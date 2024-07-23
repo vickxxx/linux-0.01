@@ -4,8 +4,12 @@ adfs.txt
 	- info and mount options for the Acorn Advanced Disc Filing System.
 affs.txt
 	- info and mount options for the Amiga Fast File System.
+bfs.txt
+	- info for the SCO UnixWare Boot Filesystem (BFS).
 coda.txt
 	- description of the CODA filesystem.
+devfs
+	- directory containing devfs documentation.
 fat_cvf.txt
 	- info on the Compressed Volume Files extension to the FAT filesystem
 hpfs.txt
@@ -16,12 +20,16 @@ ncpfs.txt
 	- info on Novell Netware(tm) filesystem using NCP protocol.
 ntfs.txt
 	- info and mount options for the NTFS filesystem (Windows NT).
+proc.txt
+	- info on Linux's /proc filesystem.
 romfs.txt
 	- Description of the ROMFS filesystem.
 smbfs.txt
 	- info on using filesystems with the SMB protocol (Windows 3.11 and NT)
 sysv-fs.txt
 	- info on the SystemV/Coherent filesystem.
+udf.txt
+	- info and mount options for the UDF filesystem.
 ufs.txt
 	- info on the ufs filesystem.
 umsdos.txt

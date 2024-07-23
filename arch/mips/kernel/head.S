@@ -1,4 +1,4 @@
-/* $Id: head.S,v 1.11 1998/10/18 13:27:12 tsbogend Exp $
+/* $Id: head.S,v 1.18 2000/03/03 22:17:07 kevink Exp $
  *
  * arch/mips/kernel/head.S
  *
@@ -8,15 +8,16 @@
  *
  * Copyright (C) 1994, 1995 Waldorf Electronics
  * Written by Ralf Baechle and Andreas Busse
- * Copyright (C) 1995, 1996, 1997, 1998 Ralf Baechle
+ * Copyright (C) 1995 - 1999 Ralf Baechle
  * Copyright (C) 1996 Paul M. Antoine
  * Modified for DECStation and hence R3000 support by Paul M. Antoine
- * Further modifications by David S. Miller
+ * Further modifications by David S. Miller and Harald Koerfgen
+ * Copyright (C) 1999 Silicon Graphics, Inc.
  *
  * Head.S contains the MIPS exception handler and startup code.
  */
 #include <linux/config.h>
-#include <linux/tasks.h>
+#include <linux/threads.h>
 
 #include <asm/asm.h>
 #include <asm/cacheops.h>
@@ -26,10 +27,8 @@
 #include <asm/regdef.h>
 #include <asm/cachectl.h>
 #include <asm/mipsregs.h>
-#include <asm/mipsconfig.h>
 #include <asm/stackframe.h>
 #include <asm/bootinfo.h>
-#include <asm/cpu.h>
 
 	.text
 	/*
@@ -54,9 +53,8 @@
 	LEAF(except_vec0_r4000)
 	.set	mips3
 	mfc0	k0, CP0_BADVADDR		# Get faulting address
-	_GET_CURRENT(k1)			# get current task ptr
 	srl	k0, k0, 22			# get pgd only bits
-	lw	k1, THREAD_PGDIR(k1)		# get task pg_dir
+	lw	k1, current_pgd			# get pgd pointer
 	sll	k0, k0, 2
 	addu	k1, k1, k0			# add in pgd offset
 	mfc0	k0, CP0_CONTEXT			# get context reg
@@ -81,9 +79,8 @@
 	LEAF(except_vec0_r4600)
 	.set	mips3
 	mfc0	k0, CP0_BADVADDR
-	_GET_CURRENT(k1)			# get current task ptr
 	srl	k0, k0, 22
-	lw	k1, THREAD_PGDIR(k1)
+	lw	k1, current_pgd			# get pgd pointer
 	sll	k0, k0, 2
 	addu	k1, k1, k0
 	mfc0	k0, CP0_CONTEXT
@@ -103,15 +100,23 @@
 	eret
 	END(except_vec0_r4600)
 
-	/* TLB refill, EXL == 0, R4xx0, non-R4600 version */
+	/* TLB refill, EXL == 0, R52x0 "Nevada" version */
+        /*
+         * This version has a bug workaround for the Nevada.  It seems
+         * as if under certain circumstances the move from cp0_context
+         * might produce a bogus result when the mfc0 instruction and
+         * it's consumer are in a different cacheline or a load instruction,
+         * probably any memory reference, is between them.  This is
+         * potencially slower than the R4000 version, so we use this
+         * special version.
+         */
 	.set	noreorder
 	.set	noat
 	LEAF(except_vec0_nevada)
 	.set	mips3
 	mfc0	k0, CP0_BADVADDR		# Get faulting address
-	_GET_CURRENT(k1)			# get current task ptr
 	srl	k0, k0, 22			# get pgd only bits
-	lw	k1, THREAD_PGDIR(k1)		# get task pg_dir
+	lw	k1, current_pgd			# get pgd pointer
 	sll	k0, k0, 2
 	addu	k1, k1, k0			# add in pgd offset
 	lw	k1, (k1)
@@ -125,9 +130,10 @@
 	mtc0	k0, CP0_ENTRYLO0		# load it
 	srl	k1, k1, 6			# convert to entrylo1
 	mtc0	k1, CP0_ENTRYLO1		# load it
+	nop					# QED specified nops
+	nop
 	tlbwr					# write random tlb entry
-	nop
-	nop
+	nop					# traditional nop
 	eret					# return from trap
 	END(except_vec0_nevada)
 
@@ -135,9 +141,8 @@
 	LEAF(except_vec0_r45k_bvahwbug)
 	.set	mips3
 	mfc0	k0, CP0_BADVADDR
-	_GET_CURRENT(k1)			# get current task ptr
 	srl	k0, k0, 22
-	lw	k1, THREAD_PGDIR(k1)
+	lw	k1, current_pgd			# get pgd pointer
 	sll	k0, k0, 2
 	addu	k1, k1, k0
 	mfc0	k0, CP0_CONTEXT
@@ -161,14 +166,13 @@
 	eret
 	END(except_vec0_r45k_bvahwbug)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* TLB refill, EXL == 0, R4000 MP badvaddr hwbug version */
 	LEAF(except_vec0_r4k_mphwbug)
 	.set	mips3
 	mfc0	k0, CP0_BADVADDR
-	_GET_CURRENT(k1)			# get current task ptr
 	srl	k0, k0, 22
-	lw	k1, THREAD_PGDIR(k1)
+	lw	k1, current_pgd			# get pgd pointer
 	sll	k0, k0, 2
 	addu	k1, k1, k0
 	mfc0	k0, CP0_CONTEXT
@@ -197,9 +201,8 @@
 	LEAF(except_vec0_r4k_250MHZhwbug)
 	.set	mips3
 	mfc0	k0, CP0_BADVADDR
-	_GET_CURRENT(k1)			# get current task ptr
 	srl	k0, k0, 22
-	lw	k1, THREAD_PGDIR(k1)
+	lw	k1, current_pgd			# get pgd pointer
 	sll	k0, k0, 2
 	addu	k1, k1, k0
 	mfc0	k0, CP0_CONTEXT
@@ -222,14 +225,13 @@
 	eret
 	END(except_vec0_r4k_250MHZhwbug)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* TLB refill, EXL == 0, R4000 MP 250MHZ entrylo[01]+badvaddr bug version */
 	LEAF(except_vec0_r4k_MP250MHZhwbug)
 	.set	mips3
 	mfc0	k0, CP0_BADVADDR
-	_GET_CURRENT(k1)			# get current task ptr
 	srl	k0, k0, 22
-	lw	k1, THREAD_PGDIR(k1)
+	lw	k1, current_pgd			# get pgd pointer
 	sll	k0, k0, 2
 	addu	k1, k1, k0
 	mfc0	k0, CP0_CONTEXT
@@ -258,27 +260,22 @@
 
 	/* TLB refill, EXL == 0, R[23]00 version */
 	LEAF(except_vec0_r2300)
+	.set	noat
 	.set	mips1
 	mfc0	k0, CP0_BADVADDR
-	_GET_CURRENT(k1)			# get current task ptr
+	lw	k1, current_pgd			# get pgd pointer
 	srl	k0, k0, 22
-	lw	k1, THREAD_PGDIR(k1)
 	sll	k0, k0, 2
 	addu	k1, k1, k0
 	mfc0	k0, CP0_CONTEXT
 	lw	k1, (k1)
-	srl	k0, k0, 1
 	and	k0, k0, 0xffc
 	addu	k1, k1, k0
 	lw	k0, (k1)
-	srl	k0, k0, 12
+	nop
 	mtc0	k0, CP0_ENTRYLO0
 	mfc0	k1, CP0_EPC
 	tlbwr
-	nop
-	nop
-	nop
-	nop
 	jr	k1
 	rfe
 	END(except_vec0_r2300)
@@ -346,23 +343,25 @@ handle_vced:
  li k1, -4
  and k0, k1
 	mtc0	zero, CP0_TAGLO
- //	nop;nop
 	cache	Index_Store_Tag_D,(k0)
- //	nop;nop
 	cache	Hit_Writeback_Inv_SD,(k0)
+#ifdef CONFIG_PROC_FS
 	lui	k0, %hi(vced_count)
 	lw	k1, %lo(vced_count)(k0)
 	addiu	k1, 1
 	sw	k1, %lo(vced_count)(k0)
+#endif
 	eret
 
 handle_vcei:
 	mfc0	k0, CP0_BADVADDR
 	cache	Hit_Writeback_Inv_SD,(k0)		# also cleans pi
+#ifdef CONFIG_PROC_FS
 	lui	k0, %hi(vcei_count)
 	lw	k1, %lo(vcei_count)(k0)
 	addiu	k1, 1
 	sw	k1, %lo(vcei_count)(k0)
+#endif
 	eret
 
 	END(except_vec3_r4000)
@@ -371,6 +370,7 @@ handle_vcei:
 	/* General exception vector. */
 	NESTED(except_vec3_generic, 0, sp)
 	.set	noat
+	.set	mips0
 	mfc0	k1, CP0_CAUSE
 	la	k0, exception_handlers
 	andi	k1, k1, 0x7c
@@ -402,11 +402,13 @@ NESTED(kernel_entry, 16, sp)
 	EXPORT(stext)
 	EXPORT(_stext)
 
-	/* Determine which MIPS variant we are running on. */
-	b	cpu_probe
-	 nop
-
-probe_done:
+	/*
+	 * Stack for kernel and init, current variable
+	 */
+	la	$28, init_task_union
+	addiu	t0, $28, KERNEL_STACK_SIZE-32
+	sw	t0, kernelsp
+	subu	sp, t0, 4*SZREG
 
 	/* The firmware/bootloader passes argc/argp/envp
 	 * to us as arguments.  But clear bss first because
@@ -421,174 +423,9 @@ probe_done:
 	bne	t0, t1, 1b
 	 sw	zero, (t0)
 
-	jal	prom_init /* prom_init(argc, argv, envp); */
+	jal	init_arch
 	 nop
-#ifdef CONFIG_SGI
-	jal	sgi_sysinit
-	 nop
-#endif
-
-#ifdef CONFIG_COBALT_MICRO_SERVER
-	jal	SetUpBootInfo
-	 nop
-#endif
-
-	/*
-	 * Determine the mmu/cache attached to this machine,
-	 * then flush the tlb and caches.  On the r4xx0
-	 * variants this also sets CP0_WIRED to zero.
-	 */
-	jal	loadmmu
-	 nop
-
-	/*
-	 * Stack for kernel and init, current variable
-	 */
-	la	$28, init_task_union
-	addiu	t0, $28, KERNEL_STACK_SIZE-32
-	sw	t0, kernelsp
-	subu	sp, t0, 4*SZREG
-
-	/* Disable coprocessors */
-	mfc0	t0, CP0_STATUS
-	li	t1, ~(ST0_CU1|ST0_CU2|ST0_CU3|ST0_KX|ST0_SX)
-	and	t0, t1
-	or	t0, ST0_CU0
-	mtc0	t0, CP0_STATUS
-
-1:	jal	start_kernel
-	 nop
-	/*
-	 * Main should never return here, but
-	 * just in case, we know what happens.
-	 */
-	b	1b
-	 nop					# delay slot
 	END(kernel_entry)
-
-	/* CPU type probing code, called at Kernel entry. */
-	LEAF(cpu_probe)
-	mfc0	t0, CP0_PRID
-	la	t3, mips_cputype
-	andi	t1, t0, 0xff00
-	li	t2, PRID_IMP_R2000
-	bne	t1, t2, 1f
-	 andi	t0, 0x00ff
-
-	li	t2, CPU_R2000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R3000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, PRID_REV_R3000A
-	bne	t0, t2, 9f
-	 nop
-
-	li	t2, CPU_R3000A
-	b	probe_done
-	sw	t2, (t3)
-9:
-	li	t2, CPU_R3000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R6000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R6000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R4000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, PRID_REV_R4400
-	bne	t0, t2, 9f
-	 nop
-
-	li	t2, CPU_R4400SC
-	b	probe_done
-	 sw	t2, (t3)
-9:
-	li	t2, CPU_R4000SC
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R6000A
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R6000A
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R10000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R10000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R8000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R8000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R4600
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R4600
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R4700
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R4700
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R4650
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R4650
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_R5000
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_R5000
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, PRID_IMP_NEVADA
-	bne	t1, t2, 1f
-	 nop
-
-	li	t2, CPU_NEVADA
-	b	probe_done
-	 sw	t2, (t3)
-1:
-	li	t2, CPU_UNKNOWN
-	sw	t2, (t3)
-
-	b	probe_done
-	 nop
-	END(cpu_probe)
 
 /*
  * This buffer is reserved for the use of the cache error handler.
@@ -598,6 +435,8 @@ probe_done:
 		.fill	32*4,1,0
 
 EXPORT(kernelsp)
+		PTR	0
+EXPORT(current_pgd)
 		PTR	0
 		.text
 

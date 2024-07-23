@@ -16,10 +16,19 @@
  *	X.25 001	Jonathan Naylor	Started coding.
  *	X.25 002	Jonathan Naylor	Centralised disconnect handling.
  *					New timer architecture.
+ *	2000-03-11	Henner Eisen	MSG_EOR handling more POSIX compliant.
+ *	2000-03-22	Daniela Squassoni Allowed disabling/enabling of 
+ *					  facilities negotiation and increased 
+ *					  the throughput upper limit.
+ *	2000-08-27	Arnaldo C. Melo s/suser/capable/ + micro cleanups
+ *	2000-09-04	Henner Eisen	Set sock->state in x25_accept(). 
+ *					Fixed x25_output() related skb leakage.
+ *	2000-10-02	Henner Eisen	Made x25_kick() single threaded per socket.
+ *	2000-10-27	Henner Eisen    MSG_DONTWAIT for fragment allocation.
+ *	2000-11-14	Henner Eisen    Closing datalink from NETDEV_GOING_DOWN
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_X25) || defined(CONFIG_X25_MODULE)
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/types.h>
@@ -46,7 +55,6 @@
 #include <linux/interrupt.h>
 #include <linux/notifier.h>
 #include <linux/proc_fs.h>
-#include <linux/if_arp.h>
 #include <linux/init.h>
 #include <net/x25.h>
 
@@ -56,7 +64,7 @@ int sysctl_x25_reset_request_timeout   = X25_DEFAULT_T22;
 int sysctl_x25_clear_request_timeout   = X25_DEFAULT_T23;
 int sysctl_x25_ack_holdback_timeout    = X25_DEFAULT_T2;
 
-static struct sock *volatile x25_list = NULL;
+static struct sock *volatile x25_list /* = NULL initially */;
 
 static struct proto_ops x25_proto_ops;
 
@@ -169,7 +177,7 @@ static void x25_remove_socket(struct sock *sk)
 /*
  *	Kill all bound sockets on a dropped device.
  */
-static void x25_kill_by_device(struct device *dev)
+static void x25_kill_by_device(struct net_device *dev)
 {
 	struct sock *s;
 
@@ -184,7 +192,8 @@ static void x25_kill_by_device(struct device *dev)
  */
 static int x25_device_event(struct notifier_block *this, unsigned long event, void *ptr)
 {
-	struct device *dev = (struct device *)ptr;
+	struct net_device *dev = (struct net_device *)ptr;
+	struct x25_neigh *neigh;
 
 	if (dev->type == ARPHRD_X25
 #if defined(CONFIG_LLC) || defined(CONFIG_LLC_MODULE)
@@ -194,6 +203,10 @@ static int x25_device_event(struct notifier_block *this, unsigned long event, vo
 		switch (event) {
 			case NETDEV_UP:
 				x25_link_device_up(dev);
+				break;
+			case NETDEV_GOING_DOWN:
+				if ((neigh = x25_get_neigh(dev)))
+					x25_terminate_link(neigh);
 				break;
 			case NETDEV_DOWN:
 				x25_kill_by_device(dev);
@@ -399,10 +412,7 @@ static int x25_getsockopt(struct socket *sock, int level, int optname,
 	if (put_user(len, optlen))
 		return -EFAULT;
 
-	if (copy_to_user(optval, &val, len))
-		return -EFAULT;
-
-	return 0;
+	return copy_to_user(optval, &val, len) ? -EFAULT : 0;
 }
 
 static int x25_listen(struct socket *sock, int backlog)
@@ -468,6 +478,7 @@ static int x25_create(struct socket *sock, int protocol)
 
 	sock->ops    = &x25_proto_ops;
 	sk->protocol = protocol;
+	sk->backlog_rcv = x25_backlog_rcv;
 
 	x25->t21   = sysctl_x25_call_request_timeout;
 	x25->t22   = sysctl_x25_reset_request_timeout;
@@ -508,6 +519,7 @@ static struct sock *x25_make_new(struct sock *osk)
 	sk->state       = TCP_ESTABLISHED;
 	sk->sleep       = osk->sleep;
 	sk->zapped      = osk->zapped;
+	sk->backlog_rcv = osk->backlog_rcv;
 
 	x25->t21        = osk->protinfo.x25->t21;
 	x25->t22        = osk->protinfo.x25->t22;
@@ -523,7 +535,7 @@ static struct sock *x25_make_new(struct sock *osk)
 	return sk;
 }
 
-static int x25_release(struct socket *sock, struct socket *peer)
+static int x25_release(struct socket *sock)
 {
 	struct sock *sk = sock->sk;
 
@@ -590,7 +602,7 @@ static int x25_connect(struct socket *sock, struct sockaddr *uaddr, int addr_len
 {
 	struct sock *sk = sock->sk;
 	struct sockaddr_x25 *addr = (struct sockaddr_x25 *)uaddr;
-	struct device *dev;
+	struct net_device *dev;
 
 	if (sk->state == TCP_ESTABLISHED && sock->state == SS_CONNECTING) {
 		sock->state = SS_CONNECTED;
@@ -681,11 +693,6 @@ static int x25_accept(struct socket *sock, struct socket *newsock, int flags)
 	struct sock *newsk;
 	struct sk_buff *skb;
 
-	if (newsock->sk != NULL)
-		x25_destroy_socket(newsock->sk);
-
-	newsock->sk = NULL;
-
 	if ((sk = sock->sk) == NULL)
 		return -EINVAL;
 
@@ -725,6 +732,7 @@ static int x25_accept(struct socket *sock, struct socket *newsock, int flags)
 	kfree_skb(skb);
 	sk->ack_backlog--;
 	newsock->sk = newsk;
+	newsock->state = SS_CONNECTED;
 
 	return 0;
 }
@@ -816,6 +824,7 @@ int x25_rx_call_request(struct sk_buff *skb, struct x25_neigh *neigh, unsigned i
 	make->protinfo.x25->source_addr   = source_addr;
 	make->protinfo.x25->neighbour     = neigh;
 	make->protinfo.x25->facilities    = facilities;
+	make->protinfo.x25->vc_facil_mask = sk->protinfo.x25->vc_facil_mask;
 
 	x25_write_internal(make, X25_CALL_ACCEPTED);
 
@@ -854,7 +863,11 @@ static int x25_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct 
 	unsigned char *asmptr;
 	int size, qbit = 0;
 
-	if (msg->msg_flags & ~(MSG_DONTWAIT | MSG_OOB))
+	if (msg->msg_flags & ~(MSG_DONTWAIT | MSG_OOB | MSG_EOR))
+		return -EINVAL;
+
+	/* we currently don't support segmented records at the user interface */
+	if (!(msg->msg_flags & (MSG_EOR|MSG_OOB)))
 		return -EINVAL;
 
 	if (sk->zapped)
@@ -901,6 +914,7 @@ static int x25_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct 
 
 	if ((skb = sock_alloc_send_skb(sk, size, 0, msg->msg_flags & MSG_DONTWAIT, &err)) == NULL)
 		return err;
+	X25_SKB_CB(skb)->flags = msg->msg_flags;
 
 	skb_reserve(skb, X25_MAX_L2_LEN + X25_EXT_MIN_LEN);
 
@@ -970,10 +984,31 @@ static int x25_sendmsg(struct socket *sock, struct msghdr *msg, int len, struct 
 	if (msg->msg_flags & MSG_OOB) {
 		skb_queue_tail(&sk->protinfo.x25->interrupt_out_queue, skb);
 	} else {
-		x25_output(sk, skb);
+	        len = x25_output(sk, skb);
+		if(len<0){
+			kfree_skb(skb);
+		} else {
+			if(sk->protinfo.x25->qbitincl) len++;
+		}
 	}
 
+	/*
+	 * lock_sock() is currently only used to serialize this x25_kick()
+	 * against input-driven x25_kick() calls. It currently only blocks
+	 * incoming packets for this socket and does not protect against
+	 * any other socket state changes and is not called from anywhere
+	 * else. As x25_kick() cannot block and as long as all socket
+	 * operations are BKL-wrapped, we don't need take to care about
+	 * purging the backlog queue in x25_release().
+	 *
+	 * Using lock_sock() to protect all socket operations entirely
+	 * (and making the whole x25 stack SMP aware) unfortunately would
+	 * require major changes to {send,recv}msg and skb allocation methods.
+	 * -> 2.5 ;)
+	 */
+	lock_sock(sk);
 	x25_kick(sk);
+	release_sock(sk);
 
 	return len;
 }
@@ -1036,6 +1071,9 @@ static int x25_recvmsg(struct socket *sock, struct msghdr *msg, int size, int fl
 		msg->msg_flags |= MSG_TRUNC;
 	}
 
+	/* Currently, each datagram always contains a complete record */ 
+	msg->msg_flags |= MSG_EOR;
+
 	skb_copy_datagram_iovec(skb, 0, msg->msg_iov, copied);
 
 	if (sx25 != NULL) {
@@ -1050,10 +1088,6 @@ static int x25_recvmsg(struct socket *sock, struct msghdr *msg, int size, int fl
 	return copied;
 }
 
-static int x25_shutdown(struct socket *sk, int how)
-{
-	return -EOPNOTSUPP;
-}
 
 static int x25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
@@ -1061,33 +1095,27 @@ static int x25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 
 	switch (cmd) {
 		case TIOCOUTQ: {
-			long amount;
+			int amount;
 			amount = sk->sndbuf - atomic_read(&sk->wmem_alloc);
 			if (amount < 0)
 				amount = 0;
-			if (put_user(amount, (unsigned long *)arg))
-				return -EFAULT;
-			return 0;
+			return put_user(amount, (unsigned int *)arg);
 		}
 
 		case TIOCINQ: {
 			struct sk_buff *skb;
-			long amount = 0L;
+			int amount = 0;
 			/* These two are safe on a single CPU system as only user tasks fiddle here */
 			if ((skb = skb_peek(&sk->receive_queue)) != NULL)
 				amount = skb->len;
-			if (put_user(amount, (unsigned long *)arg))
-				return -EFAULT;
-			return 0;
+			return put_user(amount, (unsigned int *)arg);
 		}
 
 		case SIOCGSTAMP:
 			if (sk != NULL) {
 				if (sk->stamp.tv_sec == 0)
 					return -ENOENT;
-				if (copy_to_user((void *)arg, &sk->stamp, sizeof(struct timeval)))
-					return -EFAULT;
-				return 0;
+				return copy_to_user((void *)arg, &sk->stamp, sizeof(struct timeval)) ? -EFAULT : 0;
 			}
 			return -EINVAL;
 
@@ -1112,15 +1140,13 @@ static int x25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 			return x25_subscr_ioctl(cmd, (void *)arg);
 
 		case SIOCX25SSUBSCRIP:
-			if (!suser()) return -EPERM;
+			if (!capable(CAP_NET_ADMIN)) return -EPERM;
 			return x25_subscr_ioctl(cmd, (void *)arg);
 
 		case SIOCX25GFACILITIES: {
 			struct x25_facilities facilities;
 			facilities = sk->protinfo.x25->facilities;
-			if (copy_to_user((void *)arg, &facilities, sizeof(facilities)))
-				return -EFAULT;
-			return 0;
+			return copy_to_user((void *)arg, &facilities, sizeof(facilities)) ? -EFAULT : 0;
 		}
 
 		case SIOCX25SFACILITIES: {
@@ -1135,7 +1161,7 @@ static int x25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 				return -EINVAL;
 			if (facilities.winsize_in < 1 || facilities.winsize_in > 127)
 				return -EINVAL;
-			if (facilities.throughput < 0x03 || facilities.throughput > 0x2C)
+			if (facilities.throughput < 0x03 || facilities.throughput > 0xDD)
 				return -EINVAL;
 			if (facilities.reverse != 0 && facilities.reverse != 1)
 				return -EINVAL;
@@ -1146,9 +1172,7 @@ static int x25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		case SIOCX25GCALLUSERDATA: {
 			struct x25_calluserdata calluserdata;
 			calluserdata = sk->protinfo.x25->calluserdata;
-			if (copy_to_user((void *)arg, &calluserdata, sizeof(calluserdata)))
-				return -EFAULT;
-			return 0;
+			return copy_to_user((void *)arg, &calluserdata, sizeof(calluserdata)) ? -EFAULT : 0;
 		}
 
 		case SIOCX25SCALLUSERDATA: {
@@ -1164,9 +1188,7 @@ static int x25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 		case SIOCX25GCAUSEDIAG: {
 			struct x25_causediag causediag;
 			causediag = sk->protinfo.x25->causediag;
-			if (copy_to_user((void *)arg, &causediag, sizeof(causediag)))
-				return -EFAULT;
-			return 0;
+			return copy_to_user((void *)arg, &causediag, sizeof(causediag)) ? -EFAULT : 0;
 		}
 
  		default:
@@ -1177,10 +1199,10 @@ static int x25_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 	return 0;
 }
 
-static int x25_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
+static int x25_get_info(char *buffer, char **start, off_t offset, int length)
 {
 	struct sock *s;
-	struct device *dev;
+	struct net_device *dev;
 	const char *devname;
 	int len = 0;
 	off_t pos = 0;
@@ -1240,26 +1262,29 @@ struct net_proto_family x25_family_ops = {
 	x25_create
 };
 
-static struct proto_ops x25_proto_ops = {
-	AF_X25,
+static struct proto_ops SOCKOPS_WRAPPED(x25_proto_ops) = {
+	family:		AF_X25,
 
-	sock_no_dup,
-	x25_release,
-	x25_bind,
-	x25_connect,
-	sock_no_socketpair,
-	x25_accept,
-	x25_getname,
-	datagram_poll,
-	x25_ioctl,
-	x25_listen,
-	x25_shutdown,
-	x25_setsockopt,
-	x25_getsockopt,
-	sock_no_fcntl,
-	x25_sendmsg,
-	x25_recvmsg
+	release:	x25_release,
+	bind:		x25_bind,
+	connect:	x25_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		x25_accept,
+	getname:	x25_getname,
+	poll:		datagram_poll,
+	ioctl:		x25_ioctl,
+	listen:		x25_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	x25_setsockopt,
+	getsockopt:	x25_getsockopt,
+	sendmsg:	x25_sendmsg,
+	recvmsg:	x25_recvmsg,
+	mmap:		sock_no_mmap,
 };
+
+#include <linux/smp_lock.h>
+SOCKOPS_WRAP(x25_proto, AF_X25);
+
 
 static struct packet_type x25_packet_type =
 {
@@ -1285,23 +1310,11 @@ void x25_kill_by_neigh(struct x25_neigh *neigh)
 	} 
 }
 
-#ifdef CONFIG_PROC_FS
-static struct proc_dir_entry proc_net_x25 = {
-	PROC_NET_X25, 3, "x25",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations, 
-	x25_get_info
-};
-static struct proc_dir_entry proc_net_x25_routes = {
-	PROC_NET_X25_ROUTES, 10, "x25_routes",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations, 
-	x25_routes_get_info
-};
-#endif	
-
-__initfunc(void x25_proto_init(struct net_proto *pro))
+static int __init x25_init(void)
 {
+#ifdef MODULE
+	struct net_device *dev;
+#endif /* MODULE */
 	sock_register(&x25_family_ops);
 
 	x25_packet_type.type = htons(ETH_P_X25);
@@ -1315,24 +1328,10 @@ __initfunc(void x25_proto_init(struct net_proto *pro))
 	x25_register_sysctl();
 #endif
 
-#ifdef CONFIG_PROC_FS
-	proc_net_register(&proc_net_x25);
-	proc_net_register(&proc_net_x25_routes);
-#endif	
-}
+	proc_net_create("x25", 0, x25_get_info);
+	proc_net_create("x25_routes", 0, x25_routes_get_info);
 
 #ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
-MODULE_AUTHOR("Jonathan Naylor <g4klx@g4klx.demon.co.uk>");
-MODULE_DESCRIPTION("The X.25 Packet Layer network layer protocol");
-
-int init_module(void)
-{
-	struct device *dev;
-
-	x25_proto_init(NULL);
-
 	/*
 	 *	Register any pre existing devices.
 	 */
@@ -1346,17 +1345,23 @@ int init_module(void)
 			x25_link_device_up(dev);
 	}
 	read_unlock(&dev_base_lock);
-
+#endif /* MODULE */
 	return 0;
 }
+module_init(x25_init);
 
-void cleanup_module(void)
+
+
+EXPORT_NO_SYMBOLS;
+
+MODULE_AUTHOR("Jonathan Naylor <g4klx@g4klx.demon.co.uk>");
+MODULE_DESCRIPTION("The X.25 Packet Layer network layer protocol");
+
+static void __exit x25_exit(void)
 {
 
-#ifdef CONFIG_PROC_FS
-	proc_net_unregister(PROC_NET_X25);
-	proc_net_unregister(PROC_NET_X25_ROUTES);
-#endif
+	proc_net_remove("x25");
+	proc_net_remove("x25_routes");
 
 	x25_link_free();
 	x25_route_free();
@@ -1371,7 +1376,5 @@ void cleanup_module(void)
 
 	sock_unregister(AF_X25);
 }
+module_exit(x25_exit);
 
-#endif
-
-#endif

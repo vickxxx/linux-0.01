@@ -142,6 +142,11 @@
  *                   <kodis@jagunet.com>.  Work begun on fixing driver to
  *                   work under 2.1.X.  Added temporary extra printks
  *                   which seem to slow it down enough to work.
+ *
+ *  9 November 1999 -- Make kernel-parameter implementation work with 2.3.x 
+ *	               Removed init_module & cleanup_module in favor of 
+ *		       module_init & module_exit.
+ *		       Torben Mathiasen <tmm@image.dk>
 */
 
 #include <linux/major.h>
@@ -157,6 +162,7 @@
 #include <linux/hdreg.h>
 #include <linux/genhd.h>
 #include <linux/ioport.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/string.h>
 #include <linux/malloc.h>
 #include <linux/init.h>
@@ -1641,7 +1647,7 @@ read_data_block(char          *buffer,
  * data access on a CD is done sequentially, this saves a lot of operations.
  */
 static void
-do_cdu31a_request(void)
+do_cdu31a_request(request_queue_t * q)
 {
    int block;
    int nblock;
@@ -1667,7 +1673,7 @@ do_cdu31a_request(void)
       if (signal_pending(current))
       {
          restore_flags(flags);
-         if (CURRENT && CURRENT->rq_status != RQ_INACTIVE)
+         if (!QUEUE_EMPTY && CURRENT->rq_status != RQ_INACTIVE)
          {
             end_request(0);
          }
@@ -1700,7 +1706,7 @@ cdu31a_request_startover:
        * The beginning here is stolen from the hard disk driver.  I hope
        * it's right.
        */
-      if (!(CURRENT) || CURRENT->rq_status == RQ_INACTIVE)
+      if (QUEUE_EMPTY || CURRENT->rq_status == RQ_INACTIVE)
       {
          goto end_do_cdu31a_request;
       }
@@ -3216,45 +3222,40 @@ scd_release(struct cdrom_device_info *cdi)
 }
 
 static struct cdrom_device_ops scd_dops = {
-  scd_open,                   /* open */
-  scd_release,                /* release */
-  scd_drive_status,           /* drive status */
-  scd_media_changed,          /* media changed */
-  scd_tray_move,              /* tray move */
-  scd_lock_door,              /* lock door */
-  scd_select_speed,           /* select speed */
-  NULL,                       /* select disc */
-  scd_get_last_session,       /* get last session */
-  scd_get_mcn,                /* get universal product code */
-  scd_reset,                  /* hard reset */
-  scd_audio_ioctl,            /* audio ioctl */
-  scd_dev_ioctl,              /* device-specific ioctl */
-  CDC_OPEN_TRAY | CDC_CLOSE_TRAY | CDC_LOCK | CDC_SELECT_SPEED | CDC_MULTI_SESSION | 
-  CDC_MULTI_SESSION | CDC_MCN | CDC_MEDIA_CHANGED | CDC_PLAY_AUDIO |
-  CDC_RESET | CDC_IOCTLS | CDC_DRIVE_STATUS, /* capability */
-  1,                            /* number of minor devices */
+	open:			scd_open,
+	release:		scd_release,
+	drive_status:		scd_drive_status,
+	media_changed:		scd_media_changed,
+	tray_move:		scd_tray_move,
+	lock_door:		scd_lock_door,
+	select_speed:		scd_select_speed,
+	get_last_session:	scd_get_last_session,
+	get_mcn:		scd_get_mcn,
+	reset:			scd_reset,
+	audio_ioctl:		scd_audio_ioctl,
+	dev_ioctl:		scd_dev_ioctl,
+	capability:		CDC_OPEN_TRAY | CDC_CLOSE_TRAY | CDC_LOCK |
+				CDC_SELECT_SPEED | CDC_MULTI_SESSION | 
+				CDC_MULTI_SESSION | CDC_MCN |
+				CDC_MEDIA_CHANGED | CDC_PLAY_AUDIO |
+				CDC_RESET | CDC_IOCTLS | CDC_DRIVE_STATUS,
+	n_minors:		1,
 };
 
 static struct cdrom_device_info scd_info = {
-  &scd_dops,                  /* device operations */
-  NULL,                       /* link */
-  NULL,                       /* handle */
-  0,			      /* dev */
-  0,                          /* mask */
-  2,                          /* maximum speed */
-  1,                          /* number of discs */
-  0,                          /* options, not owned */
-  0,                          /* mc_flags, not owned */
-  0                           /* use count, not owned */
+	ops:		&scd_dops,
+	speed:		2,
+	capacity:	1,
+	name:		"cdu31a"
 };
 
 /* The different types of disc loading mechanisms supported */
 static const char *load_mech[] __initdata = { "caddy", "tray", "pop-up", "unknown" };
 
-__initfunc(static void
+static void __init 
 get_drive_configuration(unsigned short base_io,
                         unsigned char res_reg[],
-                        unsigned int *res_size))
+                        unsigned int *res_size)
 {
    int retry_count;
 
@@ -3317,11 +3318,15 @@ get_drive_configuration(unsigned short base_io,
 #ifndef MODULE
 /*
  * Set up base I/O and interrupts, called from main.c.
+ 
  */
-__initfunc(void
-cdu31a_setup(char *strings,
-	     int  *ints))
+
+static int __init cdu31a_setup(char *strings)	     
 {
+    int ints[4];
+    
+    (void)get_options(strings, ARRAY_SIZE(ints), ints);
+
    if (ints[0] > 0)
    {
       cdu31a_port = ints[1];
@@ -3341,7 +3346,12 @@ cdu31a_setup(char *strings,
 	 printk("CDU31A: Unknown interface type: %s\n", strings);
       }
    }
+   
+   return 1;
 }
+
+__setup("cdu31a=", cdu31a_setup);
+
 #endif
 
 static int cdu31a_block_size;
@@ -3349,8 +3359,8 @@ static int cdu31a_block_size;
 /*
  * Initialize the driver.
  */
-__initfunc(int
-cdu31a_init(void))
+int __init 
+cdu31a_init(void)
 {
    struct s_sony_drive_config drive_config;
    unsigned int res_size;
@@ -3427,7 +3437,7 @@ cdu31a_init(void))
 
       request_region(cdu31a_port, 4,"cdu31a");
       
-      if (register_blkdev(MAJOR_NR,"cdu31a",&cdrom_fops))
+      if (devfs_register_blkdev(MAJOR_NR,"cdu31a",&cdrom_fops))
       {
 	 printk("Unable to get major %d for CDU-31a\n", MAJOR_NR);
          goto errout2;
@@ -3497,7 +3507,7 @@ cdu31a_init(void))
 
       is_a_cdu31a = strcmp("CD-ROM CDU31A", drive_config.product_id) == 0;
 
-      blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+      blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
       read_ahead[MAJOR_NR] = CDU31A_READAHEAD;
       cdu31a_block_size = 1024; /* 1kB default block size */
       /* use 'mount -o block=2048' */
@@ -3529,7 +3539,8 @@ cdu31a_init(void))
    }
 errout0:
    printk("Unable to register CDU-31a with Uniform cdrom driver\n");
-   if (unregister_blkdev(MAJOR_NR, "cdu31a"))    
+   blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+   if (devfs_unregister_blkdev(MAJOR_NR, "cdu31a"))    
    {
       printk("Can't unregister block device for cdu31a\n");
    }
@@ -3539,27 +3550,22 @@ errout3:
    return -EIO;
 }
 
-#ifdef MODULE
 
-int
-init_module(void)
-{
-	return cdu31a_init();
-}
-
-void
-cleanup_module(void)
+void __exit
+cdu31a_exit(void)
 {
    if (unregister_cdrom(&scd_info))    
    {
       printk("Can't unregister cdu31a from Uniform cdrom driver\n");
       return;
    }
-   if ((unregister_blkdev(MAJOR_NR, "cdu31a") == -EINVAL))    
+   if ((devfs_unregister_blkdev(MAJOR_NR, "cdu31a") == -EINVAL))    
    {
       printk("Can't unregister cdu31a\n");
       return;
    }
+
+   blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 
    if (cdu31a_irq > 0)
       free_irq(cdu31a_irq, NULL);
@@ -3567,4 +3573,9 @@ cleanup_module(void)
    release_region(cdu31a_port,4);
    printk(KERN_INFO "cdu31a module released.\n");
 }   
-#endif MODULE
+
+#ifdef MODULE
+module_init(cdu31a_init);
+#endif
+module_exit(cdu31a_exit);
+

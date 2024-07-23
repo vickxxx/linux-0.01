@@ -8,6 +8,7 @@
  * for more details.
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
 #include <linux/init.h>
@@ -40,9 +41,11 @@ u_short amiga_audio_period = MAX_PERIOD;
 
 static u_long clock_constant;
 
-__initfunc(void amiga_init_sound(void))
+void __init amiga_init_sound(void)
 {
-	snd_data = amiga_chip_alloc(sizeof(sine_data));
+	static struct resource beep_res = { "Beep" };
+
+	snd_data = amiga_chip_alloc_res(sizeof(sine_data), &beep_res);
 	if (!snd_data) {
 		printk (KERN_CRIT "amiga init_sound: failed to allocate chipmem\n");
 		return;
@@ -51,10 +54,15 @@ __initfunc(void amiga_init_sound(void))
 
 	/* setup divisor */
 	clock_constant = (amiga_colorclock+DATA_SIZE/2)/DATA_SIZE;
+
+	/* without amifb, turn video off and enable high quality sound */
+#ifndef CONFIG_FB_AMIGA
+	amifb_video_off();
+#endif
 }
 
 static void nosound( unsigned long ignored );
-static struct timer_list sound_timer = { NULL, NULL, 0, 0, nosound };
+static struct timer_list sound_timer = { function: nosound };
 
 void amiga_mksound( unsigned int hz, unsigned int ticks )
 {
@@ -89,13 +97,10 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 		/* turn on DMA for audio channel 2 */
 		custom.dmacon = DMAF_SETCLR | DMAF_AUD2;
 
-		restore_flags(flags);
-		return;
-	} else {
+	} else
 		nosound( 0 );
-		restore_flags(flags);
-		return;
-	}
+
+	restore_flags(flags);
 }
 
 
@@ -105,4 +110,4 @@ static void nosound( unsigned long ignored )
 	custom.dmacon = DMAF_AUD2;
 	/* restore period to previous value after beeping */
 	custom.aud[2].audper = amiga_audio_period;
-}	
+}

@@ -34,16 +34,16 @@ extern ctl_table unix_table[];
 extern ctl_table ether_table[], e802_table[];
 #endif
 
-#ifdef CONFIG_BRIDGE
-extern ctl_table bridge_table[];
-#endif
-
 #ifdef CONFIG_IPV6
 extern ctl_table ipv6_table[];
 #endif
 
 #ifdef CONFIG_TR
 extern ctl_table tr_table[];
+#endif
+
+#ifdef CONFIG_ECONET
+extern ctl_table econet_table[];
 #endif
 
 ctl_table net_table[] = {
@@ -61,14 +61,14 @@ ctl_table net_table[] = {
 #ifdef CONFIG_IPX
         {NET_IPX,    "ipx",       NULL, 0, 0555, ipx_table},
 #endif
-#ifdef CONFIG_BRIDGE
-        {NET_BRIDGE, "bridge",    NULL, 0, 0555, bridge_table},
-#endif
 #ifdef CONFIG_IPV6
 	{NET_IPV6, "ipv6", NULL, 0, 0555, ipv6_table},
 #endif
 #ifdef CONFIG_TR
 	{NET_TR, "token-ring", NULL, 0, 0555, tr_table},
+#endif
+#ifdef CONFIG_ECONET
+	{NET_ECONET, "econet",    NULL, 0, 0555, econet_table},
 #endif
 	{0}
 };

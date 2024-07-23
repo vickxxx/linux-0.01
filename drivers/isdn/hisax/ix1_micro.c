@@ -1,5 +1,5 @@
-/* $Id: ix1_micro.c,v 2.7 1998/04/15 16:44:31 keil Exp $
-
+/* $Id: ix1_micro.c,v 2.10 2000/11/24 17:05:38 kai Exp $
+ *
  * ix1_micro.c  low level stuff for ITK ix1-micro Rev.2 isdn cards
  *              derived from the original file teles3.c from Karsten Keil
  *
@@ -9,41 +9,6 @@
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *              Beat Doebeli
- *
- * $Log: ix1_micro.c,v $
- * Revision 2.7  1998/04/15 16:44:31  keil
- * new init code
- *
- * Revision 2.6  1998/02/11 17:28:09  keil
- * Niccy PnP/PCI support
- *
- * Revision 2.5  1998/02/02 13:29:42  keil
- * fast io
- *
- * Revision 2.4  1997/11/08 21:35:50  keil
- * new l1 init
- *
- * Revision 2.3  1997/11/06 17:09:35  keil
- * New 2.1 init code
- *
- * Revision 2.2  1997/10/29 18:55:51  keil
- * changes for 2.1.60 (irq2dev_map)
- *
- * Revision 2.1  1997/07/27 21:47:09  keil
- * new interface structures
- *
- * Revision 2.0  1997/06/26 11:02:50  keil
- * New Layer and card interface
- *
- * Revision 1.3  1997/04/13 19:54:02  keil
- * Change in IRQ check delay for SMP
- *
- * Revision 1.2  1997/04/06 22:54:21  keil
- * Using SKB's
- *
- * Revision 1.1  1997/01/27 15:43:10  keil
- * first version
- *
  *
  */
 
@@ -78,13 +43,14 @@
 
 
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-const char *ix1_revision = "$Revision: 2.7 $";
+const char *ix1_revision = "$Revision: 2.10 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -199,7 +165,7 @@ static void
 ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char val, stat = 0;
+	u_char val;
 
 	if (!cs) {
 		printk(KERN_WARNING "IX1: Spurious interrupt!\n");
@@ -207,16 +173,12 @@ ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	val = readreg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_ISTA + 0x40);
       Start_HSCX:
-	if (val) {
+	if (val)
 		hscx_int_main(cs, val);
-		stat |= 1;
-	}
 	val = readreg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_ISTA);
       Start_ISAC:
-	if (val) {
+	if (val)
 		isac_interrupt(cs, val);
-		stat |= 2;
-	}
 	val = readreg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_ISTA + 0x40);
 	if (val) {
 		if (cs->debug & L1_DEB_HSCX)
@@ -229,16 +191,12 @@ ix1micro_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			debugl1(cs, "ISAC IntStat after IntRoutine");
 		goto Start_ISAC;
 	}
-	if (stat & 1) {
-		writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0xFF);
-		writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0xFF);
-		writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0);
-		writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0);
-	}
-	if (stat & 2) {
-		writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0xFF);
-		writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0);
-	}
+	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0xFF);
+	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0xFF);
+	writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0xFF);
+	writereg(cs->hw.ix1.isac_ale, cs->hw.ix1.isac, ISAC_MASK, 0);
+	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK, 0);
+	writereg(cs->hw.ix1.hscx_ale, cs->hw.ix1.hscx, HSCX_MASK + 0x40, 0);
 }
 
 void
@@ -276,9 +234,6 @@ ix1_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_io_ix1micro(cs);
 			return(0);
-		case CARD_SETIRQ:
-			return(request_irq(cs->irq, &ix1micro_interrupt,
-					I4L_IRQ_FLAG, "HiSax", cs));
 		case CARD_INIT:
 			inithscxisac(cs, 3);
 			return(0);
@@ -289,8 +244,8 @@ ix1_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 }
 
 
-__initfunc(int
-setup_ix1micro(struct IsdnCard *card))
+int __init
+setup_ix1micro(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
@@ -331,6 +286,7 @@ setup_ix1micro(struct IsdnCard *card))
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &ix1_card_msg;
+	cs->irq_func = &ix1micro_interrupt;
 	ISACVersion(cs, "ix1-Micro:");
 	if (HscxVersion(cs, "ix1-Micro:")) {
 		printk(KERN_WARNING

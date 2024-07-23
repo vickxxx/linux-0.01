@@ -1,8 +1,10 @@
 /*
- * $Id: elf.h,v 1.10 1998/05/01 01:35:51 ralf Exp $
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
  */
-#ifndef __ASM_MIPS_ELF_H
-#define __ASM_MIPS_ELF_H
+#ifndef __ASM_ELF_H
+#define __ASM_ELF_H
 
 /* ELF register definitions */
 #define ELF_NGREG	45
@@ -15,13 +17,38 @@ typedef double elf_fpreg_t;
 typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 
 /*
- * This is used to ensure we don't load something for the wrong architecture.
+ * This is used to ensure we don't load something for the wrong architecture
+ * and also rejects IRIX binaries.
  */
-#define elf_check_arch(x) ((x) == EM_MIPS || (x) == EM_MIPS_RS4_BE)
+#define elf_check_arch(hdr)						\
+({									\
+	int __res = 1;							\
+	struct elfhdr *__h = (hdr);					\
+									\
+	if ((__h->e_machine != EM_MIPS) &&				\
+	    (__h->e_machine != EM_MIPS_RS4_BE))				\
+		__res = 0;						\
+	if (__h->e_flags & EF_MIPS_ARCH)				\
+		__res = 0;						\
+									\
+	__res;								\
+})
+
+/* This one accepts IRIX binaries.  */
+#define irix_elf_check_arch(hdr)					\
+({									\
+	int __res = 1;							\
+	struct elfhdr *__h = (hdr);					\
+									\
+	if ((__h->e_machine != EM_MIPS) &&				\
+	    (__h->e_machine != EM_MIPS_RS4_BE))				\
+		__res = 0;						\
+									\
+	__res;								\
+})
 
 /*
  * These are used to set parameters in the core dumps.
- * FIXME(eric) I don't know what the correct endianness to use is.
  */
 #define ELF_CLASS	ELFCLASS32
 #ifdef __MIPSEB__
@@ -76,8 +103,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 #define ELF_ET_DYN_BASE         (2 * TASK_SIZE / 3)
 
 #ifdef __KERNEL__
-#define SET_PERSONALITY(ex,ibcs2) \
-	current->personality = (ibcs2 ? PER_SVR4 : PER_LINUX)
+#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
 #endif
 
-#endif /* __ASM_MIPS_ELF_H */
+#endif /* __ASM_ELF_H */

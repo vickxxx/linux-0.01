@@ -18,8 +18,6 @@
 
 #include <asm/pgtable.h>
 
-static DECLARE_WAIT_QUEUE_HEAD(lock_queue);
-
 /*
  * Reads or writes a swap page.
  * wait=1: start I/O and wait for completion. wait=0: start asynchronous I/O.
@@ -35,54 +33,19 @@ static DECLARE_WAIT_QUEUE_HEAD(lock_queue);
  * that shared pages stay shared while being swapped.
  */
 
-static void rw_swap_page_base(int rw, unsigned long entry, struct page *page, int wait, int dolock)
+static int rw_swap_page_base(int rw, swp_entry_t entry, struct page *page, int wait)
 {
-	unsigned long type, offset;
-	struct swap_info_struct * p;
+	unsigned long offset;
 	int zones[PAGE_SIZE/512];
 	int zones_used;
 	kdev_t dev = 0;
 	int block_size;
-
-#ifdef DEBUG_SWAP
-	printk ("DebugVM: %s_swap_page entry %08lx, page %p (count %d), %s\n",
-		(rw == READ) ? "read" : "write", 
-		entry, (char *) page_address(page), page_count(page),
-		wait ? "wait" : "nowait");
-#endif
-
-	type = SWP_TYPE(entry);
-	if (type >= nr_swapfiles) {
-		printk("Internal error: bad swap-device\n");
-		return;
-	}
+	struct inode *swapf = 0;
 
 	/* Don't allow too many pending pages in flight.. */
-	if (atomic_read(&nr_async_pages) > pager_daemon.swap_cluster)
+	if ((rw == WRITE) && atomic_read(&nr_async_pages) >
+			pager_daemon.swap_cluster * (1 << page_cluster))
 		wait = 1;
-
-	p = &swap_info[type];
-	offset = SWP_OFFSET(entry);
-	if (offset >= p->max) {
-		printk("rw_swap_page: weirdness\n");
-		return;
-	}
-	if (p->swap_map && !p->swap_map[offset]) {
-		printk(KERN_ERR "rw_swap_page: "
-			"Trying to %s unallocated swap (%08lx)\n", 
-			(rw == READ) ? "read" : "write", entry);
-		return;
-	}
-	if (!(p->flags & SWP_USED)) {
-		printk(KERN_ERR "rw_swap_page: "
-			"Trying to swap to unused swap-device\n");
-		return;
-	}
-
-	if (!PageLocked(page)) {
-		printk(KERN_ERR "VM: swap page is unlocked\n");
-		return;
-	}
 
 	if (rw == READ) {
 		ClearPageUptodate(page);
@@ -90,89 +53,48 @@ static void rw_swap_page_base(int rw, unsigned long entry, struct page *page, in
 	} else
 		kstat.pswpout++;
 
-	get_page(page);
-	if (p->swap_device) {
+	get_swaphandle_info(entry, &offset, &dev, &swapf);
+	if (dev) {
 		zones[0] = offset;
 		zones_used = 1;
-		dev = p->swap_device;
 		block_size = PAGE_SIZE;
-	} else if (p->swap_file) {
-		struct inode *swapf = p->swap_file->d_inode;
-		int i;
-		if (swapf->i_op->get_block == NULL
-			&& swapf->i_op->smap != NULL){
-			/*
-				With MS-DOS, we use msdos_smap which returns
-				a sector number (not a cluster or block number).
-				It is a patch to enable the UMSDOS project.
-				Other people are working on better solution.
+	} else if (swapf) {
+		int i, j;
+		unsigned int block = offset
+			<< (PAGE_SHIFT - swapf->i_sb->s_blocksize_bits);
 
-				It sounds like ll_rw_swap_file defined
-				its operation size (sector size) based on
-				PAGE_SIZE and the number of blocks to read.
-				So using get_block or smap should work even if
-				smap will require more blocks.
-			*/
-			int j;
-			unsigned int block = offset << 3;
-
-			for (i=0, j=0; j< PAGE_SIZE ; i++, j += 512){
-				if (!(zones[i] = swapf->i_op->smap(swapf,block++))) {
-					printk("rw_swap_page: bad swap file\n");
-					return;
-				}
+		block_size = swapf->i_sb->s_blocksize;
+		for (i=0, j=0; j< PAGE_SIZE ; i++, j += block_size)
+			if (!(zones[i] = bmap(swapf,block++))) {
+				printk("rw_swap_page: bad swap file\n");
+				return 0;
 			}
-			block_size = 512;
-		}else{
-			int j;
-			unsigned int block = offset
-				<< (PAGE_SHIFT - swapf->i_sb->s_blocksize_bits);
-
-			block_size = swapf->i_sb->s_blocksize;
-			for (i=0, j=0; j< PAGE_SIZE ; i++, j += block_size)
-				if (!(zones[i] = bmap(swapf,block++))) {
-					printk("rw_swap_page: bad swap file\n");
-					return;
-				}
-			zones_used = i;
-			dev = swapf->i_dev;
-		}
+		zones_used = i;
+		dev = swapf->i_dev;
 	} else {
-		printk(KERN_ERR "rw_swap_page: no swap file or device\n");
-		put_page(page);
-		return;
+		return 0;
 	}
  	if (!wait) {
- 		set_bit(PG_decr_after, &page->flags);
+ 		SetPageDecrAfter(page);
  		atomic_inc(&nr_async_pages);
  	}
- 	if (dolock) {
- 		set_bit(PG_free_swap_after, &page->flags);
-		p->swap_map[offset]++;
- 	}
- 	set_bit(PG_free_after, &page->flags);
 
  	/* block_size == PAGE_SIZE/zones_used */
- 	brw_page(rw, page, dev, zones, block_size, 0);
+ 	brw_page(rw, page, dev, zones, block_size);
 
  	/* Note! For consistency we do all of the logic,
  	 * decrementing the page count, and unlocking the page in the
  	 * swap lock map - in the IO completion handler.
  	 */
- 	if (!wait) {
- 		return;
-	}
+ 	if (!wait)
+ 		return 1;
+
  	wait_on_page(page);
 	/* This shouldn't happen, but check to be sure. */
 	if (page_count(page) == 0)
 		printk(KERN_ERR "rw_swap_page: page unused while waiting!\n");
 
-#ifdef DEBUG_SWAP
-	printk ("DebugVM: %s_swap_page finished on page %p (count %d)\n",
-		(rw == READ) ? "read" : "write", 
-		(char *) page_address(page), 
-		page_count(page));
-#endif
+	return 1;
 }
 
 /*
@@ -184,48 +106,38 @@ static void rw_swap_page_base(int rw, unsigned long entry, struct page *page, in
  */
 void rw_swap_page(int rw, struct page *page, int wait)
 {
-	unsigned long entry = page->offset;
+	swp_entry_t entry;
+
+	entry.val = page->index;
 
 	if (!PageLocked(page))
 		PAGE_BUG(page);
 	if (!PageSwapCache(page))
 		PAGE_BUG(page);
-	if (page->inode != &swapper_inode)
+	if (page->mapping != &swapper_space)
 		PAGE_BUG(page);
-	rw_swap_page_base(rw, entry, page, wait, 1);
+	if (!rw_swap_page_base(rw, entry, page, wait))
+		UnlockPage(page);
 }
 
 /*
- * Setting up a new swap file needs a simple wrapper just to read the 
- * swap signature.  SysV shared memory also needs a simple wrapper.
- */
-void rw_swap_page_nocache(int rw, unsigned long entry, char *buf)
-{
-	struct page *page = mem_map + MAP_NR(buf);
-	
-	if (TryLockPage(page))
-		PAGE_BUG(page);
-	if (PageSwapCache(page))
-		PAGE_BUG(page);
-	if (page->inode)
-		PAGE_BUG(page);
-	page->offset = entry;
-	rw_swap_page_base(rw, entry, page, 1, 1);
-}
-
-/*
- * shmfs needs a version that doesn't put the page in the page cache!
  * The swap lock map insists that pages be in the page cache!
  * Therefore we can't use it.  Later when we can remove the need for the
  * lock map and we can reduce the number of functions exported.
  */
-void rw_swap_page_nolock(int rw, unsigned long entry, char *buf, int wait)
+void rw_swap_page_nolock(int rw, swp_entry_t entry, char *buf, int wait)
 {
-	struct page *page = mem_map + MAP_NR(buf);
+	struct page *page = virt_to_page(buf);
 	
 	if (!PageLocked(page))
 		PAGE_BUG(page);
 	if (PageSwapCache(page))
 		PAGE_BUG(page);
-	rw_swap_page_base(rw, entry, page, wait, 0);
+	if (page->mapping)
+		PAGE_BUG(page);
+	/* needs sync_page to wait I/O completation */
+	page->mapping = &swapper_space;
+	if (!rw_swap_page_base(rw, entry, page, wait))
+		UnlockPage(page);
+	page->mapping = NULL;
 }

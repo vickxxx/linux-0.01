@@ -52,22 +52,15 @@
 #include <linux/if_ether.h>	/* For the statistics structure. */
 #include <linux/if_arp.h>	/* For ARPHRD_ETHER */
 
-#define LOOPBACK_MTU	(PAGE_SIZE - 172)
+#define LOOPBACK_OVERHEAD (128 + MAX_HEADER + 16 + 16)
 
 /*
  * The higher levels take care of making this non-reentrant (it's
  * called with bh's disabled).
  */
-static int loopback_xmit(struct sk_buff *skb, struct device *dev)
+static int loopback_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
-
-	/*
-	 *	Take this out if the debug says its ok
-	 */
-	   
-	if (skb == NULL || dev == NULL) 
-		printk(KERN_DEBUG "loopback fed NULL data - splat\n");
 
 	/*
 	 *	Optimise so buffers with skb->free=1 are not copied but
@@ -102,22 +95,15 @@ static int loopback_xmit(struct sk_buff *skb, struct device *dev)
 	return(0);
 }
 
-static struct net_device_stats *get_stats(struct device *dev)
+static struct net_device_stats *get_stats(struct net_device *dev)
 {
 	return (struct net_device_stats *)dev->priv;
 }
 
-static int loopback_open(struct device *dev)
-{
-	dev->flags|=IFF_LOOPBACK;
-	return 0;
-}
-
 /* Initialize the rest of the LOOPBACK device. */
-__initfunc(int loopback_init(struct device *dev))
+int __init loopback_init(struct net_device *dev)
 {
-	dev->mtu		= LOOPBACK_MTU;
-	dev->tbusy		= 0;
+	dev->mtu		= PAGE_SIZE - LOOPBACK_OVERHEAD;
 	dev->hard_start_xmit	= loopback_xmit;
 	dev->hard_header	= eth_header;
 	dev->hard_header_cache	= eth_header_cache;
@@ -127,13 +113,15 @@ __initfunc(int loopback_init(struct device *dev))
 	dev->tx_queue_len	= 0;
 	dev->type		= ARPHRD_LOOPBACK;	/* 0x0001		*/
 	dev->rebuild_header	= eth_rebuild_header;
-	dev->open		= loopback_open;
 	dev->flags		= IFF_LOOPBACK;
 	dev->priv = kmalloc(sizeof(struct net_device_stats), GFP_KERNEL);
 	if (dev->priv == NULL)
 			return -ENOMEM;
 	memset(dev->priv, 0, sizeof(struct net_device_stats));
 	dev->get_stats = get_stats;
+
+	if (num_physpages >= ((128*1024*1024)>>PAGE_SHIFT))
+		dev->mtu = 4096*4 - LOOPBACK_OVERHEAD;
 
 	/*
 	 *	Fill in the generic fields of the device structure. 

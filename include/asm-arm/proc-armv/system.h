@@ -1,46 +1,24 @@
 /*
- * linux/include/asm-arm/proc-armv/system.h
+ *  linux/include/asm-arm/proc-armv/system.h
  *
- * Copyright (C) 1996 Russell King
+ *  Copyright (C) 1996 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
-
 #ifndef __ASM_PROC_SYSTEM_H
 #define __ASM_PROC_SYSTEM_H
 
-extern const char xchg_str[];
-
-extern __inline__ unsigned long __xchg(unsigned long x, volatile void *ptr, int size)
-{
-	switch (size) {
-		case 1:	__asm__ __volatile__ ("swpb %0, %1, [%2]" : "=r" (x) : "r" (x), "r" (ptr) : "memory");
-			break;
-		case 2:	abort ();
-		case 4:	__asm__ __volatile__ ("swp %0, %1, [%2]" : "=r" (x) : "r" (x), "r" (ptr) : "memory");
-			break;
-		default: arm_invalidptr(xchg_str, size);
-	}
-	return x;
-}
+#include <linux/config.h>
 
 #define set_cr(x)					\
-	do {						\
 	__asm__ __volatile__(				\
 	"mcr	p15, 0, %0, c1, c0	@ set CR"	\
-	  : : "r" (x));					\
-	} while (0)
+	: : "r" (x))
 
 extern unsigned long cr_no_alignment;	/* defined in entry-armv.S */
 extern unsigned long cr_alignment;	/* defined in entry-armv.S */
-
-/*
- * We can wait for an interrupt...
- */
-#define proc_idle()						\
-	do {							\
-	__asm__ __volatile__(					\
-"	mcr	p15, 0, %0, c15, c8, 2	@ proc_idle"		\
-	  : : "r" (0));						\
-	} while (0)
 
 /*
  * A couple of speedups for the ARM
@@ -50,93 +28,152 @@ extern unsigned long cr_alignment;	/* defined in entry-armv.S */
  * Save the current interrupt enable state & disable IRQs
  */
 #define __save_flags_cli(x)					\
-	do {							\
-	  unsigned long temp;					\
-	  __asm__ __volatile__(					\
-	"mrs	%1, cpsr		@ save_flags_cli\n"	\
-"	and	%0, %1, #192\n"					\
-"	orr	%1, %1, #128\n"					\
-"	msr	cpsr, %1"					\
-	  : "=r" (x), "=r" (temp)				\
-	  :							\
-	  : "memory");						\
-	} while (0)
+	({							\
+		unsigned long temp;				\
+	__asm__ __volatile__(					\
+	"mrs	%0, cpsr		@ save_flags_cli\n"	\
+"	orr	%1, %0, #128\n"					\
+"	msr	cpsr_c, %1"					\
+	: "=r" (x), "=r" (temp)					\
+	:							\
+	: "memory");						\
+	})
 	
 /*
  * Enable IRQs
  */
 #define __sti()							\
-	do {							\
-	  unsigned long temp;					\
-	  __asm__ __volatile__(					\
+	({							\
+		unsigned long temp;				\
+	__asm__ __volatile__(					\
 	"mrs	%0, cpsr		@ sti\n"		\
 "	bic	%0, %0, #128\n"					\
-"	msr	cpsr, %0"					\
-	  : "=r" (temp)						\
-	  :							\
-	  : "memory");						\
-	} while(0)
+"	msr	cpsr_c, %0"					\
+	: "=r" (temp)						\
+	:							\
+	: "memory");						\
+	})
 
 /*
  * Disable IRQs
  */
 #define __cli()							\
-	do {							\
-	  unsigned long temp;					\
-	  __asm__ __volatile__(					\
+	({							\
+		unsigned long temp;				\
+	__asm__ __volatile__(					\
 	"mrs	%0, cpsr		@ cli\n"		\
 "	orr	%0, %0, #128\n"					\
-"	msr	cpsr, %0"					\
-	  : "=r" (temp)						\
-	  :							\
-	  : "memory");						\
-	} while(0)
+"	msr	cpsr_c, %0"					\
+	: "=r" (temp)						\
+	:							\
+	: "memory");						\
+	})
+
+/*
+ * Enable FIQs
+ */
+#define __stf()							\
+	({							\
+		unsigned long temp;				\
+	__asm__ __volatile__(					\
+	"mrs	%0, cpsr		@ stf\n"		\
+"	bic	%0, %0, #64\n"					\
+"	msr	cpsr_c, %0"					\
+	: "=r" (temp)						\
+	:							\
+	: "memory");						\
+	})
+
+/*
+ * Disable FIQs
+ */
+#define __clf()							\
+	({							\
+		unsigned long temp;				\
+	__asm__ __volatile__(					\
+	"mrs	%0, cpsr		@ clf\n"		\
+"	orr	%0, %0, #64\n"					\
+"	msr	cpsr_c, %0"					\
+	: "=r" (temp)						\
+	:							\
+	: "memory");						\
+	})
 
 /*
  * save current IRQ & FIQ state
  */
 #define __save_flags(x)						\
-	do {							\
-	  __asm__ __volatile__(					\
+	__asm__ __volatile__(					\
 	"mrs	%0, cpsr		@ save_flags\n"		\
-"	and	%0, %0, #192"					\
 	  : "=r" (x)						\
 	  :							\
-	  : "memory");						\
-	} while (0)
+	  : "memory")
 
 /*
  * restore saved IRQ & FIQ state
  */
 #define __restore_flags(x)					\
-	do {							\
-	  unsigned long temp;					\
-	  __asm__ __volatile__(					\
-	"mrs	%0, cpsr		@ restore_flags\n"	\
-"	bic	%0, %0, #192\n"					\
-"	orr	%0, %0, %1\n"					\
-"	msr	cpsr, %0"					\
-	  : "=r" (temp)						\
-	  : "r" (x)						\
-	  : "memory");			\
-	} while (0)
+	__asm__ __volatile__(					\
+	"msr	cpsr_c, %0		@ restore_flags\n"	\
+	:							\
+	: "r" (x)						\
+	: "memory")
 
-/* For spinlocks etc */
-#define local_irq_save(x)	__save_flags_cli(x)
-#define local_irq_restore(x)	__restore_flags(x)
-#define local_irq_disable()	__cli()
-#define local_irq_enable()	__sti()
-
-#ifdef __SMP__
-#error SMP not supported
-#else
-
-#define cli() __cli()
-#define sti() __sti()
-#define save_flags(x)		__save_flags(x)
-#define restore_flags(x)	__restore_flags(x)
-#define save_flags_cli(x)	__save_flags_cli(x)
-
+#if defined(CONFIG_CPU_SA1100) || defined(CONFIG_CPU_SA110)
+/*
+ * On the StrongARM, "swp" is terminally broken since it bypasses the
+ * cache totally.  This means that the cache becomes inconsistent, and,
+ * since we use normal loads/stores as well, this is really bad.
+ * Typically, this causes oopsen in filp_close, but could have other,
+ * more disasterous effects.  There are two work-arounds:
+ *  1. Disable interrupts and emulate the atomic swap
+ *  2. Clean the cache, perform atomic swap, flush the cache
+ *
+ * We choose (1) since its the "easiest" to achieve here and is not
+ * dependent on the processor type.
+ */
+#define swp_is_buggy
 #endif
+
+extern __inline__ unsigned long __xchg(unsigned long x, volatile void *ptr, int size)
+{
+	extern void __bad_xchg(volatile void *, int);
+	unsigned long ret;
+#ifdef swp_is_buggy
+	unsigned long flags;
+#endif
+
+	switch (size) {
+#ifdef swp_is_buggy
+		case 1:
+			__save_flags_cli(flags);
+			ret = *(volatile unsigned char *)ptr;
+			*(volatile unsigned char *)ptr = x;
+			__restore_flags(flags);
+			break;
+
+		case 4:
+			__save_flags_cli(flags);
+			ret = *(volatile unsigned long *)ptr;
+			*(volatile unsigned long *)ptr = x;
+			__restore_flags(flags);
+			break;
+#else
+		case 1:	__asm__ __volatile__ ("swpb %0, %1, [%2]"
+					: "=r" (ret)
+					: "r" (x), "r" (ptr)
+					: "memory");
+			break;
+		case 4:	__asm__ __volatile__ ("swp %0, %1, [%2]"
+					: "=r" (ret)
+					: "r" (x), "r" (ptr)
+					: "memory");
+			break;
+#endif
+		default: __bad_xchg(ptr, size);
+	}
+
+	return ret;
+}
 
 #endif

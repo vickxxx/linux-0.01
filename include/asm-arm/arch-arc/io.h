@@ -1,19 +1,19 @@
 /*
- * linux/include/asm-arm/arch-arc/io.h
+ *  linux/include/asm-arm/arch-arc/io.h
  *
- * Copyright (C) 1997 Russell King
+ *  Copyright (C) 1997 Russell King
  *
- * Modifications:
- *  06-Dec-1997	RMK	Created.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Modifications:
+ *   06-Dec-1997 RMK	Created.
  */
 #ifndef __ASM_ARM_ARCH_IO_H
 #define __ASM_ARM_ARCH_IO_H
 
-/*
- * This architecture does not require any delayed IO, and
- * has the constant-optimised IO
- */
-#undef	ARCH_IO_DELAY
+#define IO_SPACE_LIMIT 0xffffffff
 
 /*
  * We use two different types of addressing - PC style addresses, and ARM
@@ -95,7 +95,7 @@ extern __inline__ unsigned int __ioaddr (unsigned int port)			\
 
 DECLARE_IO(char,b,"b")
 DECLARE_IO(short,w,"")
-DECLARE_IO(long,l,"")
+DECLARE_IO(int,l,"")
 
 #undef DECLARE_IO
 #undef DECLARE_DYN_IN
@@ -195,6 +195,14 @@ DECLARE_IO(long,l,"")
 		addr = IO_BASE + ((port) << 2);					\
 	addr;									\
 })
+
+#define inb(p)	 	(__builtin_constant_p((p)) ? __inbc(p)    : __inb(p))
+#define inw(p)	 	(__builtin_constant_p((p)) ? __inwc(p)    : __inw(p))
+#define inl(p)	 	(__builtin_constant_p((p)) ? __inlc(p)    : __inl(p))
+#define outb(v,p)	(__builtin_constant_p((p)) ? __outbc(v,p) : __outb(v,p))
+#define outw(v,p)	(__builtin_constant_p((p)) ? __outwc(v,p) : __outw(v,p))
+#define outl(v,p)	(__builtin_constant_p((p)) ? __outlc(v,p) : __outl(v,p))
+#define __ioaddr(p)	(__builtin_constant_p((p)) ? __ioaddr(p)  : __ioaddrc(p))
 
 /*
  * Translated address IO functions

@@ -10,6 +10,8 @@
 #ifndef __ASMPPC_IDE_H
 #define __ASMPPC_IDE_H
 
+#ifdef __KERNEL__
+
 #include <linux/sched.h>
 #include <asm/processor.h>
 
@@ -19,8 +21,7 @@
 
 #include <asm/hdreg.h>
 
-#ifdef __KERNEL__
-
+#include <linux/config.h>
 #include <linux/hdreg.h>
 #include <linux/ioport.h>
 #include <asm/io.h>
@@ -105,16 +106,20 @@ static __inline__ void  ide_init_hwif_ports(hw_regs_t *hw,
 
 static __inline__ void ide_init_default_hwifs(void)
 {
-#ifdef __DO_I_NEED_THIS
+#ifndef CONFIG_BLK_DEV_IDEPCI
 	hw_regs_t hw;
 	int index;
+	ide_ioreg_t base;
 
-	for(index = 0; index < MAX_HWIFS; index++) {
-		ide_init_hwif_ports(&hw, ide_default_io_base(index), 0, NULL);
-		hw.irq = ide_default_irq(ide_default_io_base(index));
+	for (index = 0; index < MAX_HWIFS; index++) {
+		base = ide_default_io_base(index);
+		if (base == 0)
+			continue;
+		ide_init_hwif_ports(&hw, base, 0, NULL);
+		hw.irq = ide_default_irq(base);
 		ide_register_hw(&hw, NULL);
 	}
-#endif /* __DO_I_NEED_THIS */
+#endif /* CONFIG_BLK_DEV_IDEPCI */
 }
 
 static __inline__ int ide_check_region (ide_ioreg_t from, unsigned int extent)
@@ -173,7 +178,11 @@ typedef union {
 /*
  * The following are not needed for the non-m68k ports
  */
+#ifdef CONFIG_APUS
+#define ide_ack_intr(hwif) (hwif->hw.ack_intr ? hwif->hw.ack_intr(hwif) : 1)
+#else
 #define ide_ack_intr(hwif)		(1)
+#endif
 #define ide_release_lock(lock)		do {} while (0)
 #define ide_get_lock(lock, hdlr, data)	do {} while (0)
 

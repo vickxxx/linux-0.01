@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.41 1999/06/04 13:29:05 jj Exp $
+# $Id: Makefile,v 1.48 2000/12/15 00:41:24 davem Exp $
 # sparc/Makefile
 #
 # Makefile for the architecture dependent flags and dependencies on the
@@ -15,7 +15,7 @@ SHELL  =/bin/bash
 # Uncomment the first CFLAGS if you are doing kgdb source level
 # debugging of the kernel to get the proper debugging information.
 
-IS_EGCS := $(shell if $(CC) -c -m32 -o _tmp.o arch/sparc/math-emu/fnegs.c >/dev/null 2>&1; then echo y; else echo n; fi; rm -f _tmp.o)
+IS_EGCS := $(shell if $(CC) -m32 -S -o /dev/null -xc /dev/null >/dev/null 2>&1; then echo y; else echo n; fi; )
 NEW_GAS := $(shell if $(LD) --version 2>&1 | grep 'elf64_sparc' > /dev/null; then echo y; else echo n; fi)
 
 ifeq ($(NEW_GAS),y)
@@ -35,7 +35,7 @@ LINKFLAGS = -T arch/sparc/vmlinux.lds
 
 HEAD := arch/sparc/kernel/head.o arch/sparc/kernel/init_task.o
 
-SUBDIRS := $(SUBDIRS) arch/sparc/kernel arch/sparc/lib arch/sparc/prom \
+SUBDIRS += arch/sparc/kernel arch/sparc/lib arch/sparc/prom \
 	arch/sparc/mm arch/sparc/math-emu
 
 CORE_FILES := arch/sparc/kernel/kernel.o arch/sparc/mm/mm.o $(CORE_FILES) \
@@ -44,28 +44,21 @@ CORE_FILES := arch/sparc/kernel/kernel.o arch/sparc/mm/mm.o $(CORE_FILES) \
 LIBS := $(TOPDIR)/lib/lib.a $(LIBS) $(TOPDIR)/arch/sparc/prom/promlib.a \
 	$(TOPDIR)/arch/sparc/lib/lib.a
 
-ifdef CONFIG_AP1000
-SUBDIRS := $(SUBDIRS) arch/sparc/ap1000 mpp
-CORE_FILES := $(TOPDIR)/arch/sparc/ap1000/ap1000lib.o \
-	      $(TOPDIR)/mpp/mpplib.o $(CORE_FILES) 
-DRIVERS := $(DRIVERS) drivers/ap1000/ap1000.a
-CFLAGS := $(CFLAGS) -D__MPP__=1
-endif
-
 # This one has to come last
 SUBDIRS += arch/sparc/boot
 CORE_FILES_NO_BTFIX := $(CORE_FILES)
 CORE_FILES += arch/sparc/boot/btfix.o
+
+export	CORE_FILES_NO_BTFIX
 
 archclean:
 	rm -f $(TOPDIR)/vmlinux.aout
 	-$(MAKE) -C arch/sparc/boot clean
 
 archmrproper:
-	-$(MAKE) -C arch/sparc/math-emu cleansymlinks
+	rm -f $(TOPDIR)/include/asm-sparc/asm_offsets.h
 
-archdep:
-	-$(MAKE) -C arch/sparc/math-emu symlinks
+archdep: check_asm
 
 check_asm:
 	$(MAKE) -C arch/sparc/kernel check_asm

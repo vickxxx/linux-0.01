@@ -1,4 +1,4 @@
-/* $Id: viking.S,v 1.13 1999/03/24 11:42:32 davem Exp $
+/* $Id: viking.S,v 1.18 2000/07/16 21:48:52 anton Exp $
  * viking.S: High speed Viking cache/mmu operations
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -6,6 +6,7 @@
  * Copyright (C) 1999  Pavel Semerad  (semerad@ss1000.ms.mff.cuni.cz)
  */
 
+#include <linux/config.h>
 #include <asm/ptrace.h>
 #include <asm/psr.h>
 #include <asm/asi.h>
@@ -16,7 +17,7 @@
 #include <asm/cprefix.h>
 #include <asm/btfixup.h>
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	.data
 	.align	4
 sun4dsmp_flush_tlb_spin:
@@ -30,42 +31,17 @@ sun4dsmp_flush_tlb_spin:
 	.globl	viking_flush_cache_range, viking_flush_cache_page
 	.globl	viking_flush_page, viking_mxcc_flush_page
 	.globl	viking_flush_page_for_dma, viking_flush_page_to_ram
-	.globl	viking_flush_chunk, viking_mxcc_flush_chunk
 	.globl	viking_flush_sig_insns
 	.globl	viking_flush_tlb_all, viking_flush_tlb_mm
 	.globl	viking_flush_tlb_range, viking_flush_tlb_page
 
-	.globl	viking_c_flush_chunk, viking_s_flush_chunk
-
-viking_s_flush_chunk:
-	sethi	%hi(KERNBASE), %g2
-	ba	2f
-	 sub	%o0, %g2, %g3
-
-viking_c_flush_chunk:
-	sethi	%hi(KERNBASE), %g2
-	cmp	%o0, %g2
-	bgeu	2f
-	 sub	%o0, %g2, %g3
-	sethi	BTFIXUP_SETHI(page_contig_offset), %g2
-	ba	2f
-	 sub	%o0, %g2, %g3
-
 viking_flush_page:
-viking_flush_chunk:
-	sethi	%hi(C_LABEL(srmmu_v2p_hash)), %g2
-	srl	%o0, 24, %o1
-	or	%g2, %lo(C_LABEL(srmmu_v2p_hash)), %g2
-	sll	%o1, 2, %o1
-	ld	[%g2 + %o1], %g3
-	and	%o0, PAGE_MASK, %o0
-	cmp	%g3, -1
-	be	9f
-	 add	%o0, %g3, %g3
-2:	srl	%g3, 12, %g1		! ppage >> 12
+	sethi	%hi(PAGE_OFFSET), %g2
+	sub	%o0, %g2, %g3
+	srl	%g3, 12, %g1		! ppage >> 12
 
 	clr	%o1			! set counter, 0 - 127
-	sethi	%hi(KERNBASE + PAGE_SIZE - 0x80000000), %o3
+	sethi	%hi(PAGE_OFFSET + PAGE_SIZE - 0x80000000), %o3
 	sethi	%hi(0x80000000), %o4
 	sethi	%hi(VIKING_PTAG_VALID), %o5
 	sethi	%hi(2*PAGE_SIZE), %o0
@@ -85,7 +61,7 @@ viking_flush_chunk:
 
 	andcc	%g2, %o5, %g0		! ptag VALID?
 	be	7f
-	 add	%g4, %o3, %g2		! (KERNBASE + PAGE_SIZE) | (set << 5)
+	 add	%g4, %o3, %g2		! (PAGE_OFFSET + PAGE_SIZE) | (set << 5)
 	ld	[%g2], %g3
 	ld	[%g2 + %g7], %g3
 	add	%g2, %o0, %g2
@@ -113,16 +89,9 @@ viking_flush_chunk:
 	 nop
 
 viking_mxcc_flush_page:
-	sethi	%hi(C_LABEL(srmmu_v2p_hash)), %g2
-	srl	%o0, 24, %o1
-	or	%g2, %lo(C_LABEL(srmmu_v2p_hash)), %g2
-	sll	%o1, 2, %o1
-	ld	[%g2 + %o1], %g3
-	and	%o0, PAGE_MASK, %o0
-	cmp	%g3, -1
-	be	9f
-	 add	%o0, %g3, %g3
-2:	sub	%g3, -PAGE_SIZE, %g3		! ppage + PAGE_SIZE
+	sethi	%hi(PAGE_OFFSET), %g2
+	sub	%o0, %g2, %g3
+	sub	%g3, -PAGE_SIZE, %g3		! ppage + PAGE_SIZE
 	sethi	%hi(MXCC_SRCSTREAM), %o3	! assume %hi(MXCC_SRCSTREAM) == %hi(MXCC_DESTSTREAM)
 	mov	0x10, %g2			! set cacheable bit
 	or	%o3, %lo(MXCC_SRCSTREAM), %o2
@@ -138,28 +107,13 @@ viking_mxcc_flush_page:
 9:	retl
 	 nop
 
-viking_mxcc_flush_chunk:
-	retl
-	 nop
-
-#define WINDOW_FLUSH(tmp1, tmp2)					\
-	mov	0, tmp1;						\
-98:	ld	[%g6 + AOFF_task_tss + AOFF_thread_uwinmask], tmp2;	\
-	orcc	%g0, tmp2, %g0;						\
-	add	tmp1, 1, tmp1;						\
-	bne	98b;							\
-	 save	%sp, -64, %sp;						\
-99:	subcc	tmp1, 1, tmp1;						\
-	bne	99b;							\
-	 restore %g0, %g0, %g0;
-
 viking_flush_cache_page:
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	ld	[%o0 + 0x0], %o0		/* XXX vma->vm_mm, GROSS XXX */
 #endif
 viking_flush_cache_mm:
 viking_flush_cache_range:
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	ld	[%o0 + AOFF_mm_context], %g1
 	cmp	%g1, -1
 	bne	viking_flush_cache_all
@@ -181,7 +135,7 @@ viking_flush_tlb_mm:
 	mov	SRMMU_CTX_REG, %g1
 	ld	[%o0 + AOFF_mm_context], %o1
 	lda	[%g1] ASI_M_MMUREGS, %g5
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	cmp	%o1, -1
 	be	1f
 #endif
@@ -190,7 +144,7 @@ viking_flush_tlb_mm:
 	sta	%g0, [%g2] ASI_M_FLUSH_PROBE
 	retl
 	 sta	%g5, [%g1] ASI_M_MMUREGS
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 1:	retl
 	 nop
 #endif
@@ -199,7 +153,7 @@ viking_flush_tlb_range:
 	mov	SRMMU_CTX_REG, %g1
 	ld	[%o0 + AOFF_mm_context], %o3
 	lda	[%g1] ASI_M_MMUREGS, %g5
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	cmp	%o3, -1
 	be	2f
 #endif
@@ -214,7 +168,7 @@ viking_flush_tlb_range:
 	 sta	%g0, [%o1] ASI_M_FLUSH_PROBE
 	retl
 	 sta	%g5, [%g1] ASI_M_MMUREGS
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 2:	retl
 	 nop
 #endif
@@ -224,7 +178,7 @@ viking_flush_tlb_page:
 	mov	SRMMU_CTX_REG, %g1
 	ld	[%o0 + AOFF_mm_context], %o3
 	lda	[%g1] ASI_M_MMUREGS, %g5
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	cmp	%o3, -1
 	be	1f
 #endif
@@ -233,7 +187,7 @@ viking_flush_tlb_page:
 	sta	%g0, [%o1] ASI_M_FLUSH_PROBE
 	retl
 	 sta	%g5, [%g1] ASI_M_MMUREGS
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 1:	retl
 	 nop
 #endif
@@ -244,7 +198,7 @@ viking_flush_sig_insns:
 	retl
 	 nop
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	.globl	sun4dsmp_flush_tlb_all, sun4dsmp_flush_tlb_mm
 	.globl	sun4dsmp_flush_tlb_range, sun4dsmp_flush_tlb_page
 sun4dsmp_flush_tlb_all:

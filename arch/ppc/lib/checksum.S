@@ -26,9 +26,10 @@
 _GLOBAL(ip_fast_csum)
 	lwz	r0,0(r3)
 	lwzu	r5,4(r3)
-	addi	r4,r4,-2
+	addic.	r4,r4,-2
 	addc	r0,r0,r5
 	mtctr	r4
+	blelr-
 1:	lwzu	r4,4(r3)
 	adde	r0,r0,r4
 	bdnz	1b

@@ -1,9 +1,13 @@
 /*
- * drivers/sound/vidc.h
+ *  linux/drivers/sound/vidc.h
  *
- * VIDC sound function prototypes
+ *  Copyright (C) 1997 Russell King <rmk@arm.linux.org.uk>
  *
- * Copyright (C) 1997 Russell King <rmk@arm.uk.linux.org>
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  VIDC sound function prototypes
  */
 
 /* vidc.c */
@@ -55,18 +59,9 @@ extern void     (*dma_interrupt) (void);
 extern unsigned long dma_start, dma_count, dma_bufsize;
 extern unsigned long dma_buf[2], dma_pbuf[2];
 
-/* vidc_audio.c */
-
-extern void     vidc_audio_init(struct address_info *hw_config);
-extern int      vidc_audio_get_volume(void);
-extern int      vidc_audio_set_volume(int vol);
-
-/* vidc_mixer.c */
-
-extern void     vidc_mixer_init(struct address_info *hw_config);
-
 /* vidc_synth.c */
 
 extern void     vidc_synth_init(struct address_info *hw_config);
+extern void	vidc_synth_exit(struct address_info *hw_config);
 extern int      vidc_synth_get_volume(void);
 extern int      vidc_synth_set_volume(int vol);

@@ -15,6 +15,7 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/mc146818rtc.h>	/* For struct rtc_time and ioctls, etc */
+#include <linux/smp_lock.h>
 #include <asm/bvme6000hw.h>
 
 #include <asm/io.h>
@@ -71,8 +72,9 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	}
 	case RTC_SET_TIME:	/* Set the RTC */
 	{
-		unsigned char leap_yr;
 		struct rtc_time rtc_tm;
+		unsigned char mon, day, hrs, min, sec, leap_yr;
+		unsigned int yrs;
 
 		if (!suser())
 			return -EACCES;
@@ -81,34 +83,46 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 				   sizeof(struct rtc_time)))
 			return -EFAULT;
 
-		leap_yr = ((!(rtc_tm.tm_year % 4) && (rtc_tm.tm_year % 100)) || !(rtc_tm.tm_year % 400));
+		yrs = rtc_tm.tm_year;
+		if (yrs < 1900)
+			yrs += 1900;
+		mon = rtc_tm.tm_mon + 1;   /* tm_mon starts at zero */
+		day = rtc_tm.tm_mday;
+		hrs = rtc_tm.tm_hour;
+		min = rtc_tm.tm_min;
+		sec = rtc_tm.tm_sec;
 
-		if ((rtc_tm.tm_mon > 12) || (rtc_tm.tm_mday == 0))
+		leap_yr = ((!(yrs % 4) && (yrs % 100)) || !(yrs % 400));
+
+		if ((mon > 12) || (day == 0))
 			return -EINVAL;
 
-		if (rtc_tm.tm_mday > (days_in_mo[rtc_tm.tm_mon] + ((rtc_tm.tm_mon == 2) && leap_yr)))
-			return -EINVAL;
-			
-		if ((rtc_tm.tm_hour >= 24) || (rtc_tm.tm_min >= 60) || (rtc_tm.tm_sec >= 60))
+		if (day > (days_in_mo[mon] + ((mon == 2) && leap_yr)))
 			return -EINVAL;
 
+		if ((hrs >= 24) || (min >= 60) || (sec >= 60))
+			return -EINVAL;
+
+		if (yrs >= 2070)
+			return -EINVAL;
+		
 		save_flags(flags);
 		cli();
 		/* Ensure clock and real-time-mode-register are accessible */
 		msr = rtc->msr & 0xc0;
 		rtc->msr = 0x40;
 
-		rtc->t0cr_rtmr = rtc_tm.tm_year%4;
+		rtc->t0cr_rtmr = yrs%4;
 		rtc->bcd_tenms = 0;
-		rtc->bcd_sec = BIN2BCD(rtc_tm.tm_sec);
-		rtc->bcd_min = BIN2BCD(rtc_tm.tm_min);
-		rtc->bcd_hr  = BIN2BCD(rtc_tm.tm_hour);
-		rtc->bcd_dom = BIN2BCD(rtc_tm.tm_mday);
-		rtc->bcd_mth = BIN2BCD(rtc_tm.tm_mon + 1);
-		rtc->bcd_year = BIN2BCD(rtc_tm.tm_year%100);
+		rtc->bcd_sec   = BIN2BCD(sec);
+		rtc->bcd_min   = BIN2BCD(min);
+		rtc->bcd_hr    = BIN2BCD(hrs);
+		rtc->bcd_dom   = BIN2BCD(day);
+		rtc->bcd_mth   = BIN2BCD(mon);
+		rtc->bcd_year  = BIN2BCD(yrs%100);
 		if (rtc_tm.tm_wday >= 0)
 			rtc->bcd_dow = BIN2BCD(rtc_tm.tm_wday+1);
-		rtc->t0cr_rtmr = rtc_tm.tm_year%4 | 0x08;
+		rtc->t0cr_rtmr = yrs%4 | 0x08;
 
 		rtc->msr = msr;
 		restore_flags(flags);
@@ -136,7 +150,9 @@ static int rtc_open(struct inode *inode, struct file *file)
 
 static int rtc_release(struct inode *inode, struct file *file)
 {
+	lock_kernel();
 	rtc_status = 0;
+	unlock_kernel();
 	return 0;
 }
 
@@ -145,16 +161,9 @@ static int rtc_release(struct inode *inode, struct file *file)
  */
 
 static struct file_operations rtc_fops = {
-	NULL,
-	NULL,
-	NULL,		/* No write */
-	NULL,		/* No readdir */
-	NULL,
-	rtc_ioctl,
-	NULL,		/* No mmap */
-	rtc_open,
-	NULL,		/* flush */
-	rtc_release
+	ioctl:		rtc_ioctl,
+	open:		rtc_open,
+	release:	rtc_release,
 };
 
 static struct miscdevice rtc_dev=
@@ -164,7 +173,7 @@ static struct miscdevice rtc_dev=
 	&rtc_fops
 };
 
-__initfunc(int rtc_DP8570A_init(void))
+int __init rtc_DP8570A_init(void)
 {
 	if (!MACH_IS_BVME6000)
 		return -ENODEV;

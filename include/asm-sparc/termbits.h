@@ -165,10 +165,13 @@ struct termios {
 #define B1152000  0x0000100d
 #define B1500000  0x0000100e
 #define B2000000  0x0000100f
+/* These have totally bogus values and nobody uses them
+   so far. Later on we'd have to use say 0x10000x and
+   adjust CBAUD constant and drivers accordingly.
 #define B2500000  0x00001010
 #define B3000000  0x00001011
 #define B3500000  0x00001012
-#define B4000000  0x00001013
+#define B4000000  0x00001013  */
 #define CIBAUD	  0x100f0000  /* input baud rate (not used) */
 #define CMSPAR	  0x40000000  /* mark or space (stick) parity */
 #define CRTSCTS	  0x80000000  /* flow control */
@@ -203,6 +206,9 @@ struct termios {
 #define TIOCM_DSR	0x100
 #define TIOCM_CD	TIOCM_CAR
 #define TIOCM_RI	TIOCM_RNG
+#define TIOCM_OUT1	0x2000
+#define TIOCM_OUT2	0x4000
+#define TIOCM_LOOP	0x8000
 
 /* ioctl (fd, TIOCSERGETLSR, &result) where result may be as below */
 #define TIOCSER_TEMT    0x01	/* Transmitter physically empty */

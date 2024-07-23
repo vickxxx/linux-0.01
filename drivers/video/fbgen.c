@@ -4,7 +4,7 @@
  *  Created 3 Jan 1998 by Geert Uytterhoeven
  *
  * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file README.legal in the main directory of this archive
+ * License.  See the file COPYING in the main directory of this archive
  * for more details.
  */
 
@@ -17,6 +17,7 @@
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
+#include <video/fbcon.h>
 
 static int currcon = 0;
 
@@ -186,17 +187,6 @@ int fbgen_pan_display(struct fb_var_screeninfo *var, int con,
 	fb_display[con].var.vmode &= ~FB_VMODE_YWRAP;
 
     return 0;
-}
-
-
-    /*
-     *  Frame Buffer Specific ioctls
-     */
-
-int fbgen_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
-		unsigned long arg, int con, struct fb_info *info)
-{
-    return -EINVAL;
 }
 
 

@@ -14,6 +14,9 @@
  *    routines in this file used to be inline!
  */
 
+#include <linux/module.h>
+
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/types.h>
@@ -55,16 +58,17 @@ volatile unsigned char cmd_buffer[16];
 				 */
 
 /***************************************************************** Detection */
-int blz2060_esp_detect(Scsi_Host_Template *tpnt)
+int __init blz2060_esp_detect(Scsi_Host_Template *tpnt)
 {
 	struct NCR_ESP *esp;
-	const struct ConfigDev *esp_dev;
-	unsigned int key;
+	struct zorro_dev *z = NULL;
 	unsigned long address;
 
-	if ((key = zorro_find(ZORRO_PROD_PHASE5_BLIZZARD_2060, 0, 0))){
-		esp_dev = zorro_get_board(key);
-		esp = esp_allocate(tpnt, (void *) esp_dev);
+	if ((z = zorro_find_device(ZORRO_PROD_PHASE5_BLIZZARD_2060, z))) {
+	    unsigned long board = z->resource.start;
+	    if (request_mem_region(board+BLZ2060_ESP_ADDR,
+				   sizeof(struct ESP_regs), "NCR53C9x")) {
+		esp = esp_allocate(tpnt, (void *)board+BLZ2060_ESP_ADDR);
 
 		/* Do command transfer with programmed I/O */
 		esp->do_pio_cmds = 1;
@@ -99,7 +103,7 @@ int blz2060_esp_detect(Scsi_Host_Template *tpnt)
 		 * relative to the device (i.e. in the same Zorro
 		 * I/O block).
 		 */
-		address = (unsigned long)ZTWO_VADDR(esp_dev->cd_BoardAddr);
+		address = (unsigned long)ZTWO_VADDR(board);
 		esp->dregs = (void *)(address + BLZ2060_DMA_ADDR);
 
 		/* ESP register base */
@@ -107,26 +111,24 @@ int blz2060_esp_detect(Scsi_Host_Template *tpnt)
 		
 		/* Set the command buffer */
 		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus((unsigned long) cmd_buffer);
+		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, 0, 
+		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
 			    "Blizzard 2060 SCSI", esp_intr);
 
 		/* Figure out our scsi ID on the bus */
 		esp->scsi_id = 7;
 		
-		/* Check for differential SCSI-bus */
-		/* What is this stuff? */
+		/* We don't have a differential SCSI-bus. */
 		esp->diff = 0;
 
 		esp_initialize(esp);
 
-		zorro_config_board(key, 0);
-
-		printk("\nESP: Total of %d ESP hosts found, %d actually in use.\n", nesps,esps_in_use);
+		printk("ESP: Total of %d ESP hosts found, %d actually in use.\n", nesps, esps_in_use);
 		esps_running = esps_in_use;
 		return esps_in_use;
+	    }
 	}
 	return 0;
 }
@@ -201,7 +203,7 @@ static void dma_ints_on(struct NCR_ESP *esp)
 
 static int dma_irq_p(struct NCR_ESP *esp)
 {
-	return (esp->eregs->esp_status & ESP_STAT_INTR);
+	return (esp_read(esp->eregs->esp_status) & ESP_STAT_INTR);
 }
 
 static void dma_led_off(struct NCR_ESP *esp)
@@ -230,4 +232,25 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 	} else {
 		dma_init_write(esp, addr, count);
 	}
+}
+
+#define HOSTS_C
+
+#include "blz2060.h"
+
+static Scsi_Host_Template driver_template = SCSI_BLZ2060;
+
+#include "scsi_module.c"
+
+int blz2060_esp_release(struct Scsi_Host *instance)
+{
+#ifdef MODULE
+	unsigned long address = (unsigned long)((struct NCR_ESP *)instance->hostdata)->edev;
+
+	esp_deallocate((struct NCR_ESP *)instance->hostdata);
+	esp_release();
+	release_mem_region(address, sizeof(struct ESP_regs));
+	free_irq(IRQ_AMIGA_PORTS, esp_intr);
+#endif
+	return 1;
 }

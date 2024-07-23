@@ -10,7 +10,7 @@
 #ifndef _PPA_H
 #define _PPA_H
 
-#define   PPA_VERSION   "2.03 (for Linux 2.2.x)"
+#define   PPA_VERSION   "2.07 (for Linux 2.4.x)"
 
 /* 
  * this driver has been hacked by Matteo Frigo (athena@theory.lcs.mit.edu)
@@ -51,6 +51,25 @@
  *    CONFIG_SCSI_PPA_HAVE_PEDANTIC => CONFIG_SCSI_IZIP_EPP16
  *    added CONFIG_SCSI_IZIP_SLOW_CTR option
  *                                                      [2.03]
+ *
+ * Use ppa_wait() to check for ready AND connected status bits
+ * Add ppa_wait() calls to ppa_completion()
+ *  by Peter Cherriman <pjc@ecs.soton.ac.uk> and
+ *     Tim Waugh <twaugh@redhat.com>
+ *							[2.04]
+ *
+ * Fix kernel panic on scsi timeout, 2000-08-18		[2.05]
+ *
+ * Avoid io_request_lock problems.
+ * John Cavan <johncavan@home.com>			[2.06]
+ *
+ * Busy wait for connected status bit in ppa_completion()
+ *  in order to cope with some hardware that has this bit low
+ *  for short periods of time.
+ * Add udelay() to ppa_select()
+ *  by Peter Cherriman <pjc@ecs.soton.ac.uk> and
+ *     Oleg Makarenko <omakarenko@cyberplat.ru>         
+ *                                                      [2.07]
  */
 /* ------ END OF USER CONFIGURABLE PARAMETERS ----- */
 
@@ -106,6 +125,7 @@ int ppa_sg = SG_ALL;		/* enable/disable scatter-gather. */
 #define PPA_BURST_SIZE	512	/* data burst size */
 #define PPA_SELECT_TMO  5000	/* how long to wait for target ? */
 #define PPA_SPIN_TMO    50000	/* ppa_wait loop limiter */
+#define PPA_RECON_TMO   500	/* scsi reconnection loop limiter */
 #define PPA_DEBUG	0	/* debuging option */
 #define IN_EPP_MODE(x) (x == PPA_EPP_8 || x == PPA_EPP_16 || x == PPA_EPP_32)
 
@@ -117,14 +137,15 @@ int ppa_sg = SG_ALL;		/* enable/disable scatter-gather. */
 #define r_str(x)        (unsigned char)inb((x)+1)
 #define r_ctr(x)        (unsigned char)inb((x)+2)
 #define r_epp(x)        (unsigned char)inb((x)+4)
-#define r_fifo(x)       (unsigned char)inb((x)+0x400)
-#define r_ecr(x)        (unsigned char)inb((x)+0x402)
+#define r_fifo(x)       (unsigned char)inb((x)) /* x must be base_hi */
+					/* On PCI is base+0x400 != base_hi */
+#define r_ecr(x)        (unsigned char)inb((x)+0x2) /* x must be base_hi */
 
 #define w_dtr(x,y)      outb(y, (x))
 #define w_str(x,y)      outb(y, (x)+1)
 #define w_epp(x,y)      outb(y, (x)+4)
-#define w_fifo(x,y)     outb(y, (x)+0x400)
-#define w_ecr(x,y)      outb(y, (x)+0x402)
+#define w_fifo(x,y)     outb(y, (x))	/* x must be base_hi */
+#define w_ecr(x,y)      outb(y, (x)+0x2)/* x must be base_hi */
 
 #ifdef CONFIG_SCSI_IZIP_SLOW_CTR
 #define w_ctr(x,y)      outb_p(y, (x)+2)
@@ -138,10 +159,7 @@ static int ppa_init(int);
 static void ppa_interrupt(void *);
 static int ppa_out(int, char *, int);
 
-struct proc_dir_entry proc_scsi_ppa =
-{PROC_SCSI_PPA, 3, "ppa", S_IFDIR | S_IRUGO | S_IXUGO, 2};
 #else
-extern struct proc_dir_entry proc_scsi_ppa;
 #define ppa_release 0
 #endif
 
@@ -154,7 +172,7 @@ int ppa_reset(Scsi_Cmnd *);
 int ppa_proc_info(char *, char **, off_t, int, int, int);
 int ppa_biosparam(Disk *, kdev_t, int *);
 
-#define PPA {	proc_dir:			&proc_scsi_ppa,		\
+#define PPA {	proc_name:			"ppa",		\
 		proc_info:			ppa_proc_info,		\
 		name:				"Iomega VPI0 (ppa) interface",\
 		detect:				ppa_detect,		\
@@ -165,6 +183,7 @@ int ppa_biosparam(Disk *, kdev_t, int *);
 		eh_device_reset_handler:	NULL,			\
 		eh_bus_reset_handler:		ppa_reset,		\
 		eh_host_reset_handler:		ppa_reset,		\
+		use_new_eh_code:		1,			\
 		bios_param:			ppa_biosparam,		\
 		this_id:			-1,			\
 		sg_tablesize:			SG_ALL,			\

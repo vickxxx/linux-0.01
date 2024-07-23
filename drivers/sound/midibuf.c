@@ -13,7 +13,6 @@
 /*
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
  */
-#include <linux/config.h>
 #include <linux/stddef.h>
 #include <linux/kmod.h>
 
@@ -21,7 +20,6 @@
 
 #include "sound_config.h"
 
-#ifdef CONFIG_MIDI
 
 /*
  * Don't make MAX_QUEUE_SIZE larger than 4000
@@ -53,7 +51,7 @@ static void midi_poll(unsigned long dummy);
 
 
 static struct timer_list poll_timer = {
-	NULL, NULL, 0, 0, midi_poll
+	function: midi_poll
 };
 
 static volatile int open_devs = 0;
@@ -174,6 +172,9 @@ int MIDIbuf_open(int dev, struct file *file)
 	 *    Interrupts disabled. Be careful
 	 */
 
+	if (midi_devs[dev]->owner)
+		__MOD_INC_USE_COUNT (midi_devs[dev]->owner);
+
 	if ((err = midi_devs[dev]->open(dev, mode,
 				 midi_input_intr, midi_output_intr)) < 0)
 		return err;
@@ -259,6 +260,9 @@ void MIDIbuf_release(int dev, struct file *file)
 	if (open_devs < 2)
 		del_timer(&poll_timer);;
 	open_devs--;
+
+	if (midi_devs[dev]->owner)
+		__MOD_DEC_USE_COUNT (midi_devs[dev]->owner);
 }
 
 int MIDIbuf_write(int dev, struct file *file, const char *buf, int count)
@@ -396,6 +400,7 @@ int MIDIbuf_ioctl(int dev, struct file *file,
 	}
 }
 
+/* No kernel lock - fine */
 unsigned int MIDIbuf_poll(int dev, struct file *file, poll_table * wait)
 {
 	unsigned int mask = 0;
@@ -431,6 +436,3 @@ int MIDIbuf_avail(int dev)
 		return DATA_AVAIL (midi_in_buf[dev]);
 	return 0;
 }
-
-
-#endif

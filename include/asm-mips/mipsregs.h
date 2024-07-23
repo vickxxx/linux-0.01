@@ -1,4 +1,4 @@
-/* $Id: mipsregs.h,v 1.6 1998/08/17 11:27:08 ralf Exp $
+/* $Id: mipsregs.h,v 1.6 1999/07/26 19:42:43 harald Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -30,6 +30,7 @@
 #define CP0_RANDOM $1
 #define CP0_ENTRYLO0 $2
 #define CP0_ENTRYLO1 $3
+#define CP0_CONF $3
 #define CP0_CONTEXT $4
 #define CP0_PAGEMASK $5
 #define CP0_WIRED $6
@@ -103,7 +104,10 @@
 #define read_32bit_cp0_register(source)                         \
 ({ int __res;                                                   \
         __asm__ __volatile__(                                   \
-        "mfc0\t%0,"STR(source)                                  \
+	".set\tpush\n\t"					\
+	".set\treorder\n\t"					\
+        "mfc0\t%0,"STR(source)"\n\t"                            \
+	".set\tpop"						\
         : "=r" (__res));                                        \
         __res;})
 
@@ -121,7 +125,8 @@
 
 #define write_32bit_cp0_register(register,value)                \
         __asm__ __volatile__(                                   \
-        "mtc0\t%0,"STR(register)                                \
+        "mtc0\t%0,"STR(register)"\n\t"				\
+	"nop"							\
         : : "r" (value));
 
 #define write_64bit_cp0_register(register,value)                \
@@ -229,6 +234,8 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #define ST0_UX			0x00000020
 #define ST0_SX			0x00000040
 #define ST0_KX 			0x00000080
+#define ST0_DE			0x00010000
+#define ST0_CE			0x00020000
 
 /*
  * Bitfields in the R[23]000 cp0 status register.
@@ -240,6 +247,8 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #define ST0_IEO			0x00000010
 #define ST0_KUO			0x00000020
 /* bits 6 & 7 are reserved on R[23]000 */
+#define ST0_ISC			0x00010000
+#define ST0_SWC			0x00020000
 
 /*
  * Bits specific to the R4640/R4650
@@ -268,8 +277,6 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #define  STATUSF_IP6		(1   << 14)
 #define  STATUSB_IP7		15
 #define  STATUSF_IP7		(1   << 15)
-#define ST0_DE			0x00010000
-#define ST0_CE			0x00020000
 #define ST0_CH			0x00040000
 #define ST0_SR			0x00100000
 #define ST0_BEV			0x00400000
@@ -329,6 +336,8 @@ __BUILD_SET_CP0(config,CP0_CONFIG)
 #define CONF_DB				(1 <<  4)
 #define CONF_IB				(1 <<  5)
 #define CONF_SC				(1 << 17)
+#define CONF_AC                         (1 << 23)
+#define CONF_HALT                       (1 << 25)
 
 /*
  * R10000 performance counter definitions.

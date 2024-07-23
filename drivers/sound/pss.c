@@ -24,18 +24,46 @@
  *          To probe_pss_mss added test for initialize AD1848
  * 98-05-28: Vladimir Michl <vladimir.michl@upol.cz>
  *          Fixed computation of mixer volumes
+ * 04-05-1999: Anthony Barbachan <barbcode@xmen.cis.fordham.edu>
+ *          Added code that allows the user to enable his cdrom and/or 
+ *          joystick through the module parameters pss_cdrom_port and 
+ *          pss_enable_joystick.  pss_cdrom_port takes a port address as its
+ *          argument.  pss_enable_joystick takes either a 0 or a non-0 as its
+ *          argument.
+ * 04-06-1999: Anthony Barbachan <barbcode@xmen.cis.fordham.edu>
+ *          Separated some code into new functions for easier reuse.  
+ *          Cleaned up and streamlined new code.  Added code to allow a user 
+ *          to only use this driver for enabling non-sound components 
+ *          through the new module parameter pss_no_sound (flag).  Added 
+ *          code that would allow a user to decide whether the driver should 
+ *          reset the configured hardware settings for the PSS board through 
+ *          the module parameter pss_keep_settings (flag).   This flag will 
+ *          allow a user to free up resources in use by this card if needbe, 
+ *          furthermore it allows him to use this driver to just enable the 
+ *          emulations and then be unloaded as it is no longer needed.  Both 
+ *          new settings are only available to this driver if compiled as a 
+ *          module.  The default settings of all new parameters are set to 
+ *          load the driver as it did in previous versions.
+ * 04-07-1999: Anthony Barbachan <barbcode@xmen.cis.fordham.edu>
+ *          Added module parameter pss_firmware to allow the user to tell 
+ *          the driver where the fireware file is located.  The default 
+ *          setting is the previous hardcoded setting "/etc/sound/pss_synth".
+ * 00-03-03: Christoph Hellwig <chhellwig@gmx.net>
+ *	    Adapted to module_init/module_exit
+ * 11-10-2000: Bartlomiej Zolnierkiewicz <bkz@linux-ide.org>
+ *	    Added __init to probe_pss(), attach_pss() and probe_pss_mpu()
  */
 
 
 #include <linux/config.h>
+#include <linux/init.h>
 #include <linux/module.h>
 
 #include "sound_config.h"
 #include "sound_firmware.h"
-#include "soundmodule.h"
 
-#ifdef CONFIG_PSS
-#ifdef CONFIG_AUDIO
+#include "ad1848.h"
+#include "mpu401.h"
 
 /*
  * PSS registers.
@@ -83,13 +111,7 @@
 
 #include "coproc.h"
 
-#ifdef PSS_HAVE_LD
 #include "pss_boot.h"
-#else
-static int pss_synthLen = 0;
-static unsigned char *pss_synth =
-NULL;
-#endif
 
 /* If compiled into kernel, it enable or disable pss mixer */
 #ifdef CONFIG_PSS_MIXER
@@ -121,6 +143,8 @@ static pss_confdata *devc = &pss_data;
 
 static int      pss_initialized = 0;
 static int      nonstandard_microcode = 0;
+static int	pss_cdrom_port = -1;	/* Parameter for the PSS cdrom port */
+static int	pss_enable_joystick = 0;/* Parameter for enabling the joystick */
 
 static void pss_write(pss_confdata *devc, int data)
 {
@@ -146,7 +170,7 @@ static void pss_write(pss_confdata *devc, int data)
  	printk(KERN_WARNING "PSS: DSP Command (%04x) Timeout.\n", data);
 }
 
-int probe_pss(struct address_info *hw_config)
+int __init probe_pss(struct address_info *hw_config)
 {
 	unsigned short id;
 	int irq, dma;
@@ -573,12 +597,56 @@ static int pss_mixer_ioctl (int dev, unsigned int cmd, caddr_t arg)
 
 static struct mixer_operations pss_mixer_operations =
 {
-	"SOUNDPORT",
-	"PSS-AD1848",
-	 pss_mixer_ioctl
+	owner:	THIS_MODULE,
+	id:	"SOUNDPORT",
+	name:	"PSS-AD1848",
+	ioctl:	pss_mixer_ioctl
 };
 
-void attach_pss(struct address_info *hw_config)
+void disable_all_emulations(void)
+{
+	outw(0x0000, REG(CONF_PSS));	/* 0x0400 enables joystick */
+	outw(0x0000, REG(CONF_WSS));
+	outw(0x0000, REG(CONF_SB));
+	outw(0x0000, REG(CONF_MIDI));
+	outw(0x0000, REG(CONF_CDROM));
+}
+
+void configure_nonsound_components(void)
+{
+	/* Configure Joystick port */
+
+	if(pss_enable_joystick)
+	{
+		outw(0x0400, REG(CONF_PSS));	/* 0x0400 enables joystick */
+		printk(KERN_INFO "PSS: joystick enabled.\n");
+	}
+	else
+	{
+		printk(KERN_INFO "PSS: joystick port not enabled.\n");
+	}
+
+	/* Configure CDROM port */
+
+	if(pss_cdrom_port == -1)	/* If cdrom port enablation wasn't requested */
+	{
+		printk(KERN_INFO "PSS: CDROM port not enabled.\n");
+	}
+	else if(check_region(pss_cdrom_port, 2))
+	{
+		printk(KERN_ERR "PSS: CDROM I/O port conflict.\n");
+	}
+	else if(!set_io_base(devc, CONF_CDROM, pss_cdrom_port))
+	{
+		printk(KERN_ERR "PSS: CDROM I/O port could not be set.\n");
+	}
+	else					/* CDROM port successfully configured */
+	{
+		printk(KERN_INFO "PSS: CDROM I/O port set to 0x%x.\n", pss_cdrom_port);
+	}
+}
+
+void __init attach_pss(struct address_info *hw_config)
 {
 	unsigned short  id;
 	char tmp[100];
@@ -598,13 +666,10 @@ void attach_pss(struct address_info *hw_config)
 	id = inw(REG(PSS_ID)) & 0x00ff;
 
 	/*
-	   * Disable all emulations. Will be enabled later (if required).
+	 * Disable all emulations. Will be enabled later (if required).
 	 */
-	outw(0x0000, REG(CONF_PSS));	/* 0x0400 enables joystick */
-	outw(0x0000, REG(CONF_WSS));
-	outw(0x0000, REG(CONF_SB));
-	outw(0x0000, REG(CONF_MIDI));
-	outw(0x0000, REG(CONF_CDROM));
+	 
+	disable_all_emulations();
 
 #if YOU_REALLY_WANT_TO_ALLOCATE_THESE_RESOURCES
 	if (sound_alloc_dma(hw_config->dma, "PSS"))
@@ -624,12 +689,13 @@ void attach_pss(struct address_info *hw_config)
 	}
 #endif
 
+	configure_nonsound_components();
 	pss_initialized = 1;
 	sprintf(tmp, "ECHO-PSS  Rev. %d", id);
 	conf_printf(tmp, hw_config);
 }
 
-int probe_pss_mpu(struct address_info *hw_config)
+int __init probe_pss_mpu(struct address_info *hw_config)
 {
 	int timeout;
 
@@ -675,11 +741,7 @@ int probe_pss_mpu(struct address_info *hw_config)
 			break;	/* No more input */
 	}
 
-#if (defined(CONFIG_MPU401) || defined(CONFIG_MPU_EMU)) && defined(CONFIG_MIDI)
 	return probe_mpu401(hw_config);
-#else
-	return 0;
-#endif
 }
 
 static int pss_coproc_open(void *dev_info, int sub_device)
@@ -924,16 +986,14 @@ static coproc_operations pss_coproc_operations =
 	&pss_data
 };
 
-void attach_pss_mpu(struct address_info *hw_config)
+static void __init attach_pss_mpu(struct address_info *hw_config)
 {
-#if (defined(CONFIG_MPU401) || defined(CONFIG_MPU_EMU)) && defined(CONFIG_MIDI)
-	attach_mpu401(hw_config);	/* Slot 1 */
+	attach_mpu401(hw_config, THIS_MODULE);	/* Slot 1 */
 	if (hw_config->slots[1] != -1)	/* The MPU driver installed itself */
 		midi_devs[hw_config->slots[1]]->coproc = &pss_coproc_operations;
-#endif
 }
 
-int probe_pss_mss(struct address_info *hw_config)
+static int __init probe_pss_mss(struct address_info *hw_config)
 {
 	volatile int timeout;
 
@@ -966,16 +1026,20 @@ int probe_pss_mss(struct address_info *hw_config)
 	 * downloaded to the ADSP2115 spends some time initializing the card.
 	 * Let's try to wait until it finishes this task.
 	 */
-	for (timeout = 0; timeout < 100000 && (inb(hw_config->io_base + WSS_INDEX) & WSS_INITIALIZING); timeout++);
+	for (timeout = 0; timeout < 100000 && (inb(hw_config->io_base + WSS_INDEX) &
+	  WSS_INITIALIZING); timeout++)
+		;
 
 	outb((0x0b), hw_config->io_base + WSS_INDEX);	/* Required by some cards */
 
-	for (timeout = 0; (inb(hw_config->io_base + WSS_DATA) & WSS_AUTOCALIBRATION) && (timeout < 100000); timeout++);
+	for (timeout = 0; (inb(hw_config->io_base + WSS_DATA) & WSS_AUTOCALIBRATION) &&
+	  (timeout < 100000); timeout++)
+		;
 
 	return probe_ms_sound(hw_config);
 }
 
-void attach_pss_mss(struct address_info *hw_config)
+static void __init attach_pss_mss(struct address_info *hw_config)
 {
 	int        my_mix = -999;	/* gcc shut up */
 	
@@ -993,7 +1057,7 @@ void attach_pss_mss(struct address_info *hw_config)
 		}
 	}
 	pss_mixer_reset(devc);
-	attach_ms_sound(hw_config);	/* Slot 0 */
+	attach_ms_sound(hw_config, THIS_MODULE);	/* Slot 0 */
 
 	if (hw_config->slots[0] != -1)
 	{
@@ -1007,38 +1071,36 @@ void attach_pss_mss(struct address_info *hw_config)
 	}
 }
 
-void unload_pss(struct address_info *hw_config)
+static inline void __exit unload_pss(struct address_info *hw_config)
 {
 	release_region(hw_config->io_base, 0x10);
 	release_region(hw_config->io_base+0x10, 0x9);
 }
 
-void unload_pss_mpu(struct address_info *hw_config)
+static inline void __exit unload_pss_mpu(struct address_info *hw_config)
 {
-#if (defined(CONFIG_MPU401) || defined(CONFIG_MPU_EMU)) && defined(CONFIG_MIDI)
 	unload_mpu401(hw_config);
-#endif
 }
 
-void unload_pss_mss(struct address_info *hw_config)
+static inline void __exit unload_pss_mss(struct address_info *hw_config)
 {
 	unload_ms_sound(hw_config);
 }
 
-#ifdef MODULE
 
-int pss_io = -1;
+static struct address_info cfg;
+static struct address_info cfg2;
+static struct address_info cfg_mpu;
 
-int mss_io = -1;
-int mss_irq = -1;
-int mss_dma = -1;
-
-int mpu_io = -1;
-int mpu_irq = -1;
-
-struct address_info cfgpss = { 0 /* pss_io */, 0, -1, -1 };
-struct address_info cfgmpu = { 0 /* mpu_io */, 0 /* mpu_irq */, 0, -1 };
-struct address_info cfgmss = { 0 /* mss_io */, 0 /* mss_irq */, 0 /* mss_dma */, -1 };
+static int pss_io __initdata	= -1;
+static int mss_io __initdata	= -1;
+static int mss_irq __initdata	= -1;
+static int mss_dma __initdata	= -1;
+static int mpu_io __initdata	= -1;
+static int mpu_irq __initdata	= -1;
+static int pss_no_sound __initdata = 0;	/* Just configure non-sound components */
+static int pss_keep_settings  = 1;	/* Keep hardware settings at module exit */
+static char *pss_firmware = "/etc/sound/pss_synth";
 
 MODULE_PARM(pss_io, "i");
 MODULE_PARM_DESC(pss_io, "Set i/o base of PSS card (probably 0x220 or 0x240)");
@@ -1052,6 +1114,16 @@ MODULE_PARM(mpu_io, "i");
 MODULE_PARM_DESC(mpu_io, "Set MIDI i/o base (0x330 or other. Address must be on 4 location boundaries and must be from 0x100 to 0xFFC)");
 MODULE_PARM(mpu_irq, "i");
 MODULE_PARM_DESC(mpu_irq, "Set MIDI IRQ (3, 5, 7, 9, 10, 11, 12)");
+MODULE_PARM(pss_cdrom_port, "i");
+MODULE_PARM_DESC(pss_cdrom_port, "Set the PSS CDROM port i/o base (0x340 or other)");
+MODULE_PARM(pss_enable_joystick, "i");
+MODULE_PARM_DESC(pss_enable_joystick, "Enables the PSS joystick port (1 to enable, 0 to disable)");
+MODULE_PARM(pss_no_sound, "i");
+MODULE_PARM_DESC(pss_no_sound, "Configure sound compoents (0 - no, 1 - yes)");
+MODULE_PARM(pss_keep_settings, "i");
+MODULE_PARM_DESC(pss_keep_settings, "Keep hardware setting at driver unloading (0 - no, 1 - yes)");
+MODULE_PARM(pss_firmware, "s");
+MODULE_PARM_DESC(pss_firmware, "Location of the firmware file (default - /etc/sound/pss_synth)");
 MODULE_PARM(pss_mixer, "b");
 MODULE_PARM_DESC(pss_mixer, "Enable (1) or disable (0) PSS mixer (controlling of output volume, bass, treble, synth volume). The mixer is not available on all PSS cards.");
 MODULE_AUTHOR("Hannu Savolainen, Vladimir Michl");
@@ -1064,56 +1136,97 @@ static int pssmpu = 0, pssmss = 0;
  *    Load a PSS sound card module
  */
 
-int init_module(void)
+static int __init init_pss(void)
 {
-	if (pss_io == -1 || mss_io == -1 || mss_irq == -1 || mss_dma == -1) {
+
+	if(pss_no_sound)		/* If configuring only nonsound components */
+	{
+		cfg.io_base = pss_io;
+		if(!probe_pss(&cfg))
+			return -ENODEV;
+		printk(KERN_INFO "ECHO-PSS  Rev. %d\n", inw(REG(PSS_ID)) & 0x00ff);
+		printk(KERN_INFO "PSS: loading in no sound mode.\n");
+		disable_all_emulations();
+		configure_nonsound_components();
+		return 0;
+	}
+
+	cfg.io_base = pss_io;
+
+	cfg2.io_base = mss_io;
+	cfg2.irq = mss_irq;
+	cfg2.dma = mss_dma;
+
+	cfg_mpu.io_base = mpu_io;
+	cfg_mpu.irq = mpu_irq;
+
+	if (cfg.io_base == -1 || cfg2.io_base == -1 || cfg2.irq == -1 || cfg.dma == -1) {
 		printk(KERN_INFO "pss: mss_io, mss_dma, mss_irq and pss_io must be set.\n");
 		return -EINVAL;
 	}
 
-	cfgpss.io_base = pss_io;
-
-	cfgmss.io_base = mss_io;
-	cfgmss.irq = mss_irq;
-	cfgmss.dma = mss_dma;
-
-	cfgmpu.io_base = mpu_io;
-	cfgmpu.irq = mpu_irq;
-
-	if (!pss_synth) 
-	{
+	if (!pss_synth) {
 		fw_load = 1;
-		pss_synthLen = mod_firmware_load("/etc/sound/pss_synth", (void *) &pss_synth);
+		pss_synthLen = mod_firmware_load(pss_firmware, (void *) &pss_synth);
 	}
-	if (!probe_pss(&cfgpss))
+	if (!probe_pss(&cfg))
 		return -ENODEV;
-	attach_pss(&cfgpss);
+	attach_pss(&cfg);
 	/*
 	 *    Attach stuff
 	 */
-	if (probe_pss_mpu(&cfgmpu)) {
+	if (probe_pss_mpu(&cfg_mpu)) {
 		pssmpu = 1;
-		attach_pss_mpu(&cfgmpu);
+		attach_pss_mpu(&cfg_mpu);
 	}
-	if (probe_pss_mss(&cfgmss)) {
+	if (probe_pss_mss(&cfg2)) {
 		pssmss = 1;
-		attach_pss_mss(&cfgmss);
+		attach_pss_mss(&cfg2);
 	}
-	SOUND_LOCK;
+
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit cleanup_pss(void)
 {
-	if (fw_load && pss_synth)
-		vfree(pss_synth);
-	if (pssmss)
-		unload_pss_mss(&cfgmss);
-	if (pssmpu)
-		unload_pss_mpu(&cfgmpu);
-	unload_pss(&cfgpss);
-	SOUND_LOCK_END;
+	if(!pss_no_sound)
+	{
+		if(fw_load && pss_synth)
+			vfree(pss_synth);
+		if(pssmss)
+			unload_pss_mss(&cfg2);
+		if(pssmpu)
+			unload_pss_mpu(&cfg_mpu);
+		unload_pss(&cfg);
+	}
+
+	if(!pss_keep_settings)	/* Keep hardware settings if asked */
+	{
+		disable_all_emulations();
+		printk(KERN_INFO "Resetting PSS sound card configurations.\n");
+	}
 }
-#endif
-#endif
+
+module_init(init_pss);
+module_exit(cleanup_pss);
+
+#ifndef MODULE
+static int __init setup_pss(char *str)
+{
+	/* io, mss_io, mss_irq, mss_dma, mpu_io, mpu_irq */
+	int ints[7];
+	
+	str = get_options(str, ARRAY_SIZE(ints), ints);
+
+	pss_io	= ints[1];
+	mss_io	= ints[2];
+	mss_irq	= ints[3];
+	mss_dma	= ints[4];
+	mpu_io	= ints[5];
+	mpu_irq	= ints[6];
+
+	return 1;
+}
+
+__setup("pss=", setup_pss);
 #endif

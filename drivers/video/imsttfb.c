@@ -354,9 +354,13 @@ struct fb_info_imstt {
 	} palette[256];
 	struct imstt_regvals init;
 	struct imstt_cursor cursor;
-	__u8 *frame_buffer_phys, *frame_buffer;
-	__u32 *dc_regs_phys, *dc_regs;
-	__u8 *cmap_regs_phys, *cmap_regs;
+	unsigned long frame_buffer_phys;
+	unsigned long board_size;
+	__u8 *frame_buffer;
+	unsigned long dc_regs_phys;
+	__u32 *dc_regs;
+	unsigned long cmap_regs_phys;
+	__u8 *cmap_regs;
 	__u32 total_vram;
 	__u32 ramdac;
 };
@@ -380,9 +384,7 @@ static char noaccel __initdata = 0;
 #if defined(CONFIG_PPC)
 static signed char init_vmode __initdata = -1, init_cmode __initdata = -1;
 #endif
-#ifdef MODULE
 static struct fb_info_imstt *fb_info_imstt_p[FB_MAX] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-#endif
 
 static struct imstt_regvals tvp_reg_init_2 = {
 	512,
@@ -967,8 +969,8 @@ out:
 	add_timer(&c->timer);
 }
 
-__initfunc(static void
-imstt_cursor_init (struct fb_info_imstt *p))
+static void __init 
+imstt_cursor_init (struct fb_info_imstt *p)
 {
 	struct imstt_cursor *c = &p->cursor;
 
@@ -1079,7 +1081,7 @@ imsttfbcon_clear (struct vc_data *conp, struct display *disp,
 	out_le32(&p->dc_regs[BI], 0xffffffff);
 	out_le32(&p->dc_regs[MBC], 0xffffffff);
 	out_le32(&p->dc_regs[CLR], bgc);
-	out_le32(&p->dc_regs[BLTCTL], 0x200000);
+	out_le32(&p->dc_regs[BLTCTL], 0x840); /* 0x200000 */
 	while(in_le32(&p->dc_regs[SSTATUS]) & 0x80);
 	while(in_le32(&p->dc_regs[SSTATUS]) & 0x40);
 }
@@ -1114,30 +1116,58 @@ imsttfbcon_revc (struct display *disp, int sx, int sy)
 
 #ifdef FBCON_HAS_CFB8
 static struct display_switch fbcon_imstt8 = {
-	fbcon_cfb8_setup, imsttfbcon_bmove, imsttfbcon_clear, fbcon_cfb8_putc,
-	fbcon_cfb8_putcs, imsttfbcon_revc, imsttfbcon_cursor, imsttfbcon_set_font, fbcon_cfb8_clear_margins,
-	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+	setup:		fbcon_cfb8_setup,
+	bmove:		imsttfbcon_bmove,
+	clear:		imsttfbcon_clear,
+	putc:		fbcon_cfb8_putc,
+	putcs:		fbcon_cfb8_putcs,
+	revc:		imsttfbcon_revc,
+	cursor:		imsttfbcon_cursor,
+	set_font:	imsttfbcon_set_font,
+	clear_margins:	fbcon_cfb8_clear_margins,
+	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 #ifdef FBCON_HAS_CFB16
 static struct display_switch fbcon_imstt16 = {
-	fbcon_cfb16_setup, imsttfbcon_bmove, imsttfbcon_clear, fbcon_cfb16_putc,
-	fbcon_cfb16_putcs, imsttfbcon_revc, imsttfbcon_cursor, imsttfbcon_set_font, fbcon_cfb16_clear_margins,
-	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+	setup:		fbcon_cfb16_setup,
+	bmove:		imsttfbcon_bmove,
+	clear:		imsttfbcon_clear,
+	putc:		fbcon_cfb16_putc,
+	putcs:		fbcon_cfb16_putcs,
+	revc:		imsttfbcon_revc,
+	cursor:		imsttfbcon_cursor,
+	set_font:	imsttfbcon_set_font,
+	clear_margins:	fbcon_cfb16_clear_margins,
+	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 #ifdef FBCON_HAS_CFB24
 static struct display_switch fbcon_imstt24 = {
-	fbcon_cfb24_setup, imsttfbcon_bmove, imsttfbcon_clear, fbcon_cfb24_putc,
-	fbcon_cfb24_putcs, imsttfbcon_revc, imsttfbcon_cursor, imsttfbcon_set_font, fbcon_cfb24_clear_margins,
-	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+	setup:		fbcon_cfb24_setup,
+	bmove:		imsttfbcon_bmove,
+	clear:		imsttfbcon_clear,
+	putc:		fbcon_cfb24_putc,
+	putcs:		fbcon_cfb24_putcs,
+	revc:		imsttfbcon_revc,
+	cursor:		imsttfbcon_cursor,
+	set_font:	imsttfbcon_set_font,
+	clear_margins:	fbcon_cfb24_clear_margins,
+	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 #ifdef FBCON_HAS_CFB32
 static struct display_switch fbcon_imstt32 = {
-	fbcon_cfb32_setup, imsttfbcon_bmove, imsttfbcon_clear, fbcon_cfb32_putc,
-	fbcon_cfb32_putcs, imsttfbcon_revc, imsttfbcon_cursor, imsttfbcon_set_font, fbcon_cfb32_clear_margins,
-	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
+	setup:		fbcon_cfb32_setup,
+	bmove:		imsttfbcon_bmove,
+	clear:		imsttfbcon_clear,
+	putc:		fbcon_cfb32_putc,
+	putcs:		fbcon_cfb32_putcs,
+	revc:		imsttfbcon_revc,
+	cursor:		imsttfbcon_cursor,
+	set_font:	imsttfbcon_set_font,
+	clear_margins:	fbcon_cfb32_clear_margins,
+	fontwidthmask:	FONTWIDTH(4)|FONTWIDTH(8)|FONTWIDTH(12)|FONTWIDTH(16)
 };
 #endif
 
@@ -1261,20 +1291,6 @@ do_install_cmap (int con, struct fb_info *info)
 		u_int size = fb_display[con].var.bits_per_pixel == 16 ? 32 : 256;
 		fb_set_cmap(fb_default_cmap(size), 1, imsttfb_setcolreg, info);
 	}
-}
-
-static int
-imsttfb_open (struct fb_info *info, int user)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int
-imsttfb_release (struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
 }
 
 static int
@@ -1607,15 +1623,14 @@ imsttfb_ioctl (struct inode *inode, struct file *file, u_int cmd,
 }
 
 static struct fb_ops imsttfb_ops = {
-	imsttfb_open,
-	imsttfb_release,
-	imsttfb_get_fix,
-	imsttfb_get_var,
-	imsttfb_set_var,
-	imsttfb_get_cmap,
-	imsttfb_set_cmap,
-	imsttfb_pan_display,
-	imsttfb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	imsttfb_get_fix,
+	fb_get_var:	imsttfb_get_var,
+	fb_set_var:	imsttfb_set_var,
+	fb_get_cmap:	imsttfb_get_cmap,
+	fb_set_cmap:	imsttfb_set_cmap,
+	fb_pan_display:	imsttfb_pan_display,
+	fb_ioctl:	imsttfb_ioctl,
 };
 
 static int
@@ -1728,8 +1743,8 @@ imsttfbcon_blank (int blank, struct fb_info *info)
 	out_le32(&p->dc_regs[STGCTL], ctrl);
 }
 
-__initfunc(static void
-init_imstt(struct fb_info_imstt *p))
+static void __init 
+init_imstt(struct fb_info_imstt *p)
 {
 	__u32 i, tmp;
 	__u32 *ip, *end;
@@ -1799,10 +1814,10 @@ init_imstt(struct fb_info_imstt *p))
 	}
 
 	sprintf(p->fix.id, "IMS TT (%s)", p->ramdac == IBM ? "IBM" : "TVP");
-	p->fix.smem_start = (__u8 *)p->frame_buffer_phys;
+	p->fix.smem_start = p->frame_buffer_phys;
 	p->fix.smem_len = p->total_vram;
-	p->fix.mmio_start = (__u8 *)p->dc_regs_phys;
-	p->fix.mmio_len = 0x40000;
+	p->fix.mmio_start = p->dc_regs_phys;
+	p->fix.mmio_len = 0x1000;
 	p->fix.accel = FB_ACCEL_IMS_TWINTURBO;
 	p->fix.type = FB_TYPE_PACKED_PIXELS;
 	p->fix.visual = p->disp.var.bits_per_pixel == 8 ? FB_VISUAL_PSEUDOCOLOR
@@ -1853,97 +1868,47 @@ init_imstt(struct fb_info_imstt *p))
 	printk("fb%u: %s frame buffer; %uMB vram; chip version %u\n",
 		i, p->fix.id, p->total_vram >> 20, tmp);
 
-#ifdef MODULE
 	fb_info_imstt_p[i] = p;
-#endif
 #ifdef CONFIG_FB_COMPAT_XPMAC
 	strncpy(display_info.name, "IMS,tt128mb", sizeof(display_info.name));
-	display_info.fb_address = (__u32)p->frame_buffer_phys;
-	display_info.cmap_adr_address = (__u32)&p->cmap_regs_phys[PADDRW];
-	display_info.cmap_data_address = (__u32)&p->cmap_regs_phys[PDATA];
-	display_info.disp_reg_address = (__u32)p->dc_regs_phys;
+	display_info.fb_address = p->frame_buffer_phys;
+	display_info.cmap_adr_address = p->cmap_regs_phys + PADDRW;
+	display_info.cmap_data_address = p->cmap_regs_phys + PDATA;
+	display_info.disp_reg_address = p->dc_regs_phys;
 	if (!console_fb_info)
 		console_fb_info = &p->info;
 #endif /* CONFIG_FB_COMPAT_XPMAC */
 }
 
-#if defined(CONFIG_FB_OF) && !defined(MODULE)
-__initfunc(void
-imsttfb_of_init(struct device_node *dp))
+int __init 
+imsttfb_init(void)
 {
-	struct fb_info_imstt *p;
 	int i;
-	__u32 addr = 0;
-	__u8 bus, devfn;
-	__u16 cmd;
-
-	for (i = 0; i < dp->n_addrs; i++) {
-		if (dp->addrs[i].size >= 0x02000000)
-			addr = dp->addrs[i].address;
-	}
-	if (!addr)
-		return;
-
-	if (!pci_device_loc(dp, &bus, &devfn)) {
-		if (!pcibios_read_config_word(bus, devfn, PCI_COMMAND, &cmd) && !(cmd & PCI_COMMAND_MEMORY)) {
-			cmd |= PCI_COMMAND_MEMORY;
-			pcibios_write_config_word(bus, devfn, PCI_COMMAND, cmd);
-		}
-	}
-
-	p = kmalloc(sizeof(struct fb_info_imstt), GFP_ATOMIC);
-	if (!p)
-		return;
-	memset(p, 0, sizeof(struct fb_info_imstt));
-
-	if (dp->name[11] == '8' || (dp->name[6] == '3' && dp->name[7] == 'd'))
-		p->ramdac = TVP;
-	else
-		p->ramdac = IBM;
-
-	p->frame_buffer_phys = (__u8 *)addr;
-	p->frame_buffer = (__u8 *)ioremap(addr, p->ramdac == IBM ? 0x400000 : 0x800000);
-	p->dc_regs_phys = (__u32 *)(addr + 0x800000);
-	p->dc_regs = (__u32 *)ioremap(addr + 0x800000, 0x1000);
-	p->cmap_regs_phys = (__u8 *)(addr + 0x840000);
-	p->cmap_regs = (__u8 *)ioremap(addr + 0x840000, 0x1000);
-
-	init_imstt(p);
-}
-#endif
-
-__initfunc(void
-imsttfb_init(void))
-{
-#if defined(CONFIG_FB_OF) && !defined(MODULE)
-	/* We don't want to be called like this. */
-	/* We rely on Open Firmware (offb) instead. */
-#elif defined(CONFIG_PCI)
-	struct pci_dev *pdev;
+	struct pci_dev *pdev = NULL;
 	struct fb_info_imstt *p;
-	__u32 addr;
+	unsigned long addr, size;
 	__u16 cmd;
 
-	for (pdev = pci_devices; pdev; pdev = pdev->next) {
-		if (!(((pdev->class >> 16) == PCI_BASE_CLASS_DISPLAY)
-		      && (pdev->vendor == PCI_VENDOR_ID_IMS)))
+	while ((pdev = pci_find_device(PCI_VENDOR_ID_IMS, PCI_ANY_ID, pdev))) {
+		if ((pdev->class >> 16) != PCI_BASE_CLASS_DISPLAY)
+			continue;
+		if (pci_enable_device(pdev))
 			continue;
 
-		pci_read_config_word(pdev, PCI_COMMAND, &cmd);
-		if (!(cmd & PCI_COMMAND_MEMORY)) {
-			cmd |= PCI_COMMAND_MEMORY;
-			pci_write_config_word(pdev, PCI_COMMAND, cmd);
-		}
-
-		addr = pdev->base_address[0] & PCI_BASE_ADDRESS_MEM_MASK;
+		addr = pci_resource_start (pdev, 0);
+		size = pci_resource_len (pdev, 0);
 		if (!addr)
 			continue;
 
 		p = kmalloc(sizeof(struct fb_info_imstt), GFP_ATOMIC);
 		if (!p)
-			return;
+			continue;
 		memset(p, 0, sizeof(struct fb_info_imstt));
 
+		if (!request_mem_region(addr, size, "imsttfb")) {
+			kfree(p);
+			continue;
+		}
 		printk("imsttfb: device=%04x\n", pdev->device);
 
 		switch (pdev->device) {
@@ -1956,26 +1921,31 @@ imsttfb_init(void))
 				break;
 		}
 
-		p->frame_buffer_phys = (__u8 *)addr;
+		p->frame_buffer_phys = addr;
+		p->board_size = size;
 		p->frame_buffer = (__u8 *)ioremap(addr, p->ramdac == IBM ? 0x400000 : 0x800000);
-		p->dc_regs_phys = (__u32 *)(addr + 0x800000);
+		p->dc_regs_phys = addr + 0x800000;
 		p->dc_regs = (__u32 *)ioremap(addr + 0x800000, 0x1000);
-		p->cmap_regs_phys = (__u8 *)(addr + 0x840000);
+		p->cmap_regs_phys = addr + 0x840000;
 		p->cmap_regs = (__u8 *)ioremap(addr + 0x840000, 0x1000);
 
 		init_imstt(p);
 	}
-#endif /* CONFIG_PCI */
+	for (i = 0; i < FB_MAX; i++) {
+		if (fb_info_imstt_p[i])
+			return 0;
+	}
+	return -ENXIO;
 }
 
 #ifndef MODULE
-__initfunc(void
-imsttfb_setup(char *options, int *ints))
+int __init 
+imsttfb_setup(char *options)
 {
 	char *this_opt;
 
 	if (!options || !*options)
-		return;
+		return 0;
 
 	for (this_opt = strtok(options, ","); this_opt;
 	     this_opt = strtok(NULL, ",")) {
@@ -2020,25 +1990,16 @@ imsttfb_setup(char *options, int *ints))
 		}
 #endif
 	}
+	return 0;
 }
 
 #else /* MODULE */
 
-int
+int __init
 init_module (void)
 {
-	struct fb_info_imstt *p;
-	__u32 i;
 
-	imsttfb_init();
-
-	for (i = 0; i < FB_MAX; i++) {
-		p = fb_info_imstt_p[i];
-		if (p)
-			return 0;
-	}
-
-	return -ENXIO;
+	return imsttfb_init();
 }
 
 void
@@ -2055,6 +2016,7 @@ cleanup_module (void)
 		iounmap(p->dc_regs);
 		iounmap(p->frame_buffer);
 		kfree(p);
+		release_mem_region(p->frame_buffer_phys, p->board_size);
 	}
 }
 

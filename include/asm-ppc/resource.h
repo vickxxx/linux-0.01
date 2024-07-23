@@ -11,23 +11,32 @@
 #define RLIMIT_NOFILE	7		/* max number of open files */
 #define RLIMIT_MEMLOCK	8		/* max locked-in-memory address space */
 #define RLIMIT_AS	9		/* address space limit(?) */
+#define RLIMIT_LOCKS	10		/* maximum file locks held */
 
-#define RLIM_NLIMITS	10
+#define RLIM_NLIMITS	11
 
 #ifdef __KERNEL__
 
+/*
+ * SuS says limits have to be unsigned.
+ * Which makes a ton more sense anyway.
+ */
+#define RLIM_INFINITY	(~0UL)
+
+
 #define INIT_RLIMITS							\
 {									\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_CPU */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_FSIZE */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_DATA */	\
-    {_STK_LIM, LONG_MAX},			/* RLIMIT_STACK */	\
-    {       0, LONG_MAX},			/* RLIMIT_CORE */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_RSS */	\
-    {MAX_TASKS_PER_USER, MAX_TASKS_PER_USER},	/* RLIMIT_NPROC */	\
-    { NR_OPEN,  NR_OPEN},			/* RLIMIT_NOFILE */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_MEMLOCK */	\
-    {LONG_MAX, LONG_MAX},			/* RLIMIT_AS */		\
+	{ RLIM_INFINITY, RLIM_INFINITY },		\
+	{ RLIM_INFINITY, RLIM_INFINITY },		\
+	{ RLIM_INFINITY, RLIM_INFINITY },		\
+	{      _STK_LIM, RLIM_INFINITY },		\
+	{             0, RLIM_INFINITY },		\
+	{ RLIM_INFINITY, RLIM_INFINITY },		\
+	{             0,             0 },		\
+	{      INR_OPEN,     INR_OPEN  },		\
+	{ RLIM_INFINITY, RLIM_INFINITY },		\
+	{ RLIM_INFINITY, RLIM_INFINITY },		\
+	{ RLIM_INFINITY, RLIM_INFINITY },		\
 }
 
 #endif /* __KERNEL__ */

@@ -19,7 +19,7 @@
  * results in clearer kernel profiles as we see _who_ is
  * doing page clearing or copying.
  */
-static inline void clear_page(unsigned long page)
+static inline void clear_page(void * page)
 {
 	unsigned long count = PAGE_SIZE/64;
 	unsigned long *ptr = (unsigned long *)page;
@@ -38,7 +38,9 @@ static inline void clear_page(unsigned long page)
 	} while (count);
 }
 
-static inline void copy_page(unsigned long _to, unsigned long _from)
+#define clear_user_page(page, vaddr)	clear_page(page)
+
+static inline void copy_page(void * _to, void * _from)
 {
 	unsigned long count = PAGE_SIZE/64;
 	unsigned long *to = (unsigned long *)_to;
@@ -67,6 +69,8 @@ static inline void copy_page(unsigned long _to, unsigned long _from)
 		to += 8;
 	} while (count);
 }
+
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
 
 #ifdef STRICT_MM_TYPECHECKS
 /*
@@ -106,13 +110,22 @@ typedef unsigned long pgprot_t;
 
 #endif /* STRICT_MM_TYPECHECKS */
 
-#define BUG()							\
-do {								\
-	printk("Kernel BUG at %s:%d!\n", __FILE__, __LINE__);	\
-	__asm__ __volatile__("call_pal 129 # bugchk");		\
-} while (1)
+#define BUG()		__asm__ __volatile__("call_pal 129 # bugchk")
+#define PAGE_BUG(page)	BUG()
 
-#define PAGE_BUG(page) BUG()
+/* Pure 2^n version of get_order */
+extern __inline__ int get_order(unsigned long size)
+{
+	int order;
+
+	size = (size-1) >> (PAGE_SHIFT-1);
+	order = -1;
+	do {
+		size >>= 1;
+		order++;
+	} while (size);
+	return order;
+}
 
 #endif /* !ASSEMBLY */
 
@@ -127,7 +140,8 @@ do {								\
 
 #define __pa(x)			((unsigned long) (x) - PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long) (x) + PAGE_OFFSET))
-#define MAP_NR(addr)		(__pa(addr) >> PAGE_SHIFT)
+#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 #endif /* __KERNEL__ */
 

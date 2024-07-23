@@ -27,20 +27,16 @@
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 
 static int load_aout_binary(struct linux_binprm *, struct pt_regs * regs);
-static int load_aout_library(int fd);
-static int aout_core_dump(long signr, struct pt_regs * regs);
+static int load_aout_library(struct file*);
+static int aout_core_dump(long signr, struct pt_regs * regs, struct file *file);
 
 extern void dump_thread(struct pt_regs *, struct user *);
 
 static struct linux_binfmt aout_format = {
-#ifndef MODULE
-	NULL, NULL, load_aout_binary, load_aout_library, aout_core_dump
-#else
-	NULL, &__this_module, load_aout_binary, load_aout_library, aout_core_dump
-#endif
+	NULL, THIS_MODULE, load_aout_binary, load_aout_library, aout_core_dump, PAGE_SIZE
 };
 
 static void set_brk(unsigned long start, unsigned long end)
@@ -64,12 +60,12 @@ static int dump_write(struct file *file, const void *addr, int nr)
 
 #define DUMP_WRITE(addr, nr)	\
 	if (!dump_write(file, (void *)(addr), (nr))) \
-		goto close_coredump;
+		goto end_coredump;
 
 #define DUMP_SEEK(offset) \
 if (file->f_op->llseek) { \
 	if (file->f_op->llseek(file,(offset),0) != (offset)) \
- 		goto close_coredump; \
+ 		goto end_coredump; \
 } else file->f_pos = (offset)
 
 /*
@@ -82,19 +78,16 @@ if (file->f_op->llseek) { \
  * dumping of the process results in another error..
  */
 
-static inline int
-do_aout_core_dump(long signr, struct pt_regs * regs)
+static int aout_core_dump(long signr, struct pt_regs * regs, struct file *file)
 {
-	struct dentry * dentry = NULL;
-	struct inode * inode = NULL;
-	struct file * file;
 	mm_segment_t fs;
 	int has_dumped = 0;
-	char corefile[6+sizeof(current->comm)];
 	unsigned long dump_start, dump_size;
 	struct user dump;
 #if defined(__alpha__)
 #       define START_DATA(u)	(u.start_data)
+#elif defined(__arm__)
+#	define START_DATA(u)	((u.u_tsize << PAGE_SHIFT) + u.start_code)
 #elif defined(__sparc__)
 #       define START_DATA(u)    (u.u_tsize)
 #elif defined(__i386__) || defined(__mc68000__)
@@ -106,32 +99,8 @@ do_aout_core_dump(long signr, struct pt_regs * regs)
 #       define START_STACK(u)   (u.start_stack)
 #endif
 
-	if (!current->dumpable || atomic_read(&current->mm->count) != 1)
-		return 0;
-	current->dumpable = 0;
-
-/* See if we have enough room to write the upage.  */
-	if (current->rlim[RLIMIT_CORE].rlim_cur < PAGE_SIZE)
-		return 0;
 	fs = get_fs();
 	set_fs(KERNEL_DS);
-	memcpy(corefile,"core.",5);
-#if 0
-	memcpy(corefile+5,current->comm,sizeof(current->comm));
-#else
-	corefile[4] = '\0';
-#endif
-	file = filp_open(corefile,O_CREAT | 2 | O_TRUNC | O_NOFOLLOW, 0600);
-	if (IS_ERR(file))
-		goto end_coredump;
-	dentry = file->f_dentry;
-	inode = dentry->d_inode;
-	if (!S_ISREG(inode->i_mode))
-		goto close_coredump;
-	if (!inode->i_op || !inode->i_op->default_file_ops)
-		goto close_coredump;
-	if (!file->f_op->write)
-		goto close_coredump;
 	has_dumped = 1;
 	current->flags |= PF_DUMPCORE;
        	strncpy(dump.u_comm, current->comm, sizeof(current->comm));
@@ -210,22 +179,9 @@ do_aout_core_dump(long signr, struct pt_regs * regs)
 /* Finally dump the task struct.  Not be used by gdb, but could be useful */
 	set_fs(KERNEL_DS);
 	DUMP_WRITE(current,sizeof(*current));
-close_coredump:
-	filp_close(file, NULL);
 end_coredump:
 	set_fs(fs);
 	return has_dumped;
-}
-
-static int
-aout_core_dump(long signr, struct pt_regs * regs)
-{
-	int retval;
-
-	MOD_INC_USE_COUNT;
-	retval = do_aout_core_dump(signr, regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
 }
 
 /*
@@ -263,7 +219,7 @@ static unsigned long * create_aout_tables(char * p, struct linux_binprm * bprm)
 	envp = (char **) sp;
 	sp -= argc+1;
 	argv = (char **) sp;
-#if defined(__i386__) || defined(__mc68000__)
+#if defined(__i386__) || defined(__mc68000__) || defined(__arm__)
 	put_user((unsigned long) envp,--sp);
 	put_user((unsigned long) argv,--sp);
 #endif
@@ -295,11 +251,9 @@ static unsigned long * create_aout_tables(char * p, struct linux_binprm * bprm)
  * libraries.  There is no binary dependent code anywhere else.
  */
 
-static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
+static int load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
 {
 	struct exec ex;
-	struct file * file;
-	int fd;
 	unsigned long error;
 	unsigned long fd_offset;
 	unsigned long rlim;
@@ -309,26 +263,11 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != OMAGIC &&
 	     N_MAGIC(ex) != QMAGIC && N_MAGIC(ex) != NMAGIC) ||
 	    N_TRSIZE(ex) || N_DRSIZE(ex) ||
-	    bprm->dentry->d_inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
+	    bprm->file->f_dentry->d_inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
 		return -ENOEXEC;
 	}
 
 	fd_offset = N_TXTOFF(ex);
-
-#ifdef __i386__
-	if (N_MAGIC(ex) == ZMAGIC && fd_offset != BLOCK_SIZE) {
-		printk(KERN_NOTICE "N_TXTOFF != BLOCK_SIZE. See a.out.h.\n");
-		return -ENOEXEC;
-	}
-
-	if (N_MAGIC(ex) == ZMAGIC && ex.a_text &&
-	    bprm->dentry->d_inode->i_op &&
-	    bprm->dentry->d_inode->i_op->get_block &&
-	    (fd_offset < bprm->dentry->d_inode->i_sb->s_blocksize)) {
-		printk(KERN_NOTICE "N_TXTOFF < BLOCK_SIZE. Please convert binary.\n");
-		return -ENOEXEC;
-	}
-#endif
 
 	/* Check initial limits. This avoids letting people circumvent
 	 * size limits imposed on them by creating programs with large
@@ -346,10 +285,13 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
 		return retval;
 
 	/* OK, This is the point of no return */
-	current->personality = PER_LINUX;
-
-#if defined(__sparc__) && !defined(__sparc_v9__)
-	memcpy(&current->tss.core_exec, &ex, sizeof(struct exec));
+#if !defined(__sparc__)
+	set_personality(PER_LINUX);
+#else
+	set_personality(PER_SUNOS);
+#if !defined(__sparc_v9__)
+	memcpy(&current->thread.core_exec, &ex, sizeof(struct exec));
+#endif
 #endif
 
 	current->mm->end_code = ex.a_text +
@@ -365,92 +307,101 @@ static inline int do_load_aout_binary(struct linux_binprm * bprm, struct pt_regs
  	current->flags &= ~PF_FORKNOEXEC;
 #ifdef __sparc__
 	if (N_MAGIC(ex) == NMAGIC) {
+		loff_t pos = fd_offset;
 		/* Fuck me plenty... */
+		/* <AOL></AOL> */
 		error = do_brk(N_TXTADDR(ex), ex.a_text);
-		read_exec(bprm->dentry, fd_offset, (char *) N_TXTADDR(ex),
-			  ex.a_text, 0);
+		bprm->file->f_op->read(bprm->file, (char *) N_TXTADDR(ex),
+			  ex.a_text, &pos);
 		error = do_brk(N_DATADDR(ex), ex.a_data);
-		read_exec(bprm->dentry, fd_offset + ex.a_text, (char *) N_DATADDR(ex),
-			  ex.a_data, 0);
+		bprm->file->f_op->read(bprm->file, (char *) N_DATADDR(ex),
+			  ex.a_data, &pos);
 		goto beyond_if;
 	}
 #endif
 
 	if (N_MAGIC(ex) == OMAGIC) {
+		unsigned long text_addr, map_size;
+		loff_t pos;
+
+		text_addr = N_TXTADDR(ex);
+
 #if defined(__alpha__) || defined(__sparc__)
-		do_brk(N_TXTADDR(ex) & PAGE_MASK,
-			ex.a_text+ex.a_data + PAGE_SIZE - 1);
-		read_exec(bprm->dentry, fd_offset, (char *) N_TXTADDR(ex),
-			  ex.a_text+ex.a_data, 0);
+		pos = fd_offset;
+		map_size = ex.a_text+ex.a_data + PAGE_SIZE - 1;
 #else
-		do_brk(0, ex.a_text+ex.a_data);
-		read_exec(bprm->dentry, 32, (char *) 0, ex.a_text+ex.a_data, 0);
+		pos = 32;
+		map_size = ex.a_text+ex.a_data;
 #endif
-		flush_icache_range((unsigned long) 0,
-				   (unsigned long) ex.a_text+ex.a_data);
-	} else {
-		if ((ex.a_text & 0xfff || ex.a_data & 0xfff) &&
-		    (N_MAGIC(ex) != NMAGIC))
-			printk(KERN_NOTICE "executable not page aligned\n");
 
-		fd = open_dentry(bprm->dentry, O_RDONLY);
-		if (fd < 0)
-			return fd;
-		file = fget(fd);
-
-		if ((fd_offset & ~PAGE_MASK) != 0) {
-			printk(KERN_WARNING 
-			       "fd_offset is not page aligned. Please convert program: %s\n",
-			       file->f_dentry->d_name.name
-			       );
+		error = do_brk(text_addr & PAGE_MASK, map_size);
+		if (error != (text_addr & PAGE_MASK)) {
+			send_sig(SIGKILL, current, 0);
+			return error;
 		}
 
-		if (!file->f_op || !file->f_op->mmap || ((fd_offset & ~PAGE_MASK) != 0)) {
-			fput(file);
-			sys_close(fd);
-			do_brk(0, ex.a_text+ex.a_data);
-			read_exec(bprm->dentry, fd_offset,
-				  (char *) N_TXTADDR(ex), ex.a_text+ex.a_data, 0);
+		error = bprm->file->f_op->read(bprm->file, (char *)text_addr,
+			  ex.a_text+ex.a_data, &pos);
+		if (error < 0) {
+			send_sig(SIGKILL, current, 0);
+			return error;
+		}
+			 
+		flush_icache_range(text_addr, text_addr+ex.a_text+ex.a_data);
+	} else {
+		static unsigned long error_time, error_time2;
+		if ((ex.a_text & 0xfff || ex.a_data & 0xfff) &&
+		    (N_MAGIC(ex) != NMAGIC) && (jiffies-error_time2) > 5*HZ)
+		{
+			printk(KERN_NOTICE "executable not page aligned\n");
+			error_time2 = jiffies;
+		}
+
+		if ((fd_offset & ~PAGE_MASK) != 0 &&
+		    (jiffies-error_time) > 5*HZ)
+		{
+			printk(KERN_WARNING 
+			       "fd_offset is not page aligned. Please convert program: %s\n",
+			       bprm->file->f_dentry->d_name.name);
+			error_time = jiffies;
+		}
+
+		if (!bprm->file->f_op->mmap||((fd_offset & ~PAGE_MASK) != 0)) {
+			loff_t pos = fd_offset;
+			do_brk(N_TXTADDR(ex), ex.a_text+ex.a_data);
+			bprm->file->f_op->read(bprm->file,(char *)N_TXTADDR(ex),
+					ex.a_text+ex.a_data, &pos);
 			flush_icache_range((unsigned long) N_TXTADDR(ex),
 					   (unsigned long) N_TXTADDR(ex) +
 					   ex.a_text+ex.a_data);
 			goto beyond_if;
 		}
 
-		error = do_mmap(file, N_TXTADDR(ex), ex.a_text,
+		down(&current->mm->mmap_sem);
+		error = do_mmap(bprm->file, N_TXTADDR(ex), ex.a_text,
 			PROT_READ | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 			fd_offset);
+		up(&current->mm->mmap_sem);
 
 		if (error != N_TXTADDR(ex)) {
-			fput(file);
-			sys_close(fd);
 			send_sig(SIGKILL, current, 0);
 			return error;
 		}
 
- 		error = do_mmap(file, N_DATADDR(ex), ex.a_data,
+		down(&current->mm->mmap_sem);
+ 		error = do_mmap(bprm->file, N_DATADDR(ex), ex.a_data,
 				PROT_READ | PROT_WRITE | PROT_EXEC,
 				MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE | MAP_EXECUTABLE,
 				fd_offset + ex.a_text);
-		fput(file);
-		sys_close(fd);
+		up(&current->mm->mmap_sem);
 		if (error != N_DATADDR(ex)) {
 			send_sig(SIGKILL, current, 0);
 			return error;
 		}
 	}
 beyond_if:
-	if (current->exec_domain && current->exec_domain->module)
-		__MOD_DEC_USE_COUNT(current->exec_domain->module);
-	if (current->binfmt && current->binfmt->module)
-		__MOD_DEC_USE_COUNT(current->binfmt->module);
-	current->exec_domain = lookup_exec_domain(current->personality);
-	current->binfmt = &aout_format;
-	if (current->exec_domain && current->exec_domain->module)
-		__MOD_INC_USE_COUNT(current->exec_domain->module);
-	if (current->binfmt && current->binfmt->module)
-		__MOD_INC_USE_COUNT(current->binfmt->module);
+	set_binfmt(&aout_format);
 
 	set_brk(current->mm->start_brk, current->mm->brk);
 
@@ -461,70 +412,41 @@ beyond_if:
 		return retval;
 	}
 
-	current->mm->start_stack = create_aout_tables(bprm->p, bprm);
+	current->mm->start_stack =
+		(unsigned long) create_aout_tables((char *) bprm->p, bprm);
 #ifdef __alpha__
 	regs->gp = ex.a_gpvalue;
 #endif
 	start_thread(regs, ex.a_entry, current->mm->start_stack);
-	if (current->flags & PF_PTRACED)
+	if (current->ptrace & PT_PTRACED)
 		send_sig(SIGTRAP, current, 0);
 	return 0;
 }
 
-
-static int
-load_aout_binary(struct linux_binprm * bprm, struct pt_regs * regs)
+static int load_aout_library(struct file *file)
 {
-	int retval;
-
-	MOD_INC_USE_COUNT;
-	retval = do_load_aout_binary(bprm, regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
-}
-
-static inline int
-do_load_aout_library(int fd)
-{
-        struct file * file;
 	struct inode * inode;
 	unsigned long bss, start_addr, len;
 	unsigned long error;
 	int retval;
-	loff_t offset = 0;
 	struct exec ex;
 
-	retval = -EACCES;
-	file = fget(fd);
-	if (!file)
-		goto out;
-	if (!file->f_op)
-		goto out_putf;
 	inode = file->f_dentry->d_inode;
 
 	retval = -ENOEXEC;
-	/* N.B. Save current fs? */
-	set_fs(KERNEL_DS);
-	error = file->f_op->read(file, (char *) &ex, sizeof(ex), &offset);
-	set_fs(USER_DS);
+	error = kernel_read(file, 0, (char *) &ex, sizeof(ex));
 	if (error != sizeof(ex))
-		goto out_putf;
+		goto out;
 
 	/* We come in here for the regular a.out style of shared libraries */
 	if ((N_MAGIC(ex) != ZMAGIC && N_MAGIC(ex) != QMAGIC) || N_TRSIZE(ex) ||
 	    N_DRSIZE(ex) || ((ex.a_entry & 0xfff) && N_MAGIC(ex) == ZMAGIC) ||
 	    inode->i_size < ex.a_text+ex.a_data+N_SYMSIZE(ex)+N_TXTOFF(ex)) {
-		goto out_putf;
-	}
-
-	if (N_MAGIC(ex) == ZMAGIC && N_TXTOFF(ex) &&
-	    (N_TXTOFF(ex) < inode->i_sb->s_blocksize)) {
-		printk("N_TXTOFF < BLOCK_SIZE. Please convert library\n");
-		goto out_putf;
+		goto out;
 	}
 
 	if (N_FLAGS(ex))
-		goto out_putf;
+		goto out;
 
 	/* For  QMAGIC, the starting address is 0x20 into the page.  We mask
 	   this off to get the starting address for the page */
@@ -532,31 +454,37 @@ do_load_aout_library(int fd)
 	start_addr =  ex.a_entry & 0xfffff000;
 
 	if ((N_TXTOFF(ex) & ~PAGE_MASK) != 0) {
-		printk(KERN_WARNING 
-		       "N_TXTOFF is not page aligned. Please convert library: %s\n",
-		       file->f_dentry->d_name.name
-		       );
+		static unsigned long error_time;
+		loff_t pos = N_TXTOFF(ex);
+
+		if ((jiffies-error_time) > 5*HZ)
+		{
+			printk(KERN_WARNING 
+			       "N_TXTOFF is not page aligned. Please convert library: %s\n",
+			       file->f_dentry->d_name.name);
+			error_time = jiffies;
+		}
+
+		do_brk(start_addr, ex.a_text + ex.a_data + ex.a_bss);
 		
-		do_mmap(NULL, start_addr & PAGE_MASK, ex.a_text + ex.a_data + ex.a_bss,
-			PROT_READ | PROT_WRITE | PROT_EXEC,
-			MAP_FIXED| MAP_PRIVATE, 0);
-		
-		read_exec(file->f_dentry, N_TXTOFF(ex),
-			  (char *)start_addr, ex.a_text + ex.a_data, 0);
+		file->f_op->read(file, (char *)start_addr,
+			ex.a_text + ex.a_data, &pos);
 		flush_icache_range((unsigned long) start_addr,
 				   (unsigned long) start_addr + ex.a_text + ex.a_data);
 
 		retval = 0;
-		goto out_putf;
+		goto out;
 	}
 	/* Now use mmap to map the library into memory. */
+	down(&current->mm->mmap_sem);
 	error = do_mmap(file, start_addr, ex.a_text + ex.a_data,
 			PROT_READ | PROT_WRITE | PROT_EXEC,
 			MAP_FIXED | MAP_PRIVATE | MAP_DENYWRITE,
 			N_TXTOFF(ex));
+	up(&current->mm->mmap_sem);
 	retval = error;
 	if (error != start_addr)
-		goto out_putf;
+		goto out;
 
 	len = PAGE_ALIGN(ex.a_text + ex.a_data);
 	bss = ex.a_text + ex.a_data + ex.a_bss;
@@ -564,39 +492,24 @@ do_load_aout_library(int fd)
 		error = do_brk(start_addr + len, bss - len);
 		retval = error;
 		if (error != start_addr + len)
-			goto out_putf;
+			goto out;
 	}
 	retval = 0;
-
-out_putf:
-	fput(file);
 out:
 	return retval;
 }
 
-static int
-load_aout_library(int fd)
-{
-	int retval;
-
-	MOD_INC_USE_COUNT;
-	retval = do_load_aout_library(fd);
-	MOD_DEC_USE_COUNT;
-	return retval;
-}
-
-
-int __init init_aout_binfmt(void)
+static int __init init_aout_binfmt(void)
 {
 	return register_binfmt(&aout_format);
 }
 
-#ifdef MODULE
-int init_module(void) {
-	return init_aout_binfmt();
-}
-
-void cleanup_module( void) {
+static void __exit exit_aout_binfmt(void)
+{
 	unregister_binfmt(&aout_format);
 }
-#endif
+
+EXPORT_NO_SYMBOLS;
+
+module_init(init_aout_binfmt);
+module_exit(exit_aout_binfmt);

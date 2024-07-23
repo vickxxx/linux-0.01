@@ -19,7 +19,7 @@
 #define SEM_STAT 18
 #define SEM_INFO 19
 
-/* One semid data structure for each set of semaphores in the system. */
+/* Obsolete, used only for backwards compatibility and libc5 compiles */
 struct semid_ds {
 	struct ipc_perm	sem_perm;		/* permissions .. see ipc.h */
 	__kernel_time_t	sem_otime;		/* last semop time */
@@ -30,6 +30,9 @@ struct semid_ds {
 	struct sem_undo	*undo;			/* undo requests on this array */
 	unsigned short	sem_nsems;		/* no. of semaphores in array */
 };
+
+/* Include the definition of semid64_ds */
+#include <asm/sembuf.h>
 
 /* semop system calls takes an array of these. */
 struct sembuf {
@@ -60,11 +63,11 @@ struct  seminfo {
 	int semaem;
 };
 
-#define SEMMNI  128             /* ?  max # of semaphore identifiers */
-#define SEMMSL  32              /* <= 512 max num of semaphores per id */
-#define SEMMNS  (SEMMNI*SEMMSL) /* ? max # of semaphores in system */
-#define SEMOPM  32	        /* ~ 100 max num of ops per semop call */
-#define SEMVMX  32767           /* semaphore maximum value */
+#define SEMMNI  128             /* <= IPCMNI  max # of semaphore identifiers */
+#define SEMMSL  250             /* <= 8 000 max num of semaphores per id */
+#define SEMMNS  (SEMMNI*SEMMSL) /* <= INT_MAX max # of semaphores in system */
+#define SEMOPM  32	        /* <= 1 000 max num of ops per semop call */
+#define SEMVMX  32767           /* <= 32767 semaphore maximum value */
 
 /* unused */
 #define SEMUME  SEMOPM          /* max num of undo entries per process */
@@ -81,15 +84,28 @@ struct sem {
 	int	sempid;		/* pid of last operation */
 };
 
-/* One queue for each semaphore set in the system. */
+/* One sem_array data structure for each set of semaphores in the system. */
+struct sem_array {
+	struct kern_ipc_perm	sem_perm;	/* permissions .. see ipc.h */
+	time_t			sem_otime;	/* last semop time */
+	time_t			sem_ctime;	/* last change time */
+	struct sem		*sem_base;	/* ptr to first semaphore in array */
+	struct sem_queue	*sem_pending;	/* pending operations to be processed */
+	struct sem_queue	**sem_pending_last; /* last pending operation */
+	struct sem_undo		*undo;		/* undo requests on this array */
+	unsigned long		sem_nsems;	/* no. of semaphores in array */
+};
+
+/* One queue for each sleeping process in the system. */
 struct sem_queue {
 	struct sem_queue *	next;	 /* next entry in the queue */
 	struct sem_queue **	prev;	 /* previous entry in the queue, *(q->prev) == q */
-	wait_queue_head_t	sleeper; /* sleeping process */
+	struct task_struct*	sleeper; /* this process */
 	struct sem_undo *	undo;	 /* undo structure */
 	int    			pid;	 /* process id of requesting process */
 	int    			status;	 /* completion status of operation */
-	struct semid_ds *	sma;	 /* semaphore array for operations */
+	struct sem_array *	sma;	 /* semaphore array for operations */
+	int			id;	 /* internal sem id */
 	struct sembuf *		sops;	 /* array of pending operations */
 	int			nsops;	 /* number of operations */
 	int			alter;	 /* operation will alter semaphore */
@@ -105,9 +121,9 @@ struct sem_undo {
 	short *			semadj;		/* array of adjustments, one per semaphore */
 };
 
-asmlinkage int sys_semget (key_t key, int nsems, int semflg);
-asmlinkage int sys_semop (int semid, struct sembuf *sops, unsigned nsops);
-asmlinkage int sys_semctl (int semid, int semnum, int cmd, union semun arg);
+asmlinkage long sys_semget (key_t key, int nsems, int semflg);
+asmlinkage long sys_semop (int semid, struct sembuf *sops, unsigned nsops);
+asmlinkage long sys_semctl (int semid, int semnum, int cmd, union semun arg);
 
 #endif /* __KERNEL__ */
 

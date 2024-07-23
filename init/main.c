@@ -13,6 +13,7 @@
 
 #include <linux/config.h>
 #include <linux/proc_fs.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/unistd.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
@@ -20,9 +21,12 @@
 #include <linux/utsname.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
+#include <linux/raid/md.h>
 #include <linux/smp_lock.h>
 #include <linux/blk.h>
 #include <linux/hdreg.h>
+#include <linux/iobuf.h>
+#include <linux/bootmem.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
@@ -43,12 +47,24 @@
 #  include <asm/mtrr.h>
 #endif
 
-#ifdef CONFIG_APM
-#include <linux/apm_bios.h>
+#ifdef CONFIG_3215_CONSOLE
+extern int con3215_activate(void);
 #endif
 
-#ifdef CONFIG_MAC
-extern void nubus_init(void);
+#ifdef CONFIG_NUBUS
+#include <linux/nubus.h>
+#endif
+
+#ifdef CONFIG_ISAPNP
+#include <linux/isapnp.h>
+#endif
+
+#ifdef CONFIG_IRDA
+#include <net/irda/irda_device.h>
+#endif
+
+#ifdef CONFIG_X86_IO_APIC
+#include <asm/smp.h>
 #endif
 
 /*
@@ -57,291 +73,42 @@ extern void nubus_init(void);
  * To avoid associated bogus bug reports, we flatly refuse to compile
  * with a gcc that is known to be too old from the very beginning.
  */
-#if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 6)
-#error sorry, your GCC is too old. It builds incorrect kernels.
+#if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 91)
+#error Sorry, your GCC is too old. It builds incorrect kernels.
 #endif
 
 extern char _stext, _etext;
 extern char *linux_banner;
 
-extern int console_loglevel;
-
 static int init(void *);
-extern int bdflush(void *);
-extern int kswapd(void *);
-extern void kswapd_setup(void);
 
 extern void init_IRQ(void);
 extern void init_modules(void);
-extern long console_init(long, long);
 extern void sock_init(void);
-extern void uidcache_init(void);
+extern void fork_init(unsigned long);
 extern void mca_init(void);
 extern void sbus_init(void);
 extern void ppc_init(void);
 extern void sysctl_init(void);
-extern void filescache_init(void);
 extern void signals_init(void);
+extern void bdev_init(void);
+extern int init_pcmcia_ds(void);
+extern void net_notifier_init(void);
 
-extern void device_setup(void);
-extern void binfmt_setup(void);
 extern void free_initmem(void);
 extern void filesystem_setup(void);
 
-#ifdef CONFIG_ARCH_ACORN
+#ifdef CONFIG_TC
+extern void tc_init(void);
+#endif
+
 extern void ecard_init(void);
-#endif
-
-extern void smp_setup(char *str, int *ints);
-#ifdef __i386__
-extern void ioapic_pirq_setup(char *str, int *ints);
-extern void ioapic_setup(char *str, int *ints);
-#endif
-extern void no_scroll(char *str, int *ints);
-extern void kbd_reset_setup(char *str, int *ints);
-extern void panic_setup(char *str, int *ints);
-extern void bmouse_setup(char *str, int *ints);
-extern void msmouse_setup(char *str, int *ints);
-extern void console_setup(char *str, int *ints);
-#ifdef CONFIG_PRINTER
-extern void lp_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_JOY_AMIGA
-extern void js_am_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_JOY_ANALOG
-extern void js_an_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_JOY_ASSASIN
-extern void js_as_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_JOY_CONSOLE
-extern void js_console_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_JOY_DB9
-extern void js_db9_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_JOY_TURBOGRAFX
-extern void js_tg_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_JOY_LIGHTNING
-extern void js_l4_setup(char *str, int *ints);
-#endif
-extern void eth_setup(char *str, int *ints);
-#ifdef CONFIG_ARCNET_COM20020
-extern void com20020_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_ARCNET_RIM_I
-extern void arcrimi_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_ARCNET_COM90xxIO
-extern void com90io_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_ARCNET_COM90xx
-extern void com90xx_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_DECNET
-extern void decnet_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_BLK_DEV_XD
-extern void xd_setup(char *str, int *ints);
-extern void xd_manual_geo_init(char *str, int *ints);
-#endif
-#ifdef CONFIG_BLK_DEV_IDE
-extern void ide_setup(char *);
-#endif
-#ifdef CONFIG_PARIDE_PD
-extern void pd_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_PARIDE_PF
-extern void pf_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_PARIDE_PT
-extern void pt_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_PARIDE_PG
-extern void pg_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_PARIDE_PCD
-extern void pcd_setup(char *str, int *ints);
-#endif
-extern void floppy_setup(char *str, int *ints);
-extern void st_setup(char *str, int *ints);
-extern void st0x_setup(char *str, int *ints);
-extern void advansys_setup(char *str, int *ints);
-extern void tmc8xx_setup(char *str, int *ints);
-extern void t128_setup(char *str, int *ints);
-extern void pas16_setup(char *str, int *ints);
-extern void generic_NCR5380_setup(char *str, int *intr);
-extern void generic_NCR53C400_setup(char *str, int *intr);
-extern void generic_NCR53C400A_setup(char *str, int *intr);
-extern void generic_DTC3181E_setup(char *str, int *intr);
-extern void aha152x_setup(char *str, int *ints);
-extern void aha1542_setup(char *str, int *ints);
-extern void gdth_setup(char *str, int *ints);
-extern void aic7xxx_setup(char *str, int *ints);
-extern void AM53C974_setup(char *str, int *ints);
-extern void BusLogic_Setup(char *str, int *ints);
-extern void ncr53c8xx_setup(char *str, int *ints);
-extern void sym53c8xx_setup(char *str, int *ints);
-extern void eata2x_setup(char *str, int *ints);
-extern void u14_34f_setup(char *str, int *ints);
-extern void fdomain_setup(char *str, int *ints);
-extern void ibmmca_scsi_setup(char *str, int *ints);
-extern void fd_mcs_setup(char *str, int *ints);
-extern void in2000_setup(char *str, int *ints);
-extern void NCR53c406a_setup(char *str, int *ints);
-extern void sym53c416_setup(char *str, int *ints);
-extern void wd7000_setup(char *str, int *ints);
-extern void dc390_setup(char* str, int *ints);
-extern void scsi_luns_setup(char *str, int *ints);
-extern void scsi_logging_setup(char *str, int *ints);
-extern void sound_setup(char *str, int *ints);
-extern void reboot_setup(char *str, int *ints);
-extern void video_setup(char *str, int *ints);
-#ifdef CONFIG_CDU31A
-extern void cdu31a_setup(char *str, int *ints);
-#endif CONFIG_CDU31A
-#ifdef CONFIG_BLK_DEV_PS2
-extern void ed_setup(char *str, int *ints);
-extern void tp720_setup(char *str, int *ints);
-#endif CONFIG_BLK_DEV_PS2
-#ifdef CONFIG_MCD
-extern void mcd_setup(char *str, int *ints);
-#endif CONFIG_MCD
-#ifdef CONFIG_MCDX
-extern void mcdx_setup(char *str, int *ints);
-#endif CONFIG_MCDX
-#ifdef CONFIG_SBPCD
-extern void sbpcd_setup(char *str, int *ints);
-#endif CONFIG_SBPCD
-#ifdef CONFIG_AZTCD
-extern void aztcd_setup(char *str, int *ints);
-#endif CONFIG_AZTCD
-#ifdef CONFIG_CDU535
-extern void sonycd535_setup(char *str, int *ints);
-#endif CONFIG_CDU535
-#ifdef CONFIG_GSCD
-extern void gscd_setup(char *str, int *ints);
-#endif CONFIG_GSCD
-#ifdef CONFIG_CM206
-extern void cm206_setup(char *str, int *ints);
-#endif CONFIG_CM206
-#ifdef CONFIG_OPTCD
-extern void optcd_setup(char *str, int *ints);
-#endif CONFIG_OPTCD
-#ifdef CONFIG_SJCD
-extern void sjcd_setup(char *str, int *ints);
-#endif CONFIG_SJCD
-#ifdef CONFIG_ISP16_CDI
-extern void isp16_setup(char *str, int *ints);
-#endif CONFIG_ISP16_CDI
-#ifdef CONFIG_BLK_DEV_RAM
-static void ramdisk_start_setup(char *str, int *ints);
-static void load_ramdisk(char *str, int *ints);
-static void prompt_ramdisk(char *str, int *ints);
-static void ramdisk_size(char *str, int *ints);
-#ifdef CONFIG_BLK_DEV_INITRD
-static void no_initrd(char *s,int *ints);
-#endif
-#endif CONFIG_BLK_DEV_RAM
-#ifdef CONFIG_ISDN_DRV_ICN
-extern void icn_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_ISDN_DRV_HISAX
-extern void HiSax_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_DIGIEPCA
-extern void epca_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_ISDN_DRV_PCBIT
-extern void pcbit_setup(char *str, int *ints);
-#endif
-
-#ifdef CONFIG_ATARIMOUSE
-extern void atari_mouse_setup (char *str, int *ints);
-#endif
-#ifdef CONFIG_DMASOUND
-extern void dmasound_setup (char *str, int *ints);
-#endif
-#ifdef CONFIG_ATARI_SCSI
-extern void atari_scsi_setup (char *str, int *ints);
-#endif
-extern void stram_swap_setup (char *str, int *ints);
-extern void wd33c93_setup (char *str, int *ints);
-extern void gvp11_setup (char *str, int *ints);
-extern void ncr53c7xx_setup (char *str, int *ints);
-#ifdef CONFIG_MAC_SCSI
-extern void mac_scsi_setup (char *str, int *ints);
-#endif
-
-#ifdef CONFIG_CYCLADES
-extern void cy_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_DIGI
-extern void pcxx_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_RISCOM8
-extern void riscom8_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_SPECIALIX
-extern void specialix_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_DMASCC
-extern void dmascc_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_BAYCOM_PAR
-extern void baycom_par_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_BAYCOM_SER_FDX
-extern void baycom_ser_fdx_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_BAYCOM_SER_HDX
-extern void baycom_ser_hdx_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_SOUNDMODEM
-extern void sm_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_ADBMOUSE
-extern void adb_mouse_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_WDT
-extern void wdt_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_PARPORT
-extern void parport_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_PLIP
-extern void plip_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_HFMODEM
-extern void hfmodem_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_IP_PNP
-extern void ip_auto_config_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_ROOT_NFS
-extern void nfs_root_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_FTAPE
-extern void ftape_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_MDA_CONSOLE
-extern void mdacon_setup(char *str, int *ints);
-#endif
-#ifdef CONFIG_LTPC
-extern void ltpc_setup(char *str, int *ints);
-#endif
 
 #if defined(CONFIG_SYSVIPC)
 extern void ipc_init(void);
 #endif
 #if defined(CONFIG_QUOTA)
 extern void dquot_init_hash(void);
-#endif
-
-#ifdef CONFIG_MD_BOOT
-extern void md_setup(char *str,int *ints) __init;
 #endif
 
 /*
@@ -351,59 +118,37 @@ extern void md_setup(char *str,int *ints) __init;
 #define MAX_INIT_ENVS 8
 
 extern void time_init(void);
-
-static unsigned long memory_start = 0;
-static unsigned long memory_end = 0;
+extern void softirq_init(void);
 
 int rows, cols;
 
-#ifdef CONFIG_BLK_DEV_RAM
-extern int rd_doload;		/* 1 = load ramdisk, 0 = don't load 2 = dual disk */
-extern int rd_prompt;		/* 1 = prompt for ramdisk, 0 = don't prompt */
-extern int rd_size;		/* Size of the ramdisk(s) */
-extern int rd_image_start;	/* starting block # of image */
 #ifdef CONFIG_BLK_DEV_INITRD
 kdev_t real_root_dev;
 #endif
-#endif
 
 int root_mountflags = MS_RDONLY;
-char *execute_command = NULL;
+char *execute_command;
+char root_device_name[64];
+
 
 static char * argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
 static char * envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
 
-char *get_options(char *str, int *ints)
+static int __init profile_setup(char *str)
 {
-	char *cur = str;
-	int i=1;
-
-	while (cur && (*cur=='-' || isdigit(*cur)) && i <= 10) {
-		ints[i++] = simple_strtol(cur,NULL,0);
-		if ((cur = strchr(cur,',')) != NULL)
-			cur++;
-	}
-	ints[0] = i-1;
-	return(cur);
+    int par;
+    if (get_option(&str,&par)) prof_shift = par;
+	return 1;
 }
 
-static void __init profile_setup(char *str, int *ints)
-{
-	if (ints[0] > 0)
-		prof_shift = (unsigned long) ints[1];
-	else
-		prof_shift = 2;
-}
+__setup("profile=", profile_setup);
 
 
 static struct dev_name_struct {
 	const char *name;
 	const int num;
 } root_dev_names[] __initdata = {
-#ifdef CONFIG_ROOT_NFS
 	{ "nfs",     0x00ff },
-#endif
-#ifdef CONFIG_BLK_DEV_IDE
 	{ "hda",     0x0300 },
 	{ "hdb",     0x0340 },
 	{ "hdc",     0x1600 },
@@ -420,8 +165,10 @@ static struct dev_name_struct {
 	{ "hdn",     0x5840 },
 	{ "hdo",     0x5900 },
 	{ "hdp",     0x5940 },
-#endif
-#ifdef CONFIG_BLK_DEV_SD
+	{ "hdq",     0x5A00 },
+	{ "hdr",     0x5A40 },
+	{ "hds",     0x5B00 },
+	{ "hdt",     0x5B40 },
 	{ "sda",     0x0800 },
 	{ "sdb",     0x0810 },
 	{ "sdc",     0x0820 },
@@ -438,70 +185,93 @@ static struct dev_name_struct {
 	{ "sdn",     0x08d0 },
 	{ "sdo",     0x08e0 },
 	{ "sdp",     0x08f0 },
-#endif
-#ifdef CONFIG_ATARI_ACSI
 	{ "ada",     0x1c00 },
 	{ "adb",     0x1c10 },
 	{ "adc",     0x1c20 },
 	{ "add",     0x1c30 },
 	{ "ade",     0x1c40 },
-#endif
-#ifdef CONFIG_BLK_DEV_FD
 	{ "fd",      0x0200 },
-#endif
-#ifdef CONFIG_MD_BOOT
 	{ "md",      0x0900 },	     
-#endif     
-#ifdef CONFIG_BLK_DEV_XD
 	{ "xda",     0x0d00 },
 	{ "xdb",     0x0d40 },
-#endif
-#ifdef CONFIG_BLK_DEV_RAM
 	{ "ram",     0x0100 },
-#endif
-#ifdef CONFIG_BLK_DEV_SR
 	{ "scd",     0x0b00 },
-#endif
-#ifdef CONFIG_MCD
 	{ "mcd",     0x1700 },
-#endif
-#ifdef CONFIG_CDU535
 	{ "cdu535",  0x1800 },
 	{ "sonycd",  0x1800 },
-#endif
-#ifdef CONFIG_AZTCD
 	{ "aztcd",   0x1d00 },
-#endif
-#ifdef CONFIG_CM206
 	{ "cm206cd", 0x2000 },
-#endif
-#ifdef CONFIG_GSCD
 	{ "gscd",    0x1000 },
-#endif
-#ifdef CONFIG_SBPCD
 	{ "sbpcd",   0x1900 },
-#endif
-#ifdef CONFIG_BLK_DEV_PS2
 	{ "eda",     0x2400 },
 	{ "edb",     0x2440 },
-#endif
-#ifdef CONFIG_PARIDE_PD
 	{ "pda",	0x2d00 },
 	{ "pdb",	0x2d10 },
 	{ "pdc",	0x2d20 },
 	{ "pdd",	0x2d30 },
-#endif
-#ifdef CONFIG_PARIDE_PCD
 	{ "pcd",	0x2e00 },
-#endif
-#ifdef CONFIG_PARIDE_PF
 	{ "pf",		0x2f00 },
-#endif
-#if CONFIG_APBLOCK
 	{ "apblock", APBLOCK_MAJOR << 8},
-#endif
-#if CONFIG_DDV
 	{ "ddv", DDV_MAJOR << 8},
+	{ "jsfd",    JSFD_MAJOR << 8},
+#ifdef CONFIG_MDISK
+        { "mnda", (MDISK_MAJOR << MINORBITS)},
+        { "mndb", (MDISK_MAJOR << MINORBITS) + 1},
+        { "mndc", (MDISK_MAJOR << MINORBITS) + 2},
+        { "mndd", (MDISK_MAJOR << MINORBITS) + 3},
+        { "mnde", (MDISK_MAJOR << MINORBITS) + 4},
+        { "mndf", (MDISK_MAJOR << MINORBITS) + 5},
+        { "mndg", (MDISK_MAJOR << MINORBITS) + 6},
+        { "mndh", (MDISK_MAJOR << MINORBITS) + 7},
+#endif
+#ifdef CONFIG_DASD
+	{ "dasda", (DASD_MAJOR << MINORBITS) },
+	{ "dasdb", (DASD_MAJOR << MINORBITS) + (1 << 2) },
+	{ "dasdc", (DASD_MAJOR << MINORBITS) + (2 << 2) },
+	{ "dasdd", (DASD_MAJOR << MINORBITS) + (3 << 2) },
+	{ "dasde", (DASD_MAJOR << MINORBITS) + (4 << 2) },
+	{ "dasdf", (DASD_MAJOR << MINORBITS) + (5 << 2) },
+	{ "dasdg", (DASD_MAJOR << MINORBITS) + (6 << 2) },
+	{ "dasdh", (DASD_MAJOR << MINORBITS) + (7 << 2) },
+#endif
+#if defined(CONFIG_BLK_CPQ_DA) || defined(CONFIG_BLK_CPQ_DA_MODULE)
+	{ "ida/c0d0p",0x4800 },
+	{ "ida/c0d1p",0x4810 },
+	{ "ida/c0d2p",0x4820 },
+	{ "ida/c0d3p",0x4830 },
+	{ "ida/c0d4p",0x4840 },
+	{ "ida/c0d5p",0x4850 },
+	{ "ida/c0d6p",0x4860 },
+	{ "ida/c0d7p",0x4870 },
+	{ "ida/c0d8p",0x4880 },
+	{ "ida/c0d9p",0x4890 },
+	{ "ida/c0d10p",0x48A0 },
+	{ "ida/c0d11p",0x48B0 },
+	{ "ida/c0d12p",0x48C0 },
+	{ "ida/c0d13p",0x48D0 },
+	{ "ida/c0d14p",0x48E0 },
+	{ "ida/c0d15p",0x48F0 },
+#endif
+#if defined(CONFIG_BLK_CPQ_CISS_DA) || defined(CONFIG_BLK_CPQ_CISS_DA_MODULE)
+	{ "cciss/c0d0p",0x6800 },
+	{ "cciss/c0d1p",0x6810 },
+	{ "cciss/c0d2p",0x6820 },
+	{ "cciss/c0d3p",0x6830 },
+	{ "cciss/c0d4p",0x6840 },
+	{ "cciss/c0d5p",0x6850 },
+	{ "cciss/c0d6p",0x6860 },
+	{ "cciss/c0d7p",0x6870 },
+	{ "cciss/c0d8p",0x6880 },
+	{ "cciss/c0d9p",0x6890 },
+	{ "cciss/c0d10p",0x68A0 },
+	{ "cciss/c0d11p",0x68B0 },
+	{ "cciss/c0d12p",0x68C0 },
+	{ "cciss/c0d13p",0x68D0 },
+	{ "cciss/c0d14p",0x68E0 },
+	{ "cciss/c0d15p",0x68F0 },
+#endif
+#ifdef CONFIG_NFTL
+	{ "nftla", 0x5d00 },
 #endif
 	{ NULL, 0 }
 };
@@ -509,6 +279,7 @@ static struct dev_name_struct {
 kdev_t __init name_to_kdev_t(char *line)
 {
 	int base = 0;
+
 	if (strncmp(line,"/dev/",5) == 0) {
 		struct dev_name_struct *dev = root_dev_names;
 		line += 5;
@@ -525,445 +296,46 @@ kdev_t __init name_to_kdev_t(char *line)
 	return to_kdev_t(base + simple_strtoul(line,NULL,base?10:16));
 }
 
-static void __init root_dev_setup(char *line, int *num)
+static int __init root_dev_setup(char *line)
 {
+	int i;
+	char ch;
+
 	ROOT_DEV = name_to_kdev_t(line);
+	memset (root_device_name, 0, sizeof root_device_name);
+	if (strncmp (line, "/dev/", 5) == 0) line += 5;
+	for (i = 0; i < sizeof root_device_name - 1; ++i)
+	{
+	    ch = line[i];
+	    if ( isspace (ch) || (ch == ',') || (ch == '\0') ) break;
+	    root_device_name[i] = ch;
+	}
+	return 1;
 }
 
-/*
- * List of kernel command line parameters. The first table lists parameters
- * which are subject to values parsing (leading numbers are converted to
- * an array of ints and chopped off the string), the second table contains
- * the few exceptions which obey their own syntax rules.
- */
-
-struct kernel_param {
-	const char *str;
-	void (*setup_func)(char *, int *);
-};
-
-static struct kernel_param cooked_params[] __initdata = {
-/* FIXME: make PNP just become reserve_setup */
-#ifndef CONFIG_KERNEL_PNP_RESOURCE
-	{ "reserve=", reserve_setup },
-#else
-	{ "reserve=", pnp_reserve_setup },
-#endif
-	{ "profile=", profile_setup },
-#ifdef __SMP__
-	{ "nosmp", smp_setup },
-	{ "maxcpus=", smp_setup },
-#ifdef CONFIG_X86_IO_APIC
-	{ "noapic", ioapic_setup },
-	{ "pirq=", ioapic_pirq_setup },
-#endif
-#endif
-#ifdef CONFIG_BLK_DEV_RAM
-	{ "ramdisk_start=", ramdisk_start_setup },
-	{ "load_ramdisk=", load_ramdisk },
-	{ "prompt_ramdisk=", prompt_ramdisk },
-	{ "ramdisk=", ramdisk_size },
-	{ "ramdisk_size=", ramdisk_size },
-#ifdef CONFIG_BLK_DEV_INITRD
-	{ "noinitrd", no_initrd },
-#endif
-#endif
-#ifdef CONFIG_FB
-	{ "video=", video_setup },
-#endif
-	{ "panic=", panic_setup },
-	{ "console=", console_setup },
-#ifdef CONFIG_VGA_CONSOLE
-	{ "no-scroll", no_scroll },
-#endif
-#ifdef CONFIG_MDA_CONSOLE
-	{ "mdacon=", mdacon_setup },
-#endif
-#ifdef CONFIG_VT
-	{ "kbd-reset", kbd_reset_setup },
-#endif
-#ifdef CONFIG_BUGi386
-	{ "no-hlt", no_halt },
-	{ "no387", no_387 },
-	{ "reboot=", reboot_setup },
-	{ "mca-pentium", mca_pentium },
-#endif
-#ifdef CONFIG_INET
-	{ "ether=", eth_setup },
-#endif
-#ifdef CONFIG_ARCNET_COM20020
-	{ "com20020=", com20020_setup },
-#endif
-#ifdef CONFIG_ARCNET_RIM_I
-	{ "arcrimi=", arcrimi_setup },
-#endif
-#ifdef CONFIG_ARCNET_COM90xxIO
-	{ "com90io=", com90io_setup },
-#endif
-#ifdef CONFIG_ARCNET_COM90xx
-	{ "com90xx=", com90xx_setup },
-#endif
-#ifdef CONFIG_DECNET
-	{ "decnet=", decnet_setup },
-#endif
-#ifdef CONFIG_PRINTER
-        { "lp=", lp_setup },
-#endif
-#ifdef CONFIG_JOY_AMIGA
-	{ "js_am=", js_am_setup },
-#endif
-#ifdef CONFIG_JOY_ANALOG
-	{ "js_an=", js_an_setup },
-#endif
-#ifdef CONFIG_JOY_ASSASIN
-	{ "js_as=", js_as_setup },
-#endif
-#ifdef CONFIG_JOY_CONSOLE
-	{ "js_console=", js_console_setup },
-	{ "js_console2=", js_console_setup },
-	{ "js_console3=", js_console_setup },
-#endif
-#ifdef CONFIG_JOY_DB9
-	{ "js_db9=", js_db9_setup },
-	{ "js_db9_2=", js_db9_setup },
-	{ "js_db9_3=", js_db9_setup },
-#endif
-#ifdef CONFIG_JOY_TURBOGRAFX
-	{ "js_tg=", js_tg_setup },
-	{ "js_tg_2=", js_tg_setup },
-	{ "js_tg_3=", js_tg_setup },
-#endif
-#ifdef CONFIG_SCSI
-	{ "max_scsi_luns=", scsi_luns_setup },
-	{ "scsi_logging=", scsi_logging_setup },
-#endif
-#ifdef CONFIG_JOY_LIGHTNING
-	{ "js_l4=", js_l4_setup },
-#endif
-#ifdef CONFIG_SCSI_ADVANSYS
-	{ "advansys=", advansys_setup },
-#endif
-#if defined(CONFIG_BLK_DEV_HD)
-	{ "hd=", hd_setup },
-#endif
-#ifdef CONFIG_CHR_DEV_ST
-	{ "st=", st_setup },
-#endif
-#ifdef CONFIG_BUSMOUSE
-	{ "bmouse=", bmouse_setup },
-#endif
-#ifdef CONFIG_MS_BUSMOUSE
-	{ "msmouse=", msmouse_setup },
-#endif
-#ifdef CONFIG_SCSI_SEAGATE
-	{ "st0x=", st0x_setup },
-	{ "tmc8xx=", tmc8xx_setup },
-#endif
-#ifdef CONFIG_SCSI_T128
-	{ "t128=", t128_setup },
-#endif
-#ifdef CONFIG_SCSI_PAS16
-	{ "pas16=", pas16_setup },
-#endif
-#ifdef CONFIG_SCSI_GENERIC_NCR5380
-	{ "ncr5380=", generic_NCR5380_setup },
-	{ "ncr53c400=", generic_NCR53C400_setup },
-	{ "ncr53c400a=", generic_NCR53C400A_setup },
-	{ "dtc3181e=", generic_DTC3181E_setup },
-#endif
-#ifdef CONFIG_SCSI_AHA152X
-	{ "aha152x=", aha152x_setup},
-#endif
-#ifdef CONFIG_SCSI_AHA1542
-	{ "aha1542=", aha1542_setup},
-#endif
-#ifdef CONFIG_SCSI_GDTH
-	{ "gdth=", gdth_setup},
-#endif
-#ifdef CONFIG_SCSI_AIC7XXX
-	{ "aic7xxx=", aic7xxx_setup},
-#endif
-#ifdef CONFIG_SCSI_BUSLOGIC
-	{ "BusLogic=", BusLogic_Setup},
-#endif
-#ifdef CONFIG_SCSI_NCR53C8XX
-	{ "ncr53c8xx=", ncr53c8xx_setup},
-#endif
-#ifdef CONFIG_SCSI_SYM53C8XX
-	{ "sym53c8xx=", sym53c8xx_setup},
-#endif
-#ifdef CONFIG_SCSI_EATA
-	{ "eata=", eata2x_setup},
-#endif
-#ifdef CONFIG_SCSI_U14_34F
-	{ "u14-34f=", u14_34f_setup},
-#endif
-#ifdef CONFIG_SCSI_AM53C974
-        { "AM53C974=", AM53C974_setup},
-#endif
-#ifdef CONFIG_SCSI_NCR53C406A
-	{ "ncr53c406a=", NCR53c406a_setup},
-#endif
-#ifdef CONFIG_SCSI_SYM53C416
-	{ "sym53c416=", sym53c416_setup},
-#endif
-#ifdef CONFIG_SCSI_FUTURE_DOMAIN
-	{ "fdomain=", fdomain_setup},
-#endif
-#ifdef CONFIG_SCSI_IN2000
-	{ "in2000=", in2000_setup},
-#endif
-#ifdef CONFIG_SCSI_7000FASST
-	{ "wd7000=", wd7000_setup},
-#endif
-#ifdef CONFIG_SCSI_IBMMCA
-        { "ibmmcascsi=", ibmmca_scsi_setup },
-#endif
-#ifdef CONFIG_SCSI_FD_MCS
-	{ "fd_mcs=", fd_mcs_setup },
-#endif
-#if defined(CONFIG_SCSI_DC390T) && ! defined(CONFIG_SCSI_DC390T_NOGENSUPP)
-        { "tmscsim=", dc390_setup },
-#endif
-#ifdef CONFIG_BLK_DEV_XD
-	{ "xd=", xd_setup },
-	{ "xd_geo=", xd_manual_geo_init },
-#endif
-#if defined(CONFIG_BLK_DEV_FD) || defined(CONFIG_AMIGA_FLOPPY) || defined(CONFIG_ATARI_FLOPPY)
-	{ "floppy=", floppy_setup },
-#endif
-#ifdef CONFIG_BLK_DEV_PS2
-	{ "eda=", ed_setup },
-	{ "edb=", ed_setup },
-	{ "tp720=", tp720_setup },
-#endif
-#ifdef CONFIG_CDU31A
-	{ "cdu31a=", cdu31a_setup },
-#endif CONFIG_CDU31A
-#ifdef CONFIG_MCD
-	{ "mcd=", mcd_setup },
-#endif CONFIG_MCD
-#ifdef CONFIG_MCDX
-	{ "mcdx=", mcdx_setup },
-#endif CONFIG_MCDX
-#ifdef CONFIG_SBPCD
-	{ "sbpcd=", sbpcd_setup },
-#endif CONFIG_SBPCD
-#ifdef CONFIG_AZTCD
-	{ "aztcd=", aztcd_setup },
-#endif CONFIG_AZTCD
-#ifdef CONFIG_CDU535
-	{ "sonycd535=", sonycd535_setup },
-#endif CONFIG_CDU535
-#ifdef CONFIG_GSCD
-	{ "gscd=", gscd_setup },
-#endif CONFIG_GSCD
-#ifdef CONFIG_CM206
-	{ "cm206=", cm206_setup },
-#endif CONFIG_CM206
-#ifdef CONFIG_OPTCD
-	{ "optcd=", optcd_setup },
-#endif CONFIG_OPTCD
-#ifdef CONFIG_SJCD
-	{ "sjcd=", sjcd_setup },
-#endif CONFIG_SJCD
-#ifdef CONFIG_ISP16_CDI
-	{ "isp16=", isp16_setup },
-#endif CONFIG_ISP16_CDI
-#ifdef CONFIG_SOUND_OSS
-	{ "sound=", sound_setup },
-#endif
-#ifdef CONFIG_ISDN_DRV_ICN
-	{ "icn=", icn_setup },
-#endif
-#ifdef CONFIG_ISDN_DRV_HISAX
-       { "hisax=", HiSax_setup },
-       { "HiSax=", HiSax_setup },
-#endif
-#ifdef CONFIG_ISDN_DRV_PCBIT
-	{ "pcbit=", pcbit_setup },
-#endif
-#ifdef CONFIG_ATARIMOUSE
-	{ "atamouse=", atari_mouse_setup },
-#endif
-#ifdef CONFIG_DMASOUND
-	{ "dmasound=", dmasound_setup },
-#endif
-#ifdef CONFIG_ATARI_SCSI
-	{ "atascsi=", atari_scsi_setup },
-#endif
-#ifdef CONFIG_STRAM_SWAP
-	{ "stram_swap=", stram_swap_setup },
-#endif
-#if defined(CONFIG_A4000T_SCSI) || defined(CONFIG_WARPENGINE_SCSI) \
-	    || defined(CONFIG_A4091_SCSI) || defined(CONFIG_MVME16x_SCSI) \
-	    || defined(CONFIG_BVME6000_SCSI) \
-	    || defined(CONFIG_BLZ603EPLUS_SCSI)
-        { "53c7xx=", ncr53c7xx_setup },
-#endif
-#if defined(CONFIG_A3000_SCSI) || defined(CONFIG_A2091_SCSI) \
-	    || defined(CONFIG_GVP11_SCSI)
-	{ "wd33c93=", wd33c93_setup },
-#endif
-#if defined(CONFIG_GVP11_SCSI)
-	{ "gvp11=", gvp11_setup },
-#endif
-#ifdef CONFIG_MAC_SCSI
-	{ "mac5380=", mac_scsi_setup },
-#endif
-#ifdef CONFIG_CYCLADES
-	{ "cyclades=", cy_setup },
-#endif
-#ifdef CONFIG_DIGI
-	{ "digi=", pcxx_setup },
-#endif
-#ifdef CONFIG_DIGIEPCA
-	{ "digiepca=", epca_setup },
-#endif
-#ifdef CONFIG_RISCOM8
-	{ "riscom8=", riscom8_setup },
-#endif
-#ifdef CONFIG_DMASCC
-	{ "dmascc=", dmascc_setup },
-#endif
-#ifdef CONFIG_SPECIALIX
-	{ "specialix=", specialix_setup },
-#endif
-#ifdef CONFIG_BAYCOM_PAR
-	{ "baycom_par=", baycom_par_setup },
-#endif
-#ifdef CONFIG_BAYCOM_SER_FDX
-	{ "baycom_ser_fdx=", baycom_ser_fdx_setup },
-#endif
-#ifdef CONFIG_BAYCOM_SER_HDX
-	{ "baycom_ser_hdx=", baycom_ser_hdx_setup },
-#endif
-#ifdef CONFIG_SOUNDMODEM
-	{ "soundmodem=", sm_setup },
-#endif
-#ifdef CONFIG_WDT
-	{ "wdt=", wdt_setup },
-#endif
-#ifdef CONFIG_PARPORT
-	{ "parport=", parport_setup },
-#endif
-#ifdef CONFIG_PLIP
-	{ "plip=", plip_setup },
-#endif
-#ifdef CONFIG_HFMODEM
-	{ "hfmodem=", hfmodem_setup },
-#endif
-#ifdef CONFIG_FTAPE
-	{ "ftape=", ftape_setup},
-#endif
-#ifdef CONFIG_MD_BOOT
-	{ "md=", md_setup},
-#endif
-#ifdef CONFIG_ADBMOUSE
-	{ "adb_buttons=", adb_mouse_setup },
-#endif
-#ifdef CONFIG_LTPC
-	{ "ltpc=", ltpc_setup },
-#endif
-	{ 0, 0 }
-};
-
-static struct kernel_param raw_params[] __initdata = {
-	{ "root=", root_dev_setup },
-#ifdef CONFIG_ROOT_NFS
-	{ "nfsroot=", nfs_root_setup },
-	{ "nfsaddrs=", ip_auto_config_setup },
-#endif
-#ifdef CONFIG_IP_PNP
-	{ "ip=", ip_auto_config_setup },
-#endif
-#ifdef CONFIG_PCI
-	{ "pci=", pci_setup },
-#endif
-#ifdef CONFIG_PARIDE_PD
-	{ "pd.", pd_setup },
-#endif
-#ifdef CONFIG_PARIDE_PCD
-	{ "pcd.", pcd_setup },
-#endif
-#ifdef CONFIG_PARIDE_PF
-	{ "pf.", pf_setup },
-#endif
-#ifdef CONFIG_PARIDE_PT
-        { "pt.", pt_setup },
-#endif
-#ifdef CONFIG_PARIDE_PG
-        { "pg.", pg_setup },
-#endif
-#ifdef CONFIG_APM
-	{ "apm=", apm_setup },
-#endif
-	{ 0, 0 }
-};
-
-#ifdef CONFIG_BLK_DEV_RAM
-static void __init ramdisk_start_setup(char *str, int *ints)
-{
-   if (ints[0] > 0 && ints[1] >= 0)
-      rd_image_start = ints[1];
-}
-
-static void __init load_ramdisk(char *str, int *ints)
-{
-   if (ints[0] > 0 && ints[1] >= 0)
-      rd_doload = ints[1] & 3;
-}
-
-static void __init prompt_ramdisk(char *str, int *ints)
-{
-   if (ints[0] > 0 && ints[1] >= 0)
-      rd_prompt = ints[1] & 1;
-}
-
-static void __init ramdisk_size(char *str, int *ints)
-{
-	if (ints[0] > 0 && ints[1] >= 0)
-		rd_size = ints[1];
-}
-#endif
+__setup("root=", root_dev_setup);
 
 static int __init checksetup(char *line)
 {
-	int i, ints[11];
+	struct kernel_param *p;
 
-#ifdef CONFIG_BLK_DEV_IDE
-	/* ide driver needs the basic string, rather than pre-processed values */
-	if (!strncmp(line,"ide",3) ||
-#ifdef CONFIG_BLK_DEV_VIA82C586
-	    !strncmp(line,"splitfifo",9) ||
-#endif /* CONFIG_BLK_DEV_VIA82C586 */
-	    (!strncmp(line,"hd",2) && line[2] != '=')) {
-		ide_setup(line);
-		return 1;
-	}
-#endif
-	for (i=0; raw_params[i].str; i++) {
-		int n = strlen(raw_params[i].str);
-		if (!strncmp(line,raw_params[i].str,n)) {
-			raw_params[i].setup_func(line+n, NULL);
-			return 1;
+	p = &__setup_start;
+	do {
+		int n = strlen(p->str);
+		if (!strncmp(line,p->str,n)) {
+			if (p->setup_func(line+n))
+				return 1;
 		}
-	}
-	for (i=0; cooked_params[i].str; i++) {
-		int n = strlen(cooked_params[i].str);
-		if (!strncmp(line,cooked_params[i].str,n)) {
-			cooked_params[i].setup_func(get_options(line+n, ints), ints);
-			return 1;
-		}
-	}
+		p++;
+	} while (p < &__setup_end);
 	return 0;
 }
 
 /* this should be approx 2 Bo*oMips to start (note initial shift), and will
    still work even if initially too large, it will just take slightly longer */
-unsigned long loops_per_sec = (1<<12);
+unsigned long loops_per_jiffy = (1<<12);
 
-/* This is the number of bits of precision for the loops_per_second.  Each
+/* This is the number of bits of precision for the loops_per_jiffy.  Each
    bit takes on average 1.5/HZ seconds.  This (like the original) is a little
    better than 1% */
 #define LPS_PREC 8
@@ -973,43 +345,78 @@ void __init calibrate_delay(void)
 	unsigned long ticks, loopbit;
 	int lps_precision = LPS_PREC;
 
-	loops_per_sec = (1<<12);
+	loops_per_jiffy = (1<<12);
 
 	printk("Calibrating delay loop... ");
-	while (loops_per_sec <<= 1) {
+	while (loops_per_jiffy <<= 1) {
 		/* wait for "start of" clock tick */
 		ticks = jiffies;
 		while (ticks == jiffies)
 			/* nothing */;
 		/* Go .. */
 		ticks = jiffies;
-		__delay(loops_per_sec);
+		__delay(loops_per_jiffy);
 		ticks = jiffies - ticks;
 		if (ticks)
 			break;
 	}
 
-/* Do a binary approximation to get loops_per_second set to equal one clock
+/* Do a binary approximation to get loops_per_jiffy set to equal one clock
    (up to lps_precision bits) */
-	loops_per_sec >>= 1;
-	loopbit = loops_per_sec;
+	loops_per_jiffy >>= 1;
+	loopbit = loops_per_jiffy;
 	while ( lps_precision-- && (loopbit >>= 1) ) {
-		loops_per_sec |= loopbit;
+		loops_per_jiffy |= loopbit;
 		ticks = jiffies;
 		while (ticks == jiffies);
 		ticks = jiffies;
-		__delay(loops_per_sec);
+		__delay(loops_per_jiffy);
 		if (jiffies != ticks)	/* longer than 1 tick */
-			loops_per_sec &= ~loopbit;
+			loops_per_jiffy &= ~loopbit;
 	}
 
-/* finally, adjust loops per second in terms of seconds instead of clocks */	
-	loops_per_sec *= HZ;
 /* Round the value and print it */	
 	printk("%lu.%02lu BogoMIPS\n",
-		(loops_per_sec+2500)/500000,
-		((loops_per_sec+2500)/5000) % 100);
+		loops_per_jiffy/(500000/HZ),
+		(loops_per_jiffy/(5000/HZ)) % 100);
 }
+
+static int __init readonly(char *str)
+{
+	if (*str)
+		return 0;
+	root_mountflags |= MS_RDONLY;
+	return 1;
+}
+
+static int __init readwrite(char *str)
+{
+	if (*str)
+		return 0;
+	root_mountflags &= ~MS_RDONLY;
+	return 1;
+}
+
+static int __init debug_kernel(char *str)
+{
+	if (*str)
+		return 0;
+	console_loglevel = 10;
+	return 1;
+}
+
+static int __init quiet_kernel(char *str)
+{
+	if (*str)
+		return 0;
+	console_loglevel = 4;
+	return 1;
+}
+
+__setup("ro", readonly);
+__setup("rw", readwrite);
+__setup("debug", debug_kernel);
+__setup("quiet", quiet_kernel);
 
 /*
  * This is a simple kernel command line parsing function: it parses
@@ -1022,7 +429,7 @@ void __init calibrate_delay(void)
  */
 static void __init parse_options(char *line)
 {
-	char *next;
+	char *next,*quote;
 	int args, envs;
 
 	if (!*line)
@@ -1031,23 +438,20 @@ static void __init parse_options(char *line)
 	envs = 1;	/* TERM is set to 'linux' by default */
 	next = line;
 	while ((line = next) != NULL) {
-		if ((next = strchr(line,' ')) != NULL)
-			*next++ = 0;
-		/*
-		 * check for kernel options first..
-		 */
-		if (!strcmp(line,"ro")) {
-			root_mountflags |= MS_RDONLY;
-			continue;
-		}
-		if (!strcmp(line,"rw")) {
-			root_mountflags &= ~MS_RDONLY;
-			continue;
-		}
-		if (!strcmp(line,"debug")) {
-			console_loglevel = 10;
-			continue;
-		}
+                quote = strchr(line,'"');
+                next = strchr(line, ' ');
+                while (next != NULL && quote != NULL && quote < next) {
+                        /* we found a left quote before the next blank
+                         * now we have to find the matching right quote
+                         */
+                        next = strchr(quote+1, '"');
+                        if (next != NULL) {
+                                quote = strchr(next+1, '"');
+                                next = strchr(next+1, ' ');
+                        }
+                }
+                if (next != NULL)
+                        *next++ = 0;
 		if (!strncmp(line,"init=",5)) {
 			line += 5;
 			execute_command = line;
@@ -1073,7 +477,8 @@ static void __init parse_options(char *line)
 		} else {
 			if (args >= MAX_INIT_ARGS)
 				break;
-			argv_init[++args] = line;
+			if (*line)
+				argv_init[++args] = line;
 		}
 	}
 	argv_init[args+1] = NULL;
@@ -1081,29 +486,21 @@ static void __init parse_options(char *line)
 }
 
 
-extern void setup_arch(char **, unsigned long *, unsigned long *);
+extern void setup_arch(char **);
+extern void cpu_idle(void);
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 
-/*
- *	Uniprocessor idle thread
- */
- 
-int cpu_idle(void *unused)
+#ifdef CONFIG_X86_IO_APIC
+static void __init smp_init(void)
 {
-	for(;;)
-		idle();
+	IO_APIC_init_uniprocessor();
 }
-
+#else
 #define smp_init()	do { } while (0)
+#endif
 
 #else
-
-/*
- *	Multiprocessor idle thread is in arch/...
- */
- 
-extern int cpu_idle(void * unused);
 
 /* Called by boot processor to activate the rest. */
 static void __init smp_init(void)
@@ -1116,8 +513,6 @@ static void __init smp_init(void)
 
 #endif
 
-extern void initialize_secondary(void);
-
 /*
  *	Activate the first processor.
  */
@@ -1125,71 +520,72 @@ extern void initialize_secondary(void);
 asmlinkage void __init start_kernel(void)
 {
 	char * command_line;
-
-#ifdef __SMP__
-	static int boot_cpu = 1;
-	/* "current" has been set up, we need to load it now */
-	if (!boot_cpu)
-		initialize_secondary();
-	boot_cpu = 0;
-#endif
-
+	unsigned long mempages;
+	extern char saved_command_line[];
 /*
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
  */
 	lock_kernel();
 	printk(linux_banner);
-	setup_arch(&command_line, &memory_start, &memory_end);
-	memory_start = paging_init(memory_start,memory_end);
+	setup_arch(&command_line);
+	printk("Kernel command line: %s\n", saved_command_line);
+	parse_options(command_line);
 	trap_init();
 	init_IRQ();
 	sched_init();
 	time_init();
-	parse_options(command_line);
+	softirq_init();
 
 	/*
 	 * HACK ALERT! This is early. We're enabling the console before
 	 * we've done PCI setups etc, and console_init() must be aware of
 	 * this. But we do want output early, in case something goes wrong.
 	 */
-	memory_start = console_init(memory_start,memory_end);
+	console_init();
 #ifdef CONFIG_MODULES
 	init_modules();
 #endif
 	if (prof_shift) {
-		prof_buffer = (unsigned int *) memory_start;
+		unsigned int size;
 		/* only text is profiled */
 		prof_len = (unsigned long) &_etext - (unsigned long) &_stext;
 		prof_len >>= prof_shift;
-		memory_start += prof_len * sizeof(unsigned int);
-		memset(prof_buffer, 0, prof_len * sizeof(unsigned int));
+		
+		size = prof_len * sizeof(unsigned int) + PAGE_SIZE-1;
+		prof_buffer = (unsigned int *) alloc_bootmem(size);
 	}
 
-	memory_start = kmem_cache_init(memory_start, memory_end);
+	kmem_cache_init();
 	sti();
 	calibrate_delay();
 #ifdef CONFIG_BLK_DEV_INITRD
-	if (initrd_start && !initrd_below_start_ok && initrd_start < memory_start) {
+	if (initrd_start && !initrd_below_start_ok &&
+			initrd_start < min_low_pfn << PAGE_SHIFT) {
 		printk(KERN_CRIT "initrd overwritten (0x%08lx < 0x%08lx) - "
-		    "disabling it.\n",initrd_start,memory_start);
+		    "disabling it.\n",initrd_start,min_low_pfn << PAGE_SHIFT);
 		initrd_start = 0;
 	}
 #endif
-	mem_init(memory_start,memory_end);
+	mem_init();
 	kmem_cache_sizes_init();
+#ifdef CONFIG_3215_CONSOLE
+        con3215_activate();
+#endif
 #ifdef CONFIG_PROC_FS
 	proc_root_init();
 #endif
-	uidcache_init();
-	filescache_init();
-	dcache_init();
-	vma_init();
-	buffer_init(memory_end-memory_start);
-	page_cache_init(memory_end-memory_start);
+	mempages = num_physpages;
+
+	fork_init(mempages);
+	proc_caches_init();
+	vfs_caches_init(mempages);
+	buffer_init(mempages);
+	page_cache_init(mempages);
+	kiobuf_setup();
 	signals_init();
-	inode_init();
-	file_table_init();
+	bdev_init();
+	inode_init(mempages);
 #if defined(CONFIG_SYSVIPC)
 	ipc_init();
 #endif
@@ -1205,10 +601,10 @@ asmlinkage void __init start_kernel(void)
 	 *	make syscalls (and thus be locked).
 	 */
 	smp_init();
-	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
+	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
 	unlock_kernel();
 	current->need_resched = 1;
- 	cpu_idle(NULL);
+ 	cpu_idle();
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -1224,13 +620,23 @@ static int do_linuxrc(void * shell)
 	return execve(shell, argv, envp_init);
 }
 
-static void __init no_initrd(char *s,int *ints)
-{
-	mount_initrd = 0;
-}
 #endif
 
 struct task_struct *child_reaper = &init_task;
+
+static void __init do_initcalls(void)
+{
+	initcall_t *call;
+
+	call = &__initcall_start;
+	do {
+		(*call)();
+		call++;
+	} while (call < &__initcall_end);
+
+	/* Make sure there is no pending stuff from the initcall sequence */
+	flush_scheduled_tasks();
+}
 
 /*
  * Ok, the machine is now initialized. None of the devices
@@ -1293,46 +699,43 @@ static void __init do_basic_setup(void)
 #ifdef CONFIG_DIO
 	dio_init();
 #endif
-#ifdef CONFIG_MAC
+#ifdef CONFIG_NUBUS
 	nubus_init();
+#endif
+#ifdef CONFIG_ISAPNP
+	isapnp_init();
+#endif
+#ifdef CONFIG_TC
+	tc_init();
 #endif
 
 	/* Networking initialization needs a process context */ 
 	sock_init();
 
-	/* Launch bdflush from here, instead of the old syscall way. */
-	kernel_thread(bdflush, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
-	/* Start the background pageout daemon. */
-	kswapd_setup();
-	kernel_thread(kswapd, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
-
-#if CONFIG_AP1000
-	/* Start the async paging daemon. */
-	{
-	  extern int asyncd(void *);	 
-	  kernel_thread(asyncd, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
-	}
-#endif
-
 #ifdef CONFIG_BLK_DEV_INITRD
-
 	real_root_dev = ROOT_DEV;
 	real_root_mountflags = root_mountflags;
 	if (initrd_start && mount_initrd) root_mountflags &= ~MS_RDONLY;
 	else mount_initrd =0;
 #endif
 
-	/* Set up devices .. */
-	device_setup();
-
-	/* .. executable formats .. */
-	binfmt_setup();
+	start_context_thread();
+	do_initcalls();
 
 	/* .. filesystems .. */
 	filesystem_setup();
 
+#ifdef CONFIG_IRDA
+	irda_device_init(); /* Must be done after protocol initialization */
+#endif
+#ifdef CONFIG_PCMCIA
+	init_pcmcia_ds();		/* Do this last */
+#endif
+
 	/* Mount the root filesystem.. */
 	mount_root();
+
+	mount_devfs_fs ();
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	root_mountflags = real_root_mountflags;

@@ -5,7 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp_timer.c,v 1.64 1999/05/27 00:37:31 davem Exp $
+ * Version:	$Id: tcp_timer.c,v 1.80 2000/10/03 07:29:01 anton Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -23,30 +23,17 @@
 #include <net/tcp.h>
 
 int sysctl_tcp_syn_retries = TCP_SYN_RETRIES; 
+int sysctl_tcp_synack_retries = TCP_SYNACK_RETRIES; 
 int sysctl_tcp_keepalive_time = TCP_KEEPALIVE_TIME;
 int sysctl_tcp_keepalive_probes = TCP_KEEPALIVE_PROBES;
+int sysctl_tcp_keepalive_intvl = TCP_KEEPALIVE_INTVL;
 int sysctl_tcp_retries1 = TCP_RETR1;
 int sysctl_tcp_retries2 = TCP_RETR2;
+int sysctl_tcp_orphan_retries;
 
-static void tcp_sltimer_handler(unsigned long);
-static void tcp_syn_recv_timer(unsigned long);
-static void tcp_keepalive(unsigned long data);
-static void tcp_bucketgc(unsigned long);
-static void tcp_twkill(unsigned long);
-
-struct timer_list	tcp_slow_timer = {
-	NULL, NULL,
-	0, 0,
-	tcp_sltimer_handler,
-};
-
-
-struct tcp_sl_timer tcp_slt_array[TCP_SLT_MAX] = {
-	{ATOMIC_INIT(0), TCP_SYNACK_PERIOD, 0, tcp_syn_recv_timer},/* SYNACK	*/
-	{ATOMIC_INIT(0), TCP_KEEPALIVE_PERIOD, 0, tcp_keepalive},  /* KEEPALIVE	*/
-	{ATOMIC_INIT(0), TCP_TWKILL_PERIOD, 0, tcp_twkill},        /* TWKILL	*/
-	{ATOMIC_INIT(0), TCP_BUCKETGC_PERIOD, 0, tcp_bucketgc}     /* BUCKETGC	*/
-};
+static void tcp_write_timer(unsigned long);
+static void tcp_delack_timer(unsigned long);
+static void tcp_keepalive_timer (unsigned long data);
 
 const char timer_bug_msg[] = KERN_DEBUG "tcpbug: unknown timer value\n";
 
@@ -58,466 +45,322 @@ const char timer_bug_msg[] = KERN_DEBUG "tcpbug: unknown timer value\n";
 
 void tcp_init_xmit_timers(struct sock *sk)
 {
-	init_timer(&sk->tp_pinfo.af_tcp.retransmit_timer);
-	sk->tp_pinfo.af_tcp.retransmit_timer.function=&tcp_retransmit_timer;
-	sk->tp_pinfo.af_tcp.retransmit_timer.data = (unsigned long) sk;
-	
-	init_timer(&sk->tp_pinfo.af_tcp.delack_timer);
-	sk->tp_pinfo.af_tcp.delack_timer.function=&tcp_delack_timer;
-	sk->tp_pinfo.af_tcp.delack_timer.data = (unsigned long) sk;
-
-	init_timer(&sk->tp_pinfo.af_tcp.probe_timer);
-	sk->tp_pinfo.af_tcp.probe_timer.function=&tcp_probe_timer;
-	sk->tp_pinfo.af_tcp.probe_timer.data = (unsigned long) sk;
-}
-
-/*
- *	Reset the retransmission timer
- */
- 
-void tcp_reset_xmit_timer(struct sock *sk, int what, unsigned long when)
-{
 	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
 
-	switch (what) {
-	case TIME_RETRANS:
-		/* When seting the transmit timer the probe timer 
-		 * should not be set.
-		 * The delayed ack timer can be set if we are changing the
-		 * retransmit timer when removing acked frames.
-		 */
-		if(tp->probe_timer.prev)
-			del_timer(&tp->probe_timer);
-		mod_timer(&tp->retransmit_timer, jiffies+when);
-		break;
+	init_timer(&tp->retransmit_timer);
+	tp->retransmit_timer.function=&tcp_write_timer;
+	tp->retransmit_timer.data = (unsigned long) sk;
+	tp->pending = 0;
 
-	case TIME_DACK:
-		mod_timer(&tp->delack_timer, jiffies+when);
-		break;
+	init_timer(&tp->delack_timer);
+	tp->delack_timer.function=&tcp_delack_timer;
+	tp->delack_timer.data = (unsigned long) sk;
+	tp->ack.pending = 0;
 
-	case TIME_PROBE0:
-		mod_timer(&tp->probe_timer, jiffies+when);
-		break;	
-
-	case TIME_WRITE:
-		printk(KERN_DEBUG "bug: tcp_reset_xmit_timer TIME_WRITE\n");
-		break;
-
-	default:
-		printk(KERN_DEBUG "bug: unknown timer value\n");
-	};
+	init_timer(&sk->timer);
+	sk->timer.function=&tcp_keepalive_timer;
+	sk->timer.data = (unsigned long) sk;
 }
 
 void tcp_clear_xmit_timers(struct sock *sk)
-{	
+{
 	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
 
-	if(tp->retransmit_timer.prev)
-		del_timer(&tp->retransmit_timer);
-	if(tp->delack_timer.prev)
-		del_timer(&tp->delack_timer);
-	if(tp->probe_timer.prev)
-		del_timer(&tp->probe_timer);
+	tp->pending = 0;
+	if (timer_pending(&tp->retransmit_timer) &&
+	    del_timer(&tp->retransmit_timer))
+		__sock_put(sk);
+
+	tp->ack.pending = 0;
+	tp->ack.blocked = 0;
+	if (timer_pending(&tp->delack_timer) &&
+	    del_timer(&tp->delack_timer))
+		__sock_put(sk);
+
+	if(timer_pending(&sk->timer) && del_timer(&sk->timer))
+		__sock_put(sk);
 }
 
-static int tcp_write_err(struct sock *sk, int force)
+static void tcp_write_err(struct sock *sk)
 {
-	sk->err = sk->err_soft ? sk->err_soft : ETIMEDOUT;
+	sk->err = sk->err_soft ? : ETIMEDOUT;
 	sk->error_report(sk);
-	
-	tcp_clear_xmit_timers(sk);
-	
-	/* Time wait the socket. */
-	if (!force && ((1<<sk->state) & (TCPF_FIN_WAIT1|TCPF_FIN_WAIT2|TCPF_CLOSING))) {
-		tcp_time_wait(sk);
-	} else {
-		/* Clean up time. */
-		tcp_set_state(sk, TCP_CLOSE);
-		return 0;
+
+	tcp_done(sk);
+	NET_INC_STATS_BH(TCPAbortOnTimeout);
+}
+
+/* Do not allow orphaned sockets to eat all our resources.
+ * This is direct violation of TCP specs, but it is required
+ * to prevent DoS attacks. It is called when a retransmission timeout
+ * or zero probe timeout occurs on orphaned socket.
+ *
+ * Criterium is still not confirmed experimentally and may change.
+ * We kill the socket, if:
+ * 1. If number of orphaned sockets exceeds an administratively configured
+ *    limit.
+ * 2. If we have strong memory pressure.
+ */
+static int tcp_out_of_resources(struct sock *sk, int do_reset)
+{
+	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	int orphans = atomic_read(&tcp_orphan_count);
+
+	/* If peer does not open window for long time, or did not transmit 
+	 * anything for long time, penalize it. */
+	if ((s32)(tcp_time_stamp - tp->lsndtime) > 2*TCP_RTO_MAX || !do_reset)
+		orphans <<= 1;
+
+	/* If some dubious ICMP arrived, penalize even more. */
+	if (sk->err_soft)
+		orphans <<= 1;
+
+	if (orphans >= sysctl_tcp_max_orphans ||
+	    (sk->wmem_queued > SOCK_MIN_SNDBUF &&
+	     atomic_read(&tcp_memory_allocated) > sysctl_tcp_mem[2])) {
+		if (net_ratelimit())
+			printk(KERN_INFO "Out of socket memory\n");
+
+		/* Catch exceptional cases, when connection requires reset.
+		 *      1. Last segment was sent recently. */
+		if ((s32)(tcp_time_stamp - tp->lsndtime) <= TCP_TIMEWAIT_LEN ||
+		    /*  2. Window is closed. */
+		    (!tp->snd_wnd && !tp->packets_out))
+			do_reset = 1;
+		if (do_reset)
+			tcp_send_active_reset(sk, GFP_ATOMIC);
+		tcp_done(sk);
+		NET_INC_STATS_BH(TCPAbortOnMemory);
+		return 1;
 	}
-	return 1;
+	return 0;
+}
+
+/* Calculate maximal number or retries on an orphaned socket. */
+static int tcp_orphan_retries(struct sock *sk, int alive)
+{
+	int retries = sysctl_tcp_orphan_retries; /* May be zero. */
+
+	/* We know from an ICMP that something is wrong. */
+	if (sk->err_soft && !alive)
+		retries = 0;
+
+	/* However, if socket sent something recently, select some safe
+	 * number of retries. 8 corresponds to >100 seconds with minimal
+	 * RTO of 200msec. */
+	if (retries == 0 && alive)
+		retries = 8;
+	return retries;
 }
 
 /* A write timeout has occurred. Process the after effects. */
 static int tcp_write_timeout(struct sock *sk)
 {
 	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	int retry_until;
 
-	/* Look for a 'soft' timeout. */
-	if ((sk->state == TCP_ESTABLISHED &&
-	     tp->retransmits && (tp->retransmits % TCP_QUICK_TRIES) == 0) ||
-	    (sk->state != TCP_ESTABLISHED && tp->retransmits > sysctl_tcp_retries1)) {
-		dst_negative_advice(&sk->dst_cache);
+	if ((1<<sk->state)&(TCPF_SYN_SENT|TCPF_SYN_RECV)) {
+		if (tp->retransmits)
+			dst_negative_advice(&sk->dst_cache);
+		retry_until = tp->syn_retries ? : sysctl_tcp_syn_retries;
+	} else {
+		if (tp->retransmits >= sysctl_tcp_retries1) {
+			/* NOTE. draft-ietf-tcpimpl-pmtud-01.txt requires pmtu black
+			   hole detection. :-(
+
+			   It is place to make it. It is not made. I do not want
+			   to make it. It is disguisting. It does not work in any
+			   case. Let me to cite the same draft, which requires for
+			   us to implement this:
+
+   "The one security concern raised by this memo is that ICMP black holes
+   are often caused by over-zealous security administrators who block
+   all ICMP messages.  It is vitally important that those who design and
+   deploy security systems understand the impact of strict filtering on
+   upper-layer protocols.  The safest web site in the world is worthless
+   if most TCP implementations cannot transfer data from it.  It would
+   be far nicer to have all of the black holes fixed rather than fixing
+   all of the TCP implementations."
+
+                           Golden words :-).
+		   */
+
+			dst_negative_advice(&sk->dst_cache);
+		}
+
+		retry_until = sysctl_tcp_retries2;
+		if (sk->dead) {
+			int alive = (tp->rto < TCP_RTO_MAX);
+ 
+			retry_until = tcp_orphan_retries(sk, alive);
+
+			if (tcp_out_of_resources(sk, alive || tp->retransmits < retry_until))
+				return 1;
+		}
 	}
-	
-	/* Have we tried to SYN too many times (repent repent 8)) */
-	if(tp->retransmits > sysctl_tcp_syn_retries && sk->state==TCP_SYN_SENT) {
-		tcp_write_err(sk, 1);
-		/* Don't FIN, we got nothing back */
-		return 0;
+
+	if (tp->retransmits >= retry_until) {
+		/* Has it gone just too far? */
+		tcp_write_err(sk);
+		return 1;
 	}
-
-	/* Has it gone just too far? */
-	if (tp->retransmits > sysctl_tcp_retries2) 
-		return tcp_write_err(sk, 0);
-
-	return 1;
+	return 0;
 }
 
-void tcp_delack_timer(unsigned long data)
+static void tcp_delack_timer(unsigned long data)
 {
 	struct sock *sk = (struct sock*)data;
+	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
 
-	bh_lock_sock(sk);
-	if(!sk->zapped &&
-	   sk->tp_pinfo.af_tcp.delayed_acks &&
-	   sk->state != TCP_CLOSE) {
-		if (!sk->lock.users)
-			tcp_send_ack(sk);
-		else
-			tcp_send_delayed_ack(&(sk->tp_pinfo.af_tcp), HZ/10);
-	}
-	bh_unlock_sock(sk);
-}
-
-void tcp_probe_timer(unsigned long data)
-{
-	struct sock *sk = (struct sock*)data;
-	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
-
-	if(sk->zapped) 
-		return;
-	
 	bh_lock_sock(sk);
 	if (sk->lock.users) {
 		/* Try again later. */
-		tcp_reset_xmit_timer(sk, TIME_PROBE0, HZ/5);
-		bh_unlock_sock(sk);
+		tp->ack.blocked = 1;
+		NET_INC_STATS_BH(DelayedACKLocked);
+		if (!mod_timer(&tp->delack_timer, jiffies + TCP_DELACK_MIN))
+			sock_hold(sk);
+		goto out_unlock;
+	}
+
+	tcp_mem_reclaim(sk);
+
+	if (sk->state == TCP_CLOSE || !(tp->ack.pending&TCP_ACK_TIMER))
+		goto out;
+
+	if ((long)(tp->ack.timeout - jiffies) > 0) {
+		if (!mod_timer(&tp->delack_timer, tp->ack.timeout))
+			sock_hold(sk);
+		goto out;
+	}
+	tp->ack.pending &= ~TCP_ACK_TIMER;
+
+	if (skb_queue_len(&tp->ucopy.prequeue)) {
+		struct sk_buff *skb;
+
+		net_statistics[smp_processor_id()*2].TCPSchedulerFailed += skb_queue_len(&tp->ucopy.prequeue);
+
+		while ((skb = __skb_dequeue(&tp->ucopy.prequeue)) != NULL)
+			sk->backlog_rcv(sk, skb);
+
+		tp->ucopy.memory = 0;
+	}
+
+	if (tcp_ack_scheduled(tp)) {
+		if (!tp->ack.pingpong) {
+			/* Delayed ACK missed: inflate ATO. */
+			tp->ack.ato = min(tp->ack.ato<<1, tp->rto);
+		} else {
+			/* Delayed ACK missed: leave pingpong mode and
+			 * deflate ATO.
+			 */
+			tp->ack.pingpong = 0;
+			tp->ack.ato = TCP_ATO_MIN;
+		}
+		tcp_send_ack(sk);
+		NET_INC_STATS_BH(DelayedACKs);
+	}
+	TCP_CHECK_TIMER(sk);
+
+out:
+	if (tcp_memory_pressure)
+		tcp_mem_reclaim(sk);
+out_unlock:
+	bh_unlock_sock(sk);
+	sock_put(sk);
+}
+
+static void tcp_probe_timer(struct sock *sk)
+{
+	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
+	int max_probes;
+
+	if (tp->packets_out || !tp->send_head) {
+		tp->probes_out = 0;
 		return;
 	}
 
-	/* *WARNING* RFC 1122 forbids this 
+	/* *WARNING* RFC 1122 forbids this
+	 *
 	 * It doesn't AFAIK, because we kill the retransmit timer -AK
+	 *
 	 * FIXME: We ought not to do it, Solaris 2.5 actually has fixing
 	 * this behaviour in Solaris down as a bug fix. [AC]
+	 *
+	 * Let me to explain. probes_out is zeroed by incoming ACKs
+	 * even if they advertise zero window. Hence, connection is killed only
+	 * if we received no ACKs for normal connection timeout. It is not killed
+	 * only because window stays zero for some time, window may be zero
+	 * until armageddon and even later. We are in full accordance
+	 * with RFCs, only probe timer combines both retransmission timeout
+	 * and probe timeout in one bottle.				--ANK
 	 */
-	if (tp->probes_out > sysctl_tcp_retries2) {
-		if(sk->err_soft)
-			sk->err = sk->err_soft;
-		else
-			sk->err = ETIMEDOUT;
-		sk->error_report(sk);
+	max_probes = sysctl_tcp_retries2;
 
-		if ((1<<sk->state) & (TCPF_FIN_WAIT1|TCPF_FIN_WAIT2|TCPF_CLOSING)) {
-			/* Time wait the socket. */
-			tcp_time_wait(sk);
-		} else {
-			/* Clean up time. */
-			tcp_set_state(sk, TCP_CLOSE);
-		}
+	if (sk->dead) {
+		int alive = ((tp->rto<<tp->backoff) < TCP_RTO_MAX);
+ 
+		max_probes = tcp_orphan_retries(sk, alive);
+
+		if (tcp_out_of_resources(sk, alive || tp->probes_out <= max_probes))
+			return;
+	}
+
+	if (tp->probes_out > max_probes) {
+		tcp_write_err(sk);
 	} else {
 		/* Only send another probe if we didn't close things up. */
 		tcp_send_probe0(sk);
 	}
-	bh_unlock_sock(sk);
-}
-
-static __inline__ int tcp_keepopen_proc(struct sock *sk)
-{
-	int res = 0;
-
-	if ((1<<sk->state) & (TCPF_ESTABLISHED|TCPF_CLOSE_WAIT|TCPF_FIN_WAIT2)) {
-		struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
-		__u32 elapsed = tcp_time_stamp - tp->rcv_tstamp;
-
-		if (elapsed >= sysctl_tcp_keepalive_time) {
-			if (tp->probes_out > sysctl_tcp_keepalive_probes) {
-				if(sk->err_soft)
-					sk->err = sk->err_soft;
-				else
-					sk->err = ETIMEDOUT;
-
-				tcp_set_state(sk, TCP_CLOSE);
-				sk->shutdown = SHUTDOWN_MASK;
-				if (!sk->dead)
-					sk->state_change(sk);
-			} else {
-				tp->probes_out++;
-				tp->pending = TIME_KEEPOPEN;
-				tcp_write_wakeup(sk);
-				res = 1;
-			}
-		}
-	}
-	return res;
-}
-
-/* Garbage collect TCP bind buckets. */
-static void tcp_bucketgc(unsigned long data)
-{
-	int i, reaped = 0;;
-
-	SOCKHASH_LOCK_WRITE_BH();
-	for(i = 0; i < tcp_bhash_size; i++) {
-		struct tcp_bind_bucket *tb = tcp_bhash[i];
-
-		while(tb) {
-			struct tcp_bind_bucket *next = tb->next;
-
-			if((tb->owners == NULL) &&
-			   !(tb->flags & TCPB_FLAG_LOCKED)) {
-				reaped++;
-
-				/* Unlink bucket. */
-				if(tb->next)
-					tb->next->pprev = tb->pprev;
-				*tb->pprev = tb->next;
-
-				/* Finally, free it up. */
-				kmem_cache_free(tcp_bucket_cachep, tb);
-			}
-			tb = next;
-		}
-	}
-	SOCKHASH_UNLOCK_WRITE_BH();
-
-	if(reaped != 0) {
-		struct tcp_sl_timer *slt = (struct tcp_sl_timer *)data;
-
-		/* Eat timer references. */
-		atomic_sub(reaped, &slt->count);
-	}
-}
-
-/* Kill off TIME_WAIT sockets once their lifetime has expired. */
-int tcp_tw_death_row_slot = 0;
-static struct tcp_tw_bucket *tcp_tw_death_row[TCP_TWKILL_SLOTS] =
-	{ NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL };
-
-extern void tcp_timewait_kill(struct tcp_tw_bucket *tw);
-
-static void tcp_twkill(unsigned long data)
-{
-	struct tcp_tw_bucket *tw;
-	int killed = 0;
-
-	/* The death-row tw chains are only ever touched
-	 * in BH context so no locking is needed.
-	 */
-	tw = tcp_tw_death_row[tcp_tw_death_row_slot];
-	tcp_tw_death_row[tcp_tw_death_row_slot] = NULL;
-	tcp_tw_death_row_slot =
-	  ((tcp_tw_death_row_slot + 1) & (TCP_TWKILL_SLOTS - 1));
-
-	while(tw != NULL) {
-		struct tcp_tw_bucket *next = tw->next_death;
-
-		tcp_timewait_kill(tw);
-		killed++;
-		tw = next;
-	}
-	if(killed != 0) {
-		struct tcp_sl_timer *slt = (struct tcp_sl_timer *)data;
-		atomic_sub(killed, &slt->count);
-	}
-}
-
-/* These are always called from BH context.  See callers in
- * tcp_input.c to verify this.
- */
-void tcp_tw_schedule(struct tcp_tw_bucket *tw)
-{
-	int slot = (tcp_tw_death_row_slot - 1) & (TCP_TWKILL_SLOTS - 1);
-	struct tcp_tw_bucket **tpp = &tcp_tw_death_row[slot];
-
-	SOCKHASH_LOCK_WRITE_BH();
-	if((tw->next_death = *tpp) != NULL)
-		(*tpp)->pprev_death = &tw->next_death;
-	*tpp = tw;
-	tw->pprev_death = tpp;
-
-	tw->death_slot = slot;
-	SOCKHASH_UNLOCK_WRITE_BH();
-
-	tcp_inc_slow_timer(TCP_SLT_TWKILL);
-}
-
-/* Happens rarely if at all, no care about scalability here. */
-void tcp_tw_reschedule(struct tcp_tw_bucket *tw)
-{
-	struct tcp_tw_bucket **tpp;
-	int slot;
-
-	SOCKHASH_LOCK_WRITE_BH();
-	if(tw->next_death)
-		tw->next_death->pprev_death = tw->pprev_death;
-	*tw->pprev_death = tw->next_death;
-	tw->pprev_death = NULL;
-
-	slot = (tcp_tw_death_row_slot - 1) & (TCP_TWKILL_SLOTS - 1);
-	tpp = &tcp_tw_death_row[slot];
-	if((tw->next_death = *tpp) != NULL)
-		(*tpp)->pprev_death = &tw->next_death;
-	*tpp = tw;
-	tw->pprev_death = tpp;
-
-	tw->death_slot = slot;
-	SOCKHASH_UNLOCK_WRITE_BH();
-
-	/* Timer was incremented when we first entered the table. */
-}
-
-/* This is for handling early-kills of TIME_WAIT sockets. */
-void tcp_tw_deschedule(struct tcp_tw_bucket *tw)
-{
-	SOCKHASH_LOCK_WRITE_BH();
-	if(tw->next_death)
-		tw->next_death->pprev_death = tw->pprev_death;
-	*tw->pprev_death = tw->next_death;
-	tw->pprev_death = NULL;
-	SOCKHASH_UNLOCK_WRITE_BH();
-
-	tcp_dec_slow_timer(TCP_SLT_TWKILL);
 }
 
 /*
- *	Check all sockets for keepalive timer
- *	Called every 75 seconds
- *	This timer is started by af_inet init routine and is constantly
- *	running.
- *
- *	It might be better to maintain a count of sockets that need it using
- *	setsockopt/tcp_destroy_sk and only set the timer when needed.
+ *	The TCP retransmit timer.
  */
 
-/*
- *	don't send over 5 keepopens at a time to avoid burstiness 
- *	on big servers [AC]
- */
-#define MAX_KA_PROBES	5
-
-int sysctl_tcp_max_ka_probes = MAX_KA_PROBES;
-
-/* Keepopen's are only valid for "established" TCP's, nicely our listener
- * hash gets rid of most of the useless testing, so we run through a couple
- * of the established hash chains each clock tick.  -DaveM
- *
- * And now, even more magic... TIME_WAIT TCP's cannot have keepalive probes
- * going off for them, so we only need check the first half of the established
- * hash table, even less testing under heavy load.
- *
- * I _really_ would rather do this by adding a new timer_struct to struct sock,
- * and this way only those who set the keepalive option will get the overhead.
- * The idea is you set it for 2 hours when the sock is first connected, when it
- * does fire off (if at all, most sockets die earlier) you check for the keepalive
- * option and also if the sock has been idle long enough to start probing.
- */
-static void tcp_keepalive(unsigned long data)
+static void tcp_retransmit_timer(struct sock *sk)
 {
-	static int chain_start = 0;
-	int count = 0;
-	int i;
-	
-	SOCKHASH_LOCK_READ_BH();
-	for(i = chain_start; i < (chain_start + ((tcp_ehash_size >> 1) >> 2)); i++) {
-		struct sock *sk;
-
-		sk = tcp_ehash[i];
-		while(sk) {
-			struct sock *next = sk->next;
-
-			bh_lock_sock(sk);
-			if (sk->keepopen && !sk->lock.users) {
-				SOCKHASH_UNLOCK_READ_BH();
-				count += tcp_keepopen_proc(sk);
-				SOCKHASH_LOCK_READ_BH();
-			}
-			bh_unlock_sock(sk);
-			if(count == sysctl_tcp_max_ka_probes)
-				goto out;
-			sk = next;
-		}
-	}
-out:
-	SOCKHASH_UNLOCK_READ_BH();
-	chain_start = ((chain_start + ((tcp_ehash_size >> 1)>>2)) &
-		       ((tcp_ehash_size >> 1) - 1));
-}
-
-/*
- *	The TCP retransmit timer. This lacks a few small details.
- *
- *	1. 	An initial rtt timeout on the probe0 should cause what we can
- *		of the first write queue buffer to be split and sent.
- *	2.	On a 'major timeout' as defined by RFC1122 we shouldn't report
- *		ETIMEDOUT if we know an additional 'soft' error caused this.
- *		tcp_err should save a 'soft error' for us.
- *	[Unless someone has broken it then it does, except for one 2.0 
- *	broken case of a send when the route/device is directly unreachable,
- *	and we error but should retry! - FIXME] [AC]
- */
-
-void tcp_retransmit_timer(unsigned long data)
-{
-	struct sock *sk = (struct sock*)data;
 	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
 
-	/* We are reset. We will send no more retransmits. */
-	if(sk->zapped) {
-		tcp_clear_xmit_timer(sk, TIME_RETRANS);
-		return;
-	}
+	if (tp->packets_out == 0)
+		goto out;
 
-	bh_lock_sock(sk);
-	if (sk->lock.users) {
-		/* Try again later */  
-		tcp_reset_xmit_timer(sk, TIME_RETRANS, HZ/20);
-		bh_unlock_sock(sk);
-		return;
-	}
+	BUG_TRAP(!skb_queue_empty(&sk->write_queue));
 
-	/* Clear delay ack timer. */
-	tcp_clear_xmit_timer(sk, TIME_DACK);
+	if (tcp_write_timeout(sk))
+		goto out;
 
-	/* RFC 2018, clear all 'sacked' flags in retransmission queue,
-	 * the sender may have dropped out of order frames and we must
-	 * send them out should this timer fire on us.
-	 */
-	if(tp->sack_ok) {
-		struct sk_buff *skb = skb_peek(&sk->write_queue);
-
-		while((skb != NULL) &&
-		      (skb != tp->send_head) &&
-		      (skb != (struct sk_buff *)&sk->write_queue)) {
-			TCP_SKB_CB(skb)->sacked &=
-				~(TCPCB_SACKED_ACKED | TCPCB_SACKED_RETRANS);
-			skb = skb->next;
+	if (tp->retransmits == 0) {
+		if (tp->ca_state == TCP_CA_Disorder || tp->ca_state == TCP_CA_Recovery) {
+			if (tp->sack_ok) {
+				if (tp->ca_state == TCP_CA_Recovery)
+					NET_INC_STATS_BH(TCPSackRecoveryFail);
+				else
+					NET_INC_STATS_BH(TCPSackFailures);
+			} else {
+				if (tp->ca_state == TCP_CA_Recovery)
+					NET_INC_STATS_BH(TCPRenoRecoveryFail);
+				else
+					NET_INC_STATS_BH(TCPRenoFailures);
+			}
+		} else if (tp->ca_state == TCP_CA_Loss) {
+			NET_INC_STATS_BH(TCPLossFailures);
+		} else {
+			NET_INC_STATS_BH(TCPTimeouts);
 		}
 	}
 
-	/* Retransmission. */
-	tp->retrans_head = NULL;
-	tp->rexmt_done = 0;
-	tp->fackets_out = 0;
-	tp->retrans_out = 0;
-	if (tp->retransmits == 0) {
-		/* Remember window where we lost:
-		 * "one half of the current window but at least 2 segments"
-		 *
-		 * Here "current window" means the effective one, which
-		 * means it must be an accurate representation of our current
-		 * sending rate _and_ the snd_wnd.
+	tcp_enter_loss(sk, 0);
+
+	if (tcp_retransmit_skb(sk, skb_peek(&sk->write_queue)) > 0) {
+		/* Retransmission failed because of local congestion,
+		 * do not backoff.
 		 */
-		tp->snd_ssthresh = tcp_recalc_ssthresh(tp);
-		tp->snd_cwnd_cnt = 0;
-		tp->snd_cwnd = 1;
+		if (!tp->retransmits)
+			tp->retransmits=1;
+		tcp_reset_xmit_timer(sk, TCP_TIME_RETRANS,
+				     min(tp->rto, TCP_RESOURCE_PROBE_INTERVAL));
+		goto out;
 	}
-
-	tp->retransmits++;
-
-	tp->dup_acks = 0;
-	tp->high_seq = tp->snd_nxt;
-	tcp_retransmit_skb(sk, skb_peek(&sk->write_queue));
 
 	/* Increase the timeout each time we retransmit.  Note that
 	 * we do not increase the rtt estimate.  rto is initialized
@@ -535,121 +378,249 @@ void tcp_retransmit_timer(unsigned long data)
 	 * the 120 second clamps though!
 	 */
 	tp->backoff++;
-	tp->rto = min(tp->rto << 1, 120*HZ);
-	tcp_reset_xmit_timer(sk, TIME_RETRANS, tp->rto);
+	tp->retransmits++;
+	tp->rto = min(tp->rto << 1, TCP_RTO_MAX);
+	tcp_reset_xmit_timer(sk, TCP_TIME_RETRANS, tp->rto);
+	if (tp->retransmits > sysctl_tcp_retries1)
+		__sk_dst_reset(sk);
 
-	tcp_write_timeout(sk);
+out:;
+}
 
+static void tcp_write_timer(unsigned long data)
+{
+	struct sock *sk = (struct sock*)data;
+	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
+	int event;
+
+	bh_lock_sock(sk);
+	if (sk->lock.users) {
+		/* Try again later */
+		if (!mod_timer(&tp->retransmit_timer, jiffies + (HZ/20)))
+			sock_hold(sk);
+		goto out_unlock;
+	}
+
+	if (sk->state == TCP_CLOSE || !tp->pending)
+		goto out;
+
+	if ((long)(tp->timeout - jiffies) > 0) {
+		if (!mod_timer(&tp->retransmit_timer, tp->timeout))
+			sock_hold(sk);
+		goto out;
+	}
+
+	event = tp->pending;
+	tp->pending = 0;
+
+	switch (event) {
+	case TCP_TIME_RETRANS:
+		tcp_retransmit_timer(sk);
+		break;
+	case TCP_TIME_PROBE0:
+		tcp_probe_timer(sk);
+		break;
+	}
+	TCP_CHECK_TIMER(sk);
+
+out:
+	tcp_mem_reclaim(sk);
+out_unlock:
 	bh_unlock_sock(sk);
+	sock_put(sk);
 }
 
 /*
- *	Slow timer for SYN-RECV sockets
+ *	Timer for listening sockets
  */
 
-static void tcp_do_syn_queue(struct sock *sk, struct tcp_opt *tp, unsigned long now)
+static void tcp_synack_timer(struct sock *sk)
 {
-	struct open_request *prev, *req;
+	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_listen_opt *lopt = tp->listen_opt;
+	int max_retries = tp->syn_retries ? : sysctl_tcp_synack_retries;
+	int thresh = max_retries;
+	unsigned long now = jiffies;
+	struct open_request **reqp, *req;
+	int i, budget;
 
-	prev = (struct open_request *) &tp->syn_wait_queue;
-	for(req = tp->syn_wait_queue; req; ) {
-		struct open_request *next = req->dl_next;
+	if (lopt == NULL || lopt->qlen == 0)
+		return;
 
-		if (! req->sk) {
-			tcp_synq_unlink(tp, req, prev);
-			if(req->retrans >= sysctl_tcp_retries1) {
-				(*req->class->destructor)(req);
-				tcp_dec_slow_timer(TCP_SLT_SYNACK);
-				tp->syn_backlog--;
+	/* Normally all the openreqs are young and become mature
+	 * (i.e. converted to established socket) for first timeout.
+	 * If synack was not acknowledged for 3 seconds, it means
+	 * one of the following things: synack was lost, ack was lost,
+	 * rtt is high or nobody planned to ack (i.e. synflood).
+	 * When server is a bit loaded, queue is populated with old
+	 * open requests, reducing effective size of queue.
+	 * When server is well loaded, queue size reduces to zero
+	 * after several minutes of work. It is not synflood,
+	 * it is normal operation. The solution is pruning
+	 * too old entries overriding normal timeout, when
+	 * situation becomes dangerous.
+	 *
+	 * Essentially, we reserve half of room for young
+	 * embrions; and abort old ones without pity, if old
+	 * ones are about to clog our table.
+	 */
+	if (lopt->qlen>>(lopt->max_qlen_log-1)) {
+		int young = (lopt->qlen_young<<1);
+
+		while (thresh > 2) {
+			if (lopt->qlen < young)
+				break;
+			thresh--;
+			young <<= 1;
+		}
+	}
+
+	if (tp->defer_accept)
+		max_retries = tp->defer_accept;
+
+	budget = 2*(TCP_SYNQ_HSIZE/(TCP_TIMEOUT_INIT/TCP_SYNQ_INTERVAL));
+	i = lopt->clock_hand;
+
+	do {
+		reqp=&lopt->syn_table[i];
+		while ((req = *reqp) != NULL) {
+			if ((long)(now - req->expires) >= 0) {
+				if ((req->retrans < thresh ||
+				     (req->acked && req->retrans < max_retries))
+				    && !req->class->rtx_syn_ack(sk, req, NULL)) {
+					unsigned long timeo;
+
+					if (req->retrans++ == 0)
+						lopt->qlen_young--;
+					timeo = min((TCP_TIMEOUT_INIT << req->retrans),
+						    TCP_RTO_MAX);
+					req->expires = now + timeo;
+					reqp = &req->dl_next;
+					continue;
+				}
+
+				/* Drop this request */
+				write_lock(&tp->syn_wait_lock);
+				*reqp = req->dl_next;
+				write_unlock(&tp->syn_wait_lock);
+				lopt->qlen--;
+				if (req->retrans == 0)
+					lopt->qlen_young--;
 				tcp_openreq_free(req);
-				if (! tp->syn_wait_queue)
-					break;
-			} else {
-				unsigned long timeo;
-				struct open_request *rp;
-
-				(*req->class->rtx_syn_ack)(sk, req);
-				req->retrans++;
-				timeo = min((TCP_TIMEOUT_INIT << req->retrans),
-					    (120 * HZ));
-				req->expires = now + timeo;
-				rp = prev->dl_next;
-				tcp_synq_queue(tp, req);
-				if(rp != prev->dl_next)
-					prev = prev->dl_next;
+				continue;
 			}
-		} else
-			prev = req;
-		req = next;
-	}
-}
-
-/* This now scales very nicely. -DaveM */
-static void tcp_syn_recv_timer(unsigned long data)
-{
-	struct sock *sk;
-	unsigned long now = jiffies;
-	int i;
-
-	SOCKHASH_LOCK_READ_BH();
-	for(i = 0; i < TCP_LHTABLE_SIZE; i++) {
-		sk = tcp_listening_hash[i];
-		while(sk) {
-			struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
-			
-			/* TCP_LISTEN is implied. */
-			bh_lock_sock(sk);
-			if (!sk->lock.users && tp->syn_wait_queue)
-				tcp_do_syn_queue(sk, tp, now);
-			bh_unlock_sock(sk);
-			sk = sk->next;
+			reqp = &req->dl_next;
 		}
-	}
-	SOCKHASH_UNLOCK_READ_BH();
+
+		i = (i+1)&(TCP_SYNQ_HSIZE-1);
+
+	} while (--budget > 0);
+
+	lopt->clock_hand = i;
+
+	if (lopt->qlen)
+		tcp_reset_keepalive_timer(sk, TCP_SYNQ_INTERVAL);
 }
 
-void tcp_sltimer_handler(unsigned long data)
+void tcp_delete_keepalive_timer (struct sock *sk)
 {
-	struct tcp_sl_timer *slt = tcp_slt_array;
-	unsigned long next = ~0UL;
-	unsigned long now = jiffies;
-	int i;
+	if (timer_pending(&sk->timer) && del_timer (&sk->timer))
+		__sock_put(sk);
+}
 
-	for (i=0; i < TCP_SLT_MAX; i++, slt++) {
-		if (atomic_read(&slt->count)) {
-			long trigger;
+void tcp_reset_keepalive_timer (struct sock *sk, unsigned long len)
+{
+	if (!mod_timer(&sk->timer, jiffies+len))
+		sock_hold(sk);
+}
 
-			trigger = slt->period - ((long)(now - slt->last));
+void tcp_set_keepalive(struct sock *sk, int val)
+{
+	if ((1<<sk->state)&(TCPF_CLOSE|TCPF_LISTEN))
+		return;
 
-			if (trigger <= 0) {
-				(*slt->handler)((unsigned long) slt);
-				slt->last = now;
-				trigger = slt->period;
+	if (val && !sk->keepopen)
+		tcp_reset_keepalive_timer(sk, keepalive_time_when(&sk->tp_pinfo.af_tcp));
+	else if (!val)
+		tcp_delete_keepalive_timer(sk);
+}
+
+
+static void tcp_keepalive_timer (unsigned long data)
+{
+	struct sock *sk = (struct sock *) data;
+	struct tcp_opt *tp = &sk->tp_pinfo.af_tcp;
+	__u32 elapsed;
+
+	/* Only process if socket is not in use. */
+	bh_lock_sock(sk);
+	if (sk->lock.users) {
+		/* Try again later. */ 
+		tcp_reset_keepalive_timer (sk, HZ/20);
+		goto out;
+	}
+
+	if (sk->state == TCP_LISTEN) {
+		tcp_synack_timer(sk);
+		goto out;
+	}
+
+	if (sk->state == TCP_FIN_WAIT2 && sk->dead) {
+		if (tp->linger2 >= 0) {
+			int tmo = tcp_fin_time(tp) - TCP_TIMEWAIT_LEN;
+
+			if (tmo > 0) {
+				tcp_time_wait(sk, TCP_FIN_WAIT2, tmo);
+				goto out;
 			}
-
-			/* Only reschedule if some events remain. */
-			if (atomic_read(&slt->count))
-				next = min(next, trigger);
 		}
+		tcp_send_active_reset(sk, GFP_ATOMIC);
+		goto death;
 	}
-	if (next != ~0UL)
-		mod_timer(&tcp_slow_timer, (now + next));
-}
 
-void __tcp_inc_slow_timer(struct tcp_sl_timer *slt)
-{
-	unsigned long now = jiffies;
-	unsigned long when;
+	if (!sk->keepopen || sk->state == TCP_CLOSE)
+		goto out;
 
-	slt->last = now;
+	elapsed = keepalive_time_when(tp);
 
-	when = now + slt->period;
+	/* It is alive without keepalive 8) */
+	if (tp->packets_out || tp->send_head)
+		goto resched;
 
-	if (tcp_slow_timer.prev) {
-		if ((long)(tcp_slow_timer.expires - when) >= 0)
-			mod_timer(&tcp_slow_timer, when);
+	elapsed = tcp_time_stamp - tp->rcv_tstamp;
+
+	if (elapsed >= keepalive_time_when(tp)) {
+		if ((!tp->keepalive_probes && tp->probes_out >= sysctl_tcp_keepalive_probes) ||
+		     (tp->keepalive_probes && tp->probes_out >= tp->keepalive_probes)) {
+			tcp_send_active_reset(sk, GFP_ATOMIC);
+			tcp_write_err(sk);
+			goto out;
+		}
+		if (tcp_write_wakeup(sk) <= 0) {
+			tp->probes_out++;
+			elapsed = keepalive_intvl_when(tp);
+		} else {
+			/* If keepalive was lost due to local congestion,
+			 * try harder.
+			 */
+			elapsed = TCP_RESOURCE_PROBE_INTERVAL;
+		}
 	} else {
-		tcp_slow_timer.expires = when;
-		add_timer(&tcp_slow_timer);
+		/* It is tp->rcv_tstamp + keepalive_time_when(tp) */
+		elapsed = keepalive_time_when(tp) - elapsed;
 	}
+
+	TCP_CHECK_TIMER(sk);
+	tcp_mem_reclaim(sk);
+
+resched:
+	tcp_reset_keepalive_timer (sk, elapsed);
+	goto out;
+
+death:	
+	tcp_done(sk);
+
+out:
+	bh_unlock_sock(sk);
+	sock_put(sk);
 }

@@ -3,9 +3,7 @@
 
 #include <linux/config.h>
 #include <asm/setup.h>
-#ifdef CONFIG_KGDB
-#include <asm/kgdb.h>
-#endif
+#include <asm/page.h>
 
 /*
  * Stack layout in 'ret_from_exception':
@@ -33,10 +31,6 @@
  *		     the whole kernel.
  */
 
-#ifdef __ASSEMBLY__
-
-#define curptr a2
-
 /* the following macro is used when enabling interrupts */
 #if defined(MACH_ATARI_ONLY) && !defined(CONFIG_HADES)
 	/* block out HSYNC on the atari */
@@ -48,16 +42,20 @@
 #define	MAX_NOINT_IPL	0
 #endif /* machine compilation types */ 
 
+#ifdef __ASSEMBLY__
+
+#define curptr a2
+
 LFLUSH_I_AND_D = 0x00000808
 LSIGTRAP = 5
 
-/* process bits for task_struct.flags */
-PF_TRACESYS_OFF = 3
-PF_TRACESYS_BIT = 5
-PF_PTRACED_OFF = 3
-PF_PTRACED_BIT = 4
-PF_DTRACE_OFF = 1
-PF_DTRACE_BIT = 5
+/* process bits for task_struct.ptrace */
+PT_TRACESYS_OFF = 3
+PT_TRACESYS_BIT = 1
+PT_PTRACED_OFF = 3
+PT_PTRACED_BIT = 0
+PT_DTRACE_OFF = 3
+PT_DTRACE_BIT = 2
 
 #define SAVE_ALL_INT save_all_int
 #define SAVE_ALL_SYS save_all_sys
@@ -68,7 +66,7 @@ PF_DTRACE_BIT = 5
  * regs a3-a6 and d6-d7 are preserved by C code
  * the kernel doesn't mess with usp unless it needs to
  */
-#ifndef CONFIG_KGDB
+
 /*
  * a -1 in the orig_d0 field signifies
  * that the stack frame is NOT for syscall
@@ -86,27 +84,6 @@ PF_DTRACE_BIT = 5
 	movel	%d0,%sp@-	| d0
 	moveml	%d1-%d5/%a0-%a1/%curptr,%sp@-
 .endm
-#else
-/* Need to save the "missing" registers for kgdb...
- */
-.macro	save_all_int
-	clrl	%sp@-		| stk_adj
-	pea	-1:w		| orig d0
-	movel	%d0,%sp@-	| d0
-	moveml	%d1-%d5/%a0-%a1/%curptr,%sp@-
-	moveml	%d6-%d7,kgdb_registers+GDBOFFA_D6
-	moveml	%a3-%a6,kgdb_registers+GDBOFFA_A3
-.endm
-
-.macro	save_all_sys
-	clrl	%sp@-		| stk_adj
-	movel	%d0,%sp@-	| orig d0
-	movel	%d0,%sp@-	| d0
-	moveml	%d1-%d5/%a0-%a1/%curptr,%sp@-
-	moveml	%d6-%d7,kgdb_registers+GDBOFFA_D6
-	moveml	%a3-%a6,kgdb_registers+GDBOFFA_A3
-.endm
-#endif
 
 .macro	restore_all
 	moveml	%sp@+,%a0-%a1/%curptr/%d1-%d5
@@ -132,7 +109,7 @@ PF_DTRACE_BIT = 5
 
 .macro	get_current reg=%d0
 	movel	%sp,\reg
-	andw	#-8192,\reg
+	andw	#-KTHREAD_SIZE,\reg
 	movel	\reg,%curptr
 .endm
 
@@ -144,24 +121,14 @@ PF_DTRACE_BIT = 5
 #define PT_OFF_ORIG_D0	 0x24
 #define PT_OFF_FORMATVEC 0x32
 #define PT_OFF_SR	 0x2C
-#ifndef CONFIG_KGDB
 #define SAVE_ALL_INT				\
 	"clrl	%%sp@-;"    /* stk_adj */	\
 	"pea	-1:w;"	    /* orig d0 = -1 */	\
 	"movel	%%d0,%%sp@-;" /* d0 */		\
 	"moveml	%%d1-%%d5/%%a0-%%a2,%%sp@-"
-#else
-#define SAVE_ALL_INT				\
-	"clrl	%%sp@-\n\t" /* stk_adj */	\
-	"pea	-1:w\n\t"   /* orig d0 = -1 */	\
-	"movel	%%d0,%%sp@-\n\t" /* d0 */	\
-	"moveml	%%d1-%%d5/%%a0-%%a2,%%sp@-\n\t"	\
-	"moveml	%%d6-%%d7,kgdb_registers+"STR(GDBOFFA_D6)"\n\t" \
-	"moveml	%%a3-%%a6,kgdb_registers+"STR(GDBOFFA_A3)
-#endif
 #define GET_CURRENT(tmp) \
 	"movel	%%sp,"#tmp"\n\t" \
-	"andw	#-8192,"#tmp"\n\t" \
+	"andw	#-"STR(KTHREAD_SIZE)","#tmp"\n\t" \
 	"movel	"#tmp",%%a2"
 
 #endif

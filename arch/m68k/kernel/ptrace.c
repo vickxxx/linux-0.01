@@ -18,6 +18,7 @@
 #include <linux/errno.h>
 #include <linux/ptrace.h>
 #include <linux/user.h>
+#include <linux/config.h>
 
 #include <asm/uaccess.h>
 #include <asm/page.h>
@@ -37,7 +38,7 @@
 /* sets the trace bits. */
 #define TRACE_BITS 0x8000
 
-/* Find the stack offset for a register, relative to tss.esp0. */
+/* Find the stack offset for a register, relative to thread.esp0. */
 #define PT_REG(reg)	((long)&((struct pt_regs *)0)->reg)
 #define SW_REG(reg)	((long)&((struct switch_stack *)0)->reg \
 			 - sizeof(struct switch_stack))
@@ -60,9 +61,9 @@ static inline long get_reg(struct task_struct *task, int regno)
 	unsigned long *addr;
 
 	if (regno == PT_USP)
-		addr = &task->tss.usp;
+		addr = &task->thread.usp;
 	else if (regno < sizeof(regoff)/sizeof(regoff[0]))
-		addr = (unsigned long *)(task->tss.esp0 + regoff[regno]);
+		addr = (unsigned long *)(task->thread.esp0 + regoff[regno]);
 	else
 		return 0;
 	return *addr;
@@ -77,216 +78,12 @@ static inline int put_reg(struct task_struct *task, int regno,
 	unsigned long *addr;
 
 	if (regno == PT_USP)
-		addr = &task->tss.usp;
+		addr = &task->thread.usp;
 	else if (regno < sizeof(regoff)/sizeof(regoff[0]))
-		addr = (unsigned long *) (task->tss.esp0 + regoff[regno]);
+		addr = (unsigned long *) (task->thread.esp0 + regoff[regno]);
 	else
 		return -1;
 	*addr = data;
-	return 0;
-}
-
-/*
- * This routine gets a long from any process space by following the page
- * tables. NOTE! You should check that the long isn't on a page boundary,
- * and that it is in the task area before calling this: this routine does
- * no checking.
- *
- */
-static unsigned long get_long(struct task_struct * tsk, 
-	struct vm_area_struct * vma, unsigned long addr)
-{
-	pgd_t * pgdir;
-	pmd_t * pgmiddle;
-	pte_t * pgtable;
-	unsigned long page;
-
-repeat:
-	pgdir = pgd_offset(vma->vm_mm, addr);
-	if (pgd_none(*pgdir)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	if (pgd_bad(*pgdir)) {
-		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
-		pgd_clear(pgdir);
-		return 0;
-	}
-	pgmiddle = pmd_offset(pgdir,addr);
-	if (pmd_none(*pgmiddle)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	if (pmd_bad(*pgmiddle)) {
-		printk("ptrace: bad page directory %08lx\n",
-		       pmd_val(*pgmiddle));
-		pmd_clear(pgmiddle);
-		return 0;
-	}
-	pgtable = pte_offset(pgmiddle, addr);
-	if (!pte_present(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	page = pte_page(*pgtable);
-/* this is a hack for non-kernel-mapped video buffers and similar */
-	if (MAP_NR(page) >= max_mapnr)
-		return 0;
-	page += addr & ~PAGE_MASK;
-	return *(unsigned long *) page;
-}
-
-/*
- * This routine puts a long into any process space by following the page
- * tables. NOTE! You should check that the long isn't on a page boundary,
- * and that it is in the task area before calling this: this routine does
- * no checking.
- *
- * Now keeps R/W state of page so that a text page stays readonly
- * even if a debugger scribbles breakpoints into it.  -M.U-
- */
-static void put_long(struct task_struct * tsk, struct vm_area_struct * vma, unsigned long addr,
-	unsigned long data)
-{
-	pgd_t *pgdir;
-	pmd_t *pgmiddle;
-	pte_t *pgtable;
-	unsigned long page;
-		
-repeat:
-	pgdir = pgd_offset(vma->vm_mm, addr);
-	if (!pgd_present(*pgdir)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	if (pgd_bad(*pgdir)) {
-		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
-		pgd_clear(pgdir);
-		return;
-	}
-	pgmiddle = pmd_offset(pgdir,addr);
-	if (pmd_none(*pgmiddle)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	if (pmd_bad(*pgmiddle)) {
-		printk("ptrace: bad page directory %08lx\n",
-		       pmd_val(*pgmiddle));
-		pmd_clear(pgmiddle);
-		return;
-	}
-	pgtable = pte_offset(pgmiddle, addr);
-	if (!pte_present(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	page = pte_page(*pgtable);
-	if (!pte_write(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-/* this is a hack for non-kernel-mapped video buffers and similar */
-	if (MAP_NR(page) < max_mapnr) {
-		*(unsigned long *) (page + (addr & ~PAGE_MASK)) = data;
-		flush_page_to_ram (page);
-	}
-/* we're bypassing pagetables, so we have to set the dirty bit ourselves */
-/* this should also re-instate whatever read-only mode there was before */
-	*pgtable = pte_mkdirty(mk_pte(page, vma->vm_page_prot));
-	flush_tlb_all();
-}
-
-/*
- * This routine checks the page boundaries, and that the offset is
- * within the task area. It then calls get_long() to read a long.
- */
-static int read_long(struct task_struct * tsk, unsigned long addr,
-	unsigned long * result)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, addr);
-
-	if (!vma)
-		return -EIO;
-	if ((addr & ~PAGE_MASK) > PAGE_SIZE-sizeof(long)) {
-		unsigned long low,high;
-		struct vm_area_struct * vma_low = vma;
-
-		if (addr + sizeof(long) >= vma->vm_end) {
-			vma_low = vma->vm_next;
-			if (!vma_low || vma_low->vm_start != vma->vm_end)
-				return -EIO;
-		}
-		high = get_long(tsk, vma,addr & ~(sizeof(long)-1));
-		low = get_long(tsk, vma_low,(addr+sizeof(long)) & ~(sizeof(long)-1));
-		switch (addr & (sizeof(long)-1)) {
-			case 3:
-				low >>= 8;
-				low |= high << 24;
-				break;
-			case 2:
-				low >>= 16;
-				low |= high << 16;
-				break;
-			case 1:
-				low >>= 24;
-				low |= high << 8;
-				break;
-		}
-		*result = low;
-	} else
-		*result = get_long(tsk, vma,addr);
-	return 0;
-}
-
-/*
- * This routine checks the page boundaries, and that the offset is
- * within the task area. It then calls put_long() to write a long.
- */
-static int write_long(struct task_struct * tsk, unsigned long addr,
-	unsigned long data)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, addr);
-
-	if (!vma)
-		return -EIO;
-	if ((addr & ~PAGE_MASK) > PAGE_SIZE-sizeof(long)) {
-		unsigned long low,high;
-		struct vm_area_struct * vma_low = vma;
-
-		if (addr + sizeof(long) >= vma->vm_end) {
-			vma_low = vma->vm_next;
-			if (!vma_low || vma_low->vm_start != vma->vm_end)
-				return -EIO;
-		}
-		high = get_long(tsk, vma,addr & ~(sizeof(long)-1));
-		low = get_long(tsk, vma_low,(addr+sizeof(long)) & ~(sizeof(long)-1));
-		switch (addr & (sizeof(long)-1)) {
-			case 0: /* shouldn't happen, but safety first */
-				high = data;
-				break;
-			case 3:
-				low &= 0x000000ff;
-				low |= data << 8;
-				high &= ~0xff;
-				high |= data >> 24;
-				break;
-			case 2:
-				low &= 0x0000ffff;
-				low |= data << 16;
-				high &= ~0xffff;
-				high |= data >> 16;
-				break;
-			case 1:
-				low &= 0x00ffffff;
-				low |= data << 24;
-				high &= ~0xffffff;
-				high |= data >> 8;
-				break;
-		}
-		put_long(tsk, vma,addr & ~(sizeof(long)-1),high);
-		put_long(tsk, vma_low,(addr+sizeof(long)) & ~(sizeof(long)-1),low);
-	} else
-		put_long(tsk, vma,addr,data);
 	return 0;
 }
 
@@ -300,10 +97,10 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	ret = -EPERM;
 	if (request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED)
+		if (current->ptrace & PT_PTRACED)
 			goto out;
 		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
+		current->ptrace |= PT_PTRACED;
 		ret = 0;
 		goto out;
 	}
@@ -329,9 +126,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 	 	    (current->gid != child->gid)) && !capable(CAP_SYS_PTRACE))
 			goto out;
 		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED)
+		if (child->ptrace & PT_PTRACED)
 			goto out;
-		child->flags |= PF_PTRACED;
+		child->ptrace |= PT_PTRACED;
 
 		write_lock_irqsave(&tasklist_lock, flags);
 		if (child->p_pptr != current) {
@@ -346,7 +143,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		goto out;
 	}
 	ret = -ESRCH;
-	if (!(child->flags & PF_PTRACED))
+	if (!(child->ptrace & PT_PTRACED))
 		goto out;
 	if (child->state != TASK_STOPPED) {
 		if (request != PTRACE_KILL)
@@ -360,12 +157,13 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 		case PTRACE_PEEKTEXT: /* read word at location addr. */ 
 		case PTRACE_PEEKDATA: {
 			unsigned long tmp;
+			int copied;
 
-			down(&child->mm->mmap_sem);
-			ret = read_long(child, addr, &tmp);
-			up(&child->mm->mmap_sem);
-			if (ret >= 0)
-				ret = put_user(tmp, (unsigned long *) data);
+			copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
+			ret = -EIO;
+			if (copied != sizeof(tmp))
+				goto out;
+			ret = put_user(tmp,(unsigned long *) data);
 			goto out;
 		}
 
@@ -384,10 +182,17 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 				tmp = get_reg(child, addr);
 				if (addr == PT_SR)
 					tmp >>= 16;
-			}
-			else if (addr >= 21 && addr < 49)
-				tmp = child->tss.fp[addr - 21];
-			else
+			} else if (addr >= 21 && addr < 49) {
+				tmp = child->thread.fp[addr - 21];
+#ifdef CONFIG_M68KFPU_EMU
+				/* Convert internal fpu reg representation
+				 * into long double format
+				 */
+				if (FPU_IS_EMU && (addr < 45) && !(addr % 3))
+					tmp = ((tmp & 0xffff0000) << 15) |
+					      ((tmp & 0x0000ffff) << 16);
+#endif
+			} else
 				goto out;
 			ret = put_user(tmp,(unsigned long *) data);
 			goto out;
@@ -396,9 +201,10 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
       /* when I and D space are separate, this will have to be fixed. */
 		case PTRACE_POKETEXT: /* write the word at location addr. */
 		case PTRACE_POKEDATA:
-			down(&child->mm->mmap_sem);
-			ret = write_long(child,addr,data);
-			up(&child->mm->mmap_sem);
+			ret = 0;
+			if (access_process_vm(child, addr, &data, sizeof(data), 1) == sizeof(data))
+				goto out;
+			ret = -EIO;
 			goto out;
 
 		case PTRACE_POKEUSR: /* write the word at location addr in the USER area */
@@ -408,8 +214,6 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 			addr = addr >> 2; /* temporary hack. */
 			    
-			if (addr == PT_ORIG_D0)
-				goto out;
 			if (addr == PT_SR) {
 				data &= SR_MASK;
 				data <<= 16;
@@ -423,7 +227,17 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			}
 			if (addr >= 21 && addr < 48)
 			{
-				child->tss.fp[addr - 21] = data;
+#ifdef CONFIG_M68KFPU_EMU
+				/* Convert long double format
+				 * into internal fpu reg representation
+				 */
+				if (FPU_IS_EMU && (addr < 45) && !(addr % 3)) {
+					data = (unsigned long)data << 15;
+					data = (data & 0xffff0000) |
+					       ((data & 0x0000ffff) >> 1);
+				}
+#endif
+				child->thread.fp[addr - 21] = data;
 				ret = 0;
 			}
 			goto out;
@@ -436,9 +250,9 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			if ((unsigned long) data > _NSIG)
 				goto out;
 			if (request == PTRACE_SYSCALL)
-				child->flags |= PF_TRACESYS;
+				child->ptrace |= PT_TRACESYS;
 			else
-				child->flags &= ~PF_TRACESYS;
+				child->ptrace &= ~PT_TRACESYS;
 			child->exit_code = data;
 			/* make sure the single step bit is not set. */
 			tmp = get_reg(child, PT_SR) & ~(TRACE_BITS << 16);
@@ -473,7 +287,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			ret = -EIO;
 			if ((unsigned long) data > _NSIG)
 				goto out;
-			child->flags &= ~PF_TRACESYS;
+			child->ptrace &= ~PT_TRACESYS;
 			tmp = get_reg(child, PT_SR) | (TRACE_BITS << 16);
 			put_reg(child, PT_SR, tmp);
 
@@ -490,7 +304,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 			ret = -EIO;
 			if ((unsigned long) data > _NSIG)
 				goto out;
-			child->flags &= ~(PF_PTRACED|PF_TRACESYS);
+			child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
 			child->exit_code = data;
 			write_lock_irqsave(&tasklist_lock, flags);
 			REMOVE_LINKS(child);
@@ -544,7 +358,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 		case PTRACE_GETFPREGS: { /* Get the child FPU state. */
 			ret = 0;
-			if (copy_to_user((void *)data, &child->tss.fp,
+			if (copy_to_user((void *)data, &child->thread.fp,
 					 sizeof(struct user_m68kfp_struct)))
 				ret = -EFAULT;
 			goto out;
@@ -552,7 +366,7 @@ asmlinkage int sys_ptrace(long request, long pid, long addr, long data)
 
 		case PTRACE_SETFPREGS: { /* Set the child FPU state. */
 			ret = 0;
-			if (copy_from_user(&child->tss.fp, (void *)data,
+			if (copy_from_user(&child->thread.fp, (void *)data,
 					   sizeof(struct user_m68kfp_struct)))
 				ret = -EFAULT;
 			goto out;
@@ -570,8 +384,8 @@ out:
 asmlinkage void syscall_trace(void)
 {
 	lock_kernel();
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-			!= (PF_PTRACED|PF_TRACESYS))
+	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
+			!= (PT_PTRACED|PT_TRACESYS))
 		goto out;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;

@@ -3,6 +3,9 @@
 
 #ifdef __KERNEL__
 
+#include <asm/atomic.h>
+#include <linux/mount.h>
+
 /*
  * linux/include/linux/dcache.h
  *
@@ -54,12 +57,11 @@ static __inline__ unsigned int full_name_hash(const unsigned char * name, unsign
 #define DNAME_INLINE_LEN 16
 
 struct dentry {
-	int d_count;
+	atomic_t d_count;
 	unsigned int d_flags;
 	struct inode  * d_inode;	/* Where the name belongs to - NULL is negative */
 	struct dentry * d_parent;	/* parent directory */
-	struct dentry * d_mounts;	/* mount information */
-	struct dentry * d_covers;
+	struct list_head d_vfsmnt;
 	struct list_head d_hash;	/* lookup hash list */
 	struct list_head d_lru;		/* d_count = 0 LRU list */
 	struct list_head d_child;	/* child of parent list */
@@ -78,7 +80,7 @@ struct dentry_operations {
 	int (*d_revalidate)(struct dentry *, int);
 	int (*d_hash) (struct dentry *, struct qstr *);
 	int (*d_compare) (struct dentry *, struct qstr *, struct qstr *);
-	void (*d_delete)(struct dentry *);
+	int (*d_delete)(struct dentry *);
 	void (*d_release)(struct dentry *);
 	void (*d_iput)(struct dentry *, struct inode *);
 };
@@ -90,7 +92,16 @@ struct dentry_operations {
  * might be a negative dentry which has no information associated with
  * it */
 
-
+/*
+locking rules:
+		big lock	dcache_lock	may block
+d_revalidate:	no		no		yes
+d_hash		no		no		yes
+d_compare:	no		yes		no
+d_delete:	no		yes		no
+d_release:	no		no		yes
+d_iput:		no		no		yes
+ */
 
 /* d_flags entries */
 #define DCACHE_AUTOFS_PENDING 0x0001    /* autofs: "under construction" */
@@ -98,8 +109,20 @@ struct dentry_operations {
 					 * renamed" and has to be
 					 * deleted on the last dput()
 					 */
+#define	DCACHE_NFSD_DISCONNECTED 0x0004	/* This dentry is not currently connected to the
+					 * dcache tree. Its parent will either be itself,
+					 * or will have this flag as well.
+					 * If this dentry points to a directory, then
+					 * s_nfsd_free_path semaphore will be down
+					 */
+#define DCACHE_REFERENCED	0x0008  /* Recently used, don't discard. */
 
-/*
+extern spinlock_t dcache_lock;
+
+/**
+ * d_drop - drop a dentry
+ * @dentry: dentry to drop
+ *
  * d_drop() unhashes the entry from the parent
  * dentry hashes, so that it won't be found through
  * a VFS lookup any more. Note that this is different
@@ -112,10 +135,13 @@ struct dentry_operations {
  * to invalidate a dentry for some reason (NFS
  * timeouts or autofs deletes).
  */
+
 static __inline__ void d_drop(struct dentry * dentry)
 {
+	spin_lock(&dcache_lock);
 	list_del(&dentry->d_hash);
 	INIT_LIST_HEAD(&dentry->d_hash);
+	spin_unlock(&dcache_lock);
 }
 
 static __inline__ int dname_external(struct dentry *d)
@@ -131,37 +157,50 @@ extern void d_delete(struct dentry *);
 
 /* allocate/de-allocate */
 extern struct dentry * d_alloc(struct dentry *, const struct qstr *);
-extern void prune_dcache(int);
 extern void shrink_dcache_sb(struct super_block *);
 extern void shrink_dcache_parent(struct dentry *);
 extern int d_invalidate(struct dentry *);
 
 #define shrink_dcache() prune_dcache(0)
-
+struct zone_struct;
 /* dcache memory management */
-extern int  select_dcache(int, int);
 extern void shrink_dcache_memory(int, unsigned int);
-extern void check_dcache_memory(void);
-extern void free_inode_memory(int);	/* defined in fs/inode.c */
+extern void prune_dcache(int);
+
+/* icache memory management (defined in linux/fs/inode.c) */
+extern void shrink_icache_memory(int, int);
+extern void prune_icache(int);
 
 /* only used at mount-time */
 extern struct dentry * d_alloc_root(struct inode *);
 
-/* test whether root is busy without destroying dcache */
-extern int is_root_busy(struct dentry *);
+/* <clickety>-<click> the ramfs-type tree */
+extern void d_genocide(struct dentry *);
+
+extern struct dentry *d_find_alias(struct inode *);
+extern void d_prune_aliases(struct inode *);
+
+/* test whether we have any submounts in a subdir tree */
+extern int have_submounts(struct dentry *);
 
 /*
  * This adds the entry to the hash queues.
  */
 extern void d_rehash(struct dentry *);
-/*
- * This adds the entry to the hash queues and initializes "d_inode".
- * The entry was actually filled in earlier during "d_alloc()"
+
+/**
+ * d_add - add dentry to hash queues
+ * @entry: dentry to add
+ * @inode: The inode to attach to this dentry
+ *
+ * This adds the entry to the hash queues and initializes @inode.
+ * The entry was actually filled in earlier during d_alloc().
  */
+ 
 static __inline__ void d_add(struct dentry * entry, struct inode * inode)
 {
-	d_rehash(entry);
 	d_instantiate(entry, inode);
+	d_rehash(entry);
 }
 
 /* used for rename() and baskets */
@@ -173,18 +212,54 @@ extern struct dentry * d_lookup(struct dentry *, struct qstr *);
 /* validate "insecure" dentry pointer */
 extern int d_validate(struct dentry *, struct dentry *, unsigned int, unsigned int);
 
-/* write full pathname into buffer and return start of pathname */
-extern char * d_path(struct dentry *, char *, int);
-
+extern char * __d_path(struct dentry *, struct vfsmount *, struct dentry *,
+	struct vfsmount *, char *, int);
+  
 /* Allocation counts.. */
+
+/**
+ *	dget, dget_locked	-	get a reference to a dentry
+ *	@dentry: dentry to get a reference to
+ *
+ *	Given a dentry or %NULL pointer increment the reference count
+ *	if appropriate and return the dentry. A dentry will not be 
+ *	destroyed when it has references. dget() should never be
+ *	called for dentries with zero reference counter. For these cases
+ *	(preferably none, functions in dcache.c are sufficient for normal
+ *	needs and they take necessary precautions) you should hold dcache_lock
+ *	and call dget_locked() instead of dget().
+ */
+ 
 static __inline__ struct dentry * dget(struct dentry *dentry)
 {
-	if (dentry)
-		dentry->d_count++;
+	if (dentry) {
+		if (!atomic_read(&dentry->d_count))
+			BUG();
+		atomic_inc(&dentry->d_count);
+	}
 	return dentry;
 }
 
+extern struct dentry * dget_locked(struct dentry *);
+
+/**
+ *	d_unhashed -	is dentry hashed
+ *	@dentry: entry to check
+ *
+ *	Returns true if the dentry passed is not currently hashed.
+ */
+ 
+static __inline__ int d_unhashed(struct dentry *dentry)
+{
+	return list_empty(&dentry->d_hash);
+}
+
 extern void dput(struct dentry *);
+
+static __inline__ int d_mountpoint(struct dentry *dentry)
+{
+	return !list_empty(&dentry->d_vfsmnt);
+}
 
 #endif /* __KERNEL__ */
 

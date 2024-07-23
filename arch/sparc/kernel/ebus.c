@@ -1,4 +1,4 @@
-/* $Id: ebus.c,v 1.3 1999/06/03 15:02:09 davem Exp $
+/* $Id: ebus.c,v 1.15 2000/11/08 05:06:21 davem Exp $
  * ebus.c: PCI to EBus bridge device.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -22,43 +22,73 @@
 #include <asm/oplib.h>
 #include <asm/bpp.h>
 
-#undef PROM_DEBUG
-#undef DEBUG_FILL_EBUS_DEV
-
-#ifdef PROM_DEBUG
-#define dprintk prom_printf
-#else
-#define dprintk printk
-#endif
-
 struct linux_ebus *ebus_chain = 0;
 
-#ifdef CONFIG_SUN_OPENPROMIO
-extern int openprom_init(void);
-#endif
-#ifdef CONFIG_SPARCAUDIO
-extern int sparcaudio_init(void);
-#endif
 #ifdef CONFIG_SUN_AUXIO
 extern void auxio_probe(void);
-#endif
-#ifdef CONFIG_OBP_FLASH
-extern int flash_init(void);
-#endif
-#ifdef CONFIG_ENVCTRL
-extern int envctrl_init(void);
 #endif
 
 /* We are together with pcic.c under CONFIG_PCI. */
 extern unsigned int pcic_pin_to_irq(unsigned int, char *name);
 
+/*
+ * IRQ Blacklist
+ * Here we list PROMs and systems that are known to supply crap as IRQ numbers.
+ */
+struct ebus_device_irq {
+	char *name;
+	unsigned int pin;
+};
+
+struct ebus_system_entry {
+	char *esname;
+	struct ebus_device_irq *ipt;
+};
+
+static struct ebus_device_irq je1_1[] = {
+	{ "8042",		 3 },
+	{ "SUNW,CS4231",	 0 },
+	{ "parallel",		 0 },
+	{ "se",			 2 },
+	{ 0, 0 }
+};
+
+/*
+ * Gleb's JE1 supplied reasonable pin numbers, but mine did not (OBP 2.32).
+ * Blacklist the sucker... Note that Gleb's system will work.
+ */
+static struct ebus_system_entry ebus_blacklist[] = {
+	{ "SUNW,JavaEngine1", je1_1 },
+	{ 0, 0 }
+};
+
+static struct ebus_device_irq *ebus_blackp = NULL;
+
+/*
+ */
 static inline unsigned long ebus_alloc(size_t size)
 {
 	return (unsigned long)kmalloc(size, GFP_ATOMIC);
 }
 
-__initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
-				struct linux_ebus_child *dev))
+/*
+ */
+int __init ebus_blacklist_irq(char *name)
+{
+	struct ebus_device_irq *dp;
+
+	if ((dp = ebus_blackp) != NULL) {
+		for (; dp->name != NULL; dp++) {
+			if (strcmp(name, dp->name) == 0) {
+				return pcic_pin_to_irq(dp->pin, name);
+			}
+		}
+	}
+	return 0;
+}
+
+void __init fill_ebus_child(int node, struct linux_prom_registers *preg,
+				struct linux_ebus_child *dev)
 {
 	int regs[PROMREG_MAX];
 	int irqs[PROMREG_MAX];
@@ -79,23 +109,19 @@ __initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
 				    dev->prom_name, len, dev->parent->num_addrs);
 			panic(__FUNCTION__);
 		}
-		dev->base_address[i] = dev->parent->base_address[regs[i]];
+		dev->resource[i].start = dev->parent->resource[regs[i]].start; /* XXX resource */
 	}
 
-	/*
-	 * Houston, we have a problem...
-	 * Sometimes PROM supplies absolutely meaningless properties.
-	 * Still, we take what it gives since we have nothing better.
-	 * Children of ebus may be wired on any input pin of PCIC.
-	 */
-	len = prom_getproperty(node, "interrupts", (char *)&irqs, sizeof(irqs));
-	if ((len == -1) || (len == 0)) {
+	if ((dev->irqs[0] = ebus_blacklist_irq(dev->prom_name)) != 0) {
+		dev->num_irqs = 1;
+	} else if ((len = prom_getproperty(node, "interrupts",
+	    (char *)&irqs, sizeof(irqs))) == -1 || len == 0) {
 		dev->num_irqs = 0;
 		dev->irqs[0] = 0;
 		if (dev->parent->num_irqs != 0) {
 			dev->num_irqs = 1;
 			dev->irqs[0] = dev->parent->irqs[0];
-/* P3 remove */ printk("EBUS: dev %s irq %d from parent\n", dev->prom_name, dev->irqs[0]);
+/* P3 */ /* printk("EBUS: dev %s irq %d from parent\n", dev->prom_name, dev->irqs[0]); */
 		}
 	} else {
 		dev->num_irqs = len / sizeof(irqs[0]);
@@ -110,31 +136,18 @@ __initfunc(void fill_ebus_child(int node, struct linux_prom_registers *preg,
 			dev->irqs[0] = 0;
 		} else {
 			dev->irqs[0] = pcic_pin_to_irq(irqs[0], dev->prom_name);
-/* P3 remove */ printk("EBUS: dev %s irq %d from PROM\n", dev->prom_name, dev->irqs[0]);
 		}
 	}
-
-#ifdef DEBUG_FILL_EBUS_DEV
-	dprintk("child '%s': address%s\n", dev->prom_name,
-	       dev->num_addrs > 1 ? "es" : "");
-	for (i = 0; i < dev->num_addrs; i++)
-		dprintk("        %016lx\n", dev->base_address[i]);
-	if (dev->num_irqs) {
-		dprintk("        IRQ%s", dev->num_irqs > 1 ? "s" : "");
-		for (i = 0; i < dev->num_irqs; i++)
-			dprintk(" %08x", dev->irqs[i]);
-		dprintk("\n");
-	}
-#endif
 }
 
-__initfunc(void fill_ebus_device(int node, struct linux_ebus_device *dev))
+void __init fill_ebus_device(int node, struct linux_ebus_device *dev)
 {
 	struct linux_prom_registers regs[PROMREG_MAX];
 	struct linux_ebus_child *child;
 	int irqs[PROMINTR_MAX];
 	char lbuf[128];
 	int i, n, len;
+	unsigned long baseaddr;
 
 	dev->prom_node = node;
 	prom_getstring(node, "name", lbuf, sizeof(lbuf));
@@ -175,36 +188,30 @@ __initfunc(void fill_ebus_device(int node, struct linux_ebus_device *dev))
 			;
 		}
 
-		dev->base_address[i] = dev->bus->self->base_address[n];
-		dev->base_address[i] += regs[i].phys_addr;
-
-		if (dev->base_address[i]) {
-		    dev->base_address[i] =
-		       (unsigned long)sparc_alloc_io (dev->base_address[i], 0,
-						      regs[i].reg_size,
-						      dev->prom_name, 0, 0);
-#if 0
 /*
- * This release_region() screwes those who do sparc_alloc_io().
- * Change drivers which do check_region(). See drivers/block/floppy.c.
+ * XXX Now as we have regions, why don't we make an on-demand allocation...
  */
-		    /* Some drivers call 'check_region', so we release it */
-                    release_region(dev->base_address[i] & PAGE_MASK, PAGE_SIZE);
-#endif
-
-		    if (dev->base_address[i] == 0 ) {
-			panic("ebus: unable sparc_alloc_io for dev %s",
-			      dev->prom_name);
-		    }
+		dev->resource[i].start = 0;
+		if ((baseaddr = dev->bus->self->resource[n].start +
+		    regs[i].phys_addr) != 0) {
+			/* dev->resource[i].name = dev->prom_name; */
+			if ((baseaddr = (unsigned long) ioremap(baseaddr,
+			    regs[i].reg_size)) == 0) {
+				panic("ebus: unable to remap dev %s",
+				    dev->prom_name);
+			}
 		}
+		dev->resource[i].start = baseaddr;	/* XXX Unaligned */
 	}
 
-	len = prom_getproperty(node, "interrupts", (char *)&irqs, sizeof(irqs));
-	if ((len == -1) || (len == 0)) {
+	if ((dev->irqs[0] = ebus_blacklist_irq(dev->prom_name)) != 0) {
+		dev->num_irqs = 1;
+	} else if ((len = prom_getproperty(node, "interrupts",
+	    (char *)&irqs, sizeof(irqs))) == -1 || len == 0) {
 		dev->num_irqs = 0;
 		if ((dev->irqs[0] = dev->bus->self->irq) != 0) {
 			 dev->num_irqs = 1;
-/* P3 remove */ printk("EBUS: child %s irq %d from parent\n", dev->prom_name, dev->irqs[0]);
+/* P3 */ /* printk("EBUS: child %s irq %d from parent\n", dev->prom_name, dev->irqs[0]); */
 		}
 	} else {
 		dev->num_irqs = 1;  /* dev->num_irqs = len / sizeof(irqs[0]); */
@@ -216,22 +223,9 @@ __initfunc(void fill_ebus_device(int node, struct linux_ebus_device *dev))
 			dev->irqs[0] = 0;
 		} else {
 			dev->irqs[0] = pcic_pin_to_irq(irqs[0], dev->prom_name);
-/* P3 remove */ printk("EBUS: child %s irq %d from PROM\n", dev->prom_name, dev->irqs[0]);
 		}
 	}
 
-#ifdef DEBUG_FILL_EBUS_DEV
-	dprintk("'%s': address%s\n", dev->prom_name,
-	       dev->num_addrs > 1 ? "es" : "");
-	for (i = 0; i < dev->num_addrs; i++)
-		dprintk("  %016lx\n", dev->base_address[i]);
-	if (dev->num_irqs) {
-		dprintk("  IRQ%s", dev->num_irqs > 1 ? "s" : "");
-		for (i = 0; i < dev->num_irqs; i++)
-			dprintk(" %08x", dev->irqs[i]);
-		dprintk("\n");
-	}
-#endif
 	if ((node = prom_getchild(node))) {
 		dev->children = (struct linux_ebus_child *)
 			ebus_alloc(sizeof(struct linux_ebus_child));
@@ -255,12 +249,13 @@ __initfunc(void fill_ebus_device(int node, struct linux_ebus_device *dev))
 	}
 }
 
-__initfunc(void ebus_init(void))
+void __init ebus_init(void)
 {
 	struct linux_prom_pci_registers regs[PROMREG_MAX];
 	struct linux_pbm_info *pbm;
 	struct linux_ebus_device *dev;
 	struct linux_ebus *ebus;
+	struct ebus_system_entry *sp;
 	struct pci_dev *pdev;
 	struct pcidev_cookie *cookie;
 	char lbuf[128];
@@ -273,11 +268,16 @@ __initfunc(void ebus_init(void))
 	if (!pci_present())
 		return;
 
+	prom_getstring(prom_root_node, "name", lbuf, sizeof(lbuf));
+	for (sp = ebus_blacklist; sp->esname != NULL; sp++) {
+		if (strcmp(lbuf, sp->esname) == 0) {
+			ebus_blackp = sp->ipt;
+			break;
+		}
+	}
+
 	pdev = pci_find_device(PCI_VENDOR_ID_SUN, PCI_DEVICE_ID_SUN_EBUS, 0);
 	if (!pdev) {
-#ifdef PROM_DEBUG	
-		dprintk("ebus: No EBus's found.\n");
-#endif
 		return;
 	}
 	cookie = pdev->sysdata;
@@ -288,9 +288,6 @@ __initfunc(void ebus_init(void))
 	ebus->next = 0;
 
 	while (ebusnd) {
-#ifdef PROM_DEBUG	
-		dprintk("ebus%d:", num_ebus);
-#endif
 
 		prom_getstring(ebusnd, "name", lbuf, sizeof(lbuf));
 		ebus->prom_node = ebusnd;
@@ -312,20 +309,14 @@ __initfunc(void ebus_init(void))
 		}
 		nreg = len / sizeof(struct linux_prom_pci_registers);
 
-		base = &ebus->self->base_address[0];
+		base = &ebus->self->resource[0].start;
 		for (reg = 0; reg < nreg; reg++) {
 			if (!(regs[reg].which_io & 0x03000000))
 				continue;
 
 			addr = regs[reg].phys_lo;
 			*base++ = addr;
-#ifdef PROM_DEBUG
-			dprintk(" %lx[%x]", addr, regs[reg].size_lo);
-#endif
 		}
-#ifdef PROM_DEBUG
-		dprintk("\n");
-#endif
 
 		nd = prom_getchild(ebusnd);
 		if (!nd)
@@ -367,23 +358,7 @@ __initfunc(void ebus_init(void))
 		++num_ebus;
 	}
 
-#ifdef CONFIG_SUN_OPENPROMIO
-	openprom_init();
-#endif
-
-#ifdef CONFIG_SPARCAUDIO
-	sparcaudio_init();
-#endif
-#ifdef CONFIG_SUN_BPP
-	bpp_init();
-#endif
 #ifdef CONFIG_SUN_AUXIO
 	auxio_probe();
-#endif
-#ifdef CONFIG_ENVCTRL
-	envctrl_init();
-#endif
-#ifdef CONFIG_OBP_FLASH
-	flash_init();
 #endif
 }

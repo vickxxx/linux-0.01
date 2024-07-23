@@ -8,10 +8,9 @@
 # Note 2:  the CFLAGS definitions are now in the main makefile.
 O_TARGET := umsdos.o
 
-O_OBJS   := dir.o  file.o inode.o ioctl.o mangle.o namei.o \
-		rdir.o symlink.o emd.o check.o
+obj-y   := dir.o  inode.o ioctl.o mangle.o namei.o rdir.o emd.o
 
-M_OBJS   := $(O_TARGET)
+obj-m   := $(O_TARGET)
 
 include $(TOPDIR)/Rules.make
 

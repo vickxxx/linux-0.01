@@ -2,17 +2,22 @@
 /* PLIP: A parallel port "network" driver for Linux. */
 /* This driver is for parallel port with 5-bit cable (LapLink (R) cable). */
 /*
- * Authors:	Donald Becker,  <becker@super.org>
- *		Tommy Thorn, <thorn@daimi.aau.dk>
- *		Tanabe Hiroyasu, <hiro@sanpo.t.u-tokyo.ac.jp>
- *		Alan Cox, <gw4pts@gw4pts.ampr.org>
- *		Peter Bauer, <100136.3530@compuserve.com>
- *		Niibe Yutaka, <gniibe@mri.co.jp>
+ * Authors:	Donald Becker <becker@super.org>
+ *		Tommy Thorn <thorn@daimi.aau.dk>
+ *		Tanabe Hiroyasu <hiro@sanpo.t.u-tokyo.ac.jp>
+ *		Alan Cox <gw4pts@gw4pts.ampr.org>
+ *		Peter Bauer <100136.3530@compuserve.com>
+ *		Niibe Yutaka <gniibe@mri.co.jp>
+ *		Nimrod Zimerman <zimerman@mailandnews.com>
  *
+ * Enhancements:
  *		Modularization and ifreq/ifmap support by Alan Cox.
  *		Rewritten by Niibe Yutaka.
- *              parport-sharing awareness code by Philip Blundell.
+ *		parport-sharing awareness code by Philip Blundell.
  *		SMP locking by Niibe Yutaka.
+ *		Support for parallel ports with no IRQ (poll mode),
+ *		Modifications to use the parallel port API 
+ *		by Nimrod Zimerman.
  *
  * Fixes:
  *		Niibe Yutaka
@@ -49,7 +54,7 @@
  *     To use with DOS box, please do (Turn on ARP switch):
  *	# ifconfig plip[0-2] arp
  */
-static const char *version = "NET3 PLIP version 2.3-parport gniibe@mri.co.jp\n";
+static const char *version = "NET3 PLIP version 2.4-parport gniibe@mri.co.jp\n";
 
 /*
   Sources:
@@ -57,7 +62,7 @@ static const char *version = "NET3 PLIP version 2.3-parport gniibe@mri.co.jp\n";
 	"parallel.asm" parallel port packet driver.
 
   The "Crynwr" parallel port standard specifies the following protocol:
-    Trigger by sending '0x08' (this cause interrupt on other end)
+    Trigger by sending nibble '0x8' (this causes interrupt on other end)
     count-low octet
     count-high octet
     ... data octets
@@ -93,7 +98,6 @@ static const char *version = "NET3 PLIP version 2.3-parport gniibe@mri.co.jp\n";
 #include <linux/ptrace.h>
 #include <linux/if_ether.h>
 #include <asm/system.h>
-#include <asm/io.h>
 #include <linux/in.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
@@ -105,13 +109,15 @@ static const char *version = "NET3 PLIP version 2.3-parport gniibe@mri.co.jp\n";
 #include <linux/inetdevice.h>
 #include <linux/skbuff.h>
 #include <linux/if_plip.h>
+#include <net/neighbour.h>
 
 #include <linux/tqueue.h>
 #include <linux/ioport.h>
+#include <linux/spinlock.h>
 #include <asm/bitops.h>
 #include <asm/irq.h>
 #include <asm/byteorder.h>
-#include <asm/spinlock.h>
+#include <asm/semaphore.h>
 
 #include <linux/parport.h>
 
@@ -124,8 +130,8 @@ static const char *version = "NET3 PLIP version 2.3-parport gniibe@mri.co.jp\n";
 #endif
 static unsigned int net_debug = NET_DEBUG;
 
-#define ENABLE(irq) enable_irq(irq)
-#define DISABLE(irq) disable_irq(irq)
+#define ENABLE(irq)  if (irq != -1) enable_irq(irq)
+#define DISABLE(irq) if (irq != -1) disable_irq(irq)
 
 /* In micro second */
 #define PLIP_DELAY_UNIT		   1
@@ -136,27 +142,25 @@ static unsigned int net_debug = NET_DEBUG;
 /* Nibble time out = PLIP_NIBBLE_WAIT * PLIP_DELAY_UNIT usec */
 #define PLIP_NIBBLE_WAIT        3000
 
-#define PAR_INTR_ON		(LP_PINITP|LP_PSELECP|LP_PINTEN)
-#define PAR_INTR_OFF		(LP_PINITP|LP_PSELECP)
-#define PAR_DATA(dev)		((dev)->base_addr+0)
-#define PAR_STATUS(dev)		((dev)->base_addr+1)
-#define PAR_CONTROL(dev)	((dev)->base_addr+2)
-
-/* Bottom halfs */
-static void plip_kick_bh(struct device *dev);
-static void plip_bh(struct device *dev);
+/* Bottom halves */
+static void plip_kick_bh(struct net_device *dev);
+static void plip_bh(struct net_device *dev);
+static void plip_timer_bh(struct net_device *dev);
 
 /* Interrupt handler */
 static void plip_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
 /* Functions for DEV methods */
-static int plip_rebuild_header(struct sk_buff *skb);
-static int plip_tx_packet(struct sk_buff *skb, struct device *dev);
-static int plip_open(struct device *dev);
-static int plip_close(struct device *dev);
-static struct net_device_stats *plip_get_stats(struct device *dev);
-static int plip_config(struct device *dev, struct ifmap *map);
-static int plip_ioctl(struct device *dev, struct ifreq *ifr, int cmd);
+static int plip_tx_packet(struct sk_buff *skb, struct net_device *dev);
+static int plip_hard_header(struct sk_buff *skb, struct net_device *dev,
+                            unsigned short type, void *daddr,
+                            void *saddr, unsigned len);
+static int plip_hard_header_cache(struct neighbour *neigh,
+                                  struct hh_cache *hh);
+static int plip_open(struct net_device *dev);
+static int plip_close(struct net_device *dev);
+static struct net_device_stats *plip_get_stats(struct net_device *dev);
+static int plip_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd);
 static int plip_preempt(void *handle);
 static void plip_wakeup(void *handle);
 
@@ -210,6 +214,7 @@ struct net_local {
 	struct net_device_stats enet_stats;
 	struct tq_struct immediate;
 	struct tq_struct deferred;
+	struct tq_struct timer;
 	struct plip_local snd_data;
 	struct plip_local rcv_data;
 	struct pardevice *pardev;
@@ -220,31 +225,74 @@ struct net_local {
 	int is_deferred;
 	int port_owner;
 	int should_relinquish;
-	int (*orig_rebuild_header)(struct sk_buff *skb);
+	int (*orig_hard_header)(struct sk_buff *skb, struct net_device *dev,
+	                        unsigned short type, void *daddr,
+	                        void *saddr, unsigned len);
+	int (*orig_hard_header_cache)(struct neighbour *neigh,
+	                              struct hh_cache *hh);
 	spinlock_t lock;
+	atomic_t kill_timer;
+	struct semaphore killed_timer_sem;
 };
+
+inline static void enable_parport_interrupts (struct net_device *dev)
+{
+	if (dev->irq != -1)
+	{
+		struct parport *port =
+		   ((struct net_local *)dev->priv)->pardev->port;
+		port->ops->enable_irq (port);
+	}
+}
+
+inline static void disable_parport_interrupts (struct net_device *dev)
+{
+	if (dev->irq != -1)
+	{
+		struct parport *port =
+		   ((struct net_local *)dev->priv)->pardev->port;
+		port->ops->disable_irq (port);
+	}
+}
+
+inline static void write_data (struct net_device *dev, unsigned char data)
+{
+	struct parport *port =
+	   ((struct net_local *)dev->priv)->pardev->port;
+
+	port->ops->write_data (port, data);
+}
+
+inline static unsigned char read_status (struct net_device *dev)
+{
+	struct parport *port =
+	   ((struct net_local *)dev->priv)->pardev->port;
+
+	return port->ops->read_status (port);
+}
 
 /* Entry point of PLIP driver.
    Probe the hardware, and register/initialize the driver.
 
    PLIP is rather weird, because of the way it interacts with the parport
    system.  It is _not_ initialised from Space.c.  Instead, plip_init()
-   is called, and that function makes up a "struct device" for each port, and
+   is called, and that function makes up a "struct net_device" for each port, and
    then calls us here.
 
    */
-__initfunc(int
-plip_init_dev(struct device *dev, struct parport *pb))
+int __init
+plip_init_dev(struct net_device *dev, struct parport *pb)
 {
 	struct net_local *nl;
 	struct pardevice *pardev;
 
+	SET_MODULE_OWNER(dev);
 	dev->irq = pb->irq;
 	dev->base_addr = pb->base;
 
 	if (pb->irq == -1) {
-		printk(KERN_INFO "plip: %s has no IRQ.\n", pb->name);
-		return -ENODEV;
+		printk(KERN_INFO "plip: %s has no IRQ. Using IRQ-less mode,"
+		                 "which is fairly inefficient!\n", pb->name);
 	}
 
 	pardev = parport_register_device(pb, dev->name, plip_preempt,
@@ -255,21 +303,25 @@ plip_init_dev(struct device *dev, struct parport *pb))
 		return -ENODEV;
 
 	printk(KERN_INFO "%s", version);
-	printk(KERN_INFO "%s: Parallel port at %#3lx, using IRQ %d\n", dev->name,
-	       dev->base_addr, dev->irq);
+	if (dev->irq != -1)
+		printk(KERN_INFO "%s: Parallel port at %#3lx, using IRQ %d.\n",
+		       dev->name, dev->base_addr, dev->irq);
+	else
+		printk(KERN_INFO "%s: Parallel port at %#3lx, not using IRQ.\n",
+		       dev->name, dev->base_addr);
 
 	/* Fill in the generic fields of the device structure. */
 	ether_setup(dev);
 
 	/* Then, override parts of it */
-	dev->hard_start_xmit	= plip_tx_packet;
-	dev->open		= plip_open;
-	dev->stop		= plip_close;
-	dev->get_stats 		= plip_get_stats;
-	dev->set_config		= plip_config;
-	dev->do_ioctl		= plip_ioctl;
-	dev->tx_queue_len	= 10;
-	dev->flags	        = IFF_POINTOPOINT|IFF_NOARP;
+	dev->hard_start_xmit	 = plip_tx_packet;
+	dev->open		 = plip_open;
+	dev->stop		 = plip_close;
+	dev->get_stats 		 = plip_get_stats;
+	dev->do_ioctl		 = plip_ioctl;
+	dev->header_cache_update = NULL;
+	dev->tx_queue_len 	 = 10;
+	dev->flags	         = IFF_POINTOPOINT|IFF_NOARP;
 	memset(dev->dev_addr, 0xfc, ETH_ALEN);
 
 	/* Set the private structure */
@@ -282,8 +334,12 @@ plip_init_dev(struct device *dev, struct parport *pb))
 	memset(dev->priv, 0, sizeof(struct net_local));
 	nl = (struct net_local *) dev->priv;
 
-	nl->orig_rebuild_header = dev->rebuild_header;
-	dev->rebuild_header 	= plip_rebuild_header;
+	nl->orig_hard_header    = dev->hard_header;
+	dev->hard_header        = plip_hard_header;
+
+	nl->orig_hard_header_cache = dev->hard_header_cache;
+	dev->hard_header_cache     = plip_hard_header_cache;
+
 	nl->pardev = pardev; 
 
 	nl->port_owner = 0;
@@ -293,15 +349,23 @@ plip_init_dev(struct device *dev, struct parport *pb))
 	nl->nibble	= PLIP_NIBBLE_WAIT;
 
 	/* Initialize task queue structures */
-	nl->immediate.next = NULL;
+	INIT_LIST_HEAD(&nl->immediate.list);
 	nl->immediate.sync = 0;
-	nl->immediate.routine = (void *)(void *)plip_bh;
+	nl->immediate.routine = (void (*)(void *))plip_bh;
 	nl->immediate.data = dev;
 
-	nl->deferred.next = NULL;
+	INIT_LIST_HEAD(&nl->deferred.list);
 	nl->deferred.sync = 0;
-	nl->deferred.routine = (void *)(void *)plip_kick_bh;
+	nl->deferred.routine = (void (*)(void *))plip_kick_bh;
 	nl->deferred.data = dev;
+
+	if (dev->irq == -1) {
+		INIT_LIST_HEAD(&nl->timer.list);
+		nl->timer.sync = 0;
+		nl->timer.routine = (void (*)(void *))plip_timer_bh;
+		nl->timer.data = dev;
+	}
+
 	spin_lock_init(&nl->lock);
 
 	return 0;
@@ -311,7 +375,7 @@ plip_init_dev(struct device *dev, struct parport *pb))
    This routine is kicked by do_timer().
    Request `plip_bh' to be invoked. */
 static void
-plip_kick_bh(struct device *dev)
+plip_kick_bh(struct net_device *dev)
 {
 	struct net_local *nl = (struct net_local *)dev->priv;
 
@@ -322,17 +386,17 @@ plip_kick_bh(struct device *dev)
 }
 
 /* Forward declarations of internal routines */
-static int plip_none(struct device *, struct net_local *,
+static int plip_none(struct net_device *, struct net_local *,
 		     struct plip_local *, struct plip_local *);
-static int plip_receive_packet(struct device *, struct net_local *,
+static int plip_receive_packet(struct net_device *, struct net_local *,
 			       struct plip_local *, struct plip_local *);
-static int plip_send_packet(struct device *, struct net_local *,
+static int plip_send_packet(struct net_device *, struct net_local *,
 			    struct plip_local *, struct plip_local *);
-static int plip_connection_close(struct device *, struct net_local *,
+static int plip_connection_close(struct net_device *, struct net_local *,
 				 struct plip_local *, struct plip_local *);
-static int plip_error(struct device *, struct net_local *,
+static int plip_error(struct net_device *, struct net_local *,
 		      struct plip_local *, struct plip_local *);
-static int plip_bh_timeout_error(struct device *dev, struct net_local *nl,
+static int plip_bh_timeout_error(struct net_device *dev, struct net_local *nl,
 				 struct plip_local *snd,
 				 struct plip_local *rcv,
 				 int error);
@@ -342,7 +406,7 @@ static int plip_bh_timeout_error(struct device *dev, struct net_local *nl,
 #define ERROR     2
 #define HS_TIMEOUT	3
 
-typedef int (*plip_func)(struct device *dev, struct net_local *nl,
+typedef int (*plip_func)(struct net_device *dev, struct net_local *nl,
 			 struct plip_local *snd, struct plip_local *rcv);
 
 static plip_func connection_state_table[] =
@@ -356,7 +420,7 @@ static plip_func connection_state_table[] =
 
 /* Bottom half handler of PLIP. */
 static void
-plip_bh(struct device *dev)
+plip_bh(struct net_device *dev)
 {
 	struct net_local *nl = (struct net_local *)dev->priv;
 	struct plip_local *snd = &nl->snd_data;
@@ -373,8 +437,23 @@ plip_bh(struct device *dev)
 	}
 }
 
+static void
+plip_timer_bh(struct net_device *dev)
+{
+	struct net_local *nl = (struct net_local *)dev->priv;
+	
+	if (!(atomic_read (&nl->kill_timer))) {
+		plip_interrupt (-1, dev, NULL);
+
+		queue_task (&nl->timer, &tq_timer);
+	}
+	else {
+		up (&nl->killed_timer_sem);
+	}
+}
+
 static int
-plip_bh_timeout_error(struct device *dev, struct net_local *nl,
+plip_bh_timeout_error(struct net_device *dev, struct net_local *nl,
 		      struct plip_local *snd, struct plip_local *rcv,
 		      int error)
 {
@@ -401,7 +480,7 @@ plip_bh_timeout_error(struct device *dev, struct net_local *nl,
 				/* Try again later */
 				return TIMEOUT;
 			}
-			c0 = inb(PAR_STATUS(dev));
+			c0 = read_status(dev);
 			printk(KERN_WARNING "%s: transmit timeout(%d,%02x)\n",
 			       dev->name, snd->state, c0);
 		} else
@@ -420,7 +499,7 @@ plip_bh_timeout_error(struct device *dev, struct net_local *nl,
 				/* Try again later */
 				return TIMEOUT;
 			}
-			c0 = inb(PAR_STATUS(dev));
+			c0 = read_status(dev);
 			printk(KERN_WARNING "%s: receive timeout(%d,%02x)\n",
 			       dev->name, rcv->state, c0);
 		}
@@ -441,16 +520,16 @@ plip_bh_timeout_error(struct device *dev, struct net_local *nl,
 		DISABLE(dev->irq);
 		synchronize_irq();
 	}
-	outb(PAR_INTR_OFF, PAR_CONTROL(dev));
-	dev->tbusy = 1;
+	disable_parport_interrupts (dev);
+	netif_stop_queue (dev);
 	nl->connection = PLIP_CN_ERROR;
-	outb(0x00, PAR_DATA(dev));
+	write_data (dev, 0x00);
 
 	return TIMEOUT;
 }
 
 static int
-plip_none(struct device *dev, struct net_local *nl,
+plip_none(struct net_device *dev, struct net_local *nl,
 	  struct plip_local *snd, struct plip_local *rcv)
 {
 	return OK;
@@ -459,7 +538,7 @@ plip_none(struct device *dev, struct net_local *nl,
 /* PLIP_RECEIVE --- receive a byte(two nibbles)
    Returns OK on success, TIMEOUT on timeout */
 inline static int
-plip_receive(unsigned short nibble_timeout, unsigned short status_addr,
+plip_receive(unsigned short nibble_timeout, struct net_device *dev,
 	     enum plip_nibble_state *ns_p, unsigned char *data_p)
 {
 	unsigned char c0, c1;
@@ -469,10 +548,10 @@ plip_receive(unsigned short nibble_timeout, unsigned short status_addr,
 	case PLIP_NB_BEGIN:
 		cx = nibble_timeout;
 		while (1) {
-			c0 = inb(status_addr);
+			c0 = read_status(dev);
 			udelay(PLIP_DELAY_UNIT);
 			if ((c0 & 0x80) == 0) {
-				c1 = inb(status_addr);
+				c1 = read_status(dev);
 				if (c0 == c1)
 					break;
 			}
@@ -480,17 +559,16 @@ plip_receive(unsigned short nibble_timeout, unsigned short status_addr,
 				return TIMEOUT;
 		}
 		*data_p = (c0 >> 3) & 0x0f;
-		outb(0x10, --status_addr); /* send ACK */
-		status_addr++;
+		write_data (dev, 0x10); /* send ACK */
 		*ns_p = PLIP_NB_1;
 
 	case PLIP_NB_1:
 		cx = nibble_timeout;
 		while (1) {
-			c0 = inb(status_addr);
+			c0 = read_status(dev);
 			udelay(PLIP_DELAY_UNIT);
 			if (c0 & 0x80) {
-				c1 = inb(status_addr);
+				c1 = read_status(dev);
 				if (c0 == c1)
 					break;
 			}
@@ -498,8 +576,7 @@ plip_receive(unsigned short nibble_timeout, unsigned short status_addr,
 				return TIMEOUT;
 		}
 		*data_p |= (c0 << 1) & 0xf0;
-		outb(0x00, --status_addr); /* send ACK */
-		status_addr++;
+		write_data (dev, 0x00); /* send ACK */
 		*ns_p = PLIP_NB_BEGIN;
 	case PLIP_NB_2:
 		break;
@@ -507,12 +584,66 @@ plip_receive(unsigned short nibble_timeout, unsigned short status_addr,
 	return OK;
 }
 
+/*
+ *	Determine the packet's protocol ID. The rule here is that we 
+ *	assume 802.3 if the type field is short enough to be a length.
+ *	This is normal practice and works for any 'now in use' protocol.
+ *
+ *	PLIP is ethernet ish but the daddr might not be valid if unicast.
+ *	PLIP fortunately has no bus architecture (its Point-to-point).
+ *
+ *	We can't fix the daddr thing as that quirk (more bug) is embedded
+ *	in far too many old systems not all even running Linux.
+ */
+ 
+static unsigned short plip_type_trans(struct sk_buff *skb, struct net_device *dev)
+{
+	struct ethhdr *eth;
+	unsigned char *rawp;
+	
+	skb->mac.raw=skb->data;
+	skb_pull(skb,dev->hard_header_len);
+	eth= skb->mac.ethernet;
+	
+	if(*eth->h_dest&1)
+	{
+		if(memcmp(eth->h_dest,dev->broadcast, ETH_ALEN)==0)
+			skb->pkt_type=PACKET_BROADCAST;
+		else
+			skb->pkt_type=PACKET_MULTICAST;
+	}
+	
+	/*
+	 *	This ALLMULTI check should be redundant by 1.4
+	 *	so don't forget to remove it.
+	 */
+	 
+	if (ntohs(eth->h_proto) >= 1536)
+		return eth->h_proto;
+		
+	rawp = skb->data;
+	
+	/*
+	 *	This is a magic hack to spot IPX packets. Older Novell breaks
+	 *	the protocol design and runs IPX over 802.3 without an 802.2 LLC
+	 *	layer. We look for FFFF which isn't a used 802.2 SSAP/DSAP. This
+	 *	won't work for fault tolerant netware but does for the rest.
+	 */
+	if (*(unsigned short *)rawp == 0xFFFF)
+		return htons(ETH_P_802_3);
+		
+	/*
+	 *	Real 802.2 LLC
+	 */
+	return htons(ETH_P_802_2);
+}
+
+
 /* PLIP_RECEIVE_PACKET --- receive a packet */
 static int
-plip_receive_packet(struct device *dev, struct net_local *nl,
+plip_receive_packet(struct net_device *dev, struct net_local *nl,
 		    struct plip_local *snd, struct plip_local *rcv)
 {
-	unsigned short status_addr = PAR_STATUS(dev);
 	unsigned short nibble_timeout = nl->nibble;
 	unsigned char *lbuf;
 
@@ -520,9 +651,8 @@ plip_receive_packet(struct device *dev, struct net_local *nl,
 	case PLIP_PK_TRIGGER:
 		DISABLE(dev->irq);
 		/* Don't need to synchronize irq, as we can safely ignore it */
-		outb(PAR_INTR_OFF, PAR_CONTROL(dev));
-		dev->interrupt = 0;
-		outb(0x01, PAR_DATA(dev)); /* send ACK */
+		disable_parport_interrupts (dev);
+		write_data (dev, 0x01); /* send ACK */
 		if (net_debug > 2)
 			printk(KERN_DEBUG "%s: receive start\n", dev->name);
 		rcv->state = PLIP_PK_LENGTH_LSB;
@@ -530,26 +660,26 @@ plip_receive_packet(struct device *dev, struct net_local *nl,
 
 	case PLIP_PK_LENGTH_LSB:
 		if (snd->state != PLIP_PK_DONE) {
-			if (plip_receive(nl->trigger, status_addr,
+			if (plip_receive(nl->trigger, dev,
 					 &rcv->nibble, &rcv->length.b.lsb)) {
 				/* collision, here dev->tbusy == 1 */
 				rcv->state = PLIP_PK_DONE;
 				nl->is_deferred = 1;
 				nl->connection = PLIP_CN_SEND;
 				queue_task(&nl->deferred, &tq_timer);
-				outb(PAR_INTR_ON, PAR_CONTROL(dev));
+				enable_parport_interrupts (dev);
 				ENABLE(dev->irq);
 				return OK;
 			}
 		} else {
-			if (plip_receive(nibble_timeout, status_addr,
+			if (plip_receive(nibble_timeout, dev,
 					 &rcv->nibble, &rcv->length.b.lsb))
 				return TIMEOUT;
 		}
 		rcv->state = PLIP_PK_LENGTH_MSB;
 
 	case PLIP_PK_LENGTH_MSB:
-		if (plip_receive(nibble_timeout, status_addr,
+		if (plip_receive(nibble_timeout, dev,
 				 &rcv->nibble, &rcv->length.b.msb))
 			return TIMEOUT;
 		if (rcv->length.h > dev->mtu + dev->hard_header_len
@@ -558,11 +688,12 @@ plip_receive_packet(struct device *dev, struct net_local *nl,
 			return ERROR;
 		}
 		/* Malloc up new buffer. */
-		rcv->skb = dev_alloc_skb(rcv->length.h);
+		rcv->skb = dev_alloc_skb(rcv->length.h + 2);
 		if (rcv->skb == NULL) {
 			printk(KERN_ERR "%s: Memory squeeze.\n", dev->name);
 			return ERROR;
 		}
+		skb_reserve(rcv->skb, 2);	/* Align IP on 16 byte boundaries */
 		skb_put(rcv->skb,rcv->length.h);
 		rcv->skb->dev = dev;
 		rcv->state = PLIP_PK_DATA;
@@ -572,7 +703,7 @@ plip_receive_packet(struct device *dev, struct net_local *nl,
 	case PLIP_PK_DATA:
 		lbuf = rcv->skb->data;
 		do
-			if (plip_receive(nibble_timeout, status_addr,
+			if (plip_receive(nibble_timeout, dev,
 					 &rcv->nibble, &lbuf[rcv->byte]))
 				return TIMEOUT;
 		while (++rcv->byte < rcv->length.h);
@@ -582,7 +713,7 @@ plip_receive_packet(struct device *dev, struct net_local *nl,
 		rcv->state = PLIP_PK_CHECKSUM;
 
 	case PLIP_PK_CHECKSUM:
-		if (plip_receive(nibble_timeout, status_addr,
+		if (plip_receive(nibble_timeout, dev,
 				 &rcv->nibble, &rcv->data))
 			return TIMEOUT;
 		if (rcv->data != rcv->checksum) {
@@ -595,7 +726,7 @@ plip_receive_packet(struct device *dev, struct net_local *nl,
 
 	case PLIP_PK_DONE:
 		/* Inform the upper layer for the arrival of a packet. */
-		rcv->skb->protocol=eth_type_trans(rcv->skb, dev);
+		rcv->skb->protocol=plip_type_trans(rcv->skb, dev);
 		netif_rx(rcv->skb);
 		nl->enet_stats.rx_bytes += rcv->length.h;
 		nl->enet_stats.rx_packets++;
@@ -604,20 +735,20 @@ plip_receive_packet(struct device *dev, struct net_local *nl,
 			printk(KERN_DEBUG "%s: receive end\n", dev->name);
 
 		/* Close the connection. */
-		outb (0x00, PAR_DATA(dev));
+		write_data (dev, 0x00);
 		spin_lock_irq(&nl->lock);
 		if (snd->state != PLIP_PK_DONE) {
 			nl->connection = PLIP_CN_SEND;
 			spin_unlock_irq(&nl->lock);
 			queue_task(&nl->immediate, &tq_immediate);
 			mark_bh(IMMEDIATE_BH);
-			outb(PAR_INTR_ON, PAR_CONTROL(dev));
+			enable_parport_interrupts (dev);
 			ENABLE(dev->irq);
 			return OK;
 		} else {
 			nl->connection = PLIP_CN_NONE;
 			spin_unlock_irq(&nl->lock);
-			outb(PAR_INTR_ON, PAR_CONTROL(dev));
+			enable_parport_interrupts (dev);
 			ENABLE(dev->irq);
 			return OK;
 		}
@@ -628,7 +759,7 @@ plip_receive_packet(struct device *dev, struct net_local *nl,
 /* PLIP_SEND --- send a byte (two nibbles)
    Returns OK on success, TIMEOUT when timeout    */
 inline static int
-plip_send(unsigned short nibble_timeout, unsigned short data_addr,
+plip_send(unsigned short nibble_timeout, struct net_device *dev,
 	  enum plip_nibble_state *ns_p, unsigned char data)
 {
 	unsigned char c0;
@@ -636,37 +767,34 @@ plip_send(unsigned short nibble_timeout, unsigned short data_addr,
 
 	switch (*ns_p) {
 	case PLIP_NB_BEGIN:
-		outb((data & 0x0f), data_addr);
+		write_data (dev, data & 0x0f);
 		*ns_p = PLIP_NB_1;
 
 	case PLIP_NB_1:
-		outb(0x10 | (data & 0x0f), data_addr);
+		write_data (dev, 0x10 | (data & 0x0f));
 		cx = nibble_timeout;
-		data_addr++;
 		while (1) {
-			c0 = inb(data_addr);
+			c0 = read_status(dev);
 			if ((c0 & 0x80) == 0)
 				break;
 			if (--cx == 0)
 				return TIMEOUT;
 			udelay(PLIP_DELAY_UNIT);
 		}
-		outb(0x10 | (data >> 4), --data_addr);
+		write_data (dev, 0x10 | (data >> 4));
 		*ns_p = PLIP_NB_2;
 
 	case PLIP_NB_2:
-		outb((data >> 4), data_addr);
-		data_addr++;
+		write_data (dev, (data >> 4));
 		cx = nibble_timeout;
 		while (1) {
-			c0 = inb(data_addr);
+			c0 = read_status(dev);
 			if (c0 & 0x80)
 				break;
 			if (--cx == 0)
 				return TIMEOUT;
 			udelay(PLIP_DELAY_UNIT);
 		}
-		data_addr--;
 		*ns_p = PLIP_NB_BEGIN;
 		return OK;
 	}
@@ -675,10 +803,9 @@ plip_send(unsigned short nibble_timeout, unsigned short data_addr,
 
 /* PLIP_SEND_PACKET --- send a packet */
 static int
-plip_send_packet(struct device *dev, struct net_local *nl,
+plip_send_packet(struct net_device *dev, struct net_local *nl,
 		 struct plip_local *snd, struct plip_local *rcv)
 {
-	unsigned short data_addr = PAR_DATA(dev);
 	unsigned short nibble_timeout = nl->nibble;
 	unsigned char *lbuf;
 	unsigned char c0;
@@ -693,11 +820,11 @@ plip_send_packet(struct device *dev, struct net_local *nl,
 
 	switch (snd->state) {
 	case PLIP_PK_TRIGGER:
-		if ((inb(PAR_STATUS(dev)) & 0xf8) != 0x80)
+		if ((read_status(dev) & 0xf8) != 0x80)
 			return HS_TIMEOUT;
 
 		/* Trigger remote rx interrupt. */
-		outb(0x08, data_addr);
+		write_data (dev, 0x08);
 		cx = nl->trigger;
 		while (1) {
 			udelay(PLIP_DELAY_UNIT);
@@ -708,7 +835,7 @@ plip_send_packet(struct device *dev, struct net_local *nl,
 				nl->enet_stats.collisions++;
 				return OK;
 			}
-			c0 = inb(PAR_STATUS(dev));
+			c0 = read_status(dev);
 			if (c0 & 0x08) {
 				spin_unlock_irq(&nl->lock);
 				DISABLE(dev->irq);
@@ -724,7 +851,7 @@ plip_send_packet(struct device *dev, struct net_local *nl,
 					nl->enet_stats.collisions++;
 					return OK;
 				}
-				outb(PAR_INTR_OFF, PAR_CONTROL(dev));
+				disable_parport_interrupts (dev);
 				if (net_debug > 2)
 					printk(KERN_DEBUG "%s: send start\n", dev->name);
 				snd->state = PLIP_PK_LENGTH_LSB;
@@ -734,19 +861,19 @@ plip_send_packet(struct device *dev, struct net_local *nl,
 			}
 			spin_unlock_irq(&nl->lock);
 			if (--cx == 0) {
-				outb(0x00, data_addr);
+				write_data (dev, 0x00);
 				return HS_TIMEOUT;
 			}
 		}
 
 	case PLIP_PK_LENGTH_LSB:
-		if (plip_send(nibble_timeout, data_addr,
+		if (plip_send(nibble_timeout, dev,
 			      &snd->nibble, snd->length.b.lsb))
 			return TIMEOUT;
 		snd->state = PLIP_PK_LENGTH_MSB;
 
 	case PLIP_PK_LENGTH_MSB:
-		if (plip_send(nibble_timeout, data_addr,
+		if (plip_send(nibble_timeout, dev,
 			      &snd->nibble, snd->length.b.msb))
 			return TIMEOUT;
 		snd->state = PLIP_PK_DATA;
@@ -755,7 +882,7 @@ plip_send_packet(struct device *dev, struct net_local *nl,
 
 	case PLIP_PK_DATA:
 		do
-			if (plip_send(nibble_timeout, data_addr,
+			if (plip_send(nibble_timeout, dev,
 				      &snd->nibble, lbuf[snd->byte]))
 				return TIMEOUT;
 		while (++snd->byte < snd->length.h);
@@ -765,7 +892,7 @@ plip_send_packet(struct device *dev, struct net_local *nl,
 		snd->state = PLIP_PK_CHECKSUM;
 
 	case PLIP_PK_CHECKSUM:
-		if (plip_send(nibble_timeout, data_addr,
+		if (plip_send(nibble_timeout, dev,
 			      &snd->nibble, snd->checksum))
 			return TIMEOUT;
 
@@ -776,14 +903,14 @@ plip_send_packet(struct device *dev, struct net_local *nl,
 
 	case PLIP_PK_DONE:
 		/* Close the connection */
-		outb (0x00, data_addr);
+		write_data (dev, 0x00);
 		snd->skb = NULL;
 		if (net_debug > 2)
 			printk(KERN_DEBUG "%s: send end\n", dev->name);
 		nl->connection = PLIP_CN_CLOSING;
 		nl->is_deferred = 1;
 		queue_task(&nl->deferred, &tq_timer);
-		outb(PAR_INTR_ON, PAR_CONTROL(dev));
+		enable_parport_interrupts (dev);
 		ENABLE(dev->irq);
 		return OK;
 	}
@@ -791,14 +918,13 @@ plip_send_packet(struct device *dev, struct net_local *nl,
 }
 
 static int
-plip_connection_close(struct device *dev, struct net_local *nl,
+plip_connection_close(struct net_device *dev, struct net_local *nl,
 		      struct plip_local *snd, struct plip_local *rcv)
 {
 	spin_lock_irq(&nl->lock);
 	if (nl->connection == PLIP_CN_CLOSING) {
 		nl->connection = PLIP_CN_NONE;
-		dev->tbusy = 0;
-		mark_bh(NET_BH);
+		netif_wake_queue (dev);
 	}
 	spin_unlock_irq(&nl->lock);
 	if (nl->should_relinquish) {
@@ -810,22 +936,21 @@ plip_connection_close(struct device *dev, struct net_local *nl,
 
 /* PLIP_ERROR --- wait till other end settled */
 static int
-plip_error(struct device *dev, struct net_local *nl,
+plip_error(struct net_device *dev, struct net_local *nl,
 	   struct plip_local *snd, struct plip_local *rcv)
 {
 	unsigned char status;
 
-	status = inb(PAR_STATUS(dev));
+	status = read_status(dev);
 	if ((status & 0xf8) == 0x80) {
 		if (net_debug > 2)
 			printk(KERN_DEBUG "%s: reset interface.\n", dev->name);
 		nl->connection = PLIP_CN_NONE;
 		nl->should_relinquish = 0;
-		dev->tbusy = 0;
-		dev->interrupt = 0;
-		outb(PAR_INTR_ON, PAR_CONTROL(dev));
+		netif_start_queue (dev);
+		enable_parport_interrupts (dev);
 		ENABLE(dev->irq);
-		mark_bh(NET_BH);
+		netif_wake_queue (dev);
 	} else {
 		nl->is_deferred = 1;
 		queue_task(&nl->deferred, &tq_timer);
@@ -838,7 +963,7 @@ plip_error(struct device *dev, struct net_local *nl,
 static void
 plip_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct device *dev = dev_id;
+	struct net_device *dev = dev_id;
 	struct net_local *nl;
 	struct plip_local *rcv;
 	unsigned char c0;
@@ -851,23 +976,22 @@ plip_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	nl = (struct net_local *)dev->priv;
 	rcv = &nl->rcv_data;
 
-	if (dev->interrupt)
-		return;
+	spin_lock_irq (&nl->lock);
 
-	c0 = inb(PAR_STATUS(dev));
+	c0 = read_status(dev);
 	if ((c0 & 0xf8) != 0xc0) {
-		if (net_debug > 1)
+		if ((dev->irq != -1) && (net_debug > 1))
 			printk(KERN_DEBUG "%s: spurious interrupt\n", dev->name);
+		spin_unlock_irq (&nl->lock);
 		return;
 	}
-	dev->interrupt = 1;
+
 	if (net_debug > 3)
 		printk(KERN_DEBUG "%s: interrupt.\n", dev->name);
 
-	spin_lock_irq(&nl->lock);
 	switch (nl->connection) {
 	case PLIP_CN_CLOSING:
-		dev->tbusy = 0;
+		netif_wake_queue (dev);
 	case PLIP_CN_NONE:
 	case PLIP_CN_SEND:
 		dev->last_rx = jiffies;
@@ -876,46 +1000,29 @@ plip_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		nl->timeout_count = 0;
 		queue_task(&nl->immediate, &tq_immediate);
 		mark_bh(IMMEDIATE_BH);
-		spin_unlock_irq(&nl->lock);
 		break;
 
 	case PLIP_CN_RECEIVE:
 		/* May occur because there is race condition
 		   around test and set of dev->interrupt.
 		   Ignore this interrupt. */
-		spin_unlock_irq(&nl->lock);
 		break;
 
 	case PLIP_CN_ERROR:
-		spin_unlock_irq(&nl->lock);
 		printk(KERN_ERR "%s: receive interrupt in error state\n", dev->name);
 		break;
 	}
+
+	spin_unlock_irq(&nl->lock);
 }
 
-/* We don't need to send arp, for plip is point-to-point. */
 static int
-plip_rebuild_header(struct sk_buff *skb)
-{
-	struct device *dev = skb->dev;
-	struct net_local *nl = (struct net_local *)dev->priv;
-	struct ethhdr *eth = (struct ethhdr *)skb->data;
-
-	if ((dev->flags & IFF_NOARP)==0)
-		return nl->orig_rebuild_header(skb);
-
-	memcpy(eth->h_source, dev->dev_addr, dev->addr_len);
-	memcpy(eth->h_dest, dev->broadcast, dev->addr_len);
-	return 0;
-}
-
-static int
-plip_tx_packet(struct sk_buff *skb, struct device *dev)
+plip_tx_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_local *nl = (struct net_local *)dev->priv;
 	struct plip_local *snd = &nl->snd_data;
 
-	if (dev->tbusy)
+	if (netif_queue_stopped(dev))
 		return 1;
 
 	/* We may need to grab the bus */
@@ -925,15 +1032,12 @@ plip_tx_packet(struct sk_buff *skb, struct device *dev)
 		nl->port_owner = 1;
 	}
 
-	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0) {
-		printk(KERN_WARNING "%s: Transmitter access conflict.\n", dev->name);
-		return 1;
-	}
-
+	netif_stop_queue (dev);
+	
 	if (skb->len > dev->mtu + dev->hard_header_len) {
 		printk(KERN_WARNING "%s: packet too big, %d.\n", dev->name, (int)skb->len);
-		dev->tbusy = 0;
-		return 0;
+		netif_start_queue (dev);
+		return 1;
 	}
 
 	if (net_debug > 2)
@@ -951,9 +1055,54 @@ plip_tx_packet(struct sk_buff *skb, struct device *dev)
 	queue_task(&nl->immediate, &tq_immediate);
 	mark_bh(IMMEDIATE_BH);
 	spin_unlock_irq(&nl->lock);
-
+	
 	return 0;
 }
+
+static void
+plip_rewrite_address(struct net_device *dev, struct ethhdr *eth)
+{
+	struct in_device *in_dev;
+
+	if ((in_dev=dev->ip_ptr) != NULL) {
+		/* Any address will do - we take the first */
+		struct in_ifaddr *ifa=in_dev->ifa_list;
+		if (ifa != NULL) {
+			memcpy(eth->h_source, dev->dev_addr, 6);
+			memset(eth->h_dest, 0xfc, 2);
+			memcpy(eth->h_dest+2, &ifa->ifa_address, 4);
+		}
+	}
+}
+
+static int
+plip_hard_header(struct sk_buff *skb, struct net_device *dev,
+                 unsigned short type, void *daddr,
+	         void *saddr, unsigned len)
+{
+	struct net_local *nl = (struct net_local *)dev->priv;
+	int ret;
+
+	if ((ret = nl->orig_hard_header(skb, dev, type, daddr, saddr, len)) >= 0)
+		plip_rewrite_address (dev, (struct ethhdr *)skb->data);
+
+	return ret;
+}
+
+int plip_hard_header_cache(struct neighbour *neigh,
+                           struct hh_cache *hh)
+{
+	struct net_local *nl = (struct net_local *)neigh->dev->priv;
+	int ret;
+	
+	if ((ret = nl->orig_hard_header_cache(neigh, hh)) == 0)
+	{
+		struct ethhdr *eth = (struct ethhdr*)(((u8*)hh->hh_data) + 2);
+		plip_rewrite_address (neigh->dev, eth);
+	}
+	
+	return ret;
+}                          
 
 /* Open/initialize the board.  This is called (in the current kernel)
    sometime after booting when the 'ifconfig' program is run.
@@ -962,7 +1111,7 @@ plip_tx_packet(struct sk_buff *skb, struct device *dev)
    its IRQ line.
  */
 static int
-plip_open(struct device *dev)
+plip_open(struct net_device *dev)
 {
 	struct net_local *nl = (struct net_local *)dev->priv;
 	struct in_device *in_dev;
@@ -976,10 +1125,15 @@ plip_open(struct device *dev)
 	nl->should_relinquish = 0;
 
 	/* Clear the data port. */
-	outb (0x00, PAR_DATA(dev));
+	write_data (dev, 0x00);
 
 	/* Enable rx interrupt. */
-	outb(PAR_INTR_ON, PAR_CONTROL(dev));
+	enable_parport_interrupts (dev);
+	if (dev->irq == -1)
+	{
+		atomic_set (&nl->kill_timer, 0);
+		queue_task (&nl->timer, &tq_timer);
+	}
 
 	/* Initialize the state machine. */
 	nl->rcv_data.state = nl->snd_data.state = PLIP_PK_DONE;
@@ -988,44 +1142,50 @@ plip_open(struct device *dev)
 	nl->is_deferred = 0;
 
 	/* Fill in the MAC-level header.
-	   (ab)Use "dev->broadcast" to store point-to-point MAC address.
-
-	   PLIP doesn't have a real mac address, but we need to create one
-	   to be DOS compatible.  */
-	memset(dev->dev_addr,  0xfc, ETH_ALEN);
-	memset(dev->broadcast, 0xfc, ETH_ALEN);
+	   We used to abuse dev->broadcast to store the point-to-point
+	   MAC address, but we no longer do it. Instead, we fetch the
+	   interface address whenever it is needed, which is cheap enough
+	   because we use the hh_cache. Actually, abusing dev->broadcast
+	   didn't work, because when using plip_open the point-to-point
+	   address isn't yet known.
+	   PLIP doesn't have a real MAC address, but we need it to be
+	   DOS compatible, and to properly support taps (otherwise,
+	   when the device address isn't identical to the address of a
+	   received frame, the kernel incorrectly drops it).             */
 
 	if ((in_dev=dev->ip_ptr) != NULL) {
-		/*
-		 *	Any address will do - we take the first
-		 */
+		/* Any address will do - we take the first. We already
+		   have the first two bytes filled with 0xfc, from
+		   plip_init_dev(). */
 		struct in_ifaddr *ifa=in_dev->ifa_list;
 		if (ifa != NULL) {
 			memcpy(dev->dev_addr+2, &ifa->ifa_local, 4);
-			memcpy(dev->broadcast+2, &ifa->ifa_address, 4);
 		}
 	}
 
-	dev->interrupt = 0;
-	dev->start = 1;
-	dev->tbusy = 0;
+	netif_start_queue (dev);
 
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 /* The inverse routine to plip_open (). */
 static int
-plip_close(struct device *dev)
+plip_close(struct net_device *dev)
 {
 	struct net_local *nl = (struct net_local *)dev->priv;
 	struct plip_local *snd = &nl->snd_data;
 	struct plip_local *rcv = &nl->rcv_data;
 
-	dev->tbusy = 1;
-	dev->start = 0;
+	netif_stop_queue (dev);
 	DISABLE(dev->irq);
 	synchronize_irq();
+
+	if (dev->irq == -1)
+	{
+		init_MUTEX_LOCKED (&nl->killed_timer_sem);
+		atomic_set (&nl->kill_timer, 1);
+		down (&nl->killed_timer_sem);
+	}
 
 #ifdef NOTDEF
 	outb(0x00, PAR_DATA(dev));
@@ -1052,14 +1212,13 @@ plip_close(struct device *dev)
 	/* Reset. */
 	outb(0x00, PAR_CONTROL(dev));
 #endif
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static int
 plip_preempt(void *handle)
 {
-	struct device *dev = (struct device *)handle;
+	struct net_device *dev = (struct net_device *)handle;
 	struct net_local *nl = (struct net_local *)dev->priv;
 
 	/* Stand our ground if a datagram is on the wire */
@@ -1075,7 +1234,7 @@ plip_preempt(void *handle)
 static void
 plip_wakeup(void *handle)
 {
-	struct device *dev = (struct device *)handle;
+	struct net_device *dev = (struct net_device *)handle;
 	struct net_local *nl = (struct net_local *)dev->priv;
 
 	if (nl->port_owner) {
@@ -1095,14 +1254,14 @@ plip_wakeup(void *handle)
 	if (!parport_claim(nl->pardev)) {
 		nl->port_owner = 1;
 		/* Clear the data port. */
-		outb (0x00, PAR_DATA(dev));
+		write_data (dev, 0x00);
 	}
 
 	return;
 }
 
 static struct net_device_stats *
-plip_get_stats(struct device *dev)
+plip_get_stats(struct net_device *dev)
 {
 	struct net_local *nl = (struct net_local *)dev->priv;
 	struct net_device_stats *r = &nl->enet_stats;
@@ -1111,28 +1270,7 @@ plip_get_stats(struct device *dev)
 }
 
 static int
-plip_config(struct device *dev, struct ifmap *map)
-{
-	struct net_local *nl = (struct net_local *) dev->priv;
-	struct pardevice *pardev = nl->pardev;
-
-	if (dev->flags & IFF_UP)
-		return -EBUSY;
-
-	printk(KERN_WARNING "plip: Warning, changing irq with ifconfig will be obsoleted.\n");
-	printk(KERN_WARNING "plip: Next time, please set with /proc/parport/*/irq instead.\n");
-
-	if (map->irq != (unsigned char)-1) {
-		pardev->port->irq = dev->irq = map->irq;
-		/* Dummy request */
-		request_irq(dev->irq, plip_interrupt, SA_INTERRUPT,
-			    pardev->name, NULL);
-	}
-	return 0;
-}
-
-static int
-plip_ioctl(struct device *dev, struct ifreq *rq, int cmd)
+plip_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
 	struct net_local *nl = (struct net_local *) dev->priv;
 	struct plipconf *pc = (struct plipconf *) &rq->ifr_data;
@@ -1143,6 +1281,8 @@ plip_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 		pc->nibble  = nl->nibble;
 		break;
 	case PLIP_SET_TIMEOUT:
+		if(!capable(CAP_NET_ADMIN))
+			return -EPERM;
 		nl->trigger = pc->trigger;
 		nl->nibble  = pc->nibble;
 		break;
@@ -1158,13 +1298,67 @@ static int timid = 0;
 MODULE_PARM(parport, "1-" __MODULE_STRING(PLIP_MAX) "i");
 MODULE_PARM(timid, "1i");
 
-static struct device *dev_plip[PLIP_MAX] = { NULL, };
+static struct net_device *dev_plip[PLIP_MAX] = { NULL, };
 
-#ifdef MODULE
-void
-cleanup_module(void)
+static int inline 
+plip_searchfor(int list[], int a)
 {
 	int i;
+	for (i = 0; i < PLIP_MAX && list[i] != -1; i++) {
+		if (list[i] == a) return 1;
+	}
+	return 0;
+}
+
+/* plip_attach() is called (by the parport code) when a port is
+ * available to use. */
+static void plip_attach (struct parport *port)
+{
+	static int i = 0;
+
+	if ((parport[0] == -1 && (!timid || !port->devices)) || 
+	    plip_searchfor(parport, port->number)) {
+		if (i == PLIP_MAX) {
+			printk(KERN_ERR "plip: too many devices\n");
+			return;
+		}
+		dev_plip[i] = kmalloc(sizeof(struct net_device),
+				      GFP_KERNEL);
+		if (!dev_plip[i]) {
+			printk(KERN_ERR "plip: memory squeeze\n");
+			return;
+		}
+		memset(dev_plip[i], 0, sizeof(struct net_device));
+		sprintf(dev_plip[i]->name, "plip%d", i);
+		dev_plip[i]->priv = port;
+		if (plip_init_dev(dev_plip[i],port) ||
+		    register_netdev(dev_plip[i])) {
+			kfree(dev_plip[i]);
+			dev_plip[i] = NULL;
+		} else {
+			i++;
+		}
+	}
+}
+
+/* plip_detach() is called (by the parport code) when a port is
+ * no longer available to use. */
+static void plip_detach (struct parport *port)
+{
+	/* Nothing to do */
+}
+
+static struct parport_driver plip_driver = {
+	name:	"plip",
+	attach:	plip_attach,
+	detach:	plip_detach
+};
+
+static void __exit plip_cleanup_module (void)
+{
+	int i;
+
+	parport_unregister_driver (&plip_driver);
 
 	for (i=0; i < PLIP_MAX; i++) {
 		if (dev_plip[i]) {
@@ -1175,21 +1369,22 @@ cleanup_module(void)
 				parport_release(nl->pardev);
 			parport_unregister_device(nl->pardev);
 			kfree(dev_plip[i]->priv);
-			kfree(dev_plip[i]->name);
 			kfree(dev_plip[i]);
 			dev_plip[i] = NULL;
 		}
 	}
 }
 
-#define plip_init  init_module
-
-#else /* !MODULE */
+#ifndef MODULE
 
 static int parport_ptr = 0;
 
-void plip_setup(char *str, int *ints)
+static int __init plip_setup(char *str)
 {
+	int ints[4];
+
+	str = get_options(str, ARRAY_SIZE(ints), ints);
+
 	/* Ugh. */
 	if (!strncmp(str, "parport", 7)) {
 		int n = simple_strtoul(str+7, NULL, 10);
@@ -1209,26 +1404,15 @@ void plip_setup(char *str, int *ints)
 			       ints[1]);
 		}
 	}
+	return 1;
 }
 
-#endif /* MODULE */
+__setup("plip=", plip_setup);
 
-static int inline 
-plip_searchfor(int list[], int a)
+#endif /* !MODULE */
+
+static int __init plip_init (void)
 {
-	int i;
-	for (i = 0; i < PLIP_MAX && list[i] != -1; i++) {
-		if (list[i] == a) return 1;
-	}
-	return 0;
-}
-
-__initfunc(int
-plip_init(void))
-{
-	struct parport *pb = parport_enumerate();
-	int i=0;
-
 	if (parport[0] == -2)
 		return 0;
 
@@ -1237,47 +1421,17 @@ plip_init(void))
 		timid = 0;
 	}
 
-	/* If the user feeds parameters, use them */
-	while (pb) {
-		if ((parport[0] == -1 && (!timid || !pb->devices)) || 
-		    plip_searchfor(parport, pb->number)) {
-			if (i == PLIP_MAX) {
-				printk(KERN_ERR "plip: too many devices\n");
-				break;
-			}
-			dev_plip[i] = kmalloc(sizeof(struct device),
-					      GFP_KERNEL);
-			if (!dev_plip[i]) {
-				printk(KERN_ERR "plip: memory squeeze\n");
-				break;
-			}
-			memset(dev_plip[i], 0, sizeof(struct device));
-			dev_plip[i]->name = 
-				kmalloc(strlen("plipXXX"), GFP_KERNEL);
-			if (!dev_plip[i]->name) {
-				printk(KERN_ERR "plip: memory squeeze.\n");
-				kfree(dev_plip[i]);
-				break;
-			}
-			sprintf(dev_plip[i]->name, "plip%d", i);
-			dev_plip[i]->priv = pb;
-			if (plip_init_dev(dev_plip[i],pb) || register_netdev(dev_plip[i])) {
-				kfree(dev_plip[i]->name);
-				kfree(dev_plip[i]);
-			} else {
-				i++;
-			}
-		}
-		pb = pb->next;
-  	}
-
-	if (i == 0) {
-		printk(KERN_INFO "plip: no devices registered\n");
-		return -EIO;
+	if (parport_register_driver (&plip_driver)) {
+		printk (KERN_WARNING "plip: couldn't register driver\n");
+		return 1;
 	}
+
 	return 0;
 }
-
+
+module_init(plip_init);
+module_exit(plip_cleanup_module);
+
 /*
  * Local variables:
  * compile-command: "gcc -DMODULE -DMODVERSIONS -D__KERNEL__ -Wall -Wstrict-prototypes -O2 -g -fomit-frame-pointer -pipe -c plip.c"

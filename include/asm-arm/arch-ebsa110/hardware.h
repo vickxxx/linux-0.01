@@ -1,14 +1,18 @@
 /*
- * linux/include/asm-arm/arch-ebsa110/hardware.h
+ *  linux/include/asm-arm/arch-ebsa110/hardware.h
  *
- * Copyright (C) 1996-1999 Russell King.
+ *  Copyright (C) 1996-2000 Russell King.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * This file contains the hardware definitions of the EBSA-110.
  */
 #ifndef __ASM_ARCH_HARDWARE_H
 #define __ASM_ARCH_HARDWARE_H
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 /*
  * IO definitions
@@ -28,17 +32,21 @@
  */
 #define FLUSH_BASE_PHYS		0x40000000
 
-#else
+#else	/* __ASSEMBLY__ */
 
 #define IO_BASE			0
 
-#endif
+#endif	/* __ASSEMBLY__ */
 
 #define IO_SIZE			0x20000000
 #define IO_START		0xe0000000
 
 #define FLUSH_BASE		0xdf000000
 #define PCIO_BASE		0xf0000000
+
+#define UNCACHEABLE_ADDR	0xf3000000
+
+#define PARAMS_OFFSET		0x400
 
 #endif
 

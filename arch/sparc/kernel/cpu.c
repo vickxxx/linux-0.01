@@ -7,7 +7,7 @@
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/smp.h>
-#include <linux/tasks.h>
+#include <linux/threads.h>
 #include <asm/oplib.h>
 #include <asm/page.h>
 #include <asm/head.h>
@@ -92,7 +92,7 @@ struct cpu_iu_info linux_sparc_chips[] = {
   /* Someone please write the code to support this beast! ;) */
   { 2, 0, "Bipolar Integrated Technology - B5010"},
   { 3, 0, "LSI Logic Corporation - unknown-type"},
-  { 4, 0, "Texas Instruments, Inc. - SuperSparc 50"},
+  { 4, 0, "Texas Instruments, Inc. - SuperSparc-(II)"},
   /* SparcClassic  --  borned STP1010TAB-50*/
   { 4, 1, "Texas Instruments, Inc. - MicroSparc"},
   { 4, 2, "Texas Instruments, Inc. - MicroSparc II"},
@@ -123,7 +123,7 @@ char *sparc_fpu_type[NR_CPUS] = { 0 };
 
 unsigned int fsr_storage;
 
-__initfunc(void cpu_probe(void))
+void __init cpu_probe(void)
 {
 	int psr_impl, psr_vers, fpu_vers;
 	int i, cpuid, psr;

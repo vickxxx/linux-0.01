@@ -5,7 +5,6 @@
  * Copyright (C) 1994 - 1997 by Ralf Baechle
  */
 #include <asm/asm.h>
-#include <asm/mipsconfig.h>
 #include <asm/mipsregs.h>
 #include <asm/regdef.h>
 #include <asm/sni.h>

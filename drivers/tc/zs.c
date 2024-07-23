@@ -42,6 +42,7 @@
 #include <asm/segment.h>
 #include <asm/bitops.h>
 #include <asm/uaccess.h>
+#include <asm/wbflush.h>
 #include <asm/dec/interrupts.h>
 #include <asm/dec/machtype.h>
 #include <asm/dec/tc.h>
@@ -155,7 +156,7 @@ static struct termios *serial_termios_locked[NUM_CHANNELS];
  * memory if large numbers of serial ports are open.
  */
 static unsigned char tmp_buf[4096]; /* This is cheating */
-static struct semaphore tmp_buf_sem = MUTEX;
+static DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct dec_serial *info,
 					dev_t device, const char *routine)
@@ -195,7 +196,7 @@ static inline unsigned char read_zsreg(struct dec_zschannel *channel,
 
 	if (reg != 0) {
 		*channel->control = reg & 0xf;
-		RECOVERY_DELAY;
+		wbflush(); RECOVERY_DELAY;
 	}
 	retval = *channel->control;
 	RECOVERY_DELAY;
@@ -207,10 +208,10 @@ static inline void write_zsreg(struct dec_zschannel *channel,
 {
 	if (reg != 0) {
 		*channel->control = reg & 0xf;
-		RECOVERY_DELAY;
+		wbflush(); RECOVERY_DELAY;
 	}
 	*channel->control = value;
-	RECOVERY_DELAY;
+	wbflush(); RECOVERY_DELAY;
 	return;
 }
 
@@ -227,7 +228,7 @@ static inline void write_zsdata(struct dec_zschannel *channel,
 				unsigned char value)
 {
 	*channel->data = value;
-	RECOVERY_DELAY;
+	wbflush(); RECOVERY_DELAY;
 	return;
 }
 
@@ -556,10 +557,6 @@ static void do_softint(void *private_)
 			(tty->ldisc.write_wakeup)(tty);
 		wake_up_interruptible(&tty->write_wait);
 	}
-}
-
-static void rs_timer(void)
-{
 }
 
 static int startup(struct dec_serial * info)
@@ -1313,9 +1310,8 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 		char_time = 1;
 	if (timeout)
 		char_time = MIN(char_time, timeout);
-	while ((read_zsreg(info->zs_channel, 1) & ALL_SNT) == 0) {
+	while ((read_zsreg(info->zs_channel, 1) & Tx_BUF_EMP) == 0) {
 		current->state = TASK_INTERRUPTIBLE;
-		current->counter = 0;	/* make us low-priority */
 		schedule_timeout(char_time);
 		if (signal_pending(current))
 			break;
@@ -1352,7 +1348,7 @@ void rs_hangup(struct tty_struct *tty)
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct dec_serial *info)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	int		retval;
 	int		do_clocal = 0;
 
@@ -1433,7 +1429,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		    (tty->termios->c_cflag & CBAUD))
 			zs_rtsdtr(info, 1);
 		sti();
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ZILOG_INITIALIZED)) {
 #ifdef SERIAL_DO_RESTART
@@ -1564,7 +1560,7 @@ int rs_open(struct tty_struct *tty, struct file * filp)
 
 /* Finally, routines used to initialize the serial driver. */
 
-__initfunc(static void show_serial_version(void))
+static void __init show_serial_version(void)
 {
 	printk("DECstation Z8530 serial driver version 0.03\n");
 }
@@ -1572,11 +1568,10 @@ __initfunc(static void show_serial_version(void))
 /*  Initialize Z8530s zs_channels
  */
 
-__initfunc(static void probe_sccs(void))
+static void __init probe_sccs(void)
 {
 	struct dec_serial **pp;
 	int i, n, n_chips = 0, n_channels, chip, channel;
-	unsigned long flags;
 
 	/*
 	 * did we get here by accident?
@@ -1654,7 +1649,7 @@ __initfunc(static void probe_sccs(void))
 }
 
 /* zs_init inits the driver */
-__initfunc(int zs_init(void))
+int __init zs_init(void)
 {
 	int channel, i;
 	unsigned long flags;
@@ -1665,8 +1660,6 @@ __initfunc(int zs_init(void))
 
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = rs_timer;
-	timer_table[RS_TIMER].expires = 0;
 
 	/* Find out how many Z8530 SCCs we have */
 	if (zs_chain == 0)
@@ -1774,8 +1767,8 @@ __initfunc(int zs_init(void))
 		info->tqueue.data = info;
 		info->callout_termios =callout_driver.init_termios;
 		info->normal_termios = serial_driver.init_termios;
-		info->open_wait = 0;
-		info->close_wait = 0;
+		init_waitqueue_head(&info->open_wait);
+		init_waitqueue_head(&info->close_wait);
 		printk("tty%02d at 0x%08x (irq = %d)", info->line, 
 		       info->port, info->irq);
 		printk(" is a Z85C30 SCC\n");
@@ -1829,7 +1822,7 @@ zs_console_putchar(struct dec_serial *info, char ch)
 	while (!(*(info->zs_channel->control) & Tx_BUF_EMP) && --loops)
 		RECOVERY_DELAY;
 	*(info->zs_channel->data) = ch;
-	RECOVERY_DELAY;
+	wbflush(); RECOVERY_DELAY;
 
 	restore_flags(flags);
 }
@@ -1839,7 +1832,6 @@ static void serial_console_write(struct console *co, const char *s,
 {
 	struct dec_serial *info;
 	int i;
-	unsigned char nine;
 
 	info = zs_soft + co->index;
 
@@ -1886,7 +1878,7 @@ static kdev_t serial_console_device(struct console *c)
  *	- initialize the serial port
  *	Return non-zero if we didn't find a serial port.
  */
-__initfunc(static int serial_console_setup(struct console *co, char *options))
+static int __init serial_console_setup(struct console *co, char *options)
 {
 	struct dec_serial *info;
 	int	baud = 9600;
@@ -2006,26 +1998,21 @@ __initfunc(static int serial_console_setup(struct console *co, char *options))
 }
 
 static struct console sercons = {
-	"ttyS",
-	serial_console_write,
-	NULL,
-	serial_console_device,
-	serial_console_wait_key,
-	NULL,
-	serial_console_setup,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"ttyS",
+	write:		serial_console_write,
+	device:		serial_console_device,
+	wait_key:	serial_console_wait_key,
+	setup:		serial_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
 /*
  *	Register console.
  */
-__initfunc (long zs_serial_console_init(long kmem_start, long kmem_end))
+void __init zs_serial_console_init(void)
 {
 	register_console(&sercons);
-	return kmem_start;
 }
 #endif /* ifdef CONFIG_SERIAL_CONSOLE */
 
@@ -2087,7 +2074,7 @@ static inline void kgdb_chaninit(struct dec_zschannel *ms, int intson, int bps)
  * for /dev/ttyb which is determined in setup_arch() from the
  * boot command line flags.
  */
-__initfunc(void zs_kgdb_hook(int tty_num))
+void __init zs_kgdb_hook(int tty_num)
 {
 	/* Find out how many Z8530 SCCs we have */
 	if (zs_chain == 0)

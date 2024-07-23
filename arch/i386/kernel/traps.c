@@ -2,6 +2,9 @@
  *  linux/arch/i386/traps.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
+ *
+ *  Pentium III FXSR, SSE support
+ *	Gareth Hughes <gareth@valinux.com>, May 2000
  */
 
 /*
@@ -16,10 +19,10 @@
 #include <linux/ptrace.h>
 #include <linux/timer.h>
 #include <linux/mm.h>
-#include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/spinlock.h>
+#include <linux/interrupt.h>
 
 #ifdef CONFIG_MCA
 #include <linux/mca.h>
@@ -29,12 +32,13 @@
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
-#include <asm/spinlock.h>
 #include <asm/atomic.h>
 #include <asm/debugreg.h>
 #include <asm/desc.h>
+#include <asm/i387.h>
 
 #include <asm/smp.h>
+#include <asm/pgalloc.h>
 
 #ifdef CONFIG_X86_VISWS_APIC
 #include <asm/fixmap.h>
@@ -42,12 +46,14 @@
 #include <asm/lithium.h>
 #endif
 
-#include "irq.h"
+#include <linux/irq.h>
 
 asmlinkage int system_call(void);
 asmlinkage void lcall7(void);
+asmlinkage void lcall27(void);
 
-struct desc_struct default_ldt = { 0, 0 };
+struct desc_struct default_ldt[] = { { 0, 0 }, { 0, 0 }, { 0, 0 },
+		{ 0, 0 }, { 0, 0 } };
 
 /*
  * The IDT has to be page-aligned to simplify the Pentium
@@ -56,39 +62,7 @@ struct desc_struct default_ldt = { 0, 0 };
  */
 struct desc_struct idt_table[256] __attribute__((__section__(".data.idt"))) = { {0, 0}, };
 
-static inline void console_verbose(void)
-{
-	extern int console_loglevel;
-	console_loglevel = 15;
-}
-
-#define DO_ERROR(trapnr, signr, str, name, tsk) \
-asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
-{ \
-	tsk->tss.error_code = error_code; \
-	tsk->tss.trap_no = trapnr; \
-	force_sig(signr, tsk); \
-	die_if_no_fixup(str,regs,error_code); \
-}
-
-#define DO_VM86_ERROR(trapnr, signr, str, name, tsk) \
-asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
-{ \
-	lock_kernel(); \
-	if (regs->eflags & VM_MASK) { \
-		if (!handle_vm86_trap((struct kernel_vm86_regs *) regs, error_code, trapnr)) \
-			goto out; \
-		/* else fall through */ \
-	} \
-	tsk->tss.error_code = error_code; \
-	tsk->tss.trap_no = trapnr; \
-	force_sig(signr, tsk); \
-	die_if_kernel(str,regs,error_code); \
-out: \
-	unlock_kernel(); \
-}
-
-void page_exception(void);
+extern void bust_spinlocks(void);
 
 asmlinkage void divide_error(void);
 asmlinkage void debug(void);
@@ -106,19 +80,74 @@ asmlinkage void stack_segment(void);
 asmlinkage void general_protection(void);
 asmlinkage void page_fault(void);
 asmlinkage void coprocessor_error(void);
-asmlinkage void reserved(void);
+asmlinkage void simd_coprocessor_error(void);
 asmlinkage void alignment_check(void);
 asmlinkage void spurious_interrupt_bug(void);
+asmlinkage void machine_check(void);
 
 int kstack_depth_to_print = 24;
 
 /*
  * These constants are for searching for possible module text
- * segments.  VMALLOC_OFFSET comes from mm/vmalloc.c; MODULE_RANGE is
- * a guess of how much space is likely to be vmalloced.
+ * segments.
  */
-#define VMALLOC_OFFSET (8*1024*1024)
-#define MODULE_RANGE (8*1024*1024)
+
+void show_trace(unsigned long * stack)
+{
+	int i;
+	unsigned long addr, module_start, module_end;
+
+	if (!stack)
+		stack = (unsigned long*)&stack;
+
+	printk("Call Trace: ");
+	i = 1;
+	module_start = VMALLOC_START;
+	module_end = VMALLOC_END;
+	while (((long) stack & (THREAD_SIZE-1)) != 0) {
+		addr = *stack++;
+		/*
+		 * If the address is either in the text segment of the
+		 * kernel, or in the region which contains vmalloc'ed
+		 * memory, it *may* be the address of a calling
+		 * routine; if so, print it so that someone tracing
+		 * down the cause of the crash will be able to figure
+		 * out the call path that was taken.
+		 */
+		if (((addr >= (unsigned long) &_stext) &&
+		     (addr <= (unsigned long) &_etext)) ||
+		    ((addr >= module_start) && (addr <= module_end))) {
+			if (i && ((i % 8) == 0))
+				printk("\n       ");
+			printk("[<%08lx>] ", addr);
+			i++;
+		}
+	}
+	printk("\n");
+}
+
+void show_stack(unsigned long * esp)
+{
+	unsigned long *stack;
+	int i;
+
+	// debugging aid: "show_stack(NULL);" prints the
+	// back trace for this cpu.
+
+	if(esp==NULL)
+		esp=(unsigned long*)&esp;
+
+	stack = esp;
+	for(i=0; i < kstack_depth_to_print; i++) {
+		if (((long) stack & (THREAD_SIZE-1)) == 0)
+			break;
+		if (i && ((i % 8) == 0))
+			printk("\n       ");
+		printk("%08lx ", *stack++);
+	}
+	printk("\n");
+	show_trace(esp);
+}
 
 static void show_registers(struct pt_regs *regs)
 {
@@ -126,9 +155,8 @@ static void show_registers(struct pt_regs *regs)
 	int in_kernel = 1;
 	unsigned long esp;
 	unsigned short ss;
-	unsigned long *stack, addr, module_start, module_end;
 
-	esp = (unsigned long) (1+regs);
+	esp = (unsigned long) (&regs->esp);
 	ss = __KERNEL_DS;
 	if (regs->xcs & 3) {
 		in_kernel = 0;
@@ -143,57 +171,36 @@ static void show_registers(struct pt_regs *regs)
 		regs->esi, regs->edi, regs->ebp, esp);
 	printk("ds: %04x   es: %04x   ss: %04x\n",
 		regs->xds & 0xffff, regs->xes & 0xffff, ss);
-	store_TR(i);
-	printk("Process %s (pid: %d, process nr: %d, stackpage=%08lx)",
-		current->comm, current->pid, 0xffff & i, 4096+(unsigned long)current);
-
+	printk("Process %s (pid: %d, stackpage=%08lx)",
+		current->comm, current->pid, 4096+(unsigned long)current);
 	/*
 	 * When in-kernel, we also print out the stack and code at the
 	 * time of the fault..
 	 */
 	if (in_kernel) {
+
 		printk("\nStack: ");
-		stack = (unsigned long *) esp;
-		for(i=0; i < kstack_depth_to_print; i++) {
-			if (((long) stack & 4095) == 0)
-				break;
-			if (i && ((i % 8) == 0))
-				printk("\n       ");
-			printk("%08lx ", *stack++);
-		}
-		printk("\nCall Trace: ");
-		stack = (unsigned long *) esp;
-		i = 1;
-		module_start = PAGE_OFFSET + (max_mapnr << PAGE_SHIFT);
-		module_start = ((module_start + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1));
-		module_end = module_start + MODULE_RANGE;
-		while (((long) stack & 4095) != 0) {
-			addr = *stack++;
-			/*
-			 * If the address is either in the text segment of the
-			 * kernel, or in the region which contains vmalloc'ed
-			 * memory, it *may* be the address of a calling
-			 * routine; if so, print it so that someone tracing
-			 * down the cause of the crash will be able to figure
-			 * out the call path that was taken.
-			 */
-			if (((addr >= (unsigned long) &_stext) &&
-			     (addr <= (unsigned long) &_etext)) ||
-			    ((addr >= module_start) && (addr <= module_end))) {
-				if (i && ((i % 8) == 0))
-					printk("\n       ");
-				printk("[<%08lx>] ", addr);
-				i++;
-			}
-		}
+		show_stack((unsigned long*)esp);
+
 		printk("\nCode: ");
+		if(regs->eip < PAGE_OFFSET)
+			goto bad;
+
 		for(i=0;i<20;i++)
-			printk("%02x ", ((unsigned char *)regs->eip)[i]);
+		{
+			unsigned char c;
+			if(__get_user(c, &((unsigned char*)regs->eip)[i])) {
+bad:
+				printk(" Bad EIP value.");
+				break;
+			}
+			printk("%02x ", c);
+		}
 	}
 	printk("\n");
 }	
 
-spinlock_t die_lock;
+spinlock_t die_lock = SPIN_LOCK_UNLOCKED;
 
 void die(const char * str, struct pt_regs * regs, long err)
 {
@@ -201,6 +208,7 @@ void die(const char * str, struct pt_regs * regs, long err)
 	spin_lock_irq(&die_lock);
 	printk("%s: %04lx\n", str, err & 0xffff);
 	show_registers(regs);
+
 	spin_unlock_irq(&die_lock);
 	do_exit(SIGSEGV);
 }
@@ -211,48 +219,96 @@ static inline void die_if_kernel(const char * str, struct pt_regs * regs, long e
 		die(str, regs, err);
 }
 
-static void die_if_no_fixup(const char * str, struct pt_regs * regs, long err)
+static inline unsigned long get_cr2(void)
 {
-	if (!(regs->eflags & VM_MASK) && !(3 & regs->xcs))
-	{
-		unsigned long fixup;
-		fixup = search_exception_table(regs->eip);
-		if (fixup) {
-			regs->eip = fixup;
-			return;
-		}
-		die(str, regs, err);
-	}
+	unsigned long address;
+
+	/* get the address */
+	__asm__("movl %%cr2,%0":"=r" (address));
+	return address;
 }
 
-DO_VM86_ERROR( 0, SIGFPE,  "divide error", divide_error, current)
-DO_VM86_ERROR( 3, SIGTRAP, "int3", int3, current)
-DO_VM86_ERROR( 4, SIGSEGV, "overflow", overflow, current)
-DO_VM86_ERROR( 5, SIGSEGV, "bounds", bounds, current)
-DO_ERROR( 6, SIGILL,  "invalid operand", invalid_op, current)
-DO_VM86_ERROR( 7, SIGSEGV, "device not available", device_not_available, current)
-DO_ERROR( 8, SIGSEGV, "double fault", double_fault, current)
-DO_ERROR( 9, SIGFPE,  "coprocessor segment overrun", coprocessor_segment_overrun, current)
-DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS, current)
-DO_ERROR(11, SIGBUS,  "segment not present", segment_not_present, current)
-DO_ERROR(12, SIGBUS,  "stack segment", stack_segment, current)
-DO_ERROR(17, SIGSEGV, "alignment check", alignment_check, current)
-DO_ERROR(18, SIGSEGV, "reserved", reserved, current)
-/* I don't have documents for this but it does seem to cover the cache
-   flush from user space exception some people get. */
-DO_ERROR(19, SIGSEGV, "cache flush denied", cache_flush_denied, current)
-
-asmlinkage void cache_flush_denied(struct pt_regs * regs, long error_code)
+static void inline do_trap(int trapnr, int signr, char *str, int vm86,
+			   struct pt_regs * regs, long error_code, siginfo_t *info)
 {
-	if (regs->eflags & VM_MASK) {
-		handle_vm86_fault((struct kernel_vm86_regs *) regs, error_code);
+	if (vm86 && regs->eflags & VM_MASK)
+		goto vm86_trap;
+	if (!(regs->xcs & 3))
+		goto kernel_trap;
+
+	trap_signal: {
+		struct task_struct *tsk = current;
+		tsk->thread.error_code = error_code;
+		tsk->thread.trap_no = trapnr;
+		if (info)
+			force_sig_info(signr, info, tsk);
+		else
+			force_sig(signr, tsk);
 		return;
 	}
-	die_if_kernel("cache flush denied",regs,error_code);
-	current->tss.error_code = error_code;
-	current->tss.trap_no = 19;
-	force_sig(SIGSEGV, current);
+
+	kernel_trap: {
+		unsigned long fixup = search_exception_table(regs->eip);
+		if (fixup)
+			regs->eip = fixup;
+		else	
+			die(str, regs, error_code);
+		return;
+	}
+
+	vm86_trap: {
+		int ret = handle_vm86_trap((struct kernel_vm86_regs *) regs, error_code, trapnr);
+		if (ret) goto trap_signal;
+		return;
+	}
 }
+
+#define DO_ERROR(trapnr, signr, str, name) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	do_trap(trapnr, signr, str, 0, regs, error_code, NULL); \
+}
+
+#define DO_ERROR_INFO(trapnr, signr, str, name, sicode, siaddr) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	siginfo_t info; \
+	info.si_signo = signr; \
+	info.si_errno = 0; \
+	info.si_code = sicode; \
+	info.si_addr = (void *)siaddr; \
+	do_trap(trapnr, signr, str, 0, regs, error_code, &info); \
+}
+
+#define DO_VM86_ERROR(trapnr, signr, str, name) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	do_trap(trapnr, signr, str, 1, regs, error_code, NULL); \
+}
+
+#define DO_VM86_ERROR_INFO(trapnr, signr, str, name, sicode, siaddr) \
+asmlinkage void do_##name(struct pt_regs * regs, long error_code) \
+{ \
+	siginfo_t info; \
+	info.si_signo = signr; \
+	info.si_errno = 0; \
+	info.si_code = sicode; \
+	info.si_addr = (void *)siaddr; \
+	do_trap(trapnr, signr, str, 1, regs, error_code, &info); \
+}
+
+DO_VM86_ERROR_INFO( 0, SIGFPE,  "divide error", divide_error, FPE_INTDIV, regs->eip)
+DO_VM86_ERROR( 3, SIGTRAP, "int3", int3)
+DO_VM86_ERROR( 4, SIGSEGV, "overflow", overflow)
+DO_VM86_ERROR( 5, SIGSEGV, "bounds", bounds)
+DO_ERROR_INFO( 6, SIGILL,  "invalid operand", invalid_op, ILL_ILLOPN, regs->eip)
+DO_VM86_ERROR( 7, SIGSEGV, "device not available", device_not_available)
+DO_ERROR( 8, SIGSEGV, "double fault", double_fault)
+DO_ERROR( 9, SIGFPE,  "coprocessor segment overrun", coprocessor_segment_overrun)
+DO_ERROR(10, SIGSEGV, "invalid TSS", invalid_TSS)
+DO_ERROR(11, SIGBUS,  "segment not present", segment_not_present)
+DO_ERROR(12, SIGBUS,  "stack segment", stack_segment)
+DO_ERROR_INFO(17, SIGBUS, "alignment check", alignment_check, BUS_ADRALN, get_cr2())
 
 asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 {
@@ -262,15 +318,13 @@ asmlinkage void do_general_protection(struct pt_regs * regs, long error_code)
 	if (!(regs->xcs & 3))
 		goto gp_in_kernel;
 
-	current->tss.error_code = error_code;
-	current->tss.trap_no = 13;
+	current->thread.error_code = error_code;
+	current->thread.trap_no = 13;
 	force_sig(SIGSEGV, current);
 	return;
 
 gp_in_vm86:
-	lock_kernel();
 	handle_vm86_fault((struct kernel_vm86_regs *) regs, error_code);
-	unlock_kernel();
 	return;
 
 gp_in_kernel:
@@ -289,7 +343,11 @@ static void mem_parity_error(unsigned char reason, struct pt_regs * regs)
 {
 	printk("Uhhuh. NMI received. Dazed and confused, but trying to continue\n");
 	printk("You probably have a hardware problem with your RAM chips\n");
-}	
+
+	/* Clear and disable the memory parity error line. */
+	reason = (reason & 0xf) | 4;
+	outb(reason, 0x61);
+}
 
 static void io_check_error(unsigned char reason, struct pt_regs * regs)
 {
@@ -298,8 +356,8 @@ static void io_check_error(unsigned char reason, struct pt_regs * regs)
 	printk("NMI: IOCK error (debug interrupt?)\n");
 	show_registers(regs);
 
-	/* Re-enable the IOCK line, wait for a few seconds */
-	reason |= 8;
+	/* Re-enable the IOCK line, wait for a few seconds */
+	reason = (reason & 0xf) | 8;
 	outb(reason, 0x61);
 	i = 2000;
 	while (--i) udelay(1000);
@@ -322,42 +380,152 @@ static void unknown_nmi_error(unsigned char reason, struct pt_regs * regs)
 	printk("Do you have a strange power saving mode enabled?\n");
 }
 
+#if CONFIG_X86_IO_APIC
+
+int nmi_watchdog = 1;
+
+static int __init setup_nmi_watchdog(char *str)
+{
+        get_option(&str, &nmi_watchdog);
+        return 1;
+}
+
+__setup("nmi_watchdog=", setup_nmi_watchdog);
+
+static spinlock_t nmi_print_lock = SPIN_LOCK_UNLOCKED;
+
+inline void nmi_watchdog_tick(struct pt_regs * regs)
+{
+	/*
+	 * the best way to detect wether a CPU has a 'hard lockup' problem
+	 * is to check it's local APIC timer IRQ counts. If they are not
+	 * changing then that CPU has some problem.
+	 *
+	 * as these watchdog NMI IRQs are broadcasted to every CPU, here
+	 * we only have to check the current processor.
+	 *
+	 * since NMIs dont listen to _any_ locks, we have to be extremely
+	 * careful not to rely on unsafe variables. The printk might lock
+	 * up though, so we have to break up console_lock first ...
+	 * [when there will be more tty-related locks, break them up
+	 *  here too!]
+	 */
+
+	static unsigned int last_irq_sums [NR_CPUS],
+				alert_counter [NR_CPUS];
+
+	/*
+	 * Since current-> is always on the stack, and we always switch
+	 * the stack NMI-atomically, it's safe to use smp_processor_id().
+	 */
+	int sum, cpu = smp_processor_id();
+
+	sum = apic_timer_irqs[cpu];
+
+	if (last_irq_sums[cpu] == sum) {
+		/*
+		 * Ayiee, looks like this CPU is stuck ...
+		 * wait a few IRQs (5 seconds) before doing the oops ...
+		 */
+		alert_counter[cpu]++;
+		if (alert_counter[cpu] == 5*HZ) {
+			spin_lock(&nmi_print_lock);
+			/*
+			 * We are in trouble anyway, lets at least try
+			 * to get a message out.
+			 */
+			bust_spinlocks();
+			printk("NMI Watchdog detected LOCKUP on CPU%d, registers:\n", cpu);
+			show_registers(regs);
+			printk("console shuts up ...\n");
+			console_silent();
+			spin_unlock(&nmi_print_lock);
+			do_exit(SIGSEGV);
+		}
+	} else {
+		last_irq_sums[cpu] = sum;
+		alert_counter[cpu] = 0;
+	}
+}
+#endif
+
 asmlinkage void do_nmi(struct pt_regs * regs, long error_code)
 {
 	unsigned char reason = inb(0x61);
-	extern atomic_t nmi_counter;
 
-	atomic_inc(&nmi_counter);
+
+	++nmi_count(smp_processor_id());
+	if (!(reason & 0xc0)) {
+#if CONFIG_X86_IO_APIC
+		/*
+		 * Ok, so this is none of the documented NMI sources,
+		 * so it must be the NMI watchdog.
+		 */
+		if (nmi_watchdog) {
+			nmi_watchdog_tick(regs);
+			return;
+		} else
+			unknown_nmi_error(reason, regs);
+#else
+		unknown_nmi_error(reason, regs);
+#endif
+		return;
+	}
 	if (reason & 0x80)
 		mem_parity_error(reason, regs);
 	if (reason & 0x40)
 		io_check_error(reason, regs);
-	if (!(reason & 0xc0))
-		unknown_nmi_error(reason, regs);
+	/*
+	 * Reassert NMI in case it became active meanwhile
+	 * as it's edge-triggered.
+	 */
+	outb(0x8f, 0x70);
+	inb(0x71);		/* dummy */
+	outb(0x0f, 0x70);
+	inb(0x71);		/* dummy */
 }
 
 /*
- * Careful - we must not do a lock-kernel until we have checked that the
- * debug fault happened in user mode. Getting debug exceptions while
- * in the kernel has to be handled without locking, to avoid deadlocks..
+ * Our handling of the processor debug registers is non-trivial.
+ * We do not clear them on entry and exit from the kernel. Therefore
+ * it is possible to get a watchpoint trap here from inside the kernel.
+ * However, the code in ./ptrace.c has ensured that the user can
+ * only set watchpoints on userspace addresses. Therefore the in-kernel
+ * watchpoint trap can only occur in code which is reading/writing
+ * from user space. Such code must not hold kernel locks (since it
+ * can equally take a page fault), therefore it is safe to call
+ * force_sig_info even though that claims and releases locks.
+ * 
+ * Code in ./signal.c ensures that the debug control register
+ * is restored before we deliver any signal, and therefore that
+ * user code runs with the correct debug control register even though
+ * we clear it here.
  *
  * Being careful here means that we don't have to be as careful in a
  * lot of more complicated places (task switching can be a bit lazy
  * about restoring all the debug state, and ptrace doesn't have to
  * find every occurrence of the TF bit that could be saved away even
- * by user code - and we don't have to be careful about what values
- * can be written to the debug registers because there are no really
- * bad cases).
+ * by user code)
  */
 asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 {
 	unsigned int condition;
 	struct task_struct *tsk = current;
+	siginfo_t info;
+
+	__asm__ __volatile__("movl %%db6,%0" : "=r" (condition));
+
+	/* Mask out spurious debug traps due to lazy DR7 setting */
+	if (condition & (DR_TRAP0|DR_TRAP1|DR_TRAP2|DR_TRAP3)) {
+		if (!tsk->thread.debugreg[7])
+			goto clear_dr7;
+	}
 
 	if (regs->eflags & VM_MASK)
 		goto debug_vm86;
 
-	__asm__ __volatile__("movl %%db6,%0" : "=r" (condition));
+	/* Save debug status register where ptrace can see it */
+	tsk->thread.debugreg[6] = condition;
 
 	/* Mask out spurious TF errors due to lazy TF clearing */
 	if (condition & DR_STEP) {
@@ -365,41 +533,40 @@ asmlinkage void do_debug(struct pt_regs * regs, long error_code)
 		 * The TF error should be masked out only if the current
 		 * process is not traced and if the TRAP flag has been set
 		 * previously by a tracing process (condition detected by
-		 * the PF_DTRACE flag); remember that the i386 TRAP flag
+		 * the PT_DTRACE flag); remember that the i386 TRAP flag
 		 * can be modified by the process itself in user mode,
 		 * allowing programs to debug themselves without the ptrace()
 		 * interface.
 		 */
-		if ((tsk->flags & (PF_DTRACE|PF_PTRACED)) == PF_DTRACE)
+		if ((tsk->ptrace & (PT_DTRACE|PT_PTRACED)) == PT_DTRACE)
 			goto clear_TF;
 	}
 
-	/* Mast out spurious debug traps due to lazy DR7 setting */
-	if (condition & (DR_TRAP0|DR_TRAP1|DR_TRAP2|DR_TRAP3)) {
-		if (!tsk->tss.debugreg[7])
-			goto clear_dr7;
-	}
-
-	/* If this is a kernel mode trap, we need to reset db7 to allow us to continue sanely */
-	if ((regs->xcs & 3) == 0)
-		goto clear_dr7;
-
 	/* Ok, finally something we can handle */
-	tsk->tss.trap_no = 1;
-	tsk->tss.error_code = error_code;
-	force_sig(SIGTRAP, tsk);
-	return;
+	tsk->thread.trap_no = 1;
+	tsk->thread.error_code = error_code;
+	info.si_signo = SIGTRAP;
+	info.si_errno = 0;
+	info.si_code = TRAP_BRKPT;
+	
+	/* If this is a kernel mode trap, save the user PC on entry to 
+	 * the kernel, that's what the debugger can make sense of.
+	 */
+	info.si_addr = ((regs->xcs & 3) == 0) ? (void *)tsk->thread.eip : 
+	                                        (void *)regs->eip;
+	force_sig_info(SIGTRAP, &info, tsk);
 
-debug_vm86:
-	lock_kernel();
-	handle_vm86_trap((struct kernel_vm86_regs *) regs, error_code, 1);
-	unlock_kernel();
-	return;
-
+	/* Disable additional traps. They'll be re-enabled when
+	 * the signal is delivered.
+	 */
 clear_dr7:
 	__asm__("movl %0,%%db7"
 		: /* no output */
 		: "r" (0));
+	return;
+
+debug_vm86:
+	handle_vm86_trap((struct kernel_vm86_regs *) regs, error_code, 1);
 	return;
 
 clear_TF:
@@ -412,25 +579,137 @@ clear_TF:
  * the correct behaviour even in the presence of the asynchronous
  * IRQ13 behaviour
  */
-void math_error(void)
+void math_error(void *eip)
 {
 	struct task_struct * task;
+	siginfo_t info;
+	unsigned short cwd, swd;
 
 	/*
-	 * Save the info for the exception handler
-	 * (this will also clear the error)
+	 * Save the info for the exception handler and clear the error.
 	 */
 	task = current;
-	save_fpu(task);
-	task->tss.trap_no = 16;
-	task->tss.error_code = 0;
-	force_sig(SIGFPE, task);
+	save_init_fpu(task);
+	task->thread.trap_no = 16;
+	task->thread.error_code = 0;
+	info.si_signo = SIGFPE;
+	info.si_errno = 0;
+	info.si_code = __SI_FAULT;
+	info.si_addr = eip;
+	/*
+	 * (~cwd & swd) will mask out exceptions that are not set to unmasked
+	 * status.  0x3f is the exception bits in these regs, 0x200 is the
+	 * C1 reg you need in case of a stack fault, 0x040 is the stack
+	 * fault bit.  We should only be taking one exception at a time,
+	 * so if this combination doesn't produce any single exception,
+	 * then we have a bad program that isn't syncronizing its FPU usage
+	 * and it will suffer the consequences since we won't be able to
+	 * fully reproduce the context of the exception
+	 */
+	cwd = get_fpu_cwd(task);
+	swd = get_fpu_swd(task);
+	switch (((~cwd) & swd & 0x3f) | (swd & 0x240)) {
+		case 0x000:
+		default:
+			break;
+		case 0x001: /* Invalid Op */
+		case 0x040: /* Stack Fault */
+		case 0x240: /* Stack Fault | Direction */
+			info.si_code = FPE_FLTINV;
+			break;
+		case 0x002: /* Denormalize */
+		case 0x010: /* Underflow */
+			info.si_code = FPE_FLTUND;
+			break;
+		case 0x004: /* Zero Divide */
+			info.si_code = FPE_FLTDIV;
+			break;
+		case 0x008: /* Overflow */
+			info.si_code = FPE_FLTOVF;
+			break;
+		case 0x020: /* Precision */
+			info.si_code = FPE_FLTRES;
+			break;
+	}
+	force_sig_info(SIGFPE, &info, task);
 }
 
 asmlinkage void do_coprocessor_error(struct pt_regs * regs, long error_code)
 {
 	ignore_irq13 = 1;
-	math_error();
+	math_error((void *)regs->eip);
+}
+
+void simd_math_error(void *eip)
+{
+	struct task_struct * task;
+	siginfo_t info;
+	unsigned short mxcsr;
+
+	/*
+	 * Save the info for the exception handler and clear the error.
+	 */
+	task = current;
+	save_init_fpu(task);
+	task->thread.trap_no = 19;
+	task->thread.error_code = 0;
+	info.si_signo = SIGFPE;
+	info.si_errno = 0;
+	info.si_code = __SI_FAULT;
+	info.si_addr = eip;
+	/*
+	 * The SIMD FPU exceptions are handled a little differently, as there
+	 * is only a single status/control register.  Thus, to determine which
+	 * unmasked exception was caught we must mask the exception mask bits
+	 * at 0x1f80, and then use these to mask the exception bits at 0x3f.
+	 */
+	mxcsr = get_fpu_mxcsr(task);
+	switch (~((mxcsr & 0x1f80) >> 7) & (mxcsr & 0x3f)) {
+		case 0x000:
+		default:
+			break;
+		case 0x001: /* Invalid Op */
+			info.si_code = FPE_FLTINV;
+			break;
+		case 0x002: /* Denormalize */
+		case 0x010: /* Underflow */
+			info.si_code = FPE_FLTUND;
+			break;
+		case 0x004: /* Zero Divide */
+			info.si_code = FPE_FLTDIV;
+			break;
+		case 0x008: /* Overflow */
+			info.si_code = FPE_FLTOVF;
+			break;
+		case 0x020: /* Precision */
+			info.si_code = FPE_FLTRES;
+			break;
+	}
+	force_sig_info(SIGFPE, &info, task);
+}
+
+asmlinkage void do_simd_coprocessor_error(struct pt_regs * regs,
+					  long error_code)
+{
+	if (cpu_has_xmm) {
+		/* Handle SIMD FPU exceptions on PIII+ processors. */
+		ignore_irq13 = 1;
+		simd_math_error((void *)regs->eip);
+	} else {
+		/*
+		 * Handle strange cache flush from user space exception
+		 * in all other cases.  This is undocumented behaviour.
+		 */
+		if (regs->eflags & VM_MASK) {
+			handle_vm86_fault((struct kernel_vm86_regs *)regs,
+					  error_code);
+			return;
+		}
+		die_if_kernel("cache flush denied", regs, error_code);
+		current->thread.trap_no = 19;
+		current->thread.error_code = error_code;
+		force_sig(SIGSEGV, current);
+	}
 }
 
 asmlinkage void do_spurious_interrupt_bug(struct pt_regs * regs,
@@ -452,34 +731,29 @@ asmlinkage void do_spurious_interrupt_bug(struct pt_regs * regs,
 asmlinkage void math_state_restore(struct pt_regs regs)
 {
 	__asm__ __volatile__("clts");		/* Allow maths ops (or we recurse) */
-	if(current->used_math)
-		__asm__("frstor %0": :"m" (current->tss.i387));
-	else
-	{
-		/*
-		 *	Our first FPU usage, clean the chip.
-		 */
-		__asm__("fninit");
-		current->used_math = 1;
+
+	if (current->used_math) {
+		restore_fpu(current);
+	} else {
+		init_fpu();
 	}
-	current->flags|=PF_USEDFPU;		/* So we fnsave on switch_to() */
+	current->flags |= PF_USEDFPU;	/* So we fnsave on switch_to() */
 }
 
 #ifndef CONFIG_MATH_EMULATION
 
 asmlinkage void math_emulate(long arg)
 {
-	lock_kernel();
 	printk("math-emulation not enabled and no coprocessor found.\n");
 	printk("killing %s.\n",current->comm);
 	force_sig(SIGFPE,current);
 	schedule();
-	unlock_kernel();
 }
 
 #endif /* CONFIG_MATH_EMULATION */
 
-__initfunc(void trap_init_f00f_bug(void))
+#ifndef CONFIG_M686
+void __init trap_init_f00f_bug(void)
 {
 	unsigned long page;
 	pgd_t * pgd;
@@ -494,9 +768,12 @@ __initfunc(void trap_init_f00f_bug(void))
 	pgd = pgd_offset(&init_mm, page);
 	pmd = pmd_offset(pgd, page);
 	pte = pte_offset(pmd, page);
-	free_page(pte_page(*pte));
-	*pte = mk_pte(&idt_table, PAGE_KERNEL_RO);
-	local_flush_tlb();
+	__free_page(pte_page(*pte));
+	*pte = mk_pte_phys(__pa(&idt_table), PAGE_KERNEL_RO);
+	/*
+	 * Not that any PGE-capable kernel should have the f00f bug ...
+	 */
+	__flush_tlb_all();
 
 	/*
 	 * "idt" is magic - it overlaps the idt_descr
@@ -506,6 +783,7 @@ __initfunc(void trap_init_f00f_bug(void))
 	idt = (struct desc_struct *)page;
 	__asm__ __volatile__("lidt %0": "=m" (idt_descr));
 }
+#endif
 
 #define _set_gate(gate_addr,type,dpl,addr) \
 do { \
@@ -558,7 +836,7 @@ static void __init set_call_gate(void *a, void *addr)
 		((limit) & 0x0ffff); }
 
 #define _set_tssldt_desc(n,addr,limit,type) \
-__asm__ __volatile__ ("movw %3,0(%2)\n\t" \
+__asm__ __volatile__ ("movw %w3,0(%2)\n\t" \
 	"movw %%ax,2(%2)\n\t" \
 	"rorl $16,%%eax\n\t" \
 	"movb %%al,4(%2)\n\t" \
@@ -570,12 +848,12 @@ __asm__ __volatile__ ("movw %3,0(%2)\n\t" \
 
 void set_tss_desc(unsigned int n, void *addr)
 {
-	_set_tssldt_desc(gdt_table+FIRST_TSS_ENTRY+(n<<1), (int)addr, 235, 0x89);
+	_set_tssldt_desc(gdt_table+__TSS(n), (int)addr, 235, 0x89);
 }
 
 void set_ldt_desc(unsigned int n, void *addr, unsigned int size)
 {
-	_set_tssldt_desc(gdt_table+FIRST_LDT_ENTRY+(n<<1), (int)addr, ((size << 3) - 1), 0x82);
+	_set_tssldt_desc(gdt_table+__LDT(n), (int)addr, ((size << 3)-1), 0x82);
 }
 
 #ifdef CONFIG_X86_VISWS_APIC
@@ -652,9 +930,9 @@ cobalt_init(void)
 	 * On normal SMP PC this is used only with SMP, but we have to
 	 * use it and set it up here to start the Cobalt clock
 	 */
-	set_fixmap(FIX_APIC_BASE, APIC_PHYS_BASE);
+	set_fixmap(FIX_APIC_BASE, APIC_DEFAULT_PHYS_BASE);
 	printk("Local APIC ID %lx\n", apic_read(APIC_ID));
-	printk("Local APIC Version %lx\n", apic_read(APIC_VERSION));
+	printk("Local APIC Version %lx\n", apic_read(APIC_LVR));
 
 	set_fixmap(FIX_CO_CPU, CO_CPU_PHYS);
 	printk("Cobalt Revision %lx\n", co_cpu_read(CO_CPU_REV));
@@ -670,12 +948,14 @@ cobalt_init(void)
 #endif
 void __init trap_init(void)
 {
-	if (readl(0x0FFFD9) == 'E' + ('I'<<8) + ('S'<<16) + ('A'<<24))
+#ifdef CONFIG_EISA
+	if (isa_readl(0x0FFFD9) == 'E'+('I'<<8)+('S'<<16)+('A'<<24))
 		EISA_bus = 1;
-	set_call_gate(&default_ldt,lcall7);
+#endif
+
 	set_trap_gate(0,&divide_error);
 	set_trap_gate(1,&debug);
-	set_trap_gate(2,&nmi);
+	set_intr_gate(2,&nmi);
 	set_system_gate(3,&int3);	/* int3-5 can be called from all */
 	set_system_gate(4,&overflow);
 	set_system_gate(5,&bounds);
@@ -691,16 +971,23 @@ void __init trap_init(void)
 	set_trap_gate(15,&spurious_interrupt_bug);
 	set_trap_gate(16,&coprocessor_error);
 	set_trap_gate(17,&alignment_check);
+	set_trap_gate(18,&machine_check);
+	set_trap_gate(19,&simd_coprocessor_error);
+
 	set_system_gate(SYSCALL_VECTOR,&system_call);
 
-	/* set up GDT task & ldt entries */
-	set_tss_desc(0, &init_task.tss);
-	set_ldt_desc(0, &default_ldt, 1);
+	/*
+	 * default LDT is a single-entry callgate to lcall7 for iBCS
+	 * and a callgate to lcall27 for Solaris/x86 binaries
+	 */
+	set_call_gate(&default_ldt[0],lcall7);
+	set_call_gate(&default_ldt[4],lcall27);
 
-	/* Clear NT, so that we won't have troubles with that later on */
-	__asm__("pushfl ; andl $0xffffbfff,(%esp) ; popfl");
-	load_TR(0);
-	load_ldt(0);
+	/*
+	 * Should be a barrier for any external CPU state.
+	 */
+	cpu_init();
+
 #ifdef CONFIG_X86_VISWS_APIC
 	superio_init();
 	lithium_init();

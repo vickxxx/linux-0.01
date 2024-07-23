@@ -3,7 +3,7 @@
  *
  *	Copyright (C) 1995 David A Rusling
  *	Copyright (C) 1996 Jay A Estabrook
- *	Copyright (C) 1998 Richard Henderson
+ *	Copyright (C) 1998, 1999 Richard Henderson
  *
  * Code supporting the RAWHIDE.
  */
@@ -19,49 +19,101 @@
 #include <asm/system.h>
 #include <asm/dma.h>
 #include <asm/irq.h>
-#include <asm/pci.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_mcpcia.h>
 
 #include "proto.h"
-#include "irq.h"
-#include "bios32.h"
-#include "machvec.h"
+#include "irq_impl.h"
+#include "pci_impl.h"
+#include "machvec_impl.h"
 
+
+/*
+ * HACK ALERT! only the boot cpu is used for interrupts.
+ */
+
+
+/* Note mask bit is true for ENABLED irqs.  */
+
+static unsigned int hose_irq_masks[4] = {
+	0xff0000, 0xfe0000, 0xff0000, 0xff0000
+};
+static unsigned int cached_irq_masks[4];
+spinlock_t rawhide_irq_lock = SPIN_LOCK_UNLOCKED;
+
+static inline void
+rawhide_update_irq_hw(int hose, int mask)
+{
+	*(vuip)MCPCIA_INT_MASK0(MCPCIA_HOSE2MID(hose)) = mask;
+	mb();
+	*(vuip)MCPCIA_INT_MASK0(MCPCIA_HOSE2MID(hose));
+}
+
+static inline void 
+rawhide_enable_irq(unsigned int irq)
+{
+	unsigned int mask, hose;
+
+	irq -= 16;
+	hose = irq / 24;
+	irq -= hose * 24;
+
+	spin_lock(&rawhide_irq_lock);
+	mask = cached_irq_masks[hose] |= 1 << irq;
+	mask |= hose_irq_masks[hose];
+	rawhide_update_irq_hw(hose, mask);
+	spin_unlock(&rawhide_irq_lock);
+}
+
+static void 
+rawhide_disable_irq(unsigned int irq)
+{
+	unsigned int mask, hose;
+
+	irq -= 16;
+	hose = irq / 24;
+	irq -= hose * 24;
+
+	spin_lock(&rawhide_irq_lock);
+	mask = cached_irq_masks[hose] &= ~(1 << irq);
+	mask |= hose_irq_masks[hose];
+	rawhide_update_irq_hw(hose, mask);
+	spin_unlock(&rawhide_irq_lock);
+}
+
+
+static unsigned int
+rawhide_startup_irq(unsigned int irq)
+{
+	rawhide_enable_irq(irq);
+	return 0;
+}
 
 static void
-rawhide_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
+rawhide_end_irq(unsigned int irq)
 {
-	if (irq >= 40) {
-		/* PCI bus 1 with builtin NCR810 SCSI */
-		*(vuip)MCPCIA_INT_MASK0(1) =
-			(~((mask) >> 40) & 0x00ffffffU) | 0x00fe0000U;
-		mb();
-		/* ... and read it back to make sure it got written.  */
-	  	*(vuip)MCPCIA_INT_MASK0(1);
-	}
-	else if (irq >= 16) {
-		/* PCI bus 0 with EISA bridge */
-		*(vuip)MCPCIA_INT_MASK0(0) =
-			(~((mask) >> 16) & 0x00ffffffU) | 0x00ff0000U;
-		mb();
-		/* ... and read it back to make sure it got written.  */
-	  	*(vuip)MCPCIA_INT_MASK0(0);
-	}
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);	/* ISA PIC2 */
-	else
-		outb(mask, 0x21);	/* ISA PIC1 */
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		rawhide_enable_irq(irq);
 }
+
+static struct hw_interrupt_type rawhide_irq_type = {
+	typename:	"RAWHIDE",
+	startup:	rawhide_startup_irq,
+	shutdown:	rawhide_disable_irq,
+	enable:		rawhide_enable_irq,
+	disable:	rawhide_disable_irq,
+	ack:		rawhide_disable_irq,
+	end:		rawhide_end_irq,
+};
 
 static void 
 rawhide_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 {
-	int irq, ack;
+	int irq;
 
-	ack = irq = (vector - 0x800) >> 4;
+	irq = (vector - 0x800) >> 4;
 
         /*
          * The RAWHIDE SRM console reports PCI interrupts with a vector
@@ -70,39 +122,40 @@ rawhide_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	 * it line up with the actual bit numbers from the REQ registers,
 	 * which is how we manage the interrupts/mask. Sigh...
 	 *
-	 * also, PCI #1 interrupts are offset some more... :-(
+	 * Also, PCI #1 interrupts are offset some more... :-(
          */
-	if (irq == 52)
-		ack = irq = 56; /* SCSI on PCI 1 is special */
-	else {
-		if (irq >= 24) /* adjust all PCI interrupts down 8 */
-			ack = irq = irq - 8;
-		if (irq >= 48) /* adjust PCI bus 1 interrupts down another 8 */
-			ack = irq = irq - 8;
+
+	if (irq == 52) {
+		/* SCSI on PCI1 is special.  */
+		irq = 72;
 	}
 
-	handle_irq(irq, ack, regs);
+	/* Adjust by which hose it is from.  */
+	irq -= ((irq + 16) >> 2) & 0x38;
+
+	handle_irq(irq, regs);
 }
 
 static void __init
 rawhide_init_irq(void)
 {
-	STANDARD_INIT_IRQ_PROLOG;
+	struct pci_controler *hose;
+	long i;
 
-	/* HACK ALERT! only PCI busses 0 and 1 are used currently,
-	   and routing is only to CPU #1*/
+	mcpcia_init_hoses();
 
-	*(vuip)MCPCIA_INT_MASK0(0) =
-		(~((alpha_irq_mask) >> 16) & 0x00ffffffU) | 0x00ff0000U; mb();
-	/* ... and read it back to make sure it got written.  */
-	*(vuip)MCPCIA_INT_MASK0(0);
+	for (hose = hose_head; hose; hose = hose->next) {
+		int h = hose->index;
+		rawhide_update_irq_hw(h, hose_irq_masks[h]);
+	}
 
-	*(vuip)MCPCIA_INT_MASK0(1) =
-		(~((alpha_irq_mask) >> 40) & 0x00ffffffU) | 0x00fe0000U; mb();
-	/* ... and read it back to make sure it got written.  */
-	*(vuip)MCPCIA_INT_MASK0(1);
+	for (i = 16; i < 128; ++i) {
+		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
+		irq_desc[i].handler = &rawhide_irq_type;
+	}
 
-	enable_irq(2);
+	init_i8259a_irqs();
+	common_init_isa_dma();
 }
 
 /*
@@ -139,9 +192,9 @@ rawhide_init_irq(void)
  */
 
 static int __init
-rawhide_map_irq(struct pci_dev *dev, int slot, int pin)
+rawhide_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[5][5] __initlocaldata = {
+	static char irq_tab[5][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{ 16+16, 16+16, 16+16, 16+16, 16+16}, /* IdSel 1 SCSI PCI 1 */
 		{ 16+ 0, 16+ 0, 16+ 1, 16+ 2, 16+ 3}, /* IdSel 2 slot 2 */
@@ -150,17 +203,12 @@ rawhide_map_irq(struct pci_dev *dev, int slot, int pin)
 		{ 16+12, 16+12, 16+13, 16+14, 16+15}  /* IdSel 5 slot 5 */
 	};
 	const long min_idsel = 1, max_idsel = 5, irqs_per_slot = 5;
+
+	struct pci_controler *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
 	if (irq >= 0)
-		irq += 24 * bus2hose[dev->bus->number]->pci_hose_index;
+		irq += 24 * hose->index;
 	return irq;
-}
-
-static void __init
-rawhide_pci_fixup(void)
-{
-	layout_all_busses(DEFAULT_IO_BASE, RAWHIDE_DEFAULT_MEM_BASE);
-	common_pci_fixup(rawhide_map_irq, common_swizzle);
 }
 
 
@@ -176,17 +224,18 @@ struct alpha_machine_vector rawhide_mv __initmv = {
 	DO_MCPCIA_BUS,
 	machine_check:		mcpcia_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	MCPCIA_DEFAULT_MEM_BASE,
 
-	nr_irqs:		64,
-	irq_probe_mask:		_PROBE_MASK(64),
-	update_irq_hw:		rawhide_update_irq_hw,
-	ack_irq:		generic_ack_irq,
+	nr_irqs:		128,
 	device_interrupt:	rawhide_srm_device_interrupt,
 
 	init_arch:		mcpcia_init_arch,
 	init_irq:		rawhide_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		rawhide_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		common_init_pci,
+	kill_arch:		NULL,
+	pci_map_irq:		rawhide_map_irq,
+	pci_swizzle:		common_swizzle,
 };
 ALIAS_MV(rawhide)

@@ -1,4 +1,4 @@
-/* $Id: head.S,v 1.96 1999/06/03 15:02:15 davem Exp $
+/* $Id: head.S,v 1.103 2000/05/09 17:40:13 davem Exp $
  * head.S: The initial boot code for the Sparc port of Linux.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -78,6 +78,11 @@ sun4e_notsup:
         .asciz  "Sparc-Linux sun4e support does not exist\n\n"
 	.align 4
 
+#ifndef CONFIG_SUNOS_EMUL
+#undef SUNOS_SYSCALL_TRAP
+#define SUNOS_SYSCALL_TRAP SUNOS_NO_SYSCALL_TRAP
+#endif
+
 	/* The Sparc trap table, bootloader gives us control at _start. */
 	.text
 	.globl	start, _stext, _start, __stext
@@ -87,7 +92,7 @@ __stext:
 _stext:
 start:
 C_LABEL(trapbase):
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 C_LABEL(trapbase_cpu0):
 #endif
 /* We get control passed to us here at t_zero. */
@@ -119,7 +124,7 @@ t_irq12:TRAP_ENTRY_INTERRUPT(12)            /* IRQ Zilog serial chip         */
 t_irq13:TRAP_ENTRY_INTERRUPT(13)            /* IRQ Audio Intr.               */
 t_irq14:TRAP_ENTRY_INTERRUPT(14)            /* IRQ Timer #2                  */
 	.globl	t_nmi
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 t_nmi:	NMI_TRAP                            /* Level 15 (NMI)                */
 #else
 t_nmi:	TRAP_ENTRY(0x1f, linux_trap_ipi15_sun4m)
@@ -171,7 +176,8 @@ t_bad96:BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99) BAD_TRAP(0x9
 t_bad9b:BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e) BAD_TRAP(0x9f)
 t_getcc:GETCC_TRAP                          /* Get Condition Codes           */
 t_setcc:SETCC_TRAP                          /* Set Condition Codes           */
-t_bada2:BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+t_getpsr:GETPSR_TRAP                        /* Get PSR Register              */
+t_bada3:BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
 t_slowi:INDIRECT_SOLARIS_SYSCALL(156)
 t_bada8:BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 t_badac:BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
@@ -197,7 +203,7 @@ dbtrap2:BAD_TRAP(0xff)                      /* Debugger/PROM breakpoint #2   */
 	.globl	C_LABEL(end_traptable)
 C_LABEL(end_traptable):
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* Trap tables for the other cpus. */
 	.globl	C_LABEL(trapbase_cpu1), C_LABEL(trapbase_cpu2), C_LABEL(trapbase_cpu3)
 C_LABEL(trapbase_cpu1):
@@ -247,8 +253,8 @@ C_LABEL(trapbase_cpu1):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
 	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
@@ -315,8 +321,8 @@ C_LABEL(trapbase_cpu2):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
 	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
@@ -383,8 +389,8 @@ C_LABEL(trapbase_cpu3):
 	LINUX_SYSCALL_TRAP BAD_TRAP(0x91) BAD_TRAP(0x92) BAD_TRAP(0x93) BAD_TRAP(0x94)
 	BAD_TRAP(0x95) BAD_TRAP(0x96) BAD_TRAP(0x97) BAD_TRAP(0x98) BAD_TRAP(0x99)
 	BAD_TRAP(0x9a) BAD_TRAP(0x9b) BAD_TRAP(0x9c) BAD_TRAP(0x9d) BAD_TRAP(0x9e)
-	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP
-	BAD_TRAP(0xa2) BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
+	BAD_TRAP(0x9f) GETCC_TRAP SETCC_TRAP GETPSR_TRAP
+	BAD_TRAP(0xa3) BAD_TRAP(0xa4) BAD_TRAP(0xa5) BAD_TRAP(0xa6)
 	INDIRECT_SOLARIS_SYSCALL(156) BAD_TRAP(0xa8) BAD_TRAP(0xa9) BAD_TRAP(0xaa) BAD_TRAP(0xab)
 	BAD_TRAP(0xac) BAD_TRAP(0xad) BAD_TRAP(0xae) BAD_TRAP(0xaf) BAD_TRAP(0xb0)
 	BAD_TRAP(0xb1) BAD_TRAP(0xb2) BAD_TRAP(0xb3) BAD_TRAP(0xb4) BAD_TRAP(0xb5)
@@ -436,7 +442,7 @@ C_LABEL(empty_zero_page):		.skip PAGE_SIZE
  */
 	.ascii	"HdrS"
 	.word	LINUX_VERSION_CODE
-	.half	0x0201		/* HdrS version */
+	.half	0x0203		/* HdrS version */
 C_LABEL(root_flags):
 	.half	1
 C_LABEL(root_dev):
@@ -448,6 +454,8 @@ C_LABEL(sparc_ramdisk_image):
 C_LABEL(sparc_ramdisk_size):
 	.word	0
 	.word	C_LABEL(reboot_command)
+	.word	0, 0, 0
+	.word	_end
 
 /* Cool, here we go. Pick up the romvec pointer in %o0 and stash it in
  * %g7 and at prom_vector_p. And also quickly check whether we are on
@@ -475,10 +483,8 @@ current_pc:
 1:
 		mov	%o7, %g3
 
-#ifndef CONFIG_AP1000
 		tst	%o0
 		be	no_sun4u_here
-#endif
 		 mov	%g4, %o7		/* Previous %o7. */
 	
 		mov	%o0, %l0		! stash away romvec
@@ -754,11 +760,6 @@ go_to_highmem:
  * I figure out and store nwindows and nwindowsm1 later on.
  */
 execute_in_high_mem:
-#if CONFIG_AP1000
-                /* we don't have a prom :-( */
-                b sun4m_init
-                nop
-#endif
 		mov	%l0, %o0		! put back romvec
 		mov	%l1, %o1		! and debug_vec
 
@@ -884,7 +885,7 @@ sun4d_init:
 	or	%g5, %g3, %g5
 	st	%g5, [%g4]
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	/* Get our CPU id out of bootbus */
 	set     SUN4D_BOOTBUS_CPUID, %g3
 	lduba   [%g3] ASI_M_CTL, %g3
@@ -1029,7 +1030,7 @@ sun4c_continue_boot:
 		 */
 		set	C_LABEL(init_task_union), %g6
 		set	C_LABEL(current_set), %g2
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 		sethi	%hi(C_LABEL(boot_cpu_id4)), %g3
 		ldub	[%g3 + %lo(C_LABEL(boot_cpu_id4))], %g3
 		st	%g6, [%g2]
@@ -1037,7 +1038,7 @@ sun4c_continue_boot:
 #endif
 		st	%g6, [%g2]
 
-		st	%g0, [%g6 + AOFF_task_tss + AOFF_thread_uwinmask]
+		st	%g0, [%g6 + AOFF_task_thread + AOFF_thread_uwinmask]
 
 /* Compute NWINDOWS and stash it away. Now uses %wim trick explained
  * in the V8 manual. Ok, this method seems to work, Sparc is cool...

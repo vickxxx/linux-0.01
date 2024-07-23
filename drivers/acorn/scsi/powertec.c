@@ -1,7 +1,11 @@
 /*
- * linux/arch/arm/drivers/scsi/powertec.c
+ *  linux/drivers/acorn/scsi/powertec.c
  *
- * Copyright (C) 1997-1998 Russell King
+ *  Copyright (C) 1997-2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * This driver is based on experimentation.  Hence, it may have made
  * assumptions about the particular card that I have available, and
@@ -13,8 +17,8 @@
  *  15-04-1998	RMK	Only do PIO if FAS216 will allow it.
  *  02-05-1998	RMK	Moved DMA sg list into per-interface structure.
  *  27-06-1998	RMK	Changed asm/delay.h to linux/delay.h
+ *  02-04-2000	RMK	Updated for new error handling code.
  */
-
 #include <linux/module.h>
 #include <linux/blk.h>
 #include <linux/kernel.h>
@@ -25,6 +29,7 @@
 #include <linux/unistd.h>
 #include <linux/stat.h>
 #include <linux/delay.h>
+#include <linux/pci.h>
 
 #include <asm/dma.h>
 #include <asm/ecard.h>
@@ -67,7 +72,7 @@
  */
 #define VER_MAJOR	0
 #define VER_MINOR	0
-#define VER_PATCH	2
+#define VER_PATCH	5
 
 MODULE_AUTHOR("Russell King");
 MODULE_DESCRIPTION("Powertec SCSI driver");
@@ -80,11 +85,6 @@ static struct expansion_card *ecs[MAX_ECARDS];
  * Use term=0,1,0,0,0 to turn terminators on/off
  */
 int term[MAX_ECARDS] = { 1, 1, 1, 1, 1, 1, 1, 1 };
-
-static struct proc_dir_entry proc_scsi_powertec = {
-	PROC_SCSI_QLOGICISP, 8, "powertec",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 /* Prototype: void powertecscsi_irqenable(ec, irqnr)
  * Purpose  : Enable interrupts on Powertec SCSI card
@@ -151,15 +151,6 @@ powertecscsi_intr(int irq, void *dev_id, struct pt_regs *regs)
 	fas216_intr(host);
 }
 
-static void
-powertecscsi_invalidate(char *addr, long len, fasdmadir_t direction)
-{
-	if (direction == DMA_OUT)
-		dma_cache_wback((unsigned long)addr, (unsigned long)len);
-	else
-		dma_cache_inv((unsigned long)addr, (unsigned long)len);
-}
-
 /* Prototype: fasdmatype_t powertecscsi_dma_setup(host, SCpnt, direction, min_type)
  * Purpose  : initialises DMA/PIO
  * Params   : host      - host
@@ -177,29 +168,27 @@ powertecscsi_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
 
 	if (dmach != NO_DMA &&
 	    (min_type == fasdma_real_all || SCp->this_residual >= 512)) {
-		int buf;
+		int bufs = SCp->buffers_residual;
+		int pci_dir, dma_dir;
 
-		for (buf = 1; buf <= SCp->buffers_residual &&
-			      buf < NR_SG; buf++) {
-			info->dmasg[buf].address = __virt_to_bus(
-				(unsigned long)SCp->buffer[buf].address);
-			info->dmasg[buf].length = SCp->buffer[buf].length;
+		if (bufs)
+			memcpy(info->sg + 1, SCp->buffer + 1,
+				sizeof(struct scatterlist) * bufs);
+		info->sg[0].address = SCp->ptr;
+		info->sg[0].length = SCp->this_residual;
 
-			powertecscsi_invalidate(SCp->buffer[buf].address,
-						SCp->buffer[buf].length,
-						direction);
-		}
+		if (direction == DMA_OUT)
+			pci_dir = PCI_DMA_TODEVICE,
+			dma_dir = DMA_MODE_WRITE;
+		else
+			pci_dir = PCI_DMA_FROMDEVICE,
+			dma_dir = DMA_MODE_READ;
 
-		info->dmasg[0].address = __virt_to_phys((unsigned long)SCp->ptr);
-		info->dmasg[0].length = SCp->this_residual;
-		powertecscsi_invalidate(SCp->ptr,
-					SCp->this_residual, direction);
+		pci_map_sg(NULL, info->sg, bufs + 1, pci_dir);
 
 		disable_dma(dmach);
-		set_dma_sg(dmach, info->dmasg, buf);
-		set_dma_mode(dmach,
-			     direction == DMA_OUT ? DMA_MODE_WRITE :
-						    DMA_MODE_READ);
+		set_dma_sg(dmach, info->sg, bufs + 1);
+		set_dma_mode(dmach, dma_dir);
 		enable_dma(dmach);
 		return fasdma_real_all;
 	}
@@ -236,7 +225,7 @@ powertecscsi_detect(Scsi_Host_Template *tpnt)
 	int count = 0;
 	struct Scsi_Host *host;
   
-	tpnt->proc_dir = &proc_scsi_powertec;
+	tpnt->proc_name = "powertec";
 	memset(ecs, 0, sizeof (ecs));
 
 	ecard_startfind();
@@ -261,6 +250,9 @@ powertecscsi_detect(Scsi_Host_Template *tpnt)
 		host->dma_channel = ecs[count]->dma;
 		info = (PowerTecScsi_Info *)host->hostdata;
 
+		if (host->dma_channel != NO_DMA)
+			set_dma_speed(host->dma_channel, 180);
+
 		info->control.term_port = host->io_port + POWERTEC_TERM_CONTROL;
 		info->control.terms = term[count] ? POWERTEC_TERM_ENABLE : 0;
 		powertecscsi_terminator_ctl(host, info->control.terms);
@@ -273,7 +265,7 @@ powertecscsi_detect(Scsi_Host_Template *tpnt)
 		info->info.ifcfg.select_timeout	= 255;
 		info->info.ifcfg.asyncperiod	= POWERTEC_ASYNC_PERIOD;
 		info->info.ifcfg.sync_max_depth	= POWERTEC_SYNC_DEPTH;
-		info->info.ifcfg.cntl3		= /*CNTL3_BS8 |*/ CNTL3_FASTSCSI | CNTL3_FASTCLK;
+		info->info.ifcfg.cntl3		= CNTL3_BS8 | CNTL3_FASTSCSI | CNTL3_FASTCLK;
 		info->info.ifcfg.disconnect_ok	= 1;
 		info->info.ifcfg.wide_max_size	= 0;
 		info->info.dma.setup		= powertecscsi_dma_setup;
@@ -347,25 +339,11 @@ const char *powertecscsi_info(struct Scsi_Host *host)
 	static char string[100], *p;
 
 	p = string;
-	p += sprintf(string, "%s at port %lX ",
-		     host->hostt->name, host->io_port);
-
-	if (host->irq != NO_IRQ)
-		p += sprintf(p, "irq %d ", host->irq);
-	else
-		p += sprintf(p, "NO IRQ ");
-
-	if (host->dma_channel != NO_DMA)
-		p += sprintf(p, "dma %d ", host->dma_channel);
-	else
-		p += sprintf(p, "NO DMA ");
-
-	p += sprintf(p, "v%d.%d.%d scsi %s",
+	p += sprintf(p, "%s ", host->hostt->name);
+	p += fas216_info(&info->info, p);
+	p += sprintf(p, "v%d.%d.%d terminators o%s",
 		     VER_MAJOR, VER_MINOR, VER_PATCH,
-		     info->info.scsi.type);
-
-	p += sprintf(p, " terminators %s",
-		     info->control.terms ? "on" : "off");
+		     info->control.terms ? "n" : "ff");
 
 	return string;
 }
@@ -405,13 +383,13 @@ powertecscsi_set_proc_info(struct Scsi_Host *host, char *buffer, int length)
  *					int length, int host_no, int inout)
  * Purpose  : Return information about the driver to a user process accessing
  *	      the /proc filesystem.
- * Params   : buffer - a buffer to write information to
- *	      start  - a pointer into this buffer set by this routine to the start
- *		       of the required information.
- *	      offset - offset into information that we have read upto.
- *	      length - length of buffer
+ * Params   : buffer  - a buffer to write information to
+ *	      start   - a pointer into this buffer set by this routine to the start
+ *		        of the required information.
+ *	      offset  - offset into information that we have read upto.
+ *	      length  - length of buffer
  *	      host_no - host number to return information for
- *	      inout  - 0 for reading, 1 for writing.
+ *	      inout   - 0 for reading, 1 for writing.
  * Returns  : length of data written to buffer.
  */
 int powertecscsi_proc_info(char *buffer, char **start, off_t offset,
@@ -439,16 +417,14 @@ int powertecscsi_proc_info(char *buffer, char **start, off_t offset,
 	pos = sprintf(buffer,
 			"PowerTec SCSI driver version %d.%d.%d\n",
 			VER_MAJOR, VER_MINOR, VER_PATCH);
-	pos += sprintf(buffer + pos,
-			"Address: %08lX    IRQ : %d     DMA : %d\n"
-			"FAS    : %-10s  TERM: %-3s\n\n"
-			"Statistics:\n",
-			host->io_port, host->irq, host->dma_channel,
-			info->info.scsi.type, info->control.terms ? "on" : "off");
+
+	pos += fas216_print_host(&info->info, buffer + pos);
+	pos += sprintf(buffer + pos, "Term    : o%s\n",
+			info->control.terms ? "n" : "ff");
 
 	pos += fas216_print_stats(&info->info, buffer + pos);
 
-	pos += sprintf (buffer+pos, "\nAttached devices:\n");
+	pos += sprintf(buffer+pos, "\nAttached devices:\n");
 
 	for (scd = host->host_queue; scd; scd = scd->next) {
 		pos += fas216_print_device(&info->info, scd, buffer + pos);

@@ -43,18 +43,18 @@
 
 /*      Global vars.
  */
-int ft_nr_buffers = 0;
-buffer_struct *ft_buffer[FT_MAX_NR_BUFFERS] = {NULL, };
+int ft_nr_buffers;
+buffer_struct *ft_buffer[FT_MAX_NR_BUFFERS];
 static volatile int ft_head;
 static volatile int ft_tail;	/* not volatile but need same type as head */
 int fdc_setup_error;
 location_record ft_location = {-1, 0};
-volatile int ftape_tape_running = 0;
+volatile int ftape_tape_running;
 
 /*      Local vars.
  */
-static int overrun_count_offset = 0;
-static int inhibit_correction = 0;
+static int overrun_count_offset;
+static int inhibit_correction;
 
 /*  maxmimal allowed overshoot when fast seeking
  */
@@ -433,7 +433,7 @@ int ftape_dumb_stop(void)
 			result = ftape_ready_wait(ftape_timeout.pause,&status);
 		}
 	} while (ftape_tape_running
-		 && !(sigtestsetmask(&current->signal, _NEVER_BLOCK)));
+		 && !(sigtestsetmask(&current->pending.signal, _NEVER_BLOCK)));
 #ifndef TESTING
 	ft_location.known = 0;
 #endif
@@ -661,7 +661,7 @@ static int seek_forward(int segment_id, int fast)
 		 *  to find a way to skip an EMPTY_SEGMENT. !!! FIXME !!!
 		 */
 		if (ftape_read_id() < 0 || !ft_location.known ||
-		    sigtestsetmask(&current->signal, _DONT_BLOCK)) {
+		    sigtestsetmask(&current->pending.signal, _DONT_BLOCK)) {
 			ft_location.known = 0;
 			if (!ftape_tape_running ||
 			    ++failures > FT_SECTORS_PER_SEGMENT) {
@@ -776,7 +776,7 @@ static int skip_reverse(int segment_id, int *pstatus)
 		fast_seek(count, 1);
 		logical_forward();
 		if (ftape_read_id() < 0 || !ft_location.known ||
-		    (sigtestsetmask(&current->signal, _DONT_BLOCK))) {
+		    (sigtestsetmask(&current->pending.signal, _DONT_BLOCK))) {
 			if ((!ftape_tape_running && !ft_location.known) ||
 			    ++failures > FT_SECTORS_PER_SEGMENT) {
 				TRACE_ABORT(-EIO, ft_t_err,
@@ -1002,7 +1002,7 @@ int ftape_start_tape(int segment_id, int sector_offset)
 	while (result < 0     &&
 	       retry++ <= 5   &&
 	       !ft_failure &&
-	       !(sigtestsetmask(&current->signal, _DONT_BLOCK))) {
+	       !(sigtestsetmask(&current->pending.signal, _DONT_BLOCK))) {
 		
 		if (retry && start_offset < 5) {
 			start_offset ++;

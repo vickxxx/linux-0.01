@@ -1,28 +1,13 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := decnet.o
-O_OBJS   := af_decnet.o dn_nsp_in.o dn_nsp_out.o dn_route.o dn_dev.o dn_neigh.o dn_timer.o
-M_OBJS	 := $(O_TARGET)
+obj-y    := af_decnet.o dn_nsp_in.o dn_nsp_out.o dn_route.o dn_dev.o dn_neigh.o dn_timer.o
+obj-m	 := $(O_TARGET)
 
-ifeq ($(CONFIG_DECNET_ROUTER),y)
-O_OBJS += dn_fib.o
-endif
+obj-$(CONFIG_DECNET_ROUTER) += dn_fib.o dn_rules.o dn_table.o
+obj-$(CONFIG_DECNET_FW) += dn_fw.o
 
-ifeq ($(CONFIG_DECNET_RAW),y)
-O_OBJS += dn_raw.o
-endif
-
-#ifeq ($(CONFIG_DECNET_MOP),y)
-#O_OBJS += dn_mop.o
-#endif
-
-ifeq ($(CONFIG_DECNET_FW),y)
-O_OBJS += dn_fw.o
-endif
-
-ifeq ($(CONFIG_SYSCTL),y)
-O_OBJS += sysctl_net_decnet.o
-endif
+obj-y += sysctl_net_decnet.o
 
 include $(TOPDIR)/Rules.make
 

@@ -54,7 +54,6 @@
 #include <linux/malloc.h>
 #include <linux/vmalloc.h> 
 #include <linux/errno.h>
-#include <linux/sched.h>	/* to get the struct task_struct */
 #include <linux/string.h>	/* used in new tty drivers */
 #include <linux/signal.h>	/* used in new tty drivers */
 
@@ -562,40 +561,40 @@ extern void irda_unregister_compressor (struct compressor *cp);
  * Procedures exported to if_ppp.c.
  */
 static struct compressor irda_deflate = {
-	CI_DEFLATE,		/* compress_proto */
-	z_comp_alloc,		/* comp_alloc */
-	z_comp_free,		/* comp_free */
-	z_comp_init,		/* comp_init */
-	z_comp_reset,		/* comp_reset */
-	z_compress,		/* compress */
-	z_comp_stats,		/* comp_stat */
-	z_decomp_alloc,		/* decomp_alloc */
-	z_decomp_free,		/* decomp_free */
-	z_decomp_init,		/* decomp_init */
-	z_decomp_reset,		/* decomp_reset */
-	z_decompress,		/* decompress */
-	z_incomp,		/* incomp */
-	z_comp_stats,		/* decomp_stat */
+compress_proto:	CI_DEFLATE,
+comp_alloc:	z_comp_alloc,
+comp_free:	z_comp_free,
+comp_init:	z_comp_init,
+comp_reset:	z_comp_reset,
+compress:	z_compress,
+comp_stat:	z_comp_stats,
+decomp_alloc:	z_decomp_alloc,
+decomp_free:	z_decomp_free,
+decomp_init:	z_decomp_init,
+decomp_reset:	z_decomp_reset,
+decompress:	z_decompress,
+incomp:		z_incomp,
+decomp_stat:	z_comp_stats
 };
 
 static struct compressor irda_deflate_draft = {
-	CI_DEFLATE_DRAFT,	/* compress_proto */
-	z_comp_alloc,		/* comp_alloc */
-	z_comp_free,		/* comp_free */
-	z_comp_init,		/* comp_init */
-	z_comp_reset,		/* comp_reset */
-	z_compress,		/* compress */
-	z_comp_stats,		/* comp_stat */
-	z_decomp_alloc,		/* decomp_alloc */
-	z_decomp_free,		/* decomp_free */
-	z_decomp_init,		/* decomp_init */
-	z_decomp_reset,		/* decomp_reset */
-	z_decompress,		/* decompress */
-	z_incomp,		/* incomp */
-	z_comp_stats,		/* decomp_stat */
+compress_proto:	CI_DEFLATE_DRAFT,
+comp_alloc:	z_comp_alloc,
+comp_free:	z_comp_free,
+comp_init:	z_comp_init,
+comp_reset:	z_comp_reset,
+compress:	z_compress,
+comp_stat:	z_comp_stats,
+decomp_alloc:	z_decomp_alloc,
+decomp_free:	z_decomp_free,
+decomp_init:	z_decomp_init,
+decomp_reset:	z_decomp_reset,
+decompress:	z_decompress,
+incomp:		z_incomp,
+decomp_stat:	z_comp_stats
 };
 
-__initfunc(int irda_deflate_init(void))
+int __init irda_deflate_init(void)
 {
         int answer = irda_register_compressor ( &irda_deflate);
         if (answer == 0)

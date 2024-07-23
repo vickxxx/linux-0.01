@@ -14,6 +14,8 @@
    Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
    */
 
+#include <linux/config.h>
+
 #define PP_ChipID 0x0000	/* offset   0h -> Corp -ID              */
 				/* offset   2h -> Model/Product Number  */
 				/* offset   3h -> Chip Revision Number  */
@@ -76,6 +78,12 @@
 #define LAST_IO 0x037C		/*  Last I/O port to check (+10h) */
 #define ADD_MASK 0x3000		/*  Mask it use of the ADD_PORT register */
 #define ADD_SIG 0x3000		/*  Expected ID signature */
+
+/* On Macs, we only need use the ISA I/O stuff until we do MEMORY_ON */
+#ifdef CONFIG_MAC
+#define LCSLOTBASE 0xfee00000
+#define MMIOBASE 0x40000
+#endif
 
 #define CHIP_EISA_ID_SIG 0x630E   /*  Product ID Code for Crystal Chip (CS8900 spec 4.3) */
 
@@ -209,6 +217,7 @@
 #define ENDEC_LOOPBACK 0x0200
 #define AUI_LOOPBACK 0x0400
 #define BACKOFF_OFF 0x0800
+#define FDX_8900 0x4000
 #define FAST_TEST 0x8000
 
 /* PP_RxEvent - Receive Event Bit definition - Read-only */
@@ -319,8 +328,8 @@
 #define TX_FRAME_PORT RX_FRAME_PORT
 #define TX_CMD_PORT	0x0004
 #define TX_NOW		0x0000       /*  Tx packet after   5 bytes copied */
-#define TX_AFTER_381	0x0020       /*  Tx packet after 381 bytes copied */
-#define TX_AFTER_ALL	0x0060       /*  Tx packet after all bytes copied */
+#define TX_AFTER_381	0x0040       /*  Tx packet after 381 bytes copied */
+#define TX_AFTER_ALL	0x00c0       /*  Tx packet after all bytes copied */
 #define TX_LEN_PORT	0x0006
 #define ISQ_PORT	0x0008
 #define ADD_PORT	0x000A

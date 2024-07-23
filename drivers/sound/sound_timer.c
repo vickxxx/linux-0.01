@@ -11,15 +11,12 @@
 /*
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
  */
-#include <linux/config.h>
 #include <linux/string.h>
 
 
 #include "sound_config.h"
 
-#if defined(CONFIG_SEQUENCER)
-
-static volatile int initialized = 0, opened = 0, tmr_running = 0;
+static volatile int initialized, opened, tmr_running;
 static volatile time_t tmr_offs, tmr_ctr;
 static volatile unsigned long ticks_offs;
 static volatile int curr_tempo, curr_timebase;
@@ -28,7 +25,7 @@ static volatile unsigned long next_event_time;
 static unsigned long prev_event_time;
 static volatile unsigned long usecs_per_tmr;	/* Length of the current interval */
 
-static struct sound_lowlev_timer *tmr = NULL;
+static struct sound_lowlev_timer *tmr;
 
 static unsigned long tmr2ticks(int tmr_value)
 {
@@ -168,7 +165,7 @@ static int timer_event(int dev, unsigned char *event)
 			seq_copy_to_input(event, 8);
 			break;
 
-		default:
+		default:;
 	}
 	return TIMER_NOT_ARMED;
 }
@@ -267,15 +264,16 @@ static void timer_arm(int dev, long time)
 
 static struct sound_timer_operations sound_timer =
 {
-	{"Sound Timer", 0},
-	1,			/* Priority */
-	0,			/* Local device link */
-	timer_open,
-	timer_close,
-	timer_event,
-	timer_get_time,
-	timer_ioctl,
-	timer_arm
+	owner:		THIS_MODULE,
+	info:		{"Sound Timer", 0},
+	priority:	1,	/* Priority */
+	devlink:	0,	/* Local device link */
+	open:		timer_open,
+	close:		timer_close,
+	event:		timer_event,
+	get_time:	timer_get_time,
+	ioctl:		timer_ioctl,
+	arm_timer:	timer_arm
 };
 
 void sound_timer_interrupt(void)
@@ -318,5 +316,3 @@ void  sound_timer_init(struct sound_lowlev_timer *t, char *name)
 	strcpy(sound_timer.info.name, name);
 	sound_timer_devs[n] = &sound_timer;
 }
-
-#endif

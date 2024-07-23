@@ -1,4 +1,4 @@
-/* $Id: uaccess.h,v 1.18 1999/03/30 06:38:38 jj Exp $
+/* $Id: uaccess.h,v 1.22 2000/08/29 07:01:58 davem Exp $
  * uaccess.h: User space memore access functions.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -29,15 +29,15 @@
 #define VERIFY_WRITE	1
 
 #define get_ds()	(KERNEL_DS)
-#define get_fs()	(current->tss.current_ds)
-#define set_fs(val)	((current->tss.current_ds) = (val))
+#define get_fs()	(current->thread.current_ds)
+#define set_fs(val)	((current->thread.current_ds) = (val))
 
 #define segment_eq(a,b)	((a).seg == (b).seg)
 
-/* We have there a nice not-mapped page at page_offset - PAGE_SIZE, so that this test
+/* We have there a nice not-mapped page at PAGE_OFFSET - PAGE_SIZE, so that this test
  * can be fairly lightweight.
  * No one can read/write anything from userland in the kernel space by setting
- * large size and address near to page_offset - a fault will break his intentions.
+ * large size and address near to PAGE_OFFSET - a fault will break his intentions.
  */
 #define __user_ok(addr,size) ((addr) < STACK_TOP)
 #define __kernel_ok (segment_eq(get_fs(), KERNEL_DS))
@@ -94,17 +94,9 @@ extern void __ret_efault(void);
 unsigned long __pu_addr = (unsigned long)(ptr); \
 __put_user_check((__typeof__(*(ptr)))(x),__pu_addr,sizeof(*(ptr))); })
 
-#define put_user_ret(x,ptr,retval) ({ \
-unsigned long __pu_addr = (unsigned long)(ptr); \
-__put_user_check_ret((__typeof__(*(ptr)))(x),__pu_addr,sizeof(*(ptr)),retval); })
-
 #define get_user(x,ptr) ({ \
 unsigned long __gu_addr = (unsigned long)(ptr); \
 __get_user_check((x),__gu_addr,sizeof(*(ptr)),__typeof__(*(ptr))); })
-
-#define get_user_ret(x,ptr,retval) ({ \
-unsigned long __gu_addr = (unsigned long)(ptr); \
-__get_user_check_ret((x),__gu_addr,sizeof(*(ptr)),__typeof__(*(ptr)),retval); })
 
 /*
  * The "__xxx" versions do not do address space checking, useful when
@@ -112,9 +104,7 @@ __get_user_check_ret((x),__gu_addr,sizeof(*(ptr)),__typeof__(*(ptr)),retval); })
  * checks by hand with "access_ok()")
  */
 #define __put_user(x,ptr) __put_user_nocheck((x),(ptr),sizeof(*(ptr)))
-#define __put_user_ret(x,ptr,retval) __put_user_nocheck_ret((x),(ptr),sizeof(*(ptr)),retval)
 #define __get_user(x,ptr) __get_user_nocheck((x),(ptr),sizeof(*(ptr)),__typeof__(*(ptr)))
-#define __get_user_ret(x,ptr,retval) __get_user_nocheck_ret((x),(ptr),sizeof(*(ptr)),__typeof__(*(ptr)),retval)
 
 struct __large_struct { unsigned long buf[100]; };
 #define __m(x) ((struct __large_struct *)(x))
@@ -303,19 +293,9 @@ __copy_res = __copy_user(__copy_to, (void *) (from), __copy_size); \
 } else __copy_res = __copy_size; \
 __copy_res; })
 
-#define copy_to_user_ret(to,from,n,retval) ({ \
-if (copy_to_user(to,from,n)) \
-	return retval; \
-})
-
 #define __copy_to_user(to,from,n)		\
 	__copy_user((void *)(to),		\
 		    (void *)(from), n)
-
-#define __copy_to_user_ret(to,from,n,retval) ({ \
-if (__copy_to_user(to,from,n)) \
-	return retval; \
-})
 
 #define copy_from_user(to,from,n) ({ \
 void *__copy_to = (void *) (to); \
@@ -327,19 +307,9 @@ __copy_res = __copy_user(__copy_to, __copy_from, __copy_size); \
 } else __copy_res = __copy_size; \
 __copy_res; })
 
-#define copy_from_user_ret(to,from,n,retval) ({ \
-if (copy_from_user(to,from,n)) \
-	return retval; \
-})
-
 #define __copy_from_user(to,from,n)		\
 	__copy_user((void *)(to),		\
 		    (void *)(from), n)
-
-#define __copy_from_user_ret(to,from,n,retval) ({ \
-if (__copy_from_user(to,from,n)) \
-	return retval; \
-})
 
 extern __inline__ __kernel_size_t __clear_user(void *addr, __kernel_size_t size)
 {
@@ -368,11 +338,6 @@ __clear_res = __clear_user(__clear_addr, __clear_size); \
 } else __clear_res = __clear_size; \
 __clear_res; })
 
-#define clear_user_ret(addr,size,retval) ({ \
-if (clear_user(addr,size)) \
-	return retval; \
-})
-
 extern int __strncpy_from_user(unsigned long dest, unsigned long src, int count);
 
 #define strncpy_from_user(dest,src,count) ({ \
@@ -384,6 +349,7 @@ __sfu_res = __strncpy_from_user((unsigned long) (dest), __sfu_src, __sfu_count);
 } __sfu_res; })
 
 extern int __strlen_user(const char *);
+extern int __strnlen_user(const char *, long len);
 
 extern __inline__ int strlen_user(const char *str)
 {
@@ -391,6 +357,14 @@ extern __inline__ int strlen_user(const char *str)
 		return 0;
 	else
 		return __strlen_user(str);
+}
+
+extern __inline__ int strnlen_user(const char *str, long len)
+{
+	if(!access_ok(VERIFY_READ, str, 0))
+		return 0;
+	else
+		return __strnlen_user(str, len);
 }
 
 #endif  /* __ASSEMBLY__ */

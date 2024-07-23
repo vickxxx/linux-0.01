@@ -1,4 +1,4 @@
-/* $Id: reset.c,v 1.6 1999/04/10 12:21:30 ulfc Exp $
+/* $Id: reset.c,v 1.7 1999/08/11 20:26:51 andrewb Exp $
  *
  * Reset a SGI.
  *
@@ -17,8 +17,8 @@
 #include <asm/system.h>
 #include <asm/reboot.h>
 #include <asm/sgialib.h>
-#include <asm/sgihpc.h>
-#include <asm/sgint23.h>
+#include <asm/sgi/sgihpc.h>
+#include <asm/sgi/sgint23.h>
 
 /*
  * Just powerdown if init hasn't done after POWERDOWN_TIMEOUT seconds.
@@ -88,9 +88,7 @@ static void blink_timeout(unsigned long data)
 	sgi_hpc_write1 ^= (HPC3_WRITE1_LC0OFF|HPC3_WRITE1_LC1OFF);
 	hpc3mregs->write1 = sgi_hpc_write1;
 
-	del_timer(&blink_timer);
-	blink_timer.expires = jiffies + data;
-	add_timer(&blink_timer);
+	mod_timer(&blink_timer, jiffies+data);
 }
 
 static void debounce(unsigned long data)
@@ -108,7 +106,7 @@ static void debounce(unsigned long data)
 	if (has_paniced)
 		prom_reboot();
 
-	enable_irq(9);
+	enable_irq(SGI_PANEL_IRQ);
 }
 
 static inline void power_button(void)
@@ -185,7 +183,7 @@ static void panel_int(int irq, void *dev_id, struct pt_regs *regs)
 	hpc3mregs->panel = 3; /* power_interrupt | power_supply_on */
 
 	if (ioc_icontrol->istat1 & 2) { /* Wait until interrupt goes away */
-		disable_irq(9);
+		disable_irq(SGI_PANEL_IRQ);
 		init_timer(&debounce_timer);
 		debounce_timer.function = debounce;
 		debounce_timer.expires = jiffies + 5;
@@ -239,7 +237,7 @@ void indy_reboot_setup(void)
 	_machine_halt = sgi_machine_halt;
 	_machine_power_off = sgi_machine_power_off;
 
-	request_irq(9, panel_int, 0, "Front Panel", NULL);
+	request_irq(SGI_PANEL_IRQ, panel_int, 0, "Front Panel", NULL);
 	init_timer(&blink_timer);
 	blink_timer.function = blink_timeout;
 	notifier_chain_register(&panic_notifier_list, &panic_block);

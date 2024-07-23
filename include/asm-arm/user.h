@@ -2,7 +2,7 @@
 #define _ARM_USER_H
 
 #include <asm/page.h>
-#include <linux/ptrace.h>
+#include <asm/ptrace.h>
 /* Core file format: The core file is written in such a way that gdb
    can understand it and provide useful information to the user (under
    linux we use the 'trad-core' bfd).  There are quite a number of
@@ -42,6 +42,8 @@ struct user_fp {
 	} fpregs[8];
 	unsigned int fpsr:32;
 	unsigned int fpcr:32;
+	unsigned char ftype[8];
+	unsigned int init_flag;
 };
 
 /* When the kernel dumps core, it starts by dumping the user struct -

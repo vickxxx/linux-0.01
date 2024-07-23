@@ -36,8 +36,8 @@
 #include <linux/init.h>
 #include <net/arp.h>
 
-static void tr_source_route(struct sk_buff *skb, struct trh_hdr *trh, struct device *dev);
-static void tr_add_rif_info(struct trh_hdr *trh, struct device *dev);
+static void tr_source_route(struct sk_buff *skb, struct trh_hdr *trh, struct net_device *dev);
+static void tr_add_rif_info(struct trh_hdr *trh, struct net_device *dev);
 static void rif_check_expire(unsigned long dummy);
 
 #define TR_SR_DEBUG 0
@@ -50,7 +50,7 @@ typedef struct rif_cache_s *rif_cache;
  
 struct rif_cache_s {	
 	unsigned char addr[TR_ALEN];
-	unsigned char iface[5];
+	int iface;
 	__u16 rcf;
 	__u16 rseg[8];
 	rif_cache next;
@@ -85,7 +85,7 @@ int sysctl_tr_rif_timeout = RIF_TIMEOUT;
  *	makes this a little more exciting than on ethernet.
  */
  
-int tr_header(struct sk_buff *skb, struct device *dev, unsigned short type,
+int tr_header(struct sk_buff *skb, struct net_device *dev, unsigned short type,
               void *daddr, void *saddr, unsigned len) 
 {
 	struct trh_hdr *trh;
@@ -144,7 +144,7 @@ int tr_rebuild_header(struct sk_buff *skb)
 {
 	struct trh_hdr *trh=(struct trh_hdr *)skb->data;
 	struct trllc *trllc=(struct trllc *)(skb->data+sizeof(struct trh_hdr));
-	struct device *dev = skb->dev;
+	struct net_device *dev = skb->dev;
 
 	/*
 	 *	FIXME: We don't yet support IPv6 over token rings
@@ -173,7 +173,7 @@ int tr_rebuild_header(struct sk_buff *skb)
  *	it via SNAP.
  */
  
-unsigned short tr_type_trans(struct sk_buff *skb, struct device *dev) 
+unsigned short tr_type_trans(struct sk_buff *skb, struct net_device *dev) 
 {
 
 	struct trh_hdr *trh=(struct trh_hdr *)skb->data;
@@ -189,21 +189,26 @@ unsigned short tr_type_trans(struct sk_buff *skb, struct device *dev)
 
 	skb_pull(skb,sizeof(struct trh_hdr)-TR_MAXRIFLEN+riflen);
 
-	tr_add_rif_info(trh, dev);
-
-	if(*trh->daddr & 1) 
+	if(*trh->daddr & 0x80) 
 	{
 		if(!memcmp(trh->daddr,dev->broadcast,TR_ALEN)) 	
 			skb->pkt_type=PACKET_BROADCAST;
 		else
 			skb->pkt_type=PACKET_MULTICAST;
 	}
-
+	else if ( (trh->daddr[0] & 0x01) && (trh->daddr[1] & 0x00) && (trh->daddr[2] & 0x5E))
+	{
+		skb->pkt_type=PACKET_MULTICAST;
+	}
 	else if(dev->flags & IFF_PROMISC) 
 	{
 		if(memcmp(trh->daddr, dev->dev_addr, TR_ALEN))
 			skb->pkt_type=PACKET_OTHERHOST;
 	}
+
+	if ((skb->pkt_type != PACKET_BROADCAST) &&
+	    (skb->pkt_type != PACKET_MULTICAST))
+		tr_add_rif_info(trh,dev) ; 
 
 	/*
 	 * Strip the SNAP header from ARP packets since we don't 
@@ -225,20 +230,22 @@ unsigned short tr_type_trans(struct sk_buff *skb, struct device *dev)
  *	We try to do source routing... 
  */
 
-static void tr_source_route(struct sk_buff *skb,struct trh_hdr *trh,struct device *dev) 
+static void tr_source_route(struct sk_buff *skb,struct trh_hdr *trh,struct net_device *dev) 
 {
 	int i, slack;
 	unsigned int hash;
 	rif_cache entry;
 	unsigned char *olddata;
-	unsigned long flags;
+	unsigned char mcast_func_addr[] = {0xC0,0x00,0x00,0x04,0x00,0x00};
+	unsigned long flags ; 
 	
-	spin_lock_irqsave(&rif_lock, flags);
+	spin_lock_irqsave(&rif_lock,flags);
 
 	/*
 	 *	Broadcasts are single route as stated in RFC 1042 
 	 */
-	if(!memcmp(&(trh->daddr[0]),&(dev->broadcast[0]),TR_ALEN)) 
+	if( (!memcmp(&(trh->daddr[0]),&(dev->broadcast[0]),TR_ALEN)) ||
+	    (!memcmp(&(trh->daddr[0]),&(mcast_func_addr[0]), TR_ALEN))  )
 	{
 		trh->rcf=htons((((sizeof(trh->rcf)) << 8) & TR_RCF_LEN_MASK)  
 			       | TR_RCF_FRAME2K | TR_RCF_LIMITED_BROADCAST);
@@ -259,7 +266,7 @@ static void tr_source_route(struct sk_buff *skb,struct trh_hdr *trh,struct devic
 		if(entry) 
 		{
 #if TR_SR_DEBUG
-printk("source routing for %02X %02X %02X %02X %02X %02X\n",trh->daddr[0],
+printk("source routing for %02X:%02X:%02X:%02X:%02X:%02X\n",trh->daddr[0],
 		  trh->daddr[1],trh->daddr[2],trh->daddr[3],trh->daddr[4],trh->daddr[5]);
 #endif
 			if(!entry->local_ring && (ntohs(entry->rcf) & TR_RCF_LEN_MASK) >> 8)
@@ -302,7 +309,7 @@ printk("source routing for %02X %02X %02X %02X %02X %02X\n",trh->daddr[0],
 	else 
 		slack = 18 - ((ntohs(trh->rcf) & TR_RCF_LEN_MASK)>>8);
 	olddata = skb->data;
-	spin_unlock_irqrestore(&rif_lock, flags);
+	spin_unlock_irqrestore(&rif_lock,flags);
 
 	skb_pull(skb, slack);
 	memmove(skb->data, olddata, sizeof(struct trh_hdr) - slack);
@@ -313,15 +320,14 @@ printk("source routing for %02X %02X %02X %02X %02X %02X\n",trh->daddr[0],
  *	routing.
  */
  
-static void tr_add_rif_info(struct trh_hdr *trh, struct device *dev)
+static void tr_add_rif_info(struct trh_hdr *trh, struct net_device *dev)
 {
 	int i;
 	unsigned int hash, rii_p = 0;
 	rif_cache entry;
-	unsigned long flags;
 
 
-	spin_lock_irqsave(&rif_lock, flags);
+	spin_lock_bh(&rif_lock);
 	
 	/*
 	 *	Firstly see if the entry exists
@@ -360,12 +366,12 @@ printk("adding rif_entry: addr:%02X:%02X:%02X:%02X:%02X:%02X rcf:%04X\n",
 		if(!entry) 
 		{
 			printk(KERN_DEBUG "tr.c: Couldn't malloc rif cache entry !\n");
-			spin_unlock_irqrestore(&rif_lock, flags);
+			spin_unlock_bh(&rif_lock);
 			return;
 		}
 
 		memcpy(&(entry->addr[0]),&(trh->saddr[0]),TR_ALEN);
-		memcpy(&(entry->iface[0]),dev->name,5);
+		entry->iface = dev->ifindex;
 		entry->next=rif_table[hash];
 		entry->last_used=jiffies;
 		rif_table[hash]=entry;
@@ -402,7 +408,7 @@ printk("updating rif_entry: addr:%02X:%02X:%02X:%02X:%02X:%02X rcf:%04X\n",
 		    }                                         
            	entry->last_used=jiffies;               
 	}
-	spin_unlock_irqrestore(&rif_lock, flags);
+	spin_unlock_bh(&rif_lock);
 }
 
 /*
@@ -412,9 +418,10 @@ printk("updating rif_entry: addr:%02X:%02X:%02X:%02X:%02X:%02X rcf:%04X\n",
 static void rif_check_expire(unsigned long dummy) 
 {
 	int i;
-	unsigned long now=jiffies,flags;
+	unsigned long now=jiffies;
+	unsigned long flags ; 
 
-	spin_lock_irqsave(&rif_lock, flags);
+	spin_lock_irqsave(&rif_lock,flags);
 	
 	for(i=0; i < RIF_TABLE_SIZE;i++) 
 	{
@@ -427,22 +434,20 @@ static void rif_check_expire(unsigned long dummy)
 			if((now-entry->last_used) > sysctl_tr_rif_timeout) 
 			{
 				*pentry=entry->next;
-				kfree_s(entry,sizeof(struct rif_cache_s));
+				kfree(entry);
 			}
 			else
 				pentry=&entry->next;
 		}
 	}
 	
-	spin_unlock_irqrestore(&rif_lock, flags);
+	spin_unlock_irqrestore(&rif_lock,flags);
 
 	/*
 	 *	Reset the timer
 	 */
 	 
-	del_timer(&rif_timer);
-	rif_timer.expires = jiffies + sysctl_tr_rif_timeout;
-	add_timer(&rif_timer);
+	mod_timer(&rif_timer, jiffies+sysctl_tr_rif_timeout);
 
 }
 
@@ -451,8 +456,10 @@ static void rif_check_expire(unsigned long dummy)
  *	routing.
  */
  
-#ifdef CONFIG_PROC_FS
-int rif_get_info(char *buffer,char **start, off_t offset, int length, int dummy) 
+#ifndef CONFIG_PROC_FS
+static int rif_get_info(char *buffer,char **start, off_t offset, int length)  { return 0;}
+#else
+static int rif_get_info(char *buffer,char **start, off_t offset, int length) 
 {
 	int len=0;
 	off_t begin=0;
@@ -467,11 +474,14 @@ int rif_get_info(char *buffer,char **start, off_t offset, int length, int dummy)
 	pos+=size;
 	len+=size;
 
+	spin_lock_bh(&rif_lock);
 	for(i=0;i < RIF_TABLE_SIZE;i++) 
 	{
 		for(entry=rif_table[i];entry;entry=entry->next) {
+			struct net_device *dev = __dev_get_by_index(entry->iface);
+
 			size=sprintf(buffer+len,"%s %02X:%02X:%02X:%02X:%02X:%02X %7li ",
-				     entry->iface,entry->addr[0],entry->addr[1],entry->addr[2],entry->addr[3],entry->addr[4],entry->addr[5],
+				     dev?dev->name:"?",entry->addr[0],entry->addr[1],entry->addr[2],entry->addr[3],entry->addr[4],entry->addr[5],
 				     sysctl_tr_rif_timeout-(now-entry->last_used));
 			len+=size;
 			pos=begin+len;
@@ -513,11 +523,14 @@ int rif_get_info(char *buffer,char **start, off_t offset, int length, int dummy)
 		if(pos>offset+length)
 			break;
 	}
+	spin_unlock_bh(&rif_lock);
 
 	*start=buffer+(offset-begin); /* Start of wanted data */
 	len-=(offset-begin);    /* Start slop */
 	if(len>length)
 		len=length;    /* Ending slop */
+	if (len<0)
+		len=0;
 	return len;
 }
 #endif
@@ -527,16 +540,7 @@ int rif_get_info(char *buffer,char **start, off_t offset, int length, int dummy)
  *	too much for this.
  */
 
-#ifdef CONFIG_PROC_FS
-static struct proc_dir_entry tr_rif_proc = {
-	PROC_NET_TR_RIF, 6, "tr_rif",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_net_inode_operations,
-	rif_get_info
-};
-#endif
-
-__initfunc(void rif_init(struct net_proto *unused))
+static int __init rif_init(void)
 {
 	rif_timer.expires  = RIF_TIMEOUT;
 	rif_timer.data     = 0L;
@@ -544,7 +548,8 @@ __initfunc(void rif_init(struct net_proto *unused))
 	init_timer(&rif_timer);
 	add_timer(&rif_timer);
 
-#ifdef CONFIG_PROC_FS
-	proc_net_register(&tr_rif_proc);
-#endif
+	proc_net_create("tr_rif",0,rif_get_info);
+	return 0;
 }
+
+module_init(rif_init);

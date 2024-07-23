@@ -23,10 +23,7 @@ void NCR53c7x0_intr(int irq, void *dev_id, struct pt_regs * regs);
 #define CAN_QUEUE 24
 #endif
 
-#if defined(HOSTS_C) || defined(MODULE)
 #include <scsi/scsicam.h>
-
-extern struct proc_dir_entry proc_scsi_mvme16x;
 
 #define BVME6000_SCSI  {name:                "BVME6000 NCR53c710 SCSI", \
 		       detect:              bvme6000_scsi_detect,    \
@@ -39,5 +36,5 @@ extern struct proc_dir_entry proc_scsi_mvme16x;
 		       sg_tablesize:        63,          \
 		       cmd_per_lun:	    3,     \
 		       use_clustering:      DISABLE_CLUSTERING }
-#endif
+
 #endif /* BVME6000_SCSI_H */

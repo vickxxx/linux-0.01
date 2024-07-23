@@ -1,5 +1,5 @@
-/* $Id: niccy.c,v 1.4 1998/04/16 19:16:48 keil Exp $
-
+/* $Id: niccy.c,v 1.15.6.2 2000/11/29 16:00:14 kai Exp $
+ *
  * niccy.c  low level stuff for Dr. Neuhaus NICCY PnP and NICCY PCI and
  *          compatible (SAGEM cybermodem)
  *
@@ -7,21 +7,14 @@
  * 
  * Thanks to Dr. Neuhaus and SAGEM for informations
  *
- * $Log: niccy.c,v $
- * Revision 1.4  1998/04/16 19:16:48  keil
- * need config.h
- *
- * Revision 1.3  1998/04/15 16:42:59  keil
- * new init code
- *
- * Revision 1.2  1998/02/11 17:31:04  keil
- * new file
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
 
 #define __NO_VERSION__
 #include <linux/config.h>
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
@@ -29,7 +22,7 @@
 #include <linux/pci.h>
 
 extern const char *CardType[];
-const char *niccy_revision = "$Revision: 1.4 $";
+const char *niccy_revision = "$Revision: 1.15.6.2 $";
 
 #define byteout(addr,val) outb(val,addr)
 #define bytein(addr) inb(addr)
@@ -46,8 +39,6 @@ const char *niccy_revision = "$Revision: 1.4 $";
 #define NICCY_PCI	2
 
 /* PCI stuff */
-#define PCI_VENDOR_DR_NEUHAUS	0x1267
-#define PCI_NICCY_ID		0x1016
 #define PCI_IRQ_CTRL_REG	0x38
 #define PCI_IRQ_ENABLE		0x1f00
 #define PCI_IRQ_DISABLE		0xff0000
@@ -154,7 +145,7 @@ static void
 niccy_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char val, stat = 0;
+	u_char val;
 
 	if (!cs) {
 		printk(KERN_WARNING "Niccy: Spurious interrupt!\n");
@@ -169,16 +160,12 @@ niccy_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	}
 	val = readreg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_ISTA + 0x40);
       Start_HSCX:
-	if (val) {
+	if (val)
 		hscx_int_main(cs, val);
-		stat |= 1;
-	}
 	val = readreg(cs->hw.niccy.isac_ale, cs->hw.niccy.isac, ISAC_ISTA);
       Start_ISAC:
-	if (val) {
+	if (val)
 		isac_interrupt(cs, val);
-		stat |= 2;
-	}
 	val = readreg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_ISTA + 0x40);
 	if (val) {
 		if (cs->debug & L1_DEB_HSCX)
@@ -191,16 +178,12 @@ niccy_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			debugl1(cs, "ISAC IntStat after IntRoutine");
 		goto Start_ISAC;
 	}
-	if (stat & 1) {
-		writereg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_MASK, 0xFF);
-		writereg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_MASK + 0x40, 0xFF);
-		writereg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_MASK, 0);
-		writereg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_MASK + 0x40, 0);
-	}
-	if (stat & 2) {
-		writereg(cs->hw.niccy.isac_ale, cs->hw.niccy.isac, ISAC_MASK, 0xFF);
-		writereg(cs->hw.niccy.isac_ale, cs->hw.niccy.isac, ISAC_MASK, 0);
-	}
+	writereg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_MASK, 0xFF);
+	writereg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_MASK + 0x40, 0xFF);
+	writereg(cs->hw.niccy.isac_ale, cs->hw.niccy.isac, ISAC_MASK, 0xFF);
+	writereg(cs->hw.niccy.isac_ale, cs->hw.niccy.isac, ISAC_MASK, 0);
+	writereg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_MASK, 0);
+	writereg(cs->hw.niccy.hscx_ale, cs->hw.niccy.hscx, HSCX_MASK + 0x40, 0);
 }
 
 void
@@ -223,20 +206,19 @@ release_io_niccy(struct IsdnCardState *cs)
 static void
 niccy_reset(struct IsdnCardState *cs)
 {
-	int val, nval;
-	
-	val = inl(cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
-	nval = val | PCI_IRQ_ENABLE;
-	outl(nval, cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
+	if (cs->subtyp == NICCY_PCI) {
+		int val;
 
+		val = inl(cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
+		val |= PCI_IRQ_ENABLE;
+		outl(val, cs->hw.niccy.cfg_reg + PCI_IRQ_CTRL_REG);
+	}
 	inithscxisac(cs, 3);
 }
 
 static int
 niccy_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 {
-	int imode;
-	
 	switch (mt) {
 		case CARD_RESET:
 			niccy_reset(cs);
@@ -244,14 +226,6 @@ niccy_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_io_niccy(cs);
 			return(0);
-		case CARD_SETIRQ:
-			if (cs->subtyp == NICCY_PCI)
-				imode = I4L_IRQ_FLAG | SA_SHIRQ;
-			else
-				imode = I4L_IRQ_FLAG;
-			return(request_irq(cs->irq, &niccy_interrupt,
-				imode, "HiSax", cs));
-			break;
 		case CARD_INIT:
 			niccy_reset(cs);
 			return(0);
@@ -261,10 +235,10 @@ niccy_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-static 	struct pci_dev *niccy_dev __initdata = NULL;
+static struct pci_dev *niccy_dev __initdata = NULL;
 
-__initfunc(int
-setup_niccy(struct IsdnCard *card))
+int __init
+setup_niccy(struct IsdnCard *card)
 {
 	struct IsdnCardState *cs = card->cs;
 	char tmp[64];
@@ -304,40 +278,41 @@ setup_niccy(struct IsdnCard *card))
 	} else {
 #if CONFIG_PCI
 		u_int pci_ioaddr;
-
 		if (!pci_present()) {
 			printk(KERN_ERR "Niccy: no PCI bus present\n");
 			return(0);
 		}
-
 		cs->subtyp = 0;
-		if ((niccy_dev = pci_find_device(PCI_VENDOR_DR_NEUHAUS,
-			   PCI_NICCY_ID, niccy_dev))) {
+		if ((niccy_dev = pci_find_device(PCI_VENDOR_ID_SATSAGEM,
+			PCI_DEVICE_ID_SATSAGEM_NICCY, niccy_dev))) {
+			if (pci_enable_device(niccy_dev))
+				return(0);
 			/* get IRQ */
 			if (!niccy_dev->irq) {
 				printk(KERN_WARNING "Niccy: No IRQ for PCI card found\n");
-			return(0);
-		}
+				return(0);
+			}
 			cs->irq = niccy_dev->irq;
-			if (!niccy_dev->base_address[0]) {
+			cs->hw.niccy.cfg_reg = pci_resource_start(niccy_dev, 0);
+			if (!cs->hw.niccy.cfg_reg) {
 				printk(KERN_WARNING "Niccy: No IO-Adr for PCI cfg found\n");
-			return(0);
-		}
-			cs->hw.niccy.cfg_reg = niccy_dev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
-			if (!niccy_dev->base_address[1]) {
-			printk(KERN_WARNING "Niccy: No IO-Adr for PCI card found\n");
-			return(0);
-		}
-			pci_ioaddr = niccy_dev->base_address[1] & PCI_BASE_ADDRESS_IO_MASK;
-		cs->hw.niccy.isac = pci_ioaddr + ISAC_PCI_DATA;
-		cs->hw.niccy.isac_ale = pci_ioaddr + ISAC_PCI_ADDR;
-		cs->hw.niccy.hscx = pci_ioaddr + HSCX_PCI_DATA;
-		cs->hw.niccy.hscx_ale = pci_ioaddr + HSCX_PCI_ADDR;
+				return(0);
+			}
+			pci_ioaddr = pci_resource_start(niccy_dev, 1);
+			if (!pci_ioaddr) {
+				printk(KERN_WARNING "Niccy: No IO-Adr for PCI card found\n");
+				return(0);
+			}
 			cs->subtyp = NICCY_PCI;
 		} else {
 			printk(KERN_WARNING "Niccy: No PCI card found\n");
 			return(0);
 		}
+		cs->irq_flags |= SA_SHIRQ;
+		cs->hw.niccy.isac = pci_ioaddr + ISAC_PCI_DATA;
+		cs->hw.niccy.isac_ale = pci_ioaddr + ISAC_PCI_ADDR;
+		cs->hw.niccy.hscx = pci_ioaddr + HSCX_PCI_DATA;
+		cs->hw.niccy.hscx_ale = pci_ioaddr + HSCX_PCI_ADDR;
 		if (check_region((cs->hw.niccy.isac), 4)) {
 			printk(KERN_WARNING
 				"HiSax: %s data port %x-%x already in use\n",
@@ -376,6 +351,7 @@ setup_niccy(struct IsdnCard *card))
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &niccy_card_msg;
+	cs->irq_func = &niccy_interrupt;
 	ISACVersion(cs, "Niccy:");
 	if (HscxVersion(cs, "Niccy:")) {
 		printk(KERN_WARNING

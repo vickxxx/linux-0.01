@@ -1,3 +1,14 @@
+/*
+ *  linux/drivers/acorn/scsi/acornscsi.h
+ *
+ *  Copyright (C) 1997 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Acorn SCSI driver
+ */
 #ifndef ACORNSCSI_H
 #define ACORNSCSI_H
 
@@ -23,10 +34,7 @@ extern int acornscsi_biosparam (Disk *, kdev_t, int []);
 #define CAN_QUEUE 16
 #endif
 
-#ifndef PROC_SCSI_AKA30
 #include "linux/proc_fs.h"
-#define PROC_SCSI_AKA30 PROC_SCSI_EATA
-#endif
 
 #include <scsi/scsicam.h>
 

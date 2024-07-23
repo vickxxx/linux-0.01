@@ -25,12 +25,17 @@
  * the kernel and is not a module. Since the functions are used by some Atari
  * drivers, this is the case on the Atari.
  *
+ *
+ * 	1.1	Cesar Barros: SMP locking fixes
+ * 		added changelog
  */
 
-#define NVRAM_VERSION		"1.0"
+#define NVRAM_VERSION		"1.1"
 
 #include <linux/module.h>
 #include <linux/config.h>
+#include <linux/sched.h>
+#include <linux/smp_lock.h>
 
 #define PC		1
 #define ATARI	2
@@ -38,7 +43,7 @@
 /* select machine configuration */
 #if defined(CONFIG_ATARI)
 #define MACH ATARI
-#elif defined(__i386__) /* and others?? */
+#elif defined(__i386__) || defined(__arm__) /* and others?? */
 #define MACH PC
 #else
 #error Cannot build nvram driver for this machine configuration.
@@ -81,7 +86,7 @@
 #endif
 
 /* Note that *all* calls to CMOS_READ and CMOS_WRITE must be done with
- * interrupts disabled. Due to the index-port/data-port design of the RTC, we
+ * rtc_lock held. Due to the index-port/data-port design of the RTC, we
  * don't want two different things trying to get to it at once. (e.g. the
  * periodic 11 min sync from time.c vs. this driver.)
  */
@@ -95,16 +100,14 @@
 #include <linux/mc146818rtc.h>
 #include <linux/nvram.h>
 #include <linux/init.h>
-#ifdef CONFIG_PROC_FS
 #include <linux/proc_fs.h>
-#endif
+#include <linux/spinlock.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 
-
-static int nvram_open_cnt = 0;	/* #times opened */
+static int nvram_open_cnt;	/* #times opened */
 static int nvram_open_mode;		/* special open modes */
 #define	NVRAM_WRITE		1		/* opened for writing (exclusive) */
 #define	NVRAM_EXCL		2		/* opened with O_EXCL */
@@ -165,21 +168,20 @@ unsigned char nvram_read_byte( int i )
 	unsigned long flags;
 	unsigned char c;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave (&rtc_lock, flags);
 	c = nvram_read_int( i );
-	restore_flags(flags);
+	spin_unlock_irqrestore (&rtc_lock, flags);
 	return( c );
 }
 
+/* This races nicely with trying to read with checksum checking (nvram_read) */
 void nvram_write_byte( unsigned char c, int i )
 {
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave (&rtc_lock, flags);
 	nvram_write_int( c, i );
-	restore_flags(flags);
+	spin_unlock_irqrestore (&rtc_lock, flags);
 }
 
 int nvram_check_checksum( void )
@@ -187,10 +189,9 @@ int nvram_check_checksum( void )
 	unsigned long flags;
 	int rv;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave (&rtc_lock, flags);
 	rv = nvram_check_checksum_int();
-	restore_flags(flags);
+	spin_unlock_irqrestore (&rtc_lock, flags);
 	return( rv );
 }
 
@@ -198,10 +199,9 @@ void nvram_set_checksum( void )
 {
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave (&rtc_lock, flags);
 	nvram_set_checksum_int();
-	restore_flags(flags);
+	spin_unlock_irqrestore (&rtc_lock, flags);
 }
 
 #endif /* MACH == ATARI */
@@ -230,63 +230,67 @@ static long long nvram_llseek(struct file *file,loff_t offset, int origin )
 static ssize_t nvram_read(struct file * file,
 	char * buf, size_t count, loff_t *ppos )
 {
-	unsigned long flags;
+	char contents [NVRAM_BYTES];
 	unsigned i = *ppos;
-	char *tmp = buf;
-	
-	if (i != *ppos)
-		return -EINVAL;
+	char *tmp;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irq (&rtc_lock);
 	
-	if (!nvram_check_checksum_int()) {
-		restore_flags(flags);
-		return( -EIO );
-	}
+	if (!nvram_check_checksum_int())
+		goto checksum_err;
 
-	for( ; count-- > 0 && i < NVRAM_BYTES; ++i, ++tmp )
-		put_user( nvram_read_int(i), tmp );
+	for (tmp = contents; count-- > 0 && i < NVRAM_BYTES; ++i, ++tmp)
+		*tmp = nvram_read_int(i);
+
+	spin_unlock_irq (&rtc_lock);
+
+	if (copy_to_user (buf, contents, tmp - contents))
+		return -EFAULT;
+
 	*ppos = i;
 
-	restore_flags(flags);
-	return( tmp - buf );
+	return (tmp - contents);
+
+checksum_err:
+	spin_unlock_irq (&rtc_lock);
+	return -EIO;
 }
 
 static ssize_t nvram_write(struct file * file,
 		const char * buf, size_t count, loff_t *ppos )
 {
-	unsigned long flags;
+	char contents [NVRAM_BYTES];
 	unsigned i = *ppos;
-	const char *tmp = buf;
-	char c;
-	
-	if (i != *ppos)
-		return -EINVAL;
+	char * tmp;
 
-	save_flags(flags);
-	cli();
-	
-	if (!nvram_check_checksum_int()) {
-		restore_flags(flags);
-		return( -EIO );
-	}
+	if (copy_from_user (contents, buf, (NVRAM_BYTES - i) < count ?
+						(NVRAM_BYTES - i) : count))
+		return -EFAULT;
 
-	for( ; count-- > 0 && i < NVRAM_BYTES; ++i, ++tmp ) {
-		get_user( c, tmp );
-		nvram_write_int( c, i );
-	}
+	spin_lock_irq (&rtc_lock);
+
+	if (!nvram_check_checksum_int())
+		goto checksum_err;
+
+	for (tmp = contents; count-- > 0 && i < NVRAM_BYTES; ++i, ++tmp)
+		nvram_write_int (*tmp, i);
+
 	nvram_set_checksum_int();
+
+	spin_unlock_irq (&rtc_lock);
+
 	*ppos = i;
 
-	restore_flags(flags);
-	return( tmp - buf );
+	return (tmp - contents);
+
+checksum_err:
+	spin_unlock_irq (&rtc_lock);
+	return -EIO;
 }
 
 static int nvram_ioctl( struct inode *inode, struct file *file,
 						unsigned int cmd, unsigned long arg )
 {
-	unsigned long flags;
 	int i;
 	
 	switch( cmd ) {
@@ -295,14 +299,13 @@ static int nvram_ioctl( struct inode *inode, struct file *file,
 		if (!capable(CAP_SYS_ADMIN))
 			return( -EACCES );
 
-		save_flags(flags);
-		cli();
+		spin_lock_irq (&rtc_lock);
 
 		for( i = 0; i < NVRAM_BYTES; ++i )
 			nvram_write_int( 0, i );
 		nvram_set_checksum_int();
 		
-		restore_flags(flags);
+		spin_unlock_irq (&rtc_lock);
 		return( 0 );
 	  
 	  case NVRAM_SETCKS:		/* just set checksum, contents unchanged
@@ -311,10 +314,9 @@ static int nvram_ioctl( struct inode *inode, struct file *file,
 		if (!capable(CAP_SYS_ADMIN))
 			return( -EACCES );
 
-		save_flags(flags);
-		cli();
+		spin_lock_irq (&rtc_lock);
 		nvram_set_checksum_int();
-		restore_flags(flags);
+		spin_unlock_irq (&rtc_lock);
 		return( 0 );
 
 	  default:
@@ -334,46 +336,45 @@ static int nvram_open( struct inode *inode, struct file *file )
 	if (file->f_mode & 2)
 		nvram_open_mode |= NVRAM_WRITE;
 	nvram_open_cnt++;
-	MOD_INC_USE_COUNT;
 	return( 0 );
 }
 
 static int nvram_release( struct inode *inode, struct file *file )
 {
+	lock_kernel();
 	nvram_open_cnt--;
 	if (file->f_flags & O_EXCL)
 		nvram_open_mode &= ~NVRAM_EXCL;
 	if (file->f_mode & 2)
 		nvram_open_mode &= ~NVRAM_WRITE;
+	unlock_kernel();
 
-	MOD_DEC_USE_COUNT;
 	return( 0 );
 }
 
 
-#ifdef CONFIG_PROC_FS
-
-struct proc_dir_entry *proc_nvram;
+#ifndef CONFIG_PROC_FS
+static int nvram_read_proc( char *buffer, char **start, off_t offset,
+			    int size, int *eof, void *data) { return 0; }
+#else
 
 static int nvram_read_proc( char *buffer, char **start, off_t offset,
 							int size, int *eof, void *data )
 {
-	unsigned long flags;
 	unsigned char contents[NVRAM_BYTES];
     int i, len = 0;
     off_t begin = 0;
-	
-	save_flags(flags);
-	cli();
+
+	spin_lock_irq (&rtc_lock);
 	for( i = 0; i < NVRAM_BYTES; ++i )
 		contents[i] = nvram_read_int( i );
-	restore_flags(flags);
+	spin_unlock_irq (&rtc_lock);
 	
 	*eof = mach_proc_infos( contents, buffer, &len, &begin, offset, size );
 
     if (offset >= begin + len)
 		return( 0 );
-    *start = buffer + (begin - offset);
+    *start = buffer + (offset - begin);
     return( size < begin + len - offset ? size : begin + len - offset );
 	
 }
@@ -391,19 +392,16 @@ static int nvram_read_proc( char *buffer, char **start, off_t offset,
 		}												\
 	} while(0)
 
-#endif
+#endif /* CONFIG_PROC_FS */
 
 static struct file_operations nvram_fops = {
-	nvram_llseek,
-	nvram_read,
-	nvram_write,
-	NULL,			/* No readdir */
-	NULL,			/* No poll */
-	nvram_ioctl,
-	NULL,			/* No mmap */
-	nvram_open,
-	NULL,			/* flush */
-	nvram_release
+	owner:		THIS_MODULE,
+	llseek:		nvram_llseek,
+	read:		nvram_read,
+	write:		nvram_write,
+	ioctl:		nvram_ioctl,
+	open:		nvram_open,
+	release:	nvram_release,
 };
 
 static struct miscdevice nvram_dev = {
@@ -413,37 +411,41 @@ static struct miscdevice nvram_dev = {
 };
 
 
-__initfunc(int nvram_init(void))
+static int __init nvram_init(void)
 {
+	int ret;
+
 	/* First test whether the driver should init at all */
 	if (!CHECK_DRIVER_INIT())
 	    return( -ENXIO );
 
-	printk(KERN_INFO "Non-volatile memory driver v%s\n", NVRAM_VERSION );
-	misc_register( &nvram_dev );
-#ifdef CONFIG_PROC_FS
-	if ((proc_nvram = create_proc_entry( "nvram", 0, 0 )))
-		proc_nvram->read_proc = nvram_read_proc;
-#endif
-	
-	return( 0 );
+	ret = misc_register( &nvram_dev );
+	if (ret) {
+		printk(KERN_ERR "nvram: can't misc_register on minor=%d\n", NVRAM_MINOR);
+		goto out;
+	}
+	if (!create_proc_read_entry("driver/nvram",0,0,nvram_read_proc,NULL)) {
+		printk(KERN_ERR "nvram: can't create /proc/driver/nvram\n");
+		ret = -ENOMEM;
+		goto outmisc;
+	}
+	ret = 0;
+	printk(KERN_INFO "Non-volatile memory driver v" NVRAM_VERSION "\n");
+out:
+	return( ret );
+outmisc:
+	misc_deregister( &nvram_dev );
+	goto out;
 }
 
-#ifdef MODULE
-int init_module (void)
+static void __exit nvram_cleanup_module (void)
 {
-	return( nvram_init() );
-}
-
-void cleanup_module (void)
-{
-#ifdef CONFIG_PROC_FS
-	if (proc_nvram)
-		remove_proc_entry( "nvram", 0 );
-#endif
+	remove_proc_entry( "driver/nvram", 0 );
 	misc_deregister( &nvram_dev );
 }
-#endif
+
+module_init(nvram_init);
+module_exit(nvram_cleanup_module);
 
 
 /*
@@ -479,7 +481,7 @@ static void pc_set_checksum( void )
 #ifdef CONFIG_PROC_FS
 
 static char *floppy_types[] = {
-	"none", "5.25'' 360k", "5.25'' 1.2M", "3.5'' 720k", "3.5'' 1.44M"
+	"none", "5.25'' 360k", "5.25'' 1.2M", "3.5'' 720k", "3.5'' 1.44M", "3.5'' 2.88M"
 };
 
 static char *gfx_types[] = {
@@ -492,15 +494,13 @@ static char *gfx_types[] = {
 static int pc_proc_infos( unsigned char *nvram, char *buffer, int *len,
 						  off_t *begin, off_t offset, int size )
 {
-	unsigned long flags;
 	int checksum;
 	int type;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irq (&rtc_lock);
 	checksum = nvram_check_checksum_int();
-	restore_flags(flags);
-	
+	spin_unlock_irq (&rtc_lock);
+
 	PRINT_PROC( "Checksum status: %svalid\n", checksum ? "" : "not " );
 
 	PRINT_PROC( "# floppies     : %d\n",
@@ -521,14 +521,14 @@ static int pc_proc_infos( unsigned char *nvram, char *buffer, int *len,
 	PRINT_PROC( "HD 0 type      : " );
 	type = nvram[4] >> 4;
 	if (type)
-		PRINT_PROC( " %02x\n", type == 0x0f ? nvram[11] : type );
+		PRINT_PROC( "%02x\n", type == 0x0f ? nvram[11] : type );
 	else
 		PRINT_PROC( "none\n" );
 
 	PRINT_PROC( "HD 1 type      : " );
 	type = nvram[4] & 0x0f;
 	if (type)
-		PRINT_PROC( " %02x\n", type == 0x0f ? nvram[12] : type );
+		PRINT_PROC( "%02x\n", type == 0x0f ? nvram[12] : type );
 	else
 		PRINT_PROC( "none\n" );
 

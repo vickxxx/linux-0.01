@@ -3,8 +3,11 @@
  *
  * ppc architecture timex specifications
  */
+#ifdef __KERNEL__
 #ifndef _ASMppc_TIMEX_H
 #define _ASMppc_TIMEX_H
+
+#include <linux/config.h>
 
 #define CLOCK_TICK_RATE	1193180 /* Underlying HZ */
 #define CLOCK_TICK_FACTOR	20	/* Factor of both 1000000 and CLOCK_TICK_RATE */
@@ -26,7 +29,7 @@ extern cycles_t cacheflush_time;
 
 static inline cycles_t get_cycles(void)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	cycles_t ret;
 
 	__asm__("mftb %0" : "=r" (ret) : );
@@ -37,3 +40,4 @@ static inline cycles_t get_cycles(void)
 }
 
 #endif
+#endif /* __KERNEL__ */

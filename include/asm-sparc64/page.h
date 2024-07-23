@@ -1,4 +1,4 @@
-/* $Id: page.h,v 1.25 1999/06/23 03:53:15 davem Exp $ */
+/* $Id: page.h,v 1.36 2000/08/10 01:04:53 davem Exp $ */
 
 #ifndef _SPARC64_PAGE_H
 #define _SPARC64_PAGE_H
@@ -18,12 +18,15 @@
 
 #ifndef __ASSEMBLY__
 
-#define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; } while (0)
-#define PAGE_BUG(page) do { \
-				BUG(); } while (0)
+#define BUG()		__builtin_trap()
+#define PAGE_BUG(page)	BUG()
 
-extern void clear_page(unsigned long page);
-extern void copy_page(unsigned long to, unsigned long from);
+extern void _clear_page(void *page);
+extern void _copy_page(void *to, void *from);
+#define clear_page(X)	_clear_page((void *)(X))
+#define copy_page(X,Y)	_copy_page((void *)(X), (void *)(Y))
+extern void clear_user_page(void *page, unsigned long vaddr);
+extern void copy_user_page(void *to, void *from, unsigned long vaddr);
 
 /* GROSS, defining this makes gcc pass these types as aggregates,
  * and thus on the stack, turn this crap off... -DaveM
@@ -85,7 +88,7 @@ typedef unsigned long iopgprot_t;
 
 #endif /* (STRICT_MM_TYPECHECKS) */
 
-#define TASK_UNMAPPED_BASE	((current->tss.flags & SPARC_FLAG_32BIT) ? \
+#define TASK_UNMAPPED_BASE	((current->thread.flags & SPARC_FLAG_32BIT) ? \
 				 (0x0000000070000000UL) : (PAGE_OFFSET))
 
 #endif /* !(__ASSEMBLY__) */
@@ -95,15 +98,18 @@ typedef unsigned long iopgprot_t;
 
 #ifndef __ASSEMBLY__
 /* Do prdele, look what happens to be in %g4... */
-register unsigned long page_offset asm("g4");
-#define PAGE_OFFSET		page_offset
+register unsigned long PAGE_OFFSET asm("g4");
 #else
 #define PAGE_OFFSET		0xFFFFF80000000000
 #endif
 
 #define __pa(x)			((unsigned long)(x) - PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long) (x) + PAGE_OFFSET))
-#define MAP_NR(addr)		(__pa(addr) >> PAGE_SHIFT)
+#define virt_to_page(kaddr)	(mem_map + ((__pa(kaddr)-phys_base) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+
+#define virt_to_phys __pa
+#define phys_to_virt __va
 
 #ifndef __ASSEMBLY__
 
@@ -116,13 +122,27 @@ register unsigned long page_offset asm("g4");
  */
 
 struct sparc_phys_banks {
-  unsigned long base_addr;
-  unsigned long num_bytes;
+	unsigned long base_addr;
+	unsigned long num_bytes;
 };
 
 #define SPARC_PHYS_BANKS 32
 
 extern struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS];
+
+/* Pure 2^n version of get_order */
+extern __inline__ int get_order(unsigned long size)
+{
+	int order;
+
+	size = (size-1) >> (PAGE_SHIFT-1);
+	order = -1;
+	do {
+		size >>= 1;
+		order++;
+	} while (size);
+	return order;
+}
 
 #endif /* !(__ASSEMBLY__) */
 

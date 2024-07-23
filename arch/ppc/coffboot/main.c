@@ -9,6 +9,10 @@
 #include "nonstdio.h"
 #include "rs6000.h"
 #include "zlib.h"
+#include <asm/bootinfo.h>
+#include <asm/processor.h>
+#define __KERNEL__
+#include <asm/page.h>
 
 extern void *finddevice(const char *);
 extern int getprop(void *, const char *, void *, int);
@@ -100,12 +104,37 @@ coffboot(int a1, int a2, void *prom)
 
     flush_cache(dst, len);
 
-    sa = *(unsigned *)dst + PROG_START;
+    sa = (unsigned long)dst;
     printf("start address = 0x%x\n", sa);
 
 #if 0
     pause();
 #endif
+    {
+	    struct bi_record *rec;
+	    
+	    rec = (struct bi_record *)_ALIGN((unsigned long)dst+len+(1<<20)-1,(1<<20));
+	    
+	    rec->tag = BI_FIRST;
+	    rec->size = sizeof(struct bi_record);
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+
+	    rec->tag = BI_BOOTLOADER_ID;
+	    sprintf( (char *)rec->data, "coffboot");
+	    rec->size = sizeof(struct bi_record) + strlen("coffboot") + 1;
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+	    
+	    rec->tag = BI_MACHTYPE;
+	    rec->data[0] = _MACH_Pmac;
+	    rec->data[1] = 1;
+	    rec->size = sizeof(struct bi_record) + sizeof(unsigned long);
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+	    
+	    rec->tag = BI_LAST;
+	    rec->size = sizeof(struct bi_record);
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+    }
+    
     (*(void (*)())sa)(a1, a2, prom);
 
     printf("returned?\n");
@@ -165,7 +194,6 @@ void gunzip(void *dst, int dstlen, unsigned char *src, int *lenp)
 	printf("gunzip: ran out of data in header\n");
 	exit();
     }
-
     s.zalloc = zalloc;
     s.zfree = zfree;
     r = inflateInit2(&s, -MAX_WBITS);

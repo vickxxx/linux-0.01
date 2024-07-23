@@ -23,11 +23,6 @@
  *	Moved static stuff to sb_mixer.c
  *
  */
-#include <linux/config.h>
-#include "legacy.h"
-
-#ifdef CONFIG_SBDSP
-
 /*
  * Mixer registers
  * 
@@ -78,6 +73,11 @@
 #define RIGHT_CHN	1
 
 /*
+ * 3DSE register of AWE32/64
+ */
+#define AWE_3DSE	0x90
+
+/*
  * Mixer registers of ALS007
  */
 #define ALS007_RECORD_SRC	0x6c
@@ -103,6 +103,3 @@
 #define ALS007_LINE	6
 #define ALS007_CD	2
 #define ALS007_SYNTH	7
-
-#endif
-

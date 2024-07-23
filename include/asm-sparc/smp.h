@@ -6,7 +6,8 @@
 #ifndef _SPARC_SMP_H
 #define _SPARC_SMP_H
 
-#include <linux/tasks.h>
+#include <linux/config.h>
+#include <linux/threads.h>
 #include <asm/head.h>
 #include <asm/btfixup.h>
 
@@ -23,7 +24,7 @@ extern int linux_num_cpus;	/* number of CPUs probed  */
 
 #endif /* !(__ASSEMBLY__) */
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 
 #ifndef __ASSEMBLY__
 
@@ -92,13 +93,23 @@ extern __inline__ void xc5(smpfunc_t func, unsigned long arg1, unsigned long arg
 			   unsigned long arg3, unsigned long arg4, unsigned long arg5)
 { smp_cross_call(func, arg1, arg2, arg3, arg4, arg5); }
 
-extern __volatile__ int cpu_number_map[NR_CPUS];
+extern __inline__ int smp_call_function(void (*func)(void *info), void *info, int nonatomic, int wait)
+{
+	xc1((smpfunc_t)func, (unsigned long)info);
+	return 0;
+}
+
+extern __volatile__ int __cpu_number_map[NR_CPUS];
 extern __volatile__ int __cpu_logical_map[NR_CPUS];
 extern unsigned long smp_proc_in_lock[NR_CPUS];
 
 extern __inline__ int cpu_logical_map(int cpu)
 {
 	return __cpu_logical_map[cpu];
+}
+extern __inline__ int cpu_number_map(int cpu)
+{
+	return __cpu_number_map[cpu];
 }
 
 extern __inline__ int hard_smp4m_processor_id(void)
@@ -179,7 +190,7 @@ extern __inline__ void smp_send_stop(void) { }
 
 #define PROC_CHANGE_PENALTY     15
 
-#endif /* !(__SMP__) */
+#endif /* !(CONFIG_SMP) */
 
 #define NO_PROC_ID            0xFF
 

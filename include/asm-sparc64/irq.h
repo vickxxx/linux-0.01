@@ -1,4 +1,4 @@
-/* $Id: irq.h,v 1.14 1998/12/19 11:05:41 davem Exp $
+/* $Id: irq.h,v 1.19 2000/06/26 19:40:27 davem Exp $
  * irq.h: IRQ registers on the 64-bit Sparc.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -8,6 +8,7 @@
 #ifndef _SPARC64_IRQ_H
 #define _SPARC64_IRQ_H
 
+#include <linux/config.h>
 #include <linux/linkage.h>
 #include <linux/kernel.h>
 
@@ -41,10 +42,10 @@ struct ino_bucket {
 	/* Miscellaneous flags. */
 /*0x06*/unsigned char flags;
 
-	/* Unused right now, but we will use it for proper
-	 * enable_irq()/disable_irq() nesting.
+	/* This is used to deal with IBF_DMA_SYNC on
+	 * Sabre systems.
 	 */
-/*0x07*/unsigned char __unused;
+/*0x07*/unsigned char synctab_ent;
 
 	/* Reference to handler for this IRQ.  If this is
 	 * non-NULL this means it is active and should be
@@ -61,12 +62,35 @@ struct ino_bucket {
 /*0x08*/void *irq_info;
 
 	/* Sun5 Interrupt Clear Register. */
-/*0x10*/unsigned int *iclr;
+/*0x10*/unsigned long iclr;
 
 	/* Sun5 Interrupt Mapping Register. */
-/*0x18*/unsigned int *imap;
+/*0x18*/unsigned long imap;
 
 };
+
+#ifdef CONFIG_PCI
+extern unsigned long pci_dma_wsync;
+extern unsigned long dma_sync_reg_table[256];
+extern unsigned char dma_sync_reg_table_entry;
+#endif
+
+/* IMAP/ICLR register defines */
+#define IMAP_VALID		0x80000000	/* IRQ Enabled		*/
+#define IMAP_TID		0x7c000000	/* UPA TargetID		*/
+#define IMAP_IGN		0x000007c0	/* IRQ Group Number	*/
+#define IMAP_INO		0x0000003f	/* IRQ Number		*/
+#define IMAP_INR		0x000007ff	/* Full interrupt number*/
+
+#define ICLR_IDLE		0x00000000	/* Idle state		*/
+#define ICLR_TRANSMIT		0x00000001	/* Transmit state	*/
+#define ICLR_PENDING		0x00000003	/* Pending state	*/
+
+/* Only 8-bits are available, be careful.  -DaveM */
+#define IBF_DMA_SYNC	0x01	/* DMA synchronization behind PCI bridge needed. */
+#define IBF_PCI		0x02	/* Indicates PSYCHO/SABRE/SCHIZO PCI interrupt.	 */
+#define IBF_ACTIVE	0x04	/* This interrupt is active and has a handler.	 */
+#define IBF_MULTI	0x08	/* On PCI, indicates shared bucket.		 */
 
 #define NUM_IVECS	8192
 extern struct ino_bucket ivector_table[NUM_IVECS];
@@ -74,6 +98,8 @@ extern struct ino_bucket ivector_table[NUM_IVECS];
 #define __irq_ino(irq) \
         (((struct ino_bucket *)(unsigned long)(irq)) - &ivector_table[0])
 #define __irq_pil(irq) ((struct ino_bucket *)(unsigned long)(irq))->pil
+#define __bucket(irq) ((struct ino_bucket *)(unsigned long)(irq))
+#define __irq(bucket) ((unsigned int)(unsigned long)(bucket))
 
 static __inline__ char *__irq_itoa(unsigned int irq)
 {
@@ -86,14 +112,15 @@ static __inline__ char *__irq_itoa(unsigned int irq)
 #define NR_IRQS    15
 
 extern void disable_irq(unsigned int);
+#define disable_irq_nosync disable_irq
 extern void enable_irq(unsigned int);
 extern void init_timers(void (*lvl10_irq)(int, void *, struct pt_regs *),
 			unsigned long *);
-extern unsigned int build_irq(int pil, int inofixup, unsigned int *iclr, unsigned int *imap);
+extern unsigned int build_irq(int pil, int inofixup, unsigned long iclr, unsigned long imap);
 extern unsigned int sbus_build_irq(void *sbus, unsigned int ino);
 extern unsigned int psycho_build_irq(void *psycho, int imap_off, int ino, int need_dma_sync);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 extern void set_cpu_int(int, int);
 extern void clear_cpu_int(int, int);
 extern void set_irq_udt(int);

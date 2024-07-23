@@ -52,7 +52,7 @@
 #include <asm/irq.h>
 
 #include <linux/blk.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 #include "scsi.h"
 #include "hosts.h"
 #include "sd.h"
@@ -212,10 +212,6 @@ static volatile int internal_done_flag = 0;
 static volatile int internal_done_errcode = 0;
 static char info_msg[256];
 
-struct proc_dir_entry proc_scsi_NCR53c406a = {
-    PROC_SCSI_NCR53C406A, 7, "NCR53c406a",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 /* ================================================================= */
 
 /* possible BIOS locations */
@@ -461,8 +457,8 @@ static __inline__ int NCR53c406a_pio_write(unsigned char *request,
 }
 #endif USE_PIO
 
-__initfunc(int 
-NCR53c406a_detect(Scsi_Host_Template * tpnt)){
+int  __init 
+NCR53c406a_detect(Scsi_Host_Template * tpnt){
     struct Scsi_Host *shpnt;
 #ifndef PORT_BASE
     int i;
@@ -571,7 +567,7 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt)){
 #endif USE_DMA 
     
     tpnt->present = 1;
-    tpnt->proc_dir = &proc_scsi_NCR53c406a;
+    tpnt->proc_name = "NCR53c406a";
     
     shpnt = scsi_register(tpnt, 0);
     shpnt->irq = irq_level;
@@ -593,7 +589,7 @@ NCR53c406a_detect(Scsi_Host_Template * tpnt)){
 }
 
 /* called from init/main.c */
-__initfunc(void NCR53c406a_setup(char *str, int *ints))
+void __init NCR53c406a_setup(char *str, int *ints)
 {
     static size_t setup_idx = 0;
     size_t i;
@@ -1022,7 +1018,7 @@ static void chip_init()
     outb(SYNC_MODE, SYNCOFF);   /* synchronous mode */  
 }
 
-__initfunc(void calc_port_addr(void))
+void __init calc_port_addr(void)
 {
     /* Control Register Set 0 */
     TC_LSB		= (port_base+0x00);
@@ -1063,12 +1059,10 @@ __initfunc(void calc_port_addr(void))
     /* CONFIG6		= (port_base+0x0F);*/
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = NCR53c406a;
+static Scsi_Host_Template driver_template = NCR53c406a;
 
 #include "scsi_module.c"
-#endif
 
 /*
  * Overrides for Emacs so that we get a uniform tabbing style.

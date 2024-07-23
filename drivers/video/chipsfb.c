@@ -35,8 +35,11 @@
 #include <asm/io.h>
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
-#include <asm/adb.h>
-#include <asm/pmu.h>
+#ifdef CONFIG_PMAC_BACKLIGHT
+#include <asm/backlight.h>
+#endif
+#include <linux/adb.h>
+#include <linux/pmu.h>
 
 #include <video/fbcon.h>
 #include <video/fbcon-cfb8.h>
@@ -103,45 +106,36 @@ struct fb_info_chips {
 static struct fb_info_chips *all_chips;
 
 #ifdef CONFIG_PMAC_PBOOK
-int chips_sleep_notify(struct notifier_block *, unsigned long, void *);
-static struct notifier_block chips_sleep_notifier = {
-	chips_sleep_notify, NULL, 0
+int chips_sleep_notify(struct pmu_sleep_notifier *self, int when);
+static struct pmu_sleep_notifier chips_sleep_notifier = {
+	chips_sleep_notify, SLEEP_LEVEL_VIDEO,
 };
 #endif
 
 /*
  * Exported functions
  */
-void chips_init(void);
-void chips_of_init(struct device_node *dp);
+int chips_init(void);
 
-static int chips_open(struct fb_info *info, int user);
-static int chips_release(struct fb_info *info, int user);
+static void chips_of_init(struct device_node *dp);
 static int chips_get_fix(struct fb_fix_screeninfo *fix, int con,
 			 struct fb_info *info);
 static int chips_get_var(struct fb_var_screeninfo *var, int con,
 			 struct fb_info *info);
 static int chips_set_var(struct fb_var_screeninfo *var, int con,
 			 struct fb_info *info);
-static int chips_pan_display(struct fb_var_screeninfo *var, int con,
-			     struct fb_info *info);
 static int chips_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info);
 static int chips_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info);
-static int chips_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info);
 
 static struct fb_ops chipsfb_ops = {
-	chips_open,
-	chips_release,
-	chips_get_fix,
-	chips_get_var,
-	chips_set_var,
-	chips_get_cmap,
-	chips_set_cmap,
-	chips_pan_display,
-	chips_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	chips_get_fix,
+	fb_get_var:	chips_get_var,
+	fb_set_var:	chips_set_var,
+	fb_get_cmap:	chips_get_cmap,
+	fb_set_cmap:	chips_set_cmap,
 };
 
 static int chipsfb_getcolreg(u_int regno, u_int *red, u_int *green,
@@ -150,19 +144,6 @@ static int chipsfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 			     u_int transp, struct fb_info *info);
 static void do_install_cmap(int con, struct fb_info *info);
 static void chips_set_bitdepth(struct fb_info_chips *p, struct display* disp, int con, int bpp);
-
-
-static int chips_open(struct fb_info *info, int user)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int chips_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
-}
 
 static int chips_get_fix(struct fb_fix_screeninfo *fix, int con,
 			 struct fb_info *info)
@@ -203,14 +184,6 @@ static int chips_set_var(struct fb_var_screeninfo *var, int con,
 	return 0;
 }
 
-static int chips_pan_display(struct fb_var_screeninfo *var, int con,
-			     struct fb_info *info)
-{
-	if (var->xoffset != 0 || var->yoffset != 0)
-		return -EINVAL;
-	return 0;
-}
-
 static int chips_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info)
 {
@@ -240,12 +213,6 @@ static int chips_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 	else
 		fb_copy_cmap(cmap, &fb_display[con].cmap, kspc ? 0 : 1);
 	return 0;
-}
-
-static int chips_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info)
-{
-	return -EINVAL;
 }
 
 static int chipsfbcon_switch(int con, struct fb_info *info)
@@ -281,7 +248,17 @@ static void chipsfb_blank(int blank, struct fb_info *info)
 	// used to disable backlight only for blank > 1, but it seems
 	// useful at blank = 1 too (saves battery, extends backlight life)
 	if (blank) {
-		pmu_enable_backlight(0);
+#ifdef CONFIG_PMAC_BACKLIGHT
+		set_backlight_enable(0);
+#endif /* CONFIG_PMAC_BACKLIGHT */
+		/* get the palette from the chip */
+		for (i = 0; i < 256; ++i) {
+			out_8(p->io_base + 0x3c7, i);
+			udelay(1);
+			p->palette[i].red = in_8(p->io_base + 0x3c9);
+			p->palette[i].green = in_8(p->io_base + 0x3c9);
+			p->palette[i].blue = in_8(p->io_base + 0x3c9);
+		}
 		for (i = 0; i < 256; ++i) {
 			out_8(p->io_base + 0x3c8, i);
 			udelay(1);
@@ -290,8 +267,16 @@ static void chipsfb_blank(int blank, struct fb_info *info)
 			out_8(p->io_base + 0x3c9, 0);
 		}
 	} else {
-		pmu_enable_backlight(1);
-		do_install_cmap(currcon, info);
+#ifdef CONFIG_PMAC_BACKLIGHT
+		set_backlight_enable(1);
+#endif /* CONFIG_PMAC_BACKLIGHT */
+		for (i = 0; i < 256; ++i) {
+			out_8(p->io_base + 0x3c8, i);
+			udelay(1);
+			out_8(p->io_base + 0x3c9, p->palette[i].red);
+			out_8(p->io_base + 0x3c9, p->palette[i].green);
+			out_8(p->io_base + 0x3c9, p->palette[i].blue);
+		}
 	}
 }
 
@@ -329,8 +314,9 @@ static int chipsfb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	out_8(p->io_base + 0x3c9, blue);
 
 #ifdef FBCON_HAS_CFB16
-	if (regno < 16)	p->fbcon_cfb16_cmap[regno] =
-		((red & 0xf8) << 7) | ((green & 0xf8) << 2) | ((blue & 0xf8) >> 3);
+	if (regno < 16)
+		p->fbcon_cfb16_cmap[regno] = ((red & 0xf8) << 7)
+			| ((green & 0xf8) << 2) | ((blue & 0xf8) >> 3);
 #endif
 
 	return 0;
@@ -525,7 +511,7 @@ static struct chips_init_reg chips_init_xr[] = {
 	{ 0xa8, 0x00 }
 };
 
-__initfunc(static void chips_hw_init(struct fb_info_chips *p))
+static void __init chips_hw_init(struct fb_info_chips *p)
 {
 	int i;
 
@@ -544,12 +530,12 @@ __initfunc(static void chips_hw_init(struct fb_info_chips *p))
 		write_fr(chips_init_fr[i].addr, chips_init_fr[i].data);
 }
 
-__initfunc(static void init_chips(struct fb_info_chips *p))
+static void __init init_chips(struct fb_info_chips *p)
 {
 	int i;
 
 	strcpy(p->fix.id, "C&T 65550");
-	p->fix.smem_start = (char *) p->frame_buffer_phys;
+	p->fix.smem_start = p->frame_buffer_phys;
 
 // FIXME: Assumes 1MB frame buffer, but 65550 supports 1MB or 2MB.
 // * "3500" PowerBook G3 (the original PB G3) has 2MB.
@@ -559,7 +545,7 @@ __initfunc(static void init_chips(struct fb_info_chips *p))
 // * 3400 has 1MB (I think).  Don't know if it's expandable.
 // -- Tim Seufert
 	p->fix.smem_len = 0x100000;	// 1MB
-	p->fix.mmio_start = (char *) p->io_base_phys;
+	p->fix.mmio_start = p->io_base_phys;
 	p->fix.type = FB_TYPE_PACKED_PIXELS;
 	p->fix.visual = FB_VISUAL_PSEUDOCOLOR;
 	p->fix.line_length = 800;
@@ -638,25 +624,23 @@ __initfunc(static void init_chips(struct fb_info_chips *p))
 
 #ifdef CONFIG_PMAC_PBOOK
 	if (all_chips == NULL)
-		notifier_chain_register(&sleep_notifier_list,
-					&chips_sleep_notifier);
+		pmu_register_sleep_notifier(&chips_sleep_notifier);
 #endif /* CONFIG_PMAC_PBOOK */
 	p->next = all_chips;
 	all_chips = p;
 }
 
-__initfunc(void chips_init(void))
+int __init chips_init(void)
 {
-#ifndef CONFIG_FB_OF
 	struct device_node *dp;
 
 	dp = find_devices("chips65550");
 	if (dp != 0)
 		chips_of_init(dp);
-#endif /* CONFIG_FB_OF */
+	return 0;
 }
 
-__initfunc(void chips_of_init(struct device_node *dp))
+static void __init chips_of_init(struct device_node *dp)
 {
 	struct fb_info_chips *p;
 	unsigned long addr;
@@ -670,6 +654,10 @@ __initfunc(void chips_of_init(struct device_node *dp))
 		return;
 	memset(p, 0, sizeof(*p));
 	addr = dp->addrs[0].address;
+	if (!request_mem_region(addr, dp->addrs[0].size, "chipsfb")) {
+		kfree(p);
+		return;
+	}
 #ifdef __BIG_ENDIAN
 	addr += 0x800000;	// Use big-endian aperture
 #endif
@@ -692,8 +680,10 @@ __initfunc(void chips_of_init(struct device_node *dp))
 	/* Clear the entire framebuffer */
 	memset(p->frame_buffer, 0, 0x100000);
 
+#ifdef CONFIG_PMAC_BACKLIGHT
 	/* turn on the backlight */
-	pmu_enable_backlight(1);
+	set_backlight_enable(1);
+#endif /* CONFIG_PMAC_BACKLIGHT */
 
 	init_chips(p);
 }
@@ -704,16 +694,28 @@ __initfunc(void chips_of_init(struct device_node *dp))
  * and restore it when we wake up again.
  */
 int
-chips_sleep_notify(struct notifier_block *this, unsigned long code, void *x)
+chips_sleep_notify(struct pmu_sleep_notifier *self, int when)
 {
 	struct fb_info_chips *p;
 
 	for (p = all_chips; p != NULL; p = p->next) {
 		int nb = p->var.yres * p->fix.line_length;
 
-		switch (code) {
-		case PBOOK_SLEEP:
+		switch (when) {
+		case PBOOK_SLEEP_REQUEST:
 			p->save_framebuffer = vmalloc(nb);
+			if (p->save_framebuffer == NULL)
+				return PBOOK_SLEEP_REFUSE;
+			break;
+		case PBOOK_SLEEP_REJECT:
+			if (p->save_framebuffer) {
+				vfree(p->save_framebuffer);
+				p->save_framebuffer = 0;
+			}
+			break;
+
+		case PBOOK_SLEEP_NOW:
+			chipsfb_blank(1, (struct fb_info *)p);
 			if (p->save_framebuffer)
 				memcpy(p->save_framebuffer,
 				       p->frame_buffer, nb);
@@ -725,9 +727,10 @@ chips_sleep_notify(struct notifier_block *this, unsigned long code, void *x)
 				vfree(p->save_framebuffer);
 				p->save_framebuffer = 0;
 			}
+			chipsfb_blank(0, (struct fb_info *)p);
 			break;
 		}
 	}
-	return NOTIFY_DONE;
+	return PBOOK_SLEEP_OK;
 }
 #endif /* CONFIG_PMAC_PBOOK */

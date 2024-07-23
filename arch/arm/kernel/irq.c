@@ -4,20 +4,21 @@
  *  Copyright (C) 1992 Linus Torvalds
  *  Modifications for ARM processor Copyright (C) 1995-1998 Russell King.
  *
- * This file contains the code used by various IRQ handling routines:
- * asking for different IRQ's should be done through these routines
- * instead of just grabbing them. Thus setups with different IRQ numbers
- * shouldn't result in any weird surprises, and installing new handlers
- * should be easier.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  This file contains the code used by various IRQ handling routines:
+ *  asking for different IRQ's should be done through these routines
+ *  instead of just grabbing them. Thus setups with different IRQ numbers
+ *  shouldn't result in any weird surprises, and installing new handlers
+ *  should be easier.
+ *
+ *  IRQ's are in fact implemented a bit like signal handlers for the kernel.
+ *  Naturally it's not a 1:1 relation, but there are similarities.
  */
-
-/*
- * IRQ's are in fact implemented a bit like signal handlers for the kernel.
- * Naturally it's not a 1:1 relation, but there are similarities.
- */
-#include <linux/config.h> /* for CONFIG_DEBUG_ERRORS */
+#include <linux/config.h>
 #include <linux/ptrace.h>
-#include <linux/errno.h>
 #include <linux/kernel_stat.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -26,37 +27,21 @@
 #include <linux/malloc.h>
 #include <linux/random.h>
 #include <linux/smp.h>
-#include <linux/smp_lock.h>
 #include <linux/init.h>
 
 #include <asm/hardware.h>
 #include <asm/io.h>
 #include <asm/system.h>
 
-#ifndef SMP
-#define irq_enter(cpu, irq)	(++local_irq_count[cpu])
-#define irq_exit(cpu, irq)	(--local_irq_count[cpu])
-#else
-#error SMP not supported
-#endif
-
-#ifndef cliIF
-#define cliIF()
-#endif
-
 /*
- * Maximum IRQ count.  Currently, this is arbitary.
- * However, it should not be set too low to prevent
- * false triggering.  Conversely, if it is set too
- * high, then you could miss a stuck IRQ.
+ * Maximum IRQ count.  Currently, this is arbitary.  However, it should
+ * not be set too low to prevent false triggering.  Conversely, if it
+ * is set too high, then you could miss a stuck IRQ.
  *
- * Maybe we ought to set a timer and re-enable the
- * IRQ at a later time?
+ * Maybe we ought to set a timer and re-enable the IRQ at a later time?
  */
 #define MAX_IRQ_CNT	100000
 
-unsigned int local_bh_count[NR_CPUS];
-unsigned int local_irq_count[NR_CPUS];
 spinlock_t irq_controller_lock;
 
 int setup_arm_irq(int, struct irqaction *);
@@ -85,6 +70,7 @@ struct irqdesc {
 };
 
 static struct irqdesc irq_desc[NR_IRQS];
+static volatile unsigned long irq_err_count;
 
 /*
  * Get architecture specific interrupt handlers
@@ -104,7 +90,6 @@ void disable_irq(unsigned int irq)
 	unsigned long flags;
 
 	spin_lock_irqsave(&irq_controller_lock, flags);
-	cliIF();
 	irq_desc[irq].enabled = 0;
 	irq_desc[irq].mask(irq);
 	spin_unlock_irqrestore(&irq_controller_lock, flags);
@@ -115,13 +100,10 @@ void enable_irq(unsigned int irq)
 	unsigned long flags;
 
 	spin_lock_irqsave(&irq_controller_lock, flags);
-	cliIF();
 	irq_desc[irq].probing = 0;
 	irq_desc[irq].triggered = 0;
-	if (!irq_desc[irq].noautoenable) {
-		irq_desc[irq].enabled = 1;
-		irq_desc[irq].unmask(irq);
-	}
+	irq_desc[irq].enabled = 1;
+	irq_desc[irq].unmask(irq);
 	spin_unlock_irqrestore(&irq_controller_lock, flags);
 }
 
@@ -135,8 +117,8 @@ int get_irq_list(char *buf)
 	    	action = irq_desc[i].action;
 		if (!action)
 			continue;
-		p += sprintf(p, "%3d: %10u   %s",
-			     i, kstat_irqs(i), action->name);
+		p += sprintf(p, "%3d: %10u ", i, kstat_irqs(i));
+		p += sprintf(p, "  %s", action->name);
 		for (action = action->next; action; action = action->next) {
 			p += sprintf(p, ", %s", action->name);
 		}
@@ -146,6 +128,7 @@ int get_irq_list(char *buf)
 #ifdef CONFIG_ARCH_ACORN
 	p += get_fiq_list(p);
 #endif
+	p += sprintf(p, "Err: %10lu\n", irq_err_count);
 	return p - buf;
 }
 
@@ -183,9 +166,16 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 {
 	struct irqdesc * desc;
 	struct irqaction * action;
-	int status, cpu;
+	int cpu;
 
 	irq = fixup_irq(irq);
+
+	/*
+	 * Some hardware gives randomly wrong interrupts.  Rather
+	 * than crashing, do something sensible.
+	 */
+	if (irq >= NR_IRQS)
+		goto bad_irq;
 
 	desc = irq_desc + irq;
 
@@ -199,10 +189,11 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 	desc->triggered = 1;
 
 	/* Return with this interrupt masked if no action */
-	status = 0;
 	action = desc->action;
 
 	if (action) {
+		int status = 0;
+
 		if (desc->nomask) {
 			spin_lock(&irq_controller_lock);
 			desc->unmask(irq);
@@ -237,19 +228,17 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 
 	irq_exit(cpu, irq);
 
-	/*
-	 * This should be conditional: we should really get
-	 * a return code from the irq handler to tell us
-	 * whether the handler wants us to do software bottom
-	 * half handling or not..
-	 */
-	if (1) {
-		if (bh_active & bh_mask)
-			do_bottom_half();
-	}
+	if (softirq_active(cpu) & softirq_mask(cpu))
+		do_softirq();
+	return;
+
+bad_irq:
+	irq_err_count += 1;
+	printk(KERN_ERR "IRQ: spurious interrupt %d\n", irq);
+	return;
 }
 
-#if defined(CONFIG_ARCH_ACORN)
+#ifdef CONFIG_ARCH_ACORN
 void do_ecard_IRQ(int irq, struct pt_regs *regs)
 {
 	struct irqdesc * desc;
@@ -479,7 +468,11 @@ out:
 	return irq_found;
 }
 
-__initfunc(void init_IRQ(void))
+void __init init_irq_proc(void)
+{
+}
+
+void __init init_IRQ(void)
 {
 	extern void init_dma(void);
 	int irq;
@@ -494,8 +487,5 @@ __initfunc(void init_IRQ(void))
 	}
 
 	irq_init_irq();
-#ifdef CONFIG_ARCH_ACORN
-	init_FIQ();
-#endif
 	init_dma();
 }

@@ -1,4 +1,4 @@
-/* $Id: unistd.h,v 1.55 1999/04/07 17:14:15 davem Exp $ */
+/* $Id: unistd.h,v 1.70 2000/08/14 05:39:07 jj Exp $ */
 #ifndef _SPARC_UNISTD_H
 #define _SPARC_UNISTD_H
 
@@ -46,11 +46,11 @@
 #define __NR_sigaltstack	 28 /* Common					   */
 #define __NR_pause               29 /* Is sigblock(0)->sigpause() in SunOS         */
 #define __NR_utime               30 /* Implemented via utimes() under SunOS        */
-/* #define __NR_stty             31    Implemented via ioctl() under SunOS         */
-/* #define __NR_gtty             32    Implemented via ioctl() under SunOS         */
+#define __NR_lchown32            31 /* Linux sparc32 specific                      */
+#define __NR_fchown32            32 /* Linux sparc32 specific                      */
 #define __NR_access              33 /* Common                                      */
 #define __NR_nice                34 /* Implemented via get/setpriority() in SunOS  */
-/* #define __NR_ftime            35    Implemented via gettimeofday() in SunOS     */
+#define __NR_chown32             35 /* Linux sparc32 specific                      */
 #define __NR_sync                36 /* Common                                      */
 #define __NR_kill                37 /* Common                                      */
 #define __NR_stat                38 /* Common                                      */
@@ -59,7 +59,7 @@
 #define __NR_dup                 41 /* Common                                      */
 #define __NR_pipe                42 /* Common                                      */
 #define __NR_times               43 /* Implemented via getrusage() in SunOS        */
-/* #define __NR_profil           44    Common                                      */
+#define __NR_getuid32            44 /* Linux sparc32 specific                      */
 #define __NR_umount2             45 /* Linux Specific                              */
 #define __NR_setgid              46 /* Implemented via setregid() in SunOS         */
 #define __NR_getgid              47 /* Common                                      */
@@ -67,49 +67,49 @@
 #define __NR_geteuid             49 /* SunOS calls getuid()                        */
 #define __NR_getegid             50 /* SunOS calls getgid()                        */
 #define __NR_acct                51 /* Common                                      */
-/* #define __NR_ni_syscall	 52    ENOSYS under SunOS			   */
-/* #define __NR_mctl             53    SunOS specific                              */
+/* #define __NR_memory_ordering  52    Linux sparc64 specific			   */
+#define __NR_getgid32            53 /* Linux sparc32 specific                      */
 #define __NR_ioctl               54 /* Common                                      */
 #define __NR_reboot              55 /* Common                                      */
-/* #define __NR_ni_syscall       56    ENOSYS under SunOS                          */
+#define __NR_mmap2		 56 /* Linux sparc32 Specific			   */
 #define __NR_symlink             57 /* Common                                      */
 #define __NR_readlink            58 /* Common                                      */
 #define __NR_execve              59 /* Common                                      */
 #define __NR_umask               60 /* Common                                      */
 #define __NR_chroot              61 /* Common                                      */
 #define __NR_fstat               62 /* Common                                      */
-/* #define __NR_ni_syscall       63    ENOSYS under SunOS                          */
+#define __NR_fstat64		 63 /* Linux sparc32 Specific			   */
 #define __NR_getpagesize         64 /* Common                                      */
 #define __NR_msync               65 /* Common in newer 1.3.x revs...               */
 #define __NR_vfork               66 /* Common                                      */
 #define __NR_pread               67 /* Linux Specific                              */
 #define __NR_pwrite              68 /* Linux Specific                              */
-/* #define __NR_sbrk             69    SunOS Specific                              */
-/* #define __NR_sstk             70    SunOS Specific                              */
+#define __NR_geteuid32           69 /* Linux sparc32, sbrk under SunOS             */
+#define __NR_getegid32           70 /* Linux sparc32, sstk under SunOS             */
 #define __NR_mmap                71 /* Common                                      */
-/* #define __NR_vadvise          72    SunOS Specific                              */
+#define __NR_setreuid32          72 /* Linux sparc32, vadvise under SunOS          */
 #define __NR_munmap              73 /* Common                                      */
 #define __NR_mprotect            74 /* Common                                      */
-/* #define __NR_madvise          75    SunOS Specific                              */
+#define __NR_madvise             75 /* Common                                      */
 #define __NR_vhangup             76 /* Common                                      */
-/* #define __NR_ni_syscall       77    ENOSYS under SunOS                          */
-/* #define __NR_mincore          78    SunOS Specific                              */
+#define __NR_truncate64		 77 /* Linux sparc32 Specific			   */
+#define __NR_mincore             78 /* Common                                      */
 #define __NR_getgroups           79 /* Common                                      */
 #define __NR_setgroups           80 /* Common                                      */
 #define __NR_getpgrp             81 /* Common                                      */
-/* #define __NR_setpgrp          82    setpgid, same difference...                 */
+#define __NR_setgroups32         82 /* Linux sparc32, setpgrp under SunOS          */
 #define __NR_setitimer           83 /* Common                                      */
-/* #define __NR_ni_syscall       84    ENOSYS under SunOS                          */
+#define __NR_ftruncate64	 84 /* Linux sparc32 Specific			   */
 #define __NR_swapon              85 /* Common                                      */
 #define __NR_getitimer           86 /* Common                                      */
-/* #define __NR_gethostname      87    SunOS Specific                              */
+#define __NR_setuid32            87 /* Linux sparc32, gethostname under SunOS      */
 #define __NR_sethostname         88 /* Common                                      */
-/* #define __NR_getdtablesize    89    SunOS Specific                              */
+#define __NR_setgid32            89 /* Linux sparc32, getdtablesize under SunOS    */
 #define __NR_dup2                90 /* Common                                      */
-/* #define __NR_getdopt          91    SunOS Specific                              */
+#define __NR_setfsuid32          91 /* Linux sparc32, getdopt under SunOS          */
 #define __NR_fcntl               92 /* Common                                      */
 #define __NR_select              93 /* Common                                      */
-/* #define __NR_setdopt          94    SunOS Specific                              */
+#define __NR_setfsgid32          94 /* Linux sparc32, setdopt under SunOS          */
 #define __NR_fsync               95 /* Common                                      */
 #define __NR_setpriority         96 /* Common                                      */
 #define __NR_socket              97 /* Common                                      */
@@ -123,14 +123,14 @@
 #define __NR_rt_sigtimedwait    105 /* Linux Specific                              */
 #define __NR_rt_sigqueueinfo    106 /* Linux Specific                              */
 #define __NR_rt_sigsuspend      107 /* Linux Specific                              */
-/* #define __NR_sigvec          108    SunOS Specific                              */
-/* #define __NR_sigblock        109    SunOS Specific                              */
-/* #define __NR_sigsetmask      110    SunOS Specific                              */
-/* #define __NR_sigpause        111    SunOS Specific                              */
-/* #define __NR_sigstack        112    SunOS Specific                              */
+#define __NR_setresuid32        108 /* Linux Specific, sigvec under SunOS	   */
+#define __NR_getresuid32        109 /* Linux Specific, sigblock under SunOS	   */
+#define __NR_setresgid32        110 /* Linux Specific, sigsetmask under SunOS	   */
+#define __NR_getresgid32        111 /* Linux Specific, sigpause under SunOS	   */
+#define __NR_setregid32         112 /* Linux sparc32, sigstack under SunOS         */
 #define __NR_recvmsg            113 /* Common                                      */
 #define __NR_sendmsg            114 /* Common                                      */
-/* #define __NR_vtrace          115    SunOS Specific                              */
+#define __NR_getgroups32        115 /* Linux sparc32, vtrace under SunOS           */
 #define __NR_gettimeofday       116 /* Common                                      */
 #define __NR_getrusage          117 /* Common                                      */
 #define __NR_getsockopt         118 /* Common                                      */
@@ -147,21 +147,21 @@
 #define __NR_truncate           129 /* Common                                      */
 #define __NR_ftruncate          130 /* Common                                      */
 #define __NR_flock              131 /* Common                                      */
-/* #define __NR_ni_syscall      132    ENOSYS under SunOS                          */
+#define __NR_lstat64		132 /* Linux sparc32 Specific			   */
 #define __NR_sendto             133 /* Common                                      */
 #define __NR_shutdown           134 /* Common                                      */
 #define __NR_socketpair         135 /* Common                                      */
 #define __NR_mkdir              136 /* Common                                      */
 #define __NR_rmdir              137 /* Common                                      */
 #define __NR_utimes             138 /* SunOS Specific                              */
-/* #define __NR_ni_syscall      139    ENOSYS under SunOS                          */
+#define __NR_stat64		139 /* Linux sparc32 Specific			   */
 /* #define __NR_adjtime         140    SunOS Specific                              */
 #define __NR_getpeername        141 /* Common                                      */
 /* #define __NR_gethostid       142    SunOS Specific                              */
 /* #define __NR_ni_syscall      143    ENOSYS under SunOS                          */
 #define __NR_getrlimit          144 /* Common                                      */
 #define __NR_setrlimit          145 /* Common                                      */
-/* #define __NR_killpg          146    SunOS Specific                              */
+#define __NR_pivot_root		146 /* Linux Specific, killpg under SunOS          */
 #define __NR_prctl		147 /* ENOSYS under SunOS                          */
 #define __NR_pciconfig_read	148 /* ENOSYS under SunOS                          */
 #define __NR_pciconfig_write	149 /* ENOSYS under SunOS                          */
@@ -169,8 +169,8 @@
 /* #define __NR_getmsg          151    SunOS Specific                              */
 /* #define __NR_putmsg          152    SunOS Specific                              */
 #define __NR_poll               153 /* Common                                      */
-/* #define __NR_ni_syscall      154    ENOSYS under SunOS                          */
-/* #define __NR_nfssvc          155    SunOS Specific                              */
+#define __NR_getdents64		154 /* Linux specific				   */
+#define __NR_fcntl64		155 /* Linux sparc32 Specific                      */
 /* #define __NR_getdirentries   156    SunOS Specific                              */
 #define __NR_statfs             157 /* Common                                      */
 #define __NR_fstatfs            158 /* Common                                      */
@@ -225,7 +225,7 @@
 #define __NR_syslog             207 /* Linux Specific                              */
 /* #define __NR_olduname        208    Linux Specific                              */
 /* #define __NR_iopl            209    Linux Specific - i386 specific, unused      */
-#define __NR_idle               210 /* Linux Specific                              */
+/* #define __NR_idle            210    Linux Specific - was sys_idle, now unused   */
 /* #define __NR_vm86            211    Linux Specific - i386 specific, unused      */
 #define __NR_waitpid            212 /* Linux Specific                              */
 #define __NR_swapoff            213 /* Linux Specific                              */
@@ -276,15 +276,15 @@
 type name(void) \
 { \
 long __res; \
-__asm__ __volatile__ ("or %%g0, %0, %%g1\n\t" \
-		      "t 0x10\n\t" \
+register long __g1 __asm__ ("g1") = __NR_##name; \
+__asm__ __volatile__ ("t 0x10\n\t" \
 		      "bcc 1f\n\t" \
-		      "or %%g0, %%o0, %0\n\t" \
+		      "mov %%o0, %0\n\t" \
 		      "sub %%g0, %%o0, %0\n\t" \
 		      "1:\n\t" \
 		      : "=r" (__res)\
-		      : "0" (__NR_##name) \
-		      : "g1", "o0", "cc"); \
+		      : "r" (__g1) \
+		      : "o0", "cc"); \
 if (__res < -255 || __res >= 0) \
     return (type) __res; \
 errno = -__res; \
@@ -295,16 +295,16 @@ return -1; \
 type name(type1 arg1) \
 { \
 long __res; \
-__asm__ __volatile__ ("or %%g0, %0, %%g1\n\t" \
-		      "or %%g0, %1, %%o0\n\t" \
-		      "t 0x10\n\t" \
+register long __g1 __asm__ ("g1") = __NR_##name; \
+register long __o0 __asm__ ("o0") = (long)(arg1); \
+__asm__ __volatile__ ("t 0x10\n\t" \
 		      "bcc 1f\n\t" \
-		      "or %%g0, %%o0, %0\n\t" \
+		      "mov %%o0, %0\n\t" \
 		      "sub %%g0, %%o0, %0\n\t" \
 		      "1:\n\t" \
-		      : "=r" (__res), "=r" ((long)(arg1)) \
-		      : "0" (__NR_##name),"1" ((long)(arg1)) \
-		      : "g1", "o0", "cc"); \
+		      : "=r" (__res), "=&r" (__o0) \
+		      : "1" (__o0), "r" (__g1) \
+		      : "cc"); \
 if (__res < -255 || __res >= 0) \
 	return (type) __res; \
 errno = -__res; \
@@ -315,17 +315,17 @@ return -1; \
 type name(type1 arg1,type2 arg2) \
 { \
 long __res; \
-__asm__ __volatile__ ("or %%g0, %0, %%g1\n\t" \
-		      "or %%g0, %1, %%o0\n\t" \
-		      "or %%g0, %2, %%o1\n\t" \
-		      "t 0x10\n\t" \
+register long __g1 __asm__ ("g1") = __NR_##name; \
+register long __o0 __asm__ ("o0") = (long)(arg1); \
+register long __o1 __asm__ ("o1") = (long)(arg2); \
+__asm__ __volatile__ ("t 0x10\n\t" \
 		      "bcc 1f\n\t" \
-		      "or %%g0, %%o0, %0\n\t" \
+		      "mov %%o0, %0\n\t" \
 		      "sub %%g0, %%o0, %0\n\t" \
 		      "1:\n\t" \
-		      : "=r" (__res), "=r" ((long)(arg1)), "=r" ((long)(arg2)) \
-		      : "0" (__NR_##name),"1" ((long)(arg1)),"2" ((long)(arg2)) \
-		      : "g1", "o0", "o1", "cc"); \
+		      : "=r" (__res), "=&r" (__o0) \
+		      : "1" (__o0), "r" (__o1), "r" (__g1) \
+		      : "cc"); \
 if (__res < -255 || __res >= 0) \
 	return (type) __res; \
 errno = -__res; \
@@ -336,20 +336,18 @@ return -1; \
 type name(type1 arg1,type2 arg2,type3 arg3) \
 { \
 long __res; \
-__asm__ __volatile__ ("or %%g0, %0, %%g1\n\t" \
-		      "or %%g0, %1, %%o0\n\t" \
-		      "or %%g0, %2, %%o1\n\t" \
-		      "or %%g0, %3, %%o2\n\t" \
-		      "t 0x10\n\t" \
+register long __g1 __asm__ ("g1") = __NR_##name; \
+register long __o0 __asm__ ("o0") = (long)(arg1); \
+register long __o1 __asm__ ("o1") = (long)(arg2); \
+register long __o2 __asm__ ("o2") = (long)(arg3); \
+__asm__ __volatile__ ("t 0x10\n\t" \
 		      "bcc 1f\n\t" \
-		      "or %%g0, %%o0, %0\n\t" \
+		      "mov %%o0, %0\n\t" \
 		      "sub %%g0, %%o0, %0\n\t" \
 		      "1:\n\t" \
-		      : "=r" (__res), "=r" ((long)(arg1)), "=r" ((long)(arg2)), \
-		        "=r" ((long)(arg3)) \
-		      : "0" (__NR_##name), "1" ((long)(arg1)), "2" ((long)(arg2)), \
-		        "3" ((long)(arg3)) \
-		      : "g1", "o0", "o1", "o2", "cc"); \
+		      : "=r" (__res), "=&r" (__o0) \
+		      : "1" (__o0), "r" (__o1), "r" (__o2), "r" (__g1) \
+		      : "cc"); \
 if (__res < -255 || __res>=0) \
 	return (type) __res; \
 errno = -__res; \
@@ -360,21 +358,19 @@ return -1; \
 type name (type1 arg1, type2 arg2, type3 arg3, type4 arg4) \
 { \
 long __res; \
-__asm__ __volatile__ ("or %%g0, %0, %%g1\n\t" \
-		      "or %%g0, %1, %%o0\n\t" \
-		      "or %%g0, %2, %%o1\n\t" \
-		      "or %%g0, %3, %%o2\n\t" \
-		      "or %%g0, %4, %%o3\n\t" \
-		      "t 0x10\n\t" \
+register long __g1 __asm__ ("g1") = __NR_##name; \
+register long __o0 __asm__ ("o0") = (long)(arg1); \
+register long __o1 __asm__ ("o1") = (long)(arg2); \
+register long __o2 __asm__ ("o2") = (long)(arg3); \
+register long __o3 __asm__ ("o3") = (long)(arg4); \
+__asm__ __volatile__ ("t 0x10\n\t" \
 		      "bcc 1f\n\t" \
-		      "or %%g0, %%o0, %0\n\t" \
-		      "sub %%g0,%%o0, %0\n\t" \
+		      "mov %%o0, %0\n\t" \
+		      "sub %%g0, %%o0, %0\n\t" \
 		      "1:\n\t" \
-		      : "=r" (__res), "=r" ((long)(arg1)), "=r" ((long)(arg2)), \
-		        "=r" ((long)(arg3)), "=r" ((long)(arg4)) \
-		      : "0" (__NR_##name),"1" ((long)(arg1)),"2" ((long)(arg2)), \
-		        "3" ((long)(arg3)),"4" ((long)(arg4)) \
-		      : "g1", "o0", "o1", "o2", "o3", "cc"); \
+		      : "=r" (__res), "=&r" (__o0) \
+		      : "1" (__o0), "r" (__o1), "r" (__o2), "r" (__o3), "r" (__g1) \
+		      : "cc"); \
 if (__res < -255 || __res>=0) \
 	return (type) __res; \
 errno = -__res; \
@@ -385,24 +381,21 @@ return -1; \
 	  type5,arg5) \
 type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5) \
 { \
-      long __res; \
-\
-__asm__ __volatile__ ("or %%g0, %1, %%o0\n\t" \
-		      "or %%g0, %2, %%o1\n\t" \
-		      "or %%g0, %3, %%o2\n\t" \
-		      "or %%g0, %4, %%o3\n\t" \
-		      "or %%g0, %5, %%o4\n\t" \
-		      "or %%g0, %6, %%g1\n\t" \
-		      "t 0x10\n\t" \
+long __res; \
+register long __g1 __asm__ ("g1") = __NR_##name; \
+register long __o0 __asm__ ("o0") = (long)(arg1); \
+register long __o1 __asm__ ("o1") = (long)(arg2); \
+register long __o2 __asm__ ("o2") = (long)(arg3); \
+register long __o3 __asm__ ("o3") = (long)(arg4); \
+register long __o4 __asm__ ("o4") = (long)(arg5); \
+__asm__ __volatile__ ("t 0x10\n\t" \
 		      "bcc 1f\n\t" \
-		      "or %%g0, %%o0, %0\n\t" \
+		      "mov %%o0, %0\n\t" \
 		      "sub %%g0, %%o0, %0\n\t" \
 		      "1:\n\t" \
-		      : "=r" (__res) \
-		      : "r" ((long)(arg1)),"r" ((long)(arg2)), \
-		        "r" ((long)(arg3)),"r" ((long)(arg4)),"r" ((long)(arg5)), \
-		        "i" (__NR_##name)  \
-		      : "g1", "o0", "o1", "o2", "o3", "o4", "cc"); \
+		      : "=r" (__res), "=&r" (__o0) \
+		      : "1" (__o0), "r" (__o1), "r" (__o2), "r" (__o3), "r" (__o4), "r" (__g1) \
+		      : "cc"); \
 if (__res < -255 || __res>=0) \
 	return (type) __res; \
 errno = -__res; \
@@ -423,7 +416,6 @@ return -1; \
  * some others too.
  */
 #define __NR__exit __NR_exit
-static __inline__ _syscall0(int,idle)
 static __inline__ _syscall0(int,pause)
 static __inline__ _syscall0(int,sync)
 static __inline__ _syscall0(pid_t,setsid)

@@ -5,7 +5,7 @@
  *
  *		The options processing module for ip.c
  *
- * Version:	$Id: ip_options.c,v 1.18 1999/06/09 08:29:06 davem Exp $
+ * Version:	$Id: ip_options.c,v 1.20 2000/08/09 09:17:00 davem Exp $
  *
  * Authors:	A.N.Kuznetsov
  *		
@@ -498,8 +498,10 @@ int ip_options_get(struct ip_options **optp, unsigned char *data, int optlen, in
 	memset(opt, 0, sizeof(struct ip_options));
 	if (optlen) {
 		if (user) {
-			if (copy_from_user(opt->__data, data, optlen))
+			if (copy_from_user(opt->__data, data, optlen)) {
+				kfree(opt);
 				return -EFAULT;
+			}
 		} else
 			memcpy(opt->__data, data, optlen);
 	}
@@ -509,7 +511,7 @@ int ip_options_get(struct ip_options **optp, unsigned char *data, int optlen, in
 	opt->is_data = 1;
 	opt->is_setbyuser = 1;
 	if (optlen && ip_options_compile(opt, NULL)) {
-		kfree_s(opt, sizeof(struct ip_options) + optlen);
+		kfree(opt);
 		return -EINVAL;
 	}
 	*optp = opt;

@@ -71,6 +71,7 @@
 #include <linux/fb.h>
 #include <asm/atarikb.h>
 
+#include <video/fbcon.h>
 #include <video/fbcon-cfb8.h>
 #include <video/fbcon-cfb16.h>
 #include <video/fbcon-iplan2p2.h>
@@ -84,8 +85,6 @@
 #define SWITCH_SND7 0x80
 #define SWITCH_NONE 0x00
 
-
-#define arraysize(x)			(sizeof(x)/sizeof(*(x)))
 
 #define up(x, r) (((x) + (r) - 1) & ~((r)-1))
 
@@ -428,7 +427,7 @@ static struct fb_var_screeninfo atafb_predefined[] = {
 	  0, 0, -1, -1, 0, 0, 0, 0, 0, 0, 0, 0 },
 };
 
-static int num_atafb_predefined=arraysize(atafb_predefined);
+static int num_atafb_predefined=ARRAY_SIZE(atafb_predefined);
 
 
 static int
@@ -464,7 +463,7 @@ static int tt_encode_fix( struct fb_fix_screeninfo *fix,
 	int mode;
 
 	strcpy(fix->id,"Atari Builtin");
-	fix->smem_start = real_screen_base;
+	fix->smem_start = (unsigned long)real_screen_base;
 	fix->smem_len = screen_len;
 	fix->type=FB_TYPE_INTERLEAVED_PLANES;
 	fix->type_aux=2;
@@ -797,7 +796,7 @@ static int falcon_encode_fix( struct fb_fix_screeninfo *fix,
 							  struct atafb_par *par )
 {
 	strcpy(fix->id, "Atari Builtin");
-	fix->smem_start = real_screen_base;
+	fix->smem_start = (unsigned long)real_screen_base;
 	fix->smem_len = screen_len;
 	fix->type = FB_TYPE_INTERLEAVED_PLANES;
 	fix->type_aux = 2;
@@ -1760,7 +1759,7 @@ static int stste_encode_fix( struct fb_fix_screeninfo *fix,
 	int mode;
 
 	strcpy(fix->id,"Atari Builtin");
-	fix->smem_start = real_screen_base;
+	fix->smem_start = (unsigned long)real_screen_base;
 	fix->smem_len = screen_len;
 	fix->type = FB_TYPE_INTERLEAVED_PLANES;
 	fix->type_aux = 2;
@@ -2104,7 +2103,7 @@ static int ext_encode_fix( struct fb_fix_screeninfo *fix,
 
 {
 	strcpy(fix->id,"Unknown Extern");
-	fix->smem_start=external_addr;
+	fix->smem_start = (unsigned long)external_addr;
 	fix->smem_len = PAGE_ALIGN(external_len);
 	if (external_depth == 1) {
 		fix->type = FB_TYPE_PACKED_PIXELS;
@@ -2425,36 +2424,17 @@ do_install_cmap(int con, struct fb_info *info)
 					    1, fbhw->setcolreg, info);		
 }
 
-
-	/*
-	 * Open/Release the frame buffer device
-	 */
-
-static int atafb_open(struct fb_info *info, int user)
-{
-	/*
-	 * Nothing, only a usage count for the moment
-	 */
-
-	MOD_INC_USE_COUNT;
-	return(0);
-}
-
-static int atafb_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return(0);
-}
-
-
 static int
 atafb_get_fix(struct fb_fix_screeninfo *fix, int con, struct fb_info *info)
 {
 	struct atafb_par par;
 	if (con == -1)
 		atafb_get_par(&par);
-	else
-		fbhw->decode_var(&fb_display[con].var,&par);
+	else {
+	  int err;
+		if ((err=fbhw->decode_var(&fb_display[con].var,&par)))
+		  return err;
+	}
 	memset(fix, 0, sizeof(struct fb_fix_screeninfo));
 	return fbhw->encode_fix(fix, &par);
 }
@@ -2488,7 +2468,7 @@ atafb_set_disp(int con, struct fb_info *info)
 	atafb_get_var(&var, con, info);
 	if (con == -1)
 		con=0;
-	display->screen_base = fix.smem_start;
+	display->screen_base = (void *)fix.smem_start;
 	display->visual = fix.visual;
 	display->type = fix.type;
 	display->type_aux = fix.type_aux;
@@ -2657,9 +2637,14 @@ atafb_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 }
 
 static struct fb_ops atafb_ops = {
-	atafb_open, atafb_release, atafb_get_fix, atafb_get_var,
-	atafb_set_var, atafb_get_cmap, atafb_set_cmap,
-	atafb_pan_display, atafb_ioctl	
+	owner:		THIS_MODULE,
+	fb_get_fix:	atafb_get_fix,
+	fb_get_var:	atafb_get_var,
+	fb_set_var:	atafb_set_var,
+	fb_get_cmap:	atafb_get_cmap,
+	fb_set_cmap:	atafb_set_cmap,
+	fb_pan_display:	atafb_pan_display,
+	fb_ioctl:	atafb_ioctl,
 };
 
 static void
@@ -2745,14 +2730,14 @@ atafb_blank(int blank, struct fb_info *info)
 		do_install_cmap(currcon, info);
 }
 
-__initfunc(void atafb_init(void))
+int __init atafb_init(void)
 {
 	int pad;
 	int detected_mode;
 	unsigned long mem_req;
 
 	if (!MACH_IS_ATARI)
-	        return;
+	        return -ENXIO;
 
 	do {
 #ifdef ATAFB_EXT
@@ -2806,7 +2791,7 @@ __initfunc(void atafb_init(void))
 #endif /* ATAFB_EXT */
 		mem_req = default_mem_req + ovsc_offset + ovsc_addlen;
 		mem_req = PAGE_ALIGN(mem_req) + PAGE_SIZE;
-		screen_base = atari_stram_alloc(mem_req, NULL, "atafb");
+		screen_base = atari_stram_alloc(mem_req, "atafb");
 		if (!screen_base)
 			panic("Cannot allocate screen memory");
 		memset(screen_base, 0, mem_req);
@@ -2828,9 +2813,12 @@ __initfunc(void atafb_init(void))
 		/* Map the video memory (physical address given) to somewhere
 		 * in the kernel address space.
 		 */
-		external_addr = ioremap_writethrough(external_addr, external_len);
+		external_addr =
+		  ioremap_writethrough((unsigned long)external_addr,
+				       external_len);
 		if (external_vgaiobase)
-			external_vgaiobase = ioremap(external_vgaiobase, 0x10000 );
+			external_vgaiobase =
+			  (unsigned long)ioremap(external_vgaiobase, 0x10000);
 		screen_base      =
 		real_screen_base = external_addr;
 		screen_len       = external_len & PAGE_MASK;
@@ -2855,7 +2843,7 @@ __initfunc(void atafb_init(void))
 	do_install_cmap(0, &fb_info);
 
 	if (register_framebuffer(&fb_info) < 0)
-		return;
+		return -EINVAL;
 
 	printk("Determined %dx%d, depth %d\n",
 	       disp.var.xres, disp.var.yres, disp.var.bits_per_pixel);
@@ -2868,6 +2856,8 @@ __initfunc(void atafb_init(void))
 
 	/* TODO: This driver cannot be unloaded yet */
 	MOD_INC_USE_COUNT;
+
+	return 0;
 }
 
 /* a strtok which returns empty strings, too */
@@ -2892,7 +2882,7 @@ static char * strtoke(char * s,const char * ct)
   return sbegin;
 }
 
-__initfunc(void atafb_setup( char *options, int *ints ))
+int __init atafb_setup( char *options )
 {
     char *this_opt;
     int temp;
@@ -2907,7 +2897,7 @@ __initfunc(void atafb_setup( char *options, int *ints ))
 	fb_info.fontname[0] = '\0';
 
     if (!options || !*options)
-		return;
+		return 0;
      
     for(this_opt=strtok(options,","); this_opt; this_opt=strtok(NULL,",")) {
 	if (!*this_opt) continue;
@@ -3069,7 +3059,7 @@ __initfunc(void atafb_setup( char *options, int *ints ))
 	external_yres  = yres;
 	external_depth = depth;
 	external_pmode = planes;
-	external_addr  = addr;
+	external_addr  = (void *)addr;
 	external_len   = len;
 		
 	if (external_card_type == IS_MV300)
@@ -3143,13 +3133,13 @@ __initfunc(void atafb_setup( char *options, int *ints ))
 	  user_invalid:
 		;
 	}
+	return 0;
 }
 
 #ifdef MODULE
 int init_module(void)
 {
-	atafb_init();
-	return 0;
+	return atafb_init();
 }
 
 void cleanup_module(void)

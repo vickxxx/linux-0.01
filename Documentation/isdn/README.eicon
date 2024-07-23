@@ -1,9 +1,10 @@
-$Id: README.eicon,v 1.3 1999/03/29 11:10:04 armin Exp $
+$Id: README.eicon,v 1.10 2000/08/13 12:19:15 armin Exp $
 
-(c) 1999 Cytronics & Melware
+(c) 1999,2000 Armin Schindler (mac@melware.de)
+(c) 1999,2000 Cytronics & Melware (info@melware.de)
 
 This document describes the eicon driver for the
-Eicon.Diehl active ISDN cards.
+Eicon active ISDN cards.
 
 It is meant to be used with isdn4linux, an ISDN link-level module for Linux.
 
@@ -21,31 +22,38 @@ It is meant to be used with isdn4linux, an ISDN link-level module for Linux.
     along with this program; if not, write to the Free Software
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 
-NOTE : Since the eicon driver is still experimental, this README file
-       may be incomplete and not up to date.
 
-
-However, the driver should work under following conditions :
 
 Supported Cards
----------------
+===============
 
+Old ISA type
+------------
 - S-Card ISA
 - SX-Card ISA
 - SXn-Card ISA
 - SCOM-Card ISA
 - Quadro-Card ISA
 - S2M-Card ISA
+
+DIVA Server family
+------------------
 - DIVA Server BRI/PCI 2M
 - DIVA Server PRI/PCI 2M (9M 23M 30M)
-  (Only analog modem functions of the DSPs are currently implemented)
+- DIVA Server 4BRI/PCI
+	supported functions of onboard DSPs:
+	- analog modem
+	- fax group 2/3 (Fax Class 2 commands)
+	- DTMF detection
+
 
 ISDN D-Channel Protocols
 ------------------------
 
 - ETSI (Euro-DSS1) 
 - 1TR6 (German ISDN) *not testet*
-
+- other protocols exist for the range of DIVA Server cards,
+  but they are not fully testet yet.
 
 
 You can load the module simply by using the insmod or modprobe function :
@@ -53,7 +61,7 @@ You can load the module simply by using the insmod or modprobe function :
   insmod eicon [id=driverid] [membase=<membase>] [irq=<irq>]
 
 
-The module will automatically probe the PCI-cards. If the id-options
+The module will automatically probe the PCI-cards. If the id-option
 is omitted, the driver will assume 'eicon0' for the first pci card and
 increases the digit with each further card. With a given driver-id
 the module appends a number starting with '0'.
@@ -71,6 +79,10 @@ Example for loading and starting a BRI card with E-DSS1 Protocol.
 
 	eiconctrl [-d DriverId] load etsi
 
+Example for a BRI card with E-DSS1 Protocol with PtP configuration.
+
+	eiconctrl [-d DriverId] load etsi -n -t1 -s1
+
 
 Example for loading and starting a PRI card with E-DSS1 Protocol.
 
@@ -80,6 +92,30 @@ Example for loading and starting a PRI card with E-DSS1 Protocol.
 Details about using the eiconctrl utility are in 'man eiconctrl'
 or will be printed by starting eiconctrl without any parameters.
 
+ISDNLOG:
+With eicon driver version 1.77 or newer and the eiconctrl utility
+of version 1.1 or better, you can use the isdnlog user program
+with your DIVA Server BRI card.
+Just use "eiconctrl isdnlog on" and the driver will generate
+the necessary D-Channel traces for isdnlog.
+
+
+FILECHECK:
+A part of the eicon driver source code files are provided
+by Eicon Technology. In order to get the best support from Eicon,
+these files are tested with a checksum, just to know if the files
+were modified. This does *not* mean, you are not allowed to modify the
+driver. If you want to improve the driver or you fix a bug, please do
+so and let me (or Eicon) know, about the necessary changes. So
+every user knows, if the driver he uses is modified or checked with
+Eicon files. When the driver has been loaded, in the syslog you will
+find something like "verified" or "modified" right after the version.
+
+
+Thanks to 
+	Deutsche Mailbox Saar-Lor-Lux GmbH
+	for sponsoring and testing fax
+	capabilities with Diva Server cards.
 
 
 Any reports about bugs, errors and even wishes are welcome.
@@ -90,3 +126,4 @@ Have fun !
 Armin Schindler
 mac@melware.de
 http://www.melware.de
+

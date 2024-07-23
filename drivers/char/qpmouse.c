@@ -36,13 +36,14 @@
 #include <linux/random.h>
 #include <linux/poll.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 
 #include <asm/io.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/semaphore.h>
 
-#include "pc_keyb.h"		/* mouse enable command.. */
+#include <linux/pc_keyb.h>		/* mouse enable command.. */
 
 
 /*
@@ -109,8 +110,8 @@ static int fasync_qp(int fd, struct file *filp, int on)
 
 #define QP_IRQ          12
 
-static int qp_present = 0;
-static int qp_count = 0;
+static int qp_present;
+static int qp_count;
 static int qp_data = QP_DATA;
 static int qp_status = QP_STATUS;
 
@@ -133,8 +134,7 @@ static void qp_interrupt(int cpl, void *dev_id, struct pt_regs * regs)
 		head &= QP_BUF_SIZE-1;
 	}
 	queue->head = head;
-	if (queue->fasync)
-		kill_fasync(queue->fasync, SIGIO);
+	kill_fasync(&queue->fasync, SIGIO, POLL_IN);
 	wake_up_interruptible(&queue->proc_list);
 }
 
@@ -142,6 +142,7 @@ static int release_qp(struct inode * inode, struct file * file)
 {
 	unsigned char status;
 
+	lock_kernel();
 	fasync_qp(-1, file, 0);
 	if (!--qp_count) {
 		if (!poll_qp_status())
@@ -151,8 +152,8 @@ static int release_qp(struct inode * inode, struct file * file)
 		if (!poll_qp_status())
 			printk("Warning: Mouse device busy in release_qp()\n");
 		free_irq(QP_IRQ, NULL);
-		MOD_DEC_USE_COUNT;
 	}
+	unlock_kernel();
 	return 0;
 }
 
@@ -196,7 +197,6 @@ static int open_qp(struct inode * inode, struct file * file)
 	}
 
 	outb_p(AUX_ENABLE_DEV, qp_data);	/* Wake up mouse */
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -267,7 +267,7 @@ static ssize_t read_qp(struct file * file, char * buffer,
 			return -EAGAIN;
 		add_wait_queue(&queue->proc_list, &wait);
 repeat:
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (queue_empty() && !signal_pending(current)) {
 			schedule();
 			goto repeat;
@@ -290,18 +290,13 @@ repeat:
 }
 
 struct file_operations qp_fops = {
-	NULL,		/* seek */
-	read_qp,
-	write_qp,
-	NULL, 		/* readdir */
-	poll_qp,
-	NULL, 		/* ioctl */
-	NULL,		/* mmap */
-	open_qp,
-	NULL,		/* flush */
-	release_qp,
-	NULL,
-	fasync_qp,
+	owner:		THIS_MODULE,
+	read:		read_qp,
+	write:		write_qp,
+	poll:		poll_qp,
+	open:		open_qp,
+	release:	release_qp,
+	fasync:		fasync_qp,
 };
 
 /*
@@ -349,9 +344,14 @@ int __init qpmouse_init(void)
 
 	printk(KERN_INFO "82C710 type pointing device detected -- driver installed.\n");
 /*	printk("82C710 address = %x (should be 0x310)\n", qp_data); */
+	queue = (struct qp_queue *) kmalloc(sizeof(*queue), GFP_KERNEL);
+	if(queue==NULL)
+	{
+		printk(KERN_ERR "qpmouse: no queue memory.\n");
+		return -ENOMEM;
+	}	
 	qp_present = 1;
 	misc_register(&qp_mouse);
-	queue = (struct qp_queue *) kmalloc(sizeof(*queue), GFP_KERNEL);
 	memset(queue, 0, sizeof(*queue));
 	queue->head = queue->tail = 0;
 	init_waitqueue_head(&queue->proc_list);

@@ -32,7 +32,26 @@
  * Web page
  * --------
  *	I try to maintain a web page with the Wireless LAN Howto at :
- *		http://www-uk.hpl.hp.com/people/jt/Linux/Wavelan.html
+ *	    http://www.hpl.hp.com/personal/Jean_Tourrilhes/Linux/Wavelan.html
+ *
+ * SMP
+ * ---
+ *	We now are SMP compliant (I eventually fixed the remaining bugs).
+ *	The driver has been tested on a dual P6-150 and survived my usual
+ *	set of torture tests.
+ *	Anyway, I spent enough time chasing interrupt re-entrancy during
+ *	errors or reconfigure, and I designed the locked/unlocked sections
+ *	of the driver with great care, and with the recent addition of
+ *	the spinlock (thanks to the new API), we should be quite close to
+ *	the truth.
+ *	The SMP/IRQ locking is quite coarse and conservative (i.e. not fast),
+ *	but better safe than sorry (especially at 2 Mb/s ;-).
+ *
+ *	I have also looked into disabling only our interrupt on the card
+ *	(via HACR) instead of all interrupts in the processor (via cli),
+ *	so that other driver are not impacted, and it look like it's
+ *	possible, but it's very tricky to do right (full of races). As
+ *	the gain would be mostly for SMP systems, it can wait...
  *
  * Debugging and options
  * ---------------------
@@ -164,14 +183,14 @@
  *	Marc Meertens <Marc.Meertens@Utrecht.NCR.com>,
  *	Pauline Middelink <middelin@polyware.iaf.nl>,
  *	Robert Morris <rtm@das.harvard.edu>,
- *	Jean Tourrilhes <jt@hplb.hpl.hp.com>,
+ *	Jean Tourrilhes <jt@hpl.hp.com>,
  *	Girish Welling <welling@paul.rutgers.edu>,
  *	Clark Woodworth <clark@hiway1.exit109.com>
  *	Yongguang Zhang <ygz@isl.hrl.hac.com>
  *
  * Thanks go also to:
  *	James Ashton <jaa101@syseng.anu.edu.au>,
- *	Alan Cox <iialan@iiit.swan.ac.uk>,
+ *	Alan Cox <alan@redhat.com>,
  *	Allan Creighton <allanc@cs.usyd.edu.au>,
  *	Matthew Geier <matthew@cs.usyd.edu.au>,
  *	Remo di Giovanni <remo@cs.usyd.edu.au>,
@@ -188,8 +207,9 @@
  *
  * Additional Credits:
  *
- *	My development has been done under Linux 2.0.x (Debian 1.1) with
- *	an HP Vectra XP/60.
+ *	My development has been done initially under Debian 1.1 (Linux 2.0.x)
+ *	and now	under Debian 2.2, initially with an HP Vectra XP/60, and now
+ *	an HP Vectra XP/90.
  *
  */
 
@@ -292,9 +312,42 @@
  *	- Rectify a lot of (useless) debugging code
  *	- Change the way to `#ifdef SET_PSA_CRC'
  *
+ * Changes made for release in 2.2.11 & 2.3.13 :
+ * -------------------------------------------
+ *	- Change e-mail and web page addresses
+ *	- Watchdog timer is now correctly expressed in HZ, not in jiffies
+ *	- Add channel number to the list of frequencies in range
+ *	- Add the (short) list of bit-rates in range
+ *	- Developp a new sensitivity... (sens.value & sens.fixed)
+ *
+ * Changes made for release in 2.2.14 & 2.3.23 :
+ * -------------------------------------------
+ *	- Fix check for root permission (break instead of exit)
+ *	- New nwid & encoding setting (Wireless Extension 9)
+ *
+ * Changes made for release in 2.3.49 :
+ * ----------------------------------
+ *	- Indentation reformating (Alan)
+ *	- Update to new network API (softnet - 2.3.43) :
+ *		o replace dev->tbusy (Alan)
+ *		o replace dev->tstart (Alan)
+ *		o remove dev->interrupt (Alan)
+ *		o add SMP locking via spinlock in splxx (me)
+ *		o add spinlock in interrupt handler (me)
+ *		o use kernel watchdog instead of ours (me)
+ *		o increase watchdog timeout (kernel is more sensitive) (me)
+ *		o verify that all the changes make sense and work (me)
+ *	- Fixup a potential gotcha when reconfiguring and thighten a bit
+ *		the interactions with Tx queue.
+ *
+ * Changes made for release in 2.4.0 :
+ * ---------------------------------
+ *	- Fix spinlock stupid bugs that I left in. The driver is now SMP
+ *		compliant and doesn't lockup at startup.
+ *
  * Wishes & dreams:
  * ----------------
- *	- roaming
+ *	- roaming (see Pcmcia driver)
  */
 
 /***************************** INCLUDES *****************************/
@@ -382,11 +435,11 @@
 /************************ CONSTANTS & MACROS ************************/
 
 #ifdef DEBUG_VERSION_SHOW
-static const char	*version	= "wavelan.c : v19 (wireless extensions) 20/4/99\n";
+static const char	*version	= "wavelan.c : v23 (SMP + wireless extensions) 05/10/00\n";
 #endif
 
 /* Watchdog temporisation */
-#define	WATCHDOG_JIFFIES	256	/* TODO:  express in HZ. */
+#define	WATCHDOG_JIFFIES	(512*HZ/100)
 
 /* Macro to get the number of elements in an array */
 #define	NELS(a)				(sizeof(a) / sizeof(a[0]))
@@ -404,7 +457,7 @@ static const char	*version	= "wavelan.c : v19 (wireless extensions) 20/4/99\n";
 /****************************** TYPES ******************************/
 
 /* Shortcuts */
-typedef struct device		device;
+typedef struct net_device		device;
 typedef struct net_device_stats	en_stats;
 typedef struct iw_statistics	iw_stats;
 typedef struct iw_quality	iw_qual;
@@ -428,12 +481,12 @@ struct net_local
 {
   net_local *	next;		/* linked list of the devices */
   device *	dev;		/* reverse link */
+  spinlock_t	spinlock;	/* Serialize access to the hardware (SMP) */
   en_stats	stats;		/* Ethernet interface statistics */
   int		nresets;	/* number of hardware resets */
   u_char	reconfig_82586;	/* We need to reconfigure the controller. */
   u_char	promiscuous;	/* promiscuous mode */
   int		mc_count;	/* number of multicast addresses */
-  timer_list	watchdog;	/* to avoid blocking state */
   u_short	hacr;		/* current host interface state */
 
   int		tx_n_in_use;
@@ -462,10 +515,12 @@ struct net_local
 /**************************** PROTOTYPES ****************************/
 
 /* ----------------------- MISC. SUBROUTINES ------------------------ */
-static inline unsigned long	/* flags */
-	wv_splhi(void);		/* Disable interrupts */
 static inline void
-	wv_splx(unsigned long);	/* Enable interrupts:  flags */
+	wv_splhi(net_local *,		/* Disable interrupts, lock driver */
+		 unsigned long *);	/* flags */
+static inline void
+	wv_splx(net_local *,		/* Enable interrupts, unlock driver */
+		unsigned long *);	/* flags */
 static u_char
 	wv_irq_to_psa(int);
 static int
@@ -567,7 +622,7 @@ static inline void
 		       int),
 	wv_receive(device *);	/* Read all packets waiting. */
 /* --------------------- PACKET TRANSMISSION --------------------- */
-static inline void
+static inline int
 	wv_packet_write(device *,	/* Write a packet to the Tx buffer. */
 			void *,
 			short);
@@ -594,7 +649,7 @@ static void
 			  void *,
 			  struct pt_regs *);
 static void
-	wavelan_watchdog(u_long);	/* transmission watchdog */
+	wavelan_watchdog(device *);	/* transmission watchdog */
 /* ------------------- CONFIGURATION CALLBACKS ------------------- */
 static int
 	wavelan_open(device *),		/* Open the device. */

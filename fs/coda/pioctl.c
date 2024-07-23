@@ -16,58 +16,30 @@
 #include <linux/locks.h>
 #include <asm/segment.h>
 #include <linux/string.h>
+#define __NO_VERSION__
+#include <linux/module.h>
 #include <asm/uaccess.h>
 
 #include <linux/coda.h>
 #include <linux/coda_linux.h>
 #include <linux/coda_fs_i.h>
-#include <linux/coda_cache.h>
 #include <linux/coda_psdev.h>
 
 /* pioctl ops */
 static int coda_ioctl_permission(struct inode *inode, int mask);
-static int coda_ioctl_open(struct inode *i, struct file *f);
-static int coda_ioctl_release(struct inode *i, struct file *f);
 static int coda_pioctl(struct inode * inode, struct file * filp, 
-                       unsigned int cmd, unsigned long arg);
+                       unsigned int cmd, unsigned long user_data);
 
 /* exported from this file */
 struct inode_operations coda_ioctl_inode_operations =
 {
-	&coda_ioctl_operations,
-	NULL,	                /* create */
-	NULL,	                /* lookup */
-	NULL,	                /* link */
-	NULL,	                /* unlink */
-	NULL,	                /* symlink */
-	NULL,	                /* mkdir */
-	NULL,	                /* rmdir */
-	NULL,		        /* mknod */
-	NULL,		        /* rename */
-	NULL,	                /* readlink */
-	NULL,	                /* follow_link */
-	NULL,		        /* get_block */
-	NULL,	                /* readpage */
-	NULL,		        /* writepage */
-	NULL,		        /* flushpage */
-	NULL,	                /* truncate */
-	coda_ioctl_permission,  /* permission */
-	NULL,                   /* smap */
-        NULL                    /* revalidate */
+	permission:	coda_ioctl_permission,
+	setattr:	coda_notify_change,
 };
 
 struct file_operations coda_ioctl_operations = {
-	NULL,		        /* lseek - default should work for coda */
-	NULL,                   /* read */
-	NULL,                   /* write */
-	NULL,          		/* readdir */
-	NULL,			/* select - default */
-	coda_pioctl,	        /* ioctl */
-	NULL,                   /* mmap */
-	coda_ioctl_open,        /* open */
-	NULL,
-	coda_ioctl_release,     /* release */
-	NULL,		        /* fsync */
+	owner:		THIS_MODULE,
+	ioctl:		coda_pioctl,
 };
 
 /* the coda pioctl inode ops */
@@ -78,29 +50,10 @@ static int coda_ioctl_permission(struct inode *inode, int mask)
         return 0;
 }
 
-/* The pioctl file ops*/
-int coda_ioctl_open(struct inode *i, struct file *f)
-{
-
-        ENTRY;
-
-        CDEBUG(D_PIOCTL, "File inode number: %ld\n", 
-	       f->f_dentry->d_inode->i_ino);
-
-	EXIT;
-        return 0;
-}
-
-int coda_ioctl_release(struct inode *i, struct file *f) 
-{
-        return 0;
-}
-
-
 static int coda_pioctl(struct inode * inode, struct file * filp, 
-		       unsigned int cmd, unsigned long user_data)
+                       unsigned int cmd, unsigned long user_data)
 {
-        struct dentry *target_de;
+	struct nameidata nd;
         int error;
 	struct PioctlData data;
         struct inode *target_inode = NULL;
@@ -119,25 +72,24 @@ static int coda_pioctl(struct inode * inode, struct file * filp,
 	CDEBUG(D_PIOCTL, "namei, data.follow = %d\n", 
 	       data.follow);
         if ( data.follow ) {
-                target_de = namei(data.path);
+                error = user_path_walk(data.path, &nd);
 	} else {
-	        target_de = lnamei(data.path);
+	        error = user_path_walk_link(data.path, &nd);
 	}
 		
-	if ( IS_ERR(target_de) ) {
+	if ( error ) {
                 CDEBUG(D_PIOCTL, "error: lookup fails.\n");
-		return PTR_ERR(target_de);
+		return error;
         } else {
-	        target_inode = target_de->d_inode;
+	        target_inode = nd.dentry->d_inode;
 	}
 	
-	CDEBUG(D_PIOCTL, "target ino: 0x%ld, dev: 0x%d\n",
+	CDEBUG(D_PIOCTL, "target ino: 0x%ld, dev: 0x%x\n",
 	       target_inode->i_ino, target_inode->i_dev);
 
 	/* return if it is not a Coda inode */
 	if ( target_inode->i_sb != inode->i_sb ) {
-  	        if ( target_de )
-		        dput(target_de);
+		path_release(&nd);
 	        return  -EINVAL;
 	}
 
@@ -148,9 +100,8 @@ static int coda_pioctl(struct inode * inode, struct file * filp,
 
         CDEBUG(D_PIOCTL, "ioctl on inode %ld\n", target_inode->i_ino);
 	CDEBUG(D_DOWNCALL, "dput on ino: %ld, icount %d, dcount %d\n", target_inode->i_ino, 
-	       target_inode->i_count, target_de->d_count);
-        if ( target_de ) 
-	        dput(target_de);
+	       atomic_read(&target_inode->i_count), atomic_read(&nd.dentry->d_count));
+	path_release(&nd);
         return error;
 }
 

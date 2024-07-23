@@ -15,21 +15,16 @@
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/spinlock.h>
 #include <asm/dbdma.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/prom.h>
 #include <asm/system.h>
-#include <asm/spinlock.h>
 
 #include "scsi.h"
 #include "hosts.h"
 #include "mac53c94.h"
-
-struct proc_dir_entry proc_scsi_mac53c94 = {
-	PROC_SCSI_53C94, 5, "53c94",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 enum fsc_phase {
 	idle,
@@ -52,6 +47,7 @@ struct fsc_state {
 	Scsi_Cmnd *current_req;		/* req we're currently working on */
 	enum fsc_phase phase;		/* what we're currently trying to do */
 	struct dbdma_cmd *dma_cmds;	/* space for dbdma commands, aligned */
+	void	*dma_cmd_space;
 };
 
 static struct fsc_state *all_53c94s;
@@ -82,10 +78,12 @@ mac53c94_detect(Scsi_Host_Template *tp)
 			panic("53c94: expected 2 addrs and intrs (got %d/%d)",
 			      node->n_addrs, node->n_intrs);
 		host = scsi_register(tp, sizeof(struct fsc_state));
-		if (host == 0)
-			panic("couldn't register 53c94 host");
+		if (host == NULL)
+			break;
 		host->unique_id = nfscs;
+#ifndef MODULE
 		note_scsi_host(node, host);
+#endif
 
 		state = (struct fsc_state *) host->hostdata;
 		if (state == 0)
@@ -116,6 +114,7 @@ mac53c94_detect(Scsi_Host_Template *tp)
 			DBDMA_ALIGN(dma_cmd_space);
 		memset(state->dma_cmds, 0, (host->sg_tablesize + 1)
 		       * sizeof(struct dbdma_cmd));
+		state->dma_cmd_space = dma_cmd_space;
 
 		*prev_statep = state;
 		prev_statep = &state->next;
@@ -130,6 +129,22 @@ mac53c94_detect(Scsi_Host_Template *tp)
 		++nfscs;
 	}
 	return nfscs;
+}
+
+int
+mac53c94_release(struct Scsi_Host *host)
+{
+	struct fsc_state *fp = (struct fsc_state *) host->hostdata;
+
+	if (fp == 0)
+		return 0;
+	if (fp->regs)
+		iounmap((void *) fp->regs);
+	if (fp->dma)
+		iounmap((void *) fp->dma);
+	kfree(fp->dma_cmd_space);
+	free_irq(fp->intr, fp);
+	return 0;
 }
 
 int
@@ -540,3 +555,7 @@ data_goes_out(Scsi_Cmnd *cmd)
 		return 0;
 	}
 }
+
+static Scsi_Host_Template driver_template = SCSI_MAC53C94;
+
+#include "scsi_module.c"

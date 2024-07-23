@@ -1,4 +1,4 @@
-/*  $Id: sun4d_irq.c,v 1.18 1999/04/20 13:22:30 anton Exp $
+/*  $Id: sun4d_irq.c,v 1.26 2000/07/26 01:04:03 davem Exp $
  *  arch/sparc/kernel/sun4d_irq.c:
  *			SS1000/SC2000 interrupt handling.
  *
@@ -6,6 +6,7 @@
  *  Heavily based on arch/sparc/kernel/irq.c.
  */
 
+#include <linux/config.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
@@ -18,6 +19,7 @@
 #include <linux/init.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+#include <linux/spinlock.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
@@ -31,8 +33,8 @@
 #include <asm/traps.h>
 #include <asm/irq.h>
 #include <asm/io.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
-#include <asm/spinlock.h>
 #include <asm/sbus.h>
 #include <asm/sbi.h>
 
@@ -46,7 +48,7 @@ struct sun4d_timer_regs *sun4d_timers;
 extern struct irqaction static_irqaction[MAX_STATIC_ALLOC];
 extern int static_irq_count;
 unsigned char cpu_leds[32];
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 unsigned char sbus_tid[32];
 #endif
 
@@ -66,7 +68,7 @@ static int sbus_to_pil[] = {
 };
 
 static int nsbi;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 spinlock_t sun4d_imsk_lock = SPIN_LOCK_UNLOCKED;
 #endif
 
@@ -74,7 +76,7 @@ int sun4d_get_irq_list(char *buf)
 {
 	int i, j = 0, k = 0, len = 0, sbusl;
 	struct irqaction * action;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	int x;
 #endif
 
@@ -93,7 +95,7 @@ int sun4d_get_irq_list(char *buf)
 			continue;
 		}
 found_it:	len += sprintf(buf+len, "%3d: ", i);
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 		len += sprintf(buf+len, "%10u ", kstat_irqs(i));
 #else
 		for (x = 0; x < smp_num_cpus; x++)
@@ -171,7 +173,7 @@ void sun4d_free_irq(unsigned int irq, void *dev_id)
 	else
 		*actionp = action->next;
 
-	kfree_s(action, sizeof(struct irqaction));
+	kfree(action);
 
 	if (!(*actionp))
 		disable_irq(irq);
@@ -237,12 +239,12 @@ void sun4d_handler_irq(int irq, struct pt_regs * regs)
 	irq_exit(cpu, irq);
 }
 
-unsigned int sun4d_build_irq(struct linux_sbus_device *sdev, int irq)
+unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq)
 {
 	int sbusl = pil_to_sbus[irq];
-	
+
 	if (sbusl)
-		return ((sdev->my_bus->board + 1) << 5) + (sbusl << 2) + sdev->slot;
+		return ((sdev->bus->board + 1) << 5) + (sbusl << 2) + sdev->slot;
 	else
 		return irq;
 }
@@ -319,13 +321,13 @@ int sun4d_request_irq(unsigned int irq,
 
 static void sun4d_disable_irq(unsigned int irq)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	int tid = sbus_tid[(irq >> 5) - 1];
 	unsigned long flags;
 #endif	
 	
 	if (irq < NR_IRQS) return;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	spin_lock_irqsave(&sun4d_imsk_lock, flags);
 	cc_set_imsk_other(tid, cc_get_imsk_other(tid) | (1 << sbus_to_pil[(irq >> 2) & 7]));
 	spin_unlock_irqrestore(&sun4d_imsk_lock, flags);
@@ -336,13 +338,13 @@ static void sun4d_disable_irq(unsigned int irq)
 
 static void sun4d_enable_irq(unsigned int irq)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	int tid = sbus_tid[(irq >> 5) - 1];
 	unsigned long flags;
 #endif	
 	
 	if (irq < NR_IRQS) return;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	spin_lock_irqsave(&sun4d_imsk_lock, flags);
 	cc_set_imsk_other(tid, cc_get_imsk_other(tid) & ~(1 << sbus_to_pil[(irq >> 2) & 7]));
 	spin_unlock_irqrestore(&sun4d_imsk_lock, flags);
@@ -351,7 +353,7 @@ static void sun4d_enable_irq(unsigned int irq)
 #endif
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 static void sun4d_set_cpu_int(int cpu, int level)
 {
 	sun4d_send_ipi(cpu, level);
@@ -366,10 +368,10 @@ static void sun4d_set_udt(int cpu)
 }
 
 /* Setup IRQ distribution scheme. */
-__initfunc(void sun4d_distribute_irqs(void))
+void __init sun4d_distribute_irqs(void)
 {
 #ifdef DISTRIBUTE_IRQS
-	struct linux_sbus *sbus;
+	struct sbus_bus *sbus;
 	unsigned long sbus_serving_map;
 
 	sbus_serving_map = cpu_present_map;
@@ -401,7 +403,7 @@ __initfunc(void sun4d_distribute_irqs(void))
 		set_sbi_tid(sbus->devid, sbus_tid[sbus->board] << 3);
 	}
 #else
-	struct linux_sbus *sbus;
+	struct sbus_bus *sbus;
 	int cpuid = cpu_logical_map(1);
 
 	if (cpuid == -1)
@@ -431,21 +433,24 @@ static void sun4d_load_profile_irq(int cpu, unsigned int limit)
 	bw_set_prof_limit(cpu, limit);
 }
 
-__initfunc(static void sun4d_init_timers(void (*counter_fn)(int, void *, struct pt_regs *)))
+static void __init sun4d_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
 {
 	int irq;
 	extern struct prom_cpuinfo linux_cpus[NR_CPUS];
 	int cpu;
+	struct resource r;
 
 	/* Map the User Timer registers. */
-#ifdef __SMP__
-	sun4d_timers = sparc_alloc_io(CSR_BASE(boot_cpu_id)+BW_TIMER_LIMIT, 0,
-				      PAGE_SIZE, "user timer", 0xf, 0x0);
+	memset(&r, 0, sizeof(r));
+#ifdef CONFIG_SMP
+	r.start = CSR_BASE(boot_cpu_id)+BW_TIMER_LIMIT;
 #else
-	sun4d_timers = sparc_alloc_io(CSR_BASE(0)+BW_TIMER_LIMIT, 0,
-				      PAGE_SIZE, "user timer", 0xf, 0x0);
+	r.start = CSR_BASE(0)+BW_TIMER_LIMIT;
 #endif
-    
+	r.flags = 0xf;
+	sun4d_timers = (struct sun4d_timer_regs *) sbus_ioremap(&r, 0,
+	    PAGE_SIZE, "user timer");
+
 	sun4d_timers->l10_timer_limit =  (((1000000/HZ) + 1) << 10);
 	master_l10_counter = &sun4d_timers->l10_cur_count;
 	master_l10_limit = &sun4d_timers->l10_timer_limit;
@@ -465,7 +470,7 @@ __initfunc(static void sun4d_init_timers(void (*counter_fn)(int, void *, struct 
 	for(cpu = 0; cpu < linux_num_cpus; cpu++)
 		sun4d_load_profile_irq((linux_cpus[cpu].mid >> 3), 0);
 		
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	{
 		unsigned long flags;
 		extern unsigned long lvl14_save[4];
@@ -492,9 +497,9 @@ __initfunc(static void sun4d_init_timers(void (*counter_fn)(int, void *, struct 
 #endif
 }
 
-__initfunc(void sun4d_init_sbi_irq(void))
+void __init sun4d_init_sbi_irq(void)
 {
-	struct linux_sbus *sbus;
+	struct sbus_bus *sbus;
 	unsigned mask;
 
 	nsbi = 0;
@@ -503,7 +508,7 @@ __initfunc(void sun4d_init_sbi_irq(void))
 	sbus_actions = (struct sbus_action *)kmalloc (nsbi * 8 * 4 * sizeof(struct sbus_action), GFP_ATOMIC);
 	memset (sbus_actions, 0, (nsbi * 8 * 4 * sizeof(struct sbus_action)));
 	for_each_sbus(sbus) {
-#ifdef __SMP__	
+#ifdef CONFIG_SMP	
 		extern unsigned char boot_cpu_id;
 		
 		set_sbi_tid(sbus->devid, boot_cpu_id << 3);
@@ -529,7 +534,7 @@ static char *sun4d_irq_itoa(unsigned int irq)
 	return buff;
 }
 
-__initfunc(void sun4d_init_IRQ(void))
+void __init sun4d_init_IRQ(void)
 {
 	__cli();
 
@@ -540,7 +545,7 @@ __initfunc(void sun4d_init_IRQ(void))
 	BTFIXUPSET_CALL(load_profile_irq, sun4d_load_profile_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(__irq_itoa, sun4d_irq_itoa, BTFIXUPCALL_NORM);
 	init_timers = sun4d_init_timers;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	BTFIXUPSET_CALL(set_cpu_int, sun4d_set_cpu_int, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(clear_cpu_int, sun4d_clear_ipi, BTFIXUPCALL_NOP);
 	BTFIXUPSET_CALL(set_irq_udt, sun4d_set_udt, BTFIXUPCALL_NOP);

@@ -1,6 +1,6 @@
 /* Generic NS8390 register definitions. */
 /* This file is part of Donald Becker's 8390 drivers, and is distributed
-   under the same license. Auto-loading of 8390.o added by Paul Gortmaker.
+   under the same license. Auto-loading of 8390.o only in v2.2 - Paul G.
    Some of these names and comments originated from the Crynwr
    packet drivers, which are distributed under the GPL. */
 
@@ -11,11 +11,6 @@
 #include <linux/if_ether.h>
 #include <linux/ioport.h>
 #include <linux/skbuff.h>
-
-/* With kmod, drivers can now load the 8390 module themselves! */
-#if 0 /* def CONFIG_KMOD */
-#define LOAD_8390_BY_KMOD
-#endif
 
 #define TX_2X_PAGES 12
 #define TX_1X_PAGES 6
@@ -50,119 +45,29 @@ extern void autoirq_setup(int waittime);
 extern unsigned long autoirq_report(int waittime);
 #endif
 
-#if defined(LOAD_8390_BY_KMOD) && defined(MODULE) && !defined(NS8390_CORE)
-
-/* Function pointers to be mapped onto the 8390 core support */
-static int (*S_ethdev_init)(struct device *dev);
-static void (*S_NS8390_init)(struct device *dev, int startp);
-static int (*S_ei_open)(struct device *dev);
-static int (*S_ei_close)(struct device *dev);
-static void (*S_ei_interrupt)(int irq, void *dev_id, struct pt_regs *regs);
-
-
-#define NS8390_KSYSMS_PRESENT	(			\
-	get_module_symbol(NULL, "ethdev_init") != 0 &&	\
-	get_module_symbol(NULL, "NS8390_init") != 0 &&	\
-	get_module_symbol(NULL, "ei_open") != 0 &&	\
-	get_module_symbol(NULL, "ei_close") != 0 &&	\
-	get_module_symbol(NULL, "ei_interrupt") != 0)
-
-extern __inline__ int load_8390_module(const char *driver)
-{
-
-	if (! NS8390_KSYSMS_PRESENT) {
-		int (*request_mod)(const char *module_name);
-
-		if (get_module_symbol("", "request_module") == 0) {
-			printk("%s: module auto-load (kmod) support not present.\n", driver);
-			printk("%s: unable to auto-load required 8390 module.\n", driver);
-			printk("%s: try \"modprobe 8390\" as root 1st.\n", driver);
-			return -ENOSYS;
-		}
-
-		request_mod = (void*)get_module_symbol("", "request_module");
-		if (request_mod("8390")) {
-			printk("%s: request to load the 8390 module failed.\n", driver);
-			return -ENOSYS;
-		}
-
-		/* Check if module really loaded and is valid */
-		if (! NS8390_KSYSMS_PRESENT) {
-			printk("%s: 8390.o not found/invalid or failed to load.\n", driver);
-			return -ENOSYS;
-		}
-
-		printk(KERN_INFO "%s: auto-loaded 8390 module.\n", driver);
-	}
-
-	/* Map the functions into place */
-	S_ethdev_init = (void*)get_module_symbol(0, "ethdev_init");
-	S_NS8390_init = (void*)get_module_symbol(0, "NS8390_init");
-	S_ei_open = (void*)get_module_symbol(0, "ei_open");
-	S_ei_close = (void*)get_module_symbol(0, "ei_close");
-	S_ei_interrupt = (void*)get_module_symbol(0, "ei_interrupt");
-
-	return 0;
-}
-
-/*
- * Since a kmod aware driver won't explicitly show a dependence on the
- * exported 8390 functions (due to the mapping above), the 8390 module
- * (if present, and not in-kernel) needs to be protected from garbage
- * collection.  NS8390_module is only defined for a modular 8390 core.
- */
-
-extern __inline__  void lock_8390_module(void)
-{
-	struct module **mod = (struct module**)get_module_symbol(0, "NS8390_module");
-
-	if (mod != NULL && *mod != NULL)
-		__MOD_INC_USE_COUNT(*mod);
-}
-	
-extern __inline__  void unlock_8390_module(void)
-{
-	struct module **mod = (struct module**)get_module_symbol(0, "NS8390_module");
-
-	if (mod != NULL && *mod != NULL)
-		__MOD_DEC_USE_COUNT(*mod);
-}
-	
-/*
- * These are last so they only have scope over the driver
- * code (wd, ne, 3c503, etc.)  and not over the above code.
- */
-#define ethdev_init S_ethdev_init
-#define NS8390_init S_NS8390_init
-#define ei_open S_ei_open
-#define ei_close S_ei_close
-#define ei_interrupt S_ei_interrupt
-
-#else	/* not a module or kmod support not wanted */
-
+/* Currently unused - delete in v2.5.x after purging from drivers */
 #define load_8390_module(driver)	0
-#define lock_8390_module()		do { } while (0)
-#define unlock_8390_module()		do { } while (0)
-extern int ethdev_init(struct device *dev);
-extern void NS8390_init(struct device *dev, int startp);
-extern int ei_open(struct device *dev);
-extern int ei_close(struct device *dev);
+#define unload_8390_module()		do { } while (0)
+
+extern int ethdev_init(struct net_device *dev);
+extern void NS8390_init(struct net_device *dev, int startp);
+extern int ei_open(struct net_device *dev);
+extern int ei_close(struct net_device *dev);
 extern void ei_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
-#endif
-
-/* Most of these entries should be in 'struct device' (or most of the
+/* Most of these entries should be in 'struct net_device' (or most of the
    things in there should be here!) */
 /* You have one of these per-board */
 struct ei_device {
 	const char *name;
-	void (*reset_8390)(struct device *);
-	void (*get_8390_hdr)(struct device *, struct e8390_pkt_hdr *, int);
-	void (*block_output)(struct device *, int, const unsigned char *, int);
-	void (*block_input)(struct device *, int, struct sk_buff *, int);
+	void (*reset_8390)(struct net_device *);
+	void (*get_8390_hdr)(struct net_device *, struct e8390_pkt_hdr *, int);
+	void (*block_output)(struct net_device *, int, const unsigned char *, int);
+	void (*block_input)(struct net_device *, int, struct sk_buff *, int);
 	unsigned char mcfilter[8];
 	unsigned open:1;
 	unsigned word16:1;  		/* We have the 16-bit (vs 8-bit) version of the card. */
+	unsigned bigendian:1;		/* 16-bit big endian mode */
 	unsigned txing:1;		/* Transmit Active */
 	unsigned irqlock:1;		/* 8390's intrs disabled when '1'. */
 	unsigned dmaing:1;		/* Remote DMA Active */
@@ -213,7 +118,8 @@ struct ei_device {
  */
  
 #if defined(CONFIG_MAC) || defined(CONFIG_AMIGA_PCMCIA) || \
-    defined(CONFIG_ARIADNE2) || defined(CONFIG_ARIADNE2_MODULE)
+    defined(CONFIG_ARIADNE2) || defined(CONFIG_ARIADNE2_MODULE) || \
+    defined(CONFIG_HYDRA) || defined(CONFIG_HYDRA_MODULE)
 #define EI_SHIFT(x)	(ei_local->reg_offset[x])
 #else
 #define EI_SHIFT(x)	(x)
@@ -261,6 +167,7 @@ struct ei_device {
 
 /* Bits in EN0_DCFG - Data config register */
 #define ENDCFG_WTS	0x01	/* word transfer mode selection */
+#define ENDCFG_BOS	0x02	/* byte order selection */
 
 /* Page 1 register offsets. */
 #define EN1_PHYS   EI_SHIFT(0x01)	/* This board's physical enet addr RD WR */

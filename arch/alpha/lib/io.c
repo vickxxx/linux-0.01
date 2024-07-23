@@ -2,8 +2,11 @@
  * Alpha IO and memory functions.. Just expand the inlines in the header
  * files..
  */
+
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/string.h>
+
 #include <asm/io.h>
 
 unsigned int _inb(unsigned long addr)
@@ -37,45 +40,96 @@ void _outl(unsigned int b, unsigned long addr)
 	__outl(b, addr);
 }
 
-
-unsigned long _readb(unsigned long addr)
+unsigned long ___raw_readb(unsigned long addr)
 {
 	return __readb(addr);
 }
 
-unsigned long _readw(unsigned long addr)
+unsigned long ___raw_readw(unsigned long addr)
 {
 	return __readw(addr);
 }
 
-unsigned long _readl(unsigned long addr)
+unsigned long ___raw_readl(unsigned long addr)
 {
 	return __readl(addr);
 }
 
-unsigned long _readq(unsigned long addr)
+unsigned long ___raw_readq(unsigned long addr)
 {
 	return __readq(addr);
+}
+
+unsigned long _readb(unsigned long addr)
+{
+	unsigned long r = __readb(addr);
+	mb();
+	return r;
+}
+
+unsigned long _readw(unsigned long addr)
+{
+	unsigned long r = __readw(addr);
+	mb();
+	return r;
+}
+
+unsigned long _readl(unsigned long addr)
+{
+	unsigned long r = __readl(addr);
+	mb();
+	return r;
+}
+
+unsigned long _readq(unsigned long addr)
+{
+	unsigned long r = __readq(addr);
+	mb();
+	return r;
+}
+
+void ___raw_writeb(unsigned char b, unsigned long addr)
+{
+	__writeb(b, addr);
+}
+
+void ___raw_writew(unsigned short b, unsigned long addr)
+{
+	__writew(b, addr);
+}
+
+void ___raw_writel(unsigned int b, unsigned long addr)
+{
+	__writel(b, addr);
+}
+
+void ___raw_writeq(unsigned long b, unsigned long addr)
+{
+	__writeq(b, addr);
 }
 
 void _writeb(unsigned char b, unsigned long addr)
 {
 	__writeb(b, addr);
+	mb();
 }
 
 void _writew(unsigned short b, unsigned long addr)
 {
 	__writew(b, addr);
+	mb();
 }
 
 void _writel(unsigned int b, unsigned long addr)
 {
 	__writel(b, addr);
+	mb();
 }
 
 void _writeq(unsigned long b, unsigned long addr)
 {
 	__writeq(b, addr);
+	mb();
 }
 
 /*
@@ -363,7 +417,7 @@ void _memcpy_fromio(void * to, unsigned long from, long count)
 	if (count >= 8 && ((long)to & 7) == (from & 7)) {
 		count -= 8;
 		do {
-			*(u64 *)to = readq(from);
+			*(u64 *)to = __raw_readq(from);
 			count -= 8;
 			to += 8;
 			from += 8;
@@ -374,7 +428,7 @@ void _memcpy_fromio(void * to, unsigned long from, long count)
 	if (count >= 4 && ((long)to & 3) == (from & 3)) {
 		count -= 4;
 		do {
-			*(u32 *)to = readl(from);
+			*(u32 *)to = __raw_readl(from);
 			count -= 4;
 			to += 4;
 			from += 4;
@@ -385,7 +439,7 @@ void _memcpy_fromio(void * to, unsigned long from, long count)
 	if (count >= 2 && ((long)to & 1) == (from & 1)) {
 		count -= 2;
 		do {
-			*(u16 *)to = readw(from);
+			*(u16 *)to = __raw_readw(from);
 			count -= 2;
 			to += 2;
 			from += 2;
@@ -394,7 +448,7 @@ void _memcpy_fromio(void * to, unsigned long from, long count)
 	}
 
 	while (count > 0) {
-		*(u8 *) to = readb(from);
+		*(u8 *) to = __raw_readb(from);
 		count--;
 		to++;
 		from++;
@@ -414,7 +468,7 @@ void _memcpy_toio(unsigned long to, const void * from, long count)
 	if (count >= 8 && (to & 7) == ((long)from & 7)) {
 		count -= 8;
 		do {
-			writeq(*(const u64 *)from, to);
+			__raw_writeq(*(const u64 *)from, to);
 			count -= 8;
 			to += 8;
 			from += 8;
@@ -425,7 +479,7 @@ void _memcpy_toio(unsigned long to, const void * from, long count)
 	if (count >= 4 && (to & 3) == ((long)from & 3)) {
 		count -= 4;
 		do {
-			writel(*(const u32 *)from, to);
+			__raw_writel(*(const u32 *)from, to);
 			count -= 4;
 			to += 4;
 			from += 4;
@@ -436,7 +490,7 @@ void _memcpy_toio(unsigned long to, const void * from, long count)
 	if (count >= 2 && (to & 1) == ((long)from & 1)) {
 		count -= 2;
 		do {
-			writew(*(const u16 *)from, to);
+			__raw_writew(*(const u16 *)from, to);
 			count -= 2;
 			to += 2;
 			from += 2;
@@ -445,11 +499,12 @@ void _memcpy_toio(unsigned long to, const void * from, long count)
 	}
 
 	while (count > 0) {
-		writeb(*(const u8 *) from, to);
+		__raw_writeb(*(const u8 *) from, to);
 		count--;
 		to++;
 		from++;
 	}
+	mb();
 }
 
 /*
@@ -459,21 +514,21 @@ void _memset_c_io(unsigned long to, unsigned long c, long count)
 {
 	/* Handle any initial odd byte */
 	if (count > 0 && (to & 1)) {
-		writeb(c, to);
+		__raw_writeb(c, to);
 		to++;
 		count--;
 	}
 
 	/* Handle any initial odd halfword */
 	if (count >= 2 && (to & 2)) {
-		writew(c, to);
+		__raw_writew(c, to);
 		to += 2;
 		count -= 2;
 	}
 
 	/* Handle any initial odd word */
 	if (count >= 4 && (to & 4)) {
-		writel(c, to);
+		__raw_writel(c, to);
 		to += 4;
 		count -= 4;
 	}
@@ -483,7 +538,7 @@ void _memset_c_io(unsigned long to, unsigned long c, long count)
 	count -= 8;
 	if (count >= 0) {
 		do {
-			writeq(c, to);
+			__raw_writeq(c, to);
 			to += 8;
 			count -= 8;
 		} while (count >= 0);
@@ -492,20 +547,46 @@ void _memset_c_io(unsigned long to, unsigned long c, long count)
 
 	/* The tail is word-aligned if we still have count >= 4 */
 	if (count >= 4) {
-		writel(c, to);
+		__raw_writel(c, to);
 		to += 4;
 		count -= 4;
 	}
 
 	/* The tail is half-word aligned if we have count >= 2 */
 	if (count >= 2) {
-		writew(c, to);
+		__raw_writew(c, to);
 		to += 2;
 		count -= 2;
 	}
 
 	/* And finally, one last byte.. */
 	if (count) {
-		writeb(c, to);
+		__raw_writeb(c, to);
+	}
+	mb();
+}
+
+void
+scr_memcpyw(u16 *d, const u16 *s, unsigned int count)
+{
+	if (! __is_ioaddr((unsigned long) s)) {
+		/* Source is memory.  */
+		if (! __is_ioaddr((unsigned long) d))
+			memcpy(d, s, count);
+		else
+			memcpy_toio(d, s, count);
+	} else {
+		/* Source is screen.  */
+		if (! __is_ioaddr((unsigned long) d))
+			memcpy_fromio(d, s, count);
+		else {
+			/* FIXME: Should handle unaligned ops and
+			   operation widening.  */
+			count /= 2;
+			while (count--) {
+				u16 tmp = __raw_readw((unsigned long)(s++));
+				__raw_writew(tmp, (unsigned long)(d++));
+			}
+		}
 	}
 }

@@ -1,11 +1,13 @@
 /*
- * FAS216 generic driver
+ *  linux/drivers/acorn/scsi/fas216.h
  *
- * Copyright (C) 1997-1998 Russell King
+ *  Copyright (C) 1997-2000 Russell King
  *
- * NOTE! This file should be viewed using a console with
- * >100 character width (since it uses 8-space tabs)
- * (it used to fit in 80-columns with 4 space)
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  FAS216 generic driver
  */
 #ifndef FAS216_H
 #define FAS216_H
@@ -215,6 +217,7 @@ typedef struct {
 	struct Scsi_Host	*host;			/* host					*/
 	Scsi_Cmnd		*SCpnt;			/* currently processing command		*/
 	Scsi_Cmnd		*origSCpnt;		/* original connecting command		*/
+	Scsi_Cmnd		*reqSCpnt;		/* request sense command		*/
 
 	/* driver information */
 	struct {
@@ -237,6 +240,8 @@ typedef struct {
 
 		unsigned int	async_stp;		/* Async transfer STP value		*/
 		unsigned char	msgin_fifo;		/* bytes in fifo at time of message in	*/
+		unsigned char	message[256];		/* last message received from device	*/
+		unsigned int	msglen;			/* length of last message received	*/
 
 		unsigned char	disconnectable:1;	/* this command can be disconnected	*/
 		unsigned char	aborting:1;		/* aborting command			*/
@@ -252,7 +257,8 @@ typedef struct {
 		unsigned int	miscs;
 		unsigned int	disconnects;
 		unsigned int	aborts;
-		unsigned int	resets;
+		unsigned int	bus_resets;
+		unsigned int	host_resets;
 	} stats;
 
 	/* configuration information */
@@ -348,6 +354,8 @@ extern void fas216_intr (struct Scsi_Host *instance);
  */
 extern int fas216_release (struct Scsi_Host *instance);
 
+extern int fas216_info(FAS216_Info *info, char *buffer);
+extern int fas216_print_host(FAS216_Info *info, char *buffer);
 extern int fas216_print_stats(FAS216_Info *info, char *buffer);
 extern int fas216_print_device(FAS216_Info *info, Scsi_Device *scd, char *buffer);
 

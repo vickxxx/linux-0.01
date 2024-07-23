@@ -50,10 +50,10 @@
      *  Vector numbers
      */
 
-#define OPENPIC_VEC_SOURCE      0x10    /* and up */
-#define OPENPIC_VEC_TIMER       0x40    /* and up */
-#define OPENPIC_VEC_IPI         0x50    /* and up */
-#define OPENPIC_VEC_SPURIOUS    99
+#define OPENPIC_VEC_SOURCE      16    /* and up */
+#define OPENPIC_VEC_TIMER       64    /* and up */
+#define OPENPIC_VEC_IPI         72    /* and up */
+#define OPENPIC_VEC_SPURIOUS    127
 
 
     /*
@@ -263,8 +263,12 @@ extern u_char *OpenPIC_InitSenses;
      *  Interrupt Source Registers
      */
 
-#define OPENPIC_SENSE_POLARITY			0x00800000	/* Undoc'd */
+#define OPENPIC_POLARITY_POSITIVE		0x00800000
+#define OPENPIC_POLARITY_NEGATIVE		0x00000000
+#define OPENPIC_POLARITY_MASK			0x00800000
 #define OPENPIC_SENSE_LEVEL			0x00400000
+#define OPENPIC_SENSE_EDGE			0x00000000
+#define OPENPIC_SENSE_MASK			0x00400000
 
 
     /*

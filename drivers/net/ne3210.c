@@ -43,17 +43,17 @@ static const char *version =
 #include <linux/etherdevice.h>
 #include "8390.h"
 
-int ne3210_probe(struct device *dev);
-int ne3210_probe1(struct device *dev, int ioaddr);
+int ne3210_probe(struct net_device *dev);
+static int ne3210_probe1(struct net_device *dev, int ioaddr);
 
-static int ne3210_open(struct device *dev);
-static int ne3210_close(struct device *dev);
+static int ne3210_open(struct net_device *dev);
+static int ne3210_close(struct net_device *dev);
 
-static void ne3210_reset_8390(struct device *dev);
+static void ne3210_reset_8390(struct net_device *dev);
 
-static void ne3210_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page);
-static void ne3210_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset);
-static void ne3210_block_output(struct device *dev, int count, const unsigned char *buf, const int start_page);
+static void ne3210_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page);
+static void ne3210_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset);
+static void ne3210_block_output(struct net_device *dev, int count, const unsigned char *buf, const int start_page);
 
 #define NE3210_START_PG		0x00    /* First page of TX buffer	*/
 #define NE3210_STOP_PG		0x80    /* Last page +1 of RX ring	*/
@@ -95,40 +95,45 @@ static unsigned int shmem_map[] __initdata = {0xff0, 0xfe0, 0xfff0, 0xd8, 0xffe0
  *	PROM for a match against the value assigned to Novell.
  */
 
-__initfunc(int ne3210_probe(struct device *dev))
+int __init ne3210_probe(struct net_device *dev)
 {
 	unsigned short ioaddr = dev->base_addr;
+
+	SET_MODULE_OWNER(dev);
 
 	if (ioaddr > 0x1ff)		/* Check a single specified location. */
 		return ne3210_probe1(dev, ioaddr);
 	else if (ioaddr > 0)		/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
 	if (!EISA_bus) {
 #if NE3210_DEBUG & NE3210_D_PROBE
 		printk("ne3210-debug: Not an EISA bus. Not probing high ports.\n");
 #endif
-		return ENXIO;
+		return -ENXIO;
 	}
 
 	/* EISA spec allows for up to 16 slots, but 8 is typical. */
-	for (ioaddr = 0x1000; ioaddr < 0x9000; ioaddr += 0x1000) {
-		if (check_region(ioaddr , NE3210_IO_EXTENT))
-			continue;
+	for (ioaddr = 0x1000; ioaddr < 0x9000; ioaddr += 0x1000)
 		if (ne3210_probe1(dev, ioaddr) == 0)
 			return 0;
-	}
 
-	return ENODEV;
+	return -ENODEV;
 }
 
-__initfunc(int ne3210_probe1(struct device *dev, int ioaddr))
+static int __init ne3210_probe1(struct net_device *dev, int ioaddr)
 {
-	int i;
+	int i, retval;
 	unsigned long eisa_id;
 	const char *ifmap[] = {"UTP", "?", "BNC", "AUI"};
 
-	if (inb_p(ioaddr + NE3210_ID_PORT) == 0xff) return -ENODEV;
+	if (!request_region(dev->base_addr, NE3210_IO_EXTENT, dev->name))
+		return -EBUSY;
+
+	if (inb_p(ioaddr + NE3210_ID_PORT) == 0xff) {
+		retval = -ENODEV;
+		goto out;
+	}
 
 #if NE3210_DEBUG & NE3210_D_PROBE
 	printk("ne3210-debug: probe at %#x, ID %#8x\n", ioaddr, inl(ioaddr + NE3210_ID_PORT));
@@ -140,7 +145,8 @@ __initfunc(int ne3210_probe1(struct device *dev, int ioaddr))
 /*	Check the EISA ID of the card. */
 	eisa_id = inl(ioaddr + NE3210_ID_PORT);
 	if (eisa_id != NE3210_ID) {
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	}
 
 	
@@ -153,23 +159,16 @@ __initfunc(int ne3210_probe1(struct device *dev, int ioaddr))
 		for(i = 0; i < ETHER_ADDR_LEN; i++)
 			printk(" %02x", inb(ioaddr + NE3210_SA_PROM + i));
 		printk(" (invalid prefix).\n");
-		return ENODEV;
+		retval = -ENODEV;
+		goto out;
 	}
 #endif
-
-	if (load_8390_module("ne3210.c"))
-		return -ENOSYS;
-
-	/* We should have a "dev" from Space.c or the static module table. */
-	if (dev == NULL) {
-		printk("ne3210.c: Passed a NULL device.\n");
-		dev = init_etherdev(0, 0);
-	}
 
 	/* Allocate dev->priv and fill in 8390 specific dev fields. */
 	if (ethdev_init(dev)) {
 		printk ("ne3210.c: unable to allocate memory for dev->priv!\n");
-		return -ENOMEM;
+		retval = -ENOMEM;
+		goto out;
 	}
 
 	printk("ne3210.c: NE3210 in EISA slot %d, media: %s, addr:",
@@ -190,11 +189,10 @@ __initfunc(int ne3210_probe1(struct device *dev, int ioaddr))
 	}
 	printk(" IRQ %d,", dev->irq);
 
-	if (request_irq(dev->irq, ei_interrupt, 0, "ne3210", dev)) {
+	retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev);
+	if (retval) {
 		printk (" unable to get IRQ %d.\n", dev->irq);
-		kfree(dev->priv);
-		dev->priv = NULL;
-		return EAGAIN;
+		goto out1;
 	}
 
 	if (dev->mem_start == 0) {
@@ -220,20 +218,16 @@ __initfunc(int ne3210_probe1(struct device *dev, int ioaddr))
 			printk(KERN_CRIT "ne3210.c: Use EISA SCU to set card memory below 1MB,\n");
 			printk(KERN_CRIT "ne3210.c: or to an address above 0x%lx.\n", virt_to_bus(high_memory));
 			printk(KERN_CRIT "ne3210.c: Driver NOT installed.\n");
-			free_irq(dev->irq, dev);
-			kfree(dev->priv);
-			dev->priv = NULL;
-			return EINVAL;
+			retval = -EINVAL;
+			goto out2;
 		}
 		dev->mem_start = (unsigned long)ioremap(dev->mem_start, NE3210_STOP_PG*0x100);
 		if (dev->mem_start == 0) {
 			printk(KERN_ERR "ne3210.c: Unable to remap card memory above 1MB !!\n");
 			printk(KERN_ERR "ne3210.c: Try using EISA SCU to set memory below 1MB.\n");
 			printk(KERN_ERR "ne3210.c: Driver NOT installed.\n");
-			free_irq(dev->irq, dev);
-			kfree(dev->priv);
-			dev->priv = NULL;
-			return EAGAIN;
+			retval = -EAGAIN;
+			goto out2;
 		}
 		ei_status.reg0 = 1;	/* Use as remap flag */
 		printk("ne3210.c: remapped %dkB card memory to virtual address %#lx\n",
@@ -246,7 +240,6 @@ __initfunc(int ne3210_probe1(struct device *dev, int ioaddr))
 
 	/* The 8390 offset is zero for the NE3210 */
 	dev->base_addr = ioaddr;
-	request_region(dev->base_addr, NE3210_IO_EXTENT, "ne3210");
 
 	ei_status.name = "NE3210";
 	ei_status.tx_start_page = NE3210_START_PG;
@@ -266,13 +259,21 @@ __initfunc(int ne3210_probe1(struct device *dev, int ioaddr))
 	dev->stop = &ne3210_close;
 	NS8390_init(dev, 0);
 	return 0;
+out2:
+	free_irq(dev->irq, dev);	
+out1:
+	kfree(dev->priv);
+	dev->priv = NULL;
+out:
+	release_region(ioaddr, NE3210_IO_EXTENT);
+	return retval;
 }
 
 /*
  *	Reset by toggling the "Board Enable" bits (bit 2 and 0).
  */
 
-static void ne3210_reset_8390(struct device *dev)
+static void ne3210_reset_8390(struct net_device *dev)
 {
 	unsigned short ioaddr = dev->base_addr;
 
@@ -304,10 +305,10 @@ static void ne3210_reset_8390(struct device *dev)
  */
 
 static void
-ne3210_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+ne3210_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 	unsigned long hdr_start = dev->mem_start + ((ring_page - NE3210_START_PG)<<8);
-	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	hdr->count = (hdr->count + 3) & ~3;     /* Round up allocation. */
 }
 
@@ -317,7 +318,7 @@ ne3210_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page
  *	be rounded up to a doubleword value via ne3210_get_8390_hdr() above.
  */
 
-static void ne3210_block_input(struct device *dev, int count, struct sk_buff *skb,
+static void ne3210_block_input(struct net_device *dev, int count, struct sk_buff *skb,
 						  int ring_offset)
 {
 	unsigned long xfer_start = dev->mem_start + ring_offset - (NE3210_START_PG<<8);
@@ -325,58 +326,46 @@ static void ne3210_block_input(struct device *dev, int count, struct sk_buff *sk
 	if (xfer_start + count > dev->rmem_end) {
 		/* Packet wraps over end of ring buffer. */
 		int semi_count = dev->rmem_end - xfer_start;
-		memcpy_fromio(skb->data, xfer_start, semi_count);
+		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+		isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
 	} else {
 		/* Packet is in one chunk. */
-		memcpy_fromio(skb->data, xfer_start, count);
+		isa_memcpy_fromio(skb->data, xfer_start, count);
 	}
 }
 
-static void ne3210_block_output(struct device *dev, int count,
+static void ne3210_block_output(struct net_device *dev, int count,
 				const unsigned char *buf, int start_page)
 {
 	unsigned long shmem = dev->mem_start + ((start_page - NE3210_START_PG)<<8);
 
 	count = (count + 3) & ~3;     /* Round up to doubleword */
-	memcpy_toio(shmem, buf, count);
+	isa_memcpy_toio(shmem, buf, count);
 }
 
-static int ne3210_open(struct device *dev)
+static int ne3210_open(struct net_device *dev)
 {
 	ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
-static int ne3210_close(struct device *dev)
+static int ne3210_close(struct net_device *dev)
 {
 
 	if (ei_debug > 1)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 
 	ei_close(dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 #ifdef MODULE
 #define MAX_NE3210_CARDS	4	/* Max number of NE3210 cards per module */
-#define NAMELEN			8	/* # of chars for storing dev->name */
-static char namelist[NAMELEN * MAX_NE3210_CARDS] = { 0, };
-static struct device dev_ne3210[MAX_NE3210_CARDS] = {
-	{
-		NULL,		/* assign a chunk of namelist[] below */
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
-
-static int io[MAX_NE3210_CARDS] = { 0, };
-static int irq[MAX_NE3210_CARDS]  = { 0, };
-static int mem[MAX_NE3210_CARDS] = { 0, };
+static struct net_device dev_ne3210[MAX_NE3210_CARDS];
+static int io[MAX_NE3210_CARDS];
+static int irq[MAX_NE3210_CARDS];
+static int mem[MAX_NE3210_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NE3210_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_NE3210_CARDS) "i");
@@ -387,8 +376,7 @@ int init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_NE3210_CARDS; this_dev++) {
-		struct device *dev = &dev_ne3210[this_dev];
-		dev->name = namelist+(NAMELEN*this_dev);
+		struct net_device *dev = &dev_ne3210[this_dev];
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->mem_start = mem[this_dev];
@@ -398,14 +386,12 @@ int init_module(void)
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "ne3210.c: No NE3210 card found (i/o = 0x%x).\n", io[this_dev]);
 			if (found != 0) {	/* Got at least one. */
-				lock_8390_module();
 				return 0;
 			}
 			return -ENXIO;
 		}
 		found++;
 	}
-	lock_8390_module();
 	return 0;
 }
 
@@ -414,18 +400,17 @@ void cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_NE3210_CARDS; this_dev++) {
-		struct device *dev = &dev_ne3210[this_dev];
+		struct net_device *dev = &dev_ne3210[this_dev];
 		if (dev->priv != NULL) {
-			void *priv = dev->priv;
 			free_irq(dev->irq, dev);
 			release_region(dev->base_addr, NE3210_IO_EXTENT);
 			if (ei_status.reg0)
 				iounmap((void *)dev->mem_start);
 			unregister_netdev(dev);
-			kfree(priv);
+			kfree(dev->priv);
+			dev->priv = NULL;
 		}
 	}
-	unlock_8390_module();
 }
 #endif /* MODULE */
 

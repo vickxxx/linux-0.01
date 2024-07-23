@@ -14,6 +14,9 @@
  *    routines in this file used to be inline!
  */
 
+#include <linux/module.h>
+
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/types.h>
@@ -55,37 +58,43 @@ volatile unsigned char cmd_buffer[16];
 				 */
 
 /***************************************************************** Detection */
-int blz1230_esp_detect(Scsi_Host_Template *tpnt)
+int __init blz1230_esp_detect(Scsi_Host_Template *tpnt)
 {
 	struct NCR_ESP *esp;
-	const struct ConfigDev *esp_dev;
-	unsigned int key;
+	struct zorro_dev *z = NULL;
 	unsigned long address;
 	struct ESP_regs *eregs;
 
 #if MKIV
-	if ((key = zorro_find(ZORRO_PROD_PHASE5_BLIZZARD_1230_IV_1260, 0, 0))){
+#define REAL_BLZ1230_ID		ZORRO_PROD_PHASE5_BLIZZARD_1230_IV_1260
+#define REAL_BLZ1230_ESP_ADDR	BLZ1230_ESP_ADDR
+#define REAL_BLZ1230_DMA_ADDR	BLZ1230_DMA_ADDR
 #else
-	if ((key = zorro_find(ZORRO_PROD_PHASE5_BLIZZARD_1230_II_FASTLANE_Z3_CYBERSCSI_CYBERSTORM060, 0, 0))){
+#define REAL_BLZ1230_ID		ZORRO_PROD_PHASE5_BLIZZARD_1230_II_FASTLANE_Z3_CYBERSCSI_CYBERSTORM060
+#define REAL_BLZ1230_ESP_ADDR	BLZ1230II_ESP_ADDR
+#define REAL_BLZ1230_DMA_ADDR	BLZ1230II_DMA_ADDR
 #endif
-		esp_dev = zorro_get_board(key);
 
+	if ((z = zorro_find_device(REAL_BLZ1230_ID, z))) {
+	    unsigned long board = z->resource.start;
+	    if (request_mem_region(board+REAL_BLZ1230_ESP_ADDR,
+				   sizeof(struct ESP_regs), "NCR53C9x")) {
 		/* Do some magic to figure out if the blizzard is
 		 * equipped with a SCSI controller
 		 */
-		address = (unsigned long)ZTWO_VADDR(esp_dev->cd_BoardAddr);
-#if MKIV
-		eregs = (struct ESP_regs *)(address + BLZ1230_ESP_ADDR);
-#else
-		eregs = (struct ESP_regs *)(address + BLZ1230II_ESP_ADDR);
-#endif
+		address = ZTWO_VADDR(board);
+		eregs = (struct ESP_regs *)(address + REAL_BLZ1230_ESP_ADDR);
+		esp = esp_allocate(tpnt, (void *)board+REAL_BLZ1230_ESP_ADDR);
 
-		eregs->esp_cfg1 = (ESP_CONFIG1_PENABLE | 7);
+		esp_write(eregs->esp_cfg1, (ESP_CONFIG1_PENABLE | 7));
 		udelay(5);
-		if(eregs->esp_cfg1 != (ESP_CONFIG1_PENABLE | 7))
+		if(esp_read(eregs->esp_cfg1) != (ESP_CONFIG1_PENABLE | 7)){
+			esp_deallocate(esp);
+			scsi_unregister(esp->ehost);
+			release_mem_region(board+REAL_BLZ1230_ESP_ADDR,
+					   sizeof(struct ESP_regs));
 			return 0; /* Bail out if address did not hold data */
-
-		esp = esp_allocate(tpnt, (void *) esp_dev);
+		}
 
 		/* Do command transfer with programmed I/O */
 		esp->do_pio_cmds = 1;
@@ -120,37 +129,32 @@ int blz1230_esp_detect(Scsi_Host_Template *tpnt)
 		 * relative to the device (i.e. in the same Zorro
 		 * I/O block).
 		 */
-#if MKIV
-		esp->dregs = (void *)(address + BLZ1230_DMA_ADDR);
-#else
-		esp->dregs = (void *)(address + BLZ1230II_DMA_ADDR);
-#endif	
+		esp->dregs = (void *)(address + REAL_BLZ1230_DMA_ADDR);
 	
 		/* ESP register base */
 		esp->eregs = eregs;
 
 		/* Set the command buffer */
 		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus((unsigned long) cmd_buffer);
+		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, 0, 
+		esp->slot = board+REAL_BLZ1230_ESP_ADDR;
+		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
 			    "Blizzard 1230 SCSI IV", esp_intr);
 
 		/* Figure out our scsi ID on the bus */
 		esp->scsi_id = 7;
 		
-		/* Check for differential SCSI-bus */
-		/* What is this stuff? */
+		/* We don't have a differential SCSI-bus. */
 		esp->diff = 0;
 
 		esp_initialize(esp);
 
-		zorro_config_board(key, 0);
-
-		printk("\nESP: Total of %d ESP hosts found, %d actually in use.\n", nesps,esps_in_use);
+		printk("ESP: Total of %d ESP hosts found, %d actually in use.\n", nesps, esps_in_use);
 		esps_running = esps_in_use;
 		return esps_in_use;
+	    }
 	}
 	return 0;
 }
@@ -249,7 +253,7 @@ static void dma_ints_on(struct NCR_ESP *esp)
 
 static int dma_irq_p(struct NCR_ESP *esp)
 {
-	return (esp->eregs->esp_status & ESP_STAT_INTR);
+	return (esp_read(esp->eregs->esp_status) & ESP_STAT_INTR);
 }
 
 static int dma_ports_p(struct NCR_ESP *esp)
@@ -267,4 +271,24 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 	} else {
 		dma_init_write(esp, addr, count);
 	}
+}
+
+#define HOSTS_C
+
+#include "blz1230.h"
+
+static Scsi_Host_Template driver_template = SCSI_BLZ1230;
+
+#include "scsi_module.c"
+
+int blz1230_esp_release(struct Scsi_Host *instance)
+{
+#ifdef MODULE
+	unsigned long address = (unsigned long)((struct NCR_ESP *)instance->hostdata)->edev;
+	esp_deallocate((struct NCR_ESP *)instance->hostdata);
+	esp_release();
+	release_mem_region(address, sizeof(struct ESP_regs));
+	free_irq(IRQ_AMIGA_PORTS, esp_intr);
+#endif
+	return 1;
 }

@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.43 1999/03/15 22:13:31 davem Exp $
+/* $Id: time.c,v 1.57 2000/09/16 07:33:45 davem Exp $
  * linux/arch/sparc/kernel/time.c
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -26,6 +26,7 @@
 #include <linux/timex.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/ioport.h>
 
 #include <asm/oplib.h>
 #include <asm/segment.h>
@@ -38,12 +39,13 @@
 #include <asm/machines.h>
 #include <asm/sun4paddr.h>
 #include <asm/page.h>
+#include <asm/pcic.h>
 
 extern rwlock_t xtime_lock;
 
 enum sparc_clock_type sp_clock_typ;
-struct mostek48t02 *mstk48t02_regs = 0;
-struct mostek48t08 *mstk48t08_regs = 0;
+unsigned long mstk48t02_regs = 0UL;
+static struct mostek48t08 *mstk48t08_regs = 0;
 static int set_rtc_mmss(unsigned long);
 static void sbus_do_settimeofday(struct timeval *tv);
 
@@ -68,6 +70,40 @@ struct intersil *intersil_clock;
 
 #endif
 
+static spinlock_t ticker_lock = SPIN_LOCK_UNLOCKED;
+
+/* 32-bit Sparc specific profiling function. */
+void sparc_do_profile(unsigned long pc, unsigned long o7)
+{
+	if(prof_buffer && current->pid) {
+		extern int _stext;
+		extern int __copy_user_begin, __copy_user_end;
+		extern int __atomic_begin, __atomic_end;
+		extern int __bzero_begin, __bzero_end;
+		extern int __bitops_begin, __bitops_end;
+
+		if ((pc >= (unsigned long) &__copy_user_begin &&
+		     pc < (unsigned long) &__copy_user_end) ||
+		    (pc >= (unsigned long) &__atomic_begin &&
+		     pc < (unsigned long) &__atomic_end) ||
+		    (pc >= (unsigned long) &__bzero_begin &&
+		     pc < (unsigned long) &__bzero_end) ||
+		    (pc >= (unsigned long) &__bitops_begin &&
+		     pc < (unsigned long) &__bitops_end))
+			pc = o7;
+
+		pc -= (unsigned long) &_stext;
+		pc >>= prof_shift;
+
+		spin_lock(&ticker_lock);
+		if(pc < prof_len)
+			prof_buffer[pc]++;
+		else
+			prof_buffer[prof_len - 1]++;
+		spin_unlock(&ticker_lock);
+	}
+}
+
 __volatile__ unsigned int *master_l10_counter;
 __volatile__ unsigned int *master_l10_limit;
 
@@ -79,6 +115,11 @@ void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	/* last time the cmos clock got updated */
 	static long last_rtc_update=0;
+
+#ifndef CONFIG_SMP
+	if(!user_mode(regs))
+		sparc_do_profile(regs->pc, regs->u_regs[UREG_RETPC]);
+#endif
 
 #ifdef CONFIG_SUN4
 	if((idprom->id_machtype == (SM_SUN4 | SM_4_260)) ||
@@ -108,41 +149,10 @@ void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	write_unlock(&xtime_lock);
 }
 
-/* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
- * Assumes input in normal date format, i.e. 1980-12-31 23:59:59
- * => year=1980, mon=12, day=31, hour=23, min=59, sec=59.
- *
- * [For the Julian calendar (which was used in Russia before 1917,
- * Britain & colonies before 1752, anywhere else before 1582,
- * and is still in use by some communities) leave out the
- * -year/100+year/400 terms, and add 10.]
- *
- * This algorithm was first published by Gauss (I think).
- *
- * WARNING: this function will overflow on 2106-02-07 06:28:16 on
- * machines were long is 32-bit! (However, as time_t is signed, we
- * will already get problems at other places on 2038-01-19 03:14:08)
- */
-static inline unsigned long mktime(unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
-{
-	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
-		mon += 12;	/* Puts Feb last since it has leap day */
-		year -= 1;
-	}
-	return (((
-	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
-	      year*365 - 719499
-	    )*24 + hour /* now have hours */
-	   )*60 + min /* now have minutes */
-	  )*60 + sec; /* finally seconds */
-}
-
 /* Kick start a stopped clock (procedure from the Sun NVRAM/hostid FAQ). */
-__initfunc(static void kick_start_clock(void))
+static void __init kick_start_clock(void)
 {
-	register struct mostek48t02 *regs = mstk48t02_regs;
+	struct mostek48t02 *regs = (struct mostek48t02 *)mstk48t02_regs;
 	unsigned char sec;
 	int i, count;
 
@@ -191,7 +201,7 @@ __initfunc(static void kick_start_clock(void))
 /* Return nonzero if the clock chip battery is low. */
 static __inline__ int has_low_battery(void)
 {
-	register struct mostek48t02 *regs = mstk48t02_regs;
+	struct mostek48t02 *regs = (struct mostek48t02 *)mstk48t02_regs;
 	unsigned char data1, data2;
 
 	data1 = regs->eeprom[0];	/* Read some data. */
@@ -207,27 +217,27 @@ static __inline__ void sun4_clock_probe(void)
 {
 #ifdef CONFIG_SUN4
 	int temp;
+	struct resource r;
 
+	memset(&r, 0, sizeof(r));
 	if( idprom->id_machtype == (SM_SUN4 | SM_4_330) ) {
 		sp_clock_typ = MSTK48T02;
-		mstk48t02_regs = (struct mostek48t02 *) 
-				sparc_alloc_io(sun4_clock_physaddr, 0,
-				       sizeof(*mstk48t02_regs),
-				       "clock", 0x0, 0x0);
+		r.start = sun4_clock_physaddr;
+		mstk48t02_regs = sbus_ioremap(&r, 0,
+				       sizeof(struct mostek48t02), 0);
 		mstk48t08_regs = 0;  /* To catch weirdness */
 		intersil_clock = 0;  /* just in case */
 
 		/* Kick start the clock if it is completely stopped. */
-		if (mstk48t02_regs->sec & MSTK_STOP)
+		if (mostek_read(mstk48t02_regs + MOSTEK_SEC) & MSTK_STOP)
 			kick_start_clock();
 	} else if( idprom->id_machtype == (SM_SUN4 | SM_4_260)) {
 		/* intersil setup code */
 		printk("Clock: INTERSIL at %8x ",sun4_clock_physaddr);
 		sp_clock_typ = INTERSIL;
+		r.start = sun4_clock_physaddr;
 		intersil_clock = (struct intersil *) 
-			sparc_alloc_io(sun4_clock_physaddr, 0,
-				       sizeof(*intersil_clock),
-			       	       "clock", 0x0, 0x0);
+		    sbus_ioremap(&r, 0, sizeof(*intersil_clock), "intersil");
 		mstk48t02_regs = 0;  /* just be sure */
 		mstk48t08_regs = 0;  /* ditto */
 		/* initialise the clock */
@@ -256,8 +266,10 @@ static __inline__ void clock_probe(void)
 	struct linux_prom_registers clk_reg[2];
 	char model[128];
 	register int node, cpuunit, bootbus;
+	struct resource r;
 
 	cpuunit = bootbus = 0;
+	memset(&r, 0, sizeof(r));
 
 	/* Determine the correct starting PROM node for the probe. */
 	node = prom_getchild(prom_root_node);
@@ -297,10 +309,10 @@ static __inline__ void clock_probe(void)
 		else
 			prom_apply_obio_ranges(clk_reg, 1);
 		/* Map the clock register io area read-only */
-		mstk48t02_regs = (struct mostek48t02 *) 
-			sparc_alloc_io(clk_reg[0].phys_addr,
-				       (void *) 0, sizeof(*mstk48t02_regs),
-				       "clock", clk_reg[0].which_io, 0x0);
+		r.flags = clk_reg[0].which_io;
+		r.start = clk_reg[0].phys_addr;
+		mstk48t02_regs = sbus_ioremap(&r, 0,
+		    sizeof(struct mostek48t02), "mk48t02");
 		mstk48t08_regs = 0;  /* To catch weirdness */
 	} else if (strcmp(model, "mk48t08") == 0) {
 		sp_clock_typ = MSTK48T08;
@@ -314,12 +326,13 @@ static __inline__ void clock_probe(void)
 		else
 			prom_apply_obio_ranges(clk_reg, 1);
 		/* Map the clock register io area read-only */
-		mstk48t08_regs = (struct mostek48t08 *)
-			sparc_alloc_io(clk_reg[0].phys_addr,
-				       (void *) 0, sizeof(*mstk48t08_regs),
-				       "clock", clk_reg[0].which_io, 0x0);
+		/* XXX r/o attribute is somewhere in r.flags */
+		r.flags = clk_reg[0].which_io;
+		r.start = clk_reg[0].phys_addr;
+		mstk48t08_regs = (struct mostek48t08 *) sbus_ioremap(&r, 0,
+		    sizeof(struct mostek48t08), "mk48t08");
 
-		mstk48t02_regs = &mstk48t08_regs->regs;
+		mstk48t02_regs = (unsigned long)&mstk48t08_regs->regs;
 	} else {
 		prom_printf("CLOCK: Unknown model name '%s'\n",model);
 		prom_halt();
@@ -330,11 +343,11 @@ static __inline__ void clock_probe(void)
 		printk(KERN_CRIT "NVRAM: Low battery voltage!\n");
 
 	/* Kick start the clock if it is completely stopped. */
-	if (mstk48t02_regs->sec & MSTK_STOP)
+	if (mostek_read(mstk48t02_regs + MOSTEK_SEC) & MSTK_STOP)
 		kick_start_clock();
 }
 
-__initfunc(void sbus_time_init(void))
+void __init sbus_time_init(void)
 {
 	unsigned int year, mon, day, hour, min, sec;
 	struct mostek48t02 *mregs;
@@ -348,12 +361,6 @@ __initfunc(void sbus_time_init(void))
 	BTFIXUPSET_CALL(bus_do_settimeofday, sbus_do_settimeofday, BTFIXUPCALL_NORM);
 	btfixup();
 
-#if CONFIG_AP1000
-	init_timers(timer_interrupt);
-	ap_init_time(&xtime);
-        return;
-#endif
-
 	if (ARCH_SUN4)
 		sun4_clock_probe();
 	else
@@ -364,7 +371,7 @@ __initfunc(void sbus_time_init(void))
 #ifdef CONFIG_SUN4
 	if(idprom->id_machtype == (SM_SUN4 | SM_4_330)) {
 #endif
-	mregs = mstk48t02_regs;
+	mregs = (struct mostek48t02 *)mstk48t02_regs;
 	if(!mregs) {
 		prom_printf("Something wrong, clock regs not mapped yet.\n");
 		prom_halt();
@@ -416,11 +423,11 @@ __initfunc(void sbus_time_init(void))
 	__sti();
 }
 
-__initfunc(void time_init(void))
+void __init time_init(void)
 {
 #ifdef CONFIG_PCI
 	extern void pci_time_init(void);
-	if (pci_present()) {
+	if (pcic_present()) {
 		pci_time_init();
 		return;
 	}
@@ -430,12 +437,14 @@ __initfunc(void time_init(void))
 
 extern __inline__ unsigned long do_gettimeoffset(void)
 {
+	struct tasklet_struct *t;
 	unsigned long offset = 0;
 	unsigned int count;
 
 	count = (*master_l10_counter >> 10) & 0x1fffff;
 
-	if(test_bit(TIMER_BH, &bh_active))
+	t = &bh_task_vec[TIMER_BH];
+	if (test_bit(TASKLET_STATE_SCHED, &t->state))
 		offset = 1000000;
 
 	return offset + count;
@@ -446,14 +455,6 @@ extern __inline__ unsigned long do_gettimeoffset(void)
  */
 void do_gettimeofday(struct timeval *tv)
 {
-#if CONFIG_AP1000
-	unsigned long flags;
-
-	save_and_cli(flags);
-	ap_gettimeofday(&xtime);
-	*tv = xtime;
-	restore_flags(flags);
-#else /* !(CONFIG_AP1000) */
 	/* Load doubles must be used on xtime so that what we get
 	 * is guarenteed to be atomic, this is why we can run this
 	 * with interrupts on full blast.  Don't touch this... -DaveM
@@ -488,7 +489,6 @@ void do_gettimeofday(struct timeval *tv)
 	sub	%o5, %o2, %o5
 	st	%o4, [%o0 + 0x0]
 1:	st	%o5, [%o0 + 0x4]");
-#endif
 }
 
 void do_settimeofday(struct timeval *tv)
@@ -500,13 +500,11 @@ void do_settimeofday(struct timeval *tv)
 
 static void sbus_do_settimeofday(struct timeval *tv)
 {
-#if !CONFIG_AP1000
 	tv->tv_usec -= do_gettimeoffset();
 	if(tv->tv_usec < 0) {
 		tv->tv_usec += 1000000;
 		tv->tv_sec--;
 	}
-#endif
 	xtime = *tv;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
@@ -521,7 +519,7 @@ static void sbus_do_settimeofday(struct timeval *tv)
 static int set_rtc_mmss(unsigned long nowtime)
 {
 	int real_seconds, real_minutes, mostek_minutes;
-	struct mostek48t02 *regs = mstk48t02_regs;
+	struct mostek48t02 *regs = (struct mostek48t02 *)mstk48t02_regs;
 #ifdef CONFIG_SUN4
 	struct intersil *iregs = intersil_clock;
 	int temp;

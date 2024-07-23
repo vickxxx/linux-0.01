@@ -1,4 +1,4 @@
-/* $Id: VIScopy.S,v 1.20 1999/05/25 16:52:57 jj Exp $
+/* $Id: VIScopy.S,v 1.25 2000/11/01 09:29:19 davem Exp $
  * VIScopy.S: High speed copy operations utilizing the UltraSparc
  *            Visual Instruction Set.
  *
@@ -29,19 +29,19 @@
 #include <asm/asm_offsets.h>
 
 #define FPU_CLEAN_RETL								\
-	ldub		[%g6 + AOFF_task_tss + AOFF_thread_current_ds], %o1;	\
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_current_ds], %o1;	\
 	VISExit									\
 	clr		%o0;							\
 	retl;									\
 	 wr		%o1, %g0, %asi;
 #define FPU_RETL								\
-	ldub		[%g6 + AOFF_task_tss + AOFF_thread_current_ds], %o1;	\
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_current_ds], %o1;	\
 	VISExit									\
 	clr		%o0;							\
 	retl;									\
 	 wr		%o1, %g0, %asi;
 #define NORMAL_RETL								\
-	ldub		[%g6 + AOFF_task_tss + AOFF_thread_current_ds], %o1;	\
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_current_ds], %o1;	\
 	clr		%o0;							\
 	retl;									\
 	 wr		%o1, %g0, %asi;
@@ -135,11 +135,11 @@
 #define MAIN_LOOP_CHUNK(src, dest, fdest, fsrc, len, jmptgt)	\
 	EXVIS(LDBLK		[%src] ASIBLK, %fdest);		\
 	ASI_SETDST_BLK						\
+	EXVIS2(STBLK		%fsrc, [%dest] ASIBLK);		\
 	add			%src, 0x40, %src;		\
-	add			%dest, 0x40, %dest;		\
 	subcc			%len, 0x40, %len;		\
 	be,pn			%xcc, jmptgt;			\
-	 EXVIS2(STBLK		%fsrc, [%dest - 0x40] ASIBLK);	\
+	 add			%dest, 0x40, %dest;		\
 	ASI_SETSRC_BLK
 
 #define LOOP_CHUNK1(src, dest, len, branch_dest)		\
@@ -304,6 +304,9 @@
 		.type			bcopy,@function
 
 #ifdef __KERNEL__
+		.globl			__memcpy_begin
+__memcpy_begin:
+
 		.globl			__memcpy
 		.type			__memcpy,@function
 
@@ -357,6 +360,38 @@ bcopy:		or		%o0, 0, %g3			! IEU0	Group
 		retl						! CTI	Group brk forced
 		 clr		%o0				! IEU0
 
+
+#ifdef __KERNEL__
+#define BRANCH_ALWAYS	0x10680000
+#define NOP		0x01000000
+#define ULTRA3_DO_PATCH(OLD, NEW)	\
+	sethi	%hi(NEW), %g1; \
+	or	%g1, %lo(NEW), %g1; \
+	sethi	%hi(OLD), %g2; \
+	or	%g2, %lo(OLD), %g2; \
+	sub	%g1, %g2, %g1; \
+	sethi	%hi(BRANCH_ALWAYS), %g3; \
+	srl	%g1, 2, %g1; \
+	or	%g3, %lo(BRANCH_ALWAYS), %g3; \
+	or	%g3, %g1, %g3; \
+	stw	%g3, [%g2]; \
+	sethi	%hi(NOP), %g3; \
+	or	%g3, %lo(NOP), %g3; \
+	stw	%g3, [%g2 + 0x4]; \
+	flush	%g2;
+
+	.globl	cheetah_patch_copyops
+cheetah_patch_copyops:
+	ULTRA3_DO_PATCH(memcpy, U3memcpy)
+	ULTRA3_DO_PATCH(__copy_from_user, U3copy_from_user)
+	ULTRA3_DO_PATCH(__copy_to_user, U3copy_to_user)
+	ULTRA3_DO_PATCH(__copy_in_user, U3copy_in_user)
+	retl
+	 nop
+#undef BRANCH_ALWAYS
+#undef NOP
+#undef ULTRA3_DO_PATCH
+#endif /* __KERNEL__ */
 
 	.align			32
 #ifdef __KERNEL__
@@ -1001,6 +1036,9 @@ fpu_retl:
 	FPU_RETL
 
 #ifdef __KERNEL__
+	.globl		__memcpy_end
+__memcpy_end:
+
 		.section	.fixup
 		.align		4
 VIScopyfixup_reto2:
@@ -1009,7 +1047,7 @@ VIScopyfixup_ret:
 		/* If this is copy_from_user(), zero out the rest of the
 		 * kernel buffer.
 		 */
-		ldub		[%g6 + AOFF_task_tss + AOFF_thread_current_ds], %o4
+		ldub		[%g6 + AOFF_task_thread + AOFF_thread_current_ds], %o4
 		andcc		asi_src, 0x1, %g0
 		be,pt		%icc, 1f
 		 VISExit

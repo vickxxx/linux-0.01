@@ -1,7 +1,7 @@
 #ifndef __ARM_A_OUT_H__
 #define __ARM_A_OUT_H__
 
-#include <linux/types.h>
+#include <asm/types.h>
 
 struct exec
 {
@@ -27,7 +27,8 @@ struct exec
 #define M_ARM 103
 
 #ifdef __KERNEL__
-#include <asm/arch/a.out.h>
+#define STACK_TOP	((current->personality == PER_LINUX_32BIT) ? \
+			 TASK_SIZE : TASK_SIZE_26)
 #endif
 
 #ifndef LIBRARY_START_TEXT

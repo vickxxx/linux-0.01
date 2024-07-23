@@ -5,6 +5,7 @@
  * Included from linux/fs/namei.c
  */
 
+#ifdef __KERNEL__
 #ifndef __PPC_NAMEI_H
 #define __PPC_NAMEI_H
 
@@ -13,7 +14,7 @@
  * Look at asm-sparc/namei.h for details.
  */
 
-#define __prefix_lookup_dentry(name, lookup_flags) \
-	do {} while (0)
+#define __emul_prefix() NULL
 
 #endif /* __PPC_NAMEI_H */
+#endif /* __KERNEL__ */

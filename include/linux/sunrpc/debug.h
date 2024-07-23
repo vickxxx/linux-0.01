@@ -9,13 +9,17 @@
 #ifndef _LINUX_SUNRPC_DEBUG_H_
 #define _LINUX_SUNRPC_DEBUG_H_
 
+#include <linux/config.h>
+
 #include <linux/timer.h>
 #include <linux/tqueue.h>
 
 /*
  * Enable RPC debugging/profiling.
  */
+#ifdef CONFIG_SYSCTL
 #define  RPC_DEBUG
+#endif
 /* #define  RPC_PROFILE */
 
 /*
@@ -50,7 +54,7 @@ extern unsigned int		nlm_debug;
 #undef ifdebug
 #ifdef RPC_DEBUG			
 # define ifdebug(fac)		if (rpc_debug & RPCDBG_##fac)
-# define dfprintk(fac, args...)	do { ifdebug(fac) printk(## args); } while(0)
+# define dfprintk(fac, args...)	do { ifdebug(fac) printk(args); } while(0)
 # define RPC_IFDEBUG(x)		x
 #else
 # define dfprintk(fac, args...)	do ; while (0)

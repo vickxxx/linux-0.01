@@ -1,23 +1,48 @@
 /*
- * linux/include/asm-arm/arch-rpc/system.h
+ *  linux/include/asm-arm/arch-rpc/system.h
  *
- * Copyright (c) 1996 Russell King
+ *  Copyright (C) 1996-1999 Russell King.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
-#ifndef __ASM_ARCH_SYSTEM_H
-#define __ASM_ARCH_SYSTEM_H
+#include <asm/arch/hardware.h>
+#include <asm/hardware/iomd.h>
+#include <asm/io.h>
 
-#include <asm/iomd.h>
+static void arch_idle(void)
+{
+	unsigned long start_idle;
 
-#define arch_reset(mode) {						\
-	extern void ecard_reset (int card);				\
-	outb (0, IOMD_ROMCR0);						\
-	ecard_reset(-1);						\
-	cli();								\
-	__asm__ __volatile__("msr  spsr, r1;"				\
-			     "mcr  p15, 0, %0, c1, c0, 0;"		\
-			     "movs pc, #0"				\
-			 : 						\
-			 : "r" (processor.u.armv3v4.reset()));		\
+	start_idle = jiffies;
+
+	do {
+		if (current->need_resched || hlt_counter)
+			goto slow_out;
+		cpu_do_idle(IDLE_WAIT_FAST);
+	} while (time_before(jiffies, start_idle + HZ/50));
+
+	cpu_do_idle(IDLE_CLOCK_SLOW);
+
+	while (!current->need_resched && !hlt_counter) {
+		cpu_do_idle(IDLE_WAIT_SLOW);
 	}
 
-#endif
+	cpu_do_idle(IDLE_CLOCK_FAST);
+slow_out:
+}
+
+extern __inline__ void arch_reset(char mode)
+{
+	extern void ecard_reset(int card);
+
+	ecard_reset(-1);
+
+	outb(0, IOMD_ROMCR0);
+
+	/*
+	 * Jump into the ROM
+	 */
+	cpu_reset(0);
+}

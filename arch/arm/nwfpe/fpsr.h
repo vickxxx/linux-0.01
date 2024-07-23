@@ -1,8 +1,8 @@
 /*
     NetWinder Floating Point Emulator
-    (c) Corel Computer Corporation, 1998
+    (c) Rebel.com, 1998-1999
 
-    Direct questions, comments to Scott Bambrough <scottb@corelcomputer.com>
+    Direct questions, comments to Scott Bambrough <scottb@netwinder.org>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -63,12 +63,12 @@ typedef unsigned int FPCR;  /* type for floating point control register */
 #define MASK_SYSTEM_CONTROL	0x0000ff00
 #define MASK_TRAP_STRICT	0x00001f00
 
-#define BIT_AC	0x00100000	/* use alternative C-flag definition
+#define BIT_AC	0x00001000	/* use alternative C-flag definition
 				   for compares */
-#define BIT_EP	0x00080000	/* use expanded packed decimal format */
-#define BIT_SO	0x00040000	/* select synchronous operation of FPA */
-#define BIT_NE	0x00020000	/* NaN exception bit */
-#define BIT_ND	0x00010000	/* no denormalized numbers bit */
+#define BIT_EP	0x00000800	/* use expanded packed decimal format */
+#define BIT_SO	0x00000400	/* select synchronous operation of FPA */
+#define BIT_NE	0x00000200	/* NaN exception bit */
+#define BIT_ND	0x00000100	/* no denormalized numbers bit */
 
 /* CUMULATIVE EXCEPTION FLAGS BYTE
 ---------------------------------- */

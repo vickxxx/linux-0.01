@@ -1,4 +1,4 @@
-/* $Id: promcon.c,v 1.15 1999/04/22 06:35:32 davem Exp $
+/* $Id: promcon.c,v 1.17 2000/07/26 23:02:52 davem Exp $
  * Console driver utilizing PROM sun terminal emulation
  *
  * Copyright (C) 1998  Eddie C. Dost  (ecd@skynet.be)
@@ -104,7 +104,7 @@ promcon_end(struct vc_data *conp, char *b)
 	return b - p;
 }
 
-__initfunc(const char *promcon_startup(void))
+const char __init *promcon_startup(void)
 {
 	const char *display_desc = "PROM";
 	int node;
@@ -128,8 +128,8 @@ __initfunc(const char *promcon_startup(void))
 	return display_desc;
 }
 
-__initfunc(static void
-promcon_init_unimap(struct vc_data *conp))
+static void __init 
+promcon_init_unimap(struct vc_data *conp)
 {
 	mm_segment_t old_fs = get_fs();
 	struct unipair *p, *p1;
@@ -566,7 +566,7 @@ static int promcon_dummy(void)
 
 #define DUMMY (void *) promcon_dummy
 
-struct consw prom_con = {
+const struct consw prom_con = {
 	con_startup:		promcon_startup,
 	con_init:		promcon_init,
 	con_deinit:		promcon_deinit,
@@ -581,17 +581,12 @@ struct consw prom_con = {
 	con_font_op:		promcon_font_op,
 	con_set_palette:	DUMMY,
 	con_scrolldelta:	DUMMY,
-	con_set_origin:		NULL,
-	con_save_screen:	NULL,
-#if PROMCON_COLOR
-	con_build_attr:		NULL,
-#else
+#if !(PROMCON_COLOR)
 	con_build_attr:		promcon_build_attr,
 #endif
-	con_invert_region:	NULL,
 };
 
-__initfunc(void prom_con_init(void))
+void __init prom_con_init(void)
 {
 #ifdef CONFIG_DUMMY_CONSOLE
 	if (conswitchp == &dummy_con)

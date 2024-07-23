@@ -1,84 +1,74 @@
 /*
- * linux/asm-arm/proc-armv/assembler.h
+ *  linux/asm-arm/proc-armv/assembler.h
  *
- * Copyright (C) 1996 Russell King
+ *  Copyright (C) 1996-2000 Russell King
  *
- * This file contains arm architecture specific defines
- * for the different processors
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  This file contains ARM processor specifics for
+ *  the ARM6 and better processors.
  */
+#define MODE_USR	USR_MODE
+#define MODE_FIQ	FIQ_MODE
+#define MODE_IRQ	IRQ_MODE
+#define MODE_SVC	SVC_MODE
+
+#define DEFAULT_FIQ	MODE_FIQ
 
 /*
- * LOADREGS: multiple register load (ldm) with pc in register list
- *		(takes account of ARM6 not using ^)
- *
- * RETINSTR: return instruction: adds the 's' in at the end of the
- *		instruction if this is not an ARM6
- *
- * SAVEIRQS: save IRQ state (not required on ARM2/ARM3 - done
- *		implicitly
- *
- * RESTOREIRQS: restore IRQ state (not required on ARM2/ARM3 - done
- *		implicitly with ldm ... ^ or movs.
- *
- * These next two need thinking about - can't easily use stack... (see system.S)
- * DISABLEIRQS: disable IRQS in SVC mode
- *
- * ENABLEIRQS: enable IRQS in SVC mode
- *
- * USERMODE: switch to USER mode
- *
- * SVCMODE: switch to SVC mode
+ * LOADREGS - ldm with PC in register list (eg, ldmfd sp!, {pc})
  */
-
-#define N_BIT	(1 << 31)
-#define Z_BIT	(1 << 30)
-#define C_BIT	(1 << 29)
-#define V_BIT	(1 << 28)
-
-#define PCMASK	0
-
-#ifdef __ASSEMBLER__
-
-#define I_BIT	(1 << 7)
-#define F_BIT	(1 << 6)
-
-#define MODE_FIQ26	0x01
-#define MODE_FIQ32	0x11
-
-#define DEFAULT_FIQ	MODE_FIQ32
-
+#ifdef __STDC__
 #define LOADREGS(cond, base, reglist...)\
 	ldm##cond	base,reglist
+#else
+#define LOADREGS(cond, base, reglist...)\
+	ldm/**/cond	base,reglist
+#endif
 
+/*
+ * Build a return instruction for this processor type.
+ */
 #define RETINSTR(instr, regs...)\
 	instr	regs
 
-#define MODENOP
+/*
+ * Save the current IRQ state and disable IRQs.  Note that this macro
+ * assumes FIQs are enabled, and that the processor is in SVC mode.
+ */
+	.macro	save_and_disable_irqs, oldcpsr, temp
+	mrs	\oldcpsr, cpsr
+	mov	\temp, #I_BIT | MODE_SVC
+	msr	cpsr_c, \temp
+	.endm
 
-#define MODE(savereg,tmpreg,mode) \
-	mrs	savereg, cpsr; \
-	bic	tmpreg, savereg, $0x1f; \
-	orr	tmpreg, tmpreg, $mode; \
-	msr	cpsr, tmpreg
+/*
+ * Restore interrupt state previously stored in a register.  We don't
+ * guarantee that this will preserve the flags.
+ */
+	.macro	restore_irqs, oldcpsr
+	msr	cpsr_c, \oldcpsr
+	.endm
 
-#define RESTOREMODE(savereg) \
-	msr	cpsr, savereg
-	
-#define SAVEIRQS(tmpreg)\
-	mrs	tmpreg, cpsr; \
-	str	tmpreg, [sp, $-4]!
+/*
+ * These two are used to save LR/restore PC over a user-based access.
+ * The old 26-bit architecture requires that we do.  On 32-bit
+ * architecture, we can safely ignore this requirement.
+ */
+	.macro	save_lr
+	.endm
 
-#define RESTOREIRQS(tmpreg)\
-	ldr	tmpreg, [sp], $4; \
-	msr	cpsr, tmpreg
+	.macro	restore_pc
+	mov	pc, lr
+	.endm
 
-#define DISABLEIRQS(tmpreg)\
-	mrs	tmpreg , cpsr; \
-	orr	tmpreg , tmpreg , $I_BIT; \
-	msr	cpsr, tmpreg
+#define USER(x...)				\
+9999:	x;					\
+	.section __ex_table,"a";		\
+	.align	3;				\
+	.long	9999b,9001f;			\
+	.previous
 
-#define ENABLEIRQS(tmpreg)\
-	mrs	tmpreg , cpsr; \
-	bic	tmpreg , tmpreg , $I_BIT; \
-	msr	cpsr, tmpreg
-#endif
+

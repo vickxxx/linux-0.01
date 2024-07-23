@@ -21,17 +21,6 @@
 
 #define T2_MEM_R1_MASK 0x03ffffff  /* Mem sparse region 1 mask is 26 bits */
 
-#define T2_DMA_WIN_BASE_DEFAULT	(1024*1024*1024)
-#define T2_DMA_WIN_SIZE_DEFAULT	(1024*1024*1024)
-
-#if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM_SETUP)
-#define T2_DMA_WIN_BASE		alpha_mv.dma_win_base
-#define T2_DMA_WIN_SIZE		alpha_mv.dma_win_size
-#else
-#define T2_DMA_WIN_BASE		T2_DMA_WIN_BASE_DEFAULT
-#define T2_DMA_WIN_SIZE		T2_DMA_WIN_SIZE_DEFAULT
-#endif
-
 /* GAMMA-SABLE is a SABLE with EV5-based CPUs */
 #define _GAMMA_BIAS		0x8000000000UL
 
@@ -78,33 +67,33 @@
  3.8fff.ffff
  *
  *  +--------------+ 3 8000 0000
- *  | CPU 0 CSRs   |            
+ *  | CPU 0 CSRs   |
  *  +--------------+ 3 8100 0000
- *  | CPU 1 CSRs   |            
+ *  | CPU 1 CSRs   |
  *  +--------------+ 3 8200 0000
- *  | CPU 2 CSRs   |            
+ *  | CPU 2 CSRs   |
  *  +--------------+ 3 8300 0000
- *  | CPU 3 CSRs   |            
+ *  | CPU 3 CSRs   |
  *  +--------------+ 3 8400 0000
- *  | CPU Reserved |            
+ *  | CPU Reserved |
  *  +--------------+ 3 8700 0000
- *  | Mem Reserved |            
+ *  | Mem Reserved |
  *  +--------------+ 3 8800 0000
- *  | Mem 0 CSRs   |            
+ *  | Mem 0 CSRs   |
  *  +--------------+ 3 8900 0000
- *  | Mem 1 CSRs   |            
+ *  | Mem 1 CSRs   |
  *  +--------------+ 3 8a00 0000
- *  | Mem 2 CSRs   |            
+ *  | Mem 2 CSRs   |
  *  +--------------+ 3 8b00 0000
- *  | Mem 3 CSRs   |            
- *  +--------------+ 3 8c00 0000           
- *  | Mem Reserved |            
- *  +--------------+ 3 8e00 0000           
- *  | PCI Bridge   |            
- *  +--------------+ 3 8f00 0000           
- *  | Expansion IO |            
- *  +--------------+ 3 9000 0000           
- *                                              
+ *  | Mem 3 CSRs   |
+ *  +--------------+ 3 8c00 0000
+ *  | Mem Reserved |
+ *  +--------------+ 3 8e00 0000
+ *  | PCI Bridge   |
+ *  +--------------+ 3 8f00 0000
+ *  | Expansion IO |
+ *  +--------------+ 3 9000 0000
+ *
  *
  */
 #define T2_CPU0_BASE            (IDENT_ADDR + GAMMA_BIAS + 0x380000000L)
@@ -176,7 +165,7 @@ struct el_t2_procdata_mcheck {
 	unsigned long	elfmc_bc_tag;	/* Backup Cache Tag Probe Results. */
 };
 
-/* 
+/*
  * Sable processor specific Machine Check Data segment.
  */
 
@@ -184,7 +173,7 @@ struct el_t2_logout_header {
 	unsigned int	elfl_size;	/* size in bytes of logout area. */
 	int		elfl_sbz1:31;	/* Should be zero. */
 	char		elfl_retry:1;	/* Retry flag. */
-        unsigned int	elfl_procoffset; /* Processor-specific offset. */
+	unsigned int	elfl_procoffset; /* Processor-specific offset. */
 	unsigned int	elfl_sysoffset;	 /* Offset of system-specific. */
 	unsigned int	elfl_error_type;	/* PAL error type code. */
 	unsigned int	elfl_frame_rev;		/* PAL Frame revision. */
@@ -233,7 +222,7 @@ struct el_t2_data_memory {
  */
 struct el_t2_data_other_cpu {
 	short	      elco_cpuid;	/* CPU ID */
-	short	      elco_res02[3];	
+	short	      elco_res02[3];
 	unsigned long elco_bcc;	/* CSR 0 */
 	unsigned long elco_bcce;	/* CSR 1 */
 	unsigned long elco_bccea;	/* CSR 2 */
@@ -256,7 +245,7 @@ struct el_t2_data_other_cpu {
  * Sable other CPU error frame - sable pfms section 3.44
  */
 struct el_t2_data_t2{
-        struct el_t2_frame_header elct_hdr;	/* ID$T2-FRAME */
+	struct el_t2_frame_header elct_hdr;	/* ID$T2-FRAME */
 	unsigned long elct_iocsr;	/* IO Control and Status Register */
 	unsigned long elct_cerr1;	/* Cbus Error Register 1 */
 	unsigned long elct_cerr2;	/* Cbus Error Register 2 */
@@ -294,31 +283,31 @@ struct el_t2_data_corrected {
 	unsigned long elcpb_bc_tag;
 };
 
-/* 
+/*
  * Sable error log data structure
  * Note there are 4 memory slots on sable (see t2.h)
  */
 struct el_t2_frame_mcheck {
-        struct el_t2_frame_header elfmc_header;	/* ID$P-FRAME_MCHECK */
+	struct el_t2_frame_header elfmc_header;	/* ID$P-FRAME_MCHECK */
 	struct el_t2_logout_header elfmc_hdr;
 	struct el_t2_procdata_mcheck elfmc_procdata;
 	struct el_t2_sysdata_mcheck elfmc_sysdata;
 	struct el_t2_data_t2 elfmc_t2data;
-	struct el_t2_data_memory elfmc_memdata[4]; 
-        struct el_t2_frame_header elfmc_footer;	/* empty */
+	struct el_t2_data_memory elfmc_memdata[4];
+	struct el_t2_frame_header elfmc_footer;	/* empty */
 };
 
 
-/* 
+/*
  * Sable error log data structures on memory errors
  */
 struct el_t2_frame_corrected {
-        struct el_t2_frame_header elfcc_header;	/* ID$P-BC-COR */
+	struct el_t2_frame_header elfcc_header;	/* ID$P-BC-COR */
 	struct el_t2_logout_header elfcc_hdr;
-	struct el_t2_data_corrected elfcc_procdata; 
+	struct el_t2_data_corrected elfcc_procdata;
 /*	struct el_t2_data_t2 elfcc_t2data;		*/
 /*	struct el_t2_data_memory elfcc_memdata[4];	*/
-        struct el_t2_frame_header elfcc_footer;	/* empty */
+	struct el_t2_frame_header elfcc_footer;	/* empty */
 };
 
 
@@ -328,21 +317,6 @@ struct el_t2_frame_corrected {
 #define __EXTERN_INLINE extern inline
 #define __IO_EXTERN_INLINE
 #endif
-
-/*
- * Translate physical memory address as seen on (PCI) bus into
- * a kernel virtual address and vv.
- */
-
-__EXTERN_INLINE unsigned long t2_virt_to_bus(void * address)
-{
-	return virt_to_phys(address) + T2_DMA_WIN_BASE;
-}
-
-__EXTERN_INLINE void * t2_bus_to_virt(unsigned long address)
-{
-	return phys_to_virt(address - T2_DMA_WIN_BASE);
-}
 
 /*
  * I/O functions:
@@ -398,10 +372,9 @@ __EXTERN_INLINE void t2_outl(unsigned int b, unsigned long addr)
 
 
 /*
- * Memory functions.  64-bit and 32-bit accesses are done through
- * dense memory space, everything else through sparse space.
- * 
- * For reading and writing 8 and 16 bit quantities we need to 
+ * Memory functions.
+ *
+ * For reading and writing 8 and 16 bit quantities we need to
  * go through one of the three sparse address mapping regions
  * and use the HAE_MEM CSR to provide some bits of the address.
  * The following few routines use only sparse address region 1
@@ -410,10 +383,10 @@ __EXTERN_INLINE void t2_outl(unsigned int b, unsigned long addr)
  * See p 6-17 of the specification but it looks something like this:
  *
  * 21164 Address:
- * 
- *          3         2         1                                                               
+ *
+ *          3         2         1
  * 9876543210987654321098765432109876543210
- * 1ZZZZ0.PCI.QW.Address............BBLL                 
+ * 1ZZZZ0.PCI.QW.Address............BBLL
  *
  * ZZ = SBZ
  * BB = Byte offset
@@ -421,127 +394,23 @@ __EXTERN_INLINE void t2_outl(unsigned int b, unsigned long addr)
  *
  * PCI Address:
  *
- * 3         2         1                                                               
+ * 3         2         1
  * 10987654321098765432109876543210
  * HHH....PCI.QW.Address........ 00
  *
  * HHH = 31:29 HAE_MEM CSR
- * 
+ *
  */
-
-__EXTERN_INLINE unsigned long t2_srm_base(unsigned long addr)
-{
-	if ((addr >= alpha_mv.sm_base_r1
-	     && addr <= alpha_mv.sm_base_r1 + T2_MEM_R1_MASK)
-	    || (addr >= 512*1024 && addr < 1024*1024)) {
-		return ((addr & T2_MEM_R1_MASK) << 5) + T2_SPARSE_MEM;
-	}
-#if 0
-	printk("T2: address 0x%lx not covered by HAE\n", addr);
-#endif
-	return 0;
-}
-
-__EXTERN_INLINE unsigned long t2_srm_readb(unsigned long addr)
-{
-	unsigned long result, work;
-
-	if ((work = t2_srm_base(addr)) == 0)
-		return 0xff;
-	work += 0x00;	/* add transfer length */
-
-	result = *(vip) work;
-	return __kernel_extbl(result, addr & 3);
-}
-
-__EXTERN_INLINE unsigned long t2_srm_readw(unsigned long addr)
-{
-	unsigned long result, work;
-
-	if ((work = t2_srm_base(addr)) == 0)
-		return 0xffff;
-	work += 0x08;	/* add transfer length */
-
-	result = *(vip) work;
-	return __kernel_extwl(result, addr & 3);
-}
-
-/* On SABLE with T2, we must use SPARSE memory even for 32-bit access ... */
-__EXTERN_INLINE unsigned long t2_srm_readl(unsigned long addr)
-{
-	unsigned long work;
-
-	if ((work = t2_srm_base(addr)) == 0)
-		return 0xffffffff;
-	work += 0x18;	/* add transfer length */
-
-	return *(vuip) work;
-}
-
-/* ... which makes me wonder why we advertise we have DENSE memory at all.
-   Anyway, guess that means we should emulate 64-bit access as two cycles.  */
-__EXTERN_INLINE unsigned long t2_srm_readq(unsigned long addr)
-{
-	unsigned long work, r0, r1;
-
-	if ((work = t2_srm_base(addr)) == 0)
-		return ~0UL;
-	work += 0x18;	/* add transfer length */
-
-	r0 = *(vuip) work;
-	r1 = *(vuip) (work + (4 << 5));
-	return r1 << 32 | r0;
-}
-
-__EXTERN_INLINE void t2_srm_writeb(unsigned char b, unsigned long addr)
-{
-	unsigned long work = t2_srm_base(addr);
-	if (work) {
-		work += 0x00;	/* add transfer length */
-		*(vuip) work = b * 0x01010101;
-	}
-}
-
-__EXTERN_INLINE void t2_srm_writew(unsigned short b, unsigned long addr)
-{
-	unsigned long work = t2_srm_base(addr);
-	if (work) {
-		work += 0x08;	/* add transfer length */
-		*(vuip) work = b * 0x00010001;
-	}
-}
-
-/* On SABLE with T2, we must use SPARSE memory even for 32-bit access ... */
-__EXTERN_INLINE void t2_srm_writel(unsigned int b, unsigned long addr)
-{
-	unsigned long work = t2_srm_base(addr);
-	if (work) {
-		work += 0x18;	/* add transfer length */
-		*(vuip) work = b;
-	}
-}
-
-/* ... which makes me wonder why we advertise we have DENSE memory at all.
-   Anyway, guess that means we should emulate 64-bit access as two cycles.  */
-__EXTERN_INLINE void t2_srm_writeq(unsigned long b, unsigned long addr)
-{
-	unsigned long work = t2_srm_base(addr);
-	if (work) {
-		work += 0x18;	/* add transfer length */
-		*(vuip) work = b;
-		*(vuip) (work + (4 << 5)) = b >> 32;
-	}
-}
 
 __EXTERN_INLINE unsigned long t2_readb(unsigned long addr)
 {
 	unsigned long result, msb;
 
-	msb = addr & 0xE0000000 ;
-	addr &= T2_MEM_R1_MASK ;
+	msb = addr & 0xE0000000;
+	addr &= T2_MEM_R1_MASK;
 	set_hae(msb);
 
-	result = *(vip) ((addr << 5) + T2_SPARSE_MEM + 0x00) ;
+	result = *(vip) ((addr << 5) + T2_SPARSE_MEM + 0x00);
 	return __kernel_extbl(result, addr & 3);
 }
 
@@ -549,8 +418,8 @@ __EXTERN_INLINE unsigned long t2_readw(unsigned long addr)
 {
 	unsigned long result, msb;
 
-	msb = addr & 0xE0000000 ;
-	addr &= T2_MEM_R1_MASK ;
+	msb = addr & 0xE0000000;
+	addr &= T2_MEM_R1_MASK;
 	set_hae(msb);
 
 	result = *(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x08);
@@ -562,8 +431,8 @@ __EXTERN_INLINE unsigned long t2_readl(unsigned long addr)
 {
 	unsigned long msb;
 
-	msb = addr & 0xE0000000 ;
-	addr &= T2_MEM_R1_MASK ;
+	msb = addr & 0xE0000000;
+	addr &= T2_MEM_R1_MASK;
 	set_hae(msb);
 
 	return *(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x18);
@@ -573,8 +442,8 @@ __EXTERN_INLINE unsigned long t2_readq(unsigned long addr)
 {
 	unsigned long r0, r1, work, msb;
 
-	msb = addr & 0xE0000000 ;
-	addr &= T2_MEM_R1_MASK ;
+	msb = addr & 0xE0000000;
+	addr &= T2_MEM_R1_MASK;
 	set_hae(msb);
 
 	work = (addr << 5) + T2_SPARSE_MEM + 0x18;
@@ -585,33 +454,35 @@ __EXTERN_INLINE unsigned long t2_readq(unsigned long addr)
 
 __EXTERN_INLINE void t2_writeb(unsigned char b, unsigned long addr)
 {
-        unsigned long msb ; 
+	unsigned long msb, w;
 
-	msb = addr & 0xE0000000 ;
-	addr &= T2_MEM_R1_MASK ;
+	msb = addr & 0xE0000000;
+	addr &= T2_MEM_R1_MASK;
 	set_hae(msb);
 
-	*(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x00) = b * 0x01010101;
+	w = __kernel_insbl(b, addr & 3);
+	*(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x00) = w;
 }
 
 __EXTERN_INLINE void t2_writew(unsigned short b, unsigned long addr)
 {
-        unsigned long msb ; 
+	unsigned long msb, w;
 
-	msb = addr & 0xE0000000 ;
-	addr &= T2_MEM_R1_MASK ;
+	msb = addr & 0xE0000000;
+	addr &= T2_MEM_R1_MASK;
 	set_hae(msb);
 
-	*(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x08) = b * 0x00010001;
+	w = __kernel_inswl(b, addr & 3);
+	*(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x08) = w;
 }
 
 /* On SABLE with T2, we must use SPARSE memory even for 32-bit access. */
 __EXTERN_INLINE void t2_writel(unsigned int b, unsigned long addr)
 {
-        unsigned long msb ; 
+	unsigned long msb;
 
-	msb = addr & 0xE0000000 ;
-	addr &= T2_MEM_R1_MASK ;
+	msb = addr & 0xE0000000;
+	addr &= T2_MEM_R1_MASK;
 	set_hae(msb);
 
 	*(vuip) ((addr << 5) + T2_SPARSE_MEM + 0x18) = b;
@@ -619,10 +490,10 @@ __EXTERN_INLINE void t2_writel(unsigned int b, unsigned long addr)
 
 __EXTERN_INLINE void t2_writeq(unsigned long b, unsigned long addr)
 {
-        unsigned long msb, work;
+	unsigned long msb, work;
 
-	msb = addr & 0xE0000000 ;
-	addr &= T2_MEM_R1_MASK ;
+	msb = addr & 0xE0000000;
+	addr &= T2_MEM_R1_MASK;
 	set_hae(msb);
 
 	work = (addr << 5) + T2_SPARSE_MEM + 0x18;
@@ -630,11 +501,14 @@ __EXTERN_INLINE void t2_writeq(unsigned long b, unsigned long addr)
 	*(vuip)(work + (4 << 5)) = b >> 32;
 }
 
-/* Find the DENSE memory area for a given bus address.  */
-
-__EXTERN_INLINE unsigned long t2_dense_mem(unsigned long addr)
+__EXTERN_INLINE unsigned long t2_ioremap(unsigned long addr)
 {
-	return T2_DENSE_MEM;
+	return addr;
+}
+
+__EXTERN_INLINE int t2_is_ioaddr(unsigned long addr)
+{
+	return (long)addr >= 0;
 }
 
 #undef vip
@@ -642,42 +516,22 @@ __EXTERN_INLINE unsigned long t2_dense_mem(unsigned long addr)
 
 #ifdef __WANT_IO_DEF
 
-#define virt_to_bus	t2_virt_to_bus
-#define bus_to_virt	t2_bus_to_virt
-#define __inb		t2_inb
-#define __inw		t2_inw
-#define __inl		t2_inl
-#define __outb		t2_outb
-#define __outw		t2_outw
-#define __outl		t2_outl
-
-#ifdef CONFIG_ALPHA_SRM_SETUP
-#define __readb		t2_srm_readb
-#define __readw		t2_srm_readw
-#define __readl		t2_srm_readl
-#define __readq		t2_srm_readq
-#define __writeb	t2_srm_writeb
-#define __writew	t2_srm_writew
-#define __writel	t2_srm_writel
-#define __writeq	t2_srm_writeq
-#else
-#define __readb		t2_readb
-#define __readw		t2_readw
-#define __readl		t2_readl
-#define __readq		t2_readq
-#define __writeb	t2_writeb
-#define __writew	t2_writew
-#define __writel	t2_writel
-#define __writeq	t2_writeq
-#endif
-
-#define dense_mem	t2_dense_mem
-
-#define inb(port) \
-(__builtin_constant_p((port))?__inb(port):_inb(port))
-
-#define outb(x, port) \
-(__builtin_constant_p((port))?__outb((x),(port)):_outb((x),(port)))
+#define __inb(p)		t2_inb((unsigned long)(p))
+#define __inw(p)		t2_inw((unsigned long)(p))
+#define __inl(p)		t2_inl((unsigned long)(p))
+#define __outb(x,p)		t2_outb((x),(unsigned long)(p))
+#define __outw(x,p)		t2_outw((x),(unsigned long)(p))
+#define __outl(x,p)		t2_outl((x),(unsigned long)(p))
+#define __readb(a)		t2_readb((unsigned long)(a))
+#define __readw(a)		t2_readw((unsigned long)(a))
+#define __readl(a)		t2_readl((unsigned long)(a))
+#define __readq(a)		t2_readq((unsigned long)(a))
+#define __writeb(x,a)		t2_writeb((x),(unsigned long)(a))
+#define __writew(x,a)		t2_writew((x),(unsigned long)(a))
+#define __writel(x,a)		t2_writel((x),(unsigned long)(a))
+#define __writeq(x,a)		t2_writeq((x),(unsigned long)(a))
+#define __ioremap(a)		t2_ioremap((unsigned long)(a))
+#define __is_ioaddr(a)		t2_is_ioaddr((unsigned long)(a))
 
 #endif /* __WANT_IO_DEF */
 

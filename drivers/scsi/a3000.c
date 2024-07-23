@@ -3,7 +3,9 @@
 #include <linux/blk.h>
 #include <linux/sched.h>
 #include <linux/version.h>
+#include <linux/ioport.h>
 #include <linux/init.h>
+#include <linux/spinlock.h>
 
 #include <asm/setup.h>
 #include <asm/page.h>
@@ -11,7 +13,6 @@
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
 #include <asm/irq.h>
-#include <asm/spinlock.h>
 
 #include "scsi.h"
 #include "hosts.h"
@@ -20,11 +21,6 @@
 
 #include<linux/stat.h>
 
-struct proc_dir_entry proc_scsi_a3000 = {
-    PROC_SCSI_A3000, 5, "A3000",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
-
 #define DMA(ptr) ((a3000_scsiregs *)((ptr)->base))
 #define HDATA(ptr) ((struct WD33C93_hostdata *)((ptr)->hostdata))
 
@@ -32,34 +28,25 @@ static struct Scsi_Host *a3000_host = NULL;
 
 static void a3000_intr (int irq, void *dummy, struct pt_regs *fp)
 {
-    unsigned int status = DMA(a3000_host)->ISTR;
+	unsigned long flags;
+	unsigned int status = DMA(a3000_host)->ISTR;
 
-    if (!(status & ISTR_INT_P))
-	return;
-    if (status & ISTR_INTS)
-    {
-	/* disable PORTS interrupt */
-	custom.intena = IF_PORTS;
-	wd33c93_intr (a3000_host);
-	/* enable PORTS interrupt */
-	custom.intena = IF_SETCLR | IF_PORTS;
-    } else {
-      printk("Non-serviced A3000 SCSI-interrupt? ISTR = %02x\n", status);
-    }
+	if (!(status & ISTR_INT_P))
+		return;
+	if (status & ISTR_INTS)
+	{
+		spin_lock_irqsave(&io_request_lock, flags);
+		wd33c93_intr (a3000_host);
+		spin_unlock_irqrestore(&io_request_lock, flags);
+	} else
+		printk("Non-serviced A3000 SCSI-interrupt? ISTR = %02x\n",
+		       status);
 }
 
-static void do_a3000_intr (int irq, void *dummy, struct pt_regs *fp)
-{
-    unsigned long flags;
-
-    spin_lock_irqsave(&io_request_lock, flags);
-    a3000_intr(irq, dummy, fp);
-    spin_unlock_irqrestore(&io_request_lock, flags);
-}
 static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 {
     unsigned short cntr = CNTR_PDMD | CNTR_INTEN;
-    unsigned long addr = VTOP(cmd->SCp.ptr);
+    unsigned long addr = virt_to_bus(cmd->SCp.ptr);
 
     /*
      * if the physical address has the wrong alignment, or if
@@ -91,7 +78,7 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 			cmd->request_buffer, cmd->request_bufflen);
 	}
 
-	addr = VTOP(HDATA(a3000_host)->dma_bounce_buffer);
+	addr = virt_to_bus(HDATA(a3000_host)->dma_bounce_buffer);
     }
 
     /* setup dma direction */
@@ -114,7 +101,9 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 	cache_push (addr, cmd->SCp.this_residual);
 
     /* start DMA */
+    mb();			/* make sure setup is completed */
     DMA(a3000_host)->ST_DMA = 1;
+    mb();			/* make sure DMA has started before next IO */
 
     /* return success */
     return 0;
@@ -130,12 +119,15 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
 	cntr |= CNTR_DDIR;
 
     DMA(instance)->CNTR = cntr;
+    mb();			/* make sure CNTR is updated before next IO */
 
     /* flush if we were reading */
     if (HDATA(instance)->dma_dir) {
 	DMA(instance)->FLUSH = 1;
+	mb();			/* don't allow prefetch */
 	while (!(DMA(instance)->ISTR & ISTR_FE_FLG))
-	    ;
+	    barrier();
+	mb();			/* no IO until FLUSH is done */
     }
 
     /* clear a possible interrupt */
@@ -146,9 +138,11 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
 
     /* stop DMA */
     DMA(instance)->SP_DMA = 1;
+    mb();			/* make sure DMA is stopped before next IO */
 
     /* restore the CONTROL bits (minus the direction flag) */
     DMA(instance)->CNTR = CNTR_PDMD | CNTR_INTEN;
+    mb();			/* make sure CNTR is updated before next IO */
 
     /* copy from a bounce buffer, if necessary */
     if (status && HDATA(instance)->dma_bounce_buffer) {
@@ -175,7 +169,7 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
     }
 }
 
-__initfunc(int a3000_detect(Scsi_Host_Template *tpnt))
+int __init a3000_detect(Scsi_Host_Template *tpnt)
 {
     static unsigned char called = 0;
 
@@ -184,40 +178,42 @@ __initfunc(int a3000_detect(Scsi_Host_Template *tpnt))
 
     if  (!MACH_IS_AMIGA || !AMIGAHW_PRESENT(A3000_SCSI))
 	return 0;
+    if (!request_mem_region(0xDD0000, 256, "wd33c93"))
+	return -EBUSY;
 
-    tpnt->proc_dir = &proc_scsi_a3000;
+    tpnt->proc_name = "A3000";
     tpnt->proc_info = &wd33c93_proc_info;
 
     a3000_host = scsi_register (tpnt, sizeof(struct WD33C93_hostdata));
-    a3000_host->base = (unsigned char *)ZTWO_VADDR(0xDD0000);
+    if (a3000_host == NULL) {
+	release_mem_region(0xDD0000, 256);
+    	return 0;
+    }
+    a3000_host->base = ZTWO_VADDR(0xDD0000);
     a3000_host->irq = IRQ_AMIGA_PORTS;
     DMA(a3000_host)->DAWR = DAWR_A3000;
     wd33c93_init(a3000_host, (wd33c93_regs *)&(DMA(a3000_host)->SASR),
 		 dma_setup, dma_stop, WD33C93_FS_12_15);
-    request_irq(IRQ_AMIGA_PORTS, do_a3000_intr, 0, "A3000 SCSI", a3000_intr);
+    request_irq(IRQ_AMIGA_PORTS, a3000_intr, SA_SHIRQ, "A3000 SCSI",
+		a3000_intr);
     DMA(a3000_host)->CNTR = CNTR_PDMD | CNTR_INTEN;
     called = 1;
 
     return 1;
 }
 
-#ifdef MODULE
-
 #define HOSTS_C
 
-#include "a3000.h"
-
-Scsi_Host_Template driver_template = A3000_SCSI;
+static Scsi_Host_Template driver_template = _A3000_SCSI;
 
 #include "scsi_module.c"
-
-#endif
 
 int a3000_release(struct Scsi_Host *instance)
 {
 #ifdef MODULE
     wd33c93_release();
     DMA(instance)->CNTR = 0;
+    release_mem_region(0xDD0000, 256);
     free_irq(IRQ_AMIGA_PORTS, a3000_intr);
 #endif
     return 1;

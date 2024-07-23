@@ -1,7 +1,6 @@
 #ifndef __ALPHA_APECS__H__
 #define __ALPHA_APECS__H__
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <asm/compiler.h>
 
@@ -66,27 +65,10 @@
    for most other things they are identical. It didn't seem reasonable to
    make the AVANTI support pay for the limitations of the XL. It is true,
    however, that an XL kernel will run on an AVANTI without problems.
+
+   %%% All of this should be obviated by the ability to route
+   everything through the iommu.
 */
-#define APECS_XL_DMA_WIN1_BASE		(64*1024*1024)
-#define APECS_XL_DMA_WIN1_SIZE		(64*1024*1024)
-#define APECS_XL_DMA_WIN1_SIZE_PARANOID	(48*1024*1024)
-#define APECS_XL_DMA_WIN2_BASE		(1024*1024*1024)
-#define APECS_XL_DMA_WIN2_SIZE		(1024*1024*1024)
-
-
-/* These are for normal APECS family machines, AVANTI/MUSTANG/EB64/PC64.  */
-
-#define APECS_DMA_WIN_BASE_DEFAULT	(1024*1024*1024)
-#define APECS_DMA_WIN_SIZE_DEFAULT	(1024*1024*1024)
-
-#if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM_SETUP)
-#define APECS_DMA_WIN_BASE		alpha_mv.dma_win_base
-#define APECS_DMA_WIN_SIZE		alpha_mv.dma_win_size
-#else
-#define APECS_DMA_WIN_BASE		APECS_DMA_WIN_BASE_DEFAULT
-#define APECS_DMA_WIN_SIZE		APECS_DMA_WIN_SIZE_DEFAULT
-#endif
-
 
 /*
  * 21071-DA Control and Status registers.
@@ -378,64 +360,6 @@ struct el_apecs_procdata
 #endif
 
 /*
- * Translate physical memory address as seen on (PCI) bus into
- * a kernel virtual address and vv.
- */
-
-/*
- * NOTE: we fudge the window 1 maximum as 48Mb instead of 64Mb, to prevent 
- * virt_to_bus() from returning an address in the first window, for a
- * data area that goes beyond the 64Mb first DMA window. Sigh...
- * This MUST match with <asm/dma.h> MAX_DMA_ADDRESS for consistency, but
- * we can't just use that here, because of header file looping... :-(
- */
-
-__EXTERN_INLINE unsigned long apecs_virt_to_bus(void * address)
-{
-	unsigned long paddr = virt_to_phys(address);
-	return paddr + APECS_DMA_WIN_BASE;
-}
-
-static inline unsigned long apecs_xl_virt_to_bus(void * address)
-{
-	unsigned long paddr = virt_to_phys(address);
-	if (paddr < APECS_XL_DMA_WIN1_SIZE_PARANOID)
-	  return paddr + APECS_XL_DMA_WIN1_BASE;
-	else
-	  return paddr + APECS_XL_DMA_WIN2_BASE; /* win 2 xlates to 0 also */
-}
-
-__EXTERN_INLINE void * apecs_bus_to_virt(unsigned long address)
-{
-	/*
-	 * This check is a sanity check but also ensures that bus
-	 * address 0 maps to virtual address 0 which is useful to
-	 * detect null "pointers" (the NCR driver is much simpler if
-	 * NULL pointers are preserved).
-	 */
-	if (address < APECS_DMA_WIN_BASE)
-		return 0;
-	return phys_to_virt(address - APECS_DMA_WIN_BASE);
-}
-
-static inline void * apecs_xl_bus_to_virt(unsigned long address)
-{
-	/*
-	 * This check is a sanity check but also ensures that bus
-	 * address 0 maps to virtual address 0 which is useful to
-	 * detect null "pointers" (the NCR driver is much simpler if
-	 * NULL pointers are preserved).
-	 */
-        if (address < APECS_XL_DMA_WIN1_BASE)
-                return 0;
-        else if (address < (APECS_XL_DMA_WIN1_BASE + APECS_XL_DMA_WIN1_SIZE))
-                address -= APECS_XL_DMA_WIN1_BASE;
-	else /* should be more checking here, maybe? */
-                address -= APECS_XL_DMA_WIN2_BASE;
-	return phys_to_virt(address);
-}
-
-/*
  * I/O functions:
  *
  * Unlike Jensen, the APECS machines have no concept of local
@@ -501,6 +425,7 @@ __EXTERN_INLINE unsigned long apecs_readb(unsigned long addr)
 {
 	unsigned long result, msb;
 
+	addr -= APECS_DENSE_MEM;
 	if (addr >= (1UL << 24)) {
 		msb = addr & 0xf8000000;
 		addr -= msb;
@@ -514,6 +439,7 @@ __EXTERN_INLINE unsigned long apecs_readw(unsigned long addr)
 {
 	unsigned long result, msb;
 
+	addr -= APECS_DENSE_MEM;
 	if (addr >= (1UL << 24)) {
 		msb = addr & 0xf8000000;
 		addr -= msb;
@@ -525,18 +451,19 @@ __EXTERN_INLINE unsigned long apecs_readw(unsigned long addr)
 
 __EXTERN_INLINE unsigned long apecs_readl(unsigned long addr)
 {
-	return *(vuip) (addr + APECS_DENSE_MEM);
+	return *(vuip)addr;
 }
 
 __EXTERN_INLINE unsigned long apecs_readq(unsigned long addr)
 {
-	return *(vulp) (addr + APECS_DENSE_MEM);
+	return *(vulp)addr;
 }
 
 __EXTERN_INLINE void apecs_writeb(unsigned char b, unsigned long addr)
 {
 	unsigned long msb;
 
+	addr -= APECS_DENSE_MEM;
 	if (addr >= (1UL << 24)) {
 		msb = addr & 0xf8000000;
 		addr -= msb;
@@ -549,6 +476,7 @@ __EXTERN_INLINE void apecs_writew(unsigned short b, unsigned long addr)
 {
 	unsigned long msb;
 
+	addr -= APECS_DENSE_MEM;
 	if (addr >= (1UL << 24)) {
 		msb = addr & 0xf8000000;
 		addr -= msb;
@@ -559,19 +487,22 @@ __EXTERN_INLINE void apecs_writew(unsigned short b, unsigned long addr)
 
 __EXTERN_INLINE void apecs_writel(unsigned int b, unsigned long addr)
 {
-	*(vuip) (addr + APECS_DENSE_MEM) = b;
+	*(vuip)addr = b;
 }
 
 __EXTERN_INLINE void apecs_writeq(unsigned long b, unsigned long addr)
 {
-	*(vulp) (addr + APECS_DENSE_MEM) = b;
+	*(vulp)addr = b;
 }
 
-/* Find the DENSE memory area for a given bus address.  */
-
-__EXTERN_INLINE unsigned long apecs_dense_mem(unsigned long addr)
+__EXTERN_INLINE unsigned long apecs_ioremap(unsigned long addr)
 {
-	return APECS_DENSE_MEM;
+	return addr + APECS_DENSE_MEM;
+}
+
+__EXTERN_INLINE int apecs_is_ioaddr(unsigned long addr)
+{
+	return addr >= IDENT_ADDR + 0x180000000UL;
 }
 
 #undef vip
@@ -580,40 +511,27 @@ __EXTERN_INLINE unsigned long apecs_dense_mem(unsigned long addr)
 
 #ifdef __WANT_IO_DEF
 
-#ifdef CONFIG_ALPHA_XL
-#define virt_to_bus	apecs_xl_virt_to_bus
-#define bus_to_virt	apecs_xl_bus_to_virt
-#else
-#define virt_to_bus	apecs_virt_to_bus
-#define bus_to_virt	apecs_bus_to_virt
-#endif
+#define __inb(p)		apecs_inb((unsigned long)(p))
+#define __inw(p)		apecs_inw((unsigned long)(p))
+#define __inl(p)		apecs_inl((unsigned long)(p))
+#define __outb(x,p)		apecs_outb((x),(unsigned long)(p))
+#define __outw(x,p)		apecs_outw((x),(unsigned long)(p))
+#define __outl(x,p)		apecs_outl((x),(unsigned long)(p))
+#define __readb(a)		apecs_readb((unsigned long)(a))
+#define __readw(a)		apecs_readw((unsigned long)(a))
+#define __readl(a)		apecs_readl((unsigned long)(a))
+#define __readq(a)		apecs_readq((unsigned long)(a))
+#define __writeb(x,a)		apecs_writeb((x),(unsigned long)(a))
+#define __writew(x,a)		apecs_writew((x),(unsigned long)(a))
+#define __writel(x,a)		apecs_writel((x),(unsigned long)(a))
+#define __writeq(x,a)		apecs_writeq((x),(unsigned long)(a))
+#define __ioremap(a)		apecs_ioremap((unsigned long)(a))
+#define __is_ioaddr(a)		apecs_is_ioaddr((unsigned long)(a))
 
-#define __inb		apecs_inb
-#define __inw		apecs_inw
-#define __inl		apecs_inl
-#define __outb		apecs_outb
-#define __outw		apecs_outw
-#define __outl		apecs_outl
-#define __readb		apecs_readb
-#define __readw		apecs_readw
-#define __readl		apecs_readl
-#define __readq		apecs_readq
-#define __writeb	apecs_writeb
-#define __writew	apecs_writew
-#define __writel	apecs_writel
-#define __writeq	apecs_writeq
-#define dense_mem	apecs_dense_mem
-
-#define inb(port) \
-(__builtin_constant_p((port))?__inb(port):_inb(port))
-
-#define outb(x, port) \
-(__builtin_constant_p((port))?__outb((x),(port)):_outb((x),(port)))
-
-#define readl(a)	__readl((unsigned long)(a))
-#define readq(a)	__readq((unsigned long)(a))
-#define writel(v,a)	__writel((v),(unsigned long)(a))
-#define writeq(v,a)	__writeq((v),(unsigned long)(a))
+#define __raw_readl(a)		__readl(a)
+#define __raw_readq(a)		__readq(a)
+#define __raw_writel(v,a)	__writel((v),(a))
+#define __raw_writeq(v,a)	__writeq((v),(a))
 
 #endif /* __WANT_IO_DEF */
 

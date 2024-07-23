@@ -69,7 +69,7 @@
 #define MSDOS_DOT    ".          " /* ".", padded to MSDOS_NAME chars */
 #define MSDOS_DOTDOT "..         " /* "..", padded to MSDOS_NAME chars */
 
-#define MSDOS_FAT12 4078 /* maximum number of clusters in a 12 bit FAT */
+#define MSDOS_FAT12 4084 /* maximum number of clusters in a 12 bit FAT */
 
 #define EOF_FAT12 0xFF8		/* standard EOF */
 #define EOF_FAT16 0xFFF8
@@ -196,7 +196,7 @@ extern int fat_is_binary(char conversion,char *extension);
 extern void lock_fat(struct super_block *sb);
 extern void unlock_fat(struct super_block *sb);
 extern int fat_add_cluster(struct inode *inode);
-extern struct buffer_head *fat_add_cluster1(struct inode *inode);
+extern struct buffer_head *fat_extend_dir(struct inode *inode);
 extern int date_dos2unix(__u16 time, __u16 date);
 extern void fat_fs_panic(struct super_block *s,const char *msg);
 extern void fat_lock_creation(void);
@@ -225,7 +225,6 @@ void fat_clusters_flush(struct super_block *sb);
 
 /* fat.c */
 extern int fat_access(struct super_block *sb,int nr,int new_value);
-extern int fat_smap(struct inode *inode,int sector);
 extern int fat_free(struct inode *inode,int skip);
 void fat_cache_inval_inode(struct inode *inode);
 void fat_cache_inval_dev(kdev_t device);
@@ -237,6 +236,7 @@ int fat_get_cluster(struct inode *inode,int cluster);
 /* inode.c */
 extern void fat_hash_init(void);
 extern int fat_bmap(struct inode *inode,int block);
+extern int fat_get_block(struct inode *, long, struct buffer_head *, int);
 extern int fat_notify_change(struct dentry *, struct iattr *);
 extern void fat_clear_inode(struct inode *inode);
 extern void fat_delete_inode(struct inode *inode);
@@ -247,8 +247,8 @@ extern struct inode *fat_iget(struct super_block*,int);
 extern struct inode *fat_build_inode(struct super_block*,struct msdos_dir_entry*,int,int*);
 extern struct super_block *fat_read_super(struct super_block *s, void *data, int silent, struct inode_operations *dir_ops);
 extern void msdos_put_super(struct super_block *sb);
-extern int fat_statfs(struct super_block *sb,struct statfs *buf, int);
-extern void fat_write_inode(struct inode *inode);
+extern int fat_statfs(struct super_block *sb,struct statfs *buf);
+extern void fat_write_inode(struct inode *inode, int);
 
 /* dir.c */
 extern struct file_operations fat_dir_operations;
@@ -261,27 +261,16 @@ extern int fat_dir_ioctl(struct inode * inode, struct file * filp,
 int fat_add_entries(struct inode *dir,int slots, struct buffer_head **bh,
 		  struct msdos_dir_entry **de, int *ino);
 int fat_dir_empty(struct inode *dir);
+int fat_new_dir(struct inode *inode, struct inode *parent, int is_vfat);
 
 /* file.c */
 extern struct inode_operations fat_file_inode_operations;
 extern struct inode_operations fat_file_inode_operations_1024;
 extern struct inode_operations fat_file_inode_operations_readpage;
+extern struct file_operations fat_file_operations;
 extern ssize_t fat_file_read(struct file *, char *, size_t, loff_t *);
 extern ssize_t fat_file_write(struct file *, const char *, size_t, loff_t *);
 extern void fat_truncate(struct inode *inode);
-
-/* mmap.c */
-extern int fat_mmap(struct file *, struct vm_area_struct *);
-extern int fat_readpage(struct file *, struct page *);
-
-
-/* vfat.c */
-extern int init_vfat_fs(void);
-
-
-/* msdosfs_syms.c */
-extern int init_msdos_fs(void);
-extern struct file_system_type msdos_fs_type;
 
 /* msdos.c */
 extern struct super_block *msdos_read_super(struct super_block *sb,void *data, int silent);
@@ -297,7 +286,6 @@ extern int msdos_rename(struct inode *old_dir,struct dentry *old_dentry,
 			struct inode *new_dir,struct dentry *new_dentry);
 
 /* nls.c */
-extern int init_fat_nls(void);
 extern struct fat_nls_table *fat_load_nls(int codepage);
 
 /* tables.c */
@@ -305,7 +293,6 @@ extern unsigned char fat_uni2esc[];
 extern unsigned char fat_esc2uni[];
 
 /* fatfs_syms.c */
-extern int init_fat_fs(void);
 extern void cleanup_fat_fs(void);
 
 /* nls.c */

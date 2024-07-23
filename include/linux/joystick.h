@@ -2,9 +2,11 @@
 #define _LINUX_JOYSTICK_H
 
 /*
- * /usr/include/linux/joystick.h  Version 1.2
+ * $Id: joystick.h,v 1.2 2000/05/29 10:54:53 vojtech Exp $
  *
- * Copyright (C) 1996-1998 Vojtech Pavlik
+ *  Copyright (C) 1996-2000 Vojtech Pavlik
+ *
+ *  Sponsored by SuSE
  */
 
 /*
@@ -23,18 +25,17 @@
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
  * 
  * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
+ * e-mail - mail your message to <vojtech@suse.cz>, or by paper mail:
  * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
  */
 
 #include <asm/types.h>
-#include <linux/module.h>
 
 /*
  * Version
  */
 
-#define JS_VERSION		0x01020d
+#define JS_VERSION		0x020000
 
 /*
  * Types and constants for reading from /dev/js
@@ -117,183 +118,5 @@ struct JS_DATA_SAVE_TYPE {
 	struct JS_DATA_TYPE JS_SAVE;
 	struct JS_DATA_TYPE JS_CORR;
 };
-
-/*
- * Internal definitions
- */
-
-#ifdef __KERNEL__
-
-#define JS_BUFF_SIZE		64		/* output buffer size */
-
-#include <linux/version.h>
-
-#ifndef KERNEL_VERSION
-#define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
-#endif
-
-#ifndef LINUX_VERSION_CODE
-#error "You need to use at least 2.0 Linux kernel."
-#endif
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,0,0)
-#error "You need to use at least 2.0 Linux kernel."
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,0)
-#define JS_HAS_RDTSC (current_cpu_data.x86_capability & 0x10)
-#include <linux/init.h>
-#else
-#ifdef MODULE
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,0,35)
-#define JS_HAS_RDTSC (x86_capability & 0x10)
-#else
-#define JS_HAS_RDTSC 0
-#endif
-#else
-#define JS_HAS_RDTSC (x86_capability & 0x10)
-#endif
-#define __initdata
-#define __init
-#define __cli cli
-#define __save_flags(flags) save_flags(flags)
-#define __restore_flags(flags)	restore_flags(flags)
-#define spin_lock_irqsave(x, flags) do { save_flags(flags); cli(); } while (0)
-#define spin_unlock_irqrestore(x, flags) restore_flags(flags)
-#define spin_lock_init(x) do { } while (0)
-typedef struct { int something; } spinlock_t;
-#define SPIN_LOCK_UNLOCKED { 0 }
-#define MODULE_AUTHOR(x)
-#define MODULE_PARM(x,y)
-#define MODULE_SUPPORTED_DEVICE(x)
-#define signal_pending(x) (((x)->signal) & ~((x)->blocked))
-#endif
-
-/*
- * Parport stuff
- */
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,0)
-#define USE_PARPORT
-#endif
-
-#ifdef USE_PARPORT
-#include <linux/parport.h>
-#define JS_PAR_DATA_IN(y)	parport_read_data(y->port)
-#define JS_PAR_DATA_OUT(x,y)	parport_write_data(y->port, x)
-#define JS_PAR_STATUS(y)	parport_read_status(y->port)
-#define JS_PAR_CTRL_IN(y)	parport_read_control(y->port)
-#define JS_PAR_CTRL_OUT(x,y)	parport_write_control(y->port, x)
-#define JS_PAR_ECTRL_OUT(x,y)	parport_write_econtrol(y->port, x)
-#else
-#define JS_PAR_DATA_IN(y)	inb(y)
-#define JS_PAR_DATA_OUT(x,y)	outb(x,y)
-#define JS_PAR_STATUS(y)	inb(y+1)
-#define JS_PAR_CTRL_IN(y)	inb(y+2)
-#define JS_PAR_CTRL_OUT(x,y)	outb(x,y+2)
-#define JS_PAR_ECTRL_OUT(x,y)	outb(x,y+0x402)
-#endif
-
-#define JS_PAR_STATUS_INVERT	(0x80)
-#define JS_PAR_CTRL_INVERT	(0x04)
-
-/*
- * Internal types
- */
-
-struct js_dev;
-
-typedef int (*js_read_func)(void *info, int **axes, int **buttons);
-typedef unsigned int (*js_time_func)(void);
-typedef int (*js_delta_func)(unsigned int x, unsigned int y);
-typedef int (*js_ops_func)(struct js_dev *dev);
-
-struct js_data {
-	int *axes;
-	int *buttons;
-};
-
-struct js_dev {
-	struct js_dev *next;
-	struct js_list *list;
-	struct js_port *port;
-	wait_queue_head_t wait;
-	struct js_data cur;
-	struct js_data new;
-	struct js_corr *corr;
-	struct js_event buff[JS_BUFF_SIZE];
-	js_ops_func open;
-	js_ops_func close;
-	int ahead;
-	int bhead;
-	int tail;
-	int num_axes;
-	int num_buttons;
-	char *name;
-};
-
-struct js_list {
-	struct js_list *next;
-	struct js_dev *dev;
-	int tail;
-	int startup;
-};
-
-struct js_port {
-	struct js_port *next;
-	struct js_port *prev;
-	js_read_func read;
-	struct js_dev **devs;
-	int **axes;
-	int **buttons;
-	struct js_corr **corr;
-	void *info;
-	int ndevs;
-};
-
-/*
- * Sub-module interface
- */
-
-extern unsigned int js_time_speed;
-extern js_time_func js_get_time;
-extern js_delta_func js_delta;
-
-extern unsigned int js_time_speed_a;
-extern js_time_func js_get_time_a;
-extern js_delta_func js_delta_a;
-
-extern struct js_port *js_register_port(struct js_port *port, void *info,
-	int devs, int infos, js_read_func read);
-extern struct js_port *js_unregister_port(struct js_port *port);
-
-extern int js_register_device(struct js_port *port, int number, int axes,
-	int buttons, char *name, js_ops_func open, js_ops_func close);
-extern void js_unregister_device(struct js_dev *dev);
-
-/*
- * Kernel interface
- */
-
-extern int js_init(void);
-extern int js_am_init(void);
-extern int js_an_init(void);
-extern int js_as_init(void);
-extern int js_console_init(void);
-extern int js_db9_init(void);
-extern int js_gr_init(void);
-extern int js_l4_init(void);
-extern int js_lt_init(void);
-extern int js_sw_init(void);
-extern int js_tm_init(void);
-
-extern void js_am_setup(char *str, int *ints);
-extern void js_an_setup(char *str, int *ints);
-extern void js_as_setup(char *str, int *ints);
-extern void js_console_setup(char *str, int *ints);
-extern void js_db9_setup(char *str, int *ints);
-extern void js_l4_setup(char *str, int *ints);
-
-#endif /* __KERNEL__ */
 
 #endif /* _LINUX_JOYSTICK_H */

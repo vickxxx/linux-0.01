@@ -64,8 +64,6 @@ void rtnl_unlock(void)
 	rtnl_shunlock();
 }
 
-
-
 int rtattr_parse(struct rtattr *tb[], int maxattr, struct rtattr *rta, int len)
 {
 	memset(tb, 0, sizeof(struct rtattr*)*maxattr);
@@ -136,8 +134,29 @@ int rtnetlink_send(struct sk_buff *skb, u32 pid, unsigned group, int echo)
 	return err;
 }
 
-static int rtnetlink_fill_ifinfo(struct sk_buff *skb, struct device *dev,
-				 int type, u32 pid, u32 seq)
+int rtnetlink_put_metrics(struct sk_buff *skb, unsigned *metrics)
+{
+	struct rtattr *mx = (struct rtattr*)skb->tail;
+	int i;
+
+	RTA_PUT(skb, RTA_METRICS, 0, NULL);
+	for (i=0; i<RTAX_MAX; i++) {
+		if (metrics[i])
+			RTA_PUT(skb, i+1, sizeof(unsigned), metrics+i);
+	}
+	mx->rta_len = skb->tail - (u8*)mx;
+	if (mx->rta_len == RTA_LENGTH(0))
+		skb_trim(skb, (u8*)mx - skb->data);
+	return 0;
+
+rtattr_failure:
+	skb_trim(skb, (u8*)mx - skb->data);
+	return -1;
+}
+
+
+static int rtnetlink_fill_ifinfo(struct sk_buff *skb, struct net_device *dev,
+				 int type, u32 pid, u32 seq, u32 change)
 {
 	struct ifinfomsg *r;
 	struct nlmsghdr  *nlh;
@@ -150,7 +169,12 @@ static int rtnetlink_fill_ifinfo(struct sk_buff *skb, struct device *dev,
 	r->ifi_type = dev->type;
 	r->ifi_index = dev->ifindex;
 	r->ifi_flags = dev->flags;
-	r->ifi_change = ~0U;
+	r->ifi_change = change;
+
+	if (!netif_running(dev) || !netif_carrier_ok(dev))
+		r->ifi_flags &= ~IFF_RUNNING;
+	else
+		r->ifi_flags |= IFF_RUNNING;
 
 	RTA_PUT(skb, IFLA_IFNAME, strlen(dev->name)+1, dev->name);
 	if (dev->addr_len) {
@@ -167,6 +191,8 @@ static int rtnetlink_fill_ifinfo(struct sk_buff *skb, struct device *dev,
 		RTA_PUT(skb, IFLA_QDISC,
 			strlen(dev->qdisc_sleeping->ops->id) + 1,
 			dev->qdisc_sleeping->ops->id);
+	if (dev->master)
+		RTA_PUT(skb, IFLA_MASTER, sizeof(int), &dev->master->ifindex);
 	if (dev->get_stats) {
 		struct net_device_stats *stats = dev->get_stats(dev);
 		if (stats)
@@ -185,13 +211,13 @@ int rtnetlink_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	int idx;
 	int s_idx = cb->args[0];
-	struct device *dev;
+	struct net_device *dev;
 
 	read_lock(&dev_base_lock);
 	for (dev=dev_base, idx=0; dev; dev = dev->next, idx++) {
 		if (idx < s_idx)
 			continue;
-		if (rtnetlink_fill_ifinfo(skb, dev, RTM_NEWLINK, NETLINK_CB(cb->skb).pid, cb->nlh->nlmsg_seq) <= 0)
+		if (rtnetlink_fill_ifinfo(skb, dev, RTM_NEWLINK, NETLINK_CB(cb->skb).pid, cb->nlh->nlmsg_seq, 0) <= 0)
 			break;
 	}
 	read_unlock(&dev_base_lock);
@@ -224,7 +250,7 @@ int rtnetlink_dump_all(struct sk_buff *skb, struct netlink_callback *cb)
 	return skb->len;
 }
 
-void rtmsg_ifinfo(int type, struct device *dev)
+void rtmsg_ifinfo(int type, struct net_device *dev, unsigned change)
 {
 	struct sk_buff *skb;
 	int size = NLMSG_GOODSIZE;
@@ -233,7 +259,7 @@ void rtmsg_ifinfo(int type, struct device *dev)
 	if (!skb)
 		return;
 
-	if (rtnetlink_fill_ifinfo(skb, dev, type, 0, 0) < 0) {
+	if (rtnetlink_fill_ifinfo(skb, dev, type, 0, 0, change) < 0) {
 		kfree_skb(skb);
 		return;
 	}
@@ -414,23 +440,25 @@ extern __inline__ int rtnetlink_rcv_skb(struct sk_buff *skb)
 
 static void rtnetlink_rcv(struct sock *sk, int len)
 {
-	struct sk_buff *skb;
+	do {
+		struct sk_buff *skb;
 
-	if (rtnl_shlock_nowait())
-		return;
+		if (rtnl_shlock_nowait())
+			return;
 
-	while ((skb = skb_dequeue(&sk->receive_queue)) != NULL) {
-		if (rtnetlink_rcv_skb(skb)) {
-			if (skb->len)
-				skb_queue_head(&sk->receive_queue, skb);
-			else
-				kfree_skb(skb);
-			break;
+		while ((skb = skb_dequeue(&sk->receive_queue)) != NULL) {
+			if (rtnetlink_rcv_skb(skb)) {
+				if (skb->len)
+					skb_queue_head(&sk->receive_queue, skb);
+				else
+					kfree_skb(skb);
+				break;
+			}
+			kfree_skb(skb);
 		}
-		kfree_skb(skb);
-	}
 
-	rtnl_shunlock();
+		up(&rtnl_sem);
+	} while (rtnl && rtnl->receive_queue.qlen);
 }
 
 static struct rtnetlink_link link_rtnetlink_table[RTM_MAX-RTM_BASE+1] =
@@ -464,13 +492,23 @@ static struct rtnetlink_link link_rtnetlink_table[RTM_MAX-RTM_BASE+1] =
 
 static int rtnetlink_event(struct notifier_block *this, unsigned long event, void *ptr)
 {
-	struct device *dev = ptr;
+	struct net_device *dev = ptr;
 	switch (event) {
 	case NETDEV_UNREGISTER:
-		rtmsg_ifinfo(RTM_DELLINK, dev);
+		rtmsg_ifinfo(RTM_DELLINK, dev, ~0U);
+		break;
+	case NETDEV_REGISTER:
+		rtmsg_ifinfo(RTM_NEWLINK, dev, ~0U);
+		break;
+	case NETDEV_UP:
+	case NETDEV_DOWN:
+		rtmsg_ifinfo(RTM_NEWLINK, dev, IFF_UP|IFF_RUNNING);
+		break;
+	case NETDEV_CHANGE:
+	case NETDEV_GOING_DOWN:
 		break;
 	default:
-		rtmsg_ifinfo(RTM_NEWLINK, dev);
+		rtmsg_ifinfo(RTM_NEWLINK, dev, 0);
 		break;
 	}
 	return NOTIFY_DONE;
@@ -483,7 +521,7 @@ struct notifier_block rtnetlink_dev_notifier = {
 };
 
 
-__initfunc(void rtnetlink_init(void))
+void __init rtnetlink_init(void)
 {
 #ifdef RTNL_DEBUG
 	printk("Initializing RT netlink socket\n");

@@ -19,8 +19,8 @@
 #define _ASM_DMA_H
 
 #include <linux/config.h>
+#include <linux/spinlock.h>
 #include <asm/io.h>
-#include <asm/spinlock.h>
 
 #define dma_outb	outb
 #define dma_inb		inb
@@ -91,6 +91,7 @@
 */
 #define ALPHA_XL_MAX_DMA_ADDRESS	(IDENT_ADDR+0x3000000UL)
 #define ALPHA_RUFFIAN_MAX_DMA_ADDRESS	(IDENT_ADDR+0x1000000UL)
+#define ALPHA_NAUTILUS_MAX_DMA_ADDRESS	(IDENT_ADDR+0x1000000UL)
 #define ALPHA_MAX_DMA_ADDRESS		(~0UL)
 
 #ifdef CONFIG_ALPHA_GENERIC
@@ -100,6 +101,8 @@
 #  define MAX_DMA_ADDRESS		ALPHA_XL_MAX_DMA_ADDRESS
 # elif defined(CONFIG_ALPHA_RUFFIAN)
 #  define MAX_DMA_ADDRESS		ALPHA_RUFFIAN_MAX_DMA_ADDRESS
+# elif defined(CONFIG_ALPHA_NAUTILUS)
+#  define MAX_DMA_ADDRESS		ALPHA_NAUTILUS_MAX_DMA_ADDRESS
 # else
 #  define MAX_DMA_ADDRESS		ALPHA_MAX_DMA_ADDRESS
 # endif
@@ -346,7 +349,7 @@ extern int check_dma(unsigned int dmanr);
 
 /* From PCI */
 
-#ifdef CONFIG_PCI_QUIRKS
+#ifdef CONFIG_PCI
 extern int isa_dma_bridge_buggy;
 #else
 #define isa_dma_bridge_buggy 	(0)

@@ -7,7 +7,7 @@ available from this place and ftp.uni-erlangen.de/linux/680x0/q40/
 and mirrors.
 
 Hints to documentation usually refer to the linux source tree in
-/usr/src/linux unless URL given.
+/usr/src/linux/Documentation unless URL given.
 
 It seems IRQ unmasking can't be safely done on a Q40. Autoprobing is 
 not yet implemented - do not try it! (See below)
@@ -18,8 +18,8 @@ particular device drivers.
 The floppy imposes a very high interrupt load on the CPU, approx 30K/s.
 When something blocks interrupts (HD) it will loose some of them, so far 
 this is not known to have caused any data loss. On hihgly loaded systems
-it can make the floppy very slow. Other Q40 OS' simply poll the floppy
-for this reason - something that can't be done in Linux.
+it can make the floppy very slow or practicaly stop. Other Q40 OS' simply 
+poll the floppy for this reason - something that can't be done in Linux.
 Only possible cure is getting a 82072 contoler with fifo instead of 
 the 8272A
 
@@ -48,7 +48,7 @@ Debugging
 Upon startup the kernel will usually output "ABCQGHIJ" into the SRAM, 
 preceded by the booter signature. This is a trace just in case something 
 went wrong during earliest setup stages. 
-*Changed* to preserve SRAM contents by default, this is only done when 
+**Changed** to preserve SRAM contents by default, this is only done when 
 requested - SRAM must start with '%LX$' signature to do this. '-d' option 
 to 'lxx' loader enables this.
 
@@ -56,8 +56,7 @@ SRAM can also be used as additional console device, use debug=mem.
 This will save kernel startup msgs into SRAM, the screen will display 
 only the penguin - and shell prompt if it gets that far..
 
-Serial console works and can also be used for debugging, provided serial
-initialisation works.
+Serial console works and can also be used for debugging, see loader_txt
 
 Most problems seem to be caused by fawlty or badly configured io-cards or 
 harddrives anyway..there are so many things that can go wrong here.
@@ -82,8 +81,9 @@ The main interrupt register IIRQ_REG will indicate whether an IRQ was internal
 or from some ISA devices, EIRQ_REG can distinguish up to 8 ISA IRQs.
 
 The Q40 custom chip is programmable to provide 2 periodic timers:
-	- 50 or 200 Hz - level 2,  !!THIS CANT BE DISABLED!!
-	- 10 or 20 KHz - level 4 (and possibly 6 - hardware decoding..)
+	- 50 or 200 Hz - level 2,
+	- 10 or 20 KHz - level 4 
+  !!THIS CANT BE DISABLED!!
 
 Linux uses the 200 Hz interrupt for timer and beep by default.
 
@@ -92,12 +92,24 @@ Interrupts
 ==========
 
 q40 master chip handles only level triggered interrupts :-((
-further limitation is no disabling etc. Unless someone finds 
-some ingenious clue this means autoprobing will never work.
-Parallel port interrupts cause most trouble..
 
-IRQ sharing is not yet implemented.
+IRQ sharing is not yet implemented but this should be only a minor
+problem..
 
+Linux has some requirements wrt interrupt architecture, these are
+to my knowledge:
+	(a) interrupt handler must not be reentered even when sti() is called
+	    from within handler
+	(b) working enable/disable_irq
+
+Luckily these requirements are only important for drivers shared
+with other architectures - ide,serial,parallel, ethernet..
+q40ints.c now contains a trivial hack for (a), (b) is more difficult
+because only irq's 4-15 can be disabled - and only all o them at once.
+Thus disable_irq() can effectively block the machine if the driver goes
+asleep.
+One thing to keep in minde when hacking around the interrupt code is 
+that there is no way to find out which IRQ caused a request.
 
 Keyboard
 ========

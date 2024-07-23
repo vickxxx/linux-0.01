@@ -1,6 +1,8 @@
 #ifndef _LINUX_MISCDEVICE_H
 #define _LINUX_MISCDEVICE_H
 
+#include <linux/devfs_fs_kernel.h>
+
 #define BUSMOUSE_MINOR 0
 #define PSMOUSE_MINOR  1
 #define MS_BUSMOUSE_MINOR 2
@@ -10,13 +12,15 @@
 #define SUN_MOUSE_MINOR 6
 #define APOLLO_MOUSE_MINOR 7
 #define PC110PAD_MINOR 9
-#define MAC_MOUSE_MINOR 10
+#define ADB_MOUSE_MINOR 10
 #define WATCHDOG_MINOR		130	/* Watchdog timer     */
 #define TEMP_MINOR		131	/* Temperature Sensor */
 #define RTC_MINOR 135
+#define EFI_RTC_MINOR		136	/* EFI Time services */
 #define SUN_OPENPROM_MINOR 139
 #define NVRAM_MINOR 144
 #define I2O_MINOR 166
+#define MICROCODE_MINOR		184
 #define MISC_DYNAMIC_MINOR 255
 
 #define SGI_GRAPHICS_MINOR   146
@@ -27,6 +31,8 @@
 /* drivers/sgi/char/usema.c */
 #define SGI_USEMACLONE	     151
 
+#define TUN_MINOR	     200
+
 extern int misc_init(void);
 
 struct miscdevice 
@@ -35,6 +41,7 @@ struct miscdevice
 	const char *name;
 	struct file_operations *fops;
 	struct miscdevice * next, * prev;
+	devfs_handle_t devfs_handle;
 };
 
 extern int misc_register(struct miscdevice * misc);

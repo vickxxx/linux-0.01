@@ -22,7 +22,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 /*
  * This is used to ensure we don't load something for the wrong architecture.
  */
-#define elf_check_arch(x) ((x) == EM_ALPHA)
+#define elf_check_arch(x) ((x)->e_machine == EM_ALPHA)
 
 /*
  * These are used to set parameters in the core dumps.
@@ -127,8 +127,7 @@ typedef elf_fpreg_t elf_fpregset_t[ELF_NFPREG];
 
 #ifdef __KERNEL__
 #define SET_PERSONALITY(EX, IBCS2)				\
-	current->personality =					\
-	  ((EX).e_flags & EF_ALPHA_32BIT			\
+	set_personality(((EX).e_flags & EF_ALPHA_32BIT)		\
 	   ? PER_LINUX_32BIT : (IBCS2) ? PER_SVR4 : PER_LINUX)
 #endif
 

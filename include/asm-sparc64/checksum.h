@@ -1,4 +1,4 @@
-/* $Id: checksum.h,v 1.12 1999/05/25 16:53:36 jj Exp $ */
+/* $Id: checksum.h,v 1.16 2000/01/31 01:26:54 davem Exp $ */
 #ifndef __SPARC64_CHECKSUM_H
 #define __SPARC64_CHECKSUM_H
 
@@ -29,7 +29,7 @@
  *
  * it's best to have buff aligned on a 32-bit boundary
  */
-extern unsigned int csum_partial(unsigned char * buff, int len, unsigned int sum);
+extern unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum);
 
 /* the same as csum_partial, but copies from user space while it
  * checksums
@@ -37,12 +37,6 @@ extern unsigned int csum_partial(unsigned char * buff, int len, unsigned int sum
  * here even more important to align src and dst on a 32-bit (or even
  * better 64-bit) boundary
  */
-/* FIXME: Remove these macros ASAP */
-#define csum_partial_copy(src, dst, len, sum) \
-			csum_partial_copy_nocheck(src,dst,len,sum)
-#define csum_partial_copy_fromuser(s, d, l, w)  \
-			csum_partial_copy_from_user((char *) (s), (d), (l), (w), NULL)
-
 extern unsigned int csum_partial_copy_sparc64(const char *src, char *dst, int len, unsigned int sum);
 			
 extern __inline__ unsigned int 
@@ -50,7 +44,7 @@ csum_partial_copy_nocheck (const char *src, char *dst, int len,
 			   unsigned int sum)
 {
 	int ret;
-	unsigned char cur_ds = current->tss.current_ds.seg;
+	unsigned char cur_ds = current->thread.current_ds.seg;
 	__asm__ __volatile__ ("wr %%g0, %0, %%asi" : : "i" (ASI_P));
 	ret = csum_partial_copy_sparc64(src, dst, len, sum);
 	__asm__ __volatile__ ("wr %%g0, %0, %%asi" : : "r" (cur_ds));
@@ -66,15 +60,19 @@ csum_partial_copy_from_user(const char *src, char *dst, int len,
 	return csum_partial_copy_sparc64(src, dst, len, sum);
 }
 
-#if 0
-/* Not implemented, but nobody uses it yet... */
+/* 
+ *	Copy and checksum to user
+ */
+#define HAVE_CSUM_COPY_USER
+extern unsigned int csum_partial_copy_user_sparc64(const char *src, char *dst, int len, unsigned int sum);
 extern __inline__ unsigned int 
-csum_partial_copy_to_user(const char *src, char *dst, int len, 
-			  unsigned int sum, int *err)
+csum_and_copy_to_user(const char *src, char *dst, int len, 
+		      unsigned int sum, int *err)
 {
-	return 0;
+	__asm__ __volatile__ ("stx	%0, [%%sp + 0x7ff + 128]"
+			      : : "r" (err));
+	return csum_partial_copy_user_sparc64(src, dst, len, sum);
 }
-#endif
   
 /* ihl is always 5 or greater, almost always is 5, and iph is word aligned
  * the majority of the time.
@@ -169,7 +167,7 @@ static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
 
 static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 						     struct in6_addr *daddr,
-						     __u16 len,
+						     __u32 len,
 						     unsigned short proto,
 						     unsigned int sum) 
 {
@@ -194,7 +192,7 @@ static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 	addccc		%%g3, %%g7, %0
 	addc		0, %0, %0
 "	: "=&r" (sum)
-	: "r" (saddr), "r" (daddr), "r"(htonl((__u32) (len))),
+	: "r" (saddr), "r" (daddr), "r"(htonl(len)),
 	  "r"(htonl(proto)), "r"(sum)
 	: "g2", "g3", "g7", "cc");
 

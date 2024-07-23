@@ -1,7 +1,9 @@
 #ifndef _ASMPPC_SIGNAL_H
 #define _ASMPPC_SIGNAL_H
 
+#ifdef __KERNEL__
 #include <linux/types.h>
+#endif /* __KERNEL__ */
 
 /* Avoid too many header ordering problems.  */
 struct siginfo;
@@ -54,6 +56,7 @@ typedef struct {
 #define SIGLOST		29
 */
 #define SIGPWR		30
+#define SIGSYS		31
 #define	SIGUNUSED	31
 
 /* These should not be considered constants from userland.  */

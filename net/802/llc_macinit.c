@@ -160,7 +160,7 @@ int register_cl2llc_client(llcptr lp, const char *device, void (*event)(llcptr),
 	char eye_init[] = "LLC\0";
 
 	memset(lp, 0, sizeof(*lp));
-	lp->dev = dev_get(device);
+	lp->dev = __dev_get_by_name(device);
 	if(lp->dev == NULL)
 		return -ENODEV;
 	memcpy(lp->eye, eye_init, sizeof(lp->eye));
@@ -204,24 +204,11 @@ EXPORT_SYMBOL(llc_cancel_timers);
 
 #define ALL_TYPES_8022 0
 
-__initfunc(void llc_init(struct net_proto *proto))
+static int __init llc_init(void)
 {
 	printk(KERN_NOTICE "IEEE 802.2 LLC for Linux 2.1 (c) 1996 Tim Alpaerts\n");
-	return;
-}
-
-#ifdef MODULE
-
-
-int init_module(void)
-{
-	llc_init(NULL);
 	return 0;
 }
 
-void cleanup_module(void)
-{
 
-}
-
-#endif
+module_init(llc_init);

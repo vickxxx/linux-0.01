@@ -27,28 +27,23 @@
 
 #define MAJOR_NR    Z2RAM_MAJOR
 
-#include <linux/config.h>
 #include <linux/major.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/blk.h>
 #include <linux/init.h>
-
-#if defined(MODULE)
 #include <linux/module.h>
-#endif
 
 #include <asm/setup.h>
 #include <asm/bitops.h>
 #include <asm/amigahw.h>
-#ifdef CONFIG_APUS
 #include <asm/pgtable.h>
 #include <asm/io.h>
-#endif
 #include <linux/zorro.h>
 
 
-extern int num_memory;
-extern struct mem_info memory[NUM_MEMINFO];
+extern int m68k_realnum_memory;
+extern struct mem_info m68k_memory[NUM_MEMINFO];
 
 #define TRUE                  (1)
 #define FALSE                 (0)
@@ -74,7 +69,7 @@ static int list_count       = 0;
 static int current_device   = -1;
 
 static void
-do_z2_request( void )
+do_z2_request( request_queue_t * q )
 {
     u_long start, len, addr, size;
 
@@ -150,7 +145,7 @@ get_chipram( void )
     {
 	chip_count++;
 	z2ram_map[ z2ram_size ] =
-	    (u_long)amiga_chip_alloc( Z2RAM_CHUNKSIZE );
+	    (u_long)amiga_chip_alloc( Z2RAM_CHUNKSIZE, "z2ram" );
 
 	if ( z2ram_map[ z2ram_size ] == 0 )
 	{
@@ -171,12 +166,16 @@ z2_open( struct inode *inode, struct file *filp )
 	sizeof( z2ram_map[0] );
     int max_chip_map = ( amiga_chip_size / Z2RAM_CHUNKSIZE ) *
 	sizeof( z2ram_map[0] );
+    int rc = -ENOMEM;
+
+    MOD_INC_USE_COUNT;
 
     device = DEVICE_NR( inode->i_rdev );
 
     if ( current_device != -1 && current_device != device )
     {
-	return -EBUSY;
+	rc = -EBUSY;
+	goto err_out;
     }
 
     if ( current_device == -1 )
@@ -191,20 +190,18 @@ z2_open( struct inode *inode, struct file *filp )
 		int index = device - Z2MINOR_MEMLIST1 + 1;
 		unsigned long size, paddr, vaddr;
 
-		if (index >= num_memory) {
+		if (index >= m68k_realnum_memory) {
 			printk( KERN_ERR DEVICE_NAME
 				": no such entry in z2ram_map\n" );
-			return -ENOMEM;
+		        goto err_out;
 		}
 
-		paddr = memory[index].addr;
-		size = memory[index].size & ~(Z2RAM_CHUNKSIZE-1);
+		paddr = m68k_memory[index].addr;
+		size = m68k_memory[index].size & ~(Z2RAM_CHUNKSIZE-1);
 
 #ifdef __powerpc__
 		/* FIXME: ioremap doesn't build correct memory tables. */
 		{
-			extern void* vmalloc (unsigned long);
-			extern void vfree (void*);
 			vfree(vmalloc (size));
 		}
 
@@ -212,8 +209,7 @@ z2_open( struct inode *inode, struct file *filp )
 						   _PAGE_WRITETHRU);
 
 #else
-		vaddr = kernel_map (paddr, size, KERNELMAP_FULL_CACHING,
-				    NULL);
+		vaddr = (unsigned long)ioremap(paddr, size);
 #endif
 		z2ram_map = 
 			kmalloc((size/Z2RAM_CHUNKSIZE)*sizeof(z2ram_map[0]),
@@ -222,7 +218,7 @@ z2_open( struct inode *inode, struct file *filp )
 		{
 		    printk( KERN_ERR DEVICE_NAME
 			": cannot get mem for z2ram_map\n" );
-		    return -ENOMEM;
+		    goto err_out;
 		}
 
 		while (size) {
@@ -247,7 +243,7 @@ z2_open( struct inode *inode, struct file *filp )
 		{
 		    printk( KERN_ERR DEVICE_NAME
 			": cannot get mem for z2ram_map\n" );
-		    return -ENOMEM;
+		    goto err_out;
 		}
 
 		get_z2ram();
@@ -268,7 +264,7 @@ z2_open( struct inode *inode, struct file *filp )
 		{
 		    printk( KERN_ERR DEVICE_NAME
 			": cannot get mem for z2ram_map\n" );
-		    return -ENOMEM;
+		    goto err_out;
 		}
 
 		get_z2ram();
@@ -286,7 +282,7 @@ z2_open( struct inode *inode, struct file *filp )
 		{
 		    printk( KERN_ERR DEVICE_NAME
 			": cannot get mem for z2ram_map\n" );
-		    return -ENOMEM;
+		    goto err_out;
 		}
 
 		get_chipram();
@@ -299,15 +295,17 @@ z2_open( struct inode *inode, struct file *filp )
 	    break;
 
 	    default:
-		return -ENODEV;
+		rc = -ENODEV;
+		goto err_out;
+	
+	    break;
 	}
 
 	if ( z2ram_size == 0 )
 	{
-	    kfree( z2ram_map );
 	    printk( KERN_NOTICE DEVICE_NAME
 		": no unused ZII/Chip RAM found\n" );
-	    return -ENOMEM;
+	    goto err_out_kfree;
 	}
 
 	current_device = device;
@@ -316,11 +314,13 @@ z2_open( struct inode *inode, struct file *filp )
 	blk_size[ MAJOR_NR ] = z2_sizes;
     }
 
-#if defined(MODULE)
-    MOD_INC_USE_COUNT;
-#endif
-
     return 0;
+
+err_out_kfree:
+    kfree( z2ram_map );
+err_out:
+    MOD_DEC_USE_COUNT;
+    return rc;
 }
 
 static int
@@ -329,35 +329,23 @@ z2_release( struct inode *inode, struct file *filp )
     if ( current_device == -1 )
 	return 0;     
 
-    sync_dev( inode->i_rdev );
+    /*
+     * FIXME: unmap memory
+     */
 
-#if defined(MODULE)
     MOD_DEC_USE_COUNT;
-#endif
 
     return 0;
 }
 
-static struct file_operations z2_fops =
+static struct block_device_operations z2_fops =
 {
-	NULL,                   /* lseek - default */
-	block_read,             /* read - general block-dev read */
-	block_write,            /* write - general block-dev write */
-	NULL,                   /* readdir - bad */
-	NULL,                   /* poll */
-	NULL,                   /* ioctl */
-	NULL,                   /* mmap */
-	z2_open,                /* open */
-	NULL,			/* flush */
-	z2_release,             /* release */
-	block_fsync,            /* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
+	open:		z2_open,
+	release:	z2_release,
 };
 
-__initfunc(int
-z2_init( void ))
+int __init 
+z2_init( void )
 {
 
     if ( !MACH_IS_AMIGA )
@@ -380,7 +368,7 @@ z2_init( void ))
 	    }
     }    
    
-    blk_dev[ MAJOR_NR ].request_fn = DEVICE_REQUEST;
+    blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
     blksize_size[ MAJOR_NR ] = z2_blocksizes;
     blk_size[ MAJOR_NR ] = z2_sizes;
 
@@ -409,6 +397,8 @@ cleanup_module( void )
 
     if ( unregister_blkdev( MAJOR_NR, DEVICE_NAME ) != 0 )
 	printk( KERN_ERR DEVICE_NAME ": unregister of device failed\n");
+
+    blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 
     if ( current_device != -1 )
     {

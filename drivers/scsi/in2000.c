@@ -1845,7 +1845,7 @@ static char setup_buffer[SETUP_BUFFER_SIZE];
 static char setup_used[MAX_SETUP_ARGS];
 static int done_setup = 0;
 
-in2000__INITFUNC( void in2000_setup (char *str, int *ints) )
+void __init in2000_setup (char *str, int *ints)
 {
 int i;
 char *p1,*p2;
@@ -1877,7 +1877,7 @@ char *p1,*p2;
 /* check_setup_args() returns index if key found, 0 if not
  */
 
-in2000__INITFUNC( static int check_setup_args(char *key, int *flags, int *val, char *buf) )
+static int __init check_setup_args(char *key, int *flags, int *val, char *buf)
 {
 int x;
 char *cp;
@@ -1931,7 +1931,7 @@ static const int int_tab[] in2000__INITDATA = {
    };
 
 
-in2000__INITFUNC( int in2000_detect(Scsi_Host_Template * tpnt) )
+int __init in2000_detect(Scsi_Host_Template * tpnt)
 {
 struct Scsi_Host *instance;
 struct IN2000_hostdata *hostdata;
@@ -2023,9 +2023,11 @@ char buf[32];
  * initialize it.
  */
 
-      tpnt->proc_dir = &proc_scsi_in2000; /* done more than once? harmless. */
-      detect_count++;
+      tpnt->proc_name = "in2000";
       instance  = scsi_register(tpnt, sizeof(struct IN2000_hostdata));
+      if(instance == NULL)
+      	continue;
+      detect_count++;
       if (!instance_list)
          instance_list = instance;
       hostdata = (struct IN2000_hostdata *)instance->hostdata;
@@ -2186,13 +2188,6 @@ int size;
       }
     return 0;
 }
-
-
-
-struct proc_dir_entry proc_scsi_in2000 = {
-   PROC_SCSI_IN2000, 6, "in2000",
-   S_IFDIR | S_IRUGO | S_IXUGO, 2
-   };
 
 
 int in2000_proc_info(char *buf, char **start, off_t off, int len, int hn, int in)
@@ -2366,11 +2361,6 @@ static int stop = 0;
 }
 
 
-#ifdef MODULE
-
-Scsi_Host_Template driver_template = IN2000;
-
+static Scsi_Host_Template driver_template = IN2000;
 #include "scsi_module.c"
-
-#endif
 

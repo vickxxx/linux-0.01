@@ -1,5 +1,5 @@
-/* $Id: tei.c,v 2.11 1998/11/15 23:55:24 keil Exp $
-
+/* $Id: tei.c,v 2.17 2000/11/24 17:05:38 kai Exp $
+ *
  * Author       Karsten Keil (keil@isdn4linux.de)
  *              based on the teles driver from Jan den Ouden
  *
@@ -10,69 +10,14 @@
  * Thanks to    Jan den Ouden
  *              Fritz Elfert
  *
- * $Log: tei.c,v $
- * Revision 2.11  1998/11/15 23:55:24  keil
- * changes from 2.0
- *
- * Revision 2.10  1998/05/25 14:08:10  keil
- * HiSax 3.0
- * fixed X.75 and leased line to work again
- * Point2Point and fixed TEI are runtime options now:
- *    hisaxctrl <id> 7 1  set PTP
- *    hisaxctrl <id> 8 <TEIVALUE *2 >
- *    set fixed TEI to TEIVALUE (0-63)
- *
- * Revision 2.9  1998/05/25 12:58:23  keil
- * HiSax golden code from certification, Don't use !!!
- * No leased lines, no X75, but many changes.
- *
- * Revision 2.8  1998/03/07 22:57:07  tsbogend
- * made HiSax working on Linux/Alpha
- *
- * Revision 2.7  1998/02/12 23:08:11  keil
- * change for 2.1.86 (removing FREE_READ/FREE_WRITE from [dev]_kfree_skb()
- *
- * Revision 2.6  1998/02/02 13:41:42  keil
- * fix MDL_ASSIGN for PtP
- *
- * Revision 2.5  1997/11/06 17:09:12  keil
- * New 2.1 init code
- *
- * Revision 2.4  1997/10/29 19:04:46  keil
- * changes for 2.1
- *
- * Revision 2.3  1997/10/01 09:21:43  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 2.2  1997/07/31 19:24:39  keil
- * fixed a warning
- *
- * Revision 2.1  1997/07/31 11:50:16  keil
- * ONE TEI and FIXED TEI handling
- *
- * Revision 2.0  1997/07/27 21:13:30  keil
- * New TEI managment
- *
- * Revision 1.9  1997/06/26 11:18:02  keil
- * New managment
- *
- * Revision 1.8  1997/04/07 22:59:08  keil
- * GFP_KERNEL --> GFP_ATOMIC
- *
- * Revision 1.7  1997/04/06 22:54:03  keil
- * Using SKB's
- *
- * Old log removed/ KKe
- *
  */
 #define __NO_VERSION__
 #include "hisax.h"
 #include "isdnl2.h"
+#include <linux/init.h>
 #include <linux/random.h>
 
-const char *tei_revision = "$Revision: 2.11 $";
+const char *tei_revision = "$Revision: 2.17 $";
 
 #define ID_REQUEST	1
 #define ID_ASSIGNED	2
@@ -84,9 +29,7 @@ const char *tei_revision = "$Revision: 2.11 $";
 
 #define TEI_ENTITY_ID	0xf
 
-static
-struct Fsm teifsm =
-{NULL, 0, 0, NULL, NULL};
+static struct Fsm teifsm;
 
 void tei_handler(struct PStack *st, u_char pr, struct sk_buff *skb);
 
@@ -210,7 +153,7 @@ tei_id_assign(struct FsmInst *fi, int event, void *arg)
 	if (st->ma.debug)
 		st->ma.tei_m.printdebug(&st->ma.tei_m,
 			"identity assign ri %d tei %d", ri, tei);
-	if ((ost = findtei(st, tei))) {		/* same tei is in use */
+	if ((ost = findtei(st, tei))) {	/* same tei is in use */
 		if (ri != ost->ma.ri) {
 			st->ma.tei_m.printdebug(&st->ma.tei_m,
 				"possible duplicate assignment tei %d", tei);
@@ -223,6 +166,27 @@ tei_id_assign(struct FsmInst *fi, int event, void *arg)
 		cs = (struct IsdnCardState *) st->l1.hardware;
 		cs->cardmsg(cs, MDL_ASSIGN | REQUEST, NULL);
 	}
+}
+
+static void
+tei_id_test_dup(struct FsmInst *fi, int event, void *arg)
+{
+	struct PStack *ost, *st = fi->userdata;
+	struct sk_buff *skb = arg;
+	int tei, ri;
+
+	ri = ((unsigned int) skb->data[1] << 8) + skb->data[2];
+	tei = skb->data[4] >> 1;
+	if (st->ma.debug)
+		st->ma.tei_m.printdebug(&st->ma.tei_m,
+			"foreign identity assign ri %d tei %d", ri, tei);
+	if ((ost = findtei(st, tei))) {	/* same tei is in use */
+		if (ri != ost->ma.ri) {	/* and it wasn't our request */
+			st->ma.tei_m.printdebug(&st->ma.tei_m,
+				"possible duplicate assignment tei %d", tei);
+			FsmEvent(&ost->ma.tei_m, EV_VERIFY, NULL);
+		}
+	} 
 }
 
 static void
@@ -353,8 +317,8 @@ tei_l1l2(struct PStack *st, int pr, void *arg)
 		if (skb->len < 3) {
 			st->ma.tei_m.printdebug(&st->ma.tei_m,
 				"short mgr frame %ld/3", skb->len);
-		} else if (((skb->data[0] >> 2) != TEI_SAPI) ||
-			   ((skb->data[1] >> 1) != GROUP_TEI)) {
+		} else if ((skb->data[0] != ((TEI_SAPI << 2) | 2)) ||
+			   (skb->data[1] != ((GROUP_TEI << 1) | 1))) {
 			st->ma.tei_m.printdebug(&st->ma.tei_m,
 				"wrong mgr sapi/tei %x/%x",
 				skb->data[0], skb->data[1]);
@@ -465,9 +429,10 @@ release_tei(struct IsdnCardState *cs)
 	}
 }
 
-static struct FsmNode TeiFnList[] HISAX_INITDATA =
+static struct FsmNode TeiFnList[] __initdata =
 {
 	{ST_TEI_NOP, EV_IDREQ, tei_id_request},
+	{ST_TEI_NOP, EV_ASSIGN, tei_id_test_dup},
 	{ST_TEI_NOP, EV_VERIFY, tei_id_verify},
 	{ST_TEI_NOP, EV_REMOVE, tei_id_remove},
 	{ST_TEI_NOP, EV_CHKREQ, tei_id_chk_req},
@@ -481,8 +446,8 @@ static struct FsmNode TeiFnList[] HISAX_INITDATA =
 
 #define TEI_FN_COUNT (sizeof(TeiFnList)/sizeof(struct FsmNode))
 
-HISAX_INITFUNC(void
-TeiNew(void))
+void __init
+TeiNew(void)
 {
 	teifsm.state_count = TEI_STATE_COUNT;
 	teifsm.event_count = TEI_EVENT_COUNT;

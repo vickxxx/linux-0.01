@@ -25,53 +25,27 @@
 #include <linux/amigaffs.h>
 
 static int affs_readdir(struct file *, void *, filldir_t);
-static ssize_t affs_dir_read(struct file *, char *, size_t, loff_t *);
 
-static struct file_operations affs_dir_operations = {
-	NULL,			/* lseek - default */
-	affs_dir_read,		/* read */
-	NULL,			/* write - bad */
-	affs_readdir,		/* readdir */
-	NULL,			/* poll - default */
-	NULL,			/* ioctl - default */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	file_fsync		/* default fsync */
+struct file_operations affs_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	affs_readdir,
+	fsync:		file_fsync,
 };
 
 /*
  * directories can handle most operations...
  */
 struct inode_operations affs_dir_inode_operations = {
-	&affs_dir_operations,	/* default directory file-ops */
-	affs_create,		/* create */
-	affs_lookup,		/* lookup */
-	affs_link,		/* link */
-	affs_unlink,		/* unlink */
-	affs_symlink,		/* symlink */
-	affs_mkdir,		/* mkdir */
-	affs_rmdir,		/* rmdir */
-	NULL,			/* mknod */
-	affs_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permissions */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+	create:		affs_create,
+	lookup:		affs_lookup,
+	link:		affs_link,
+	unlink:		affs_unlink,
+	symlink:	affs_symlink,
+	mkdir:		affs_mkdir,
+	rmdir:		affs_rmdir,
+	rename:		affs_rename,
+	setattr:	affs_notify_change,
 };
-
-static ssize_t
-affs_dir_read(struct file *filp, char *buf, size_t count, loff_t *ppos)
-{
-	return -EISDIR;
-}
 
 static int
 affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
@@ -98,14 +72,14 @@ affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 
 	if (filp->f_pos == 0) {
 		filp->private_data = (void *)0;
-		if (filldir(dirent,".",1,filp->f_pos,inode->i_ino) < 0) {
+		if (filldir(dirent,".",1,filp->f_pos,inode->i_ino,DT_DIR) < 0) {
 			return 0;
 		}
 		++filp->f_pos;
 		stored++;
 	}
 	if (filp->f_pos == 1) {
-		if (filldir(dirent,"..",2,filp->f_pos,affs_parent_ino(inode)) < 0) {
+		if (filldir(dirent,"..",2,filp->f_pos,affs_parent_ino(inode),DT_DIR) < 0) {
 			return stored;
 		}
 		filp->f_pos = 2;
@@ -137,7 +111,7 @@ affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		 * we can jump directly to where we left off.
 		 */
 		if (filp->private_data && filp->f_version == inode->i_version) {
-			i = (s32)filp->private_data;
+			i = (s32)(unsigned long)filp->private_data;
 			j = 0;
 			pr_debug("AFFS: readdir() left off=%d\n",i);
 		}
@@ -161,9 +135,9 @@ affs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 			pr_debug("AFFS: readdir(): filldir(\"%.*s\",ino=%lu), i=%d\n",
 				 namelen,name,ino,i);
 			filp->private_data = (void *)ino;
-			if (filldir(dirent,name,namelen,filp->f_pos,ino) < 0)
+			if (filldir(dirent,name,namelen,filp->f_pos,ino,DT_UNKNOWN) < 0)
 				goto readdir_done;
-			filp->private_data = (void *)i;
+			filp->private_data = (void *)(unsigned long)i;
 			affs_brelse(fh_bh);
 			fh_bh = NULL;
 			stored++;

@@ -10,6 +10,21 @@
 #include <linux/efs_fs.h>
 #include <linux/efs_fs_sb.h>
 
+extern int efs_get_block(struct inode *, long, struct buffer_head *, int);
+static int efs_readpage(struct file *file, struct page *page)
+{
+	return block_read_full_page(page,efs_get_block);
+}
+static int _efs_bmap(struct address_space *mapping, long block)
+{
+	return generic_block_bmap(mapping,block,efs_get_block);
+}
+struct address_space_operations efs_aops = {
+	readpage: efs_readpage,
+	sync_page: block_sync_page,
+	bmap: _efs_bmap
+};
+
 static inline void extent_copy(efs_extent *src, efs_extent *dst) {
 	/*
 	 * this is slightly evil. it doesn't just copy
@@ -70,8 +85,8 @@ void efs_read_inode(struct inode *inode) {
     
 	inode->i_mode  = be16_to_cpu(efs_inode->di_mode);
 	inode->i_nlink = be16_to_cpu(efs_inode->di_nlink);
-	inode->i_uid   = be16_to_cpu(efs_inode->di_uid);
-	inode->i_gid   = be16_to_cpu(efs_inode->di_gid);
+	inode->i_uid   = (uid_t)be16_to_cpu(efs_inode->di_uid);
+	inode->i_gid   = (gid_t)be16_to_cpu(efs_inode->di_gid);
 	inode->i_size  = be32_to_cpu(efs_inode->di_size);
 	inode->i_atime = be32_to_cpu(efs_inode->di_atime);
 	inode->i_mtime = be32_to_cpu(efs_inode->di_mtime);
@@ -123,24 +138,21 @@ void efs_read_inode(struct inode *inode) {
 	switch (inode->i_mode & S_IFMT) {
 		case S_IFDIR: 
 			inode->i_op = &efs_dir_inode_operations; 
+			inode->i_fop = &efs_dir_operations; 
 			break;
 		case S_IFREG:
-			inode->i_op = &efs_file_inode_operations;
+			inode->i_fop = &generic_ro_fops;
+			inode->i_data.a_ops = &efs_aops;
 			break;
 		case S_IFLNK:
-			inode->i_op = &efs_symlink_inode_operations;
+			inode->i_op = &page_symlink_inode_operations;
+			inode->i_data.a_ops = &efs_symlink_aops;
 			break;
 		case S_IFCHR:
-			inode->i_rdev = device;
-			inode->i_op = &chrdev_inode_operations; 
-			break;
 		case S_IFBLK:
-			inode->i_rdev = device;
-			inode->i_op = &blkdev_inode_operations; 
-			break;
 		case S_IFIFO:
-			init_fifo(inode);
-			break;    
+			init_special_inode(inode, inode->i_mode, device);
+			break;
 		default:
 			printk(KERN_WARNING "EFS: unsupported inode mode %o\n", inode->i_mode);
 			goto read_inode_error;
@@ -151,16 +163,7 @@ void efs_read_inode(struct inode *inode) {
         
 read_inode_error:
 	printk(KERN_WARNING "EFS: failed to read inode %lu\n", inode->i_ino);
-	inode->i_mode = S_IFREG;
-	inode->i_atime = 0;
-	inode->i_ctime = 0;
-	inode->i_mtime = 0;
-	inode->i_nlink = 1;
-	inode->i_size = 0;
-	inode->i_blocks = 0;
-	inode->i_uid = 0;
-	inode->i_gid = 0;
-	inode->i_op = NULL;
+	make_bad_inode(inode);
 
 	return;
 }

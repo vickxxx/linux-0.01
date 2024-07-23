@@ -1,4 +1,4 @@
-/* $Id: sparc-stub.c,v 1.24 1998/02/08 07:58:44 ecd Exp $
+/* $Id: sparc-stub.c,v 1.27 2000/10/03 07:28:49 anton Exp $
  * sparc-stub.c:  KGDB support for the Linux kernel.
  *
  * Modifications to run under Linux
@@ -105,9 +105,9 @@
 #include <asm/oplib.h>
 #include <asm/head.h>
 #include <asm/traps.h>
-#include <asm/system.h>
 #include <asm/vac-ops.h>
 #include <asm/kgdb.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 /*
  *
@@ -123,7 +123,7 @@ extern char getDebugChar(void);   /* read and return a single char */
  */
 #define BUFMAX 2048
 
-static int initialized = 0;	/* !0 means we've been initialized */
+static int initialized;	/* !0 means we've been initialized */
 
 static const char hexchars[]="0123456789abcdef";
 

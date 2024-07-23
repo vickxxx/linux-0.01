@@ -10,6 +10,7 @@
 #ifndef SUNRPC_SVC_H
 #define SUNRPC_SVC_H
 
+#include <linux/in.h>
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/xdr.h>
 #include <linux/sunrpc/svcauth.h>
@@ -29,6 +30,7 @@ struct svc_serv {
 	struct svc_sock *	sv_sockets;	/* pending sockets */
 	struct svc_program *	sv_program;	/* RPC program */
 	struct svc_stat *	sv_stats;	/* RPC statistics */
+	spinlock_t		sv_lock;
 	unsigned int		sv_nrthreads;	/* # of server threads */
 	unsigned int		sv_bufsz;	/* datagram buffer size */
 	unsigned int		sv_xdrsize;	/* XDR buffer size */

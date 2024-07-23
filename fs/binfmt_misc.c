@@ -27,8 +27,9 @@
 #include <linux/proc_fs.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
+#include <linux/file.h>
+#include <linux/spinlock.h>
 #include <asm/uaccess.h>
-#include <asm/spinlock.h>
 
 /*
  * We should make this work with a "stub-only" /proc,
@@ -64,16 +65,12 @@ static void entry_proc_cleanup(struct binfmt_entry *e);
 static int entry_proc_setup(struct binfmt_entry *e);
 
 static struct linux_binfmt misc_format = {
-#ifndef MODULE
-	NULL, 0, load_misc_binary, NULL, NULL
-#else
-	NULL, &__this_module, load_misc_binary, NULL, NULL
-#endif
+	NULL, THIS_MODULE, load_misc_binary, NULL, NULL, 0
 };
 
-static struct proc_dir_entry *bm_dir = NULL;
+static struct proc_dir_entry *bm_dir;
 
-static struct binfmt_entry *entries = NULL;
+static struct binfmt_entry *entries;
 static int free_id = 1;
 static int enabled = 1;
 
@@ -184,12 +181,11 @@ static struct binfmt_entry *check_file(struct linux_binprm *bprm)
 static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 {
 	struct binfmt_entry *fmt;
-	struct dentry * dentry;
-	char iname[128];
+	struct file * file;
+	char iname[BINPRM_BUF_SIZE];
 	char *iname_addr = iname;
 	int retval;
 
-	MOD_INC_USE_COUNT;
 	retval = -ENOEXEC;
 	if (!enabled)
 		goto _ret;
@@ -198,15 +194,16 @@ static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	read_lock(&entries_lock);
 	fmt = check_file(bprm);
 	if (fmt) {
-		strncpy(iname, fmt->interpreter, 127);
-		iname[127] = '\0';
+		strncpy(iname, fmt->interpreter, BINPRM_BUF_SIZE - 1);
+		iname[BINPRM_BUF_SIZE - 1] = '\0';
 	}
 	read_unlock(&entries_lock);
 	if (!fmt)
 		goto _ret;
 
-	dput(bprm->dentry);
-	bprm->dentry = NULL;
+	allow_write_access(bprm->file);
+	fput(bprm->file);
+	bprm->file = NULL;
 
 	/* Build args for interpreter */
 	remove_arg_zero(bprm);
@@ -218,17 +215,16 @@ static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	bprm->argc++;
 	bprm->filename = iname;	/* for binfmt_script */
 
-	dentry = open_namei(iname, 0, 0);
-	retval = PTR_ERR(dentry);
-	if (IS_ERR(dentry))
+	file = open_exec(iname);
+	retval = PTR_ERR(file);
+	if (IS_ERR(file))
 		goto _ret;
-	bprm->dentry = dentry;
+	bprm->file = file;
 
 	retval = prepare_binprm(bprm);
 	if (retval >= 0)
 		retval = search_binary_handler(bprm, regs);
 _ret:
-	MOD_DEC_USE_COUNT;
 	return retval;
 }
 
@@ -328,7 +324,7 @@ static int proc_write_register(struct file *file, const char *buffer,
 
 	/* more sanity checks */
 	if (err || !(!cnt || (!(--cnt) && (*sp == '\n'))) ||
-	    (e->size < 1) || ((e->size + e->offset) > 127) ||
+	    (e->size < 1) || ((e->size + e->offset) > (BINPRM_BUF_SIZE - 1)) ||
 	    !(e->proc_name) || !(e->interpreter) || entry_proc_setup(e))
 		goto free_err;
 
@@ -475,35 +471,15 @@ static int entry_proc_setup(struct binfmt_entry *e)
 	return 0;
 }
 
-#ifdef MODULE
-/*
- * This is called as the fill_inode function when an inode
- * is going into (fill = 1) or out of service (fill = 0).
- * We use it here to manage the module use counts.
- *
- * Note: only the top-level directory needs to do this; if
- * a lower level is referenced, the parent will be as well.
- */
-static void bm_modcount(struct inode *inode, int fill)
-{
-	if (fill)
-		MOD_INC_USE_COUNT;
-	else
-		MOD_DEC_USE_COUNT;
-}
-#endif
-
-int __init init_misc_binfmt(void)
+static int __init init_misc_binfmt(void)
 {
 	int error = -ENOENT;
 	struct proc_dir_entry *status = NULL, *reg;
 
-	bm_dir = create_proc_entry("sys/fs/binfmt_misc", S_IFDIR, NULL);
+	bm_dir = proc_mkdir("sys/fs/binfmt_misc", NULL); /* WTF??? */
 	if (!bm_dir)
 		goto out;
-#ifdef MODULE
-	bm_dir->fill_inode = bm_modcount;
-#endif
+	bm_dir->owner = THIS_MODULE;
 
 	status = create_proc_entry("status", S_IFREG | S_IRUGO | S_IWUSR,
 					bm_dir);
@@ -528,14 +504,7 @@ cleanup_bm:
 	goto out;
 }
 
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-int init_module(void)
-{
-	return init_misc_binfmt();
-}
-
-void cleanup_module(void)
+static void __exit exit_misc_binfmt(void)
 {
 	unregister_binfmt(&misc_format);
 	remove_proc_entry("register", bm_dir);
@@ -543,5 +512,8 @@ void cleanup_module(void)
 	clear_entries();
 	remove_proc_entry("sys/fs/binfmt_misc", NULL);
 }
-#endif
-#undef VERBOSE_STATUS
+
+EXPORT_NO_SYMBOLS;
+
+module_init(init_misc_binfmt);
+module_exit(exit_misc_binfmt);

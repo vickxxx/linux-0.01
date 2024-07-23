@@ -17,6 +17,7 @@
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/system.h>
+#include <asm/fpu.h>
 
 #include "proto.h"
 
@@ -57,12 +58,6 @@ enum {
  *  |	        		     | v
  *  +================================+
  */
-#define PT_REG(reg)	(PAGE_SIZE*2 - sizeof(struct pt_regs)		\
-			 + (long)&((struct pt_regs *)0)->reg)
-
-#define SW_REG(reg)	(PAGE_SIZE*2 - sizeof(struct pt_regs)		\
-			 - sizeof(struct switch_stack)			\
-			 + (long)&((struct switch_stack *)0)->reg)
 
 /* 
  * The following table maps a register index into the stack offset at
@@ -106,7 +101,7 @@ get_reg_addr(struct task_struct * task, unsigned long regno)
 	long *addr;
 
 	if (regno == 30) {
-		addr = &task->tss.usp;
+		addr = &task->thread.usp;
 	} else if (regno == 31 || regno > 64) {
 		zero = 0;
 		addr = &zero;
@@ -119,258 +114,46 @@ get_reg_addr(struct task_struct * task, unsigned long regno)
 /*
  * Get contents of register REGNO in task TASK.
  */
-static inline long
+static long
 get_reg(struct task_struct * task, unsigned long regno)
 {
+	/* Special hack for fpcr -- combine hardware and software bits.  */
+	if (regno == 63) {
+		unsigned long fpcr = *get_reg_addr(task, regno);
+		unsigned long swcr = task->thread.flags & IEEE_SW_MASK;
+		swcr = swcr_update_status(swcr, fpcr);
+		return fpcr | swcr;
+	}
 	return *get_reg_addr(task, regno);
 }
 
 /*
  * Write contents of register REGNO in task TASK.
  */
-static inline int
+static int
 put_reg(struct task_struct *task, unsigned long regno, long data)
 {
+	if (regno == 63) {
+		task->thread.flags = ((task->thread.flags & ~IEEE_SW_MASK)
+				      | (data & IEEE_SW_MASK));
+		data = (data & FPCR_DYN_MASK) | ieee_swcr_to_fpcr(data);
+	}
 	*get_reg_addr(task, regno) = data;
 	return 0;
 }
 
-/*
- * This routine gets a long from any process space by following the page
- * tables. NOTE! You should check that the long isn't on a page boundary,
- * and that it is in the task area before calling this: this routine does
- * no checking.
- */
-static unsigned long
-get_long(struct task_struct * tsk, struct vm_area_struct * vma,
-	 unsigned long addr)
+static inline int
+read_int(struct task_struct *task, unsigned long addr, int * data)
 {
-	pgd_t * pgdir;
-	pmd_t * pgmiddle;
-	pte_t * pgtable;
-	unsigned long page;
-
-	DBG(DBG_MEM_ALL, ("getting long at 0x%lx\n", addr));
- repeat:
-	pgdir = pgd_offset(vma->vm_mm, addr);
-	if (pgd_none(*pgdir)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	if (pgd_bad(*pgdir)) {
-		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
-		pgd_clear(pgdir);
-		return 0;
-	}
-	pgmiddle = pmd_offset(pgdir, addr);
-	if (pmd_none(*pgmiddle)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	if (pmd_bad(*pgmiddle)) {
-		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
-		pmd_clear(pgmiddle);
-		return 0;
-	}
-	pgtable = pte_offset(pgmiddle, addr);
-	if (!pte_present(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 0);
-		goto repeat;
-	}
-	page = pte_page(*pgtable);
-	/* this is a hack for non-kernel-mapped video buffers and similar */
-	if (MAP_NR(page) >= max_mapnr)
-		return 0;
-	page += addr & ~PAGE_MASK;
-	return *(unsigned long *) page;
+	int copied = access_process_vm(task, addr, data, sizeof(int), 0);
+	return (copied == sizeof(int)) ? 0 : -EIO;
 }
 
-/*
- * This routine puts a long into any process space by following the page
- * tables. NOTE! You should check that the long isn't on a page boundary,
- * and that it is in the task area before calling this: this routine does
- * no checking.
- *
- * Now keeps R/W state of page so that a text page stays readonly
- * even if a debugger scribbles breakpoints into it.  -M.U-
- */
-static void
-put_long(struct task_struct * tsk, struct vm_area_struct * vma,
-	 unsigned long addr, unsigned long data)
+static inline int
+write_int(struct task_struct *task, unsigned long addr, int data)
 {
-	pgd_t *pgdir;
-	pmd_t *pgmiddle;
-	pte_t *pgtable;
-	unsigned long page;
-
- repeat:
-	pgdir = pgd_offset(vma->vm_mm, addr);
-	if (!pgd_present(*pgdir)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	if (pgd_bad(*pgdir)) {
-		printk("ptrace: bad page directory %08lx\n", pgd_val(*pgdir));
-		pgd_clear(pgdir);
-		return;
-	}
-	pgmiddle = pmd_offset(pgdir, addr);
-	if (pmd_none(*pgmiddle)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	if (pmd_bad(*pgmiddle)) {
-		printk("ptrace: bad page middle %08lx\n", pmd_val(*pgmiddle));
-		pmd_clear(pgmiddle);
-		return;
-	}
-	pgtable = pte_offset(pgmiddle, addr);
-	if (!pte_present(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-	page = pte_page(*pgtable);
-	if (!pte_write(*pgtable)) {
-		handle_mm_fault(tsk, vma, addr, 1);
-		goto repeat;
-	}
-
-	/* This is a hack for non-kernel-mapped video buffers and similar.  */
-	if (MAP_NR(page) < max_mapnr)
-		*(unsigned long *) (page + (addr & ~PAGE_MASK)) = data;
-
-	/* We're bypassing pagetables, so we have to set the dirty bit
-	   ourselves.  This should also re-instate whatever read-only
-	   mode there was before.  */
-	set_pte(pgtable, pte_mkdirty(mk_pte(page, vma->vm_page_prot)));
-	flush_tlb();
-}
-
-/*
- * This routine checks the page boundaries, and that the offset is
- * within the task area. It then calls get_long() to read a long.
- */
-static int
-read_long(struct task_struct * tsk, unsigned long addr, unsigned long * result)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, addr);
-
-	DBG(DBG_MEM_ALL, ("in read_long\n"));
-	if (!vma)
-		return -EIO;
-	if ((addr & ~PAGE_MASK) > (PAGE_SIZE - sizeof(long))) {
-		struct vm_area_struct * vma_high = vma;
-		unsigned long low, align;
-
-		if (addr + sizeof(long) >= vma->vm_end) {
-			vma_high = vma->vm_next;
-			if (!vma_high || vma_high->vm_start != vma->vm_end)
-				return -EIO;
-		}
-		align = addr & (sizeof(long) - 1);
-		addr -= align;
-		low = get_long(tsk, vma, addr);
-		if (align) {
-			unsigned long high;
-
-			high = get_long(tsk, vma_high, addr + sizeof(long));
-			low >>= align * 8;
-			low  |= high << (64 - align * 8);
-		}
-		*result = low;
-	} else {
-	        long l = get_long(tsk, vma, addr);
-
-		DBG(DBG_MEM_ALL, ("value is 0x%lx\n", l));
-		*result = l;
-	}
-	return 0;
-}
-
-/*
- * This routine checks the page boundaries, and that the offset is
- * within the task area. It then calls put_long() to write a long.
- */
-static int
-write_long(struct task_struct * tsk, unsigned long addr, unsigned long data)
-{
-	struct vm_area_struct * vma = find_extend_vma(tsk, addr);
-
-	if (!vma)
-		return -EIO;
-	if ((addr & ~PAGE_MASK) > PAGE_SIZE-sizeof(long)) {
-		unsigned long low, high, align;
-		struct vm_area_struct * vma_high = vma;
-
-		if (addr + sizeof(long) >= vma->vm_end) {
-			vma_high = vma->vm_next;
-			if (!vma_high || vma_high->vm_start != vma->vm_end)
-				return -EIO;
-		}
-		align = addr & (sizeof(long) - 1);
-		addr -= align;
-		low  = get_long(tsk, vma, addr);
-		high = get_long(tsk, vma_high, addr + sizeof(long));
-		low  &= ~0UL >> (64 - align * 8);
-		high &= ~0UL << (align * 8);
-		low  |= data << (align * 8);
-		high |= data >> (64 - align * 8);
-		put_long(tsk, vma, addr, low);
-		put_long(tsk, vma_high, addr + sizeof(long), high);
-	} else
-		put_long(tsk, vma, addr, data);
-	return 0;
-}
-
-/*
- * Read a 32bit int from address space TSK.
- */
-static int
-read_int(struct task_struct * tsk, unsigned long addr, unsigned int *data)
-{
-	unsigned long l, align;
-	int res;
-
-	align = addr & 0x7;
-	addr &= ~0x7;
-
-	res = read_long(tsk, addr, &l);
-	if (res < 0)
-		return res;
-
-	if (align == 0) {
-		*data = l;
-	} else {
-		*data = l >> 32;
-	}
-	return 0;
-}
-
-/*
- * Write a 32bit word to address space TSK.
- *
- * For simplicity, do a read-modify-write of the 64bit word that
- * contains the 32bit word that we are about to write.
- */
-static int
-write_int(struct task_struct * tsk, unsigned long addr, unsigned int data)
-{
-	unsigned long l, align;
-	int res;
-
-	align = addr & 0x7;
-	addr &= ~0x7;
-
-	res = read_long(tsk, addr, &l);
-	if (res < 0)
-		return res;
-
-	if (align == 0) {
-		l = (l & 0xffffffff00000000UL) | ((unsigned long) data <<  0);
-	} else {
-		l = (l & 0x00000000ffffffffUL) | ((unsigned long) data << 32);
-	}
-	return write_long(tsk, addr, l);
+	int copied = access_process_vm(task, addr, &data, sizeof(int), 1);
+	return (copied == sizeof(int)) ? 0 : -EIO;
 }
 
 /*
@@ -399,31 +182,31 @@ ptrace_set_bpt(struct task_struct * child)
 		 * branch (emulation can be tricky for fp branches).
 		 */
 		displ = ((s32)(insn << 11)) >> 9;
-		child->tss.bpt_addr[nsaved++] = pc + 4;
+		child->thread.bpt_addr[nsaved++] = pc + 4;
 		if (displ)		/* guard against unoptimized code */
-			child->tss.bpt_addr[nsaved++] = pc + 4 + displ;
+			child->thread.bpt_addr[nsaved++] = pc + 4 + displ;
 		DBG(DBG_BPT, ("execing branch\n"));
 	} else if (op_code == 0x1a) {
 		reg_b = (insn >> 16) & 0x1f;
-		child->tss.bpt_addr[nsaved++] = get_reg(child, reg_b);
+		child->thread.bpt_addr[nsaved++] = get_reg(child, reg_b);
 		DBG(DBG_BPT, ("execing jump\n"));
 	} else {
-		child->tss.bpt_addr[nsaved++] = pc + 4;
+		child->thread.bpt_addr[nsaved++] = pc + 4;
 		DBG(DBG_BPT, ("execing normal insn\n"));
 	}
 
 	/* install breakpoints: */
 	for (i = 0; i < nsaved; ++i) {
-		res = read_int(child, child->tss.bpt_addr[i], &insn);
+		res = read_int(child, child->thread.bpt_addr[i], &insn);
 		if (res < 0)
 			return res;
-		child->tss.bpt_insn[i] = insn;
-		DBG(DBG_BPT, ("    -> next_pc=%lx\n", child->tss.bpt_addr[i]));
-		res = write_int(child, child->tss.bpt_addr[i], BREAKINST);
+		child->thread.bpt_insn[i] = insn;
+		DBG(DBG_BPT, ("    -> next_pc=%lx\n", child->thread.bpt_addr[i]));
+		res = write_int(child, child->thread.bpt_addr[i], BREAKINST);
 		if (res < 0)
 			return res;
 	}
-	child->tss.bpt_nsaved = nsaved;
+	child->thread.bpt_nsaved = nsaved;
 	return 0;
 }
 
@@ -434,9 +217,9 @@ ptrace_set_bpt(struct task_struct * child)
 int
 ptrace_cancel_bpt(struct task_struct * child)
 {
-	int i, nsaved = child->tss.bpt_nsaved;
+	int i, nsaved = child->thread.bpt_nsaved;
 
-	child->tss.bpt_nsaved = 0;
+	child->thread.bpt_nsaved = 0;
 
 	if (nsaved > 2) {
 		printk("ptrace_cancel_bpt: bogus nsaved: %d!\n", nsaved);
@@ -444,8 +227,8 @@ ptrace_cancel_bpt(struct task_struct * child)
 	}
 
 	for (i = 0; i < nsaved; ++i) {
-		write_int(child, child->tss.bpt_addr[i],
-			  child->tss.bpt_insn[i]);
+		write_int(child, child->thread.bpt_addr[i],
+			  child->thread.bpt_insn[i]);
 	}
 	return (nsaved != 0);
 }
@@ -455,7 +238,6 @@ sys_ptrace(long request, long pid, long addr, long data,
 	   int a4, int a5, struct pt_regs regs)
 {
 	struct task_struct *child;
-	unsigned long tmp;
 	long ret;
 
 	lock_kernel();
@@ -464,18 +246,23 @@ sys_ptrace(long request, long pid, long addr, long data,
 	ret = -EPERM;
 	if (request == PTRACE_TRACEME) {
 		/* are we already being traced? */
-		if (current->flags & PF_PTRACED)
-			goto out;
-		/* set the ptrace bit in the process flags. */
-		current->flags |= PF_PTRACED;
+		if (current->ptrace & PT_PTRACED)
+			goto out_notsk;
+		/* set the ptrace bit in the process ptrace flags. */
+		current->ptrace |= PT_PTRACED;
 		ret = 0;
-		goto out;
+		goto out_notsk;
 	}
 	if (pid == 1)		/* you may not mess with init */
-		goto out;
+		goto out_notsk;
 	ret = -ESRCH;
-	if (!(child = find_task_by_pid(pid)))
-		goto out;
+	read_lock(&tasklist_lock);
+	child = find_task_by_pid(pid);
+	if (child)
+		get_task_struct(child);
+	read_unlock(&tasklist_lock);
+	if (!child)
+		goto out_notsk;
 	if (request == PTRACE_ATTACH) {
 		ret = -EPERM;
 		if (child == current)
@@ -491,20 +278,22 @@ sys_ptrace(long request, long pid, long addr, long data,
 		    && !capable(CAP_SYS_PTRACE))
 			goto out;
 		/* the same process cannot be attached many times */
-		if (child->flags & PF_PTRACED)
+		if (child->ptrace & PT_PTRACED)
 			goto out;
-		child->flags |= PF_PTRACED;
+		child->ptrace |= PT_PTRACED;
+		write_lock_irq(&tasklist_lock);
 		if (child->p_pptr != current) {
 			REMOVE_LINKS(child);
 			child->p_pptr = current;
 			SET_LINKS(child);
 		}
+		write_unlock_irq(&tasklist_lock);
 		send_sig(SIGSTOP, child, 1);
 		ret = 0;
 		goto out;
 	}
 	ret = -ESRCH;
-	if (!(child->flags & PF_PTRACED)) {
+	if (!(child->ptrace & PT_PTRACED)) {
 		DBG(DBG_MEM, ("child not traced\n"));
 		goto out;
 	}
@@ -521,16 +310,17 @@ sys_ptrace(long request, long pid, long addr, long data,
 	switch (request) {
 	/* When I and D space are separate, these will need to be fixed.  */
 	case PTRACE_PEEKTEXT: /* read word at location addr. */
-	case PTRACE_PEEKDATA:
-		down(&child->mm->mmap_sem);
-		ret = read_long(child, addr, &tmp);
-		up(&child->mm->mmap_sem);
-		DBG(DBG_MEM, ("peek %#lx->%#lx\n", addr, tmp));
-		if (ret < 0)
+	case PTRACE_PEEKDATA: {
+		unsigned long tmp;
+		int copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
+		ret = -EIO;
+		if (copied != sizeof(tmp))
 			goto out;
+		
 		regs.r0 = 0;	/* special return: no errors */
 		ret = tmp;
 		goto out;
+	}
 
 	/* Read register number ADDR. */
 	case PTRACE_PEEKUSR:
@@ -541,12 +331,12 @@ sys_ptrace(long request, long pid, long addr, long data,
 
 	/* When I and D space are separate, this will have to be fixed.  */
 	case PTRACE_POKETEXT: /* write the word at location addr. */
-	case PTRACE_POKEDATA:
-		DBG(DBG_MEM, ("poke %#lx<-%#lx\n", addr, data));
-		down(&child->mm->mmap_sem);
-		ret = write_long(child, addr, data);
-		up(&child->mm->mmap_sem);
+	case PTRACE_POKEDATA: {
+		unsigned long tmp = data;
+		int copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 1);
+		ret = (copied == sizeof(tmp)) ? 0 : -EIO;
 		goto out;
+	}
 
 	case PTRACE_POKEUSR: /* write the specified register */
 		DBG(DBG_MEM, ("poke $%ld<-%#lx\n", addr, data));
@@ -560,9 +350,9 @@ sys_ptrace(long request, long pid, long addr, long data,
 		if ((unsigned long) data > _NSIG)
 			goto out;
 		if (request == PTRACE_SYSCALL)
-			child->flags |= PF_TRACESYS;
+			child->ptrace |= PT_TRACESYS;
 		else
-			child->flags &= ~PF_TRACESYS;
+			child->ptrace &= ~PT_TRACESYS;
 		child->exit_code = data;
 		wake_up_process(child);
 		/* make sure single-step breakpoint is gone. */
@@ -589,8 +379,8 @@ sys_ptrace(long request, long pid, long addr, long data,
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
 			goto out;
-		child->tss.bpt_nsaved = -1;	/* mark single-stepping */
-		child->flags &= ~PF_TRACESYS;
+		child->thread.bpt_nsaved = -1;	/* mark single-stepping */
+		child->ptrace &= ~PT_TRACESYS;
 		wake_up_process(child);
 		child->exit_code = data;
 		/* give it a chance to run. */
@@ -601,12 +391,14 @@ sys_ptrace(long request, long pid, long addr, long data,
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
 			goto out;
-		child->flags &= ~(PF_PTRACED|PF_TRACESYS);
+		child->ptrace &= ~(PT_PTRACED|PT_TRACESYS);
 		wake_up_process(child);
 		child->exit_code = data;
+		write_lock_irq(&tasklist_lock);
 		REMOVE_LINKS(child);
 		child->p_pptr = child->p_opptr;
 		SET_LINKS(child);
+		write_unlock_irq(&tasklist_lock);
 		/* make sure single-step breakpoint is gone. */
 		ptrace_cancel_bpt(child);
 		ret = 0;
@@ -617,6 +409,8 @@ sys_ptrace(long request, long pid, long addr, long data,
 		goto out;
 	}
  out:
+	free_task_struct(child);
+ out_notsk:
 	unlock_kernel();
 	return ret;
 }
@@ -624,8 +418,8 @@ sys_ptrace(long request, long pid, long addr, long data,
 asmlinkage void
 syscall_trace(void)
 {
-	if ((current->flags & (PF_PTRACED|PF_TRACESYS))
-	    != (PF_PTRACED|PF_TRACESYS))
+	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
+	    != (PT_PTRACED|PT_TRACESYS))
 		return;
 	current->exit_code = SIGTRAP;
 	current->state = TASK_STOPPED;

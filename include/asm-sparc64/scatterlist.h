@@ -1,4 +1,4 @@
-/* $Id: scatterlist.h,v 1.6 1998/12/16 04:33:57 davem Exp $ */
+/* $Id: scatterlist.h,v 1.9 1999/12/17 12:32:15 jj Exp $ */
 #ifndef _SPARC64_SCATTERLIST_H
 #define _SPARC64_SCATTERLIST_H
 
@@ -11,9 +11,12 @@ struct scatterlist {
     unsigned int length;
 
     __u32 dvma_address; /* A place to hang host-specific addresses at. */
+    __u32 dvma_length;
 };
 
-extern unsigned long phys_base;
-#define ISA_DMA_THRESHOLD (phys_base + (0xfe000000UL) + PAGE_OFFSET)
+#define sg_dma_address(sg) ((sg)->dvma_address)
+#define sg_dma_len(sg)     ((sg)->dvma_length)
+
+#define ISA_DMA_THRESHOLD	(~0UL)
 
 #endif /* !(_SPARC64_SCATTERLIST_H) */

@@ -20,21 +20,34 @@
  * Note: we hold the dentry use count while the file is open.
  */
 static u32
-nlm_fopen(struct svc_rqst *rqstp, struct knfs_fh *f, struct file *filp)
+nlm_fopen(struct svc_rqst *rqstp, struct nfs_fh *f, struct file *filp)
 {
 	u32		nfserr;
 	struct svc_fh	fh;
 
-	/* must initialize before using! */
-	fh_init(&fh);
-	fh.fh_handle = *f;
+	/* must initialize before using! but maxsize doesn't matter */
+	fh_init(&fh,0);
+	fh.fh_handle.fh_size = f->size;
+	memcpy((char*)&fh.fh_handle.fh_base, f->data, f->size);
 	fh.fh_export = NULL;
 
-	nfserr = nfsd_open(rqstp, &fh, S_IFREG, 0, filp);
+	nfserr = nfsd_open(rqstp, &fh, S_IFREG, MAY_LOCK, filp);
 	if (!nfserr)
 		dget(filp->f_dentry);
 	fh_put(&fh);
-	return nfserr;
+ 	/* nlm and nfsd don't share error codes.
+	 * we invent: 0 = no error
+	 *            1 = stale file handle
+	 *	      2 = other error
+	 */
+	switch (nfserr) {
+	case nfs_ok:
+		return 0;
+	case nfserr_stale:
+		return 1;
+	default:
+		return 2;
+	}
 }
 
 static void

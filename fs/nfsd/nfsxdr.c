@@ -17,10 +17,6 @@
 
 #define NFSDDBG_FACILITY		NFSDDBG_XDR
 
-u32	nfs_ok, nfserr_perm, nfserr_noent, nfserr_io, nfserr_nxio,
-	nfserr_inval, nfserr_acces, nfserr_exist, nfserr_nodev, nfserr_notdir,
-	nfserr_isdir, nfserr_fbig, nfserr_nospc, nfserr_rofs,
-	nfserr_nametoolong, nfserr_dquot, nfserr_stale;
 
 #ifdef NFSD_OPTIMIZE_SPACE
 # define inline
@@ -36,37 +32,6 @@ static u32	nfs_ftypes[] = {
 	NFSOCK, NFBAD,  NFLNK, NFBAD,
 };
 
-/*
- * Initialization of NFS status variables
- */
-void
-nfsd_xdr_init(void)
-{
-	static int	inited = 0;
-
-	if (inited)
-		return;
-
-	nfs_ok		= htonl(NFS_OK);
-	nfserr_perm	= htonl(NFSERR_PERM);
-	nfserr_noent	= htonl(NFSERR_NOENT);
-	nfserr_io	= htonl(NFSERR_IO);
-	nfserr_inval	= htonl(NFSERR_INVAL);
-	nfserr_nxio = htonl(NFSERR_NXIO);
-	nfserr_acces = htonl(NFSERR_ACCES);
-	nfserr_exist = htonl(NFSERR_EXIST);
-	nfserr_nodev = htonl(NFSERR_NODEV);
-	nfserr_notdir = htonl(NFSERR_NOTDIR);
-	nfserr_isdir = htonl(NFSERR_ISDIR);
-	nfserr_fbig = htonl(NFSERR_FBIG);
-	nfserr_nospc = htonl(NFSERR_NOSPC);
-	nfserr_rofs = htonl(NFSERR_ROFS);
-	nfserr_nametoolong = htonl(NFSERR_NAMETOOLONG);
-	nfserr_dquot = htonl(NFSERR_DQUOT);
-	nfserr_stale = htonl(NFSERR_STALE);
-
-	inited = 1;
-}
 
 /*
  * XDR functions for basic NFS types
@@ -74,19 +39,20 @@ nfsd_xdr_init(void)
 static inline u32 *
 decode_fh(u32 *p, struct svc_fh *fhp)
 {
-	fh_init(fhp);
-	memcpy(&fhp->fh_handle, p, sizeof(struct knfs_fh));
+	fh_init(fhp, NFS_FHSIZE);
+	memcpy(&fhp->fh_handle.fh_base, p, NFS_FHSIZE);
+	fhp->fh_handle.fh_size = NFS_FHSIZE;
 
 	/* FIXME: Look up export pointer here and verify
 	 * Sun Secure RPC if requested */
-	return p + (sizeof(struct knfs_fh) >> 2);
+	return p + (NFS_FHSIZE >> 2);
 }
 
 static inline u32 *
 encode_fh(u32 *p, struct svc_fh *fhp)
 {
-	memcpy(p, &fhp->fh_handle, sizeof(struct knfs_fh));
-	return p + (sizeof(struct knfs_fh) >> 2);
+	memcpy(p, &fhp->fh_handle.fh_base, NFS_FHSIZE);
+	return p + (NFS_FHSIZE>> 2);
 }
 
 /*
@@ -189,7 +155,7 @@ encode_fattr(struct svc_rqst *rqstp, u32 *p, struct inode *inode)
 	*p++ = htonl((u32) inode->i_ino);
 	*p++ = htonl((u32) inode->i_atime);
 	*p++ = 0;
-	*p++ = htonl((u32) inode->i_mtime);
+	*p++ = htonl((u32) lease_get_mtime(inode));
 	*p++ = 0;
 	*p++ = htonl((u32) inode->i_ctime);
 	*p++ = 0;
@@ -424,7 +390,7 @@ nfssvc_encode_statfsres(struct svc_rqst *rqstp, u32 *p,
 
 int
 nfssvc_encode_entry(struct readdir_cd *cd, const char *name,
-					int namlen, off_t offset, ino_t ino)
+		    int namlen, off_t offset, ino_t ino, unsigned int d_type)
 {
 	u32	*p = cd->buffer;
 	int	buflen, slen;
@@ -446,11 +412,9 @@ nfssvc_encode_entry(struct readdir_cd *cd, const char *name,
 		cd->eob = 1;
 		return -EINVAL;
 	}
-	*p++ = xdr_one;			/* mark entry present */
-	*p++ = htonl((u32) ino);	/* file id */
-	*p++ = htonl((u32) namlen);	/* name length & name */
-	memcpy(p, name, namlen);
-	p += slen;
+	*p++ = xdr_one;				/* mark entry present */
+	*p++ = htonl((u32) ino);		/* file id */
+	p    = xdr_encode_array(p, name, namlen);/* name length & name */
 	cd->offset = p;			/* remember pointer */
 	*p++ = ~(u32) 0;		/* offset of next entry */
 

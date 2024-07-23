@@ -1,20 +1,32 @@
 /*
  * align.c - handle alignment exceptions for the Power PC.
  *
- * Paul Mackerras	August 1996.
- * Copyright (C) 1996 Paul Mackerras	(paulus@cs.anu.edu.au).
+ * Copyright (c) 1996 Paul Mackerras <paulus@cs.anu.edu.au>
+ * Copyright (c) 1998-1999 TiVo, Inc.
+ *   PowerPC 403GCX modifications.
+ * Copyright (c) 1999 Grant Erickson <grant@lcse.umn.edu>
+ *   PowerPC 403GCX/405GP modifications.
  */
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
+#include <asm/cache.h>
 
 struct aligninfo {
 	unsigned char len;
 	unsigned char flags;
 };
+
+#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
+#define	OPCD(inst)	(((inst) & 0xFC000000) >> 26)
+#define	RS(inst)	(((inst) & 0x03E00000) >> 21)
+#define	RA(inst)	(((inst) & 0x001F0000) >> 16)
+#define	IS_DFORM(code)	((code) >= 32 && (code) <= 47)
+#endif
 
 #define INVALID	{ 0, 0 }
 
@@ -26,6 +38,8 @@ struct aligninfo {
 #define M	0x20	/* multiple load/store */
 #define S	0x40	/* single-precision fp, or byte-swap value */
 #define HARD	0x80	/* string, stwcx. */
+
+#define DCBZ	0x5f	/* 8xx/82xx dcbz faults when cache not enabled */
 
 /*
  * The PowerPC stores certain bits of the instruction that caused the
@@ -170,6 +184,9 @@ int
 fix_alignment(struct pt_regs *regs)
 {
 	int instr, nb, flags;
+#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
+	int opcode, f1, f2, f3;
+#endif
 	int i, t;
 	int reg, areg;
 	unsigned char *addr;
@@ -180,13 +197,62 @@ fix_alignment(struct pt_regs *regs)
 		unsigned char v[8];
 	} data;
 
-	instr = (regs->dsisr >> 10) & 0x7f;
-	nb = aligninfo[instr].len;
-	if (nb == 0)
-		return 0;	/* too hard or invalid instruction bits */
-	flags = aligninfo[instr].flags;
-	addr = (unsigned char *) regs->dar;
+#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
+	/* The 4xx-family processors have no DSISR register,
+	 * so we emulate it.
+	 * The POWER4 has a DSISR register but doesn't set it on
+	 * an alignment fault.  -- paulus
+	 */
+
+	instr = *((unsigned int *)regs->nip);
+	opcode = OPCD(instr);
+	reg = RS(instr);
+	areg = RA(instr);
+
+	if (IS_DFORM(opcode)) {
+		f1 = 0;
+		f2 = (instr & 0x04000000) >> 26;
+		f3 = (instr & 0x78000000) >> 27;
+	} else {
+		f1 = (instr & 0x00000006) >> 1;
+		f2 = (instr & 0x00000040) >> 6;
+		f3 = (instr & 0x00000780) >> 7;
+	}
+
+	instr = ((f1 << 5) | (f2 << 4) | f3);
+#else
 	reg = (regs->dsisr >> 5) & 0x1f;	/* source/dest register */
+	areg = regs->dsisr & 0x1f;		/* register to update */
+	instr = (regs->dsisr >> 10) & 0x7f;
+#endif
+
+	nb = aligninfo[instr].len;
+	if (nb == 0) {
+		long *p;
+		int i;
+
+		if (instr != DCBZ)
+			return 0;	/* too hard or invalid instruction */
+		/*
+		 * The dcbz (data cache block zero) instruction
+		 * gives an alignment fault if used on non-cacheable
+		 * memory.  We handle the fault mainly for the
+		 * case when we are running with the cache disabled
+		 * for debugging.
+		 */
+		p = (long *) (regs->dar & -L1_CACHE_BYTES);
+		for (i = 0; i < L1_CACHE_BYTES / sizeof(long); ++i)
+			p[i] = 0;
+		return 1;
+	}
+
+	flags = aligninfo[instr].flags;
+
+	/* For the 4xx-family processors, the 'dar' field of the
+	 * pt_regs structure is overloaded and is really from the DEAR.
+	 */
+
+	addr = (unsigned char *)regs->dar;
 
 	/* Verify the address of the operand */
 	if (user_mode(regs)) {
@@ -243,10 +309,10 @@ fix_alignment(struct pt_regs *regs)
 		}
 		break;
 	case LD+F:
-		current->tss.fpr[reg] = data.d;
+		current->thread.fpr[reg] = data.d;
 		break;
 	case ST+F:
-		data.d = current->tss.fpr[reg];
+		data.d = current->thread.fpr[reg];
 		break;
 	/* these require some floating point conversions... */
 	/* we'd like to use the assignment, but we have to compile
@@ -254,13 +320,13 @@ fix_alignment(struct pt_regs *regs)
 	 * fp regs for copying 8-byte objects. */
 	case LD+F+S:
 		enable_kernel_fp();
-		cvt_fd(&data.f, &current->tss.fpr[reg], &current->tss.fpscr);
-		/* current->tss.fpr[reg] = data.f; */
+		cvt_fd(&data.f, &current->thread.fpr[reg], &current->thread.fpscr);
+		/* current->thread.fpr[reg] = data.f; */
 		break;
 	case ST+F+S:
 		enable_kernel_fp();
-		cvt_df(&current->tss.fpr[reg], &data.f, &current->tss.fpscr);
-		/* data.f = current->tss.fpr[reg]; */
+		cvt_df(&current->thread.fpr[reg], &data.f, &current->thread.fpscr);
+		/* data.f = current->thread.fpr[reg]; */
 		break;
 	default:
 		printk("align: can't handle flags=%x\n", flags);
@@ -280,7 +346,6 @@ fix_alignment(struct pt_regs *regs)
 	}
 
 	if (flags & U) {
-		areg = regs->dsisr & 0x1f;	/* register to update */
 		regs->gpr[areg] = regs->dar;
 	}
 

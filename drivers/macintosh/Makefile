@@ -9,42 +9,45 @@
 # parent makes..
 #
 
-SUB_DIRS     := 
-MOD_SUB_DIRS := $(SUB_DIRS)
+# The target object and module list name.
 
-L_TARGET := macintosh.a
-M_OBJS   :=
+O_TARGET	:= macintosh.o
 
-ifndef CONFIG_MBX
-L_OBJS   := via-cuda.o macio-adb.o via-pmu.o mediabay.o
-endif
-ifeq ($(CONFIG_MAC_KEYBOARD),y)
-LX_OBJS  := adb.o
-endif
+# Objects that export symbols.
 
-ifeq ($(CONFIG_MAC_SERIAL),y)
-  L_OBJS += macserial.o
-else
-  ifeq ($(CONFIG_MAC_SERIAL),m)
-    M_OBJS += macserial.o
-  endif
-endif
+export-objs	:= adb.o rtc.o mac_hid.o
 
-ifeq ($(CONFIG_NVRAM),y)
-  L_OBJS += nvram.o
-else
-  ifeq ($(CONFIG_NVRAM),m)
-    M_OBJS += nvram.o
-  endif
+# Object file lists.
+
+obj-y	:=
+obj-m	:=
+obj-n	:=
+obj-	:=
+
+# Each configuration option enables a list of files.
+
+ifeq ($(CONFIG_PMAC_PBOOK),y)
+	obj-y			+= mediabay.o
 endif
 
-ifdef CONFIG_MAC_KEYBOARD
-L_OBJS += mac_keyb.o
-endif
+obj-$(CONFIG_MAC_SERIAL)	+= macserial.o
+obj-$(CONFIG_NVRAM)		+= nvram.o
+obj-$(CONFIG_MAC_HID)		+= mac_hid.o
+obj-$(CONFIG_INPUT_ADBHID)	+= adbhid.o
+obj-$(CONFIG_PPC_RTC)		+= rtc.o
+
+obj-$(CONFIG_ADB_PMU)		+= via-pmu.o
+obj-$(CONFIG_ADB_CUDA)		+= via-cuda.o
+
+obj-$(CONFIG_ADB)		+= adb.o
+obj-$(CONFIG_ADB_KEYBOARD)	+= mac_keyb.o
+obj-$(CONFIG_ADB_MACII)		+= via-macii.o
+obj-$(CONFIG_ADB_MACIISI)	+= via-maciisi.o
+obj-$(CONFIG_ADB_IOP)		+= adb-iop.o
+obj-$(CONFIG_ADB_PMU68K)	+= via-pmu68k.o
+obj-$(CONFIG_ADB_MACIO)		+= macio-adb.o
+
+# The global Rules.make.
 
 include $(TOPDIR)/Rules.make
 
-# Integrated in mac_keyb.c
-# mackeymap.map is retained for historical reasons
-#mackeymap.c: mackeymap.map
-#	loadkeys --mktable mackeymap.map > mackeymap.c

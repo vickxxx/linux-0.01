@@ -1,112 +1,64 @@
 #
 # Makefile for the joystick drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now inherited from the
-# parent makes..
-#
 
-O_TARGET := js.o
-O_OBJS   :=
-M_OBJS   :=
+O_TARGET	:= js.o
 
-ifeq ($(CONFIG_JOYSTICK),y)
-O_OBJS += joystick.o
-else
-  ifeq ($(CONFIG_JOYSTICK),m)
-  M_OBJS += joystick.o
-  endif
+# Objects that export symbols.
+
+export-objs	:= serio.o gameport.o
+
+# I-Force may need both USB and RS-232
+
+ifeq ($(CONFIG_INPUT_IFORCE_232),m)
+	ifeq ($(CONFIG_INPUT_IFORCE_USB),y)
+		CONFIG_INPUT_IFORCE_USB := m
+	endif
+endif
+ifeq ($(CONFIG_INPUT_IFORCE_USB),m)
+	ifeq ($(CONFIG_INPUT_IFORCE_232),y)
+		CONFIG_INPUT_IFORCE_232 := m
+	endif
 endif
 
-ifeq ($(CONFIG_JOY_AMIGA),y)
-O_OBJS += joy-amiga.o
-else
-  ifeq ($(CONFIG_JOY_AMIGA),m)
-  M_OBJS += joy-amiga.o
-  endif
-endif
+# Object file lists.
 
-ifeq ($(CONFIG_JOY_ANALOG),y)
-O_OBJS += joy-analog.o
-else
-  ifeq ($(CONFIG_JOY_ANALOG),m)
-  M_OBJS += joy-analog.o
-  endif
-endif
+obj-y	:=
+obj-m	:=
+obj-n	:=
+obj-	:=
 
-ifeq ($(CONFIG_JOY_ASSASIN),y)
-O_OBJS += joy-assasin.o
-else
-  ifeq ($(CONFIG_JOY_ASSASIN),m)
-  M_OBJS += joy-assasin.o
-  endif
-endif
+# Each configuration option enables a list of files.
 
-ifeq ($(CONFIG_JOY_CONSOLE),y)
-O_OBJS += joy-console.o
-else
-  ifeq ($(CONFIG_JOY_CONSOLE),m)
-  M_OBJS += joy-console.o
-  endif
-endif
+obj-$(CONFIG_INPUT_SERPORT)	+= serport.o serio.o
 
-ifeq ($(CONFIG_JOY_DB9),y)
-O_OBJS += joy-db9.o
-else
-  ifeq ($(CONFIG_JOY_DB9),m)
-  M_OBJS += joy-db9.o
-  endif
-endif
+obj-$(CONFIG_INPUT_NS558)	+= ns558.o gameport.o
+obj-$(CONFIG_INPUT_LIGHTNING)	+= lightning.o gameport.o
+obj-$(CONFIG_INPUT_PCIGAME)	+= pcigame.o gameport.o
 
-ifeq ($(CONFIG_JOY_GRAVIS),y)
-O_OBJS += joy-gravis.o
-else
-  ifeq ($(CONFIG_JOY_GRAVIS),m)
-  M_OBJS += joy-gravis.o
-  endif
-endif
+obj-$(CONFIG_INPUT_WARRIOR)	+= warrior.o serio.o
+obj-$(CONFIG_INPUT_MAGELLAN)	+= magellan.o serio.o
+obj-$(CONFIG_INPUT_SPACEORB)	+= spaceorb.o serio.o
+obj-$(CONFIG_INPUT_SPACEBALL)	+= spaceball.o serio.o
+obj-$(CONFIG_INPUT_IFORCE_232)	+= iforce.o serio.o
+obj-$(CONFIG_INPUT_IFORCE_USB)	+= iforce.o
 
-ifeq ($(CONFIG_JOY_LIGHTNING),y)
-O_OBJS += joy-lightning.o
-else
-  ifeq ($(CONFIG_JOY_LIGHTNING),m)
-  M_OBJS += joy-lightning.o
-  endif
-endif
+obj-$(CONFIG_INPUT_ANALOG)	+= analog.o gameport.o
+obj-$(CONFIG_INPUT_A3D)		+= a3d.o gameport.o
+obj-$(CONFIG_INPUT_ADI)		+= adi.o gameport.o
+obj-$(CONFIG_INPUT_COBRA)	+= cobra.o gameport.o
+obj-$(CONFIG_INPUT_GF2K)	+= gf2k.o gameport.o
+obj-$(CONFIG_INPUT_GRIP)	+= grip.o gameport.o
+obj-$(CONFIG_INPUT_INTERACT)	+= interact.o gameport.o
+obj-$(CONFIG_INPUT_TMDC)	+= tmdc.o gameport.o
+obj-$(CONFIG_INPUT_SIDEWINDER)	+= sidewinder.o gameport.o
 
-ifeq ($(CONFIG_JOY_LOGITECH),y)
-O_OBJS += joy-logitech.o
-else
-  ifeq ($(CONFIG_JOY_LOGITECH),m)
-  M_OBJS += joy-logitech.o
-  endif
-endif
+obj-$(CONFIG_INPUT_DB9)		+= db9.o
+obj-$(CONFIG_INPUT_GAMECON)	+= gamecon.o
+obj-$(CONFIG_INPUT_TURBOGRAFX)	+= turbografx.o
 
-ifeq ($(CONFIG_JOY_SIDEWINDER),y)
-O_OBJS += joy-sidewinder.o
-else
-  ifeq ($(CONFIG_JOY_SIDEWINDER),m)
-  M_OBJS += joy-sidewinder.o
-  endif
-endif
+obj-$(CONFIG_INPUT_AMIJOY)	+= amijoy.o
 
-ifeq ($(CONFIG_JOY_THRUSTMASTER),y)
-O_OBJS += joy-thrustmaster.o
-else 
-  ifeq ($(CONFIG_JOY_THRUSTMASTER),m)
-  M_OBJS += joy-thrustmaster.o
-  endif
-endif
-
-ifeq ($(CONFIG_JOY_TURBOGRAFX),y)
-O_OBJS += joy-turbografx.o
-else 
-  ifeq ($(CONFIG_JOY_TURBOGRAFX),m)
-  M_OBJS += joy-turbografx.o
-  endif
-endif
+# The global Rules.make.
 
 include $(TOPDIR)/Rules.make

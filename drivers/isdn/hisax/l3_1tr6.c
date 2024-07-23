@@ -1,5 +1,5 @@
-/* $Id: l3_1tr6.c,v 2.8 1998/11/15 23:55:08 keil Exp $
-
+/* $Id: l3_1tr6.c,v 2.13 2000/11/19 17:02:48 kai Exp $
+ *
  *  German 1TR6 D-channel protocol
  *
  * Author       Karsten Keil (keil@isdn4linux.de)
@@ -7,45 +7,6 @@
  *		This file is (c) under GNU PUBLIC LICENSE
  *		For changes and modifications please read
  *		../../../Documentation/isdn/HiSax.cert
- *
- *
- * $Log: l3_1tr6.c,v $
- * Revision 2.8  1998/11/15 23:55:08  keil
- * changes from 2.0
- *
- * Revision 2.7  1998/08/13 23:36:45  keil
- * HiSax 3.1 - don't work stable with current LinkLevel
- *
- * Revision 2.6  1998/05/25 14:10:18  keil
- * HiSax 3.0
- * X.75 and leased are working again.
- *
- * Revision 2.5  1998/05/25 12:58:14  keil
- * HiSax golden code from certification, Don't use !!!
- * No leased lines, no X75, but many changes.
- *
- * Revision 2.4  1998/02/12 23:07:57  keil
- * change for 2.1.86 (removing FREE_READ/FREE_WRITE from [dev]_kfree_skb()
- *
- * Revision 2.3  1997/11/06 17:12:24  keil
- * KERN_NOTICE --> KERN_INFO
- *
- * Revision 2.2  1997/10/29 19:03:00  keil
- * changes for 2.1
- *
- * Revision 2.1  1997/08/03 15:28:09  keil
- * release L3 empty processes
- *
- * Revision 2.0  1997/07/27 21:15:45  keil
- * New Callref based layer3
- *
- * Revision 1.12  1997/06/26 11:11:45  keil
- * SET_SKBFREE now on creation of a SKB
- *
- * Revision 1.11  1997/04/06 22:54:18  keil
- * Using SKB's
- *
- * Old Log removed /KKe
  *
  */
 
@@ -56,7 +17,7 @@
 #include <linux/ctype.h>
 
 extern char *HiSax_getrev(const char *revision);
-const char *l3_1tr6_revision = "$Revision: 2.8 $";
+const char *l3_1tr6_revision = "$Revision: 2.13 $";
 
 #define MsgHead(ptr, cref, mty, dis) \
 	*ptr++ = dis; \
@@ -407,7 +368,7 @@ l3_1tr6_rel(struct l3_process *pc, u_char pr, void *arg)
 			pc->para.loc = 0;
 		}
 	} else {
-		pc->para.cause = -1;
+		pc->para.cause = NO_CAUSE;
 		l3_1tr6_error(pc, "missing REL cause", skb);
 		return;
 	}
@@ -427,7 +388,7 @@ l3_1tr6_rel_ack(struct l3_process *pc, u_char pr, void *arg)
 	dev_kfree_skb(skb);
 	StopAllL3Timer(pc);
 	newl3state(pc, 0);
-	pc->para.cause = -1;
+	pc->para.cause = NO_CAUSE;
 	pc->st->l3.l3l4(pc->st, CC_RELEASE | CONFIRM, pc);
 	release_l3_process(pc);
 }
@@ -475,7 +436,7 @@ l3_1tr6_disc(struct l3_process *pc, u_char pr, void *arg)
 	} else {
 		if (pc->st->l3.debug & L3_DEB_WARN)
 			l3_debug(pc->st, "cause not found");
-		pc->para.cause = -1;
+		pc->para.cause = NO_CAUSE;
 	}
 	if (!findie(skb->data, skb->len, WE6_date, 6)) {
 		l3_1tr6_error(pc, "missing connack date", skb);
@@ -567,6 +528,9 @@ l3_1tr6_disconnect_req(struct l3_process *pc, u_char pr, void *arg)
 		case 0x10:
 			clen = 0;
 			break;
+                case 0x11:
+                        cause = CAUSE_UserBusy;
+                        break;
 		case 0x15:
 			cause = CAUSE_CallRejected;
 			break;
@@ -620,7 +584,7 @@ l3_1tr6_t305(struct l3_process *pc, u_char pr, void *arg)
 	u_char clen = 1;
 
 	L3DelTimer(&pc->timer);
-	if (pc->para.cause > 0)
+	if (pc->para.cause != NO_CAUSE)
 		cause = pc->para.cause;
 	/* Map DSS1 causes */
 	switch (cause & 0x7f) {
@@ -679,6 +643,25 @@ l3_1tr6_t308_2(struct l3_process *pc, u_char pr, void *arg)
 	pc->st->l3.l3l4(pc->st, CC_RELEASE_ERR, pc);
 	release_l3_process(pc);
 }
+
+static void
+l3_1tr6_dl_reset(struct l3_process *pc, u_char pr, void *arg)
+{
+        pc->para.cause = CAUSE_LocalProcErr;
+        l3_1tr6_disconnect_req(pc, pr, NULL);
+        pc->st->l3.l3l4(pc->st, CC_SETUP_ERR, pc);
+}
+
+static void
+l3_1tr6_dl_release(struct l3_process *pc, u_char pr, void *arg)
+{
+        newl3state(pc, 0);
+        pc->para.cause = 0x1b;          /* Destination out of order */
+        pc->para.loc = 0;
+        pc->st->l3.l3l4(pc->st, CC_RELEASE | INDICATION, pc);
+        release_l3_process(pc);
+}
+
 /* *INDENT-OFF* */
 static struct stateentry downstl[] =
 {
@@ -689,8 +672,6 @@ static struct stateentry downstl[] =
     	 CC_DISCONNECT | REQUEST, l3_1tr6_disconnect_req},
 	{SBIT(12),
 	 CC_RELEASE | REQUEST, l3_1tr6_release_req},
-	{ALL_STATES,
-	 CC_DLRL | REQUEST, l3_1tr6_reset},
 	{SBIT(6),
 	 CC_IGNORE | REQUEST, l3_1tr6_reset},
 	{SBIT(6),
@@ -751,10 +732,21 @@ static struct stateentry datastln1[] =
 	{SBIT(19),
 	 MT_N1_REL_ACK, l3_1tr6_rel_ack}
 };
-/* *INDENT-ON* */
 
 #define DATASTLN1_LEN \
 	(sizeof(datastln1) / sizeof(struct stateentry))
+
+static struct stateentry manstatelist[] =
+{
+        {SBIT(2),
+         DL_ESTABLISH | INDICATION, l3_1tr6_dl_reset},
+        {ALL_STATES,
+         DL_RELEASE | INDICATION, l3_1tr6_dl_release},
+};
+ 
+#define MANSLLEN \
+        (sizeof(manstatelist) / sizeof(struct stateentry))
+/* *INDENT-ON* */
 
 static void
 up1tr6(struct PStack *st, int pr, void *arg)
@@ -778,7 +770,7 @@ up1tr6(struct PStack *st, int pr, void *arg)
 	}
 	if (skb->len < 4) {
 		if (st->l3.debug & L3_DEB_PROTERR) {
-			sprintf(tmp, "up1tr6 len only %ld", skb->len);
+			sprintf(tmp, "up1tr6 len only %d", skb->len);
 			l3_debug(st, tmp);
 		}
 		dev_kfree_skb(skb);
@@ -786,7 +778,7 @@ up1tr6(struct PStack *st, int pr, void *arg)
 	}
 	if ((skb->data[0] & 0xfe) != PROTO_DIS_N0) {
 		if (st->l3.debug & L3_DEB_PROTERR) {
-			sprintf(tmp, "up1tr6%sunexpected discriminator %x message len %ld",
+			sprintf(tmp, "up1tr6%sunexpected discriminator %x message len %d",
 				(pr == (DL_DATA | INDICATION)) ? " " : "(broadcast) ",
 				skb->data[0], skb->len);
 			l3_debug(st, tmp);
@@ -879,7 +871,7 @@ down1tr6(struct PStack *st, int pr, void *arg)
 	struct Channel *chan;
 	char tmp[80];
 
-	if (((DL_ESTABLISH | REQUEST)== pr) || ((DL_RELEASE | REQUEST)== pr)) {
+	if ((DL_ESTABLISH | REQUEST)== pr) {
 		l3_msg(st, pr, NULL);
 		return;
 	} else if ((CC_SETUP | REQUEST) == pr) {
@@ -891,7 +883,7 @@ down1tr6(struct PStack *st, int pr, void *arg)
 		} else {
 			proc->chan = chan;
 			chan->proc = proc;
-			proc->para.setup = chan->setup;
+			memcpy(&proc->para.setup, &chan->setup, sizeof(setup_parm));
 			proc->callref = cr;
 		}
 	} else {
@@ -918,6 +910,34 @@ down1tr6(struct PStack *st, int pr, void *arg)
 	}
 }
 
+static void
+man1tr6(struct PStack *st, int pr, void *arg)
+{
+        int i;
+        struct l3_process *proc = arg;
+ 
+        if (!proc) {
+                printk(KERN_ERR "HiSax man1tr6 without proc pr=%04x\n", pr);
+                return;
+        }
+        for (i = 0; i < MANSLLEN; i++)
+                if ((pr == manstatelist[i].primitive) &&
+                    ((1 << proc->state) & manstatelist[i].state))
+                        break;
+        if (i == MANSLLEN) {
+                if (st->l3.debug & L3_DEB_STATE) {
+                        l3_debug(st, "cr %d man1tr6 state %d prim %d unhandled",
+                                proc->callref & 0x7f, proc->state, pr);
+                }
+        } else {
+                if (st->l3.debug & L3_DEB_STATE) {
+                        l3_debug(st, "cr %d man1tr6 state %d prim %d",
+                                proc->callref & 0x7f, proc->state, pr);
+                }
+                manstatelist[i].rout(proc, pr, arg);
+        }
+}
+ 
 void
 setstack_1tr6(struct PStack *st)
 {
@@ -925,6 +945,7 @@ setstack_1tr6(struct PStack *st)
 
 	st->lli.l4l3 = down1tr6;
 	st->l2.l2l3 = up1tr6;
+	st->l3.l3ml3 = man1tr6;
 	st->l3.N303 = 0;
 
 	strcpy(tmp, l3_1tr6_revision);

@@ -48,24 +48,6 @@ unsigned int csum_partial_copy_from_user ( const char *src, char *dst,
 	return csum_partial_copy_generic ( src, dst, len, sum, err_ptr, NULL);
 }
 
-#if 0
-
-/* Not used at the moment. It is difficult to imagine for what purpose
-   it can be used :-) Please, do not forget to verify_area before it --ANK
- */
-
-/*
- * This combination is currently not used, but possible:
- */
-
-extern __inline__
-unsigned int csum_partial_copy_to_user ( const char *src, char *dst,
-					int len, int sum, int *err_ptr)
-{
-	return csum_partial_copy_generic ( src, dst, len, sum, NULL, err_ptr);
-}
-#endif
-
 /*
  * These are the old (and unsafe) way of doing checksums, a warning message will be
  * printed if they are used and an exeption occurs.
@@ -172,7 +154,7 @@ static inline unsigned short ip_compute_csum(unsigned char * buff, int len) {
 #define _HAVE_ARCH_IPV6_CSUM
 static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 						     struct in6_addr *daddr,
-						     __u16 len,
+						     __u32 len,
 						     unsigned short proto,
 						     unsigned int sum) 
 {
@@ -191,7 +173,7 @@ static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 		"
 		: "=&r" (sum)
 		: "r" (saddr), "r" (daddr), 
-		  "r"(htonl((__u32) (len))), "r"(htonl(proto)), "0"(sum));
+		  "r"(htonl(len)), "r"(htonl(proto)), "0"(sum));
 
 	return csum_fold(sum);
 }

@@ -1,22 +1,19 @@
 /*
- * arch/arm/lib/uaccess-armo.S
+ *  linux/arch/arm/lib/uaccess-armo.S
  *
- * Copyright (C) 1998 Russell King
+ *  Copyright (C) 1998 Russell King
  *
- * Note!  Some code fragments found in here have a special calling
- * convention - they are not APCS compliant!
+ *  Note!  Some code fragments found in here have a special calling
+ *  convention - they are not APCS compliant!
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 
 		.text
-
-#define USER(x...)					\
-9999:		x;					\
-		.section __ex_table,"a";		\
-		.align	3;				\
-		.long	9999b,9001f;			\
-		.previous
 
 		.globl	SYMBOL_NAME(uaccess_user)
 SYMBOL_NAME(uaccess_user):
@@ -30,7 +27,7 @@ SYMBOL_NAME(uaccess_user):
 		.word	__arch_copy_to_user
 		.word	__arch_clear_user
 		.word	__arch_strncpy_from_user
-		.word	__arch_strlen_user
+		.word	__arch_strnlen_user
 
 
 @ In : r0 = x, r1 = addr, r2 = error

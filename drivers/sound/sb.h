@@ -1,7 +1,3 @@
-#include <linux/config.h>
-#include "legacy.h"
-
-#ifdef CONFIG_SBDSP
 #define DSP_RESET	(devc->base + 0x6)
 #define DSP_READ	(devc->base + 0xA)
 #define DSP_WRITE	(devc->base + 0xC)
@@ -74,6 +70,13 @@ struct mixer_def {
 typedef struct mixer_def mixer_tab[32][2];
 typedef struct mixer_def mixer_ent;
 
+struct sb_module_options
+{
+	int  esstype;	/* ESS chip type */
+	int  acer;	/* Do acer notebook init? */
+	int  sm_games;	/* Logitech soundman games? */
+};
+
 typedef struct sb_devc {
 	   int dev;
 
@@ -132,7 +135,10 @@ typedef struct sb_devc {
 	   int input_opened;
 	   int midi_broken;
 	   void (*midi_input_intr) (int dev, unsigned char data);
-	   void *midi_irq_cookie;	/* IRQ cookie for the midi */
+	   void *midi_irq_cookie;		/* IRQ cookie for the midi */
+
+	   struct sb_module_options sbmo;	/* Module options */
+
 	} sb_devc;
 	
 /*
@@ -151,14 +157,15 @@ int sb_dsp_get_byte(sb_devc * devc);
 int sb_dsp_reset (sb_devc *devc);
 void sb_setmixer (sb_devc *devc, unsigned int port, unsigned int value);
 unsigned int sb_getmixer (sb_devc *devc, unsigned int port);
-int sb_dsp_detect (struct address_info *hw_config, int pci, int pciio);
-int sb_dsp_init (struct address_info *hw_config);
+int sb_dsp_detect (struct address_info *hw_config, int pci, int pciio, struct sb_module_options *sbmo);
+int sb_dsp_init (struct address_info *hw_config, struct module *owner);
 void sb_dsp_unload(struct address_info *hw_config, int sbmpu);
-int sb_mixer_init(sb_devc *devc);
+int sb_mixer_init(sb_devc *devc, struct module *owner);
+void sb_mixer_unload(sb_devc *devc);
 void sb_mixer_set_stereo (sb_devc *devc, int mode);
 void smw_mixer_init(sb_devc *devc);
-void sb_dsp_midi_init (sb_devc *devc);
-void sb_audio_init (sb_devc *devc, char *name);
+void sb_dsp_midi_init (sb_devc *devc, struct module *owner);
+void sb_audio_init (sb_devc *devc, char *name, struct module *owner);
 void sb_midi_interrupt (sb_devc *devc);
 void sb_chgmixer (sb_devc * devc, unsigned int reg, unsigned int mask, unsigned int val);
 int sb_common_mixer_set(sb_devc * devc, int dev, int left, int right);
@@ -166,6 +173,13 @@ int sb_common_mixer_set(sb_devc * devc, int dev, int left, int right);
 int sb_audio_open(int dev, int mode);
 void sb_audio_close(int dev);
 
-extern int acer;
 extern sb_devc *last_sb;
-#endif
+
+/*	From sb_common.c */
+void sb_dsp_disable_midi(int port);
+void sb_dsp_disable_recording(int port);
+int probe_sbmpu (struct address_info *hw_config, struct module *owner);
+void unload_sbmpu (struct address_info *hw_config);
+
+void unload_sb16(struct address_info *hw_info);
+void unload_sb16midi(struct address_info *hw_info);

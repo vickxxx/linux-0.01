@@ -2,6 +2,8 @@
  *  linux/arch/i386/mm/init.c
  *
  *  Copyright (C) 1995  Linus Torvalds
+ *
+ *  Support of BIGMEM added by Gerhard Wichert, Siemens AG, July 1999
  */
 
 #include <linux/config.h>
@@ -20,27 +22,93 @@
 #ifdef CONFIG_BLK_DEV_INITRD
 #include <linux/blk.h>
 #endif
+#include <linux/highmem.h>
+#include <linux/pagemap.h>
+#include <linux/bootmem.h>
 
 #include <asm/processor.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/dma.h>
 #include <asm/fixmap.h>
+#include <asm/e820.h>
+#include <asm/apic.h>
 
-extern void show_net_buffers(void);
-extern unsigned long init_smp_mappings(unsigned long);
+unsigned long highstart_pfn, highend_pfn;
+static unsigned long totalram_pages;
+static unsigned long totalhigh_pages;
 
-void __bad_pte_kernel(pmd_t *pmd)
+/*
+ * BAD_PAGE is the page that is used for page faults when linux
+ * is out-of-memory. Older versions of linux just did a
+ * do_exit(), but using this instead means there is less risk
+ * for a process dying in kernel mode, possibly leaving an inode
+ * unused etc..
+ *
+ * BAD_PAGETABLE is the accompanying page-table: it is initialized
+ * to point to BAD_PAGE entries.
+ *
+ * ZERO_PAGE is a special page that is used for zero-initialized
+ * data and COW.
+ */
+
+/*
+ * These are allocated in head.S so that we get proper page alignment.
+ * If you change the size of these then change head.S as well.
+ */
+extern char empty_bad_page[PAGE_SIZE];
+#if CONFIG_X86_PAE
+extern pmd_t empty_bad_pmd_table[PTRS_PER_PMD];
+#endif
+extern pte_t empty_bad_pte_table[PTRS_PER_PTE];
+
+/*
+ * We init them before every return and make them writable-shared.
+ * This guarantees we get out of the kernel in some more or less sane
+ * way.
+ */
+#if CONFIG_X86_PAE
+static pmd_t * get_bad_pmd_table(void)
 {
-	printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
-	pmd_val(*pmd) = _KERNPG_TABLE + __pa(BAD_PAGETABLE);
+	pmd_t v;
+	int i;
+
+	set_pmd(&v, __pmd(_PAGE_TABLE + __pa(empty_bad_pte_table)));
+
+	for (i = 0; i < PAGE_SIZE/sizeof(pmd_t); i++)
+		empty_bad_pmd_table[i] = v;
+
+	return empty_bad_pmd_table;
+}
+#endif
+
+static pte_t * get_bad_pte_table(void)
+{
+	pte_t v;
+	int i;
+
+	v = pte_mkdirty(mk_pte_phys(__pa(empty_bad_page), PAGE_SHARED));
+
+	for (i = 0; i < PAGE_SIZE/sizeof(pte_t); i++)
+		empty_bad_pte_table[i] = v;
+
+	return empty_bad_pte_table;
 }
 
-void __bad_pte(pmd_t *pmd)
+
+
+void __handle_bad_pmd(pmd_t *pmd)
 {
-	printk("Bad pmd in pte_alloc: %08lx\n", pmd_val(*pmd));
-	pmd_val(*pmd) = _PAGE_TABLE + __pa(BAD_PAGETABLE);
+	pmd_ERROR(*pmd);
+	set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(get_bad_pte_table())));
+}
+
+void __handle_bad_pmd_kernel(pmd_t *pmd)
+{
+	pmd_ERROR(*pmd);
+	set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(get_bad_pte_table())));
 }
 
 pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long offset)
@@ -50,16 +118,16 @@ pte_t *get_pte_kernel_slow(pmd_t *pmd, unsigned long offset)
 	pte = (pte_t *) __get_free_page(GFP_KERNEL);
 	if (pmd_none(*pmd)) {
 		if (pte) {
-			clear_page((unsigned long)pte);
-			pmd_val(*pmd) = _KERNPG_TABLE + __pa(pte);
+			clear_page(pte);
+			set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(pte)));
 			return pte + offset;
 		}
-		pmd_val(*pmd) = _KERNPG_TABLE + __pa(BAD_PAGETABLE);
+		set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(get_bad_pte_table())));
 		return NULL;
 	}
 	free_page((unsigned long)pte);
 	if (pmd_bad(*pmd)) {
-		__bad_pte_kernel(pmd);
+		__handle_bad_pmd_kernel(pmd);
 		return NULL;
 	}
 	return (pte_t *) pmd_page(*pmd) + offset;
@@ -72,19 +140,19 @@ pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
 	pte = (unsigned long) __get_free_page(GFP_KERNEL);
 	if (pmd_none(*pmd)) {
 		if (pte) {
-			clear_page(pte);
-			pmd_val(*pmd) = _PAGE_TABLE + __pa(pte);
-			return (pte_t *)(pte + offset);
+			clear_page((void *)pte);
+			set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(pte)));
+			return (pte_t *)pte + offset;
 		}
-		pmd_val(*pmd) = _PAGE_TABLE + __pa(BAD_PAGETABLE);
+		set_pmd(pmd, __pmd(_PAGE_TABLE + __pa(get_bad_pte_table())));
 		return NULL;
 	}
 	free_page(pte);
 	if (pmd_bad(*pmd)) {
-		__bad_pte(pmd);
+		__handle_bad_pmd(pmd);
 		return NULL;
 	}
-	return (pte_t *) (pmd_page(*pmd) + offset);
+	return (pte_t *) pmd_page(*pmd) + offset;
 }
 
 int do_check_pgt_cache(int low, int high)
@@ -104,50 +172,35 @@ int do_check_pgt_cache(int low, int high)
 }
 
 /*
- * BAD_PAGE is the page that is used for page faults when linux
- * is out-of-memory. Older versions of linux just did a
- * do_exit(), but using this instead means there is less risk
- * for a process dying in kernel mode, possibly leaving an inode
- * unused etc..
- *
- * BAD_PAGETABLE is the accompanying page-table: it is initialized
- * to point to BAD_PAGE entries.
- *
- * ZERO_PAGE is a special page that is used for zero-initialized
- * data and COW.
+ * NOTE: pagetable_init alloc all the fixmap pagetables contiguous on the
+ * physical space so we can cache the place of the first one and move
+ * around without checking the pgd every time.
  */
-pte_t * __bad_pagetable(void)
+
+#if CONFIG_HIGHMEM
+pte_t *kmap_pte;
+pgprot_t kmap_prot;
+
+#define kmap_get_fixmap_pte(vaddr)					\
+	pte_offset(pmd_offset(pgd_offset_k(vaddr), (vaddr)), (vaddr))
+
+void __init kmap_init(void)
 {
-	extern char empty_bad_page_table[PAGE_SIZE];
-	int d0, d1;
+	unsigned long kmap_vstart;
 
-	__asm__ __volatile__("cld ; rep ; stosl"
-			     : "=&D" (d0), "=&c" (d1)
-			     : "a" (pte_val(BAD_PAGE)),
-			     "0" ((long) empty_bad_page_table),
-			     "1" (PAGE_SIZE/4)
-			     : "memory");
-	return (pte_t *) empty_bad_page_table;
+	/* cache the first kmap pte */
+	kmap_vstart = __fix_to_virt(FIX_KMAP_BEGIN);
+	kmap_pte = kmap_get_fixmap_pte(kmap_vstart);
+
+	kmap_prot = PAGE_KERNEL;
 }
-
-pte_t __bad_page(void)
-{
-	extern char empty_bad_page[PAGE_SIZE];
-	int d0, d1;
-
-	__asm__ __volatile__("cld ; rep ; stosl"
-			     : "=&D" (d0), "=&c" (d1)
-			     : "a" (0),
-			     "0" ((long) empty_bad_page),
-			     "1" (PAGE_SIZE/4)
-			     : "memory");
-	return pte_mkdirty(mk_pte((unsigned long) empty_bad_page, PAGE_SHARED));
-}
+#endif /* CONFIG_HIGHMEM */
 
 void show_mem(void)
 {
-	int i,free = 0,total = 0,reserved = 0;
+	int i, total = 0, reserved = 0;
 	int shared = 0, cached = 0;
+	int highmem = 0;
 
 	printk("Mem-info:\n");
 	show_free_areas();
@@ -155,193 +208,279 @@ void show_mem(void)
 	i = max_mapnr;
 	while (i-- > 0) {
 		total++;
+		if (PageHighMem(mem_map+i))
+			highmem++;
 		if (PageReserved(mem_map+i))
 			reserved++;
 		else if (PageSwapCache(mem_map+i))
 			cached++;
-		else if (!page_count(mem_map+i))
-			free++;
-		else
+		else if (page_count(mem_map+i))
 			shared += page_count(mem_map+i) - 1;
 	}
-	printk("%d pages of RAM\n",total);
+	printk("%d pages of RAM\n", total);
+	printk("%d pages of HIGHMEM\n",highmem);
 	printk("%d reserved pages\n",reserved);
 	printk("%d pages shared\n",shared);
 	printk("%d pages swap cached\n",cached);
 	printk("%ld pages in page table cache\n",pgtable_cache_size);
-#ifdef CONFIG_NET
-	show_net_buffers();
-#endif
+	show_buffers();
 }
-
-extern unsigned long free_area_init(unsigned long, unsigned long);
 
 /* References to section boundaries */
 
 extern char _text, _etext, _edata, __bss_start, _end;
 extern char __init_begin, __init_end;
 
-#define X86_CR4_VME		0x0001		/* enable vm86 extensions */
-#define X86_CR4_PVI		0x0002		/* virtual interrupts flag enable */
-#define X86_CR4_TSD		0x0004		/* disable time stamp at ipl 3 */
-#define X86_CR4_DE		0x0008		/* enable debugging extensions */
-#define X86_CR4_PSE		0x0010		/* enable page size extensions */
-#define X86_CR4_PAE		0x0020		/* enable physical address extensions */
-#define X86_CR4_MCE		0x0040		/* Machine check enable */
-#define X86_CR4_PGE		0x0080		/* enable global pages */
-#define X86_CR4_PCE		0x0100		/* enable performance counters at ipl 3 */
-
-/*
- * Save the cr4 feature set we're using (ie
- * Pentium 4MB enable and PPro Global page
- * enable), so that any CPU's that boot up
- * after us can get the correct flags.
- */
-unsigned long mmu_cr4_features __initdata = 0;
-
-static inline void set_in_cr4(unsigned long mask)
-{
-	mmu_cr4_features |= mask;
-	__asm__("movl %%cr4,%%eax\n\t"
-		"orl %0,%%eax\n\t"
-		"movl %%eax,%%cr4\n"
-		: : "irg" (mask)
-		:"ax");
-}
-
-/*
- * allocate page table(s) for compile-time fixed mappings
- */
-static unsigned long __init fixmap_init(unsigned long start_mem)
-{
-	pgd_t * pg_dir;
-	unsigned int idx;
-	unsigned long address;
-
-	start_mem = PAGE_ALIGN(start_mem);
-
-	for (idx=1; idx <= __end_of_fixed_addresses; idx += PTRS_PER_PTE)
-	{
-		address = __fix_to_virt(__end_of_fixed_addresses-idx);
-		pg_dir = swapper_pg_dir + (address >> PGDIR_SHIFT);
-		memset((void *)start_mem, 0, PAGE_SIZE);
-		pgd_val(*pg_dir) = _PAGE_TABLE | __pa(start_mem);
-		start_mem += PAGE_SIZE;
-	}
-
-	return start_mem;
-}
-
-static void set_pte_phys (unsigned long vaddr, unsigned long phys)
+static inline void set_pte_phys (unsigned long vaddr,
+			unsigned long phys, pgprot_t flags)
 {
 	pgprot_t prot;
-	pte_t * pte;
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
 
-	pte = pte_offset(pmd_offset(pgd_offset_k(vaddr), vaddr), vaddr);
-	prot = PAGE_KERNEL;
-	if (boot_cpu_data.x86_capability & X86_FEATURE_PGE)
-		pgprot_val(prot) |= _PAGE_GLOBAL;
+	pgd = swapper_pg_dir + __pgd_offset(vaddr);
+	if (pgd_none(*pgd)) {
+		printk("PAE BUG #00!\n");
+		return;
+	}
+	pmd = pmd_offset(pgd, vaddr);
+	if (pmd_none(*pmd)) {
+		printk("PAE BUG #01!\n");
+		return;
+	}
+	pte = pte_offset(pmd, vaddr);
+	if (pte_val(*pte))
+		pte_ERROR(*pte);
+	pgprot_val(prot) = pgprot_val(PAGE_KERNEL) | pgprot_val(flags);
 	set_pte(pte, mk_pte_phys(phys, prot));
 
-	local_flush_tlb();
+	/*
+	 * It's enough to flush this one mapping.
+	 * (PGE mappings get flushed as well)
+	 */
+	__flush_tlb_one(vaddr);
 }
 
-void set_fixmap (enum fixed_addresses idx, unsigned long phys)
+void __set_fixmap (enum fixed_addresses idx, unsigned long phys, pgprot_t flags)
 {
 	unsigned long address = __fix_to_virt(idx);
 
 	if (idx >= __end_of_fixed_addresses) {
-		printk("Invalid set_fixmap\n");
+		printk("Invalid __set_fixmap\n");
 		return;
 	}
-	set_pte_phys (address,phys);
+	set_pte_phys(address, phys, flags);
+}
+
+static void __init fixrange_init (unsigned long start, unsigned long end, pgd_t *pgd_base)
+{
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte;
+	int i, j;
+	unsigned long vaddr;
+
+	vaddr = start;
+	i = __pgd_offset(vaddr);
+	j = __pmd_offset(vaddr);
+	pgd = pgd_base + i;
+
+	for ( ; (i < PTRS_PER_PGD) && (vaddr != end); pgd++, i++) {
+#if CONFIG_X86_PAE
+		if (pgd_none(*pgd)) {
+			pmd = (pmd_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+			set_pgd(pgd, __pgd(__pa(pmd) + 0x1));
+			if (pmd != pmd_offset(pgd, 0))
+				printk("PAE BUG #02!\n");
+		}
+		pmd = pmd_offset(pgd, vaddr);
+#else
+		pmd = (pmd_t *)pgd;
+#endif
+		for (; (j < PTRS_PER_PMD) && (vaddr != end); pmd++, j++) {
+			if (pmd_none(*pmd)) {
+				pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+				set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(pte)));
+				if (pte != pte_offset(pmd, 0))
+					BUG();
+			}
+			vaddr += PMD_SIZE;
+		}
+		j = 0;
+	}
+}
+
+static void __init pagetable_init (void)
+{
+	unsigned long vaddr, end;
+	pgd_t *pgd, *pgd_base;
+	int i, j, k;
+	pmd_t *pmd;
+	pte_t *pte;
+
+	/*
+	 * This can be zero as well - no problem, in that case we exit
+	 * the loops anyway due to the PTRS_PER_* conditions.
+	 */
+	end = (unsigned long)__va(max_low_pfn*PAGE_SIZE);
+
+	pgd_base = swapper_pg_dir;
+#if CONFIG_X86_PAE
+	for (i = 0; i < PTRS_PER_PGD; i++) {
+		pgd = pgd_base + i;
+		__pgd_clear(pgd);
+	}
+#endif
+	i = __pgd_offset(PAGE_OFFSET);
+	pgd = pgd_base + i;
+
+	for (; i < PTRS_PER_PGD; pgd++, i++) {
+		vaddr = i*PGDIR_SIZE;
+		if (end && (vaddr >= end))
+			break;
+#if CONFIG_X86_PAE
+		pmd = (pmd_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+		set_pgd(pgd, __pgd(__pa(pmd) + 0x1));
+#else
+		pmd = (pmd_t *)pgd;
+#endif
+		if (pmd != pmd_offset(pgd, 0))
+			BUG();
+		for (j = 0; j < PTRS_PER_PMD; pmd++, j++) {
+			vaddr = i*PGDIR_SIZE + j*PMD_SIZE;
+			if (end && (vaddr >= end))
+				break;
+			if (cpu_has_pse) {
+				unsigned long __pe;
+
+				set_in_cr4(X86_CR4_PSE);
+				boot_cpu_data.wp_works_ok = 1;
+				__pe = _KERNPG_TABLE + _PAGE_PSE + __pa(vaddr);
+				/* Make it "global" too if supported */
+				if (cpu_has_pge) {
+					set_in_cr4(X86_CR4_PGE);
+					__pe += _PAGE_GLOBAL;
+				}
+				set_pmd(pmd, __pmd(__pe));
+				continue;
+			}
+
+			pte = (pte_t *) alloc_bootmem_low_pages(PAGE_SIZE);
+			set_pmd(pmd, __pmd(_KERNPG_TABLE + __pa(pte)));
+
+			if (pte != pte_offset(pmd, 0))
+				BUG();
+
+			for (k = 0; k < PTRS_PER_PTE; pte++, k++) {
+				vaddr = i*PGDIR_SIZE + j*PMD_SIZE + k*PAGE_SIZE;
+				if (end && (vaddr >= end))
+					break;
+				*pte = mk_pte_phys(__pa(vaddr), PAGE_KERNEL);
+			}
+		}
+	}
+
+	/*
+	 * Fixed mappings, only the page table structure has to be
+	 * created - mappings will be set by set_fixmap():
+	 */
+	vaddr = __fix_to_virt(__end_of_fixed_addresses - 1) & PMD_MASK;
+	fixrange_init(vaddr, 0, pgd_base);
+
+#if CONFIG_HIGHMEM
+	/*
+	 * Permanent kmaps:
+	 */
+	vaddr = PKMAP_BASE;
+	fixrange_init(vaddr, vaddr + PAGE_SIZE*LAST_PKMAP, pgd_base);
+
+	pgd = swapper_pg_dir + __pgd_offset(vaddr);
+	pmd = pmd_offset(pgd, vaddr);
+	pte = pte_offset(pmd, vaddr);
+	pkmap_page_table = pte;
+#endif
+
+#if CONFIG_X86_PAE
+	/*
+	 * Add low memory identity-mappings - SMP needs it when
+	 * starting up on an AP from real-mode. In the non-PAE
+	 * case we already have these mappings through head.S.
+	 * All user-space mappings are explicitly cleared after
+	 * SMP startup.
+	 */
+	pgd_base[0] = pgd_base[USER_PTRS_PER_PGD];
+#endif
+}
+
+void __init zap_low_mappings (void)
+{
+	int i;
+	/*
+	 * Zap initial low-memory mappings.
+	 *
+	 * Note that "pgd_clear()" doesn't do it for
+	 * us in this case, because pgd_clear() is a
+	 * no-op in the 2-level case (pmd_clear() is
+	 * the thing that clears the page-tables in
+	 * that case).
+	 */
+	for (i = 0; i < USER_PTRS_PER_PGD; i++)
+#if CONFIG_X86_PAE
+		pgd_clear(swapper_pg_dir+i);
+#else
+		set_pgd(swapper_pg_dir+i, __pgd(0));
+#endif
+	flush_tlb_all();
 }
 
 /*
- * paging_init() sets up the page tables - note that the first 4MB are
+ * paging_init() sets up the page tables - note that the first 8MB are
  * already mapped by head.S.
  *
  * This routines also unmaps the page at virtual kernel address 0, so
  * that we can trap those pesky NULL-reference errors in the kernel.
  */
-__initfunc(unsigned long paging_init(unsigned long start_mem, unsigned long end_mem))
+void __init paging_init(void)
 {
-	pgd_t * pg_dir;
-	pte_t * pg_table;
-	unsigned long tmp;
-	unsigned long address;
+	pagetable_init();
 
-/*
- * Physical page 0 is special; it's not touched by Linux since BIOS
- * and SMM (for laptops with [34]86/SL chips) may need it.  It is read
- * and write protected to detect null pointer references in the
- * kernel.
- * It may also hold the MP configuration table when we are booting SMP.
- */
-	start_mem = PAGE_ALIGN(start_mem);
-	address = PAGE_OFFSET;
-	pg_dir = swapper_pg_dir;
-	/* unmap the original low memory mappings */
-	pgd_val(pg_dir[0]) = 0;
+	__asm__( "movl %%ecx,%%cr3\n" ::"c"(__pa(swapper_pg_dir)));
 
-	/* Map whole memory from PAGE_OFFSET */
-	pg_dir += USER_PGD_PTRS;
-	while (address < end_mem) {
-		/*
-		 * If we're running on a Pentium CPU, we can use the 4MB
-		 * page tables. 
-		 *
-		 * The page tables we create span up to the next 4MB
-		 * virtual memory boundary, but that's OK as we won't
-		 * use that memory anyway.
-		 */
-		if (boot_cpu_data.x86_capability & X86_FEATURE_PSE) {
-			unsigned long __pe;
-
-			set_in_cr4(X86_CR4_PSE);
-			boot_cpu_data.wp_works_ok = 1;
-			__pe = _KERNPG_TABLE + _PAGE_4M + __pa(address);
-			/* Make it "global" too if supported */
-			if (boot_cpu_data.x86_capability & X86_FEATURE_PGE) {
-				set_in_cr4(X86_CR4_PGE);
-				__pe += _PAGE_GLOBAL;
-			}
-			pgd_val(*pg_dir) = __pe;
-			pg_dir++;
-			address += 4*1024*1024;
-			continue;
-		}
-
-		/*
-		 * We're on a [34]86, use normal page tables.
-		 * pg_table is physical at this point
-		 */
-		pg_table = (pte_t *) (PAGE_MASK & pgd_val(*pg_dir));
-		if (!pg_table) {
-			pg_table = (pte_t *) __pa(start_mem);
-			start_mem += PAGE_SIZE;
-		}
-
-		pgd_val(*pg_dir) = _PAGE_TABLE | (unsigned long) pg_table;
-		pg_dir++;
-
-		/* now change pg_table to kernel virtual addresses */
-		pg_table = (pte_t *) __va(pg_table);
-		for (tmp = 0 ; tmp < PTRS_PER_PTE ; tmp++,pg_table++) {
-			pte_t pte = mk_pte(address, PAGE_KERNEL);
-			if (address >= end_mem)
-				pte_val(pte) = 0;
-			set_pte(pg_table, pte);
-			address += PAGE_SIZE;
-		}
-	}
-	start_mem = fixmap_init(start_mem);
-#ifdef __SMP__
-	start_mem = init_smp_mappings(start_mem);
+#if CONFIG_X86_PAE
+	/*
+	 * We will bail out later - printk doesnt work right now so
+	 * the user would just see a hanging kernel.
+	 */
+	if (cpu_has_pae)
+		set_in_cr4(X86_CR4_PAE);
 #endif
-	local_flush_tlb();
 
-	return free_area_init(start_mem, end_mem);
+	__flush_tlb_all();
+
+#ifdef CONFIG_HIGHMEM
+	kmap_init();
+#endif
+	{
+		unsigned long zones_size[MAX_NR_ZONES] = {0, 0, 0};
+		unsigned int max_dma, high, low;
+
+		max_dma = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
+		low = max_low_pfn;
+		high = highend_pfn;
+
+		if (low < max_dma)
+			zones_size[ZONE_DMA] = low;
+		else {
+			zones_size[ZONE_DMA] = max_dma;
+			zones_size[ZONE_NORMAL] = low - max_dma;
+#ifdef CONFIG_HIGHMEM
+			zones_size[ZONE_HIGHMEM] = high - low;
+#endif
+		}
+		free_area_init(zones_size);
+	}
+	return;
 }
 
 /*
@@ -350,154 +489,206 @@ __initfunc(unsigned long paging_init(unsigned long start_mem, unsigned long end_
  * before and after the test are here to work-around some nasty CPU bugs.
  */
 
-__initfunc(void test_wp_bit(void))
+/*
+ * This function cannot be __init, since exceptions don't work in that
+ * section.
+ */
+static int do_test_wp_bit(unsigned long vaddr);
+
+void __init test_wp_bit(void)
 {
-	unsigned char tmp_reg;
-	unsigned long old = pg0[0];
+/*
+ * Ok, all PSE-capable CPUs are definitely handling the WP bit right.
+ */
+	const unsigned long vaddr = PAGE_OFFSET;
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte, old_pte;
 
 	printk("Checking if this processor honours the WP bit even in supervisor mode... ");
-	pg0[0] = pte_val(mk_pte(PAGE_OFFSET, PAGE_READONLY));
+
+	pgd = swapper_pg_dir + __pgd_offset(vaddr);
+	pmd = pmd_offset(pgd, vaddr);
+	pte = pte_offset(pmd, vaddr);
+	old_pte = *pte;
+	*pte = mk_pte_phys(0, PAGE_READONLY);
 	local_flush_tlb();
-	current->mm->mmap->vm_start += PAGE_SIZE;
-	__asm__ __volatile__(
-		"jmp 1f; 1:\n"
-		"movb %0,%1\n"
-		"movb %1,%0\n"
-		"jmp 1f; 1:\n"
-		:"=m" (*(char *) __va(0)),
-		 "=q" (tmp_reg)
-		:/* no inputs */
-		:"memory");
-	pg0[0] = old;
+
+	boot_cpu_data.wp_works_ok = do_test_wp_bit(vaddr);
+
+	*pte = old_pte;
 	local_flush_tlb();
-	current->mm->mmap->vm_start -= PAGE_SIZE;
-	if (boot_cpu_data.wp_works_ok < 0) {
-		boot_cpu_data.wp_works_ok = 0;
+
+	if (!boot_cpu_data.wp_works_ok) {
 		printk("No.\n");
 #ifdef CONFIG_X86_WP_WORKS_OK
 		panic("This kernel doesn't support CPU's with broken WP. Recompile it for a 386!");
 #endif
-	} else
-		printk(".\n");
+	} else {
+		printk("Ok.\n");
+	}
 }
 
-__initfunc(void mem_init(unsigned long start_mem, unsigned long end_mem))
+static inline int page_is_ram (unsigned long pagenr)
 {
-	unsigned long start_low_mem = PAGE_SIZE;
-	int codepages = 0;
-	int reservedpages = 0;
-	int datapages = 0;
-	int initpages = 0;
-	unsigned long tmp;
-	unsigned long endbase;
+	int i;
 
-	end_mem &= PAGE_MASK;
-	high_memory = (void *) end_mem;
-	max_mapnr = num_physpages = MAP_NR(end_mem);
+	for (i = 0; i < e820.nr_map; i++) {
+		unsigned long addr, end;
+
+		if (e820.map[i].type != E820_RAM)	/* not usable memory */
+			continue;
+		/*
+		 *	!!!FIXME!!! Some BIOSen report areas as RAM that
+		 *	are not. Notably the 640->1Mb area. We need a sanity
+		 *	check here.
+		 */
+		addr = (e820.map[i].addr+PAGE_SIZE-1) >> PAGE_SHIFT;
+		end = (e820.map[i].addr+e820.map[i].size) >> PAGE_SHIFT;
+		if  ((pagenr >= addr) && (pagenr < end))
+			return 1;
+	}
+	return 0;
+}
+
+void __init mem_init(void)
+{
+	int codesize, reservedpages, datasize, initsize;
+	int tmp;
+
+	if (!mem_map)
+		BUG();
+
+#ifdef CONFIG_HIGHMEM
+	highmem_start_page = mem_map + highstart_pfn;
+	max_mapnr = num_physpages = highend_pfn;
+#else
+	max_mapnr = num_physpages = max_low_pfn;
+#endif
+	high_memory = (void *) __va(max_low_pfn * PAGE_SIZE);
 
 	/* clear the zero-page */
 	memset(empty_zero_page, 0, PAGE_SIZE);
 
-	/* mark usable pages in the mem_map[] */
-	start_low_mem = PAGE_ALIGN(start_low_mem)+PAGE_OFFSET;
+	/* this will put all low memory onto the freelists */
+	totalram_pages += free_all_bootmem();
 
-#ifdef __SMP__
-	/*
-	 * But first pinch a few for the stack/trampoline stuff
-	 *	FIXME: Don't need the extra page at 4K, but need to fix
-	 *	trampoline before removing it. (see the GDT stuff)
-	 *
-	 */
-	start_low_mem += PAGE_SIZE;				/* 32bit startup code */
-	start_low_mem = smp_alloc_memory(start_low_mem); 	/* AP processor stacks */
-#endif
-	start_mem = PAGE_ALIGN(start_mem);
+	reservedpages = 0;
+	for (tmp = 0; tmp < max_low_pfn; tmp++)
+		/*
+		 * Only count reserved RAM pages
+		 */
+		if (page_is_ram(tmp) && PageReserved(mem_map+tmp))
+			reservedpages++;
+#ifdef CONFIG_HIGHMEM
+	for (tmp = highstart_pfn; tmp < highend_pfn; tmp++) {
+		struct page *page = mem_map + tmp;
 
-	/*
-	 * IBM messed up *AGAIN* in their thinkpad: 0xA0000 -> 0x9F000.
-	 * They seem to have done something stupid with the floppy
-	 * controller as well..
-	 * The amount of available base memory is in WORD 40:13.
-	 */
-	endbase = PAGE_OFFSET + ((*(unsigned short *)__va(0x413) * 1024) & PAGE_MASK);
-	while (start_low_mem < endbase) {
-		clear_bit(PG_reserved, &mem_map[MAP_NR(start_low_mem)].flags);
-		start_low_mem += PAGE_SIZE;
-	}
-
-	while (start_mem < end_mem) {
-		clear_bit(PG_reserved, &mem_map[MAP_NR(start_mem)].flags);
-		start_mem += PAGE_SIZE;
-	}
-	for (tmp = PAGE_OFFSET ; tmp < end_mem ; tmp += PAGE_SIZE) {
-		if (tmp >= MAX_DMA_ADDRESS)
-			clear_bit(PG_DMA, &mem_map[MAP_NR(tmp)].flags);
-		if (PageReserved(mem_map+MAP_NR(tmp))) {
-			if (tmp >= (unsigned long) &_text && tmp < (unsigned long) &_edata) {
-				if (tmp < (unsigned long) &_etext)
-					codepages++;
-				else
-					datapages++;
-			} else if (tmp >= (unsigned long) &__init_begin
-				   && tmp < (unsigned long) &__init_end)
-				initpages++;
-			else if (tmp >= (unsigned long) &__bss_start
-				 && tmp < (unsigned long) start_mem)
-				datapages++;
-			else
-				reservedpages++;
+		if (!page_is_ram(tmp)) {
+			SetPageReserved(page);
 			continue;
 		}
-		set_page_count(mem_map+MAP_NR(tmp), 1);
-#ifdef CONFIG_BLK_DEV_INITRD
-		if (!initrd_start || (tmp < initrd_start || tmp >=
-		    initrd_end))
-#endif
-			free_page(tmp);
+		ClearPageReserved(page);
+		set_bit(PG_highmem, &page->flags);
+		atomic_set(&page->count, 1);
+		__free_page(page);
+		totalhigh_pages++;
 	}
-	printk("Memory: %luk/%luk available (%dk kernel code, %dk reserved, %dk data, %dk init)\n",
-		(unsigned long) nr_free_pages << (PAGE_SHIFT-10),
-		max_mapnr << (PAGE_SHIFT-10),
-		codepages << (PAGE_SHIFT-10),
-		reservedpages << (PAGE_SHIFT-10),
-		datapages << (PAGE_SHIFT-10),
-		initpages << (PAGE_SHIFT-10));
+	totalram_pages += totalhigh_pages;
+#endif
+	codesize =  (unsigned long) &_etext - (unsigned long) &_text;
+	datasize =  (unsigned long) &_edata - (unsigned long) &_etext;
+	initsize =  (unsigned long) &__init_end - (unsigned long) &__init_begin;
 
+	printk("Memory: %luk/%luk available (%dk kernel code, %dk reserved, %dk data, %dk init, %ldk highmem)\n",
+		(unsigned long) nr_free_pages() << (PAGE_SHIFT-10),
+		max_mapnr << (PAGE_SHIFT-10),
+		codesize >> 10,
+		reservedpages << (PAGE_SHIFT-10),
+		datasize >> 10,
+		initsize >> 10,
+		(unsigned long) (totalhigh_pages << (PAGE_SHIFT-10))
+	       );
+
+#if CONFIG_X86_PAE
+	if (!cpu_has_pae)
+		panic("cannot execute a PAE-enabled kernel on a PAE-less CPU!");
+#endif
 	if (boot_cpu_data.wp_works_ok < 0)
 		test_wp_bit();
+
+	/*
+	 * Subtle. SMP is doing it's boot stuff late (because it has to
+	 * fork idle threads) - but it also needs low mappings for the
+	 * protected-mode entry to work. We zap these entries only after
+	 * the WP-bit has been tested.
+	 */
+#ifndef CONFIG_SMP
+	zap_low_mappings();
+#endif
+
+}
+
+/* Put this after the callers, so that it cannot be inlined */
+static int do_test_wp_bit(unsigned long vaddr)
+{
+	char tmp_reg;
+	int flag;
+
+	__asm__ __volatile__(
+		"	movb %0,%1	\n"
+		"1:	movb %1,%0	\n"
+		"	xorl %2,%2	\n"
+		"2:			\n"
+		".section __ex_table,\"a\"\n"
+		"	.align 4	\n"
+		"	.long 1b,2b	\n"
+		".previous		\n"
+		:"=m" (*(char *) vaddr),
+		 "=q" (tmp_reg),
+		 "=r" (flag)
+		:"2" (1)
+		:"memory");
+	
+	return flag;
 }
 
 void free_initmem(void)
 {
 	unsigned long addr;
-	
+
 	addr = (unsigned long)(&__init_begin);
 	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
-		mem_map[MAP_NR(addr)].flags &= ~(1 << PG_reserved);
-		set_page_count(mem_map+MAP_NR(addr), 1);
+		ClearPageReserved(virt_to_page(addr));
+		set_page_count(virt_to_page(addr), 1);
 		free_page(addr);
+		totalram_pages++;
 	}
 	printk ("Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
 }
 
+#ifdef CONFIG_BLK_DEV_INITRD
+void free_initrd_mem(unsigned long start, unsigned long end)
+{
+	if (start < end)
+		printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
+	for (; start < end; start += PAGE_SIZE) {
+		ClearPageReserved(virt_to_page(start));
+		set_page_count(virt_to_page(start), 1);
+		free_page(start);
+		totalram_pages++;
+	}
+}
+#endif
+
 void si_meminfo(struct sysinfo *val)
 {
-	int i;
-
-	i = max_mapnr;
-	val->totalram = 0;
+	val->totalram = totalram_pages;
 	val->sharedram = 0;
-	val->freeram = nr_free_pages << PAGE_SHIFT;
-	val->bufferram = atomic_read(&buffermem);
-	while (i-- > 0)  {
-		if (PageReserved(mem_map+i))
-			continue;
-		val->totalram++;
-		if (!page_count(mem_map+i))
-			continue;
-		val->sharedram += page_count(mem_map+i) - 1;
-	}
-	val->totalram <<= PAGE_SHIFT;
-	val->sharedram <<= PAGE_SHIFT;
+	val->freeram = nr_free_pages();
+	val->bufferram = atomic_read(&buffermem_pages);
+	val->totalhigh = totalhigh_pages;
+	val->freehigh = nr_free_highpages();
+	val->mem_unit = PAGE_SIZE;
 	return;
 }

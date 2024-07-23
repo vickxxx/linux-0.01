@@ -7,8 +7,10 @@
  * Status:        Experimental.
  * Author:        James McKenzie <james@fishsoup.dhs.org>
  * Created at:    Sat May 8  12:35:27 1999
+ * Modified:      Paul Bristow <paul.bristow@technologist.com>
+ * Modified:      Mon Nov 11 19:10:05 1999
  * 
- *     Copyright (c) 1999 James McKenzie, All Rights Reserved.
+ *     Copyright (c) 1999-2000 James McKenzie, All Rights Reserved.
  *      
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -28,32 +30,13 @@
 /* an olivetti notebook which doesn't have FIR, a toshiba libretto, and */
 /* an hp printer, this works fine at 4MBPS with my HP printer */
 
-static char *rcsid = "$Id: toshoboe.c,v 1.5 1999/05/12 12:24:39 root Exp root $";
-
-/* 
- * $Log: toshoboe.c,v $
- * Revision 1.5  1999/05/12 12:24:39  root
- * *** empty log message ***
- *
- * Revision 1.4  1999/05/12 11:55:08  root
- * *** empty log message ***
- *
- * Revision 1.3  1999/05/09 01:33:12  root
- * *** empty log message ***
- *
- * Revision 1.2  1999/05/09 01:30:38  root
- * *** empty log message ***
- *
- * Revision 1.1  1999/05/09 01:25:04  root
- * Initial revision
- * 
- */
+static char *rcsid = "$Id: toshoboe.c,v 1.91 1999/06/29 14:21:06 root Exp $";
 
 /* Define this to have only one frame in the XMIT or RECV queue */
 /* Toshiba's drivers do this, but it disables back to back tansfers */
 /* I think that the chip may have some problems certainly, I have */
 /* seen it jump over tasks in the taskfile->xmit with this turned on */
-#define ONETASK
+#define ONETASK 
 
 /* To adjust the number of tasks in use edit toshoboe.h */
 
@@ -73,7 +56,6 @@ static char *rcsid = "$Id: toshoboe.c,v 1.5 1999/05/12 12:24:39 root Exp root $"
 /* No user servicable parts below here */
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/skbuff.h>
@@ -83,6 +65,7 @@ static char *rcsid = "$Id: toshoboe.c,v 1.5 1999/05/12 12:24:39 root Exp root $"
 #include <linux/malloc.h>
 #include <linux/init.h>
 #include <linux/pci.h>
+#include <linux/rtnetlink.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -93,6 +76,9 @@ static char *rcsid = "$Id: toshoboe.c,v 1.5 1999/05/12 12:24:39 root Exp root $"
 #include <net/irda/irlap_frame.h>
 #include <net/irda/irda_device.h>
 
+#include <linux/pm.h>
+static int toshoboe_pmproc (struct pm_dev *dev, pm_request_t rqst, void *data);
+
 #include <net/irda/toshoboe.h>
 
 static char *driver_name = "toshoboe";
@@ -100,11 +86,13 @@ static char *driver_name = "toshoboe";
 static struct toshoboe_cb *dev_self[NSELFS + 1] =
 {NULL, NULL, NULL, NULL, NULL};
 
+static int max_baud = 4000000;
+
 /* Shutdown the chip and point the taskfile reg somewhere else */
-static void 
+static void
 toshoboe_stopchip (struct toshoboe_cb *self)
 {
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
   outb_p (0x0e, OBOE_REG_11);
 
@@ -117,16 +105,19 @@ toshoboe_stopchip (struct toshoboe_cb *self)
   outb_p (0x00, OBOE_ISR);      /*FIXME: should i do this to disbale ints */
   outb_p (0x80, OBOE_RST);
   outb_p (0xe, OBOE_LOCK);
+
 }
 
 /*Set the baud rate */
-static void 
+static void
 toshoboe_setbaud (struct toshoboe_cb *self, int baud)
 {
-  DEBUG (4, __FUNCTION__ "()\n");
+  unsigned long flags;
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
-  printk (KERN_WARNING "ToshOboe: seting baud to %d\n", baud);
+  printk (KERN_WARNING "ToshOboe: setting baud to %d\n", baud);
 
+  save_flags (flags);
   cli ();
   switch (baud)
     {
@@ -177,21 +168,22 @@ toshoboe_setbaud (struct toshoboe_cb *self, int baud)
       break;
     }
 
-  sti ();
+  restore_flags (flags);
 
   outb_p (0x00, OBOE_RST);
   outb_p (0x80, OBOE_RST);
   outb_p (0x01, OBOE_REG_9);
 
+  self->io.speed = baud;
 }
 
 /* Wake the chip up and get it looking at the taskfile */
-static void 
+static void
 toshoboe_startchip (struct toshoboe_cb *self)
 {
   __u32 physaddr;
 
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
 
   outb_p (0, OBOE_LOCK);
@@ -217,19 +209,19 @@ toshoboe_startchip (struct toshoboe_cb *self)
 }
 
 /*Let the chip look at memory */
-static void 
+static void
 toshoboe_enablebm (struct toshoboe_cb *self)
 {
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
   pci_set_master (self->pdev);
 }
 
 /*Don't let the chip look at memory */
-static void 
+static void
 toshoboe_disablebm (struct toshoboe_cb *self)
 {
   __u8 command;
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
   pci_read_config_byte (self->pdev, PCI_COMMAND, &command);
   command &= ~PCI_COMMAND_MASTER;
@@ -238,13 +230,15 @@ toshoboe_disablebm (struct toshoboe_cb *self)
 }
 
 /*setup the taskfile */
-static void 
+static void
 toshoboe_initbuffs (struct toshoboe_cb *self)
 {
   int i;
+  unsigned long flags;
 
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
+  save_flags (flags);
   cli ();
 
   for (i = 0; i < TX_SLOTS; ++i)
@@ -261,25 +255,38 @@ toshoboe_initbuffs (struct toshoboe_cb *self)
       self->taskfile->recv[i].buffer = virt_to_bus (self->recv_bufs[i]);
     }
 
-  sti ();
+  restore_flags (flags);
 }
 
-
 /*Transmit something */
-static int 
-toshoboe_hard_xmit (struct sk_buff *skb, struct device *dev)
+static int
+toshoboe_hard_xmit (struct sk_buff *skb, struct net_device *dev)
 {
-  struct irda_device *idev;
   struct toshoboe_cb *self;
+  __u32 speed;
   int mtt, len;
 
-  idev = (struct irda_device *) dev->priv;
-  ASSERT (idev != NULL, return 0;);
-  ASSERT (idev->magic == IRDA_DEVICE_MAGIC, return 0;);
+  self = (struct toshoboe_cb *) dev->priv;
 
-  self = idev->priv;
-  ASSERT (self != NULL, return 0;);
+  ASSERT (self != NULL, return 0;
+    );
 
+  /* Check if we need to change the speed */
+  if ((speed = irda_get_speed(skb)) != self->io.speed) {
+	/* Check for empty frame */
+	if (!skb->len) {
+	    toshoboe_setbaud(self, speed); 
+	    return 0;
+	} else
+	    self->new_speed = speed;
+  }
+
+  netif_stop_queue(dev);
+  
+  if (self->stopped) {
+	  dev_kfree_skb(skb);
+    return 0;
+  }
 
 #ifdef ONETASK
   if (self->txpending)
@@ -319,17 +326,14 @@ toshoboe_hard_xmit (struct sk_buff *skb, struct device *dev)
 
   self->txpending++;
 
-  /*FIXME: ask about tbusy,media_busy stuff, for the moment */
-  /*tbusy means can't queue any more */
+  /*FIXME: ask about busy,media_busy stuff, for the moment */
+  /*busy means can't queue any more */
 #ifndef ONETASK
-  if (self->txpending == TX_SLOTS)
-    {
-#else
+  if (self->txpending != TX_SLOTS)
   {
-#endif
-    if (irda_lock ((void *) &dev->tbusy) == FALSE)
-      return -EBUSY;
+  	netif_wake_queue(dev);
   }
+#endif
 
   outb_p (0x80, OBOE_RST);
   outb_p (1, OBOE_REG_9);
@@ -343,27 +347,21 @@ toshoboe_hard_xmit (struct sk_buff *skb, struct device *dev)
 }
 
 /*interrupt handler */
-static void 
+static void
 toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 {
-  struct irda_device *idev = (struct irda_device *) dev_id;
-  struct toshoboe_cb *self;
+  struct toshoboe_cb *self = (struct toshoboe_cb *) dev_id;
   __u8 irqstat;
   struct sk_buff *skb;
 
-  if (idev == NULL)
+  if (self == NULL)
     {
       printk (KERN_WARNING "%s: irq %d for unknown device.\n",
               driver_name, irq);
       return;
     }
 
-  self = idev->priv;
-
-  if (!self)
-    return;
-
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
   irqstat = inb_p (OBOE_ISR);
 
@@ -379,12 +377,15 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
     {
       self->txpending--;
 
-      idev->stats.tx_packets++;
+      self->stats.tx_packets++;
 
-      idev->media_busy = FALSE;
-      idev->netdev.tbusy = 0;
+      if (self->new_speed) {
+	      toshoboe_setbaud(self, self->new_speed);
 
-      mark_bh (NET_BH);
+	      self->new_speed = 0;
+      }
+      /* Tell network layer that we want more frames */
+      netif_wake_queue(self->netdev);
     }
 
   if (irqstat & OBOE_ISR_RXDONE)
@@ -399,8 +400,9 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 #endif
         {
           int len = self->taskfile->recv[self->rxs].len;
-	
-	  if (len>2) len-=2;
+
+          if (len > 2)
+            len -= 2;
 
           skb = dev_alloc_skb (len + 1);
           if (skb)
@@ -410,8 +412,8 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
               skb_put (skb, len);
               memcpy (skb->data, self->recv_bufs[self->rxs], len);
 
-              idev->stats.rx_packets++;
-              skb->dev = &idev->netdev;
+              self->stats.rx_packets++;
+              skb->dev = self->netdev;
               skb->mac.raw = skb->data;
               skb->protocol = htons (ETH_P_IRDA);
             }
@@ -420,8 +422,6 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
               printk (KERN_INFO __FUNCTION__
                       "(), memory squeeze, dropping frame.\n");
             }
-
-
 
           self->taskfile->recv[self->rxs].control = 0x83;
           self->taskfile->recv[self->rxs].len = 0x0;
@@ -448,76 +448,18 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
     {
       /*FIXME: I think this is a TX or RX error of some sort */
 
-      idev->stats.tx_errors++;
-      idev->stats.rx_errors++;
+      self->stats.tx_errors++;
+      self->stats.rx_errors++;
 
     }
 
 
 }
 
-
-
-/* Change the baud rate */
-static void 
-toshoboe_change_speed (struct irda_device *idev, int speed)
+static int
+toshoboe_net_init (struct net_device *dev)
 {
-  struct toshoboe_cb *self;
-  DEBUG (4, __FUNCTION__ "()\n");
-
-  ASSERT (idev != NULL, return;);
-  ASSERT (idev->magic == IRDA_DEVICE_MAGIC, return;);
-
-  self = idev->priv;
-  ASSERT (self != NULL, return;);
-
-  idev->io.baudrate = speed;
-
-  toshoboe_setbaud (self, speed);
-
-}
-
-
-/* Check all xmit_tasks finished */
-static void 
-toshoboe_wait_until_sent (struct irda_device *idev)
-{
-  struct toshoboe_cb *self;
-  int i;
-
-  DEBUG (4, __FUNCTION__ "()\n");
-
-  ASSERT (idev != NULL, return;);
-  ASSERT (idev->magic == IRDA_DEVICE_MAGIC, return;);
-
-  self = idev->priv;
-  ASSERT (self != NULL, return;);
-
-  for (i = 0; i < TX_SLOTS; ++i)
-    {
-      while (self->taskfile->xmit[i].control)
-        {
-          current->state = TASK_INTERRUPTIBLE;
-          schedule_timeout (6);
-        }
-    }
-
-}
-
-static int 
-toshoboe_is_receiving (struct irda_device *idev)
-{
-  DEBUG (4, __FUNCTION__ "()\n");
-
-/*FIXME Can't tell! */
-  return (FALSE);
-}
-
-
-static int 
-toshoboe_net_init (struct device *dev)
-{
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
   /* Setup to be a normal IrDA network device driver */
   irda_device_setup (dev);
@@ -527,37 +469,12 @@ toshoboe_net_init (struct device *dev)
 }
 
 
-
-
-static int 
-toshoboe_net_open (struct device *dev)
+static void 
+toshoboe_initptrs (struct toshoboe_cb *self)
 {
-  struct irda_device *idev;
-  struct toshoboe_cb *self;
 
-  DEBUG (4, __FUNCTION__ "()\n");
-
-  ASSERT (dev != NULL, return -1;);
-  idev = (struct irda_device *) dev->priv;
-
-  ASSERT (idev != NULL, return 0;);
-  ASSERT (idev->magic == IRDA_DEVICE_MAGIC, return 0;);
-
-  self = idev->priv;
-  ASSERT (self != NULL, return 0;);
-
-  if (request_irq (idev->io.irq, toshoboe_interrupt,
-                   SA_SHIRQ | SA_INTERRUPT, idev->name, (void *) idev))
-    {
-
-      return -EAGAIN;
-    }
-
-  toshoboe_initbuffs (self);
-  toshoboe_enablebm (self);
-  toshoboe_startchip (self);
-
-
+  unsigned long flags;
+  save_flags (flags);
   cli ();
 
   /*FIXME: need to test this carefully to check which one */
@@ -568,11 +485,11 @@ toshoboe_net_open (struct device *dev)
   self->rxs = inb_p (OBOE_RCVT);
   self->txs = inb_p (OBOE_XMTT) - OBOE_XMTT_OFFSET;
 
-#ifdef 0
+#if 0
   self->rxs = 0;
   self->txs = 0;
 #endif
-#ifdef 0
+#if 0
   self->rxs = RX_SLOTS - 1;
   self->txs = 0;
 #endif
@@ -580,45 +497,84 @@ toshoboe_net_open (struct device *dev)
 
   self->txpending = 0;
 
-  sti ();
+  restore_flags (flags);
+
+}
 
 
-  dev->tbusy = 0;
-  dev->interrupt = 0;
-  dev->start = 1;
+static int
+toshoboe_net_open (struct net_device *dev)
+{
+  struct toshoboe_cb *self;
 
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+
+  ASSERT (dev != NULL, return -1;
+    );
+  self = (struct toshoboe_cb *) dev->priv;
+
+  ASSERT (self != NULL, return 0;
+    );
+
+  if (self->stopped)
+    return 0;
+
+  if (request_irq (self->io.irq, toshoboe_interrupt,
+                   SA_SHIRQ | SA_INTERRUPT, dev->name, (void *) self))
+    {
+
+      return -EAGAIN;
+    }
+
+  toshoboe_initbuffs (self);
+  toshoboe_enablebm (self);
+  toshoboe_startchip (self);
+  toshoboe_initptrs (self);
+
+  /* Ready to play! */
+  netif_start_queue(dev);  
+  /* 
+   * Open new IrLAP layer instance, now that everything should be
+   * initialized properly 
+   */
+  self->irlap = irlap_open(dev, &self->qos);	
+
+  self->open = 1;
+	
   MOD_INC_USE_COUNT;
 
   return 0;
 
 }
 
-static int 
-toshoboe_net_close (struct device *dev)
+static int
+toshoboe_net_close (struct net_device *dev)
 {
-  struct irda_device *idev;
   struct toshoboe_cb *self;
 
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
-  ASSERT (dev != NULL, return -1;);
-  idev = (struct irda_device *) dev->priv;
+  ASSERT (dev != NULL, return -1;
+    );
+  self = (struct toshoboe_cb *) dev->priv;
 
-  ASSERT (idev != NULL, return 0;);
-  ASSERT (idev->magic == IRDA_DEVICE_MAGIC, return 0;);
+  /* Stop device */
+  netif_stop_queue(dev);
+    
+  /* Stop and remove instance of IrLAP */
+  if (self->irlap)
+	  irlap_close(self->irlap);
+  self->irlap = NULL;
 
-  dev->tbusy = 1;
-  dev->start = 0;
+  self->open = 0;
 
+  free_irq (self->io.irq, (void *) self);
 
-  self = idev->priv;
-
-  ASSERT (self != NULL, return 0;);
-
-  free_irq (idev->io.irq, (void *) idev);
-
-  toshoboe_stopchip (self);
-  toshoboe_disablebm (self);
+  if (!self->stopped)
+    {
+      toshoboe_stopchip (self);
+      toshoboe_disablebm (self);
+    }
 
   MOD_DEC_USE_COUNT;
 
@@ -626,28 +582,80 @@ toshoboe_net_close (struct device *dev)
 
 }
 
+/*
+ * Function toshoboe_net_ioctl (dev, rq, cmd)
+ *
+ *    Process IOCTL commands for this device
+ *
+ */
+static int toshoboe_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+{
+	struct if_irda_req *irq = (struct if_irda_req *) rq;
+	struct toshoboe_cb *self;
+	unsigned long flags;
+	int ret = 0;
 
+	ASSERT(dev != NULL, return -1;);
+
+	self = dev->priv;
+
+	ASSERT(self != NULL, return -1;);
+
+	IRDA_DEBUG(2, __FUNCTION__ "(), %s, (cmd=0x%X)\n", dev->name, cmd);
+	
+	/* Disable interrupts & save flags */
+	save_flags(flags);
+	cli();
+	
+	switch (cmd) {
+	case SIOCSBANDWIDTH: /* Set bandwidth */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+		/* toshoboe_setbaud(self, irq->ifr_baudrate); */
+                /* Just change speed once - inserted by Paul Bristow */
+	        self->new_speed = irq->ifr_baudrate;
+		break;
+	case SIOCSMEDIABUSY: /* Set media busy */
+		if (!capable(CAP_NET_ADMIN))
+			return -EPERM;
+		irda_device_set_media_busy(self->netdev, TRUE);
+		break;
+	case SIOCGRECEIVING: /* Check if we are receiving right now */
+		irq->ifr_receiving = 0; /* Can't tell */
+		break;
+	default:
+		ret = -EOPNOTSUPP;
+	}
+	
+	restore_flags(flags);
+	
+	return ret;
+}
 
 #ifdef MODULE
 
-static int 
-toshoboe_close (struct irda_device *idev)
+MODULE_DESCRIPTION("Toshiba OBOE IrDA Device Driver");
+MODULE_AUTHOR("James McKenzie <james@fishsoup.dhs.org>");
+MODULE_PARM (max_baud, "i");
+MODULE_PARM_DESC(max_baus, "Maximum baud rate");
+
+static int
+toshoboe_close (struct toshoboe_cb *self)
 {
-  struct toshoboe_cb *self;
   int i;
 
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
-  ASSERT (idev != NULL, return -1;);
-  ASSERT (idev->magic == IRDA_DEVICE_MAGIC, return -1;);
+  ASSERT (self != NULL, return -1;
+    );
 
-  self = idev->priv;
+  if (!self->stopped)
+    {
+      toshoboe_stopchip (self);
+      toshoboe_disablebm (self);
+    }
 
-  ASSERT (self != NULL, return -1;);
-
-  toshoboe_stopchip (self);
-
-  release_region (idev->io.iobase, idev->io.io_ext);
+  release_region (self->io.sir_base, self->io.sir_ext);
 
 
   for (i = 0; i < TX_SLOTS; ++i)
@@ -662,13 +670,16 @@ toshoboe_close (struct irda_device *idev)
       self->recv_bufs[i] = NULL;
     }
 
+  if (self->netdev) {
+	  /* Remove netdevice */
+	  rtnl_lock();
+	  unregister_netdevice(self->netdev);
+	  rtnl_unlock();
+  }
 
   kfree (self->taskfilebuf);
   self->taskfilebuf = NULL;
   self->taskfile = NULL;
-
-
-  irda_device_close (idev);
 
   return (0);
 
@@ -678,16 +689,17 @@ toshoboe_close (struct irda_device *idev)
 
 
 
-static int 
+static int
 toshoboe_open (struct pci_dev *pci_dev)
 {
   struct toshoboe_cb *self;
-  struct irda_device *idev;
+  struct net_device *dev;
+  struct pm_dev *pmdev;
   int i = 0;
-  int ok=0;
+  int ok = 0;
+  int err;
 
-
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
   while (dev_self[i])
     i++;
@@ -709,26 +721,24 @@ toshoboe_open (struct pci_dev *pci_dev)
 
   memset (self, 0, sizeof (struct toshoboe_cb));
 
+  dev_self[i] = self;           /*This needs moving if we ever get more than one chip */
 
-  dev_self[i] = self;
-
+  self->open = 0;
+  self->stopped = 0;
   self->pdev = pci_dev;
-  self->base = pci_dev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
+  self->base = pci_dev->resource[0].start;
 
-  idev = &self->idev;
-
-  /*Setup idev */
-
-  idev->io.iobase = self->base;
-  idev->io.irq = pci_dev->irq;
-  idev->io.io_ext = CHIP_IO_EXTENT;
+  self->io.sir_base = self->base;
+  self->io.irq = pci_dev->irq;
+  self->io.sir_ext = CHIP_IO_EXTENT;
+  self->io.speed = 9600;
 
   /* Lock the port that we need */
-  i = check_region (idev->io.iobase, idev->io.io_ext);
+  i = check_region (self->io.sir_base, self->io.sir_ext);
   if (i < 0)
     {
-      DEBUG (0, __FUNCTION__ "(), can't get iobase of 0x%03x\n",
-             idev->io.iobase);
+      IRDA_DEBUG (0, __FUNCTION__ "(), can't get iobase of 0x%03x\n",
+             self->io.sir_base);
 
       dev_self[i] = NULL;
       kfree (self);
@@ -736,55 +746,52 @@ toshoboe_open (struct pci_dev *pci_dev)
       return -ENODEV;
     }
 
-  request_region (idev->io.iobase, idev->io.io_ext, driver_name);
 
-  irda_init_max_qos_capabilies (&idev->qos);
+  irda_init_max_qos_capabilies (&self->qos);
+  self->qos.baud_rate.bits = 0;
 
-  idev->qos.baud_rate.bits = IR_2400 | /*IR_4800 | */ IR_9600 | IR_19200 |
-    IR_115200;
+  if (max_baud >= 2400)
+    self->qos.baud_rate.bits |= IR_2400;
+  /*if (max_baud>=4800) idev->qos.baud_rate.bits|=IR_4800; */
+  if (max_baud >= 9600)
+    self->qos.baud_rate.bits |= IR_9600;
+  if (max_baud >= 19200)
+    self->qos.baud_rate.bits |= IR_19200;
+  if (max_baud >= 115200)
+    self->qos.baud_rate.bits |= IR_115200;
 #ifdef ENABLE_FAST
- idev->qos.baud_rate.bits|= IR_576000 | IR_1152000 | (IR_4000000 << 8);
+  if (max_baud >= 576000)
+    self->qos.baud_rate.bits |= IR_576000;
+  if (max_baud >= 1152000)
+    self->qos.baud_rate.bits |= IR_1152000;
+  if (max_baud >= 4000000)
+    self->qos.baud_rate.bits |= (IR_4000000 << 8);
 #endif
 
-  idev->qos.min_turn_time.bits = 0xff;  /*FIXME: what does this do? */
 
-  irda_qos_bits_to_value (&idev->qos);
+  self->qos.min_turn_time.bits = 0xff;  /*FIXME: what does this do? */
 
-  idev->flags = IFF_SIR | IFF_DMA | IFF_PIO;
+  irda_qos_bits_to_value (&self->qos);
+
+  self->flags = IFF_SIR | IFF_DMA | IFF_PIO;
 
 #ifdef ENABLE_FAST
-  idev->flags |= IFF_FIR;
+  if (max_baud >= 576000)
+    self->flags |= IFF_FIR;
 #endif
-
-  /* These aren't much use as we need to have a whole panoply of
-   * buffers running */
-
-  idev->rx_buff.flags = 0;
-  idev->tx_buff.flags = 0;
-  idev->rx_buff.truesize = 0;
-  idev->rx_buff.truesize = 0;
-
-  idev->change_speed = toshoboe_change_speed;
-  idev->wait_until_sent = toshoboe_wait_until_sent;
-  idev->is_receiving = toshoboe_is_receiving;
-
-  idev->netdev.init = toshoboe_net_init;
-  idev->netdev.hard_start_xmit = toshoboe_hard_xmit;
-  idev->netdev.open = toshoboe_net_open;
-  idev->netdev.stop = toshoboe_net_close;
-
 
   /* Now setup the endless buffers we need */
 
   self->txs = 0;
   self->rxs = 0;
 
-  self->taskfilebuf = kmalloc (OBOE_TASK_BUF_LEN, GFP_KERNEL | GFP_DMA);
-  if (!self->taskfilebuf) {
-	printk(KERN_ERR "toshoboe: kmalloc for DMA failed()\n");
-	kfree(self);
-	return -ENOMEM;
-  }
+  self->taskfilebuf = kmalloc (OBOE_TASK_BUF_LEN, GFP_KERNEL);
+  if (!self->taskfilebuf)
+    {
+      printk (KERN_ERR "toshoboe: kmalloc for DMA failed()\n");
+      kfree (self);
+      return -ENOMEM;
+    }
 
 
   memset (self->taskfilebuf, 0, OBOE_TASK_BUF_LEN);
@@ -803,29 +810,62 @@ toshoboe_open (struct pci_dev *pci_dev)
   for (i = 0; i < TX_SLOTS; ++i)
     {
       self->xmit_bufs[i] = kmalloc (TX_BUF_SZ, GFP_KERNEL | GFP_DMA);
-      if (self->xmit_bufs[i]) ok++;
+      if (self->xmit_bufs[i])
+        ok++;
     }
 
   for (i = 0; i < RX_SLOTS; ++i)
     {
       self->recv_bufs[i] = kmalloc (TX_BUF_SZ, GFP_KERNEL | GFP_DMA);
-      if (self->recv_bufs[i]) ok++;
+      if (self->recv_bufs[i])
+        ok++;
     }
 
-  if (ok!=RX_SLOTS+TX_SLOTS) {
-	printk(KERN_ERR  "toshoboe: kmalloc for buffers failed()\n");
+  if (ok != RX_SLOTS + TX_SLOTS)
+    {
+      printk (KERN_ERR "toshoboe: kmalloc for buffers failed()\n");
 
 
-  for (i = 0; i < TX_SLOTS; ++i) if (self->xmit_bufs[i]) kfree(self->xmit_bufs[i]);
-  for (i = 0; i < RX_SLOTS; ++i) if (self->recv_bufs[i]) kfree(self->recv_bufs[i]);
+      for (i = 0; i < TX_SLOTS; ++i)
+        if (self->xmit_bufs[i])
+          kfree (self->xmit_bufs[i]);
+      for (i = 0; i < RX_SLOTS; ++i)
+        if (self->recv_bufs[i])
+          kfree (self->recv_bufs[i]);
 
-	kfree(self);
-	return -ENOMEM;
+      kfree (self);
+      return -ENOMEM;
 
+    }
+
+  request_region (self->io.sir_base, self->io.sir_ext, driver_name);
+
+  if (!(dev = dev_alloc("irda%d", &err))) {
+	  ERROR(__FUNCTION__ "(), dev_alloc() failed!\n");
+	  return -ENOMEM;
+  }
+  dev->priv = (void *) self;
+  self->netdev = dev;
+  
+  MESSAGE("IrDA: Registered device %s\n", dev->name);
+
+  dev->init = toshoboe_net_init;
+  dev->hard_start_xmit = toshoboe_hard_xmit;
+  dev->open = toshoboe_net_open;
+  dev->stop = toshoboe_net_close;
+  dev->do_ioctl = toshoboe_net_ioctl;
+
+  rtnl_lock();
+  err = register_netdevice(dev);
+  rtnl_unlock();
+  if (err) {
+	  ERROR(__FUNCTION__ "(), register_netdev() failed!\n");
+	  return -1;
   }
 
-
-  irda_device_open (idev, driver_name, self);
+  pmdev = pm_register (PM_PCI_DEV, PM_PCI_ID(pci_dev), toshoboe_pmproc);
+  if (pmdev)
+	  pmdev->data = self;
 
   printk (KERN_WARNING "ToshOboe: Using ");
 #ifdef ONETASK
@@ -838,7 +878,84 @@ toshoboe_open (struct pci_dev *pci_dev)
   return (0);
 }
 
-__initfunc (int toshoboe_init (void))
+static void 
+toshoboe_gotosleep (struct toshoboe_cb *self)
+{
+  int i = 10;
+
+  printk (KERN_WARNING "ToshOboe: suspending\n");
+
+  if (self->stopped)
+    return;
+
+  self->stopped = 1;
+
+  if (!self->open)
+    return;
+
+/*FIXME: can't sleep here wait one second */
+
+  while ((i--) && (self->txpending))
+    mdelay (100);
+
+  toshoboe_stopchip (self);
+  toshoboe_disablebm (self);
+
+  self->txpending = 0;
+
+}
+
+
+static void 
+toshoboe_wakeup (struct toshoboe_cb *self)
+{
+  unsigned long flags;
+
+  if (!self->stopped)
+    return;
+
+  if (!self->open)
+    {
+      self->stopped = 0;
+      return;
+    }
+
+  save_flags (flags);
+  cli ();
+
+  toshoboe_initbuffs (self);
+  toshoboe_enablebm (self);
+  toshoboe_startchip (self);
+
+  toshoboe_setbaud (self, self->io.speed);
+
+  toshoboe_initptrs (self);
+
+  netif_wake_queue(self->netdev);
+  restore_flags (flags);
+  printk (KERN_WARNING "ToshOboe: waking up\n");
+
+}
+
+static int 
+toshoboe_pmproc (struct pm_dev *dev, pm_request_t rqst, void *data)
+{
+  struct toshoboe_cb *self = (struct toshoboe_cb *) dev->data;
+  if (self) {
+	  switch (rqst) {
+	  case PM_SUSPEND:
+		  toshoboe_gotosleep (self);
+		  break;
+	  case PM_RESUME:
+		  toshoboe_wakeup (self);
+		  break;
+	  }
+  }
+  return 0;
+}
+
+
+int __init toshoboe_init (void)
 {
   struct pci_dev *pci_dev = NULL;
   int found = 0;
@@ -850,48 +967,53 @@ __initfunc (int toshoboe_init (void))
       if (pci_dev)
         {
           printk (KERN_WARNING "ToshOboe: Found 701 chip at 0x%0lx irq %d\n",
-                  pci_dev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK,
+		  pci_dev->resource[0].start,
                   pci_dev->irq);
 
           if (!toshoboe_open (pci_dev))
-            found++;
+	      found++;
         }
 
     }
   while (pci_dev);
 
+
   if (found)
-    return 0;
+    {
+      return 0;
+    }
 
   return -ENODEV;
 }
 
 #ifdef MODULE
 
-static void 
+static void
 toshoboe_cleanup (void)
 {
   int i;
 
-  DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, __FUNCTION__ "()\n");
 
   for (i = 0; i < 4; i++)
     {
       if (dev_self[i])
-        toshoboe_close (&(dev_self[i]->idev));
+        toshoboe_close (dev_self[i]);
     }
+
+  pm_unregister_all (toshoboe_pmproc);
 }
 
 
 
-int 
+int
 init_module (void)
 {
   return toshoboe_init ();
 }
 
 
-void 
+void
 cleanup_module (void)
 {
   toshoboe_cleanup ();

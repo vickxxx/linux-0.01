@@ -12,6 +12,7 @@
  *
  * Rani Assaf <rani@magic.metawire.com> :980802: JIFFIES and CPU clock sources are repaired.
  * Eduardo J. Blanco <ejbs@netlabs.com.uy> :990222: kmod support
+ * Jamal Hadi Salim <hadi@nortelnetworks.com>: 990601: ingress support
  */
 
 #include <linux/config.h>
@@ -39,8 +40,6 @@
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
-
-#define BUG_TRAP(x) if (!(x)) { printk("Assertion (" #x ") failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); }
 
 #ifdef CONFIG_RTNETLINK
 static int qdisc_notify(struct sk_buff *oskb, struct nlmsghdr *n, u32 clid,
@@ -95,9 +94,15 @@ static int tclass_notify(struct sk_buff *oskb, struct nlmsghdr *n,
 
    ---enqueue
 
-   enqueue returns number of enqueued packets i.e. this number is 1,
-   if packet was enqueued successfully and <1 if something (not
-   necessary THIS packet) was dropped.
+   enqueue returns 0, if packet was enqueued successfully.
+   If packet (this one or another one) was dropped, it returns
+   not zero error code.
+   NET_XMIT_DROP 	- this packet dropped
+     Expected action: do not backoff, but wait until queue will clear.
+   NET_XMIT_CN	 	- probably this packet enqueued, but another one dropped.
+     Expected action: backoff or ignore
+   NET_XMIT_POLICED	- dropped by police.
+     Expected action: backoff or error to real-time apps.
 
    Auxiliary routines:
 
@@ -186,7 +191,7 @@ int unregister_qdisc(struct Qdisc_ops *qops)
    (root qdisc, all its children, children of children etc.)
  */
 
-struct Qdisc *qdisc_lookup(struct device *dev, u32 handle)
+struct Qdisc *qdisc_lookup(struct net_device *dev, u32 handle)
 {
 	struct Qdisc *q;
 
@@ -206,6 +211,7 @@ struct Qdisc *qdisc_leaf(struct Qdisc *p, u32 classid)
 	if (cops == NULL)
 		return NULL;
 	cl = cops->get(p, classid);
+
 	if (cl == 0)
 		return NULL;
 	leaf = cops->leaf(p, cl);
@@ -276,7 +282,7 @@ void qdisc_put_rtab(struct qdisc_rate_table *tab)
 
 /* Allocate an unique handle from space managed by kernel */
 
-u32 qdisc_alloc_handle(struct device *dev)
+u32 qdisc_alloc_handle(struct net_device *dev)
 {
 	int i = 0x10000;
 	static u32 autohandle = TC_H_MAKE(0x80000000U, 0);
@@ -293,7 +299,7 @@ u32 qdisc_alloc_handle(struct device *dev)
 /* Attach toplevel qdisc to device dev */
 
 static struct Qdisc *
-dev_graft_qdisc(struct device *dev, struct Qdisc *qdisc)
+dev_graft_qdisc(struct net_device *dev, struct Qdisc *qdisc)
 {
 	struct Qdisc *oqdisc;
 
@@ -302,17 +308,32 @@ dev_graft_qdisc(struct device *dev, struct Qdisc *qdisc)
 
 	write_lock(&qdisc_tree_lock);
 	spin_lock_bh(&dev->queue_lock);
-	oqdisc = dev->qdisc_sleeping;
+	if (qdisc && qdisc->flags&TCQ_F_INGRES) {
+		oqdisc = dev->qdisc_ingress;
+		/* Prune old scheduler */
+		if (oqdisc && atomic_read(&oqdisc->refcnt) <= 1) {
+			/* delete */
+			qdisc_reset(oqdisc);
+			dev->qdisc_ingress = NULL;
+		} else {  /* new */
+			dev->qdisc_ingress = qdisc;
+		}
 
-	/* Prune old scheduler */
-	if (oqdisc && atomic_read(&oqdisc->refcnt) <= 1)
-		qdisc_reset(oqdisc);
+	} else {
 
-	/* ... and graft new one */
-	if (qdisc == NULL)
-		qdisc = &noop_qdisc;
-	dev->qdisc_sleeping = qdisc;
-	dev->qdisc = &noop_qdisc;
+		oqdisc = dev->qdisc_sleeping;
+
+		/* Prune old scheduler */
+		if (oqdisc && atomic_read(&oqdisc->refcnt) <= 1)
+			qdisc_reset(oqdisc);
+
+		/* ... and graft new one */
+		if (qdisc == NULL)
+			qdisc = &noop_qdisc;
+		dev->qdisc_sleeping = qdisc;
+		dev->qdisc = &noop_qdisc;
+	}
+
 	spin_unlock_bh(&dev->queue_lock);
 	write_unlock(&qdisc_tree_lock);
 
@@ -329,13 +350,19 @@ dev_graft_qdisc(struct device *dev, struct Qdisc *qdisc)
    Old qdisc is not destroyed but returned in *old.
  */
 
-int qdisc_graft(struct device *dev, struct Qdisc *parent, u32 classid,
+int qdisc_graft(struct net_device *dev, struct Qdisc *parent, u32 classid,
 		struct Qdisc *new, struct Qdisc **old)
 {
 	int err = 0;
+	struct Qdisc *q = *old;
 
-	if (parent == NULL) {
-		*old = dev_graft_qdisc(dev, new);
+
+	if (parent == NULL) { 
+		if (q && q->flags&TCQ_F_INGRES) {
+			*old = dev_graft_qdisc(dev, q);
+		} else {
+			*old = dev_graft_qdisc(dev, new);
+		}
 	} else {
 		struct Qdisc_class_ops *cops = parent->ops->cl_ops;
 
@@ -361,7 +388,7 @@ int qdisc_graft(struct device *dev, struct Qdisc *parent, u32 classid,
  */
 
 static struct Qdisc *
-qdisc_create(struct device *dev, u32 handle, struct rtattr **tca, int *errp)
+qdisc_create(struct net_device *dev, u32 handle, struct rtattr **tca, int *errp)
 {
 	int err;
 	struct rtattr *kind = tca[TCA_KIND-1];
@@ -402,6 +429,10 @@ qdisc_create(struct device *dev, u32 handle, struct rtattr **tca, int *errp)
 	memset(sch, 0, size);
 
 	skb_queue_head_init(&sch->q);
+
+	if (handle == TC_H_INGRESS)
+		sch->flags |= TCQ_F_INGRES;
+
 	sch->ops = ops;
 	sch->enqueue = ops->enqueue;
 	sch->dequeue = ops->dequeue;
@@ -414,7 +445,11 @@ qdisc_create(struct device *dev, u32 handle, struct rtattr **tca, int *errp)
 		if (handle == 0)
 			goto err_out;
 	}
-	sch->handle = handle;
+
+	if (handle == TC_H_INGRESS)
+                sch->handle =TC_H_MAKE(TC_H_INGRESS, 0);
+        else
+                sch->handle = handle;
 
 	if (!ops->init || (err = ops->init(sch, tca[TCA_OPTIONS-1])) == 0) {
 		write_lock(&qdisc_tree_lock);
@@ -503,23 +538,27 @@ static int tc_get_qdisc(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 {
 	struct tcmsg *tcm = NLMSG_DATA(n);
 	struct rtattr **tca = arg;
-	struct device *dev;
+	struct net_device *dev;
 	u32 clid = tcm->tcm_parent;
 	struct Qdisc *q = NULL;
 	struct Qdisc *p = NULL;
 	int err;
 
-	if ((dev = dev_get_by_index(tcm->tcm_ifindex)) == NULL)
+	if ((dev = __dev_get_by_index(tcm->tcm_ifindex)) == NULL)
 		return -ENODEV;
 
 	if (clid) {
 		if (clid != TC_H_ROOT) {
-			if ((p = qdisc_lookup(dev, TC_H_MAJ(clid))) == NULL)
-				return -ENOENT;
-			q = qdisc_leaf(p, clid);
-		} else
+			if (TC_H_MAJ(clid) != TC_H_MAJ(TC_H_INGRESS)) {
+				if ((p = qdisc_lookup(dev, TC_H_MAJ(clid))) == NULL)
+					return -ENOENT;
+				q = qdisc_leaf(p, clid);
+			} else { /* ingress */
+				q = dev->qdisc_ingress;
+                        }
+		} else {
 			q = dev->qdisc_sleeping;
-
+		}
 		if (!q)
 			return -ENOENT;
 
@@ -560,20 +599,24 @@ static int tc_modify_qdisc(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 {
 	struct tcmsg *tcm = NLMSG_DATA(n);
 	struct rtattr **tca = arg;
-	struct device *dev;
+	struct net_device *dev;
 	u32 clid = tcm->tcm_parent;
 	struct Qdisc *q = NULL;
 	struct Qdisc *p = NULL;
 	int err;
 
-	if ((dev = dev_get_by_index(tcm->tcm_ifindex)) == NULL)
+	if ((dev = __dev_get_by_index(tcm->tcm_ifindex)) == NULL)
 		return -ENODEV;
 
 	if (clid) {
 		if (clid != TC_H_ROOT) {
-			if ((p = qdisc_lookup(dev, TC_H_MAJ(clid))) == NULL)
-				return -ENOENT;
-			q = qdisc_leaf(p, clid);
+			if (clid != TC_H_INGRESS) {
+				if ((p = qdisc_lookup(dev, TC_H_MAJ(clid))) == NULL)
+					return -ENOENT;
+				q = qdisc_leaf(p, clid);
+			} else { /*ingress */
+				q = dev->qdisc_ingress;
+			}
 		} else {
 			q = dev->qdisc_sleeping;
 		}
@@ -651,7 +694,10 @@ static int tc_modify_qdisc(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 create_n_graft:
 	if (!(n->nlmsg_flags&NLM_F_CREATE))
 		return -ENOENT;
-	q = qdisc_create(dev, tcm->tcm_handle, tca, &err);
+	if (clid == TC_H_INGRESS)
+		q = qdisc_create(dev, tcm->tcm_parent, tca, &err);
+        else
+		q = qdisc_create(dev, tcm->tcm_handle, tca, &err);
 	if (q == NULL)
 		return err;
 
@@ -751,7 +797,7 @@ static int tc_dump_qdisc(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	int idx, q_idx;
 	int s_idx, s_q_idx;
-	struct device *dev;
+	struct net_device *dev;
 	struct Qdisc *q;
 
 	s_idx = cb->args[0];
@@ -797,7 +843,7 @@ static int tc_ctl_tclass(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 {
 	struct tcmsg *tcm = NLMSG_DATA(n);
 	struct rtattr **tca = arg;
-	struct device *dev;
+	struct net_device *dev;
 	struct Qdisc *q = NULL;
 	struct Qdisc_class_ops *cops;
 	unsigned long cl = 0;
@@ -807,7 +853,7 @@ static int tc_ctl_tclass(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 	u32 qid = TC_H_MAJ(clid);
 	int err;
 
-	if ((dev = dev_get_by_index(tcm->tcm_ifindex)) == NULL)
+	if ((dev = __dev_get_by_index(tcm->tcm_ifindex)) == NULL)
 		return -ENODEV;
 
 	/*
@@ -971,7 +1017,7 @@ static int tc_dump_tclass(struct sk_buff *skb, struct netlink_callback *cb)
 {
 	int t;
 	int s_t;
-	struct device *dev;
+	struct net_device *dev;
 	struct Qdisc *q;
 	struct tcmsg *tcm = (struct tcmsg*)NLMSG_DATA(cb->nlh);
 	struct qdisc_dump_args arg;
@@ -1006,6 +1052,7 @@ static int tc_dump_tclass(struct sk_buff *skb, struct netlink_callback *cb)
 
 	cb->args[0] = t;
 
+	dev_put(dev);
 	return skb->len;
 }
 #endif
@@ -1019,8 +1066,9 @@ static int psched_read_proc(char *buffer, char **start, off_t offset,
 {
 	int len;
 
-	len = sprintf(buffer, "%08x %08x\n",
-		      psched_tick_per_us, psched_us_per_tick);
+	len = sprintf(buffer, "%08x %08x %08x %08x\n",
+		      psched_tick_per_us, psched_us_per_tick,
+		      1000000, HZ);
 
 	len -= offset;
 
@@ -1063,7 +1111,7 @@ PSCHED_WATCHER psched_time_mark;
 static void psched_tick(unsigned long);
 
 static struct timer_list psched_timer =
-	{ NULL, NULL, 0, 0L, psched_tick };
+	{ function: psched_tick };
 
 static void psched_tick(unsigned long dummy)
 {
@@ -1083,18 +1131,13 @@ static void psched_tick(unsigned long dummy)
 #endif
 
 #if PSCHED_CLOCK_SOURCE == PSCHED_CPU
-__initfunc(int psched_calibrate_clock(void))
+int __init psched_calibrate_clock(void)
 {
 	psched_time_t stamp, stamp1;
 	struct timeval tv, tv1;
 	psched_tdiff_t delay;
 	long rdelay;
 	unsigned long stop;
-
-#if CPU == 586 || CPU == 686
-	if (!(boot_cpu_data.x86_capability & X86_FEATURE_TSC))
-		return -1;
-#endif
 
 #ifdef PSCHED_WATCHER
 	psched_tick(0);
@@ -1122,13 +1165,10 @@ __initfunc(int psched_calibrate_clock(void))
 }
 #endif
 
-__initfunc(int pktsched_init(void))
+int __init pktsched_init(void)
 {
 #ifdef CONFIG_RTNETLINK
 	struct rtnetlink_link *link_p;
-#endif
-#ifdef CONFIG_PROC_FS
-	struct proc_dir_entry *ent;
 #endif
 
 #if PSCHED_CLOCK_SOURCE == PSCHED_CPU
@@ -1163,7 +1203,7 @@ __initfunc(int pktsched_init(void))
 
 #define INIT_QDISC(name) { \
           extern struct Qdisc_ops name##_qdisc_ops; \
-          register_qdisc(&##name##_qdisc_ops); \
+          register_qdisc(& name##_qdisc_ops);       \
 	}
 
 	INIT_QDISC(pfifo);
@@ -1187,6 +1227,9 @@ __initfunc(int pktsched_init(void))
 #ifdef CONFIG_NET_SCH_GRED
        INIT_QDISC(gred);
 #endif
+#ifdef CONFIG_NET_SCH_INGRESS
+       INIT_QDISC(ingress);
+#endif
 #ifdef CONFIG_NET_SCH_DSMARK
        INIT_QDISC(dsmark);
 #endif
@@ -1202,13 +1245,15 @@ __initfunc(int pktsched_init(void))
 #ifdef CONFIG_NET_SCH_PRIO
 	INIT_QDISC(prio);
 #endif
+#ifdef CONFIG_NET_SCH_ATM
+	INIT_QDISC(atm);
+#endif
 #ifdef CONFIG_NET_CLS
 	tc_filter_init();
 #endif
 
 #ifdef CONFIG_PROC_FS
-	ent = create_proc_entry("net/psched", 0, 0);
-	ent->read_proc = psched_read_proc;
+	create_proc_read_entry("net/psched", 0, 0, psched_read_proc, NULL);
 #endif
 
 	return 0;

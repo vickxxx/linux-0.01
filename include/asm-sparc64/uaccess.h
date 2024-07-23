@@ -1,4 +1,4 @@
-/* $Id: uaccess.h,v 1.30 1999/05/25 16:53:32 jj Exp $ */
+/* $Id: uaccess.h,v 1.33 2000/08/29 07:01:58 davem Exp $ */
 #ifndef _ASM_UACCESS_H
 #define _ASM_UACCESS_H
 
@@ -36,14 +36,14 @@
 #define VERIFY_READ	0
 #define VERIFY_WRITE	1
 
-#define get_fs() (current->tss.current_ds)
+#define get_fs() (current->thread.current_ds)
 #define get_ds() (KERNEL_DS)
 
 #define segment_eq(a,b)  ((a).seg == (b).seg)
 
 #define set_fs(val)								\
 do {										\
-	current->tss.current_ds = (val);					\
+	current->thread.current_ds = (val);					\
 	__asm__ __volatile__ ("wr %%g0, %0, %%asi" : : "r" ((val).seg));	\
 } while(0)
 
@@ -102,22 +102,12 @@ extern void __ret_efault(void);
 unsigned long __pu_addr = (unsigned long)(ptr); \
 __put_user_nocheck((__typeof__(*(ptr)))(x),__pu_addr,sizeof(*(ptr))); })
 
-#define put_user_ret(x,ptr,retval) ({ \
-unsigned long __pu_addr = (unsigned long)(ptr); \
-__put_user_nocheck_ret((__typeof__(*(ptr)))(x),__pu_addr,sizeof(*(ptr)),retval); })
-
 #define get_user(x,ptr) ({ \
 unsigned long __gu_addr = (unsigned long)(ptr); \
 __get_user_nocheck((x),__gu_addr,sizeof(*(ptr)),__typeof__(*(ptr))); })
 
-#define get_user_ret(x,ptr,retval) ({ \
-unsigned long __gu_addr = (unsigned long)(ptr); \
-__get_user_nocheck_ret((x),__gu_addr,sizeof(*(ptr)),__typeof__(*(ptr)),retval); })
-
 #define __put_user(x,ptr) put_user(x,ptr)
-#define __put_user_ret(x,ptr,retval) put_user_ret(x,ptr,retval)
 #define __get_user(x,ptr) get_user(x,ptr)
-#define __get_user_ret(x,ptr,retval) get_user_ret(x,ptr,retval)
 
 struct __large_struct { unsigned long buf[100]; };
 #define __m(x) ((struct __large_struct *)(x))
@@ -288,43 +278,13 @@ extern __kernel_size_t __copy_in_user(void *to, const void *from,
 	__copy_from_user((void *)(to),	\
 		    (void *)(from), (__kernel_size_t)(n))
 
-#define copy_from_user_ret(to,from,n,retval) ({ \
-if (copy_from_user(to,from,n)) \
-	return retval; \
-})
-
-#define __copy_from_user_ret(to,from,n,retval) ({ \
-if (__copy_from_user(to,from,n)) \
-	return retval; \
-})
-
 #define copy_to_user(to,from,n) \
 	__copy_to_user((void *)(to), \
 	(void *) (from), (__kernel_size_t)(n))
 
-#define copy_to_user_ret(to,from,n,retval) ({ \
-if (copy_to_user(to,from,n)) \
-	return retval; \
-})
-
-#define __copy_to_user_ret(to,from,n,retval) ({ \
-if (__copy_to_user(to,from,n)) \
-	return retval; \
-})
-
 #define copy_in_user(to,from,n) \
 	__copy_in_user((void *)(to), \
 	(void *) (from), (__kernel_size_t)(n))
-
-#define copy_in_user_ret(to,from,n,retval) ({ \
-if (copy_in_user(to,from,n)) \
-	return retval; \
-})
-
-#define __copy_in_user_ret(to,from,n,retval) ({ \
-if (__copy_in_user(to,from,n)) \
-	return retval; \
-})
 
 extern __inline__ __kernel_size_t __clear_user(void *addr, __kernel_size_t size)
 {
@@ -336,19 +296,16 @@ extern __inline__ __kernel_size_t __clear_user(void *addr, __kernel_size_t size)
 #define clear_user(addr,n) \
 	__clear_user((void *)(addr), (__kernel_size_t)(n))
 
-#define clear_user_ret(addr,size,retval) ({ \
-if (clear_user(addr,size)) \
-	return retval; \
-})
-
 extern int __strncpy_from_user(unsigned long dest, unsigned long src, int count);
 
 #define strncpy_from_user(dest,src,count) \
 	__strncpy_from_user((unsigned long)(dest), (unsigned long)(src), (int)(count))
 
 extern int __strlen_user(const char *);
+extern int __strnlen_user(const char *, long len);
 
 #define strlen_user __strlen_user
+#define strnlen_user __strnlen_user
 
 #endif  /* __ASSEMBLY__ */
 

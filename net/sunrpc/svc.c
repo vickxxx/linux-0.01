@@ -32,6 +32,9 @@ svc_create(struct svc_program *prog, unsigned int bufsize, unsigned int xdrsize)
 	struct svc_serv	*serv;
 
 	xdr_init();
+#ifdef RPC_DEBUG
+	rpc_register_sysctl();
+#endif
 
 	if (!(serv = (struct svc_serv *) kmalloc(sizeof(*serv), GFP_KERNEL)))
 		return NULL;
@@ -42,6 +45,7 @@ svc_create(struct svc_program *prog, unsigned int bufsize, unsigned int xdrsize)
 	serv->sv_stats     = prog->pg_stats;
 	serv->sv_bufsz	   = bufsize? bufsize : 4096;
 	serv->sv_xdrsize   = xdrsize;
+	spin_lock_init(&serv->sv_lock);
 
 	serv->sv_name      = prog->pg_name;
 
@@ -269,8 +273,8 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 	if (prog != progp->pg_prog)
 		goto err_bad_prog;
 
-	versp = progp->pg_vers[vers];
-	if (!versp || vers >= progp->pg_nvers)
+	if (vers >= progp->pg_nvers ||
+	  !(versp = progp->pg_vers[vers]))
 		goto err_bad_vers;
 
 	procp = versp->vs_proc + proc;
@@ -355,7 +359,7 @@ err_bad_rpc:
 	goto sendit;
 
 err_bad_auth:
-	dprintk("svc: authentication failed (%ld)\n", ntohl(auth_stat));
+	dprintk("svc: authentication failed (%d)\n", ntohl(auth_stat));
 	serv->sv_stats->rpcbadauth++;
 	resp->buf[-1] = xdr_one;	/* REJECT */
 	svc_putlong(resp, xdr_one);	/* AUTH_ERROR */

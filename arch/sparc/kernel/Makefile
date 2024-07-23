@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.49 1999/01/02 16:45:37 davem Exp $
+# $Id: Makefile,v 1.62 2000/12/15 00:41:17 davem Exp $
 # Makefile for the linux kernel.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
@@ -7,45 +7,43 @@
 #
 # Note 2! The CFLAGS definitions are now in the main makefile...
 
+SH = $(CONFIG_SHELL)
+
 .S.s:
-	$(CPP) -D__ASSEMBLY__ $(AFLAGS) -ansi $< -o $*.s
+	$(CPP) $(AFLAGS) -ansi $< -o $*.s
 
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -ansi -c $< -o $*.o
+	$(CC) $(AFLAGS) -ansi -c $< -o $*.o
 
 all: kernel.o head.o init_task.o
 
 O_TARGET := kernel.o
+
+export-objs := sparc_ksyms.o
 IRQ_OBJS := irq.o sun4m_irq.o sun4c_irq.o sun4d_irq.o
-O_OBJS   := entry.o wof.o wuf.o etrap.o rtrap.o traps.o ${IRQ_OBJS} \
+obj-y    := entry.o wof.o wuf.o etrap.o rtrap.o traps.o ${IRQ_OBJS} \
 	    process.o signal.o ioport.o setup.o idprom.o \
-	    sys_sparc.o sunos_asm.o sparc-stub.o systbls.o sys_sunos.o  \
-	    sunos_ioctl.o time.o windows.o cpu.o devices.o \
-	    sclow.o solaris.o tadpole.o tick14.o ptrace.o sys_solaris.o \
-	    unaligned.o muldiv.o pcic.o
+	    sys_sparc.o sunos_asm.o sparc-stub.o systbls.o \
+	    time.o windows.o cpu.o devices.o sclow.o \
+	    tadpole.o tick14.o ptrace.o sys_solaris.o \
+	    unaligned.o muldiv.o pcic.o semaphore.o sparc_ksyms.o
 
-OX_OBJS  := sparc_ksyms.o
+obj-$(CONFIG_SUN4) += sun4setup.o
+obj-$(CONFIG_SMP) += trampoline.o smp.o sun4m_smp.o sun4d_smp.o
+obj-$(CONFIG_SUN_AUXIO) += auxio.o
+obj-$(CONFIG_PCI) += ebus.o
 
-ifdef CONFIG_SUN4
-O_OBJS += sun4setup.o
-endif
-
-ifdef CONFIG_SMP
-O_OBJS += trampoline.o smp.o sun4m_smp.o sun4d_smp.o
-endif
-
-ifdef CONFIG_SUN_AUXIO
-O_OBJS += auxio.o
-endif
-
-ifdef CONFIG_PCI
-O_OBJS += ebus.o
+ifdef CONFIG_SUNOS_EMUL
+obj-y += sys_sunos.o sunos_ioctl.o
 endif
 
 head.o: head.S
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -ansi -c $*.S -o $*.o
+	$(CC) $(AFLAGS) -ansi -c $*.S -o $*.o
 
 check_asm: dummy
+	@if [ ! -r $(HPATH)/asm/asm_offsets.h ] ; then \
+	  touch $(HPATH)/asm/asm_offsets.h ; \
+	fi
 	@echo "/* Automatically generated. Do not edit. */" > asm_offsets.h
 	@echo "#ifndef __ASM_OFFSETS_H__" >> asm_offsets.h
 	@echo "#define __ASM_OFFSETS_H__" >> asm_offsets.h
@@ -57,21 +55,30 @@ check_asm: dummy
 	@echo "#include <linux/config.h>" > tmp.c
 	@echo "#undef CONFIG_SMP" >> tmp.c
 	@echo "#include <linux/sched.h>" >> tmp.c
-	$(CC) -E tmp.c -o tmp.i
+	$(CPP) $(CPPFLAGS) tmp.c -o tmp.i
+	@echo "/* Automatically generated. Do not edit. */" > check_asm_data.c
+	@echo "#include <linux/config.h>" >> check_asm_data.c
+	@echo "#undef CONFIG_SMP" >> check_asm_data.c
+	@echo "#include <linux/sched.h>" >> check_asm_data.c
+	@echo "unsigned int check_asm_data[] = {" >> check_asm_data.c
+	$(SH) ./check_asm.sh -data task tmp.i check_asm_data.c
+	$(SH) ./check_asm.sh -data mm tmp.i check_asm_data.c
+	$(SH) ./check_asm.sh -data thread tmp.i check_asm_data.c
+	@echo '};' >> check_asm_data.c
+	$(CC) $(CFLAGS) -S -o check_asm_data.s check_asm_data.c
 	@echo "/* Automatically generated. Do not edit. */" > check_asm.c
-	@echo "#include <linux/config.h>" >> check_asm.c
-	@echo "#undef CONFIG_SMP" >> check_asm.c
-	@echo "#include <linux/sched.h>" >> check_asm.c
-	@echo 'struct task_struct _task;' >> check_asm.c
-	@echo 'struct mm_struct _mm;' >> check_asm.c
-	@echo 'struct thread_struct _thread;' >> check_asm.c
+	@echo 'extern int printf(const char *fmt, ...);' >>check_asm.c
+	@echo "unsigned int check_asm_data[] = {" >> check_asm.c
+	$(SH) ./check_asm.sh -ints check_asm_data.s check_asm.c
+	@echo "};" >> check_asm.c
 	@echo 'int main(void) {' >> check_asm.c
-	$(SH) ./check_asm.sh task tmp.i check_asm.c
-	$(SH) ./check_asm.sh mm tmp.i check_asm.c
-	$(SH) ./check_asm.sh thread tmp.i check_asm.c
+	@echo 'int i = 0;' >> check_asm.c
+	$(SH) ./check_asm.sh -printf task tmp.i check_asm.c
+	$(SH) ./check_asm.sh -printf mm tmp.i check_asm.c
+	$(SH) ./check_asm.sh -printf thread tmp.i check_asm.c
 	@echo 'return 0; }' >> check_asm.c
-	@rm -f tmp.[ci]
-	$(CC) -o check_asm check_asm.c
+	@rm -f tmp.[ci] check_asm_data.[cs]
+	$(HOSTCC) -o check_asm check_asm.c
 	./check_asm >> asm_offsets.h
 	@rm -f check_asm check_asm.c
 	@echo "" >> asm_offsets.h
@@ -81,22 +88,31 @@ check_asm: dummy
 	@echo "#undef CONFIG_SMP" >> tmp.c
 	@echo "#define CONFIG_SMP 1" >> tmp.c
 	@echo "#include <linux/sched.h>" >> tmp.c
-	$(CC) -D__SMP__ -E tmp.c -o tmp.i
+	$(CPP) $(CPPFLAGS) tmp.c -o tmp.i
+	@echo "/* Automatically generated. Do not edit. */" > check_asm_data.c
+	@echo "#include <linux/config.h>" >> check_asm_data.c
+	@echo "#undef CONFIG_SMP" >> check_asm_data.c
+	@echo "#define CONFIG_SMP 1" >> check_asm_data.c
+	@echo "#include <linux/sched.h>" >> check_asm_data.c
+	@echo "unsigned int check_asm_data[] = {" >> check_asm_data.c
+	$(SH) ./check_asm.sh -data task tmp.i check_asm_data.c
+	$(SH) ./check_asm.sh -data mm tmp.i check_asm_data.c
+	$(SH) ./check_asm.sh -data thread tmp.i check_asm_data.c
+	@echo '};' >> check_asm_data.c
+	$(CC) $(CFLAGS) -S -o check_asm_data.s check_asm_data.c
 	@echo "/* Automatically generated. Do not edit. */" > check_asm.c
-	@echo "#include <linux/config.h>" >> check_asm.c
-	@echo "#undef CONFIG_SMP" >> check_asm.c
-	@echo "#define CONFIG_SMP 1" >> check_asm.c
-	@echo "#include <linux/sched.h>" >> check_asm.c
-	@echo 'struct task_struct _task;' >> check_asm.c
-	@echo 'struct mm_struct _mm;' >> check_asm.c
-	@echo 'struct thread_struct _thread;' >> check_asm.c
+	@echo 'extern int printf(const char *fmt, ...);' >>check_asm.c
+	@echo "unsigned int check_asm_data[] = {" >> check_asm.c
+	$(SH) ./check_asm.sh -ints check_asm_data.s check_asm.c
+	@echo "};" >> check_asm.c
 	@echo 'int main(void) {' >> check_asm.c
-	$(SH) ./check_asm.sh task tmp.i check_asm.c
-	$(SH) ./check_asm.sh mm tmp.i check_asm.c
-	$(SH) ./check_asm.sh thread tmp.i check_asm.c
+	@echo 'int i = 0;' >> check_asm.c
+	$(SH) ./check_asm.sh -printf task tmp.i check_asm.c
+	$(SH) ./check_asm.sh -printf mm tmp.i check_asm.c
+	$(SH) ./check_asm.sh -printf thread tmp.i check_asm.c
 	@echo 'return 0; }' >> check_asm.c
-	@rm -f tmp.[ci]
-	$(CC) -D__SMP__ -o check_asm check_asm.c
+	@rm -f tmp.[ci] check_asm_data.[cs]
+	$(HOSTCC) -o check_asm check_asm.c
 	./check_asm >> asm_offsets.h
 	@rm -f check_asm check_asm.c
 	@echo "" >> asm_offsets.h

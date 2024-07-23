@@ -1,7 +1,6 @@
 #ifndef __LINUX_RTNETLINK_H
 #define __LINUX_RTNETLINK_H
 
-#include <linux/config.h>
 #include <linux/netlink.h>
 
 #define RTNL_DEBUG 1
@@ -140,6 +139,7 @@ enum
 #define RTPROT_MRT	10	/* Merit MRT */
 #define RTPROT_ZEBRA	11	/* Zebra */
 #define RTPROT_BIRD	12	/* BIRD */
+#define RTPROT_DNROUTED	13	/* DECnet routing daemon */
 
 /* rtm_scope
 
@@ -249,6 +249,11 @@ struct rta_cacheinfo
 	__s32	rta_expires;
 	__u32	rta_error;
 	__u32	rta_used;
+
+#define RTNETLINK_HAVE_PEERINFO 1
+	__u32	rta_id;
+	__u32	rta_ts;
+	__u32	rta_tsage;
 };
 
 /* RTM_METRICS --- array of struct rtattr with types of RTAX_* */
@@ -256,16 +261,28 @@ struct rta_cacheinfo
 enum
 {
 	RTAX_UNSPEC,
+#define RTAX_UNSPEC RTAX_UNSPEC
 	RTAX_LOCK,
+#define RTAX_LOCK RTAX_LOCK
 	RTAX_MTU,
+#define RTAX_MTU RTAX_MTU
 	RTAX_WINDOW,
+#define RTAX_WINDOW RTAX_WINDOW
 	RTAX_RTT,
-	RTAX_HOPS,
+#define RTAX_RTT RTAX_RTT
+	RTAX_RTTVAR,
+#define RTAX_RTTVAR RTAX_RTTVAR
 	RTAX_SSTHRESH,
+#define RTAX_SSTHRESH RTAX_SSTHRESH
 	RTAX_CWND,
+#define RTAX_CWND RTAX_CWND
+	RTAX_ADVMSS,
+#define RTAX_ADVMSS RTAX_ADVMSS
+	RTAX_REORDERING,
+#define RTAX_REORDERING RTAX_REORDERING
 };
 
-#define RTAX_MAX RTAX_CWND
+#define RTAX_MAX RTAX_REORDERING
 
 
 
@@ -420,11 +437,15 @@ enum
 	IFLA_QDISC,
 	IFLA_STATS,
 	IFLA_COST,
-	IFLA_PRIORITY
+#define IFLA_COST IFLA_COST
+	IFLA_PRIORITY,
+#define IFLA_PRIORITY IFLA_PRIORITY
+	IFLA_MASTER
+#define IFLA_MASTER IFLA_MASTER
 };
 
 
-#define IFLA_MAX IFLA_STATS
+#define IFLA_MAX IFLA_MASTER
 
 #define IFLA_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct ifinfomsg))))
 #define IFLA_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct ifinfomsg))
@@ -450,7 +471,7 @@ enum
    IFF_BROADCAST devices are able to use multicasts too.
  */
 
-/* ifi_link.
+/* IFLA_LINK.
    For usual devices it is equal ifi_index.
    If it is a "virtual interface" (f.e. tunnel), ifi_link
    can point to real physical interface (f.e. for bandwidth calculations),
@@ -515,6 +536,8 @@ enum
 
 #ifdef __KERNEL__
 
+#include <linux/config.h>
+
 extern __inline__ int rtattr_strcmp(struct rtattr *rta, char *str)
 {
 	int len = strlen(str) + 1;
@@ -535,12 +558,20 @@ struct rtnetlink_link
 extern struct rtnetlink_link * rtnetlink_links[NPROTO];
 extern int rtnetlink_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb);
 extern int rtnetlink_send(struct sk_buff *skb, u32 pid, u32 group, int echo);
+extern int rtnetlink_put_metrics(struct sk_buff *skb, unsigned *metrics);
 
 extern void __rta_fill(struct sk_buff *skb, int attrtype, int attrlen, const void *data);
 
 #define RTA_PUT(skb, attrtype, attrlen, data) \
 ({ if (skb_tailroom(skb) < (int)RTA_SPACE(attrlen)) goto rtattr_failure; \
    __rta_fill(skb, attrtype, attrlen, data); })
+
+extern void rtmsg_ifinfo(int type, struct net_device *dev, unsigned change);
+
+#else
+
+#define rtmsg_ifinfo(a,b,c) do { } while (0)
+
 #endif
 
 extern struct semaphore rtnl_sem;
@@ -565,6 +596,10 @@ extern void rtnl_lock(void);
 extern void rtnl_unlock(void);
 extern void rtnetlink_init(void);
 
+#define ASSERT_RTNL() do { if (down_trylock(&rtnl_sem) == 0)  { up(&rtnl_sem); \
+printk("RTNL: assertion failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); } \
+		   } while(0);
+#define BUG_TRAP(x) if (!(x)) { printk("KERNEL: assertion (" #x ") failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); }
 
 
 #endif /* __KERNEL__ */

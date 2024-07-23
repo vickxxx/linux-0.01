@@ -1,4 +1,4 @@
-/* $Id$
+/* $Id: setup.c,v 1.4 1999/10/09 00:00:57 ralf Exp $
  *
  * setup.c: Baget/MIPS specific setup, including init of the feature struct.
  *
@@ -16,12 +16,10 @@
 
 extern long mips_memory_upper;
 
-extern void wbflush_setup(void);
-
 #define CACHEABLE_STR(val) ((val) ? "not cached" : "cached")
 #define MIN(a,b)           (((a)<(b)) ? (a):(b)) 
 		
-__initfunc(static void vac_show(void))
+static void __init vac_show(void)
 { 
 	int i;
 	unsigned short val, decode = vac_inw(VAC_DECODE_CTRL);
@@ -172,7 +170,7 @@ __initfunc(static void vac_show(void))
 	       (VAC_CTRL_DELAY_IOSELI_VAL(val)&1) ? ".5" : "");
 }
 
-__initfunc(static void vac_init(void))
+static void __init vac_init(void)
 {
 	unsigned short mem_limit = ((mips_memory_upper-KSEG0) >> 16);
 
@@ -283,7 +281,7 @@ __initfunc(static void vac_init(void))
         vac_show();
 }
 
-__initfunc(static void vac_start(void))
+static void __init vac_start(void)
 {
 	vac_outw(0, VAC_ID);
 	vac_outw(VAC_INT_CTRL_TIMER_DISABLE|
@@ -305,7 +303,7 @@ __initfunc(static void vac_start(void))
 	vac_outw((500000/(384*16))<<8,VAC_CPU_CLK_DIV); 
 }
 
-__initfunc(static void vic_show(void))
+static void __init vic_show(void)
 {
 	unsigned char val;
 	char *timeout[]  = { "4", "16", "32", "64", "128", "256", "disabled" };
@@ -364,7 +362,7 @@ __initfunc(static void vic_show(void))
 	
 }
 
-__initfunc(static void vic_init(void))
+static void __init vic_init(void)
 {
 	 unsigned char id = vic_inb(VIC_ID);
 	 if ((id & 0xf0) != 0xf0)
@@ -463,7 +461,7 @@ static void vic_start(void)
 		 VIC_INT_ENABLE, VIC_LINT7);
 }
 
-__initfunc(void baget_irq_setup(void))
+void __init baget_irq_setup(void)
 {
 	extern void bagetIRQ(void);
 
@@ -475,13 +473,11 @@ extern void baget_machine_restart(char *command);
 extern void baget_machine_halt(void);
 extern void baget_machine_power_off(void);
  
-__initfunc(void baget_setup(void))
+void __init baget_setup(void)
 {
 	printk("BT23/63-201n found.\n");
 	*BAGET_WRERR_ACK = 0;
 	irq_setup = baget_irq_setup;
-
-	wbflush_setup();
 
         _machine_restart   = baget_machine_restart;
         _machine_halt      = baget_machine_halt;

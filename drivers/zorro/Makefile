@@ -9,24 +9,19 @@
 # parent makefile.
 #
 
-SUB_DIRS     :=
-MOD_SUB_DIRS := $(SUB_DIRS)
-ALL_SUB_DIRS := $(SUB_DIRS)
+O_TARGET := driver.o
 
-L_TARGET := zorro.a
+export-objs		:= zorro.o
 
-# Nasty trick as nobody references zorrosyms.o, but we still want it linked.
-ifeq ($(CONFIG_MODULES),y)
-O_TARGET = zorro_syms.o
-OX_OBJS  = zorrosyms.o
-O_OBJS   = zorro.o
-L_OBJS   := zorro_syms.o
-else
-L_OBJS   := zorro.o
-endif
-
-ifdef CONFIG_PROC_FS
-L_OBJS   += proc.o
-endif
+obj-$(CONFIG_ZORRO)	+= zorro.o names.o
+obj-$(CONFIG_PROC_FS)	+= proc.o
 
 include $(TOPDIR)/Rules.make
+
+names.o: names.c devlist.h
+
+devlist.h: zorro.ids gen-devlist
+	./gen-devlist <zorro.ids
+
+gen-devlist: gen-devlist.c
+	$(HOSTCC) $(HOSTCFLAGS) -o gen-devlist gen-devlist.c

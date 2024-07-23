@@ -34,6 +34,12 @@
  * 971222       Changed open/close for temperature handling
  *              Michael Meskes <meskes@debian.org>.
  * 980112       Used minor numbers from include/linux/miscdevice.h
+ * 990403       Clear reset status after reading control status register in 
+ *              pcwd_showprevstate(). [Marc Boucher <marc@mbsi.ca>]
+ * 990605	Made changes to code to support Firmware 1.22a, added
+ *		fairly useless proc entry.
+ * 990610	removed said useless proc code for the merge <alan>
+ * 000403	Removed last traces of proc code. <davej>
  */
 
 #include <linux/module.h>
@@ -55,6 +61,9 @@
 #include <linux/mm.h>
 #include <linux/watchdog.h>
 #include <linux/init.h>
+#include <linux/proc_fs.h>
+#include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -67,7 +76,7 @@
  */
 static int pcwd_ioports[] = { 0x270, 0x350, 0x370, 0x000 };
 
-#define WD_VER                  "1.0 (11/18/96)"
+#define WD_VER                  "1.10 (06/05/99)"
 
 /*
  * It should be noted that PCWD_REVISION_B was removed because A and B
@@ -92,6 +101,7 @@ static int pcwd_ioports[] = { 0x270, 0x350, 0x370, 0x000 };
 
 static int current_readport, revision, temp_panic;
 static int is_open, initial_status, supports_temp, mode_debug;
+static spinlock_t io_lock;
 
 /*
  * PCWD_CHECKCARD
@@ -99,7 +109,7 @@ static int is_open, initial_status, supports_temp, mode_debug;
  * This routine checks the "current_readport" to see if the card lies there.
  * If it does, it returns accordingly.
  */
-__initfunc(static int pcwd_checkcard(void))
+static int __init pcwd_checkcard(void)
 {
 	int card_dat, prev_card_dat, found = 0, count = 0, done = 0;
 
@@ -177,8 +187,10 @@ void pcwd_showprevstate(void)
 
 	if (revision == PCWD_REVISION_A)
 		initial_status = card_status = inb(current_readport);
-	else
+	else {
 		initial_status = card_status = inb(current_readport + 1);
+		outb_p(0x00, current_readport + 1); /* clear reset status */
+	}
 
 	if (revision == PCWD_REVISION_A) {
 		if (card_status & WD_WDRST)
@@ -228,10 +240,9 @@ static int pcwd_ioctl(struct inode *inode, struct file *file,
 	int i, cdat, rv;
 	static struct watchdog_info ident=
 	{
-		/* FIXME: should set A/C here */
 		WDIOF_OVERHEAT|WDIOF_CARDRESET,
 		1,
-		"PCWD."
+		"PCWD"
 	};
 
 	switch(cmd) {
@@ -243,7 +254,12 @@ static int pcwd_ioctl(struct inode *inode, struct file *file,
 		return i ? -EFAULT : 0;
 
 	case WDIOC_GETSTATUS:
-		cdat = inb(current_readport);
+		spin_lock(&io_lock);
+		if (revision == PCWD_REVISION_A) 
+			cdat = inb(current_readport);
+		else
+			cdat = inb(current_readport + 1 );
+		spin_unlock(&io_lock);
 		rv = 0;
 
 		if (revision == PCWD_REVISION_A) 
@@ -306,7 +322,9 @@ static int pcwd_ioctl(struct inode *inode, struct file *file,
 		rv = 0;
 		if ((supports_temp) && (mode_debug == 0)) 
 		{
+			spin_lock(&io_lock);
 			rv = inb(current_readport);
+			spin_unlock(&io_lock);
 			if(put_user(rv, (int*) arg))
 				return -EFAULT;
 		} else if(put_user(rv, (int*) arg))
@@ -321,9 +339,11 @@ static int pcwd_ioctl(struct inode *inode, struct file *file,
 
 			if (rv & WDIOS_DISABLECARD) 
 			{
+				spin_lock(&io_lock);
 				outb_p(0xA5, current_readport + 3);
 				outb_p(0xA5, current_readport + 3);
 				cdat = inb_p(current_readport + 2);
+				spin_unlock(&io_lock);
 				if ((cdat & 0x10) == 0) 
 				{
 					printk("pcwd: Could not disable card.\n");
@@ -335,8 +355,10 @@ static int pcwd_ioctl(struct inode *inode, struct file *file,
 
 			if (rv & WDIOS_ENABLECARD) 
 			{
+				spin_lock(&io_lock);
 				outb_p(0x00, current_readport + 3);
 				cdat = inb_p(current_readport + 2);
+				spin_unlock(&io_lock);
 				if (cdat & 0x10) 
 				{
 					printk("pcwd: Could not enable card.\n");
@@ -385,11 +407,14 @@ static int pcwd_open(struct inode *ino, struct file *filep)
                     MOD_INC_USE_COUNT;
                     /*  Enable the port  */
                     if (revision == PCWD_REVISION_C)
-                        outb_p(0x00, current_readport + 3);
+                    {
+                    	spin_lock(&io_lock);
+                    	outb_p(0x00, current_readport + 3);
+                    	spin_unlock(&io_lock);
+                    }
                     is_open = 1;
                     return(0);
                 case TEMP_MINOR:
-                    MOD_INC_USE_COUNT;
                     return(0);
                 default:
                     return (-ENODEV);
@@ -399,7 +424,7 @@ static int pcwd_open(struct inode *ino, struct file *filep)
 static ssize_t pcwd_read(struct file *file, char *buf, size_t count,
 			 loff_t *ppos)
 {
-	unsigned short c = inb(current_readport);
+	unsigned short c;
 	unsigned char cp;
 
 	/*  Can't seek (pread) on this device  */
@@ -408,8 +433,13 @@ static ssize_t pcwd_read(struct file *file, char *buf, size_t count,
 	switch(MINOR(file->f_dentry->d_inode->i_rdev)) 
 	{
 		case TEMP_MINOR:
-		        /* c is in celsius, we need fahrenheit */
-		        cp = (c*9/5)+32;
+			/*
+			 * Convert metric to Fahrenheit, since this was
+			 * the decided 'standard' for this return value.
+			 */
+			
+			c = inb(current_readport);
+			cp = (c * 9 / 5) + 32;
 			if(copy_to_user(buf, &cp, 1))
 				return -EFAULT;
 			return 1;
@@ -420,16 +450,19 @@ static ssize_t pcwd_read(struct file *file, char *buf, size_t count,
 
 static int pcwd_close(struct inode *ino, struct file *filep)
 {
-	MOD_DEC_USE_COUNT;
 	if (MINOR(ino->i_rdev)==WATCHDOG_MINOR)
 	{
+		lock_kernel();
 	        is_open = 0;
 #ifndef CONFIG_WATCHDOG_NOWAYOUT
 		/*  Disable the board  */
 		if (revision == PCWD_REVISION_C) {
+			spin_lock(&io_lock);
 			outb_p(0xA5, current_readport + 3);
 			outb_p(0xA5, current_readport + 3);
+			spin_unlock(&io_lock);
 		}
+		unlock_kernel();
 #endif
 	}
 	return 0;
@@ -443,14 +476,18 @@ static inline void get_support(void)
 
 static inline int get_revision(void)
 {
+	int r = PCWD_REVISION_C;
+	
+	spin_lock(&io_lock);
 	if ((inb(current_readport + 2) == 0xFF) ||
 	    (inb(current_readport + 3) == 0xFF))
-		return(PCWD_REVISION_A);
+		r=PCWD_REVISION_A;
+	spin_unlock(&io_lock);
 
-	return(PCWD_REVISION_C);
+	return r;
 }
 
-__initfunc(static int send_command(int cmd))
+static int __init send_command(int cmd)
 {
 	int i;
 
@@ -507,21 +544,12 @@ static void debug_off(void)
 }
 
 static struct file_operations pcwd_fops = {
-	NULL,		/* Seek */
-	pcwd_read,	/* Read */
-	pcwd_write,	/* Write */
-	NULL,		/* Readdir */
-	NULL,		/* Poll */
-	pcwd_ioctl,	/* IOctl */
-	NULL,		/* MMAP */
-	pcwd_open,	/* Open */
-	NULL,		/* flush */
-	pcwd_close,	/* Release */
-	NULL,		/* Fsync */
-	NULL,		/* Fasync */
-	NULL,		/* CheckMediaChange */
-	NULL,		/* Revalidate */
-	NULL,		/* Lock */
+	owner:		THIS_MODULE,
+	read:		pcwd_read,
+	write:		pcwd_write,
+	ioctl:		pcwd_ioctl,
+	open:		pcwd_open,
+	release:	pcwd_close,
 };
 
 static struct miscdevice pcwd_miscdev = {
@@ -536,17 +564,14 @@ static struct miscdevice temp_miscdev = {
 	&pcwd_fops
 };
  
-#ifdef	MODULE
-int init_module(void)
-#else
-__initfunc(int pcwatchdog_init(void))
-#endif
+static int __init pcwatchdog_init(void)
 {
 	int i, found = 0;
-
+	spin_lock_init(&io_lock);
+	
 	revision = PCWD_REVISION_A;
 
-	printk("pcwd: v%s Ken Hollis (khollis@nurk.org)\n", WD_VER);
+	printk("pcwd: v%s Ken Hollis (kenji@bitgate.com)\n", WD_VER);
 
 	/* Initial variables */
 	is_open = 0;
@@ -589,6 +614,9 @@ __initfunc(int pcwatchdog_init(void))
 		return -1;
 	}
 
+	if (supports_temp)
+		printk("pcwd: Temperature Option Detected.\n");
+
 	debug_off();
 
 	pcwd_showprevstate();
@@ -612,8 +640,7 @@ __initfunc(int pcwatchdog_init(void))
 	return 0;
 }
 
-#ifdef	MODULE
-void cleanup_module(void)
+static void __exit pcwatchdog_exit(void)
 {
 	/*  Disable the board  */
 	if (revision == PCWD_REVISION_C) {
@@ -626,4 +653,6 @@ void cleanup_module(void)
 
 	release_region(current_readport, (revision == PCWD_REVISION_A) ? 2 : 4);
 }
-#endif
+
+module_init(pcwatchdog_init);
+module_exit(pcwatchdog_exit);

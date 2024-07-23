@@ -10,16 +10,8 @@
  * values have to start from 0x20
  * (i.e. linux_logo_{red,green,blue}[0] is color 0x20)
  */
+#ifdef __KERNEL__
  
-#include <linux/config.h>
-#ifdef CONFIG_APUS
-#include <asm-m68k/linux_logo.h>
-
-#undef linux_logo_banner
-#define linux_logo_banner "Linux/PPC version " UTS_RELEASE
-
-#else
-
 #include <linux/init.h>
 
 #define linux_logo_banner "Linux/PPC version " UTS_RELEASE
@@ -48,4 +40,4 @@ extern unsigned char linux_logo16_blue[];
 extern unsigned char linux_logo16[];
 
 #endif
-#endif /* CONFIG_APUS */
+#endif /* __KERNEL__ */

@@ -159,17 +159,9 @@ int mac_SCC_reset_done = 0;
 static int scc_port = -1;
 
 static struct console mac_console_driver = {
-	"debug",
-	NULL,			/* write */
-	NULL,			/* read */
-	NULL,			/* device */
-	NULL,			/* wait_key */
-	NULL,			/* unblank */
-	NULL,			/* setup */
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"debug",
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
 /*
@@ -243,7 +235,7 @@ void mac_scca_console_write (struct console *co, const char *str,
     }
 }
 
-#ifdef CONFIG_SERIAL_CONSOLE
+#if defined(CONFIG_SERIAL_CONSOLE) || defined(DEBUG_SERIAL)
 int mac_sccb_console_wait_key(struct console *co)
 {
     int i;
@@ -305,7 +297,7 @@ int mac_scca_console_wait_key(struct console *co)
     } while(0)
     
 #ifndef CONFIG_SERIAL_CONSOLE
-__initfunc(static void mac_init_scc_port( int cflag, int port ))
+static void __init mac_init_scc_port( int cflag, int port )
 #else
 void mac_init_scc_port( int cflag, int port )
 #endif
@@ -385,12 +377,18 @@ void mac_init_scc_port( int cflag, int port )
 }
 #endif /* DEBUG_SERIAL */
 
-__initfunc(void mac_debug_init(void))
+void mac_init_scca_port( int cflag )
 {
-#ifdef CONFIG_KGDB
-    /* the m68k_debug_device is used by the GDB stub, do nothing here */
-    return;
-#endif
+	mac_init_scc_port(cflag, 0);
+}
+
+void mac_init_sccb_port( int cflag )
+{
+	mac_init_scc_port(cflag, 1);
+}
+
+void __init mac_debug_init(void)
+{
 #ifdef DEBUG_SERIAL
     if (   !strcmp( m68k_debug_device, "ser"  )
         || !strcmp( m68k_debug_device, "ser1" )) {

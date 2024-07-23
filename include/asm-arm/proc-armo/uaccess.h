@@ -1,7 +1,11 @@
 /*
- * linux/include/asm-arm/proc-armo/segment.h
+ *  linux/include/asm-arm/proc-armo/segment.h
  *
- * Copyright (C) 1996 Russell King
+ *  Copyright (C) 1996 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 /*
@@ -19,16 +23,12 @@
 #define KERNEL_DS	0x03000000
 #define USER_DS   	0x02000000
 
-#define get_ds()	(KERNEL_DS)
-#define get_fs()	(current->addr_limit)
-#define segment_eq(a,b)	((a) == (b))
-
 extern uaccess_t uaccess_user, uaccess_kernel;
 
 extern __inline__ void set_fs (mm_segment_t fs)
 {
 	current->addr_limit = fs;
-	current->tss.uaccess = fs == USER_DS ? &uaccess_user : &uaccess_kernel;
+	current->thread.uaccess = fs == USER_DS ? &uaccess_user : &uaccess_kernel;
 }
 
 #define __range_ok(addr,size) ({					\
@@ -47,8 +47,6 @@ extern __inline__ void set_fs (mm_segment_t fs)
 		: "cc");						\
 	(flag == 0); })
 
-#define access_ok(type,addr,size) (__range_ok(addr,size) == 0)
-
 #define __put_user_asm_byte(x,addr,err)					\
 	__asm__ __volatile__(						\
 	"	mov	r0, %1\n"					\
@@ -58,7 +56,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	mov	pc, %3\n"					\
 	"	mov	%0, r2\n"					\
 	: "=r" (err)							\
-	: "r" (x), "r" (addr), "r" (current->tss.uaccess->put_byte),	\
+	: "r" (x), "r" (addr), "r" (current->thread.uaccess->put_byte),	\
 	  "0" (err)							\
 	: "r0", "r1", "r2", "lr")
 
@@ -71,7 +69,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	mov	pc, %3\n"					\
 	"	mov	%0, r2\n"					\
 	: "=r" (err)							\
-	: "r" (x), "r" (addr), "r" (current->tss.uaccess->put_half),	\
+	: "r" (x), "r" (addr), "r" (current->thread.uaccess->put_half),	\
 	  "0" (err)							\
 	: "r0", "r1", "r2", "lr")
 
@@ -84,7 +82,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	mov	pc, %3\n"					\
 	"	mov	%0, r2\n"					\
 	: "=r" (err)							\
-	: "r" (x), "r" (addr), "r" (current->tss.uaccess->put_word),	\
+	: "r" (x), "r" (addr), "r" (current->thread.uaccess->put_word),	\
 	  "0" (err)							\
 	: "r0", "r1", "r2", "lr")
 
@@ -97,7 +95,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	mov	%0, r1\n"					\
 	"	mov	%1, r0\n"					\
 	: "=r" (err), "=r" (x)						\
-	: "r" (addr), "r" (current->tss.uaccess->get_byte), "0" (err)	\
+	: "r" (addr), "r" (current->thread.uaccess->get_byte), "0" (err)	\
 	: "r0", "r1", "r2", "lr")
 
 #define __get_user_asm_half(x,addr,err)					\
@@ -109,7 +107,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	mov	%0, r1\n"					\
 	"	mov	%1, r0\n"					\
 	: "=r" (err), "=r" (x)						\
-	: "r" (addr), "r" (current->tss.uaccess->get_half), "0" (err)	\
+	: "r" (addr), "r" (current->thread.uaccess->get_half), "0" (err)	\
 	: "r0", "r1", "r2", "lr")
 
 #define __get_user_asm_word(x,addr,err)					\
@@ -121,20 +119,20 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	mov	%0, r1\n"					\
 	"	mov	%1, r0\n"					\
 	: "=r" (err), "=r" (x)						\
-	: "r" (addr), "r" (current->tss.uaccess->get_word), "0" (err)	\
+	: "r" (addr), "r" (current->thread.uaccess->get_word), "0" (err)	\
 	: "r0", "r1", "r2", "lr")
 
 #define __do_copy_from_user(to,from,n)					\
-	(n) = current->tss.uaccess->copy_from_user((to),(from),(n))
+	(n) = current->thread.uaccess->copy_from_user((to),(from),(n))
 
 #define __do_copy_to_user(to,from,n)					\
-	(n) = current->tss.uaccess->copy_to_user((to),(from),(n))
+	(n) = current->thread.uaccess->copy_to_user((to),(from),(n))
 
 #define __do_clear_user(addr,sz)					\
-	(sz) = current->tss.uaccess->clear_user((addr),(sz))
+	(sz) = current->thread.uaccess->clear_user((addr),(sz))
 
 #define __do_strncpy_from_user(dst,src,count,res)			\
-	(res) = current->tss.uaccess->strncpy_from_user(dst,src,count)
+	(res) = current->thread.uaccess->strncpy_from_user(dst,src,count)
 
-#define __do_strlen_user(s,res)						\
-	(res) = current->tss.uaccess->strlen_user(s)
+#define __do_strnlen_user(s,n,res)					\
+	(res) = current->thread.uaccess->strnlen_user(s,n)

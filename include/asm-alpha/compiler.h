@@ -9,15 +9,13 @@
  * these tests and macros.
  */
 
-/*
- * EGCS (of varying versions) does a good job of using insxl and extxl.
- */
-
-#if __GNUC__ > 2 || __GNUC_MINOR__ >= 91
+#if 0
 #define __kernel_insbl(val, shift) \
   (((unsigned long)(val) & 0xfful) << ((shift) * 8))
 #define __kernel_inswl(val, shift) \
   (((unsigned long)(val) & 0xfffful) << ((shift) * 8))
+#define __kernel_insql(val, shift) \
+  ((unsigned long)(val) << ((shift) * 8))
 #else
 #define __kernel_insbl(val, shift)					\
   ({ unsigned long __kir;						\
@@ -27,9 +25,13 @@
   ({ unsigned long __kir;						\
      __asm__("inswl %2,%1,%0" : "=r"(__kir) : "rI"(shift), "r"(val));	\
      __kir; })
+#define __kernel_insql(val, shift)					\
+  ({ unsigned long __kir;						\
+     __asm__("insql %2,%1,%0" : "=r"(__kir) : "rI"(shift), "r"(val));	\
+     __kir; })
 #endif
 
-#if __GNUC__ > 2 || __GNUC_MINOR__ >= 92
+#if 0 && (__GNUC__ > 2 || __GNUC_MINOR__ >= 92)
 #define __kernel_extbl(val, shift)  (((val) >> (((shift) & 7) * 8)) & 0xfful)
 #define __kernel_extwl(val, shift)  (((val) >> (((shift) & 7) * 8)) & 0xfffful)
 #else
@@ -47,11 +49,10 @@
 /* 
  * Beginning with EGCS 1.1, GCC defines __alpha_bwx__ when the BWX 
  * extension is enabled.  Previous versions did not define anything
- * we could test during compilation, so allow users to tell us when
- * the compiler will DTRT.
+ * we could test during compilation -- too bad, so sad.
  */
 
-#if defined(HAVE_BWX) || defined(__alpha_bwx__)
+#if defined(__alpha_bwx__)
 #define __kernel_ldbu(mem)	(mem)
 #define __kernel_ldwu(mem)	(mem)
 #define __kernel_stb(val,mem)	((mem) = (val))
@@ -69,6 +70,15 @@
   __asm__("stb %1,%0" : "=m"(mem) : "r"(val))
 #define __kernel_stw(val,mem) \
   __asm__("stw %1,%0" : "=m"(mem) : "r"(val))
+#endif
+
+/* Somewhere in the middle of the GCC 2.96 development cycle, we implemented
+   a mechanism by which the user can annotate likely branch directions and
+   expect the blocks to be reordered appropriately.  Define __builtin_expect
+   to nothing for earlier compilers.  */
+
+#if __GNUC__ == 2 && __GNUC_MINOR__ < 96
+#define __builtin_expect(x, expected_value) (x)
 #endif
 
 #endif /* __ALPHA_COMPILER_H */

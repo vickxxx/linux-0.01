@@ -8,16 +8,19 @@
  */
 #include "../coffboot/nonstdio.h"
 #include "../coffboot/zlib.h"
+#include <asm/bootinfo.h>
+#include <asm/processor.h>
+#include <asm/page.h>
 
 extern void *finddevice(const char *);
 extern int getprop(void *, const char *, void *, int);
 void gunzip(void *, int, unsigned char *, int *);
 
-#define get_16be(x)	(*(unsigned short *)(x))
-#define get_32be(x)	(*(unsigned *)(x))
-
 #define RAM_START	0x00000000
-#define RAM_END		(8<<20)
+#define RAM_END		(64<<20)
+
+#define BOOT_START	((unsigned long)_start)
+#define BOOT_END	((unsigned long)(_end + 0xFFF) & ~0xFFF)
 
 #define RAM_FREE	((unsigned long)(_end+0x1000)&~0xFFF)
 #define PROG_START	0x00010000
@@ -30,7 +33,10 @@ extern char image_data[];
 extern int image_len;
 extern char initrd_data[];
 extern int initrd_len;
+extern char sysmap_data[];
+extern int sysmap_len;
 
+static char scratch[1024<<10];	/* 1MB of scratch space for gunzip */
 
 chrpboot(int a1, int a2, void *prom)
 {
@@ -48,17 +54,20 @@ chrpboot(int a1, int a2, void *prom)
 	initrd_start = (RAM_END - initrd_size) & ~0xFFF;
 	a1 = initrd_start;
 	a2 = initrd_size;
-	printf("initial ramdisk moving 0x%x <- 0x%x (%x bytes)\n\r", initrd_start,
-	       initrd_data,initrd_size);
+	claim(initrd_start, RAM_END - initrd_start, 0);
+	printf("initial ramdisk moving 0x%x <- 0x%x (%x bytes)\n\r",
+	       initrd_start, initrd_data, initrd_size);
 	memcpy((char *)initrd_start, initrd_data, initrd_size);
-	end_avail = (char *)initrd_start;
-    } else
-	end_avail = (char *) RAM_END;
+    }
+
     im = image_data;
     len = image_len;
+    /* claim 4MB starting at PROG_START */
+    claim(PROG_START, (4<<20) - PROG_START, 0);
     dst = (void *) PROG_START;
     if (im[0] == 0x1f && im[1] == 0x8b) {
-	avail_ram = (char *)RAM_FREE;
+	avail_ram = scratch;
+	end_avail = scratch + sizeof(scratch);
 	printf("gunzipping (0x%x <- 0x%x:0x%0x)...", dst, im, im+len);
 	gunzip(dst, 0x400000, im, &len);
 	printf("done %u bytes\n\r", len);
@@ -68,10 +77,40 @@ chrpboot(int a1, int a2, void *prom)
 
     flush_cache(dst, len);
     
-    sa = *(unsigned long *)PROG_START+PROG_START;
+    sa = (unsigned long)PROG_START;
     printf("start address = 0x%x\n\r", sa);
 
-    (*(void (*)())sa)(a1, a2, prom, 0, 0);
+    {
+	    struct bi_record *rec;
+	    
+	    rec = (struct bi_record *)_ALIGN((unsigned long)dst+len+(1<<20)-1,(1<<20));
+
+	    rec->tag = BI_FIRST;
+	    rec->size = sizeof(struct bi_record);
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+	    
+	    rec->tag = BI_BOOTLOADER_ID;
+	    sprintf( (char *)rec->data, "chrpboot");
+	    rec->size = sizeof(struct bi_record) + strlen("chrpboot") + 1;
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+	    
+	    rec->tag = BI_MACHTYPE;
+	    rec->data[0] = _MACH_chrp;
+	    rec->data[1] = 1;
+	    rec->size = sizeof(struct bi_record) + sizeof(unsigned long);
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+#if 0
+	    rec->tag = BI_SYSMAP;
+	    rec->data[0] = (unsigned long)sysmap_data;
+	    rec->data[1] = sysmap_len;
+	    rec->size = sizeof(struct bi_record) + sizeof(unsigned long);
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+#endif
+	    rec->tag = BI_LAST;
+	    rec->size = sizeof(struct bi_record);
+	    rec = (struct bi_record *)((unsigned long)rec + rec->size);
+    }
+    (*(void (*)())sa)(a1, a2, prom);
 
     printf("returned?\n\r");
 
@@ -94,6 +133,10 @@ void *zalloc(void *x, unsigned items, unsigned size)
 
 void zfree(void *x, void *addr, unsigned nb)
 {
+    nb = (nb + 7) & -8;
+    if (addr == (avail_ram - nb)) {
+	avail_ram -= nb;
+    }
 }
 
 #define HEAD_CRC	2

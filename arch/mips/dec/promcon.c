@@ -35,7 +35,7 @@ static int prom_console_wait_key(struct console *co)
     return prom_getchar();
 }
 
-__initfunc(static int prom_console_setup(struct console *co, char *options))
+static int __init prom_console_setup(struct console *co, char *options)
 {
     return 0;
 }
@@ -47,24 +47,20 @@ static kdev_t prom_console_device(struct console *c)
 
 static struct console sercons =
 {
-    "ttyS",
-    prom_console_write,
-    NULL,
-    prom_console_device,
-    prom_console_wait_key,
-    NULL,
-    prom_console_setup,
-    CON_PRINTBUFFER,
-    -1,
-    0,
-    NULL
+    name:	"ttyS",
+    write:	prom_console_write,
+    device:	prom_console_device,
+    wait_key:	prom_console_wait_key,
+    setup:	prom_console_setup,
+    flags:	CON_PRINTBUFFER,
+    index:	-1,
 };
 
 /*
  *    Register console.
  */
 
-__initfunc(long prom_console_init(long kmem_start, long kmem_end))
+long __init prom_console_init(long kmem_start, long kmem_end)
 {
     register_console(&sercons);
     return kmem_start;

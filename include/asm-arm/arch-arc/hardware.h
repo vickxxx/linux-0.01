@@ -1,13 +1,17 @@
 /*
- * linux/include/asm-arm/arch-arc/hardware.h
+ *  linux/include/asm-arm/arch-arc/hardware.h
  *
- * Copyright (C) 1996-1999 Russell King.
+ *  Copyright (C) 1996-1999 Russell King.
  *
- * This file contains the hardware definitions of the
- * Acorn Archimedes/A5000 machines.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
- * Modifications:
- *  04-04-1998	PJB/RMK	Merged arc and a5k versions
+ *  This file contains the hardware definitions of the
+ *  Acorn Archimedes/A5000 machines.
+ *
+ *  Modifications:
+ *   04-04-1998	PJB/RMK	Merged arc and a5k versions
  */
 #ifndef __ASM_ARCH_HARDWARE_H
 #define __ASM_ARCH_HARDWARE_H
@@ -22,13 +26,8 @@
  */
 #define HAS_IOC
 #define HAS_MEMC
-#include <asm/memc.h>
+#include <asm/hardware/memc.h>
 #define HAS_VIDC
-
-/*
- * Optional hardware
- */
-#define HAS_EXPMASK
 
 /* Hardware addresses of major areas.
  *  *_START is the physical address
@@ -43,13 +42,11 @@
  * Screen mapping information
  */
 #define SCREEN_START		0x02000000
-#define SCREEN2_END		0x02078000
-#define SCREEN2_BASE		0x02000000
-#define SCREEN1_END		0x02000000
-#define SCREEN1_BASE		0x01f88000
+#define SCREEN_END		0x02078000
+#define SCREEN_BASE		0x02000000
 
 
-#ifndef __ASSEMBLER__
+#ifndef __ASSEMBLY__
 
 /*
  * for use with inb/outb
@@ -61,10 +58,8 @@
 #define IOEB_PSCLR		0x800d4016
 #define IOEB_MONTYPE		0x800d401c
 #endif
-#ifdef CONFIG_ARCH_ARC
 #define LATCHAADDR		0x80094010
 #define LATCHBADDR		0x80094006
-#endif
 #define IOC_BASE		0x80080000
 
 #define IO_EC_IOC4_BASE		0x8009c000
@@ -91,7 +86,7 @@
  * RAM definitions
  */
 #define GET_MEMORY_END(p)	(PAGE_OFFSET + (p->u1.s.page_size) * (p->u1.s.nr_pages))
-#define PARAMS_BASE		(PAGE_OFFSET + 0x7c000)
+#define PARAMS_OFFSET		0x7c000
 
 #else
 
@@ -101,5 +96,14 @@
 #define PCIO_BASE		0x03010000
 
 #endif
+
+#ifndef __ASSEMBLY__
+#define __EXPMASK(offset)	(((volatile unsigned char *)EXPMASK_BASE)[offset])
+#else
+#define __EXPMASK(offset)	offset
 #endif
 
+#define	EXPMASK_STATUS	__EXPMASK(0x00)
+#define EXPMASK_ENABLE	__EXPMASK(0x04)
+
+#endif

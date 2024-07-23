@@ -1,25 +1,29 @@
 /*
- * include/asm-arm/arch-ebsa285/irq.h
+ *  linux/include/asm-arm/arch-ebsa285/irq.h
  *
- * Copyright (C) 1996-1998 Russell King
+ *  Copyright (C) 1996-1998 Russell King
  *
- * Changelog:
- *  22-Aug-1998	RMK	Restructured IRQ routines
- *  03-Sep-1998	PJB	Merged CATS support
- *  20-Jan-1998	RMK	Started merge of EBSA286, CATS and NetWinder
- *  26-Jan-1999	PJB	Don't use IACK on CATS
- *  16-Mar-1999	RMK	Added autodetect of ISA PICs
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Changelog:
+ *   22-Aug-1998 RMK	Restructured IRQ routines
+ *   03-Sep-1998 PJB	Merged CATS support
+ *   20-Jan-1998 RMK	Started merge of EBSA286, CATS and NetWinder
+ *   26-Jan-1999 PJB	Don't use IACK on CATS
+ *   16-Mar-1999 RMK	Added autodetect of ISA PICs
  */
-#include <linux/config.h>
 #include <asm/hardware.h>
-#include <asm/dec21285.h>
+#include <asm/hardware/dec21285.h>
 #include <asm/irq.h>
+#include <asm/mach-types.h>
 
 /*
  * Footbridge IRQ translation table
  *  Converts from our IRQ numbers into FootBridge masks
  */
-static int dc21285_irq_mask[] = {
+static const int dc21285_irq_mask[] = {
 	IRQ_MASK_UART_RX,	/*  0 */
 	IRQ_MASK_UART_TX,	/*  1 */
 	IRQ_MASK_TIMER1,	/*  2 */
@@ -35,14 +39,18 @@ static int dc21285_irq_mask[] = {
 	IRQ_MASK_PCI,		/* 12 */
 	IRQ_MASK_SDRAMPARITY,	/* 13 */
 	IRQ_MASK_I2OINPOST,	/* 14 */
-	IRQ_MASK_PCI_ERR	/* 15 */
+	IRQ_MASK_PCI_ABORT,	/* 15 */
+	IRQ_MASK_PCI_SERR,	/* 16 */
+	IRQ_MASK_DISCARD_TIMER,	/* 17 */
+	IRQ_MASK_PCI_DPERR,	/* 18 */
+	IRQ_MASK_PCI_PERR,	/* 19 */
 };
 
 static int isa_irq = -1;
 
 static inline int fixup_irq(unsigned int irq)
 {
-#ifdef CONFIG_HOST_FOOTBRIDGE
+#ifdef PCIIACK_BASE
 	if (irq == isa_irq)
 		irq = *(unsigned char *)PCIIACK_BASE;
 #endif
@@ -52,12 +60,12 @@ static inline int fixup_irq(unsigned int irq)
 
 static void dc21285_mask_irq(unsigned int irq)
 {
-	*CSR_IRQ_DISABLE = dc21285_irq_mask[irq & 15];
+	*CSR_IRQ_DISABLE = dc21285_irq_mask[_DC21285_INR(irq)];
 }
 
 static void dc21285_unmask_irq(unsigned int irq)
 {
-	*CSR_IRQ_ENABLE = dc21285_irq_mask[irq & 15];
+	*CSR_IRQ_ENABLE = dc21285_irq_mask[_DC21285_INR(irq)];
 }
 
 static void isa_mask_pic_lo_irq(unsigned int irq)
@@ -110,6 +118,8 @@ static void no_action(int cpl, void *dev_id, struct pt_regs *regs)
 }
 
 static struct irqaction irq_cascade = { no_action, 0, 0, "cascade", NULL, NULL };
+static struct resource pic1_resource = { "pic1", 0x20, 0x3f };
+static struct resource pic2_resource = { "pic2", 0xa0, 0xbf };
 
 static __inline__ void irq_init_irq(void)
 {
@@ -121,7 +131,7 @@ static __inline__ void irq_init_irq(void)
 	*CSR_IRQ_DISABLE = -1;
 	*CSR_FIQ_DISABLE = -1;
 
-	for (irq = _DC21285_IRQ(0); irq < _DC21285_IRQ(16); irq++) {
+	for (irq = _DC21285_IRQ(0); irq < _DC21285_IRQ(20); irq++) {
 		irq_desc[irq].valid	= 1;
 		irq_desc[irq].probe_ok	= 1;
 		irq_desc[irq].mask_ack	= dc21285_mask_irq;
@@ -133,32 +143,29 @@ static __inline__ void irq_init_irq(void)
 	 * Determine the ISA settings for
 	 * the machine we're running on.
 	 */
-	switch (machine_arch_type) {
-	default:
-		isa_irq = -1;
-		break;
+	isa_irq = -1;
 
-	case MACH_TYPE_EBSA285:
-		/* The following is dependent on which slot
-		 * you plug the Southbridge card into.  We
-		 * currently assume that you plug it into
-		 * the right-hand most slot.
-		 */
-		isa_irq = IRQ_PCI;
-		break;
+	if (footbridge_cfn_mode()) {
+		if (machine_is_ebsa285())
+			/* The following is dependent on which slot
+			 * you plug the Southbridge card into.  We
+			 * currently assume that you plug it into
+			 * the right-hand most slot.
+			 */
+			isa_irq = IRQ_PCI;
 
-	case MACH_TYPE_CATS:
-		isa_irq = IRQ_IN2;
-		break;
+		if (machine_is_cats())
+			isa_irq = IRQ_IN2;
 
-	case MACH_TYPE_NETWINDER:
-		isa_irq = IRQ_IN3;
-		break;
+		if (machine_is_netwinder())
+			isa_irq = IRQ_IN3;
 	}
 
 	if (isa_irq != -1) {
 		/*
 		 * Setup, and then probe for an ISA PIC
+		 * If the PIC is not there, then we
+		 * ignore the PIC.
 		 */
 		outb(0x11, PIC_LO);
 		outb(_ISA_IRQ(0), PIC_MASK_LO);	/* IRQ number		*/
@@ -172,8 +179,6 @@ static __inline__ void irq_init_irq(void)
 		outb(0x01, PIC_MASK_HI);	/* x86			*/
 		outb(0xfa, PIC_MASK_HI);	/* pattern: 11111010	*/
 
-//		outb(0x68, PIC_LO);		/* enable special mode	*/
-//		outb(0x68, PIC_HI);		/* enable special mode	*/
 		outb(0x0b, PIC_LO);
 		outb(0x0b, PIC_HI);
 
@@ -201,9 +206,18 @@ static __inline__ void irq_init_irq(void)
 			irq_desc[irq].unmask	= isa_unmask_pic_hi_irq;
 		}
 
-		request_region(PIC_LO, 2, "pic1");
-		request_region(PIC_HI, 2, "pic2");
+		request_resource(&ioport_resource, &pic1_resource);
+		request_resource(&ioport_resource, &pic2_resource);
 		setup_arm_irq(IRQ_ISA_CASCADE, &irq_cascade);
 		setup_arm_irq(isa_irq, &irq_cascade);
+
+		/*
+		 * On the NetWinder, don't automatically
+		 * enable ISA IRQ11 when it is requested.
+		 * There appears to be a missing pull-up
+		 * resistor on this line.
+		 */
+		if (machine_is_netwinder())
+			irq_desc[_ISA_IRQ(11)].noautoenable = 1;
 	}
 }

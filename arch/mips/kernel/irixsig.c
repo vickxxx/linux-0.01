@@ -2,10 +2,9 @@
  * irixsig.c: WHEEE, IRIX signals!  YOW, am I compatable or what?!?!
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
- *
- * $Id: irixsig.c,v 1.11 1999/06/17 13:25:46 ralf Exp $
+ * Copyright (C) 1997 - 2000 Ralf Baechle (ralf@gnu.org)
+ * Copyright (C) 2000 Silicon Graphics, Inc.
  */
-
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -19,6 +18,7 @@
 
 asmlinkage int sys_wait4(pid_t pid, unsigned long *stat_addr,
                          int options, unsigned long *ru);
+extern asmlinkage void syscall_trace(void);
 
 #undef DEBUG_SIG
 
@@ -114,27 +114,25 @@ static void setup_irix_frame(struct k_sigaction *ka, struct pt_regs *regs,
 	dump_irix5_sigctx(ctx);
 #endif
 
-	regs->regs[5] = 0; /* XXX sigcode XXX */
 	regs->regs[4] = (unsigned long) signr;
+	regs->regs[5] = 0; /* XXX sigcode XXX */
 	regs->regs[6] = regs->regs[29] = sp;
 	regs->regs[7] = (unsigned long) ka->sa.sa_handler;
-	regs->regs[25] = regs->cp0_epc = current->tss.irix_trampoline;
+	regs->regs[25] = regs->cp0_epc = (unsigned long) ka->sa.sa_restorer;
 	return;
 
 segv_and_exit:
-	lock_kernel();
-	do_exit(SIGSEGV);
-	unlock_kernel();
+	if (signr == SIGSEGV)
+		ka->sa.sa_handler = SIG_DFL;
+	force_sig(SIGSEGV, current);
 }
 
 static void inline
 setup_irix_rt_frame(struct k_sigaction * ka, struct pt_regs *regs,
                int signr, sigset_t *oldmask, siginfo_t *info)
 {
-	lock_kernel();
 	printk("Aiee: setup_tr_frame wants to be written");
 	do_exit(SIGSEGV);
-	unlock_kernel();
 }
 
 static inline void handle_signal(unsigned long sig, struct k_sigaction *ka,
@@ -193,7 +191,7 @@ asmlinkage int do_irix_signal(sigset_t *oldset, struct pt_regs *regs)
 		if (!signr)
 			break;
 
-		if ((current->flags & PF_PTRACED) && signr != SIGKILL) {
+		if ((current->ptrace & PT_PTRACED) && signr != SIGKILL) {
 			/* Let the debugger run.  */
 			current->exit_code = signr;
 			current->state = TASK_STOPPED;
@@ -261,17 +259,13 @@ asmlinkage int do_irix_signal(sigset_t *oldset, struct pt_regs *regs)
 
 			case SIGQUIT: case SIGILL: case SIGTRAP:
 			case SIGABRT: case SIGFPE: case SIGSEGV:
-				lock_kernel();
-				if (current->binfmt
-				    && current->binfmt->core_dump
-				    && current->binfmt->core_dump(signr, regs))
+				if (do_coredump(signr, regs))
 					exit_code |= 0x80;
-				unlock_kernel();
 				/* FALLTHRU */
 
 			default:
-				lock_kernel();
-				sigaddset(&current->signal, signr);
+				sigaddset(&current->pending.signal, signr);
+				recalc_sigpending(current);
 				current->flags |= PF_SIGNALED;
 				do_exit(exit_code);
 				/* NOTREACHED */
@@ -300,11 +294,12 @@ asmlinkage int do_irix_signal(sigset_t *oldset, struct pt_regs *regs)
 	return 0;
 }
 
-asmlinkage unsigned long irix_sigreturn(struct pt_regs *regs)
+asmlinkage void
+irix_sigreturn(struct pt_regs *regs)
 {
 	struct sigctx_irix5 *context, *magic;
 	unsigned long umask, mask;
-	u64 *fregs, res;
+	u64 *fregs;
 	int sig, i, base = 0;
 	sigset_t blocked;
 
@@ -337,10 +332,10 @@ asmlinkage unsigned long irix_sigreturn(struct pt_regs *regs)
 	__get_user(regs->lo, &context->lo);
 
 	if ((umask & 1) && context->usedfp) {
-		fregs = (u64 *) &current->tss.fpu;
+		fregs = (u64 *) &current->thread.fpu;
 		for(i = 0; i < 32; i++)
 			fregs[i] = (u64) context->fpregs[i];
-		__get_user(current->tss.fpu.hard.control, &context->fpcsr);
+		__get_user(current->thread.fpu.hard.control, &context->fpcsr);
 	}
 
 	/* XXX do sigstack crapola here... XXX */
@@ -357,6 +352,8 @@ asmlinkage unsigned long irix_sigreturn(struct pt_regs *regs)
 	/*
 	 * Don't let your children do this ...
 	 */
+	if (current->ptrace & PT_TRACESYS)
+		syscall_trace();
 	__asm__ __volatile__(
 		"move\t$29,%0\n\t"
 		"j\tret_from_sys_call"
@@ -365,11 +362,7 @@ asmlinkage unsigned long irix_sigreturn(struct pt_regs *regs)
 		/* Unreached */
 
 badframe:
-	lock_kernel();
-	do_exit(SIGSEGV);
-	unlock_kernel();
-
-	return res;
+	force_sig(SIGSEGV, current);
 }
 
 struct sigact_irix5 {
@@ -390,7 +383,7 @@ static inline void dump_sigact_irix5(struct sigact_irix5 *p)
 
 asmlinkage int 
 irix_sigaction(int sig, const struct sigaction *act,
-	      struct sigaction *oact, unsigned long trampoline)
+	      struct sigaction *oact, void *trampoline)
 {
 	struct k_sigaction new_ka, old_ka;
 	int ret;
@@ -410,15 +403,14 @@ irix_sigaction(int sig, const struct sigaction *act,
 			return -EFAULT;
 
 		__copy_from_user(&mask, &act->sa_mask, sizeof(sigset_t));
-		new_ka.ka_restorer = NULL;
-	}
 
-	/*
-	 * Hmmm... methinks IRIX libc always passes a valid trampoline
-	 * value for all invocations of sigaction.  Will have to
-	 * investigate.  POSIX POSIX, die die die...
-	 */
-	current->tss.irix_trampoline = trampoline;
+		/*
+		 * Hmmm... methinks IRIX libc always passes a valid trampoline
+		 * value for all invocations of sigaction.  Will have to
+		 * investigate.  POSIX POSIX, die die die...
+		 */
+		new_ka.sa.sa_restorer = trampoline;
+	}
 
 /* XXX Implement SIG_SETMASK32 for IRIX compatibility */
 	ret = do_sigaction(sig, act ? &new_ka : NULL, oact ? &old_ka : NULL);
@@ -437,23 +429,7 @@ irix_sigaction(int sig, const struct sigaction *act,
 
 asmlinkage int irix_sigpending(irix_sigset_t *set)
 {
-	lock_kernel();
-	if (verify_area(VERIFY_WRITE, set, sizeof(*set)) < 0)
-		return -EFAULT;
-
-	/* fill in "set" with signals pending but blocked. */
-	spin_lock_irq(&current->sigmask_lock);
-	__put_user(current->blocked.sig[0] & current->signal.sig[0],
-	           &set->sig[0]);
-	__put_user(current->blocked.sig[1] & current->signal.sig[1],
-	           &set->sig[1]);
-	__put_user(current->blocked.sig[2] & current->signal.sig[2],
-	           &set->sig[2]);
-	__put_user(current->blocked.sig[3] & current->signal.sig[3],
-	           &set->sig[3]);
-	spin_unlock_irq(&current->sigmask_lock);
-
-	return 0;
+	return do_sigpending(set, sizeof(*set));
 }
 
 asmlinkage int irix_sigprocmask(int how, irix_sigset_t *new, irix_sigset_t *old)
@@ -461,10 +437,9 @@ asmlinkage int irix_sigprocmask(int how, irix_sigset_t *new, irix_sigset_t *old)
 	sigset_t oldbits, newbits;
 	int error;
 
-
-	if(new) {
+	if (new) {
 		error = verify_area(VERIFY_READ, new, sizeof(*new));
-		if(error)
+		if (error)
 			return error;
 		__copy_from_user(&newbits, new, sizeof(unsigned long)*4);
 		sigdelsetmask(&newbits, ~_BLOCKABLE);
@@ -516,6 +491,7 @@ asmlinkage int irix_sigsuspend(struct pt_regs *regs)
 	spin_lock_irq(&current->sigmask_lock);
 	saveset = current->blocked;
 	current->blocked = newset;
+	recalc_sigpending(current);
 	spin_unlock_irq(&current->sigmask_lock);
 
 	regs->regs[2] = -EINTR;
@@ -572,7 +548,6 @@ asmlinkage int irix_sigpoll_sys(unsigned long *set, struct irix5_siginfo *info,
 	sigset_t kset;
 	int i, sig, error, timeo = 0;
 
-	lock_kernel();
 #ifdef DEBUG_SIG
 	printk("[%s:%d] irix_sigpoll_sys(%p,%p,%p)\n",
 	       current->comm, current->pid, set, info, tp);
@@ -613,7 +588,7 @@ asmlinkage int irix_sigpoll_sys(unsigned long *set, struct irix5_siginfo *info,
 		expire = schedule_timeout(expire);
 
 		for (i=0; i<=4; i++)
-			tmp |= (current->signal.sig[i] & kset.sig[i]);
+			tmp |= (current->pending.signal.sig[i] & kset.sig[i]);
 
 		if (tmp)
 			break;
@@ -630,7 +605,7 @@ asmlinkage int irix_sigpoll_sys(unsigned long *set, struct irix5_siginfo *info,
 	for(sig = 1; i <= 65 /* IRIX_NSIG */; sig++) {
 		if (sigismember (&kset, sig))
 			continue;
-		if (sigismember (&current->signal, sig)) {
+		if (sigismember (&current->pending.signal, sig)) {
 			/* XXX need more than this... */
 			if (info)
 				info->sig = sig;
@@ -643,7 +618,6 @@ asmlinkage int irix_sigpoll_sys(unsigned long *set, struct irix5_siginfo *info,
 	error = -EINTR;
 
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -669,44 +643,45 @@ asmlinkage int irix_waitsys(int type, int pid, struct irix5_siginfo *info,
 	DECLARE_WAITQUEUE(wait, current);
 	struct task_struct *p;
 
-	lock_kernel();
-	if(!info) {
+	if (!info) {
 		retval = -EINVAL;
 		goto out;
 	}
 	retval = verify_area(VERIFY_WRITE, info, sizeof(*info));
 	if(retval)
 		goto out;
-	if(ru) {
+	if (ru) {
 		retval = verify_area(VERIFY_WRITE, ru, sizeof(*ru));
 		if(retval)
 			goto out;
 	}
-	if(options & ~(W_MASK)) {
+	if (options & ~(W_MASK)) {
 		retval = -EINVAL;
 		goto out;
 	}
-	if(type != P_PID && type != P_PGID && type != P_ALL) {
+	if (type != P_PID && type != P_PGID && type != P_ALL) {
 		retval = -EINVAL;
 		goto out;
 	}
 	add_wait_queue(&current->wait_chldexit, &wait);
 repeat:
 	flag = 0;
-	for(p = current->p_cptr; p; p = p->p_osptr) {
-		if((type == P_PID) && p->pid != pid)
+	current->state = TASK_INTERRUPTIBLE;
+	read_lock(&tasklist_lock);
+	for (p = current->p_cptr; p; p = p->p_osptr) {
+		if ((type == P_PID) && p->pid != pid)
 			continue;
-		if((type == P_PGID) && p->pgrp != pid)
+		if ((type == P_PGID) && p->pgrp != pid)
 			continue;
-		if((p->exit_signal != SIGCHLD))
+		if ((p->exit_signal != SIGCHLD))
 			continue;
 		flag = 1;
-		switch(p->state) {
+		switch (p->state) {
 			case TASK_STOPPED:
 				if (!p->exit_code)
 					continue;
 				if (!(options & (W_TRAPPED|W_STOPPED)) &&
-				    !(p->flags & PF_PTRACED))
+				    !(p->ptrace & PT_PTRACED))
 					continue;
 				if (ru != NULL)
 					getrusage(p, RUSAGE_BOTH, ru);
@@ -747,12 +722,13 @@ repeat:
 				continue;
 		}
 	}
-	if(flag) {
+	read_unlock(&tasklist_lock);
+	if (flag) {
 		retval = 0;
-		if(options & W_NOHANG)
+		if (options & W_NOHANG)
 			goto end_waitsys;
 		retval = -ERESTARTSYS;
-		if(signal_pending(current))
+		if (signal_pending(current))
 			goto end_waitsys;
 		current->state = TASK_INTERRUPTIBLE;
 		schedule();
@@ -760,10 +736,10 @@ repeat:
 	}
 	retval = -ECHILD;
 end_waitsys:
+	current->state = TASK_RUNNING;
 	remove_wait_queue(&current->wait_chldexit, &wait);
 
 out:
-	unlock_kernel();
 	return retval;
 }
 
@@ -786,8 +762,7 @@ asmlinkage int irix_getcontext(struct pt_regs *regs)
 	struct irix5_context *ctx;
 	unsigned long flags;
 
-	lock_kernel();
-	if(regs->regs[2] == 1000)
+	if (regs->regs[2] == 1000)
 		base = 1;
 	ctx = (struct irix5_context *) regs->regs[base + 4];
 
@@ -799,7 +774,7 @@ asmlinkage int irix_getcontext(struct pt_regs *regs)
 	error = verify_area(VERIFY_WRITE, ctx, sizeof(*ctx));
 	if(error)
 		goto out;
-	__put_user(current->tss.irix_oldctx, &ctx->link);
+	__put_user(current->thread.irix_oldctx, &ctx->link);
 
 	__copy_to_user(&ctx->sigmask, &current->blocked, sizeof(irix_sigset_t));
 
@@ -810,7 +785,7 @@ asmlinkage int irix_getcontext(struct pt_regs *regs)
 
 	__put_user(0, &ctx->weird_graphics_thing);
 	__put_user(0, &ctx->regs[0]);
-	for(i = 1; i < 32; i++)
+	for (i = 1; i < 32; i++)
 		__put_user(regs->regs[i], &ctx->regs[i]);
 	__put_user(regs->lo, &ctx->regs[32]);
 	__put_user(regs->hi, &ctx->regs[33]);
@@ -828,7 +803,6 @@ asmlinkage int irix_getcontext(struct pt_regs *regs)
 	error = 0;
 
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -837,7 +811,6 @@ asmlinkage unsigned long irix_setcontext(struct pt_regs *regs)
 	int error, base = 0;
 	struct irix5_context *ctx;
 
-	lock_kernel();
 	if(regs->regs[2] == 1000)
 		base = 1;
 	ctx = (struct irix5_context *) regs->regs[base + 4];
@@ -848,15 +821,15 @@ asmlinkage unsigned long irix_setcontext(struct pt_regs *regs)
 #endif
 
 	error = verify_area(VERIFY_READ, ctx, sizeof(*ctx));
-	if(error)
+	if (error)
 		goto out;
 
-	if(ctx->flags & 0x02) {
+	if (ctx->flags & 0x02) {
 		/* XXX sigstack garbage, todo... */
 		printk("Wheee, cannot do sigstack stuff in setcontext\n");
 	}
 
-	if(ctx->flags & 0x04) {
+	if (ctx->flags & 0x04) {
 		int i;
 
 		/* XXX extra control block stuff... todo... */
@@ -867,15 +840,14 @@ asmlinkage unsigned long irix_setcontext(struct pt_regs *regs)
 		regs->cp0_epc = ctx->regs[35];
 	}
 
-	if(ctx->flags & 0x08) {
+	if (ctx->flags & 0x08) {
 		/* XXX fpu context, blah... */
 		printk("Wheee, cannot restore FPU context yet...\n");
 	}
-	current->tss.irix_oldctx = ctx->link;
+	current->thread.irix_oldctx = ctx->link;
 	error = regs->regs[2];
 
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -885,7 +857,6 @@ asmlinkage int irix_sigstack(struct irix_sigstack *new, struct irix_sigstack *ol
 {
 	int error;
 
-	lock_kernel();
 #ifdef DEBUG_SIG
 	printk("[%s:%d] irix_sigstack(%p,%p)\n",
 	       current->comm, current->pid, new, old);
@@ -902,8 +873,8 @@ asmlinkage int irix_sigstack(struct irix_sigstack *new, struct irix_sigstack *ol
 			goto out;
 	}
 	error = 0;
+
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -914,18 +885,17 @@ asmlinkage int irix_sigaltstack(struct irix_sigaltstack *new,
 {
 	int error;
 
-	lock_kernel();
 #ifdef DEBUG_SIG
 	printk("[%s:%d] irix_sigaltstack(%p,%p)\n",
 	       current->comm, current->pid, new, old);
 #endif
-	if(new) {
+	if (new) {
 		error = verify_area(VERIFY_READ, new, sizeof(*new));
 		if(error)
 			goto out;
 	}
 
-	if(old) {
+	if (old) {
 		error = verify_area(VERIFY_WRITE, old, sizeof(*old));
 		if(error)
 			goto out;
@@ -934,7 +904,6 @@ asmlinkage int irix_sigaltstack(struct irix_sigaltstack *new,
 
 out:
 	error = 0;
-	unlock_kernel();
 
 	return error;
 }
@@ -947,7 +916,6 @@ asmlinkage int irix_sigsendset(struct irix_procset *pset, int sig)
 {
 	int error;
 
-	lock_kernel();
 	error = verify_area(VERIFY_READ, pset, sizeof(*pset));
 	if(error)
 		goto out;
@@ -957,10 +925,8 @@ asmlinkage int irix_sigsendset(struct irix_procset *pset, int sig)
 	       pset->cmd, pset->ltype, pset->lid, pset->rtype, pset->rid,
 	       sig);
 #endif
-
 	error = -EINVAL;
 
 out:
-	unlock_kernel();
 	return error;
 }

@@ -34,7 +34,7 @@
  * The timezone where the local system is located.  Used as a default by some
  * programs who obtain this value by using gettimeofday.
  */
-struct timezone sys_tz = { 0, 0};
+struct timezone sys_tz;
 
 static void do_normal_gettime(struct timeval * tm)
 {
@@ -54,6 +54,10 @@ void get_fast_time(struct timeval * t)
 	do_get_fast_time(t);
 }
 
+/* The xtime_lock is not only serializing the xtime read/writes but it's also
+   serializing all accesses to the global NTP variables now. */
+extern rwlock_t xtime_lock;
+
 #if !defined(__alpha__) && !defined(__ia64__)
 
 /*
@@ -64,7 +68,7 @@ void get_fast_time(struct timeval * t)
  *
  * XXX This function is NOT 64-bit clean!
  */
-asmlinkage int sys_time(int * tloc)
+asmlinkage long sys_time(int * tloc)
 {
 	int i;
 
@@ -85,7 +89,7 @@ asmlinkage int sys_time(int * tloc)
  * architectures that need it).
  */
  
-asmlinkage int sys_stime(int * tptr)
+asmlinkage long sys_stime(int * tptr)
 {
 	int value;
 
@@ -93,20 +97,20 @@ asmlinkage int sys_stime(int * tptr)
 		return -EPERM;
 	if (get_user(value, tptr))
 		return -EFAULT;
-	cli();
+	write_lock_irq(&xtime_lock);
 	xtime.tv_sec = value;
 	xtime.tv_usec = 0;
 	time_adjust = 0;	/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	sti();
+	write_unlock_irq(&xtime_lock);
 	return 0;
 }
 
 #endif
 
-asmlinkage int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
+asmlinkage long sys_gettimeofday(struct timeval *tv, struct timezone *tz)
 {
 	if (tv) {
 		struct timeval ktv;
@@ -139,9 +143,9 @@ asmlinkage int sys_gettimeofday(struct timeval *tv, struct timezone *tz)
  */
 inline static void warp_clock(void)
 {
-	cli();
+	write_lock_irq(&xtime_lock);
 	xtime.tv_sec += sys_tz.tz_minuteswest * 60;
-	sti();
+	write_unlock_irq(&xtime_lock);
 }
 
 /*
@@ -181,7 +185,7 @@ int do_sys_settimeofday(struct timeval *tv, struct timezone *tz)
 	return 0;
 }
 
-asmlinkage int sys_settimeofday(struct timeval *tv, struct timezone *tz)
+asmlinkage long sys_settimeofday(struct timeval *tv, struct timezone *tz)
 {
 	struct timeval	new_tv;
 	struct timezone new_tz;
@@ -198,23 +202,23 @@ asmlinkage int sys_settimeofday(struct timeval *tv, struct timezone *tz)
 	return do_sys_settimeofday(tv ? &new_tv : NULL, tz ? &new_tz : NULL);
 }
 
-long pps_offset = 0;		/* pps time offset (us) */
+long pps_offset;		/* pps time offset (us) */
 long pps_jitter = MAXTIME;	/* time dispersion (jitter) (us) */
 
-long pps_freq = 0;		/* frequency offset (scaled ppm) */
+long pps_freq;			/* frequency offset (scaled ppm) */
 long pps_stabil = MAXFREQ;	/* frequency dispersion (scaled ppm) */
 
 long pps_valid = PPS_VALID;	/* pps signal watchdog counter */
 
 int pps_shift = PPS_SHIFT;	/* interval duration (s) (shift) */
 
-long pps_jitcnt = 0;		/* jitter limit exceeded */
-long pps_calcnt = 0;		/* calibration intervals */
-long pps_errcnt = 0;		/* calibration errors */
-long pps_stbcnt = 0;		/* stability limit exceeded */
+long pps_jitcnt;		/* jitter limit exceeded */
+long pps_calcnt;		/* calibration intervals */
+long pps_errcnt;		/* calibration errors */
+long pps_stbcnt;		/* stability limit exceeded */
 
 /* hook for a loadable hardpps kernel module */
-void (*hardpps_ptr)(struct timeval *) = (void (*)(struct timeval *))0;
+void (*hardpps_ptr)(struct timeval *);
 
 /* adjtimex mainly allows reading (and writing, if superuser) of
  * kernel time-keeping variables. used by xntpd.
@@ -222,7 +226,7 @@ void (*hardpps_ptr)(struct timeval *) = (void (*)(struct timeval *))0;
 int do_adjtimex(struct timex *txc)
 {
         long ltemp, mtemp, save_adjust;
-	int result = time_state;	/* mostly `TIME_OK' */
+	int result;
 
 	/* In order to modify anything, you gotta be super-user! */
 	if (txc->modes && !capable(CAP_SYS_TIME))
@@ -240,7 +244,8 @@ int do_adjtimex(struct timex *txc)
 		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ)
 			return -EINVAL;
 
-	cli(); /* SMP: global cli() is enough protection. */
+	write_lock_irq(&xtime_lock);
+	result = time_state;	/* mostly `TIME_OK' */
 
 	/* Save for later - semantics of adjtime is to return old value */
 	save_adjust = time_adjust;
@@ -385,7 +390,6 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	txc->constant	   = time_constant;
 	txc->precision	   = time_precision;
 	txc->tolerance	   = time_tolerance;
-	do_gettimeofday(&txc->time);
 	txc->tick	   = tick;
 	txc->ppsfreq	   = pps_freq;
 	txc->jitter	   = pps_jitter >> PPS_AVG;
@@ -395,12 +399,12 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	txc->calcnt	   = pps_calcnt;
 	txc->errcnt	   = pps_errcnt;
 	txc->stbcnt	   = pps_stbcnt;
-
-	sti();
+	write_unlock_irq(&xtime_lock);
+	do_gettimeofday(&txc->time);
 	return(result);
 }
 
-asmlinkage int sys_adjtimex(struct timex *txc_p)
+asmlinkage long sys_adjtimex(struct timex *txc_p)
 {
 	struct timex txc;		/* Local copy of parameter */
 	int ret;

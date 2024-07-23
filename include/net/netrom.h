@@ -56,7 +56,7 @@ enum {
 
 typedef struct {
 	ax25_address		user_addr, source_addr, dest_addr;
-	struct device		*device;
+	struct net_device		*device;
 	unsigned char		my_index,   my_id;
 	unsigned char		your_index, your_id;
 	unsigned char		state, condition, bpqext, window;
@@ -79,7 +79,7 @@ struct nr_neigh {
 	ax25_address    callsign;
 	ax25_digi       *digipeat;
 	ax25_cb		*ax25;
-	struct device   *dev;
+	struct net_device   *dev;
 	unsigned char   quality;
 	unsigned char   locked;
 	unsigned short  count;
@@ -114,14 +114,12 @@ extern int  sysctl_netrom_transport_requested_window_size;
 extern int  sysctl_netrom_transport_no_activity_timeout;
 extern int  sysctl_netrom_routing_control;
 extern int  sysctl_netrom_link_fails_count;
-extern int  nr_rx_frame(struct sk_buff *, struct device *);
+extern int  nr_rx_frame(struct sk_buff *, struct net_device *);
 extern void nr_destroy_socket(struct sock *);
 
 /* nr_dev.c */
-extern int  nr_rx_ip(struct sk_buff *, struct device *);
-extern int  nr_init(struct device *);
-
-#include <net/nrcall.h>
+extern int  nr_rx_ip(struct sk_buff *, struct net_device *);
+extern int  nr_init(struct net_device *);
 
 /* nr_in.c */
 extern int  nr_process_rx_frame(struct sock *, struct sk_buff *);
@@ -141,14 +139,14 @@ extern void nr_enquiry_response(struct sock *);
 extern void nr_check_iframes_acked(struct sock *, unsigned short);
 
 /* nr_route.c */
-extern void nr_rt_device_down(struct device *);
-extern struct device *nr_dev_first(void);
-extern struct device *nr_dev_get(ax25_address *);
+extern void nr_rt_device_down(struct net_device *);
+extern struct net_device *nr_dev_first(void);
+extern struct net_device *nr_dev_get(ax25_address *);
 extern int  nr_rt_ioctl(unsigned int, void *);
 extern void nr_link_failed(ax25_cb *, int);
 extern int  nr_route_frame(struct sk_buff *, ax25_cb *);
-extern int  nr_nodes_get_info(char *, char **, off_t, int, int);
-extern int  nr_neigh_get_info(char *, char **, off_t, int, int);
+extern int  nr_nodes_get_info(char *, char **, off_t, int);
+extern int  nr_neigh_get_info(char *, char **, off_t, int);
 extern void nr_rt_free(void);
 
 /* nr_subr.c */

@@ -22,13 +22,12 @@
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/init.h>
 
 #include "scsi.h"
 #include "hosts.h"
 #include "NCR53C9x.h"
 #include "mac_esp.h"
-
-#include "../../arch/m68k/mac/via6522.h"  /* huh? */
 
 #include <asm/io.h>
 
@@ -36,10 +35,14 @@
 #include <asm/irq.h>
 #include <asm/macints.h>
 #include <asm/machw.h>
+#include <asm/mac_via.h>
 
 #include <asm/pgtable.h>
 
 #include <asm/macintosh.h>
+
+#define mac_turnon_irq(x)	mac_enable_irq(x)
+#define mac_turnoff_irq(x)	mac_disable_irq(x)
 
 extern inline void esp_handle(struct NCR_ESP *esp);
 extern void mac_esp_intr(int irq, void *dev_id, struct pt_regs *pregs);
@@ -59,9 +62,14 @@ static int  dma_ports_p(struct NCR_ESP *esp);
 static void dma_setup(struct NCR_ESP * esp, __u32 addr, int count, int write);
 static void dma_setup_quick(struct NCR_ESP * esp, __u32 addr, int count, int write);
 
-
 static int esp_dafb_dma_irq_p(struct NCR_ESP * espdev);
 static int esp_iosb_dma_irq_p(struct NCR_ESP * espdev);
+
+volatile unsigned char cmd_buffer[16];
+				/* This is where all commands are put
+				 * before they are transfered to the ESP chip
+				 * via PIO.
+				 */
 
 static int esp_initialized = 0;
 
@@ -140,7 +148,7 @@ void fake_drq(int irq, void *dev_id, struct pt_regs *pregs)
 #define DRIVER_SETUP
 
 /*
- * Function : mac_scsi_setup(char *str, int *ints)
+ * Function : mac_esp_setup(char *str, int *ints)
  *
  * Purpose : booter command line initialization of the overrides array,
  *
@@ -152,7 +160,7 @@ void fake_drq(int irq, void *dev_id, struct pt_regs *pregs)
  *
  */
 
-void mac_esp_setup(char *str, int *ints) {
+static int __init mac_esp_setup(char *str, int *ints) {
 #ifdef DRIVER_SETUP
 	/* Format of mac53c9x parameter is:
 	 *   mac53c9x=<num_esps>,<disconnect>,<nosync>,<can_queue>,<cmd_per_lun>,<sg_tablesize>,<hostid>,<use_tags>
@@ -178,7 +186,7 @@ void mac_esp_setup(char *str, int *ints) {
 	
 	if (ints[0] < 1) {
 		printk( "mac_esp_setup: no arguments!\n" );
-		return;
+		return 0;
 	}
 
 	if (ints[0] >= 1) {
@@ -229,7 +237,10 @@ void mac_esp_setup(char *str, int *ints) {
 	}
 #endif
 #endif
+	return 1; 
 }
+
+__setup("mac53c9x=", mac_esp_setup);
 
 /*
  * ESP address 'detection'
@@ -286,6 +297,9 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 #if 0
 	unsigned long timeout;
 #endif
+
+	if (esp_initialized > 0)
+		return -ENODEV;
 
 	/* what do we have in this machine... */
 	if (MACHW_PRESENT(MAC_SCSI_96)) {
@@ -358,9 +372,12 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 
 		} /* chipnum == 0 */
 
-
 		/* use pio for command bytes; pio for message/data: TBI */
 		esp->do_pio_cmds = 1;
+
+		/* Set the command buffer */
+		esp->esp_command = (volatile unsigned char*) cmd_buffer;
+		esp->esp_command_dvma = (volatile unsigned char*) cmd_buffer;
 
 		/* various functions */
 		esp->dma_bytes_sent = &dma_bytes_sent;
@@ -401,7 +418,9 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 			esp->irq = IRQ_MAC_SCSI;
 
 			request_irq(IRQ_MAC_SCSI, esp_intr, 0, "Mac ESP SCSI", esp);
+#if 0	/* conflicts with IOP ADB */
 			request_irq(IRQ_MAC_SCSIDRQ, fake_drq, 0, "Mac ESP DRQ", esp);
+#endif
 
 			if (macintosh_config->scsi_type == MAC_SCSI_QUADRA) {
 				esp->cfreq = 16500000;
@@ -413,8 +432,9 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 		} else { /* chipnum == 1 */
 
 			esp->irq = IRQ_MAC_SCSIDRQ;
-
+#if 0	/* conflicts with IOP ADB */
 			request_irq(IRQ_MAC_SCSIDRQ, esp_intr, 0, "Mac ESP SCSI 2", esp);
+#endif
 
 			esp->cfreq = 25000000;
 
@@ -469,7 +489,7 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 static int esp_dafb_dma_irq_p(struct NCR_ESP * esp)
 {
 	unsigned int ret;
-	int sreg = esp->eregs->esp_status;
+	int sreg = esp_read(esp->eregs->esp_status);
 
 #ifdef DEBUG_MAC_ESP
 	printk("mac_esp: esp_dafb_dma_irq_p dafb %d irq %d\n", 
@@ -510,7 +530,7 @@ static int esp_dafb_dma_irq_p(struct NCR_ESP * esp)
 static int esp_iosb_dma_irq_p(struct NCR_ESP * esp)
 {
 	int ret  = mac_irq_pending(IRQ_MAC_SCSI) || mac_irq_pending(IRQ_MAC_SCSIDRQ);
-	int sreg = esp->eregs->esp_status;
+	int sreg = esp_read(esp->eregs->esp_status);
 
 #ifdef DEBUG_MAC_ESP
 	printk("mac_esp: dma_irq_p drq %d irq %d sreg %x curr %p disc %p\n", 
@@ -614,7 +634,7 @@ static void dma_ints_on(struct NCR_ESP * esp)
 
 static int dma_irq_p(struct NCR_ESP * esp)
 {
-	int i = esp->eregs->esp_status;
+	int i = esp_read(esp->eregs->esp_status);
 
 #ifdef DEBUG_MAC_ESP
 	printk("mac_esp: dma_irq_p status %d\n", i);
@@ -629,7 +649,7 @@ static int dma_irq_p_quick(struct NCR_ESP * esp)
 	 * Copied from iosb_dma_irq_p()
 	 */
 	int ret  = mac_irq_pending(IRQ_MAC_SCSI) || mac_irq_pending(IRQ_MAC_SCSIDRQ);
-	int sreg = esp->eregs->esp_status;
+	int sreg = esp_read(esp->eregs->esp_status);
 
 #ifdef DEBUG_MAC_ESP
 	printk("mac_esp: dma_irq_p drq %d irq %d sreg %x curr %p disc %p\n", 
@@ -689,3 +709,7 @@ static void dma_setup_quick(struct NCR_ESP * esp, __u32 addr, int count, int wri
 	printk("mac_esp: dma_setup_quick\n");
 #endif
 }
+
+static Scsi_Host_Template driver_template = SCSI_MAC_ESP;
+
+#include "scsi_module.c"

@@ -68,11 +68,6 @@ static unsigned char target2alpa[] = {
 0x25, 0x23, 0x1f, 0x1e, 0x1d, 0x1b, 0x18, 0x17, 0x10, 0x0f, 0x08, 0x04, 0x02, 0x01, 0x00
 };
 
-struct proc_dir_entry proc_scsi_fcal = {
-	PROC_SCSI_FCAL, 4, "fcal",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
-
 static int fcal_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cmnd *fcmd);
 
 static void fcal_select_queue_depths(struct Scsi_Host *host, Scsi_Device *devlist)
@@ -90,14 +85,14 @@ static void fcal_select_queue_depths(struct Scsi_Host *host, Scsi_Device *devlis
 
 /* Detect all FC Arbitrated Loops attached to the machine.
    fc4 module has done all the work for us... */
-__initfunc(int fcal_detect(Scsi_Host_Template *tpnt))
+int __init fcal_detect(Scsi_Host_Template *tpnt)
 {
 	int nfcals = 0;
 	fc_channel *fc;
 	int fcalcount;
 	int i;
 
-	tpnt->proc_dir = &proc_scsi_fcal;
+	tpnt->proc_name = "fcal";
 	fcalcount = 0;
 	for_each_online_fc_channel(fc)
 		if (fc->posmap)
@@ -133,7 +128,11 @@ __initfunc(int fcal_detect(Scsi_Host_Template *tpnt))
 		if (!ages) continue;
 				
 		host = scsi_register (tpnt, sizeof (struct fcal));
-		if (!host) panic ("Cannot register FCAL host\n");
+		if (!host) 
+		{
+			kfree(ages);
+			continue;
+		}
 				
 		nfcals++;
 				
@@ -223,7 +222,7 @@ int fcal_proc_info (char *buffer, char **start, off_t offset, int length, int ho
 	fc = fcal->fc;
 
 #ifdef __sparc__
-	SPRINTF ("Sun Enterprise Network Array (A5000 or E?500) on %s\n", fc->name);
+	SPRINTF ("Sun Enterprise Network Array (A5000 or E?500) on %s PROM node %x\n", fc->name, fc->dev->prom_node);
 #else
 	SPRINTF ("Fibre Channel Arbitrated Loop on %s\n", fc->name);
 #endif
@@ -297,11 +296,8 @@ static int fcal_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cmn
 	return 0;
 }
 
-#ifdef MODULE
-
-Scsi_Host_Template driver_template = FCAL;
+static Scsi_Host_Template driver_template = FCAL;
 
 #include "scsi_module.c"
 
 EXPORT_NO_SYMBOLS;
-#endif /* MODULE */

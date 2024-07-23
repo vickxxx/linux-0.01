@@ -172,13 +172,12 @@ aic7xxx_proc_info ( char *buffer, char **start, off_t offset, int length,
 #else
   size += sprintf(BLS, "  AIC7XXX_PROC_STATS     : Disabled\n");
 #endif
-  size += sprintf(BLS, "  AIC7XXX_RESET_DELAY    : %d\n", AIC7XXX_RESET_DELAY);
   size += sprintf(BLS, "\n");
   size += sprintf(BLS, "Adapter Configuration:\n");
   size += sprintf(BLS, "           SCSI Adapter: %s\n",
       board_names[p->board_name_index]);
   if (p->flags & AHC_TWIN)
-    size += sprintf(BLS, "                         Twin Channel\n");
+    size += sprintf(BLS, "                         Twin Channel Controller ");
   else
   {
     char *channel = "";
@@ -209,8 +208,21 @@ aic7xxx_proc_info ( char *buffer, char **start, off_t offset, int length,
       ultra = "Ultra-2 LVD/SE ";
     else if (p->features & AHC_ULTRA)
       ultra = "Ultra ";
-    size += sprintf(BLS, "                           %s%sController%s\n",
+    size += sprintf(BLS, "                           %s%sController%s ",
       ultra, wide, channel);
+  }
+  switch(p->chip & ~AHC_CHIPID_MASK)
+  {
+    case AHC_VL:
+      size += sprintf(BLS, "at VLB slot %d\n", p->pci_device_fn);
+      break;
+    case AHC_EISA:
+      size += sprintf(BLS, "at EISA slot %d\n", p->pci_device_fn);
+      break;
+    default:
+      size += sprintf(BLS, "at PCI %d/%d/%d\n", p->pci_bus,
+        PCI_SLOT(p->pci_device_fn), PCI_FUNC(p->pci_device_fn));
+      break;
   }
   if( !(p->maddr) )
   {
@@ -373,11 +385,9 @@ aic7xxx_proc_info ( char *buffer, char **start, off_t offset, int length,
   }
   else
   {
-    *start = &aic7xxx_buffer[offset];   /* Start of wanted data */
-    if (size - offset < length)
-    {
-      length = size - offset;
-    }
+    *start = buffer;
+    length = MIN(length, size - offset);
+    memcpy(buffer, &aic7xxx_buffer[offset], length);
   }
 
   return (length);

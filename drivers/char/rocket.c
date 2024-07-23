@@ -42,29 +42,26 @@
 #include <linux/config.h>
 #include <linux/version.h>
 
-#if (defined(CONFIG_PCI) && (LINUX_VERSION_CODE >= 131072))
+#ifdef CONFIG_PCI
 #define ENABLE_PCI
 #endif
 
-#if (LINUX_VERSION_CODE > 66304)
 #define NEW_MODULES
 #ifdef LOCAL_ROCKET_H		/* We're building standalone */
 #define MODULE
-#endif
 #endif
 
 #ifdef NEW_MODULES
 #ifdef MODVERSIONS
 #include <linux/modversions.h>
 #endif
-#include <linux/module.h>
 #else /* !NEW_MODULES */
 #ifdef MODVERSIONS
 #define MODULE
 #endif
-#include <linux/module.h>
 #endif /* NEW_MODULES */
 
+#include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/major.h>
 #include <linux/kernel.h>
@@ -89,8 +86,6 @@
 #endif
 #if (LINUX_VERSION_CODE >= 131343) /* 2.1.15 -- XX get correct version */
 #include <linux/init.h>
-#else
-#define __initfunc(x)	x
 #endif
 	
 #include "rocket_int.h"
@@ -143,18 +138,10 @@
 
 #define _INLINE_ inline
 
-/*
- * Until we get a formal timer assignment
- */
-#ifndef COMTROL_TIMER
-#define COMTROL_TIMER 26
-#endif
-
 #ifndef NEW_MODULES
 /*
  * NB. we must include the kernel idenfication string in to install the module.
  */
-#include <linux/version.h>
 /*static*/ char kernel_version[] = UTS_RELEASE;
 #endif
 
@@ -167,24 +154,26 @@ static void rp_wait_until_sent(struct tty_struct *tty, int timeout);
 static void rp_flush_buffer(struct tty_struct *tty);
 
 static struct tty_driver rocket_driver, callout_driver;
-static int rocket_refcount = 0;
+static int rocket_refcount;
 
-static int rp_num_ports_open = 0;
+static int rp_num_ports_open;
 
-unsigned long board1 = 0;
-unsigned long board2 = 0;
-unsigned long board3 = 0;
-unsigned long board4 = 0;
-unsigned long controller = 0;
-unsigned long support_low_speed = 0;
+static struct timer_list rocket_timer;
+
+unsigned long board1;
+unsigned long board2;
+unsigned long board3;
+unsigned long board4;
+unsigned long controller;
+unsigned long support_low_speed;
 int rp_baud_base = 460800;
 static unsigned long rcktpt_io_addr[NUM_BOARDS];
 static int max_board;
 #ifdef TIME_STAT
-static unsigned long long time_stat = 0;
-static unsigned long time_stat_short = 0;
-static unsigned long time_stat_long = 0;
-static unsigned long time_counter = 0;
+static unsigned long long time_stat;
+static unsigned long time_stat_short;
+static unsigned long time_stat_long;
+static unsigned long time_counter;
 #endif
 
 #if ((LINUX_VERSION_CODE > 0x020111) && defined(MODULE))
@@ -202,13 +191,6 @@ MODULE_PARM(controller, "i");
 MODULE_PARM_DESC(controller, "I/O port for (ISA) rocketport controller");
 MODULE_PARM(support_low_speed, "i");
 MODULE_PARM_DESC(support_low_speed, "0 means support 50 baud, 1 means support 460400 baud");	
-#endif
-
-/*
- * Provide backwards compatibility for kernels prior to 2.1.8.
- */
-#if (LINUX_VERSION_CODE < 0x20000)
-typedef dev_t kdev_t;
 #endif
 
 #if (LINUX_VERSION_CODE < 131336)
@@ -236,7 +218,7 @@ int copy_to_user(void *to_user, const void *from, unsigned long len)
 
 static inline int signal_pending(struct task_struct *p)
 {
-	return (p->signal & (~p->blocked != 0));
+	return (p->signal & ~p->blocked) != 0;
 }
 
 #else
@@ -517,7 +499,7 @@ static _INLINE_ void rp_handle_port(struct r_port *info)
 /*
  * The top level polling routine.
  */
-static void rp_do_poll(void)
+static void rp_do_poll(unsigned long dummy)
 {
 	CONTROLLER_t *ctlp;
 	int ctrl, aiop, ch, line;
@@ -569,7 +551,7 @@ static void rp_do_poll(void)
 	 * Reset the timer so we get called at the next clock tick.
 	 */
 	if (rp_num_ports_open) {
-		timer_active |= 1 << COMTROL_TIMER;
+		mod_timer(&rocket_timer, jiffies + 1);
 	}
 #ifdef TIME_STAT
 	__asm__(".byte 0x0f,0x31"
@@ -892,7 +874,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			sSetDTR(&info->channel);
 			sSetRTS(&info->channel);
 		}
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ROCKET_INITIALIZED)) {
 			if (info->flags & ROCKET_HUP_NOTIFY)
@@ -1057,7 +1039,7 @@ static int rp_open(struct tty_struct *tty, struct file * filp)
 		sSetRTS(cp);
 	}
 	
-	timer_active |= 1 << COMTROL_TIMER;
+	mod_timer(&rocket_timer, jiffies + 1);
 
 	retval = block_til_ready(tty, filp, info);
 	if (retval) {
@@ -1664,7 +1646,6 @@ static void rp_wait_until_sent(struct tty_struct *tty, int timeout)
 		       jiffies, check_time);
 #endif
 		current->state = TASK_INTERRUPTIBLE;
-		current->counter = 0;	/* make us low-priority */
 		schedule_timeout(check_time);
 		if (signal_pending(current))
 			break;
@@ -1762,13 +1743,8 @@ static void rp_put_char(struct tty_struct *tty, unsigned char ch)
 	}
 }
 
-#if (LINUX_VERSION_CODE > 66304)
 static int rp_write(struct tty_struct * tty, int from_user,
 		    const unsigned char *buf, int count)
-#else
-static int rp_write(struct tty_struct * tty, int from_user,
-		    unsigned char *buf, int count)
-#endif	
 {
 	struct r_port * info = (struct r_port *)tty->driver_data;
 	CHANNEL_t	*cp;
@@ -1961,7 +1937,7 @@ static struct pci_dev *pci_find_slot(unsigned char bus,
 }
 #endif
      
-__initfunc(int register_PCI(int i, unsigned int bus, unsigned int device_fn))
+int __init register_PCI(int i, unsigned int bus, unsigned int device_fn)
 {
 	int	num_aiops, aiop, max_num_aiops, num_chan, chan;
 	unsigned int	aiopio[MAX_AIOPS_PER_BOARD];
@@ -1976,15 +1952,10 @@ __initfunc(int register_PCI(int i, unsigned int bus, unsigned int device_fn))
 	if (!dev)
 		return 0;
 
-#if (LINUX_VERSION_CODE >= 0x020163) /* 2.1.99 */
-	rcktpt_io_addr[i] = dev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
-#else
-	ret = pcibios_read_config_dword(bus, device_fn, PCI_BASE_ADDRESS_0,
-		&port);
-	if (ret)
+	if (pci_enable_device(dev))
 		return 0;
-	rcktpt_io_addr[i] = port & PCI_BASE_ADDRESS_IO_MASK;
-#endif	
+
+	rcktpt_io_addr[i] = pci_resource_start (dev, 0);
 	switch(dev->device) {
 	case PCI_DEVICE_ID_RP4QUAD:
 		str = "Quadcable";
@@ -2050,7 +2021,7 @@ __initfunc(int register_PCI(int i, unsigned int bus, unsigned int device_fn))
 	return(1);
 }
 
-__initfunc(static int init_PCI(int boards_found))
+static int __init init_PCI(int boards_found)
 {
 	unsigned char	bus, device_fn;
 	int	i, count = 0;
@@ -2105,7 +2076,7 @@ __initfunc(static int init_PCI(int boards_found))
 }
 #endif
 
-__initfunc(static int init_ISA(int i, int *reserved_controller))
+static int __init init_ISA(int i, int *reserved_controller)
 {
 	int	num_aiops, num_chan;
 	int	aiop, chan;
@@ -2157,7 +2128,7 @@ __initfunc(static int init_ISA(int i, int *reserved_controller))
 /*
  * The module "startup" routine; it's run when the module is loaded.
  */
-__initfunc(int rp_init(void))
+int __init rp_init(void)
 {
 	int i, retval, pci_boards_found, isa_boards_found;
 	int	reserved_controller = 0;
@@ -2169,13 +2140,12 @@ __initfunc(int rp_init(void))
 	 * Set up the timer channel.  If it is already in use by
 	 * some other driver, give up.
 	 */
-	if (timer_table[COMTROL_TIMER].fn) {
-		printk("rocket.o: Timer channel %d already in use!\n",
-		       COMTROL_TIMER);
+	if (rocket_timer.function) {
+		printk("rocket.o: Timer already in use!\n");
 		return -EBUSY;
 	}
-	timer_table[COMTROL_TIMER].fn = rp_do_poll;
-	timer_table[COMTROL_TIMER].expires = 0;
+	init_timer(&rocket_timer);
+	rocket_timer.function = rp_do_poll;
 	
 	/*
 	 * Initialize the array of pointers to our own internal state
@@ -2232,7 +2202,7 @@ __initfunc(int rp_init(void))
 	
 	if (max_board == 0) {
 		printk("No rocketport ports found; unloading driver.\n");
-		timer_table[COMTROL_TIMER].fn = 0;
+		rocket_timer.function = 0;
 		return -ENODEV;
 	}
 
@@ -2324,7 +2294,9 @@ cleanup_module( void) {
 	int	retval;
 	int	i;
 	int	released_controller = 0;
-	
+
+	del_timer_sync(&rocket_timer);
+
 	retval = tty_unregister_driver(&callout_driver);
 	if (retval) {
 		printk("Error %d while trying to unregister "
@@ -2352,7 +2324,7 @@ cleanup_module( void) {
 	}
 	if (tmp_buf)
 		free_page((unsigned long) tmp_buf);
-	timer_table[COMTROL_TIMER].fn = 0;
+	rocket_timer.function = 0;
 }
 #endif
 

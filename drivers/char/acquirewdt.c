@@ -37,8 +37,11 @@
 #include <linux/notifier.h>
 #include <linux/reboot.h>
 #include <linux/init.h>
+#include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 
-static int acq_is_open=0;
+static int acq_is_open;
+static spinlock_t acq_lock;
 
 /*
  *	You must set these - there is no sane way to probe for this board.
@@ -117,15 +120,19 @@ static int acq_open(struct inode *inode, struct file *file)
 	switch(MINOR(inode->i_rdev))
 	{
 		case WATCHDOG_MINOR:
+			spin_lock(&acq_lock);
 			if(acq_is_open)
+			{
+				spin_unlock(&acq_lock);
 				return -EBUSY;
-			MOD_INC_USE_COUNT;
+			}
 			/*
 			 *	Activate 
 			 */
 	 
 			acq_is_open=1;
 			inb_p(WDT_START);      
+			spin_unlock(&acq_lock);
 			return 0;
 		default:
 			return -ENODEV;
@@ -134,14 +141,17 @@ static int acq_open(struct inode *inode, struct file *file)
 
 static int acq_close(struct inode *inode, struct file *file)
 {
+	lock_kernel();
 	if(MINOR(inode->i_rdev)==WATCHDOG_MINOR)
 	{
+		spin_lock(&acq_lock);
 #ifndef CONFIG_WATCHDOG_NOWAYOUT	
 		inb_p(WDT_STOP);
 #endif		
 		acq_is_open=0;
+		spin_unlock(&acq_lock);
 	}
-	MOD_DEC_USE_COUNT;
+	unlock_kernel();
 	return 0;
 }
 
@@ -166,16 +176,12 @@ static int acq_notify_sys(struct notifier_block *this, unsigned long code,
  
  
 static struct file_operations acq_fops = {
-	NULL,
-	acq_read,
-	acq_write,
-	NULL,		/* No Readdir */
-	NULL,		/* No Select */
-	acq_ioctl,
-	NULL,		/* No mmap */
-	acq_open,
-	NULL,		/* flush */
-	acq_close
+	owner:		THIS_MODULE,
+	read:		acq_read,
+	write:		acq_write,
+	ioctl:		acq_ioctl,
+	open:		acq_open,
+	release:	acq_close,
 };
 
 static struct miscdevice acq_miscdev=
@@ -198,11 +204,19 @@ static struct notifier_block acq_notifier=
 	0
 };
 
-#ifdef MODULE
+static int __init acq_init(void)
+{
+	printk("WDT driver for Acquire single board computer initialising.\n");
 
-#define acq_init init_module
-
-void cleanup_module(void)
+	spin_lock_init(&acq_lock);
+	misc_register(&acq_miscdev);
+	request_region(WDT_STOP, 1, "Acquire WDT");
+	request_region(WDT_START, 1, "Acquire WDT");
+	register_reboot_notifier(&acq_notifier);
+	return 0;
+}
+	
+static void __exit acq_exit(void)
 {
 	misc_deregister(&acq_miscdev);
 	unregister_reboot_notifier(&acq_notifier);
@@ -210,16 +224,5 @@ void cleanup_module(void)
 	release_region(WDT_START,1);
 }
 
-#endif
-
-__initfunc(int acq_init(void))
-{
-	printk("WDT driver for Acquire single board computer initialising.\n");
-
-	misc_register(&acq_miscdev);
-	request_region(WDT_STOP, 1, "Acquire WDT");
-	request_region(WDT_START, 1, "Acquire WDT");
-	unregister_reboot_notifier(&acq_notifier);
-	return 0;
-}
-
+module_init(acq_init);
+module_exit(acq_exit);

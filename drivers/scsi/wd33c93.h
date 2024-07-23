@@ -23,6 +23,7 @@
 #ifndef WD33C93_H
 #define WD33C93_H
 
+#include <linux/config.h>
 
 #define PROC_INTERFACE     /* add code for /proc/scsi/wd33c93/xxx interface */
 #ifdef  PROC_INTERFACE
@@ -189,7 +190,12 @@
    /* This is what the 3393 chip looks like to us */
 typedef struct {
    volatile unsigned char   SASR;
+#if !defined(CONFIG_MVME147_SCSI)
    char                     pad;
+#endif
+#ifdef CONFIG_SGI_IP22
+   char                     pad2,pad3;
+#endif
    volatile unsigned char   SCMD;
 } wd33c93_regs;
 
@@ -223,13 +229,13 @@ struct WD33C93_hostdata {
     uchar            clock_freq;
     uchar            chip;             /* what kind of wd33c93? */
     uchar            microcode;        /* microcode rev */
+    uchar            dma_buffer_pool;  /* FEF: buffer from chip_ram? */
     int              dma_dir;          /* data transfer dir. */
     dma_setup_t      dma_setup;
     dma_stop_t       dma_stop;
     unsigned int     dma_xfer_mask;
     uchar            *dma_bounce_buffer;
     unsigned int     dma_bounce_len;
-    uchar            dma_buffer_pool;  /* FEF: buffer from chip_ram? */
     volatile uchar   busy[8];          /* index = target, bit = lun */
     volatile Scsi_Cmnd *input_Q;       /* commands waiting to be started */
     volatile Scsi_Cmnd *selecting;     /* trying to select this command */
@@ -336,11 +342,7 @@ int wd33c93_abort (Scsi_Cmnd *cmd);
 int wd33c93_queuecommand (Scsi_Cmnd *cmd, void (*done)(Scsi_Cmnd *));
 void wd33c93_intr (struct Scsi_Host *instance);
 int wd33c93_proc_info(char *, char **, off_t, int, int, int);
-
-#if LINUX_VERSION_CODE >= 0x010300
 int wd33c93_reset (Scsi_Cmnd *, unsigned int);
-#else
-int wd33c93_reset (Scsi_Cmnd *);
-#endif
+void wd33c93_release(void);
 
 #endif /* WD33C93_H */

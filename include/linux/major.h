@@ -64,10 +64,11 @@
 #define AZTECH_CDROM_MAJOR 29
 #define GRAPHDEV_MAJOR	29	/* SparcLinux & Linux/68k /dev/fb */
 #define SHMIQ_MAJOR	85	/* Linux/mips, SGI /dev/shmiq */
-#define USEMA_MAJOR	86	/* Linux/MIPS, SGI /dev/usema */
 #define CM206_CDROM_MAJOR 32
 #define IDE2_MAJOR	33
 #define IDE3_MAJOR	34
+#define XPRAM_MAJOR     35      /* expanded storage on S/390 = "slow ram" */
+                                /* proposed by Peter                      */
 #define NETLINK_MAJOR	36
 #define PS2ESDI_MAJOR	36
 #define IDETAPE_MAJOR	37
@@ -76,12 +77,15 @@
 #define DDV_MAJOR       39   /* AP1000 DDV block device */
 #define NBD_MAJOR	43   /* Network block device	*/
 #define RISCOM8_NORMAL_MAJOR 48
+#define DAC960_MAJOR	48	/* 48..55 */
 #define RISCOM8_CALLOUT_MAJOR 49
 #define MKISS_MAJOR	55
 #define DSP56K_MAJOR    55   /* DSP56001 processor device */
 
 #define IDE4_MAJOR	56
 #define IDE5_MAJOR	57
+
+#define LVM_BLK_MAJOR	58	/* Logical Volume Manager */
 
 #define SCSI_DISK1_MAJOR	65
 #define SCSI_DISK2_MAJOR	66
@@ -92,19 +96,65 @@
 #define SCSI_DISK7_MAJOR	71
 
 
+#define COMPAQ_SMART2_MAJOR	72
+#define COMPAQ_SMART2_MAJOR1	73
+#define COMPAQ_SMART2_MAJOR2	74
+#define COMPAQ_SMART2_MAJOR3	75
+#define COMPAQ_SMART2_MAJOR4	76
+#define COMPAQ_SMART2_MAJOR5	77
+#define COMPAQ_SMART2_MAJOR6	78
+#define COMPAQ_SMART2_MAJOR7	79
+
 #define SPECIALIX_NORMAL_MAJOR 75
 #define SPECIALIX_CALLOUT_MAJOR 76
+
+#define COMPAQ_CISS_MAJOR 	104
+#define COMPAQ_CISS_MAJOR1	105
+#define COMPAQ_CISS_MAJOR2      106
+#define COMPAQ_CISS_MAJOR3      107
+#define COMPAQ_CISS_MAJOR4      108
+#define COMPAQ_CISS_MAJOR5      109
+#define COMPAQ_CISS_MAJOR6      110
+#define COMPAQ_CISS_MAJOR7      111
+
+#define DASD_MAJOR      94	/* Official assignations from Peter */
+
+#define MDISK_MAJOR     95	/* Official assignations from Peter */
 
 #define I2O_MAJOR		80	/* 80->87 */
 
 #define IDE6_MAJOR	88
 #define IDE7_MAJOR	89
+#define IDE8_MAJOR	90
+#define IDE9_MAJOR	91
 
 #define AURORA_MAJOR 79
+
+#define JSFD_MAJOR	99
+
+#define PHONE_MAJOR	100
+
+#define LVM_CHAR_MAJOR	109	/* Logical Volume Manager */
+
+#define RTF_MAJOR	150
+#define RAW_MAJOR	162
+
+#define USB_ACM_MAJOR		166
+#define USB_ACM_AUX_MAJOR	167
+#define USB_CHAR_MAJOR		180
 
 #define UNIX98_PTY_MASTER_MAJOR	128
 #define UNIX98_PTY_MAJOR_COUNT	8
 #define UNIX98_PTY_SLAVE_MAJOR	(UNIX98_PTY_MASTER_MAJOR+UNIX98_PTY_MAJOR_COUNT)
+
+#define VXVM_MAJOR		199	/* VERITAS volume i/o driver    */
+#define VXSPEC_MAJOR		200	/* VERITAS volume config driver */
+#define VXDMP_MAJOR		201	/* VERITAS volume multipath driver */
+
+#define MSR_MAJOR		202
+#define CPUID_MAJOR		203
+
+#define OSST_MAJOR	206	/* OnStream-SCx0 SCSI tape */
 
 /*
  * Tests for SCSI devices.

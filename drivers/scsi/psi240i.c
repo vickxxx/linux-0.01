@@ -33,9 +33,9 @@
 #include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
+#include <linux/spinlock.h>
 #include <asm/dma.h>
 #include <asm/system.h>
-#include <asm/spinlock.h>
 #include <asm/io.h>
 #include <linux/blk.h>
 #include "scsi.h"
@@ -45,9 +45,6 @@
 #include "psi_chip.h"
 
 #include<linux/stat.h>
-
-struct proc_dir_entry Proc_Scsi_Psi240i =
-	{ PROC_SCSI_PSI240I, 7, "psi240i", S_IFDIR | S_IRUGO | S_IXUGO, 2 };
 
 //#define DEBUG 1
 
@@ -600,6 +597,8 @@ int Psi240i_Detect (Scsi_Host_Template *tpnt)
 			continue;
 
 		pshost = scsi_register (tpnt, sizeof(ADAPTER240I));
+		if(pshost == NULL)
+			continue;
 
 		save_flags (flags);
 		cli ();
@@ -716,10 +715,8 @@ int Psi240i_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 	}
 
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = PSI240I;
+static Scsi_Host_Template driver_template = PSI240I;
 
 #include "scsi_module.c"
-#endif
 

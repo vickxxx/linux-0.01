@@ -10,7 +10,7 @@
 #ifndef _IMM_H
 #define _IMM_H
 
-#define   IMM_VERSION   "2.03 (for Linux 2.0.0)"
+#define   IMM_VERSION   "2.05 (for Linux 2.4.0)"
 
 /* 
  * 10 Apr 1998 (Good Friday) - Received EN144302 by email from Iomega.
@@ -59,6 +59,10 @@
  *    CONFIG_SCSI_PPA_HAVE_PEDANTIC => CONFIG_SCSI_IZIP_EPP16
  *    added CONFIG_SCSI_IZIP_SLOW_CTR option
  *                                                      [2.03]
+ *  Fix kernel panic on scsi timeout.		20Aug00 [2.04]
+ *
+ *  Avoid io_request_lock problems.
+ *  John Cavan <johncavan@home.com>		16Nov00 [2.05]
  */
 /* ------ END OF USER CONFIGURABLE PARAMETERS ----- */
 
@@ -125,14 +129,15 @@ int imm_sg = SG_ALL;		/* enable/disable scatter-gather. */
 #define r_str(x)        (unsigned char)inb((x)+1)
 #define r_ctr(x)        (unsigned char)inb((x)+2)
 #define r_epp(x)        (unsigned char)inb((x)+4)
-#define r_fifo(x)       (unsigned char)inb((x)+0x400)
-#define r_ecr(x)        (unsigned char)inb((x)+0x402)
+#define r_fifo(x)       (unsigned char)inb((x))   /* x must be base_hi */
+					/* On PCI is: base+0x400 != base_hi */
+#define r_ecr(x)        (unsigned char)inb((x)+2) /* x must be base_hi */
 
 #define w_dtr(x,y)      outb(y, (x))
 #define w_str(x,y)      outb(y, (x)+1)
 #define w_epp(x,y)      outb(y, (x)+4)
-#define w_fifo(x,y)     outb(y, (x)+0x400)
-#define w_ecr(x,y)      outb(y, (x)+0x402)
+#define w_fifo(x,y)     outb(y, (x))     /* x must be base_hi */
+#define w_ecr(x,y)      outb(y, (x)+0x2) /* x must be base_hi */
 
 #ifdef CONFIG_SCSI_IZIP_SLOW_CTR
 #define w_ctr(x,y)      outb_p(y, (x)+2)
@@ -146,10 +151,7 @@ static int imm_init(int);
 static void imm_interrupt(void *);
 static int imm_out(int, char *, int);
 
-struct proc_dir_entry proc_scsi_imm =
-{PROC_SCSI_PPA, 3, "imm", S_IFDIR | S_IRUGO | S_IXUGO, 2};
 #else
-extern struct proc_dir_entry proc_scsi_imm;
 #define imm_release 0
 #endif
 
@@ -162,7 +164,7 @@ int imm_reset(Scsi_Cmnd *);
 int imm_proc_info(char *, char **, off_t, int, int, int);
 int imm_biosparam(Disk *, kdev_t, int *);
 
-#define IMM {	proc_dir:			&proc_scsi_imm,		\
+#define IMM {	proc_name:			"imm",			\
 		proc_info:			imm_proc_info,		\
 		name:				"Iomega VPI2 (imm) interface",\
 		detect:				imm_detect,		\
@@ -173,6 +175,7 @@ int imm_biosparam(Disk *, kdev_t, int *);
                 eh_device_reset_handler:        NULL,                   \
                 eh_bus_reset_handler:           imm_reset,              \
                 eh_host_reset_handler:          imm_reset,              \
+		use_new_eh_code:		1,			\
 		bios_param:		        imm_biosparam,		\
 		this_id:			7,			\
 		sg_tablesize:			SG_ALL,			\

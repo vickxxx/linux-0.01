@@ -18,24 +18,24 @@
 #include <asm/sbus.h>
 #include <asm/ebus.h>
 #include <asm/fhc.h>
+#include <asm/starfire.h>
 
 /* Probe and map in the Auxiliary I/O register */
-unsigned char *auxio_register;
+unsigned long auxio_register = 0;
 
-__initfunc(void auxio_probe(void))
+void __init auxio_probe(void)
 {
-        struct linux_sbus *bus;
-        struct linux_sbus_device *sdev = 0;
-	struct linux_prom_registers auxregs[1];
+        struct sbus_bus *sbus;
+        struct sbus_dev *sdev = 0;
 
-        for_each_sbus(bus) {
-                for_each_sbusdev(sdev, bus) {
-                        if(!strcmp(sdev->prom_name, "auxio")) {
-				break;
-                        }
+        for_each_sbus(sbus) {
+                for_each_sbusdev(sdev, sbus) {
+                        if(!strcmp(sdev->prom_name, "auxio"))
+				goto found_sdev;
                 }
         }
 
+found_sdev:
 	if (!sdev) {
 #ifdef CONFIG_PCI
 		struct linux_ebus *ebus;
@@ -51,35 +51,21 @@ __initfunc(void auxio_probe(void))
 	ebus_done:
 
 		if (edev) {
-			if (check_region(edev->base_address[0],
-					 sizeof(unsigned int))) {
-				prom_printf("%s: Can't get region %lx, %d\n",
-					    __FUNCTION__, edev->base_address[0],
-					    sizeof(unsigned int));
-				prom_halt();
-			}
-			request_region(edev->base_address[0],
-				       sizeof(unsigned int), "LED auxio");
-
-			led_auxio = edev->base_address[0];
+			led_auxio = edev->resource[0].start;
 			outl(0x01, led_auxio);
 			return;
 		}
 #endif
-		if(central_bus) {
-			auxio_register = NULL;
+		if(central_bus || this_is_starfire) {
+			auxio_register = 0UL;
 			return;
 		}
 		prom_printf("Cannot find auxio node, cannot continue...\n");
 		prom_halt();
 	}
 
-	prom_getproperty(sdev->prom_node, "reg", (char *) auxregs, sizeof(auxregs));
-	prom_apply_sbus_ranges(sdev->my_bus, auxregs, 0x1, sdev);
 	/* Map the register both read and write */
-	auxio_register = (unsigned char *) sparc_alloc_io(auxregs[0].phys_addr, 0,
-							  auxregs[0].reg_size,
-							  "auxiliaryIO",
-							  auxregs[0].which_io, 0x0);
+	auxio_register = sbus_ioremap(&sdev->resource[0], 0,
+				      sdev->reg_addrs[0].reg_size, "auxiliaryIO");
 	TURN_ON_LED;
 }

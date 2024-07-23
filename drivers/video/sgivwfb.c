@@ -89,44 +89,35 @@ static struct sgivwfb_par par_current = {
 /*
  *  Interface used by the world
  */
-void sgivwfb_setup(char *options, int *ints);
+int sgivwfb_setup(char*);
 
-static int sgivwfb_open(struct fb_info *info, int user);
-static int sgivwfb_release(struct fb_info *info, int user);
 static int sgivwfb_get_fix(struct fb_fix_screeninfo *fix, int con,
 			   struct fb_info *info);
 static int sgivwfb_get_var(struct fb_var_screeninfo *var, int con,
 			   struct fb_info *info);
 static int sgivwfb_set_var(struct fb_var_screeninfo *var, int con,
 			   struct fb_info *info);
-static int sgivwfb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info);
 static int sgivwfb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
 static int sgivwfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			    struct fb_info *info);
-static int sgivwfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			 u_long arg, int con, struct fb_info *info);
 static int sgivwfb_mmap(struct fb_info *info, struct file *file,
                         struct vm_area_struct *vma);
 
 static struct fb_ops sgivwfb_ops = {
-  sgivwfb_open,
-  sgivwfb_release,
-  sgivwfb_get_fix,
-  sgivwfb_get_var,
-  sgivwfb_set_var,
-  sgivwfb_get_cmap,
-  sgivwfb_set_cmap,
-  sgivwfb_pan_display,
-  sgivwfb_ioctl,
-  sgivwfb_mmap
+	owner:		THIS_MODULE,
+	fb_get_fix:	sgivwfb_get_fix,
+	fb_get_var:	sgivwfb_get_var,
+	fb_set_var:	sgivwfb_set_var,
+	fb_get_cmap:	sgivwfb_get_cmap,
+	fb_set_cmap:	sgivwfb_set_cmap,
+	fb_mmap:	sgivwfb_mmap,
 };
 
 /*
  *  Interface to the low level console driver
  */
-void sgivwfb_init(void);
+int sgivwfb_init(void);
 static int sgivwfbcon_switch(int con, struct fb_info *info);
 static int sgivwfbcon_updatevar(int con, struct fb_info *info);
 static void sgivwfbcon_blank(int blank, struct fb_info *info);
@@ -165,7 +156,7 @@ static unsigned long bytes_per_pixel(int bpp)
     length = 4;
     break;
   default:
-    printk("sgivwfb: unsupported bpp=%d\n", bpp);
+    printk(KERN_INFO "sgivwfb: unsupported bpp=%d\n", bpp);
     length = 0;
     break;
   }
@@ -271,7 +262,7 @@ static void activate_par(struct sgivwfb_par *par)
   if (wholeTilesX*maxPixelsPerTileX < xpmax)
     wholeTilesX++;
 
-  printk("sgivwfb: pixPerTile=%d wholeTilesX=%d\n",
+  printk(KERN_DEBUG "sgivwfb: pixPerTile=%d wholeTilesX=%d\n",
 	 maxPixelsPerTileX, wholeTilesX);
 
   /* dbe_InitGammaMap(); */
@@ -465,7 +456,7 @@ static void activate_par(struct sgivwfb_par *par)
     }
 
   if (i==100000)
-    printk("sgivwfb: timeout waiting for frame DMA enable.\n");
+    printk(KERN_INFO "sgivwfb: timeout waiting for frame DMA enable.\n");
 
   outputVal = 0;
   htmp = currentTiming->hblank_end - 19;
@@ -501,7 +492,7 @@ static void sgivwfb_encode_fix(struct fb_fix_screeninfo *fix,
 {
   memset(fix, 0, sizeof(struct fb_fix_screeninfo));
   strcpy(fix->id, sgivwfb_name);
-  fix->smem_start = (char *) sgivwfb_mem_phys;
+  fix->smem_start = sgivwfb_mem_phys;
   fix->smem_len = sgivwfb_mem_size;
   fix->type = FB_TYPE_PACKED_PIXELS;
   fix->type_aux = 0;
@@ -517,7 +508,7 @@ static void sgivwfb_encode_fix(struct fb_fix_screeninfo *fix,
   fix->xpanstep = 0;
   fix->ypanstep = ypan;
   fix->line_length = get_line_length(var->xres_virtual, var->bits_per_pixel);
-  fix->mmio_start = (char *) DBE_REG_PHYS;
+  fix->mmio_start = DBE_REG_PHYS;
   fix->mmio_len = DBE_REG_SIZE;
 }
 
@@ -577,24 +568,6 @@ static void do_install_cmap(int con, struct fb_info *info)
 }
 
 /* ---------------------------------------------------- */
-
-/*
- *  Open/Release the frame buffer device
- */
-static int sgivwfb_open(struct fb_info *info, int user)
-{
-  /*
-   *  Nothing, only a usage count for the moment
-   */
-  MOD_INC_USE_COUNT;
-  return(0);
-}
-
-static int sgivwfb_release(struct fb_info *info, int user)
-{
-  MOD_DEC_USE_COUNT;
-  return(0);
-}
 
 /*
  *  Get the Fixed Part of the Display
@@ -688,7 +661,7 @@ static int sgivwfb_set_var(struct fb_var_screeninfo *var, int con,
   /* XXX FIXME - should try to pick best refresh rate */
   /* for now, pick closest dot-clock within 3MHz*/
   req_dot = (int)((1.0e3/1.0e6) / (1.0e-12 * (float)var->pixclock));
-  printk("sgivwfb: requested pixclock=%d ps (%d KHz)\n", var->pixclock,
+  printk(KERN_INFO "sgivwfb: requested pixclock=%d ps (%d KHz)\n", var->pixclock,
 	 req_dot);
   test_mode=min_mode;
   while (dbeVTimings[min_mode].width == dbeVTimings[test_mode].width) {
@@ -700,7 +673,7 @@ static int sgivwfb_set_var(struct fb_var_screeninfo *var, int con,
     test_mode--;
   min_mode = test_mode;
   timing = &dbeVTimings[min_mode];
-  printk("sgivwfb: granted dot-clock=%d KHz\n", timing->cfreq);
+  printk(KERN_INFO "sgivwfb: granted dot-clock=%d KHz\n", timing->cfreq);
 
   /* Adjust virtual resolution, if necessary */
   if (var->xres > var->xres_virtual || (!ywrap && !ypan))
@@ -775,9 +748,9 @@ static int sgivwfb_set_var(struct fb_var_screeninfo *var, int con,
 	oldvxres != var->xres_virtual || oldvyres != var->yres_virtual ||
 	oldbpp != var->bits_per_pixel || !par_current.valid) {
       struct fb_fix_screeninfo fix;
-      printk("sgivwfb: new video mode xres=%d yres=%d bpp=%d\n",
+      printk(KERN_INFO "sgivwfb: new video mode xres=%d yres=%d bpp=%d\n",
 	     var->xres, var->yres, var->bits_per_pixel);
-      printk("         vxres=%d vyres=%d\n",
+      printk(KERN_INFO "         vxres=%d vyres=%d\n",
 	     var->xres_virtual, var->yres_virtual);
       activate_par(&par_current);
       sgivwfb_encode_fix(&fix, var);
@@ -826,39 +799,6 @@ static int sgivwfb_set_var(struct fb_var_screeninfo *var, int con,
 }
 
 /*
- *  Pan or Wrap the Display
- *
- *  This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
- */
-
-static int sgivwfb_pan_display(struct fb_var_screeninfo *var, int con,
-			       struct fb_info *info)
-{
-#if 0
-  if (var->vmode & FB_VMODE_YWRAP) {
-    if (var->yoffset < 0 ||
-	var->yoffset >= fb_display[con].var.yres_virtual ||
-	var->xoffset)
-      return -EINVAL;
-  } else {
-    if (var->xoffset+fb_display[con].var.xres >
-	fb_display[con].var.xres_virtual ||
-	var->yoffset+fb_display[con].var.yres >
-	fb_display[con].var.yres_virtual)
-      return -EINVAL;
-  }
-  fb_display[con].var.xoffset = var->xoffset;
-  fb_display[con].var.yoffset = var->yoffset;
-  if (var->vmode & FB_VMODE_YWRAP)
-    fb_display[con].var.vmode |= FB_VMODE_YWRAP;
-  else
-    fb_display[con].var.vmode &= ~FB_VMODE_YWRAP;
-  return 0;
-#endif
-  return -EINVAL;
-}
-
-/*
  *  Get the Colormap
  */
 static int sgivwfb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
@@ -883,8 +823,8 @@ static int sgivwfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
   int err;
 
   if (!fb_display[con].cmap.len) {	/* no colormap allocated? */
-    if ((err = fb_alloc_cmap(&fb_display[con].cmap,
-			     1<<fb_display[con].var.bits_per_pixel, 0)))
+    int size = fb_display[con].var.bits_per_pixel == 16 ? 32 : 256;
+    if ((err = fb_alloc_cmap(&fb_display[con].cmap, size, 0)))
       return err;
   }
   if (con == currcon)			/* current console? */
@@ -894,58 +834,53 @@ static int sgivwfb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
   return 0;
 }
 
-/*
- *  Virtual Frame Buffer Specific ioctls
- */
-static int sgivwfb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			 u_long arg, int con, struct fb_info *info)
-{
-  return -EINVAL;
-}
-
 static int sgivwfb_mmap(struct fb_info *info, struct file *file,
                         struct vm_area_struct *vma)
 {
   unsigned long size = vma->vm_end - vma->vm_start;
-  unsigned long offset = sgivwfb_mem_phys + vma->vm_offset;
-  if (vma->vm_offset+size > sgivwfb_mem_size)
+  unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
+  if (vma->vm_pgoff > (~0UL >> PAGE_SHIFT))
+	return -EINVAL;
+  if (offset+size > sgivwfb_mem_size)
     return -EINVAL;
+  offset += sgivwfb_mem_phys;
   pgprot_val(vma->vm_page_prot) = pgprot_val(vma->vm_page_prot) | _PAGE_PCD;
   vma->vm_flags |= VM_IO;
   if (remap_page_range(vma->vm_start, offset, size, vma->vm_page_prot))
     return -EAGAIN;
   vma->vm_file = file;
-  printk("sgivwfb: mmap framebuffer P(%lx)->V(%lx)\n", offset, vma->vm_start);
+  printk(KERN_DEBUG "sgivwfb: mmap framebuffer P(%lx)->V(%lx)\n", offset, vma->vm_start);
   return 0;
 }
 
-__initfunc(void sgivwfb_setup(char *options, int *ints))
+int __init sgivwfb_setup(char *options)
 {
   char *this_opt;
 
   fb_info.fontname[0] = '\0';
 
   if (!options || !*options)
-    return;
+    return 0;
 
   for (this_opt = strtok(options, ","); this_opt;
        this_opt = strtok(NULL, ",")) {
     if (!strncmp(this_opt, "font:", 5))
       strcpy(fb_info.fontname, this_opt+5);
   }
+  return 0;
 }
 
 /*
  *  Initialisation
  */
-__initfunc(void sgivwfb_init(void))
+int __init sgivwfb_init(void)
 {
-  printk("sgivwfb: framebuffer at 0x%lx, size %ldk\n",
+  printk(KERN_INFO "sgivwfb: framebuffer at 0x%lx, size %ldk\n",
 	 sgivwfb_mem_phys, sgivwfb_mem_size/1024);
 
   regs = (asregs*)ioremap_nocache(DBE_REG_PHYS, DBE_REG_SIZE);
   if (!regs) {
-    printk("sgivwfb: couldn't ioremap registers\n");
+    printk(KERN_ERR "sgivwfb: couldn't ioremap registers\n");
     goto fail_ioremap_regs;
   }
 
@@ -965,7 +900,7 @@ __initfunc(void sgivwfb_init(void))
 
   fbmem = ioremap_nocache((unsigned long)sgivwfb_mem_phys, sgivwfb_mem_size);
   if (!fbmem) {
-    printk("sgivwfb: couldn't ioremap fbmem\n");
+    printk(KERN_ERR "sgivwfb: couldn't ioremap fbmem\n");
     goto fail_ioremap_fbmem;
   }
 
@@ -973,21 +908,21 @@ __initfunc(void sgivwfb_init(void))
   sgivwfb_set_var(&par_current.var, -1, &fb_info);
 
   if (register_framebuffer(&fb_info) < 0) {
-    printk("sgivwfb: couldn't register framebuffer\n");
+    printk(KERN_ERR "sgivwfb: couldn't register framebuffer\n");
     goto fail_register_framebuffer;
   }
 
-  printk("fb%d: Virtual frame buffer device, using %ldK of video memory\n",
+  printk(KERN_INFO "fb%d: Virtual frame buffer device, using %ldK of video memory\n",
 	 GET_FB_IDX(fb_info.node), sgivwfb_mem_size>>10);
 
-  return;
+  return 0;
 
  fail_register_framebuffer:
   iounmap((char*)fbmem);
  fail_ioremap_fbmem:
   iounmap(regs);
  fail_ioremap_regs:
-  return;
+  return -ENXIO;
 }
 
 static int sgivwfbcon_switch(int con, struct fb_info *info)
@@ -1022,8 +957,7 @@ static void sgivwfbcon_blank(int blank, struct fb_info *info)
 #ifdef MODULE
 int init_module(void)
 {
-  sgivwfb_init();
-  return 0;
+  return sgivwfb_init();
 }
 
 void cleanup_module(void)

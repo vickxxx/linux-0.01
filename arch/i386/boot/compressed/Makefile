@@ -9,7 +9,7 @@ SYSTEM = $(TOPDIR)/vmlinux
 
 OBJECTS = $(HEAD) misc.o
 
-CFLAGS = -O2 -DSTDC_HEADERS
+CFLAGS = $(CPPFLAGS) -O2 -DSTDC_HEADERS
 ZLDFLAGS = -e startup_32
 
 #
@@ -30,8 +30,11 @@ vmlinux: piggy.o $(OBJECTS)
 bvmlinux: piggy.o $(OBJECTS)
 	$(LD) $(BZLINKFLAGS) -o bvmlinux $(OBJECTS) piggy.o
 
-head.o: head.S $(TOPDIR)/include/linux/tasks.h
+head.o: head.S
 	$(CC) $(AFLAGS) -traditional -c head.S
+
+misc.o: misc.c
+	$(CC) $(CFLAGS) -c misc.c
 
 piggy.o:	$(SYSTEM)
 	tmppiggy=_tmp_$$$$piggy; \
@@ -39,7 +42,7 @@ piggy.o:	$(SYSTEM)
 	$(OBJCOPY) $(SYSTEM) $$tmppiggy; \
 	gzip -f -9 < $$tmppiggy > $$tmppiggy.gz; \
 	echo "SECTIONS { .data : { input_len = .; LONG(input_data_end - input_data) input_data = .; *(.data) input_data_end = .; }}" > $$tmppiggy.lnk; \
-	$(LD) -m elf_i386 -r -o piggy.o -b binary $$tmppiggy.gz -b elf32-i386 -T $$tmppiggy.lnk; \
+	$(LD) -r -o piggy.o -b binary $$tmppiggy.gz -b elf32-i386 -T $$tmppiggy.lnk; \
 	rm -f $$tmppiggy $$tmppiggy.gz $$tmppiggy.lnk
 
 clean:

@@ -5,7 +5,7 @@
  *
  *		INET protocol dispatch tables.
  *
- * Version:	$Id: protocol.c,v 1.9 1997/10/29 20:27:34 kuznet Exp $
+ * Version:	$Id: protocol.c,v 1.12 2000/10/03 07:29:00 anton Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -35,6 +35,7 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/timer.h>
+#include <linux/brlock.h>
 #include <net/ip.h>
 #include <net/protocol.h>
 #include <net/tcp.h>
@@ -111,30 +112,7 @@ static struct inet_protocol icmp_protocol =
 
 struct inet_protocol *inet_protocol_base = IPPROTO_PREVIOUS;
 
-struct inet_protocol *inet_protos[MAX_INET_PROTOS] = 
-{
-	NULL
-};
-
-
-/*
- *	Find a protocol in the protocol tables given its
- *	IP type.
- */
-
-struct inet_protocol *inet_get_protocol(unsigned char prot)
-{
-	unsigned char hash;
-	struct inet_protocol *p;
-
-	hash = prot & (MAX_INET_PROTOS - 1);
-	for (p = inet_protos[hash] ; p != NULL; p=p->next) 
-	{
-		if (p->protocol == prot) 
-			return((struct inet_protocol *) p);
-	}
-	return(NULL);
-}
+struct inet_protocol *inet_protos[MAX_INET_PROTOS];
 
 /*
  *	Add a protocol handler to the hash tables
@@ -146,6 +124,7 @@ void inet_add_protocol(struct inet_protocol *prot)
 	struct inet_protocol *p2;
 
 	hash = prot->protocol & (MAX_INET_PROTOS - 1);
+	br_write_lock_bh(BR_NETPROTO_LOCK);
 	prot ->next = inet_protos[hash];
 	inet_protos[hash] = prot;
 	prot->copy = 0;
@@ -164,6 +143,7 @@ void inet_add_protocol(struct inet_protocol *prot)
 		}
 		p2 = (struct inet_protocol *) p2->next;
 	}
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
 }
 
 /*
@@ -177,9 +157,11 @@ int inet_del_protocol(struct inet_protocol *prot)
 	unsigned char hash;
 
 	hash = prot->protocol & (MAX_INET_PROTOS - 1);
+	br_write_lock_bh(BR_NETPROTO_LOCK);
 	if (prot == inet_protos[hash]) 
 	{
 		inet_protos[hash] = (struct inet_protocol *) inet_protos[hash]->next;
+		br_write_unlock_bh(BR_NETPROTO_LOCK);
 		return(0);
 	}
 
@@ -200,6 +182,7 @@ int inet_del_protocol(struct inet_protocol *prot)
 			if (p->copy == 0 && lp != NULL) 
 				lp->copy = 0;
 			p->next = prot->next;
+			br_write_unlock_bh(BR_NETPROTO_LOCK);
 			return(0);
 		}
 		if (p->next != NULL && p->next->protocol == prot->protocol) 
@@ -207,5 +190,6 @@ int inet_del_protocol(struct inet_protocol *prot)
 
 		p = (struct inet_protocol *) p->next;
 	}
+	br_write_unlock_bh(BR_NETPROTO_LOCK);
 	return(-1);
 }

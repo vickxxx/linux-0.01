@@ -1,24 +1,29 @@
 /*
- * linux/drivers/char/mouse_rpc.c
+ *  linux/drivers/char/mouse_rpc.c
  *
- * Copyright (C) 1996-1998 Russell King
+ *  Copyright (C) 1996-1998 Russell King
  *
- * This handles the Acorn RiscPCs mouse.  We basically have a couple
- * of hardware registers that track the sensor count for the X-Y movement
- * and another register holding the button state.  On every VSYNC interrupt
- * we read the complete state and then work out if something has changed.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  This handles the Acorn RiscPCs mouse.  We basically have a couple
+ *  of hardware registers that track the sensor count for the X-Y movement
+ *  and another register holding the button state.  On every VSYNC interrupt
+ *  we read the complete state and then work out if something has changed.
  */
 #include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/interrupt.h>
+#include <linux/init.h>
 
 #include <asm/hardware.h>
 #include <asm/irq.h>
 #include <asm/io.h>
-#include <asm/iomd.h>
+#include <asm/hardware/iomd.h>
 
-#include "../../char/mouse.h"
+#include "../../char/busmouse.h"
 
 static short old_x, old_y, old_b;
 static int mousedev;
@@ -45,11 +50,10 @@ mouse_rpc_irq(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 static struct busmouse rpcmouse = {
-	6, "arcmouse", NULL, NULL, 7
+	6, "arcmouse", NULL, NULL, NULL, 7
 };
 
-int
-mouse_rpc_init(void)
+static int __init mouse_rpc_init(void)
 {
 	mousedev = register_busmouse(&rpcmouse);
 
@@ -69,19 +73,13 @@ mouse_rpc_init(void)
 	return mousedev >= 0 ? 0 : -ENODEV;
 }
 
-#ifdef MODULE
-int
-init_module(void)
-{
-	return mouse_rpc_init();
-}
-
-int
-cleanup_module(void)
+static void __exit mouse_rpc_exit(void)
 {
 	if (mousedev >= 0) {
 		unregister_busmouse(mousedev);
 		free_irq(IRQ_VSYNCPULSE, &mousedev);
 	}
 }
-#endif
+
+module_init(mouse_rpc_init);
+module_exit(mouse_rpc_exit);

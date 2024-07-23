@@ -46,15 +46,21 @@
 /*
  * Flags for msync
  */
-#define MS_SYNC		0		/* synchronous memory sync */
-#define MS_ASYNC	1		/* sync memory asynchronously */
-#define MS_INVALIDATE	2		/* invalidate mappings & caches */
+#define MS_ASYNC	0x0001		/* sync memory asynchronously */
+#define MS_INVALIDATE	0x0002		/* invalidate mappings & caches */
+#define MS_SYNC		0x0004		/* synchronous memory sync */
 
 /*
  * Flags for mlockall
  */
 #define MCL_CURRENT	1		/* lock all current mappings */
 #define MCL_FUTURE	2		/* lock all future mappings */
+
+#define MADV_NORMAL	0x0		/* default page-in behavior */
+#define MADV_RANDOM	0x1		/* page-in minimum required */
+#define MADV_SEQUENTIAL	0x2		/* read-ahead aggressively */
+#define MADV_WILLNEED	0x3		/* pre-fault pages */
+#define MADV_DONTNEED	0x4		/* discard these pages */
 
 /* compatibility flags */
 #define MAP_ANON       MAP_ANONYMOUS

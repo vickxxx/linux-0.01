@@ -83,6 +83,12 @@ extern __inline__ int __generic_test_and_clear_bit(int nr, void * vaddr)
 	return retval;
 }
 
+/*
+ * clear_bit() doesn't provide any barrier for the compiler.
+ */
+#define smp_mb__before_clear_bit()	barrier()
+#define smp_mb__after_clear_bit()	barrier()
+
 #define clear_bit(nr,vaddr) \
   (__builtin_constant_p(nr) ? \
    __constant_clear_bit(nr, vaddr) : \
@@ -262,7 +268,7 @@ minix_find_first_zero_bit (const void *vaddr, unsigned size)
 }
 
 extern __inline__ int
-minix_set_bit (int nr, void *vaddr)
+minix_test_and_set_bit (int nr, void *vaddr)
 {
 	char retval;
 
@@ -272,8 +278,10 @@ minix_set_bit (int nr, void *vaddr)
 	return retval;
 }
 
+#define minix_set_bit(nr,addr)	((void)minix_test_and_set_bit(nr,addr))
+
 extern __inline__ int
-minix_clear_bit (int nr, void *vaddr)
+minix_test_and_clear_bit (int nr, void *vaddr)
 {
 	char retval;
 

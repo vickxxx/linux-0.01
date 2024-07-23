@@ -46,8 +46,8 @@ int pcbit_init(void)
 
 	num_boards = 0;
 
-	printk(KERN_INFO 
-	       "PCBIT-D device driver v 0.5 - "
+	printk(KERN_NOTICE 
+	       "PCBIT-D device driver v 0.5-fjpc0 19991204 - "
 	       "Copyright (C) 1996 Universidade de Lisboa\n");
 
 	if (mem[0] || irq[0]) 
@@ -97,15 +97,20 @@ void cleanup_module(void)
 
 	for (board = 0; board < num_boards; board++)
 		pcbit_terminate(board);
-	printk(KERN_INFO 
+	printk(KERN_NOTICE 
 	       "PCBIT-D module unloaded\n");
 }
 
 #else
-void pcbit_setup(char *str, int *ints)
+#define MAX_PARA	(MAX_PCBIT_CARDS * 2)
+#include <linux/init.h>
+static int __init pcbit_setup(char *line)
 {
 	int i, j, argc;
+	char *str;
+	int ints[MAX_PARA+1];
 
+	str = get_options(line, MAX_PARA, ints);
 	argc = ints[0];
 	i = 0;
 	j = 1;
@@ -124,7 +129,9 @@ void pcbit_setup(char *str, int *ints)
 
 		i++;
 	}
+	return(1);
 }
+__setup("pcbit=", pcbit_setup);
 #endif
 
 

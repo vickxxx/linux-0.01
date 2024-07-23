@@ -6,7 +6,7 @@
  *		 Revision Date:  February 9, 1993
  *
  *	Developers:
- *      Jay Schulist    <Jay.Schulist@spacs.k12.wi.us>
+ *      Jay Schulist    <jschlst@turbolinux.com>
  *	Jim Freeman	<jfree@caldera.com>
  *
  *	Changes:
@@ -15,6 +15,11 @@
  *				made static the ipx ops. Removed the hack
  *				ipx methods interface. Dropped AF_SPX - its
  *				the wrong abstraction.
+ *	Eduardo Trapani	:	Added a check for the return value of
+ *				ipx_if_offset that crashed sock_alloc_send_skb.
+ *				Added spx_datagram_poll() so that select()
+ *				works now on SPX sockets.  Added updating
+ *				of the alloc count to follow rmt_seq.
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -36,10 +41,10 @@
 #include <asm/uaccess.h>
 #include <linux/uio.h>
 #include <linux/unistd.h>
-#include <linux/firewall.h>
+#include <linux/poll.h>
 
 static struct proto_ops *ipx_operations;
-static struct proto_ops spx_operations;
+static struct proto_ops spx_ops;
 static __u16  connids;
 
 /* Functions needed for SPX connection start up */
@@ -49,6 +54,45 @@ static void spx_watchdog(unsigned long data);
 void spx_rcv(struct sock *sk, int bytes);
 
 extern void ipx_remove_socket(struct sock *sk);
+
+/* Datagram poll:	the same code as datagram_poll() in net/core
+			but the right spx buffers are looked at and
+			there is no question on the type of the socket
+			*/
+static unsigned int spx_datagram_poll(struct file * file, struct socket *sock, poll_table *wait)
+{
+	struct sock *sk = sock->sk;
+	struct spx_opt *pdata = &sk->tp_pinfo.af_spx;
+	unsigned int mask;
+
+	poll_wait(file, sk->sleep, wait);
+	mask = 0;
+
+	/* exceptional events? */
+	if (sk->err || !skb_queue_empty(&sk->error_queue))
+		mask |= POLLERR;
+	if (sk->shutdown & RCV_SHUTDOWN)
+		mask |= POLLHUP;
+
+	/* readable? */
+	if (!skb_queue_empty(&pdata->rcv_queue))
+		mask |= POLLIN | POLLRDNORM;
+
+	/* Need to check for termination and startup */
+	if (sk->state==TCP_CLOSE)
+		mask |= POLLHUP;
+	/* connection hasn't started yet? */
+	if (sk->state == TCP_SYN_SENT)
+		return mask;
+
+	/* writable? */
+	if (sock_writeable(sk))
+		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
+	else
+		set_bit(SOCK_ASYNC_NOSPACE,&sk->socket->flags);
+
+	return mask;
+}
 
 /* Create the SPX specific data */
 static int spx_sock_init(struct sock *sk)
@@ -96,7 +140,7 @@ static int spx_create(struct socket *sock, int protocol)
 	switch(sock->type)
         {
                 case SOCK_SEQPACKET:
-			sock->ops = &spx_operations;
+			sock->ops = &spx_ops;
 			break;
 		default:
 			sk_free(sk);
@@ -114,10 +158,6 @@ static int spx_create(struct socket *sock, int protocol)
 	return (0);
 }
 
-static int spx_shutdown(struct socket *sk,int how)
-{
-        return (-EOPNOTSUPP);
-}
 
 void spx_close_socket(struct sock *sk)
 {
@@ -149,7 +189,7 @@ void spx_destroy_socket(struct sock *sk)
 }
 
 /* Release an SPX socket */
-static int spx_release(struct socket *sock, struct socket *peer)
+static int spx_release(struct socket *sock)
 {
  	struct sock *sk = sock->sk;
 	struct spx_opt *pdata = &sk->tp_pinfo.af_spx;
@@ -185,17 +225,13 @@ static int spx_listen(struct socket *sock, int backlog)
         if(sk->zapped != 0)
                 return (-EAGAIN);
 
-        if((unsigned) backlog == 0)     /* BSDism */
-                backlog = 1;
-        if((unsigned) backlog > SOMAXCONN)
-                backlog = SOMAXCONN;
         sk->max_ack_backlog = backlog;
         if(sk->state != TCP_LISTEN)
         {
                 sk->ack_backlog = 0;
                 sk->state = TCP_LISTEN;
         }
-        sk->socket->flags |= SO_ACCEPTCON;
+        sk->socket->flags |= __SO_ACCEPTCON;
 
         return (0);
 }
@@ -208,15 +244,11 @@ static int spx_accept(struct socket *sock, struct socket *newsock, int flags)
         struct sk_buff *skb;
 	int err;
 
-	if(newsock->sk != NULL)
-		spx_destroy_socket(newsock->sk);
-        newsock->sk = NULL;
-
 	if(sock->sk == NULL)
 		return (-EINVAL);
 	sk = sock->sk;
 
-        if((sock->state != SS_UNCONNECTED) || !(sock->flags & SO_ACCEPTCON))
+        if((sock->state != SS_UNCONNECTED) || !(sock->flags & __SO_ACCEPTCON))
                 return (-EINVAL);
         if(sock->type != SOCK_SEQPACKET)
 		return (-EOPNOTSUPP);
@@ -403,11 +435,16 @@ static int spx_transmit(struct sock *sk, struct sk_buff *skb, int type, int len)
 		int offset  = ipx_if_offset(pdata->dest_addr.net);
         	int size    = offset + sizeof(struct ipxspxhdr);
 
+        	if (offset < 0) /* ENETUNREACH */
+        		return(-ENETUNREACH);
+
 		save_flags(flags);
 		cli();
         	skb = sock_alloc_send_skb(sk, size, 1, 0, &err);
-        	if(skb == NULL)
+        	if(skb == NULL) {
+			restore_flags(flags);
                 	return (-ENOMEM);
+		}
         	skb_reserve(skb, offset);
         	skb->h.raw = skb->nh.raw = skb_put(skb,sizeof(struct ipxspxhdr));
 		restore_flags(flags);
@@ -431,9 +468,7 @@ static int spx_transmit(struct sock *sk, struct sk_buff *skb, int type, int len)
         ipxh->spx.allocseq      = htons(pdata->alloc);
 
 	/* Reset/Set WD timer */
-        del_timer(&pdata->watchdog);
-        pdata->watchdog.expires = jiffies + VERIFY_TIMEOUT;
-        add_timer(&pdata->watchdog);
+        mod_timer(&pdata->watchdog, jiffies+VERIFY_TIMEOUT);
 
 	switch(type)
 	{
@@ -662,6 +697,7 @@ void spx_rcv(struct sock *sk, int bytes)
 			{
 				pdata->rmt_seq = ntohs(ipxh->spx.sequence);
 				pdata->rmt_ack = ntohs(ipxh->spx.ackseq);
+				pdata->alloc   = pdata->rmt_seq + 3;
 				if(pdata->rmt_ack > 0 || pdata->rmt_ack == 0)
 					spx_retransmit_chk(pdata,pdata->rmt_ack, ACK);
 
@@ -707,9 +743,9 @@ static int spx_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 
 	cli();
         skb  	= sock_alloc_send_skb(sk, size, 0, flags&MSG_DONTWAIT, &err);
+	sti();
         if(skb == NULL)
                 return (err);
-	sti();
 
 	skb->sk = sk;
         skb_reserve(skb, offset);
@@ -847,25 +883,29 @@ static int spx_getsockopt(struct socket *sock, int level, int optname,
 	return (err);
 }
 
-static struct proto_ops spx_operations = {
-        PF_IPX,
-        sock_no_dup,
-        spx_release,
-        spx_bind,
-        spx_connect,
-        sock_no_socketpair,
-        spx_accept,
-	spx_getname,
-        datagram_poll,  /* this does seqpacket too */
-	spx_ioctl,
-        spx_listen,
-        spx_shutdown,
-	spx_setsockopt,
-	spx_getsockopt,
-        sock_no_fcntl,
-        spx_sendmsg,
-        spx_recvmsg
+static struct proto_ops SOCKOPS_WRAPPED(spx_ops) = {
+	family:		PF_IPX,
+
+	release:	spx_release,
+	bind:		spx_bind,
+	connect:	spx_connect,
+	socketpair:	sock_no_socketpair,
+	accept:		spx_accept,
+	getname:	spx_getname,
+	poll:		spx_datagram_poll,
+	ioctl:		spx_ioctl,
+	listen:		spx_listen,
+	shutdown:	sock_no_shutdown,
+	setsockopt:	spx_setsockopt,
+	getsockopt:	spx_getsockopt,
+	sendmsg:	spx_sendmsg,
+	recvmsg:	spx_recvmsg,
+	mmap:		sock_no_mmap,
 };
+
+#include <linux/smp_lock.h>
+SOCKOPS_WRAP(spx, PF_IPX);
+
 
 static struct net_proto_family spx_family_ops=
 {

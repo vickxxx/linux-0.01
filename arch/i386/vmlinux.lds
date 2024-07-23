@@ -6,7 +6,7 @@ OUTPUT_ARCH(i386)
 ENTRY(_start)
 SECTIONS
 {
-  . = 0xC0000000  + 0x100000;
+  . = 0xC0000000 + 0x100000;
   _text = .;			/* Text and read-only data */
   .text : {
 	*(.text)
@@ -14,6 +14,9 @@ SECTIONS
 	*(.gnu.warning)
 	} = 0x9090
   .text.lock : { *(.text.lock) }	/* out-of-line lock text */
+
+  _etext = .;			/* End of text section */
+
   .rodata : { *(.rodata) }
   .kstrtab : { *(.kstrtab) }
 
@@ -25,8 +28,6 @@ SECTIONS
   __start___ksymtab = .;	/* Kernel symbol table */
   __ksymtab : { *(__ksymtab) }
   __stop___ksymtab = .;
-
-  _etext = .;			/* End of text section */
 
   .data : {			/* Data */
 	*(.data)
@@ -42,21 +43,34 @@ SECTIONS
   __init_begin = .;
   .text.init : { *(.text.init) }
   .data.init : { *(.data.init) }
+  . = ALIGN(16);
+  __setup_start = .;
+  .setup.init : { *(.setup.init) }
+  __setup_end = .;
+  __initcall_start = .;
+  .initcall.init : { *(.initcall.init) }
+  __initcall_end = .;
   . = ALIGN(4096);
   __init_end = .;
-
-  . = ALIGN(32);
-  .data.cacheline_aligned : { *(.data.cacheline_aligned) }
 
   . = ALIGN(4096);
   .data.page_aligned : { *(.data.idt) }
 
+  . = ALIGN(32);
+  .data.cacheline_aligned : { *(.data.cacheline_aligned) }
 
   __bss_start = .;		/* BSS */
   .bss : {
 	*(.bss)
 	}
   _end = . ;
+
+  /* Sections to be discarded */
+  /DISCARD/ : {
+	*(.text.exit)
+	*(.data.exit)
+	*(.exitcall.exit)
+	}
 
   /* Stabs debugging sections.  */
   .stab 0 : { *(.stab) }

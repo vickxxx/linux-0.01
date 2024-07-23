@@ -34,21 +34,10 @@ struct in6_addr
 		__u8		u6_addr8[16];
 		__u16		u6_addr16[8];
 		__u32		u6_addr32[4];
-#if (~0UL) > 0xffffffff
-#ifndef __RELAX_IN6_ADDR_ALIGNMENT
-		/* Alas, protocols do not respect 64bit alignmnet.
-		   rsvp/pim/... are broken. However, it is good
-		   idea to force correct alignment always, when
-		   it is possible.
-		 */
-		__u64		u6_addr64[2];
-#endif
-#endif
 	} in6_u;
 #define s6_addr			in6_u.u6_addr8
 #define s6_addr16		in6_u.u6_addr16
 #define s6_addr32		in6_u.u6_addr32
-#define s6_addr64		in6_u.u6_addr64
 };
 
 struct sockaddr_in6 {
@@ -56,8 +45,8 @@ struct sockaddr_in6 {
 	__u16			sin6_port;      /* Transport layer port # */
 	__u32			sin6_flowinfo;  /* IPv6 flow information */
 	struct in6_addr		sin6_addr;      /* IPv6 address */
+	__u32			sin6_scope_id;  /* scope id (new in RFC2553) */
 };
-
 
 struct ipv6_mreq {
 	/* IPv6 multicast address of group */
@@ -129,8 +118,6 @@ struct in6_flowlabel_req
 #define IPPROTO_HOPOPTS		0	/* IPv6 hop-by-hop options	*/
 #define IPPROTO_ROUTING		43	/* IPv6 routing header		*/
 #define IPPROTO_FRAGMENT	44	/* IPv6 fragmentation header	*/
-#define IPPROTO_ESP		50	/* encapsulating security payload */
-#define IPPROTO_AH		51	/* authentication header	*/
 #define IPPROTO_ICMPV6		58	/* ICMPv6			*/
 #define IPPROTO_NONE		59	/* IPv6 no next header		*/
 #define IPPROTO_DSTOPTS		60	/* IPv6 destination options	*/
@@ -140,7 +127,7 @@ struct in6_flowlabel_req
  */
 #define IPV6_TLV_PAD0		0
 #define IPV6_TLV_PADN		1
-#define IPV6_TLV_ROUTERALERT	20
+#define IPV6_TLV_ROUTERALERT	5
 #define IPV6_TLV_JUMBO		194
 
 /*
@@ -158,18 +145,6 @@ struct in6_flowlabel_req
 #define IPV6_NEXTHOP		9
 #define IPV6_AUTHHDR		10
 #define IPV6_FLOWINFO		11
-
-#if 0
-/* Aliases for obsolete names */
-#define IPV6_RXHOPOPTS		IPV6_HOPOPTS
-#define IPV6_RXDSTOPTS		IPV6_DSTOPTS
-#define IPV6_RXSRCRT		IPV6_RTHDR
-#endif
-
-/*
- *	Alternative names
- */
-#define SCM_SRCRT		IPV6_RXSRCRT
 
 #define IPV6_UNICAST_HOPS	16
 #define IPV6_MULTICAST_IF	17

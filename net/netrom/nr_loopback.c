@@ -11,17 +11,17 @@
  *
  *	History
  *	NET/ROM 007	Tomi(OH2BNS)	Created this file.
+ *                                      Small change in nr_loopback_queue().
  *
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_NETROM) || defined(CONFIG_NETROM_MODULE)
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/timer.h>
 #include <net/ax25.h>
 #include <linux/skbuff.h>
 #include <net/netrom.h>
+#include <linux/init.h>
 
 static struct sk_buff_head loopback_queue;
 static struct timer_list loopback_timer;
@@ -37,24 +37,24 @@ void nr_loopback_init(void)
 
 static int nr_loopback_running(void)
 {
-	return (loopback_timer.prev != NULL || loopback_timer.next != NULL);
+	return timer_pending(&loopback_timer);
 }
 
 int nr_loopback_queue(struct sk_buff *skb)
 {
 	struct sk_buff *skbn;
 
-	skbn = skb_clone(skb, GFP_ATOMIC);
+	if ((skbn = alloc_skb(skb->len, GFP_ATOMIC)) != NULL) {
+		memcpy(skb_put(skbn, skb->len), skb->data, skb->len);
+		skbn->h.raw = skbn->data;
 
-	kfree_skb(skb);
-
-	if (skbn != NULL) {
 		skb_queue_tail(&loopback_queue, skbn);
 
 		if (!nr_loopback_running())
 			nr_set_loopback_timer();
 	}
 
+	kfree_skb(skb);
 	return 1;
 }
 
@@ -75,7 +75,7 @@ static void nr_loopback_timer(unsigned long param)
 {
 	struct sk_buff *skb;
 	ax25_address *nr_dest;
-	struct device *dev;
+	struct net_device *dev;
 
 	if ((skb = skb_dequeue(&loopback_queue)) != NULL) {
 		nr_dest = (ax25_address *)(skb->data + 7);
@@ -90,9 +90,7 @@ static void nr_loopback_timer(unsigned long param)
 	}
 }
 
-#ifdef MODULE
-
-void nr_loopback_clear(void)
+void __exit nr_loopback_clear(void)
 {
 	struct sk_buff *skb;
 
@@ -101,7 +99,3 @@ void nr_loopback_clear(void)
 	while ((skb = skb_dequeue(&loopback_queue)) != NULL)
 		kfree_skb(skb);
 }
-
-#endif
-
-#endif

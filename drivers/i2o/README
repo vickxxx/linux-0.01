@@ -9,23 +9,35 @@
 
 AUTHORS (so far)
 
-Alan Cox, 	Building Number Three Ltd.
+Alan Cox, Building Number Three Ltd.
 	Core code, SCSI and Block OSMs
 
-Steve Ralston,	LSI Logic Corp.
+Steve Ralston, LSI Logic Corp.
 	Debugging SCSI and Block OSM
 
-Deepak Saxena,	Intel Corp.
+Deepak Saxena, Intel Corp.
+	Various core/block extensions
 	/proc interface, bug fixes
 	Ioctl interfaces for control
+	Debugging LAN OSM
 
 Philip Rumpf
 	Fixed assorted dumb SMP locking bugs
 
-Juha Sievanen,  University Of Helsinki Finland
-	LAN OSM
+Juha Sievanen, University of Helsinki Finland
+	LAN OSM code
+	/proc interface to LAN class
 	Bug fixes
 	Core code extensions
+
+Auvo Häkkinen, University of Helsinki Finland
+	LAN OSM code
+	/Proc interface to LAN class
+	Bug fixes
+	Core code extensions
+
+Taneli Vähäkangas, University of Helsinki Finland
+	Fixes to i2o_config
 
 CREDITS
 
@@ -41,26 +53,34 @@ Symbios Logic (Now LSI)
 BoxHill Corporation
 	Loan of initial FibreChannel disk array used for development work.
 
+European Comission
+	Funding the work done by the University of Helsinki
+
+SysKonnect
+        Loan of FDDI and Gigabit Ethernet cards
+
+ASUSTeK
+        Loan of I2O motherboard 
+
 STATUS:
 
 o	The core setup works within limits.
-o	The scsi layer seems to almost work. I'm still chasing down the hang
-	bug.
-o	The block OSM is fairly minimal but does seem to work.
-
+o	The scsi layer seems to almost work. 
+           I'm still chasing down the hang bug.
+o	The block OSM is mostly functional
+o	LAN OSM works with FDDI and Ethernet cards.
 
 TO DO:
 
 General:
-o	Support multiple IOP's and tell them about each other
 o	Provide hidden address space if asked
 o	Long term message flow control
 o	PCI IOP's without interrupts are not supported yet
 o	Push FAIL handling into the core
 o	DDM control interfaces for module load etc
+o       Add I2O 2.0 support (Deffered to 2.5 kernel)
 
 Block:
-o	Real error handler
 o	Multiple major numbers
 o	Read ahead and cache handling stuff. Talk to Ingo and people
 o	Power management
@@ -69,10 +89,10 @@ o	Finish Media changers
 SCSI:
 o	Find the right way to associate drives/luns/busses
 
-Net:
-o	Port the existing RCPCI work to the frame work or write a new
-	driver. This one is with the Finns
+Lan:	
+o	Performance tuning
+o	Test Fibre Channel code
 
 Tape:
 o	Anyone seen anything implementing this ?
-
+           (D.S: Will attempt to do so if spare cycles permit)

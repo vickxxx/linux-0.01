@@ -3,7 +3,7 @@
 /*
  *	sm.h  --  soundcard radio modem driver internal header.
  *
- *	Copyright (C) 1996-1998  Thomas Sailer (sailer@ife.ee.ethz.ch)
+ *	Copyright (C) 1996-1999  Thomas Sailer (sailer@ife.ee.ethz.ch)
  *
  *	This program is free software; you can redistribute it and/or modify
  *	it under the terms of the GNU General Public License as published by
@@ -34,6 +34,7 @@
 #include <linux/soundmodem.h>
 #include <asm/processor.h>
 #include <linux/bitops.h>
+#include <linux/parport.h>
 
 #define SM_DEBUG
 
@@ -49,6 +50,8 @@ struct sm_state {
 	const struct modem_rx_info *mode_rx;
 
 	const struct hardware_info *hwdrv;
+
+	struct pardevice *pardev;
 
 	/*
 	 * Hardware (soundcard) access routines state
@@ -138,11 +141,11 @@ struct hardware_info {
 	/*
 	 * mode specific open/close
 	 */
-	int (*open)(struct device *, struct sm_state *);
-	int (*close)(struct device *, struct sm_state *);
-	int (*ioctl)(struct device *, struct sm_state *, struct ifreq *,
+	int (*open)(struct net_device *, struct sm_state *);
+	int (*close)(struct net_device *, struct sm_state *);
+	int (*ioctl)(struct net_device *, struct sm_state *, struct ifreq *,
 		     struct hdlcdrv_ioctl *, int);
-	int (*sethw)(struct device *, struct sm_state *, char *);
+	int (*sethw)(struct net_device *, struct sm_state *, char *);
 };
 
 /* --------------------------------------------------------------------- */
@@ -296,10 +299,6 @@ extern inline unsigned int lcm(unsigned int x, unsigned int y)
 
 #ifdef __i386__
 
-#include <asm/processor.h>
-
-#define HAS_RDTSC (current_cpu_data.x86_capability & X86_FEATURE_TSC)
-
 /*
  * only do 32bit cycle counter arithmetic; we hope we won't overflow.
  * in fact, overflowing modems would require over 2THz CPU clock speeds :-)
@@ -307,7 +306,7 @@ extern inline unsigned int lcm(unsigned int x, unsigned int y)
 
 #define time_exec(var,cmd)                                              \
 ({                                                                      \
-	if (HAS_RDTSC) {                                                \
+	if (cpu_has_tsc) {                                              \
 		unsigned int cnt1, cnt2, cnt3;                          \
 		__asm__(".byte 0x0f,0x31" : "=a" (cnt1), "=d" (cnt3));  \
 		cmd;                                                    \

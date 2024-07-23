@@ -70,8 +70,6 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 #define CAN_QUEUE 16
 #endif
 
-#if defined(HOSTS_C) || defined(MODULE)
-
 #define GENERIC_NCR5380 {						\
 	proc_info:      generic_NCR5380_proc_info,			\
 	name:           "Generic NCR5380/NCR53C400 Scsi Driver",	\
@@ -87,8 +85,6 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
         sg_tablesize:   SG_ALL,						\
 	cmd_per_lun:    CMD_PER_LUN ,					\
         use_clustering: DISABLE_CLUSTERING}
-
-#endif
 
 #ifndef HOSTS_C
 
@@ -123,7 +119,7 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 
 #define NCR5380_map_config memory
 
-#define NCR5380_map_type volatile unsigned char*
+#define NCR5380_map_type unsigned long
 
 #define NCR5380_map_name base
 
@@ -140,8 +136,8 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 #define NCR5380_region_size 0x3a00
 
 
-#define NCR5380_read(reg) (*(NCR5380_map_name + NCR53C400_mem_base + (reg)))
-#define NCR5380_write(reg, value) (*(NCR5380_map_name + NCR53C400_mem_base + (reg)) = value)
+#define NCR5380_read(reg) isa_readb(NCR5380_map_name + NCR53C400_mem_base + (reg))
+#define NCR5380_write(reg, value) isa_writeb(NCR5380_map_name + NCR53C400_mem_base + (reg), value)
 
 #endif
 

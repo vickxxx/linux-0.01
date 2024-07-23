@@ -38,176 +38,125 @@
 #define NCP_SYMLINK_MAGIC0	le32_to_cpu(0x6c6d7973)     /* "symlnk->" */
 #define NCP_SYMLINK_MAGIC1	le32_to_cpu(0x3e2d6b6e)
 
-static int ncp_readlink(struct dentry *, char *, int);
-static struct dentry *ncp_follow_link(struct dentry *, struct dentry *, unsigned int);
 int ncp_create_new(struct inode *dir, struct dentry *dentry,
                           int mode,int attributes);
 
-/*
- * symlinks can't do much...
- */
-struct inode_operations ncp_symlink_inode_operations={
-	NULL,			/* no file-operations */
-	NULL,			/* create */
-	NULL,			/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	ncp_readlink,		/* readlink */
-	ncp_follow_link,	/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
-};
+/* ----- read a symbolic link ------------------------------------------ */
 
-/* ----- follow a symbolic link ------------------------------------------ */
-
-static struct dentry *ncp_follow_link(struct dentry *dentry,
-				      struct dentry *base,
-				      unsigned int follow)
+static int ncp_symlink_readpage(struct file *file, struct page *page)
 {
-	struct inode *inode=dentry->d_inode;
-	int error, length, cnt;
+	struct inode *inode = page->mapping->host;
+	int error, length, len, cnt;
 	char *link;
+	char *buf = kmap(page);
 
-#ifdef DEBUG
-	printk("ncp_follow_link(dentry=%p,base=%p,follow=%u)\n",dentry,base,follow);
-#endif
-
-	if(!S_ISLNK(inode->i_mode)) {
-		dput(base);
-		return ERR_PTR(-EINVAL);
-	}
-
-	if(ncp_make_open(inode,O_RDONLY)) {
-		dput(base);
-		return ERR_PTR(-EIO);
-	}
-
-	for (cnt = 0; (link=(char *)kmalloc(NCP_MAX_SYMLINK_SIZE+1, GFP_NFS))==NULL; cnt++) {
-		if (cnt > 10) {
-			dput(base);
-			return ERR_PTR(-EAGAIN); /* -ENOMEM? */
-		}
+	error = -ENOMEM;
+	for (cnt = 0; (link=(char *)kmalloc(NCP_MAX_SYMLINK_SIZE, GFP_NFS))==NULL; cnt++) {
+		if (cnt > 10)
+			goto fail;
 		schedule();
 	}
+
+	if (ncp_make_open(inode,O_RDONLY))
+		goto failEIO;
 
 	error=ncp_read_kernel(NCP_SERVER(inode),NCP_FINFO(inode)->file_handle,
                          0,NCP_MAX_SYMLINK_SIZE,link,&length);
 
-	if (error!=0 || length<NCP_MIN_SYMLINK_SIZE || 
-	   ((__u32 *)link)[0]!=NCP_SYMLINK_MAGIC0 || ((__u32 *)link)[1]!=NCP_SYMLINK_MAGIC1) {
-		dput(base);
-		kfree(link);
-		return ERR_PTR(-EIO);
-	}
- 
-	link[length]=0;
+	ncp_inode_close(inode);
+	/* Close file handle if no other users... */
+	ncp_make_closed(inode);
+	if (error)
+		goto failEIO;
 
-	vol2io(NCP_SERVER(inode), link+8, 0);
-	
-	/* UPDATE_ATIME(inode); */
-	base=lookup_dentry(link+8, base, follow);
+	if (length<NCP_MIN_SYMLINK_SIZE || 
+	    ((__u32 *)link)[0]!=NCP_SYMLINK_MAGIC0 ||
+	    ((__u32 *)link)[1]!=NCP_SYMLINK_MAGIC1)
+	    	goto failEIO;
+
+	len = NCP_MAX_SYMLINK_SIZE;
+	error = ncp_vol2io(NCP_SERVER(inode), buf, &len, link+8, length-8, 0);
 	kfree(link);
+	if (error)
+		goto fail;
+	SetPageUptodate(page);
+	kunmap(page);
+	UnlockPage(page);
+	return 0;
 
-	return base;
-}
-
-/* ----- read symbolic link ---------------------------------------------- */
-
-static int ncp_readlink(struct dentry * dentry, char * buffer, int buflen)
-{
-	struct inode *inode=dentry->d_inode;
-	char *link;
-	int length,error;
-
-#ifdef DEBUG
-	printk("ncp_readlink(dentry=%p,buffer=%p,buflen=%d)\n",dentry,buffer,buflen);
-#endif
-
-	if(!S_ISLNK(inode->i_mode))
-		return -EINVAL;
-
-	if(ncp_make_open(inode,O_RDONLY))
-		return -EIO;
-
-	if((link=(char *)kmalloc(NCP_MAX_SYMLINK_SIZE+1,GFP_NFS))==NULL)
-		return -ENOMEM;
-
-	error = ncp_read_kernel(NCP_SERVER(inode),NCP_FINFO(inode)->file_handle,
-		0,NCP_MAX_SYMLINK_SIZE,link,&length);
-
-	if (error!=0 || length < NCP_MIN_SYMLINK_SIZE || buflen < (length-8) ||
-	   ((__u32 *)link)[0]!=NCP_SYMLINK_MAGIC0 ||((__u32 *)link)[1]!=NCP_SYMLINK_MAGIC1) {
-	   	error = -EIO;
-		goto out;
-	}
-
-	link[length] = 0;
-
-	vol2io(NCP_SERVER(inode), link+8, 0);
-	
-	error = length - 8;
-	if(copy_to_user(buffer, link+8, error))
-		error = -EFAULT;
-      
-out:;
+failEIO:
+	error = -EIO;
 	kfree(link);
+fail:
+	SetPageError(page);
+	kunmap(page);
+	UnlockPage(page);
 	return error;
 }
 
+/*
+ * symlinks can't do much...
+ */
+struct address_space_operations ncp_symlink_aops = {
+	readpage:	ncp_symlink_readpage,
+};
+	
 /* ----- create a new symbolic link -------------------------------------- */
  
 int ncp_symlink(struct inode *dir, struct dentry *dentry, const char *symname) {
-	int i,length;
 	struct inode *inode;
 	char *link;
+	int length, err, i;
 
 #ifdef DEBUG
-	printk("ncp_symlink(dir=%p,dentry=%p,symname=%s)\n",dir,dentry,symname);
+	PRINTK("ncp_symlink(dir=%p,dentry=%p,symname=%s)\n",dir,dentry,symname);
 #endif
 
 	if (!(NCP_SERVER(dir)->m.flags & NCP_MOUNT_SYMLINKS))
 		return -EPERM;	/* EPERM is returned by VFS if symlink procedure does not exist */
 
-	if ((length=strlen(symname))>NCP_MAX_SYMLINK_SIZE)
+	if ((length=strlen(symname))>NCP_MAX_SYMLINK_SIZE-8)
 		return -EINVAL;
 
 	if ((link=(char *)kmalloc(length+9,GFP_NFS))==NULL)
 		return -ENOMEM;
 
-	if (ncp_create_new(dir,dentry,0,aSHARED|aHIDDEN)) {
-		kfree(link);
-		return -EIO;
-	}
+	err = -EIO;
+	if (ncp_create_new(dir,dentry,0,aSHARED|aHIDDEN))
+		goto failfree;
 
 	inode=dentry->d_inode;
 
+	if (ncp_make_open(inode, O_WRONLY))
+		goto failfree;
+
 	((__u32 *)link)[0]=NCP_SYMLINK_MAGIC0;
 	((__u32 *)link)[1]=NCP_SYMLINK_MAGIC1;
-	memcpy(link+8, symname, length+1); /* including last zero for io2vol */
 
 	/* map to/from server charset, do not touch upper/lower case as
 	   symlink can point out of ncp filesystem */
-	io2vol(NCP_SERVER(inode), link+8, 0);
-	
+	length += 1;
+	err = ncp_io2vol(NCP_SERVER(inode),link+8,&length,symname,length-1,0);
+	if (err)
+		goto fail;
+
 	if(ncp_write_kernel(NCP_SERVER(inode), NCP_FINFO(inode)->file_handle, 
 	    		    0, length+8, link, &i) || i!=length+8) {
-		kfree(link);
-		return -EIO;
+		err = -EIO;
+		goto fail;
 	}
 
+	ncp_inode_close(inode);
+	ncp_make_closed(inode);
 	kfree(link);
 	return 0;
+
+fail:
+	ncp_inode_close(inode);
+	ncp_make_closed(inode);
+failfree:
+	kfree(link);
+	return err;	
 }
 #endif
 

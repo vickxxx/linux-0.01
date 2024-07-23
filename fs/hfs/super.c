@@ -36,30 +36,22 @@
 
 static void hfs_read_inode(struct inode *);
 static void hfs_put_super(struct super_block *);
-static int hfs_statfs(struct super_block *, struct statfs *, int);
+static int hfs_statfs(struct super_block *, struct statfs *);
 static void hfs_write_super(struct super_block *);
 
 /*================ Global variables ================*/
 
 static struct super_operations hfs_super_operations = { 
-	hfs_read_inode,		/* read_inode */
-	NULL,			/* write_inode */
-	hfs_put_inode,		/* put_inode     - in inode.c */
-	NULL,                   /* delete_inode  */
-	hfs_notify_change,	/* notify_change - in inode.c */
-	hfs_put_super,		/* put_super */
-	hfs_write_super,	/* write_super */
-	hfs_statfs,		/* statfs */
-	NULL			/* remount_fs */
+	read_inode:	hfs_read_inode,
+	put_inode:	hfs_put_inode,
+	put_super:	hfs_put_super,
+	write_super:	hfs_write_super,
+	statfs:		hfs_statfs,
 };
 
 /*================ File-local variables ================*/
 
-static struct file_system_type hfs_fs = {
-        "hfs",
-	FS_REQUIRES_DEV,
-	hfs_read_super, 
-	NULL};
+static DECLARE_FSTYPE_DEV(hfs_fs, "hfs", hfs_read_super);
 
 /*================ File-local functions ================*/
 
@@ -72,7 +64,6 @@ static struct file_system_type hfs_fs = {
 static void hfs_read_inode(struct inode *inode)
 {
   inode->i_mode = 0;
-  inode->i_op = NULL;
 }
 
 /*
@@ -131,8 +122,6 @@ static void hfs_put_super(struct super_block *sb)
 
 	/* restore default blocksize for the device */
 	set_blocksize(sb->s_dev, BLOCK_SIZE);
-
-	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -144,21 +133,20 @@ static void hfs_put_super(struct super_block *sb)
  *
  * changed f_files/f_ffree to reflect the fs_ablock/free_ablocks.
  */
-static int hfs_statfs(struct super_block *sb, struct statfs *buf, int len)
+static int hfs_statfs(struct super_block *sb, struct statfs *buf)
 {
 	struct hfs_mdb *mdb = HFS_SB(sb)->s_mdb;
-	struct statfs tmp;
 
-	tmp.f_type = HFS_SUPER_MAGIC;
-	tmp.f_bsize = HFS_SECTOR_SIZE;
-	tmp.f_blocks = mdb->alloc_blksz * mdb->fs_ablocks;
-	tmp.f_bfree = mdb->alloc_blksz * mdb->free_ablocks;
-	tmp.f_bavail = tmp.f_bfree;
-	tmp.f_files = mdb->fs_ablocks;  
-	tmp.f_ffree = mdb->free_ablocks;
-	tmp.f_namelen = HFS_NAMELEN;
+	buf->f_type = HFS_SUPER_MAGIC;
+	buf->f_bsize = HFS_SECTOR_SIZE;
+	buf->f_blocks = mdb->alloc_blksz * mdb->fs_ablocks;
+	buf->f_bfree = mdb->alloc_blksz * mdb->free_ablocks;
+	buf->f_bavail = buf->f_bfree;
+	buf->f_files = mdb->fs_ablocks;  
+	buf->f_ffree = mdb->free_ablocks;
+	buf->f_namelen = HFS_NAMELEN;
 
-	return copy_to_user(buf, &tmp, len) ? -EFAULT : 0;
+	return 0;
 }
 
 /*
@@ -412,11 +400,6 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 		goto bail3;
 	}
 
-	/* in case someone tries to unload the module while we wait on I/O */
-	MOD_INC_USE_COUNT;
-
-	lock_super(s);
-
 	/* set the device driver to 512-byte blocks */
 	set_blocksize(dev, HFS_SECTOR_SIZE);
 
@@ -476,7 +459,6 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 	s->s_root->d_op = &hfs_dentry_operations;
 
 	/* everything's okay */
-	unlock_super(s);
 	return s;
 
 bail_no_root: 
@@ -486,45 +468,23 @@ bail1:
 	hfs_mdb_put(mdb, s->s_flags & MS_RDONLY);
 bail2:
 	set_blocksize(dev, BLOCK_SIZE);
-	unlock_super(s);
-	MOD_DEC_USE_COUNT;
 bail3:
-	s->s_dev = 0;
 	return NULL;	
 }
 
-__initfunc(int init_hfs_fs(void))
+static int __init init_hfs_fs(void)
 {
         hfs_cat_init();
 	return register_filesystem(&hfs_fs);
 }
 
-#ifdef MODULE
-int init_module(void) {
-	int error;
-
-#if defined(DEBUG_SIZES) || defined(DEBUG_ALL)
-	hfs_warn("HFS inode: %d bytes available\n",
-		 sizeof(struct ext2_inode_info)-sizeof(struct hfs_inode_info));
-	hfs_warn("HFS super_block: %d bytes available\n",
-		 sizeof(struct ext2_sb_info)-sizeof(struct hfs_sb_info));
-	if ((sizeof(struct hfs_inode_info)>sizeof(struct ext2_inode_info)) ||
-	    (sizeof(struct hfs_sb_info)>sizeof(struct ext2_sb_info))) {
-		return -ENOMEM; /* well sort of */
-	}
-#endif
-	error = init_hfs_fs();
-	if (!error) {
-		/* register_symtab(NULL); */
-	}
-	return error;
-}
-
-void cleanup_module(void) {
+static void __exit exit_hfs_fs(void) {
 	hfs_cat_free();
 	unregister_filesystem(&hfs_fs);
 }
-#endif
+
+module_init(init_hfs_fs)
+module_exit(exit_hfs_fs)
 
 #if defined(DEBUG_ALL) || defined(DEBUG_MEM)
 long int hfs_alloc = 0;

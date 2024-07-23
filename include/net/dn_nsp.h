@@ -19,8 +19,11 @@ extern void dn_nsp_send_data_ack(struct sock *sk);
 extern void dn_nsp_send_oth_ack(struct sock *sk);
 extern void dn_nsp_delayed_ack(struct sock *sk);
 extern void dn_send_conn_ack(struct sock *sk);
-extern void dn_send_conn_conf(struct sock *sk);
-extern void dn_send_disc(struct sock *sk, unsigned char type, unsigned short reason);
+extern void dn_send_conn_conf(struct sock *sk, int gfp);
+extern void dn_nsp_send_disc(struct sock *sk, unsigned char type, 
+				unsigned short reason, int gfp);
+extern void dn_nsp_return_disc(struct sk_buff *skb, unsigned char type,
+				unsigned short reason);
 extern void dn_nsp_send_lnk(struct sock *sk, unsigned short flags);
 extern void dn_nsp_send_conninit(struct sock *sk, unsigned char flags);
 
@@ -36,9 +39,27 @@ extern int dn_nsp_backlog_rcv(struct sock *sk, struct sk_buff *skb);
 extern struct sk_buff *dn_alloc_skb(struct sock *sk, int size, int pri);
 extern struct sk_buff *dn_alloc_send_skb(struct sock *sk, int *size, int noblock, int *err);
 
-#define NSP_REASON_NR 1
-#define NSP_REASON_DC 42
-#define NSP_REASON_NL 41
+#define NSP_REASON_OK 0		/* No error */
+#define NSP_REASON_NR 1		/* No resources */
+#define NSP_REASON_UN 2		/* Unrecognised node name */
+#define NSP_REASON_SD 3		/* Node shutting down */
+#define NSP_REASON_ID 4		/* Invalid destination end user */
+#define NSP_REASON_ER 5		/* End user lacks resources */
+#define NSP_REASON_OB 6		/* Object too busy */
+#define NSP_REASON_US 7		/* Unspecified error */
+#define NSP_REASON_TP 8		/* Third-Party abort */
+#define NSP_REASON_EA 9		/* End user has aborted the link */
+#define NSP_REASON_IF 10	/* Invalid node name format */
+#define NSP_REASON_LS 11	/* Local node shutdown */
+#define NSP_REASON_LL 32	/* Node lacks logical-link resources */
+#define NSP_REASON_LE 33	/* End user lacks logical-link resources */
+#define NSP_REASON_UR 34	/* Unacceptable RQSTRID or PASSWORD field */
+#define NSP_REASON_UA 36	/* Unacceptable ACCOUNT field */
+#define NSP_REASON_TM 38	/* End user timed out logical link */
+#define NSP_REASON_NU 39	/* Node unreachable */
+#define NSP_REASON_NL 41	/* No-link message */
+#define NSP_REASON_DC 42	/* Disconnect confirm */
+#define NSP_REASON_IO 43	/* Image data field overflow */
 
 #define NSP_DISCINIT 0x38
 #define NSP_DISCCONF 0x48
@@ -49,88 +70,79 @@ extern struct sk_buff *dn_alloc_send_skb(struct sock *sk, int *size, int noblock
 
 /* Data Messages    (data segment/interrupt/link service)               */
 
-        struct nsp_data_seg_msg
-        {
-                unsigned char   msgflg          __attribute__((packed));
-                unsigned short  dstaddr         __attribute__((packed));
-                unsigned short  srcaddr         __attribute__((packed));
-        };
+struct nsp_data_seg_msg
+{
+	unsigned char   msgflg          __attribute__((packed));
+	unsigned short  dstaddr         __attribute__((packed));
+	unsigned short  srcaddr         __attribute__((packed));
+};
 
-        struct nsp_data_opt_msg
-        {
-                unsigned short  acknum          __attribute__((packed));
-                unsigned short  segnum          __attribute__((packed));
-                unsigned short  lsflgs          __attribute__((packed));
-        };
+struct nsp_data_opt_msg
+{
+	unsigned short  acknum          __attribute__((packed));
+	unsigned short  segnum          __attribute__((packed));
+	unsigned short  lsflgs          __attribute__((packed));
+};
 
-        struct nsp_data_opt_msg1
-        {
-                unsigned short  acknum          __attribute__((packed));
-                unsigned short  segnum          __attribute__((packed));
-        };
+struct nsp_data_opt_msg1
+{
+	unsigned short  acknum          __attribute__((packed));
+	unsigned short  segnum          __attribute__((packed));
+};
 
-/* Acknowledgment Messages */
-/*-------------------------*/
 
-/* Acknowledgment Messages (data/other data)                             */
-
-        struct  nsp_data_ack_msg
-        {
-                unsigned char   msgflg          __attribute__((packed));
-                unsigned short  dstaddr         __attribute__((packed));
-                unsigned short  srcaddr         __attribute__((packed));
-                unsigned short  acknum          __attribute__((packed));
-        };
+/* Acknowledgment Message (data/other data)                             */
+struct nsp_data_ack_msg
+{
+	unsigned char   msgflg          __attribute__((packed));
+	unsigned short  dstaddr         __attribute__((packed));
+	unsigned short  srcaddr         __attribute__((packed));
+	unsigned short  acknum          __attribute__((packed));
+};
 
 /* Connect Acknowledgment Message */
+struct  nsp_conn_ack_msg
+{
+	unsigned char   msgflg          __attribute__((packed));
+	unsigned short  dstaddr         __attribute__((packed));
+};
 
-        struct  nsp_conn_ack_msg
-        {
-                unsigned char   msgflg          __attribute__((packed));
-                unsigned short  dstaddr         __attribute__((packed));
-        };
-
-/* Control Messages */
-/*------------------*/
 
 /* Connect Initiate/Retransmit Initiate/Connect Confirm */
-
-        struct  nsp_conn_init_msg
-        {
-                unsigned char   msgflg          __attribute__((packed));
-#define         NSP_CI          0x18            /* Connect Initiate     */
-#define         NSP_RCI         0x68            /* Retrans. Conn Init   */
-                unsigned short  dstaddr         __attribute__((packed));
-                unsigned short  srcaddr         __attribute__((packed));
-                unsigned char   services        __attribute__((packed));
-#define         NSP_FC_NONE     0x00            /* Flow Control None    */
-#define         NSP_FC_SRC      0x04            /* Seg Req. Count       */
-#define         NSP_FC_SCMC     0x08            /* Sess. Control Mess   */
-                unsigned char   info            __attribute__((packed));
-                unsigned short  segsize         __attribute__((packed));
-        };
+struct  nsp_conn_init_msg
+{
+	unsigned char   msgflg          __attribute__((packed));
+#define NSP_CI      0x18            /* Connect Initiate     */
+#define NSP_RCI     0x68            /* Retrans. Conn Init   */
+	unsigned short  dstaddr         __attribute__((packed));
+        unsigned short  srcaddr         __attribute__((packed));
+        unsigned char   services        __attribute__((packed));
+#define NSP_FC_NONE   0x00            /* Flow Control None    */
+#define NSP_FC_SRC    0x04            /* Seg Req. Count       */
+#define NSP_FC_SCMC   0x08            /* Sess. Control Mess   */
+	unsigned char   info            __attribute__((packed));
+        unsigned short  segsize         __attribute__((packed));
+};
 
 /* Disconnect Initiate/Disconnect Confirm */
+struct  nsp_disconn_init_msg
+{
+	unsigned char   msgflg          __attribute__((packed));
+        unsigned short  dstaddr         __attribute__((packed));
+        unsigned short  srcaddr         __attribute__((packed));
+        unsigned short  reason          __attribute__((packed));
+};
 
-        struct  nsp_disconn_init_msg
-        {
-                unsigned char   msgflg          __attribute__((packed));
-                unsigned short  dstaddr         __attribute__((packed));
-                unsigned short  srcaddr         __attribute__((packed));
-                unsigned short  reason          __attribute__((packed));
-        };
 
 
-/*------------------------- SCP - messages ------------------------------*/
-
-        struct  srcobj_fmt
-        {
-                char            format          __attribute__((packed));
-                unsigned char   task            __attribute__((packed));
-                unsigned short  grpcode         __attribute__((packed));
-                unsigned short  usrcode         __attribute__((packed));
-                char            dlen            __attribute__((packed));
-        };
+struct  srcobj_fmt
+{
+	char            format          __attribute__((packed));
+        unsigned char   task            __attribute__((packed));
+        unsigned short  grpcode         __attribute__((packed));
+        unsigned short  usrcode         __attribute__((packed));
+        char            dlen            __attribute__((packed));
+};
 
 /*
  * A collection of functions for manipulating the sequence

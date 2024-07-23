@@ -8,6 +8,7 @@
  * Code supporting the DP264 (EV6+TSUNAMI).
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/mm.h>
@@ -22,75 +23,195 @@
 #include <asm/bitops.h>
 #include <asm/mmu_context.h>
 #include <asm/io.h>
-#include <asm/pci.h>
 #include <asm/pgtable.h>
 #include <asm/core_tsunami.h>
 #include <asm/hwrpb.h>
 
 #include "proto.h"
-#include "irq.h"
-#include "bios32.h"
-#include "machvec.h"
+#include "irq_impl.h"
+#include "pci_impl.h"
+#include "machvec_impl.h"
 
-#define dev2hose(d) (bus2hose[(d)->bus->number]->pci_hose_index)
 
-/*
- * HACK ALERT! only the boot cpu is used for interrupts.
- */
+/* Note mask bit is true for ENABLED irqs.  */
+static unsigned long cached_irq_mask;
+/* dp264 boards handle at max four CPUs */
+static unsigned long cpu_irq_affinity[4] = { 0UL, 0UL, 0UL, 0UL };
+
+spinlock_t dp264_irq_lock = SPIN_LOCK_UNLOCKED;
 
 static void
-dp264_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
+tsunami_update_irq_hw(unsigned long mask)
 {
-	if (irq >= 16) {
-		volatile unsigned long *csr;
+	register tsunami_cchip *cchip = TSUNAMI_cchip;
+	unsigned long isa_enable = 1UL << 55;
+	register int bcpu = boot_cpuid;
 
-		if (TSUNAMI_bootcpu < 2)
-			if (!TSUNAMI_bootcpu)
-				csr = &TSUNAMI_cchip->dim0.csr;
-			else
-				csr = &TSUNAMI_cchip->dim1.csr;
-		else
-			if (TSUNAMI_bootcpu == 2)
-				csr = &TSUNAMI_cchip->dim2.csr;
-			else
-				csr = &TSUNAMI_cchip->dim3.csr;
-		
-		*csr = ~mask;
-		mb();
-		*csr;
-	}
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);	/* ISA PIC2 */
-	else
-		outb(mask, 0x21);	/* ISA PIC1 */
+#ifdef CONFIG_SMP
+	register unsigned long cpm = cpu_present_mask;
+	volatile unsigned long *dim0, *dim1, *dim2, *dim3;
+	unsigned long mask0, mask1, mask2, mask3, dummy;
+
+	mask &= ~isa_enable;
+	mask0 = mask & cpu_irq_affinity[0];
+	mask1 = mask & cpu_irq_affinity[1];
+	mask2 = mask & cpu_irq_affinity[2];
+	mask3 = mask & cpu_irq_affinity[3];
+
+	if (bcpu == 0) mask0 |= isa_enable;
+	else if (bcpu == 1) mask1 |= isa_enable;
+	else if (bcpu == 2) mask2 |= isa_enable;
+	else mask3 |= isa_enable;
+
+	dim0 = &cchip->dim0.csr;
+	dim1 = &cchip->dim1.csr;
+	dim2 = &cchip->dim2.csr;
+	dim3 = &cchip->dim3.csr;
+	if ((cpm & 1) == 0) dim0 = &dummy;
+	if ((cpm & 2) == 0) dim1 = &dummy;
+	if ((cpm & 4) == 0) dim2 = &dummy;
+	if ((cpm & 8) == 0) dim3 = &dummy;
+
+	*dim0 = mask0;
+	*dim1 = mask1;
+	*dim2 = mask2;
+	*dim3 = mask3;
+	mb();
+	*dim0;
+	*dim1;
+	*dim2;
+	*dim3;
+#else
+	volatile unsigned long *dimB;
+	if (bcpu == 0) dimB = &cchip->dim0.csr;
+	else if (bcpu == 1) dimB = &cchip->dim1.csr;
+	else if (bcpu == 2) dimB = &cchip->dim2.csr;
+	else dimB = &cchip->dim3.csr;
+
+	*dimB = mask | isa_enable;
+	mb();
+	*dimB;
+#endif
 }
 
 static void
-clipper_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
+dp264_enable_irq(unsigned int irq)
 {
-	if (irq >= 16) {
-		volatile unsigned long *csr;
-
-		if (TSUNAMI_bootcpu < 2)
-			if (!TSUNAMI_bootcpu)
-				csr = &TSUNAMI_cchip->dim0.csr;
-			else
-				csr = &TSUNAMI_cchip->dim1.csr;
-		else
-			if (TSUNAMI_bootcpu == 2)
-				csr = &TSUNAMI_cchip->dim2.csr;
-			else
-				csr = &TSUNAMI_cchip->dim3.csr;
-		
-		*csr = (~mask >> 16) | (1UL << 55); /* master ISA enable */
-		mb();
-		*csr;
-	}
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);	/* ISA PIC2 */
-	else
-		outb(mask, 0x21);	/* ISA PIC1 */
+	spin_lock(&dp264_irq_lock);
+	cached_irq_mask |= 1UL << irq;
+	tsunami_update_irq_hw(cached_irq_mask);
+	spin_unlock(&dp264_irq_lock);
 }
+
+static void
+dp264_disable_irq(unsigned int irq)
+{
+	spin_lock(&dp264_irq_lock);
+	cached_irq_mask &= ~(1UL << irq);
+	tsunami_update_irq_hw(cached_irq_mask);
+	spin_unlock(&dp264_irq_lock);
+}
+
+static unsigned int
+dp264_startup_irq(unsigned int irq)
+{ 
+	dp264_enable_irq(irq);
+	return 0; /* never anything pending */
+}
+
+static void
+dp264_end_irq(unsigned int irq)
+{ 
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		dp264_enable_irq(irq);
+}
+
+static void
+clipper_enable_irq(unsigned int irq)
+{
+	spin_lock(&dp264_irq_lock);
+	cached_irq_mask |= 1UL << (irq - 16);
+	tsunami_update_irq_hw(cached_irq_mask);
+	spin_unlock(&dp264_irq_lock);
+}
+
+static void
+clipper_disable_irq(unsigned int irq)
+{
+	spin_lock(&dp264_irq_lock);
+	cached_irq_mask &= ~(1UL << (irq - 16));
+	tsunami_update_irq_hw(cached_irq_mask);
+	spin_unlock(&dp264_irq_lock);
+}
+
+static unsigned int
+clipper_startup_irq(unsigned int irq)
+{ 
+	clipper_enable_irq(irq);
+	return 0; /* never anything pending */
+}
+
+static void
+clipper_end_irq(unsigned int irq)
+{ 
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		clipper_enable_irq(irq);
+}
+
+static void
+cpu_set_irq_affinity(unsigned int irq, unsigned long affinity)
+{
+	int cpu;
+
+	for (cpu = 0; cpu < 4; cpu++) {
+		unsigned long aff = cpu_irq_affinity[cpu];
+		if (affinity & (1UL << cpu))
+			aff |= 1UL << irq;
+		else
+			aff &= ~(1UL << irq);
+		cpu_irq_affinity[cpu] = aff;
+	}
+}
+
+static void
+dp264_set_affinity(unsigned int irq, unsigned long affinity)
+{ 
+	spin_lock(&dp264_irq_lock);
+	cpu_set_irq_affinity(irq, affinity);
+	tsunami_update_irq_hw(cached_irq_mask);
+	spin_unlock(&dp264_irq_lock);
+}
+
+static void
+clipper_set_affinity(unsigned int irq, unsigned long affinity)
+{ 
+	spin_lock(&dp264_irq_lock);
+	cpu_set_irq_affinity(irq - 16, affinity);
+	tsunami_update_irq_hw(cached_irq_mask);
+	spin_unlock(&dp264_irq_lock);
+}
+
+static struct hw_interrupt_type dp264_irq_type = {
+	typename:	"DP264",
+	startup:	dp264_startup_irq,
+	shutdown:	dp264_disable_irq,
+	enable:		dp264_enable_irq,
+	disable:	dp264_disable_irq,
+	ack:		dp264_disable_irq,
+	end:		dp264_end_irq,
+	set_affinity:	dp264_set_affinity,
+};
+
+static struct hw_interrupt_type clipper_irq_type = {
+	typename:	"CLIPPER",
+	startup:	clipper_startup_irq,
+	shutdown:	clipper_disable_irq,
+	enable:		clipper_enable_irq,
+	disable:	clipper_disable_irq,
+	ack:		clipper_disable_irq,
+	end:		clipper_end_irq,
+	set_affinity:	clipper_set_affinity,
+};
 
 static void
 dp264_device_interrupt(unsigned long vector, struct pt_regs * regs)
@@ -126,9 +247,9 @@ dp264_device_interrupt(unsigned long vector, struct pt_regs * regs)
 static void 
 dp264_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 {
-	int irq, ack;
+	int irq;
 
-	ack = irq = (vector - 0x800) >> 4;
+	irq = (vector - 0x800) >> 4;
 
 	/*
 	 * The SRM console reports PCI interrupts with a vector calculated by:
@@ -142,19 +263,19 @@ dp264_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	 * so we don't count them.
 	 */
 	if (irq >= 32)
-		ack = irq = irq - 16;
+		irq -= 16;
 
-	handle_irq(irq, ack, regs);
+	handle_irq(irq, regs);
 }
 
 static void 
 clipper_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 {
-	int irq, ack;
+	int irq;
 
-	ack = irq = (vector - 0x800) >> 4;
+	irq = (vector - 0x800) >> 4;
 
-	/*
+/*
 	 * The SRM console reports PCI interrupts with a vector calculated by:
 	 *
 	 *	0x900 + (0x10 * DRIR-bit)
@@ -166,7 +287,17 @@ clipper_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	 *
 	 * Eg IRQ 24 is DRIR bit 8, etc, etc
 	 */
-	handle_irq(irq, ack, regs);
+	handle_irq(irq, regs);
+}
+
+static void __init
+init_tsunami_irqs(struct hw_interrupt_type * ops, int imin, int imax)
+{
+	long i;
+	for (i = imin; i <= imax; ++i) {
+		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
+		irq_desc[i].handler = ops;
+	}
 }
 
 static void __init
@@ -180,10 +311,10 @@ dp264_init_irq(void)
 	if (alpha_using_srm)
 		alpha_mv.device_interrupt = dp264_srm_device_interrupt;
 
-	dp264_update_irq_hw(16, alpha_irq_mask, 0);
+	tsunami_update_irq_hw(0);
 
-        enable_irq(55);     /* Enable ISA interrupt controller.  */
-	enable_irq(2);
+	init_i8259a_irqs();
+	init_tsunami_irqs(&dp264_irq_type, 16, 47);
 }
 
 static void __init
@@ -197,10 +328,10 @@ clipper_init_irq(void)
 	if (alpha_using_srm)
 		alpha_mv.device_interrupt = clipper_srm_device_interrupt;
 
-	clipper_update_irq_hw(16, alpha_irq_mask, 0);
+	tsunami_update_irq_hw(0);
 
-        enable_irq(55);     /* Enable ISA interrupt controller.  */
-	enable_irq(2);
+	init_i8259a_irqs();
+	init_tsunami_irqs(&clipper_irq_type, 24, 63);
 }
 
 
@@ -260,9 +391,9 @@ clipper_init_irq(void)
  */
 
 static int __init
-dp264_map_irq(struct pci_dev *dev, int slot, int pin)
+dp264_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[6][5] __initlocaldata = {
+	static char irq_tab[6][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{    -1,    -1,    -1,    -1,    -1}, /* IdSel 5 ISA Bridge */
 		{ 16+ 3, 16+ 3, 16+ 2, 16+ 2, 16+ 2}, /* IdSel 6 SCSI builtin*/
@@ -272,18 +403,31 @@ dp264_map_irq(struct pci_dev *dev, int slot, int pin)
 		{ 16+ 3, 16+ 3, 16+ 2, 16+ 1, 16+ 0}  /* IdSel 10 slot 3 */
 	};
 	const long min_idsel = 5, max_idsel = 10, irqs_per_slot = 5;
+
+	struct pci_controler *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
 
-	if (irq > 0)
-		irq += 16 * dev2hose(dev);
+	if (irq > 0) {
+		irq += 16 * hose->index;
+	} else {
+		/* ??? The Contaq IDE controler on the ISA bridge uses
+		   "legacy" interrupts 14 and 15.  I don't know if anything
+		   can wind up at the same slot+pin on hose1, so we'll
+		   just have to trust whatever value the console might
+		   have assigned.  */
+
+		u8 irq8;
+		pci_read_config_byte(dev, PCI_INTERRUPT_LINE, &irq8);
+		irq = irq8;
+	}
 
 	return irq;
 }
 
 static int __init
-monet_map_irq(struct pci_dev *dev, int slot, int pin)
+monet_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[13][5] __initlocaldata = {
+	static char irq_tab[13][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{    45,    45,    45,    45,    45}, /* IdSel 3 21143 PCI1 */
 		{    -1,    -1,    -1,    -1,    -1}, /* IdSel 4 unused */
@@ -308,19 +452,23 @@ monet_map_irq(struct pci_dev *dev, int slot, int pin)
 	return COMMON_TABLE_LOOKUP;
 }
 
-static int __init
-monet_swizzle(struct pci_dev *dev, int *pinp)
+static u8 __init
+monet_swizzle(struct pci_dev *dev, u8 *pinp)
 {
+	struct pci_controler *hose = dev->sysdata;
 	int slot, pin = *pinp;
 
-	/* Check first for the built-in bridge on hose 1. */
-	if (dev2hose(dev) == 1 && PCI_SLOT(dev->bus->self->devfn) == 8) {
+	if (hose->first_busno == dev->bus->number) {
+		slot = PCI_SLOT(dev->devfn);
+	}
+	/* Check for the built-in bridge on hose 1. */
+	else if (hose->index == 1 && PCI_SLOT(dev->bus->self->devfn) == 8) {
 		slot = PCI_SLOT(dev->devfn);
 	} else {
 		/* Must be a card-based bridge.  */
 		do {
 			/* Check for built-in bridge on hose 1. */
-			if (dev2hose(dev) == 1 &&
+			if (hose->index == 1 &&
 			    PCI_SLOT(dev->bus->self->devfn) == 8) {
 				slot = PCI_SLOT(dev->devfn);
 				break;
@@ -338,9 +486,9 @@ monet_swizzle(struct pci_dev *dev, int *pinp)
 }
 
 static int __init
-webbrick_map_irq(struct pci_dev *dev, int slot, int pin)
+webbrick_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[13][5] __initlocaldata = {
+	static char irq_tab[13][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{    -1,    -1,    -1,    -1,    -1}, /* IdSel 7 ISA Bridge */
 		{    -1,    -1,    -1,    -1,    -1}, /* IdSel 8 unused */
@@ -359,9 +507,9 @@ webbrick_map_irq(struct pci_dev *dev, int slot, int pin)
 }
 
 static int __init
-clipper_map_irq(struct pci_dev *dev, int slot, int pin)
+clipper_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[7][5] __initlocaldata = {
+	static char irq_tab[7][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{ 16+ 8, 16+ 8, 16+ 9, 16+10, 16+11}, /* IdSel 1 slot 1 */
 		{ 16+12, 16+12, 16+13, 16+14, 16+15}, /* IdSel 2 slot 2 */
@@ -372,44 +520,39 @@ clipper_map_irq(struct pci_dev *dev, int slot, int pin)
 		{    -1,    -1,    -1,    -1,    -1}  /* IdSel 7 ISA Bridge */
 	};
 	const long min_idsel = 1, max_idsel = 7, irqs_per_slot = 5;
+
+	struct pci_controler *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
 
 	if (irq > 0)
-		irq += 16 * dev2hose(dev);
+		irq += 16 * hose->index;
 
 	return irq;
 }
 
 static void __init
-dp264_pci_fixup(void)
+dp264_init_pci(void)
 {
-	layout_all_busses(DEFAULT_IO_BASE, DEFAULT_MEM_BASE);
-	common_pci_fixup(dp264_map_irq, common_swizzle);
+	common_init_pci();
 	SMC669_Init(0);
 }
 
 static void __init
-monet_pci_fixup(void)
+monet_init_pci(void)
 {
-	layout_all_busses(DEFAULT_IO_BASE, DEFAULT_MEM_BASE);
-	common_pci_fixup(monet_map_irq, monet_swizzle);
-	/* es1888_init(); */ /* later? */
+	common_init_pci();
 	SMC669_Init(1);
+	es1888_init();
 }
 
 static void __init
-webbrick_pci_fixup(void)
+webbrick_init_arch(void)
 {
-	layout_all_busses(DEFAULT_IO_BASE, DEFAULT_MEM_BASE);
-	common_pci_fixup(webbrick_map_irq, common_swizzle);
-	SMC669_Init(0);
-}
+	tsunami_init_arch();
 
-static void __init
-clipper_pci_fixup(void)
-{
-	layout_all_busses(DEFAULT_IO_BASE, DEFAULT_MEM_BASE);
-	common_pci_fixup(clipper_map_irq, common_swizzle);
+	/* Tsunami caches 4 PTEs at a time; DS10 has only 1 hose. */
+	hose_head->sg_isa->align_entry = 4;
+	hose_head->sg_pci->align_entry = 4;
 }
 
 
@@ -425,18 +568,19 @@ struct alpha_machine_vector dp264_mv __initmv = {
 	DO_TSUNAMI_BUS,
 	machine_check:		tsunami_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	DEFAULT_MEM_BASE,
 
 	nr_irqs:		64,
-	irq_probe_mask:		_PROBE_MASK(64),
-	update_irq_hw:		dp264_update_irq_hw,
-	ack_irq:		generic_ack_irq,
 	device_interrupt:	dp264_device_interrupt,
 
 	init_arch:		tsunami_init_arch,
 	init_irq:		dp264_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		dp264_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		dp264_init_pci,
+	kill_arch:		tsunami_kill_arch,
+	pci_map_irq:		dp264_map_irq,
+	pci_swizzle:		common_swizzle,
 };
 ALIAS_MV(dp264)
 
@@ -448,18 +592,19 @@ struct alpha_machine_vector monet_mv __initmv = {
 	DO_TSUNAMI_BUS,
 	machine_check:		tsunami_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	DEFAULT_MEM_BASE,
 
 	nr_irqs:		64,
-	irq_probe_mask:		_PROBE_MASK(64),
-	update_irq_hw:		dp264_update_irq_hw,
-	ack_irq:		generic_ack_irq,
 	device_interrupt:	dp264_device_interrupt,
 
 	init_arch:		tsunami_init_arch,
 	init_irq:		dp264_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		monet_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		monet_init_pci,
+	kill_arch:		tsunami_kill_arch,
+	pci_map_irq:		monet_map_irq,
+	pci_swizzle:		monet_swizzle,
 };
 
 struct alpha_machine_vector webbrick_mv __initmv = {
@@ -470,18 +615,19 @@ struct alpha_machine_vector webbrick_mv __initmv = {
 	DO_TSUNAMI_BUS,
 	machine_check:		tsunami_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	DEFAULT_MEM_BASE,
 
 	nr_irqs:		64,
-	irq_probe_mask:		_PROBE_MASK(64),
-	update_irq_hw:		dp264_update_irq_hw,
-	ack_irq:		generic_ack_irq,
 	device_interrupt:	dp264_device_interrupt,
 
-	init_arch:		tsunami_init_arch,
+	init_arch:		webbrick_init_arch,
 	init_irq:		dp264_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		webbrick_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		common_init_pci,
+	kill_arch:		tsunami_kill_arch,
+	pci_map_irq:		webbrick_map_irq,
+	pci_swizzle:		common_swizzle,
 };
 
 struct alpha_machine_vector clipper_mv __initmv = {
@@ -492,18 +638,19 @@ struct alpha_machine_vector clipper_mv __initmv = {
 	DO_TSUNAMI_BUS,
 	machine_check:		tsunami_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	DEFAULT_MEM_BASE,
 
 	nr_irqs:		64,
-	irq_probe_mask:		_PROBE_MASK(64),
-	update_irq_hw:		clipper_update_irq_hw,
-	ack_irq:		generic_ack_irq,
 	device_interrupt:	dp264_device_interrupt,
 
 	init_arch:		tsunami_init_arch,
 	init_irq:		clipper_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		clipper_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		common_init_pci,
+	kill_arch:		tsunami_kill_arch,
+	pci_map_irq:		clipper_map_irq,
+	pci_swizzle:		common_swizzle,
 };
 
 /* No alpha_mv alias for webbrick/monet/clipper, since we compile them

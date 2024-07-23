@@ -65,20 +65,6 @@ static struct gendisk *get_gendisk(kdev_t dev) {
 	return g;
 }
 
-/* moved here from md.c - will be discarded later */
-char *partition_name (kdev_t dev) {
-	static char name[40];		/* kdevname returns 32 bytes */
-					/* disk_name requires 32 bytes */
-	struct gendisk *hd = get_gendisk (dev);
-
-	if (!hd) {
-		sprintf (name, "[dev %s]", kdevname(dev));
-		return (name);
-	}
-
-	return disk_name (hd, MINOR(dev), name);  /* routine in genhd.c */
-}
-
 /*
  * Add a partition.
  *
@@ -282,6 +268,13 @@ int blk_ioctl(kdev_t dev, unsigned int cmd, unsigned long arg)
 		case BLKPG:
 			return blkpg_ioctl(dev, (struct blkpg_ioctl_arg *) arg);
 			
+		case BLKELVGET:
+			return blkelvget_ioctl(&blk_get_queue(dev)->elevator,
+					       (blkelv_ioctl_arg_t *) arg);
+		case BLKELVSET:
+			return blkelvset_ioctl(&blk_get_queue(dev)->elevator,
+					       (blkelv_ioctl_arg_t *) arg);
+
 		default:
 			return -EINVAL;
 	}

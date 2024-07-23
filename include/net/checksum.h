@@ -93,7 +93,7 @@ static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 #endif
 
 #ifndef _HAVE_ARCH_COPY_AND_CSUM_FROM_USER
-extern __inline__
+static inline
 unsigned int csum_and_copy_from_user (const char *src, char *dst,
 				      int len, int sum, int *err_ptr)
 {
@@ -106,5 +106,49 @@ unsigned int csum_and_copy_from_user (const char *src, char *dst,
 	return sum;
 }
 #endif
+
+#ifndef HAVE_CSUM_COPY_USER
+static __inline__ unsigned int csum_and_copy_to_user
+(const char *src, char *dst, int len, unsigned int sum, int *err_ptr)
+{
+	sum = csum_partial(src, len, sum);
+
+	if (access_ok(VERIFY_WRITE, dst, len)) {
+		if (copy_to_user(dst, src, len) == 0)
+			return sum;
+	}
+	if (len)
+		*err_ptr = -EFAULT;
+
+	return -1; /* invalid checksum */
+}
+#endif
+
+static inline unsigned int csum_add(unsigned int csum, unsigned int addend)
+{
+	csum += addend;
+	return csum + (csum < addend);
+}
+
+static inline unsigned int csum_sub(unsigned int csum, unsigned int addend)
+{
+	return csum_add(csum, ~addend);
+}
+
+static inline unsigned int
+csum_block_add(unsigned int csum, unsigned int csum2, int offset)
+{
+	if (offset&1)
+		csum2 = ((csum2&0xFF00FF)<<8)+((csum2>>8)&0xFF00FF);
+	return csum_add(csum, csum2);
+}
+
+static inline unsigned int
+csum_block_sub(unsigned int csum, unsigned int csum2, int offset)
+{
+	if (offset&1)
+		csum2 = ((csum2&0xFF00FF)<<8)+((csum2>>8)&0xFF00FF);
+	return csum_sub(csum, csum2);
+}
 
 #endif

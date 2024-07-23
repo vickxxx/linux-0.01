@@ -80,24 +80,6 @@
 #endif
 
 /*
- * Change virtual addresses to bus addresses and vv.
- *
- * NOTE! On the Jensen, the physical address is the same
- * as the bus address, but this is not necessarily true on
- * other alpha hardware.
- */
-__EXTERN_INLINE unsigned long jensen_virt_to_bus(void * address)
-{
-	return virt_to_phys(address);
-}
-
-__EXTERN_INLINE void * jensen_bus_to_virt(unsigned long address)
-{
-	return phys_to_virt(address);
-}
-
-
-/*
  * Handle the "host address register". This needs to be set
  * to the high 7 bits of the EISA address.  This is also needed
  * for EISA IO addresses, which are only 16 bits wide (the
@@ -292,20 +274,20 @@ __EXTERN_INLINE void jensen_writeq(unsigned long b, unsigned long addr)
 	*(vuip) (addr + (4 << 7)) = b >> 32;
 }
 
-/* Find the DENSE memory area for a given bus address.
-   Whee, there is none.  */
-
-__EXTERN_INLINE unsigned long jensen_dense_mem(unsigned long addr)
+__EXTERN_INLINE unsigned long jensen_ioremap(unsigned long addr)
 {
-	return 0;
+	return addr;
+}
+
+__EXTERN_INLINE int jensen_is_ioaddr(unsigned long addr)
+{
+	return (long)addr >= 0;
 }
 
 #undef vuip
 
 #ifdef __WANT_IO_DEF
 
-#define virt_to_bus	jensen_virt_to_bus
-#define bus_to_virt	jensen_bus_to_virt
 #define __inb		jensen_inb
 #define __inw		jensen_inw
 #define __inl		jensen_inl
@@ -320,7 +302,8 @@ __EXTERN_INLINE unsigned long jensen_dense_mem(unsigned long addr)
 #define __readq		jensen_readq
 #define __writel	jensen_writel
 #define __writeq	jensen_writeq
-#define dense_mem	jensen_dense_mem
+#define __ioremap	jensen_ioremap
+#define __is_ioaddr	jensen_is_ioaddr
 
 /*
  * The above have so much overhead that it probably doesn't make

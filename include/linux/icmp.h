@@ -82,10 +82,26 @@ struct icmphdr {
 
 #ifdef __KERNEL__
 
-struct icmp_err {
-  int		errno;
-  unsigned	fatal:1;
+#include <linux/ip.h>
+
+/*
+ *	Build xmit assembly blocks
+ */
+
+struct icmp_bxm
+{
+	void *data_ptr;
+	int data_len;
+	struct icmphdr icmph;
+	unsigned long csum;
+	struct ip_options replyopts;
+	unsigned char  optbuf[40];
 };
+
+struct sk_buff;
+
+extern void icmp_reply(struct icmp_bxm *, struct sk_buff *);
+
 #endif
 
 /*

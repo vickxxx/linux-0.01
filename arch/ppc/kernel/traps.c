@@ -87,48 +87,90 @@ _exception(int signr, struct pt_regs *regs)
 void
 MachineCheckException(struct pt_regs *regs)
 {
-	if ( !user_mode(regs) )
-	{
-#ifdef CONFIG_MBX
-		/* the mbx pci read routines can cause machine checks -- Cort */
-		bad_page_fault(regs,regs->dar);
+#ifdef CONFIG_ALL_PPC
+	unsigned long fixup;
+#endif /* CONFIG_ALL_PPC */
+
+	if (user_mode(regs)) {
+		_exception(SIGSEGV, regs);	
 		return;
-#endif /* CONFIG_MBX */
+	}
+
+#if defined(CONFIG_8xx) && defined(CONFIG_PCI)
+	/* the qspan pci read routines can cause machine checks -- Cort */
+	bad_page_fault(regs, regs->dar);
+	return;
+#endif
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
-		if (debugger_fault_handler) {
-			debugger_fault_handler(regs);
+	if (debugger_fault_handler) {
+		debugger_fault_handler(regs);
+		return;
+	}
+#endif
+
+#ifdef CONFIG_ALL_PPC
+	/*
+	 * I/O accesses can cause machine checks on powermacs.
+	 * Check if the NIP corresponds to the address of a sync
+	 * instruction for which there is an entry in the exception
+	 * table.
+	 */
+	if (regs->msr & (0x80000 | 0x40000)
+	    && (fixup = search_exception_table(regs->nip)) != 0) {
+		/*
+		 * Check that it's a sync instruction.
+		 * As the address is in the exception table
+		 * we should be able to read the instr there.
+		 */
+		if (*(unsigned int *)regs->nip == 0x7c0004ac) {
+			unsigned int lsi = ((unsigned int *)regs->nip)[-1];
+			int rb = (lsi >> 11) & 0x1f;
+			printk(KERN_DEBUG "%s bad port %lx at %lx\n",
+			       (lsi & 0x100)? "OUT to": "IN from",
+			       regs->gpr[rb] - _IO_BASE, regs->nip);
+			regs->nip = fixup;
 			return;
 		}
-#endif
-		printk("Machine check in kernel mode.\n");
-		printk("Caused by (from msr): ");
-		printk("regs %p ",regs);
-		switch( regs->msr & 0x0000F000)
-		{
-		case (1<<12) :
-			printk("Machine check signal - probably due to mm fault\n"
-				"with mmu off\n");
-			break;
-		case (1<<13) :
-			printk("Transfer error ack signal\n");
-			break;
-		case (1<<14) :
-			printk("Data parity signal\n");
-			break;
-		case (1<<15) :
-			printk("Address parity signal\n");
-			break;
-		default:
-			printk("Unknown values in msr\n");
-		}
-		show_regs(regs);
-#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
-		debugger(regs);
-#endif
-		print_backtrace((unsigned long *)regs->gpr[1]);
-		panic("machine check");
 	}
-	_exception(SIGSEGV, regs);	
+#endif /* CONFIG_ALL_PPC */
+	printk("Machine check in kernel mode.\n");
+	printk("Caused by (from SRR1=%lx): ", regs->msr);
+	switch (regs->msr & 0xF0000) {
+	case 0x80000:
+		printk("Machine check signal\n");
+		break;
+	case 0x40000:
+		printk("Transfer error ack signal\n");
+		break;
+	case 0x20000:
+		printk("Data parity error signal\n");
+		break;
+	case 0x10000:
+		printk("Address parity error signal\n");
+		break;
+	default:
+		printk("Unknown values in msr\n");
+	}
+	show_regs(regs);
+#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
+	debugger(regs);
+#endif
+	print_backtrace((unsigned long *)regs->gpr[1]);
+	panic("machine check");
+}
+
+void
+SMIException(struct pt_regs *regs)
+{
+#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
+	{
+		debugger(regs);
+		return;
+	}
+#endif
+	show_regs(regs);
+	print_backtrace((unsigned long *)regs->gpr[1]);
+	panic("System Management Interrupt");
 }
 
 void
@@ -155,9 +197,62 @@ RunModeException(struct pt_regs *regs)
 	_exception(SIGTRAP, regs);	
 }
 
+/* Illegal instruction emulation support.  Originally written to
+ * provide the PVR to user applications using the mfspr rd, PVR.
+ * Return non-zero if we can't emulate, or EFAULT if the associated
+ * memory access caused an access fault.  Return zero on success.
+ *
+ * There are a couple of ways to do this, either "decode" the instruction
+ * or directly match lots of bits.  In this case, matching lots of
+ * bits is faster and easier.
+ *
+ */
+#define INST_MFSPR_PVR		0x7c1f42a6
+#define INST_MFSPR_PVR_MASK	0xfc1fffff
+
+static int
+emulate_instruction(struct pt_regs *regs)
+{
+	uint    instword;
+	uint    rd;
+	uint    retval;
+
+	retval = EFAULT;
+
+	if (!user_mode(regs))
+		return retval;
+
+	if (get_user(instword, (uint *)(regs->nip)))
+		return retval;
+
+	/* Emulate the mfspr rD, PVR.
+	 */
+	if ((instword & INST_MFSPR_PVR_MASK) == INST_MFSPR_PVR) {
+		rd = (instword >> 21) & 0x1f;
+		regs->gpr[rd] = _get_PVR();
+		retval = 0;
+	}
+	if (retval == 0)
+		regs->nip += 4;
+	return(retval);
+}
+
 void
 ProgramCheckException(struct pt_regs *regs)
 {
+#if defined(CONFIG_4xx)
+	unsigned int esr = mfspr(SPRN_ESR);
+
+	if (esr & ESR_PTR) {
+#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
+		if (debugger_bpt(regs))
+			return;
+#endif
+		_exception(SIGTRAP, regs);
+	} else {
+		_exception(SIGILL, regs);
+	}
+#else
 	if (regs->msr & 0x100000) {
 		/* IEEE FP exception */
 		_exception(SIGFPE, regs);
@@ -169,8 +264,16 @@ ProgramCheckException(struct pt_regs *regs)
 #endif
 		_exception(SIGTRAP, regs);
 	} else {
-		_exception(SIGILL, regs);
+		/* Try to emulate it if we should. */
+		int errcode;
+		if ((errcode = emulate_instruction(regs))) {
+			if (errcode == EFAULT)
+				_exception(SIGBUS, regs);
+			else
+				_exception(SIGILL, regs);
+		}
 	}
+#endif
 }
 
 void
@@ -189,8 +292,6 @@ AlignmentException(struct pt_regs *regs)
 {
 	int fixed;
 
-	if (regs->msr & MSR_FP)
-		giveup_fpu(current);
 	fixed = fix_alignment(regs);
 	if (fixed == 1) {
 		regs->nip += 4;	/* skip over emulated instruction */
@@ -198,7 +299,10 @@ AlignmentException(struct pt_regs *regs)
 	}
 	if (fixed == -EFAULT) {
 		/* fixed == -EFAULT means the operand address was bad */
-		bad_page_fault(regs, regs->dar);
+		if (user_mode(regs))
+			force_sig(SIGSEGV, current);
+		else
+			bad_page_fault(regs, regs->dar);
 		return;
 	}
 	_exception(SIGBUS, regs);	
@@ -229,25 +333,29 @@ trace_syscall(struct pt_regs *regs)
 void
 SoftwareEmulation(struct pt_regs *regs)
 {
-	int	errcode;
-	extern int	Soft_emulate_8xx (struct pt_regs *regs);
-	extern void print_8xx_pte(struct mm_struct *, unsigned long);	
+	extern int do_mathemu(struct pt_regs *);
+	int errcode;
 
-	if (user_mode(regs))
-	{
-		if ((errcode = Soft_emulate_8xx(regs))) {
-printk("Software Emulation %s/%d NIP: %lx *NIP: 0x%x code: %x",
-       current->comm,current->pid,
-       regs->nip, *((uint *)regs->nip), errcode);
-/*print_8xx_pte(current->mm, regs->nip);*/
-			if (errcode == EFAULT)
-				_exception(SIGBUS, regs);
-			else
-				_exception(SIGILL, regs);
-		}
-	}
-	else {
+	if (!user_mode(regs)) {
+		show_regs(regs);
+#if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
+		debugger(regs);
+#endif
+		print_backtrace((unsigned long *)regs->gpr[1]);
 		panic("Kernel Mode Software FPU Emulation");
+	}
+
+#ifdef CONFIG_MATH_EMULATION
+	if ((errcode = do_mathemu(regs))) {
+#else
+	if ((errcode = Soft_emulate_8xx(regs))) {
+#endif
+		if (errcode > 0)
+			_exception(SIGFPE, regs);
+		else if (errcode == -EFAULT)
+			_exception(SIGSEGV, regs);
+		else
+			_exception(SIGILL, regs);
 	}
 }
 #endif
@@ -259,6 +367,6 @@ TAUException(struct pt_regs *regs)
 	       regs->nip, regs->msr, regs->trap);
 }
 
-__initfunc(void trap_init(void))
+void __init trap_init(void)
 {
 }

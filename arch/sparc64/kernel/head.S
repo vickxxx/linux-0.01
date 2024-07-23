@@ -1,4 +1,4 @@
-/* $Id: head.S,v 1.61 1999/05/25 16:53:10 jj Exp $
+/* $Id: head.S,v 1.65 2000/05/09 17:40:13 davem Exp $
  * head.S: Initial boot code for the Sparc64 port of Linux.
  *
  * Copyright (C) 1996,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -52,7 +52,7 @@ bootup_user_stack:
 
         .ascii  "HdrS"
         .word   LINUX_VERSION_CODE
-        .half   0x0202          /* HdrS version */
+        .half   0x0203          /* HdrS version */
 root_flags:
         .half   1
 root_dev:
@@ -65,6 +65,7 @@ sparc_ramdisk_size:
         .word   0
         .xword  reboot_command
 	.xword	bootstr_len
+	.word	_end
 
 	/* We must be careful, 32-bit OpenBOOT will get confused if it
 	 * tries to save away a register window to a 64-bit kernel
@@ -91,28 +92,6 @@ sparc64_boot:
          */
 	wrpr    %g0, (PSTATE_PRIV|PSTATE_PEF|PSTATE_IE), %pstate
 	wr	%g0, 0, %fprs
-
-#ifdef __SMP__
-	/* Ugly but necessary... */
-	sethi	%hi(KERNBASE), %g7
-	sethi	%hi(sparc64_cpu_startup), %g5
-	or	%g5, %lo(sparc64_cpu_startup), %g5
-	sub	%g5, %g7, %g5
-	sethi	%hi(sparc64_cpu_startup_end), %g6
-	or	%g6, %lo(sparc64_cpu_startup_end), %g6
-	sub	%g6, %g7, %g6
-	sethi	%hi(smp_trampoline), %g3
-	or	%g3, %lo(smp_trampoline), %g3
-	sub	%g3, %g7, %g3
-1:	ldx	[%g5], %g1
-	stx	%g1, [%g3]
-	membar	#StoreStore
-	flush	%g3
-	add	%g5, 8, %g5
-	cmp	%g5, %g6
-	blu,pt	%xcc, 1b
-	 add	%g3, 8, %g3
-#endif
 
 create_mappings:
 	/* %g5 holds the tlb data */
@@ -283,7 +262,16 @@ sun4u_init:
 
 	/* Setup "Linux Current Register", thanks Sun 8-) */
 	wr	%g0, 0x1, %pcr
-	wr	%g6, 0x0, %pic
+
+	/* Blackbird errata workaround.  See commentary in
+	 * smp.c:smp_percpu_timer_interrupt() for more
+	 * information.
+	 */
+	ba,pt	%xcc, 99f
+	 nop
+	.align	64
+99:	wr	%g6, %g0, %pic
+	rd	%pic, %g0
 #endif
 
 	wr	%g0, ASI_P, %asi
@@ -378,9 +366,9 @@ setup_tba:	/* i0 = is_starfire */
 
 	/* Setup Interrupt globals */
 	wrpr	%o1, (PSTATE_IG|PSTATE_IE), %pstate
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	sethi	%hi(__up_workvec), %g5
-	or	%g5, %lo(__up_workvec), %g1
+	or	%g5, %lo(__up_workvec), %g6
 #else
 	/* By definition of where we are, this is boot_cpu. */
 	sethi	%hi(cpu_data), %g5
@@ -404,7 +392,7 @@ not_starfire:
 set_worklist:
 	sllx	%g1, 7, %g1
 	add	%g5, %g1, %g5
-	add	%g5, 64, %g1
+	add	%g5, 64, %g6
 #endif
 
 	/* Kill PROM timer */

@@ -36,7 +36,7 @@ struct kern_rta
 
 struct fib_nh
 {
-	struct device		*nh_dev;
+	struct net_device		*nh_dev;
 	unsigned		nh_flags;
 	unsigned char		nh_scope;
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
@@ -58,16 +58,18 @@ struct fib_info
 {
 	struct fib_info		*fib_next;
 	struct fib_info		*fib_prev;
-	int			fib_refcnt;
+	int			fib_treeref;
+	atomic_t		fib_clntref;
+	int			fib_dead;
 	unsigned		fib_flags;
 	int			fib_protocol;
 	u32			fib_prefsrc;
 	u32			fib_priority;
-#define FIB_MAX_METRICS RTAX_RTT
-	unsigned		fib_metrics[FIB_MAX_METRICS];
+	unsigned		fib_metrics[RTAX_MAX];
 #define fib_mtu fib_metrics[RTAX_MTU-1]
 #define fib_window fib_metrics[RTAX_WINDOW-1]
 #define fib_rtt fib_metrics[RTAX_RTT-1]
+#define fib_advmss fib_metrics[RTAX_ADVMSS-1]
 	int			fib_nhs;
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 	int			fib_power;
@@ -83,7 +85,6 @@ struct fib_rule;
 
 struct fib_result
 {
-	u32		*prefix;
 	unsigned char	prefixlen;
 	unsigned char	nh_sel;
 	unsigned char	type;
@@ -93,6 +94,7 @@ struct fib_result
 	struct fib_rule	*r;
 #endif
 };
+
 
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 
@@ -138,19 +140,19 @@ struct fib_table
 extern struct fib_table *local_table;
 extern struct fib_table *main_table;
 
-extern __inline__ struct fib_table *fib_get_table(int id)
+static inline struct fib_table *fib_get_table(int id)
 {
 	if (id != RT_TABLE_LOCAL)
 		return main_table;
 	return local_table;
 }
 
-extern __inline__ struct fib_table *fib_new_table(int id)
+static inline struct fib_table *fib_new_table(int id)
 {
 	return fib_get_table(id);
 }
 
-extern __inline__ int fib_lookup(const struct rt_key *key, struct fib_result *res)
+static inline int fib_lookup(const struct rt_key *key, struct fib_result *res)
 {
 	if (local_table->tb_lookup(local_table, key, res) &&
 	    main_table->tb_lookup(main_table, key, res))
@@ -158,7 +160,7 @@ extern __inline__ int fib_lookup(const struct rt_key *key, struct fib_result *re
 	return 0;
 }
 
-extern __inline__ void fib_select_default(const struct rt_key *key, struct fib_result *res)
+static inline void fib_select_default(const struct rt_key *key, struct fib_result *res)
 {
 	if (FIB_RES_GW(*res) && FIB_RES_NH(*res).nh_scope == RT_SCOPE_LINK)
 		main_table->tb_select_default(main_table, key, res);
@@ -171,8 +173,9 @@ extern __inline__ void fib_select_default(const struct rt_key *key, struct fib_r
 extern struct fib_table * fib_tables[RT_TABLE_MAX+1];
 extern int fib_lookup(const struct rt_key *key, struct fib_result *res);
 extern struct fib_table *__fib_new_table(int id);
+extern void fib_rule_put(struct fib_rule *r);
 
-extern __inline__ struct fib_table *fib_get_table(int id)
+static inline struct fib_table *fib_get_table(int id)
 {
 	if (id == 0)
 		id = RT_TABLE_MAIN;
@@ -180,7 +183,7 @@ extern __inline__ struct fib_table *fib_get_table(int id)
 	return fib_tables[id];
 }
 
-extern __inline__ struct fib_table *fib_new_table(int id)
+static inline struct fib_table *fib_new_table(int id)
 {
 	if (id == 0)
 		id = RT_TABLE_MAIN;
@@ -200,11 +203,11 @@ extern int inet_rtm_newroute(struct sk_buff *skb, struct nlmsghdr* nlh, void *ar
 extern int inet_rtm_getroute(struct sk_buff *skb, struct nlmsghdr* nlh, void *arg);
 extern int inet_dump_fib(struct sk_buff *skb, struct netlink_callback *cb);
 extern int fib_validate_source(u32 src, u32 dst, u8 tos, int oif,
-			       struct device *dev, u32 *spec_dst, u32 *itag);
+			       struct net_device *dev, u32 *spec_dst, u32 *itag);
 extern void fib_select_multipath(const struct rt_key *key, struct fib_result *res);
 
 /* Exported by fib_semantics.c */
-extern int 		ip_fib_check_default(u32 gw, struct device *dev);
+extern int 		ip_fib_check_default(u32 gw, struct net_device *dev);
 extern void		fib_release_info(struct fib_info *);
 extern int		fib_semantic_match(int type, struct fib_info *,
 					   const struct rt_key *, struct fib_result*);
@@ -214,8 +217,8 @@ extern int fib_nh_match(struct rtmsg *r, struct nlmsghdr *, struct kern_rta *rta
 extern int fib_dump_info(struct sk_buff *skb, u32 pid, u32 seq, int event,
 			 u8 tb_id, u8 type, u8 scope, void *dst, int dst_len, u8 tos,
 			 struct fib_info *fi);
-extern int fib_sync_down(u32 local, struct device *dev, int force);
-extern int fib_sync_up(struct device *dev);
+extern int fib_sync_down(u32 local, struct net_device *dev, int force);
+extern int fib_sync_up(struct net_device *dev);
 extern int fib_convert_rtentry(int cmd, struct nlmsghdr *nl, struct rtmsg *rtm,
 			       struct kern_rta *rta, struct rtentry *r);
 extern void fib_node_get_info(int type, int dead, struct fib_info *fi, u32 prefix, u32 mask, char *buffer);
@@ -238,7 +241,7 @@ extern u32 fib_rules_policy(u32 saddr, struct fib_result *res, unsigned *flags);
 extern void fib_rules_init(void);
 #endif
 
-extern __inline__ void fib_combine_itag(u32 *itag, struct fib_result *res)
+static inline void fib_combine_itag(u32 *itag, struct fib_result *res)
 {
 #ifdef CONFIG_NET_CLS_ROUTE
 #ifdef CONFIG_IP_MULTIPLE_TABLES
@@ -253,5 +256,24 @@ extern __inline__ void fib_combine_itag(u32 *itag, struct fib_result *res)
 #endif
 #endif
 }
+
+extern void free_fib_info(struct fib_info *fi);
+
+static inline void fib_info_put(struct fib_info *fi)
+{
+	if (atomic_dec_and_test(&fi->fib_clntref))
+		free_fib_info(fi);
+}
+
+static inline void fib_res_put(struct fib_result *res)
+{
+	if (res->fi)
+		fib_info_put(res->fi);
+#ifdef CONFIG_IP_MULTIPLE_TABLES
+	if (res->r)
+		fib_rule_put(res->r);
+#endif
+}
+
 
 #endif  _NET_FIB_H

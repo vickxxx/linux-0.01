@@ -1,25 +1,8 @@
-	Linux kernel release 2.3.xx
+	Linux kernel release 2.4.xx
 
-These are the release notes for Linux version 2.3.  Read them carefully,
+These are the release notes for Linux version 2.4.  Read them carefully,
 as they tell you what this is all about, explain how to install the
 kernel, and what to do if something goes wrong. 
-
-Linux version 2.3 is a DEVELOPMENT kernel, and not intended for general
-public use.  Different releases may have various and sometimes severe
-bugs.  It is *strongly* recommended that you back up the previous kernel
-before installing any new 2.3.xx release.
-
-If you need to use a proven and stable Linux kernel, please use 1.2.13,
-2.0.36 or 2.2.xx.  All features which will be in the 2.3.xx releases will
-be contained in 2.4.xx when the code base has stabilized again.
-
-If you decide to use 2.3, it is recommended that you join the kernel mailing
-list.  To do this, e-mail majordomo@vger.rutgers.edu, and put in the body
-of the message "subscribe linux-kernel" or "subscribe linux-kernel-digest"
-for a daily digest of the mailing list (it is a high-traffic list.)
-
-However, please make sure you don't ask questions which are already answered
-in various files in the Documentation directory.  See DOCUMENTATION below.
 
 WHAT IS LINUX?
 
@@ -59,23 +42,27 @@ DOCUMENTATION:
 
 INSTALLING the kernel:
 
- - If you install the full sources, do a
+ - If you install the full sources, put the kernel tarball in a
+   directory where you have permissions (eg. your home directory) and
+   unpack it:
 
-		cd /usr/src
-		gzip -cd linux-2.3.XX.tar.gz | tar xvf -
+		gzip -cd linux-2.4.XX.tar.gz | tar xvf -
 
-   to get it all put in place. Replace "XX" with the version number of the
-   latest kernel.
+   Replace "XX" with the version number of the latest kernel.
 
- - You can also upgrade between 2.3.xx releases by patching.  Patches are
+   Do NOT use the /usr/src/linux area! This area has a (usually
+   incomplete) set of kernel headers that are used by the library header
+   files.  They should match the library, and not get messed up by
+   whatever the kernel-du-jour happens to be.
+
+ - You can also upgrade between 2.4.xx releases by patching.  Patches are
    distributed in the traditional gzip and the new bzip2 format.  To
-   install by patching, get all the newer patch files and do
+   install by patching, get all the newer patch files, enter the
+   directory in which you unpacked the kernel source and execute:
 
-		cd /usr/src
 		gzip -cd patchXX.gz | patch -p0
 
    or
-		cd /usr/src
 		bzip2 -dc patchXX.bz2 | patch -p0
 
    (repeat xx for all versions bigger than the version of your current
@@ -88,24 +75,22 @@ INSTALLING the kernel:
    process.  It determines the current kernel version and applies any
    patches found.
 
-		cd /usr/src
-		linux/scripts/patch-kernel
+		linux/scripts/patch-kernel linux
 
-   The default directory for the kernel source is /usr/src/linux, but
-   can be specified as the first argument.  Patches are applied from
-   the current directory, but an alternative directory can be specified
-   as the second argument.
+   The first argument in the command above is the location of the
+   kernel source.  Patches are applied from the current directory, but
+   an alternative directory can be specified as the second argument.
 
  - Make sure you have no stale .o files and dependencies lying around:
 
-		cd /usr/src/linux
+		cd linux
 		make mrproper
 
    You should now have the sources correctly installed.
 
 SOFTWARE REQUIREMENTS
 
-   Compiling and running the 2.3.x kernels requires up-to-date
+   Compiling and running the 2.4.xx kernels requires up-to-date
    versions of various software packages.  Consult
    ./Documentation/Changes for the minimum version numbers required
    and how to get updates for these packages.  Beware that using
@@ -159,24 +144,29 @@ CONFIGURING the kernel:
 
 COMPILING the kernel:
 
- - Make sure you have gcc-2.7.2 or newer available.  It seems older gcc
-   versions can have problems compiling newer versions of Linux.  This
-   is mainly because the older compilers can only generate "a.out"-format
-   executables.  As of Linux 2.1.0, the kernel must be compiled as an
-   "ELF" binary.  If you upgrade your compiler, remember to get the new
-   binutils package too (for as/ld/nm and company).
+ - Make sure you have gcc-2.91.66 (egcs-1.1.2) available.  gcc 2.95.2 may
+   also work but is not as safe, and *gcc 2.7.2.3 is no longer supported*.
+   Also remember to upgrade your binutils package (for as/ld/nm and company)
+   if necessary. For more information, refer to ./Documentation/Changes.
 
    Please note that you can still run a.out user programs with this
    kernel.
 
- - Do a "make zImage" to create a compressed kernel image.  If you want
+ - Do a "make bzImage" to create a compressed kernel image.  If you want
    to make a boot disk (without root filesystem or LILO), insert a floppy
-   in your A: drive, and do a "make zdisk".  It is also possible to do
-   "make zlilo" if you have lilo installed to suit the kernel makefiles,
+   in your A: drive, and do a "make bzdisk".  It is also possible to do
+   "make install" if you have lilo installed to suit the kernel makefiles,
    but you may want to check your particular lilo setup first. 
 
- - If your kernel is too large for "make zImage", use "make bzImage"
-   instead.
+   To do the actual install you have to be root, but none of the normal
+   build should require that. Don't take the name of root in vain.
+
+ - In the unlikely event that your system cannot boot bzImage kernels you
+   can still compile your kernel as zImage. However, since zImage support
+   will be removed at some point in the future in favor of bzImage we
+   encourage people having problems with booting bzImage kernels to report
+   these, with detailed hardware configuration information, to the
+   linux-kernel mailing list and to H. Peter Anvin <hpa+linux@zytor.com>.
 
  - If you configured any of the parts of the kernel as `modules', you
    will have to do "make modules" followed by "make modules_install".
@@ -192,23 +182,23 @@ COMPILING the kernel:
    do a "make modules_install".
 
  - In order to boot your new kernel, you'll need to copy the kernel
-   image (found in /usr/src/linux/arch/i386/boot/zImage after compilation)
+   image (found in .../linux/arch/i386/boot/bzImage after compilation)
    to the place where your regular bootable kernel is found. 
 
-   For some, this is on a floppy disk, in which case you can "cp
-   /usr/src/linux/arch/i386/boot/zImage /dev/fd0" to make a bootable
-   floppy.  Please note that you can not boot a kernel by
-   directly dumping it to a 720k double-density 3.5" floppy.  In this
-   case, it is highly recommended that you install LILO on your
-   double-density boot floppy or switch to high-density floppies.
+   For some, this is on a floppy disk, in which case you can copy the
+   kernel bzImage file to /dev/fd0 to make a bootable floppy. Please note
+   that you can not boot a kernel by directly dumping it to a 720k
+   double-density 3.5" floppy.  In this case, it is highly recommended
+   that you install LILO on your double-density boot floppy or switch to
+   high-density floppies.
 
    If you boot Linux from the hard drive, chances are you use LILO which
    uses the kernel image as specified in the file /etc/lilo.conf.  The
-   kernel image file is usually /vmlinuz, or /zImage, or /etc/zImage. 
-   To use the new kernel, save a copy of the old image and copy the new
-   image over the old one.  Then, you MUST RERUN LILO to update the
-   loading map!! If you don't, you won't be able to boot the new kernel
-   image. 
+   kernel image file is usually /vmlinuz, /boot/vmlinuz, /bzImage or
+   /boot/bzImage.  To use the new kernel, save a copy of the old image
+   and copy the new image over the old one.  Then, you MUST RERUN LILO
+   to update the loading map!! If you don't, you won't be able to boot
+   the new kernel image.
 
    Reinstalling LILO is usually a matter of running /sbin/lilo. 
    You may wish to edit /etc/lilo.conf to specify an entry for your
@@ -260,9 +250,10 @@ IF SOMETHING GOES WRONG:
    the above example it's due to a bad kernel pointer). More information
    on making sense of the dump is in Documentation/oops-tracing.txt
 
- - You can use the "ksymoops" program to make sense of the dump.  Find
-   the C++ sources under the scripts/ directory to avoid having to do
-   the dump lookup by hand:
+ - You can use the "ksymoops" program to make sense of the dump.  This
+   utility can be downloaded from
+   ftp://ftp.<country>.kernel.org/pub/linux/utils/kernel/ksymoops.
+   Alternately you can do the dump lookup by hand:
 
  - In debugging dumps like the above, it helps enormously if you can
    look up what the EIP value means.  The hex value as such doesn't help

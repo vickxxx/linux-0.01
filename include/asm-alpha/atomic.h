@@ -9,11 +9,13 @@
  * than regular operations.
  */
 
-#ifdef __SMP__
+
+/*
+ * Counter is volatile to make sure gcc doesn't try to be clever
+ * and move things around on us. We need to use _exactly_ the address
+ * the user gave us, not some alias that contains the same information.
+ */
 typedef struct { volatile int counter; } atomic_t;
-#else
-typedef struct { int counter; } atomic_t;
-#endif
 
 #define ATOMIC_INIT(i)	( (atomic_t) { (i) } )
 
@@ -21,19 +23,12 @@ typedef struct { int counter; } atomic_t;
 #define atomic_set(v,i)		((v)->counter = (i))
 
 /*
- * Make sure gcc doesn't try to be clever and move things around
- * on us. We need to use _exactly_ the address the user gave us,
- * not some alias that contains the same information.
- */
-#define __atomic_fool_gcc(x) (*(struct { int a[100]; } *)x)
-
-/*
  * To get proper branch prediction for the main line, we must branch
  * forward to code at the end of this object's .text section, then
  * branch back to restart the operation.
  */
 
-extern __inline__ void atomic_add(int i, atomic_t * v)
+static __inline__ void atomic_add(int i, atomic_t * v)
 {
 	unsigned long temp;
 	__asm__ __volatile__(
@@ -41,14 +36,14 @@ extern __inline__ void atomic_add(int i, atomic_t * v)
 	"	addl %0,%2,%0\n"
 	"	stl_c %0,%1\n"
 	"	beq %0,2f\n"
-	".section .text2,\"ax\"\n"
+	".subsection 2\n"
 	"2:	br 1b\n"
 	".previous"
-	:"=&r" (temp), "=m" (__atomic_fool_gcc(v))
-	:"Ir" (i), "m" (__atomic_fool_gcc(v)));
+	:"=&r" (temp), "=m" (v->counter)
+	:"Ir" (i), "m" (v->counter));
 }
 
-extern __inline__ void atomic_sub(int i, atomic_t * v)
+static __inline__ void atomic_sub(int i, atomic_t * v)
 {
 	unsigned long temp;
 	__asm__ __volatile__(
@@ -56,49 +51,49 @@ extern __inline__ void atomic_sub(int i, atomic_t * v)
 	"	subl %0,%2,%0\n"
 	"	stl_c %0,%1\n"
 	"	beq %0,2f\n"
-	".section .text2,\"ax\"\n"
+	".subsection 2\n"
 	"2:	br 1b\n"
 	".previous"
-	:"=&r" (temp), "=m" (__atomic_fool_gcc(v))
-	:"Ir" (i), "m" (__atomic_fool_gcc(v)));
+	:"=&r" (temp), "=m" (v->counter)
+	:"Ir" (i), "m" (v->counter));
 }
 
 /*
  * Same as above, but return the result value
  */
-extern __inline__ long atomic_add_return(int i, atomic_t * v)
+static __inline__ long atomic_add_return(int i, atomic_t * v)
 {
 	long temp, result;
 	__asm__ __volatile__(
 	"1:	ldl_l %0,%1\n"
+	"	addl %0,%3,%2\n"
 	"	addl %0,%3,%0\n"
-	"	mov %0,%2\n"
 	"	stl_c %0,%1\n"
 	"	beq %0,2f\n"
 	"	mb\n"
-	".section .text2,\"ax\"\n"
+	".subsection 2\n"
 	"2:	br 1b\n"
 	".previous"
-	:"=&r" (temp), "=m" (__atomic_fool_gcc(v)), "=&r" (result)
-	:"Ir" (i), "m" (__atomic_fool_gcc(v)));
+	:"=&r" (temp), "=m" (v->counter), "=&r" (result)
+	:"Ir" (i), "m" (v->counter) : "memory");
 	return result;
 }
 
-extern __inline__ long atomic_sub_return(int i, atomic_t * v)
+static __inline__ long atomic_sub_return(int i, atomic_t * v)
 {
 	long temp, result;
 	__asm__ __volatile__(
 	"1:	ldl_l %0,%1\n"
+	"	subl %0,%3,%2\n"
 	"	subl %0,%3,%0\n"
-	"	mov %0,%2\n"
 	"	stl_c %0,%1\n"
 	"	beq %0,2f\n"
 	"	mb\n"
-	".section .text2,\"ax\"\n"
+	".subsection 2\n"
 	"2:	br 1b\n"
 	".previous"
-	:"=&r" (temp), "=m" (__atomic_fool_gcc(v)), "=&r" (result)
-	:"Ir" (i), "m" (__atomic_fool_gcc(v)));
+	:"=&r" (temp), "=m" (v->counter), "=&r" (result)
+	:"Ir" (i), "m" (v->counter) : "memory");
 	return result;
 }
 

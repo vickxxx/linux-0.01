@@ -1,11 +1,16 @@
 /*
- * linux/arch/arm/drivers/block/keyb_ps2.c
+ *  linux/drivers/acorn/char/keyb_ps2.c
  *
- * Keyboard driver for RPC ARM Linux.
+ *  Copyright (C) 2000 Russell King
  *
- * Note!!! This driver talks directly to the keyboard.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Keyboard driver for RiscPC ARM Linux.
+ *
+ *  Note!!! This driver talks directly to the keyboard.
  */
-
 #include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
@@ -25,13 +30,12 @@
 #include <asm/irq.h>
 #include <asm/hardware.h>
 #include <asm/io.h>
-#include <asm/iomd.h>
+#include <asm/hardware/iomd.h>
 #include <asm/system.h>
 
+extern struct tasklet_struct keyboard_tasklet;
 extern void kbd_reset_kdown(void);
 int kbd_read_mask;
-
-#define IRQ_KEYBOARDRX 15
 
 #define VERSION 100
 
@@ -318,27 +322,24 @@ static void ps2kbd_rx(int irq, void *dev_id, struct pt_regs *regs)
 
 	while (inb(IOMD_KCTRL) & (1 << 5))
 		handle_rawcode(inb(IOMD_KARTRX));
-	mark_bh(KEYBOARD_BH);
+	tasklet_schedule(&keyboard_tasklet);
 }
 
 static void ps2kbd_tx(int irq, void *dev_id, struct pt_regs *regs)
 {
 }
 
-__initfunc(int ps2kbd_init_hw(void))
+int __init ps2kbd_init_hw(void)
 {
-	unsigned long flags;
+	/* Reset the keyboard state machine. */
+	outb(0, IOMD_KCTRL);
+	outb(8, IOMD_KCTRL);
 
-	save_flags_cli (flags);
+	(void)IOMD_KARTRX;
 	if (request_irq (IRQ_KEYBOARDRX, ps2kbd_rx, 0, "keyboard", NULL) != 0)
 		panic("Could not allocate keyboard receive IRQ!");
 	if (request_irq (IRQ_KEYBOARDTX, ps2kbd_tx, 0, "keyboard", NULL) != 0)
 		panic("Could not allocate keyboard transmit IRQ!");
-	disable_irq (IRQ_KEYBOARDTX);
-	(void)IOMD_KARTRX;
-	restore_flags (flags);
 
-	printk (KERN_INFO "PS/2 keyboard driver v%d.%02d\n", VERSION/100, VERSION%100);
 	return 0;
 }
-

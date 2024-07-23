@@ -35,7 +35,6 @@
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -50,7 +49,7 @@
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
-#include <linux/firewall.h>
+#include <linux/netfilter.h>
 #include <net/sock.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -58,7 +57,7 @@
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 
-ax25_cb *ax25_send_frame(struct sk_buff *skb, int paclen, ax25_address *src, ax25_address *dest, ax25_digi *digi, struct device *dev)
+ax25_cb *ax25_send_frame(struct sk_buff *skb, int paclen, ax25_address *src, ax25_address *dest, ax25_digi *digi, struct net_device *dev)
 {
 	ax25_dev *ax25_dev;
 	ax25_cb *ax25;
@@ -98,7 +97,7 @@ ax25_cb *ax25_send_frame(struct sk_buff *skb, int paclen, ax25_address *src, ax2
 			ax25_free_cb(ax25);
 			return NULL;
 		}
-		*ax25->digipeat = *digi;
+		memcpy(ax25->digipeat, digi, sizeof(ax25_digi));
 	}
 
 	switch (ax25->ax25_dev->values[AX25_VALUES_PROTOCOL]) {
@@ -174,7 +173,7 @@ void ax25_output(ax25_cb *ax25, int paclen, struct sk_buff *skb)
 
 			if (ka9qfrag == 1) {
 				skb_reserve(skbn, frontlen + 2);
-
+				skbn->nh.raw = skbn->data + (skb->nh.raw - skb->data);
 				memcpy(skb_put(skbn, len), skb->data, len);
 				p = skb_push(skbn, 2);
 
@@ -187,6 +186,7 @@ void ax25_output(ax25_cb *ax25, int paclen, struct sk_buff *skb)
 				}
 			} else {
 				skb_reserve(skbn, frontlen + 1);
+				skbn->nh.raw = skbn->data + (skb->nh.raw - skb->data);
 				memcpy(skb_put(skbn, len), skb->data, len);
 				p = skb_push(skbn, 1);
 				*p = AX25_P_TEXT;
@@ -379,11 +379,6 @@ void ax25_queue_xmit(struct sk_buff *skb)
 {
 	unsigned char *ptr;
 
-	if (call_out_firewall(PF_AX25, skb->dev, skb->data, NULL, &skb) != FW_ACCEPT) {
-		kfree_skb(skb);
-		return;
-	}
-
 	skb->protocol = htons(ETH_P_AX25);
 	skb->dev      = ax25_fwd_dev(skb->dev);
 
@@ -412,4 +407,3 @@ int ax25_check_iframes_acked(ax25_cb *ax25, unsigned short nr)
 	return 0;
 }
 
-#endif

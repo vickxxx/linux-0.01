@@ -38,6 +38,7 @@
 #include <asm/irq.h>
 
 #ifdef CONFIG_ATARI
+#include <linux/interrupt.h>
 #include <asm/atari_stdma.h>
 #endif
 
@@ -49,28 +50,21 @@
 #define MAX_HWIFS	4	/* same as the other archs */
 #endif
 
-int q40ide_default_irq(q40ide_ioreg_t);
 
 static __inline__ int ide_default_irq(ide_ioreg_t base)
 {
-        if (MACH_IS_Q40)
-	      return q40ide_default_irq((q40ide_ioreg_t) base);
-	else return 0;
+	  return 0;
 }
-
-int q40ide_default_io_base(int);
 
 static __inline__ ide_ioreg_t ide_default_io_base(int index)
 {
-	if (MACH_IS_Q40)
-		return q40ide_default_io_base(index);
-	else return 0;
+          return 0;
 }
 
 /*
  *  Can we do this in a generic manner??
  */
-void q40_ide_init_hwif_ports (hw_regs_t *hw, q40ide_ioreg_t data_port, q40ide_ioreg_t ctrl_port, int *irq);
+
 
 /*
  * Set up a hw structure for a specified data port, control port and IRQ.
@@ -78,11 +72,8 @@ void q40_ide_init_hwif_ports (hw_regs_t *hw, q40ide_ioreg_t data_port, q40ide_io
  */
 static __inline__ void ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl_port, int *irq)
 {
-#ifdef CONFIG_Q40
-	if (MACH_IS_Q40)
-		return q40_ide_init_hwif_ports(hw, (q40ide_ioreg_t) data_port, (q40ide_ioreg_t) ctrl_port, irq);
-#endif
-	printk("ide_init_hwif_ports: must not be called\n");
+	if (data_port || ctrl_port)
+		printk("ide_init_hwif_ports: must not be called\n");
 }
 
 /*
@@ -104,10 +95,6 @@ typedef union {
 	} b;
 	} select_t;
 
-#ifdef CONFIG_MAC	/* MSch: Hack; wrapper for ide_intr */
-void mac_ide_intr(int irq, void *dev_id, struct pt_regs *regs);
-#endif
-
 static __inline__ int ide_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
 			unsigned long flags, const char *device, void *dev_id)
 {
@@ -121,11 +108,7 @@ static __inline__ int ide_request_irq(unsigned int irq, void (*handler)(int, voi
 #endif /* CONFIG_Q40*/
 #ifdef CONFIG_MAC
 	if (MACH_IS_MAC)
-#if 0	/* MSch Hack: maybe later we'll call ide_intr without a wrapper */
-	return nubus_request_irq(12, dev_id, handler);
-#else
-	return nubus_request_irq(12, dev_id, mac_ide_intr);
-#endif
+		return request_irq(irq, handler, 0, device, dev_id);
 #endif /* CONFIG_MAC */
 	return 0;
 }
@@ -142,7 +125,7 @@ static __inline__ void ide_free_irq(unsigned int irq, void *dev_id)
 #endif /* CONFIG_Q40*/
 #ifdef CONFIG_MAC
 	if (MACH_IS_MAC)
-		nubus_free_irq(12);
+		free_irq(irq, dev_id);
 #endif /* CONFIG_MAC */
 }
 

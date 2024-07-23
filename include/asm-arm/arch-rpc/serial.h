@@ -1,10 +1,14 @@
 /*
- * linux/include/asm-arm/arch-rpc/serial.h
+ *  linux/include/asm-arm/arch-rpc/serial.h
  *
- * Copyright (c) 1996 Russell King.
+ *  Copyright (C) 1996 Russell King.
  *
- * Changelog:
- *  15-10-1996	RMK	Created
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Changelog:
+ *   15-10-1996	RMK	Created
  */
 #ifndef __ASM_ARCH_SERIAL_H
 #define __ASM_ARCH_SERIAL_H
@@ -20,8 +24,10 @@
 
 #define STD_COM_FLAGS (ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST)
 
+#define RS_TABLE_SIZE	16
+
      /* UART CLK        PORT  IRQ     FLAGS        */
-#define SERIAL_PORT_DFNS \
+#define STD_SERIAL_PORT_DEFNS \
 	{ 0, BASE_BAUD, 0x3F8, 10, STD_COM_FLAGS },	/* ttyS0 */	\
 	{ 0, BASE_BAUD, 0x2F8, 10, STD_COM_FLAGS },	/* ttyS1 */	\
 	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS2 */	\
@@ -35,6 +41,8 @@
 	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS10 */	\
 	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS11 */	\
 	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS12 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS13 */
+	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS }	/* ttyS13 */
+
+#define EXTRA_SERIAL_PORT_DEFNS
 
 #endif

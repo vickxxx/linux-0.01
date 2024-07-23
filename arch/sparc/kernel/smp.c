@@ -8,12 +8,14 @@
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/tasks.h>
+#include <linux/threads.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
 #include <linux/init.h>
+#include <linux/spinlock.h>
+#include <linux/mm.h>
 
 #include <asm/ptrace.h>
 #include <asm/atomic.h>
@@ -21,10 +23,9 @@
 #include <asm/delay.h>
 #include <asm/irq.h>
 #include <asm/page.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
-#include <asm/atops.h>
-#include <asm/spinlock.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
 
@@ -50,7 +51,7 @@ unsigned long cpu_offset[NR_CPUS];
 unsigned char boot_cpu_id = 0;
 unsigned char boot_cpu_id4 = 0; /* boot_cpu_id << 2 */
 int smp_activated = 0;
-volatile int cpu_number_map[NR_CPUS];
+volatile int __cpu_number_map[NR_CPUS];
 volatile int __cpu_logical_map[NR_CPUS];
 cycles_t cacheflush_time = 0; /* XXX */
 
@@ -74,7 +75,7 @@ volatile int smp_process_available=0;
 volatile int smp_commenced = 0;
 
 /* Not supported on Sparc yet. */
-__initfunc(void smp_setup(char *str, int *ints))
+void __init smp_setup(char *str, int *ints)
 {
 }
 
@@ -83,12 +84,12 @@ __initfunc(void smp_setup(char *str, int *ints))
  *	a given CPU
  */
 
-__initfunc(void smp_store_cpu_info(int id))
+void __init smp_store_cpu_info(int id)
 {
-	cpu_data[id].udelay_val = loops_per_sec; /* this is it on sparc. */
+	cpu_data[id].udelay_val = loops_per_jiffy; /* this is it on sparc. */
 }
 
-__initfunc(void smp_commence(void))
+void __init smp_commence(void)
 {
 	/*
 	 *	Lets the callin's below out of their loop.
@@ -103,17 +104,17 @@ __initfunc(void smp_commence(void))
 /* Only broken Intel needs this, thus it should not even be referenced
  * globally...
  */
-__initfunc(void initialize_secondary(void))
+void __init initialize_secondary(void)
 {
 }
 
-extern int cpu_idle(void *unused);
+extern int cpu_idle(void);
 
 /* Activate a secondary processor. */
 int start_secondary(void *unused)
 {
 	prom_printf("Start secondary called. Should not happen\n");
-	return cpu_idle(NULL);
+	return cpu_idle();
 }
 
 void cpu_panic(void)
@@ -129,7 +130,7 @@ void cpu_panic(void)
 extern struct prom_cpuinfo linux_cpus[NR_CPUS];
 struct linux_prom_registers smp_penguin_ctable __initdata = { 0 };
 
-__initfunc(void smp_boot_cpus(void))
+void __init smp_boot_cpus(void)
 {
 	extern void smp4m_boot_cpus(void);
 	extern void smp4d_boot_cpus(void);
@@ -141,31 +142,35 @@ __initfunc(void smp_boot_cpus(void))
 }
 
 void smp_flush_cache_all(void)
-{ xc0((smpfunc_t) BTFIXUP_CALL(local_flush_cache_all)); }
+{
+	xc0((smpfunc_t) BTFIXUP_CALL(local_flush_cache_all));
+	local_flush_cache_all();
+}
 
 void smp_flush_tlb_all(void)
-{ xc0((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_all)); }
+{
+	xc0((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_all));
+	local_flush_tlb_all();
+}
 
 void smp_flush_cache_mm(struct mm_struct *mm)
-{ 
+{
 	if(mm->context != NO_CONTEXT) {
-		if(mm->cpu_vm_mask == (1 << smp_processor_id()))
-			local_flush_cache_mm(mm);
-		else
+		if(mm->cpu_vm_mask != (1 << smp_processor_id()))
 			xc1((smpfunc_t) BTFIXUP_CALL(local_flush_cache_mm), (unsigned long) mm);
+		local_flush_cache_mm(mm);
 	}
 }
 
 void smp_flush_tlb_mm(struct mm_struct *mm)
 {
 	if(mm->context != NO_CONTEXT) {
-		if(mm->cpu_vm_mask == (1 << smp_processor_id())) {
-			local_flush_tlb_mm(mm);
-		} else {
+		if(mm->cpu_vm_mask != (1 << smp_processor_id())) {
 			xc1((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_mm), (unsigned long) mm);
-			if(atomic_read(&mm->count) == 1 && current->mm == mm)
+			if(atomic_read(&mm->mm_users) == 1 && current->active_mm == mm)
 				mm->cpu_vm_mask = (1 << smp_processor_id());
 		}
+		local_flush_tlb_mm(mm);
 	}
 }
 
@@ -173,11 +178,9 @@ void smp_flush_cache_range(struct mm_struct *mm, unsigned long start,
 			   unsigned long end)
 {
 	if(mm->context != NO_CONTEXT) {
-		if(mm->cpu_vm_mask == (1 << smp_processor_id()))
-			local_flush_cache_range(mm, start, end);
-		else
-			xc3((smpfunc_t) BTFIXUP_CALL(local_flush_cache_range), (unsigned long) mm,
-			    start, end);
+		if(mm->cpu_vm_mask != (1 << smp_processor_id()))
+			xc3((smpfunc_t) BTFIXUP_CALL(local_flush_cache_range), (unsigned long) mm, start, end);
+		local_flush_cache_range(mm, start, end);
 	}
 }
 
@@ -185,11 +188,9 @@ void smp_flush_tlb_range(struct mm_struct *mm, unsigned long start,
 			 unsigned long end)
 {
 	if(mm->context != NO_CONTEXT) {
-		if(mm->cpu_vm_mask == (1 << smp_processor_id()))
-			local_flush_tlb_range(mm, start, end);
-		else
-			xc3((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_range), (unsigned long) mm,
-			    start, end);
+		if(mm->cpu_vm_mask != (1 << smp_processor_id()))
+			xc3((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_range), (unsigned long) mm, start, end);
+		local_flush_tlb_range(mm, start, end);
 	}
 }
 
@@ -198,11 +199,9 @@ void smp_flush_cache_page(struct vm_area_struct *vma, unsigned long page)
 	struct mm_struct *mm = vma->vm_mm;
 
 	if(mm->context != NO_CONTEXT) {
-		if(mm->cpu_vm_mask == (1 << smp_processor_id()))
-			local_flush_cache_page(vma, page);
-		else
-			xc2((smpfunc_t) BTFIXUP_CALL(local_flush_cache_page),
-			    (unsigned long) vma, page);
+		if(mm->cpu_vm_mask != (1 << smp_processor_id()))
+			xc2((smpfunc_t) BTFIXUP_CALL(local_flush_cache_page), (unsigned long) vma, page);
+		local_flush_cache_page(vma, page);
 	}
 }
 
@@ -211,10 +210,9 @@ void smp_flush_tlb_page(struct vm_area_struct *vma, unsigned long page)
 	struct mm_struct *mm = vma->vm_mm;
 
 	if(mm->context != NO_CONTEXT) {
-		if(mm->cpu_vm_mask == (1 << smp_processor_id()))
-			local_flush_tlb_page(vma, page);
-		else
+		if(mm->cpu_vm_mask != (1 << smp_processor_id()))
 			xc2((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_page), (unsigned long) vma, page);
+		local_flush_tlb_page(vma, page);
 	}
 }
 
@@ -228,17 +226,15 @@ void smp_flush_page_to_ram(unsigned long page)
 	 */
 #if 1
 	xc1((smpfunc_t) BTFIXUP_CALL(local_flush_page_to_ram), page);
-#else
-	local_flush_page_to_ram(page);
 #endif
+	local_flush_page_to_ram(page);
 }
 
 void smp_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr)
 {
-	if(mm->cpu_vm_mask == (1 << smp_processor_id()))
-		local_flush_sig_insns(mm, insn_addr);
-	else
+	if(mm->cpu_vm_mask != (1 << smp_processor_id()))
 		xc2((smpfunc_t) BTFIXUP_CALL(local_flush_sig_insns), (unsigned long) mm, insn_addr);
+	local_flush_sig_insns(mm, insn_addr);
 }
 
 /* Reschedule call back. */
@@ -288,8 +284,8 @@ int smp_bogo_info(char *buf)
 		if (cpu_present_map & (1 << i))
 			len += sprintf(buf + len, "Cpu%dBogo\t: %lu.%02lu\n", 
 					i,
-					cpu_data[i].udelay_val/500000,
-					(cpu_data[i].udelay_val/5000)%100);
+					cpu_data[i].udelay_val/(500000/HZ),
+					(cpu_data[i].udelay_val/(5000/HZ))%100);
 	return len;
 }
 

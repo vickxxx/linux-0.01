@@ -1,24 +1,13 @@
 /*
    The compile-time configurable defaults for the Linux SCSI tape driver.
 
-   Copyright 1995 Kai Makisara.
+   Copyright 1995-2000 Kai Makisara.
 
-   Last modified: Wed Sep  2 21:24:07 1998 by root@home
+   Last modified: Sat Apr 22 14:47:02 2000 by makisara@kai.makisara.local
 */
 
 #ifndef _ST_OPTIONS_H
 #define _ST_OPTIONS_H
-
-/* The driver allocates the tape buffers when needed if ST_RUNTIME_BUFFERS
-   is nonzero. Otherwise a number of buffers are allocated at initialization.
-   The drawback of runtime allocation is that allocation may fail. In any
-   case the driver tries to allocate a new tape buffer when none is free. */
-#define ST_RUNTIME_BUFFERS 0
-
-/* The minimum limit for the number of SCSI tape devices is determined by
-   ST_MAX_TAPES. If the number of tape devices and the "slack" defined by
-   ST_EXTRA_DEVS exceeds ST_MAX_TAPES, the large number is used. */
-#define ST_MAX_TAPES 4
 
 /* The driver does not wait for some operations to finish before returning
    to the user program if ST_NOWAIT is non-zero. This helps if the SCSI
@@ -41,7 +30,7 @@
    SENSE. */
 #define ST_DEFAULT_BLOCK 0
 
-/* The tape driver buffer size in kilobytes. */
+/* The tape driver buffer size in kilobytes. Must be non-zero. */
 #define ST_BUFFER_BLOCKS 32
 
 /* The number of kilobytes of data in the buffer that triggers an
@@ -49,10 +38,11 @@
    below. */
 #define ST_WRITE_THRESHOLD_BLOCKS 30
 
-/* The maximum number of tape buffers the driver allocates. The number
-   is also constrained by the number of drives detected. Determines the
-   maximum number of concurrently active tape drives. */
-#define ST_MAX_BUFFERS (2 + ST_EXTRA_DEVS)
+/* The maximum number of tape buffers the driver tries to allocate at 
+   driver initialisation. The number is also constrained by the number
+   of drives detected. If more buffers are needed, they are allocated
+   at run time and freed after use. */
+#define ST_MAX_BUFFERS 4
 
 /* Maximum number of scatter/gather segments */
 #define ST_MAX_SG      16

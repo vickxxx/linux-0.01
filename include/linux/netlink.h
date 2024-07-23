@@ -8,6 +8,7 @@
 #define NETLINK_ARPD		8
 #define NETLINK_ROUTE6		11	/* af_inet6 route comm channel */
 #define NETLINK_IP6_FW		13
+#define NETLINK_DNRTMSG		14	/* DECnet routing messages */
 #define NETLINK_TAPBASE		16	/* 16 to 31 are ethertap */
 
 #define MAX_LINKS 32		
@@ -150,8 +151,6 @@ extern int netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 			      int (*dump)(struct sk_buff *skb, struct netlink_callback*),
 			      int (*done)(struct netlink_callback*));
 
-
-extern void netlink_proto_init(struct net_proto *pro);
 
 #endif /* __KERNEL__ */
 

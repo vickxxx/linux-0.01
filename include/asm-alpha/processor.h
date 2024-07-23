@@ -61,15 +61,6 @@ struct thread_struct {
 	 */
 	unsigned long flags;
 
-	/* The full version of the ASN including serial number.
-
-	   Two threads running on two different processors must of necessity
-	   have different serial numbers.  Having this duplicated from
-	   mm->context allows them to be slightly out of sync preventing 
-	   the asn from incrementing each and every time the two threads
-	   are scheduled.  */
-	unsigned long mm_context;
-
 	/* Perform syscall argument validation (get/set_fs). */
 	mm_segment_t fs;
 
@@ -82,13 +73,15 @@ struct thread_struct {
 #define INIT_MMAP { &init_mm, PAGE_OFFSET,  PAGE_OFFSET+0x10000000, \
 	NULL, PAGE_SHARED, VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
 
-#define INIT_TSS  { \
+#define INIT_THREAD  { \
 	0, 0, 0, \
 	0, 0, 0, \
 	0, 0, 0, \
-	0, 0, \
+	0, \
 	KERNEL_DS \
 }
+
+#define THREAD_SIZE (2*PAGE_SIZE)
 
 #include <asm/ptrace.h>
 
@@ -118,22 +111,40 @@ extern inline unsigned long thread_saved_pc(struct thread_struct *t)
 	return 0;
 }
 
-/*
- * Do necessary setup to start up a newly executed thread.
- */
+/* Do necessary setup to start up a newly executed thread.  */
 extern void start_thread(struct pt_regs *, unsigned long, unsigned long);
+
+struct task_struct;
 
 /* Free all resources held by a thread. */
 extern void release_thread(struct task_struct *);
 
-#define copy_segments(nr, tsk, mm)	do { } while (0)
+/* Create a kernel thread without removing it from tasklists.  */
+extern long kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
+
+#define copy_segments(tsk, mm)		do { } while (0)
 #define release_segments(mm)		do { } while (0)
-#define forget_segments()		do { } while (0)
+
+unsigned long get_wchan(struct task_struct *p);
+
+/* See arch/alpha/kernel/ptrace.c for details.  */
+#define PT_REG(reg)	(PAGE_SIZE*2 - sizeof(struct pt_regs)		\
+			 + (long)&((struct pt_regs *)0)->reg)
+
+#define SW_REG(reg)	(PAGE_SIZE*2 - sizeof(struct pt_regs)		\
+			 - sizeof(struct switch_stack)			\
+			 + (long)&((struct switch_stack *)0)->reg)
+
+#define KSTK_EIP(tsk) \
+    (*(unsigned long *)(PT_REG(pc) + (unsigned long)(tsk)))
+
+#define KSTK_ESP(tsk)	((tsk) == current ? rdusp() : (tsk)->thread.usp)
 
 /* NOTE: The task struct and the stack go together!  */
 #define alloc_task_struct() \
         ((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
 #define free_task_struct(p)     free_pages((unsigned long)(p),1)
+#define get_task_struct(tsk)      atomic_inc(&virt_to_page(tsk)->count)
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)

@@ -1,4 +1,4 @@
-/* $Id: processor.h,v 1.71 1999/05/27 04:52:43 davem Exp $
+/* $Id: processor.h,v 1.80 2000/12/31 10:05:43 davem Exp $
  * include/asm-sparc/processor.h
  *
  * Copyright (C) 1994 David S. Miller (davem@caip.rutgers.edu)
@@ -22,6 +22,7 @@
 #include <asm/segment.h>
 #include <asm/btfixup.h>
 #include <asm/page.h>
+#include <asm/atomic.h>
 
 /*
  * Bus types
@@ -57,10 +58,6 @@ struct thread_struct {
 	unsigned long uwinmask __attribute__ ((aligned (8)));
 	struct pt_regs *kregs;
 
-	/* For signal handling */
-	unsigned long sig_address __attribute__ ((aligned (8)));
-	unsigned long sig_desc;
-
 	/* Context switch saved kernel state. */
 	unsigned long ksp __attribute__ ((aligned (8)));
 	unsigned long kpc;
@@ -88,17 +85,19 @@ struct thread_struct {
 	mm_segment_t current_ds;
 	struct exec core_exec;     /* just what it says. */
 	int new_signal;
+	atomic_t refcount;	/* used for sun4c only */
 };
 
 #define SPARC_FLAG_KTHREAD      0x1    /* task is a kernel thread */
 #define SPARC_FLAG_UNALIGNED    0x2    /* is allowed to do unaligned accesses */
+#define SPARC_FLAG_MMAPSHARED	0x4    /* task wants a shared mmap */
 
 #define INIT_MMAP { &init_mm, (0), (0), \
 		    NULL, __pgprot(0x0) , VM_READ | VM_WRITE | VM_EXEC, 1, NULL, NULL }
 
-#define INIT_TSS  { \
-/* uwinmask, kregs, sig_address, sig_desc, ksp, kpc, kpsr, kwim */ \
-   0,        0,     0,           0,        0,   0,   0,    0, \
+#define INIT_THREAD  { \
+/* uwinmask, kregs, ksp, kpc, kpsr, kwim */ \
+   0,        0,     0,   0,   0,    0, \
 /* fork_kpsr, fork_kwim */ \
    0,         0, \
 /* reg_window */  \
@@ -154,23 +153,54 @@ extern __inline__ void start_thread(struct pt_regs * regs, unsigned long pc,
 extern pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 
 
-#define copy_segments(__nr, __tsk, __mm)	\
-	if((__tsk) == current &&		\
-	   (__mm) != NULL)			\
-		flush_user_windows()
+#define copy_segments(tsk, mm)		do { } while (0)
 #define release_segments(mm)		do { } while (0)
-#define forget_segments()		do { } while (0)
+
+#define get_wchan(__TSK) \
+({	extern void scheduling_functions_start_here(void); \
+	extern void scheduling_functions_end_here(void); \
+	unsigned long pc, fp, bias = 0; \
+	unsigned long task_base = (unsigned long) (__TSK); \
+        unsigned long __ret = 0; \
+	struct reg_window *rw; \
+	int count = 0; \
+	if (!(__TSK) || (__TSK) == current || \
+            (__TSK)->state == TASK_RUNNING) \
+		goto __out; \
+	fp = (__TSK)->thread.ksp + bias; \
+	do { \
+		/* Bogus frame pointer? */ \
+		if (fp < (task_base + sizeof(struct task_struct)) || \
+		    fp >= (task_base + (2 * PAGE_SIZE))) \
+			break; \
+		rw = (struct reg_window *) fp; \
+		pc = rw->ins[7]; \
+		if (pc < ((unsigned long) scheduling_functions_start_here) || \
+                    pc >= ((unsigned long) scheduling_functions_end_here)) { \
+			__ret = pc; \
+			goto __out; \
+		} \
+		fp = rw->ins[6] + bias; \
+	} while (++count < 16); \
+__out:	__ret; \
+})
+
+#define KSTK_EIP(tsk)  ((tsk)->thread.kregs->pc)
+#define KSTK_ESP(tsk)  ((tsk)->thread.kregs->u_regs[UREG_FP])
 
 #ifdef __KERNEL__
+#define THREAD_SIZE (2*PAGE_SIZE)
 
 extern struct task_struct *last_task_used_math;
 
 /* Allocation and freeing of basic task resources. */
 BTFIXUPDEF_CALL(struct task_struct *, alloc_task_struct, void)
 BTFIXUPDEF_CALL(void, free_task_struct, struct task_struct *)
+BTFIXUPDEF_CALL(void, get_task_struct, struct task_struct *)
 
 #define alloc_task_struct() BTFIXUP_CALL(alloc_task_struct)()
 #define free_task_struct(tsk) BTFIXUP_CALL(free_task_struct)(tsk)
+#define get_task_struct(tsk) BTFIXUP_CALL(get_task_struct)(tsk)
 
 #define init_task	(init_task_union.task)
 #define init_stack	(init_task_union.stack)

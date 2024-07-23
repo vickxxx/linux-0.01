@@ -1,10 +1,7 @@
-/*
- *  include/asm-mips/bugs.h
+/* $Id: bugs.h,v 1.4 1999/08/18 23:37:49 ralf Exp $
  *
- *  Copyright (C) 1995  Waldorf Electronics
- *  Copyright (C) 1997  Ralf Baechle
- *
- * $Id: bugs.h,v 1.4 1998/05/01 01:35:47 ralf Exp $
+ * Copyright (C) 1995  Waldorf Electronics
+ * Copyright (C) 1997, 1999  Ralf Baechle
  */
 #include <asm/bootinfo.h>
 
@@ -20,6 +17,11 @@ static inline void check_wait(void)
 {
 	printk("Checking for 'wait' instruction... ");
 	switch(mips_cputype) {
+	case CPU_R3081:
+	case CPU_R3081E:
+		cpu_wait = r3081_wait;
+		printk(" available.\n");
+		break;
 	case CPU_R4200: 
 	case CPU_R4300: 
 	case CPU_R4600: 
@@ -28,7 +30,7 @@ static inline void check_wait(void)
 	case CPU_R4700: 
 	case CPU_R5000: 
 	case CPU_NEVADA:
-		wait_available = 1;
+		cpu_wait = r4k_wait;
 		printk(" available.\n");
 		break;
 	default:
@@ -37,7 +39,8 @@ static inline void check_wait(void)
 	}
 }
 
-static void check_bugs(void)
+static void __init
+check_bugs(void)
 {
 	check_wait();
 }

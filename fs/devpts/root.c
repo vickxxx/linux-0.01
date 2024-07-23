@@ -20,51 +20,17 @@ static int devpts_root_readdir(struct file *,void *,filldir_t);
 static struct dentry *devpts_root_lookup(struct inode *,struct dentry *);
 static int devpts_revalidate(struct dentry *, int);
 
-static struct file_operations devpts_root_operations = {
-	NULL,                   /* llseek */
-	NULL,                   /* read */
-	NULL,                   /* write */
-	devpts_root_readdir,    /* readdir */
-	NULL,                   /* poll */
-	NULL,			/* ioctl */
-	NULL,                   /* mmap */
-	NULL,                   /* open */
-	NULL,			/* flush */
-	NULL,                   /* release */
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+struct file_operations devpts_root_operations = {
+	read:		generic_read_dir,
+	readdir:	devpts_root_readdir,
 };
 
 struct inode_operations devpts_root_inode_operations = {
-	&devpts_root_operations, /* file operations */
-	NULL,                   /* create */
-	devpts_root_lookup,     /* lookup */
-	NULL,                   /* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,                   /* mknod */
-	NULL,                   /* rename */
-	NULL,                   /* readlink */
-	NULL,                   /* follow_link */
-	NULL,                   /* get_block */
-	NULL,                   /* readpage */
-	NULL,                   /* writepage */
-	NULL,                   /* flushpage */
-	NULL,                   /* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+	lookup:		devpts_root_lookup,
 };
 
 static struct dentry_operations devpts_dentry_operations = {
-	devpts_revalidate,	/* d_revalidate */
-	NULL,			/* d_hash */
-	NULL,			/* d_compare */
+	d_revalidate:	devpts_revalidate,
 };
 
 /*
@@ -86,21 +52,21 @@ static int devpts_root_readdir(struct file *filp, void *dirent, filldir_t filldi
 	switch(nr)
 	{
 	case 0:
-		if (filldir(dirent, ".", 1, nr, inode->i_ino) < 0)
+		if (filldir(dirent, ".", 1, nr, inode->i_ino, DT_DIR) < 0)
 			return 0;
 		filp->f_pos = ++nr;
 		/* fall through */
 	case 1:
-		if (filldir(dirent, "..", 2, nr, inode->i_ino) < 0)
+		if (filldir(dirent, "..", 2, nr, inode->i_ino, DT_DIR) < 0)
 			return 0;
 		filp->f_pos = ++nr;
 		/* fall through */
 	default:
-		while ( nr < sbi->max_ptys ) {
+		while ( nr - 2 < sbi->max_ptys ) {
 			int ptynr = nr - 2;
 			if ( sbi->inodes[ptynr] ) {
 				genptsname(numbuf, ptynr);
-				if ( filldir(dirent, numbuf, strlen(numbuf), nr, nr) < 0 )
+				if ( filldir(dirent, numbuf, strlen(numbuf), nr, nr, DT_CHR) < 0 )
 					return 0;
 			}
 			filp->f_pos = ++nr;
@@ -152,10 +118,9 @@ static struct dentry *devpts_root_lookup(struct inode * dir, struct dentry * den
 			unsigned int nentry = *p++ - '0';
 			if ( nentry > 9 )
 				return NULL;
-			nentry += entry * 10;
-			if (nentry < entry)
+			if ( entry >= ~0U/10 )
 				return NULL;
-			entry = nentry;
+			entry = nentry + entry * 10;
 		}
 	}
 
@@ -164,7 +129,7 @@ static struct dentry *devpts_root_lookup(struct inode * dir, struct dentry * den
 
 	dentry->d_inode = sbi->inodes[entry];
 	if ( dentry->d_inode )
-		dentry->d_inode->i_count++;
+		atomic_inc(&dentry->d_inode->i_count);
 	
 	d_add(dentry, dentry->d_inode);
 

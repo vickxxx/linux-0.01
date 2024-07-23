@@ -56,44 +56,20 @@ const struct hfs_name hfs_dbl_reserved2[] = {
 #define ROOTINFO	(&hfs_dbl_reserved2[0])
 #define PCNT_ROOTINFO	(&hfs_dbl_reserved2[1])
 
-static struct file_operations hfs_dbl_dir_operations = {
-	NULL,			/* lseek - default */
-	hfs_dir_read,		/* read - invalid */
-	NULL,			/* write - bad */
-	dbl_readdir,		/* readdir */
-	NULL,			/* select - default */
-	NULL,			/* ioctl - default */
-	NULL,			/* mmap - none */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	file_fsync,		/* fsync - default */
-        NULL,			/* fasync - default */
-        NULL,			/* check_media_change - none */
-        NULL			/* revalidate - none */
+struct file_operations hfs_dbl_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	dbl_readdir,
+	fsync:		file_fsync,
 };
 
 struct inode_operations hfs_dbl_dir_inode_operations = {
-	&hfs_dbl_dir_operations,/* default directory file-ops */
-	dbl_create,		/* create */
-	dbl_lookup,		/* lookup */
-	NULL,			/* link */
-	dbl_unlink,		/* unlink */
-	NULL,			/* symlink */
-	dbl_mkdir,		/* mkdir */
-	dbl_rmdir,		/* rmdir */
-	NULL,			/* mknod */
-	dbl_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+	create:		dbl_create,
+	lookup:		dbl_lookup,
+	unlink:		dbl_unlink,
+	mkdir:		dbl_mkdir,
+	rmdir:		dbl_rmdir,
+	rename:		dbl_rename,
+	setattr:	hfs_notify_change,
 };
 
 
@@ -207,7 +183,8 @@ static int dbl_readdir(struct file * filp,
 
 	if (filp->f_pos == 0) {
 		/* Entry 0 is for "." */
-		if (filldir(dirent, DOT->Name, DOT_LEN, 0, dir->i_ino)) {
+		if (filldir(dirent, DOT->Name, DOT_LEN, 0, dir->i_ino,
+			    DT_DIR)) {
 			return 0;
 		}
 		filp->f_pos = 1;
@@ -216,7 +193,7 @@ static int dbl_readdir(struct file * filp,
 	if (filp->f_pos == 1) {
 		/* Entry 1 is for ".." */
 		if (filldir(dirent, DOT_DOT->Name, DOT_DOT_LEN, 1,
-			    hfs_get_hl(entry->key.ParID))) {
+			    hfs_get_hl(entry->key.ParID), DT_DIR)) {
 			return 0;
 		}
 		filp->f_pos = 2;
@@ -253,7 +230,8 @@ static int dbl_readdir(struct file * filp,
 				    &((struct hfs_cat_key *)brec.key)->CName);
 			}
 
-			if (filldir(dirent, tmp_name, len, filp->f_pos, ino)) {
+			if (filldir(dirent, tmp_name, len, filp->f_pos, ino,
+				    DT_UNKNOWN)) {
 				hfs_cat_close(entry, &brec);
 				return 0;
 			}
@@ -267,7 +245,8 @@ static int dbl_readdir(struct file * filp,
 			/* In root dir last entry is for "%RootInfo" */
 			if (filldir(dirent, PCNT_ROOTINFO->Name,
 				    PCNT_ROOTINFO_LEN, filp->f_pos,
-				    ntohl(entry->cnid) | HFS_DBL_HDR)) {
+				    ntohl(entry->cnid) | HFS_DBL_HDR,
+				    DT_UNKNOWN)) {
 				return 0;
 			}
 		}

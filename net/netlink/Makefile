@@ -8,19 +8,13 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := netlink.o
-MOD_LIST_NAME := NET_MISC_MODULES
 
-O_OBJS  := 
-OX_OBJS := af_netlink.o
+export-objs := af_netlink.o
 
-M_OBJS :=
+obj-y  := af_netlink.o
 
-ifeq ($(CONFIG_NETLINK_DEV), y)
-  O_OBJS += netlink_dev.o
-endif
+obj-m  :=
 
-ifeq ($(CONFIG_NETLINK_DEV), m)
-  M_OBJS += netlink_dev.o
-endif
+obj-$(CONFIG_NETLINK_DEV) += netlink_dev.o
 
 include $(TOPDIR)/Rules.make

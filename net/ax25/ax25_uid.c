@@ -13,8 +13,6 @@
  *	AX.25 036	Jonathan(G4KLX)	Split from af_ax25.c.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -39,7 +37,7 @@
 #include <linux/notifier.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
-#include <linux/firewall.h>
+#include <linux/netfilter.h>
 #include <linux/sysctl.h>
 #include <net/ip.h>
 #include <net/arp.h>
@@ -48,7 +46,7 @@
  *	Callsign/UID mapper. This is in kernel space for security on multi-amateur machines.
  */
 
-static ax25_uid_assoc *ax25_uid_list = NULL;
+static ax25_uid_assoc *ax25_uid_list;
 
 int ax25_uid_policy = 0;
 
@@ -78,7 +76,7 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 			return -ENOENT;
 
 		case SIOCAX25ADDUID:
-			if (!suser())
+			if (!capable(CAP_NET_ADMIN))
 				return -EPERM;
 			if (ax25_findbyuid(sax->sax25_uid))
 				return -EEXIST;
@@ -95,7 +93,7 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 			return 0;
 
 		case SIOCAX25DELUID:
-			if (!suser())
+			if (!capable(CAP_NET_ADMIN))
 				return -EPERM;
 			for (ax25_uid = ax25_uid_list; ax25_uid != NULL; ax25_uid = ax25_uid->next) {
 				if (ax25cmp(&sax->sax25_call, &ax25_uid->call) == 0)
@@ -129,7 +127,7 @@ int ax25_uid_ioctl(int cmd, struct sockaddr_ax25 *sax)
 	return -EINVAL;	/*NOTREACHED */
 }
 
-int ax25_uid_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
+int ax25_uid_get_info(char *buffer, char **start, off_t offset, int length)
 {
 	ax25_uid_assoc *pt;
 	int len     = 0;
@@ -164,12 +162,10 @@ int ax25_uid_get_info(char *buffer, char **start, off_t offset, int length, int 
 	return len;
 }
 
-#ifdef MODULE
-
 /*
  *	Free all memory associated with UID/Callsign structures.
  */
-void ax25_uid_free(void)
+void __exit ax25_uid_free(void)
 {
 	ax25_uid_assoc *s, *ax25_uid = ax25_uid_list;
 
@@ -180,7 +176,3 @@ void ax25_uid_free(void)
 		kfree(s);
 	}
 }
-
-#endif
-
-#endif

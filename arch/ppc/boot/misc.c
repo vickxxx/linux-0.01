@@ -1,7 +1,7 @@
 /*
  * misc.c
  *
- * $Id: misc.c,v 1.65 1999/05/17 19:11:13 cort Exp $
+ * $Id: misc.c,v 1.68 1999/10/20 22:08:08 cort Exp $
  * 
  * Adapted for PowerPC by Gary Thomas
  *
@@ -16,6 +16,7 @@
 #include <linux/config.h>
 #include <asm/page.h>
 #include <asm/processor.h>
+#include <asm/bootinfo.h>
 #include <asm/mmu.h>
 #if defined(CONFIG_SERIAL_CONSOLE)
 #include "ns16550.h"
@@ -309,8 +310,6 @@ void gunzip(void *dst, int dstlen, unsigned char *src, int *lenp)
 	inflateEnd(&s);
 }
 
-unsigned char sanity[0x2000];
-
 unsigned long
 decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum,
 		  RESIDUAL *residual, void *OFW_interface)
@@ -333,7 +332,6 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum,
 	cols = 80;
 	orig_x = 0;
 	orig_y = 24;
-
 	
 	/*
 	 * IBM's have the MMU on, so we have to disable it or
@@ -465,6 +463,7 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum,
 		puts(" ");
 		puthex((unsigned long)zimage_size+(unsigned long)zimage_start);
 		puts("\n");
+		avail_ram += zimage_size;
 	}
 
 	/* relocate initrd */
@@ -472,15 +471,19 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum,
 	{
 		puts("initrd at:     "); puthex(initrd_start);
 		puts(" "); puthex(initrd_end); puts("\n");
-#ifdef OMIT
-		avail_ram = (char *)PAGE_ALIGN(
-			(unsigned long)zimage_size+(unsigned long)zimage_start);
-		memcpy ((void *)avail_ram, (void *)initrd_start, INITRD_SIZE );
-		initrd_start = (unsigned long)avail_ram;
-		initrd_end = initrd_start + INITRD_SIZE;
-		puts("relocated to:  "); puthex(initrd_start);
-		puts(" "); puthex(initrd_end); puts("\n");
-#endif
+		if ( (unsigned long)initrd_start <= 0x00800000 )
+		{
+			memcpy( (void *)avail_ram,
+				(void *)initrd_start, initrd_end-initrd_start );
+			puts("relocated to:  ");
+			initrd_end = (unsigned long) avail_ram + (initrd_end-initrd_start);
+			initrd_start = (unsigned long)avail_ram;
+			puthex((unsigned long)initrd_start);
+			puts(" ");
+			puthex((unsigned long)initrd_end);
+			puts("\n");
+		}
+		avail_ram = (char *)PAGE_ALIGN((unsigned long)initrd_end);
 	}
 
 	avail_ram = (char *)0x00400000;
@@ -516,18 +519,39 @@ decompress_kernel(unsigned long load_addr, int num_words, unsigned long cksum,
 	*cp = 0;
 	puts("\n");
 
-	/* mappings on early boot can only handle 16M */
-	if ( (int)(cmd_line[0]) > (16<<20))
-		puts("cmd_line located > 16M\n");
-	if ( (int)hold_residual > (16<<20))
-		puts("hold_residual located > 16M\n");
-	if ( initrd_start > (16<<20))
-		puts("initrd_start located > 16M\n");
-       
 	puts("Uncompressing Linux...");
-
 	gunzip(0, 0x400000, zimage_start, &zimage_size);
 	puts("done.\n");
+	
+	{
+		struct bi_record *rec;
+	    
+		rec = (struct bi_record *)PAGE_ALIGN(zimage_size);
+	    
+		rec->tag = BI_FIRST;
+		rec->size = sizeof(struct bi_record);
+		rec = (struct bi_record *)((unsigned long)rec + rec->size);
+
+		rec->tag = BI_BOOTLOADER_ID;
+		memcpy( (void *)rec->data, "prepboot", 9);
+		rec->size = sizeof(struct bi_record) + 8 + 1;
+		rec = (struct bi_record *)((unsigned long)rec + rec->size);
+	    
+		rec->tag = BI_MACHTYPE;
+		rec->data[0] = _MACH_prep;
+		rec->data[1] = 1;
+		rec->size = sizeof(struct bi_record) + sizeof(unsigned long);
+		rec = (struct bi_record *)((unsigned long)rec + rec->size);
+	    
+		rec->tag = BI_CMD_LINE;
+		memcpy( (char *)rec->data, cmd_line, strlen(cmd_line)+1);
+		rec->size = sizeof(struct bi_record) + strlen(cmd_line) + 1;
+		rec = (struct bi_record *)((ulong)rec + rec->size);
+		
+		rec->tag = BI_LAST;
+		rec->size = sizeof(struct bi_record);
+		rec = (struct bi_record *)((unsigned long)rec + rec->size);
+	}
 	puts("Now booting the kernel\n");
 	return (unsigned long)hold_residual;
 }

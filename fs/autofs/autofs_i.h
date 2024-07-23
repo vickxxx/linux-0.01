@@ -56,13 +56,12 @@ struct autofs_dir_ent {
 	struct autofs_dir_ent **back;
 	/* The following entries are for the expiry system */
 	unsigned long last_usage;
-	struct autofs_dir_ent *exp_next;
-	struct autofs_dir_ent *exp_prev;
+	struct list_head exp;
 };
 
 struct autofs_dirhash {
 	struct autofs_dir_ent *h[AUTOFS_HASH_SIZE];
-	struct autofs_dir_ent expiry_head;
+	struct list_head expiry_head;
 };
 
 struct autofs_wait_queue {
@@ -133,13 +132,15 @@ void autofs_hash_nuke(struct autofs_dirhash *);
 /* Expiration-handling functions */
 
 void autofs_update_usage(struct autofs_dirhash *,struct autofs_dir_ent *);
-struct autofs_dir_ent *autofs_expire(struct super_block *,struct autofs_sb_info *);
+struct autofs_dir_ent *autofs_expire(struct super_block *,struct autofs_sb_info *, struct vfsmount *mnt);
 
 /* Operations structures */
 
 extern struct inode_operations autofs_root_inode_operations;
 extern struct inode_operations autofs_symlink_inode_operations;
 extern struct inode_operations autofs_dir_inode_operations;
+extern struct file_operations autofs_root_operations;
+extern struct file_operations autofs_dir_operations;
 
 /* Initializing function */
 

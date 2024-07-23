@@ -1,6 +1,24 @@
 /*
  *      u14-34f.c - Low-level driver for UltraStor 14F/34F SCSI host adapters.
  *
+ *      01 Nov 2000 Rev. 6.02 for linux 2.4.0-test11
+ *        + Removed old scsi error handling support.
+ *        + The obsolete boot option flag eh:n is silently ignored.
+ *        + Removed error messages while a disk drive is powered up at
+ *          boot time.
+ *        + Improved boot messages: all tagged capable device are
+ *          indicated as "tagged".
+ *
+ *      16 Sep 1999 Rev. 5.11 for linux 2.2.12 and 2.3.18
+ *        + Updated to the new __setup interface for boot command line options.
+ *        + When loaded as a module, accepts the new parameter boot_options
+ *          which value is a string with the same format of the kernel boot
+ *          command line options. A valid example is:
+ *          modprobe u14-34f boot_options=\"0x230,0x340,lc:y,mq:4\"
+ *
+ *      22 Jul 1999 Rev. 5.00 for linux 2.2.10 and 2.3.11
+ *        + Removed pre-2.2 source code compatibility.
+ *
  *      26 Jul 1998 Rev. 4.33 for linux 2.0.35 and 2.1.111
  *          Added command line option (et:[y|n]) to use the existing
  *          translation (returned by scsicam_bios_param) as disk geometry.
@@ -159,7 +177,9 @@
  *
  *          Multiple U14F and/or U34F host adapters are supported.
  *
- *  Copyright (C) 1994-1998 Dario Ballabio (dario@milano.europe.dg.com)
+ *  Copyright (C) 1994-2000 Dario Ballabio (ballabio_dario@emc.com)
+ *
+ *  Alternate email: dario.ballabio@inwind.it, dario.ballabio@tiscalinet.it
  *
  *  Redistribution and use in source and binary forms, with or without
  *  modification, are permitted provided that redistributions of source
@@ -251,8 +271,6 @@
  *  After the optional list of detection probes, other possible command line
  *  options are:
  *
- *  eh:y  use new scsi code (linux 2.2 only);
- *  eh:n  use old scsi code;
  *  et:y  use disk geometry returned by scsicam_bios_param;
  *  et:n  use disk geometry jumpered on the board;
  *  lc:y  enables linked commands;
@@ -263,13 +281,13 @@
  *
  *  The default value is: "u14-34f=lc:n,of:n,mq:8,et:n".
  *  An example using the list of detection probes could be:
- *  "u14-34f=0x230,0x340,lc:y,of:n,mq:4,eh:n,et:n".
+ *  "u14-34f=0x230,0x340,lc:y,of:n,mq:4,et:n".
  *
  *  When loading as a module, parameters can be specified as well.
  *  The above example would be (use 1 in place of y and 0 in place of n):
  *
  *  modprobe u14-34f io_port=0x230,0x340 linked_comm=1 have_old_firmware=0 \
- *                max_queue_depth=4 use_new_eh_code=0 ext_tran=0
+ *                max_queue_depth=4 ext_tran=0
  *
  *  ----------------------------------------------------------------------------
  *  In this implementation, linked commands are designed to work with any DISK
@@ -312,22 +330,23 @@
 
 #include <linux/version.h>
 
+#ifndef LinuxVersionCode
 #define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
+#endif
+
 #define MAX_INT_PARAM 10
 
 #if defined(MODULE)
 #include <linux/module.h>
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,26)
+MODULE_PARM(boot_options, "s");
 MODULE_PARM(io_port, "1-" __MODULE_STRING(MAX_INT_PARAM) "i");
 MODULE_PARM(linked_comm, "i");
 MODULE_PARM(have_old_firmware, "i");
 MODULE_PARM(link_statistics, "i");
 MODULE_PARM(max_queue_depth, "i");
-MODULE_PARM(use_new_eh_code, "i");
 MODULE_PARM(ext_tran, "i");
 MODULE_AUTHOR("Dario Ballabio");
-#endif
 
 #endif
 
@@ -349,47 +368,16 @@ MODULE_AUTHOR("Dario Ballabio");
 #include "u14-34f.h"
 #include <linux/stat.h>
 #include <linux/config.h>
-
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,36)
 #include <linux/init.h>
-#else
-#define __initfunc(A) A
-#define __initdata
-#define __init
-#endif
+#include <linux/ctype.h>
+#include <linux/spinlock.h>
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,101)
-#include <asm/spinlock.h>
-#define IRQ_FLAGS
-#define IRQ_LOCK
-#define IRQ_LOCK_SAVE
-#define IRQ_UNLOCK
-#define IRQ_UNLOCK_RESTORE
 #define SPIN_FLAGS unsigned long spin_flags;
 #define SPIN_LOCK spin_lock_irq(&io_request_lock);
 #define SPIN_LOCK_SAVE spin_lock_irqsave(&io_request_lock, spin_flags);
 #define SPIN_UNLOCK spin_unlock_irq(&io_request_lock);
 #define SPIN_UNLOCK_RESTORE \
                   spin_unlock_irqrestore(&io_request_lock, spin_flags);
-static int use_new_eh_code = TRUE;
-#else
-#define IRQ_FLAGS unsigned long irq_flags;
-#define IRQ_LOCK cli();
-#define IRQ_LOCK_SAVE do {save_flags(irq_flags); cli();} while (0);
-#define IRQ_UNLOCK sti();
-#define IRQ_UNLOCK_RESTORE do {restore_flags(irq_flags);} while (0);
-#define SPIN_FLAGS
-#define SPIN_LOCK
-#define SPIN_LOCK_SAVE
-#define SPIN_UNLOCK
-#define SPIN_UNLOCK_RESTORE
-static int use_new_eh_code = FALSE;
-#endif
-
-struct proc_dir_entry proc_scsi_u14_34f = {
-    PROC_SCSI_U14_34F, 6, "u14_34f",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 /* Values for the PRODUCT_ID ports for the 14/34F */
 #define PRODUCT_ID1  0x56
@@ -467,7 +455,6 @@ struct proc_dir_entry proc_scsi_u14_34f = {
 #define ASOK              0x00
 #define ASST              0x91
 
-#define ARRAY_SIZE(arr) (sizeof (arr) / sizeof (arr)[0])
 #define YESNO(a) ((a) ? 'y' : 'n')
 #define TLDEV(type) ((type) == TYPE_DISK || (type) == TYPE_ROM)
 
@@ -532,7 +519,7 @@ static char sha[MAX_BOARDS];
 /* Initialize num_boards so that ihdlr can work while detect is in progress */
 static unsigned int num_boards = MAX_BOARDS;
 
-static unsigned long io_port[] __initdata = {
+static unsigned long io_port[] = {
 
    /* Space for MAX_INT_PARAM ports usable while loading as a module */
    SKIP,    SKIP,   SKIP,   SKIP,   SKIP,   SKIP,   SKIP,   SKIP,
@@ -568,8 +555,9 @@ static void do_interrupt_handler(int, void *, struct pt_regs *);
 static void flush_dev(Scsi_Device *, unsigned long, unsigned int, unsigned int);
 static int do_trace = FALSE;
 static int setup_done = FALSE;
-static int link_statistics = 0;
+static int link_statistics;
 static int ext_tran = FALSE;
+static char *boot_options;
 
 #if defined(HAVE_OLD_UX4F_FIRMWARE)
 static int have_old_firmware = TRUE;
@@ -592,9 +580,7 @@ static int max_queue_depth = MAX_CMD_PER_LUN;
 static void select_queue_depths(struct Scsi_Host *host, Scsi_Device *devlist) {
    Scsi_Device *dev;
    int j, ntag = 0, nuntag = 0, tqd, utqd;
-   IRQ_FLAGS
 
-   IRQ_LOCK_SAVE
    j = ((struct hostdata *) host->hostdata)->board_number;
 
    for(dev = devlist; dev; dev = dev->next) {
@@ -633,16 +619,15 @@ static void select_queue_depths(struct Scsi_Host *host, Scsi_Device *devlist) {
          }
 
       if (dev->tagged_supported && TLDEV(dev->type) && dev->tagged_queue)
-         tag_suffix = ", tagged";
+         tag_suffix = ", soft-tagged";
       else if (dev->tagged_supported && TLDEV(dev->type))
-         tag_suffix = ", untagged";
+         tag_suffix = ", tagged";
 
       printk("%s: scsi%d, channel %d, id %d, lun %d, cmds/lun %d%s%s.\n",
              BN(j), host->host_no, dev->channel, dev->id, dev->lun,
              dev->queue_depth, link_suffix, tag_suffix);
       }
 
-   IRQ_UNLOCK_RESTORE
    return;
 }
 
@@ -686,10 +671,8 @@ static int board_inquiry(unsigned int j) {
    outb(CMD_OGM_INTR, sh[j]->io_port + REG_LCL_INTR);
 
    SPIN_UNLOCK
-   IRQ_UNLOCK
    time = jiffies;
    while ((jiffies - time) < HZ && limit++ < 20000) udelay(100L);
-   IRQ_LOCK
    SPIN_LOCK
 
    if (cpp->adapter_status || HD(j)->cp_stat[0] != FREE) {
@@ -701,17 +684,17 @@ static int board_inquiry(unsigned int j) {
    return FALSE;
 }
 
-__initfunc (static inline int port_detect \
-      (unsigned long port_base, unsigned int j, Scsi_Host_Template *tpnt)) {
+static inline int port_detect \
+      (unsigned long port_base, unsigned int j, Scsi_Host_Template *tpnt) {
    unsigned char irq, dma_channel, subversion, i;
    unsigned char in_byte;
    char *bus_type, dma_name[16];
 
    /* Allowed BIOS base addresses (NULL indicates reserved) */
-   void *bios_segment_table[8] = {
-      NULL,
-      (void *) 0xc4000, (void *) 0xc8000, (void *) 0xcc000, (void *) 0xd0000,
-      (void *) 0xd4000, (void *) 0xd8000, (void *) 0xdc000
+   unsigned long bios_segment_table[8] = {
+      0,
+      0xc4000, 0xc8000, 0xcc000, 0xd0000,
+      0xd4000, 0xd8000, 0xdc000
       };
 
    /* Allowed IRQs */
@@ -747,7 +730,9 @@ __initfunc (static inline int port_detect \
    sprintf(name, "%s%d", driver_name, j);
 
    if(check_region(port_base, REGION_SIZE)) {
+#if defined(DEBUG_DETECT)
       printk("%s: address 0x%03lx in use, skipping probe.\n", name, port_base);
+#endif
       return FALSE;
       }
 
@@ -780,12 +765,6 @@ __initfunc (static inline int port_detect \
       }
 
    if (have_old_firmware) tpnt->use_clustering = DISABLE_CLUSTERING;
-
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,101)
-   tpnt->use_new_eh_code = use_new_eh_code;
-#else
-   use_new_eh_code = FALSE;
-#endif
 
    sh[j] = scsi_register(tpnt, sizeof(struct hostdata));
 
@@ -845,7 +824,7 @@ __initfunc (static inline int port_detect \
       }
    else {
       unsigned long flags;
-      sh[j]->wish_block = TRUE;
+      scsi_register_blocked_host(sh[j]);
       sh[j]->unchecked_isa_dma = TRUE;
       
       flags=claim_dma_lock();
@@ -894,10 +873,10 @@ __initfunc (static inline int port_detect \
    if (max_queue_depth < MAX_CMD_PER_LUN) max_queue_depth = MAX_CMD_PER_LUN;
 
    if (j == 0) {
-      printk("UltraStor 14F/34F: Copyright (C) 1994-1998 Dario Ballabio.\n");
-      printk("%s config options -> of:%c, lc:%c, mq:%d, eh:%c, et:%c.\n",
+      printk("UltraStor 14F/34F: Copyright (C) 1994-2000 Dario Ballabio.\n");
+      printk("%s config options -> of:%c, lc:%c, mq:%d, et:%c.\n",
              driver_name, YESNO(have_old_firmware), YESNO(linked_comm),
-             max_queue_depth, YESNO(use_new_eh_code), YESNO(ext_tran));
+             max_queue_depth, YESNO(ext_tran));
       }
 
    printk("%s: %s 0x%03lx, BIOS 0x%05x, IRQ %u, %s, SG %d, MB %d.\n",
@@ -915,7 +894,7 @@ __initfunc (static inline int port_detect \
    return TRUE;
 }
 
-__initfunc (void u14_34f_setup(char *str, int *ints)) {
+static void internal_setup(char *str, int *ints) {
    int i, argc = ints[0];
    char *cur = str, *pc;
 
@@ -940,7 +919,6 @@ __initfunc (void u14_34f_setup(char *str, int *ints)) {
       else if (!strncmp(cur, "of:", 3)) have_old_firmware = val;
       else if (!strncmp(cur, "mq:", 3))  max_queue_depth = val;
       else if (!strncmp(cur, "ls:", 3))  link_statistics = val;
-      else if (!strncmp(cur, "eh:", 3))  use_new_eh_code = val;
       else if (!strncmp(cur, "et:", 3))  ext_tran = val;
 
       if ((cur = strchr(cur, ','))) ++cur;
@@ -949,12 +927,29 @@ __initfunc (void u14_34f_setup(char *str, int *ints)) {
    return;
 }
 
-__initfunc (int u14_34f_detect(Scsi_Host_Template *tpnt)) {
-   unsigned int j = 0, k;
-   IRQ_FLAGS
+static int option_setup(char *str) {
+   int ints[MAX_INT_PARAM];
+   char *cur = str;
+   int i = 1;
 
-   IRQ_LOCK_SAVE
-   tpnt->proc_dir = &proc_scsi_u14_34f;
+   while (cur && isdigit(*cur) && i <= MAX_INT_PARAM) {
+      ints[i++] = simple_strtoul(cur, NULL, 0);
+
+      if ((cur = strchr(cur, ',')) != NULL) cur++;
+   }
+
+   ints[0] = i - 1;
+   internal_setup(cur, ints);
+   return 1;
+}
+
+int u14_34f_detect(Scsi_Host_Template *tpnt)
+{
+   unsigned int j = 0, k;
+
+   tpnt->proc_name = "u14-34f";
+
+   if(boot_options) option_setup(boot_options);
 
 #if defined(MODULE)
    /* io_port could have been modified when loading as a module */
@@ -974,7 +969,6 @@ __initfunc (int u14_34f_detect(Scsi_Host_Template *tpnt)) {
       }
 
    num_boards = j;
-   IRQ_UNLOCK_RESTORE
    return j;
 }
 
@@ -1110,91 +1104,10 @@ static inline int do_qcomm(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) {
 
 int u14_34f_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) {
    int rtn;
-   IRQ_FLAGS
 
-   IRQ_LOCK_SAVE
    rtn = do_qcomm(SCpnt, done);
-   IRQ_UNLOCK_RESTORE
    return rtn;
 }
-
-static inline int do_old_abort(Scsi_Cmnd *SCarg) {
-   unsigned int i, j;
-
-   j = ((struct hostdata *) SCarg->host->hostdata)->board_number;
-
-   if (SCarg->host_scribble == NULL ||
-       (SCarg->serial_number_at_timeout &&
-       (SCarg->serial_number != SCarg->serial_number_at_timeout))) {
-      printk("%s: abort, target %d.%d:%d, pid %ld inactive.\n",
-             BN(j), SCarg->channel, SCarg->target, SCarg->lun, SCarg->pid);
-      return SCSI_ABORT_NOT_RUNNING;
-      }
-
-   i = *(unsigned int *)SCarg->host_scribble;
-   printk("%s: abort, mbox %d, target %d.%d:%d, pid %ld.\n",
-          BN(j), i, SCarg->channel, SCarg->target, SCarg->lun, SCarg->pid);
-
-   if (i >= sh[j]->can_queue)
-      panic("%s: abort, invalid SCarg->host_scribble.\n", BN(j));
-
-   if (wait_on_busy(sh[j]->io_port, MAXLOOP)) {
-      printk("%s: abort, timeout error.\n", BN(j));
-      return SCSI_ABORT_ERROR;
-      }
-
-   if (HD(j)->cp_stat[i] == FREE) {
-      printk("%s: abort, mbox %d is free.\n", BN(j), i);
-      return SCSI_ABORT_NOT_RUNNING;
-      }
-
-   if (HD(j)->cp_stat[i] == IN_USE) {
-      printk("%s: abort, mbox %d is in use.\n", BN(j), i);
-
-      if (SCarg != HD(j)->cp[i].SCpnt)
-         panic("%s: abort, mbox %d, SCarg %p, cp SCpnt %p.\n",
-               BN(j), i, SCarg, HD(j)->cp[i].SCpnt);
-
-      if (inb(sh[j]->io_port + REG_SYS_INTR) & IRQ_ASSERTED)
-         printk("%s: abort, mbox %d, interrupt pending.\n", BN(j), i);
-
-      return SCSI_ABORT_SNOOZE;
-      }
-
-   if (HD(j)->cp_stat[i] == IN_RESET) {
-      printk("%s: abort, mbox %d is in reset.\n", BN(j), i);
-      return SCSI_ABORT_ERROR;
-      }
-
-   if (HD(j)->cp_stat[i] == LOCKED) {
-      printk("%s: abort, mbox %d is locked.\n", BN(j), i);
-      return SCSI_ABORT_NOT_RUNNING;
-      }
-
-   if (HD(j)->cp_stat[i] == READY || HD(j)->cp_stat[i] == ABORTING) {
-      SCarg->result = DID_ABORT << 16;
-      SCarg->host_scribble = NULL;
-      HD(j)->cp_stat[i] = FREE;
-      printk("%s, abort, mbox %d ready, DID_ABORT, pid %ld done.\n",
-             BN(j), i, SCarg->pid);
-      SCarg->scsi_done(SCarg);
-      return SCSI_ABORT_SUCCESS;
-      }
-
-   panic("%s: abort, mbox %d, invalid cp_stat.\n", BN(j), i);
-}
-
-int u14_34f_old_abort(Scsi_Cmnd *SCarg) {
-   int rtn;
-   IRQ_FLAGS
-
-   IRQ_LOCK_SAVE
-   rtn = do_old_abort(SCarg);
-   IRQ_UNLOCK_RESTORE
-   return rtn;
-}
-
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,101)
 
 static inline int do_abort(Scsi_Cmnd *SCarg) {
    unsigned int i, j;
@@ -1272,162 +1185,6 @@ int u14_34f_abort(Scsi_Cmnd *SCarg) {
 
    return do_abort(SCarg);
 }
-
-#endif /* new_eh_code */
-
-static inline int do_old_reset(Scsi_Cmnd *SCarg) {
-   unsigned int i, j, time, k, c, limit = 0;
-   int arg_done = FALSE;
-   Scsi_Cmnd *SCpnt;
-
-   j = ((struct hostdata *) SCarg->host->hostdata)->board_number;
-   printk("%s: reset, enter, target %d.%d:%d, pid %ld.\n",
-          BN(j), SCarg->channel, SCarg->target, SCarg->lun, SCarg->pid);
-
-   if (SCarg->host_scribble == NULL)
-      printk("%s: reset, pid %ld inactive.\n", BN(j), SCarg->pid);
-
-   if (SCarg->serial_number_at_timeout &&
-       (SCarg->serial_number != SCarg->serial_number_at_timeout)) {
-      printk("%s: reset, pid %ld, reset not running.\n", BN(j), SCarg->pid);
-      return SCSI_RESET_NOT_RUNNING;
-      }
-
-   if (HD(j)->in_reset) {
-      printk("%s: reset, exit, already in reset.\n", BN(j));
-      return SCSI_RESET_ERROR;
-      }
-
-   if (wait_on_busy(sh[j]->io_port, MAXLOOP)) {
-      printk("%s: reset, exit, timeout error.\n", BN(j));
-      return SCSI_RESET_ERROR;
-      }
-
-   HD(j)->retries = 0;
-
-   for (c = 0; c <= sh[j]->max_channel; c++)
-      for (k = 0; k < sh[j]->max_id; k++) {
-         HD(j)->target_redo[k][c] = TRUE;
-         HD(j)->target_to[k][c] = 0;
-         }
-
-   for (i = 0; i < sh[j]->can_queue; i++) {
-
-      if (HD(j)->cp_stat[i] == FREE) continue;
-
-      if (HD(j)->cp_stat[i] == LOCKED) {
-         HD(j)->cp_stat[i] = FREE;
-         printk("%s: reset, locked mbox %d forced free.\n", BN(j), i);
-         continue;
-         }
-
-      if (!(SCpnt = HD(j)->cp[i].SCpnt))
-         panic("%s: reset, mbox %d, SCpnt == NULL.\n", BN(j), i);
-
-      if (HD(j)->cp_stat[i] == READY || HD(j)->cp_stat[i] == ABORTING) {
-         HD(j)->cp_stat[i] = ABORTING;
-         printk("%s: reset, mbox %d aborting, pid %ld.\n",
-                BN(j), i, SCpnt->pid);
-         }
-
-      else {
-         HD(j)->cp_stat[i] = IN_RESET;
-         printk("%s: reset, mbox %d in reset, pid %ld.\n",
-                BN(j), i, SCpnt->pid);
-         }
-
-      if (SCpnt->host_scribble == NULL)
-         panic("%s: reset, mbox %d, garbled SCpnt.\n", BN(j), i);
-
-      if (*(unsigned int *)SCpnt->host_scribble != i)
-         panic("%s: reset, mbox %d, index mismatch.\n", BN(j), i);
-
-      if (SCpnt->scsi_done == NULL)
-         panic("%s: reset, mbox %d, SCpnt->scsi_done == NULL.\n", BN(j), i);
-
-      if (SCpnt == SCarg) arg_done = TRUE;
-      }
-
-   if (wait_on_busy(sh[j]->io_port, MAXLOOP)) {
-      printk("%s: reset, cannot reset, timeout error.\n", BN(j));
-      return SCSI_RESET_ERROR;
-      }
-
-   outb(CMD_RESET, sh[j]->io_port + REG_LCL_INTR);
-   printk("%s: reset, board reset done, enabling interrupts.\n", BN(j));
-
-#if defined(DEBUG_RESET)
-   do_trace = TRUE;
-#endif
-
-   HD(j)->in_reset = TRUE;
-   SPIN_UNLOCK
-   IRQ_UNLOCK
-   time = jiffies;
-   while ((jiffies - time) < (10 * HZ) && limit++ < 200000) udelay(100L);
-   IRQ_LOCK
-   SPIN_LOCK
-   printk("%s: reset, interrupts disabled, loops %d.\n", BN(j), limit);
-
-   for (i = 0; i < sh[j]->can_queue; i++) {
-
-      if (HD(j)->cp_stat[i] == IN_RESET) {
-         SCpnt = HD(j)->cp[i].SCpnt;
-         SCpnt->result = DID_RESET << 16;
-         SCpnt->host_scribble = NULL;
-
-         /* This mailbox is still waiting for its interrupt */
-         HD(j)->cp_stat[i] = LOCKED;
-
-         printk("%s, reset, mbox %d locked, DID_RESET, pid %ld done.\n",
-                BN(j), i, SCpnt->pid);
-         }
-
-      else if (HD(j)->cp_stat[i] == ABORTING) {
-         SCpnt = HD(j)->cp[i].SCpnt;
-         SCpnt->result = DID_RESET << 16;
-         SCpnt->host_scribble = NULL;
-
-         /* This mailbox was never queued to the adapter */
-         HD(j)->cp_stat[i] = FREE;
-
-         printk("%s, reset, mbox %d aborting, DID_RESET, pid %ld done.\n",
-                BN(j), i, SCpnt->pid);
-         }
-
-      else
-
-         /* Any other mailbox has already been set free by interrupt */
-         continue;
-
-      SCpnt->scsi_done(SCpnt);
-      IRQ_LOCK
-      }
-
-   HD(j)->in_reset = FALSE;
-   do_trace = FALSE;
-
-   if (arg_done) {
-      printk("%s: reset, exit, success.\n", BN(j));
-      return SCSI_RESET_SUCCESS;
-      }
-   else {
-      printk("%s: reset, exit, wakeup.\n", BN(j));
-      return SCSI_RESET_PUNT;
-      }
-}
-
-int u14_34f_old_reset(Scsi_Cmnd *SCarg, unsigned int reset_flags) {
-   int rtn;
-   IRQ_FLAGS
-
-   IRQ_LOCK_SAVE
-   rtn = do_old_reset(SCarg);
-   IRQ_UNLOCK_RESTORE
-   return rtn;
-}
-
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,101)
 
 static inline int do_reset(Scsi_Cmnd *SCarg) {
    unsigned int i, j, time, k, c, limit = 0;
@@ -1510,10 +1267,8 @@ static inline int do_reset(Scsi_Cmnd *SCarg) {
 
    HD(j)->in_reset = TRUE;
    SPIN_UNLOCK
-   IRQ_UNLOCK
    time = jiffies;
    while ((jiffies - time) < (10 * HZ) && limit++ < 200000) udelay(100L);
-   IRQ_LOCK
    SPIN_LOCK
    printk("%s: reset, interrupts disabled, loops %d.\n", BN(j), limit);
 
@@ -1549,7 +1304,6 @@ static inline int do_reset(Scsi_Cmnd *SCarg) {
          continue;
 
       SCpnt->scsi_done(SCpnt);
-      IRQ_LOCK
       }
 
    HD(j)->in_reset = FALSE;
@@ -1565,8 +1319,6 @@ int u14_34f_reset(Scsi_Cmnd *SCarg) {
 
    return do_reset(SCarg);
 }
-
-#endif /* new_eh_code */
 
 int u14_34f_biosparam(Disk *disk, kdev_t dev, int *dkinfo) {
    unsigned int j = 0;
@@ -1689,7 +1441,7 @@ static inline int reorder(unsigned int j, unsigned long cursec,
 
    if (link_statistics) {
       if (cursec > sl[0]) iseek = cursec - sl[0]; else iseek = sl[0] - cursec;
-      batchcount++; readycount += n_ready, seeknosort += seek / 1024;
+      batchcount++; readycount += n_ready; seeknosort += seek / 1024;
       if (input_only) inputcount++;
       if (overlap) { ovlcount++; seeksorted += iseek / 1024; }
       else seeksorted += (iseek + maxsec - minsec) / 1024;
@@ -1863,7 +1615,9 @@ static inline void ihdlr(int irq, unsigned int j) {
          if (tstatus == GOOD)
             HD(j)->target_redo[SCpnt->target][SCpnt->channel] = FALSE;
 
-         if (spp->target_status && SCpnt->device->type == TYPE_DISK)
+         if (spp->target_status && SCpnt->device->type == TYPE_DISK &&
+             (!(tstatus == CHECK_CONDITION && HD(j)->iocount <= 1000 &&
+               (SCpnt->sense_buffer[2] & 0xf) == NOT_READY)))
             printk("%s: ihdlr, target %d.%d:%d, pid %ld, "\
                    "target_status 0x%x, sense key 0x%x.\n", BN(j),
                    SCpnt->channel, SCpnt->target, SCpnt->lun,
@@ -1956,29 +1710,27 @@ static inline void ihdlr(int irq, unsigned int j) {
 
 static void do_interrupt_handler(int irq, void *shap, struct pt_regs *regs) {
    unsigned int j;
-   IRQ_FLAGS
    SPIN_FLAGS
 
    /* Check if the interrupt must be processed by this handler */
    if ((j = (unsigned int)((char *)shap - sha)) >= num_boards) return;
 
    SPIN_LOCK_SAVE
-   IRQ_LOCK_SAVE
    ihdlr(irq, j);
-   IRQ_UNLOCK_RESTORE
    SPIN_UNLOCK_RESTORE
 }
 
 int u14_34f_release(struct Scsi_Host *shpnt) {
    unsigned int i, j;
-   IRQ_FLAGS
-
-   IRQ_LOCK_SAVE
 
    for (j = 0; sh[j] != NULL && sh[j] != shpnt; j++);
 
    if (sh[j] == NULL) panic("%s: release, invalid Scsi_Host pointer.\n",
                             driver_name);
+
+   if( sh[j]->unchecked_isa_dma ) {
+	   scsi_deregister_blocked_host(sh[j]);
+   }
 
    for (i = 0; i < sh[j]->can_queue; i++)
       if ((&HD(j)->cp[i])->sglist) kfree((&HD(j)->cp[i])->sglist);
@@ -1989,12 +1741,13 @@ int u14_34f_release(struct Scsi_Host *shpnt) {
 
    release_region(sh[j]->io_port, sh[j]->n_io_port);
    scsi_unregister(sh[j]);
-   IRQ_UNLOCK_RESTORE
    return FALSE;
 }
 
-#if defined(MODULE)
-Scsi_Host_Template driver_template = ULTRASTOR_14_34F;
+static Scsi_Host_Template driver_template = ULTRASTOR_14_34F;
 
 #include "scsi_module.c"
-#endif
+
+#ifndef MODULE
+__setup("u14-34f=", option_setup);
+#endif /* end MODULE */

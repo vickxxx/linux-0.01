@@ -105,7 +105,7 @@ problem and not mine, but I'm not sure.
 Configuration
 =============
 
-You can pass kernel command line options to vesafb with
+You can pass kernel command line options to matroxfb with
 `video=matrox:option1,option2:value2,option3' (multiple options should be 
 separated by comma, values are separated from options by `:'). 
 Accepted options:
@@ -146,6 +146,27 @@ noinit   - tells driver, that devices were already initialized. You should use
 	   strange pattern on screen and so on. Devices not enabled by BIOS
 	   are still initialized. It is default.
 init     - driver initializes every device it knows about.
+memtype  - specifies memory type, implies 'init'. This is valid only for G200 
+           and G400 and has following meaning:
+             G200: 0 -> 2x128Kx32 chips, 2MB onboard, probably sgram
+                   1 -> 2x128Kx32 chips, 4MB onboard, probably sgram
+                   2 -> 2x256Kx32 chips, 4MB onboard, probably sgram
+                   3 -> 2x256Kx32 chips, 8MB onboard, probably sgram
+                   4 -> 2x512Kx16 chips, 8/16MB onboard, probably sdram only
+                   5 -> same as above
+                   6 -> 4x128Kx32 chips, 4MB onboard, probably sgram
+                   7 -> 4x128Kx32 chips, 8MB onboard, probably sgram
+             G400: 0 -> 2x512Kx16 SDRAM, 16/32MB
+                        2x512Kx32 SGRAM, 16/32MB
+                   1 -> 2x256Kx32 SGRAM, 8/16MB
+                   2 -> 4x128Kx32 SGRAM, 8/16MB
+                   3 -> 4x512Kx32 SDRAM, 32MB
+                   4 -> 4x256Kx32 SGRAM, 16/32MB
+                   5 -> 2x1Mx32 SDRAM, 32MB
+                   6 -> reserved
+                   7 -> reserved
+           You should use sdram or sgram parameter in addition to memtype 
+           parameter.
 nomtrr   - disables write combining on frame buffer. This slows down driver but
            there is reported minor incompatibility between GUS DMA and XFree
 	   under high loads if write combining is enabled (sound dropouts).
@@ -191,6 +212,10 @@ nocross4MB - pixel line must not cross 4MB boundary. It is default for
 	     limitations which do not allow this. But this option is
 	     incompatible with some (if not all yet released) versions of
 	     XF86_FBDev.
+dfp      - enables digital flat panel interface. This option is incompatible with
+           secondary (TV) output - if DFP is active, TV output must be
+	   inactive and vice versa. DFP always uses same timing as primary
+	   (monitor) output.
 vesa:X   - selects startup videomode. X is number from 0 to 0x1FF, see table
            above for detailed explanation. Default is 640x480x8bpp if driver
 	   has 8bpp support. Otherwise first available of 640x350x4bpp,
@@ -228,7 +253,7 @@ depth:X  - Bits per pixel: 0=text, 4,8,15,16,24 or 32. Default depends on
            `vesa'.
 
 If you know capabilities of your monitor, you can specify some (or all) of
-`pixclk', `fh' and `fv'. In this case, `pixclock' is computed so that
+`maxclk', `fh' and `fv'. In this case, `pixclock' is computed so that
 pixclock <= maxclk, real_fh <= fh and real_fv <= fv.
 
 maxclk:X - maximum dotclock. X can be specified in MHz, kHz or Hz. Default is
@@ -276,16 +301,16 @@ And following misfeatures:
  + color keying is not supported
  + feature connector of Mystique and Gx00 is set to VGA mode (it is disabled
    by BIOS)
- + DCC (monitor detection) protocol is not implemented
+ + DDC (monitor detection) is supported through dualhead driver
  + some check for input values are not so strict how it should be (you can
    specify vslen=4000 and so on).
  + maybe more...
 And following features:
  + 4bpp is available only on Millennium I and Millennium II. It is hardware
    limitation.
- + current fbset is not able to set 15bpp videomode: you must specify
-   depth==16 and green.length==5. fbset does not allow you to set 
-   green.length.
+ + selection between 1:5:5:5 and 5:6:5 16bpp videomode is done by -rgba 
+   option of fbset: "fbset -depth 16 -rgba 5,5,5" selects 1:5:5:5, anything
+   else selects 5:6:5 mode.
  + text mode uses 6 bit VGA palette instead of 8 bit (one of 262144 colors
    instead of one of 16M colors). It is due to hardware limitation of 
    Millennium I/II and SVGALib compatibility.
@@ -329,6 +354,27 @@ TEXT
         8x16
 	Millennium I  G200
 TEXT     3.29         1.50
+
+
+Dualhead G400
+=============
+Driver supports dualhead G400 with some limitations:
+ + secondary head shares videomemory with primary head. It is not problem
+   if you have 32MB of videoram, but if you have only 16MB, you may have
+   to think twice before choosing videomode (for example twice 1880x1440x32bpp
+   is not possible).
+ + due to hardware limitation, secondary head can use only 16 and 32bpp
+   videomodes.
+ + secondary head is not accelerated. There were bad problems with accelerated
+   XFree when secondary head used to use acceleration.
+ + secondary head always powerups in 640x480@60-32 videomode. You have to use
+   fbset to change this mode.
+ + secondary head always powerups in monitor mode. You have to use matroxset
+   to change it to TV mode. Also, you must select at least 525 lines for
+   NTSC output and 625 lines for PAL output.
+ + kernel is not fully multihead ready. So some things are impossible to do.
+ + if you compiled it as module, you must insert i2c-matroxfb, matroxfb_maven
+   and matroxfb_crtc2 into kernel.
 
 	
 * Yes, it is slower than Millennium I.

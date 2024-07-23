@@ -57,6 +57,11 @@
 				thanks to Luke McFarlane. Also tidied up some
 				printk behaviour. ISP16 initialization
 				is now handled by a separate driver.
+				
+	09-11-99 	  	Make kernel-parameter implementation work with 2.3.x 
+	                 	Removed init_module & cleanup_module in favor of 
+			 	module_init & module_exit.
+			 	Torben Mathiasen <tmm@image.dk>
 */
 
 /* Includes */
@@ -66,6 +71,8 @@
 #include <linux/mm.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
+
 #include <asm/io.h>
 
 #define MAJOR_NR OPTICS_CDROM_MAJOR
@@ -258,23 +265,18 @@ inline static int flag_low(int flag, unsigned long timeout)
 /* Timed waiting for status or data */
 static int sleep_timeout;	/* max # of ticks to sleep */
 static DECLARE_WAIT_QUEUE_HEAD(waitq);
-static struct timer_list delay_timer = {NULL, NULL, 0, 0, NULL};
-
-#define SET_TIMER(func, jifs) \
-	delay_timer.expires = jiffies+(jifs); \
-	delay_timer.function = (void *) (func); \
-	add_timer(&delay_timer);
-#define CLEAR_TIMER	del_timer(&delay_timer)
+static void sleep_timer(unsigned long data);
+static struct timer_list delay_timer = {function: sleep_timer};
 
 
 /* Timer routine: wake up when desired flag goes low,
    or when timeout expires. */
-static void sleep_timer(void)
+static void sleep_timer(unsigned long data)
 {
 	int flags = inb(STATUS_PORT) & FL_STDT;
 
 	if (flags == FL_STDT && --sleep_timeout > 0) {
-		SET_TIMER(sleep_timer, HZ/100); /* multi-statement macro */
+		mod_timer(&delay_timer, jiffies + HZ/100); /* multi-statement macro */
 	} else
 		wake_up(&waitq);
 }
@@ -290,7 +292,7 @@ static int sleep_flag_low(int flag, unsigned long timeout)
 	sleep_timeout = timeout;
 	flag_high = inb(STATUS_PORT) & flag;
 	if (flag_high && sleep_timeout > 0) {
-		SET_TIMER(sleep_timer, HZ/100);
+		mod_timer(&delay_timer, jiffies + HZ/100);
 		sleep_on(&waitq);
 		flag_high = inb(STATUS_PORT) & flag;
 	}
@@ -975,7 +977,7 @@ static int update_toc(void)
 
 
 #define CURRENT_VALID \
-	(CURRENT && MAJOR(CURRENT -> rq_dev) == MAJOR_NR \
+	(!QUEUE_EMPTY && MAJOR(CURRENT -> rq_dev) == MAJOR_NR \
 	 && CURRENT -> cmd == READ && CURRENT -> sector != -1)
 
 
@@ -1072,15 +1074,11 @@ static volatile int error = 0;	/* %% do something with this?? */
 static int tries;		/* ibid?? */
 static int timeout = 0;
 
-static struct timer_list req_timer = {NULL, NULL, 0, 0, NULL};
+static void poll(unsigned long data);
+static struct timer_list req_timer = {function: poll};
 
-#define SET_REQ_TIMER(func, jifs) \
-	req_timer.expires = jiffies+(jifs); \
-	req_timer.function = (void *) (func); \
-	add_timer(&req_timer);
-#define CLEAR_REQ_TIMER	del_timer(&req_timer)
 
-static void poll(void)
+static void poll(unsigned long data)
 {
 	static volatile int read_count = 1;
 	int flags;
@@ -1356,11 +1354,11 @@ static void poll(void)
 		}
 	}
 
-	SET_REQ_TIMER(poll, HZ/100);
+	mod_timer(&req_timer, jiffies + HZ/100);
 }
 
 
-static void do_optcd_request(void)
+static void do_optcd_request(request_queue_t * q)
 {
 	DEBUG((DEBUG_REQUEST, "do_optcd_request(%ld+%ld)",
 	       CURRENT -> sector, CURRENT -> nr_sectors));
@@ -1394,7 +1392,7 @@ static void do_optcd_request(void)
 				timeout = READ_TIMEOUT;
 				tries = 5;
 				/* %% why not start right away?? */
-				SET_REQ_TIMER(poll, HZ/100);
+				mod_timer(&req_timer, jiffies + HZ/100);
 			}
 			break;
 		}
@@ -1873,6 +1871,8 @@ static int opt_open(struct inode *ip, struct file *fp)
 {
 	DEBUG((DEBUG_VFS, "starting opt_open"));
 
+	MOD_INC_USE_COUNT;
+
 	if (!open_count && state == S_IDLE) {
 		int status;
 
@@ -1887,12 +1887,12 @@ static int opt_open(struct inode *ip, struct file *fp)
 		status = drive_status();
 		if (status < 0) {
 			DEBUG((DEBUG_VFS, "drive_status: %02x", -status));
-			return -EIO;
+			goto err_out;
 		}
 		DEBUG((DEBUG_VFS, "status: %02x", status));
 		if ((status & ST_DOOR_OPEN) || (status & ST_DRVERR)) {
 			printk(KERN_INFO "optcd: no disk or door open\n");
-			return -EIO;
+			goto err_out;
 		}
 		status = exec_cmd(COMLOCK);		/* Lock door */
 		if (status < 0) {
@@ -1906,15 +1906,18 @@ static int opt_open(struct inode *ip, struct file *fp)
 				DEBUG((DEBUG_VFS,
 				       "exec_cmd COMUNLOCK: %02x", -status));
 			}
-			return -EIO;
+			goto err_out;
 		}
 		open_count++;
 	}
-	MOD_INC_USE_COUNT;
 
 	DEBUG((DEBUG_VFS, "exiting opt_open"));
 
 	return 0;
+
+err_out:
+    MOD_DEC_USE_COUNT;
+	return -EIO;
 }
 
 
@@ -1930,8 +1933,6 @@ static int opt_release(struct inode *ip, struct file *fp)
 	if (!--open_count) {
 		toc_uptodate = 0;
 		opt_invalidate_buffers();
-		sync_dev(ip -> i_rdev);
-		invalidate_buffers(ip -> i_rdev);
 	 	status = exec_cmd(COMUNLOCK);	/* Unlock door */
 		if (status < 0) {
 			DEBUG((DEBUG_VFS, "exec_cmd COMUNLOCK: %02x", -status));
@@ -1940,8 +1941,8 @@ static int opt_release(struct inode *ip, struct file *fp)
 			status = exec_cmd(COMOPEN);
 			DEBUG((DEBUG_VFS, "exec_cmd COMOPEN: %02x", -status));
 		}
-		CLEAR_TIMER;
-		CLEAR_REQ_TIMER;
+		del_timer(&delay_timer);
+		del_timer(&req_timer);
 	}
 	MOD_DEC_USE_COUNT;
 	return 0;
@@ -1966,7 +1967,7 @@ static int opt_media_change(kdev_t dev)
 
 /* Returns 1 if a drive is detected with a version string
    starting with "DOLPHIN". Otherwise 0. */
-__initfunc(static int version_ok(void))
+static int __init version_ok(void)
 {
 	char devname[100];
 	int count, i, ch, status;
@@ -2003,34 +2004,33 @@ __initfunc(static int version_ok(void))
 }
 
 
-static struct file_operations opt_fops = {
-	NULL,			/* lseek - default */
-	block_read,		/* read - general block-dev read */
-	block_write,		/* write - general block-dev write */
-	NULL,			/* readdir - bad */
-	NULL,			/* poll */
-	opt_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	opt_open,		/* open */
-	NULL,			/* flush */
-	opt_release,		/* release */
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	opt_media_change,	/* media change */
-	NULL			/* revalidate */
+static struct block_device_operations opt_fops = {
+	open:			opt_open,
+	release:		opt_release,
+	ioctl:			opt_ioctl,
+	check_media_change:	opt_media_change,
 };
 
-
+#ifndef MODULE
 /* Get kernel parameter when used as a kernel driver */
-__initfunc(void optcd_setup(char *str, int *ints))
+static int optcd_setup(char *str)
 {
+	int ints[4];
+	(void)get_options(str, ARRAY_SIZE(ints), ints);
+	
 	if (ints[0] > 0)
 		optcd_port = ints[1];
+
+ 	return 1;
 }
+
+__setup("optcd=", optcd_setup);
+
+#endif MODULE
 
 /* Test for presence of drive and initialize it. Called at boot time
    or during module initialisation. */
-__initfunc(int optcd_init(void))
+int __init optcd_init(void)
 {
 	int status;
 
@@ -2059,37 +2059,41 @@ __initfunc(int optcd_init(void))
 		DEBUG((DEBUG_VFS, "exec_cmd COMINITDOUBLE: %02x", -status));
 		return -EIO;
 	}
-	if (register_blkdev(MAJOR_NR, "optcd", &opt_fops) != 0)
+	if (devfs_register_blkdev(MAJOR_NR, "optcd", &opt_fops) != 0)
 	{
 		printk(KERN_ERR "optcd: unable to get major %d\n", MAJOR_NR);
 		return -EIO;
 	}
-
+	devfs_register (NULL, "optcd", DEVFS_FL_DEFAULT, MAJOR_NR, 0,
+			S_IFBLK | S_IRUGO | S_IWUGO, &opt_fops, NULL);
 	hardsect_size[MAJOR_NR] = &hsecsize;
 	blksize_size[MAJOR_NR] = &blksize;
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 4;
 	request_region(optcd_port, 4, "optcd");
+	register_disk(NULL, MKDEV(MAJOR_NR,0), 1, &opt_fops, 0);
 
 	printk(KERN_INFO "optcd: DOLPHIN 8000 AT CDROM at 0x%x\n", optcd_port);
 	return 0;
 }
 
 
-#ifdef MODULE
-int init_module(void)
+void __exit optcd_exit(void)
 {
-	return optcd_init();
-}
-
-
-void cleanup_module(void)
-{
-	if (unregister_blkdev(MAJOR_NR, "optcd") == -EINVAL) {
+	devfs_unregister(devfs_find_handle(NULL, "optcd", 0, 0,
+					   DEVFS_SPECIAL_BLK, 0));
+	if (devfs_unregister_blkdev(MAJOR_NR, "optcd") == -EINVAL) {
 		printk(KERN_ERR "optcd: what's that: can't unregister\n");
 		return;
 	}
+	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 	release_region(optcd_port, 4);
 	printk(KERN_INFO "optcd: module released.\n");
 }
-#endif MODULE
+
+#ifdef MODULE
+module_init(optcd_init);
+#endif
+module_exit(optcd_exit);
+
+

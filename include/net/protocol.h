@@ -61,6 +61,7 @@ struct inet6_protocol
 	void		*data;
 	const char	*name;
 };
+
 #endif
 
 extern struct inet_protocol *inet_protocol_base;

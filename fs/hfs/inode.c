@@ -20,6 +20,7 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/smp_lock.h>
 
 /*================ Variable-like macros ================*/
 
@@ -44,14 +45,18 @@ static void init_file_inode(struct inode *inode, hfs_u8 fork)
 	}
 
 	if (fork == HFS_FK_DATA) {
+#if 0 /* XXX: disable crlf translations for now */
 		hfs_u32 type = hfs_get_nl(entry->info.file.finfo.fdType);
 
-		fk = &entry->u.file.data_fork;
 		HFS_I(inode)->convert =
 			((HFS_SB(inode->i_sb)->s_conv == 't') ||
 			 ((HFS_SB(inode->i_sb)->s_conv == 'a') &&
 			  ((type == htonl(0x54455854)) ||   /* "TEXT" */
 			   (type == htonl(0x7474726f)))));  /* "ttro" */
+#else
+		HFS_I(inode)->convert = 0;
+#endif
+		fk = &entry->u.file.data_fork;
 	} else {
 		fk = &entry->u.file.rsrc_fork;
 		HFS_I(inode)->convert = 0;
@@ -75,8 +80,9 @@ void hfs_put_inode(struct inode * inode)
 {
 	struct hfs_cat_entry *entry = HFS_I(inode)->entry;
 
+	lock_kernel();
 	hfs_cat_put(entry);
-	if (inode->i_count == 1) {
+	if (atomic_read(&inode->i_count) == 1) {
 	  struct hfs_hdr_layout *tmp = HFS_I(inode)->layout;
 
 	  if (tmp) {
@@ -84,6 +90,7 @@ void hfs_put_inode(struct inode * inode)
 		HFS_DELETE(tmp);
 	  }
 	}
+	unlock_kernel();
 }
 
 /*
@@ -102,7 +109,9 @@ void hfs_put_inode(struct inode * inode)
  *     to permissions must be applied to all other in-core inodes which 
  *     correspond to the same HFS file.
  */
-int hfs_notify_change(struct dentry *dentry, struct iattr * attr)
+enum {HFS_NORM, HFS_HDR, HFS_CAP};
+
+static int __hfs_notify_change(struct dentry *dentry, struct iattr * attr, int kind)
 {
 	struct inode *inode = dentry->d_inode;
 	struct hfs_cat_entry *entry = HFS_I(inode)->entry;
@@ -144,6 +153,22 @@ int hfs_notify_change(struct dentry *dentry, struct iattr * attr)
 		}
 		attr->ia_mode &= ~hsb->s_umask;
 	}
+	/*
+	 * Normal files handle size change in normal way.
+	 * Oddballs are served here.
+	 */
+	if (attr->ia_valid & ATTR_SIZE) {
+		if (kind == HFS_CAP) {
+			inode->i_size = attr->ia_size;
+			if (inode->i_size > HFS_FORK_MAX)
+				inode->i_size = HFS_FORK_MAX;
+			mark_inode_dirty(inode);
+			attr->ia_valid &= ~ATTR_SIZE;
+		} else if (kind == HFS_HDR) {
+			hdr_truncate(inode, attr->ia_size);
+			attr->ia_valid &= ~ATTR_SIZE;
+		}
+	}
 	inode_setattr(inode, attr);
 
 	/* We wouldn't want to mess with the sizes of the other fork */
@@ -179,6 +204,47 @@ int hfs_notify_change(struct dentry *dentry, struct iattr * attr)
 
 	return 0;
 }
+
+int hfs_notify_change(struct dentry *dentry, struct iattr * attr)
+{
+	return __hfs_notify_change(dentry, attr, HFS_NORM);
+}
+
+int hfs_notify_change_cap(struct dentry *dentry, struct iattr * attr)
+{
+	return __hfs_notify_change(dentry, attr, HFS_CAP);
+}
+
+int hfs_notify_change_hdr(struct dentry *dentry, struct iattr * attr)
+{
+	return __hfs_notify_change(dentry, attr, HFS_HDR);
+}
+
+static int hfs_writepage(struct page *page)
+{
+	return block_write_full_page(page,hfs_get_block);
+}
+static int hfs_readpage(struct file *file, struct page *page)
+{
+	return block_read_full_page(page,hfs_get_block);
+}
+static int hfs_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
+{
+	return cont_prepare_write(page,from,to,hfs_get_block,
+		&page->mapping->host->u.hfs_i.mmu_private);
+}
+static int hfs_bmap(struct address_space *mapping, long block)
+{
+	return generic_block_bmap(mapping,block,hfs_get_block);
+}
+struct address_space_operations hfs_aops = {
+	readpage: hfs_readpage,
+	writepage: hfs_writepage,
+	sync_page: block_sync_page,
+	prepare_write: hfs_prepare_write,
+	commit_write: generic_commit_write,
+	bmap: hfs_bmap
+};
 
 /*
  * __hfs_iget()
@@ -300,10 +366,14 @@ void hfs_cap_ifill(struct inode * inode, ino_t type, const int version)
 		inode->i_nlink = 1;
 		inode->i_mode = S_IRUGO | S_IWUGO | S_IFREG;
 		inode->i_op = &hfs_cap_info_inode_operations;
+		inode->i_fop = &hfs_cap_info_operations;
 	} else if (entry->type == HFS_CDR_FIL) {
 		init_file_inode(inode, (type == HFS_CAP_DATA) ?
 						HFS_FK_DATA : HFS_FK_RSRC);
 		inode->i_op = &hfs_file_inode_operations;
+		inode->i_fop = &hfs_file_operations;
+		inode->i_mapping->a_ops = &hfs_aops;
+		inode->u.hfs_i.mmu_private = inode->i_size;
 	} else { /* Directory */
 		struct hfs_dir *hdir = &entry->u.dir;
 
@@ -314,16 +384,19 @@ void hfs_cap_ifill(struct inode * inode, ino_t type, const int version)
 			inode->i_mode = S_IRWXUGO | S_IFDIR;
 			inode->i_nlink = hdir->dirs + 4;
 			inode->i_op = &hfs_cap_ndir_inode_operations;
+			inode->i_fop = &hfs_cap_dir_operations;
 			HFS_I(inode)->file_type = HFS_CAP_NORM;
 		} else if (type == HFS_CAP_FDIR) {
 			inode->i_mode = S_IRUGO | S_IXUGO | S_IFDIR;
 			inode->i_nlink = 2;
 			inode->i_op = &hfs_cap_fdir_inode_operations;
+			inode->i_fop = &hfs_cap_dir_operations;
 			HFS_I(inode)->file_type = HFS_CAP_FNDR;
 		} else if (type == HFS_CAP_RDIR) {
 			inode->i_mode = S_IRUGO | S_IXUGO | S_IFDIR;
 			inode->i_nlink = 2;
 			inode->i_op = &hfs_cap_rdir_inode_operations;
+			inode->i_fop = &hfs_cap_dir_operations;
 			HFS_I(inode)->file_type = HFS_CAP_RSRC;
 		}
 	}
@@ -354,9 +427,13 @@ void hfs_dbl_ifill(struct inode * inode, ino_t type, const int version)
 			HFS_I(inode)->default_layout = &hfs_dbl_dir_hdr_layout;
 		}
 		inode->i_op = &hfs_hdr_inode_operations;
+		inode->i_fop = &hfs_hdr_operations;
 	} else if (entry->type == HFS_CDR_FIL) {
 		init_file_inode(inode, HFS_FK_DATA);
 		inode->i_op = &hfs_file_inode_operations;
+		inode->i_fop = &hfs_file_operations;
+		inode->i_mapping->a_ops = &hfs_aops;
+		inode->u.hfs_i.mmu_private = inode->i_size;
 	} else { /* Directory */
 		struct hfs_dir *hdir = &entry->u.dir;
 
@@ -365,6 +442,7 @@ void hfs_dbl_ifill(struct inode * inode, ino_t type, const int version)
 		inode->i_size = 3 + 2 * (hdir->dirs + hdir->files);
 		inode->i_mode = S_IRWXUGO | S_IFDIR;
 		inode->i_op = &hfs_dbl_dir_inode_operations;
+		inode->i_fop = &hfs_dbl_dir_operations;
 		HFS_I(inode)->file_type = HFS_DBL_NORM;
 		HFS_I(inode)->dir_size = 2;
 	}
@@ -393,11 +471,15 @@ void hfs_nat_ifill(struct inode * inode, ino_t type, const int version)
 			inode->i_nlink = 1;
 		}
 		inode->i_op = &hfs_hdr_inode_operations;
+		inode->i_fop = &hfs_hdr_operations;
 		HFS_I(inode)->default_layout = (version == 2) ?
 			&hfs_nat2_hdr_layout : &hfs_nat_hdr_layout;
 	} else if (entry->type == HFS_CDR_FIL) {
 		init_file_inode(inode, HFS_FK_DATA);
 		inode->i_op = &hfs_file_inode_operations;
+		inode->i_fop = &hfs_file_operations;
+		inode->i_mapping->a_ops = &hfs_aops;
+		inode->u.hfs_i.mmu_private = inode->i_size;
 	} else { /* Directory */
 		struct hfs_dir *hdir = &entry->u.dir;
 
@@ -414,5 +496,6 @@ void hfs_nat_ifill(struct inode * inode, ino_t type, const int version)
 			inode->i_op = &hfs_nat_hdir_inode_operations;
 			HFS_I(inode)->file_type = HFS_NAT_HDR;
 		}
+		inode->i_fop = &hfs_nat_dir_operations;
 	}
 }

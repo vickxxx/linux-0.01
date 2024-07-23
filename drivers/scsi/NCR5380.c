@@ -563,14 +563,10 @@ static volatile int main_running = 0;
 
 static __inline__ void run_main(void)
 {
-	unsigned long flags;
-	save_flags(flags);
-	cli();
 	if (!main_running) {
 		main_running = 1;
 		NCR5380_main();
 	}
-	restore_flags(flags);
 }
 
 #ifdef USLEEP
@@ -667,9 +663,7 @@ static int NCR5380_set_timer(struct Scsi_Host *instance)
 	((struct NCR5380_hostdata *) instance->hostdata)->next_timer = tmp;
 	*prev = instance;
    
-	del_timer(&usleep_timer);
-	usleep_timer.expires = ((struct NCR5380_hostdata *) expires_first->hostdata)->time_expires;
-	add_timer(&usleep_timer);
+	mod_timer(&usleep_timer, ((struct NCR5380_hostdata *) expires_first->hostdata)->time_expires);
 	restore_flags(flags);
 	return 0;
 }
@@ -736,12 +730,12 @@ static inline void NCR5380_all_init(void)
 
 static int probe_irq __initdata = 0;
 
-__initfunc(static void probe_intr(int irq, void *dev_id, struct pt_regs *regs))
+static void __init probe_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	probe_irq = irq;
 }
 
-__initfunc(static int NCR5380_probe_irq(struct Scsi_Host *instance, int possible))
+static int __init NCR5380_probe_irq(struct Scsi_Host *instance, int possible)
 {
 	NCR5380_local_declare();
 	struct NCR5380_hostdata *hostdata = (struct NCR5380_hostdata *)
@@ -797,7 +791,7 @@ __initfunc(static int NCR5380_probe_irq(struct Scsi_Host *instance, int possible
  * Inputs : instance, pointer to this instance.  Unused.
  */
 
-__initfunc(static void NCR5380_print_options(struct Scsi_Host *instance))
+static void __init NCR5380_print_options(struct Scsi_Host *instance)
 {
 	printk(" generic options"
 #ifdef AUTOPROBE_IRQ
@@ -1018,7 +1012,7 @@ char *lprint_opcode(int opcode, char *pos, char *buffer, int length)
  * 
  */
 
-__initfunc(static void NCR5380_init(struct Scsi_Host *instance, int flags))
+static void __init NCR5380_init(struct Scsi_Host *instance, int flags)
 {
 	NCR5380_local_declare();
 	int i, pass;
@@ -1226,7 +1220,6 @@ int NCR5380_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *)) {
 	 * sense data is only guaranteed to be valid while the condition exists.
 	 */
 
-	cli();
 	if (!(hostdata->issue_queue) || (cmd->cmnd[0] == REQUEST_SENSE)) {
 		LIST(cmd, hostdata->issue_queue);
 		cmd->host_scribble = (unsigned char *) hostdata->issue_queue;
@@ -1438,7 +1431,7 @@ static void NCR5380_main(void) {
 
 #ifndef DONT_USE_INTR
 #include <linux/blk.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 
 /*
  * Function : void NCR5380_intr (int irq)
@@ -2252,7 +2245,9 @@ static int NCR5380_transfer_dma(struct Scsi_Host *instance,
 	register unsigned char p = *phase;
 	register unsigned char *d = *data;
 	unsigned char tmp;
+#if defined(PSEUDO_DMA) && !defined(UNSAFE)
 	unsigned long flags;
+#endif
 	int foo;
 #if defined(REAL_DMA_POLL)
 	int cnt, toPIO;

@@ -1,4 +1,4 @@
-/* $Id: system.h,v 1.74 1999/05/08 03:03:14 davem Exp $ */
+/* $Id: system.h,v 1.84 2000/09/23 02:11:22 davem Exp $ */
 #include <linux/config.h>
 
 #ifndef __SPARC_SYSTEM_H
@@ -15,8 +15,6 @@
 #include <asm/ptrace.h>
 #include <asm/btfixup.h>
 
-#define EMPTY_PGT       (&empty_bad_page)
-#define EMPTY_PGE	(&empty_bad_page_table)
 #endif /* __KERNEL__ */
 
 #ifndef __ASSEMBLY__
@@ -68,21 +66,36 @@ extern void synchronize_user_stack(void);
 extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 		   void *fpqueue, unsigned long *fpqdepth);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define SWITCH_ENTER \
 	if(prev->flags & PF_USEDFPU) { \
 		put_psr(get_psr() | PSR_EF); \
-		fpsave(&prev->tss.float_regs[0], &prev->tss.fsr, \
-		       &prev->tss.fpqueue[0], &prev->tss.fpqdepth); \
+		fpsave(&prev->thread.float_regs[0], &prev->thread.fsr, \
+		       &prev->thread.fpqueue[0], &prev->thread.fpqdepth); \
 		prev->flags &= ~PF_USEDFPU; \
-		prev->tss.kregs->psr &= ~PSR_EF; \
+		prev->thread.kregs->psr &= ~PSR_EF; \
 	}
 
 #define SWITCH_DO_LAZY_FPU
 #else
 #define SWITCH_ENTER
-#define SWITCH_DO_LAZY_FPU if(last_task_used_math != next) next->tss.kregs->psr&=~PSR_EF;
+#define SWITCH_DO_LAZY_FPU if(last_task_used_math != next) next->thread.kregs->psr&=~PSR_EF;
 #endif
+
+/*
+ * Flush windows so that the VM switch which follows
+ * would not pull the stack from under us.
+ *
+ * SWITCH_ENTER and SWITH_DO_LAZY_FPU do not work yet (e.g. SMP does not work)
+ */
+#define prepare_to_switch() do { \
+	__asm__ __volatile__( \
+	".globl\tflush_patch_switch\nflush_patch_switch:\n\t" \
+	"save %sp, -0x40, %sp; save %sp, -0x40, %sp; save %sp, -0x40, %sp\n\t" \
+	"save %sp, -0x40, %sp; save %sp, -0x40, %sp; save %sp, -0x40, %sp\n\t" \
+	"save %sp, -0x40, %sp\n\t" \
+	"restore; restore; restore; restore; restore; restore; restore"); \
+} while(0)
 
 	/* Much care has gone into this code, do not touch it.
 	 *
@@ -91,6 +104,9 @@ extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 	 * holding certain values, gcc is told that they are clobbered.
 	 * Gcc needs registers for 3 values in and 1 value out, so we
 	 * clobber every non-fixed-usage register besides l2/l3/o4/o5.  -DaveM
+	 *
+	 * Hey Dave, that do not touch sign is too much of an incentive
+	 * - Anton
 	 */
 #define switch_to(prev, next, last) do {						\
 	__label__ here;									\
@@ -98,16 +114,7 @@ extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 	extern struct task_struct *current_set[NR_CPUS];				\
 	SWITCH_ENTER									\
 	SWITCH_DO_LAZY_FPU								\
-	__asm__ __volatile__(								\
-	".globl\tflush_patch_switch\nflush_patch_switch:\n\t"				\
-	"save %sp, -0x40, %sp; save %sp, -0x40, %sp; save %sp, -0x40, %sp\n\t"		\
-	"save %sp, -0x40, %sp; save %sp, -0x40, %sp; save %sp, -0x40, %sp\n\t"		\
-	"save %sp, -0x40, %sp\n\t"							\
-	"restore; restore; restore; restore; restore; restore; restore");		\
-	if(!(next->tss.flags & SPARC_FLAG_KTHREAD) &&					\
-	   !(next->flags & PF_EXITING))							\
-		switch_to_context(next);						\
-	next->mm->cpu_vm_mask |= (1 << smp_processor_id());				\
+	next->active_mm->cpu_vm_mask |= (1 << smp_processor_id());			\
 	task_pc = ((unsigned long) &&here) - 0x8;					\
 	__asm__ __volatile__(								\
 	"mov	%%g6, %%g3\n\t"								\
@@ -136,16 +143,16 @@ extern void fpsave(unsigned long *fpregs, unsigned long *fsr,
 	" mov	%%g3, %0\n\t"								\
         : "=&r" (last)									\
         : "r" (&(current_set[hard_smp_processor_id()])), "r" (next),			\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->tss.kpsr)),		\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->tss.ksp)),		\
+	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.kpsr)),		\
+	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.ksp)),		\
 	  "r" (task_pc)									\
 	: "g1", "g2", "g3", "g4", "g5", "g7", "l0", "l1",				\
 	"l4", "l5", "l6", "l7", "i0", "i1", "i2", "i3", "i4", "i5", "o0", "o1", "o2",	\
 	"o3");										\
 here:  } while(0)
 
-/* Changing the IRQ level on the Sparc.   We now avoid writing the psr
- * whenever possible.
+/*
+ * Changing the IRQ level on the Sparc.
  */
 extern __inline__ void setipl(unsigned long __orig_psr)
 {
@@ -237,19 +244,17 @@ extern __inline__ unsigned long read_psr_and_cli(void)
 #define __save_flags(flags)	((flags) = getipl())
 #define __save_and_cli(flags)	((flags) = read_psr_and_cli())
 #define __restore_flags(flags)	setipl((flags))
+#define local_irq_disable()		__cli()
+#define local_irq_enable()		__sti()
+#define local_irq_save(flags)		__save_and_cli(flags)
+#define local_irq_restore(flags)	__restore_flags(flags)
 
-#ifdef __SMP__
-
-/* This goes away after lockups have been found... */
-#ifndef DEBUG_IRQLOCK
-#define DEBUG_IRQLOCK
-#endif
+#ifdef CONFIG_SMP
 
 extern unsigned char global_irq_holder;
 
 #define save_and_cli(flags)   do { save_flags(flags); cli(); } while(0)
 
-#ifdef DEBUG_IRQLOCK
 extern void __global_cli(void);
 extern void __global_sti(void);
 extern unsigned long __global_save_flags(void);
@@ -258,42 +263,6 @@ extern void __global_restore_flags(unsigned long flags);
 #define sti()			__global_sti()
 #define save_flags(flags)	((flags)=__global_save_flags())
 #define restore_flags(flags)	__global_restore_flags(flags)
-#else
-
-#error For combined sun4[md] smp, we need to get rid of the rdtbr.
-
-/* Visit arch/sparc/lib/irqlock.S for all the fun details... */
-#define cli()      __asm__ __volatile__("mov	%%o7, %%g4\n\t"			\
-					"call	___f_global_cli\n\t"		\
-					" rd	%%tbr, %%g7" : :		\
-					: "g1", "g2", "g3", "g4", "g5", "g7",	\
-					  "memory", "cc")
-
-#define sti()							\
-do {	register unsigned long bits asm("g7");			\
-	bits = 0;						\
-	__asm__ __volatile__("mov	%%o7, %%g4\n\t"		\
-			     "call	___f_global_sti\n\t"	\
-			     " rd	%%tbr, %%g2"		\
-			     : /* no outputs */			\
-			     : "r" (bits)			\
-			     : "g1", "g2", "g3", "g4", "g5",	\
-			       "memory", "cc");			\
-} while(0)
-
-#define restore_flags(flags)						\
-do {	register unsigned long bits asm("g7");				\
-	bits = flags;							\
-	__asm__ __volatile__("mov	%%o7, %%g4\n\t"			\
-			     "call	___f_global_restore_flags\n\t"	\
-			     " andcc	%%g7, 0x1, %%g0"		\
-			     : "=&r" (bits)				\
-			     : "0" (bits)				\
-			     : "g1", "g2", "g3", "g4", "g5",		\
-			       "memory", "cc");				\
-} while(0)
-
-#endif /* DEBUG_IRQLOCK */
 
 #else
 
@@ -309,17 +278,22 @@ do {	register unsigned long bits asm("g7");				\
 #define mb()	__asm__ __volatile__ ("" : : : "memory")
 #define rmb()	mb()
 #define wmb()	mb()
+#define set_mb(__var, __value)  do { __var = __value; mb(); } while(0)
+#define set_wmb(__var, __value) set_mb(__var, __value)
+#define smp_mb()	__asm__ __volatile__("":::"memory");
+#define smp_rmb()	__asm__ __volatile__("":::"memory");
+#define smp_wmb()	__asm__ __volatile__("":::"memory");
 
 #define nop() __asm__ __volatile__ ("nop");
 
 /* This has special calling conventions */
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 BTFIXUPDEF_CALL(void, ___xchg32, void)
 #endif
 
 extern __inline__ unsigned long xchg_u32(__volatile__ unsigned long *m, unsigned long val)
 {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	__asm__ __volatile__("swap [%2], %0"
 			     : "=&r" (val)
 			     : "0" (val), "r" (m));

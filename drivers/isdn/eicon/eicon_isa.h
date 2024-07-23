@@ -1,10 +1,10 @@
-/* $Id: eicon_isa.h,v 1.3 1999/03/29 11:19:47 armin Exp $
+/* $Id: eicon_isa.h,v 1.10 2000/05/07 08:51:04 armin Exp $
  *
- * ISDN low-level module for Eicon.Diehl active ISDN-Cards.
+ * ISDN low-level module for Eicon active ISDN-Cards.
  *
- * Copyright 1998    by Fritz Elfert (fritz@wuemaus.franken.de)
- * Copyright 1998,99 by Armin Schindler (mac@melware.de)
- * Copyright 1999    Cytronics & Melware (info@melware.de)
+ * Copyright 1998      by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1998-2000 by Armin Schindler (mac@melware.de)
+ * Copyright 1999,2000 Cytronics & Melware (info@melware.de)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -20,28 +20,13 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  *
- * $Log: eicon_isa.h,v $
- * Revision 1.3  1999/03/29 11:19:47  armin
- * I/O stuff now in seperate file (eicon_io.c)
- * Old ISA type cards (S,SX,SCOM,Quadro,S2M) implemented.
- *
- * Revision 1.2  1999/03/02 12:37:46  armin
- * Added some important checks.
- * Analog Modem with DSP.
- * Channels will be added to Link-Level after loading firmware.
- *
- * Revision 1.1  1999/01/01 18:09:44  armin
- * First checkin of new eicon driver.
- * DIVA-Server BRI/PCI and PRI/PCI are supported.
- * Old diehl code is obsolete.
- *
- *
  */
 
 #ifndef eicon_isa_h
 #define eicon_isa_h
 
 #ifdef __KERNEL__
+#include <linux/config.h>
 
 /* Factory defaults for ISA-Cards */
 #define EICON_ISA_MEMBASE 0xd0000
@@ -106,6 +91,10 @@ typedef union {
 typedef struct {
 	int               ramsize;
 	int               irq;	    /* IRQ                        */
+	unsigned long	  physmem;  /* physical memory address	  */
+#ifdef CONFIG_MCA
+	int		  io;	    /* IO-port for MCA brand      */
+#endif /* CONFIG_MCA */
 	void*             card;
 	eicon_isa_shmem*  shmem;    /* Shared-memory area         */
 	unsigned char*    intack;   /* Int-Acknowledge            */
@@ -117,7 +106,6 @@ typedef struct {
 	unsigned char     mvalid;   /* Flag: Memory is valid      */
 	unsigned char     ivalid;   /* Flag: IRQ is valid         */
 	unsigned char     master;   /* Flag: Card ist Quadro 1/4  */
-	void*             generic;  /* Ptr to generic card struct */
 } eicon_isa_card;
 
 /* Offsets for special locations on standard cards */

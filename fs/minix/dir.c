@@ -12,54 +12,12 @@
 #include <linux/minix_fs.h>
 #include <linux/stat.h>
 
-#include <asm/uaccess.h>
-
-static ssize_t minix_dir_read(struct file * filp, char * buf,
-			      size_t count, loff_t *ppos)
-{
-	return -EISDIR;
-}
-
 static int minix_readdir(struct file *, void *, filldir_t);
 
-static struct file_operations minix_dir_operations = {
-	NULL,			/* lseek - default */
-	minix_dir_read,		/* read */
-	NULL,			/* write - bad */
-	minix_readdir,		/* readdir */
-	NULL,			/* poll - default */
-	NULL,			/* ioctl - default */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	file_fsync		/* default fsync */
-};
-
-/*
- * directories can handle most operations...
- */
-struct inode_operations minix_dir_inode_operations = {
-	&minix_dir_operations,	/* default directory file-ops */
-	minix_create,		/* create */
-	minix_lookup,		/* lookup */
-	minix_link,		/* link */
-	minix_unlink,		/* unlink */
-	minix_symlink,		/* symlink */
-	minix_mkdir,		/* mkdir */
-	minix_rmdir,		/* rmdir */
-	minix_mknod,		/* mknod */
-	minix_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+struct file_operations minix_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	minix_readdir,
+	fsync:		file_fsync,
 };
 
 static int minix_readdir(struct file * filp,
@@ -85,7 +43,7 @@ static int minix_readdir(struct file * filp,
 			de = (struct minix_dir_entry *) (offset + bh->b_data);
 			if (de->inode) {
 				int size = strnlen(de->name, info->s_namelen);
-				if (filldir(dirent, de->name, size, filp->f_pos, de->inode) < 0) {
+				if (filldir(dirent, de->name, size, filp->f_pos, de->inode, DT_UNKNOWN) < 0) {
 					brelse(bh);
 					return 0;
 				}

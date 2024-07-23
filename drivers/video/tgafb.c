@@ -1,27 +1,29 @@
 /*
  *  linux/drivers/video/tgafb.c -- DEC 21030 TGA frame buffer device
  *
+ *	Copyright (C) 1999,2000 Martin Lucina, Tom Zerucha
+ *  
+ *  $Id: tgafb.c,v 1.12.2.3 2000/04/04 06:44:56 mato Exp $
+ *
+ *  This driver is partly based on the original TGA framebuffer device, which 
+ *  was partly based on the original TGA console driver, which are
+ *
  *	Copyright (C) 1997 Geert Uytterhoeven
- *
- *  This driver is partly based on the original TGA console driver
- *
- *	Copyright (C) 1995  Jay Estabrook
+ *	Copyright (C) 1995 Jay Estabrook
  *
  *  This file is subject to the terms and conditions of the GNU General Public
  *  License. See the file COPYING in the main directory of this archive for
  *  more details.
  */
 
-
 /* KNOWN PROBLEMS/TO DO ===================================================== *
  *
  *	- How to set a single color register on 24-plane cards?
  *
- *	- Hardware cursor (useful for other graphics boards too)
- *
- *	- Support for more resolutions
+ *	- Hardware cursor/other text acceleration methods
  *
  *	- Some redraws can stall kernel for several seconds
+ *	  [This should now be solved by the fast memmove() patch in 2.3.6]
  *
  * KNOWN PROBLEMS/TO DO ==================================================== */
 
@@ -40,482 +42,464 @@
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/selection.h>
+#include <linux/console.h>
 #include <asm/io.h>
 
 #include <video/fbcon.h>
 #include <video/fbcon-cfb8.h>
 #include <video/fbcon-cfb32.h>
+#include "tgafb.h"
 
 
-/* TGA hardware description (minimal) */
-/*
- * Offsets within Memory Space
- */
-#define	TGA_ROM_OFFSET			0x0000000
-#define	TGA_REGS_OFFSET			0x0100000
-#define	TGA_8PLANE_FB_OFFSET		0x0200000
-#define	TGA_24PLANE_FB_OFFSET		0x0804000
-#define	TGA_24PLUSZ_FB_OFFSET		0x1004000
+    /*
+     *  Global declarations
+     */
 
-#define	TGA_PLANEMASK_REG		0x0028
-#define	TGA_MODE_REG			0x0030
-#define	TGA_RASTEROP_REG		0x0034
-#define	TGA_DEEP_REG			0x0050
-#define	TGA_PIXELMASK_REG		0x005c
-#define	TGA_CURSOR_BASE_REG		0x0060
-#define	TGA_HORIZ_REG			0x0064
-#define	TGA_VERT_REG			0x0068
-#define	TGA_BASE_ADDR_REG		0x006c
-#define	TGA_VALID_REG			0x0070
-#define	TGA_CURSOR_XY_REG		0x0074
-#define	TGA_INTR_STAT_REG		0x007c
-#define	TGA_RAMDAC_SETUP_REG		0x00c0
-#define	TGA_BLOCK_COLOR0_REG		0x0140
-#define	TGA_BLOCK_COLOR1_REG		0x0144
-#define	TGA_CLOCK_REG			0x01e8
-#define	TGA_RAMDAC_REG			0x01f0
-#define	TGA_CMD_STAT_REG		0x01f8
+static struct tgafb_info fb_info;
+static struct tgafb_par current_par;
+static int current_par_valid = 0;
+static struct display disp;
 
-/*
- * useful defines for managing the BT485 on the 8-plane TGA
- */
-#define	BT485_READ_BIT			0x01
-#define	BT485_WRITE_BIT			0x00
+static char default_fontname[40] = { 0 };
+static struct fb_var_screeninfo default_var;
+static int default_var_valid = 0;
 
-#define	BT485_ADDR_PAL_WRITE		0x00
-#define	BT485_DATA_PAL			0x02
-#define	BT485_PIXEL_MASK		0x04
-#define	BT485_ADDR_PAL_READ		0x06
-#define	BT485_ADDR_CUR_WRITE		0x08
-#define	BT485_DATA_CUR			0x0a
-#define	BT485_CMD_0			0x0c
-#define	BT485_ADDR_CUR_READ		0x0e
-#define	BT485_CMD_1			0x10
-#define	BT485_CMD_2			0x12
-#define	BT485_STATUS			0x14
-#define	BT485_CMD_3			0x14
-#define	BT485_CUR_RAM			0x16
-#define	BT485_CUR_LOW_X			0x18
-#define	BT485_CUR_HIGH_X		0x1a
-#define	BT485_CUR_LOW_Y			0x1c
-#define	BT485_CUR_HIGH_Y		0x1e
+static int currcon = 0;
 
-/*
- * useful defines for managing the BT463 on the 24-plane TGAs
- */
-#define	BT463_ADDR_LO		0x0
-#define	BT463_ADDR_HI		0x1
-#define	BT463_REG_ACC		0x2
-#define	BT463_PALETTE		0x3
-
-#define	BT463_CUR_CLR_0		0x0100
-#define	BT463_CUR_CLR_1		0x0101
-
-#define	BT463_CMD_REG_0		0x0201
-#define	BT463_CMD_REG_1		0x0202
-#define	BT463_CMD_REG_2		0x0203
-
-#define	BT463_READ_MASK_0	0x0205
-#define	BT463_READ_MASK_1	0x0206
-#define	BT463_READ_MASK_2	0x0207
-#define	BT463_READ_MASK_3	0x0208
-
-#define	BT463_BLINK_MASK_0	0x0209
-#define	BT463_BLINK_MASK_1	0x020a
-#define	BT463_BLINK_MASK_2	0x020b
-#define	BT463_BLINK_MASK_3	0x020c
-
-#define	BT463_WINDOW_TYPE_BASE	0x0300
+static struct { u_char red, green, blue, pad; } palette[256];
+#ifdef FBCON_HAS_CFB32
+static u32 fbcon_cfb32_cmap[16];
+#endif
 
 
-int tga_type;
-unsigned int tga_mem_base;
-unsigned long tga_fb_base;
-unsigned long tga_regs_base;
+    /*
+     *  Hardware presets
+     */
 
-static unsigned int fb_offset_presets[4] __initdata = {
+static unsigned int fb_offset_presets[4] = {
 	TGA_8PLANE_FB_OFFSET,
 	TGA_24PLANE_FB_OFFSET,
 	0xffffffff,
 	TGA_24PLUSZ_FB_OFFSET
 };
 
-static unsigned int deep_presets[4] __initdata = {
+static unsigned int deep_presets[4] = {
   0x00014000,
   0x0001440d,
   0xffffffff,
   0x0001441d
 };
 
-static unsigned int rasterop_presets[4] __initdata = {
+static unsigned int rasterop_presets[4] = {
   0x00000003,
   0x00000303,
   0xffffffff,
   0x00000303
 };
 
-static unsigned int mode_presets[4] __initdata = {
+static unsigned int mode_presets[4] = {
   0x00002000,
   0x00002300,
   0xffffffff,
   0x00002300
 };
 
-static unsigned int base_addr_presets[4] __initdata = {
+static unsigned int base_addr_presets[4] = {
   0x00000000,
   0x00000001,
   0xffffffff,
   0x00000001
 };
 
-#define TGA_WRITE_REG(v,r) \
-	{ writel((v), tga_regs_base+(r)); mb(); }
 
-#define TGA_READ_REG(r) readl(tga_regs_base+(r))
+    /*
+     *  Predefined video modes
+     *  This is a subset of the standard VESA modes, recalculated from XFree86.
+     *
+     *  XXX Should we store these in terms of the encoded par structs? Even better,
+     *      fbcon should provide a general mechanism for doing something like this.
+     */
 
-#define BT485_WRITE(v,r) \
-	  TGA_WRITE_REG((r),TGA_RAMDAC_SETUP_REG);		\
-	  TGA_WRITE_REG(((v)&0xff)|((r)<<8),TGA_RAMDAC_REG);
+static struct {
+    const char *name;
+    struct fb_var_screeninfo var;
+} tgafb_predefined[] __initdata = {
+    { "640x480-60", {
+	640, 480, 640, 480, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 39722, 40, 24, 32, 11, 96, 2,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "800x600-56", {
+	800, 600, 800, 600, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 27777, 128, 24, 22, 1, 72, 2,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "640x480-72", {
+	640, 480, 640, 480, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 31746, 144, 40, 30, 8, 40, 3,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "800x600-60", {
+	800, 600, 800, 600, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 25000, 88, 40, 23, 1, 128, 4,
+	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "800x600-72", {
+	800, 600, 800, 600, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 20000, 64, 56, 23, 37, 120, 6,
+	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1024x768-60", {
+	1024, 768, 1024, 768, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 15384, 168, 8, 29, 3, 144, 6,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1152x864-60", {
+	1152, 864, 1152, 864, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 11123, 208, 64, 16, 4, 256, 8,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1024x768-70", {
+	1024, 768, 1024, 768, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 13333, 144, 24, 29, 3, 136, 6,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1024x768-76", {
+	1024, 768, 1024, 768, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 11764, 208, 8, 36, 16, 120, 3,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1152x864-70", {
+	1152, 864, 1152, 864, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 10869, 106, 56, 20, 1, 160, 10,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1280x1024-61", {
+	1280, 1024, 1280, 1024, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 9090, 200, 48, 26, 1, 184, 3,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1024x768-85", {
+	1024, 768, 1024, 768, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 10111, 192, 32, 34, 14, 160, 6,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1280x1024-70", {
+	1280, 1024, 1280, 1024, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 7905, 224, 32, 28, 8, 160, 8,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1152x864-84", {
+	1152, 864, 1152, 864, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 7407, 184, 312, 32, 0, 128, 12,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1280x1024-76", {
+	1280, 1024, 1280, 1024, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 7407, 248, 32, 34, 3, 104, 3,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "1280x1024-85", {
+	1280, 1024, 1280, 1024, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 6349, 224, 64, 44, 1, 160, 3,
+	0,
+	FB_VMODE_NONINTERLACED
+    }},
 
-#define BT463_LOAD_ADDR(a) \
-	TGA_WRITE_REG(BT463_ADDR_LO<<2, TGA_RAMDAC_SETUP_REG); \
-	TGA_WRITE_REG((BT463_ADDR_LO<<10)|((a)&0xff), TGA_RAMDAC_REG); \
-	TGA_WRITE_REG(BT463_ADDR_HI<<2, TGA_RAMDAC_SETUP_REG); \
-	TGA_WRITE_REG((BT463_ADDR_HI<<10)|(((a)>>8)&0xff), TGA_RAMDAC_REG);
+    /* These are modes used by the two fixed-frequency monitors I have at home. 
+     * You may or may not find these useful.
+     */
 
-#define BT463_WRITE(m,a,v) \
-	BT463_LOAD_ADDR((a)); \
-	TGA_WRITE_REG(((m)<<2),TGA_RAMDAC_SETUP_REG); \
-	TGA_WRITE_REG(((m)<<10)|((v)&0xff),TGA_RAMDAC_REG);
-
-
-unsigned char PLLbits[7] __initdata = { 0x80, 0x04, 0x00, 0x24, 0x44, 0x80, 0xb8 };
-
-const unsigned long bt485_cursor_source[64] __initdata = {
-#if 1
-  0x0000000000000000,0x0000000000000000,0x0000000000000000,0x0000000000000000,
-  0x0000000000000000,0x0000000000000000,0x0000000000000000,0x0000000000000000,
-  0x0000000000000000,0x0000000000000000,0x0000000000000000,0x0000000000000000,
-  0x0000000000000000,0x0000000000000000,0x0000000000000000,0x0000000000000000,
-#else
-  0x00000000000000ff,0x00000000000000ff,0x00000000000000ff,0x00000000000000ff,
-  0x00000000000000ff,0x00000000000000ff,0x00000000000000ff,0x00000000000000ff,
-  0x00000000000000ff,0x00000000000000ff,0x00000000000000ff,0x00000000000000ff,
-  0x00000000000000ff,0x00000000000000ff,0x00000000000000ff,0x00000000000000ff,
-#endif
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+    { "WYSE1", {			/* 1280x1024 @ 72 Hz, 130 Mhz clock */
+	1280, 1024, 1280, 1024, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 7692, 192, 32, 47, 0, 192, 5,
+	FB_SYNC_HOR_HIGH_ACT|FB_SYNC_VERT_HIGH_ACT,
+	FB_VMODE_NONINTERLACED
+    }},
+    { "IBM3", {				/* 1280x1024 @ 70 Hz, 120 Mhz clock */
+	1280, 1024, 1280, 1024, 0, 0, 0, 0,
+	{0, 8, 0}, {0, 8, 0}, {0, 8, 0}, {0, 0, 0},
+	0, 0, -1, -1, FB_ACCELF_TEXT, 8333, 192, 32, 47, 0, 192, 5,
+	0,
+	FB_VMODE_NONINTERLACED
+    }}
 };
 
-const unsigned int bt463_cursor_source[256] __initdata = {
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0xffff0000, 0x00000000, 0x00000000, 0x00000000,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
-  0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
-};
-
-
-#define arraysize(x)	(sizeof(x)/sizeof(*(x)))
-
-static int currcon = 0;
-static struct display disp;
-static struct fb_info fb_info;
-static struct { u_char red, green, blue, pad; } palette[256];
-#ifdef FBCON_HAS_CFB32
-static u32 fbcon_cfb32_cmap[16];
-#endif
-
-static struct fb_fix_screeninfo fb_fix = { { "DEC TGA ", } };
-static struct fb_var_screeninfo fb_var = { 0, };
+#define NUM_TOTAL_MODES    ARRAY_SIZE(tgafb_predefined)
 
 
     /*
      *  Interface used by the world
      */
 
-static int tgafb_open(struct fb_info *info, int user);
-static int tgafb_release(struct fb_info *info, int user);
-static int tgafb_get_fix(struct fb_fix_screeninfo *fix, int con,
-			 struct fb_info *info);
-static int tgafb_get_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info);
-static int tgafb_set_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info);
-static int tgafb_pan_display(struct fb_var_screeninfo *var, int con,
-			     struct fb_info *info);
-static int tgafb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
-			  struct fb_info *info);
+static void tgafb_detect(void);
+static int tgafb_encode_fix(struct fb_fix_screeninfo *fix, const void *fb_par,
+		        struct fb_info_gen *info);
+static int tgafb_decode_var(const struct fb_var_screeninfo *var, void *fb_par,
+		        struct fb_info_gen *info);
+static int tgafb_encode_var(struct fb_var_screeninfo *var, const void *fb_par,
+		        struct fb_info_gen *info);
+static void tgafb_get_par(void *fb_par, struct fb_info_gen *info);
+static void tgafb_set_par(const void *fb_par, struct fb_info_gen *info);
+static int tgafb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue, 
+		u_int *transp, struct fb_info *info);
+static int tgafb_setcolreg(u_int regno, u_int red, u_int green, u_int blue, 
+		u_int transp, struct fb_info *info);
+static int tgafb_blank(int blank, struct fb_info_gen *info);
+static void tgafb_set_disp(const void *fb_par, struct display *disp, 
+		struct fb_info_gen *info);
+
+int tgafb_setup(char*);
+int tgafb_init(void);
+void tgafb_cleanup(struct fb_info *info);
+
+static void tgafb_set_pll(int f);
+#if 1
 static int tgafb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info);
-static int tgafb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info);
-
-
-    /*
-     *  Interface to the low level console driver
-     */
-
-void tgafb_init(void);
-static int tgafbcon_switch(int con, struct fb_info *info);
-static int tgafbcon_updatevar(int con, struct fb_info *info);
-static void tgafbcon_blank(int blank, struct fb_info *info);
-
-
-    /*
-     *  Internal routines
-     */
-
-static int tgafb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
-			   u_int *transp, struct fb_info *info);
-static int tgafb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
-			   u_int transp, struct fb_info *info);
-#if 1
-static void tga_update_palette(void);
+static void tgafb_update_palette(void);
 #endif
-static void do_install_cmap(int con, struct fb_info *info);
-
-
-static struct fb_ops tgafb_ops = {
-    tgafb_open, tgafb_release, tgafb_get_fix, tgafb_get_var, tgafb_set_var,
-    tgafb_get_cmap, tgafb_set_cmap, tgafb_pan_display, tgafb_ioctl
-};
 
 
     /*
-     *  Open/Release the frame buffer device
+     *  Chipset specific functions
      */
 
-static int tgafb_open(struct fb_info *info, int user)
-{
-    /*                                                                     
-     *  Nothing, only a usage count for the moment                          
-     */                                                                    
 
-    MOD_INC_USE_COUNT;
-    return(0);                              
-}
-        
-static int tgafb_release(struct fb_info *info, int user)
+static void tgafb_detect(void)
 {
-    MOD_DEC_USE_COUNT;
-    return(0);                                                    
+    return;
 }
 
 
-    /*
-     *  Get the Fixed Part of the Display
-     */
-
-static int tgafb_get_fix(struct fb_fix_screeninfo *fix, int con,
-			 struct fb_info *info)
+static int tgafb_encode_fix(struct fb_fix_screeninfo *fix, const void *fb_par,
+	struct fb_info_gen *info)
 {
-    memcpy(fix, &fb_fix, sizeof(fb_fix));
-    return 0;
-}
+    struct tgafb_par *par = (struct tgafb_par *)fb_par;
 
+    strcpy(fix->id, fb_info.gen.info.modename);
 
-    /*
-     *  Get the User Defined Part of the Display
-     */
-
-static int tgafb_get_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info)
-{
-    memcpy(var, &fb_var, sizeof(fb_var));
-    return 0;
-}
-
-
-    /*
-     *  Set the User Defined Part of the Display
-     */
-
-static int tgafb_set_var(struct fb_var_screeninfo *var, int con,
-			 struct fb_info *info)
-{
-    struct display *display;
-    int oldbpp = -1, err;
-
-    if (con >= 0)
-	display = &fb_display[con];
-    else
-	display = &disp;	/* used during initialization */
-
-    if (var->xres > fb_var.xres || var->yres > fb_var.yres ||
-	var->xres_virtual > fb_var.xres_virtual ||
-	var->yres_virtual > fb_var.yres_virtual ||
-	var->bits_per_pixel > fb_var.bits_per_pixel ||
-	var->nonstd ||
-	(var->vmode & FB_VMODE_MASK) != FB_VMODE_NONINTERLACED)
-	return -EINVAL;
-    memcpy(var, &fb_var, sizeof(fb_var));
-
-    if ((var->activate & FB_ACTIVATE_MASK) == FB_ACTIVATE_NOW) {
-	oldbpp = display->var.bits_per_pixel;
-	display->var = *var;
+    fix->type = FB_TYPE_PACKED_PIXELS;
+    fix->type_aux = 0;
+    if (fb_info.tga_type == TGA_TYPE_8PLANE) {
+	fix->visual = FB_VISUAL_PSEUDOCOLOR;
+    } else {
+	fix->visual = FB_VISUAL_TRUECOLOR;
     }
-    if (oldbpp != var->bits_per_pixel) {
-	if ((err = fb_alloc_cmap(&display->cmap, 0, 0)))
-	    return err;
-	do_install_cmap(con, info);
-    }
+
+    fix->line_length = par->xres * (par->bits_per_pixel >> 3);
+    fix->smem_start = fb_info.tga_fb_base;
+    fix->smem_len = fix->line_length * par->yres;
+    fix->mmio_start = fb_info.tga_regs_base;
+    fix->mmio_len = 0x1000;		/* Is this sufficient? */
+    fix->xpanstep = fix->ypanstep = fix->ywrapstep = 0;
+    fix->accel = FB_ACCEL_DEC_TGA;
+
     return 0;
 }
 
 
-    /*
-     *  Pan or Wrap the Display
-     *
-     *  This call looks only at xoffset, yoffset and the FB_VMODE_YWRAP flag
-     */
-
-static int tgafb_pan_display(struct fb_var_screeninfo *var, int con,
-			     struct fb_info *info)
+static int tgafb_decode_var(const struct fb_var_screeninfo *var, void *fb_par,
+	struct fb_info_gen *info)
 {
-    if (var->xoffset || var->yoffset)
-	return -EINVAL;
-    else
-	return 0;
-}
+    struct tgafb_par *par = (struct tgafb_par *)fb_par;
 
-    /*
-     *  Get the Colormap
-     */
-
-static int tgafb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
-			  struct fb_info *info)
-{
-    if (con == currcon) /* current console? */
-	return fb_get_cmap(cmap, kspc, tgafb_getcolreg, info);
-    else if (fb_display[con].cmap.len) /* non default colormap? */
-	fb_copy_cmap(&fb_display[con].cmap, cmap, kspc ? 0 : 2);
-    else
-	fb_copy_cmap(fb_default_cmap(256), cmap, kspc ? 0 : 2);
-    return 0;
-}
-
-    /*
-     *  Set the Colormap
-     */
-
-static int tgafb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
-			  struct fb_info *info)
-{
-    int err;
-
-    if (!fb_display[con].cmap.len) {	/* no colormap allocated? */
-	if ((err = fb_alloc_cmap(&fb_display[con].cmap, 256, 0)))
-	    return err;
+    /* round up some */
+    if (fb_info.tga_type == TGA_TYPE_8PLANE) {
+	if (var->bits_per_pixel > 8) {
+	    return -EINVAL;
+	}
+	par->bits_per_pixel = 8;
+    } else {
+	if (var->bits_per_pixel > 32) {
+	    return -EINVAL;
+	}
+	par->bits_per_pixel = 32;
     }
-    if (con == currcon) {		/* current console? */
-	err = fb_set_cmap(cmap, kspc, tgafb_setcolreg, info);
-#if 1
-	if (tga_type != 0)
-		tga_update_palette();
+
+    /* check the values for sanity */
+    if (var->xres_virtual != var->xres ||
+	var->yres_virtual != var->yres ||
+	var->nonstd || (1000000000/var->pixclock) > TGA_PLL_MAX_FREQ ||
+	(var->vmode & FB_VMODE_MASK) != FB_VMODE_NONINTERLACED
+#if 0	/* fbmon not done.  uncomment for 2.5.x -brad */
+	|| !fbmon_valid_timings(var->pixclock, var->htotal, var->vtotal, info))
+#else
+	)
 #endif
-	return err;
-    } else
-	fb_copy_cmap(cmap, &fb_display[con].cmap, kspc ? 0 : 1);
+	return -EINVAL;
+
+    /* encode video timings */
+    par->htimings = ((var->xres/4) & TGA_HORIZ_ACT_LSB) | 
+	(((var->xres/4) & 0x600 << 19) & TGA_HORIZ_ACT_MSB);
+    par->vtimings = (var->yres & TGA_VERT_ACTIVE);
+    par->htimings |= ((var->right_margin/4) << 9) & TGA_HORIZ_FP;
+    par->vtimings |= (var->lower_margin << 11) & TGA_VERT_FP;
+    par->htimings |= ((var->hsync_len/4) << 14) & TGA_HORIZ_SYNC;
+    par->vtimings |= (var->vsync_len << 16) & TGA_VERT_SYNC;
+    par->htimings |= ((var->left_margin/4) << 21) & TGA_HORIZ_BP;
+    par->vtimings |= (var->upper_margin << 22) & TGA_VERT_BP;
+
+    if (var->sync & FB_SYNC_HOR_HIGH_ACT)
+	par->htimings |= TGA_HORIZ_POLARITY;
+    if (var->sync & FB_SYNC_VERT_HIGH_ACT)
+	par->vtimings |= TGA_VERT_POLARITY;
+    if (var->sync & FB_SYNC_ON_GREEN) {
+	par->sync_on_green = 1;
+    } else {
+	par->sync_on_green = 0;
+    }
+
+    /* store other useful values in par */
+    par->xres = var->xres; 
+    par->yres = var->yres;
+    par->pll_freq = 1000000000/var->pixclock;
+    par->bits_per_pixel = var->bits_per_pixel;
+
     return 0;
 }
 
 
-static int tgafb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info)
+static int tgafb_encode_var(struct fb_var_screeninfo *var, const void *fb_par,
+	struct fb_info_gen *info)
 {
-    return -EINVAL;
+    struct tgafb_par *par = (struct tgafb_par *)fb_par;
+
+    /* decode video timings */
+    var->xres = ((par->htimings & TGA_HORIZ_ACT_LSB) | ((par->htimings & TGA_HORIZ_ACT_MSB) >> 19)) * 4;
+    var->yres = (par->vtimings & TGA_VERT_ACTIVE);
+    var->right_margin = ((par->htimings & TGA_HORIZ_FP) >> 9) * 4;
+    var->lower_margin = ((par->vtimings & TGA_VERT_FP) >> 11);
+    var->hsync_len = ((par->htimings & TGA_HORIZ_SYNC) >> 14) * 4;
+    var->vsync_len = ((par->vtimings & TGA_VERT_SYNC) >> 16);
+    var->left_margin = ((par->htimings & TGA_HORIZ_BP) >> 21) * 4;
+    var->upper_margin = ((par->vtimings & TGA_VERT_BP) >> 22);
+
+    if (par->htimings & TGA_HORIZ_POLARITY) 
+    	var->sync |= FB_SYNC_HOR_HIGH_ACT;
+    if (par->vtimings & TGA_VERT_POLARITY)
+    	var->sync |= FB_SYNC_VERT_HIGH_ACT;
+    if (par->sync_on_green == 1)
+	var->sync |= FB_SYNC_ON_GREEN;
+
+    var->xres_virtual = var->xres;
+    var->yres_virtual = var->yres;
+    var->xoffset = var->yoffset = 0;
+
+    /* depth-related */
+    if (fb_info.tga_type == TGA_TYPE_8PLANE) {
+	var->red.offset = 0;
+	var->green.offset = 0;
+	var->blue.offset = 0;
+    } else {
+	var->red.offset = 16;
+	var->green.offset = 8;
+	var->blue.offset = 0;
+    }
+    var->bits_per_pixel = par->bits_per_pixel;
+    var->grayscale = 0;
+    var->red.length = var->green.length = var->blue.length = 8;
+    var->red.msb_right = var->green.msb_right = var->blue.msb_right = 0;
+    var->transp.offset = var->transp.length = var->transp.msb_right = 0;
+
+    /* others */
+    var->xoffset = var->yoffset = 0;
+    var->pixclock = 1000000000/par->pll_freq;
+    var->nonstd = 0;
+    var->activate = 0;
+    var->height = var->width = -1;
+    var->accel_flags = 0;
+
+    return 0;
 }
 
 
-    /*
-     *  Initialisation
-     */
-
-__initfunc(void tgafb_init(void))
+static void tgafb_get_par(void *fb_par, struct fb_info_gen *info)
 {
-    int i, j, temp;
-    unsigned char *cbp;
-    struct pci_dev *pdev;
+    struct tgafb_par *par = (struct tgafb_par *)fb_par;
 
-    pdev = pci_find_device(PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_TGA, NULL);
-    if (!pdev)
-	return;
-    tga_mem_base = pdev->base_address[0] & PCI_BASE_ADDRESS_MEM_MASK;
-#ifdef DEBUG
-    printk("tgafb_init: mem_base 0x%x\n", tga_mem_base);
-#endif /* DEBUG */
+    if (current_par_valid)
+	*par = current_par;
+    else {
+	if (fb_info.tga_type == TGA_TYPE_8PLANE)
+	    default_var.bits_per_pixel = 8;
+	else
+	    default_var.bits_per_pixel = 32;
 
-    tga_type = (readl((unsigned long)tga_mem_base) >> 12) & 0x0f;
-    switch (tga_type) {
-	case 0:
-	    strcat(fb_fix.id, "8plane");
-	    break;
-	case 1:
-	    strcat(fb_fix.id, "24plane");
-	    break;
-	case 3:
-	    strcat(fb_fix.id, "24plusZ");
-	    break;
-	default:
-	    printk("TGA type (0x%x) unrecognized!\n", tga_type);
+	tgafb_decode_var(&default_var, par, info);
+    }
+}
+
+
+static void tgafb_set_par(const void *fb_par, struct fb_info_gen *info)
+{
+    int i, j;
+    struct tgafb_par *par = (struct tgafb_par *)fb_par;
+
+#if 0
+    /* XXX this will break console switching with X11, maybe I need to test KD_GRAPHICS? */
+    /* if current_par is valid, check to see if we need to change anything */
+    if (current_par_valid) {
+	if (!memcmp(par, &current_par, sizeof current_par)) {
 	    return;
+	}
     }
+#endif
+    current_par = *par;
+    current_par_valid = 1;
 
-    tga_regs_base = ((unsigned long)tga_mem_base + TGA_REGS_OFFSET);
-    tga_fb_base = ((unsigned long)tga_mem_base + fb_offset_presets[tga_type]);
-
-    /* first, disable video timing */
-    TGA_WRITE_REG(0x03, TGA_VALID_REG); /* SCANNING and BLANK */
-
+    /* first, disable video */
+    TGA_WRITE_REG(TGA_VALID_VIDEO | TGA_VALID_BLANK, TGA_VALID_REG);
+    
     /* write the DEEP register */
     while (TGA_READ_REG(TGA_CMD_STAT_REG) & 1) /* wait for not busy */
       continue;
 
     mb();
-    TGA_WRITE_REG(deep_presets[tga_type], TGA_DEEP_REG);
+    TGA_WRITE_REG(deep_presets[fb_info.tga_type], TGA_DEEP_REG);
     while (TGA_READ_REG(TGA_CMD_STAT_REG) & 1) /* wait for not busy */
 	continue;
     mb();
 
     /* write some more registers */
-    TGA_WRITE_REG(rasterop_presets[tga_type], TGA_RASTEROP_REG);
-    TGA_WRITE_REG(mode_presets[tga_type], TGA_MODE_REG);
-    TGA_WRITE_REG(base_addr_presets[tga_type], TGA_BASE_ADDR_REG);
+    TGA_WRITE_REG(rasterop_presets[fb_info.tga_type], TGA_RASTEROP_REG);
+    TGA_WRITE_REG(mode_presets[fb_info.tga_type], TGA_MODE_REG);
+    TGA_WRITE_REG(base_addr_presets[fb_info.tga_type], TGA_BASE_ADDR_REG);
 
-    /* write the PLL for 640x480 @ 60Hz */
-    for (i = 0; i <= 6; i++) {
-	for (j = 0; j <= 7; j++) {
-	    temp = (PLLbits[i] >> (7-j)) & 1;
-	    if (i == 6 && j == 7)
-		temp |= 2;
-	    TGA_WRITE_REG(temp, TGA_CLOCK_REG);
-	}
-    }
+    /* calculate & write the PLL */
+    tgafb_set_pll(par->pll_freq);
 
     /* write some more registers */
     TGA_WRITE_REG(0xffffffff, TGA_PLANEMASK_REG);
@@ -523,21 +507,19 @@ __initfunc(void tgafb_init(void))
     TGA_WRITE_REG(0x12345678, TGA_BLOCK_COLOR0_REG);
     TGA_WRITE_REG(0x12345678, TGA_BLOCK_COLOR1_REG);
 
-    /* init video timing regs for 640x480 @ 60 Hz */
-    TGA_WRITE_REG(0x018608a0, TGA_HORIZ_REG);
-    TGA_WRITE_REG(0x084251e0, TGA_VERT_REG);
+    /* init video timing regs */
+    TGA_WRITE_REG(par->htimings, TGA_HORIZ_REG);
+    TGA_WRITE_REG(par->vtimings, TGA_VERT_REG);
 
-    if (tga_type == 0) { /* 8-plane */
-
-	fb_var.bits_per_pixel = 8;
-	fb_fix.visual = FB_VISUAL_PSEUDOCOLOR;
+    /* initalise RAMDAC */
+    if (fb_info.tga_type == TGA_TYPE_8PLANE) { 
 
 	/* init BT485 RAMDAC registers */
-	BT485_WRITE(0xa2, BT485_CMD_0);
+	BT485_WRITE(0xa2 | (par->sync_on_green ? 0x8 : 0x0), BT485_CMD_0);
 	BT485_WRITE(0x01, BT485_ADDR_PAL_WRITE);
 	BT485_WRITE(0x14, BT485_CMD_3); /* cursor 64x64 */
 	BT485_WRITE(0x40, BT485_CMD_1);
-	BT485_WRITE(0x22, BT485_CMD_2); /* WIN cursor type */
+	BT485_WRITE(0x20, BT485_CMD_2); /* cursor off, for now */
 	BT485_WRITE(0xff, BT485_PIXEL_MASK);
 
 	/* fill palette registers */
@@ -560,48 +542,13 @@ __initfunc(void tgafb_init(void))
 	    TGA_WRITE_REG(0x00|(BT485_DATA_PAL<<8), TGA_RAMDAC_REG);
 	}	  
 
-	/* initialize RAMDAC cursor colors */
-	BT485_WRITE(0, BT485_ADDR_CUR_WRITE);
-
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* overscan WHITE */
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* overscan WHITE */
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* overscan WHITE */
-
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 1 BLACK */
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 1 BLACK */
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 1 BLACK */
-
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 2 BLACK */
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 2 BLACK */
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 2 BLACK */
-
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 3 BLACK */
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 3 BLACK */
-	BT485_WRITE(0x00, BT485_DATA_CUR); /* color 3 BLACK */
-
-	/* initialize RAMDAC cursor RAM */
-	BT485_WRITE(0x00, BT485_ADDR_PAL_WRITE);
-	cbp = (unsigned char *)bt485_cursor_source;
-	for (i = 0; i < 512; i++) {
-	    BT485_WRITE(*cbp++, BT485_CUR_RAM);
-	}
-	for (i = 0; i < 512; i++) {
-	    BT485_WRITE(0xff, BT485_CUR_RAM);
-	}
-
     } else { /* 24-plane or 24plusZ */
 
-	fb_var.bits_per_pixel = 32;
-	fb_fix.visual = FB_VISUAL_TRUECOLOR;
-
-	TGA_WRITE_REG(0x01, TGA_VALID_REG); /* SCANNING */
-
-	/*
-	 * init some registers
-	 */
+	/* init BT463 registers */
 	BT463_WRITE(BT463_REG_ACC, BT463_CMD_REG_0, 0x40);
 	BT463_WRITE(BT463_REG_ACC, BT463_CMD_REG_1, 0x08);
-	BT463_WRITE(BT463_REG_ACC, BT463_CMD_REG_2, 0x40);
+	BT463_WRITE(BT463_REG_ACC, BT463_CMD_REG_2, 
+		(par->sync_on_green ? 0x80 : 0x40));
 
 	BT463_WRITE(BT463_REG_ACC, BT463_READ_MASK_0, 0xff);
 	BT463_WRITE(BT463_REG_ACC, BT463_READ_MASK_1, 0xff);
@@ -613,9 +560,7 @@ __initfunc(void tgafb_init(void))
 	BT463_WRITE(BT463_REG_ACC, BT463_BLINK_MASK_2, 0x00);
 	BT463_WRITE(BT463_REG_ACC, BT463_BLINK_MASK_3, 0x00);
 
-	/*
-	 * fill the palette
-	 */
+	/* fill the palette */
 	BT463_LOAD_ADDR(0x0000);
 	TGA_WRITE_REG((BT463_PALETTE<<2), TGA_RAMDAC_REG);
 
@@ -632,9 +577,7 @@ __initfunc(void tgafb_init(void))
 	    TGA_WRITE_REG(0x00|(BT463_PALETTE<<10), TGA_RAMDAC_REG);
 	}	  
 
-	/*
-	 * fill window type table after start of vertical retrace
-	 */
+	/* fill window type table after start of vertical retrace */
 	while (!(TGA_READ_REG(TGA_INTR_STAT_REG) & 0x01))
 	    continue;
 	TGA_WRITE_REG(0x01, TGA_INTR_STAT_REG);
@@ -651,215 +594,102 @@ __initfunc(void tgafb_init(void))
 	    TGA_WRITE_REG(0x01|(BT463_REG_ACC<<10), TGA_RAMDAC_REG);
 	    TGA_WRITE_REG(0x80|(BT463_REG_ACC<<10), TGA_RAMDAC_REG);
 	}
-
-	/*
-	 * init cursor colors
-	 */
-	BT463_LOAD_ADDR(BT463_CUR_CLR_0);
-
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG); /* background */
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG); /* background */
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG); /* background */
-
-	TGA_WRITE_REG(0xff|(BT463_REG_ACC<<10), TGA_RAMDAC_REG); /* foreground */
-	TGA_WRITE_REG(0xff|(BT463_REG_ACC<<10), TGA_RAMDAC_REG); /* foreground */
-	TGA_WRITE_REG(0xff|(BT463_REG_ACC<<10), TGA_RAMDAC_REG); /* foreground */
-
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG);
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG);
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG);
-
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG);
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG);
-	TGA_WRITE_REG(0x00|(BT463_REG_ACC<<10), TGA_RAMDAC_REG);
-
-	/*
-	 * finally, init the cursor shape
-	 */
-	temp = tga_fb_base - 1024; /* this assumes video starts at base
-				     and base is beyond memory start*/
-
-	for (i = 0; i < 256; i++) {
-	    writel(bt463_cursor_source[i], temp + i*4);
-	}
-	TGA_WRITE_REG(temp & 0x000fffff, TGA_CURSOR_BASE_REG);
+   
     }
 
     /* finally, enable video scan
-       (and pray for the monitor... :-) */
-    TGA_WRITE_REG(0x01, TGA_VALID_REG); /* SCANNING */
+	(and pray for the monitor... :-) */
+    TGA_WRITE_REG(TGA_VALID_VIDEO, TGA_VALID_REG);
+}
 
-    fb_var.xres = fb_var.xres_virtual = 640;
-    fb_var.yres = fb_var.yres_virtual = 480;
-    fb_fix.line_length = 80*fb_var.bits_per_pixel;
-    fb_fix.smem_start = (char *)__pa(tga_fb_base + dense_mem(tga_fb_base));
-    fb_fix.smem_len = fb_fix.line_length*fb_var.yres;
-    fb_fix.type = FB_TYPE_PACKED_PIXELS;
-    fb_fix.type_aux = 0;
-    fb_fix.mmio_start = (char *)__pa(tga_regs_base);
-    fb_fix.mmio_len = 0x1000;		/* Is this sufficient? */
-    fb_fix.accel = FB_ACCEL_DEC_TGA;
 
-    fb_var.xoffset = fb_var.yoffset = 0;
-    fb_var.grayscale = 0;
-    if (tga_type == 0) { /* 8-plane */
-	fb_var.red.offset = 0;
-	fb_var.green.offset = 0;
-	fb_var.blue.offset = 0;
-    } else { /* 24-plane or 24plusZ */
-	/* XXX: is this correct?? */
-	fb_var.red.offset = 16;
-	fb_var.green.offset = 8;
-	fb_var.blue.offset = 0;
+#define DIFFCHECK(x) { if( m <= 0x3f ) { \
+      int delta = f - (TGA_PLL_BASE_FREQ * (x)) / (r << shift); \
+      if (delta < 0) delta = -delta; \
+      if (delta < min_diff) min_diff = delta, vm = m, va = a, vr = r; } }
+
+static void tgafb_set_pll(int f)
+{
+    int                 n, shift, base, min_diff, target;
+    int                 r,a,m,vm = 34, va = 1, vr = 30;
+
+    for( r = 0 ; r < 12 ; r++ )
+	TGA_WRITE_REG(!r, TGA_CLOCK_REG);
+
+    if (f > TGA_PLL_MAX_FREQ)
+	f = TGA_PLL_MAX_FREQ;
+
+    if (f >= TGA_PLL_MAX_FREQ / 2)
+	shift = 0;
+    else if (f >= TGA_PLL_MAX_FREQ / 4)
+	shift = 1;
+    else
+	shift = 2;
+
+    TGA_WRITE_REG(shift & 1, TGA_CLOCK_REG);
+    TGA_WRITE_REG(shift >> 1, TGA_CLOCK_REG);
+
+    for( r = 0 ; r < 10 ; r++ ) {
+	TGA_WRITE_REG(0, TGA_CLOCK_REG);
     }
-    fb_var.red.length = fb_var.green.length = fb_var.blue.length = 8;
-    fb_var.red.msb_right = fb_var.green.msb_right = fb_var.blue.msb_right = 0;
-    fb_var.transp.offset = fb_var.transp.length = fb_var.transp.msb_right = 0;
-    fb_var.nonstd = 0;
-    fb_var.activate = 0;
-    fb_var.height = fb_var.width = -1;
-    fb_var.accel_flags = 0;
-    fb_var.pixclock = 39722;
-    fb_var.left_margin = 40;
-    fb_var.right_margin = 24;
-    fb_var.upper_margin = 32;
-    fb_var.lower_margin = 11;
-    fb_var.hsync_len = 96;
-    fb_var.vsync_len = 2;
-    fb_var.sync = 0;
-    fb_var.vmode = FB_VMODE_NONINTERLACED;
 
-    disp.var = fb_var;
-    disp.cmap.start = 0;
-    disp.cmap.len = 0;
-    disp.cmap.red = disp.cmap.green = disp.cmap.blue = disp.cmap.transp = NULL;
-    disp.screen_base = (char *)tga_fb_base + dense_mem(tga_fb_base);
-    disp.visual = fb_fix.visual;
-    disp.type = fb_fix.type;
-    disp.type_aux = fb_fix.type_aux;
-    disp.ypanstep = 0;
-    disp.ywrapstep = 0;
-    disp.line_length = fb_fix.line_length;
-    disp.can_soft_blank = 1;
-    disp.inverse = 0;
-    switch (tga_type) {
-#ifdef FBCON_HAS_CFB8
-	case 0: /* 8-plane */
-	    disp.dispsw = &fbcon_cfb8;
-	    break;
-#endif
-#ifdef FBCON_HAS_CFB32
-	case 1: /* 24-plane */
-	case 3: /* 24plusZ */
-	    disp.dispsw = &fbcon_cfb32;
-	    disp.dispsw_data = &fbcon_cfb32_cmap;
-	    break;
-#endif
-	default:
-	    disp.dispsw = &fbcon_dummy;
+    if (f <= 120000) {
+	TGA_WRITE_REG(0, TGA_CLOCK_REG);
+	TGA_WRITE_REG(0, TGA_CLOCK_REG);
     }
-    disp.scrollmode = SCROLL_YREDRAW;
+    else if (f <= 200000) {
+	TGA_WRITE_REG(1, TGA_CLOCK_REG);
+	TGA_WRITE_REG(0, TGA_CLOCK_REG);
+    }
+    else {
+	TGA_WRITE_REG(0, TGA_CLOCK_REG);
+	TGA_WRITE_REG(1, TGA_CLOCK_REG);
+    }
 
-    strcpy(fb_info.modename, fb_fix.id);
-    fb_info.node = -1;
-    fb_info.fbops = &tgafb_ops;
-    fb_info.disp = &disp;
-    fb_info.fontname[0] = '\0';
-    fb_info.changevar = NULL;
-    fb_info.switch_con = &tgafbcon_switch;
-    fb_info.updatevar = &tgafbcon_updatevar;
-    fb_info.blank = &tgafbcon_blank;
-    fb_info.flags = FBINFO_FLAG_DEFAULT;
+    TGA_WRITE_REG(1, TGA_CLOCK_REG);
+    TGA_WRITE_REG(0, TGA_CLOCK_REG);
+    TGA_WRITE_REG(0, TGA_CLOCK_REG);
+    TGA_WRITE_REG(1, TGA_CLOCK_REG);
+    TGA_WRITE_REG(0, TGA_CLOCK_REG);
+    TGA_WRITE_REG(1, TGA_CLOCK_REG);
 
-    tgafb_set_var(&fb_var, -1, &fb_info);
+    target = (f << shift) / TGA_PLL_BASE_FREQ;
+    min_diff = TGA_PLL_MAX_FREQ;
 
-    if (register_framebuffer(&fb_info) < 0)
-	return;
+    r = 7 / target;
+    if (!r)
+	r = 1;
 
-    printk("fb%d: %s frame buffer device\n", GET_FB_IDX(fb_info.node),
-	   fb_fix.id);
-}
-
-
-static int tgafbcon_switch(int con, struct fb_info *info)
-{
-    /* Do we have to save the colormap? */
-    if (fb_display[currcon].cmap.len)
-	fb_get_cmap(&fb_display[currcon].cmap, 1, tgafb_getcolreg, info);
-
-    currcon = con;
-    /* Install new colormap */
-    do_install_cmap(con, info);
-    return 0;
-}
-
-    /*
-     *  Update the `var' structure (called by fbcon.c)
-     */
-
-static int tgafbcon_updatevar(int con, struct fb_info *info)
-{
-    /* Nothing */
-    return 0;
-}
-
-    /*
-     *  Blank and unblank the display.
-     */
-
-static void tgafbcon_blank(int blank, struct fb_info *info)
-{
-    static int tga_vesa_blanked = 0;
-    u32 vhcr, vvcr;
-    unsigned long flags;
-    
-    save_flags(flags);
-    cli();
-
-    vhcr = TGA_READ_REG(TGA_HORIZ_REG);
-    vvcr = TGA_READ_REG(TGA_VERT_REG);
-
-    switch (blank) {
-    case 0: /* Unblanking */
-        if (tga_vesa_blanked) {
-	   TGA_WRITE_REG(vhcr & 0xbfffffff, TGA_HORIZ_REG);
-	   TGA_WRITE_REG(vvcr & 0xbfffffff, TGA_VERT_REG);
-	   tga_vesa_blanked = 0;
+    base = target * r;
+    while (base < 449) {
+	for (n = base < 7 ? 7 : base ; n < base + target && n < 449; n++) {
+	m = ((n + 3) / 7) - 1;
+	a = 0;
+	DIFFCHECK((m + 1) * 7);
+	m++;
+	DIFFCHECK((m + 1) * 7);
+	m = (n / 6) - 1;
+	if( (a = n % 6))
+	    DIFFCHECK( n );
 	}
- 	TGA_WRITE_REG(0x01, TGA_VALID_REG); /* SCANNING */
-	break;
-
-    case 1: /* Normal blanking */
-	TGA_WRITE_REG(0x03, TGA_VALID_REG); /* SCANNING and BLANK */
-	break;
-
-    case 2: /* VESA blank (vsync off) */
-	TGA_WRITE_REG(vvcr | 0x40000000, TGA_VERT_REG);
-	TGA_WRITE_REG(0x02, TGA_VALID_REG); /* BLANK */
-	tga_vesa_blanked = 1;
-	break;
-
-    case 3: /* VESA blank (hsync off) */
-	TGA_WRITE_REG(vhcr | 0x40000000, TGA_HORIZ_REG);
-	TGA_WRITE_REG(0x02, TGA_VALID_REG); /* BLANK */
-	tga_vesa_blanked = 1;
-	break;
-
-    case 4: /* Poweroff */
-	TGA_WRITE_REG(vhcr | 0x40000000, TGA_HORIZ_REG);
-	TGA_WRITE_REG(vvcr | 0x40000000, TGA_VERT_REG);
-	TGA_WRITE_REG(0x02, TGA_VALID_REG); /* BLANK */
-	tga_vesa_blanked = 1;
-	break;
+	r++;
+	base += target;
     }
 
-    restore_flags(flags);
+    vr--;
+
+    for( r=0; r<8 ; r++) {
+	TGA_WRITE_REG((vm >> r) & 1, TGA_CLOCK_REG);
+    }
+    for( r=0; r<8 ; r++) {
+	TGA_WRITE_REG((va >> r) & 1, TGA_CLOCK_REG);
+    }
+    for( r=0; r<7 ; r++) {
+	TGA_WRITE_REG((vr >> r) & 1, TGA_CLOCK_REG);
+    }
+    TGA_WRITE_REG(((vr >> 7) & 1)|2, TGA_CLOCK_REG);
 }
 
-    /*
-     *  Read a single color register and split it into
-     *  colors/transparent. Return != 0 for invalid regno.
-     */
 
 static int tgafb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
                          u_int *transp, struct fb_info *info)
@@ -874,12 +704,6 @@ static int tgafb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
 }
 
 
-    /*
-     *  Set a single color register. The values supplied are already
-     *  rounded down to the hardware's capabilities (according to the
-     *  entries in the var structure). Return != 0 for invalid regno.
-     */
-
 static int tgafb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
                          u_int transp, struct fb_info *info)
 {
@@ -893,11 +717,11 @@ static int tgafb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
     palette[regno].blue = blue;
 
 #ifdef FBCON_HAS_CFB32
-    if (regno < 16 && tga_type != 0)
+    if (regno < 16 && fb_info.tga_type != TGA_TYPE_8PLANE)
 	fbcon_cfb32_cmap[regno] = (red << 16) | (green << 8) | blue;
 #endif
 
-    if (tga_type == 0) { /* 8-plane */
+    if (fb_info.tga_type == TGA_TYPE_8PLANE) { 
         BT485_WRITE(regno, BT485_ADDR_PAL_WRITE);
         TGA_WRITE_REG(BT485_DATA_PAL, TGA_RAMDAC_SETUP_REG);
         TGA_WRITE_REG(red|(BT485_DATA_PAL<<8),TGA_RAMDAC_REG);
@@ -909,14 +733,34 @@ static int tgafb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
     return 0;
 }
 
-
 #if 1
     /*
      *	FIXME: since I don't know how to set a single arbitrary color register
      *  on 24-plane cards, all color palette registers have to be updated
      */
 
-static void tga_update_palette(void)
+static int tgafb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
+			  struct fb_info *info)
+{
+    int err;
+
+    if (!fb_display[con].cmap.len) {	/* no colormap allocated? */
+	if ((err = fb_alloc_cmap(&fb_display[con].cmap, 256, 0)))
+	    return err;
+    }
+    if (con == currcon) {		/* current console? */
+	err = fb_set_cmap(cmap, kspc, tgafb_setcolreg, info);
+#if 1
+	if (fb_info.tga_type != TGA_TYPE_8PLANE)
+		tgafb_update_palette();
+#endif
+	return err;
+    } else
+	fb_copy_cmap(cmap, &fb_display[con].cmap, kspc ? 0 : 1);
+    return 0;
+}
+
+static void tgafb_update_palette(void)
 {
     int i;
 
@@ -931,81 +775,240 @@ static void tga_update_palette(void)
 }
 #endif
 
-static void do_install_cmap(int con, struct fb_info *info)
+
+static int tgafb_blank(int blank, struct fb_info_gen *info)
 {
-    if (con != currcon)
-	return;
-    if (fb_display[con].cmap.len)
-	fb_set_cmap(&fb_display[con].cmap, 1, tgafb_setcolreg, info);
-    else
-	fb_set_cmap(fb_default_cmap(256), 1, tgafb_setcolreg, info);
-#if 1
-    if (tga_type != 0)
-        tga_update_palette();
-#endif
-}
+    static int tga_vesa_blanked = 0;
+    u32 vhcr, vvcr, vvvr;
+    unsigned long flags;
+    
+    save_flags(flags);
+    cli();
 
-#if 0	/* No cursor stuff yet */
+    vhcr = TGA_READ_REG(TGA_HORIZ_REG);
+    vvcr = TGA_READ_REG(TGA_VERT_REG);
+    vvvr = TGA_READ_REG(TGA_VALID_REG) & ~(TGA_VALID_VIDEO | TGA_VALID_BLANK);
 
-/*
- * Hide the cursor from view, during blanking, usually...
- */
-void
-hide_cursor(void)
-{
-	unsigned long flags;
-	save_flags(flags); cli();
-
-	if (tga_type == 0) {
-	  BT485_WRITE(0x20, BT485_CMD_2);
-	} else {
-	  TGA_WRITE_REG(0x03, TGA_VALID_REG); /* SCANNING and BLANK */
+    switch (blank) {
+    case 0: /* Unblanking */
+        if (tga_vesa_blanked) {
+	   TGA_WRITE_REG(vhcr & 0xbfffffff, TGA_HORIZ_REG);
+	   TGA_WRITE_REG(vvcr & 0xbfffffff, TGA_VERT_REG);
+	   tga_vesa_blanked = 0;
 	}
+ 	TGA_WRITE_REG(vvvr | TGA_VALID_VIDEO, TGA_VALID_REG);
+	break;
 
-	restore_flags(flags);
-}
+    case 1: /* Normal blanking */
+	TGA_WRITE_REG(vvvr | TGA_VALID_VIDEO | TGA_VALID_BLANK, TGA_VALID_REG);
+	break;
 
-void
-set_cursor(int currcons)
-{
-  unsigned int idx, xt, yt, row, col;
-  unsigned long flags;
+    case 2: /* VESA blank (vsync off) */
+	TGA_WRITE_REG(vvcr | 0x40000000, TGA_VERT_REG);
+	TGA_WRITE_REG(vvvr | TGA_VALID_BLANK, TGA_VALID_REG);
+	tga_vesa_blanked = 1;
+	break;
 
-  if (currcons != fg_console || console_blanked || vcmode == KD_GRAPHICS)
-    return;
+    case 3: /* VESA blank (hsync off) */
+	TGA_WRITE_REG(vhcr | 0x40000000, TGA_HORIZ_REG);
+	TGA_WRITE_REG(vvvr | TGA_VALID_BLANK, TGA_VALID_REG);
+	tga_vesa_blanked = 1;
+	break;
 
-  save_flags(flags); cli();
-
-  if (deccm) {
-    idx = (pos - video_mem_base) >> 1;
-    col = idx % 80;
-    row = (idx - col) / 80;
-
-    if (tga_type == 0) { /* 8-plane */
-
-      xt = col * TGA_F_WIDTH + 64;
-      yt = row * TGA_F_HEIGHT_PADDED + 64;
-
-      /* make sure it's enabled */
-      BT485_WRITE(0x22, BT485_CMD_2); /* WIN cursor type */
-
-      BT485_WRITE(xt, BT485_CUR_LOW_X);
-      BT485_WRITE((xt >> 8), BT485_CUR_HIGH_X);
-      BT485_WRITE(yt, BT485_CUR_LOW_Y);
-      BT485_WRITE((yt >> 8), BT485_CUR_HIGH_Y);
-
-    } else {
-
-      xt = col * TGA_F_WIDTH + 144;
-      yt = row * TGA_F_HEIGHT_PADDED + 35;
-
-      TGA_WRITE_REG(0x05, TGA_VALID_REG); /* SCANNING and CURSOR */
-      TGA_WRITE_REG(xt | (yt << 12), TGA_CURSOR_XY_REG);
+    case 4: /* Poweroff */
+	TGA_WRITE_REG(vhcr | 0x40000000, TGA_HORIZ_REG);
+	TGA_WRITE_REG(vvcr | 0x40000000, TGA_VERT_REG);
+	TGA_WRITE_REG(vvvr | TGA_VALID_BLANK, TGA_VALID_REG);
+	tga_vesa_blanked = 1;
+	break;
     }
 
-  } else
-    hide_cursor();
-  restore_flags(flags);
+    restore_flags(flags);
+    return 0;
 }
 
+
+static void tgafb_set_disp(const void *fb_par, struct display *disp,
+	struct fb_info_gen *info)
+{
+    disp->screen_base = (char *)fb_info.tga_fb_base;
+    switch (fb_info.tga_type) {
+#ifdef FBCON_HAS_CFB8
+	case TGA_TYPE_8PLANE:
+	    disp->dispsw = &fbcon_cfb8;
+            break;
 #endif
+#ifdef FBCON_HAS_CFB32
+        case TGA_TYPE_24PLANE:
+        case TGA_TYPE_24PLUSZ:
+	    disp->dispsw = &fbcon_cfb32; 
+            disp->dispsw_data = &fbcon_cfb32_cmap;
+            break;
+#endif
+        default:
+            disp->dispsw = &fbcon_dummy;
+    }
+
+    disp->scrollmode = SCROLL_YREDRAW;
+}
+
+
+struct fbgen_hwswitch tgafb_hwswitch = {
+    tgafb_detect, tgafb_encode_fix, tgafb_decode_var, tgafb_encode_var, tgafb_get_par,
+    tgafb_set_par, tgafb_getcolreg, tgafb_setcolreg, NULL, tgafb_blank, 
+    tgafb_set_disp
+};
+
+
+    /*
+     *  Hardware Independent functions
+     */
+
+
+    /* 
+     *  Frame buffer operations
+     */
+
+static struct fb_ops tgafb_ops = {
+	owner:		THIS_MODULE,
+	fb_get_fix:	fbgen_get_fix,
+	fb_get_var:	fbgen_get_var,
+	fb_set_var:	fbgen_set_var,
+	fb_get_cmap:	fbgen_get_cmap,
+	fb_set_cmap:	tgafb_set_cmap,
+};
+
+
+    /*
+     *  Setup
+     */
+
+int __init tgafb_setup(char *options) {
+    char *this_opt;
+    int i;
+    
+    if (options && *options) {
+    	for(this_opt=strtok(options,","); this_opt; this_opt=strtok(NULL,",")) {
+       	    if (!*this_opt) { continue; }
+        
+	    if (!strncmp(this_opt, "font:", 5)) {
+	     	strncpy(default_fontname, this_opt+5, sizeof default_fontname);
+	    }
+
+	    else if (!strncmp(this_opt, "mode:", 5)) {
+    		for (i = 0; i < NUM_TOTAL_MODES; i++) {
+    		    if (!strcmp(this_opt+5, tgafb_predefined[i].name))
+    			default_var = tgafb_predefined[i].var;
+		    	default_var_valid = 1;
+    		}
+    	    } 
+	    
+	    else {
+      		printk(KERN_ERR "tgafb: unknown parameter %s\n", this_opt);
+    	    }
+      	}
+    }
+    return 0;
+}
+
+
+    /*
+     *  Initialisation
+     */
+
+int __init tgafb_init(void)
+{
+    struct pci_dev *pdev;
+
+    pdev = pci_find_device(PCI_VENDOR_ID_DEC, PCI_DEVICE_ID_DEC_TGA, NULL);
+    if (!pdev)
+	return -ENXIO;
+
+    /* divine board type */
+
+    fb_info.tga_mem_base = (unsigned long)ioremap(pdev->resource[0].start, 0);
+    fb_info.tga_type = (readl(fb_info.tga_mem_base) >> 12) & 0x0f;
+    fb_info.tga_regs_base = fb_info.tga_mem_base + TGA_REGS_OFFSET;
+    fb_info.tga_fb_base = (fb_info.tga_mem_base
+			   + fb_offset_presets[fb_info.tga_type]);
+    pci_read_config_byte(pdev, PCI_REVISION_ID, &fb_info.tga_chip_rev);
+
+    /* setup framebuffer */
+
+    fb_info.gen.info.node = -1;
+    fb_info.gen.info.flags = FBINFO_FLAG_DEFAULT;
+    fb_info.gen.info.fbops = &tgafb_ops;
+    fb_info.gen.info.disp = &disp;
+    fb_info.gen.info.changevar = NULL;
+    fb_info.gen.info.switch_con = &fbgen_switch;
+    fb_info.gen.info.updatevar = &fbgen_update_var;
+    fb_info.gen.info.blank = &fbgen_blank;
+    strcpy(fb_info.gen.info.fontname, default_fontname);
+    fb_info.gen.parsize = sizeof (struct tgafb_par);
+    fb_info.gen.fbhw = &tgafb_hwswitch;
+    fb_info.gen.fbhw->detect();
+
+    printk (KERN_INFO "tgafb: DC21030 [TGA] detected, rev=0x%02x\n", fb_info.tga_chip_rev);
+    printk (KERN_INFO "tgafb: at PCI bus %d, device %d, function %d\n", 
+	    pdev->bus->number, PCI_SLOT(pdev->devfn), PCI_FUNC(pdev->devfn));
+	    
+    switch (fb_info.tga_type) 
+    { 
+	case TGA_TYPE_8PLANE:
+	    strcpy (fb_info.gen.info.modename,"Digital ZLXp-E1"); 
+	    break;
+
+	case TGA_TYPE_24PLANE:
+	    strcpy (fb_info.gen.info.modename,"Digital ZLXp-E2"); 
+	    break;
+
+	case TGA_TYPE_24PLUSZ:
+	    strcpy (fb_info.gen.info.modename,"Digital ZLXp-E3"); 
+	    break;
+    }
+
+    /* This should give a reasonable default video mode */
+
+    if (!default_var_valid) {
+	default_var = tgafb_predefined[0].var;
+    }
+    fbgen_get_var(&disp.var, -1, &fb_info.gen.info);
+    disp.var.activate = FB_ACTIVATE_NOW;
+    fbgen_do_set_var(&disp.var, 1, &fb_info.gen);
+    fbgen_set_disp(-1, &fb_info.gen);
+    fbgen_install_cmap(0, &fb_info.gen);
+    if (register_framebuffer(&fb_info.gen.info) < 0)
+	return -EINVAL;
+    printk(KERN_INFO "fb%d: %s frame buffer device at 0x%lx\n", 
+	    GET_FB_IDX(fb_info.gen.info.node), fb_info.gen.info.modename, 
+	    pdev->resource[0].start);
+    return 0;
+}
+
+
+    /*
+     *  Cleanup
+     */
+
+void tgafb_cleanup(struct fb_info *info)
+{
+    unregister_framebuffer(info);
+}
+
+
+    /*
+     *  Modularisation
+     */
+
+#ifdef MODULE
+int init_module(void)
+{
+    return tgafb_init();
+}
+
+void cleanup_module(void)
+{
+    tgafb_cleanup(void);
+}
+#endif /* MODULE */
+

@@ -2,6 +2,7 @@
 #define __ALPHA_IO_H
 
 #include <linux/config.h>
+#include <linux/kernel.h>
 #include <asm/system.h>
 
 /* We don't use IO slowdowns on the Alpha, but.. */
@@ -50,17 +51,44 @@ static inline void set_hae(unsigned long new_hae)
 /*
  * Change virtual addresses to physical addresses and vv.
  */
-static inline unsigned long virt_to_phys(volatile void * address)
+static inline unsigned long virt_to_phys(void *address)
 {
-	/* Conditionalize this on the CPU?  This here is 40 bits,
-	   whereas EV4 only supports 34.  But KSEG is farther out
-	   so it shouldn't _really_ matter.  */
-	return 0xffffffffffUL & (unsigned long) address;
+	return (unsigned long)address - IDENT_ADDR;
 }
 
 static inline void * phys_to_virt(unsigned long address)
 {
 	return (void *) (address + IDENT_ADDR);
+}
+
+/*
+ * Change addresses as seen by the kernel (virtual) to addresses as
+ * seen by a device (bus), and vice versa.
+ *
+ * Note that this only works for a limited range of kernel addresses,
+ * and very well may not span all memory.  Consider this interface 
+ * deprecated in favour of the mapping functions in <asm/pci.h>.
+ */
+extern unsigned long __direct_map_base;
+extern unsigned long __direct_map_size;
+
+static inline unsigned long virt_to_bus(void *address)
+{
+	unsigned long phys = virt_to_phys(address);
+	unsigned long bus = phys + __direct_map_base;
+	return phys <= __direct_map_size ? bus : 0;
+}
+
+static inline void *bus_to_virt(unsigned long address)
+{
+	void *virt;
+
+	/* This check is a sanity check but also ensures that bus address 0
+	   maps to virtual address 0 which is useful to detect null pointers
+	   (the NCR driver is much simpler if NULL pointers are preserved).  */
+	address -= __direct_map_base;
+	virt = phys_to_virt(address);
+	return (long)address <= 0 ? NULL : virt;
 }
 
 #else /* !__KERNEL__ */
@@ -84,15 +112,12 @@ extern void _sethae (unsigned long addr);	/* cached version */
 
 /* In a generic kernel, we always go through the machine vector.  */
 
-# define virt_to_bus(a)	alpha_mv.mv_virt_to_bus(a)
-# define bus_to_virt(a)	alpha_mv.mv_bus_to_virt(a)
-
-# define __inb		alpha_mv.mv_inb
-# define __inw		alpha_mv.mv_inw
-# define __inl		alpha_mv.mv_inl
-# define __outb		alpha_mv.mv_outb
-# define __outw		alpha_mv.mv_outw
-# define __outl		alpha_mv.mv_outl
+# define __inb(p)	alpha_mv.mv_inb((unsigned long)(p))
+# define __inw(p)	alpha_mv.mv_inw((unsigned long)(p))
+# define __inl(p)	alpha_mv.mv_inl((unsigned long)(p))
+# define __outb(x,p)	alpha_mv.mv_outb((x),(unsigned long)(p))
+# define __outw(x,p)	alpha_mv.mv_outw((x),(unsigned long)(p))
+# define __outl(x,p)	alpha_mv.mv_outl((x),(unsigned long)(p))
 
 # define __readb(a)	alpha_mv.mv_readb((unsigned long)(a))
 # define __readw(a)	alpha_mv.mv_readw((unsigned long)(a))
@@ -103,6 +128,9 @@ extern void _sethae (unsigned long addr);	/* cached version */
 # define __writel(v,a)	alpha_mv.mv_writel((v),(unsigned long)(a))
 # define __writeq(v,a)	alpha_mv.mv_writeq((v),(unsigned long)(a))
 
+# define __ioremap(a)	alpha_mv.mv_ioremap((unsigned long)(a))
+# define __is_ioaddr(a)	alpha_mv.mv_is_ioaddr((unsigned long)(a))
+
 # define inb		__inb
 # define inw		__inw
 # define inl		__inl
@@ -110,16 +138,14 @@ extern void _sethae (unsigned long addr);	/* cached version */
 # define outw		__outw
 # define outl		__outl
 
-# define readb		__readb
-# define readw		__readw
-# define readl		__readl
-# define readq		__readq
-# define writeb		__writeb
-# define writew		__writew
-# define writel		__writel
-# define writeq		__writeq
-
-# define dense_mem(a)	alpha_mv.mv_dense_mem(a)
+# define __raw_readb	__readb
+# define __raw_readw	__readw
+# define __raw_readl	__readl
+# define __raw_readq	__readq
+# define __raw_writeb	__writeb
+# define __raw_writew	__writew
+# define __raw_writel	__writel
+# define __raw_writeq	__writeq
 
 #else
 
@@ -130,20 +156,24 @@ extern void _sethae (unsigned long addr);	/* cached version */
 # include <asm/core_apecs.h>
 #elif defined(CONFIG_ALPHA_CIA)
 # include <asm/core_cia.h>
+#elif defined(CONFIG_ALPHA_IRONGATE)
+# include <asm/core_irongate.h>
+#elif defined(CONFIG_ALPHA_JENSEN)
+# include <asm/jensen.h>
 #elif defined(CONFIG_ALPHA_LCA)
 # include <asm/core_lca.h>
 #elif defined(CONFIG_ALPHA_MCPCIA)
 # include <asm/core_mcpcia.h>
-#elif defined(CONFIG_ALPHA_PYXIS)
-# include <asm/core_pyxis.h>
+#elif defined(CONFIG_ALPHA_POLARIS)
+# include <asm/core_polaris.h>
 #elif defined(CONFIG_ALPHA_T2)
 # include <asm/core_t2.h>
 #elif defined(CONFIG_ALPHA_TSUNAMI)
 # include <asm/core_tsunami.h>
-#elif defined(CONFIG_ALPHA_JENSEN)
-# include <asm/jensen.h>
-#elif defined(CONFIG_ALPHA_RX164)
-# include <asm/core_polaris.h>
+#elif defined(CONFIG_ALPHA_TITAN)
+# include <asm/core_titan.h>
+#elif defined(CONFIG_ALPHA_WILDFIRE)
+# include <asm/core_wildfire.h>
 #else
 #error "What system is this?"
 #endif
@@ -184,13 +214,13 @@ extern void		_writeq(unsigned long b, unsigned long addr);
  * redefined by userlevel programs.
  */
 #ifndef inb
-# define inb(p)		_inb((p))
+# define inb(p)		_inb(p)
 #endif
 #ifndef inw
-# define inw(p)		_inw((p))
+# define inw(p)		_inw(p)
 #endif
 #ifndef inl
-# define inl(p)		_inl((p))
+# define inl(p)		_inl(p)
 #endif
 #ifndef outb
 # define outb(b,p)	_outb((b),(p))
@@ -222,16 +252,18 @@ extern void		_writeq(unsigned long b, unsigned long addr);
 # define outl_p		outl
 #endif
 
+#define IO_SPACE_LIMIT 0xffff
+
 #else 
 
 /* Userspace declarations.  */
 
-extern unsigned int	inb (unsigned long port);
-extern unsigned int	inw (unsigned long port);
-extern unsigned int	inl (unsigned long port);
-extern void		outb (unsigned char b,unsigned long port);
-extern void		outw (unsigned short w,unsigned long port);
-extern void		outl (unsigned int l,unsigned long port);
+extern unsigned int	inb(unsigned long port);
+extern unsigned int	inw(unsigned long port);
+extern unsigned int	inl(unsigned long port);
+extern void		outb(unsigned char b,unsigned long port);
+extern void		outw(unsigned short w,unsigned long port);
+extern void		outl(unsigned int l,unsigned long port);
 extern unsigned long	readb(unsigned long addr);
 extern unsigned long	readw(unsigned long addr);
 extern unsigned long	readl(unsigned long addr);
@@ -244,20 +276,89 @@ extern void		writel(unsigned int b, unsigned long addr);
 #ifdef __KERNEL__
 
 /*
- * The "address" in IO memory space is not clearly either an integer or a
- * pointer. We will accept both, thus the casts.
+ * On Alpha, we have the whole of I/O space mapped at all times, but
+ * at odd and sometimes discontinuous addresses.  Note that the 
+ * discontinuities are all across busses, so we need not care for that
+ * for any one device.
  *
- * On the alpha, we have the whole physical address space mapped at all
- * times, so "ioremap()" and "iounmap()" do not need to do anything.
+ * Map the I/O space address into the kernel's virtual address space.
  */
 static inline void * ioremap(unsigned long offset, unsigned long size)
 {
-	return (void *) offset;
+	return (void *) __ioremap(offset);
 } 
 
 static inline void iounmap(void *addr)
 {
 }
+
+static inline void * ioremap_nocache(unsigned long offset, unsigned long size)
+{
+	return ioremap(offset, size);
+} 
+
+/* Indirect back to the macros provided.  */
+
+extern unsigned long	___raw_readb(unsigned long addr);
+extern unsigned long	___raw_readw(unsigned long addr);
+extern unsigned long	___raw_readl(unsigned long addr);
+extern unsigned long	___raw_readq(unsigned long addr);
+extern void		___raw_writeb(unsigned char b, unsigned long addr);
+extern void		___raw_writew(unsigned short b, unsigned long addr);
+extern void		___raw_writel(unsigned int b, unsigned long addr);
+extern void		___raw_writeq(unsigned long b, unsigned long addr);
+
+#ifdef __raw_readb
+# define readb(a)	({ unsigned long r_ = __raw_readb(a); mb(); r_; })
+#endif
+#ifdef __raw_readw
+# define readw(a)	({ unsigned long r_ = __raw_readw(a); mb(); r_; })
+#endif
+#ifdef __raw_readl
+# define readl(a)	({ unsigned long r_ = __raw_readl(a); mb(); r_; })
+#endif
+#ifdef __raw_readq
+# define readq(a)	({ unsigned long r_ = __raw_readq(a); mb(); r_; })
+#endif
+
+#ifdef __raw_writeb
+# define writeb(v,a)	({ __raw_writeb((v),(a)); mb(); })
+#endif
+#ifdef __raw_writew
+# define writew(v,a)	({ __raw_writew((v),(a)); mb(); })
+#endif
+#ifdef __raw_writel
+# define writel(v,a)	({ __raw_writel((v),(a)); mb(); })
+#endif
+#ifdef __raw_writeq
+# define writeq(v,a)	({ __raw_writeq((v),(a)); mb(); })
+#endif
+
+#ifndef __raw_readb
+# define __raw_readb(a)	___raw_readb((unsigned long)(a))
+#endif
+#ifndef __raw_readw
+# define __raw_readw(a)	___raw_readw((unsigned long)(a))
+#endif
+#ifndef __raw_readl
+# define __raw_readl(a)	___raw_readl((unsigned long)(a))
+#endif
+#ifndef __raw_readq
+# define __raw_readq(a)	___raw_readq((unsigned long)(a))
+#endif
+
+#ifndef __raw_writeb
+# define __raw_writeb(v,a)  ___raw_writeb((v),(unsigned long)(a))
+#endif
+#ifndef __raw_writew
+# define __raw_writew(v,a)  ___raw_writew((v),(unsigned long)(a))
+#endif
+#ifndef __raw_writel
+# define __raw_writel(v,a)  ___raw_writel((v),(unsigned long)(a))
+#endif
+#ifndef __raw_writeq
+# define __raw_writeq(v,a)  ___raw_writeq((v),(unsigned long)(a))
+#endif
 
 #ifndef readb
 # define readb(a)	_readb((unsigned long)(a))
@@ -271,6 +372,7 @@ static inline void iounmap(void *addr)
 #ifndef readq
 # define readq(a)	_readq((unsigned long)(a))
 #endif
+
 #ifndef writeb
 # define writeb(v,a)	_writeb((v),(unsigned long)(a))
 #endif

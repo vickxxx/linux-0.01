@@ -3,39 +3,85 @@
 #
 # create a compressed vmlinuz image from the original vmlinux
 #
-# With this config, max compressed image size = 640k
-# Uncompressed image size = 1.3M (text+data)
+# Note! SYSTEM, ZTEXTADDR, ZBSSADDR and ZRELADDR are now exported
+# from arch/arm/boot/Makefile
+#
 
-SYSTEM	=$(TOPDIR)/vmlinux
-HEAD	=$(COMPRESSED_HEAD)
-OBJS	=$(HEAD) misc.o $(COMPRESSED_EXTRA)
-CFLAGS	=-O2 -DSTDC_HEADERS $(CFLAGS_PROC)
-ARFLAGS =rc
-FONTC	=$(TOPDIR)/drivers/video/font_acorn_8x8.c
+HEAD		 = head.o
+OBJS		 = misc.o
+CFLAGS		 = $(CPPFLAGS) -O2 -DSTDC_HEADERS $(CFLAGS_PROC)
+FONTC		 = $(TOPDIR)/drivers/video/font_acorn_8x8.c
+ZLDFLAGS	 = -p -X -T vmlinux.lds
 
+#
+# Architecture dependencies
+#
 ifeq ($(CONFIG_ARCH_ACORN),y)
-OBJS	+= ll_char_wr.o font.o
+OBJS		+= ll_char_wr.o font.o
+ZLDFLAGS	+= -defsym params=$(PARAMS_PHYS)
+endif
+
+ifeq ($(CONFIG_ARCH_NETWINDER),y)
+OBJS		+= head-netwinder.o
+endif
+
+ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
+OBJS		+= head-netwinder.o
+endif
+
+ifeq ($(CONFIG_ARCH_NEXUSPCI),y)
+HEAD		 = head-nexuspci.o
+endif
+
+ifeq ($(CONFIG_ARCH_L7200),y)
+OBJS		+= head-l7200.o
+endif
+
+ifeq ($(CONFIG_ARCH_P720T),y)
+# Borrow this code from SA1100
+OBJS		+= head-sa1100.o
+endif
+
+ifeq ($(CONFIG_ARCH_SA1100),y)
+OBJS		+= head-sa1100.o setup-sa1100.o
+ifeq ($(CONFIG_SA1100_NANOENGINE),y)
+  OBJS += hw-bse.o
+endif
+endif
+
+SEDFLAGS	= s/TEXT_START/$(ZTEXTADDR)/;s/LOAD_ADDR/$(ZRELADDR)/;
+
+ifneq ($(ZBSSADDR),)
+SEDFLAGS	+= s/BSS_START/$(ZBSSADDR)/
+else
+SEDFLAGS	+= s/BSS_START/ALIGN(4)/
 endif
 
 all:		vmlinux
 
-vmlinux:	$(OBJS) piggy.o
-		$(LD) $(ZLINKFLAGS) -o vmlinux $(OBJS) piggy.o
+vmlinux:	$(HEAD) $(OBJS) piggy.o vmlinux.lds
+		$(LD) $(ZLDFLAGS) $(HEAD) $(OBJS) piggy.o $(LIBGCC) -o vmlinux
 
 $(HEAD): 	$(HEAD:.o=.S)
-		$(CC) -traditional -DLOADADDR=$(ZRELADDR) -c $(HEAD:.o=.S)
+		$(CC) $(AFLAGS) -traditional -c $(HEAD:.o=.S)
 
 piggy.o:	$(SYSTEM)
-		tmppiggy=_tmp_$$$$piggy; \
-		rm -f $$tmppiggy $$tmppiggy.gz $$tmppiggy.lnk; \
-		$(OBJCOPY) $(SYSTEM) $$tmppiggy; \
-		gzip -f -9 < $$tmppiggy > $$tmppiggy.gz; \
-		echo "SECTIONS { .data : { input_len = .; LONG(input_data_end - input_data) input_data = .; *(.data) input_data_end = .; }}" > $$tmppiggy.lnk; \
-		$(LD) -r -o piggy.o -b binary $$tmppiggy.gz -b elf32-arm -T $$tmppiggy.lnk; \
-		rm -f $$tmppiggy $$tmppiggy.gz $$tmppiggy.lnk;
+		$(OBJCOPY) $(SYSTEM) piggy
+		gzip $(GZFLAGS) < piggy > piggy.gz
+		$(LD) -r -o $@ -b binary piggy.gz
+		rm -f piggy piggy.gz
 
 font.o:		$(FONTC)
-		$(CC) -Dstatic= -c -o $@ $(FONTC)
+		$(CC) $(CFLAGS) -Dstatic= -c -o $@ $(FONTC)
 
-clean:;		rm -f vmlinux core
+vmlinux.lds:	vmlinux.lds.in
+		@sed "$(SEDFLAGS)" < vmlinux.lds.in > $@
 
+clean:;		rm -f vmlinux core piggy* vmlinux.lds
+
+.PHONY:	vmlinux.lds clean
+
+misc.o: misc.c $(TOPDIR)/include/asm/arch/uncompress.h $(TOPDIR)/lib/inflate.c
+
+%.o: %.S
+	$(CC) $(AFLAGS) $(EXTRA_AFLAGS) $(AFLAGS_$@) -c -o $@ $<

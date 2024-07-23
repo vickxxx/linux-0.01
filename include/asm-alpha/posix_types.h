@@ -12,6 +12,7 @@ typedef unsigned int	__kernel_ino_t;
 typedef unsigned int	__kernel_mode_t;
 typedef unsigned int	__kernel_nlink_t;
 typedef long		__kernel_off_t;
+typedef long		__kernel_loff_t;
 typedef int		__kernel_pid_t;
 typedef int		__kernel_ipc_pid_t;
 typedef unsigned int	__kernel_uid_t;
@@ -25,14 +26,17 @@ typedef long		__kernel_clock_t;
 typedef int		__kernel_daddr_t;
 typedef char *		__kernel_caddr_t;
 typedef unsigned long	__kernel_sigset_t;	/* at least 32 bits */
-
-#ifdef __GNUC__
-typedef long long	__kernel_loff_t;
-#endif
+typedef unsigned short	__kernel_uid16_t;
+typedef unsigned short	__kernel_gid16_t;
 
 typedef struct {
 	int	val[2];
 } __kernel_fsid_t;
+
+typedef __kernel_uid_t __kernel_old_uid_t;
+typedef __kernel_gid_t __kernel_old_gid_t;
+typedef __kernel_uid_t __kernel_uid32_t;
+typedef __kernel_gid_t __kernel_gid32_t;
 
 #ifdef __KERNEL__
 

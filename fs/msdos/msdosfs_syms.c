@@ -26,15 +26,17 @@ EXPORT_SYMBOL(msdos_unlink);
 EXPORT_SYMBOL(msdos_read_super);
 EXPORT_SYMBOL(msdos_put_super);
 
+static DECLARE_FSTYPE_DEV(msdos_fs_type, "msdos", msdos_read_super);
 
-struct file_system_type msdos_fs_type = {
-	"msdos",
-	FS_REQUIRES_DEV,
-	msdos_read_super, 
-	NULL
-};
-
-__initfunc(int init_msdos_fs(void))
+static int __init init_msdos_fs(void)
 {
 	return register_filesystem(&msdos_fs_type);
 }
+
+static void __exit exit_msdos_fs(void)
+{
+	unregister_filesystem(&msdos_fs_type);
+}
+
+module_init(init_msdos_fs)
+module_exit(exit_msdos_fs)

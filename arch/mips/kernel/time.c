@@ -1,7 +1,6 @@
-/* $Id: time.c,v 1.12 1999/06/13 16:30:34 ralf Exp $
- *
- *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
- *  Copyright (C) 1996, 1997, 1998  Ralf Baechle
+/*
+ * Copyright (C) 1991, 1992, 1995  Linus Torvalds
+ * Copyright (C) 1996 - 2000  Ralf Baechle
  *
  * This file contains the time handling details for PC-style clocks as
  * found in some MIPS systems.
@@ -15,16 +14,20 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
+#include <linux/kernel_stat.h>
 
 #include <asm/bootinfo.h>
 #include <asm/mipsregs.h>
 #include <asm/io.h>
 #include <asm/irq.h>
+#include <asm/ddb5074.h>
 
 #include <linux/mc146818rtc.h>
 #include <linux/timex.h>
 
-extern volatile unsigned long lost_ticks;
+extern volatile unsigned long wall_jiffies;
+unsigned long r4k_interval;
+extern rwlock_t xtime_lock;
 
 /*
  * Change this if you have some constant time drift
@@ -37,7 +40,7 @@ extern volatile unsigned long lost_ticks;
 
 /* Cycle counter value at the previous timer interrupt.. */
 
-static unsigned int timerhi = 0, timerlo = 0;
+static unsigned int timerhi, timerlo;
 
 /*
  * On MIPS only R4000 and better have a cycle counter.
@@ -50,14 +53,14 @@ static unsigned long do_fast_gettimeoffset(void)
 	unsigned long res, tmp;
 
 	/* Last jiffy when do_fast_gettimeoffset() was called. */
-	static unsigned long last_jiffies=0;
+	static unsigned long last_jiffies;
 	unsigned long quotient;
 
 	/*
 	 * Cached "1/(clocks per usec)*2^32" value.
 	 * It has to be recalculated once each jiffy.
 	 */
-	static unsigned long cached_quotient=0;
+	static unsigned long cached_quotient;
 
 	tmp = jiffies;
 
@@ -151,7 +154,7 @@ static unsigned long do_slow_gettimeoffset(void)
 	int count;
 
 	static int count_p = LATCH;    /* for the first call after boot */
-	static unsigned long jiffies_p = 0;
+	static unsigned long jiffies_p;
 
 	/*
 	 * cache volatile jiffies temporarily; we have IRQs turned off. 
@@ -218,18 +221,18 @@ void do_gettimeofday(struct timeval *tv)
 {
 	unsigned long flags;
 
-	save_and_cli(flags);
+	read_lock_irqsave (&xtime_lock, flags);
 	*tv = xtime;
 	tv->tv_usec += do_gettimeoffset();
 
 	/*
-	 * xtime is atomically updated in timer_bh. lost_ticks is
-	 * nonzero if the timer bottom half hasnt executed yet.
+	 * xtime is atomically updated in timer_bh. jiffies - wall_jiffies
+	 * is nonzero if the timer bottom half hasnt executed yet.
 	 */
-	if (lost_ticks)
+	if (jiffies - wall_jiffies)
 		tv->tv_usec += USECS_PER_JIFFY;
 
-	restore_flags(flags);
+	read_unlock_irqrestore (&xtime_lock, flags);
 
 	if (tv->tv_usec >= 1000000) {
 		tv->tv_usec -= 1000000;
@@ -239,7 +242,7 @@ void do_gettimeofday(struct timeval *tv)
 
 void do_settimeofday(struct timeval *tv)
 {
-	cli();
+	write_lock_irq (&xtime_lock);
 	/* This is revolting. We need to set the xtime.tv_usec
 	 * correctly. However, the value in this location is
 	 * is value at the last tick.
@@ -258,7 +261,7 @@ void do_settimeofday(struct timeval *tv)
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	sti();
+	write_unlock_irq (&xtime_lock);
 }
 
 /*
@@ -327,7 +330,7 @@ static int set_rtc_mmss(unsigned long nowtime)
 }
 
 /* last time the cmos clock got updated */
-static long last_rtc_update = 0;
+static long last_rtc_update;
 
 /*
  * timer_interrupt() needs to keep up the real-time clock,
@@ -336,7 +339,24 @@ static long last_rtc_update = 0;
 static void inline
 timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-#ifdef CONFIG_PROFILE
+#ifdef CONFIG_DDB5074
+	static unsigned cnt, period, dist;
+
+	if (cnt == 0 || cnt == dist)
+	    ddb5074_led_d2(1);
+	else if (cnt == 7 || cnt == dist+7)
+	    ddb5074_led_d2(0);
+	
+	if (++cnt > period) {
+	    cnt = 0;
+	    /* The hyperbolic function below modifies the heartbeat period
+	     * length in dependency of the current (5min) load. It goes
+	     * through the points f(0)=126, f(1)=86, f(5)=51,
+	     * f(inf)->30. */
+	     period = ((672<<FSHIFT)/(5*avenrun[0]+(7<<FSHIFT))) + 30;
+	     dist = period / 4;
+	}
+#endif
 	if(!user_mode(regs)) {
 		if (prof_buffer && current->pid) {
 			extern int _stext;
@@ -354,7 +374,6 @@ timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			atomic_inc((atomic_t *)&prof_buffer[pc]);
 		}
 	}
-#endif
 	do_timer(regs);
 
 	/*
@@ -362,22 +381,26 @@ timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
 	 * called as close as possible to 500 ms before the new second starts.
 	 */
+	read_lock (&xtime_lock); 
 	if ((time_status & STA_UNSYNC) == 0 &&
 	    xtime.tv_sec > last_rtc_update + 660 &&
 	    xtime.tv_usec >= 500000 - ((unsigned) tick) / 2 &&
-	    xtime.tv_usec <= 500000 + ((unsigned) tick) / 2)
+	    xtime.tv_usec <= 500000 + ((unsigned) tick) / 2) {
 	  if (set_rtc_mmss(xtime.tv_sec) == 0)
 	    last_rtc_update = xtime.tv_sec;
 	  else
 	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
+	}
 	/* As we return to user mode fire off the other CPU schedulers.. this is 
 	   basically because we don't yet share IRQ's around. This message is
 	   rigged to be safe on the 386 - basically it's a hack, so don't look
 	   closely for now.. */
 	/*smp_message_pass(MSG_ALL_BUT_SELF, MSG_RESCHEDULE, 0L, 0); */
+	read_unlock (&xtime_lock); 
 }
 
-static void r4k_timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static inline void 
+r4k_timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	unsigned int count;
 
@@ -388,6 +411,18 @@ static void r4k_timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	count = read_32bit_cp0_register(CP0_COUNT);
 	timerhi += (count < timerlo);	/* Wrap around */
 	timerlo = count;
+
+#ifdef CONFIG_SGI_IP22
+	/* Since we don't get anything but r4k timer interrupts, we need to
+	 * set this up so that we'll get one next time. Fortunately since we
+	 * have timerhi/timerlo, we don't care so much if we miss one. So
+	 * we need only ask for the next in r4k_interval counts. On other
+	 * archs we have a real timer, so we don't want this.
+	 */
+	write_32bit_cp0_register (CP0_COMPARE, 
+				  (unsigned long) (count + r4k_interval));
+        kstat.irqs[0][irq]++;
+#endif
 
 	timer_interrupt(irq, dev_id, regs);
 
@@ -402,35 +437,10 @@ static void r4k_timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	}
 }
 
-/* Converts Gregorian date to seconds since 1970-01-01 00:00:00.
- * Assumes input in normal date format, i.e. 1980-12-31 23:59:59
- * => year=1980, mon=12, day=31, hour=23, min=59, sec=59.
- *
- * [For the Julian calendar (which was used in Russia before 1917,
- * Britain & colonies before 1752, anywhere else before 1582,
- * and is still in use by some communities) leave out the
- * -year/100+year/400 terms, and add 10.]
- *
- * This algorithm was first published by Gauss (I think).
- *
- * WARNING: this function will overflow on 2106-02-07 06:28:16 on
- * machines were long is 32-bit! (However, as time_t is signed, we
- * will already get problems at other places on 2038-01-19 03:14:08)
- */
-static inline unsigned long mktime(unsigned int year, unsigned int mon,
-	unsigned int day, unsigned int hour,
-	unsigned int min, unsigned int sec)
+void indy_r4k_timer_interrupt (struct pt_regs *regs)
 {
-	if (0 >= (int) (mon -= 2)) {	/* 1..12 -> 11,12,1..10 */
-		mon += 12;	/* Puts Feb last since it has leap day */
-		year -= 1;
-	}
-	return (((
-	    (unsigned long)(year/4 - year/100 + year/400 + 367*mon/12 + day) +
-	      year*365 - 719499
-	    )*24 + hour /* now have hours */
-	   )*60 + min /* now have minutes */
-	  )*60 + sec; /* finally seconds */
+	static const int INDY_R4K_TIMER_IRQ = 7;
+	r4k_timer_interrupt (INDY_R4K_TIMER_IRQ, NULL, regs);
 }
 
 char cyclecounter_available;
@@ -479,9 +489,9 @@ struct irqaction irq0  = { timer_interrupt, SA_INTERRUPT, 0,
 
 void (*board_time_init)(struct irqaction *irq);
 
-__initfunc(void time_init(void))
+void __init time_init(void)
 {
-	unsigned int epoch, year, mon, day, hour, min, sec;
+	unsigned int epoch = 0, year, mon, day, hour, min, sec;
 	int i;
 
 	/* The Linux interpretation of the CMOS clock register contents:
@@ -524,8 +534,10 @@ __initfunc(void time_init(void))
 	}
 	year += epoch;
 
+	write_lock_irq (&xtime_lock);
 	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
 	xtime.tv_usec = 0;
+	write_unlock_irq (&xtime_lock);
 
 	init_cycle_counter();
 

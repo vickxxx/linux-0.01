@@ -9,29 +9,29 @@
 # parent makefile.
 #
 
-L_TARGET := pci.a
+O_TARGET := driver.o
 
-# Nasty trick as nobody references pcisyms.o, but we still want it linked.
-ifeq ($(CONFIG_MODULES),y)
-O_TARGET = pci_syms.o
-OX_OBJS  = pcisyms.o
-O_OBJS   = pci.o
-L_OBJS   := pci_syms.o
-else
-L_OBJS   := pci.o
-endif
+export-objs := pci.o
 
-ifdef CONFIG_PROC_FS
-L_OBJS   += proc.o
-ifdef CONFIG_PCI_OLD_PROC
-L_OBJS   += oldproc.o
-endif
-endif
+obj-$(CONFIG_PCI) += pci.o quirks.o compat.o names.o setup-res.o
+obj-$(CONFIG_PROC_FS) += proc.o
 
-ifdef CONFIG_PCI_QUIRKS
-L_OBJS   += quirks.o
-endif
+#
+# Some architectures use the generic PCI setup functions
+#
+obj-$(CONFIG_ALPHA) += setup-bus.o setup-irq.o
+obj-$(CONFIG_ARM) += setup-bus.o setup-irq.o
 
-L_OBJS   += compat.o
+ifndef CONFIG_X86
+obj-y += syscall.o
+endif
 
 include $(TOPDIR)/Rules.make
+
+names.o: names.c devlist.h classlist.h
+
+devlist.h classlist.h: pci.ids gen-devlist
+	./gen-devlist <pci.ids
+
+gen-devlist: gen-devlist.c
+	$(HOSTCC) $(HOSTCFLAGS) -o gen-devlist gen-devlist.c

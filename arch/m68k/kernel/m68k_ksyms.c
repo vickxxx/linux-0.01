@@ -11,16 +11,18 @@
 
 #include <asm/setup.h>
 #include <asm/machdep.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/irq.h>
 #include <asm/io.h>
 #include <asm/semaphore.h>
 #include <asm/checksum.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
-#include <asm/m68kserial.h>
 
+asmlinkage long long __ashldi3 (long long, int);
 asmlinkage long long __ashrdi3 (long long, int);
+asmlinkage long long __lshrdi3 (long long, int);
+asmlinkage long long __muldi3 (long long, long long);
 extern char m68k_debug_device[];
 
 extern void dump_thread(struct pt_regs *, struct user *);
@@ -31,32 +33,34 @@ extern int dump_fpu(elf_fpregset_t *);
 EXPORT_SYMBOL(m68k_machtype);
 EXPORT_SYMBOL(m68k_cputype);
 EXPORT_SYMBOL(m68k_is040or060);
+EXPORT_SYMBOL(m68k_realnum_memory);
+EXPORT_SYMBOL(m68k_memory);
+#ifndef CONFIG_SUN3
 EXPORT_SYMBOL(cache_push);
 EXPORT_SYMBOL(cache_clear);
 #ifndef CONFIG_SINGLE_MEMORY_CHUNK
 EXPORT_SYMBOL(mm_vtop);
 EXPORT_SYMBOL(mm_ptov);
 EXPORT_SYMBOL(mm_end_of_chunk);
-#endif
+#endif /* !CONFIG_SINGLE_MEMORY_CHUNK */
 EXPORT_SYMBOL(mm_vtop_fallback);
-EXPORT_SYMBOL(m68k_realnum_memory);
-EXPORT_SYMBOL(m68k_memory);
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(iounmap);
+EXPORT_SYMBOL(kernel_set_cachemode);
+#endif /* !CONFIG_SUN3 */
 EXPORT_SYMBOL(m68k_debug_device);
 EXPORT_SYMBOL(dump_fpu);
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(strstr);
-EXPORT_SYMBOL(local_irq_count);
-EXPORT_SYMBOL(local_bh_count);
+EXPORT_SYMBOL(strtok);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
-EXPORT_SYMBOL(kernel_set_cachemode);
 EXPORT_SYMBOL(kernel_thread);
-EXPORT_SYMBOL(register_serial);
-EXPORT_SYMBOL(unregister_serial);
+#ifdef CONFIG_VME
+EXPORT_SYMBOL(vme_brdtype);
+#endif
 
 /* Networking helper routines. */
 EXPORT_SYMBOL(csum_partial_copy);
@@ -65,12 +69,18 @@ EXPORT_SYMBOL(csum_partial_copy);
    explicitly (the C compiler generates them).  Fortunately,
    their interface isn't gonna change any time soon now, so
    it's OK to leave it out of version control.  */
+EXPORT_SYMBOL_NOVERS(__ashldi3);
 EXPORT_SYMBOL_NOVERS(__ashrdi3);
+EXPORT_SYMBOL_NOVERS(__lshrdi3);
 EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL_NOVERS(memset);
 EXPORT_SYMBOL_NOVERS(memcmp);
+EXPORT_SYMBOL_NOVERS(memscan);
+EXPORT_SYMBOL_NOVERS(__muldi3);
 
 EXPORT_SYMBOL_NOVERS(__down_failed);
 EXPORT_SYMBOL_NOVERS(__down_failed_interruptible);
 EXPORT_SYMBOL_NOVERS(__down_failed_trylock);
 EXPORT_SYMBOL_NOVERS(__up_wakeup);
+
+EXPORT_SYMBOL(get_wchan);

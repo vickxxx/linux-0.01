@@ -22,39 +22,45 @@ extern struct task_struct *child_reaper;
 
 int getrusage(struct task_struct *, int, struct rusage *);
 
-static void release(struct task_struct * p)
+static void release_task(struct task_struct * p)
 {
 	if (p != current) {
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 		/*
-		 * Wait to make sure the process isn't active on any
-		 * other CPU
+		 * Wait to make sure the process isn't on the
+		 * runqueue (active on some other CPU still)
 		 */
-		for (;;)  {
-			int has_cpu;
-			spin_lock_irq(&runqueue_lock);
-			has_cpu = p->has_cpu;
-			spin_unlock_irq(&runqueue_lock);
-			if (!has_cpu)
+		for (;;) {
+			task_lock(p);
+			if (!p->has_cpu)
 				break;
+			task_unlock(p);
 			do {
 				barrier();
 			} while (p->has_cpu);
 		}
+		task_unlock(p);
 #endif
-		free_uid(p);
-		nr_tasks--;
-		add_free_taskslot(p->tarray_ptr);
-
-		write_lock_irq(&tasklist_lock);
-		unhash_pid(p);
-		REMOVE_LINKS(p);
-		write_unlock_irq(&tasklist_lock);
+		atomic_dec(&p->user->processes);
+		free_uid(p->user);
+		unhash_process(p);
 
 		release_thread(p);
 		current->cmin_flt += p->min_flt + p->cmin_flt;
 		current->cmaj_flt += p->maj_flt + p->cmaj_flt;
 		current->cnswap += p->nswap + p->cnswap;
+		/*
+		 * Potentially available timeslices are retrieved
+		 * here - this way the parent does not get penalized
+		 * for creating too many processes.
+		 *
+		 * (this cannot be used to artificially 'generate'
+		 * timeslices, because any timeslice recovered here
+		 * was given away by the parent in the first place.)
+		 */
+		current->counter += p->counter;
+		if (current->counter >= MAX_COUNTER)
+			current->counter = MAX_COUNTER;
 		free_task_struct(p);
 	} else {
 		printk("task releasing itself\n");
@@ -138,15 +144,29 @@ static inline int has_stopped_jobs(int pgrp)
 	return retval;
 }
 
+/*
+ * When we die, we re-parent all our children.
+ * Try to give them to another thread in our process
+ * group, and if no such member exists, give it to
+ * the global child reaper process (ie "init")
+ */
 static inline void forget_original_parent(struct task_struct * father)
 {
-	struct task_struct * p;
+	struct task_struct * p, *reaper;
 
 	read_lock(&tasklist_lock);
+
+	/* Next in our thread group */
+	reaper = next_thread(father);
+	if (reaper == father)
+		reaper = child_reaper;
+
 	for_each_task(p) {
 		if (p->p_opptr == father) {
+			/* We dont want people slaying init */
 			p->exit_signal = SIGCHLD;
-			p->p_opptr = child_reaper; /* init */
+			p->self_exec_id++;
+			p->p_opptr = reaper;
 			if (p->pdeath_signal) send_sig(p->pdeath_signal, p, 0);
 		}
 	}
@@ -159,18 +179,16 @@ static inline void close_files(struct files_struct * files)
 
 	j = 0;
 	for (;;) {
-		unsigned long set = files->open_fds.fds_bits[j];
+		unsigned long set;
 		i = j * __NFDBITS;
-		j++;
-		if (i >= files->max_fds)
+		if (i >= files->max_fdset || i >= files->max_fds)
 			break;
+		set = files->open_fds->fds_bits[j++];
 		while (set) {
 			if (set & 1) {
-				struct file * file = files->fd[i];
-				if (file) {
-					files->fd[i] = NULL;
+				struct file * file = xchg(&files->fd[i], NULL);
+				if (file)
 					filp_close(file, files);
-				}
 			}
 			i++;
 			set >>= 1;
@@ -178,25 +196,32 @@ static inline void close_files(struct files_struct * files)
 	}
 }
 
-extern kmem_cache_t *files_cachep;  
+void put_files_struct(struct files_struct *files)
+{
+	if (atomic_dec_and_test(&files->count)) {
+		close_files(files);
+		/*
+		 * Free the fd and fdset arrays if we expanded them.
+		 */
+		if (files->fd != &files->fd_array[0])
+			free_fd_array(files->fd, files->max_fds);
+		if (files->max_fdset > __FD_SETSIZE) {
+			free_fdset(files->open_fds, files->max_fdset);
+			free_fdset(files->close_on_exec, files->max_fdset);
+		}
+		kmem_cache_free(files_cachep, files);
+	}
+}
 
 static inline void __exit_files(struct task_struct *tsk)
 {
 	struct files_struct * files = tsk->files;
 
 	if (files) {
+		task_lock(tsk);
 		tsk->files = NULL;
-		if (atomic_dec_and_test(&files->count)) {
-			close_files(files);
-			/*
-			 * Free the fd array as appropriate ...
-			 */
-			if (NR_OPEN * sizeof(struct file *) == PAGE_SIZE)
-				free_page((unsigned long) files->fd);
-			else
-				kfree(files->fd);
-			kmem_cache_free(files_cachep, files);
-		}
+		task_unlock(tsk);
+		put_files_struct(files);
 	}
 }
 
@@ -205,17 +230,36 @@ void exit_files(struct task_struct *tsk)
 	__exit_files(tsk);
 }
 
+static inline void __put_fs_struct(struct fs_struct *fs)
+{
+	/* No need to hold fs->lock if we are killing it */
+	if (atomic_dec_and_test(&fs->count)) {
+		dput(fs->root);
+		mntput(fs->rootmnt);
+		dput(fs->pwd);
+		mntput(fs->pwdmnt);
+		if (fs->altroot) {
+			dput(fs->altroot);
+			mntput(fs->altrootmnt);
+		}
+		kmem_cache_free(fs_cachep, fs);
+	}
+}
+
+void put_fs_struct(struct fs_struct *fs)
+{
+	__put_fs_struct(fs);
+}
+
 static inline void __exit_fs(struct task_struct *tsk)
 {
 	struct fs_struct * fs = tsk->fs;
 
 	if (fs) {
+		task_lock(tsk);
 		tsk->fs = NULL;
-		if (atomic_dec_and_test(&fs->count)) {
-			dput(fs->root);
-			dput(fs->pwd);
-			kfree(fs);
-		}
+		task_unlock(tsk);
+		__put_fs_struct(fs);
 	}
 }
 
@@ -224,41 +268,49 @@ void exit_fs(struct task_struct *tsk)
 	__exit_fs(tsk);
 }
 
-static inline void __exit_sighand(struct task_struct *tsk)
+/*
+ * We can use these to temporarily drop into
+ * "lazy TLB" mode and back.
+ */
+struct mm_struct * start_lazy_tlb(void)
 {
-	struct signal_struct * sig = tsk->sig;
+	struct mm_struct *mm = current->mm;
+	current->mm = NULL;
+	/* active_mm is still 'mm' */
+	atomic_inc(&mm->mm_count);
+	enter_lazy_tlb(mm, current, smp_processor_id());
+	return mm;
+}
 
-	if (sig) {
-		unsigned long flags;
+void end_lazy_tlb(struct mm_struct *mm)
+{
+	struct mm_struct *active_mm = current->active_mm;
 
-		spin_lock_irqsave(&tsk->sigmask_lock, flags);
-		tsk->sig = NULL;
-		spin_unlock_irqrestore(&tsk->sigmask_lock, flags);
-		if (atomic_dec_and_test(&sig->count))
-			kfree(sig);
+	current->mm = mm;
+	if (mm != active_mm) {
+		current->active_mm = mm;
+		activate_mm(active_mm, mm);
 	}
-
-	flush_signals(tsk);
+	mmdrop(active_mm);
 }
 
-void exit_sighand(struct task_struct *tsk)
-{
-	__exit_sighand(tsk);
-}
-
+/*
+ * Turn us into a lazy TLB process if we
+ * aren't already..
+ */
 static inline void __exit_mm(struct task_struct * tsk)
 {
 	struct mm_struct * mm = tsk->mm;
 
-	/* Set us up to use the kernel mm state */
-	if (mm != &init_mm) {
-		flush_cache_mm(mm);
-		flush_tlb_mm(mm);
-		destroy_context(mm);
-		tsk->mm = &init_mm;
-		tsk->swappable = 0;
-		SET_PAGE_DIR(tsk, swapper_pg_dir);
-		mm_release();
+	mm_release();
+	if (mm) {
+		atomic_inc(&mm->mm_count);
+		if (mm != tsk->active_mm) BUG();
+		/* more a memory barrier than a real lock */
+		task_lock(tsk);
+		tsk->mm = NULL;
+		task_unlock(tsk);
+		enter_lazy_tlb(mm, current, smp_processor_id());
 		mmput(mm);
 	}
 }
@@ -274,7 +326,7 @@ void exit_mm(struct task_struct *tsk)
  */
 static void exit_notify(void)
 {
-	struct task_struct * p;
+	struct task_struct * p, *t;
 
 	forget_original_parent(current);
 	/*
@@ -286,16 +338,39 @@ static void exit_notify(void)
 	 * and we were the only connection outside, so our pgrp
 	 * is about to become orphaned.
 	 */
-	if ((current->p_pptr->pgrp != current->pgrp) &&
-	    (current->p_pptr->session == current->session) &&
+	 
+	t = current->p_pptr;
+	
+	if ((t->pgrp != current->pgrp) &&
+	    (t->session == current->session) &&
 	    will_become_orphaned_pgrp(current->pgrp, current) &&
 	    has_stopped_jobs(current->pgrp)) {
 		kill_pg(current->pgrp,SIGHUP,1);
 		kill_pg(current->pgrp,SIGCONT,1);
 	}
 
-	/* Let father know we died */
-	notify_parent(current, current->exit_signal);
+	/* Let father know we died 
+	 *
+	 * Thread signals are configurable, but you aren't going to use
+	 * that to send signals to arbitary processes. 
+	 * That stops right now.
+	 *
+	 * If the parent exec id doesn't match the exec id we saved
+	 * when we started then we know the parent has changed security
+	 * domain.
+	 *
+	 * If our self_exec id doesn't match our parent_exec_id then
+	 * we have changed execution domain as these two values started
+	 * the same after a fork.
+	 *	
+	 */
+	
+	if(current->exit_signal != SIGCHLD &&
+	    ( current->parent_exec_id != t->self_exec_id  ||
+	      current->self_exec_id != current->parent_exec_id) 
+	    && !capable(CAP_KILL))
+		current->exit_signal = SIGCHLD;
+
 
 	/*
 	 * This loop does two things:
@@ -307,11 +382,13 @@ static void exit_notify(void)
 	 */
 
 	write_lock_irq(&tasklist_lock);
+	current->state = TASK_ZOMBIE;
+	do_notify_parent(current, current->exit_signal);
 	while (current->p_cptr != NULL) {
 		p = current->p_cptr;
 		current->p_cptr = p->p_osptr;
 		p->p_ysptr = NULL;
-		p->flags &= ~(PF_PTRACED|PF_TRACESYS);
+		p->ptrace = 0;
 
 		p->p_pptr = p->p_opptr;
 		p->p_osptr = p->p_pptr->p_cptr;
@@ -319,7 +396,7 @@ static void exit_notify(void)
 			p->p_osptr->p_ysptr = p;
 		p->p_pptr->p_cptr = p;
 		if (p->state == TASK_ZOMBIE)
-			notify_parent(p, p->exit_signal);
+			do_notify_parent(p, p->exit_signal);
 		/*
 		 * process group orphan check
 		 * Case ii: Our child is in a different pgrp
@@ -339,9 +416,6 @@ static void exit_notify(void)
 		}
 	}
 	write_unlock_irq(&tasklist_lock);
-
-	if (current->leader)
-		disassociate_ctty(1);
 }
 
 NORET_TYPE void do_exit(long code)
@@ -349,39 +423,38 @@ NORET_TYPE void do_exit(long code)
 	struct task_struct *tsk = current;
 
 	if (in_interrupt())
-		printk("Aiee, killing interrupt handler\n");
+		panic("Aiee, killing interrupt handler!");
 	if (!tsk->pid)
 		panic("Attempted to kill the idle task!");
+	if (tsk->pid == 1)
+		panic("Attempted to kill init!");
 	tsk->flags |= PF_EXITING;
-	start_bh_atomic();
-	del_timer(&tsk->real_timer);
-	end_bh_atomic();
+	del_timer_sync(&tsk->real_timer);
 
-	lock_kernel();
 fake_volatile:
 #ifdef CONFIG_BSD_PROCESS_ACCT
 	acct_process(code);
 #endif
-	sem_exit();
 	__exit_mm(tsk);
-#if CONFIG_AP1000
-	exit_msc(tsk);
-#endif
+
+	lock_kernel();
+	sem_exit();
 	__exit_files(tsk);
 	__exit_fs(tsk);
-	__exit_sighand(tsk);
+	exit_sighand(tsk);
 	exit_thread();
-	tsk->state = TASK_ZOMBIE;
-	tsk->exit_code = code;
-	exit_notify();
-#ifdef DEBUG_PROC_TREE
-	audit_ptree();
-#endif
-	if (tsk->exec_domain && tsk->exec_domain->module)
-		__MOD_DEC_USE_COUNT(tsk->exec_domain->module);
+
+	if (current->leader)
+		disassociate_ctty(1);
+
+	put_exec_domain(tsk->exec_domain);
 	if (tsk->binfmt && tsk->binfmt->module)
 		__MOD_DEC_USE_COUNT(tsk->binfmt->module);
+
+	tsk->exit_code = code;
+	exit_notify();
 	schedule();
+	BUG();
 /*
  * In order to get rid of the "volatile function does return" message
  * I did this little loop that confuses gcc to think do_exit really
@@ -398,44 +471,61 @@ fake_volatile:
 	goto fake_volatile;
 }
 
-asmlinkage int sys_exit(int error_code)
+NORET_TYPE void up_and_exit(struct semaphore *sem, long code)
+{
+	if (sem)
+		up(sem);
+	
+	do_exit(code);
+}
+
+asmlinkage long sys_exit(int error_code)
 {
 	do_exit((error_code&0xff)<<8);
 }
 
-asmlinkage int sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct rusage * ru)
+asmlinkage long sys_wait4(pid_t pid,unsigned int * stat_addr, int options, struct rusage * ru)
 {
 	int flag, retval;
 	DECLARE_WAITQUEUE(wait, current);
-	struct task_struct *p;
+	struct task_struct *tsk;
 
-	if (options & ~(WNOHANG|WUNTRACED|__WCLONE))
+	if (options & ~(WNOHANG|WUNTRACED|__WNOTHREAD|__WCLONE|__WALL))
 		return -EINVAL;
 
 	add_wait_queue(&current->wait_chldexit,&wait);
 repeat:
 	flag = 0;
+	current->state = TASK_INTERRUPTIBLE;
 	read_lock(&tasklist_lock);
- 	for (p = current->p_cptr ; p ; p = p->p_osptr) {
-		if (pid>0) {
-			if (p->pid != pid)
+	tsk = current;
+	do {
+		struct task_struct *p;
+	 	for (p = tsk->p_cptr ; p ; p = p->p_osptr) {
+			if (pid>0) {
+				if (p->pid != pid)
+					continue;
+			} else if (!pid) {
+				if (p->pgrp != current->pgrp)
+					continue;
+			} else if (pid != -1) {
+				if (p->pgrp != -pid)
+					continue;
+			}
+			/* Wait for all children (clone and not) if __WALL is set;
+			 * otherwise, wait for clone children *only* if __WCLONE is
+			 * set; otherwise, wait for non-clone children *only*.  (Note:
+			 * A "clone" child here is one that reports to its parent
+			 * using a signal other than SIGCHLD.) */
+			if (((p->exit_signal != SIGCHLD) ^ ((options & __WCLONE) != 0))
+			    && !(options & __WALL))
 				continue;
-		} else if (!pid) {
-			if (p->pgrp != current->pgrp)
-				continue;
-		} else if (pid != -1) {
-			if (p->pgrp != -pid)
-				continue;
-		}
-		/* wait for cloned processes iff the __WCLONE flag is set */
-		if ((p->exit_signal != SIGCHLD) ^ ((options & __WCLONE) != 0))
-			continue;
-		flag = 1;
-		switch (p->state) {
+			flag = 1;
+			switch (p->state) {
 			case TASK_STOPPED:
 				if (!p->exit_code)
 					continue;
-				if (!(options & WUNTRACED) && !(p->flags & PF_PTRACED))
+				if (!(options & WUNTRACED) && !(p->ptrace & PT_PTRACED))
 					continue;
 				read_unlock(&tasklist_lock);
 				retval = ru ? getrusage(p, RUSAGE_BOTH, ru) : 0; 
@@ -461,18 +551,19 @@ repeat:
 					REMOVE_LINKS(p);
 					p->p_pptr = p->p_opptr;
 					SET_LINKS(p);
+					do_notify_parent(p, SIGCHLD);
 					write_unlock_irq(&tasklist_lock);
-					notify_parent(p, SIGCHLD);
 				} else
-					release(p);
-#ifdef DEBUG_PROC_TREE
-				audit_ptree();
-#endif
+					release_task(p);
 				goto end_wait4;
 			default:
 				continue;
+			}
 		}
-	}
+		if (options & __WNOTHREAD)
+			break;
+		tsk = next_thread(tsk);
+	} while (tsk != current);
 	read_unlock(&tasklist_lock);
 	if (flag) {
 		retval = 0;
@@ -481,23 +572,23 @@ repeat:
 		retval = -ERESTARTSYS;
 		if (signal_pending(current))
 			goto end_wait4;
-		current->state=TASK_INTERRUPTIBLE;
 		schedule();
 		goto repeat;
 	}
 	retval = -ECHILD;
 end_wait4:
+	current->state = TASK_RUNNING;
 	remove_wait_queue(&current->wait_chldexit,&wait);
 	return retval;
 }
 
-#ifndef __alpha__
+#if !defined(__alpha__) && !defined(__ia64__)
 
 /*
  * sys_waitpid() remains for compatibility. waitpid() should be
  * implemented by calling sys_wait4() from libc.a.
  */
-asmlinkage int sys_waitpid(pid_t pid,unsigned int * stat_addr, int options)
+asmlinkage long sys_waitpid(pid_t pid,unsigned int * stat_addr, int options)
 {
 	return sys_wait4(pid, stat_addr, options, NULL);
 }

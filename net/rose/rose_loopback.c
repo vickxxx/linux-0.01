@@ -14,14 +14,13 @@
  *
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/timer.h>
 #include <net/ax25.h>
 #include <linux/skbuff.h>
 #include <net/rose.h>
+#include <linux/init.h>
 
 static struct sk_buff_head loopback_queue;
 static struct timer_list loopback_timer;
@@ -37,7 +36,7 @@ void rose_loopback_init(void)
 
 static int rose_loopback_running(void)
 {
-	return (loopback_timer.prev != NULL || loopback_timer.next != NULL);
+	return timer_pending(&loopback_timer);
 }
 
 int rose_loopback_queue(struct sk_buff *skb, struct rose_neigh *neigh)
@@ -74,7 +73,7 @@ static void rose_set_loopback_timer(void)
 static void rose_loopback_timer(unsigned long param)
 {
 	struct sk_buff *skb;
-	struct device *dev;
+	struct net_device *dev;
 	rose_address *dest;
 	struct sock *sk;
 	unsigned short frametype;
@@ -107,9 +106,7 @@ static void rose_loopback_timer(unsigned long param)
 	}
 }
 
-#ifdef MODULE
-
-void rose_loopback_clear(void)
+void __exit rose_loopback_clear(void)
 {
 	struct sk_buff *skb;
 
@@ -120,7 +117,3 @@ void rose_loopback_clear(void)
 		kfree_skb(skb);
 	}
 }
-
-#endif
-
-#endif

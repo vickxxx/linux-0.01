@@ -4,29 +4,31 @@
 #define WNOHANG		0x00000001
 #define WUNTRACED	0x00000002
 
-#define __WCLONE	0x80000000
+#define __WNOTHREAD	0x20000000	/* Don't wait on children of other threads in this group */
+#define __WALL		0x40000000	/* Wait on all children, regardless of type */
+#define __WCLONE	0x80000000	/* Wait only on non-SIGCHLD children */
 
 #ifdef __KERNEL__
 
 #include <linux/kernel.h>
 #include <linux/list.h>
 #include <linux/stddef.h>
+#include <linux/spinlock.h>
 
 #include <asm/page.h>
-#include <asm/spinlock.h>
 #include <asm/processor.h>
 
 /*
  * Temporary debugging help until all code is converted to the new
  * waitqueue usage.
  */
-#define WAITQUEUE_DEBUG 1
+#define WAITQUEUE_DEBUG 0
 
 #if WAITQUEUE_DEBUG
 extern int printk(const char *fmt, ...);
 #define WQ_BUG() do { \
 	printk("wq bug, forcing oops.\n"); \
-	*(int*)0 = 0; \
+	BUG(); \
 } while (0)
 
 #define CHECK_MAGIC(x) if (x != (long)&(x)) \
@@ -42,7 +44,8 @@ extern int printk(const char *fmt, ...);
 #endif
 
 struct __wait_queue {
-	unsigned int compiler_warning;
+	unsigned int flags;
+#define WQ_FLAG_EXCLUSIVE	0x01
 	struct task_struct * task;
 	struct list_head task_list;
 #if WAITQUEUE_DEBUG
@@ -107,7 +110,7 @@ typedef struct __wait_queue_head wait_queue_head_t;
 #endif
 
 #define __WAITQUEUE_INITIALIZER(name,task) \
-	{ 0x1234567, task, { NULL, NULL } __WAITQUEUE_DEBUG_INIT(name)}
+	{ 0x0, task, { NULL, NULL } __WAITQUEUE_DEBUG_INIT(name)}
 #define DECLARE_WAITQUEUE(name,task) \
 	wait_queue_t name = __WAITQUEUE_INITIALIZER(name,task)
 
@@ -139,6 +142,7 @@ static inline void init_waitqueue_entry(wait_queue_t *q,
 	if (!q || !p)
 		WQ_BUG();
 #endif
+	q->flags = 0;
 	q->task = p;
 #if WAITQUEUE_DEBUG
 	q->__magic = (long)&q->__magic;
@@ -156,7 +160,7 @@ static inline int waitqueue_active(wait_queue_head_t *q)
 	return !list_empty(&q->task_list);
 }
 
-extern inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
+static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
 {
 #if WAITQUEUE_DEBUG
 	if (!head || !new)
@@ -172,7 +176,7 @@ extern inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
 /*
  * Used for wake-one threads:
  */
-extern inline void __add_wait_queue_tail(wait_queue_head_t *head,
+static inline void __add_wait_queue_tail(wait_queue_head_t *head,
 						wait_queue_t *new)
 {
 #if WAITQUEUE_DEBUG
@@ -183,10 +187,10 @@ extern inline void __add_wait_queue_tail(wait_queue_head_t *head,
 	if (!head->task_list.next || !head->task_list.prev)
 		WQ_BUG();
 #endif
-	list_add(&new->task_list, head->task_list.prev);
+	list_add_tail(&new->task_list, &head->task_list);
 }
 
-extern inline void __remove_wait_queue(wait_queue_head_t *head,
+static inline void __remove_wait_queue(wait_queue_head_t *head,
 							wait_queue_t *old)
 {
 #if WAITQUEUE_DEBUG

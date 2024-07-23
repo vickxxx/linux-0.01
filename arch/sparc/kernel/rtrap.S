@@ -1,4 +1,4 @@
-/* $Id: rtrap.S,v 1.51 1998/07/26 03:02:38 davem Exp $
+/* $Id: rtrap.S,v 1.55 2000/08/05 10:48:40 davem Exp $
  * rtrap.S: Return from Sparc trap low-level code.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -48,16 +48,18 @@ rtrap_7win_patch5:	and	%g1, 0x7f, %g1
 	.globl	rtrap_patch3, rtrap_patch4, rtrap_patch5
 	.globl	C_LABEL(ret_trap_lockless_ipi)
 ret_trap_entry:
-	sethi	%hi(C_LABEL(bh_active)), %l3
-	sethi	%hi(C_LABEL(bh_mask)), %l4
-	ld	[%l4 + %lo(C_LABEL(bh_mask))], %g5
-	ld	[%l3 + %lo(C_LABEL(bh_active))], %g4
+	ld	[%curptr + AOFF_task_processor], %l3
+	sll	%l3, 5, %l3
+	sethi	%hi(C_LABEL(irq_stat)), %l4		! &softirq_active
+	add	%l4, %l3, %l4
+	ld	[%l4 + %lo(C_LABEL(irq_stat))], %g5	! softirq_active
+	ld	[%l4 + %lo(C_LABEL(irq_stat) + 4)], %g4	! softirq_mask
 	andcc	%g4, %g5, %g0
 	be	C_LABEL(ret_trap_lockless_ipi)
 	 nop
-	call	C_LABEL(do_bottom_half)
+	call	C_LABEL(do_softirq)
 	 nop
-
+	
 C_LABEL(ret_trap_lockless_ipi):
 	andcc	%t_psr, PSR_PS, %g0
 	be	1f
@@ -95,7 +97,7 @@ ret_trap_continue:
 	wr	%t_psr, 0x0, %psr
 	WRITE_PAUSE
 
-	ld	[%curptr + AOFF_task_tss + AOFF_thread_w_saved], %twin_tmp1
+	ld	[%curptr + AOFF_task_thread + AOFF_thread_w_saved], %twin_tmp1
 	orcc	%g0, %twin_tmp1, %g0
 	be	ret_trap_nobufwins
 	 nop
@@ -119,7 +121,7 @@ ret_trap_nobufwins:
 	/* If there are already live user windows in the
 	 * set we can return from trap safely.
 	 */
-	ld	[%curptr + AOFF_task_tss + AOFF_thread_uwinmask], %twin_tmp1
+	ld	[%curptr + AOFF_task_thread + AOFF_thread_uwinmask], %twin_tmp1
 	orcc	%g0, %twin_tmp1, %g0
 	bne	ret_trap_userwins_ok
 	 nop
@@ -297,7 +299,7 @@ sun4c_rett_onepage:
 	.globl	C_LABEL(srmmu_rett_stackchk)
 C_LABEL(srmmu_rett_stackchk):
 	bne	ret_trap_user_stack_is_bolixed
-	 GET_PAGE_OFFSET(g1)
+	 sethi   %hi(PAGE_OFFSET), %g1
 	cmp	%g1, %fp
 	bleu	ret_trap_user_stack_is_bolixed
 	 mov	AC_M_SFSR, %g1

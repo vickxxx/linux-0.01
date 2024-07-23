@@ -4,11 +4,13 @@
  * kernel entry-points
  */
 
+#include <linux/config.h>
 #include <asm/system.h>
+#include <asm/cache.h>
 
 #define SIGCHLD 20
 
-#define NR_SYSCALLS 371
+#define NR_SYSCALLS 377
 
 /*
  * These offsets must match with alpha_mv in <asm/machvec.h>.
@@ -32,11 +34,15 @@
 #define TASK_ADDR_LIMIT		24	
 #define TASK_EXEC_DOMAIN	32
 #define TASK_NEED_RESCHED	40
+#define TASK_PTRACE		48
+#define TASK_PROCESSOR		100
 
 /*
  * task flags (must match include/linux/sched.h):
  */
-#define	PF_PTRACED	0x00000010
+#define	PT_PTRACED	0x00000001
+
+#define CLONE_VM        0x00000100 
 
 /*
  * This defines the normal kernel pt-regs layout.
@@ -82,8 +88,8 @@
 	ldq	$1,8($30);		\
 	ldq	$2,16($30);		\
 	ldq	$3,24($30);		\
-	ldq	$20,152($30);		\
-	ldq	$21,HAE_CACHE($19);	\
+	ldq	$21,152($30);		\
+	ldq	$20,HAE_CACHE($19);	\
 	ldq	$4,32($30);		\
 	ldq	$5,40($30);		\
 	ldq	$6,48($30);		\
@@ -225,21 +231,23 @@ kernel_clone:
 .end	kernel_clone
 
 /*
- * __kernel_thread(clone_flags, fn, arg)
+ * kernel_thread(fn, arg, clone_flags)
  */
 .align 3
-.globl	__kernel_thread
-.ent	__kernel_thread
-__kernel_thread:
+.globl	kernel_thread
+.ent	kernel_thread
+kernel_thread:
 	ldgp	$29,0($27)	/* we can be called from a module */
 	.frame $30, 4*8, $26
 	subq	$30,4*8,$30
 	stq	$10,16($30)
 	stq	$9,8($30)
+	lda	$0,CLONE_VM
 	stq	$26,0($30)
 	.prologue 1
-	mov	$17,$9		/* save fn */		
-	mov	$18,$10		/* save arg */
+	mov	$16,$9		/* save fn */		
+	mov	$17,$10		/* save arg */
+	or	$18,$0,$16	/* shuffle flags to front; add CLONE_VM.  */
 	bsr	$26,kernel_clone
 	bne	$20,1f		/* $20 is non-zero in child */
 	ldq	$26,0($30)
@@ -257,7 +265,7 @@ __kernel_thread:
 	mov	$0,$16
 	mov	$31,$26
 	jsr	$31,sys_exit
-.end	__kernel_thread
+.end	kernel_thread
 
 /*
  * __kernel_execve(path, argv, envp, regs)
@@ -551,10 +559,10 @@ entSys:
 	lda	$5,sys_call_table
 	lda	$27,sys_ni_syscall
 	cmpult	$0,$4,$4
-	ldq	$3,TASK_FLAGS($8)
+	ldq	$3,TASK_PTRACE($8)
 	stq	$17,SP_OFF+32($30)
 	s8addq	$0,$5,$5
-	and     $3,PF_PTRACED,$3
+	and     $3,PT_PTRACED,$3
 	stq	$18,SP_OFF+40($30)
 	bne     $3,strace
 	beq	$4,1f
@@ -568,12 +576,15 @@ entSys:
 .align 3
 ret_from_sys_call:
 	cmovne	$26,0,$19		/* $19 = 0 => non-restartable */
-	/* check bottom half interrupts */
-	ldq	$3,bh_active
-	ldq	$4,bh_mask
-	and	$3,$4,$2
-	bne	$2,handle_bottom_half
-ret_from_handle_bh:
+	ldl	$3,TASK_PROCESSOR($8)
+	lda	$4,irq_stat		/* softirq_active */
+	sll	$3,L1_CACHE_SHIFT,$3
+	addq	$3,$4,$4
+	ldq	$4,0($4)		/* softirq_active[32] + softirq_mask[32] */
+	sll	$4,32,$3
+	and	$4,$3,$4
+	bne	$4,handle_softirq
+ret_from_softirq:
 	ldq	$0,SP_OFF($30)
 	and	$0,8,$0
 	beq	$0,restore_all
@@ -652,16 +663,16 @@ strace_error:
 	br	ret_from_sys_call
 
 	.align 3
-handle_bottom_half:
+handle_softirq:
 	subq	$30,16,$30
 	stq	$19,0($30)	/* save syscall nr */
 	stq	$20,8($30)	/* and error indication (a3) */
-	jsr	$26,do_bottom_half
+	jsr	$26,do_softirq
 	ldq	$19,0($30)
 	ldq	$20,8($30)
 	addq	$30,16,$30
-	br	ret_from_handle_bh
-
+	br	ret_from_softirq
+	
 	.align 3
 syscall_error:
 	/*
@@ -698,7 +709,7 @@ signal_return:
 	br	restore_all
 .end entSys
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
         .globl  ret_from_smp_fork
 .align 3
 .ent ret_from_smp_fork
@@ -707,7 +718,7 @@ ret_from_smp_fork:
 	mov	$17,$16
 	jsr	$31,schedule_tail
 .end ret_from_smp_fork
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 .align 3
 .ent reschedule
@@ -822,7 +833,7 @@ sys_call_table:
 	.quad alpha_ni_syscall
 	.quad alpha_ni_syscall			/* 50 */
 	.quad sys_acct
-	.quad osf_sigpending
+	.quad sys_sigpending
 	.quad alpha_ni_syscall
 	.quad sys_ioctl
 	.quad alpha_ni_syscall			/* 55 */
@@ -1092,7 +1103,7 @@ sys_call_table:
 	.quad sys_munlockall
 	.quad sys_sysinfo
 	.quad sys_sysctl
-	.quad sys_idle				/* 320 */
+	.quad sys_ni_syscall			/* 320 */
 	.quad sys_oldumount
 	.quad sys_swapon
 	.quad sys_times
@@ -1143,3 +1154,10 @@ sys_call_table:
 	.quad sys_capget
 	.quad sys_capset
 	.quad sys_sendfile			/* 370 */
+	.quad sys_setresgid
+	.quad sys_getresgid
+	.quad sys_ni_syscall			/* sys_dipc */
+	.quad sys_pivot_root
+	.quad sys_mincore			/* 375 */
+	.quad sys_pciconfig_iobase
+	.quad sys_getdents64

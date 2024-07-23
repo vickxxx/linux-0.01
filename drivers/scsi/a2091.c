@@ -12,7 +12,7 @@
 #include <asm/amigahw.h>
 #include <linux/zorro.h>
 #include <asm/irq.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 
 #include "scsi.h"
 #include "hosts.h"
@@ -20,11 +20,6 @@
 #include "a2091.h"
 
 #include<linux/stat.h>
-
-struct proc_dir_entry proc_scsi_a2091 = {
-    PROC_SCSI_A2091, 5, "A2091",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 #define DMA(ptr) ((a2091_scsiregs *)((ptr)->base))
 #define HDATA(ptr) ((struct WD33C93_hostdata *)((ptr)->hostdata))
@@ -34,6 +29,7 @@ static Scsi_Host_Template *a2091_template;
 
 static void a2091_intr (int irq, void *dummy, struct pt_regs *fp)
 {
+    unsigned long flags;
     unsigned int status;
     struct Scsi_Host *instance;
     for (instance = first_instance; instance &&
@@ -41,32 +37,20 @@ static void a2091_intr (int irq, void *dummy, struct pt_regs *fp)
     {
 	status = DMA(instance)->ISTR;
 	if (!(status & (ISTR_INT_F|ISTR_INT_P)))
-	    continue;
+		continue;
 
-	if (status & ISTR_INTS)
-	{
-	    /* disable PORTS interrupt */
-	    custom.intena = IF_PORTS;
-	    wd33c93_intr (instance);
-	    /* enable PORTS interrupt */
-	    custom.intena = IF_SETCLR | IF_PORTS;
+	if (status & ISTR_INTS) {
+		spin_lock_irqsave(&io_request_lock, flags);
+		wd33c93_intr (instance);
+		spin_unlock_irqrestore(&io_request_lock, flags);
 	}
     }
-}
-
-static void do_a2091_intr (int irq, void *dummy, struct pt_regs *fp)
-{
-    unsigned long flags;
-
-    spin_lock_irqsave(&io_request_lock, flags);
-    a2091_intr(irq, dummy, fp);
-    spin_unlock_irqrestore(&io_request_lock, flags);
 }
 
 static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 {
     unsigned short cntr = CNTR_PDMD | CNTR_INTEN;
-    unsigned long addr = VTOP(cmd->SCp.ptr);
+    unsigned long addr = virt_to_bus(cmd->SCp.ptr);
     struct Scsi_Host *instance = cmd->host;
 
     /* don't allow DMA if the physical address is bad */
@@ -85,7 +69,7 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 	}
 
 	/* get the physical address of the bounce buffer */
-	addr = VTOP(HDATA(instance)->dma_bounce_buffer);
+	addr = virt_to_bus(HDATA(instance)->dma_bounce_buffer);
 
 	/* the bounce buffer may not be in the first 16M of physmem */
 	if (addr & A2091_XFER_MASK) {
@@ -200,61 +184,62 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
 
 static int num_a2091 = 0;
 
-__initfunc(int a2091_detect(Scsi_Host_Template *tpnt))
+int __init a2091_detect(Scsi_Host_Template *tpnt)
 {
     static unsigned char called = 0;
     struct Scsi_Host *instance;
-    caddr_t address;
-    unsigned int key;
-    const struct ConfigDev *cd;
+    unsigned long address;
+    struct zorro_dev *z = NULL;
 
     if (!MACH_IS_AMIGA || called)
 	return 0;
     called = 1;
 
-    tpnt->proc_dir = &proc_scsi_a2091;
+    tpnt->proc_name = "A2091";
     tpnt->proc_info = &wd33c93_proc_info;
 
-    while ((key = zorro_find(ZORRO_PROD_CBM_A590_A2091_1, 0, 0)) ||
-	   (key = zorro_find(ZORRO_PROD_CBM_A590_A2091_2, 0, 0))) {
-	cd = zorro_get_board(key);
-	address = cd->cd_BoardAddr;
+    while ((z = zorro_find_device(ZORRO_WILDCARD, z))) {
+	if (z->id != ZORRO_PROD_CBM_A590_A2091_1 &&
+	    z->id != ZORRO_PROD_CBM_A590_A2091_2)
+	    continue;
+	address = z->resource.start;
+	if (!request_mem_region(address, 256, "wd33c93"))
+	    continue;
+
 	instance = scsi_register (tpnt, sizeof (struct WD33C93_hostdata));
-	instance->base = (unsigned char *)ZTWO_VADDR(address);
+	if (instance == NULL) {
+	    release_mem_region(address, 256);
+	    continue;
+	}
+	instance->base = ZTWO_VADDR(address);
 	instance->irq = IRQ_AMIGA_PORTS;
-	instance->unique_id = key;
+	instance->unique_id = z->slotaddr;
 	DMA(instance)->DAWR = DAWR_A2091;
 	wd33c93_init(instance, (wd33c93_regs *)&(DMA(instance)->SASR),
 		     dma_setup, dma_stop, WD33C93_FS_8_10);
 	if (num_a2091++ == 0) {
 	    first_instance = instance;
 	    a2091_template = instance->hostt;
-	    request_irq(IRQ_AMIGA_PORTS, do_a2091_intr, 0, "A2091 SCSI", a2091_intr);
+	    request_irq(IRQ_AMIGA_PORTS, a2091_intr, SA_SHIRQ, "A2091 SCSI",
+			a2091_intr);
 	}
 	DMA(instance)->CNTR = CNTR_PDMD | CNTR_INTEN;
-	zorro_config_board(key, 0);
     }
 
     return num_a2091;
 }
 
-#ifdef MODULE
-
 #define HOSTS_C
 
-#include "a2091.h"
-
-Scsi_Host_Template driver_template = A2091_SCSI;
+static Scsi_Host_Template driver_template = A2091_SCSI;
 
 #include "scsi_module.c"
-
-#endif
 
 int a2091_release(struct Scsi_Host *instance)
 {
 #ifdef MODULE
 	DMA(instance)->CNTR = 0;
-	zorro_unconfig_board(instance->unique_id, 0);
+	release_mem_region(ZTWO_PADDR(instance->base), 256);
 	if (--num_a2091 == 0)
 		free_irq(IRQ_AMIGA_PORTS, a2091_intr);
 	wd33c93_release();

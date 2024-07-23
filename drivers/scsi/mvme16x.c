@@ -18,14 +18,8 @@
 #include "hosts.h"
 #include "53c7xx.h"
 #include "mvme16x.h"
-#include "asm/mvme16xhw.h"
 
 #include<linux/stat.h>
-
-struct proc_dir_entry proc_scsi_mvme16x = {
-    PROC_SCSI_MVME16x, 7, "MVME16x",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 extern ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
 			u32 base, int io_port, int irq, int dma,
@@ -46,7 +40,7 @@ int mvme16x_scsi_detect(Scsi_Host_Template *tpnt)
     if (called)
 	return 0;
 
-    tpnt->proc_dir = &proc_scsi_mvme16x;
+    tpnt->proc_name = "MVME16x";
 
     options = OPTION_MEMORY_MAPPED|OPTION_DEBUG_TEST1|OPTION_INTFLY|OPTION_SYNCHRONOUS|OPTION_ALWAYS_SYNCHRONOUS|OPTION_DISCONNECT;
 

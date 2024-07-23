@@ -16,6 +16,23 @@
  *		Steve Whitehouse : Timeouts for cached routes.
  *              Steve Whitehouse : Use dst cache for input routes too.
  *              Steve Whitehouse : Fixed error values in dn_send_skb.
+ *              Steve Whitehouse : Rework routing functions to better fit
+ *                                 DECnet routing design
+ *              Alexey Kuznetsov : New SMP locking
+ *              Steve Whitehouse : More SMP locking changes & dn_cache_dump()
+ *              Steve Whitehouse : Prerouting NF hook, now really is prerouting.
+ *				   Fixed possible skb leak in rtnetlink funcs.
+ *              Steve Whitehouse : Dave Miller's dynamic hash table sizing and
+ *                                 Alexey Kuznetsov's finer grained locking
+ *                                 from ipv4/route.c.
+ *              Steve Whitehouse : Routing is now starting to look like a
+ *                                 sensible set of code now, mainly due to
+ *                                 my copying the IPv4 routing code. The
+ *                                 hooks here are modified and will continue
+ *                                 to evolve for a while.
+ *              Steve Whitehouse : Real SMP at last :-) Also new netfilter
+ *                                 stuff. Look out raw sockets your days
+ *                                 are numbered!
  */
 
 /******************************************************************************
@@ -38,7 +55,6 @@
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/timer.h>
 #include <linux/sockios.h>
 #include <linux/net.h>
 #include <linux/netdevice.h>
@@ -49,9 +65,9 @@
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
 #include <linux/init.h>
-#include <linux/firewall.h>
 #include <linux/rtnetlink.h>
 #include <linux/string.h>
+#include <linux/netfilter_decnet.h>
 #include <asm/errno.h>
 #include <net/neighbour.h>
 #include <net/dst.h>
@@ -61,13 +77,21 @@
 #include <net/dn_route.h>
 #include <net/dn_neigh.h>
 #include <net/dn_fib.h>
-#include <net/dn_raw.h>
+
+struct dn_rt_hash_bucket
+{
+	struct dn_route *chain;
+	rwlock_t lock;
+} __attribute__((__aligned__(8)));
 
 extern struct neigh_table dn_neigh_table;
 
-#define DN_HASHBUCKETS 16
 
 static unsigned char dn_hiord_addr[6] = {0xAA,0x00,0x04,0x00,0x00,0x00};
+
+int dn_rt_min_delay = 2*HZ;
+int dn_rt_max_delay = 10*HZ;
+static unsigned long dn_rt_deadline = 0;
 
 static int dn_dst_gc(void);
 static struct dst_entry *dn_dst_check(struct dst_entry *, __u32);
@@ -75,9 +99,13 @@ static struct dst_entry *dn_dst_reroute(struct dst_entry *, struct sk_buff *skb)
 static struct dst_entry *dn_dst_negative_advice(struct dst_entry *);
 static void dn_dst_link_failure(struct sk_buff *);
 static int dn_route_input(struct sk_buff *);
+static void dn_run_flush(unsigned long dummy);
 
-static struct dn_route *dn_route_cache[DN_HASHBUCKETS];
-static struct timer_list dn_route_timer = { NULL, NULL, 0, 0L, NULL };
+static struct dn_rt_hash_bucket *dn_rt_hash_table;
+static unsigned dn_rt_hash_mask;
+
+static struct timer_list dn_route_timer;
+static struct timer_list dn_rt_flush_timer = { function: dn_run_flush };
 int decnet_dst_gc_interval = 2;
 
 static struct dst_ops dn_dst_ops = {
@@ -90,40 +118,50 @@ static struct dst_ops dn_dst_ops = {
 	NULL,
 	dn_dst_negative_advice,
 	dn_dst_link_failure,
+	sizeof(struct dn_route),
 	ATOMIC_INIT(0)
 };
 
-static __inline__ unsigned dn_hash(unsigned short dest)
+static __inline__ unsigned dn_hash(unsigned short src, unsigned short dst)
 {
-	unsigned short tmp = (dest&0xff) ^ (dest>>8);
-	return (tmp&0x0f) ^ (tmp>>4);
+	unsigned short tmp = src ^ dst;
+	tmp ^= (tmp >> 3);
+	tmp ^= (tmp >> 5);
+	tmp ^= (tmp >> 10);
+	return dn_rt_hash_mask & (unsigned)tmp;
 }
 
-static void dn_dst_check_expire(unsigned long dummy)
+static void SMP_TIMER_NAME(dn_dst_check_expire)(unsigned long dummy)
 {
 	int i;
 	struct dn_route *rt, **rtp;
 	unsigned long now = jiffies;
 	unsigned long expire = 120 * HZ;
 
-	for(i = 0; i < DN_HASHBUCKETS; i++) {
-		rtp = &dn_route_cache[i];
-		for(;(rt=*rtp); rtp = &rt->u.rt_next) {
-			if (atomic_read(&rt->u.dst.use) ||
-					(now - rt->u.dst.lastuse) < expire)
+	for(i = 0; i <= dn_rt_hash_mask; i++) {
+		rtp = &dn_rt_hash_table[i].chain;
+
+		write_lock(&dn_rt_hash_table[i].lock);
+		while((rt=*rtp) != NULL) {
+			if (atomic_read(&rt->u.dst.__refcnt) ||
+					(now - rt->u.dst.lastuse) < expire) {
+				rtp = &rt->u.rt_next;
 				continue;
+			}
 			*rtp = rt->u.rt_next;
 			rt->u.rt_next = NULL;
 			dst_free(&rt->u.dst);
 		}
+		write_unlock(&dn_rt_hash_table[i].lock);
 
 		if ((jiffies - now) > 0)
 			break;
 	}
 
-	dn_route_timer.expires = now + decnet_dst_gc_interval * HZ;
-	add_timer(&dn_route_timer);
+	mod_timer(&dn_route_timer, now + decnet_dst_gc_interval * HZ);
 }
+
+SMP_TIMER_DEFINE(dn_dst_check_expire, dn_dst_task);
 
 static int dn_dst_gc(void)
 {
@@ -132,20 +170,24 @@ static int dn_dst_gc(void)
 	unsigned long now = jiffies;
 	unsigned long expire = 10 * HZ;
 
-	start_bh_atomic();
-	for(i = 0; i < DN_HASHBUCKETS; i++) {
-		rtp = &dn_route_cache[i];
-		for(; (rt=*rtp); rtp = &rt->u.rt_next) {
-			if (atomic_read(&rt->u.dst.use) ||
-					(now - rt->u.dst.lastuse) < expire)
+	for(i = 0; i <= dn_rt_hash_mask; i++) {
+
+		write_lock_bh(&dn_rt_hash_table[i].lock);
+		rtp = &dn_rt_hash_table[i].chain;
+
+		while((rt=*rtp) != NULL) {
+			if (atomic_read(&rt->u.dst.__refcnt) ||
+					(now - rt->u.dst.lastuse) < expire) {
+				rtp = &rt->u.rt_next;
 				continue;
+			}
 			*rtp = rt->u.rt_next;
 			rt->u.rt_next = NULL;
 			dst_free(&rt->u.dst);
 			break;
 		}
+		write_unlock_bh(&dn_rt_hash_table[i].lock);
 	}
-	end_bh_atomic();
 
 	return 0;
 }
@@ -177,41 +219,92 @@ static void dn_dst_link_failure(struct sk_buff *skb)
 	return;
 }
 
-static void dn_insert_route(struct dn_route *rt)
+static void dn_insert_route(struct dn_route *rt, unsigned hash)
 {
-	unsigned hash = dn_hash(rt->rt_daddr);
 	unsigned long now = jiffies;
 
-	start_bh_atomic();
-
-	rt->u.rt_next = dn_route_cache[hash];
-	dn_route_cache[hash] = rt;
+	write_lock_bh(&dn_rt_hash_table[hash].lock);
+	rt->u.rt_next = dn_rt_hash_table[hash].chain;
+	dn_rt_hash_table[hash].chain = rt;
 	
-	atomic_inc(&rt->u.dst.refcnt);
-	atomic_inc(&rt->u.dst.use);
+	dst_hold(&rt->u.dst);
+	rt->u.dst.__use++;
 	rt->u.dst.lastuse = now;
 
-	end_bh_atomic();
+	write_unlock_bh(&dn_rt_hash_table[hash].lock);
 }
 
-#if defined(CONFIG_DECNET_MODULE)
-static void dn_run_flush(unsigned long dummy)
+void SMP_TIMER_NAME(dn_run_flush)(unsigned long dummy)
 {
 	int i;
 	struct dn_route *rt, *next;
 
-	for(i = 0; i < DN_HASHBUCKETS; i++) {
-		if ((rt = xchg(&dn_route_cache[i], NULL)) == NULL)
-			continue;
+	for(i = 0; i < dn_rt_hash_mask; i++) {
+		write_lock_bh(&dn_rt_hash_table[i].lock);
+
+		if ((rt = xchg(&dn_rt_hash_table[i].chain, NULL)) == NULL)
+			goto nothing_to_declare;
 
 		for(; rt; rt=next) {
 			next = rt->u.rt_next;
 			rt->u.rt_next = NULL;
 			dst_free((struct dst_entry *)rt);
 		}
+
+nothing_to_declare:
+		write_unlock_bh(&dn_rt_hash_table[i].lock);
 	}
 }
-#endif /* CONFIG_DECNET_MODULE */
+
+SMP_TIMER_DEFINE(dn_run_flush, dn_flush_task);
+
+static spinlock_t dn_rt_flush_lock = SPIN_LOCK_UNLOCKED;
+
+void dn_rt_cache_flush(int delay)
+{
+	unsigned long now = jiffies;
+	int user_mode = !in_interrupt();
+
+	if (delay < 0)
+		delay = dn_rt_min_delay;
+
+	spin_lock_bh(&dn_rt_flush_lock);
+
+	if (del_timer(&dn_rt_flush_timer) && delay > 0 && dn_rt_deadline) {
+		long tmo = (long)(dn_rt_deadline - now);
+
+		if (user_mode && tmo < dn_rt_max_delay - dn_rt_min_delay)
+			tmo = 0;
+
+		if (delay > tmo)
+			delay = tmo;
+	}
+
+	if (delay <= 0) {
+		spin_unlock_bh(&dn_rt_flush_lock);
+		dn_run_flush(0);
+		return;
+	}
+
+	if (dn_rt_deadline == 0)
+		dn_rt_deadline = now + dn_rt_max_delay;
+
+	dn_rt_flush_timer.expires = now + delay;
+	add_timer(&dn_rt_flush_timer);
+	spin_unlock_bh(&dn_rt_flush_lock);
+}
+
+
+static int dn_route_rx_packet(struct sk_buff *skb)
+{
+	int err;
+
+	if ((err = dn_route_input(skb)) == 0)
+		return skb->dst->input(skb);
+
+	kfree_skb(skb);
+	return err;
+}
 
 static int dn_route_rx_long(struct sk_buff *skb)
 {
@@ -242,24 +335,7 @@ static int dn_route_rx_long(struct sk_buff *skb)
         ptr++;
         cb->hops = *ptr++; /* Visit Count */
 
-	if (dn_route_input(skb) == 0) {
-
-#ifdef CONFIG_DECNET_FW
-		struct neighbour *neigh = skb->dst->neighbour;
-
-		switch(call_in_firewall(PF_DECnet, skb->dev, NULL, NULL, &skb)) {
-			case FW_REJECT:
-				neigh->ops->error_report(neigh, skb);
-				return 0;
-			case FW_BLOCK:
-			default:
-				goto drop_it;
-			case FW_ACCEPT:
-		}
-#endif /* CONFIG_DECNET_FW */
-
-		return skb->dst->input(skb);
-	}
+	return NF_HOOK(PF_DECnet, NF_DN_PRE_ROUTING, skb, skb->dev, NULL, dn_route_rx_packet);
 
 drop_it:
 	kfree_skb(skb);
@@ -285,34 +361,29 @@ static int dn_route_rx_short(struct sk_buff *skb)
         ptr += 2;
         cb->hops = *ptr & 0x3f;
 
-        if (dn_route_input(skb) == 0) {
-
-#ifdef CONFIG_DECNET_FW
-		struct neighbour *neigh = skb->dst->neighbour;
-
-                switch(call_in_firewall(PF_DECnet, skb->dev, NULL, NULL, &skb)) {
-			case FW_REJECT:
-				neigh->ops->error_report(neigh, skb);
-				return 0;
-			case FW_BLOCK:
-			default:
-				goto drop_it;
-
-                        case FW_ACCEPT:
-		}
-#endif /* CONFIG_DECNET_FW */
-
-		return skb->dst->input(skb);
-        }
+	return NF_HOOK(PF_DECnet, NF_DN_PRE_ROUTING, skb, skb->dev, NULL, dn_route_rx_packet);
 
 drop_it:
         kfree_skb(skb);
         return 0;
 }
 
-int dn_route_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
+static int dn_route_discard(struct sk_buff *skb)
 {
-	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
+	kfree_skb(skb);
+	return 0;
+}
+
+static int dn_route_ptp_hello(struct sk_buff *skb)
+{
+	dn_dev_hello(skb);
+	dn_neigh_pointopoint_hello(skb);
+	return 0;
+}
+
+int dn_route_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
+{
+	struct dn_skb_cb *cb;
 	unsigned char flags = 0;
 	int padlen = 0;
 	__u16 len = dn_ntohs(*(__u16 *)skb->data);
@@ -321,8 +392,8 @@ int dn_route_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt
 	if (dn == NULL)
 		goto dump_it;
 
-	cb->stamp = jiffies;
-	cb->iif = dev->ifindex;
+	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL)
+		goto out;
 
 	skb_pull(skb, 2);
 
@@ -332,6 +403,10 @@ int dn_route_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt
 	skb_trim(skb, len);
 
 	flags = *skb->data;
+
+	cb = (struct dn_skb_cb *)skb->cb;
+	cb->stamp = jiffies;
+	cb->iif = dev->ifindex;
 
 	/*
 	 * If we have padding, remove it.
@@ -352,15 +427,11 @@ int dn_route_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt
 
 	cb->rt_flags = flags;
 
-	if (dn->parms.setsrc)
-		dn->parms.setsrc(skb);
-
-	/* printk(KERN_DEBUG "dn_route_rcv: got 0x%02x from %s [%d %d %d]\n", (int)flags,
-				(dev) ? dev->name : "???", len, skb->len, padlen);  */
-
-#ifdef CONFIG_DECNET_RAW
-	dn_raw_rx_routing(skb);
-#endif /* CONFIG_DECNET_RAW */
+	if (decnet_debug_level & 1)
+		printk(KERN_DEBUG 
+			"dn_route_rcv: got 0x%02x from %s [%d %d %d]\n",
+			(int)flags, (dev) ? dev->name : "???", len, skb->len, 
+			padlen);
 
         if (flags & DN_RT_PKT_CNTL) {
                 switch(flags & DN_RT_CNTL_MSK) {
@@ -377,24 +448,20 @@ int dn_route_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt
 
 		switch(flags & DN_RT_CNTL_MSK) {
                 	case DN_RT_PKT_HELO:
-				dn_dev_hello(skb);
-				dn_neigh_pointopoint_hello(skb);
-				return 0;
+				NF_HOOK(PF_DECnet, NF_DN_HELLO, skb, skb->dev, NULL, dn_route_ptp_hello);
+				goto out;
 
                 	case DN_RT_PKT_L1RT:
                 	case DN_RT_PKT_L2RT:
-#ifdef CONFIG_DECNET_ROUTER
-				return dn_fib_rt_message(skb);
-#else
-                      		break;
-#endif /* CONFIG_DECNET_ROUTER */
+                                NF_HOOK(PF_DECnet, NF_DN_ROUTE, skb, skb->dev, NULL, dn_route_discard);
+                      		goto out;
                 	case DN_RT_PKT_ERTH:
-				dn_neigh_router_hello(skb);
-                        	return 0;
+				NF_HOOK(PF_DECnet, NF_DN_HELLO, skb, skb->dev, NULL, dn_neigh_router_hello);
+                        	goto out;
 
                 	case DN_RT_PKT_EEDH:
-				dn_neigh_endnode_hello(skb);
-                        	return 0;
+				NF_HOOK(PF_DECnet, NF_DN_HELLO, skb, skb->dev, NULL, dn_neigh_endnode_hello);
+                        	goto out;
                 }
         } else {
 		if (dn->parms.state != DN_DEV_S_RU)
@@ -411,59 +478,22 @@ int dn_route_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt
         }
 
 dump_it:
-	if (net_ratelimit())
-		printk(KERN_DEBUG "dn_route_rcv: Dumping packet\n");
 	kfree_skb(skb);
+out:
 	return 0;
 }
-
-
-void dn_send_skb(struct sk_buff *skb)
-{
-	struct sock *sk = skb->sk;
-	struct dn_scp *scp = &sk->protinfo.dn;
-
-	if (sk == NULL) {
-		dev_queue_xmit(skb);
-		return ;
-	}
-
-	skb->h.raw = skb->data;
-
-	scp->stamp = jiffies; /* Record time packet was sent */
-
-	/* printk(KERN_DEBUG "dn_send_skb\n"); */
-
-	if (sk->dst_cache && sk->dst_cache->obsolete) {
-		dst_release(sk->dst_cache);
-		sk->dst_cache = NULL;
-	}
-
-	if (sk->dst_cache == NULL) {
-		if (dn_route_output(sk) != 0) {
-			kfree_skb(skb);
-			sk->err = EHOSTUNREACH;
-			if (!sk->dead)
-				sk->state_change(sk);
-			return;
-		}
-	}
-
-	skb->dst = dst_clone(sk->dst_cache);
-
-	sk->dst_cache->output(skb);
-}
-
 
 static int dn_output(struct sk_buff *skb)
 {
 	struct dst_entry *dst = skb->dst;
 	struct dn_route *rt = (struct dn_route *)dst;
-	struct device *dev = dst->dev;
+	struct net_device *dev = dst->dev;
 	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
+	struct neighbour *neigh;
+
 	int err = -EINVAL;
 
-	if (!dst->neighbour)
+	if ((neigh = dst->neighbour) == NULL)
 		goto error;
 
 	skb->dev = dev;
@@ -480,44 +510,27 @@ static int dn_output(struct sk_buff *skb)
 	cb->rt_flags |= DN_RT_F_IE;
 	cb->hops = 0;
 
-	/*
-	 * Filter through the outgoing firewall
-	 */
-#ifdef CONFIG_DECNET_FW
-        switch(call_out_firewall(PF_DECnet, dst->dev, NULL, NULL, &skb)) {
-                case FW_REJECT:
-			err = -EPERM;
-			goto drop;
-                case FW_BLOCK:
-                default:
-                        err = 0;
-                        goto drop;
-                case FW_ACCEPT:
-        }
-#endif /* CONFIG_DECNET_FW */
-
-	return dst->neighbour->output(skb);
+	return NF_HOOK(PF_DECnet, NF_DN_LOCAL_OUT, skb, NULL, dev, neigh->output);
 
 error:
 	if (net_ratelimit())
 		printk(KERN_DEBUG "dn_output: This should not happen\n");
 
-#ifdef CONFIG_DECNET_FW
-drop:
-#endif
 	kfree_skb(skb);
 
 	return err;
 }
 
 #ifdef CONFIG_DECNET_ROUTER
-static int dn_l2_forward(struct sk_buff *skb)
+static int dn_forward(struct sk_buff *skb)
 {
 	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
 	struct dst_entry *dst = skb->dst;
+	struct net_device *dev = skb->dev;
+	struct neighbour *neigh;
 	int err = -EINVAL;
 
-	if (!dst->neighbour)
+	if ((neigh = dst->neighbour) == NULL)
 		goto error;
 
 	/*
@@ -526,21 +539,6 @@ static int dn_l2_forward(struct sk_buff *skb)
 	err = 0;
 	if (++cb->hops > 30)
 		goto drop;
-
-	/*
-	 * Forwarding firewall
-	 */
-#ifdef CONFIG_DECNET_FW
-	switch(call_fw_firewall(PF_DECnet, dst->dev, NULL, NULL, &skb)) {
-		case FW_REJECT:
-			dst->neighbour->ops->error_report(dst->neighbour, skb);
-			return -EPERM;
-		case FW_BLOCK:
-		default:
-			goto drop;
-		case FW_ACCEPT:
-	}
-#endif /* CONFIG_DECNET_FW */
 
 	skb->dev = dst->dev;
 
@@ -554,19 +552,7 @@ static int dn_l2_forward(struct sk_buff *skb)
 	else
 		cb->rt_flags &= ~DN_RT_F_IE;
 
-#ifdef CONFIG_DECNET_FW
-	switch(call_out_firewall(PF_DECnet, dst->dev, NULL, NULL, &skb)) {
-		case FW_REJECT:
-			dst->neighbour->ops->error_report(dst->neighbour, skb);
-			return -EPERM;
-		case FW_BLOCK:
-		default:
-			goto drop;
-		case FW_ACCEPT:
-	}
-#endif /* CONFIG_DECNET_FW */
-
-	return dst->neighbour->output(skb);
+	return NF_HOOK(PF_DECnet, NF_DN_FORWARD, skb, dev, skb->dev, neigh->output);
 
 
 error:
@@ -576,22 +562,6 @@ drop:
 	kfree_skb(skb);
 
 	return err;
-}
-
-/*
- * Simple frontend to the l2 routing function which filters
- * traffic not in our area when we should only do l1
- * routing.
- */
-static int dn_l1_forward(struct sk_buff *skb)
-{
-	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
-
-	if ((dn_ntohs(cb->dst ^ decnet_address) & 0xfc00) == 0)
-		return dn_l2_forward(skb);
-
-	kfree_skb(skb);
-	return 0;
 }
 #endif
 
@@ -624,46 +594,77 @@ static int dn_rt_bug(struct sk_buff *skb)
 	return -EINVAL;
 }
 
-static int dn_route_output_slow(struct sock *sk)
+static int dn_route_output_slow(struct dst_entry **pprt, dn_address dst, dn_address src, int flags)
 {
-	struct dn_scp *scp = &sk->protinfo.dn;
-	dn_address dest = dn_saddr2dn(&scp->peer);
 	struct dn_route *rt = NULL;
-	struct device *dev  = decnet_default_device;
+	struct net_device *dev = decnet_default_device;
 	struct neighbour *neigh = NULL;
 	struct dn_dev *dn_db;
-	unsigned char addr[6];
-
+	unsigned hash;
 #ifdef CONFIG_DECNET_ROUTER
-	if ((decnet_node_type == DN_RT_INFO_L1RT) || (decnet_node_type == DN_RT_INFO_L2RT)) {
-#if 0
-		struct dn_fib_ent *fe = dn_fib_lookup(dest, decnet_address);
+	struct dn_fib_key key;
+	struct dn_fib_res res;
+	int err;
 
-		if (fe != NULL) {
-			neigh = neigh_clone(fe->neigh);
-			dn_fib_release(fe);
-			goto got_route;
+	key.src = src;
+	key.dst = dst;
+	key.iif = 0;
+	key.oif = 0;
+	key.fwmark = 0;
+	key.scope = RT_SCOPE_UNIVERSE;
+
+	if ((err = dn_fib_lookup(&key, &res)) == 0) {
+		switch(res.type) {
+			case RTN_UNICAST:
+				/*
+				 * This method of handling multipath
+				 * routes is a hack and will change.
+				 * It works for now though.
+				 */
+				if (res.fi->fib_nhs)
+					dn_fib_select_multipath(&key, &res);
+				neigh = __neigh_lookup(&dn_neigh_table, &DN_FIB_RES_GW(res), DN_FIB_RES_DEV(res), 1);
+				err = -ENOBUFS;
+				if (!neigh)
+					break;
+				err = 0;
+				break;
+			case RTN_UNREACHABLE:
+				err = -EHOSTUNREACH;
+				break;
+			default:
+				err = -EINVAL;
 		}
-#endif
+		dn_fib_res_put(&res);
+		if (err < 0)
+			return err;
+		goto got_route;
 	}
+
+	if (err != -ESRCH)
+		return err;
 #endif 
 
-	dn_dn2eth(addr, dest);
-
 	/* Look in On-Ethernet cache first */
-	if ((neigh = dn_neigh_lookup(&dn_neigh_table, &addr)) != NULL)
-		goto got_route;
+	if (!(flags & MSG_TRYHARD)) {
+		if ((neigh = dn_neigh_lookup(&dn_neigh_table, &dst)) != NULL)
+			goto got_route;
+	}
 
 	if (dev == NULL)
 		return -EINVAL;
 
-	/* FIXME: We need to change this for routing nodes */
-	/* Send to default router if that doesn't work */
-	if ((neigh = neigh_lookup(&dn_neigh_table, &addr, dev)) != NULL)
+	dn_db = dev->dn_ptr;
+
+	if (dn_db == NULL)
+		return -EINVAL;
+
+	/* Try default router */
+	if ((neigh = neigh_clone(dn_db->router)) != NULL)
 		goto got_route;
 
 	/* Send to default device (and hope for the best) if above fail */
-	if ((neigh = __neigh_lookup(&dn_neigh_table, &addr, dev, 1)) != NULL)
+	if ((neigh = __neigh_lookup(&dn_neigh_table, &dst, dev, 1)) != NULL)
 		goto got_route;
 
 
@@ -671,20 +672,23 @@ static int dn_route_output_slow(struct sock *sk)
 
 got_route:
 
-	if ((rt = dst_alloc(sizeof(struct dn_route), &dn_dst_ops)) == NULL) {
+	if ((rt = dst_alloc(&dn_dst_ops)) == NULL) {
 		neigh_release(neigh);
 		return -EINVAL;
 	}
 
 	dn_db = (struct dn_dev *)neigh->dev->dn_ptr;
 	
-	rt->rt_saddr = decnet_address;
-	rt->rt_daddr = dest;
-	rt->rt_oif = neigh->dev->ifindex;
-	rt->rt_iif = 0;
+	rt->key.saddr  = src;
+	rt->rt_saddr   = src;
+	rt->key.daddr  = dst;
+	rt->rt_daddr   = dst;
+	rt->key.oif    = neigh ? neigh->dev->ifindex : -1;
+	rt->key.iif    = 0;
+	rt->key.fwmark = 0;
 
 	rt->u.dst.neighbour = neigh;
-	rt->u.dst.dev = neigh->dev;
+	rt->u.dst.dev = neigh ? neigh->dev : NULL;
 	rt->u.dst.lastuse = jiffies;
 	rt->u.dst.output = dn_output;
 	rt->u.dst.input  = dn_rt_bug;
@@ -692,46 +696,63 @@ got_route:
 	if (dn_dev_islocal(neigh->dev, rt->rt_daddr))
 		rt->u.dst.input = dn_nsp_rx;
 
-	dn_insert_route(rt);
-	sk->dst_cache = &rt->u.dst;
+	hash = dn_hash(rt->key.saddr, rt->key.daddr);
+	dn_insert_route(rt, hash);
+	*pprt = &rt->u.dst;
 
 	return 0;
 }
 
-int dn_route_output(struct sock *sk)
+int dn_route_output(struct dst_entry **pprt, dn_address dst, dn_address src, int flags)
 {
-	struct dn_scp *scp = &sk->protinfo.dn;
-	dn_address dest = dn_saddr2dn(&scp->peer);
-	unsigned hash = dn_hash(dest);
+	unsigned hash = dn_hash(src, dst);
 	struct dn_route *rt = NULL;
-	unsigned short src = dn_saddr2dn(&scp->addr);
 
-	start_bh_atomic();
-	for(rt = dn_route_cache[hash]; rt; rt = rt->u.rt_next) {
-		if ((dest == rt->rt_daddr) &&
-				(src == rt->rt_saddr) &&
-				(rt->rt_iif == 0) &&
-				(rt->rt_oif != 0)) {
-			rt->u.dst.lastuse = jiffies;
-			atomic_inc(&rt->u.dst.use);
-			atomic_inc(&rt->u.dst.refcnt);
-			end_bh_atomic();
-			sk->dst_cache = &rt->u.dst;
-			return 0;
+	if (!(flags & MSG_TRYHARD)) {
+		read_lock_bh(&dn_rt_hash_table[hash].lock);
+		for(rt = dn_rt_hash_table[hash].chain; rt; rt = rt->u.rt_next) {
+			if ((dst == rt->key.daddr) &&
+					(src == rt->key.saddr) &&
+					(rt->key.iif == 0) &&
+					(rt->key.oif != 0)) {
+				rt->u.dst.lastuse = jiffies;
+				dst_hold(&rt->u.dst);
+				rt->u.dst.__use++;
+				read_unlock_bh(&dn_rt_hash_table[hash].lock);
+				*pprt = &rt->u.dst;
+				return 0;
+			}
 		}
+		read_unlock_bh(&dn_rt_hash_table[hash].lock);
 	}
-	end_bh_atomic();
 
-	return dn_route_output_slow(sk);
+	return dn_route_output_slow(pprt, dst, src, flags);
 }
 
 static int dn_route_input_slow(struct sk_buff *skb)
 {
 	struct dn_route *rt = NULL;
 	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
-	struct device *dev = skb->dev;
+	struct net_device *dev = skb->dev;
+	struct dn_dev *dn_db;
 	struct neighbour *neigh = NULL;
-	unsigned char addr[6];
+	int (*dnrt_input)(struct sk_buff *skb);
+	int (*dnrt_output)(struct sk_buff *skb);
+	u32 fwmark = 0;
+	unsigned hash;
+	dn_address saddr = cb->src;
+	dn_address daddr = cb->dst;
+#ifdef CONFIG_DECNET_ROUTER
+	struct dn_fib_key key;
+	struct dn_fib_res res;
+	int err;
+#endif
+
+	if (dev == NULL)
+		return -EINVAL;
+
+	if ((dn_db = dev->dn_ptr) == NULL)
+		return -EINVAL;
 
 	/*
 	 * In this case we've just received a packet from a source
@@ -741,80 +762,116 @@ static int dn_route_input_slow(struct sk_buff *skb)
 	 * so this only affects packets which have originated elsewhere.
 	 */
 	if (dn_dev_islocal(dev, cb->src))
-		return 1;
+		return -ENOTUNIQ;
+
+	/*
+	 * Default is to create a drop everything entry
+	 */
+	dnrt_input  = dn_blackhole;
+	dnrt_output = dn_rt_bug;
+
+	/*
+	 * Is the destination us ?
+	 */
+	if (!dn_dev_islocal(dev, cb->dst))
+		goto non_local_input;
+
+	/*
+	 * Local input... find source of skb
+	 */
+	dnrt_input  = dn_nsp_rx;
+	dnrt_output = dn_output;
+	saddr = cb->dst;
+	daddr = cb->src;
+
+	if ((neigh = neigh_lookup(&dn_neigh_table, &cb->src, dev)) != NULL)
+		goto add_entry;
+
+	if (dn_db->router && ((neigh = neigh_clone(dn_db->router)) != NULL))
+		goto add_entry;
+
+	neigh = neigh_create(&dn_neigh_table, &cb->src, dev);
+	if (!IS_ERR(neigh)) {
+		if (dev->type == ARPHRD_ETHER)
+			memcpy(neigh->ha, skb->mac.ethernet->h_source, ETH_ALEN);
+		goto add_entry;
+	}
+
+	return PTR_ERR(neigh);
+
+non_local_input:
 
 #ifdef CONFIG_DECNET_ROUTER
-	if ((decnet_node_type == DN_RT_INFO_L1RT) || (decnet_node_type == DN_RT_INFO_L2RT)) {
-#if 0
-		struct dn_fib_ent *fe = NULL;
+	/*
+	 * Destination is another node... find next hop in
+	 * routing table here.
+	 */
 
-		fe = dn_fib_lookup(cb->src, cb->dst);
+	key.src = cb->src;
+	key.dst = cb->dst;
+	key.iif = dev->ifindex;
+	key.oif = 0;
+	key.scope = RT_SCOPE_UNIVERSE;
 
-		/* Try routing table first */
-		if (fe != NULL) {
-			neigh = neigh_clone(fe->neigh);
-			dn_fib_release(fe);
-			goto got_route;
+#ifdef CONFIG_DECNET_ROUTE_FWMARK
+	key.fwmark = skb->nfmark;
+#else
+	key.fwmark = 0;
+#endif
+
+	if ((err = dn_fib_lookup(&key, &res)) == 0) {
+		switch(res.type) {
+			case RTN_UNICAST:
+				if (res.fi->fib_nhs)
+					dn_fib_select_multipath(&key, &res);
+				neigh = __neigh_lookup(&dn_neigh_table, &DN_FIB_RES_GW(res), DN_FIB_RES_DEV(res), 1);
+				err = -ENOBUFS;
+				if (!neigh)
+					break;
+				err = 0;
+				dnrt_input = dn_forward;
+				fwmark = key.fwmark;
+				break;
+			case RTN_UNREACHABLE:
+				dnrt_input = dn_blackhole;
+				fwmark = key.fwmark;
+				break;
+			default:
+				err = -EINVAL;
 		}
-#endif
+		dn_fib_res_put(&res);
+		if (err < 0)
+			return err;
+		goto add_entry;
 	}
-#endif
 
-	dn_dn2eth(addr, cb->src);
+	return err;
 
-	/* Now see if we are directly connected */
-	if ((neigh = dn_neigh_lookup(&dn_neigh_table, &addr)) != NULL)
-		goto got_route;
+#endif /* CONFIG_DECNET_ROUTER */
 
-	if (dev == NULL)
-		return -EINVAL;
+add_entry:
 
-	/* FIXME: Try the default router here .... */
-
-	if ((neigh = __neigh_lookup(&dn_neigh_table, &addr, dev, 1)) != NULL)
-		goto got_route;
-
-	return -EINVAL;
-
-got_route:
-
-	if ((rt = dst_alloc(sizeof(struct dn_route), &dn_dst_ops)) == NULL) {
+	if ((rt = dst_alloc(&dn_dst_ops)) == NULL) {
                 neigh_release(neigh);
                 return -EINVAL;
         }
 
-	rt->rt_saddr = cb->dst;
-	rt->rt_daddr = cb->src;
-	rt->rt_oif = 0;
-	rt->rt_iif = neigh->dev->ifindex;
+	rt->key.saddr  = cb->src;
+	rt->rt_saddr   = saddr;
+	rt->key.daddr  = cb->dst;
+	rt->rt_daddr   = daddr;
+	rt->key.oif    = 0;
+	rt->key.iif    = dev->ifindex;
+	rt->key.fwmark = fwmark;
 
 	rt->u.dst.neighbour = neigh;
-	rt->u.dst.dev = neigh->dev;
+	rt->u.dst.dev = neigh ? neigh->dev : NULL;
 	rt->u.dst.lastuse = jiffies;
-	rt->u.dst.output = dn_output;
+	rt->u.dst.output = dnrt_output;
+	rt->u.dst.input = dnrt_input;
 
-	switch(decnet_node_type) {
-		case DN_RT_INFO_ENDN:
-			rt->u.dst.input = dn_blackhole;
-			break;
-#ifdef CONFIG_DECNET_ROUTER
-		case DN_RT_INFO_L1RT:
-			rt->u.dst.input = dn_l1_forward;
-			break;
-		case DN_RT_INFO_L2RT:
-			rt->u.dst.input = dn_l2_forward;
-			break;
-#endif /* CONFIG_DECNET_ROUTER */
-		default:
-			rt->u.dst.input = dn_blackhole;
-			if (net_ratelimit())
-				printk(KERN_DEBUG "dn_route_input_slow: What kind of node are we?\n");
-	}
-
-	if (dn_dev_islocal(dev, cb->dst))
-		rt->u.dst.input = dn_nsp_rx;
-
-	dn_insert_route(rt);
+	hash = dn_hash(rt->key.saddr, rt->key.daddr);
+	dn_insert_route(rt, hash);
 	skb->dst = (struct dst_entry *)rt;
 
 	return 0;
@@ -824,28 +881,33 @@ int dn_route_input(struct sk_buff *skb)
 {
 	struct dn_route *rt;
 	struct dn_skb_cb *cb = (struct dn_skb_cb *)skb->cb;
-	unsigned hash = dn_hash(cb->src);
+	unsigned hash = dn_hash(cb->src, cb->dst);
 
 	if (skb->dst)
 		return 0;
 
-	for(rt = dn_route_cache[hash]; rt != NULL; rt = rt->u.rt_next) {
-		if ((rt->rt_saddr == cb->dst) &&
-				(rt->rt_daddr == cb->src) &&
-				(rt->rt_oif == 0) &&
-				(rt->rt_iif == cb->iif)) {
+	read_lock(&dn_rt_hash_table[hash].lock);
+	for(rt = dn_rt_hash_table[hash].chain; rt != NULL; rt = rt->u.rt_next) {
+		if ((rt->key.saddr == cb->src) &&
+				(rt->key.daddr == cb->dst) &&
+				(rt->key.oif == 0) &&
+#ifdef CONFIG_DECNET_ROUTE_FWMARK
+				(rt->key.fwmark == skb->nfmark) &&
+#endif
+				(rt->key.iif == cb->iif)) {
 			rt->u.dst.lastuse = jiffies;
-			atomic_inc(&rt->u.dst.use);
-			atomic_inc(&rt->u.dst.refcnt);
+			dst_hold(&rt->u.dst);
+			rt->u.dst.__use++;
+			read_unlock(&dn_rt_hash_table[hash].lock);
 			skb->dst = (struct dst_entry *)rt;
 			return 0;
 		}
 	}
+	read_unlock(&dn_rt_hash_table[hash].lock);
 
 	return dn_route_input_slow(skb);
 }
 
-#ifdef CONFIG_DECNET_ROUTER
 #ifdef CONFIG_RTNETLINK
 static int dn_rt_fill_info(struct sk_buff *skb, u32 pid, u32 seq, int event, int nowait)
 {
@@ -863,6 +925,7 @@ static int dn_rt_fill_info(struct sk_buff *skb, u32 pid, u32 seq, int event, int
 	r->rtm_tos = 0;
 	r->rtm_table = 0;
 	r->rtm_type = 0;
+	r->rtm_flags = 0;
 	r->rtm_scope = RT_SCOPE_UNIVERSE;
 	r->rtm_protocol = RTPROT_UNSPEC;
 	RTA_PUT(skb, RTA_DST, 2, &rt->rt_daddr);
@@ -883,11 +946,14 @@ rtattr_failure:
         return -1;
 }
 
-int dn_fib_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr *nlh, void *arg)
+/*
+ * This is called by both endnodes and routers now.
+ */
+int dn_cache_getroute(struct sk_buff *in_skb, struct nlmsghdr *nlh, void *arg)
 {
 	struct rtattr **rta = arg;
-	/* struct rtmsg *rtm = NLMSG_DATA(nlh); */
 	struct dn_route *rt = NULL;
+	struct dn_skb_cb *cb;
 	dn_address dst = 0;
 	dn_address src = 0;
 	int iif = 0;
@@ -898,6 +964,7 @@ int dn_fib_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr *nlh, void *arg)
 	if (skb == NULL)
 		return -ENOBUFS;
 	skb->mac.raw = skb->data;
+	cb = (struct dn_skb_cb *)skb->cb;
 
 	if (rta[RTA_SRC-1])
 		memcpy(&src, RTA_DATA(rta[RTA_SRC-1]), 2);
@@ -907,29 +974,36 @@ int dn_fib_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr *nlh, void *arg)
 		memcpy(&iif, RTA_DATA(rta[RTA_IIF-1]), sizeof(int));
 
 	if (iif) {
-		struct device *dev;
-		if ((dev = dev_get_by_index(iif)) == NULL)
+		struct net_device *dev;
+		if ((dev = dev_get_by_index(iif)) == NULL) {
+			kfree_skb(skb);
 			return -ENODEV;
-		if (!dev->dn_ptr)
+		}
+		if (!dev->dn_ptr) {
+			dev_put(dev);
+			kfree_skb(skb);
 			return -ENODEV;
+		}
 		skb->protocol = __constant_htons(ETH_P_DNA_RT);
 		skb->dev = dev;
-		start_bh_atomic();
+		cb->src = src;
+		cb->dst = dst;
+		local_bh_disable();
 		err = dn_route_input(skb);
-		end_bh_atomic();
+		local_bh_enable();
+		memset(cb, 0, sizeof(struct dn_skb_cb));
 		rt = (struct dn_route *)skb->dst;
-		if (!err && rt->u.dst.error)
-			err = rt->u.dst.error;
 	} else {
-		int oif = 0;
-		if (rta[RTA_OIF-1])
-			memcpy(&oif, RTA_DATA(rta[RTA_OIF-1]), sizeof(int));
-		err = -EOPNOTSUPP;
+		err = dn_route_output((struct dst_entry **)&rt, dst, src, 0);
 	}
-	if (err) {
-		kfree_skb(skb);
-		return err;
-	}
+
+	if (!err && rt->u.dst.error)
+		err = rt->u.dst.error;
+	if (skb->dev)
+		dev_put(skb->dev);
+	skb->dev = NULL;
+	if (err)
+		goto out_free;
 	skb->dst = &rt->u.dst;
 
 	NETLINK_CB(skb).dst_pid = NETLINK_CB(in_skb).pid;
@@ -937,20 +1011,69 @@ int dn_fib_rtm_getroute(struct sk_buff *in_skb, struct nlmsghdr *nlh, void *arg)
 	err = dn_rt_fill_info(skb, NETLINK_CB(in_skb).pid, nlh->nlmsg_seq, RTM_NEWROUTE, 0);
 
 	if (err == 0)
-		return 0;
-	if (err < 0)
-		return -EMSGSIZE;
+		goto out_free;
+	if (err < 0) {
+		err = -EMSGSIZE;
+		goto out_free;
+	}
 
 	err = netlink_unicast(rtnl, skb, NETLINK_CB(in_skb).pid, MSG_DONTWAIT);
 
 	return err;
+
+out_free:
+	kfree_skb(skb);
+	return err;
+}
+
+/*
+ * For routers, this is called from dn_fib_dump, but for endnodes its
+ * called directly from the rtnetlink dispatch table.
+ */
+int dn_cache_dump(struct sk_buff *skb, struct netlink_callback *cb)
+{
+	struct dn_route *rt;
+	int h, s_h;
+	int idx, s_idx;
+
+	if (NLMSG_PAYLOAD(cb->nlh, 0) < sizeof(struct rtmsg))
+		return -EINVAL;
+	if (!(((struct rtmsg *)NLMSG_DATA(cb->nlh))->rtm_flags&RTM_F_CLONED))
+		return 0;
+
+	s_h = cb->args[0];
+	s_idx = idx = cb->args[1];
+	for(h = 0; h <= dn_rt_hash_mask; h++) {
+		if (h < s_h)
+			continue;
+		if (h > s_h)
+			s_idx = 0;
+		read_lock_bh(&dn_rt_hash_table[h].lock);
+		for(rt = dn_rt_hash_table[h].chain, idx = 0; rt; rt = rt->u.rt_next, idx++) {
+			if (idx < s_idx)
+				continue;
+			skb->dst = dst_clone(&rt->u.dst);
+			if (dn_rt_fill_info(skb, NETLINK_CB(cb->skb).pid,
+					cb->nlh->nlmsg_seq, RTM_NEWROUTE, 1) <= 0) {
+				dst_release(xchg(&skb->dst, NULL));
+				read_unlock_bh(&dn_rt_hash_table[h].lock);
+				goto done;
+			}
+			dst_release(xchg(&skb->dst, NULL));
+		}
+		read_unlock_bh(&dn_rt_hash_table[h].lock);
+	}
+
+done:
+	cb->args[0] = h;
+	cb->args[1] = idx;
+	return skb->len;
 }
 #endif /* CONFIG_RTNETLINK */
-#endif /* CONFIG_DECNET_ROUTER */
 
 #ifdef CONFIG_PROC_FS
 
-static int decnet_cache_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
+static int decnet_cache_get_info(char *buffer, char **start, off_t offset, int length)
 {
         int len = 0;
         off_t pos = 0;
@@ -959,18 +1082,20 @@ static int decnet_cache_get_info(char *buffer, char **start, off_t offset, int l
 	int i;
 	char buf1[DN_ASCBUF_LEN], buf2[DN_ASCBUF_LEN];
 
-	start_bh_atomic();
-	for(i = 0; i < DN_HASHBUCKETS; i++) {
-		rt = dn_route_cache[i];
+	for(i = 0; i <= dn_rt_hash_mask; i++) {
+		read_lock_bh(&dn_rt_hash_table[i].lock);
+		rt = dn_rt_hash_table[i].chain;
 		for(; rt != NULL; rt = rt->u.rt_next) {
 			len += sprintf(buffer + len, "%-8s %-7s %-7s %04d %04d %04d\n",
 					rt->u.dst.dev ? rt->u.dst.dev->name : "*",
 					dn_addr2asc(dn_ntohs(rt->rt_daddr), buf1),
 					dn_addr2asc(dn_ntohs(rt->rt_saddr), buf2),
-					atomic_read(&rt->u.dst.use),
-					atomic_read(&rt->u.dst.refcnt),
+					atomic_read(&rt->u.dst.__refcnt),
+					rt->u.dst.__use,
 					(int)rt->u.dst.rtt
 					);
+
+
 
 	                pos = begin + len;
 	
@@ -981,10 +1106,10 @@ static int decnet_cache_get_info(char *buffer, char **start, off_t offset, int l
               		if (pos > offset + length)
                 	        break;
 		}
+		read_unlock_bh(&dn_rt_hash_table[i].lock);
 		if (pos > offset + length)
 			break;
 	}
-	end_bh_atomic();
 
         *start = buffer + (offset - begin);
         len   -= (offset - begin);
@@ -994,35 +1119,74 @@ static int decnet_cache_get_info(char *buffer, char **start, off_t offset, int l
         return(len);
 } 
 
-static struct proc_dir_entry proc_net_decnet_cache = {
-        PROC_NET_DN_CACHE, 12, "decnet_cache",
-        S_IFREG | S_IRUGO, 1, 0, 0,
-        0, &proc_net_inode_operations,
-        decnet_cache_get_info
-};
-
 #endif /* CONFIG_PROC_FS */
 
 void __init dn_route_init(void)
 {
-	memset(dn_route_cache, 0, sizeof(struct dn_route *) * DN_HASHBUCKETS);
+	int i, goal, order;
+
+	dn_dst_ops.kmem_cachep = kmem_cache_create("dn_dst_cache",
+						   sizeof(struct dn_route),
+						   0, SLAB_HWCACHE_ALIGN,
+						   NULL, NULL);
+
+	if (!dn_dst_ops.kmem_cachep)
+		panic("DECnet: Failed to allocate dn_dst_cache\n");
 
 	dn_route_timer.function = dn_dst_check_expire;
 	dn_route_timer.expires = jiffies + decnet_dst_gc_interval * HZ;
 	add_timer(&dn_route_timer);
 
+	goal = num_physpages >> (26 - PAGE_SHIFT);
+
+	for(order = 0; (1UL << order) < goal; order++)
+		/* NOTHING */;
+
+        /*
+         * Only want 1024 entries max, since the table is very, very unlikely
+         * to be larger than that.
+         */
+        while(order && ((((1UL << order) * PAGE_SIZE) / 
+                                sizeof(struct dn_rt_hash_bucket)) >= 2048))
+                order--;
+
+        do {
+                dn_rt_hash_mask = (1UL << order) * PAGE_SIZE /
+                        sizeof(struct dn_rt_hash_bucket);
+                while(dn_rt_hash_mask & (dn_rt_hash_mask - 1))
+                        dn_rt_hash_mask--;
+                dn_rt_hash_table = (struct dn_rt_hash_bucket *)
+                        __get_free_pages(GFP_ATOMIC, order);
+        } while (dn_rt_hash_table == NULL && --order > 0);
+
+	if (!dn_rt_hash_table)
+                panic("Failed to allocate DECnet route cache hash table\n");
+
+	printk(KERN_INFO 
+		"DECnet: Routing cache hash table of %u buckets, %ldKbytes\n", 
+		dn_rt_hash_mask, 
+		(long)(dn_rt_hash_mask*sizeof(struct dn_rt_hash_bucket))/1024);
+
+	dn_rt_hash_mask--;
+        for(i = 0; i <= dn_rt_hash_mask; i++) {
+                dn_rt_hash_table[i].lock = RW_LOCK_UNLOCKED;
+                dn_rt_hash_table[i].chain = NULL;
+        }
+
+        dn_dst_ops.gc_thresh = (dn_rt_hash_mask + 1);
+
 #ifdef CONFIG_PROC_FS
-	proc_net_register(&proc_net_decnet_cache);
+	proc_net_create("decnet_cache",0,decnet_cache_get_info);
 #endif /* CONFIG_PROC_FS */
 }
 
-#ifdef CONFIG_DECNET_MODULE
-void dn_route_cleanup(void)
+void __exit dn_route_cleanup(void)
 {
 	del_timer(&dn_route_timer);
 	dn_run_flush(0);
+
 #ifdef CONFIG_PROC_FS
-	proc_net_unregister(PROC_NET_DN_CACHE);
+	proc_net_remove("decnet_cache");
 #endif /* CONFIG_PROC_FS */
 }
-#endif /* CONFIG_DECNET_MODULE */
+

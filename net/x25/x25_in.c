@@ -13,9 +13,13 @@
  *		2 of the License, or (at your option) any later version.
  *
  *	History
- *	X.25 001	Jonathan Naylor	Started coding.
- *	X.25 002	Jonathan Naylor	Centralised disconnection code.
- *					New timer architecture.
+ *	X.25 001	Jonathan Naylor	  Started coding.
+ *	X.25 002	Jonathan Naylor	  Centralised disconnection code.
+ *					  New timer architecture.
+ *	2000-03-20	Daniela Squassoni Disabling/enabling of facilities 
+ *					  negotiation.
+ *	2000-11-10	Henner Eisen	  Check and reset for out-of-sequence
+ *					  i-frames.
  */
 
 #include <linux/config.h>
@@ -111,7 +115,7 @@ static int x25_state1_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 			 */
 			skb_pull(skb, X25_STD_MIN_LEN);
 			skb_pull(skb, x25_addr_ntoa(skb->data, &source_addr, &dest_addr));
-			skb_pull(skb, x25_parse_facilities(skb, &sk->protinfo.x25->facilities));
+			skb_pull(skb, x25_parse_facilities(skb, &sk->protinfo.x25->facilities, &sk->protinfo.x25->vc_facil_mask));
 			/*
 			 *	Copy any Call User Data.
 			 */
@@ -214,7 +218,8 @@ static int x25_state3_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 
 		case X25_DATA:	/* XXX */
 			sk->protinfo.x25->condition &= ~X25_COND_PEER_RX_BUSY;
-			if (!x25_validate_nr(sk, nr)) {
+			if ((ns!=sk->protinfo.x25->vr) || 
+			    !x25_validate_nr(sk, nr)) {
 				x25_clear_queues(sk);
 				x25_write_internal(sk, X25_RESET_REQUEST);
 				x25_start_t22timer(sk);
@@ -278,6 +283,7 @@ static int x25_state3_machine(struct sock *sk, struct sk_buff *skb, int frametyp
 					kill_proc(sk->proc, SIGURG, 1);
 				else
 					kill_pg(-sk->proc, SIGURG, 1);
+				sock_wake_async(sk->socket, 3, POLL_PRI);
 			}
 			x25_write_internal(sk, X25_INTERRUPT_CONFIRMATION);
 			break;
@@ -352,6 +358,16 @@ int x25_process_rx_frame(struct sock *sk, struct sk_buff *skb)
 	x25_kick(sk);
 
 	return queued;
+}
+
+int x25_backlog_rcv(struct sock *sk, struct sk_buff *skb)
+{
+	int queued;
+
+	queued = x25_process_rx_frame(sk,skb);
+	if(!queued) kfree_skb(skb);
+
+	return 0;
 }
 
 #endif

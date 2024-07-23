@@ -13,12 +13,11 @@
  *
  * Thomas Sailer				: ioctl code reworked (vmalloc/vfree removed)
  * Rolf Fokkens (Dec 20 1998)	: Moved ESS stuff into sb_ess.[ch]
+ * Stanislav Voronyi <stas@esc.kharkov.com>	: Support for AWE 3DSE device (Jun 7 1999)
  */
 
-#include <linux/config.h>
 #include "sound_config.h"
 
-#ifdef CONFIG_SBDSP
 #define __SB_MIXER_C__
 
 #include "sb.h"
@@ -76,27 +75,6 @@ MIX_ENT(SOUND_MIXER_IMIX,	0x00, 0, 0, 0x00, 0, 0),
 MIX_ENT(SOUND_MIXER_ALTPCM,	0x00, 0, 0, 0x00, 0, 0),
 MIX_ENT(SOUND_MIXER_RECLEV,	0x00, 0, 0, 0x00, 0, 0)
 };
-
-#ifdef	__SGNXPRO__
-#if 0
-static mixer_tab sgnxpro_mix = { 	/* not used anywhere */
-MIX_ENT(SOUND_MIXER_VOLUME,	0x22, 7, 4, 0x22, 3, 4),
-MIX_ENT(SOUND_MIXER_BASS,	0x46, 2, 3, 0x00, 0, 0),
-MIX_ENT(SOUND_MIXER_TREBLE,	0x44, 2, 3, 0x00, 0, 0),
-MIX_ENT(SOUND_MIXER_SYNTH,	0x26, 7, 4, 0x26, 3, 4),
-MIX_ENT(SOUND_MIXER_PCM,	0x04, 7, 4, 0x04, 3, 4),
-MIX_ENT(SOUND_MIXER_SPEAKER,	0x42, 2, 3, 0x00, 0, 0),
-MIX_ENT(SOUND_MIXER_LINE,	0x2e, 7, 4, 0x2e, 3, 4),
-MIX_ENT(SOUND_MIXER_MIC,	0x0a, 2, 3, 0x00, 0, 0),
-MIX_ENT(SOUND_MIXER_CD,		0x28, 7, 4, 0x28, 3, 4),
-MIX_ENT(SOUND_MIXER_IMIX,	0x00, 0, 0, 0x00, 0, 0),
-MIX_ENT(SOUND_MIXER_ALTPCM,	0x00, 0, 0, 0x00, 0, 0),
-MIX_ENT(SOUND_MIXER_RECLEV,	0x00, 0, 0, 0x00, 0, 0),
-MIX_ENT(SOUND_MIXER_IGAIN,	0x00, 0, 0, 0x00, 0, 0),
-MIX_ENT(SOUND_MIXER_OGAIN,	0x00, 0, 0, 0x00, 0, 0)
-};
-#endif
-#endif
 
 static mixer_tab sb16_mix = {
 MIX_ENT(SOUND_MIXER_VOLUME,	0x30, 7, 5, 0x31, 7, 5),
@@ -550,14 +528,37 @@ static int sb_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 	int val, ret;
 
 	/*
-	 * Use ioctl(fd, SOUND_MIXER_PRIVATE1, &mode) to turn AGC off (0) or on (1).
+	 * Use ioctl(fd, SOUND_MIXER_AGC, &mode) to turn AGC off (0) or on (1).
+	 * Use ioctl(fd, SOUND_MIXER_3DSE, &mode) to turn 3DSE off (0) or on (1)
+	 *					      or mode==2 put 3DSE state to mode.
 	 */
-	if (cmd == SOUND_MIXER_PRIVATE1 && devc->model == MDL_SB16) 
-	{
-		if (get_user(val, (int *)arg))
-			return -EFAULT;
-		sb_setmixer(devc, 0x43, (~val) & 0x01);
-		return 0;
+	if (devc->model == MDL_SB16) {
+		if (cmd == SOUND_MIXER_AGC) 
+		{
+			if (get_user(val, (int *)arg))
+				return -EFAULT;
+			sb_setmixer(devc, 0x43, (~val) & 0x01);
+			return 0;
+		}
+		if (cmd == SOUND_MIXER_3DSE) 
+		{
+			/* I put here 15, but I don't know the exact version.
+			   At least my 4.13 havn't 3DSE, 4.16 has it. */
+			if (devc->minor < 15)
+				return -EINVAL;
+			if (get_user(val, (int *)arg))
+				return -EFAULT;
+			if (val == 0 || val == 1)
+				sb_chgmixer(devc, AWE_3DSE, 0x01, val);
+			else if (val == 2)
+			{
+				ret = sb_getmixer(devc, AWE_3DSE)&0x01;
+				return put_user(ret, (int *)arg);
+			}
+			else
+				return -EINVAL;
+			return 0;
+		}
 	}
 	if (((cmd >> 8) & 0xff) == 'M') 
 	{
@@ -625,27 +626,28 @@ static int sb_mixer_ioctl(int dev, unsigned int cmd, caddr_t arg)
 
 static struct mixer_operations sb_mixer_operations =
 {
-	"SB",
-	"Sound Blaster",
-	sb_mixer_ioctl
+	owner:	THIS_MODULE,
+	id:	"SB",
+	name:	"Sound Blaster",
+	ioctl:	sb_mixer_ioctl
 };
 
 static struct mixer_operations als007_mixer_operations =
 {
-	"ALS007",
-	"Avance ALS-007",
-	sb_mixer_ioctl
+	owner:	THIS_MODULE,
+	id:	"ALS007",
+	name:	"Avance ALS-007",
+	ioctl:	sb_mixer_ioctl
 };
 
 static void sb_mixer_reset(sb_devc * devc)
 {
 	char name[32];
 	int i;
-	extern int sm_games;
 
 	sprintf(name, "SB_%d", devc->sbmixnum);
 
-	if (sm_games)
+	if (devc->sbmo.sm_games)
 		devc->levels = load_mixer_volumes(name, smg_default_levels, 1);
 	else
 		devc->levels = load_mixer_volumes(name, sb_default_levels, 1);
@@ -658,7 +660,7 @@ static void sb_mixer_reset(sb_devc * devc)
 	};
 }
 
-int sb_mixer_init(sb_devc * devc)
+int sb_mixer_init(sb_devc * devc, struct module *owner)
 {
 	int mixer_type = 0;
 	int m;
@@ -735,9 +737,17 @@ int sb_mixer_init(sb_devc * devc)
 		memcpy ((char *) mixer_devs[m], (char *) &als007_mixer_operations, sizeof (struct mixer_operations));
 
 	mixer_devs[m]->devc = devc;
+
+	if (owner)
+			 mixer_devs[m]->owner = owner;
+	
 	devc->my_mixerdev = m;
 	sb_mixer_reset(devc);
 	return 1;
 }
 
-#endif
+void sb_mixer_unload(sb_devc *devc)
+{
+	sound_unload_mixerdev(devc->my_mixerdev);
+	sbmixnum--;
+}

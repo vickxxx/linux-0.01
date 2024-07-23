@@ -1,10 +1,14 @@
 /*
- * linux/include/asm-arm/posix_types.h
+ *  linux/include/asm-arm/posix_types.h
  *
- * Copyright (c) 1996-1998 Russell King.
+ *  Copyright (C) 1996-1998 Russell King.
  *
- * Changelog:
- *  27-06-1996	RMK	Created
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Changelog:
+ *   27-06-1996	RMK	Created
  */
 #ifndef __ARCH_ARM_POSIX_TYPES_H
 #define __ARCH_ARM_POSIX_TYPES_H
@@ -32,6 +36,13 @@ typedef long			__kernel_suseconds_t;
 typedef long			__kernel_clock_t;
 typedef int			__kernel_daddr_t;
 typedef char *			__kernel_caddr_t;
+typedef unsigned short		__kernel_uid16_t;
+typedef unsigned short		__kernel_gid16_t;
+typedef unsigned int		__kernel_uid32_t;
+typedef unsigned int		__kernel_gid32_t;
+
+typedef unsigned short		__kernel_old_uid_t;
+typedef unsigned short		__kernel_old_gid_t;
 
 #ifdef __GNUC__
 typedef long long		__kernel_loff_t;

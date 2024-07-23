@@ -1,5 +1,9 @@
 /*
  * linux/drivers/net/am79c961.h
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 
 #ifndef _LINUX_am79c961a_H
@@ -45,6 +49,7 @@
 #define CSR3_EMBA	0x0008
 #define CSR3_DXMT2PD	0x0010
 #define CSR3_LAPPEN	0x0020
+#define CSR3_DXSUFLO	0x0040
 #define CSR3_IDONM	0x0100
 #define CSR3_TINTM	0x0200
 #define CSR3_RINTM	0x0400
@@ -52,6 +57,9 @@
 #define CSR3_MISSM	0x1000
 #define CSR3_BABLM	0x4000
 #define CSR3_MASKALL	0x5F00
+
+#define CTRL1		5
+#define CTRL1_SPND	0x0001
 
 #define LADRL		8
 #define LADRM1		9
@@ -69,7 +77,8 @@
 #define MODE_COLL	0x0010
 #define MODE_DRETRY	0x0020
 #define MODE_INTLOOP	0x0040
-#define MODE_PORT0	0x0080
+#define MODE_PORT_AUI	0x0000
+#define MODE_PORT_10BT	0x0080
 #define MODE_DRXPA	0x2000
 #define MODE_DRXBA	0x4000
 #define MODE_PROMISC	0x8000
@@ -97,13 +106,14 @@
 #define TMD_ERR		0x4000
 #define TMD_OWN		0x8000
 
-#define TST_RTRY	0x0200
-#define TST_LCAR	0x0400
+#define TST_RTRY	0x0400
+#define TST_LCAR	0x0800
 #define TST_LCOL	0x1000
 #define TST_UFLO	0x4000
+#define TST_BUFF	0x8000
 
 struct dev_priv {
-    struct enet_statistics stats;
+    struct net_device_stats stats;
     unsigned long	rxbuffer[RX_BUFFERS];
     unsigned long	txbuffer[TX_BUFFERS];
     unsigned char	txhead;
@@ -112,17 +122,9 @@ struct dev_priv {
     unsigned char	rxtail;
     unsigned long	rxhdr;
     unsigned long	txhdr;
+    spinlock_t		chip_lock;
 };
 
-extern int	am79c961_probe (struct device *dev);
-static int	am79c961_probe1 (struct device *dev);
-static int	am79c961_open (struct device *dev);
-static int	am79c961_sendpacket (struct sk_buff *skb, struct device *dev);
-static void	am79c961_interrupt (int irq, void *dev_id, struct pt_regs *regs);
-static void	am79c961_rx (struct device *dev, struct dev_priv *priv);
-static void	am79c961_tx (struct device *dev, struct dev_priv *priv);
-static int	am79c961_close (struct device *dev);
-static struct enet_statistics *am79c961_getstats (struct device *dev);
-static void	am79c961_setmulticastlist (struct device *dev);
+extern int	am79c961_probe (struct net_device *dev);
 
 #endif

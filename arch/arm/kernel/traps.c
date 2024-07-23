@@ -3,12 +3,14 @@
  *
  *  Copyright (C) 1995, 1996 Russell King
  *  Fragments that appear the same as linux/arch/i386/kernel/traps.c (C) Linus Torvalds
- */
-
-/*
- * 'traps.c' handles hardware exceptions after we have saved some state in
- * 'linux/arch/arm/lib/traps.S'.  Mostly a debugging aid, but will probably
- * kill the offending process.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  'traps.c' handles hardware exceptions after we have saved some state in
+ *  'linux/arch/arm/lib/traps.S'.  Mostly a debugging aid, but will probably
+ *  kill the offending process.
  */
 #include <linux/config.h>
 #include <linux/types.h>
@@ -16,33 +18,29 @@
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/spinlock.h>
+#include <linux/ptrace.h>
+#include <linux/init.h>
 
+#include <asm/atomic.h>
+#include <asm/io.h>
+#include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <asm/io.h>
-#include <asm/spinlock.h>
-#include <asm/atomic.h>
-#include <asm/pgtable.h>
+
+#include "ptrace.h"
 
 extern void c_backtrace (unsigned long fp, int pmode);
-extern int ptrace_cancel_bpt (struct task_struct *);
+extern void show_pte(struct mm_struct *mm, unsigned long addr);
 
-char *processor_modes[]=
+const char *processor_modes[]=
 { "USER_26", "FIQ_26" , "IRQ_26" , "SVC_26" , "UK4_26" , "UK5_26" , "UK6_26" , "UK7_26" ,
   "UK8_26" , "UK9_26" , "UK10_26", "UK11_26", "UK12_26", "UK13_26", "UK14_26", "UK15_26",
   "USER_32", "FIQ_32" , "IRQ_32" , "SVC_32" , "UK4_32" , "UK5_32" , "UK6_32" , "ABT_32" ,
   "UK8_32" , "UK9_32" , "UK10_32", "UND_32" , "UK12_32", "UK13_32", "UK14_32", "SYS_32"
 };
 
-static char *handler[]= { "prefetch abort", "data abort", "address exception", "interrupt" };
-
-static inline void console_verbose(void)
-{
-	extern int console_loglevel;
-	console_loglevel = 15;
-}
-
-int kstack_depth_to_print = 200;
+static const char *handler[]= { "prefetch abort", "data abort", "address exception", "interrupt" };
 
 /*
  * Stack pointers should always be within the kernels view of
@@ -69,10 +67,14 @@ void dump_mem(unsigned long bottom, unsigned long top)
 		printk("%08lx: ", p);
 
 		for (i = 0; i < 8; i++, p += 4) {
+			unsigned int val;
+
 			if (p < bottom || p >= top)
 				printk("         ");
-			else
-				printk("%08lx ", *(unsigned long *)p);
+			else {
+				__get_user(val, (unsigned long *)p);
+				printk("%08x ", val);
+			}
 			if (i == 3)
 				printk(" ");
 		}
@@ -88,48 +90,60 @@ void dump_mem(unsigned long bottom, unsigned long top)
 #define VMALLOC_OFFSET (8*1024*1024)
 #define MODULE_RANGE (8*1024*1024)
 
-static void dump_instr(unsigned long pc, int user)
+static void dump_instr(struct pt_regs *regs)
 {
-	int pmin = -2, pmax = 3, ok = 0;
-	extern char start_kernel, _etext;
+	unsigned long addr = instruction_pointer(regs);
+	const int thumb = thumb_mode(regs);
+	const int width = thumb ? 4 : 8;
+	int i;
 
-	if (!user) {
-		unsigned long module_start, module_end;
-		unsigned long kernel_start, kernel_end;
+	printk("Code: ");
+	for (i = -2; i < 3; i++) {
+		unsigned int val, bad;
 
-		module_start = VMALLOC_START;
-		module_end   = module_start + MODULE_RANGE;
+		if (thumb)
+			bad = __get_user(val, &((u16 *)addr)[i]);
+		else
+			bad = __get_user(val, &((u32 *)addr)[i]);
 
-		kernel_start = (unsigned long)&start_kernel;
-		kernel_end   = (unsigned long)&_etext;
-
-		if (pc >= kernel_start && pc < kernel_end) {
-			if (pc + pmin < kernel_start)
-				pmin = kernel_start - pc;
-			if (pc + pmax > kernel_end)
-				pmax = kernel_end - pc;
-			ok = 1;
-		} else if (pc >= module_start && pc < module_end) {
-			if (pc + pmin < module_start)
-				pmin = module_start - pc;
-			if (pc + pmax > module_end)
-				pmax = module_end - pc;
-			ok = 1;
+		if (!bad)
+			printk(i == 0 ? "(%0*x) " : "%0*x", width, val);
+		else {
+			printk("bad PC value.");
+			break;
 		}
-	} else
-		ok = verify_area(VERIFY_READ, (void *)(pc + pmin), pmax - pmin) == 0;
-
-	printk ("Code: ");
-	if (ok) {
-		int i;
-		for (i = pmin; i < pmax; i++)
-			printk(i == 0 ? "(%08lx) " : "%08lx ", ((unsigned long *)pc)[i]);
-		printk ("\n");
-	} else
-		printk ("pc not in code space\n");
+	}
+	printk("\n");
 }
 
-spinlock_t die_lock;
+static void dump_stack(struct task_struct *tsk, unsigned long sp)
+{
+	printk("Stack:\n");
+	dump_mem(sp - 16, 8192+(unsigned long)tsk);
+}
+
+static void dump_backtrace(struct pt_regs *regs, struct task_struct *tsk)
+{
+	unsigned int fp;
+	int ok = 1;
+
+	printk("Backtrace: ");
+	fp = regs->ARM_fp;
+	if (!fp) {
+		printk("no frame pointer");
+		ok = 0;
+	} else if (verify_stack(fp)) {
+		printk("invalid frame pointer %08lx", fp);
+		ok = 0;
+	} else if (fp < 4096+(unsigned long)tsk)
+		printk("frame pointer underflow");
+	printk("\n");
+
+	if (ok)
+		c_backtrace(fp, processor_mode(regs));
+}
+
+spinlock_t die_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  * This function is protected against re-entrancy.
@@ -138,9 +152,9 @@ void die(const char *str, struct pt_regs *regs, int err)
 {
 	struct task_struct *tsk = current;
 
+	console_verbose();
 	spin_lock_irq(&die_lock);
 
-	console_verbose();
 	printk("Internal error: %s: %x\n", str, err);
 	printk("CPU: %d\n", smp_processor_id());
 	show_regs(regs);
@@ -148,45 +162,29 @@ void die(const char *str, struct pt_regs *regs, int err)
 		current->comm, current->pid, 4096+(unsigned long)tsk);
 
 	if (!user_mode(regs)) {
-		unsigned long sp = (unsigned long)(regs + 1);
-		unsigned long fp;
-		int dump_info = 1;
+		mm_segment_t fs;
 
-		printk("Stack: ");
-		if (verify_stack(sp)) {
-			printk("invalid kernel stack pointer %08lx", sp);
-			dump_info = 0;
-		} else if (sp < 4096+(unsigned long)tsk)
-			printk("kernel stack pointer underflow");
-		printk("\n");
+		/*
+		 * We need to switch to kernel mode so that we can
+		 * use __get_user to safely read from kernel space.
+		 * Note that we now dump the code first, just in case
+		 * the backtrace kills us.
+		 */
+		fs = get_fs();
+		set_fs(KERNEL_DS);
 
-		if (dump_info)
-			dump_mem(sp - 16, 8192+(unsigned long)tsk);
+		dump_instr(regs);
+		dump_stack(tsk, (unsigned long)(regs + 1));
+		dump_backtrace(regs, tsk);
 
-		dump_info = 1;
-
-		printk("Backtrace: ");
-		fp = regs->ARM_fp;
-		if (!fp) {
-			printk("no frame pointer");
-			dump_info = 0;
-		} else if (verify_stack(fp)) {
-			printk("invalid frame pointer %08lx", fp);
-			dump_info = 0;
-		} else if (fp < 4096+(unsigned long)tsk)
-			printk("frame pointer underflow");
-		printk("\n");
-
-		if (dump_info)
-			c_backtrace(fp, processor_mode(regs));
-
-		dump_instr(instruction_pointer(regs), 0);
+		set_fs(fs);
 	}
 
-	spin_unlock_irq(&die_lock);	
+	spin_unlock_irq(&die_lock);
+	do_exit(SIGSEGV);
 }
 
-static void die_if_kernel(const char *str, struct pt_regs *regs, int err)
+void die_if_kernel(const char *str, struct pt_regs *regs, int err)
 {
 	if (user_mode(regs))
     		return;
@@ -194,37 +192,50 @@ static void die_if_kernel(const char *str, struct pt_regs *regs, int err)
     	die(str, regs, err);
 }
 
-void bad_user_access_alignment(const void *ptr)
-{
-	printk(KERN_ERR "bad user access alignment: ptr = %p, pc = %p\n", ptr, 
-		__builtin_return_address(0));
-	current->tss.error_code = 0;
-	current->tss.trap_no = 11;
-	force_sig(SIGBUS, current);
-/*	die_if_kernel("Oops - bad user access alignment", regs, mode);*/
-}
-
 asmlinkage void do_undefinstr(int address, struct pt_regs *regs, int mode)
 {
+	unsigned long addr = instruction_pointer(regs);
+	siginfo_t info;
+
 #ifdef CONFIG_DEBUG_USER
 	printk(KERN_INFO "%s (%d): undefined instruction: pc=%08lx\n",
-		current->comm, current->pid, instruction_pointer(regs));
+		current->comm, current->pid, addr);
+	dump_instr(regs);
 #endif
-	current->tss.error_code = 0;
-	current->tss.trap_no = 6;
-	force_sig(SIGILL, current);
+
+	current->thread.error_code = 0;
+	current->thread.trap_no = 6;
+
+	info.si_signo = SIGILL;
+	info.si_errno = 0;
+	info.si_code  = ILL_ILLOPC;
+	info.si_addr  = (void *)addr;
+
+	force_sig_info(SIGILL, &info, current);
+
 	die_if_kernel("Oops - undefined instruction", regs, mode);
 }
 
 asmlinkage void do_excpt(int address, struct pt_regs *regs, int mode)
 {
+	siginfo_t info;
+
 #ifdef CONFIG_DEBUG_USER
 	printk(KERN_INFO "%s (%d): address exception: pc=%08lx\n",
 		current->comm, current->pid, instruction_pointer(regs));
+	dump_instr(regs);
 #endif
-	current->tss.error_code = 0;
-	current->tss.trap_no = 11;
-	force_sig(SIGBUS, current);
+
+	current->thread.error_code = 0;
+	current->thread.trap_no = 11;
+
+	info.si_signo = SIGBUS;
+	info.si_errno = 0;
+	info.si_code  = BUS_ADRERR;
+	info.si_addr  = (void *)address;
+
+	force_sig_info(SIGBUS, &info, current);
+
 	die_if_kernel("Oops - address exception", regs, mode);
 }
 
@@ -237,11 +248,10 @@ asmlinkage void do_unexp_fiq (struct pt_regs *regs)
 }
 
 /*
- * bad_mode handles the impossible case in the vectors.
- * If you see one of these, then it's extremely serious,
- * and could mean you have buggy hardware.  It never
- * returns, and never tries to sync.  We hope that we
- * can dump out some state information...
+ * bad_mode handles the impossible case in the vectors.  If you see one of
+ * these, then it's extremely serious, and could mean you have buggy hardware.
+ * It never returns, and never tries to sync.  We hope that we can at least
+ * dump out some state information...
  */
 asmlinkage void bad_mode(struct pt_regs *regs, int reason, int proc_mode)
 {
@@ -251,7 +261,8 @@ asmlinkage void bad_mode(struct pt_regs *regs, int reason, int proc_mode)
 		handler[reason], processor_modes[proc_mode]);
 
 	/*
-	 * Dump out the vectors and stub routines
+	 * Dump out the vectors and stub routines.  Maybe a better solution
+	 * would be to dump them out only if we detect that they are corrupted.
 	 */
 	printk(KERN_CRIT "Vectors:\n");
 	dump_mem(0, 0x40);
@@ -260,41 +271,48 @@ asmlinkage void bad_mode(struct pt_regs *regs, int reason, int proc_mode)
 
 	die("Oops", regs, 0);
 	cli();
-	while(1);
+	panic("bad mode");
 }
 
 /*
- * 'math_state_restore()' saves the current math information in the
- * old math state array, and gets the new ones from the current task.
- *
- * We no longer save/restore the math state on every context switch
- * any more.  We only do this now if it actually gets used.
+ * Handle some more esoteric system calls
  */
-asmlinkage void math_state_restore (void)
+asmlinkage int arm_syscall(int no, struct pt_regs *regs)
 {
-	current->used_math = 1;
-}
+	siginfo_t info;
 
-asmlinkage int arm_syscall (int no, struct pt_regs *regs)
-{
 	switch (no) {
 	case 0: /* branch through 0 */
-		force_sig(SIGSEGV, current);
+		info.si_signo = SIGSEGV;
+		info.si_errno = 0;
+		info.si_code  = SEGV_MAPERR;
+		info.si_addr  = NULL;
+
+		force_sig_info(SIGSEGV, &info, current);
+
 		die_if_kernel("branch through zero", regs, 0);
 		break;
 
-	case 1: /* SWI_BREAK_POINT */
-		regs->ARM_pc -= 4; /* Decrement PC by one instruction */
-		ptrace_cancel_bpt(current);
-		force_sig(SIGTRAP, current);
+	case 1: /* SWI BREAK_POINT */
+		/*
+		 * The PC is always left pointing at the next
+		 * instruction.  Fix this.
+		 */
+		regs->ARM_pc -= 4;
+		__ptrace_cancel_bpt(current);
+
+		info.si_signo = SIGTRAP;
+		info.si_errno = 0;
+		info.si_code  = TRAP_BRKPT;
+		info.si_addr  = (void *)instruction_pointer(regs);
+
+		force_sig_info(SIGTRAP, &info, current);
 		return regs->ARM_r0;
 
 	case 2:	/* sys_cacheflush */
 #ifdef CONFIG_CPU_32
-		/* r0 = start, r1 = length, r2 = flags */
-		processor.u.armv3v4._flush_cache_area(regs->ARM_r0,
-						      regs->ARM_r1,
-						      1);
+		/* r0 = start, r1 = end, r2 = flags */
+		cpu_cache_clean_invalidate_range(regs->ARM_r0, regs->ARM_r1, 1);
 #endif
 		break;
 
@@ -306,10 +324,11 @@ asmlinkage int arm_syscall (int no, struct pt_regs *regs)
 		if (no <= 0x7ff)
 			return -ENOSYS;
 #ifdef CONFIG_DEBUG_USER
-		/* experiance shows that these seem to indicate that
+		/* experience shows that these seem to indicate that
 		 * something catastrophic has happened
 		 */
 		printk("[%d] %s: arm syscall %d\n", current->pid, current->comm, no);
+		dump_instr(regs);
 		if (user_mode(regs)) {
 			show_regs(regs);
 			c_backtrace(regs->ARM_fp, processor_mode(regs));
@@ -337,53 +356,102 @@ asmlinkage void deferred(int n, struct pt_regs *regs)
 	}
 
 #ifdef CONFIG_DEBUG_USER
-	printk(KERN_ERR "[%d] %s: old system call.\n", current->pid, 
-	       current->comm);
+	printk(KERN_ERR "[%d] %s: obsolete system call %08x.\n",
+		current->pid, current->comm, n);
+	dump_instr(regs);
 #endif
 	force_sig(SIGILL, current);
+	die_if_kernel("Oops", regs, n);
 }
 
-asmlinkage void arm_malalignedptr(const char *str, void *pc, volatile void *ptr)
+void __bad_xchg(volatile void *ptr, int size)
 {
-	printk("Mal-aligned pointer in %s: %p (PC=%p)\n", str, ptr, pc);
+	printk("xchg: bad data size: pc 0x%p, ptr 0x%p, size %d\n",
+		__builtin_return_address(0), ptr, size);
+	BUG();
 }
 
-asmlinkage void arm_invalidptr(const char *function, int size)
+/*
+ * A data abort trap was taken, but we did not handle the instruction.
+ * Try to abort the user program, or panic if it was the kernel.
+ */
+asmlinkage void
+baddataabort(int code, unsigned long instr, struct pt_regs *regs)
 {
-	printk("Invalid pointer size in %s (pc=%p) size %d\n",
-		function, __builtin_return_address(0), size);
-}
+	unsigned long addr = instruction_pointer(regs);
+	siginfo_t info;
 
-#ifdef CONFIG_CPU_26
-asmlinkage void baddataabort(int code, unsigned long instr, struct pt_regs *regs)
-{
-	unsigned long phys, addr = instruction_pointer(regs);
-
-#ifdef CONFIG_DEBUG_ERRORS
-	printk("pid=%d\n", current->pid);
-
-	show_regs(regs);
-	dump_instr(instruction_pointer(regs), 1);
-	{
-		pgd_t *pgd;
-
-		printk ("current->tss.memmap = %08lX\n", current->tss.memmap);
-		pgd = pgd_offset(current->mm, addr);
-		printk ("*pgd = %08lx", pgd_val (*pgd));
-		if (!pgd_none (*pgd)) {
-			pmd_t *pmd;
-			pmd = pmd_offset (pgd, addr);
-			printk (", *pmd = %08lx", pmd_val (*pmd));
-			if (!pmd_none (*pmd)) {
-				unsigned long ptr = pte_page(*pte_offset(pmd, addr));
-				printk (", *pte = %08lx", pte_val (*pte_offset (pmd, addr)));
-				phys = ptr + (addr & 0x7fff);
-			}
-		}
-		printk ("\n");
-	}
+#ifdef CONFIG_DEBUG_USER
+	printk(KERN_ERR "[%d] %s: bad data abort: code %d instr 0x%08lx\n",
+		current->pid, current->comm, code, instr);
+	dump_instr(regs);
+	show_pte(current->mm, addr);
 #endif
-	panic("unknown data abort code %d [pc=%08lx *pc=%08lx lr=%08lx sp=%08lx]",
-		code, regs->ARM_pc, instr, regs->ARM_lr, regs->ARM_sp);
+
+	info.si_signo = SIGILL;
+	info.si_errno = 0;
+	info.si_code  = ILL_ILLOPC;
+	info.si_addr  = (void *)addr;
+
+	force_sig_info(SIGILL, &info, current);
+	die_if_kernel("unknown data abort code", regs, instr);
 }
+
+void __bug(const char *file, int line, void *data)
+{
+	printk(KERN_CRIT"kernel BUG at %s:%d!", file, line);
+	if (data)
+		printk(KERN_CRIT" - extra data = %p", data);
+	printk("\n");
+	*(int *)0 = 0;
+}
+
+void __readwrite_bug(const char *fn)
+{
+	printk("%s called, but not implemented", fn);
+	BUG();
+}
+
+void __pte_error(const char *file, int line, unsigned long val)
+{
+	printk("%s:%d: bad pte %08lx.\n", file, line, val);
+}
+
+void __pmd_error(const char *file, int line, unsigned long val)
+{
+	printk("%s:%d: bad pmd %08lx.\n", file, line, val);
+}
+
+void __pgd_error(const char *file, int line, unsigned long val)
+{
+	printk("%s:%d: bad pgd %08lx.\n", file, line, val);
+}
+
+asmlinkage void __div0(void)
+{
+	printk("Division by zero in kernel.\n");
+	__backtrace();
+}
+
+void abort(void)
+{
+	void *lr = __builtin_return_address(0);
+
+	printk(KERN_CRIT "abort() called from %p!  (Please "
+	       "report to rmk@arm.linux.org.uk)\n", lr);
+
+	BUG();
+
+	/* if that doesn't kill us, halt */
+	panic("Oops failed to kill thread");
+}
+
+void __init trap_init(void)
+{
+	extern void __trap_init(void);
+
+	__trap_init();
+#ifdef CONFIG_CPU_32
+	modify_domain(DOMAIN_USER, DOMAIN_CLIENT);
 #endif
+}

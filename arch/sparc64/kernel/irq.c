@@ -1,4 +1,4 @@
-/* $Id: irq.c,v 1.76 1999/04/02 14:54:30 davem Exp $
+/* $Id: irq.c,v 1.94 2000/09/21 06:27:10 anton Exp $
  * irq.c: UltraSparc IRQ handling/init/registry.
  *
  * Copyright (C) 1997  David S. Miller  (davem@caip.rutgers.edu)
@@ -11,6 +11,7 @@
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
 #include <linux/signal.h>
+#include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/malloc.h>
 #include <linux/random.h> /* XXX ADD add_foo_randomness() calls... -DaveM */
@@ -30,17 +31,13 @@
 #include <asm/smp.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
-
-#ifdef CONFIG_PCI
-#include <linux/pci.h>
-#include <asm/pbm.h>
-#endif
+#include <asm/starfire.h>
 
 /* Internal flag, should not be visible elsewhere at all. */
 #define SA_IMAP_MASKED		0x100
 #define SA_DMA_SYNC		0x200
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 static void distribute_irqs(void);
 #endif
 
@@ -59,11 +56,24 @@ static void distribute_irqs(void);
 
 struct ino_bucket ivector_table[NUM_IVECS] __attribute__ ((aligned (64)));
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 unsigned int __up_workvec[16] __attribute__ ((aligned (64)));
-#define irq_work(__cpu, __pil)	&(__up_workvec[(__pil)])
+#define irq_work(__cpu, __pil)	&(__up_workvec[(void)(__cpu), (__pil)])
 #else
 #define irq_work(__cpu, __pil)	&(cpu_data[(__cpu)].irq_worklists[(__pil)])
+#endif
+
+#ifdef CONFIG_PCI
+/* This is a table of physical addresses used to deal with SA_DMA_SYNC.
+ * It is used for PCI only to synchronize DMA transfers with IRQ delivery
+ * for devices behind busses other than APB on Sabre systems.
+ *
+ * Currently these physical addresses are just config space accesses
+ * to the command register for that device.
+ */
+unsigned long pci_dma_wsync;
+unsigned long dma_sync_reg_table[256];
+unsigned char dma_sync_reg_table_entry = 0;
 #endif
 
 /* This is based upon code in the 32-bit Sparc kernel written mostly by
@@ -79,20 +89,11 @@ struct irqaction *irq_action[NR_IRQS+1] = {
 	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL
 };
 
-/* Only 8-bits are available, be careful.  -DaveM */
-#define IBF_DMA_SYNC	0x01	/* DMA synchronization behind PCI bridge needed. */
-#define IBF_PCI		0x02	/* Indicates PSYCHO/SCHIZO PCI interrupt.	 */
-#define IBF_ACTIVE	0x04	/* This interrupt is active and has a handler.	 */
-#define IBF_MULTI	0x08	/* On PCI, indicates shared bucket.		 */
-
-#define __bucket(irq) ((struct ino_bucket *)(unsigned long)(irq))
-#define __irq(bucket) ((unsigned int)(unsigned long)(bucket))
-
 int get_irq_list(char *buf)
 {
 	int i, len = 0;
 	struct irqaction *action;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	int j;
 #endif
 
@@ -100,7 +101,7 @@ int get_irq_list(char *buf)
 		if(!(action = *(i + irq_action)))
 			continue;
 		len += sprintf(buf + len, "%3d: ", i);
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 		len += sprintf(buf + len, "%10u ", kstat_irqs(i));
 #else
 		for (j = 0; j < smp_num_cpus; j++)
@@ -120,134 +121,15 @@ int get_irq_list(char *buf)
 	return len;
 }
 
-/* SBUS SYSIO INO number to Sparc PIL level. */
-unsigned char sysio_ino_to_pil[] = {
-	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 0 */
-	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 1 */
-	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 2 */
-	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 3 */
-	3, /* Onboard SCSI */
-	5, /* Onboard Ethernet */
-/*XXX*/	8, /* Onboard BPP */
-	0, /* Bogon */
-       13, /* Audio */
-/*XXX*/15, /* PowerFail */
-	0, /* Bogon */
-	0, /* Bogon */
-       12, /* Zilog Serial Channels (incl. Keyboard/Mouse lines) */
-       11, /* Floppy */
-	0, /* Spare Hardware (bogon for now) */
-	0, /* Keyboard (bogon for now) */
-	0, /* Mouse (bogon for now) */
-	0, /* Serial (bogon for now) */
-     0, 0, /* Bogon, Bogon */
-       10, /* Timer 0 */
-       11, /* Timer 1 */
-     0, 0, /* Bogon, Bogon */
-       15, /* Uncorrectable SBUS Error */
-       15, /* Correctable SBUS Error */
-       15, /* SBUS Error */
-/*XXX*/ 0, /* Power Management (bogon for now) */
-};
-
-/* INO number to IMAP register offset for SYSIO external IRQ's.
- * This should conform to both Sunfire/Wildfire server and Fusion
- * desktop designs.
- */
-#define offset(x) ((unsigned long)(&(((struct sysio_regs *)0)->x)))
-#define bogon     ((unsigned long) -1)
-static unsigned long sysio_irq_offsets[] = {
-/* SBUS Slot 0 --> 3, level 1 --> 7 */
-offset(imap_slot0),offset(imap_slot0),offset(imap_slot0),offset(imap_slot0),
-offset(imap_slot0),offset(imap_slot0),offset(imap_slot0),offset(imap_slot0),
-offset(imap_slot1),offset(imap_slot1),offset(imap_slot1),offset(imap_slot1),
-offset(imap_slot1),offset(imap_slot1),offset(imap_slot1),offset(imap_slot1),
-offset(imap_slot2),offset(imap_slot2),offset(imap_slot2),offset(imap_slot2),
-offset(imap_slot2),offset(imap_slot2),offset(imap_slot2),offset(imap_slot2),
-offset(imap_slot3),offset(imap_slot3),offset(imap_slot3),offset(imap_slot3),
-offset(imap_slot3),offset(imap_slot3),offset(imap_slot3),offset(imap_slot3),
-/* Onboard devices (not relevant/used on SunFire). */
-offset(imap_scsi), offset(imap_eth), offset(imap_bpp), bogon,
-offset(imap_audio), offset(imap_pfail), bogon, bogon,
-offset(imap_kms), offset(imap_flpy), offset(imap_shw),
-offset(imap_kbd), offset(imap_ms), offset(imap_ser), bogon, bogon,
-offset(imap_tim0), offset(imap_tim1), bogon, bogon,
-offset(imap_ue), offset(imap_ce), offset(imap_sberr),
-offset(imap_pmgmt),
-};
-
-#undef bogon
-
-#define NUM_SYSIO_OFFSETS (sizeof(sysio_irq_offsets) / sizeof(sysio_irq_offsets[0]))
-
-/* Convert Interrupt Mapping register pointer to assosciated
- * Interrupt Clear register pointer, SYSIO specific version.
- */
-static unsigned int *sysio_imap_to_iclr(unsigned int *imap)
-{
-	unsigned long diff;
-
-	diff = offset(iclr_unused0) - offset(imap_slot0);
-	return (unsigned int *) (((unsigned long)imap) + diff);
-}
-
-#undef offset
-
-#ifdef CONFIG_PCI
-/* PCI PSYCHO INO number to Sparc PIL level. */
-unsigned char psycho_ino_to_pil[] = {
-	7, 5, 4, 2,			/* PCI A slot 0  Int A, B, C, D */
-	7, 5, 4, 2,			/* PCI A slot 1  Int A, B, C, D */
-	7, 5, 4, 2,			/* PCI A slot 2  Int A, B, C, D */
-	7, 5, 4, 2,			/* PCI A slot 3  Int A, B, C, D */
-	6, 4, 3, 1,			/* PCI B slot 0  Int A, B, C, D */
-	6, 4, 3, 1,			/* PCI B slot 1  Int A, B, C, D */
-	6, 4, 3, 1,			/* PCI B slot 2  Int A, B, C, D */
-	6, 4, 3, 1,			/* PCI B slot 3  Int A, B, C, D */
-	3,  /* SCSI */
-	5,  /* Ethernet */
-	8,  /* Parallel Port */
-	13, /* Audio Record */
-	14, /* Audio Playback */
-	15, /* PowerFail */
-	3,  /* second SCSI */
-	11, /* Floppy */
-	2,  /* Spare Hardware */
-	9,  /* Keyboard */
-	4,  /* Mouse */
-	12, /* Serial */
-	10, /* Timer 0 */
-	11, /* Timer 1 */
-	15, /* Uncorrectable ECC */
-	15, /* Correctable ECC */
-	15, /* PCI Bus A Error */
-	15, /* PCI Bus B Error */
-	1, /* Power Management */
-};
-
-/* INO number to IMAP register offset for PSYCHO external IRQ's. */
-#define psycho_offset(x) ((unsigned long)(&(((struct psycho_regs *)0)->x)))
-
-#define psycho_imap_offset(ino)						      \
-	((ino & 0x20) ? (psycho_offset(imap_scsi) + (((ino) & 0x1f) << 3)) :  \
-			(psycho_offset(imap_a_slot0) + (((ino) & 0x3c) << 1)))
-
-#define psycho_iclr_offset(ino)						      \
-	((ino & 0x20) ? (psycho_offset(iclr_scsi) + (((ino) & 0x1f) << 3)) :  \
-			(psycho_offset(iclr_a_slot0[0]) + (((ino) & 0x1f)<<3)))
-
-#endif
-
 /* Now these are always passed a true fully specified sun4u INO. */
 void enable_irq(unsigned int irq)
 {
-	extern int this_is_starfire;
 	struct ino_bucket *bucket = __bucket(irq);
-	unsigned int *imap;
+	unsigned long imap;
 	unsigned long tid;
 
 	imap = bucket->imap;
-	if (!imap)
+	if (imap == 0UL)
 		return;
 
 	if(this_is_starfire == 0) {
@@ -257,9 +139,6 @@ void enable_irq(unsigned int irq)
 				     : "i" (ASI_UPA_CONFIG));
 		tid = ((tid & UPA_CONFIG_MID) << 9);
 	} else {
-		extern unsigned int starfire_translate(unsigned int *imap,
-						       unsigned int upaid);
-
 		tid = (starfire_translate(imap, current->processor) << 26);
 	}
 
@@ -267,27 +146,31 @@ void enable_irq(unsigned int irq)
 	 * of this SYSIO's preconfigured IGN in the SYSIO Control
 	 * Register, the hardware just mirrors that value here.
 	 * However for Graphics and UPA Slave devices the full
-	 * SYSIO_IMAP_INR field can be set by the programmer here.
+	 * IMAP_INR field can be set by the programmer here.
 	 *
 	 * Things like FFB can now be handled via the new IRQ mechanism.
 	 */
-	*imap = SYSIO_IMAP_VALID | (tid & SYSIO_IMAP_TID);
+	upa_writel(IMAP_VALID | (tid & IMAP_TID), imap);
 }
 
 /* This now gets passed true ino's as well. */
 void disable_irq(unsigned int irq)
 {
 	struct ino_bucket *bucket = __bucket(irq);
-	unsigned int *imap;
+	unsigned long imap;
 
 	imap = bucket->imap;
-	if (imap != NULL) {
+	if (imap != 0UL) {
+		u32 tmp;
+
 		/* NOTE: We do not want to futz with the IRQ clear registers
 		 *       and move the state to IDLE, the SCSI code does call
 		 *       disable_irq() to assure atomicity in the queue cmd
 		 *       SCSI adapter driver code.  Thus we'd lose interrupts.
 		 */
-		*imap &= ~(SYSIO_IMAP_VALID);
+		tmp = upa_readl(imap);
+		tmp &= ~IMAP_VALID;
+		upa_writel(tmp, imap);
 	}
 }
 
@@ -302,18 +185,18 @@ static struct ino_bucket pil0_dummy_bucket = {
 	0,	/* flags */
 	0,	/* __unused */
 	NULL,	/* irq_info */
-	NULL,	/* iclr */
-	NULL,	/* imap */
+	0UL,	/* iclr */
+	0UL,	/* imap */
 };
 
-unsigned int build_irq(int pil, int inofixup, unsigned int *iclr, unsigned int *imap)
+unsigned int build_irq(int pil, int inofixup, unsigned long iclr, unsigned long imap)
 {
 	struct ino_bucket *bucket;
 	int ino;
 
 	if(pil == 0) {
-		if(iclr != NULL || imap != NULL) {
-			prom_printf("Invalid dummy bucket for PIL0 (%p:%p)\n",
+		if(iclr != 0UL || imap != 0UL) {
+			prom_printf("Invalid dummy bucket for PIL0 (%lx:%lx)\n",
 				    iclr, imap);
 			prom_halt();
 		}
@@ -321,13 +204,13 @@ unsigned int build_irq(int pil, int inofixup, unsigned int *iclr, unsigned int *
 	}
 
 	/* RULE: Both must be specified in all other cases. */
-	if (iclr == NULL || imap == NULL) {
+	if (iclr == 0UL || imap == 0UL) {
 		prom_printf("Invalid build_irq %d %d %016lx %016lx\n",
 			    pil, inofixup, iclr, imap);
 		prom_halt();
 	}
 	
-	ino = (*imap & (SYSIO_IMAP_IGN | SYSIO_IMAP_INO)) + inofixup;
+	ino = (upa_readl(imap) & (IMAP_IGN | IMAP_INO)) + inofixup;
 	if(ino > NUM_IVECS) {
 		prom_printf("Invalid INO %04x (%d:%d:%016lx:%016lx)\n",
 			    ino, pil, inofixup, iclr, imap);
@@ -358,134 +241,6 @@ unsigned int build_irq(int pil, int inofixup, unsigned int *iclr, unsigned int *
 
 	return __irq(bucket);
 }
-
-unsigned int sbus_build_irq(void *buscookie, unsigned int ino)
-{
-	struct linux_sbus *sbus = (struct linux_sbus *)buscookie;
-	struct sysio_regs *sregs = sbus->iommu->sysio_regs;
-	unsigned long offset;
-	int pil;
-	unsigned int *imap, *iclr;
-	int sbus_level = 0;
-
-	pil = sysio_ino_to_pil[ino];
-	if(!pil) {
-		printk("sbus_irq_build: Bad SYSIO INO[%x]\n", ino);
-		panic("Bad SYSIO IRQ translations...");
-	}
-	offset = sysio_irq_offsets[ino];
-	if(offset == ((unsigned long)-1)) {
-		printk("get_irq_translations: Bad SYSIO INO[%x] cpu[%d]\n",
-			ino, pil);
-		panic("BAD SYSIO IRQ offset...");
-	}
-	offset += ((unsigned long)sregs);
-	imap = ((unsigned int *)offset);
-
-	/* SYSIO inconsistancy.  For external SLOTS, we have to select
-	 * the right ICLR register based upon the lower SBUS irq level
-	 * bits.
-	 */
-	if(ino >= 0x20) {
-		iclr = sysio_imap_to_iclr(imap);
-	} else {
-		unsigned long iclraddr;
-		int sbus_slot = (ino & 0x18)>>3;
-		
-		sbus_level = ino & 0x7;
-
-		switch(sbus_slot) {
-		case 0:
-			iclr = &sregs->iclr_slot0;
-			break;
-		case 1:
-			iclr = &sregs->iclr_slot1;
-			break;
-		case 2:
-			iclr = &sregs->iclr_slot2;
-			break;
-		default:
-		case 3:
-			iclr = &sregs->iclr_slot3;
-			break;
-		};
-
-		iclraddr = (unsigned long) iclr;
-		iclraddr += ((sbus_level - 1) * 8);
-		iclr = (unsigned int *) iclraddr;
-	}
-	return build_irq(pil, sbus_level, iclr, imap);
-}
-
-#ifdef CONFIG_PCI
-unsigned int psycho_build_irq(void *buscookie, int imap_off, int ino, int need_dma_sync)
-{
-	struct linux_psycho *psycho = (struct linux_psycho *)buscookie;
-	struct psycho_regs *pregs = psycho->psycho_regs;
-	unsigned long addr;
-	struct ino_bucket *bucket;
-	int pil;
-	unsigned int *imap, *iclr;
-	int inofixup = 0;
-
-	pil = psycho_ino_to_pil[ino & PCI_IRQ_INO];
-	
-	addr = (unsigned long) &pregs->imap_a_slot0;
-	addr = addr + imap_off;
-	imap = ((unsigned int *)addr) + 1;
-
-	addr = (unsigned long) pregs;
-	addr += psycho_iclr_offset(ino & (PCI_IRQ_INO));
-	iclr = ((unsigned int *)addr) + 1;
-
-	if(!(ino & 0x20))
-		inofixup = ino & 0x03;
-
-	/* First check for sharing. */
-	ino = (*imap & (SYSIO_IMAP_IGN | SYSIO_IMAP_INO)) + inofixup;
-	if (ino > NUM_IVECS) {
-		prom_printf("PSYCHO: Invalid INO %04x (%d:%d:%016lx:%016lx)\n",
-			    ino, pil, inofixup, iclr, imap);
-		prom_halt();
-	}
-	bucket = &ivector_table[ino];
-	if(bucket->flags & IBF_ACTIVE) {
-		void *old_handler = bucket->irq_info;
-		unsigned long flags;
-
-		if(old_handler == NULL) {
-			prom_printf("PSYCHO: Active bucket, but no handler.\n");
-			prom_halt();
-		}
-		save_and_cli(flags);
-		if((bucket->flags & IBF_MULTI) == 0) {
-			void **vector;
-
-			vector = kmalloc(sizeof(void *) * 4,
-					 GFP_KERNEL);
-
-			/* We might have slept. */
-			if((bucket->flags & IBF_MULTI) != 0) {
-				kfree(vector);
-			} else {
-				vector[0] = old_handler;
-				vector[1] = vector[2] = vector[3] = NULL;
-				bucket->irq_info = vector;
-				bucket->flags |= IBF_MULTI;
-			}
-		}
-		restore_flags(flags);
-	} else {
-		/* Just init the bucket */
-		bucket = __bucket(build_irq(pil, inofixup, iclr, imap));
-	}	
-	if (need_dma_sync)
-		bucket->flags |= IBF_DMA_SYNC;
-		
-	bucket->flags |= IBF_PCI;
-	return __irq(bucket);
-}
-#endif
 
 static void atomic_bucket_insert(struct ino_bucket *bucket)
 {
@@ -535,8 +290,6 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 			/*
 			 * Check wether we _should_ use DMA Write Sync
 			 * (for devices behind bridges behind APB). 
-			 *
-			 * XXX: Not implemented, yet.
 			 */
 			if (bucket->flags & IBF_DMA_SYNC)
 				irqflags |= SA_DMA_SYNC;
@@ -664,7 +417,7 @@ int request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *)
 	}
 	restore_flags(flags);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	distribute_irqs();
 #endif
 	return 0;
@@ -731,7 +484,7 @@ void free_irq(unsigned int irq, void *dev_id)
 		*(bucket->pil + irq_action) = action->next;
 
 	if(action->flags & SA_IMAP_MASKED) {
-		unsigned int *imap = bucket->imap;
+		unsigned long imap = bucket->imap;
 		void **vector, *orig;
 		int ent;
 
@@ -792,103 +545,38 @@ out:
 	restore_flags(flags);
 }
 
-/* Only uniprocessor needs this IRQ/BH locking depth, on SMP it
- * lives in the per-cpu structure for cache reasons.
- */
-#ifndef __SMP__
-unsigned int local_irq_count;
-unsigned int local_bh_count;
+#ifdef CONFIG_SMP
 
-#define irq_enter(cpu, irq)	(local_irq_count++)
-#define irq_exit(cpu, irq)	(local_irq_count--)
-#else
-atomic_t global_bh_lock = ATOMIC_INIT(0);
-spinlock_t global_bh_count = SPIN_LOCK_UNLOCKED;
-
-/* Who has global_irq_lock. */
+/* Who has the global irq brlock */
 unsigned char global_irq_holder = NO_PROC_ID;
-
-/* This protects IRQ's. */
-spinlock_t global_irq_lock = SPIN_LOCK_UNLOCKED;
-
-/* Global IRQ locking depth. */
-atomic_t global_irq_count = ATOMIC_INIT(0);
-
-#define irq_enter(cpu, irq)			\
-do {	hardirq_enter(cpu);			\
-	spin_unlock_wait(&global_irq_lock);	\
-} while(0)
-#define irq_exit(cpu, irq)	hardirq_exit(cpu)
 
 static void show(char * str)
 {
 	int cpu = smp_processor_id();
+	int i;
 
 	printk("\n%s, CPU %d:\n", str, cpu);
-	printk("irq:  %d [%ld %ld]\n",
-	       atomic_read(&global_irq_count),
-	       cpu_data[0].irq_count, cpu_data[1].irq_count);
-	printk("bh:   %d [%ld %ld]\n",
-	       (spin_is_locked(&global_bh_count) ? 1 : 0),
-	       cpu_data[0].bh_count, cpu_data[1].bh_count);
+	printk("irq:  %d [ ", irqs_running());
+	for (i = 0; i < smp_num_cpus; i++)
+		printk("%u ", __brlock_array[i][BR_GLOBALIRQ_LOCK]);
+	printk("]\nbh:   %d [ ",
+	       (spin_is_locked(&global_bh_lock) ? 1 : 0));
+	for (i = 0; i < smp_num_cpus; i++)
+		printk("%u ", local_bh_count(i));
+	printk("]\n");
 }
 
 #define MAXCOUNT 100000000
 
-static inline void wait_on_bh(void)
-{
-	int count = MAXCOUNT;
-	do {
-		if(!--count) {
-			show("wait_on_bh");
-			count = 0;
-		}
-		membar("#LoadLoad");
-	} while(spin_is_locked(&global_bh_count));
-}
-
+#if 0
 #define SYNC_OTHER_ULTRAS(x)	udelay(x+1)
-
-static inline void wait_on_irq(int cpu)
-{
-	int count = MAXCOUNT;
-	for(;;) {
-		membar("#LoadLoad");
-		if (!atomic_read (&global_irq_count)) {
-			if (local_bh_count || ! spin_is_locked(&global_bh_count))
-				break;
-		}
-		spin_unlock (&global_irq_lock);
-		membar("#StoreLoad | #StoreStore");
-		for(;;) {
-			if (!--count) {
-				show("wait_on_irq");
-				count = ~0;
-			}
-			__sti();
-			SYNC_OTHER_ULTRAS(cpu);
-			__cli();
-			if (atomic_read(&global_irq_count))
-				continue;
-			if (spin_is_locked (&global_irq_lock))
-				continue;
-			if (!local_bh_count && spin_is_locked (&global_bh_count))
-				continue;
-			if (spin_trylock(&global_irq_lock))
-				break;
-		}
-	}
-}
-
-void synchronize_bh(void)
-{
-	if (spin_is_locked (&global_bh_count) && !in_interrupt())
-		wait_on_bh();
-}
+#else
+#define SYNC_OTHER_ULTRAS(x)	membar("#Sync");
+#endif
 
 void synchronize_irq(void)
 {
-	if (atomic_read(&global_irq_count)) {
+	if (irqs_running()) {
 		cli();
 		sti();
 	}
@@ -896,15 +584,37 @@ void synchronize_irq(void)
 
 static inline void get_irqlock(int cpu)
 {
-	if (! spin_trylock(&global_irq_lock)) {
-		if ((unsigned char) cpu == global_irq_holder)
-			return;
-		do {
-			while (spin_is_locked (&global_irq_lock))
-				membar("#LoadLoad");
-		} while(! spin_trylock(&global_irq_lock));
+	int count;
+
+	if ((unsigned char)cpu == global_irq_holder)
+		return;
+
+	count = MAXCOUNT;
+again:
+	br_write_lock(BR_GLOBALIRQ_LOCK);
+	for (;;) {
+		spinlock_t *lock;
+
+		if (!irqs_running() &&
+		    (local_bh_count(smp_processor_id()) || !spin_is_locked(&global_bh_lock)))
+			break;
+
+		br_write_unlock(BR_GLOBALIRQ_LOCK);
+		lock = &__br_write_locks[BR_GLOBALIRQ_LOCK].lock;
+		while (irqs_running() ||
+		       spin_is_locked(lock) ||
+		       (!local_bh_count(smp_processor_id()) && spin_is_locked(&global_bh_lock))) {
+			if (!--count) {
+				show("get_irqlock");
+				count = (~0 >> 1);
+			}
+			__sti();
+			SYNC_OTHER_ULTRAS(cpu);
+			__cli();
+		}
+		goto again;
 	}
-	wait_on_irq(cpu);
+
 	global_irq_holder = cpu;
 }
 
@@ -916,7 +626,7 @@ void __global_cli(void)
 	if(flags == 0) {
 		int cpu = smp_processor_id();
 		__cli();
-		if (! local_irq_count)
+		if (! local_irq_count(cpu))
 			get_irqlock(cpu);
 	}
 }
@@ -925,7 +635,7 @@ void __global_sti(void)
 {
 	int cpu = smp_processor_id();
 
-	if (! local_irq_count)
+	if (! local_irq_count(cpu))
 		release_irqlock(cpu);
 	__sti();
 }
@@ -937,7 +647,7 @@ unsigned long __global_save_flags(void)
 	__save_flags(flags);
 	local_enabled = ((flags == 0) ? 1 : 0);
 	retval = 2 + local_enabled;
-	if (! local_irq_count) {
+	if (! local_irq_count(smp_processor_id())) {
 		if (local_enabled)
 			retval = 1;
 		if (global_irq_holder == (unsigned char) smp_processor_id())
@@ -971,7 +681,7 @@ void __global_restore_flags(unsigned long flags)
 	}
 }
 
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 
 void catch_disabled_ivec(struct pt_regs *regs)
 {
@@ -1001,8 +711,7 @@ void handler_irq(int irq, struct pt_regs *regs)
 {
 	struct ino_bucket *bp, *nbp;
 	int cpu = smp_processor_id();
-#ifdef __SMP__
-	extern int this_is_starfire;
+#ifdef CONFIG_SMP
 	int should_forward = (this_is_starfire == 0	&&
 			      irq < 10			&&
 			      current->pid != 0);
@@ -1011,20 +720,20 @@ void handler_irq(int irq, struct pt_regs *regs)
 	/* 'cpu' is the MID (ie. UPAID), calculate the MID
 	 * of our buddy.
 	 */
-	if(should_forward != 0) {
-		buddy = cpu_number_map[cpu] + 1;
+	if (should_forward != 0) {
+		buddy = cpu_number_map(cpu) + 1;
 		if (buddy >= NR_CPUS ||
 		    (buddy = cpu_logical_map(buddy)) == -1)
 			buddy = cpu_logical_map(0);
 
 		/* Voo-doo programming. */
-		if(cpu_data[buddy].idle_volume < FORWARD_VOLUME)
+		if (cpu_data[buddy].idle_volume < FORWARD_VOLUME)
 			should_forward = 0;
 		buddy <<= 26;
 	}
 #endif
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	/*
 	 * Check for TICK_INT on level 14 softint.
 	 */
@@ -1037,33 +746,39 @@ void handler_irq(int irq, struct pt_regs *regs)
 	kstat.irqs[cpu][irq]++;
 
 	/* Sliiiick... */
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 	bp = ((irq != 0) ?
 	      __bucket(xchg32(irq_work(cpu, irq), 0)) :
 	      &pil0_dummy_bucket);
 #else
 	bp = __bucket(xchg32(irq_work(cpu, irq), 0));
 #endif
-	for( ; bp != NULL; bp = nbp) {
+	for ( ; bp != NULL; bp = nbp) {
 		unsigned char flags = bp->flags;
 
 		nbp = __bucket(bp->irq_chain);
-		if((flags & IBF_ACTIVE) != 0) {
-			if((flags & IBF_MULTI) == 0) {
+		if ((flags & IBF_ACTIVE) != 0) {
+#ifdef CONFIG_PCI
+			if ((flags & IBF_DMA_SYNC) != 0) {
+				upa_readl(dma_sync_reg_table[bp->synctab_ent]);
+				upa_readq(pci_dma_wsync);
+			}
+#endif
+			if ((flags & IBF_MULTI) == 0) {
 				struct irqaction *ap = bp->irq_info;
 				ap->handler(__irq(bp), ap->dev_id, regs);
 			} else {
 				void **vector = (void **)bp->irq_info;
 				int ent;
-				for(ent = 0; ent < 4; ent++) {
+				for (ent = 0; ent < 4; ent++) {
 					struct irqaction *ap = vector[ent];
-					if(ap != NULL)
+					if (ap != NULL)
 						ap->handler(__irq(bp), ap->dev_id, regs);
 				}
 			}
 			/* Only the dummy bucket lacks IMAP/ICLR. */
-			if(bp->pil != 0) {
-#ifdef __SMP__
+			if (bp->pil != 0) {
+#ifdef CONFIG_SMP
 				/* Ok, here is what is going on:
 				 * 1) Retargeting IRQs on Starfire is very
 				 *    expensive so just forget about it on them.
@@ -1076,10 +791,10 @@ void handler_irq(int irq, struct pt_regs *regs)
 				if (should_forward != 0) {
 					/* Push it to our buddy. */
 					should_forward = 0;
-					*(bp->imap) = (buddy | SYSIO_IMAP_VALID);
+					upa_writel(buddy | IMAP_VALID, bp->imap);
 				}
 #endif
-				*(bp->iclr) = SYSIO_ICLR_IDLE;
+				upa_writel(ICLR_IDLE, bp->iclr);
 			}
 		} else
 			bp->pending = 1;
@@ -1103,7 +818,7 @@ void sparc_floppy_irq(int irq, void *dev_cookie, struct pt_regs *regs)
 	bucket = (struct ino_bucket *)action->mask;
 
 	floppy_interrupt(irq, dev_cookie, regs);
-	*(bucket->iclr) = SYSIO_ICLR_IDLE;
+	upa_writel(ICLR_IDLE, bucket->iclr);
 
 	irq_exit(cpu, irq);
 }
@@ -1207,7 +922,7 @@ int request_fast_irq(unsigned int irq,
 
 	restore_flags(flags);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	distribute_irqs();
 #endif
 	return 0;
@@ -1230,22 +945,22 @@ int probe_irq_off(unsigned long mask)
 void init_timers(void (*cfunc)(int, void *, struct pt_regs *),
 		 unsigned long *clock)
 {
-	unsigned long flags;
+	unsigned long pstate;
 	extern unsigned long timer_tick_offset;
 	int node, err;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	extern void smp_tick_init(void);
 #endif
 
 	node = linux_cpus[0].prom_node;
 	*clock = prom_getint(node, "clock-frequency");
 	timer_tick_offset = *clock / HZ;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	smp_tick_init();
 #endif
 
 	/* Register IRQ handler. */
-	err = request_irq(build_irq(0, 0, NULL, NULL), cfunc, (SA_INTERRUPT | SA_STATIC_ALLOC),
+	err = request_irq(build_irq(0, 0, 0UL, 0UL), cfunc, (SA_INTERRUPT | SA_STATIC_ALLOC),
 			  "timer", NULL);
 
 	if(err) {
@@ -1253,40 +968,65 @@ void init_timers(void (*cfunc)(int, void *, struct pt_regs *),
 		prom_halt();
 	}
 
-	save_and_cli(flags);
+	/* Guarentee that the following sequences execute
+	 * uninterrupted.
+	 */
+	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
+			     "wrpr	%0, %1, %%pstate"
+			     : "=r" (pstate)
+			     : "i" (PSTATE_IE));
 
 	/* Set things up so user can access tick register for profiling
-	 * purposes.
+	 * purposes.  Also workaround BB_ERRATA_1 by doing a dummy
+	 * read back of %tick after writing it.
 	 */
 	__asm__ __volatile__("
 		sethi	%%hi(0x80000000), %%g1
-		sllx	%%g1, 32, %%g1
-		rd	%%tick, %%g2
+		ba,pt	%%xcc, 1f
+		 sllx	%%g1, 32, %%g1
+		.align	64
+	1:	rd	%%tick, %%g2
 		add	%%g2, 6, %%g2
 		andn	%%g2, %%g1, %%g2
 		wrpr	%%g2, 0, %%tick
-"	: /* no outputs */
+		rdpr	%%tick, %%g0"
+	: /* no outputs */
 	: /* no inputs */
 	: "g1", "g2");
 
+	/* Workaround for Spitfire Errata (#54 I think??), I discovered
+	 * this via Sun BugID 4008234, mentioned in Solaris-2.5.1 patch
+	 * number 103640.
+	 *
+	 * On Blackbird writes to %tick_cmpr can fail, the
+	 * workaround seems to be to execute the wr instruction
+	 * at the start of an I-cache line, and perform a dummy
+	 * read back from %tick_cmpr right after writing to it. -DaveM
+	 */
 	__asm__ __volatile__("
 		rd	%%tick, %%g1
-		add	%%g1, %0, %%g1
-		wr	%%g1, 0x0, %%tick_cmpr"
+		ba,pt	%%xcc, 1f
+		 add	%%g1, %0, %%g1
+		.align	64
+	1:	wr	%%g1, 0x0, %%tick_cmpr
+		rd	%%tick_cmpr, %%g0"
 	: /* no outputs */
 	: "r" (timer_tick_offset)
 	: "g1");
 
-	restore_flags(flags);
+	/* Restore PSTATE_IE. */
+	__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
+			     : /* no outputs */
+			     : "r" (pstate));
+
 	sti();
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 static int retarget_one_irq(struct irqaction *p, int goal_cpu)
 {
-	extern int this_is_starfire;
 	struct ino_bucket *bucket = __bucket(p->mask);
-	unsigned int *imap = bucket->imap;
+	unsigned long imap = bucket->imap;
 	unsigned int tid;
 
 	/* Never change this, it causes problems on Ex000 systems. */
@@ -1296,12 +1036,9 @@ static int retarget_one_irq(struct irqaction *p, int goal_cpu)
 	if(this_is_starfire == 0) {
 		tid = __cpu_logical_map[goal_cpu] << 26;
 	} else {
-		extern unsigned int starfire_translate(unsigned int *imap,
-						       unsigned int upaid);
-
 		tid = (starfire_translate(imap, __cpu_logical_map[goal_cpu]) << 26);
 	}
-	*imap = SYSIO_IMAP_VALID | (tid & SYSIO_IMAP_TID);
+	upa_writel(IMAP_VALID | (tid & IMAP_TID), imap);
 
 	goal_cpu++;
 	if(goal_cpu >= NR_CPUS ||
@@ -1399,7 +1136,7 @@ void enable_prom_timer(void)
 	prom_timers->count0 = 0;
 }
 
-__initfunc(void init_IRQ(void))
+void __init init_IRQ(void)
 {
 	static int called = 0;
 
@@ -1408,7 +1145,7 @@ __initfunc(void init_IRQ(void))
 		map_prom_timers();
 		kill_prom_timer();
 		memset(&ivector_table[0], 0, sizeof(ivector_table));
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 		memset(&__up_workvec[0], 0, sizeof(__up_workvec));
 #endif
 	}
@@ -1430,4 +1167,9 @@ __initfunc(void init_IRQ(void))
 			     : /* No outputs */
 			     : "i" (PSTATE_IE)
 			     : "g1");
+}
+
+void init_irq_proc(void)
+{
+	/* For now, nothing... */
 }

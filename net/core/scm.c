@@ -29,7 +29,6 @@
 #include <linux/inet.h>
 #include <net/ip.h>
 #include <net/protocol.h>
-#include <net/rarp.h>
 #include <net/tcp.h>
 #include <net/udp.h>
 #include <linux/skbuff.h>
@@ -162,11 +161,6 @@ int __scm_send(struct socket *sock, struct msghdr *msg, struct scm_cookie *p)
 		kfree(p->fp);
 		p->fp = NULL;
 	}
-
-	err = -EINVAL; 
-	if (msg->msg_flags & MSG_CTLFLAGS)
-		goto error;
-
 	return 0;
 	
 error:
@@ -210,11 +204,15 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 {
 	struct cmsghdr *cm = (struct cmsghdr*)msg->msg_control;
 
-	int fdmax = (msg->msg_controllen - sizeof(struct cmsghdr))/sizeof(int);
+	int fdmax = 0;
 	int fdnum = scm->fp->count;
 	struct file **fp = scm->fp->fp;
 	int *cmfptr;
 	int err = 0, i;
+
+	if (msg->msg_controllen > sizeof(struct cmsghdr))
+		fdmax = ((msg->msg_controllen - sizeof(struct cmsghdr))
+			 / sizeof(int));
 
 	if (fdnum < fdmax)
 		fdmax = fdnum;
@@ -232,8 +230,8 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 			break;
 		}
 		/* Bump the usage count and install the file. */
-		atomic_inc(&fp[i]->f_count);
-		current->files->fd[new_fd] = fp[i];
+		get_file(fp[i]);
+		fd_install(new_fd, fp[i]);
 	}
 
 	if (i > 0)
@@ -251,7 +249,7 @@ void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm)
 			msg->msg_controllen -= cmlen;
 		}
 	}
-	if (i < fdnum)
+	if (i < fdnum || (fdnum && fdmax <= 0))
 		msg->msg_flags |= MSG_CTRUNC;
 
 	/*
@@ -271,10 +269,9 @@ struct scm_fp_list *scm_fp_dup(struct scm_fp_list *fpl)
 
 	new_fpl = kmalloc(sizeof(*fpl), GFP_KERNEL);
 	if (new_fpl) {
-		memcpy(new_fpl, fpl, sizeof(*fpl));
-
 		for (i=fpl->count-1; i>=0; i--)
-			atomic_inc(&fpl->fp[i]->f_count);
+			get_file(fpl->fp[i]);
+		memcpy(new_fpl, fpl, sizeof(*fpl));
 	}
 	return new_fpl;
 }

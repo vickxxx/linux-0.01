@@ -50,12 +50,10 @@ struct AM53C974_hostdata {
 	unsigned char max_offset[8];	/* max. sync. offset (setup), only valid if corresponding sync_en is nonzero */
 };
 
-extern struct proc_dir_entry proc_scsi_am53c974;
-
 #define AM53C974 {				  \
-    proc_dir:       &proc_scsi_am53c974,          \
+    proc_name:      "am53c974",    	          \
     name:           "AM53C974",        		  \
-    detect:         AM53C974_detect,   		  \
+    detect:         AM53C974_pci_detect,	  \
     release:        AM53C974_release,		  \
     info:           AM53C974_info,     		  \
     command:        AM53C974_command,  		  \
@@ -70,14 +68,12 @@ extern struct proc_dir_entry proc_scsi_am53c974;
     use_clustering: DISABLE_CLUSTERING 		  \
     }
 
-void AM53C974_setup(char *str, int *ints);
-int AM53C974_detect(Scsi_Host_Template * tpnt);
-int AM53C974_release(struct Scsi_Host *shp);
-int AM53C974_biosparm(Disk * disk, int dev, int *info_array);
-const char *AM53C974_info(struct Scsi_Host *);
-int AM53C974_command(Scsi_Cmnd * SCpnt);
-int AM53C974_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *));
-int AM53C974_abort(Scsi_Cmnd * cmd);
-int AM53C974_reset(Scsi_Cmnd * cmd, unsigned int);
+static int AM53C974_pci_detect(Scsi_Host_Template * tpnt);
+static int AM53C974_release(struct Scsi_Host *shp);
+static const char *AM53C974_info(struct Scsi_Host *);
+static int AM53C974_command(Scsi_Cmnd * SCpnt);
+static int AM53C974_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *));
+static int AM53C974_abort(Scsi_Cmnd * cmd);
+static int AM53C974_reset(Scsi_Cmnd * cmd, unsigned int);
 
 #endif				/* AM53C974_H */

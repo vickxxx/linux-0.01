@@ -3,8 +3,9 @@
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
  *
- * $Id: loadmmu.c,v 1.10 1999/06/17 13:25:51 ralf Exp $
+ * $Id: loadmmu.c,v 1.17 2000/03/13 10:33:05 raiko Exp $
  */
+#include <linux/config.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -14,64 +15,57 @@
 #include <asm/pgtable.h>
 #include <asm/system.h>
 #include <asm/bootinfo.h>
-#include <asm/sgialib.h>
 
 /* memory functions */
-void (*clear_page)(unsigned long page);
-void (*copy_page)(unsigned long to, unsigned long from);
+void (*_clear_page)(void * page);
+void (*_copy_page)(void * to, void * from);
 
 /* Cache operations. */
-void (*flush_cache_all)(void);
-void (*flush_cache_mm)(struct mm_struct *mm);
-void (*flush_cache_range)(struct mm_struct *mm, unsigned long start,
+void (*_flush_cache_all)(void);
+void (*_flush_cache_mm)(struct mm_struct *mm);
+void (*_flush_cache_range)(struct mm_struct *mm, unsigned long start,
 			  unsigned long end);
-void (*flush_cache_page)(struct vm_area_struct *vma, unsigned long page);
-void (*flush_cache_sigtramp)(unsigned long addr);
-void (*flush_page_to_ram)(unsigned long page);
+void (*_flush_cache_page)(struct vm_area_struct *vma, unsigned long page);
+void (*_flush_cache_sigtramp)(unsigned long addr);
+void (*_flush_page_to_ram)(struct page * page);
 
 /* DMA cache operations. */
-void (*dma_cache_wback_inv)(unsigned long start, unsigned long size);
-void (*dma_cache_wback)(unsigned long start, unsigned long size);
-void (*dma_cache_inv)(unsigned long start, unsigned long size);
+void (*_dma_cache_wback_inv)(unsigned long start, unsigned long size);
+void (*_dma_cache_wback)(unsigned long start, unsigned long size);
+void (*_dma_cache_inv)(unsigned long start, unsigned long size);
 
-/* TLB operations. */
-void (*flush_tlb_all)(void);
-void (*flush_tlb_mm)(struct mm_struct *mm);
-void (*flush_tlb_range)(struct mm_struct *mm, unsigned long start,
-			unsigned long end);
-void (*flush_tlb_page)(struct vm_area_struct *vma, unsigned long page);
-
-/* Miscellaneous. */
-void (*load_pgd)(unsigned long pg_dir);
-void (*pgd_init)(unsigned long page);
-void (*update_mmu_cache)(struct vm_area_struct * vma,
-			 unsigned long address, pte_t pte);
-
-void (*show_regs)(struct pt_regs *);
-
-void (*add_wired_entry)(unsigned long entrylo0, unsigned long entrylo1,
-			unsigned long entryhi, unsigned long pagemask);
-
-int (*user_mode)(struct pt_regs *);
-
-asmlinkage void *(*resume)(void *last, void *next);
-
+#ifdef CONFIG_CPU_R3000
 extern void ld_mmu_r2300(void);
+#endif
+#if defined(CONFIG_CPU_R4X00) || defined(CONFIG_CPU_R4300) || \
+    defined(CONFIG_CPU_R5000) || defined(CONFIG_CPU_NEVADA)
 extern void ld_mmu_r4xx0(void);
+#endif
+#ifdef CONFIG_CPU_R6000
 extern void ld_mmu_r6000(void);
+#endif
+#ifdef CONFIG_CPU_R8000
 extern void ld_mmu_tfp(void);
+#endif
+#ifdef CONFIG_CPU_R10000
 extern void ld_mmu_andes(void);
+#endif
 
-__initfunc(void loadmmu(void))
+void __init loadmmu(void)
 {
 	switch(mips_cputype) {
+#ifdef CONFIG_CPU_R3000
 	case CPU_R2000:
 	case CPU_R3000:
 	case CPU_R3000A:
+	case CPU_R3081E:
 		printk("Loading R[23]00 MMU routines.\n");
 		ld_mmu_r2300();
 		break;
+#endif
 
+#if defined(CONFIG_CPU_R4X00) || defined(CONFIG_CPU_R4300) || \
+    defined(CONFIG_CPU_R5000) || defined(CONFIG_CPU_NEVADA)
 	case CPU_R4000PC:
 	case CPU_R4000SC:
 	case CPU_R4000MC:
@@ -90,22 +84,14 @@ __initfunc(void loadmmu(void))
 		printk("Loading R4000 MMU routines.\n");
 		ld_mmu_r4xx0();
 		break;
+#endif
 
-	case CPU_R6000:
-	case CPU_R6000A:
-		printk("Loading R6000 MMU routines.\n");
-		ld_mmu_r6000();
-		break;
-
-	case CPU_R8000:
-		printk("Loading TFP MMU routines.\n");
-		ld_mmu_tfp();
-		break;
-
+#ifdef CONFIG_CPU_R10000
 	case CPU_R10000:
 		printk("Loading R10000 MMU routines.\n");
 		ld_mmu_andes();
 		break;
+#endif
 
 	default:
 		/* XXX We need an generic routine in the MIPS port

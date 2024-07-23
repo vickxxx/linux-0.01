@@ -2,7 +2,7 @@
 #               Makefile for wm-FPU-emu
 #
 
-L_TARGET := math.a
+O_TARGET := math.o
 
 #DEBUG	= -DDEBUGGING
 DEBUG	=
@@ -10,7 +10,7 @@ PARANOID = -DPARANOID
 CFLAGS	:= $(CFLAGS) $(PARANOID) $(DEBUG) -fno-builtin $(MATH_EMULATION)
 
 .S.o:
-	$(CC) -D__ASSEMBLY__ $(PARANOID) -c $<
+	$(CC) $(AFLAGS) $(PARANOID) -c $<
 
 # From 'C' language sources:
 C_OBJS =fpu_entry.o errors.o \
@@ -27,7 +27,7 @@ A_OBJS =reg_u_add.o reg_u_div.o reg_u_mul.o reg_u_sub.o \
 	div_Xsig.o polynom_Xsig.o round_Xsig.o \
 	shr_Xsig.o mul_Xsig.o
 
-L_OBJS =$(C_OBJS) $(A_OBJS)
+obj-y =$(C_OBJS) $(A_OBJS)
 
 include $(TOPDIR)/Rules.make
 

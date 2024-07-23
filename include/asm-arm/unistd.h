@@ -7,7 +7,6 @@
  * This file contains the system call numbers.
  */
 
-#define __NR_setup			(__NR_SYSCALL_BASE+  0)	/* used only by init, to get system going */
 #define __NR_exit			(__NR_SYSCALL_BASE+  1)
 #define __NR_fork			(__NR_SYSCALL_BASE+  2)
 #define __NR_read			(__NR_SYSCALL_BASE+  3)
@@ -25,7 +24,7 @@
 #define __NR_chmod			(__NR_SYSCALL_BASE+ 15)
 #define __NR_lchown			(__NR_SYSCALL_BASE+ 16)
 #define __NR_break			(__NR_SYSCALL_BASE+ 17)
-#define __NR_oldstat			(__NR_SYSCALL_BASE+ 18)
+
 #define __NR_lseek			(__NR_SYSCALL_BASE+ 19)
 #define __NR_getpid			(__NR_SYSCALL_BASE+ 20)
 #define __NR_mount			(__NR_SYSCALL_BASE+ 21)
@@ -35,7 +34,7 @@
 #define __NR_stime			(__NR_SYSCALL_BASE+ 25)
 #define __NR_ptrace			(__NR_SYSCALL_BASE+ 26)
 #define __NR_alarm			(__NR_SYSCALL_BASE+ 27)
-#define __NR_oldfstat			(__NR_SYSCALL_BASE+ 28)
+
 #define __NR_pause			(__NR_SYSCALL_BASE+ 29)
 #define __NR_utime			(__NR_SYSCALL_BASE+ 30)
 #define __NR_stty			(__NR_SYSCALL_BASE+ 31)
@@ -66,7 +65,7 @@
 #define __NR_mpx			(__NR_SYSCALL_BASE+ 56)
 #define __NR_setpgid			(__NR_SYSCALL_BASE+ 57)
 #define __NR_ulimit			(__NR_SYSCALL_BASE+ 58)
-#define __NR_oldolduname		(__NR_SYSCALL_BASE+ 59)
+
 #define __NR_umask			(__NR_SYSCALL_BASE+ 60)
 #define __NR_chroot			(__NR_SYSCALL_BASE+ 61)
 #define __NR_ustat			(__NR_SYSCALL_BASE+ 62)
@@ -83,7 +82,7 @@
 #define __NR_sigpending			(__NR_SYSCALL_BASE+ 73)
 #define __NR_sethostname		(__NR_SYSCALL_BASE+ 74)
 #define __NR_setrlimit			(__NR_SYSCALL_BASE+ 75)
-#define __NR_getrlimit			(__NR_SYSCALL_BASE+ 76)
+#define __NR_old_getrlimit		(__NR_SYSCALL_BASE+ 76)	/* Back compat 2GB limited rlimit */
 #define __NR_getrusage			(__NR_SYSCALL_BASE+ 77)
 #define __NR_gettimeofday		(__NR_SYSCALL_BASE+ 78)
 #define __NR_settimeofday		(__NR_SYSCALL_BASE+ 79)
@@ -91,7 +90,7 @@
 #define __NR_setgroups			(__NR_SYSCALL_BASE+ 81)
 #define __NR_select			(__NR_SYSCALL_BASE+ 82)
 #define __NR_symlink			(__NR_SYSCALL_BASE+ 83)
-#define __NR_oldlstat			(__NR_SYSCALL_BASE+ 84)
+
 #define __NR_readlink			(__NR_SYSCALL_BASE+ 85)
 #define __NR_uselib			(__NR_SYSCALL_BASE+ 86)
 #define __NR_swapon			(__NR_SYSCALL_BASE+ 87)
@@ -116,8 +115,8 @@
 #define __NR_stat			(__NR_SYSCALL_BASE+106)
 #define __NR_lstat			(__NR_SYSCALL_BASE+107)
 #define __NR_fstat			(__NR_SYSCALL_BASE+108)
-#define __NR_olduname			(__NR_SYSCALL_BASE+109)
-#define __NR_iopl			(__NR_SYSCALL_BASE+110)
+
+
 #define __NR_vhangup			(__NR_SYSCALL_BASE+111)
 #define __NR_idle			(__NR_SYSCALL_BASE+112)
 #define __NR_syscall			(__NR_SYSCALL_BASE+113) /* syscall to call a syscall! */
@@ -198,6 +197,33 @@
 					/* 188 reserved */
 					/* 189 reserved */
 #define __NR_vfork			(__NR_SYSCALL_BASE+190)
+#define __NR_getrlimit			(__NR_SYSCALL_BASE+191)	/* SuS compliant getrlimit */
+#define __NR_mmap2			(__NR_SYSCALL_BASE+192)
+#define __NR_truncate64			(__NR_SYSCALL_BASE+193)
+#define __NR_ftruncate64		(__NR_SYSCALL_BASE+194)
+#define __NR_stat64			(__NR_SYSCALL_BASE+195)
+#define __NR_lstat64			(__NR_SYSCALL_BASE+196)
+#define __NR_fstat64			(__NR_SYSCALL_BASE+197)
+#define __NR_lchown32			(__NR_SYSCALL_BASE+198)
+#define __NR_getuid32			(__NR_SYSCALL_BASE+199)
+#define __NR_getgid32			(__NR_SYSCALL_BASE+200)
+#define __NR_geteuid32			(__NR_SYSCALL_BASE+201)
+#define __NR_getegid32			(__NR_SYSCALL_BASE+202)
+#define __NR_setreuid32			(__NR_SYSCALL_BASE+203)
+#define __NR_setregid32			(__NR_SYSCALL_BASE+204)
+#define __NR_getgroups32		(__NR_SYSCALL_BASE+205)
+#define __NR_setgroups32		(__NR_SYSCALL_BASE+206)
+#define __NR_fchown32			(__NR_SYSCALL_BASE+207)
+#define __NR_setresuid32		(__NR_SYSCALL_BASE+208)
+#define __NR_getresuid32		(__NR_SYSCALL_BASE+209)
+#define __NR_setresgid32		(__NR_SYSCALL_BASE+210)
+#define __NR_getresgid32		(__NR_SYSCALL_BASE+211)
+#define __NR_chown32			(__NR_SYSCALL_BASE+212)
+#define __NR_setuid32			(__NR_SYSCALL_BASE+213)
+#define __NR_setgid32			(__NR_SYSCALL_BASE+214)
+#define __NR_setfsuid32			(__NR_SYSCALL_BASE+215)
+#define __NR_setfsgid32			(__NR_SYSCALL_BASE+216)
+#define __NR_getdents64			(__NR_SYSCALL_BASE+217)
 
 #define __sys2(x) #x
 #define __sys1(x) __sys2(x)
@@ -306,39 +332,39 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5) {			\
 
 #ifdef __KERNEL_SYSCALLS__
 
-static inline int idle(void)
+static inline long idle(void)
 {
-	extern int sys_idle(void);
+	extern long sys_idle(void);
 	return sys_idle();
 }
 
-static inline int pause(void)
+static inline long pause(void)
 {
-	extern int sys_pause(void);
+	extern long sys_pause(void);
 	return sys_pause();
 }
 
-static inline int sync(void)
+static inline long sync(void)
 {
-	extern int sys_sync(void);
+	extern long sys_sync(void);
 	return sys_sync();
 }
 
 static inline pid_t setsid(void)
 {
-	extern int sys_setsid(void);
+	extern long sys_setsid(void);
 	return sys_setsid();
 }
 
-static inline int write(int fd, const char *buf, off_t count)
+static inline long write(int fd, const char *buf, off_t count)
 {
-	extern int sys_write(int, const char *, int);
+	extern long sys_write(int, const char *, int);
 	return sys_write(fd, buf, count);
 }
 
-static inline int read(int fd, char *buf, off_t count)
+static inline long read(int fd, char *buf, off_t count)
 {
-	extern int sys_read(int, char *, int);
+	extern long sys_read(int, char *, int);
 	return sys_read(fd, buf, count);
 }
 
@@ -348,44 +374,45 @@ static inline off_t lseek(int fd, off_t offset, int count)
 	return sys_lseek(fd, offset, count);
 }
 
-static inline int dup(int fd)
+static inline long dup(int fd)
 {
-	extern int sys_dup(int);
+	extern long sys_dup(int);
 	return sys_dup(fd);
 }
 
-static inline int open(const char *file, int flag, int mode)
+static inline long open(const char *file, int flag, int mode)
 {
-	extern int sys_open(const char *, int, int);
+	extern long sys_open(const char *, int, int);
 	return sys_open(file, flag, mode);
 }
 
-static inline int close(int fd)
+static inline long close(int fd)
 {
+	extern long sys_close(unsigned int);
 	return sys_close(fd);
 }
 
-static inline int _exit(int exitcode)
+static inline long _exit(int exitcode)
 {
-	extern int sys_exit(int) __attribute__((noreturn));
+	extern long sys_exit(int) __attribute__((noreturn));
 	return sys_exit(exitcode);
 }
 
 static inline pid_t waitpid(pid_t pid, int *wait_stat, int options)
 {
-	extern int sys_wait4(int, int *, int, struct rusage *);
+	extern long sys_wait4(int, int *, int, struct rusage *);
 	return sys_wait4((int)pid, wait_stat, options, NULL);
 }
 
-static inline int delete_module(const char *name)
+static inline long delete_module(const char *name)
 {
-	extern int sys_delete_module(const char *name);
+	extern long sys_delete_module(const char *name);
 	return sys_delete_module(name);
 }
 
 static inline pid_t wait(int * wait_stat)
 {
-	extern int sys_wait4(int, int *, int, struct rusage *);
+	extern long sys_wait4(int, int *, int, struct rusage *);
 	return sys_wait4(-1, wait_stat, 0, NULL);
 }
 
@@ -395,13 +422,5 @@ static inline pid_t wait(int * wait_stat)
  */
 static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp);
 
-/*
- * Create a new kernel thread
- */
-extern pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
-
 #endif
 #endif /* __ASM_ARM_UNISTD_H */
-
-
-

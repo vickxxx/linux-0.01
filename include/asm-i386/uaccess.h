@@ -42,7 +42,7 @@ extern int __verify_write(const void *, unsigned long);
 	unsigned long flag,sum; \
 	asm("addl %3,%1 ; sbbl %0,%0; cmpl %1,%4; sbbl $0,%0" \
 		:"=&r" (flag), "=r" (sum) \
-		:"1" (addr),"g" (size),"g" (current->addr_limit.seg)); \
+		:"1" (addr),"g" ((int)(size)),"g" (current->addr_limit.seg)); \
 	flag; })
 
 #ifdef CONFIG_X86_WP_WORKS_OK
@@ -56,7 +56,7 @@ extern int __verify_write(const void *, unsigned long);
 			 segment_eq(get_fs(),KERNEL_DS) || \
 			  __verify_write((void *)(addr),(size))))
 
-#endif /* CPU */
+#endif
 
 extern inline int verify_area(int type, const void * addr, unsigned long size)
 {
@@ -135,16 +135,8 @@ extern void __put_user_bad(void);
 		:"0" (ptr),"d" (x)					\
 		:"cx")
 
-#define put_user(x,ptr)									\
-({	int __ret_pu;									\
-	switch(sizeof (*(ptr))) {							\
-	case 1:  __put_user_x(1,__ret_pu,(__typeof__(*(ptr)))(x),ptr); break;		\
-	case 2:  __put_user_x(2,__ret_pu,(__typeof__(*(ptr)))(x),ptr); break;		\
-	case 4:  __put_user_x(4,__ret_pu,(__typeof__(*(ptr)))(x),ptr); break;		\
-	default: __put_user_x(X,__ret_pu,x,ptr); break;					\
-	}										\
-	__ret_pu;									\
-})
+#define put_user(x,ptr)							\
+  __put_user_check((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
 
 #define __get_user(x,ptr) \
   __get_user_nocheck((x),(ptr),sizeof(*(ptr)))
@@ -157,6 +149,16 @@ extern void __put_user_bad(void);
 	__put_user_size((x),(ptr),(size),__pu_err);	\
 	__pu_err;					\
 })
+
+
+#define __put_user_check(x,ptr,size)			\
+({							\
+	long __pu_err = -EFAULT;					\
+	__typeof__(*(ptr)) *__pu_addr = (ptr);		\
+	if (access_ok(VERIFY_WRITE,__pu_addr,size))	\
+		__put_user_size((x),__pu_addr,(size),__pu_err);	\
+	__pu_err;					\
+})							
 
 #define __put_user_size(x,ptr,size,retval)				\
 do {									\
@@ -229,20 +231,6 @@ do {									\
 		".previous"					\
 		: "=r"(err), ltype (x)				\
 		: "m"(__m(addr)), "i"(-EFAULT), "0"(err))
-
-/*
- * The "xxx_ret" versions return constant specified in third argument, if
- * something bad happens. These macros can be optimized for the
- * case of just returning from the function xxx_ret is used.
- */
-
-#define put_user_ret(x,ptr,ret) ({ if (put_user(x,ptr)) return ret; })
-
-#define get_user_ret(x,ptr,ret) ({ if (get_user(x,ptr)) return ret; })
-
-#define __put_user_ret(x,ptr,ret) ({ if (__put_user(x,ptr)) return ret; })
-
-#define __get_user_ret(x,ptr,ret) ({ if (__get_user(x,ptr)) return ret; })
 
 
 /*
@@ -523,7 +511,7 @@ do {								\
 			"	stosb\n"			\
 			"	popl %%eax\n"			\
 			"	incl %0\n"			\
-			"	jmp 2b\n"			\
+			"	jmp 3b\n"			\
 			".previous\n"				\
 			".section __ex_table,\"a\"\n"		\
 			"	.align 4\n"			\
@@ -581,10 +569,6 @@ __constant_copy_from_user_nocheck(void *to, const void *from, unsigned long n)
 	 __constant_copy_from_user((to),(from),(n)) :	\
 	 __generic_copy_from_user((to),(from),(n)))
 
-#define copy_to_user_ret(to,from,n,retval) ({ if (copy_to_user(to,from,n)) return retval; })
-
-#define copy_from_user_ret(to,from,n,retval) ({ if (copy_from_user(to,from,n)) return retval; })
-
 #define __copy_to_user(to,from,n)			\
 	(__builtin_constant_p(n) ?			\
 	 __constant_copy_to_user_nocheck((to),(from),(n)) :	\
@@ -597,7 +581,8 @@ __constant_copy_from_user_nocheck(void *to, const void *from, unsigned long n)
 
 long strncpy_from_user(char *dst, const char *src, long count);
 long __strncpy_from_user(char *dst, const char *src, long count);
-long strlen_user(const char *str);
+#define strlen_user(str) strnlen_user(str, ~0UL >> 1)
+long strnlen_user(const char *str, long n);
 unsigned long clear_user(void *mem, unsigned long len);
 unsigned long __clear_user(void *mem, unsigned long len);
 

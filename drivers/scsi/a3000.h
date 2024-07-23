@@ -1,4 +1,5 @@
 #ifndef A3000_H
+#define A3000_H
 
 /* $Id: a3000.h,v 1.4 1997/01/19 23:07:10 davem Exp $
  *
@@ -29,11 +30,7 @@ int wd33c93_reset(Scsi_Cmnd *, unsigned int);
 #define CAN_QUEUE 16
 #endif
 
-#ifdef HOSTS_C
-
-extern struct proc_dir_entry proc_scsi_a3000;
-
-#define A3000_SCSI {  proc_dir:		   &proc_scsi_a3000,		\
+#define _A3000_SCSI { proc_name:	   "A3000",			\
 		      proc_info:           NULL,			\
 		      name:                "Amiga 3000 built-in SCSI",	\
 		      detect:              a3000_detect,		\
@@ -46,7 +43,6 @@ extern struct proc_dir_entry proc_scsi_a3000;
 		      sg_tablesize:        SG_ALL,			\
 		      cmd_per_lun:	   CMD_PER_LUN,			\
 		      use_clustering:      ENABLE_CLUSTERING }
-#else
 
 /*
  * if the transfer address ANDed with this results in a non-zero
@@ -97,7 +93,5 @@ typedef struct {
 #define ISTR_OE_INT		(1<<2)
 #define ISTR_FF_FLG		(1<<1)
 #define ISTR_FE_FLG		(1<<0)
-
-#endif /* else def HOSTS_C */
 
 #endif /* A3000_H */

@@ -60,6 +60,7 @@ static char *lancestr = "LANCE";
 #include <asm/dec/machtype.h>
 #include <asm/dec/tc.h>
 #include <asm/dec/kn01.h>
+#include <asm/wbflush.h>
 #include <asm/addrspace.h>
 
 #include <linux/config.h>
@@ -255,6 +256,8 @@ struct lance_private {
 	volatile struct lance_init_block *init_block;
 	volatile unsigned long *dma_ptr_reg;
 
+	spinlock_t	lock;
+
 	int rx_new, tx_new;
 	int rx_old, tx_old;
 
@@ -262,8 +265,9 @@ struct lance_private {
 
 	unsigned short busmaster_regval;
 
-	struct device *dev;	/* Backpointer        */
+	struct net_device *dev;	/* Backpointer        */
 	struct lance_private *next_module;
+	struct timer_list       multicast_timer;
 
 	/* Pointers to the ring buffers as seen from the CPU */
 	char *rx_buf_ptr_cpu[RX_RING_SIZE];
@@ -301,6 +305,7 @@ int dec_lance_debug = 2;
 static inline void writereg(volatile unsigned short *regptr, short value)
 {
 	*regptr = value;
+	wbflush();
 }
 
 /* Load the CSR registers */
@@ -380,6 +385,7 @@ void cp_to_buf(void *to, const void *from, __kernel_size_t len)
 		}
 	}
 
+	wbflush();
 }
 
 void cp_from_buf(void *to, unsigned char *from, int len)
@@ -440,8 +446,7 @@ void cp_from_buf(void *to, unsigned char *from, int len)
 }
 
 /* Setup the Lance Rx and Tx rings */
-/* Sets dev->tbusy */
-static void lance_init_ring(struct device *dev)
+static void lance_init_ring(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_init_block *ib;
@@ -451,11 +456,9 @@ static void lance_init_ring(struct device *dev)
 	ib = (struct lance_init_block *) (dev->mem_start);
 
 	/* Lock out other processes while setting up hardware */
-	dev->tbusy = 1;
+	netif_stop_queue(dev);
 	lp->rx_new = lp->tx_new = 0;
 	lp->rx_old = lp->tx_old = 0;
-
-	ib->mode = 0;
 
 	/* Copy the ethernet address to the lance init block.
 	 * XXX bit 0 of the physical address registers has to be zero
@@ -482,11 +485,6 @@ static void lance_init_ring(struct device *dev)
 	if (ZERO)
 		printk("TX ptr: %8.8x(%8.8x)\n", leptr, libdesc_offset(btx_ring, 0));
 
-	/* Clear the multicast filter */
-	ib->filter[0] = 0;
-	ib->filter[2] = 0;
-	ib->filter[4] = 0;
-	ib->filter[6] = 0;
 	if (ZERO)
 		printk("TX rings:\n");
 
@@ -515,6 +513,7 @@ static void lance_init_ring(struct device *dev)
 		if (i < 3 && ZERO)
 			printk("%d: 0x%8.8x(0x%8.8x)\n", i, leptr, (int) lp->rx_buf_ptr_cpu[i]);
 	}
+	wbflush();
 }
 
 static int init_restart_lance(struct lance_private *lp)
@@ -544,7 +543,7 @@ static int init_restart_lance(struct lance_private *lp)
 	return 0;
 }
 
-static int lance_rx(struct device *dev)
+static int lance_rx(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_init_block *ib;
@@ -626,7 +625,7 @@ static int lance_rx(struct device *dev)
 	return 0;
 }
 
-static int lance_tx(struct device *dev)
+static void lance_tx(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_init_block *ib;
@@ -636,6 +635,8 @@ static int lance_tx(struct device *dev)
 	int status;
 	ib = (struct lance_init_block *) (dev->mem_start);
 	j = lp->tx_old;
+
+	spin_lock(&lp->lock);
 
 	for (i = j; i != lp->tx_new; i = j) {
 		td = &ib->btx_ring[i];
@@ -661,7 +662,7 @@ static int lance_tx(struct device *dev)
 				lance_init_ring(dev);
 				load_csrs(lp);
 				init_restart_lance(lp);
-				return 0;
+				goto out;
 			}
 			/* Buffer errors and underflows turn off the
 			 * transmitter, restart the adapter.
@@ -677,7 +678,7 @@ static int lance_tx(struct device *dev)
 				lance_init_ring(dev);
 				load_csrs(lp);
 				init_restart_lance(lp);
-				return 0;
+				goto out;
 			}
 		} else if ((td->tmd1_bits & LE_T1_POK) == LE_T1_POK) {
 			/*
@@ -698,20 +699,20 @@ static int lance_tx(struct device *dev)
 		j = (j + 1) & TX_RING_MOD_MASK;
 	}
 	lp->tx_old = j;
-	return 0;
+out:
+	if (netif_queue_stopped(dev) &&
+	    TX_BUFFS_AVAIL > 0)
+		netif_wake_queue(dev);
+
+	spin_unlock(&lp->lock);
 }
 
 static void lance_interrupt(const int irq, void *dev_id, struct pt_regs *regs)
 {
-	struct device *dev = (struct device *) dev_id;
+	struct net_device *dev = (struct net_device *) dev_id;
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_regs *ll = lp->ll;
 	int csr0;
-
-	if (dev->interrupt)
-		printk("%s: again\n", dev->name);
-
-	dev->interrupt = 1;
 
 	writereg(&ll->rap, LE_CSR0);
 	csr0 = ll->rdp;
@@ -730,10 +731,6 @@ static void lance_interrupt(const int irq, void *dev_id, struct pt_regs *regs)
 	if (csr0 & LE_C0_TINT)
 		lance_tx(dev);
 
-	if ((TX_BUFFS_AVAIL >= 0) && dev->tbusy) {
-		dev->tbusy = 0;
-		mark_bh(NET_BH);
-	}
 	if (csr0 & LE_C0_BABL)
 		lp->stats.tx_errors++;
 
@@ -752,23 +749,24 @@ static void lance_interrupt(const int irq, void *dev_id, struct pt_regs *regs)
 			 * re-enable LANCE DMA
 			 */
 			*(unsigned long *) (system_base + IOCTL + SSR) |= (1 << 16);
+			wbflush();
 		}
 		writereg(&ll->rdp, LE_C0_STOP);
 
 		lance_init_ring(dev);
 		load_csrs(lp);
 		init_restart_lance(lp);
-		dev->tbusy = 0;
+		netif_wake_queue(dev);
 	}
 	writereg(&ll->rdp, LE_C0_INEA);
 	writereg(&ll->rdp, LE_C0_INEA);
-	dev->interrupt = 0;
 }
 
-struct device *last_dev = 0;
+struct net_device *last_dev = 0;
 
-static int lance_open(struct device *dev)
+static int lance_open(struct net_device *dev)
 {
+	volatile struct lance_init_block *ib = (struct lance_init_block *) (dev->mem_start);
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_regs *ll = lp->ll;
 	int status = 0;
@@ -784,12 +782,20 @@ static int lance_open(struct device *dev)
 	writereg(&ll->rap, LE_CSR0);
 	writereg(&ll->rdp, LE_C0_STOP);
 
+	/* Set mode and clear multicast filter only at device open,
+	 * so that lance_init_ring() called at any error will not
+	 * forget multicast filters.
+	 *
+	 * BTW it is common bug in all lance drivers! --ANK
+	 */
+	ib->mode = 0;
+	ib->filter [0] = 0;
+	ib->filter [2] = 0;
+
 	lance_init_ring(dev);
 	load_csrs(lp);
 
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
+	netif_start_queue(dev);
 
 	status = init_restart_lance(lp);
 
@@ -801,13 +807,13 @@ static int lance_open(struct device *dev)
 	return status;
 }
 
-static int lance_close(struct device *dev)
+static int lance_close(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_regs *ll = lp->ll;
 
-	dev->start = 0;
-	dev->tbusy = 1;
+	netif_stop_queue(dev);
+	del_timer_sync(&lp->multicast_timer);
 
 	/* Stop the card */
 	writereg(&ll->rap, LE_CSR0);
@@ -820,7 +826,7 @@ static int lance_close(struct device *dev)
 	return 0;
 }
 
-static inline int lance_reset(struct device *dev)
+static inline int lance_reset(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_regs *ll = lp->ll;
@@ -833,51 +839,30 @@ static inline int lance_reset(struct device *dev)
 	lance_init_ring(dev);
 	load_csrs(lp);
 	dev->trans_start = jiffies;
-	dev->interrupt = 0;
-	dev->start = 1;
-	dev->tbusy = 0;
 	status = init_restart_lance(lp);
-#ifdef DEBUG_DRIVER
-	printk("Lance restart=%d\n", status);
-#endif
 	return status;
 }
 
-static int lance_start_xmit(struct sk_buff *skb, struct device *dev)
+static void lance_tx_timeout(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_regs *ll = lp->ll;
-	volatile struct lance_init_block *ib;
-	unsigned long flags;
-	int entry, skblen, len;
-	int status = 0;
-	static int outs;
-	ib = (struct lance_init_block *) (dev->mem_start);
 
-	/* Transmitter timeout, serious problems */
-	if (dev->tbusy) {
-		int tickssofar = jiffies - dev->trans_start;
-
-		if (tickssofar < 100) {
-			status = -1;
-		} else {
-			printk("%s: transmit timed out, status %04x, reset\n",
+	printk(KERN_ERR "%s: transmit timed out, status %04x, reset\n",
 			       dev->name, ll->rdp);
 			lance_reset(dev);
-		}
-		return status;
-	}
-	/* Block a timer-based transmit from overlapping. */
-	if (test_and_set_bit(0, (void *) &dev->tbusy) != 0) {
-		printk("Transmitter access conflict.\n");
-		return -1;
-	}
+	netif_wake_queue(dev);
+}
+
+static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
+{
+	struct lance_private *lp = (struct lance_private *) dev->priv;
+	volatile struct lance_regs *ll = lp->ll;
+	volatile struct lance_init_block *ib = (struct lance_init_block *) (dev->mem_start);
+	int entry, skblen, len;
+
 	skblen = skb->len;
-	save_and_cli(flags);
-	if (!TX_BUFFS_AVAIL) {
-		restore_flags(flags);
-		return -1;
-	}
+
 	len = (skblen <= ETH_ZLEN) ? ETH_ZLEN : skblen;
 
 	lp->stats.tx_bytes += len;
@@ -899,27 +884,28 @@ static int lance_start_xmit(struct sk_buff *skb, struct device *dev)
 	ib->btx_ring[entry].tmd1_bits = (LE_T1_POK | LE_T1_OWN);
 	lp->tx_new = (lp->tx_new + 1) & TX_RING_MOD_MASK;
 
-	outs++;
+	if (TX_BUFFS_AVAIL <= 0)
+		netif_stop_queue(dev);
+
 	/* Kick the lance: transmit now */
 	writereg(&ll->rdp, LE_C0_INEA | LE_C0_TDMD);
+
+	spin_unlock_irq(&lp->lock);
+
 	dev->trans_start = jiffies;
 	dev_kfree_skb(skb);
 
-	if (TX_BUFFS_AVAIL)
-		dev->tbusy = 0;
-
-	restore_flags(flags);
-	return status;
+ 	return 0;
 }
 
-static struct net_device_stats *lance_get_stats(struct device *dev)
+static struct net_device_stats *lance_get_stats(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 
 	return &lp->stats;
 }
 
-static void lance_load_multicast(struct device *dev)
+static void lance_load_multicast(struct net_device *dev)
 {
 	volatile struct lance_init_block *ib = (struct lance_init_block *) (dev->mem_start);
 	volatile u16 *mcast_table = (u16 *) & ib->filter;
@@ -970,7 +956,7 @@ static void lance_load_multicast(struct device *dev)
 	return;
 }
 
-static void lance_set_multicast(struct device *dev)
+static void lance_set_multicast(struct net_device *dev)
 {
 	struct lance_private *lp = (struct lance_private *) dev->priv;
 	volatile struct lance_init_block *ib;
@@ -978,11 +964,16 @@ static void lance_set_multicast(struct device *dev)
 
 	ib = (struct lance_init_block *) (dev->mem_start);
 
-	while (dev->tbusy)
-		schedule();
-	set_bit(0, (void *) &dev->tbusy);
-	while (lp->tx_old != lp->tx_new)
-		schedule();
+	if (!netif_running(dev))
+		return;
+
+	if (lp->tx_old != lp->tx_new) {
+		mod_timer(&lp->multicast_timer, jiffies + 4);
+		netif_wake_queue(dev);
+		return;
+	}
+
+	netif_stop_queue(dev);
 
 	writereg(&ll->rap, LE_CSR0);
 	writereg(&ll->rdp, LE_C0_STOP);
@@ -997,15 +988,23 @@ static void lance_set_multicast(struct device *dev)
 	}
 	load_csrs(lp);
 	init_restart_lance(lp);
-	dev->tbusy = 0;
+	netif_wake_queue(dev);
 }
 
-__initfunc(static int dec_lance_init(struct device *dev, const int type))
+static void lance_set_multicast_retry(unsigned long _opaque)
 {
-	static unsigned version_printed = 0;
+	struct net_device *dev = (struct net_device *) _opaque;
+
+	lance_set_multicast(dev);
+}
+
+static int __init dec_lance_init(struct net_device *dev, const int type)
+{
+	static unsigned version_printed;
+	struct net_device *dev;
 	struct lance_private *lp;
 	volatile struct lance_regs *ll;
-	int i;
+	int i, ret;
 	unsigned long esar_base;
 	unsigned char *esar;
 
@@ -1018,20 +1017,13 @@ __initfunc(static int dec_lance_init(struct device *dev, const int type))
 	if (dec_lance_debug && version_printed++ == 0)
 		printk(version);
 
-	if (dev == NULL) {
-		dev = init_etherdev(0, sizeof(struct lance_private) + 8);
-	} else {
-		dev->priv = kmalloc(sizeof(struct lance_private) + 8,
-				    GFP_KERNEL);
-		if (dev->priv == NULL)
-			return -ENOMEM;
-		memset(dev->priv, 0, sizeof(struct lance_private) + 8);
+	dev = init_etherdev(0, sizeof(struct lance_private));
+	if (!dev)
+		return -ENOMEM;
 
-	}
-
-	/* Make certain the data structures used by the LANCE are aligned. */
-	dev->priv = (void *) (((unsigned long) dev->priv + 7) & ~7);
+	/* init_etherdev ensures the data structures used by the LANCE are aligned. */
 	lp = (struct lance_private *) dev->priv;
+	spin_lock_init(&lp->lock);
 
 	switch (type) {
 #ifdef CONFIG_TC
@@ -1071,6 +1063,7 @@ __initfunc(static int dec_lance_init(struct device *dev, const int type))
 		lp->dma_ptr_reg = (unsigned long *) (system_base + IOCTL + LANCE_DMA_P);
 		*(lp->dma_ptr_reg) = PHYSADDR(dev->mem_start) << 3;
 		*(unsigned long *) (system_base + IOCTL + SSR) |= (1 << 16);
+		wbflush();
 
 		break;
 	case PMAD_LANCE:
@@ -1114,8 +1107,8 @@ __initfunc(static int dec_lance_init(struct device *dev, const int type))
 		break;
 	default:
 		printk("declance_init called with unknown type\n");
-		return -ENODEV;
-		break;
+		ret = -ENODEV;
+		goto err_out;
 	}
 
 	ll = (struct lance_regs *) dev->base_addr;
@@ -1126,7 +1119,8 @@ __initfunc(static int dec_lance_init(struct device *dev, const int type))
 	if (esar[0x60] != 0xff && esar[0x64] != 0x00 &&
 	    esar[0x68] != 0x55 && esar[0x6c] != 0xaa) {
 		printk("Ethernet station address prom not found!\n");
-		return -ENODEV;
+		ret = -ENODEV;
+		goto err_out;
 	}
 	/* Check the prom contents */
 	for (i = 0; i < 8; i++) {
@@ -1135,7 +1129,8 @@ __initfunc(static int dec_lance_init(struct device *dev, const int type))
 		    esar[0x3c - i * 4] != esar[0x40 + i * 4]) {
 			printk("Something is wrong with the ethernet "
 			       "station address prom!\n");
-			return -ENODEV;
+			ret = -ENODEV;
+			goto err_out;
 		}
 	}
 
@@ -1161,14 +1156,14 @@ __initfunc(static int dec_lance_init(struct device *dev, const int type))
 
 	printk(" irq = %d\n", dev->irq);
 
-	/* Fill the dev fields */
-
-	dev->open = lance_open;
-	dev->stop = lance_close;
-	dev->hard_start_xmit = lance_start_xmit;
-	dev->get_stats = lance_get_stats;
-	dev->set_multicast_list = lance_set_multicast;
-	dev->dma = 0;
+	lp->dev = dev;
+	dev->open = &lance_open;
+	dev->stop = &lance_close;
+	dev->hard_start_xmit = &lance_start_xmit;
+	dev->tx_timeout = &lance_tx_timeout;
+	dev->watchdog_timeo = 5*HZ;
+	dev->get_stats = &lance_get_stats;
+	dev->set_multicast_list = &lance_set_multicast;
 
 	/* lp->ll is the location of the registers for lance card */
 	lp->ll = ll;
@@ -1179,24 +1174,43 @@ __initfunc(static int dec_lance_init(struct device *dev, const int type))
 	 * specification.
 	 */
 	lp->busmaster_regval = 0;
-	lp->dev = dev;
+
+	dev->dma = 0;
 
 	ether_setup(dev);
-/*
-   #ifdef MODULE
-   dev->ifindex = dev_new_index();
-   lp->next_module = root_lance_dev;
-   root_lance_dev = lp;
-   #endif
- */
+
+	/* We cannot sleep if the chip is busy during a
+	 * multicast list update event, because such events
+	 * can occur from interrupts (ex. IPv6).  So we
+	 * use a timer to try again later when necessary. -DaveM
+	 */
+	init_timer(&lp->multicast_timer);
+	lp->multicast_timer.data = (unsigned long) dev;
+	lp->multicast_timer.function = &lance_set_multicast_retry;
+
+#ifdef MODULE
+	dev->ifindex = dev_new_index();
+	lp->next_module = root_lance_dev;
+	root_lance_dev = lp;
+#endif
 	return 0;
+
+err_out:
+	unregister_netdev(dev);
+	kfree(dev);
+	return ret;
 }
 
 
 /* Find all the lance cards on the system and initialize them */
-__initfunc(int dec_lance_probe(struct device *dev))
+static int __init dec_lance_probe(void)
 {
+	struct net_device *dev = NULL;
 	static int called = 0;
+
+#ifdef MODULE
+	root_lance_dev = NULL;
+#endif
 
 #ifdef CONFIG_TC
 	int slot = -1;
@@ -1232,19 +1246,9 @@ __initfunc(int dec_lance_probe(struct device *dev))
 	return dec_lance_init(dev, type);
 }
 
-/*
-   #ifdef MODULE
-
-   int
-   init_module(void)
-   {
-   root_lance_dev = NULL;
-   return dec_lance_probe(NULL);
-   }
-
-   void
-   cleanup_module(void)
-   {
+static void __exit dec_lance_cleanup(void)
+{
+#ifdef MODULE
    struct lance_private *lp;
 
    while (root_lance_dev) {
@@ -1254,6 +1258,8 @@ __initfunc(int dec_lance_probe(struct device *dev))
    kfree(root_lance_dev->dev);
    root_lance_dev = lp;
    }
-   }
+#endif /* MODULE */
+}
 
-   #endif -* MODULE */
+module_init(dec_lance_probe);
+module_exit(dec_lance_cleanup);

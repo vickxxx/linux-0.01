@@ -89,38 +89,30 @@ struct minix_dir_entry {
 
 #ifdef __KERNEL__
 
-extern struct dentry *minix_lookup(struct inode * dir, struct dentry *dentry);
-extern int minix_create(struct inode * dir, struct dentry *dentry, int mode);
-extern int minix_mkdir(struct inode * dir, struct dentry *dentry, int mode);
-extern int minix_rmdir(struct inode * dir, struct dentry *dentry);
-extern int minix_unlink(struct inode * dir, struct dentry *dentry);
-extern int minix_symlink(struct inode * inode, struct dentry *dentry,
-	const char * symname);
-extern int minix_link(struct dentry * old_dentry, struct inode * dir, struct dentry *dentry);
-extern int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, int rdev);
-extern int minix_rename(struct inode * old_dir, struct dentry *old_dentry,
-			struct inode * new_dir, struct dentry *new_dentry);
-extern struct inode * minix_new_inode(const struct inode * dir);
+extern struct inode * minix_new_inode(const struct inode * dir, int * error);
 extern void minix_free_inode(struct inode * inode);
 extern unsigned long minix_count_free_inodes(struct super_block *sb);
-extern int minix_new_block(struct super_block * sb);
-extern void minix_free_block(struct super_block * sb, int block);
+extern int minix_new_block(struct inode * inode);
+extern void minix_free_block(struct inode * inode, int block);
 extern unsigned long minix_count_free_blocks(struct super_block *sb);
 
-extern int minix_bmap(struct inode *,int);
-
 extern struct buffer_head * minix_getblk(struct inode *, int, int);
-extern int minix_get_block(struct inode *, long, struct buffer_head *, int);
 extern struct buffer_head * minix_bread(struct inode *, int, int);
 
+extern void V1_minix_truncate(struct inode *);
+extern void V2_minix_truncate(struct inode *);
 extern void minix_truncate(struct inode *);
-extern int init_minix_fs(void);
 extern int minix_sync_inode(struct inode *);
-extern int minix_sync_file(struct file *, struct dentry *);
+extern int V1_minix_sync_file(struct inode *);
+extern int V2_minix_sync_file(struct inode *);
+extern int V1_minix_get_block(struct inode *, long, struct buffer_head *, int);
+extern int V2_minix_get_block(struct inode *, long, struct buffer_head *, int);
 
+extern struct address_space_operations minix_aops;
 extern struct inode_operations minix_file_inode_operations;
 extern struct inode_operations minix_dir_inode_operations;
-extern struct inode_operations minix_symlink_inode_operations;
+extern struct file_operations minix_file_operations;
+extern struct file_operations minix_dir_operations;
 extern struct dentry_operations minix_dentry_operations;
 
 #endif /* __KERNEL__ */

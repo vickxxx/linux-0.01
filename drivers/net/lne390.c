@@ -26,10 +26,13 @@
 	You can try <http://www.mylex.com> if you want more info, as I've
 	never even seen one of these cards.  :)
 
+	Arnaldo Carvalho de Melo <acme@conectiva.com.br> - 2000/09/01
+	- get rid of check_region
+	- no need to check if dev == NULL in lne390_probe1
 */
 
 static const char *version =
-	"lne390.c: Driver revision v0.99, 12/05/98\n";
+	"lne390.c: Driver revision v0.99.1, 01/09/2000\n";
 
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -46,17 +49,17 @@ static const char *version =
 #include <linux/etherdevice.h>
 #include "8390.h"
 
-int lne390_probe(struct device *dev);
-int lne390_probe1(struct device *dev, int ioaddr);
+int lne390_probe(struct net_device *dev);
+static int lne390_probe1(struct net_device *dev, int ioaddr);
 
-static int lne390_open(struct device *dev);
-static int lne390_close(struct device *dev);
+static int lne390_open(struct net_device *dev);
+static int lne390_close(struct net_device *dev);
 
-static void lne390_reset_8390(struct device *dev);
+static void lne390_reset_8390(struct net_device *dev);
 
-static void lne390_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page);
-static void lne390_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset);
-static void lne390_block_output(struct device *dev, int count, const unsigned char *buf, const int start_page);
+static void lne390_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page);
+static void lne390_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset);
+static void lne390_block_output(struct net_device *dev, int count, const unsigned char *buf, const int start_page);
 
 #define LNE390_START_PG		0x00    /* First page of TX buffer	*/
 #define LNE390_STOP_PG		0x80    /* Last page +1 of RX ring	*/
@@ -100,36 +103,46 @@ static unsigned int shmem_mapB[] __initdata = {0xff, 0xfe, 0x0e, 0xfff, 0xffe, 0
  *	PROM for a match against the value assigned to Mylex.
  */
 
-__initfunc(int lne390_probe(struct device *dev))
+int __init lne390_probe(struct net_device *dev)
 {
 	unsigned short ioaddr = dev->base_addr;
+	int ret;
 
-	if (ioaddr > 0x1ff)		/* Check a single specified location. */
-		return lne390_probe1(dev, ioaddr);
+	SET_MODULE_OWNER(dev);
+
+	if (ioaddr > 0x1ff) {		/* Check a single specified location. */
+		if (!request_region(ioaddr, LNE390_IO_EXTENT, dev->name))
+			return -EBUSY;
+		ret = lne390_probe1(dev, ioaddr);
+		if (ret)
+			release_region(ioaddr, LNE390_IO_EXTENT);
+		return ret;
+	}
 	else if (ioaddr > 0)		/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
 	if (!EISA_bus) {
 #if LNE390_DEBUG & LNE390_D_PROBE
 		printk("lne390-debug: Not an EISA bus. Not probing high ports.\n");
 #endif
-		return ENXIO;
+		return -ENXIO;
 	}
 
 	/* EISA spec allows for up to 16 slots, but 8 is typical. */
 	for (ioaddr = 0x1000; ioaddr < 0x9000; ioaddr += 0x1000) {
-		if (check_region(ioaddr , LNE390_IO_EXTENT))
+		if (!request_region(ioaddr, LNE390_IO_EXTENT, dev->name))
 			continue;
 		if (lne390_probe1(dev, ioaddr) == 0)
 			return 0;
+		release_region(ioaddr, LNE390_IO_EXTENT);
 	}
 
-	return ENODEV;
+	return -ENODEV;
 }
 
-__initfunc(int lne390_probe1(struct device *dev, int ioaddr))
+static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 {
-	int i, revision;
+	int i, revision, ret;
 	unsigned long eisa_id;
 
 	if (inb_p(ioaddr + LNE390_ID_PORT) == 0xff) return -ENODEV;
@@ -144,7 +157,7 @@ __initfunc(int lne390_probe1(struct device *dev, int ioaddr))
 /*	Check the EISA ID of the card. */
 	eisa_id = inl(ioaddr + LNE390_ID_PORT);
 	if ((eisa_id != LNE390_ID0) && (eisa_id != LNE390_ID1)) {
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	revision = (eisa_id >> 24) & 0x01;	/* 0 = rev A, 1 rev B */
@@ -158,19 +171,9 @@ __initfunc(int lne390_probe1(struct device *dev, int ioaddr))
 		for(i = 0; i < ETHER_ADDR_LEN; i++)
 			printk(" %02x", inb(ioaddr + LNE390_SA_PROM + i));
 		printk(" (invalid prefix).\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 #endif
-
-	if (load_8390_module("lne390.c"))
-		return -ENOSYS;
-
-	/* We should have a "dev" from Space.c or the static module table. */
-	if (dev == NULL) {
-		printk("lne390.c: Passed a NULL device.\n");
-		dev = init_etherdev(0, 0);
-	}
-
 	/* Allocate dev->priv and fill in 8390 specific dev fields. */
 	if (ethdev_init(dev)) {
 		printk ("lne390.c: unable to allocate memory for dev->priv!\n");
@@ -194,11 +197,11 @@ __initfunc(int lne390_probe1(struct device *dev, int ioaddr))
 	}
 	printk(" IRQ %d,", dev->irq);
 
-	if (request_irq(dev->irq, ei_interrupt, 0, "lne390", dev)) {
+	if ((ret = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev))) {
 		printk (" unable to get IRQ %d.\n", dev->irq);
 		kfree(dev->priv);
 		dev->priv = NULL;
-		return EAGAIN;
+		return ret;
 	}
 
 	if (dev->mem_start == 0) {
@@ -228,20 +231,16 @@ __initfunc(int lne390_probe1(struct device *dev, int ioaddr))
 			printk(KERN_CRIT "lne390.c: Use EISA SCU to set card memory below 1MB,\n");
 			printk(KERN_CRIT "lne390.c: or to an address above 0x%lx.\n", virt_to_bus(high_memory));
 			printk(KERN_CRIT "lne390.c: Driver NOT installed.\n");
-			free_irq(dev->irq, dev);
-			kfree(dev->priv);
-			dev->priv = NULL;
-			return EINVAL;
+			ret = -EINVAL;
+			goto cleanup;
 		}
 		dev->mem_start = (unsigned long)ioremap(dev->mem_start, LNE390_STOP_PG*0x100);
 		if (dev->mem_start == 0) {
 			printk(KERN_ERR "lne390.c: Unable to remap card memory above 1MB !!\n");
 			printk(KERN_ERR "lne390.c: Try using EISA SCU to set memory below 1MB.\n");
 			printk(KERN_ERR "lne390.c: Driver NOT installed.\n");
-			free_irq(dev->irq, dev);
-			kfree(dev->priv);
-			dev->priv = NULL;
-			return EAGAIN;
+			ret = -EAGAIN;
+			goto cleanup;
 		}
 		ei_status.reg0 = 1;	/* Use as remap flag */
 		printk("lne390.c: remapped %dkB card memory to virtual address %#lx\n",
@@ -254,7 +253,6 @@ __initfunc(int lne390_probe1(struct device *dev, int ioaddr))
 
 	/* The 8390 offset is zero for the LNE390 */
 	dev->base_addr = ioaddr;
-	request_region(dev->base_addr, LNE390_IO_EXTENT, "lne390");
 
 	ei_status.name = "LNE390";
 	ei_status.tx_start_page = LNE390_START_PG;
@@ -274,6 +272,11 @@ __initfunc(int lne390_probe1(struct device *dev, int ioaddr))
 	dev->stop = &lne390_close;
 	NS8390_init(dev, 0);
 	return 0;
+cleanup:
+	free_irq(dev->irq, dev);
+	kfree(dev->priv);
+	dev->priv = NULL;
+	return ret;
 }
 
 /*
@@ -281,7 +284,7 @@ __initfunc(int lne390_probe1(struct device *dev, int ioaddr))
  *	file, this just toggles the "Board Enable" bits (bit 2 and 0).
  */
 
-static void lne390_reset_8390(struct device *dev)
+static void lne390_reset_8390(struct net_device *dev)
 {
 	unsigned short ioaddr = dev->base_addr;
 
@@ -313,10 +316,10 @@ static void lne390_reset_8390(struct device *dev)
  */
 
 static void
-lne390_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+lne390_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 	unsigned long hdr_start = dev->mem_start + ((ring_page - LNE390_START_PG)<<8);
-	memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
 	hdr->count = (hdr->count + 3) & ~3;     /* Round up allocation. */
 }
 
@@ -326,7 +329,7 @@ lne390_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page
  *	be rounded up to a doubleword value via lne390_get_8390_hdr() above.
  */
 
-static void lne390_block_input(struct device *dev, int count, struct sk_buff *skb,
+static void lne390_block_input(struct net_device *dev, int count, struct sk_buff *skb,
 						  int ring_offset)
 {
 	unsigned long xfer_start = dev->mem_start + ring_offset - (LNE390_START_PG<<8);
@@ -334,58 +337,46 @@ static void lne390_block_input(struct device *dev, int count, struct sk_buff *sk
 	if (xfer_start + count > dev->rmem_end) {
 		/* Packet wraps over end of ring buffer. */
 		int semi_count = dev->rmem_end - xfer_start;
-		memcpy_fromio(skb->data, xfer_start, semi_count);
+		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+		isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
 	} else {
 		/* Packet is in one chunk. */
-		memcpy_fromio(skb->data, xfer_start, count);
+		isa_memcpy_fromio(skb->data, xfer_start, count);
 	}
 }
 
-static void lne390_block_output(struct device *dev, int count,
+static void lne390_block_output(struct net_device *dev, int count,
 				const unsigned char *buf, int start_page)
 {
 	unsigned long shmem = dev->mem_start + ((start_page - LNE390_START_PG)<<8);
 
 	count = (count + 3) & ~3;     /* Round up to doubleword */
-	memcpy_toio(shmem, buf, count);
+	isa_memcpy_toio(shmem, buf, count);
 }
 
-static int lne390_open(struct device *dev)
+static int lne390_open(struct net_device *dev)
 {
 	ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
-static int lne390_close(struct device *dev)
+static int lne390_close(struct net_device *dev)
 {
 
 	if (ei_debug > 1)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 
 	ei_close(dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 #ifdef MODULE
 #define MAX_LNE_CARDS	4	/* Max number of LNE390 cards per module */
-#define NAMELEN		8	/* # of chars for storing dev->name */
-static char namelist[NAMELEN * MAX_LNE_CARDS] = { 0, };
-static struct device dev_lne[MAX_LNE_CARDS] = {
-	{
-		NULL,		/* assign a chunk of namelist[] below */
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
-
-static int io[MAX_LNE_CARDS] = { 0, };
-static int irq[MAX_LNE_CARDS]  = { 0, };
-static int mem[MAX_LNE_CARDS] = { 0, };
+static struct net_device dev_lne[MAX_LNE_CARDS];
+static int io[MAX_LNE_CARDS];
+static int irq[MAX_LNE_CARDS];
+static int mem[MAX_LNE_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_LNE_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_LNE_CARDS) "i");
@@ -396,8 +387,7 @@ int init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_LNE_CARDS; this_dev++) {
-		struct device *dev = &dev_lne[this_dev];
-		dev->name = namelist+(NAMELEN*this_dev);
+		struct net_device *dev = &dev_lne[this_dev];
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->mem_start = mem[this_dev];
@@ -407,14 +397,12 @@ int init_module(void)
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "lne390.c: No LNE390 card found (i/o = 0x%x).\n", io[this_dev]);
 			if (found != 0) {	/* Got at least one. */
-				lock_8390_module();
 				return 0;
 			}
 			return -ENXIO;
 		}
 		found++;
 	}
-	lock_8390_module();
 	return 0;
 }
 
@@ -423,7 +411,7 @@ void cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_LNE_CARDS; this_dev++) {
-		struct device *dev = &dev_lne[this_dev];
+		struct net_device *dev = &dev_lne[this_dev];
 		if (dev->priv != NULL) {
 			void *priv = dev->priv;
 			free_irq(dev->irq, dev);
@@ -434,7 +422,6 @@ void cleanup_module(void)
 			kfree(priv);
 		}
 	}
-	unlock_8390_module();
 }
 #endif /* MODULE */
 

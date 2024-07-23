@@ -138,6 +138,7 @@
 
 static const char *version = "ewrk3.c:v0.43 96/8/16 davies@maniac.ultranet.com\n";
 
+#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/kernel.h>
@@ -288,36 +289,37 @@ struct ewrk3_private {
 /*
    ** Public Functions
  */
-static int ewrk3_open(struct device *dev);
-static int ewrk3_queue_pkt(struct sk_buff *skb, struct device *dev);
+static int ewrk3_open(struct net_device *dev);
+static int ewrk3_queue_pkt(struct sk_buff *skb, struct net_device *dev);
 static void ewrk3_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static int ewrk3_close(struct device *dev);
-static struct net_device_stats *ewrk3_get_stats(struct device *dev);
-static void set_multicast_list(struct device *dev);
-static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd);
+static int ewrk3_close(struct net_device *dev);
+static struct net_device_stats *ewrk3_get_stats(struct net_device *dev);
+static void set_multicast_list(struct net_device *dev);
+static int ewrk3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 
 /*
    ** Private functions
  */
-static int ewrk3_hw_init(struct device *dev, u_long iobase);
-static void ewrk3_init(struct device *dev);
-static int ewrk3_rx(struct device *dev);
-static int ewrk3_tx(struct device *dev);
+static int ewrk3_hw_init(struct net_device *dev, u_long iobase);
+static void ewrk3_init(struct net_device *dev);
+static int ewrk3_rx(struct net_device *dev);
+static int ewrk3_tx(struct net_device *dev);
+static void ewrk3_timeout(struct net_device *dev);
 
 static void EthwrkSignature(char *name, char *eeprom_image);
 static int DevicePresent(u_long iobase);
-static void SetMulticastFilter(struct device *dev);
+static void SetMulticastFilter(struct net_device *dev);
 static int EISA_signature(char *name, s32 eisa_id);
 
 static int Read_EEPROM(u_long iobase, u_char eaddr);
 static int Write_EEPROM(short data, u_long iobase, u_char eaddr);
-static u_char get_hw_addr(struct device *dev, u_char * eeprom_image, char chipType);
+static u_char get_hw_addr(struct net_device *dev, u_char * eeprom_image, char chipType);
 
-static void isa_probe(struct device *dev, u_long iobase);
-static void eisa_probe(struct device *dev, u_long iobase);
-static struct device *alloc_device(struct device *dev, u_long iobase);
+static void isa_probe(struct net_device *dev, u_long iobase);
+static void eisa_probe(struct net_device *dev, u_long iobase);
+static struct net_device *alloc_device(struct net_device *dev, u_long iobase);
 static int ewrk3_dev_index(char *s);
-static struct device *insert_device(struct device *dev, u_long iobase, int (*init) (struct device *));
+static struct net_device *insert_device(struct net_device *dev, u_long iobase, int (*init) (struct net_device *));
 
 
 #ifdef MODULE
@@ -342,14 +344,13 @@ static int num_ewrk3s = 0, num_eth = 0;
     outb(EEPROM_INIT, EWRK3_IOPR);\
     mdelay(1);\
 }
-
 
-
-
-__initfunc(int ewrk3_probe(struct device *dev))
+int __init ewrk3_probe(struct net_device *dev)
 {
 	int tmp = num_ewrk3s, status = -ENODEV;
 	u_long iobase = dev->base_addr;
+
+	SET_MODULE_OWNER(dev);
 
 	if ((iobase == 0) && loading_module) {
 		printk("Autoprobing is not supported when loading a module based driver.\n");
@@ -378,8 +379,8 @@ __initfunc(int ewrk3_probe(struct device *dev))
 	return status;
 }
 
-__initfunc(static int
-	   ewrk3_hw_init(struct device *dev, u_long iobase))
+static int __init 
+ewrk3_hw_init(struct net_device *dev, u_long iobase)
 {
 	struct ewrk3_private *lp;
 	int i, status = 0;
@@ -604,12 +605,14 @@ __initfunc(static int
 				printk(version);
 			}
 			/* The EWRK3-specific entries in the device structure. */
-			dev->open = &ewrk3_open;
-			dev->hard_start_xmit = &ewrk3_queue_pkt;
-			dev->stop = &ewrk3_close;
-			dev->get_stats = &ewrk3_get_stats;
-			dev->set_multicast_list = &set_multicast_list;
-			dev->do_ioctl = &ewrk3_ioctl;
+			dev->open = ewrk3_open;
+			dev->hard_start_xmit = ewrk3_queue_pkt;
+			dev->stop = ewrk3_close;
+			dev->get_stats = ewrk3_get_stats;
+			dev->set_multicast_list = set_multicast_list;
+			dev->do_ioctl = ewrk3_ioctl;
+			dev->tx_timeout = ewrk3_timeout;
+			dev->watchdog_timeo = QUEUE_PKT_TIMEOUT;
 
 			dev->mem_start = 0;
 
@@ -619,12 +622,11 @@ __initfunc(static int
 	} else {
 		status = -ENXIO;
 	}
-
 	return status;
 }
 
 
-static int ewrk3_open(struct device *dev)
+static int ewrk3_open(struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	u_long iobase = dev->base_addr;
@@ -667,10 +669,7 @@ static int ewrk3_open(struct device *dev)
 				printk("  cmr:  0x%02x\n", inb(EWRK3_CMR));
 				printk("  fmqc: 0x%02x\n", inb(EWRK3_FMQC));
 			}
-			dev->tbusy = 0;
-			dev->start = 1;
-			dev->interrupt = UNMASK_INTERRUPTS;
-
+			netif_start_queue(dev);
 			/*
 			   ** Unmask EWRK3 board interrupts
 			 */
@@ -679,13 +678,10 @@ static int ewrk3_open(struct device *dev)
 
 		}
 	} else {
-		dev->start = 0;
-		dev->tbusy = 1;
-		printk("%s: ewrk3 available for hard strapped set up only.\n", dev->name);
-		printk("      Run the 'ewrk3setup' utility or remove the hard straps.\n");
+		printk(KERN_ERR "%s: ewrk3 available for hard strapped set up only.\n", dev->name);
+		printk(KERN_ERR "      Run the 'ewrk3setup' utility or remove the hard straps.\n");
+		return -EINVAL;
 	}
-
-	MOD_INC_USE_COUNT;
 
 	return status;
 }
@@ -693,7 +689,7 @@ static int ewrk3_open(struct device *dev)
 /*
    ** Initialize the EtherWORKS 3 operating conditions
  */
-static void ewrk3_init(struct device *dev)
+static void ewrk3_init(struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	u_char csr, page;
@@ -725,149 +721,149 @@ static void ewrk3_init(struct device *dev)
 }
 
 /*
+ *  Transmit timeout
+ */
+ 
+static void ewrk3_timeout(struct net_device *dev)
+{
+	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
+	u_char icr, csr;
+	u_long iobase = dev->base_addr;
+	
+	if (!lp->hard_strapped) 
+	{
+		printk(KERN_WARNING"%s: transmit timed/locked out, status %04x, resetting.\n",
+		       dev->name, inb(EWRK3_CSR));
+
+		/*
+		   ** Mask all board interrupts
+		 */
+		DISABLE_IRQs;
+
+		/*
+		   ** Stop the TX and RX...
+		 */
+		STOP_EWRK3;
+
+		ewrk3_init(dev);
+
+		/*
+		   ** Unmask EWRK3 board interrupts
+		 */
+		ENABLE_IRQs;
+
+		dev->trans_start = jiffies;
+		netif_wake_queue(dev);
+	}
+}
+
+/*
    ** Writes a socket buffer to the free page queue
  */
-static int ewrk3_queue_pkt(struct sk_buff *skb, struct device *dev)
+static int ewrk3_queue_pkt(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	u_long iobase = dev->base_addr;
 	int status = 0;
-	u_char icr, csr;
+	u_char icr;
 
-	/* Transmitter timeout, serious problems. */
-	if (dev->tbusy || lp->lock) {
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < QUEUE_PKT_TIMEOUT) {
-			status = -1;
-		} else if (!lp->hard_strapped) {
-			printk("%s: transmit timed/locked out, status %04x, resetting.\n",
-			       dev->name, inb(EWRK3_CSR));
+	netif_stop_queue(dev);
+#ifdef CONFIG_SMP
+#error "This needs spinlocks"
+#endif
+	DISABLE_IRQs;	/* So that the page # remains correct */
 
+	/*
+	   ** Get a free page from the FMQ when resources are available
+	 */
+	if (inb(EWRK3_FMQC) > 0) 
+	{
+		u_long buf = 0;
+		u_char page;
+
+		if ((page = inb(EWRK3_FMQ)) < lp->mPage) {
 			/*
-			   ** Mask all board interrupts
+			   ** Set up shared memory window and pointer into the window
 			 */
-			DISABLE_IRQs;
-
-			/*
-			   ** Stop the TX and RX...
-			 */
-			STOP_EWRK3;
-
-			ewrk3_init(dev);
-
-			/*
-			   ** Unmask EWRK3 board interrupts
-			 */
-			ENABLE_IRQs;
-
-			dev->tbusy = 0;
-			dev->trans_start = jiffies;
-		}
-	} else if (skb->len > 0) {
-
-		/*
-		   ** Block a timer-based transmit from overlapping.  This could better be
-		   ** done with atomic_swap(1, dev->tbusy), but set_bit() works as well.
-		 */
-		if (test_and_set_bit(0, (void *) &dev->tbusy) != 0)
-			printk("%s: Transmitter access conflict.\n", dev->name);
-
-		DISABLE_IRQs;	/* So that the page # remains correct */
-
-		/*
-		   ** Get a free page from the FMQ when resources are available
-		 */
-		if (inb(EWRK3_FMQC) > 0) {
-			u_long buf = 0;
-			u_char page;
-
-			if ((page = inb(EWRK3_FMQ)) < lp->mPage) {
-				/*
-				   ** Set up shared memory window and pointer into the window
-				 */
-				while (test_and_set_bit(0, (void *) &lp->lock) != 0);	/* Wait for lock to free */
-				if (lp->shmem_length == IO_ONLY) {
-					outb(page, EWRK3_IOPR);
-				} else if (lp->shmem_length == SHMEM_2K) {
-					buf = lp->shmem_base;
-					outb(page, EWRK3_MPR);
-				} else if (lp->shmem_length == SHMEM_32K) {
-					buf = ((((short) page << 11) & 0x7800) + lp->shmem_base);
-					outb((page >> 4), EWRK3_MPR);
-				} else if (lp->shmem_length == SHMEM_64K) {
-					buf = ((((short) page << 11) & 0xf800) + lp->shmem_base);
-					outb((page >> 5), EWRK3_MPR);
-				} else {
-					status = -1;
-					printk("%s: Oops - your private data area is hosed!\n", dev->name);
-				}
-
-				if (!status) {
-
-					/*
-					   ** Set up the buffer control structures and copy the data from
-					   ** the socket buffer to the shared memory .
-					 */
-
-					if (lp->shmem_length == IO_ONLY) {
-						int i;
-						u_char *p = skb->data;
-
-						outb((char) (TCR_QMODE | TCR_PAD | TCR_IFC), EWRK3_DATA);
-						outb((char) (skb->len & 0xff), EWRK3_DATA);
-						outb((char) ((skb->len >> 8) & 0xff), EWRK3_DATA);
-						outb((char) 0x04, EWRK3_DATA);
-						for (i = 0; i < skb->len; i++) {
-							outb(*p++, EWRK3_DATA);
-						}
-						outb(page, EWRK3_TQ);	/* Start sending pkt */
-					} else {
-						writeb((char) (TCR_QMODE | TCR_PAD | TCR_IFC), (char *) buf);	/* ctrl byte */
-						buf += 1;
-						writeb((char) (skb->len & 0xff), (char *) buf);		/* length (16 bit xfer) */
-						buf += 1;
-						if (lp->txc) {
-							writeb((char) (((skb->len >> 8) & 0xff) | XCT), (char *) buf);
-							buf += 1;
-							writeb(0x04, (char *) buf);	/* index byte */
-							buf += 1;
-							writeb(0x00, (char *) (buf + skb->len));	/* Write the XCT flag */
-							memcpy_toio(buf, skb->data, PRELOAD);	/* Write PRELOAD bytes */
-							outb(page, EWRK3_TQ);	/* Start sending pkt */
-							memcpy_toio(buf + PRELOAD, skb->data + PRELOAD, skb->len - PRELOAD);
-							writeb(0xff, (char *) (buf + skb->len));	/* Write the XCT flag */
-						} else {
-							writeb((char) ((skb->len >> 8) & 0xff), (char *) buf);
-							buf += 1;
-							writeb(0x04, (char *) buf);	/* index byte */
-							buf += 1;
-							memcpy_toio((char *) buf, skb->data, skb->len);		/* Write data bytes */
-							outb(page, EWRK3_TQ);	/* Start sending pkt */
-						}
-					}
-
-					dev->trans_start = jiffies;
-					dev_kfree_skb(skb);
-
-				} else {	/* return unused page to the free memory queue */
-					outb(page, EWRK3_FMQ);
-				}
-				lp->lock = 0;	/* unlock the page register */
+			while (test_and_set_bit(0, (void *) &lp->lock) != 0);	/* Wait for lock to free */
+			if (lp->shmem_length == IO_ONLY) {
+				outb(page, EWRK3_IOPR);
+			} else if (lp->shmem_length == SHMEM_2K) {
+				buf = lp->shmem_base;
+				outb(page, EWRK3_MPR);
+			} else if (lp->shmem_length == SHMEM_32K) {
+				buf = ((((short) page << 11) & 0x7800) + lp->shmem_base);
+				outb((page >> 4), EWRK3_MPR);
+			} else if (lp->shmem_length == SHMEM_64K) {
+				buf = ((((short) page << 11) & 0xf800) + lp->shmem_base);
+				outb((page >> 5), EWRK3_MPR);
 			} else {
-				printk("ewrk3_queue_pkt(): Invalid free memory page (%d).\n",
-				       (u_char) page);
+				status = -1;
+				printk(KERN_ERR "%s: Oops - your private data area is hosed!\n", dev->name);
 			}
-		} else {
-			printk("ewrk3_queue_pkt(): No free resources...\n");
-			printk("ewrk3_queue_pkt(): CSR: %02x ICR: %02x FMQC: %02x\n", inb(EWRK3_CSR), inb(EWRK3_ICR), inb(EWRK3_FMQC));
-		}
 
-		/* Check for free resources: clear 'tbusy' if there are some */
-		if (inb(EWRK3_FMQC) > 0) {
-			dev->tbusy = 0;
+			if (!status) {
+				/*
+				   ** Set up the buffer control structures and copy the data from
+				   ** the socket buffer to the shared memory .
+				 */
+					if (lp->shmem_length == IO_ONLY) {
+					int i;
+					u_char *p = skb->data;
+						outb((char) (TCR_QMODE | TCR_PAD | TCR_IFC), EWRK3_DATA);
+					outb((char) (skb->len & 0xff), EWRK3_DATA);
+					outb((char) ((skb->len >> 8) & 0xff), EWRK3_DATA);
+					outb((char) 0x04, EWRK3_DATA);
+					for (i = 0; i < skb->len; i++) {
+						outb(*p++, EWRK3_DATA);
+					}
+					outb(page, EWRK3_TQ);	/* Start sending pkt */
+				} else {
+					writeb((char) (TCR_QMODE | TCR_PAD | TCR_IFC), (char *) buf);	/* ctrl byte */
+					buf += 1;
+					writeb((char) (skb->len & 0xff), (char *) buf);		/* length (16 bit xfer) */
+					buf += 1;
+					if (lp->txc) {
+						writeb((char) (((skb->len >> 8) & 0xff) | XCT), (char *) buf);
+						buf += 1;
+						writeb(0x04, (char *) buf);	/* index byte */
+						buf += 1;
+						writeb(0x00, (char *) (buf + skb->len));	/* Write the XCT flag */
+						isa_memcpy_toio(buf, skb->data, PRELOAD);	/* Write PRELOAD bytes */
+						outb(page, EWRK3_TQ);	/* Start sending pkt */
+						isa_memcpy_toio(buf + PRELOAD, skb->data + PRELOAD, skb->len - PRELOAD);
+						writeb(0xff, (char *) (buf + skb->len));	/* Write the XCT flag */
+					} else {
+						writeb((char) ((skb->len >> 8) & 0xff), (char *) buf);
+						buf += 1;
+						writeb(0x04, (char *) buf);	/* index byte */
+						buf += 1;
+						isa_memcpy_toio(buf, skb->data, skb->len);		/* Write data bytes */
+						outb(page, EWRK3_TQ);	/* Start sending pkt */
+					}
+				}
+
+				lp->stats.tx_bytes += skb->len;
+				dev->trans_start = jiffies;
+				dev_kfree_skb(skb);
+			} else {	/* return unused page to the free memory queue */
+				outb(page, EWRK3_FMQ);
+			}
+			lp->lock = 0;	/* unlock the page register */
+		} else {
+			printk("ewrk3_queue_pkt(): Invalid free memory page (%d).\n",
+			       (u_char) page);
 		}
-		ENABLE_IRQs;
+	} else {
+		printk(KERN_WARNING "%s: ewrk3_queue_pkt(): No free resources...\n", dev->name);
+		printk(KERN_WARNING "%s: ewrk3_queue_pkt(): CSR: %02x ICR: %02x FMQC: %02x\n", dev->name, inb(EWRK3_CSR), inb(EWRK3_ICR), inb(EWRK3_FMQC));
 	}
+
+	/* Check for free resources: clear 'tbusy' if there are some */
+	if (inb(EWRK3_FMQC) > 0) {
+		netif_wake_queue(dev);
+	}
+	ENABLE_IRQs;
 	return status;
 }
 
@@ -876,68 +872,54 @@ static int ewrk3_queue_pkt(struct sk_buff *skb, struct device *dev)
  */
 static void ewrk3_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	struct device *dev = dev_id;
+	struct net_device *dev = dev_id;
 	struct ewrk3_private *lp;
 	u_long iobase;
 	u_char icr, cr, csr;
 
-	if (dev == NULL) {
-		printk("ewrk3_interrupt(): irq %d for unknown device.\n", irq);
+	lp = (struct ewrk3_private *) dev->priv;
+	iobase = dev->base_addr;
+
+	/* get the interrupt information */
+	csr = inb(EWRK3_CSR);
+
+	/*
+	 ** Mask the EWRK3 board interrupts and turn on the LED
+	 */
+	DISABLE_IRQs;
+
+	cr = inb(EWRK3_CR);
+	cr |= CR_LED;
+	outb(cr, EWRK3_CR);
+
+	if (csr & CSR_RNE)	/* Rx interrupt (packet[s] arrived) */
+		ewrk3_rx(dev);
+
+	if (csr & CSR_TNE)	/* Tx interrupt (packet sent) */
+		ewrk3_tx(dev);
+
+	/*
+	 ** Now deal with the TX/RX disable flags. These are set when there
+	 ** are no more resources. If resources free up then enable these
+	 ** interrupts, otherwise mask them - failure to do this will result
+	 ** in the system hanging in an interrupt loop.
+	 */
+	if (inb(EWRK3_FMQC)) {	/* any resources available? */
+		lp->irq_mask |= ICR_TXDM | ICR_RXDM;	/* enable the interrupt source */
+		csr &= ~(CSR_TXD | CSR_RXD);	/* ensure restart of a stalled TX or RX */
+		outb(csr, EWRK3_CSR);
+		netif_wake_queue(dev);
 	} else {
-		lp = (struct ewrk3_private *) dev->priv;
-		iobase = dev->base_addr;
-
-		if (dev->interrupt)
-			printk("%s: Re-entering the interrupt handler.\n", dev->name);
-
-		dev->interrupt = MASK_INTERRUPTS;
-
-		/* get the interrupt information */
-		csr = inb(EWRK3_CSR);
-
-		/*
-		   ** Mask the EWRK3 board interrupts and turn on the LED
-		 */
-		DISABLE_IRQs;
-
-		cr = inb(EWRK3_CR);
-		cr |= CR_LED;
-		outb(cr, EWRK3_CR);
-
-		if (csr & CSR_RNE)	/* Rx interrupt (packet[s] arrived) */
-			ewrk3_rx(dev);
-
-		if (csr & CSR_TNE)	/* Tx interrupt (packet sent) */
-			ewrk3_tx(dev);
-
-		/*
-		   ** Now deal with the TX/RX disable flags. These are set when there
-		   ** are no more resources. If resources free up then enable these
-		   ** interrupts, otherwise mask them - failure to do this will result
-		   ** in the system hanging in an interrupt loop.
-		 */
-		if (inb(EWRK3_FMQC)) {	/* any resources available? */
-			lp->irq_mask |= ICR_TXDM | ICR_RXDM;	/* enable the interrupt source */
-			csr &= ~(CSR_TXD | CSR_RXD);	/* ensure restart of a stalled TX or RX */
-			outb(csr, EWRK3_CSR);
-			dev->tbusy = 0;		/* clear TX busy flag */
-			mark_bh(NET_BH);
-		} else {
-			lp->irq_mask &= ~(ICR_TXDM | ICR_RXDM);		/* disable the interrupt source */
-		}
-
-		/* Unmask the EWRK3 board interrupts and turn off the LED */
-		cr &= ~CR_LED;
-		outb(cr, EWRK3_CR);
-
-		dev->interrupt = UNMASK_INTERRUPTS;
-		ENABLE_IRQs;
+		lp->irq_mask &= ~(ICR_TXDM | ICR_RXDM);		/* disable the interrupt source */
 	}
 
-	return;
+	/* Unmask the EWRK3 board interrupts and turn off the LED */
+	cr &= ~CR_LED;
+	outb(cr, EWRK3_CR);
+	ENABLE_IRQs;
 }
 
-static int ewrk3_rx(struct device *dev)
+static int ewrk3_rx(struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	u_long iobase = dev->base_addr;
@@ -1015,7 +997,7 @@ static int ewrk3_rx(struct device *dev)
 								*p++ = inb(EWRK3_DATA);
 							}
 						} else {
-							memcpy_fromio(p, buf, pkt_len);
+							isa_memcpy_fromio(p, buf, pkt_len);
 						}
 
 						/*
@@ -1029,6 +1011,7 @@ static int ewrk3_rx(struct device *dev)
 						   ** Update stats
 						 */
 						lp->stats.rx_packets++;
+						lp->stats.rx_bytes += pkt_len;
 						for (i = 1; i < EWRK3_PKT_STAT_SZ - 1; i++) {
 							if (pkt_len < i * EWRK3_PKT_BIN_SZ) {
 								lp->pktStats.bins[i]++;
@@ -1081,7 +1064,7 @@ static int ewrk3_rx(struct device *dev)
 /*
    ** Buffer sent - check for TX buffer errors.
  */
-static int ewrk3_tx(struct device *dev)
+static int ewrk3_tx(struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	u_long iobase = dev->base_addr;
@@ -1117,15 +1100,14 @@ static int ewrk3_tx(struct device *dev)
 	return 0;
 }
 
-static int ewrk3_close(struct device *dev)
+static int ewrk3_close(struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	u_long iobase = dev->base_addr;
 	u_char icr, csr;
 
-	dev->start = 0;
-	dev->tbusy = 1;
-
+	netif_stop_queue(dev);
+	
 	if (ewrk3_debug > 1) {
 		printk("%s: Shutting down ethercard, status was %2.2x.\n",
 		       dev->name, inb(EWRK3_CSR));
@@ -1150,12 +1132,10 @@ static int ewrk3_close(struct device *dev)
 	if (!lp->hard_strapped) {
 		free_irq(dev->irq, dev);
 	}
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
-static struct net_device_stats *ewrk3_get_stats(struct device *dev)
+static struct net_device_stats *ewrk3_get_stats(struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 
@@ -1166,7 +1146,7 @@ static struct net_device_stats *ewrk3_get_stats(struct device *dev)
 /*
    ** Set or clear the multicast filter for this adapter.
  */
-static void set_multicast_list(struct device *dev)
+static void set_multicast_list(struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	u_long iobase = dev->base_addr;
@@ -1199,7 +1179,7 @@ static void set_multicast_list(struct device *dev)
    ** Note that when clearing the table, the broadcast bit must remain asserted
    ** to receive broadcast messages.
  */
-static void SetMulticastFilter(struct device *dev)
+static void SetMulticastFilter(struct net_device *dev)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	struct dev_mc_list *dmi = dev->mc_list;
@@ -1285,7 +1265,7 @@ static void SetMulticastFilter(struct device *dev)
 /*
    ** ISA bus I/O device probe
  */
-__initfunc(static void isa_probe(struct device *dev, u_long ioaddr))
+static void __init isa_probe(struct net_device *dev, u_long ioaddr)
 {
 	int i = num_ewrk3s, maxSlots;
 	u_long iobase;
@@ -1325,7 +1305,7 @@ __initfunc(static void isa_probe(struct device *dev, u_long ioaddr))
    ** EISA bus I/O device probe. Probe from slot 1 since slot 0 is usually
    ** the motherboard.
  */
-__initfunc(static void eisa_probe(struct device *dev, u_long ioaddr))
+static void __init eisa_probe(struct net_device *dev, u_long ioaddr)
 {
 	int i, maxSlots;
 	u_long iobase;
@@ -1372,10 +1352,9 @@ __initfunc(static void eisa_probe(struct device *dev, u_long ioaddr))
    ** are not available then insert a new device structure at the end of
    ** the current list.
  */
-__initfunc(static struct device *
-	   alloc_device(struct device *dev, u_long iobase))
+static struct net_device * __init  alloc_device(struct net_device *dev, u_long iobase)
 {
-	struct device *adev = NULL;
+	struct net_device *adev = NULL;
 	int fixed = 0, new_dev = 0;
 
 	num_eth = ewrk3_dev_index(dev->name);
@@ -1417,12 +1396,12 @@ __initfunc(static struct device *
    ** If at end of eth device list and can't use current entry, malloc
    ** one up. If memory could not be allocated, print an error message.
  */
-__initfunc(static struct device *
-	   insert_device(struct device *dev, u_long iobase, int (*init) (struct device *)))
+static struct net_device * __init
+insert_device(struct net_device *dev, u_long iobase, int (*init) (struct net_device *))
 {
-	struct device *new;
+	struct net_device *new;
 
-	new = (struct device *) kmalloc(sizeof(struct device) + 8, GFP_KERNEL);
+	new = (struct net_device *) kmalloc(sizeof(struct net_device) + 8, GFP_KERNEL);
 	if (new == NULL) {
 		printk("eth%d: Device not initialised, insufficient memory\n", num_eth);
 		return NULL;
@@ -1430,7 +1409,6 @@ __initfunc(static struct device *
 		new->next = dev->next;
 		dev->next = new;
 		dev = dev->next;	/* point to the new device */
-		dev->name = (char *) (dev + 1);
 		if (num_eth > 9999) {
 			sprintf(dev->name, "eth????");	/* New device name */
 		} else {
@@ -1443,8 +1421,8 @@ __initfunc(static struct device *
 	return dev;
 }
 
-__initfunc(static int
-	   ewrk3_dev_index(char *s))
+static int __init 
+ewrk3_dev_index(char *s)
 {
 	int i = 0, j = 0;
 
@@ -1499,7 +1477,7 @@ static int Write_EEPROM(short data, u_long iobase, u_char eaddr)
 /*
    ** Look for a particular board name in the on-board EEPROM.
  */
-__initfunc(static void EthwrkSignature(char *name, char *eeprom_image))
+static void __init EthwrkSignature(char *name, char *eeprom_image)
 {
 	u_long i, j, k;
 	char *signatures[] = EWRK3_SIGNATURE;
@@ -1536,7 +1514,7 @@ __initfunc(static void EthwrkSignature(char *name, char *eeprom_image))
    ** ethernet address for later read out.
  */
 
-__initfunc(static int DevicePresent(u_long iobase))
+static int __init DevicePresent(u_long iobase)
 {
 	union {
 		struct {
@@ -1573,7 +1551,7 @@ __initfunc(static int DevicePresent(u_long iobase))
 	return status;
 }
 
-__initfunc(static u_char get_hw_addr(struct device *dev, u_char * eeprom_image, char chipType))
+static u_char __init get_hw_addr(struct net_device *dev, u_char * eeprom_image, char chipType)
 {
 	int i, j, k;
 	u_short chksum;
@@ -1624,7 +1602,7 @@ __initfunc(static u_char get_hw_addr(struct device *dev, u_char * eeprom_image, 
 /*
    ** Look for a particular board name in the EISA configuration space
  */
-__initfunc(static int EISA_signature(char *name, s32 eisa_id))
+static int __init EISA_signature(char *name, s32 eisa_id)
 {
 	u_long i;
 	char *signatures[] = EWRK3_SIGNATURE;
@@ -1661,7 +1639,7 @@ __initfunc(static int EISA_signature(char *name, s32 eisa_id))
    ** Perform IOCTL call functions here. Some are privileged operations and the
    ** effective uid is checked in those cases.
  */
-static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
+static int ewrk3_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
 	struct ewrk3_private *lp = (struct ewrk3_private *) dev->priv;
 	struct ewrk3_ioctl *ioc = (struct ewrk3_ioctl *) &rq->ifr_data;
@@ -1679,18 +1657,20 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 			tmp.addr[i] = dev->dev_addr[i];
 		}
 		ioc->len = ETH_ALEN;
-		if (!(status = verify_area(VERIFY_WRITE, (void *) ioc->data, ioc->len))) {
-			copy_to_user(ioc->data, tmp.addr, ioc->len);
+		if (copy_to_user(ioc->data, tmp.addr, ioc->len)) {
+			status = -EFAULT;
+			break;
 		}
-		break;
 	case EWRK3_SET_HWADDR:	/* Set the hardware address */
 		if (capable(CAP_NET_ADMIN)) {
-			if (!(status = verify_area(VERIFY_READ, (void *) ioc->data, ETH_ALEN))) {
 				csr = inb(EWRK3_CSR);
 				csr |= (CSR_TXD | CSR_RXD);
 				outb(csr, EWRK3_CSR);	/* Disable the TX and RX */
 
-				copy_from_user(tmp.addr, ioc->data, ETH_ALEN);
+				if (copy_from_user(tmp.addr, ioc->data, ETH_ALEN)) {
+					status = -EFAULT;
+					break;
+				}
 				for (i = 0; i < ETH_ALEN; i++) {
 					dev->dev_addr[i] = tmp.addr[i];
 					outb(tmp.addr[i], EWRK3_PAR0 + i);
@@ -1698,7 +1678,6 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 
 				csr &= ~(CSR_TXD | CSR_RXD);	/* Enable the TX and RX */
 				outb(csr, EWRK3_CSR);
-			}
 		} else {
 			status = -EPERM;
 		}
@@ -1730,7 +1709,6 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 
 		break;
 	case EWRK3_GET_MCA:	/* Get the multicast address table */
-		if (!(status = verify_area(VERIFY_WRITE, ioc->data, ioc->len))) {
 			while (test_and_set_bit(0, (void *) &lp->lock) != 0);	/* Wait for lock to free */
 			if (lp->shmem_length == IO_ONLY) {
 				outb(0, EWRK3_IOPR);
@@ -1740,20 +1718,24 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 				}
 			} else {
 				outb(0, EWRK3_MPR);
-				memcpy_fromio(tmp.addr, (char *) (lp->shmem_base + PAGE0_HTE), (HASH_TABLE_LEN >> 3));
+				isa_memcpy_fromio(tmp.addr, lp->shmem_base + PAGE0_HTE, (HASH_TABLE_LEN >> 3));
 			}
 			ioc->len = (HASH_TABLE_LEN >> 3);
-			copy_to_user(ioc->data, tmp.addr, ioc->len);
-		}
+			if (copy_to_user(ioc->data, tmp.addr, ioc->len)) {
+				status = -EFAULT;
+				break;
+			}
+
 		lp->lock = 0;	/* Unlock the page register */
 
 		break;
 	case EWRK3_SET_MCA:	/* Set a multicast address */
 		if (capable(CAP_NET_ADMIN)) {
-			if (!(status = verify_area(VERIFY_READ, ioc->data, ETH_ALEN * ioc->len))) {
-				copy_from_user(tmp.addr, ioc->data, ETH_ALEN * ioc->len);
-				set_multicast_list(dev);
+			if (copy_from_user(tmp.addr, ioc->data, ETH_ALEN * ioc->len)) {
+				status = -EFAULT;
+				break;
 			}
+			set_multicast_list(dev);
 		} else {
 			status = -EPERM;
 		}
@@ -1781,9 +1763,8 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 	case EWRK3_GET_STATS:	/* Get the driver statistics */
 		cli();
 		ioc->len = sizeof(lp->pktStats);
-		if (!(status = verify_area(VERIFY_WRITE, ioc->data, ioc->len))) {
-			copy_to_user(ioc->data, &lp->pktStats, ioc->len);
-		}
+		if (copy_to_user(ioc->data, &lp->pktStats, ioc->len))
+			status = -EFAULT;
 		sti();
 
 		break;
@@ -1800,16 +1781,16 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 	case EWRK3_GET_CSR:	/* Get the CSR Register contents */
 		tmp.addr[0] = inb(EWRK3_CSR);
 		ioc->len = 1;
-		if (!(status = verify_area(VERIFY_WRITE, ioc->data, ioc->len))) {
-			copy_to_user(ioc->data, tmp.addr, ioc->len);
-		}
+		if (copy_to_user(ioc->data, tmp.addr, ioc->len))
+			status = -EFAULT;
 		break;
 	case EWRK3_SET_CSR:	/* Set the CSR Register contents */
 		if (capable(CAP_NET_ADMIN)) {
-			if (!(status = verify_area(VERIFY_READ, ioc->data, 1))) {
-				copy_from_user(tmp.addr, ioc->data, 1);
-				outb(tmp.addr[0], EWRK3_CSR);
+			if (copy_from_user(tmp.addr, ioc->data, 1)) {
+				status = -EFAULT;
+				break;
 			}
+			outb(tmp.addr[0], EWRK3_CSR);
 		} else {
 			status = -EPERM;
 		}
@@ -1826,9 +1807,8 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 				tmp.addr[i++] = inb(EWRK3_PAR0 + j);
 			}
 			ioc->len = EEPROM_MAX + 1 + ETH_ALEN;
-			if (!(status = verify_area(VERIFY_WRITE, ioc->data, ioc->len))) {
-				copy_to_user(ioc->data, tmp.addr, ioc->len);
-			}
+			if (copy_to_user(ioc->data, tmp.addr, ioc->len))
+				status = -EFAULT;
 		} else {
 			status = -EPERM;
 		}
@@ -1836,11 +1816,12 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 		break;
 	case EWRK3_SET_EEPROM:	/* Set the EEPROM contents */
 		if (capable(CAP_NET_ADMIN)) {
-			if (!(status = verify_area(VERIFY_READ, ioc->data, EEPROM_MAX))) {
-				copy_from_user(tmp.addr, ioc->data, EEPROM_MAX);
-				for (i = 0; i < (EEPROM_MAX >> 1); i++) {
-					Write_EEPROM(tmp.val[i], iobase, i);
-				}
+			if (copy_from_user(tmp.addr, ioc->data, EEPROM_MAX)) {
+				status = -EFAULT;
+				break;
+			}
+			for (i = 0; i < (EEPROM_MAX >> 1); i++) {
+				Write_EEPROM(tmp.val[i], iobase, i);
 			}
 		} else {
 			status = -EPERM;
@@ -1850,12 +1831,11 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 	case EWRK3_GET_CMR:	/* Get the CMR Register contents */
 		tmp.addr[0] = inb(EWRK3_CMR);
 		ioc->len = 1;
-		if (!(status = verify_area(VERIFY_WRITE, ioc->data, ioc->len))) {
-			copy_to_user(ioc->data, tmp.addr, ioc->len);
-		}
+		if (copy_to_user(ioc->data, tmp.addr, ioc->len))
+			status = -EFAULT;
 		break;
 	case EWRK3_SET_TX_CUT_THRU:	/* Set TX cut through mode */
-		if (suser()) {
+		if (capable(CAP_NET_ADMIN)) {
 			lp->txc = 1;
 		} else {
 			status = -EPERM;
@@ -1863,7 +1843,7 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 
 		break;
 	case EWRK3_CLR_TX_CUT_THRU:	/* Clear TX cut through mode */
-		if (suser()) {
+		if (capable(CAP_NET_ADMIN)) {
 			lp->txc = 0;
 		} else {
 			status = -EPERM;
@@ -1878,15 +1858,7 @@ static int ewrk3_ioctl(struct device *dev, struct ifreq *rq, int cmd)
 }
 
 #ifdef MODULE
-static char devicename[9] =
-{0,};
-static struct device thisEthwrk =
-{
-	devicename,		/* device name is inserted by /linux/drivers/net/net_init.c */
-	0, 0, 0, 0,
-	0x300, 5,		/* I/O address, IRQ */
-	0, 0, 0, NULL, ewrk3_probe};
-
+static struct net_device thisEthwrk;
 static int io = 0x300;		/* <--- EDIT THESE LINES FOR YOUR CONFIGURATION */
 static int irq = 5;		/* or use the insmod io= irq= options           */
 
@@ -1897,6 +1869,7 @@ int init_module(void)
 {
 	thisEthwrk.base_addr = io;
 	thisEthwrk.irq = irq;
+	thisEthwrk.init = ewrk3_probe;
 	if (register_netdev(&thisEthwrk) != 0)
 		return -EIO;
 	return 0;

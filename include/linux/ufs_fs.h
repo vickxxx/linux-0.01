@@ -18,6 +18,10 @@
  * Niels Kristian Bech Jensen <nkbj@image.dk>.
  *
  * Write support by Daniel Pirkl <daniel.pirkl@email.cz>
+ *
+ * HP/UX hfs filesystem support added by
+ * Martin K. Petersen <mkp@mkp.net>, August 1999
+ *
  */
 
 #ifndef __LINUX_UFS_FS_H
@@ -37,6 +41,30 @@
 #define UFS_SECTOR_BITS 9
 #define UFS_MAGIC 0x00011954
 #define UFS_CIGAM 0x54190100 /* byteswapped MAGIC */
+
+
+/* HP specific MAGIC values */
+
+#define UFS_MAGIC_LFN   0x00095014 /* fs supports filenames > 14 chars */
+#define UFS_CIGAM_LFN   0x14500900 /* srahc 41 < semanelif stroppus sf */
+
+#define UFS_MAGIC_SEC   0x00612195 /* B1 security fs */
+#define UFS_CIGAM_SEC   0x95216100
+
+#define UFS_MAGIC_FEA   0x00195612 /* fs_featurebits supported */
+#define UFS_CIGAM_FEA   0x12561900
+
+#define UFS_MAGIC_4GB   0x05231994 /* fs > 4 GB && fs_featurebits */
+#define UFS_CIGAM_4GB   0x94192305
+
+/* Seems somebody at HP goofed here. B1 and lfs are both 0x2 !?! */
+#define UFS_FSF_LFN     0x00000001 /* long file names */
+#define UFS_FSF_B1      0x00000002 /* B1 security */
+#define UFS_FSF_LFS     0x00000002 /* large files */
+#define UFS_FSF_LUID    0x00000004 /* large UIDs */
+
+/* End of HP stuff */
+
 
 #define UFS_BSIZE	8192
 #define UFS_MINBSIZE	4096
@@ -111,7 +139,7 @@
 #define UFS_MOUNT_ONERROR_UMOUNT	0x00000004
 #define UFS_MOUNT_ONERROR_REPAIR	0x00000008
 
-#define UFS_MOUNT_UFSTYPE		0x000007F0
+#define UFS_MOUNT_UFSTYPE		0x00000FF0
 #define UFS_MOUNT_UFSTYPE_OLD		0x00000010
 #define UFS_MOUNT_UFSTYPE_44BSD		0x00000020
 #define UFS_MOUNT_UFSTYPE_SUN		0x00000040
@@ -119,6 +147,7 @@
 #define UFS_MOUNT_UFSTYPE_NEXTSTEP_CD	0x00000100
 #define UFS_MOUNT_UFSTYPE_OPENSTEP	0x00000200
 #define UFS_MOUNT_UFSTYPE_SUNx86	0x00000400
+#define UFS_MOUNT_UFSTYPE_HP	        0x00000800
 
 #define ufs_clear_opt(o,opt)	o &= ~UFS_MOUNT_##opt
 #define ufs_set_opt(o,opt)	o |= UFS_MOUNT_##opt
@@ -221,19 +250,6 @@ struct ufs_timeval {
 	__s32	tv_usec;
 };
 
-/*
- * File types
- */
-#define DT_UNKNOWN	0
-#define DT_FIFO		1
-#define DT_CHR		2
-#define DT_DIR		4
-#define DT_BLK		6
-#define DT_REG		8
-#define DT_LNK		10
-#define DT_SOCK		12
-#define DT_WHT		14
-   
 struct ufs_dir_entry {
 	__u32  d_ino;			/* inode number of this entry */
 	__u16  d_reclen;		/* length of this entry */
@@ -504,9 +520,6 @@ struct ufs_inode {
 
 #ifdef __KERNEL__
 
-/* acl.c */
-extern int ufs_permission (struct inode *, int);
-
 /* balloc.c */
 extern void ufs_free_fragments (struct inode *, unsigned, unsigned);
 extern void ufs_free_blocks (struct inode *, unsigned, unsigned);
@@ -518,12 +531,13 @@ extern void ufs_put_cylinder (struct super_block *, unsigned);
 
 /* dir.c */
 extern struct inode_operations ufs_dir_inode_operations;
-extern struct file_operations ufs_dir_operations;
 extern int ufs_check_dir_entry (const char *, struct inode *, struct ufs_dir_entry *, struct buffer_head *, unsigned long);
 
 /* file.c */
 extern struct inode_operations ufs_file_inode_operations;
 extern struct file_operations ufs_file_operations;
+
+extern struct address_space_operations ufs_aops;
 
 /* ialloc.c */
 extern void ufs_free_inode (struct inode *inode);
@@ -533,36 +547,24 @@ extern struct inode * ufs_new_inode (const struct inode *, int, int *);
 extern int ufs_frag_map (struct inode *, int);
 extern void ufs_read_inode (struct inode *);
 extern void ufs_put_inode (struct inode *);
-extern void ufs_write_inode (struct inode *);
+extern void ufs_write_inode (struct inode *, int);
 extern int ufs_sync_inode (struct inode *);
-extern void ufs_write_inode (struct inode *);
 extern void ufs_delete_inode (struct inode *);
 extern struct buffer_head * ufs_getfrag (struct inode *, unsigned, int, int *);
-extern int ufs_getfrag_block (struct inode *, long, struct buffer_head *, int);
 extern struct buffer_head * ufs_bread (struct inode *, unsigned, int, int *);
 
 /* namei.c */
-extern struct dentry *ufs_lookup (struct inode *, struct dentry *);
-extern int ufs_mkdir(struct inode *, struct dentry *, int);
-extern int ufs_rmdir (struct inode *, struct dentry *);
-extern int ufs_unlink (struct inode *, struct dentry *);
-extern int ufs_create (struct inode *, struct dentry *, int);
-extern int ufs_rename (struct inode *, struct dentry *, struct inode *, struct dentry *);
-extern int ufs_mknod (struct inode *, struct dentry *, int, int);
-extern int ufs_symlink (struct inode *, struct dentry *, const char *);
-extern int ufs_link (struct dentry *, struct inode *, struct dentry *);
+extern struct file_operations ufs_dir_operations;
         
 /* super.c */
-extern struct super_operations ufs_super_ops;
 extern struct file_system_type ufs_fs_type;
 extern void ufs_warning (struct super_block *, const char *, const char *, ...) __attribute__ ((format (printf, 3, 4)));
 extern void ufs_error (struct super_block *, const char *, const char *, ...) __attribute__ ((format (printf, 3, 4)));
 extern void ufs_panic (struct super_block *, const char *, const char *, ...) __attribute__ ((format (printf, 3, 4)));
-extern int init_ufs_fs(void);
 extern void ufs_write_super (struct super_block *);
 
 /* symlink.c */
-extern struct inode_operations ufs_symlink_inode_operations;
+extern struct inode_operations ufs_fast_symlink_inode_operations;
 
 /* truncate.c */
 extern void ufs_truncate (struct inode *);

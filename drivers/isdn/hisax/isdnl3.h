@@ -1,44 +1,20 @@
-/* $Id: isdnl3.h,v 2.3 1998/11/15 23:55:06 keil Exp $
-
- * $Log: isdnl3.h,v $
- * Revision 2.3  1998/11/15 23:55:06  keil
- * changes from 2.0
+/* $Id: isdnl3.h,v 2.6 2000/06/26 08:59:13 keil Exp $
  *
- * Revision 2.2  1998/05/25 14:10:17  keil
- * HiSax 3.0
- * X.75 and leased are working again.
- *
- * Revision 2.1  1998/05/25 12:58:13  keil
- * HiSax golden code from certification, Don't use !!!
- * No leased lines, no X75, but many changes.
- *
- * Revision 2.0  1997/07/27 21:15:42  keil
- * New Callref based layer3
- *
- * Revision 1.4  1997/06/26 11:20:57  keil
- * ?
- *
- * Revision 1.3  1997/04/06 22:54:17  keil
- * Using SKB's
- *
- * Revision 1.2  1997/01/21 22:31:28  keil
- * new statemachine; L3 timers
- *
- * Revision 1.1  1996/10/13 20:03:47  keil
- * Initial revision
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 
 #define SBIT(state) (1<<state)
-#define ALL_STATES  0x00ffffff
+#define ALL_STATES  0x03ffffff
 
-#define	PROTO_DIS_EURO	0x08
+#define PROTO_DIS_EURO	0x08
 
 #define L3_DEB_WARN	0x01
-#define	L3_DEB_PROTERR	0x02
-#define	L3_DEB_STATE	0x04
-#define	L3_DEB_CHARGE	0x08
+#define L3_DEB_PROTERR	0x02
+#define L3_DEB_STATE	0x04
+#define L3_DEB_CHARGE	0x08
+#define L3_DEB_CHECK	0x10
+#define L3_DEB_SI	0x20
 
 struct stateentry {
 	int state;

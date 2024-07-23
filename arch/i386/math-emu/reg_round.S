@@ -95,7 +95,7 @@
 /*	Not re-entrant, so we can gain speed by putting
 	local storage in a static area: */
 .data
-	.align 2,0
+	.align 4,0
 FPU_bits_lost:
 	.byte	0
 FPU_denormal:
@@ -365,7 +365,7 @@ LRound_nearest_64:
 	jne	LDo_64_round_up
 
 	/* Now test for round-to-even */
-	testb	$1,%ebx
+	testb	$1,%bl
 	jz	LCheck_truncate_64
 
 LDo_64_round_up:

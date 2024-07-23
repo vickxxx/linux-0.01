@@ -134,10 +134,10 @@
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/proc_fs.h>
+#include <linux/spinlock.h>
 #include <asm/io.h>
 #include <asm/bitops.h>
 #include <asm/system.h>
-#include <asm/spinlock.h>
 #include <asm/dma.h>
 
 #define ULTRASTOR_PRIVATE	/* Get the private stuff from ultrastor.h */
@@ -148,11 +148,6 @@
 #include "sd.h"
 #include<linux/stat.h>
 
-struct proc_dir_entry proc_scsi_ultrastor = {
-    PROC_SCSI_ULTRASTOR, 9, "ultrastor",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
-
 #define FALSE 0
 #define TRUE 1
 
@@ -161,8 +156,6 @@ struct proc_dir_entry proc_scsi_ultrastor = {
 #endif
 
 #define VERSION "1.12"
-
-#define ARRAY_SIZE(arr) (sizeof (arr) / sizeof (arr)[0])
 
 #define PACKED		__attribute__((packed))
 #define ALIGNED(x)	__attribute__((aligned(x)))
@@ -633,7 +626,7 @@ static int ultrastor_24f_detect(Scsi_Host_Template * tpnt)
 
 int ultrastor_detect(Scsi_Host_Template * tpnt)
 {
-    tpnt->proc_dir = &proc_scsi_ultrastor;
+    tpnt->proc_name = "ultrastor";
   return ultrastor_14f_detect(tpnt) || ultrastor_24f_detect(tpnt);
 }
 
@@ -1168,9 +1161,7 @@ static void do_ultrastor_interrupt(int irq, void *dev_id, struct pt_regs *regs)
     spin_unlock_irqrestore(&io_request_lock, flags);
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = ULTRASTOR_14F;
+static Scsi_Host_Template driver_template = ULTRASTOR_14F;
 
 #include "scsi_module.c"
-#endif

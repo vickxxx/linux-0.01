@@ -56,24 +56,7 @@ void sysv_free_inode(struct inode * inode)
 	struct buffer_head * bh;
 	struct sysv_inode * raw_inode;
 
-	if (!inode)
-		return;
-	if (!inode->i_dev) {
-		printk("sysv_free_inode: inode has no device\n");
-		return;
-	}
-	if (inode->i_count != 1) {
-		printk("sysv_free_inode: inode has count=%d\n", inode->i_count);
-		return;
-	}
-	if (inode->i_nlink) {
-		printk("sysv_free_inode: inode has nlink=%d\n", inode->i_nlink);
-		return;
-	}
-	if (!(sb = inode->i_sb)) {
-		printk("sysv_free_inode: inode on nonexistent device\n");
-		return;
-	}
+	sb = inode->i_sb;
 	ino = inode->i_ino;
 	if (ino <= SYSV_ROOT_INO || ino > sb->sv_ninodes) {
 		printk("sysv_free_inode: inode 0,1,2 or nonexistent inode\n");
@@ -91,11 +74,11 @@ void sysv_free_inode(struct inode * inode)
 	if (*sb->sv_sb_fic_count < sb->sv_fic_size)
 		*sv_sb_fic_inode(sb,(*sb->sv_sb_fic_count)++) = ino;
 	(*sb->sv_sb_total_free_inodes)++;
-	mark_buffer_dirty(sb->sv_bh1, 1); /* super-block has been modified */
-	if (sb->sv_bh1 != sb->sv_bh2) mark_buffer_dirty(sb->sv_bh2, 1);
+	mark_buffer_dirty(sb->sv_bh1); /* super-block has been modified */
+	if (sb->sv_bh1 != sb->sv_bh2) mark_buffer_dirty(sb->sv_bh2);
 	sb->s_dirt = 1; /* and needs time stamp */
 	memset(raw_inode, 0, sizeof(struct sysv_inode));
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	unlock_super(sb);
 	brelse(bh);
 }
@@ -108,11 +91,12 @@ struct inode * sysv_new_inode(const struct inode * dir)
 	struct sysv_inode * raw_inode;
 	int i,j,ino,block;
 
-	if (!dir || !(inode = get_empty_inode()))
+	if (!dir)
 		return NULL;
 	sb = dir->i_sb;
-	inode->i_sb = sb;
-	inode->i_flags = 0;
+	inode = new_inode(sb);
+	if (!inode)
+		return NULL;
 	lock_super(sb);		/* protect against task switches */
 	if ((*sb->sv_sb_fic_count == 0)
 	    || (*sv_sb_fic_inode(sb,(*sb->sv_sb_fic_count)-1) == 0) /* Applies only to SystemV2 FS */
@@ -146,29 +130,24 @@ struct inode * sysv_new_inode(const struct inode * dir)
 	}
 	/* Now *sb->sv_sb_fic_count > 0. */
 	ino = *sv_sb_fic_inode(sb,--(*sb->sv_sb_fic_count));
-	mark_buffer_dirty(sb->sv_bh1, 1); /* super-block has been modified */
-	if (sb->sv_bh1 != sb->sv_bh2) mark_buffer_dirty(sb->sv_bh2, 1);
+	mark_buffer_dirty(sb->sv_bh1); /* super-block has been modified */
+	if (sb->sv_bh1 != sb->sv_bh2) mark_buffer_dirty(sb->sv_bh2);
 	sb->s_dirt = 1; /* and needs time stamp */
-	inode->i_count = 1;
-	inode->i_nlink = 1;
-	inode->i_dev = sb->s_dev;
 	inode->i_uid = current->fsuid;
 	inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->fsgid;
 	inode->i_ino = ino;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	inode->i_op = NULL;
 	inode->i_blocks = inode->i_blksize = 0;
 	insert_inode_hash(inode);
 	mark_inode_dirty(inode);
 	/* Change directory entry: */
 	inode->i_mode = 0;		/* for sysv_write_inode() */
-	inode->i_size = 0;		/* ditto */
-	sysv_write_inode(inode);	/* ensure inode not allocated again */
+	sysv_write_inode(inode, 0);	/* ensure inode not allocated again */
 					/* FIXME: caller may call this too. */
 	mark_inode_dirty(inode);	/* cleared by sysv_write_inode() */
 	/* That's it. */
 	(*sb->sv_sb_total_free_inodes)--;
-	mark_buffer_dirty(sb->sv_bh2, 1); /* super-block has been modified again */
+	mark_buffer_dirty(sb->sv_bh2); /* super-block has been modified again */
 	sb->s_dirt = 1; /* and needs time stamp again */
 	unlock_super(sb);
 	return inode;
@@ -206,7 +185,7 @@ unsigned long sysv_count_free_inodes(struct super_block * sb)
 		printk("sysv_count_free_inodes: free inode count was %d, correcting to %d\n",(short)(*sb->sv_sb_total_free_inodes),count);
 		if (!(sb->s_flags & MS_RDONLY)) {
 			*sb->sv_sb_total_free_inodes = count;
-			mark_buffer_dirty(sb->sv_bh2, 1); /* super-block has been modified */
+			mark_buffer_dirty(sb->sv_bh2); /* super-block has been modified */
 			sb->s_dirt = 1; /* and needs time stamp */
 		}
 	}

@@ -1,7 +1,11 @@
 /*
- * linux/include/asm-arm/arch-a5k/uncompress.h
+ *  linux/include/asm-arm/arch-rpc/uncompress.h
  *
- * Copyright (C) 1996 Russell King
+ *  Copyright (C) 1996 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
 #define VIDMEM ((char *)SCREEN_START)
  
@@ -52,7 +56,7 @@ static const unsigned long palette_4[16] = {
 #define palette_setpixel(p)	*(unsigned long *)(IO_START+0x00400000) = 0x10000000|((p) & 255)
 #define palette_write(v)	*(unsigned long *)(IO_START+0x00400000) = 0x00000000|((v) & 0x00ffffff)
 
-static struct param_struct * const params = (struct param_struct *)Z_PARAMS_BASE;
+extern struct param_struct params;
 
 #ifndef STANDALONE_DEBUG 
 /*
@@ -65,8 +69,8 @@ static void puts(const char *s)
 	unsigned char c;
 	char *ptr;
 
-	x = params->video_x;
-	y = params->video_y;
+	x = params.video_x;
+	y = params.video_y;
 
 	while ( ( c = *(unsigned char *)s++ ) != '\0' ) {
 		if ( c == '\n' ) {
@@ -75,7 +79,7 @@ static void puts(const char *s)
 				y--;
 			}
 		} else {
-			ptr = VIDMEM + ((y*video_num_columns*params->bytes_per_char_v+x)*bytes_per_char_h);
+			ptr = VIDMEM + ((y*video_num_columns*params.bytes_per_char_v+x)*bytes_per_char_h);
 			ll_write_char(ptr, c|(white<<16));
 			if ( ++x >= video_num_columns ) {
 				x = 0;
@@ -86,8 +90,8 @@ static void puts(const char *s)
 		}
 	}
 
-	params->video_x = x;
-	params->video_y = y;
+	params.video_x = x;
+	params.video_y = y;
 }
 
 static void error(char *x);
@@ -99,9 +103,9 @@ static void arch_decomp_setup(void)
 {
 	int i;
 	
-	video_num_lines = params->video_num_rows;
-	video_num_columns = params->video_num_cols;
-	bytes_per_char_h = params->bytes_per_char_h;
+	video_num_lines = params.video_num_rows;
+	video_num_columns = params.video_num_cols;
+	bytes_per_char_h = params.bytes_per_char_h;
 	video_size_row = video_num_columns * bytes_per_char_h;
 	if (bytes_per_char_h == 4)
 		for (i = 0; i < 256; i++)
@@ -136,7 +140,7 @@ static void arch_decomp_setup(void)
 		white = 7;
 	}
 
-	if (params->nr_pages * params->page_size < 4096*1024) error("<4M of mem\n");
+	if (params.nr_pages * params.page_size < 4096*1024) error("<4M of mem\n");
 }
 #endif
 

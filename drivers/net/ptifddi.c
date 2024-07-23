@@ -1,4 +1,4 @@
-/* $Id: ptifddi.c,v 1.7 1999/06/09 08:19:01 davem Exp $
+/* $Id: ptifddi.c,v 1.13 2000/07/11 22:35:22 davem Exp $
  * ptifddi.c: Network driver for Performance Technologies single-attach
  *            and dual-attach FDDI sbus cards.
  *
@@ -108,48 +108,48 @@ static void pti_is_not_so_happy(struct ptifddi *pp)
 {
 }
 
-static inline void pti_tx(struct ptifddi *pp, struct device *dev)
+static inline void pti_tx(struct ptifddi *pp, struct net_device *dev)
 {
 }
 
-static inline void myri_rx(struct ptifddi *pp, struct device *dev)
+static inline void myri_rx(struct ptifddi *pp, struct net_device *dev)
 {
 }
 
 static void pti_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	struct device *dev		= (struct device *) dev_id;
+	struct net_device *dev		= (struct net_device *) dev_id;
 	struct ptifddi *pp		= (struct ptifddi *) dev->priv;
 
 }
 
-static int pti_open(struct device *dev)
+static int pti_open(struct net_device *dev)
 {
 	struct ptifddi *pp = (struct ptifddi *) dev->priv;
 
 	return pti_init(pp, in_interrupt());
 }
 
-static int pti_close(struct device *dev)
+static int pti_close(struct net_device *dev)
 {
 	struct ptifddi *pp = (struct ptifddi *) dev->priv;
 
 	return 0;
 }
 
-static int pti_start_xmit(struct sk_buff *skb, struct device *dev)
+static int pti_start_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ptifddi *pp = (struct ptifddi *) dev->priv;
 }
 
-static struct enet_statistics *pti_get_stats(struct device *dev)
+static struct net_device_stats *pti_get_stats(struct net_device *dev)
 { return &(((struct ptifddi *)dev->priv)->enet_stats); }
 
-static void pti_set_multicast(struct device *dev)
+static void pti_set_multicast(struct net_device *dev)
 {
 }
 
-static inline int pti_fddi_init(struct device *dev, struct linux_sbus_device *sdev, int num)
+static inline int pti_fddi_init(struct net_device *dev, struct sbus_dev *sdev, int num)
 {
 	static unsigned version_printed = 0;
 	struct ptifddi *pp;
@@ -160,37 +160,28 @@ static inline int pti_fddi_init(struct device *dev, struct linux_sbus_device *sd
 	if(version_printed++ == 0)
 		printk(version);
 
-	prom_apply_sbus_ranges(sdev->my_bus, &sdev->reg_addrs[0],
-			       sdev->num_registers, sdev);
-
 	/* Register 0 mapping contains DPRAM. */
-	pp->dpram = sparc_alloc_io(sdev->reg_addrs[0].phys_addr, 0,
-				   sdev->reg_addrs[0].reg_size,
-				   "PTI FDDI DPRAM",
-				   sdev->reg_addrs[0].which_io, 0);
+	pp->dpram = (struct dfddi_ram *) sbus_ioremap(
+	    &sdep->resource[0], 0, sizeof(sturct dfddi_ram), "PTI FDDI DPRAM");
 	if(!pp->dpram) {
 		printk("ptiFDDI: Cannot map DPRAM I/O area.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/* Next, register 1 contains reset byte. */
-	pp->reset = sparc_alloc_io(sdev->reg_addrs[1].phys_addr, 0,
-				   sdev->reg_addrs[1].reg_size,
-				   "PTI FDDI RESET Byte",
-				   sdev->reg_addrs[1].which_io, 0);
+	pp->reset = (unsigned char *) sbus_ioremap(
+	    &sdep->resource[1], 0, 1, "PTI FDDI RESET Byte");
 	if(!pp->reset) {
 		printk("ptiFDDI: Cannot map RESET byte.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/* Register 2 contains unreset byte. */
-	pp->unreset = sparc_alloc_io(sdev->reg_addrs[2].phys_addr, 0,
-				     sdev->reg_addrs[2].reg_size,
-				     "PTI FDDI UNRESET Byte",
-				     sdev->reg_addrs[2].which_io, 0);
+	pp->unreset = (unsigned char *) sbus_ioremap(
+	    &sdep->resource[2], 0, 1, "PTI FDDI UNRESET Byte");
 	if(!pp->unreset) {
 		printk("ptiFDDI: Cannot map UNRESET byte.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/* Reset the card. */
@@ -200,7 +191,7 @@ static inline int pti_fddi_init(struct device *dev, struct linux_sbus_device *sd
 	i = pti_card_test(pp);
 	if(i) {
 		printk("ptiFDDI: Bootup card test fails.\n");
-		return ENODEV;
+		return -ENODEV;
 	}
 
 	/* Clear DPRAM, start afresh. */
@@ -213,15 +204,15 @@ static inline int pti_fddi_init(struct device *dev, struct linux_sbus_device *sd
 	pti_load_main_firmware(pp);
 }
 
-__initfunc(int ptifddi_sbus_probe(struct device *dev))
+int __init ptifddi_sbus_probe(struct net_device *dev)
 {
-	struct linux_sbus *bus;
-	struct linux_sbus_device *sdev = 0;
+	struct sbus_bus *bus;
+	struct sbus_dev *sdev = 0;
 	static int called = 0;
 	int cards = 0, v;
 
 	if(called)
-		return ENODEV;
+		return -ENODEV;
 	called++;
 
 	for_each_sbus(bus) {
@@ -237,7 +228,7 @@ __initfunc(int ptifddi_sbus_probe(struct device *dev))
 		}
 	}
 	if(!cards)
-		return ENODEV;
+		return -ENODEV;
 	return 0;
 }
 

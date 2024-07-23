@@ -2,6 +2,10 @@
  *  linux/drivers/char/mem.c
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
+ *
+ *  Added devfs support. 
+ *    Jan-11-1998, C. Scott Ananian <cananian@alumni.princeton.edu>
+ *  Shared /dev/zero mmaping support, Feb 2000, Kanoj Sarcar <kanoj@sgi.com>
  */
 
 #include <linux/config.h>
@@ -14,24 +18,15 @@
 #include <linux/mman.h>
 #include <linux/random.h>
 #include <linux/init.h>
-#include <linux/joystick.h>
-#include <linux/i2c.h>
+#include <linux/raw.h>
+#include <linux/capability.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 
-#ifdef CONFIG_SOUND
-void soundcore_init(void);
-#ifdef CONFIG_SOUND_OSS
-void soundcard_init(void);
-#endif
-#ifdef CONFIG_DMASOUND
-void dmasound_init(void);
-#endif
-#endif
-#ifdef CONFIG_SPARCAUDIO
-extern int sparcaudio_init(void);
+#ifdef CONFIG_I2C
+extern int i2c_init_all(void);
 #endif
 #ifdef CONFIG_ISDN
 int isdn_init(void);
@@ -48,11 +43,8 @@ extern void prom_con_init(void);
 #ifdef CONFIG_MDA_CONSOLE
 extern void mda_console_init(void);
 #endif
-#if defined(CONFIG_PPC) || defined(CONFIG_MAC)
+#if defined(CONFIG_ADB)
 extern void adbdev_init(void);
-#endif
-#ifdef CONFIG_USB
-extern void usb_init(void);
 #endif
      
 static ssize_t do_write_mem(struct file * file, void *p, unsigned long realp,
@@ -73,7 +65,7 @@ static ssize_t do_write_mem(struct file * file, void *p, unsigned long realp,
 		written+=sz;
 	}
 #endif
-	if (copy_from_user(p, buf, count)) 
+	if (copy_from_user(p, buf, count))
 		return -EFAULT;
 	written += count;
 	*ppos += written;
@@ -135,11 +127,15 @@ static ssize_t write_mem(struct file * file, const char * buf,
 	return do_write_mem(file, __va(p), p, buf, count, ppos);
 }
 
+#ifndef pgprot_noncached
+
 /*
  * This should probably be per-architecture in <asm/pgtable.h>
  */
-static inline unsigned long pgprot_noncached(unsigned long prot)
+static inline pgprot_t pgprot_noncached(pgprot_t _prot)
 {
+	unsigned long prot = pgprot_val(_prot);
+
 #if defined(__i386__)
 	/* On PPro and successors, PCD alone doesn't always mean 
 	    uncached because of interactions with the MTRRs. PCD | PWT
@@ -149,17 +145,27 @@ static inline unsigned long pgprot_noncached(unsigned long prot)
 #elif defined(__powerpc__)
 	prot |= _PAGE_NO_CACHE | _PAGE_GUARDED;
 #elif defined(__mc68000__)
-	if (CPU_IS_020_OR_030)
+#ifdef SUN3_PAGE_NOCACHE
+	if (MMU_IS_SUN3)
+		prot |= SUN3_PAGE_NOCACHE;
+	else
+#endif
+	if (MMU_IS_851 || MMU_IS_030)
 		prot |= _PAGE_NOCACHE030;
 	/* Use no-cache mode, serialized */
-	if (CPU_IS_040_OR_060)
+	else if (MMU_IS_040 || MMU_IS_060)
 		prot = (prot & _CACHEMASK040) | _PAGE_NOCACHE_S;
 #elif defined(__mips__)
 	prot = (prot & ~_CACHE_MASK) | _CACHE_UNCACHED;
+#elif defined(__arm__) && defined(CONFIG_CPU_32)
+	/* Turn off caching for all I/O areas */
+	prot &= ~(L_PTE_CACHEABLE | L_PTE_BUFFERABLE);
 #endif
 
-	return prot;
+	return __pgprot(prot);
 }
+
+#endif /* !pgprot_noncached */
 
 /*
  * Architectures vary in how they handle caching for addresses 
@@ -176,8 +182,11 @@ static inline int noncached_address(unsigned long addr)
 	 * caching for the high addresses through the KEN pin, but
 	 * we maintain the tradition of paranoia in this code.
 	 */
- 	return !(boot_cpu_data.x86_capability & X86_FEATURE_MTRR)
-		&& addr >= __pa(high_memory);
+ 	return !( test_bit(X86_FEATURE_MTRR, &boot_cpu_data.x86_capability) ||
+		  test_bit(X86_FEATURE_K6_MTRR, &boot_cpu_data.x86_capability) ||
+		  test_bit(X86_FEATURE_CYRIX_ARR, &boot_cpu_data.x86_capability) ||
+		  test_bit(X86_FEATURE_CENTAUR_MCR, &boot_cpu_data.x86_capability) )
+	  && addr >= __pa(high_memory);
 #else
 	return addr >= __pa(high_memory);
 #endif
@@ -185,10 +194,7 @@ static inline int noncached_address(unsigned long addr)
 
 static int mmap_mem(struct file * file, struct vm_area_struct * vma)
 {
-	unsigned long offset = vma->vm_offset;
-
-	if (offset & ~PAGE_MASK)
-		return -ENXIO;
+	unsigned long offset = vma->vm_pgoff << PAGE_SHIFT;
 
 	/*
 	 * Accessing memory above the top the kernel knows about or
@@ -196,8 +202,10 @@ static int mmap_mem(struct file * file, struct vm_area_struct * vma)
 	 * done non-cached.
 	 */
 	if (noncached_address(offset) || (file->f_flags & O_SYNC))
-		pgprot_val(vma->vm_page_prot) 
-			= pgprot_noncached(pgprot_val(vma->vm_page_prot));
+		vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	/* Don't try to swap out physical pages.. */
+	vma->vm_flags |= VM_RESERVED;
 
 	/*
 	 * Don't dump addresses that are not real memory to a core file.
@@ -219,9 +227,10 @@ static ssize_t read_kmem(struct file *file, char *buf,
 {
 	unsigned long p = *ppos;
 	ssize_t read = 0;
-	ssize_t virtr;
+	ssize_t virtr = 0;
+	char * kbuf; /* k-addr because vread() takes vmlist_lock rwlock */
 		
-	if (p < (unsigned long) high_memory) { 
+	if (p < (unsigned long) high_memory) {
 		read = count;
 		if (count > (unsigned long) high_memory - p)
 			read = (unsigned long) high_memory - p;
@@ -231,24 +240,44 @@ static ssize_t read_kmem(struct file *file, char *buf,
 		if (p < PAGE_SIZE && read > 0) {
 			size_t tmp = PAGE_SIZE - p;
 			if (tmp > read) tmp = read;
-			clear_user(buf, tmp);
+			if (clear_user(buf, tmp))
+				return -EFAULT;
 			buf += tmp;
 			p += tmp;
 			read -= tmp;
 			count -= tmp;
 		}
 #endif
-		copy_to_user(buf, (char *)p, read);
+		if (copy_to_user(buf, (char *)p, read))
+			return -EFAULT;
 		p += read;
 		buf += read;
 		count -= read;
 	}
 
-	virtr = vread(buf, (char *)p, count);
-	if (virtr < 0)
-		return virtr;
-	*ppos += p + virtr;
-	return virtr + read;
+	if (count > 0) {
+		kbuf = (char *)__get_free_page(GFP_KERNEL);
+		if (!kbuf)
+			return -ENOMEM;
+		while (count > 0) {
+			int len = count;
+
+			if (len > PAGE_SIZE)
+				len = PAGE_SIZE;
+			len = vread(kbuf, (char *)p, len);
+			if (len && copy_to_user(buf, kbuf, len)) {
+				free_page((unsigned long)kbuf);
+				return -EFAULT;
+			}
+			count -= len;
+			buf += len;
+			virtr += len;
+			p += len;
+		}
+		free_page((unsigned long)kbuf);
+	}
+ 	*ppos = p;
+ 	return virtr + read;
 }
 
 /*
@@ -266,6 +295,7 @@ static ssize_t write_kmem(struct file * file, const char * buf,
 	return do_write_mem(file, (void*)p, p, buf, count, ppos);
 }
 
+#if !defined(__mc68000__)
 static ssize_t read_port(struct file * file, char * buf,
 			 size_t count, loff_t *ppos)
 {
@@ -303,6 +333,7 @@ static ssize_t write_port(struct file * file, const char * buf,
 	*ppos = i;
 	return tmp-buf;
 }
+#endif
 
 static ssize_t read_null(struct file * file, char * buf,
 			 size_t count, loff_t *ppos)
@@ -413,7 +444,7 @@ out:
 static int mmap_zero(struct file * file, struct vm_area_struct * vma)
 {
 	if (vma->vm_flags & VM_SHARED)
-		return -EINVAL;
+		return shmem_zero_setup(vma);
 	if (zeromap_page_range(vma->vm_start, vma->vm_end - vma->vm_start, vma->vm_page_prot))
 		return -EAGAIN;
 	return 0;
@@ -458,92 +489,61 @@ static loff_t memory_lseek(struct file * file, loff_t offset, int orig)
 	}
 }
 
+static int open_port(struct inode * inode, struct file * filp)
+{
+	return capable(CAP_SYS_RAWIO) ? 0 : -EPERM;
+}
+
 #define mmap_kmem	mmap_mem
 #define zero_lseek	null_lseek
 #define full_lseek      null_lseek
 #define write_zero	write_null
 #define read_full       read_zero
+#define open_mem	open_port
+#define open_kmem	open_mem
 
 static struct file_operations mem_fops = {
-	memory_lseek,
-	read_mem,
-	write_mem,
-	NULL,		/* mem_readdir */
-	NULL,		/* mem_poll */
-	NULL,		/* mem_ioctl */
-	mmap_mem,
-	NULL,		/* no special open code */
-	NULL,		/* flush */
-	NULL,		/* no special release code */
-	NULL		/* fsync */
+	llseek:		memory_lseek,
+	read:		read_mem,
+	write:		write_mem,
+	mmap:		mmap_mem,
+	open:		open_mem,
 };
 
 static struct file_operations kmem_fops = {
-	memory_lseek,
-	read_kmem,
-	write_kmem,
-	NULL,		/* kmem_readdir */
-	NULL,		/* kmem_poll */
-	NULL,		/* kmem_ioctl */
-	mmap_kmem,
-	NULL,		/* no special open code */
-	NULL,		/* flush */
-	NULL,		/* no special release code */
-	NULL		/* fsync */
+	llseek:		memory_lseek,
+	read:		read_kmem,
+	write:		write_kmem,
+	mmap:		mmap_kmem,
+	open:		open_kmem,
 };
 
 static struct file_operations null_fops = {
-	null_lseek,
-	read_null,
-	write_null,
-	NULL,		/* null_readdir */
-	NULL,		/* null_poll */
-	NULL,		/* null_ioctl */
-	NULL,		/* null_mmap */
-	NULL,		/* no special open code */
-	NULL,		/* flush */
-	NULL,		/* no special release code */
-	NULL		/* fsync */
+	llseek:		null_lseek,
+	read:		read_null,
+	write:		write_null,
 };
 
+#if !defined(__mc68000__)
 static struct file_operations port_fops = {
-	memory_lseek,
-	read_port,
-	write_port,
-	NULL,		/* port_readdir */
-	NULL,		/* port_poll */
-	NULL,		/* port_ioctl */
-	NULL,		/* port_mmap */
-	NULL,		/* no special open code */
-	NULL,		/* flush */
-	NULL,		/* no special release code */
-	NULL		/* fsync */
+	llseek:		memory_lseek,
+	read:		read_port,
+	write:		write_port,
+	open:		open_port,
 };
+#endif
 
 static struct file_operations zero_fops = {
-	zero_lseek,
-	read_zero,
-	write_zero,
-	NULL,		/* zero_readdir */
-	NULL,		/* zero_poll */
-	NULL,		/* zero_ioctl */
-	mmap_zero,
-	NULL,		/* no special open code */
-	NULL,		/* flush */
-	NULL		/* no special release code */
+	llseek:		zero_lseek,
+	read:		read_zero,
+	write:		write_zero,
+	mmap:		mmap_zero,
 };
 
 static struct file_operations full_fops = {
-	full_lseek,
-	read_full,
-	write_full,
-	NULL,		/* full_readdir */
-	NULL,		/* full_poll */
-	NULL,		/* full_ioctl */	
-	NULL,		/* full_mmap */
-	NULL,		/* no special open code */
-	NULL,		/* flush */
-	NULL		/* no special release code */
+	llseek:		full_lseek,
+	read:		read_full,
+	write:		write_full,
 };
 
 static int memory_open(struct inode * inode, struct file * filp)
@@ -558,7 +558,7 @@ static int memory_open(struct inode * inode, struct file * filp)
 		case 3:
 			filp->f_op = &null_fops;
 			break;
-#if !defined(CONFIG_PPC) && !defined(__mc68000__)
+#if !defined(__mc68000__)
 		case 4:
 			filp->f_op = &port_fops;
 			break;
@@ -583,27 +583,46 @@ static int memory_open(struct inode * inode, struct file * filp)
 	return 0;
 }
 
+void __init memory_devfs_register (void)
+{
+    /*  These are never unregistered  */
+    static const struct {
+	unsigned short minor;
+	char *name;
+	umode_t mode;
+	struct file_operations *fops;
+    } list[] = { /* list of minor devices */
+	{1, "mem",     S_IRUSR | S_IWUSR | S_IRGRP, &mem_fops},
+	{2, "kmem",    S_IRUSR | S_IWUSR | S_IRGRP, &kmem_fops},
+	{3, "null",    S_IRUGO | S_IWUGO,           &null_fops},
+	{4, "port",    S_IRUSR | S_IWUSR | S_IRGRP, &port_fops},
+	{5, "zero",    S_IRUGO | S_IWUGO,           &zero_fops},
+	{7, "full",    S_IRUGO | S_IWUGO,           &full_fops},
+	{8, "random",  S_IRUGO | S_IWUSR,           &random_fops},
+	{9, "urandom", S_IRUGO | S_IWUSR,           &urandom_fops}
+    };
+    int i;
+
+    for (i=0; i<(sizeof(list)/sizeof(*list)); i++)
+	devfs_register (NULL, list[i].name, DEVFS_FL_NONE,
+			MEM_MAJOR, list[i].minor,
+			list[i].mode | S_IFCHR,
+			list[i].fops, NULL);
+}
+
 static struct file_operations memory_fops = {
-	NULL,		/* lseek */
-	NULL,		/* read */
-	NULL,		/* write */
-	NULL,		/* readdir */
-	NULL,		/* poll */
-	NULL,		/* ioctl */
-	NULL,		/* mmap */
-	memory_open,	/* just a selector for the real open */
-	NULL,		/* flush */
-	NULL,		/* release */
-	NULL		/* fsync */
+	open:		memory_open,	/* just a selector for the real open */
 };
 
-__initfunc(int chr_dev_init(void))
+int __init chr_dev_init(void)
 {
-	if (register_chrdev(MEM_MAJOR,"mem",&memory_fops))
+	if (devfs_register_chrdev(MEM_MAJOR,"mem",&memory_fops))
 		printk("unable to get major %d for memory devs\n", MEM_MAJOR);
+	memory_devfs_register();
 	rand_initialize();
-#ifdef CONFIG_USB
-	usb_init();
+	raw_init();
+#ifdef CONFIG_I2C
+	i2c_init_all();
 #endif
 #if defined (CONFIG_FB)
 	fbmem_init();
@@ -622,25 +641,6 @@ __initfunc(int chr_dev_init(void))
 	lp_m68k_init();
 #endif
 	misc_init();
-#ifdef CONFIG_SOUND
-	soundcore_init();
-#ifdef CONFIG_SOUND_OSS	
-	soundcard_init();
-#endif	
-#ifdef CONFIG_DMASOUND
-	dmasound_init();
-#endif	
-#endif
-#ifdef CONFIG_SPARCAUDIO
-	sparcaudio_init();
-#endif
-#ifdef CONFIG_JOYSTICK
-	/*
-	 *	Some joysticks only appear when the sound card they are
-	 *	connected to is configured. Keep the sound/joystick ordering.
-	 */
-	js_init();
-#endif	
 #if CONFIG_QIC02_TAPE
 	qic02_tape_init();
 #endif
@@ -650,10 +650,7 @@ __initfunc(int chr_dev_init(void))
 #ifdef CONFIG_FTAPE
 	ftape_init();
 #endif
-#ifdef CONFIG_VIDEO_BT848
-	i2c_init();
-#endif
-#if defined(CONFIG_PPC) || defined(CONFIG_MAC)
+#if defined(CONFIG_ADB)
 	adbdev_init();
 #endif
 #ifdef CONFIG_VIDEO_DEV

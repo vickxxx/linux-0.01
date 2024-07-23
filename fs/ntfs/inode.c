@@ -6,6 +6,7 @@
  *  Copyright (C) 1996-1997 Régis Duchesne
  *  Copyright (C) 1998 Joseph Malicki
  *  Copyright (C) 1999 Steve Dodd
+ *  Copyright (C) 2000 Anton Altaparmakov
  */
 
 #include "ntfstypes.h"
@@ -258,7 +259,7 @@ static void ntfs_load_attributes(ntfs_inode* ino)
 	if( !buf )
 		return;
 	delta=0;
-	for(offset=0;datasize;datasize-=len)
+	for(offset=0;datasize;datasize-=len,offset+=len)
 	{
 		ntfs_io io;
 		io.fn_put=ntfs_put;
@@ -268,7 +269,7 @@ static void ntfs_load_attributes(ntfs_inode* ino)
 		if(ntfs_read_attr(ino,vol->at_attribute_list,0,offset,&io)){
 			ntfs_error("error in load_attributes\n");
 		}
-		delta=len;
+		delta+=len;
 		parse_attributes(ino,buf,&delta);
 		if(delta)
 			/* move remaining bytes to buffer start */
@@ -551,11 +552,11 @@ int ntfs_readwrite_attr(ntfs_inode *ino, ntfs_attribute *attr, int offset,
 		dest->size=chunk;
 		error=ntfs_getput_clusters(ino->vol,s_cluster,
 					   offset-s_vcn*clustersize,dest);
-		if(error)/* FIXME: maybe return failure */
+		if(error)
 		{
 			ntfs_error("Read error\n");
 			dest->size=copied;
-			return 0;
+			return error;
 		}
 		l-=chunk;
 		copied+=chunk;
@@ -612,7 +613,7 @@ int ntfs_vcn_to_lcn(ntfs_inode *ino,int vcn)
 		return 0;
 
 	for(rnum=0;rnum<data->d.r.len && 
-		    vcn>data->d.r.runlist[rnum].len;rnum++)
+		    vcn>=data->d.r.runlist[rnum].len;rnum++)
 		vcn-=data->d.r.runlist[rnum].len;
 	
 	return data->d.r.runlist[rnum].cluster+vcn;
@@ -1049,7 +1050,7 @@ ntfs_clear_bit (unsigned char *byte, int bit)
 
 /* We have to skip the 16 metafiles and the 8 reserved entries */
 static int 
-new_inode (ntfs_volume* vol,int* result)
+ntfs_new_inode (ntfs_volume* vol,int* result)
 {
 	int byte,error;
 	int bit;
@@ -1235,11 +1236,11 @@ int ntfs_alloc_inode (ntfs_inode *dir, ntfs_inode *result,
 	ntfs_volume* vol=dir->vol;
 	int byte,bit;
 
-	error=new_inode (vol,&(result->i_number));
+	error=ntfs_new_inode (vol,&(result->i_number));
 	if(error==ENOSPC){
 		error=ntfs_extend_mft(vol);
 		if(error)return error;
-		error=new_inode(vol,&(result->i_number));
+		error=ntfs_new_inode(vol,&(result->i_number));
 	}
 	if(error){
 		ntfs_error ("ntfs_get_empty_inode: no free inodes\n");

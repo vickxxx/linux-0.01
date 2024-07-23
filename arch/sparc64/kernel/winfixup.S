@@ -1,4 +1,4 @@
-/* $Id: winfixup.S,v 1.27 1998/09/25 01:09:14 davem Exp $
+/* $Id: winfixup.S,v 1.29 2000/03/26 09:13:48 davem Exp $
  *
  * winfixup.S: Handle cases where user stack pointer is found to be bogus.
  *
@@ -31,7 +31,7 @@
 fill_fixup:
 	rdpr		%tstate, %g1
 	andcc		%g1, TSTATE_PRIV, %g0
-	clr		%g4
+	or		%g4, FAULT_CODE_WINFIXUP, %g4
 	be,pt		%xcc, window_scheisse_from_user_common
 	 and		%g1, TSTATE_CWP, %g1
 
@@ -69,21 +69,20 @@ fill_fixup:
 	mov		%g6, %o7			! Get current.
 
 	andn		%l1, PSTATE_MM, %l1		! We want to be in RMO
-	srlx		%g5, PAGE_SHIFT, %o1		! Fault address
+	stb		%g4, [%g6 + AOFF_task_thread + AOFF_thread_fault_code]
+	stx		%g5, [%g6 + AOFF_task_thread + AOFF_thread_fault_address]
 	wrpr		%g0, 0x0, %tl			! Out of trap levels.
 	wrpr		%l1, (PSTATE_IE | PSTATE_AG | PSTATE_RMO), %pstate
 	sethi		%uhi(PAGE_OFFSET), %g4		! Prepare page_offset global reg
 	mov		%o7, %g6
 	sllx		%g4, 32, %g4			! and finish it...
-	clr		%o2
 
 	/* This is the same as below, except we handle this a bit special
 	 * since we must preserve %l5 and %l6, see comment above.
 	 */
-	sllx		%o1, PAGE_SHIFT, %o1
 	call		do_sparc64_fault
 	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
-	b,pt		%xcc, rtrap
+	ba,pt		%xcc, rtrap
 	 nop						! yes, nop is correct
 
 	/* Be very careful about usage of the alternate globals here.
@@ -95,76 +94,73 @@ fill_fixup:
 	 * do not touch %g7 or %g2 so we handle the two cases fine.
 	 */
 spill_fixup:
-	lduh		[%g6 + AOFF_task_tss + AOFF_thread_flags], %g1
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_flags], %g1
 	andcc		%g1, SPARC_FLAG_32BIT, %g0
-	lduh		[%g6 + AOFF_task_tss + AOFF_thread_w_saved], %g1
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_w_saved], %g1
 
 	sll		%g1, 3, %g3
 	add		%g6, %g3, %g3
-	stx		%sp, [%g3 + AOFF_task_tss + AOFF_thread_rwbuf_stkptrs]
+	stx		%sp, [%g3 + AOFF_task_thread + AOFF_thread_rwbuf_stkptrs]
 	sll		%g1, 7, %g3
 	bne,pt		%xcc, 1f
 	 add		%g6, %g3, %g3
-	stx		%l0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x00]
-	stx		%l1, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x08]
+	stx		%l0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x00]
+	stx		%l1, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x08]
 
-	stx		%l2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x10]
-	stx		%l3, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x18]
-	stx		%l4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x20]
-	stx		%l5, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x28]
-	stx		%l6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x30]
-	stx		%l7, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x38]
-	stx		%i0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x40]
-	stx		%i1, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x48]
+	stx		%l2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x10]
+	stx		%l3, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x18]
+	stx		%l4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x20]
+	stx		%l5, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x28]
+	stx		%l6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x30]
+	stx		%l7, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x38]
+	stx		%i0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x40]
+	stx		%i1, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x48]
 
-	stx		%i2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x50]
-	stx		%i3, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x58]
-	stx		%i4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x60]
-	stx		%i5, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x68]
-	stx		%i6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x70]
+	stx		%i2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x50]
+	stx		%i3, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x58]
+	stx		%i4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x60]
+	stx		%i5, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x68]
+	stx		%i6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x70]
 	b,pt		%xcc, 2f
-	 stx		%i7, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x78]
-1:	stw		%l0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x00]
+	 stx		%i7, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x78]
+1:	stw		%l0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x00]
 
-	stw		%l1, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x04]
-	stw		%l2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x08]
-	stw		%l3, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x0c]
-	stw		%l4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x10]
-	stw		%l5, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x14]
-	stw		%l6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x18]
-	stw		%l7, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x1c]
-	stw		%i0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x20]
+	stw		%l1, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x04]
+	stw		%l2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x08]
+	stw		%l3, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x0c]
+	stw		%l4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x10]
+	stw		%l5, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x14]
+	stw		%l6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x18]
+	stw		%l7, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x1c]
+	stw		%i0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x20]
 
-	stw		%i1, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x24]
-	stw		%i2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x28]
-	stw		%i3, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x2c]
-	stw		%i4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x30]
-	stw		%i5, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x34]
-	stw		%i6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x38]
-	stw		%i7, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x3c]
+	stw		%i1, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x24]
+	stw		%i2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x28]
+	stw		%i3, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x2c]
+	stw		%i4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x30]
+	stw		%i5, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x34]
+	stw		%i6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x38]
+	stw		%i7, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x3c]
 2:	add		%g1, 1, %g1
 
-	sth		%g1, [%g6 + AOFF_task_tss + AOFF_thread_w_saved]
+	stb		%g1, [%g6 + AOFF_task_thread + AOFF_thread_w_saved]
 	rdpr		%tstate, %g1
 	andcc		%g1, TSTATE_PRIV, %g0
 	saved
 	and		%g1, TSTATE_CWP, %g1
-	be,a,pn		%xcc, window_scheisse_from_user_common
-	 or		%g4, 0x4, %g4			! we know it was a write
+	be,pn		%xcc, window_scheisse_from_user_common
+	 mov		FAULT_CODE_WRITE | FAULT_CODE_DTLB | FAULT_CODE_WINFIXUP, %g4
 	retry
-window_scheisse_from_user_common:
-	wrpr		%g1, %cwp
-	sethi		%hi(109f), %g7
-	ba,pt		%xcc, etrap
-109:	 or		%g7, %lo(109b), %g7
-	srlx		%l5, PAGE_SHIFT, %o1
 
-	and		%l4, 0x4, %o2
-	sllx		%o1, PAGE_SHIFT, %o1
+window_scheisse_from_user_common:
+	stb		%g4, [%g6 + AOFF_task_thread + AOFF_thread_fault_code]
+	stx		%g5, [%g6 + AOFF_task_thread + AOFF_thread_fault_address]
+	wrpr		%g1, %cwp
+	ba,pt		%xcc, etrap
+	 rd		%pc, %g7
 	call		do_sparc64_fault
 	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
-	ba,pt		%xcc, rtrap
-	 clr		%l6
+	ba,a,pt		%xcc, rtrap_clr_l6
 
 	.globl		winfix_mna, fill_fixup_mna, spill_fixup_mna
 winfix_mna:
@@ -208,47 +204,47 @@ fill_fixup_mna:
 	b,pt		%xcc, rtrap
 	 nop						! yes, the nop is correct
 spill_fixup_mna:
-	lduh		[%g6 + AOFF_task_tss + AOFF_thread_flags], %g1
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_flags], %g1
 	andcc		%g1, SPARC_FLAG_32BIT, %g0
-	lduh		[%g6 + AOFF_task_tss + AOFF_thread_w_saved], %g1
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_w_saved], %g1
 	sll		%g1, 3, %g3
 	add		%g6, %g3, %g3
-	stx		%sp, [%g3 + AOFF_task_tss + AOFF_thread_rwbuf_stkptrs]
+	stx		%sp, [%g3 + AOFF_task_thread + AOFF_thread_rwbuf_stkptrs]
 
 	sll		%g1, 7, %g3
 	bne,pt		%xcc, 1f
 	 add		%g6, %g3, %g3
-	stx		%l0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x00]
-	stx		%l1, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x08]
-	stx		%l2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x10]
-	stx		%l3, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x18]
-	stx		%l4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x20]
+	stx		%l0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x00]
+	stx		%l1, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x08]
+	stx		%l2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x10]
+	stx		%l3, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x18]
+	stx		%l4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x20]
 
-	stx		%l5, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x28]
-	stx		%l6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x30]
-	stx		%l7, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x38]
-	stx		%i0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x40]
-	stx		%i1, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x48]
-	stx		%i2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x50]
-	stx		%i3, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x58]
-	stx		%i4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x60]
+	stx		%l5, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x28]
+	stx		%l6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x30]
+	stx		%l7, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x38]
+	stx		%i0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x40]
+	stx		%i1, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x48]
+	stx		%i2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x50]
+	stx		%i3, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x58]
+	stx		%i4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x60]
 
-	stx		%i5, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x68]
-	stx		%i6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x70]
-	stx		%i7, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x78]
+	stx		%i5, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x68]
+	stx		%i6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x70]
+	stx		%i7, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x78]
 	b,pt		%xcc, 2f
 	 add		%g1, 1, %g1
-1:	std		%l0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x00]
-	std		%l2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x08]
-	std		%l4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x10]
+1:	std		%l0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x00]
+	std		%l2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x08]
+	std		%l4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x10]
 
-	std		%l6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x18]
-	std		%i0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x20]
-	std		%i2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x28]
-	std		%i4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x30]
-	std		%i6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x38]
+	std		%l6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x18]
+	std		%i0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x20]
+	std		%i2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x28]
+	std		%i4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x30]
+	std		%i6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x38]
 	add		%g1, 1, %g1
-2:	sth		%g1, [%g6 + AOFF_task_tss + AOFF_thread_w_saved]
+2:	stb		%g1, [%g6 + AOFF_task_thread + AOFF_thread_w_saved]
 	rdpr		%tstate, %g1
 
 	andcc		%g1, TSTATE_PRIV, %g0
@@ -315,47 +311,47 @@ fill_fixup_dax:
 	b,pt		%xcc, rtrap
 	 nop						! yes, the nop is correct
 spill_fixup_dax:
-	lduh		[%g6 + AOFF_task_tss + AOFF_thread_flags], %g1
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_flags], %g1
 	andcc		%g1, SPARC_FLAG_32BIT, %g0
-	lduh		[%g6 + AOFF_task_tss + AOFF_thread_w_saved], %g1
+	ldub		[%g6 + AOFF_task_thread + AOFF_thread_w_saved], %g1
 	sll		%g1, 3, %g3
 	add		%g6, %g3, %g3
-	stx		%sp, [%g3 + AOFF_task_tss + AOFF_thread_rwbuf_stkptrs]
+	stx		%sp, [%g3 + AOFF_task_thread + AOFF_thread_rwbuf_stkptrs]
 
 	sll		%g1, 7, %g3
 	bne,pt		%xcc, 1f
 	 add		%g6, %g3, %g3
-	stx		%l0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x00]
-	stx		%l1, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x08]
-	stx		%l2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x10]
-	stx		%l3, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x18]
-	stx		%l4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x20]
+	stx		%l0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x00]
+	stx		%l1, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x08]
+	stx		%l2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x10]
+	stx		%l3, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x18]
+	stx		%l4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x20]
 
-	stx		%l5, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x28]
-	stx		%l6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x30]
-	stx		%l7, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x38]
-	stx		%i0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x40]
-	stx		%i1, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x48]
-	stx		%i2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x50]
-	stx		%i3, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x58]
-	stx		%i4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x60]
+	stx		%l5, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x28]
+	stx		%l6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x30]
+	stx		%l7, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x38]
+	stx		%i0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x40]
+	stx		%i1, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x48]
+	stx		%i2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x50]
+	stx		%i3, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x58]
+	stx		%i4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x60]
 
-	stx		%i5, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x68]
-	stx		%i6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x70]
-	stx		%i7, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x78]
+	stx		%i5, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x68]
+	stx		%i6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x70]
+	stx		%i7, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x78]
 	b,pt		%xcc, 2f
 	 add		%g1, 1, %g1
-1:	std		%l0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x00]
-	std		%l2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x08]
-	std		%l4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x10]
+1:	std		%l0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x00]
+	std		%l2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x08]
+	std		%l4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x10]
 
-	std		%l6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x18]
-	std		%i0, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x20]
-	std		%i2, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x28]
-	std		%i4, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x30]
-	std		%i6, [%g3 + AOFF_task_tss + AOFF_thread_reg_window + 0x38]
+	std		%l6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x18]
+	std		%i0, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x20]
+	std		%i2, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x28]
+	std		%i4, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x30]
+	std		%i6, [%g3 + AOFF_task_thread + AOFF_thread_reg_window + 0x38]
 	add		%g1, 1, %g1
-2:	sth		%g1, [%g6 + AOFF_task_tss + AOFF_thread_w_saved]
+2:	stb		%g1, [%g6 + AOFF_task_thread + AOFF_thread_w_saved]
 	rdpr		%tstate, %g1
 
 	andcc		%g1, TSTATE_PRIV, %g0

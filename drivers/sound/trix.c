@@ -13,26 +13,22 @@
  *
  * Changes
  *	Alan Cox		Modularisation, cleanup.
+ *	Christoph Hellwig	Adapted to module_init/module_exit
+ *	Arnaldo C. de Melo	Got rid of attach_uart401
  */
  
 #include <linux/config.h>
+#include <linux/init.h>
 #include <linux/module.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
 #include "sb.h"
 #include "sound_firmware.h"
 
-#ifdef CONFIG_TRIX
+#include "ad1848.h"
+#include "mpu401.h"
 
-#ifdef INCLUDE_TRIX_BOOT
-#include <linux/init.h>
 #include "trix_boot.h"
-#else
-static unsigned char *trix_boot = NULL;
-static int trix_boot_len = 0;
-#endif
-
 
 static int kilroy_was_here = 0;	/* Don't detect twice */
 static int sb_initialized = 0;
@@ -41,6 +37,8 @@ static int mpu_initialized = 0;
 static int *trix_osp = NULL;
 
 static int mpu = 0;
+
+static int joystick=0;
 
 static unsigned char trix_read(int addr)
 {
@@ -138,7 +136,7 @@ static int trix_set_wss_port(struct address_info *hw_config)
  *      AudioTrix Pro
  */
 
-int probe_trix_wss(struct address_info *hw_config)
+static int __init probe_trix_wss(struct address_info *hw_config)
 {
 	int ret;
 
@@ -196,16 +194,14 @@ int probe_trix_wss(struct address_info *hw_config)
 
 	if (ret)
 	{
-#ifdef TRIX_ENABLE_JOYSTICK
-		trix_write(0x15, 0x80);
-#endif
+		if(joystick==1)
+			trix_write(0x15, 0x80);
 		request_region(0x390, 2, "AudioTrix");
 	}
 	return ret;
 }
 
-void
-attach_trix_wss(struct address_info *hw_config)
+static void __init attach_trix_wss(struct address_info *hw_config)
 {
 	static unsigned char interrupt_bits[12] = {
 		0, 0, 0, 0, 0, 0, 0, 0x08, 0, 0x10, 0x18, 0x20
@@ -263,7 +259,8 @@ attach_trix_wss(struct address_info *hw_config)
 					  dma1,
 					  dma2,
 					  0,
-					  hw_config->osp);
+					  hw_config->osp,
+					  THIS_MODULE);
 	request_region(hw_config->io_base, 4, "MSS config");
 
 	if (num_mixers > old_num_mixers)	/* Mixer got installed */
@@ -275,12 +272,12 @@ attach_trix_wss(struct address_info *hw_config)
 	}
 }
 
-int probe_trix_sb(struct address_info *hw_config)
+static int __init probe_trix_sb(struct address_info *hw_config)
 {
 
 	int tmp;
 	unsigned char conf;
-	static char irq_translate[] = {
+	static signed char irq_translate[] = {
 		-1, -1, -1, 0, 1, 2, -1, 3
 	};
 
@@ -322,44 +319,29 @@ int probe_trix_sb(struct address_info *hw_config)
 	sb_initialized = 1;
 
 	hw_config->name = "AudioTrix SB";
-#ifdef CONFIG_SBDSP
-	return sb_dsp_detect(hw_config, 0, 0);
-#else
-	return 0;
-#endif
+	return sb_dsp_detect(hw_config, 0, 0, NULL);
 }
 
-void attach_trix_sb(struct address_info *hw_config)
+static void __init attach_trix_sb(struct address_info *hw_config)
 {
 	extern int sb_be_quiet;
 	int old_quiet;
 
-#ifdef CONFIG_SBDSP
 	hw_config->driver_use_1 = SB_NO_MIDI | SB_NO_MIXER | SB_NO_RECORDING;
 
 	/* Prevent false alarms */
 	old_quiet = sb_be_quiet;
 	sb_be_quiet = 1;
 
-	sb_dsp_init(hw_config);
+	sb_dsp_init(hw_config, THIS_MODULE);
 
 	sb_be_quiet = old_quiet;
-#endif
 }
 
-void attach_trix_mpu(struct address_info *hw_config)
+static int __init probe_trix_mpu(struct address_info *hw_config)
 {
-#if defined(CONFIG_UART401) && defined(CONFIG_MIDI)
-	hw_config->name = "AudioTrix Pro";
-	attach_uart401(hw_config);
-#endif
-}
-
-int probe_trix_mpu(struct address_info *hw_config)
-{
-#if defined(CONFIG_UART401) && defined(CONFIG_MIDI)
 	unsigned char conf;
-	static char irq_bits[] = {
+	static int irq_bits[] = {
 		-1, -1, -1, 1, 2, 3, -1, 4, -1, 5
 	};
 
@@ -376,11 +358,6 @@ int probe_trix_mpu(struct address_info *hw_config)
 	if (mpu_initialized)
 	{
 		DDB(printk("Trix: MPU mode already initialized\n"));
-		return 0;
-	}
-	if (check_region(hw_config->io_base, 4))
-	{
-		printk(KERN_ERR "AudioTrix: MPU I/O port conflict (%x)\n", hw_config->io_base);
 		return 0;
 	}
 	if (hw_config->irq > 9)
@@ -414,13 +391,11 @@ int probe_trix_mpu(struct address_info *hw_config)
 	conf |= irq_bits[hw_config->irq] << 4;
 	trix_write(0x19, (trix_read(0x19) & 0x83) | conf);
 	mpu_initialized = 1;
-	return probe_uart401(hw_config);
-#else
-	return 0;
-#endif
+	hw_config->name = "AudioTrix Pro";
+	return probe_uart401(hw_config, THIS_MODULE);
 }
 
-void unload_trix_wss(struct address_info *hw_config)
+static void __exit unload_trix_wss(struct address_info *hw_config)
 {
 	int dma2 = hw_config->dma2;
 
@@ -438,35 +413,32 @@ void unload_trix_wss(struct address_info *hw_config)
 	sound_unload_audiodev(hw_config->slots[0]);
 }
 
-void unload_trix_mpu(struct address_info *hw_config)
+static inline void __exit unload_trix_mpu(struct address_info *hw_config)
 {
-#if defined(CONFIG_UART401) && defined(CONFIG_MIDI)
 	unload_uart401(hw_config);
-#endif
 }
 
-void unload_trix_sb(struct address_info *hw_config)
+static inline void __exit unload_trix_sb(struct address_info *hw_config)
 {
-#ifdef CONFIG_SBDSP
 	sb_dsp_unload(hw_config, mpu);
-#endif
 }
 
-#ifdef MODULE
+static struct address_info cfg;
+static struct address_info cfg2;
+static struct address_info cfg_mpu;
 
-int             io = -1;
-int             irq = -1;
-int             dma = -1;
-int             dma2 = -1;	/* Set this for modules that need it */
+static int sb = 0;
+static int fw_load;
 
-int             sb_io = -1;
-int             sb_dma = -1;
-int             sb_irq = -1;
-
-int             mpu_io = -1;
-int             mpu_irq = -1;
-
-EXPORT_NO_SYMBOLS;
+static int __initdata io	= -1;
+static int __initdata irq	= -1;
+static int __initdata dma	= -1;
+static int __initdata dma2	= -1;	/* Set this for modules that need it */
+static int __initdata sb_io	= -1;
+static int __initdata sb_dma	= -1;
+static int __initdata sb_irq	= -1;
+static int __initdata mpu_io	= -1;
+static int __initdata mpu_irq	= -1;
 
 MODULE_PARM(io,"i");
 MODULE_PARM(irq,"i");
@@ -477,43 +449,34 @@ MODULE_PARM(sb_dma,"i");
 MODULE_PARM(sb_irq,"i");
 MODULE_PARM(mpu_io,"i");
 MODULE_PARM(mpu_irq,"i");
+MODULE_PARM(joystick, "i");
 
-struct address_info config;
-struct address_info sb_config;
-struct address_info mpu_config;
-
-static int      sb = 0;
-
-static int      fw_load;
-
-int init_module(void)
+static int __init init_trix(void)
 {
 	printk(KERN_INFO "MediaTrix audio driver Copyright (C) by Hannu Savolainen 1993-1996\n");
 
-	if (io == -1 || dma == -1 || irq == -1)
-	{
+	cfg.io_base = io;
+	cfg.irq = irq;
+	cfg.dma = dma;
+	cfg.dma2 = dma2;
+
+	cfg2.io_base = sb_io;
+	cfg2.irq = sb_irq;
+	cfg2.dma = sb_dma;
+
+	cfg_mpu.io_base = mpu_io;
+	cfg_mpu.irq = mpu_irq;
+
+	if (cfg.io_base == -1 || cfg.dma == -1 || cfg.irq == -1) {
 		printk(KERN_INFO "I/O, IRQ, DMA and type are mandatory\n");
 		return -EINVAL;
 	}
-	config.io_base = io;
-	config.irq = irq;
-	config.dma = dma;
-	config.dma2 = dma2;
 
-	sb_config.io_base = sb_io;
-	sb_config.irq = sb_irq;
-	sb_config.dma = sb_dma;
-
-	mpu_config.io_base = mpu_io;
-	mpu_config.irq = mpu_irq;
-
-	if (sb_io != -1 && (sb_irq == -1 || sb_dma == -1))
-	{
+	if (cfg2.io_base != -1 && (cfg2.irq == -1 || cfg2.dma == -1)) {
 		printk(KERN_INFO "CONFIG_SB_IRQ and CONFIG_SB_DMA must be specified if SB_IO is set.\n");
 		return -EINVAL;
 	}
-	if (mpu_io != -1 && mpu_irq == -1)
-	{
+	if (cfg_mpu.io_base != -1 && cfg_mpu.irq == -1) {
 		printk(KERN_INFO "CONFIG_MPU_IRQ must be specified if MPU_IO is set.\n");
 		return -EINVAL;
 	}
@@ -523,43 +486,61 @@ int init_module(void)
 		trix_boot_len = mod_firmware_load("/etc/sound/trxpro.bin",
 						    (char **) &trix_boot);
 	}
-	if (!probe_trix_wss(&config))
+	if (!probe_trix_wss(&cfg))
 		return -ENODEV;
-	attach_trix_wss(&config);
+	attach_trix_wss(&cfg);
 
 	/*
 	 *    We must attach in the right order to get the firmware
 	 *      loaded up in time.
 	 */
 
-	if (sb_io != -1)
-	{
-		sb = probe_trix_sb(&sb_config);
+	if (cfg2.io_base != -1) {
+		sb = probe_trix_sb(&cfg2);
 		if (sb)
-			attach_trix_sb(&sb_config);
+			attach_trix_sb(&cfg2);
 	}
 	
-	if (mpu_io != -1)
-	{
-		mpu = probe_trix_mpu(&mpu_config);
-		if (mpu)
-			attach_trix_mpu(&mpu_config);
-	}
-	SOUND_LOCK;
+	if (cfg_mpu.io_base != -1)
+		mpu = probe_trix_mpu(&cfg_mpu);
+
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit cleanup_trix(void)
 {
 	if (fw_load && trix_boot)
 		vfree(trix_boot);
 	if (sb)
-		unload_trix_sb(&sb_config);
+		unload_trix_sb(&cfg2);
 	if (mpu)
-		unload_trix_mpu(&mpu_config);
-	unload_trix_wss(&config);
-	SOUND_LOCK_END;
+		unload_trix_mpu(&cfg_mpu);
+	unload_trix_wss(&cfg);
 }
 
-#endif
+module_init(init_trix);
+module_exit(cleanup_trix);
+
+#ifndef MODULE
+static int __init setup_trix (char *str)
+{
+	/* io, irq, dma, dma2, sb_io, sb_irq, sb_dma, mpu_io, mpu_irq */
+	int ints[9];
+	
+	str = get_options(str, ARRAY_SIZE(ints), ints);
+
+	io	= ints[1];
+	irq	= ints[2];
+	dma	= ints[3];
+	dma2	= ints[4];
+	sb_io	= ints[5];
+	sb_irq	= ints[6];
+	sb_dma	= ints[6];
+	mpu_io	= ints[7];
+	mpu_irq	= ints[8];
+
+	return 1;
+}
+
+__setup("trix=", setup_trix);
 #endif

@@ -36,6 +36,8 @@
 **  Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 **
 **   
+**  Rasmus Andersen, December 2000: Converted to new PCI API.
+**
 **  Pete Popov, January 11,99: Fixed a couple of 2.1.x problems 
 **  (virt_to_bus() not called), tested it under 2.2pre5 (as a module), and 
 **  added a #define(s) to enable the use of the same file for both, the 2.0.x 
@@ -47,41 +49,32 @@
 **
 ***************************************************************************/
 
-static char *version =
-"RedCreek Communications PCI linux driver version 2.02\n";
-
-
 #include <linux/module.h>
-#include <linux/version.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/in.h>
+#include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/malloc.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
-#include <linux/bios32.h>
 #include <linux/timer.h>
 #include <asm/irq.h>            /* For NR_IRQS only. */
 #include <asm/bitops.h>
 #include <asm/io.h>
-
-#if LINUX_VERSION_CODE >= 0x020100
-#define LINUX_2_1
-#endif
-
-#ifdef LINUX_2_1
 #include <asm/uaccess.h>
-#endif
 
 #include <linux/if_ether.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 
+
+static char version[] __initdata =
+"RedCreek Communications PCI linux driver version 2.03\n";
 
 #define RC_LINUX_MODULE
 #include "rclanmtl.h"
@@ -91,11 +84,6 @@ static char *version =
 
 #define NEW_MULTICAST
 #include <linux/delay.h>
-
-#ifndef LINUX_2_1
-#define ioremap vremap
-#define iounmap vfree
-#endif
 
 /* PCI/45 Configuration space values */
 #define RC_PCI45_VENDOR_ID  0x4916
@@ -128,16 +116,14 @@ typedef struct
      *    pointer to the device structure which is part
      * of the interface to the Linux kernel.
      */
-    struct device *dev;            
+    struct net_device *dev;            
      
-    char devname[8];                /* "ethN" string */
     U8     id;                        /* the AdapterID */
     U32    pci_addr;               /* the pci address of the adapter */
     U32    bus;
     U32    function;
     struct timer_list timer;        /*  timer */
-    struct enet_statistics  stats; /* the statistics structure */
-    struct device *next;            /* points to the next RC adapter */
+    struct net_device_stats  stats; /* the statistics structure */
     unsigned long numOutRcvBuffers;/* number of outstanding receive buffers*/
     unsigned char shutdown;
     unsigned char reboot;
@@ -149,165 +135,50 @@ DPA, *PDPA;
 
 #define MAX_ADAPTERS 32
 
-static PDPA  PCIAdapters[MAX_ADAPTERS] = 
-{
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-    NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL
-};
+static PDPA  PCIAdapters[MAX_ADAPTERS];
 
+static int RCinit(struct net_device *dev);
 
-static int RCinit(struct device *dev);
-static int RCscan(struct device *dev);
-static int RCfound_device(struct device *, int, int, int, int, int, int);
-
-static int RCopen(struct device *);
-static int RC_xmit_packet(struct sk_buff *, struct device *);
+static int RCopen(struct net_device *);
+static int RC_xmit_packet(struct sk_buff *, struct net_device *);
 static void RCinterrupt(int, void *, struct pt_regs *);
-static int RCclose(struct device *dev);
-static struct enet_statistics *RCget_stats(struct device *);
-static int RCioctl(struct device *, struct ifreq *, int);
-static int RCconfig(struct device *, struct ifmap *);
+static int RCclose(struct net_device *dev);
+static struct net_device_stats *RCget_stats(struct net_device *);
+static int RCioctl(struct net_device *, struct ifreq *, int);
+static int RCconfig(struct net_device *, struct ifmap *);
 static void RCxmit_callback(U32, U16, PU32, U16);
 static void RCrecv_callback(U32, U8, U32, PU32, U16);
 static void RCreset_callback(U32, U32, U32, U16);
 static void RCreboot_callback(U32, U32, U32, U16);
-static int RC_allocate_and_post_buffers(struct device *, int);
+static int RC_allocate_and_post_buffers(struct net_device *, int);
 
 
-/* A list of all installed RC devices, for removing the driver module. */
-static struct device *root_RCdev = NULL;
+static struct pci_device_id rcpci45_pci_table[] __devinitdata = {
+	{ RC_PCI45_VENDOR_ID, RC_PCI45_DEVICE_ID, PCI_ANY_ID, PCI_ANY_ID, 0, 0, 0},
+	{0, }
+};
+MODULE_DEVICE_TABLE(pci, rcpci45_pci_table);
 
-#ifdef MODULE
-int init_module(void)
-#else
-int rcpci_probe(struct device *dev)
-#endif
+static void rcpci45_remove_one(struct pci_dev *pdev)
 {
-    int cards_found;
+	struct net_device *dev = pdev->driver_data;
+	PDPA pDpa = dev->priv;
 
-#ifdef MODULE
-    cards_found = RCscan(NULL);
-#else
-    cards_found = RCscan(dev);
-#endif
-    if (cards_found)
-        printk(version);
-    return cards_found ? 0 : -ENODEV;
+        if (!dev) {
+                printk (KERN_ERR "remove non-existent device\n");
+                return;
+        }
+
+	printk("IOP reset: 0x%x\n", RCResetIOP(pDpa->id));
+
+	unregister_netdev(dev);
+	iounmap((void *)dev->base_addr);
+        free_irq(dev->irq, dev);
+
+	kfree(dev);
 }
 
-static int RCscan(struct device *dev)
-{
-    int cards_found = 0;
-    static int pci_index = 0;
-
-    if (!pcibios_present()) 
-        return cards_found;
-
-    for (;pci_index < 0x8; pci_index++) 
-    {
-        unsigned char pci_bus, pci_device_fn;
-        int scan_status;
-        int board_index = 0;
-        unsigned char pci_irq_line;
-        unsigned short pci_command, vendor, device, class;
-        unsigned int pci_ioaddr;
-
-
-        scan_status =  
-            (pcibios_find_device (RC_PCI45_VENDOR_ID, 
-                                  RC_PCI45_DEVICE_ID, 
-                                  pci_index, 
-                                  &pci_bus, 
-                                  &pci_device_fn));
-#ifdef RCDEBUG
-        printk("rc scan_status = 0x%X\n", scan_status);
-#endif
-        if (scan_status != PCIBIOS_SUCCESSFUL)
-            break;
-        pcibios_read_config_word(pci_bus, 
-                                 pci_device_fn, 
-                                 PCI_VENDOR_ID, &vendor);
-        pcibios_read_config_word(pci_bus, 
-                                 pci_device_fn,
-                                 PCI_DEVICE_ID, &device);
-        pcibios_read_config_byte(pci_bus, 
-                                 pci_device_fn,
-                                 PCI_INTERRUPT_LINE, &pci_irq_line);
-        pcibios_read_config_dword(pci_bus, 
-                                  pci_device_fn,
-                                  PCI_BASE_ADDRESS_0, &pci_ioaddr);
-        pcibios_read_config_word(pci_bus, 
-                                 pci_device_fn,
-                                 PCI_CLASS_DEVICE, &class);
-
-        pci_ioaddr &= ~0xf;
-
-#ifdef RCDEBUG
-        printk("rc: Found RedCreek PCI adapter\n");
-        printk("rc: pci class = 0x%x  0x%x \n", class, class>>8);
-        printk("rc: pci_bus = %d,  pci_device_fn = %d\n", pci_bus, pci_device_fn);
-        printk("rc: pci_irq_line = 0x%x \n", pci_irq_line);
-        printk("rc: pci_ioaddr = 0x%x\n", pci_ioaddr);
-#endif
-
-        if (check_region(pci_ioaddr, 2*32768))
-        {
-            printk("rc: check_region failed\n");
-            continue;
-        }
-#ifdef RCDEBUG
-        else
-        {
-            printk("rc: check_region passed\n");
-        }
-#endif
-           
-        /*
-         * Get and check the bus-master and latency values.
-         * Some PCI BIOSes fail to set the master-enable bit.
-         */
-
-        pcibios_read_config_word(pci_bus, 
-                                 pci_device_fn,
-                                 PCI_COMMAND, 
-                                 &pci_command);
-        if ( ! (pci_command & PCI_COMMAND_MASTER)) {
-            printk("rc: PCI Master Bit has not been set!\n");
-                        
-            pci_command |= PCI_COMMAND_MASTER;
-            pcibios_write_config_word(pci_bus, 
-                                      pci_device_fn,
-                                      PCI_COMMAND, 
-                                      pci_command);
-        }
-        if ( ! (pci_command & PCI_COMMAND_MEMORY)) {
-            /*
-             * If the BIOS did not set the memory enable bit, what else
-             * did it not initialize?  Skip this adapter.
-             */
-            printk("rc: Adapter %d, PCI Memory Bit has not been set!\n",
-                   cards_found);
-            printk("rc: Bios problem? \n");
-            continue;
-        }
-                
-        if (!RCfound_device(dev, pci_ioaddr, pci_irq_line,
-                          pci_bus, pci_device_fn,
-                          board_index++, cards_found))
-        {
-            dev = 0;
-            cards_found++;
-        }
-    }
-#ifdef RCDEBUG
-    printk("rc: found %d cards \n", cards_found);
-#endif
-    return cards_found;
-}
-
-static int RCinit(struct device *dev)
+static int RCinit(struct net_device *dev)
 {
     dev->open = &RCopen;
     dev->hard_start_xmit = &RC_xmit_packet;
@@ -318,61 +189,59 @@ static int RCinit(struct device *dev)
     return 0;
 }
 
-static int
-RCfound_device(struct device *dev, int memaddr, int irq, 
-               int bus, int function, int product_index, int card_idx)
+static int rcpci45_init_one(struct pci_dev *pdev, 
+			    const struct pci_device_id *ent)
 {
     int dev_size = 32768;        
     unsigned long *vaddr=0;
     PDPA pDpa;
     int init_status;
 
+    long memaddr = pci_resource_start(pdev, 0);
+    int card_idx;    
+    struct net_device *dev;
+
+    static int card_counter = 0;
+
+    card_idx = card_counter++; /* Yeah, icky hack. */
+
     /* 
      * Allocate and fill new device structure. 
-     * We need enough for struct device plus DPA plus the LAN API private
+     * We need enough for struct net_device plus DPA plus the LAN API private
      * area, which requires a minimum of 16KB.  The top of the allocated
-     * area will be assigned to struct device; the next chunk will be
+     * area will be assigned to struct net_device; the next chunk will be
      * assigned to DPA; and finally, the rest will be assigned to the
      * the LAN API layer.
      */
 
-#ifdef MODULE
-    dev = (struct device *) kmalloc(dev_size, GFP_DMA | GFP_KERNEL |GFP_ATOMIC);
+    dev = (struct net_device *) kmalloc(dev_size, GFP_DMA | GFP_KERNEL |GFP_ATOMIC);
     if (!dev)
     {
-        printk("rc: unable to kmalloc dev\n");
+        printk("rcpci45 driver: unable to kmalloc dev struct\n");
         return 1;   
     }
     memset(dev, 0, dev_size);
+
+    pdev->driver_data = dev;
+
     /*
      * dev->priv will point to the start of DPA.
      */
-    dev->priv = (void *)(((long)dev + sizeof(struct device) + 15) & ~15);
-#else
-    dev->priv = 0;
-    dev->priv = (struct device *) kmalloc(dev_size, GFP_DMA | GFP_KERNEL |GFP_ATOMIC);
-    if (!dev->priv)
-    {
-        printk("rc: unable to kmalloc private area\n");
-        return 1;  
-    }
-    memset(dev->priv, 0, dev_size);
-#endif
+    dev->priv = (void *)(((long)dev + sizeof(struct net_device) + 15) & ~15);
 
 #ifdef RCDEBUG
     printk("rc: dev = 0x%x, dev->priv = 0x%x\n", (uint)dev, (uint)dev->priv);
 #endif
-
+    
     pDpa = dev->priv;
-    if (!dev->name)
-        dev->name = pDpa->devname;
 
     pDpa->dev = dev;            /* this is just for easy reference */
-    pDpa->function = function;
-    pDpa->bus = bus;
+    pDpa->function = pdev->devfn;
+    pDpa->bus = (unsigned char)pdev->bus->number;
     pDpa->id = card_idx;        /* the device number */
     pDpa->pci_addr = memaddr;
     PCIAdapters[card_idx] = pDpa;
+
 #ifdef RCDEBUG
     printk("rc: pDpa = 0x%x, id = %d \n", (uint)pDpa, (uint)pDpa->id);
 #endif
@@ -396,8 +265,7 @@ RCfound_device(struct device *dev, int memaddr, int irq,
            (uint)dev, (uint)dev->priv, (uint)vaddr);
 #endif
     dev->base_addr = (unsigned long)vaddr;
-    dev->irq = irq;
-    dev->interrupt = 0;
+    dev->irq = pdev->irq;
 
     /*
      * Request a shared interrupt line.
@@ -439,10 +307,6 @@ RCfound_device(struct device *dev, int memaddr, int irq,
     dev->init = &RCinit;
     ether_setup(dev);            /* linux kernel interface */
 
-    pDpa->next = root_RCdev;
-    root_RCdev = dev;
-
-#ifdef MODULE
     if (register_netdev(dev) != 0) /* linux kernel interface */
     {
         printk("rc: unable to register device \n");
@@ -451,17 +315,30 @@ RCfound_device(struct device *dev, int memaddr, int irq,
         kfree(dev);
         return 1;
     }
-#else
-    RCinit(dev);
-#endif
     printk("%s: RedCreek Communications IPSEC VPN adapter\n",
         dev->name);
 
     return 0; /* success */
 }
 
+static struct pci_driver rcpci45_driver = {
+	name: "rcpci45",
+	id_table: rcpci45_pci_table,
+	probe: rcpci45_init_one,
+	remove: rcpci45_remove_one,
+};
+
+static int __init rcpci_init_module (void)
+{
+	int rc = pci_module_init(&rcpci45_driver);
+
+	if (!rc)
+		printk(version);
+	return rc;
+}
+
 static int
-RCopen(struct device *dev)
+RCopen(struct net_device *dev)
 {
     int post_buffers = MAX_NMBR_RCV_BUFFERS;
     PDPA pDpa = (PDPA) dev->priv;
@@ -522,40 +399,38 @@ RCopen(struct device *dev)
     printk("rc: RCopen: posted %d buffers\n", (uint)pDpa->numOutRcvBuffers);
 #endif
     MOD_INC_USE_COUNT;
+    netif_start_queue(dev);
     return 0;
 }
 
 static int
-RC_xmit_packet(struct sk_buff *skb, struct device *dev)
+RC_xmit_packet(struct sk_buff *skb, struct net_device *dev)
 {
 
     PDPA pDpa = (PDPA) dev->priv;
     singleTCB tcb;
     psingleTCB ptcb = &tcb;
     RC_RETURN status = 0;
-    
-        if (dev->tbusy || pDpa->shutdown || pDpa->reboot)
-        {
+   
+    netif_stop_queue(dev);
+     
+    if (pDpa->shutdown || pDpa->reboot)
+    {
 #ifdef RCDEBUG
             printk("rc: RC_xmit_packet: tbusy!\n");
 #endif
-            dev->tbusy = 1;
             return 1;
-        }
-      
-    if ( skb->len <= 0 ) 
-    {
-        printk("RC_xmit_packet: skb->len less than 0!\n");
-        return 0;
     }
-
+      
     /*
      * The user is free to reuse the TCB after RCI2OSendPacket() returns, since
      * the function copies the necessary info into its own private space.  Thus,
      * our TCB can be a local structure.  The skb, on the other hand, will be
      * freed up in our interrupt handler.
      */
+
     ptcb->bcount = 1;
+
     /* 
      * we'll get the context when the adapter interrupts us to tell us that
      * the transmision is done. At that time, we can free skb.
@@ -575,13 +450,12 @@ RC_xmit_packet(struct sk_buff *skb, struct device *dev)
 #ifdef RCDEBUG
         printk("rc: RC send error 0x%x\n", (uint)status);
 #endif
-        dev->tbusy = 1;
         return 1;
     }
     else
     {
         dev->trans_start = jiffies;
-        //       dev->tbusy = 0;
+        netif_wake_queue(dev);
     }
     /*
      * That's it!
@@ -607,7 +481,7 @@ RCxmit_callback(U32 Status,
 {
     struct sk_buff *skb;
     PDPA pDpa;
-    struct device *dev;
+    struct net_device *dev;
 
         pDpa = PCIAdapters[AdapterID];
         if (!pDpa)
@@ -638,21 +512,16 @@ RCxmit_callback(U32 Status,
             printk("rc: skb = 0x%x\n", (uint)skb);
 #endif
             BufferContext++;
-#ifdef LINUX_2_1
-            dev_kfree_skb (skb);
-#else
-            dev_kfree_skb (skb, FREE_WRITE);
-#endif
+            dev_kfree_skb_irq(skb);
         }
-        dev->tbusy = 0;
-
+	netif_wake_queue(dev);
 }
 
 static void
 RCreset_callback(U32 Status, U32 p1, U32 p2, U16 AdapterID)
 {
     PDPA pDpa;
-    struct device *dev;
+    struct net_device *dev;
      
     pDpa = PCIAdapters[AdapterID];
     dev = pDpa->dev;
@@ -752,7 +621,7 @@ RCrecv_callback(U32  Status,
     U32 len, count;
     PDPA pDpa;
     struct sk_buff *skb;
-    struct device *dev;
+    struct net_device *dev;
     singleTCB tcb;
     psingleTCB ptcb = &tcb;
 
@@ -803,18 +672,10 @@ RCrecv_callback(U32  Status,
                 while(PktCount--)
                 {
                     skb = (struct sk_buff *)PacketDescBlock[0];
-#ifndef LINUX_2_1
-                    skb->free = 1;
-                    skb->lock = 0;    
-#endif
 #ifdef RCDEBUG
                     printk("free skb 0x%p\n", skb);
 #endif
-#ifdef LINUX_2_1
                     dev_kfree_skb (skb);
-#else
-                    dev_kfree_skb(skb, FREE_READ);
-#endif
                     pDpa->numOutRcvBuffers--;
                     PacketDescBlock += BD_SIZE; /* point to next context field */
                 }
@@ -853,12 +714,7 @@ RCrecv_callback(U32  Status,
                     if ( RCPostRecvBuffers(pDpa->id, (PRCTCB)ptcb ) != RC_RTN_NO_ERROR)
                     {
                         printk("rc: RCrecv_callback: post buffer failed!\n");
-#ifdef LINUX_2_1
                         dev_kfree_skb (skb);
-#else
-                        skb->free = 1;
-                        dev_kfree_skb(skb, FREE_READ);
-#endif
                     }
                     else
                     {
@@ -908,7 +764,7 @@ RCinterrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 
     PDPA pDpa;
-    struct device *dev = (struct device *)(dev_id);
+    struct net_device *dev = (struct net_device *)(dev_id);
 
     pDpa = (PDPA) (dev->priv);
      
@@ -920,24 +776,18 @@ RCinterrupt(int irq, void *dev_id, struct pt_regs *regs)
            (uint)pDpa, (uint)dev, (uint)pDpa->id);
     printk("dev = 0x%x\n", (uint)dev);
 #endif
-    if (dev->interrupt)
-        printk("%s: Re-entering the interrupt handler.\n", dev->name);
-    dev->interrupt = 1;
 
     RCProcI2OMsgQ(pDpa->id);
-    dev->interrupt = 0;
-
-    return;
 }
 
 
 #define REBOOT_REINIT_RETRY_LIMIT 4
 static void rc_timer(unsigned long data)
 {
-    struct device *dev = (struct device *)data;
+    struct net_device *dev = (struct net_device *)data;
     PDPA pDpa = (PDPA) (dev->priv);
     int init_status;
-    static int retry = 0;
+    static int retry;
     int post_buffers = MAX_NMBR_RCV_BUFFERS;
     int count = 0;
     int requested = 0;
@@ -979,7 +829,7 @@ static void rc_timer(unsigned long data)
                        (uint)pDpa->numOutRcvBuffers);
             }
             printk("rc: Initialization done.\n");
-            dev->tbusy=0;
+            netif_wake_queue(dev);
             retry=0;
             return;
         case RC_RTN_FREE_Q_EMPTY:
@@ -1017,11 +867,13 @@ static void rc_timer(unsigned long data)
 }
 
 static int
-RCclose(struct device *dev)
+RCclose(struct net_device *dev)
 {
 
     PDPA pDpa = (PDPA) dev->priv;
 
+    netif_stop_queue(dev);
+    
 #ifdef RCDEBUG
     printk("rc: RCclose\r\n");
 #endif
@@ -1055,8 +907,8 @@ RCclose(struct device *dev)
     return 0;
 }
 
-static struct enet_statistics *
-RCget_stats(struct device *dev)
+static struct net_device_stats *
+RCget_stats(struct net_device *dev)
 {
     RCLINKSTATS    RCstats;
    
@@ -1138,12 +990,12 @@ RCget_stats(struct device *dev)
         pDpa->stats.tx_heartbeat_errors = 0;
         pDpa->stats.tx_window_errors = 0;
 
-        return ((struct enet_statistics *)&(pDpa->stats));
+        return ((struct net_device_stats *)&(pDpa->stats));
     }
     return 0;
 }
 
-static int RCioctl(struct device *dev, struct ifreq *rq, int cmd)
+static int RCioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 {
     RCuser_struct RCuser;
     PDPA pDpa = dev->priv;
@@ -1152,6 +1004,9 @@ static int RCioctl(struct device *dev, struct ifreq *rq, int cmd)
     printk("RCioctl: cmd = 0x%x\n", cmd);
 #endif
  
+    if(!capable(CAP_NET_ADMIN))
+    	return -EPERM;
+    	
     switch (cmd)  {
  
     case RCU_PROTOCOL_REV:
@@ -1165,17 +1020,8 @@ static int RCioctl(struct device *dev, struct ifreq *rq, int cmd)
 
     case RCU_COMMAND:
     {
-#ifdef LINUX_2_1
         if(copy_from_user(&RCuser, rq->ifr_data, sizeof(RCuser)))
              return -EFAULT;
-#else
-        int error;
-        error=verify_area(VERIFY_WRITE, rq->ifr_data, sizeof(RCuser));
-        if (error)  {
-            return error;
-        }
-        memcpy_fromfs(&RCuser, rq->ifr_data, sizeof(RCuser));
-#endif
         
 #ifdef RCDEBUG
         printk("RCioctl: RCuser_cmd = 0x%x\n", RCuser.cmd);
@@ -1236,7 +1082,7 @@ static int RCioctl(struct device *dev, struct ifreq *rq, int cmd)
             }
             RCUD_GETSPEED = &RCuser.RCUS_GETSPEED;
             RCGetLinkSpeed(pDpa->id, (PU32) &RCUD_GETSPEED->LinkSpeedCode, NULL);
-            printk("RC speed = 0x%ld\n", RCUD_GETSPEED->LinkSpeedCode);
+            printk("RC speed = 0x%u\n", RCUD_GETSPEED->LinkSpeedCode);
             break;
         case RCUC_SETIPANDMASK:
             printk("RC SETIPANDMASK\n");
@@ -1264,19 +1110,19 @@ static int RCioctl(struct device *dev, struct ifreq *rq, int cmd)
             printk("RC SETSPEED\n");
             RCUD_SETSPEED = &RCuser.RCUS_SETSPEED;
             RCSetLinkSpeed(pDpa->id, (U16) RCUD_SETSPEED->LinkSpeedCode);
-            printk("RC New speed = 0x%d\n", RCUD_SETSPEED->LinkSpeedCode);
+            printk("RC New speed = 0x%x\n", RCUD_SETSPEED->LinkSpeedCode);
             break;
         case RCUC_SETPROM:
             printk("RC SETPROM\n");
             RCUD_SETPROM = &RCuser.RCUS_SETPROM;
             RCSetPromiscuousMode(pDpa->id,(U16)RCUD_SETPROM->PromMode);
-            printk("RC New prom mode = 0x%d\n", RCUD_SETPROM->PromMode);
+            printk("RC New prom mode = 0x%x\n", RCUD_SETPROM->PromMode);
             break;
         case RCUC_SETBROADCAST:
             printk("RC SETBROADCAST\n");
             RCUD_SETBROADCAST = &RCuser.RCUS_SETBROADCAST;
             RCSetBroadcastMode(pDpa->id,(U16)RCUD_SETBROADCAST->BroadcastMode);
-            printk("RC New broadcast mode = 0x%d\n", RCUD_SETBROADCAST->BroadcastMode);
+            printk("RC New broadcast mode = 0x%x\n", RCUD_SETBROADCAST->BroadcastMode);
             break;
         default:
             printk("RC command default\n");
@@ -1284,23 +1130,19 @@ static int RCioctl(struct device *dev, struct ifreq *rq, int cmd)
             RCUD_DEFAULT -> rc = 0x11223344;
             break;
         }
-#ifdef LINUX_2_1
-        copy_to_user(rq->ifr_data, &RCuser, sizeof(RCuser));
-#else
-        memcpy_tofs(rq->ifr_data, &RCuser, sizeof(RCuser));
-#endif
+        if(copy_to_user(rq->ifr_data, &RCuser, sizeof(RCuser)))
+        	return -EFAULT;
         break;
-    }   /* RCU_COMMAND */ 
+	}   /* RCU_COMMAND */ 
 
-    default:
-        printk("RC default\n");
-        rq->ifr_ifru.ifru_data = (caddr_t) 0x12345678;
-        break;
+	default:
+        	rq->ifr_ifru.ifru_data = (caddr_t) 0x12345678;
+        	return -EINVAL;
     }
     return 0;
 }
 
-static int RCconfig(struct device *dev, struct ifmap *map)
+static int RCconfig(struct net_device *dev, struct ifmap *map)
 {
     /*
      * To be completed ...
@@ -1319,41 +1161,17 @@ static int RCconfig(struct device *dev, struct ifmap *map)
 }
 
 
-#ifdef MODULE
-void
-cleanup_module(void)
+static void __exit rcpci_cleanup_module (void)
 {
-    PDPA pDpa;
-    struct device *next;
-
-
-#ifdef RCDEBUG
-    printk("rc: RC cleanup_module\n");
-    printk("rc: root_RCdev = 0x%x\n", (uint)root_RCdev);
-#endif
-
-
-    while (root_RCdev)
-    {
-        pDpa = (PDPA) root_RCdev->priv;
-#ifdef RCDEBUG
-        printk("rc: cleanup 0x%08X\n", (uint)root_RCdev);
-#endif
-        printk("IOP reset: 0x%x\n", RCResetIOP(pDpa->id));
-        unregister_netdev(root_RCdev);
-        next = pDpa->next;
-
-        iounmap((unsigned long *)root_RCdev->base_addr); 
-        free_irq( root_RCdev->irq, root_RCdev );
-        kfree(root_RCdev);
-        root_RCdev = next;
-    }
+	pci_unregister_driver(&rcpci45_driver);
 }
-#endif
+
+module_init(rcpci_init_module);
+module_exit(rcpci_cleanup_module);
 
 
 static int
-RC_allocate_and_post_buffers(struct device *dev, int numBuffers)
+RC_allocate_and_post_buffers(struct net_device *dev, int numBuffers)
 {
 
     int i;
@@ -1432,17 +1250,10 @@ RC_allocate_and_post_buffers(struct device *dev, int numBuffers)
         while(p[0])
         {
             skb = (struct sk_buff *)pB->context;
-#ifndef LINUX_2_1
-            skb->free = 1;    
-#endif
 #ifdef RCDEBUG
             printk("rc: freeing 0x%x\n", (uint)skb);
 #endif
-#ifdef LINUX_2_1
             dev_kfree_skb (skb);
-#else
-            dev_kfree_skb(skb, FREE_READ);
-#endif
             p[0]--;
             pB++;
         }

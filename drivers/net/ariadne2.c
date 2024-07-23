@@ -1,7 +1,7 @@
 /*
- *  Amiga Linux/m68k Ariadne II Ethernet Driver
+ *  Amiga Linux/m68k and Linux/PPC Ariadne II and X-Surf Ethernet Driver
  *
- *  (C) Copyright 1998 by some Elitist 680x0 Users(TM)
+ *  (C) Copyright 1998-2000 by some Elitist 680x0 Users(TM)
  *
  *  ---------------------------------------------------------------------------
  *
@@ -15,8 +15,8 @@
  *
  *  ---------------------------------------------------------------------------
  *
- *  The Ariadne II is a Zorro-II board made by Village Tronic. It contains a
- *  Realtek RTL8019AS Ethernet Controller.
+ *  The Ariadne II and X-Surf are Zorro-II boards containing Realtek RTL8019AS
+ *  Ethernet Controllers.
  */
 
 #include <linux/module.h>
@@ -36,10 +36,6 @@
 #include <asm/amigahw.h>
 
 #include "8390.h"
-
-
-#define ARIADNE2_BASE		0x0300
-#define ARIADNE2_BOOTROM	0xc000
 
 
 #define NE_BASE		(dev->base_addr)
@@ -65,63 +61,82 @@
 
 #define WORDSWAP(a)	((((a)>>8)&0xff) | ((a)<<8))
 
-int ariadne2_probe(struct device *dev);
-static int ariadne2_init(struct device *dev, unsigned int key,
-			 unsigned long board);
+#ifdef MODULE
+static struct net_device *root_ariadne2_dev = NULL;
+#endif
 
-static int ariadne2_open(struct device *dev);
-static int ariadne2_close(struct device *dev);
+static const struct card_info {
+    zorro_id id;
+    const char *name;
+    unsigned int offset;
+} cards[] __initdata = {
+    { ZORRO_PROD_VILLAGE_TRONIC_ARIADNE2, "Ariadne II", 0x0600 },
+    { ZORRO_PROD_INDIVIDUAL_COMPUTERS_X_SURF, "X-Surf", 0x8600 },
+};
 
-static void ariadne2_reset_8390(struct device *dev);
-static void ariadne2_get_8390_hdr(struct device *dev,
+static int __init ariadne2_probe(void);
+static int __init ariadne2_init(struct net_device *dev, unsigned long board,
+				const char *name, unsigned long ioaddr);
+static int ariadne2_open(struct net_device *dev);
+static int ariadne2_close(struct net_device *dev);
+static void ariadne2_reset_8390(struct net_device *dev);
+static void ariadne2_get_8390_hdr(struct net_device *dev,
 				  struct e8390_pkt_hdr *hdr, int ring_page);
-static void ariadne2_block_input(struct device *dev, int count,
+static void ariadne2_block_input(struct net_device *dev, int count,
 				 struct sk_buff *skb, int ring_offset);
-static void ariadne2_block_output(struct device *dev, const int count,
+static void ariadne2_block_output(struct net_device *dev, const int count,
 				  const unsigned char *buf,
 				  const int start_page);
+static void __exit ariadne2_cleanup(void);
 
-
-__initfunc(int ariadne2_probe(struct device *dev))
+static int __init ariadne2_probe(void)
 {
-    unsigned int key;
-    const struct ConfigDev *cd;
-    u_long board;
-    int err;
+    struct net_device *dev;
+    struct zorro_dev *z = NULL;
+    unsigned long board, ioaddr;
+    int err = -ENODEV;
+    int i;
 
-    if ((key = zorro_find(ZORRO_PROD_VILLAGE_TRONIC_ARIADNE2, 0, 0))) {
-	cd = zorro_get_board(key);
-	if ((board = (u_long)cd->cd_BoardAddr)) {
-	    if ((err = ariadne2_init(dev, key, ZTWO_VADDR(board))))
-		return err;
-	    zorro_config_board(key, 0);
-	    return 0;
+    while ((z = zorro_find_device(ZORRO_WILDCARD, z))) {
+	for (i = ARRAY_SIZE(cards)-1; i >= 0; i--)
+	    if (z->id == cards[i].id)
+		break;
+	if (i < 0)
+	    continue;
+	board = z->resource.start;
+	ioaddr = board+cards[i].offset;
+	dev = init_etherdev(0, 0);
+	SET_MODULE_OWNER(dev);
+	if (!dev)
+	    return -ENOMEM;
+	if (!request_mem_region(ioaddr, NE_IO_EXTENT*2, dev->name)) {
+	    kfree(dev);
+	    continue;
 	}
+	if ((err = ariadne2_init(dev, board, cards[i].name,
+				 ZTWO_VADDR(ioaddr)))) {
+	    release_mem_region(ioaddr, NE_IO_EXTENT*2);
+	    kfree(dev);
+	    return err;
+	}
+	err = 0;
     }
-    return -ENODEV;
+
+    if (err == -ENODEV)
+	printk("No Ariadne II or X-Surf ethernet card found.\n");
+    return err;
 }
 
-__initfunc(static int ariadne2_init(struct device *dev, unsigned int key,
-				    unsigned long board))
+static int __init ariadne2_init(struct net_device *dev, unsigned long board,
+				const char *name, unsigned long ioaddr)
 {
     int i;
     unsigned char SA_prom[32];
-    const char *name = NULL;
     int start_page, stop_page;
     static u32 ariadne2_offsets[16] = {
 	0x00, 0x02, 0x04, 0x06, 0x08, 0x0a, 0x0c, 0x0e,
 	0x10, 0x12, 0x14, 0x16, 0x18, 0x1a, 0x1c, 0x1e,
     };
-    int ioaddr = board+ARIADNE2_BASE*2;
-
-    if (load_8390_module("ariadne2.c"))
-	return -ENOSYS;
-
-    /* We should have a "dev" from Space.c or the static module table. */
-    if (dev == NULL) {
-	printk(KERN_ERR "ariadne2.c: Passed a NULL device.\n");
-	dev = init_etherdev(0, 0);
-    }
 
     /* Reset card. Who knows what dain-bramaged state it was left in. */
     {
@@ -175,29 +190,28 @@ __initfunc(static int ariadne2_init(struct device *dev, unsigned int key,
     start_page = NESM_START_PG;
     stop_page = NESM_STOP_PG;
 
-    name = "NE2000";
-
     dev->base_addr = ioaddr;
+    dev->irq = IRQ_AMIGA_PORTS;
 
     /* Install the Interrupt handler */
-    if (request_irq(IRQ_AMIGA_PORTS, ei_interrupt, 0, "AriadNE2 Ethernet",
-		    dev))
-	return -EAGAIN;
+    i = request_irq(IRQ_AMIGA_PORTS, ei_interrupt, SA_SHIRQ, dev->name, dev);
+    if (i) return i;
 
     /* Allocate dev->priv and fill in 8390 specific dev fields. */
     if (ethdev_init(dev)) {
 	printk("Unable to get memory for dev->priv.\n");
 	return -ENOMEM;
     }
-    ((struct ei_device *)dev->priv)->priv = key;
 
     for(i = 0; i < ETHER_ADDR_LEN; i++) {
+#ifdef DEBUG
 	printk(" %2.2x", SA_prom[i]);
+#endif
 	dev->dev_addr[i] = SA_prom[i];
     }
 
-    printk("%s: AriadNE2 at 0x%08lx, Ethernet Address "
-	   "%02x:%02x:%02x:%02x:%02x:%02x\n", dev->name, board,
+    printk("%s: %s at 0x%08lx, Ethernet Address "
+	   "%02x:%02x:%02x:%02x:%02x:%02x\n", dev->name, name, board,
 	   dev->dev_addr[0], dev->dev_addr[1], dev->dev_addr[2],
 	   dev->dev_addr[3], dev->dev_addr[4], dev->dev_addr[5]);
 
@@ -215,29 +229,31 @@ __initfunc(static int ariadne2_init(struct device *dev, unsigned int key,
     ei_status.reg_offset = ariadne2_offsets;
     dev->open = &ariadne2_open;
     dev->stop = &ariadne2_close;
+#ifdef MODULE
+    ei_status.priv = (unsigned long)root_ariadne2_dev;
+    root_ariadne2_dev = dev;
+#endif
     NS8390_init(dev, 0);
     return 0;
 }
 
-static int ariadne2_open(struct device *dev)
+static int ariadne2_open(struct net_device *dev)
 {
     ei_open(dev);
-    MOD_INC_USE_COUNT;
     return 0;
 }
 
-static int ariadne2_close(struct device *dev)
+static int ariadne2_close(struct net_device *dev)
 {
     if (ei_debug > 1)
 	printk("%s: Shutting down ethercard.\n", dev->name);
     ei_close(dev);
-    MOD_DEC_USE_COUNT;
     return 0;
 }
 
 /* Hard reset the card.  This used to pause for the same period that a
    8390 reset command required, but that shouldn't be necessary. */
-static void ariadne2_reset_8390(struct device *dev)
+static void ariadne2_reset_8390(struct net_device *dev)
 {
     unsigned long reset_start_time = jiffies;
 
@@ -262,7 +278,7 @@ static void ariadne2_reset_8390(struct device *dev)
    we don't need to be concerned with ring wrap as the header will be at
    the start of a page, so we optimize accordingly. */
 
-static void ariadne2_get_8390_hdr(struct device *dev,
+static void ariadne2_get_8390_hdr(struct net_device *dev,
 				  struct e8390_pkt_hdr *hdr, int ring_page)
 {
     int nic_base = dev->base_addr;
@@ -272,8 +288,8 @@ static void ariadne2_get_8390_hdr(struct device *dev,
     /* This *shouldn't* happen. If it does, it's the last thing you'll see */
     if (ei_status.dmaing) {
 	printk("%s: DMAing conflict in ne_get_8390_hdr "
-	   "[DMAstat:%d][irqlock:%d][intr:%ld].\n", dev->name, ei_status.dmaing,
-	   ei_status.irqlock, dev->interrupt);
+	   "[DMAstat:%d][irqlock:%d].\n", dev->name, ei_status.dmaing,
+	   ei_status.irqlock);
 	return;
     }
 
@@ -302,7 +318,7 @@ static void ariadne2_get_8390_hdr(struct device *dev,
    The NEx000 doesn't share the on-board packet memory -- you have to put
    the packet out through the "remote DMA" dataport using writeb. */
 
-static void ariadne2_block_input(struct device *dev, int count,
+static void ariadne2_block_input(struct net_device *dev, int count,
 				 struct sk_buff *skb, int ring_offset)
 {
     int nic_base = dev->base_addr;
@@ -313,9 +329,8 @@ static void ariadne2_block_input(struct device *dev, int count,
     /* This *shouldn't* happen. If it does, it's the last thing you'll see */
     if (ei_status.dmaing) {
 	printk("%s: DMAing conflict in ne_block_input "
-	   "[DMAstat:%d][irqlock:%d][intr:%ld].\n",
-	   dev->name, ei_status.dmaing, ei_status.irqlock,
-	   dev->interrupt);
+	   "[DMAstat:%d][irqlock:%d].\n",
+	   dev->name, ei_status.dmaing, ei_status.irqlock);
 	return;
     }
     ei_status.dmaing |= 0x01;
@@ -336,7 +351,7 @@ static void ariadne2_block_input(struct device *dev, int count,
     ei_status.dmaing &= ~0x01;
 }
 
-static void ariadne2_block_output(struct device *dev, int count,
+static void ariadne2_block_output(struct net_device *dev, int count,
 				  const unsigned char *buf,
 				  const int start_page)
 {
@@ -354,8 +369,8 @@ static void ariadne2_block_output(struct device *dev, int count,
     /* This *shouldn't* happen. If it does, it's the last thing you'll see */
     if (ei_status.dmaing) {
 	printk("%s: DMAing conflict in ne_block_output."
-	   "[DMAstat:%d][irqlock:%d][intr:%ld]\n", dev->name, ei_status.dmaing,
-	   ei_status.irqlock, dev->interrupt);
+	   "[DMAstat:%d][irqlock:%d]\n", dev->name, ei_status.dmaing,
+	   ei_status.irqlock);
 	return;
     }
     ei_status.dmaing |= 0x01;
@@ -390,36 +405,21 @@ static void ariadne2_block_output(struct device *dev, int count,
     return;
 }
 
+static void __exit ariadne2_cleanup(void)
+{
 #ifdef MODULE
-static char devicename[9] = { 0, };
+    struct net_device *dev, *next;
 
-static struct device ariadne2_dev =
-{
-    devicename,
-    0, 0, 0, 0,
-    0, 0,
-    0, 0, 0, NULL, ariadne2_probe,
-};
-
-int init_module(void)
-{
-    int err;
-    if ((err = register_netdev(&ariadne2_dev))) {
-	if (err == -EIO)
-	    printk("No AriadNE2 ethernet card found.\n");
-	return err;
+    while ((dev = root_ariadne2_dev)) {
+	next = (struct net_device *)(ei_status.priv);
+	unregister_netdev(dev);
+	free_irq(IRQ_AMIGA_PORTS, dev);
+	release_mem_region(ZTWO_PADDR(dev->base_addr), NE_IO_EXTENT*2);
+	kfree(dev);
+	root_ariadne2_dev = next;
     }
-    lock_8390_module();
-    return 0;
+#endif
 }
 
-void cleanup_module(void)
-{
-    unsigned int key = ((struct ei_device *)ariadne2_dev.priv)->priv;
-    free_irq(IRQ_AMIGA_PORTS, &ariadne2_dev);
-    unregister_netdev(&ariadne2_dev);
-    zorro_unconfig_board(key, 0);
-    unlock_8390_module();
-}
-
-#endif	/* MODULE */
+module_init(ariadne2_probe);
+module_exit(ariadne2_cleanup);

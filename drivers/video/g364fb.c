@@ -77,8 +77,6 @@
 #define MON_ID_REG 	0xe4100000 	/* unused */
 #define RESET_REG 	0xe4180000  	/* Write only */
 
-#define arraysize(x)	(sizeof(x)/sizeof(*(x)))
-
 static int currcon = 0;
 static struct display disp;
 static struct fb_info fb_info;
@@ -91,8 +89,6 @@ static struct fb_var_screeninfo fb_var = { 0, };
 /*
  *  Interface used by the world
  */
-static int g364fb_open(struct fb_info *info, int user);
-static int g364fb_release(struct fb_info *info, int user);
 static int g364fb_get_fix(struct fb_fix_screeninfo *fix, int con,
 			  struct fb_info *info);
 static int g364fb_get_var(struct fb_var_screeninfo *var, int con,
@@ -105,14 +101,12 @@ static int g364fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			   struct fb_info *info);
 static int g364fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			   struct fb_info *info);
-static int g364fb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			u_long arg, int con, struct fb_info *info);
 
 
 /*
  *  Interface to the low level console driver
  */
-void g364fb_init(void);
+int g364fb_init(void);
 static int g364fbcon_switch(int con, struct fb_info *info);
 static int g364fbcon_updatevar(int con, struct fb_info *info);
 static void g364fbcon_blank(int blank, struct fb_info *info);
@@ -129,8 +123,13 @@ static void do_install_cmap(int con, struct fb_info *info);
 
 
 static struct fb_ops g364fb_ops = {
-    g364fb_open, g364fb_release, g364fb_get_fix, g364fb_get_var, g364fb_set_var,
-    g364fb_get_cmap, g364fb_set_cmap, g364fb_pan_display, g364fb_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	g364fb_get_fix,
+	fb_get_var:	g364fb_get_var,
+	fb_set_var:	g364fb_set_var,
+	fb_get_cmap:	g364fb_get_cmap,
+	fb_set_cmap:	g364fb_set_cmap,
+	fb_pan_display:	g364fb_pan_display,
 };
 
 
@@ -151,30 +150,16 @@ void fbcon_g364fb_cursor(struct display *p, int mode, int x, int y)
 
 
 static struct display_switch fbcon_g364cfb8 = {
-    fbcon_cfb8_setup, fbcon_cfb8_bmove, fbcon_cfb8_clear, fbcon_cfb8_putc,
-    fbcon_cfb8_putcs, fbcon_cfb8_revc, fbcon_g364fb_cursor, NULL,
-    fbcon_cfb8_clear_margins, FONTWIDTH(8)
+    setup:		fbcon_cfb8_setup,
+    bmove:		fbcon_cfb8_bmove,
+    clear:		fbcon_cfb8_clear,
+    putc:		fbcon_cfb8_putc,
+    putcs:		fbcon_cfb8_putcs,
+    revc:		fbcon_cfb8_revc,
+    cursor:		fbcon_g364fb_cursor,
+    clear_margins:	fbcon_cfb8_clear_margins,
+    fontwidthmask:	FONTWIDTH(8)
 };
-
-
-/*
- *  Open/Release the frame buffer device
- */
-static int g364fb_open(struct fb_info *info, int user)                                       
-{
-    /*                                                                     
-     *  Nothing, only a usage count for the moment                          
-     */                                                                    
-    MOD_INC_USE_COUNT;
-    return(0);                              
-}
-        
-static int g364fb_release(struct fb_info *info, int user)
-{
-    MOD_DEC_USE_COUNT;
-    return(0);                                                    
-}
-
 
 /*
  *  Get the Fixed Part of the Display
@@ -287,17 +272,10 @@ static int g364fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 }
 
 
-static int g364fb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-			u_long arg, int con, struct fb_info *info)
-{
-    return -EINVAL;
-}
-
-
 /*
  *  Initialisation
  */
-__initfunc(void g364fb_init(void))
+int __init g364fb_init(void)
 {
     int i,j;
     volatile unsigned int *pal_ptr = (volatile unsigned int *) CLR_PAL_REG;
@@ -345,7 +323,7 @@ __initfunc(void g364fb_init(void))
     fb_var.yres = yres;
 
     fb_fix.line_length = (xres / 8) * fb_var.bits_per_pixel;
-    fb_fix.smem_start = (char *)0x40000000; /* physical address */
+    fb_fix.smem_start = 0x40000000; /* physical address */
     /* get size of video memory; this is special for the JAZZ hardware */
     mem = (r4030_read_reg32(JAZZ_R4030_CONFIG) >> 8) & 3;
     fb_fix.smem_len = (1 << (mem*2)) * 512 * 1024;
@@ -355,7 +333,7 @@ __initfunc(void g364fb_init(void))
     fb_fix.xpanstep = 0;
     fb_fix.ypanstep = 1;
     fb_fix.ywrapstep = 0;
-    fb_fix.mmio_start = NULL;
+    fb_fix.mmio_start = 0;
     fb_fix.mmio_len = 0;
     fb_fix.accel = FB_ACCEL_NONE;
     
@@ -413,10 +391,11 @@ __initfunc(void g364fb_init(void))
     g364fb_set_var(&fb_var, -1, &fb_info);
 
     if (register_framebuffer(&fb_info) < 0)
-	return;
+	return -EINVAL;
 
     printk("fb%d: %s frame buffer device\n", GET_FB_IDX(fb_info.node),
 	   fb_fix.id);
+    return 0;
 }
 
 

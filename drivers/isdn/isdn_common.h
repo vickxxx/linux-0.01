@@ -1,4 +1,4 @@
-/* $Id: isdn_common.h,v 1.15 1999/04/18 14:06:50 fritz Exp $
+/* $Id: isdn_common.h,v 1.21 2000/11/25 17:00:59 kai Exp $
 
  * header for Linux ISDN subsystem, common used functions and debugging-switches (linklevel).
  *
@@ -19,75 +19,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * $Log: isdn_common.h,v $
- * Revision 1.15  1999/04/18 14:06:50  fritz
- * Removed TIMRU stuff.
- *
- * Revision 1.14  1999/04/12 12:33:18  fritz
- * Changes from 2.0 tree.
- *
- * Revision 1.13  1999/03/02 12:04:47  armin
- * -added ISDN_STAT_ADDCH to increase supported channels after
- *  register_isdn().
- * -ttyI now goes on-hook on ATZ when B-Ch is connected.
- * -added timer-function for register S7 (Wait for Carrier).
- * -analog modem (ISDN_PROTO_L2_MODEM) implementations.
- * -on L2_MODEM a string will be appended to the CONNECT-Message,
- *  which is provided by the HL-Driver in parm.num in ISDN_STAT_BCONN.
- * -variable "dialing" used for ATA also, for interrupting call
- *  establishment and register S7.
- *
- * Revision 1.12  1998/06/26 15:12:27  fritz
- * Added handling of STAT_ICALL with incomplete CPN.
- * Added AT&L for ttyI emulator.
- * Added more locking stuff in tty_write.
- *
- * Revision 1.11  1998/04/14 16:28:47  he
- * Fixed user space access with interrupts off and remaining
- * copy_{to,from}_user() -> -EFAULT return codes
- *
- * Revision 1.10  1998/03/07 18:21:03  cal
- * Dynamic Timeout-Rule-Handling vs. 971110 included
- *
- * Revision 1.9  1998/02/20 17:19:01  fritz
- * Added common stub for sending commands to lowlevel.
- *
- * Revision 1.8  1997/10/09 21:28:49  fritz
- * New HL<->LL interface:
- *   New BSENT callback with nr. of bytes included.
- *   Sending without ACK.
- *   New L1 error status (not yet in use).
- *   Cleaned up obsolete structures.
- * Implemented Cisco-SLARP.
- * Changed local net-interface data to be dynamically allocated.
- * Removed old 2.0 compatibility stuff.
- *
- * Revision 1.7  1997/10/01 09:20:30  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 1.6  1997/02/28 02:32:44  fritz
- * Cleanup: Moved some tty related stuff from isdn_common.c
- *          to isdn_tty.c
- * Bugfix:  Bisync protocol did not behave like documented.
- *
- * Revision 1.5  1997/02/10 10:05:45  fritz
- * More changes for Kernel 2.1.X
- * Symbol information moved to isdn_syms.c
- *
- * Revision 1.4  1997/02/03 22:56:50  fritz
- * Removed isdn_writebuf_stub prototype.
- *
- * Revision 1.3  1996/05/19 00:13:05  fritz
- * Removed debug flag.
- *
- * Revision 1.2  1996/04/20 16:20:40  fritz
- * Misc. typos.
- *
- * Revision 1.1  1996/01/10 21:37:19  fritz
- * Initial revision
  *
  */
 
@@ -115,15 +46,11 @@ extern char *isdn_map_eaz2msn(char *msn, int di);
 extern void isdn_timer_ctrl(int tf, int onoff);
 extern void isdn_unexclusive_channel(int di, int ch);
 extern int isdn_getnum(char **);
-#if LINUX_VERSION_CODE < 131841
-extern int isdn_readbchan(int, int, u_char *, u_char *, int, struct wait_queue**);
-#else
 extern int isdn_readbchan(int, int, u_char *, u_char *, int, wait_queue_head_t *);
-#endif
-extern int isdn_get_free_channel(int, int, int, int, int);
+extern int isdn_get_free_channel(int, int, int, int, int, char *);
 extern int isdn_writebuf_skb_stub(int, int, int, struct sk_buff *);
 extern int register_isdn(isdn_if * i);
-extern int isdn_wildmat(char *, char *);
+extern int isdn_msncmp( const char *,  const char *);
 extern int isdn_add_channels(driver *, int, int, int);
 #if defined(ISDN_DEBUG_NET_DUMP) || defined(ISDN_DEBUG_MODEM_DUMP)
 extern void isdn_dumppkt(char *, u_char *, int, int);

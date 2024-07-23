@@ -31,17 +31,9 @@ int atari_SCC_init_done = 0;
 int atari_SCC_reset_done = 0;
 
 static struct console atari_console_driver = {
-	"debug",
-	NULL,			/* write */
-	NULL,			/* read */
-	NULL,			/* device */
-	NULL,			/* wait_key */
-	NULL,			/* unblank */
-	NULL,			/* setup */
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"debug",
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
 
@@ -102,7 +94,7 @@ static int ata_par_out (char c)
 {
     unsigned char tmp;
     /* This a some-seconds timeout in case no printer is connected */
-    unsigned long i = loops_per_sec > 1 ? loops_per_sec : 10000000;
+    unsigned long i = loops_per_jiffy > 1 ? loops_per_jiffy : 10000000/HZ;
 
     while( (mfp.par_dt_reg & 1) && --i ) /* wait for BUSY == L */
 	;
@@ -168,7 +160,7 @@ int atari_midi_console_wait_key(struct console *co)
  * SCC serial ports. They're used by the debugging interface, kgdb, and the
  * serial console code. */
 #ifndef CONFIG_SERIAL_CONSOLE
-__initfunc(static void atari_init_mfp_port( int cflag ))
+static void __init atari_init_mfp_port( int cflag )
 #else
 void atari_init_mfp_port( int cflag )
 #endif
@@ -204,7 +196,7 @@ void atari_init_mfp_port( int cflag )
 	MFPDELAY();					\
     } while(0)
 
-/* loops_per_sec isn't initialized yet, so we can't use udelay(). This does a
+/* loops_per_jiffy isn't initialized yet, so we can't use udelay(). This does a
  * delay of ~ 60us. */
 #define LONG_DELAY()				\
     do {					\
@@ -214,7 +206,7 @@ void atari_init_mfp_port( int cflag )
     } while(0)
     
 #ifndef CONFIG_SERIAL_CONSOLE
-__initfunc(static void atari_init_scc_port( int cflag ))
+static void __init atari_init_scc_port( int cflag )
 #else
 void atari_init_scc_port( int cflag )
 #endif
@@ -281,7 +273,7 @@ void atari_init_scc_port( int cflag )
 }
 
 #ifndef CONFIG_SERIAL_CONSOLE 
-__initfunc(static void atari_init_midi_port( int cflag ))
+static void __init atari_init_midi_port( int cflag )
 #else
 void atari_init_midi_port( int cflag )
 #endif
@@ -309,12 +301,8 @@ void atari_init_midi_port( int cflag )
 		     ACIA_RHTID : ACIA_RLTID);
 }
 
-__initfunc(void atari_debug_init(void))
+void __init atari_debug_init(void)
 {
-#ifdef CONFIG_KGDB
-    /* the m68k_debug_device is used by the GDB stub, do nothing here */
-    return;
-#endif
     if (!strcmp( m68k_debug_device, "ser" )) {
 	/* defaults to ser2 for a Falcon and ser1 otherwise */
 	strcpy( m68k_debug_device, MACH_IS_FALCON ? "ser2" : "ser1" );

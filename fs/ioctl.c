@@ -19,19 +19,18 @@ static int file_ioctl(struct file *filp,unsigned int cmd,unsigned long arg)
 	switch (cmd) {
 		case FIBMAP:
 		{
-			struct buffer_head tmp;
-
-			if (inode->i_op == NULL)
-				return -EBADF;
-		    	if (inode->i_op->get_block == NULL)
+			struct address_space *mapping = inode->i_mapping;
+			int res;
+			/* do we support this mess? */
+			if (!mapping->a_ops->bmap)
 				return -EINVAL;
+			if (!capable(CAP_SYS_RAWIO))
+				return -EPERM;
 			if ((error = get_user(block, (int *) arg)) != 0)
 				return error;
 
-			tmp.b_state = 0;
-			tmp.b_blocknr = 0;
-			inode->i_op->get_block(inode, block, &tmp, 0);
-			return put_user(tmp.b_blocknr, (int *) arg);
+			res = mapping->a_ops->bmap(mapping, block);
+			return put_user(res, (int *) arg);
 		}
 		case FIGETBSZ:
 			if (inode->i_sb == NULL)
@@ -46,24 +45,24 @@ static int file_ioctl(struct file *filp,unsigned int cmd,unsigned long arg)
 }
 
 
-asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
+asmlinkage long sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 {	
 	struct file * filp;
 	unsigned int flag;
 	int on, error = -EBADF;
 
-	lock_kernel();
 	filp = fget(fd);
 	if (!filp)
 		goto out;
 	error = 0;
+	lock_kernel();
 	switch (cmd) {
 		case FIOCLEX:
-			FD_SET(fd, &current->files->close_on_exec);
+			set_close_on_exec(fd, 1);
 			break;
 
 		case FIONCLEX:
-			FD_CLR(fd, &current->files->close_on_exec);
+			set_close_on_exec(fd, 0);
 			break;
 
 		case FIONBIO:
@@ -89,8 +88,12 @@ asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 			/* Did FASYNC state change ? */
 			if ((flag ^ filp->f_flags) & FASYNC) {
 				if (filp->f_op && filp->f_op->fasync)
-					filp->f_op->fasync(fd, filp, on); 
+					error = filp->f_op->fasync(fd, filp, on);
+				else error = -ENOTTY;
 			}
+			if (error != 0)
+				break;
+
 			if (on)
 				filp->f_flags |= FASYNC;
 			else
@@ -99,16 +102,14 @@ asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
 
 		default:
 			error = -ENOTTY;
-			if (!filp->f_dentry || !filp->f_dentry->d_inode)
-				error = -ENOENT;
-			else if (S_ISREG(filp->f_dentry->d_inode->i_mode))
+			if (S_ISREG(filp->f_dentry->d_inode->i_mode))
 				error = file_ioctl(filp, cmd, arg);
 			else if (filp->f_op && filp->f_op->ioctl)
 				error = filp->f_op->ioctl(filp->f_dentry->d_inode, filp, cmd, arg);
 	}
+	unlock_kernel();
 	fput(filp);
 
 out:
-	unlock_kernel();
 	return error;
 }

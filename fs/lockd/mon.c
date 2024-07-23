@@ -24,20 +24,18 @@ extern struct rpc_program	nsm_program;
 /*
  * Local NSM state
  */
-u32				nsm_local_state = 0;
+u32				nsm_local_state;
 
 /*
  * Common procedure for SM_MON/SM_UNMON calls
  */
 static int
-nsm_mon_unmon(struct nlm_host *host, char *what, u32 proc)
+nsm_mon_unmon(struct nlm_host *host, u32 proc, struct nsm_res *res)
 {
 	struct rpc_clnt	*clnt;
 	int		status;
 	struct nsm_args	args;
-	struct nsm_res	res;
 
-	dprintk("lockd: nsm_%s(%s)\n", what, host->h_name);
 	status = -EACCES;
 	clnt = nsm_create();
 	if (!clnt)
@@ -47,23 +45,15 @@ nsm_mon_unmon(struct nlm_host *host, char *what, u32 proc)
 	args.prog = NLM_PROGRAM;
 	args.vers = 1;
 	args.proc = NLMPROC_NSM_NOTIFY;
+	memset(res, 0, sizeof(*res));
 
-	status = rpc_call(clnt, proc, &args, &res, 0);
-	if (status < 0) {
+	status = rpc_call(clnt, proc, &args, res, 0);
+	if (status < 0)
 		printk(KERN_DEBUG "nsm_mon_unmon: rpc failed, status=%d\n",
 			status);
-		goto out;
-	}
-
-	status = -EACCES;
-	if (res.status != 0) {
-		printk(KERN_NOTICE "lockd: cannot %s %s\n", what, host->h_name);
-		goto out;
-	}
-
-	nsm_local_state = res.state;
-	status = 0;
-out:
+	else
+		status = 0;
+ out:
 	return status;
 }
 
@@ -73,10 +63,16 @@ out:
 int
 nsm_monitor(struct nlm_host *host)
 {
+	struct nsm_res	res;
 	int		status;
 
-	status = nsm_mon_unmon(host, "monitor", SM_MON);
-	if (status >= 0)
+	dprintk("lockd: nsm_monitor(%s)\n", host->h_name);
+
+	status = nsm_mon_unmon(host, SM_MON, &res);
+
+	if (status < 0 || res.status != 0)
+		printk(KERN_NOTICE "lockd: cannot monitor %s\n", host->h_name);
+	else
 		host->h_monitored = 1;
 	return status;
 }
@@ -87,9 +83,15 @@ nsm_monitor(struct nlm_host *host)
 int
 nsm_unmonitor(struct nlm_host *host)
 {
+	struct nsm_res	res;
 	int		status;
 
-	if ((status = nsm_mon_unmon(host, "unmonitor", SM_UNMON)) >= 0)
+	dprintk("lockd: nsm_unmonitor(%s)\n", host->h_name);
+
+	status = nsm_mon_unmon(host, SM_UNMON, &res);
+	if (status < 0)
+		printk(KERN_NOTICE "lockd: cannot unmonitor %s\n", host->h_name);
+	else
 		host->h_monitored = 0;
 	return status;
 }
@@ -143,7 +145,7 @@ xdr_encode_mon(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
 	char	buffer[20];
 	u32	addr = ntohl(argp->addr);
 
-	dprintk("nsm: xdr_encode_mon(%08lx, %ld, %ld, %ld)\n",
+	dprintk("nsm: xdr_encode_mon(%08x, %d, %d, %d)\n",
 			htonl(argp->addr), htonl(argp->proc),
 			htonl(argp->vers), htonl(argp->proc));
 
@@ -163,7 +165,7 @@ xdr_encode_mon(struct rpc_rqst *rqstp, u32 *p, struct nsm_args *argp)
 	*p++ = htonl(argp->proc);
 
 	/* This is the private part. Needed only for SM_MON call */
-	if (rqstp->rq_task->tk_proc == SM_MON) {
+	if (rqstp->rq_task->tk_msg.rpc_proc == SM_MON) {
 		*p++ = argp->addr;
 		*p++ = 0;
 		*p++ = 0;
@@ -187,7 +189,7 @@ xdr_decode_stat_res(struct rpc_rqst *rqstp, u32 *p, struct nsm_res *resp)
 static int
 xdr_decode_stat(struct rpc_rqst *rqstp, u32 *p, struct nsm_res *resp)
 {
-	resp->status = ntohl(*p++);
+	resp->state = ntohl(*p++);
 	return 0;
 }
 
@@ -195,6 +197,12 @@ xdr_decode_stat(struct rpc_rqst *rqstp, u32 *p, struct nsm_res *resp)
 #define SM_my_id_sz	(3+1+SM_my_name_sz)
 #define SM_mon_id_sz	(1+XDR_QUADLEN(20)+SM_my_id_sz)
 #define SM_mon_sz	(SM_mon_id_sz+4)
+#define SM_monres_sz	2
+#define SM_unmonres_sz	1
+
+#ifndef MAX
+# define MAX(a, b)	(((a) > (b))? (a) : (b))
+#endif
 
 static struct rpc_procinfo	nsm_procedures[] = {
         { "sm_null",
@@ -205,10 +213,10 @@ static struct rpc_procinfo	nsm_procedures[] = {
 		(kxdrproc_t) xdr_error, 0, 0 },
         { "sm_mon",
 		(kxdrproc_t) xdr_encode_mon,
-		(kxdrproc_t) xdr_decode_stat_res, SM_mon_sz, 2 },
+		(kxdrproc_t) xdr_decode_stat_res, MAX(SM_mon_sz, SM_monres_sz) << 2, 0 },
         { "sm_unmon",
 		(kxdrproc_t) xdr_encode_mon,
-		(kxdrproc_t) xdr_decode_stat, SM_mon_id_sz, 1 },
+		(kxdrproc_t) xdr_decode_stat, MAX(SM_mon_id_sz, SM_unmonres_sz) << 2, 0 },
         { "sm_unmon_all",
 		(kxdrproc_t) xdr_error,
 		(kxdrproc_t) xdr_error, 0, 0 },

@@ -11,6 +11,7 @@
  */
 
 #define DEBUG 0
+#include <asm/div64.h>
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/malloc.h>
@@ -26,11 +27,13 @@
 #include <linux/major.h>
 #include <linux/blkdev.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
 extern int *blk_size[];
 extern struct timezone sys_tz;
+extern struct inode_operations affs_symlink_inode_operations;
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
@@ -58,6 +61,7 @@ affs_read_inode(struct inode *inode)
 	unsigned long		 prot;
 	s32			 ptype, stype;
 	unsigned short		 id;
+	loff_t		tmp;
 
 	pr_debug("AFFS: read_inode(%lu)\n",inode->i_ino);
 
@@ -146,7 +150,10 @@ affs_read_inode(struct inode *inode)
 				block = AFFS_I2BSIZE(inode) - 24;
 			else
 				block = AFFS_I2BSIZE(inode);
-			inode->u.affs_i.i_lastblock = ((inode->i_size + block - 1) / block) - 1;
+			tmp = inode->i_size + block -1;
+			do_div (tmp, block);
+			tmp--;
+			inode->u.affs_i.i_lastblock = tmp;
 			break;
 		case ST_SOFTLINK:
 			inode->i_mode |= S_IFLNK;
@@ -162,24 +169,30 @@ affs_read_inode(struct inode *inode)
 			 sys_tz.tz_minuteswest * 60;
 	affs_brelse(bh);
 
-	inode->i_op = NULL;
 	if (S_ISREG(inode->i_mode)) {
 		if (inode->i_sb->u.affs_sb.s_flags & SF_OFS) {
-			inode->i_op = &affs_file_inode_operations_ofs;
-		} else {
 			inode->i_op = &affs_file_inode_operations;
+			inode->i_fop = &affs_file_operations_ofs;
+			return;
 		}
+		inode->i_op = &affs_file_inode_operations;
+		inode->i_fop = &affs_file_operations;
+		inode->i_mapping->a_ops = &affs_aops;
+		inode->u.affs_i.mmu_private = inode->i_size;
 	} else if (S_ISDIR(inode->i_mode)) {
 		/* Maybe it should be controlled by mount parameter? */
 		inode->i_mode |= S_ISVTX;
 		inode->i_op = &affs_dir_inode_operations;
+		inode->i_fop = &affs_dir_operations;
 	}
-	else if (S_ISLNK(inode->i_mode))
+	else if (S_ISLNK(inode->i_mode)) {
 		inode->i_op = &affs_symlink_inode_operations;
+		inode->i_data.a_ops = &affs_symlink_aops;
+	}
 }
 
 void
-affs_write_inode(struct inode *inode)
+affs_write_inode(struct inode *inode, int unused)
 {
 	struct buffer_head	*bh;
 	struct file_end		*file_end;
@@ -190,8 +203,10 @@ affs_write_inode(struct inode *inode)
 
 	if (!inode->i_nlink)
 		return;
+	lock_kernel();
 	if (!(bh = bread(inode->i_dev,inode->i_ino,AFFS_I2BSIZE(inode)))) {
 		affs_error(inode->i_sb,"write_inode","Cannot read block %lu",inode->i_ino);
+		unlock_kernel();
 		return;
 	}
 	file_end = GET_END_PTR(struct file_end, bh->b_data,AFFS_I2BSIZE(inode));
@@ -217,8 +232,9 @@ affs_write_inode(struct inode *inode)
 		}
 	}
 	affs_fix_checksum(AFFS_I2BSIZE(inode),bh->b_data,5);
-	mark_buffer_dirty(bh,1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
+	unlock_kernel();
 }
 
 int
@@ -245,9 +261,8 @@ affs_notify_change(struct dentry *dentry, struct iattr *attr)
 	if (attr->ia_valid & ATTR_MODE)
 		inode->u.affs_i.i_protect = mode_to_prot(attr->ia_mode);
 
-	inode_setattr(inode, attr);
-	mark_inode_dirty(inode);
 	error = 0;
+	inode_setattr(inode, attr);
 out:
 	return error;
 }
@@ -258,8 +273,9 @@ affs_put_inode(struct inode *inode)
 	pr_debug("AFFS: put_inode(ino=%lu, nlink=%u)\n",
 		inode->i_ino,inode->i_nlink);
 
+	lock_kernel();
 	affs_free_prealloc(inode);
-	if (inode->i_count == 1) {
+	if (atomic_read(&inode->i_count) == 1) {
 		unsigned long cache_page = (unsigned long) inode->u.affs_i.i_ec;
 		if (cache_page) {
 			pr_debug("AFFS: freeing ext cache\n");
@@ -267,16 +283,19 @@ affs_put_inode(struct inode *inode)
 			free_page(cache_page);
 		}
 	}
+	unlock_kernel();
 }
 
 void
 affs_delete_inode(struct inode *inode)
 {
 	pr_debug("AFFS: delete_inode(ino=%lu, nlink=%u)\n",inode->i_ino,inode->i_nlink);
+	lock_kernel();
 	inode->i_size = 0;
 	if (S_ISREG(inode->i_mode) && !inode->u.affs_i.i_hlink)
 		affs_truncate(inode);
 	affs_free_block(inode->i_sb,inode->i_ino);
+	unlock_kernel();
 	clear_inode(inode);
 }
 
@@ -287,29 +306,22 @@ affs_new_inode(const struct inode *dir)
 	struct super_block	*sb;
 	s32			 block;
 
-	if (!dir || !(inode = get_empty_inode()))
+	if (!dir)
 		return NULL;
 
 	sb = dir->i_sb;
-	inode->i_sb    = sb;
-	inode->i_flags = 0;
+	inode = new_inode(sb);
+	if (!inode)
+		return NULL;
 
 	if (!(block = affs_new_header((struct inode *)dir))) {
 		iput(inode);
 		return NULL;
 	}
 
-	inode->i_count   = 1;
-	inode->i_nlink   = 1;
-	inode->i_dev     = sb->s_dev;
 	inode->i_uid     = current->fsuid;
 	inode->i_gid     = current->fsgid;
 	inode->i_ino     = block;
-	inode->i_op      = NULL;
-	inode->i_blocks  = 0;
-	inode->i_size    = 0;
-	inode->i_mode    = 0;
-	inode->i_blksize = 0;
 	inode->i_mtime   = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 
 	inode->u.affs_i.i_original  = 0;
@@ -381,7 +393,7 @@ affs_add_entry(struct inode *dir, struct inode *link, struct inode *inode,
 		affs_fix_checksum(AFFS_I2BSIZE(link),link_bh->b_data,5);
 		link->i_version = ++event;
 		mark_inode_dirty(link);
-		mark_buffer_dirty(link_bh,1);
+		mark_buffer_dirty(link_bh);
 	}
 	affs_fix_checksum(AFFS_I2BSIZE(inode),inode_bh->b_data,5);
 	affs_fix_checksum(AFFS_I2BSIZE(dir),dir_bh->b_data,5);
@@ -391,8 +403,8 @@ affs_add_entry(struct inode *dir, struct inode *link, struct inode *inode,
 
 	mark_inode_dirty(dir);
 	mark_inode_dirty(inode);
-	mark_buffer_dirty(dir_bh,1);
-	mark_buffer_dirty(inode_bh,1);
+	mark_buffer_dirty(dir_bh);
+	mark_buffer_dirty(inode_bh);
 
 addentry_done:
 	affs_brelse(dir_bh);

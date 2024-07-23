@@ -1,4 +1,4 @@
-/* $Id: irixioctl.c,v 1.6 1999/02/06 05:12:56 adevries Exp $
+/*
  * irixioctl.c: A fucking mess...
  *
  * Copyright (C) 1996 David S. Miller (dm@engr.sgi.com)
@@ -29,25 +29,26 @@ extern asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd,
 				unsigned long arg);
 extern asmlinkage int sys_write(unsigned int fd,char * buf,unsigned int count);
 extern void start_tty(struct tty_struct *tty);
-
 static struct tty_struct *get_tty(int fd)
 {
 	struct file *filp;
+	struct tty_struct *ttyp = NULL;
 
-	if(!(filp = fcheck(fd)))
-		return ((struct tty_struct *) 0);
-	if(filp->private_data) {
-		struct tty_struct *ttyp = (struct tty_struct *) filp->private_data;
+	read_lock(&current->files->file_lock);
+	filp = fcheck(fd);
+	if(filp && filp->private_data) {
+		ttyp = (struct tty_struct *) filp->private_data;
 
-		if(ttyp->magic == TTY_MAGIC)
-			return ttyp;
+		if(ttyp->magic != TTY_MAGIC)
+			ttyp =NULL;
 	}
-	return ((struct tty_struct *) 0);
+	read_unlock(&current->files->file_lock);
+	return ttyp;
 }
 
 static struct tty_struct *get_real_tty(struct tty_struct *tp)
 {
-	if(tp->driver.type == TTY_DRIVER_TYPE_PTY &&
+	if (tp->driver.type == TTY_DRIVER_TYPE_PTY &&
 	   tp->driver.subtype == PTY_TYPE_MASTER)
 		return tp->link;
 	else
@@ -60,7 +61,6 @@ asmlinkage int irix_ioctl(int fd, unsigned long cmd, unsigned long arg)
 	mm_segment_t old_fs;
 	int error = 0;
 
-	lock_kernel();
 #ifdef DEBUG_IOCTLS
 	printk("[%s:%d] irix_ioctl(%d, ", current->comm, current->pid, fd);
 #endif
@@ -86,7 +86,7 @@ asmlinkage int irix_ioctl(int fd, unsigned long cmd, unsigned long arg)
 		old_fs = get_fs(); set_fs(get_ds());
 		error = sys_ioctl(fd, TCGETS, (unsigned long) &kt);
 		set_fs(old_fs);
-		if(error)
+		if (error)
 			break;
 		__put_user(kt.c_iflag, &it->c_iflag);
 		__put_user(kt.c_oflag, &it->c_oflag);
@@ -105,7 +105,7 @@ asmlinkage int irix_ioctl(int fd, unsigned long cmd, unsigned long arg)
 #ifdef DEBUG_IOCTLS
 		printk("TCSETS, %08lx) ", arg);
 #endif
-		if(!access_ok(VERIFY_READ, it, sizeof(*it))) {
+		if (!access_ok(VERIFY_READ, it, sizeof(*it))) {
 			error = -EFAULT;
 			break;
 		}
@@ -258,6 +258,5 @@ asmlinkage int irix_ioctl(int fd, unsigned long cmd, unsigned long arg)
 #ifdef DEBUG_IOCTLS
 	printk("error=%d\n", error);
 #endif
-	unlock_kernel();
 	return error;
 }

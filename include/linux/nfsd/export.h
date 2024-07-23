@@ -4,16 +4,17 @@
  * Public declarations for NFS exports. The definitions for the
  * syscall interface are in nfsctl.h
  *
- * Copyright (C) 1995, 1996 Olaf Kirch <okir@monad.swb.de>
+ * Copyright (C) 1995-1997 Olaf Kirch <okir@monad.swb.de>
  */
 
 #ifndef NFSD_EXPORT_H
 #define NFSD_EXPORT_H
 
-#include <linux/types.h>
-#include <linux/socket.h>
-#include <linux/in.h>
-#include <linux/fs.h>
+#include <asm/types.h>
+#ifdef __KERNEL__
+# include <linux/types.h>
+# include <linux/in.h>
+#endif
 
 /*
  * Important limits for the exports stuff.
@@ -34,8 +35,11 @@
 #define NFSEXP_UIDMAP		0x0040
 #define NFSEXP_KERBEROS		0x0080		/* not available */
 #define NFSEXP_SUNSECURE	0x0100
-#define NFSEXP_CROSSMNT		0x0200		/* not available */
-#define NFSEXP_ALLFLAGS		0x03FF
+#define NFSEXP_CROSSMNT		0x0200
+#define NFSEXP_NOSUBTREECHECK	0x0400
+#define	NFSEXP_NOAUTHNLM	0x0800		/* Don't authenticate NLM requests - just trust */
+#define NFSEXP_MSNFS		0x1000	/* do silly things that MS clients expect */
+#define NFSEXP_ALLFLAGS		0x1FFF
 
 
 #ifdef __KERNEL__
@@ -59,6 +63,7 @@ struct svc_export {
 	struct svc_export *	ex_parent;
 	struct svc_client *	ex_client;
 	int			ex_flags;
+	struct vfsmount *	ex_mnt;
 	struct dentry *		ex_dentry;
 	kdev_t			ex_dev;
 	ino_t			ex_ino;
@@ -86,22 +91,10 @@ struct svc_client *	exp_getclient(struct sockaddr_in *sin);
 void			exp_putclient(struct svc_client *clp);
 struct svc_export *	exp_get(struct svc_client *clp, kdev_t dev, ino_t ino);
 int			exp_rootfh(struct svc_client *, kdev_t, ino_t,
-					char *path, struct knfs_fh *);
+					char *path, struct knfsd_fh *, int maxsize);
 int			nfserrno(int errno);
 void			exp_nlmdetach(void);
 
-
-extern __inline__ int
-exp_checkaddr(struct svc_client *clp, struct in_addr addr)
-{
-	struct in_addr	*ap = clp->cl_addr;
-	int		i;
-
-	for (i = clp->cl_naddr; i--; ap++)
-		if (ap->s_addr == addr.s_addr)
-			return 1;
-	return 0;
-}
 
 #endif /* __KERNEL__ */
 

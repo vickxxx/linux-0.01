@@ -116,6 +116,8 @@
  *     16/11/96 - Fiddled and frigged for 2.0.18
  *
  * DAG 30/01/99 - Started frobbing for 2.2.1
+ * DAG 20/06/99 - A little more frobbing:
+ *     Included include/asm/uaccess.h for get_user/put_user
  */
 
 #include <linux/sched.h>
@@ -140,8 +142,11 @@
 #include <asm/io.h>
 #include <asm/ioc.h>
 #include <asm/irq.h>
+#include <asm/mach-types.h>
 #include <asm/pgtable.h>
 #include <asm/segment.h>
+#include <asm/uaccess.h>
+
 
 #define MAJOR_NR FLOPPY_MAJOR
 #define FLOPPY_DMA 0
@@ -193,7 +198,7 @@ static struct archy_disk_type {
 #define MAX_DISK_SIZE 720
 
 static int floppy_sizes[256];
-static int floppy_blocksizes[256] = {0,};
+static int floppy_blocksizes[256];
 
 /* current info on each unit */
 static struct archy_floppy_struct {
@@ -285,6 +290,7 @@ static unsigned int changed_floppies = 0xff, fake_change = 0;
 #define MAX_ERRORS			8	/* After this many errors the driver
 						 * will give up. */
 
+static struct timer_list fd_timer;
 
 #define	START_MOTOR_OFF_TIMER(delay)			\
     do {						\
@@ -295,15 +301,12 @@ static unsigned int changed_floppies = 0xff, fake_change = 0;
 
 #define	START_CHECK_CHANGE_TIMER(delay)				\
     do {							\
-        timer_table[FLOPPY_TIMER].expires = jiffies + (delay);	\
-        timer_active |= (1 << FLOPPY_TIMER);			\
+        mod_timer(&fd_timer, jiffies + (delay));		\
 	} while(0)
 
-#define	START_TIMEOUT()					\
-    do {						\
-        del_timer( &timeout_timer );			\
-        timeout_timer.expires = jiffies + FLOPPY_TIMEOUT;	\
-        add_timer( &timeout_timer );			\
+#define	START_TIMEOUT()					     \
+    do {						     \
+        mod_timer(&timeout_timer, jiffies+FLOPPY_TIMEOUT); \
 	} while(0)
 
 #define	STOP_TIMEOUT()					\
@@ -338,7 +341,7 @@ static void fd_select_side(int side);
 static void fd_select_drive(int drive);
 static void fd_deselect(void);
 static void fd_motor_off_timer(unsigned long dummy);
-static void check_change(void);
+static void check_change(unsigned long dummy);
 static __inline__ void set_head_settle_flag(void);
 static __inline__ int get_head_settle_flag(void);
 static void floppy_irqconsequencehandler(void);
@@ -499,7 +502,7 @@ static void fd_motor_off_timer(unsigned long dummy)
  * as possible) and keep track of the current state of the write protection.
  */
 
-static void check_change(void)
+static void check_change(unsigned long dummy)
 {
 	static int drive = 0;
 
@@ -587,7 +590,7 @@ static void fd_error(void)
 {
 	printk("FDC1772: fd_error\n");
 	/*panic("fd1772: fd_error"); *//* DAG tmp */
-	if (!CURRENT)
+	if (QUEUE_EMPTY)
 		return;
 	CURRENT->errors++;
 	if (CURRENT->errors >= MAX_ERRORS) {
@@ -1091,12 +1094,12 @@ static void finish_fdc_done(int dummy)
 	STOP_TIMEOUT();
 	NeedSeek = 0;
 
-	if ((timer_active & (1 << FLOPPY_TIMER)) &&
-	    time_after(jiffies + 5, timer_table[FLOPPY_TIMER].expires)) 
+	if (timer_pending(&fd_timer) &&
+	    time_after(jiffies + 5, fd_timer.expires)) 
 		/* If the check for a disk change is done too early after this
 		 * last seek command, the WP bit still reads wrong :-((
 		 */
-		timer_table[FLOPPY_TIMER].expires = jiffies + 5;
+		mod_timer(&fd_timer, jiffies + 5);
 	else {
 		/*      START_CHECK_CHANGE_TIMER( CHECK_CHANGE_DELAY ); */
 	};
@@ -1226,14 +1229,14 @@ static void redo_fd_request(void)
 
 	DPRINT(("redo_fd_request: CURRENT=%08lx CURRENT->rq_dev=%04x CURRENT->sector=%ld\n",
 		(unsigned long) CURRENT, CURRENT ? CURRENT->rq_dev : 0,
-		CURRENT ? CURRENT->sector : 0));
+		!QUEUE_EMPTY ? CURRENT->sector : 0));
 
-	if (CURRENT && CURRENT->rq_status == RQ_INACTIVE)
+	if (!QUEUE_EMPTY && CURRENT->rq_status == RQ_INACTIVE)
 		goto the_end;
 
       repeat:
 
-	if (!CURRENT)
+	if (QUEUE_EMPTY)
 		goto the_end;
 
 	if (MAJOR(CURRENT->rq_dev) != MAJOR_NR)
@@ -1346,10 +1349,6 @@ static int invalidate_drive(int rdev)
 static int fd_ioctl(struct inode *inode, struct file *filp,
 		    unsigned int cmd, unsigned long param)
 {
-#define IOCTL_MODE_BIT 8
-#define OPEN_WRITE_BIT 16
-#define IOCTL_ALLOWED (filp && (filp->f_mode & IOCTL_MODE_BIT))
-
 	int drive, device;
 
 	device = inode->i_rdev;
@@ -1357,8 +1356,6 @@ static int fd_ioctl(struct inode *inode, struct file *filp,
 		RO_IOCTLS(inode->i_rdev, param);
 	}
 	drive = MINOR(device);
-	if (!IOCTL_ALLOWED)
-		return -EPERM;
 	switch (cmd) {
 	case FDFMTBEG:
 		return 0;
@@ -1540,12 +1537,6 @@ static int floppy_open(struct inode *inode, struct file *filp)
 	if (old_dev && old_dev != inode->i_rdev)
 		invalidate_buffers(old_dev);
 
-	/* Allow ioctls if we have write-permissions even if read-only open */
-	if (filp->f_mode & 2 || permission(inode, 2) == 0)
-		filp->f_mode |= IOCTL_MODE_BIT;
-	if (filp->f_mode & 2)
-		filp->f_mode |= OPEN_WRITE_BIT;
-
 	if (filp->f_flags & O_NDELAY)
 		return 0;
 
@@ -1564,14 +1555,7 @@ static int floppy_open(struct inode *inode, struct file *filp)
 
 static void floppy_release(struct inode *inode, struct file *filp)
 {
-	int drive;
-
-	drive = inode->i_rdev & 3;
-
-	if (!filp || (filp->f_mode & (2 | OPEN_WRITE_BIT)))
-		/* if the file is mounted OR (writable now AND writable at open
-		   time) Linus: Does this cover all cases? */
-		block_fsync(inode, filp);
+	int drive = MINOR(inode->i_rdev) & 3;
 
 	if (fd_ref[drive] < 0)
 		fd_ref[drive] = 0;
@@ -1581,28 +1565,23 @@ static void floppy_release(struct inode *inode, struct file *filp)
 	}
 }
 
-static struct file_operations floppy_fops =
+static struct block_device_operations floppy_fops =
 {
-	NULL,			/* lseek - default */
-	block_read,		/* read - general block-dev read */
-	block_write,		/* write - general block-dev write */
-	NULL,			/* readdir - bad */
-	NULL,			/* select */
-	fd_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	floppy_open,		/* open */
-	NULL,			/* flush */
-	floppy_release,		/* release */
-	block_fsync,		/* fsync */
-	NULL,			/* fasync */
-	check_floppy_change,	/* media_change */
-	floppy_revalidate,	/* revalidate */
+	owner:			THIS_MODULE,
+	open:			floppy_open,
+	release:		floppy_release,
+	ioctl:			fd_ioctl,
+	check_media_change:	check_floppy_change,
+	revalidate:		floppy_revalidate,
 };
 
 
-int floppy_init(void)
+int fd1772_init(void)
 {
 	int i;
+
+	if (!machine_is_arc())
+		return 0;
 
 	if (register_blkdev(MAJOR_NR, "fd", &floppy_fops)) {
 		printk("Unable to get major %d for floppy\n", MAJOR_NR);
@@ -1628,9 +1607,9 @@ int floppy_init(void)
 #endif
 
 	/* initialize check_change timer */
-	timer_table[FLOPPY_TIMER].fn = check_change;
-	timer_active &= ~(1 << FLOPPY_TIMER);
-
+	init_timer(&fd_timer);
+	fd_timer.function = check_change;
+}
 
 #ifdef TRACKBUFFER
   DMABuffer = (char *)kmalloc((MAX_SECTORS+1)*512,GFP_KERNEL); /* Atari uses 512 - I want to eventually cope with 1K sectors */

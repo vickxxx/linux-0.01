@@ -70,9 +70,8 @@
 #define NR_PRIMARY 8	/* maximum number of primary ports */
 
 /* The following variables can be set by giving module options */
-static int irq[NR_PRIMARY] = {0,0,0,0,0,0,0,0};	/* IRQ for each base port */
-static unsigned int divisor[NR_PRIMARY] = {0,0,0,0,0,0,0,0};
-	/* custom divisor for each port */
+static int irq[NR_PRIMARY];	/* IRQ for each base port */
+static unsigned int divisor[NR_PRIMARY]; /* custom divisor for each port */
 static unsigned int dma = ESP_DMA_CHANNEL; /* DMA channel */
 static unsigned int rx_trigger = ESP_RX_TRIGGER;
 static unsigned int tx_trigger = ESP_TX_TRIGGER;
@@ -168,7 +167,7 @@ static struct termios *serial_termios_locked[NR_PORTS];
  * buffer across all the serial ports, since it significantly saves
  * memory if large numbers of serial ports are open.
  */
-static unsigned char *tmp_buf = 0;
+static unsigned char *tmp_buf;
 static DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct esp_struct *info,
@@ -201,20 +200,6 @@ static inline void serial_out(struct esp_struct *info, int offset,
 			      unsigned char value)
 {
 	outb(value, info->port+offset);
-}
-
-static inline int __get_order(unsigned long size)
-{
-	int order;
-
-	size = (size + PAGE_SIZE -1) >> PAGE_SHIFT;
-	order = -1;
-	do {
-		size >>= 1;
-		order++;
-	} while (size);
-
-	return order;
 }
 
 /*
@@ -655,7 +640,9 @@ static _INLINE_ void check_modem_status(struct esp_struct *info)
 #ifdef SERIAL_DEBUG_OPEN
 			printk("scheduling hangup...");
 #endif
-			queue_task(&info->tqueue_hangup, &tq_scheduler);
+			MOD_INC_USE_COUNT;
+			if (schedule_task(&info->tqueue_hangup) == 0)
+				MOD_DEC_USE_COUNT;
 		}
 	}
 }
@@ -817,10 +804,9 @@ static void do_serial_hangup(void *private_)
 	struct tty_struct	*tty;
 	
 	tty = info->tty;
-	if (!tty)
-		return;
-
-	tty_hangup(tty);
+	if (tty)
+		tty_hangup(tty);
+	MOD_DEC_USE_COUNT;
 }
 
 /*
@@ -965,14 +951,14 @@ static int startup(struct esp_struct * info)
 
 	if (!(info->stat_flags & ESP_STAT_USE_PIO) && !dma_buffer) {
 		dma_buffer = (char *)__get_dma_pages(
-			GFP_KERNEL, __get_order(DMA_BUFFER_SZ));
+			GFP_KERNEL, get_order(DMA_BUFFER_SZ));
 
 		/* use PIO mode if DMA buf/chan cannot be allocated */
 		if (!dma_buffer)
 			info->stat_flags |= ESP_STAT_USE_PIO;
 		else if (request_dma(dma, "esp serial")) {
 			free_pages((unsigned int)dma_buffer,
-				   __get_order(DMA_BUFFER_SZ));
+				   get_order(DMA_BUFFER_SZ));
 			dma_buffer = 0;
 			info->stat_flags |= ESP_STAT_USE_PIO;
 		}
@@ -1076,7 +1062,7 @@ static void shutdown(struct esp_struct * info)
 		if (!current_port) {
 			free_dma(dma);
 			free_pages((unsigned int)dma_buffer,
-				   __get_order(DMA_BUFFER_SZ));
+				   get_order(DMA_BUFFER_SZ));
 			dma_buffer = 0;
 		}		
 	}
@@ -2180,7 +2166,6 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 	while ((serial_in(info, UART_ESI_STAT1) != 0x03) ||
 		(serial_in(info, UART_ESI_STAT2) != 0xff)) {
 		current->state = TASK_INTERRUPTIBLE;
-		current->counter = 0;
 		schedule_timeout(char_time);
 
 		if (signal_pending(current))
@@ -2318,7 +2303,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 				scratch | UART_MCR_DTR | UART_MCR_RTS);
 		}
 		sti();
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ASYNC_INITIALIZED)) {
 #ifdef SERIAL_DO_RESTART
@@ -2526,7 +2511,7 @@ static _INLINE_ int autoconfig(struct esp_struct * info, int *region_start)
 /*
  * The serial driver boot-time initialization code!
  */
-__initfunc(int espserial_init(void))
+int __init espserial_init(void)
 {
 	int i, offset;
 	int region_start;
@@ -2786,7 +2771,7 @@ void cleanup_module(void)
 
 	if (dma_buffer)
 		free_pages((unsigned int)dma_buffer,
-			__get_order(DMA_BUFFER_SZ));
+			get_order(DMA_BUFFER_SZ));
 
 	if (tmp_buf)
 		free_page((unsigned long)tmp_buf);

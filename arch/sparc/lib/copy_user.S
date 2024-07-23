@@ -14,6 +14,7 @@
 #include <asm/cprefix.h>
 #include <asm/ptrace.h>
 #include <asm/asmmacro.h>
+#include <asm/page.h>
 
 #define EX(x,y,a,b,z) 				\
 98: 	x,y;					\
@@ -110,6 +111,9 @@
 
 	.text
 	.align	4
+
+	.globl  __copy_user_begin
+__copy_user_begin:
 
 	.globl	C_LABEL(__copy_user)
 dword_align:
@@ -355,7 +359,7 @@ short_aligned_end:
 97:
 	mov	%o2, %g3
 fixupretl:
-	GET_PAGE_OFFSET(g1)
+	sethi   %hi(PAGE_OFFSET), %g1
 	cmp	%o0, %g1
 	blu	1f
 	 cmp	%o1, %g1
@@ -481,3 +485,6 @@ fixupretl:
 	sub	%o0, %g3, %o0
 	ba	fixupretl
 	 add	%g3, %o2, %g3
+
+	.globl  __copy_user_end
+__copy_user_end:

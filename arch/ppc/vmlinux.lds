@@ -41,6 +41,7 @@ SECTIONS
     *(.rodata)
     *(.rodata1)
   }
+  .kstrtab   : { *(.kstrtab) }
   .fini      : { *(.fini)    } =0
   .ctors     : { *(.ctors)   }
   .dtors     : { *(.dtors)   }
@@ -64,13 +65,32 @@ SECTIONS
   __ex_table : { *(__ex_table) }
   __stop___ex_table = .;
 
+  __start___ksymtab = .;	/* Kernel symbol table */
+  __ksymtab : { *(__ksymtab) }
+  __stop___ksymtab = .;
+
   . = ALIGN(32);
   .data.cacheline_aligned : { *(.data.cacheline_aligned) }
 
   . = ALIGN(4096);
   __init_begin = .;
   .text.init : { *(.text.init) }
-  .data.init : { *(.data.init) }
+  .data.init : { 
+    *(.data.init);
+    __vtop_table_begin = .;
+    *(.vtop_fixup);
+    __vtop_table_end = .;
+    __ptov_table_begin = .;
+    *(.ptov_fixup);
+    __ptov_table_end = .;
+  }
+  . = ALIGN(16);
+  __setup_start = .;
+  .setup.init : { *(.setup.init) }
+  __setup_end = .;
+  __initcall_start = .;
+  .initcall.init : { *(.initcall.init) }
+  __initcall_end = .;
   . = ALIGN(4096);
   __init_end = .;
 
@@ -87,6 +107,27 @@ SECTIONS
   .data.prep : { *(.data.prep) }
   . = ALIGN(4096);
   __prep_end = .;
+
+  . = ALIGN(4096);
+  __chrp_begin = .;
+  .text.chrp : { *(.text.chrp) }
+  .data.chrp : { *(.data.chrp) }
+  . = ALIGN(4096);
+  __chrp_end = .;
+
+  . = ALIGN(4096);
+  __apus_begin = .;
+  .text.apus : { *(.text.apus) }
+  .data.apus : { *(.data.apus) }
+  . = ALIGN(4096);
+  __apus_end = .;
+
+  . = ALIGN(4096);
+  __apus_begin = .;
+  .text.apus : { *(.text.apus) }
+  .data.apus : { *(.data.apus) }
+  . = ALIGN(4096);
+  __apus_end = .;
 
   . = ALIGN(4096);
   __openfirmware_begin = .;
@@ -106,4 +147,3 @@ SECTIONS
   _end = . ;
   PROVIDE (end = .);
 }
-

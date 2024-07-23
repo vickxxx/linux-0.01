@@ -34,6 +34,21 @@
  *					  exposed a problem in readdir
  *			2.1.107		code-freeze spellchecker run
  *	Aug 1998			2.1.118+ VFS changes
+ *	Sep 1998	2.1.122		another VFS change (follow_link)
+ *	Apr 1999	2.2.7		no more EBADF checking in
+ *					  lookup/readdir, use ERR_PTR
+ *	Jun 1999	2.3.6		d_alloc_root use changed
+ *			2.3.9		clean up usage of ENOENT/negative
+ *					  dentries in lookup
+ *					clean up page flags setting
+ *					  (error, uptodate, locking) in
+ *					  in readpage
+ *					use init_special_inode for
+ *					  fifos/sockets (and streamline) in
+ *					  read_inode, fix _ops table order
+ *	Aug 1999	2.3.16		__initfunc() => __init change
+ *	Oct 1999	2.3.24		page->owner hack obsoleted
+ *	Nov 1999	2.3.27		2.3.25+ page->offset => index change
  */
 
 /* todo:
@@ -90,11 +105,8 @@ romfs_read_super(struct super_block *s, void *data, int silent)
 	struct romfs_super_block *rsb;
 	int sz;
 
-	MOD_INC_USE_COUNT;
-
 	/* I would parse the options here, but there are none.. :) */
 
-	lock_super(s);
 	set_blocksize(dev, ROMBSIZE);
 	s->s_blocksize = ROMBSIZE;
 	s->s_blocksize_bits = ROMBSBITS;
@@ -138,44 +150,28 @@ romfs_read_super(struct super_block *s, void *data, int silent)
 	if (!s->s_root)
 		goto outnobh;
 
-	unlock_super(s);
-
 	/* Ehrhm; sorry.. :)  And thanks to Hans-Joachim Widmaier  :) */
 	if (0) {
 out:
 		brelse(bh);
 outnobh:
-		s->s_dev = 0;
-		unlock_super(s);
-		MOD_DEC_USE_COUNT;
 		s = NULL;
 	}
 
 	return s;
 }
 
-/* Nothing to do.. */
-
-static void
-romfs_put_super(struct super_block *sb)
-{
-	MOD_DEC_USE_COUNT;
-	return;
-}
-
 /* That's simple too. */
 
 static int
-romfs_statfs(struct super_block *sb, struct statfs *buf, int bufsize)
+romfs_statfs(struct super_block *sb, struct statfs *buf)
 {
-	struct statfs tmp;
-
-	memset(&tmp, 0, sizeof(tmp));
-	tmp.f_type = ROMFS_MAGIC;
-	tmp.f_bsize = ROMBSIZE;
-	tmp.f_blocks = (sb->u.romfs_sb.s_maxsize+ROMBSIZE-1)>>ROMBSBITS;
-	tmp.f_namelen = ROMFS_MAXFN;
-	return copy_to_user(buf, &tmp, bufsize) ? -EFAULT : 0;
+	buf->f_type = ROMFS_MAGIC;
+	buf->f_bsize = ROMBSIZE;
+	buf->f_bfree = buf->f_bavail = buf->f_ffree;
+	buf->f_blocks = (sb->u.romfs_sb.s_maxsize+ROMBSIZE-1)>>ROMBSBITS;
+	buf->f_namelen = ROMFS_MAXFN;
+	return 0;
 }
 
 /* some helper routines */
@@ -258,6 +254,10 @@ romfs_copyfrom(struct inode *i, void *dest, unsigned long offset, unsigned long 
 	return res;
 }
 
+static unsigned char romfs_dtype_table[] = {
+	DT_UNKNOWN, DT_DIR, DT_REG, DT_LNK, DT_BLK, DT_CHR, DT_SOCK, DT_FIFO
+};
+
 static int
 romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
@@ -302,7 +302,8 @@ romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		nextfh = ntohl(ri.next);
 		if ((nextfh & ROMFH_TYPE) == ROMFH_HRD)
 			ino = ntohl(ri.spec);
-		if (filldir(dirent, fsname, j, offset, ino) < 0) {
+		if (filldir(dirent, fsname, j, offset, ino,
+			    romfs_dtype_table[nextfh & ROMFH_TYPE]) < 0) {
 			return stored;
 		}
 		stored++;
@@ -392,228 +393,63 @@ out:	return ERR_PTR(res);
  */
 
 static int
-romfs_readpage(struct file * file, struct page * page)
+romfs_readpage(struct file *file, struct page * page)
 {
-	struct dentry *dentry = file->f_dentry;
-	struct inode *inode = dentry->d_inode;
-	unsigned long buf;
+	struct inode *inode = page->mapping->host;
 	unsigned long offset, avail, readlen;
+	void *buf;
 	int result = -EIO;
 
 	lock_kernel();
 	get_page(page);
 	buf = page_address(page);
 
-	/* hack? */
-	page->owner = (int)current;
-
-	offset = page->offset;
+	/* 32 bit warning -- but not for us :) */
+	offset = page->index << PAGE_CACHE_SHIFT;
 	if (offset < inode->i_size) {
 		avail = inode->i_size-offset;
 		readlen = min(avail, PAGE_SIZE);
-		if (romfs_copyfrom(inode, (void *)buf, inode->u.romfs_i.i_dataoffset+offset, readlen) == readlen) {
+		if (romfs_copyfrom(inode, buf, inode->u.romfs_i.i_dataoffset+offset, readlen) == readlen) {
 			if (readlen < PAGE_SIZE) {
-				memset((void *)(buf+readlen),0,PAGE_SIZE-readlen);
+				memset(buf + readlen,0,PAGE_SIZE-readlen);
 			}
 			SetPageUptodate(page);
 			result = 0;
 		}
 	}
 	if (result) {
-		memset((void *)buf, 0, PAGE_SIZE);
+		memset(buf, 0, PAGE_SIZE);
 		SetPageError(page);
 	}
+	flush_dcache_page(page);
 
 	UnlockPage(page);
 
-	free_page(buf);
+	__free_page(page);
 	unlock_kernel();
 
 	return result;
 }
 
-static int
-romfs_readlink(struct dentry *dentry, char *buffer, int len)
-{
-	struct inode *inode = dentry->d_inode;
-	int mylen;
-	char buf[ROMFS_MAXFN];		/* XXX dynamic */
-
-	if (!inode || !S_ISLNK(inode->i_mode)) {
-		mylen = -EBADF;
-		goto out;
-	}
-
-	mylen = min(sizeof(buf), inode->i_size);
-
-	if (romfs_copyfrom(inode, buf, inode->u.romfs_i.i_dataoffset, mylen) <= 0) {
-		mylen = -EIO;
-		goto out;
-	}
-	copy_to_user(buffer, buf, mylen);
-
-out:
-	return mylen;
-}
-
-static struct dentry *romfs_follow_link(struct dentry *dentry,
-					struct dentry *base,
-					unsigned int follow)
-{
-	struct inode *inode = dentry->d_inode;
-	char *link;
-	int len, cnt;
-
-	len = inode->i_size;
-
-	dentry = ERR_PTR(-EAGAIN);			/* correct? */
-	if (!(link = kmalloc(len+1, GFP_KERNEL)))
-		goto outnobuf;
-
-	cnt = romfs_copyfrom(inode, link, inode->u.romfs_i.i_dataoffset, len);
-	if (len != cnt) {
-		dentry = ERR_PTR(-EIO);
-		goto out;
-	} else
-		link[len] = 0;
-
-	dentry = lookup_dentry(link, base, follow);
-	kfree(link);
-
-	if (0) {
-out:
-		kfree(link);
-outnobuf:
-		dput(base);
-	}
-	return dentry;
-}
-
 /* Mapping from our types to the kernel */
 
-static struct file_operations romfs_file_operations = {
-	NULL,			/* lseek - default */
-        generic_file_read,	/* read */
-	NULL,			/* write - bad */
-	NULL,			/* readdir */
-	NULL,			/* poll - default */
-	NULL,			/* ioctl */
-	generic_file_mmap,	/* mmap */
-	NULL,			/* open */
-	NULL,			/* flush */
-	NULL,			/* release */
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL			/* revalidate */
-};
-
-static struct inode_operations romfs_file_inode_operations = {
-	&romfs_file_operations,
-	NULL,			/* create */
-	NULL,			/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block -- not really */
-	romfs_readpage,		/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+static struct address_space_operations romfs_aops = {
+	readpage: romfs_readpage
 };
 
 static struct file_operations romfs_dir_operations = {
-	NULL,			/* lseek - default */
-        NULL,			/* read */
-	NULL,			/* write - bad */
-	romfs_readdir,		/* readdir */
-	NULL,			/* poll - default */
-	NULL,			/* ioctl */
-	NULL,			/* mmap */
-	NULL,			/* open */
-	NULL,			/* flush */
-	NULL,			/* release */
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL			/* revalidate */
+	read:		generic_read_dir,
+	readdir:	romfs_readdir,
 };
-
-/* Merged dir/symlink op table.  readdir/lookup/readlink/follow_link
- * will protect from type mismatch.
- */
 
 static struct inode_operations romfs_dir_inode_operations = {
-	&romfs_dir_operations,
-	NULL,			/* create */
-	romfs_lookup,		/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
-};
-
-static struct inode_operations romfs_link_inode_operations = {
-	NULL,			/* no file operations on symlinks */
-	NULL,			/* create */
-	NULL,			/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	romfs_readlink,		/* readlink */
-	romfs_follow_link,	/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+	lookup:		romfs_lookup,
 };
 
 static mode_t romfs_modemap[] =
 {
 	0, S_IFDIR+0644, S_IFREG+0644, S_IFLNK+0777,
 	S_IFBLK+0600, S_IFCHR+0600, S_IFSOCK+0644, S_IFIFO+0644
-};
-
-static struct inode_operations *romfs_inoops[] =
-{
-	NULL,				/* hardlink, handled elsewhere */
-	&romfs_dir_inode_operations,
-	&romfs_file_inode_operations,
-	&romfs_link_inode_operations,
-	NULL,				/* device/fifo/socket nodes, */
-	NULL,				/*   set by init_special_inode */
-	NULL,
-	NULL,
 };
 
 static void
@@ -623,7 +459,6 @@ romfs_read_inode(struct inode *i)
 	struct romfs_inode ri;
 
 	ino = i->i_ino & ROMFH_MASK;
-	i->i_op = NULL;
 	i->i_mode = 0;
 
 	/* Loop for finding the real hard link */
@@ -659,59 +494,55 @@ romfs_read_inode(struct inode *i)
         /* Compute permissions */
         ino = romfs_modemap[nextfh & ROMFH_TYPE];
 	/* only "normal" files have ops */
-        if ((i->i_op = romfs_inoops[nextfh & ROMFH_TYPE])) {
-		if (nextfh & ROMFH_EXEC)
-			ino |= S_IXUGO;
-		i->i_mode = ino;
-		if (S_ISDIR(ino))
+	switch (nextfh & ROMFH_TYPE) {
+		case 1:
 			i->i_size = i->u.romfs_i.i_metasize;
-	} else {
-		/* depending on MBZ for sock/fifos */
-		nextfh = ntohl(ri.spec);
-		nextfh = kdev_t_to_nr(MKDEV(nextfh>>16,nextfh&0xffff));
-		init_special_inode(i, ino, nextfh);
+			i->i_op = &romfs_dir_inode_operations;
+			i->i_fop = &romfs_dir_operations;
+			if (nextfh & ROMFH_EXEC)
+				ino |= S_IXUGO;
+			i->i_mode = ino;
+			break;
+		case 2:
+			i->i_fop = &generic_ro_fops;
+			i->i_data.a_ops = &romfs_aops;
+			if (nextfh & ROMFH_EXEC)
+				ino |= S_IXUGO;
+			i->i_mode = ino;
+			break;
+		case 3:
+			i->i_op = &page_symlink_inode_operations;
+			i->i_data.a_ops = &romfs_aops;
+			i->i_mode = ino | S_IRWXUGO;
+			break;
+		default:
+			/* depending on MBZ for sock/fifos */
+			nextfh = ntohl(ri.spec);
+			nextfh = kdev_t_to_nr(MKDEV(nextfh>>16,nextfh&0xffff));
+			init_special_inode(i, ino, nextfh);
 	}
 }
 
 static struct super_operations romfs_ops = {
-	romfs_read_inode,	/* read inode */
-	NULL,			/* write inode */
-	NULL,			/* put inode */
-	NULL,			/* delete inode */
-	NULL,			/* notify change */
-	romfs_put_super,	/* put super */
-	NULL,			/* write super */
-	romfs_statfs,		/* statfs */
-	NULL			/* remount */
+	read_inode:	romfs_read_inode,
+	statfs:		romfs_statfs,
 };
 
-static struct file_system_type romfs_fs_type = {
-	"romfs",
-	FS_REQUIRES_DEV,
-	romfs_read_super,
-	NULL
-};
+static DECLARE_FSTYPE_DEV(romfs_fs_type, "romfs", romfs_read_super);
 
-__initfunc(int init_romfs_fs(void))
+static int __init init_romfs_fs(void)
 {
 	return register_filesystem(&romfs_fs_type);
 }
 
-#ifdef MODULE
+static void __exit exit_romfs_fs(void)
+{
+	unregister_filesystem(&romfs_fs_type);
+}
 
 /* Yes, works even as a module... :) */
 
 EXPORT_NO_SYMBOLS;
 
-int
-init_module(void)
-{
-	return init_romfs_fs();
-}
-
-void
-cleanup_module(void)
-{
-	unregister_filesystem(&romfs_fs_type);
-}
-#endif
+module_init(init_romfs_fs)
+module_exit(exit_romfs_fs)

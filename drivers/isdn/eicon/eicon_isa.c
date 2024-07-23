@@ -1,11 +1,11 @@
-/* $Id: eicon_isa.c,v 1.5 1999/04/01 12:48:33 armin Exp $
+/* $Id: eicon_isa.c,v 1.16 2000/06/12 12:44:02 armin Exp $
  *
- * ISDN low-level module for Eicon.Diehl active ISDN-Cards.
+ * ISDN low-level module for Eicon active ISDN-Cards.
  * Hardware-specific code for old ISA cards.
  *
- * Copyright 1998    by Fritz Elfert (fritz@wuemaus.franken.de)
- * Copyright 1998,99 by Armin Schindler (mac@melware.de)
- * Copyright 1999    Cytronics & Melware (info@melware.de)
+ * Copyright 1998      by Fritz Elfert (fritz@isdn4linux.de)
+ * Copyright 1998-2000 by Armin Schindler (mac@melware.de)
+ * Copyright 1999,2000 Cytronics & Melware (info@melware.de)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -21,31 +21,9 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  *
- * $Log: eicon_isa.c,v $
- * Revision 1.5  1999/04/01 12:48:33  armin
- * Changed some log outputs.
- *
- * Revision 1.4  1999/03/29 11:19:46  armin
- * I/O stuff now in seperate file (eicon_io.c)
- * Old ISA type cards (S,SX,SCOM,Quadro,S2M) implemented.
- *
- * Revision 1.3  1999/03/02 12:37:45  armin
- * Added some important checks.
- * Analog Modem with DSP.
- * Channels will be added to Link-Level after loading firmware.
- *
- * Revision 1.2  1999/01/24 20:14:19  armin
- * Changed and added debug stuff.
- * Better data sending. (still problems with tty's flip buffer)
- *
- * Revision 1.1  1999/01/01 18:09:43  armin
- * First checkin of new eicon driver.
- * DIVA-Server BRI/PCI and PRI/PCI are supported.
- * Old diehl code is obsolete.
- *
- *
  */
 
+#include <linux/config.h>
 #include "eicon.h"
 #include "eicon_isa.h"
 
@@ -53,7 +31,11 @@
 #define release_shmem release_region
 #define request_shmem request_region
 
-char *eicon_isa_revision = "$Revision: 1.5 $";
+char *eicon_isa_revision = "$Revision: 1.16 $";
+
+#undef EICON_MCA_DEBUG
+
+#ifdef CONFIG_ISDN_DRV_EICON_ISA
 
 /* Mask for detecting invalid IRQ parameter */
 static int eicon_isa_valid_irq[] = {
@@ -66,8 +48,10 @@ static int eicon_isa_valid_irq[] = {
 
 static void
 eicon_isa_release_shmem(eicon_isa_card *card) {
-	if (card->mvalid)
-		release_shmem((unsigned long)card->shmem, card->ramsize);
+	if (card->mvalid) {
+		iounmap(card->shmem);
+		release_mem_region(card->physmem, card->ramsize);
+	}
 	card->mvalid = 0;
 }
 
@@ -94,9 +78,9 @@ eicon_isa_printpar(eicon_isa_card *card) {
 		case EICON_CTYPE_SCOM:
 		case EICON_CTYPE_QUADRO:
 		case EICON_CTYPE_S2M:
-			printk(KERN_INFO "Eicon %s at 0x%lx, irq %d\n",
+			printk(KERN_INFO "Eicon %s at 0x%lx, irq %d.\n",
 			       eicon_ctype_name[card->type],
-			       (unsigned long)card->shmem,
+			       card->physmem,
 			       card->irq);
 	}
 }
@@ -105,8 +89,12 @@ int
 eicon_isa_find_card(int Mem, int Irq, char * Id)
 {
 	int primary = 1;
+	unsigned long amem;
 
 	if (!strlen(Id))
+		return -1;
+
+	if (Mem == -1)
 		return -1;
 
 	/* Check for valid membase address */
@@ -117,24 +105,27 @@ eicon_isa_find_card(int Mem, int Irq, char * Id)
 			 Mem, Id);
 		return -1;
 	}
-	if (check_shmem(Mem, RAMSIZE)) {
+	if (check_mem_region(Mem, RAMSIZE)) {
 		printk(KERN_WARNING "eicon_isa_boot: memory at 0x%x already in use.\n", Mem);
 		return -1;
 	}
 
-        writew(0x55aa, Mem + 0x402);
-        if (readw(Mem + 0x402) != 0x55aa) primary = 0;
-	writew(0, Mem + 0x402);
-	if (readw(Mem + 0x402) != 0) primary = 0;
+	amem = (unsigned long) ioremap(Mem, RAMSIZE);
+        writew(0x55aa, amem + 0x402);
+        if (readw(amem + 0x402) != 0x55aa) primary = 0;
+	writew(0, amem + 0x402);
+	if (readw(amem + 0x402) != 0) primary = 0;
 
 	printk(KERN_INFO "Eicon: Driver-ID: %s\n", Id);
 	if (primary) {
 		printk(KERN_INFO "Eicon: assuming pri card at 0x%x\n", Mem);
-		writeb(0, Mem + 0x3ffe);
+		writeb(0, amem + 0x3ffe);
+		iounmap((unsigned char *)amem);
 		return EICON_CTYPE_ISAPRI;
 	} else {
 		printk(KERN_INFO "Eicon: assuming bri card at 0x%x\n", Mem);
-		writeb(0, Mem + 0x400);
+		writeb(0, amem + 0x400);
+		iounmap((unsigned char *)amem);
 		return EICON_CTYPE_ISABRI;
 	}
 	return -1;
@@ -166,43 +157,69 @@ eicon_isa_bootload(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 		return -EFAULT;
 	}
 
+	if (card->type == EICON_CTYPE_ISAPRI)
+		card->ramsize  = RAMSIZE_P;
+	else
+		card->ramsize  = RAMSIZE;
+
+	if (check_mem_region(card->physmem, card->ramsize)) {
+		printk(KERN_WARNING "eicon_isa_boot: memory at 0x%lx already in use.\n",
+			card->physmem);
+		kfree(code);
+		return -EBUSY;
+	}
+	request_mem_region(card->physmem, card->ramsize, "Eicon ISA ISDN");
+	card->shmem = (eicon_isa_shmem *) ioremap(card->physmem, card->ramsize);
+#ifdef EICON_MCA_DEBUG
+	printk(KERN_INFO "eicon_isa_boot: card->ramsize = %d.\n", card->ramsize);
+#endif
+	card->mvalid = 1;
+
 	switch(card->type) {
 		case EICON_CTYPE_S:
 		case EICON_CTYPE_SX:
 		case EICON_CTYPE_SCOM:
 		case EICON_CTYPE_QUADRO:
 		case EICON_CTYPE_ISABRI:
-			card->ramsize  = RAMSIZE;
 			card->intack   = (__u8 *)card->shmem + INTACK;
 			card->startcpu = (__u8 *)card->shmem + STARTCPU;
 			card->stopcpu  = (__u8 *)card->shmem + STOPCPU;
 			break;
 		case EICON_CTYPE_S2M:
 		case EICON_CTYPE_ISAPRI:
-			card->ramsize  = RAMSIZE_P;
 			card->intack   = (__u8 *)card->shmem + INTACK_P;
 			card->startcpu = (__u8 *)card->shmem + STARTCPU_P;
 			card->stopcpu  = (__u8 *)card->shmem + STOPCPU_P;
 			break;
 		default:
 			printk(KERN_WARNING "eicon_isa_boot: Invalid card type %d\n", card->type);
+			eicon_isa_release_shmem(card);
+			kfree(code);
 			return -EINVAL;
 	}
 
-	/* Register shmem */
-	if (check_shmem((unsigned long)card->shmem, card->ramsize)) {
-		printk(KERN_WARNING "eicon_isa_boot: memory at 0x%lx already in use.\n",
-			(unsigned long)card->shmem);
-		kfree(code);
-		return -EBUSY;
-	}
-	request_shmem((unsigned long)card->shmem, card->ramsize, "Eicon ISA ISDN");
-	card->mvalid = 1;
-
 	/* clear any pending irq's */
 	readb(card->intack);
+#ifdef CONFIG_MCA
+	if (MCA_bus) {
+		if (card->type == EICON_CTYPE_SCOM) {
+			outb_p(0,card->io+1);
+		}
+		else {
+			printk(KERN_WARNING "eicon_isa_boot: Card type not supported yet.\n");
+			eicon_isa_release_shmem(card);
+			return -EINVAL;
+		};
+
+#ifdef EICON_MCA_DEBUG
+	printk(KERN_INFO "eicon_isa_boot: card->io      = %x.\n", card->io);
+	printk(KERN_INFO "eicon_isa_boot: card->irq     = %d.\n", (int)card->irq);
+#endif
+	}
+#else
 	/* set reset-line active */
 	writeb(0, card->stopcpu); 
+#endif  /* CONFIG_MCA */
 	/* clear irq-requests */
 	writeb(0, card->intack);
 	readb(card->intack);
@@ -229,7 +246,13 @@ eicon_isa_bootload(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 
 	/* Start CPU */
 	writeb(cbuf.boot_opt, &boot->ctrl);
+#ifdef CONFIG_MCA
+	if (MCA_bus) {
+		outb_p(0, card->io);
+	}
+#else 
 	writeb(0, card->startcpu); 
+#endif /* CONFIG_MCA */
 
 	/* Delay 0.2 sec. */
 	SLEEP(20);
@@ -241,7 +264,11 @@ eicon_isa_bootload(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 		SLEEP(10);
 	}
 	if (readb(&boot->ctrl) != 0) {
-		printk(KERN_WARNING "eicon_isa_boot: CPU test failed\n");
+		printk(KERN_WARNING "eicon_isa_boot: CPU test failed.\n");
+#ifdef EICON_MCA_DEBUG
+		printk(KERN_INFO "eicon_isa_boot: &boot->ctrl = %d.\n",
+			readb(&boot->ctrl));
+#endif
 		eicon_isa_release_shmem(card);
 		return -EIO;
 	}
@@ -273,8 +300,8 @@ eicon_isa_bootload(eicon_isa_card *card, eicon_isa_codebuf *cb) {
         }
 	printk(KERN_INFO "%s: startup-code loaded\n", eicon_ctype_name[card->type]); 
 	if ((card->type == EICON_CTYPE_QUADRO) && (card->master)) {
-		tmp = eicon_addcard(card->type, (unsigned long)card->shmem, card->irq, 
-					((eicon_card *)card->card)->regname);
+		tmp = eicon_addcard(card->type, card->physmem, card->irq, 
+				((eicon_card *)card->card)->regname, 0);
 		printk(KERN_INFO "Eicon: %d adapters added\n", tmp);
 	}
 	return 0;
@@ -294,7 +321,7 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 		return -EFAULT;
 
 	if (!(code = kmalloc(cbuf.firmware_len, GFP_KERNEL))) {
-		printk(KERN_WARNING "eicon_isa_boot: Couldn't allocate code buffer\n");
+		printk(KERN_WARNING "eicon_isa_load: Couldn't allocate code buffer\n");
 		return -ENOMEM;
 	}
 
@@ -310,7 +337,7 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 		/* Check for valid IRQ */
 		if ((card->irq < 0) || (card->irq > 15) || 
 		    (!((1 << card->irq) & eicon_isa_valid_irq[card->type & 0x0f]))) {
-			printk(KERN_WARNING "eicon_isa_boot: illegal irq: %d\n", card->irq);
+			printk(KERN_WARNING "eicon_isa_load: illegal irq: %d\n", card->irq);
 			eicon_isa_release_shmem(card);
 			kfree(code);
 			return -EINVAL;
@@ -319,7 +346,7 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 		if (!request_irq(card->irq, &eicon_irq, 0, "Eicon ISA ISDN", card))
 			card->ivalid = 1;
 		else {
-			printk(KERN_WARNING "eicon_isa_boot: irq %d already in use.\n",
+			printk(KERN_WARNING "eicon_isa_load: irq %d already in use.\n",
 			       card->irq);
 			eicon_isa_release_shmem(card);
 			kfree(code);
@@ -330,7 +357,7 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
         tmp = readb(&boot->msize);
         if (tmp != 8 && tmp != 16 && tmp != 24 &&
             tmp != 32 && tmp != 48 && tmp != 60) {
-                printk(KERN_WARNING "eicon_isa_boot: invalid memsize\n");
+                printk(KERN_WARNING "eicon_isa_load: invalid memsize\n");
 		eicon_isa_release_shmem(card);
                 return -EIO;
         }
@@ -353,7 +380,7 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 			SLEEP(2);
 		}
 		if (readb(&boot->ctrl)) {
-			printk(KERN_WARNING "eicon_isa_boot: download timeout at 0x%x\n", p-code);
+			printk(KERN_WARNING "eicon_isa_load: download timeout at 0x%x\n", p-code);
 			eicon_isa_release(card);
 			kfree(code);
 			return -EIO;
@@ -376,7 +403,7 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 		SLEEP(2);
 	}
 	if (readw(&boot->signature) != 0x4447) {
-		printk(KERN_WARNING "eicon_isa_boot: firmware selftest failed %04x\n",
+		printk(KERN_WARNING "eicon_isa_load: firmware selftest failed %04x\n",
 		       readw(&boot->signature));
 		eicon_isa_release(card);
 		return -EIO;
@@ -401,11 +428,15 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 			SLEEP(2);
 		}
 		if (card->irqprobe == 1) {
-			printk(KERN_WARNING "eicon_isa_boot: IRQ test failed\n");
+			printk(KERN_WARNING "eicon_isa_load: IRQ # %d test failed\n", card->irq);
 			eicon_isa_release(card);
 			return -EIO;
 		}
 	}
+#ifdef EICON_MCA_DEBUG
+	printk(KERN_INFO "eicon_isa_load: IRQ # %d test succeeded.\n", card->irq);
+#endif
+
 	writeb(card->irq, &card->shmem->com.Int);
 
 	/* initializing some variables */
@@ -430,3 +461,5 @@ eicon_isa_load(eicon_isa_card *card, eicon_isa_codebuf *cb) {
 	card->irqprobe = 0;
 	return 0;
 }
+
+#endif /* CONFIG_ISDN_DRV_EICON_ISA */

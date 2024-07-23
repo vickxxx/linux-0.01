@@ -1,7 +1,10 @@
-/* $Id: socket.c,v 1.1 1998/10/28 08:12:11 jj Exp $
+/* $Id: socket.c,v 1.4 2000/11/18 02:11:00 davem Exp $
  * socket.c: Socket syscall emulation for Solaris 2.6+
  *
  * Copyright (C) 1998 Jakub Jelinek (jj@ultra.linux.cz)
+ *
+ * 1999-08-19 Fixed socketpair code 
+ *            Jason Rappleye (rappleye@ccr.buffalo.edu)
  */
 
 #include <linux/types.h>
@@ -15,7 +18,6 @@
 #include <asm/string.h>
 #include <asm/oplib.h>
 #include <asm/idprom.h>
-#include <asm/machines.h>
 
 #include "conv.h"
 
@@ -24,6 +26,18 @@
 #define SOCK_SOL_RAW		4
 #define SOCK_SOL_RDM		5
 #define SOCK_SOL_SEQPACKET	6
+
+#define SOL_SO_SNDLOWAT		0x1003
+#define SOL_SO_RCVLOWAT		0x1004
+#define SOL_SO_SNDTIMEO		0x1005
+#define SOL_SO_RCVTIMEO		0x1006
+#define SOL_SO_STATE		0x2000
+
+#define SOL_SS_NDELAY		0x040
+#define SOL_SS_NONBLOCK		0x080
+#define SOL_SS_ASYNC		0x100
+
+#define SO_STATE		0x000e
 
 static int socket_check(int family, int type)
 {
@@ -40,6 +54,19 @@ static int socket_check(int family, int type)
 	return type;
 }
 
+static int solaris_to_linux_sockopt(int optname) 
+{
+	switch (optname) {
+	case SOL_SO_SNDLOWAT: optname = SO_SNDLOWAT; break;
+	case SOL_SO_RCVLOWAT: optname = SO_RCVLOWAT; break;
+	case SOL_SO_SNDTIMEO: optname = SO_SNDTIMEO; break;
+	case SOL_SO_RCVTIMEO: optname = SO_RCVTIMEO; break;
+	case SOL_SO_STATE: optname = SO_STATE; break;
+	};
+	
+	return optname;
+}
+	
 asmlinkage int solaris_socket(int family, int type, int protocol)
 {
 	int (*sys_socket)(int, int, int) =
@@ -50,14 +77,19 @@ asmlinkage int solaris_socket(int family, int type, int protocol)
 	return sys_socket(family, type, protocol);
 }
 
-asmlinkage int solaris_socketpair(int family, int type, int protocol, int *usockvec)
+asmlinkage int solaris_socketpair(int *usockvec)
 {
 	int (*sys_socketpair)(int, int, int, int *) =
 		(int (*)(int, int, int, int *))SYS(socketpair);
 
-	type = socket_check (family, type);
-	if (type < 0) return type;
-	return sys_socketpair(family, type, protocol, usockvec);
+	/* solaris socketpair really only takes one arg at the syscall
+	 * level, int * usockvec. The libs apparently take care of 
+	 * making sure that family==AF_UNIX and type==SOCK_STREAM. The 
+	 * pointer we really want ends up residing in the first (and
+	 * supposedly only) argument.
+	 */
+
+	return sys_socketpair(AF_UNIX, SOCK_STREAM, 0, (int *)usockvec);
 }
 
 asmlinkage int solaris_bind(int fd, struct sockaddr *addr, int addrlen)
@@ -73,6 +105,12 @@ asmlinkage int solaris_setsockopt(int fd, int level, int optname, u32 optval, in
 	int (*sunos_setsockopt)(int, int, int, u32, int) =
 		(int (*)(int, int, int, u32, int))SUNOS(105);
 
+	optname = solaris_to_linux_sockopt(optname);
+	if (optname < 0)
+		return optname;
+	if (optname == SO_STATE)
+		return 0;
+
 	return sunos_setsockopt(fd, level, optname, optval, optlen);
 }
 
@@ -80,6 +118,13 @@ asmlinkage int solaris_getsockopt(int fd, int level, int optname, u32 optval, u3
 {
 	int (*sunos_getsockopt)(int, int, int, u32, u32) =
 		(int (*)(int, int, int, u32, u32))SUNOS(118);
+
+	optname = solaris_to_linux_sockopt(optname);
+	if (optname < 0)
+		return optname;
+
+	if (optname == SO_STATE)
+		optname = SOL_SO_STATE;
 
 	return sunos_getsockopt(fd, level, optname, optval, optlen);
 }
@@ -220,7 +265,7 @@ extern __inline__ struct socket *sockfd_lookup(int fd, int *err)
 	}
 
 	inode = file->f_dentry->d_inode;
-	if (!inode || !inode->i_sock || !socki_lookup(inode)) {
+	if (!inode->i_sock || !socki_lookup(inode)) {
 		*err = -ENOTSOCK;
 		fput(file);
 		return NULL;

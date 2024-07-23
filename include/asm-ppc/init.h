@@ -1,12 +1,8 @@
+#ifdef __KERNEL__
 #ifndef _PPC_INIT_H
 #define _PPC_INIT_H
 
-#if __GNUC__ > 2 || __GNUC_MINOR__ >= 90 /* egcs */
-#define __init __attribute__ ((__section__ (".text.init")))
-#define __initdata __attribute__ ((__section__ (".data.init")))
-#define __initfunc(__arginit) \
-	__arginit __init; \
-	__arginit
+#include <linux/init.h>
 
 #define __pmac __attribute__ ((__section__ (".text.pmac")))
 #define __pmacdata __attribute__ ((__section__ (".data.pmac")))
@@ -20,6 +16,18 @@
 	__argprep __prep; \
 	__argprep
 
+#define __chrp __attribute__ ((__section__ (".text.chrp")))
+#define __chrpdata __attribute__ ((__section__ (".data.chrp")))
+#define __chrpfunc(__argchrp) \
+	__argchrp __chrp; \
+	__argchrp
+
+#define __apus __attribute__ ((__section__ (".text.apus")))
+#define __apusdata __attribute__ ((__section__ (".data.apus")))
+#define __apusfunc(__argapus) \
+	__argapus __apus; \
+	__argapus
+
 /* this is actually just common chrp/pmac code, not OF code -- Cort */
 #define __openfirmware __attribute__ ((__section__ (".text.openfirmware")))
 #define __openfirmwaredata __attribute__ ((__section__ (".data.openfirmware")))
@@ -27,35 +35,5 @@
 	__argopenfirmware __openfirmware; \
 	__argopenfirmware
 	
-#define __INIT		.section	".text.init",#alloc,#execinstr
-#define __FINIT	.previous
-#define __INITDATA	.section	".data.init",#alloc,#write
-
-#define __cacheline_aligned __attribute__ \
-			 ((__section__ (".data.cacheline_aligned")))
-
-#else /* not egcs */
-
-#define __init
-#define __initdata
-#define __initfunc(x) x
-	
-#define __INIT
-#define __FINIT
-#define __INITDATA
-	
-#define __pmac
-#define __pmacdata
-#define __pmacfunc(x) x
-	
-#define __prep
-#define __prepdata
-#define __prepfunc(x) x
-
-#define __openfirmware
-#define __openfirmwaredata
-#define __openfirmwarefunc(x) x
-
-#define __cacheline_aligned
-#endif /* egcs */
-#endif
+#endif /* _PPC_INIT_H */
+#endif /* __KERNEL__ */

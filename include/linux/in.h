@@ -38,6 +38,10 @@ enum {
 
   IPPROTO_PIM    = 103,		/* Protocol Independent Multicast	*/
 
+  IPPROTO_ESP = 50,            /* Encapsulation Security Payload protocol */
+  IPPROTO_AH = 51,             /* Authentication Header protocol       */
+  IPPROTO_COMP   = 108,                /* Compression Header protocol */
+
   IPPROTO_RAW	 = 255,		/* Raw IP packets			*/
   IPPROTO_MAX
 };
@@ -62,6 +66,7 @@ struct in_addr {
 #define IP_RECVTTL	12
 #define	IP_RECVTOS	13
 #define IP_MTU		14
+#define IP_FREEBIND	15
 
 /* BSD compatibility */
 #define IP_RECVRETOPTS	IP_RETOPTS

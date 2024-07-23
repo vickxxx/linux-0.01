@@ -1,27 +1,30 @@
 /*
- * linux/arch/arm/kernel/ecard.c
+ *  linux/arch/arm/kernel/ecard.c
+ *
+ *  Copyright 1995-1998 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  *  Find all installed expansion cards, and handle interrupts from them.
  *
- * Copyright 1995-1998 Russell King
+ *  Created from information from Acorns RiscOS3 PRMs
  *
- * Created from information from Acorns RiscOS3 PRMs
- *
- * 08-Dec-1996	RMK	Added code for the 9'th expansion card - the ether
+ *  08-Dec-1996	RMK	Added code for the 9'th expansion card - the ether
  *			podule slot.
- * 06-May-1997  RMK	Added blacklist for cards whose loader doesn't work.
- * 12-Sep-1997	RMK	Created new handling of interrupt enables/disables
+ *  06-May-1997	RMK	Added blacklist for cards whose loader doesn't work.
+ *  12-Sep-1997	RMK	Created new handling of interrupt enables/disables
  *			- cards can now register their own routine to control
  *			interrupts (recommended).
- * 29-Sep-1997	RMK	Expansion card interrupt hardware not being re-enabled
+ *  29-Sep-1997	RMK	Expansion card interrupt hardware not being re-enabled
  *			on reset from Linux. (Caused cards not to respond
  *			under RiscOS without hard reset).
- * 15-Feb-1998	RMK	Added DMA support
- * 12-Sep-1998	RMK	Added EASI support
- * 10-Jan-1999	RMK	Run loaders in a simulated RISC OS environment.
- * 17-Apr-1999	RMK	Support for EASI Type C cycles.
+ *  15-Feb-1998	RMK	Added DMA support
+ *  12-Sep-1998	RMK	Added EASI support
+ *  10-Jan-1999	RMK	Run loaders in a simulated RISC OS environment.
+ *  17-Apr-1999	RMK	Support for EASI Type C cycles.
  */
-
 #define ECARD_C
 #define __KERNEL_SYSCALLS__
 
@@ -33,9 +36,7 @@
 #include <linux/interrupt.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
-#include <linux/errno.h>
 #include <linux/proc_fs.h>
-#include <linux/unistd.h>
 #include <linux/init.h>
 
 #include <asm/dma.h>
@@ -43,12 +44,11 @@
 #include <asm/hardware.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
+#include <asm/mmu_context.h>
 
-#ifdef CONFIG_ARCH_ARC
-#include <asm/arch/oldlatches.h>
-#else
-#define oldlatch_init()
+#ifndef CONFIG_ARCH_RPC
+#define HAVE_EXPMASK
 #endif
 
 enum req {
@@ -81,7 +81,7 @@ static unsigned int have_expmask;
 /* List of descriptions of cards which don't have an extended
  * identification, or chunk directories containing a description.
  */
-static const struct expcard_blacklist __init blacklist[] = {
+static struct expcard_blacklist __initdata blacklist[] = {
 	{ MANU_ACORN, PROD_ACORN_ETHER1, "Acorn Ether1" }
 };
 
@@ -140,15 +140,10 @@ ecard_task_reset(struct ecard_request *req)
 	if (req->ec == NULL) {
 		ecard_t *ec;
 
-		for (ec = cards; ec; ec = ec->next) {
-			printk(KERN_DEBUG "Resetting card %d\n",
-			       ec->slot_no);
-
+		for (ec = cards; ec; ec = ec->next)
 			if (ec->loader)
 				ecard_loader_reset(POD_INT_ADDR(ec->podaddr),
 						   ec->loader);
-		}
-		printk(KERN_DEBUG "All cards reset\n");
 	} else if (req->ec->loader)
 		ecard_loader_reset(POD_INT_ADDR(req->ec->podaddr),
 				   req->ec->loader);
@@ -231,11 +226,44 @@ static wait_queue_head_t ecard_wait;
 static wait_queue_head_t ecard_done;
 static struct ecard_request *ecard_req;
 
+/* to be removed when exec_mmap becomes extern */
+static int exec_mmap(void)
+{
+	struct mm_struct * mm, * old_mm;
+
+	old_mm = current->mm;
+	if (old_mm && atomic_read(&old_mm->mm_users) == 1) {
+		flush_cache_mm(old_mm);
+		mm_release();
+		exit_mmap(old_mm);
+		flush_tlb_mm(old_mm);
+		return 0;
+	}
+
+	mm = mm_alloc();
+	if (mm) {
+		struct mm_struct *active_mm = current->active_mm;
+
+		current->mm = mm;
+		current->active_mm = mm;
+		activate_mm(active_mm, mm);
+		mm_release();
+		if (old_mm) {
+			if (active_mm != old_mm) BUG();
+			mmput(old_mm);
+			return 0;
+		}
+		mmdrop(active_mm);
+		return 0;
+	}
+	return -ENOMEM;
+}
+
 /*
- * Set up the expansion card daemon's environment.
+ * Set up the expansion card
+ * daemon's environment.
  */
-static void
-ecard_init_task(void)
+static void ecard_init_task(int force)
 {
 	/* We want to set up the page tables for the following mapping:
 	 *  Virtual	Physical
@@ -250,6 +278,9 @@ ecard_init_task(void)
 	 */
 	pgd_t *src_pgd, *dst_pgd;
 	unsigned int dst_addr = IO_START;
+
+	if (!force)
+		exec_mmap();
 
 	src_pgd = pgd_offset(current->mm, IO_BASE);
 	dst_pgd = pgd_offset(current->mm, dst_addr);
@@ -276,21 +307,24 @@ ecard_init_task(void)
 static int
 ecard_task(void * unused)
 {
-	current->session = 1;
-	current->pgrp = 1;
+	struct task_struct *tsk = current;
+
+	tsk->session = 1;
+	tsk->pgrp = 1;
 
 	/*
 	 * We don't want /any/ signals, not even SIGKILL
 	 */
-	sigfillset(&current->blocked);
-	sigemptyset(&current->signal);
+	sigfillset(&tsk->blocked);
+	sigemptyset(&tsk->pending.signal);
+	recalc_sigpending(tsk);
 
-	strcpy(current->comm, "kecardd");
+	strcpy(tsk->comm, "kecardd");
 
 	/*
 	 * Set up the environment
 	 */
-	ecard_init_task();
+	ecard_init_task(0);
 
 	while (1) {
 		struct ecard_request *req;
@@ -299,7 +333,7 @@ ecard_task(void * unused)
 			req = xchg(&ecard_req, NULL);
 
 			if (req == NULL) {
-				sigemptyset(&current->signal);
+				sigemptyset(&tsk->pending.signal);
 				interruptible_sleep_on(&ecard_wait);
 			}
 		} while (req == NULL);
@@ -333,13 +367,14 @@ ecard_call(struct ecard_request *req)
 	 * call the loader.  We can't schedule, or
 	 * sleep for this call.
 	 */
-	if ((current == task[0] || in_interrupt()) &&
+	if ((current == &init_task || in_interrupt()) &&
 	    req->req == req_reset && req->ec == NULL) {
-		ecard_init_task();
+		ecard_init_task(1);
 		ecard_task_reset(req);
 	} else {
 		if (ecard_pid <= 0)
-			ecard_pid = kernel_thread(ecard_task, NULL, 0);
+			ecard_pid = kernel_thread(ecard_task, NULL,
+					CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 
 		ecard_req = req;
 
@@ -721,8 +756,8 @@ again:
 		printk(KERN_WARNING "Wild interrupt from backplane (masks)\n");
 }
 
-__initfunc(static void
-ecard_probeirqhw(void))
+static void __init
+ecard_probeirqhw(void)
 {
 	ecard_t *ec;
 	int found;
@@ -790,6 +825,8 @@ unsigned int ecard_address(ecard_t *ec, card_type_t type, card_speed_t speed)
 			ectcr |= 1 << slot;
 		break;
 #endif
+	default:
+		break;
 	}
 
 #ifdef IOMD_ECTCR
@@ -797,8 +834,6 @@ unsigned int ecard_address(ecard_t *ec, card_type_t type, card_speed_t speed)
 #endif
 	return address;
 }
-
-static const char *unknown = "*unknown*";
 
 static int ecard_prints(char *buffer, ecard_t *ec)
 {
@@ -818,7 +853,7 @@ static int ecard_prints(char *buffer, ecard_t *ec)
 			ec->card_desc = kmalloc(strlen(incd.d.string)+1, GFP_KERNEL);
 
 			if (ec->card_desc)
-				strcpy(ec->card_desc, incd.d.string);
+				strcpy((char *)ec->card_desc, incd.d.string);
 		}
 
 		buffer += sprintf(buffer, "%s\n", ec->card_desc ? ec->card_desc : "*unknown*");
@@ -828,7 +863,7 @@ static int ecard_prints(char *buffer, ecard_t *ec)
 	return buffer - start;
 }
 
-int get_ecard_dev_info(char *buf, char **start, off_t pos, int count, int wr)
+static int get_ecard_dev_info(char *buf, char **start, off_t pos, int count)
 {
 	ecard_t *ec = cards;
 	off_t at = 0;
@@ -851,19 +886,13 @@ int get_ecard_dev_info(char *buf, char **start, off_t pos, int count, int wr)
 	return (count > cnt) ? cnt : count;
 }
 
-static struct proc_dir_entry proc_ecard_devices = {
-	PROC_BUS_ECARD_DEVICES, 7, "devices",
-	S_IFREG | S_IRUGO, 1, 0, 0,
-	0, &proc_array_inode_operations,
-	get_ecard_dev_info
-};
-
-static struct proc_dir_entry *proc_bus_ecard_dir;
+static struct proc_dir_entry *proc_bus_ecard_dir = NULL;
 
 static void ecard_proc_init(void)
 {
-	proc_bus_ecard_dir = create_proc_entry("ecard", S_IFDIR, proc_bus);
-	proc_register(proc_bus_ecard_dir, &proc_ecard_devices);
+	proc_bus_ecard_dir = proc_mkdir("ecard", proc_bus);
+	create_proc_info_entry("devices", 0, proc_bus_ecard_dir,
+		get_ecard_dev_info);
 }
 
 /*
@@ -872,13 +901,12 @@ static void ecard_proc_init(void)
  * If bit 1 of the first byte of the card is set, then the
  * card does not exist.
  */
-__initfunc(static int
-ecard_probe(int slot, card_type_t type))
+static int __init
+ecard_probe(int slot, card_type_t type)
 {
 	ecard_t **ecp;
 	ecard_t *ec;
 	struct ex_ecid cid;
-	char buffer[200];
 	int i, rc = -ENOMEM;
 
 	ec = kmalloc(sizeof(ecard_t), GFP_KERNEL);
@@ -959,12 +987,9 @@ ecard_probe(int slot, card_type_t type))
 nodev:
 	if (rc && ec)
 		kfree(ec);
-	else {
+	else
 		slot_to_expcard[slot] = ec;
 
-		ecard_prints(buffer, ec);
-		printk("%s", buffer);
-	}
 	return rc;
 }
 
@@ -1009,7 +1034,7 @@ ecard_t *ecard_find(int cid, const card_ids *cids)
 	return finding_pos;
 }
 
-__initfunc(static void ecard_free_all(void))
+static void __init ecard_free_all(void)
 {
 	ecard_t *ec, *ecn;
 
@@ -1029,18 +1054,16 @@ __initfunc(static void ecard_free_all(void))
  * Locate all hardware - interrupt management and
  * actual cards.
  */
-__initfunc(void ecard_init(void))
+void __init ecard_init(void)
 {
 	int slot;
-
-	oldlatch_init();
 
 #ifdef CONFIG_CPU_32
 	init_waitqueue_head(&ecard_wait);
 	init_waitqueue_head(&ecard_done);
 #endif
 
-	printk("Probing expansion cards: (does not imply support)\n");
+	printk("Probing expansion cards\n");
 
 	for (slot = 0; slot < 8; slot ++) {
 		if (ecard_probe(slot, ECARD_EASI) == -ENODEV)

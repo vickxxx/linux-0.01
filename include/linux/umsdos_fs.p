@@ -17,42 +17,27 @@ struct dentry *umsdos_covered(struct dentry *, char *, int);
 struct dentry *umsdos_solve_hlink (struct dentry *hlink);
 
 /* emd.c 22/06/95 00.22.04 */
-ssize_t umsdos_file_write_kmem_real (struct file *filp,
-				const char *buf,
-				size_t  count);
-
-ssize_t umsdos_file_read_kmem (struct file *filp,
-	 char *buf,
-	 size_t count);
-ssize_t umsdos_file_write_kmem (struct file *filp,
-	 const char *buf,
-	 size_t count);
-ssize_t umsdos_emd_dir_write (struct file *filp,
-	 char *buf,
-	 size_t count);
-ssize_t umsdos_emd_dir_read (struct file *filp,
-	 char *buf,
-	 size_t count);
 struct dentry *umsdos_get_emd_dentry(struct dentry *);
 int umsdos_have_emd(struct dentry *);
 int umsdos_make_emd(struct dentry *);
-int umsdos_emd_dir_readentry (struct file *, struct umsdos_dirent *);
+int umsdos_emd_dir_readentry (struct dentry *, loff_t *, struct umsdos_dirent *);
 int umsdos_newentry (struct dentry *, struct umsdos_info *);
 int umsdos_newhidden (struct dentry *, struct umsdos_info *);
 int umsdos_delentry (struct dentry *, struct umsdos_info *, int);
 int umsdos_findentry (struct dentry *, struct umsdos_info *, int);
 int umsdos_isempty (struct dentry *);
+int umsdos_writeentry (struct dentry *, struct umsdos_info *, int);
 
 /* file.c 25/01/95 02.25.38 */
 
 /* inode.c 12/06/95 09.49.40 */
 void fill_new_filp (struct file *filp, struct dentry *dentry);
 void UMSDOS_read_inode (struct inode *);
-void UMSDOS_write_inode (struct inode *);
+void UMSDOS_write_inode (struct inode *, int);
 int UMSDOS_notify_change (struct dentry *, struct iattr *attr);
 int umsdos_notify_change_locked(struct dentry *, struct iattr *attr);
 void UMSDOS_put_inode (struct inode *);
-int UMSDOS_statfs (struct super_block *, struct statfs *, int);
+int UMSDOS_statfs (struct super_block *, struct statfs *);
 struct super_block *UMSDOS_read_super (struct super_block *, void *, int);
 void UMSDOS_put_super (struct super_block *);
 
@@ -108,11 +93,3 @@ int UMSDOS_rename (struct inode *old_dir,
 /* rdir.c 22/03/95 03.31.42 */
 struct dentry *umsdos_rlookup_x (struct inode *dir, struct dentry *dentry, int nopseudo);
 struct dentry *UMSDOS_rlookup (struct inode *dir, struct dentry *dentry);
-
-/* symlink.c 23/01/95 03.38.30 */
-
-/* check.c */
-void checkd_inode (struct inode *inode);
-void check_inode (struct inode *inode);
-void check_dentry (struct dentry *dentry);
-void check_dentry_path (struct dentry *dentry, const char *desc);

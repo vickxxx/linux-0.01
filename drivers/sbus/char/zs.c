@@ -1,4 +1,4 @@
-/* $Id: zs.c,v 1.42 1999/05/12 11:15:26 davem Exp $
+/* $Id: zs.c,v 1.61 2001/01/03 08:08:49 ecd Exp $
  * zs.c: Zilog serial port driver for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -23,6 +23,7 @@
 #include <linux/console.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/bootmem.h>
 #include <linux/sysrq.h>
 
 #include <asm/io.h>
@@ -32,6 +33,8 @@
 #include <asm/uaccess.h>
 #include <asm/bitops.h>
 #include <asm/kdebug.h>
+#include <asm/page.h>
+#include <asm/pgtable.h>
 
 #include <asm/sbus.h>
 #ifdef __sparc_v9__
@@ -65,8 +68,8 @@ static int num_serial = 2; /* sun4/sun4c/sun4m - Two chips on board. */
 #else
 #define ZSDELAY()
 #define ZSDELAY_LONG()
-#define ZS_WSYNC(channel) \
-	((void) *((volatile unsigned char *)(&((channel)->control))))
+#define ZS_WSYNC(__channel) \
+	sbus_readb(&((__channel)->control))
 #endif
 
 struct sun_zslayout **zs_chips;
@@ -164,6 +167,47 @@ static struct termios **serial_termios_locked;
 #define MIN(a,b)	((a) < (b) ? (a) : (b))
 #endif
 
+#undef ZS_LOG
+#ifdef ZS_LOG
+struct zs_logent {
+	u8 reg, val;
+	u8 write, __pad;
+#define REGIRQ	0xff
+#define REGDATA	0xfe
+#define REGCTRL	0xfd
+};
+struct zs_logent zslog[32];
+int zs_curlog = 0;
+#define ZSLOG(__reg, __val, __write) \
+do{	int index = zs_curlog; \
+	zslog[index].reg = (__reg); \
+	zslog[index].val = (__val); \
+	zslog[index].write = (__write); \
+	zs_curlog = (index + 1) & (32 - 1); \
+}while(0)
+int zs_dumplog(char *buffer)
+{
+	int len = 0;
+	int i;
+
+	for (i = 0; i < 32; i++) {
+		u8 reg, val, write;
+
+		reg = zslog[i].reg;
+		val = zslog[i].val;
+		write = zslog[i].write;
+		len += sprintf(buffer + len,
+			       "ZSLOG[%2d]: reg %2x val %2x %s\n",
+			       i, reg, val, write ? "write" : "read");
+	}
+	len += sprintf(buffer + len, "ZS current log index %d\n",
+		       zs_curlog);
+	return len;
+}
+#else
+#define ZSLOG(x,y,z)	do { } while (0)
+#endif
+
 /*
  * tmp_buf is used as a temporary buffer by serial_write.  We need to
  * lock it in case the memcpy_fromfs blocks while swapping in a page,
@@ -197,15 +241,13 @@ static inline int serial_paranoia_check(struct sun_serial *info,
 	return 0;
 }
 
-/*
- * This is used to figure out the divisor speeds and the timeouts
- */
+/* This is used to figure out the divisor speeds and the timeouts. */
 static int baud_table[] = {
 	0, 50, 75, 110, 134, 150, 200, 300, 600, 1200, 1800, 2400, 4800,
-	9600, 19200, 38400, 76800, 0 };
+	9600, 19200, 38400, 76800, 0
+};
 
-/* 
- * Reading and writing Zilog8530 registers.  The delays are to make this
+/* Reading and writing Zilog8530 registers.  The delays are to make this
  * driver work on the Sun4 which needs a settling delay after each chip
  * register access, other machines handle this in hardware via auxiliary
  * flip-flops which implement the settle time we do in software.
@@ -215,26 +257,28 @@ static inline unsigned char read_zsreg(struct sun_zschannel *channel,
 {
 	unsigned char retval;
 
-	channel->control = reg;
+	sbus_writeb(reg, &channel->control);
 	ZSDELAY();
-	retval = channel->control;
+	retval = sbus_readb(&channel->control);
 	ZSDELAY();
+	ZSLOG(reg, retval, 0);
 	return retval;
 }
 
 static inline void write_zsreg(struct sun_zschannel *channel,
 			       unsigned char reg, unsigned char value)
 {
-	channel->control = reg;
+	ZSLOG(reg, value, 1);
+	sbus_writeb(reg, &channel->control);
 	ZSDELAY();
-	channel->control = value;
+	sbus_writeb(value, &channel->control);
 	ZSDELAY();
 }
 
 static inline void load_zsregs(struct sun_serial *info, unsigned char *regs)
 {
-	unsigned long flags;
 	struct sun_zschannel *channel = info->zs_channel;
+	unsigned long flags;
 	unsigned char stat;
 	int i;
 
@@ -287,12 +331,18 @@ static inline void zs_put_char(struct sun_zschannel *channel, char ch)
 	 * a timed polling loop and on sparc64 ZSDELAY
 	 * is a nop.  -DaveM
 	 */
-	while((channel->control & Tx_BUF_EMP) == 0 && --loops)
+	do {
+		u8 val = sbus_readb(&channel->control);
+		ZSLOG(REGCTRL, val, 0);
+		if (val & Tx_BUF_EMP)
+			break;
 		udelay(5);
+	} while (--loops);
 
-	channel->data = ch;
+	sbus_writeb(ch, &channel->data);
 	ZSDELAY();
 	ZS_WSYNC(channel);
+	ZSLOG(REGDATA, ch, 1);
 }
 
 /* Sets or clears DTR/RTS on the requested line */
@@ -339,7 +389,7 @@ static inline void kgdb_chaninit(struct sun_serial *ss, int intson, int bps)
  */
 static void zs_stop(struct tty_struct *tty)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 	unsigned long flags;
 
 	if (serial_paranoia_check(info, tty->device, "zs_stop"))
@@ -355,7 +405,7 @@ static void zs_stop(struct tty_struct *tty)
 
 static void zs_start(struct tty_struct *tty)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 	unsigned long flags;
 	
 	if (serial_paranoia_check(info, tty->device, "zs_start"))
@@ -374,6 +424,8 @@ static void zs_start(struct tty_struct *tty)
  */
 void batten_down_hatches(void)
 {
+	if (!stop_a_enabled)
+		return;
 	/* If we are doing kadb, we call the debugger
 	 * else we just drop into the boot monitor.
 	 * Note that we must flush the user windows
@@ -424,7 +476,7 @@ void batten_down_hatches(void)
  * processing in the software interrupt portion of the driver.
  */
 static _INLINE_ void zs_sched_event(struct sun_serial *info,
-				  int event)
+				    int event)
 {
 	info->event |= 1 << event;
 	queue_task(&info->tqueue, &tq_serial);
@@ -439,9 +491,12 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch, stat;
+	int do_queue_task = 1;
 
 	do {
-		ch = (info->zs_channel->data) & info->parity_mask;
+		ch = sbus_readb(&info->zs_channel->data);
+		ZSLOG(REGDATA, ch, 0);
+		ch &= info->parity_mask;
 		ZSDELAY();
 
 		/* If this is the console keyboard, we need to handle
@@ -466,14 +521,16 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 				return;
 			}
 			sunkbd_inchar(ch, regs);
-			return;
+			do_queue_task = 0;
+			goto next_char;
 		}
 		if(info->cons_mouse) {
-			sun_mouse_inbyte(ch);
-			return;
+			sun_mouse_inbyte(ch, 0);
+			do_queue_task = 0;
+			goto next_char;
 		}
 		if(info->is_cons) {
-			if(ch==0) {
+			if(ch == 0) {
 				/* whee, break received */
 				batten_down_hatches();
 				/* Continue execution... */
@@ -502,9 +559,11 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 		*tty->flip.flag_buf_ptr++ = 0;
 		*tty->flip.char_buf_ptr++ = ch;
 
+	next_char:
 		/* Check if we have another character... */
-		stat = info->zs_channel->control;
+		stat = sbus_readb(&info->zs_channel->control);
 		ZSDELAY();
+		ZSLOG(REGCTRL, stat, 0);
 		if (!(stat & Rx_CH_AV))
 			break;
 
@@ -512,7 +571,8 @@ static _INLINE_ void receive_chars(struct sun_serial *info, struct pt_regs *regs
 		stat = read_zsreg(info->zs_channel, R1);
 	} while (!(stat & (PAR_ERR | Rx_OVR | CRC_ERR)));
 
-	queue_task(&tty->flip.tqueue, &tq_timer);
+	if (do_queue_task != 0)
+		queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
 static _INLINE_ void transmit_chars(struct sun_serial *info)
@@ -528,9 +588,10 @@ static _INLINE_ void transmit_chars(struct sun_serial *info)
 
 	if((info->xmit_cnt <= 0) || (tty != 0 && tty->stopped)) {
 		/* That's peculiar... */
-		info->zs_channel->control = RES_Tx_P;
+		sbus_writeb(RES_Tx_P, &info->zs_channel->control);
 		ZSDELAY();
 		ZS_WSYNC(info->zs_channel);
+		ZSLOG(REGCTRL, RES_Tx_P, 1);
 		return;
 	}
 
@@ -543,9 +604,10 @@ static _INLINE_ void transmit_chars(struct sun_serial *info)
 		zs_sched_event(info, RS_EVENT_WRITE_WAKEUP);
 
 	if(info->xmit_cnt <= 0) {
-		info->zs_channel->control = RES_Tx_P;
+		sbus_writeb(RES_Tx_P, &info->zs_channel->control);
 		ZSDELAY();
 		ZS_WSYNC(info->zs_channel);
+		ZSLOG(REGCTRL, RES_Tx_P, 1);
 	}
 }
 
@@ -554,13 +616,14 @@ static _INLINE_ void status_handle(struct sun_serial *info)
 	unsigned char status;
 
 	/* Get status from Read Register 0 */
-	status = info->zs_channel->control;
+	status = sbus_readb(&info->zs_channel->control);
 	ZSDELAY();
+	ZSLOG(REGCTRL, status, 0);
 	/* Clear status condition... */
-	info->zs_channel->control = RES_EXT_INT;
+	sbus_writeb(RES_EXT_INT, &info->zs_channel->control);
 	ZSDELAY();
 	ZS_WSYNC(info->zs_channel);
-
+	ZSLOG(REGCTRL, RES_EXT_INT, 1);
 #if 0
 	if(status & DCD) {
 		if((info->tty->termios->c_cflag & CRTSCTS) &&
@@ -579,8 +642,12 @@ static _INLINE_ void status_handle(struct sun_serial *info)
 	 * 'break asserted' status change interrupt, call
 	 * the boot prom.
 	 */
-	if((status & BRK_ABRT) && info->break_abort)
-		batten_down_hatches();
+	if(status & BRK_ABRT) {
+		if (info->break_abort)
+			batten_down_hatches();
+		if (info->cons_mouse)
+			sun_mouse_inbyte(0, 1);
+	}
 
 	/* XXX Whee, put in a buffer somewhere, the status information
 	 * XXX whee whee whee... Where does the information go...
@@ -595,8 +662,9 @@ static _INLINE_ void special_receive(struct sun_serial *info)
 
 	stat = read_zsreg(info->zs_channel, R1);
 	if (stat & (PAR_ERR | Rx_OVR | CRC_ERR)) {
-		ch = info->zs_channel->data;
+		ch = sbus_readb(&info->zs_channel->data);
 		ZSDELAY();
+		ZSLOG(REGDATA, ch, 0);
 	}
 
 	if (!tty)
@@ -616,9 +684,10 @@ static _INLINE_ void special_receive(struct sun_serial *info)
 done:
 	queue_task(&tty->flip.tqueue, &tq_timer);
 clear:
-	info->zs_channel->control = ERR_RES;
+	sbus_writeb(ERR_RES, &info->zs_channel->control);
 	ZSDELAY();
 	ZS_WSYNC(info->zs_channel);
+	ZSLOG(REGCTRL, ERR_RES, 1);
 }
 
 
@@ -632,6 +701,7 @@ void zs_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	int i;
 
 	info = (struct sun_serial *)dev_id;
+	ZSLOG(REGIRQ, 0, 0);
 	for (i = 0; i < NUM_SERIAL; i++) {
 		zs_intreg = read_zsreg(info->zs_next->zs_channel, 2);
 		zs_intreg &= STATUS_MASK;
@@ -754,20 +824,6 @@ static void do_serial_hangup(void *private_)
 	tty_hangup(tty);
 }
 
-
-/*
- * This subroutine is called when the RS_TIMER goes off.  It is used
- * by the serial driver to handle ports that do not have an interrupt
- * (irq=0).  This doesn't work at all for 16450's, as a sun has a Z8530.
- */
- 
-static void zs_timer(void)
-{
-	printk("zs_timer called\n");
-	prom_halt();
-	return;
-}
-
 static int startup(struct sun_serial * info)
 {
 	unsigned long flags;
@@ -797,13 +853,15 @@ static int startup(struct sun_serial * info)
 	/*
 	 * Clear the interrupt registers.
 	 */
-	info->zs_channel->control = ERR_RES;
+	sbus_writeb(ERR_RES, &info->zs_channel->control);
 	ZSDELAY();
 	ZS_WSYNC(info->zs_channel);
+	ZSLOG(REGCTRL, ERR_RES, 1);
 
-	info->zs_channel->control = RES_H_IUS;
+	sbus_writeb(RES_H_IUS, &info->zs_channel->control);
 	ZSDELAY();
 	ZS_WSYNC(info->zs_channel);
+	ZSLOG(REGCTRL, RES_H_IUS, 1);
 
 	/*
 	 * Now, initialize the Zilog
@@ -826,25 +884,19 @@ static int startup(struct sun_serial * info)
 	/*
 	 * And clear the interrupt registers again for luck.
 	 */
-	info->zs_channel->control = ERR_RES;
+	sbus_writeb(ERR_RES, &info->zs_channel->control);
 	ZSDELAY();
 	ZS_WSYNC(info->zs_channel);
+	ZSLOG(REGCTRL, ERR_RES, 1);
 
-	info->zs_channel->control = RES_H_IUS;
+	sbus_writeb(RES_H_IUS, &info->zs_channel->control);
 	ZSDELAY();
 	ZS_WSYNC(info->zs_channel);
+	ZSLOG(REGCTRL, RES_H_IUS, 1);
 
 	if (info->tty)
 		clear_bit(TTY_IO_ERROR, &info->tty->flags);
 	info->xmit_cnt = info->xmit_head = info->xmit_tail = 0;
-
-	/*
-	 * Set up serial timers...
-	 */
-#if 0  /* Works well and stops the machine. */
-	timer_table[RS_TIMER].expires = jiffies + 2;
-	timer_active |= 1 << RS_TIMER;
-#endif
 
 	/*
 	 * and set the speed of the serial port
@@ -892,7 +944,6 @@ static void shutdown(struct sun_serial * info)
  */
 static void change_speed(struct sun_serial *info)
 {
-	unsigned short port;
 	unsigned cflag;
 	int	quot = 0;
 	int	i;
@@ -901,7 +952,7 @@ static void change_speed(struct sun_serial *info)
 	if (!info->tty || !info->tty->termios)
 		return;
 	cflag = info->tty->termios->c_cflag;
-	if (!(port = info->port))
+	if (!info->port)
 		return;
 	i = cflag & CBAUD;
 	if (cflag & CBAUDEX) {
@@ -1035,24 +1086,32 @@ void putDebugChar(char kgdb_char)
 {
 	struct sun_zschannel *chan = zs_kgdbchan;
 
-	while((chan->control & Tx_BUF_EMP)==0)
+	while((sbus_readb(&chan->control) & Tx_BUF_EMP)==0)
 		udelay(5);
-	chan->data = kgdb_char;
+	sbus_writeb(kgdb_char, &chan->data);
 	ZS_WSYNC(chan);
+	ZSLOG(REGDATA, kgdb_char, 1);
 }
 
 char getDebugChar(void)
 {
 	struct sun_zschannel *chan = zs_kgdbchan;
+	u8 val;
 
-	while((chan->control & Rx_CH_AV)==0)
+	do {
+		val = sbus_readb(&chan->control);
+		ZSLOG(REGCTRL, val, 0);
 		udelay(5);
-	return chan->data;
+	} while ((val & Rx_CH_AV) == 0);
+
+	val = sbus_readb(&chan->data);
+	ZSLOG(REGDATA, val, 0);
+	return val;
 }
 
 static void zs_flush_chars(struct tty_struct *tty)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 	unsigned long flags;
 
 	if (serial_paranoia_check(info, tty->device, "zs_flush_chars"))
@@ -1087,9 +1146,9 @@ out:
 static int zs_write(struct tty_struct * tty, int from_user,
 		    const unsigned char *buf, int count)
 {
-	int	c, total = 0;
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 	unsigned long flags;
+	int c, total = 0;
 
 	if (serial_paranoia_check(info, tty->device, "zs_write"))
 		return 0;
@@ -1143,8 +1202,8 @@ static int zs_write(struct tty_struct * tty, int from_user,
 
 static int zs_write_room(struct tty_struct *tty)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
-	int	ret;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
+	int ret;
 
 	if (serial_paranoia_check(info, tty->device, "zs_write_room"))
 		return 0;
@@ -1156,7 +1215,7 @@ static int zs_write_room(struct tty_struct *tty)
 
 static int zs_chars_in_buffer(struct tty_struct *tty)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 
 	if (serial_paranoia_check(info, tty->device, "zs_chars_in_buffer"))
 		return 0;
@@ -1165,7 +1224,7 @@ static int zs_chars_in_buffer(struct tty_struct *tty)
 
 static void zs_flush_buffer(struct tty_struct *tty)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 
 	if (serial_paranoia_check(info, tty->device, "zs_flush_buffer"))
 		return;
@@ -1188,7 +1247,7 @@ static void zs_flush_buffer(struct tty_struct *tty)
  */
 static void zs_throttle(struct tty_struct * tty)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 #ifdef SERIAL_DEBUG_THROTTLE
 	char	buf[64];
 	
@@ -1211,7 +1270,7 @@ static void zs_throttle(struct tty_struct * tty)
 
 static void zs_unthrottle(struct tty_struct * tty)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 #ifdef SERIAL_DEBUG_THROTTLE
 	char	buf[64];
 	
@@ -1259,7 +1318,8 @@ static int get_serial_info(struct sun_serial * info,
 	tmp.close_delay = info->close_delay;
 	tmp.closing_wait = info->closing_wait;
 	tmp.custom_divisor = info->custom_divisor;
-	copy_to_user_ret(retinfo,&tmp,sizeof(*retinfo), -EFAULT);
+	if (copy_to_user(retinfo,&tmp,sizeof(*retinfo)))
+		return -EFAULT;
 	return 0;
 }
 
@@ -1268,7 +1328,7 @@ static int set_serial_info(struct sun_serial * info,
 {
 	struct serial_struct new_serial;
 	struct sun_serial old_info;
-	int 			retval = 0;
+	int retval = 0;
 
 	if (!new_info || copy_from_user(&new_serial,new_info,sizeof(new_serial)))
 		return -EFAULT;
@@ -1326,10 +1386,12 @@ static int get_lsr_info(struct sun_serial * info, unsigned int *value)
 	unsigned char status;
 
 	cli();
-	status = info->zs_channel->control;
+	status = sbus_readb(&info->zs_channel->control);
 	ZSDELAY();
+	ZSLOG(REGCTRL, status, 0);
 	sti();
-	put_user_ret(status,value, -EFAULT);
+	if (put_user(status, value))
+		return -EFAULT;
 	return 0;
 }
 
@@ -1339,15 +1401,17 @@ static int get_modem_info(struct sun_serial * info, unsigned int *value)
 	unsigned int result;
 
 	cli();
-	status = info->zs_channel->control;
+	status = sbus_readb(&info->zs_channel->control);
 	ZSDELAY();
+	ZSLOG(REGCTRL, status, 0);
 	sti();
 	result =  ((info->curregs[5] & RTS) ? TIOCM_RTS : 0)
 		| ((info->curregs[5] & DTR) ? TIOCM_DTR : 0)
 		| ((status  & DCD) ? TIOCM_CAR : 0)
 		| ((status  & SYNC) ? TIOCM_DSR : 0)
 		| ((status  & CTS) ? TIOCM_CTS : 0);
-	put_user_ret(result, value, -EFAULT);
+	if (put_user(result, value))
+		return -EFAULT;
 	return 0;
 }
 
@@ -1356,7 +1420,8 @@ static int set_modem_info(struct sun_serial * info, unsigned int cmd,
 {
 	unsigned int arg;
 
-	get_user_ret(arg, value, -EFAULT);
+	if (get_user(arg, value))
+		return -EFAULT;
 	switch (cmd) {
 	case TIOCMBIS: 
 		if (arg & TIOCM_RTS)
@@ -1402,7 +1467,7 @@ static void send_break(	struct sun_serial * info, int duration)
 static int zs_ioctl(struct tty_struct *tty, struct file * file,
 		    unsigned int cmd, unsigned long arg)
 {
-	struct sun_serial * info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial * info = (struct sun_serial *) tty->driver_data;
 	int retval;
 
 	if (serial_paranoia_check(info, tty->device, "zs_ioctl"))
@@ -1432,11 +1497,13 @@ static int zs_ioctl(struct tty_struct *tty, struct file * file,
 			send_break(info, arg ? arg*(HZ/10) : HZ/4);
 			return 0;
 		case TIOCGSOFTCAR:
-			put_user_ret(C_CLOCAL(tty) ? 1 : 0,
-				     (unsigned long *) arg, -EFAULT);
+			if (put_user(C_CLOCAL(tty) ? 1 : 0,
+				     (unsigned long *) arg))
+				return -EFAULT;
 			return 0;
 		case TIOCSSOFTCAR:
-			get_user_ret(arg, (unsigned long *) arg, -EFAULT);
+			if (get_user(arg, (unsigned long *) arg))
+				return -EFAULT;
 			tty->termios->c_cflag =
 				((tty->termios->c_cflag & ~CLOCAL) |
 				 (arg ? CLOCAL : 0));
@@ -1457,8 +1524,9 @@ static int zs_ioctl(struct tty_struct *tty, struct file * file,
 			return get_lsr_info(info, (unsigned int *) arg);
 
 		case TIOCSERGSTRUCT:
-			copy_to_user_ret((struct sun_serial *) arg,
-				    info, sizeof(struct sun_serial), -EFAULT);
+			if (copy_to_user((struct sun_serial *) arg,
+				    info, sizeof(struct sun_serial)))
+				return -EFAULT;
 			return 0;
 			
 		default:
@@ -1469,7 +1537,7 @@ static int zs_ioctl(struct tty_struct *tty, struct file * file,
 
 static void zs_set_termios(struct tty_struct *tty, struct termios *old_termios)
 {
-	struct sun_serial *info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial *info = (struct sun_serial *) tty->driver_data;
 
 	if (tty->termios->c_cflag == old_termios->c_cflag)
 		return;
@@ -1495,7 +1563,7 @@ static void zs_set_termios(struct tty_struct *tty, struct termios *old_termios)
  */
 static void zs_close(struct tty_struct *tty, struct file * filp)
 {
-	struct sun_serial * info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial * info = (struct sun_serial *) tty->driver_data;
 	unsigned long flags;
 
 	if (!info || serial_paranoia_check(info, tty->device, "zs_close"))
@@ -1598,7 +1666,7 @@ static void zs_close(struct tty_struct *tty, struct file * filp)
  */
 void zs_hangup(struct tty_struct *tty)
 {
-	struct sun_serial * info = (struct sun_serial *)tty->driver_data;
+	struct sun_serial * info = (struct sun_serial *) tty->driver_data;
 
 	if (serial_paranoia_check(info, tty->device, "zs_hangup"))
 		return;
@@ -1629,9 +1697,8 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct sun_serial *info)
 {
 	DECLARE_WAITQUEUE(wait, current);
-	int		retval;
-	int		do_clocal = 0;
-	unsigned char	r0;
+	int retval, do_clocal = 0;
+	unsigned char r0;
 
 	/*
 	 * If the device is in the middle of being closed, then block
@@ -1711,7 +1778,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		if (!(info->flags & ZILOG_CALLOUT_ACTIVE))
 			zs_rtsdtr(info, 1);
 		sti();
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ZILOG_INITIALIZED)) {
 #ifdef SERIAL_DEBUG_OPEN
@@ -1769,10 +1836,11 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
  */
 int zs_open(struct tty_struct *tty, struct file * filp)
 {
-	struct sun_serial	*info;
-	int 			retval, line;
+	struct sun_serial *info;
+	int retval, line;
 
 	line = MINOR(tty->device) - tty->driver.minor_start;
+
 	/* The zilog lines for the mouse/keyboard must be
 	 * opened using their respective drivers.
 	 */
@@ -1844,7 +1912,7 @@ int zs_open(struct tty_struct *tty, struct file * filp)
 
 static void show_serial_version(void)
 {
-	char *revision = "$Revision: 1.42 $";
+	char *revision = "$Revision: 1.61 $";
 	char *version, *p;
 
 	version = strchr(revision, ' ');
@@ -1862,24 +1930,26 @@ static void show_serial_version(void)
  *       we have a special version for sun4u.
  */
 #ifdef __sparc_v9__
-__initfunc(static struct sun_zslayout *
-get_zs(int chip))
+static struct sun_zslayout * __init get_zs(int chip)
 {
 	unsigned int vaddr[2] = { 0, 0 };
 	unsigned long mapped_addr = 0;
 	int busnode, seen, zsnode, sun4u_ino;
 	static int irq = 0;
 
-	if(chip < 0 || chip >= NUM_SERIAL)
-		panic("get_zs bogon zs chip number");
+	if(chip < 0 || chip >= NUM_SERIAL) {
+		prom_printf("get_zs bogon zs chip number");
+		prom_halt();
+	}
 
 	if(central_bus)
 		busnode = central_bus->child->prom_node;
 	else
 		busnode = prom_searchsiblings(prom_getchild(prom_root_node), "sbus");
-	if(busnode == 0 || busnode == -1)
-		panic("get_zs: no zs bus to search");
-
+	if(busnode == 0 || busnode == -1) {
+		prom_printf("get_zs: no zs bus to search");
+		prom_halt();
+	}
 	zsnode = prom_getchild(busnode);
 	seen = 0;
 	while(zsnode) {
@@ -1892,8 +1962,8 @@ get_zs(int chip))
 						   (void *) vaddr, sizeof(vaddr));
 
 			if(len == -1 || central_bus != NULL) {
-				struct linux_sbus *sbus = NULL;
-				struct linux_sbus_device *sdev = NULL;
+				struct sbus_bus *sbus = NULL;
+				struct sbus_dev *sdev = NULL;
 
 				/* "address" property is not guarenteed,
 				 * everything in I/O is implicitly mapped
@@ -1912,11 +1982,9 @@ get_zs(int chip))
 				if (sdev == NULL && central_bus == NULL)
 					prom_halt();
 				if (central_bus == NULL) {
-					prom_apply_sbus_ranges(sbus, sdev->reg_addrs, 1, sdev);
-					mapped_addr = (unsigned long)
-						sparc_alloc_io(sdev->reg_addrs[0].phys_addr, 0,
-							       PAGE_SIZE, "Zilog Registers",
-							       sdev->reg_addrs[0].which_io, 0x0);
+					mapped_addr =
+					    sbus_ioremap(&sdev->resource[0], 0,
+							 PAGE_SIZE, "Zilog Registers");
 				} else {
 					struct linux_prom_registers zsregs[1];
 					int err;
@@ -1928,11 +1996,11 @@ get_zs(int chip))
 						prom_printf("ZS: Cannot map Zilog regs.\n");
 						prom_halt();
 					}
-					prom_apply_fhc_ranges(central_bus->child, &zsregs[0], 1);
-					prom_apply_central_ranges(central_bus, &zsregs[0], 1);
-					mapped_addr = (unsigned long)
-						__va((((unsigned long)zsregs[0].which_io)<<32) |
-						     (((unsigned long)zsregs[0].phys_addr)));
+					apply_fhc_ranges(central_bus->child, &zsregs[0], 1);
+					apply_central_ranges(central_bus, &zsregs[0], 1);
+					mapped_addr =
+						((((u64)zsregs[0].which_io)<<32UL)|
+						 ((u64)zsregs[0].phys_addr));
 				}
 			} else if(len % sizeof(unsigned int)) {
 				prom_printf("WHOOPS:  proplen for %s "
@@ -1947,13 +2015,14 @@ get_zs(int chip))
 					       (sizeof(sun4u_ino)));
 			if(!irq) {
 				if (central_bus) {
-					irq = zilog_irq = 
-						build_irq(12, 0, 
-							&central_bus->child->fhc_regs.uregs->fhc_uart_iclr,
-							&central_bus->child->fhc_regs.uregs->fhc_uart_imap);
+					unsigned long iclr, imap;
+
+					iclr = central_bus->child->fhc_regs.uregs + FHC_UREGS_ICLR;
+					imap = central_bus->child->fhc_regs.uregs + FHC_UREGS_IMAP;
+					irq = zilog_irq = build_irq(12, 0, iclr, imap);
 				} else {
 					irq = zilog_irq = 
-						sbus_build_irq(SBus_chain, sun4u_ino);
+						sbus_build_irq(sbus_root, sun4u_ino);
 				}
 			}
 			break;
@@ -1965,14 +2034,23 @@ get_zs(int chip))
 		panic("get_zs: whee chip not found");
 	if(!vaddr[0] && !mapped_addr)
 		panic("get_zs: whee no serial chip mappable");
-	if (mapped_addr != 0)
+	if (mapped_addr != 0) {
 		return (struct sun_zslayout *) mapped_addr;
-	else
-		return (struct sun_zslayout *) (unsigned long) vaddr[0];
+	} else {
+		pgd_t *pgd = pgd_offset_k((unsigned long)vaddr[0]);
+		pmd_t *pmd = pmd_offset(pgd, (unsigned long)vaddr[0]);
+		pte_t *pte = pte_offset(pmd, (unsigned long)vaddr[0]);
+		unsigned long base = pte_val(*pte) & _PAGE_PADDR;
+
+		/* Translate PROM's mapping we captured at boot
+		 * time into physical address.
+		 */
+		base += ((unsigned long)vaddr[0] & ~PAGE_MASK);
+		return (struct sun_zslayout *) base;
+	}
 }
 #else /* !(__sparc_v9__) */
-__initfunc(static struct sun_zslayout *
-get_zs(int chip))
+static struct sun_zslayout * __init get_zs(int chip)
 {
 	struct linux_prom_irqs tmp_irq[2];
 	unsigned int paddr = 0;
@@ -1982,16 +2060,13 @@ get_zs(int chip))
 	static int irq = 0;
 	int chipid = chip;
 
-#if CONFIG_AP1000
-        printk("No zs chip\n");
-        return NULL;
-#endif
-
 	iospace = 0;
 	if(chip < 0 || chip >= NUM_SERIAL)
 		panic("get_zs bogon zs chip number");
 
 	if(sparc_cpu_model == sun4) {
+		struct resource dummy_resource;
+
 		/* Grrr, these have to be hardcoded aieee */
 		switch(chip) {
 		case 0:
@@ -2005,16 +2080,17 @@ get_zs(int chip))
 		zs_nodes[chip] = 0;
 		if(!irq)
 			zilog_irq = irq = 12;
-		vaddr[0] = (unsigned long)
-				sparc_alloc_io(paddr, 0, 8,
-					       "Zilog Serial", iospace, 0);
+		dummy_resource.start = paddr;
+		dummy_resource.end = paddr + 8 - 1;
+		dummy_resource.flags = IORESOURCE_IO;
+		vaddr[0] = sbus_ioremap(&dummy_resource, 0,
+					8, "Zilog Serial");
 	} else {
 		/* Can use the prom for other machine types */
 		zsnode = prom_getchild(prom_root_node);
 		if (sparc_cpu_model == sun4d) {
-			int node;
 			int no = 0;
-			
+
 			tmpnode = zsnode;
 			zsnode = 0;
 			bbnode = 0;
@@ -2059,15 +2135,18 @@ get_zs(int chip))
 				} else {
 					/* On sun4d don't have address property :( */
 					struct linux_prom_registers zsreg[4];
+					struct resource res;
 					
 					if (prom_getproperty(zsnode, "reg", (char *)zsreg, sizeof(zsreg)) == -1) {
 						prom_printf ("Cannot map zs regs\n");
 						prom_halt();
 					}
 					prom_apply_generic_ranges(bbnode, cpunode, zsreg, 1);
-					vaddr[0] = (unsigned long)
-							sparc_alloc_io(zsreg[0].phys_addr, 0, 8,
-								       "Zilog Serial", zsreg[0].which_io, 0);
+					res.start = zsreg[0].phys_addr;
+					res.end = res.start + 8 - 1;
+					res.flags = zsreg[0].which_io | IORESOURCE_IO;
+					vaddr[0] = sbus_ioremap(&res, 0,
+								8, "Zilog Serial");
 				}
 				zs_nodes[chip] = zsnode;
 				len = prom_getproperty(zsnode, "intr",
@@ -2077,9 +2156,9 @@ get_zs(int chip))
 					prom_printf(
 					      "WHOOPS:  proplen for %s "
 					      "was %d, need multiple of "
-					      "%d\n", "address", len,
+					      "%d\n", "intr", len,
 					      sizeof(struct linux_prom_irqs));
-					panic("zilog: address property");
+					panic("zilog: intr property");
 				}
 				if(!irq) {
 					irq = zilog_irq = tmp_irq[0].pri;
@@ -2113,11 +2192,62 @@ void zs_change_mouse_baud(int newbaud)
 	write_zsreg(zs_soft[channel].zs_channel, R13, ((brg >> 8) & 0xff));
 }
 
-__initfunc(int zs_probe (unsigned long *memory_start))
+void __init zs_init_alloc_failure(const char *table_name)
 {
-	char *p;
+	prom_printf("zs_probe: Cannot alloc %s.\n", table_name);
+	prom_halt();
+}
+
+void * __init zs_alloc_bootmem(unsigned long size)
+{
+	void *ret;
+
+	ret = __alloc_bootmem(size, SMP_CACHE_BYTES, 0UL);
+	if (ret != NULL)
+		memset(ret, 0, size);
+
+	return ret;
+}
+
+void __init zs_alloc_tables(void)
+{
+	zs_chips = (struct sun_zslayout **)
+		zs_alloc_bootmem(NUM_SERIAL * sizeof(struct sun_zslayout *));
+	if (zs_chips == NULL)
+		zs_init_alloc_failure("zs_chips");
+	zs_channels = (struct sun_zschannel **)
+		zs_alloc_bootmem(NUM_CHANNELS * sizeof(struct sun_zschannel *));
+	if (zs_channels == NULL)
+		zs_init_alloc_failure("zs_channels");
+	zs_nodes = (int *)
+		zs_alloc_bootmem(NUM_SERIAL * sizeof(int));
+	if (zs_nodes == NULL)
+		zs_init_alloc_failure("zs_nodes");
+	zs_soft = (struct sun_serial *)
+		zs_alloc_bootmem(NUM_CHANNELS * sizeof(struct sun_serial));
+	if (zs_soft == NULL)
+		zs_init_alloc_failure("zs_soft");
+	zs_ttys = (struct tty_struct *)
+		zs_alloc_bootmem(NUM_CHANNELS * sizeof(struct tty_struct));
+	if (zs_ttys == NULL)
+		zs_init_alloc_failure("zs_ttys");
+	serial_table = (struct tty_struct **)
+		zs_alloc_bootmem(NUM_CHANNELS * sizeof(struct tty_struct *));
+	if (serial_table == NULL)
+		zs_init_alloc_failure("serial_table");
+	serial_termios = (struct termios **)
+		zs_alloc_bootmem(NUM_CHANNELS * sizeof(struct termios *));
+	if (serial_termios == NULL)
+		zs_init_alloc_failure("serial_termios");
+	serial_termios_locked = (struct termios **)
+		zs_alloc_bootmem(NUM_CHANNELS * sizeof(struct termios *));
+	if (serial_termios_locked == NULL)
+		zs_init_alloc_failure("serial_termios_locked");
+}
+
+int __init zs_probe(void)
+{
 	int node;
-	int i;
 
 	if(sparc_cpu_model == sun4)
 		goto no_probe;
@@ -2169,42 +2299,24 @@ __initfunc(int zs_probe (unsigned long *memory_start))
 	NUM_SERIAL = 2;
 
 no_probe:
-	p = (char *)((*memory_start + 7) & ~7);
-	zs_chips = (struct sun_zslayout **)(p);
-	i = NUM_SERIAL * sizeof (struct sun_zslayout *);
-	zs_channels = (struct sun_zschannel **)(p + i);
-	i += NUM_CHANNELS * sizeof (struct sun_zschannel *);
-	zs_nodes = (int *)(p + i);
-	i += NUM_SERIAL * sizeof (int);
-	zs_soft = (struct sun_serial *)(p + i);
-	i += NUM_CHANNELS * sizeof (struct sun_serial);
-	zs_ttys = (struct tty_struct *)(p + i);
-	i += NUM_CHANNELS * sizeof (struct tty_struct);
-	serial_table = (struct tty_struct **)(p + i);
-	i += NUM_CHANNELS * sizeof (struct tty_struct *);
-	serial_termios = (struct termios **)(p + i);
-	i += NUM_CHANNELS * sizeof (struct termios *);
-	serial_termios_locked = (struct termios **)(p + i);
-	i += NUM_CHANNELS * sizeof (struct termios *);
-	memset (p, 0, i);
-	*memory_start = (((unsigned long)p) + i + 7) & ~7;
+	zs_alloc_tables();
 
 	/* Fill in rs_ops struct... */
 #ifdef CONFIG_SERIAL_CONSOLE
-	sunserial_setinitfunc(memory_start, zs_console_init);
+	sunserial_setinitfunc(zs_console_init);
 #endif
-	sunserial_setinitfunc(memory_start, zs_init);
+	sunserial_setinitfunc(zs_init);
 	rs_ops.rs_kgdb_hook = zs_kgdb_hook;
 	rs_ops.rs_change_mouse_baud = zs_change_mouse_baud;
 
-	sunkbd_setinitfunc(memory_start, sun_kbd_init);
+	sunkbd_setinitfunc(sun_kbd_init);
 	kbd_ops.compute_shiftstate = sun_compute_shiftstate;
 	kbd_ops.setledstate = sun_setledstate;
 	kbd_ops.getledstate = sun_getledstate;
 	kbd_ops.setkeycode = sun_setkeycode;
 	kbd_ops.getkeycode = sun_getkeycode;
 #if defined(__sparc_v9__) && defined(CONFIG_PCI)
-	sunkbd_install_keymaps(memory_start, sun_key_maps, sun_keymap_count,
+	sunkbd_install_keymaps(sun_key_maps, sun_keymap_count,
 			       sun_func_buf, sun_func_table,
 			       sun_funcbufsize, sun_funcbufleft,
 			       sun_accent_table, sun_accent_table_size);
@@ -2217,7 +2329,8 @@ static inline void zs_prepare(void)
 	int channel, chip;
 	unsigned long flags;
 
-	if (!NUM_SERIAL) return;
+	if (!NUM_SERIAL)
+		return;
 	
 	save_and_cli(flags);
 	
@@ -2266,22 +2379,15 @@ static inline void zs_prepare(void)
 	restore_flags(flags);
 }
 
-__initfunc(int zs_init(void))
+int __init zs_init(void)
 {
 	int channel, brg, i;
 	unsigned long flags;
 	struct sun_serial *info;
 	char dummy;
 
-#if CONFIG_AP1000
-        printk("not doing zs_init()\n");
-        return 0;
-#endif
-
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = zs_timer;
-	timer_table[RS_TIMER].expires = 0;
 
 	show_serial_version();
 
@@ -2291,7 +2397,11 @@ __initfunc(int zs_init(void))
 	memset(&serial_driver, 0, sizeof(struct tty_driver));
 	serial_driver.magic = TTY_DRIVER_MAGIC;
 	serial_driver.driver_name = "serial";
+#ifdef CONFIG_DEVFS_FS
+	serial_driver.name = "tts/%d";
+#else
 	serial_driver.name = "ttyS";
+#endif
 	serial_driver.major = TTY_MAJOR;
 	serial_driver.minor_start = 64;
 	serial_driver.num = NUM_CHANNELS;
@@ -2330,7 +2440,7 @@ __initfunc(int zs_init(void))
 	 * major number and the subtype code.
 	 */
 	callout_driver = serial_driver;
-	callout_driver.name = "cua";
+	callout_driver.name = "cua/%d";
 	callout_driver.major = TTYAUX_MAJOR;
 	callout_driver.subtype = SERIAL_TYPE_CALLOUT;
 
@@ -2349,12 +2459,13 @@ __initfunc(int zs_init(void))
 	 */
 	if (request_irq(zilog_irq, zs_interrupt,
 			(SA_INTERRUPT | SA_STATIC_ALLOC),
-			"Zilog8530", zs_chain))
-		panic("Unable to attach zs intr\n");
+			"Zilog8530", zs_chain)) {
+		prom_printf("Unable to attach zs intr\n");
+		prom_halt();
+	}
 
 	/* Initialize Hardware */
 	for(channel = 0; channel < NUM_CHANNELS; channel++) {
-
 		/* Hardware reset each chip */
 		if (!(channel & 1)) {
 			write_zsreg(zs_soft[channel].zs_channel, R9, FHWRES);
@@ -2535,8 +2646,7 @@ __initfunc(int zs_init(void))
  * for /dev/ttyb which is determined in setup_arch() from the
  * boot command line flags.
  */
-__initfunc(static void
-zs_kgdb_hook(int tty_num))
+static void __init zs_kgdb_hook(int tty_num)
 {
 	int chip = 0;
 
@@ -2584,12 +2694,14 @@ zs_console_putchar(struct sun_serial *info, char ch)
  */
 static void zs_fair_output(struct sun_serial *info)
 {
-	int left;		/* Output no more than that */
 	unsigned long flags;
+	int left;		/* Output no more than that */
 	char c;
 
-	if (info == 0) return;
-	if (info->xmit_buf == 0) return;
+	if (info == NULL)
+		return;
+	if (info->xmit_buf == NULL)
+		return;
 
 	save_flags(flags);  cli();
 	left = info->xmit_cnt;
@@ -2606,8 +2718,9 @@ static void zs_fair_output(struct sun_serial *info)
 	}
 
 	/* Last character is being transmitted now (hopefully). */
-	info->zs_channel->control = RES_Tx_P;
+	sbus_writeb(RES_Tx_P, &info->zs_channel->control);
 	ZSDELAY();
+	ZSLOG(REGCTRL, RES_Tx_P, 1);
 
 	restore_flags(flags);
 	return;
@@ -2648,8 +2761,7 @@ static kdev_t zs_console_device(struct console *con)
 	return MKDEV(TTY_MAJOR, 64 + con->index);
 }
 
-__initfunc(static int
-zs_console_setup(struct console *con, char *options))
+static int __init zs_console_setup(struct console *con, char *options)
 {
 	struct sun_serial *info;
 	int i, brg, baud;
@@ -2717,21 +2829,16 @@ zs_console_setup(struct console *con, char *options))
 }
 
 static struct console zs_console = {
-	"ttyS",
-	zs_console_write,
-	NULL,
-	zs_console_device,
-	zs_console_wait_key,
-	NULL,
-	zs_console_setup,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"ttyS",
+	write:		zs_console_write,
+	device:		zs_console_device,
+	wait_key:	zs_console_wait_key,
+	setup:		zs_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
-__initfunc(static int
-zs_console_init(void))
+static int __init zs_console_init(void)
 {
 	extern int con_is_present(void);
 

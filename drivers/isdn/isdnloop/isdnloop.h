@@ -1,8 +1,8 @@
-/* $Id: isdnloop.h,v 1.3 1998/04/14 20:59:35 he Exp $
+/* $Id: isdnloop.h,v 1.5 2000/11/13 22:51:50 kai Exp $
 
  * Loopback lowlevel module for testing of linklevel.
  *
- * Copyright 1997 by Fritz Elfert (fritz@wuemaus.franken.de)
+ * Copyright 1997 by Fritz Elfert (fritz@isdn4linux.de)
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -17,18 +17,6 @@
  * You should have received a copy of the GNU General Public License
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
- *
- * $Log: isdnloop.h,v $
- * Revision 1.3  1998/04/14 20:59:35  he
- * merged 2.1.94 changes
- *
- * Revision 1.2  1997/10/01 09:22:07  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 1.1  1997/03/24 23:02:05  fritz
- * Added isdnloop driver.
  *
  */
 

@@ -211,6 +211,8 @@ typedef	struct _READ_CAPACITY_DATA
 	}	READ_CAPACITY_DATA, *PREAD_CAPACITY_DATA;
 
 // SCSI inquiry data
+#ifndef HOSTS_C
+
 typedef struct _INQUIRYDATA
 	{
 	UCHAR DeviceType			:5;
@@ -235,6 +237,7 @@ typedef struct _INQUIRYDATA
     UCHAR VendorSpecific[20];
     UCHAR Reserved3[40];
 	}	INQUIRYDATA, *PINQUIRYDATA;
+#endif
 
 // IDE IDENTIFY data
 typedef struct _IDENTIFY_DATA
@@ -318,9 +321,7 @@ int Psi240i_BiosParam		(Disk *disk, kdev_t dev, int geom[]);
 	#define NULL 0
 #endif
 
-extern struct proc_dir_entry Proc_Scsi_Psi240i;
-
-#define PSI240I { proc_dir:       &Proc_Scsi_Psi240i,/* proc_dir_entry */ \
+#define PSI240I { proc_name:      "psi240i", \
 		  name:           "PSI-240I EIDE Disk Controller",\
 		  detect:         Psi240i_Detect,			\
 		  command:	  Psi240i_Command,			\

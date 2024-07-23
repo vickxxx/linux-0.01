@@ -23,7 +23,6 @@
 #include <linux/malloc.h>
 #include <linux/random.h>
 #include <linux/smp.h>
-#include <linux/tasks.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
 
@@ -38,7 +37,7 @@
 
 #include <asm/cobalt.h>
 
-#include "irq.h"
+#include <linux/irq.h>
 
 /*
  * This is the PIIX4-based 8259 that is wired up indirectly to Cobalt
@@ -92,6 +91,8 @@ static void disable_cobalt_irq(unsigned int irq);
 static void startup_cobalt_irq(unsigned int irq);
 #define shutdown_cobalt_irq disable_cobalt_irq
 
+static spinlock_t irq_controller_lock = SPIN_LOCK_UNLOCKED;
+
 static struct hw_interrupt_type cobalt_irq_type = {
 	"Cobalt-APIC",
 	startup_cobalt_irq,
@@ -103,9 +104,9 @@ static struct hw_interrupt_type cobalt_irq_type = {
 
 
 /*
- * Not an initfunc, needed by the reboot code
+ * Not an __init, needed by the reboot code
  */
-void init_pic_mode(void)
+void disable_IO_APIC(void)
 {
 	/* Nop on Cobalt */
 } 
@@ -377,7 +378,7 @@ void init_VISWS_APIC_irqs(void)
 	for (i = 0; i < 16; i++) {
 		irq_desc[i].status = IRQ_DISABLED;
 		irq_desc[i].action = 0;
-		irq_desc[i].depth = 0;
+		irq_desc[i].depth = 1;
 
 		/*
 		 * Cobalt IRQs are mapped to standard ISA

@@ -17,7 +17,10 @@
 #include <linux/fb.h>
 
 #include <asm/byteorder.h>
+
+#ifdef __mc68000__
 #include <asm/setup.h>
+#endif
 
 #include <video/fbcon.h>
 #include <video/fbcon-iplan2p8.h>
@@ -337,7 +340,7 @@ void fbcon_iplan2p8_clear(struct vc_data *conp, struct display *p, int sy,
 	/* Clears are split if the region starts at an odd column or
 	* end at an even column. These extra columns are spread
 	* across the interleaved planes. All in between can be
-	* cleared by normal mymemclear_small(), because both bytes of
+	* cleared by normal fb_memclear_small(), because both bytes of
 	* the single plane words are affected.
 	*/
 
@@ -492,9 +495,14 @@ void fbcon_iplan2p8_clear_margins(struct vc_data *conp, struct display *p,
      */
 
 struct display_switch fbcon_iplan2p8 = {
-    fbcon_iplan2p8_setup, fbcon_iplan2p8_bmove, fbcon_iplan2p8_clear,
-    fbcon_iplan2p8_putc, fbcon_iplan2p8_putcs, fbcon_iplan2p8_revc, NULL,
-    NULL, fbcon_iplan2p8_clear_margins, FONTWIDTH(8)
+    setup:		fbcon_iplan2p8_setup,
+    bmove:		fbcon_iplan2p8_bmove,
+    clear:		fbcon_iplan2p8_clear,
+    putc:		fbcon_iplan2p8_putc,
+    putcs:		fbcon_iplan2p8_putcs,
+    revc:		fbcon_iplan2p8_revc,
+    clear_margins:	fbcon_iplan2p8_clear_margins,
+    fontwidthmask:	FONTWIDTH(8)
 };
 
 

@@ -22,10 +22,10 @@
  *			Joerg(DL1BKE)	Fixed DAMA Slave. We are *required* to start with
  *					standard AX.25 mode.
  *	AX.25 037	Jonathan(G4KLX)	New timer architecture.
+ *                      Tomi(OH2BNS)    Fixed heartbeat expiry (check ax25_dev).
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -139,12 +139,12 @@ void ax25_stop_idletimer(ax25_cb *ax25)
 
 int ax25_t1timer_running(ax25_cb *ax25)
 {
-	return (ax25->t1timer.prev != NULL || ax25->t1timer.next != NULL);
+	return timer_pending(&ax25->t1timer);
 }
 
 unsigned long ax25_display_timer(struct timer_list *timer)
 {
-	if (timer->prev == NULL && timer->next == NULL)
+	if (!timer_pending(timer))
 		return 0;
 
 	return timer->expires - jiffies;
@@ -153,8 +153,12 @@ unsigned long ax25_display_timer(struct timer_list *timer)
 static void ax25_heartbeat_expiry(unsigned long param)
 {
 	ax25_cb *ax25 = (ax25_cb *)param;
+	int proto = AX25_PROTO_STD_SIMPLEX;
 
-	switch (ax25->ax25_dev->values[AX25_VALUES_PROTOCOL]) {
+	if (ax25->ax25_dev)
+		proto = ax25->ax25_dev->values[AX25_VALUES_PROTOCOL];
+
+	switch (proto) {
 		case AX25_PROTO_STD_SIMPLEX:
 		case AX25_PROTO_STD_DUPLEX:
 			ax25_std_heartbeat_expiry(ax25);
@@ -250,5 +254,3 @@ static void ax25_idletimer_expiry(unsigned long param)
 #endif
 	}
 }
-
-#endif

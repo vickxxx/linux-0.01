@@ -1,4 +1,4 @@
-/* $Id: devops.c,v 1.11 1998/03/09 14:04:24 jj Exp $
+/* $Id: devops.c,v 1.13 2000/08/26 02:38:03 anton Exp $
  * devops.c:  Device operations using the PROM.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -21,7 +21,7 @@ prom_devopen(char *dstr)
 {
 	int handle;
 	unsigned long flags;
-	save_flags(flags); cli();
+	spin_lock_irqsave(&prom_lock, flags);
 	switch(prom_vers) {
 	case PROM_V0:
 		handle = (*(romvec->pv_v0devops.v0_devopen))(dstr);
@@ -31,13 +31,12 @@ prom_devopen(char *dstr)
 	case PROM_V3:
 		handle = (*(romvec->pv_v2devops.v2_dev_open))(dstr);
 		break;
-        case PROM_AP1000:
 	default:
 		handle = -1;
 		break;
 	};
 	restore_current();
-	restore_flags(flags);
+	spin_unlock_irqrestore(&prom_lock, flags);
 
 	return handle;
 }
@@ -47,7 +46,7 @@ int
 prom_devclose(int dhandle)
 {
 	unsigned long flags;
-	save_flags(flags); cli();
+	spin_lock_irqsave(&prom_lock, flags);
 	switch(prom_vers) {
 	case PROM_V0:
 		(*(romvec->pv_v0devops.v0_devclose))(dhandle);
@@ -56,12 +55,11 @@ prom_devclose(int dhandle)
 	case PROM_V3:
 		(*(romvec->pv_v2devops.v2_dev_close))(dhandle);
 		break;
-        case PROM_AP1000:
 	default:
 		break;
 	};
 	restore_current();
-	restore_flags(flags);
+	spin_unlock_irqrestore(&prom_lock, flags);
 	return 0;
 }
 
@@ -72,7 +70,7 @@ void
 prom_seek(int dhandle, unsigned int seekhi, unsigned int seeklo)
 {
 	unsigned long flags;
-	save_flags(flags); cli();
+	spin_lock_irqsave(&prom_lock, flags);
 	switch(prom_vers) {
 	case PROM_V0:
 		(*(romvec->pv_v0devops.v0_seekdev))(dhandle, seekhi, seeklo);
@@ -81,12 +79,11 @@ prom_seek(int dhandle, unsigned int seekhi, unsigned int seeklo)
 	case PROM_V3:
 		(*(romvec->pv_v2devops.v2_dev_seek))(dhandle, seekhi, seeklo);
 		break;
-        case PROM_AP1000:
 	default:
 		break;
 	};
 	restore_current();
-	restore_flags(flags);
+	spin_unlock_irqrestore(&prom_lock, flags);
 
 	return;
 }

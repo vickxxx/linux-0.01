@@ -7,6 +7,8 @@
  *		2 of the License, or (at your option) any later version.
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
+ * Fixes:       19990609: J Hadi Salim <hadi@nortelnetworks.com>: 
+ *              Init --  EINVAL when opt undefined
  */
 
 #include <linux/config.h>
@@ -69,17 +71,18 @@ prio_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 {
 	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
 	struct Qdisc *qdisc;
+	int ret;
 
 	qdisc = q->queues[prio_classify(skb, sch)];
 
-	if (qdisc->enqueue(skb, qdisc) == 1) {
+	if ((ret = qdisc->enqueue(skb, qdisc)) == 0) {
 		sch->stats.bytes += skb->len;
 		sch->stats.packets++;
 		sch->q.qlen++;
-		return 1;
+		return 0;
 	}
 	sch->stats.drops++;
-	return 0;
+	return ret;
 }
 
 
@@ -88,15 +91,16 @@ prio_requeue(struct sk_buff *skb, struct Qdisc* sch)
 {
 	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
 	struct Qdisc *qdisc;
+	int ret;
 
 	qdisc = q->queues[prio_classify(skb, sch)];
 
-	if (qdisc->ops->requeue(skb, qdisc) == 1) {
+	if ((ret = qdisc->ops->requeue(skb, qdisc)) == 0) {
 		sch->q.qlen++;
-		return 1;
+		return 0;
 	}
 	sch->stats.drops++;
-	return 0;
+	return ret;
 }
 
 
@@ -209,8 +213,6 @@ static int prio_tune(struct Qdisc *sch, struct rtattr *opt)
 
 static int prio_init(struct Qdisc *sch, struct rtattr *opt)
 {
-	static const u8 prio2band[TC_PRIO_MAX+1] =
-	{ 1, 2, 2, 2, 1, 2, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1 };
 	struct prio_sched_data *q = (struct prio_sched_data *)sch->data;
 	int i;
 
@@ -218,14 +220,7 @@ static int prio_init(struct Qdisc *sch, struct rtattr *opt)
 		q->queues[i] = &noop_qdisc;
 
 	if (opt == NULL) {
-		q->bands = 3;
-		memcpy(q->prio2band, prio2band, sizeof(prio2band));
-		for (i=0; i<3; i++) {
-			struct Qdisc *child;
-			child = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops);
-			if (child)
-				q->queues[i] = child;
-		}
+		return -EINVAL;
 	} else {
 		int err;
 

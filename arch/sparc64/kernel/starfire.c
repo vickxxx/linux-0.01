@@ -1,7 +1,8 @@
-/* $Id: starfire.c,v 1.2 1998/12/09 18:53:11 davem Exp $
+/* $Id: starfire.c,v 1.8 2000/10/27 18:36:47 anton Exp $
  * starfire.c: Starfire/E10000 support.
  *
- * Copyright (C) 1998 David S. Miller (davem@dm.cobaltmicro.com)
+ * Copyright (C) 1998 David S. Miller (davem@redhat.com)
+ * Copyright (C) 2000 Anton Blanchard (anton@linuxcare.com)
  */
 
 #include <linux/kernel.h>
@@ -10,23 +11,37 @@
 #include <asm/page.h>
 #include <asm/oplib.h>
 #include <asm/smp.h>
+#include <asm/upa.h>
+#include <asm/starfire.h>
 
-/* A few places around the kernel check this to see if
+/*
+ * A few places around the kernel check this to see if
  * they need to call us to do things in a Starfire specific
  * way.
  */
 int this_is_starfire = 0;
 
-void starfire_check(void)
+void check_if_starfire(void)
 {
 	int ssnode = prom_finddevice("/ssp-serial");
+	if(ssnode != 0 && ssnode != -1)
+		this_is_starfire = 1;
+}
 
-	if(ssnode != 0 && ssnode != -1) {
+void starfire_cpu_setup(void)
+{
+	if (this_is_starfire) {
+/*
+ * We do this in starfire_translate and xcall_deliver. When we fix our cpu
+ * arrays to support > 64 processors we can use the real upaid instead
+ * of the logical cpuid in __cpu_number_map etc, then we can get rid of
+ * the translations everywhere. - Anton
+ */
+#if 0
 		int i;
 
-		this_is_starfire = 1;
-
-		/* Now must fixup cpu MIDs.  OBP gave us a logical
+		/*
+		 * Now must fixup cpu MIDs.  OBP gave us a logical
 		 * linear cpuid number, not the real upaid.
 		 */
 		for(i = 0; i < linux_num_cpus; i++) {
@@ -38,22 +53,24 @@ void starfire_check(void)
 
 			linux_cpus[i].mid = mid;
 		}
+#endif
 	}
 }
 
 int starfire_hard_smp_processor_id(void)
 {
-	return *((unsigned int *) __va(0x1fff40000d0));
+	return upa_readl(0x1fff40000d0UL);
 }
 
-/* Each Starfire board has 32 registers which perform translation
+/*
+ * Each Starfire board has 32 registers which perform translation
  * and delivery of traditional interrupt packets into the extended
  * Starfire hardware format.  Essentially UPAID's now have 2 more
  * bits than in all previous Sun5 systems.
  */
 struct starfire_irqinfo {
-	unsigned int *imap_slots[32];
-	unsigned int *tregs[32];
+	unsigned long imap_slots[32];
+	unsigned long tregs[32];
 	struct starfire_irqinfo *next;
 	int upaid, hwmid;
 };
@@ -79,8 +96,11 @@ void *starfire_hookup(int upaid)
 	treg_base += (hwmid << 33UL);
 	treg_base += 0x200UL;
 	for(i = 0; i < 32; i++) {
-		p->imap_slots[i] = NULL;
-		p->tregs[i] = __va(treg_base + (i * 0x10));
+		p->imap_slots[i] = 0UL;
+		p->tregs[i] = treg_base + (i * 0x10UL);
+		/* Lets play it safe and not overwrite existing mappings */
+		if (upa_readl(p->tregs[i]) != 0)
+			p->imap_slots[i] = 0xdeadbeaf;
 	}
 	p->upaid = upaid;
 	p->next = sflist;
@@ -89,7 +109,7 @@ void *starfire_hookup(int upaid)
 	return (void *) p;
 }
 
-unsigned int starfire_translate(unsigned int *imap,
+unsigned int starfire_translate(unsigned long imap,
 				unsigned int upaid)
 {
 	struct starfire_irqinfo *p;
@@ -107,7 +127,7 @@ unsigned int starfire_translate(unsigned int *imap,
 	}
 	for(i = 0; i < 32; i++) {
 		if(p->imap_slots[i] == imap ||
-		   p->imap_slots[i] == NULL)
+		   p->imap_slots[i] == 0UL)
 			break;
 	}
 	if(i == 32) {
@@ -115,7 +135,13 @@ unsigned int starfire_translate(unsigned int *imap,
 		panic("Lucy in the sky....");
 	}
 	p->imap_slots[i] = imap;
-	*(p->tregs[i]) = upaid;
+
+	/* map to real upaid */
+	upaid = (((upaid & 0x3c) << 1) |
+	       ((upaid & 0x40) >> 4) |
+	       (upaid & 0x3));
+
+	upa_writel(upaid, p->tregs[i]);
 
 	return i;
 }

@@ -1,4 +1,4 @@
-Documentation for /proc/sys/kernel/*	kernel version 2.2.5
+Documentation for /proc/sys/kernel/*	kernel version 2.2.10
 	(c) 1998, 1999,  Rik van Riel <riel@nl.linux.org>
 
 For general info and legal blurb, please look in README.
@@ -28,6 +28,8 @@ show up in /proc/sys/kernel:
 - modprobe                    ==> Documentation/kmod.txt
 - osrelease
 - ostype
+- overflowgid
+- overflowuid
 - panic
 - powersave-nap               [ PPC only ]
 - printk
@@ -76,12 +78,21 @@ to decide what to do with it.
 
 domainname & hostname:
 
-These files can be controlled to set the domainname and
-hostname of your box. For the classic darkstar.frop.org
-a simple:
+These files can be used to set the NIS/YP domainname and the
+hostname of your box in exactly the same way as the commands
+domainname and hostname, i.e.:
 # echo "darkstar" > /proc/sys/kernel/hostname
-# echo "frop.org" > /proc/sys/kernel/domainname
-would suffice to set your hostname and domainname.
+# echo "mydomain" > /proc/sys/kernel/domainname
+has the same effect as
+# hostname "darkstar" > /proc/sys/kernel/hostname
+# domainname "mydomain" > /proc/sys/kernel/domainname
+
+Note, however, that the classic darkstar.frop.org has the
+hostname "darkstar" and DNS (Internet Domain Name Server)
+domainname "frop.org", not to be confused with the NIS (Network
+Information Service) or YP (Yellow Pages) domainname. These two
+domain names are in general different. For a detailed discussion
+see the hostname(1) man page.
 
 ==============================================================
 
@@ -114,6 +125,18 @@ needs a little more clarification however. The '#5' means that
 this is the fifth kernel built from this source base and the
 date behind it indicates the time the kernel was built.
 The only way to tune these values is to rebuild the kernel :-)
+
+==============================================================
+
+overflowgid & overflowuid:
+
+if your architecture did not always support 32-bit UIDs (i.e. arm, i386,
+m68k, sh, and sparc32), a fixed UID and GID will be returned to
+applications that use the old 16-bit UID/GID system calls, if the actual
+UID or GID would exceed 65535.
+
+These sysctls allow you to change the value of the fixed UID and GID.
+The default is 65534.
 
 ==============================================================
 

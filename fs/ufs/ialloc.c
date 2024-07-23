@@ -70,22 +70,11 @@ void ufs_free_inode (struct inode * inode)
 	
 	UFSD(("ENTER, ino %lu\n", inode->i_ino))
 
-	if (!inode)
-		return;
 	sb = inode->i_sb;
 	swab = sb->u.ufs_sb.s_swab;
 	uspi = sb->u.ufs_sb.s_uspi;
 	usb1 = ubh_get_usb_first(USPI_UBH);
 	
-	if (inode->i_count > 1) {
-		ufs_warning(sb, "ufs_free_inode", "inode has count=%d\n", inode->i_count);
-		return;
-	}
-	if (inode->i_nlink) {
-		ufs_warning(sb, "ufs_free_inode", "inode has nlink=%d\n", inode->i_nlink);
-		return;
-	}
-
 	ino = inode->i_ino;
 
 	lock_super (sb);
@@ -112,6 +101,7 @@ void ufs_free_inode (struct inode * inode)
 	is_directory = S_ISDIR(inode->i_mode);
 
 	DQUOT_FREE_INODE(sb, inode);
+	DQUOT_DROP(inode);
 
 	clear_inode (inode);
 
@@ -131,8 +121,8 @@ void ufs_free_inode (struct inode * inode)
 			DEC_SWAB32(sb->fs_cs(cg).cs_ndir);
 		}
 	}
-	ubh_mark_buffer_dirty (USPI_UBH, 1);
-	ubh_mark_buffer_dirty (UCPI_UBH, 1);
+	ubh_mark_buffer_dirty (USPI_UBH);
+	ubh_mark_buffer_dirty (UCPI_UBH);
 	if (sb->s_flags & MS_SYNCHRONOUS) {
 		ubh_ll_rw_block (WRITE, 1, (struct ufs_buffer_head **) &ucpi);
 		ubh_wait_on_buffer (UCPI_UBH);
@@ -171,19 +161,16 @@ struct inode * ufs_new_inode (const struct inode * dir,	int mode, int * err )
 		*err = -EPERM;
 		return NULL;
 	}
-	inode = get_empty_inode ();
+	sb = dir->i_sb;
+	inode = new_inode(sb);
 	if (!inode) {
 		*err = -ENOMEM;
 		return NULL;
 	}
-	sb = dir->i_sb;
 	swab = sb->u.ufs_sb.s_swab;
 	uspi = sb->u.ufs_sb.s_uspi;
 	usb1 = ubh_get_usb_first(USPI_UBH);
 
-	inode->i_sb = sb;
-	inode->i_flags = 0;
-	
 	lock_super (sb);
 
 	*err = -ENOSPC;
@@ -262,8 +249,8 @@ cg_found:
 		INC_SWAB32(sb->fs_cs(cg).cs_ndir);
 	}
 
-	ubh_mark_buffer_dirty (USPI_UBH, 1);
-	ubh_mark_buffer_dirty (UCPI_UBH, 1);
+	ubh_mark_buffer_dirty (USPI_UBH);
+	ubh_mark_buffer_dirty (UCPI_UBH);
 	if (sb->s_flags & MS_SYNCHRONOUS) {
 		ubh_ll_rw_block (WRITE, 1, (struct ufs_buffer_head **) &ucpi);
 		ubh_wait_on_buffer (UCPI_UBH);
@@ -271,13 +258,8 @@ cg_found:
 	sb->s_dirt = 1;
 
 	inode->i_mode = mode;
-	inode->i_sb = sb;
-	inode->i_nlink = 1;
-	inode->i_dev = sb->s_dev;
 	inode->i_uid = current->fsuid;
-	if (test_opt (sb, GRPID))
-		inode->i_gid = dir->i_gid;
-	else if (dir->i_mode & S_ISGID) {
+	if (dir->i_mode & S_ISGID) {
 		inode->i_gid = dir->i_gid;
 		if (S_ISDIR(mode))
 			mode |= S_ISGID;
@@ -289,10 +271,7 @@ cg_found:
 	inode->i_blocks = 0;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 	inode->u.ufs_i.i_flags = dir->u.ufs_i.i_flags;
-	inode->u.ufs_i.i_uid = inode->i_uid;
-	inode->u.ufs_i.i_gid = inode->i_gid;
 	inode->u.ufs_i.i_lastfrag = 0;
-	inode->i_op = NULL;
 
 	insert_inode_hash(inode);
 	mark_inode_dirty(inode);

@@ -26,7 +26,9 @@
 extern struct inode_operations coda_dir_inode_operations;
 extern struct inode_operations coda_file_inode_operations;
 extern struct inode_operations coda_ioctl_inode_operations;
-extern struct inode_operations coda_symlink_inode_operations;
+
+extern struct address_space_operations coda_file_aops;
+extern struct address_space_operations coda_symlink_aops;
 
 extern struct file_operations coda_dir_operations;
 extern struct file_operations coda_file_operations;
@@ -37,6 +39,7 @@ int coda_open(struct inode *i, struct file *f);
 int coda_release(struct inode *i, struct file *f);
 int coda_permission(struct inode *inode, int mask);
 int coda_revalidate_inode(struct dentry *);
+int coda_notify_change(struct dentry *, struct iattr *);
 
 /* global variables */
 extern int coda_debug;
@@ -45,6 +48,8 @@ extern int coda_access_cache;
 
 /* this file:  heloers */
 static __inline__ struct ViceFid *coda_i2f(struct inode *);
+static __inline__ char *coda_i2s(struct inode *);
+static __inline__ void coda_flag_inode(struct inode *, int flag);
 char *coda_f2s(ViceFid *f);
 char *coda_f2s2(ViceFid *f);
 int coda_isroot(struct inode *i);
@@ -53,23 +58,12 @@ int coda_fid_is_weird(struct ViceFid *fid);
 int coda_iscontrol(const char *name, size_t length);
 
 void coda_load_creds(struct coda_cred *cred);
-int coda_mycred(struct coda_cred *);
 void coda_vattr_to_iattr(struct inode *, struct coda_vattr *);
 void coda_iattr_to_vattr(struct iattr *, struct coda_vattr *);
 unsigned short coda_flags_to_cflags(unsigned short);
 void print_vattr( struct coda_vattr *attr );
 int coda_cred_ok(struct coda_cred *cred);
 int coda_cred_eq(struct coda_cred *cred1, struct coda_cred *cred2);
-
-/* defined in  file.c */
-void coda_prepare_openfile(struct inode *coda_inode, struct file *coda_file, 
-			   struct inode *open_inode,  struct file *open_file,
-			   struct dentry *open_dentry);
-void coda_restore_codafile(struct inode *coda_inode, struct file *coda_file, 
-			   struct inode *open_inode, struct file *open_file);
-int coda_inode_grab(dev_t dev, ino_t ino, struct inode **ind);
-
-#define NB_SFS_SIZ 0x895440
 
 /* cache.c */
 void coda_purge_children(struct inode *, int);
@@ -99,7 +93,7 @@ void coda_sysctl_clean(void);
   if (coda_debug & mask) {                                        \
     printk("(%s,l. %d): ",  __FUNCTION__, __LINE__);              \
     printk(format, ## a); }                                       \
-} while (0) ;                            
+} while (0)
 
 #define ENTRY    \
     if(coda_print_entry) printk("Process %d entered %s\n",current->pid,__FUNCTION__)
@@ -107,37 +101,41 @@ void coda_sysctl_clean(void);
 #define EXIT    \
     if(coda_print_entry) printk("Process %d leaving %s\n",current->pid,__FUNCTION__)
 
-#define CHECK_CNODE(c) do {  } while (0);
-
 #define CODA_ALLOC(ptr, cast, size)                                       \
 do {                                                                      \
-    if (size < 3000) {                                                    \
+    if (size < PAGE_SIZE) {                                               \
         ptr = (cast)kmalloc((unsigned long) size, GFP_KERNEL);            \
-                CDEBUG(D_MALLOC, "kmalloced: %x at %x.\n", (int) size, (int) ptr);\
-     }  else {                                                             \
+        CDEBUG(D_MALLOC, "kmalloced: %lx at %p.\n", (long)size, ptr);     \
+     }  else {                                                            \
         ptr = (cast)vmalloc((unsigned long) size);                        \
-	CDEBUG(D_MALLOC, "vmalloced: %x at %x.\n", (int) size, (int) ptr);}\
+	CDEBUG(D_MALLOC, "vmalloced: %lx at %p .\n", (long)size, ptr);}   \
     if (ptr == 0) {                                                       \
-        printk("kernel malloc returns 0 at %s:%d\n", __FILE__, __LINE__);  \
+        printk("kernel malloc returns 0 at %s:%d\n", __FILE__, __LINE__); \
     }                                                                     \
-    memset( ptr, 0, size );                                                   \
+    else memset( ptr, 0, size );                                          \
 } while (0)
 
 
-#define CODA_FREE(ptr,size) do {if (size < 3000) { kfree_s((ptr), (size)); CDEBUG(D_MALLOC, "kfreed: %x at %x.\n", (int) size, (int) ptr); } else { vfree((ptr)); CDEBUG(D_MALLOC, "vfreed: %x at %x.\n", (int) size, (int) ptr);} } while (0)
+#define CODA_FREE(ptr,size) do {if (size < PAGE_SIZE) { kfree((ptr)); CDEBUG(D_MALLOC, "kfreed: %lx at %p.\n", (long) size, ptr); } else { vfree((ptr)); CDEBUG(D_MALLOC, "vfreed: %lx at %p.\n", (long) size, ptr);} } while (0)
 
-/* inode to cnode */
+/* inode to cnode access functions */
 
 static __inline__ struct ViceFid *coda_i2f(struct inode *inode)
 {
 	return &(inode->u.coda_i.c_fid);
 }
 
+static __inline__ char *coda_i2s(struct inode *inode)
+{
+	return coda_f2s(&(inode->u.coda_i.c_fid));
+}
+
+/* this will not zap the inode away */
+static __inline__ void coda_flag_inode(struct inode *inode, int flag)
+{
+	inode->u.coda_i.c_flags |= flag;
+}		
+
 #define ITOC(inode) (&((inode)->u.coda_i))
-
-
-
-
-
 
 #endif

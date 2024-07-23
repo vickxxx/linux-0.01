@@ -21,7 +21,6 @@
  * applications that require more DP ram, we can expand the boundaries
  * but then we have to be careful of any downloaded microcode.
  */
-#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -30,12 +29,7 @@
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <asm/irq.h>
-#ifdef CONFIG_MBX
-#include <asm/mbx.h>
-#endif
-#ifdef CONFIG_FADS
-#include <asm/fads.h>
-#endif
+#include <asm/mpc8xx.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/8xx_immap.h>
@@ -95,32 +89,36 @@ m8xx_cpm_reset(uint host_page_addr)
 	*/
 	dp_alloc_base = CPM_DATAONLY_BASE;
 	dp_alloc_top = dp_alloc_base + CPM_DATAONLY_SIZE;
+
 	/* Set the host page for allocation.
 	*/
 	host_buffer = host_page_addr;	/* Host virtual page address */
 	host_end = host_page_addr + PAGE_SIZE;
-	pte = va_to_pte(&init_task, host_page_addr);
+	pte = va_to_pte(host_page_addr);
 	pte_val(*pte) |= _PAGE_NO_CACHE;
-	flush_tlb_page(current->mm->mmap, host_buffer);
+	flush_tlb_page(init_mm.mmap, host_buffer);
 
 	/* Tell everyone where the comm processor resides.
 	*/
 	cpmp = (cpm8xx_t *)commproc;
+}
 
+/* This is called during init_IRQ.  We used to do it above, but this
+ * was too early since init_IRQ was not yet called.
+ */
+void
+cpm_interrupt_init(void)
+{
 	/* Initialize the CPM interrupt controller.
 	*/
 	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cicr =
 	    (CICR_SCD_SCC4 | CICR_SCC_SCC3 | CICR_SCB_SCC2 | CICR_SCA_SCC1) |
-		(((5)/2) << 13) | CICR_HP_MASK;
-	/* I hard coded the CPM interrupt to 5 above
-	 * since the CPM_INTERRUPT define is relative to
-	 * the linux irq structure not what the hardware
-	 * belives. -- Cort
-	 */
+		((CPM_INTERRUPT/2) << 13) | CICR_HP_MASK;
 	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr = 0;
+
 	/* Set our interrupt handler with the core CPU.
 	*/
-	if (request_irq(CPM_INTERRUPT, cpm_interrupt, 0, "cpm", NULL) != 0)
+	if (request_8xxirq(CPM_INTERRUPT, cpm_interrupt, 0, "cpm", NULL) != 0)
 		panic("Could not allocate CPM IRQ!");
 
 	/* Install our own error handler.
@@ -151,7 +149,7 @@ cpm_interrupt(int irq, void * dev, struct pt_regs * regs)
 	/* After servicing the interrupt, we have to remove the status
 	 * indicator.
 	 */
-	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cisr |= (1 << vec);
+	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cisr = (1 << vec);
 	
 }
 
@@ -176,6 +174,16 @@ cpm_install_handler(int vec, void (*handler)(void *), void *dev_id)
 	cpm_vecs[vec].handler = handler;
 	cpm_vecs[vec].dev_id = dev_id;
 	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr |= (1 << vec);
+}
+
+/* Free a CPM interrupt handler.
+*/
+void
+cpm_free_handler(int vec)
+{
+	cpm_vecs[vec].handler = NULL;
+	cpm_vecs[vec].dev_id = NULL;
+	((immap_t *)IMAP_ADDR)->im_cpic.cpic_cimr &= ~(1 << vec);
 }
 
 /* Allocate some memory from the dual ported ram.  We may want to
@@ -218,7 +226,7 @@ m8xx_cpm_hostalloc(uint size)
  * The internal baud rate clock is the system clock divided by 16.
  * This assumes the baudrate is 16x oversampled by the uart.
  */
-#define BRG_INT_CLK	(((bd_t *)res)->bi_intfreq * 1000000)
+#define BRG_INT_CLK	(((bd_t *)__res)->bi_intfreq * 1000000)
 #define BRG_UART_CLK	(BRG_INT_CLK/16)
 
 void

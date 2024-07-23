@@ -3,10 +3,13 @@
  *
  * Default SMP lock implementation
  */
+#ifdef __KERNEL__
 #include <linux/interrupt.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 
 extern spinlock_t kernel_flag;
+
+#define kernel_locked()		spin_is_locked(&kernel_flag)
 
 /*
  * Release global kernel lock and global interrupt lock
@@ -47,3 +50,4 @@ extern __inline__ void unlock_kernel(void)
 	if (--current->lock_depth < 0)
 		spin_unlock(&kernel_flag);
 }
+#endif /* __KERNEL__ */

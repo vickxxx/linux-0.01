@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.52 1999/05/08 08:09:48 anton Exp $
+/* $Id: sys_sparc.c,v 1.67 2000/11/30 08:37:31 anton Exp $
  * linux/arch/sparc/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -9,7 +9,6 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/sched.h>
-#include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/file.h>
@@ -35,12 +34,47 @@ asmlinkage unsigned long sys_getpagesize(void)
 	return PAGE_SIZE; /* Possibly older binaries want 8192 on sun4's? */
 }
 
+#define COLOUR_ALIGN(addr)      (((addr)+SHMLBA-1)&~(SHMLBA-1))
+
+unsigned long get_unmapped_area(unsigned long addr, unsigned long len)
+{
+	struct vm_area_struct * vmm;
+
+	/* See asm-sparc/uaccess.h */
+	if (len > TASK_SIZE - PAGE_SIZE)
+		return 0;
+	if (ARCH_SUN4C_SUN4 && len > 0x20000000)
+		return 0;
+	if (!addr)
+		addr = TASK_UNMAPPED_BASE;
+
+	if (current->thread.flags & SPARC_FLAG_MMAPSHARED)
+		addr = COLOUR_ALIGN(addr);
+	else
+		addr = PAGE_ALIGN(addr);
+
+	for (vmm = find_vma(current->mm, addr); ; vmm = vmm->vm_next) {
+		/* At this point:  (!vmm || addr < vmm->vm_end). */
+		if (ARCH_SUN4C_SUN4 && addr < 0xe0000000 && 0x20000000 - len < addr) {
+			addr = PAGE_OFFSET;
+			vmm = find_vma(current->mm, PAGE_OFFSET);
+		}
+		if (TASK_SIZE - PAGE_SIZE - len < addr)
+			return 0;
+		if (!vmm || addr + len <= vmm->vm_start)
+			return addr;
+		addr = vmm->vm_end;
+		if (current->thread.flags & SPARC_FLAG_MMAPSHARED)
+			addr = COLOUR_ALIGN(addr);
+	}
+}
+
 extern asmlinkage unsigned long sys_brk(unsigned long brk);
 
 asmlinkage unsigned long sparc_brk(unsigned long brk)
 {
 	if(ARCH_SUN4C_SUN4) {
-		if(brk >= 0x20000000 && brk < 0xe0000000)
+		if ((brk & 0xe0000000) != (current->mm->brk & 0xe0000000))
 			return current->mm->brk;
 	}
 	return sys_brk(brk);
@@ -55,14 +89,12 @@ asmlinkage int sparc_pipe(struct pt_regs *regs)
 	int fd[2];
 	int error;
 
-	lock_kernel();
 	error = do_pipe(fd);
 	if (error)
 		goto out;
 	regs->u_regs[UREG_I1] = fd[1];
 	error = fd[0];
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -76,7 +108,6 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 {
 	int version, err;
 
-	lock_kernel();
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
 
@@ -171,56 +202,116 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 	else
 		err = -EINVAL;
 out:
-	unlock_kernel();
 	return err;
 }
 
 /* Linux version of mmap */
-asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
+static unsigned long do_mmap2(unsigned long addr, unsigned long len,
 	unsigned long prot, unsigned long flags, unsigned long fd,
-	unsigned long off)
+	unsigned long pgoff)
 {
 	struct file * file = NULL;
 	unsigned long retval = -EBADF;
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
 	if (!(flags & MAP_ANONYMOUS)) {
 		file = fget(fd);
 		if (!file)
 			goto out;
 	}
-	retval = -ENOMEM;
-	len = PAGE_ALIGN(len);
-	if(!(flags & MAP_FIXED) && !addr) {
-		addr = get_unmapped_area(addr, len);
-		if(!addr)
-			goto out_putf;
-	}
 
-	/* See asm-sparc/uaccess.h */
 	retval = -EINVAL;
-	if((len > (TASK_SIZE - PAGE_SIZE)) || (addr > (TASK_SIZE-len-PAGE_SIZE)))
+	len = PAGE_ALIGN(len);
+	if (ARCH_SUN4C_SUN4 &&
+	    (len > 0x20000000 ||
+	     ((flags & MAP_FIXED) &&
+	      addr < 0xe0000000 && addr + len > 0x20000000)))
 		goto out_putf;
 
-	if(ARCH_SUN4C_SUN4) {
-		if(((addr >= 0x20000000) && (addr < 0xe0000000))) {
-			/* VM hole */
-			retval = current->mm->brk;
-			goto out_putf;
-		}
-	}
+	/* See asm-sparc/uaccess.h */
+	if (len > TASK_SIZE - PAGE_SIZE || addr + len > TASK_SIZE - PAGE_SIZE)
+		goto out_putf;
 
 	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
-	retval = do_mmap(file, addr, len, prot, flags, off);
+
+	if (flags & MAP_SHARED)
+		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
+
+	down(&current->mm->mmap_sem);
+	retval = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
+	up(&current->mm->mmap_sem);
+
+	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
 
 out_putf:
 	if (file)
 		fput(file);
 out:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
 	return retval;
+}
+
+asmlinkage unsigned long sys_mmap2(unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags, unsigned long fd,
+	unsigned long pgoff)
+{
+	/* Make sure the shift for mmap2 is constant (12), no matter what PAGE_SIZE
+	   we have. */
+	return do_mmap2(addr, len, prot, flags, fd, pgoff >> (PAGE_SHIFT - 12));
+}
+
+asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags, unsigned long fd,
+	unsigned long off)
+{
+	return do_mmap2(addr, len, prot, flags, fd, off >> PAGE_SHIFT);
+}
+
+extern unsigned long do_mremap(unsigned long addr,
+	unsigned long old_len, unsigned long new_len,
+	unsigned long flags, unsigned long new_addr);
+                
+asmlinkage unsigned long sparc_mremap(unsigned long addr,
+	unsigned long old_len, unsigned long new_len,
+	unsigned long flags, unsigned long new_addr)
+{
+	struct vm_area_struct *vma;
+	unsigned long ret = -EINVAL;
+	if (ARCH_SUN4C_SUN4) {
+		if (old_len > 0x20000000 || new_len > 0x20000000)
+			goto out;
+		if (addr < 0xe0000000 && addr + old_len > 0x20000000)
+			goto out;
+	}
+	if (old_len > TASK_SIZE - PAGE_SIZE ||
+	    new_len > TASK_SIZE - PAGE_SIZE)
+		goto out;
+	down(&current->mm->mmap_sem);
+	vma = find_vma(current->mm, addr);
+	if (vma && (vma->vm_flags & VM_SHARED))
+		current->thread.flags |= SPARC_FLAG_MMAPSHARED;
+	if (flags & MREMAP_FIXED) {
+		if (ARCH_SUN4C_SUN4 &&
+		    new_addr < 0xe0000000 &&
+		    new_addr + new_len > 0x20000000)
+			goto out_sem;
+		if (new_addr + new_len > TASK_SIZE - PAGE_SIZE)
+			goto out_sem;
+	} else if ((ARCH_SUN4C_SUN4 && addr < 0xe0000000 &&
+		    addr + new_len > 0x20000000) ||
+		   addr + new_len > TASK_SIZE - PAGE_SIZE) {
+		ret = -ENOMEM;
+		if (!(flags & MREMAP_MAYMOVE))
+			goto out_sem;
+		new_addr = get_unmapped_area (addr, new_len);
+		if (!new_addr)
+			goto out_sem;
+		flags |= MREMAP_FIXED;
+	}
+	ret = do_mremap(addr, old_len, new_len, flags, new_addr);
+out_sem:
+	current->thread.flags &= ~(SPARC_FLAG_MMAPSHARED);
+	up(&current->mm->mmap_sem);
+out:
+	return ret;       
 }
 
 /* we come to here via sys_nis_syscall so it can setup the regs argument */
@@ -230,12 +321,10 @@ c_sys_nis_syscall (struct pt_regs *regs)
 	static int count = 0;
 	
 	if (count++ > 5) return -ENOSYS;
-	lock_kernel();
 	printk ("%s[%d]: Unimplemented SPARC system call %d\n", current->comm, current->pid, (int)regs->u_regs[1]);
 #ifdef DEBUG_UNIMP_SYSCALL	
 	show_regs (regs);
 #endif
-	unlock_kernel();
 	return -ENOSYS;
 }
 
@@ -244,11 +333,19 @@ c_sys_nis_syscall (struct pt_regs *regs)
 asmlinkage void
 sparc_breakpoint (struct pt_regs *regs)
 {
+	siginfo_t info;
+
 	lock_kernel();
 #ifdef DEBUG_SPARC_BREAKPOINT
         printk ("TRAP: Entering kernel PC=%x, nPC=%x\n", regs->pc, regs->npc);
 #endif
-	force_sig(SIGTRAP, current);
+	info.si_signo = SIGTRAP;
+	info.si_errno = 0;
+	info.si_code = TRAP_BRKPT;
+	info.si_addr = (void *)regs->pc;
+	info.si_trapno = 0;
+	force_sig_info(SIGTRAP, &info, current);
+
 #ifdef DEBUG_SPARC_BREAKPOINT
 	printk ("TRAP: Returning to space: PC=%x nPC=%x\n", regs->pc, regs->npc);
 #endif
@@ -263,7 +360,7 @@ sparc_sigaction (int sig, const struct old_sigaction *act,
 	int ret;
 
 	if (sig < 0) {
-		current->tss.new_signal = 1;
+		current->thread.new_signal = 1;
 		sig = -sig;
 	}
 
@@ -313,7 +410,7 @@ sys_rt_sigaction(int sig, const struct sigaction *act, struct sigaction *oact,
 	/* All tasks which use RT signals (effectively) use
 	 * new style signals.
 	 */
-	current->tss.new_signal = 1;
+	current->thread.new_signal = 1;
 
 	if (act) {
 		new_ka.ka_restorer = restorer;
@@ -344,7 +441,7 @@ asmlinkage int sys_getdomainname(char *name, int len)
  	int nlen;
  	int err = -EFAULT;
  	
- 	down(&uts_sem);
+ 	down_read(&uts_sem);
  	
 	nlen = strlen(system_utsname.domainname) + 1;
 
@@ -356,15 +453,6 @@ asmlinkage int sys_getdomainname(char *name, int len)
 		goto done;
 	err = 0;
 done:
-	up(&uts_sem);
+	up_read(&uts_sem);
 	return err;
 }
-
-
-#ifndef CONFIG_AP1000
-/* only AP+ systems have sys_aplib */
-asmlinkage int sys_aplib(void)
-{
-	return -ENOSYS;
-}
-#endif

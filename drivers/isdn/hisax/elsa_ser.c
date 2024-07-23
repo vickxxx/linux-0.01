@@ -1,3 +1,10 @@
+/* $Id: elsa_ser.c,v 2.10 2000/11/19 17:02:47 kai Exp $
+ *
+ * stuff for the serial modem on ELSA cards
+ *
+ * This file is (c) under GNU PUBLIC LICENSE
+ *
+ */
 #include <linux/config.h>
 #include <linux/serial.h>
 #include <linux/serial_reg.h>
@@ -298,7 +305,7 @@ modem_fill(struct BCState *bcs) {
 				(PACKET_NOACK != bcs->tx_skb->pkt_type))
 					bcs->st->lli.l1writewakeup(bcs->st,
 						bcs->hw.hscx.count);
-			dev_kfree_skb(bcs->tx_skb);
+			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;
 		}
 	}
@@ -389,74 +396,6 @@ static inline void transmit_chars(struct IsdnCardState *cs, int *intr_done)
 	}
 }
 
-#if 0
-static inline void check_modem_status(struct IsdnCardState *cs)
-{
-	int	status;
-	struct async_struct *info = cs->hw.elsa.info;
-	struct	async_icount *icount;
-	
-	status = serial_inp(info, UART_MSR);
-
-	if (status & UART_MSR_ANY_DELTA) {
-		icount = &info->state->icount;
-		/* update input line counters */
-		if (status & UART_MSR_TERI)
-			icount->rng++;
-		if (status & UART_MSR_DDSR)
-			icount->dsr++;
-		if (status & UART_MSR_DDCD) {
-			icount->dcd++;
-		}
-		if (status & UART_MSR_DCTS)
-			icount->cts++;
-//		wake_up_interruptible(&info->delta_msr_wait);
-	}
-
-	if ((info->flags & ASYNC_CHECK_CD) && (status & UART_MSR_DDCD)) {
-#if (defined(SERIAL_DEBUG_OPEN) || defined(SERIAL_DEBUG_INTR))
-		printk("ttys%d CD now %s...", info->line,
-		       (status & UART_MSR_DCD) ? "on" : "off");
-#endif		
-		if (status & UART_MSR_DCD)
-//			wake_up_interruptible(&info->open_wait);
-;
-		else if (!((info->flags & ASYNC_CALLOUT_ACTIVE) &&
-			   (info->flags & ASYNC_CALLOUT_NOHUP))) {
-#ifdef SERIAL_DEBUG_OPEN
-			printk("doing serial hangup...");
-#endif
-			if (info->tty)
-				tty_hangup(info->tty);
-		}
-	}
-#if 0
-	if (info->flags & ASYNC_CTS_FLOW) {
-		if (info->tty->hw_stopped) {
-			if (status & UART_MSR_CTS) {
-#if (defined(SERIAL_DEBUG_INTR) || defined(SERIAL_DEBUG_FLOW))
-				printk("CTS tx start...");
-#endif
-				info->tty->hw_stopped = 0;
-				info->IER |= UART_IER_THRI;
-				serial_outp(info, UART_IER, info->IER);
-//				rs_sched_event(info, RS_EVENT_WRITE_WAKEUP);
-				return;
-			}
-		} else {
-			if (!(status & UART_MSR_CTS)) {
-#if (defined(SERIAL_DEBUG_INTR) || defined(SERIAL_DEBUG_FLOW))
-				printk("CTS tx stop...");
-#endif
-				info->tty->hw_stopped = 1;
-				info->IER &= ~UART_IER_THRI;
-				serial_outp(info, UART_IER, info->IER);
-			}
-		}
-	}
-#endif 0
-}
-#endif
 
 static void rs_interrupt_elsa(int irq, struct IsdnCardState *cs)
 {
@@ -510,13 +449,13 @@ close_elsastate(struct BCState *bcs)
 			bcs->hw.hscx.rcvbuf = NULL;
 		}
 		while ((skb = skb_dequeue(&bcs->rqueue))) {
-			dev_kfree_skb(skb);
+			dev_kfree_skb_any(skb);
 		}
 		while ((skb = skb_dequeue(&bcs->squeue))) {
-			dev_kfree_skb(skb);
+			dev_kfree_skb_any(skb);
 		}
 		if (bcs->tx_skb) {
-			dev_kfree_skb(bcs->tx_skb);
+			dev_kfree_skb_any(bcs->tx_skb);
 			bcs->tx_skb = NULL;
 			test_and_clear_bit(BC_FLG_BUSY, &bcs->Flag);
 		}
@@ -664,7 +603,9 @@ modem_l2l1(struct PStack *st, int pr, void *arg)
 		st->l1.bcs->cs->hw.elsa.MFlag=2;
 	} else if (pr == (PH_DEACTIVATE | REQUEST)) {
 		test_and_clear_bit(BC_FLG_ACTIV, &st->l1.bcs->Flag);
-		send_arcofi(st->l1.bcs->cs, ARCOFI_XOP_0, st->l1.bc, 0);
+		st->l1.bcs->cs->dc.isac.arcofi_bc = st->l1.bc;
+		arcofi_fsm(st->l1.bcs->cs, ARCOFI_START, &ARCOFI_XOP_0);
+		interruptible_sleep_on(&st->l1.bcs->cs->dc.isac.arcofi_wait);
 		st->l1.bcs->cs->hw.elsa.MFlag=1;
 	} else {
 		printk(KERN_WARNING"ElsaSer: unknown pr %x\n", pr);

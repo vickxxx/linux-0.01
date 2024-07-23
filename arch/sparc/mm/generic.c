@@ -1,4 +1,4 @@
-/* $Id: generic.c,v 1.6 1998/10/27 23:28:00 davem Exp $
+/* $Id: generic.c,v 1.10 2000/08/09 00:00:15 davem Exp $
  * generic.c: Generic Sparc mm routines that are not dependent upon
  *            MMU type but are Sparc specific.
  *
@@ -9,46 +9,26 @@
 #include <linux/mm.h>
 #include <linux/swap.h>
 
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
-
-
-/* Allocate a block of RAM which is aligned to its size.
- * This procedure can be used until the call to mem_init().
- */
-void *sparc_init_alloc(unsigned long *kbrk, unsigned long size)
-{
-        unsigned long mask = size - 1;
-        unsigned long ret;
-
-        if(!size)
-                return 0x0;
-        if(size & mask) {
-                prom_printf("panic: sparc_init_alloc botch\n");
-                prom_halt();
-        }
-        ret = (*kbrk + mask) & ~mask;
-        *kbrk = ret + size;
-        memset((void*) ret, 0, size);
-        return (void*) ret;
-}
 
 static inline void forget_pte(pte_t page)
 {
 	if (pte_none(page))
 		return;
 	if (pte_present(page)) {
-		unsigned long addr = pte_page(page);
-		if (MAP_NR(addr) >= max_mapnr || PageReserved(mem_map+MAP_NR(addr)))
+		struct page *ptpage = pte_page(page);
+		if ((!VALID_PAGE(ptpage)) || PageReserved(ptpage))
 			return;
 		/* 
 		 * free_page() used to be able to clear swap cache
 		 * entries.  We may now have to do it manually.  
 		 */
-		free_page_and_swap_cache(addr);
+		free_page_and_swap_cache(ptpage);
 		return;
 	}
-	swap_free(pte_val(page));
+	swap_free(pte_to_swp_entry(page));
 }
 
 /* Remap IO memory, the same way as remap_page_range(), but use
@@ -91,7 +71,9 @@ static inline int io_remap_pmd_range(pmd_t * pmd, unsigned long address, unsigne
 		pte_t * pte = pte_alloc(pmd, address);
 		if (!pte)
 			return -ENOMEM;
+		spin_lock(&current->mm->page_table_lock);
 		io_remap_pte_range(pte, address, end - address, address + offset, prot, space);
+		spin_unlock(&current->mm->page_table_lock);
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
 	} while (address < end);

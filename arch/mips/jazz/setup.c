@@ -1,4 +1,4 @@
-/* $Id: setup.c,v 1.20 1999/02/25 21:57:47 tsbogend Exp $
+/* $Id: setup.c,v 1.24 1999/10/09 00:00:58 ralf Exp $
  *
  * Setup pointers to hardware-dependent routines.
  *
@@ -18,11 +18,12 @@
 #include <linux/console.h>
 #include <linux/fb.h>
 #include <linux/mc146818rtc.h>
+#include <linux/ide.h>
 #include <asm/bootinfo.h>
 #include <asm/keyboard.h>
-#include <asm/ide.h>
 #include <asm/irq.h>
 #include <asm/jazz.h>
+#include <asm/jazzdma.h>
 #include <asm/ptrace.h>
 #include <asm/reboot.h>
 #include <asm/io.h>
@@ -52,14 +53,14 @@ extern struct fd_ops jazz_fd_ops;
 
 void (*board_time_init)(struct irqaction *irq);
 
-__initfunc(static void jazz_time_init(struct irqaction *irq))
+static void __init jazz_time_init(struct irqaction *irq)
 {
         /* set the clock to 100 Hz */
         r4030_write_reg32(JAZZ_TIMER_INTERVAL, 9);
         i8259_setup_irq(JAZZ_TIMER_IRQ, irq);
 }
 
-__initfunc(static void jazz_irq_setup(void))
+static void __init jazz_irq_setup(void)
 {
         set_except_vector(0, jazz_handle_int);
 	r4030_write_reg16(JAZZ_IO_IRQ_ENABLE,
@@ -79,7 +80,12 @@ __initfunc(static void jazz_irq_setup(void))
 	i8259_setup_irq(2, &irq2);
 }
 
-__initfunc(void jazz_setup(void))
+int __init page_is_ram(unsigned long pagenr)
+{
+	return 1;
+}
+
+void __init jazz_setup(void)
 {
 	add_wired_entry (0x02000017, 0x03c00017, 0xe0000000, PM_64K);
 	add_wired_entry (0x02400017, 0x02440017, 0xe2000000, PM_16M);
@@ -102,8 +108,29 @@ __initfunc(void jazz_setup(void))
 #ifdef CONFIG_BLK_DEV_IDE
 	ide_ops = &std_ide_ops;
 #endif
+#ifdef CONFIG_BLK_DEV_FD
+	fd_ops = &jazz_fd_ops;
+#endif
+#ifdef CONFIG_VT
 	conswitchp = &dummy_con;
+#endif
+
+#warning "Somebody should check if screen_info is ok for Jazz."
+
+	screen_info = (struct screen_info) {
+		0, 0,		/* orig-x, orig-y */
+		0,		/* unused */
+		0,		/* orig_video_page */
+		0,		/* orig_video_mode */
+		160,		/* orig_video_cols */
+		0, 0, 0,	/* unused, ega_bx, unused */
+		64,		/* orig_video_lines */
+		0,		/* orig_video_isVGA */
+		16		/* orig_video_points */
+	};
+
 	rtc_ops = &jazz_rtc_ops;
 	kbd_ops = &jazz_kbd_ops;
-	fd_ops = &jazz_fd_ops;
+
+	vdma_init();
 }

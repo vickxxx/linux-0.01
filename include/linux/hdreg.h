@@ -49,6 +49,7 @@
 #define WIN_SEEK		0x70
 #define WIN_DIAGNOSE		0x90
 #define WIN_SPECIFY		0x91	/* set drive geometry translation */
+#define WIN_IDLEIMMEDIATE	0xE1	/* force drive to become "ready" */
 #define WIN_SETIDLE1		0xE3
 #define WIN_SETIDLE2		0x97
 
@@ -59,8 +60,8 @@
 #define WIN_CHECKPOWERMODE1	0xE5
 #define WIN_CHECKPOWERMODE2	0x98
 
-#define WIN_DOORLOCK		0xde	/* lock door on removable drives */
-#define WIN_DOORUNLOCK		0xdf	/* unlock door on removable drives */
+#define WIN_DOORLOCK		0xDE	/* lock door on removable drives */
+#define WIN_DOORUNLOCK		0xDF	/* unlock door on removable drives */
 
 #define WIN_MULTREAD		0xC4	/* read sectors using multiple mode */
 #define WIN_MULTWRITE		0xC5	/* write sectors using multiple mode */
@@ -68,18 +69,25 @@
 #define WIN_IDENTIFY		0xEC	/* ask drive to identify itself	*/
 #define WIN_IDENTIFY_DMA	0xEE	/* same as WIN_IDENTIFY, but DMA */
 #define WIN_SETFEATURES		0xEF	/* set special drive features */
-#define WIN_READDMA		0xc8	/* read sectors using DMA transfers */
-#define WIN_WRITEDMA		0xca	/* write sectors using DMA transfers */
+#define WIN_READDMA		0xC8	/* read sectors using DMA transfers */
+#define WIN_WRITEDMA		0xCA	/* write sectors using DMA transfers */
+
+#define WIN_QUEUED_SERVICE	0xA2	/* */
+#define WIN_READDMA_QUEUED	0xC7	/* read sectors using Queued DMA transfers */
+#define WIN_WRITEDMA_QUEUED	0xCC	/* write sectors using Queued DMA transfers */
 
 #define WIN_READ_BUFFER		0xE4	/* force read only 1 sector */
 #define WIN_WRITE_BUFFER	0xE8	/* force write only 1 sector */
 
-#define WIN_SMART		0xb0	/* self-monitoring and reporting */
+#define WIN_SMART		0xB0	/* self-monitoring and reporting */
 
 /* Additional drive command codes used by ATAPI devices. */
 #define WIN_PIDENTIFY		0xA1	/* identify ATAPI device	*/
 #define WIN_SRST		0x08	/* ATAPI soft reset command */
-#define WIN_PACKETCMD		0xa0	/* Send a packet command. */
+#define WIN_PACKETCMD		0xA0	/* Send a packet command. */
+
+#define DISABLE_SEAGATE		0xFB
+#define EXABYTE_ENABLE_NEST	0xF0
 
 /* WIN_SMART sub-commands */
 
@@ -88,6 +96,8 @@
 #define SMART_AUTOSAVE		0xd2
 #define SMART_SAVE		0xd3
 #define SMART_IMMEDIATE_OFFLINE	0xd4
+#define SMART_READ_LOG_SECTOR	0xd5
+#define SMART_WRITE_LOG_SECTOR	0xd6
 #define SMART_ENABLE		0xd8
 #define SMART_DISABLE		0xd9
 #define SMART_STATUS		0xda
@@ -97,6 +107,9 @@
 
 #define SETFEATURES_EN_WCACHE	0x02	/* Enable write cache */
 #define SETFEATURES_XFER	0x03	/* Set transfer mode */
+#	define XFER_UDMA_7	0x47	/* 0100|0111 */
+#	define XFER_UDMA_6	0x46	/* 0100|0110 */
+#	define XFER_UDMA_5	0x45	/* 0100|0101 */
 #	define XFER_UDMA_4	0x44	/* 0100|0100 */
 #	define XFER_UDMA_3	0x43	/* 0100|0011 */
 #	define XFER_UDMA_2	0x42	/* 0100|0010 */
@@ -114,6 +127,7 @@
 #	define XFER_PIO_1	0x09	/* 0000|1001 */
 #	define XFER_PIO_0	0x08	/* 0000|1000 */
 #	define XFER_PIO_SLOW	0x00	/* 0000|0000 */
+#define SETFEATURES_DIS_DEFECT	0x04	/* Disable Defect Management */
 #define SETFEATURES_EN_APM	0x05	/* Enable advanced power management */
 #define SETFEATURES_DIS_MSN	0x31	/* Disable Media Status Notification */
 #define SETFEATURES_DIS_RLA	0x55	/* Disable read look-ahead feature */
@@ -121,9 +135,11 @@
 #define SETFEATURES_EN_SI	0x5E	/* Enable SERVICE interrupt */
 #define SETFEATURES_DIS_RPOD	0x66	/* Disable reverting to power on defaults */
 #define SETFEATURES_DIS_WCACHE	0x82	/* Disable write cache */
+#define SETFEATURES_EN_DEFECT	0x84	/* Enable Defect Management */
 #define SETFEATURES_DIS_APM	0x85	/* Disable advanced power management */
 #define SETFEATURES_EN_MSN	0x95	/* Enable Media Status Notification */
 #define SETFEATURES_EN_RLA	0xAA	/* Enable read look-ahead feature */
+#define SETFEATURES_PREFETCH	0xAB	/* Sets drive prefetch value */
 #define SETFEATURES_EN_RPOD	0xCC	/* Enable reverting to power on defaults */
 #define SETFEATURES_DIS_RI	0xDD	/* Disable release interrupt */
 #define SETFEATURES_DIS_SI	0xDE	/* Disable SERVICE interrupt */
@@ -165,7 +181,13 @@ struct hd_geometry {
 #define HDIO_GET_DMA		0x030b	/* get use-dma flag */
 #define HDIO_GET_NICE		0x030c	/* get nice flags */
 #define HDIO_GET_IDENTITY	0x030d	/* get IDE identification info */
+
+#define HDIO_DRIVE_RESET	0x031c	/* execute a device reset */
+#define HDIO_TRISTATE_HWIF	0x031d	/* execute a channel tristate */
+#define HDIO_DRIVE_TASK		0x031e	/* execute task and special drive command */
 #define HDIO_DRIVE_CMD		0x031f	/* execute a special drive command */
+
+#define HDIO_DRIVE_CMD_AEB	HDIO_DRIVE_TASK
 
 /* hd/ide ctl's that pass (arg) non-ptr values are numbered 0x032n/0x033n */
 #define HDIO_SET_MULTCOUNT	0x0321	/* change IDE blockmode */
@@ -179,6 +201,19 @@ struct hd_geometry {
 #define HDIO_SET_NICE		0x0329	/* set nice flags */
 #define HDIO_UNREGISTER_HWIF	0x032a  /* unregister interface */
 
+/* BIG GEOMETRY */
+struct hd_big_geometry {
+	unsigned char heads;
+	unsigned char sectors;
+	unsigned int cylinders;
+	unsigned long start;
+};
+
+/* hd/ide ctl's that pass (arg) ptrs to user space are numbered 0x033n/0x033n */
+#define HDIO_GETGEO_BIG		0x0330	/* */
+#define HDIO_GETGEO_BIG_RAW	0x0331	/* */
+
+#define __NEW_HD_DRIVE_ID
 /* structure returned by HDIO_GET_IDENTITY, as per ANSI ATA2 rev.2f spec */
 struct hd_driveid {
 	unsigned short	config;		/* lots of obsolete bit flags */
@@ -223,68 +258,50 @@ struct hd_driveid {
 	unsigned short  eide_dma_time;	/* recommended mword dma cycle time (ns) */
 	unsigned short  eide_pio;       /* min cycle time (ns), no IORDY  */
 	unsigned short  eide_pio_iordy; /* min cycle time (ns), with IORDY */
-	unsigned short  word69;
-	unsigned short  word70;
+	unsigned short	words69_70[2];	/* reserved words 69-70 */
 	/* HDIO_GET_IDENTITY currently returns only words 0 through 70 */
-	unsigned short  word71;
-	unsigned short  word72;
-	unsigned short  word73;
-	unsigned short  word74;
-	unsigned short  word75;
-	unsigned short  word76;
-	unsigned short  word77;
-	unsigned short  word78;
-	unsigned short  word79;
-	unsigned short  word80;
-	unsigned short  word81;
-	unsigned short  command_sets;	/* bits 0:Smart 1:Security 2:Removable 3:PM */
-	unsigned short  word83;		/* bits 14:Smart Enabled 13:0 zero */
-	unsigned short  word84;
-	unsigned short  word85;
-	unsigned short  word86;
-	unsigned short  word87;
-	unsigned short  dma_ultra;
+	unsigned short	words71_74[4];	/* reserved words 71-74 */
+	unsigned short  queue_depth;	/*  */
+	unsigned short  words76_79[4];	/* reserved words 76-79 */
+	unsigned short  major_rev_num;	/*  */
+	unsigned short  minor_rev_num;	/*  */
+	unsigned short  command_set_1;	/* bits 0:Smart 1:Security 2:Removable 3:PM */
+	unsigned short  command_set_2;	/* bits 14:Smart Enabled 13:0 zero */
+	unsigned short  cfsse;		/* command set-feature supported extensions */
+	unsigned short  cfs_enable_1;	/* command set-feature enabled */
+	unsigned short  cfs_enable_2;	/* command set-feature enabled */
+	unsigned short  csf_default;	/* command set-feature default */
+	unsigned short  dma_ultra;	/*  */
 	unsigned short	word89;		/* reserved (word 89) */
 	unsigned short	word90;		/* reserved (word 90) */
-	unsigned short	word91;		/* reserved (word 91) */
+	unsigned short	CurAPMvalues;	/* current APM values */
 	unsigned short	word92;		/* reserved (word 92) */
-	unsigned short	word93;		/* reserved (word 93) */
-	unsigned short	word94;		/* reserved (word 94) */
-	unsigned short	word95;		/* reserved (word 95) */
-	unsigned short	word96;		/* reserved (word 96) */
-	unsigned short	word97;		/* reserved (word 97) */
-	unsigned short	word98;		/* reserved (word 98) */
-	unsigned short	word99;		/* reserved (word 99) */
-	unsigned short	word100;	/* reserved (word 100) */
-	unsigned short	word101;	/* reserved (word 101) */
-	unsigned short	word102;	/* reserved (word 102) */
-	unsigned short	word103;	/* reserved (word 103) */
-	unsigned short	word104;	/* reserved (word 104) */
-	unsigned short	word105;	/* reserved (word 105) */
-	unsigned short	word106;	/* reserved (word 106) */
-	unsigned short	word107;	/* reserved (word 107) */
-	unsigned short	word108;	/* reserved (word 108) */
-	unsigned short	word109;	/* reserved (word 109) */
-	unsigned short	word110;	/* reserved (word 110) */
-	unsigned short	word111;	/* reserved (word 111) */
-	unsigned short	word112;	/* reserved (word 112) */
-	unsigned short	word113;	/* reserved (word 113) */
-	unsigned short	word114;	/* reserved (word 114) */
-	unsigned short	word115;	/* reserved (word 115) */
-	unsigned short	word116;	/* reserved (word 116) */
-	unsigned short	word117;	/* reserved (word 117) */
-	unsigned short	word118;	/* reserved (word 118) */
-	unsigned short	word119;	/* reserved (word 119) */
-	unsigned short	word120;	/* reserved (word 120) */
-	unsigned short	word121;	/* reserved (word 121) */
-	unsigned short	word122;	/* reserved (word 122) */
-	unsigned short	word123;	/* reserved (word 123) */
-	unsigned short	word124;	/* reserved (word 124) */
-	unsigned short	word125;	/* reserved (word 125) */
-	unsigned short	word126;	/* reserved (word 126) */
+	unsigned short	hw_config;	/* hardware config */
+	unsigned short  words94_125[32];/* reserved words 94-125 */
+	unsigned short	last_lun;	/* reserved (word 126) */
 	unsigned short	word127;	/* reserved (word 127) */
-	unsigned short	security;	/* bits 0:support 1:enabled 2:locked 3:frozen */
-	unsigned short	reserved[127];
+	unsigned short	dlf;		/* device lock function
+					 * 15:9	reserved
+					 * 8	security level 1:max 0:high
+					 * 7:6	reserved
+					 * 5	enhanced erase
+					 * 4	expire
+					 * 3	frozen
+					 * 2	locked
+					 * 1	en/disabled
+					 * 0	capability
+					 */
+	unsigned short  csfo;		/* current set features options
+					 * 15:4	reserved
+					 * 3	auto reassign
+					 * 2	reverting
+					 * 1	read-look-ahead
+					 * 0	write cache
+					 */
+	unsigned short	words130_155[26];/* reserved vendor words 130-155 */
+	unsigned short	word156;
+	unsigned short	words157_159[3];/* reserved vendor words 157-159 */
+	unsigned short	words160_255[95];/* reserved words 160-255 */
 };
 
 /*
@@ -303,10 +320,6 @@ struct hd_driveid {
  * These routines are used for kernel command line parameters from main.c:
  */
 #include <linux/config.h>
-
-#ifdef CONFIG_BLK_DEV_HD
-void hd_setup(char *, int *);
-#endif	/* CONFIG_BLK_DEV_HD */
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
 int ide_register(int io_port, int ctl_port, int irq);

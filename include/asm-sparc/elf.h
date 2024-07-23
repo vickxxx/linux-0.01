@@ -1,4 +1,4 @@
-/* $Id: elf.h,v 1.20 1998/09/14 09:11:10 davem Exp $ */
+/* $Id: elf.h,v 1.22 2000/07/12 01:27:08 davem Exp $ */
 #ifndef __ASMSPARC_ELF_H
 #define __ASMSPARC_ELF_H
 
@@ -59,7 +59,7 @@ typedef struct {
 /*
  * This is used to ensure we don't load something for the wrong architecture.
  */
-#define elf_check_arch(x) ((x) == EM_SPARC)
+#define elf_check_arch(x) ((x)->e_machine == EM_SPARC)
 
 /*
  * These are used to set parameters in the core dumps.
@@ -105,8 +105,7 @@ typedef struct {
 #define ELF_PLATFORM	(NULL)
 
 #ifdef __KERNEL__
-#define SET_PERSONALITY(ex, ibcs2) \
-	current->personality = (ibcs2 ? PER_SVR4 : PER_LINUX)
+#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
 #endif
 
 #endif /* !(__ASMSPARC_ELF_H) */

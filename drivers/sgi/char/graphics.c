@@ -1,4 +1,4 @@
-/* $Id: graphics.c,v 1.16 1999/04/01 23:45:00 ulfc Exp $
+/* $Id: graphics.c,v 1.22 2000/02/18 00:24:43 ralf Exp $
  *
  * gfx.c: support for SGI's /dev/graphics, /dev/opengl
  *
@@ -33,6 +33,7 @@
 #include <linux/mman.h>
 #include <linux/malloc.h>
 #include <linux/module.h>
+#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include "gconsole.h"
 #include "graphics.h"
@@ -41,7 +42,7 @@
 #include <asm/rrm.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
-#include <asm/newport.h>
+#include <video/newport.h>
 
 #define DEBUG
 
@@ -99,9 +100,10 @@ sgi_graphics_ioctl (struct inode *inode, struct file *file, unsigned int cmd, un
 		i = verify_area (VERIFY_READ, (void *) arg, sizeof (struct gfx_getboardinfo_args));
 		if (i) return i;
 		
-		__get_user_ret (board,    &bia->board, -EFAULT);
-		__get_user_ret (dest_buf, &bia->buf,   -EFAULT);
-		__get_user_ret (max_len,  &bia->len,   -EFAULT);
+		if (__get_user (board,    &bia->board) ||
+		    __get_user (dest_buf, &bia->buf) ||
+		    __get_user (max_len,  &bia->len))
+			return -EFAULT;
 
 		if (board >= boards)
 			return -EINVAL;
@@ -124,8 +126,9 @@ sgi_graphics_ioctl (struct inode *inode, struct file *file, unsigned int cmd, un
 		i = verify_area (VERIFY_READ, (void *)arg, sizeof (struct gfx_attach_board_args));
 		if (i) return i;
 
-		__get_user_ret (board, &att->board, -EFAULT);
-		__get_user_ret (vaddr, &att->vaddr, -EFAULT);
+		if (__get_user (board, &att->board) ||
+		    __get_user (vaddr, &att->vaddr))
+			return -EFAULT;
 
 		/* Ok for now we are assuming /dev/graphicsN -> head N even
 		 * if the ioctl api suggests that this is not quite the case.
@@ -150,9 +153,11 @@ sgi_graphics_ioctl (struct inode *inode, struct file *file, unsigned int cmd, un
 		 * sgi_graphics_mmap
 		 */
 		disable_gconsole ();
+		down(&current->mm->mmap_sem);
 		r = do_mmap (file, (unsigned long)vaddr,
 			     cards[board].g_regs_size, PROT_READ|PROT_WRITE,
 			     MAP_FIXED|MAP_PRIVATE, 0);
+		up(&current->mm->mmap_sem);
 		if (r)
 			return r;
 	}
@@ -192,6 +197,7 @@ sgi_graphics_close (struct inode *inode, struct file *file)
 	int board = GRAPHICS_CARD (inode->i_rdev);
 
 	/* Tell the rendering manager that one client is going away */
+	lock_kernel();
 	rrm_close (inode, file);
 
 	/* Was this file handle from the board owner?, clear it */
@@ -201,6 +207,7 @@ sgi_graphics_close (struct inode *inode, struct file *file)
 			(*cards [board].g_reset_console)();
 		enable_gconsole ();
 	}
+	unlock_kernel();
 	return 0;
 }
 
@@ -254,16 +261,7 @@ sgi_graphics_nopage (struct vm_area_struct *vma, unsigned long address, int
  */
 
 static struct vm_operations_struct graphics_mmap = {
-	NULL,			/* no special mmap-open */
-	NULL,			/* no special mmap-close */
-	NULL,			/* no special mmap-unmap */
-	NULL,			/* no special mmap-protect */
-	NULL,			/* no special mmap-sync */
-	NULL,			/* no special mmap-advise */
-	sgi_graphics_nopage,	/* our magic no-page fault handler */
-	NULL,			/* no special mmap-wppage */
-	NULL,			/* no special mmap-swapout */
-	NULL			/* no special mmap-swapin */
+	nopage:	sgi_graphics_nopage,	/* our magic no-page fault handler */
 };
 	
 int
@@ -272,8 +270,6 @@ sgi_graphics_mmap (struct file *file, struct vm_area_struct *vma)
 	uint size;
 
 	size = vma->vm_end - vma->vm_start;
-	if (vma->vm_offset & ~PAGE_MASK)
-		return -ENXIO;
 
 	/* 1. Set our special graphic virtualizer  */
 	vma->vm_ops = &graphics_mmap;
@@ -298,20 +294,10 @@ graphics_ops_post_init (int slot)
 #endif
 
 struct file_operations sgi_graphics_fops = {
-	NULL,			/* llseek */
-	NULL,			/* read */
-	NULL,			/* write */
-	NULL,			/* readdir */
-	NULL,			/* poll */
-	sgi_graphics_ioctl,	/* ioctl */
-	sgi_graphics_mmap,	/* mmap */
-	sgi_graphics_open,	/* open */
-	NULL,			/* flush */
-	sgi_graphics_close,	/* release */
-	NULL,			/* fsync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+	ioctl:		sgi_graphics_ioctl,
+	mmap:		sgi_graphics_mmap,
+	open:		sgi_graphics_open,
+	release:	sgi_graphics_close,
 };
 
 /* /dev/graphics */
@@ -325,13 +311,13 @@ static struct miscdevice dev_opengl = {
 };
 
 /* This is called later from the misc-init routine */
-__initfunc(void gfx_register (void))
+void __init gfx_register (void)
 {
 	misc_register (&dev_graphics);
 	misc_register (&dev_opengl);
 }
 
-__initfunc(void gfx_init (const char **name))
+void __init gfx_init (const char **name)
 {
 #if 0
 	struct console_ops *console;

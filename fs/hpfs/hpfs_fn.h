@@ -64,13 +64,13 @@ typedef void nonconst; /* What this is for ? */
 extern inline time_t local_to_gmt(struct super_block *s, time_t t)
 {
 	extern struct timezone sys_tz;
-	return t + sys_tz.tz_minuteswest * 60 - (sys_tz.tz_dsttime ? 3600 : 0) +s->s_hpfs_timeshift;
+	return t + sys_tz.tz_minuteswest * 60 + s->s_hpfs_timeshift;
 }
 
 extern inline time_t gmt_to_local(struct super_block *s, time_t t)
 {
 	extern struct timezone sys_tz;
-	return t - sys_tz.tz_minuteswest * 60 + (sys_tz.tz_dsttime ? 3600 : 0) -s->s_hpfs_timeshift;
+	return t - sys_tz.tz_minuteswest * 60 - s->s_hpfs_timeshift;
 }
 
 /*
@@ -224,8 +224,8 @@ void hpfs_set_dentry_operations(struct dentry *);
 
 /* dir.c */
 
-int hpfs_dir_read(struct file *, char *, size_t, loff_t *);
 int hpfs_dir_release(struct inode *, struct file *);
+loff_t hpfs_dir_lseek(struct file *, loff_t, int);
 int hpfs_readdir(struct file *, void *, filldir_t);
 struct dentry *hpfs_lookup(struct inode *, struct dentry *);
 
@@ -248,6 +248,7 @@ struct hpfs_dirent *map_fnode_dirent(struct super_block *, fnode_secno, struct f
 /* ea.c */
 
 void hpfs_ea_ext_remove(struct super_block *, secno, int, unsigned);
+int hpfs_read_ea(struct super_block *, struct fnode *, char *, char *, int);
 char *hpfs_get_ea(struct super_block *, struct fnode *, char *, int *);
 void hpfs_set_ea(struct inode *, struct fnode *, char *, char *, int);
 
@@ -255,12 +256,11 @@ void hpfs_set_ea(struct inode *, struct fnode *, char *, char *, int);
 
 int hpfs_file_release(struct inode *, struct file *);
 int hpfs_open(struct inode *, struct file *);
-int hpfs_file_fsync(struct file *, struct dentry *);
+int hpfs_file_fsync(struct file *, struct dentry *, int);
 secno hpfs_bmap(struct inode *, unsigned);
 void hpfs_truncate(struct inode *);
-ssize_t hpfs_file_read(struct file *, char *, size_t, loff_t *);
-ssize_t hpfs_file_write(struct file *, const char *, size_t, loff_t *);
-int hpfs_writepage (struct file *, struct page *);
+int hpfs_get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create);
+ssize_t hpfs_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos);
 
 /* inode.c */
 
@@ -283,10 +283,6 @@ struct anode *hpfs_map_anode(struct super_block *s, anode_secno, struct buffer_h
 struct dnode *hpfs_map_dnode(struct super_block *s, dnode_secno, struct quad_buffer_head *);
 dnode_secno hpfs_fnode_dno(struct super_block *s, ino_t ino);
 
-/* mmap.c */
-
-int hpfs_mmap(struct file *, struct vm_area_struct *);
-
 /* name.c */
 
 unsigned char hpfs_upcase(unsigned char *, unsigned char);
@@ -305,8 +301,7 @@ int hpfs_mknod(struct inode *, struct dentry *, int, int);
 int hpfs_symlink(struct inode *, struct dentry *, const char *);
 int hpfs_unlink(struct inode *, struct dentry *);
 int hpfs_rmdir(struct inode *, struct dentry *);
-int hpfs_readlink(struct dentry *, char *, int);
-struct dentry *hpfs_follow_link(struct dentry *, struct dentry *, unsigned int);
+int hpfs_symlink_readpage(struct file *, struct page *);
 int hpfs_rename(struct inode *, struct dentry *, struct inode *, struct dentry *);
 
 /* super.c */
@@ -316,5 +311,6 @@ int hpfs_stop_cycles(struct super_block *, int, int *, int *, char *);
 int hpfs_remount_fs(struct super_block *, int *, char *);
 void hpfs_put_super(struct super_block *);
 unsigned hpfs_count_one_bitmap(struct super_block *, secno);
-int hpfs_statfs(struct super_block *, struct statfs *, int);
-struct super_block *hpfs_read_super(struct super_block *, void *, int);
+int hpfs_statfs(struct super_block *, struct statfs *);
+
+extern struct address_space_operations hpfs_aops;

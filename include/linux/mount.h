@@ -10,37 +10,42 @@
  */
 #ifndef _LINUX_MOUNT_H
 #define _LINUX_MOUNT_H
+#ifdef __KERNEL__
 
-#define DQUOT_USR_ENABLED	0x01		/* User diskquotas enabled */
-#define DQUOT_GRP_ENABLED	0x02		/* Group diskquotas enabled */
-
-struct quota_mount_options
-{
-	unsigned int flags;			/* Flags for diskquotas on this device */
-	struct semaphore semaphore;		/* lock device while I/O in progress */
-	struct file *files[MAXQUOTAS];		/* fp's to quotafiles */
-	time_t inode_expire[MAXQUOTAS];		/* expiretime for inode-quota */
-	time_t block_expire[MAXQUOTAS];		/* expiretime for block-quota */
-	char rsquash[MAXQUOTAS];		/* for quotas threath root as any other user */
-};
+#define MNT_VISIBLE	1
 
 struct vfsmount
 {
-  kdev_t mnt_dev;			/* Device this applies to */
-  char *mnt_devname;			/* Name of device e.g. /dev/dsk/hda1 */
-  char *mnt_dirname;			/* Name of directory mounted on */
-  unsigned int mnt_flags;		/* Flags of this device */
-  struct super_block *mnt_sb;		/* pointer to superblock */
-  struct quota_mount_options mnt_dquot;	/* Diskquota specific mount options */
-  struct vfsmount *mnt_next;		/* pointer to next in linkedlist */
+	struct dentry *mnt_mountpoint;	/* dentry of mountpoint */
+	struct dentry *mnt_root;	/* root of the mounted tree */
+	struct vfsmount *mnt_parent;	/* fs we are mounted on */
+	struct list_head mnt_instances;	/* other vfsmounts of the same fs */
+	struct list_head mnt_clash;	/* those who are mounted on (other */
+					/* instances) of the same dentry */
+	struct super_block *mnt_sb;	/* pointer to superblock */
+	struct list_head mnt_mounts;	/* list of children, anchored here */
+	struct list_head mnt_child;	/* and going through their mnt_child */
+	atomic_t mnt_count;
+	int mnt_flags;
+	char *mnt_devname;		/* Name of device e.g. /dev/dsk/hda1 */
+	struct list_head mnt_list;
+	uid_t mnt_owner;
 };
 
-struct vfsmount *lookup_vfsmnt(kdev_t dev);
+static inline struct vfsmount *mntget(struct vfsmount *mnt)
+{
+	if (mnt)
+		atomic_inc(&mnt->mnt_count);
+	return mnt;
+}
 
-/*
- *	Umount options
- */
- 
-#define MNT_FORCE	0x00000001	/* Attempt to forcibily umount */
+static inline void mntput(struct vfsmount *mnt)
+{
+	if (mnt) {
+		if (atomic_dec_and_test(&mnt->mnt_count))
+			BUG();
+	}
+}
 
+#endif
 #endif /* _LINUX_MOUNT_H */

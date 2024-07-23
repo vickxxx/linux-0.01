@@ -18,63 +18,20 @@
  *        David S. Miller (davem@caip.rutgers.edu), 1995
  */
 
-#include <asm/uaccess.h>
-
-#include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/ext2_fs.h>
-#include <linux/sched.h>
-#include <linux/stat.h>
 
-static ssize_t ext2_dir_read (struct file * filp, char * buf,
-			      size_t count, loff_t *ppos)
-{
-	return -EISDIR;
-}
+static unsigned char ext2_filetype_table[] = {
+	DT_UNKNOWN, DT_REG, DT_DIR, DT_CHR, DT_BLK, DT_FIFO, DT_SOCK, DT_LNK
+};
 
 static int ext2_readdir(struct file *, void *, filldir_t);
 
-static struct file_operations ext2_dir_operations = {
-	NULL,			/* lseek - default */
-	ext2_dir_read,		/* read */
-	NULL,			/* write - bad */
-	ext2_readdir,		/* readdir */
-	NULL,			/* poll - default */
-	ext2_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	ext2_sync_file,		/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL			/* revalidate */
-};
-
-/*
- * directories can handle most operations...
- */
-struct inode_operations ext2_dir_inode_operations = {
-	&ext2_dir_operations,	/* default directory file-ops */
-	ext2_create,		/* create */
-	ext2_lookup,		/* lookup */
-	ext2_link,		/* link */
-	ext2_unlink,		/* unlink */
-	ext2_symlink,		/* symlink */
-	ext2_mkdir,		/* mkdir */
-	ext2_rmdir,		/* rmdir */
-	ext2_mknod,		/* mknod */
-	ext2_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	ext2_permission,	/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+struct file_operations ext2_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	ext2_readdir,
+	ioctl:		ext2_ioctl,
+	fsync:		ext2_sync_file,
 };
 
 int ext2_check_dir_entry (const char * function, struct inode * dir,
@@ -185,8 +142,8 @@ revalidate:
 						   bh, offset)) {
 				/* On error, skip the f_pos to the
                                    next block. */
-				filp->f_pos = (filp->f_pos & (sb->s_blocksize - 1))
-					      + sb->s_blocksize;
+				filp->f_pos = (filp->f_pos | (sb->s_blocksize - 1))
+					      + 1;
 				brelse (bh);
 				return stored;
 			}
@@ -199,14 +156,19 @@ revalidate:
 				 * not the directory has been modified
 				 * during the copy operation.
 				 */
-				unsigned long version = inode->i_version;
+				unsigned long version = filp->f_version;
+				unsigned char d_type = DT_UNKNOWN;
 
+				if (EXT2_HAS_INCOMPAT_FEATURE(sb, EXT2_FEATURE_INCOMPAT_FILETYPE)
+				    && de->file_type < EXT2_FT_MAX)
+					d_type = ext2_filetype_table[de->file_type];
 				error = filldir(dirent, de->name,
 						de->name_len,
-						filp->f_pos, le32_to_cpu(de->inode));
+						filp->f_pos, le32_to_cpu(de->inode),
+						d_type);
 				if (error)
 					break;
-				if (version != inode->i_version)
+				if (version != filp->f_version)
 					goto revalidate;
 				stored ++;
 			}

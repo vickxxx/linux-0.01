@@ -17,6 +17,12 @@
  * 
  * This file may be redistributed under the terms of the GNU Public
  * License.
+ *
+ * Reduced memory usage for older ARM systems  - Russell King.
+ *
+ * 2000/01/20   Fixed SMP locking on put_tty_queue using bits of 
+ *		the patch by Andrew J. Kroll <ag784@freenet.buffalo.edu>
+ *		who actually finally proved there really was a race.
  */
 
 #include <linux/types.h>
@@ -57,13 +63,43 @@
 #define TTY_THRESHOLD_THROTTLE		128 /* now based on remaining room */
 #define TTY_THRESHOLD_UNTHROTTLE 	128
 
+static inline unsigned char *alloc_buf(void)
+{
+	unsigned char *p;
+	int prio = in_interrupt() ? GFP_ATOMIC : GFP_KERNEL;
+
+	if (PAGE_SIZE != N_TTY_BUF_SIZE) {
+		p = kmalloc(N_TTY_BUF_SIZE, prio);
+		if (p)
+			memset(p, 0, N_TTY_BUF_SIZE);
+	} else
+		p = (unsigned char *)get_zeroed_page(prio);
+
+	return p;
+}
+
+static inline void free_buf(unsigned char *buf)
+{
+	if (PAGE_SIZE != N_TTY_BUF_SIZE)
+		kfree(buf);
+	else
+		free_page((unsigned long) buf);
+}
+
 static inline void put_tty_queue(unsigned char c, struct tty_struct *tty)
 {
+	unsigned long flags;
+	/*
+	 *	The problem of stomping on the buffers ends here.
+	 *	Why didn't anyone see this one comming? --AJK
+	*/
+	spin_lock_irqsave(&tty->read_lock, flags);
 	if (tty->read_cnt < N_TTY_BUF_SIZE) {
 		tty->read_buf[tty->read_head] = c;
 		tty->read_head = (tty->read_head + 1) & (N_TTY_BUF_SIZE-1);
 		tty->read_cnt++;
 	}
+	spin_unlock_irqrestore(&tty->read_lock, flags);
 }
 
 /* 
@@ -86,7 +122,11 @@ static void check_unthrottle(struct tty_struct * tty)
  */
 static void reset_buffer_flags(struct tty_struct *tty)
 {
+	unsigned long flags;
+
+	spin_lock_irqsave(&tty->read_lock, flags);
 	tty->read_head = tty->read_tail = tty->read_cnt = 0;
+	spin_unlock_irqrestore(&tty->read_lock, flags);
 	tty->canon_head = tty->canon_data = tty->erasing = 0;
 	memset(&tty->read_flags, 0, sizeof tty->read_flags);
 	check_unthrottle(tty);
@@ -114,14 +154,19 @@ void n_tty_flush_buffer(struct tty_struct * tty)
  */
 ssize_t n_tty_chars_in_buffer(struct tty_struct *tty)
 {
-	if (tty->icanon) {
-		if (!tty->canon_data) return 0;
+	unsigned long flags;
+	ssize_t n = 0;
 
-		return (tty->canon_head > tty->read_tail) ?
+	spin_lock_irqsave(&tty->read_lock, flags);
+	if (!tty->icanon) {
+		n = tty->read_cnt;
+	} else if (tty->canon_data) {
+		n = (tty->canon_head > tty->read_tail) ?
 			tty->canon_head - tty->read_tail :
 			tty->canon_head + (N_TTY_BUF_SIZE - tty->read_tail);
 	}
-	return tty->read_cnt;
+	spin_unlock_irqrestore(&tty->read_lock, flags);
+	return n;
 }
 
 /*
@@ -206,10 +251,10 @@ static ssize_t opost_block(struct tty_struct * tty,
 		nr = space;
 	if (nr > sizeof(buf))
 	    nr = sizeof(buf);
-	nr -= copy_from_user(buf, inbuf, nr);
-	if (!nr)
-		return 0;
-	
+
+	if (copy_from_user(buf, inbuf, nr))
+		return -EFAULT;
+
 	for (i = 0, cp = buf; i < nr; i++, cp++) {
 		switch (*cp) {
 		case '\n':
@@ -283,6 +328,7 @@ static void eraser(unsigned char c, struct tty_struct *tty)
 {
 	enum { ERASE, WERASE, KILL } kill_type;
 	int head, seen_alnums;
+	unsigned long flags;
 
 	if (tty->read_head == tty->canon_head) {
 		/* opost('\a', tty); */		/* what do you think? */
@@ -294,15 +340,19 @@ static void eraser(unsigned char c, struct tty_struct *tty)
 		kill_type = WERASE;
 	else {
 		if (!L_ECHO(tty)) {
+			spin_lock_irqsave(&tty->read_lock, flags);
 			tty->read_cnt -= ((tty->read_head - tty->canon_head) &
 					  (N_TTY_BUF_SIZE - 1));
 			tty->read_head = tty->canon_head;
+			spin_unlock_irqrestore(&tty->read_lock, flags);
 			return;
 		}
 		if (!L_ECHOK(tty) || !L_ECHOKE(tty) || !L_ECHOE(tty)) {
+			spin_lock_irqsave(&tty->read_lock, flags);
 			tty->read_cnt -= ((tty->read_head - tty->canon_head) &
 					  (N_TTY_BUF_SIZE - 1));
 			tty->read_head = tty->canon_head;
+			spin_unlock_irqrestore(&tty->read_lock, flags);
 			finish_erasing(tty);
 			echo_char(KILL_CHAR(tty), tty);
 			/* Add a newline if ECHOK is on and ECHOKE is off. */
@@ -324,8 +374,10 @@ static void eraser(unsigned char c, struct tty_struct *tty)
 			else if (seen_alnums)
 				break;
 		}
+		spin_lock_irqsave(&tty->read_lock, flags);
 		tty->read_head = head;
 		tty->read_cnt--;
+		spin_unlock_irqrestore(&tty->read_lock, flags);
 		if (L_ECHO(tty)) {
 			if (L_ECHOPRT(tty)) {
 				if (!tty->erasing) {
@@ -603,8 +655,7 @@ send_signal:
 			put_tty_queue(c, tty);
 			tty->canon_head = tty->read_head;
 			tty->canon_data++;
-			if (tty->fasync)
-				kill_fasync(tty->fasync, SIGIO);
+			kill_fasync(&tty->fasync, SIGIO, POLL_IN);
 			if (waitqueue_active(&tty->read_wait))
 				wake_up_interruptible(&tty->read_wait);
 			return;
@@ -658,11 +709,13 @@ static void n_tty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 	char *f, flags = TTY_NORMAL;
 	int	i;
 	char	buf[64];
+	unsigned long cpuflags;
 
 	if (!tty->read_buf)
 		return;
 
 	if (tty->real_raw) {
+		spin_lock_irqsave(&tty->read_lock, cpuflags);
 		i = MIN(count, MIN(N_TTY_BUF_SIZE - tty->read_cnt,
 				   N_TTY_BUF_SIZE - tty->read_head));
 		memcpy(tty->read_buf + tty->read_head, cp, i);
@@ -676,6 +729,7 @@ static void n_tty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 		memcpy(tty->read_buf + tty->read_head, cp, i);
 		tty->read_head = (tty->read_head + i) & (N_TTY_BUF_SIZE-1);
 		tty->read_cnt += i;
+		spin_unlock_irqrestore(&tty->read_lock, cpuflags);
 	} else {
 		for (i=count, p = cp, f = fp; i; i--, p++) {
 			if (f)
@@ -705,8 +759,7 @@ static void n_tty_receive_buf(struct tty_struct *tty, const unsigned char *cp,
 	}
 
 	if (!tty->icanon && (tty->read_cnt >= tty->minimum_to_wake)) {
-		if (tty->fasync)
-			kill_fasync(tty->fasync, SIGIO);
+		kill_fasync(&tty->fasync, SIGIO, POLL_IN);
 		if (waitqueue_active(&tty->read_wait))
 			wake_up_interruptible(&tty->read_wait);
 	}
@@ -799,7 +852,7 @@ static void n_tty_close(struct tty_struct *tty)
 {
 	n_tty_flush_buffer(tty);
 	if (tty->read_buf) {
-		free_page((unsigned long) tty->read_buf);
+		free_buf(tty->read_buf);
 		tty->read_buf = 0;
 	}
 }
@@ -810,8 +863,7 @@ static int n_tty_open(struct tty_struct *tty)
 		return -EINVAL;
 
 	if (!tty->read_buf) {
-		tty->read_buf = (unsigned char *)
-			get_free_page(in_interrupt() ? GFP_ATOMIC : GFP_KERNEL);
+		tty->read_buf = alloc_buf();
 		if (!tty->read_buf)
 			return -ENOMEM;
 	}
@@ -850,14 +902,20 @@ static inline int copy_from_read_buf(struct tty_struct *tty,
 {
 	int retval;
 	ssize_t n;
+	unsigned long flags;
 
 	retval = 0;
+	spin_lock_irqsave(&tty->read_lock, flags);
 	n = MIN(*nr, MIN(tty->read_cnt, N_TTY_BUF_SIZE - tty->read_tail));
+	spin_unlock_irqrestore(&tty->read_lock, flags);
 	if (n) {
+		mb();
 		retval = copy_to_user(*b, &tty->read_buf[tty->read_tail], n);
 		n -= retval;
+		spin_lock_irqsave(&tty->read_lock, flags);
 		tty->read_tail = (tty->read_tail + n) & (N_TTY_BUF_SIZE-1);
 		tty->read_cnt -= n;
+		spin_unlock_irqrestore(&tty->read_lock, flags);
 		*b += n;
 		*nr -= n;
 	}
@@ -874,6 +932,7 @@ static ssize_t read_chan(struct tty_struct *tty, struct file *file,
 	ssize_t retval = 0;
 	ssize_t size;
 	long timeout;
+	unsigned long flags;
 
 do_it_again:
 
@@ -948,7 +1007,7 @@ do_it_again:
 		/* This statement must be first before checking for input
 		   so that any interrupt will set the state back to
 		   TASK_RUNNING. */
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		
 		if (((minimum - (b - buf)) < tty->minimum_to_wake) &&
 		    ((minimum - (b - buf)) >= 1))
@@ -992,9 +1051,11 @@ do_it_again:
 				eol = test_and_clear_bit(tty->read_tail,
 						&tty->read_flags);
 				c = tty->read_buf[tty->read_tail];
+				spin_lock_irqsave(&tty->read_lock, flags);
 				tty->read_tail = ((tty->read_tail+1) &
 						  (N_TTY_BUF_SIZE-1));
 				tty->read_cnt--;
+				spin_unlock_irqrestore(&tty->read_lock, flags);
 
 				if (!eol || (c != __DISABLED_CHAR)) {
 					put_user(c, b++);
@@ -1073,7 +1134,7 @@ static ssize_t write_chan(struct tty_struct * tty, struct file * file,
 
 	add_wait_queue(&tty->write_wait, &wait);
 	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
 			break;
@@ -1123,6 +1184,7 @@ break_out:
 	return (b - buf) ? b - buf : retval;
 }
 
+/* Called without the kernel lock held - fine */
 static unsigned int normal_poll(struct tty_struct * tty, struct file * file, poll_table *wait)
 {
 	unsigned int mask = 0;

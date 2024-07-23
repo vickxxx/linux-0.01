@@ -17,6 +17,9 @@
  *    routines in this file used to be inline!
  */
 
+#include <linux/module.h>
+
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/types.h>
@@ -64,27 +67,29 @@ volatile unsigned char cmd_buffer[16];
 				 */
 
 /***************************************************************** Detection */
-int cyber_esp_detect(Scsi_Host_Template *tpnt)
+int __init cyber_esp_detect(Scsi_Host_Template *tpnt)
 {
 	struct NCR_ESP *esp;
-	const struct ConfigDev *esp_dev;
-	unsigned int key;
+	struct zorro_dev *z = NULL;
 	unsigned long address;
 
-
-	if ((key = zorro_find(ZORRO_PROD_PHASE5_BLIZZARD_1220_CYBERSTORM, 0, 0)) ||
-	    (key = zorro_find(ZORRO_PROD_PHASE5_BLIZZARD_1230_II_FASTLANE_Z3_CYBERSCSI_CYBERSTORM060, 0, 0))){
-		esp_dev = zorro_get_board(key);
-
+	while ((z = zorro_find_device(ZORRO_WILDCARD, z))) {
+	    unsigned long board = z->resource.start;
+	    if ((z->id == ZORRO_PROD_PHASE5_BLIZZARD_1220_CYBERSTORM ||
+		 z->id == ZORRO_PROD_PHASE5_BLIZZARD_1230_II_FASTLANE_Z3_CYBERSCSI_CYBERSTORM060) &&
+		request_mem_region(board+CYBER_ESP_ADDR,
+		    		   sizeof(struct ESP_regs), "NCR53C9x")) {
 		/* Figure out if this is a CyberStorm or really a 
 		 * Fastlane/Blizzard Mk II by looking at the board size.
 		 * CyberStorm maps 64kB
 		 * (ZORRO_PROD_PHASE5_BLIZZARD_1220_CYBERSTORM does anyway)
 		 */
-		if((unsigned long)esp_dev->cd_BoardSize != 0x10000)
+		if(z->resource.end-board != 0xffff) {
+			release_mem_region(board+CYBER_ESP_ADDR,
+					   sizeof(struct ESP_regs));
 			return 0;
-
-		esp = esp_allocate(tpnt, (void *) esp_dev);
+		}
+		esp = esp_allocate(tpnt, (void *)board+CYBER_ESP_ADDR);
 
 		/* Do command transfer with programmed I/O */
 		esp->do_pio_cmds = 1;
@@ -119,7 +124,7 @@ int cyber_esp_detect(Scsi_Host_Template *tpnt)
 		 * relative to the device (i.e. in the same Zorro
 		 * I/O block).
 		 */
-		address = (unsigned long)ZTWO_VADDR(esp_dev->cd_BoardAddr);
+		address = (unsigned long)ZTWO_VADDR(board);
 		esp->dregs = (void *)(address + CYBER_DMA_ADDR);
 
 		/* ESP register base */
@@ -127,10 +132,10 @@ int cyber_esp_detect(Scsi_Host_Template *tpnt)
 		
 		/* Set the command buffer */
 		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus((unsigned long) cmd_buffer);
+		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, 0, 
+		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
 			    "CyberStorm SCSI", esp_intr);
 		/* Figure out our scsi ID on the bus */
 		/* The DMA cond flag contains a hardcoded jumper bit
@@ -140,17 +145,15 @@ int cyber_esp_detect(Scsi_Host_Template *tpnt)
 		 */
 		esp->scsi_id = 7;
 		
-		/* Check for differential SCSI-bus */
-		/* What is this stuff? */
+		/* We don't have a differential SCSI-bus. */
 		esp->diff = 0;
 
 		esp_initialize(esp);
 
-		zorro_config_board(key, 0);
-
-		printk("\nESP: Total of %d ESP hosts found, %d actually in use.\n", nesps,esps_in_use);
+		printk("ESP: Total of %d ESP hosts found, %d actually in use.\n", nesps, esps_in_use);
 		esps_running = esps_in_use;
 		return esps_in_use;
+	    }
 	}
 	return 0;
 }
@@ -263,7 +266,7 @@ static void dma_ints_on(struct NCR_ESP *esp)
 static int dma_irq_p(struct NCR_ESP *esp)
 {
 	/* It's important to check the DMA IRQ bit in the correct way! */
-	return ((esp->eregs->esp_status & ESP_STAT_INTR) &&
+	return ((esp_read(esp->eregs->esp_status) & ESP_STAT_INTR) &&
 		((((struct cyber_dma_registers *)(esp->dregs))->cond_reg) &
 		 CYBER_DMA_HNDL_INTR));
 }
@@ -295,4 +298,25 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 	} else {
 		dma_init_write(esp, addr, count);
 	}
+}
+
+#define HOSTS_C
+
+#include "cyberstorm.h"
+
+static Scsi_Host_Template driver_template = SCSI_CYBERSTORM;
+
+#include "scsi_module.c"
+
+int cyber_esp_release(struct Scsi_Host *instance)
+{
+#ifdef MODULE
+	unsigned long address = (unsigned long)((struct NCR_ESP *)instance->hostdata)->edev;
+
+	esp_deallocate((struct NCR_ESP *)instance->hostdata);
+	esp_release();
+	release_mem_region(address, sizeof(struct ESP_regs));
+	free_irq(IRQ_AMIGA_PORTS, esp_intr);
+#endif
+	return 1;
 }

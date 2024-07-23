@@ -157,19 +157,6 @@ static inline void mark_inodes_deleted(struct hfs_cat_entry *entry,
 /*================ Global functions ================*/
 
 /*
- * hfs_dir_read()
- *
- * This is the read() entry in the file_operations structure for HFS
- * directories.	 It simply returns an error code, since reading is not
- * supported.
- */
-hfs_rwret_t hfs_dir_read(struct file * filp, char *buf,
-			 hfs_rwarg_t count, loff_t *ppos)
-{
-	return -EISDIR;
-}
-
-/*
  * hfs_create()
  *
  * This is the create() entry in the inode_operations structure for
@@ -287,7 +274,6 @@ int hfs_unlink(struct inode * dir, struct dentry *dentry)
 		inode->i_nlink--; 
 		inode->i_ctime = CURRENT_TIME;
 		mark_inode_dirty(inode);
-		d_delete(dentry);
 		update_dirs_minus(entry, 0);
 	}
 
@@ -324,17 +310,13 @@ int hfs_rmdir(struct inode * parent, struct dentry *dentry)
 		goto hfs_rmdir_put;
 
 	error = -EBUSY;
-	if (!list_empty(&dentry->d_hash))
+	if (!d_unhashed(dentry))
 		goto hfs_rmdir_put;
 
-	if (/* we only have to worry about 2 and 3 for mount points */
-		(victim->sys_entry[2] &&
-		 (victim->sys_entry[2]->d_mounts !=
-		  victim->sys_entry[2]->d_covers)) ||
-		(victim->sys_entry[3] &&
-		 (victim->sys_entry[3]->d_mounts != 
-		  victim->sys_entry[3]->d_covers))
-		) 
+	/* we only have to worry about 2 and 3 for mount points */
+	if (victim->sys_entry[2] && d_mountpoint(victim->sys_entry[2]))
+		goto hfs_rmdir_put;
+	if (victim->sys_entry[3] && d_mountpoint(victim->sys_entry[3])) 
 		goto hfs_rmdir_put;
 
 	
@@ -345,7 +327,6 @@ int hfs_rmdir(struct inode * parent, struct dentry *dentry)
 	inode->i_nlink = 0;
 	inode->i_ctime = CURRENT_TIME;
 	mark_inode_dirty(inode);
-	d_delete(dentry);
 	update_dirs_minus(entry, 1);
 	 
 hfs_rmdir_put:

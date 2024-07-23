@@ -1,7 +1,6 @@
 #ifndef __ALPHA_TSUNAMI__H__
 #define __ALPHA_TSUNAMI__H__
 
-#include <linux/config.h>
 #include <linux/types.h>
 #include <asm/compiler.h>
 
@@ -15,17 +14,6 @@
  * Preliminary, Chapters 2-5
  *
  */
-
-#define TSUNAMI_DMA_WIN_BASE_DEFAULT    (1024*1024*1024U)
-#define TSUNAMI_DMA_WIN_SIZE_DEFAULT    (1024*1024*1024U)
-
-#if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_SRM_SETUP)
-#define TSUNAMI_DMA_WIN_BASE		alpha_mv.dma_win_base
-#define TSUNAMI_DMA_WIN_SIZE		alpha_mv.dma_win_size
-#else
-#define TSUNAMI_DMA_WIN_BASE		TSUNAMI_DMA_WIN_BASE_DEFAULT
-#define TSUNAMI_DMA_WIN_SIZE		TSUNAMI_DMA_WIN_SIZE_DEFAULT
-#endif
 
 /* XXX: Do we need to conditionalize on this?  */
 #ifdef USE_48_BIT_KSEG
@@ -64,6 +52,7 @@ typedef struct {
 	tsunami_64	mpr2;
 	tsunami_64	mpr3;
 	tsunami_64	mctl;
+	tsunami_64	__pad1;
 	tsunami_64	ttr;
 	tsunami_64	tdr;
 	tsunami_64	dim2;
@@ -142,7 +131,7 @@ union TPchipPERROR {
 		unsigned perror_v_rsvd2 : 1;
 		unsigned perror_v_cmd : 4;
 		unsigned perror_v_syn : 8;
-        } perror_r_bits;
+	} perror_r_bits;
 	int perror_q_whole [2];
 };                       
 
@@ -162,7 +151,7 @@ union TPchipWSBA {
 		unsigned wsba_v_rsvd1 : 17;
 		unsigned wsba_v_addr : 12;
 		unsigned wsba_v_rsvd2 : 32;
-        } wsba_r_bits;
+	} wsba_r_bits;
 	int wsba_q_whole [2];
 };
 
@@ -256,22 +245,35 @@ union TPchipPERRMASK {
 		unsigned perrmask_v_cre : 1;                 
 		unsigned perrmask_v_rsvd1 : 20;
 		unsigned perrmask_v_rsvd2 : 32;
-        } perrmask_r_bits;
+	} perrmask_r_bits;
 	int perrmask_q_whole [2];
 };                       
 
 /*
  * Memory spaces:
  */
-#define HOSE(h) (((unsigned long)(h)) << 33)
+#define TSUNAMI_HOSE(h)		(((unsigned long)(h)) << 33)
+#define TSUNAMI_BASE		(IDENT_ADDR + TS_BIAS)
 
-#define TSUNAMI_MEM(h)	     (IDENT_ADDR + TS_BIAS + 0x000000000UL + HOSE(h))
-#define _TSUNAMI_IACK_SC(h)  (IDENT_ADDR + TS_BIAS + 0x1F8000000UL + HOSE(h))
-#define TSUNAMI_IO(h)	     (IDENT_ADDR + TS_BIAS + 0x1FC000000UL + HOSE(h))
-#define TSUNAMI_CONF(h)	     (IDENT_ADDR + TS_BIAS + 0x1FE000000UL + HOSE(h))
+#define TSUNAMI_MEM(h)		(TSUNAMI_BASE+TSUNAMI_HOSE(h) + 0x000000000UL)
+#define _TSUNAMI_IACK_SC(h)	(TSUNAMI_BASE+TSUNAMI_HOSE(h) + 0x1F8000000UL)
+#define TSUNAMI_IO(h)		(TSUNAMI_BASE+TSUNAMI_HOSE(h) + 0x1FC000000UL)
+#define TSUNAMI_CONF(h)		(TSUNAMI_BASE+TSUNAMI_HOSE(h) + 0x1FE000000UL)
 
-#define TSUNAMI_IACK_SC	     _TSUNAMI_IACK_SC(0) /* hack! */
+#define TSUNAMI_IACK_SC		_TSUNAMI_IACK_SC(0) /* hack! */
 
+
+/* 
+ * The canonical non-remaped I/O and MEM addresses have these values
+ * subtracted out.  This is arranged so that folks manipulating ISA
+ * devices can use their familiar numbers and have them map to bus 0.
+ */
+
+#define TSUNAMI_IO_BIAS          TSUNAMI_IO(0)
+#define TSUNAMI_MEM_BIAS         TSUNAMI_MEM(0)
+
+/* The IO address space is larger than 0xffff */
+#define TSUNAMI_IO_SPACE	(TSUNAMI_CONF(0) - TSUNAMI_IO(0))
 
 /*
  * Data structure for handling TSUNAMI machine checks:
@@ -288,20 +290,6 @@ struct el_TSUNAMI_sysdata_mcheck {
 #endif
 
 /*
- * Translate physical memory address as seen on (PCI) bus into
- * a kernel virtual address and vv.
- */
-__EXTERN_INLINE unsigned long tsunami_virt_to_bus(void * address)
-{
-	return virt_to_phys(address) + TSUNAMI_DMA_WIN_BASE;
-}
-
-__EXTERN_INLINE void * tsunami_bus_to_virt(unsigned long address)
-{
-	return phys_to_virt(address - TSUNAMI_DMA_WIN_BASE);
-}
-
-/*
  * I/O functions:
  *
  * TSUNAMI, the 21??? PCI/memory support chipset for the EV6 (21264)
@@ -313,39 +301,47 @@ __EXTERN_INLINE void * tsunami_bus_to_virt(unsigned long address)
 #define vuip	volatile unsigned int *
 #define vulp	volatile unsigned long *
 
-#define XADDR	((addr) & 0xffffffffUL)
-#define XHOSE	(((addr) >> 32) & 3UL)
-
 __EXTERN_INLINE unsigned int tsunami_inb(unsigned long addr)
 {
-	return __kernel_ldbu(*(vucp)(XADDR + TSUNAMI_IO(XHOSE)));
+	/* ??? I wish I could get rid of this.  But there's no ioremap
+	   equivalent for I/O space.  PCI I/O can be forced into the
+	   correct hose's I/O region, but that doesn't take care of
+	   legacy ISA crap.  */
+
+	addr += TSUNAMI_IO_BIAS;
+	return __kernel_ldbu(*(vucp)addr);
 }
 
 __EXTERN_INLINE void tsunami_outb(unsigned char b, unsigned long addr)
 {
-	__kernel_stb(b, *(vucp)(XADDR + TSUNAMI_IO(XHOSE)));
+	addr += TSUNAMI_IO_BIAS;
+	__kernel_stb(b, *(vucp)addr);
 	mb();
 }
 
 __EXTERN_INLINE unsigned int tsunami_inw(unsigned long addr)
 {
-	return __kernel_ldwu(*(vusp)(XADDR + TSUNAMI_IO(XHOSE)));
+	addr += TSUNAMI_IO_BIAS;
+	return __kernel_ldwu(*(vusp)addr);
 }
 
 __EXTERN_INLINE void tsunami_outw(unsigned short b, unsigned long addr)
 {
-	__kernel_stw(b, *(vusp)(XADDR + TSUNAMI_IO(XHOSE)));
+	addr += TSUNAMI_IO_BIAS;
+	__kernel_stw(b, *(vusp)addr);
 	mb();
 }
 
 __EXTERN_INLINE unsigned int tsunami_inl(unsigned long addr)
 {
-	return *(vuip)(XADDR + TSUNAMI_IO(XHOSE));
+	addr += TSUNAMI_IO_BIAS;
+	return *(vuip)addr;
 }
 
 __EXTERN_INLINE void tsunami_outl(unsigned int b, unsigned long addr)
 {
-	*(vuip)(XADDR + TSUNAMI_IO(XHOSE)) = b;
+	addr += TSUNAMI_IO_BIAS;
+	*(vuip)addr = b;
 	mb();
 }
 
@@ -353,55 +349,54 @@ __EXTERN_INLINE void tsunami_outl(unsigned int b, unsigned long addr)
  * Memory functions.  all accesses are done through linear space.
  */
 
+__EXTERN_INLINE unsigned long tsunami_ioremap(unsigned long addr)
+{
+	return addr + TSUNAMI_MEM_BIAS;
+}
+
+__EXTERN_INLINE int tsunami_is_ioaddr(unsigned long addr)
+{
+	return addr >= TSUNAMI_BASE;
+}
+
 __EXTERN_INLINE unsigned long tsunami_readb(unsigned long addr)
 {
-	return __kernel_ldbu(*(vucp)(XADDR + TSUNAMI_MEM(XHOSE)));
+	return __kernel_ldbu(*(vucp)addr);
 }
 
 __EXTERN_INLINE unsigned long tsunami_readw(unsigned long addr)
 {
-	return __kernel_ldwu(*(vusp)(XADDR + TSUNAMI_MEM(XHOSE)));
+	return __kernel_ldwu(*(vusp)addr);
 }
 
 __EXTERN_INLINE unsigned long tsunami_readl(unsigned long addr)
 {
-	return *(vuip)(XADDR + TSUNAMI_MEM(XHOSE));
+	return *(vuip)addr;
 }
 
 __EXTERN_INLINE unsigned long tsunami_readq(unsigned long addr)
 {
-	return *(vulp)(XADDR + TSUNAMI_MEM(XHOSE));
+	return *(vulp)addr;
 }
 
 __EXTERN_INLINE void tsunami_writeb(unsigned char b, unsigned long addr)
 {
-	__kernel_stb(b, *(vucp)(XADDR + TSUNAMI_MEM(XHOSE)));
-	mb();
+	__kernel_stb(b, *(vucp)addr);
 }
 
 __EXTERN_INLINE void tsunami_writew(unsigned short b, unsigned long addr)
 {
-	__kernel_stw(b, *(vusp)(XADDR + TSUNAMI_MEM(XHOSE)));
-	mb();
+	__kernel_stw(b, *(vusp)addr);
 }
 
 __EXTERN_INLINE void tsunami_writel(unsigned int b, unsigned long addr)
 {
-	*(vuip)(XADDR + TSUNAMI_MEM(XHOSE)) = b;
-	mb();
+	*(vuip)addr = b;
 }
 
 __EXTERN_INLINE void tsunami_writeq(unsigned long b, unsigned long addr)
 {
-	*(vulp)(XADDR + TSUNAMI_MEM(XHOSE)) = b;
-	mb();
-}
-
-/* Find the DENSE memory area for a given bus address.  */
-
-__EXTERN_INLINE unsigned long tsunami_dense_mem(unsigned long addr)
-{
-	return TSUNAMI_MEM(XHOSE);
+	*(vulp)addr = b;
 }
 
 #undef vucp
@@ -409,47 +404,39 @@ __EXTERN_INLINE unsigned long tsunami_dense_mem(unsigned long addr)
 #undef vuip
 #undef vulp
 
-#undef XADDR
-#undef XHOSE
-
 #ifdef __WANT_IO_DEF
 
-#define virt_to_bus	tsunami_virt_to_bus
-#define bus_to_virt	tsunami_bus_to_virt
+#define __inb(p)		tsunami_inb((unsigned long)(p))
+#define __inw(p)		tsunami_inw((unsigned long)(p))
+#define __inl(p)		tsunami_inl((unsigned long)(p))
+#define __outb(x,p)		tsunami_outb((x),(unsigned long)(p))
+#define __outw(x,p)		tsunami_outw((x),(unsigned long)(p))
+#define __outl(x,p)		tsunami_outl((x),(unsigned long)(p))
+#define __readb(a)		tsunami_readb((unsigned long)(a))
+#define __readw(a)		tsunami_readw((unsigned long)(a))
+#define __readl(a)		tsunami_readl((unsigned long)(a))
+#define __readq(a)		tsunami_readq((unsigned long)(a))
+#define __writeb(x,a)		tsunami_writeb((x),(unsigned long)(a))
+#define __writew(x,a)		tsunami_writew((x),(unsigned long)(a))
+#define __writel(x,a)		tsunami_writel((x),(unsigned long)(a))
+#define __writeq(x,a)		tsunami_writeq((x),(unsigned long)(a))
+#define __ioremap(a)		tsunami_ioremap((unsigned long)(a))
+#define __is_ioaddr(a)		tsunami_is_ioaddr((unsigned long)(a))
 
-#define __inb		tsunami_inb
-#define __inw		tsunami_inw
-#define __inl		tsunami_inl
-#define __outb		tsunami_outb
-#define __outw		tsunami_outw
-#define __outl		tsunami_outl
-#define __readb		tsunami_readb
-#define __readw		tsunami_readw
-#define __writeb	tsunami_writeb
-#define __writew	tsunami_writew
-#define __readl		tsunami_readl
-#define __readq		tsunami_readq
-#define __writel	tsunami_writel
-#define __writeq	tsunami_writeq
-#define dense_mem	tsunami_dense_mem
-
-#define inb(port) __inb((port))
-#define inw(port) __inw((port))
-#define inl(port) __inl((port))
-
-#define outb(v, port) __outb((v),(port))
-#define outw(v, port) __outw((v),(port))
-#define outl(v, port) __outl((v),(port))
-
-#define readb(a)	__readb((unsigned long)(a))
-#define readw(a)	__readw((unsigned long)(a))
-#define readl(a)	__readl((unsigned long)(a))
-#define readq(a)	__readq((unsigned long)(a))
-
-#define writeb(v,a)	__writeb((v),(unsigned long)(a))
-#define writew(v,a)	__writew((v),(unsigned long)(a))
-#define writel(v,a)	__writel((v),(unsigned long)(a))
-#define writeq(v,a)	__writeq((v),(unsigned long)(a))
+#define inb(p)			__inb(p)
+#define inw(p)			__inw(p)
+#define inl(p)			__inl(p)
+#define outb(x,p)		__outb((x),(p))
+#define outw(x,p)		__outw((x),(p))
+#define outl(x,p)		__outl((x),(p))
+#define __raw_readb(a)		__readb(a)
+#define __raw_readw(a)		__readw(a)
+#define __raw_readl(a)		__readl(a)
+#define __raw_readq(a)		__readq(a)
+#define __raw_writeb(v,a)	__writeb((v),(a))
+#define __raw_writew(v,a)	__writew((v),(a))
+#define __raw_writel(v,a)	__writel((v),(a))
+#define __raw_writeq(v,a)	__writeq((v),(a))
 
 #endif /* __WANT_IO_DEF */
 

@@ -5,6 +5,7 @@
  * User space memory access functions
  */
 #include <linux/sched.h>
+#include <asm/errno.h>
 
 #define VERIFY_READ 0
 #define VERIFY_WRITE 1
@@ -30,41 +31,50 @@ struct exception_table_entry
 /* Returns 0 if exception not found and fixup otherwise.  */
 extern unsigned long search_exception_table(unsigned long);
 
+#define get_ds()	(KERNEL_DS)
+#define get_fs()	(current->addr_limit)
+#define segment_eq(a,b)	((a) == (b))
+
 #include <asm/proc/uaccess.h>
 
-extern inline int verify_area(int type, const void * addr, unsigned long size)
+#define access_ok(type,addr,size)	(__range_ok(addr,size) == 0)
+
+extern __inline__ int verify_area(int type, const void * addr, unsigned long size)
 {
-	return access_ok(type,addr,size) ? 0 : -EFAULT;
+	return access_ok(type, addr, size) ? 0 : -EFAULT;
 }
 
 /*
  * Single-value transfer routines.  They automatically use the right
- * size if we just have the right pointer type.
+ * size if we just have the right pointer type.  Note that the functions
+ * which read from user space (*get_*) need to take care not to leak
+ * kernel data even if the calling code is buggy and fails to check
+ * the return value.  This means zeroing out the destination variable
+ * or buffer on error.  Normally this is done out of line by the
+ * fixup code, but there are a few places where it intrudes on the
+ * main code path.  When we only write to user space, there is no
+ * problem.
  *
  * The "__xxx" versions of the user access functions do not verify the
  * address space - it must have been done previously with a separate
  * "access_ok()" call.
  *
- * The "xxx_ret" versions return constant specified in the third
- * argument if something bad happens.
+ * The "xxx_error" versions set the third argument to EFAULT if an
+ * error occurs, and leave it unchanged on success.  Note that these
+ * versions are void (ie, don't return a value as such).
  */
 #define get_user(x,p)		__get_user_check((x),(p),sizeof(*(p)))
 #define __get_user(x,p)		__get_user_nocheck((x),(p),sizeof(*(p)))
-#define get_user_ret(x,p,r)	({ if (get_user(x,p)) return r; })
-#define __get_user_ret(x,p,r)	({ if (__get_user(x,p)) return r; })
+#define __get_user_error(x,p,e)	__get_user_nocheck_error((x),(p),sizeof(*(p)),(e))
 
 #define put_user(x,p)		__put_user_check((__typeof(*(p)))(x),(p),sizeof(*(p)))
 #define __put_user(x,p)		__put_user_nocheck((__typeof(*(p)))(x),(p),sizeof(*(p)))
-#define put_user_ret(x,p,r)	({ if (put_user(x,p)) return r; })
-#define __put_user_ret(x,p,r)	({ if (__put_user(x,p)) return r; })
+#define __put_user_error(x,p,e)	__put_user_nocheck_error((x),(p),sizeof(*(p)),(e))
 
 static __inline__ unsigned long copy_from_user(void *to, const void *from, unsigned long n)
 {
-	char *end = (char *)to + n;
-	if (access_ok(VERIFY_READ, from, n)) {
+	if (access_ok(VERIFY_READ, from, n))
 		__do_copy_from_user(to, from, n);
-		if (n) memset(end - n, 0, n);
-	}
 	return n;
 }
 
@@ -73,9 +83,6 @@ static __inline__ unsigned long __copy_from_user(void *to, const void *from, uns
 	__do_copy_from_user(to, from, n);
 	return n;
 }
-
-#define copy_from_user_ret(t,f,n,r)					\
-	({ if (copy_from_user(t,f,n)) return r; })
 
 static __inline__ unsigned long copy_to_user(void *to, const void *from, unsigned long n)
 {
@@ -89,9 +96,6 @@ static __inline__ unsigned long __copy_to_user(void *to, const void *from, unsig
 	__do_copy_to_user(to, from, n);
 	return n;
 }
-
-#define copy_to_user_ret(t,f,n,r)					\
-	({ if (copy_to_user(t,f,n)) return r; })
 
 static __inline__ unsigned long clear_user (void *to, unsigned long n)
 {
@@ -121,12 +125,14 @@ static __inline__ long __strncpy_from_user (char *dst, const char *src, long cou
 	return res;
 }
 
-extern __inline__ long strlen_user (const char *s)
+#define strlen_user(s)	strnlen_user(s, ~0UL >> 1)
+
+extern __inline__ long strnlen_user(const char *s, long n)
 {
 	unsigned long res = 0;
 
 	if (__addr_ok(s))
-		__do_strlen_user (s, res);
+		__do_strnlen_user(s, n, res);
 
 	return res;
 }
@@ -138,26 +144,38 @@ extern __inline__ long strlen_user (const char *s)
 ({									\
 	long __gu_err = -EFAULT, __gu_val = 0;				\
 	const __typeof__(*(ptr)) *__gu_addr = (ptr);			\
-	if (access_ok(VERIFY_READ,__gu_addr,size))			\
+	if (access_ok(VERIFY_READ,__gu_addr,size)) {			\
+		__gu_err = 0;						\
 		__get_user_size(__gu_val,__gu_addr,(size),__gu_err);	\
+	}								\
 	(x) = (__typeof__(*(ptr)))__gu_val;				\
 	__gu_err;							\
 })
 
 #define __get_user_nocheck(x,ptr,size)					\
 ({									\
-	long __gu_err = 0, __gu_val = 0;				\
+	long __gu_err = 0, __gu_val;					\
 	__get_user_size(__gu_val,(ptr),(size),__gu_err);		\
 	(x) = (__typeof__(*(ptr)))__gu_val;				\
 	__gu_err;							\
+})
+
+#define __get_user_nocheck_error(x,ptr,size,err)			\
+({									\
+	long __gu_val;							\
+	__get_user_size(__gu_val,(ptr),(size),(err));			\
+	(x) = (__typeof__(*(ptr)))__gu_val;				\
+	(void) 0;							\
 })
 
 #define __put_user_check(x,ptr,size)					\
 ({									\
 	long __pu_err = -EFAULT;					\
 	__typeof__(*(ptr)) *__pu_addr = (ptr);				\
-	if (access_ok(VERIFY_WRITE,__pu_addr,size))			\
+	if (access_ok(VERIFY_WRITE,__pu_addr,size)) {			\
+		__pu_err = 0;						\
 		__put_user_size((x),__pu_addr,(size),__pu_err);		\
+	}								\
 	__pu_err;							\
 })
 
@@ -168,11 +186,16 @@ extern __inline__ long strlen_user (const char *s)
 	__pu_err;							\
 })
 
+#define __put_user_nocheck_error(x,ptr,size,err)			\
+({									\
+	__put_user_size((x),(ptr),(size),err);				\
+	(void) 0;							\
+})
+
 extern long __get_user_bad(void);
 
 #define __get_user_size(x,ptr,size,retval)				\
 do {									\
-	retval = 0;							\
 	switch (size) {							\
 	case 1:	__get_user_asm_byte(x,ptr,retval);	break;		\
 	case 2:	__get_user_asm_half(x,ptr,retval);	break;		\
@@ -185,7 +208,6 @@ extern long __put_user_bad(void);
 
 #define __put_user_size(x,ptr,size,retval)				\
 do {									\
-	retval = 0;							\
 	switch (size) {							\
 	case 1: __put_user_asm_byte(x,ptr,retval);	break;		\
 	case 2: __put_user_asm_half(x,ptr,retval);	break;		\

@@ -1,4 +1,4 @@
-/* $Id: $
+/* $Id: tc.c,v 1.3 1999/10/09 00:01:32 ralf Exp $
  * tc-init: We assume the TURBOchannel to be up and running so
  * just probe for Modules and fill in the global data structure
  * tc_bus.
@@ -12,7 +12,8 @@
  */
 
 #include <linux/string.h>
-#include <asm/init.h>
+#include <linux/init.h>
+#include <linux/ioport.h>
 #include <asm/addrspace.h>
 #include <asm/errno.h>
 #include <asm/dec/machtype.h>
@@ -92,12 +93,12 @@ unsigned long get_tc_speed(void)
 /*
  * Probing for TURBOchannel modules
  */
-__initfunc(static void my_dbe_handler(struct pt_regs *regs))
+static void __init my_dbe_handler(struct pt_regs *regs)
 {
 	regs->cp0_epc += 4;
 }
 
-__initfunc(static void tc_probe(unsigned long startaddr, unsigned long size, int max_slot))
+static void __init tc_probe(unsigned long startaddr, unsigned long size, int max_slot)
 {
 	int i, slot;
 	long offset;
@@ -164,7 +165,7 @@ __initfunc(static void tc_probe(unsigned long startaddr, unsigned long size, int
 /*
  * the main entry
  */
-__initfunc(void tc_init(void))
+void __init tc_init(void)
 {
 	int tc_clock;
 	int i;
@@ -231,6 +232,6 @@ __initfunc(void tc_init(void))
 					tc_bus[i].name, tc_bus[i].firmware);
 			}
 #endif
+		ioport_resource.end = KSEG2 - 1;
 	}
-
 }

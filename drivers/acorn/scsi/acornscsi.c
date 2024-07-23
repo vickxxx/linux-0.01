@@ -1,8 +1,12 @@
 /*
- * linux/arch/arm/drivers/scsi/acornscsi.c
+ *  linux/drivers/acorn/scsi/acornscsi.c
  *
  *  Acorn SCSI 3 driver
  *  By R.M.King.
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
  * Abandoned using the Select and Transfer command since there were
  * some nasty races between our software and the target devices that
@@ -189,10 +193,6 @@
 
 unsigned int sdtr_period = SDTR_PERIOD;
 unsigned int sdtr_size   = SDTR_SIZE;
-
-static struct proc_dir_entry proc_scsi_acornscsi = {
-	PROC_SCSI_EATA, 9, "acornscsi", S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 static void acornscsi_done(AS_Host *host, Scsi_Cmnd **SCpntp, unsigned int result);
 static int acornscsi_reconnect_finish(AS_Host *host);
@@ -2625,7 +2625,7 @@ acornscsi_do_abort(AS_Host *host, Scsi_Cmnd *SCpnt)
 {
 	enum res_abort res = res_not_running;
 
-	if (queue_removecmd(&host->queues.issue, SCpnt)) {
+	if (queue_remove_cmd(&host->queues.issue, SCpnt)) {
 		/*
 		 * The command was on the issue queue, and has not been
 		 * issued yet.  We can remove the command from the queue,
@@ -2636,7 +2636,7 @@ acornscsi_do_abort(AS_Host *host, Scsi_Cmnd *SCpnt)
 		printk("on issue queue ");
 //#endif
 		res = res_success;
-	} else if (queue_removecmd(&host->queues.disconnected, SCpnt)) {
+	} else if (queue_remove_cmd(&host->queues.disconnected, SCpnt)) {
 		/*
 		 * The command was on the disconnected queue.  Simply
 		 * acknowledge the abort condition, and when the target
@@ -2875,7 +2875,7 @@ int acornscsi_detect(Scsi_Host_Template * tpnt)
     struct Scsi_Host *instance;
     AS_Host *host;
 
-    tpnt->proc_dir = &proc_scsi_acornscsi;
+    tpnt->proc_name = "acornscsi";
 
     for (i = 0; i < MAX_ECARDS; i++)
 	ecs[i] = NULL;
@@ -2982,7 +2982,7 @@ char *acornscsi_info(struct Scsi_Host *host)
 
     p = string;
     
-    p += sprintf(string, "%s at port %X irq %d v%d.%d.%d"
+    p += sprintf(string, "%s at port %08lX irq %d v%d.%d.%d"
 #ifdef CONFIG_SCSI_ACORNSCSI_SYNC
     " SYNC"
 #endif

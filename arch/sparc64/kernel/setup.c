@@ -1,4 +1,4 @@
-/*  $Id: setup.c,v 1.44 1999/05/28 02:17:29 davem Exp $
+/*  $Id: setup.c,v 1.58 2001/01/01 01:46:15 davem Exp $
  *  linux/arch/sparc64/kernel/setup.c
  *
  *  Copyright (C) 1995,1996  David S. Miller (davem@caip.rutgers.edu)
@@ -37,6 +37,7 @@
 #include <asm/pgtable.h>
 #include <asm/idprom.h>
 #include <asm/head.h>
+#include <asm/starfire.h>
 
 #ifdef CONFIG_IP_PNP
 #include <net/ipconfig.h>
@@ -74,17 +75,10 @@ prom_console_write(struct console *con, const char *s, unsigned n)
 }
 
 static struct console prom_console = {
-	"prom",
-	prom_console_write,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	CON_CONSDEV | CON_ENABLED,
-	-1,
-	0,
-	NULL
+	name:		"prom",
+	write:		prom_console_write,
+	flags:		CON_CONSDEV | CON_ENABLED,
+	index:		-1,
 };
 
 #define PROM_TRUE	-1
@@ -135,17 +129,21 @@ int prom_callback(long *args)
 			 * Find process owning ctx, lookup mapping.
 			 */
 			struct task_struct *p;
+			struct mm_struct *mm = NULL;
 			pgd_t *pgdp;
 			pmd_t *pmdp;
 			pte_t *ptep;
 
-			for_each_task(p)
-				if (p->tss.ctx == ctx)
+			for_each_task(p) {
+				mm = p->mm;
+				if (CTX_HWBITS(mm->context) == ctx)
 					break;
-			if (p->tss.ctx != ctx)
+			}
+			if (!mm ||
+			    CTX_HWBITS(mm->context) != ctx)
 				goto done;
 
-			pgdp = pgd_offset(p->mm, va);
+			pgdp = pgd_offset(mm, va);
 			if (pgd_none(*pgdp))
 				goto done;
 			pmdp = pmd_offset(pgdp, va);
@@ -160,9 +158,17 @@ int prom_callback(long *args)
 		}
 
 		if ((va >= KERNBASE) && (va < (KERNBASE + (4 * 1024 * 1024)))) {
+			/* Spitfire Errata #32 workaround */
+			__asm__ __volatile__("stxa	%0, [%1] %2\n\t"
+					     "flush	%%g6"
+					     : /* No outputs */
+					     : "r" (0),
+					     "r" (PRIMARY_CONTEXT), "i" (ASI_DMMU));
+
 			/*
 			 * Locked down tlb entry 63.
 			 */
+
 			tte = spitfire_get_dtlb_data(63);
 			res = PROM_TRUE;
 			goto done;
@@ -275,21 +281,16 @@ unsigned int boot_flags = 0;
 #ifdef CONFIG_SUN_CONSOLE
 static int console_fb __initdata = 0;
 #endif
-static unsigned long memory_size = 0;
+
+/* Exported for mm/init.c:paging_init. */
+unsigned long cmdline_memory_size = 0;
 
 #ifdef PROM_DEBUG_CONSOLE
 static struct console prom_debug_console = {
-	"debug",
-	prom_console_write,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"debug",
+	write:		prom_console_write,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 #endif
 
@@ -312,7 +313,7 @@ int obp_system_intr(void)
  * Process kernel command line switches that are specific to the
  * SPARC or that require special low-level processing.
  */
-__initfunc(static void process_switch(char c))
+static void __init process_switch(char c)
 {
 	switch (c) {
 	case 'd':
@@ -331,7 +332,7 @@ __initfunc(static void process_switch(char c))
 	}
 }
 
-__initfunc(static void boot_flags_init(char *commands))
+static void __init boot_flags_init(char *commands)
 {
 	while (*commands) {
 		/* Move to the start of the next "argument". */
@@ -394,13 +395,13 @@ __initfunc(static void boot_flags_init(char *commands))
 				 * "mem=XXX[kKmM]" overrides the PROM-reported
 				 * memory size.
 				 */
-				memory_size = simple_strtoul(commands + 4,
-							     &commands, 0);
+				cmdline_memory_size = simple_strtoul(commands + 4,
+								     &commands, 0);
 				if (*commands == 'K' || *commands == 'k') {
-					memory_size <<= 10;
+					cmdline_memory_size <<= 10;
 					commands++;
 				} else if (*commands=='M' || *commands=='m') {
-					memory_size <<= 20;
+					cmdline_memory_size <<= 20;
 					commands++;
 				}
 			}
@@ -417,8 +418,6 @@ extern void panic_setup(char *, int *);
 extern unsigned short root_flags;
 extern unsigned short root_dev;
 extern unsigned short ram_flags;
-extern unsigned int sparc_ramdisk_image;
-extern unsigned int sparc_ramdisk_size;
 #define RAMDISK_IMAGE_START_MASK	0x07FF
 #define RAMDISK_PROMPT_FLAG		0x8000
 #define RAMDISK_LOAD_FLAG		0x4000
@@ -432,14 +431,24 @@ extern unsigned long phys_base;
 
 static struct pt_regs fake_swapper_regs = { { 0, }, 0, 0, 0, 0 };
 
-extern struct consw sun_serial_con;
+void register_prom_callbacks(void)
+{
+	prom_setcallback(prom_callback);
+	prom_feval(": linux-va>tte-data 2 \" va>tte-data\" $callback drop ; "
+		   "' linux-va>tte-data to va>tte-data");
+	prom_feval(": linux-.soft1 1 \" .soft1\" $callback 2drop ; "
+		   "' linux-.soft1 to .soft1");
+	prom_feval(": linux-.soft2 1 \" .soft2\" $callback 2drop ; "
+		   "' linux-.soft2 to .soft2");
+}
 
-__initfunc(void setup_arch(char **cmdline_p,
-	unsigned long * memory_start_p, unsigned long * memory_end_p))
+extern void paging_init(void);
+
+void __init setup_arch(char **cmdline_p)
 {
 	extern int serial_console;  /* in console.c, of course */
-	unsigned long lowest_paddr, end_of_phys_memory = 0;
-	int total, i;
+	unsigned long highest_paddr;
+	int i;
 
 	/* Initialize PROM console and command line. */
 	*cmdline_p = prom_getbootargs();
@@ -457,47 +466,29 @@ __initfunc(void setup_arch(char **cmdline_p,
 	conswitchp = &prom_con;
 #endif
 
+	/* Work out if we are starfire early on */
+	check_if_starfire();
+
 	boot_flags_init(*cmdline_p);
 
 	idprom_init();
-	total = prom_probe_memory();
-
-	lowest_paddr = 0xffffffffffffffffUL;
-	for(i=0; sp_banks[i].num_bytes != 0; i++) {
-		if(sp_banks[i].base_addr < lowest_paddr)
-			lowest_paddr = sp_banks[i].base_addr;
-		end_of_phys_memory = sp_banks[i].base_addr +
-			sp_banks[i].num_bytes;
-		if (memory_size) {
-			if (end_of_phys_memory > memory_size) {
-				sp_banks[i].num_bytes -=
-					(end_of_phys_memory - memory_size);
-				end_of_phys_memory = memory_size;
-				sp_banks[++i].base_addr = 0xdeadbeef;
-				sp_banks[i].num_bytes = 0;
-			}
-		}
-	}
-	prom_setcallback(prom_callback);
-	prom_feval(": linux-va>tte-data 2 \" va>tte-data\" $callback drop ; "
-		   "' linux-va>tte-data to va>tte-data");
-	prom_feval(": linux-.soft1 1 \" .soft1\" $callback 2drop ; "
-		   "' linux-.soft1 to .soft1");
-	prom_feval(": linux-.soft2 1 \" .soft2\" $callback 2drop ; "
-		   "' linux-.soft2 to .soft2");
+	(void) prom_probe_memory();
 
 	/* In paging_init() we tip off this value to see if we need
 	 * to change init_mm.pgd to point to the real alias mapping.
 	 */
-	phys_base = lowest_paddr;
+	phys_base = 0xffffffffffffffffUL;
+	highest_paddr = 0UL;
+	for (i = 0; sp_banks[i].num_bytes != 0; i++) {
+		unsigned long top;
 
-	*memory_start_p = PAGE_ALIGN(((unsigned long) &end));
-	*memory_end_p = (end_of_phys_memory + PAGE_OFFSET);
-
-#ifdef DAVEM_DEBUGGING
-	prom_printf("phys_base[%016lx] memory_start[%016lx] memory_end[%016lx]\n",
-		    phys_base, *memory_start_p, *memory_end_p);
-#endif
+		if (sp_banks[i].base_addr < phys_base)
+			phys_base = sp_banks[i].base_addr;
+		top = sp_banks[i].base_addr +
+			sp_banks[i].num_bytes;
+		if (highest_paddr < top)
+			highest_paddr = top;
+	}
 
 	if (!root_flags)
 		root_mountflags &= ~MS_RDONLY;
@@ -507,35 +498,12 @@ __initfunc(void setup_arch(char **cmdline_p,
 	rd_prompt = ((ram_flags & RAMDISK_PROMPT_FLAG) != 0);
 	rd_doload = ((ram_flags & RAMDISK_LOAD_FLAG) != 0);	
 #endif
-#ifdef CONFIG_BLK_DEV_INITRD
-	if (sparc_ramdisk_image) {
-		unsigned long start = 0;
-		
-		if (sparc_ramdisk_image >= (unsigned long)&end - 2 * PAGE_SIZE)
-			sparc_ramdisk_image -= KERNBASE;
-		initrd_start = sparc_ramdisk_image + phys_base + PAGE_OFFSET;
-		initrd_end = initrd_start + sparc_ramdisk_size;
-		if (initrd_end > *memory_end_p) {
-			printk(KERN_CRIT "initrd extends beyond end of memory "
-		                 	 "(0x%016lx > 0x%016lx)\ndisabling initrd\n",
-		       			 initrd_end,*memory_end_p);
-			initrd_start = 0;
-		}
-		if (initrd_start)
-			start = sparc_ramdisk_image + KERNBASE;
-		if (start >= *memory_start_p && start < *memory_start_p + 2 * PAGE_SIZE) {
-			initrd_below_start_ok = 1;
-			*memory_start_p = PAGE_ALIGN (start + sparc_ramdisk_size);
-		}
-	}
-#endif	
 
 	/* Due to stack alignment restrictions and assumptions... */
-	init_task.mm->mmap->vm_page_prot = PAGE_SHARED;
-	init_task.mm->mmap->vm_start = PAGE_OFFSET;
-	init_task.mm->mmap->vm_end = *memory_end_p;
-	init_task.mm->context = (unsigned long) NO_CONTEXT;
-	init_task.tss.kregs = &fake_swapper_regs;
+	init_mm.mmap->vm_page_prot = PAGE_SHARED;
+	init_mm.mmap->vm_start = PAGE_OFFSET;
+	init_mm.mmap->vm_end = PAGE_OFFSET + highest_paddr;
+	init_task.thread.kregs = &fake_swapper_regs;
 
 #ifdef CONFIG_IP_PNP
 	if (!ic_set_manually) {
@@ -592,6 +560,8 @@ __initfunc(void setup_arch(char **cmdline_p,
 #endif
 	if (serial_console)
 		conswitchp = NULL;
+
+	paging_init();
 }
 
 asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int on)
@@ -621,7 +591,7 @@ int get_cpuinfo(char *buffer)
             "type\t\t: sun4u\n"
 	    "ncpus probed\t: %d\n"
 	    "ncpus active\t: %d\n"
-#ifndef __SMP__
+#ifndef CONFIG_SMP
             "BogoMips\t: %lu.%02lu\n"
 #endif
 	    ,
@@ -629,16 +599,23 @@ int get_cpuinfo(char *buffer)
             sparc_fpu_type[cpuid],
             prom_rev, prom_prev >> 16, (prom_prev >> 8) & 0xff, prom_prev & 0xff,
 	    linux_num_cpus, smp_num_cpus
-#ifndef __SMP__
-            , loops_per_sec/500000, (loops_per_sec/5000) % 100
+#ifndef CONFIG_SMP
+            , loops_per_jiffy/(500000/HZ), (loops_per_jiffy/(5000/HZ)) % 100
 #endif
 	    );
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	len += smp_bogo(buffer + len);
 #endif
 	len += mmu_info(buffer + len);
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	len += smp_info(buffer + len);
+#endif
+#undef ZS_LOG
+#ifdef ZS_LOG
+	{
+		extern int zs_dumplog(char *);
+		len += zs_dumplog(buffer + len);
+	}
 #endif
 	return len;
 }

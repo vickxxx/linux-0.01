@@ -1,4 +1,4 @@
-/* $Id: checksum.h,v 1.29 1999/03/21 05:22:07 davem Exp $ */
+/* $Id: checksum.h,v 1.31 2000/01/31 01:26:52 davem Exp $ */
 #ifndef __SPARC_CHECKSUM_H
 #define __SPARC_CHECKSUM_H
 
@@ -30,7 +30,7 @@
  *
  * it's best to have buff aligned on a 32-bit boundary
  */
-extern unsigned int csum_partial(unsigned char * buff, int len, unsigned int sum);
+extern unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum);
 
 /* the same as csum_partial, but copies from fs:src while it
  * checksums
@@ -210,7 +210,7 @@ static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
 
 static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 						     struct in6_addr *daddr,
-						     __u16 len,
+						     __u32 len,
 						     unsigned short proto,
 						     unsigned int sum) 
 {
@@ -237,7 +237,7 @@ static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 		"
 		: "=&r" (sum)
 		: "r" (saddr), "r" (daddr), 
-		  "r"(htonl((__u32) (len))), "r"(htonl(proto)), "r"(sum)
+		  "r"(htonl(len)), "r"(htonl(proto)), "r"(sum)
 		: "g2", "g3", "g4", "cc");
 
 	return csum_fold(sum);

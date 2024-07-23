@@ -7,17 +7,9 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
-MOD_LIST_NAME := NET_MISC_MODULES
+O_TARGET := econet.o
 
-O_OBJS :=
-M_OBJS :=
-
-ifeq ($(CONFIG_ECONET),y)
-  O_OBJS += econet.o
-else
-  ifeq ($(CONFIG_ECONET), m)
-    M_OBJS += econet.o
-  endif
-endif
+obj-y := af_econet.o sysctl_net_ec.o
+obj-m := $(O_TARGET)
 
 include $(TOPDIR)/Rules.make

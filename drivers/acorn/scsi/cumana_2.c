@@ -1,17 +1,21 @@
 /*
- * linux/arch/arm/drivers/scsi/cumana_2.c
+ *  linux/drivers/acorn/scsi/cumana_2.c
  *
- * Copyright (C) 1997-1998 Russell King
+ *  Copyright (C) 1997-2000 Russell King
  *
- * Changelog:
- *  30-08-1997	RMK	0.0.0	Created, READONLY version.
- *  22-01-1998	RMK	0.0.1	Updated to 2.1.80.
- *  15-04-1998	RMK	0.0.1	Only do PIO if FAS216 will allow it.
- *  02-05-1998	RMK	0.0.2	Updated & added DMA support.
- *  27-06-1998	RMK		Changed asm/delay.h to linux/delay.h
- *  18-08-1998	RMK	0.0.3	Fixed synchronous transfer depth.
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Changelog:
+ *   30-08-1997	RMK	0.0.0	Created, READONLY version.
+ *   22-01-1998	RMK	0.0.1	Updated to 2.1.80.
+ *   15-04-1998	RMK	0.0.1	Only do PIO if FAS216 will allow it.
+ *   02-05-1998	RMK	0.0.2	Updated & added DMA support.
+ *   27-06-1998	RMK		Changed asm/delay.h to linux/delay.h
+ *   18-08-1998	RMK	0.0.3	Fixed synchronous transfer depth.
+ *   02-04-2000	RMK	0.0.4	Updated for new error handling code.
  */
-
 #include <linux/module.h>
 #include <linux/blk.h>
 #include <linux/kernel.h>
@@ -22,6 +26,7 @@
 #include <linux/unistd.h>
 #include <linux/stat.h>
 #include <linux/delay.h>
+#include <linux/pci.h>
 
 #include <asm/dma.h>
 #include <asm/ecard.h>
@@ -70,7 +75,7 @@
  */
 #define VER_MAJOR	0
 #define VER_MINOR	0
-#define VER_PATCH	3
+#define VER_PATCH	4
 
 static struct expansion_card *ecs[MAX_ECARDS];
 
@@ -83,11 +88,6 @@ MODULE_PARM_DESC(term, "SCSI bus termination");
  * Use term=0,1,0,0,0 to turn terminators on/off
  */
 int term[MAX_ECARDS] = { 1, 1, 1, 1, 1, 1, 1, 1 };
-
-static struct proc_dir_entry proc_scsi_cumanascsi_2 = {
-	PROC_SCSI_QLOGICFAS, 6, "cumanascs2",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 /* Prototype: void cumanascsi_2_irqenable(ec, irqnr)
  * Purpose  : Enable interrupts on Cumana SCSI 2 card
@@ -155,15 +155,6 @@ cumanascsi_2_intr(int irq, void *dev_id, struct pt_regs *regs)
 	fas216_intr(host);
 }
 
-static void
-cumanascsi_2_invalidate(char *addr, long len, fasdmadir_t direction)
-{
-	if (direction == DMA_OUT)
-		dma_cache_wback((unsigned long)addr, (unsigned long)len);
-	else
-		dma_cache_inv((unsigned long)addr, (unsigned long)len);
-}
-
 /* Prototype: fasdmatype_t cumanascsi_2_dma_setup(host, SCpnt, direction, min_type)
  * Purpose  : initialises DMA/PIO
  * Params   : host      - host
@@ -183,33 +174,30 @@ cumanascsi_2_dma_setup(struct Scsi_Host *host, Scsi_Pointer *SCp,
 
 	if (dmach != NO_DMA &&
 	    (min_type == fasdma_real_all || SCp->this_residual >= 512)) {
-		int buf;
+		int bufs = SCp->buffers_residual;
+		int pci_dir, dma_dir, alatch_dir;
 
-		for (buf = 1; buf <= SCp->buffers_residual &&
-			      buf < NR_SG; buf++) {
-			info->dmasg[buf].address = __virt_to_bus(
-				(unsigned long)SCp->buffer[buf].address);
-			info->dmasg[buf].length = SCp->buffer[buf].length;
+		if (bufs)
+			memcpy(info->sg + 1, SCp->buffer + 1,
+				sizeof(struct scatterlist) * bufs);
+		info->sg[0].address = SCp->ptr;
+		info->sg[0].length  = SCp->this_residual;
 
-			cumanascsi_2_invalidate(SCp->buffer[buf].address,
-						SCp->buffer[buf].length,
-						direction);
-		}
+		if (direction == DMA_OUT)
+			pci_dir = PCI_DMA_TODEVICE,
+			dma_dir = DMA_MODE_WRITE,
+			alatch_dir = ALATCH_DMA_OUT;
+		else
+			pci_dir = PCI_DMA_FROMDEVICE,
+			dma_dir = DMA_MODE_READ,
+			alatch_dir = ALATCH_DMA_IN;
 
-		info->dmasg[0].address = __virt_to_phys((unsigned long)SCp->ptr);
-		info->dmasg[0].length = SCp->this_residual;
-		cumanascsi_2_invalidate(SCp->ptr,
-					SCp->this_residual, direction);
+		pci_map_sg(NULL, info->sg, bufs + 1, pci_dir);
 
 		disable_dma(dmach);
-		set_dma_sg(dmach, info->dmasg, buf);
-		if (direction == DMA_OUT) {
-			outb(ALATCH_DMA_OUT, info->alatch);
-			set_dma_mode(dmach, DMA_MODE_WRITE);
-		} else {
-			outb(ALATCH_DMA_IN, info->alatch);
-			set_dma_mode(dmach, DMA_MODE_READ);
-		}
+		set_dma_sg(dmach, info->sg, bufs + 1);
+		outb(alatch_dir, info->alatch);
+		set_dma_mode(dmach, dma_dir);
 		enable_dma(dmach);
 		outb(ALATCH_ENA_DMA, info->alatch);
 		outb(ALATCH_DIS_BIT32, info->alatch);
@@ -329,7 +317,7 @@ cumanascsi_2_detect(Scsi_Host_Template *tpnt)
 	int count = 0;
 	struct Scsi_Host *host;
   
-	tpnt->proc_dir = &proc_scsi_cumanascsi_2;
+	tpnt->proc_name = "cumanascs2";
 	memset(ecs, 0, sizeof (ecs));
 
 	ecard_startfind();
@@ -438,25 +426,11 @@ const char *cumanascsi_2_info(struct Scsi_Host *host)
 	static char string[100], *p;
 
 	p = string;
-	p += sprintf(string, "%s at port %lX ",
-		     host->hostt->name, host->io_port);
-
-	if (host->irq != NO_IRQ)
-		p += sprintf(p, "irq %d ", host->irq);
-	else
-		p += sprintf(p, "NO IRQ ");
-
-	if (host->dma_channel != NO_DMA)
-		p += sprintf(p, "dma %d ", host->dma_channel);
-	else
-		p += sprintf(p, "NO DMA ");
-
-	p += sprintf(p, "v%d.%d.%d scsi %s",
+	p += sprintf(p, "%s ", host->hostt->name);
+	p += fas216_info(&info->info, p);
+	p += sprintf(p, "v%d.%d.%d terminators o%s",
 		     VER_MAJOR, VER_MINOR, VER_PATCH,
-		     info->info.scsi.type);
-
-	p += sprintf(p, " terminators %s",
-		     info->terms ? "on" : "off");
+		     info->terms ? "n" : "ff");
 
 	return string;
 }
@@ -530,26 +504,14 @@ int cumanascsi_2_proc_info (char *buffer, char **start, off_t offset,
 	pos = sprintf(buffer,
 			"Cumana SCSI II driver version %d.%d.%d\n",
 			VER_MAJOR, VER_MINOR, VER_PATCH);
-	pos += sprintf(buffer + pos,
-			"Address: %08lX    IRQ : %d     DMA : %d\n"
-			"FAS    : %-10s  TERM: %-3s\n\n"
-			"Statistics:\n",
-			host->io_port, host->irq, host->dma_channel,
-			info->info.scsi.type, info->terms ? "on" : "off");
 
-	pos += sprintf(buffer+pos,
-			"Queued commands: %-10u   Issued commands: %-10u\n"
-			"Done commands  : %-10u   Reads          : %-10u\n"
-			"Writes         : %-10u   Others         : %-10u\n"
-			"Disconnects    : %-10u   Aborts         : %-10u\n"
-			"Resets         : %-10u\n",
-			info->info.stats.queues,      info->info.stats.removes,
-			info->info.stats.fins,        info->info.stats.reads,
-			info->info.stats.writes,      info->info.stats.miscs,
-			info->info.stats.disconnects, info->info.stats.aborts,
-			info->info.stats.resets);
+	pos += fas216_print_host(&info->info, buffer + pos);
+	pos += sprintf(buffer + pos, "Term    : o%s\n",
+			info->terms ? "n" : "ff");
 
-	pos += sprintf(buffer+pos, "\nAttached devices:%s\n", host->host_queue ? "" : " none");
+	pos += fas216_print_stats(&info->info, buffer + pos);
+
+	pos += sprintf(buffer+pos, "\nAttached devices:\n");
 
 	for (scd = host->host_queue; scd; scd = scd->next) {
 		int len;

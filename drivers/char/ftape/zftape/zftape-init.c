@@ -35,14 +35,11 @@
 #endif
 #include <linux/fcntl.h>
 #include <linux/wrapper.h>
+#include <linux/smp_lock.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <linux/zftape.h>
-#if LINUX_VERSION_CODE >=KERNEL_VER(2,1,16)
 #include <linux/init.h>
-#else
-#define __initdata
-#define __initfunc(__arg) __arg
-#endif
 
 #include "../zftape/zftape-init.h"
 #include "../zftape/zftape-read.h"
@@ -55,7 +52,6 @@ char zft_src[] __initdata = "$Source: /homes/cvs/ftape-stacked/ftape/zftape/zfta
 char zft_rev[] __initdata = "$Revision: 1.8 $";
 char zft_dat[] __initdata = "$Date: 1997/11/06 00:48:56 $";
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
 MODULE_AUTHOR("(c) 1996, 1997 Claus-Justus Heine "
 	      "(claus@momo.math.rwth-aachen.de)");
 MODULE_DESCRIPTION(ZFTAPE_VERSION " - "
@@ -63,7 +59,6 @@ MODULE_DESCRIPTION(ZFTAPE_VERSION " - "
 		   "Support for QIC-113 compatible volume table "
 		   "and builtin compression (lzrw3 algorithm)");
 MODULE_SUPPORTED_DEVICE("char-major-27");
-#endif
 
 /*      Global vars.
  */
@@ -89,54 +84,24 @@ static sigset_t orig_sigmask;
  */
 
 static int  zft_open (struct inode *ino, struct file *filep);
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,31)
 static int zft_close(struct inode *ino, struct file *filep);
-#else
-static void zft_close(struct inode *ino, struct file *filep);
-#endif
 static int  zft_ioctl(struct inode *ino, struct file *filep,
 		      unsigned int command, unsigned long arg);
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,56)
 static int  zft_mmap(struct file *filep, struct vm_area_struct *vma);
-#else
-static int  zft_mmap(struct inode *ino, struct file *filep,
-		     struct vm_area_struct *vma);
-#endif
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,60)
 static ssize_t zft_read (struct file *fp, char *buff,
 			 size_t req_len, loff_t *ppos);
 static ssize_t zft_write(struct file *fp, const char *buff,
 			 size_t req_len, loff_t *ppos);
-#elif LINUX_VERSION_CODE >= KERNEL_VER(2,1,0)
-static long zft_read (struct inode *ino, struct file *fp, char *buff,
-		      unsigned long req_len);
-static long zft_write(struct inode *ino, struct file *fp, const char *buff,
-		      unsigned long req_len);
-#else
-static int  zft_read (struct inode *ino, struct file *fp, char *buff,
-		      int req_len); 
-#if LINUX_VERSION_CODE >= KERNEL_VER(1,3,0)
-static int  zft_write(struct inode *ino, struct file *fp, const char *buff,
-		      int req_len);
-#else
-static int  zft_write(struct inode *ino, struct file *fp, char *buff,
-		      int req_len);
-#endif
-#endif
 
 static struct file_operations zft_cdev =
 {
-	NULL,			/* llseek */
-	zft_read,		/* read */
-	zft_write,		/* write */
-	NULL,			/* readdir */
-	NULL,		       	/* select */
-	zft_ioctl,		/* ioctl */
-	zft_mmap,		/* mmap */
-	zft_open,		/* open */
-	NULL,			/* flush */
-	zft_close,		/* release */
-	NULL,			/* fsync */
+	owner:		THIS_MODULE,
+	read:		zft_read,
+	write:		zft_write,
+	ioctl:		zft_ioctl,
+	mmap:		zft_mmap,
+	open:		zft_open,
+	release:	zft_close,
 };
 
 /*      Open floppy tape device
@@ -146,15 +111,6 @@ static int zft_open(struct inode *ino, struct file *filep)
 	int result;
 	TRACE_FUN(ft_t_flow);
 
-#if LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
-	if (!MOD_IN_USE) {
-		MOD_INC_USE_COUNT; /* lock module in memory */
-	}
-#else
-	MOD_INC_USE_COUNT; /*  sets MOD_VISITED and MOD_USED_ONCE,
-			    *  locking is done with can_unload()
-			    */
-#endif
 	TRACE(ft_t_flow, "called for minor %d", MINOR(ino->i_rdev));
 	if (busy_flag) {
 		TRACE_ABORT(-EBUSY, ft_t_warn, "failed: already busy");
@@ -164,11 +120,6 @@ static int zft_open(struct inode *ino, struct file *filep)
 	     > 
 	    FTAPE_SEL_D) {
 		busy_flag = 0;
-#if defined(MODULE) && LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
-		if (!zft_dirty()) {
-			MOD_DEC_USE_COUNT; /* unlock module in memory */
-		}
-#endif
 		TRACE_ABORT(-ENXIO, ft_t_err, "failed: illegal unit nr");
 	}
 	orig_sigmask = current->blocked;
@@ -177,11 +128,6 @@ static int zft_open(struct inode *ino, struct file *filep)
 	if (result < 0) {
 		current->blocked = orig_sigmask; /* restore mask */
 		busy_flag = 0;
-#if defined(MODULE) && LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
-		if (!zft_dirty()) {
-			MOD_DEC_USE_COUNT; /* unlock module in memory */
-		}
-#endif
 		TRACE_ABORT(result, ft_t_err, "_ftape_open failed");
 	} else {
 		/* Mask signals that will disturb proper operation of the
@@ -200,13 +146,11 @@ static int zft_close(struct inode *ino, struct file *filep)
 	int result;
 	TRACE_FUN(ft_t_flow);
 
+	lock_kernel();
 	if (!busy_flag || MINOR(ino->i_rdev) != zft_unit) {
 		TRACE(ft_t_err, "failed: not busy or wrong unit");
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,31)
+		unlock_kernel();
 		TRACE_EXIT 0;
-#else
-		TRACE_EXIT; /* keep busy_flag !(?) */
-#endif
 	}
 	sigfillset(&current->blocked);
 	result = _zft_close();
@@ -215,16 +159,8 @@ static int zft_close(struct inode *ino, struct file *filep)
 	}
 	current->blocked = orig_sigmask; /* restore before open state */
 	busy_flag = 0;
-#if defined(MODULE) && LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
-	if (!zft_dirty()) {
-		MOD_DEC_USE_COUNT; /* unlock module in memory */
-	}
-#endif
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,31)
+	unlock_kernel();
 	TRACE_EXIT 0;
-#else
-	TRACE_EXIT;
-#endif
 }
 
 /*      Ioctl for floppy tape device
@@ -250,24 +186,14 @@ static int zft_ioctl(struct inode *ino, struct file *filep,
 
 /*      Ioctl for floppy tape device
  */
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,56)
 static int  zft_mmap(struct file *filep, struct vm_area_struct *vma)
-#else
-static int zft_mmap(struct inode *ino,
-		    struct file *filep,
-		    struct vm_area_struct *vma)
-#endif
 {
 	int result = -EIO;
 	sigset_t old_sigmask;
 	TRACE_FUN(ft_t_flow);
 
 	if (!busy_flag || 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,56)
 	    MINOR(filep->f_dentry->d_inode->i_rdev) != zft_unit || 
-#else
-	    MINOR(ino->i_rdev) != zft_unit ||
-#endif
 	    ft_failure)
 	{
 		TRACE_ABORT(-EIO, ft_t_err,
@@ -275,34 +201,26 @@ static int zft_mmap(struct inode *ino,
 	}
 	old_sigmask = current->blocked; /* save mask */
 	sigfillset(&current->blocked);
+	lock_kernel();
 	if ((result = ftape_mmap(vma)) >= 0) {
 #ifndef MSYNC_BUG_WAS_FIXED
 		static struct vm_operations_struct dummy = { NULL, };
 		vma->vm_ops = &dummy;
 #endif
 	}
+	unlock_kernel();
 	current->blocked = old_sigmask; /* restore mask */
 	TRACE_EXIT result;
 }
 
 /*      Read from floppy tape device
  */
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,60)
 static ssize_t zft_read(struct file *fp, char *buff,
 			size_t req_len, loff_t *ppos)
-#elif LINUX_VERSION_CODE >= KERNEL_VER(2,1,0)
-static long zft_read(struct inode *ino, struct file *fp, char *buff,
-		     unsigned long req_len)
-#else
-static int  zft_read(struct inode *ino, struct file *fp, char *buff,
-		     int req_len)
-#endif
 {
 	int result = -EIO;
 	sigset_t old_sigmask;
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,60)
 	struct inode *ino = fp->f_dentry->d_inode;
-#endif
 	TRACE_FUN(ft_t_flow);
 
 	TRACE(ft_t_data_flow, "called with count: %ld", (unsigned long)req_len);
@@ -320,25 +238,12 @@ static int  zft_read(struct inode *ino, struct file *fp, char *buff,
 
 /*      Write to tape device
  */
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,60)
 static ssize_t zft_write(struct file *fp, const char *buff,
 			 size_t req_len, loff_t *ppos)
-#elif LINUX_VERSION_CODE >= KERNEL_VER(2,1,0)
-static long zft_write(struct inode *ino, struct file *fp, const char *buff,
-		      unsigned long req_len)
-#elif LINUX_VERSION_CODE >= KERNEL_VER(1,3,0)
-static int  zft_write(struct inode *ino, struct file *fp, const char *buff,
-		      int req_len)
-#else
-static int  zft_write(struct inode *ino, struct file *fp, char *buff,
-		      int req_len)
-#endif
 {
 	int result = -EIO;
 	sigset_t old_sigmask;
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,60)
 	struct inode *ino = fp->f_dentry->d_inode;
-#endif
 	TRACE_FUN(ft_t_flow);
 
 	TRACE(ft_t_flow, "called with count: %ld", (unsigned long)req_len);
@@ -414,8 +319,9 @@ extern int zft_compressor_init(void);
 /*  Called by modules package when installing the driver or by kernel
  *  during the initialization phase
  */
-__initfunc(int zft_init(void))
+int __init zft_init(void)
 {
+	int i;
 	TRACE_FUN(ft_t_flow);
 
 #ifdef MODULE
@@ -444,12 +350,43 @@ KERN_INFO
 	TRACE(ft_t_info, "zft_init @ 0x%p", zft_init);
 	TRACE(ft_t_info,
 	      "installing zftape VFS interface for ftape driver ...");
-	TRACE_CATCH(register_chrdev(QIC117_TAPE_MAJOR, "zft", &zft_cdev),);
-#if LINUX_VERSION_CODE >= KERNEL_VER(1,2,0) 
-# if LINUX_VERSION_CODE < KERNEL_VER(2,1,18)
-	register_symtab(&zft_symbol_table); /* add global zftape symbols */
-# endif
-#endif
+	TRACE_CATCH(devfs_register_chrdev(QIC117_TAPE_MAJOR, "zft", &zft_cdev),);
+
+	for (i = 0; i < 4; i++) {
+		char devname[9];
+
+		sprintf (devname, "qft%i", i);
+		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
+			        QIC117_TAPE_MAJOR, i,
+				S_IFCHR | S_IRUSR | S_IWUSR,
+				&zft_cdev, NULL);
+		sprintf (devname, "nqft%i", i);
+		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
+				QIC117_TAPE_MAJOR, i + 4,
+				S_IFCHR | S_IRUSR | S_IWUSR,
+				&zft_cdev, NULL);
+		sprintf (devname, "zqft%i", i);
+		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
+				QIC117_TAPE_MAJOR, i + 16,
+				S_IFCHR | S_IRUSR | S_IWUSR,
+				&zft_cdev, NULL);
+		sprintf (devname, "nzqft%i", i);
+		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
+				QIC117_TAPE_MAJOR, i + 20,
+				S_IFCHR | S_IRUSR | S_IWUSR,
+				&zft_cdev, NULL);
+		sprintf (devname, "rawqft%i", i);
+		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
+				QIC117_TAPE_MAJOR, i + 32,
+				S_IFCHR | S_IRUSR | S_IWUSR,
+				&zft_cdev, NULL);
+		sprintf (devname, "nrawqft%i", i);
+		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
+				QIC117_TAPE_MAJOR, i + 36,
+				S_IFCHR | S_IRUSR | S_IWUSR,
+				&zft_cdev, NULL);
+	}
+
 #ifdef CONFIG_ZFT_COMPRESSOR
 	(void)zft_compressor_init();
 #endif
@@ -461,27 +398,20 @@ KERN_INFO
 
 
 #ifdef MODULE
-#if LINUX_VERSION_CODE <= KERNEL_VER(1,2,13) && defined(MODULE)
-char kernel_version[] = UTS_RELEASE;
-#endif
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
 /* Called by modules package before trying to unload the module
  */
 static int can_unload(void)
 {
-	return (zft_dirty() || busy_flag) ? -EBUSY : 0;
+	return (GET_USE_COUNT(THIS_MODULE)||zft_dirty()||busy_flag)?-EBUSY:0;
 }
-#endif
 /* Called by modules package when installing the driver
  */
 int init_module(void)
 {
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,18)
 	if (!mod_member_present(&__this_module, can_unload)) {
 		return -EBUSY;
 	}
 	__this_module.can_unload = can_unload;
-#endif
 	return zft_init();
 }
 
@@ -489,12 +419,29 @@ int init_module(void)
  */
 void cleanup_module(void)
 {
+	int i;
+	char devname[9];
+
 	TRACE_FUN(ft_t_flow);
 
-	if (unregister_chrdev(QIC117_TAPE_MAJOR, "zft") != 0) {
+	if (devfs_unregister_chrdev(QIC117_TAPE_MAJOR, "zft") != 0) {
 		TRACE(ft_t_warn, "failed");
 	} else {
 		TRACE(ft_t_info, "successful");
+	}
+        for (i = 0; i < 4; i++) {
+		sprintf(devname, "qft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "nqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 4, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "zqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 16, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "nzqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 20, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "rawqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 32, DEVFS_SPECIAL_CHR, 0));
+		sprintf(devname, "nrawqft%i", i);
+		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 36, DEVFS_SPECIAL_CHR, 0));
 	}
 	zft_uninit_mem(); /* release remaining memory, if any */
         printk(KERN_INFO "zftape successfully unloaded.\n");

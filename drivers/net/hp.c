@@ -56,20 +56,20 @@ static unsigned int hppclan_portlist[] __initdata =
 #define HP_8BSTOP_PG	0x80	/* Last page +1 of RX ring */
 #define HP_16BSTOP_PG	0xFF	/* Same, for 16 bit cards. */
 
-int hp_probe(struct device *dev);
-int hp_probe1(struct device *dev, int ioaddr);
+int hp_probe(struct net_device *dev);
+static int hp_probe1(struct net_device *dev, int ioaddr);
 
-static int hp_open(struct device *dev);
-static int hp_close(struct device *dev);
-static void hp_reset_8390(struct device *dev);
-static void hp_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static int hp_open(struct net_device *dev);
+static int hp_close(struct net_device *dev);
+static void hp_reset_8390(struct net_device *dev);
+static void hp_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 					int ring_page);
-static void hp_block_input(struct device *dev, int count,
+static void hp_block_input(struct net_device *dev, int count,
 					struct sk_buff *skb , int ring_offset);
-static void hp_block_output(struct device *dev, int count,
+static void hp_block_output(struct net_device *dev, int count,
 							const unsigned char *buf, int start_page);
 
-static void hp_init_card(struct device *dev);
+static void hp_init_card(struct net_device *dev);
 
 /* The map from IRQ number to HP_CONFIGURE register setting. */
 /* My default is IRQ5	             0  1  2  3  4  5  6  7  8  9 10 11 */
@@ -79,38 +79,34 @@ static char irqmap[16] __initdata= { 0, 0, 4, 6, 8,10, 0,14, 0, 4, 2,12,0,0,0,0}
 /*	Probe for an HP LAN adaptor.
 	Also initialize the card and fill in STATION_ADDR with the station
 	address. */
-#ifdef HAVE_DEVLIST
-struct netdev_entry netcard_drv =
-{"hp", hp_probe1, HP_IO_EXTENT, hppclan_portlist};
-#else
 
-__initfunc(int hp_probe(struct device *dev))
+int __init hp_probe(struct net_device *dev)
 {
 	int i;
-	int base_addr = dev ? dev->base_addr : 0;
+	int base_addr = dev->base_addr;
+
+	SET_MODULE_OWNER(dev);
 
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return hp_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
-		return ENXIO;
+		return -ENXIO;
 
-	for (i = 0; hppclan_portlist[i]; i++) {
-		int ioaddr = hppclan_portlist[i];
-		if (check_region(ioaddr, HP_IO_EXTENT))
-			continue;
-		if (hp_probe1(dev, ioaddr) == 0)
+	for (i = 0; hppclan_portlist[i]; i++)
+		if (hp_probe1(dev, hppclan_portlist[i]) == 0)
 			return 0;
-	}
 
-	return ENODEV;
+	return -ENODEV;
 }
-#endif
 
-__initfunc(int hp_probe1(struct device *dev, int ioaddr))
+static int __init hp_probe1(struct net_device *dev, int ioaddr)
 {
-	int i, board_id, wordmode;
+	int i, retval, board_id, wordmode;
 	const char *name;
-	static unsigned version_printed = 0;
+	static unsigned version_printed;
+
+	if (!request_region(ioaddr, HP_IO_EXTENT, dev->name))
+		return -EBUSY;
 
 	/* Check for the HP physical address, 08 00 09 xx xx xx. */
 	/* This really isn't good enough: we may pick up HP LANCE boards
@@ -118,8 +114,10 @@ __initfunc(int hp_probe1(struct device *dev, int ioaddr))
 	if (inb(ioaddr) != 0x08
 		|| inb(ioaddr+1) != 0x00
 		|| inb(ioaddr+2) != 0x09
-		|| inb(ioaddr+14) == 0x57)
-		return ENODEV;
+		|| inb(ioaddr+14) == 0x57) {
+		retval = -ENODEV;
+		goto out;
+	}
 
 	/* Set up the parameters based on the board ID.
 	   If you have additional mappings, please mail them to me -djb. */
@@ -131,22 +129,14 @@ __initfunc(int hp_probe1(struct device *dev, int ioaddr))
 		wordmode = 0;
 	}
 
-	if (load_8390_module("hp.c"))
-		return -ENOSYS;
-
-	/* We should have a "dev" from Space.c or the static module table. */
-	if (dev == NULL) {
-		printk("hp.c: Passed a NULL device.\n");
-		dev = init_etherdev(0, 0);
-	}
-
 	if (ei_debug  &&  version_printed++ == 0)
 		printk(version);
 
 	/* Allocate dev->priv and fill in 8390 specific dev fields. */
 	if (ethdev_init(dev)) {
 		printk (" unable to get memory for dev->priv.\n");
-		return -ENOMEM;
+		retval = -ENOMEM;
+		goto out;
 	}
 
 	printk("%s: %s (ID %02x) at %#3x,", dev->name, name, board_id, ioaddr);
@@ -162,12 +152,12 @@ __initfunc(int hp_probe1(struct device *dev, int ioaddr))
 		do {
 			int irq = *irqp;
 			if (request_irq (irq, NULL, 0, "bogus", NULL) != -EBUSY) {
-				autoirq_setup(0);
+				unsigned long cookie = probe_irq_on();
 				/* Twinkle the interrupt, and check if it's seen. */
 				outb_p(irqmap[irq] | HP_RUN, ioaddr + HP_CONFIGURE);
 				outb_p( 0x00 | HP_RUN, ioaddr + HP_CONFIGURE);
-				if (irq == autoirq_report(0)		 /* It's a good IRQ line! */
-					&& request_irq (irq, ei_interrupt, 0, "hp", dev) == 0) {
+				if (irq == probe_irq_off(cookie)		 /* It's a good IRQ line! */
+					&& request_irq (irq, ei_interrupt, 0, dev->name, dev) == 0) {
 					printk(" selecting IRQ %d.\n", irq);
 					dev->irq = *irqp;
 					break;
@@ -176,23 +166,17 @@ __initfunc(int hp_probe1(struct device *dev, int ioaddr))
 		} while (*++irqp);
 		if (*irqp == 0) {
 			printk(" no free IRQ lines.\n");
-			kfree(dev->priv);
-			dev->priv = NULL;
-			return EBUSY;
+			retval = -EBUSY;
+			goto out1;
 		}
 	} else {
 		if (dev->irq == 2)
 			dev->irq = 9;
-		if (request_irq(dev->irq, ei_interrupt, 0, "hp", dev)) {
+		if ((retval = request_irq(dev->irq, ei_interrupt, 0, dev->name, dev))) {
 			printk (" unable to get IRQ %d.\n", dev->irq);
-			kfree(dev->priv);
-			dev->priv = NULL;
-			return EBUSY;
+			goto out1;
 		}
 	}
-
-	/* Grab the region so we can find another board if something fails. */
-	request_region(ioaddr, HP_IO_EXTENT,"hp");
 
 	/* Set the base address to point to the NIC, not the "real" base! */
 	dev->base_addr = ioaddr + NIC_OFFSET;
@@ -212,26 +196,30 @@ __initfunc(int hp_probe1(struct device *dev, int ioaddr))
 	hp_init_card(dev);
 
 	return 0;
+out1:
+	kfree(dev->priv);
+	dev->priv = NULL;
+out:
+	release_region(ioaddr, HP_IO_EXTENT);
+	return retval;
 }
 
 static int
-hp_open(struct device *dev)
+hp_open(struct net_device *dev)
 {
 	ei_open(dev);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int
-hp_close(struct device *dev)
+hp_close(struct net_device *dev)
 {
 	ei_close(dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static void
-hp_reset_8390(struct device *dev)
+hp_reset_8390(struct net_device *dev)
 {
 	int hp_base = dev->base_addr - NIC_OFFSET;
 	int saved_config = inb_p(hp_base + HP_CONFIGURE);
@@ -253,7 +241,7 @@ hp_reset_8390(struct device *dev)
 }
 
 static void
-hp_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+hp_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 	int nic_base = dev->base_addr;
 	int saved_config = inb_p(nic_base - NIC_OFFSET + HP_CONFIGURE);
@@ -280,7 +268,7 @@ hp_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
    out through the "remote DMA" dataport. */
 
 static void
-hp_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset)
+hp_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
 	int nic_base = dev->base_addr;
 	int saved_config = inb_p(nic_base - NIC_OFFSET + HP_CONFIGURE);
@@ -315,7 +303,7 @@ hp_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offs
 }
 
 static void
-hp_block_output(struct device *dev, int count,
+hp_block_output(struct net_device *dev, int count,
 				const unsigned char *buf, int start_page)
 {
 	int nic_base = dev->base_addr;
@@ -374,7 +362,7 @@ hp_block_output(struct device *dev, int count,
 
 /* This function resets the ethercard if something screws up. */
 static void
-hp_init_card(struct device *dev)
+hp_init_card(struct net_device *dev)
 {
 	int irq = dev->irq;
 	NS8390_init(dev, 0);
@@ -385,19 +373,9 @@ hp_init_card(struct device *dev)
 
 #ifdef MODULE
 #define MAX_HP_CARDS	4	/* Max number of HP cards per module */
-#define NAMELEN		8	/* # of chars for storing dev->name */
-static char namelist[NAMELEN * MAX_HP_CARDS] = { 0, };
-static struct device dev_hp[MAX_HP_CARDS] = {
-	{
-		NULL,		/* assign a chunk of namelist[] below */
-		0, 0, 0, 0,
-		0, 0,
-		0, 0, 0, NULL, NULL
-	},
-};
-
-static int io[MAX_HP_CARDS] = { 0, };
-static int irq[MAX_HP_CARDS]  = { 0, };
+static struct net_device dev_hp[MAX_HP_CARDS];
+static int io[MAX_HP_CARDS];
+static int irq[MAX_HP_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_HP_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_HP_CARDS) "i");
@@ -410,8 +388,7 @@ init_module(void)
 	int this_dev, found = 0;
 
 	for (this_dev = 0; this_dev < MAX_HP_CARDS; this_dev++) {
-		struct device *dev = &dev_hp[this_dev];
-		dev->name = namelist+(NAMELEN*this_dev);
+		struct net_device *dev = &dev_hp[this_dev];
 		dev->irq = irq[this_dev];
 		dev->base_addr = io[this_dev];
 		dev->init = hp_probe;
@@ -422,14 +399,12 @@ init_module(void)
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "hp.c: No HP card found (i/o = 0x%x).\n", io[this_dev]);
 			if (found != 0) {	/* Got at least one. */
-				lock_8390_module();
 				return 0;
 			}
 			return -ENXIO;
 		}
 		found++;
 	}
-	lock_8390_module();
 	return 0;
 }
 
@@ -439,7 +414,7 @@ cleanup_module(void)
 	int this_dev;
 
 	for (this_dev = 0; this_dev < MAX_HP_CARDS; this_dev++) {
-		struct device *dev = &dev_hp[this_dev];
+		struct net_device *dev = &dev_hp[this_dev];
 		if (dev->priv != NULL) {
 			int ioaddr = dev->base_addr - NIC_OFFSET;
 			void *priv = dev->priv;
@@ -449,7 +424,6 @@ cleanup_module(void)
 			kfree(priv);
 		}
 	}
-	unlock_8390_module();
 }
 #endif /* MODULE */
 

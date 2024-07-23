@@ -3,12 +3,16 @@
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
  */
 
+#include <linux/config.h>
 #include <asm/cprefix.h>
 #include <asm/ptrace.h>
 #include <asm/psr.h>
 
 	.text
 	.align	4
+
+	.globl  __bitops_begin
+__bitops_begin:
 
 	/* Take bits in %g2 and set them in word at %g1,
 	 * return whether bits were set in original value
@@ -24,7 +28,7 @@ ___set_bit:
 	or	%g3, PSR_PIL, %g5
 	wr	%g5, 0x0, %psr
 	nop; nop; nop
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	set	C_LABEL(bitops_spinlock), %g5
 2:	ldstub	[%g5], %g7		! Spin on the byte lock for SMP.
 	orcc	%g7, 0x0, %g0		! Did we get it?
@@ -33,7 +37,7 @@ ___set_bit:
 	 ld	[%g1], %g7
 	or	%g7, %g2, %g5
 	and	%g7, %g2, %g2
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	st	%g5, [%g1]
 	set	C_LABEL(bitops_spinlock), %g5
 	stb	%g0, [%g5]
@@ -53,7 +57,7 @@ ___clear_bit:
 	or	%g3, PSR_PIL, %g5
 	wr	%g5, 0x0, %psr
 	nop; nop; nop
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	set	C_LABEL(bitops_spinlock), %g5
 2:	ldstub	[%g5], %g7		! Spin on the byte lock for SMP.
 	orcc	%g7, 0x0, %g0		! Did we get it?
@@ -62,7 +66,7 @@ ___clear_bit:
 	 ld	[%g1], %g7
 	andn	%g7, %g2, %g5
 	and	%g7, %g2, %g2
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	st	%g5, [%g1]
 	set	C_LABEL(bitops_spinlock), %g5
 	stb	%g0, [%g5]
@@ -82,7 +86,7 @@ ___change_bit:
 	or	%g3, PSR_PIL, %g5
 	wr	%g5, 0x0, %psr
 	nop; nop; nop
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	set	C_LABEL(bitops_spinlock), %g5
 2:	ldstub	[%g5], %g7		! Spin on the byte lock for SMP.
 	orcc	%g7, 0x0, %g0		! Did we get it?
@@ -91,7 +95,7 @@ ___change_bit:
 	 ld	[%g1], %g7
 	xor	%g7, %g2, %g5
 	and	%g7, %g2, %g2
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	st	%g5, [%g1]
 	set	C_LABEL(bitops_spinlock), %g5
 	stb	%g0, [%g5]
@@ -111,7 +115,7 @@ ___set_le_bit:
 	or	%g3, PSR_PIL, %g5
 	wr	%g5, 0x0, %psr
 	nop; nop; nop
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	set	C_LABEL(bitops_spinlock), %g5
 2:	ldstub	[%g5], %g7		! Spin on the byte lock for SMP.
 	orcc	%g7, 0x0, %g0		! Did we get it?
@@ -120,7 +124,7 @@ ___set_le_bit:
 	 ldub	[%g1], %g7
 	or	%g7, %g2, %g5
 	and	%g7, %g2, %g2
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	stb	%g5, [%g1]
 	set	C_LABEL(bitops_spinlock), %g5
 	stb	%g0, [%g5]
@@ -139,7 +143,7 @@ ___clear_le_bit:
 	or	%g3, PSR_PIL, %g5
 	wr	%g5, 0x0, %psr
 	nop; nop; nop
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	set	C_LABEL(bitops_spinlock), %g5
 2:	ldstub	[%g5], %g7		! Spin on the byte lock for SMP.
 	orcc	%g7, 0x0, %g0		! Did we get it?
@@ -148,7 +152,7 @@ ___clear_le_bit:
 	 ldub	[%g1], %g7
 	andn	%g7, %g2, %g5
 	and	%g7, %g2, %g2
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	stb	%g5, [%g1]
 	set	C_LABEL(bitops_spinlock), %g5
 	stb	%g0, [%g5]
@@ -159,3 +163,6 @@ ___clear_le_bit:
 	nop; nop; nop
 	jmpl	%o7, %g0
 	 mov	%g4, %o7
+
+	.globl  __bitops_end
+__bitops_end:

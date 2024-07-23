@@ -1,4 +1,4 @@
-/* $Id: irq.h,v 1.26 1999/04/20 13:22:44 anton Exp $
+/* $Id: irq.h,v 1.32 2000/08/26 02:42:28 anton Exp $
  * irq.h: IRQ registers on the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -7,8 +7,9 @@
 #ifndef _SPARC_IRQ_H
 #define _SPARC_IRQ_H
 
+#include <linux/config.h>
 #include <linux/linkage.h>
-#include <linux/tasks.h>     /* For NR_CPUS */
+#include <linux/threads.h>     /* For NR_CPUS */
 
 #include <asm/system.h>     /* For SUN4M_NCPUS */
 #include <asm/btfixup.h>
@@ -19,20 +20,6 @@ BTFIXUPDEF_CALL(char *, __irq_itoa, unsigned int)
 #define __irq_itoa(irq) BTFIXUP_CALL(__irq_itoa)(irq)
 
 #define NR_IRQS    15
-
-/* IRQ handler dispatch entry and exit. */
-#ifdef __SMP__
-extern unsigned int local_irq_count[NR_CPUS];
-#define irq_enter(cpu, irq)                     \
-do {    hardirq_enter(cpu);                     \
-        spin_unlock_wait(&global_irq_lock);     \
-	} while(0)
-#define irq_exit(cpu, irq)      hardirq_exit(cpu)
-#else
-extern unsigned int local_irq_count;
-#define irq_enter(cpu, irq)     (local_irq_count++)
-#define irq_exit(cpu, irq)      (local_irq_count--)
-#endif
 
 /* Dave Redman (djhr@tadpole.co.uk)
  * changed these to function pointers.. it saves cycles and will allow
@@ -49,6 +36,7 @@ BTFIXUPDEF_CALL(void, clear_clock_irq, void)
 BTFIXUPDEF_CALL(void, clear_profile_irq, int)
 BTFIXUPDEF_CALL(void, load_profile_irq, int, unsigned int)
 
+#define disable_irq_nosync disable_irq
 #define disable_irq(irq) BTFIXUP_CALL(disable_irq)(irq)
 #define enable_irq(irq) BTFIXUP_CALL(enable_irq)(irq)
 #define disable_pil_irq(irq) BTFIXUP_CALL(disable_pil_irq)(irq)
@@ -62,7 +50,7 @@ extern void claim_ticker14(void (*irq_handler)(int, void *, struct pt_regs *),
 			   int irq,
 			   unsigned int timeout);
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 BTFIXUPDEF_CALL(void, set_cpu_int, int, int)
 BTFIXUPDEF_CALL(void, clear_cpu_int, int, int)
 BTFIXUPDEF_CALL(void, set_irq_udt, int)

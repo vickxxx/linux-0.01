@@ -3,7 +3,7 @@
  *
  *	Copyright (C) 1995 David A Rusling
  *	Copyright (C) 1996 Jay A Estabrook
- *	Copyright (C) 1998 Richard Henderson
+ *	Copyright (C) 1998, 1999, 2000 Richard Henderson
  *
  * Code supporting the MIATA (EV56+PYXIS).
  */
@@ -22,74 +22,20 @@
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <asm/core_pyxis.h>
+#include <asm/core_cia.h>
 
 #include "proto.h"
-#include "irq.h"
-#include "bios32.h"
-#include "machvec.h"
+#include "irq_impl.h"
+#include "pci_impl.h"
+#include "machvec_impl.h"
 
-
-static void 
-miata_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
-{
-	if (irq >= 16) {
-		/* Make CERTAIN none of the bogus ints get enabled... */
-		*(vulp)PYXIS_INT_MASK =
-			~((long)mask >> 16) & ~0x400000000000063bUL;
-		mb();
-		/* ... and read it back to make sure it got written.  */
-		*(vulp)PYXIS_INT_MASK;
-	}
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);	/* ISA PIC2 */
-	else
-		outb(mask, 0x21);	/* ISA PIC1 */
-}
-
-static void 
-miata_device_interrupt(unsigned long vector, struct pt_regs *regs)
-{
-	unsigned long pld, tmp;
-	unsigned int i;
-
-	/* Read the interrupt summary register of PYXIS */
-	pld = *(vulp)PYXIS_INT_REQ;
-
-	/*
-	 * For now, AND off any bits we are not interested in:
-	 *   HALT (2), timer (6), ISA Bridge (7), 21142/3 (8)
-	 * then all the PCI slots/INTXs (12-31).
-	 */
-	/* Maybe HALT should only be used for SRM console boots? */
-	pld &= 0x00000000fffff9c4UL;
-
-	/*
-	 * Now for every possible bit set, work through them and call
-	 * the appropriate interrupt handler.
-	 */
-	while (pld) {
-		i = ffz(~pld);
-		pld &= pld - 1; /* clear least bit set */
-		if (i == 7) {
-			isa_device_interrupt(vector, regs);
-		} else if (i == 6) {
-			continue;
-		} else {
-			/* if not timer int */
-			handle_irq(16 + i, 16 + i, regs);
-		}
-		*(vulp)PYXIS_INT_REQ = 1UL << i; mb();
-		tmp = *(vulp)PYXIS_INT_REQ;
-	}
-}
 
 static void 
 miata_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 {
-	int irq, ack;
+	int irq;
 
-	ack = irq = (vector - 0x800) >> 4;
+	irq = (vector - 0x800) >> 4;
 
 	/*
 	 * I really hate to do this, but the MIATA SRM console ignores the
@@ -106,34 +52,35 @@ miata_srm_device_interrupt(unsigned long vector, struct pt_regs * regs)
 	 * So, here's this grotty hack... :-(
 	 */
 	if (irq >= 16)
-		ack = irq = irq + 8;
+		irq = irq + 8;
 
-	handle_irq(irq, ack, regs);
+	handle_irq(irq, regs);
 }
 
 static void __init
 miata_init_irq(void)
 {
-	STANDARD_INIT_IRQ_PROLOG;
-
 	if (alpha_using_srm)
 		alpha_mv.device_interrupt = miata_srm_device_interrupt;
 
-	/* Note invert on MASK bits.  */
-	*(vulp)PYXIS_INT_MASK =
-	  ~((long)alpha_irq_mask >> 16) & ~0x400000000000063bUL; mb();
 #if 0
 	/* These break on MiataGL so we'll try not to do it at all.  */
 	*(vulp)PYXIS_INT_HILO = 0x000000B2UL; mb();	/* ISA/NMI HI */
 	*(vulp)PYXIS_RT_COUNT = 0UL; mb();		/* clear count */
 #endif
-	/* Clear upper timer.  */
-	*(vulp)PYXIS_INT_REQ  = 0x4000000000000180UL; mb();
 
-	enable_irq(16 + 2);	/* enable HALT switch - SRM only? */
-	enable_irq(16 + 6);     /* enable timer */
-	enable_irq(16 + 7);     /* enable ISA PIC cascade */
-	enable_irq(2);		/* enable cascade */
+	init_i8259a_irqs();
+
+	/* Not interested in the bogus interrupts (3,10), Fan Fault (0),
+           NMI (1), or EIDE (9).
+
+	   We also disable the risers (4,5), since we don't know how to
+	   route the interrupts behind the bridge.  */
+	init_pyxis_irqs(0x63b0000);
+
+	common_init_isa_dma();
+	setup_irq(16+2, &halt_switch_irqaction);	/* SRM only? */
+	setup_irq(16+6, &timer_cascade_irqaction);
 }
 
 
@@ -202,9 +149,9 @@ miata_init_irq(void)
  */
 
 static int __init
-miata_map_irq(struct pci_dev *dev, int slot, int pin)
+miata_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-        static char irq_tab[18][5] __initlocaldata = {
+        static char irq_tab[18][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{16+ 8, 16+ 8, 16+ 8, 16+ 8, 16+ 8},  /* IdSel 14,  DC21142 */
 		{   -1,    -1,    -1,    -1,    -1},  /* IdSel 15,  EIDE    */
@@ -224,21 +171,24 @@ miata_map_irq(struct pci_dev *dev, int slot, int pin)
 		{16+20, 16+20, 16+21, 16+22, 16+23},  /* IdSel 28,  slot 1  */
 		{16+24, 16+24, 16+25, 16+26, 16+27},  /* IdSel 29,  slot 2  */
 		{16+28, 16+28, 16+29, 16+30, 16+31},  /* IdSel 30,  slot 3  */
-		/* this bridge is on the main bus of the later original MIATA */
+		/* This bridge is on the main bus of the later orig MIATA */
 		{   -1,    -1,    -1,    -1,    -1},  /* IdSel 31,  PCI-PCI */
         };
 	const long min_idsel = 3, max_idsel = 20, irqs_per_slot = 5;
 	return COMMON_TABLE_LOOKUP;
 }
 
-static int __init
-miata_swizzle(struct pci_dev *dev, int *pinp)
+static u8 __init
+miata_swizzle(struct pci_dev *dev, u8 *pinp)
 {
 	int slot, pin = *pinp;
 
-	/* Check first for the built-in bridge.  */
-	if ((PCI_SLOT(dev->bus->self->devfn) == 8) ||
-	    (PCI_SLOT(dev->bus->self->devfn) == 20)) {
+	if (dev->bus->number == 0) {
+		slot = PCI_SLOT(dev->devfn);
+	}		
+	/* Check for the built-in bridge.  */
+	else if ((PCI_SLOT(dev->bus->self->devfn) == 8) ||
+		 (PCI_SLOT(dev->bus->self->devfn) == 20)) {
 		slot = PCI_SLOT(dev->devfn) + 9;
 	}
 	else 
@@ -263,12 +213,21 @@ miata_swizzle(struct pci_dev *dev, int *pinp)
 }
 
 static void __init
-miata_pci_fixup(void)
+miata_init_pci(void)
 {
-	layout_all_busses(DEFAULT_IO_BASE, DEFAULT_MEM_BASE);
-	common_pci_fixup(miata_map_irq, miata_swizzle);
+	cia_init_pci();
 	SMC669_Init(0); /* it might be a GL (fails harmlessly if not) */
 	es1888_init();
+}
+
+static void
+miata_kill_arch(int mode)
+{
+	/* Who said DEC engineers have no sense of humor? ;-)  */
+	if (alpha_using_srm) {
+		*(vuip) PYXIS_RESET = 0x0000dead;
+		mb();
+	}
 }
 
 
@@ -281,20 +240,21 @@ struct alpha_machine_vector miata_mv __initmv = {
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_PYXIS_IO,
-	DO_PYXIS_BUS,
-	machine_check:		pyxis_machine_check,
+	DO_CIA_BUS,
+	machine_check:		cia_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	DEFAULT_MEM_BASE,
 
 	nr_irqs:		48,
-	irq_probe_mask:		_PROBE_MASK(48),
-	update_irq_hw:		miata_update_irq_hw,
-	ack_irq:		generic_ack_irq,
-	device_interrupt:	miata_device_interrupt,
+	device_interrupt:	pyxis_device_interrupt,
 
 	init_arch:		pyxis_init_arch,
 	init_irq:		miata_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		miata_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		miata_init_pci,
+	kill_arch:		miata_kill_arch,
+	pci_map_irq:		miata_map_irq,
+	pci_swizzle:		miata_swizzle,
 };
 ALIAS_MV(miata)

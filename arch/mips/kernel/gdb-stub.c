@@ -12,7 +12,7 @@
  *
  *  Copyright (C) 1995 Andreas Busse
  *
- * $Id: gdb-stub.c,v 1.7 1999/06/12 18:39:28 ulfc Exp $
+ * $Id: gdb-stub.c,v 1.6 1999/05/01 22:40:35 ralf Exp $
  */
 
 /*
@@ -115,7 +115,7 @@ void handle_exception(struct gdb_regs *regs);
 
 static char input_buffer[BUFMAX];
 static char output_buffer[BUFMAX];
-static int initialized = 0;	/* !0 means we've been initialized */
+static int initialized;	/* !0 means we've been initialized */
 static const char hexchars[]="0123456789abcdef";
 
 

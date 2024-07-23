@@ -4,6 +4,7 @@
  *  Copyright (C) 1995, 1996 by Volker Lendecke
  *  Modified for big endian by J.F. Chadima and David S. Miller
  *  Modified 1997 Peter Waltenberg, Bill Hawes, David Woodhouse for 2.1 dcache
+ *  Modified 1999 Wolfram Pienkoss for NLS
  *
  */
 
@@ -17,10 +18,10 @@ static inline int min(int a, int b)
 	return a < b ? a : b;
 }
 
-static void assert_server_locked(struct ncp_server *server)
+static inline void assert_server_locked(struct ncp_server *server)
 {
 	if (server->lock == 0) {
-		DPRINTK(KERN_DEBUG "ncpfs: server not locked!\n");
+		DPRINTK("ncpfs: server not locked!\n");
 	}
 }
 
@@ -69,7 +70,7 @@ static void ncp_add_pstring(struct ncp_server *server, const char *s)
 	int len = strlen(s);
 	assert_server_locked(server);
 	if (len > 255) {
-		DPRINTK(KERN_DEBUG "ncpfs: string too long: %s\n", s);
+		DPRINTK("ncpfs: string too long: %s\n", s);
 		len = 255;
 	}
 	ncp_add_byte(server, len);
@@ -77,7 +78,7 @@ static void ncp_add_pstring(struct ncp_server *server, const char *s)
 	return;
 }
 
-static void ncp_init_request(struct ncp_server *server)
+static inline void ncp_init_request(struct ncp_server *server)
 {
 	ncp_lock_server(server);
 
@@ -85,17 +86,17 @@ static void ncp_init_request(struct ncp_server *server)
 	server->has_subfunction = 0;
 }
 
-static void ncp_init_request_s(struct ncp_server *server, int subfunction)
+static inline void ncp_init_request_s(struct ncp_server *server, int subfunction)
 {
-	ncp_init_request(server);
-	ncp_add_word(server, 0);	/* preliminary size */
-
+	ncp_lock_server(server);
+	
+	server->current_size = sizeof(struct ncp_request_header) + 2;
 	ncp_add_byte(server, subfunction);
 
 	server->has_subfunction = 1;
 }
 
-static char *
+static inline char *
  ncp_reply_data(struct ncp_server *server, int offset)
 {
 	return &(server->packet[sizeof(struct ncp_reply_header) + offset]);
@@ -148,7 +149,7 @@ ncp_negotiate_size_and_options(struct ncp_server *server,
 	int result;
 
 	/* there is minimum */
-	if (size < 512) size = 512;
+	if (size < NCP_BLOCK_SIZE) size = NCP_BLOCK_SIZE;
 
 	ncp_init_request(server);
 	ncp_add_word(server, htons(size));
@@ -162,7 +163,7 @@ ncp_negotiate_size_and_options(struct ncp_server *server,
 
 	/* NCP over UDP returns 0 (!!!) */
 	result = ntohs(ncp_reply_word(server, 0));
-	if (result >= 512) size=min(result, size);
+	if (result >= NCP_BLOCK_SIZE) size=min(result, size);
 	*ret_size = size;
 	*ret_options = ncp_reply_byte(server, 4);
 
@@ -196,7 +197,7 @@ ncp_get_volume_info_with_number(struct ncp_server *server, int n,
 	result = -EIO;
 	len = ncp_reply_byte(server, 29);
 	if (len > NCP_VOLNAME_LEN) {
-		DPRINTK(KERN_DEBUG "ncpfs: volume name too long: %d\n", len);
+		DPRINTK("ncpfs: volume name too long: %d\n", len);
 		goto out;
 	}
 	memcpy(&(target->volume_name), ncp_reply_data(server, 30), len);
@@ -220,20 +221,23 @@ ncp_close_file(struct ncp_server *server, const char *file_id)
 	return result;
 }
 
-/*
- * Called with the superblock locked.
- */
 int
 ncp_make_closed(struct inode *inode)
 {
 	int err;
-	NCP_FINFO(inode)->opened = 0;
-	err = ncp_close_file(NCP_SERVER(inode), NCP_FINFO(inode)->file_handle);
-#ifdef NCPFS_PARANOIA
-if (!err)
-printk(KERN_DEBUG "ncp_make_closed: volnum=%d, dirent=%u, error=%d\n",
-NCP_FINFO(inode)->volNumber, NCP_FINFO(inode)->dirEntNum, err);
-#endif
+
+	err = 0;
+	down(&NCP_FINFO(inode)->open_sem);	
+	if (atomic_read(&NCP_FINFO(inode)->opened) == 1) {
+		atomic_set(&NCP_FINFO(inode)->opened, 0);
+		err = ncp_close_file(NCP_SERVER(inode), NCP_FINFO(inode)->file_handle);
+
+		if (!err)
+			PPRINTK("ncp_make_closed: volnum=%d, dirent=%u, error=%d\n",
+				NCP_FINFO(inode)->volNumber,
+				NCP_FINFO(inode)->dirEntNum, err);
+	}
+	up(&NCP_FINFO(inode)->open_sem);
 	return err;
 }
 
@@ -264,7 +268,7 @@ static void ncp_extract_file_info(void *structure, struct nw_info_struct *target
 	memcpy(target, structure, info_struct_size);
 	name_len = structure + info_struct_size;
 	target->nameLen = *name_len;
-	strncpy(target->entryName, name_len + 1, *name_len);
+	memcpy(target->entryName, name_len + 1, *name_len);
 	target->entryName[*name_len] = '\0';
 	return;
 }
@@ -350,7 +354,7 @@ ncp_get_known_namespace(struct ncp_server *server, __u8 volume)
 	namespace = ncp_reply_data(server, 2);
 
 	while (no_namespaces > 0) {
-		DPRINTK(KERN_DEBUG "get_namespaces: found %d on %d\n", *namespace, volume);
+		DPRINTK("get_namespaces: found %d on %d\n", *namespace, volume);
 
 #ifdef CONFIG_NCPFS_NFS_NS
 		if ((*namespace == NW_NS_NFS) && !(server->m.flags&NCP_MOUNT_NO_NFS)) 
@@ -387,7 +391,7 @@ ncp_ObtainSpecificDirBase(struct ncp_server *server,
 	ncp_add_byte(server, 6); /* subfunction */
 	ncp_add_byte(server, nsSrc);
 	ncp_add_byte(server, nsDst);
-	ncp_add_word(server, 0x8006); /* get all */
+	ncp_add_word(server, htons(0x0680)); /* get all */
 	ncp_add_dword(server, RIM_ALL);
 	ncp_add_handle_path(server, vol_num, dir_base, 1, path);
 
@@ -406,9 +410,8 @@ ncp_ObtainSpecificDirBase(struct ncp_server *server,
 }
 
 int
-ncp_mount_subdir(struct ncp_server *server,
-		__u8 volNumber,
-		__u8 srcNS, __u32 dirEntNum)
+ncp_mount_subdir(struct ncp_server *server, struct nw_info_struct *i,
+			__u8 volNumber, __u8 srcNS, __u32 dirEntNum)
 {
 	int dstNS;
 	int result;
@@ -422,9 +425,9 @@ ncp_mount_subdir(struct ncp_server *server,
 		return result;
 	}
 	server->name_space[volNumber] = dstNS;
-	server->root.finfo.i.volNumber = volNumber;
-	server->root.finfo.i.dirEntNum = newDirEnt;
-	server->root.finfo.i.DosDirNum = newDosEnt;
+	i->volNumber = volNumber;
+	i->dirEntNum = newDirEnt;
+	i->DosDirNum = newDosEnt;
 	server->m.mounted_vol[1] = 0;
 	server->m.mounted_vol[0] = 'X';
 	return 0;
@@ -437,7 +440,7 @@ ncp_lookup_volume(struct ncp_server *server, char *volname,
 	int result;
 	int volnum;
 
-	DPRINTK(KERN_DEBUG "ncp_lookup_volume: looking up vol %s\n", volname);
+	DPRINTK("ncp_lookup_volume: looking up vol %s\n", volname);
 
 	ncp_init_request(server);
 	ncp_add_byte(server, 22);	/* Subfunction: Generate dir handle */
@@ -463,11 +466,11 @@ ncp_lookup_volume(struct ncp_server *server, char *volname,
 
 	server->name_space[volnum] = ncp_get_known_namespace(server, volnum);
 
-	DPRINTK(KERN_DEBUG "lookup_vol: namespace[%d] = %d\n",
+	DPRINTK("lookup_vol: namespace[%d] = %d\n",
 		volnum, server->name_space[volnum]);
 
 	target->nameLen = strlen(volname);
-	strcpy(target->entryName, volname);
+	memcpy(target->entryName, volname, target->nameLen+1);
 	target->attributes = aDIR;
 	/* set dates to Jan 1, 1986  00:00 */
 	target->creationTime = target->modifyTime = cpu_to_le16(0x0000);
@@ -538,7 +541,7 @@ ncp_del_file_or_subdir2(struct ncp_server *server,
 
 	if (!inode) {
 #if CONFIG_NCPFS_DEBUGDENTRY
-		printk(KERN_DEBUG "ncpfs: ncpdel2: dentry->d_inode == NULL\n");
+		PRINTK("ncpfs: ncpdel2: dentry->d_inode == NULL\n");
 #endif
 		return 0xFF;	/* Any error */
 	}
@@ -583,7 +586,7 @@ int ncp_open_create_file_or_subdir(struct ncp_server *server,
 				   int open_create_mode,
 				   __u32 create_attributes,
 				   int desired_acc_rights,
-				   struct nw_file_info *target)
+				   struct ncp_entry_info *target)
 {
 	__u16 search_attribs = ntohs(0x0600);
 	__u8  volnum = target->i.volNumber;
@@ -613,14 +616,13 @@ int ncp_open_create_file_or_subdir(struct ncp_server *server,
 
 	if ((result = ncp_request(server, 87)) != 0)
 		goto out;
-	target->opened = 1;
+	if (!(create_attributes & aDIR))
+		target->opened = 1;
 	target->server_file_handle = ncp_reply_dword(server, 0);
 	target->open_create_action = ncp_reply_byte(server, 4);
 
-	if (dir != NULL) {
-		/* in target there's a new finfo to fill */
-		ncp_extract_file_info(ncp_reply_data(server, 6), &(target->i));
-	}
+	/* in target there's a new finfo to fill */
+	ncp_extract_file_info(ncp_reply_data(server, 6), &(target->i));
 	ConvertToNWfromDWORD(target->server_file_handle, target->file_handle);
 
 out:
@@ -887,4 +889,252 @@ ncp_ClearPhysicalRecord(struct ncp_server *server, const char *file_id,
 }
 #endif	/* CONFIG_NCPFS_IOCTL_LOCKING */
 
+#ifdef CONFIG_NCPFS_NLS
+/* This are the NLS conversion routines with inspirations and code parts
+ * from the vfat file system and hints from Petr Vandrovec.
+ */
 
+inline unsigned char
+ncp__tolower(struct nls_table *t, unsigned char c)
+{
+	unsigned char nc = t->charset2lower[c];
+
+	return nc ? nc : c;
+}
+
+inline unsigned char
+ncp__toupper(struct nls_table *t, unsigned char c)
+{
+	unsigned char nc = t->charset2upper[c];
+
+	return nc ? nc : c;
+}
+
+int
+ncp__io2vol(struct ncp_server *server, unsigned char *vname, unsigned int *vlen,
+		const unsigned char *iname, unsigned int ilen, int cc)
+{
+	struct nls_table *in = server->nls_io;
+	struct nls_table *out = server->nls_vol;
+	unsigned char *vname_start;
+	unsigned char *vname_end;
+	const unsigned char *iname_end;
+
+	iname_end = iname + ilen;
+	vname_start = vname;
+	vname_end = vname + *vlen - 1;
+
+	while (iname < iname_end) {
+		int chl;
+		wchar_t ec;
+
+		if (NCP_IS_FLAG(server, NCP_FLAG_UTF8)) {
+			int k;
+
+			k = utf8_mbtowc(&ec, iname, iname_end - iname);
+			if (k < 0)
+				return -EINVAL;
+			iname += k;
+		} else {
+			if (*iname == NCP_ESC) {
+				int k;
+
+				if (iname_end - iname < 5)
+					goto nospec;
+
+				ec = 0;
+				for (k = 1; k < 5; k++) {
+					unsigned char nc;
+
+					nc = iname[k] - '0';
+					if (nc >= 10) {
+						nc -= 'A' - '0' - 10;
+						if ((nc < 10) || (nc > 15)) {
+							goto nospec;
+						}
+					}
+					ec = (ec << 4) | nc;
+				}
+				iname += 5;
+			} else {
+nospec:;			
+				if ( (chl = in->char2uni(iname, iname_end - iname, &ec)) < 0)
+					return chl;
+				iname += chl;
+			}
+		}
+
+		/* unitoupper should be here! */
+
+		chl = out->uni2char(ec, vname, vname_end - vname);
+		if (chl < 0)
+			return chl;
+
+		/* this is wrong... */
+		if (cc) {
+			int chi;
+
+			for (chi = 0; chi < chl; chi++){
+				vname[chi] = ncp_toupper(out, vname[chi]);
+			}
+		}
+		vname += chl;
+	}
+
+	*vname = 0;
+	*vlen = vname - vname_start;
+	return 0;
+}
+
+int
+ncp__vol2io(struct ncp_server *server, unsigned char *iname, unsigned int *ilen,
+		const unsigned char *vname, unsigned int vlen, int cc)
+{
+	struct nls_table *in = server->nls_vol;
+	struct nls_table *out = server->nls_io;
+	const unsigned char *vname_end;
+	unsigned char *iname_start;
+	unsigned char *iname_end;
+	unsigned char *vname_cc;
+	int err;
+
+	vname_cc = NULL;
+
+	if (cc) {
+		int i;
+
+		/* this is wrong! */
+		vname_cc = kmalloc(vlen, GFP_KERNEL);
+		if (!vname_cc)
+			return -ENOMEM;
+		for (i = 0; i < vlen; i++)
+			vname_cc[i] = ncp_tolower(in, vname[i]);
+		vname = vname_cc;
+	}
+
+	iname_start = iname;
+	iname_end = iname + *ilen - 1;
+	vname_end = vname + vlen;
+
+	while (vname < vname_end) {
+		wchar_t ec;
+		int chl;
+
+		if ( (chl = in->char2uni(vname, vname_end - vname, &ec)) < 0) {
+			err = chl;
+			goto quit;
+		}
+		vname += chl;
+
+		/* unitolower should be here! */
+
+		if (NCP_IS_FLAG(server, NCP_FLAG_UTF8)) {
+			int k;
+
+			k = utf8_wctomb(iname, ec, iname_end - iname);
+			if (k < 0) {
+				err = -ENAMETOOLONG;
+				goto quit;
+			}
+			iname += k;
+		} else {
+			if ( (chl = out->uni2char(ec, iname, iname_end - iname)) >= 0) {
+				iname += chl;
+			} else {
+				int k;
+
+				if (iname_end - iname < 5) {
+					err = -ENAMETOOLONG;
+					goto quit;
+				}
+				*iname = NCP_ESC;
+				for (k = 4; k > 0; k--) {
+					unsigned char v;
+					
+					v = (ec & 0xF) + '0';
+					if (v > '9') {
+						v += 'A' - '9' - 1;
+					}
+					iname[k] = v;
+					ec >>= 4;
+				}
+				iname += 5;
+			}
+		}
+	}
+
+	*iname = 0;
+	*ilen = iname - iname_start;
+	err = 0;
+quit:;
+	if (cc)
+		kfree(vname_cc);
+	return err;
+}
+
+#else
+
+int
+ncp__io2vol(unsigned char *vname, unsigned int *vlen,
+		const unsigned char *iname, unsigned int ilen, int cc)
+{
+	int i;
+
+	if (*vlen <= ilen)
+		return -ENAMETOOLONG;
+
+	if (cc)
+		for (i = 0; i < ilen; i++) {
+			*vname = toupper(*iname);
+			vname++;
+			iname++;
+		}
+	else {
+		memmove(vname, iname, ilen);
+		vname += ilen;
+	}
+
+	*vlen = ilen;
+	*vname = 0;
+	return 0;
+}
+
+int
+ncp__vol2io(unsigned char *iname, unsigned int *ilen,
+		const unsigned char *vname, unsigned int vlen, int cc)
+{
+	int i;
+
+	if (*ilen <= vlen)
+		return -ENAMETOOLONG;
+
+	if (cc)
+		for (i = 0; i < vlen; i++) {
+			*iname = tolower(*vname);
+			iname++;
+			vname++;
+		}
+	else {
+		memmove(iname, vname, vlen);
+		iname += vlen;
+	}
+
+	*ilen = vlen;
+	*iname = 0;
+	return 0;
+}
+
+#endif
+
+inline int
+ncp_strnicmp(struct nls_table *t, const unsigned char *s1,
+					const unsigned char *s2, int n)
+{
+	int i;
+
+	for (i=0; i<n; i++)
+		if (ncp_tolower(t, s1[i]) != ncp_tolower(t, s2[i]))
+			return 1;
+
+	return 0;
+}

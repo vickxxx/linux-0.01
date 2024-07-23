@@ -1,20 +1,22 @@
-SMP on x86/Linux is now an official feature and is not experimental.
-Experimental SMP support for other architectures is underway.
+To set up SMP
 
-Please view linux/Documentation/smp for more information about enabling SMP.
+Configure the kernel and answer Y to CONFIG_SMP.
 
-SMP support for Linux with up to 16 processors using the Intel MP
-specification. 
+If you are using LILO, it is handy to have both SMP and non-SMP
+kernel images on hand. Edit /etc/lilo.conf to create an entry
+for another kernel image called "linux-smp" or something.
 
-To fix:
+The next time you compile the kernel, when running a SMP kernel,
+edit linux/Makefile and change "MAKE=make" to "MAKE=make -jN"
+(where N = number of CPU + 1, or if you have tons of memory/swap
+ you can just use "-j" without a number). Feel free to experiment
+with this one.
 
-o	Clean up processor specific/independent split.
-o	Document it all.	[PARTLY DONE]
-o	Halting other CPUs on reset or panic doesn't always work.
-o	Don't waste page at 4 K--don't need it now (watch the GDT code).
-o	Dump bootup pages once booted somehow.
-o	Clean up warnings/volatiles.
-o	486 startup code.
-o	How to handle mixed FPU/non FPU processors.
-o	Test IO-APIC on various hardware.
-o	Separate IO-APIC from SMP.
+Of course you should time how long each build takes :-)
+Example:
+   make config
+   time -v sh -c 'make dep ; make clean install modules modules_install'
+
+If you are using some Compaq MP compliant machines you will need to set
+the operating system in the BIOS settings to "Unixware" - don't ask me
+why Compaqs don't work otherwise.

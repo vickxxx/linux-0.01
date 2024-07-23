@@ -7,23 +7,30 @@
  */
 
 #include <linux/string.h>
+#include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include "hpfs_fn.h"
 
+/* HUH? */
 int hpfs_open(struct inode *i, struct file *f)
 {
+	lock_kernel();
 	hpfs_lock_inode(i);
 	hpfs_unlock_inode(i); /* make sure nobody is deleting the file */
+	unlock_kernel();
 	if (!i->i_nlink) return -ENOENT;
 	return 0;
 }
 
 int hpfs_file_release(struct inode *inode, struct file *file)
 {
+	lock_kernel();
 	hpfs_write_if_changed(inode);
+	unlock_kernel();
 	return 0;
 }
 
-int hpfs_file_fsync(struct file *file, struct dentry *dentry)
+int hpfs_file_fsync(struct file *file, struct dentry *dentry, int datasync)
 {
 	/*return file_fsync(file, dentry);*/
 	return 0; /* Don't fsync :-) */
@@ -54,95 +61,69 @@ void hpfs_truncate(struct inode *i)
 	if (IS_IMMUTABLE(i)) return /*-EPERM*/;
 	i->i_hpfs_n_secs = 0;
 	i->i_blocks = 1 + ((i->i_size + 511) >> 9);
+	i->u.hpfs_i.mmu_private = i->i_size;
 	hpfs_truncate_btree(i->i_sb, i->i_ino, 1, ((i->i_size + 511) >> 9));
 	hpfs_write_inode(i);
 }
 
-int hpfs_getblk_block(struct inode *inode, long block, int create, int *err, int *created)
+int hpfs_get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create)
 {
-	int add;
-	int sec = 0;
-	down(&inode->i_sem);
-	if (err) *err = 0;
-	if (created) *created = 0;
-	if (!inode->i_blocks) {
-		hpfs_error(inode->i_sb, "hpfs_get_block: inode %08x has no blocks", inode->i_ino);
-		if (err) *err = -EFSERROR;
-		up(&inode->i_sem);
+	secno s;
+	s = hpfs_bmap(inode, iblock);
+	if (s) {
+		bh_result->b_dev = inode->i_dev;
+		bh_result->b_blocknr = s;
+		bh_result->b_state |= (1UL << BH_Mapped);
 		return 0;
 	}
-	if (block < ((add = inode->i_blocks - 1))) {
-		int bm;
-		if (!(bm = hpfs_bmap(inode, block))) {
-			hpfs_error(inode->i_sb, "hpfs_get_block: cound not bmap block %08x, inode %08x, size %08x", (int)block, inode->i_ino, (int)inode->i_size);
-			*err = -EFSERROR;
-		}
-		up(&inode->i_sem);
-		return bm;
+	if (!create) return 0;
+	if (iblock<<9 != inode->u.hpfs_i.mmu_private) {
+		BUG();
+		return -EIO;
 	}
-	if (!create) {
-		if (err) *err = -EFBIG;
-		up(&inode->i_sem);
-		return 0;
+	if ((s = hpfs_add_sector_to_btree(inode->i_sb, inode->i_ino, 1, inode->i_blocks - 1)) == -1) {
+		hpfs_truncate_btree(inode->i_sb, inode->i_ino, 1, inode->i_blocks - 1);
+		return -ENOSPC;
 	}
-	if (created) *created = 1;
-	while (add <= block) {
-		if ((sec = hpfs_add_sector_to_btree(inode->i_sb, inode->i_ino, 1, add)) == -1) {
-			if (err) *err = -ENOSPC;
-			hpfs_truncate_btree(inode->i_sb, inode->i_ino, 1, inode->i_blocks - 1);
-			return 0;
-		} /* FIXME: clear block */
-		add++;
-	}
-	inode->i_blocks = add + 1;
-	up(&inode->i_sem);
-	return sec;
+	inode->i_blocks++;
+	inode->u.hpfs_i.mmu_private += 512;
+	bh_result->b_dev = inode->i_dev;
+	bh_result->b_blocknr = s;
+	bh_result->b_state |= (1UL << BH_Mapped) | (1UL << BH_New);
+	return 0;
 }
 
-/* copied from ext2fs */
-static int hpfs_get_block(struct inode *inode, unsigned long block, struct buffer_head *bh, int update)
+static int hpfs_writepage(struct page *page)
 {
-	if (!bh->b_blocknr) {
-		int error, created;
-		unsigned long blocknr;
-
-		blocknr = hpfs_getblk_block(inode, block, 1, &error, &created);
-		if (!blocknr) {
-			if (!error)
-				error = -ENOSPC;
-			return error;
-		}
-
-		bh->b_dev = inode->i_dev;
-		bh->b_blocknr = blocknr;
-
-		if (!update)
-			return 0;
-
-		if (created) {
-			memset(bh->b_data, 0, bh->b_size);
-			set_bit(BH_Uptodate, &bh->b_state);
-			return 0;
-		}
-	}
-
-	if (!update)
-		return 0;
-
-	lock_kernel();
-	ll_rw_block(READ, 1, &bh);
-	wait_on_buffer(bh);
-	unlock_kernel();
-
-	return buffer_uptodate(bh) ? 0 : -EIO;
+	return block_write_full_page(page,hpfs_get_block);
 }
+static int hpfs_readpage(struct file *file, struct page *page)
+{
+	return block_read_full_page(page,hpfs_get_block);
+}
+static int hpfs_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
+{
+	return cont_prepare_write(page,from,to,hpfs_get_block,
+		&page->mapping->host->u.hpfs_i.mmu_private);
+}
+static int _hpfs_bmap(struct address_space *mapping, long block)
+{
+	return generic_block_bmap(mapping,block,hpfs_get_block);
+}
+struct address_space_operations hpfs_aops = {
+	readpage: hpfs_readpage,
+	writepage: hpfs_writepage,
+	sync_page: block_sync_page,
+	prepare_write: hpfs_prepare_write,
+	commit_write: generic_commit_write,
+	bmap: _hpfs_bmap
+};
 
 ssize_t hpfs_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 {
 	ssize_t retval;
 
-	retval = generic_file_write(file, buf, count,
-				    ppos, block_write_partial_page);
+	retval = generic_file_write(file, buf, count, ppos);
 	if (retval > 0) {
 		struct inode *inode = file->f_dentry->d_inode;
 		inode->i_mtime = CURRENT_TIME;

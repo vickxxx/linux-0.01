@@ -13,46 +13,22 @@
  *
  * Changes
  *	Alan Cox		Modularisation, changed memory allocations
+ *	Christoph Hellwig	Adapted to module_init/module_exit
  *
  * Status
  *	Untested
  */
 
-#include <linux/config.h>
+#include <linux/init.h>
 #include <linux/module.h>
 
 #include "sound_config.h"
-#include "soundmodule.h"
-
-#ifdef CONFIG_VMIDI
 
 #include "v_midi.h"
 
 static vmidi_devc *v_devc[2] = { NULL, NULL};
 static int midi1,midi2;
 static void *midi_mem = NULL;
-
-#ifdef MODULE
-
-static struct address_info config;	/* dummy */
-
-int init_module(void)
-{
-	printk("MIDI Loopback device driver\n");
-	if (!probe_v_midi(&config))
-		return -ENODEV;
-	attach_v_midi(&config);
-	SOUND_LOCK;
-	return 0;
-}
-
-void cleanup_module(void)
-{
-	unload_v_midi(&config);
-	SOUND_LOCK_END;
-}
-
-#endif
 
 /*
  * The DSP channel can be used either for input or output. Variable
@@ -129,7 +105,7 @@ static int v_midi_out (int dev, unsigned char midi_byte)
 	return 1;
 }
 
-static int v_midi_start_read (int dev)
+static inline int v_midi_start_read (int dev)
 {
 	return 0;
 }
@@ -146,7 +122,7 @@ static int v_midi_end_read (int dev)
 
 /* why -EPERM and not -EINVAL?? */
 
-static int v_midi_ioctl (int dev, unsigned cmd, caddr_t arg)
+static inline int v_midi_ioctl (int dev, unsigned cmd, caddr_t arg)
 {
 	return -EPERM;
 }
@@ -159,36 +135,30 @@ static int v_midi_ioctl (int dev, unsigned cmd, caddr_t arg)
 
 static struct midi_operations v_midi_operations =
 {
-	{"Loopback MIDI Port 1", 0, 0, SNDCARD_VMIDI},
-	&std_midi_synth,
-	{0},
-	v_midi_open,
-	v_midi_close,
-	v_midi_ioctl,
-	v_midi_out,
-	v_midi_start_read,
-	v_midi_end_read,
-	NULL,
-	NULL,
-	NULL,
-	NULL
+	owner:		THIS_MODULE,
+	info:		{"Loopback MIDI Port 1", 0, 0, SNDCARD_VMIDI},
+	converter:	&std_midi_synth,
+	in_info:	{0},
+	open:		v_midi_open,
+	close:		v_midi_close,
+	ioctl:		v_midi_ioctl,
+	outputc:	v_midi_out,
+	start_read:	v_midi_start_read,
+	end_read:	v_midi_end_read,
 };
 
 static struct midi_operations v_midi_operations2 =
 {
-	{"Loopback MIDI Port 2", 0, 0, SNDCARD_VMIDI},
-	&std_midi_synth,
-	{0},
-	v_midi_open,
-	v_midi_close,
-	v_midi_ioctl,
-	v_midi_out,
-	v_midi_start_read,
-	v_midi_end_read,
-	NULL,
-	NULL,
-	NULL,
-	NULL
+	owner:		THIS_MODULE,
+	info:		{"Loopback MIDI Port 2", 0, 0, SNDCARD_VMIDI},
+	converter:	&std_midi_synth,
+	in_info:	{0},
+	open:		v_midi_open,
+	close:		v_midi_close,
+	ioctl:		v_midi_ioctl,
+	outputc:	v_midi_out,
+	start_read:	v_midi_start_read,
+	end_read:	v_midi_end_read,
 };
 
 /*
@@ -204,7 +174,7 @@ struct vmidi_memory
 	struct vmidi_devc v_ops[2];
 };
 
-void attach_v_midi (struct address_info *hw_config)
+static void __init attach_v_midi (struct address_info *hw_config)
 {
 	struct vmidi_memory *m;
 	/* printk("Attaching v_midi device.....\n"); */
@@ -285,17 +255,35 @@ void attach_v_midi (struct address_info *hw_config)
 	/* printk("Attached v_midi device\n"); */
 }
 
-int probe_v_midi(struct address_info *hw_config)
+static inline int __init probe_v_midi(struct address_info *hw_config)
 {
 	return(1);	/* always OK */
 }
 
 
-void unload_v_midi(struct address_info *hw_config)
+static void __exit unload_v_midi(struct address_info *hw_config)
 {
 	sound_unload_mididev(midi1);
 	sound_unload_mididev(midi2);
 	kfree(midi_mem);
 }
 
-#endif
+static struct address_info cfg; /* dummy */
+
+static int __init init_vmidi(void)
+{
+	printk("MIDI Loopback device driver\n");
+	if (!probe_v_midi(&cfg))
+		return -ENODEV;
+	attach_v_midi(&cfg);
+
+	return 0;
+}
+
+static void __exit cleanup_vmidi(void)
+{
+	unload_v_midi(&cfg);
+}
+
+module_init(init_vmidi);
+module_exit(cleanup_vmidi);

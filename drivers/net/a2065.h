@@ -1,8 +1,7 @@
 /*
  * Amiga Linux/68k A2065 Ethernet Driver
  *
- * (C) Copyright 1995 by Geert Uytterhoeven
- *			(Geert.Uytterhoeven@cs.kuleuven.ac.be)
+ * (C) Copyright 1995 by Geert Uytterhoeven <geert@linux-m68k.org>
  *
  * ---------------------------------------------------------------------------
  *
@@ -170,9 +169,8 @@ struct lance_tx_desc {
  *		A2065 Expansion Board Structure
  */
 
-struct A2065Board {
-	u_char Pad1[0x4000];
-	volatile struct lance_regs Lance;
-	u_char Pad2[0x3ffc];
-	volatile u_char RAM[0x8000];
-};
+#define A2065_LANCE		0x4000
+
+#define A2065_RAM		0x8000
+#define A2065_RAM_SIZE		0x8000
+

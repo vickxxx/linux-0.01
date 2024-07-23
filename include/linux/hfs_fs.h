@@ -140,6 +140,19 @@ struct hfs_hdr_layout {
 			*order[HFS_HDR_MAX];	/* 'descr' ordered by offset */
 };
 
+/* header layout for netatalk's v1 appledouble file format */
+struct hfs_nat_hdr {
+	hfs_lword_t	magic;
+	hfs_lword_t	version;
+	hfs_byte_t	homefs[16];
+	hfs_word_t	entries;
+	hfs_byte_t	descrs[12*5];
+	hfs_byte_t	real_name[255];	/* id=3 */
+	hfs_byte_t	comment[200];	/* id=4 XXX: not yet implemented */
+	hfs_byte_t	old_info[16];	/* id=7 */
+	hfs_u8		finderinfo[32]; /* id=9 */
+};
+
 /* 
  * Default header layout for Netatalk and AppleDouble
  */
@@ -221,8 +234,6 @@ extern struct hfs_cat_entry *hfs_cat_get(struct hfs_mdb *,
 					 const struct hfs_cat_key *);
 
 /* dir.c */
-extern hfs_rwret_t hfs_dir_read(struct file *, char *, hfs_rwarg_t,
-				loff_t *);
 extern int hfs_create(struct inode *, struct dentry *, int);
 extern int hfs_mkdir(struct inode *, struct dentry *, int);
 extern int hfs_unlink(struct inode *, struct dentry *);
@@ -236,12 +247,14 @@ extern const struct hfs_name hfs_cap_reserved2[];
 extern struct inode_operations hfs_cap_ndir_inode_operations;
 extern struct inode_operations hfs_cap_fdir_inode_operations;
 extern struct inode_operations hfs_cap_rdir_inode_operations;
+extern struct file_operations hfs_cap_dir_operations;
 extern void hfs_cap_drop_dentry(struct dentry *, const ino_t);
 
 /* dir_dbl.c */
 extern const struct hfs_name hfs_dbl_reserved1[];
 extern const struct hfs_name hfs_dbl_reserved2[];
 extern struct inode_operations hfs_dbl_dir_inode_operations;
+extern struct file_operations hfs_dbl_dir_operations;
 extern void hfs_dbl_drop_dentry(struct dentry *, const ino_t);
 
 /* dir_nat.c */
@@ -249,12 +262,8 @@ extern const struct hfs_name hfs_nat_reserved1[];
 extern const struct hfs_name hfs_nat_reserved2[];
 extern struct inode_operations hfs_nat_ndir_inode_operations;
 extern struct inode_operations hfs_nat_hdir_inode_operations;
+extern struct file_operations hfs_nat_dir_operations;
 extern void hfs_nat_drop_dentry(struct dentry *, const ino_t);
-
-/* dir_sngl.c */
-extern const struct hfs_name hfs_sngl_reserved1[];
-extern const struct hfs_name hfs_sngl_reserved2[];
-extern struct inode_operations hfs_sngl_dir_inode_operations;
 
 /* file.c */
 extern hfs_s32 hfs_do_read(struct inode *, struct hfs_fork *, hfs_u32,
@@ -263,21 +272,27 @@ extern hfs_s32 hfs_do_write(struct inode *, struct hfs_fork *, hfs_u32,
 			    const char *, hfs_u32);
 extern void hfs_file_fix_mode(struct hfs_cat_entry *entry);
 extern struct inode_operations hfs_file_inode_operations;
+extern struct file_operations hfs_file_operations;
 
 /* file_cap.c */
 extern struct inode_operations hfs_cap_info_inode_operations;
+extern struct file_operations hfs_cap_info_operations;
 
 /* file_hdr.c */
 extern struct inode_operations hfs_hdr_inode_operations;
+extern struct file_operations hfs_hdr_operations;
 extern const struct hfs_hdr_layout hfs_dbl_fil_hdr_layout;
 extern const struct hfs_hdr_layout hfs_dbl_dir_hdr_layout;
 extern const struct hfs_hdr_layout hfs_nat_hdr_layout;
 extern const struct hfs_hdr_layout hfs_nat2_hdr_layout;
 extern const struct hfs_hdr_layout hfs_sngl_hdr_layout;
+extern void hdr_truncate(struct inode *,size_t);
 
 /* inode.c */
 extern void hfs_put_inode(struct inode *);
 extern int hfs_notify_change(struct dentry *, struct iattr *);
+extern int hfs_notify_change_cap(struct dentry *, struct iattr *);
+extern int hfs_notify_change_hdr(struct dentry *, struct iattr *);
 extern struct inode *hfs_iget(struct hfs_cat_entry *, ino_t, struct dentry *);
 
 extern void hfs_cap_ifill(struct inode *, ino_t, const int);
@@ -287,7 +302,6 @@ extern void hfs_sngl_ifill(struct inode *, ino_t, const int);
 
 /* super.c */
 extern struct super_block *hfs_read_super(struct super_block *,void *,int);
-extern int init_hfs_fs(void);
 
 /* trans.c */
 extern void hfs_colon2mac(struct hfs_name *, const char *, int);
@@ -306,12 +320,12 @@ extern void hfs_tolower(unsigned char *, int);
 #define	HFS_I(X)	(&((X)->u.hfs_i))
 #define	HFS_SB(X)	(&((X)->u.hfs_sb))
 
-extern __inline__ void hfs_nameout(struct inode *dir, struct hfs_name *out,
+static inline void hfs_nameout(struct inode *dir, struct hfs_name *out,
 				   const char *in, int len) {
 	HFS_SB(dir->i_sb)->s_nameout(out, in, len);
 }
 
-extern __inline__ int hfs_namein(struct inode *dir, char *out,
+static inline int hfs_namein(struct inode *dir, char *out,
 				 const struct hfs_name *in) {
 	int len = HFS_SB(dir->i_sb)->s_namein(out, in);
 	if (HFS_SB(dir->i_sb)->s_lowercase) {

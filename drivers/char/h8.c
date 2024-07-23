@@ -3,6 +3,11 @@
  *
  * The H8 is used to deal with the power and thermal environment
  * of a system.
+ *
+ * Fixes:
+ *	June 1999, AV	added releasing /proc/driver/h8
+ *	Feb  2000, Borislav Deianov
+ *			changed queues to use list.h instead of lists.h
  */
 
 #include <linux/config.h>
@@ -16,16 +21,15 @@
 #include <linux/stddef.h>
 #include <linux/timer.h>
 #include <linux/fcntl.h>
-#include <linux/malloc.h>
 #include <linux/linkage.h>
-#ifdef CONFIG_PROC_FS
 #include <linux/stat.h>
 #include <linux/proc_fs.h>
-#endif
 #include <linux/miscdevice.h>
-#include <linux/lists.h>
+#include <linux/list.h>
 #include <linux/ioport.h>
 #include <linux/poll.h>
+#include <linux/init.h>
+#include <linux/slab.h>
 
 #define __KERNEL_SYSCALLS__
 #include <asm/unistd.h>
@@ -50,15 +54,13 @@
 /*
  * Forward declarations.
  */
-int          h8_init(void);
+static int   h8_init(void);
 int          h8_display_blank(void);
 int          h8_display_unblank(void);
 
 static void  h8_intr(int irq, void *dev_id, struct pt_regs *regs);
 
-#ifdef CONFIG_PROC_FS
-static int   h8_get_info(char *, char **, off_t, int, int);
-#endif
+static int   h8_get_info(char *, char **, off_t, int);
 
 /*
  * Support Routines.
@@ -104,33 +106,6 @@ static int h8_monitor_timer_active = 0;
 
 static char  driver_version[] = "X0.0";/* no spaces */
 
-static struct file_operations h8_fops = {
-        NULL,           /* lseek */
-        NULL,
-        NULL,           /* write */
-        NULL,           /* readdir */
-        NULL,
-        NULL,
-        NULL,           /* mmap */
-        NULL,
-	NULL,		/* flush */
-        NULL,
-        NULL,           /* fsync */
-        NULL            /* fasync */
-};
-
-static struct miscdevice h8_device = {
-        H8_MINOR_DEV,
-        "h8",
-        &h8_fops
-};
-
-#ifdef CONFIG_PROC_FS
-static struct proc_dir_entry    h8_proc_entry = {
-        0, 3, "h8", S_IFREG | S_IRUGO, 1, 0, 0, 0, 0, h8_get_info
-};
-#endif
-
 union	intr_buf intrbuf;
 int	intr_buf_ptr;
 union   intr_buf xx;	
@@ -153,7 +128,9 @@ unsigned int h8_state = H8_IDLE;
 unsigned int h8_index = -1;
 unsigned int h8_enabled = 0;
 
-queue_head_t h8_actq, h8_cmdq, h8_freeq;
+LIST_HEAD(h8_actq);
+LIST_HEAD(h8_cmdq);
+LIST_HEAD(h8_freeq);
 
 /* 
  * Globals used in thermal control of Alphabook1.
@@ -182,7 +159,7 @@ int speed_tab[6] = {230, 153, 115, 57, 28, 14};
 static void h8_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	u_char	stat_reg, data_reg;
-	h8_cmd_q_t *qp = (h8_cmd_q_t *)QUEUE_FIRST(&h8_actq, link);
+	h8_cmd_q_t *qp = list_entry(h8_actq.next, h8_cmd_q_t, link);
 
 	stat_reg = H8_GET_STATUS;
 	data_reg = H8_READ_DATA;
@@ -272,7 +249,7 @@ static void h8_intr(int irq, void *dev_id, struct pt_regs *regs)
 	        return;
 	    } else if (data_reg == H8_SYNC_BYTE) {
 	        h8_state = H8_IDLE;
-		if (!QUEUE_EMPTY(&h8_actq, link))
+		if (!list_empty(&h8_actq))
 		    h8_send_next_cmd_byte();
 	    } else {
 	        Dprintk ("h8_intr: resync unknown data 0x%x \n", data_reg);
@@ -288,10 +265,10 @@ static void h8_intr(int irq, void *dev_id, struct pt_regs *regs)
 		/* If command reception finished. */
 		if (qp->cnt == qp->nrsp) {
 		    h8_state = H8_IDLE;
-		    QUEUE_REMOVE(&h8_actq, qp, link);
+		    list_del(&qp->link);
 		    h8_cmd_done (qp);
 		    /* More commands to send over? */
-		    if (!QUEUE_EMPTY(&h8_cmdq, link))
+		    if (!list_empty(&h8_cmdq))
 		        h8_start_new_cmd();
 		}
 		return;
@@ -307,64 +284,26 @@ static void h8_intr(int irq, void *dev_id, struct pt_regs *regs)
 	return;
 }
 
-#ifdef MODULE
-
-int init_module(void)
+static void __exit h8_cleanup (void)
 {
-        printk("H8 module at %X(Interrupt %d)\n", h8_base, h8_irq);
-        if(request_irq(h8_irq, h8_intr, SA_INTERRUPT, "h8", NULL))
-        {
-                printk("H8: error: IRQ %d is not free.\n", h8_irq);
-                return -EIO;
-        }
-
-        misc_register(&h8_device);
-        request_region(h8_base, 8, "h8");
-
-#ifdef CONFIG_PROC_FS
-        proc_register(&proc_root, &h8_proc_entry);
-#endif
-
-	QUEUE_INIT(&h8_actq, link, h8_cmd_q_t *);
-	QUEUE_INIT(&h8_cmdq, link, h8_cmd_q_t *);
-	QUEUE_INIT(&h8_freeq, link, h8_cmd_q_t *);
-	h8_alloc_queues();
-
-	h8_hw_init();
-
-	kernel_thread(h8_monitor_thread, NULL, 0);
-
-        return 0;
-}
-
-void cleanup_module(void)
-{
-        misc_deregister(&h8_device);
+	remove_proc_entry("driver/h8", NULL);
         release_region(h8_base, 8);
         free_irq(h8_irq, NULL);
 }
 
-#else /* MODULE */
-
-int h8_init(void)
+static int __init h8_init(void)
 {
         if(request_irq(h8_irq, h8_intr, SA_INTERRUPT, "h8", NULL))
         {
-                printk("H8: error: IRQ %d is not free\n", h8_irq);
+                printk(KERN_ERR "H8: error: IRQ %d is not free\n", h8_irq);
                 return -EIO;
         }
-        printk("H8 at 0x%x IRQ %d\n", h8_base, h8_irq);
+        printk(KERN_INFO "H8 at 0x%x IRQ %d\n", h8_base, h8_irq);
 
-#ifdef CONFIG_PROC_FS
-        proc_register(&proc_root, &h8_proc_entry);
-#endif
+        create_proc_info_entry("driver/h8", 0, NULL, h8_get_info);
 
-        misc_register(&h8_device);
         request_region(h8_base, 8, "h8");
 
-	QUEUE_INIT(&h8_actq, link, h8_cmd_q_t *);
-	QUEUE_INIT(&h8_cmdq, link, h8_cmd_q_t *);
-	QUEUE_INIT(&h8_freeq, link, h8_cmd_q_t *);
 	h8_alloc_queues();
 
 	h8_hw_init();
@@ -373,9 +312,11 @@ int h8_init(void)
 
         return 0;
 }
-#endif /* MODULE */
 
-void h8_hw_init(void)
+module_init(h8_init);
+module_exit(h8_cleanup);
+
+static void __init h8_hw_init(void)
 {
 	u_char	buf[H8_MAX_CMD_SIZE];
 
@@ -407,9 +348,9 @@ void h8_hw_init(void)
 	return;
 }
 
-#ifdef CONFIG_PROC_FS
-int h8_get_info(char *buf, char **start, off_t fpos, int length, int dummy)
+static int h8_get_info(char *buf, char **start, off_t fpos, int length)
 {
+#ifdef CONFIG_PROC_FS
         char *p;
 
         if (!h8_enabled)
@@ -430,8 +371,10 @@ int h8_get_info(char *buf, char **start, off_t fpos, int length, int dummy)
 		     );
 
         return p - buf;
-}
+#else
+	return 0;
 #endif
+}
 
 /* Called from console driver -- must make sure h8_enabled. */
 int h8_display_blank(void)
@@ -483,7 +426,7 @@ h8_alloc_queues(void)
         save_flags(flags); cli();
         for (i = 0; i < H8_Q_ALLOC_AMOUNT; i++) {
                 /* place each at front of freeq */
-                QUEUE_ENTER(&h8_freeq, &qp[i], link, h8_cmd_q_t *);
+                list_add(&qp[i].link, &h8_freeq);
         }
         restore_flags(flags);
         return (1);
@@ -501,15 +444,15 @@ h8_q_cmd(u_char *cmd, int cmd_size, int resp_size)
 
         /* get cmd buf */
 	save_flags(flags); cli();
-        while (QUEUE_EMPTY(&h8_freeq, link)) {
+        while (list_empty(&h8_freeq)) {
                 Dprintk("H8: need to allocate more cmd buffers\n");
                 restore_flags(flags);
                 h8_alloc_queues();
                 save_flags(flags); cli();
         }
         /* get first element from queue */
-        qp = (h8_cmd_q_t *)QUEUE_FIRST(&h8_freeq, link);
-        QUEUE_REMOVE(&h8_freeq, qp, link);
+        qp = list_entry(h8_freeq.next, h8_cmd_q_t, link);
+        list_del(&qp->link);
 
         restore_flags(flags);
 
@@ -522,7 +465,8 @@ h8_q_cmd(u_char *cmd, int cmd_size, int resp_size)
         /* queue it at the end of the cmd queue */
         save_flags(flags); cli();
 
-        QUEUE_ENTER(&h8_cmdq, qp, link, h8_cmd_q_t *);
+        /* XXX this actually puts it at the start of cmd queue, bug? */
+        list_add(&qp->link, &h8_cmdq);
 
         restore_flags(flags);
 
@@ -543,13 +487,13 @@ h8_start_new_cmd(void)
                 return;
         }
 
-        if (!QUEUE_EMPTY(&h8_actq, link)) {
+        if (!list_empty(&h8_actq)) {
                 Dprintk("h8_start_new_cmd: inconsistency: IDLE with non-empty active queue!\n");
                 restore_flags(flags);
                 return;
         }
 
-        if (QUEUE_EMPTY(&h8_cmdq, link)) {
+        if (list_empty(&h8_cmdq)) {
                 Dprintk("h8_start_new_cmd: no command to dequeue\n");
                 restore_flags(flags);
                 return;
@@ -558,9 +502,10 @@ h8_start_new_cmd(void)
          * Take first command off of the command queue and put
          * it on the active queue.
          */
-        qp = (h8_cmd_q_t *) QUEUE_FIRST(&h8_cmdq, link);
-        QUEUE_REMOVE(&h8_cmdq, qp, link);
-        QUEUE_ENTER(&h8_actq, qp, link, h8_cmd_q_t *);
+        qp = list_entry(h8_cmdq.next, h8_cmd_q_t, link);
+        list_del(&qp->link);
+        /* XXX should this go to the end of the active queue? */
+        list_add(&qp->link, &h8_actq);
         h8_state = H8_XMIT;
         if (h8_debug & 0x1)
                 Dprintk("h8_start_new_cmd: Starting a command\n");
@@ -575,7 +520,7 @@ h8_start_new_cmd(void)
 void
 h8_send_next_cmd_byte(void)
 {
-        h8_cmd_q_t      *qp = (h8_cmd_q_t *)QUEUE_FIRST(&h8_actq, link);
+        h8_cmd_q_t      *qp = list_entry(h8_actq.next, h8_cmd_q_t, link);
         int cnt;
 
         cnt = qp->cnt;
@@ -732,7 +677,7 @@ h8_cmd_done(h8_cmd_q_t *qp)
 	    if (h8_debug & 0x40000) 
 	        printk("H8: Sync command done - byte returned was 0x%x\n", 
 		       qp->rcvbuf[0]);
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *);
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_RD_SN:
@@ -740,7 +685,7 @@ h8_cmd_done(h8_cmd_q_t *qp)
 	    printk("H8: read Ethernet address: command done - address: %x - %x - %x - %x - %x - %x \n", 
 		   qp->rcvbuf[0], qp->rcvbuf[1], qp->rcvbuf[2],
 		   qp->rcvbuf[3], qp->rcvbuf[4], qp->rcvbuf[5]);
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *);
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_RD_HW_VER:
@@ -748,13 +693,13 @@ h8_cmd_done(h8_cmd_q_t *qp)
 	case H8_RD_MAX_TEMP:
 	    printk("H8: Max recorded CPU temp %d, Sys temp %d\n",
 		   qp->rcvbuf[0], qp->rcvbuf[1]);
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *);
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_RD_MIN_TEMP:
 	    printk("H8: Min recorded CPU temp %d, Sys temp %d\n",
 		   qp->rcvbuf[0], qp->rcvbuf[1]);
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *);
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_RD_CURR_TEMP:
@@ -762,7 +707,7 @@ h8_cmd_done(h8_cmd_q_t *qp)
 	    xx.byte[0] = qp->rcvbuf[0];
 	    xx.byte[1] = qp->rcvbuf[1];
 	    wake_up(&h8_sync_wait); 
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *); 
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_RD_SYS_VARIENT:
@@ -783,7 +728,7 @@ h8_cmd_done(h8_cmd_q_t *qp)
 	    xx.byte[0] = qp->rcvbuf[1];
 	    h8_sync_channel |= H8_GET_EXT_STATUS;
 	    wake_up(&h8_sync_wait); 
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *); 
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_RD_USER_CFG:
@@ -798,7 +743,7 @@ h8_cmd_done(h8_cmd_q_t *qp)
 	case H8_RD_INT_BATT_STATUS:
 	    printk("H8: Read int batt status cmd done - returned was %x %x %x\n",
 		   qp->rcvbuf[0], qp->rcvbuf[1], qp->rcvbuf[2]);
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *);
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_RD_EXT_BATT_STATUS:
@@ -810,7 +755,7 @@ h8_cmd_done(h8_cmd_q_t *qp)
 	        printk("H8: Device control cmd done - byte returned was 0x%x\n",
 		       qp->rcvbuf[0]);
 	    }
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *);
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_CTL_TFT_BRT_DC:
@@ -831,7 +776,7 @@ h8_cmd_done(h8_cmd_q_t *qp)
 	        XDprintk("H8: ctl upper thermal thresh cmd done - returned was %d\n",
 		       qp->rcvbuf[0]);
 	    }
-	    QUEUE_ENTER(&h8_freeq, qp, link, h8_cmd_q_t *);
+	    list_add(&qp->link, &h8_freeq);
 	    break;
 
 	case H8_CTL_LOWER_TEMP:

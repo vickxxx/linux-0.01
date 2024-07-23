@@ -9,6 +9,7 @@
 #include <linux/mman.h>
 
 #include <asm/uaccess.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 
 static inline void change_pte_range(pmd_t * pmd, unsigned long address,
@@ -20,7 +21,7 @@ static inline void change_pte_range(pmd_t * pmd, unsigned long address,
 	if (pmd_none(*pmd))
 		return;
 	if (pmd_bad(*pmd)) {
-		printk("change_pte_range: bad pmd (%08lx)\n", pmd_val(*pmd));
+		pmd_ERROR(*pmd);
 		pmd_clear(pmd);
 		return;
 	}
@@ -30,12 +31,19 @@ static inline void change_pte_range(pmd_t * pmd, unsigned long address,
 	if (end > PMD_SIZE)
 		end = PMD_SIZE;
 	do {
-		pte_t entry = *pte;
-		if (pte_present(entry))
+		if (pte_present(*pte)) {
+			pte_t entry;
+
+			/* Avoid an SMP race with hardware updated dirty/clean
+			 * bits by wiping the pte and then setting the new pte
+			 * into place.
+			 */
+			entry = ptep_get_and_clear(pte);
 			set_pte(pte, pte_modify(entry, newprot));
+		}
 		address += PAGE_SIZE;
 		pte++;
-	} while (address < end);
+	} while (address && (address < end));
 }
 
 static inline void change_pmd_range(pgd_t * pgd, unsigned long address,
@@ -47,7 +55,7 @@ static inline void change_pmd_range(pgd_t * pgd, unsigned long address,
 	if (pgd_none(*pgd))
 		return;
 	if (pgd_bad(*pgd)) {
-		printk("change_pmd_range: bad pgd (%08lx)\n", pgd_val(*pgd));
+		pgd_ERROR(*pgd);
 		pgd_clear(pgd);
 		return;
 	}
@@ -60,7 +68,7 @@ static inline void change_pmd_range(pgd_t * pgd, unsigned long address,
 		change_pte_range(pmd, address, end - address, newprot);
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
-	} while (address < end);
+	} while (address && (address < end));
 }
 
 static void change_protection(unsigned long start, unsigned long end, pgprot_t newprot)
@@ -70,11 +78,15 @@ static void change_protection(unsigned long start, unsigned long end, pgprot_t n
 
 	dir = pgd_offset(current->mm, start);
 	flush_cache_range(current->mm, beg, end);
-	while (start < end) {
+	if (start >= end)
+		BUG();
+	spin_lock(&current->mm->page_table_lock);
+	do {
 		change_pmd_range(dir, start, end - start, newprot);
 		start = (start + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
-	}
+	} while (start && (start < end));
+	spin_unlock(&current->mm->page_table_lock);
 	flush_tlb_range(current->mm, beg, end);
 	return;
 }
@@ -82,8 +94,10 @@ static void change_protection(unsigned long start, unsigned long end, pgprot_t n
 static inline int mprotect_fixup_all(struct vm_area_struct * vma,
 	int newflags, pgprot_t prot)
 {
+	spin_lock(&vma->vm_mm->page_table_lock);
 	vma->vm_flags = newflags;
 	vma->vm_page_prot = prot;
+	spin_unlock(&vma->vm_mm->page_table_lock);
 	return 0;
 }
 
@@ -97,16 +111,21 @@ static inline int mprotect_fixup_start(struct vm_area_struct * vma,
 	if (!n)
 		return -ENOMEM;
 	*n = *vma;
-	vma->vm_start = end;
 	n->vm_end = end;
-	vma->vm_offset += vma->vm_start - n->vm_start;
 	n->vm_flags = newflags;
+	n->vm_raend = 0;
 	n->vm_page_prot = prot;
 	if (n->vm_file)
-		atomic_inc(&n->vm_file->f_count);
+		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	insert_vm_struct(current->mm, n);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_pgoff += (end - vma->vm_start) >> PAGE_SHIFT;
+	vma->vm_start = end;
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -120,16 +139,21 @@ static inline int mprotect_fixup_end(struct vm_area_struct * vma,
 	if (!n)
 		return -ENOMEM;
 	*n = *vma;
-	vma->vm_end = start;
 	n->vm_start = start;
-	n->vm_offset += n->vm_start - vma->vm_start;
+	n->vm_pgoff += (n->vm_start - vma->vm_start) >> PAGE_SHIFT;
 	n->vm_flags = newflags;
+	n->vm_raend = 0;
 	n->vm_page_prot = prot;
 	if (n->vm_file)
-		atomic_inc(&n->vm_file->f_count);
+		get_file(n->vm_file);
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
-	insert_vm_struct(current->mm, n);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_end = start;
+	__insert_vm_struct(current->mm, n);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -150,21 +174,28 @@ static inline int mprotect_fixup_middle(struct vm_area_struct * vma,
 	*left = *vma;
 	*right = *vma;
 	left->vm_end = start;
-	vma->vm_start = start;
-	vma->vm_end = end;
 	right->vm_start = end;
-	vma->vm_offset += vma->vm_start - left->vm_start;
-	right->vm_offset += right->vm_start - left->vm_start;
-	vma->vm_flags = newflags;
-	vma->vm_page_prot = prot;
+	right->vm_pgoff += (right->vm_start - left->vm_start) >> PAGE_SHIFT;
+	left->vm_raend = 0;
+	right->vm_raend = 0;
 	if (vma->vm_file)
 		atomic_add(2,&vma->vm_file->f_count);
 	if (vma->vm_ops && vma->vm_ops->open) {
 		vma->vm_ops->open(left);
 		vma->vm_ops->open(right);
 	}
-	insert_vm_struct(current->mm, left);
-	insert_vm_struct(current->mm, right);
+	lock_vma_mappings(vma);
+	spin_lock(&vma->vm_mm->page_table_lock);
+	vma->vm_pgoff += (start - vma->vm_start) >> PAGE_SHIFT;
+	vma->vm_start = start;
+	vma->vm_end = end;
+	vma->vm_flags = newflags;
+	vma->vm_raend = 0;
+	vma->vm_page_prot = prot;
+	__insert_vm_struct(current->mm, left);
+	__insert_vm_struct(current->mm, right);
+	spin_unlock(&vma->vm_mm->page_table_lock);
+	unlock_vma_mappings(vma);
 	return 0;
 }
 
@@ -194,7 +225,7 @@ static int mprotect_fixup(struct vm_area_struct * vma,
 	return 0;
 }
 
-asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
+asmlinkage long sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 {
 	unsigned long nstart, end, tmp;
 	struct vm_area_struct * vma, * next;
@@ -202,7 +233,7 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 
 	if (start & ~PAGE_MASK)
 		return -EINVAL;
-	len = (len + ~PAGE_MASK) & PAGE_MASK;
+	len = PAGE_ALIGN(len);
 	end = start + len;
 	if (end < start)
 		return -EINVAL;
@@ -212,7 +243,6 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 		return 0;
 
 	down(&current->mm->mmap_sem);
-	lock_kernel();
 
 	vma = find_vma(current->mm, start);
 	error = -EFAULT;
@@ -247,9 +277,7 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 			break;
 		}
 	}
-	merge_segments(current->mm, start, end);
 out:
-	unlock_kernel();
 	up(&current->mm->mmap_sem);
 	return error;
 }

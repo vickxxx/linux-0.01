@@ -2,7 +2,7 @@
 #define LINUX_UMSDOS_FS_H
 
 
-#define UMS_DEBUG 1	/* define for check_* functions */
+/*#define UMS_DEBUG 1	// define for check_* functions */
 /*#define UMSDOS_DEBUG 1*/
 #define UMSDOS_PARANOIA 1
 
@@ -65,8 +65,8 @@ struct umsdos_dirent {
 	unsigned char name_len;	/* if == 0, then this entry is not used */
 	unsigned char flags;	/* UMSDOS_xxxx */
 	unsigned short nlink;	/* How many hard links point to this entry */
-	uid_t uid;		/* Owner user id */
-	gid_t gid;		/* Group id */
+	__kernel_uid_t uid;	/* Owner user id */
+	__kernel_gid_t gid;	/* Group id */
 	time_t atime;		/* Access time */
 	time_t mtime;		/* Last modification time */
 	time_t ctime;		/* Creation time */
@@ -145,8 +145,8 @@ struct umsdos_ioctl {
 		ino_t st_ino;
 		umode_t st_mode;
 		nlink_t st_nlink;
-		uid_t st_uid;
-		gid_t st_gid;
+		__kernel_uid_t st_uid;
+		__kernel_gid_t st_gid;
 		dev_t st_rdev;
 		unsigned short __pad2;
 		off_t st_size;
@@ -158,8 +158,8 @@ struct umsdos_ioctl {
 		unsigned long __unused2;
 		time_t st_ctime;
 		unsigned long __unused3;
-		unsigned long __unused4;
-		unsigned long __unused5;
+		uid_t st_uid32;
+		gid_t st_gid32;
 	} stat;
 	char version, release;
 };
@@ -174,12 +174,9 @@ struct umsdos_ioctl {
 #endif
 
 extern struct inode_operations umsdos_dir_inode_operations;
-extern struct file_operations umsdos_file_operations;
-extern struct inode_operations umsdos_file_inode_operations;
-extern struct inode_operations umsdos_file_inode_operations_no_bmap;
-extern struct inode_operations umsdos_file_inode_operations_readpage;
-extern struct inode_operations umsdos_symlink_inode_operations;
-extern int init_umsdos_fs (void);
+extern struct inode_operations umsdos_rdir_inode_operations;
+extern struct file_operations umsdos_dir_operations;
+extern struct file_operations umsdos_rdir_operations;
 
 #include <linux/umsdos_fs.p>
 

@@ -1,4 +1,3 @@
-# $Id: Makefile,v 1.13 1998/08/17 10:16:23 ralf Exp $
 #
 # This file is subject to the terms and conditions of the GNU General Public
 # License.  See the file "COPYING" in the main directory of this archive
@@ -18,44 +17,27 @@
 #
 ifdef CONFIG_CPU_LITTLE_ENDIAN
 tool-prefix	= mipsel-linux-
-ifdef CONFIG_MIPS_ECOFF
-oformat		= ecoff-littlemips
-else
-oformat		= elf32-littlemips
-endif
 else
 tool-prefix	= mips-linux-
-ifdef CONFIG_MIPS_ECOFF
-oformat		= ecoff-bigmips
-else
-oformat		= elf32-bigmips
-endif
 endif
 
 ifdef CONFIG_CROSSCOMPILE
 CROSS_COMPILE  = $(tool-prefix)
 endif
 
-LINKFLAGS	= -static -N
-MODFLAGS	+= -mlong-calls
-
 #
-# The new ELF GCC uses -G0 -mabicalls -fpic as default.  We don't need PIC
+# The ELF GCC uses -G0 -mabicalls -fpic as default.  We don't need PIC
 # code in the kernel since it only slows down the whole thing.  For the
 # old GCC these options are just the defaults.  At some point we might
 # make use of global pointer optimizations.
 #
 # The DECStation requires an ECOFF kernel for remote booting, other MIPS
-# machines may also.
+# machines may also.  Since BFD is incredibly buggy with respect to
+# crossformat linking we rely on the elf2ecoff tool for format conversion.
 #
-ifdef CONFIG_ELF_KERNEL
 CFLAGS		+= -G 0 -mno-abicalls -fno-pic
-LINKFLAGS	+= -G 0
-endif
-ifdef CONFIG_ECOFF_KERNEL
-CFLAGS		+= -G 0 -mno-abicalls -fno-pic
-LINKFLAGS	+= -G 0 -oformat ecoff-littlemips
-endif
+LINKFLAGS	+= -static -G 0
+MODFLAGS	+= -mlong-calls
 
 ifdef CONFIG_REMOTE_DEBUG
 CFLAGS		:= $(CFLAGS) -g
@@ -68,25 +50,25 @@ ifdef CONFIG_CPU_R3000
 CFLAGS		:= $(CFLAGS) -mcpu=r3000 -mips1
 endif
 ifdef CONFIG_CPU_R6000
-CFLAGS		:= $(CFLAGS) -mcpu=r6000 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r6000 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_R4300
-CFLAGS		:= $(CFLAGS) -mcpu=r4300 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r4300 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_R4X00
-CFLAGS		:= $(CFLAGS) -mcpu=r4600 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r4600 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_R5000
-CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_NEVADA
-CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -mmad
+CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -Wa,--trap -mmad
 endif
 ifdef CONFIG_CPU_R8000
-CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -Wa,--trap
 endif
 ifdef CONFIG_CPU_R10000
-CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2
+CFLAGS		:= $(CFLAGS) -mcpu=r8000 -mips2 -Wa,--trap
 endif
 
 #
@@ -118,6 +100,12 @@ LIBS          += arch/mips/arc/arclib.a
 LOADADDR      += 0x80080000
 endif
 
+ifdef CONFIG_COBALT_MICRO_SERVER
+ARCHIVES      += arch/mips/cobalt/cobalt.o
+SUBDIRS       += arch/mips/cobalt
+LOADADDR      += 0x80000000
+endif
+
 ifdef CONFIG_SNI_RM200_PCI
 CORE_FILES    += arch/mips/sni/sni.o
 SUBDIRS       += arch/mips/sni arch/mips/arc
@@ -125,7 +113,7 @@ LIBS          += arch/mips/arc/arclib.a
 LOADADDR      += 0x80080000
 endif
 
-ifdef CONFIG_SGI
+ifdef CONFIG_SGI_IP22
 LIBS          += arch/mips/sgi/kernel/sgikern.a arch/mips/arc/arclib.a
 SUBDIRS       += arch/mips/sgi/kernel arch/mips/arc
 #
@@ -134,7 +122,6 @@ SUBDIRS       += arch/mips/sgi/kernel arch/mips/arc
 # 8kb aligned or the handling of the current variable will break.
 #
 LOADADDR      += 0x88002000
-HOSTCC        = cc
 endif
 
 #
@@ -143,6 +130,25 @@ endif
 ifdef CONFIG_BAGET_MIPS
 SUBDIRS       += arch/mips/baget arch/mips/baget/prom
 LIBS          += arch/mips/baget/baget.a arch/mips/baget/prom/bagetlib.a
+LOADADDR      += 0x80001000
+endif
+
+#
+# NEC DDB Vrc-5074
+#
+ifdef CONFIG_DDB5074
+SUBDIRS       += arch/mips/ddb5074
+LIBS          += arch/mips/ddb5074/ddb5074.a
+LOADADDR      += 0x80080000
+endif
+
+#
+# Orion Board
+#
+ifdef CONFIG_ORION
+LIBS          += arch/mips/orion/orionkern.a
+SUBDIRS       += arch/mips/orion
+LINKSCRIPT    = arch/mips/orion/ld.script.orion
 endif
 
 #
@@ -171,7 +177,7 @@ CFLAGS		+= -pipe
 
 HEAD := arch/mips/kernel/head.o arch/mips/kernel/init_task.o
 
-SUBDIRS := $(SUBDIRS) $(addprefix arch/mips/, kernel mm lib tools)
+SUBDIRS := $(addprefix arch/mips/, tools) $(SUBDIRS) $(addprefix arch/mips/, kernel mm lib)
 CORE_FILES := arch/mips/kernel/kernel.o arch/mips/mm/mm.o $(CORE_FILES)
 LIBS := arch/mips/lib/lib.a $(LIBS)
 
@@ -182,6 +188,13 @@ BAGETBOOT = $(MAKE) -C arch/$(ARCH)/baget
 balo:  vmlinux
 	$(BAGETBOOT) balo
 
+endif
+
+ifdef CONFIG_ORION
+ORIONBOOT = $(MAKE) -C arch/$(ARCH)/orion
+
+orionboot:
+	$(ORIONBOOT) orionboot
 endif
 
 MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
@@ -198,8 +211,14 @@ archclean:
 	@$(MAKEBOOT) clean
 	$(MAKE) -C arch/$(ARCH)/kernel clean
 	$(MAKE) -C arch/$(ARCH)/tools clean
+	$(MAKE) -C arch/mips/baget clean
 
 archmrproper:
+	@$(MAKEBOOT) mrproper
+	$(MAKE) -C arch/$(ARCH)/tools mrproper
 
 archdep:
+	if [ ! -f $(TOPDIR)/include/asm-$(ARCH)/offset.h ]; then \
+	 touch $(TOPDIR)/include/asm-$(ARCH)/offset.h; \
+	fi;
 	@$(MAKEBOOT) dep

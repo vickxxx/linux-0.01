@@ -1,10 +1,9 @@
-/* $Id: scall_o32.S,v 1.4 1998/06/25 20:01:01 ralf Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1997, 1998 by Ralf Baechle
+ * Copyright (C) 1997, 1998, 1999, 2000 by Ralf Baechle
  */
 #include <asm/asm.h>
 #include <linux/errno.h>
@@ -12,10 +11,11 @@
 #include <asm/mipsregs.h>
 #include <asm/regdef.h>
 #include <asm/stackframe.h>
+#include <asm/isadep.h>
 #include <asm/unistd.h>
 
 /* This duplicates the definition from <linux/sched.h> */
-#define PF_TRACESYS	0x00000020	/* tracing system calls */
+#define PT_TRACESYS	0x00000002	/* tracing system calls */
 
 /* This duplicates the definition from <asm/signal.h> */
 #define SIGILL		4		/* Illegal instruction (ANSI).  */
@@ -48,8 +48,9 @@ NESTED(handle_sys, PT_SIZE, sp)
 	bgez	t0, stackargs
 
 stack_done:
-	lw	t0, TASK_FLAGS($28)	# syscall tracing enabled?
-	andi	t0, PF_TRACESYS
+        sw      a3, PT_R26(sp)          # save for syscall restart
+	lw	t0, TASK_PTRACE($28)	# syscall tracing enabled?
+	andi	t0, PT_TRACESYS
 	bnez	t0, trace_a_syscall
 
 	jalr	t2			# Do The Real Thing (TM)
@@ -64,13 +65,13 @@ stack_done:
 1:	sw	v0, PT_R2(sp)		# result
 
 EXPORT(o32_ret_from_sys_call)
-	lw	t0,bh_mask
-	lw	t1,bh_active		# unused delay slot
-	and	t0,t1
-	bnez	t0,o32_handle_bottom_half
+	lw	t0, irq_stat		# softirq_active
+	lw	t1, irq_stat+4		# softirq_mask.  unused delay slot
+	and	t0, t1
+	bnez	t0, o32_handle_softirq
 
 9:	lw	t0,PT_STATUS(sp)	# returning to kernel mode?
-	andi	t1, t0, 0x10
+	andi	t1, t0, KU_USER
 	lw	t2, TASK_NEED_RESCHED($28)
 	beqz	t1, o32_return		# -> yes
 	bnez	t2, o32_reschedule
@@ -83,13 +84,10 @@ EXPORT(o32_ret_from_sys_call)
 
 o32_return:
 	RESTORE_SOME
-	RESTORE_SP
-	.set	mips3
-	eret
-	.set	mips0
+	RESTORE_SP_AND_RET
 
-o32_handle_bottom_half:
-	jal	do_bottom_half
+o32_handle_softirq:
+	jal	do_softirq
 	b	9b
 o32_reschedule:
 	SAVE_STATIC
@@ -100,9 +98,9 @@ o32_reschedule:
 
 trace_a_syscall:
 	SAVE_STATIC
-	sw	t2,PT_R1(sp)
+	sw	t2, PT_R1(sp)
 	jal	syscall_trace
-	lw	t2,PT_R1(sp)
+	lw	t2, PT_R1(sp)
 
 	lw	a0, PT_R4(sp)		# Restore argument registers
 	lw	a1, PT_R5(sp)
@@ -140,15 +138,28 @@ stackargs:
 
 	lw	t0, PT_R29(sp)		# get old user stack pointer
 	la	t1, 3f			# copy 1 to 2 arguments
-	sll	t3, t3, 3
+	sll	t3, t3, 4
 	subu	t1, t3
 	jr	t1
 
 	/* Ok, copy the args from the luser stack to the kernel stack */
+	/*
+	 * I know Ralf doesn't like nops but this avoids code
+	 * duplication for R3000 targets (and this is the
+	 * only place where ".set reorder" doesn't help).
+	 * Harald.
+	 */
+	.set    push
+	.set    noreorder
 1:	lw	t1, 20(t0)		# argument #6 from usp
+	nop
 	sw	t1, 20(sp)
+	nop
 2:	lw	t1, 16(t0)		# argument #5 from usp
+	nop
 	sw	t1, 16(sp)
+	nop
+	.set	pop
 
 3:	j	stack_done		# go back
 
@@ -159,6 +170,7 @@ stackargs:
 
 	/*
 	 * The stackpointer for a call with more than 4 arguments is bad.
+	 * We probably should handle this case a bit more drastic.
 	 */
 bad_stack:
 	negu	v0				# error
@@ -177,3 +189,4 @@ illegal_syscall:
 	li	t0, 1				# set error flag
 	sw	t0, PT_R7(sp)
 	j	ret_from_sys_call
+	END(handle_sys)

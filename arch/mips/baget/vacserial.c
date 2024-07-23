@@ -1,4 +1,4 @@
-/* $Id$
+/* $Id: vacserial.c,v 1.3 1999/08/17 22:18:37 ralf Exp $
  * vacserial.c: VAC UART serial driver
  *              This code stealed and adopted from linux/drivers/char/serial.c
  *              See that for author info
@@ -22,7 +22,8 @@
 #define RS_STROBE_TIME (10*HZ)
 #define RS_ISR_PASS_LIMIT  2 /* Beget is not a super-computer (old=256) */
 
-#define IRQ_T(info) ((info->flags & ASYNC_SHARE_IRQ) ? SA_SHIRQ : SA_INTERRUPT)
+#define IRQ_T(state) \
+ ((state->flags & ASYNC_SHARE_IRQ) ? SA_SHIRQ : SA_INTERRUPT)
 
 #define SERIAL_INLINE
   
@@ -114,6 +115,9 @@ static struct console sercons;
 static void autoconfig(struct serial_state * info);
 static void change_speed(struct async_struct *info);
 static void rs_wait_until_sent(struct tty_struct *tty, int timeout);
+static void rs_timer(unsigned long dummy);
+
+static struct timer_list vacs_timer;
 
 /*
  * Here we define the default xmit fifo size used for each type of
@@ -157,7 +161,7 @@ static struct termios *serial_termios_locked[NR_PORTS];
  * memory if large numbers of serial ports are open.
  */
 static unsigned char *tmp_buf;
-static struct semaphore tmp_buf_sem = MUTEX;
+static DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int serial_paranoia_check(struct async_struct *info,
 					kdev_t device, const char *routine)
@@ -695,7 +699,7 @@ static int startup(struct async_struct * info)
 			handler = rs_interrupt_single;
 
 
-		retval = request_irq(state->irq, handler, IRQ_T(info),
+		retval = request_irq(state->irq, handler, IRQ_T(state),
 				     "serial", NULL);
 		if (retval) {
 			if (capable(CAP_SYS_ADMIN)) {
@@ -749,8 +753,7 @@ static int startup(struct async_struct * info)
 	/*
 	 * Set up serial timers...
 	 */
-	timer_table[RS_TIMER].expires = jiffies + 2*HZ/100;
-	timer_active |= 1 << RS_TIMER;
+	mod_timer(&vacs_timer, jiffies + 2*HZ/100);
 
 	/*
 	 * and set the speed of the serial port
@@ -813,7 +816,7 @@ static void shutdown(struct async_struct * info)
 		if (IRQ_ports[state->irq]) {
 			free_irq(state->irq, NULL);
 			retval = request_irq(state->irq, rs_interrupt_single,
-					     IRQ_T(info), "serial", NULL);
+					     IRQ_T(state), "serial", NULL);
 			
 			if (retval)
 				printk("serial shutdown: request_irq: error %d"
@@ -912,6 +915,8 @@ static void change_speed(struct async_struct *info)
 
 	/* Determine divisor based on baud rate */
 	baud = tty_get_baud_rate(info->tty);
+	if (!baud)
+		baud = 9600;    /* B0 transition handled in rs_set_termios */
 	baud_base = info->state->baud_base;
 	if (baud == 38400 &&
 	    ((info->flags & ASYNC_SPD_MASK) == ASYNC_SPD_CUST))
@@ -1357,7 +1362,7 @@ static int set_serial_info(struct async_struct * info,
 check_and_exit:
 	if (!state->port || !state->type)
 		return 0;
-	if (state->flags & ASYNC_INITIALIZED) {
+	if (info->flags & ASYNC_INITIALIZED) {
 		if (((old_state.flags & ASYNC_SPD_MASK) !=
 		     (state->flags & ASYNC_SPD_MASK)) ||
 		    (old_state.custom_divisor != state->custom_divisor)) {
@@ -1603,8 +1608,9 @@ static int rs_ioctl(struct tty_struct *tty, struct file * file,
 static void rs_set_termios(struct tty_struct *tty, struct termios *old_termios)
 {
 	struct async_struct *info = (struct async_struct *)tty->driver_data;
-	
-	if (   (tty->termios->c_cflag == old_termios->c_cflag)
+	unsigned int cflag = tty->termios->c_cflag;
+
+	if (   (cflag == old_termios->c_cflag)
 	    && (   RELEVANT_IFLAG(tty->termios->c_iflag) 
 		== RELEVANT_IFLAG(old_termios->c_iflag)))
 	  return;
@@ -1613,7 +1619,7 @@ static void rs_set_termios(struct tty_struct *tty, struct termios *old_termios)
 
 	/* Handle turning off CRTSCTS */
 	if ((old_termios->c_cflag & CRTSCTS) &&
-	    !(tty->termios->c_cflag & CRTSCTS)) {
+	    !(cflag & CRTSCTS)) {
 		tty->hw_stopped = 0;
 		rs_start(tty);
 	}
@@ -1778,7 +1784,6 @@ static void rs_wait_until_sent(struct tty_struct *tty, int timeout)
 		baget_printk("lsr = %d (jiff=%lu)...", lsr, jiffies);
 #endif
 		current->state = TASK_INTERRUPTIBLE;
-		current->counter = 0;	/* make us low-priority */
 		schedule_timeout(char_time);
 		if (signal_pending(current))
 			break;
@@ -1821,7 +1826,7 @@ static void rs_hangup(struct tty_struct *tty)
 static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			   struct async_struct *info)
 {
-	struct wait_queue wait = { current, NULL };
+	DECLARE_WAITQUEUE(wait, current);
 	struct serial_state *state = info->state;
 	int		retval;
 	int		do_clocal = 0,  extra_count = 0;  
@@ -1903,7 +1908,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	restore_flags(flags); 
 	info->blocked_open++;
 	while (1) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ASYNC_INITIALIZED)) {
 #ifdef SERIAL_DO_RESTART
@@ -1961,6 +1966,9 @@ static int get_async_struct(int line, struct async_struct **ret_info)
 		return -ENOMEM;
 	}
 	memset(info, 0, sizeof(struct async_struct));
+	init_waitqueue_head(&info->open_wait);
+	init_waitqueue_head(&info->close_wait);
+	init_waitqueue_head(&info->delta_msr_wait);
 	info->magic = SERIAL_MAGIC;
 	info->port = sstate->port;
 	info->flags = sstate->flags;
@@ -1970,7 +1978,7 @@ static int get_async_struct(int line, struct async_struct **ret_info)
 	info->tqueue.data = info;
 	info->state = sstate;
 	if (sstate->info) {
-		kfree_s(info, sizeof(struct async_struct));
+		kfree(info);
 		*ret_info = sstate->info;
 		return 0;
 	}
@@ -2162,7 +2170,7 @@ int rs_read_proc(char *page, char **start, off_t off, int count,
 done:
 	if (off >= len+begin)
 		return 0;
-	*start = page + (begin-off);
+	*start = page + (off-begin);
 	return ((count < begin+len-off) ? count : begin+len-off);
 }
 
@@ -2249,7 +2257,7 @@ EXPORT_SYMBOL(unregister_serial);
  *  Important function for VAC UART check and reanimation.
  */
 
-static void rs_timer(void)
+static void rs_timer(unsigned long dummy)
 {
         static unsigned long last_strobe = 0;
         struct async_struct *info;
@@ -2279,8 +2287,7 @@ static void rs_timer(void)
                 }
         }
         last_strobe = jiffies;
-        timer_table[RS_TIMER].expires = jiffies + RS_STROBE_TIME;
-        timer_active |= 1 << RS_TIMER;
+        mod_timer(&vacs_timer, jiffies + RS_STROBE_TIME);
 
 	/*
 	 *  It looks this code for case we share IRQ with console...
@@ -2295,14 +2302,14 @@ static void rs_timer(void)
 #endif
                 restore_flags(flags);
 
-                timer_table[RS_TIMER].expires = jiffies + IRQ_timeout[0] - 2;
+                mod_timer(&vacs_timer, jiffies + IRQ_timeout[0] - 2);
         }
 }
  
 /*
  * The serial driver boot-time initialization code!
  */
-__initfunc(int rs_init(void))
+int __init rs_init(void)
 {
 	int i;
 	struct serial_state * state;
@@ -2317,8 +2324,9 @@ __initfunc(int rs_init(void))
 #endif
 
 	init_bh(SERIAL_BH, do_serial_bh);
-	timer_table[RS_TIMER].fn = rs_timer;
-	timer_table[RS_TIMER].expires = 0;
+	init_timer(&vacs_timer);
+	vacs_timer.function = rs_timer;
+	vacs_timer.expires = 0;
 
 	for (i = 0; i < NR_IRQS; i++) {
 		IRQ_ports[i] = 0;
@@ -2522,9 +2530,7 @@ void cleanup_module(void)
 	save_flags(flags);
 	cli();
 
-	timer_active &= ~(1 << RS_TIMER);
-	timer_table[RS_TIMER].fn = NULL;
-	timer_table[RS_TIMER].expires = 0;
+	del_timer_sync(&vacs_timer);
         remove_bh(SERIAL_BH);
 
 	if ((e1 = tty_unregister_driver(&serial_driver)))
@@ -2666,7 +2672,7 @@ static kdev_t serial_console_device(struct console *c)
  *	- initialize the serial port
  *	Return non-zero if we didn't find a serial port.
  */
-__initfunc(static int serial_console_setup(struct console *co, char *options))
+static int __init serial_console_setup(struct console *co, char *options)
 {
 	struct serial_state *ser;
 	unsigned cval;
@@ -2805,23 +2811,19 @@ __initfunc(static int serial_console_setup(struct console *co, char *options))
 }
 
 static struct console sercons = {
-	"ttyS",
-	serial_console_write,
-	NULL,
-	serial_console_device,
-	serial_console_wait_key,
-	NULL,
-	serial_console_setup,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"ttyS",
+	write:		serial_console_write,
+	device:		serial_console_device,
+	wait_key:	serial_console_wait_key,
+	setup:		serial_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
 
 /*
  *	Register console.
  */
-__initfunc (long serial_console_init(long kmem_start, long kmem_end))
+long __init serial_console_init(long kmem_start, long kmem_end)
 {
 	register_console(&sercons);
 	return kmem_start;
@@ -2837,7 +2839,7 @@ __initfunc (long serial_console_init(long kmem_start, long kmem_end))
  * device more directly.
  */
 
-static int initialized = 0;
+static int initialized;
 
 static int rs_debug_init(struct async_struct *info)
 {

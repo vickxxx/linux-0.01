@@ -1,53 +1,39 @@
 /*
  * include/asm-ppc/cache.h
  */
+#ifdef __KERNEL__
 #ifndef __ARCH_PPC_CACHE_H
 #define __ARCH_PPC_CACHE_H
 
 #include <linux/config.h>
 #include <asm/processor.h>
-/*#include <asm/system.h>*/
 
 /* bytes per L1 cache line */
-#define        L1_CACHE_BYTES  32      
-#define        L1_CACHE_ALIGN(x)       (((x)+(L1_CACHE_BYTES-1))&~(L1_CACHE_BYTES-1))
-#define L1_CACHE_PAGES		8
+#if !defined(CONFIG_8xx) || defined(CONFIG_8260)
+#if defined(CONFIG_PPC64BRIDGE)
+#define L1_CACHE_BYTES	128
+#else
+#define	L1_CACHE_BYTES  32
+#endif /* PPC64 */
+#else
+#define	L1_CACHE_BYTES	16
+#endif /* !8xx || 8260 */
 
-#define        SMP_CACHE_BYTES L1_CACHE_BYTES
+#define	L1_CACHE_ALIGN(x)       (((x)+(L1_CACHE_BYTES-1))&~(L1_CACHE_BYTES-1))
+#define	L1_CACHE_PAGES		8
+
+#define	SMP_CACHE_BYTES L1_CACHE_BYTES
+
+#ifdef MODULE
+#define __cacheline_aligned __attribute__((__aligned__(L1_CACHE_BYTES)))
+#else
+#define __cacheline_aligned					\
+  __attribute__((__aligned__(L1_CACHE_BYTES),			\
+		 __section__(".data.cacheline_aligned")))
+#endif
 
 #if defined(__KERNEL__) && !defined(__ASSEMBLY__)
 extern void flush_dcache_range(unsigned long start, unsigned long stop);
-
-static inline unsigned long unlock_dcache(void)
-{
-#ifndef CONFIG_8xx	
-	ulong hid0 = 0;
-	/* 601 doesn't do this */
-	if ( (ulong) _get_PVR() == 1 )
-		return 0;
-	asm("mfspr %0,1008 \n\t" : "=r" (hid0) );
-	if ( !(hid0 & HID0_DLOCK) )
-		return 0;
-	asm("mtspr 1008,%0 \n\t" :: "r" (hid0 & ~(HID0_DLOCK)));
-	return (hid0 & HID0_DLOCK) ? 1 : 0;
-#else /* ndef CONFIG_8xx */
-	return 0;
-#endif
-}
-
-static inline void lock_dcache(unsigned long lockit)
-{
-#ifndef CONFIG_8xx
-	/* 601 doesn't do this */
-	if ( !lockit || ((ulong) _get_PVR() == 1) )
-		return;
-	asm("mfspr	%0,1008 \n\t"
-	    "ori	%0,%0,%2 \n\t"
-	    "mtspr	1008,%0 \n\t"
-	    "sync \n\t isync \n\t"
-	    : "=r" (lockit) : "0" (lockit), "i" (HID0_DLOCK));
-#endif /* ndef CONFIG_8xx */
-}
 
 #endif /* __ASSEMBLY__ */
 
@@ -98,3 +84,4 @@ static inline void lock_dcache(unsigned long lockit)
 #endif /* CONFIG_8xx */
 
 #endif
+#endif /* __KERNEL__ */

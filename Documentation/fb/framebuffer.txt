@@ -1,8 +1,8 @@
 			The Frame Buffer Device
 			-----------------------
 
-Maintained by Geert Uytterhoeven (Geert.Uytterhoeven@cs.kuleuven.ac.be)
-Last revised: November 7, 1998
+Maintained by Geert Uytterhoeven <geert@linux-m68k.org>
+Last revised: January 2, 2000
 
 
 0. Introduction
@@ -29,9 +29,9 @@ By convention, the following device nodes are used (numbers indicate the device
 minor numbers):
 
       0 = /dev/fb0	First frame buffer
-     32 = /dev/fb1	Second frame buffer
+      1 = /dev/fb1	Second frame buffer
 	  ...
-    224 = /dev/fb7	8th frame buffer
+     31 = /dev/fb31	32nd frame buffer
 
 For backwards compatibility, you may want to create the following symbolic
 links:
@@ -294,7 +294,11 @@ under "xc/programs/Xserver/hw/xfree86/doc/modeDB.txt".
 -------------
 
 For more specific information about the frame buffer device and its
-applications, please refer to the following documentation:
+applications, please refer to the Linux-fbdev website:
+
+    http://www.linux-fbdev.org/
+
+and to the following documentation:
 
   - The manual pages for fbset: fbset(8), fb.modes(5)
   - The manual pages for XFree86: XF68_FBDev(1), XF86Config(4/5)
@@ -304,7 +308,20 @@ applications, please refer to the following documentation:
       o linux/include/video/
 
 
-8. Downloading
+
+8. Mailing list
+---------------
+
+There's a _development_ mailing list at linux-fbdev@vuser.vu.union.edu,
+controlled by majordomo. Send an email with `help' in the message body to
+majordomo@vuser.vu.union.edu for subscription information.
+
+The mailing list is archived at
+
+    http://www.mail-archive.com/linux-fbdev@vuser.vu.union.edu/
+
+
+9. Downloading
 --------------
 
 All necessary files can be found at
@@ -313,8 +330,12 @@ All necessary files can be found at
 
 and on its mirrors.
 
+The latest version of fbset can be found at
+
+    http://home.tvd.be/cr26864/Linux/fbdev/
+
   
-9. Credits                                                       
+10. Credits                                                       
 ----------                                                       
                 
 This readme was written by Geert Uytterhoeven, partly based on the original

@@ -54,6 +54,7 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/genhd.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/delay.h>
 #include <linux/mm.h>
 #include <linux/major.h>
@@ -253,17 +254,8 @@ static int				CurrentNSect;
 static char				*CurrentBuffer;
 
 
-#define SET_TIMER()							\
-	do {								\
-		del_timer( &acsi_timer );				\
-		acsi_timer.expires = jiffies + ACSI_TIMEOUT;		\
-		add_timer( &acsi_timer );				\
-	} while(0)
-
-#define CLEAR_TIMER()							\
-	do {								\
-		del_timer( &acsi_timer );				\
-	} while(0)
+#define SET_TIMER()	mod_timer(&acsi_timer, jiffies + ACSI_TIMEOUT)
+#define CLEAR_TIMER()	del_timer(&acsi_timer)
 
 static unsigned long	STramMask;
 #define STRAM_ADDR(a)	(((a) & STramMask) == 0)
@@ -369,7 +361,7 @@ static void acsi_times_out( unsigned long dummy );
 static void copy_to_acsibuffer( void );
 static void copy_from_acsibuffer( void );
 static void do_end_requests( void );
-static void do_acsi_request( void );
+static void do_acsi_request( request_queue_t * );
 static void redo_acsi_request( void );
 static int acsi_ioctl( struct inode *inode, struct file *file, unsigned int
                        cmd, unsigned long arg );
@@ -378,7 +370,7 @@ static int acsi_release( struct inode * inode, struct file * file );
 static void acsi_prevent_removal( int target, int flag );
 static int acsi_change_blk_size( int target, int lun);
 static int acsi_mode_sense( int target, int lun, SENSE_DATA *sd );
-static void acsi_geninit( struct gendisk *gd );
+static void acsi_geninit(void);
 static int revalidate_acsidisk( int dev, int maxusage );
 static int acsi_revalidate (dev_t);
 
@@ -412,7 +404,7 @@ extern int slm_init( void );
  * 6), the timeout is based on the 'jiffies' variable to provide exact
  * timeouts for device probing etc.
  * If interrupts are disabled, the number of tries is based on the
- * 'loops_per_sec' variable. A rough estimation is sufficient here...
+ * 'loops_per_jiffy' variable. A rough estimation is sufficient here...
  */
 
 #define INT_LEVEL													\
@@ -425,12 +417,12 @@ int acsi_wait_for_IRQ( unsigned timeout )
 
 {
 	if (INT_LEVEL < 6) {
-		unsigned long maxjif;
-		for( maxjif = jiffies + timeout; time_before(jiffies, maxjif); )
+		unsigned long maxjif = jiffies + timeout;
+		while (time_before(jiffies, maxjif))
 			if (!(mfp.par_dt_reg & 0x20)) return( 1 );
 	}
 	else {
-		long tries = loops_per_sec / HZ / 8 * timeout;
+		long tries = loops_per_jiffy / 8 * timeout;
 		while( --tries >= 0 )
 			if (!(mfp.par_dt_reg & 0x20)) return( 1 );
 	}		
@@ -442,12 +434,12 @@ int acsi_wait_for_noIRQ( unsigned timeout )
 
 {
 	if (INT_LEVEL < 6) {
-		unsigned long maxjif;
-		for( maxjif = jiffies + timeout; time_before(jiffies, maxjif); )
+		unsigned long maxjif = jiffies + timeout;
+		while (time_before(jiffies, maxjif))
 			if (mfp.par_dt_reg & 0x20) return( 1 );
 	}
 	else {
-		long tries = loops_per_sec * timeout / HZ / 8;
+		long tries = loops_per_jiffy * timeout / 8;
 		while( tries-- >= 0 )
 			if (mfp.par_dt_reg & 0x20) return( 1 );
 	}		
@@ -502,7 +494,7 @@ static int acsicmd_dma( const char *cmd, char *buffer, int blocks, int rwflag, i
 #endif
 	
 	rwflag = rwflag ? 0x100 : 0;
-	paddr = VTOP( buffer );
+	paddr = virt_to_phys( buffer );
 
 	acsi_delay_end(COMMAND_DELAY);
 	DISABLE_IRQ();
@@ -610,7 +602,7 @@ static int acsi_reqsense( char *buffer, int targ, int lun)
 	if (!acsicmd_nodma( reqsense_cmd, 0 )) return( 0 );
 	if (!acsi_wait_for_IRQ( 10 )) return( 0 );
 	acsi_getstatus();
-	dma_cache_maintenance( VTOP(buffer), 16, 0 );
+	dma_cache_maintenance( virt_to_phys(buffer), 16, 0 );
 	
 	return( 1 );
 }	
@@ -778,7 +770,7 @@ static void unexpected_acsi_interrupt( void )
 static void bad_rw_intr( void )
 
 {
-	if (!CURRENT)
+	if (QUEUE_EMPTY)
 		return;
 
 	if (++CURRENT->errors >= MAX_ERRORS)
@@ -809,7 +801,7 @@ static void read_intr( void )
 		return;
 	}
 
-	dma_cache_maintenance( VTOP(CurrentBuffer), CurrentNSect*512, 0 );
+	dma_cache_maintenance( virt_to_phys(CurrentBuffer), CurrentNSect*512, 0 );
 	if (CurrentBuffer == acsi_buffer)
 		copy_from_acsibuffer();
 
@@ -852,7 +844,7 @@ static void acsi_times_out( unsigned long dummy )
 
 	DEVICE_INTR = NULL;
 	printk( KERN_ERR "ACSI timeout\n" );
-	if (!CURRENT) return;
+	if (QUEUE_EMPTY) return;
 	if (++CURRENT->errors >= MAX_ERRORS) {
 #ifdef DEBUG
 		printk( KERN_ERR "ACSI: too many errors.\n" );
@@ -947,7 +939,7 @@ static void do_end_requests( void )
  *
  ***********************************************************************/
 
-static void do_acsi_request( void )
+static void do_acsi_request( request_queue_t * q )
 
 {
 	stdma_lock( acsi_interrupt, NULL );
@@ -962,7 +954,7 @@ static void redo_acsi_request( void )
 	unsigned long		pbuffer;
 	struct buffer_head	*bh;
 	
-	if (CURRENT && CURRENT->rq_status == RQ_INACTIVE) {
+	if (!QUEUE_EMPTY && CURRENT->rq_status == RQ_INACTIVE) {
 		if (!DEVICE_INTR) {
 			ENABLE_IRQ();
 			stdma_release();
@@ -978,7 +970,7 @@ static void redo_acsi_request( void )
 	/* Another check here: An interrupt or timer event could have
 	 * happened since the last check!
 	 */
-	if (CURRENT && CURRENT->rq_status == RQ_INACTIVE) {
+	if (!QUEUE_EMPTY && CURRENT->rq_status == RQ_INACTIVE) {
 		if (!DEVICE_INTR) {
 			ENABLE_IRQ();
 			stdma_release();
@@ -988,7 +980,7 @@ static void redo_acsi_request( void )
 	if (DEVICE_INTR)
 		return;
 
-	if (!CURRENT) {
+	if (QUEUE_EMPTY) {
 		CLEAR_INTR;
 		ENABLE_IRQ();
 		stdma_release();
@@ -1030,7 +1022,7 @@ static void redo_acsi_request( void )
 	 * consecutive buffers and thus can be done with a single command.
 	 */
 	buffer      = CURRENT->buffer;
-	pbuffer     = VTOP(buffer);
+	pbuffer     = virt_to_phys(buffer);
 	nsect       = CURRENT->current_nr_sectors;
 	CurrentNReq = 1;
 
@@ -1052,7 +1044,7 @@ static void redo_acsi_request( void )
 			unsigned long pendadr, pnewadr;
 			pendadr = pbuffer + nsect*512;
 			while( (bh = bh->b_reqnext) ) {
-				pnewadr = VTOP(bh->b_data);
+				pnewadr = virt_to_phys(bh->b_data);
 				if (!STRAM_ADDR(pnewadr) || pendadr != pnewadr) break;
 				nsect += bh->b_size >> 9;
 				pendadr = pnewadr + bh->b_size;
@@ -1225,11 +1217,7 @@ static int acsi_open( struct inode * inode, struct file * filp )
 
 static int acsi_release( struct inode * inode, struct file * file )
 {
-	int device;
-
-	sync_dev(inode->i_rdev);
-
-	device = DEVICE_NR(MINOR(inode->i_rdev));
+	int device = DEVICE_NR(MINOR(inode->i_rdev));
 	if (--access_count[device] == 0 && acsi_info[device].removable)
 		acsi_prevent_removal(device, 0);
 	MOD_DEC_USE_COUNT;
@@ -1398,22 +1386,19 @@ static int acsi_mode_sense( int target, int lun, SENSE_DATA *sd )
  ********************************************************************/
 
 
+extern struct block_device_operations acsi_fops;
+
 static struct gendisk acsi_gendisk = {
-	MAJOR_NR,			/* Major number */	
-	"ad",				/* Major name */
-	4,					/* Bits to shift to get real from partition */
-	1 << 4,				/* Number of partitions per real */
-	MAX_DEV,			/* maximum number of real */
-#ifdef MODULE
-	NULL,				/* called from init_module() */
-#else
-	acsi_geninit,		/* init function */
-#endif
-	acsi_part,			/* hd struct */
-	acsi_sizes,			/* block sizes */
-	0,					/* number */
+	MAJOR_NR,		/* Major number */	
+	"ad",			/* Major name */
+	4,			/* Bits to shift to get real from partition */
+	1 << 4,			/* Number of partitions per real */
+	acsi_part,		/* hd struct */
+	acsi_sizes,		/* block sizes */
+	0,			/* number */
 	(void *)acsi_info,	/* internal */
-	NULL				/* next */
+	NULL,			/* next */
+	&acsi_fops,		/* file operations */
 };
 	
 #define MAX_SCSI_DEVICE_CODE 10
@@ -1672,7 +1657,15 @@ EXPORT_SYMBOL(acsi_attach_SLMs);
 int SLM_devices[8];
 #endif
 
-static void acsi_geninit( struct gendisk *gd )
+static struct block_device_operations acsi_fops = {
+	open:			acsi_open,
+	release:		acsi_release,
+	ioctl:			acsi_ioctl,
+	check_media_change:	acsi_media_change,
+	revalidate:		acsi_revalidate,
+};
+
+static void acsi_geninit(void)
 {
 	int i, target, lun;
 	struct acsi_info_struct *aip;
@@ -1754,14 +1747,15 @@ static void acsi_geninit( struct gendisk *gd )
 			NDevices, n_slm );
 #endif
 					 
-	for( i = 0; i < NDevices; ++i ) {
-		acsi_part[i<<4].start_sect = 0;
-		acsi_part[i<<4].nr_sects = acsi_info[i].size;
-	}
-	acsi_gendisk.nr_real = NDevices;
 	for( i = 0; i < (MAX_DEV << 4); i++ )
 		acsi_blocksizes[i] = 1024;
 	blksize_size[MAJOR_NR] = acsi_blocksizes;
+	for( i = 0; i < NDevices; ++i )
+		register_disk(&acsi_gendisk, MKDEV(MAJOR_NR,i<<4),
+				(acsi_info[i].type==HARDDISK)?1<<4:1,
+				&acsi_fops,
+				acsi_info[i].size);
+	acsi_gendisk.nr_real = NDevices;
 }
 
 #ifdef CONFIG_ATARI_SLM_MODULE
@@ -1779,54 +1773,37 @@ void acsi_attach_SLMs( int (*attach_func)( int, int ) )
 }
 #endif /* CONFIG_ATARI_SLM_MODULE */
 
-static struct file_operations acsi_fops = {
-	NULL,			/* lseek - default */
-	block_read,		/* read - general block-dev read */
-	block_write,	/* write - general block-dev write */
-	NULL,			/* readdir - bad */
-	NULL,			/* select */
-	acsi_ioctl,		/* ioctl */
-	NULL,			/* mmap */
-	acsi_open,		/* open */
-	NULL,			/* flush */
-	acsi_release,		/* release */
-	block_fsync,		/* fsync */
-	NULL,			/* fasync */
-	acsi_media_change,	/* media_change */
-	acsi_revalidate,	/* revalidate */
-};
-
 
 int acsi_init( void )
 
 {
+	int err = 0;
 	if (!MACH_IS_ATARI || !ATARIHW_PRESENT(ACSI))
 		return 0;
-
-	if (register_blkdev( MAJOR_NR, "ad", &acsi_fops )) {
+	if (devfs_register_blkdev( MAJOR_NR, "ad", &acsi_fops )) {
 		printk( KERN_ERR "Unable to get major %d for ACSI\n", MAJOR_NR );
 		return -EBUSY;
 	}
-
 	if (!(acsi_buffer =
-		  (char *)atari_stram_alloc( ACSI_BUFFER_SIZE, NULL, "acsi" ))) {
+		  (char *)atari_stram_alloc(ACSI_BUFFER_SIZE, "acsi"))) {
 		printk( KERN_ERR "Unable to get ACSI ST-Ram buffer.\n" );
-		unregister_blkdev( MAJOR_NR, "ad" );
+		devfs_unregister_blkdev( MAJOR_NR, "ad" );
 		return -ENOMEM;
 	}
-	phys_acsi_buffer = VTOP( acsi_buffer );
+	phys_acsi_buffer = virt_to_phys( acsi_buffer );
 	STramMask = ATARIHW_PRESENT(EXTD_DMA) ? 0x00000000 : 0xff000000;
 	
-	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
 	read_ahead[MAJOR_NR] = 8;		/* 8 sector (4kB) read-ahead */
 	acsi_gendisk.next = gendisk_head;
 	gendisk_head = &acsi_gendisk;
 
 #ifdef CONFIG_ATARI_SLM
-	return( slm_init() );
-#else
-	return 0;
+	err = slm_init();
 #endif
+	if (!err)
+		acsi_geninit();
+	return err;
 }
 
 
@@ -1838,7 +1815,6 @@ int init_module(void)
 	if ((err = acsi_init()))
 		return( err );
 	printk( KERN_INFO "ACSI driver loaded as module.\n");
-	acsi_geninit( &(struct gendisk){ 0,0,0,0,0,0,0,0,0,0,0 } );
 	return( 0 );
 }
 
@@ -1847,10 +1823,10 @@ void cleanup_module(void)
 	struct gendisk ** gdp;
 
 	del_timer( &acsi_timer );
-	blk_dev[MAJOR_NR].request_fn = 0;
+	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
 	atari_stram_free( acsi_buffer );
 
-	if (unregister_blkdev( MAJOR_NR, "ad" ) != 0)
+	if (devfs_unregister_blkdev( MAJOR_NR, "ad" ) != 0)
 		printk( KERN_ERR "acsi: cleanup_module failed\n");
 
 	for (gdp = &gendisk_head; *gdp; gdp = &((*gdp)->next))
@@ -1936,9 +1912,7 @@ static int revalidate_acsidisk( int dev, int maxusage )
 	ENABLE_IRQ();
 	stdma_release();
 	
-	gdev->part[start].nr_sects = aip->size;
-	if (aip->type == HARDDISK && aip->size > 0)
-		resetup_one_dev(gdev, device);
+	grok_partitions(gdev, device, (aip->type==HARDDISK)?1<<4:1, aip->size);
 
 	DEVICE_BUSY = 0;
 	wake_up(&busy_wait);

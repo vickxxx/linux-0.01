@@ -1,10 +1,14 @@
 /*
- * linux/include/asm-arm/arch-ebsa110/serial.h
+ *  linux/include/asm-arm/arch-ebsa110/serial.h
  *
- * Copyright (c) 1996,1997,1998 Russell King.
+ *  Copyright (C) 1996,1997,1998 Russell King.
  *
- * Changelog:
- *  15-10-1996	RMK	Created
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Changelog:
+ *   15-10-1996	RMK	Created
  */
 #ifndef __ASM_ARCH_SERIAL_H
 #define __ASM_ARCH_SERIAL_H
@@ -20,22 +24,14 @@
 
 #define STD_COM_FLAGS (ASYNC_BOOT_AUTOCONF | ASYNC_SKIP_TEST)
 
+#define RS_TABLE_SIZE	2
+
      /* UART CLK        PORT  IRQ     FLAGS        */
-#define SERIAL_PORT_DFNS \
+#define STD_SERIAL_PORT_DEFNS \
 	{ 0, BASE_BAUD, 0x3F8,  1, STD_COM_FLAGS },	/* ttyS0 */	\
-	{ 0, BASE_BAUD, 0x2F8,  2, STD_COM_FLAGS },	/* ttyS1 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS2 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS3 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS }, 	/* ttyS4 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS5 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS6 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS7 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS8 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS9 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS10 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS11 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS12 */	\
-	{ 0, BASE_BAUD, 0    ,  0, STD_COM_FLAGS },	/* ttyS13 */
+	{ 0, BASE_BAUD, 0x2F8,  2, STD_COM_FLAGS }	/* ttyS1 */
+
+#define EXTRA_SERIAL_PORT_DEFNS
 
 #endif
 

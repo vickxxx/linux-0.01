@@ -9,30 +9,39 @@
  * OSS/Free for Linux is distributed under the GNU GENERAL PUBLIC LICENSE (GPL)
  * Version 2 (June 1991). See the "COPYING" file distributed with this software
  * for more info.
- */
-/*
+ *
+ *
  * Daniel J. Rodriksson: Modified sbintr to handle 8 and 16 bit interrupts
  *                       for full duplex support ( only sb16 by now )
  * Rolf Fokkens:	 Added (BETA?) support for ES1887 chips.
  * (fokkensr@vertis.nl)	 Which means: You can adjust the recording levels.
+ *
+ * 2000/01/18 - separated sb_card and sb_common -
+ * Jeff Garzik <jgarzik@mandrakesoft.com>
+ *
+ * 2000/09/18 - got rid of attach_uart401
+ * Arnaldo Carvalho de Melo <acme@conectiva.com.br>
  */
+
 #include <linux/config.h>
+#include <linux/init.h>
+#include <linux/module.h>
 #include <linux/delay.h>
-#include <asm/init.h>
 
 #include "sound_config.h"
 #include "sound_firmware.h"
 
-#ifdef CONFIG_SBDSP
-
-#ifndef CONFIG_AUDIO
-#error You will need to configure the sound driver with CONFIG_AUDIO option.
-#endif
+#include "mpu401.h"
 
 #include "sb_mixer.h"
 #include "sb.h"
-
 #include "sb_ess.h"
+
+/*
+ * global module flag
+ */
+
+int sb_be_quiet = 0;
 
 static sb_devc *detected_devc = NULL;	/* For communication from probe to init */
 static sb_devc *last_devc = NULL;	/* For MPU401 initialization */
@@ -44,6 +53,8 @@ static unsigned char jazz_irq_bits[] = {
 static unsigned char jazz_dma_bits[] = {
 	0, 1, 0, 2, 0, 3, 0, 4
 };
+
+void *smw_free = NULL;
 
 /*
  * Jazz16 chipset specific control variables
@@ -114,10 +125,9 @@ static void sb_intr (sb_devc *devc)
 	{
 		src = sb_getmixer(devc, IRQ_STAT);	/* Interrupt source register */
 
-#if defined(CONFIG_MIDI)&& defined(CONFIG_UART401)
 		if (src & 4)						/* MPU401 interrupt */
-			uart401intr(devc->irq, devc->midi_irq_cookie, NULL);
-#endif
+			if(devc->midi_irq_cookie)
+				uart401intr(devc->irq, devc->midi_irq_cookie, NULL);
 
 		if (!(src & 3))
 			return;	/* Not a DSP interrupt */
@@ -138,9 +148,7 @@ static void sb_intr (sb_devc *devc)
 				break;
 
 			case IMODE_MIDI:
-#ifdef CONFIG_MIDI
 				sb_midi_interrupt(devc);
-#endif
 				break;
 
 			default:
@@ -283,7 +291,6 @@ static int sb16_set_dma_hw(sb_devc * devc)
 	return 1;
 }
 
-#if defined(CONFIG_MIDI) && defined(CONFIG_UART401)
 static void sb16_set_mpu_port(sb_devc * devc, struct address_info *hw_config)
 {
 	/*
@@ -306,7 +313,6 @@ static void sb16_set_mpu_port(sb_devc * devc, struct address_info *hw_config)
 			printk(KERN_ERR "SB16: Invalid MIDI I/O port %x\n", hw_config->io_base);
 	}
 }
-#endif
 
 static int sb16_set_irq_hw(sb_devc * devc, int level)
 {
@@ -490,12 +496,16 @@ static void relocate_ess1688(sb_devc * devc)
 #endif
 }
 
-int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio)
+int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio, struct sb_module_options *sbmo)
 {
 	sb_devc sb_info;
 	sb_devc *devc = &sb_info;
 
 	memset((char *) &sb_info, 0, sizeof(sb_info));	/* Zero everything */
+
+	/* Copy module options in place */
+	if(sbmo) memcpy(&devc->sbmo, sbmo, sizeof(struct sb_module_options));
+
 	sb_info.my_mididev = -1;
 	sb_info.my_mixerdev = -1;
 	sb_info.dev = -1;
@@ -540,7 +550,7 @@ int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio)
 		printk("Yamaha PCI mode.\n");
 	}
 	
-	if (acer)
+	if (devc->sbmo.acer)
 	{
 		cli();
 		inb(devc->base + 0x09);
@@ -626,7 +636,7 @@ int sb_dsp_detect(struct address_info *hw_config, int pci, int pciio)
 	return 1;
 }
 
-int sb_dsp_init(struct address_info *hw_config)
+int sb_dsp_init(struct address_info *hw_config, struct module *owner)
 {
 	sb_devc *devc;
 	char name[100];
@@ -804,12 +814,10 @@ int sb_dsp_init(struct address_info *hw_config)
 
 	if (!(devc->caps & SB_NO_MIXER))
 		if (devc->major == 3 || devc->major == 4)
-			sb_mixer_init(devc);
+			sb_mixer_init(devc, owner);
 
-#ifdef CONFIG_MIDI
 	if (!(devc->caps & SB_NO_MIDI))
-		sb_dsp_midi_init(devc);
-#endif
+		sb_dsp_midi_init(devc, owner);
 
 	if (hw_config->name == NULL)
 		hw_config->name = "Sound Blaster (8 BIT/MONO ONLY)";
@@ -855,7 +863,7 @@ int sb_dsp_init(struct address_info *hw_config)
 			if (sound_alloc_dma(devc->dma16, "SoundBlaster16"))
 				printk(KERN_WARNING "Sound Blaster:  can't allocate 16 bit DMA channel %d.\n", devc->dma16);
 		}
-		sb_audio_init(devc, name);
+		sb_audio_init(devc, name, owner);
 		hw_config->slots[0]=devc->dev;
 	}
 	else
@@ -897,10 +905,10 @@ void sb_dsp_unload(struct address_info *hw_config, int sbmpu)
 		}
 		if (!(devc->caps & SB_NO_AUDIO && devc->caps & SB_NO_MIDI))
 		{
-			if (devc->irq > 0);
+			if (devc->irq > 0)
 				free_irq(devc->irq, devc);
 
-			sound_unload_mixerdev(devc->my_mixerdev);
+			sb_mixer_unload(devc);
 			/* We don't have to do this bit any more the UART401 is its own
 				master  -- Krzysztof Halasa */
 			/* But we have to do it, if UART401 is not detected */
@@ -969,8 +977,6 @@ void sb_chgmixer
 	value = (value & ~mask) | (val & mask);
 	sb_setmixer(devc, reg, value);
 }
-
-#ifdef CONFIG_MIDI
 
 /*
  *	MPU401 MIDI initialization.
@@ -1048,8 +1054,6 @@ static int smw_midi_init(sb_devc * devc, struct address_info *hw_config)
 #ifdef MODULE
 	if (!smw_ucode)
 	{
-		extern void *smw_free;
-
 		smw_ucodeLen = mod_firmware_load("/etc/sound/midi0001.bin", (void *) &smw_ucode);
 		smw_free = smw_ucode;
 	}
@@ -1188,26 +1192,10 @@ static int init_Jazz16_midi(sb_devc * devc, struct address_info *hw_config)
 	return 1;
 }
 
-void attach_sbmpu(struct address_info *hw_config)
-{
-	if (last_sb->model == MDL_ESS) {
-#if defined(CONFIG_SOUND_MPU401)
-		attach_mpu401(hw_config);
-		if (last_sb->irq == -hw_config->irq) {
-			last_sb->midi_irq_cookie=(void *)hw_config->slots[1];
-		}
-#endif
-		return;
-	}
-#if defined(CONFIG_UART401)
-	attach_uart401(hw_config);
-	last_sb->midi_irq_cookie=midi_devs[hw_config->slots[4]]->devc;
-#endif
-}
-
-int probe_sbmpu(struct address_info *hw_config)
+int probe_sbmpu(struct address_info *hw_config, struct module *owner)
 {
 	sb_devc *devc = last_devc;
+	int ret;
 
 	if (last_devc == NULL)
 		return 0;
@@ -1215,7 +1203,17 @@ int probe_sbmpu(struct address_info *hw_config)
 	last_devc = 0;
 
 	if (hw_config->io_base <= 0)
+	{
+		/* The real vibra16 is fine about this, but we have to go
+		   wipe up after Cyrix again */
+		   	   
+		if(devc->model == MDL_SB16 && devc->minor >= 12)
+		{
+			unsigned char   bits = sb_getmixer(devc, 0x84) & ~0x06;
+			sb_setmixer(devc, 0x84, bits | 0x02);		/* Disable MPU */
+		}
 		return 0;
+	}
 
 #if defined(CONFIG_SOUND_MPU401)
 	if (devc->model == MDL_ESS)
@@ -1229,16 +1227,15 @@ int probe_sbmpu(struct address_info *hw_config)
 			return 0;
 		hw_config->name = "ESS1xxx MPU";
 		devc->midi_irq_cookie = -1;
-		return probe_mpu401(hw_config);
+		if (!probe_mpu401(hw_config))
+			return 0;
+		attach_mpu401(hw_config, owner);
+		if (last_sb->irq == -hw_config->irq)
+			last_sb->midi_irq_cookie=(void *)hw_config->slots[1];
+		return 1;
 	}
 #endif
 
-#if defined(CONFIG_UART401)
-	if (check_region(hw_config->io_base, 4))
-	{
-		printk(KERN_ERR "sbmpu: I/O port conflict (%x)\n", hw_config->io_base);
-		return 0;
-	}
 	switch (devc->model)
 	{
 		case MDL_SB16:
@@ -1248,7 +1245,8 @@ int probe_sbmpu(struct address_info *hw_config)
 				return 0;
 			}
 			hw_config->name = "Sound Blaster 16";
-			hw_config->irq = -devc->irq;
+			if (hw_config->irq < 3 || hw_config->irq == devc->irq)
+				hw_config->irq = -devc->irq;
 			if (devc->minor > 12)		/* What is Vibra's version??? */
 				sb16_set_mpu_port(devc, hw_config);
 			break;
@@ -1267,10 +1265,11 @@ int probe_sbmpu(struct address_info *hw_config)
 		default:
 			return 0;
 	}
-	return probe_uart401(hw_config);
-#else
-	return 0;
-#endif
+	
+	ret = probe_uart401(hw_config, owner);
+	if (ret)
+		last_sb->midi_irq_cookie=midi_devs[hw_config->slots[4]]->devc;
+	return ret;
 }
 
 void unload_sbmpu(struct address_info *hw_config)
@@ -1281,23 +1280,14 @@ void unload_sbmpu(struct address_info *hw_config)
 		return;
 	}
 #endif
-#if defined(CONFIG_UART401)
 	unload_uart401(hw_config);
-#endif
-}
-#else				/* !CONFIG_MIDI */
-
-void unload_sbmpu(struct address_info *hw_config)
-{
 }
 
-int probe_sbmpu(struct address_info *hw_config)
-{
-	return 0;
-}
-
-void attach_sbmpu(struct address_info *hw_config)
-{
-}
-#endif
-#endif
+EXPORT_SYMBOL(sb_dsp_init);
+EXPORT_SYMBOL(sb_dsp_detect);
+EXPORT_SYMBOL(sb_dsp_unload);
+EXPORT_SYMBOL(sb_dsp_disable_midi);
+EXPORT_SYMBOL(sb_be_quiet);
+EXPORT_SYMBOL(probe_sbmpu);
+EXPORT_SYMBOL(unload_sbmpu);
+EXPORT_SYMBOL(smw_free);

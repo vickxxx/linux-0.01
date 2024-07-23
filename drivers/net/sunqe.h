@@ -1,4 +1,5 @@
-/* sunqe.h: Definitions for the Sun QuadEthernet driver.
+/* $Id: sunqe.h,v 1.13 2000/02/09 11:15:42 davem Exp $
+ * sunqe.h: Definitions for the Sun QuadEthernet driver.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
  */
@@ -7,14 +8,13 @@
 #define _SUNQE_H
 
 /* QEC global registers. */
-struct qe_globreg {
-	volatile unsigned int ctrl;      /* Control                  */
-	volatile unsigned int stat;      /* Status                   */
-	volatile unsigned int psize;     /* Packet Size              */
-	volatile unsigned int msize;     /* Local-mem size (64K)     */
-	volatile unsigned int rsize;     /* Receive partition size   */
-	volatile unsigned int tsize;     /* Transmit partition size  */
-};
+#define GLOB_CTRL	0x00UL		/* Control			*/
+#define GLOB_STAT	0x04UL		/* Status			*/
+#define GLOB_PSIZE	0x08UL		/* Packet Size			*/
+#define GLOB_MSIZE	0x0cUL		/* Local-memory Size		*/
+#define GLOB_RSIZE	0x10UL		/* Receive partition size	*/
+#define GLOB_TSIZE	0x14UL		/* Transmit partition size	*/
+#define GLOB_REG_SIZE	0x18UL
 
 #define GLOB_CTRL_MMODE       0x40000000 /* MACE qec mode            */
 #define GLOB_CTRL_BMODE       0x10000000 /* BigMAC qec mode          */
@@ -42,22 +42,21 @@ struct qe_globreg {
 #define GLOB_STAT_PER_QE(status, channel) (((status) >> ((channel) * 4)) & 0xf)
 
 /* The following registers are for per-qe channel information/status. */
-struct qe_creg {
-	volatile unsigned int ctrl;       /* Control                   */
-	volatile unsigned int stat;       /* Status                    */
-	volatile unsigned int rxds;       /* RX descriptor ring ptr    */
-	volatile unsigned int txds;       /* TX descriptor ring ptr    */
-	volatile unsigned int rimask;     /* RX Interrupt Mask         */
-	volatile unsigned int timask;     /* TX Interrupt Mask         */
-	volatile unsigned int qmask;      /* QEC Error Interrupt Mask  */
-	volatile unsigned int mmask;      /* MACE Error Interrupt Mask */
-	volatile unsigned int rxwbufptr;  /* Local memory rx write ptr */
-	volatile unsigned int rxrbufptr;  /* Local memory rx read ptr  */
-	volatile unsigned int txwbufptr;  /* Local memory tx write ptr */
-	volatile unsigned int txrbufptr;  /* Local memory tx read ptr  */
-	volatile unsigned int ccnt;       /* Collision Counter         */
-	volatile unsigned int pipg;       /* Inter-Frame Gap           */
-};
+#define CREG_CTRL	0x00UL	/* Control                   */
+#define CREG_STAT	0x04UL	/* Status                    */
+#define CREG_RXDS	0x08UL	/* RX descriptor ring ptr    */
+#define CREG_TXDS	0x0cUL	/* TX descriptor ring ptr    */
+#define CREG_RIMASK	0x10UL	/* RX Interrupt Mask         */
+#define CREG_TIMASK	0x14UL	/* TX Interrupt Mask         */
+#define CREG_QMASK	0x18UL	/* QEC Error Interrupt Mask  */
+#define CREG_MMASK	0x1cUL	/* MACE Error Interrupt Mask */
+#define CREG_RXWBUFPTR	0x20UL	/* Local memory rx write ptr */
+#define CREG_RXRBUFPTR	0x24UL	/* Local memory rx read ptr  */
+#define CREG_TXWBUFPTR	0x28UL	/* Local memory tx write ptr */
+#define CREG_TXRBUFPTR	0x2cUL	/* Local memory tx read ptr  */
+#define CREG_CCNT	0x30UL	/* Collision Counter         */
+#define CREG_PIPG	0x34UL	/* Inter-Frame Gap           */
+#define CREG_REG_SIZE	0x38UL
 
 #define CREG_CTRL_RXOFF       0x00000004  /* Disable this qe's receiver*/
 #define CREG_CTRL_RESET       0x00000002  /* Reset this qe channel     */
@@ -127,40 +126,39 @@ struct qe_creg {
 #define CREG_PIPG_WMASK       0x0000000f  /* SBUS Wait Mask            */
 
 /* Per-channel AMD 79C940 MACE registers. */
-struct qe_mregs {
-	volatile unsigned char rxfifo;   /* Receive FIFO                   */
-	volatile unsigned char txfifo;   /* Transmit FIFO                  */
-	volatile unsigned char txfcntl;  /* Transmit Frame Control         */
-	volatile unsigned char txfstat;  /* Transmit Frame Status          */
-	volatile unsigned char txrcnt;   /* Transmit Retry Count           */
-	volatile unsigned char rxfcntl;  /* Receive Frame Control          */
-	volatile unsigned char rxfstat;  /* Receive Frame Status           */
-	volatile unsigned char ffcnt;    /* FIFO Frame Count               */
-	volatile unsigned char ireg;     /* Interrupt Register             */
-	volatile unsigned char imask;    /* Interrupt Mask                 */
-	volatile unsigned char poll;     /* POLL Register                  */
-	volatile unsigned char bconfig;  /* BIU Config                     */
-	volatile unsigned char fconfig;  /* FIFO Config                    */
-	volatile unsigned char mconfig;  /* MAC Config                     */
-	volatile unsigned char plsconfig;/* PLS Config                     */
-	volatile unsigned char phyconfig;/* PHY Config                     */
-	volatile unsigned char chipid1;  /* Chip-ID, low bits              */
-	volatile unsigned char chipid2;  /* Chip-ID, high bits             */
-	volatile unsigned char iaconfig; /* Internal Address Config        */
-	volatile unsigned char _unused0; /* Reserved...                    */
-	volatile unsigned char filter;   /* Logical Address Filter         */
-	volatile unsigned char ethaddr;  /* Our Ethernet Address           */
-	volatile unsigned char _unused1; /* Reserved...                    */
-	volatile unsigned char _unused2; /* Reserved...                    */
-	volatile unsigned char mpcnt;    /* Missed Packet Count            */
-	volatile unsigned char _unused3; /* Reserved...                    */
-	volatile unsigned char rpcnt;    /* Runt Packet Count              */
-	volatile unsigned char rccnt;    /* RX Collision Count             */
-	volatile unsigned char _unused4; /* Reserved...                    */
-	volatile unsigned char utest;    /* User Test                      */
-	volatile unsigned char rtest1;   /* Reserved Test 1                */
-	volatile unsigned char rtest2;   /* Reserved Test 2                */
-};
+#define MREGS_RXFIFO	0x00UL	/* Receive FIFO                   */
+#define MREGS_TXFIFO	0x01UL	/* Transmit FIFO                  */
+#define MREGS_TXFCNTL	0x02UL	/* Transmit Frame Control         */
+#define MREGS_TXFSTAT	0x03UL	/* Transmit Frame Status          */
+#define MREGS_TXRCNT	0x04UL	/* Transmit Retry Count           */
+#define MREGS_RXFCNTL	0x05UL	/* Receive Frame Control          */
+#define MREGS_RXFSTAT	0x06UL	/* Receive Frame Status           */
+#define MREGS_FFCNT	0x07UL	/* FIFO Frame Count               */
+#define MREGS_IREG	0x08UL	/* Interrupt Register             */
+#define MREGS_IMASK	0x09UL	/* Interrupt Mask                 */
+#define MREGS_POLL	0x0aUL	/* POLL Register                  */
+#define MREGS_BCONFIG	0x0bUL	/* BIU Config                     */
+#define MREGS_FCONFIG	0x0cUL	/* FIFO Config                    */
+#define MREGS_MCONFIG	0x0dUL	/* MAC Config                     */
+#define MREGS_PLSCONFIG	0x0eUL	/* PLS Config                     */
+#define MREGS_PHYCONFIG	0x0fUL	/* PHY Config                     */
+#define MREGS_CHIPID1	0x10UL	/* Chip-ID, low bits              */
+#define MREGS_CHIPID2	0x11UL	/* Chip-ID, high bits             */
+#define MREGS_IACONFIG	0x12UL	/* Internal Address Config        */
+	/* 0x13UL, reserved */
+#define MREGS_FILTER	0x14UL	/* Logical Address Filter         */
+#define MREGS_ETHADDR	0x15UL	/* Our Ethernet Address           */
+	/* 0x16UL, reserved */
+	/* 0x17UL, reserved */
+#define MREGS_MPCNT	0x18UL	/* Missed Packet Count            */
+	/* 0x19UL, reserved */
+#define MREGS_RPCNT	0x1aUL	/* Runt Packet Count              */
+#define MREGS_RCCNT	0x1bUL	/* RX Collision Count             */
+	/* 0x1cUL, reserved */
+#define MREGS_UTEST	0x1dUL	/* User Test                      */
+#define MREGS_RTEST1	0x1eUL	/* Reserved Test 1                */
+#define MREGS_RTEST2	0x1fUL	/* Reserved Test 2                */
+#define MREGS_REG_SIZE	0x20UL
 
 #define MREGS_TXFCNTL_DRETRY        0x80 /* Retry disable                  */
 #define MREGS_TXFCNTL_DFCS          0x08 /* Disable TX FCS                 */
@@ -267,8 +265,8 @@ struct qe_mregs {
 #define MREGS_UTEST_NOLOOP          0x00 /* No loopback                    */
 
 struct qe_rxd {
-	unsigned int rx_flags;
-	unsigned int rx_addr;
+	u32 rx_flags;
+	u32 rx_addr;
 };
 
 #define RXD_OWN      0x80000000 /* Ownership.      */
@@ -276,8 +274,8 @@ struct qe_rxd {
 #define RXD_LENGTH   0x000007ff /* Packet Length.  */
 
 struct qe_txd {
-	unsigned int tx_flags;
-	unsigned int tx_addr;
+	u32 tx_flags;
+	u32 tx_addr;
 };
 
 #define TXD_OWN      0x80000000 /* Ownership.      */
@@ -289,28 +287,18 @@ struct qe_txd {
 #define TX_RING_MAXSIZE   256
 #define RX_RING_MAXSIZE   256
 
-#define TX_RING_SIZE      256
-#define RX_RING_SIZE      256
+#define TX_RING_SIZE      16
+#define RX_RING_SIZE      16
 
-#define NEXT_RX(num)       (((num) + 1) & (RX_RING_SIZE - 1))
-#define NEXT_TX(num)       (((num) + 1) & (TX_RING_SIZE - 1))
-#define PREV_RX(num)       (((num) - 1) & (RX_RING_SIZE - 1))
-#define PREV_TX(num)       (((num) - 1) & (TX_RING_SIZE - 1))
+#define NEXT_RX(num)       (((num) + 1) & (RX_RING_MAXSIZE - 1))
+#define NEXT_TX(num)       (((num) + 1) & (TX_RING_MAXSIZE - 1))
+#define PREV_RX(num)       (((num) - 1) & (RX_RING_MAXSIZE - 1))
+#define PREV_TX(num)       (((num) - 1) & (TX_RING_MAXSIZE - 1))
 
 #define TX_BUFFS_AVAIL(qp)                                    \
         (((qp)->tx_old <= (qp)->tx_new) ?                     \
 	  (qp)->tx_old + (TX_RING_SIZE - 1) - (qp)->tx_new :  \
 			    (qp)->tx_old - (qp)->tx_new - 1)
-
-
-#define SUN4C_TX_BUFFS_AVAIL(qp)                                    \
-        (((qp)->tx_old <= (qp)->tx_new) ?                           \
-	  (qp)->tx_old + (SUN4C_TX_RING_SIZE - 1) - (qp)->tx_new :  \
-	  (qp)->tx_old - (qp)->tx_new - (TX_RING_SIZE - SUN4C_TX_RING_SIZE))
-
-
-#define RX_COPY_THRESHOLD  256
-#define RX_BUF_ALLOC_SIZE  (1546 + 64)
 
 struct qe_init_block {
 	struct qe_rxd qe_rxd[RX_RING_MAXSIZE];
@@ -323,73 +311,41 @@ struct qe_init_block {
 struct sunqe;
 
 struct sunqec {
-	struct qe_globreg         *gregs;             /* QEC Global Registers         */
-
-	struct sunqe              *qes[4];
-	unsigned int               qec_bursts;
-	struct linux_sbus_device  *qec_sbus_dev;
-	struct sunqec             *next_module;
+	unsigned long		gregs;		/* QEC Global Registers         */
+	struct sunqe		*qes[4];	/* Each child MACE              */
+	unsigned int            qec_bursts;	/* Support burst sizes          */
+	struct sbus_dev		*qec_sdev;	/* QEC's SBUS device            */
+	struct sunqec		*next_module;	/* List of all QECs in system   */
 };
 
-#define SUN4C_PKT_BUF_SZ	1544
-#define SUN4C_RX_BUFF_SIZE	SUN4C_PKT_BUF_SZ
-#define SUN4C_TX_BUFF_SIZE	SUN4C_PKT_BUF_SZ
-
-#define SUN4C_RX_RING_SIZE	16
-#define SUN4C_TX_RING_SIZE	16
+#define PKT_BUF_SZ	1664
+#define RXD_PKT_SZ	1664
 
 struct sunqe_buffers {
-	char	tx_buf[SUN4C_TX_RING_SIZE][SUN4C_TX_BUFF_SIZE];
-	char	pad[2];		/* Align rx_buf for copy_and_sum(). */
-	char	rx_buf[SUN4C_RX_RING_SIZE][SUN4C_RX_BUFF_SIZE];
+	u8	tx_buf[TX_RING_SIZE][PKT_BUF_SZ];
+	u8	__pad[2];
+	u8	rx_buf[RX_RING_SIZE][PKT_BUF_SZ];
 };
 
 #define qebuf_offset(mem, elem) \
 ((__u32)((unsigned long)(&(((struct sunqe_buffers *)0)->mem[elem][0]))))
 
-#define SUN4C_NEXT_RX(num)	(((num) + 1) & (SUN4C_RX_RING_SIZE - 1))
-#define SUN4C_NEXT_TX(num)	(((num) + 1) & (SUN4C_TX_RING_SIZE - 1))
-#define SUN4C_PREV_RX(num)	(((num) - 1) & (SUN4C_RX_RING_SIZE - 1))
-#define SUN4C_PREV_TX(num)	(((num) - 1) & (SUN4C_TX_RING_SIZE - 1))
-
 struct sunqe {
-	struct qe_creg            *qcregs;           /* QEC per-channel Registers      */
-	struct qe_mregs           *mregs;            /* Per-channel MACE Registers     */
-	struct qe_init_block      *qe_block;         /* RX and TX descriptors          */
-	__u32                      qblock_dvma;      /* RX and TX descriptors          */
-
-	struct sk_buff            *rx_skbs[RX_RING_SIZE];
-	struct sk_buff            *tx_skbs[TX_RING_SIZE];
-
-	int                        rx_new, tx_new, rx_old, tx_old;
-
-	struct sunqe_buffers      *sun4c_buffers; /* CPU visible address.  */
-	__u32                      s4c_buf_dvma;  /* DVMA visible address. */
-
-	struct sunqec             *parent;
-
-	struct net_device_stats   net_stats;     /* Statistical counters               */
-	struct linux_sbus_device  *qe_sbusdev;   /* QE's SBUS device struct            */
-	struct device             *dev;          /* QE's netdevice struct              */
-	int                        channel;      /* Who am I?                          */
+	unsigned long			qcregs;		/* QEC per-channel Registers   */
+	unsigned long			mregs;		/* Per-channel MACE Registers  */
+	struct qe_init_block      	*qe_block;	/* RX and TX descriptors       */
+	__u32                      	qblock_dvma;	/* RX and TX descriptors       */
+	spinlock_t			lock;		/* Protects txfull state       */
+	int                        	rx_new, rx_old;	/* RX ring extents	       */
+	int			   	tx_new, tx_old;	/* TX ring extents	       */
+	struct sunqe_buffers		*buffers;	/* CPU visible address.        */
+	__u32				buffers_dvma;	/* DVMA visible address.       */
+	struct sunqec			*parent;
+	u8				mconfig;	/* Base MACE mconfig value     */
+	struct net_device_stats		net_stats;	/* Statistical counters        */
+	struct sbus_dev			*qe_sdev;	/* QE's SBUS device struct     */
+	struct net_device		*dev;		/* QE's netdevice struct       */
+	int				channel;	/* Who am I?                   */
 };
-
-/* We use this to acquire receive skb's that we can DMA directly into. */
-#define ALIGNED_RX_SKB_ADDR(addr) \
-        ((((unsigned long)(addr) + (64 - 1)) & ~(64 - 1)) - (unsigned long)(addr))
-
-static inline struct sk_buff *qe_alloc_skb(unsigned int length, int gfp_flags)
-{
-	struct sk_buff *skb;
-
-	skb = alloc_skb(length + 64, gfp_flags);
-	if(skb) {
-		int offset = ALIGNED_RX_SKB_ADDR(skb->data);
-
-		if(offset)
-			skb_reserve(skb, offset);
-	}
-	return skb;
-}
 
 #endif /* !(_SUNQE_H) */

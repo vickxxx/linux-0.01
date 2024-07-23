@@ -6,120 +6,52 @@
  *  inode VFS functions
  */
 
+#include <linux/sched.h>
+#include <linux/smp_lock.h>
 #include "hpfs_fn.h"
 
-static const struct file_operations hpfs_file_ops =
+static struct file_operations hpfs_file_ops =
 {
-	NULL,				/* lseek - default */
-	generic_file_read,		/* read */
-	hpfs_file_write,		/* write */
-	NULL,				/* readdir - bad */
-	NULL,				/* poll - default */
-	NULL,				/* ioctl - default */
-	generic_file_mmap/*hpfs_mmap*/,	/* mmap */
-	hpfs_open,			/* open */
-	NULL,				/* flush */
-	hpfs_file_release,		/* release */
-	hpfs_file_fsync,		/* fsync */
-	NULL,				/* fasync */
-	NULL,				/* check_media_change */
-	NULL,				/* revalidate */
-	NULL,				/* lock */
+	read:		generic_file_read,
+	write:		hpfs_file_write,
+	mmap:		generic_file_mmap,
+	open:		hpfs_open,
+	release:	hpfs_file_release,
+	fsync:		hpfs_file_fsync,
 };
 
-static const struct inode_operations hpfs_file_iops =
+static struct inode_operations hpfs_file_iops =
 {
-	(nonconst *) & hpfs_file_ops,	/* default file operations */
-	NULL,				/* create */
-	NULL,				/* lookup */
-	NULL,				/* link */
-	NULL,				/* unlink */
-	NULL,				/* symlink */
-	NULL,				/* mkdir */
-	NULL,				/* rmdir */
-	NULL,				/* mknod */
-	NULL,				/* rename */
-	NULL,				/* readlink */
-	NULL,				/* follow_link */
-	(int (*)(struct inode *, int))
-#warning Someone needs to code up hpfs_get_block properly... -DaveM
-	&hpfs_bmap,			/* get_block */
-	block_read_full_page,		/* readpage */
-	hpfs_writepage,			/* writepage */
-	block_flushpage,		/* flushpage */
-	hpfs_truncate,			/* truncate */
-	NULL,				/* permission */
-	NULL,				/* smap */
-	NULL,				/* revalidate */
+	truncate:	hpfs_truncate,
+	setattr:	hpfs_notify_change,
 };
 
-static const struct file_operations hpfs_dir_ops =
+static struct file_operations hpfs_dir_ops =
 {
-	NULL,				/* lseek - default */
-	hpfs_dir_read,			/* read */
-	NULL,				/* write - bad */
-	hpfs_readdir,			/* readdir */
-	NULL,				/* poll - default */
-	NULL,				/* ioctl - default */
-	NULL,				/* mmap */
-	hpfs_open,			/* open */
-	NULL,				/* flush */
-	hpfs_dir_release,		/* no special release code */
-	hpfs_file_fsync,		/* fsync */
-	NULL,				/* fasync */
-	NULL,				/* check_media_change */
-	NULL,				/* revalidate */
-	NULL,				/* lock */
+	llseek:		hpfs_dir_lseek,
+	read:		generic_read_dir,
+	readdir:	hpfs_readdir,
+	open:		hpfs_open,
+	release:	hpfs_dir_release,
+	fsync:		hpfs_file_fsync,
 };
 
-static const struct inode_operations hpfs_dir_iops =
+static struct inode_operations hpfs_dir_iops =
 {
-	(nonconst *) & hpfs_dir_ops,	/* default directory file ops */
-	hpfs_create,			/* create */
-	hpfs_lookup,			/* lookup */
-	NULL,				/* link */
-	hpfs_unlink,			/* unlink */
-	hpfs_symlink,			/* symlink */
-	hpfs_mkdir,			/* mkdir */
-	hpfs_rmdir,			/* rmdir */
-	hpfs_mknod,			/* mknod */
-	hpfs_rename,			/* rename */
-	NULL,				/* readlink */
-	NULL,				/* follow_link */
-	NULL,				/* get_block */
-	NULL,				/* readpage */
-	NULL,				/* writepage */
-	NULL,				/* flushpage */
-	NULL,				/* truncate */
-	NULL,				/* permission */
-	NULL,				/* smap */
-	NULL				/* revalidate */
+	create:		hpfs_create,
+	lookup:		hpfs_lookup,
+	unlink:		hpfs_unlink,
+	symlink:	hpfs_symlink,
+	mkdir:		hpfs_mkdir,
+	rmdir:		hpfs_rmdir,
+	mknod:		hpfs_mknod,
+	rename:		hpfs_rename,
+	setattr:	hpfs_notify_change,
 };
 
-const struct inode_operations hpfs_symlink_iops =
-{
-	NULL,				/* default file operations */
-	NULL,				/* create */
-	NULL,				/* lookup */
-	NULL,				/* link */
-	NULL,				/* unlink */
-	NULL,				/* symlink */
-	NULL,				/* mkdir */
-	NULL,				/* rmdir */
-	NULL,				/* mknod */
-	NULL,				/* rename */
-	hpfs_readlink,			/* readlink */
-	hpfs_follow_link,		/* follow_link */
-	NULL,				/* get_block */
-	NULL,				/* readpage */
-	NULL,				/* writepage */
-	NULL,				/* flushpage */
-	NULL,				/* truncate */
-	NULL,				/* permission */
-	NULL,				/* smap */
-	NULL				/* revalidate */
+struct address_space_operations hpfs_symlink_aops = {
+	readpage:	hpfs_symlink_readpage
 };
-
 
 void hpfs_read_inode(struct inode *i)
 {
@@ -128,7 +60,6 @@ void hpfs_read_inode(struct inode *i)
 	struct super_block *sb = i->i_sb;
 	unsigned char *ea;
 	int ea_size;
-	i->i_op = 0;
 	init_MUTEX(&i->i_hpfs_sem);
 	i->i_uid = sb->s_hpfs_uid;
 	i->i_gid = sb->s_hpfs_gid;
@@ -162,14 +93,16 @@ void hpfs_read_inode(struct inode *i)
 	if (i->i_sb->s_hpfs_rd_inode == 2) {
 		i->i_mode |= S_IFREG;
 		i->i_mode &= ~0111;
-		i->i_op = (struct inode_operations *) &hpfs_file_iops;
+		i->i_op = &hpfs_file_iops;
+		i->i_fop = &hpfs_file_ops;
 		i->i_nlink = 1;
 		return;
 	}
 	if (!(fnode = hpfs_map_fnode(sb, i->i_ino, &bh))) {
 		/*i->i_mode |= S_IFREG;
 		i->i_mode &= ~0111;
-		i->i_op = (struct inode_operations *) &hpfs_file_iops;
+		i->i_op = &hpfs_file_iops;
+		i->i_fop = &hpfs_file_ops;
 		i->i_nlink = 0;*/
 		make_bad_inode(i);
 		return;
@@ -192,7 +125,8 @@ void hpfs_read_inode(struct inode *i)
 		if ((ea = hpfs_get_ea(i->i_sb, fnode, "SYMLINK", &ea_size))) {
 			kfree(ea);
 			i->i_mode = S_IFLNK | 0777;
-			i->i_op = (struct inode_operations *) &hpfs_symlink_iops;
+			i->i_op = &page_symlink_inode_operations;
+			i->i_data.a_ops = &hpfs_symlink_aops;
 			i->i_nlink = 1;
 			i->i_size = ea_size;
 			i->i_blocks = 1;
@@ -228,7 +162,8 @@ void hpfs_read_inode(struct inode *i)
 	if (fnode->dirflag) {
 		unsigned n_dnodes, n_subdirs;
 		i->i_mode |= S_IFDIR;
-		i->i_op = (struct inode_operations *) &hpfs_dir_iops;
+		i->i_op = &hpfs_dir_iops;
+		i->i_fop = &hpfs_dir_ops;
 		i->i_hpfs_parent_dir = fnode->up;
 		i->i_hpfs_dno = fnode->u.external[0].disk_secno;
 		if (sb->s_hpfs_chk >= 2) {
@@ -243,10 +178,13 @@ void hpfs_read_inode(struct inode *i)
 	} else {
 		i->i_mode |= S_IFREG;
 		if (!i->i_hpfs_ea_mode) i->i_mode &= ~0111;
-		i->i_op = (struct inode_operations *) &hpfs_file_iops;
+		i->i_op = &hpfs_file_iops;
+		i->i_fop = &hpfs_file_ops;
 		i->i_nlink = 1;
 		i->i_size = fnode->file_size;
 		i->i_blocks = ((i->i_size + 511) >> 9) + 1;
+		i->i_data.a_ops = &hpfs_aops;
+		i->u.hpfs_i.mmu_private = i->i_size;
 	}
 	brelse(bh);
 }
@@ -297,7 +235,7 @@ void hpfs_write_inode(struct inode *i)
 	struct inode *parent;
 	if (!i->i_nlink) return;
 	if (i->i_ino == i->i_sb->s_hpfs_root) return;
-	if (i->i_hpfs_rddir_off && !i->i_count) {
+	if (i->i_hpfs_rddir_off && !atomic_read(&i->i_count)) {
 		if (*i->i_hpfs_rddir_off) printk("HPFS: write_inode: some position still there\n");
 		kfree(i->i_hpfs_rddir_off);
 		i->i_hpfs_rddir_off = NULL;
@@ -353,7 +291,7 @@ void hpfs_write_inode_nolock(struct inode *i)
 			hpfs_brelse4(&qbh);
 		} else hpfs_error(i->i_sb, "directory %08x doesn't have '.' entry", i->i_ino);
 	}
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 }
 
@@ -377,5 +315,8 @@ void hpfs_write_if_changed(struct inode *inode)
 
 void hpfs_delete_inode(struct inode *inode)
 {
+	lock_kernel();
 	hpfs_remove_fnode(inode->i_sb, inode->i_ino);
+	unlock_kernel();
+	clear_inode(inode);
 }

@@ -5,9 +5,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995, 1996, 1997 by Ralf Baechle
- *
- * $Id: sysmips.c,v 1.6 1998/08/25 09:14:42 ralf Exp $
+ * Copyright (C) 1995, 1996, 1997, 2000 by Ralf Baechle
  */
 #include <linux/errno.h>
 #include <linux/linkage.h>
@@ -19,7 +17,7 @@
 #include <linux/utsname.h>
 
 #include <asm/cachectl.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/sysmips.h>
 #include <asm/uaccess.h>
 
@@ -51,48 +49,52 @@ sys_sysmips(int cmd, int arg1, int arg2, int arg3)
 {
 	int	*p;
 	char	*name;
-	int	flags, tmp, len, retval;
+	int	flags, tmp, len, retval, errno;
 
-	lock_kernel();
-	switch(cmd)
-	{
-	case SETNAME:
-		retval = -EPERM;
+	switch(cmd) {
+	case SETNAME: {
+		char nodename[__NEW_UTS_LEN + 1];
+
 		if (!capable(CAP_SYS_ADMIN))
-			goto out;
+			return -EPERM;
 
 		name = (char *) arg1;
-		len = strlen_user(name);
 
-		retval = len;
-		if (len < 0)
-			goto out;
+		len = strncpy_from_user(nodename, name, sizeof(nodename));
+		if (len < 0) 
+			return -EFAULT;
 
-		retval = -EINVAL;
-		if (len == 0 || len > __NEW_UTS_LEN)
-			goto out;
+		down_write(&uts_sem);
+		strncpy(system_utsname.nodename, name, len);
+		up_write(&uts_sem);
+		system_utsname.nodename[len] = '\0'; 
+		return 0;
+	}
 
-		copy_from_user(system_utsname.nodename, name, len);
-		system_utsname.nodename[len] = '\0';
-		retval = 0;
-		goto out;
-
-	case MIPS_ATOMIC_SET:
+	case MIPS_ATOMIC_SET: {
 		/* This is broken in case of page faults and SMP ...
-		   Risc/OS fauls after maximum 20 tries with EAGAIN.  */
+		    Risc/OS faults after maximum 20 tries with EAGAIN.  */
+		unsigned int tmp;
+
 		p = (int *) arg1;
-		retval = verify_area(VERIFY_WRITE, p, sizeof(*p));
-		if (retval)
-			goto out;
+		errno = verify_area(VERIFY_WRITE, p, sizeof(*p));
+		if (errno)
+			return errno;
+		errno = 0;
 		save_and_cli(flags);
-		retval = *p;
-		*p = arg2;
+		errno |= __get_user(tmp, p);
+		errno |= __put_user(arg2, p);
 		restore_flags(flags);
-		goto out;
+
+		if (errno)
+			return tmp;
+
+		return tmp;             /* This is broken ...  */ 
+        }
 
 	case MIPS_FIXADE:
-		tmp = current->tss.mflags & ~3;
-		current->tss.mflags = tmp | (arg1 & 3);
+		tmp = current->thread.mflags & ~3;
+		current->thread.mflags = tmp | (arg1 & 3);
 		retval = 0;
 		goto out;
 
@@ -111,7 +113,6 @@ sys_sysmips(int cmd, int arg1, int arg2, int arg3)
 	}
 
 out:
-	unlock_kernel();
 	return retval;
 }
 
@@ -122,4 +123,11 @@ asmlinkage int
 sys_cachectl(char *addr, int nbytes, int op)
 {
 	return -ENOSYS;
+}
+
+asmlinkage int sys_pause(void)
+{
+	current->state = TASK_INTERRUPTIBLE;
+	schedule();
+	return -ERESTARTNOHAND;
 }

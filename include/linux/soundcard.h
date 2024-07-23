@@ -76,8 +76,8 @@
  */
 
 #ifndef _SIOWR
-#if defined(_IOWR) && (defined(_AIX) || (!defined(sun) && !defined(sparc) && !defined(__INCioctlh) && !defined(__Lynx__)))
-/* Use already defined ioctl defines if they exist (except with Sun) */
+#if defined(_IOWR) && (defined(_AIX) || (!defined(sun) && !defined(sparc) && !defined(__sparc__) && !defined(__INCioctlh) && !defined(__Lynx__)))
+/* Use already defined ioctl defines if they exist (except with Sun or Sparc) */
 #define	SIOCPARM_MASK	IOCPARM_MASK
 #define	SIOC_VOID	IOC_VOID
 #define	SIOC_OUT	IOC_OUT
@@ -179,7 +179,7 @@ typedef struct seq_event_rec {
  * Some big endian/little endian handling macros
  */
 
-#if defined(_AIX) || defined(AIX) || defined(sparc) || defined(HPPA) || defined(PPC)
+#if defined(_AIX) || defined(AIX) || defined(sparc) || defined(__sparc__) || defined(HPPA) || defined(PPC)
 /* Big endian machines */
 #  define _PATCHKEY(id) (0xfd00|id)
 #  define AFMT_S16_NE AFMT_S16_BE
@@ -552,6 +552,7 @@ typedef struct {
 #	define AFMT_U16_LE		0x00000080	/* Little endian U16 */
 #	define AFMT_U16_BE		0x00000100	/* Big endian U16 */
 #	define AFMT_MPEG		0x00000200	/* MPEG (2) audio */
+#	define AFMT_AC3		0x00000400	/* Dolby Digital AC3 */
 
 /*
  * Buffer status queries.
@@ -581,11 +582,14 @@ typedef struct audio_buf_info {
 							/* but usually not */
 #	define DSP_CAP_TRIGGER		0x00001000	/* Supports SETTRIGGER */
 #	define DSP_CAP_MMAP		0x00002000	/* Supports mmap() */
+#	define DSP_CAP_MULTI		0x00004000	/* support multiple open */
+#	define DSP_CAP_BIND		0x00008000	/* channel binding to front/rear/cneter/lfe */
+
 
 #define SNDCTL_DSP_GETTRIGGER		_SIOR ('P',16, int)
 #define SNDCTL_DSP_SETTRIGGER		_SIOW ('P',16, int)
 #	define PCM_ENABLE_INPUT		0x00000001
-#	define PCM_ENABLE_OUTPUT	0x00000002
+#	define PCM_ENABLE_OUTPUT		0x00000002
 
 typedef struct count_info {
 		int bytes;	/* Total # of bytes processed */
@@ -605,6 +609,19 @@ typedef struct buffmem_desc {
 #define SNDCTL_DSP_SETSYNCRO		_SIO  ('P', 21)
 #define SNDCTL_DSP_SETDUPLEX		_SIO  ('P', 22)
 #define SNDCTL_DSP_GETODELAY		_SIOR ('P', 23, int)
+
+#define SNDCTL_DSP_GETCHANNELMASK		_SIOWR('P', 64, int)
+#define SNDCTL_DSP_BIND_CHANNEL		_SIOWR('P', 65, int)
+#	define DSP_BIND_QUERY		0x00000000
+#	define DSP_BIND_FRONT		0x00000001
+#	define DSP_BIND_SURR		0x00000002
+#	define DSP_BIND_CENTER_LFE	0x00000004
+#	define DSP_BIND_HANDSET		0x00000008
+#	define DSP_BIND_MIC		0x00000010
+#	define DSP_BIND_MODEM1		0x00000020
+#	define DSP_BIND_MODEM2		0x00000040
+#	define DSP_BIND_I2S		0x00000080
+#	define DSP_BIND_SPDIF		0x00000100
 
 /*
  * Application's profile defines the way how playback underrun situations should be handled.
@@ -889,6 +906,12 @@ typedef struct _old_mixer_info /* Obsolete */
 typedef unsigned char mixer_record[128];
 
 #define SOUND_MIXER_ACCESS		_SIOWR('M', 102, mixer_record)
+
+/*
+ * Two ioctls for special souncard function
+ */
+#define SOUND_MIXER_AGC  _SIOWR('M', 103, int)
+#define SOUND_MIXER_3DSE  _SIOWR('M', 104, int)
 
 /*
  * The SOUND_MIXER_PRIVATE# commands can be redefined by low level drivers.

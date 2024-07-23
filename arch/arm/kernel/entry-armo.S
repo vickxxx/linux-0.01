@@ -1,27 +1,32 @@
 /*
- * linux/arch/arm/kernel/entry-armo.S
+ *  linux/arch/arm/kernel/entry-armo.S
  *
- * Copyright (C) 1995,1996,1997,1998 Russell King.
+ *  Copyright (C) 1995,1996,1997,1998 Russell King.
  *
- * Low-level vector interface routines
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
- * Design issues:
- *  - We have several modes that each vector can be called from,
- *    each with its own set of registers.  On entry to any vector,
- *    we *must* save the registers used in *that* mode.
+ *  Low-level vector interface routines
  *
- *  - This code must be as fast as possible.
+ *  Design issues:
+ *   - We have several modes that each vector can be called from,
+ *     each with its own set of registers.  On entry to any vector,
+ *     we *must* save the registers used in *that* mode.
  *
- * There are a few restrictions on the vectors:
- *  - the SWI vector cannot be called from *any* non-user mode
+ *   - This code must be as fast as possible.
  *
- *  - the FP emulator is *never* called from *any* non-user mode undefined
- *    instruction.
+ *  There are a few restrictions on the vectors:
+ *   - the SWI vector cannot be called from *any* non-user mode
  *
- * Ok, so this file may be a mess, but its as efficient as possible while
- * adhering to the above criteria.
+ *   - the FP emulator is *never* called from *any* non-user mode undefined
+ *     instruction.
+ *
+ *  Ok, so this file may be a mess, but its as efficient as possible while
+ *  adhering to the above criteria.
  */
 #include <linux/linkage.h>
+#include <linux/config.h>
 
 #include <asm/assembler.h>
 #include <asm/errno.h>
@@ -29,18 +34,13 @@
 
 #include "../lib/constants.h"
 
+		.macro	zero_fp
+#ifdef CONFIG_FRAME_POINTER
+		mov	fp, #0
+#endif
+		.endm
+
 		.text
-
-@ Offsets into task structure
-@ ---------------------------
-@
-#define STATE		0
-#define COUNTER		4
-#define PRIORITY	8
-#define FLAGS		12
-#define SIGPENDING	16
-
-#define PF_TRACESYS	0x20
 
 @ Bad Abort numbers
 @ -----------------
@@ -50,12 +50,6 @@
 #define BAD_ADDREXCPTN	2
 #define BAD_IRQ		3
 #define BAD_UNDEFINSTR	4
-
-@ OS version number used in SWIs
-@  RISC OS is 0
-@  RISC iX is 8
-@
-#define OS_NUMBER	9
 
 @
 @ Stack format (ensured by USER_* and SVC_*)
@@ -213,7 +207,7 @@ irq_prio_h:	.byte	 0, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
 		stmfd	sp!, {r0 - r12}		;\
 		mov	r0, #-1			;\
 		str	r0, [sp, #S_OLD_R0]	;\
-		mov	fp, #0
+		zero_fp
 
 #define SVC_IRQ_SAVE_ALL			\
 		str	sp, [sp, #-16]!		;\
@@ -224,7 +218,7 @@ irq_prio_h:	.byte	 0, 8, 9, 8,10,10,10,10,11,11,11,11,10,10,10,10
 		stmfd	sp!, {r0 - r12}		;\
 		mov	r0, #-1			;\
 		str	r0, [sp, #S_OLD_R0]	;\
-		mov	fp, #0
+		zero_fp
 
 #define SVC_RESTORE_ALL				\
 		ldmfd	sp, {r0 - pc}^
@@ -261,7 +255,7 @@ vector_undefinstr:
 		tst	lr,#3
 		bne	__und_svc
 		save_user_regs
-		mov	fp, #0
+		zero_fp
 		teqp	pc, #I_BIT | MODE_SVC
 .Lbug_undef:
 		ldr	r4, .LC2
@@ -283,6 +277,10 @@ __und_svc:	SVC_SAVE_ALL				@ Non-user mode
 		bl	SYMBOL_NAME(do_undefinstr)
 		SVC_RESTORE_ALL
 
+#ifdef CONFIG_NWFPE
+		/* The FPE is always present */
+		.equ	fpe_not_present, 0
+#else
 /* We get here if an undefined instruction happens and the floating
  * point emulator is not present.  If the offending instruction was
  * a WFS, we just perform a normal return as if we had emulated the
@@ -319,6 +317,7 @@ wfs_mask_data:	.word	0x0e200110			@ WFS/RFS
 		.word	0x0d0d0100			@ LDF [sp]/STF [sp]
 		.word	0x0d0b0100			@ LDF [fp]/STF [fp]
 		.word	0x0f0f0f00
+#endif
 
 .LC2:		.word	SYMBOL_NAME(fp_enter)
 
@@ -444,6 +443,7 @@ vector_IRQ:	ldr	r13, .LCirq			@ I will leave this one in just in case...
 		orr	lr, lr, #0x08000003		@ Force SVC
 		bne	do_IRQ
 		mov	r4, #0
+		get_current_task r5
 		b	ret_with_reschedule
 
 		irq_prio_table
@@ -535,7 +535,6 @@ Ldata_unknown:	@ Part of jumptable
 		mov	r0, r1
 		mov	r1, r4
 		mov	r2, r3
-	mov r3, lr
 		b	baddataabort
 
 Ldata_ldrstr_post:
@@ -650,6 +649,15 @@ Ldata_ldcstc_pre:
 		b	SYMBOL_NAME(do_DataAbort)
 
 /*
+ * Register switch for older 26-bit only ARMs
+ */
+ENTRY(__switch_to)
+		stmfd	sp!, {r4 - sl, fp, lr}		@ Store most regs on stack
+		str	sp, [r0, #TSS_SAVE]		@ Save sp_SVC
+		ldr	sp, [r1, #TSS_SAVE]		@ Get saved sp_SVC
+		ldmfd	sp!, {r4 - sl, fp, pc}^		@ Load all regs saved previously
+
+/*
  *=============================================================================
  *		Low-level interface code
  *-----------------------------------------------------------------------------
@@ -678,7 +686,7 @@ Ldata_ldcstc_pre:
 /*
  * initialise the trap system
  */
-ENTRY(trap_init)
+ENTRY(__trap_init)
 		stmfd	sp!, {r4 - r7, lr}
 		adr	r1, .Ljump_addresses
 		ldmia	r1, {r1 - r7, ip, lr}

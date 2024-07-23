@@ -1,4 +1,4 @@
-/* $Id: unaligned.c,v 1.18 1999/04/03 11:36:17 anton Exp $
+/* $Id: unaligned.c,v 1.22 2000/04/29 08:05:21 anton Exp $
  * unaligned.c: Unaligned load/store trap handling with special
  *              cases for the kernel to do them more quickly.
  *
@@ -61,7 +61,7 @@ static inline int decode_access_size(unsigned int insn)
 		return 2;
 	else {
 		printk("Impossible unaligned trap. insn=%08x\n", insn);
-		die_if_kernel("Byte sized unaligned access?!?!", current->tss.kregs);
+		die_if_kernel("Byte sized unaligned access?!?!", current->thread.kregs);
 		return 4; /* just to keep gcc happy. */
 	}
 }
@@ -106,6 +106,26 @@ static inline unsigned long fetch_reg(unsigned int reg, struct pt_regs *regs)
 	return win->locals[reg - 16]; /* yes, I know what this does... */
 }
 
+static inline unsigned long safe_fetch_reg(unsigned int reg, struct pt_regs *regs)
+{
+	struct reg_window *win;
+	unsigned long ret;
+
+	if(reg < 16)
+		return (!reg ? 0 : regs->u_regs[reg]);
+
+	/* Ho hum, the slightly complicated case. */
+	win = (struct reg_window *) regs->u_regs[UREG_FP];
+
+	if ((unsigned long)win & 3)
+		return -1;
+
+	if (get_user(ret, &win->locals[reg - 16]))
+		return -1;
+
+	return ret;
+}
+
 static inline unsigned long *fetch_reg_addr(unsigned int reg, struct pt_regs *regs)
 {
 	struct reg_window *win;
@@ -129,6 +149,22 @@ static inline unsigned long compute_effective_address(struct pt_regs *regs,
 	} else {
 		maybe_flush_windows(rs1, rs2, rd);
 		return (fetch_reg(rs1, regs) + fetch_reg(rs2, regs));
+	}
+}
+
+static inline unsigned long safe_compute_effective_address(struct pt_regs *regs,
+							   unsigned int insn)
+{
+	unsigned int rs1 = (insn >> 14) & 0x1f;
+	unsigned int rs2 = insn & 0x1f;
+	unsigned int rd = (insn >> 25) & 0x1f;
+
+	if(insn & 0x2000) {
+		maybe_flush_windows(rs1, 0, rd);
+		return (safe_fetch_reg(rs1, regs) + sign_extend_imm13(insn));
+	} else {
+		maybe_flush_windows(rs1, rs2, rd);
+		return (safe_fetch_reg(rs1, regs) + safe_fetch_reg(rs2, regs));
 	}
 }
 
@@ -315,10 +351,12 @@ void kernel_mna_trap_fault(struct pt_regs *regs, unsigned int insn)
         	} else
                 	printk(KERN_ALERT "Unable to handle kernel paging request in mna handler");
 	        printk(KERN_ALERT " at virtual address %08lx\n",address);
-        	printk(KERN_ALERT "current->mm->context = %08lx\n",
-	               (unsigned long) current->mm->context);
-	        printk(KERN_ALERT "current->mm->pgd = %08lx\n",
-        	       (unsigned long) current->mm->pgd);
+		printk(KERN_ALERT "current->{mm,active_mm}->context = %08lx\n",
+			(current->mm ? current->mm->context :
+			current->active_mm->context));
+		printk(KERN_ALERT "current->{mm,active_mm}->pgd = %08lx\n",
+			(current->mm ? (unsigned long) current->mm->pgd :
+			(unsigned long) current->active_mm->pgd));
 	        die_if_kernel("Oops", regs);
 		/* Not reached */
 	}
@@ -422,9 +460,14 @@ void user_mna_trap_fault(struct pt_regs *regs, unsigned int insn) __asm__ ("user
 
 void user_mna_trap_fault(struct pt_regs *regs, unsigned int insn)
 {
-	current->tss.sig_address = regs->pc;
-	current->tss.sig_desc = SUBSIG_PRIVINST;
-	send_sig(SIGBUS, current, 1);
+	siginfo_t info;
+
+	info.si_signo = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_ADRALN;
+	info.si_addr = (void *)safe_compute_effective_address(regs, insn);
+	info.si_trapno = 0;
+	send_sig_info(SIGBUS, &info, current);
 }
 
 asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
@@ -432,7 +475,7 @@ asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
 	enum direction dir;
 
 	lock_kernel();
-	if(!(current->tss.flags & SPARC_FLAG_UNALIGNED) ||
+	if(!(current->thread.flags & SPARC_FLAG_UNALIGNED) ||
 	   (((insn >> 30) & 3) != 3))
 		goto kill_user;
 	dir = decode_direction(insn);
@@ -487,9 +530,7 @@ asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
 	}
 
 kill_user:
-	current->tss.sig_address = regs->pc;
-	current->tss.sig_desc = SUBSIG_PRIVINST;
-	send_sig(SIGBUS, current, 1);
+	user_mna_trap_fault(regs, insn);
 out:
 	unlock_kernel();
 }

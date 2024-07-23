@@ -41,6 +41,7 @@
 #include <linux/vt_kern.h>
 #include <linux/kbd_ll.h>
 #include <linux/sysrq.h>
+#include <linux/pm.h>
 
 #define SIZE(x) (sizeof(x)/sizeof((x)[0]))
 
@@ -60,7 +61,9 @@
 #define KBD_DEFLOCK 0
 #endif
 
+void (*kbd_ledfunc)(unsigned int led);
 EXPORT_SYMBOL(handle_scancode);
+EXPORT_SYMBOL(kbd_ledfunc);
 
 extern void ctrl_alt_del(void);
 
@@ -80,24 +83,24 @@ int keyboard_wait_for_keypress(struct console *co)
  */
 
 /* shift state counters.. */
-static unsigned char k_down[NR_SHIFT] = {0, };
+static unsigned char k_down[NR_SHIFT];
 /* keyboard key bitmap */
-static unsigned long key_down[256/BITS_PER_LONG] = { 0, };
+static unsigned long key_down[256/BITS_PER_LONG];
 
-static int dead_key_next = 0;
+static int dead_key_next;
 /* 
  * In order to retrieve the shift_state (for the mouse server), either
  * the variable must be global, or a new procedure must be created to 
  * return the value. I chose the former way.
  */
-int shift_state = 0;
+int shift_state;
 static int npadch = -1;			/* -1 or number assembled on pad */
-static unsigned char diacr = 0;
-static char rep = 0;			/* flag telling character repeat */
+static unsigned char diacr;
+static char rep;			/* flag telling character repeat */
 struct kbd_struct kbd_table[MAX_NR_CONSOLES];
 static struct tty_struct **ttytab;
 static struct kbd_struct * kbd = kbd_table;
-static struct tty_struct * tty = NULL;
+static struct tty_struct * tty;
 
 void compute_shiftstate(void);
 
@@ -157,6 +160,8 @@ struct pt_regs * kbd_pt_regs;
 static int sysrq_pressed;
 #endif
 
+static struct pm_dev *pm_kbd;
+
 /*
  * Many other routines do put_queue, but I think either
  * they produce ASCII, or they produce some user-assigned
@@ -199,8 +204,10 @@ void handle_scancode(unsigned char scancode, int down)
 	char up_flag = down ? 0 : 0200;
 	char raw_mode;
 
+	pm_access(pm_kbd);
+
 	do_poke_blanked_console = 1;
-	mark_bh(CONSOLE_BH);
+	tasklet_schedule(&console_tasklet);
 	add_keyboard_randomness(scancode | up_flag);
 
 	tty = ttytab? ttytab[fg_console]: NULL;
@@ -890,17 +897,21 @@ static inline unsigned char getleds(void){
  * used, but this allows for easy and efficient race-condition
  * prevention later on.
  */
-static void kbd_bh(void)
+static void kbd_bh(unsigned long dummy)
 {
 	unsigned char leds = getleds();
 
 	if (leds != ledstate) {
 		ledstate = leds;
 		kbd_leds(leds);
+		if (kbd_ledfunc) kbd_ledfunc(leds);
 	}
 }
 
-__initfunc(int kbd_init(void))
+EXPORT_SYMBOL(keyboard_tasklet);
+DECLARE_TASKLET_DISABLED(keyboard_tasklet, kbd_bh, 0);
+
+int __init kbd_init(void)
 {
 	int i;
 	struct kbd_struct kbd0;
@@ -919,7 +930,11 @@ __initfunc(int kbd_init(void))
 	ttytab = console_driver.table;
 
 	kbd_init_hw();
-	init_bh(KEYBOARD_BH, kbd_bh);
-	mark_bh(KEYBOARD_BH);
+
+	tasklet_enable(&keyboard_tasklet);
+	tasklet_schedule(&keyboard_tasklet);
+	
+	pm_kbd = pm_register(PM_SYS_DEV, PM_SYS_KBC, NULL);
+
 	return 0;
 }

@@ -63,6 +63,7 @@ typedef unsigned long sigset_t;
 #define SIGLOST		29
 */
 #define SIGPWR		30
+#define SIGSYS		31
 #define	SIGUNUSED	31
 
 /* These should not be considered constants from userland.  */
@@ -180,12 +181,12 @@ typedef struct sigaltstack {
 
 extern __inline__ void sigaddset(sigset_t *set, int _sig)
 {
-	__asm__("btsl %1,%0" : "=m"(*set) : "ir"(_sig - 1) : "cc");
+	__asm__("btsl %1,%0" : "=m"(*set) : "Ir"(_sig - 1) : "cc");
 }
 
 extern __inline__ void sigdelset(sigset_t *set, int _sig)
 {
-	__asm__("btrl %1,%0" : "=m"(*set) : "ir"(_sig - 1) : "cc");
+	__asm__("btrl %1,%0" : "=m"(*set) : "Ir"(_sig - 1) : "cc");
 }
 
 extern __inline__ int __const_sigismember(sigset_t *set, int _sig)
@@ -198,7 +199,7 @@ extern __inline__ int __gen_sigismember(sigset_t *set, int _sig)
 {
 	int ret;
 	__asm__("btl %2,%1\n\tsbbl %0,%0"
-		: "=r"(ret) : "m"(*set), "ir"(_sig-1) : "cc");
+		: "=r"(ret) : "m"(*set), "Ir"(_sig-1) : "cc");
 	return ret;
 }
 

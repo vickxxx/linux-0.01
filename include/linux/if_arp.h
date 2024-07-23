@@ -13,6 +13,7 @@
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *		Florian La Roche,
  *		Jonathan Layes <layes@loran.com>
+ *		Arnaldo Carvalho de Melo <acme@conectiva.com.br> ARPHRD_HWX25
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -35,6 +36,7 @@
 #define	ARPHRD_ARCNET	7		/* ARCnet			*/
 #define	ARPHRD_APPLETLK	8		/* APPLEtalk			*/
 #define ARPHRD_DLCI	15		/* Frame Relay DLCI		*/
+#define ARPHRD_ATM	19		/* ATM 				*/
 #define ARPHRD_METRICOM	23		/* Metricom STRIP (new IANA id)	*/
 
 /* Dummy types for non ARP hardware */
@@ -46,6 +48,7 @@
 #define ARPHRD_ADAPT	264
 #define ARPHRD_ROSE	270
 #define ARPHRD_X25	271		/* CCITT X.25			*/
+#define ARPHRD_HWX25	272		/* Boards with X.25 in firmware	*/
 #define ARPHRD_PPP	512
 #define ARPHRD_HDLC	513		/* (Cisco) HDLC 		*/
 #define ARPHRD_LAPB	516		/* LAPB				*/
@@ -66,20 +69,25 @@
 #define ARPHRD_HIPPI	780		/* High Performance Parallel Interface */
 #define ARPHRD_ASH	781		/* Nexus 64Mbps Ash		*/
 #define ARPHRD_ECONET	782		/* Acorn Econet			*/
-#define ARPHRD_IRDA 	783		/* Linux/IR			*/
+#define ARPHRD_IRDA 	783		/* Linux-IrDA			*/
 /* ARP works differently on different FC media .. so  */
 #define ARPHRD_FCPP	784		/* Point to point fibrechanel	*/
 #define ARPHRD_FCAL	785		/* Fibrechannel arbitrated loop */
 #define ARPHRD_FCPL	786		/* Fibrechannel public loop	*/
 #define ARPHRD_FCFABRIC	787		/* Fibrechannel fabric		*/
 	/* 787->799 reserved for fibrechannel media types */
+#define ARPHRD_IEEE802_TR 800		/* Magic type ident for TR	*/
 
+#define ARPHRD_VOID	  0xFFFF	/* Void type, nothing is known */
 
 /* ARP protocol opcodes. */
 #define	ARPOP_REQUEST	1		/* ARP request			*/
 #define	ARPOP_REPLY	2		/* ARP reply			*/
 #define	ARPOP_RREQUEST	3		/* RARP request			*/
 #define	ARPOP_RREPLY	4		/* RARP reply			*/
+#define	ARPOP_InREQUEST	8		/* InARP request		*/
+#define	ARPOP_InREPLY	9		/* InARP reply			*/
+#define	ARPOP_NAK	10		/* (ATM)ARP NAK			*/
 
 
 /* ARP ioctl request. */

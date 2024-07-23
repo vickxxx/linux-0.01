@@ -10,6 +10,7 @@
 
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/delay.h>
 #include <linux/interrupt.h>
@@ -19,6 +20,8 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/bootmem.h>
+#include <linux/module.h>
 
 #include <asm/bootinfo.h>
 #include <asm/setup.h>
@@ -34,13 +37,19 @@
 
 #ifdef CONFIG_BLK_DEV_INITRD
 #include <linux/blk.h>
-#include <asm/pgtable.h>
+#endif
+
+#ifndef CONFIG_AMIGA
+#define dbprintf	printk
 #endif
 
 unsigned long m68k_machtype;
 unsigned long m68k_cputype;
 unsigned long m68k_fputype;
 unsigned long m68k_mmutype;
+#ifdef CONFIG_VME
+unsigned long vme_brdtype;
+#endif
 
 int m68k_is040or060 = 0;
 
@@ -49,6 +58,7 @@ extern unsigned long availmem;
 
 int m68k_num_memory = 0;
 int m68k_realnum_memory = 0;
+unsigned long m68k_memoffset;
 struct mem_info m68k_memory[NUM_MEMINFO];
 
 static struct mem_info m68k_ramdisk = { 0, 0 };
@@ -58,13 +68,15 @@ char saved_command_line[CL_SIZE];
 
 char m68k_debug_device[6] = "";
 
-void (*mach_sched_init) (void (*handler)(int, void *, struct pt_regs *)) __initdata;
+void (*mach_sched_init) (void (*handler)(int, void *, struct pt_regs *)) __initdata = NULL;
 /* machine dependent keyboard functions */
-int (*mach_keyb_init) (void) __initdata;
+int (*mach_keyb_init) (void) __initdata = NULL;
 int (*mach_kbdrate) (struct kbd_repeat *) = NULL;
 void (*mach_kbd_leds) (unsigned int) = NULL;
+int (*mach_kbd_translate)(unsigned char scancode, unsigned char *keycode, char raw_mode) = NULL;
+unsigned int SYSRQ_KEY;
 /* machine dependent irq functions */
-void (*mach_init_IRQ) (void) __initdata;
+void (*mach_init_IRQ) (void) __initdata = NULL;
 void (*(*mach_default_handler)[]) (int, void *, struct pt_regs *) = NULL;
 void (*mach_get_model) (char *model) = NULL;
 int (*mach_get_hardware_list) (char *buffer) = NULL;
@@ -76,32 +88,20 @@ void (*mach_gettod) (int*, int*, int*, int*, int*, int*);
 int (*mach_hwclk) (int, struct hwclk_time*) = NULL;
 int (*mach_set_clock_mmss) (unsigned long) = NULL;
 void (*mach_reset)( void );
+void (*mach_halt)( void ) = NULL;
+void (*mach_power_off)( void ) = NULL;
 long mach_max_dma_address = 0x00ffffff; /* default set to the lower 16MB */
-#if defined(CONFIG_AMIGA_FLOPPY) || defined(CONFIG_ATARI_FLOPPY) || defined(CONFIG_BLK_DEV_FD)
+#if defined(CONFIG_AMIGA_FLOPPY) || defined(CONFIG_ATARI_FLOPPY) 
 void (*mach_floppy_setup) (char *, int *) __initdata = NULL;
 void (*mach_floppy_eject) (void) = NULL;
 #endif
-struct serial_struct;
-#ifdef CONFIG_SERIAL
-long serial_rs_init(void);
-int serial_register_serial(struct serial_struct *);
-void serial_unregister_serial(int);
-long ser_console_init(long, long );
-#endif
-#if defined(CONFIG_USERIAL)||defined(CONFIG_BVME6000_SCC)||defined(CONFIG_MVME162_SCC)||defined(CONFIG_HPDCA)||defined(CONFIG_WHIPPET_SERIAL)||defined(CONFIG_MULTIFACE_III_TTY)||defined(CONFIG_GVPIOEXT)||defined(CONFIG_AMIGA_BUILTIN_SERIAL)||defined(CONFIG_MAC_SCC)||defined(CONFIG_ATARI_MIDI)||defined(CONFIG_ATARI_SCC)||defined(CONFIG_ATARI_MFPSER)
-#define M68K_SERIAL
-#endif
-#ifdef M68K_SERIAL
-long m68k_rs_init(void);
-int m68k_register_serial(struct serial_struct *);
-void m68k_unregister_serial(int);
-long m68k_serial_console_init(long, long );
-#endif
 #ifdef CONFIG_HEARTBEAT
 void (*mach_heartbeat) (int) = NULL;
+EXPORT_SYMBOL(mach_heartbeat);
 #endif
-
-extern void base_trap_init(void);
+#ifdef CONFIG_M68K_L2_CACHE
+void (*mach_l2_flush) (int) = NULL;
+#endif
 
 #ifdef CONFIG_MAGIC_SYSRQ
 int mach_sysrq_key = -1;
@@ -114,6 +114,9 @@ extern int amiga_parse_bootinfo(const struct bi_record *);
 extern int atari_parse_bootinfo(const struct bi_record *);
 extern int mac_parse_bootinfo(const struct bi_record *);
 extern int q40_parse_bootinfo(const struct bi_record *);
+extern int bvme6000_parse_bootinfo(const struct bi_record *);
+extern int mvme16x_parse_bootinfo(const struct bi_record *);
+extern int mvme147_parse_bootinfo(const struct bi_record *);
 
 extern void config_amiga(void);
 extern void config_atari(void);
@@ -127,10 +130,14 @@ extern void config_hp300(void);
 extern void config_q40(void);
 extern void config_sun3x(void);
 
+extern void mac_debugging_short (int, short);
+extern void mac_debugging_long  (int, long);
+
 #define MASK_256K 0xfffc0000
 
+extern void paging_init(void);
 
-__initfunc(static void m68k_parse_bootinfo(const struct bi_record *record))
+static void __init m68k_parse_bootinfo(const struct bi_record *record)
 {
     while (record->tag != BI_LAST) {
 	int unknown = 0;
@@ -171,6 +178,12 @@ __initfunc(static void m68k_parse_bootinfo(const struct bi_record *record))
 		    unknown = mac_parse_bootinfo(record);
 		else if (MACH_IS_Q40)
 		    unknown = q40_parse_bootinfo(record);
+		else if (MACH_IS_BVME6000)
+		    unknown = bvme6000_parse_bootinfo(record);
+		else if (MACH_IS_MVME16x)
+		    unknown = mvme16x_parse_bootinfo(record);
+		else if (MACH_IS_MVME147)
+		    unknown = mvme147_parse_bootinfo(record);
 		else
 		    unknown = 1;
 	}
@@ -187,13 +200,16 @@ __initfunc(static void m68k_parse_bootinfo(const struct bi_record *record))
 	       (m68k_num_memory - 1));
 	m68k_num_memory = 1;
     }
+    m68k_memoffset = m68k_memory[0].addr-PAGE_OFFSET;
 #endif
 }
 
-__initfunc(void setup_arch(char **cmdline_p, unsigned long * memory_start_p,
-			   unsigned long * memory_end_p))
+void __init setup_arch(char **cmdline_p)
 {
 	extern int _etext, _edata, _end;
+#ifndef CONFIG_SUN3
+	unsigned long endmem, startmem;
+#endif
 	int i;
 	char *p, *q;
 
@@ -205,18 +221,23 @@ __initfunc(void setup_arch(char **cmdline_p, unsigned long * memory_start_p,
 	else if (CPU_IS_060)
 		m68k_is040or060 = 6;
 
-	base_trap_init();
-
+	/* FIXME: m68k_fputype is passed in by Penguin booter, which can
+	 * be confused by software FPU emulation. BEWARE.
+	 * We should really do our own FPU check at startup.
+	 * [what do we do with buggy 68LC040s? if we have problems
+	 *  with them, we should add a test to check_bugs() below] */
+#ifndef CONFIG_M68KFPU_EMU_ONLY
 	/* clear the fpu if we have one */
 	if (m68k_fputype & (FPU_68881|FPU_68882|FPU_68040|FPU_68060)) {
 		volatile int zero = 0;
 		asm __volatile__ ("frestore %0" : : "m" (zero));
 	}
+#endif	
 
-	init_task.mm->start_code = PAGE_OFFSET;
-	init_task.mm->end_code = (unsigned long) &_etext;
-	init_task.mm->end_data = (unsigned long) &_edata;
-	init_task.mm->brk = (unsigned long) &_end;
+	init_mm.start_code = PAGE_OFFSET;
+	init_mm.end_code = (unsigned long) &_etext;
+	init_mm.end_data = (unsigned long) &_edata;
+	init_mm.brk = (unsigned long) &_end;
 
 	*cmdline_p = m68k_command_line;
 	memcpy(saved_command_line, *cmdline_p, CL_SIZE);
@@ -314,17 +335,42 @@ __initfunc(void setup_arch(char **cmdline_p, unsigned long * memory_start_p,
 		panic ("No configuration setup");
 	}
 
+#ifndef CONFIG_SUN3
+	startmem= m68k_memory[0].addr;
+	endmem = startmem + m68k_memory[0].size;
+	high_memory = PAGE_OFFSET;
+	for (i = 0; i < m68k_num_memory; i++) {
+		m68k_memory[i].size &= MASK_256K;
+		if (m68k_memory[i].addr < startmem)
+			startmem = m68k_memory[i].addr;
+		if (m68k_memory[i].addr+m68k_memory[i].size > endmem)
+			endmem = m68k_memory[i].addr+m68k_memory[i].size;
+		high_memory += m68k_memory[i].size;
+	}
+
+	availmem += init_bootmem_node(NODE_DATA(0), availmem >> PAGE_SHIFT,
+				      startmem >> PAGE_SHIFT, endmem >> PAGE_SHIFT);
+
+	for (i = 0; i < m68k_num_memory; i++)
+		free_bootmem(m68k_memory[i].addr, m68k_memory[i].size);
+
+	reserve_bootmem(m68k_memory[0].addr, availmem - m68k_memory[0].addr);
+
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (m68k_ramdisk.size) {
+		reserve_bootmem(m68k_ramdisk.addr, m68k_ramdisk.size);
 		initrd_start = (unsigned long)phys_to_virt(m68k_ramdisk.addr);
 		initrd_end = initrd_start + m68k_ramdisk.size;
+		printk ("initrd: %08lx - %08lx\n", initrd_start, initrd_end);
 	}
 #endif
 
-	*memory_start_p = availmem;
-	*memory_end_p = 0;
-	for (i = 0; i < m68k_num_memory; i++)
-		*memory_end_p += m68k_memory[i].size & MASK_256K;
+#ifdef CONFIG_ATARI
+	if (MACH_IS_ATARI)
+		atari_stram_reserve_pages(availmem);
+#endif
+#endif /* !CONFIG_SUN3 */
+	paging_init();
 }
 
 int get_cpuinfo(char * buffer)
@@ -354,6 +400,9 @@ int get_cpuinfo(char * buffer)
 	clockfactor = 0;
     }
 
+#ifdef CONFIG_M68KFPU_EMU_ONLY
+    fpu="none(soft float)";
+#else
     if (m68k_fputype & FPU_68881)
 	fpu = "68881";
     else if (m68k_fputype & FPU_68882)
@@ -366,6 +415,7 @@ int get_cpuinfo(char * buffer)
 	fpu = "Sun FPA";
     else
 	fpu = "none";
+#endif
 
     if (m68k_mmutype & MMU_68851)
 	mmu = "68851";
@@ -382,7 +432,7 @@ int get_cpuinfo(char * buffer)
     else
 	mmu = "unknown";
 
-    clockfreq = loops_per_sec*clockfactor;
+    clockfreq = loops_per_jiffy*HZ*clockfactor;
 
     return(sprintf(buffer, "CPU:\t\t%s\n"
 		   "MMU:\t\t%s\n"
@@ -392,8 +442,8 @@ int get_cpuinfo(char * buffer)
 		   "Calibration:\t%lu loops\n",
 		   cpu, mmu, fpu,
 		   clockfreq/1000000,(clockfreq/100000)%10,
-		   loops_per_sec/500000,(loops_per_sec/5000)%100,
-		   loops_per_sec));
+		   loops_per_jiffy/(500000/HZ),(loops_per_jiffy/(5000/HZ))%100,
+		   loops_per_jiffy));
 
 }
 
@@ -421,53 +471,9 @@ int get_hardware_list(char *buffer)
     return(len);
 }
 
-#if defined(CONFIG_SERIAL) || defined(M68K_SERIAL)
-int rs_init(void)
-{
-#ifdef CONFIG_SERIAL
-  if (MACH_IS_Q40)
-    return serial_rs_init();
-#endif
-#ifdef M68K_SERIAL  
-    return m68k_rs_init();
-#endif
-}
-int register_serial(struct serial_struct *p)
-{
-#ifdef CONFIG_SERIAL
-  if (MACH_IS_Q40)
-    return serial_register_serial(p);
-#endif
-#ifdef M68K_SERIAL
-  return m68k_register_serial(p);
-#endif
-}
-void unregister_serial(int i)
-{
-#ifdef CONFIG_SERIAL
-  if (MACH_IS_Q40)
-    serial_unregister_serial(i);
-#endif
-#ifdef M68K_SERIAL
-  m68k_unregister_serial(i);
-#endif
-}
-#ifdef CONFIG_SERIAL_CONSOLE
-long serial_console_init(long kmem_start, long kmem_end)
-{
-#ifdef CONFIG_SERIAL
-  if (MACH_IS_Q40)
-    return ser_console_init(kmem_start, kmem_end);
-#endif
-#if defined(M68K_SERIAL) && defined(CONFIG_SERIAL_CONSOLE)
-  return m68k_serial_console_init(kmem_start, kmem_end);
-#endif
-}
-#endif
-#endif
 
-#if defined(CONFIG_AMIGA_FLOPPY) || defined(CONFIG_ATARI_FLOPPY) || defined(CONFIG_BLK_DEV_FD)
-__initfunc(void floppy_setup(char *str, int *ints))
+#if defined(CONFIG_AMIGA_FLOPPY) || defined(CONFIG_ATARI_FLOPPY)
+void __init floppy_setup(char *str, int *ints)
 {
 	if (mach_floppy_setup)
 		mach_floppy_setup (str, ints);
@@ -481,7 +487,7 @@ void floppy_eject(void)
 #endif
 
 /* for "kbd-reset" cmdline param */
-__initfunc(void kbd_reset_setup(char *str, int *ints))
+void __init kbd_reset_setup(char *str, int *ints)
 {
 }
 
@@ -496,7 +502,7 @@ void arch_gettod(int *year, int *mon, int *day, int *hour,
 
 void check_bugs(void)
 {
-#ifndef CONFIG_FPU_EMU
+#ifndef CONFIG_M68KFPU_EMU
 	if (m68k_fputype == 0) {
 		printk( KERN_EMERG "*** YOU DO NOT HAVE A FLOATING POINT UNIT, "
 				"WHICH IS REQUIRED BY LINUX/M68K ***\n" );
@@ -505,5 +511,7 @@ void check_bugs(void)
 		printk( KERN_EMERG "(see http://no-fpu.linux-m68k.org)\n" );
 		panic( "no FPU" );
 	}
-#endif
+
+#endif /* CONFIG_SUN3 */
+
 }

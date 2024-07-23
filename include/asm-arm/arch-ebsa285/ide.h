@@ -1,10 +1,14 @@
 /*
- * linux/include/asm-arm/arch-ebsa285/ide.h
+ *  linux/include/asm-arm/arch-ebsa285/ide.h
  *
- * Copyright (c) 1998 Russell King
+ *  Copyright (C) 1998 Russell King
  *
- * Modifications:
- *  29-07-1998	RMK	Major re-work of IDE architecture specific code
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Modifications:
+ *   29-07-1998	RMK	Major re-work of IDE architecture specific code
  */
 #include <asm/irq.h>
 
@@ -13,7 +17,7 @@
  * This should follow whatever the default interface uses.
  */
 static __inline__ void
-ide_init_hwif_ports(hw_regs_t *hw, int data_port, int ctrl_port, int irq)
+ide_init_hwif_ports(hw_regs_t *hw, int data_port, int ctrl_port, int *irq)
 {
 	ide_ioreg_t reg = (ide_ioreg_t) data_port;
 	int i;
@@ -23,7 +27,8 @@ ide_init_hwif_ports(hw_regs_t *hw, int data_port, int ctrl_port, int irq)
 		reg += 1;
 	}
 	hw->io_ports[IDE_CONTROL_OFFSET] = (ide_ioreg_t) ctrl_port;
-	hw->irq = irq;
+	if (irq)
+		*irq = 0;
 }
 
 /*

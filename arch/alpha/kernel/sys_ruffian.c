@@ -3,7 +3,7 @@
  *
  *	Copyright (C) 1995 David A Rusling
  *	Copyright (C) 1996 Jay A Estabrook
- *	Copyright (C) 1998 Richard Henderson
+ *	Copyright (C) 1998, 1999, 2000 Richard Henderson
  *
  * Code supporting the RUFFIAN.
  */
@@ -23,120 +23,20 @@
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <asm/core_pyxis.h>
+#include <asm/core_cia.h>
 
 #include "proto.h"
-#include "irq.h"
-#include "bios32.h"
-#include "machvec.h"
+#include "irq_impl.h"
+#include "pci_impl.h"
+#include "machvec_impl.h"
 
-static void
-ruffian_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
-{
-	if (irq >= 16) {
-		/* Note inverted sense of mask bits: */
-		/* Make CERTAIN none of the bogus ints get enabled... */
-		*(vulp)PYXIS_INT_MASK =
-			~((long)mask >> 16) & 0x00000000ffffffbfUL;
-		mb();
-		/* ... and read it back to make sure it got written.  */
-		*(vulp)PYXIS_INT_MASK;
-	}
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);	/* ISA PIC2 */
-	else
-		outb(mask, 0x21);	/* ISA PIC1 */
-}
-
-static void
-ruffian_ack_irq(unsigned long irq)
-{
-	if (irq < 16) {
-		/* Ack PYXIS ISA interrupt.  */
-		*(vulp)PYXIS_INT_REQ = 1L << 7; mb();
-		/* ... and read it back to make sure it got written.  */
-		*(vulp)PYXIS_INT_REQ;
-		if (irq > 7) {
-			outb(0x20, 0xa0);
-		}
-		outb(0x20, 0x20);
-	} else {
-		/* Ack PYXIS PCI interrupt.  */
-		*(vulp)PYXIS_INT_REQ = (1UL << (irq - 16)); mb();
-		/* ... and read it back to make sure it got written.  */
-		*(vulp)PYXIS_INT_REQ;
-	}
-}
-
-static void
-ruffian_device_interrupt(unsigned long vector, struct pt_regs *regs)
-{
-	unsigned long pld;
-	unsigned int i;
-
-	/* Read the interrupt summary register of PYXIS */
-	pld = *(vulp)PYXIS_INT_REQ;
-
-	/* For now, AND off any bits we are not interested in:
-	 * HALT (2), timer (6), ISA Bridge (7), 21142 (8)
-	 * then all the PCI slots/INTXs (12-31) 
-	 * flash(5) :DWH:
-	 */
-	pld &= 0x00000000ffffff9fUL; /* was ffff7f */
-
-	/*
-	 * Now for every possible bit set, work through them and call
-	 * the appropriate interrupt handler.
-	 */
-	while (pld) {
-		i = ffz(~pld);
-		pld &= pld - 1; /* clear least bit set */
-		if (i == 7) { /* if ISA int */
-			/* Ruffian does not have the RTC connected to 
-			   the CPU timer interrupt.  Instead, it uses the
-			   PIT connected to IRQ 0.  So we must detect that
-			   and route that specifically to where we expected
-			   to find the timer interrupt come in.  */
-
-			/* Copy this code from isa_device_interrupt because
-			   we need to hook into int 0 for the timer.  I
-			   refuse to soil device_interrupt with ifdefs.  */
-
-			/* Generate a PCI interrupt acknowledge cycle.
-			   The PIC will respond with the interrupt
-			   vector of the highest priority interrupt
-			   that is pending.  The PALcode sets up the
-			   interrupts vectors such that irq level L
-			   generates vector L.  */
-
-			unsigned int j = *(vuip)PYXIS_IACK_SC & 0xff;
-			if (j == 7 && !(inb(0x20) & 0x80)) {
-				/* It's only a passive release... */
-			} else if (j == 0) {
-			  	handle_irq(TIMER_IRQ, -1, regs);
-				ruffian_ack_irq(0);
-			} else {
-				handle_irq(j, j, regs);
-			}
-		} else { /* if not an ISA int */
-			handle_irq(16 + i, 16 + i, regs);
-		}
-
-		*(vulp)PYXIS_INT_REQ = 1UL << i; mb();
-		*(vulp)PYXIS_INT_REQ; /* read to force the write */
-	}
-}
 
 static void __init
 ruffian_init_irq(void)
 {
-	STANDARD_INIT_IRQ_PROLOG;
-
 	/* Invert 6&7 for i82371 */
 	*(vulp)PYXIS_INT_HILO  = 0x000000c0UL; mb();
 	*(vulp)PYXIS_INT_CNFG  = 0x00002064UL; mb();	 /* all clear */
-	*(vulp)PYXIS_INT_MASK  = 0x00000000UL; mb();
-	*(vulp)PYXIS_INT_REQ   = 0xffffffffUL; mb();
 
 	outb(0x11,0xA0);
 	outb(0x08,0xA1);
@@ -150,29 +50,54 @@ ruffian_init_irq(void)
 	outb(0x01,0x21);
 	outb(0xFF,0x21);
 	
-	/* Send -INTA pulses to clear any pending interrupts ...*/
-	*(vuip) PYXIS_IACK_SC;
-
 	/* Finish writing the 82C59A PIC Operation Control Words */
 	outb(0x20,0xA0);
 	outb(0x20,0x20);
 	
-	/* Turn on the interrupt controller, the timer interrupt  */
-	enable_irq(16 + 7);	/* enable ISA PIC cascade */
-	enable_irq(0);		/* enable timer */
-	enable_irq(2);		/* enable 2nd PIC cascade */
+	init_i8259a_irqs();
+
+	/* Not interested in the bogus interrupts (0,3,6),
+	   NMI (1), HALT (2), flash (5), or 21142 (8).  */
+	init_pyxis_irqs(0x16f0000);
+
+	common_init_isa_dma();
 }
 
-
-/*
- * For RUFFIAN, we do not want to make any modifications to the PCI
- * setup.  But we may need to do some kind of init.
- */
-
 static void __init
-ruffian_pci_fixup(void)
+ruffian_init_rtc(void)
 {
-	/* layout_all_busses(DEFAULT_IO_BASE, DEFAULT_MEM_BASE); */
+	/* Ruffian does not have the RTC connected to the CPU timer
+	   interrupt.  Instead, it uses the PIT connected to IRQ 0.  */
+
+	/* Setup interval timer.  */
+	outb(0x34, 0x43);		/* binary, mode 2, LSB/MSB, ch 0 */
+	outb(LATCH & 0xff, 0x40);	/* LSB */
+	outb(LATCH >> 8, 0x40);		/* MSB */
+
+	outb(0xb6, 0x43);		/* pit counter 2: speaker */
+	outb(0x31, 0x42);
+	outb(0x13, 0x42);
+
+	setup_irq(0, &timer_irqaction);
+}
+
+static void
+ruffian_kill_arch (int mode)
+{
+#if 0
+	/* This only causes re-entry to ARCSBIOS */
+	/* Perhaps this works for other PYXIS as well?  */
+	*(vuip) PYXIS_RESET = 0x0000dead;
+	mb();
+#endif
+}
+
+static int __init
+ruffian_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+{
+	/* We don't know anything about the PCI routing, so leave
+	   the IRQ unchanged.  */
+	return dev->irq;
 }
 
 
@@ -194,7 +119,7 @@ ruffian_get_bank_size(unsigned long offset)
     
 	/* Check BANK_ENABLE */
 	if (bank & 0x01) {
-		static unsigned long size[] __initlocaldata = {
+		static unsigned long size[] __initdata = {
 			0x40000000UL, /* 0x00,   1G */ 
 			0x20000000UL, /* 0x02, 512M */
 			0x10000000UL, /* 0x04, 256M */
@@ -215,43 +140,6 @@ ruffian_get_bank_size(unsigned long offset)
 }
 #endif /* BUILDING_FOR_MILO */
 
-static void __init
-ruffian_init_arch(unsigned long *mem_start, unsigned long *mem_end)
-{
-	/* FIXME: What do we do with ruffian_get_bank_size above?  */
-
-	pyxis_enable_errors();
-	if (!pyxis_srm_window_setup()) {
-		printk("ruffian_init_arch: Skipping window register rewrites."
-		       "\n... Trust DeskStation firmware!\n");
-	}
-	pyxis_finish_init_arch();
-}
-
-static void
-ruffian_init_pit (void)
-{
-	/* Ruffian depends on the system timer established in MILO! */
-	request_region(0x70, 0x10, "timer");
-
-	outb(0xb6, 0x43);       /* pit counter 2: speaker */
-	outb(0x31, 0x42);
-	outb(0x13, 0x42);
-}
-
-static void
-ruffian_kill_arch (int mode, char *reboot_cmd)
-{
-#if 0
-	/* this only causes re-entry to ARCSBIOS */
-	/* Perhaps this works for other PYXIS as well?  */
-	*(vuip) PYXIS_RESET = 0x0000dead;
-	mb();
-#endif
-	generic_kill_arch(mode, reboot_cmd);
-}
-
-
 /*
  * The System Vector
  */
@@ -260,22 +148,22 @@ struct alpha_machine_vector ruffian_mv __initmv = {
 	vector_name:		"Ruffian",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
-	/* For the moment, do not use BWIO on RUFFIAN.  */
-	IO(PYXIS,pyxis,pyxis),
-	DO_PYXIS_BUS,
-	machine_check:		pyxis_machine_check,
+	DO_PYXIS_IO,
+	DO_CIA_BUS,
+	machine_check:		cia_machine_check,
 	max_dma_address:	ALPHA_RUFFIAN_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	DEFAULT_MEM_BASE,
 
 	nr_irqs:		48,
-	irq_probe_mask:		RUFFIAN_PROBE_MASK,
-	update_irq_hw:		ruffian_update_irq_hw,
-	ack_irq:		ruffian_ack_irq,
-	device_interrupt:	ruffian_device_interrupt,
+	device_interrupt:	pyxis_device_interrupt,
 
-	init_arch:		ruffian_init_arch,
+	init_arch:		pyxis_init_arch,
 	init_irq:		ruffian_init_irq,
-	init_pit:		ruffian_init_pit,
-	pci_fixup:		ruffian_pci_fixup,
+	init_rtc:		ruffian_init_rtc,
+	init_pci:		cia_init_pci,
 	kill_arch:		ruffian_kill_arch,
+	pci_map_irq:		ruffian_map_irq,
+	pci_swizzle:		common_swizzle,
 };
 ALIAS_MV(ruffian)

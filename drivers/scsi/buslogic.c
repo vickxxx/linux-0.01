@@ -43,9 +43,9 @@
 #include <linux/sched.h>
 #include <linux/stat.h>
 #include <linux/pci.h>
+#include <linux/spinlock.h>
 #include <asm/dma.h>
 #include <asm/io.h>
-#include <asm/spinlock.h>
 #include <asm/system.h>
 #include "scsi.h"
 #include "hosts.h"
@@ -61,7 +61,7 @@
 */
 
 static int
-  BusLogic_DriverOptionsCount =			0;
+  BusLogic_DriverOptionsCount;
 
 
 /*
@@ -75,13 +75,13 @@ static BusLogic_DriverOptions_T
 
 
 /*
-  BusLogic_Options can be assigned a string by the Loadable Kernel Module
-  Installation Facility to be parsed for BusLogic Driver Options
-  specifications.
+  BusLogic can be assigned a string by insmod.
 */
 
-static char
-  *BusLogic_Options =				NULL;
+#ifdef MODULE
+static char *BusLogic;
+MODULE_PARM(BusLogic, "s");
+#endif
 
 
 /*
@@ -90,7 +90,7 @@ static char
 */
 
 static BusLogic_ProbeOptions_T
-  BusLogic_ProbeOptions =			{ 0 };
+  BusLogic_ProbeOptions;
 
 
 /*
@@ -99,7 +99,7 @@ static BusLogic_ProbeOptions_T
 */
 
 static BusLogic_GlobalOptions_T
-  BusLogic_GlobalOptions =			{ 0 };
+  BusLogic_GlobalOptions;
 
 
 /*
@@ -108,8 +108,8 @@ static BusLogic_GlobalOptions_T
 */
 
 static BusLogic_HostAdapter_T
-  *BusLogic_FirstRegisteredHostAdapter =	NULL,
-  *BusLogic_LastRegisteredHostAdapter =		NULL;
+  *BusLogic_FirstRegisteredHostAdapter,
+  *BusLogic_LastRegisteredHostAdapter;
 
 
 /*
@@ -117,7 +117,7 @@ static BusLogic_HostAdapter_T
 */
 
 static int
-  BusLogic_ProbeInfoCount =			0;
+  BusLogic_ProbeInfoCount;
 
 
 /*
@@ -128,7 +128,7 @@ static int
 */
 
 static BusLogic_ProbeInfo_T
-  *BusLogic_ProbeInfoList =			NULL;
+  *BusLogic_ProbeInfoList;
 
 
 /*
@@ -139,16 +139,6 @@ static BusLogic_ProbeInfo_T
 
 static char
   *BusLogic_CommandFailureReason;
-
-
-/*
-  BusLogic_ProcDirectoryEntry is the BusLogic /proc/scsi directory entry.
-*/
-
-PROC_DirectoryEntry_T
-  BusLogic_ProcDirectoryEntry =
-    { PROC_SCSI_BUSLOGIC, 8, "BusLogic", S_IFDIR | S_IRUGO | S_IXUGO, 2 };
-
 
 /*
   BusLogic_AnnounceDriver announces the Driver Version and Date, Author's
@@ -781,14 +771,15 @@ static int BusLogic_InitializeMultiMasterProbeInfo(BusLogic_HostAdapter_T
       unsigned char Bus = PCI_Device->bus->number;
       unsigned char Device = PCI_Device->devfn >> 3;
       unsigned int IRQ_Channel = PCI_Device->irq;
-      unsigned long BaseAddress0 = PCI_Device->base_address[0];
-      unsigned long BaseAddress1 = PCI_Device->base_address[1];
-      BusLogic_IO_Address_T IO_Address =
-	BaseAddress0 & PCI_BASE_ADDRESS_IO_MASK;
-      BusLogic_PCI_Address_T PCI_Address =
-	BaseAddress1 & PCI_BASE_ADDRESS_MEM_MASK;
-      if ((BaseAddress0 & PCI_BASE_ADDRESS_SPACE)
-	  != PCI_BASE_ADDRESS_SPACE_IO)
+      unsigned long BaseAddress0 = pci_resource_start(PCI_Device, 0);
+      unsigned long BaseAddress1 = pci_resource_start(PCI_Device, 1);
+      BusLogic_IO_Address_T IO_Address = BaseAddress0;
+      BusLogic_PCI_Address_T PCI_Address = BaseAddress1;
+
+      if (pci_enable_device(PCI_Device))
+      	continue;
+      
+      if (pci_resource_flags(PCI_Device, 0) & IORESOURCE_MEM)
 	{
 	  BusLogic_Error("BusLogic: Base Address0 0x%X not I/O for "
 			 "MultiMaster Host Adapter\n", NULL, BaseAddress0);
@@ -796,8 +787,7 @@ static int BusLogic_InitializeMultiMasterProbeInfo(BusLogic_HostAdapter_T
 			 NULL, Bus, Device, IO_Address);
 	  continue;
 	}
-      if ((BaseAddress1 & PCI_BASE_ADDRESS_SPACE)
-	  != PCI_BASE_ADDRESS_SPACE_MEMORY)
+      if (pci_resource_flags(PCI_Device,1) & IORESOURCE_IO)
 	{
 	  BusLogic_Error("BusLogic: Base Address1 0x%X not Memory for "
 			 "MultiMaster Host Adapter\n", NULL, BaseAddress1);
@@ -986,8 +976,11 @@ static int BusLogic_InitializeMultiMasterProbeInfo(BusLogic_HostAdapter_T
       unsigned char Bus = PCI_Device->bus->number;
       unsigned char Device = PCI_Device->devfn >> 3;
       unsigned int IRQ_Channel = PCI_Device->irq;
-      BusLogic_IO_Address_T IO_Address =
-	PCI_Device->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
+      BusLogic_IO_Address_T IO_Address = pci_resource_start(PCI_Device, 0);
+
+      if (pci_enable_device(PCI_Device))
+		continue;
+
       if (IO_Address == 0 || IRQ_Channel == 0) continue;
       for (i = 0; i < BusLogic_ProbeInfoCount; i++)
 	{
@@ -1030,15 +1023,16 @@ static int BusLogic_InitializeFlashPointProbeInfo(BusLogic_HostAdapter_T
       unsigned char Bus = PCI_Device->bus->number;
       unsigned char Device = PCI_Device->devfn >> 3;
       unsigned int IRQ_Channel = PCI_Device->irq;
-      unsigned long BaseAddress0 = PCI_Device->base_address[0];
-      unsigned long BaseAddress1 = PCI_Device->base_address[1];
-      BusLogic_IO_Address_T IO_Address =
-	BaseAddress0 & PCI_BASE_ADDRESS_IO_MASK;
-      BusLogic_PCI_Address_T PCI_Address =
-	BaseAddress1 & PCI_BASE_ADDRESS_MEM_MASK;
+      unsigned long BaseAddress0 = pci_resource_start(PCI_Device, 0);
+      unsigned long BaseAddress1 = pci_resource_start(PCI_Device, 1);
+      BusLogic_IO_Address_T IO_Address = BaseAddress0;
+      BusLogic_PCI_Address_T PCI_Address = BaseAddress1;
+
+      if (pci_enable_device(PCI_Device))
+		continue;
+
 #ifndef CONFIG_SCSI_OMIT_FLASHPOINT
-      if ((BaseAddress0 & PCI_BASE_ADDRESS_SPACE)
-	  != PCI_BASE_ADDRESS_SPACE_IO)
+      if (pci_resource_flags(PCI_Device, 0) & IORESOURCE_MEM)
 	{
 	  BusLogic_Error("BusLogic: Base Address0 0x%X not I/O for "
 			 "FlashPoint Host Adapter\n", NULL, BaseAddress0);
@@ -1046,8 +1040,7 @@ static int BusLogic_InitializeFlashPointProbeInfo(BusLogic_HostAdapter_T
 			 NULL, Bus, Device, IO_Address);
 	  continue;
 	}
-      if ((BaseAddress1 & PCI_BASE_ADDRESS_SPACE)
-	  != PCI_BASE_ADDRESS_SPACE_MEMORY)
+      if (pci_resource_flags(PCI_Device, 1) & IORESOURCE_IO)
 	{
 	  BusLogic_Error("BusLogic: Base Address1 0x%X not Memory for "
 			 "FlashPoint Host Adapter\n", NULL, BaseAddress1);
@@ -1089,8 +1082,8 @@ static int BusLogic_InitializeFlashPointProbeInfo(BusLogic_HostAdapter_T
 #else
       BusLogic_Error("BusLogic: FlashPoint Host Adapter detected at "
 		     "PCI Bus %d Device %d\n", NULL, Bus, Device);
-      BusLogic_Error("BusLogic: I/O Address 0x%X PCI Address 0x%X, "
-		     "but FlashPoint\n", NULL, IO_Address, PCI_Address);
+      BusLogic_Error("BusLogic: I/O Address 0x%X PCI Address 0x%X, irq %d, "
+		     "but FlashPoint\n", NULL, IO_Address, PCI_Address, IRQ_Channel);
       BusLogic_Error("BusLogic: support was omitted in this kernel "
 		     "configuration.\n", NULL);
 #endif
@@ -2741,8 +2734,10 @@ int BusLogic_DetectHostAdapter(SCSI_Host_Template_T *HostTemplate)
       return 0;
     }
   memset(PrototypeHostAdapter, 0, sizeof(BusLogic_HostAdapter_T));
-  if (BusLogic_Options != NULL)
-    BusLogic_ParseDriverOptions(BusLogic_Options);
+#ifdef MODULE
+  if (BusLogic != NULL)
+    BusLogic_Setup(BusLogic);
+#endif
   BusLogic_InitializeProbeInfoList(PrototypeHostAdapter);
   for (ProbeIndex = 0; ProbeIndex < BusLogic_ProbeInfoCount; ProbeIndex++)
     {
@@ -2798,6 +2793,11 @@ int BusLogic_DetectHostAdapter(SCSI_Host_Template_T *HostTemplate)
 	Register the SCSI Host structure.
       */
       Host = scsi_register(HostTemplate, sizeof(BusLogic_HostAdapter_T));
+      if(Host==NULL)
+      {
+      	release_region(HostAdapter->IO_Address, HostAdapter->AddressCount);
+      	continue;
+      }
       HostAdapter = (BusLogic_HostAdapter_T *) Host->hostdata;
       memcpy(HostAdapter, PrototypeHostAdapter, sizeof(BusLogic_HostAdapter_T));
       HostAdapter->SCSI_Host = Host;
@@ -4369,7 +4369,8 @@ Target	Requested Completed  Requested Completed  Requested Completed\n\
 		   HostAdapter, Length, BusLogic_MessageBufferSize);
   if ((Length -= Offset) <= 0) return 0;
   if (Length >= BytesAvailable) Length = BytesAvailable;
-  *StartPointer = &HostAdapter->MessageBuffer[Offset];
+  memcpy(ProcBuffer, HostAdapter->MessageBuffer + Offset, Length);
+  *StartPointer = ProcBuffer;
   return Length;
 }
 
@@ -4672,14 +4673,14 @@ static boolean BusLogic_ParseKeyword(char **StringPointer, char *Keyword)
   INSMOD Loadable Kernel Module Installation Facility:
 
     insmod BusLogic.o \
-	'BusLogic_Options="QueueDepth:[,7,15];QueueDepth:31,BusSettleTime:30"'
+	'BusLogic="QueueDepth:[,7,15];QueueDepth:31,BusSettleTime:30"'
 
   NOTE: Module Utilities 2.1.71 or later is required for correct parsing
 	of driver options containing commas.
 
 */
 
-static void BusLogic_ParseDriverOptions(char *OptionsString)
+static int __init BusLogic_ParseDriverOptions(char *OptionsString)
 {
   while (true)
     {
@@ -4722,7 +4723,7 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
 		  BusLogic_Error("BusLogic: Invalid Driver Options "
 				 "(illegal I/O Address 0x%X)\n",
 				 NULL, IO_Address);
-		  return;
+		  return 0;
 		}
 	    }
 	  else if (BusLogic_ParseKeyword(&OptionsString, "NoProbeISA"))
@@ -4752,7 +4753,7 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
 		      BusLogic_Error("BusLogic: Invalid Driver Options "
 				     "(illegal Queue Depth %d)\n",
 				     NULL, QueueDepth);
-		      return;
+		      return 0;
 		    }
 		  DriverOptions->QueueDepth[TargetID] = QueueDepth;
 		  if (*OptionsString == ',')
@@ -4764,7 +4765,7 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
 		      BusLogic_Error("BusLogic: Invalid Driver Options "
 				     "(',' or ']' expected at '%s')\n",
 				     NULL, OptionsString);
-		      return;
+		      return 0;
 		    }
 		}
 	      if (*OptionsString != ']')
@@ -4772,7 +4773,7 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
 		  BusLogic_Error("BusLogic: Invalid Driver Options "
 				 "(']' expected at '%s')\n",
 				 NULL, OptionsString);
-		  return;
+		  return 0;
 		}
 	      else OptionsString++;
 	    }
@@ -4786,7 +4787,7 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
 		  BusLogic_Error("BusLogic: Invalid Driver Options "
 				 "(illegal Queue Depth %d)\n",
 				 NULL, QueueDepth);
-		  return;
+		  return 0;
 		}
 	      DriverOptions->CommonQueueDepth = QueueDepth;
 	      for (TargetID = 0;
@@ -4904,7 +4905,7 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
 		  BusLogic_Error("BusLogic: Invalid Driver Options "
 				 "(illegal Bus Settle Time %d)\n",
 				 NULL, BusSettleTime);
-		  return;
+		  return 0;
 		}
 	      DriverOptions->BusSettleTime = BusSettleTime;
 	    }
@@ -4942,7 +4943,7 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
 	{
 	  BusLogic_Error("BusLogic: Invalid Driver Options "
 			 "(all or no I/O Addresses must be specified)\n", NULL);
-	  return;
+	  return 0;
 	}
       /*
 	Tagged Queuing is disabled when the Queue Depth is 1 since queuing
@@ -4956,8 +4957,9 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
 	    DriverOptions->TaggedQueuingPermittedMask |= TargetBit;
 	  }
       if (*OptionsString == ';') OptionsString++;
-      if (*OptionsString == '\0') return;
+      if (*OptionsString == '\0') return 0;
     }
+    return 1;
 }
 
 
@@ -4965,29 +4967,29 @@ static void BusLogic_ParseDriverOptions(char *OptionsString)
   BusLogic_Setup handles processing of Kernel Command Line Arguments.
 */
 
-void BusLogic_Setup(char *CommandLineString, int *CommandLineIntegers)
+static int __init 
+BusLogic_Setup(char *str)
 {
-  if (CommandLineIntegers[0] != 0)
-    {
-      BusLogic_Error("BusLogic: Obsolete Command Line Entry "
-		     "Format Ignored\n", NULL);
-      return;
-    }
-  if (CommandLineString == NULL || *CommandLineString == '\0') return;
-  BusLogic_ParseDriverOptions(CommandLineString);
+	int ints[3];
+
+	(void)get_options(str, ARRAY_SIZE(ints), ints);
+
+	if (ints[0] != 0) {
+		BusLogic_Error("BusLogic: Obsolete Command Line Entry "
+				"Format Ignored\n", NULL);
+		return 0;
+	}
+	if (str == NULL || *str == '\0')
+		return 0;
+	return BusLogic_ParseDriverOptions(str);
 }
 
+__setup("BusLogic=", BusLogic_Setup);
 
 /*
-  Include Module support if requested.
+  Get it all started
 */
 
-#ifdef MODULE
-
-MODULE_PARM(BusLogic_Options, "s");
-
-SCSI_Host_Template_T driver_template = BUSLOGIC;
+static SCSI_Host_Template_T driver_template = BUSLOGIC;
 
 #include "scsi_module.c"
-
-#endif

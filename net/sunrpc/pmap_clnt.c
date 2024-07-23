@@ -31,6 +31,7 @@
 static struct rpc_clnt *	pmap_create(char *, struct sockaddr_in *, int);
 static void			pmap_getport_done(struct rpc_task *);
 extern struct rpc_program	pmap_program;
+spinlock_t			pmap_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  * Obtain the port for a given RPC service on a given host. This one can
@@ -41,6 +42,7 @@ rpc_getport(struct rpc_task *task, struct rpc_clnt *clnt)
 {
 	struct rpc_portmap *map = &clnt->cl_pmap;
 	struct sockaddr_in *sap = &clnt->cl_xprt->addr;
+	struct rpc_message msg = { PMAP_GETPORT, map, &clnt->cl_port, NULL };
 	struct rpc_clnt	*pmap_clnt;
 	struct rpc_task	*child;
 
@@ -48,11 +50,14 @@ rpc_getport(struct rpc_task *task, struct rpc_clnt *clnt)
 			task->tk_pid, clnt->cl_server,
 			map->pm_prog, map->pm_vers, map->pm_prot);
 
+	spin_lock(&pmap_lock);
 	if (clnt->cl_binding) {
 		rpc_sleep_on(&clnt->cl_bindwait, task, NULL, 0);
+		spin_unlock(&pmap_lock);
 		return;
 	}
 	clnt->cl_binding = 1;
+	spin_unlock(&pmap_lock);
 
 	task->tk_status = -EACCES; /* why set this? returns -EIO below */
 	if (!(pmap_clnt = pmap_create(clnt->cl_server, sap, map->pm_prot)))
@@ -66,15 +71,17 @@ rpc_getport(struct rpc_task *task, struct rpc_clnt *clnt)
 		goto bailout;
 
 	/* Setup the call info struct */
-	rpc_call_setup(child, PMAP_GETPORT, map, &clnt->cl_port, 0);
+	rpc_call_setup(child, &msg, 0);
 
 	/* ... and run the child task */
 	rpc_run_child(task, child, pmap_getport_done);
 	return;
 
 bailout:
+	spin_lock(&pmap_lock);
 	clnt->cl_binding = 0;
 	rpc_wake_up(&clnt->cl_bindwait);
+	spin_unlock(&pmap_lock);
 	task->tk_status = -EIO;
 	task->tk_action = NULL;
 }
@@ -90,8 +97,8 @@ rpc_getport_external(struct sockaddr_in *sin, __u32 prog, __u32 vers, int prot)
 	char		hostname[32];
 	int		status;
 
-	dprintk("RPC:      rpc_getport_external(%s, %d, %d, %d)\n",
-			in_ntoa(sin->sin_addr.s_addr), prog, vers, prot);
+	dprintk("RPC:      rpc_getport_external(%u.%u.%u.%u, %d, %d, %d)\n",
+			NIPQUAD(sin->sin_addr.s_addr), prog, vers, prot);
 
 	strcpy(hostname, in_ntoa(sin->sin_addr.s_addr));
 	if (!(pmap_clnt = pmap_create(hostname, sin, prot)))
@@ -128,8 +135,10 @@ pmap_getport_done(struct rpc_task *task)
 		clnt->cl_port = htons(clnt->cl_port);
 		clnt->cl_xprt->addr.sin_port = clnt->cl_port;
 	}
+	spin_lock(&pmap_lock);
 	clnt->cl_binding = 0;
 	rpc_wake_up(&clnt->cl_bindwait);
+	spin_unlock(&pmap_lock);
 }
 
 /*

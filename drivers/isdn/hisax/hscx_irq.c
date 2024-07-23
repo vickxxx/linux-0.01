@@ -1,48 +1,14 @@
-/* $Id: hscx_irq.c,v 1.11 1998/11/15 23:54:49 keil Exp $
-
+/* $Id: hscx_irq.c,v 1.16 2000/11/19 17:02:47 kai Exp $
+ *
  * hscx_irq.c     low level b-channel stuff for Siemens HSCX
  *
  * Author     Karsten Keil (keil@isdn4linux.de)
  *
  * This is an include file for fast inline IRQ stuff
  *
- * $Log: hscx_irq.c,v $
- * Revision 1.11  1998/11/15 23:54:49  keil
- * changes from 2.0
- *
- * Revision 1.10  1998/08/13 23:36:35  keil
- * HiSax 3.1 - don't work stable with current LinkLevel
- *
- * Revision 1.9  1998/06/24 14:44:51  keil
- * Fix recovery of TX IRQ loss
- *
- * Revision 1.8  1998/04/10 10:35:22  paul
- * fixed (silly?) warnings from egcs on Alpha.
- *
- * Revision 1.7  1998/02/12 23:07:37  keil
- * change for 2.1.86 (removing FREE_READ/FREE_WRITE from [dev]_kfree_skb()
- *
- * Revision 1.6  1997/10/29 19:01:07  keil
- * changes for 2.1
- *
- * Revision 1.5  1997/10/01 09:21:35  fritz
- * Removed old compatibility stuff for 2.0.X kernels.
- * From now on, this code is for 2.1.X ONLY!
- * Old stuff is still in the separate branch.
- *
- * Revision 1.4  1997/08/15 17:48:02  keil
- * cosmetic
- *
- * Revision 1.3  1997/07/27 21:38:36  keil
- * new B-channel interface
- *
- * Revision 1.2  1997/06/26 11:16:19  keil
- * first version
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
-
-#include <linux/string.h>
 
 
 static inline void
@@ -180,16 +146,28 @@ hscx_interrupt(struct IsdnCardState *cs, u_char val, u_char hscx)
 	if (val & 0x80) {	/* RME */
 		r = READHSCX(cs, hscx, HSCX_RSTA);
 		if ((r & 0xf0) != 0xa0) {
-			if (!(r & 0x80))
+			if (!(r & 0x80)) {
 				if (cs->debug & L1_DEB_WARN)
 					debugl1(cs, "HSCX invalid frame");
-			if ((r & 0x40) && bcs->mode)
+#ifdef ERROR_STATISTIC
+				bcs->err_inv++;
+#endif
+			}
+			if ((r & 0x40) && bcs->mode) {
 				if (cs->debug & L1_DEB_WARN)
 					debugl1(cs, "HSCX RDO mode=%d",
 						bcs->mode);
-			if (!(r & 0x20))
+#ifdef ERROR_STATISTIC
+				bcs->err_rdo++;
+#endif
+			}
+			if (!(r & 0x20)) {
 				if (cs->debug & L1_DEB_WARN)
 					debugl1(cs, "HSCX CRC error");
+#ifdef ERROR_STATISTIC
+				bcs->err_crc++;
+#endif
+			}
 			WriteHSCXCMDR(cs, hscx, 0x80);
 		} else {
 			count = READHSCX(cs, hscx, HSCX_RBCL) & (
@@ -234,7 +212,7 @@ hscx_interrupt(struct IsdnCardState *cs, u_char val, u_char hscx)
 				if (bcs->st->lli.l1writewakeup &&
 					(PACKET_NOACK != bcs->tx_skb->pkt_type))
 					bcs->st->lli.l1writewakeup(bcs->st, bcs->hw.hscx.count);
-				dev_kfree_skb(bcs->tx_skb);
+				dev_kfree_skb_irq(bcs->tx_skb);
 				bcs->hw.hscx.count = 0; 
 				bcs->tx_skb = NULL;
 			}
@@ -264,6 +242,9 @@ hscx_int_main(struct IsdnCardState *cs, u_char val)
 			if (bcs->mode == 1)
 				hscx_fill_fifo(bcs);
 			else {
+#ifdef ERROR_STATISTIC
+				bcs->err_tx++;
+#endif
 				/* Here we lost an TX interrupt, so
 				   * restart transmitting the whole frame.
 				 */
@@ -294,6 +275,9 @@ hscx_int_main(struct IsdnCardState *cs, u_char val)
 				/* Here we lost an TX interrupt, so
 				   * restart transmitting the whole frame.
 				 */
+#ifdef ERROR_STATISTIC
+				bcs->err_tx++;
+#endif
 				if (bcs->tx_skb) {
 					skb_push(bcs->tx_skb, bcs->hw.hscx.count);
 					bcs->tx_cnt += bcs->hw.hscx.count;

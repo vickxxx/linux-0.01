@@ -18,7 +18,7 @@
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/io.h>
 #include <asm/system.h>
 
@@ -39,7 +39,7 @@
 
 static inline struct vm_struct *get_io_area(unsigned long size)
 {
-	return get_vm_area(size);
+	return get_vm_area(size, VM_IOREMAP);
 }
 
 

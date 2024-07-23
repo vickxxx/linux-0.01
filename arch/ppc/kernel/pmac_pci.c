@@ -17,8 +17,10 @@
 #include <linux/delay.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/bootmem.h>
+
+#include <asm/init.h>
 #include <asm/io.h>
-#include <asm/pgtable.h>
 #include <asm/prom.h>
 #include <asm/pci-bridge.h>
 #include <asm/machdep.h>
@@ -28,7 +30,19 @@
 struct bridge_data **bridges, *bridge_list;
 static int max_bus;
 
-static void add_bridges(struct device_node *dev, unsigned long *mem_ptr);
+struct uninorth_data {
+	struct device_node*	node;
+	volatile unsigned int*	cfg_addr;
+	volatile unsigned int*	cfg_data;
+	void*			iobase;
+	unsigned long		iobase_phys;
+};
+
+static struct uninorth_data uninorth_bridges[3];
+static int uninorth_count;
+static int uninorth_default = -1;
+
+static void add_bridges(struct device_node *dev);
 
 /*
  * Magic constants for enabling cache coherency in the bandit/PSX bridge.
@@ -42,6 +56,7 @@ static void add_bridges(struct device_node *dev, unsigned long *mem_ptr);
 #define BANDIT_MAGIC	0x50
 #define BANDIT_COHERENT	0x40
 
+/* Obsolete, should be replaced by pmac_pci_dev_io_base() (below) */
 __pmac
 void *pci_io_base(unsigned int bus)
 {
@@ -69,6 +84,202 @@ int pci_device_loc(struct device_node *dev, unsigned char *bus_ptr,
 	*bus_ptr = reg[0] >> 16;
 	*devfn_ptr = reg[0] >> 8;
 	return 0;
+}
+
+/* This routines figures out on which root bridge a given PCI device
+ * is attached.
+ */
+__pmac
+int
+pmac_pci_dev_root_bridge(unsigned char bus, unsigned char dev_fn)
+{
+	struct device_node *node, *bridge_node;
+	int bridge = uninorth_default;
+
+	if (uninorth_count == 0)
+		return 0;
+	if (bus == 0 && PCI_SLOT(dev_fn) < 11)
+		return 0;
+	
+	/* We look for the OF device corresponding to this bus/devfn pair. If we
+	 * don't find it, we default to the external PCI */
+	bridge_node = NULL;
+	node = find_pci_device_OFnode(bus, dev_fn & 0xf8);
+	if (node) {
+	    /* note: we don't stop on the first occurence since we need to go
+             * up to the root bridge */
+	    do {
+		if (node->type && !strcmp(node->type, "pci") 
+			&& device_is_compatible(node, "uni-north"))
+			bridge_node = node;
+		node=node->parent;
+	    } while (node);
+	}
+	if (bridge_node) {
+	    int i;
+	    for (i=0;i<uninorth_count;i++)
+		if (uninorth_bridges[i].node == bridge_node) {
+		    bridge = i;
+		    break;
+		}
+	}
+
+	if (bridge == -1) {
+		printk(KERN_WARNING "pmac_pci: no default bridge !\n");
+		return 0;
+	}
+
+	return bridge;	
+}
+
+__pmac
+void *
+pmac_pci_dev_io_base(unsigned char bus, unsigned char devfn, int physical)
+{
+	int bridge = -1;
+	if (uninorth_count != 0)
+		bridge = pmac_pci_dev_root_bridge(bus, devfn);
+	if (bridge == -1) {
+		struct bridge_data *bp;
+
+		if (bus > max_bus || (bp = bridges[bus]) == 0)
+			return 0;
+		return physical ? (void *) bp->io_base_phys : bp->io_base;
+	}
+	return physical ? (void *) uninorth_bridges[bridge].iobase_phys
+		: uninorth_bridges[bridge].iobase;
+}
+
+__pmac
+void *
+pmac_pci_dev_mem_base(unsigned char bus, unsigned char devfn)
+{
+	return 0;
+}
+
+/* This function only works for bus 0, uni-N uses a different mecanism for
+ * other busses (see below)
+ */
+#define UNI_N_CFA0(devfn, off)	\
+	((1 << (unsigned long)PCI_SLOT(dev_fn)) \
+	| (((unsigned long)PCI_FUNC(dev_fn)) << 8) \
+	| (((unsigned long)(off)) & 0xFCUL))
+
+/* This one is for type 1 config accesses */
+#define UNI_N_CFA1(bus, devfn, off)	\
+	((((unsigned long)(bus)) << 16) \
+	|(((unsigned long)(devfn)) << 8) \
+	|(((unsigned long)(off)) & 0xFCUL) \
+	|1UL)
+	
+__pmac static
+unsigned int
+uni_north_access_data(unsigned char bus, unsigned char dev_fn,
+				unsigned char offset)
+{
+	int bridge;
+	unsigned int caddr;
+
+	bridge = pmac_pci_dev_root_bridge(bus, dev_fn);
+	if (bus == 0)
+		caddr = UNI_N_CFA0(dev_fn, offset);
+	else
+		caddr = UNI_N_CFA1(bus, dev_fn, offset);
+	
+	if (bridge == -1) {
+		printk(KERN_WARNING "pmac_pci: no default bridge !\n");
+		return 0;
+	}
+		
+	/* Uninorth will return garbage if we don't read back the value ! */
+	out_le32(uninorth_bridges[bridge].cfg_addr, caddr);
+	(void)in_le32(uninorth_bridges[bridge].cfg_addr);
+	/* Yes, offset is & 7, not & 3 ! */
+	return (unsigned int)(uninorth_bridges[bridge].cfg_data) + (offset & 0x07);
+}
+
+__pmac
+int uni_pcibios_read_config_byte(unsigned char bus, unsigned char dev_fn,
+				  unsigned char offset, unsigned char *val)
+{
+	unsigned int addr;
+	
+	*val = 0xff;
+	addr = uni_north_access_data(bus, dev_fn, offset);
+	if (!addr)
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	*val = in_8((volatile unsigned char*)addr);
+	return PCIBIOS_SUCCESSFUL;
+}
+
+__pmac
+int uni_pcibios_read_config_word(unsigned char bus, unsigned char dev_fn,
+				  unsigned char offset, unsigned short *val)
+{
+	unsigned int addr;
+	
+	*val = 0xffff;
+	addr = uni_north_access_data(bus, dev_fn, offset);
+	if (!addr)
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	*val = in_le16((volatile unsigned short*)addr);
+	return PCIBIOS_SUCCESSFUL;
+}
+
+__pmac
+int uni_pcibios_read_config_dword(unsigned char bus, unsigned char dev_fn,
+				   unsigned char offset, unsigned int *val)
+{
+	unsigned int addr;
+	
+	*val = 0xffff;
+	addr = uni_north_access_data(bus, dev_fn, offset);
+	if (!addr)
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	*val = in_le32((volatile unsigned int*)addr);
+	return PCIBIOS_SUCCESSFUL;
+}
+
+__pmac
+int uni_pcibios_write_config_byte(unsigned char bus, unsigned char dev_fn,
+				   unsigned char offset, unsigned char val)
+{
+	unsigned int addr;
+	
+	addr = uni_north_access_data(bus, dev_fn, offset);
+	if (!addr)
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	out_8((volatile unsigned char *)addr, val);
+	(void)in_8((volatile unsigned char *)addr);
+	return PCIBIOS_SUCCESSFUL;
+}
+
+__pmac
+int uni_pcibios_write_config_word(unsigned char bus, unsigned char dev_fn,
+				   unsigned char offset, unsigned short val)
+{
+	unsigned int addr;
+	
+	addr = uni_north_access_data(bus, dev_fn, offset);
+	if (!addr)
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	out_le16((volatile unsigned short *)addr, val);
+	(void)in_le16((volatile unsigned short *)addr);
+	return PCIBIOS_SUCCESSFUL;
+}
+
+__pmac
+int uni_pcibios_write_config_dword(unsigned char bus, unsigned char dev_fn,
+				    unsigned char offset, unsigned int val)
+{
+	unsigned int addr;
+	
+	addr = uni_north_access_data(bus, dev_fn, offset);
+	if (!addr)
+		return PCIBIOS_DEVICE_NOT_FOUND;
+	out_le32((volatile unsigned int *)addr, val);
+	(void)in_le32((volatile unsigned int *)addr);
+	return PCIBIOS_SUCCESSFUL;
 }
 
 __pmac
@@ -315,7 +526,7 @@ int grackle_pcibios_write_config_dword(unsigned char bus, unsigned char dev_fn,
  * N.B. we can't use pcibios_*_config_* here because bridges[]
  * is not initialized yet.
  */
-__initfunc(static void init_bandit(struct bridge_data *bp))
+static void __init init_bandit(struct bridge_data *bp)
 {
 	unsigned int vendev, magic;
 	int rev;
@@ -360,24 +571,52 @@ __initfunc(static void init_bandit(struct bridge_data *bp))
 	       bp->io_base);
 }
 
-__initfunc(unsigned long pmac_find_bridges(unsigned long mem_start, unsigned long mem_end))
+#define GRACKLE_PICR1_STG		0x00000040
+#define GRACKLE_PICR1_LOOPSNOOP		0x00000010
+
+/* N.B. this is called before bridges is initialized, so we can't
+   use grackle_pcibios_{read,write}_config_dword. */
+static inline void grackle_set_stg(struct bridge_data *bp, int enable)
+{
+	unsigned int val;
+
+	out_be32(bp->cfg_addr, GRACKLE_CFA(0, 0, 0xa8));
+	val = in_le32((volatile unsigned int *)bp->cfg_data);
+	val = enable? (val | GRACKLE_PICR1_STG) :
+		(val & ~GRACKLE_PICR1_STG);
+	out_be32(bp->cfg_addr, GRACKLE_CFA(0, 0, 0xa8));
+	out_le32((volatile unsigned int *)bp->cfg_data, val);
+}
+
+static inline void grackle_set_loop_snoop(struct bridge_data *bp, int enable)
+{
+	unsigned int val;
+
+	out_be32(bp->cfg_addr, GRACKLE_CFA(0, 0, 0xa8));
+	val = in_le32((volatile unsigned int *)bp->cfg_data);
+	val = enable? (val | GRACKLE_PICR1_LOOPSNOOP) :
+		(val & ~GRACKLE_PICR1_LOOPSNOOP);
+	out_be32(bp->cfg_addr, GRACKLE_CFA(0, 0, 0xa8));
+	out_le32((volatile unsigned int *)bp->cfg_data, val);
+}
+
+
+void __init pmac_find_bridges(void)
 {
 	int bus;
 	struct bridge_data *bridge;
 
 	bridge_list = 0;
 	max_bus = 0;
-	add_bridges(find_devices("bandit"), &mem_start);
-	add_bridges(find_devices("chaos"), &mem_start);
-	add_bridges(find_devices("pci"), &mem_start);
-	bridges = (struct bridge_data **) mem_start;
-	mem_start += (max_bus + 1) * sizeof(struct bridge_data *);
+	add_bridges(find_devices("bandit"));
+	add_bridges(find_devices("chaos"));
+	add_bridges(find_devices("pci"));
+	bridges = (struct bridge_data **)
+		alloc_bootmem((max_bus + 1) * sizeof(struct bridge_data *));
 	memset(bridges, 0, (max_bus + 1) * sizeof(struct bridge_data *));
 	for (bridge = bridge_list; bridge != NULL; bridge = bridge->next)
 		for (bus = bridge->bus_number; bus <= bridge->max_bus; ++bus)
 			bridges[bus] = bridge;
-
-	return mem_start;
 }
 
 /*
@@ -385,7 +624,7 @@ __initfunc(unsigned long pmac_find_bridges(unsigned long mem_start, unsigned lon
  * "pci" (a MPC106) and no bandit or chaos bridges, and contrariwise,
  * if we have one or more bandit or chaos bridges, we don't have a MPC106.
  */
-__initfunc(static void add_bridges(struct device_node *dev, unsigned long *mem_ptr))
+static void __init add_bridges(struct device_node *dev)
 {
 	int *bus_range;
 	int len;
@@ -411,21 +650,54 @@ __initfunc(static void add_bridges(struct device_node *dev, unsigned long *mem_p
 			printk(KERN_INFO "PCI buses %d..%d", bus_range[0],
 			       bus_range[1]);
 		printk(" controlled by %s at %x\n", dev->name, addr->address);
-		bp = (struct bridge_data *) *mem_ptr;
-		*mem_ptr += sizeof(struct bridge_data);
-		if (strcmp(dev->name, "pci") != 0) {
-			bp->cfg_addr = (volatile unsigned int *)
-				ioremap(addr->address + 0x800000, 0x1000);
-			bp->cfg_data = (volatile unsigned char *)
-				ioremap(addr->address + 0xc00000, 0x1000);
-			bp->io_base = (void *) ioremap(addr->address, 0x10000);
-		} else {
-			/* XXX */
+		if (device_is_compatible(dev, "uni-north")) {
+			int i = uninorth_count++;
+			uninorth_bridges[i].cfg_addr = ioremap(addr->address + 0x800000, 0x1000);
+			uninorth_bridges[i].cfg_data = ioremap(addr->address + 0xc00000, 0x1000);
+			uninorth_bridges[i].node = dev;
+			uninorth_bridges[i].iobase_phys = addr->address;
+			/* is 0x10000 enough for io space ? */
+			uninorth_bridges[i].iobase = (void *)ioremap(addr->address, 0x10000);
+			/* XXX This is the bridge with the PCI expansion bus. This is also the
+			 * address of the bus that will receive type 1 config accesses and io
+			 * accesses. Appears to be correct for iMac DV and G4 Sawtooth too.
+			 * That means that we cannot do io cycles on the AGP bus nor the internal
+			 * ethernet/fw bus. Fortunately, they appear not to be needed on iMac DV
+			 * and G4 neither.
+			 */
+			if (addr->address == 0xf2000000)
+				uninorth_default = i;
+			else
+				continue;
+		}
+		
+		bp = (struct bridge_data *) alloc_bootmem(sizeof(*bp));
+		if (device_is_compatible(dev, "uni-north")) {
+			bp->cfg_addr = 0;
+			bp->cfg_data = 0;
+			bp->io_base = uninorth_bridges[uninorth_count-1].iobase;
+			bp->io_base_phys = uninorth_bridges[uninorth_count-1].iobase_phys;
+		} else if (strcmp(dev->name, "pci") == 0) {
+			/* XXX assume this is a mpc106 (grackle) */
 			bp->cfg_addr = (volatile unsigned int *)
 				ioremap(0xfec00000, 0x1000);
 			bp->cfg_data = (volatile unsigned char *)
 				ioremap(0xfee00000, 0x1000);
+			bp->io_base_phys = 0xfe000000;
                         bp->io_base = (void *) ioremap(0xfe000000, 0x20000);
+                        if (machine_is_compatible("AAPL,PowerBook1998"))
+                        	grackle_set_loop_snoop(bp, 1);
+#if 0 			/* Disabled for now, HW problems ??? */
+			grackle_set_stg(bp, 1);
+#endif
+		} else {
+			/* a `bandit' or `chaos' bridge */
+			bp->cfg_addr = (volatile unsigned int *)
+				ioremap(addr->address + 0x800000, 0x1000);
+			bp->cfg_data = (volatile unsigned char *)
+				ioremap(addr->address + 0xc00000, 0x1000);
+			bp->io_base_phys = addr->address;
+			bp->io_base = (void *) ioremap(addr->address, 0x10000);
 		}
 		if (isa_io_base == 0)
 			isa_io_base = (unsigned long) bp->io_base;
@@ -442,9 +714,32 @@ __initfunc(static void add_bridges(struct device_node *dev, unsigned long *mem_p
 	}
 }
 
-__initfunc(
-void
-pmac_pcibios_fixup(void))
+/* Recursively searches any node that is of type PCI-PCI bridge. Without
+ * this, the old code would miss children of P2P bridges and hence not
+ * fix IRQ's for cards located behind P2P bridges.
+ * - Ranjit Deshpande, 01/20/99
+ */
+void __init
+fix_intr(struct device_node *node, struct pci_dev *dev)
+{
+	unsigned int *reg, *class_code;
+
+	for (; node != 0;node = node->sibling) {
+		class_code = (unsigned int *) get_property(node, "class-code", 0);
+		if(class_code && (*class_code >> 8) == PCI_CLASS_BRIDGE_PCI)
+			fix_intr(node->child, dev);
+		reg = (unsigned int *) get_property(node, "reg", 0);
+		if (reg == 0 || ((reg[0] >> 8) & 0xff) != dev->devfn)
+			continue;
+		/* this is the node, see if it has interrupts */
+		if (node->n_intrs > 0) 
+			dev->irq = node->intrs[0].line;
+		break;
+	}
+}
+
+void __init
+pmac_pcibios_fixup(void)
 {
 	struct pci_dev *dev;
 	
@@ -454,7 +749,7 @@ pmac_pcibios_fixup(void))
 	 *	  honor the existence of multi-function devices where
 	 *	  different functions have different interrupt pins. [mj]
 	 */
-	for(dev=pci_devices; dev; dev=dev->next)
+	pci_for_each_dev(dev)
 	{
 		/*
 		 * Open Firmware often doesn't initialize the,
@@ -468,21 +763,38 @@ pmac_pcibios_fixup(void))
 		if (pci_read_config_byte(dev, PCI_INTERRUPT_PIN, &pin) ||
 		    !pin)
 			continue; /* No interrupt generated -> no fixup */
-                fix_intr(bp->node->child, dev);
+		/* We iterate all instances of uninorth for now */	
+		if (uninorth_count && dev->bus->number == 0) {
+			int i;
+			for (i=0;i<uninorth_count;i++)
+				fix_intr(uninorth_bridges[i].node->child, dev);
+		} else
+                	fix_intr(bp->node->child, dev);
 	}
 }
 
-__initfunc(
-void
-pmac_setup_pci_ptrs(void))
+void __init
+pmac_setup_pci_ptrs(void)
 {
-	if (find_devices("pci") != 0) {
-		/* looks like a G3 powermac */
-		set_config_access_method(grackle);
-	} else {
+	struct device_node* np;
+
+	np = find_devices("pci");
+	if (np != 0)
+	{
+		if (device_is_compatible(np, "uni-north"))
+		{
+			/* looks like an Core99 powermac */
+			set_config_access_method(uni);
+		} else
+		{
+			/* looks like a G3 powermac */
+			set_config_access_method(grackle);
+		}
+	} else
+	{
 		set_config_access_method(pmac);
 	}
-
+	
 	ppc_md.pcibios_fixup = pmac_pcibios_fixup;
 }
 

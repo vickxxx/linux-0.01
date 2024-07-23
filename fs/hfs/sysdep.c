@@ -17,6 +17,7 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/smp_lock.h>
 
 static int hfs_revalidate_dentry(struct dentry *, int);
 static int hfs_hash_dentry(struct dentry *, struct qstr *);
@@ -24,12 +25,10 @@ static int hfs_compare_dentry(struct dentry *, struct qstr *, struct qstr *);
 static void hfs_dentry_iput(struct dentry *, struct inode *);
 struct dentry_operations hfs_dentry_operations =
 {
-	hfs_revalidate_dentry,	/* d_revalidate(struct dentry *) */
-	hfs_hash_dentry,	/* d_hash */
-	hfs_compare_dentry,    	/* d_compare */
-	NULL,	                /* d_delete(struct dentry *) */
-	NULL,                   /* d_release(struct dentry *) */
-	hfs_dentry_iput         /* d_iput(struct dentry *, struct inode *) */
+	d_revalidate:	hfs_revalidate_dentry,	
+	d_hash:		hfs_hash_dentry,
+	d_compare:	hfs_compare_dentry,
+	d_iput:		hfs_dentry_iput,
 };
 
 /*
@@ -85,7 +84,9 @@ static void hfs_dentry_iput(struct dentry *dentry, struct inode *inode)
 {
 	struct hfs_cat_entry *entry = HFS_I(inode)->entry;
 
+	lock_kernel();
 	entry->sys_entry[HFS_ITYPE_TO_INT(HFS_ITYPE(inode->i_ino))] = NULL;
+	unlock_kernel();
 	iput(inode);
 }
 
@@ -95,6 +96,7 @@ static int hfs_revalidate_dentry(struct dentry *dentry, int flags)
 	int diff;
 
 	/* fix up inode on a timezone change */
+	lock_kernel();
 	if (inode && 
 	    (diff = (hfs_to_utc(0) - HFS_I(inode)->tz_secondswest))) {
 		inode->i_ctime += diff;
@@ -102,5 +104,6 @@ static int hfs_revalidate_dentry(struct dentry *dentry, int flags)
 		inode->i_mtime += diff;
 		HFS_I(inode)->tz_secondswest += diff;
 	}
+	unlock_kernel();
 	return 1;
 }

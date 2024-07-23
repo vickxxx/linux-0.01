@@ -1,6 +1,6 @@
 /*
  *  hosts.h Copyright (C) 1992 Drew Eckhardt
- *          Copyright (C) 1993, 1994, 1995 Eric Youngdale
+ *          Copyright (C) 1993, 1994, 1995, 1998, 1999 Eric Youngdale
  *
  *  mid to low-level SCSI driver interface header
  *      Initial versions: Drew Eckhardt
@@ -8,7 +8,7 @@
  *
  *  <drew@colorado.edu>
  *
- *	 Modified by Eric Youngdale eric@aib.com to
+ *	 Modified by Eric Youngdale eric@andante.org to
  *	 add scatter-gather, multiple outstanding request, and other
  *	 enhancements.
  *
@@ -95,6 +95,8 @@ typedef struct	SHT
      * especially that scsi_malloc/scsi_free must not be called.
      */
     int (* detect)(struct SHT *);
+
+    int (*revoke)(Scsi_Device *);
 
     /* Used with loadable modules to unload the host structures.  Note:
      * there is a default action built into the modules code which may
@@ -211,6 +213,12 @@ typedef struct	SHT
      */
     int (* bios_param)(Disk *, kdev_t, int []);
 
+
+    /*
+     * Used to set the queue depth for a specific device.
+     */
+    void (*select_queue_depths)(struct Scsi_Host *, Scsi_Device *);
+
     /*
      * This determines if we will use a non-interrupt driven
      * or an interrupt driven scheme,  It is set to the maximum number
@@ -277,6 +285,11 @@ typedef struct	SHT
      */
     unsigned emulated:1;
 
+    /*
+     * Name of proc directory
+     */
+    char *proc_name;
+
 } Scsi_Host_Template;
 
 /*
@@ -297,13 +310,7 @@ struct Scsi_Host
      */
     struct Scsi_Host      * next;
     Scsi_Device           * host_queue;
-    /*
-     * List of commands that have been rejected because either the host
-     * or the device was busy.  These need to be retried relatively quickly,
-     * but we need to hold onto it for a short period until the host/device
-     * is available.
-     */
-    Scsi_Cmnd             * pending_commands;
+
 
     struct task_struct    * ehandler;  /* Error recovery thread. */
     struct semaphore      * eh_wait;   /* The error recovery thread waits on
@@ -336,16 +343,8 @@ struct Scsi_Host
     unsigned int max_lun;
     unsigned int max_channel;
 
-    /*
-     * Pointer to a circularly linked list - this indicates the hosts
-     * that should be locked out of performing I/O while we have an active
-     * command on this host.
-     */
-    struct Scsi_Host * block;
-    unsigned wish_block:1;
-
     /* These parameters should be set by the detect routine */
-    unsigned char *base;
+    unsigned long base;
     unsigned long io_port;
     unsigned char n_io_port;
     unsigned char dma_channel;
@@ -365,6 +364,17 @@ struct Scsi_Host
      * initialized, as required.
      */
 
+    /*
+     * The maximum length of SCSI commands that this host can accept.
+     * Probably 12 for most host adapters, but could be 16 for others.
+     * For drivers that don't set this field, a value of 12 is
+     * assumed.  I am leaving this as a number rather than a bit
+     * because you never know what subsequent SCSI standards might do
+     * (i.e. could there be a 20 byte or a 24-byte command a few years
+     * down the road?).  
+     */
+    unsigned char max_cmd_len;
+
     int this_id;
     int can_queue;
     short cmd_per_lun;
@@ -382,14 +392,25 @@ struct Scsi_Host
      * Host has rejected a command because it was busy.
      */
     unsigned host_blocked:1;
+
+    /*
+     * Host has requested that no further requests come through for the
+     * time being.
+     */
+    unsigned host_self_blocked:1;
     
     /*
      * Host uses correct SCSI ordering not PC ordering. The bit is
      * set for the minority of drivers whose authors actually read the spec ;)
      */
-
     unsigned reverse_ordering:1;
-    
+
+    /*
+     * Indicates that one or more devices on this host were starved, and
+     * when the device becomes less busy that we need to feed them.
+     */
+    unsigned some_device_starved:1;
+   
     void (*select_queue_depths)(struct Scsi_Host *, Scsi_Device *);
 
     /*
@@ -401,6 +422,30 @@ struct Scsi_Host
         __attribute__ ((aligned (sizeof(unsigned long))));
 };
 
+/*
+ * These two functions are used to allocate and free a pseudo device
+ * which will connect to the host adapter itself rather than any
+ * physical device.  You must deallocate when you are done with the
+ * thing.  This physical pseudo-device isn't real and won't be available
+ * from any high-level drivers.
+ */
+extern void scsi_free_host_dev(Scsi_Device * SDpnt);
+extern Scsi_Device * scsi_get_host_dev(struct Scsi_Host * SHpnt);
+
+extern void scsi_unblock_requests(struct Scsi_Host * SHpnt);
+extern void scsi_block_requests(struct Scsi_Host * SHpnt);
+extern void scsi_report_bus_reset(struct Scsi_Host * SHpnt, int channel);
+
+typedef struct SHN
+    {
+    struct SHN * next;
+    char * name;
+    unsigned short host_no;
+    unsigned short host_registered;
+    unsigned loaded_as_module;
+    } Scsi_Host_Name;
+	
+extern Scsi_Host_Name * scsi_host_no_list;
 extern struct Scsi_Host * scsi_hostlist;
 extern struct Scsi_Device_Template * scsi_devicelist;
 
@@ -408,27 +453,27 @@ extern Scsi_Host_Template * scsi_hosts;
 
 extern void build_proc_dir_entries(Scsi_Host_Template  *);
 
-
 /*
  *  scsi_init initializes the scsi hosts.
  */
 
-/*
- * We use these goofy things because the MM is not set up when we init
- * the scsi subsystem.	By using these functions we can write code that
- * looks normal.  Also, it makes it possible to use the same code for a
- * loadable module.
- */
-
-extern void * scsi_init_malloc(unsigned int size, int priority);
-extern void scsi_init_free(char * ptr, unsigned int size);
-
 extern int next_scsi_host;
 
-extern int scsi_loadable_module_flag;
 unsigned int scsi_init(void);
 extern struct Scsi_Host * scsi_register(Scsi_Host_Template *, int j);
 extern void scsi_unregister(struct Scsi_Host * i);
+
+extern void scsi_register_blocked_host(struct Scsi_Host * SHpnt);
+extern void scsi_deregister_blocked_host(struct Scsi_Host * SHpnt);
+
+/*
+ * Prototypes for functions/data in scsi_scan.c
+ */
+extern void scan_scsis(struct Scsi_Host *shpnt,
+		       uint hardcoded,
+		       uint hchannel,
+		       uint hid,
+                       uint hlun);
 
 extern void scsi_mark_host_reset(struct Scsi_Host *Host);
 
@@ -441,10 +486,12 @@ struct Scsi_Device_Template
     const char * tag;
     struct module * module;	  /* Used for loadable modules */
     unsigned char scsi_type;
-    unsigned char major;
-    unsigned char nr_dev;	  /* Number currently attached */
-    unsigned char dev_noticed;	  /* Number of devices detected. */
-    unsigned char dev_max;	  /* Current size of arrays */
+    unsigned int major;
+    unsigned int min_major;      /* Minimum major in range. */ 
+    unsigned int max_major;      /* Maximum major in range. */
+    unsigned int nr_dev;	  /* Number currently attached */
+    unsigned int dev_noticed;	  /* Number of devices detected. */
+    unsigned int dev_max;	  /* Current size of arrays */
     unsigned blk:1;		  /* 0 if character device */
     int (*detect)(Scsi_Device *); /* Returns 1 if we can attach this device */
     int (*init)(void);		  /* Sizes arrays based upon number of devices
@@ -452,12 +499,11 @@ struct Scsi_Device_Template
     void (*finish)(void);	  /* Perform initialization after attachment */
     int (*attach)(Scsi_Device *); /* Attach devices to arrays */
     void (*detach)(Scsi_Device *);
+    int (*init_command)(Scsi_Cmnd *);     /* Used by new queueing code. 
+                                           Selects command for blkdevs */
 };
 
-extern struct Scsi_Device_Template sd_template;
-extern struct Scsi_Device_Template st_template;
-extern struct Scsi_Device_Template sr_template;
-extern struct Scsi_Device_Template sg_template;
+void  scsi_initialize_queue(Scsi_Device * SDpnt, struct Scsi_Host * SHpnt);
 
 int scsi_register_device(struct Scsi_Device_Template * sdpnt);
 
@@ -480,15 +526,22 @@ extern void scsi_unregister_module(int, void *);
  *
  * Even bigger hack for SparcSTORAGE arrays. Those are at least 6 disks, but
  * usually up to 30 disks, so everyone would need to change this. -jj
+ *
+ * Note: These things are all evil and all need to go away.  My plan is to
+ * tackle the character devices first, as there aren't any locking implications
+ * in the block device layer.   The block devices will require more work.
+ *
+ * The generics driver has been updated to resize as required.  So as the tape
+ * driver. Two down, two more to go.
  */
-#ifdef CONFIG_SCSI_PLUTO_MODULE
-#define SD_EXTRA_DEVS 40
-#else
-#define SD_EXTRA_DEVS 4
+#ifndef CONFIG_SD_EXTRA_DEVS
+#define CONFIG_SD_EXTRA_DEVS 2
 #endif
-#define ST_EXTRA_DEVS 2
-#define SR_EXTRA_DEVS 2
-#define SG_EXTRA_DEVS (SD_EXTRA_DEVS + SR_EXTRA_DEVS + ST_EXTRA_DEVS)
+#ifndef CONFIG_SR_EXTRA_DEVS
+#define CONFIG_SR_EXTRA_DEVS 2
+#endif
+#define SD_EXTRA_DEVS CONFIG_SD_EXTRA_DEVS
+#define SR_EXTRA_DEVS CONFIG_SR_EXTRA_DEVS
 
 #endif
 /*

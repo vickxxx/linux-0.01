@@ -21,7 +21,7 @@
    Version 0.46 1/30/97 - kernel 1.2.0+
 
    Functions as standalone, loadable, and PCMCIA driver, the latter from
-   Dave Hind's PCMCIA package.
+   Dave Hinds' PCMCIA package.
 
    Redistributable under terms of the GNU Public License
 
@@ -107,7 +107,6 @@
 #ifdef PCMCIA
 #undef QL_INT_ACTIVE_HIGH
 #define QL_INT_ACTIVE_HIGH 0
-#define MODULE
 #endif 
 
 #include <linux/module.h>
@@ -123,18 +122,13 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/unistd.h>
+#include <linux/spinlock.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/spinlock.h>
 #include "sd.h"
 #include "hosts.h"
 #include "qlogicfas.h"
 #include<linux/stat.h>
-
-static struct proc_dir_entry proc_scsi_qlogicfas = {
-    PROC_SCSI_QLOGICFAS, 6, "qlogicfas",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 /*----------------------------------------------------------------*/
 /* driver state info, local to driver */
@@ -550,7 +544,7 @@ int	qltyp;			/* type of chip */
 struct	Scsi_Host	*hreg;	/* registered host structure */
 unsigned long	flags;
 
-host->proc_dir =  &proc_scsi_qlogicfas;
+host->proc_name =  "qlogicfas";
 
 /* Qlogic Cards only exist at 0x230 or 0x330 (the chip itself decodes the
    address - I check 230 first since MIDI cards are typically at 330
@@ -649,8 +643,10 @@ int	qlogicfas_biosparam(Disk * disk, kdev_t dev, int ip[])
 		ip[0] = 0xff;
 		ip[1] = 0x3f;
 		ip[2] = disk->capacity / (ip[0] * ip[1]);
+#if 0
 		if (ip[2] > 1023)
 			ip[2] = 1023;
+#endif
 	}
 	return 0;
 }
@@ -680,10 +676,7 @@ const char	*qlogicfas_info(struct Scsi_Host * host)
 	return qinfo;
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = QLOGICFAS;
-
+static Scsi_Host_Template driver_template = QLOGICFAS;
 #include "scsi_module.c"
-#endif
 

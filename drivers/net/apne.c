@@ -74,18 +74,18 @@
 #define NESM_STOP_PG	0x80	/* Last page +1 of RX ring */
 
 
-int apne_probe(struct device *dev);
-static int apne_probe1(struct device *dev, int ioaddr);
+int apne_probe(struct net_device *dev);
+static int apne_probe1(struct net_device *dev, int ioaddr);
 
-static int apne_open(struct device *dev);
-static int apne_close(struct device *dev);
+static int apne_open(struct net_device *dev);
+static int apne_close(struct net_device *dev);
 
-static void apne_reset_8390(struct device *dev);
-static void apne_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
+static void apne_reset_8390(struct net_device *dev);
+static void apne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 			  int ring_page);
-static void apne_block_input(struct device *dev, int count,
+static void apne_block_input(struct net_device *dev, int count,
 								struct sk_buff *skb, int ring_offset);
-static void apne_block_output(struct device *dev, const int count,
+static void apne_block_output(struct net_device *dev, const int count,
 							const unsigned char *buf, const int start_page);
 static void apne_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
@@ -121,7 +121,7 @@ static const char *version =
 
 static int apne_owned = 0;	/* signal if card already owned */
 
-__initfunc(int apne_probe(struct device *dev))
+int __init apne_probe(struct net_device *dev)
 {
 #ifndef MANUAL_CONFIG
 	char tuple[8];
@@ -129,7 +129,9 @@ __initfunc(int apne_probe(struct device *dev))
 
 	if (apne_owned)
 		return -ENODEV;
-        
+
+	SET_MODULE_OWNER(dev);
+
 	if ( !(AMIGAHW_PRESENT(PCMCIA)) )
 		return (-ENODEV);
                                 
@@ -161,8 +163,7 @@ __initfunc(int apne_probe(struct device *dev))
 
 }
 
-
-__initfunc(static int apne_probe1(struct device *dev, int ioaddr))
+static int __init apne_probe1(struct net_device *dev, int ioaddr)
 {
     int i;
     unsigned char SA_prom[32];
@@ -178,15 +179,6 @@ __initfunc(static int apne_probe1(struct device *dev, int ioaddr))
                 4,   5+GAYLE_ODD,   6,   7+GAYLE_ODD,
                 8,   9+GAYLE_ODD, 0xa, 0xb+GAYLE_ODD,
               0xc, 0xd+GAYLE_ODD, 0xe, 0xf+GAYLE_ODD };
-
-    if (load_8390_module("apne.c"))
-        return -ENOSYS;
-
-    /* We should have a "dev" from Space.c or the static module table. */
-    if (dev == NULL) {
-	printk(KERN_ERR "apne.c: Passed a NULL device.\n");
-	dev = init_etherdev(0, 0);
-    }
 
     if (ei_debug  &&  version_printed++ == 0)
 	printk(version);
@@ -272,7 +264,7 @@ __initfunc(static int apne_probe1(struct device *dev, int ioaddr))
 	stop_page = (wordlength == 2) ? 0x40 : 0x20;
     } else {
 	printk(" not found.\n");
-	return ENXIO;
+	return -ENXIO;
 
     }
 
@@ -295,9 +287,8 @@ __initfunc(static int apne_probe1(struct device *dev, int ioaddr))
     dev->base_addr = ioaddr;
 
     /* Install the Interrupt handler */
-    if (request_irq(IRQ_AMIGA_PORTS, apne_interrupt, 0, "apne Ethernet", dev))
-        return -EAGAIN;
-
+    i = request_irq(IRQ_AMIGA_PORTS, apne_interrupt, SA_SHIRQ, dev->name, dev);
+    if (i) return i;
 
     /* Allocate dev->priv and fill in 8390 specific dev fields. */
     if (ethdev_init(dev)) {
@@ -310,8 +301,7 @@ __initfunc(static int apne_probe1(struct device *dev, int ioaddr))
 	dev->dev_addr[i] = SA_prom[i];
     }
 
-    printk("\n%s: %s found.\n",
-	   dev->name, name);
+    printk("\n%s: %s found.\n", dev->name, name);
 
     ei_status.name = name;
     ei_status.tx_start_page = start_page;
@@ -338,27 +328,25 @@ __initfunc(static int apne_probe1(struct device *dev, int ioaddr))
 }
 
 static int
-apne_open(struct device *dev)
+apne_open(struct net_device *dev)
 {
     ei_open(dev);
-    MOD_INC_USE_COUNT;
     return 0;
 }
 
 static int
-apne_close(struct device *dev)
+apne_close(struct net_device *dev)
 {
     if (ei_debug > 1)
 	printk("%s: Shutting down ethercard.\n", dev->name);
     ei_close(dev);
-    MOD_DEC_USE_COUNT;
     return 0;
 }
 
 /* Hard reset the card.  This used to pause for the same period that a
    8390 reset command required, but that shouldn't be necessary. */
 static void
-apne_reset_8390(struct device *dev)
+apne_reset_8390(struct net_device *dev)
 {
     unsigned long reset_start_time = jiffies;
 
@@ -385,7 +373,7 @@ apne_reset_8390(struct device *dev)
    the start of a page, so we optimize accordingly. */
 
 static void
-apne_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
+apne_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
 {
 
     int nic_base = dev->base_addr;
@@ -396,9 +384,8 @@ apne_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
     /* This *shouldn't* happen. If it does, it's the last thing you'll see */
     if (ei_status.dmaing) {
 	printk("%s: DMAing conflict in ne_get_8390_hdr "
-	   "[DMAstat:%d][irqlock:%d][intr:%ld].\n",
-	   dev->name, ei_status.dmaing, ei_status.irqlock,
-	   dev->interrupt);
+	   "[DMAstat:%d][irqlock:%d][intr:%d].\n",
+	   dev->name, ei_status.dmaing, ei_status.irqlock, dev->irq);
 	return;
     }
 
@@ -434,7 +421,7 @@ apne_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, int ring_page)
    the packet out through the "remote DMA" dataport using writeb. */
 
 static void
-apne_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_offset)
+apne_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring_offset)
 {
     int nic_base = dev->base_addr;
     char *buf = skb->data;
@@ -445,9 +432,8 @@ apne_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_of
     /* This *shouldn't* happen. If it does, it's the last thing you'll see */
     if (ei_status.dmaing) {
 	printk("%s: DMAing conflict in ne_block_input "
-	   "[DMAstat:%d][irqlock:%d][intr:%ld].\n",
-	   dev->name, ei_status.dmaing, ei_status.irqlock,
-	   dev->interrupt);
+	   "[DMAstat:%d][irqlock:%d][intr:%d].\n",
+	   dev->name, ei_status.dmaing, ei_status.irqlock, dev->irq);
 	return;
     }
     ei_status.dmaing |= 0x01;
@@ -476,7 +462,7 @@ apne_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_of
 }
 
 static void
-apne_block_output(struct device *dev, int count,
+apne_block_output(struct net_device *dev, int count,
 		const unsigned char *buf, const int start_page)
 {
     int nic_base = NE_BASE;
@@ -494,9 +480,8 @@ apne_block_output(struct device *dev, int count,
     /* This *shouldn't* happen. If it does, it's the last thing you'll see */
     if (ei_status.dmaing) {
 	printk("%s: DMAing conflict in ne_block_output."
-	   "[DMAstat:%d][irqlock:%d][intr:%ld]\n",
-	   dev->name, ei_status.dmaing, ei_status.irqlock,
-	   dev->interrupt);
+	   "[DMAstat:%d][irqlock:%d][intr:%d]\n",
+	   dev->name, ei_status.dmaing, ei_status.irqlock, dev->irq);
 	return;
     }
     ei_status.dmaing |= 0x01;
@@ -559,25 +544,18 @@ static void apne_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 }
 
 #ifdef MODULE
-static char devicename[9] = {0, };
-
-static struct device apne_dev =
-{
-	devicename,
-	0, 0, 0, 0,
-	0, 0,
-	0, 0, 0, NULL, apne_probe,
-};
+static struct net_device apne_dev;
 
 int init_module(void)
 {
 	int err;
+
+	apne_dev.init = apne_probe;
 	if ((err = register_netdev(&apne_dev))) {
 		if (err == -EIO)
 			printk("No PCMCIA NEx000 ethernet card found.\n");
 		return (err);
 	}
-	lock_8390_module();
 	return (0);
 }
 
@@ -590,8 +568,6 @@ void cleanup_module(void)
 	free_irq(IRQ_AMIGA_PORTS, &apne_dev);
 
 	pcmcia_reset();
-
-	unlock_8390_module();
 
 	apne_owned = 0;
 }

@@ -14,8 +14,6 @@
  *	ROSE 003	Jonathan(G4KLX)	New timer architecture.
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -36,7 +34,7 @@
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
-#include <linux/firewall.h>
+#include <linux/netfilter.h>
 #include <net/rose.h>
 
 static void rose_ftimer_expiry(unsigned long);
@@ -76,12 +74,12 @@ void rose_stop_t0timer(struct rose_neigh *neigh)
 
 int rose_ftimer_running(struct rose_neigh *neigh)
 {
-	return (neigh->ftimer.prev != NULL || neigh->ftimer.next != NULL);
+	return timer_pending(&neigh->ftimer);
 }
 
 int rose_t0timer_running(struct rose_neigh *neigh)
 {
-	return (neigh->t0timer.prev != NULL || neigh->t0timer.next != NULL);
+	return timer_pending(&neigh->t0timer);
 }
 
 static void rose_ftimer_expiry(unsigned long param)
@@ -291,10 +289,12 @@ void rose_transmit_link(struct sk_buff *skb, struct rose_neigh *neigh)
 {
 	unsigned char *dptr;
 
+#if 0
 	if (call_fw_firewall(PF_ROSE, skb->dev, skb->data, NULL, &skb) != FW_ACCEPT) {
 		kfree_skb(skb);
 		return;
 	}
+#endif
 
 	if (neigh->loopback) {
 		rose_loopback_queue(skb, neigh);
@@ -320,5 +320,3 @@ void rose_transmit_link(struct sk_buff *skb, struct rose_neigh *neigh)
 		}
 	}
 }
-
-#endif

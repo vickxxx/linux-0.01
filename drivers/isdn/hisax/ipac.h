@@ -1,21 +1,10 @@
-/* $Id: ipac.h,v 1.3 1998/04/15 16:48:09 keil Exp $
-
+/* $Id: ipac.h,v 1.5 2000/06/26 08:59:13 keil Exp $
+ *
  * ipac.h   IPAC specific defines
  *
- * Author       Karsten Keil (keil@temic-ech.spacenet.de)
+ * Author       Karsten Keil (keil@isdn4linux.de)
  *
- *
- * $Log: ipac.h,v $
- * Revision 1.3  1998/04/15 16:48:09  keil
- * IPAC_ATX added
- *
- * Revision 1.2  1997/10/29 18:51:21  keil
- * New files
- *
- * Revision 1.1.2.1  1997/10/17 22:10:48  keil
- * new files on 2.0
- *
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 

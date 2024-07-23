@@ -1,9 +1,10 @@
+
 /*
     NetWinder Floating Point Emulator
-    (c) Corel Computer Corporation, 1998
+    (c) Rebel.com, 1998-1999
     (c) Philip Blundell, 1998-1999
 
-    Direct questions, comments to Scott Bambrough <scottb@corelcomputer.com>
+    Direct questions, comments to Scott Bambrough <scottb@netwinder.org>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -20,31 +21,16 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
 */
 
-#include "config.h"
-
-#ifdef MODULE
 #include <linux/module.h>
 #include <linux/version.h>
-#else
-#define MOD_INC_USE_COUNT
-#define MOD_DEC_USE_COUNT
-#endif
+#include <linux/config.h>
 
 /* XXX */
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
-#include <linux/mm.h>
-#include <linux/sched.h>
 #include <linux/init.h>
-
-#include <asm/system.h>
-#include <asm/uaccess.h>
-#include <asm/io.h>
-#include <asm/spinlock.h>
-#include <asm/atomic.h>
-#include <asm/pgtable.h>
 /* XXX */
 
 #include "softfloat.h"
@@ -60,71 +46,54 @@ extern FPA11 *fpa11;
 typedef struct task_struct*	PTASK;
 
 #ifdef MODULE
-int fp_printk(const char *,...);
 void fp_send_sig(unsigned long sig, PTASK p, int priv);
 #if LINUX_VERSION_CODE > 0x20115
-MODULE_AUTHOR("Scott Bambrough <scottb@corelcomputer.com>");
+MODULE_AUTHOR("Scott Bambrough <scottb@rebel.com>");
 MODULE_DESCRIPTION("NWFPE floating point emulator");
 #endif
 
 #else
-#define fp_printk	printk
 #define fp_send_sig	send_sig
 #define kern_fp_enter	fp_enter
 #endif
 
 /* kernel function prototypes required */
-void C_SYMBOL_NAME(fp_setup)(void);
+void fp_setup(void);
 
 /* external declarations for saved kernel symbols */
-extern unsigned int C_SYMBOL_NAME(kern_fp_enter);
+extern void (*kern_fp_enter)(void);
+
+/* Original value of fp_enter from kernel before patched by fpe_init. */ 
+static void (*orig_fp_enter)(void);
 
 /* forward declarations */
 extern void nwfpe_enter(void);
 
-/* Original value of fp_enter from kernel before patched by fpe_init. */ 
-static unsigned int orig_fp_enter;
-
 /* Address of user registers on the kernel stack. */
 unsigned int *userRegisters;
 
-void __init C_SYMBOL_NAME(fpe_version)(void)
-{
-  static const char szTitle[] = "<4>NetWinder Floating Point Emulator ";
-  static const char szVersion[] = "V0.94.1 ";
-  static const char szCopyright[] = "(c) 1998 Corel Computer Corp.\n";
-  C_SYMBOL_NAME(fp_printk)(szTitle);
-  C_SYMBOL_NAME(fp_printk)(szVersion);
-  C_SYMBOL_NAME(fp_printk)(szCopyright);
-}
-
 int __init fpe_init(void)
 {
-  /* Display title, version and copyright information. */
-  C_SYMBOL_NAME(fpe_version)();
+  if (sizeof(FPA11) > sizeof(union fp_state))
+    printk(KERN_ERR "nwfpe: bad structure size\n");
+  else {
+    /* Display title, version and copyright information. */
+    printk(KERN_WARNING "NetWinder Floating Point Emulator V0.95 "
+	   "(c) 1998-1999 Rebel.com\n");
 
-  /* Save pointer to the old FP handler and then patch ourselves in */
-  orig_fp_enter = C_SYMBOL_NAME(kern_fp_enter);
-  C_SYMBOL_NAME(kern_fp_enter) = (unsigned int)C_SYMBOL_NAME(nwfpe_enter);
+    /* Save pointer to the old FP handler and then patch ourselves in */
+    orig_fp_enter = kern_fp_enter;
+    kern_fp_enter = nwfpe_enter;
+  }
 
   return 0;
 }
 
-#ifdef MODULE
-int init_module(void)
-{
-  return(fpe_init());
-}
-
-void cleanup_module(void)
+void __exit fpe_exit(void)
 {
   /* Restore the values we saved earlier. */
-  C_SYMBOL_NAME(kern_fp_enter) = orig_fp_enter;
+  kern_fp_enter = orig_fp_enter;
 }
-#endif
-
-#define _ARM_pc 60
-#define _ARM_cpsr 64
 
 /*
 ScottB:  November 4, 1998
@@ -136,7 +105,7 @@ fpmodule.c to integrate with the NetBSD kernel (I hope!).
 
 [1/1/99: Not quite true any more unfortunately.  There is Linux-specific
 code to access data in user space in some other source files at the 
-moment.  --philb]
+moment (grep for get_user / put_user calls).  --philb]
 
 float_exception_flags is a global variable in SoftFloat.
 
@@ -148,20 +117,42 @@ cumulative exceptions flag byte are set and we return.
 
 void float_raise(signed char flags)
 {
-#if 0
-  printk(KERN_DEBUG "NWFPE: exception %08x at %08x from %08x\n", flags,
+  register unsigned int fpsr, cumulativeTraps;
+  
+#ifdef CONFIG_DEBUG_USER
+  printk(KERN_DEBUG "NWFPE: %s[%d] takes exception %08x at %p from %08x\n",
+	 current->comm, current->pid, flags,
 	 __builtin_return_address(0), userRegisters[15]);
 #endif
 
+  /* Keep SoftFloat exception flags up to date.  */
   float_exception_flags |= flags;
-  if (readFPSR() & (flags << 16))
-  {
-    /* raise exception */
-    C_SYMBOL_NAME(fp_send_sig)(SIGFPE,C_SYMBOL_NAME(current),1);
-  }
-  else
-  {
-    /* set the cumulative exceptions flags */
-    writeFPSR(flags);
-  }
+
+  /* Read fpsr and initialize the cumulativeTraps.  */
+  fpsr = readFPSR();
+  cumulativeTraps = 0;
+  
+  /* For each type of exception, the cumulative trap exception bit is only
+     set if the corresponding trap enable bit is not set.  */
+  if ((!(fpsr & BIT_IXE)) && (flags & BIT_IXC))
+     cumulativeTraps |= BIT_IXC;  
+  if ((!(fpsr & BIT_UFE)) && (flags & BIT_UFC))
+     cumulativeTraps |= BIT_UFC;  
+  if ((!(fpsr & BIT_OFE)) && (flags & BIT_OFC))
+     cumulativeTraps |= BIT_OFC;  
+  if ((!(fpsr & BIT_DZE)) && (flags & BIT_DZC))
+     cumulativeTraps |= BIT_DZC;  
+  if ((!(fpsr & BIT_IOE)) && (flags & BIT_IOC))
+     cumulativeTraps |= BIT_IOC;  
+
+  /* Set the cumulative exceptions flags.  */
+  if (cumulativeTraps)
+    writeFPSR(fpsr | cumulativeTraps);
+
+  /* Raise an exception if necessary.  */
+  if (fpsr & (flags << 16))
+    fp_send_sig(SIGFPE, current, 1);
 }
+
+module_init(fpe_init);
+module_exit(fpe_exit);

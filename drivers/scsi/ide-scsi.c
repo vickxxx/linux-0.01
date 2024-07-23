@@ -1,7 +1,7 @@
 /*
- * linux/drivers/scsi/ide-scsi.c	Version 0.6		Jan  27, 1998
+ * linux/drivers/scsi/ide-scsi.c	Version 0.9		Jul   4, 1999
  *
- * Copyright (C) 1996 - 1998 Gadi Oxman <gadio@netvision.net.il>
+ * Copyright (C) 1996 - 1999 Gadi Oxman <gadio@netvision.net.il>
  */
 
 /*
@@ -25,10 +25,11 @@
  *                       Fix MODE_SENSE_6/MODE_SELECT_6/INQUIRY translation.
  * Ver 0.7   Dec 04 98   Ignore commands where lun != 0 to avoid multiple
  *                        detection of devices with CONFIG_SCSI_MULTI_LUN
- * Ver 0.8   Feb 05 99   Optical media need translation too. 
+ * Ver 0.8   Feb 05 99   Optical media need translation too. Reverse 0.7.
+ * Ver 0.9   Jul 04 99   Fix a bug in SG_SET_TRANSFORM.
  */
 
-#define IDESCSI_VERSION "0.6"
+#define IDESCSI_VERSION "0.9"
 
 #include <linux/module.h>
 #include <linux/types.h>
@@ -306,7 +307,7 @@ static inline unsigned long get_timeout(idescsi_pc_t *pc)
 /*
  *	Our interrupt handler.
  */
-static void idescsi_pc_intr (ide_drive_t *drive)
+static ide_startstop_t idescsi_pc_intr (ide_drive_t *drive)
 {
 	idescsi_scsi_t *scsi = drive->driver_data;
 	byte status, ireason;
@@ -336,15 +337,14 @@ static void idescsi_pc_intr (ide_drive_t *drive)
 		if (status & ERR_STAT)
 			rq->errors++;
 		idescsi_end_request (1, HWGROUP(drive));
-		return;
+		return ide_stopped;
 	}
 	bcount = IN_BYTE (IDE_BCOUNTH_REG) << 8 | IN_BYTE (IDE_BCOUNTL_REG);
 	ireason = IN_BYTE (IDE_IREASON_REG);
 
 	if (ireason & IDESCSI_IREASON_COD) {
 		printk (KERN_ERR "ide-scsi: CoD != 0 in idescsi_pc_intr\n");
-		ide_do_reset (drive);
-		return;
+		return ide_do_reset (drive);
 	}
 	if (ireason & IDESCSI_IREASON_IO) {
 		temp = pc->actually_transferred + bcount;
@@ -363,8 +363,8 @@ static void idescsi_pc_intr (ide_drive_t *drive)
 				pc->actually_transferred += temp;
 				pc->current_position += temp;
 				idescsi_discard_data (drive,bcount - temp);
-				ide_set_handler(drive, &idescsi_pc_intr, get_timeout(pc));
-				return;
+				ide_set_handler(drive, &idescsi_pc_intr, get_timeout(pc), NULL);
+				return ide_started;
 			}
 #if IDESCSI_DEBUG_LOG
 			printk (KERN_NOTICE "ide-scsi: The scsi wants to send us more data than expected - allowing transfer\n");
@@ -387,33 +387,35 @@ static void idescsi_pc_intr (ide_drive_t *drive)
 	pc->actually_transferred+=bcount;				/* Update the current position */
 	pc->current_position+=bcount;
 
-	ide_set_handler(drive, &idescsi_pc_intr, get_timeout(pc));	/* And set the interrupt handler again */
+	ide_set_handler(drive, &idescsi_pc_intr, get_timeout(pc), NULL);	/* And set the interrupt handler again */
+	return ide_started;
 }
 
-static void idescsi_transfer_pc (ide_drive_t *drive)
+static ide_startstop_t idescsi_transfer_pc (ide_drive_t *drive)
 {
 	idescsi_scsi_t *scsi = drive->driver_data;
 	idescsi_pc_t *pc = scsi->pc;
 	byte ireason;
+	ide_startstop_t startstop;
 
-	if (ide_wait_stat (drive,DRQ_STAT,BUSY_STAT,WAIT_READY)) {
+	if (ide_wait_stat (&startstop,drive,DRQ_STAT,BUSY_STAT,WAIT_READY)) {
 		printk (KERN_ERR "ide-scsi: Strange, packet command initiated yet DRQ isn't asserted\n");
-		return;
+		return startstop;
 	}
 	ireason = IN_BYTE (IDE_IREASON_REG);
 	if ((ireason & (IDESCSI_IREASON_IO | IDESCSI_IREASON_COD)) != IDESCSI_IREASON_COD) {
 		printk (KERN_ERR "ide-scsi: (IO,CoD) != (0,1) while issuing a packet command\n");
-		ide_do_reset (drive);
-		return;
+		return ide_do_reset (drive);
 	}
-	ide_set_handler(drive, &idescsi_pc_intr, get_timeout(pc));	/* Set the interrupt routine */
+	ide_set_handler(drive, &idescsi_pc_intr, get_timeout(pc), NULL);	/* Set the interrupt routine */
 	atapi_output_bytes (drive, scsi->pc->c, 12);			/* Send the actual packet */
+	return ide_started;
 }
 
 /*
  *	Issue a packet command
  */
-static void idescsi_issue_pc (ide_drive_t *drive, idescsi_pc_t *pc)
+static ide_startstop_t idescsi_issue_pc (ide_drive_t *drive, idescsi_pc_t *pc)
 {
 	idescsi_scsi_t *scsi = drive->driver_data;
 	int bcount;
@@ -428,29 +430,31 @@ static void idescsi_issue_pc (ide_drive_t *drive, idescsi_pc_t *pc)
 	if (drive->using_dma && rq->bh)
 		dma_ok=!HWIF(drive)->dmaproc(test_bit (PC_WRITING, &pc->flags) ? ide_dma_write : ide_dma_read, drive);
 
-	OUT_BYTE (drive->ctl,IDE_CONTROL_REG);
+	SELECT_DRIVE(HWIF(drive), drive);
+	if (IDE_CONTROL_REG)
+		OUT_BYTE (drive->ctl,IDE_CONTROL_REG);
 	OUT_BYTE (dma_ok,IDE_FEATURE_REG);
 	OUT_BYTE (bcount >> 8,IDE_BCOUNTH_REG);
 	OUT_BYTE (bcount & 0xff,IDE_BCOUNTL_REG);
-	OUT_BYTE (drive->select.all,IDE_SELECT_REG);
 
 	if (dma_ok) {
 		set_bit (PC_DMA_IN_PROGRESS, &pc->flags);
 		(void) (HWIF(drive)->dmaproc(ide_dma_begin, drive));
 	}
 	if (test_bit (IDESCSI_DRQ_INTERRUPT, &scsi->flags)) {
-		ide_set_handler (drive, &idescsi_transfer_pc, get_timeout(pc));
+		ide_set_handler (drive, &idescsi_transfer_pc, get_timeout(pc), NULL);
 		OUT_BYTE (WIN_PACKETCMD, IDE_COMMAND_REG);		/* Issue the packet command */
+		return ide_started;
 	} else {
 		OUT_BYTE (WIN_PACKETCMD, IDE_COMMAND_REG);
-		idescsi_transfer_pc (drive);
+		return idescsi_transfer_pc (drive);
 	}
 }
 
 /*
  *	idescsi_do_request is our request handling function.
  */
-static void idescsi_do_request (ide_drive_t *drive, struct request *rq, unsigned long block)
+static ide_startstop_t idescsi_do_request (ide_drive_t *drive, struct request *rq, unsigned long block)
 {
 #if IDESCSI_DEBUG_LOG
 	printk (KERN_INFO "rq_status: %d, rq_dev: %u, cmd: %d, errors: %d\n",rq->rq_status,(unsigned int) rq->rq_dev,rq->cmd,rq->errors);
@@ -458,11 +462,11 @@ static void idescsi_do_request (ide_drive_t *drive, struct request *rq, unsigned
 #endif /* IDESCSI_DEBUG_LOG */
 
 	if (rq->cmd == IDESCSI_PC_RQ) {
-		idescsi_issue_pc (drive, (idescsi_pc_t *) rq->buffer);
-		return;
+		return idescsi_issue_pc (drive, (idescsi_pc_t *) rq->buffer);
 	}
 	printk (KERN_ERR "ide-scsi: %s: unsupported command in request queue (%x)\n", drive->name, rq->cmd);
 	idescsi_end_request (0,HWGROUP (drive));
+	return ide_stopped;
 }
 
 static int idescsi_open (struct inode *inode, struct file *filp, ide_drive_t *drive)
@@ -486,7 +490,7 @@ static void idescsi_add_settings(ide_drive_t *drive)
 /*
  *			drive	setting name	read/write	ioctl	ioctl		data type	min	max	mul_factor	div_factor	data pointer		set function
  */
-	ide_add_setting(drive,	"bios_cyl",	SETTING_RW,	-1,	-1,		TYPE_SHORT,	0,	1023,	1,		1,		&drive->bios_cyl,	NULL);
+	ide_add_setting(drive,	"bios_cyl",	SETTING_RW,	-1,	-1,		TYPE_INT,	0,	1023,	1,		1,		&drive->bios_cyl,	NULL);
 	ide_add_setting(drive,	"bios_head",	SETTING_RW,	-1,	-1,		TYPE_BYTE,	0,	255,	1,		1,		&drive->bios_head,	NULL);
 	ide_add_setting(drive,	"bios_sect",	SETTING_RW,	-1,	-1,		TYPE_BYTE,	0,	63,	1,		1,		&drive->bios_sect,	NULL);
 	ide_add_setting(drive,	"transform",	SETTING_RW,	-1,	-1,		TYPE_INT,	0,	3,	1,		1,		&scsi->transform,	NULL);
@@ -542,6 +546,7 @@ static ide_driver_t idescsi_driver = {
 	idescsi_open,		/* open */
 	idescsi_ide_release,	/* release */
 	NULL,			/* media_change */
+	NULL,			/* revalidate */
 	NULL,			/* pre_reset */
 	NULL,			/* capacity */
 	NULL,			/* special */
@@ -555,8 +560,6 @@ static ide_module_t idescsi_module = {
 	&idescsi_driver,
 	NULL
 };
-
-static struct proc_dir_entry idescsi_proc_dir = {PROC_SCSI_IDESCSI, 8, "ide-scsi", S_IFDIR | S_IRUGO | S_IXUGO, 2};
 
 /*
  *	idescsi_init will register the driver for each scsi.
@@ -577,6 +580,7 @@ int idescsi_init (void)
 	for (i = 0; media[i] != 255; i++) {
 		failed = 0;
 		while ((drive = ide_scan_devices (media[i], idescsi_driver.name, NULL, failed++)) != NULL) {
+
 			if ((scsi = (idescsi_scsi_t *) kmalloc (sizeof (idescsi_scsi_t), GFP_KERNEL)) == NULL) {
 				printk (KERN_ERR "ide-scsi: %s: Can't allocate a scsi structure\n", drive->name);
 				continue;
@@ -600,11 +604,17 @@ int idescsi_detect (Scsi_Host_Template *host_template)
 {
 	struct Scsi_Host *host;
 	int id;
+	int last_lun = 0;
 
-	host_template->proc_dir = &idescsi_proc_dir;
+	host_template->proc_name = "ide-scsi";
 	host = scsi_register(host_template, 0);
-	for (id = 0; id < MAX_HWIFS * MAX_DRIVES && idescsi_drives[id]; id++);
+	if(host == NULL)
+		return 0;
+		
+	for (id = 0; id < MAX_HWIFS * MAX_DRIVES && idescsi_drives[id]; id++)
+		last_lun = IDE_MAX(last_lun, idescsi_drives[id]->last_lun);
 	host->max_id = id;
+	host->max_lun = last_lun + 1;
 	host->can_queue = host->cmd_per_lun * id;
 	return 1;
 }
@@ -633,7 +643,10 @@ int idescsi_ioctl (Scsi_Device *dev, int cmd, void *arg)
 	idescsi_scsi_t *scsi = drive->driver_data;
 
 	if (cmd == SG_SET_TRANSFORM) {
-		set_bit(IDESCSI_SG_TRANSFORM, &scsi->transform);
+		if (arg)
+			set_bit(IDESCSI_SG_TRANSFORM, &scsi->transform);
+		else
+			clear_bit(IDESCSI_SG_TRANSFORM, &scsi->transform);
 		return 0;
 	} else if (cmd == SG_GET_TRANSFORM)
 		return put_user(test_bit(IDESCSI_SG_TRANSFORM, &scsi->transform), (int *) arg);
@@ -806,18 +819,17 @@ int idescsi_bios (Disk *disk, kdev_t dev, int *parm)
 	return 0;
 }
 
-#ifdef MODULE
-Scsi_Host_Template idescsi_template = IDESCSI;
+static Scsi_Host_Template idescsi_template = IDESCSI;
 
-int init_module (void)
+static int __init init_idescsi_module(void)
 {
-	idescsi_init ();
-	idescsi_template.module = &__this_module;
+	idescsi_init();
+	idescsi_template.module = THIS_MODULE;
 	scsi_register_module (MODULE_SCSI_HA, &idescsi_template);
 	return 0;
 }
 
-void cleanup_module (void)
+static void __exit exit_idescsi_module(void)
 {
 	ide_drive_t *drive;
 	byte media[] = {TYPE_DISK, TYPE_TAPE, TYPE_PROCESSOR, TYPE_WORM, TYPE_ROM, TYPE_SCANNER, TYPE_MOD, 255};
@@ -828,10 +840,12 @@ void cleanup_module (void)
 		failed = 0;
 		while ((drive = ide_scan_devices (media[i], idescsi_driver.name, &idescsi_driver, failed)) != NULL)
 			if (idescsi_cleanup (drive)) {
-				printk ("%s: cleanup_module() called while still busy\n", drive->name);
+				printk ("%s: exit_idescsi_module() called while still busy\n", drive->name);
 				failed++;
 			}
 	}
 	ide_unregister_module(&idescsi_module);
 }
-#endif /* MODULE */
+
+module_init(init_idescsi_module);
+module_exit(exit_idescsi_module);

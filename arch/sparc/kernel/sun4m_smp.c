@@ -7,12 +7,14 @@
 
 #include <linux/kernel.h>
 #include <linux/sched.h>
-#include <linux/tasks.h>
+#include <linux/threads.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
 #include <linux/init.h>
+#include <linux/spinlock.h>
+#include <linux/mm.h>
 
 #include <asm/ptrace.h>
 #include <asm/atomic.h>
@@ -20,10 +22,9 @@
 #include <asm/delay.h>
 #include <asm/irq.h>
 #include <asm/page.h>
+#include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
-#include <asm/atops.h>
-#include <asm/spinlock.h>
 #include <asm/hardirq.h>
 #include <asm/softirq.h>
 
@@ -51,12 +52,14 @@ extern struct cpuinfo_sparc cpu_data[NR_CPUS];
 extern unsigned long cpu_offset[NR_CPUS];
 extern unsigned char boot_cpu_id;
 extern int smp_activated;
-extern volatile int cpu_number_map[NR_CPUS];
+extern volatile int __cpu_number_map[NR_CPUS];
 extern volatile int __cpu_logical_map[NR_CPUS];
 extern volatile unsigned long ipi_count;
 extern volatile int smp_process_available;
 extern volatile int smp_commenced;
 extern int __smp4m_processor_id(void);
+
+extern unsigned long totalram_pages;
 
 /*#define SMP_DEBUG*/
 
@@ -77,12 +80,13 @@ static inline unsigned long swap(volatile unsigned long *ptr, unsigned long val)
 static void smp_setup_percpu_timer(void);
 extern void cpu_probe(void);
 
-__initfunc(void smp4m_callin(void))
+void __init smp4m_callin(void)
 {
 	int cpuid = hard_smp_processor_id();
 
 	local_flush_cache_all();
 	local_flush_tlb_all();
+
 	set_irq_udt(mid_xlate[boot_cpu_id]);
 
 	/* Get our local ticker going. */
@@ -90,27 +94,35 @@ __initfunc(void smp4m_callin(void))
 
 	calibrate_delay();
 	smp_store_cpu_info(cpuid);
+
 	local_flush_cache_all();
 	local_flush_tlb_all();
 
+	/*
+	 * Unblock the master CPU _only_ when the scheduler state
+	 * of all secondary CPUs will be up-to-date, so after
+	 * the SMP initialization the master will be just allowed
+	 * to call the scheduler code.
+	 */
+	init_idle();
+
 	/* Allow master to continue. */
 	swap((unsigned long *)&cpu_callin_map[cpuid], 1);
+
 	local_flush_cache_all();
 	local_flush_tlb_all();
 	
 	cpu_probe();
 
-	while(!task[cpuid] || current_set[cpuid] != task[cpuid])
-		barrier();
-
 	/* Fix idle thread fields. */
 	__asm__ __volatile__("ld [%0], %%g6\n\t"
 			     : : "r" (&current_set[cpuid])
 			     : "memory" /* paranoid */);
-	current->mm->mmap->vm_page_prot = PAGE_SHARED;
-	current->mm->mmap->vm_start = PAGE_OFFSET;
-	current->mm->mmap->vm_end = init_task.mm->mmap->vm_end;
-	
+
+	/* Attach to the address space of init_task. */
+	atomic_inc(&init_mm.mm_count);
+	current->active_mm = &init_mm;
+
 	while(!smp_commenced)
 		barrier();
 
@@ -135,7 +147,7 @@ extern unsigned long trapbase_cpu1[];
 extern unsigned long trapbase_cpu2[];
 extern unsigned long trapbase_cpu3[];
 
-__initfunc(void smp4m_boot_cpus(void))
+void __init smp4m_boot_cpus(void)
 {
 	int cpucount = 0;
 	int i = 0;
@@ -143,21 +155,23 @@ __initfunc(void smp4m_boot_cpus(void))
 
 	printk("Entering SMP Mode...\n");
 
-	for (i = 0; i < NR_CPUS; i++)
-		cpu_offset[i] = (char *)&cpu_data[i] - (char *)&cpu_data;
-
 	__sti();
 	cpu_present_map = 0;
+
 	for(i=0; i < linux_num_cpus; i++)
 		cpu_present_map |= (1<<i);
-	for(i=0; i < NR_CPUS; i++)
-		cpu_number_map[i] = -1;
-	for(i=0; i < NR_CPUS; i++)
+
+	for(i=0; i < NR_CPUS; i++) {
+		cpu_offset[i] = (char *)&cpu_data[i] - (char *)&cpu_data;
+		__cpu_number_map[i] = -1;
 		__cpu_logical_map[i] = -1;
+	}
+
 	mid_xlate[boot_cpu_id] = (linux_cpus[boot_cpu_id].mid & ~8);
-	cpu_number_map[boot_cpu_id] = 0;
+	__cpu_number_map[boot_cpu_id] = 0;
 	__cpu_logical_map[0] = boot_cpu_id;
 	current->processor = boot_cpu_id;
+
 	smp_store_cpu_info(boot_cpu_id);
 	set_irq_udt(mid_xlate[boot_cpu_id]);
 	smp_setup_percpu_timer();
@@ -178,11 +192,18 @@ __initfunc(void smp4m_boot_cpus(void))
 			/* Cook up an idler for this guy. */
 			kernel_thread(start_secondary, NULL, CLONE_PID);
 
-			p = task[++cpucount];
+			cpucount++;
+
+			p = init_task.prev_task;
+			init_tasks[i] = p;
 
 			p->processor = i;
 			p->has_cpu = 1; /* we schedule the first task manually */
+
 			current_set[i] = p;
+
+			del_from_runqueue(p);
+			unhash_process(p);
 
 			/* See trampoline.S for details... */
 			entry += ((i-1) * 3);
@@ -211,7 +232,7 @@ __initfunc(void smp4m_boot_cpus(void))
 			}
 			if(cpu_callin_map[i]) {
 				/* Another "Red Snapper". */
-				cpu_number_map[i] = i;
+				__cpu_number_map[i] = i;
 				__cpu_logical_map[i] = i;
 			} else {
 				cpucount--;
@@ -220,7 +241,7 @@ __initfunc(void smp4m_boot_cpus(void))
 		}
 		if(!(cpu_callin_map[i])) {
 			cpu_present_map &= ~(1 << i);
-			cpu_number_map[i] = -1;
+			__cpu_number_map[i] = -1;
 		}
 	}
 	local_flush_cache_all();
@@ -256,18 +277,26 @@ __initfunc(void smp4m_boot_cpus(void))
 	cpu_data[prev].next = first;
 	
 	/* Free unneeded trap tables */
-	
 	if (!(cpu_present_map & (1 << 1))) {
-		mem_map[MAP_NR((unsigned long)trapbase_cpu1)].flags &= ~(1 << PG_reserved);
+		ClearPageReserved(virt_to_page(trapbase_cpu1));
+		set_page_count(virt_to_page(trapbase_cpu1), 1);
 		free_page((unsigned long)trapbase_cpu1);
+		totalram_pages++;
+		num_physpages++;
 	}
 	if (!(cpu_present_map & (1 << 2))) {
-		mem_map[MAP_NR((unsigned long)trapbase_cpu2)].flags &= ~(1 << PG_reserved);
+		ClearPageReserved(virt_to_page(trapbase_cpu2));
+		set_page_count(virt_to_page(trapbase_cpu2), 1);
 		free_page((unsigned long)trapbase_cpu2);
+		totalram_pages++;
+		num_physpages++;
 	}
 	if (!(cpu_present_map & (1 << 3))) {
-		mem_map[MAP_NR((unsigned long)trapbase_cpu3)].flags &= ~(1 << PG_reserved);
+		ClearPageReserved(virt_to_page(trapbase_cpu3));
+		set_page_count(virt_to_page(trapbase_cpu3), 1);
 		free_page((unsigned long)trapbase_cpu3);
+		totalram_pages++;
+		num_physpages++;
 	}
 
 	/* Ok, they are spinning and ready to go. */
@@ -375,9 +404,6 @@ void smp4m_cross_call(smpfunc_t func, unsigned long arg1, unsigned long arg2,
 			}
 		}
 
-		/* First, run local copy. */
-		func(arg1, arg2, arg3, arg4, arg5);
-
 		{
 			register int i;
 
@@ -395,8 +421,7 @@ void smp4m_cross_call(smpfunc_t func, unsigned long arg1, unsigned long arg2,
 		}
 
 		spin_unlock_irqrestore(&cross_call_lock, flags);
-	} else
-		func(arg1, arg2, arg3, arg4, arg5); /* Just need to run local copy. */
+	}
 }
 
 /* Running cross calls. */
@@ -410,33 +435,10 @@ void smp4m_cross_call_irq(void)
 	ccall_info.processors_out[i] = 1;
 }
 
-/* Protects counters touched during level14 ticker */
-static spinlock_t ticker_lock = SPIN_LOCK_UNLOCKED;
-
-/* 32-bit Sparc specific profiling function. */
-static inline void sparc_do_profile(unsigned long pc)
-{
-	if(prof_buffer && current->pid) {
-		extern int _stext;
-
-		pc -= (unsigned long) &_stext;
-		pc >>= prof_shift;
-
-		spin_lock(&ticker_lock);
-		if(pc < prof_len)
-			prof_buffer[pc]++;
-		else
-			prof_buffer[prof_len - 1]++;
-		spin_unlock(&ticker_lock);
-	}
-}
-
 extern unsigned int prof_multiplier[NR_CPUS];
 extern unsigned int prof_counter[NR_CPUS];
 
-extern void update_one_process(struct task_struct *p, unsigned long ticks,
-			       unsigned long user, unsigned long system,
-			       int cpu);
+extern void sparc_do_profile(unsigned long pc, unsigned long o7);
 
 void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 {
@@ -445,41 +447,22 @@ void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 	clear_profile_irq(mid_xlate[cpu]);
 
 	if(!user_mode(regs))
-		sparc_do_profile(regs->pc);
+		sparc_do_profile(regs->pc, regs->u_regs[UREG_RETPC]);
 
 	if(!--prof_counter[cpu]) {
 		int user = user_mode(regs);
 
 		irq_enter(cpu, 0);
-		if(current->pid) {
-			update_one_process(current, 1, user, !user, cpu);
-
-			if(--current->counter < 0) {
-				current->counter = 0;
-				current->need_resched = 1;
-			}
-
-			if(user) {
-				if(current->priority < DEF_PRIORITY) {
-					kstat.cpu_nice++;
-					kstat.per_cpu_nice[cpu]++;
-				} else {
-					kstat.cpu_user++;
-					kstat.per_cpu_user[cpu]++;
-				}
-			} else {
-				kstat.cpu_system++;
-				kstat.per_cpu_system[cpu]++;
-			}
-		}
-		prof_counter[cpu] = prof_multiplier[cpu];
+		update_process_times(user);
 		irq_exit(cpu, 0);
+
+		prof_counter[cpu] = prof_multiplier[cpu];
 	}
 }
 
 extern unsigned int lvl14_resolution;
 
-__initfunc(static void smp_setup_percpu_timer(void))
+static void __init smp_setup_percpu_timer(void)
 {
 	int cpu = smp_processor_id();
 
@@ -490,7 +473,7 @@ __initfunc(static void smp_setup_percpu_timer(void))
 		enable_pil_irq(14);
 }
 
-__initfunc(void smp4m_blackbox_id(unsigned *addr))
+void __init smp4m_blackbox_id(unsigned *addr)
 {
 	int rd = *addr & 0x3e000000;
 	int rs1 = rd >> 11;
@@ -500,7 +483,7 @@ __initfunc(void smp4m_blackbox_id(unsigned *addr))
 	addr[2] = 0x80082003 | rd | rs1;	/* and reg, 3, reg */
 }
 
-__initfunc(void smp4m_blackbox_current(unsigned *addr))
+void __init smp4m_blackbox_current(unsigned *addr)
 {
 	int rd = *addr & 0x3e000000;
 	int rs1 = rd >> 11;
@@ -510,7 +493,7 @@ __initfunc(void smp4m_blackbox_current(unsigned *addr))
 	addr[4] = 0x8008200c | rd | rs1;	/* and reg, 3, reg */
 }
 
-__initfunc(void sun4m_init_smp(void))
+void __init sun4m_init_smp(void)
 {
 	BTFIXUPSET_BLACKBOX(smp_processor_id, smp4m_blackbox_id);
 	BTFIXUPSET_BLACKBOX(load_current, smp4m_blackbox_current);

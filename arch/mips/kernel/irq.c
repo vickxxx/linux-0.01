@@ -1,5 +1,4 @@
-/* $Id: irq.c,v 1.15 1999/02/25 21:50:49 tsbogend Exp $
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -7,8 +6,9 @@
  * Code to handle x86 style IRQs plus some generic interrupt stuff.
  *
  * Copyright (C) 1992 Linus Torvalds
- * Copyright (C) 1994, 1995, 1996, 1997, 1998 Ralf Baechle
+ * Copyright (C) 1994 - 2000 Ralf Baechle
  */
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/kernel_stat.h>
@@ -29,6 +29,23 @@
 #include <asm/mipsregs.h>
 #include <asm/system.h>
 #include <asm/sni.h>
+#include <asm/nile4.h>
+
+/*
+ * Linux has a controller-independent x86 interrupt architecture.
+ * every controller has a 'controller-template', that is used
+ * by the main code to do the right thing. Each driver-visible
+ * interrupt source is transparently wired to the apropriate
+ * controller. Thus drivers need not be aware of the
+ * interrupt-controller.
+ *
+ * Various interrupt controllers we handle: 8259 PIC, SMP IO-APIC,
+ * PIIX4's internal 8259 PIC and SGI's Visual Workstation Cobalt (IO-)APIC.
+ * (IO-APICs assumed to be messaging to Pentium local-APICs)
+ *
+ * the code is designed to be easily extended with new/different
+ * interrupt controllers, without having to do assembly magic.
+ */
 
 /*
  * This contains the irq mask for both 8259A irq controllers, it's an
@@ -44,8 +61,6 @@ static unsigned int cached_irq_mask = 0xffff;
 #define cached_21       (__byte(0,cached_irq_mask))
 #define cached_A1       (__byte(1,cached_irq_mask))
 
-unsigned int local_bh_count[NR_CPUS];
-unsigned int local_irq_count[NR_CPUS];
 unsigned long spurious_count = 0;
 
 /*
@@ -72,7 +87,7 @@ static inline void unmask_irq(unsigned int irq)
 	}
 }
 
-void disable_irq(unsigned int irq_nr)
+void i8259_disable_irq(unsigned int irq_nr)
 {
 	unsigned long flags;
 
@@ -81,7 +96,7 @@ void disable_irq(unsigned int irq_nr)
 	restore_flags(flags);
 }
 
-void enable_irq(unsigned int irq_nr)
+void i8259_enable_irq(unsigned int irq_nr)
 {
 	unsigned long flags;
 	save_and_cli(flags);
@@ -123,8 +138,6 @@ int get_irq_list(char *buf)
 	return len;
 }
 
-atomic_t __mips_bh_counter;
-
 static inline void i8259_mask_and_ack_irq(int irq)
 {
 	cached_irq_mask |= 1 << irq;
@@ -147,7 +160,7 @@ asmlinkage void i8259_do_irq(int irq, struct pt_regs *regs)
 	int do_random, cpu;
 
 	cpu = smp_processor_id();
-	hardirq_enter(cpu);
+	irq_enter(cpu);
 
 	if (irq >= 16)
 		goto out;
@@ -175,7 +188,7 @@ asmlinkage void i8259_do_irq(int irq, struct pt_regs *regs)
 	unmask_irq (irq);
 
 out:
-	hardirq_exit(cpu);
+	irq_exit(cpu);
 }
 
 /*
@@ -191,7 +204,7 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 	int do_random, cpu;
 
 	cpu = smp_processor_id();
-	hardirq_enter(cpu);
+	irq_enter(cpu);
 	kstat.irqs[cpu][irq]++;
 
 	action = *(irq + irq_action);
@@ -209,7 +222,10 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 			add_interrupt_randomness(irq);
 		__cli();
 	}
-	hardirq_exit(cpu);
+	irq_exit(cpu);
+
+	if (softirq_active(cpu)&softirq_mask(cpu))
+		do_softirq();
 
 	/* unmasking and bottom half handling is done magically for us. */
 }
@@ -245,7 +261,12 @@ int i8259_setup_irq(int irq, struct irqaction * new)
 	*p = new;
 
 	if (!shared) {
-		unmask_irq(irq);
+		if (is_i8259_irq(irq))
+		    unmask_irq(irq);
+#if CONFIG_DDB5074 /* This has no business here  */
+		else
+		    nile4_enable_irq(irq_to_nile4(irq));
+#endif
 	}
 	restore_flags(flags);
 	return 0;
@@ -320,7 +341,7 @@ unsigned long probe_irq_on (void)
 	/* first, enable any unassigned (E)ISA irqs */
 	for (i = 15; i > 0; i--) {
 		if (!irq_action[i]) {
-			enable_irq(i);
+			i8259_enable_irq(i);
 			irqs |= (1 << i);
 		}
 	}
@@ -356,7 +377,7 @@ static int i8259_irq_cannonicalize(int irq)
 	return ((irq == 2) ? 9 : irq);
 }
 
-__initfunc(static void i8259_init(void))
+void __init i8259_init(void)
 {
 	/* Init master interrupt controller */
 	outb(0x11, 0x20); /* Start init sequence */
@@ -376,7 +397,7 @@ __initfunc(static void i8259_init(void))
 	outb(cached_21, 0x21);
 }
 
-__initfunc(void init_IRQ(void))
+void __init init_IRQ(void)
 {
 	irq_cannonicalize = i8259_irq_cannonicalize;
 	/* i8259_init(); */

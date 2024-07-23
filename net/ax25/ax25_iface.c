@@ -14,7 +14,6 @@
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -40,18 +39,18 @@ static struct protocol_struct {
 	struct protocol_struct *next;
 	unsigned int pid;
 	int (*func)(struct sk_buff *, ax25_cb *);
-} *protocol_list = NULL;
+} *protocol_list;
 
 static struct linkfail_struct {
 	struct linkfail_struct *next;
 	void (*func)(ax25_cb *, int);
-} *linkfail_list = NULL;
+} *linkfail_list;
 
 static struct listen_struct {
 	struct listen_struct *next;
 	ax25_address  callsign;
-	struct device *dev;
-} *listen_list = NULL;
+	struct net_device *dev;
+} *listen_list;
 
 int ax25_protocol_register(unsigned int pid, int (*func)(struct sk_buff *, ax25_cb *))
 {
@@ -168,7 +167,7 @@ void ax25_linkfail_release(void (*func)(ax25_cb *, int))
 	restore_flags(flags);
 }
 
-int ax25_listen_register(ax25_address *callsign, struct device *dev)
+int ax25_listen_register(ax25_address *callsign, struct net_device *dev)
 {
 	struct listen_struct *listen;
 	unsigned long flags;
@@ -193,7 +192,7 @@ int ax25_listen_register(ax25_address *callsign, struct device *dev)
 	return 1;
 }
 
-void ax25_listen_release(ax25_address *callsign, struct device *dev)
+void ax25_listen_release(ax25_address *callsign, struct net_device *dev)
 {
 	struct listen_struct *s, *listen = listen_list;
 	unsigned long flags;
@@ -237,7 +236,7 @@ int (*ax25_protocol_function(unsigned int pid))(struct sk_buff *, ax25_cb *)
 	return NULL;
 }
 
-int ax25_listen_mine(ax25_address *callsign, struct device *dev)
+int ax25_listen_mine(ax25_address *callsign, struct net_device *dev)
 {
 	struct listen_struct *listen;
 
@@ -267,4 +266,3 @@ int ax25_protocol_is_registered(unsigned int pid)
 	return 0;
 }
 
-#endif

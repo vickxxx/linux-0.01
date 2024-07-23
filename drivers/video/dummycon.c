@@ -20,12 +20,15 @@
 #if defined(__arm__)
 #define DUMMY_COLUMNS	ORIG_VIDEO_COLS
 #define DUMMY_ROWS	ORIG_VIDEO_LINES
+#elif defined(__hppa__)
+#define DUMMY_COLUMNS	80	/* fixme ! (mine uses 160x64 at 1280x1024) */
+#define DUMMY_ROWS	25
 #else
 #define DUMMY_COLUMNS	80
 #define DUMMY_ROWS	25
 #endif
 
-__initfunc(static const char *dummycon_startup(void))
+static const char *dummycon_startup(void)
 {
     return "dummy device";
 }
@@ -45,26 +48,27 @@ static int dummycon_dummy(void)
     return 0;
 }
 
+#define DUMMY	(void *)dummycon_dummy
+
 /*
  *  The console `switch' structure for the dummy console
  *
  *  Most of the operations are dummies.
  */
 
-struct consw dummy_con = {
-    dummycon_startup, dummycon_init,
-    (void *)dummycon_dummy,	/* con_deinit */
-    (void *)dummycon_dummy,	/* con_clear */
-    (void *)dummycon_dummy,	/* con_putc */
-    (void *)dummycon_dummy,	/* con_putcs */
-    (void *)dummycon_dummy,	/* con_cursor */
-    (void *)dummycon_dummy,	/* con_scroll */
-    (void *)dummycon_dummy,	/* con_bmove */
-    (void *)dummycon_dummy,	/* con_switch */
-    (void *)dummycon_dummy,	/* con_blank */
-    (void *)dummycon_dummy,	/* con_font_op */
-    (void *)dummycon_dummy,	/* con_set_palette */
-    (void *)dummycon_dummy,	/* con_scrolldelta */
-    NULL,			/* con_set_origin */
-    NULL,			/* con_save_screen */
+const struct consw dummy_con = {
+    con_startup:	dummycon_startup,
+    con_init:		dummycon_init,
+    con_deinit:		DUMMY,
+    con_clear:		DUMMY,
+    con_putc:		DUMMY,
+    con_putcs:		DUMMY,
+    con_cursor:		DUMMY,
+    con_scroll:		DUMMY,
+    con_bmove:		DUMMY,
+    con_switch:		DUMMY,
+    con_blank:		DUMMY,
+    con_font_op:	DUMMY,
+    con_set_palette:	DUMMY,
+    con_scrolldelta:	DUMMY,
 };

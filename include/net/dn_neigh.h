@@ -7,7 +7,7 @@
  */
 struct dn_neigh {
         struct neighbour n;
-        unsigned char addr[ETH_ALEN];
+	dn_address addr;
         unsigned long flags;
 #define DN_NDFLAG_R1    0x0001 /* Router L1      */
 #define DN_NDFLAG_R2    0x0002 /* Router L2      */
@@ -19,10 +19,10 @@ struct dn_neigh {
 extern void dn_neigh_init(void);
 extern void dn_neigh_cleanup(void);
 extern struct neighbour *dn_neigh_lookup(struct neigh_table *tbl, void *ptr);
-extern void dn_neigh_router_hello(struct sk_buff *skb);
-extern void dn_neigh_endnode_hello(struct sk_buff *skb);
+extern int dn_neigh_router_hello(struct sk_buff *skb);
+extern int dn_neigh_endnode_hello(struct sk_buff *skb);
 extern void dn_neigh_pointopoint_hello(struct sk_buff *skb);
-extern int dn_neigh_elist(struct device *dev, unsigned char *ptr, int n);
+extern int dn_neigh_elist(struct net_device *dev, unsigned char *ptr, int n);
 
 extern struct neigh_table dn_neigh_table;
 

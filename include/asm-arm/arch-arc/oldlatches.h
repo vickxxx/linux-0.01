@@ -1,19 +1,18 @@
 /*
- * linux/include/asm-arm/arch-arc/oldlatches.h
+ *  linux/include/asm-arm/arch-arc/oldlatches.h
  *
- * Copyright (C) 1996 Russell King, Dave Gilbert
+ *  Copyright (C) 1996 Russell King, Dave Gilbert
  *
- * Dummy oldlatches.h
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  *
- * Modifications:
- *  04-04-1998	PJB/RMK	Merged arc and a5k versions
+ *  Modifications:
+ *   04-04-1998	PJB/RMK	Merged arc and a5k versions
  */
 #ifndef _ASM_ARCH_OLDLATCH_H
 #define _ASM_ARCH_OLDLATCH_H
 
-#include <linux/config.h>
-
-#if defined(CONFIG_ARCH_ARC)
 #define LATCHA_FDSEL0    (1<<0)
 #define LATCHA_FDSEL1    (1<<1)
 #define LATCHA_FDSEL2    (1<<2)
@@ -34,14 +33,5 @@ void oldlatch_bupdate(unsigned char mask,unsigned char newdata);
 /* newval=(oldval & mask)|newdata */
 void oldlatch_aupdate(unsigned char mask,unsigned char newdata);
 
-void oldlatch_init(void);
-
-#elif defined(CONFIG_ARCH_A5K)
-
-#ifdef __need_oldlatches
-#error "Old latches not present in this (a5k) machine"
-#endif
-
-#endif
 #endif
 

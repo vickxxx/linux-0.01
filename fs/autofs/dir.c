@@ -12,29 +12,10 @@
 
 #include "autofs_i.h"
 
-static int autofs_dir_readdir(struct file *filp,
-			       void *dirent, filldir_t filldir)
-{
-	struct inode *inode=filp->f_dentry->d_inode;
-
-	switch((unsigned long) filp->f_pos)
-	{
-	case 0:
-		if (filldir(dirent, ".", 1, 0, inode->i_ino) < 0)
-			return 0;
-		filp->f_pos++;
-		/* fall through */
-	case 1:
-		if (filldir(dirent, "..", 2, 1, AUTOFS_ROOT_INO) < 0)
-			return 0;
-		filp->f_pos++;
-		/* fall through */
-	}
-	return 1;
-}
-
 /*
- * No entries except for "." and "..", both of which are handled by the VFS layer
+ * No entries except for "." and "..", both of which are handled by the VFS
+ * layer. So all children are negative and dcache-based versions of operations
+ * are OK.
  */
 static struct dentry *autofs_dir_lookup(struct inode *dir,struct dentry *dentry)
 {
@@ -42,44 +23,12 @@ static struct dentry *autofs_dir_lookup(struct inode *dir,struct dentry *dentry)
 	return NULL;
 }
 
-static struct file_operations autofs_dir_operations = {
-	NULL,			/* llseek */
-	NULL,			/* read */
-	NULL,			/* write */
-	autofs_dir_readdir,	/* readdir */
-	NULL,			/* poll */
-	NULL,			/* ioctl */
-	NULL,			/* mmap */
-	NULL,			/* open */
-	NULL,			/* flush */
-	NULL,			/* release */
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
+struct file_operations autofs_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	dcache_readdir,
 };
 
 struct inode_operations autofs_dir_inode_operations = {
-	&autofs_dir_operations,	/* file operations */
-	NULL,			/* create */
-	autofs_dir_lookup,	/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+	lookup:		autofs_dir_lookup,
 };
 

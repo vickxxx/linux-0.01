@@ -31,56 +31,27 @@
 /* To have statistics (just packets sent) define this */
 
 #include <linux/config.h>
-#include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/sched.h>
-#include <linux/types.h>
-#include <linux/fcntl.h>
-#include <linux/interrupt.h>
-#include <linux/ptrace.h>
-#include <linux/ioport.h>
-#include <linux/in.h>
-#include <linux/malloc.h>
-#include <linux/string.h>
-#include <linux/init.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-#include <linux/errno.h>
-
+#include <linux/kernel.h>
 #include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
+#include <linux/init.h>
 
-static int dummy_xmit(struct sk_buff *skb, struct device *dev);
-static struct net_device_stats *dummy_get_stats(struct device *dev);
-
-static int dummy_open(struct device *dev)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int dummy_close(struct device *dev)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
-}
+static int dummy_xmit(struct sk_buff *skb, struct net_device *dev);
+static struct net_device_stats *dummy_get_stats(struct net_device *dev);
 
 /* fake multicast ability */
-static void set_multicast_list(struct device *dev)
+static void set_multicast_list(struct net_device *dev)
 {
 }
 
 #ifdef CONFIG_NET_FASTROUTE
-static int dummy_accept_fastpath(struct device *dev, struct dst_entry *dst)
+static int dummy_accept_fastpath(struct net_device *dev, struct dst_entry *dst)
 {
 	return -1;
 }
 #endif
 
-__initfunc(int dummy_init(struct device *dev))
+static int __init dummy_init(struct net_device *dev)
 {
 	/* Initialize the device structure. */
 	dev->hard_start_xmit	= dummy_xmit;
@@ -91,8 +62,6 @@ __initfunc(int dummy_init(struct device *dev))
 	memset(dev->priv, 0, sizeof(struct net_device_stats));
 	dev->get_stats	= dummy_get_stats;
 
-	dev->open = dummy_open;
-	dev->stop = dummy_close;
 	dev->set_multicast_list = set_multicast_list;
 
 	/* Fill in the fields of the device structure with ethernet-generic values. */
@@ -107,44 +76,34 @@ __initfunc(int dummy_init(struct device *dev))
 	return 0;
 }
 
-static int dummy_xmit(struct sk_buff *skb, struct device *dev)
+static int dummy_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_device_stats *stats;
-	dev_kfree_skb(skb);
 
 	stats = (struct net_device_stats *)dev->priv;
 	stats->tx_packets++;
 	stats->tx_bytes+=skb->len;
 
+	dev_kfree_skb(skb);
 	return 0;
 }
 
-static struct net_device_stats *dummy_get_stats(struct device *dev)
+static struct net_device_stats *dummy_get_stats(struct net_device *dev)
 {
-	struct net_device_stats *stats = (struct net_device_stats *) dev->priv;
-	return stats;
+	return dev->priv;
 }
 
-#ifdef MODULE
+static struct net_device dev_dummy;
 
-__initfunc(static int dummy_probe(struct device *dev))
+static int __init dummy_init_module(void)
 {
-	dummy_init(dev);
-	return 0;
-}
+	int err;
 
-static char dummy_name[16];
+	dev_dummy.init = dummy_init;
+	SET_MODULE_OWNER(&dev_dummy);
 
-static struct device dev_dummy = {
-		dummy_name, 	/* Needs to be writeable */
-		0, 0, 0, 0,
-	 	0x0, 0,
-	 	0, 0, 0, NULL, dummy_probe };
-
-int init_module(void)
-{
 	/* Find a name for this unit */
-	int err=dev_alloc_name(&dev_dummy,"dummy%d");
+	err=dev_alloc_name(&dev_dummy,"dummy%d");
 	if(err<0)
 		return err;
 	if (register_netdev(&dev_dummy) != 0)
@@ -152,10 +111,14 @@ int init_module(void)
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit dummy_cleanup_module(void)
 {
 	unregister_netdev(&dev_dummy);
 	kfree(dev_dummy.priv);
-	dev_dummy.priv = NULL;
+
+	memset(&dev_dummy, 0, sizeof(dev_dummy));
+	dev_dummy.init = dummy_init;
 }
-#endif /* MODULE */
+
+module_init(dummy_init_module);
+module_exit(dummy_cleanup_module);

@@ -93,7 +93,7 @@ static int tty_drivers_read_proc(char *page, char **start, off_t off,
 		*eof = 1;
 	if (off >= len+begin)
 		return 0;
-	*start = page + (begin-off);
+	*start = page + (off-begin);
 	return ((count < begin+len-off) ? count : begin+len-off);
 }
 
@@ -123,7 +123,7 @@ static int tty_ldiscs_read_proc(char *page, char **start, off_t off,
 		*eof = 1;
 	if (off >= len+begin)
 		return 0;
-	*start = page + (begin-off);
+	*start = page + (off-begin);
 	return ((count < begin+len-off) ? count : begin+len-off);
 }
 
@@ -161,29 +161,21 @@ void proc_tty_unregister_driver(struct tty_driver *driver)
 	if (!ent)
 		return;
 		
-	proc_unregister(proc_tty_driver, ent->low_ino);
+	remove_proc_entry(driver->driver_name, proc_tty_driver);
 	
 	driver->proc_entry = 0;
-	kfree(ent);
 }
 
 /*
  * Called by proc_root_init() to initialize the /proc/tty subtree
  */
-__initfunc(void proc_tty_init(void))
+void __init proc_tty_init(void)
 {
-	struct proc_dir_entry *ent;
-	
-	ent = create_proc_entry("tty", S_IFDIR, 0);
-	if (!ent)
+	if (!proc_mkdir("tty", 0))
 		return;
-	proc_tty_ldisc = create_proc_entry("tty/ldisc", S_IFDIR, 0);
-	proc_tty_driver = create_proc_entry("tty/driver", S_IFDIR, 0);
+	proc_tty_ldisc = proc_mkdir("tty/ldisc", 0);
+	proc_tty_driver = proc_mkdir("tty/driver", 0);
 
-	ent = create_proc_entry("tty/ldiscs", 0, 0);
-	ent->read_proc = tty_ldiscs_read_proc;
-
-	ent = create_proc_entry("tty/drivers", 0, 0);
-	ent->read_proc = tty_drivers_read_proc;
+	create_proc_read_entry("tty/ldiscs", 0, 0, tty_ldiscs_read_proc,NULL);
+	create_proc_read_entry("tty/drivers", 0, 0, tty_drivers_read_proc,NULL);
 }
-

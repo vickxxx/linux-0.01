@@ -15,7 +15,7 @@
  *
  *	Chris Beauregard August 9th, 1996
  *	- Rewrote /proc/mca
- *	
+ *
  *	Chris Beauregard January 7th, 1997
  *	- Added basic NMI-processing
  *	- Added more information to mca_info structure
@@ -29,8 +29,15 @@
  *	David Weinehall March 24th, 1999
  *	- Fixed the output of 'Driver Installed' in /proc/mca/pos
  *	- Made the Integrated Video & SCSI show up even if they have id 0000
+ *
+ *	Alexander Viro November 9th, 1999
+ *	- Switched to regular procfs methods
+ *
+ *	Alfred Arnold & David Weinehall August 23rd, 2000
+ *	- Added support for Planar POS-registers
  */
 
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -46,9 +53,10 @@
 #include <asm/uaccess.h>
 #include <linux/init.h>
 
-/* This structure holds MCA information. Each (plug-in) adapter has 
+/* This structure holds MCA information. Each (plug-in) adapter has
  * eight POS registers. Then the machine may have integrated video and
  * SCSI subsystems, which also have eight POS registers.
+ * Finally, the motherboard (planar) has got POS-registers.
  * Other miscellaneous information follows.
  */
 
@@ -88,7 +96,7 @@ struct MCA_info {
 /* The mca_info structure pointer. If MCA bus is present, the function
  * mca_probe() is invoked. The function puts motherboard, then all
  * adapters into setup mode, allocates and fills an MCA_info structure,
- * and points this pointer to the structure. Otherwise the pointer 
+ * and points this pointer to the structure. Otherwise the pointer
  * is set to zero.
  */
 
@@ -105,52 +113,7 @@ static struct MCA_info* mca_info = NULL;
 /*--------------------------------------------------------------------*/
 
 #ifdef CONFIG_PROC_FS
-
 static void mca_do_proc_init(void);
-static int mca_default_procfn(char* buf, int slot);
-
-static ssize_t proc_mca_read(struct file*, char*, size_t, loff_t *);
-
-static struct file_operations proc_mca_operations = {
-	NULL,			/* llseek */
-	proc_mca_read,		/* read */
-	NULL,			/* write */
-	NULL,			/* readdir */
-	NULL,			/* poll */
-	NULL,			/* ioctl */
-	NULL,			/* mmap */
-	NULL,			/* open */
-	NULL,			/* flush */
-	NULL,			/* release */
-	NULL,			/* fsync */
-	NULL,			/* fascync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-	NULL			/* lock */
-};
-
-static struct inode_operations proc_mca_inode_operations = {
-	&proc_mca_operations,	/* default file-ops */
-	NULL,			/* create */
-	NULL,			/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
-};
 #endif
 
 /*--------------------------------------------------------------------*/
@@ -210,7 +173,19 @@ static void mca_configure_adapter_status(int slot) {
 
 /*--------------------------------------------------------------------*/
 
-__initfunc(void mca_init(void))
+struct resource mca_standard_resources[] = {
+	{ "system control port B (MCA)", 0x60, 0x60 },
+	{ "arbitration (MCA)", 0x90, 0x90 },
+	{ "card Select Feedback (MCA)", 0x91, 0x91 },
+	{ "system Control port A (MCA)", 0x92, 0x92 },
+	{ "system board setup (MCA)", 0x94, 0x94 },
+	{ "POS (MCA)", 0x96, 0x97 },
+	{ "POS (MCA)", 0x100, 0x107 }
+};
+
+#define MCA_STANDARD_RESOURCES	(sizeof(mca_standard_resources)/sizeof(struct resource))
+
+void __init mca_init(void)
 {
 	unsigned int i, j;
 	unsigned long flags;
@@ -223,7 +198,7 @@ __initfunc(void mca_init(void))
 	 */
 
 	/* Make sure the MCA bus is present */
-	
+
 	if(!MCA_bus)
 		return;
 	printk("Micro Channel bus detected.\n");
@@ -245,7 +220,16 @@ __initfunc(void mca_init(void))
 
 	outb_p(0, MCA_ADAPTER_SETUP_REG);
 
-	/* Put motherboard into video setup mode, read integrated video 
+	/* Read motherboard POS registers */
+
+	outb_p(0x7f, MCA_MOTHERBOARD_SETUP_REG);
+	mca_info->slot[MCA_MOTHERBOARD].name[0] = 0;
+	for(j=0; j<8; j++) {
+		mca_info->slot[MCA_MOTHERBOARD].pos[j] = inb_p(MCA_POS_REG(j));
+	}
+	mca_configure_adapter_status(MCA_MOTHERBOARD);
+
+	/* Put motherboard into video setup mode, read integrated video
 	 * POS registers, and turn motherboard setup off.
 	 */
 
@@ -271,7 +255,7 @@ __initfunc(void mca_init(void))
 	outb_p(0xf7, MCA_MOTHERBOARD_SETUP_REG);
 	mca_info->slot[MCA_INTEGSCSI].name[0] = 0;
 	for(j=0; j<8; j++) {
-		if((mca_info->slot[MCA_INTEGSCSI].pos[j] = inb_p(MCA_POS_REG(j))) != 0xff) 
+		if((mca_info->slot[MCA_INTEGSCSI].pos[j] = inb_p(MCA_POS_REG(j))) != 0xff)
 		{
 			/* 0xff all across means no device. 0x00 means
 			 * something's broken, but a device is probably there.
@@ -285,17 +269,17 @@ __initfunc(void mca_init(void))
 			mca_info->which_scsi = 0xf7;
 		}
 	}
-	if(!mca_info->which_scsi) { 
+	if(!mca_info->which_scsi) {
 
 		/* Didn't find it at 0xf7, try somewhere else... */
 		mca_info->which_scsi = 0xfd;
 
 		outb_p(0xfd, MCA_MOTHERBOARD_SETUP_REG);
-		for(j=0; j<8; j++) 
+		for(j=0; j<8; j++)
 			mca_info->slot[MCA_INTEGSCSI].pos[j] = inb_p(MCA_POS_REG(j));
 	}
 	mca_configure_adapter_status(MCA_INTEGSCSI);
-	
+
 	/* Turn off motherboard setup */
 
 	outb_p(0xff, MCA_MOTHERBOARD_SETUP_REG);
@@ -319,13 +303,8 @@ __initfunc(void mca_init(void))
 
 	restore_flags(flags);
 
-	request_region(0x60,0x01,"system control port B (MCA)");
-	request_region(0x90,0x01,"arbitration (MCA)");
-	request_region(0x91,0x01,"card Select Feedback (MCA)");
-	request_region(0x92,0x01,"system Control port A (MCA)");
-	request_region(0x94,0x01,"system board setup (MCA)");
-	request_region(0x96,0x02,"POS (MCA)");
-	request_region(0x100,0x08,"POS (MCA)");
+	for (i = 0; i < MCA_STANDARD_RESOURCES; i++)
+		request_resource(&ioport_resource, mca_standard_resources + i);
 
 #ifdef CONFIG_PROC_FS
 	mca_do_proc_init();
@@ -344,6 +323,9 @@ static void mca_handle_nmi_slot(int slot, int check_flag)
 			mca_info->slot[slot].name);
 	} else if(slot == MCA_INTEGVIDEO) {
 		printk("NMI: caused by MCA integrated video adapter (%s)\n",
+			mca_info->slot[slot].name);
+	} else if(slot == MCA_MOTHERBOARD) {
+		printk("NMI: caused by motherboard (%s)\n",
 			mca_info->slot[slot].name);
 	}
 
@@ -397,6 +379,19 @@ void mca_handle_nmi(void)
 
 /*--------------------------------------------------------------------*/
 
+/**
+ *	mca_find_adapter - scan for adapters
+ *	@id:	MCA identification to search for
+ *	@start:	starting slot
+ *
+ *	Search the MCA configuration for adapters matching the 16bit
+ *	ID given. The first time it should be called with start as zero
+ *	and then further calls made passing the return value of the
+ *	previous call until %MCA_NOTFOUND is returned.
+ *
+ *	Disabled adapters are not reported.
+ */
+
 int mca_find_adapter(int id, int start)
 {
 	if(mca_info == NULL || id == 0xffff) {
@@ -425,9 +420,26 @@ int mca_find_adapter(int id, int start)
 	return MCA_NOTFOUND;
 } /* mca_find_adapter() */
 
+EXPORT_SYMBOL(mca_find_adapter);
+
 /*--------------------------------------------------------------------*/
 
-int mca_find_unused_adapter(int id, int start) 
+/**
+ *	mca_find_unused_adapter - scan for unused adapters
+ *	@id:	MCA identification to search for
+ *	@start:	starting slot
+ *
+ *	Search the MCA configuration for adapters matching the 16bit
+ *	ID given. The first time it should be called with start as zero
+ *	and then further calls made passing the return value of the
+ *	previous call until %MCA_NOTFOUND is returned.
+ *
+ *	Adapters that have been claimed by drivers and those that
+ *	are disabled are not reported. This function thus allows a driver
+ *	to scan for further cards when some may already be driven.
+ */
+
+int mca_find_unused_adapter(int id, int start)
 {
 	if(mca_info == NULL || id == 0xffff) {
 		return MCA_NOTFOUND;
@@ -454,20 +466,45 @@ int mca_find_unused_adapter(int id, int start)
 	}
 
 	return MCA_NOTFOUND;
-} /* mca_find_unused_adapter() */	
+} /* mca_find_unused_adapter() */
+
+EXPORT_SYMBOL(mca_find_unused_adapter);
 
 /*--------------------------------------------------------------------*/
 
-unsigned char mca_read_stored_pos(int slot, int reg) 
+/**
+ *	mca_read_stored_pos - read POS register from boot data
+ *	@slot: slot number to read from
+ *	@reg:  register to read from
+ *
+ *	Fetch a POS value that was stored at boot time by the kernel
+ *	when it scanned the MCA space. The register value is returned.
+ *	Missing or invalid registers report 0.
+ */
+
+unsigned char mca_read_stored_pos(int slot, int reg)
 {
 	if(slot < 0 || slot >= MCA_NUMADAPTERS || mca_info == NULL) return 0;
 	if(reg < 0 || reg >= 8) return 0;
 	return mca_info->slot[slot].pos[reg];
 } /* mca_read_stored_pos() */
 
+EXPORT_SYMBOL(mca_read_stored_pos);
+
 /*--------------------------------------------------------------------*/
 
-unsigned char mca_read_pos(int slot, int reg) 
+/**
+ *	mca_read_pos - read POS register from card
+ *	@slot: slot number to read from
+ *	@reg:  register to read from
+ *
+ *	Fetch a POS value directly from the hardware to obtain the
+ *	current value. This is much slower than mca_read_stored_pos and
+ *	may not be invoked from interrupt context. It handles the
+ *	deep magic required for onboard devices transparently.
+ */
+
+unsigned char mca_read_pos(int slot, int reg)
 {
 	unsigned int byte = 0;
 	unsigned long flags;
@@ -502,6 +539,14 @@ unsigned char mca_read_pos(int slot, int reg)
 
 		byte = inb_p(MCA_POS_REG(reg));
 		outb_p(0xff, MCA_MOTHERBOARD_SETUP_REG);
+	} else if(slot == MCA_MOTHERBOARD) {
+
+		/* Disable adapter setup, enable motherboard setup */
+		outb_p(0, MCA_ADAPTER_SETUP_REG);
+		outb_p(0x7f, MCA_MOTHERBOARD_SETUP_REG);
+
+		byte = inb_p(MCA_POS_REG(reg));
+		outb_p(0xff, MCA_MOTHERBOARD_SETUP_REG);
 	} else if(slot < MCA_MAX_SLOT_NR) {
 
 		/* Make sure motherboard setup is off */
@@ -524,19 +569,35 @@ unsigned char mca_read_pos(int slot, int reg)
 	return byte;
 } /* mca_read_pos() */
 
+EXPORT_SYMBOL(mca_read_pos);
+
 /*--------------------------------------------------------------------*/
 
-/* Note that this a technically a Bad Thing, as IBM tech stuff says
- * you should only set POS values through their utilities.
- * However, some devices such as the 3c523 recommend that you write
- * back some data to make sure the configuration is consistent.
- * I'd say that IBM is right, but I like my drivers to work.
- * This function can't do checks to see if multiple devices end up
- * with the same resources, so you might see magic smoke if someone
- * screws up.
+/**
+ *	mca_write_pos - read POS register from card
+ *	@slot: slot number to read from
+ *	@reg:  register to read from
+ *	@byte: byte to write to the POS registers
+ *
+ *	Store a POS value directly from the hardware. You should not
+ *	normally need to use this function and should have a very good
+ *	knowledge of MCA bus before you do so. Doing this wrongly can
+ *	damage the hardware.
+ *
+ *	This function may not be used from interrupt context.
+ *
+ *	Note that this a technically a Bad Thing, as IBM tech stuff says
+ *	you should only set POS values through their utilities.
+ *	However, some devices such as the 3c523 recommend that you write
+ *	back some data to make sure the configuration is consistent.
+ *	I'd say that IBM is right, but I like my drivers to work.
+ *
+ *	This function can't do checks to see if multiple devices end up
+ *	with the same resources, so you might see magic smoke if someone
+ *	screws up.
  */
 
-void mca_write_pos(int slot, int reg, unsigned char byte) 
+void mca_write_pos(int slot, int reg, unsigned char byte)
 {
 	unsigned long flags;
 
@@ -567,9 +628,21 @@ void mca_write_pos(int slot, int reg, unsigned char byte)
 	mca_info->slot[slot].pos[reg] = byte;
 } /* mca_write_pos() */
 
+EXPORT_SYMBOL(mca_write_pos);
+
 /*--------------------------------------------------------------------*/
 
-void mca_set_adapter_name(int slot, char* name) 
+/**
+ *	mca_set_adapter_name - Set the description of the card
+ *	@slot: slot to name
+ *	@name: text string for the namen
+ *
+ *	This function sets the name reported via /proc for this
+ *	adapter slot. This is for user information only. Setting a
+ *	name deletes any previous name.
+ */
+
+void mca_set_adapter_name(int slot, char* name)
 {
 	if(mca_info == NULL) return;
 
@@ -585,6 +658,26 @@ void mca_set_adapter_name(int slot, char* name)
 	}
 }
 
+EXPORT_SYMBOL(mca_set_adapter_name);
+
+/**
+ *	mca_set_adapter_procfn - Set the /proc callback
+ *	@slot: slot to configure
+ *	@procfn: callback function to call for /proc
+ *	@dev: device information passed to the callback
+ *
+ *	This sets up an information callback for /proc/mca/slot?.  The
+ *	function is called with the buffer, slot, and device pointer (or
+ *	some equally informative context information, or nothing, if you
+ *	prefer), and is expected to put useful information into the
+ *	buffer.  The adapter name, ID, and POS registers get printed
+ *	before this is called though, so don't do it again.
+ *
+ *	This should be called with a %NULL @procfn when a module
+ *	unregisters, thus preventing kernel crashes and other such
+ *	nastiness.
+ */
+
 void mca_set_adapter_procfn(int slot, MCA_ProcFn procfn, void* dev)
 {
 	if(mca_info == NULL) return;
@@ -595,10 +688,32 @@ void mca_set_adapter_procfn(int slot, MCA_ProcFn procfn, void* dev)
 	}
 }
 
+EXPORT_SYMBOL(mca_set_adapter_procfn);
+
+/**
+ *	mca_is_adapter_used - check if claimed by driver
+ *	@slot:	slot to check
+ *
+ *	Returns 1 if the slot has been claimed by a driver
+ */
+
 int mca_is_adapter_used(int slot)
 {
 	return mca_info->slot[slot].driver_loaded;
 }
+
+EXPORT_SYMBOL(mca_is_adapter_used);
+
+/**
+ *	mca_mark_as_used - claim an MCA device
+ *	@slot:	slot to claim
+ *	FIXME:  should we make this threadsafe
+ *
+ *	Claim an MCA slot for a device driver. If the
+ *	slot is already taken the function returns 1,
+ *	if it is not taken it is claimed and 0 is
+ *	returned.
+ */
 
 int mca_mark_as_used(int slot)
 {
@@ -607,12 +722,31 @@ int mca_mark_as_used(int slot)
 	return 0;
 }
 
+EXPORT_SYMBOL(mca_mark_as_used);
+
+/**
+ *	mca_mark_as_unused - release an MCA device
+ *	@slot:	slot to claim
+ *
+ *	Release the slot for other drives to use.
+ */
+
 void mca_mark_as_unused(int slot)
 {
 	mca_info->slot[slot].driver_loaded = 0;
 }
- 
-char *mca_get_adapter_name(int slot) 
+
+EXPORT_SYMBOL(mca_mark_as_unused);
+
+/**
+ *	mca_get_adapter_name - get the adapter description
+ *	@slot:	slot to query
+ *
+ *	Return the adapter description if set. If it has not been
+ *	set or the slot is out range then return NULL.
+ */
+
+char *mca_get_adapter_name(int slot)
 {
 	if(mca_info == NULL) return 0;
 
@@ -622,6 +756,16 @@ char *mca_get_adapter_name(int slot)
 
 	return 0;
 }
+
+EXPORT_SYMBOL(mca_get_adapter_name);
+
+/**
+ *	mca_isadapter - check if the slot holds an adapter
+ *	@slot:	slot to query
+ *
+ *	Returns zero if the slot does not hold an adapter, non zero if
+ *	it does.
+ */
 
 int mca_isadapter(int slot)
 {
@@ -635,6 +779,17 @@ int mca_isadapter(int slot)
 	return 0;
 }
 
+EXPORT_SYMBOL(mca_isadapter);
+
+
+/**
+ *	mca_isadapter - check if the slot holds an adapter
+ *	@slot:	slot to query
+ *
+ *	Returns a non zero value if the slot holds an enabled adapter
+ *	and zero for any other case.
+ */
+
 int mca_isenabled(int slot)
 {
 	if(mca_info == NULL) return 0;
@@ -646,115 +801,67 @@ int mca_isenabled(int slot)
 	return 0;
 }
 
+EXPORT_SYMBOL(mca_isenabled);
+
 /*--------------------------------------------------------------------*/
 
 #ifdef CONFIG_PROC_FS
 
-int get_mca_info(char *buf) 
+int get_mca_info(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
 {
 	int i, j, len = 0;
 
-	if(MCA_bus && mca_info != NULL) 
-	{
+	if(MCA_bus && mca_info != NULL) {
 		/* Format POS registers of eight MCA slots */
 
-		for(i=0; i<MCA_MAX_SLOT_NR; i++) 
-		{
-			len += sprintf(buf+len, "Slot %d: ", i+1);
-			for(j=0; j<8; j++) 
-				len += sprintf(buf+len, "%02x ", mca_info->slot[i].pos[j]);
-			len += sprintf(buf+len, " %s\n", mca_info->slot[i].name);
+		for(i=0; i<MCA_MAX_SLOT_NR; i++) {
+			len += sprintf(page+len, "Slot %d: ", i+1);
+			for(j=0; j<8; j++)
+				len += sprintf(page+len, "%02x ", mca_info->slot[i].pos[j]);
+			len += sprintf(page+len, " %s\n", mca_info->slot[i].name);
 		}
 
 		/* Format POS registers of integrated video subsystem */
 
-		len += sprintf(buf+len, "Video : ");
-		for(j=0; j<8; j++) 
-			len += sprintf(buf+len, "%02x ", mca_info->slot[MCA_INTEGVIDEO].pos[j]);
-		len += sprintf(buf+len, " %s\n", mca_info->slot[MCA_INTEGVIDEO].name);
+		len += sprintf(page+len, "Video : ");
+		for(j=0; j<8; j++)
+			len += sprintf(page+len, "%02x ", mca_info->slot[MCA_INTEGVIDEO].pos[j]);
+		len += sprintf(page+len, " %s\n", mca_info->slot[MCA_INTEGVIDEO].name);
 
 		/* Format POS registers of integrated SCSI subsystem */
-	
-		len += sprintf(buf+len, "SCSI  : ");
+
+		len += sprintf(page+len, "SCSI  : ");
 		for(j=0; j<8; j++)
-			len += sprintf(buf+len, "%02x ", mca_info->slot[MCA_INTEGSCSI].pos[j]);
-		len += sprintf(buf+len, " %s\n", mca_info->slot[MCA_INTEGSCSI].name);
+			len += sprintf(page+len, "%02x ", mca_info->slot[MCA_INTEGSCSI].pos[j]);
+		len += sprintf(page+len, " %s\n", mca_info->slot[MCA_INTEGSCSI].name);
+
+		/* Format POS registers of motherboard */
+
+		len += sprintf(page+len, "Planar: ");
+		for(j=0; j<8; j++)
+			len += sprintf(page+len, "%02x ", mca_info->slot[MCA_MOTHERBOARD].pos[j]);
+		len += sprintf(page+len, " %s\n", mca_info->slot[MCA_MOTHERBOARD].name);
 	} else {
 		/* Leave it empty if MCA not detected - this should *never*
-		 * happen! 
+		 * happen!
 		 */
 	}
 
+	if (len <= off+count) *eof = 1;
+	*start = page + off;
+	len -= off;
+	if (len>count) len = count;
+	if (len<0) len = 0;
 	return len;
 }
 
-
 /*--------------------------------------------------------------------*/
 
-__initfunc(void mca_do_proc_init(void))
-{
-	int i;
-	struct proc_dir_entry* node = NULL;
-
-	if(mca_info == NULL) return;	/* Should never happen */
-
-	proc_register(&proc_mca, &(struct proc_dir_entry) {
-		PROC_MCA_REGISTERS, 3, "pos", S_IFREG|S_IRUGO,
-		1, 0, 0, 0, &proc_mca_inode_operations,});
-
-	proc_register(&proc_mca, &(struct proc_dir_entry) {
-		PROC_MCA_MACHINE, 7, "machine", S_IFREG|S_IRUGO,
-		1, 0, 0, 0, &proc_mca_inode_operations,});
-
-	/* Initialize /proc/mca entries for existing adapters */
-
-	for(i = 0; i < MCA_NUMADAPTERS; i++) {
-		mca_info->slot[i].procfn = 0;
-		mca_info->slot[i].dev = 0;
-
-		if(!mca_isadapter(i)) continue;
-
-		node = (struct proc_dir_entry *)kmalloc(sizeof(struct proc_dir_entry), GFP_KERNEL);
-
-		if(node == NULL) {
-			printk("Failed to allocate memory for MCA proc-entries!");
-			return;
-		}
-		memset(node, 0, sizeof(struct proc_dir_entry));
-
-		if(i < MCA_MAX_SLOT_NR) {
-			node->low_ino = PROC_MCA_SLOT + i;
-			node->namelen = sprintf(mca_info->slot[i].procname,
-				"slot%d", i+1);
-		} else if(i == MCA_INTEGVIDEO) {
-			node->low_ino = PROC_MCA_VIDEO;
-			node->namelen = sprintf(mca_info->slot[i].procname,
-				"video");
-		} else if(i == MCA_INTEGSCSI) {
-			node->low_ino = PROC_MCA_SCSI;
-			node->namelen = sprintf(mca_info->slot[i].procname,
-				"scsi");
-		}
-		node->name = mca_info->slot[i].procname;
-		node->mode = S_IFREG | S_IRUGO;
-		node->ops = &proc_mca_inode_operations;
-		proc_register(&proc_mca, node);
-	}
-
-} /* mca_do_proc_init() */
-
-/*--------------------------------------------------------------------*/
-
-int mca_default_procfn(char* buf, int slot) 
+static int mca_default_procfn(char* buf, struct MCA_adapter *p)
 {
 	int len = 0, i;
-
-	/* This really shouldn't happen... */
-
-	if(mca_info == NULL) {
-		*buf = 0;
-		return 0;
-	}
+	int slot = p - mca_info->slot;
 
 	/* Print out the basic information */
 
@@ -764,22 +871,24 @@ int mca_default_procfn(char* buf, int slot)
 		len += sprintf(buf+len, "Integrated SCSI Adapter\n");
 	} else if(slot == MCA_INTEGVIDEO) {
 		len += sprintf(buf+len, "Integrated Video Adapter\n");
+	} else if(slot == MCA_MOTHERBOARD) {
+		len += sprintf(buf+len, "Motherboard\n");
 	}
-	if(mca_info->slot[slot].name[0]) {
+	if(p->name[0]) {
 
 		/* Drivers might register a name without /proc handler... */
 
 		len += sprintf(buf+len, "Adapter Name: %s\n",
-			mca_info->slot[slot].name);
+			p->name);
 	} else {
 		len += sprintf(buf+len, "Adapter Name: Unknown\n");
 	}
 	len += sprintf(buf+len, "Id: %02x%02x\n",
-		mca_info->slot[slot].pos[1], mca_info->slot[slot].pos[0]);
+		p->pos[1], p->pos[0]);
 	len += sprintf(buf+len, "Enabled: %s\nPOS: ",
 		mca_isenabled(slot) ? "Yes" : "No");
 	for(i=0; i<8; i++) {
-		len += sprintf(buf+len, "%02x ", mca_info->slot[slot].pos[i]);
+		len += sprintf(buf+len, "%02x ", p->pos[i]);
 	}
 	len += sprintf(buf+len, "\nDriver Installed: %s",
 		mca_is_adapter_used(slot) ? "Yes" : "No");
@@ -789,111 +898,83 @@ int mca_default_procfn(char* buf, int slot)
 	return len;
 } /* mca_default_procfn() */
 
-static int get_mca_machine_info(char* buf) 
+static int get_mca_machine_info(char* page, char **start, off_t off,
+				 int count, int *eof, void *data)
 {
 	int len = 0;
 
-	len += sprintf(buf+len, "Model Id: 0x%x\n", machine_id);
-	len += sprintf(buf+len, "Submodel Id: 0x%x\n", machine_submodel_id);
-	len += sprintf(buf+len, "BIOS Revision: 0x%x\n", BIOS_revision);
+	len += sprintf(page+len, "Model Id: 0x%x\n", machine_id);
+	len += sprintf(page+len, "Submodel Id: 0x%x\n", machine_submodel_id);
+	len += sprintf(page+len, "BIOS Revision: 0x%x\n", BIOS_revision);
 
+	if (len <= off+count) *eof = 1;
+	*start = page + off;
+	len -= off;
+	if (len>count) len = count;
+	if (len<0) len = 0;
 	return len;
 }
 
-static int mca_fill(char* page, int pid, int type, char** start,
-	loff_t *offset, int length)
+static int mca_read_proc(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
 {
+	struct MCA_adapter *p = (struct MCA_adapter *)data;
 	int len = 0;
-	int slot = 0;
-
-	switch(type) {
-		case PROC_MCA_REGISTERS:
-			return get_mca_info(page);
-		case PROC_MCA_MACHINE:
-			return get_mca_machine_info(page);
-		case PROC_MCA_VIDEO:
-			slot = MCA_INTEGVIDEO;
-			break;
-		case PROC_MCA_SCSI:
-			slot = MCA_INTEGSCSI;
-			break;
-		default:
-			if(type < PROC_MCA_SLOT || type >= PROC_MCA_LAST) {
-				return -EBADF;
-			}
-			slot = type - PROC_MCA_SLOT;
-			break;
-	}
-
-	/* If we made it here, we better have a valid slot */
 
 	/* Get the standard info */
 
-	len = mca_default_procfn(page, slot);
+	len = mca_default_procfn(page, p);
 
 	/* Do any device-specific processing, if there is any */
 
-	if(mca_info->slot[slot].procfn) {
-		len += mca_info->slot[slot].procfn(page+len, slot,
-			mca_info->slot[slot].dev);
+	if(p->procfn) {
+		len += p->procfn(page+len, p-mca_info->slot, p->dev);
 	}
-
+	if (len <= off+count) *eof = 1;
+	*start = page + off;
+	len -= off;
+	if (len>count) len = count;
+	if (len<0) len = 0;
 	return len;
-} /* mca_fill() */
+} /* mca_read_proc() */
 
-/* Blatantly stolen from fs/proc/array.c, and thus is probably overkill */ 
+/*--------------------------------------------------------------------*/
 
-#define PROC_BLOCK_SIZE	(3*1024)
-
-static ssize_t proc_mca_read(struct file* file,
-	char* buf, size_t count, loff_t *ppos)
+void __init mca_do_proc_init(void)
 {
-	unsigned long page;
-	char *start;
-	int length;
-	int end;
-	unsigned int type, pid;
-	struct proc_dir_entry *dp;
-	struct inode *inode = file->f_dentry->d_inode;
+	int i;
+	struct proc_dir_entry *proc_mca;
+	struct proc_dir_entry* node = NULL;
+	struct MCA_adapter *p;
 
-	if(count < 0)
-		return -EINVAL;
-	if(count > PROC_BLOCK_SIZE)
-		count = PROC_BLOCK_SIZE;
-	if(!(page = __get_free_page(GFP_KERNEL)))
-		return -ENOMEM;
-	type = inode->i_ino;
-	pid = type >> 16;
-	type &= 0x0000ffff;
-	start = NULL;
-	dp = (struct proc_dir_entry *) inode->u.generic_ip;
-	length = mca_fill((char *) page, pid, type,
-			  &start, ppos, count);
-	if(length < 0) {
-		free_page(page);
-		return length;
-	}
-	if(start != NULL) {
-		/* We have had block-adjusting processing! */
+	if(mca_info == NULL) return;	/* Should never happen */
 
-		copy_to_user(buf, start, length);
-		*ppos += length;
-		count = length;
-	} else {
-		/* Static 4kB (or whatever) block capacity */
+	proc_mca = proc_mkdir("mca", &proc_root);
+	create_proc_read_entry("pos",0,proc_mca,get_mca_info,NULL);
+	create_proc_read_entry("machine",0,proc_mca,get_mca_machine_info,NULL);
 
-		if(*ppos >= length) {
-			free_page(page);
-			return 0;
+	/* Initialize /proc/mca entries for existing adapters */
+
+	for(i = 0; i < MCA_NUMADAPTERS; i++) {
+		p = &mca_info->slot[i];
+		p->procfn = 0;
+
+		if(i < MCA_MAX_SLOT_NR) sprintf(p->procname,"slot%d", i+1);
+		else if(i == MCA_INTEGVIDEO) sprintf(p->procname,"video");
+		else if(i == MCA_INTEGSCSI) sprintf(p->procname,"scsi");
+		else if(i == MCA_MOTHERBOARD) sprintf(p->procname,"planar");
+
+		if(!mca_isadapter(i)) continue;
+
+		node = create_proc_read_entry(p->procname, 0, proc_mca,
+						mca_read_proc, (void *)p);
+
+		if(node == NULL) {
+			printk("Failed to allocate memory for MCA proc-entries!");
+			return;
 		}
-		if(count + *ppos > length)
-			count = length - *ppos;
-		end = count + *ppos;
-		copy_to_user(buf, (char *) page + *ppos, count);
-		*ppos = end;
 	}
-	free_page(page);
-	return count;
-} /* proc_mca_read() */
+
+} /* mca_do_proc_init() */
 
 #endif

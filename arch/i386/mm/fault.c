@@ -16,10 +16,11 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/hardirq.h>
 
 extern void die(const char *,struct pt_regs *,long);
@@ -50,7 +51,8 @@ good_area:
 	start &= PAGE_MASK;
 
 	for (;;) {
-		handle_mm_fault(current,vma, start, 1);
+		if (handle_mm_fault(current->mm, vma, start, 1) <= 0)
+			goto bad_area;
 		if (!size)
 			break;
 		size--;
@@ -75,6 +77,19 @@ bad_area:
 	return 0;
 }
 
+extern spinlock_t console_lock, timerlist_lock;
+
+/*
+ * Unlock any spinlocks which will prevent us from getting the
+ * message out (timerlist_lock is aquired through the
+ * console unblank code)
+ */
+void bust_spinlocks(void)
+{
+	spin_lock_init(&console_lock);
+	spin_lock_init(&timerlist_lock);
+}
+
 asmlinkage void do_invalid_op(struct pt_regs *, unsigned long);
 extern unsigned long idt;
 
@@ -97,18 +112,33 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
 	unsigned long page;
 	unsigned long fixup;
 	int write;
+	siginfo_t info;
 
 	/* get the address */
 	__asm__("movl %%cr2,%0":"=r" (address));
 
 	tsk = current;
+
+	/*
+	 * We fault-in kernel-space virtual memory on-demand. The
+	 * 'reference' page table is init_mm.pgd.
+	 *
+	 * NOTE! We MUST NOT take any locks for this case. We may
+	 * be in an interrupt or a critical region, and should
+	 * only copy the information from the master page table,
+	 * nothing more.
+	 */
+	if (address >= TASK_SIZE)
+		goto vmalloc_fault;
+
 	mm = tsk->mm;
+	info.si_code = SEGV_MAPERR;
 
 	/*
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-	if (in_interrupt() || mm == &init_mm)
+	if (in_interrupt() || !mm)
 		goto no_context;
 
 	down(&mm->mmap_sem);
@@ -137,6 +167,7 @@ asmlinkage void do_page_fault(struct pt_regs *regs, unsigned long error_code)
  * we can handle it..
  */
 good_area:
+	info.si_code = SEGV_ACCERR;
 	write = 0;
 	switch (error_code & 3) {
 		default:	/* 3: write, present */
@@ -162,8 +193,18 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
-	if (!handle_mm_fault(tsk, vma, address, write))
+	switch (handle_mm_fault(mm, vma, address, write)) {
+	case 1:
+		tsk->min_flt++;
+		break;
+	case 2:
+		tsk->maj_flt++;
+		break;
+	case 0:
 		goto do_sigbus;
+	default:
+		goto out_of_memory;
+	}
 
 	/*
 	 * Did it hit the DOS screen memory VA from vm86 mode?
@@ -171,7 +212,7 @@ good_area:
 	if (regs->eflags & VM_MASK) {
 		unsigned long bit = (address - 0xA0000) >> PAGE_SHIFT;
 		if (bit < 32)
-			tsk->tss.screen_bitmap |= 1 << bit;
+			tsk->thread.screen_bitmap |= 1 << bit;
 	}
 	up(&mm->mmap_sem);
 	return;
@@ -183,12 +224,17 @@ good_area:
 bad_area:
 	up(&mm->mmap_sem);
 
+bad_area_nosemaphore:
 	/* User mode accesses just cause a SIGSEGV */
 	if (error_code & 4) {
-		tsk->tss.cr2 = address;
-		tsk->tss.error_code = error_code;
-		tsk->tss.trap_no = 14;
-		force_sig(SIGSEGV, tsk);
+		tsk->thread.cr2 = address;
+		tsk->thread.error_code = error_code;
+		tsk->thread.trap_no = 14;
+		info.si_signo = SIGSEGV;
+		info.si_errno = 0;
+		/* info.si_code has been set above */
+		info.si_addr = (void *)address;
+		force_sig_info(SIGSEGV, &info, tsk);
 		return;
 	}
 
@@ -216,30 +262,18 @@ no_context:
 /*
  * Oops. The kernel tried to access some bad page. We'll have to
  * terminate things with extreme prejudice.
- *
- * First we check if it was the bootup rw-test, though..
  */
-	if (boot_cpu_data.wp_works_ok < 0 &&
-	    address == PAGE_OFFSET && (error_code & 1)) {
-		boot_cpu_data.wp_works_ok = 1;
-		pg0[0] = pte_val(mk_pte(PAGE_OFFSET, PAGE_KERNEL));
-		local_flush_tlb();
-		/*
-		 * Beware: Black magic here. The printk is needed here to flush
-		 * CPU state on certain buggy processors.
-		 */
-		printk("Ok");
-		return;
-	}
+
+	bust_spinlocks();
 
 	if (address < PAGE_SIZE)
 		printk(KERN_ALERT "Unable to handle kernel NULL pointer dereference");
 	else
 		printk(KERN_ALERT "Unable to handle kernel paging request");
 	printk(" at virtual address %08lx\n",address);
-	__asm__("movl %%cr3,%0" : "=r" (page));
-	printk(KERN_ALERT "current->tss.cr3 = %08lx, %%cr3 = %08lx\n",
-		tsk->tss.cr3, page);
+	printk(" printing eip:\n");
+	printk("%08lx\n", regs->eip);
+	asm("movl %%cr3,%0":"=r" (page));
 	page = ((unsigned long *) __va(page))[address >> 22];
 	printk(KERN_ALERT "*pde = %08lx\n", page);
 	if (page & 1) {
@@ -255,6 +289,13 @@ no_context:
  * We ran out of memory, or some other thing happened to us that made
  * us unable to handle the page fault gracefully.
  */
+out_of_memory:
+	up(&mm->mmap_sem);
+	printk("VM: killing process %s\n", tsk->comm);
+	if (error_code & 4)
+		do_exit(SIGKILL);
+	goto no_context;
+
 do_sigbus:
 	up(&mm->mmap_sem);
 
@@ -262,12 +303,46 @@ do_sigbus:
 	 * Send a sigbus, regardless of whether we were in kernel
 	 * or user mode.
 	 */
-	tsk->tss.cr2 = address;
-	tsk->tss.error_code = error_code;
-	tsk->tss.trap_no = 14;
-	force_sig(SIGBUS, tsk);
+	tsk->thread.cr2 = address;
+	tsk->thread.error_code = error_code;
+	tsk->thread.trap_no = 14;
+	info.si_code = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_ADRERR;
+	info.si_addr = (void *)address;
+	force_sig_info(SIGBUS, &info, tsk);
 
 	/* Kernel mode? Handle exceptions or die */
 	if (!(error_code & 4))
 		goto no_context;
+	return;
+
+vmalloc_fault:
+	{
+		/*
+		 * Synchronize this task's top level page-table
+		 * with the 'reference' page table.
+		 */
+		int offset = __pgd_offset(address);
+		pgd_t *pgd, *pgd_k;
+		pmd_t *pmd, *pmd_k;
+
+		pgd = tsk->active_mm->pgd + offset;
+		pgd_k = init_mm.pgd + offset;
+
+		if (!pgd_present(*pgd)) {
+			if (!pgd_present(*pgd_k))
+				goto bad_area_nosemaphore;
+			set_pgd(pgd, *pgd_k);
+			return;
+		}
+
+		pmd = pmd_offset(pgd, address);
+		pmd_k = pmd_offset(pgd_k, address);
+
+		if (pmd_present(*pmd) || !pmd_present(*pmd_k))
+			goto bad_area_nosemaphore;
+		set_pmd(pmd, *pmd_k);
+		return;
+	}
 }

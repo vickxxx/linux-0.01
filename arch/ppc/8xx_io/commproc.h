@@ -18,6 +18,7 @@
 #ifndef __CPM_8XX__
 #define __CPM_8XX__
 
+#include <linux/config.h>
 #include <asm/8xx_immap.h>
 
 /* CPM Command register.
@@ -32,6 +33,7 @@
 #define CPM_CR_INIT_TRX		((ushort)0x0000)
 #define CPM_CR_INIT_RX		((ushort)0x0001)
 #define CPM_CR_INIT_TX		((ushort)0x0002)
+#define CPM_CR_HUNT_MODE	((ushort)0x0003)
 #define CPM_CR_STOP_TX		((ushort)0x0004)
 #define CPM_CR_RESTART_TX	((ushort)0x0006)
 #define CPM_CR_SET_GADDR	((ushort)0x0008)
@@ -78,6 +80,7 @@ typedef struct cpm_buf_desc {
 #define BD_SC_READY	((ushort)0x8000)	/* Transmit is ready */
 #define BD_SC_WRAP	((ushort)0x2000)	/* Last buffer descriptor */
 #define BD_SC_INTRPT	((ushort)0x1000)	/* Interrupt on change */
+#define BD_SC_LAST	((ushort)0x0800)	/* Last buffer in frame */
 #define BD_SC_CM	((ushort)0x0200)	/* Continous mode */
 #define BD_SC_ID	((ushort)0x0100)	/* Rec'd too many idles */
 #define BD_SC_P		((ushort)0x0100)	/* xmt preamble */
@@ -90,6 +93,7 @@ typedef struct cpm_buf_desc {
 /* Parameter RAM offsets.
 */
 #define PROFF_SCC1	((uint)0x0000)
+#define PROFF_IIC	((uint)0x0080)
 #define PROFF_SCC2	((uint)0x0100)
 #define PROFF_SCC3	((uint)0x0200)
 #define PROFF_SMC1	((uint)0x0280)
@@ -97,6 +101,7 @@ typedef struct cpm_buf_desc {
 #define PROFF_SMC2	((uint)0x0380)
 
 /* Define enough so I can at least use the serial port as a UART.
+ * The MBX uses SMC1 as the host serial port.
  */
 typedef struct smc_uart {
 	ushort	smc_rbase;	/* Rx Buffer descriptor base address */
@@ -136,14 +141,59 @@ typedef struct smc_uart {
 #define SMCMR_SM_TRANS	((ushort)0x0030)
 #define SMCMR_SM_MASK	((ushort)0x0030)
 #define SMCMR_PM_EVEN	((ushort)0x0100)	/* Even parity, else odd */
+#define SMCMR_REVD	SMCMR_PM_EVEN
 #define SMCMR_PEN	((ushort)0x0200)	/* Parity enable */
+#define SMCMR_BS	SMCMR_PEN
 #define SMCMR_SL	((ushort)0x0400)	/* Two stops, else one */
 #define SMCR_CLEN_MASK	((ushort)0x7800)	/* Character length */
 #define smcr_mk_clen(C)	(((C) << 11) & SMCR_CLEN_MASK)
 
+/* SMC2 as Centronics parallel printer.  It is half duplex, in that
+ * it can only receive or transmit.  The parameter ram values for
+ * each direction are either unique or properly overlap, so we can
+ * include them in one structure.
+ */
+typedef struct smc_centronics {
+	ushort	scent_rbase;
+	ushort	scent_tbase;
+	u_char	scent_cfcr;
+	u_char	scent_smask;
+	ushort	scent_mrblr;
+	uint	scent_rstate;
+	uint	scent_r_ptr;
+	ushort	scent_rbptr;
+	ushort	scent_r_cnt;
+	uint	scent_rtemp;
+	uint	scent_tstate;
+	uint	scent_t_ptr;
+	ushort	scent_tbptr;
+	ushort	scent_t_cnt;
+	uint	scent_ttemp;
+	ushort	scent_max_sl;
+	ushort	scent_sl_cnt;
+	ushort	scent_character1;
+	ushort	scent_character2;
+	ushort	scent_character3;
+	ushort	scent_character4;
+	ushort	scent_character5;
+	ushort	scent_character6;
+	ushort	scent_character7;
+	ushort	scent_character8;
+	ushort	scent_rccm;
+	ushort	scent_rccr;
+} smc_cent_t;
+
+/* Centronics Status Mask Register.
+*/
+#define SMC_CENT_F	((u_char)0x08)
+#define SMC_CENT_PE	((u_char)0x04)
+#define SMC_CENT_S	((u_char)0x02)
+
 /* SMC Event and Mask register.
 */
-#define	SMCM_TXE	((unsigned char)0x10)
+#define	SMCM_BRKE	((unsigned char)0x40)	/* When in UART Mode */
+#define	SMCM_BRK	((unsigned char)0x10)	/* When in UART Mode */
+#define	SMCM_TXE	((unsigned char)0x10)	/* When in Transparent Mode */
 #define	SMCM_BSY	((unsigned char)0x04)
 #define	SMCM_TX		((unsigned char)0x02)
 #define	SMCM_RX		((unsigned char)0x01)
@@ -329,6 +379,7 @@ typedef struct scc_enet {
 	ushort	sen_taddrl;	/* temp address (LSB) */
 } scc_enet_t;
 
+#ifdef CONFIG_MBX
 /* Bits in parallel I/O port registers that have to be set/cleared
  * to configure the pins for SCC1 use.  The TCLK and RCLK seem unique
  * to the MBX860 board.  Any two of the four available clocks could be
@@ -348,6 +399,140 @@ typedef struct scc_enet {
  */
 #define SICR_ENET_MASK	((uint)0x000000ff)
 #define SICR_ENET_CLKRT	((uint)0x0000003d)
+#endif
+
+#ifdef CONFIG_RPXLITE
+/* This ENET stuff is for the MPC850 with ethernet on SCC2.  Some of
+ * this may be unique to the RPX-Lite configuration.
+ * Note TENA is on Port B.
+ */
+#define PA_ENET_RXD	((ushort)0x0004)
+#define PA_ENET_TXD	((ushort)0x0008)
+#define PA_ENET_TCLK	((ushort)0x0200)
+#define PA_ENET_RCLK	((ushort)0x0800)
+#define PB_ENET_TENA	((uint)0x00002000)
+#define PC_ENET_CLSN	((ushort)0x0040)
+#define PC_ENET_RENA	((ushort)0x0080)
+
+#define SICR_ENET_MASK	((uint)0x0000ff00)
+#define SICR_ENET_CLKRT	((uint)0x00003d00)
+#endif
+
+#ifdef CONFIG_BSEIP
+/* This ENET stuff is for the MPC823 with ethernet on SCC2.
+ * This is unique to the BSE ip-Engine board.
+ */
+#define PA_ENET_RXD	((ushort)0x0004)
+#define PA_ENET_TXD	((ushort)0x0008)
+#define PA_ENET_TCLK	((ushort)0x0100)
+#define PA_ENET_RCLK	((ushort)0x0200)
+#define PB_ENET_TENA	((uint)0x00002000)
+#define PC_ENET_CLSN	((ushort)0x0040)
+#define PC_ENET_RENA	((ushort)0x0080)
+
+/* BSE uses port B and C bits for PHY control also.
+*/
+#define PB_BSE_POWERUP	((uint)0x00000004)
+#define PB_BSE_FDXDIS	((uint)0x00008000)
+#define PC_BSE_LOOPBACK	((ushort)0x0800)
+
+#define SICR_ENET_MASK	((uint)0x0000ff00)
+#define SICR_ENET_CLKRT	((uint)0x00002c00)
+#endif
+
+#ifdef CONFIG_RPXCLASSIC
+/* Bits in parallel I/O port registers that have to be set/cleared
+ * to configure the pins for SCC1 use.
+ */
+#define PA_ENET_RXD	((ushort)0x0001)
+#define PA_ENET_TXD	((ushort)0x0002)
+#define PA_ENET_TCLK	((ushort)0x0200)
+#define PA_ENET_RCLK	((ushort)0x0800)
+#define PB_ENET_TENA	((uint)0x00001000)
+#define PC_ENET_CLSN	((ushort)0x0010)
+#define PC_ENET_RENA	((ushort)0x0020)
+
+/* Control bits in the SICR to route TCLK (CLK2) and RCLK (CLK4) to
+ * SCC1.  Also, make sure GR1 (bit 24) and SC1 (bit 25) are zero.
+ */
+#define SICR_ENET_MASK	((uint)0x000000ff)
+#define SICR_ENET_CLKRT	((uint)0x0000003d)
+#endif
+
+#if (defined(CONFIG_TQM860) || defined(CONFIG_TQM860L))
+/*
+ * TQM860 and TQM860L Configuration:
+ *
+ * Signal       PAR     DIR     ODR     DAT     Function
+ * Port A,  5    1       0       -       -       TCLK (CLK3) for Ethernet
+ * Port A,  7    1       0       -       -       RCLK (CLK1) for Ethernet
+ * Port A, 14    1       0       -       -       TXD for Ethernet (SCC1)
+ * Port A, 15    1       0       -       -       RXD for Ethernet (SCC1)
+ * Port C,  7    0       0       0       -       -> ETH-LOOP
+ * Port C, 10    0       0       1       -       CD  for Ethernet (SCC1)
+ * Port C, 11    0       0       1       -       CTS for Ethernet (SCC1)
+ * Port C, 15    *       *       0       -       TENA/RTS for Ethernet
+ */
+
+#define PA_ENET_RXD	((ushort)0x0001)	/* PA 15 */
+#define PA_ENET_TXD	((ushort)0x0002)	/* PA 14 */
+#define PA_ENET_TCLK	((ushort)0x0400)	/* PA  5 */
+#define PA_ENET_RCLK	((ushort)0x0100)	/* PA  7 */
+
+#define PC_ENET_TENA	((ushort)0x0001)	/* PC 15 */
+#define PC_ENET_CLSN	((ushort)0x0010)	/* PC 11 */
+#define PC_ENET_RENA	((ushort)0x0020)	/* PC 10 */
+
+/* Control bits in the SICR to route TCLK (CLK3) and RCLK (CLK1) to
+ * SCC1.  Also, make sure GR1 (bit 24) and SC1 (bit 25) are zero.
+ */
+#define SICR_ENET_MASK	((uint)0x000000ff)
+#define SICR_ENET_CLKRT	((uint)0x00000026)
+
+#endif	/* CONFIG_TQM860, TQM860L */
+
+#ifdef CONFIG_TQM8xxL
+/*
+ * TQM8xxL Configuration (except TQM860L):
+ *
+ * Signal       PAR     DIR     ODR     DAT     Function
+ * Port A,  5    1       0       -       -       TCLK (CLK3) for Ethernet
+ * Port A,  7    1       0       -       -       RCLK (CLK1) for Ethernet
+ * Port A, 12    1       0       -       -       TXD for Ethernet (SCC2)
+ * Port A, 13    1       0       -       -       RXD for Ethernet (SCC2)
+ * Port B, 18    1       1       -       -       TENA/RTS for Ethernet on STK8xx
+ * Port C,  7    0       0       0       -       -> ETH-LOOP
+ * Port C,  8    0       0       1       -       CD  for Ethernet (SCC2)
+ * Port C,  9    0       0       1       -       CTS for Ethernet (SCC2)
+ * Port C, 14    *       *       0       -       TENA/RTS for Ethernet on FPS850
+ *
+ * Note: Using PC14 as RTS2 (TENA) does not work on the TQM850L when
+ * used with the starter-kit mainboard; we *must* use PB18 instead.
+ * For the FPS850 system, we *must* use PC14 :-(
+ */
+
+#define PA_ENET_RXD	((ushort)0x0004)	/* PA 13 */
+#define PA_ENET_TXD	((ushort)0x0008)	/* PA 12 */
+#define PA_ENET_RCLK	((ushort)0x0100)	/* PA  7 */
+#define PA_ENET_TCLK	((ushort)0x0400)	/* PA  5 */
+
+#ifndef	CONFIG_FPS850	/* not valid on FPS board */
+#define	PB_ENET_TENA	((uint)0x00002000)
+#endif	/* !CONFIG_FPS850 */
+
+#ifdef	CONFIG_FPS850	/* FPS uses default configuration */
+#define PC_ENET_TENA	((ushort)0x0002)	/* PC 14 */
+#endif	/* CONFIG_FPS850 */
+#define PC_ENET_CLSN	((ushort)0x0040)	/* PC  9 */
+#define PC_ENET_RENA	((ushort)0x0080)	/* PC  8 */
+
+/* Control bits in the SICR to route TCLK (CLK3) and RCLK (CLK1) to
+ * SCC2.  Also, make sure GR2 (bit 16) and SC2 (bit 17) are zero.
+ */
+#define SICR_ENET_MASK	((uint)0x0000ff00)
+#define SICR_ENET_CLKRT	((uint)0x00002600)
+
+#endif	/* CONFIG_TQM8xxL */
 
 /* SCC Event register as used by Ethernet.
 */
@@ -475,6 +660,30 @@ typedef struct scc_trans {
 	uint	st_cpres;	/* Preset CRC */
 	uint	st_cmask;	/* Constant mask for CRC */
 } scc_trans_t;
+
+#define BD_SCC_TX_LAST		((ushort)0x0800)
+
+/* IIC parameter RAM.
+*/
+typedef struct iic {
+	ushort	iic_rbase;	/* Rx Buffer descriptor base address */
+	ushort	iic_tbase;	/* Tx Buffer descriptor base address */
+	u_char	iic_rfcr;	/* Rx function code */
+	u_char	iic_tfcr;	/* Tx function code */
+	ushort	iic_mrblr;	/* Max receive buffer length */
+	uint	iic_rstate;	/* Internal */
+	uint	iic_rdp;	/* Internal */
+	ushort	iic_rbptr;	/* Internal */
+	ushort	iic_rbc;	/* Internal */
+	uint	iic_rxtmp;	/* Internal */
+	uint	iic_tstate;	/* Internal */
+	uint	iic_tdp;	/* Internal */
+	ushort	iic_tbptr;	/* Internal */
+	ushort	iic_tbc;	/* Internal */
+	uint	iic_txtmp;	/* Internal */
+} iic_t;
+
+#define BD_IIC_START		((ushort)0x0400)
 
 /* CPM interrupts.  There are nearly 32 interrupts generated by CPM
  * channels or devices.  All of these are presented to the PPC core

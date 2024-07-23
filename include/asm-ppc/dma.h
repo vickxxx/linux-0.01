@@ -6,9 +6,11 @@
  * Changes for ppc sound by Christoph Nadig
  */
 
+#ifdef __KERNEL__
+
 #include <linux/config.h>
 #include <asm/io.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 #include <asm/system.h>
 
 /*
@@ -99,17 +101,20 @@ extern unsigned long ISA_DMA_THRESHOLD;
 
 /* used in nasty hack for sound - see prep_setup_arch() -- Cort */
 extern long ppc_cs4232_dma, ppc_cs4232_dma2;
-#ifdef CONFIG_CS4232
+#if defined(CONFIG_CS4232)
+#if defined(CONFIG_PREP) || defined(CONFIG_ALL_PPC)
 #define SND_DMA1 ppc_cs4232_dma
 #define SND_DMA2 ppc_cs4232_dma2
-#else
-#ifdef CONFIG_MSS
+#else /* !CONFIG_PREP && !CONFIG_ALL_PPC */
+#define SND_DMA1 -1
+#define SND_DMA2 -1
+#endif /* !CONFIG_PREP */
+#elif defined(CONFIG_MSS)
 #define SND_DMA1 CONFIG_MSS_DMA
 #define SND_DMA2 CONFIG_MSS_DMA2
 #else
 #define SND_DMA1 -1
 #define SND_DMA2 -1
-#endif
 #endif
 
 /* 8237 DMA controllers */
@@ -203,6 +208,7 @@ static __inline__ void enable_dma(unsigned int dmanr)
 	 */
 	unsigned char ucDmaCmd=0x00;
 
+#if defined(CONFIG_PREP) || defined(CONFIG_ALL_PPC)
 	if(_prep_type==_PREP_Radstone)
 	{
 		switch(ucSystemType)
@@ -227,6 +233,7 @@ static __inline__ void enable_dma(unsigned int dmanr)
 			}
 		}
 	}
+#endif /* CONFIG_PREP || CONFIG_ALL_PPC */
 
 	if (dmanr != 4)
 	{
@@ -399,9 +406,10 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 extern int request_dma(unsigned int dmanr, const char * device_id);	/* reserve a DMA channel */
 extern void free_dma(unsigned int dmanr);	/* release it again */
 
-#ifdef CONFIG_PCI_QUIRKS
+#ifdef CONFIG_PCI
 extern int isa_dma_bridge_buggy;                                        
 #else                                                         
 #define isa_dma_bridge_buggy   (0)
 #endif
 #endif /* _ASM_DMA_H */
+#endif /* __KERNEL__ */

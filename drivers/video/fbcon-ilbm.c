@@ -45,7 +45,7 @@ void fbcon_ilbm_bmove(struct display *p, int sy, int sx, int dy, int dx,
 		      int height, int width)
 {
     if (sx == 0 && dx == 0 && width == p->next_plane)
-	mymemmove(p->screen_base+dy*fontheight(p)*p->next_line,
+	fb_memmove(p->screen_base+dy*fontheight(p)*p->next_line,
 		  p->screen_base+sy*fontheight(p)*p->next_line,
 		  height*fontheight(p)*p->next_line);
     else {
@@ -56,7 +56,7 @@ void fbcon_ilbm_bmove(struct display *p, int sy, int sx, int dy, int dx,
 	    src = p->screen_base+sy*fontheight(p)*p->next_line+sx;
 	    dest = p->screen_base+dy*fontheight(p)*p->next_line+dx;
 	    for (i = p->var.bits_per_pixel*height*fontheight(p); i--;) {
-		mymemmove(dest, src, width);
+		fb_memmove(dest, src, width);
 		src += p->next_plane;
 		dest += p->next_plane;
 	    }
@@ -66,7 +66,7 @@ void fbcon_ilbm_bmove(struct display *p, int sy, int sx, int dy, int dx,
 	    for (i = p->var.bits_per_pixel*height*fontheight(p); i--;) {
 		src -= p->next_plane;
 		dest -= p->next_plane;
-		mymemmove(dest, src, width);
+		fb_memmove(dest, src, width);
 	    }
 	}
     }
@@ -86,9 +86,9 @@ void fbcon_ilbm_clear(struct vc_data *conp, struct display *p, int sy, int sx,
 	bg = bg0;
 	for (i = p->var.bits_per_pixel; i--; dest += p->next_plane) {
 	    if (bg & 1)
-		mymemset(dest, width);
+		fb_memset255(dest, width);
 	    else
-		mymemclear(dest, width);
+		fb_memclear(dest, width);
 	    bg >>= 1;
 	}
     }
@@ -259,8 +259,13 @@ void fbcon_ilbm_revc(struct display *p, int xx, int yy)
      */
 
 struct display_switch fbcon_ilbm = {
-    fbcon_ilbm_setup, fbcon_ilbm_bmove, fbcon_ilbm_clear, fbcon_ilbm_putc,
-    fbcon_ilbm_putcs, fbcon_ilbm_revc, NULL, NULL, NULL, FONTWIDTH(8)
+    setup:		fbcon_ilbm_setup,
+    bmove:		fbcon_ilbm_bmove,
+    clear:		fbcon_ilbm_clear,
+    putc:		fbcon_ilbm_putc,
+    putcs:		fbcon_ilbm_putcs,
+    revc:		fbcon_ilbm_revc,
+    fontwidthmask:	FONTWIDTH(8)
 };
 
 

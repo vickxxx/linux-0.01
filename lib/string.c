@@ -46,7 +46,7 @@ int strnicmp(const char *s1, const char *s2, size_t len)
 }
 #endif
 
-char * ___strtok = NULL;
+char * ___strtok;
 
 #ifndef __HAVE_ARCH_STRCPY
 char * strcpy(char * dest,const char *src)
@@ -250,13 +250,13 @@ char * strsep(char **s, const char * ct)
 	
 	*s = strpbrk( sbegin, ct);
 	if (*s && **s != '\0')
-		**s++ = '\0';
+		*(*s)++ = '\0';
 	return (sbegin);
 }
 #endif
 
 #ifndef __HAVE_ARCH_MEMSET
-void * memset(void * s,char c,size_t count)
+void * memset(void * s,int c,size_t count)
 {
 	char *xs = (char *) s;
 
@@ -361,4 +361,18 @@ char * strstr(const char * s1,const char * s2)
 	}
 	return NULL;
 }
+#endif
+
+#ifndef __HAVE_ARCH_MEMCHR
+void *memchr(const void *s, int c, size_t n)
+{
+	const unsigned char *p = s;
+	while (n-- != 0) {
+        	if ((unsigned char)c == *p++) {
+			return (void *)(p-1);
+		}
+	}
+	return NULL;
+}
+
 #endif

@@ -25,78 +25,64 @@
 #include <linux/file.h>
 #include <linux/fcntl.h>
 #include <linux/malloc.h>
+#include <linux/vmalloc.h>
 #include <linux/init.h>
 
 #include <linux/ncp_fs.h>
 
 #include "ncplib_kernel.h"
 
-static void ncp_read_inode(struct inode *);
-static void ncp_put_inode(struct inode *);
 static void ncp_delete_inode(struct inode *);
 static void ncp_put_super(struct super_block *);
-static int  ncp_statfs(struct super_block *, struct statfs *, int);
+static int  ncp_statfs(struct super_block *, struct statfs *);
 
 static struct super_operations ncp_sops =
 {
-	ncp_read_inode,		/* read inode */
-	NULL,			/* write inode */
-	ncp_put_inode,		/* put inode */
-	ncp_delete_inode,       /* delete inode */
-	ncp_notify_change,	/* notify change */
-	ncp_put_super,		/* put superblock */
-	NULL,			/* write superblock */
-	ncp_statfs,		/* stat filesystem */
-	NULL                    /* remount */
+	put_inode:	force_delete,
+	delete_inode:	ncp_delete_inode,
+	put_super:	ncp_put_super,
+	statfs:		ncp_statfs,
 };
 
 extern struct dentry_operations ncp_dentry_operations;
 #ifdef CONFIG_NCPFS_EXTRAS
-extern struct inode_operations ncp_symlink_inode_operations;
+extern struct address_space_operations ncp_symlink_aops;
 extern int ncp_symlink(struct inode*, struct dentry*, const char*);
 #endif
-
-static struct nw_file_info *read_nwinfo = NULL;
-static DECLARE_MUTEX(read_sem);
 
 /*
  * Fill in the ncpfs-specific information in the inode.
  */
-void ncp_update_inode(struct inode *inode, struct nw_file_info *nwinfo)
+void ncp_update_inode(struct inode *inode, struct ncp_entry_info *nwinfo)
 {
 	NCP_FINFO(inode)->DosDirNum = nwinfo->i.DosDirNum;
 	NCP_FINFO(inode)->dirEntNum = nwinfo->i.dirEntNum;
 	NCP_FINFO(inode)->volNumber = nwinfo->i.volNumber;
 
-#ifdef CONFIG_NCPFS_SMALLDOS
-	NCP_FINFO(inode)->origNS = nwinfo->i.NSCreator;
-#endif
 #ifdef CONFIG_NCPFS_STRONG
 	NCP_FINFO(inode)->nwattr = nwinfo->i.attributes;
 #endif
-	NCP_FINFO(inode)->opened = nwinfo->opened;
 	NCP_FINFO(inode)->access = nwinfo->access;
 	NCP_FINFO(inode)->server_file_handle = nwinfo->server_file_handle;
 	memcpy(NCP_FINFO(inode)->file_handle, nwinfo->file_handle,
 			sizeof(nwinfo->file_handle));
-#ifdef NCPFS_DEBUG_VERBOSE
-printk(KERN_DEBUG "ncp_update_inode: updated %s, volnum=%d, dirent=%u\n",
-nwinfo->i.entryName, NCP_FINFO(inode)->volNumber, NCP_FINFO(inode)->dirEntNum);
-#endif
+	DPRINTK("ncp_update_inode: updated %s, volnum=%d, dirent=%u\n",
+		nwinfo->i.entryName, NCP_FINFO(inode)->volNumber,
+		NCP_FINFO(inode)->dirEntNum);
 }
 
-void ncp_update_inode2(struct inode* inode, struct nw_file_info *nwinfo)
+void ncp_update_inode2(struct inode* inode, struct ncp_entry_info *nwinfo)
 {
 	struct nw_info_struct *nwi = &nwinfo->i;
 	struct ncp_server *server = NCP_SERVER(inode);
 
-	if (!NCP_FINFO(inode)->opened) {
+	if (!atomic_read(&NCP_FINFO(inode)->opened)) {
 #ifdef CONFIG_NCPFS_STRONG
 		NCP_FINFO(inode)->nwattr = nwi->attributes;
 #endif
 		if (nwi->attributes & aDIR) {
 			inode->i_mode = server->m.dir_mode;
-			inode->i_size = 512;
+			inode->i_size = NCP_BLOCK_SIZE;
 		} else {
 			inode->i_mode = server->m.file_mode;
 			inode->i_size = le32_to_cpu(nwi->dataStreamSize);
@@ -105,8 +91,8 @@ void ncp_update_inode2(struct inode* inode, struct nw_file_info *nwinfo)
 				switch (nwi->attributes & (aHIDDEN|aSYSTEM)) {
 					case aHIDDEN:
 						if (server->m.flags & NCP_MOUNT_SYMLINKS) {
-							if ((inode->i_size >= NCP_MIN_SYMLINK_SIZE)
-							 && (inode->i_size <= NCP_MAX_SYMLINK_SIZE)) {
+							if ( /* (inode->i_size >= NCP_MIN_SYMLINK_SIZE)
+							 && */ (inode->i_size <= NCP_MAX_SYMLINK_SIZE)) {
 								inode->i_mode = (inode->i_mode & ~S_IFMT) | S_IFLNK;
 								break;
 							}
@@ -130,20 +116,23 @@ void ncp_update_inode2(struct inode* inode, struct nw_file_info *nwinfo)
 		}
 		if (nwi->attributes & aRONLY) inode->i_mode &= ~0222;
 	}
-	inode->i_blocks = 0;
-	if ((inode->i_size)&&(inode->i_blksize)) {
-		inode->i_blocks = (inode->i_size-1)/(inode->i_blksize)+1;
-	}
-	/* TODO: times? I'm not sure... */
-	NCP_FINFO(inode)->DosDirNum = nwinfo->i.DosDirNum;
-	NCP_FINFO(inode)->dirEntNum = nwinfo->i.dirEntNum;
-	NCP_FINFO(inode)->volNumber = nwinfo->i.volNumber;
+	inode->i_blocks = (inode->i_size + NCP_BLOCK_SIZE - 1) >> NCP_BLOCK_SHIFT;
+
+	inode->i_mtime = ncp_date_dos2unix(le16_to_cpu(nwi->modifyTime),
+					   le16_to_cpu(nwi->modifyDate));
+	inode->i_ctime = ncp_date_dos2unix(le16_to_cpu(nwi->creationTime),
+					   le16_to_cpu(nwi->creationDate));
+	inode->i_atime = ncp_date_dos2unix(0, le16_to_cpu(nwi->lastAccessDate));
+
+	NCP_FINFO(inode)->DosDirNum = nwi->DosDirNum;
+	NCP_FINFO(inode)->dirEntNum = nwi->dirEntNum;
+	NCP_FINFO(inode)->volNumber = nwi->volNumber;
 }
 
 /*
- * Fill in the inode based on the nw_file_info structure.
+ * Fill in the inode based on the ncp_entry_info structure.
  */
-static void ncp_set_attr(struct inode *inode, struct nw_file_info *nwinfo)
+static void ncp_set_attr(struct inode *inode, struct ncp_entry_info *nwinfo)
 {
 	struct nw_info_struct *nwi = &nwinfo->i;
 	struct ncp_server *server = NCP_SERVER(inode);
@@ -152,7 +141,7 @@ static void ncp_set_attr(struct inode *inode, struct nw_file_info *nwinfo)
 		inode->i_mode = server->m.dir_mode;
 		/* for directories dataStreamSize seems to be some
 		   Object ID ??? */
-		inode->i_size = 512;
+		inode->i_size = NCP_BLOCK_SIZE;
 	} else {
 		inode->i_mode = server->m.file_mode;
 		inode->i_size = le32_to_cpu(nwi->dataStreamSize);
@@ -162,8 +151,8 @@ static void ncp_set_attr(struct inode *inode, struct nw_file_info *nwinfo)
 			switch (nwi->attributes & (aHIDDEN|aSYSTEM)) {
 				case aHIDDEN:
 					if (server->m.flags & NCP_MOUNT_SYMLINKS) {
-						if ((inode->i_size >= NCP_MIN_SYMLINK_SIZE)
-						 && (inode->i_size <= NCP_MAX_SYMLINK_SIZE)) {
+						if (/* (inode->i_size >= NCP_MIN_SYMLINK_SIZE)
+						 && */ (inode->i_size <= NCP_MAX_SYMLINK_SIZE)) {
 							inode->i_mode = (inode->i_mode & ~S_IFMT) | S_IFLNK;
 							break;
 						}
@@ -187,19 +176,15 @@ static void ncp_set_attr(struct inode *inode, struct nw_file_info *nwinfo)
 	}
 	if (nwi->attributes & aRONLY) inode->i_mode &= ~0222;
 
-	DDPRINTK(KERN_DEBUG "ncp_read_inode: inode->i_mode = %u\n", inode->i_mode);
+	DDPRINTK("ncp_read_inode: inode->i_mode = %u\n", inode->i_mode);
 
 	inode->i_nlink = 1;
 	inode->i_uid = server->m.uid;
 	inode->i_gid = server->m.gid;
-	inode->i_blksize = 512;
 	inode->i_rdev = 0;
+	inode->i_blksize = NCP_BLOCK_SIZE;
 
-	inode->i_blocks = 0;
-	if ((inode->i_blksize != 0) && (inode->i_size != 0)) {
-		inode->i_blocks =
-		    (inode->i_size - 1) / inode->i_blksize + 1;
-	}
+	inode->i_blocks = (inode->i_size + NCP_BLOCK_SIZE - 1) >> NCP_BLOCK_SHIFT;
 
 	inode->i_mtime = ncp_date_dos2unix(le16_to_cpu(nwi->modifyTime),
 			  		   le16_to_cpu(nwi->modifyDate));
@@ -210,37 +195,17 @@ static void ncp_set_attr(struct inode *inode, struct nw_file_info *nwinfo)
 	ncp_update_inode(inode, nwinfo);
 }
 
-/*
- * This is called from iget() with the read semaphore held. 
- * The global ncpfs_file_info structure has been set up by ncp_iget.
- */
-static void ncp_read_inode(struct inode *inode)
-{
-	if (read_nwinfo == NULL) {
-		printk(KERN_ERR "ncp_read_inode: invalid call\n");
-		return;
-	}
-
-	ncp_set_attr(inode, read_nwinfo);
-
-	if (S_ISREG(inode->i_mode)) {
-		inode->i_op = &ncp_file_inode_operations;
-	} else if (S_ISDIR(inode->i_mode)) {
-		inode->i_op = &ncp_dir_inode_operations;
-#ifdef CONFIG_NCPFS_EXTRAS
-	} else if (S_ISLNK(inode->i_mode)) {
-		inode->i_op = &ncp_symlink_inode_operations;
-#endif
-	} else {
-		inode->i_op = NULL;
-	}
-}
+static struct inode_operations ncp_symlink_inode_operations = {
+	readlink:	page_readlink,
+	follow_link:	page_follow_link,
+	setattr:	ncp_notify_change,
+};
 
 /*
- * Set up the ncpfs_inode_info pointer and get a new inode.
+ * Get a new inode.
  */
 struct inode * 
-ncp_iget(struct super_block *sb, struct ncpfs_inode_info *info)
+ncp_iget(struct super_block *sb, struct ncp_entry_info *info)
 {
 	struct inode *inode;
 
@@ -249,105 +214,126 @@ ncp_iget(struct super_block *sb, struct ncpfs_inode_info *info)
 		return NULL;
 	}
 
-	down(&read_sem);
-	read_nwinfo = &info->nw_info;
-	inode = iget(sb, info->ino);
-	read_nwinfo = NULL;
-	up(&read_sem);
-	if (!inode)
+	inode = new_inode(sb);
+	if (inode) {
+		init_MUTEX(&NCP_FINFO(inode)->open_sem);
+		atomic_set(&NCP_FINFO(inode)->opened, info->opened);
+
+		inode->i_ino = info->ino;
+		ncp_set_attr(inode, info);
+		if (S_ISREG(inode->i_mode)) {
+			inode->i_op = &ncp_file_inode_operations;
+			inode->i_fop = &ncp_file_operations;
+		} else if (S_ISDIR(inode->i_mode)) {
+			inode->i_op = &ncp_dir_inode_operations;
+			inode->i_fop = &ncp_dir_operations;
+#ifdef CONFIG_NCPFS_EXTRAS
+		} else if (S_ISLNK(inode->i_mode)) {
+			inode->i_op = &ncp_symlink_inode_operations;
+			inode->i_data.a_ops = &ncp_symlink_aops;
+#endif
+		}
+		insert_inode_hash(inode);
+	} else
 		printk(KERN_ERR "ncp_iget: iget failed!\n");
 	return inode;
-}
-
-static void ncp_put_inode(struct inode *inode)
-{
-	if (inode->i_count == 1)
-		inode->i_nlink = 0;
 }
 
 static void
 ncp_delete_inode(struct inode *inode)
 {
 	if (S_ISDIR(inode->i_mode)) {
-		DDPRINTK(KERN_DEBUG "ncp_delete_inode: put directory %ld\n", inode->i_ino);
-		ncp_invalid_dir_cache(inode);
+		DDPRINTK("ncp_delete_inode: put directory %ld\n", inode->i_ino);
 	}
 
-	if (NCP_FINFO(inode)->opened && ncp_make_closed(inode) != 0) {
+	if (ncp_make_closed(inode) != 0) {
 		/* We can't do anything but complain. */
 		printk(KERN_ERR "ncp_delete_inode: could not close\n");
 	}
 	clear_inode(inode);
 }
 
-static void ncp_init_root(struct ncp_server *server,
-			struct ncpfs_inode_info *info)
-{
-	struct ncp_inode_info *root = &(server->root);
-	struct nw_info_struct *i = &(root->finfo.i);
-
-	DPRINTK(KERN_DEBUG "ncp_init_root: i = %x\n", (int) i);
-
-	i->attributes	 = aDIR;
-	i->dataStreamSize= 1024;
-	i->dirEntNum	 = 0;
-	i->DosDirNum	 = 0;
-#ifdef CONFIG_NCPFS_SMALLDOS
-	i->NSCreator	 = NW_NS_DOS;
-#endif
-	i->volNumber	 = NCP_NUMBER_OF_VOLUMES + 1;	/* illegal volnum */
-	/* set dates of mountpoint to Jan 1, 1986; 00:00 */
-	i->creationTime = i->modifyTime = cpu_to_le16(0x0000);
-	i->creationDate = i->modifyDate = i->lastAccessDate = cpu_to_le16(0x0C21);
-	i->nameLen	 = 0;
-	i->entryName[0]  = '\0';
-
-	root->finfo.opened= 0;
-	info->ino = 2; /* tradition */
-	info->nw_info = root->finfo;
-	return;
-}
-
 struct super_block *
 ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 {
-	struct ncp_mount_data *data = (struct ncp_mount_data *) raw_data;
+	struct ncp_mount_data_kernel data;
 	struct ncp_server *server;
 	struct file *ncp_filp;
 	struct inode *root_inode;
-	kdev_t dev = sb->s_dev;
+	struct inode *sock_inode;
+	struct socket *sock;
 	int error;
+	int default_bufsize;
 #ifdef CONFIG_NCPFS_PACKET_SIGNING
 	int options;
 #endif
-	struct ncpfs_inode_info finfo;
+	struct ncp_entry_info finfo;
 
-	MOD_INC_USE_COUNT;
-	if (data == NULL)
+	if (raw_data == NULL)
 		goto out_no_data;
-	if (data->version != NCP_MOUNT_VERSION)
-		goto out_bad_mount;
-	ncp_filp = fget(data->ncp_fd);
+	switch (*(int*)raw_data) {
+		case NCP_MOUNT_VERSION:
+			{
+				struct ncp_mount_data* md = (struct ncp_mount_data*)raw_data;
+
+				data.flags = md->flags;
+				data.int_flags = NCP_IMOUNT_LOGGEDIN_POSSIBLE;
+				data.mounted_uid = md->mounted_uid;
+				data.wdog_pid = md->wdog_pid;
+				data.ncp_fd = md->ncp_fd;
+				data.time_out = md->time_out;
+				data.retry_count = md->retry_count;
+				data.uid = md->uid;
+				data.gid = md->gid;
+				data.file_mode = md->file_mode;
+				data.dir_mode = md->dir_mode;
+				memcpy(data.mounted_vol, md->mounted_vol,
+					NCP_VOLNAME_LEN+1);
+			}
+			break;
+		case NCP_MOUNT_VERSION_V4:
+			{
+				struct ncp_mount_data_v4* md = (struct ncp_mount_data_v4*)raw_data;
+
+				data.flags = md->flags;
+				data.int_flags = 0;
+				data.mounted_uid = md->mounted_uid;
+				data.wdog_pid = md->wdog_pid;
+				data.ncp_fd = md->ncp_fd;
+				data.time_out = md->time_out;
+				data.retry_count = md->retry_count;
+				data.uid = md->uid;
+				data.gid = md->gid;
+				data.file_mode = md->file_mode;
+				data.dir_mode = md->dir_mode;
+				data.mounted_vol[0] = 0;
+			}
+			break;
+		default:
+			goto out_bad_mount;
+	}
+	ncp_filp = fget(data.ncp_fd);
 	if (!ncp_filp)
 		goto out_bad_file;
-	if (!S_ISSOCK(ncp_filp->f_dentry->d_inode->i_mode))
+	sock_inode = ncp_filp->f_dentry->d_inode;
+	if (!S_ISSOCK(sock_inode->i_mode))
 		goto out_bad_file2;
-
-	lock_super(sb);
+	sock = &sock_inode->u.socket_i;
+	if (!sock)
+		goto out_bad_file2;
+		
+	if (sock->type == SOCK_STREAM)
+		default_bufsize = 61440;
+	else
+		default_bufsize = 1024;
 
 	sb->s_blocksize = 1024;	/* Eh...  Is this correct? */
 	sb->s_blocksize_bits = 10;
 	sb->s_magic = NCP_SUPER_MAGIC;
-	sb->s_dev = dev;
 	sb->s_op = &ncp_sops;
 
-	/* We must malloc our own super-block info */
-	server = (struct ncp_server *) ncp_kmalloc(sizeof(struct ncp_server),
-						   GFP_KERNEL);
-	if (server == NULL)
-		goto out_no_server;
+	server = NCP_SBP(sb);
 	memset(server, 0, sizeof(*server));
-	NCP_SBP(sb) = server;
 
 	server->ncp_filp = ncp_filp;
 /*	server->lock = 0;	*/
@@ -368,13 +354,14 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 /*	server->priv.len = 0;			*/
 /*	server->priv.data = NULL;		*/
 
-	server->m = *data;
+	server->m = data;
 	/* Althought anything producing this is buggy, it happens
 	   now because of PATH_MAX changes.. */
-	if (server->m.time_out < 10) {
+	if (server->m.time_out < 1) {
 		server->m.time_out = 10;
 		printk(KERN_INFO "You need to recompile your ncpfs utils..\n");
 	}
+	server->m.time_out = server->m.time_out * HZ / 100;
 	server->m.file_mode = (server->m.file_mode &
 			       (S_IRWXU | S_IRWXG | S_IRWXO)) | S_IFREG;
 	server->m.dir_mode = (server->m.dir_mode &
@@ -382,14 +369,16 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 
 #ifdef CONFIG_NCPFS_NLS
 	/* load the default NLS charsets */
-	server->nls_charsets.codepage[0] = 0;
-	server->nls_charsets.iocharset[0] = 0;
 	server->nls_vol = load_nls_default();
 	server->nls_io = load_nls_default();
 #endif /* CONFIG_NCPFS_NLS */
 
+	server->dentry_ttl = 0;	/* no caching */
+
+#undef NCP_PACKET_SIZE
+#define NCP_PACKET_SIZE 65536
 	server->packet_size = NCP_PACKET_SIZE;
-	server->packet = ncp_kmalloc(NCP_PACKET_SIZE, GFP_KERNEL);
+	server->packet = vmalloc(NCP_PACKET_SIZE);
 	if (server->packet == NULL)
 		goto out_no_packet;
 
@@ -398,16 +387,16 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 	ncp_unlock_server(server);
 	if (error < 0)
 		goto out_no_connect;
-	DPRINTK(KERN_DEBUG "ncp_read_super: NCP_SBP(sb) = %x\n", (int) NCP_SBP(sb));
+	DPRINTK("ncp_read_super: NCP_SBP(sb) = %x\n", (int) NCP_SBP(sb));
 
 #ifdef CONFIG_NCPFS_PACKET_SIGNING
-	if (ncp_negotiate_size_and_options(server, NCP_DEFAULT_BUFSIZE,
+	if (ncp_negotiate_size_and_options(server, default_bufsize,
 		NCP_DEFAULT_OPTIONS, &(server->buffer_size), &options) == 0)
 	{
 		if (options != NCP_DEFAULT_OPTIONS)
 		{
 			if (ncp_negotiate_size_and_options(server, 
-				NCP_DEFAULT_BUFSIZE,
+				default_bufsize,
 				options & 2, 
 				&(server->buffer_size), &options) != 0)
 				
@@ -420,22 +409,41 @@ ncp_read_super(struct super_block *sb, void *raw_data, int silent)
 	}
 	else 
 #endif	/* CONFIG_NCPFS_PACKET_SIGNING */
-	if (ncp_negotiate_buffersize(server, NCP_DEFAULT_BUFSIZE,
+	if (ncp_negotiate_buffersize(server, default_bufsize,
   				     &(server->buffer_size)) != 0)
 		goto out_no_bufsize;
-	DPRINTK(KERN_DEBUG "ncpfs: bufsize = %d\n", server->buffer_size);
+	DPRINTK("ncpfs: bufsize = %d\n", server->buffer_size);
 
-	ncp_init_root(server, &finfo);
-	server->name_space[finfo.nw_info.i.volNumber] = NW_NS_DOS;
+	memset(&finfo, 0, sizeof(finfo));
+	finfo.i.attributes	= aDIR;
+	finfo.i.dataStreamSize	= NCP_BLOCK_SIZE;
+	finfo.i.dirEntNum	= 0;
+	finfo.i.DosDirNum	= 0;
+#ifdef CONFIG_NCPFS_SMALLDOS
+	finfo.i.NSCreator	= NW_NS_DOS;
+#endif
+	finfo.i.volNumber	= NCP_NUMBER_OF_VOLUMES + 1;	/* illegal volnum */
+	/* set dates of mountpoint to Jan 1, 1986; 00:00 */
+	finfo.i.creationTime	= finfo.i.modifyTime
+				= cpu_to_le16(0x0000);
+	finfo.i.creationDate	= finfo.i.modifyDate
+				= finfo.i.lastAccessDate
+				= cpu_to_le16(0x0C21);
+	finfo.i.nameLen		= 0;
+	finfo.i.entryName[0]	= '\0';
+
+	finfo.opened		= 0;
+	finfo.ino		= 2;	/* tradition */
+
+	server->name_space[finfo.i.volNumber] = NW_NS_DOS;
         root_inode = ncp_iget(sb, &finfo);
         if (!root_inode)
 		goto out_no_root;
-	DPRINTK(KERN_DEBUG "ncp_read_super: root vol=%d\n", NCP_FINFO(root_inode)->volNumber);
-        server->root_dentry = sb->s_root = d_alloc_root(root_inode);
+	DPRINTK("ncp_read_super: root vol=%d\n", NCP_FINFO(root_inode)->volNumber);
+	sb->s_root = d_alloc_root(root_inode);
         if (!sb->s_root)
 		goto out_no_root;
-	server->root_dentry->d_op = &ncp_dentry_operations;
-	unlock_super(sb);
+	sb->s_root->d_op = &ncp_dentry_operations;
 	return sb;
 
 out_no_root:
@@ -452,7 +460,7 @@ out_disconnect:
 out_no_connect:
 	printk(KERN_ERR "ncp_read_super: Failed connection, error=%d\n", error);
 out_free_packet:
-	ncp_kfree_s(server->packet, server->packet_size);
+	vfree(server->packet);
 	goto out_free_server;
 out_no_packet:
 	printk(KERN_ERR "ncp_read_super: could not alloc packet\n");
@@ -461,18 +469,12 @@ out_free_server:
 	unload_nls(server->nls_io);
 	unload_nls(server->nls_vol);
 #endif
-	ncp_kfree_s(NCP_SBP(sb), sizeof(struct ncp_server));
-	goto out_unlock;
-out_no_server:
-	printk(KERN_ERR "ncp_read_super: could not alloc ncp_server\n");
-out_unlock:
 	/* 23/12/1998 Marcin Dalecki <dalecki@cs.net.pl>:
 	 * 
 	 * The previously used put_filp(ncp_filp); was bogous, since
 	 * it doesn't proper unlocking.
 	 */
 	fput(ncp_filp);
-	unlock_super(sb);
 	goto out;
 
 out_bad_file2:
@@ -487,8 +489,6 @@ out_bad_mount:
 out_no_data:
 	printk(KERN_ERR "ncp_read_super: missing data argument\n");
 out:
-	sb->s_dev = 0;
-	MOD_DEC_USE_COUNT;
 	return NULL;
 }
 
@@ -521,32 +521,25 @@ static void ncp_put_super(struct super_block *sb)
 		ncp_kfree_s(server->priv.data, server->priv.len);
 	if (server->auth.object_name)
 		ncp_kfree_s(server->auth.object_name, server->auth.object_name_len);
-	ncp_kfree_s(server->packet, server->packet_size);
+	vfree(server->packet);
 
-	ncp_kfree_s(NCP_SBP(sb), sizeof(struct ncp_server));
-
-	MOD_DEC_USE_COUNT;
 }
 
-static int ncp_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
+static int ncp_statfs(struct super_block *sb, struct statfs *buf)
 {
-	struct statfs tmp;
-
 	/* We cannot say how much disk space is left on a mounted
 	   NetWare Server, because free space is distributed over
 	   volumes, and the current user might have disk quotas. So
 	   free space is not that simple to determine. Our decision
 	   here is to err conservatively. */
 
-	tmp.f_type = NCP_SUPER_MAGIC;
-	tmp.f_bsize = 512;
-	tmp.f_blocks = 0;
-	tmp.f_bfree = 0;
-	tmp.f_bavail = 0;
-	tmp.f_files = -1;
-	tmp.f_ffree = -1;
-	tmp.f_namelen = 12;
-	return copy_to_user(buf, &tmp, bufsiz) ? -EFAULT : 0;
+	buf->f_type = NCP_SUPER_MAGIC;
+	buf->f_bsize = NCP_BLOCK_SIZE;
+	buf->f_blocks = 0;
+	buf->f_bfree = 0;
+	buf->f_bavail = 0;
+	buf->f_namelen = 12;
+	return 0;
 }
 
 int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
@@ -562,6 +555,9 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 	server = NCP_SERVER(inode);
 	if ((!server) || !ncp_conn_valid(server))
 		goto out;
+
+	/* ageing the dentry to force validation */
+	ncp_age_dentry(server, dentry);
 
 	result = inode_change_ok(inode, attr);
 	if (result < 0)
@@ -682,10 +678,10 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 	if ((attr->ia_valid & ATTR_SIZE) != 0) {
 		int written;
 
-		DPRINTK(KERN_DEBUG "ncpfs: trying to change size to %ld\n",
+		DPRINTK("ncpfs: trying to change size to %ld\n",
 			attr->ia_size);
 
-		if ((result = ncp_make_open(inode, O_RDWR)) < 0) {
+		if ((result = ncp_make_open(inode, O_WRONLY)) < 0) {
 			return -EACCES;
 		}
 		ncp_write_kernel(NCP_SERVER(inode), NCP_FINFO(inode)->file_handle,
@@ -693,9 +689,11 @@ int ncp_notify_change(struct dentry *dentry, struct iattr *attr)
 
 		/* According to ndir, the changes only take effect after
 		   closing the file */
+		ncp_inode_close(inode);
 		result = ncp_make_closed(inode);
+		if (!result)
+			vmtruncate(inode, attr->ia_size);
 	}
-	ncp_invalid_dir_cache(dentry->d_parent->d_inode);
 out:
 	return result;
 }
@@ -705,46 +703,30 @@ int ncp_malloced;
 int ncp_current_malloced;
 #endif
 
-static struct file_system_type ncp_fs_type = {
-	"ncpfs",
-	0 /* FS_NO_DCACHE doesn't work correctly */,
-        ncp_read_super,
-	NULL
-};
+static DECLARE_FSTYPE(ncp_fs_type, "ncpfs", ncp_read_super, 0);
 
-__initfunc(int init_ncp_fs(void))
+static int __init init_ncp_fs(void)
 {
-	return register_filesystem(&ncp_fs_type);
-}
-
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
-int init_module(void)
-{
-	DPRINTK(KERN_DEBUG "ncpfs: init_module called\n");
-
-	init_MUTEX(&read_sem);
-	read_nwinfo = NULL;
+	DPRINTK("ncpfs: init_module called\n");
 
 #ifdef DEBUG_NCP_MALLOC
 	ncp_malloced = 0;
 	ncp_current_malloced = 0;
 #endif
-	ncp_init_dir_cache();
-
-	return init_ncp_fs();
+	return register_filesystem(&ncp_fs_type);
 }
 
-void cleanup_module(void)
+static void __exit exit_ncp_fs(void)
 {
-	DPRINTK(KERN_DEBUG "ncpfs: cleanup_module called\n");
-	ncp_free_dir_cache();
+	DPRINTK("ncpfs: cleanup_module called\n");
 	unregister_filesystem(&ncp_fs_type);
 #ifdef DEBUG_NCP_MALLOC
-	printk(KERN_DEBUG "ncp_malloced: %d\n", ncp_malloced);
-	printk(KERN_DEBUG "ncp_current_malloced: %d\n", ncp_current_malloced);
+	PRINTK("ncp_malloced: %d\n", ncp_malloced);
+	PRINTK("ncp_current_malloced: %d\n", ncp_current_malloced);
 #endif
 }
 
-#endif
+EXPORT_NO_SYMBOLS;
+
+module_init(init_ncp_fs)
+module_exit(exit_ncp_fs)

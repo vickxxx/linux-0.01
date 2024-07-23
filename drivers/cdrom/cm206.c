@@ -151,6 +151,11 @@ History:
 
 24 jan 1998   Removed the cm206_disc_status() function, as it was now dead
               code.  The Uniform CDROM driver now provides this functionality.
+	      
+9 Nov. 1999   Make kernel-parameter implementation work with 2.3.x 
+	      Removed init_module & cleanup_module in favor of 
+	      module_init & module_exit.
+	      Torben Mathiasen <tmm@image.dk>
  * 
  * Parts of the code are based upon lmscd.c written by Kai Petzke,
  * sbpcd.c written by Eberhard Moenkeberg, and mcd.c by Martin
@@ -182,6 +187,7 @@ History:
 #include <linux/interrupt.h>
 #include <linux/timer.h>
 #include <linux/cdrom.h>
+#include <linux/devfs_fs_kernel.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
 #include <linux/malloc.h>
@@ -209,6 +215,8 @@ static int auto_probe=1;	/* Yes, why not? */
 
 static int cm206_base = CM206_BASE;
 static int cm206_irq = CM206_IRQ; 
+static int cm206[2] = {0,0};	/* for compatible `insmod' parameter passing */
+
 MODULE_PARM(cm206_base, "i");	/* base */
 MODULE_PARM(cm206_irq, "i");	/* irq */
 MODULE_PARM(cm206, "1-2i");	/* base,irq or irq,base */
@@ -728,13 +736,14 @@ void get_disc_status(void)
 
 static int cm206_open(struct cdrom_device_info * cdi, int purpose) 
 {
+  MOD_INC_USE_COUNT;
   if (!cd->openfiles) {		/* reset only first time */
     cd->background=0;
     reset_cm260();
     cd->adapter_last = -1;	/* invalidate adapter memory */
     cd->sector_last = -1;
   }
-  ++cd->openfiles; MOD_INC_USE_COUNT;
+  ++cd->openfiles;
   stats(open);
   return 0;
 }
@@ -749,7 +758,8 @@ static void cm206_release(struct cdrom_device_info * cdi)
     cd->sector_last = -1;	/* Make our internal buffer invalid */
     FIRST_TRACK = 0;		/* No valid disc status */
   }
-  --cd->openfiles; MOD_DEC_USE_COUNT;
+  --cd->openfiles;
+  MOD_DEC_USE_COUNT;
 }
 
 /* Empty buffer empties $sectors$ sectors of the adapter card buffer,
@@ -801,7 +811,7 @@ int try_adapter(int sector)
 /* This is not a very smart implementation. We could optimize for 
    consecutive block numbers. I'm not convinced this would really
    bring down the processor load. */
-static void do_cm206_request(void)
+static void do_cm206_request(request_queue_t * q)
 {
   long int i, cd_sec_no;
   int quarter, error; 
@@ -809,7 +819,7 @@ static void do_cm206_request(void)
   
   while(1) {	 /* repeat until all requests have been satisfied */
     INIT_REQUEST;
-    if (CURRENT == NULL || CURRENT->rq_status == RQ_INACTIVE)
+    if (QUEUE_EMPTY || CURRENT->rq_status == RQ_INACTIVE)
       return;
     if (CURRENT->cmd != READ) {
       debug(("Non-read command %d on cdrom\n", CURRENT->cmd));
@@ -1225,39 +1235,31 @@ int cm206_select_speed(struct cdrom_device_info * cdi, int speed)
 }
 
 static struct cdrom_device_ops cm206_dops = {
-  cm206_open,			/* open */
-  cm206_release,		/* release */
-  cm206_drive_status,		/* drive status */
-  cm206_media_changed,		/* media changed */
-  cm206_tray_move,		/* tray move */
-  cm206_lock_door,		/* lock door */
-  cm206_select_speed,		/* select speed */
-  NULL,				/* select disc */
-  cm206_get_last_session,	/* get last session */
-  cm206_get_upc,		/* get universal product code */
-  cm206_reset,			/* hard reset */
-  cm206_audio_ioctl,		/* audio ioctl */
-  cm206_ioctl,			/* device-specific ioctl */
-  CDC_CLOSE_TRAY | CDC_OPEN_TRAY | CDC_LOCK | CDC_MULTI_SESSION |
-    CDC_MEDIA_CHANGED | CDC_MCN | CDC_PLAY_AUDIO | CDC_SELECT_SPEED |
-    CDC_IOCTLS | CDC_DRIVE_STATUS, 
-    /* capability */
-  1,				/* number of minor devices */
+	open:			cm206_open,
+	release:		cm206_release,
+	drive_status:		cm206_drive_status,
+	media_changed:		cm206_media_changed,
+	tray_move:		cm206_tray_move,
+	lock_door:		cm206_lock_door,
+	select_speed:		cm206_select_speed,
+	get_last_session:	cm206_get_last_session,
+	get_mcn:		cm206_get_upc,
+	reset:			cm206_reset,
+	audio_ioctl:		cm206_audio_ioctl,
+	dev_ioctl:		cm206_ioctl,
+	capability:		CDC_CLOSE_TRAY | CDC_OPEN_TRAY | CDC_LOCK |
+				CDC_MULTI_SESSION | CDC_MEDIA_CHANGED |
+				CDC_MCN | CDC_PLAY_AUDIO | CDC_SELECT_SPEED |
+				CDC_IOCTLS | CDC_DRIVE_STATUS, 
+	n_minors:		1,
 };
 
 
 static struct cdrom_device_info cm206_info = {
-  &cm206_dops,                  /* device operations */
-  NULL,				/* link */
-  NULL,				/* handle (not used by cm206) */
-  0,				/* dev */
-  0,				/* mask */
-  2,				/* maximum speed */
-  1,				/* number of discs */
-  0,				/* options, not owned */
-  0,				/* mc_flags, not owned */
-  0,				/* use count, not owned */
-  "cm206"			/* name of the device type */
+	ops:		&cm206_dops,
+	speed:		2,
+	capacity:	1,
+	name:		"cm206",
 };
 
 /* This routine gets called during initialization if things go wrong,
@@ -1270,10 +1272,11 @@ static void cleanup(int level)
       printk("Can't unregister cdrom cm206\n");
       return;
     }
-    if (unregister_blkdev(MAJOR_NR, "cm206")) {
+    if (devfs_unregister_blkdev(MAJOR_NR, "cm206")) {
       printk("Can't unregister major cm206\n");
       return;
     }
+    blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
   case 3: 
     free_irq(cm206_irq, NULL);
   case 2: 
@@ -1294,7 +1297,7 @@ static void cleanup(int level)
    check_region, 15 bits of one port and 6 of another make things
    likely enough to accept the region on the first hit...
  */
-__initfunc(int probe_base_port(int base))
+int __init probe_base_port(int base)
 {
   int b=0x300, e=0x370;		/* this is the range of start addresses */
   volatile int fool, i;
@@ -1314,7 +1317,7 @@ __initfunc(int probe_base_port(int base))
 
 #if !defined(MODULE) || defined(AUTO_PROBE_MODULE)
 /* Probe for irq# nr. If nr==0, probe for all possible irq's. */
-__initfunc(int probe_irq(int nr)) {
+int __init probe_irq(int nr){
   int irqs, irq;
   outw(dc_normal | READ_AHEAD, r_data_control);	/* disable irq-generation */
   sti(); 
@@ -1328,7 +1331,7 @@ __initfunc(int probe_irq(int nr)) {
 }
 #endif
 
-__initfunc(int cm206_init(void))
+int __init cm206_init(void)
 {
   uch e=0;
   long int size=sizeof(struct cm206_struct);
@@ -1383,7 +1386,7 @@ __initfunc(int cm206_init(void))
     return -EIO;
   }
   printk(".\n");
-  if (register_blkdev(MAJOR_NR, "cm206", &cdrom_fops) != 0) {
+  if (devfs_register_blkdev(MAJOR_NR, "cm206", &cdrom_fops) != 0) {
     printk(KERN_INFO "Cannot register for major %d!\n", MAJOR_NR);
     cleanup(3);
     return -EIO;
@@ -1394,7 +1397,7 @@ __initfunc(int cm206_init(void))
     cleanup(3);
     return -EIO;
   }    
-  blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+  blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
   blksize_size[MAJOR_NR] = cm206_blocksizes;
   read_ahead[MAJOR_NR] = 16;	/* reads ahead what? */
   init_bh(CM206_BH, cm206_bh);
@@ -1411,9 +1414,8 @@ __initfunc(int cm206_init(void))
 
 #ifdef MODULE
 
-static int cm206[2] = {0,0};	/* for compatible `insmod' parameter passing */
 
-__initfunc(void parse_options(void))
+static void __init parse_options(void)
 {
   int i;
   for (i=0; i<2; i++) {
@@ -1428,7 +1430,7 @@ __initfunc(void parse_options(void))
   }
 }
 
-int init_module(void)
+int __cm206_init(void)
 {
 	parse_options();
 #if !defined(AUTO_PROBE_MODULE)
@@ -1437,19 +1439,26 @@ int init_module(void)
 	return cm206_init();
 }
 
-void cleanup_module(void)
+void __exit cm206_exit(void)
 {
   cleanup(4);
   printk(KERN_INFO "cm206 removed\n");
 }
+
+module_init(__cm206_init);
+module_exit(cm206_exit);
       
 #else /* !MODULE */
 
 /* This setup function accepts either `auto' or numbers in the range
  * 3--11 (for irq) or 0x300--0x370 (for base port) or both. */
-__initfunc(void cm206_setup(char *s, int *p))
+
+static int __init cm206_setup(char *s)
 {
-  int i;
+  int i, p[4];
+  
+  (void)get_options(s, ARRAY_SIZE(p), p);
+  
   if (!strcmp(s, "auto")) auto_probe=1;
   for(i=1; i<=p[0]; i++) {
     if (0x300 <= p[i] && i<= 0x370 && p[i] % 0x10 == 0) {
@@ -1461,10 +1470,14 @@ __initfunc(void cm206_setup(char *s, int *p))
       auto_probe = 0;
     }
   }
+ return 1;
 }
-#endif /* MODULE */
+
+__setup("cm206=", cm206_setup);
+
+#endif /* !MODULE */
 /*
  * Local variables:
- * compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/include -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -D__SMP__ -pipe -fno-strength-reduce -m486 -DCPU=486 -D__SMP__ -DMODULE -DMODVERSIONS -include /usr/src/linux/include/linux/modversions.h  -c -o cm206.o cm206.c"
+ * compile-command: "gcc -D__KERNEL__ -I/usr/src/linux/include -Wall -Wstrict-prototypes -O2 -fomit-frame-pointer -pipe -fno-strength-reduce -m486 -DMODULE -DMODVERSIONS -include /usr/src/linux/include/linux/modversions.h  -c -o cm206.o cm206.c"
  * End:
  */

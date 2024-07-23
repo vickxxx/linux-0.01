@@ -44,11 +44,6 @@
 #include "aha1740.h"
 #include<linux/stat.h>
 
-struct proc_dir_entry proc_scsi_aha1740 = {
-    PROC_SCSI_AHA1740, 7, "aha1740",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
-
 /* IF YOU ARE HAVING PROBLEMS WITH THIS DRIVER, AND WANT TO WATCH
    IT WORK, THEN:
 #define DEBUG
@@ -546,6 +541,11 @@ int aha1740_detect(Scsi_Host_Template * tpnt)
 	    continue;
 	}
 	shpnt = scsi_register(tpnt, sizeof(struct aha1740_hostdata));
+	if(shpnt == NULL)
+	{
+		free_irq(irq_level, NULL);
+		continue;
+	}
 	request_region(slotbase, SLOTSIZE, "aha1740");
 	shpnt->base = 0;
 	shpnt->io_port = slotbase;
@@ -606,12 +606,10 @@ int aha1740_biosparam(Disk * disk, kdev_t dev, int* ip)
     return 0;
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = AHA1740;
+static Scsi_Host_Template driver_template = AHA1740;
 
 #include "scsi_module.c"
-#endif
 
 /* Okay, you made it all the way through.  As of this writing, 3/31/93, I'm
 brad@saturn.gaylord.com or brad@bradpc.gaylord.com.  I'll try to help as time

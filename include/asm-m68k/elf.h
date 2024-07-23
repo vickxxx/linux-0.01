@@ -5,6 +5,7 @@
  * ELF register definitions..
  */
 
+#include <linux/config.h>
 #include <asm/ptrace.h>
 #include <asm/user.h>
 
@@ -18,7 +19,7 @@ typedef struct user_m68kfp_struct elf_fpregset_t;
 /*
  * This is used to ensure we don't load something for the wrong architecture.
  */
-#define elf_check_arch(x) ((x) == EM_68K)
+#define elf_check_arch(x) ((x)->e_machine == EM_68K)
 
 /*
  * These are used to set parameters in the core dumps.
@@ -33,14 +34,22 @@ typedef struct user_m68kfp_struct elf_fpregset_t;
 #define ELF_PLAT_INIT(_r)	_r->a1 = 0
 
 #define USE_ELF_CORE_DUMP
+#ifndef CONFIG_SUN3
 #define ELF_EXEC_PAGESIZE	4096
+#else
+#define ELF_EXEC_PAGESIZE	8192
+#endif
 
 /* This is the location that an ET_DYN program is loaded if exec'ed.  Typical
    use of this is to invoke "./ld.so someprog" to test out a new version of
    the loader.  We need to make sure that it is out of the way of the program
    that it will "exec", and that there is sufficient room for the brk.  */
 
+#ifndef CONFIG_SUN3
 #define ELF_ET_DYN_BASE         0xD0000000UL
+#else
+#define ELF_ET_DYN_BASE         0x0D800000UL
+#endif
 
 #define ELF_CORE_COPY_REGS(pr_reg, regs)				\
 	/* Bleech. */							\
@@ -80,8 +89,7 @@ typedef struct user_m68kfp_struct elf_fpregset_t;
 #define ELF_PLATFORM  (NULL)
 
 #ifdef __KERNEL__
-#define SET_PERSONALITY(ex, ibcs2) \
-	current->personality = (ibcs2 ? PER_SVR4 : PER_LINUX)
+#define SET_PERSONALITY(ex, ibcs2) set_personality((ibcs2)?PER_SVR4:PER_LINUX)
 #endif
 
 #endif

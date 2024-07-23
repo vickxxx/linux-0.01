@@ -14,6 +14,10 @@
 #include <asm/virtconvert.h>
 
 /*
+ * These are for PCI shared memory _only_ and should never be used
+ * on any other type of memory, including Zorro memory. They are meant to
+ * access the bus in the bus byte order which is little-endian!.
+ *
  * readX/writeX() are used to access memory mapped devices. On some
  * architectures the memory mapped IO stuff needs to be accessed
  * differently. On the m68k architecture, we just read/write the
@@ -43,6 +47,11 @@
 #define outb(x,addr) ((void) writeb(x,addr))
 #define outb_p(x,addr) outb(x,addr)
 
+#ifndef CONFIG_SUN3
+#define IO_SPACE_LIMIT 0xffff
+#else
+#define IO_SPACE_LIMIT 0x0fffffff
+#endif
 
 /* Values for nocacheflag and cmode */
 #define IOMAP_FULL_CACHING		0

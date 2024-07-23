@@ -14,7 +14,6 @@
  *        cycle is a good cycle.
  */
 #include <asm/asm.h>
-#include <asm/mipsconfig.h>
 #include <asm/mipsregs.h>
 #include <asm/jazz.h>
 #include <asm/regdef.h>

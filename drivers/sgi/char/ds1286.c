@@ -1,4 +1,4 @@
-/* $Id: ds1286.c,v 1.4 1999/06/17 13:29:03 ralf Exp $
+/* $Id: ds1286.c,v 1.6 1999/10/09 00:01:31 ralf Exp $
  *
  *	Real Time Clock interface for Linux	
  *
@@ -37,11 +37,12 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/rtc.h>
+#include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 
 #include <asm/ds1286.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <asm/spinlock.h>
 #include <asm/system.h>
 
 #define DS1286_VERSION		"1.0"
@@ -73,9 +74,7 @@ void clear_rtc_irq_bit(unsigned char bit);
 
 static inline unsigned char ds1286_is_updating(void);
 
-#ifdef __SMP__
 static spinlock_t ds1286_lock = SPIN_LOCK_UNLOCKED;
-#endif
 
 /*
  *	Bits in rtc_status. (7 bits of room for future expansion)
@@ -356,7 +355,9 @@ static int ds1286_open(struct inode *inode, struct file *file)
 
 static int ds1286_release(struct inode *inode, struct file *file)
 {
+	lock_kernel();
 	ds1286_status &= ~RTC_IS_OPEN;
+	unlock_kernel();
 	return 0;
 }
 
@@ -373,16 +374,12 @@ static unsigned int ds1286_poll(struct file *file, poll_table *wait)
  */
 
 static struct file_operations ds1286_fops = {
-	ds1286_llseek,
-	ds1286_read,
-	NULL,		/* No write */
-	NULL,		/* No readdir */
-	ds1286_poll,
-	ds1286_ioctl,
-	NULL,		/* No mmap */
-	ds1286_open,
-	NULL,
-	ds1286_release
+	llseek:		ds1286_llseek,
+	read:		ds1286_read,
+	poll:		ds1286_poll,
+	ioctl:		ds1286_ioctl,
+	open:		ds1286_open,
+	release:	ds1286_release,
 };
 
 static struct miscdevice ds1286_dev=
@@ -392,7 +389,7 @@ static struct miscdevice ds1286_dev=
 	&ds1286_fops
 };
 
-__initfunc(int ds1286_init(void))
+int __init ds1286_init(void)
 {
 	printk(KERN_INFO "DS1286 Real Time Clock Driver v%s\n", DS1286_VERSION);
 	misc_register(&ds1286_dev);

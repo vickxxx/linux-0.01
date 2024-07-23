@@ -49,15 +49,16 @@
  *      the previous version of this driver.  Coded added by Anthony Barbachan 
  *      from bugfix tip originally suggested by Alan Cox.
  *
+ *  November 1999 -- Make kernel-parameter implementation work with 2.3.x 
+ *	             Removed init_module & cleanup_module in favor of 
+ *	             module_init & module_exit.
+ *	             Torben Mathiasen <tmm@image.dk>
  */
 
 #define SJCD_VERSION_MAJOR 1
 #define SJCD_VERSION_MINOR 7
 
-#ifdef MODULE
 #include <linux/module.h>
-#endif /* MODULE */
-
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
@@ -69,6 +70,7 @@
 #include <linux/string.h>
 #include <linux/major.h>
 #include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
@@ -148,7 +150,7 @@ static struct sjcd_stat statistic;
 /*
  * Timer.
  */
-static struct timer_list sjcd_delay_timer = { NULL, NULL, 0, 0, NULL };
+static struct timer_list sjcd_delay_timer;
 
 #define SJCD_SET_TIMER( func, tmout )           \
     ( sjcd_delay_timer.expires = jiffies+tmout,         \
@@ -163,11 +165,20 @@ static int sjcd_cleanup(void);
  * Set up device, i.e., use command line data to set
  * base address.
  */
-__initfunc(void sjcd_setup( char *str, int *ints ))
+#ifndef MODULE
+static int __init sjcd_setup( char *str)
 {
+   int ints[2];
+   (void)get_options(str, ARRAY_SIZE(ints), ints);
    if (ints[0] > 0)
       sjcd_base = ints[1];
+
+   return 1;
 }
+
+__setup("sjcd=", sjcd_setup);
+
+#endif
 
 /*
  * Special converters.
@@ -925,7 +936,7 @@ static void sjcd_invalidate_buffers( void ){
  */
 
 #define CURRENT_IS_VALID                                      \
-    ( CURRENT != NULL && MAJOR( CURRENT->rq_dev ) == MAJOR_NR && \
+    ( !QUEUE_EMPTY && MAJOR( CURRENT->rq_dev ) == MAJOR_NR && \
       CURRENT->cmd == READ && CURRENT->sector != -1 )
 
 static void sjcd_transfer( void ){
@@ -1272,7 +1283,7 @@ static void sjcd_poll( void ){
   SJCD_SET_TIMER( sjcd_poll, 1 );
 }
 
-static void do_sjcd_request( void ){
+static void do_sjcd_request( request_queue_t * q ){
 #if defined( SJCD_TRACE )
   printk( "SJCD: do_sjcd_request(%ld+%ld)\n",
 	 CURRENT->sector, CURRENT->nr_sectors );
@@ -1325,6 +1336,8 @@ int sjcd_open( struct inode *ip, struct file *fp ){
    */
   if( fp->f_mode & 2 ) return( -EROFS );
   
+  MOD_INC_USE_COUNT;
+
   if( sjcd_open_count == 0 ){
     int s, sjcd_open_tries;
 /* We don't know that, do we? */
@@ -1346,7 +1359,7 @@ int sjcd_open( struct inode *ip, struct file *fp ){
 #if defined( SJCD_DIAGNOSTIC )
 	printk( "SJCD: open: timed out when check status.\n" );
 #endif
-	return( -EIO );
+	goto err_out;
       } else if( !sjcd_media_is_available ){
 #if defined( SJCD_DIAGNOSTIC )
 	printk("SJCD: open: no disk in drive\n");
@@ -1361,10 +1374,10 @@ int sjcd_open( struct inode *ip, struct file *fp ){
 #if defined( SJCD_DIAGNOSTIC )
 	    printk("SJCD: open: tray close attempt failed\n");
 #endif
-	    return( -EIO );
+	    goto err_out;
 	  }
 	  continue;
-	} else return( -EIO );
+	} else goto err_out;
       }
       break;
     }
@@ -1373,17 +1386,19 @@ int sjcd_open( struct inode *ip, struct file *fp ){
 #if defined( SJCD_DIAGNOSTIC )
       printk("SJCD: open: tray lock attempt failed\n");
 #endif
-      return( -EIO );
+      goto err_out;
     }
 #if defined( SJCD_TRACE )
     printk( "SJCD: open: done\n" );
 #endif
   }
-#ifdef MODULE
-  MOD_INC_USE_COUNT;
-#endif
+
   ++sjcd_open_count;
   return( 0 );
+
+err_out:
+  MOD_DEC_USE_COUNT;
+  return( -EIO );
 }
 
 /*
@@ -1400,8 +1415,6 @@ static int sjcd_release( struct inode *inode, struct file *file ){
 #endif
   if( --sjcd_open_count == 0 ){
     sjcd_invalidate_buffers();
-    sync_dev( inode->i_rdev );
-    invalidate_buffers( inode->i_rdev );
     s = sjcd_tray_unlock();
     if( s < 0 || !sjcd_status_valid || sjcd_command_failed ){
 #if defined( SJCD_DIAGNOSTIC )
@@ -1423,21 +1436,11 @@ static int sjcd_release( struct inode *inode, struct file *file ){
 /*
  * A list of file operations allowed for this cdrom.
  */
-static struct file_operations sjcd_fops = {
-  NULL,               /* lseek - default */
-  block_read,         /* read - general block-dev read */
-  block_write,        /* write - general block-dev write */
-  NULL,               /* readdir - bad */
-  NULL,               /* poll */
-  sjcd_ioctl,         /* ioctl */
-  NULL,               /* mmap */
-  sjcd_open,          /* open */
-  NULL,		      /* flush */
-  sjcd_release,       /* release */
-  NULL,               /* fsync */
-  NULL,               /* fasync */
-  sjcd_disk_change,   /* media change */
-  NULL                /* revalidate */
+static struct block_device_operations sjcd_fops = {
+	open:			sjcd_open,
+	release:		sjcd_release,
+	ioctl:			sjcd_ioctl,
+	check_media_change:	sjcd_disk_change,
 };
 
 static int blksize = 2048;
@@ -1457,7 +1460,7 @@ static struct {
  * Test for presence of drive and initialize it. Called at boot time.
  * Probe cdrom, find out version and status.
  */
-__initfunc(int sjcd_init( void )){
+int __init sjcd_init( void ){
   int i;
 
   printk(KERN_INFO "SJCD: Sanyo CDR-H94A cdrom driver version %d.%d.\n", SJCD_VERSION_MAJOR,
@@ -1470,13 +1473,14 @@ __initfunc(int sjcd_init( void )){
 	hardsect_size[MAJOR_NR] = &secsize;
 	blksize_size[MAJOR_NR] = &blksize;
 
-  if( register_blkdev( MAJOR_NR, "sjcd", &sjcd_fops ) != 0 ){
+  if( devfs_register_blkdev( MAJOR_NR, "sjcd", &sjcd_fops ) != 0 ){
     printk( "SJCD: Unable to get major %d for Sanyo CD-ROM\n", MAJOR_NR );
     return( -EIO );
   }
   
-  blk_dev[ MAJOR_NR ].request_fn = DEVICE_REQUEST;
+  blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
   read_ahead[ MAJOR_NR ] = 4;
+  register_disk(NULL, MKDEV(MAJOR_NR,0), 1, &sjcd_fops, 0);
   
   if( check_region( sjcd_base, 4 ) ){
     printk( "SJCD: Init failed, I/O port (%X) is already in use\n",
@@ -1561,6 +1565,8 @@ __initfunc(int sjcd_init( void )){
   }
 
   printk(KERN_INFO "SJCD: Status: port=0x%x.\n", sjcd_base);
+  devfs_register (NULL, "sjcd", DEVFS_FL_DEFAULT, MAJOR_NR, 0,
+		  S_IFBLK | S_IRUGO | S_IWUGO, &sjcd_fops, NULL);
 
   sjcd_present++;
   return( 0 );
@@ -1569,26 +1575,29 @@ __initfunc(int sjcd_init( void )){
 static int
 sjcd_cleanup(void)
 {
-  if( (unregister_blkdev(MAJOR_NR, "sjcd") == -EINVAL) )
+  if( (devfs_unregister_blkdev(MAJOR_NR, "sjcd") == -EINVAL) )
     printk( "SJCD: cannot unregister device.\n" );
-  else
+  else {
     release_region( sjcd_base, 4 );
+    blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+  }
 
   return(0);
 }
 
-#ifdef MODULE
 
-int init_module(void)
+void __exit sjcd_exit(void)
 {
-  return sjcd_init();
-}
-
-void cleanup_module(void)
-{
+  devfs_unregister(devfs_find_handle(NULL, "sjcd", 0, 0, DEVFS_SPECIAL_BLK,0));
   if ( sjcd_cleanup() )
     printk( "SJCD: module: cannot be removed.\n" );
   else
     printk(KERN_INFO "SJCD: module: removed.\n");
 }
+
+#ifdef MODULE
+module_init(sjcd_init);
 #endif
+module_exit(sjcd_exit);
+
+

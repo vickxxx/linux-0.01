@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.101 1999/01/04 06:24:52 jj Exp $
+/* $Id: fault.c,v 1.118 2000/12/29 07:52:41 anton Exp $
  * fault.c:  Page fault handlers for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -12,9 +12,8 @@
 #include <linux/types.h>
 #include <linux/ptrace.h>
 #include <linux/mman.h>
-#include <linux/tasks.h>
+#include <linux/threads.h>
 #include <linux/kernel.h>
-#include <linux/smp.h>
 #include <linux/signal.h>
 #include <linux/mm.h>
 #include <linux/smp.h>
@@ -147,10 +146,11 @@ static void unhandled_fault(unsigned long address, struct task_struct *tsk,
 		printk(KERN_ALERT "Unable to handle kernel paging request "
 		       "at virtual address %08lx\n", address);
 	}
-	printk(KERN_ALERT "tsk->mm->context = %08lx\n",
-	       (unsigned long) tsk->mm->context);
-	printk(KERN_ALERT "tsk->mm->pgd = %08lx\n",
-	       (unsigned long) tsk->mm->pgd);
+	printk(KERN_ALERT "tsk->{mm,active_mm}->context = %08lx\n",
+		(tsk->mm ? tsk->mm->context : tsk->active_mm->context));
+	printk(KERN_ALERT "tsk->{mm,active_mm}->pgd = %08lx\n",
+		(tsk->mm ? (unsigned long) tsk->mm->pgd :
+		 	(unsigned long) tsk->active_mm->pgd));
 	die_if_kernel("Oops", regs);
 }
 
@@ -197,20 +197,37 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
 	struct mm_struct *mm = tsk->mm;
 	unsigned int fixup;
 	unsigned long g2;
+	siginfo_t info;
 	int from_user = !(regs->psr & PSR_PS);
 
 	if(text_fault)
 		address = regs->pc;
 
 	/*
+	 * We fault-in kernel-space virtual memory on-demand. The
+	 * 'reference' page table is init_mm.pgd.
+	 *
+	 * NOTE! We MUST NOT take any locks for this case. We may
+	 * be in an interrupt or a critical region, and should
+	 * only copy the information from the master page table,
+	 * nothing more.
+	 */
+	if (!ARCH_SUN4C_SUN4 && address >= TASK_SIZE)
+		goto vmalloc_fault;
+
+	info.si_code = SEGV_MAPERR;
+
+	/*
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-        if (in_interrupt() || mm == &init_mm)
-                goto do_kernel_fault;
+        if (in_interrupt() || !mm)
+                goto no_context;
 
 	down(&mm->mmap_sem);
-	/* The kernel referencing a bad kernel pointer can lock up
+
+	/*
+	 * The kernel referencing a bad kernel pointer can lock up
 	 * a sun4c machine completely, so we must attempt recovery.
 	 */
 	if(!from_user && address >= PAGE_OFFSET)
@@ -230,6 +247,7 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
 	 * we can handle it..
 	 */
 good_area:
+	info.si_code = SEGV_ACCERR;
 	if(write) {
 		if(!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
@@ -238,18 +256,53 @@ good_area:
 		if(!(vma->vm_flags & (VM_READ | VM_EXEC)))
 			goto bad_area;
 	}
-	if (!handle_mm_fault(current, vma, address, write))
+
+	/*
+	 * If for any reason at all we couldn't handle the fault,
+	 * make sure we exit gracefully rather than endlessly redo
+	 * the fault.
+	 */
+	switch (handle_mm_fault(mm, vma, address, write)) {
+	case 1:
+		current->min_flt++;
+		break;
+	case 2:
+		current->maj_flt++;
+		break;
+	case 0:
 		goto do_sigbus;
+	default:
+		goto out_of_memory;
+	}
 	up(&mm->mmap_sem);
 	return;
+
 	/*
 	 * Something tried to access memory that isn't in our memory map..
 	 * Fix it, but check if it's kernel or user first..
 	 */
 bad_area:
 	up(&mm->mmap_sem);
+
+bad_area_nosemaphore:
+	/* User mode accesses just cause a SIGSEGV */
+	if(from_user) {
+#if 0
+		printk("Fault whee %s [%d]: segfaults at %08lx pc=%08lx\n",
+		       tsk->comm, tsk->pid, address, regs->pc);
+#endif
+		info.si_signo = SIGSEGV;
+		info.si_errno = 0;
+		/* info.si_code set above to make clear whether
+		   this was a SEGV_MAPERR or SEGV_ACCERR fault.  */
+		info.si_addr = (void *)address;
+		info.si_trapno = 0;
+		force_sig_info (SIGSEGV, &info, tsk);
+		return;
+	}
+
 	/* Is this in ex_table? */
-do_kernel_fault:
+no_context:
 	g2 = regs->u_regs[UREG_G2];
 	if (!from_user && (fixup = search_exception_table (regs->pc, &g2))) {
 		if (fixup > 10) { /* Values below are reserved for other things */
@@ -276,26 +329,60 @@ do_kernel_fault:
 			return;
 		}
 	}
-	if(from_user) {
-#if 0
-		printk("Fault whee %s [%d]: segfaults at %08lx pc=%08lx\n",
-		       tsk->comm, tsk->pid, address, regs->pc);
-#endif
-		tsk->tss.sig_address = address;
-		tsk->tss.sig_desc = SUBSIG_NOMAPPING;
-		force_sig(SIGSEGV, tsk);
-		return;
-	}
+	
 	unhandled_fault (address, tsk, regs);
-	return;
+	do_exit(SIGKILL);
+
+/*
+ * We ran out of memory, or some other thing happened to us that made
+ * us unable to handle the page fault gracefully.
+ */
+out_of_memory:
+	up(&mm->mmap_sem);
+	printk("VM: killing process %s\n", tsk->comm);
+	if (from_user)
+		do_exit(SIGKILL);
+	goto no_context;
 
 do_sigbus:
 	up(&mm->mmap_sem);
-	tsk->tss.sig_address = address;
-	tsk->tss.sig_desc = SUBSIG_MISCERROR;
-	force_sig(SIGBUS, tsk);
-	if (! from_user)
-		goto do_kernel_fault;
+	info.si_signo = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_ADRERR;
+	info.si_addr = (void *)address;
+	info.si_trapno = 0;
+	force_sig_info (SIGBUS, &info, tsk);
+	if (!from_user)
+		goto no_context;
+
+vmalloc_fault:
+	{
+		/*
+		 * Synchronize this task's top level page-table
+		 * with the 'reference' page table.
+		 */
+		int offset = pgd_index(address);
+		pgd_t *pgd, *pgd_k;
+		pmd_t *pmd, *pmd_k;
+
+		pgd = tsk->active_mm->pgd + offset;
+		pgd_k = init_mm.pgd + offset;
+
+		if (!pgd_present(*pgd)) {
+			if (!pgd_present(*pgd_k))
+				goto bad_area_nosemaphore;
+			pgd_val(*pgd) = pgd_val(*pgd_k);
+			return;
+		}
+
+		pmd = pmd_offset(pgd, address);
+		pmd_k = pmd_offset(pgd_k, address);
+
+		if (pmd_present(*pmd) || !pmd_present(*pmd_k))
+			goto bad_area_nosemaphore;
+		pmd_val(*pmd) = pmd_val(*pmd_k);
+		return;
+	}
 }
 
 asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
@@ -303,45 +390,62 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 {
 	extern void sun4c_update_mmu_cache(struct vm_area_struct *,
 					   unsigned long,pte_t);
-	extern pgd_t *sun4c_pgd_offset(struct mm_struct *,unsigned long);
 	extern pte_t *sun4c_pte_offset(pmd_t *,unsigned long);
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
 	pgd_t *pgdp;
 	pte_t *ptep;
 
-	if (text_fault)
+	if (text_fault) {
 		address = regs->pc;
+	} else if (!write &&
+		   !(regs->psr & PSR_PS)) {
+		unsigned int insn, *ip;
 
-	pgdp = sun4c_pgd_offset(mm, address);
+		ip = (unsigned int *)regs->pc;
+		if (! get_user(insn, ip)) {
+			if ((insn & 0xc1680000) == 0xc0680000)
+				write = 1;
+		}
+	}
+
+	pgdp = pgd_offset(mm, address);
 	ptep = sun4c_pte_offset((pmd_t *) pgdp, address);
 
 	if (pgd_val(*pgdp)) {
 	    if (write) {
 		if ((pte_val(*ptep) & (_SUN4C_PAGE_WRITE|_SUN4C_PAGE_PRESENT))
 				   == (_SUN4C_PAGE_WRITE|_SUN4C_PAGE_PRESENT)) {
+			unsigned long flags;
 
 			*ptep = __pte(pte_val(*ptep) | _SUN4C_PAGE_ACCESSED |
 				      _SUN4C_PAGE_MODIFIED |
 				      _SUN4C_PAGE_VALID |
 				      _SUN4C_PAGE_DIRTY);
 
+			save_and_cli(flags);
 			if (sun4c_get_segmap(address) != invalid_segment) {
 				sun4c_put_pte(address, pte_val(*ptep));
+				restore_flags(flags);
 				return;
 			}
+			restore_flags(flags);
 		}
 	    } else {
 		if ((pte_val(*ptep) & (_SUN4C_PAGE_READ|_SUN4C_PAGE_PRESENT))
 				   == (_SUN4C_PAGE_READ|_SUN4C_PAGE_PRESENT)) {
+			unsigned long flags;
 
 			*ptep = __pte(pte_val(*ptep) | _SUN4C_PAGE_ACCESSED |
 				      _SUN4C_PAGE_VALID);
 
+			save_and_cli(flags);
 			if (sun4c_get_segmap(address) != invalid_segment) {
 				sun4c_put_pte(address, pte_val(*ptep));
+				restore_flags(flags);
 				return;
 			}
+			restore_flags(flags);
 		}
 	    }
 	}
@@ -367,6 +471,9 @@ inline void force_user_fault(unsigned long address, int write)
 	struct vm_area_struct *vma;
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
+	siginfo_t info;
+
+	info.si_code = SEGV_MAPERR;
 
 #if 0
 	printk("wf<pid=%d,wr=%d,addr=%08lx>\n",
@@ -383,13 +490,15 @@ inline void force_user_fault(unsigned long address, int write)
 	if(expand_stack(vma, address))
 		goto bad_area;
 good_area:
-	if(write)
+	info.si_code = SEGV_ACCERR;
+	if(write) {
 		if(!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
-	else
+	} else {
 		if(!(vma->vm_flags & (VM_READ | VM_EXEC)))
 			goto bad_area;
-	if (!handle_mm_fault(current, vma, address, write))
+	}
+	if (!handle_mm_fault(mm, vma, address, write))
 		goto do_sigbus;
 	up(&mm->mmap_sem);
 	return;
@@ -399,47 +508,48 @@ bad_area:
 	printk("Window whee %s [%d]: segfaults at %08lx\n",
 	       tsk->comm, tsk->pid, address);
 #endif
-	tsk->tss.sig_address = address;
-	tsk->tss.sig_desc = SUBSIG_NOMAPPING;
-	send_sig(SIGSEGV, tsk, 1);
+	info.si_signo = SIGSEGV;
+	info.si_errno = 0;
+	/* info.si_code set above to make clear whether
+	   this was a SEGV_MAPERR or SEGV_ACCERR fault.  */
+	info.si_addr = (void *)address;
+	info.si_trapno = 0;
+	force_sig_info (SIGSEGV, &info, tsk);
 	return;
 
 do_sigbus:
 	up(&mm->mmap_sem);
-	tsk->tss.sig_address = address;
-	tsk->tss.sig_desc = SUBSIG_MISCERROR;
-	force_sig(SIGBUS, tsk);
+	info.si_signo = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_ADRERR;
+	info.si_addr = (void *)address;
+	info.si_trapno = 0;
+	force_sig_info (SIGBUS, &info, tsk);
 }
 
 void window_overflow_fault(void)
 {
 	unsigned long sp;
 
-	lock_kernel();
-	sp = current->tss.rwbuf_stkptrs[0];
+	sp = current->thread.rwbuf_stkptrs[0];
 	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
 		force_user_fault(sp + 0x38, 1);
 	force_user_fault(sp, 1);
-	unlock_kernel();
 }
 
 void window_underflow_fault(unsigned long sp)
 {
-	lock_kernel();
 	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
 		force_user_fault(sp + 0x38, 0);
 	force_user_fault(sp, 0);
-	unlock_kernel();
 }
 
 void window_ret_fault(struct pt_regs *regs)
 {
 	unsigned long sp;
 
-	lock_kernel();
 	sp = regs->u_regs[UREG_FP];
 	if(((sp + 0x38) & PAGE_MASK) != (sp & PAGE_MASK))
 		force_user_fault(sp + 0x38, 0);
 	force_user_fault(sp, 0);
-	unlock_kernel();
 }

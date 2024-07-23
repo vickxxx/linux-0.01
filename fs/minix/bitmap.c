@@ -16,6 +16,8 @@
 #include <linux/stat.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
+#include <linux/locks.h>
+#include <linux/quotaops.h>
 
 #include <asm/bitops.h>
 
@@ -51,8 +53,9 @@ static unsigned long count_free(struct buffer_head *map[], unsigned numblocks, _
 	return(sum);
 }
 
-void minix_free_block(struct super_block * sb, int block)
+void minix_free_block(struct inode * inode, int block)
 {
+	struct super_block * sb = inode->i_sb;
 	struct buffer_head * bh;
 	unsigned int bit,zone;
 
@@ -77,15 +80,16 @@ void minix_free_block(struct super_block * sb, int block)
 		return;
 	}
 	bh = sb->u.minix_sb.s_zmap[zone];
-	if (!minix_clear_bit(bit,bh->b_data))
+	if (!minix_test_and_clear_bit(bit,bh->b_data))
 		printk("free_block (%s:%d): bit already cleared\n",
 		       kdevname(sb->s_dev), block);
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	return;
 }
 
-int minix_new_block(struct super_block * sb)
+int minix_new_block(struct inode * inode)
 {
+	struct super_block * sb = inode->i_sb;
 	struct buffer_head * bh;
 	int i,j;
 
@@ -103,11 +107,11 @@ repeat:
 	}
 	if (!bh || j >= 8192)
 		return 0;
-	if (minix_set_bit(j,bh->b_data)) {
+	if (minix_test_and_set_bit(j,bh->b_data)) {
 		printk("new_block: bit already set");
 		goto repeat;
 	}
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	j += i*8192 + sb->u.minix_sb.s_firstdatazone-1;
 	if (j < sb->u.minix_sb.s_firstdatazone ||
 	    j >= sb->u.minix_sb.s_nzones)
@@ -146,7 +150,7 @@ static struct buffer_head *V1_minix_clear_inode(struct inode *inode)
 		     (ino - 1) % MINIX_INODES_PER_BLOCK);
 	raw_inode->i_nlinks = 0;
 	raw_inode->i_mode = 0;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	return bh;
 }
 
@@ -174,7 +178,7 @@ static struct buffer_head *V2_minix_clear_inode(struct inode *inode)
 		     (ino - 1) % MINIX2_INODES_PER_BLOCK);
 	raw_inode->i_nlinks = 0;
 	raw_inode->i_mode = 0;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	return bh;
 }
 
@@ -195,24 +199,6 @@ void minix_free_inode(struct inode * inode)
 	struct buffer_head * bh;
 	unsigned long ino;
 
-	if (!inode)
-		return;
-	if (!inode->i_dev) {
-		printk("free_inode: inode has no device\n");
-		return;
-	}
-	if (inode->i_count > 1) {
-		printk("free_inode: inode has count=%d\n",inode->i_count);
-		return;
-	}
-	if (inode->i_nlink) {
-		printk("free_inode: inode has nlink=%d\n",inode->i_nlink);
-		return;
-	}
-	if (!inode->i_sb) {
-		printk("free_inode: inode on nonexistent device\n");
-		return;
-	}
 	if (inode->i_ino < 1 || inode->i_ino > inode->i_sb->u.minix_sb.s_ninodes) {
 		printk("free_inode: inode 0 or nonexistent inode\n");
 		return;
@@ -222,28 +208,32 @@ void minix_free_inode(struct inode * inode)
 		printk("free_inode: nonexistent imap in superblock\n");
 		return;
 	}
+
 	bh = inode->i_sb->u.minix_sb.s_imap[ino >> 13];
 	minix_clear_inode(inode);
 	clear_inode(inode);
-	if (!minix_clear_bit(ino & 8191, bh->b_data))
+	if (!minix_test_and_clear_bit(ino & 8191, bh->b_data))
 		printk("free_inode: bit %lu already cleared.\n",ino);
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 }
 
-struct inode * minix_new_inode(const struct inode * dir)
+struct inode * minix_new_inode(const struct inode * dir, int * error)
 {
 	struct super_block * sb;
 	struct inode * inode;
 	struct buffer_head * bh;
 	int i,j;
 
-	if (!dir || !(inode = get_empty_inode()))
-		return NULL;
 	sb = dir->i_sb;
-	inode->i_sb = sb;
-	inode->i_flags = 0;
+	inode = new_inode(sb);
+	if (!inode) {
+		*error = -ENOMEM;
+		return NULL;
+	}
 	j = 8192;
 	bh = NULL;
+	*error = -ENOSPC;
+	lock_super(sb);
 	for (i = 0; i < sb->u.minix_sb.s_imap_blocks; i++) {
 		bh = inode->i_sb->u.minix_sb.s_imap[i];
 		if ((j = minix_find_first_zero_bit(bh->b_data, 8192)) < 8192)
@@ -251,29 +241,32 @@ struct inode * minix_new_inode(const struct inode * dir)
 	}
 	if (!bh || j >= 8192) {
 		iput(inode);
+		unlock_super(sb);
 		return NULL;
 	}
-	if (minix_set_bit(j,bh->b_data)) {	/* shouldn't happen */
+	if (minix_test_and_set_bit(j,bh->b_data)) {	/* shouldn't happen */
 		printk("new_inode: bit already set");
 		iput(inode);
+		unlock_super(sb);
 		return NULL;
 	}
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	j += i*8192;
 	if (!j || j > inode->i_sb->u.minix_sb.s_ninodes) {
 		iput(inode);
+		unlock_super(sb);
 		return NULL;
 	}
-	inode->i_nlink = 1;
-	inode->i_dev = sb->s_dev;
 	inode->i_uid = current->fsuid;
 	inode->i_gid = (dir->i_mode & S_ISGID) ? dir->i_gid : current->fsgid;
 	inode->i_ino = j;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	inode->i_op = NULL;
 	inode->i_blocks = inode->i_blksize = 0;
 	insert_inode_hash(inode);
 	mark_inode_dirty(inode);
+
+	unlock_super(sb);
+	*error = 0;
 	return inode;
 }
 

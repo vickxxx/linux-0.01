@@ -106,9 +106,9 @@ revalidate:
 						   bh, offset)) {
 				/* On error, skip the f_pos to the
 				   next block. */
-				filp->f_pos = (filp->f_pos &
+				filp->f_pos = (filp->f_pos |
 				              (sb->s_blocksize - 1)) +
-					       sb->s_blocksize;
+					       1;
 				brelse (bh);
 				return stored;
 			}
@@ -121,15 +121,18 @@ revalidate:
 				 * version stamp to detect whether or
 				 * not the directory has been modified
 				 * during the copy operation. */
-				unsigned long version = inode->i_version;
+				unsigned long version = filp->f_version;
+				unsigned char d_type = DT_UNKNOWN;
 
 				UFSD(("filldir(%s,%u)\n", de->d_name, SWAB32(de->d_ino)))
 				UFSD(("namlen %u\n", ufs_get_de_namlen(de)))
+				if ((flags & UFS_DE_MASK) == UFS_DE_44BSD)
+					d_type = de->d_u.d_44.d_type;
 				error = filldir(dirent, de->d_name, ufs_get_de_namlen(de),
-						filp->f_pos, SWAB32(de->d_ino));
+						filp->f_pos, SWAB32(de->d_ino), d_type);
 				if (error)
 					break;
-				if (version != inode->i_version)
+				if (version != filp->f_version)
 					goto revalidate;
 				stored ++;
 			}
@@ -168,7 +171,7 @@ int ufs_check_dir_entry (const char * function,	struct inode * dir,
 		error_msg = "inode out of bounds";
 
 	if (error_msg != NULL)
-		ufs_error (sb, function, "bad entry in directory #%lu, size %lu: %s - "
+		ufs_error (sb, function, "bad entry in directory #%lu, size %Lu: %s - "
 			    "offset=%lu, inode=%lu, reclen=%d, namlen=%d",
 			    dir->i_ino, dir->i_size, error_msg, offset,
 			    (unsigned long) SWAB32(de->d_ino),
@@ -177,42 +180,8 @@ int ufs_check_dir_entry (const char * function,	struct inode * dir,
 	return (error_msg == NULL ? 1 : 0);
 }
 
-static struct file_operations ufs_dir_operations = {
-	NULL,			/* lseek */
-	NULL,			/* read */
-	NULL,			/* write */
-	ufs_readdir,		/* readdir */
-	NULL,			/* select */
-	NULL,			/* ioctl */
-	NULL,			/* mmap */
-	NULL,			/* open */
-	NULL,			/* flush */
-	NULL,			/* release */
-	file_fsync,		/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL,			/* revalidate */
-};
-
-struct inode_operations ufs_dir_inode_operations = {
-	&ufs_dir_operations,	/* default directory file operations */
-	ufs_create,		/* create */
-	ufs_lookup,		/* lookup */
-	ufs_link,		/* link */
-	ufs_unlink,		/* unlink */
-	ufs_symlink,		/* symlink */
-	ufs_mkdir,		/* mkdir */
-	ufs_rmdir,		/* rmdir */
-	ufs_mknod,		/* mknod */
-	ufs_rename,		/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	NULL,			/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	ufs_permission,		/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+struct file_operations ufs_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	ufs_readdir,
+	fsync:		file_fsync,
 };

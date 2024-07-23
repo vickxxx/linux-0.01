@@ -8,24 +8,14 @@
 # Note 2! The CFLAGS definitions are now in the main makefile.
 
 O_TARGET := proc.o
-O_OBJS   := inode.o root.o base.o generic.o mem.o link.o fd.o array.o \
-		kmsg.o scsi.o proc_tty.o sysvipc.o
-ifdef CONFIG_OMIRR
-O_OBJS   := $(O_OBJS) omirr.o
-endif
-OX_OBJS  := procfs_syms.o
-M_OBJS   := 
 
-ifeq ($(CONFIG_SUN_OPENPROMFS),y)
-O_OBJS += openpromfs.o
-else
-  ifeq ($(CONFIG_SUN_OPENPROMFS),m)
-  M_OBJS += openpromfs.o
-  endif
-endif
+export-objs := procfs_syms.o
+
+obj-y    := inode.o root.o base.o generic.o array.o \
+		kmsg.o proc_tty.o proc_misc.o kcore.o procfs_syms.o
 
 ifeq ($(CONFIG_PROC_DEVICETREE),y)
-O_OBJS += proc_devtree.o
+obj-y += proc_devtree.o
 endif
 
 include $(TOPDIR)/Rules.make

@@ -1,9 +1,9 @@
 /*
  * The DSP56001 Device Driver, saviour of the Free World(tm)
  *
- * Authors: Fredrik Noring   <noring@lysator.liu.se>
- *          lars brinkhoff   <f93labr@dd.chalmers.se>
- *          Tomas Berndtsson <tobe@lysator.liu.se>
+ * Authors: Fredrik Noring   <noring@nocrew.org>
+ *          lars brinkhoff   <lars@nocrew.org>
+ *          Tomas Berndtsson <tomas@nocrew.org>
  *
  * First version May 1996
  *
@@ -34,6 +34,8 @@
 #include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
+#include <linux/smp_lock.h>
 
 #include <asm/segment.h>
 #include <asm/atarihw.h>
@@ -73,13 +75,13 @@
 		m = min(count, maxio); \
 		for (i = 0; i < m; i++) { \
 			for (t = 0; t < timeout && !ENABLE; t++) \
-				wait_some(2); \
+				wait_some(HZ/50); \
 			if(!ENABLE) \
 				return -EIO; \
 			f; \
 		} \
 		count -= m; \
-		if (m == maxio) wait_some(2); \
+		if (m == maxio) wait_some(HZ/50); \
 	} \
 }
 
@@ -87,7 +89,7 @@
 { \
 	int t; \
 	for(t = 0; t < n && !DSP56K_TRANSMIT; t++) \
-		wait_some(1); \
+		wait_some(HZ/100); \
 	if(!DSP56K_TRANSMIT) { \
 		return -EIO; \
 	} \
@@ -97,7 +99,7 @@
 { \
 	int t; \
 	for(t = 0; t < n && !DSP56K_RECEIVE; t++) \
-		wait_some(1); \
+		wait_some(HZ/100); \
 	if(!DSP56K_RECEIVE) { \
 		return -EIO; \
 	} \
@@ -471,10 +473,6 @@ static int dsp56k_open(struct inode *inode, struct file *file)
 		return -ENXIO;
 	}
 
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif /* MODULE */
-
 	return 0;
 }
 
@@ -486,7 +484,9 @@ static int dsp56k_release(struct inode *inode, struct file *file)
 	{
 	case DSP56K_DEV_56001:
 
+		lock_kernel();
 		dsp56k.in_use = 0;
+		unlock_kernel();
 
 		break;
 	default:
@@ -494,47 +494,44 @@ static int dsp56k_release(struct inode *inode, struct file *file)
 		return -ENXIO;
 	}
 
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
 	return 0;
 }
 
 static struct file_operations dsp56k_fops = {
-	NULL,    /* no special dsp56k_lseek */
-	dsp56k_read,
-	dsp56k_write,
-	NULL,    /* no special dsp56k_readdir */
-	NULL,    /* dsp56k_poll? */
-	dsp56k_ioctl,
-	NULL,    /* no special dsp56k_mmap */
-	dsp56k_open,
-	NULL,	/* flush */
-	dsp56k_release,
-	NULL,    /* no special dsp56k_fsync */
-	NULL,    /* no special dsp56k_fasync */
-	NULL,    /* no special dsp56k_check_media_change */
-	NULL     /* no special dsp56k_revalidate */
+	owner:		THIS_MODULE,
+	read:		dsp56k_read,
+	write:		dsp56k_write,
+	ioctl:		dsp56k_ioctl,
+	open:		dsp56k_open,
+	release:	dsp56k_release,
 };
 
 
 /****** Init and module functions ******/
 
-__initfunc(int dsp56k_init(void))
+static devfs_handle_t devfs_handle;
+
+int __init dsp56k_init(void)
 {
 	if(!MACH_IS_ATARI || !ATARIHW_PRESENT(DSP56K)) {
 		printk("DSP56k driver: Hardware not present\n");
 		return -ENODEV;
 	}
 
-	if(register_chrdev(DSP56K_MAJOR, "dsp56k", &dsp56k_fops)) {
+	if(devfs_register_chrdev(DSP56K_MAJOR, "dsp56k", &dsp56k_fops)) {
 		printk("DSP56k driver: Unable to register driver\n");
 		return -ENODEV;
 	}
+	devfs_handle = devfs_register (NULL, "dsp56k", DEVFS_FL_DEFAULT,
+				       DSP56K_MAJOR, 0,
+				       S_IFCHR | S_IRUSR | S_IWUSR,
+				       &dsp56k_fops, NULL);
 
 	dsp56k.in_use = 0;
 
 	printk("DSP56k driver installed\n");
+
+	return 0;
 }
 
 #ifdef MODULE
@@ -545,6 +542,7 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	unregister_chrdev(DSP56K_MAJOR, "dsp56k");
+	devfs_unregister_chrdev(DSP56K_MAJOR, "dsp56k");
+	devfs_unregister (devfs_handle);
 }
 #endif /* MODULE */

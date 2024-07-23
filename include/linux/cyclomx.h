@@ -1,10 +1,10 @@
 /*
-* cyclomx.h	CYCLOM X Multiprotocol WAN Link Driver.
+* cyclomx.h	Cyclom 2X WAN Link Driver.
 *		User-level API definitions.
 *
 * Author:	Arnaldo Carvalho de Melo <acme@conectiva.com.br>
 *
-* Copyright:	(c) 1998, 1999 Arnaldo Carvalho de Melo
+* Copyright:	(c) 1998-2000 Arnaldo Carvalho de Melo
 *
 * Based on wanpipe.h by Gene Kozin <genek@compuserve.com>
 *
@@ -13,23 +13,26 @@
 *		as published by the Free Software Foundation; either version
 *		2 of the License, or (at your option) any later version.
 * ============================================================================
+* 2000/07/13    acme		remove crap #if KERNEL_VERSION > blah
+* 2000/01/21    acme            rename cyclomx_open to cyclomx_mod_inc_use_count
+*                               and cyclomx_close to cyclomx_mod_dec_use_count
 * 1999/05/19	acme		wait_queue_head_t wait_stats(support for 2.3.*)
 * 1999/01/03	acme		judicious use of data types
-* Dec 27, 1998	Arnaldo		cleanup: PACKED not needed
-* Aug 08, 1998	Arnaldo		Version 0.0.1
+* 1998/12/27	acme		cleanup: PACKED not needed
+* 1998/08/08	acme		Version 0.0.1
 */
 #ifndef	_CYCLOMX_H
 #define	_CYCLOMX_H
 
 #include <linux/config.h>
 #include <linux/wanrouter.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 
 #ifdef	__KERNEL__
 /* Kernel Interface */
 
-#include <linux/cycx_drv.h>	/* CYCLOM X support module API definitions */
-#include <linux/cycx_cfm.h>	/* CYCLOM X firmware module definitions */
+#include <linux/cycx_drv.h>	/* Cyclom 2X support module API definitions */
+#include <linux/cycx_cfm.h>	/* Cyclom 2X firmware module definitions */
 #ifdef CONFIG_CYCLOMX_X25
 #include <linux/cycx_x25.h>
 #endif
@@ -56,12 +59,7 @@ typedef struct cycx {
 	spinlock_t lock;
 	char in_isr;			/* interrupt-in-service flag */
 	char buff_int_mode_unbusy;      /* flag for carrying out dev_tint */
-	u16 irq_dis_if_send_count;	/* Disabling irqs in if_send*/
-#if LINUX_VERSION_CODE >= 0x020300
 	wait_queue_head_t wait_stats;  /* to wait for the STATS indication */
-#else
-	struct wait_queue* wait_stats;  /* to wait for the STATS indication */
-#endif
 	u32 mbox;			/* -> mailbox */
 	void (*isr)(struct cycx* card);	/* interrupt service routine */
 	int (*exec)(struct cycx* card, void* u_cmd, void* u_data);
@@ -73,7 +71,7 @@ typedef struct cycx {
 			u32 lo_svc;
 			u32 hi_svc;
 			TX25Stats stats;
-			unsigned critical;	/* critical section flag */
+			spinlock_t lock;
 			u32 connection_keys;
 		} x;
 #endif
@@ -81,12 +79,12 @@ typedef struct cycx {
 } cycx_t;
 
 /* Public Functions */
-void cyclomx_open      (cycx_t* card);			/* cycx_main.c */
-void cyclomx_close     (cycx_t* card);			/* cycx_main.c */
-void cyclomx_set_state (cycx_t* card, int state);	/* cycx_main.c */
+void cyclomx_mod_inc_use_count (cycx_t *card);		/* cycx_main.c */
+void cyclomx_mod_dec_use_count (cycx_t *card);		/* cycx_main.c */
+void cyclomx_set_state (cycx_t *card, int state);	/* cycx_main.c */
 
 #ifdef CONFIG_CYCLOMX_X25
-int cyx_init (cycx_t* card, wandev_conf_t* conf);	/* cycx_x25.c */
+int cyx_init (cycx_t *card, wandev_conf_t *conf);	/* cycx_x25.c */
 #endif
 #endif	/* __KERNEL__ */
 #endif	/* _CYCLOMX_H */

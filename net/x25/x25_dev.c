@@ -14,6 +14,7 @@
  *
  *	History
  *	X.25 001	Jonathan Naylor	Started coding.
+ *      2000-09-04	Henner Eisen	Prevent freeing a dangling skb.
  */
 
 #include <linux/config.h>
@@ -31,7 +32,6 @@
 #include <linux/stat.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
-#include <linux/if_arp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
 #include <asm/segment.h>
@@ -44,7 +44,6 @@
 #include <linux/notifier.h>
 #include <linux/proc_fs.h>
 #include <linux/if_arp.h>
-#include <linux/firewall.h>
 #include <net/x25.h>
 
 static int x25_receive_data(struct sk_buff *skb, struct x25_neigh *neigh)
@@ -52,11 +51,6 @@ static int x25_receive_data(struct sk_buff *skb, struct x25_neigh *neigh)
 	struct sock *sk;
 	unsigned short frametype;
 	unsigned int lci;
-
-	if (call_in_firewall(PF_X25, skb->dev, skb->data, NULL, &skb) != FW_ACCEPT) {
-		kfree_skb(skb);
-		return 0;
-	}
 
 	frametype = skb->data[2];
         lci = ((skb->data[0] << 8) & 0xF00) + ((skb->data[1] << 0) & 0x0FF);
@@ -74,8 +68,17 @@ static int x25_receive_data(struct sk_buff *skb, struct x25_neigh *neigh)
 	 *	Find an existing socket.
 	 */
 	if ((sk = x25_find_socket(lci, neigh)) != NULL) {
+		int queued = 1;
+
 		skb->h.raw = skb->data;
-		return x25_process_rx_frame(sk, skb);
+		bh_lock_sock(sk);
+		if (!sk->lock.users) {
+			queued = x25_process_rx_frame(sk, skb);
+		} else {
+			sk_add_backlog(sk, skb);
+		}
+		bh_unlock_sock(sk);
+		return queued;
 	}
 
 	/*
@@ -85,17 +88,18 @@ static int x25_receive_data(struct sk_buff *skb, struct x25_neigh *neigh)
 		return x25_rx_call_request(skb, neigh, lci);
 
 	/*
-	 *	Its not a Call Request, nor is it a control frame, throw it awa
+	 *	Its not a Call Request, nor is it a control frame.
+	 *      Let caller throw it away.
 	 */
 /*
 	x25_transmit_clear_request(neigh, lci, 0x0D);
 */
-	kfree_skb(skb);
+	printk(KERN_DEBUG "x25_receive_data(): unknown frame type %2x\n",frametype);
 
 	return 0;
 }
 
-int x25_lapb_receive_frame(struct sk_buff *skb, struct device *dev, struct packet_type *ptype)
+int x25_lapb_receive_frame(struct sk_buff *skb, struct net_device *dev, struct packet_type *ptype)
 {
 	struct x25_neigh *neigh;
 	int queued;
@@ -142,7 +146,7 @@ int x25_lapb_receive_frame(struct sk_buff *skb, struct device *dev, struct packe
 	}
 }
 
-int x25_llc_receive_frame(struct sk_buff *skb, struct device *dev, struct packet_type *ptype)
+int x25_llc_receive_frame(struct sk_buff *skb, struct net_device *dev, struct packet_type *ptype)
 {
 	struct x25_neigh *neigh;
 

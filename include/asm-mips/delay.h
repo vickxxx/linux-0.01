@@ -7,10 +7,13 @@
  * Copyright (C) 1994 by Waldorf Electronics
  * Copyright (C) 1995 - 1998 by Ralf Baechle
  */
-#ifndef __ASM_MIPS_DELAY_H
-#define __ASM_MIPS_DELAY_H
+#ifndef _ASM_DELAY_H
+#define _ASM_DELAY_H
 
-extern __inline__ void __delay(int loops)
+#include <linux/config.h>
+
+extern __inline__ void
+__delay(unsigned long loops)
 {
 	__asm__ __volatile__ (
 		".set\tnoreorder\n"
@@ -33,15 +36,16 @@ extern __inline__ void __delay(int loops)
  */
 extern __inline__ void __udelay(unsigned long usecs, unsigned long lps)
 {
+	unsigned long lo;
+
 	usecs *= 0x000010c6;		/* 2**32 / 1000000 */
-	__asm__("multu\t%0,%2\n\t"
-		"mfhi\t%0"
-		:"=r" (usecs)
-		:"0" (usecs),"r" (lps));
+	__asm__("multu\t%2,%3"
+		:"=h" (usecs), "=l" (lo)
+		:"r" (usecs),"r" (lps));
 	__delay(usecs);
 }
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define __udelay_val cpu_data[smp_processor_id()].udelay_val
 #else
 #define __udelay_val loops_per_sec
@@ -49,4 +53,4 @@ extern __inline__ void __udelay(unsigned long usecs, unsigned long lps)
 
 #define udelay(usecs) __udelay((usecs),__udelay_val)
 
-#endif /* __ASM_MIPS_DELAY_H */
+#endif /* _ASM_DELAY_H */

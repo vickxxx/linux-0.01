@@ -74,7 +74,7 @@ static char *version =
 	"ni5010.c: v1.00 06/23/97 Jan-Pascal van Best and Andreas Mohr\n";
 	
 /* bufsize_rcv == 0 means autoprobing */
-unsigned int bufsize_rcv = 0;
+static unsigned int bufsize_rcv = 0;
 
 #define jumpered_interrupts	/* IRQ line jumpered on board */
 #undef jumpered_dma		/* No DMA used */
@@ -100,33 +100,35 @@ struct ni5010_local {
 
 /* Index to functions, as function prototypes. */
 
-extern int 	ni5010_probe(struct device *dev);
-static int	ni5010_probe1(struct device *dev, int ioaddr);
-static int	ni5010_open(struct device *dev);
-static int	ni5010_send_packet(struct sk_buff *skb, struct device *dev);
+extern int 	ni5010_probe(struct net_device *dev);
+static int	ni5010_probe1(struct net_device *dev, int ioaddr);
+static int	ni5010_open(struct net_device *dev);
+static int	ni5010_send_packet(struct sk_buff *skb, struct net_device *dev);
 static void	ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static void	ni5010_rx(struct device *dev);
-static int	ni5010_close(struct device *dev);
-static struct net_device_stats *ni5010_get_stats(struct device *dev);
-static void 	ni5010_set_multicast_list(struct device *dev);
-static void	reset_receiver(struct device *dev);
+static void	ni5010_rx(struct net_device *dev);
+static void	ni5010_timeout(struct net_device *dev);
+static int	ni5010_close(struct net_device *dev);
+static struct net_device_stats *ni5010_get_stats(struct net_device *dev);
+static void 	ni5010_set_multicast_list(struct net_device *dev);
+static void	reset_receiver(struct net_device *dev);
 
-static int	process_xmt_interrupt(struct device *dev);
+static int	process_xmt_interrupt(struct net_device *dev);
 #define tx_done(dev) 1
-extern void	hardware_send_packet(struct device *dev, char *buf, int length);
-extern void 	chipset_init(struct device *dev, int startp);
+static void	hardware_send_packet(struct net_device *dev, char *buf, int length);
+static void 	chipset_init(struct net_device *dev, int startp);
 static void	dump_packet(void *buf, int len);
-static void 	show_registers(struct device *dev);
+static void 	show_registers(struct net_device *dev);
 
 
-__initfunc(int ni5010_probe(struct device *dev))
+int __init ni5010_probe(struct net_device *dev)
 {
 	int *port;
-
-	int base_addr = dev ? dev->base_addr : 0;
+	int base_addr = dev->base_addr;
 
         PRINTK2((KERN_DEBUG "%s: Entering ni5010_probe\n", dev->name));
-        
+
+	SET_MODULE_OWNER(dev);
+
 	if (base_addr > 0x1ff)		/* Check a single specified location. */
 		return ni5010_probe1(dev, base_addr);
 	else if (base_addr != 0)	/* Don't probe at all. */
@@ -157,7 +159,7 @@ static inline int rd_port(int ioaddr)
 	return inb(IE_SAPROM);
 }
 
-__initfunc(void trigger_irq(int ioaddr))
+static void __init trigger_irq(int ioaddr)
 {
 		outb(0x00, EDLC_RESET);	/* Clear EDLC hold RESET state */
 		outb(0x00, IE_RESET);	/* Board reset */
@@ -182,11 +184,11 @@ __initfunc(void trigger_irq(int ioaddr))
  *      verifies that the correct device exists and functions.
  */
 
-__initfunc(static int ni5010_probe1(struct device *dev, int ioaddr))
+static int __init ni5010_probe1(struct net_device *dev, int ioaddr)
 {
 	static unsigned version_printed = 0;
 	int i;
-	unsigned int data;
+	unsigned int data = 0;
 	int boguscount = 40;
 
 	/*
@@ -233,14 +235,6 @@ __initfunc(static int ni5010_probe1(struct device *dev, int ioaddr))
 	} else return -ENODEV;
 	
 	PRINTK2((KERN_DEBUG "%s: I/O #3 passed!\n", dev->name));
-
-	if (dev == NULL) {
-		dev = init_etherdev(0,0);
-		if (dev == NULL) {
-			printk(KERN_WARNING "%s: Failed to allocate device memory\n", boardname);
-			return -ENOMEM;
-		}
-	}
 
 	if (NI5010_DEBUG && version_printed++ == 0)
 		printk(KERN_INFO "%s", version);
@@ -320,15 +314,13 @@ __initfunc(static int ni5010_probe1(struct device *dev, int ioaddr))
 	dev->stop		= ni5010_close;
 	dev->hard_start_xmit	= ni5010_send_packet;
 	dev->get_stats		= ni5010_get_stats;
-	dev->set_multicast_list = &ni5010_set_multicast_list;
+	dev->set_multicast_list = ni5010_set_multicast_list;
+	dev->tx_timeout		= ni5010_timeout;
+	dev->watchdog_timeo	= HZ/20;
 
 	/* Fill in the fields of the device structure with ethernet values. */
 	ether_setup(dev);
 	
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 0;
-
 	dev->flags &= ~IFF_MULTICAST;	/* Multicast doesn't work */
 
 	/* Shut up the ni5010 */
@@ -355,7 +347,7 @@ __initfunc(static int ni5010_probe1(struct device *dev, int ioaddr))
  * there is non-reboot way to recover if something goes wrong.
  */
    
-static int ni5010_open(struct device *dev)
+static int ni5010_open(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
 	int i;
@@ -403,18 +395,15 @@ static int ni5010_open(struct device *dev)
 	
 	outb(0, EDLC_RESET);	/* Un-reset the ni5010 */
 	
-	dev->tbusy = 0;
-	dev->interrupt = 0;
-	dev->start = 1;
-	
+	netif_start_queue(dev);
+		
 	if (NI5010_DEBUG) show_registers(dev); 
 
-    	MOD_INC_USE_COUNT;
 	PRINTK((KERN_DEBUG "%s: open successful\n", dev->name));
      	return 0;
 }
 
-static void reset_receiver(struct device *dev)
+static void reset_receiver(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
 	
@@ -426,42 +415,31 @@ static void reset_receiver(struct device *dev)
 	outb(0xff, EDLC_RMASK);	/* Enable all rcv interrupts */
 }
 
-static int ni5010_send_packet(struct sk_buff *skb, struct device *dev)
+static void ni5010_timeout(struct net_device *dev)
 {
+	printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name,
+		   tx_done(dev) ? "IRQ conflict" : "network cable problem");
+	/* Try to restart the adaptor. */
+	/* FIXME: Give it a real kick here */
+	chipset_init(dev, 1);
+	dev->trans_start = jiffies;
+	netif_wake_queue(dev);
+}
+
+static int ni5010_send_packet(struct sk_buff *skb, struct net_device *dev)
+{
+	int length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+
 	PRINTK2((KERN_DEBUG "%s: entering ni5010_send_packet\n", dev->name));
-	if (dev->tbusy) {
-		/* 
-                 * If we get here, some higher level has decided we are broken.
-		 * There should really be a "kick me" function call instead. 
-		 */
-		int tickssofar = jiffies - dev->trans_start;
-		if (tickssofar < 5)
-			return 1;
-		printk("tbusy\n");
-		printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name,
-			   tx_done(dev) ? "IRQ conflict" : "network cable problem");
-		/* Try to restart the adaptor. */
-		/* FIXME: Give it a real kick here */
-		chipset_init(dev, 1);
-		dev->tbusy=0;
-		dev->trans_start = jiffies;
-	}
 
 	/* 
-         * Block a timer-based transmit from overlapping.  This could better be
-	 * done with atomic_swap(1, dev->tbusy), but test_and_set_bit() works as well. 
+         * Block sending
 	 */
-	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0) {
-		printk(KERN_WARNING "%s: Transmitter access conflict.\n", dev->name);
-		return 1;
-	} else {
-		int length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-
-		hardware_send_packet(dev, (unsigned char *)skb->data, length);
-		dev->trans_start = jiffies;
-	}
+	
+	netif_stop_queue(dev);
+	hardware_send_packet(dev, (unsigned char *)skb->data, length);
+	dev->trans_start = jiffies;
 	dev_kfree_skb (skb);
-
 	return 0;
 }
 
@@ -469,22 +447,12 @@ static int ni5010_send_packet(struct sk_buff *skb, struct device *dev)
  * The typical workload of the driver:
  * Handle the network interface interrupts. 
  */
-static void 
-ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static void  ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-	struct device *dev = dev_id;
+	struct net_device *dev = dev_id;
 	struct ni5010_local *lp;
 	int ioaddr, status;
 	int xmit_was_error = 0;
-
-	if (dev == NULL || dev->irq != irq) {
-		printk(KERN_WARNING "%s: irq %d for unknown device.\n", 
-				boardname, irq);
-		return;
-	}
-
-	if (dev->interrupt) printk(KERN_WARNING "%s: Reentering IRQ-handler!\n", dev->name);
-	dev->interrupt = 1;
 
 	PRINTK2((KERN_DEBUG "%s: entering ni5010_interrupt\n", dev->name));
 
@@ -507,8 +475,6 @@ ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (!xmit_was_error) 
 		reset_receiver(dev); 
-
-	dev->interrupt = 0;
 	return;
 }
 
@@ -530,8 +496,7 @@ static void dump_packet(void *buf, int len)
 }
 
 /* We have a good packet, get it out of the buffer. */
-static void
-ni5010_rx(struct device *dev)
+static void ni5010_rx(struct net_device *dev)
 {
 	struct ni5010_local *lp = (struct ni5010_local *)dev->priv;
 	int ioaddr = dev->base_addr;
@@ -594,7 +559,7 @@ ni5010_rx(struct device *dev)
 	
 }
 
-static int process_xmt_interrupt(struct device *dev)
+static int process_xmt_interrupt(struct net_device *dev)
 {
 	struct ni5010_local *lp = (struct ni5010_local *)dev->priv;
 	int ioaddr = dev->base_addr;
@@ -624,8 +589,7 @@ static int process_xmt_interrupt(struct device *dev)
 
 	lp->stats.tx_packets++;
 	lp->stats.tx_bytes += lp->o_pkt_size;
-	dev->tbusy = 0;
-	mark_bh(NET_BH);	/* Inform upper layers. */
+	netif_wake_queue(dev);
 			
 	PRINTK2((KERN_DEBUG "%s: sent packet, size=%#4.4x\n", 
 		dev->name, lp->o_pkt_size));
@@ -634,8 +598,7 @@ static int process_xmt_interrupt(struct device *dev)
 }
 
 /* The inverse routine to ni5010_open(). */
-static int
-ni5010_close(struct device *dev)
+static int ni5010_close(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
 
@@ -647,10 +610,8 @@ ni5010_close(struct device *dev)
 	outb(0, IE_MMODE);
 	outb(RS_RESET, EDLC_RESET);
 
-        dev->tbusy = 1;
-	dev->start = 0;
-
-	MOD_DEC_USE_COUNT;
+	netif_stop_queue(dev);
+	
 	PRINTK((KERN_DEBUG "%s: %s closed down\n", dev->name, boardname));
 	return 0;
 
@@ -658,8 +619,7 @@ ni5010_close(struct device *dev)
 
 /* Get the current statistics.	This may be called with the card open or
    closed. */
-static struct net_device_stats *
-ni5010_get_stats(struct device *dev)
+static struct net_device_stats *ni5010_get_stats(struct net_device *dev)
 {
 	struct ni5010_local *lp = (struct ni5010_local *)dev->priv;
 
@@ -681,8 +641,7 @@ ni5010_get_stats(struct device *dev)
    num_addrs > 0        Multicast mode, receive normal and MC packets, and do
                         best-effort filtering.
 */
-static void
-ni5010_set_multicast_list(struct device *dev)
+static void ni5010_set_multicast_list(struct net_device *dev)
 {
 	short ioaddr = dev->base_addr;  
 
@@ -702,7 +661,7 @@ ni5010_set_multicast_list(struct device *dev)
 	}
 }
 
-extern void hardware_send_packet(struct device *dev, char *buf, int length)
+static void hardware_send_packet(struct net_device *dev, char *buf, int length)
 {
 	struct ni5010_local *lp = (struct ni5010_local *)dev->priv;
 	int ioaddr = dev->base_addr;
@@ -748,16 +707,18 @@ extern void hardware_send_packet(struct device *dev, char *buf, int length)
 
 	restore_flags(flags);
 
+	netif_wake_queue(dev);
+	
 	if (NI5010_DEBUG) show_registers(dev);	
 }
 
-extern void chipset_init(struct device *dev, int startp)
+static void chipset_init(struct net_device *dev, int startp)
 {
 	/* FIXME: Move some stuff here */
 	PRINTK3((KERN_DEBUG "%s: doing NOTHING in chipset_init\n", dev->name));
 }
 
-static void show_registers(struct device *dev)
+static void show_registers(struct net_device *dev)
 {
 	int ioaddr = dev->base_addr;
 	
@@ -771,15 +732,9 @@ static void show_registers(struct device *dev)
 }
 
 #ifdef MODULE
-static char devicename[9] = { 0, };
-static struct device dev_ni5010 = {
-        devicename,
-        0, 0, 0, 0,
-        0, 0,
-        0, 0, 0, NULL, ni5010_probe };
-
-int io  = 0;
-int irq = 0;
+static struct net_device dev_ni5010;
+static int io;
+static int irq;
 
 MODULE_PARM(io, "i");
 MODULE_PARM(irq, "i");
@@ -803,6 +758,7 @@ int init_module(void)
 	PRINTK2((KERN_DEBUG "%s: init_module irq=%#2x, io=%#3x\n", boardname, irq, io));
         dev_ni5010.irq=irq;
         dev_ni5010.base_addr=io;
+	dev_ni5010.init=ni5010_probe;
         if ((result = register_netdev(&dev_ni5010)) != 0) {
         	PRINTK((KERN_WARNING "%s: register_netdev returned %d.\n", 
         		boardname, result));

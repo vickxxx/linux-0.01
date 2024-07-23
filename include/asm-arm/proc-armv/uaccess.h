@@ -1,37 +1,12 @@
 /*
- * linux/include/asm-arm/proc-armv/uaccess.h
- */
-
-/*
- * The fs functions are implemented on the ARMV3 and V4 architectures
- * using the domain register.
+ *  linux/include/asm-arm/proc-armv/uaccess.h
  *
- *  DOMAIN_IO     - domain 2 includes all IO only
- *  DOMAIN_KERNEL - domain 1 includes all kernel memory only
- *  DOMAIN_USER   - domain 0 includes all user memory only
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
  */
-
-#include <asm/hardware.h>
-
-#define DOMAIN_CLIENT	1
-#define DOMAIN_MANAGER	3
- 
-#define DOMAIN_USER_CLIENT	((DOMAIN_CLIENT) << 0)
-#define DOMAIN_USER_MANAGER	((DOMAIN_MANAGER) << 0)
-
-#define DOMAIN_KERNEL_CLIENT	((DOMAIN_CLIENT) << 2)
-#define DOMAIN_KERNEL_MANAGER	((DOMAIN_MANAGER) << 2)
-
-#define DOMAIN_IO_CLIENT	((DOMAIN_CLIENT) << 4)
-#define DOMAIN_IO_MANAGER	((DOMAIN_MANAGER) << 4)
-
-/*
- * When we want to access kernel memory in the *_user functions,
- * we change the domain register to KERNEL_DS, thus allowing
- * unrestricted access
- */
-#define KERNEL_DOMAIN	(DOMAIN_USER_CLIENT | DOMAIN_KERNEL_MANAGER | DOMAIN_IO_CLIENT)
-#define USER_DOMAIN	(DOMAIN_USER_CLIENT | DOMAIN_KERNEL_CLIENT  | DOMAIN_IO_CLIENT)
+#include <asm/arch/memory.h>
+#include <asm/proc/domain.h>
 
 /*
  * Note that this is actually 0x1,0000,0000
@@ -39,17 +14,11 @@
 #define KERNEL_DS	0x00000000
 #define USER_DS		PAGE_OFFSET
 
-#define get_ds()	(KERNEL_DS)
-#define get_fs()	(current->addr_limit)
-
-#define segment_eq(a,b)	((a) == (b))
-
 extern __inline__ void set_fs (mm_segment_t fs)
 {
 	current->addr_limit = fs;
 
-	__asm__ __volatile__("mcr	p15, 0, %0, c3, c0" :
-		: "r" (fs ? USER_DOMAIN : KERNEL_DOMAIN));
+	modify_domain(DOMAIN_KERNEL, fs ? DOMAIN_CLIENT : DOMAIN_MANAGER);
 }
 
 /* We use 33-bit arithmetic here... */
@@ -69,15 +38,13 @@ extern __inline__ void set_fs (mm_segment_t fs)
 		: "cc"); \
 	(flag == 0); })
 
-#define access_ok(type,addr,size) (__range_ok(addr,size) == 0)
-
 #define __put_user_asm_byte(x,addr,err)				\
 	__asm__ __volatile__(					\
 	"1:	strbt	%1,[%2],#0\n"				\
 	"2:\n"							\
 	"	.section .fixup,\"ax\"\n"			\
 	"	.align	2\n"					\
-	"3:	mvn	%0, %3\n"				\
+	"3:	mov	%0, %3\n"				\
 	"	b	2b\n"					\
 	"	.previous\n"					\
 	"	.section __ex_table,\"a\"\n"			\
@@ -85,7 +52,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	.long	1b, 3b\n"				\
 	"	.previous"					\
 	: "=r" (err)						\
-	: "r" (x), "r" (addr), "i" (EFAULT), "0" (err))
+	: "r" (x), "r" (addr), "i" (-EFAULT), "0" (err))
 
 #define __put_user_asm_half(x,addr,err)				\
 ({								\
@@ -96,7 +63,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"3:\n"							\
 	"	.section .fixup,\"ax\"\n"			\
 	"	.align	2\n"					\
-	"4:	mvn	%0, %5\n"				\
+	"4:	mov	%0, %5\n"				\
 	"	b	3b\n"					\
 	"	.previous\n"					\
 	"	.section __ex_table,\"a\"\n"			\
@@ -107,7 +74,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	: "=r" (err)						\
 	: "r" (__temp), "r" (__temp >> 8),			\
 	  "r" (addr), "r" ((int)(addr) + 1),			\
-	   "i" (EFAULT), "0" (err));				\
+	   "i" (-EFAULT), "0" (err));				\
 })
 
 #define __put_user_asm_word(x,addr,err)				\
@@ -116,7 +83,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"2:\n"							\
 	"	.section .fixup,\"ax\"\n"			\
 	"	.align	2\n"					\
-	"3:	mvn	%0, %3\n"				\
+	"3:	mov	%0, %3\n"				\
 	"	b	2b\n"					\
 	"	.previous\n"					\
 	"	.section __ex_table,\"a\"\n"			\
@@ -124,7 +91,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	.long	1b, 3b\n"				\
 	"	.previous"					\
 	: "=r" (err)						\
-	: "r" (x), "r" (addr), "i" (EFAULT), "0" (err))
+	: "r" (x), "r" (addr), "i" (-EFAULT), "0" (err))
 
 #define __get_user_asm_byte(x,addr,err)				\
 	__asm__ __volatile__(					\
@@ -132,7 +99,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"2:\n"							\
 	"	.section .fixup,\"ax\"\n"			\
 	"	.align	2\n"					\
-	"3:	mvn	%0, %3\n"				\
+	"3:	mov	%0, %3\n"				\
 	"	mov	%1, #0\n"				\
 	"	b	2b\n"					\
 	"	.previous\n"					\
@@ -141,7 +108,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	.long	1b, 3b\n"				\
 	"	.previous"					\
 	: "=r" (err), "=r" (x)					\
-	: "r" (addr), "i" (EFAULT), "0" (err))
+	: "r" (addr), "i" (-EFAULT), "0" (err))
 
 #define __get_user_asm_half(x,addr,err)				\
 ({								\
@@ -153,7 +120,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"3:\n"							\
 	"	.section .fixup,\"ax\"\n"			\
 	"	.align	2\n"					\
-	"4:	mvn	%0, %5\n"				\
+	"4:	mov	%0, %5\n"				\
 	"	mov	%1, #0\n"				\
 	"	b	3b\n"					\
 	"	.previous\n"					\
@@ -164,7 +131,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	.previous"					\
 	: "=r" (err), "=r" (x), "=&r" (__temp)			\
 	: "r" (addr), "r" ((int)(addr) + 1),			\
-	   "i" (EFAULT), "0" (err));				\
+	   "i" (-EFAULT), "0" (err));				\
 })
 
 
@@ -174,7 +141,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"2:\n"							\
 	"	.section .fixup,\"ax\"\n"			\
 	"	.align	2\n"					\
-	"3:	mvn	%0, %3\n"				\
+	"3:	mov	%0, %3\n"				\
 	"	mov	%1, #0\n"				\
 	"	b	2b\n"					\
 	"	.previous\n"					\
@@ -183,7 +150,7 @@ extern __inline__ void set_fs (mm_segment_t fs)
 	"	.long	1b, 3b\n"				\
 	"	.previous"					\
 	: "=r" (err), "=r" (x)					\
-	: "r" (addr), "i" (EFAULT), "0" (err))
+	: "r" (addr), "i" (-EFAULT), "0" (err))
 
 extern unsigned long __arch_copy_from_user(void *to, const void *from, unsigned long n);
 #define __do_copy_from_user(to,from,n)				\
@@ -201,6 +168,6 @@ extern unsigned long __arch_strncpy_from_user(char *to, const char *from, unsign
 #define __do_strncpy_from_user(dst,src,count,res)		\
 	(res) = __arch_strncpy_from_user(dst,src,count)
 
-extern unsigned long __arch_strlen_user(const char *s);
-#define __do_strlen_user(s,res)					\
-	(res) = __arch_strlen_user(s)
+extern unsigned long __arch_strnlen_user(const char *s, long n);
+#define __do_strnlen_user(s,n,res)					\
+	(res) = __arch_strnlen_user(s,n)

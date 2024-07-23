@@ -23,11 +23,9 @@
        Support for video modes and acceleration must be added
        together with accelerated X-Windows driver implementation.
 
-                                                (Anyone to help with this?)
-
        Most important thing at this moment is that we have working
        JavaEngine1  console & X  with new console interface.
-       
+
 ******************************************************************************/
 
 #include <linux/module.h>
@@ -78,7 +76,7 @@ struct pci_mmap_map {
 struct fb_info_iga {
     struct fb_info fb_info;
     unsigned long frame_buffer_phys;
-    unsigned long frame_buffer;
+    char *frame_buffer;
     unsigned long io_base_phys;
     unsigned long io_base;
     u32 total_vram;
@@ -142,23 +140,19 @@ struct fb_var_screeninfo default_var_1280x1024 __initdata = {
 
 /*
  *   Memory-mapped I/O functions for Sparc PCI
+ *
+ * On sparc we happen to access I/O with memory mapped functions too.
  */ 
-static inline unsigned char pci_inb (struct fb_info_iga *info, 
-				     unsigned int reg) 
-{
-	return *(volatile unsigned char*)(info->io_base + reg);
-}
-static inline void pci_outb (struct fb_info_iga *info, unsigned char c,
-			     unsigned int reg) 
-{
-	*(volatile unsigned char*)(info->io_base + reg) = c;
-}
+#define pci_inb(info, reg)        readb(info->io_base+(reg))
+#define pci_outb(info, val, reg)  writeb(val, info->io_base+(reg))
+
 static inline unsigned int iga_inb(struct fb_info_iga *info,
 				   unsigned int reg, unsigned int idx )
 {
         pci_outb(info, idx, reg);
         return pci_inb(info, reg + 1);
 }
+
 static inline void iga_outb(struct fb_info_iga *info, unsigned char val,
 			    unsigned int reg, unsigned int idx )
 {
@@ -176,33 +170,30 @@ static void iga_blank_border(struct fb_info_iga *info)
 {
         int i;
 
-        for (i=0; i < 3; i++) 
-                iga_outb(info, 0, IGA_EXT_CNTRL, IGA_IDX_OVERSCAN_COLOR + i);
+#if 0
+	/*
+	 * PROM does this for us, so keep this code as a reminder
+	 * about required read from 0x3DA and writing of 0x20 in the end.
+	 */
+	(void) pci_inb(info, 0x3DA);		/* required for every access */
+	pci_outb(info, IGA_IDX_VGA_OVERSCAN, IGA_ATTR_CTL);
+	(void) pci_inb(info, IGA_ATTR_CTL+1);
+	pci_outb(info, 0x38, IGA_ATTR_CTL);
+	pci_outb(info, 0x20, IGA_ATTR_CTL);	/* re-enable visual */
+#endif
+	/*
+	 * This does not work as it was designed because the overscan
+	 * color is looked up in the palette. Therefore, under X11
+	 * overscan changes color.
+	 */
+	for (i=0; i < 3; i++)
+		iga_outb(info, 0, IGA_EXT_CNTRL, IGA_IDX_OVERSCAN_COLOR + i);
 }
 
 
 /*
  *  Frame buffer device API
  */
-
-/*
- * Open/Release the frame buffer device
- */
-
-static int igafb_open(struct fb_info *info, int user)
-{
-        /*
-         * Nothing, only a usage count for the moment
-         */
-        MOD_INC_USE_COUNT;
-        return(0);
-}
-
-static int igafb_release(struct fb_info *info, int user)
-{
-        MOD_DEC_USE_COUNT;
-        return(0);
-}
 
 static int igafb_update_var(int con, struct fb_info *info)
 {
@@ -217,7 +208,7 @@ static int igafb_get_fix(struct fb_fix_screeninfo *fix, int con,
         memset(fix, 0, sizeof(struct fb_fix_screeninfo));
         strcpy(fix->id, igafb_name);
 
-        fix->smem_start = (char *)fb->frame_buffer;
+        fix->smem_start = (unsigned long) fb->frame_buffer;
         fix->smem_len = fb->total_vram;
         fix->xpanstep = 0;
         fix->ypanstep = 0;
@@ -261,8 +252,6 @@ static int igafb_mmap(struct fb_info *info, struct file *file,
 		return -ENXIO;
 
 	size = vma->vm_end - vma->vm_start;
-	if (vma->vm_offset & ~PAGE_MASK)
-		return -ENXIO;
 
 	/* To stop the swapper from even considering these pages. */
 	vma->vm_flags |= (VM_SHM | VM_LOCKED);
@@ -273,7 +262,7 @@ static int igafb_mmap(struct fb_info *info, struct file *file,
 		for (i = 0; fb->mmap_map[i].size; i++) {
 			unsigned long start = fb->mmap_map[i].voff;
 			unsigned long end = start + fb->mmap_map[i].size;
-			unsigned long offset = vma->vm_offset + page;
+			unsigned long offset = (vma->vm_pgoff << PAGE_SHIFT) + page;
 
 			if (start > offset)
 				continue;
@@ -361,13 +350,13 @@ static int iga_setcolreg(unsigned regno, unsigned red, unsigned green,
         info->palette[regno].red   = red;
         info->palette[regno].green = green;
         info->palette[regno].blue  = blue;
-        
+
 	pci_outb(info, regno, DAC_W_INDEX);
 	pci_outb(info, red,   DAC_DATA);
 	pci_outb(info, green, DAC_DATA);
 	pci_outb(info, blue,  DAC_DATA);
 
-	if (regno << 16)
+	if (regno < 16) {
 		switch (default_var.bits_per_pixel) {
 #ifdef FBCON_HAS_CFB16
 		case 16:
@@ -383,11 +372,14 @@ static int iga_setcolreg(unsigned regno, unsigned red, unsigned green,
 #endif
 #ifdef FBCON_HAS_CFB32
 		case 32:
+			{ int i;
 			i = (regno << 8) | regno;
 			info->fbcon_cmap.cfb32[regno] = (i << 16) | i;
+			}
 			break;
 #endif
 		}
+	}
 	return 0;
 }
 
@@ -439,36 +431,18 @@ static int igafb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
         return 0;
 }
 
-static int igafb_pan_display(struct fb_var_screeninfo *var, int con,
-                             struct fb_info *info)
-{
-        /* no panning */
-        return -EINVAL;
-}
-
-static int igafb_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info)
-{
-	return -EINVAL;
-}
-
 /*
  * Framebuffer option structure
  */
 static struct fb_ops igafb_ops = {
-    igafb_open, 
-    igafb_release, 
-    igafb_get_fix, 
-    igafb_get_var, 
-    igafb_set_var,
-    igafb_get_cmap, 
-    igafb_set_cmap, 
-    igafb_pan_display, 
-    igafb_ioctl,
+	owner:		THIS_MODULE,
+	fb_get_fix:	igafb_get_fix,
+	fb_get_var:	igafb_get_var,
+	fb_set_var:	igafb_set_var,
+	fb_get_cmap:	igafb_get_cmap,
+	fb_set_cmap:	igafb_set_cmap,
 #ifdef __sparc__
-    igafb_mmap
-#else
-    NULL
+	fb_mmap:	igafb_mmap,
 #endif
 };
 
@@ -477,7 +451,7 @@ static void igafb_set_disp(int con, struct fb_info_iga *info)
         struct fb_fix_screeninfo fix;
         struct display *display;
         struct display_switch *sw;
-        
+
         if (con >= 0)
                 display = &fb_display[con];
         else 
@@ -486,7 +460,7 @@ static void igafb_set_disp(int con, struct fb_info_iga *info)
         igafb_get_fix(&fix, con, &info->fb_info);
 
         memset(display, 0, sizeof(struct display));
-        display->screen_base = (char*)info->frame_buffer;
+        display->screen_base = info->frame_buffer;
         display->visual = fix.visual;
         display->type = fix.type;
         display->type_aux = fix.type_aux;
@@ -508,22 +482,24 @@ static void igafb_set_disp(int con, struct fb_info_iga *info)
         case 15:
         case 16:
                 sw = &fbcon_cfb16;
-		display->dispsw_data = fbcon_cmap.cfb16;
+		display->dispsw_data = info->fbcon_cmap.cfb16;
                 break;
 #endif
 #ifdef FBCON_HAS_CFB24
 	case 24:
 		sw = &fbcon_cfb24;
-		display->dispsw_data = fbcon_cmap.cfb24;
+		display->dispsw_data = info->fbcon_cmap.cfb24;
 		break;
 #endif
 #ifdef FBCON_HAS_CFB32
         case 32:
                 sw = &fbcon_cfb32;
-		display->dispsw_data = fbcon_cmap.cfb32;
+		display->dispsw_data = info->fbcon_cmap.cfb32;
                 break;
 #endif
         default:
+		printk(KERN_WARNING "igafb_set_disp: unknown resolution %d\n",
+		    default_var.bits_per_pixel);
                 return;
         }
         memcpy(&info->dispsw, sw, sizeof(*sw));
@@ -536,15 +512,15 @@ static void igafb_set_disp(int con, struct fb_info_iga *info)
 static int igafb_switch(int con, struct fb_info *fb_info)
 {
 	struct fb_info_iga *info = (struct fb_info_iga*) fb_info;
-	
+
         /* Do we have to save the colormap? */
         if (fb_display[info->currcon].cmap.len)
                 fb_get_cmap(&fb_display[info->currcon].cmap, 1,
                             iga_getcolreg, fb_info);
-        
-        info->currcon = con;
-        /* Install new colormap */
-        do_install_cmap(con, fb_info);
+
+	info->currcon = con;
+	/* Install new colormap */
+	do_install_cmap(con, fb_info);
 	igafb_update_var(con, fb_info);
         return 1;
 }
@@ -559,7 +535,7 @@ static void igafb_blank(int blank, struct fb_info *info)
 }
 
 
-__initfunc(static int iga_init(struct fb_info_iga *info))
+static int __init iga_init(struct fb_info_iga *info)
 {
         char vramsz = iga_inb(info, IGA_EXT_CNTRL, IGA_IDX_EXT_BUS_CNTL) 
 		                                         & MEM_SIZE_ALIAS;
@@ -579,15 +555,17 @@ __initfunc(static int iga_init(struct fb_info_iga *info))
         if (default_var.bits_per_pixel > 8) {
                 info->video_cmap_len = 16;
         } else {
-		int i, j;
-                for(i = 0; i < 16; i++) {
-                        j = color_table[i];
-                        info->palette[i].red   = default_red[j];
-                        info->palette[i].green = default_grn[j];
-                        info->palette[i].blue  = default_blu[j];
-                }
                 info->video_cmap_len = 256;
         }
+	{
+		int j, k;
+		for (j = 0; j < 16; j++) {
+			k = color_table[j];
+			info->palette[j].red = default_red[k];
+			info->palette[j].green = default_grn[k];
+			info->palette[j].blue = default_blu[k];
+		}
+	}
 
 	strcpy(info->fb_info.modename, igafb_name);
 	info->fb_info.node = -1;
@@ -600,16 +578,6 @@ __initfunc(static int iga_init(struct fb_info_iga *info))
 	info->fb_info.blank = &igafb_blank;
 	info->fb_info.flags=FBINFO_FLAG_DEFAULT;
 
-	{
-		int j, k;
-		for (j = 0; j < 16; j++) {
-			k = color_table[j];
-			info->palette[j].red = default_red[k];
-			info->palette[j].green = default_grn[k];
-			info->palette[j].blue = default_blu[k];
-		}
-	}
-
 	igafb_set_disp(-1, info);
 
 	if (register_framebuffer(&info->fb_info) < 0)
@@ -621,10 +589,9 @@ __initfunc(static int iga_init(struct fb_info_iga *info))
 
 	iga_blank_border(info); 
 	return 1;
-}	
+}
 
-
-__initfunc(void igafb_init(void))
+int __init igafb_init(void)
 {
         struct pci_dev *pdev;
         struct fb_info_iga *info;
@@ -634,57 +601,73 @@ __initfunc(void igafb_init(void))
 
         /* Do not attach when we have a serial console. */
         if (!con_is_present())
-                return;
+                return -ENXIO;
 
         pdev = pci_find_device(PCI_VENDOR_ID_INTERG, 
                                PCI_DEVICE_ID_INTERG_1682, 0);
 	if (pdev == NULL) {
-        	pdev = pci_find_device(PCI_VENDOR_ID_INTERG, 
-                               0x2000, 0);
-        	if(pdev == NULL)
-        	        return;
+		/*
+		 * XXX We tried to use cyber2000fb.c for IGS 2000.
+		 * But it does not initialize the chip in JavaStation-E, alas.
+		 */
+        	pdev = pci_find_device(PCI_VENDOR_ID_INTERG, 0x2000, 0);
+        	if(pdev == NULL) {
+        	        return -ENXIO;
+		}
 		iga2000 = 1;
 	}
 
         info = kmalloc(sizeof(struct fb_info_iga), GFP_ATOMIC);
         if (!info) {
                 printk("igafb_init: can't alloc fb_info_iga\n");
-                return;
+                return -ENOMEM;
         }
         memset(info, 0, sizeof(struct fb_info_iga));
 
-	info->frame_buffer = pdev->base_address[0];
-	if (!info->frame_buffer) {
+	if ((addr = pdev->resource[0].start) == 0) {
+                printk("igafb_init: no memory start\n");
 		kfree(info);
-		return;
+		return -ENXIO;
 	}
 
-        pcibios_read_config_dword(0, pdev->devfn,
-                                  PCI_BASE_ADDRESS_0, 
-                                  (unsigned int*)&addr);
-	if (!addr)
-		return;
+	if ((info->frame_buffer = ioremap(addr, 1024*1024*2)) == 0) {
+                printk("igafb_init: can't remap %lx[2M]\n", addr);
+		kfree(info);
+		return -ENXIO;
+	}
+
 	info->frame_buffer_phys = addr & PCI_BASE_ADDRESS_MEM_MASK;
 
 #ifdef __sparc__
-
-	info->io_base_phys = info->frame_buffer_phys;
-
 	/*
-	 * The right test would be to look if there is a base I/O address.
-	 * But it appears that IGA 1682 reuses _memory_ address as a base
-	 * for I/O accesses.
+	 * The following is sparc specific and this is why:
+	 *
+	 * IGS2000 has its I/O memory mapped and we want
+	 * to generate memory cycles on PCI, e.g. do ioremap(),
+	 * then readb/writeb() as in Documentation/IO-mapping.txt.
+	 *
+	 * IGS1682 is more traditional, it responds to PCI I/O
+	 * cycles, so we want to access it with inb()/outb().
+	 *
+	 * On sparc, PCIC converts CPU memory access within
+	 * phys window 0x3000xxxx into PCI I/O cycles. Therefore
+	 * we may use readb/writeb to access them with IGS1682.
+	 *
+	 * We do not take io_base_phys from resource[n].start
+	 * on IGS1682 because that chip is BROKEN. It does not
+	 * have a base register for I/O. We just "know" what its
+	 * I/O addresses are.
 	 */
 	if (iga2000) {
-		info->io_base = (int) sparc_alloc_io(info->frame_buffer_phys |
-		    0x00800000, NULL, 0x1000, "iga", 0, 0);
+		info->io_base_phys = info->frame_buffer_phys | 0x00800000;
 	} else {
-		/* Obtain virtual address and correct physical by PCIC shift */
-		info->io_base = pcic_alloc_io(&info->io_base_phys);
+		info->io_base_phys = 0x30000000;	/* XXX */
 	}
-	if (!info->io_base) {
+	if ((info->io_base = (int) ioremap(info->io_base_phys, 0x1000)) == 0) {
+                printk("igafb_init: can't remap %lx[4K]\n", info->io_base_phys);
+		iounmap((void *)info->frame_buffer);
                 kfree(info);
-		return;
+		return -ENXIO;
 	}
 
 	/*
@@ -697,10 +680,11 @@ __initfunc(void igafb_init(void))
 
 	info->mmap_map = kmalloc(4 * sizeof(*info->mmap_map), GFP_ATOMIC);
 	if (!info->mmap_map) {
-                printk("igafb_init: can't alloc mmap_map\n");
-		/* XXX Here we left I/O allocated */
+		printk("igafb_init: can't alloc mmap_map\n");
+		iounmap((void *)info->io_base);
+		iounmap(info->frame_buffer);
                 kfree(info);
-		return;
+		return -ENOMEM;
 	}
 
 	memset(info->mmap_map, 0, 4 * sizeof(*info->mmap_map));
@@ -750,7 +734,10 @@ __initfunc(void igafb_init(void))
             }
 
 #endif
-        if (!iga_init(info)) {
+
+	if (!iga_init(info)) {
+		iounmap((void *)info->io_base);
+		iounmap(info->frame_buffer);
 		if (info->mmap_map)
 			kfree(info->mmap_map);
 		kfree(info);
@@ -775,14 +762,16 @@ __initfunc(void igafb_init(void))
 	    info->mmap_map[1].prot_mask = SRMMU_CACHE;
 	    info->mmap_map[1].prot_flag = SRMMU_WRITE;
 #endif /* __sparc__ */
+
+	return 0;
 }
 
-__initfunc(void igafb_setup(char *options, int *ints))
+int __init igafb_setup(char *options)
 {
     char *this_opt;
 
     if (!options || !*options)
-        return;
+        return 0;
 
     for (this_opt = strtok(options, ","); this_opt;
          this_opt = strtok(NULL, ",")) {
@@ -798,4 +787,5 @@ __initfunc(void igafb_setup(char *options, int *ints))
                 fontname[i] = 0;
         }
     }
+    return 0;
 }

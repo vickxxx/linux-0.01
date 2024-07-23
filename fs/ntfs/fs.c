@@ -1,10 +1,11 @@
 /*
  *  fs.c
- *  NTFS driver for Linux 2.1
+ *  NTFS driver for Linux 2.3.x
  *
  *  Copyright (C) 1995-1997, 1999 Martin von Löwis
  *  Copyright (C) 1996 Richard Russon
  *  Copyright (C) 1996-1997 Régis Duchesne
+ *  Copyright (C) 2000, Anton Altaparmakov
  */
 
 #ifdef HAVE_CONFIG_H
@@ -28,9 +29,11 @@
 #include <linux/nls.h>
 #include <linux/locks.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 
 /* Forward declarations */
 static struct inode_operations ntfs_dir_inode_operations;
+static struct file_operations ntfs_dir_operations;
 
 #define ITEM_SIZE 2040
 
@@ -52,7 +55,6 @@ static void ntfs_getuser_update_vm (void *dest, ntfs_io *src, ntfs_size_t len)
 {
 	struct ntfs_getuser_update_vm_s *p = src->param;
 	copy_from_user (dest, p->user, len);
-	update_vm_cache (p->ino, p->off, dest, len);
 	p->user += len;
 	p->off += len;
 }
@@ -79,7 +81,7 @@ ntfs_read(struct file * filp, char *buf, size_t count, loff_t *off)
 	io.param=buf;
 	io.size=count;
 	error=ntfs_read_attr(ino,ino->vol->at_data,NULL,*off,&io);
-	if(error)return -error;
+	if(error && !io.size)return -error;
 	
 	*off+=io.size;
 	return io.size;
@@ -198,7 +200,7 @@ static int ntfs_printcb(ntfs_u8 *entry,void *param)
 	/* filldir expects an off_t rather than an loff_t.
 	   Hope we don't have more than 65535 index records */
 	error=nf->filldir(nf->dirent,nf->name,nf->namelen,
-			(nf->ph<<16)|nf->pl,inum);
+			(nf->ph<<16)|nf->pl,inum,DT_UNKNOWN);
 	ntfs_free(nf->name);
 	/* Linux filldir errors are negative, other errors positive */
 	return error;
@@ -217,18 +219,18 @@ static int ntfs_readdir(struct file* filp, void *dirent, filldir_t filldir)
 	       (unsigned)dir->i_ino,(unsigned int)dir->i_mode);
 
 	ntfs_debug(DEBUG_OTHER, "readdir: Looking for file %x dircount %d\n",
-	       (unsigned)filp->f_pos,dir->i_count);
+	       (unsigned)filp->f_pos,atomic_read(&dir->i_count));
 	cb.pl=filp->f_pos & 0xFFFF;
 	cb.ph=filp->f_pos >> 16;
 	/* end of directory */
 	if(cb.ph==0xFFFF){
 		/* FIXME: Maybe we can return those with the previous call */
 		switch(cb.pl){
-		case 0: filldir(dirent,".",1,filp->f_pos,dir->i_ino);
+		case 0: filldir(dirent,".",1,filp->f_pos,dir->i_ino,DT_DIR);
 			filp->f_pos=0xFFFF0001;
 			return 0;
 			/* FIXME: parent directory */
-		case 1: filldir(dirent,"..",2,filp->f_pos,0);
+		case 1: filldir(dirent,"..",2,filp->f_pos,0,DT_DIR);
 			filp->f_pos=0xFFFF0002;
 			return 0;
 		}
@@ -360,8 +362,11 @@ static int parse_options(ntfs_volume* vol,char *opt)
 	if((vol->nct & (nct_uni_xlate | nct_map | nct_utf8))==0)
 		/* default to UTF-8 */
 		vol->nct=nct_utf8;
-	if(!vol->nls_map)
+	if(!vol->nls_map){
 		vol->nls_map=load_nls_default();
+		if (vol->nls_map)
+			vol->nct=nct_map | (vol->nct&nct_uni_xlate);
+	}
 	return 1;
 
  needs_arg:
@@ -405,49 +410,13 @@ static struct dentry *ntfs_lookup(struct inode *dir, struct dentry *d)
 }
 
 static struct file_operations ntfs_file_operations_nommap = {
-	NULL, /* lseek */
-	ntfs_read,
+	read:		ntfs_read,
 #ifdef CONFIG_NTFS_RW
-	ntfs_write,
-#else
-	NULL,
+	write:		ntfs_write,
 #endif
-	NULL, /* readdir */
-	NULL, /* select */
-	NULL, /* ioctl */
-	NULL, /* mmap */
-	NULL, /* open */
-	NULL, /* flush */
-	NULL, /* release */
-	NULL, /* fsync */
-	NULL, /* fasync */
-	NULL, /* check_media_change */
-	NULL, /* revalidate */
-	NULL, /* lock */
 };
 
-static struct inode_operations ntfs_inode_operations_nobmap = {
-	&ntfs_file_operations_nommap,
-	NULL, /* create */
-	NULL, /* lookup */
-	NULL, /* link */
-	NULL, /* unlink */
-	NULL, /* symlink */
-	NULL, /* mkdir */
-	NULL, /* rmdir */
-	NULL, /* mknod */
-	NULL, /* rename */
-	NULL, /* readlink */
-	NULL, /* follow_link */
-	NULL, /* get_block */
-	NULL, /* readpage */
-	NULL, /* writepage */
-	NULL, /* flushpage */
-	NULL, /* truncate */
-	NULL, /* permission */
-	NULL, /* smap */
-	NULL, /* revalidate */
-};
+static struct inode_operations ntfs_inode_operations_nobmap;
 
 #ifdef CONFIG_NTFS_RW
 static int
@@ -459,7 +428,7 @@ ntfs_create(struct inode* dir,struct dentry *d,int mode)
 	int error=0;
 	ntfs_attribute *si;
 
-	r=get_empty_inode();
+	r=new_inode(dir->i_sb);
 	if(!r){
 		error=ENOMEM;
 		goto fail;
@@ -487,8 +456,6 @@ ntfs_create(struct inode* dir,struct dentry *d,int mode)
 
 	r->i_uid=vol->uid;
 	r->i_gid=vol->gid;
-	r->i_nlink=1;
-	r->i_sb=dir->i_sb;
 	/* FIXME: dirty? dev? */
 	/* get the file modification times from the standard information */
 	si=ntfs_find_attr(ino,vol->at_standard_information,NULL);
@@ -500,6 +467,7 @@ ntfs_create(struct inode* dir,struct dentry *d,int mode)
 	}
 	/* It's not a directory */
 	r->i_op=&ntfs_inode_operations_nobmap;
+	r->i_fop=&ntfs_file_operations_nommap,
 	r->i_mode=S_IFREG|S_IRUGO;
 #ifdef CONFIG_NTFS_RW
 	r->i_mode|=S_IWUGO;
@@ -532,7 +500,7 @@ _linux_ntfs_mkdir(struct inode *dir, struct dentry* d, int mode)
 		goto out;
 
 	error = EIO;
-	r = get_empty_inode();
+	r = new_inode(dir->i_sb);
 	if (!r)
 		goto out;
 	
@@ -552,8 +520,6 @@ _linux_ntfs_mkdir(struct inode *dir, struct dentry* d, int mode)
 		goto out;
 	r->i_uid = vol->uid;
 	r->i_gid = vol->gid;
-	r->i_nlink = 1;
-	r->i_sb = dir->i_sb;
 	si = ntfs_find_attr(ino,vol->at_standard_information,NULL);
 	if(si){
 		char *attr = si->d.data;
@@ -563,6 +529,7 @@ _linux_ntfs_mkdir(struct inode *dir, struct dentry* d, int mode)
 	}
 	/* It's a directory */
 	r->i_op = &ntfs_dir_inode_operations;
+	r->i_fop = &ntfs_dir_operations;
 	r->i_mode = S_IFDIR|S_IRUGO|S_IXUGO;
 #ifdef CONFIG_NTFS_RW
 	r->i_mode|=S_IWUGO;
@@ -578,6 +545,7 @@ _linux_ntfs_mkdir(struct inode *dir, struct dentry* d, int mode)
 }
 #endif
 
+#if 0
 static int 
 ntfs_bmap(struct inode *ino,int block)
 {
@@ -586,100 +554,68 @@ ntfs_bmap(struct inode *ino,int block)
 	       ino->i_ino,block,ret);
 	return (ret==-1) ? 0:ret;
 }
+#endif
+
+/* It's fscking broken. */
+/* FIXME: [bm]map code is disabled until ntfs_get_block gets sorted! */
+/*
+static int ntfs_get_block(struct inode *inode, long block, struct buffer_head *bh, int create)
+{
+	BUG();
+	return -1;
+}
 
 static struct file_operations ntfs_file_operations = {
-	NULL, /* lseek */
-	ntfs_read,
+	read:		ntfs_read,
+	mmap:		generic_file_mmap,
 #ifdef CONFIG_NTFS_RW
-	ntfs_write,
-#else
-	NULL,
+	write:		ntfs_write,
 #endif
-	NULL, /* readdir */
-	NULL, /* select */
-	NULL, /* ioctl */
-	generic_file_mmap,
-	NULL, /* open */
-	NULL, /* flush */
-	NULL, /* release */
-	NULL, /* fsync */
-	NULL, /* fasync */
-	NULL, /* check_media_change */
-	NULL, /* revalidate */
-	NULL, /* lock */
 };
 
-static struct inode_operations ntfs_inode_operations = {
-	&ntfs_file_operations,
-	NULL, /* create */
-	NULL, /* lookup */
-	NULL, /* link */
-	NULL, /* unlink */
-	NULL, /* symlink */
-	NULL, /* mkdir */
-	NULL, /* rmdir */
-	NULL, /* mknod */
-	NULL, /* rename */
-	NULL, /* readlink */
-	NULL, /* follow_link */
-	ntfs_bmap, /* get_block */
-	block_read_full_page, /* readpage */
-	NULL, /* writepage */
-	NULL, /* flushpage */
-	NULL, /* truncate */
-	NULL, /* permission */
-	NULL, /* smap */
-	NULL, /* revalidate */
-};
+static struct inode_operations ntfs_inode_operations;
+*/
 
 static struct file_operations ntfs_dir_operations = {
-	NULL, /* lseek */
-	NULL, /* read */
-	NULL, /* write */
-	ntfs_readdir, /* readdir */
-	NULL, /* poll */
-	NULL, /* ioctl */
-	NULL, /* mmap */
-	NULL, /* open */
-	NULL, /* flush */
-	NULL, /* release */
-	NULL, /* fsync */
-	NULL, /* fasync */
-	NULL, /* check_media_change */
-	NULL, /* revalidate */
-	NULL, /* lock */
+	read:		generic_read_dir,
+	readdir:	ntfs_readdir,
 };
 
 static struct inode_operations ntfs_dir_inode_operations = {
-	&ntfs_dir_operations,
+	lookup:		ntfs_lookup,
 #ifdef CONFIG_NTFS_RW
-	ntfs_create, /* create */
-#else
-	NULL,
+	create:		ntfs_create,
+	mkdir:		_linux_ntfs_mkdir,
 #endif
-	ntfs_lookup, /* lookup */
-	NULL, /* link */
-	NULL, /* unlink */
-	NULL, /* symlink */
-#ifdef CONFIG_NTFS_RW
-	_linux_ntfs_mkdir, /* mkdir */
-#else
-	NULL,
-#endif
-	NULL, /* rmdir */
-	NULL, /* mknod */
-	NULL, /* rename */
-	NULL, /* readlink */
-	NULL, /* follow_link */
-	NULL, /* get_block */
-	NULL, /* readpage */
-	NULL, /* writepage */
-	NULL, /* flushpage */
-	NULL, /* truncate */
-	NULL, /* permission */
-	NULL, /* smap */
-	NULL, /* revalidate */
 };
+
+/*
+static int ntfs_writepage(struct page *page)
+{
+	return block_write_full_page(page,ntfs_get_block);
+}
+static int ntfs_readpage(struct file *file, struct page *page)
+{
+	return block_read_full_page(page,ntfs_get_block);
+}
+static int ntfs_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
+{
+	return cont_prepare_write(page,from,to,ntfs_get_block,
+		&page->mapping->host->u.ntfs_i.mmu_private);
+}
+static int _ntfs_bmap(struct address_space *mapping, long block)
+{
+	return generic_block_bmap(mapping,block,ntfs_get_block);
+}
+struct address_space_operations ntfs_aops = {
+	readpage: ntfs_readpage,
+	writepage: ntfs_writepage,
+	sync_page: block_sync_page,
+	prepare_write: ntfs_prepare_write,
+	commit_write: generic_commit_write,
+	bmap: _ntfs_bmap
+};
+*/
 
 /* ntfs_read_inode is called by the Virtual File System (the kernel layer that
  * deals with filesystems) when iget is called requesting an inode not already
@@ -695,7 +631,6 @@ static void ntfs_read_inode(struct inode* inode)
 	ntfs_attribute *si;
 
 	vol=NTFS_INO2VOL(inode);
-	inode->i_op=NULL;
 	inode->i_mode=0;
 	ntfs_debug(DEBUG_OTHER, "ntfs_read_inode %x\n",(unsigned)inode->i_ino);
 
@@ -734,7 +669,10 @@ static void ntfs_read_inode(struct inode* inode)
 	else
 	{
 		inode->i_size=data->size;
-		can_mmap=!data->resident && !data->compressed;
+		/* FIXME: once ntfs_get_block is implemented, uncomment the
+		 * next line and remove the can_mmap = 0; */
+		/* can_mmap=!data->resident && !data->compressed;*/
+		can_mmap = 0;
 	}
 	/* get the file modification times from the standard information */
 	si=ntfs_find_attr(ino,vol->at_standard_information,NULL);
@@ -752,12 +690,25 @@ static void ntfs_read_inode(struct inode* inode)
 		inode->i_size = at ? at->size : 0;
 	  
 		inode->i_op=&ntfs_dir_inode_operations;
+		inode->i_fop=&ntfs_dir_operations;
 		inode->i_mode=S_IFDIR|S_IRUGO|S_IXUGO;
 	}
 	else
 	{
-		inode->i_op=can_mmap ? &ntfs_inode_operations : 
-			&ntfs_inode_operations_nobmap;
+		/* As long as ntfs_get_block() is just a call to BUG() do not
+	 	 * define any [bm]map ops or we get the BUG() whenever someone
+		 * runs mc or mpg123 on an ntfs partition!
+		 * FIXME: Uncomment the below code when ntfs_get_block is
+		 * implemented. */
+		/* if (can_mmap) {
+			inode->i_op = &ntfs_inode_operations;
+			inode->i_fop = &ntfs_file_operations;
+			inode->i_mapping->a_ops = &ntfs_aops;
+			inode->u.ntfs_i.mmu_private = inode->i_size;
+		} else */ {
+			inode->i_op=&ntfs_inode_operations_nobmap;
+			inode->i_fop=&ntfs_file_operations_nommap;
+		}
 		inode->i_mode=S_IFREG|S_IRUGO;
 	}
 #ifdef CONFIG_NTFS_RW
@@ -769,15 +720,18 @@ static void ntfs_read_inode(struct inode* inode)
 
 #ifdef CONFIG_NTFS_RW
 static void 
-ntfs_write_inode (struct inode *ino)
+ntfs_write_inode (struct inode *ino, int unused)
 {
+	lock_kernel();
 	ntfs_debug (DEBUG_LINUX, "ntfs:write inode %x\n", ino->i_ino);
 	ntfs_update_inode (NTFS_LINO2NINO (ino));
+	unlock_kernel();
 }
 #endif
 
 static void _ntfs_clear_inode(struct inode *ino)
 {
+	lock_kernel();
 	ntfs_debug(DEBUG_OTHER, "ntfs_clear_inode %lx\n",ino->i_ino);
 #ifdef NTFS_IN_LINUX_KERNEL
 	if(ino->i_ino!=FILE_MFT)
@@ -790,6 +744,7 @@ static void _ntfs_clear_inode(struct inode *ino)
 		ino->u.generic_ip=0;
 	}
 #endif
+	unlock_kernel();
 	return;
 }
 
@@ -809,38 +764,38 @@ static void ntfs_put_super(struct super_block *sb)
 	ntfs_free(vol);
 #endif
 	ntfs_debug(DEBUG_OTHER, "ntfs_put_super: done\n");
-	MOD_DEC_USE_COUNT;
 }
 
 /* Called by the kernel when asking for stats */
-static int ntfs_statfs(struct super_block *sb, struct statfs *sf, int bufsize)
+static int ntfs_statfs(struct super_block *sb, struct statfs *sf)
 {
-	struct statfs fs;
 	struct inode *mft;
 	ntfs_volume *vol;
+	ntfs_u64 size;
 	int error;
 
 	ntfs_debug(DEBUG_OTHER, "ntfs_statfs\n");
 	vol=NTFS_SB2VOL(sb);
-	memset(&fs,0,sizeof(fs));
-	fs.f_type=NTFS_SUPER_MAGIC;
-	fs.f_bsize=vol->clustersize;
+	sf->f_type=NTFS_SUPER_MAGIC;
+	sf->f_bsize=vol->clustersize;
 
-	error = ntfs_get_volumesize( NTFS_SB2VOL( sb ), &fs.f_blocks );
+	error = ntfs_get_volumesize( NTFS_SB2VOL( sb ), &size );
 	if( error )
 		return -error;
-	fs.f_bfree=ntfs_get_free_cluster_count(vol->bitmap);
-	fs.f_bavail=fs.f_bfree;
+	sf->f_blocks = size;	/* volumesize is in clusters */
+	sf->f_bfree=ntfs_get_free_cluster_count(vol->bitmap);
+	sf->f_bavail=sf->f_bfree;
 
-	/* Number of files is limited by free space only, so we lie here */
-	fs.f_ffree=0;
 	mft=iget(sb,FILE_MFT);
-	fs.f_files=mft->i_size/vol->mft_recordsize;
+	if (!mft)
+		return -EIO;
+	/* So ... we lie... thus this following cast of loff_t value
+	   is ok here.. */
+	sf->f_files = (unsigned long)mft->i_size / vol->mft_recordsize;
 	iput(mft);
 
 	/* should be read from volume */
-	fs.f_namelen=255;
-	copy_to_user(sf,&fs,bufsize);
+	sf->f_namelen=255;
 	return 0;
 }
 
@@ -854,20 +809,14 @@ static int ntfs_remount_fs(struct super_block *sb, int *flags, char *options)
 
 /* Define the super block operation that are implemented */
 static struct super_operations ntfs_super_operations = {
-	ntfs_read_inode,
+	read_inode:	ntfs_read_inode,
 #ifdef CONFIG_NTFS_RW
-	ntfs_write_inode,
-#else
-	NULL,
+	write_inode:	ntfs_write_inode,
 #endif
-	NULL, /* put_inode */
-	NULL, /* delete_inode */
-	NULL, /* notify_change */
-	ntfs_put_super,
-	NULL, /* write_super */
-	ntfs_statfs,
-	ntfs_remount_fs, /* remount */
-	_ntfs_clear_inode, /* clear_inode */ 
+	put_super:	ntfs_put_super,
+	statfs:		ntfs_statfs,
+	remount_fs:	ntfs_remount_fs,
+	clear_inode:	_ntfs_clear_inode,
 };
 
 /* Called to mount a filesystem by read_super() in fs/super.c
@@ -886,14 +835,6 @@ struct super_block * ntfs_read_super(struct super_block *sb,
 	struct buffer_head *bh;
 	int i;
 
-	/* When the driver is compiled as a module, kmod must know when it
-	 * can safely remove it from memory. To do this, each module owns a
-	 * reference counter.
-	 */
-	MOD_INC_USE_COUNT;
-	/* Don't put ntfs_debug() before MOD_INC_USE_COUNT, printk() can block
-	 * so this could lead to a race condition with kmod.
-	 */
 	ntfs_debug(DEBUG_OTHER, "ntfs_read_super\n");
 
 #ifdef NTFS_IN_LINUX_KERNEL
@@ -907,9 +848,6 @@ struct super_block * ntfs_read_super(struct super_block *sb,
 	if(!parse_options(vol,(char*)options))
 		goto ntfs_read_super_vol;
 
-	/* Ensure that the super block won't be used until it is completed */
-	lock_super(sb);
-	ntfs_debug(DEBUG_OTHER, "lock_super\n");
 #if 0
 	/* Set to read only, user option might reset it */
 	sb->s_flags |= MS_RDONLY;
@@ -982,62 +920,31 @@ struct super_block * ntfs_read_super(struct super_block *sb,
 		ntfs_error("Could not get root dir inode\n");
 		goto ntfs_read_super_mft;
 	}
-	unlock_super(sb);
-	ntfs_debug(DEBUG_OTHER, "unlock_super\n");
 	ntfs_debug(DEBUG_OTHER, "read_super: done\n");
 	return sb;
 
 ntfs_read_super_mft:
 	ntfs_free(vol->mft);
 ntfs_read_super_unl:
-	sb->s_dev = 0;
-	unlock_super(sb);
-	ntfs_debug(DEBUG_OTHER, "unlock_super\n");
 ntfs_read_super_vol:
 	#ifndef NTFS_IN_LINUX_KERNEL
 	ntfs_free(vol);
 ntfs_read_super_dec:
 	#endif
 	ntfs_debug(DEBUG_OTHER, "read_super: done\n");
-	MOD_DEC_USE_COUNT;
 	return NULL;
 }
 
 /* Define the filesystem
- *
- * Define SECOND if you cannot unload ntfs, and want to avoid rebooting
- * for just one more test
  */
-static struct file_system_type ntfs_fs_type = {
-/* Filesystem name, as used after mount -t */
-#ifndef SECOND
-	"ntfs",
-#else
-	"ntfs2",
-#endif
-/* This filesystem requires a device (a hard disk)
- * May want to add FS_IBASKET when it works
- */
-	FS_REQUIRES_DEV,
-/* Entry point of the filesystem */
-	ntfs_read_super,
-/* Will point to the next filesystem in the kernel table */
-	NULL
-};
+static DECLARE_FSTYPE_DEV(ntfs_fs_type, "ntfs", ntfs_read_super);
 
-/* When this code is not compiled as a module, this is the main entry point,
- * called by do_sys_setup() in fs/filesystems.c
- *
- * NOTE : __initfunc() is a macro used to remove this function from memory
- * once initialization is done
- */
-__initfunc(int init_ntfs_fs(void))
+static int __init init_ntfs_fs(void)
 {
 	/* Comment this if you trust klogd. There are reasons not to trust it
 	 */
 #if defined(DEBUG) && !defined(MODULE)
-	extern int console_loglevel;
-	console_loglevel=15;
+	console_verbose();
 #endif
 	printk(KERN_NOTICE "NTFS version " NTFS_VERSION "\n");
 	SYSCTL(1);
@@ -1046,44 +953,23 @@ __initfunc(int init_ntfs_fs(void))
 	return register_filesystem(&ntfs_fs_type);
 }
 
-#ifdef MODULE
-/* A module is a piece of code which can be inserted in and removed
- * from the running kernel whenever you want using lsmod, or on demand using
- * kmod
- */
-
-/* No function of this module is needed by another module */
-EXPORT_NO_SYMBOLS;
-/* Only used for documentation purposes at the moment,
- * see include/linux/module.h
- */
-MODULE_AUTHOR("Martin von Löwis");
-MODULE_DESCRIPTION("NTFS driver");
-/* no MODULE_SUPPORTED_DEVICE() */
-/* Load-time parameter */
-MODULE_PARM(ntdebug, "i");
-MODULE_PARM_DESC(ntdebug, "Debug level");
-
-/* When this code is compiled as a module, if you use mount -t ntfs when no
- * ntfs filesystem is registered (see /proc/filesystems), get_fs_type() in
- * fs/super.c asks kmod to load the module named ntfs in memory.
- *
- * Therefore, this function is the main entry point in this case
- */
-int init_module(void)
-{
-	return init_ntfs_fs();
-}
-
-/* Called by kmod just before the kernel removes the module from memory */
-void cleanup_module(void)
+static void __exit exit_ntfs_fs(void)
 {
 	SYSCTL(0);
 	ntfs_debug(DEBUG_OTHER, "unregistering %s\n",ntfs_fs_type.name);
 	unregister_filesystem(&ntfs_fs_type);
 }
+
+EXPORT_NO_SYMBOLS;
+MODULE_AUTHOR("Martin von Löwis");
+MODULE_DESCRIPTION("NTFS driver");
+#ifdef DEBUG
+MODULE_PARM(ntdebug, "i");
+MODULE_PARM_DESC(ntdebug, "Debug level");
 #endif
 
+module_init(init_ntfs_fs)
+module_exit(exit_ntfs_fs)
 /*
  * Local variables:
  *  c-file-style: "linux"

@@ -1,4 +1,4 @@
-/* $Id: page.h,v 1.44 1999/06/23 03:53:11 davem Exp $
+/* $Id: page.h,v 1.55 2000/10/30 21:01:41 davem Exp $
  * page.h:  Various defines and such for MMU operations on the Sparc for
  *          the Linux kernel.
  *
@@ -14,12 +14,16 @@
 #else
 #define PAGE_SHIFT   12
 #endif
+#ifndef __ASSEMBLY__
+/* I have my suspicions... -DaveM */
+#define PAGE_SIZE    (1UL << PAGE_SHIFT)
+#else
 #define PAGE_SIZE    (1 << PAGE_SHIFT)
+#endif
 #define PAGE_MASK    (~(PAGE_SIZE-1))
 
 #ifdef __KERNEL__
 
-#include <linux/config.h>
 #include <asm/head.h>       /* for KERNBASE */
 #include <asm/btfixup.h>
 
@@ -28,32 +32,30 @@
 
 #ifndef __ASSEMBLY__
 
-#define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; } while (0)
-#define PAGE_BUG(page) do { \
-				BUG(); } while (0)
-
-#define clear_page(page)	memset((void *)(page), 0, PAGE_SIZE)
-#define copy_page(to,from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
-
-extern unsigned long page_offset;
-
-BTFIXUPDEF_SETHI_INIT(page_offset,0xf0000000)
-
-#ifdef MODULE
-#define 	PAGE_OFFSET  (page_offset)
+/*
+ * XXX I am hitting compiler bugs with __builtin_trap. This has
+ * hit me before and rusty was blaming his netfilter bugs on
+ * this so lets disable it. - Anton
+ */
+#if 0
+/* We need the mb()'s so we don't trigger a compiler bug - Anton */
+#define BUG() do { \
+	mb(); \
+	__builtin_trap(); \
+	mb(); \
+} while(0)
 #else
-#define		PAGE_OFFSET  BTFIXUP_SETHI(page_offset)
+#define BUG() do { \
+	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; \
+} while (0)
 #endif
 
-/* translate between physical and virtual addresses */
-BTFIXUPDEF_CALL_CONST(unsigned long, mmu_v2p, unsigned long)
-BTFIXUPDEF_CALL_CONST(unsigned long, mmu_p2v, unsigned long)
+#define PAGE_BUG(page)	BUG()
 
-#define mmu_v2p(vaddr) BTFIXUP_CALL(mmu_v2p)(vaddr)
-#define mmu_p2v(paddr) BTFIXUP_CALL(mmu_p2v)(paddr)
-
-#define __pa(x)    (mmu_v2p((unsigned long)(x)))
-#define __va(x)    ((void *)(mmu_p2v((unsigned long)(x))))
+#define clear_page(page)	 memset((void *)(page), 0, PAGE_SIZE)
+#define copy_page(to,from) 	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
+#define clear_user_page(page, vaddr)	clear_page(page)
+#define copy_user_page(to, from, vaddr)	copy_page(to, from)
 
 /* The following structure is used to hold the physical
  * memory configuration of the machine.  This is filled in
@@ -112,132 +114,6 @@ typedef struct { unsigned long iopgprot; } iopgprot_t;
 #define __pgprot(x)	((pgprot_t) { (x) } )
 #define __iopgprot(x)	((iopgprot_t) { (x) } )
 
-#elif CONFIG_AP1000_DEBUG
-
-typedef struct { unsigned long pte; } pte_t;
-typedef struct { unsigned long iopte; } iopte_t;
-typedef struct { unsigned long pmd; } pmd_t;
-typedef struct { unsigned long pgd; } pgd_t;
-typedef struct { unsigned long ctxd; } ctxd_t;
-typedef struct { unsigned long pgprot; } pgprot_t;
-typedef struct { unsigned long iopgprot; } iopgprot_t;
-
-static inline unsigned long __get_val(unsigned long x)
-{
-	if ((x & 0xF0000000) == (8<<28))
-		return x & 0x0FFFFFFF;
-	return x;
-}
-
-static inline unsigned long __set_val(unsigned long x)
-{
-	if ((x & 0xF0000000) == (0<<28))
-		return x | 0x80000000;
-	return x;
-}
-
-#define __pte_val(x)	((x).pte)
-#define __iopte_val(x)	((x).iopte)
-#define __pmd_val(x)      ((x).pmd)
-#define __pgd_val(x)	((x).pgd)
-#define __ctxd_val(x)	((x).ctxd)
-#define __pgprot_val(x)	((x).pgprot)
-#define __iopgprot_val(x)	((x).iopgprot)
-
-#define ___pte(x)	((pte_t) { (x) } )
-#define ___iopte(x)	((iopte_t) { (x) } )
-#define ___pmd(x)        ((pmd_t) { (x) } )
-#define ___pgd(x)	((pgd_t) { (x) } )
-#define ___ctxd(x)	((ctxd_t) { (x) } )
-#define ___pgprot(x)	((pgprot_t) { (x) } )
-#define ___iopgprot(x)	((iopgprot_t) { (x) } )
-
-
-#define pte_val(x) __get_val(__pte_val(x))
-#define iopte_val(x) __get_val(__iopte_val(x))
-#define pmd_val(x) __get_val(__pmd_val(x))
-#define pgd_val(x) __get_val(__pgd_val(x))
-#define ctxd_val(x) __get_val(__ctxd_val(x))
-#define pgprot_val(x) __get_val(__pgprot_val(x))
-#define iopgprot_val(x) __get_val(__iopgprot_val(x))
-
-#define __pte(x) ___pte(__set_val(x))
-#define __iopte(x) ___iopte(__set_val(x))
-#define __pmd(x) ___pmd(__set_val(x))
-#define __pgd(x) ___pgd(__set_val(x))
-#define __ctxd(x) ___ctxd(__set_val(x))
-#define __pgprot(x) ___pgprot(x)
-#define __iopgprot(x) ___iopgprot(__set_val(x))
-
-#elif CONFIG_AP1000
-
-typedef unsigned long pte_t;
-typedef unsigned long iopte_t;
-typedef unsigned long pmd_t;
-typedef unsigned long pgd_t;
-typedef unsigned long ctxd_t;
-typedef unsigned long pgprot_t;
-typedef unsigned long iopgprot_t;
-
-static inline unsigned long __get_val(unsigned long x)
-{
-#if 0
-	extern void ap_panic(char *fmt,...);
-	if (x && (x & 0xF0000000) == 0) {
-		ap_panic("get_val got 0x%x\n",x);
-	}
-#endif
-	if ((x & 0xF0000000) == (8<<28))
-		return x & 0x0FFFFFFF;
-	return x;
-}
-
-static inline unsigned long __set_val(unsigned long x)
-{
-#if 0
-	extern void ap_panic(char *fmt,...);
-	if ((x & 0xF0000000) == (8<<28)) {
-		ap_panic("set_val got 0x%x\n",x);
-	}
-#endif
-	if ((x & 0xF0000000) == (0<<28))
-		return x | 0x80000000;
-	return x;
-}
-
-#define __pte_val(x)	(x)
-#define __iopte_val(x)	(x)
-#define __pmd_val(x)      (x)
-#define __pgd_val(x)	(x)
-#define __ctxd_val(x)	(x)
-#define __pgprot_val(x)	(x)
-#define __iopgprot_val(x)	(x)
-
-#define ___pte(x)	((pte_t) { (x) } )
-#define ___iopte(x)	((iopte_t) { (x) } )
-#define ___pmd(x)        ((pmd_t) { (x) } )
-#define ___pgd(x)	((pgd_t) { (x) } )
-#define ___ctxd(x)	((ctxd_t) { (x) } )
-#define ___pgprot(x)	((pgprot_t) { (x) } )
-#define ___iopgprot(x)	((iopgprot_t) { (x) } )
-
-
-#define pte_val(x) __get_val(__pte_val(x))
-#define iopte_val(x) __get_val(__iopte_val(x))
-#define pmd_val(x) __get_val(__pmd_val(x))
-#define pgd_val(x) __get_val(__pgd_val(x))
-#define ctxd_val(x) __get_val(__ctxd_val(x))
-#define pgprot_val(x) __get_val(__pgprot_val(x))
-#define iopgprot_val(x) __get_val(__iopgprot_val(x))
-
-#define __pte(x) ___pte(__set_val(x))
-#define __iopte(x) ___iopte(__set_val(x))
-#define __pmd(x) ___pmd(__set_val(x))
-#define __pgd(x) ___pgd(__set_val(x))
-#define __ctxd(x) ___ctxd(__set_val(x))
-#define __pgprot(x) ___pgprot(x)
-#define __iopgprot(x) ___iopgprot(__set_val(x))
-
 #else
 /*
  * .. while these make it easier on the compiler
@@ -274,19 +150,34 @@ BTFIXUPDEF_SETHI(sparc_unmapped_base)
 
 #define TASK_UNMAPPED_BASE	BTFIXUP_SETHI(sparc_unmapped_base)
 
-/* to align the pointer to the (next) page boundary */
-#define PAGE_ALIGN(addr)  (((addr)+PAGE_SIZE-1)&PAGE_MASK)
+/* Pure 2^n version of get_order */
+extern __inline__ int get_order(unsigned long size)
+{
+	int order;
 
-/* Now, to allow for very large physical memory configurations we
- * place the page pool both above the kernel and below the kernel.
- */
-#define MAP_NR(addr) ((((unsigned long) (addr)) - PAGE_OFFSET) >> PAGE_SHIFT)
+	size = (size-1) >> (PAGE_SHIFT-1);
+	order = -1;
+	do {
+		size >>= 1;
+		order++;
+	} while (size);
+	return order;
+}
 
 #else /* !(__ASSEMBLY__) */
 
 #define __pgprot(x)	(x)
 
 #endif /* !(__ASSEMBLY__) */
+
+/* to align the pointer to the (next) page boundary */
+#define PAGE_ALIGN(addr)  (((addr)+PAGE_SIZE-1)&PAGE_MASK)
+
+#define PAGE_OFFSET	0xf0000000
+#define __pa(x)                 ((unsigned long)(x) - PAGE_OFFSET)
+#define __va(x)                 ((void *)((unsigned long) (x) + PAGE_OFFSET))
+#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
+#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 #endif /* __KERNEL__ */
 

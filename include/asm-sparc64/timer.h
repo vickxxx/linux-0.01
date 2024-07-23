@@ -1,4 +1,4 @@
-/* $Id: timer.h,v 1.2 1998/03/15 17:23:52 ecd Exp $
+/* $Id: timer.h,v 1.3 2000/05/09 17:40:15 davem Exp $
  * timer.h: System timer definitions for sun5.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -22,6 +22,8 @@
  * scheduling, system/user tick counting for the current thread,
  * and also profiling if enabled.
  */
+
+#include <linux/config.h>
 
 /* Two timers, traditionally steered to PIL's 10 and 14 respectively.
  * But since INO packets are used on sun5, we could use any PIL level
@@ -48,7 +50,7 @@ struct sun5_timer {
  */
 #define SUN5_HZ_TO_LIMIT(__hz)  (1000000/(__hz))
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 extern unsigned long timer_tick_offset;
 extern void timer_tick_interrupt(struct pt_regs *);
 #endif

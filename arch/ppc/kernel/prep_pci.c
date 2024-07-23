@@ -1,5 +1,5 @@
 /*
- * $Id: prep_pci.c,v 1.35 1999/05/10 23:31:03 cort Exp $
+ * $Id: prep_pci.c,v 1.40 1999/09/17 17:23:05 cort Exp $
  * PReP pci functions.
  * Originally by Gary Thomas
  * rewritten and updated by Cort Dougan (cort@cs.nmt.edu)
@@ -13,6 +13,7 @@
 #include <linux/init.h>
 #include <linux/openpic.h>
 
+#include <asm/init.h>
 #include <asm/byteorder.h>
 #include <asm/io.h>
 #include <asm/ptrace.h>
@@ -38,7 +39,8 @@ unsigned char *Motherboard_routes;
 /* Used for Motorola to store system config register */
 static unsigned long	*ProcInfo;
 
-extern void chrp_do_IRQ(struct pt_regs *,int , int);
+extern int chrp_get_irq(struct pt_regs *);
+extern void chrp_post_irq(struct pt_regs* regs, int);
 
 /* Tables for known hardware */   
 
@@ -685,7 +687,7 @@ static u_char mvme2600_openpic_initsenses[] __initdata = {
 int prep_keybd_present = 1;
 int MotMPIC = 0;
 
-__initfunc(int raven_init(void))
+int __init raven_init(void)
 {
 	unsigned int	devid;
 	unsigned int	pci_membase;
@@ -733,7 +735,8 @@ __initfunc(int raven_init(void))
 	OpenPIC_InitSenses = mvme2600_openpic_initsenses;
 	OpenPIC_NumInitSenses = sizeof(mvme2600_openpic_initsenses);
 
-	ppc_md.do_IRQ = chrp_do_IRQ;
+	ppc_md.get_irq = chrp_get_irq;
+	ppc_md.post_irq = chrp_post_irq;
 	
 	/* If raven is present on Motorola store the system config register
 	 * for later use.
@@ -788,7 +791,7 @@ struct mot_info {
 	{0x000, 0x00, 0x00, "",					NULL,			NULL}
 };
 
-__initfunc(unsigned long prep_route_pci_interrupts(void))
+unsigned long __init prep_route_pci_interrupts(void)
 {
 	unsigned char *ibc_pirq = (unsigned char *)0x80800860;
 	unsigned char *ibc_pcicon = (unsigned char *)0x80800840;
@@ -976,9 +979,8 @@ __initfunc(unsigned long prep_route_pci_interrupts(void))
 	return 0;
 }
 
-__initfunc(
-void
-prep_pcibios_fixup(void))
+void __init
+prep_pcibios_fixup(void)
 {
         struct pci_dev *dev;
         extern unsigned char *Motherboard_map;
@@ -996,7 +998,7 @@ prep_pcibios_fixup(void))
 	printk("Setting PCI interrupts for a \"%s\"\n", Motherboard_map_name);
 	if (OpenPIC) {
 		/* PCI interrupts are controlled by the OpenPIC */
-		for(dev=pci_devices; dev; dev=dev->next) {
+		pci_for_each_dev(dev) {
 			if (dev->bus->number == 0) {
                        		dev->irq = openpic_to_irq(Motherboard_map[PCI_SLOT(dev->devfn)]);
 				pcibios_write_config_byte(dev->bus->number, dev->devfn, PCI_INTERRUPT_PIN, dev->irq);
@@ -1005,8 +1007,7 @@ prep_pcibios_fixup(void))
 		return;
 	}
 
-	for(dev=pci_devices; dev; dev=dev->next)
-	{
+	pci_for_each_dev(dev) {
 		/*
 		 * Use our old hard-coded kludge to figure out what
 		 * irq this device uses.  This is necessary on things
@@ -1017,17 +1018,17 @@ prep_pcibios_fixup(void))
 
 		for ( i = 0 ; i <= 5 ; i++ )
 		{
-		        if ( dev->base_address[i] > 0x10000000 )
+		        if ( dev->resource[i].start > 0x10000000 )
 		        {
 		                printk("Relocating PCI address %lx -> %lx\n",
-		                       dev->base_address[i],
-		                       (dev->base_address[i] & 0x00FFFFFF)
+		                       dev->resource[i].start,
+		                       (dev->resource[i].start & 0x00FFFFFF)
 		                       | 0x01000000);
-		                dev->base_address[i] =
-		                  (dev->base_address[i] & 0x00FFFFFF) | 0x01000000;
+		                dev->resource[i].start =
+		                  (dev->resource[i].start & 0x00FFFFFF) | 0x01000000;
 		                pci_write_config_dword(dev,
 		                        PCI_BASE_ADDRESS_0+(i*0x4),
-		                       dev->base_address[i] );
+		                       dev->resource[i].start );
 		        }
 		}
 #if 0
@@ -1044,9 +1045,8 @@ prep_pcibios_fixup(void))
 
 decl_config_access_method(indirect);
 
-__initfunc(
-void
-prep_setup_pci_ptrs(void))
+void __init
+prep_setup_pci_ptrs(void)
 {
 	PPC_DEVICE *hostbridge;
 
@@ -1055,7 +1055,7 @@ prep_setup_pci_ptrs(void))
         {
 		pci_config_address = (unsigned *)0x80000cf8;
 		pci_config_data = (char *)0x80000cfc;
-                set_config_access_method(indirect);		
+		set_config_access_method(indirect);		
         }
         else
         {

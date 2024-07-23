@@ -61,8 +61,9 @@ Mellon the rights to redistribute these changes without encumbrance.
 
 
 
-/* Catch new _KERNEL defn for NetBSD */
-#ifdef __NetBSD__
+/* Catch new _KERNEL defn for NetBSD and DJGPP/__CYGWIN32__ */
+#if defined(__NetBSD__) || \
+  ((defined(DJGPP) || defined(__CYGWIN32__)) && !defined(KERNEL))
 #include <sys/types.h>
 #endif 
 
@@ -91,7 +92,6 @@ struct timespec {
         long       ts_nsec;
 };
 #else  /* DJGPP but not KERNEL */
-#include <sys/types.h>
 #include <sys/time.h>
 typedef unsigned long long u_quad_t;
 #endif /* !KERNEL */
@@ -100,20 +100,33 @@ typedef unsigned long long u_quad_t;
 
 #if defined(__linux__)
 #define cdev_t u_quad_t
+#ifndef __KERNEL__
 #if !defined(_UQUAD_T_) && (!defined(__GLIBC__) || __GLIBC__ < 2)
 #define _UQUAD_T_ 1
 typedef unsigned long long u_quad_t;
 #endif
+#else /*__KERNEL__ */
+typedef unsigned long long u_quad_t;
+#endif /* __KERNEL__ */
 #else
 #define cdev_t dev_t
 #endif
 
 #ifdef __CYGWIN32__
-typedef unsigned char u_int8_t;
 struct timespec {
         time_t  tv_sec;         /* seconds */
         long    tv_nsec;        /* nanoseconds */
 };
+#endif
+
+#ifndef __BIT_TYPES_DEFINED__
+#define __BIT_TYPES_DEFINED__
+typedef signed char	      int8_t;
+typedef unsigned char	    u_int8_t;
+typedef short		     int16_t;
+typedef unsigned short	   u_int16_t;
+typedef int		     int32_t;
+typedef unsigned int	   u_int32_t;
 #endif
 
 
@@ -151,8 +164,8 @@ struct timespec {
 struct venus_dirent {
         unsigned long	d_fileno;		/* file number of entry */
         unsigned short	d_reclen;		/* length of this record */
-        char 		d_type;			/* file type, see below */
-        char		d_namlen;		/* length of string in d_name */
+        unsigned char 	d_type;			/* file type, see below */
+        unsigned char	d_namlen;		/* length of string in d_name */
         char		d_name[CODA_MAXNAMLEN + 1];/* name must be no longer than this */
 };
 #undef DIRSIZ
@@ -215,11 +228,6 @@ static __inline__ ino_t  coda_f2i(struct ViceFid *fid)
 #endif
 
 
-#ifndef __BIT_TYPES_DEFINED__
-#define u_int32_t unsigned int
-#endif
-
-
 #ifndef _VUID_T_
 #define _VUID_T_
 typedef u_int32_t vuid_t;
@@ -229,12 +237,8 @@ typedef u_int32_t vgid_t;
 #ifndef _CODACRED_T_
 #define _CODACRED_T_
 struct coda_cred {
-	vuid_t cr_uid, cr_euid, cr_suid, cr_fsuid;
-	vgid_t cr_groupid,     cr_egid, cr_sgid, cr_fsgid;
-#if   defined(CODA_SUPPORTS_SUPPLEMENTARY_GROUPS)
-	int    cr_nsupgps;
-	vgid_t cr_supgps[NGROUPS];
-#endif        /* defined(CODA_SUPPORTS_SUPPLEMENTARY_GROUPS) */
+    vuid_t cr_uid, cr_euid, cr_suid, cr_fsuid; /* Real, efftve, set, fs uid*/
+    vgid_t cr_groupid,     cr_egid, cr_sgid, cr_fsgid; /* same for groups */
 };
 #endif 
 
@@ -246,7 +250,7 @@ struct coda_cred {
 enum coda_vtype	{ C_VNON, C_VREG, C_VDIR, C_VBLK, C_VCHR, C_VLNK, C_VSOCK, C_VFIFO, C_VBAD };
 
 struct coda_vattr {
-	int     	va_type;	/* vnode type (for create) */
+	long     	va_type;	/* vnode type (for create) */
 	u_short		va_mode;	/* files access mode and type */
 	short		va_nlink;	/* number of references to file */
 	vuid_t		va_uid;		/* owner user id */
@@ -266,12 +270,21 @@ struct coda_vattr {
 
 #endif 
 
+/* structure used by CODA_STATFS for getting cache information from venus */
+struct coda_statfs {
+    int32_t f_blocks;
+    int32_t f_bfree;
+    int32_t f_bavail;
+    int32_t f_files;
+    int32_t f_ffree;
+};
+
 /*
  * Kernel <--> Venus communications.
  */
 
 #define CODA_ROOT	2
-#define CODA_SYNC	3
+#define CODA_OPEN_BY_FD	3
 #define CODA_OPEN	4
 #define CODA_CLOSE	5
 #define CODA_IOCTL	6
@@ -285,23 +298,22 @@ struct coda_vattr {
 #define CODA_RENAME	14
 #define CODA_MKDIR	15
 #define CODA_RMDIR	16
-#define CODA_READDIR	17
 #define CODA_SYMLINK	18
 #define CODA_READLINK	19
 #define CODA_FSYNC	20
-#define CODA_INACTIVE	21
 #define CODA_VGET	22
 #define CODA_SIGNAL	23
-#define CODA_REPLACE	24
-#define CODA_FLUSH       25
-#define CODA_PURGEUSER   26
-#define CODA_ZAPFILE     27
-#define CODA_ZAPDIR      28
-#define CODA_PURGEFID    30
+#define CODA_REPLACE	 24 /* DOWNCALL */
+#define CODA_FLUSH       25 /* DOWNCALL */
+#define CODA_PURGEUSER   26 /* DOWNCALL */
+#define CODA_ZAPFILE     27 /* DOWNCALL */
+#define CODA_ZAPDIR      28 /* DOWNCALL */
+#define CODA_PURGEFID    30 /* DOWNCALL */
 #define CODA_OPEN_BY_PATH 31
 #define CODA_RESOLVE     32
 #define CODA_REINTEGRATE 33
-#define CODA_NCALLS 34
+#define CODA_STATFS	 34
+#define CODA_NCALLS 35
 
 #define DOWNCALL(opcode) (opcode >= CODA_REPLACE && opcode <= CODA_PURGEFID)
 
@@ -310,14 +322,12 @@ struct coda_vattr {
                             VC_MAXDATASIZE  
 
 #define CIOC_KERNEL_VERSION _IOWR('c', 10, sizeof (int))
-#if	0
-	/* don't care about kernel version number */
-#define CODA_KERNEL_VERSION 0
-	/* The old venus 4.6 compatible interface */
-#define CODA_KERNEL_VERSION 1
+
+#if 0
+#define CODA_KERNEL_VERSION 0 /* don't care about kernel version number */
+#define CODA_KERNEL_VERSION 1 /* The old venus 4.6 compatible interface */
 #endif
-	/* venus_lookup gets an extra parameter to aid windows.*/
-#define CODA_KERNEL_VERSION 2
+#define CODA_KERNEL_VERSION 2 /* venus_lookup gets an extra parameter */
 
 /*
  *        Venus <-> Coda  RPC arguments
@@ -347,9 +357,6 @@ struct coda_root_out {
 struct coda_root_in {
     struct coda_in_hdr in;
 };
-
-/* coda_sync: */
-/* Nothing needed for coda_sync */
 
 /* coda_open: */
 struct coda_open_in {
@@ -527,20 +534,6 @@ struct coda_rmdir_out {
     struct coda_out_hdr out;
 };
 
-/* coda_readdir: */
-struct coda_readdir_in {
-    struct coda_in_hdr ih;
-    ViceFid	VFid;
-    int	count;
-    int	offset;
-};
-
-struct coda_readdir_out {
-    struct coda_out_hdr oh;
-    int	size;
-    caddr_t	data;		/* Place holder for data. */
-};
-
 /* coda_symlink: NO_OUT */
 struct coda_symlink_in {
     struct coda_in_hdr ih;
@@ -575,12 +568,6 @@ struct coda_fsync_in {
 
 struct coda_fsync_out {
     struct coda_out_hdr out;
-};
-
-/* coda_inactive: NO_OUT */
-struct coda_inactive_in {
-    struct coda_in_hdr ih;
-    ViceFid VFid;
 };
 
 /* coda_vget: */
@@ -636,31 +623,24 @@ struct coda_purgefid_out {
     ViceFid CodaFid;
 };
 
-/* coda_rdwr: */
-struct coda_rdwr_in {
-    struct coda_in_hdr ih;
-    ViceFid	VFid;
-    int	rwflag;
-    int	count;
-    int	offset;
-    int	ioflag;
-    caddr_t	data;		/* Place holder for data. */	
-};
-
-struct coda_rdwr_out {
-    struct coda_out_hdr oh;
-    int	rwflag;
-    int	count;
-    caddr_t	data;	/* Place holder for data. */
-};
-
-
 /* coda_replace: */
 /* CODA_REPLACE is a venus->kernel call */	
 struct coda_replace_out { /* coda_replace is a venus->kernel call */
     struct coda_out_hdr oh;
     ViceFid NewFid;
     ViceFid OldFid;
+};
+
+/* coda_open_by_fd: */
+struct coda_open_by_fd_in {
+    struct coda_in_hdr ih;
+    ViceFid    VFid;
+    int        flags;
+};
+
+struct coda_open_by_fd_out {
+    struct coda_out_hdr oh;
+    int fd;
 };
 
 /* coda_open_by_path: */
@@ -673,6 +653,16 @@ struct coda_open_by_path_in {
 struct coda_open_by_path_out {
     struct coda_out_hdr oh;
 	int path;
+};
+
+/* coda_statfs: NO_IN */
+struct coda_statfs_in {
+    struct coda_in_hdr in;
+};
+
+struct coda_statfs_out {
+    struct coda_out_hdr oh;
+    struct coda_statfs stat;
 };
 
 /* 
@@ -697,14 +687,13 @@ union inputArgs {
     struct coda_rename_in coda_rename;
     struct coda_mkdir_in coda_mkdir;
     struct coda_rmdir_in coda_rmdir;
-    struct coda_readdir_in coda_readdir;
     struct coda_symlink_in coda_symlink;
     struct coda_readlink_in coda_readlink;
     struct coda_fsync_in coda_fsync;
-    struct coda_inactive_in coda_inactive;
     struct coda_vget_in coda_vget;
-    struct coda_rdwr_in coda_rdwr;
-	struct coda_open_by_path_in coda_open_by_path;
+    struct coda_open_by_fd_in coda_open_by_fd;
+    struct coda_open_by_path_in coda_open_by_path;
+    struct coda_statfs_in coda_statfs;
 };
 
 union outputArgs {
@@ -716,7 +705,6 @@ union outputArgs {
     struct coda_lookup_out coda_lookup;
     struct coda_create_out coda_create;
     struct coda_mkdir_out coda_mkdir;
-    struct coda_readdir_out coda_readdir;
     struct coda_readlink_out coda_readlink;
     struct coda_vget_out coda_vget;
     struct coda_purgeuser_out coda_purgeuser;
@@ -724,9 +712,10 @@ union outputArgs {
     struct coda_zapdir_out coda_zapdir;
     struct coda_zapvnode_out coda_zapvnode;
     struct coda_purgefid_out coda_purgefid;
-    struct coda_rdwr_out coda_rdwr;
     struct coda_replace_out coda_replace;
-	struct coda_open_by_path_out coda_open_by_path;
+    struct coda_open_by_fd_out coda_open_by_fd;
+    struct coda_open_by_path_out coda_open_by_path;
+    struct coda_statfs_out coda_statfs;
 };    
 
 union coda_downcalls {
@@ -752,20 +741,11 @@ struct ViceIoctl {
         short out_size;         /* Maximum size of output buffer, <= 2K */
 };
 
-#if defined(__CYGWIN32__) || defined(DJGPP)
-struct PioctlData {
-	unsigned long cmd;
-        const char *path;
-        int follow;
-        struct ViceIoctl vi;
-};
-#else
 struct PioctlData {
         const char *path;
         int follow;
         struct ViceIoctl vi;
 };
-#endif
 
 #define	CODA_CONTROL		".CONTROL"
 #define CODA_CONTROLLEN           8
@@ -779,5 +759,15 @@ struct PioctlData {
 #define	IS_CTL_FID(fidp)	((fidp)->Volume == CTL_VOL &&\
 				 (fidp)->Vnode == CTL_VNO &&\
 				 (fidp)->Unique == CTL_UNI)
+
+/* Data passed to mount */
+
+#define CODA_MOUNT_VERSION 1
+
+struct coda_mount_data {
+	int		version;
+	int		fd;       /* Opened device */
+};
+
 #endif 
 

@@ -26,7 +26,7 @@
 #include <linux/swap.h>
 
 #include <asm/system.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/page.h>
 
 static inline void
@@ -108,22 +108,23 @@ remove_mapping (struct task_struct *task, unsigned long start, unsigned long end
 
 void *vmalloc_uncached (unsigned long size)
 {
-	return vmalloc_prot (size, PAGE_KERNEL_UNCACHED);
+	return __vmalloc (size, GFP_KERNEL | __GFP_HIGHMEM,
+	                  PAGE_KERNEL_UNCACHED);
 }
 
 static inline void free_pte(pte_t page)
 {
 	if (pte_present(page)) {
-		unsigned long addr = pte_page(page);
-		if (MAP_NR(addr) >= max_mapnr || PageReserved(mem_map+MAP_NR(addr)))
+		struct page *ptpage = pte_page(page);
+		if ((!VALID_PAGE(ptpage)) || PageReserved(ptpage))
 			return;
-		free_page(addr);
+		__free_page(ptpage);
 		if (current->mm->rss <= 0)
 			return;
 		current->mm->rss--;
 		return;
 	}
-	swap_free(pte_val(page));
+	swap_free(pte_to_swp_entry(page));
 }
 
 static inline void forget_pte(pte_t page)
@@ -152,15 +153,15 @@ vmap_pte_range (pte_t *pte, unsigned long address, unsigned long size, unsigned 
 		end = PMD_SIZE;
 	do {
 		pte_t oldpage = *pte;
-		unsigned long page;
+		struct page * page;
 		pte_clear(pte);
 
 		vdir = pgd_offset_k (vaddr);
 		vpmd = pmd_offset (vdir, vaddr);
 		vpte = pte_offset (vpmd, vaddr);
 		page = pte_page (*vpte);
-		
-		set_pte(pte, mk_pte_phys(page, PAGE_USERIO));
+
+		set_pte(pte, mk_pte(page, PAGE_USERIO));
 		forget_pte(oldpage);
 		address += PAGE_SIZE;
 		vaddr += PAGE_SIZE;

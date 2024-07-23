@@ -8,8 +8,10 @@
 #include <linux/mm.h>
 #include <asm/uaccess.h>
 
+kernel_cap_t cap_bset = CAP_INIT_EFF_SET;
+
 /* Note: never hold tasklist_lock while spinning for this one */
-spinlock_t task_capability_lock;
+spinlock_t task_capability_lock = SPIN_LOCK_UNLOCKED;
 
 /*
  * For sys_getproccap() and sys_setproccap(), any of the three
@@ -17,7 +19,7 @@ spinlock_t task_capability_lock;
  * uninteresting and/or not to be changed.
  */
 
-asmlinkage int sys_capget(cap_user_header_t header, cap_user_data_t dataptr)
+asmlinkage long sys_capget(cap_user_header_t header, cap_user_data_t dataptr)
 {
      int error, pid;
      __u32 version;
@@ -124,7 +126,7 @@ static void cap_set_all(kernel_cap_t *effective,
  * E: must be set to a subset of (new target) Permitted
  */
 
-asmlinkage int sys_capset(cap_user_header_t header, const cap_user_data_t data)
+asmlinkage long sys_capset(cap_user_header_t header, const cap_user_data_t data)
 {
      kernel_cap_t inheritable, permitted, effective;
      __u32 version;

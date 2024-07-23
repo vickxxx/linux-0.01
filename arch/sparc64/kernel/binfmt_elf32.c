@@ -1,7 +1,7 @@
 /*
  * binfmt_elf32.c: Support 32-bit Sparc ELF binaries on Ultra.
  *
- * Copyright (C) 1995, 1996, 1997, 1998 David S. Miller	(davem@dm.cobaltmicro.com)
+ * Copyright (C) 1995, 1996, 1997, 1998 David S. Miller	(davem@redhat.com)
  * Copyright (C) 1995, 1996, 1997, 1998 Jakub Jelinek	(jj@ultra.linux.cz)
  */
 
@@ -79,7 +79,7 @@ typedef struct {
 	} pr_un;
 } elf_xregset_t;
 
-#define elf_check_arch(x)	(((x) == EM_SPARC) || ((x) == EM_SPARC32PLUS))
+#define elf_check_arch(x)	(((x)->e_machine == EM_SPARC) || ((x)->e_machine == EM_SPARC32PLUS))
 
 #define ELF_ET_DYN_BASE         0x08000000
 
@@ -129,6 +129,13 @@ struct elf_prpsinfo32
 	char	pr_psargs[ELF_PRARGSZ];	/* initial part of arg list */
 };
 
+#include <linux/highuid.h>
+
+#undef NEW_TO_OLD_UID
+#undef NEW_TO_OLD_GID
+#define NEW_TO_OLD_UID(uid) ((uid) > 65535) ? (u16)overflowuid : (u16)(uid)
+#define NEW_TO_OLD_GID(gid) ((gid) > 65535) ? (u16)overflowgid : (u16)(gid)
+
 #define elf_addr_t	u32
 #define elf_caddr_t	u32
 #undef start_thread
@@ -142,7 +149,7 @@ struct elf_prpsinfo32
 #ifdef CONFIG_BINFMT_ELF32_MODULE
 #define CONFIG_BINFMT_ELF_MODULE CONFIG_BINFMT_ELF32_MODULE
 #endif
-#define ELF_FLAGS_INIT	current->tss.flags |= SPARC_FLAG_32BIT
+#define ELF_FLAGS_INIT	current->thread.flags |= SPARC_FLAG_32BIT
 
 MODULE_DESCRIPTION("Binary format loader for compatibility with 32bit SparcLinux binaries on the Ultra");
 MODULE_AUTHOR("Eric Youngdale, David S. Miller, Jakub Jelinek");

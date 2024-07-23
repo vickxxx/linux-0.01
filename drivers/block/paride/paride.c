@@ -13,18 +13,21 @@
 	1.02	GRG 1998.05.05  init_proto, release_proto, ktti
 	1.03	GRG 1998.08.15  eliminate compiler warning
 	1.04    GRG 1998.11.28  added support for FRIQ 
-
+	1.05    TMW 2000.06.06  use parport_find_number instead of
+				parport_enumerate
 */
 
-#define PI_VERSION      "1.04"
+#define PI_VERSION      "1.05"
 
 #include <linux/module.h>
 #include <linux/config.h>
+#include <linux/kmod.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
+#include <linux/wait.h>
 
 #ifdef CONFIG_PARPORT_MODULE
 #define CONFIG_PARPORT
@@ -118,8 +121,8 @@ static void pi_claim( PIA *pi)
 	pi->claimed = 1;
 #ifdef CONFIG_PARPORT
         if (pi->pardev)
-          while (parport_claim((struct pardevice *)(pi->pardev)))
-            sleep_on(&(pi->parq));
+		wait_event (pi->parq,
+			    !parport_claim ((struct pardevice *)pi->pardev));
 #endif
 }
 
@@ -236,22 +239,25 @@ static void pi_register_parport( PIA *pi, int verbose)
 {
 #ifdef CONFIG_PARPORT
 
-	struct parport	*pp;
+	struct parport *port;
 
-	pp = parport_enumerate();
+	port = parport_find_base (pi->port);
+	if (!port) return;
 
-	while((pp)&&(pp->base != pi->port)) pp = pp->next;
+	pi->pardev = parport_register_device(port,
+					     pi->device,NULL,
+					     pi_wake_up,NULL,
+					     0,(void *)pi);
+	parport_put_port (port);
+	if (!pi->pardev) return;
 
-	if (!pp) return;
-
-	pi->pardev = (void *) parport_register_device(
-	      pp,pi->device,NULL,pi_wake_up,NULL,0,(void *)pi);
 
 	init_waitqueue_head(&pi->parq);
 
-	if (verbose) printk("%s: 0x%x is %s\n",pi->device,pi->port,pp->name);
+	if (verbose) printk("%s: 0x%x is %s\n",pi->device,pi->port,
+			    port->name);
 	
-	pi->parname = (char *)pp->name;
+	pi->parname = (char *)port->name;
 
 #endif
 }
@@ -335,6 +341,9 @@ int pi_init(PIA *pi, int autoprobe, int port, int mode,
 
 	s = protocol; e = s+1;
 
+	if (!protocols[0])
+		request_module ("paride_protocol");
+
 	if (autoprobe) {
 		s = 0; 
 		e = MAX_PROTOS;
@@ -401,6 +410,7 @@ int	init_module(void)
 {	int k;
 
 	for (k=0;k<MAX_PROTOS;k++) protocols[k] = 0;
+
 	printk("paride: version %s installed\n",PI_VERSION);
 	return 0;
 }

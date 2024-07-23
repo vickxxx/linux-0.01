@@ -11,9 +11,9 @@
 LINKFLAGS = -static -T bootloader.lds #-N -relax
 
 .S.s:
-	$(CC) -D__ASSEMBLY__ -traditional -E -o $*.o $<
+	$(CPP) $(AFLAGS) -traditional -o $*.o $<
 .S.o:
-	$(CC) -D__ASSEMBLY__ -traditional -c -o $*.o $<
+	$(CC) $(AFLAGS) -traditional -c -o $*.o $<
 
 OBJECTS = head.o main.o
 BPOBJECTS = head.o bootp.o
@@ -68,7 +68,7 @@ vmlinux.nh: $(VMLINUX) $(OBJSTRIP)
 	$(OBJSTRIP) -v $(VMLINUX) vmlinux.nh
 
 vmlinux: $(TOPDIR)/vmlinux
-	strip -o vmlinux $(VMLINUX)
+	$(STRIP) -o vmlinux $(VMLINUX)
 
 tools/lxboot: $(OBJSTRIP) bootloader
 	$(OBJSTRIP) -p bootloader tools/lxboot
@@ -80,7 +80,7 @@ tools/bootph: bootpheader $(OBJSTRIP)
 	$(OBJSTRIP) -vb bootpheader tools/bootph
 
 $(OBJSTRIP): $(OBJSTRIP).c
-	$(HOSTCC) $(OBJSTRIP).c -o $(OBJSTRIP)
+	$(HOSTCC) $(HOSTCFLAGS) -I$(HPATH) $(OBJSTRIP).c -o $(OBJSTRIP)
 
 tools/mkbb: tools/mkbb.c
 	$(HOSTCC) tools/mkbb.c -o tools/mkbb

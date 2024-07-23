@@ -56,6 +56,7 @@
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
+#include <net/slhc_vj.h>
 
 #ifdef CONFIG_INET
 /* Entire module is for IP only */
@@ -77,10 +78,7 @@
 #include <linux/timer.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
-#include <linux/mm.h>
-#include <linux/init.h>
 #include <net/checksum.h>
-#include <net/slhc_vj.h>
 #include <asm/unaligned.h>
 
 int last_retran;
@@ -752,20 +750,9 @@ void cleanup_module(void)
 	return;
 }
 
-#else /* MODULE */
-
-__initfunc(void slhc_install(void))
-{
-}
-
 #endif /* MODULE */
 #else /* CONFIG_INET */
-EXPORT_SYMBOL(slhc_init);
-EXPORT_SYMBOL(slhc_free);
-EXPORT_SYMBOL(slhc_remember);
-EXPORT_SYMBOL(slhc_compress);
-EXPORT_SYMBOL(slhc_uncompress);
-EXPORT_SYMBOL(slhc_toss);
+
 
 int
 slhc_toss(struct slcompress *comp)
@@ -806,5 +793,11 @@ slhc_init(int rslots, int tslots)
   printk(KERN_DEBUG "Called IP function on non IP-system: slhc_init");
   return NULL;
 }
+EXPORT_SYMBOL(slhc_init);
+EXPORT_SYMBOL(slhc_free);
+EXPORT_SYMBOL(slhc_remember);
+EXPORT_SYMBOL(slhc_compress);
+EXPORT_SYMBOL(slhc_uncompress);
+EXPORT_SYMBOL(slhc_toss);
 
 #endif /* CONFIG_INET */

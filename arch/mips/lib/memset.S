@@ -1,13 +1,9 @@
 /*
- * include/asm-mips/types.h
- *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
  * Copyright (C) 1998 by Ralf Baechle
- *
- * $Id: memset.S,v 1.1 1998/05/04 09:12:54 ralf Exp $
  */
 #include <asm/asm.h>
 #include <asm/offset.h>

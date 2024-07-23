@@ -22,7 +22,8 @@
  *		2 of the License, or (at your option) any later version.
  *
  *	Changes
- *		Alan Cox	:	New arp/rebuild header
+ *		Alan Cox		:	New arp/rebuild header
+ *		Maciej W. Rozycki	:	IPv6 support
  */
  
 #include <linux/config.h>
@@ -51,17 +52,17 @@
  * daddr=NULL	means leave destination address (eg unresolved arp)
  */
 
-int fddi_header(struct sk_buff	*skb, struct device *dev, unsigned short type,
+int fddi_header(struct sk_buff	*skb, struct net_device *dev, unsigned short type,
 		void *daddr, void *saddr, unsigned len)
 {
 	int hl = FDDI_K_SNAP_HLEN;
 	struct fddihdr *fddi;
 	
-	if(type != ETH_P_IP && type != ETH_P_ARP)
+	if(type != ETH_P_IP && type != ETH_P_IPV6 && type != ETH_P_ARP)
 		hl=FDDI_K_8022_HLEN-3;
 	fddi = (struct fddihdr *)skb_push(skb, hl);
 	fddi->fc			 = FDDI_FC_K_ASYNC_LLC_DEF;
-	if(type == ETH_P_IP || type == ETH_P_ARP)
+	if(type == ETH_P_IP || type == ETH_P_IPV6 || type == ETH_P_ARP)
 	{
 		fddi->hdr.llc_snap.dsap		 = FDDI_EXTENDED_SAP;
 		fddi->hdr.llc_snap.ssap		 = FDDI_EXTENDED_SAP;
@@ -120,7 +121,7 @@ int fddi_rebuild_header(struct sk_buff	*skb)
  * the proper pointer to the start of packet data (skb->data).
  */
  
-unsigned short fddi_type_trans(struct sk_buff *skb, struct device *dev)
+unsigned short fddi_type_trans(struct sk_buff *skb, struct net_device *dev)
 {
 	struct fddihdr *fddi = (struct fddihdr *)skb->data;
 	unsigned short type;

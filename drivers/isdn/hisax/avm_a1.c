@@ -1,72 +1,21 @@
-/* $Id: avm_a1.c,v 2.10 1998/11/15 23:54:21 keil Exp $
-
+/* $Id: avm_a1.c,v 2.13 2000/11/24 17:05:37 kai Exp $
+ *
  * avm_a1.c     low level stuff for AVM A1 (Fritz) isdn cards
  *
  * Author       Karsten Keil (keil@isdn4linux.de)
  *
- *
- * $Log: avm_a1.c,v $
- * Revision 2.10  1998/11/15 23:54:21  keil
- * changes from 2.0
- *
- * Revision 2.9  1998/08/13 23:36:12  keil
- * HiSax 3.1 - don't work stable with current LinkLevel
- *
- * Revision 2.8  1998/04/15 16:44:27  keil
- * new init code
- *
- * Revision 2.7  1998/02/02 13:29:37  keil
- * fast io
- *
- * Revision 2.6  1998/01/13 23:09:46  keil
- * really disable timer
- *
- * Revision 2.5  1998/01/02 06:50:29  calle
- * Perodic timer of A1 now disabled, no need for linux driver.
- *
- * Revision 2.4  1997/11/08 21:35:42  keil
- * new l1 init
- *
- * Revision 2.3  1997/11/06 17:13:32  keil
- * New 2.1 init code
- *
- * Revision 2.2  1997/10/29 18:55:48  keil
- * changes for 2.1.60 (irq2dev_map)
- *
- * Revision 2.1  1997/07/27 21:47:13  keil
- * new interface structures
- *
- * Revision 2.0  1997/06/26 11:02:48  keil
- * New Layer and card interface
- *
- * Revision 1.6  1997/04/13 19:54:07  keil
- * Change in IRQ check delay for SMP
- *
- * Revision 1.5  1997/04/06 22:54:10  keil
- * Using SKB's
- *
- * Revision 1.4  1997/01/27 15:50:21  keil
- * SMP proof,cosmetics
- *
- * Revision 1.3  1997/01/21 22:14:20  keil
- * cleanups
- *
- * Revision 1.2  1996/10/27 22:07:31  keil
- * cosmetic changes
- *
- * Revision 1.1  1996/10/13 20:04:49  keil
- * Initial revision
- *
+ * This file is (c) under GNU PUBLIC LICENSE
  *
  */
 #define __NO_VERSION__
+#include <linux/init.h>
 #include "hisax.h"
 #include "isac.h"
 #include "hscx.h"
 #include "isdnl1.h"
 
 extern const char *CardType[];
-static const char *avm_revision = "$Revision: 2.10 $";
+static const char *avm_revision = "$Revision: 2.13 $";
 
 #define	 AVM_A1_STAT_ISAC	0x01
 #define	 AVM_A1_STAT_HSCX	0x02
@@ -153,7 +102,7 @@ static void
 avm_a1_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char val, sval, stat = 0;
+	u_char val, sval;
 
 	if (!cs) {
 		printk(KERN_WARNING "AVM A1: Spurious interrupt!\n");
@@ -167,29 +116,21 @@ avm_a1_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 			debugl1(cs, "avm IntStatus %x", sval);
 		if (!(sval & AVM_A1_STAT_HSCX)) {
 			val = readreg(cs->hw.avm.hscx[1], HSCX_ISTA);
-			if (val) {
+			if (val)
 				hscx_int_main(cs, val);
-				stat |= 1;
-			}
 		}
 		if (!(sval & AVM_A1_STAT_ISAC)) {
 			val = readreg(cs->hw.avm.isac, ISAC_ISTA);
-			if (val) {
+			if (val)
 				isac_interrupt(cs, val);
-				stat |= 2;
-			}
 		}
 	}
-	if (stat & 1) {
-		writereg(cs->hw.avm.hscx[0], HSCX_MASK, 0xFF);
-		writereg(cs->hw.avm.hscx[1], HSCX_MASK, 0xFF);
-		writereg(cs->hw.avm.hscx[0], HSCX_MASK, 0x0);
-		writereg(cs->hw.avm.hscx[1], HSCX_MASK, 0x0);
-	}
-	if (stat & 2) {
-		writereg(cs->hw.avm.isac, ISAC_MASK, 0xFF);
-		writereg(cs->hw.avm.isac, ISAC_MASK, 0x0);
-	}
+	writereg(cs->hw.avm.hscx[0], HSCX_MASK, 0xFF);
+	writereg(cs->hw.avm.hscx[1], HSCX_MASK, 0xFF);
+	writereg(cs->hw.avm.isac, ISAC_MASK, 0xFF);
+	writereg(cs->hw.avm.isac, ISAC_MASK, 0x0);
+	writereg(cs->hw.avm.hscx[0], HSCX_MASK, 0x0);
+	writereg(cs->hw.avm.hscx[1], HSCX_MASK, 0x0);
 }
 
 inline static void
@@ -219,9 +160,6 @@ AVM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		case CARD_RELEASE:
 			release_ioregs(cs, 0x3f);
 			return(0);
-		case CARD_SETIRQ:
-			return(request_irq(cs->irq, &avm_a1_interrupt,
-					I4L_IRQ_FLAG, "HiSax", cs));
 		case CARD_INIT:
 			inithscxisac(cs, 1);
 			byteout(cs->hw.avm.cfg_reg, 0x16);
@@ -234,8 +172,8 @@ AVM_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 	return(0);
 }
 
-__initfunc(int
-setup_avm_a1(struct IsdnCard *card))
+int __init
+setup_avm_a1(struct IsdnCard *card)
 {
 	u_char val;
 	struct IsdnCardState *cs = card->cs;
@@ -378,6 +316,7 @@ setup_avm_a1(struct IsdnCard *card))
 	cs->BC_Write_Reg = &WriteHSCX;
 	cs->BC_Send_Data = &hscx_fill_fifo;
 	cs->cardmsg = &AVM_card_msg;
+	cs->irq_func = &avm_a1_interrupt;
 	ISACVersion(cs, "AVM A1:");
 	if (HscxVersion(cs, "AVM A1:")) {
 		printk(KERN_WARNING

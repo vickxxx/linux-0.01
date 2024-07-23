@@ -9,9 +9,8 @@
  * High loaded stuff by Hans Lermen & Werner Almesberger, Feb. 1996
  */
 
-#include <asm/segment.h>
+#include <linux/vmalloc.h>
 #include <asm/io.h>
-
 /*
  * gzip declarations
  */
@@ -74,11 +73,13 @@ static void gzip_release(void **);
 /*
  * This is set up by the setup-routine at boot-time
  */
-#define EXT_MEM_K (*(unsigned short *)0x90002)
+static unsigned char *real_mode; /* Pointer to real-mode data */
+
+#define EXT_MEM_K   (*(unsigned short *)(real_mode + 0x2))
 #ifndef STANDARD_MEMORY_BIOS_CALL
-#define ALT_MEM_K (*(unsigned long *) 0x901e0)
+#define ALT_MEM_K   (*(unsigned long *)(real_mode + 0x1e0))
 #endif
-#define SCREEN_INFO (*(struct screen_info *)0x90000)
+#define SCREEN_INFO (*(struct screen_info *)(real_mode+0))
 
 extern char input_data[];
 extern int input_len;
@@ -98,13 +99,13 @@ static void puts(const char *);
   
 extern int end;
 static long free_mem_ptr = (long)&end;
-static long free_mem_end_ptr = 0x90000;
- 
+static long free_mem_end_ptr;
+
 #define INPLACE_MOVE_ROUTINE  0x1000
 #define LOW_BUFFER_START      0x2000
-#define LOW_BUFFER_END       0x90000
-#define LOW_BUFFER_SIZE      ( LOW_BUFFER_END - LOW_BUFFER_START )
-#define HEAP_SIZE             0x2000
+#define LOW_BUFFER_MAX       0x90000
+#define HEAP_SIZE             0x3000
+static unsigned int low_buffer_end, low_buffer_size;
 static int high_loaded =0;
 static uch *high_buffer_start /* = (uch *)(((ulg)&end) + HEAP_SIZE)*/;
 
@@ -146,7 +147,7 @@ static void gzip_release(void **ptr)
 	free_mem_ptr = (long) *ptr;
 }
  
-static void scroll()
+static void scroll(void)
 {
 	int i;
 
@@ -198,6 +199,7 @@ void* memset(void* s, int c, size_t n)
 	char *ss = (char*)s;
 
 	for (i=0;i<n;i++) ss[i] = c;
+	return s;
 }
 
 void* memcpy(void* __dest, __const void* __src,
@@ -207,13 +209,14 @@ void* memcpy(void* __dest, __const void* __src,
 	char *d = (char *)__dest, *s = (char *)__src;
 
 	for (i=0;i<__n;i++) d[i] = s[i];
+	return __dest;
 }
 
 /* ===========================================================================
  * Fill the input buffer. This is called only when the buffer is empty
  * and at least one byte is really needed.
  */
-static int fill_inbuf()
+static int fill_inbuf(void)
 {
 	if (insize != 0) {
 		error("ran out of input data\n");
@@ -229,7 +232,7 @@ static int fill_inbuf()
  * Write the output window window[0..outcnt-1] and update crc and bytes_out.
  * (Used for the decompressed data only.)
  */
-static void flush_window_low()
+static void flush_window_low(void)
 {
     ulg c = crc;         /* temporary variable */
     unsigned n;
@@ -247,7 +250,7 @@ static void flush_window_low()
     outcnt = 0;
 }
 
-static void flush_window_high()
+static void flush_window_high(void)
 {
     ulg c = crc;         /* temporary variable */
     unsigned n;
@@ -255,7 +258,7 @@ static void flush_window_high()
     in = window;
     for (n = 0; n < outcnt; n++) {
 	ch = *output_data++ = *in++;
-	if ((ulg)output_data == LOW_BUFFER_END) output_data=high_buffer_start;
+	if ((ulg)output_data == low_buffer_end) output_data=high_buffer_start;
 	c = crc_32_tab[((int)c ^ ch) & 0xff] ^ (c >> 8);
     }
     crc = c;
@@ -263,7 +266,7 @@ static void flush_window_high()
     outcnt = 0;
 }
 
-static void flush_window()
+static void flush_window(void)
 {
 	if (high_loaded) flush_window_high();
 	else flush_window_low();
@@ -287,7 +290,7 @@ struct {
 	short b;
 	} stack_start = { & user_stack [STACK_SIZE] , __KERNEL_DS };
 
-void setup_normal_output_buffer()
+void setup_normal_output_buffer(void)
 {
 #ifdef STANDARD_MEMORY_BIOS_CALL
 	if (EXT_MEM_K < 1024) error("Less than 2MB of memory.\n");
@@ -295,6 +298,7 @@ void setup_normal_output_buffer()
 	if ((ALT_MEM_K > EXT_MEM_K ? ALT_MEM_K : EXT_MEM_K) < 1024) error("Less than 2MB of memory.\n");
 #endif
 	output_data = (char *)0x100000; /* Points to 1M */
+	free_mem_end_ptr = (long)real_mode;
 }
 
 struct moveparams {
@@ -311,10 +315,13 @@ void setup_output_buffer_if_we_run_high(struct moveparams *mv)
 	if ((ALT_MEM_K > EXT_MEM_K ? ALT_MEM_K : EXT_MEM_K) < (3*1024)) error("Less than 4MB of memory.\n");
 #endif	
 	mv->low_buffer_start = output_data = (char *)LOW_BUFFER_START;
+	low_buffer_end = ((unsigned int)real_mode > LOW_BUFFER_MAX
+	  ? LOW_BUFFER_MAX : (unsigned int)real_mode) & ~0xfff;
+	low_buffer_size = low_buffer_end - LOW_BUFFER_START;
 	high_loaded = 1;
 	free_mem_end_ptr = (long)high_buffer_start;
-	if ( (0x100000 + LOW_BUFFER_SIZE) > ((ulg)high_buffer_start)) {
-		high_buffer_start = (uch *)(0x100000 + LOW_BUFFER_SIZE);
+	if ( (0x100000 + low_buffer_size) > ((ulg)high_buffer_start)) {
+		high_buffer_start = (uch *)(0x100000 + low_buffer_size);
 		mv->hcount = 0; /* say: we need not to move high_buffer */
 	}
 	else mv->hcount = -1;
@@ -323,17 +330,21 @@ void setup_output_buffer_if_we_run_high(struct moveparams *mv)
 
 void close_output_buffer_if_we_run_high(struct moveparams *mv)
 {
-	mv->lcount = bytes_out;
-	if (bytes_out > LOW_BUFFER_SIZE) {
-		mv->lcount = LOW_BUFFER_SIZE;
-		if (mv->hcount) mv->hcount = bytes_out - LOW_BUFFER_SIZE;
+	if (bytes_out > low_buffer_size) {
+		mv->lcount = low_buffer_size;
+		if (mv->hcount)
+			mv->hcount = bytes_out - low_buffer_size;
+	} else {
+		mv->lcount = bytes_out;
+		mv->hcount = 0;
 	}
-	else mv->hcount = 0;
 }
 
 
-int decompress_kernel(struct moveparams *mv)
+int decompress_kernel(struct moveparams *mv, void *rmode)
 {
+	real_mode = rmode;
+
 	if (SCREEN_INFO.orig_video_mode == 7) {
 		vidmem = (char *) 0xb0000;
 		vidport = 0x3b4;
@@ -355,4 +366,3 @@ int decompress_kernel(struct moveparams *mv)
 	if (high_loaded) close_output_buffer_if_we_run_high(mv);
 	return high_loaded;
 }
-

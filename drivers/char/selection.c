@@ -36,11 +36,11 @@ extern void poke_blanked_console(void);
 
 /* Variables for selection control. */
 /* Use a dynamic buffer, instead of static (Dec 1994) */
-       int sel_cons = 0;		/* must not be disallocated */
+       int sel_cons;		/* must not be disallocated */
 static volatile int sel_start = -1; 	/* cleared by clear_selection */
 static int sel_end;
-static int sel_buffer_lth = 0;
-static char *sel_buffer = NULL;
+static int sel_buffer_lth;
+static char *sel_buffer;
 
 /* clear_selection, highlight and highlight_pointer can be called
    from interrupt (via scrollback/front) */
@@ -301,7 +301,7 @@ int paste_selection(struct tty_struct *tty)
 	poke_blanked_console();
 	add_wait_queue(&vt->paste_wait, &wait);
 	while (sel_buffer && sel_buffer_lth > pasted) {
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (test_bit(TTY_THROTTLED, &tty->flags)) {
 			schedule();
 			continue;

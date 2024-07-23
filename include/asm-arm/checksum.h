@@ -1,17 +1,13 @@
 /*
- * linux/include/asm-arm/checksum.h
+ *  linux/include/asm-arm/checksum.h
  *
  * IP checksum routines
  *
  * Copyright (C) Original authors of ../asm-i386/checksum.h
- * Copyright (C) 1996,1997,1998 Russell King
+ * Copyright (C) 1996-1999 Russell King
  */
 #ifndef __ASM_ARM_CHECKSUM_H
 #define __ASM_ARM_CHECKSUM_H
-
-#ifndef __ASM_ARM_SEGMENT_H
-#include <asm/segment.h>
-#endif
 
 /*
  * computes the checksum of a memory block at buff, length len,
@@ -41,42 +37,27 @@ csum_partial_copy_nocheck(const char *src, char *dst, int len, int sum);
 unsigned int
 csum_partial_copy_from_user(const char *src, char *dst, int len, int sum, int *err_ptr);
 
-#if 0
-/*
- * This combination is currently not used, but possible:
- */
-unsigned int
-csum_partial_copy_to_user(const char *src, char *dst, int len, int sum, int *err_ptr);
-#endif
-
 /*
  * These are the old (and unsafe) way of doing checksums, a warning message will be
  * printed if they are used and an exception occurs.
  *
  * these functions should go away after some time.
  */
-#define csum_partial_copy_fromuser csum_partial_copy
-unsigned int
-csum_partial_copy(const char *src, char *dst, int len, int sum);
+#define csum_partial_copy(src,dst,len,sum)	csum_partial_copy_nocheck(src,dst,len,sum)
 
 /*
  *	This is a version of ip_compute_csum() optimized for IP headers,
  *	which always checksum on 4 octet boundaries.
- *
- *	Converted and optimised for ARM by R. M. King.
- *
- *	Note: the order that the LDM registers are loaded with respect to
- *	the adc's doesn't matter.
  */
 static inline unsigned short
 ip_fast_csum(unsigned char * iph, unsigned int ihl)
 {
 	unsigned int sum, tmp1;
 
-    __asm__ __volatile__("
-	sub	%2, %2, #5
-	ldr	%0, [%1], #4
+	__asm__ __volatile__(
+	"ldr	%0, [%1], #4		@ ip_fast_csum
 	ldr	%3, [%1], #4
+	sub	%2, %2, #5
 	adds	%0, %0, %3
 	ldr	%3, [%1], #4
 	adcs	%0, %0, %3
@@ -93,9 +74,10 @@ ip_fast_csum(unsigned char * iph, unsigned int ihl)
 	mvn	%0, %0
 	mov	%0, %0, lsr #16
 	"
-	: "=&r" (sum), "=&r" (iph), "=&r" (ihl), "=&r" (tmp1)
-	: "1" (iph), "2" (ihl));
-	return(sum);
+	: "=r" (sum), "=r" (iph), "=r" (ihl), "=r" (tmp1)
+	: "1" (iph), "2" (ihl)
+	: "cc");
+	return sum;
 }
 
 /*
@@ -104,25 +86,28 @@ ip_fast_csum(unsigned char * iph, unsigned int ihl)
 static inline unsigned int
 csum_fold(unsigned int sum)
 {
-	__asm__("
-	adds	%0, %0, %0, lsl #16
+	__asm__(
+	"adds	%0, %1, %1, lsl #16	@ csum_fold
 	addcs	%0, %0, #0x10000"
 	: "=r" (sum)
-	: "0" (sum));
+	: "r" (sum)
+	: "cc");
 	return (~sum) >> 16;
 }
 
-static inline unsigned long
+static inline unsigned int
 csum_tcpudp_nofold(unsigned long saddr, unsigned long daddr, unsigned short len,
-		   unsigned short proto, unsigned int sum)
+		   unsigned int proto, unsigned int sum)
 {
-	__asm__("
-	adds	%0, %0, %1
-	adcs	%0, %0, %2
+	__asm__(
+	"adds	%0, %1, %2		@ csum_tcpudp_nofold
 	adcs	%0, %0, %3
+	adcs	%0, %0, %4
+	adcs	%0, %0, %5
 	adc	%0, %0, #0"
 	: "=&r"(sum)
-	: "r" (daddr), "r" (saddr), "r" ((ntohs(len)<<16)+proto*256), "0" (sum));
+	: "r" (sum), "r" (daddr), "r" (saddr), "r" (ntohs(len) << 16), "Ir" (proto << 8)
+	: "cc");
 	return sum;
 }	
 /*
@@ -131,9 +116,21 @@ csum_tcpudp_nofold(unsigned long saddr, unsigned long daddr, unsigned short len,
  */
 static inline unsigned short int
 csum_tcpudp_magic(unsigned long saddr, unsigned long daddr, unsigned short len,
-		  unsigned short proto, unsigned int sum)
+		  unsigned int proto, unsigned int sum)
 {
-	return csum_fold(csum_tcpudp_nofold(saddr, daddr, len, proto, sum));
+	__asm__(
+	"adds	%0, %1, %2		@ csum_tcpudp_magic
+	adcs	%0, %0, %3
+	adcs	%0, %0, %4
+	adcs	%0, %0, %5
+	adc	%0, %0, #0
+	adds	%0, %0, %0, lsl #16
+	addcs	%0, %0, #0x10000
+	mvn	%0, %0"
+	: "=&r"(sum)
+	: "r" (sum), "r" (daddr), "r" (saddr), "r" (ntohs(len)), "Ir" (proto << 8)
+	: "cc");
+	return sum >> 16;
 }
 
 
@@ -153,10 +150,10 @@ __csum_ipv6_magic(struct in6_addr *saddr, struct in6_addr *daddr, __u32 len,
 		__u32 proto, unsigned int sum);
 
 extern __inline__ unsigned short int
-csum_ipv6_magic(struct in6_addr *saddr, struct in6_addr *daddr, __u16 len,
+csum_ipv6_magic(struct in6_addr *saddr, struct in6_addr *daddr, __u32 len,
 		unsigned short proto, unsigned int sum)
 {
-	return csum_fold(__csum_ipv6_magic(saddr, daddr, htonl((__u32)len),
+	return csum_fold(__csum_ipv6_magic(saddr, daddr, htonl(len),
 					   htonl(proto), sum));
 }
 #endif

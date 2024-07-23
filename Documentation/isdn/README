@@ -11,7 +11,7 @@ README for the ISDN-subsystem
   necessary. Those programs and some contributed utilities are available
   at
 
-   ftp.franken.de
+   ftp.isdn4linux.de
 
    /pub/isdn4linux/isdn4k-utils-<VersionNumber>.tar.gz
 
@@ -22,19 +22,23 @@ README for the ISDN-subsystem
    reasons, the mailing-list's primary language is german. However mails
    written in english have been welcome all the time.
 
-   to subscribe: write a email to majordomo@hub-wue.franken.de,
+   to subscribe: write a email to majordomo@listserv.isdn4linux.de,
    Subject irrelevant, in the message body:
    subscribe isdn4linux <your_email_address>
 
-   To write to the mailing-list, write to isdn4linux@hub-wue.franken.de
+   To write to the mailing-list, write to isdn4linux@listserv.isdn4linux.de
 
    This mailinglist is bidirectionally gated to the newsgroup
 
      de.alt.comm.isdn4linux
 
-  There is also a well maintained FAQ (both english and german) available
-  at ftp.franken.de in /pub/isdn4linux/FAQ/
-  This FAQ is also available at http://www.lrz-muenchen.de/~ui161ab/www/isdn/
+  There is also a well maintained FAQ in English available at
+     http://www.mhessler.de/i4lfaq/
+  It can be viewed online, or downloaded in sgml/text/html format.
+  The FAQ can also be viewed online at
+     http://www.isdn4inux.de/faq/
+  or downloaded from
+     ftp://ftp.isdn4linux.de/pub/isdn4linux/FAQ/
 
   1.1 Technical details
 
@@ -76,8 +80,7 @@ README for the ISDN-subsystem
    The functionality is almost the same as that of a serial device
    (the line-discs are handled by the kernel), which lets you run
    SLIP, CSLIP and asynchronous PPP through the devices. We have tested
-   Seyon, minicom, CSLIP (uri-dip) PPP and mgetty (compiled with NO_FAX),
-   XCept.
+   Seyon, minicom, CSLIP (uri-dip) PPP, mgetty, XCept and Hylafax. 
 
    The modem-emulation supports the following:
            1.3.1 Commands:
@@ -120,6 +123,10 @@ README for the ISDN-subsystem
                AT&D3    Same as AT&D2 but also resets all registers.
                AT&Ex    Set the EAZ/MSN for this channel to x.
                AT&F     Reset all registers and profile to "factory-defaults"
+               AT&Lx    Set list of phone numbers to listen on.  x is a
+                        list of wildcard patterns separated by semicolon.
+                        If this is set, it has precedence over the MSN set
+                        by AT&E.
                AT&Rx    Select V.110 bitrate adaption.
                         This command enables V.110 protocol with 9600 baud
                         (x=9600), 19200 baud (x=19200) or 38400 baud
@@ -139,7 +146,7 @@ README for the ISDN-subsystem
                             x = 38400: 198
                           Note on value in Reg 19:
                             There is _NO_ common convention for 38400 baud.
-                            The value 198 is choosen arbitrarily. Users
+                            The value 198 is chosen arbitrarily. Users
                             _MUST_ negotiate this value before establishing
                             a connection.
                AT&Sx    Set window-size (x = 1..8) (not yet implemented)
@@ -149,6 +156,8 @@ README for the ISDN-subsystem
                AT&X0    BTX-mode and T.70-mode off (default)
                AT&X1    BTX-mode on. (S13.1=1, S13.5=0 S14=0, S16=7, S18=7, S19=0)
                AT&X2    T.70-mode on. (S13.1=1, S13.5=1, S14=0, S16=7, S18=7, S19=0)
+               AT+Rx    Resume a suspended call with CallID x (x = 1,2,3...)
+               AT+Sx    Suspend a call with CallID x (x = 1,2,3...)
 
            For voice-mode commands refer to README.audio
 
@@ -215,6 +224,9 @@ README for the ISDN-subsystem
                                           an incoming call happened (RING) and
                                           the remote party hung up before any
                                           local ATA was given.
+			    Bit 7:    0 = Don't show display messages from net
+                                      1 = Show display messages from net
+				          (S12 Bit 1 must be 0 too)      
              14   0         Layer-2 protocol:
                                       0 = X75/LAPB with I-frames
                                       1 = X75/LAPB with UI-frames
@@ -225,8 +237,12 @@ README for the ISDN-subsystem
                                       8 = V.110, 19200 baud
                                       9 = V.110, 38400 baud
                                      10 = Analog Modem (only if hardware supports this)
-             15   0         Layer-3 protocol: (at the moment always 0)
+                                     11 = Fax G3 (only if hardware supports this)
+             15   0         Layer-3 protocol:
                                       0 = transparent
+                                      1 = transparent with audio features (e.g. DSP)
+                                      2 = Fax G3 Class 2 commands (S14 has to be set to 11)
+                                      3 = Fax G3 Class 1 commands (S14 has to be set to 11)
              16   250       Send-Packet-size/16
              17   8         Window-size (not yet implemented)
              18   4         Bit coded register, Service-Octet-1 to accept,
@@ -255,6 +271,11 @@ README for the ISDN-subsystem
                             Set on incoming call (during RING) to
                             octet 3a of calling party number IE (Screening info)
                             See section 4.5.10 of ITU Q.931
+             23   0         Bit coded register:
+                            Bit 0:    0 = Add CPN to RING message off
+                                      1 = Add CPN to RING message on
+                            Bit 1:    0 = Add CPN to FCON message off
+                                      1 = Add CPN to FCON message on
 
   Last but not least a (at the moment fairly primitive) device to request
   the line-status (/dev/isdninfo) is made available.
@@ -292,8 +313,6 @@ README for the ISDN-subsystem
   If an incoming call matches one network interface, it gets connected to it.
   If another incoming call for the same EAZ arrives, which does not match
   a network interface, the first tty gets a "RING" and so on.
-  As soon as voice gets supported (with the availability of the Diehl-driver),
-  the service-identifier will be evaluated in addition.
 
 2 System prerequisites:
 
@@ -570,7 +589,7 @@ README for the ISDN-subsystem
    If other drivers will not be affected, I will include the changes
    in the next release.
    For developers only, there is a second mailing-list. Write to me
-   (fritz@wuemaus.franken.de), if you want to join that list.
+   (fritz@isdn4linux.de), if you want to join that list.
 
 Have fun!
 

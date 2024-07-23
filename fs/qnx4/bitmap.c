@@ -1,12 +1,12 @@
-/* 
+/*
  * QNX4 file system, Linux implementation.
- * 
- * Version : 0.1
- * 
+ *
+ * Version : 0.2.1
+ *
  * Using parts of the xiafs filesystem.
- * 
+ *
  * History :
- * 
+ *
  * 28-05-1998 by Richard Frowijn : first release.
  * 20-06-1998 by Frank Denis : basic optimisations.
  * 25-06-1998 by Frank Denis : qnx4_is_free, qnx4_set_bitmap, qnx4_bmap .
@@ -61,11 +61,11 @@ void count_bits(const register char *bmPart, register int size,
 
 unsigned long qnx4_count_free_blocks(struct super_block *sb)
 {
-	int start = sb->u.qnx4_sb.BitMap->di_first_xtnt.xtnt_blk - 1;
+	int start = le32_to_cpu(sb->u.qnx4_sb.BitMap->di_first_xtnt.xtnt_blk) - 1;
 	int total = 0;
 	int total_free = 0;
 	int offset = 0;
-	int size = sb->u.qnx4_sb.BitMap->di_size;
+	int size = le32_to_cpu(sb->u.qnx4_sb.BitMap->di_size);
 	struct buffer_head *bh;
 
 	while (total < size) {
@@ -76,20 +76,18 @@ unsigned long qnx4_count_free_blocks(struct super_block *sb)
 		count_bits(bh->b_data, size - total, &total_free);
 		brelse(bh);
 		total += QNX4_BLOCK_SIZE;
+		offset++;
 	}
 
 	return total_free;
 }
 
-unsigned long qnx4_count_free_inodes(struct super_block *sb)
-{
-	return qnx4_count_free_blocks(sb) * QNX4_INODES_PER_BLOCK;	/* FIXME */
-}
+#ifdef CONFIG_QNX4FS_RW
 
-int qnx4_is_free(struct super_block *sb, int block)
+int qnx4_is_free(struct super_block *sb, long block)
 {
-	int start = sb->u.qnx4_sb.BitMap->di_first_xtnt.xtnt_blk - 1;
-	int size = sb->u.qnx4_sb.BitMap->di_size;
+	int start = le32_to_cpu(sb->u.qnx4_sb.BitMap->di_first_xtnt.xtnt_blk) - 1;
+	int size = le32_to_cpu(sb->u.qnx4_sb.BitMap->di_size);
 	struct buffer_head *bh;
 	const char *g;
 	int ret = -EIO;
@@ -115,21 +113,10 @@ int qnx4_is_free(struct super_block *sb, int block)
 	return ret;
 }
 
-int qnx4_bmap(struct inode *inode, int block)
+int qnx4_set_bitmap(struct super_block *sb, long block, int busy)
 {
-   QNX4DEBUG(("qnx4: bmap on block [%d]\n", block));
-   if (block < 0) {
-      return 0;
-   }
-   return !qnx4_is_free(inode->i_sb, block);
-}
-
-#ifdef CONFIG_QNX4FS_RW
-
-int qnx4_set_bitmap(struct super_block *sb, int block, int busy)
-{
-	int start = sb->u.qnx4_sb.BitMap->di_first_xtnt.xtnt_blk - 1;
-	int size = sb->u.qnx4_sb.BitMap->di_size;
+	int start = le32_to_cpu(sb->u.qnx4_sb.BitMap->di_first_xtnt.xtnt_blk) - 1;
+	int size = le32_to_cpu(sb->u.qnx4_sb.BitMap->di_size);
 	struct buffer_head *bh;
 	char *g;
 
@@ -147,7 +134,7 @@ int qnx4_set_bitmap(struct super_block *sb, int block, int busy)
 	} else {
 		(*g) |= (1 << (block % 8));
 	}
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 
 	return 0;
@@ -166,25 +153,6 @@ static void qnx4_clear_inode(struct inode *inode)
 
 void qnx4_free_inode(struct inode *inode)
 {
-	if (!inode) {
-		return;
-	}
-	if (!inode->i_dev) {
-		printk("free_inode: inode has no device\n");
-		return;
-	}
-	if (inode->i_count > 1) {
-		printk("free_inode: inode has count=%d\n", inode->i_count);
-		return;
-	}
-	if (inode->i_nlink) {
-		printk("free_inode: inode has nlink=%d\n", inode->i_nlink);
-		return;
-	}
-	if (!inode->i_sb) {
-		printk("free_inode: inode on nonexistent device\n");
-		return;
-	}
 	if (inode->i_ino < 1) {
 		printk("free_inode: inode 0 or nonexistent inode\n");
 		return;

@@ -115,7 +115,7 @@ static char *version =
 #include <asm/atari_stdma.h>
 
 
-extern struct device *init_etherdev(struct device *dev, int sizeof_private);
+extern struct net_device *init_etherdev(struct net_device *dev, int sizeof_private);
 
 /* use 0 for production, 1 for verification, >2 for debug
  */
@@ -149,16 +149,16 @@ unsigned char *phys_nic_packet;
 
 /* Index to functions, as function prototypes.
  */
-extern int bionet_probe(struct device *dev);
+extern int bionet_probe(struct net_device *dev);
 
-static int bionet_open(struct device *dev);
-static int bionet_send_packet(struct sk_buff *skb, struct device *dev);
-static void bionet_poll_rx(struct device *);
-static int bionet_close(struct device *dev);
-static struct net_device_stats *net_get_stats(struct device *dev);
+static int bionet_open(struct net_device *dev);
+static int bionet_send_packet(struct sk_buff *skb, struct net_device *dev);
+static void bionet_poll_rx(struct net_device *);
+static int bionet_close(struct net_device *dev);
+static struct net_device_stats *net_get_stats(struct net_device *dev);
 static void bionet_tick(unsigned long);
 
-static struct timer_list bionet_timer = { NULL, NULL, 0, 0, bionet_tick };
+static struct timer_list bionet_timer = { function: bionet_tick };
 
 #define STRAM_ADDR(a)	(((a) & 0xff000000) == 0)
 
@@ -324,15 +324,15 @@ end:
 
 /* Check for a network adaptor of this type, and return '0' if one exists.
  */
-__initfunc(int
-bionet_probe(struct device *dev)) {
+int __init 
+bionet_probe(struct net_device *dev){
 	unsigned char station_addr[6];
 	static unsigned version_printed = 0;
 	static int no_more_found = 0; /* avoid "Probing for..." printed 4 times */
 	int i;
 
 	if (!MACH_IS_ATARI || no_more_found)
-		return ENODEV;
+		return -ENODEV;
 
 	printk("Probing for BioNet 100 Adapter...\n");
 
@@ -350,12 +350,11 @@ bionet_probe(struct device *dev)) {
 	||  station_addr[2] != 'O' ) {
 		no_more_found = 1;
 		printk( "No BioNet 100 found.\n" );
-		return ENODEV;
+		return -ENODEV;
 	}
 
+	SET_MODULE_OWNER(dev);
 
-	if (dev == NULL)
-		return ENODEV;
 	if (bionet_debug > 0 && version_printed++ == 0)
 		printk(version);
 
@@ -404,7 +403,7 @@ bionet_probe(struct device *dev)) {
    there is non-reboot way to recover if something goes wrong.
  */
 static int
-bionet_open(struct device *dev) {
+bionet_open(struct net_device *dev) {
 	struct net_local *lp = (struct net_local *)dev->priv;
 
 	if (bionet_debug > 0)
@@ -425,12 +424,11 @@ bionet_open(struct device *dev) {
 	bionet_timer.data = (long)dev;
 	bionet_timer.expires = jiffies + lp->poll_time;
 	add_timer(&bionet_timer);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
 static int
-bionet_send_packet(struct sk_buff *skb, struct device *dev) {
+bionet_send_packet(struct sk_buff *skb, struct net_device *dev) {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	unsigned long flags;
 
@@ -446,7 +444,7 @@ bionet_send_packet(struct sk_buff *skb, struct device *dev) {
 	}
 	else {
 		int length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
-		unsigned long buf = VTOP(skb->data);
+		unsigned long buf = virt_to_phys(skb->data);
 		int stat;
 
 		stdma_lock(bionet_intr, NULL);
@@ -497,7 +495,7 @@ bionet_send_packet(struct sk_buff *skb, struct device *dev) {
 /* We have a good packet(s), get it/them out of the buffers.
  */
 static void
-bionet_poll_rx(struct device *dev) {
+bionet_poll_rx(struct net_device *dev) {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int boguscount = 10;
 	int pkt_len, status;
@@ -599,7 +597,7 @@ bionet_poll_rx(struct device *dev) {
  */
 static void
 bionet_tick(unsigned long data) {
-	struct device	 *dev = (struct device *)data;
+	struct net_device	 *dev = (struct net_device *)data;
 	struct net_local *lp = (struct net_local *)dev->priv;
 
 	if( bionet_debug > 0 && (lp->open_time++ & 7) == 8 )
@@ -614,7 +612,7 @@ bionet_tick(unsigned long data) {
 /* The inverse routine to bionet_open().
  */
 static int
-bionet_close(struct device *dev) {
+bionet_close(struct net_device *dev) {
 	struct net_local *lp = (struct net_local *)dev->priv;
 
 	if (bionet_debug > 0)
@@ -629,14 +627,13 @@ bionet_close(struct device *dev) {
 	dev->start = 0;
 
 	stdma_release();
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 /* Get the current statistics.
    This may be called with the card open or closed.
  */
-static struct net_device_stats *net_get_stats(struct device *dev) 
+static struct net_device_stats *net_get_stats(struct net_device *dev) 
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	return &lp->stats;
@@ -645,19 +642,13 @@ static struct net_device_stats *net_get_stats(struct device *dev)
 
 #ifdef MODULE
 
-static char bio_name[16];
-static struct device bio_dev =
-	{
-		bio_name,	/* filled in by register_netdev() */
-		0, 0, 0, 0,	/* memory */
-		0, 0,		/* base, irq */
-		0, 0, 0, NULL, bionet_probe,
-	};
+static struct net_device bio_dev;
 
 int
 init_module(void) {
 	int err;
 
+	bio_dev.init = bionet_probe;
 	if ((err = register_netdev(&bio_dev))) {
 		if (err == -EEXIST)  {
 			printk("BIONET: devices already present. Module not loaded.\n");

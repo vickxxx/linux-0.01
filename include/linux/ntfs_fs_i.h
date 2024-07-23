@@ -24,11 +24,11 @@ typedef __kernel_mode_t ntmode_t;
 #endif
 #ifndef NTFS_UID_T
 #define NTFS_UID_T
-typedef __kernel_uid_t ntfs_uid_t;
+typedef uid_t ntfs_uid_t;
 #endif
 #ifndef NTFS_GID_T
 #define NTFS_GID_T
-typedef __kernel_gid_t ntfs_gid_t;
+typedef gid_t ntfs_gid_t;
 #endif
 #ifndef NTFS_SIZE_T
 #define NTFS_SIZE_T
@@ -62,6 +62,7 @@ typedef unsigned int ntfs_cluster_t;
 
 /* Definition of NTFS in-memory inode structure */
 struct ntfs_inode_info{
+	unsigned long mmu_private;
 	struct ntfs_sb_info *vol;
 	int i_number;                /* should be really 48 bits */
 	unsigned sequence_number;

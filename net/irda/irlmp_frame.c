@@ -6,7 +6,7 @@
  * Status:        Experimental.
  * Author:        Dag Brattli <dagb@cs.uit.no>
  * Created at:    Tue Aug 19 02:09:59 1997
- * Modified at:   Mon May 31 09:53:16 1999
+ * Modified at:   Mon Dec 13 13:41:12 1999
  * Modified by:   Dag Brattli <dagb@cs.uit.no>
  * 
  *     Copyright (c) 1998-1999 Dag Brattli <dagb@cs.uit.no>
@@ -34,24 +34,23 @@
 #include <net/irda/irlmp_frame.h>
 #include <net/irda/discovery.h>
 
+#define	DISCO_SMALL_DELAY	250	/* Delay for some discoveries in ms */
+struct timer_list disco_delay;		/* The timer associated */
+
 static struct lsap_cb *irlmp_find_lsap(struct lap_cb *self, __u8 dlsap, 
 				       __u8 slsap, int status, hashbin_t *);
 
 inline void irlmp_send_data_pdu(struct lap_cb *self, __u8 dlsap, __u8 slsap,
 				int expedited, struct sk_buff *skb)
 {
-	__u8 *frame;
-
-	frame = skb->data;
-
-	frame[0] = dlsap;
-	frame[1] = slsap;
+	skb->data[0] = dlsap;
+	skb->data[1] = slsap;
 
 	if (expedited) {
-		DEBUG( 4, __FUNCTION__ "(), sending expedited data\n");
-		irlap_data_request( self->irlap, skb, FALSE);
+		IRDA_DEBUG(4, __FUNCTION__ "(), sending expedited data\n");
+		irlap_data_request(self->irlap, skb, TRUE);
 	} else
-		irlap_data_request( self->irlap, skb, TRUE);
+		irlap_data_request(self->irlap, skb, FALSE);
 }
 
 /*
@@ -64,8 +63,8 @@ void irlmp_send_lcf_pdu(struct lap_cb *self, __u8 dlsap, __u8 slsap,
 {
 	__u8 *frame;
 	
-	DEBUG(4, __FUNCTION__ "()\n");
-	
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
 	ASSERT(skb != NULL, return;);
@@ -82,8 +81,7 @@ void irlmp_send_lcf_pdu(struct lap_cb *self, __u8 dlsap, __u8 slsap,
 	else
 		frame[3] = 0x00; /* rsvd */
 
-	ASSERT(self->irlap != NULL, return;);
-	irlap_data_request(self->irlap, skb, TRUE);
+	irlap_data_request(self->irlap, skb, FALSE);
 }
 
 /*
@@ -92,14 +90,131 @@ void irlmp_send_lcf_pdu(struct lap_cb *self, __u8 dlsap, __u8 slsap,
  *    Used by IrLAP to pass received data frames to IrLMP layer
  *
  */
-void irlmp_link_data_indication(struct lap_cb *self, int reliable, 
-			        struct sk_buff *skb)
+void irlmp_link_data_indication(struct lap_cb *self, struct sk_buff *skb, 
+				int unreliable)
 {
 	struct lsap_cb *lsap;
 	__u8   slsap_sel;   /* Source (this) LSAP address */
 	__u8   dlsap_sel;   /* Destination LSAP address */
 	__u8   *fp;
 	
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
+
+	ASSERT(self != NULL, return;);
+	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
+	ASSERT(skb->len > 2, return;);
+
+	fp = skb->data;
+
+	/*
+	 *  The next statements may be confusing, but we do this so that 
+	 *  destination LSAP of received frame is source LSAP in our view
+	 */
+	slsap_sel = fp[0] & LSAP_MASK; 
+	dlsap_sel = fp[1];	
+
+	/*
+	 *  Check if this is an incoming connection, since we must deal with
+	 *  it in a different way than other established connections.
+	 */
+	if ((fp[0] & CONTROL_BIT) && (fp[2] == CONNECT_CMD)) {
+		IRDA_DEBUG(3, __FUNCTION__ "(), incoming connection, "
+			   "source LSAP=%d, dest LSAP=%d\n",
+			   slsap_sel, dlsap_sel);
+		
+		/* Try to find LSAP among the unconnected LSAPs */
+		lsap = irlmp_find_lsap(self, dlsap_sel, slsap_sel, CONNECT_CMD,
+				       irlmp->unconnected_lsaps);
+		
+		/* Maybe LSAP was already connected, so try one more time */
+		if (!lsap) {
+			IRDA_DEBUG(1, __FUNCTION__ "(), incoming connection for LSAP already connected\n");
+			lsap = irlmp_find_lsap(self, dlsap_sel, slsap_sel, 0,
+					       self->lsaps);
+		}
+	} else
+		lsap = irlmp_find_lsap(self, dlsap_sel, slsap_sel, 0, 
+				       self->lsaps);
+	
+	if (lsap == NULL) {
+		IRDA_DEBUG(2, "IrLMP, Sorry, no LSAP for received frame!\n");
+		IRDA_DEBUG(2, __FUNCTION__ 
+		      "(), slsap_sel = %02x, dlsap_sel = %02x\n", slsap_sel, 
+		      dlsap_sel);
+		if (fp[0] & CONTROL_BIT) {
+			IRDA_DEBUG(2, __FUNCTION__ 
+			      "(), received control frame %02x\n", fp[2]);
+		} else {
+			IRDA_DEBUG(2, __FUNCTION__ "(), received data frame\n");
+		}
+		dev_kfree_skb(skb);
+		return;
+	}
+
+	/* 
+	 *  Check if we received a control frame? 
+	 */
+	if (fp[0] & CONTROL_BIT) {
+		switch (fp[2]) {
+		case CONNECT_CMD:
+			lsap->lap = self;
+			irlmp_do_lsap_event(lsap, LM_CONNECT_INDICATION, skb);
+			break;
+		case CONNECT_CNF:
+			irlmp_do_lsap_event(lsap, LM_CONNECT_CONFIRM, skb);
+			break;
+		case DISCONNECT:
+			IRDA_DEBUG(4, __FUNCTION__ 
+				   "(), Disconnect indication!\n");
+			irlmp_do_lsap_event(lsap, LM_DISCONNECT_INDICATION, 
+					    skb);
+			break;
+		case ACCESSMODE_CMD:
+			IRDA_DEBUG(0, "Access mode cmd not implemented!\n");
+			dev_kfree_skb(skb);
+			break;
+		case ACCESSMODE_CNF:
+			IRDA_DEBUG(0, "Access mode cnf not implemented!\n");
+			dev_kfree_skb(skb);
+			break;
+		default:
+			IRDA_DEBUG(0, __FUNCTION__ 
+				   "(), Unknown control frame %02x\n", fp[2]);
+			dev_kfree_skb(skb);
+			break;
+		}
+	} else if (unreliable) {
+		/* Optimize and bypass the state machine if possible */
+		if (lsap->lsap_state == LSAP_DATA_TRANSFER_READY)
+			irlmp_udata_indication(lsap, skb);
+		else
+			irlmp_do_lsap_event(lsap, LM_UDATA_INDICATION, skb);
+	} else {	
+		/* Optimize and bypass the state machine if possible */
+		if (lsap->lsap_state == LSAP_DATA_TRANSFER_READY)
+			irlmp_data_indication(lsap, skb);
+		else
+			irlmp_do_lsap_event(lsap, LM_DATA_INDICATION, skb);
+	}
+}
+
+/*
+ * Function irlmp_link_unitdata_indication (self, skb)
+ *
+ *    
+ *
+ */
+#ifdef CONFIG_IRDA_ULTRA
+void irlmp_link_unitdata_indication(struct lap_cb *self, struct sk_buff *skb)
+{
+	struct lsap_cb *lsap;
+	__u8   slsap_sel;   /* Source (this) LSAP address */
+	__u8   dlsap_sel;   /* Destination LSAP address */
+	__u8   pid;         /* Protocol identifier */
+	__u8   *fp;
+	
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
+
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
 	ASSERT(skb->len > 2, return;);
@@ -112,84 +227,44 @@ void irlmp_link_data_indication(struct lap_cb *self, int reliable,
 	 */
 	slsap_sel = fp[0] & LSAP_MASK; 
 	dlsap_sel = fp[1];
-
-	/*
-	 *  Check if this is an incoming connection, since we must deal with
-	 *  it in a different way than other established connections.
-	 */
-	if ((fp[0] & CONTROL_BIT) && (fp[2] == CONNECT_CMD)) {
-		DEBUG(3,"Incoming connection, source LSAP=%d, dest LSAP=%d\n",
-		      slsap_sel, dlsap_sel);
-		
-		/* Try to find LSAP among the unconnected LSAPs */
-		lsap = irlmp_find_lsap(self, dlsap_sel, slsap_sel, CONNECT_CMD,
-				       irlmp->unconnected_lsaps);
-		
-		/* Maybe LSAP was already connected, so try one more time */
-		if (!lsap)
-			lsap = irlmp_find_lsap(self, dlsap_sel, slsap_sel, 0,
-					       self->lsaps);
-	} else
-		lsap = irlmp_find_lsap(self, dlsap_sel, slsap_sel, 0, 
-				       self->lsaps);
+	pid       = fp[2];
 	
-	if (lsap == NULL) {
-		DEBUG(2, "IrLMP, Sorry, no LSAP for received frame!\n");
-		DEBUG(2, __FUNCTION__ 
-		      "(), slsap_sel = %02x, dlsap_sel = %02x\n", slsap_sel, 
-		      dlsap_sel);
-		if (fp[0] & CONTROL_BIT) {
-			DEBUG(2, __FUNCTION__ 
-			      "(), received control frame %02x\n", fp[2]);
-		} else {
-			DEBUG(2, __FUNCTION__ "(), received data frame\n");
-		}
+	if (pid & 0x80) {
+		IRDA_DEBUG(0, __FUNCTION__ "(), extension in PID not supp!\n");
 		dev_kfree_skb(skb);
+
 		return;
 	}
 
-	/* 
-	 *  Check if we received a control frame? 
-	 */
-	if (fp[0] & CONTROL_BIT) {
-		switch(fp[2]) {
-		case CONNECT_CMD:
-			lsap->lap = self;
-			irlmp_do_lsap_event(lsap, LM_CONNECT_INDICATION, skb);
-			break;
-		case CONNECT_CNF:
-			irlmp_do_lsap_event(lsap, LM_CONNECT_CONFIRM, skb);
-			break;
-		case DISCONNECT:
-			DEBUG( 4, __FUNCTION__ "(), Disconnect indication!\n");
-			irlmp_do_lsap_event(lsap, LM_DISCONNECT_INDICATION, 
-					    skb);
-			break;
-		case ACCESSMODE_CMD:
-			DEBUG( 0, "Access mode cmd not implemented!\n");
-			break;
-		case ACCESSMODE_CNF:
-			DEBUG( 0, "Access mode cnf not implemented!\n");
-			break;
-		default:
-			DEBUG( 0, __FUNCTION__ 
-			       "(), Unknown control frame %02x\n", fp[2]);
+	/* Check if frame is addressed to the connectionless LSAP */
+	if ((slsap_sel != LSAP_CONNLESS) || (dlsap_sel != LSAP_CONNLESS)) {
+		IRDA_DEBUG(0, __FUNCTION__ "(), dropping frame!\n");
+		dev_kfree_skb(skb);
+		
+		return;
+	}
+	
+	lsap = (struct lsap_cb *) hashbin_get_first(irlmp->unconnected_lsaps);
+	while (lsap != NULL) {
+		/*
+		 *  Check if source LSAP and dest LSAP selectors and PID match.
+		 */
+		if ((lsap->slsap_sel == slsap_sel) && 
+		    (lsap->dlsap_sel == dlsap_sel) && 
+		    (lsap->pid == pid)) 
+		{			
 			break;
 		}
-	} else if (reliable == LAP_RELIABLE) {
-		/* Optimize and bypass the state machine if possible */
-		if (lsap->lsap_state == LSAP_DATA_TRANSFER_READY)
-			irlmp_data_indication(lsap, skb);
-		else
-			irlmp_do_lsap_event(lsap, LM_DATA_INDICATION, skb);
-	} else if (reliable == LAP_UNRELIABLE) {
-		/* Optimize and bypass the state machine if possible */
-		if (lsap->lsap_state == LSAP_DATA_TRANSFER_READY)
-			irlmp_data_indication(lsap, skb);
-		else
-			irlmp_do_lsap_event(lsap, LM_UDATA_INDICATION, skb);
+		lsap = (struct lsap_cb *) hashbin_get_next(irlmp->unconnected_lsaps);
+	}
+	if (lsap)
+		irlmp_connless_data_indication(lsap, skb);
+	else {
+		IRDA_DEBUG(0, __FUNCTION__ "(), found no matching LSAP!\n");
+		dev_kfree_skb(skb);
 	}
 }
+#endif /* CONFIG_IRDA_ULTRA */
 
 /*
  * Function irlmp_link_disconnect_indication (reason, userdata)
@@ -202,7 +277,7 @@ void irlmp_link_disconnect_indication(struct lap_cb *lap,
 				      LAP_REASON reason, 
 				      struct sk_buff *userdata)
 {
-	DEBUG(2, __FUNCTION__ "()\n");
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
 
 	ASSERT(lap != NULL, return;);
 	ASSERT(lap->magic == LMP_LAP_MAGIC, return;);
@@ -211,7 +286,9 @@ void irlmp_link_disconnect_indication(struct lap_cb *lap,
 	lap->daddr = DEV_ADDR_ANY;
 
         /* FIXME: must do something with the userdata if any */
-
+	if (userdata)
+		dev_kfree_skb(userdata);
+	
 	/*
 	 *  Inform station state machine
 	 */
@@ -228,7 +305,7 @@ void irlmp_link_connect_indication(struct lap_cb *self, __u32 saddr,
 				   __u32 daddr, struct qos_info *qos,
 				   struct sk_buff *skb) 
 {
-	DEBUG(4, __FUNCTION__ "()\n");
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 
 	/* Copy QoS settings for this session */
 	self->qos = qos;
@@ -249,11 +326,15 @@ void irlmp_link_connect_indication(struct lap_cb *self, __u32 saddr,
 void irlmp_link_connect_confirm(struct lap_cb *self, struct qos_info *qos, 
 				struct sk_buff *userdata)
 {
-	DEBUG(4, __FUNCTION__ "()\n");
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
 	ASSERT(qos != NULL, return;);
+
+	/* Don't need use the userdata for now */
+	if (userdata)
+		dev_kfree_skb(userdata);
 
 	/* Copy QoS settings for this session */
 	self->qos = qos;
@@ -262,10 +343,50 @@ void irlmp_link_connect_confirm(struct lap_cb *self, struct qos_info *qos,
 }
 
 /*
+ * Function irlmp_discovery_timeout (priv)
+ *
+ *    Create a discovery event to the state machine (called after a delay)
+ *
+ * Note : irlmp_do_lap_event will handle the very rare case where the LAP
+ * is destroyed while we were sleeping.
+ */
+static void irlmp_discovery_timeout(u_long	priv)
+{
+	struct lap_cb *self;
+
+	IRDA_DEBUG(2, __FUNCTION__ "()\n");
+
+	self = (struct lap_cb *) priv;
+	ASSERT(self != NULL, return;);
+
+	/* Just handle it the same way as a discovery confirm */
+	irlmp_do_lap_event(self, LM_LAP_DISCOVERY_CONFIRM, NULL);
+}
+
+/*
  * Function irlmp_link_discovery_indication (self, log)
  *
  *    Device is discovering us
  *
+ * It's not an answer to our own discoveries, just another device trying
+ * to perform discovery, but we don't want to miss the opportunity
+ * to exploit this information, because :
+ *	o We may not actively perform discovery (just passive discovery)
+ *	o This type of discovery is much more reliable. In some cases, it
+ *	  seem that less than 50% of our discoveries get an answer, while
+ *	  we always get ~100% of these.
+ *	o Make faster discovery, statistically divide time of discovery
+ *	  events by 2 (important for the latency aspect and user feel)
+ * However, when both devices discover each other, they might attempt to
+ * connect to each other, and it would create collisions on the medium.
+ * The trick here is to defer the event by a little delay to avoid both
+ * devices to jump in exactly at the same time...
+ *
+ * The delay is currently set to 0.25s, which leave enough time to perform
+ * a connection and don't interfer with next discovery (the lowest discovery
+ * period/timeout that may be set is 1s). The message triggering this
+ * event was the last of the discovery, so the medium is now free...
+ * Maybe more testing is needed to get the value right...
  */
 void irlmp_link_discovery_indication(struct lap_cb *self, 
 				     discovery_t *discovery)
@@ -274,11 +395,15 @@ void irlmp_link_discovery_indication(struct lap_cb *self,
 	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
 
 	irlmp_add_discovery(irlmp->cachelog, discovery);
-
-	/* Just handle it the same way as a discovery confirm */
-#if 0
-	irlmp_do_lap_event(self, LM_LAP_DISCOVERY_CONFIRM, NULL);
-#endif
+	
+	/* If delay was activated, kill it! */
+	if(timer_pending(&disco_delay))
+		del_timer(&disco_delay);
+	/* Set delay timer to expire in 0.25s. */
+	disco_delay.expires = jiffies + (DISCO_SMALL_DELAY * HZ/1000);
+	disco_delay.function = irlmp_discovery_timeout;
+	disco_delay.data = (unsigned long) self;
+	add_timer(&disco_delay);
 }
 
 /*
@@ -291,13 +416,18 @@ void irlmp_link_discovery_indication(struct lap_cb *self,
  */
 void irlmp_link_discovery_confirm(struct lap_cb *self, hashbin_t *log)
 {
-	DEBUG(4, __FUNCTION__ "()\n");
+	IRDA_DEBUG(4, __FUNCTION__ "()\n");
 
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
 	
 	irlmp_add_discovery_log(irlmp->cachelog, log);
-      
+
+	/* If discovery delay was activated, kill it! */
+	if(timer_pending(&disco_delay))
+		del_timer(&disco_delay);
+
+	/* Propagate event to the state machine */
 	irlmp_do_lap_event(self, LM_LAP_DISCOVERY_CONFIRM, NULL);
 }
 
@@ -373,5 +503,3 @@ static struct lsap_cb *irlmp_find_lsap(struct lap_cb *self, __u8 dlsap_sel,
 	/* Sorry not found! */
 	return NULL;
 }
-
-

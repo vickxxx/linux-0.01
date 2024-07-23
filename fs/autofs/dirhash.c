@@ -17,17 +17,13 @@
 static void autofs_init_usage(struct autofs_dirhash *dh,
 			      struct autofs_dir_ent *ent)
 {
-	ent->exp_next = &dh->expiry_head;
-	ent->exp_prev = dh->expiry_head.exp_prev;
-	dh->expiry_head.exp_prev->exp_next = ent;
-	dh->expiry_head.exp_prev = ent;
+	list_add_tail(&ent->exp, &dh->expiry_head);
 	ent->last_usage = jiffies;
 }
 
 static void autofs_delete_usage(struct autofs_dir_ent *ent)
 {
-	ent->exp_prev->exp_next = ent->exp_next;
-	ent->exp_next->exp_prev = ent->exp_prev;
+	list_del(&ent->exp);
 }
 
 void autofs_update_usage(struct autofs_dirhash *dh,
@@ -38,19 +34,21 @@ void autofs_update_usage(struct autofs_dirhash *dh,
 }
 
 struct autofs_dir_ent *autofs_expire(struct super_block *sb,
-				     struct autofs_sb_info *sbi)
+				     struct autofs_sb_info *sbi,
+				     struct vfsmount *mnt)
 {
 	struct autofs_dirhash *dh = &sbi->dirhash;
 	struct autofs_dir_ent *ent;
 	struct dentry *dentry;
 	unsigned long timeout = sbi->exp_timeout;
 
-	ent = dh->expiry_head.exp_next;
-
-	if ( ent == &(dh->expiry_head) || sbi->catatonic )
-		return NULL;	/* No entries */
-
-	while ( jiffies - ent->last_usage >= timeout ) {
+	while (1) {
+		if ( list_empty(&dh->expiry_head) || sbi->catatonic )
+			return NULL;	/* No entries */
+		/* We keep the list sorted by last_usage and want old stuff */
+		ent = list_entry(dh->expiry_head.next, struct autofs_dir_ent, exp);
+		if (jiffies - ent->last_usage < timeout)
+			break;
 		/* Move to end of list in case expiry isn't desirable */
 		autofs_update_usage(dh, ent);
 
@@ -78,25 +76,36 @@ struct autofs_dir_ent *autofs_expire(struct super_block *sb,
 
 		/* Make sure entry is mounted and unused; note that dentry will
 		   point to the mounted-on-top root. */
-		if ( !S_ISDIR(dentry->d_inode->i_mode)
-		     || dentry->d_mounts == dentry ) {
+		if (!S_ISDIR(dentry->d_inode->i_mode)||!d_mountpoint(dentry)) {
 			DPRINTK(("autofs: not expirable (not a mounted directory): %s\n", ent->name));
 			continue;
 		}
+		mntget(mnt);
+		dget(dentry);
+		if (!follow_down(&mnt, &dentry)) {
+			dput(dentry);
+			mntput(mnt);
+			DPRINTK(("autofs: not expirable (not a mounted directory): %s\n", ent->name));
+			continue;
+		}
+		while (d_mountpoint(dentry) && follow_down(&mnt, &dentry))
+			;
+		dput(dentry);
 
-		if ( !is_root_busy(dentry->d_mounts) ) {
+		if ( may_umount(mnt) == 0 ) {
+			mntput(mnt);
 			DPRINTK(("autofs: signaling expire on %s\n", ent->name));
 			return ent; /* Expirable! */
 		}
-		DPRINTK(("autofs: didn't expire due to is_root_busy: %s\n", ent->name));
+		DPRINTK(("autofs: didn't expire due to may_umount: %s\n", ent->name));
+		mntput(mnt);
 	}
 	return NULL;		/* No expirable entries */
 }
 
 void autofs_initialize_hash(struct autofs_dirhash *dh) {
 	memset(&dh->h, 0, AUTOFS_HASH_SIZE*sizeof(struct autofs_dir_ent *));
-	dh->expiry_head.exp_next = dh->expiry_head.exp_prev =
-		&dh->expiry_head;
+	INIT_LIST_HEAD(&dh->expiry_head);
 }
 
 struct autofs_dir_ent *autofs_hash_lookup(const struct autofs_dirhash *dh, struct qstr *name)
@@ -124,8 +133,8 @@ void autofs_hash_insert(struct autofs_dirhash *dh, struct autofs_dir_ent *ent)
 	autofs_say(ent->name,ent->len);
 
 	autofs_init_usage(dh,ent);
-	if ( ent->dentry )
-		ent->dentry->d_count++;
+	if (ent->dentry)
+		dget(ent->dentry);
 
 	dhnp = &dh->h[(unsigned) ent->hash % AUTOFS_HASH_SIZE];
 	ent->next = *dhnp;

@@ -5,11 +5,12 @@
  */
 
 #include <linux/config.h>
+#include <linux/init.h>
 #include <linux/module.h>
 #include "sound_config.h"
-#include "soundmodule.h"
 
-#ifdef CONFIG_PAS
+#include "pas2.h"
+#include "sb.h"
 
 static unsigned char dma_bits[] = {
 	4, 1, 2, 3, 0, 5, 6, 7
@@ -53,6 +54,8 @@ static int	broken_bus_clock = 1;
 static int	broken_bus_clock = 0;
 #endif
 
+static struct address_info cfg;
+static struct address_info cfg2;
 
 char            pas_model = 0;
 static char    *pas_model_names[] = {
@@ -83,7 +86,7 @@ void pas_write(unsigned char data, int ioaddr)
 
 /******************* Begin of the Interrupt Handler ********************/
 
-static void pasintr(int irq, void *dev_id, struct pt_regs *dummy)
+void pasintr(int irq, void *dev_id, struct pt_regs *dummy)
 {
 	int             status;
 
@@ -92,16 +95,12 @@ static void pasintr(int irq, void *dev_id, struct pt_regs *dummy)
 
 	if (status & 0x08)
 	{
-#ifdef CONFIG_AUDIO
 		  pas_pcm_interrupt(status, 1);
-#endif
 		  status &= ~0x08;
 	}
 	if (status & 0x10)
 	{
-#ifdef CONFIG_MIDI
 		  pas_midi_interrupt();
-#endif
 		  status &= ~0x10;
 	}
 }
@@ -132,9 +131,7 @@ int pas_remove_intr(int mask)
 
 /******************* Begin of the Initialization Code ******************/
 
-extern struct address_info sbhw_config;
-
-static int config_pas_hw(struct address_info *hw_config)
+static int __init config_pas_hw(struct address_info *hw_config)
 {
 	char            ok = 1;
 	unsigned        int_ptrs;	/* scsi/sound interrupt pointers */
@@ -239,17 +236,13 @@ static int config_pas_hw(struct address_info *hw_config)
 	mix_write(0x80 | 5, 0x078B);
 	mix_write(5, 0x078B);
 
-#if !defined(DISABLE_SB_EMULATION) && defined(CONFIG_SB)
+#if !defined(DISABLE_SB_EMULATION)
 
 	{
 		struct address_info *sb_config;
 
-#ifndef MODULE
-		if ((sb_config = sound_getconf(SNDCARD_SB)))
-#else
-		sb_config = &sbhw_config;
+		sb_config = &cfg2;
 		if (sb_config->io_base)
-#endif
 		{
 			unsigned char   irq_dma;
 
@@ -292,7 +285,7 @@ static int config_pas_hw(struct address_info *hw_config)
 	return ok;
 }
 
-static int detect_pas_hw(struct address_info *hw_config)
+static int __init detect_pas_hw(struct address_info *hw_config)
 {
 	unsigned char   board_id, foo;
 
@@ -333,7 +326,7 @@ static int detect_pas_hw(struct address_info *hw_config)
 	return pas_model;
 }
 
-void attach_pas_card(struct address_info *hw_config)
+static void __init attach_pas_card(struct address_info *hw_config)
 {
 	pas_irq = hw_config->irq;
 
@@ -351,29 +344,24 @@ void attach_pas_card(struct address_info *hw_config)
 		}
 		if (config_pas_hw(hw_config))
 		{
-#ifdef CONFIG_AUDIO
 			pas_pcm_init(hw_config);
-#endif
 
-#if !defined(MODULE) && !defined(DISABLE_SB_EMULATION) && defined(CONFIG_SB)
-
+#if !defined(MODULE) && !defined(DISABLE_SB_EMULATION)
 			sb_dsp_disable_midi(pas_sb_base);	/* No MIDI capability */
 #endif
 
-#ifdef CONFIG_MIDI
 			pas_midi_init();
-#endif
 			pas_init_mixer();
 		}
 	}
 }
 
-int probe_pas(struct address_info *hw_config)
+static inline int __init probe_pas(struct address_info *hw_config)
 {
 	return detect_pas_hw(hw_config);
 }
 
-void unload_pas(struct address_info *hw_config)
+static void __exit unload_pas(struct address_info *hw_config)
 {
 	extern int pas_audiodev;
 	extern int pas2_mididev;
@@ -391,17 +379,15 @@ void unload_pas(struct address_info *hw_config)
 		sound_unload_audiodev(pas_audiodev);
 }
 
-#ifdef MODULE
+static int __initdata io	= -1;
+static int __initdata irq	= -1;
+static int __initdata dma	= -1;
+static int __initdata dma16	= -1;	/* Set this for modules that need it */
 
-int             io = -1;
-int             irq = -1;
-int             dma = -1;
-int             dma16 = -1;	/* Set this for modules that need it */
-
-int             sb_io = 0;
-int             sb_irq = -1;
-int             sb_dma = -1;
-int             sb_dma16 = -1;
+static int __initdata sb_io	= 0;
+static int __initdata sb_irq	= -1;
+static int __initdata sb_dma	= -1;
+static int __initdata sb_dma16	= -1;
 
 MODULE_PARM(io,"i");
 MODULE_PARM(irq,"i");
@@ -417,41 +403,60 @@ MODULE_PARM(joystick,"i");
 MODULE_PARM(symphony,"i");
 MODULE_PARM(broken_bus_clock,"i");
 
-struct address_info config;
-struct address_info sbhw_config;
-
-int init_module(void)
+static int __init init_pas2(void)
 {
 	printk(KERN_INFO "Pro Audio Spectrum driver Copyright (C) by Hannu Savolainen 1993-1996\n");
 
-	if (io == -1 || dma == -1 || irq == -1)
-	{
-		  printk(KERN_INFO "I/O, IRQ, DMA and type are mandatory\n");
-		  return -EINVAL;
+	cfg.io_base = io;
+	cfg.irq = irq;
+	cfg.dma = dma;
+	cfg.dma2 = dma16;
+
+	cfg2.io_base = sb_io;
+	cfg2.irq = sb_irq;
+	cfg2.dma = sb_dma;
+	cfg2.dma2 = sb_dma16;
+
+	if (cfg.io_base == -1 || cfg.dma == -1 || cfg.irq == -1) {
+		printk(KERN_INFO "I/O, IRQ, DMA and type are mandatory\n");
+		return -EINVAL;
 	}
-	config.io_base = io;
-	config.irq = irq;
-	config.dma = dma;
-	config.dma2 = dma16;
 
-	sbhw_config.io_base = sb_io;
-	sbhw_config.irq = sb_irq;
-	sbhw_config.dma = sb_dma;
-	sbhw_config.dma2 = sb_dma16;
-
-	if (!probe_pas(&config))
+	if (!probe_pas(&cfg))
 		return -ENODEV;
-	attach_pas_card(&config);
-	SOUND_LOCK;
+	attach_pas_card(&cfg);
+
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit cleanup_pas2(void)
 {
-	unload_pas(&config);
-	SOUND_LOCK_END;
+	unload_pas(&cfg);
 }
 
+module_init(init_pas2);
+module_exit(cleanup_pas2);
 
-#endif
+#ifndef MODULE
+static int __init setup_pas2(char *str)
+{
+	/* io, irq, dma, dma2, sb_io, sb_irq, sb_dma, sb_dma2 */
+	int ints[9];
+	
+	str = get_options(str, ARRAY_SIZE(ints), ints);
+
+	io	= ints[1];
+	irq	= ints[2];
+	dma	= ints[3];
+	dma16	= ints[4];
+
+	sb_io	= ints[5];
+	sb_irq	= ints[6];
+	sb_dma	= ints[7];
+	sb_dma16 = ints[8];
+
+	return 1;
+}
+
+__setup("pas2=", setup_pas2);
 #endif

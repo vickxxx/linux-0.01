@@ -31,8 +31,6 @@ static hfs_rwret_t cap_info_read(struct file *, char *,
 				 hfs_rwarg_t, loff_t *);
 static hfs_rwret_t cap_info_write(struct file *, const char *,
 				  hfs_rwarg_t, loff_t *);
-static void cap_info_truncate(struct inode *);
-
 /*================ Function-like macros ================*/
 
 /*
@@ -46,45 +44,14 @@ static void cap_info_truncate(struct inode *);
 
 /*================ Global variables ================*/
 
-static struct file_operations hfs_cap_info_operations = {
-	NULL,			/* lseek - default */
-	cap_info_read,		/* read */
-	cap_info_write,		/* write */
-	NULL,			/* readdir - bad */
-	NULL,			/* select - default */
-	NULL,			/* ioctl - default */
-	NULL,			/* mmap - not yet */
-	NULL,			/* no special open code */
-	NULL,			/* flush */
-	NULL,			/* no special release code */
-	file_fsync,		/* fsync - default */
-	NULL,			/* fasync - default */
-	NULL,			/* check_media_change - none */
-	NULL,			/* revalidate - none */
-	NULL			/* lock - none */
+struct file_operations hfs_cap_info_operations = {
+	read:		cap_info_read,
+	write:		cap_info_write,
+	fsync:		file_fsync,
 };
 
 struct inode_operations hfs_cap_info_inode_operations = {
-	&hfs_cap_info_operations,	/* default file operations */
-	NULL,				/* create */
-	NULL,				/* lookup */
-	NULL,				/* link */
-	NULL,				/* unlink */
-	NULL,				/* symlink */
-	NULL,				/* mkdir */
-	NULL,				/* rmdir */
-	NULL,				/* mknod */
-	NULL,				/* rename */
-	NULL,				/* readlink */
-	NULL,				/* follow_link */
-	NULL,				/* get_block - none */
-	NULL,				/* readpage */
-	NULL,				/* writepage */
-	NULL,				/* flushpage */
-	cap_info_truncate,		/* truncate */
-	NULL,				/* permission */
-	NULL,				/* smap */
-	NULL				/* revalidata */
+	setattr:	hfs_notify_change_cap,
 };
 
 /*================ File-local functions ================*/
@@ -283,18 +250,4 @@ static hfs_rwret_t cap_info_write(struct file *filp, const char *buf,
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	mark_inode_dirty(inode);
 	return count;
-}
-
-/*
- * cap_info_truncate()
- *
- * This is the truncate field in the inode_operations structure for
- * CAP metadata files.
- */
-static void cap_info_truncate(struct inode *inode)
-{
-	if (inode->i_size > HFS_FORK_MAX) {
-		inode->i_size = HFS_FORK_MAX;
-		mark_inode_dirty(inode);
-	}
 }

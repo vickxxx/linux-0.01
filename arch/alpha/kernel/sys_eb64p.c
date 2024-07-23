@@ -3,7 +3,7 @@
  *
  *	Copyright (C) 1995 David A Rusling
  *	Copyright (C) 1996 Jay A Estabrook
- *	Copyright (C) 1998 Richard Henderson
+ *	Copyright (C) 1998, 1999 Richard Henderson
  *
  * Code supporting the EB64+ and EB66.
  */
@@ -26,26 +26,58 @@
 #include <asm/pgtable.h>
 #include <asm/core_apecs.h>
 #include <asm/core_lca.h>
+#include <asm/hwrpb.h>
 
 #include "proto.h"
-#include "irq.h"
-#include "bios32.h"
-#include "machvec.h"
+#include "irq_impl.h"
+#include "pci_impl.h"
+#include "machvec_impl.h"
 
+
+/* Note mask bit is true for DISABLED irqs.  */
+static unsigned int cached_irq_mask = -1;
+
+static inline void
+eb64p_update_irq_hw(unsigned int irq, unsigned long mask)
+{
+	outb(mask >> (irq >= 24 ? 24 : 16), (irq >= 24 ? 0x27 : 0x26));
+}
+
+static inline void
+eb64p_enable_irq(unsigned int irq)
+{
+	eb64p_update_irq_hw(irq, cached_irq_mask &= ~(1 << irq));
+}
 
 static void
-eb64p_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
+eb64p_disable_irq(unsigned int irq)
 {
-	if (irq >= 16)
-		if (irq >= 24)
-			outb(mask >> 24, 0x27);
-		else
-			outb(mask >> 16, 0x26);
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);
-	else
-		outb(mask, 0x21);
+	eb64p_update_irq_hw(irq, cached_irq_mask |= 1 << irq);
 }
+
+static unsigned int
+eb64p_startup_irq(unsigned int irq)
+{
+	eb64p_enable_irq(irq);
+	return 0; /* never anything pending */
+}
+
+static void
+eb64p_end_irq(unsigned int irq)
+{
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		eb64p_enable_irq(irq);
+}
+
+static struct hw_interrupt_type eb64p_irq_type = {
+	typename:	"EB64P",
+	startup:	eb64p_startup_irq,
+	shutdown:	eb64p_disable_irq,
+	enable:		eb64p_enable_irq,
+	disable:	eb64p_disable_irq,
+	ack:		eb64p_disable_irq,
+	end:		eb64p_end_irq,
+};
 
 static void 
 eb64p_device_interrupt(unsigned long vector, struct pt_regs *regs)
@@ -55,6 +87,7 @@ eb64p_device_interrupt(unsigned long vector, struct pt_regs *regs)
 
 	/* Read the interrupt summary registers */
 	pld = inb(0x26) | (inb(0x27) << 8);
+
 	/*
 	 * Now, for every possible bit set, work through
 	 * them and call the appropriate interrupt handler.
@@ -66,7 +99,7 @@ eb64p_device_interrupt(unsigned long vector, struct pt_regs *regs)
 		if (i == 5) {
 			isa_device_interrupt(vector, regs);
 		} else {
-			handle_irq(16 + i, 16 + i, regs);
+			handle_irq(16 + i, regs);
 		}
 	}
 }
@@ -74,7 +107,9 @@ eb64p_device_interrupt(unsigned long vector, struct pt_regs *regs)
 static void __init
 eb64p_init_irq(void)
 {
-#ifdef CONFIG_ALPHA_GENERIC
+	long i;
+
+#if defined(CONFIG_ALPHA_GENERIC) || defined(CONFIG_ALPHA_CABRIOLET)
 	/*
 	 * CABRIO SRM may not set variation correctly, so here we test
 	 * the high word of the interrupt summary register for the RAZ
@@ -82,21 +117,30 @@ eb64p_init_irq(void)
 	 */
 	if (inw(0x806) != 0xffff) {
 		extern struct alpha_machine_vector cabriolet_mv;
-#if 1
-		printk("eb64p_init_irq: resetting for CABRIO\n");
-#endif
+
+		printk("Detected Cabriolet: correcting HWRPB.\n");
+
+		hwrpb->sys_variation |= 2L << 10;
+		hwrpb_update_checksum(hwrpb);
+
 		alpha_mv = cabriolet_mv;
 		alpha_mv.init_irq();
 		return;
 	}
 #endif /* GENERIC */
 
-	STANDARD_INIT_IRQ_PROLOG;
+	outb(0xff, 0x26);
+	outb(0xff, 0x27);
 
-	outb(alpha_irq_mask >> 16, 0x26);
-	outb(alpha_irq_mask >> 24, 0x27);
-	enable_irq(16 + 5);		/* enable SIO cascade */
-	enable_irq(2);			/* enable cascade */
+	init_i8259a_irqs();
+
+	for (i = 16; i < 32; ++i) {
+		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
+		irq_desc[i].handler = &eb64p_irq_type;
+	}		
+
+	common_init_isa_dma();
+	setup_irq(16+5, &isa_cascade_irqaction);
 }
 
 /*
@@ -112,7 +156,7 @@ eb64p_init_irq(void)
  * 3        Interrupt Line B from slot 1
  * 4        Interrupt Line C from slot 0
  * 5        Interrupt line from the two ISA PICs
- * 6        Tulip (slot 
+ * 6        Tulip
  * 7        NCR SCSI
  *
  * Summary @ 0x27
@@ -142,9 +186,9 @@ eb64p_init_irq(void)
  */
 
 static int __init
-eb64p_map_irq(struct pci_dev *dev, int slot, int pin)
+eb64p_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[5][5] __initlocaldata = {
+	static char irq_tab[5][5] __initdata = {
 		/*INT  INTA  INTB  INTC   INTD */
 		{16+7, 16+7, 16+7, 16+7,  16+7},  /* IdSel 5,  slot ?, ?? */
 		{16+0, 16+0, 16+2, 16+4,  16+9},  /* IdSel 6,  slot ?, ?? */
@@ -154,13 +198,6 @@ eb64p_map_irq(struct pci_dev *dev, int slot, int pin)
 	};
 	const long min_idsel = 5, max_idsel = 9, irqs_per_slot = 5;
 	return COMMON_TABLE_LOOKUP;
-}
-
-static void __init
-eb64p_pci_fixup(void)
-{
-	layout_all_busses(DEFAULT_IO_BASE, APECS_AND_LCA_DEFAULT_MEM_BASE);
-	common_pci_fixup(eb64p_map_irq, common_swizzle);
 }
 
 
@@ -177,18 +214,19 @@ struct alpha_machine_vector eb64p_mv __initmv = {
 	DO_APECS_BUS,
 	machine_check:		apecs_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
 
 	nr_irqs:		32,
-	irq_probe_mask:		_PROBE_MASK(32),
-	update_irq_hw:		eb64p_update_irq_hw,
-	ack_irq:		generic_ack_irq,
 	device_interrupt:	eb64p_device_interrupt,
 
 	init_arch:		apecs_init_arch,
 	init_irq:		eb64p_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		eb64p_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		common_init_pci,
+	kill_arch:		NULL,
+	pci_map_irq:		eb64p_map_irq,
+	pci_swizzle:		common_swizzle,
 };
 ALIAS_MV(eb64p)
 #endif
@@ -202,18 +240,18 @@ struct alpha_machine_vector eb66_mv __initmv = {
 	DO_LCA_BUS,
 	machine_check:		lca_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	APECS_AND_LCA_DEFAULT_MEM_BASE,
 
 	nr_irqs:		32,
-	irq_probe_mask:		_PROBE_MASK(32),
-	update_irq_hw:		eb64p_update_irq_hw,
-	ack_irq:		generic_ack_irq,
 	device_interrupt:	eb64p_device_interrupt,
 
 	init_arch:		lca_init_arch,
 	init_irq:		eb64p_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		eb64p_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		common_init_pci,
+	pci_map_irq:		eb64p_map_irq,
+	pci_swizzle:		common_swizzle,
 };
 ALIAS_MV(eb66)
 #endif

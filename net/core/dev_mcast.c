@@ -13,6 +13,7 @@
  *					rather than any time but...
  *		Alan Cox	:	IFF_ALLMULTI support.
  *		Alan Cox	: 	New format set_multicast_list() calls.
+ *		Gleb Natapov    :       Remove dev_mc_lock.
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -59,63 +60,67 @@
  *	Device mc lists are changed by bh at least if IPv6 is enabled,
  *	so that it must be bh protected.
  *
- *	We protect all mc lists with global rw lock
- *	and block accesses to device mc filters with dev->xmit_lock.
+ *	We block accesses to device mc filters with dev->xmit_lock.
  */
-static rwlock_t dev_mc_lock = RW_LOCK_UNLOCKED;
 
 /*
  *	Update the multicast list into the physical NIC controller.
  */
  
-void dev_mc_upload(struct device *dev)
+static void __dev_mc_upload(struct net_device *dev)
 {
 	/* Don't do anything till we up the interface
-	   [dev_open will call this function so the list will
-	    stay sane] */
+	 * [dev_open will call this function so the list will
+	 * stay sane]
+	 */
 
-	if(!(dev->flags&IFF_UP))
+	if (!(dev->flags&IFF_UP))
 		return;
 
 	/*
-	 *	Devices with no set multicast don't get set 
+	 *	Devices with no set multicast or which have been
+	 *	detached don't get set.
 	 */
 
-	if(dev->set_multicast_list==NULL)
+	if (dev->set_multicast_list == NULL ||
+	    !netif_device_present(dev))
 		return;
 
-	read_lock_bh(&dev_mc_lock);
-	spin_lock(&dev->xmit_lock);
-	dev->xmit_lock_owner = smp_processor_id();
 	dev->set_multicast_list(dev);
-	dev->xmit_lock_owner = -1;
-	spin_unlock(&dev->xmit_lock);
-	read_unlock_bh(&dev_mc_lock);
+}
+
+void dev_mc_upload(struct net_device *dev)
+{
+	spin_lock_bh(&dev->xmit_lock);
+	__dev_mc_upload(dev);
+	spin_unlock_bh(&dev->xmit_lock);
 }
 
 /*
  *	Delete a device level multicast
  */
  
-int dev_mc_delete(struct device *dev, void *addr, int alen, int glbl)
+int dev_mc_delete(struct net_device *dev, void *addr, int alen, int glbl)
 {
 	int err = 0;
 	struct dev_mc_list *dmi, **dmip;
 
-	write_lock_bh(&dev_mc_lock);
-	for (dmip=&dev->mc_list; (dmi=*dmip)!=NULL; dmip=&dmi->next) {
+	spin_lock_bh(&dev->xmit_lock);
+
+	for (dmip = &dev->mc_list; (dmi = *dmip) != NULL; dmip = &dmi->next) {
 		/*
 		 *	Find the entry we want to delete. The device could
 		 *	have variable length entries so check these too.
 		 */
-		if (memcmp(dmi->dmi_addr,addr,dmi->dmi_addrlen)==0 && alen==dmi->dmi_addrlen) {
+		if (memcmp(dmi->dmi_addr, addr, dmi->dmi_addrlen) == 0 &&
+		    alen == dmi->dmi_addrlen) {
 			if (glbl) {
 				int old_glbl = dmi->dmi_gusers;
 				dmi->dmi_gusers = 0;
 				if (old_glbl == 0)
 					break;
 			}
-			if(--dmi->dmi_users)
+			if (--dmi->dmi_users)
 				goto done;
 
 			/*
@@ -123,20 +128,22 @@ int dev_mc_delete(struct device *dev, void *addr, int alen, int glbl)
 			 */
 			*dmip = dmi->next;
 			dev->mc_count--;
-			kfree_s(dmi,sizeof(*dmi));
+
+			kfree(dmi);
+
 			/*
 			 *	We have altered the list, so the card
 			 *	loaded filter is now wrong. Fix it
 			 */
-			write_unlock_bh(&dev_mc_lock);
-
-			dev_mc_upload(dev);
+			__dev_mc_upload(dev);
+			
+			spin_unlock_bh(&dev->xmit_lock);
 			return 0;
 		}
 	}
 	err = -ENOENT;
 done:
-	write_unlock_bh(&dev_mc_lock);
+	spin_unlock_bh(&dev->xmit_lock);
 	return err;
 }
 
@@ -144,19 +151,17 @@ done:
  *	Add a device level multicast
  */
  
-int dev_mc_add(struct device *dev, void *addr, int alen, int glbl)
+int dev_mc_add(struct net_device *dev, void *addr, int alen, int glbl)
 {
 	int err = 0;
 	struct dev_mc_list *dmi, *dmi1;
 
-	/* RED-PEN: does gfp_any() work now? It requires
-	   true local_bh_disable rather than global.
-	 */
-	dmi1 = (struct dev_mc_list *)kmalloc(sizeof(*dmi), gfp_any());
+	dmi1 = (struct dev_mc_list *)kmalloc(sizeof(*dmi), GFP_ATOMIC);
 
-	write_lock_bh(&dev_mc_lock);
-	for(dmi=dev->mc_list; dmi!=NULL; dmi=dmi->next) {
-		if (memcmp(dmi->dmi_addr,addr,dmi->dmi_addrlen)==0 && dmi->dmi_addrlen==alen) {
+	spin_lock_bh(&dev->xmit_lock);
+	for (dmi = dev->mc_list; dmi != NULL; dmi = dmi->next) {
+		if (memcmp(dmi->dmi_addr, addr, dmi->dmi_addrlen) == 0 &&
+		    dmi->dmi_addrlen == alen) {
 			if (glbl) {
 				int old_glbl = dmi->dmi_gusers;
 				dmi->dmi_gusers = 1;
@@ -168,23 +173,25 @@ int dev_mc_add(struct device *dev, void *addr, int alen, int glbl)
 		}
 	}
 
-	if ((dmi=dmi1)==NULL) {
-		write_unlock_bh(&dev_mc_lock);
+	if ((dmi = dmi1) == NULL) {
+		spin_unlock_bh(&dev->xmit_lock);
 		return -ENOMEM;
 	}
 	memcpy(dmi->dmi_addr, addr, alen);
-	dmi->dmi_addrlen=alen;
-	dmi->next=dev->mc_list;
-	dmi->dmi_users=1;
-	dmi->dmi_gusers=glbl ? 1 : 0;
-	dev->mc_list=dmi;
+	dmi->dmi_addrlen = alen;
+	dmi->next = dev->mc_list;
+	dmi->dmi_users = 1;
+	dmi->dmi_gusers = glbl ? 1 : 0;
+	dev->mc_list = dmi;
 	dev->mc_count++;
-	write_unlock_bh(&dev_mc_lock);
-	dev_mc_upload(dev);
+
+	__dev_mc_upload(dev);
+	
+	spin_unlock_bh(&dev->xmit_lock);
 	return 0;
 
 done:
-	write_unlock_bh(&dev_mc_lock);
+	spin_unlock_bh(&dev->xmit_lock);
 	if (dmi1)
 		kfree(dmi1);
 	return err;
@@ -194,76 +201,75 @@ done:
  *	Discard multicast list when a device is downed
  */
 
-void dev_mc_discard(struct device *dev)
+void dev_mc_discard(struct net_device *dev)
 {
-	write_lock_bh(&dev_mc_lock);
-	while (dev->mc_list!=NULL) {
-		struct dev_mc_list *tmp=dev->mc_list;
-		dev->mc_list=tmp->next;
+	spin_lock_bh(&dev->xmit_lock);
+	
+	while (dev->mc_list != NULL) {
+		struct dev_mc_list *tmp = dev->mc_list;
+		dev->mc_list = tmp->next;
 		if (tmp->dmi_users > tmp->dmi_gusers)
 			printk("dev_mc_discard: multicast leakage! dmi_users=%d\n", tmp->dmi_users);
-		kfree_s(tmp,sizeof(*tmp));
+		kfree(tmp);
 	}
-	dev->mc_count=0;
-	write_unlock_bh(&dev_mc_lock);
+	dev->mc_count = 0;
+
+	spin_unlock_bh(&dev->xmit_lock);
 }
 
 #ifdef CONFIG_PROC_FS
 static int dev_mc_read_proc(char *buffer, char **start, off_t offset,
 			    int length, int *eof, void *data)
 {
-	off_t pos=0, begin=0;
+	off_t pos = 0, begin = 0;
 	struct dev_mc_list *m;
-	int len=0;
-	struct device *dev;
+	int len = 0;
+	struct net_device *dev;
 
 	read_lock(&dev_base_lock);
 	for (dev = dev_base; dev; dev = dev->next) {
-		read_lock_bh(&dev_mc_lock);
+		spin_lock_bh(&dev->xmit_lock);
 		for (m = dev->mc_list; m; m = m->next) {
 			int i;
 
-			len += sprintf(buffer+len,"%-4d %-15s %-5d %-5d ", dev->ifindex, dev->name,
-				       m->dmi_users, m->dmi_gusers);
+			len += sprintf(buffer+len,"%-4d %-15s %-5d %-5d ", dev->ifindex,
+				       dev->name, m->dmi_users, m->dmi_gusers);
 
-			for (i=0; i<m->dmi_addrlen; i++)
+			for (i = 0; i < m->dmi_addrlen; i++)
 				len += sprintf(buffer+len, "%02x", m->dmi_addr[i]);
 
-			len+=sprintf(buffer+len, "\n");
+			len += sprintf(buffer+len, "\n");
 
-			pos=begin+len;
+			pos = begin + len;
 			if (pos < offset) {
-				len=0;
-				begin=pos;
+				len = 0;
+				begin = pos;
 			}
-			if (pos > offset+length) {
-				read_unlock_bh(&dev_mc_lock);
+			if (pos > offset + length) {
+				spin_unlock_bh(&dev->xmit_lock);
 				goto done;
 			}
 		}
-		read_unlock_bh(&dev_mc_lock);
+		spin_unlock_bh(&dev->xmit_lock);
 	}
 	*eof = 1;
 
 done:
 	read_unlock(&dev_base_lock);
-	*start=buffer+(offset-begin);
-	len-=(offset-begin);
-	if(len>length)
-		len=length;
-	if(len<0)
-		len=0;
+	*start = buffer + (offset - begin);
+	len -= (offset - begin);
+	if (len > length)
+		len = length;
+	if (len < 0)
+		len = 0;
 	return len;
 }
 #endif
 
-__initfunc(void dev_mcast_init(void))
+void __init dev_mcast_init(void)
 {
 #ifdef CONFIG_PROC_FS
-	struct proc_dir_entry *ent;
-
-	ent = create_proc_entry("net/dev_mcast", 0, 0);
-	ent->read_proc = dev_mc_read_proc;
+	create_proc_read_entry("net/dev_mcast", 0, 0, dev_mc_read_proc, NULL);
 #endif
 }
 

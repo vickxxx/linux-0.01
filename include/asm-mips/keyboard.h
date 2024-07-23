@@ -1,14 +1,13 @@
-/*
- * CPU specific parts of the keyboard driver
+/* $Id: keyboard.h,v 1.14 1999/08/19 22:56:33 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * $Id: keyboard.h,v 1.12 1998/09/16 22:52:41 ralf Exp $
+ * Copyright (C) 1994 - 1999 Ralf Baechle
  */
-#ifndef __ASM_MIPS_KEYBOARD_H
-#define __ASM_MIPS_KEYBOARD_H
+#ifndef _ASM_KEYBOARD_H
+#define _ASM_KEYBOARD_H
 
 #ifdef __KERNEL__
 
@@ -26,6 +25,7 @@ extern char pckbd_unexpected_up(unsigned char keycode);
 extern void pckbd_leds(unsigned char leds);
 extern void pckbd_init_hw(void);
 extern unsigned char pckbd_sysrq_xlate[128];
+extern void kbd_forward_char (int ch);
 
 #define kbd_setkeycode		pckbd_setkeycode
 #define kbd_getkeycode		pckbd_getkeycode
@@ -72,4 +72,4 @@ extern struct kbd_ops *kbd_ops;
 
 #endif /* __KERNEL */
 
-#endif /* __ASM_MIPS_KEYBOARD_H */
+#endif /* _ASM_KEYBOARD_H */

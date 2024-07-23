@@ -1,4 +1,4 @@
-/* $Id: indy_int.c,v 1.13 1999/06/12 17:26:15 ulfc Exp $
+/* $Id: indy_int.c,v 1.18 2000/03/02 02:36:50 ralf Exp $
  *
  * indy_int.c: Routines for generic manipulation of the INT[23] ASIC
  *             found on INDY workstations..
@@ -10,6 +10,7 @@
  *                    - Interrupt handling fixes
  */
 #include <linux/init.h>
+
 #include <linux/errno.h>
 #include <linux/kernel_stat.h>
 #include <linux/signal.h>
@@ -32,11 +33,27 @@
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
-#include <asm/sgi.h>
-#include <asm/sgihpc.h>
-#include <asm/sgint23.h>
+#include <asm/sgi/sgi.h>
+#include <asm/sgi/sgihpc.h>
+#include <asm/sgi/sgint23.h>
 #include <asm/sgialib.h>
 #include <asm/gdb-stub.h>
+
+/*
+ * Linux has a controller-independent x86 interrupt architecture.
+ * every controller has a 'controller-template', that is used
+ * by the main code to do the right thing. Each driver-visible
+ * interrupt source is transparently wired to the apropriate
+ * controller. Thus drivers need not be aware of the
+ * interrupt-controller.
+ *
+ * Various interrupt controllers we handle: 8259 PIC, SMP IO-APIC,
+ * PIIX4's internal 8259 PIC and SGI's Visual Workstation Cobalt (IO-)APIC.
+ * (IO-APICs assumed to be messaging to Pentium local-APICs)
+ *
+ * the code is designed to be easily extended with new/different
+ * interrupt controllers, without having to do assembly magic.
+ */
 
 /* #define DEBUG_SGINT */
 
@@ -53,8 +70,6 @@ static char lc3msk_to_irqnr[256];
 
 extern asmlinkage void indyIRQ(void);
 
-unsigned int local_bh_count[NR_CPUS];
-unsigned int local_irq_count[NR_CPUS];
 unsigned long spurious_count = 0;
 
 /* Local IRQ's are layed out logically like this:
@@ -257,8 +272,6 @@ int get_irq_list(char *buf)
 	return len;
 }
 
-atomic_t __mips_bh_counter;
-
 /*
  * do_IRQ handles IRQ's that have been installed without the
  * SA_INTERRUPT flag: it uses the full signal-handling return
@@ -272,7 +285,7 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 	int do_random, cpu;
 
 	cpu = smp_processor_id();
-	hardirq_enter(cpu);
+	irq_enter(cpu);
 	kstat.irqs[0][irq]++;
 
 	printk("Got irq %d, press a key.", irq);
@@ -308,7 +321,7 @@ asmlinkage void do_IRQ(int irq, struct pt_regs * regs)
 			add_interrupt_randomness(irq);
 		__cli();
 	}
-	hardirq_exit(cpu);
+	irq_exit(cpu);
 
 	/* unmasking and bottom half handling is done magically for us. */
 }
@@ -422,7 +435,7 @@ static int indy_irq_cannonicalize(int irq)
 	return irq;	/* Sane hardware, sane code ... */
 }
 
-__initfunc(void init_IRQ(void))
+void __init init_IRQ(void)
 {
 	irq_cannonicalize = indy_irq_cannonicalize;
 	irq_setup();
@@ -451,10 +464,10 @@ void indy_local0_irqdispatch(struct pt_regs *regs)
 	/* if action == NULL, then we do have a handler for the irq */
 	if ( action == NULL ) { goto no_handler; }
 	
-	hardirq_enter(cpu);
+	irq_enter(cpu);
 	kstat.irqs[0][irq + 16]++;
 	action->handler(irq, action->dev_id, regs);
-	hardirq_exit(cpu);
+	irq_exit(cpu);
 	goto end;
 
 no_handler:
@@ -489,10 +502,10 @@ void indy_local1_irqdispatch(struct pt_regs *regs)
 	/* if action == NULL, then we do have a handler for the irq */
 	if ( action == NULL ) { goto no_handler; }
 	
-	hardirq_enter(cpu);
+	irq_enter(cpu);
 	kstat.irqs[0][irq + 24]++;
 	action->handler(irq, action->dev_id, regs);
-	hardirq_exit(cpu);
+	irq_exit(cpu);
 	goto end;
 	
 no_handler:
@@ -507,13 +520,13 @@ void indy_buserror_irq(struct pt_regs *regs)
 	int cpu = smp_processor_id();
 	int irq = 6;
 
-	hardirq_enter(cpu);
+	irq_enter(cpu);
 	kstat.irqs[0][irq]++;
 	printk("Got a bus error IRQ, shouldn't happen yet\n");
 	show_regs(regs);
 	printk("Spinning...\n");
 	while(1);
-	hardirq_exit(cpu);
+	irq_exit(cpu);
 }
 
 /* Misc. crap just to keep the kernel linking... */
@@ -527,7 +540,7 @@ int probe_irq_off (unsigned long irqs)
 	return 0;
 }
 
-__initfunc(void sgint_init(void))
+void __init sgint_init(void)
 {
 	int i;
 

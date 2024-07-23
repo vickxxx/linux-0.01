@@ -1,26 +1,56 @@
-#include <linux/config.h>
-
+#ifdef __KERNEL__
 #ifndef _PPC_PGTABLE_H
 #define _PPC_PGTABLE_H
 
+#include <linux/config.h>
+
 #ifndef __ASSEMBLY__
-#include <linux/mm.h>
+#include <linux/sched.h>
+#include <linux/threads.h>
 #include <asm/processor.h>		/* For TASK_SIZE */
 #include <asm/mmu.h>
 #include <asm/page.h>
 
+#if defined(CONFIG_4xx)
+extern void local_flush_tlb_all(void);
+extern void local_flush_tlb_mm(struct mm_struct *mm);
+extern void local_flush_tlb_page(struct vm_area_struct *vma, unsigned long vmaddr);
+extern void local_flush_tlb_range(struct mm_struct *mm, unsigned long start,
+				  unsigned long end);
+extern inline void flush_hash_page(unsigned context, unsigned long va)
+	{ }
+#elif defined(CONFIG_8xx)
+#define __tlbia()	asm volatile ("tlbia" : : )
+
+extern inline void local_flush_tlb_all(void)
+	{ __tlbia(); }
+extern inline void local_flush_tlb_mm(struct mm_struct *mm)
+	{ __tlbia(); }
+extern inline void local_flush_tlb_page(struct vm_area_struct *vma,
+				unsigned long vmaddr)
+	{ __tlbia(); }
+extern inline void local_flush_tlb_range(struct mm_struct *mm,
+				unsigned long start, unsigned long end)
+	{ __tlbia(); }
+extern inline void flush_hash_page(unsigned context, unsigned long va)
+	{ }
+#else
+struct mm_struct;
+struct vm_area_struct;
 extern void local_flush_tlb_all(void);
 extern void local_flush_tlb_mm(struct mm_struct *mm);
 extern void local_flush_tlb_page(struct vm_area_struct *vma, unsigned long vmaddr);
 extern void local_flush_tlb_range(struct mm_struct *mm, unsigned long start,
 			    unsigned long end);
+#endif
 
 #define flush_tlb_all local_flush_tlb_all
 #define flush_tlb_mm local_flush_tlb_mm
 #define flush_tlb_page local_flush_tlb_page
 #define flush_tlb_range local_flush_tlb_range
 
-extern __inline__ void flush_tlb_pgtables(struct mm_struct *mm, unsigned long start, unsigned long end)
+extern inline void flush_tlb_pgtables(struct mm_struct *mm,
+				unsigned long start, unsigned long end)
 {
 	/* PPC has hw page tables. */
 }
@@ -36,14 +66,19 @@ extern __inline__ void flush_tlb_pgtables(struct mm_struct *mm, unsigned long st
 #define flush_cache_mm(mm)		do { } while (0)
 #define flush_cache_range(mm, a, b)	do { } while (0)
 #define flush_cache_page(vma, p)	do { } while (0)
+#define flush_icache_page(vma, page)	do { } while (0)
 
 extern void flush_icache_range(unsigned long, unsigned long);
-extern void flush_page_to_ram(unsigned long);
+extern void __flush_page_to_ram(unsigned long page_va);
+extern void flush_page_to_ram(struct page *page);
+
+#define flush_dcache_page(page)			do { } while (0)
 
 extern unsigned long va_to_phys(unsigned long address);
-extern pte_t *va_to_pte(struct task_struct *tsk, unsigned long address);
+extern pte_t *va_to_pte(unsigned long address);
 extern unsigned long ioremap_bot, ioremap_base;
 #endif /* __ASSEMBLY__ */
+
 /*
  * The PowerPC MMU uses a hash table containing PTEs, together with
  * a set of 16 segment registers (on 32-bit implementations), to define
@@ -56,7 +91,9 @@ extern unsigned long ioremap_bot, ioremap_base;
  * for extracting ptes from the tree and putting them into the hash table
  * when necessary, and updating the accessed and modified bits in the
  * page table tree.
- *
+ */
+
+/*
  * The PowerPC MPC8xx uses a TLB with hardware assisted, software tablewalk.
  * We also use the two level tables, but we can put the real bits in them
  * needed for the TLB and tablewalk.  These definitions require Mx_CTR.PPM = 0,
@@ -73,6 +110,16 @@ extern unsigned long ioremap_bot, ioremap_base;
  * that is where it exists in the MD_TWC, and bit 26 for writethrough.
  * These will get masked from the level 2 descriptor at TLB load time, and
  * copied to the MD_TWC before it gets loaded.
+ */
+
+/*
+ * At present, all PowerPC 400-class processors share a similar TLB
+ * architecture. The instruction and data sides share a unified,
+ * 64-entry, fully-associative TLB which is maintained totally under
+ * software control. In addition, the instruction side has a
+ * hardware-managed, 4-entry, fully-associative TLB which serves as a
+ * first level to the shared TLB. These two TLBs are known as the UTLB
+ * and ITLB, respectively (see "mmu.h" for definitions).
  */
 
 /* PMD_SHIFT determines the size of the area mapped by the second-level page tables */
@@ -93,8 +140,20 @@ extern unsigned long ioremap_bot, ioremap_base;
 #define PTRS_PER_PMD	1
 #define PTRS_PER_PGD	1024
 #define USER_PTRS_PER_PGD	(TASK_SIZE / PGDIR_SIZE)
+#define FIRST_USER_PGD_NR	0
 
-/* Just any arbitrary offset to the start of the vmalloc VM area: the
+#define USER_PGD_PTRS (PAGE_OFFSET >> PGDIR_SHIFT)
+#define KERNEL_PGD_PTRS (PTRS_PER_PGD-USER_PGD_PTRS)
+
+#define pte_ERROR(e) \
+	printk("%s:%d: bad pte %08lx.\n", __FILE__, __LINE__, pte_val(e))
+#define pmd_ERROR(e) \
+	printk("%s:%d: bad pmd %08lx.\n", __FILE__, __LINE__, pmd_val(e))
+#define pgd_ERROR(e) \
+	printk("%s:%d: bad pgd %08lx.\n", __FILE__, __LINE__, pgd_val(e))
+
+/*
+ * Just any arbitrary offset to the start of the vmalloc VM area: the
  * current 64MB value just means that there will be a 64MB "hole" after the
  * physical memory until the kernel virtual memory starts.  That means that
  * any out-of-bounds memory accesses will hopefully be caught.
@@ -110,7 +169,7 @@ extern unsigned long ioremap_bot, ioremap_base;
  * system.  This really does become a problem for machines with good amounts
  * of RAM.  -- Cort
  */
-#define VMALLOC_OFFSET (0x4000000) /* 64M */
+#define VMALLOC_OFFSET (0x1000000) /* 16M */
 #define VMALLOC_START ((((long)high_memory + VMALLOC_OFFSET) & ~(VMALLOC_OFFSET-1)))
 #define VMALLOC_VMADDR(x) ((unsigned long)(x))
 #define VMALLOC_END	ioremap_bot
@@ -119,7 +178,41 @@ extern unsigned long ioremap_bot, ioremap_base;
  * Bits in a linux-style PTE.  These match the bits in the
  * (hardware-defined) PowerPC PTE as closely as possible.
  */
-#ifndef CONFIG_8xx
+
+#if defined(CONFIG_4xx)
+/* Definitions for 4xx embedded chips. */
+#define	_PAGE_GUARDED	0x001	/* G: page is guarded from prefetch */
+#define	_PAGE_COHERENT	0x002	/* M: enforece memory coherence */
+#define	_PAGE_NO_CACHE	0x004	/* I: caching is inhibited */
+#define	_PAGE_WRITETHRU	0x008	/* W: caching is write-through */
+#define	_PAGE_USER	0x010	/* matches one of the zone permission bits */
+#define	_PAGE_PRESENT	0x040	/* software: PTE contains a translation */
+#define _PAGE_DIRTY	0x100	/* C: page changed */
+#define	_PAGE_RW	0x200	/* Writes permitted */
+#define _PAGE_ACCESSED	0x400	/* R: page referenced */
+#define _PAGE_HWWRITE	0x800	/* software: _PAGE_RW & _PAGE_DIRTY */
+#define	_PAGE_SHARED	0
+
+#elif defined(CONFIG_8xx)
+/* Definitions for 8xx embedded chips. */
+#define _PAGE_PRESENT	0x0001	/* Page is valid */
+#define _PAGE_NO_CACHE	0x0002	/* I: cache inhibit */
+#define _PAGE_SHARED	0x0004	/* No ASID (context) compare */
+
+/* These five software bits must be masked out when the entry is loaded
+ * into the TLB.
+ */
+#define _PAGE_DIRTY	0x0008	/* software: page changed */
+#define _PAGE_GUARDED	0x0010	/* software: guarded access */
+#define _PAGE_WRITETHRU 0x0020	/* software: use writethrough cache */
+#define _PAGE_RW	0x0040	/* software: user write access allowed */
+#define _PAGE_ACCESSED	0x0080	/* software: page referenced */
+
+#define _PAGE_HWWRITE	0x0100	/* C: page changed (write protect) */
+#define _PAGE_USER	0x0800	/* One of the PP bits, the other must be 0 */
+
+#else /* CONFIG_6xx */
+/* Definitions for 60x, 740/750, etc. */
 #define _PAGE_PRESENT	0x001	/* software: pte contains a translation */
 #define _PAGE_USER	0x002	/* matches one of the PP bits */
 #define _PAGE_RW	0x004	/* software: user write access allowed */
@@ -131,33 +224,11 @@ extern unsigned long ioremap_bot, ioremap_base;
 #define _PAGE_ACCESSED	0x100	/* R: page referenced */
 #define _PAGE_HWWRITE	0x200	/* software: _PAGE_RW & _PAGE_DIRTY */
 #define _PAGE_SHARED	0
-
-#else
-#define _PAGE_PRESENT	0x0001	/* Page is valid */
-#define _PAGE_NO_CACHE	0x0002	/* I: cache inhibit */
-#define _PAGE_SHARED	0x0004	/* No ASID (context) compare */
-
-/* These four software bits must be masked out when the entry is loaded
- * into the TLB.
- */
-#define _PAGE_GUARDED	0x0010	/* software: guarded access */
-#define _PAGE_WRITETHRU 0x0020	/* software: use writethrough cache */
-#define _PAGE_RW	0x0040	/* software: user write access allowed */
-#define _PAGE_ACCESSED	0x0080	/* software: page referenced */
-
-#define _PAGE_DIRTY	0x0100	/* C: page changed (write protect) */
-#define _PAGE_USER	0x0800	/* One of the PP bits, the other must be 0 */
-
-/* This is used to enable or disable the actual hardware write
- * protection.
- */
-#define _PAGE_HWWRITE	_PAGE_DIRTY
-
-#endif /* CONFIG_8xx */
+#endif
 
 #define _PAGE_CHG_MASK	(PAGE_MASK | _PAGE_ACCESSED | _PAGE_DIRTY)
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define _PAGE_BASE	_PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_COHERENT
 #else
 #define _PAGE_BASE	_PAGE_PRESENT | _PAGE_ACCESSED
@@ -198,6 +269,14 @@ extern unsigned long ioremap_bot, ioremap_base;
 #define __S110	PAGE_SHARED
 #define __S111	PAGE_SHARED
 
+#ifndef __ASSEMBLY__
+/*
+ * ZERO_PAGE is a global shared page that is always zero: used
+ * for zero-mapped memory areas etc..
+ */
+extern unsigned long empty_zero_page[1024];
+#define ZERO_PAGE(vaddr) (virt_to_page(empty_zero_page))
+
 /*
  * BAD_PAGETABLE is used when we need a bogus page-table, while
  * BAD_PAGE is used for a bogus page.
@@ -205,15 +284,12 @@ extern unsigned long ioremap_bot, ioremap_base;
  * ZERO_PAGE is a global shared page that is always zero: used
  * for zero-mapped memory areas etc..
  */
-#ifndef __ASSEMBLY__
 extern pte_t __bad_page(void);
 extern pte_t * __bad_pagetable(void);
 
-extern unsigned long empty_zero_page[1024];
-#endif __ASSEMBLY__
 #define BAD_PAGETABLE	__bad_pagetable()
 #define BAD_PAGE	__bad_page()
-#define ZERO_PAGE(vaddr)	((unsigned long) empty_zero_page)
+#endif /* __ASSEMBLY__ */
 
 /* number of bits that fit into a memory pointer */
 #define BITS_PER_PTR	(8*sizeof(unsigned long))
@@ -225,31 +301,23 @@ extern unsigned long empty_zero_page[1024];
 /* 64-bit machines, beware!  SRB. */
 #define SIZEOF_PTR_LOG2	2
 
-/* to set the page-dir */
-/* tsk is a task_struct and pgdir is a pte_t */
-#ifndef CONFIG_8xx
-#define SET_PAGE_DIR(tsk,pgdir)  \
-	((tsk)->tss.pg_tables = (unsigned long *)(pgdir))
-#else /* CONFIG_8xx */     
-#define SET_PAGE_DIR(tsk,pgdir)  \
- do { \
-	unsigned long __pgdir = (unsigned long)pgdir; \
-	((tsk)->tss.pg_tables = (unsigned long *)(__pgdir)); \
-	asm("mtspr %0,%1 \n\t" : : "i"(M_TWB), "r"(__pa(__pgdir))); \
- } while (0)
-#endif /* CONFIG_8xx */
-     
+#define pte_none(pte)		(!pte_val(pte))
+#define pte_present(pte)	(pte_val(pte) & _PAGE_PRESENT)
+#define pte_clear(ptep)		do { pte_val(*(ptep)) = 0; } while (0)
+
+#define pmd_none(pmd)		(!pmd_val(pmd))
+#define	pmd_bad(pmd)		((pmd_val(pmd) & ~PAGE_MASK) != 0)
+#define	pmd_present(pmd)	((pmd_val(pmd) & PAGE_MASK) != 0)
+#define	pmd_clear(pmdp)		do { pmd_val(*(pmdp)) = 0; } while (0)
+
+/*
+ * Permanent address of a page.
+ */
+#define page_address(page)  ((page)->virtual)
+#define pages_to_mb(x)		((x) >> (20-PAGE_SHIFT))
+#define pte_page(x)		(mem_map+(unsigned long)((pte_val(x) >> PAGE_SHIFT)))
+
 #ifndef __ASSEMBLY__
-extern inline int pte_none(pte_t pte)		{ return !pte_val(pte); }
-extern inline int pte_present(pte_t pte)	{ return pte_val(pte) & _PAGE_PRESENT; }
-extern inline void pte_clear(pte_t *ptep)	{ pte_val(*ptep) = 0; }
-
-extern inline int pmd_none(pmd_t pmd)		{ return !pmd_val(pmd); }
-extern inline int pmd_bad(pmd_t pmd)		{ return (pmd_val(pmd) & ~PAGE_MASK) != 0; }
-extern inline int pmd_present(pmd_t pmd)	{ return (pmd_val(pmd) & PAGE_MASK) != 0; }
-extern inline void pmd_clear(pmd_t * pmdp)	{ pmd_val(*pmdp) = 0; }
-
-
 /*
  * The "pgd_xxx()" functions here are trivial for a folded two-level
  * setup: the pgd is never bad, and a pmd always exists (as it's folded
@@ -258,7 +326,10 @@ extern inline void pmd_clear(pmd_t * pmdp)	{ pmd_val(*pmdp) = 0; }
 extern inline int pgd_none(pgd_t pgd)		{ return 0; }
 extern inline int pgd_bad(pgd_t pgd)		{ return 0; }
 extern inline int pgd_present(pgd_t pgd)	{ return 1; }
-extern inline void pgd_clear(pgd_t * pgdp)	{ }
+#define pgd_clear(xp)				do { } while (0)
+
+#define pgd_page(pgd) \
+	((unsigned long) __va(pgd_val(pgd) & PAGE_MASK))
 
 /*
  * The following only work if pte_present() is true.
@@ -309,52 +380,41 @@ extern inline pte_t pte_mkyoung(pte_t pte) {
  * within a page table are directly modified.  Thus, the following
  * hook is made available.
  */
-#if 1
 #define set_pte(pteptr, pteval)	((*(pteptr)) = (pteval))
-#else
-extern inline void set_pte(pte_t *pteptr, pte_t pteval)
-{
-	unsigned long val = pte_val(pteval);
-	extern void xmon(void *);
-
-	if ((val & _PAGE_PRESENT) && ((val < 0x111000 || (val & 0x800)
-	    || ((val & _PAGE_HWWRITE) && (~val & (_PAGE_RW|_PAGE_DIRTY)))) {
-		printk("bad pte val %lx ptr=%p\n", val, pteptr);
-		xmon(0);
-	}
-	*pteptr = pteval;
-}
-#endif
 
 /*
  * Conversion functions: convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
  */
 
-static inline pte_t mk_pte_phys(unsigned long page, pgprot_t pgprot)
-{ pte_t pte; pte_val(pte) = (page) | pgprot_val(pgprot); return pte; }
+extern inline pte_t mk_pte_phys(unsigned long physpage, pgprot_t pgprot)
+{
+	pte_t pte;
+	pte_val(pte) = physpage | pgprot_val(pgprot);
+	return pte;
+}
 
-extern inline pte_t mk_pte(unsigned long page, pgprot_t pgprot)
-{ pte_t pte; pte_val(pte) = __pa(page) | pgprot_val(pgprot); return pte; }
+#define mk_pte(page,pgprot) \
+({									\
+	pte_t pte;							\
+	pte_val(pte) = ((page - mem_map) << PAGE_SHIFT) | pgprot_val(pgprot); \
+	pte;							\
+})
 
 extern inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
-{ pte_val(pte) = (pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot); return pte; }
+{
+	pte_val(pte) = (pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot);
+	return pte;
+}
 
-extern inline unsigned long pte_page(pte_t pte)
-{ return (unsigned long) __va(pte_val(pte) & PAGE_MASK); }
-
-extern inline unsigned long pmd_page(pmd_t pmd)
-{ return pmd_val(pmd); }
-
+#define pmd_page(pmd)	(pmd_val(pmd))
 
 /* to find an entry in a kernel page-table-directory */
 #define pgd_offset_k(address) pgd_offset(&init_mm, address)
 
 /* to find an entry in a page-table-directory */
-extern inline pgd_t * pgd_offset(struct mm_struct * mm, unsigned long address)
-{
-	return mm->pgd + (address >> PGDIR_SHIFT);
-}
+#define pgd_index(address)	 ((address) >> PGDIR_SHIFT)
+#define pgd_offset(mm, address)	 ((mm)->pgd + pgd_index(address))
 
 /* Find an entry in the second-level page table.. */
 extern inline pmd_t * pmd_offset(pgd_t * dir, unsigned long address)
@@ -368,230 +428,8 @@ extern inline pte_t * pte_offset(pmd_t * dir, unsigned long address)
 	return (pte_t *) pmd_page(*dir) + ((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1));
 }
 
-/*
- * This is handled very differently on the PPC since out page tables
- * are all 0's and I want to be able to use these zero'd pages elsewhere
- * as well - it gives us quite a speedup.
- *
- * Note that the SMP/UP versions are the same but we don't need a
- * per cpu list of zero pages because we do the zero-ing with the cache
- * off and the access routines are lock-free but the pgt cache stuff
- * is per-cpu since it isn't done with any lock-free access routines
- * (although I think we need arch-specific routines so I can do lock-free).
- *
- * I need to generalize this so we can use it for other arch's as well.
- * -- Cort
- */
-#ifdef __SMP__
-#define quicklists	cpu_data[smp_processor_id()]
-#else
-extern struct pgtable_cache_struct {
-	unsigned long *pgd_cache;
-	unsigned long *pte_cache;
-	unsigned long pgtable_cache_sz;
-} quicklists;
-#endif
-
-#define pgd_quicklist 		(quicklists.pgd_cache)
-#define pmd_quicklist 		((unsigned long *)0)
-#define pte_quicklist 		(quicklists.pte_cache)
-#define pgtable_cache_size 	(quicklists.pgtable_cache_sz)
-
-extern unsigned long *zero_cache;    /* head linked list of pre-zero'd pages */
-extern unsigned long zero_sz;	     /* # currently pre-zero'd pages */
-extern unsigned long zeropage_hits;  /* # zero'd pages request that we've done */
-extern unsigned long zeropage_calls; /* # zero'd pages request that've been made */
-extern unsigned long zerototal;      /* # pages zero'd over time */
-
-#define zero_quicklist     	(zero_cache)
-#define zero_cache_sz  	 	(zero_sz)
-#define zero_cache_calls 	(zeropage_calls)
-#define zero_cache_hits  	(zeropage_hits)
-#define zero_cache_total 	(zerototal)
-
-/* return a pre-zero'd page from the list, return NULL if none available -- Cort */
-extern unsigned long get_zero_page_fast(void);
-
-extern __inline__ pgd_t *get_pgd_slow(void)
-{
-	pgd_t *ret/* = (pgd_t *)__get_free_page(GFP_KERNEL)*/, *init;
-
-	if ( (ret = (pgd_t *)get_zero_page_fast()) == NULL )
-	{
-		if ( (ret = (pgd_t *)__get_free_page(GFP_KERNEL)) != NULL )
-			memset (ret, 0, USER_PTRS_PER_PGD * sizeof(pgd_t));
-	}
-	if (ret) {
-		init = pgd_offset(&init_mm, 0);
-		/*memset (ret, 0, USER_PTRS_PER_PGD * sizeof(pgd_t));*/
-		memcpy (ret + USER_PTRS_PER_PGD, init + USER_PTRS_PER_PGD,
-			(PTRS_PER_PGD - USER_PTRS_PER_PGD) * sizeof(pgd_t));
-	}
-	return ret;
-}
-
-extern __inline__ pgd_t *get_pgd_fast(void)
-{
-        unsigned long *ret;
-
-        if((ret = pgd_quicklist) != NULL) {
-                pgd_quicklist = (unsigned long *)(*ret);
-                ret[0] = ret[1];
-                pgtable_cache_size--;
-        } else
-                ret = (unsigned long *)get_pgd_slow();
-        return (pgd_t *)ret;
-}
-
-extern __inline__ void free_pgd_fast(pgd_t *pgd)
-{
-        *(unsigned long *)pgd = (unsigned long) pgd_quicklist;
-        pgd_quicklist = (unsigned long *) pgd;
-        pgtable_cache_size++;
-}
-
-extern __inline__ void free_pgd_slow(pgd_t *pgd)
-{
-	free_page((unsigned long)pgd);
-}
-
-extern pte_t *get_pte_slow(pmd_t *pmd, unsigned long address_preadjusted);
-
-extern __inline__ pte_t *get_pte_fast(void)
-{
-        unsigned long *ret;
-
-        if((ret = (unsigned long *)pte_quicklist) != NULL) {
-                pte_quicklist = (unsigned long *)(*ret);
-                ret[0] = ret[1];
-                pgtable_cache_size--;
-         }
-        return (pte_t *)ret;
-}
-
-extern __inline__ void free_pte_fast(pte_t *pte)
-{
-        *(unsigned long *)pte = (unsigned long) pte_quicklist;
-        pte_quicklist = (unsigned long *) pte;
-        pgtable_cache_size++;
-}
-
-extern __inline__ void free_pte_slow(pte_t *pte)
-{
-	free_page((unsigned long)pte);
-}
-
-/* We don't use pmd cache, so this is a dummy routine */
-extern __inline__ pmd_t *get_pmd_fast(void)
-{
-	return (pmd_t *)0;
-}
-
-extern __inline__ void free_pmd_fast(pmd_t *pmd)
-{
-}
-
-extern __inline__ void free_pmd_slow(pmd_t *pmd)
-{
-}
-
-extern void __bad_pte(pmd_t *pmd);
-
-#define pte_free_kernel(pte)    free_pte_fast(pte)
-#define pte_free(pte)           free_pte_fast(pte)
-#define pgd_free(pgd)           free_pgd_fast(pgd)
-#define pgd_alloc()             get_pgd_fast()
-
-extern inline pte_t * pte_alloc(pmd_t * pmd, unsigned long address)
-{
-	address = (address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1);
-	if (pmd_none(*pmd)) {
-		pte_t * page = (pte_t *) get_pte_fast();
-		
-		if (!page)
-			return get_pte_slow(pmd, address);
-		pmd_val(*pmd) = (unsigned long) page;
-		return page + address;
-	}
-	if (pmd_bad(*pmd)) {
-		__bad_pte(pmd);
-		return NULL;
-	}
-	return (pte_t *) pmd_page(*pmd) + address;
-}
-
-/*
- * allocating and freeing a pmd is trivial: the 1-entry pmd is
- * inside the pgd, so has no extra memory associated with it.
- */
-extern inline void pmd_free(pmd_t * pmd)
-{
-}
-
-extern inline pmd_t * pmd_alloc(pgd_t * pgd, unsigned long address)
-{
-	return (pmd_t *) pgd;
-}
-
-#define pmd_free_kernel		pmd_free
-#define pmd_alloc_kernel	pmd_alloc
-#define pte_alloc_kernel	pte_alloc
-
-extern int do_check_pgt_cache(int, int);
-
-extern inline void set_pgdir(unsigned long address, pgd_t entry)
-{
-	struct task_struct * p;
-	pgd_t *pgd;
-#ifdef __SMP__
-	int i;
-#endif	
-        
-	read_lock(&tasklist_lock);
-	for_each_task(p) {
-		if (!p->mm)
-			continue;
-		*pgd_offset(p->mm,address) = entry;
-	}
-	read_unlock(&tasklist_lock);
-#ifndef __SMP__
-	for (pgd = (pgd_t *)pgd_quicklist; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
-		pgd[address >> PGDIR_SHIFT] = entry;
-#else
-	/* To pgd_alloc/pgd_free, one holds master kernel lock and so does our callee, so we can
-	   modify pgd caches of other CPUs as well. -jj */
-	for (i = 0; i < NR_CPUS; i++)
-		for (pgd = (pgd_t *)cpu_data[i].pgd_cache; pgd; pgd = (pgd_t *)*(unsigned long *)pgd)
-			pgd[address >> PGDIR_SHIFT] = entry;
-#endif
-}
-
 extern pgd_t swapper_pg_dir[1024];
-
-extern __inline__ pte_t *find_pte(struct mm_struct *mm,unsigned long va)
-{
-	pgd_t *dir;
-	pmd_t *pmd;
-	pte_t *pte;
-
-	va &= PAGE_MASK;
-	
-	dir = pgd_offset( mm, va );
-	if (dir)
-	{
-		pmd = pmd_offset(dir, va & PAGE_MASK);
-		if (pmd && pmd_present(*pmd))
-		{
-			pte = pte_offset(pmd, va);
-			if (pte && pte_present(*pte))
-			{			
-				pte_uncache(*pte);
-				flush_tlb_page(find_vma(mm,va),va);
-			}
-		}
-	}
-	return pte;
-}
+extern void paging_init(void);
 
 /*
  * Page tables may have changed.  We don't need to do anything here
@@ -607,13 +445,12 @@ extern __inline__ pte_t *find_pte(struct mm_struct *mm,unsigned long va)
 extern void flush_hash_segments(unsigned low_vsid, unsigned high_vsid);
 extern void flush_hash_page(unsigned context, unsigned long va);
 
-
-#define SWP_TYPE(entry) (((entry) >> 1) & 0x7f)
-#define SWP_OFFSET(entry) ((entry) >> 8)
-#define SWP_ENTRY(type,offset) (((type) << 1) | ((offset) << 8))
-
-#define module_map      vmalloc
-#define module_unmap    vfree
+/* Encode and de-code a swap entry */
+#define SWP_TYPE(entry)			(((entry).val >> 1) & 0x3f)
+#define SWP_OFFSET(entry)		((entry).val >> 8)
+#define SWP_ENTRY(type, offset)		((swp_entry_t) { ((type) << 1) | ((offset) << 8) })
+#define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
+#define swp_entry_to_pte(x)		((pte_t) { (x).val })
 
 /* CONFIG_APUS */
 /* For virtual address to physical address conversion */
@@ -647,5 +484,10 @@ extern void kernel_set_cachemode (unsigned long address, unsigned long size,
 #define PageSkip(page)		(0)
 #define kern_addr_valid(addr)	(1)
 
+#define io_remap_page_range remap_page_range 
+
+#include <asm-generic/pgtable.h>
+
 #endif __ASSEMBLY__
 #endif /* _PPC_PGTABLE_H */
+#endif /* __KERNEL__ */

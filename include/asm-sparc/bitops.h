@@ -1,4 +1,4 @@
-/* $Id: bitops.h,v 1.54 1998/09/21 05:07:34 jj Exp $
+/* $Id: bitops.h,v 1.61 2000/09/23 02:11:22 davem Exp $
  * bitops.h: Bit string operations on the Sparc.
  *
  * Copyright 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -17,8 +17,6 @@
  * atomic, so packages like nthreads should do some locking around these
  * themself.
  */
-
-#define __SMPVOL
 
 extern __inline__ unsigned long set_bit(unsigned long nr, void *addr)
 {
@@ -82,19 +80,13 @@ extern __inline__ void change_bit(unsigned long nr, void *addr)
 
 #include <asm/system.h>
 
-#ifdef __SMP__
-#define __SMPVOL volatile
-#else
-#define __SMPVOL
-#endif
-
 /* Set bit 'nr' in 32-bit quantity at address 'addr' where bit '0'
  * is in the highest of the four bytes and bit '31' is the high bit
  * within the first byte. Sparc is BIG-Endian. Unless noted otherwise
  * all bit-ops return 0 if bit was previously clear and != 0 otherwise.
  */
 
-extern __inline__ unsigned long test_and_set_bit(unsigned long nr, __SMPVOL void *addr)
+extern __inline__ int test_and_set_bit(unsigned long nr, volatile void *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
@@ -111,12 +103,12 @@ extern __inline__ unsigned long test_and_set_bit(unsigned long nr, __SMPVOL void
 	return mask != 0;
 }
 
-extern __inline__ void set_bit(unsigned long nr, __SMPVOL void *addr)
+extern __inline__ void set_bit(unsigned long nr, volatile void *addr)
 {
 	(void) test_and_set_bit(nr, addr);
 }
 
-extern __inline__ unsigned long test_and_clear_bit(unsigned long nr, __SMPVOL void *addr)
+extern __inline__ int test_and_clear_bit(unsigned long nr, volatile void *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
@@ -134,12 +126,12 @@ extern __inline__ unsigned long test_and_clear_bit(unsigned long nr, __SMPVOL vo
 	return mask != 0;
 }
 
-extern __inline__ void clear_bit(unsigned long nr, __SMPVOL void *addr)
+extern __inline__ void clear_bit(unsigned long nr, volatile void *addr)
 {
 	(void) test_and_clear_bit(nr, addr);
 }
 
-extern __inline__ unsigned long test_and_change_bit(unsigned long nr, __SMPVOL void *addr)
+extern __inline__ int test_and_change_bit(unsigned long nr, volatile void *addr)
 {
 	register unsigned long mask asm("g2");
 	register unsigned long *ADDR asm("g1");
@@ -157,17 +149,20 @@ extern __inline__ unsigned long test_and_change_bit(unsigned long nr, __SMPVOL v
 	return mask != 0;
 }
 
-extern __inline__ void change_bit(unsigned long nr, __SMPVOL void *addr)
+extern __inline__ void change_bit(unsigned long nr, volatile void *addr)
 {
 	(void) test_and_change_bit(nr, addr);
 }
 
 #endif /* __KERNEL__ */
 
+#define smp_mb__before_clear_bit()	do { } while(0)
+#define smp_mb__after_clear_bit()	do { } while(0)
+
 /* The following routine need not be atomic. */
-extern __inline__ unsigned long test_bit(int nr, __const__ __SMPVOL void *addr)
+extern __inline__ int test_bit(int nr, __const__ void *addr)
 {
-	return 1UL & (((__const__ unsigned int *) addr)[nr >> 5] >> (nr & 31));
+	return (1 & (((__const__ unsigned int *) addr)[nr >> 5] >> (nr & 31))) != 0;
 }
 
 /* The easy/cheese version for now. */
@@ -240,6 +235,8 @@ extern __inline__ unsigned long find_next_zero_bit(void *addr, unsigned long siz
 
 found_first:
 	tmp |= ~0UL << size;
+	if (tmp == ~0UL)        /* Are any bits zero? */
+		return result + size; /* Nope. */
 found_middle:
 	return result + ffz(tmp);
 }
@@ -297,7 +294,7 @@ extern __inline__ int clear_le_bit(int nr, void *addr)
 
 /* Now for the ext2 filesystem bit operations and helper routines. */
 
-extern __inline__ int set_le_bit(int nr,void * addr)
+extern __inline__ int set_le_bit(int nr, volatile void * addr)
 {
 	register int mask asm("g2");
 	register unsigned char *ADDR asm("g1");
@@ -315,7 +312,7 @@ extern __inline__ int set_le_bit(int nr,void * addr)
 	return mask;
 }
 
-extern __inline__ int clear_le_bit(int nr, void * addr)
+extern __inline__ int clear_le_bit(int nr, volatile void * addr)
 {
 	register int mask asm("g2");
 	register unsigned char *ADDR asm("g1");
@@ -387,7 +384,11 @@ extern __inline__ unsigned long find_next_zero_le_bit(void *addr, unsigned long 
 	tmp = *p;
 
 found_first:
-	return result + ffz(__swab32(tmp) | (~0UL << size));
+	tmp = __swab32(tmp) | (~0UL << size);
+	if (tmp == ~0UL)        /* Are any bits zero? */
+		return result + size; /* Nope. */
+	return result + ffz(tmp);
+
 found_middle:
 	return result + ffz(__swab32(tmp));
 }
@@ -398,8 +399,9 @@ found_middle:
 #define ext2_find_next_zero_bit      find_next_zero_le_bit
 
 /* Bitmap functions for the minix filesystem.  */
-#define minix_set_bit(nr,addr) test_and_set_bit(nr,addr)
-#define minix_clear_bit(nr,addr) test_and_clear_bit(nr,addr)
+#define minix_test_and_set_bit(nr,addr) test_and_set_bit(nr,addr)
+#define minix_set_bit(nr,addr) set_bit(nr,addr)
+#define minix_test_and_clear_bit(nr,addr) test_and_clear_bit(nr,addr)
 #define minix_test_bit(nr,addr) test_bit(nr,addr)
 #define minix_find_first_zero_bit(addr,size) find_first_zero_bit(addr,size)
 

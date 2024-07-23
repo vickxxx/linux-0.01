@@ -1,7 +1,8 @@
-/* $Id: system.h,v 1.50 1999/05/08 03:03:22 davem Exp $ */
+/* $Id: system.h,v 1.62 2000/09/23 02:09:21 davem Exp $ */
 #ifndef __SPARC64_SYSTEM_H
 #define __SPARC64_SYSTEM_H
 
+#include <linux/config.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/asm_offsets.h>
@@ -63,11 +64,15 @@ extern unsigned long empty_zero_page;
 	retval; \
 })
 
-#define __save_flags(flags)	((flags) = getipl())
-#define __save_and_cli(flags)	((flags) = read_pil_and_cli())
-#define __restore_flags(flags)	setipl((flags))
+#define __save_flags(flags)		((flags) = getipl())
+#define __save_and_cli(flags)		((flags) = read_pil_and_cli())
+#define __restore_flags(flags)		setipl((flags))
+#define local_irq_disable()		__cli()
+#define local_irq_enable()		__sti()
+#define local_irq_save(flags)		__save_and_cli(flags)
+#define local_irq_restore(flags)	__restore_flags(flags)
 
-#ifndef __SMP__
+#ifndef CONFIG_SMP
 #define cli() __cli()
 #define sti() __sti()
 #define save_flags(x) __save_flags(x)
@@ -90,13 +95,27 @@ extern void __global_restore_flags(unsigned long flags);
 
 #endif
 
-#define mb()  		__asm__ __volatile__ ("stbar" : : : "memory")
-
 #define nop() 		__asm__ __volatile__ ("nop")
 
 #define membar(type)	__asm__ __volatile__ ("membar " type : : : "memory");
-#define rmb()		membar("#LoadLoad | #LoadStore")
-#define wmb()		membar("#StoreLoad | #StoreStore")
+#define mb()		\
+	membar("#LoadLoad | #LoadStore | #StoreStore | #StoreLoad");
+#define rmb()		membar("#LoadLoad")
+#define wmb()		membar("#StoreStore")
+#define set_mb(__var, __value) \
+	do { __var = __value; membar("#StoreLoad | #StoreStore"); } while(0)
+#define set_wmb(__var, __value) \
+	do { __var = __value; membar("#StoreStore"); } while(0)
+
+#ifdef CONFIG_SMP
+#define smp_mb()	mb()
+#define smp_rmb()	rmb()
+#define smp_wmb()	wmb()
+#else
+#define smp_mb()	__asm__ __volatile__("":::"memory");
+#define smp_rmb()	__asm__ __volatile__("":::"memory");
+#define smp_wmb()	__asm__ __volatile__("":::"memory");
+#endif
 
 #define flushi(addr)	__asm__ __volatile__ ("flush %0" : : "r" (addr) : "memory")
 
@@ -106,24 +125,27 @@ extern void __global_restore_flags(unsigned long flags);
 #define read_pcr(__p)  __asm__ __volatile__("rd	%%pcr, %0" : "=r" (__p))
 #define write_pcr(__p) __asm__ __volatile__("wr	%0, 0x0, %%pcr" : : "r" (__p));
 #define read_pic(__p)  __asm__ __volatile__("rd %%pic, %0" : "=r" (__p))
-#define reset_pic()    __asm__ __volatile__("wr	%g0, 0x0, %pic");
+
+/* Blackbird errata workaround.  See commentary in
+ * arch/sparc64/kernel/smp.c:smp_percpu_timer_interrupt()
+ * for more information.
+ */
+#define reset_pic()    						\
+	__asm__ __volatile__("ba,pt	%xcc, 99f\n\t"		\
+			     ".align	64\n"			\
+			  "99:wr	%g0, 0x0, %pic\n\t"	\
+			     "rd	%pic, %g0")
 
 #ifndef __ASSEMBLY__
 
 extern void synchronize_user_stack(void);
 
-extern __inline__ void flushw_user(void)
-{
-	__asm__ __volatile__("
-		rdpr		%%otherwin, %%g1
-		brz,pt		%%g1, 1f
-		 mov		%%o7, %%g3
-		call		__flushw_user
-		 clr		%%g2
-1:"	: : : "g1", "g2", "g3");
-}
+extern void __flushw_user(void);
+#define flushw_user() __flushw_user()
 
 #define flush_user_windows flushw_user
+#define flush_register_windows flushw_all
+#define prepare_to_switch flushw_all
 
 	/* See what happens when you design the chip correctly?
 	 *
@@ -135,20 +157,19 @@ extern __inline__ void flushw_user(void)
 	 * and 2 stores in this critical code path.  -DaveM
 	 */
 #define switch_to(prev, next, last)						\
-do {	if (current->tss.flags & SPARC_FLAG_PERFCTR) {				\
+do {	if (current->thread.flags & SPARC_FLAG_PERFCTR) {			\
 		unsigned long __tmp;						\
 		read_pcr(__tmp);						\
-		current->tss.pcr_reg = __tmp;					\
+		current->thread.pcr_reg = __tmp;				\
 		read_pic(__tmp);						\
-		current->tss.kernel_cntd0 += (unsigned int)(__tmp);		\
-		current->tss.kernel_cntd1 += ((__tmp) >> 32);			\
+		current->thread.kernel_cntd0 += (unsigned int)(__tmp);		\
+		current->thread.kernel_cntd1 += ((__tmp) >> 32);		\
 	}									\
 	save_and_clear_fpu();							\
-	__asm__ __volatile__(							\
-	"flushw\n\t"								\
-	"wrpr	%g0, 0x94, %pstate\n\t");					\
-	__get_mmu_context(next);						\
-	(next)->mm->cpu_vm_mask |= (1UL << smp_processor_id());			\
+	/* If you are tempted to conditionalize the following */		\
+	/* so that ASI is only written if it changes, think again. */		\
+	__asm__ __volatile__("wr %%g0, %0, %%asi"				\
+			     : : "r" (next->thread.current_ds.seg));		\
 	__asm__ __volatile__(							\
 	"mov	%%g6, %%g5\n\t"							\
 	"wrpr	%%g0, 0x95, %%pstate\n\t"					\
@@ -156,15 +177,15 @@ do {	if (current->tss.flags & SPARC_FLAG_PERFCTR) {				\
 	"stx	%%i7, [%%sp + 2047 + 0x78]\n\t"					\
 	"rdpr	%%wstate, %%o5\n\t"						\
 	"stx	%%o6, [%%g6 + %3]\n\t"						\
-	"sth	%%o5, [%%g6 + %2]\n\t"						\
+	"stb	%%o5, [%%g6 + %2]\n\t"						\
 	"rdpr	%%cwp, %%o5\n\t"						\
-	"sth	%%o5, [%%g6 + %5]\n\t"						\
+	"stb	%%o5, [%%g6 + %5]\n\t"						\
 	"mov	%1, %%g6\n\t"							\
-	"lduh	[%1 + %5], %%g1\n\t"						\
+	"ldub	[%1 + %5], %%g1\n\t"						\
 	"wrpr	%%g1, %%cwp\n\t"						\
 	"ldx	[%%g6 + %3], %%o6\n\t"						\
-	"lduh	[%%g6 + %2], %%o5\n\t"						\
-	"lduh	[%%g6 + %4], %%o7\n\t"						\
+	"ldub	[%%g6 + %2], %%o5\n\t"						\
+	"ldub	[%%g6 + %4], %%o7\n\t"						\
 	"mov	%%g6, %%l2\n\t"							\
 	"wrpr	%%o5, 0x0, %%wstate\n\t"					\
 	"ldx	[%%sp + 2047 + 0x70], %%i6\n\t"					\
@@ -172,22 +193,23 @@ do {	if (current->tss.flags & SPARC_FLAG_PERFCTR) {				\
 	"wrpr	%%g0, 0x94, %%pstate\n\t"					\
 	"mov	%%l2, %%g6\n\t"							\
 	"wrpr	%%g0, 0x96, %%pstate\n\t"					\
-	"andcc	%%o7, 0x100, %%g0\n\t"						\
+	"andcc	%%o7, %6, %%g0\n\t"						\
 	"bne,pn	%%icc, ret_from_syscall\n\t"					\
 	" mov	%%g5, %0\n\t"							\
 	: "=&r" (last)								\
 	: "r" (next),								\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->tss.wstate)),	\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->tss.ksp)),	\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->tss.flags)),	\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->tss.cwp))	\
+	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.wstate)),\
+	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.ksp)),	\
+	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.flags)),\
+	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.cwp)),	\
+	  "i" (SPARC_FLAG_NEWCHILD)						\
 	: "cc", "g1", "g2", "g3", "g5", "g7",					\
 	  "l2", "l3", "l4", "l5", "l6", "l7",					\
 	  "i0", "i1", "i2", "i3", "i4", "i5",					\
 	  "o0", "o1", "o2", "o3", "o4", "o5", "o7");				\
 	/* If you fuck with this, update ret_from_syscall code too. */		\
-	if (current->tss.flags & SPARC_FLAG_PERFCTR) {				\
-		write_pcr(current->tss.pcr_reg);				\
+	if (current->thread.flags & SPARC_FLAG_PERFCTR) {			\
+		write_pcr(current->thread.pcr_reg);				\
 		reset_pic();							\
 	}									\
 } while(0)
@@ -243,6 +265,63 @@ static __inline__ unsigned long __xchg(unsigned long x, __volatile__ void * ptr,
 }
 
 extern void die_if_kernel(char *str, struct pt_regs *regs) __attribute__ ((noreturn));
+
+/* 
+ * Atomic compare and exchange.  Compare OLD with MEM, if identical,
+ * store NEW in MEM.  Return the initial value in MEM.  Success is
+ * indicated by comparing RETURN with OLD.
+ */
+
+#define __HAVE_ARCH_CMPXCHG 1
+
+extern __inline__ unsigned long
+__cmpxchg_u32(volatile int *m, int old, int new)
+{
+	__asm__ __volatile__("cas [%2], %3, %0\n\t"
+			     "membar #StoreStore | #StoreLoad"
+			     : "=&r" (new)
+			     : "0" (new), "r" (m), "r" (old)
+			     : "memory");
+
+	return new;
+}
+
+extern __inline__ unsigned long
+__cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
+{
+	__asm__ __volatile__("casx [%2], %3, %0\n\t"
+			     "membar #StoreStore | #StoreLoad"
+			     : "=&r" (new)
+			     : "0" (new), "r" (m), "r" (old)
+			     : "memory");
+
+	return new;
+}
+
+/* This function doesn't exist, so you'll get a linker error
+   if something tries to do an invalid cmpxchg().  */
+extern void __cmpxchg_called_with_bad_pointer(void);
+
+static __inline__ unsigned long
+__cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
+{
+	switch (size) {
+		case 4:
+			return __cmpxchg_u32(ptr, old, new);
+		case 8:
+			return __cmpxchg_u64(ptr, old, new);
+	}
+	__cmpxchg_called_with_bad_pointer();
+	return old;
+}
+
+#define cmpxchg(ptr,o,n)						 \
+  ({									 \
+     __typeof__(*(ptr)) _o_ = (o);					 \
+     __typeof__(*(ptr)) _n_ = (n);					 \
+     (__typeof__(*(ptr))) __cmpxchg((ptr), (unsigned long)_o_,		 \
+				    (unsigned long)_n_, sizeof(*(ptr))); \
+  })
 
 #endif /* !(__ASSEMBLY__) */
 

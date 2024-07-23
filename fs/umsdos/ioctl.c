@@ -29,7 +29,8 @@ static int umsdos_ioctl_fill (
 				     const char *name,
 				     int name_len,
 				     off_t offset,
-				     ino_t ino)
+				     ino_t ino,
+				     unsigned type)
 {
 	int ret = -EINVAL;
 	struct UMSDOS_DIR_ONCE *d = (struct UMSDOS_DIR_ONCE *) buf;
@@ -75,7 +76,6 @@ int UMSDOS_ioctl_dir(struct inode *dir, struct file *filp, unsigned int cmd,
 	struct dentry *dentry = filp->f_dentry;
 	struct umsdos_ioctl *idata = (struct umsdos_ioctl *) data_ptr;
 	int ret;
-	struct file new_filp;
 	struct umsdos_ioctl data;
 
 Printk(("UMSDOS_ioctl_dir: %s/%s, cmd=%d, data=%08lx\n",
@@ -161,6 +161,7 @@ dentry->d_parent->d_name.name, dentry->d_name.name, cmd, data_ptr));
 		 * Return > 0 if success.
 		 */
 		struct dentry *demd;
+		loff_t pos = filp->f_pos;
 
 		/* The absence of the EMD is simply seen as an EOF */
 		demd = umsdos_get_emd_dentry(dentry);
@@ -171,14 +172,22 @@ dentry->d_parent->d_name.name, dentry->d_name.name, cmd, data_ptr));
 		if (!demd->d_inode)
 			goto read_dput;
 
-		fill_new_filp(&new_filp, demd);
-		new_filp.f_pos = filp->f_pos;
-		while (new_filp.f_pos < demd->d_inode->i_size) {
-			off_t f_pos = new_filp.f_pos;
+		while (pos < demd->d_inode->i_size) {
+			off_t f_pos = pos;
 			struct umsdos_dirent entry;
 			struct umsdos_info info;
 
-			ret = umsdos_emd_dir_readentry (&new_filp, &entry);
+			ret = umsdos_emd_dir_readentry (demd, &pos, &entry);
+
+			if (ret == -ENAMETOOLONG) {
+				printk (KERN_INFO "Fixing EMD entry with invalid size -- zeroing out\n");
+				memset (&info, 0, sizeof (info));
+				info.f_pos = f_pos;
+				info.recsize = UMSDOS_REC_SIZE;
+				ret = umsdos_writeentry (dentry, &info, 1);
+				continue;
+			}
+
 			if (ret)
 				break;
 			if (entry.name_len <= 0)
@@ -199,7 +208,7 @@ dentry->d_parent->d_name.name, dentry->d_name.name, cmd, data_ptr));
 			break;
 		}
 		/* update the original f_pos */
-		filp->f_pos = new_filp.f_pos;
+		filp->f_pos = pos;
 	read_dput:
 		d_drop(demd);
 		dput(demd);
@@ -217,14 +226,11 @@ dentry->d_parent->d_name.name, dentry->d_name.name, cmd, data_ptr));
 		 * 
 		 * Return 0 if success.
 		 */
-		extern struct inode_operations umsdos_rdir_inode_operations;
 
 		ret = umsdos_make_emd(dentry);
 Printk(("UMSDOS_ioctl_dir: INIT_EMD %s/%s, ret=%d\n",
 dentry->d_parent->d_name.name, dentry->d_name.name, ret));
-		dir->i_op = (ret == 0)
-		    ? &umsdos_dir_inode_operations
-		    : &umsdos_rdir_inode_operations;
+		umsdos_setup_dir (dentry);
 		goto out;
 	}
 
@@ -280,6 +286,8 @@ printk("umsdos_ioctl: renaming %s/%s to %s/%s\n",
 old_dentry->d_parent->d_name.name, old_dentry->d_name.name,
 new_dentry->d_parent->d_name.name, new_dentry->d_name.name);
 			ret = msdos_rename (dir, old_dentry, dir, new_dentry);
+			d_drop(new_dentry);
+			d_drop(old_dentry);
 			dput(new_dentry);
 		}
 		dput(old_dentry);
@@ -332,6 +340,8 @@ new_dentry->d_parent->d_name.name, new_dentry->d_name.name);
 			ret = -EISDIR;
 			if (!S_ISDIR(temp->d_inode->i_mode))
 				ret = msdos_unlink (dir, temp);
+			if (!ret)
+				d_delete(temp);
 		}
 		dput (temp);
 		goto out;
@@ -356,6 +366,8 @@ new_dentry->d_parent->d_name.name, new_dentry->d_name.name);
 			ret = -ENOTDIR;
 			if (S_ISDIR(temp->d_inode->i_mode))
 				ret = msdos_rmdir (dir, temp);
+			if (!ret)
+				d_delete(temp);
 		}
 		dput (temp);
 		goto out;

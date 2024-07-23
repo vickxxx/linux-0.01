@@ -12,18 +12,21 @@
  * Amiga support by Hamish Macdonald
  */
 
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/errno.h>
 #include <linux/keyboard.h>
+#include <linux/kd.h>
+#include <linux/kbd_ll.h>
 #include <linux/delay.h>
 #include <linux/timer.h>
-#include <linux/kd.h>
 #include <linux/random.h>
 #include <linux/kernel.h>
+#include <linux/ioport.h>
 #include <linux/init.h>
-#include <linux/kbd_ll.h>
+#include <linux/kbd_kern.h>
 
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
@@ -175,7 +178,7 @@ static unsigned int key_repeat_rate  = DEFAULT_KEYB_REP_RATE;
 
 static unsigned char rep_scancode;
 static void amikeyb_rep(unsigned long ignore);
-static struct timer_list amikeyb_rep_timer = {NULL, NULL, 0, 0, amikeyb_rep};
+static struct timer_list amikeyb_rep_timer = {function: amikeyb_rep};
 
 static void amikeyb_rep(unsigned long ignore)
 {
@@ -186,7 +189,6 @@ static void amikeyb_rep(unsigned long ignore)
     kbd_pt_regs = NULL;
 
     amikeyb_rep_timer.expires = jiffies + key_repeat_rate;
-    amikeyb_rep_timer.prev = amikeyb_rep_timer.next = NULL;
     add_timer(&amikeyb_rep_timer);
     handle_scancode(rep_scancode, 1);
 
@@ -230,7 +232,7 @@ static void keyboard_interrupt(int irq, void *dummy, struct pt_regs *fp)
     /* switch CIA serial port to input mode */
     ciaa.cra &= ~0x40;
 
-    mark_bh(KEYBOARD_BH);
+    tasklet_schedule(&keyboard_tasklet);
 
     /* rotate scan code to get up/down bit in proper position */
     scancode = ((scancode >> 1) & 0x7f) | ((scancode << 7) & 0x80);
@@ -254,10 +256,9 @@ static void keyboard_interrupt(int irq, void *dummy, struct pt_regs *fp)
 	    del_timer(&amikeyb_rep_timer);
 	    rep_scancode = keycode;
 	    amikeyb_rep_timer.expires = jiffies + key_repeat_delay;
-	    amikeyb_rep_timer.prev = amikeyb_rep_timer.next = NULL;
 	    add_timer(&amikeyb_rep_timer);
 	}
-	handle_scancode(scancode, !break_flag);
+	handle_scancode(keycode, !break_flag);
     } else
 	switch (keycode) {
 	    case 0x78:
@@ -295,10 +296,12 @@ static void keyboard_interrupt(int irq, void *dummy, struct pt_regs *fp)
 	}
 }
 
-__initfunc(int amiga_keyb_init(void))
+int __init amiga_keyb_init(void)
 {
     if (!AMIGAHW_PRESENT(AMI_KEYBOARD))
         return -EIO;
+    if (!request_mem_region(CIAA_PHYSADDR-1+0xb00, 0x100, "amikeyb"))
+	return -EBUSY;
 
     /* setup key map */
     memcpy(key_maps[0], amiplain_map, sizeof(plain_map));
@@ -342,7 +345,15 @@ int amiga_kbdrate( struct kbd_repeat *k )
     return( 0 );
 }
 
-/* for "kbd-reset" cmdline param */
-__initfunc(void amiga_kbd_reset_setup(char *str, int *ints))
+int amiga_kbd_translate(unsigned char keycode, unsigned char *keycodep, char raw_mode)
 {
+#ifdef CONFIG_MAGIC_SYSRQ
+        /* SHIFT+ALTGR+HELP pressed? */
+        if ((keycode == 0x5f) && ((shift_state & 0xff) == 3))
+                *keycodep = 0xff;
+        else
+#endif
+                *keycodep = keycode;
+        return 1;
 }
+

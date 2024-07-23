@@ -14,7 +14,6 @@
  * for more details.
  */
 
-#include <stdarg.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -25,6 +24,7 @@
 #include <linux/init.h>
 #include <linux/major.h>
 
+#include <asm/bootinfo.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/setup.h>
@@ -63,6 +63,15 @@ static unsigned char bin2bcd (unsigned char b);
  * kernel/sched.c, called via bvme6000_process_int() */
 
 static void (*tick_handler)(int, void *, struct pt_regs *);
+
+
+int bvme6000_parse_bootinfo(const struct bi_record *bi)
+{
+	if (bi->tag == BI_VME_TYPE)
+		return 0;
+	else
+		return 1;
+}
 
 int bvme6000_kbdrate (struct kbd_repeat *k)
 {
@@ -104,10 +113,17 @@ static int bvme6000_get_hardware_list(char *buffer)
 }
 
 
-__initfunc(void config_bvme6000(void))
+void __init config_bvme6000(void)
 {
     volatile PitRegsPtr pit = (PitRegsPtr)BVME_PIT_BASE;
 
+    /* Board type is only set by newer versions of vmelilo/tftplilo */
+    if (!vme_brdtype) {
+	if (m68k_cputype == CPU_68060)
+	    vme_brdtype = VME_TYPE_BVME6000;
+	else
+	    vme_brdtype = VME_TYPE_BVME4000;
+    }
 #if 0
     /* Call bvme6000_set_vectors() so ABORT will work, along with BVMBug
      * debugger.  Note trap_init() will splat the abort vector, but
@@ -116,6 +132,7 @@ __initfunc(void config_bvme6000(void))
     bvme6000_set_vectors();
 #endif
 
+    mach_max_dma_address = 0xffffffff;
     mach_sched_init      = bvme6000_sched_init;
     mach_keyb_init       = bvme6000_keyb_init;
     mach_kbdrate         = bvme6000_kbdrate;

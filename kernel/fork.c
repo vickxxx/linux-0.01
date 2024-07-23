@@ -6,11 +6,12 @@
 
 /*
  *  'fork.c' contains the help-routines for the 'fork' system call
- * (see also system_call.s).
+ * (see also entry.S and others).
  * Fork is rather simple, once you get the hang of it, but the memory
- * management can be a bitch. See 'mm/mm.c': 'copy_page_tables()'
+ * management can be a bitch. See 'mm/memory.c': 'copy_page_tables()'
  */
 
+#include <linux/config.h>
 #include <linux/malloc.h>
 #include <linux/init.h>
 #include <linux/unistd.h>
@@ -19,167 +20,60 @@
 #include <linux/vmalloc.h>
 
 #include <asm/pgtable.h>
-#include <asm/mmu_context.h>
+#include <asm/pgalloc.h>
 #include <asm/uaccess.h>
+#include <asm/mmu_context.h>
 
-/* The idle tasks do not count.. */
-int nr_tasks=0;
-int nr_running=0;
+/* The idle threads do not count.. */
+int nr_threads;
+int nr_running;
 
-unsigned long int total_forks=0;	/* Handle normal Linux uptimes. */
-int last_pid=0;
-
-/* SLAB cache for mm_struct's. */
-kmem_cache_t *mm_cachep;
-
-/* SLAB cache for files structs */
-kmem_cache_t *files_cachep; 
+int max_threads;
+unsigned long total_forks;	/* Handle normal Linux uptimes. */
+int last_pid;
 
 struct task_struct *pidhash[PIDHASH_SZ];
 
-struct task_struct **tarray_freelist = NULL;
-spinlock_t taskslot_lock = SPIN_LOCK_UNLOCKED;
-
-/* UID task count cache, to prevent walking entire process list every
- * single fork() operation.
- */
-#define UIDHASH_SZ	(PIDHASH_SZ >> 2)
-
-static struct user_struct {
-	atomic_t count;
-	struct user_struct *next, **pprev;
-	unsigned int uid;
-} *uidhash[UIDHASH_SZ];
-
-spinlock_t uidhash_lock = SPIN_LOCK_UNLOCKED;
-
-kmem_cache_t *uid_cachep;
-
-#define uidhashfn(uid)	(((uid >> 8) ^ uid) & (UIDHASH_SZ - 1))
-
-/*
- * These routines must be called with the uidhash spinlock held!
- */
-static inline void uid_hash_insert(struct user_struct *up, unsigned int hashent)
+void add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
 {
-	if((up->next = uidhash[hashent]) != NULL)
-		uidhash[hashent]->pprev = &up->next;
-	up->pprev = &uidhash[hashent];
-	uidhash[hashent] = up;
+	unsigned long flags;
+
+	wq_write_lock_irqsave(&q->lock, flags);
+	wait->flags = 0;
+	__add_wait_queue(q, wait);
+	wq_write_unlock_irqrestore(&q->lock, flags);
 }
 
-static inline void uid_hash_remove(struct user_struct *up)
+void add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait)
 {
-	if(up->next)
-		up->next->pprev = up->pprev;
-	*up->pprev = up->next;
+	unsigned long flags;
+
+	wq_write_lock_irqsave(&q->lock, flags);
+	wait->flags = WQ_FLAG_EXCLUSIVE;
+	__add_wait_queue_tail(q, wait);
+	wq_write_unlock_irqrestore(&q->lock, flags);
 }
 
-static inline struct user_struct *uid_hash_find(unsigned short uid, unsigned int hashent)
+void remove_wait_queue(wait_queue_head_t *q, wait_queue_t * wait)
 {
-	struct user_struct *up, *next;
+	unsigned long flags;
 
-	next = uidhash[hashent];
-	for (;;) {
-		up = next;
-		if (next) {
-			next = up->next;
-			if (up->uid != uid)
-				continue;
-			atomic_inc(&up->count);
-		}
-		break;
-	}
-	return up;
+	wq_write_lock_irqsave(&q->lock, flags);
+	__remove_wait_queue(q, wait);
+	wq_write_unlock_irqrestore(&q->lock, flags);
 }
 
-/*
- * For SMP, we need to re-test the user struct counter
- * after having aquired the spinlock. This allows us to do
- * the common case (not freeing anything) without having
- * any locking.
- */
-#ifdef __SMP__
-  #define uid_hash_free(up)	(!atomic_read(&(up)->count))
-#else
-  #define uid_hash_free(up)	(1)
-#endif
-
-void free_uid(struct task_struct *p)
+void __init fork_init(unsigned long mempages)
 {
-	struct user_struct *up = p->user;
+	/*
+	 * The default maximum number of threads is set to a safe
+	 * value: the thread structures can take up at most half
+	 * of memory.
+	 */
+	max_threads = mempages / (THREAD_SIZE/PAGE_SIZE) / 2;
 
-	if (up) {
-		p->user = NULL;
-		if (atomic_dec_and_test(&up->count)) {
-			spin_lock(&uidhash_lock);
-			if (uid_hash_free(up)) {
-				uid_hash_remove(up);
-				kmem_cache_free(uid_cachep, up);
-			}
-			spin_unlock(&uidhash_lock);
-		}
-	}
-}
-
-int alloc_uid(struct task_struct *p)
-{
-	unsigned int hashent = uidhashfn(p->uid);
-	struct user_struct *up;
-
-	spin_lock(&uidhash_lock);
-	up = uid_hash_find(p->uid, hashent);
-	spin_unlock(&uidhash_lock);
-
-	if (!up) {
-		struct user_struct *new;
-
-		new = kmem_cache_alloc(uid_cachep, SLAB_KERNEL);
-		if (!new)
-			return -EAGAIN;
-		new->uid = p->uid;
-		atomic_set(&new->count, 1);
-
-		/*
-		 * Before adding this, check whether we raced
-		 * on adding the same user already..
-		 */
-		spin_lock(&uidhash_lock);
-		up = uid_hash_find(p->uid, hashent);
-		if (up) {
-			kmem_cache_free(uid_cachep, new);
-		} else {
-			uid_hash_insert(new, hashent);
-			up = new;
-		}
-		spin_unlock(&uidhash_lock);
-
-	}
-	p->user = up;
-	return 0;
-}
-
-void __init uidcache_init(void)
-{
-	int i;
-
-	uid_cachep = kmem_cache_create("uid_cache", sizeof(struct user_struct),
-				       0,
-				       SLAB_HWCACHE_ALIGN, NULL, NULL);
-	if(!uid_cachep)
-		panic("Cannot create uid taskcount SLAB cache\n");
-
-	for(i = 0; i < UIDHASH_SZ; i++)
-		uidhash[i] = 0;
-}
-
-static inline struct task_struct ** find_empty_process(void)
-{
-	struct task_struct **tslot = NULL;
-
-	if ((nr_tasks < NR_TASKS - MIN_TASKS_LEFT_FOR_ROOT) || !current->uid)
-		tslot = get_free_taskslot();
-	return tslot;
+	init_task.rlim[RLIMIT_NPROC].rlim_cur = max_threads/2;
+	init_task.rlim[RLIMIT_NPROC].rlim_max = max_threads/2;
 }
 
 /* Protects next_safe and last_pid. */
@@ -234,11 +128,21 @@ static inline int dup_mmap(struct mm_struct * mm)
 	int retval;
 
 	flush_cache_mm(current->mm);
+	mm->locked_vm = 0;
+	mm->mmap = NULL;
+	mm->mmap_avl = NULL;
+	mm->mmap_cache = NULL;
+	mm->map_count = 0;
+	mm->cpu_vm_mask = 0;
+	mm->swap_cnt = 0;
+	mm->swap_address = 0;
 	pprev = &mm->mmap;
 	for (mpnt = current->mm->mmap ; mpnt ; mpnt = mpnt->vm_next) {
 		struct file *file;
 
 		retval = -ENOMEM;
+		if(mpnt->vm_flags & VM_DONTCOPY)
+			continue;
 		tmp = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 		if (!tmp)
 			goto fail_nomem;
@@ -249,16 +153,19 @@ static inline int dup_mmap(struct mm_struct * mm)
 		tmp->vm_next = NULL;
 		file = tmp->vm_file;
 		if (file) {
-			atomic_inc(&file->f_count);
+			struct inode *inode = file->f_dentry->d_inode;
+			get_file(file);
 			if (tmp->vm_flags & VM_DENYWRITE)
-				file->f_dentry->d_inode->i_writecount--;
+				atomic_dec(&inode->i_writecount);
       
 			/* insert tmp into the share list, just after mpnt */
+			spin_lock(&inode->i_mapping->i_shared_lock);
 			if((tmp->vm_next_share = mpnt->vm_next_share) != NULL)
 				mpnt->vm_next_share->vm_pprev_share =
 					&tmp->vm_next_share;
 			mpnt->vm_next_share = tmp;
 			tmp->vm_pprev_share = &mpnt->vm_next_share;
+			spin_unlock(&inode->i_mapping->i_shared_lock);
 		}
 
 		/* Copy the pages, but defer checking for errors */
@@ -270,10 +177,9 @@ static inline int dup_mmap(struct mm_struct * mm)
 		 * Link in the new vma even if an error occurred,
 		 * so that exit_mmap() can clean up the mess.
 		 */
-		tmp->vm_next = *pprev;
 		*pprev = tmp;
-
 		pprev = &tmp->vm_next;
+
 		if (retval)
 			goto fail_nomem;
 	}
@@ -286,36 +192,64 @@ fail_nomem:
 	return retval;
 }
 
+spinlock_t mmlist_lock __cacheline_aligned = SPIN_LOCK_UNLOCKED;
+
+#define allocate_mm()	(kmem_cache_alloc(mm_cachep, SLAB_KERNEL))
+#define free_mm(mm)	(kmem_cache_free(mm_cachep, (mm)))
+
+static struct mm_struct * mm_init(struct mm_struct * mm)
+{
+	atomic_set(&mm->mm_users, 1);
+	atomic_set(&mm->mm_count, 1);
+	init_MUTEX(&mm->mmap_sem);
+	mm->page_table_lock = SPIN_LOCK_UNLOCKED;
+	mm->pgd = pgd_alloc();
+	if (mm->pgd)
+		return mm;
+	free_mm(mm);
+	return NULL;
+}
+	
+
 /*
  * Allocate and initialize an mm_struct.
- *
- * NOTE! The mm mutex will be locked until the
- * caller decides that all systems are go..
  */
 struct mm_struct * mm_alloc(void)
 {
 	struct mm_struct * mm;
 
-	mm = kmem_cache_alloc(mm_cachep, SLAB_KERNEL);
+	mm = allocate_mm();
 	if (mm) {
-		*mm = *current->mm;
-		init_new_context(mm);
-		atomic_set(&mm->count, 1);
-		mm->map_count = 0;
-		mm->def_flags = 0;
-		init_MUTEX_LOCKED(&mm->mmap_sem);
-		/*
-		 * Leave mm->pgd set to the parent's pgd
-		 * so that pgd_offset() is always valid.
-		 */
-		mm->mmap = mm->mmap_avl = mm->mmap_cache = NULL;
-
-		/* It has not run yet, so cannot be present in anyone's
-		 * cache or tlb.
-		 */
-		mm->cpu_vm_mask = 0;
+		memset(mm, 0, sizeof(*mm));
+		return mm_init(mm);
 	}
-	return mm;
+	return NULL;
+}
+
+/*
+ * Called when the last reference to the mm
+ * is dropped: either by a lazy thread or by
+ * mmput. Free the page directory and the mm.
+ */
+inline void __mmdrop(struct mm_struct *mm)
+{
+	if (mm == &init_mm) BUG();
+	pgd_free(mm->pgd);
+	destroy_context(mm);
+	free_mm(mm);
+}
+
+/*
+ * Decrement the use count and release all resources for an mm.
+ */
+void mmput(struct mm_struct *mm)
+{
+	if (atomic_dec_and_lock(&mm->mm_users, &mmlist_lock)) {
+		list_del(&mm->mmlist);
+		spin_unlock(&mmlist_lock);
+		exit_mmap(mm);
+		mmdrop(mm);
+	}
 }
 
 /* Please note the differences between mmput and mm_release.
@@ -334,7 +268,7 @@ struct mm_struct * mm_alloc(void)
 void mm_release(void)
 {
 	struct task_struct *tsk = current;
-	forget_segments();
+
 	/* notify parent sleeping on vfork() */
 	if (tsk->flags & PF_VFORK) {
 		tsk->flags &= ~PF_VFORK;
@@ -342,63 +276,108 @@ void mm_release(void)
 	}
 }
 
-/*
- * Decrement the use count and release all resources for an mm.
- */
-void mmput(struct mm_struct *mm)
+static int copy_mm(unsigned long clone_flags, struct task_struct * tsk)
 {
-	if (atomic_dec_and_test(&mm->count)) {
-		release_segments(mm);
-		exit_mmap(mm);
-		free_page_tables(mm);
-		kmem_cache_free(mm_cachep, mm);
-	}
-}
-
-static inline int copy_mm(int nr, unsigned long clone_flags, struct task_struct * tsk)
-{
-	struct mm_struct * mm;
+	struct mm_struct * mm, *oldmm;
 	int retval;
 
-	if (clone_flags & CLONE_VM) {
-		mmget(current->mm);
-		/*
-		 * Set up the LDT descriptor for the clone task.
-		 */
-		copy_segments(nr, tsk, NULL);
-		SET_PAGE_DIR(tsk, current->mm->pgd);
-		return 0;
-	}
-
-	retval = -ENOMEM;
-	mm = mm_alloc();
-	if (!mm)
-		goto fail_nomem;
-
-	tsk->mm = mm;
 	tsk->min_flt = tsk->maj_flt = 0;
 	tsk->cmin_flt = tsk->cmaj_flt = 0;
 	tsk->nswap = tsk->cnswap = 0;
-	copy_segments(nr, tsk, mm);
-	retval = new_page_tables(tsk);
-	if (retval)
-		goto free_mm;
+
+	tsk->mm = NULL;
+	tsk->active_mm = NULL;
+
+	/*
+	 * Are we cloning a kernel thread?
+	 *
+	 * We need to steal a active VM for that..
+	 */
+	oldmm = current->mm;
+	if (!oldmm)
+		return 0;
+
+	if (clone_flags & CLONE_VM) {
+		atomic_inc(&oldmm->mm_users);
+		mm = oldmm;
+		goto good_mm;
+	}
+
+	retval = -ENOMEM;
+	mm = allocate_mm();
+	if (!mm)
+		goto fail_nomem;
+
+	/* Copy the current MM stuff.. */
+	memcpy(mm, oldmm, sizeof(*mm));
+	if (!mm_init(mm))
+		goto fail_nomem;
+
+	down(&oldmm->mmap_sem);
 	retval = dup_mmap(mm);
+	up(&oldmm->mmap_sem);
+
+	/*
+	 * Add it to the mmlist after the parent.
+	 *
+	 * Doing it this way means that we can order
+	 * the list, and fork() won't mess up the
+	 * ordering significantly.
+	 */
+	spin_lock(&mmlist_lock);
+	list_add(&mm->mmlist, &oldmm->mmlist);
+	spin_unlock(&mmlist_lock);
+
 	if (retval)
 		goto free_pt;
-	up(&mm->mmap_sem);
+
+	/*
+	 * child gets a private LDT (if there was an LDT in the parent)
+	 */
+	copy_segments(tsk, mm);
+
+	if (init_new_context(tsk,mm))
+		goto free_pt;
+
+good_mm:
+	tsk->mm = mm;
+	tsk->active_mm = mm;
 	return 0;
 
-free_mm:
-	tsk->mm = NULL;
-	release_segments(mm);
-	kmem_cache_free(mm_cachep, mm);
-	return retval;
 free_pt:
-	tsk->mm = NULL;
 	mmput(mm);
 fail_nomem:
 	return retval;
+}
+
+static inline struct fs_struct *__copy_fs_struct(struct fs_struct *old)
+{
+	struct fs_struct *fs = kmem_cache_alloc(fs_cachep, GFP_KERNEL);
+	/* We don't need to lock fs - think why ;-) */
+	if (fs) {
+		atomic_set(&fs->count, 1);
+		fs->lock = RW_LOCK_UNLOCKED;
+		fs->umask = old->umask;
+		read_lock(&old->lock);
+		fs->rootmnt = mntget(old->rootmnt);
+		fs->root = dget(old->root);
+		fs->pwdmnt = mntget(old->pwdmnt);
+		fs->pwd = dget(old->pwd);
+		if (old->altroot) {
+			fs->altrootmnt = mntget(old->altrootmnt);
+			fs->altroot = dget(old->altroot);
+		} else {
+			fs->altrootmnt = NULL;
+			fs->altroot = NULL;
+		}	
+		read_unlock(&old->lock);
+	}
+	return fs;
+}
+
+struct fs_struct *copy_fs_struct(struct fs_struct *old)
+{
+	return __copy_fs_struct(old);
 }
 
 static inline int copy_fs(unsigned long clone_flags, struct task_struct * tsk)
@@ -407,42 +386,30 @@ static inline int copy_fs(unsigned long clone_flags, struct task_struct * tsk)
 		atomic_inc(&current->fs->count);
 		return 0;
 	}
-	tsk->fs = kmalloc(sizeof(*tsk->fs), GFP_KERNEL);
+	tsk->fs = __copy_fs_struct(current->fs);
 	if (!tsk->fs)
 		return -1;
-	atomic_set(&tsk->fs->count, 1);
-	tsk->fs->umask = current->fs->umask;
-	tsk->fs->root = dget(current->fs->root);
-	tsk->fs->pwd = dget(current->fs->pwd);
 	return 0;
 }
 
-/*
- * Copy a fd_set and compute the maximum fd it contains. 
- */
-static inline int __copy_fdset(unsigned long *d, unsigned long *src)
+static int count_open_files(struct files_struct *files, int size)
 {
-	int i; 
-	unsigned long *p = src; 
-	unsigned long *max = src; 
-
-	for (i = __FDSET_LONGS; i; --i) {
-		if ((*d++ = *p++) != 0) 
-			max = p; 
+	int i;
+	
+	/* Find the last open fd */
+	for (i = size/(8*sizeof(long)); i > 0; ) {
+		if (files->open_fds->fds_bits[--i])
+			break;
 	}
-	return (max - src)*sizeof(long)*8; 
-}
-
-static inline int copy_fdset(fd_set *dst, fd_set *src)
-{
-	return __copy_fdset(dst->fds_bits, src->fds_bits);  
+	i = (i+1) * 8 * sizeof(long);
+	return i;
 }
 
 static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 {
 	struct files_struct *oldf, *newf;
 	struct file **old_fds, **new_fds;
-	int size, i, error = 0;
+	int open_files, nfds, size, i, error = 0;
 
 	/*
 	 * A background process may not have any files ...
@@ -462,57 +429,103 @@ static int copy_files(unsigned long clone_flags, struct task_struct * tsk)
 	if (!newf) 
 		goto out;
 
-	/*
-	 * Allocate the fd array, using get_free_page() if possible.
-	 * Eventually we want to make the array size variable ...
-	 */
-	size = NR_OPEN * sizeof(struct file *);
-	if (size == PAGE_SIZE)
-		new_fds = (struct file **) __get_free_page(GFP_KERNEL);
-	else
-		new_fds = (struct file **) kmalloc(size, GFP_KERNEL);
-	if (!new_fds)
-		goto out_release;
-
-	newf->file_lock = RW_LOCK_UNLOCKED;
 	atomic_set(&newf->count, 1);
-	newf->max_fds = NR_OPEN;
-	newf->fd = new_fds;
-	newf->close_on_exec = oldf->close_on_exec;
-	i = copy_fdset(&newf->open_fds, &oldf->open_fds);
+
+	newf->file_lock	    = RW_LOCK_UNLOCKED;
+	newf->next_fd	    = 0;
+	newf->max_fds	    = NR_OPEN_DEFAULT;
+	newf->max_fdset	    = __FD_SETSIZE;
+	newf->close_on_exec = &newf->close_on_exec_init;
+	newf->open_fds	    = &newf->open_fds_init;
+	newf->fd	    = &newf->fd_array[0];
+
+	/* We don't yet have the oldf readlock, but even if the old
+           fdset gets grown now, we'll only copy up to "size" fds */
+	size = oldf->max_fdset;
+	if (size > __FD_SETSIZE) {
+		newf->max_fdset = 0;
+		write_lock(&newf->file_lock);
+		error = expand_fdset(newf, size);
+		write_unlock(&newf->file_lock);
+		if (error)
+			goto out_release;
+	}
+	read_lock(&oldf->file_lock);
+
+	open_files = count_open_files(oldf, size);
+
+	/*
+	 * Check whether we need to allocate a larger fd array.
+	 * Note: we're not a clone task, so the open count won't
+	 * change.
+	 */
+	nfds = NR_OPEN_DEFAULT;
+	if (open_files > nfds) {
+		read_unlock(&oldf->file_lock);
+		newf->max_fds = 0;
+		write_lock(&newf->file_lock);
+		error = expand_fd_array(newf, open_files);
+		write_unlock(&newf->file_lock);
+		if (error) 
+			goto out_release;
+		nfds = newf->max_fds;
+		read_lock(&oldf->file_lock);
+	}
 
 	old_fds = oldf->fd;
-	for (; i != 0; i--) {
+	new_fds = newf->fd;
+
+	memcpy(newf->open_fds->fds_bits, oldf->open_fds->fds_bits, open_files/8);
+	memcpy(newf->close_on_exec->fds_bits, oldf->close_on_exec->fds_bits, open_files/8);
+
+	for (i = open_files; i != 0; i--) {
 		struct file *f = *old_fds++;
-		*new_fds = f;
 		if (f)
-			atomic_inc(&f->f_count);
-		new_fds++;
+			get_file(f);
+		*new_fds++ = f;
 	}
+	read_unlock(&oldf->file_lock);
+
+	/* compute the remainder to be cleared */
+	size = (newf->max_fds - open_files) * sizeof(struct file *);
+
 	/* This is long word aligned thus could use a optimized version */ 
-	memset(new_fds, 0, (char *)newf->fd + size - (char *)new_fds); 
-      
+	memset(new_fds, 0, size); 
+
+	if (newf->max_fdset > open_files) {
+		int left = (newf->max_fdset-open_files)/8;
+		int start = open_files / (8 * sizeof(unsigned long));
+		
+		memset(&newf->open_fds->fds_bits[start], 0, left);
+		memset(&newf->close_on_exec->fds_bits[start], 0, left);
+	}
+
 	tsk->files = newf;
 	error = 0;
 out:
 	return error;
 
 out_release:
+	free_fdset (newf->close_on_exec, newf->max_fdset);
+	free_fdset (newf->open_fds, newf->max_fdset);
 	kmem_cache_free(files_cachep, newf);
 	goto out;
 }
 
 static inline int copy_sighand(unsigned long clone_flags, struct task_struct * tsk)
 {
+	struct signal_struct *sig;
+
 	if (clone_flags & CLONE_SIGHAND) {
 		atomic_inc(&current->sig->count);
 		return 0;
 	}
-	tsk->sig = kmalloc(sizeof(*tsk->sig), GFP_KERNEL);
-	if (!tsk->sig)
+	sig = kmem_cache_alloc(sigact_cachep, GFP_KERNEL);
+	tsk->sig = sig;
+	if (!sig)
 		return -1;
-	spin_lock_init(&tsk->sig->siglock);
-	atomic_set(&tsk->sig->count, 1);
+	spin_lock_init(&sig->siglock);
+	atomic_set(&sig->count, 1);
 	memcpy(tsk->sig->action, current->sig->action, sizeof(tsk->sig->action));
 	return 0;
 }
@@ -524,7 +537,7 @@ static inline void copy_flags(unsigned long clone_flags, struct task_struct *p)
 	new_flags &= ~(PF_SUPERPRIV | PF_USEDFPU | PF_VFORK);
 	new_flags |= PF_FORKNOEXEC;
 	if (!(clone_flags & CLONE_PTRACE))
-		new_flags &= ~(PF_PTRACED|PF_TRACESYS);
+		p->ptrace = 0;
 	if (clone_flags & CLONE_VFORK)
 		new_flags |= PF_VFORK;
 	p->flags = new_flags;
@@ -532,16 +545,26 @@ static inline void copy_flags(unsigned long clone_flags, struct task_struct *p)
 
 /*
  *  Ok, this is the main fork-routine. It copies the system process
- * information (task[nr]) and sets up the necessary registers. It
- * also copies the data segment in its entirety.
+ * information (task[nr]) and sets up the necessary registers. It also
+ * copies the data segment in its entirety.  The "stack_start" and
+ * "stack_top" arguments are simply passed along to the platform
+ * specific copy_thread() routine.  Most platforms ignore stack_top.
+ * For an example that's using stack_top, see
+ * arch/ia64/kernel/process.c.
  */
-int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
+int do_fork(unsigned long clone_flags, unsigned long stack_start,
+	    struct pt_regs *regs, unsigned long stack_size)
 {
-	int nr;
 	int retval = -ENOMEM;
 	struct task_struct *p;
 	DECLARE_MUTEX_LOCKED(sem);
 
+	if (clone_flags & CLONE_PID) {
+		/* This is only allowed from the boot up thread */
+		if (current->pid)
+			return -EPERM;
+	}
+	
 	current->vfork_sem = &sem;
 
 	p = alloc_task_struct();
@@ -550,28 +573,22 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 
 	*p = *current;
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
-
 	retval = -EAGAIN;
-	if (p->user) {
-		if (atomic_read(&p->user->count) >= p->rlim[RLIMIT_NPROC].rlim_cur)
-			goto bad_fork_free;
-		atomic_inc(&p->user->count);
-	}
+	if (atomic_read(&p->user->processes) >= p->rlim[RLIMIT_NPROC].rlim_cur)
+		goto bad_fork_free;
+	atomic_inc(&p->user->__count);
+	atomic_inc(&p->user->processes);
 
-	{
-		struct task_struct **tslot;
-		tslot = find_empty_process();
-		if (!tslot)
-			goto bad_fork_cleanup_count;
-		p->tarray_ptr = tslot;
-		*tslot = p;
-		nr = tslot - &task[0];
-	}
+	/*
+	 * Counter increases are protected by
+	 * the kernel lock so nr_threads can't
+	 * increase under us (but it may decrease).
+	 */
+	if (nr_threads >= max_threads)
+		goto bad_fork_cleanup_count;
+	
+	get_exec_domain(p->exec_domain);
 
-	if (p->exec_domain && p->exec_domain->module)
-		__MOD_INC_USE_COUNT(p->exec_domain->module);
 	if (p->binfmt && p->binfmt->module)
 		__MOD_INC_USE_COUNT(p->binfmt->module);
 
@@ -582,25 +599,21 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	copy_flags(clone_flags, p);
 	p->pid = get_pid(clone_flags);
 
-	/*
-	 * This is a "shadow run" state. The process
-	 * is marked runnable, but isn't actually on
-	 * any run queue yet.. (that happens at the
-	 * very end).
-	 */
-	p->state = TASK_RUNNING;
-	p->next_run = p;
-	p->prev_run = p;
+	p->run_list.next = NULL;
+	p->run_list.prev = NULL;
 
-	p->p_pptr = p->p_opptr = current;
+	if ((clone_flags & CLONE_VFORK) || !(clone_flags & CLONE_PARENT)) {
+		p->p_opptr = current;
+		if (!(p->ptrace & PT_PTRACED))
+			p->p_pptr = current;
+	}
 	p->p_cptr = NULL;
 	init_waitqueue_head(&p->wait_chldexit);
 	p->vfork_sem = NULL;
+	spin_lock_init(&p->alloc_lock);
 
 	p->sigpending = 0;
-	sigemptyset(&p->signal);
-	p->sigqueue = NULL;
-	p->sigqueue_tail = &p->sigqueue;
+	init_sigpending(&p->pending);
 
 	p->it_real_value = p->it_virt_value = p->it_prof_value = 0;
 	p->it_real_incr = p->it_virt_incr = p->it_prof_incr = 0;
@@ -611,7 +624,7 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	p->tty_old_pgrp = 0;
 	p->times.tms_utime = p->times.tms_stime = 0;
 	p->times.tms_cutime = p->times.tms_cstime = 0;
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	{
 		int i;
 		p->has_cpu = 0;
@@ -633,12 +646,17 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 		goto bad_fork_cleanup_files;
 	if (copy_sighand(clone_flags, p))
 		goto bad_fork_cleanup_fs;
-	if (copy_mm(nr, clone_flags, p))
+	if (copy_mm(clone_flags, p))
 		goto bad_fork_cleanup_sighand;
-	retval = copy_thread(nr, clone_flags, usp, p, regs);
+	retval = copy_thread(0, clone_flags, stack_start, stack_size, p, regs);
 	if (retval)
 		goto bad_fork_cleanup_sighand;
 	p->semundo = NULL;
+	
+	/* Our parent execution domain becomes current domain
+	   These must match for thread signalling to apply */
+	   
+	p->parent_exec_id = p->self_exec_id;
 
 	/* ok, now we should be set up.. */
 	p->swappable = 1;
@@ -651,8 +669,10 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	 * more scheduling fairness. This is only important in the first
 	 * timeslice, on the long run the scheduling behaviour is unchanged.
 	 */
+	p->counter = (current->counter + 1) >> 1;
 	current->counter >>= 1;
-	p->counter = current->counter;
+	if (!current->counter)
+		current->need_resched = 1;
 
 	/*
 	 * Ok, add it to the run-queues and make it
@@ -661,22 +681,24 @@ int do_fork(unsigned long clone_flags, unsigned long usp, struct pt_regs *regs)
 	 * Let it rip!
 	 */
 	retval = p->pid;
-	if (retval) {
-		write_lock_irq(&tasklist_lock);
-		SET_LINKS(p);
-		hash_pid(p);
-		write_unlock_irq(&tasklist_lock);
-
-		nr_tasks++;
-
-		p->next_run = NULL;
-		p->prev_run = NULL;
-		wake_up_process(p);		/* do this last */
+	p->tgid = retval;
+	INIT_LIST_HEAD(&p->thread_group);
+	write_lock_irq(&tasklist_lock);
+	if (clone_flags & CLONE_THREAD) {
+		p->tgid = current->tgid;
+		list_add(&p->thread_group, &current->thread_group);
 	}
+	SET_LINKS(p);
+	hash_pid(p);
+	nr_threads++;
+	write_unlock_irq(&tasklist_lock);
+
+	if (p->ptrace & PT_PTRACED)
+		send_sig(SIGSTOP, p, 1);
+
+	wake_up_process(p);		/* do this last */
 	++total_forks;
-bad_fork:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
+
 fork_out:
 	if ((clone_flags & CLONE_VFORK) && (retval > 0)) 
 		down(&sem);
@@ -689,27 +711,61 @@ bad_fork_cleanup_fs:
 bad_fork_cleanup_files:
 	exit_files(p); /* blocking */
 bad_fork_cleanup:
-	if (p->exec_domain && p->exec_domain->module)
-		__MOD_DEC_USE_COUNT(p->exec_domain->module);
+	put_exec_domain(p->exec_domain);
 	if (p->binfmt && p->binfmt->module)
 		__MOD_DEC_USE_COUNT(p->binfmt->module);
-
-	add_free_taskslot(p->tarray_ptr);
 bad_fork_cleanup_count:
-	if (p->user)
-		free_uid(p);
+	atomic_dec(&p->user->processes);
+	free_uid(p->user);
 bad_fork_free:
 	free_task_struct(p);
-	goto bad_fork;
+	goto fork_out;
 }
 
-void __init filescache_init(void)
+/* SLAB cache for signal_struct structures (tsk->sig) */
+kmem_cache_t *sigact_cachep;
+
+/* SLAB cache for files_struct structures (tsk->files) */
+kmem_cache_t *files_cachep;
+
+/* SLAB cache for fs_struct structures (tsk->fs) */
+kmem_cache_t *fs_cachep;
+
+/* SLAB cache for vm_area_struct structures */
+kmem_cache_t *vm_area_cachep;
+
+/* SLAB cache for mm_struct structures (tsk->mm) */
+kmem_cache_t *mm_cachep;
+
+void __init proc_caches_init(void)
 {
+	sigact_cachep = kmem_cache_create("signal_act",
+			sizeof(struct signal_struct), 0,
+			SLAB_HWCACHE_ALIGN, NULL, NULL);
+	if (!sigact_cachep)
+		panic("Cannot create signal action SLAB cache");
+
 	files_cachep = kmem_cache_create("files_cache", 
-					 sizeof(struct files_struct),
-					 0, 
-					 SLAB_HWCACHE_ALIGN,
-					 NULL, NULL);
+			 sizeof(struct files_struct), 0, 
+			 SLAB_HWCACHE_ALIGN, NULL, NULL);
 	if (!files_cachep) 
-		panic("Cannot create files cache"); 
+		panic("Cannot create files SLAB cache");
+
+	fs_cachep = kmem_cache_create("fs_cache", 
+			 sizeof(struct fs_struct), 0, 
+			 SLAB_HWCACHE_ALIGN, NULL, NULL);
+	if (!fs_cachep) 
+		panic("Cannot create fs_struct SLAB cache");
+ 
+	vm_area_cachep = kmem_cache_create("vm_area_struct",
+			sizeof(struct vm_area_struct), 0,
+			SLAB_HWCACHE_ALIGN, NULL, NULL);
+	if(!vm_area_cachep)
+		panic("vma_init: Cannot alloc vm_area_struct SLAB cache");
+
+	mm_cachep = kmem_cache_create("mm_struct",
+			sizeof(struct mm_struct), 0,
+			SLAB_HWCACHE_ALIGN, NULL, NULL);
+	if(!mm_cachep)
+		panic("vma_init: Cannot alloc mm_struct SLAB cache");
 }

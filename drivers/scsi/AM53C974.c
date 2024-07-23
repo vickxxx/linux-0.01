@@ -1,4 +1,4 @@
-#include <linux/config.h>
+#include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
@@ -7,10 +7,10 @@
 #include <linux/string.h>
 #include <linux/blk.h>
 #include <linux/init.h>
+#include <linux/spinlock.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
-#include <asm/spinlock.h>
 
 #include "scsi.h"
 #include "hosts.h"
@@ -380,20 +380,14 @@ static void AM53C974_dma_blast(struct Scsi_Host *instance, unsigned char dmastat
 			       unsigned char statreg);
 static void AM53C974_intr_bus_reset(struct Scsi_Host *instance);
 
-static struct Scsi_Host *first_instance = NULL;
-static Scsi_Host_Template *the_template = NULL;
-static struct Scsi_Host *first_host = NULL;	/* Head of list of AMD boards */
-static volatile int main_running = 0;
-static int commandline_current = 0;
+static struct Scsi_Host *first_instance;
+static Scsi_Host_Template *the_template;
+static struct Scsi_Host *first_host;	/* Head of list of AMD boards */
+static volatile int main_running;
+static int commandline_current;
 override_t overrides[7] =
 {
 	{-1, 0, 0, 0},};	/* LILO overrides */
-
-struct proc_dir_entry proc_scsi_am53c974 =
-{
-	PROC_SCSI_AM53C974, 8, "am53c974",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
 
 #ifdef AM53C974_DEBUG
 static int deb_stop = 1;
@@ -576,19 +570,25 @@ static void AM53C974_keywait(void)
 	restore_flags(flags);
 }
 
+#ifndef MODULE
 /**************************************************************************
-* Function : AM53C974_setup(char *str, int *ints)
+* Function : AM53C974_setup(char *str)
 *
 * Purpose : LILO command line initialization of the overrides array,
 * 
-* Inputs : str - unused, ints - array of integer parameters with ints[0]
-*	    equal to the number of ints.
+* Input : str - parameter string.
+*
+* Returns : 1.
 *
 * NOTE : this function needs to be declared as an external function
 *         in init/main.c and included there in the bootsetups list
 ***************************************************************************/
-void AM53C974_setup(char *str, int *ints)
+static int AM53C974_setup(char *str)
 {
+	int ints[5];
+
+	get_options(str, ARRAY_SIZE(ints), ints);
+
 	if (ints[0] < 4)
 		printk("AM53C974_setup: wrong number of parameters;\n correct syntax is: AM53C974=host-scsi-id, target-scsi-id, max-rate, max-offset\n");
 	else {
@@ -609,9 +609,13 @@ void AM53C974_setup(char *str, int *ints)
 		} else
 			printk("AM53C974_setup: too many overrides\n");
 	}
-}
 
-#if defined (CONFIG_PCI)
+	return 1;
+}
+__setup("AM53C974=", AM53C974_setup);
+
+#endif /* !MODULE */
+
 /**************************************************************************
 * Function : int AM53C974_pci_detect(Scsi_Host_Template *tpnt)
 *
@@ -621,54 +625,27 @@ void AM53C974_setup(char *str, int *ints)
 * 
 * Returns : number of host adapters detected
 **************************************************************************/
-static __inline__ int AM53C974_pci_detect(Scsi_Host_Template * tpnt)
+static int __init AM53C974_pci_detect(Scsi_Host_Template * tpnt)
 {
 	int count = 0;		/* number of boards detected */
 	struct pci_dev *pdev = NULL;
 	unsigned short command;
 
 	while ((pdev = pci_find_device(PCI_VENDOR_ID_AMD, PCI_DEVICE_ID_AMD_SCSI, pdev))) {
+		if (pci_enable_device(pdev))
+			continue;
 		pci_read_config_word(pdev, PCI_COMMAND, &command);
 
 		/* check whether device is I/O mapped -- should be */
 		if (!(command & PCI_COMMAND_IO))
 			continue;
 
-		/* PCI Spec 2.1 states that it is either the driver's or the PCI card's responsibility
-		   to set the PCI Master Enable Bit if needed. 
-		   (from Mark Stockton <marks@schooner.sys.hou.compaq.com>) */
-		if (!(command & PCI_COMMAND_MASTER)) {
-			command |= PCI_COMMAND_MASTER;
-			printk("PCI Master Bit has not been set. Setting...\n");
-			pci_write_config_word(pdev, PCI_COMMAND, command);
-		}
+		pci_set_master (pdev);
+
 		/* everything seems OK now, so initialize */
 		if (AM53C974_init(tpnt, pdev))
 			count++;
 	}
-	return (count);
-}
-#endif
-
-/**************************************************************************
-* Function : int AM53C974_detect(Scsi_Host_Template *tpnt)
-*
-* Purpose : detects and initializes AM53C974 SCSI chips
-*
-* Inputs : tpnt - host template
-* 
-* Returns : number of host adapters detected
-**************************************************************************/
-__initfunc(int AM53C974_detect(Scsi_Host_Template * tpnt))
-{
-	int count = 0;		/* number of boards detected */
-
-	tpnt->proc_dir = &proc_scsi_am53c974;
-
-#if defined (CONFIG_PCI)
-	if (pci_present())
-		count = AM53C974_pci_detect(tpnt);
-#endif
 	return (count);
 }
 
@@ -686,7 +663,7 @@ __initfunc(int AM53C974_detect(Scsi_Host_Template * tpnt))
 *       set up by the BIOS (as reflected by contents of register CNTLREG1).
 *       This is the only BIOS assistance we need.
 **************************************************************************/
-__initfunc(static int AM53C974_init(Scsi_Host_Template * tpnt, struct pci_dev *pdev))
+static int __init  AM53C974_init(Scsi_Host_Template * tpnt, struct pci_dev *pdev)
 {
 	AM53C974_local_declare();
 	int i, j;
@@ -700,8 +677,8 @@ __initfunc(static int AM53C974_init(Scsi_Host_Template * tpnt, struct pci_dev *p
 
 	instance = scsi_register(tpnt, sizeof(struct AM53C974_hostdata));
 	hostdata = (struct AM53C974_hostdata *) instance->hostdata;
-	instance->base = NULL;
-	instance->io_port = pdev->base_address[0] & PCI_BASE_ADDRESS_IO_MASK;
+	instance->base = 0;
+	instance->io_port = pci_resource_start(pdev, 0);
 	instance->irq = pdev->irq;
 	instance->dma_channel = -1;
 	AM53C974_setio(instance);
@@ -819,7 +796,7 @@ static void AM53C974_config_after_reset(struct Scsi_Host *instance)
 *                                                                      *
 * Returns : info string                                                *
 ************************************************************************/
-const char *AM53C974_info(struct Scsi_Host *instance)
+static const char *AM53C974_info(struct Scsi_Host *instance)
 {
 	static char info[100];
 
@@ -839,7 +816,7 @@ const char *AM53C974_info(struct Scsi_Host *instance)
 *                                                                         *
 * Returns :status, see hosts.h for details                                *
 ***************************************************************************/
-int AM53C974_command(Scsi_Cmnd * SCpnt)
+static int AM53C974_command(Scsi_Cmnd * SCpnt)
 {
 	DEB(printk("AM53C974_command called\n"));
 	return 0;
@@ -912,7 +889,7 @@ static __inline__ void run_main(void)
 *	twiddling done to the host specific fields of cmd.  If the 
 *	main coroutine is not running, it is restarted.
 **************************************************************************/
-int AM53C974_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
+static int AM53C974_queue_command(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 {
 	unsigned long flags;
 	struct Scsi_Host *instance = cmd->host;
@@ -2292,7 +2269,7 @@ static void AM53C974_intr_bus_reset(struct Scsi_Host *instance)
 *
 * Returns : 0 - success, -1 on failure.
  **************************************************************************/
-int AM53C974_abort(Scsi_Cmnd * cmd)
+static int AM53C974_abort(Scsi_Cmnd * cmd)
 {
 	AM53C974_local_declare();
 	unsigned long flags;
@@ -2400,7 +2377,7 @@ int AM53C974_abort(Scsi_Cmnd * cmd)
 * 
 * FIXME(eric) the reset_flags are ignored.
 **************************************************************************/
-int AM53C974_reset(Scsi_Cmnd * cmd, unsigned int reset_flags)
+static int AM53C974_reset(Scsi_Cmnd * cmd, unsigned int reset_flags)
 {
 	AM53C974_local_declare();
 	unsigned long flags;
@@ -2456,7 +2433,7 @@ int AM53C974_reset(Scsi_Cmnd * cmd, unsigned int reset_flags)
  *
  * Release resources allocated for a single AM53C974 adapter.
  */
-int AM53C974_release(struct Scsi_Host *shp)
+static int AM53C974_release(struct Scsi_Host *shp)
 {
 	free_irq(shp->irq, shp);
 	scsi_unregister(shp);
@@ -2464,8 +2441,9 @@ int AM53C974_release(struct Scsi_Host *shp)
 }
 
 
-#ifdef MODULE
-static Scsi_Host_Template driver_template = AM53C974;
+/* You can specify overrides=a,b,c,d in the same format at AM53C974=a,b,c,d
+   on boot up */
+MODULE_PARM(overrides, "1-32i");
 
+static Scsi_Host_Template driver_template = AM53C974;
 #include "scsi_module.c"
-#endif

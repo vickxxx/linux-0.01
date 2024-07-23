@@ -1,7 +1,13 @@
 /*
- * Cumana SCSI II driver
+ *  linux/drivers/acorn/scsi/cumana_2.h
  *
- * Copyright (C) 1997-1998 Russell King
+ *  Copyright (C) 1997-2000 Russell King
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Cumana SCSI II driver
  */
 #ifndef CUMANA_2_H
 #define CUMANA_2_H
@@ -23,6 +29,13 @@ extern int cumanascsi_2_proc_info (char *buffer, char **start, off_t offset,
 #define CAN_QUEUE	1
 #endif
 
+#ifndef CMD_PER_LUN
+/*
+ * Default queue size
+ */
+#define CMD_PER_LUN	1
+#endif
+
 #ifndef SCSI_ID
 /*
  * Default SCSI host ID
@@ -32,27 +45,27 @@ extern int cumanascsi_2_proc_info (char *buffer, char **start, off_t offset,
 
 #include <scsi/scsicam.h>
 
-#ifndef HOSTS_C
 #include "fas216.h"
-#endif
 
-#define CUMANASCSI_2 {							\
-proc_info:		cumanascsi_2_proc_info,				\
-name:			"Cumana SCSI II",				\
-detect:			cumanascsi_2_detect,	/* detect		*/	\
-release:		cumanascsi_2_release,	/* release		*/	\
-info:			cumanascsi_2_info,	/* info			*/	\
-command:		fas216_command,		/* command		*/	\
-queuecommand:		fas216_queue_command,	/* queuecommand		*/	\
-abort:			fas216_abort,		/* abort		*/	\
-reset:			fas216_reset,		/* reset		*/	\
-bios_param:		scsicam_bios_param,	/* biosparam		*/	\
-can_queue:		CAN_QUEUE,		/* can queue		*/	\
-this_id:		SCSI_ID,		/* scsi host id		*/	\
-sg_tablesize:		SG_ALL,			/* sg_tablesize		*/	\
-cmd_per_lun:		CAN_QUEUE,		/* cmd per lun		*/	\
-unchecked_isa_dma:	0,			/* unchecked isa dma	*/	\
-use_clustering:		DISABLE_CLUSTERING					\
+#define CUMANASCSI_2 {					\
+proc_info:			cumanascsi_2_proc_info,	\
+name:				"Cumana SCSI II",	\
+detect:				cumanascsi_2_detect,	\
+release:			cumanascsi_2_release,	\
+info:				cumanascsi_2_info,	\
+bios_param:			scsicam_bios_param,	\
+can_queue:			CAN_QUEUE,		\
+this_id:			SCSI_ID,		\
+sg_tablesize:			SG_ALL,			\
+cmd_per_lun:			CMD_PER_LUN,		\
+use_clustering:			DISABLE_CLUSTERING,	\
+command:			fas216_command,		\
+queuecommand:			fas216_queue_command,	\
+eh_host_reset_handler:		fas216_eh_host_reset,	\
+eh_bus_reset_handler:		fas216_eh_bus_reset,	\
+eh_device_reset_handler:	fas216_eh_device_reset,	\
+eh_abort_handler:		fas216_eh_abort,	\
+use_new_eh_code:		1			\
 	}
 
 #ifndef HOSTS_C
@@ -69,7 +82,7 @@ typedef struct {
 	unsigned int	alatch;		/* Control register	*/
 	unsigned int	terms;		/* Terminator state	*/
 	unsigned int	dmaarea;	/* Pseudo DMA area	*/
-	dmasg_t		dmasg[NR_SG];	/* Scatter DMA list	*/
+	struct scatterlist sg[NR_SG];	/* Scatter DMA list	*/
 } CumanaScsi2_Info;
 
 #define CSTATUS_IRQ	(1 << 0)

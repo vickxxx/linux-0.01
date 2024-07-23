@@ -1,16 +1,13 @@
 #ifndef _LINUX_FB_H
 #define _LINUX_FB_H
 
+#include <linux/tty.h>
 #include <asm/types.h>
 
 /* Definitions of frame buffers						*/
 
-#define FB_MAJOR	29
-
-#define FB_MODES_SHIFT		5	/* 32 modes per framebuffer */
-#define FB_NUM_MINORS		256	/* 256 Minors               */
-#define FB_MAX			(FB_NUM_MINORS / (1 << FB_MODES_SHIFT))
-#define GET_FB_IDX(node)	(MINOR(node) >> FB_MODES_SHIFT)
+#define FB_MAJOR		29
+#define FB_MAX			32	/* sufficient for now */
 
 /* ioctls
    0x46 is 'F'								*/
@@ -26,6 +23,15 @@
 /* #define FBIOSWITCH_MONIBIT	0x460E */
 #define FBIOGET_CON2FBMAP	0x460F
 #define FBIOPUT_CON2FBMAP	0x4610
+#define FBIOBLANK		0x4611		/* arg: 0 or vesa level + 1 */
+#define FBIOGET_VBLANK		_IOR('F', 0x12, struct fb_vblank)
+#define FBIO_ALLOC              0x4613
+#define FBIO_FREE               0x4614
+#define FBIOGET_GLYPH           0x4615
+#define FBIOGET_HWCINFO         0x4616
+#define FBIOPUT_MODEINFO        0x4617
+#define FBIOGET_DISPINFO        0x4618
+
 
 #define FB_TYPE_PACKED_PIXELS		0	/* Packed Pixels	*/
 #define FB_TYPE_PLANES			1	/* Non interleaved planes */
@@ -38,6 +44,10 @@
 #define FB_AUX_TEXT_S3_MMIO	2	/* S3 MMIO fasttext */
 #define FB_AUX_TEXT_MGA_STEP16	3	/* MGA Millenium I: text, attr, 14 reserved bytes */
 #define FB_AUX_TEXT_MGA_STEP8	4	/* other MGAs:      text, attr,  6 reserved bytes */
+
+#define FB_AUX_VGA_PLANES_VGA4		0	/* 16 color planes (EGA/VGA) */
+#define FB_AUX_VGA_PLANES_CFB4		1	/* CFB4 in planes (VGA) */
+#define FB_AUX_VGA_PLANES_CFB8		2	/* CFB8 in planes (VGA) */
 
 #define FB_VISUAL_MONO01		0	/* Monochr. 1=Black 0=White */
 #define FB_VISUAL_MONO10		1	/* Monochr. 1=White 0=Black */
@@ -69,13 +79,24 @@
 #define FB_ACCEL_MATROX_MGAG100	20	/* Matrox G100 (Productiva G100) */
 #define FB_ACCEL_MATROX_MGAG200	21	/* Matrox G200 (Myst, Mill, ...) */
 #define FB_ACCEL_SUN_CG14	22	/* Sun cgfourteen		 */
-#define FB_ACCEL_SUN_BWTWO	23	/* Sun bwtwo			 */
-#define FB_ACCEL_SUN_CGTHREE	24	/* Sun cgthree			 */
-#define FB_ACCEL_SUN_TCX	25	/* Sun tcx			 */
+#define FB_ACCEL_SUN_BWTWO	23	/* Sun bwtwo			*/
+#define FB_ACCEL_SUN_CGTHREE	24	/* Sun cgthree			*/
+#define FB_ACCEL_SUN_TCX	25	/* Sun tcx			*/
+#define FB_ACCEL_MATROX_MGAG400	26	/* Matrox G400			*/
+#define FB_ACCEL_NV3		27	/* nVidia RIVA 128              */
+#define FB_ACCEL_NV4		28	/* nVidia RIVA TNT		*/
+#define FB_ACCEL_NV5		29	/* nVidia RIVA TNT2		*/
+#define FB_ACCEL_CT_6555x	30	/* C&T 6555x			*/
+#define FB_ACCEL_3DFX_BANSHEE	31	/* 3Dfx Banshee			*/
+#define FB_ACCEL_ATI_RAGE128	32	/* ATI Rage128 family		*/
+#define FB_ACCEL_IGS_CYBER2000	33	/* CyberPro 2000		*/
+#define FB_ACCEL_IGS_CYBER2010	34	/* CyberPro 2010		*/
+#define FB_ACCEL_IGS_CYBER5000	35	/* CyberPro 5000		*/
+#define FB_ACCEL_SIS_GLAMOUR    36	/* SiS 300/630/540              */
 
 struct fb_fix_screeninfo {
 	char id[16];			/* identification string eg "TT Builtin" */
-	char *smem_start;		/* Start of frame buffer mem */
+	unsigned long smem_start;	/* Start of frame buffer mem */
 					/* (physical address) */
 	__u32 smem_len;			/* Length of frame buffer mem */
 	__u32 type;			/* see FB_TYPE_*		*/
@@ -85,7 +106,7 @@ struct fb_fix_screeninfo {
 	__u16 ypanstep;			/* zero if no hardware panning  */
 	__u16 ywrapstep;		/* zero if no hardware ywrap    */
 	__u32 line_length;		/* length of a line in bytes    */
-	char *mmio_start;		/* Start of Memory Mapped I/O   */
+	unsigned long mmio_start;	/* Start of Memory Mapped I/O   */
 					/* (physical address) */
 	__u32 mmio_len;			/* Length of Memory Mapped I/O  */
 	__u32 accel;			/* Type of acceleration available */
@@ -188,6 +209,12 @@ struct fb_con2fbmap {
 	__u32 framebuffer;
 };
 
+/* VESA Blanking Levels */
+#define VESA_NO_BLANKING        0
+#define VESA_VSYNC_SUSPEND      1
+#define VESA_HSYNC_SUSPEND      2
+#define VESA_POWERDOWN          3
+
 struct fb_monspecs {
 	__u32 hfmin;			/* hfreq lower limit (Hz) */
 	__u32 hfmax; 			/* hfreq upper limit (Hz) */
@@ -196,9 +223,35 @@ struct fb_monspecs {
 	unsigned dpms : 1;		/* supports DPMS */
 };
 
+#define FB_VBLANK_VBLANKING	0x001	/* currently in a vertical blank */
+#define FB_VBLANK_HBLANKING	0x002	/* currently in a horizontal blank */
+#define FB_VBLANK_HAVE_VBLANK	0x004	/* vertical blanks can be detected */
+#define FB_VBLANK_HAVE_HBLANK	0x008	/* horizontal blanks can be detected */
+#define FB_VBLANK_HAVE_COUNT	0x010	/* global retrace counter is available */
+#define FB_VBLANK_HAVE_VCOUNT	0x020	/* the vcount field is valid */
+#define FB_VBLANK_HAVE_HCOUNT	0x040	/* the hcount field is valid */
+#define FB_VBLANK_VSYNCING	0x080	/* currently in a vsync */
+#define FB_VBLANK_HAVE_VSYNC	0x100	/* verical syncs can be detected */
+
+struct fb_vblank {
+	__u32 flags;			/* FB_VBLANK flags */
+	__u32 count;			/* counter of retraces since boot */
+	__u32 vcount;			/* current scanline position */
+	__u32 hcount;			/* current scandot position */
+	__u32 reserved[4];		/* reserved for future compatibility */
+};
+
 #ifdef __KERNEL__
 
+#if 1 /* to go away in 2.5.0 */
+extern int GET_FB_IDX(kdev_t rdev);
+#else
+#define GET_FB_IDX(node)	(MINOR(node))
+#endif
+
 #include <linux/fs.h>
+#include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
 
 
 struct fb_info;
@@ -212,6 +265,7 @@ struct file;
 
 struct fb_ops {
     /* open/release and usage marking */
+    struct module *owner;
     int (*fb_open)(struct fb_info *info, int user);
     int (*fb_release)(struct fb_info *info, int user);
     /* get non settable parameters */
@@ -229,10 +283,10 @@ struct fb_ops {
     /* set colormap */
     int (*fb_set_cmap)(struct fb_cmap *cmap, int kspc, int con,
 		       struct fb_info *info);
-    /* pan display */
+    /* pan display (optional) */
     int (*fb_pan_display)(struct fb_var_screeninfo *var, int con,
 			  struct fb_info *info);
-    /* perform fb specific ioctl */
+    /* perform fb specific ioctl (optional) */
     int (*fb_ioctl)(struct inode *inode, struct file *file, unsigned int cmd,
 		    unsigned long arg, int con, struct fb_info *info);
     /* perform fb specific mmap */
@@ -241,71 +295,23 @@ struct fb_ops {
     int (*fb_rasterimg)(struct fb_info *info, int start);
 };
 
-
-   /*
-    *    This is the interface between the low-level console driver and the
-    *    low-level frame buffer device
-    */
-
-struct display {
-    /* Filled in by the frame buffer device */
-
-    struct fb_var_screeninfo var;   /* variable infos. yoffset and vmode */
-				    /* are updated by fbcon.c */
-    struct fb_cmap cmap;            /* colormap */
-    char *screen_base;              /* pointer to top of virtual screen */    
-				    /* (virtual address) */
-    int visual;
-    int type;                       /* see FB_TYPE_* */
-    int type_aux;                   /* Interleave for interleaved Planes */
-    u_short ypanstep;               /* zero if no hardware ypan */
-    u_short ywrapstep;              /* zero if no hardware ywrap */
-    u_long line_length;             /* length of a line in bytes */
-    u_short can_soft_blank;         /* zero if no hardware blanking */
-    u_short inverse;                /* != 0 text black on white as default */
-    struct display_switch *dispsw;  /* low level operations */
-    void *dispsw_data;		    /* optional dispsw helper data */
-
-#if 0
-    struct fb_fix_cursorinfo fcrsr;
-    struct fb_var_cursorinfo *vcrsr;
-    struct fb_cursorstate crsrstate;
-#endif
-
-    /* Filled in by the low-level console driver */
-
-    struct vc_data *conp;           /* pointer to console data */
-    struct fb_info *fb_info;        /* frame buffer for this console */
-    int vrows;                      /* number of virtual rows */
-    unsigned short cursor_x;	    /* current cursor position */
-    unsigned short cursor_y;
-    int fgcol;                      /* text colors */
-    int bgcol;
-    u_long next_line;               /* offset to one line below */
-    u_long next_plane;              /* offset to next plane */
-    u_char *fontdata;               /* Font associated to this display */
-    unsigned short _fontheightlog;
-    unsigned short _fontwidthlog;
-    unsigned short _fontheight;
-    unsigned short _fontwidth;
-    int userfont;                   /* != 0 if fontdata kmalloc()ed */
-    u_short scrollmode;             /* Scroll Method */
-    short yscroll;                  /* Hardware scrolling */
-    unsigned char fgshift, bgshift;
-    unsigned short charmask;	    /* 0xff or 0x1ff */
-};
-
-
 struct fb_info {
    char modename[40];			/* default video mode */
    kdev_t node;
    int flags;
+   int open;                            /* Has this been open already ? */
 #define FBINFO_FLAG_MODULE	1	/* Low-level driver is a module */
+   struct fb_var_screeninfo var;        /* Current var */
+   struct fb_fix_screeninfo fix;        /* Current fix */
+   struct fb_monspecs monspecs;         /* Current Monitor specs */
+   struct fb_cmap cmap;                 /* Current cmap */
    struct fb_ops *fbops;
-   struct fb_monspecs monspecs;
+   char *screen_base;                   /* Virtual address */
    struct display *disp;		/* initial display variable */
    struct vc_data *display_fg;		/* Console visible on this display */
    char fontname[40];			/* default font name */
+   devfs_handle_t devfs_handle;         /* Devfs handle for new name         */
+   devfs_handle_t devfs_lhandle;        /* Devfs handle for compat. symlink  */
    int (*changevar)(int);		/* tell console var has changed */
    int (*switch_con)(int, struct fb_info*);
 					/* tell fb to switch consoles */
@@ -314,8 +320,11 @@ struct fb_info {
    void (*blank)(int, struct fb_info*);	/* tell fb to (un)blank the screen */
 					/* arg = 0: unblank */
 					/* arg > 0: VESA level (arg-1) */
-
+   void *pseudo_palette;                /* Fake palette of 16 colors and 
+					   the cursor's color for non
+                                           palette mode */
    /* From here on everything is device dependent */
+   void *par;	
 };
 
 #ifdef MODULE
@@ -378,9 +387,6 @@ extern int fbgen_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info);
 extern int fbgen_pan_display(struct fb_var_screeninfo *var, int con,
 			     struct fb_info *info);
-extern int fbgen_ioctl(struct inode *inode, struct file *file,
-		       unsigned int cmd, unsigned long arg, int con,
-		       struct fb_info *info);
 
     /*
      *  Helper functions
@@ -395,26 +401,17 @@ extern int fbgen_switch(int con, struct fb_info *info);
 extern void fbgen_blank(int blank, struct fb_info *info);
 
 
-struct fb_videomode {
-    const char *name;
-    struct fb_var_screeninfo var;
-};
-
-
-/* drivers/char/fbmem.c */
+/* drivers/video/fbmem.c */
 extern int register_framebuffer(struct fb_info *fb_info);
-extern int unregister_framebuffer(const struct fb_info *fb_info);
-extern int fbmon_valid_timings(u_int pixclock, u_int htotal, u_int vtotal,
-			       const struct fb_info *fb_info);
-extern int fbmon_dpms(const struct fb_info *fb_info);
-
+extern int unregister_framebuffer(struct fb_info *fb_info);
 
 extern int num_registered_fb;
 extern struct fb_info *registered_fb[FB_MAX];
-extern char con2fb_map[MAX_NR_CONSOLES];
 
-/* drivers/video/fbcon.c */
-extern struct display fb_display[MAX_NR_CONSOLES];
+/* drivers/video/fbmon.c */
+extern int fbmon_valid_timings(u_int pixclock, u_int htotal, u_int vtotal,
+			       const struct fb_info *fb_info);
+extern int fbmon_dpms(const struct fb_info *fb_info);
 
 /* drivers/video/fbcmap.c */
 extern int fb_alloc_cmap(struct fb_cmap *cmap, int len, int transp);
@@ -431,11 +428,57 @@ extern int fb_set_cmap(struct fb_cmap *cmap, int kspc,
 extern struct fb_cmap *fb_default_cmap(int len);
 extern void fb_invert_cmaps(void);
 
-/* VESA Blanking Levels */
-#define VESA_NO_BLANKING	0
-#define VESA_VSYNC_SUSPEND	1
-#define VESA_HSYNC_SUSPEND	2
-#define VESA_POWERDOWN		3
+struct fb_videomode {
+    const char *name;	/* optional */
+    u32 refresh;	/* optional */
+    u32 xres;
+    u32 yres;
+    u32 pixclock;
+    u32 left_margin;
+    u32 right_margin;
+    u32 upper_margin;
+    u32 lower_margin;
+    u32 hsync_len;
+    u32 vsync_len;
+    u32 sync;
+    u32 vmode;
+};
+
+#ifdef MODULE
+static inline int fb_find_mode(struct fb_var_screeninfo *var,
+			       struct fb_info *info, const char *mode_option,
+			       const struct fb_videomode *db,
+			       unsigned int dbsize,
+			       const struct fb_videomode *default_mode,
+			       unsigned int default_bpp)
+{
+    extern int __fb_try_mode(struct fb_var_screeninfo *var,
+	    		     struct fb_info *info,
+			     const struct fb_videomode *mode,
+			     unsigned int bpp);
+    /*
+     *  FIXME: How to make the compiler optimize vga640x400 away if
+     *         default_mode is non-NULL?
+     */
+    static const struct fb_videomode vga640x400 = {
+	/* 640x400 @ 70 Hz, 31.5 kHz hsync */
+	NULL, 70, 640, 400, 39721, 40, 24, 39, 9, 96, 2,
+	0, FB_VMODE_NONINTERLACED
+    };
+    if (!default_mode)
+	default_mode = &vga640x400;
+    if (!default_bpp)
+	default_bpp = 8;
+    return __fb_try_mode(var, info, default_mode, default_bpp);
+}
+#else
+extern int __init fb_find_mode(struct fb_var_screeninfo *var,
+			       struct fb_info *info, const char *mode_option,
+			       const struct fb_videomode *db,
+			       unsigned int dbsize,
+			       const struct fb_videomode *default_mode,
+			       unsigned int default_bpp);
+#endif
 
 #endif /* __KERNEL__ */
 

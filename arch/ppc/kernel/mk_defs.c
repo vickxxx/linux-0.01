@@ -9,6 +9,7 @@
  */
 
 #include <stddef.h>
+#include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -35,19 +36,25 @@ main(void)
 	DEFINE(COUNTER, offsetof(struct task_struct, counter));
 	DEFINE(PROCESSOR, offsetof(struct task_struct, processor));
 	DEFINE(SIGPENDING, offsetof(struct task_struct, sigpending));
-	DEFINE(TSS, offsetof(struct task_struct, tss));
+	DEFINE(THREAD, offsetof(struct task_struct, thread));
 	DEFINE(MM, offsetof(struct task_struct, mm));
+	DEFINE(ACTIVE_MM, offsetof(struct task_struct, active_mm));
 	DEFINE(TASK_STRUCT_SIZE, sizeof(struct task_struct));
 	DEFINE(KSP, offsetof(struct thread_struct, ksp));
-	DEFINE(PG_TABLES, offsetof(struct thread_struct, pg_tables));
-	DEFINE(PGD, offsetof(struct mm_struct, pgd));
+	DEFINE(PGDIR, offsetof(struct thread_struct, pgdir));
 	DEFINE(LAST_SYSCALL, offsetof(struct thread_struct, last_syscall));
 	DEFINE(PT_REGS, offsetof(struct thread_struct, regs));
-	DEFINE(PF_TRACESYS, PF_TRACESYS);
+	DEFINE(PT_TRACESYS, PT_TRACESYS);
 	DEFINE(TASK_FLAGS, offsetof(struct task_struct, flags));
+	DEFINE(TASK_PTRACE, offsetof(struct task_struct, ptrace));
 	DEFINE(NEED_RESCHED, offsetof(struct task_struct, need_resched));
-	DEFINE(TSS_FPR0, offsetof(struct thread_struct, fpr[0]));
-	DEFINE(TSS_FPSCR, offsetof(struct thread_struct, fpscr));
+	DEFINE(THREAD_FPR0, offsetof(struct thread_struct, fpr[0]));
+	DEFINE(THREAD_FPSCR, offsetof(struct thread_struct, fpscr));
+#ifdef CONFIG_ALTIVEC
+	DEFINE(THREAD_VR0, offsetof(struct thread_struct, vr[0]));
+	DEFINE(THREAD_VRSAVE, offsetof(struct thread_struct, vrsave));
+	DEFINE(THREAD_VSCR, offsetof(struct thread_struct, vscr));
+#endif /* CONFIG_ALTIVEC */
 	/* Interrupt register frame */
 	DEFINE(TASK_UNION_SIZE, sizeof(union task_union));
 	DEFINE(STACK_FRAME_OVERHEAD, STACK_FRAME_OVERHEAD);
@@ -85,15 +92,24 @@ main(void)
 	DEFINE(GPR29, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, gpr[29]));
 	DEFINE(GPR30, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, gpr[30]));
 	DEFINE(GPR31, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, gpr[31]));
-	/* Note: these symbols include _ because they overlap with special register names */
+	/* Note: these symbols include _ because they overlap with special
+	 * register names
+	 */
 	DEFINE(_NIP, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, nip));
 	DEFINE(_MSR, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, msr));
 	DEFINE(_CTR, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, ctr));
 	DEFINE(_LINK, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, link));
 	DEFINE(_CCR, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, ccr));
+	DEFINE(_MQ, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, mq));
 	DEFINE(_XER, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, xer));
 	DEFINE(_DAR, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, dar));
 	DEFINE(_DSISR, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, dsisr));
+	/* The PowerPC 400-class processors have neither the DAR nor the DSISR
+	 * SPRs. Hence, we overload them to hold the similar DEAR and ESR SPRs
+	 * for such processors.
+	 */
+	DEFINE(_DEAR, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, dar));
+	DEFINE(_ESR, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, dsisr));
 	DEFINE(ORIG_GPR3, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, orig_gpr3));
 	DEFINE(RESULT, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, result));
 	DEFINE(TRAP, STACK_FRAME_OVERHEAD+offsetof(struct pt_regs, trap));

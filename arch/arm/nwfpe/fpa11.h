@@ -1,8 +1,8 @@
 /*
     NetWinder Floating Point Emulator
-    (c) Corel Computer Corporation, 1998
+    (c) Rebel.com, 1998-1999
     
-    Direct questions, comments to Scott Bambrough <scottb@corelcomputer.com>
+    Direct questions, comments to Scott Bambrough <scottb@netwinder.org>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -31,25 +31,25 @@
 #define		typeDouble		0x02
 #define		typeExtended		0x03
 
-typedef struct tagFPREG {
-   unsigned int fType;
-   union {
-      float32  fSingle;
-      float64  fDouble;
-      floatx80 fExtended;
-   } fValue;
+typedef union tagFPREG {
+   float32  fSingle;
+   float64  fDouble;
+   floatx80 fExtended;
 } FPREG;
 
 /* FPA11 device model */
 typedef struct tagFPA11 {
+  FPREG fpreg[8];		/* 8 floating point registers */
+  FPSR fpsr;			/* floating point status register */
+  FPCR fpcr;			/* floating point control register */
+  unsigned char fType[8];	/* type of floating point value held in
+				   floating point registers.  One of none
+				   single, double or extended. */
   int initflag;			/* this is special.  The kernel guarantees
 				   to set it to 0 when a thread is launched,
 				   so we can use it to detect whether this
 				   instance of the emulator needs to be
 				   initialised. */
-  FPREG fpreg[8];		/* 8 floating point registers */
-  FPSR fpsr;			/* floating point status register */
-  FPCR fpcr;			/* floating point control register */
 } FPA11;
 
 extern void resetFPA11(void);

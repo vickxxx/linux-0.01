@@ -6,8 +6,10 @@
 #ifndef _SPARC64_SMP_H
 #define _SPARC64_SMP_H
 
-#include <linux/tasks.h>
+#include <linux/config.h>
+#include <linux/threads.h>
 #include <asm/asi.h>
+#include <asm/starfire.h>
 
 #ifndef __ASSEMBLY__
 /* PROM provided per-processor information we need
@@ -24,7 +26,7 @@ extern struct prom_cpuinfo linux_cpus[64];
 
 #endif /* !(__ASSEMBLY__) */
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 
 #ifndef __ASSEMBLY__
 
@@ -33,19 +35,18 @@ extern struct prom_cpuinfo linux_cpus[64];
 /* Keep this a multiple of 64-bytes for cache reasons. */
 struct cpuinfo_sparc {
 	/* Dcache line 1 */
-	unsigned long	irq_count;
-	unsigned long	bh_count;
+	unsigned int	__pad0;		/* bh_count moved to irq_stat for consistency. KAO */
 	unsigned int	multiplier;
 	unsigned int	counter;
+	unsigned int	idle_volume;
+	unsigned int	__pad[2];
 	unsigned long	udelay_val;
 
 	/* Dcache line 2 */
 	unsigned int	pgcache_size;
 	unsigned int	pgdcache_size;
-	unsigned long	*pte_cache;
+	unsigned long	*pte_cache[2];
 	unsigned long	*pgd_cache;
-	unsigned int	idle_volume;
-	unsigned int	__pad;
 
 	/* Dcache lines 3 and 4 */
 	unsigned int	irq_worklists[16];
@@ -68,21 +69,21 @@ extern void smp_callin(void);
 extern void smp_boot_cpus(void);
 extern void smp_store_cpu_info(int id);
 
-extern __volatile__ int cpu_number_map[NR_CPUS];
+extern __volatile__ int __cpu_number_map[NR_CPUS];
 extern __volatile__ int __cpu_logical_map[NR_CPUS];
 
 extern __inline__ int cpu_logical_map(int cpu)
 {
 	return __cpu_logical_map[cpu];
 }
+extern __inline__ int cpu_number_map(int cpu)
+{
+	return __cpu_number_map[cpu];
+}
 
 extern __inline__ int hard_smp_processor_id(void)
 {
-	extern int this_is_starfire;
-
 	if(this_is_starfire != 0) {
-		extern int starfire_hard_smp_processor_id(void);
-
 		return starfire_hard_smp_processor_id();
 	} else {
 		unsigned long upaconfig;
@@ -119,7 +120,7 @@ extern __inline__ void smp_send_stop(void) { }
 
 #define PROC_CHANGE_PENALTY	20
 
-#endif /* !(__SMP__) */
+#endif /* !(CONFIG_SMP) */
 
 #define NO_PROC_ID		0xFF
 

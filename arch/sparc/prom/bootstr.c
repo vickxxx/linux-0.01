@@ -1,10 +1,9 @@
-/* $Id: bootstr.c,v 1.17 1998/02/09 13:26:21 jj Exp $
+/* $Id: bootstr.c,v 1.20 2000/02/08 20:24:23 davem Exp $
  * bootstr.c:  Boot string/argument acquisition from the PROM.
  *
  * Copyright(C) 1995 David S. Miller (davem@caip.rutgers.edu)
  */
 
-#include <linux/config.h>
 #include <linux/string.h>
 #include <asm/oplib.h>
 #include <asm/sun4prom.h>
@@ -16,8 +15,8 @@ static char fetched __initdata = 0;
 
 extern linux_sun4_romvec *sun4_romvec;
 
-__initfunc(char *
-prom_getbootargs(void))
+char * __init
+prom_getbootargs(void)
 {
 	int iter;
 	char *cp, *arg;
@@ -55,11 +54,6 @@ prom_getbootargs(void))
 		 */
 		strncpy(barg_buf, *romvec->pv_v2bootargs.bootargs, BARG_LEN-1);
 		break;
-        case PROM_AP1000:
-#if CONFIG_AP1000
-                ap_getbootargs(barg_buf, BARG_LEN);
-                break;
-#endif
 	default:
 		break;
 	}

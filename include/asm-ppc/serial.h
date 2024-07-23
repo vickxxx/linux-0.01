@@ -2,10 +2,11 @@
  * include/asm-ppc/serial.h
  */
 
+#ifdef __KERNEL__
 #include <linux/config.h>
 
-#ifdef CONFIG_APUS
-#include <asm-m68k/serial.h>
+#ifdef CONFIG_GEMINI
+#include <asm/gemini_serial.h>
 #else
 
 /*
@@ -16,6 +17,12 @@
  * megabits/second; but this requires the faster clock.
  */
 #define BASE_BAUD ( 1843200 / 16 )
+
+#ifdef CONFIG_SERIAL_MANY_PORTS
+#define RS_TABLE_SIZE  64
+#else
+#define RS_TABLE_SIZE  4
+#endif
 
 /* Standard COM flags (except for COM4, because of the 8514 problem) */
 #ifdef CONFIG_SERIAL_DETECT_IRQ
@@ -120,4 +127,5 @@
 	HUB6_SERIAL_PORT_DFNS		\
 	MCA_SERIAL_PORT_DFNS
 
-#endif /* CONFIG_APUS */
+#endif /* CONFIG_GEMINI */
+#endif /* __KERNEL__ */

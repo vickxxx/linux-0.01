@@ -43,64 +43,88 @@
 #include <linux/console.h>
 #include <linux/ide.h>
 #include <linux/pci.h>
+#include <linux/adb.h>
+#include <linux/cuda.h>
+#include <linux/pmu.h>
+
+#include <asm/init.h>
 #include <asm/prom.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/pci-bridge.h>
-#include <asm/adb.h>
-#include <asm/cuda.h>
-#include <asm/pmu.h>
 #include <asm/ohare.h>
 #include <asm/mediabay.h>
 #include <asm/feature.h>
-#include <asm/ide.h>
 #include <asm/machdep.h>
 #include <asm/keyboard.h>
+#include <asm/dma.h>
+#include <asm/bootx.h>
 
-#include "time.h"
+#include <asm/time.h>
 #include "local_irq.h"
 #include "pmac_pic.h"
 
 #undef SHOW_GATWICK_IRQS
 
-unsigned long pmac_get_rtc_time(void);
-int pmac_set_rtc_time(unsigned long nowtime);
-void pmac_read_rtc_time(void);
-void pmac_calibrate_decr(void);
-void pmac_setup_pci_ptrs(void);
+extern long pmac_time_init(void);
+extern unsigned long pmac_get_rtc_time(void);
+extern int pmac_set_rtc_time(unsigned long nowtime);
+extern void pmac_read_rtc_time(void);
+extern void pmac_calibrate_decr(void);
+extern void pmac_setup_pci_ptrs(void);
 
 extern int mackbd_setkeycode(unsigned int scancode, unsigned int keycode);
 extern int mackbd_getkeycode(unsigned int scancode);
-extern int mackbd_translate(unsigned char scancode, unsigned char *keycode,
-			   char raw_mode);
-extern char mackbd_unexpected_up(unsigned char keycode);
+extern int mackbd_translate(unsigned char keycode, unsigned char *keycodep,
+		     char raw_mode);
+extern int mackbd_unexpected_up(unsigned char keycode);
 extern void mackbd_leds(unsigned char leds);
-extern void mackbd_init_hw(void);
+extern void __init mackbd_init_hw(void);
+extern int mac_hid_kbd_translate(unsigned char scancode, unsigned char *keycode,
+				 char raw_mode);
+extern char mac_hid_kbd_unexpected_up(unsigned char keycode);
+extern void mac_hid_init_hw(void);
 #ifdef CONFIG_MAGIC_SYSRQ
-unsigned char mackbd_sysrq_xlate[128];
+extern unsigned char mac_hid_kbd_sysrq_xlate[128];
+extern unsigned char pckbd_sysrq_xlate[128];
+extern unsigned char mackbd_sysrq_xlate[128];
 #endif /* CONFIG_MAGIC_SYSRQ */
 extern int pckbd_setkeycode(unsigned int scancode, unsigned int keycode);
 extern int pckbd_getkeycode(unsigned int scancode);
 extern int pckbd_translate(unsigned char scancode, unsigned char *keycode,
 			   char raw_mode);
 extern char pckbd_unexpected_up(unsigned char keycode);
-extern void pckbd_leds(unsigned char leds);
-extern void pckbd_init_hw(void);
+extern int keyboard_sends_linux_keycodes;
+extern void pmac_nvram_update(void);
+
+extern void *pmac_pci_dev_io_base(unsigned char bus, unsigned char devfn, int physical);
+extern void *pmac_pci_dev_mem_base(unsigned char bus, unsigned char devfn);
+extern int pmac_pci_dev_root_bridge(unsigned char bus, unsigned char devfn);
 
 unsigned char drive_info;
 
 int ppc_override_l2cr = 0;
 int ppc_override_l2cr_value;
+int has_l2cache = 0;
+
+static int current_root_goodness = -1;
 
 extern char saved_command_line[];
+
+extern int pmac_newworld;
 
 #define DEFAULT_ROOT_DEVICE 0x0801	/* sda1 - slightly silly choice */
 
 extern void zs_kgdb_hook(int tty_num);
 static void ohare_init(void);
 static void init_p2pbridge(void);
+#ifdef CONFIG_BOOTX_TEXT
+void pmac_progress(char *s, unsigned short hex);
+#endif
+
+sys_ctrler_t sys_ctrler = SYS_CTRLER_UNKNOWN;
 
 __pmac
 int
@@ -144,6 +168,7 @@ pmac_get_cpuinfo(char *buffer)
 		unsigned int *dc = (unsigned int *)
 			get_property(np, "d-cache-size", NULL);
 		len += sprintf(buffer+len, "L2 cache\t:");
+		has_l2cache = 1;
 		if (get_property(np, "cache-unified", NULL) != 0 && dc) {
 			len += sprintf(buffer+len, " %dK unified", *dc / 1024);
 		} else {
@@ -163,16 +188,24 @@ pmac_get_cpuinfo(char *buffer)
 	/* find ram info */
 	np = find_devices("memory");
 	if (np != 0) {
+		int n;
 		struct reg_property *reg = (struct reg_property *)
-			get_property(np, "reg", NULL);
+			get_property(np, "reg", &n);
+		
 		if (reg != 0) {
-			len += sprintf(buffer+len, "memory\t\t: %dMB\n",
-				       reg->size >> 20);
+			unsigned long total = 0;
+
+			for (n /= sizeof(struct reg_property); n > 0; --n)
+				total += (reg++)->size;
+			len += sprintf(buffer+len, "memory\t\t: %luMB\n",
+				       total >> 20);
 		}
 	}
 
 	/* Checks "l2cr-value" property in the registry */
 	np = find_devices("cpus");		
+	if (np == 0)
+		np = find_type_devices("cpu");		
 	if (np != 0) {
 		unsigned int *l2cr = (unsigned int *)
 			get_property(np, "l2cr-value", NULL);
@@ -181,36 +214,22 @@ pmac_get_cpuinfo(char *buffer)
 		}
 	}
 	
+	/* Indicate newworld/oldworld */
+	len += sprintf(buffer+len, "pmac-generation\t: %s\n",
+		pmac_newworld ? "NewWorld" : "OldWorld");		
+	
+
 	return len;
 }
 
 #ifdef CONFIG_SCSI
 /* Find the device number for the disk (if any) at target tgt
-   on host adaptor host.
-   XXX this really really should be in drivers/scsi/sd.c. */
+   on host adaptor host.  We just need to get the prototype from
+   sd.h */
 #include <linux/blkdev.h>
 #include "../../../drivers/scsi/scsi.h"
 #include "../../../drivers/scsi/sd.h"
-#include "../../../drivers/scsi/hosts.h"
 
-#define SD_MAJOR(i)		(!(i) ? SCSI_DISK0_MAJOR : SCSI_DISK1_MAJOR-1+(i))
-#define SD_MAJOR_NUMBER(i)	SD_MAJOR((i) >> 8)
-#define SD_MINOR_NUMBER(i)	((i) & 255)
-#define MKDEV_SD_PARTITION(i)	MKDEV(SD_MAJOR_NUMBER(i), SD_MINOR_NUMBER(i))
-#define MKDEV_SD(index)		MKDEV_SD_PARTITION((index) << 4)
-
-__init
-kdev_t sd_find_target(void *host, int tgt)
-{
-    Scsi_Disk *dp;
-    int i;
-
-    for (dp = rscsi_disks, i = 0; i < sd_template.dev_max; ++i, ++dp)
-        if (dp->device != NULL && dp->device->host == host
-            && dp->device->id == tgt)
-            return MKDEV_SD(i);
-    return 0;
-}
 #endif
 
 /*
@@ -225,8 +244,8 @@ pmac_mksound(unsigned int hz, unsigned int ticks)
 
 static volatile u32 *sysctrl_regs;
 
-__initfunc(void
-pmac_setup_arch(unsigned long *memory_start_p, unsigned long *memory_end_p))
+void __init
+pmac_setup_arch(void)
 {
 	struct device_node *cpu;
 	int *fp;
@@ -239,8 +258,10 @@ pmac_setup_arch(unsigned long *memory_start_p, unsigned long *memory_end_p))
 		if (fp != 0) {
 			switch (_get_PVR() >> 16) {
 			case 4:		/* 604 */
+			case 8:		/* G3 */
 			case 9:		/* 604e */
 			case 10:	/* mach V (604ev5) */
+			case 12:	/* G4 */
 			case 20:	/* 620 */
 				loops_per_sec = *fp;
 				break;
@@ -257,12 +278,14 @@ pmac_setup_arch(unsigned long *memory_start_p, unsigned long *memory_end_p))
 	__ioremap(0xffc00000, 0x400000, pgprot_val(PAGE_READONLY));
 	ohare_init();
 
-	*memory_start_p = pmac_find_bridges(*memory_start_p, *memory_end_p);
+	pmac_find_bridges();
 	init_p2pbridge();
-
+	
 	/* Checks "l2cr-value" property in the registry */
-	if ( (_get_PVR() >> 16) == 8) {
+	if ( (_get_PVR() >> 16) == 8 || (_get_PVR() >> 16) == 12 ) {
 		struct device_node *np = find_devices("cpus");		
+		if (np == 0)
+			np = find_type_devices("cpu");		
 		if (np != 0) {
 			unsigned int *l2cr = (unsigned int *)
 				get_property(np, "l2cr-value", NULL);
@@ -280,15 +303,19 @@ pmac_setup_arch(unsigned long *memory_start_p, unsigned long *memory_end_p))
 			ppc_override_l2cr_value, (ppc_override_l2cr_value & 0x80000000)
 				? "enabled" : "disabled");
 
-	feature_init();
-
 #ifdef CONFIG_KGDB
 	zs_kgdb_hook(0);
 #endif
 
+#ifdef CONFIG_ADB_CUDA
 	find_via_cuda();
+#endif	
+#ifdef CONFIG_ADB_PMU
 	find_via_pmu();
-
+#endif	
+#ifdef CONFIG_NVRAM
+	pmac_nvram_init();
+#endif
 #ifdef CONFIG_DUMMY_CONSOLE
 	conswitchp = &dummy_con;
 #endif
@@ -306,7 +333,7 @@ pmac_setup_arch(unsigned long *memory_start_p, unsigned long *memory_end_p))
 /*
  * Tweak the PCI-PCI bridge chip on the blue & white G3s.
  */
-__initfunc(static void init_p2pbridge(void))
+static void __init init_p2pbridge(void)
 {
 	struct device_node *p2pbridge;
 	unsigned char bus, devfn;
@@ -318,17 +345,18 @@ __initfunc(static void init_p2pbridge(void))
 	    || p2pbridge->parent == NULL
 	    || strcmp(p2pbridge->parent->name, "pci") != 0)
 		return;
-
 	if (pci_device_loc(p2pbridge, &bus, &devfn) < 0)
 		return;
-
-	pcibios_read_config_word(bus, devfn, PCI_BRIDGE_CONTROL, &val);
+	if (ppc_md.pcibios_read_config_word(bus, devfn, PCI_BRIDGE_CONTROL, &val) < 0) {
+		printk(KERN_ERR "init_p2pbridge: couldn't read bridge control\n");
+		return;
+	}
 	val &= ~PCI_BRIDGE_CTL_MASTER_ABORT;
-	pcibios_write_config_word(bus, devfn, PCI_BRIDGE_CONTROL, val);
-	pcibios_read_config_word(bus, devfn, PCI_BRIDGE_CONTROL, &val);
+	ppc_md.pcibios_write_config_word(bus, devfn, PCI_BRIDGE_CONTROL, val);
+	ppc_md.pcibios_read_config_word(bus, devfn, PCI_BRIDGE_CONTROL, &val);
 }
 
-__initfunc(static void ohare_init(void))
+static void __init ohare_init(void)
 {
 	/*
 	 * Turn on the L2 cache.
@@ -341,7 +369,8 @@ __initfunc(static void ohare_init(void))
 				sysctrl_regs[4] |= 0x04000020;
 			else
 				sysctrl_regs[4] |= 0x04000000;
-			printk(KERN_INFO "Level 2 cache enabled\n");
+			if(has_l2cache)
+				printk(KERN_INFO "Level 2 cache enabled\n");
 		}
 	}
 }
@@ -353,17 +382,23 @@ int boot_target;
 int boot_part;
 kdev_t boot_dev;
 
-__initfunc(void
-pmac_init2(void))
+void __init
+pmac_init2(void)
 {
-	adb_init();
-	pmac_nvram_init();
+#ifdef CONFIG_ADB_PMU
+	via_pmu_start();
+#endif
+#ifdef CONFIG_ADB_CUDA
+	via_cuda_start();
+#endif
+#ifdef CONFIG_PMAC_PBOOK
 	media_bay_init();
+#endif	
 }
 
 #ifdef CONFIG_SCSI
-__initfunc(void
-note_scsi_host(struct device_node *node, void *host))
+void __init
+note_scsi_host(struct device_node *node, void *host)
 {
 	int l;
 	char *p;
@@ -392,15 +427,13 @@ note_scsi_host(struct device_node *node, void *host))
 }
 #endif
 
-#ifdef CONFIG_BLK_DEV_IDE_PMAC
-extern int pmac_ide_count;
-extern struct device_node *pmac_ide_node[];
-static int ide_majors[] = { 3, 22, 33, 34, 56, 57, 88, 89 };
+#if defined(CONFIG_BLK_DEV_IDE) && defined(CONFIG_BLK_DEV_IDE_PMAC)
 
-__initfunc(kdev_t find_ide_boot(void))
+kdev_t __init find_ide_boot(void)
 {
 	char *p;
-	int i, n;
+	int n;
+	kdev_t __init pmac_find_ide_boot(char *bootdevice, int n);
 
 	if (bootdevice == NULL)
 		return 0;
@@ -409,22 +442,11 @@ __initfunc(kdev_t find_ide_boot(void))
 		return 0;
 	n = p - bootdevice;
 
-	/*
-	 * Look through the list of IDE interfaces for this one.
-	 */
-	for (i = 0; i < pmac_ide_count; ++i) {
-		char *name = pmac_ide_node[i]->full_name;
-		if (memcmp(name, bootdevice, n) == 0 && name[n] == 0) {
-			/* XXX should cope with the 2nd drive as well... */
-			return MKDEV(ide_majors[i], 0);
-		}
-	}
-
-	return 0;
+	return pmac_find_ide_boot(bootdevice, n);
 }
-#endif /* CONFIG_BLK_DEV_IDE_PMAC */
+#endif /* CONFIG_BLK_DEV_IDE && CONFIG_BLK_DEV_IDE_PMAC */
 
-__initfunc(void find_boot_device(void))
+void __init find_boot_device(void)
 {
 #ifdef CONFIG_SCSI
 	if (boot_host != NULL) {
@@ -433,20 +455,21 @@ __initfunc(void find_boot_device(void))
 			return;
 	}
 #endif
-#ifdef CONFIG_BLK_DEV_IDE_PMAC
+#if defined(CONFIG_BLK_DEV_IDE) && defined(CONFIG_BLK_DEV_IDE_PMAC)
 	boot_dev = find_ide_boot();
 #endif
 }
 
-/* can't be initfunc - can be called whenever a disk is first accessed */
+/* can't be __init - can be called whenever a disk is first accessed */
 __pmac
-void note_bootable_part(kdev_t dev, int part)
+void note_bootable_part(kdev_t dev, int part, int goodness)
 {
 	static int found_boot = 0;
 	char *p;
 
 	/* Do nothing if the root has been set already. */
-	if (ROOT_DEV != to_kdev_t(DEFAULT_ROOT_DEVICE))
+	if ((goodness < current_root_goodness) &&
+		(ROOT_DEV != to_kdev_t(DEFAULT_ROOT_DEVICE)))
 		return;
 	p = strstr(saved_command_line, "root=");
 	if (p != NULL && (p == saved_command_line || p[-1] == ' '))
@@ -456,29 +479,36 @@ void note_bootable_part(kdev_t dev, int part)
 		find_boot_device();
 		found_boot = 1;
 	}
-	if (dev == boot_dev) {
+	if (boot_dev == 0 || dev == boot_dev) {
 		ROOT_DEV = MKDEV(MAJOR(dev), MINOR(dev) + part);
 		boot_dev = NODEV;
-		printk(" (root)");
+		current_root_goodness = goodness;
 	}
 }
 
 void
 pmac_restart(char *cmd)
 {
+#ifdef CONFIG_ADB_CUDA
 	struct adb_request req;
+#endif /* CONFIG_ADB_CUDA */
 
-	switch (adb_hardware) {
-	case ADB_VIACUDA:
+	pmac_nvram_update();
+	
+	switch (sys_ctrler) {
+#ifdef CONFIG_ADB_CUDA
+	case SYS_CTRLER_CUDA:
 		cuda_request(&req, NULL, 2, CUDA_PACKET,
 			     CUDA_RESET_SYSTEM);
 		for (;;)
 			cuda_poll();
 		break;
-
-	case ADB_VIAPMU:
+#endif /* CONFIG_ADB_CUDA */
+#ifdef CONFIG_ADB_PMU		
+	case SYS_CTRLER_PMU:
 		pmu_restart();
 		break;
+#endif /* CONFIG_ADB_PMU */		
 	default:
 	}
 }
@@ -486,19 +516,26 @@ pmac_restart(char *cmd)
 void
 pmac_power_off(void)
 {
+#ifdef CONFIG_ADB_CUDA
 	struct adb_request req;
+#endif /* CONFIG_ADB_CUDA */
 
-	switch (adb_hardware) {
-	case ADB_VIACUDA:
+	pmac_nvram_update();
+	
+	switch (sys_ctrler) {
+#ifdef CONFIG_ADB_CUDA
+	case SYS_CTRLER_CUDA:
 		cuda_request(&req, NULL, 2, CUDA_PACKET,
 			     CUDA_POWERDOWN);
 		for (;;)
 			cuda_poll();
 		break;
-
-	case ADB_VIAPMU:
+#endif /* CONFIG_ADB_CUDA */
+#ifdef CONFIG_ADB_PMU
+	case SYS_CTRLER_PMU:
 		pmu_shutdown();
 		break;
+#endif /* CONFIG_ADB_PMU */
 	default:
 	}
 }
@@ -517,13 +554,13 @@ pmac_halt(void)
 void
 pmac_ide_insw(ide_ioreg_t port, void *buf, int ns)
 {
-	_insw_ns(port+_IO_BASE, buf, ns);
+	_insw_ns((unsigned short *)(port+_IO_BASE), buf, ns);
 }
 
 void
 pmac_ide_outsw(ide_ioreg_t port, void *buf, int ns)
 {
-	_outsw_ns(port+_IO_BASE, buf, ns);
+	_outsw_ns((unsigned short *)(port+_IO_BASE), buf, ns);
 }
 
 int
@@ -532,11 +569,15 @@ pmac_ide_default_irq(ide_ioreg_t base)
         return 0;
 }
 
+#if defined(CONFIG_BLK_DEV_IDE) && defined(CONFIG_BLK_DEV_IDE_PMAC)
+extern ide_ioreg_t pmac_ide_get_base(int index);
+#endif
+
 ide_ioreg_t
 pmac_ide_default_io_base(int index)
 {
-#if defined(CONFIG_BLK_DEV_IDE_PMAC)
-        return pmac_ide_regbase[index];
+#if defined(CONFIG_BLK_DEV_IDE) && defined(CONFIG_BLK_DEV_IDE_PMAC)
+        return pmac_ide_get_base(index);
 #else
 	return 0;
 #endif
@@ -573,7 +614,7 @@ pmac_ide_fix_driveid(struct hd_driveid *id)
         ppc_generic_ide_fix_driveid(id);
 }
 
-#if defined(CONFIG_BLK_DEV_IDE_PMAC)
+#if defined(CONFIG_BLK_DEV_IDE) && defined(CONFIG_BLK_DEV_IDE_PMAC)
 /* This is declared in drivers/block/ide-pmac.c */
 void pmac_ide_init_hwif_ports (hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl_port, int *irq);
 #else
@@ -587,9 +628,9 @@ void pmac_ide_init_hwif_ports(hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t 
 #endif
 #endif
 
-__initfunc(void
+void __init
 pmac_init(unsigned long r3, unsigned long r4, unsigned long r5,
-	  unsigned long r6, unsigned long r7))
+	  unsigned long r6, unsigned long r7)
 {
 	pmac_setup_pci_ptrs();
 
@@ -605,19 +646,42 @@ pmac_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.get_cpuinfo    = pmac_get_cpuinfo;
 	ppc_md.irq_cannonicalize = NULL;
 	ppc_md.init_IRQ       = pmac_pic_init;
-	ppc_md.do_IRQ         = pmac_do_IRQ;
+	ppc_md.get_irq        = pmac_get_irq;
 	ppc_md.init           = pmac_init2;
 
 	ppc_md.restart        = pmac_restart;
 	ppc_md.power_off      = pmac_power_off;
 	ppc_md.halt           = pmac_halt;
 
-	ppc_md.time_init      = NULL;
+	ppc_md.time_init      = pmac_time_init;
 	ppc_md.set_rtc_time   = pmac_set_rtc_time;
 	ppc_md.get_rtc_time   = pmac_get_rtc_time;
 	ppc_md.calibrate_decr = pmac_calibrate_decr;
 
-#if defined(CONFIG_VT) && defined(CONFIG_MAC_KEYBOARD)
+	ppc_md.pci_dev_io_base          = pmac_pci_dev_io_base;
+	ppc_md.pci_dev_mem_base         = pmac_pci_dev_mem_base;
+	ppc_md.pci_dev_root_bridge      = pmac_pci_dev_root_bridge;
+
+#ifdef CONFIG_VT
+#ifdef CONFIG_INPUT_ADBHID
+	ppc_md.kbd_init_hw       = mac_hid_init_hw;
+	ppc_md.kbd_translate     = mac_hid_kbd_translate;
+	ppc_md.kbd_unexpected_up = mac_hid_kbd_unexpected_up;
+	ppc_md.kbd_setkeycode    = 0;
+	ppc_md.kbd_getkeycode    = 0;
+#ifdef CONFIG_MAGIC_SYSRQ
+#ifdef CONFIG_MAC_ADBKEYCODES
+	if (!keyboard_sends_linux_keycodes) {
+		ppc_md.ppc_kbd_sysrq_xlate = mac_hid_kbd_sysrq_xlate;
+		SYSRQ_KEY = 0x69;
+	} else
+#endif /* CONFIG_MAC_ADBKEYCODES */
+	{
+		ppc_md.ppc_kbd_sysrq_xlate = pckbd_sysrq_xlate;
+		SYSRQ_KEY = 0x54;
+	}
+#endif /* CONFIG_MAGIC_SYSRQ */
+#elif defined(CONFIG_ADB_KEYBOARD)
 	ppc_md.kbd_setkeycode    = mackbd_setkeycode;
 	ppc_md.kbd_getkeycode    = mackbd_getkeycode;
 	ppc_md.kbd_translate     = mackbd_translate;
@@ -625,12 +689,13 @@ pmac_init(unsigned long r3, unsigned long r4, unsigned long r5,
 	ppc_md.kbd_leds          = mackbd_leds;
 	ppc_md.kbd_init_hw       = mackbd_init_hw;
 #ifdef CONFIG_MAGIC_SYSRQ
-	ppc_md.ppc_kbd_sysrq_xlate	 = mackbd_sysrq_xlate;
+	ppc_md.ppc_kbd_sysrq_xlate       = mackbd_sysrq_xlate;
 	SYSRQ_KEY = 0x69;
-#endif
-#endif
+#endif /* CONFIG_MAGIC_SYSRQ */
+#endif /* CONFIG_INPUT_ADBHID/CONFIG_ADB_KEYBOARD */
+#endif /* CONFIG_VT */
 
-#if defined(CONFIG_BLK_DEV_IDE_PMAC)
+#if defined(CONFIG_BLK_DEV_IDE) && defined(CONFIG_BLK_DEV_IDE_PMAC)
         ppc_ide_md.insw = pmac_ide_insw;
         ppc_ide_md.outsw = pmac_ide_outsw;
         ppc_ide_md.default_irq = pmac_ide_default_irq;
@@ -642,6 +707,25 @@ pmac_init(unsigned long r3, unsigned long r4, unsigned long r5,
         ppc_ide_md.ide_init_hwif = pmac_ide_init_hwif_ports;
 
         ppc_ide_md.io_base = _IO_BASE;	/* actually too early for this :-( */
-#endif		
+#endif
+#ifdef CONFIG_BOOTX_TEXT
+	ppc_md.progress = pmac_progress;
+#endif
+	if (ppc_md.progress) ppc_md.progress("pmac_init(): exit", 0);
+	
 }
+
+#ifdef CONFIG_BOOTX_TEXT
+extern void drawchar(char c);
+extern void drawstring(const char *c);
+extern boot_infos_t *disp_bi;
+void
+pmac_progress(char *s, unsigned short hex)
+{
+	if (disp_bi == 0)
+		return;
+	prom_drawstring(s);
+	prom_drawchar('\n');
+}
+#endif CONFIG_BOOTX_TEXT
 

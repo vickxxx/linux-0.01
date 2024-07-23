@@ -117,8 +117,6 @@ int t128_proc_info (char *buffer, char **start, off_t offset,
  * macros when this is being used solely for the host stub.
  */
 
-#if defined(HOSTS_C) || defined(MODULE)
-
 #define TRANTOR_T128 {					\
 	name:           "Trantor T128/T128F/T228",	\
 	detect:         t128_detect,			\
@@ -132,33 +130,31 @@ int t128_proc_info (char *buffer, char **start, off_t offset,
 	cmd_per_lun:    CMD_PER_LUN,			\
 	use_clustering: DISABLE_CLUSTERING}
 
-#endif
-
 #ifndef HOSTS_C
 
 #define NCR5380_implementation_fields \
-    volatile unsigned char *base
+    unsigned long base
 
 #define NCR5380_local_declare() \
-    volatile unsigned char *base
+    unsigned long base
 
 #define NCR5380_setup(instance) \
-    base = (volatile unsigned char *) (instance)->base
+    base = (instance)->base
 
 #define T128_address(reg) (base + T_5380_OFFSET + ((reg) * 0x20))
 
 #if !(TDEBUG & TDEBUG_TRANSFER) 
-#define NCR5380_read(reg) (*(T128_address(reg)))
-#define NCR5380_write(reg, value) (*(T128_address(reg)) = (value))
+#define NCR5380_read(reg) isa_readb(T128_address(reg))
+#define NCR5380_write(reg, value) isa_writeb((value),(T128_address(reg)))
 #else
 #define NCR5380_read(reg)						\
     (((unsigned char) printk("scsi%d : read register %d at address %08x\n"\
-    , instance->hostno, (reg), T128_address(reg))), *(T128_address(reg)))
+    , instance->hostno, (reg), T128_address(reg))), isa_readb(T128_address(reg)))
 
 #define NCR5380_write(reg, value) {					\
     printk("scsi%d : write %02x to register %d at address %08x\n", 	\
 	    instance->hostno, (value), (reg), T128_address(reg));	\
-    *(T128_address(reg)) = (value);					\
+    isa_writeb((value), (T128_address(reg)));				\
 }
 #endif
 

@@ -5,14 +5,14 @@
 
 int scsi_debug_detect(Scsi_Host_Template *);
 int scsi_debug_command(Scsi_Cmnd *);
-int scsi_debug_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
+int scsi_debug_queuecommand(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 int scsi_debug_abort(Scsi_Cmnd *);
 int scsi_debug_biosparam(Disk *, kdev_t, int[]);
 int scsi_debug_reset(Scsi_Cmnd *, unsigned int);
 int scsi_debug_proc_info(char *, char **, off_t, int, int, int);
- 
+
 #ifndef NULL
-	#define NULL 0
+#define NULL 0
 #endif
 
 
@@ -27,16 +27,15 @@ int scsi_debug_proc_info(char *, char **, off_t, int, int, int);
 #define SCSI_DEBUG {proc_info:         scsi_debug_proc_info,	\
 		    name:              "SCSI DEBUG",		\
 		    detect:            scsi_debug_detect,	\
-		    command:           scsi_debug_command,	\
 		    queuecommand:      scsi_debug_queuecommand, \
 		    abort:             scsi_debug_abort,	\
 		    reset:             scsi_debug_reset,	\
 		    bios_param:        scsi_debug_biosparam,	\
 		    can_queue:         SCSI_DEBUG_CANQUEUE,	\
 		    this_id:           7,			\
-		    sg_tablesize:      SG_ALL,			\
+		    sg_tablesize:      16,			\
 		    cmd_per_lun:       3,			\
-		    unchecked_isa_dma: 1,			\
+		    unchecked_isa_dma: 0,			\
 		    use_clustering:    ENABLE_CLUSTERING,	\
 		    use_new_eh_code:   1,			\
 }

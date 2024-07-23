@@ -32,16 +32,22 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
+#include <net/checksum.h>
 #include <net/ip.h>
-#if LINUX_VERSION_CODE >= 0x020100
 #include <asm/uaccess.h>
-#endif
 
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/xdr.h>
 #include <linux/sunrpc/svcsock.h>
 #include <linux/sunrpc/stats.h>
 
+/* SMP locking strategy:
+ *
+ * 	svc_sock->sk_lock and svc_serv->sv_lock protect their
+ *	respective structures.
+ *
+ *	Antideadlock ordering is sk_lock --> sv_lock.
+ */
 
 #define RPCDBG_FACILITY	RPCDBG_SVCSOCK
 
@@ -54,7 +60,7 @@ static int		svc_udp_sendto(struct svc_rqst *);
 
 
 /*
- * Queue up an idle server thread.
+ * Queue up an idle server thread.  Must have serv->sv_lock held.
  */
 static inline void
 svc_serv_enqueue(struct svc_serv *serv, struct svc_rqst *rqstp)
@@ -63,7 +69,7 @@ svc_serv_enqueue(struct svc_serv *serv, struct svc_rqst *rqstp)
 }
 
 /*
- * Dequeue an nfsd thread.
+ * Dequeue an nfsd thread.  Must have serv->sv_lock held.
  */
 static inline void
 svc_serv_dequeue(struct svc_serv *serv, struct svc_rqst *rqstp)
@@ -90,14 +96,17 @@ svc_release_skb(struct svc_rqst *rqstp)
 /*
  * Queue up a socket with data pending. If there are idle nfsd
  * processes, wake 'em up.
- * When calling this function, you should make sure it can't be interrupted
- * by the network bottom half.
+ *
+ * This must be called with svsk->sk_lock held.
  */
 static void
 svc_sock_enqueue(struct svc_sock *svsk)
 {
 	struct svc_serv	*serv = svsk->sk_server;
 	struct svc_rqst	*rqstp;
+
+	/* NOTE: Local BH is already disabled by our caller. */
+	spin_lock(&serv->sv_lock);
 
 	if (serv->sv_threads && serv->sv_sockets)
 		printk(KERN_ERR
@@ -106,7 +115,7 @@ svc_sock_enqueue(struct svc_sock *svsk)
 	if (svsk->sk_busy) {
 		/* Don't enqueue socket while daemon is receiving */
 		dprintk("svc: socket %p busy, not enqueued\n", svsk->sk_sk);
-		return;
+		goto out_unlock;
 	}
 
 	/* Mark socket as busy. It will remain in this state until the
@@ -131,20 +140,21 @@ svc_sock_enqueue(struct svc_sock *svsk)
 		rpc_append_list(&serv->sv_sockets, svsk);
 		svsk->sk_qued = 1;
 	}
+
+out_unlock:
+	spin_unlock(&serv->sv_lock);
 }
 
 /*
- * Dequeue the first socket.
+ * Dequeue the first socket.  Must be called with the serv->sv_lock held.
  */
 static inline struct svc_sock *
 svc_sock_dequeue(struct svc_serv *serv)
 {
 	struct svc_sock	*svsk;
 
-	start_bh_atomic();
 	if ((svsk = serv->sv_sockets) != NULL)
 		rpc_remove_list(&serv->sv_sockets, svsk);
-	end_bh_atomic();
 
 	if (svsk) {
 		dprintk("svc: socket %p dequeued, inuse=%d\n",
@@ -162,7 +172,7 @@ svc_sock_dequeue(struct svc_serv *serv)
 static inline void
 svc_sock_received(struct svc_sock *svsk, int count)
 {
-	start_bh_atomic();
+	spin_lock_bh(&svsk->sk_lock);
 	if ((svsk->sk_data -= count) < 0) {
 		printk(KERN_NOTICE "svc: sk_data negative!\n");
 		svsk->sk_data = 0;
@@ -174,7 +184,7 @@ svc_sock_received(struct svc_sock *svsk, int count)
 						svsk->sk_sk);
 		svc_sock_enqueue(svsk);
 	}
-	end_bh_atomic();
+	spin_unlock_bh(&svsk->sk_lock);
 }
 
 /*
@@ -183,7 +193,7 @@ svc_sock_received(struct svc_sock *svsk, int count)
 static inline void
 svc_sock_accepted(struct svc_sock *svsk)
 {
-	start_bh_atomic();
+	spin_lock_bh(&svsk->sk_lock);
         svsk->sk_busy = 0;
         svsk->sk_conn--;
         if (svsk->sk_conn || svsk->sk_data || svsk->sk_close) {
@@ -191,7 +201,7 @@ svc_sock_accepted(struct svc_sock *svsk)
 						svsk->sk_sk);
                 svc_sock_enqueue(svsk);
         }
-	end_bh_atomic();
+	spin_unlock_bh(&svsk->sk_lock);
 }
 
 /*
@@ -221,6 +231,7 @@ svc_wake_up(struct svc_serv *serv)
 {
 	struct svc_rqst	*rqstp;
 
+	spin_lock_bh(&serv->sv_lock);
 	if ((rqstp = serv->sv_threads) != NULL) {
 		dprintk("svc: daemon %p woken up.\n", rqstp);
 		/*
@@ -229,6 +240,7 @@ svc_wake_up(struct svc_serv *serv)
 		 */
 		wake_up(&rqstp->rq_wait);
 	}
+	spin_unlock_bh(&serv->sv_lock);
 }
 
 /*
@@ -238,7 +250,8 @@ static int
 svc_sendto(struct svc_rqst *rqstp, struct iovec *iov, int nr)
 {
 	mm_segment_t	oldfs;
-	struct socket	*sock = rqstp->rq_sock->sk_sock;
+	struct svc_sock	*svsk = rqstp->rq_sock;
+	struct socket	*sock = svsk->sk_sock;
 	struct msghdr	msg;
 	int		i, buflen, len;
 
@@ -252,24 +265,14 @@ svc_sendto(struct svc_rqst *rqstp, struct iovec *iov, int nr)
 	msg.msg_control = NULL;
 	msg.msg_controllen = 0;
 
-#if LINUX_VERSION_CODE >= 0x020100
 	msg.msg_flags	= MSG_DONTWAIT;
 
 	oldfs = get_fs(); set_fs(KERNEL_DS);
 	len = sock_sendmsg(sock, &msg, buflen);
 	set_fs(oldfs);
-#else
-	msg.msg_flags	= 0;
 
-	oldfs = get_fs(); set_fs(KERNEL_DS);
-	len = sock->ops->sendmsg(sock, &msg, buflen, 1, 0);
-	set_fs(oldfs);
-#endif
-
-	dprintk("svc: socket %p sendto([%p %d... ], %d, %d) = %d\n",
-			rqstp->rq_sock,
-			iov[0].iov_base, iov[0].iov_len, nr,
-			buflen, len);
+	dprintk("svc: socket %p sendto([%p %Zu... ], %d, %d) = %d\n",
+			rqstp->rq_sock, iov[0].iov_base, iov[0].iov_len, nr, buflen, len);
 
 	return len;
 }
@@ -300,7 +303,7 @@ svc_recvfrom(struct svc_rqst *rqstp, struct iovec *iov, int nr, int buflen)
 	mm_segment_t	oldfs;
 	struct msghdr	msg;
 	struct socket	*sock;
-	int		len;
+	int		len, alen;
 
 	rqstp->rq_addrlen = sizeof(rqstp->rq_addr);
 	sock = rqstp->rq_sock->sk_sock;
@@ -312,22 +315,21 @@ svc_recvfrom(struct svc_rqst *rqstp, struct iovec *iov, int nr, int buflen)
 	msg.msg_control = NULL;
 	msg.msg_controllen = 0;
 
-#if LINUX_VERSION_CODE >= 0x020100
 	msg.msg_flags	= MSG_DONTWAIT;
 
 	oldfs = get_fs(); set_fs(KERNEL_DS);
 	len = sock_recvmsg(sock, &msg, buflen, MSG_DONTWAIT);
 	set_fs(oldfs);
-#else
-	msg.msg_flags	= 0;
 
-	oldfs = get_fs(); set_fs(KERNEL_DS);
-	len = sock->ops->recvmsg(sock, &msg, buflen, 0, 1, &rqstp->rq_addrlen);
-	set_fs(oldfs);
-#endif
+	/* sock_recvmsg doesn't fill in the name/namelen, so we must..
+	 * possibly we should cache this in the svc_sock structure
+	 * at accept time. FIXME
+	 */
+	alen = sizeof(rqstp->rq_addr);
+	sock->ops->getname(sock, (struct sockaddr *)&rqstp->rq_addr, &alen, 1);
 
-	dprintk("svc: socket %p recvfrom(%p, %d) = %d\n", rqstp->rq_sock,
-				iov[0].iov_base, iov[0].iov_len, len);
+	dprintk("svc: socket %p recvfrom(%p, %Zu) = %d\n",
+		rqstp->rq_sock, iov[0].iov_base, iov[0].iov_len, len);
 
 	return len;
 }
@@ -341,11 +343,16 @@ svc_udp_data_ready(struct sock *sk, int count)
 	struct svc_sock	*svsk = (struct svc_sock *)(sk->user_data);
 
 	if (!svsk)
-		return;
+		goto out;
 	dprintk("svc: socket %p(inet %p), count=%d, busy=%d\n",
 		svsk, sk, count, svsk->sk_busy);
+	spin_lock_bh(&svsk->sk_lock);
 	svsk->sk_data = 1;
 	svc_sock_enqueue(svsk);
+	spin_unlock_bh(&svsk->sk_lock);
+ out:
+	if (sk->sleep && waitqueue_active(sk->sleep))
+		wake_up_interruptible(sk->sleep);
 }
 
 /*
@@ -369,6 +376,16 @@ svc_udp_recvfrom(struct svc_rqst *rqstp)
 		dprintk("svc: recvfrom returned error %d\n", -err);
 	}
 
+	if (skb->ip_summed != CHECKSUM_UNNECESSARY) {
+		unsigned int csum = skb->csum;
+		csum = csum_partial(skb->h.raw, skb->len, csum);
+		if ((unsigned short)csum_fold(csum)) {
+			skb_free_datagram(svsk->sk_sk, skb);
+			svc_sock_received(svsk, 0);
+			return 0;
+		}
+	}
+
 	/* There may be more data */
 	svsk->sk_data = 1;
 
@@ -385,11 +402,7 @@ svc_udp_recvfrom(struct svc_rqst *rqstp)
 	/* Get sender address */
 	rqstp->rq_addr.sin_family = AF_INET;
 	rqstp->rq_addr.sin_port = skb->h.uh->source;
-#if LINUX_VERSION_CODE >= 0x020100
 	rqstp->rq_addr.sin_addr.s_addr = skb->nh.iph->saddr;
-#else
-	rqstp->rq_addr.sin_addr.s_addr = skb->saddr;
-#endif
 
 	if (serv->sv_stats)
 		serv->sv_stats->netudpcnt++;
@@ -450,14 +463,19 @@ svc_tcp_state_change1(struct sock *sk)
 
 	if  (sk->state != TCP_ESTABLISHED) {
 		/* Aborted connection, SYN_RECV or whatever... */
-		return;
+		goto out;
 	}
 	if (!(svsk = (struct svc_sock *) sk->user_data)) {
 		printk("svc: socket %p: no user data\n", sk);
-		return;
+		goto out;
 	}
+	spin_lock_bh(&svsk->sk_lock);
 	svsk->sk_conn++;
 	svc_sock_enqueue(svsk);
+	spin_unlock_bh(&svsk->sk_lock);
+ out:
+	if (sk->sleep && waitqueue_active(sk->sleep))
+		wake_up_interruptible_all(sk->sleep);
 }
 
 /*
@@ -473,10 +491,15 @@ svc_tcp_state_change2(struct sock *sk)
 
 	if (!(svsk = (struct svc_sock *) sk->user_data)) {
 		printk("svc: socket %p: no user data\n", sk);
-		return;
+		goto out;
 	}
+	spin_lock_bh(&svsk->sk_lock);
 	svsk->sk_close = 1;
 	svc_sock_enqueue(svsk);
+	spin_unlock_bh(&svsk->sk_lock);
+ out:
+	if (sk->sleep && waitqueue_active(sk->sleep))
+		wake_up_interruptible_all(sk->sleep);
 }
 
 static void
@@ -484,18 +507,17 @@ svc_tcp_data_ready(struct sock *sk, int count)
 {
 	struct svc_sock *	svsk;
 
-	/* Disconnect signalled through data_ready?!? */
-	if (sk->state != TCP_ESTABLISHED) {
-		svc_tcp_state_change2(sk);
-		return;
-	}
-
 	dprintk("svc: socket %p TCP data ready (svsk %p)\n",
 			sk, sk->user_data);
 	if (!(svsk = (struct svc_sock *)(sk->user_data)))
-		return;
+		goto out;
+	spin_lock_bh(&svsk->sk_lock);
 	svsk->sk_data++;
 	svc_sock_enqueue(svsk);
+	spin_unlock_bh(&svsk->sk_lock);
+ out:
+	if (sk->sleep && waitqueue_active(sk->sleep))
+		wake_up_interruptible(sk->sleep);
 }
 
 /*
@@ -523,40 +545,38 @@ svc_tcp_accept(struct svc_sock *svsk)
 	dprintk("svc: tcp_accept %p allocated\n", newsock);
 
 	newsock->type = sock->type;
-	if ((err = sock->ops->dup(newsock, sock)) < 0) {
-		printk(KERN_WARNING "%s: socket dup failed (err %d)!\n",
-					serv->sv_name, -err);
-		goto failed;
-	}
+	newsock->ops = ops = sock->ops;
 
-	ops = newsock->ops;
 	if ((err = ops->accept(sock, newsock, O_NONBLOCK)) < 0) {
-		printk(KERN_WARNING "%s: accept failed (err %d)!\n",
-					serv->sv_name, -err);
+		if (net_ratelimit())
+			printk(KERN_WARNING "%s: accept failed (err %d)!\n",
+				   serv->sv_name, -err);
 		goto failed;		/* aborted connection or whatever */
 	}
 
 	slen = sizeof(sin);
 	err = ops->getname(newsock, (struct sockaddr *) &sin, &slen, 1);
 	if (err < 0) {
-		printk(KERN_WARNING "%s: peername failed (err %d)!\n",
-					serv->sv_name, -err);
+		if (net_ratelimit())
+			printk(KERN_WARNING "%s: peername failed (err %d)!\n",
+				   serv->sv_name, -err);
 		goto failed;		/* aborted connection or whatever */
 	}
 
 	/* Ideally, we would want to reject connections from unauthorized
-	 * hosts here, but we have no generic client tables. For now,
-	 * we just punt connects from unprivileged ports. */
+	 * hosts here, but when we get encription, the IP of the host won't
+	 * tell us anything. For now just warn about unpriv connections.
+	 */
 	if (ntohs(sin.sin_port) >= 1024) {
-		printk(KERN_WARNING
-			"%s: connect from unprivileged port: %s:%d",
-			serv->sv_name, 
-			in_ntoa(sin.sin_addr.s_addr), ntohs(sin.sin_port));
-		goto failed;
+		if (net_ratelimit())
+			printk(KERN_WARNING
+				   "%s: connect from unprivileged port: %u.%u.%u.%u:%d\n",
+				   serv->sv_name, 
+				   NIPQUAD(sin.sin_addr.s_addr), ntohs(sin.sin_port));
 	}
 
-	dprintk("%s: connect from %s:%04x\n", serv->sv_name,
-			in_ntoa(sin.sin_addr.s_addr), ntohs(sin.sin_port));
+	dprintk("%s: connect from %u.%u.%u.%u:%04x\n", serv->sv_name,
+			NIPQUAD(sin.sin_addr.s_addr), ntohs(sin.sin_port));
 
 	if (!(newsvsk = svc_setup_socket(serv, newsock, &err, 0)))
 		goto failed;
@@ -564,9 +584,11 @@ svc_tcp_accept(struct svc_sock *svsk)
 	/* Precharge. Data may have arrived on the socket before we
 	 * installed the data_ready callback. 
 	 */
+	spin_lock_bh(&newsvsk->sk_lock);
 	newsvsk->sk_data = 1;
 	newsvsk->sk_temp = 1;
 	svc_sock_enqueue(newsvsk);
+	spin_unlock_bh(&newsvsk->sk_lock);
 
 	if (serv->sv_stats)
 		serv->sv_stats->nettcpconn++;
@@ -587,7 +609,7 @@ svc_tcp_recvfrom(struct svc_rqst *rqstp)
 	struct svc_sock	*svsk = rqstp->rq_sock;
 	struct svc_serv	*serv = svsk->sk_server;
 	struct svc_buf	*bufp = &rqstp->rq_argbuf;
-	int		len, ready;
+	int		len, ready, used;
 
 	dprintk("svc: tcp_recv %p data %d conn %d close %d\n",
 			svsk, svsk->sk_data, svsk->sk_conn, svsk->sk_close);
@@ -621,6 +643,11 @@ svc_tcp_recvfrom(struct svc_rqst *rqstp)
 
 		svsk->sk_reclen = ntohl(svsk->sk_reclen);
 		if (!(svsk->sk_reclen & 0x80000000)) {
+			/* FIXME: technically, a record can be fragmented,
+			 *  and non-terminal fragments will not have the top
+			 *  bit set in the fragment length header.
+			 *  But apparently no known nfs clients send fragmented
+			 *  records. */
 			/* FIXME: shutdown socket */
 			printk(KERN_NOTICE "RPC: bad TCP reclen %08lx",
 			       (unsigned long) svsk->sk_reclen);
@@ -636,11 +663,21 @@ svc_tcp_recvfrom(struct svc_rqst *rqstp)
 		goto error;
 
 	if (len < svsk->sk_reclen) {
+		/* FIXME: if sk_reclen > window-size, then we will
+		 * never be able to receive the record, so should
+		 * shutdown the connection
+		 */
 		dprintk("svc: incomplete TCP record (%d of %d)\n",
 			len, svsk->sk_reclen);
 		svc_sock_received(svsk, ready);
-		len = -EAGAIN;	/* record not complete */
+		return -EAGAIN;	/* record not complete */
 	}
+	/* if we think there is only one more record to read, but
+	 * it is bigger than we expect, then two records must have arrived
+	 * together, so pretend we aren't using the record.. */
+	if (len > svsk->sk_reclen && ready == 1)
+		used = 0;
+	else	used = 1;
 
 	/* Frob argbuf */
 	bufp->iov[0].iov_base += 4;
@@ -667,7 +704,7 @@ svc_tcp_recvfrom(struct svc_rqst *rqstp)
 	svsk->sk_reclen = 0;
 	svsk->sk_tcplen = 0;
 
-	svc_sock_received(svsk, 1);
+	svc_sock_received(svsk, used);
 	if (serv->sv_stats)
 		serv->sv_stats->nettcpcnt++;
 
@@ -695,6 +732,7 @@ static int
 svc_tcp_sendto(struct svc_rqst *rqstp)
 {
 	struct svc_buf	*bufp = &rqstp->rq_resbuf;
+	int sent;
 
 	/* Set up the first element of the reply iovec.
 	 * Any other iovecs that may be in use have been taken
@@ -704,7 +742,17 @@ svc_tcp_sendto(struct svc_rqst *rqstp)
 	bufp->iov[0].iov_len  = bufp->len << 2;
 	bufp->base[0] = htonl(0x80000000|((bufp->len << 2) - 4));
 
-	return svc_sendto(rqstp, bufp->iov, bufp->nriov);
+	sent = svc_sendto(rqstp, bufp->iov, bufp->nriov);
+	if (sent != bufp->len<<2) {
+		printk(KERN_NOTICE "rpc-srv/tcp: %s: sent only %d bytes of %d - should shutdown socket\n",
+		       rqstp->rq_sock->sk_server->sv_name,
+		       sent, bufp->len << 2);
+		/* FIXME: should shutdown the socket, or allocate more memort
+		 * or wait and try again or something.  Otherwise
+		 * client will get confused
+		 */
+	}
+	return sent;
 }
 
 static int
@@ -752,7 +800,6 @@ svc_recv(struct svc_serv *serv, struct svc_rqst *rqstp, long timeout)
 			"svc_recv: service %p, wait queue active!\n",
 			 rqstp);
 
-again:
 	/* Initialize the buffers */
 	rqstp->rq_argbuf = rqstp->rq_defbuf;
 	rqstp->rq_resbuf = rqstp->rq_defbuf;
@@ -760,7 +807,7 @@ again:
 	if (signalled())
 		return -EINTR;
 
-	start_bh_atomic();
+	spin_lock_bh(&serv->sv_lock);
 	if ((svsk = svc_sock_dequeue(serv)) != NULL) {
 		rqstp->rq_sock = svsk;
 		svsk->sk_inuse++;
@@ -772,22 +819,23 @@ again:
 		 * We have to be able to interrupt this wait
 		 * to bring down the daemons ...
 		 */
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		add_wait_queue(&rqstp->rq_wait, &wait);
-		end_bh_atomic();
+		spin_unlock_bh(&serv->sv_lock);
+
 		schedule_timeout(timeout);
 
+		spin_lock_bh(&serv->sv_lock);
 		remove_wait_queue(&rqstp->rq_wait, &wait);
 
-		start_bh_atomic();
 		if (!(svsk = rqstp->rq_sock)) {
 			svc_serv_dequeue(serv, rqstp);
-			end_bh_atomic();
+			spin_unlock_bh(&serv->sv_lock);
 			dprintk("svc: server %p, no data yet\n", rqstp);
 			return signalled()? -EINTR : -EAGAIN;
 		}
 	}
-	end_bh_atomic();
+	spin_unlock_bh(&serv->sv_lock);
 
 	dprintk("svc: server %p, socket %p, inuse=%d\n",
 		 rqstp, svsk, svsk->sk_inuse);
@@ -797,7 +845,7 @@ again:
 	/* No data, incomplete (TCP) read, or accept() */
 	if (len == 0 || len == -EAGAIN) {
 		svc_sock_release(rqstp);
-		goto again;
+		return -EAGAIN;
 	}
 
 	rqstp->rq_secure  = ntohs(rqstp->rq_addr.sin_port) < 1024;
@@ -869,17 +917,14 @@ svc_setup_socket(struct svc_serv *serv, struct socket *sock,
 	}
 	memset(svsk, 0, sizeof(*svsk));
 
-#if LINUX_VERSION_CODE >= 0x020100
 	inet = sock->sk;
-#else
-	inet = (struct sock *) sock->data;
-#endif
 	inet->user_data = svsk;
 	svsk->sk_sock = sock;
 	svsk->sk_sk = inet;
 	svsk->sk_ostate = inet->state_change;
 	svsk->sk_odata = inet->data_ready;
 	svsk->sk_server = serv;
+	spin_lock_init(&svsk->sk_lock);
 
 	/* Initialize the socket */
 	if (sock->type == SOCK_DGRAM)
@@ -899,8 +944,10 @@ if (svsk->sk_sk == NULL)
 		return NULL;
 	}
 
+	spin_lock_bh(&serv->sv_lock);
 	svsk->sk_list = serv->sv_allsocks;
 	serv->sv_allsocks = svsk;
+	spin_unlock_bh(&serv->sv_lock);
 
 	dprintk("svc: svc_setup_socket created %p (inet %p)\n",
 				svsk, svsk->sk_sk);
@@ -918,9 +965,9 @@ svc_create_socket(struct svc_serv *serv, int protocol, struct sockaddr_in *sin)
 	int		error;
 	int		type;
 
-	dprintk("svc: svc_create_socket(%s, %d, %08lx:%d)\n",
+	dprintk("svc: svc_create_socket(%s, %d, %u.%u.%u.%u:%d)\n",
 				serv->sv_program->pg_name, protocol,
-				ntohl(sin->sin_addr.s_addr),
+				NIPQUAD(sin->sin_addr.s_addr),
 				ntohs(sin->sin_port));
 
 	if (protocol != IPPROTO_UDP && protocol != IPPROTO_TCP) {
@@ -943,7 +990,6 @@ svc_create_socket(struct svc_serv *serv, int protocol, struct sockaddr_in *sin)
 	if (protocol == IPPROTO_TCP) {
 		if ((error = sock->ops->listen(sock, 5)) < 0)
 			goto bummer;
-		sock->flags |= SO_ACCEPTCON;
 	}
 
 	if ((svsk = svc_setup_socket(serv, sock, &error, 1)) != NULL)
@@ -973,16 +1019,22 @@ svc_delete_socket(struct svc_sock *svsk)
 	sk->state_change = svsk->sk_ostate;
 	sk->data_ready = svsk->sk_odata;
 
+	spin_lock_bh(&serv->sv_lock);
+
 	for (rsk = &serv->sv_allsocks; *rsk; rsk = &(*rsk)->sk_list) {
 		if (*rsk == svsk)
 			break;
 	}
-	if (!*rsk)
+	if (!*rsk) {
+		spin_unlock_bh(&serv->sv_lock);
 		return;
+	}
 	*rsk = svsk->sk_list;
-
 	if (svsk->sk_qued)
 		rpc_remove_list(&serv->sv_sockets, svsk);
+
+	spin_unlock_bh(&serv->sv_lock);
+
 	svsk->sk_dead = 1;
 
 	if (!svsk->sk_inuse) {

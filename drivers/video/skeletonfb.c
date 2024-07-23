@@ -4,7 +4,7 @@
  *  Created 28 Dec 1997 by Geert Uytterhoeven
  *
  * This file is subject to the terms and conditions of the GNU General Public
- * License.  See the file README.legal in the main directory of this archive
+ * License.  See the file COPYING in the main directory of this archive
  * for more details.
  */
 
@@ -73,6 +73,8 @@ static struct fb_var_screeninfo default_var;
 static int currcon = 0;
 static int inverse = 0;
 
+int xxxfb_init(void);
+int xxxfb_setup(char*);
 
 /* ------------------- chipset specific functions -------------------------- */
 
@@ -285,7 +287,8 @@ static void xxx_set_disp(const void *par, struct display *disp,
 
 struct fbgen_hwswitch xxx_switch = {
     xxx_detect, xxx_encode_fix, xxx_decode_var, xxx_encode_var, xxx_get_par,
-    xxx_set_par, xxx_getcolreg, xxx_setcolreg, xxx_blank, xxx_dispsw
+    xxx_set_par, xxx_getcolreg, xxx_setcolreg, xxx_pan_display, xxx_blank,
+    xxx_set_disp
 };
 
 
@@ -297,7 +300,7 @@ struct fbgen_hwswitch xxx_switch = {
      *  Initialization
      */
 
-__initfunc(void xxxfb_init(void))
+int __init xxxfb_init(void)
 {
     fb_info.gen.fbhw = &xxx_switch;
     fb_info.gen.fbhw->detect();
@@ -316,12 +319,13 @@ __initfunc(void xxxfb_init(void))
     fbgen_set_disp(-1, &fb_info.gen);
     fbgen_install_cmap(0, &fb_info.gen);
     if (register_framebuffer(&fb_info.gen.info) < 0)
-	return;
-    printk("fb%d: %s frame buffer device\n", GET_FB_IDX(fb_info.gen.info.node),
+	return -EINVAL;
+    printk(KERN_INFO "fb%d: %s frame buffer device\n", GET_FB_IDX(fb_info.gen.info.node),
 	   fb_info.gen.info.modename);
 
     /* uncomment this if your driver cannot be unloaded */
     /* MOD_INC_USE_COUNT; */
+    return 0;
 }
 
 
@@ -345,7 +349,7 @@ void xxxfb_cleanup(struct fb_info *info)
      *  Setup
      */
 
-__initfunc(void xxxfb_setup(char *options, int *ints))
+int __init xxxfb_setup(char *options)
 {
     /* Parse user speficied options (`video=xxxfb:') */
 }
@@ -358,16 +362,15 @@ __initfunc(void xxxfb_setup(char *options, int *ints))
      *  Frame buffer operations
      */
 
+/* If all you need is that - just don't define ->fb_open */
 static int xxxfb_open(const struct fb_info *info, int user)
 {
-    /* Nothing, only a usage count for the moment */
-    MOD_INC_USE_COUNT;
     return 0;
 }
 
+/* If all you need is that - just don't define ->fb_release */
 static int xxxfb_release(const struct fb_info *info, int user)
 {
-    MOD_DEC_USE_COUNT;
     return 0;
 }
 
@@ -378,8 +381,16 @@ static int xxxfb_release(const struct fb_info *info, int user)
      */
 
 static struct fb_ops xxxfb_ops = {
-    xxxfb_open, xxxfb_release, fbgen_get_fix, fbgen_get_var, fbgen_set_var,
-    fbgen_get_cmap, fbgen_set_cmap, fbgen_pan_display, fbgen_ioctl
+	owner:		THIS_MODULE,
+	fb_open:	xxxfb_open,    /* only if you need it to do something */
+	fb_release:	xxxfb_release, /* only if you need it to do something */
+	fb_get_fix:	fbgen_get_fix,
+	fb_get_var:	fbgen_get_var,
+	fb_set_var:	fbgen_set_var,
+	fb_get_cmap:	fbgen_get_cmap,
+	fb_set_cmap:	fbgen_set_cmap,
+	fb_pan_display:	fbgen_pan_display,
+	fb_ioctl:	xxxfb_ioctl,   /* optional */
 };
 
 
@@ -393,8 +404,7 @@ static struct fb_ops xxxfb_ops = {
 #ifdef MODULE
 int init_module(void)
 {
-    xxxfb_init();
-    return 0;
+    return xxxfb_init();
 }
 
 void cleanup_module(void)

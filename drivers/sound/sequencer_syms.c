@@ -9,7 +9,6 @@
 char sequencer_syms_symbol;
 
 #include "sound_config.h"
-
 #include "sound_calls.h"
 
 EXPORT_SYMBOL(note_to_freq);
@@ -23,10 +22,6 @@ EXPORT_SYMBOL(sound_timer_init);
 EXPORT_SYMBOL(sound_timer_interrupt);
 EXPORT_SYMBOL(sound_timer_syncinterval);
 EXPORT_SYMBOL(reprogram_timer);
-
-#include "softoss.h"
-
-EXPORT_SYMBOL(softsynthp);
 
 /* Tuning */
 

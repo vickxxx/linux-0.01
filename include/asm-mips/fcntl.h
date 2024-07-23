@@ -1,4 +1,4 @@
-/* $Id: fcntl.h,v 1.3 1998/08/29 20:41:02 ralf Exp $
+/* $Id: fcntl.h,v 1.4 1998/09/19 19:19:36 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
@@ -31,10 +31,10 @@
 #define O_NDELAY	O_NONBLOCK
 
 #define F_DUPFD		0	/* dup */
-#define F_GETFD		1	/* get f_flags */
-#define F_SETFD		2	/* set f_flags */
-#define F_GETFL		3	/* more flags (cloexec) */
-#define F_SETFL		4
+#define F_GETFD		1	/* get close_on_exec */
+#define F_SETFD		2	/* set/clear close_on_exec */
+#define F_GETFL		3	/* get file->f_flags */
+#define F_SETFL		4	/* set file->f_flags */
 #define F_GETLK		14
 #define F_SETLK		6
 #define F_SETLKW	7
@@ -56,12 +56,20 @@
 #define F_EXLCK		4	/* or 3 */
 #define F_SHLCK		8	/* or 4 */
 
+/* for leases */
+#define F_INPROGRESS	16
+
 /* operations for bsd flock(), also used by the kernel implementation */
 #define LOCK_SH		1	/* shared lock */
 #define LOCK_EX		2	/* exclusive lock */
 #define LOCK_NB		4	/* or'd with one of the above to prevent		XXXXXXXXXXXXXXXXXX
 				   blocking */
 #define LOCK_UN		8	/* remove lock */
+
+#define LOCK_MAND	32	/* This is a mandatory flock */
+#define LOCK_READ	64	/* ... Which allows concurrent read operations */
+#define LOCK_WRITE	128	/* ... Which allows concurrent write operations */
+#define LOCK_RW		192	/* ... Which allows concurrent read & write ops */
 
 typedef struct flock {
 	short l_type;
@@ -73,4 +81,5 @@ typedef struct flock {
 	long  pad[4];			/* ZZZZZZZZZZZZZZZZZZZZZZZZZZ */
 } flock_t;
 
+#define F_LINUX_SPECIFIC_BASE	1024
 #endif /* __ASM_MIPS_FCNTL_H */

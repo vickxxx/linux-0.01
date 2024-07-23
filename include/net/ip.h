@@ -22,7 +22,7 @@
 #ifndef _IP_H
 #define _IP_H
 
-
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/ip.h>
@@ -41,7 +41,6 @@
 struct inet_skb_parm
 {
 	struct ip_options	opt;		/* Compiled IP options		*/
-	u16			redirport;	/* Redirect port		*/
 	unsigned char		flags;
 
 #define IPSKB_MASQUERADED	1
@@ -66,6 +65,7 @@ struct ip_ra_chain
 };
 
 extern struct ip_ra_chain *ip_ra_chain;
+extern rwlock_t ip_ra_lock;
 
 /* IP flags. */
 #define IP_CE		0x8000		/* Flag: "Congestion"		*/
@@ -76,27 +76,26 @@ extern struct ip_ra_chain *ip_ra_chain;
 #define IP_FRAG_TIME	(30 * HZ)		/* fragment lifetime	*/
 
 extern void		ip_mc_dropsocket(struct sock *);
-extern void		ip_mc_dropdevice(struct device *dev);
-extern int		ip_mc_procinfo(char *, char **, off_t, int, int);
+extern void		ip_mc_dropdevice(struct net_device *dev);
+extern int		ip_mc_procinfo(char *, char **, off_t, int);
 
 /*
  *	Functions provided by ip.c
  */
 
-extern void		ip_build_and_send_pkt(struct sk_buff *skb, struct sock *sk,
+extern int		ip_build_and_send_pkt(struct sk_buff *skb, struct sock *sk,
 					      u32 saddr, u32 daddr,
 					      struct ip_options *opt);
-extern int		ip_rcv(struct sk_buff *skb, struct device *dev,
+extern int		ip_rcv(struct sk_buff *skb, struct net_device *dev,
 			       struct packet_type *pt);
 extern int		ip_local_deliver(struct sk_buff *skb);
 extern int		ip_mr_input(struct sk_buff *skb);
 extern int		ip_output(struct sk_buff *skb);
 extern int		ip_mc_output(struct sk_buff *skb);
-extern void		ip_fragment(struct sk_buff *skb, int (*out)(struct sk_buff*));
+extern int		ip_fragment(struct sk_buff *skb, int (*out)(struct sk_buff*));
 extern int		ip_do_nat(struct sk_buff *skb);
 extern void		ip_send_check(struct iphdr *ip);
-extern int		ip_id_count;			  
-extern void		ip_queue_xmit(struct sk_buff *skb);
+extern int		ip_queue_xmit(struct sk_buff *skb);
 extern void		ip_init(void);
 extern int		ip_build_xmit(struct sock *sk,
 				      int getfrag (const void *,
@@ -109,6 +108,22 @@ extern int		ip_build_xmit(struct sock *sk,
 				      struct rtable *rt,
 				      int flags);
 
+/*
+ *	Map a multicast IP onto multicast MAC for type Token Ring.
+ *      This conforms to RFC1469 Option 2 Multicasting i.e.
+ *      using a functional address to transmit / receive 
+ *      multicast packets.
+ */
+
+static inline void ip_tr_mc_map(u32 addr, char *buf)
+{
+	buf[0]=0xC0;
+	buf[1]=0x00;
+	buf[2]=0x00;
+	buf[3]=0x04;
+	buf[4]=0x00;
+	buf[5]=0x00;
+}
 
 struct ip_reply_arg {
 	struct iovec iov[2];   
@@ -121,7 +136,7 @@ struct ip_reply_arg {
 void ip_send_reply(struct sock *sk, struct sk_buff *skb, struct ip_reply_arg *arg,
 		   unsigned int len); 
 
-extern int __ip_finish_output(struct sk_buff *skb);
+extern __inline__ int ip_finish_output(struct sk_buff *skb);
 
 struct ipv4_config
 {
@@ -131,65 +146,61 @@ struct ipv4_config
 };
 
 extern struct ipv4_config ipv4_config;
-extern struct ip_mib	ip_statistics;
-extern struct linux_mib	net_statistics;
+extern struct ip_mib	ip_statistics[NR_CPUS*2];
+#define IP_INC_STATS(field)		SNMP_INC_STATS(ip_statistics, field)
+#define IP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(ip_statistics, field)
+#define IP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(ip_statistics, field)
+extern struct linux_mib	net_statistics[NR_CPUS*2];
+#define NET_INC_STATS(field)		SNMP_INC_STATS(net_statistics, field)
+#define NET_INC_STATS_BH(field)		SNMP_INC_STATS_BH(net_statistics, field)
+#define NET_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(net_statistics, field)
 
 extern int sysctl_local_port_range[2];
+extern int sysctl_ip_default_ttl;
 
-extern __inline__ int ip_finish_output(struct sk_buff *skb)
-{
-	struct dst_entry *dst = skb->dst;
-	struct device *dev = dst->dev;
-	struct hh_cache *hh = dst->hh;
-
-	skb->dev = dev;
-	skb->protocol = __constant_htons(ETH_P_IP);
-
-	if (hh) {
-		read_lock_bh(&hh->hh_lock);
-		memcpy(skb->data - 16, hh->hh_data, 16);
-		read_unlock_bh(&hh->hh_lock);
-	        skb_push(skb, hh->hh_len);
-		return hh->hh_output(skb);
-	} else if (dst->neighbour)
-		return dst->neighbour->output(skb);
-
-	kfree_skb(skb);
-	return -EINVAL;
-}
-
-extern __inline__ void ip_send(struct sk_buff *skb)
+#ifdef CONFIG_INET
+static inline int ip_send(struct sk_buff *skb)
 {
 	if (skb->len > skb->dst->pmtu)
-		ip_fragment(skb, __ip_finish_output);
+		return ip_fragment(skb, ip_finish_output);
 	else
-		ip_finish_output(skb);
+		return ip_finish_output(skb);
 }
 
-extern __inline__
+/* The function in 2.2 was invalid, producing wrong result for
+ * check=0xFEFF. It was noticed by Arthur Skawina _year_ ago. --ANK(000625) */
+static inline
 int ip_decrease_ttl(struct iphdr *iph)
 {
-	u16 check = iph->check;
-	check = ntohs(check) + 0x0100;
-	if ((check & 0xFF00) == 0)
-		check++;		/* carry overflow */
-	iph->check = htons(check);
+	u32 check = iph->check;
+	check += __constant_htons(0x0100);
+	iph->check = check + (check>=0xFFFF);
 	return --iph->ttl;
 }
 
-extern __inline__
+static inline
 int ip_dont_fragment(struct sock *sk, struct dst_entry *dst)
 {
-	return (sk->ip_pmtudisc == IP_PMTUDISC_DO ||
-		(sk->ip_pmtudisc == IP_PMTUDISC_WANT &&
+	return (sk->protinfo.af_inet.pmtudisc == IP_PMTUDISC_DO ||
+		(sk->protinfo.af_inet.pmtudisc == IP_PMTUDISC_WANT &&
 		 !(dst->mxlock&(1<<RTAX_MTU))));
+}
+
+extern void __ip_select_ident(struct iphdr *iph, struct dst_entry *dst);
+
+static inline void ip_select_ident(struct iphdr *iph, struct dst_entry *dst)
+{
+	if (iph->frag_off&__constant_htons(IP_DF))
+		iph->id = 0;
+	else
+		__ip_select_ident(iph, dst);
 }
 
 /*
  *	Map a multicast IP onto multicast MAC for type ethernet.
  */
 
-extern __inline__ void ip_eth_mc_map(u32 addr, char *buf)
+static inline void ip_eth_mc_map(u32 addr, char *buf)
 {
 	addr=ntohl(addr);
 	buf[0]=0x01;
@@ -202,6 +213,7 @@ extern __inline__ void ip_eth_mc_map(u32 addr, char *buf)
 	buf[3]=addr&0x7F;
 }
 
+#endif
 
 extern int	ip_call_ra_chain(struct sk_buff *skb);
 
@@ -210,6 +222,8 @@ extern int	ip_call_ra_chain(struct sk_buff *skb);
  */
  
 struct sk_buff *ip_defrag(struct sk_buff *skb);
+extern int ip_frag_nqueues;
+extern atomic_t ip_frag_mem;
 
 /*
  *	Functions provided by ip_forward.c

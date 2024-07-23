@@ -1,3 +1,11 @@
+/*
+ * Update: The Berkeley copyright was changed, and the change 
+ * is retroactive to all "true" BSD software (ie everything
+ * from UCB as opposed to other peoples code that just carried
+ * the same license). The new copyright doesn't clash with the
+ * GPL, so the module-only restriction has been removed..
+ */
+
 /* Because this code is derived from the 4.3BSD compress source:
  *
  * Copyright (c) 1985, 1986 The Regents of the University of California.
@@ -39,7 +47,7 @@
 /*
  * This version is for use with contiguous buffers on Linux-derived systems.
  *
- *  ==FILEVERSION 970607==
+ *  ==FILEVERSION 20000226==
  *
  *  NOTE TO MAINTAINERS:
  *     If you modify this file at all, please set the number above to the
@@ -53,37 +61,10 @@
  * From: bsd_comp.c,v 1.3 1994/12/08 01:59:58 paulus Exp
  */
 
-#ifndef MODULE
-#error This file must be compiled as a module.
-#endif
-
 #include <linux/module.h>
-#include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/types.h>
-#include <linux/fcntl.h>
-#include <linux/interrupt.h>
-#include <linux/ptrace.h>
-#include <linux/ioport.h>
-#include <linux/in.h>
+#include <linux/init.h>
 #include <linux/malloc.h>
 #include <linux/vmalloc.h>
-#include <linux/tty.h>
-#include <linux/errno.h>
-#include <linux/string.h>	/* used in new tty drivers */
-#include <linux/signal.h>	/* used in new tty drivers */
-
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/byteorder.h>
-
-#include <linux/if.h>
-
-#include <linux/if_ether.h>
-#include <linux/netdevice.h>
-#include <linux/skbuff.h>
-#include <linux/inet.h>
-#include <linux/ioctl.h>
 
 #include <linux/ppp_defs.h>
 
@@ -1177,17 +1158,18 @@ static struct compressor ppp_bsd_compress = {
  * Module support routines
  *************************************************************/
 
-int
-init_module(void)
+int bsdcomp_init(void)
 {
-	int answer = ppp_register_compressor (&ppp_bsd_compress);
+	int answer = ppp_register_compressor(&ppp_bsd_compress);
 	if (answer == 0)
-		printk (KERN_INFO "PPP BSD Compression module registered\n");
+		printk(KERN_INFO "PPP BSD Compression module registered\n");
 	return answer;
 }
 
-void
-cleanup_module(void)
+void bsdcomp_cleanup(void)
 {
-	ppp_unregister_compressor (&ppp_bsd_compress);
+	ppp_unregister_compressor(&ppp_bsd_compress);
 }
+
+module_init(bsdcomp_init);
+module_exit(bsdcomp_cleanup);

@@ -35,7 +35,7 @@ extern struct timezone sys_tz;
 
 #define MIN(a,b) (((a)<(b))?(a):(b))
 
-static int affs_statfs(struct super_block *sb, struct statfs *buf, int bufsiz);
+static int affs_statfs(struct super_block *sb, struct statfs *buf);
 static int affs_remount (struct super_block *sb, int *flags, char *data);
 
 static void
@@ -52,7 +52,7 @@ affs_put_super(struct super_block *sb)
 		secs_to_datestamp(CURRENT_TIME,
 				  &ROOT_END_S(sb->u.affs_sb.s_root_bh->b_data,sb)->disk_altered);
 		affs_fix_checksum(sb->s_blocksize,sb->u.affs_sb.s_root_bh->b_data,5);
-		mark_buffer_dirty(sb->u.affs_sb.s_root_bh,1);
+		mark_buffer_dirty(sb->u.affs_sb.s_root_bh);
 	}
 
 	if (sb->u.affs_sb.s_prefix)
@@ -65,7 +65,6 @@ affs_put_super(struct super_block *sb)
 	 */
 	set_blocksize(sb->s_dev, sb->u.affs_sb.s_blksize);
 
-	MOD_DEC_USE_COUNT;
 	return;
 }
 
@@ -89,7 +88,7 @@ affs_write_super(struct super_block *sb)
 		secs_to_datestamp(CURRENT_TIME,
 				  &ROOT_END_S(sb->u.affs_sb.s_root_bh->b_data,sb)->disk_altered);
 		affs_fix_checksum(sb->s_blocksize,sb->u.affs_sb.s_root_bh->b_data,5);
-		mark_buffer_dirty(sb->u.affs_sb.s_root_bh,1);
+		mark_buffer_dirty(sb->u.affs_sb.s_root_bh);
 		sb->s_dirt = !clean;	/* redo until bitmap synced */
 	} else
 		sb->s_dirt = 0;
@@ -98,15 +97,14 @@ affs_write_super(struct super_block *sb)
 }
 
 static struct super_operations affs_sops = {
-	affs_read_inode,
-	affs_write_inode,
-	affs_put_inode,
-	affs_delete_inode,
-	affs_notify_change,
-	affs_put_super,
-	affs_write_super,
-	affs_statfs,
-	affs_remount
+	read_inode:	affs_read_inode,
+	write_inode:	affs_write_inode,
+	put_inode:	affs_put_inode,
+	delete_inode:	affs_delete_inode,
+	put_super:	affs_put_super,
+	write_super:	affs_write_super,
+	statfs:		affs_statfs,
+	remount_fs:	affs_remount,
 };
 
 static int
@@ -263,8 +261,6 @@ affs_read_super(struct super_block *s, void *data, int silent)
 
 	pr_debug("AFFS: read_super(%s)\n",data ? (const char *)data : "no options");
 
-	MOD_INC_USE_COUNT;
-	lock_super(s);
 	s->s_magic             = AFFS_SUPER_MAGIC;
 	s->s_op                = &affs_sops;
 	s->u.affs_sb.s_bitmap  = NULL;
@@ -495,7 +491,7 @@ got_root:
 					chksum = cpu_to_be32(0x7FFFFFFF >> (31 - key));
 					((u32 *)bb->b_data)[ptype] &= chksum;
 					affs_fix_checksum(s->s_blocksize,bb->b_data,0);
-					mark_buffer_dirty(bb,1);
+					mark_buffer_dirty(bb);
 					bmalt = 1;
 				}
 				ptype = (size + 31) & ~0x1F;
@@ -548,7 +544,6 @@ nobitmap:
 		goto out_no_root;
 	s->s_root->d_op = &affs_dentry_operations;
 
-	unlock_super(s);
 	/* Record date of last change if the bitmap was truncated and
 	 * create data zones if the volume is writable.
 	 */
@@ -558,7 +553,7 @@ nobitmap:
 			secs_to_datestamp(CURRENT_TIME,&ROOT_END(
 				s->u.affs_sb.s_root_bh->b_data,root_inode)->disk_altered);
 			affs_fix_checksum(s->s_blocksize,s->u.affs_sb.s_root_bh->b_data,5);
-			mark_buffer_dirty(s->u.affs_sb.s_root_bh,1);
+			mark_buffer_dirty(s->u.affs_sb.s_root_bh);
 		}
 		affs_make_zones(s);
 	}
@@ -616,9 +611,6 @@ out_free_prefix:
 	if (s->u.affs_sb.s_prefix)
 		kfree(s->u.affs_sb.s_prefix);
 out_fail:
-	s->s_dev = 0;
-	unlock_super(s);
-	MOD_DEC_USE_COUNT;
 	return NULL;
 }
 
@@ -662,50 +654,35 @@ affs_remount(struct super_block *sb, int *flags, char *data)
 }
 
 static int
-affs_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
+affs_statfs(struct super_block *sb, struct statfs *buf)
 {
 	int		 free;
-	struct statfs	 tmp;
 
 	pr_debug("AFFS: statfs() partsize=%d, reserved=%d\n",sb->u.affs_sb.s_partition_size,
 	     sb->u.affs_sb.s_reserved);
 
 	free          = affs_count_free_blocks(sb);
-	tmp.f_type    = AFFS_SUPER_MAGIC;
-	tmp.f_bsize   = sb->s_blocksize;
-	tmp.f_blocks  = sb->u.affs_sb.s_partition_size - sb->u.affs_sb.s_reserved;
-	tmp.f_bfree   = free;
-	tmp.f_bavail  = free;
-	tmp.f_files   = 0;
-	tmp.f_ffree   = 0;
-	return copy_to_user(buf,&tmp,bufsiz) ? -EFAULT : 0;
+	buf->f_type    = AFFS_SUPER_MAGIC;
+	buf->f_bsize   = sb->s_blocksize;
+	buf->f_blocks  = sb->u.affs_sb.s_partition_size - sb->u.affs_sb.s_reserved;
+	buf->f_bfree   = free;
+	buf->f_bavail  = free;
+	return 0;
 }
 
-static struct file_system_type affs_fs_type = {
-	"affs",
-	FS_REQUIRES_DEV,
-	affs_read_super,
-	NULL
-};
+static DECLARE_FSTYPE_DEV(affs_fs_type, "affs", affs_read_super);
 
-__initfunc(int init_affs_fs(void))
+static int __init init_affs_fs(void)
 {
 	return register_filesystem(&affs_fs_type);
 }
 
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
-int
-init_module(void)
-{
-	return register_filesystem(&affs_fs_type);
-}
-
-void
-cleanup_module(void)
+static void __exit exit_affs_fs(void)
 {
 	unregister_filesystem(&affs_fs_type);
 }
 
-#endif
+EXPORT_NO_SYMBOLS;
+
+module_init(init_affs_fs)
+module_exit(exit_affs_fs)

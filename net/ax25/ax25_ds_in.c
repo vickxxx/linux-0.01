@@ -22,8 +22,6 @@
  *			Joerg(DL1BKE)	ax25->n2count never got reset
  */
 
-#include <linux/config.h>
-#if defined(CONFIG_AX25_DAMA_SLAVE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -89,10 +87,8 @@ static int ax25_ds_state1_machine(ax25_cb *ax25, struct sk_buff *skb, int framet
 			ax25_dama_on(ax25);
 
 			/* according to DK4EG´s spec we are required to
-			 * send a RR RESPONSE FINAL NR=0. Please mail
-			 * <jreuter@poboxes.com> if this causes problems
-			 * with the TheNetNode DAMA Master implementation.
-			 */ 
+			 * send a RR RESPONSE FINAL NR=0. 
+			 */
 
 			ax25_std_enquiry_response(ax25);
 			break;
@@ -314,4 +310,3 @@ int ax25_ds_frame_in(ax25_cb *ax25, struct sk_buff *skb, int type)
 	return queued;
 }
 
-#endif

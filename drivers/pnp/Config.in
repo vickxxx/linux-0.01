@@ -1,16 +1,11 @@
 #
 # Plug and Play configuration
 #
-
 mainmenu_option next_comment
-comment 'Plug and Play support'
- 
-bool 'Plug and Play support' CONFIG_PNP
+comment 'Plug and Play configuration'
 
-if [ "$CONFIG_PNP" = "y" ]; then
-  if [ "$CONFIG_PARPORT" != "n" ]; then
-    dep_tristate '  Auto-probe for parallel devices' CONFIG_PNP_PARPORT $CONFIG_PARPORT
-  fi
-fi
+tristate 'Plug and Play support' CONFIG_PNP
+
+dep_tristate '  ISA Plug and Play support' CONFIG_ISAPNP $CONFIG_PNP
 
 endmenu

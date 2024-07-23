@@ -3,7 +3,7 @@
  *
  *	Copyright (C) 1995 David A Rusling
  *	Copyright (C) 1996 Jay A Estabrook
- *	Copyright (C) 1998 Richard Henderson
+ *	Copyright (C) 1998, 1999 Richard Henderson
  *
  * Code supporting the ALCOR and XLT (XL-300/366/433).
  */
@@ -27,48 +27,76 @@
 #include <asm/core_cia.h>
 
 #include "proto.h"
-#include "irq.h"
-#include "bios32.h"
-#include "machvec.h"
+#include "irq_impl.h"
+#include "pci_impl.h"
+#include "machvec_impl.h"
 
 
-static void 
-alcor_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
+/* Note mask bit is true for ENABLED irqs.  */
+static unsigned long cached_irq_mask;
+
+static inline void
+alcor_update_irq_hw(unsigned long mask)
 {
-	if (irq >= 16) {
-		/* On Alcor, at least, lines 20..30 are not connected and can
-		   generate spurrious interrupts if we turn them on while IRQ
-		   probing.  So explicitly mask them out. */
-		mask |= 0x7ff000000000UL;
+	*(vuip)GRU_INT_MASK = mask;
+	mb();
+}
 
-		/* Note inverted sense of mask bits: */
-		*(vuip)GRU_INT_MASK = ~(mask >> 16);
-		mb();
-	}
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);	/* ISA PIC2 */
-	else
-		outb(mask, 0x21);	/* ISA PIC1 */
+static inline void
+alcor_enable_irq(unsigned int irq)
+{
+	alcor_update_irq_hw(cached_irq_mask |= 1UL << (irq - 16));
 }
 
 static void
-alcor_ack_irq(unsigned long irq)
+alcor_disable_irq(unsigned int irq)
 {
-	if (irq < 16) {
-		/* Ack the interrupt making it the lowest priority */
-		/*  First the slave .. */
-		if (irq > 7) {
-			outb(0xE0 | (irq - 8), 0xa0);
-			irq = 2;
-		}
-		/* .. then the master */
-		outb(0xE0 | irq, 0x20);
-
-		/* On ALCOR/XLT, need to dismiss interrupt via GRU. */
-		*(vuip)GRU_INT_CLEAR = 0x80000000; mb();
-		*(vuip)GRU_INT_CLEAR = 0x00000000; mb();
-	}
+	alcor_update_irq_hw(cached_irq_mask &= ~(1UL << (irq - 16)));
 }
+
+static void
+alcor_mask_and_ack_irq(unsigned int irq)
+{
+	alcor_disable_irq(irq);
+
+	/* On ALCOR/XLT, need to dismiss interrupt via GRU. */
+	*(vuip)GRU_INT_CLEAR = 1 << (irq - 16); mb();
+	*(vuip)GRU_INT_CLEAR = 0; mb();
+}
+
+static unsigned int
+alcor_startup_irq(unsigned int irq)
+{
+	alcor_enable_irq(irq);
+	return 0;
+}
+
+static void
+alcor_isa_mask_and_ack_irq(unsigned int irq)
+{
+	i8259a_mask_and_ack_irq(irq);
+
+	/* On ALCOR/XLT, need to dismiss interrupt via GRU. */
+	*(vuip)GRU_INT_CLEAR = 0x80000000; mb();
+	*(vuip)GRU_INT_CLEAR = 0; mb();
+}
+
+static void
+alcor_end_irq(unsigned int irq)
+{
+	if (!(irq_desc[irq].status & (IRQ_DISABLED|IRQ_INPROGRESS)))
+		alcor_enable_irq(irq);
+}
+
+static struct hw_interrupt_type alcor_irq_type = {
+	typename:	"ALCOR",
+	startup:	alcor_startup_irq,
+	shutdown:	alcor_disable_irq,
+	enable:		alcor_enable_irq,
+	disable:	alcor_disable_irq,
+	ack:		alcor_mask_and_ack_irq,
+	end:		alcor_end_irq,
+};
 
 static void
 alcor_device_interrupt(unsigned long vector, struct pt_regs *regs)
@@ -89,26 +117,39 @@ alcor_device_interrupt(unsigned long vector, struct pt_regs *regs)
 		if (i == 31) {
 			isa_device_interrupt(vector, regs);
 		} else {
-			handle_irq(16 + i, 16 + i, regs);
+			handle_irq(16 + i, regs);
 		}
 	}
 }
 
-static void
+static void __init
 alcor_init_irq(void)
 {
-	STANDARD_INIT_IRQ_PROLOG;
+	long i;
 
 	if (alpha_using_srm)
 		alpha_mv.device_interrupt = srm_device_interrupt;
 
-	*(vuip)GRU_INT_MASK  = ~(alpha_irq_mask >> 16); mb(); /* invert */
-	*(vuip)GRU_INT_EDGE  = 0U; mb();		/* all are level */
+	*(vuip)GRU_INT_MASK  = 0; mb();			/* all disabled */
+	*(vuip)GRU_INT_EDGE  = 0; mb();			/* all are level */
 	*(vuip)GRU_INT_HILO  = 0x80000000U; mb();	/* ISA only HI */
-	*(vuip)GRU_INT_CLEAR = 0UL; mb();		/* all clear */
+	*(vuip)GRU_INT_CLEAR = 0; mb();			/* all clear */
 
-	enable_irq(16 + 31);		/* enable (E)ISA PIC cascade */
-	enable_irq(2);			/* enable cascade */
+	for (i = 16; i < 48; ++i) {
+		/* On Alcor, at least, lines 20..30 are not connected
+		   and can generate spurrious interrupts if we turn them
+		   on while IRQ probing.  */
+		if (i >= 16+20 && i <= 16+30)
+			continue;
+		irq_desc[i].status = IRQ_DISABLED | IRQ_LEVEL;
+		irq_desc[i].handler = &alcor_irq_type;
+	}
+	i8259a_irq_type.ack = alcor_isa_mask_and_ack_irq;
+
+	init_i8259a_irqs();
+	common_init_isa_dma();
+
+	setup_irq(16+31, &isa_cascade_irqaction);
 }
 
 
@@ -158,9 +199,9 @@ alcor_init_irq(void)
  */
 
 static int __init
-alcor_map_irq(struct pci_dev *dev, int slot, int pin)
+alcor_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[7][5] __initlocaldata = {
+	static char irq_tab[7][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		/* note: IDSEL 17 is XLT only */
 		{16+13, 16+13, 16+13, 16+13, 16+13},	/* IdSel 17,  TULIP  */
@@ -175,24 +216,14 @@ alcor_map_irq(struct pci_dev *dev, int slot, int pin)
 	return COMMON_TABLE_LOOKUP;
 }
 
-static void __init
-alcor_pci_fixup(void)
-{
-	layout_all_busses(EISA_DEFAULT_IO_BASE, DEFAULT_MEM_BASE);
-	common_pci_fixup(alcor_map_irq, common_swizzle);
-}
-
-
 static void
-alcor_kill_arch (int mode, char *reboot_cmd)
+alcor_kill_arch(int mode)
 {
 	/* Who said DEC engineer's have no sense of humor? ;-)  */
 	if (alpha_using_srm) {
 		*(vuip) GRU_RESET = 0x0000dead;
 		mb();
 	}
-
-	generic_kill_arch(mode, reboot_cmd);
 }
 
 
@@ -209,18 +240,19 @@ struct alpha_machine_vector alcor_mv __initmv = {
 	DO_CIA_BUS,
 	machine_check:		cia_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		EISA_DEFAULT_IO_BASE,
+	min_mem_address:	CIA_DEFAULT_MEM_BASE,
 
 	nr_irqs:		48,
-	irq_probe_mask:		ALCOR_PROBE_MASK,
-	update_irq_hw:		alcor_update_irq_hw,
-	ack_irq:		alcor_ack_irq,
 	device_interrupt:	alcor_device_interrupt,
 
 	init_arch:		cia_init_arch,
 	init_irq:		alcor_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		alcor_pci_fixup,
+	init_rtc:		common_init_rtc,
+	init_pci:		cia_init_pci,
 	kill_arch:		alcor_kill_arch,
+	pci_map_irq:		alcor_map_irq,
+	pci_swizzle:		common_swizzle,
 
 	sys: { cia: {
 	    gru_int_req_bits:	ALCOR_GRU_INT_REQ_BITS
@@ -238,18 +270,19 @@ struct alpha_machine_vector xlt_mv __initmv = {
 	DO_CIA_BUS,
 	machine_check:		cia_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		EISA_DEFAULT_IO_BASE,
+	min_mem_address:	CIA_DEFAULT_MEM_BASE,
 
 	nr_irqs:		48,
-	irq_probe_mask:		ALCOR_PROBE_MASK,
-	update_irq_hw:		alcor_update_irq_hw,
-	ack_irq:		alcor_ack_irq,
 	device_interrupt:	alcor_device_interrupt,
 
 	init_arch:		cia_init_arch,
 	init_irq:		alcor_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		alcor_pci_fixup,
+	init_rtc:		common_init_rtc,
+	init_pci:		cia_init_pci,
 	kill_arch:		alcor_kill_arch,
+	pci_map_irq:		alcor_map_irq,
+	pci_swizzle:		common_swizzle,
 
 	sys: { cia: {
 	    gru_int_req_bits:	XLT_GRU_INT_REQ_BITS

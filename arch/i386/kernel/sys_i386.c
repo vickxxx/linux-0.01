@@ -31,14 +31,45 @@ asmlinkage int sys_pipe(unsigned long * fildes)
 	int fd[2];
 	int error;
 
-	lock_kernel();
 	error = do_pipe(fd);
-	unlock_kernel();
 	if (!error) {
 		if (copy_to_user(fildes, fd, 2*sizeof(int)))
 			error = -EFAULT;
 	}
 	return error;
+}
+
+/* common code for old and new mmaps */
+static inline long do_mmap2(
+	unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags,
+	unsigned long fd, unsigned long pgoff)
+{
+	int error = -EBADF;
+	struct file * file = NULL;
+
+	flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	if (!(flags & MAP_ANONYMOUS)) {
+		file = fget(fd);
+		if (!file)
+			goto out;
+	}
+
+	down(&current->mm->mmap_sem);
+	error = do_mmap_pgoff(file, addr, len, prot, flags, pgoff);
+	up(&current->mm->mmap_sem);
+
+	if (file)
+		fput(file);
+out:
+	return error;
+}
+
+asmlinkage long sys_mmap2(unsigned long addr, unsigned long len,
+	unsigned long prot, unsigned long flags,
+	unsigned long fd, unsigned long pgoff)
+{
+	return do_mmap2(addr, len, prot, flags, fd, pgoff);
 }
 
 /*
@@ -59,31 +90,21 @@ struct mmap_arg_struct {
 
 asmlinkage int old_mmap(struct mmap_arg_struct *arg)
 {
-	int error = -EFAULT;
-	struct file * file = NULL;
 	struct mmap_arg_struct a;
+	int err = -EFAULT;
 
 	if (copy_from_user(&a, arg, sizeof(a)))
-		return -EFAULT;
+		goto out;
 
-	down(&current->mm->mmap_sem);
-	lock_kernel();
-	if (!(a.flags & MAP_ANONYMOUS)) {
-		error = -EBADF;
-		file = fget(a.fd);
-		if (!file)
-			goto out;
-	}
-	a.flags &= ~(MAP_EXECUTABLE | MAP_DENYWRITE);
+	err = -EINVAL;
+	if (a.offset & ~PAGE_MASK)
+		goto out;
 
-	error = do_mmap(file, a.addr, a.len, a.prot, a.flags, a.offset);
-	if (file)
-		fput(file);
+	err = do_mmap2(a.addr, a.len, a.prot, a.flags, a.fd, a.offset >> PAGE_SHIFT);
 out:
-	unlock_kernel();
-	up(&current->mm->mmap_sem);
-	return error;
+	return err;
 }
+
 
 extern asmlinkage int sys_select(int, fd_set *, fd_set *, fd_set *, struct timeval *);
 
@@ -116,86 +137,71 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 	version = call >> 16; /* hack for backward compatibility */
 	call &= 0xffff;
 
-	if (call <= SEMCTL)
-		switch (call) {
-		case SEMOP:
-			return sys_semop (first, (struct sembuf *)ptr, second);
-		case SEMGET:
-			return sys_semget (first, second, third);
-		case SEMCTL: {
-			union semun fourth;
+	switch (call) {
+	case SEMOP:
+		return sys_semop (first, (struct sembuf *)ptr, second);
+	case SEMGET:
+		return sys_semget (first, second, third);
+	case SEMCTL: {
+		union semun fourth;
+		if (!ptr)
+			return -EINVAL;
+		if (get_user(fourth.__pad, (void **) ptr))
+			return -EFAULT;
+		return sys_semctl (first, second, third, fourth);
+	}
+
+	case MSGSND:
+		return sys_msgsnd (first, (struct msgbuf *) ptr, 
+				   second, third);
+	case MSGRCV:
+		switch (version) {
+		case 0: {
+			struct ipc_kludge tmp;
 			if (!ptr)
 				return -EINVAL;
-			if (get_user(fourth.__pad, (void **) ptr))
+			
+			if (copy_from_user(&tmp,
+					   (struct ipc_kludge *) ptr, 
+					   sizeof (tmp)))
 				return -EFAULT;
-			return sys_semctl (first, second, third, fourth);
-			}
-		default:
-			return -EINVAL;
+			return sys_msgrcv (first, tmp.msgp, second,
+					   tmp.msgtyp, third);
 		}
+		default:
+			return sys_msgrcv (first,
+					   (struct msgbuf *) ptr,
+					   second, fifth, third);
+		}
+	case MSGGET:
+		return sys_msgget ((key_t) first, second);
+	case MSGCTL:
+		return sys_msgctl (first, second, (struct msqid_ds *) ptr);
 
-	if (call <= MSGCTL) 
-		switch (call) {
-		case MSGSND:
-			return sys_msgsnd (first, (struct msgbuf *) ptr, 
-					  second, third);
-		case MSGRCV:
-			switch (version) {
-			case 0: {
-				struct ipc_kludge tmp;
-				if (!ptr)
-					return -EINVAL;
-				
-				if (copy_from_user(&tmp,
-						   (struct ipc_kludge *) ptr, 
-						   sizeof (tmp)))
-					return -EFAULT;
-				return sys_msgrcv (first, tmp.msgp, second,
-						   tmp.msgtyp, third);
-				}
-			default:
-				return sys_msgrcv (first,
-						   (struct msgbuf *) ptr,
-						   second, fifth, third);
-			}
-		case MSGGET:
-			return sys_msgget ((key_t) first, second);
-		case MSGCTL:
-			return sys_msgctl (first, second,
-					   (struct msqid_ds *) ptr);
-		default:
-			return -EINVAL;
+	case SHMAT:
+		switch (version) {
+		default: {
+			ulong raddr;
+			ret = sys_shmat (first, (char *) ptr, second, &raddr);
+			if (ret)
+				return ret;
+			return put_user (raddr, (ulong *) third);
 		}
-	if (call <= SHMCTL) 
-		switch (call) {
-		case SHMAT:
-			switch (version) {
-			default: {
-				ulong raddr;
-				ret = sys_shmat (first, (char *) ptr,
-						 second, &raddr);
-				if (ret)
-					return ret;
-				return put_user (raddr, (ulong *) third);
-			}
-			case 1:	/* iBCS2 emulator entry point */
-				if (!segment_eq(get_fs(), get_ds()))
-					return -EINVAL;
-				return sys_shmat (first, (char *) ptr,
-						  second, (ulong *) third);
-			}
-		case SHMDT: 
-			return sys_shmdt ((char *)ptr);
-		case SHMGET:
-			return sys_shmget (first, second, third);
-		case SHMCTL:
-			return sys_shmctl (first, second,
-					   (struct shmid_ds *) ptr);
-		default:
-			return -EINVAL;
+		case 1:	/* iBCS2 emulator entry point */
+			if (!segment_eq(get_fs(), get_ds()))
+				return -EINVAL;
+			return sys_shmat (first, (char *) ptr, second, (ulong *) third);
 		}
-	
-	return -EINVAL;
+	case SHMDT: 
+		return sys_shmdt ((char *)ptr);
+	case SHMGET:
+		return sys_shmget (first, second, third);
+	case SHMCTL:
+		return sys_shmctl (first, second,
+				   (struct shmid_ds *) ptr);
+	default:
+		return -EINVAL;
+	}
 }
 
 /*
@@ -206,9 +212,9 @@ asmlinkage int sys_uname(struct old_utsname * name)
 	int err;
 	if (!name)
 		return -EFAULT;
-	down(&uts_sem);
+	down_read(&uts_sem);
 	err=copy_to_user(name, &system_utsname, sizeof (*name));
-	up(&uts_sem);
+	up_read(&uts_sem);
 	return err?-EFAULT:0;
 }
 
@@ -221,7 +227,7 @@ asmlinkage int sys_olduname(struct oldold_utsname * name)
 	if (!access_ok(VERIFY_WRITE,name,sizeof(struct oldold_utsname)))
 		return -EFAULT;
   
-  	down(&uts_sem);
+  	down_read(&uts_sem);
 	
 	error = __copy_to_user(&name->sysname,&system_utsname.sysname,__OLD_UTS_LEN);
 	error |= __put_user(0,name->sysname+__OLD_UTS_LEN);
@@ -234,7 +240,7 @@ asmlinkage int sys_olduname(struct oldold_utsname * name)
 	error |= __copy_to_user(&name->machine,&system_utsname.machine,__OLD_UTS_LEN);
 	error |= __put_user(0,name->machine+__OLD_UTS_LEN);
 	
-	up(&uts_sem);
+	up_read(&uts_sem);
 	
 	error = error ? -EFAULT : 0;
 

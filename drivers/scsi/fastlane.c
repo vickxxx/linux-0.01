@@ -22,6 +22,9 @@
  *    routines in this file used to be inline!
  */
 
+#include <linux/module.h>
+
+#include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/delay.h>
 #include <linux/types.h>
@@ -38,6 +41,7 @@
 
 #include <linux/zorro.h>
 #include <asm/irq.h>
+#include <asm/io.h>
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
 
@@ -77,25 +81,26 @@ volatile unsigned char cmd_buffer[16];
 				 */
 
 /***************************************************************** Detection */
-int fastlane_esp_detect(Scsi_Host_Template *tpnt)
+int __init fastlane_esp_detect(Scsi_Host_Template *tpnt)
 {
 	struct NCR_ESP *esp;
-	const struct ConfigDev *esp_dev;
-	unsigned int key;
+	struct zorro_dev *z = NULL;
 	unsigned long address;
 
-	if ((key = zorro_find(ZORRO_PROD_PHASE5_BLIZZARD_1230_II_FASTLANE_Z3_CYBERSCSI_CYBERSTORM060, 0, 0))){
-
-		esp_dev = zorro_get_board(key);
-
+	if ((z = zorro_find_device(ZORRO_PROD_PHASE5_BLIZZARD_1230_II_FASTLANE_Z3_CYBERSCSI_CYBERSTORM060, z))) {
+	    unsigned long board = z->resource.start;
+	    if (request_mem_region(board+FASTLANE_ESP_ADDR,
+				   sizeof(struct ESP_regs), "NCR53C9x")) {
 		/* Check if this is really a fastlane controller. The problem
 		 * is that also the cyberstorm and blizzard controllers use
 		 * this ID value. Fortunately only Fastlane maps in Z3 space
 		 */
-		if((unsigned long)esp_dev->cd_BoardAddr < 0x1000000)
+		if (board < 0x1000000) {
+			release_mem_region(board+FASTLANE_ESP_ADDR,
+					   sizeof(struct ESP_regs));
 			return 0;
-
-		esp = esp_allocate(tpnt, (void *) esp_dev);
+		}
+		esp = esp_allocate(tpnt, (void *)board+FASTLANE_ESP_ADDR);
 
 		/* Do command transfer with programmed I/O */
 		esp->do_pio_cmds = 1;
@@ -137,14 +142,13 @@ int fastlane_esp_detect(Scsi_Host_Template *tpnt)
 
 		/* Map the physical address space into virtual kernel space */
 		address = (unsigned long)
-			kernel_map((unsigned long)esp_dev->cd_BoardAddr,
-				   esp_dev->cd_BoardSize,
-				   KERNELMAP_NOCACHE_SER,
-				   NULL);
+			ioremap_nocache(board, z->resource.end-board+1);
 
 		if(!address){
 			printk("Could not remap Fastlane controller memory!");
 			scsi_unregister (esp->ehost);
+			release_mem_region(board+FASTLANE_ESP_ADDR,
+					   sizeof(struct ESP_regs));
 			return 0;
 		}
 
@@ -163,27 +167,26 @@ int fastlane_esp_detect(Scsi_Host_Template *tpnt)
 		
 		/* Set the command buffer */
 		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = virt_to_bus((unsigned long) cmd_buffer);
+		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
 
 		esp->irq = IRQ_AMIGA_PORTS;
-		request_irq(IRQ_AMIGA_PORTS, esp_intr, 0, 
+		esp->slot = board+FASTLANE_ESP_ADDR;
+		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
 			    "Fastlane SCSI", esp_intr);
 
 		/* Controller ID */
 		esp->scsi_id = 7;
 		
-		/* Check for differential SCSI-bus */
-		/* What is this stuff? */
+		/* We don't have a differential SCSI-bus. */
 		esp->diff = 0;
 
 		dma_clear(esp);
 		esp_initialize(esp);
 
-		zorro_config_board(key, 0);
-
-		printk("\nESP: Total of %d ESP hosts found, %d actually in use.\n", nesps,esps_in_use);
+		printk("ESP: Total of %d ESP hosts found, %d actually in use.\n", nesps, esps_in_use);
 		esps_running = esps_in_use;
 		return esps_in_use;
+	    }
 	}
 	return 0;
 }
@@ -312,7 +315,7 @@ static int dma_irq_p(struct NCR_ESP *esp)
 	   (dma_status & FASTLANE_DMA_CREQ) &&
 #endif
 	   (!(dma_status & FASTLANE_DMA_MINT)) &&
-	   ((((struct ESP_regs *) (esp->eregs))->esp_status) & ESP_STAT_INTR));
+	   (esp_read(((struct ESP_regs *) (esp->eregs))->esp_status) & ESP_STAT_INTR));
 }
 
 static void dma_led_off(struct NCR_ESP *esp)
@@ -342,4 +345,23 @@ static void dma_setup(struct NCR_ESP *esp, __u32 addr, int count, int write)
 	} else {
 		dma_init_write(esp, addr, count);
 	}
+}
+
+#define HOSTS_C
+
+#include "fastlane.h"
+
+static Scsi_Host_Template driver_template = SCSI_FASTLANE;
+#include "scsi_module.c"
+
+int fastlane_esp_release(struct Scsi_Host *instance)
+{
+#ifdef MODULE
+	unsigned long address = (unsigned long)((struct NCR_ESP *)instance->hostdata)->edev;
+	esp_deallocate((struct NCR_ESP *)instance->hostdata);
+	esp_release();
+	release_mem_region(address, sizeof(struct ESP_regs));
+	free_irq(IRQ_AMIGA_PORTS, esp_intr);
+#endif
+	return 1;
 }

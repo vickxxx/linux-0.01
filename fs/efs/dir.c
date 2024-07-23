@@ -8,46 +8,13 @@
 
 static int efs_readdir(struct file *, void *, filldir_t);
 
-static struct file_operations efs_dir_operations = {
-	NULL,			/* lseek */
-	NULL,			/* read */
-	NULL,			/* write */
-	efs_readdir,		/* readdir */
-	NULL,			/* poll */
-	NULL,			/* ioctl */
-	NULL,			/* mmap */
-	NULL,			/* open */
-	NULL,			/* flush */
-	NULL,			/* release */
-	NULL,			/* fsync */
-	NULL,			/* fasync */
-	NULL,			/* check_media_change */
-	NULL			/* revalidate */
+struct file_operations efs_dir_operations = {
+	read:		generic_read_dir,
+	readdir:	efs_readdir,
 };
 
-extern int efs_get_block(struct inode *, long, struct buffer_head *, int);
-
 struct inode_operations efs_dir_inode_operations = {
-	&efs_dir_operations,	/* default directory file-ops */
-	NULL,			/* create */
-	efs_lookup,		/* lookup */
-	NULL,			/* link */
-	NULL,			/* unlink */
-	NULL,			/* symlink */
-	NULL,			/* mkdir */
-	NULL,			/* rmdir */
-	NULL,			/* mknod */
-	NULL,			/* rename */
-	NULL,			/* readlink */
-	NULL,			/* follow_link */
-	efs_get_block,		/* get_block */
-	NULL,			/* readpage */
-	NULL,			/* writepage */
-	NULL,			/* flushpage */
-	NULL,			/* truncate */
-	NULL,			/* permission */
-	NULL,			/* smap */
-	NULL			/* revalidate */
+	lookup:		efs_lookup,
 };
 
 static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
@@ -60,9 +27,6 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 	efs_block_t		block;
 	int			slot, namelen;
 	char			*nameptr;
-
-	if (!inode || !S_ISDIR(inode->i_mode))
-		return -EBADF;
 
 	if (inode->i_size & (EFS_DIRBSIZE-1))
 		printk(KERN_WARNING "EFS: WARNING: readdir(): directory size not a multiple of EFS_DIRBSIZE\n");
@@ -111,7 +75,7 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 				filp->f_pos = (block << EFS_DIRBSIZE_BITS) | slot;
 
 				/* copy filename and data in dirslot */
-				filldir(dirent, nameptr, namelen, filp->f_pos, inodenum);
+				filldir(dirent, nameptr, namelen, filp->f_pos, inodenum, DT_UNKNOWN);
 
 				/* sanity check */
 				if (nameptr - (char *) dirblock + namelen > EFS_DIRBSIZE) {

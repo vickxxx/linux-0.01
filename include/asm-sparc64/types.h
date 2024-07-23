@@ -1,4 +1,4 @@
-/* $Id: types.h,v 1.2 1997/12/22 13:28:33 mj Exp $ */
+/* $Id: types.h,v 1.3 2000/01/28 13:43:15 jj Exp $ */
 #ifndef _SPARC64_TYPES_H
 #define _SPARC64_TYPES_H
 
@@ -44,6 +44,10 @@ typedef __signed__ long s64;
 typedef unsigned long u64;
 
 #define BITS_PER_LONG 64
+
+/* Dma addresses are 32-bits wide for now.  */
+
+typedef u32 dma_addr_t;
 
 #endif /* __KERNEL__ */
 

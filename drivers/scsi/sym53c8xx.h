@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998  Gerard Roudier <groudier@club-internet.fr>
+**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -65,8 +65,6 @@
 **	Used by hosts.c and sym53c8xx.c with module configuration.
 */
 
-#if defined(HOSTS_C) || defined(MODULE)
-
 #include <scsi/scsicam.h>
 
 int sym53c8xx_abort(Scsi_Cmnd *);
@@ -110,7 +108,5 @@ int sym53c8xx_release(struct Scsi_Host *);
 			0,	0,	DISABLE_CLUSTERING} 
  
 #endif /* LINUX_VERSION_CODE */
-
-#endif /* defined(HOSTS_C) || defined(MODULE) */ 
 
 #endif /* SYM53C8XX_H */

@@ -270,18 +270,13 @@
 
  **************************************************************************/
 
-#ifdef PCMCIA
-#define MODULE
-#endif
-
-#ifdef MODULE
 #include <linux/module.h>
-#endif
 
 #ifdef PCMCIA
 #undef MODULE
 #endif
 
+#include <linux/init.h>
 #include <linux/sched.h>
 #include <asm/io.h>
 #include <linux/blk.h>
@@ -289,7 +284,7 @@
 #include "hosts.h"
 #include "fdomain.h"
 #include <asm/system.h>
-#include <asm/spinlock.h>
+#include <linux/spinlock.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
@@ -299,11 +294,6 @@
 #include <linux/delay.h>
 
 #include <linux/config.h>	/* for CONFIG_PCI */
-
-struct proc_dir_entry proc_scsi_fdomain = {
-    PROC_SCSI_FDOMAIN, 7, "fdomain",
-    S_IFDIR | S_IRUGO | S_IXUGO, 2
-};
   
 #define VERSION          "$Revision: 5.50 $"
 
@@ -434,8 +424,8 @@ extern void              do_fdomain_16x0_intr( int irq, void *dev_id,
                                    parameters.  For example:
 				   insmod fdomain fdomain=0x140,11
 				*/
-static int               fdomain[]={ 0, 0, 0 };
-MODULE_PARM(fdomain, "2-3i");
+static char * fdomain = NULL;
+MODULE_PARM(fdomain, "s");
 #endif
 
 static unsigned long addresses[] = {
@@ -570,20 +560,29 @@ static void print_banner( struct Scsi_Host *shpnt )
    printk( "\n" );
 }
 
-void fdomain_setup( char *str, int *ints )
+static int __init fdomain_setup( char *str )
 {
-   if (setup_called++ || ints[0] < 2 || ints[0] > 3) {
-      printk( "scsi: <fdomain>"
-	      " Usage: fdomain=<PORT_BASE>,<IRQ>[,<ADAPTER_ID>]\n" );
-      printk( "scsi: <fdomain> Bad LILO/INSMOD parameters?\n" );
-   }
+	int ints[4];
 
-   port_base       = ints[0] >= 1 ? ints[1] : 0;
-   interrupt_level = ints[0] >= 2 ? ints[2] : 0;
-   this_id         = ints[0] >= 3 ? ints[3] : 0;
+	(void)get_options(str, ARRAY_SIZE(ints), ints);
+
+	if (setup_called++ || ints[0] < 2 || ints[0] > 3) {
+		printk( "scsi: <fdomain>"
+		" Usage: fdomain=<PORT_BASE>,<IRQ>[,<ADAPTER_ID>]\n" );
+		printk( "scsi: <fdomain> Bad LILO/INSMOD parameters?\n" );
+		return 0;
+	}
+
+	port_base       = ints[0] >= 1 ? ints[1] : 0;
+	interrupt_level = ints[0] >= 2 ? ints[2] : 0;
+	this_id         = ints[0] >= 3 ? ints[3] : 0;
    
-   bios_major = bios_minor = -1; /* Use geometry for BIOS version >= 3.4 */
+	bios_major = bios_minor = -1; /* Use geometry for BIOS version >= 3.4 */
+	++setup_called;
+	return 1;
 }
+
+__setup("fdomain=", fdomain_setup);
 
 
 static void do_pause( unsigned amount )	/* Pause for amount*10 milliseconds */
@@ -694,19 +693,20 @@ static int fdomain_get_irq( int base )
 static int fdomain_isa_detect( int *irq, int *iobase )
 {
    int i, j;
-   int base;
+   int base = 0xdeadbeef;
    int flag = 0;
 
 #if DEBUG_DETECT
    printk( "scsi: <fdomain> fdomain_isa_detect:" );
 #endif
 
+
    for (i = 0; !bios_base && i < ADDRESS_COUNT; i++) {
 #if DEBUG_DETECT
       printk( " %lx(%lx),", addresses[i], bios_base );
 #endif
       for (j = 0; !bios_base && j < SIGNATURE_COUNT; j++) {
-	 if (check_signature(addresses[i] + signatures[j].sig_offset,
+	 if (isa_check_signature(addresses[i] + signatures[j].sig_offset,
 			     signatures[j].signature,
 			     signatures[j].sig_length )) {
 	    bios_major = signatures[j].major_bios_version;
@@ -828,6 +828,7 @@ static int fdomain_pci_bios_detect( int *irq, int *iobase )
 			       PCI_DEVICE_ID_FD_36C70,
 			       pdev)) == NULL)
      return 0;
+   if (pci_enable_device(pdev)) return 0;
        
 #if DEBUG_DETECT
    printk( "scsi: <fdomain> TMC-3260 detect:"
@@ -840,14 +841,14 @@ static int fdomain_pci_bios_detect( int *irq, int *iobase )
    /* We now have the appropriate device function for the FD board so we
       just read the PCI config info from the registers.  */
 
-   pci_base = pdev->base_address[0];
+   pci_base = pci_resource_start(pdev, 0);
    pci_irq = pdev->irq;
 
    /* Now we have the I/O base address and interrupt from the PCI
       configuration registers. */
 
    *irq    = pci_irq;
-   *iobase = (pci_base & PCI_BASE_ADDRESS_IO_MASK);
+   *iobase = pci_base;
 
 #if DEBUG_DETECT
    printk( "scsi: <fdomain> TMC-3260 detect:"
@@ -875,6 +876,8 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
    int              retcode;
    struct Scsi_Host *shpnt;
 #if DO_DETECT
+   int i = 0;
+   int j = 0;
    const int        buflen = 255;
    Scsi_Cmnd        SCinit;
    unsigned char    do_inquiry[] =       { INQUIRY, 0, 0, 0, buflen, 0 };
@@ -884,16 +887,11 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
    unsigned char    buf[buflen];
 #endif
 
-   tpnt->proc_dir = &proc_scsi_fdomain;
+   tpnt->proc_name = "fdomain";
 
 #ifdef MODULE
-   if (fdomain[0] || fdomain[1] || fdomain[2]) {
-      port_base       = fdomain[0];
-      interrupt_level = fdomain[1];
-      this_id         = fdomain[2];
-      bios_major = bios_minor = -1;
-      ++setup_called;
-   }
+	if (fdomain)
+		fdomain_setup(fdomain);
 #endif
    
    if (setup_called) {
@@ -967,6 +965,8 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
 				   get resources.  */
 
    shpnt = scsi_register( tpnt, 0 );
+   if(shpnt == NULL)
+   	return 0;
    shpnt->irq = interrupt_level;
    shpnt->io_port = port_base;
    shpnt->n_io_port = 0x10;
@@ -2030,9 +2030,7 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
    return 0;
 }
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = FDOMAIN_16X0;
+static Scsi_Host_Template driver_template = FDOMAIN_16X0;
 
 #include "scsi_module.c"
-#endif

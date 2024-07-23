@@ -13,6 +13,7 @@
  * enhanced by Bjoern Brauel and Roman Hodek
  */
 
+#include <linux/config.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
@@ -24,6 +25,7 @@
 #include <linux/random.h>
 #include <linux/init.h>
 #include <linux/kbd_ll.h>
+#include <linux/kbd_kern.h>
 
 #include <asm/atariints.h>
 #include <asm/atarihw.h>
@@ -272,7 +274,7 @@ static unsigned int key_repeat_delay = DEFAULT_KEYB_REP_DELAY;
 static unsigned int key_repeat_rate  = DEFAULT_KEYB_REP_RATE;
 
 static unsigned char rep_scancode;
-static struct timer_list atakeyb_rep_timer = { NULL, NULL, 0, 0, atakeyb_rep };
+static struct timer_list atakeyb_rep_timer = { function: atakeyb_rep };
 
 static void atakeyb_rep( unsigned long ignore )
 
@@ -287,8 +289,8 @@ static void atakeyb_rep( unsigned long ignore )
 	/* A keyboard int may have come in before we disabled the irq, so
 	 * double-check whether rep_scancode is still != 0 */
 	if (rep_scancode) {
+		init_timer(&atakeyb_rep_timer);
 		atakeyb_rep_timer.expires = jiffies + key_repeat_rate;
-		atakeyb_rep_timer.prev = atakeyb_rep_timer.next = NULL;
 		add_timer( &atakeyb_rep_timer );
 
 		handle_scancode(rep_scancode, 1);
@@ -362,7 +364,7 @@ static void keyboard_interrupt(int irq, void *dummy, struct pt_regs *fp)
     if (acia_stat & ACIA_RDRF)	/* received a character */
     {
 	scancode = acia.key_data;	/* get it or reset the ACIA, I'll get it! */
-	mark_bh(KEYBOARD_BH);
+	tasklet_schedule(&keyboard_tasklet);
       interpret_scancode:
 	switch (kb_state.state)
 	{
@@ -444,7 +446,6 @@ static void keyboard_interrupt(int irq, void *dummy, struct pt_regs *fp)
 		    del_timer( &atakeyb_rep_timer );
 		    rep_scancode = scancode;
 		    atakeyb_rep_timer.expires = jiffies + key_repeat_delay;
-		    atakeyb_rep_timer.prev = atakeyb_rep_timer.next = NULL;
 		    add_timer( &atakeyb_rep_timer );
 		}
 
@@ -762,7 +763,7 @@ void atari_kbd_leds (unsigned int leds)
  * Martin Rogge, 20 Aug 1995
  */
  
-__initfunc(int atari_keyb_init(void))
+int __init atari_keyb_init(void)
 {
     /* setup key map */
     memcpy(key_maps[0], ataplain_map, sizeof(plain_map));
@@ -861,3 +862,16 @@ int atari_kbdrate( struct kbd_repeat *k )
 	
 	return( 0 );
 }
+
+int atari_kbd_translate(unsigned char keycode, unsigned char *keycodep, char raw_mode)
+{
+#ifdef CONFIG_MAGIC_SYSRQ
+        /* ALT+HELP pressed? */
+        if ((keycode == 98) && ((shift_state & 0xff) == 8))
+                *keycodep = 0xff;
+        else
+#endif
+                *keycodep = keycode;
+        return 1;
+}
+

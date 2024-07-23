@@ -1,3 +1,4 @@
+#define MSNFS	/* HACK HACK */
 /*
  * linux/fs/nfsd/export.c
  *
@@ -9,8 +10,6 @@
  * creates a client control block and adds it to the hash
  * table. Then, you call NFSCTL_EXPORT for each fs.
  *
- * You cannot currently read the export information from the
- * kernel. It would be nice to have a /proc file though.
  *
  * Copyright (C) 1995, 1996 Olaf Kirch, <okir@monad.swb.de>
  */
@@ -58,16 +57,14 @@ struct svc_clnthash {
 	struct svc_client *	h_client;
 };
 static struct svc_clnthash *	clnt_hash[CLIENT_HASHMAX];
-static svc_client *		clients = NULL;
-static int			initialized = 0;
+static svc_client *		clients;
+static int			initialized;
 
-static int			hash_lock = 0;
-static int			want_lock = 0;
-static int			hash_count = 0;
+static int			hash_lock;
+static int			want_lock;
+static int			hash_count;
 static DECLARE_WAIT_QUEUE_HEAD(	hash_wait );
 
-#define READLOCK		0
-#define WRITELOCK		1
 
 /*
  * Find a client's export for a device.
@@ -106,73 +103,19 @@ out:
 }
 
 /*
- * Check whether there are any exports for a device.
- */
-static int
-exp_device_in_use(kdev_t dev)
-{
-	struct svc_client *clp;
-
-	for (clp = clients; clp; clp = clp->cl_next) {
-		if (exp_find(clp, dev))
-			return 1;
-	}
-	return 0;
-}
-
-/*
- * Look up the device of the parent fs.
- */
-static inline int
-nfsd_parentdev(kdev_t *devp)
-{
-	struct super_block	*sb;
-
-	if (!(sb = get_super(*devp)) || !sb->s_root->d_covers)
-		return 0;
-	if (*devp == sb->s_root->d_covers->d_inode->i_dev)
-		return 0;
-	*devp = sb->s_root->d_covers->d_inode->i_dev;
-	return 1;
-}
-
-/*
  * Find the export entry for a given dentry.  <gam3@acm.org>
  */
 static svc_export *
 exp_parent(svc_client *clp, kdev_t dev, struct dentry *dentry)
 {
 	svc_export      *exp;
-	kdev_t		xdev = dev;
-	struct dentry	*xdentry = dentry;
-	struct dentry	*ndentry = NULL;
 
-	if (clp == NULL || dentry == NULL)
+	if (clp == NULL)
 		return NULL;
 
-	do {
-		xdev = dev;
-		do {
-			exp = clp->cl_export[EXPORT_HASH(xdev)];
-			if (exp)
-				do {
-					ndentry = exp->ex_dentry;
-				        if (ndentry == xdentry) {
-#ifdef NFSD_PARANOIA
-if (dev == xdev)
-	dprintk("nfsd: exp_parent submount over mount.\n");
-else
-	dprintk("nfsd: exp_parent found.\n");
-#endif
-						goto out;
-					}
-				} while (NULL != (exp = exp->ex_next));
-		} while (nfsd_parentdev(&xdev));
-		if (IS_ROOT(xdentry))
+	for (exp = clp->cl_export[EXPORT_HASH(dev)]; exp; exp = exp->ex_next)
+		if (is_subdir(dentry, exp->ex_dentry))
 			break;
-	} while ((xdentry = xdentry->d_parent));
-	exp = NULL;
-out:
 	return exp;
 }
 
@@ -185,30 +128,15 @@ static svc_export *
 exp_child(svc_client *clp, kdev_t dev, struct dentry *dentry)
 {
 	svc_export      *exp;
-	struct dentry	*xdentry = dentry;
-	struct dentry	*ndentry = NULL;
 
-	if (clp == NULL || dentry == NULL)
+	if (clp == NULL)
 		return NULL;
 
-	exp = clp->cl_export[EXPORT_HASH(dev)];
-	if (exp)
-		do {
-			ndentry = exp->ex_dentry;
-			if (ndentry)
-				while ((ndentry = ndentry->d_parent)) {
-					if (ndentry == xdentry) {
-#ifdef NFSD_PARANOIA
-dprintk("nfsd: exp_child mount under submount.\n");
-#endif
-						goto out;
-					}
-					if (IS_ROOT(ndentry))
-						break;
-				}
-		} while (NULL != (exp = exp->ex_next));
-	exp = NULL;
-out:
+	for (exp = clp->cl_export[EXPORT_HASH(dev)]; exp; exp = exp->ex_next) {
+		struct dentry	*ndentry = exp->ex_dentry;
+		if (ndentry && is_subdir(ndentry->d_parent, dentry))
+			break;
+	}
 	return exp;
 }
 
@@ -221,7 +149,7 @@ exp_export(struct nfsctl_export *nxp)
 	svc_client	*clp;
 	svc_export	*exp, *parent;
 	svc_export	**head;
-	struct dentry	*dentry = NULL;
+	struct nameidata nd;
 	struct inode	*inode = NULL;
 	int		i, err;
 	kdev_t		dev;
@@ -235,7 +163,7 @@ exp_export(struct nfsctl_export *nxp)
 
 	dprintk("exp_export called for %s:%s (%x/%ld fl %x).\n",
 			nxp->ex_client, nxp->ex_path,
-			nxp->ex_dev, nxp->ex_ino, nxp->ex_flags);
+			nxp->ex_dev, (long) nxp->ex_ino, nxp->ex_flags);
 	dev = to_kdev_t(nxp->ex_dev);
 	ino = nxp->ex_ino;
 
@@ -261,15 +189,13 @@ exp_export(struct nfsctl_export *nxp)
 	}
 
 	/* Look up the dentry */
-	err = -EINVAL;
-	dentry = lookup_dentry(nxp->ex_path, NULL, 0);
-	if (IS_ERR(dentry))
+	err = 0;
+	if (path_init(nxp->ex_path, LOOKUP_POSITIVE, &nd))
+		err = path_walk(nxp->ex_path, &nd);
+	if (err)
 		goto out_unlock;
 
-	err = -ENOENT;
-	inode = dentry->d_inode;
-	if (!inode)
-		goto finish;
+	inode = nd.dentry->d_inode;
 	err = -EINVAL;
 	if (inode->i_dev != dev || inode->i_ino != nxp->ex_ino) {
 		printk(KERN_DEBUG "exp_export: i_dev = %x, dev = %x\n",
@@ -286,16 +212,20 @@ exp_export(struct nfsctl_export *nxp)
 		goto finish;
 
 	err = -EINVAL;
-	if ((parent = exp_child(clp, dev, dentry)) != NULL) {
+	if (!(inode->i_sb->s_type->fs_flags & FS_REQUIRES_DEV) ||
+	    inode->i_sb->s_op->read_inode == NULL) {
+		dprintk("exp_export: export of invalid fs type.\n");
+		goto finish;
+	}
+
+	if ((parent = exp_child(clp, dev, nd.dentry)) != NULL) {
 		dprintk("exp_export: export not valid (Rule 3).\n");
 		goto finish;
 	}
 	/* Is this is a sub-export, must be a proper subset of FS */
-	if ((parent = exp_parent(clp, dev, dentry)) != NULL) {
-		if (dev == parent->ex_dev) {
-			dprintk("exp_export: sub-export not valid (Rule 2).\n");
-			goto finish;
-		}
+	if ((parent = exp_parent(clp, dev, nd.dentry)) != NULL) {
+		dprintk("exp_export: sub-export not valid (Rule 2).\n");
+		goto finish;
 	}
 
 	err = -ENOMEM;
@@ -306,7 +236,8 @@ exp_export(struct nfsctl_export *nxp)
 	strcpy(exp->ex_path, nxp->ex_path);
 	exp->ex_client = clp;
 	exp->ex_parent = parent;
-	exp->ex_dentry = dentry;
+	exp->ex_dentry = nd.dentry;
+	exp->ex_mnt = nd.mnt;
 	exp->ex_flags = nxp->ex_flags;
 	exp->ex_dev = dev;
 	exp->ex_ino = ino;
@@ -340,7 +271,7 @@ out:
 
 	/* Release the dentry */
 finish:
-	dput(dentry);
+	path_release(&nd);
 	goto out_unlock;
 }
 
@@ -354,6 +285,7 @@ exp_do_unexport(svc_export *unexp)
 	svc_export	*exp;
 	svc_client	*clp;
 	struct dentry	*dentry;
+	struct vfsmount *mnt;
 	struct inode	*inode;
 	int		i;
 
@@ -365,21 +297,13 @@ exp_do_unexport(svc_export *unexp)
 				exp->ex_parent = unexp->ex_parent;
 	}
 
-	/*
-	 * Check whether this is the last export for this device,
-	 * and if so flush any cached dentries.
-	 */
-	if (!exp_device_in_use(unexp->ex_dev)) {
-printk("exp_do_unexport: %s last use, flushing cache\n",
-	kdevname(unexp->ex_dev));
-		nfsd_fh_flush(unexp->ex_dev);
-	}
-
 	dentry = unexp->ex_dentry;
+	mnt = unexp->ex_mnt;
 	inode = dentry->d_inode;
 	if (unexp->ex_dev != inode->i_dev || unexp->ex_ino != inode->i_ino)
 		printk(KERN_WARNING "nfsd: bad dentry in unexport!\n");
 	dput(dentry);
+	mntput(mnt);
 
 	kfree(unexp);
 }
@@ -453,41 +377,41 @@ out:
  */
 int
 exp_rootfh(struct svc_client *clp, kdev_t dev, ino_t ino,
-	   char *path, struct knfs_fh *f)
+	   char *path, struct knfsd_fh *f, int maxsize)
 {
 	struct svc_export	*exp;
-	struct dentry		*dentry = NULL;
+	struct nameidata	nd;
 	struct inode		*inode;
 	struct svc_fh		fh;
 	int			err;
 
 	err = -EPERM;
 	if (path) {
-		if (!(dentry = lookup_dentry(path, NULL, 0))) {
+		if (path_init(path, LOOKUP_POSITIVE, &nd) &&
+		    path_walk(path, &nd)) {
 			printk("nfsd: exp_rootfh path not found %s", path);
-			return -EPERM;
+			return err;
 		}
-		dev = dentry->d_inode->i_dev;
-		ino = dentry->d_inode->i_ino;
+		dev = nd.dentry->d_inode->i_dev;
+		ino = nd.dentry->d_inode->i_ino;
 	
 		dprintk("nfsd: exp_rootfh(%s [%p] %s:%x/%ld)\n",
-		         path, dentry, clp->cl_ident, dev, ino);
-		exp = exp_parent(clp, dev, dentry);
+		         path, nd.dentry, clp->cl_ident, dev, (long) ino);
+		exp = exp_parent(clp, dev, nd.dentry);
 	} else {
 		dprintk("nfsd: exp_rootfh(%s:%x/%ld)\n",
-		         clp->cl_ident, dev, ino);
-		if ((exp = exp_get(clp, dev, ino)))
-			if (!(dentry = dget(exp->ex_dentry))) {
-				printk("exp_rootfh: Aieee, NULL dentry\n");
-				return -EPERM;
-			}
+		         clp->cl_ident, dev, (long) ino);
+		if ((exp = exp_get(clp, dev, ino))) {
+			nd.mnt = mntget(exp->ex_mnt);
+			nd.dentry = dget(exp->ex_dentry);
+		}
 	}
 	if (!exp) {
 		dprintk("nfsd: exp_rootfh export not found.\n");
 		goto out;
 	}
 
-	inode = dentry->d_inode;
+	inode = nd.dentry->d_inode;
 	if (!inode) {
 		printk("exp_rootfh: Aieee, NULL d_inode\n");
 		goto out;
@@ -496,20 +420,23 @@ exp_rootfh(struct svc_client *clp, kdev_t dev, ino_t ino,
 		printk("exp_rootfh: Aieee, ino/dev mismatch\n");
 		printk("exp_rootfh: arg[dev(%x):ino(%ld)]"
 		       " inode[dev(%x):ino(%ld)]\n",
-		       dev, ino, inode->i_dev, inode->i_ino);
+		       dev, (long) ino, inode->i_dev, (long) inode->i_ino);
 	}
 
 	/*
 	 * fh must be initialized before calling fh_compose
 	 */
-	fh_init(&fh);
-	fh_compose(&fh, exp, dentry);
-	memcpy(f, &fh.fh_handle, sizeof(struct knfs_fh));
+	fh_init(&fh, maxsize);
+	if (fh_compose(&fh, exp, dget(nd.dentry)))
+		err = -EINVAL;
+	else
+		err = 0;
+	memcpy(f, &fh.fh_handle, sizeof(struct knfsd_fh));
 	fh_put(&fh);
-	return 0;
 
 out:
-	dput(dentry);
+	if (path)
+		path_release(&nd);
 	return err;
 }
 
@@ -627,7 +554,12 @@ struct flags {
 	{ NFSEXP_UIDMAP, {"uidmap", ""}},
 	{ NFSEXP_KERBEROS, { "kerberos", ""}},
 	{ NFSEXP_SUNSECURE, { "sunsecure", ""}},
-	{ NFSEXP_CROSSMNT, {"crossmnt", ""}},
+	{ NFSEXP_CROSSMNT, {"nohide", ""}},
+	{ NFSEXP_NOSUBTREECHECK, {"no_subtree_check", ""}},
+	{ NFSEXP_NOAUTHNLM, {"insecure_locks", ""}},
+#ifdef NSMFS
+	{ NFSEXP_MSNFS, {"msnfs", ""}},
+#endif
 	{ 0, {"", ""}}
 };
 
@@ -684,7 +616,7 @@ exp_procfs_exports(char *buffer, char **start, off_t offset,
 							if (first++) len += sprintf(buffer+len, "%s", " ");
 							if (tmp->h_client != clp)
 								len += sprintf(buffer+len, "(");
-							len += sprintf(buffer+len, "%ld.%ld.%ld.%ld",
+							len += sprintf(buffer+len, "%d.%d.%d.%d",
 									htonl(addr.s_addr) >> 24 & 0xff,
 									htonl(addr.s_addr) >> 16 & 0xff,
 									htonl(addr.s_addr) >>  8 & 0xff,

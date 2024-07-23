@@ -14,8 +14,11 @@
 /*
  * ioctl commands
  */
-#define	SMB_IOC_GETMOUNTUID		_IOR('u', 1, __kernel_uid_t)
+#define	SMB_IOC_GETMOUNTUID		_IOR('u', 1, __kernel_old_uid_t)
 #define SMB_IOC_NEWCONN                 _IOW('u', 2, struct smb_conn_opt)
+
+/* __kernel_uid_t can never change, so we have to use __kernel_uid32_t */
+#define	SMB_IOC_GETMOUNTUID32		_IOR('u', 3, __kernel_uid32_t)
 
 #ifdef __KERNEL__
 
@@ -58,7 +61,7 @@ smb_vfree(void *obj)
 #else /* DEBUG_SMB_MALLOC */
 
 #define smb_kmalloc(s,p) kmalloc(s,p)
-#define smb_kfree_s(o,s) kfree_s(o,s)
+#define smb_kfree_s(o,s) kfree(o)
 #define smb_vmalloc(s)   vmalloc(s)
 #define smb_vfree(o)     vfree(o)
 
@@ -69,13 +72,6 @@ smb_vfree(void *obj)
  */
 #define SMB_F_CACHEVALID	0x01	/* directory cache valid */
 #define SMB_F_LOCALWRITE	0x02	/* file modified locally */
-
-/*
- * Bug fix flags
- */
-#define SMB_FIX_WIN95	0x0001	/* Win 95 server */
-#define SMB_FIX_OLDATTR	0x0002	/* Use core getattr (Win 95 speedup) */
-#define SMB_FIX_DIRATTR	0x0004	/* Use find_first for getattr */
 
 
 /* NT1 protocol capability bits */
@@ -98,9 +94,12 @@ int smb_mmap(struct file *, struct vm_area_struct *);
 
 /* linux/fs/smbfs/file.c */
 extern struct inode_operations smb_file_inode_operations;
+extern struct file_operations smb_file_operations;
+extern struct address_space_operations smb_file_aops;
 
 /* linux/fs/smbfs/dir.c */
 extern struct inode_operations smb_dir_inode_operations;
+extern struct file_operations smb_dir_operations;
 void smb_renew_times(struct dentry *);
 
 /* linux/fs/smbfs/ioctl.c */
@@ -114,9 +113,9 @@ int  smb_revalidate_inode(struct dentry *);
 int  smb_notify_change(struct dentry *, struct iattr *);
 unsigned long smb_invent_inos(unsigned long);
 struct inode *smb_iget(struct super_block *, struct smb_fattr *);
-extern int init_smb_fs(void);
 
 /* linux/fs/smbfs/proc.c */
+int smb_setcodepage(struct smb_sb_info *server, struct smb_nls_codepage *cp);
 __u32 smb_len(unsigned char *);
 __u8 *smb_encode_smb_length(__u8 *, __u32);
 __u8 *smb_setup_header(struct smb_sb_info *, __u8, __u16, __u16);
@@ -125,11 +124,10 @@ int smb_get_wsize(struct smb_sb_info *);
 int smb_newconn(struct smb_sb_info *, struct smb_conn_opt *);
 int smb_errno(struct smb_sb_info *);
 int smb_close(struct inode *);
-void smb_close_dentry(struct dentry *);
 int smb_close_fileid(struct dentry *, __u16);
 int smb_open(struct dentry *, int);
-int smb_proc_read(struct dentry *, off_t, int, char *);
-int smb_proc_write(struct dentry *, off_t, int, const char *);
+int smb_proc_read(struct inode *, off_t, int, char *);
+int smb_proc_write(struct inode *, off_t, int, const char *);
 int smb_proc_create(struct dentry *, __u16, time_t, __u16 *);
 int smb_proc_mv(struct dentry *, struct dentry *);
 int smb_proc_mkdir(struct dentry *);

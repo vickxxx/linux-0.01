@@ -177,25 +177,19 @@ extern int iso_date(char *, int);
 
 extern int parse_rock_ridge_inode(struct iso_directory_record *, struct inode *);
 extern int get_rock_ridge_filename(struct iso_directory_record *, char *, struct inode *);
+extern int isofs_name_translate(struct iso_directory_record *, char *, struct inode *);
 
-extern char * get_rock_ridge_symlink(struct inode *);
 extern int find_rock_ridge_relocation(struct iso_directory_record *, struct inode *);
 
-int get_joliet_filename(struct iso_directory_record *, struct inode *, unsigned char *);
+int get_joliet_filename(struct iso_directory_record *, unsigned char *, struct inode *);
 int get_acorn_filename(struct iso_directory_record *, char *, struct inode *);
 
 extern struct dentry *isofs_lookup(struct inode *, struct dentry *);
-extern int isofs_get_block(struct inode *, long, struct buffer_head *, int);
-extern int isofs_bmap(struct inode *, int);
-extern int init_iso9660_fs(void);
-extern int isofs_lookup_grandparent(struct inode *, int);
+extern struct buffer_head *isofs_bread(struct inode *, unsigned int, unsigned int);
 
-extern struct inode_operations isofs_file_inode_operations;
 extern struct inode_operations isofs_dir_inode_operations;
-extern struct inode_operations isofs_symlink_inode_operations;
-extern struct inode_operations isofs_chrdev_inode_operations;
-extern struct inode_operations isofs_blkdev_inode_operations;
-extern struct inode_operations isofs_fifo_inode_operations;
+extern struct file_operations isofs_dir_operations;
+extern struct address_space_operations isofs_symlink_aops;
 
 /* The following macros are used to check for memory leaks. */
 #ifdef LEAK_CHECK

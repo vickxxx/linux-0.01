@@ -9,6 +9,7 @@
 #if LINUX_VERSION_CODE >= 0x020100
 #include <linux/poll.h>
 #endif
+#include <linux/devfs_fs_kernel.h>
 
 struct video_device
 {
@@ -30,6 +31,7 @@ struct video_device
 	void *priv;		/* Used to be 'private' but that upsets C++ */
 	int busy;
 	int minor;
+	devfs_handle_t devfs_handle;
 };
 
 extern int videodev_init(void);
@@ -55,6 +57,10 @@ extern void video_unregister_device(struct video_device *);
 #define VID_TYPE_SCALES		128	/* Scalable */
 #define VID_TYPE_MONOCHROME	256	/* Monochrome only */
 #define VID_TYPE_SUBCAPTURE	512	/* Can capture subareas of the image */
+#define VID_TYPE_MPEG_DECODER	1024	/* Can decode MPEG streams */
+#define VID_TYPE_MPEG_ENCODER	2048	/* Can encode MPEG streams */
+#define VID_TYPE_MJPEG_DECODER	4096	/* Can decode MJPEG streams */
+#define VID_TYPE_MJPEG_ENCODER	8192	/* Can encode MJPEG streams */
 
 struct video_capability
 {
@@ -171,6 +177,7 @@ struct video_window
 	struct	video_clip *clips;	/* Set only */
 	int	clipcount;
 #define VIDEO_WINDOW_INTERLACE	1
+#define VIDEO_WINDOW_CHROMAKEY	16	/* Overlay by chromakey */
 #define VIDEO_CLIP_BITMAP	-1
 /* bitmap is 1024x625, a '1' bit represents a clipped pixel */
 #define VIDEO_CLIPMAP_SIZE	(128 * 625)
@@ -230,6 +237,47 @@ struct video_unit
 	int	teletext;	/* Teletext minor */
 };
 
+struct vbi_format {
+	__u32	sampling_rate;	/* in Hz */
+	__u32	samples_per_line;
+	__u32	sample_format;	/* VIDEO_PALETTE_RAW only (1 byte) */
+	__s32	start[2];	/* starting line for each frame */
+	__u32	count[2];	/* count of lines for each frame */
+	__u32	flags;
+#define	VBI_UNSYNC	1	/* can distingues between top/bottom field */
+#define	VBI_INTERLACED	2	/* lines are interlaced */
+};
+
+/* video_info is biased towards hardware mpeg encode/decode */
+/* but it could apply generically to any hardware compressor/decompressor */
+struct video_info
+{
+	__u32	frame_count;	/* frames output since decode/encode began */
+	__u32	h_size;		/* current unscaled horizontal size */
+	__u32	v_size;		/* current unscaled veritcal size */
+	__u32	smpte_timecode;	/* current SMPTE timecode (for current GOP) */
+	__u32	picture_type;	/* current picture type */
+	__u32	temporal_reference;	/* current temporal reference */
+	__u8	user_data[256];	/* user data last found in compressed stream */
+	/* user_data[0] contains user data flags, user_data[1] has count */
+};
+
+/* generic structure for setting playback modes */
+struct video_play_mode
+{
+	int	mode;
+	int	p1;
+	int	p2;
+};
+
+/* for loading microcode / fpga programming */
+struct video_code
+{
+	char	loadwhat[16];	/* name or tag of file being passed */
+	int	datasize;
+	__u8	*data;
+};
+
 #define VIDIOCGCAP		_IOR('v',1,struct video_capability)	/* Get capabilities */
 #define VIDIOCGCHAN		_IOWR('v',2,struct video_channel)	/* Get channel info (sources) */
 #define VIDIOCSCHAN		_IOW('v',3,struct video_channel)	/* Set channel 	*/
@@ -238,7 +286,7 @@ struct video_unit
 #define VIDIOCGPICT		_IOR('v',6,struct video_picture)	/* Get picture properties */
 #define VIDIOCSPICT		_IOW('v',7,struct video_picture)	/* Set picture properties */
 #define VIDIOCCAPTURE		_IOW('v',8,int)				/* Start, end capture */
-#define VIDIOCGWIN		_IOR('v',9, struct video_window)	/* Set the video overlay window */
+#define VIDIOCGWIN		_IOR('v',9, struct video_window)	/* Get the video overlay window */
 #define VIDIOCSWIN		_IOW('v',10, struct video_window)	/* Set the video overlay window - passes clip list for hardware smarts , chromakey etc */
 #define VIDIOCGFBUF		_IOR('v',11, struct video_buffer)	/* Get frame buffer */
 #define VIDIOCSFBUF		_IOW('v',12, struct video_buffer)	/* Set frame buffer - root only */
@@ -249,12 +297,53 @@ struct video_unit
 #define VIDIOCSAUDIO		_IOW('v',17, struct video_audio)	/* Audio source, mute etc */
 #define VIDIOCSYNC		_IOW('v',18, int)			/* Sync with mmap grabbing */
 #define VIDIOCMCAPTURE		_IOW('v',19, struct video_mmap)		/* Grab frames */
-#define VIDIOCGMBUF		_IOR('v', 20, struct video_mbuf)	/* Memory map buffer info */
-#define VIDIOCGUNIT		_IOR('v', 21, struct video_unit)	/* Get attached units */
-#define VIDIOCGCAPTURE		_IOR('v',22, struct video_capture)	/* Get frame buffer */
-#define VIDIOCSCAPTURE		_IOW('v',23, struct video_capture)	/* Set frame buffer - root only */
+#define VIDIOCGMBUF		_IOR('v',20, struct video_mbuf)		/* Memory map buffer info */
+#define VIDIOCGUNIT		_IOR('v',21, struct video_unit)		/* Get attached units */
+#define VIDIOCGCAPTURE		_IOR('v',22, struct video_capture)	/* Get subcapture */
+#define VIDIOCSCAPTURE		_IOW('v',23, struct video_capture)	/* Set subcapture */
+#define VIDIOCSPLAYMODE		_IOW('v',24, struct video_play_mode)	/* Set output video mode/feature */
+#define VIDIOCSWRITEMODE	_IOW('v',25, int)			/* Set write mode */
+#define VIDIOCGPLAYINFO		_IOR('v',26, struct video_info)		/* Get current playback info from hardware */
+#define VIDIOCSMICROCODE	_IOW('v',27, struct video_code)		/* Load microcode into hardware */
+#define	VIDIOCGVBIFMT		_IOR('v',28, struct vbi_format)		/* Get VBI information */
+#define	VIDIOCSVBIFMT		_IOW('v',29, struct vbi_format)		/* Set VBI information */
+
 
 #define BASE_VIDIOCPRIVATE	192		/* 192-255 are private */
+
+/* VIDIOCSWRITEMODE */
+#define VID_WRITE_MPEG_AUD		0
+#define VID_WRITE_MPEG_VID		1
+#define VID_WRITE_OSD			2
+#define VID_WRITE_TTX			3
+#define VID_WRITE_CC			4
+#define VID_WRITE_MJPEG			5
+
+/* VIDIOCSPLAYMODE */
+#define VID_PLAY_VID_OUT_MODE		0
+	/* p1: = VIDEO_MODE_PAL, VIDEO_MODE_NTSC, etc ... */
+#define VID_PLAY_GENLOCK		1
+	/* p1: 0 = OFF, 1 = ON */
+	/* p2: GENLOCK FINE DELAY value */ 
+#define VID_PLAY_NORMAL			2
+#define VID_PLAY_PAUSE			3
+#define VID_PLAY_SINGLE_FRAME		4
+#define VID_PLAY_FAST_FORWARD		5
+#define VID_PLAY_SLOW_MOTION		6
+#define VID_PLAY_IMMEDIATE_NORMAL	7
+#define VID_PLAY_SWITCH_CHANNELS	8
+#define VID_PLAY_FREEZE_FRAME		9
+#define VID_PLAY_STILL_MODE		10
+#define VID_PLAY_MASTER_MODE		11
+	/* p1: see below */
+#define		VID_PLAY_MASTER_NONE	1
+#define		VID_PLAY_MASTER_VIDEO	2
+#define		VID_PLAY_MASTER_AUDIO	3
+#define VID_PLAY_ACTIVE_SCANLINES	12
+	/* p1 = first active; p2 = last active */
+#define VID_PLAY_RESET			13
+#define VID_PLAY_END_MARK		14
+
 
 
 #define VID_HARDWARE_BT848	1
@@ -276,9 +365,15 @@ struct video_unit
 #define VID_HARDWARE_BROADWAY	17	/* Broadway project */
 #define VID_HARDWARE_GEMTEK	18
 #define VID_HARDWARE_TYPHOON	19
-#define VID_HARDWARE_VINO	20	/* Reserved for SGI Indy Vino */
+#define VID_HARDWARE_VINO	20	/* SGI Indy Vino */
 #define VID_HARDWARE_CADET	21	/* Cadet radio */
-#define VID_HARDWARE_CPIA	22
+#define VID_HARDWARE_TRUST	22	/* Trust FM Radio */
+#define VID_HARDWARE_TERRATEC	23	/* TerraTec ActiveRadio */
+#define VID_HARDWARE_CPIA	24
+#define VID_HARDWARE_ZR36120	25	/* Zoran ZR36120/ZR36125 */
+#define VID_HARDWARE_ZR36067	26	/* Zoran ZR36067/36060 */
+#define VID_HARDWARE_OV511	27	
+#define VID_HARDWARE_ZR356700	28	/* Zoran 36700 series */
 
 /*
  *	Initialiser list

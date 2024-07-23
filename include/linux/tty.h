@@ -23,7 +23,6 @@
 #include <linux/tqueue.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_ldisc.h>
-#include <linux/serialP.h>
 
 #include <asm/system.h>
 
@@ -109,7 +108,12 @@ extern struct screen_info screen_info;
 #define VIDEO_TYPE_EGAM		0x20	/* EGA/VGA in Monochrome Mode	*/
 #define VIDEO_TYPE_EGAC		0x21	/* EGA in Color Mode		*/
 #define VIDEO_TYPE_VGAC		0x22	/* VGA+ in Color Mode		*/
-#define VIDEO_TYPE_VLFB		0x23	/* VESA VGA in graphic mode    	*/
+#define VIDEO_TYPE_VLFB		0x23	/* VESA VGA in graphic mode	*/
+
+#define VIDEO_TYPE_PICA_S3	0x30	/* ACER PICA-61 local S3 video	*/
+#define VIDEO_TYPE_MIPS_G364	0x31    /* MIPS Magnum 4000 G364 video  */
+#define VIDEO_TYPE_SNI_RM	0x32    /* SNI RM200 PCI video          */
+#define VIDEO_TYPE_SGI          0x33    /* Various SGI graphics hardware */
 
 #define VIDEO_TYPE_TGAC		0x40	/* DEC TGA */
 
@@ -277,6 +281,7 @@ struct tty_struct {
 	struct tq_struct tq_hangup;
 	void *disc_data;
 	void *driver_data;
+	struct list_head tty_files;
 
 #define N_TTY_BUF_SIZE 4096
 	
@@ -300,6 +305,8 @@ struct tty_struct {
 	unsigned long canon_head;
 	unsigned int canon_column;
 	struct semaphore atomic_read;
+	struct semaphore atomic_write;
+	spinlock_t read_lock;
 };
 
 /* tty magic number */
@@ -325,6 +332,7 @@ struct tty_struct {
 #define TTY_HW_COOK_OUT 14
 #define TTY_HW_COOK_IN 15
 #define TTY_PTY_LOCK 16
+#define TTY_NO_WRITE_SPLIT 17
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
@@ -337,12 +345,15 @@ extern int fg_console, last_console, want_console;
 
 extern int kmsg_redirect;
 
-extern unsigned long con_init(unsigned long);
+extern void con_init(void);
+extern void console_init(void);
 
-extern int rs_init(void);
 extern int lp_init(void);
 extern int pty_init(void);
-extern int tty_init(void);
+extern void tty_init(void);
+extern int mxser_init(void);
+extern int moxa_init(void);
+extern int ip2_init(void);
 extern int pcxe_init(void);
 extern int pc_init(void);
 extern int vcs_init(void);
@@ -350,7 +361,6 @@ extern int rp_init(void);
 extern int cy_init(void);
 extern int stl_init(void);
 extern int stli_init(void);
-extern int riscom8_init(void);
 extern int specialix_init(void);
 extern int espserial_init(void);
 extern int macserial_init(void);
@@ -365,6 +375,9 @@ extern void start_tty(struct tty_struct * tty);
 extern int tty_register_ldisc(int disc, struct tty_ldisc *new_ldisc);
 extern int tty_register_driver(struct tty_driver *driver);
 extern int tty_unregister_driver(struct tty_driver *driver);
+extern void tty_register_devfs (struct tty_driver *driver, unsigned int flags,
+				unsigned minor);
+extern void tty_unregister_devfs (struct tty_driver *driver, unsigned minor);
 extern int tty_read_raw_data(struct tty_struct *tty, unsigned char *bufp,
 			     int buflen);
 extern void tty_write_message(struct tty_struct *tty, char *msg);
@@ -390,7 +403,7 @@ extern int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 
 /* serial.c */
 
-extern long serial_console_init(long kmem_start, long kmem_end);
+extern void serial_console_init(void);
  
 /* pcxx.c */
 

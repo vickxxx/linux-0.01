@@ -11,20 +11,7 @@
 
 #include <linux/config.h>
 #include <linux/types.h>
-
-#define CONFIG_MSDOS_PARTITION 1
-
-#ifdef __alpha__
-#define CONFIG_OSF_PARTITION 1
-#endif
-
-#if defined(__sparc__) || defined(CONFIG_SMD_DISKLABEL)
-#define CONFIG_SUN_PARTITION 1
-#endif
-
-#if defined(CONFIG_SGI) || defined(CONFIG_SGI_DISKLABEL)
-#define CONFIG_SGI_PARTITION 1
-#endif
+#include <linux/major.h>
 
 /* These three have identical behaviour; use the second one if DOS fdisk gets
    confused about extended/logical partitions starting past cylinder 1023. */
@@ -33,6 +20,7 @@
 #define WIN98_EXTENDED_PARTITION 0x0f
 
 #define LINUX_SWAP_PARTITION	0x82
+#define LINUX_RAID_PARTITION	0xfd	/* autodetect RAID partition */
 
 #ifdef CONFIG_SOLARIS_X86_PARTITION
 #define SOLARIS_X86_PARTITION	LINUX_SWAP_PARTITION
@@ -42,7 +30,7 @@
 #define EZD_PARTITION		0x55	/* EZ-DRIVE */
 #define DM6_AUX1PARTITION	0x51	/* no DDO:  use xlated geom */
 #define DM6_AUX3PARTITION	0x53	/* no DDO:  use xlated geom */
-	
+
 struct partition {
 	unsigned char boot_ind;		/* 0x80 - active */
 	unsigned char head;		/* starting head */
@@ -56,10 +44,16 @@ struct partition {
 	unsigned int nr_sects;		/* nr of sectors in partition */
 } __attribute__((packed));
 
+#ifdef __KERNEL__
+#  include <linux/devfs_fs_kernel.h>
+
 struct hd_struct {
 	long start_sect;
 	long nr_sects;
+	devfs_handle_t de;              /* primary (master) devfs entry  */
 };
+
+#define GENHD_FL_REMOVABLE  1
 
 struct gendisk {
 	int major;			/* major number of driver */
@@ -67,16 +61,19 @@ struct gendisk {
 	int minor_shift;		/* number of times minor is shifted to
 					   get real minor */
 	int max_p;			/* maximum partitions per device */
-	int max_nr;			/* maximum number of real devices */
 
-	void (*init)(struct gendisk *);	/* Initialization called before we do our thing */
 	struct hd_struct *part;		/* [indexed by minor] */
 	int *sizes;			/* [idem], device size in blocks */
 	int nr_real;			/* number of real devices */
 
 	void *real_devices;		/* internal use */
 	struct gendisk *next;
+	struct block_device_operations *fops;
+
+	devfs_handle_t *de_arr;         /* one per physical disc */
+	char *flags;                    /* one per physical disc */
 };
+#endif  /*  __KERNEL__  */
 
 #ifdef CONFIG_SOLARIS_X86_PARTITION
 
@@ -231,7 +228,40 @@ extern struct gendisk *gendisk_head;	/* linked list of disks */
 
 char *disk_name (struct gendisk *hd, int minor, char *buf);
 
-int get_hardsect_size(kdev_t dev);
+extern void devfs_register_partitions (struct gendisk *dev, int minor,
+				       int unregister);
+
+
+
+/*
+ * FIXME: this should use genhd->minor_shift, but that is slow to look up.
+ */
+static inline unsigned int disk_index (kdev_t dev)
+{
+	int major = MAJOR(dev);
+	int minor = MINOR(dev);
+	unsigned int index;
+
+	switch (major) {
+		case DAC960_MAJOR+0:
+			index = (minor & 0x00f8) >> 3;
+			break;
+		case SCSI_DISK0_MAJOR:
+			index = (minor & 0x00f0) >> 4;
+			break;
+		case IDE0_MAJOR:	/* same as HD_MAJOR */
+		case XT_DISK_MAJOR:
+			index = (minor & 0x0040) >> 6;
+			break;
+		case IDE1_MAJOR:
+			index = ((minor & 0x0040) >> 6) + 2;
+			break;
+		default:
+			return 0;
+	}
+	return index;
+}
+
 #endif
 
 #endif

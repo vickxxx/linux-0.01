@@ -27,6 +27,11 @@
 
  /*
   *  Bit simplified and optimized by Jan Hubicka
+  *  Support of BIGMEM added by Gerhard Wichert, Siemens AG, July 1999.
+  *
+  *  isa_memset_io, isa_memcpy_fromio, isa_memcpy_toio added,
+  *  isa_read[wl] and isa_write[wl] fixed
+  *  - Arnaldo Carvalho de Melo <acme@conectiva.com.br>
   */
 
 #ifdef SLOW_IO_BY_JUMPING
@@ -66,12 +71,12 @@ __IN1(s##_p) __IN2(s,s1,"w") __FULL_SLOW_DOWN_IO : "=a" (_v) : "Nd" (port) ,##i 
 
 #define __INS(s) \
 extern inline void ins##s(unsigned short port, void * addr, unsigned long count) \
-{ __asm__ __volatile__ ("cld ; rep ; ins" #s \
+{ __asm__ __volatile__ ("rep ; ins" #s \
 : "=D" (addr), "=c" (count) : "d" (port),"0" (addr),"1" (count)); }
 
 #define __OUTS(s) \
 extern inline void outs##s(unsigned short port, const void * addr, unsigned long count) \
-{ __asm__ __volatile__ ("cld ; rep ; outs" #s \
+{ __asm__ __volatile__ ("rep ; outs" #s \
 : "=S" (addr), "=c" (count) : "d" (port),"0" (addr),"1" (count)); }
 
 #define RETURN_TYPE unsigned char
@@ -96,25 +101,38 @@ __OUTS(b)
 __OUTS(w)
 __OUTS(l)
 
+#define IO_SPACE_LIMIT 0xffff
+
 #ifdef __KERNEL__
 
 #include <linux/vmalloc.h>
-#include <asm/page.h>
 
-#define __io_virt(x)		((void *)(PAGE_OFFSET | (unsigned long)(x)))
-#define __io_phys(x)		((unsigned long)(x) & ~PAGE_OFFSET)
+/*
+ * Temporary debugging check to catch old code using
+ * unmapped ISA addresses. Will be removed in 2.4.
+ */
+#if 1
+  extern void *__io_virt_debug(unsigned long x, const char *file, int line);
+  extern unsigned long __io_phys_debug(unsigned long x, const char *file, int line);
+  #define __io_virt(x) __io_virt_debug((unsigned long)(x), __FILE__, __LINE__)
+//#define __io_phys(x) __io_phys_debug((unsigned long)(x), __FILE__, __LINE__)
+#else
+  #define __io_virt(x) ((void *)(x))
+//#define __io_phys(x) __pa(x)
+#endif
+
 /*
  * Change virtual addresses to physical addresses and vv.
  * These are pretty trivial
  */
 extern inline unsigned long virt_to_phys(volatile void * address)
 {
-	return __io_phys(address);
+	return __pa(address);
 }
 
 extern inline void * phys_to_virt(unsigned long address)
 {
-	return __io_virt(address);
+	return __va(address);
 }
 
 extern void * __ioremap(unsigned long offset, unsigned long size, unsigned long flags);
@@ -152,20 +170,48 @@ extern void iounmap(void *addr);
 #define readb(addr) (*(volatile unsigned char *) __io_virt(addr))
 #define readw(addr) (*(volatile unsigned short *) __io_virt(addr))
 #define readl(addr) (*(volatile unsigned int *) __io_virt(addr))
+#define __raw_readb readb
+#define __raw_readw readw
+#define __raw_readl readl
 
 #define writeb(b,addr) (*(volatile unsigned char *) __io_virt(addr) = (b))
 #define writew(b,addr) (*(volatile unsigned short *) __io_virt(addr) = (b))
 #define writel(b,addr) (*(volatile unsigned int *) __io_virt(addr) = (b))
+#define __raw_writeb writeb
+#define __raw_writew writew
+#define __raw_writel writel
 
 #define memset_io(a,b,c)	memset(__io_virt(a),(b),(c))
 #define memcpy_fromio(a,b,c)	memcpy((a),__io_virt(b),(c))
 #define memcpy_toio(a,b,c)	memcpy(__io_virt(a),(b),(c))
 
 /*
+ * ISA space is 'always mapped' on a typical x86 system, no need to
+ * explicitly ioremap() it. The fact that the ISA IO space is mapped
+ * to PAGE_OFFSET is pure coincidence - it does not mean ISA values
+ * are physical addresses. The following constant pointer can be
+ * used as the IO-area pointer (it can be iounmapped as well, so the
+ * analogy with PCI is quite large):
+ */
+#define __ISA_IO_base ((char *)(PAGE_OFFSET))
+
+#define isa_readb(a) readb(__ISA_IO_base + (a))
+#define isa_readw(a) readw(__ISA_IO_base + (a))
+#define isa_readl(a) readl(__ISA_IO_base + (a))
+#define isa_writeb(b,a) writeb(b,__ISA_IO_base + (a))
+#define isa_writew(w,a) writew(w,__ISA_IO_base + (a))
+#define isa_writel(l,a) writel(l,__ISA_IO_base + (a))
+#define isa_memset_io(a,b,c)		memset_io(__ISA_IO_base + (a),(b),(c))
+#define isa_memcpy_fromio(a,b,c)	memcpy_fromio((a),__ISA_IO_base + (b),(c))
+#define isa_memcpy_toio(a,b,c)		memcpy_toio(__ISA_IO_base + (a),(b),(c))
+
+
+/*
  * Again, i386 does not require mem IO specific function.
  */
 
-#define eth_io_copy_and_sum(a,b,c,d)	eth_copy_and_sum((a),__io_virt(b),(c),(d))
+#define eth_io_copy_and_sum(a,b,c,d)		eth_copy_and_sum((a),__io_virt(b),(c),(d))
+#define isa_eth_io_copy_and_sum(a,b,c,d)	eth_copy_and_sum((a),__io_virt(__ISA_IO_base + (b)),(c),(d))
 
 static inline int check_signature(unsigned long io_addr,
 	const unsigned char *signature, int length)
@@ -173,6 +219,22 @@ static inline int check_signature(unsigned long io_addr,
 	int retval = 0;
 	do {
 		if (readb(io_addr) != *signature)
+			goto out;
+		io_addr++;
+		signature++;
+		length--;
+	} while (length);
+	retval = 1;
+out:
+	return retval;
+}
+
+static inline int isa_check_signature(unsigned long io_addr,
+	const unsigned char *signature, int length)
+{
+	int retval = 0;
+	do {
+		if (isa_readb(io_addr) != *signature)
 			goto out;
 		io_addr++;
 		signature++;

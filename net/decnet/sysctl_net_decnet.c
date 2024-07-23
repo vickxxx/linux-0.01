@@ -29,9 +29,12 @@
 
 int decnet_debug_level = 0;
 int decnet_time_wait = 30;
-int decnet_dn_count = 3;
-int decnet_di_count = 5;
-int decnet_dr_count = 5;
+int decnet_dn_count = 1;
+int decnet_di_count = 3;
+int decnet_dr_count = 3;
+int decnet_log_martians = 1;
+
+#ifdef CONFIG_SYSCTL
 extern int decnet_dst_gc_interval;
 static int min_decnet_time_wait[] = { 5 };
 static int max_decnet_time_wait[] = { 600 };
@@ -51,6 +54,22 @@ static struct ctl_table_header *dn_table_header = NULL;
 #define ISUPPER(x) (((x) >= 'A') && ((x) <= 'Z'))
 #define ISALPHA(x) (ISLOWER(x) || ISUPPER(x))
 #define INVALID_END_CHAR(x) (ISNUM(x) || ISALPHA(x))
+
+static void strip_it(char *str)
+{
+	for(;;) {
+		switch(*str) {
+			case ' ':
+			case '\n':
+			case '\r':
+			case ':':
+				*str = 0;
+			case 0:
+				return;
+		}
+		str++;
+	}
+}
 
 /*
  * Simple routine to parse an ascii DECnet address
@@ -102,123 +121,6 @@ static int parse_addr(dn_address *addr, char *str)
 	return 0;
 }
 
-static char *node2str(int n)
-{
-	switch(n) {
-		case DN_RT_INFO_ENDN:
-			return "EndNode\n";
-		case DN_RT_INFO_L1RT:
-			return "Level 1 Router\n";
-		case DN_RT_INFO_L2RT:
-			return "Level 2 Router\n";
-	}
-
-	return "Unknown\n";
-}
-
-static int dn_node_type_strategy(ctl_table *table, int *name, int nlen,
-				void *oldval, size_t *oldlenp,
-				void *newval, size_t newlen,
-				void **context)
-{
-	int len;
-	int type;
-
-	if (oldval && oldlenp) {
-		if (get_user(len, oldlenp))
-			return -EFAULT;
-		if (len) {
-			if (len != sizeof(int))
-				return -EINVAL;
-			if (put_user(decnet_node_type, (int *)oldval))
-				return -EFAULT;
-		}
-	}
-
-	if (newval && newlen) {
-		if (newlen != sizeof(int))
-			return -EINVAL;
-
-		if (get_user(type, (int *)newval))
-			return -EFAULT;
-
-		switch(type) {
-			case DN_RT_INFO_ENDN: /* EndNode        */
-#ifdef CONFIG_DECNET_ROUTER
-			case DN_RT_INFO_L1RT: /* Level 1 Router */
-			case DN_RT_INFO_L2RT: /* Level 2 Router */
-#endif
-				break;
-			default:
-				return -EINVAL;
-		}
-
-		if (decnet_node_type != type) {
-			dn_dev_devices_off();
-			decnet_node_type = type;
-			dn_dev_devices_on();
-		}
-	}
-	return 0;
-}
-
-static int dn_node_type_handler(ctl_table *table, int write, 
-				struct file * filp,
-				void *buffer, size_t *lenp)
-{
-	char *s = node2str(decnet_node_type);
-	int len = strlen(s);
-
-	if (!*lenp || (filp->f_pos && !write)) {
-		*lenp = 0;
-		return 0;
-	}
-
-	if (write) {
-		char c = *(char *)buffer;
-		int type = 0;
-
-		switch(c) {
-			case 'e':
-			case 'E':
-			case '0':
-				type = DN_RT_INFO_ENDN;
-				break;
-#ifdef CONFIG_DECNET_ROUTER
-			case 'r':
-			case '1':
-				type = DN_RT_INFO_L1RT;
-				break;
-			case 'R':
-			case '2':
-				type = DN_RT_INFO_L2RT;
-				break;
-#endif /* CONFIG_DECNET_ROUTER */
-			default:
-				return -EINVAL;	
-		}
-
-		if (decnet_node_type != type) {
-			dn_dev_devices_off();
-			decnet_node_type = type;
-			dn_dev_devices_on();
-		}
-
-		filp->f_pos += 1;
-
-		return 0;
-	}
-
-	if (len > *lenp) len = *lenp;
-
-	if (copy_to_user(buffer, s, len))
-		return -EFAULT;
-
-	*lenp = len;
-	filp->f_pos += len;
-
-	return 0;
-}
 
 static int dn_node_address_strategy(ctl_table *table, int *name, int nlen,
 				void *oldval, size_t *oldlenp,
@@ -247,7 +149,7 @@ static int dn_node_address_strategy(ctl_table *table, int *name, int nlen,
 		dn_dev_devices_off();
 
 		decnet_address = addr;
-		dn_dn2eth(decnet_ether_address, decnet_address);
+		dn_dn2eth(decnet_ether_address, dn_ntohs(decnet_address));
 
 		dn_dev_devices_on();
 	}
@@ -274,14 +176,15 @@ static int dn_node_address_handler(ctl_table *table, int write,
 			return -EFAULT;
 
 		addr[len] = 0;
+		strip_it(addr);
 
-		if (parse_addr(&dnaddr, buffer))
+		if (parse_addr(&dnaddr, addr))
 			return -EINVAL;
 
 		dn_dev_devices_off();
 
 		decnet_address = dnaddr;
-		dn_dn2eth(decnet_ether_address, decnet_address);
+		dn_dn2eth(decnet_ether_address, dn_ntohs(decnet_address));
 
 		dn_dev_devices_on();
 
@@ -312,7 +215,7 @@ static int dn_def_dev_strategy(ctl_table *table, int *name, int nlen,
 				void **context)
 {
 	size_t len;
-	struct device *dev = decnet_default_device;
+	struct net_device *dev = decnet_default_device;
 	char devname[17];
 	size_t namel;
 
@@ -345,7 +248,7 @@ static int dn_def_dev_strategy(ctl_table *table, int *name, int nlen,
 
 		devname[newlen] = 0;
 
-		if ((dev = dev_get(devname)) == NULL)
+		if ((dev = __dev_get_by_name(devname)) == NULL)
 			return -ENODEV;
 
 		if (dev->dn_ptr == NULL)
@@ -363,7 +266,7 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 				void *buffer, size_t *lenp)
 {
 	int len;
-	struct device *dev = decnet_default_device;
+	struct net_device *dev = decnet_default_device;
 	char devname[17];
 
 	if (!*lenp || (filp->f_pos && !write)) {
@@ -372,7 +275,6 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 	}
 
 	if (write) {
-
 		if (*lenp > 16)
 			return -E2BIG;
 
@@ -380,8 +282,9 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 			return -EFAULT;
 
 		devname[*lenp] = 0;
+		strip_it(devname);
 
-		if ((dev = dev_get(devname)) == NULL)
+		if ((dev = __dev_get_by_name(devname)) == NULL)
 			return -ENODEV;
 
 		if (dev->dn_ptr == NULL)
@@ -414,9 +317,6 @@ static int dn_def_dev_handler(ctl_table *table, int write,
 }
 
 static ctl_table dn_table[] = {
-	{NET_DECNET_NODE_TYPE, "node_type", NULL, 1, 0644, NULL,
-	dn_node_type_handler, dn_node_type_strategy, NULL,
-	NULL, NULL},
 	{NET_DECNET_NODE_ADDRESS, "node_address", NULL, 7, 0644, NULL,
 	dn_node_address_handler, dn_node_address_strategy, NULL,
 	NULL, NULL},
@@ -471,3 +371,12 @@ void dn_unregister_sysctl(void)
 	unregister_sysctl_table(dn_table_header);
 }
 
+#else  /* CONFIG_SYSCTL */
+void dn_unregister_sysctl(void)
+{
+}
+void dn_register_sysctl(void)
+{
+}
+
+#endif

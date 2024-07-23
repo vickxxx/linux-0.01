@@ -1,4 +1,4 @@
-/* $Id: memory.c,v 1.13 1998/01/30 10:59:03 jj Exp $
+/* $Id: memory.c,v 1.15 2000/01/29 01:09:12 anton Exp $
  * memory.c: Prom routine for acquiring various bits of information
  *           about RAM on the machine, both virtual and physical.
  *
@@ -39,8 +39,8 @@ struct linux_mem_v0 prom_memlist;
 /* Internal Prom library routine to sort a linux_mlist_v0 memory
  * list.  Used below in initialization.
  */
-__initfunc(static void
-prom_sortmemlist(struct linux_mlist_v0 *thislist))
+static void __init
+prom_sortmemlist(struct linux_mlist_v0 *thislist)
 {
 	int swapi = 0;
 	int i, mitr, tmpsize;
@@ -69,7 +69,7 @@ prom_sortmemlist(struct linux_mlist_v0 *thislist))
 }
 
 /* Initialize the memory lists based upon the prom version. */
-__initfunc(void prom_meminit(void))
+void __init prom_meminit(void)
 {
 	int node = 0;
 	unsigned int iter, num_regs;
@@ -194,19 +194,6 @@ __initfunc(void prom_meminit(void))
 #endif
 		break;
 
-        case PROM_AP1000:
-#if CONFIG_AP1000
-		/* really simple memory map */
-		prom_phys_total[0].start_adr = 0x00000000;
-		prom_phys_total[0].num_bytes = ap_memory_size();
-		prom_phys_total[0].theres_more = 0x0;
-		prom_prom_taken[0].start_adr = 0x00000000; 
-		prom_prom_taken[0].num_bytes = 0x00000000;
-		prom_prom_taken[0].theres_more = 0x0;
-		prom_phys_avail[0].start_adr = 0x00000000;
-		prom_phys_avail[0].num_bytes = prom_phys_total[0].num_bytes;
-		prom_phys_avail[0].theres_more = 0x0;
-#endif
 	default:
 		break;
 	};

@@ -48,6 +48,8 @@
 #include <linux/miscdevice.h>
 #include <linux/mm.h>
 #include <linux/poll.h>
+#include <linux/spinlock.h>
+#include <linux/smp_lock.h>
 #include <linux/init.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -69,19 +71,18 @@ struct sun_mouse {
 	unsigned char prev_state;      /* Previous button state */
 	int delta_x;                   /* Current delta-x */
 	int delta_y;                   /* Current delta-y */
-	int present;
-	int ready;		       /* set if there if data is available */
 	int active;		       /* set if device is open */
         int vuid_mode;	               /* VUID_NATIVE or VUID_FIRM_EVENT */
 	wait_queue_head_t proc_list;
 	struct fasync_struct *fasync;
 	
 	/* The event/stream queue */
+	spinlock_t lock;
 	unsigned int head;
 	unsigned int tail;
 	union {
 		char stream [STREAM_SIZE];
-		Firm_event ev [0];
+		Firm_event ev [EV_SIZE];
 	} queue;
 };
 
@@ -97,14 +98,22 @@ extern void mouse_put_char(char ch);
 static int
 push_event (Firm_event *ev)
 {
-	int next = (sunmouse.head + 1) % EV_SIZE;
+	unsigned long flags;
+	int next, ret;
 	
-	if (next != sunmouse.tail){
+	spin_lock_irqsave(&sunmouse.lock, flags);
+
+	next = (sunmouse.head + 1) % EV_SIZE;
+	ret = 0;
+	if (next != sunmouse.tail) {
 		sunmouse.queue.ev [sunmouse.head] = *ev;
 		sunmouse.head = next;
-		return 1;
+		ret = 1;
 	}
-	return 0;
+
+	spin_unlock_irqrestore(&sunmouse.lock, flags);
+
+	return ret;
 }
 
 static int
@@ -113,37 +122,37 @@ queue_empty (void)
 	return sunmouse.head == sunmouse.tail;
 }
 
-static Firm_event *
-get_from_queue (void)
+/* Must be invoked under the sunmouse.lock */
+static void get_from_queue (Firm_event *p)
 {
-	Firm_event *result;
-	
-	result = &sunmouse.queue.ev [sunmouse.tail];
+	*p = sunmouse.queue.ev [sunmouse.tail];
 	sunmouse.tail = (sunmouse.tail + 1) % EV_SIZE;
-	return result;
 }
 
 static void
 push_char (char c)
 {
-	int next = (sunmouse.head + 1) % STREAM_SIZE;
+	unsigned long flags;
+	int next;
 
-	if (next != sunmouse.tail){
+	spin_lock_irqsave(&sunmouse.lock, flags);
+
+	next = (sunmouse.head + 1) % STREAM_SIZE;
+	if (next != sunmouse.tail) {
 #ifdef SMOUSE_DEBUG
 		printk("P<%02x>\n", (unsigned char)c);
 #endif
 		sunmouse.queue.stream [sunmouse.head] = c;
 		sunmouse.head = next;
 	}
-	sunmouse.ready = 1;
-	if (sunmouse.fasync)
-		kill_fasync (sunmouse.fasync, SIGIO);
+
+	spin_unlock_irqrestore(&sunmouse.lock, flags);
+
+	kill_fasync (&sunmouse.fasync, SIGIO, POLL_IN);
 	wake_up_interruptible (&sunmouse.proc_list);
 }
 
 /* Auto baud rate "detection".  ;-) */
-static int mouse_bogon_bytes = 0;
-static int mouse_baud_changing = 0;	/* For reporting things to the user. */
 static int mouse_baud = 4800;		/* Initial rate set by zilog driver. */
 
 /* Change the baud rate after receiving too many "bogon bytes". */
@@ -161,71 +170,112 @@ void sun_mouse_change_baud(void)
 		mouse_baud = 1200;
 
 	rs_change_mouse_baud(mouse_baud);
-	mouse_baud_changing = 1;
 }
 
-void mouse_baud_detection(unsigned char c)
+/* This tries to monitor the mouse state so that it
+ * can automatically adjust to the correct baud rate.
+ * The mouse spits out BRKs when the baud rate is
+ * incorrect.
+ *
+ * It returns non-zero if we should ignore this byte.
+ */
+int mouse_baud_detection(unsigned char c, int is_break)
 {
-	static int wait_for_synchron = 1;
+	static int mouse_got_break = 0;
 	static int ctr = 0;
 
-	if(wait_for_synchron) {
-		if((c < 0x80) || (c > 0x87))
-			mouse_bogon_bytes++;
-		else {
-			ctr = 0;
-			wait_for_synchron = 0;
-		}
-	} else {
-		ctr++;
-		if(ctr >= 4) {
-			ctr = 0;
-			wait_for_synchron = 1;
-			if(mouse_baud_changing == 1) {
-				printk(KERN_DEBUG "sunmouse: Successfully adjusted to %d baud.\n",
-				       mouse_baud);
-				mouse_baud_changing = 0;
-			}
-		}
-	}
-	if(mouse_bogon_bytes > 12) {
+	if (is_break) {
+		/* Let a few normal bytes go by before
+		 * we jump the gun and say we need to
+		 * try another baud rate.
+		 */
+		if (mouse_got_break && ctr < 8)
+			return 1;
+
+		/* OK, we need to try another baud rate. */
 		sun_mouse_change_baud();
-		mouse_bogon_bytes = 0;
-		wait_for_synchron = 1;
+		ctr = 0;
+		mouse_got_break = 1;
+		return 1;
 	}
+	if (mouse_got_break) {
+		ctr++;
+		if (c == 0x87) {
+			printk(KERN_INFO "sunmouse: Successfully "
+			       "adjusted to %d baud.\n", mouse_baud);
+			mouse_got_break = 0;
+		}
+		return 1;
+	}
+
+	return 0;
 }
 
-/* The following is called from the zs driver when bytes are received on
- * the Mouse zs8530 channel.
+/* You ask me, why does this cap the lower bound at -127 and not
+ * -128?  Because the xf86 mouse code is crap and treats -128
+ * as an illegal value and resets it's protocol state machine
+ * when it sees this value.
+ */
+#define CLIP(__X)	(((__X) > 127) ? 127 : (((__X) < -127) ? -127 : (__X)))
+
+/* The following is called from the serial driver when bytes/breaks
+ * are received on the Mouse line.
  */
 void
-sun_mouse_inbyte(unsigned char byte)
+sun_mouse_inbyte(unsigned char byte, int is_break)
 {
 	signed char mvalue;
 	int d, pushed = 0;
 	Firm_event ev;
 
 	add_mouse_randomness (byte);
+#if 0
+	{
+		static int xxx = 0;
+		printk("mouse(%02x:%d) ",
+		       byte, is_break);
+		if (byte == 0x87) {
+			xxx = 0;
+			printk("\n");
+		}
+	}
+#endif
+	if (mouse_baud_detection(byte, is_break))
+		return;
+
 	if(!sunmouse.active)
 		return;
 
-	mouse_baud_detection(byte);
+	/* Ignore this if it is garbage. */
+	if (sunmouse.byte == 69) {
+		if (byte != 0x87)
+			return;
 
-	if (!gen_events){
-		push_char (byte);
-		return;
+		/* Ok, we've begun the state machine. */
+		sunmouse.byte = 0;
 	}
-
+#if 0
 	/* If the mouse sends us a byte from 0x80 to 0x87
 	 * we are starting at byte zero in the transaction
 	 * protocol.
 	 */
-	if(byte >= 0x80 && byte <= 0x87)
+	if((byte & ~0x0f) == 0x80) 
 		sunmouse.byte = 0;
+#endif
 
 	mvalue = (signed char) byte;
 	switch(sunmouse.byte) {
 	case 0:
+		/* If we get a bogus button byte, just skip it.
+		 * When we get here the baud detection code has
+		 * passed, so the only other things which can
+		 * cause this are dropped serial characters and
+		 * confused mouse.  We check this because otherwise
+		 * begin posting erroneous mouse events.
+		 */
+		if ((byte & 0xf0) != 0x80)
+			return;
+
 		/* Button state */
 		sunmouse.button_state = (~byte) & 0x7;
 #ifdef SMOUSE_DEBUG
@@ -234,6 +284,12 @@ sun_mouse_inbyte(unsigned char byte)
 		       ((sunmouse.button_state & 0x2) ? "DOWN" : "UP"),
 		       ((sunmouse.button_state & 0x1) ? "DOWN" : "UP"));
 #endif
+		/* To deal with the Sparcbook 3 */
+		if (byte & 0x8) {
+			sunmouse.byte += 2;
+			sunmouse.delta_y = 0;
+			sunmouse.delta_x = 0;
+		}
 		sunmouse.byte++;
 		return;
 	case 1:
@@ -258,6 +314,7 @@ sun_mouse_inbyte(unsigned char byte)
 		printk("DX2<%d>", mvalue);
 #endif
 		sunmouse.delta_x += mvalue;
+		sunmouse.delta_x = CLIP(sunmouse.delta_x);
 		sunmouse.byte++;
 		return;
 	case 4:
@@ -266,7 +323,8 @@ sun_mouse_inbyte(unsigned char byte)
 		printk("DY2<%d>", mvalue);
 #endif
 		sunmouse.delta_y += mvalue;
-		sunmouse.byte = 69;  /* Some ridiculous value */
+		sunmouse.delta_y = CLIP(sunmouse.delta_y);
+		sunmouse.byte = 0;  /* Back to button state */
 		break;
 	case 69:
 		/* Until we get the (0x80 -> 0x87) value we aren't
@@ -279,18 +337,26 @@ sun_mouse_inbyte(unsigned char byte)
 		sunmouse.byte = 69;  /* What could cause this? */
 		return;
 	};
+
+	if (!gen_events) {
+		push_char (~sunmouse.button_state & 0x87);
+		push_char (sunmouse.delta_x);
+		push_char (sunmouse.delta_y);
+		return;
+	}
+
 	d = bstate ^ pstate;
 	pstate = bstate;
-	if (d){
-		if (d & BUTTON_LEFT){
+	if (d) {
+		if (d & BUTTON_LEFT) {
 			ev.id = MS_LEFT;
 			ev.value = bstate & BUTTON_LEFT;
 		}
-		if (d & BUTTON_RIGHT){
+		if (d & BUTTON_RIGHT) {
 			ev.id = MS_RIGHT;
 			ev.value = bstate & BUTTON_RIGHT;
 		}
-		if (d & BUTTON_MIDDLE){
+		if (d & BUTTON_MIDDLE) {
 			ev.id = MS_MIDDLE;
 			ev.value = bstate & BUTTON_MIDDLE;
 		}
@@ -298,27 +364,25 @@ sun_mouse_inbyte(unsigned char byte)
 		ev.value = ev.value ? VKEY_DOWN : VKEY_UP;
 		pushed += push_event (&ev);
 	}
-	if (sunmouse.delta_x){
+	if (sunmouse.delta_x) {
 		ev.id = LOC_X_DELTA;
 		ev.time = xtime;
 		ev.value = sunmouse.delta_x;
 		pushed += push_event (&ev);
 		sunmouse.delta_x = 0;
 	}
-	if (sunmouse.delta_y){
+	if (sunmouse.delta_y) {
 		ev.id = LOC_Y_DELTA;
 		ev.time = xtime;
 		ev.value = sunmouse.delta_y;
 		pushed += push_event (&ev);
 	}
 	
-	if(pushed != 0) {
+	if (pushed != 0) {
 		/* We just completed a transaction, wake up whoever is awaiting
 		 * this event.
 		 */
-		sunmouse.ready = 1;
-		if (sunmouse.fasync)
-			kill_fasync (sunmouse.fasync, SIGIO);
+		kill_fasync (&sunmouse.fasync, SIGIO, POLL_IN);
 		wake_up_interruptible(&sunmouse.proc_list);
 	}
 	return;
@@ -327,11 +391,9 @@ sun_mouse_inbyte(unsigned char byte)
 static int
 sun_mouse_open(struct inode * inode, struct file * file)
 {
-	if(sunmouse.active++)
+	if (sunmouse.active++)
 		return 0;
-	if(!sunmouse.present)
-		return -EINVAL;
-	sunmouse.ready = sunmouse.delta_x = sunmouse.delta_y = 0;
+	sunmouse.delta_x = sunmouse.delta_y = 0;
 	sunmouse.button_state = 0x80;
 	sunmouse.vuid_mode = VUID_NATIVE;
 	return 0;
@@ -350,10 +412,10 @@ static int sun_mouse_fasync (int fd, struct file *filp, int on)
 static int
 sun_mouse_close(struct inode *inode, struct file *file)
 {
+	lock_kernel();
 	sun_mouse_fasync (-1, file, 0);
-	if (--sunmouse.active)
-		return 0;
-	sunmouse.ready = 0;
+	sunmouse.active--;
+	unlock_kernel();
 	return 0;
 }
 
@@ -369,56 +431,96 @@ sun_mouse_read(struct file *file, char *buffer,
 	       size_t count, loff_t *ppos)
 {
 	DECLARE_WAITQUEUE(wait, current);
+	unsigned long flags;
 
-	if (queue_empty ()){
+	if (queue_empty ()) {
 		if (file->f_flags & O_NONBLOCK)
 			return -EWOULDBLOCK;
 		add_wait_queue (&sunmouse.proc_list, &wait);
-		while (queue_empty () && !signal_pending(current)) {
-			current->state = TASK_INTERRUPTIBLE;
-			schedule ();
+repeat:
+		set_current_state(TASK_INTERRUPTIBLE);
+		if (queue_empty() && !signal_pending(current)) {
+			schedule();
+			goto repeat;
 		}
 		current->state = TASK_RUNNING;
 		remove_wait_queue (&sunmouse.proc_list, &wait);
 	}
-	if (gen_events){
+	if (gen_events) {
 		char *p = buffer, *end = buffer+count;
 		
+		spin_lock_irqsave(&sunmouse.lock, flags);
 		while (p < end && !queue_empty ()){
+			Firm_event this_event;
+
+			get_from_queue(&this_event);
+			spin_unlock_irqrestore(&sunmouse.lock, flags);
+
 #ifdef CONFIG_SPARC32_COMPAT
-			if (current->tss.flags & SPARC_FLAG_32BIT) {
-				Firm_event *q = get_from_queue();
-				
-				copy_to_user_ret((Firm_event *)p, q, 
-						 sizeof(Firm_event)-sizeof(struct timeval),
-						 -EFAULT);
+			if (current->thread.flags & SPARC_FLAG_32BIT) {
+				if ((end - p) <
+				    ((sizeof(Firm_event) - sizeof(struct timeval) +
+				      (sizeof(u32) * 2))))
+					break;
+				if (copy_to_user((Firm_event *)p, &this_event,
+						 sizeof(Firm_event)-sizeof(struct timeval)))
+					return -EFAULT;
 				p += sizeof(Firm_event)-sizeof(struct timeval);
-				__put_user_ret(q->time.tv_sec, (u32 *)p, -EFAULT);
+				if (__put_user(this_event.time.tv_sec, (u32 *)p))
+					return -EFAULT;
 				p += sizeof(u32);
-				__put_user_ret(q->time.tv_usec, (u32 *)p, -EFAULT);
+				if (__put_user(this_event.time.tv_usec, (u32 *)p))
+					return -EFAULT;
 				p += sizeof(u32);
 			} else
 #endif	
 			{	
-				copy_to_user_ret((Firm_event *)p, get_from_queue(),
-				     		 sizeof(Firm_event), -EFAULT);
+				if ((end - p) < sizeof(Firm_event))
+					break;
+				if (copy_to_user((Firm_event *)p, &this_event,
+				     		 sizeof(Firm_event)))
+					return -EFAULT;
 				p += sizeof (Firm_event);
 			}
+			spin_lock_irqsave(&sunmouse.lock, flags);
 		}
-		sunmouse.ready = !queue_empty ();
+		spin_unlock_irqrestore(&sunmouse.lock, flags);
 		file->f_dentry->d_inode->i_atime = CURRENT_TIME;
 		return p-buffer;
 	} else {
-		int c;
-		
-		for (c = count; !queue_empty() && c; c--){
-			put_user_ret(sunmouse.queue.stream[sunmouse.tail], buffer, -EFAULT);
+		int c, limit = 3;
+
+		if (count < limit)
+			limit = count;
+		for (c = 0; c < limit; c++) {
+			unsigned char val;
+			int empty = 0;
+
+			spin_lock_irqsave(&sunmouse.lock, flags);
+			if (queue_empty()) {
+				empty = 1;
+				val = 0;
+			} else {
+				val = sunmouse.queue.stream[sunmouse.tail];
+				sunmouse.tail = (sunmouse.tail + 1) % STREAM_SIZE;
+			}
+			spin_unlock_irqrestore(&sunmouse.lock, flags);
+
+			if (empty)
+				break;
+
+			put_user(val, buffer);
 			buffer++;
-			sunmouse.tail = (sunmouse.tail + 1) % STREAM_SIZE;
 		}
-		sunmouse.ready = !queue_empty();
+		while (c < count) {
+			if (c >= 5)
+				break;
+			put_user(0, buffer);
+			buffer++;
+			c++;
+		}
 		file->f_dentry->d_inode->i_atime = CURRENT_TIME;
-		return count-c;
+		return c;
 	}
 	/* Only called if nothing was sent */
 	if (signal_pending(current))
@@ -429,7 +531,7 @@ sun_mouse_read(struct file *file, char *buffer,
 static unsigned int sun_mouse_poll(struct file *file, poll_table *wait)
 {
 	poll_wait(file, &sunmouse.proc_list, wait);
-	if(sunmouse.ready)
+	if(!queue_empty())
 		return POLLIN | POLLRDNORM;
 	return 0;
 }
@@ -441,18 +543,24 @@ sun_mouse_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsig
 	switch (cmd){
 		/* VUIDGFORMAT - Get input device byte stream format */
 	case _IOR('v', 2, int):
-		put_user_ret(sunmouse.vuid_mode, (int *) arg, -EFAULT);
+		if (put_user(sunmouse.vuid_mode, (int *) arg))
+			return -EFAULT;
 		break;
 
 		/* VUIDSFORMAT - Set input device byte stream format*/
 	case _IOW('v', 1, int):
-		get_user_ret(i, (int *) arg, -EFAULT);
+		if (get_user(i, (int *) arg))
+			return -EFAULT;
 		if (i == VUID_NATIVE || i == VUID_FIRM_EVENT){
 			int value;
 
-			get_user_ret(value, (int *)arg, -EFAULT);
+			if (get_user(value, (int *)arg))
+				return -EFAULT;
+
+			spin_lock_irq(&sunmouse.lock);
 			sunmouse.vuid_mode = value;
 			sunmouse.head = sunmouse.tail = 0;
+			spin_unlock_irq(&sunmouse.lock);
 		} else
 			return -EINVAL;
 		break;
@@ -462,54 +570,40 @@ sun_mouse_ioctl (struct inode *inode, struct file *file, unsigned int cmd, unsig
 		/* This is a buggy application doing termios on the mouse driver */
 		/* we ignore it.  I keep this check here so that we will notice   */
 		/* future mouse vuid ioctls */
-		break;
+		return -ENOTTY;
 		
 	default:
 #ifdef DEBUG
 		printk ("[MOUSE-ioctl: %8.8x]\n", cmd);
 #endif
-		return -1;
+		return -EINVAL;
 	}
 	return 0;
 }
 
 struct file_operations sun_mouse_fops = {
-	NULL,
-	sun_mouse_read,
-	sun_mouse_write,
-	NULL,
-	sun_mouse_poll,
-	sun_mouse_ioctl,
-	NULL,
-	sun_mouse_open,
-	NULL,		/* flush */
-	sun_mouse_close,
-	NULL,
-	sun_mouse_fasync,
+	read:		sun_mouse_read,
+	write:		sun_mouse_write,
+	poll:		sun_mouse_poll,
+	ioctl:		sun_mouse_ioctl,
+	open:		sun_mouse_open,
+	release:	sun_mouse_close,
+	fasync:		sun_mouse_fasync,
 };
 
 static struct miscdevice sun_mouse_mouse = {
 	SUN_MOUSE_MINOR, "sunmouse", &sun_mouse_fops
 };
 
-__initfunc(int sun_mouse_init(void))
+void sun_mouse_zsinit(void)
 {
-	if (!sunmouse.present)
-		return -ENODEV;
-
 	printk("Sun Mouse-Systems mouse driver version 1.00\n");
 
-	sunmouse.ready = sunmouse.active = 0;
+	sunmouse.active = 0;
 	misc_register (&sun_mouse_mouse);
 	sunmouse.delta_x = sunmouse.delta_y = 0;
 	sunmouse.button_state = 0x80;
 	init_waitqueue_head(&sunmouse.proc_list);
+	spin_lock_init(&sunmouse.lock);
 	sunmouse.byte = 69;
-	return 0;
-}
-
-void
-sun_mouse_zsinit(void)
-{
-	sunmouse.present = 1;
 }

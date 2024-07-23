@@ -1,4 +1,4 @@
-# $Id: Makefile,v 1.33 1999/01/02 16:45:47 davem Exp $
+# $Id: Makefile,v 1.38 2000/12/15 00:41:22 davem Exp $
 # Makefile for the linux Sparc-specific parts of the memory manager.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
@@ -7,26 +7,22 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
+.S.o:
+	$(CC) $(AFLAGS) -ansi -c -o $*.o $<
+
 O_TARGET := mm.o
-O_OBJS   := fault.o init.o loadmmu.o generic.o asyncd.o extable.o btfixup.o
+obj-y    := fault.o init.o loadmmu.o generic.o extable.o btfixup.o
+
 ifeq ($(CONFIG_SUN4),y)
-O_OBJS	 += nosrmmu.o
+obj-y	 += nosrmmu.o
 else
-O_OBJS	 += srmmu.o iommu.o io-unit.o hypersparc.o viking.o tsunami.o
+obj-y	 += srmmu.o iommu.o io-unit.o hypersparc.o viking.o tsunami.o swift.o
 endif
+
 ifdef CONFIG_SMP
-O_OBJS   += nosun4c.o
+obj-y   += nosun4c.o
 else
-O_OBJS   += sun4c.o
+obj-y   += sun4c.o
 endif
 
 include $(TOPDIR)/Rules.make
-
-hypersparc.o: hypersparc.S
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -ansi -c -o hypersparc.o hypersparc.S
-
-viking.o: viking.S
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -ansi -c -o viking.o viking.S
-
-tsunami.o: tsunami.S
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -ansi -c -o tsunami.o tsunami.S

@@ -139,7 +139,7 @@ tbf_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 	if ((sch->stats.backlog += skb->len) <= q->limit) {
 		sch->stats.bytes += skb->len;
 		sch->stats.packets++;
-		return 1;
+		return 0;
 	}
 
 	/* Drop action: undo the things that we just did,
@@ -155,7 +155,7 @@ drop:
 	if (sch->reshape_fail==NULL || sch->reshape_fail(skb, sch))
 #endif
 		kfree_skb(skb);
-	return 0;
+	return NET_XMIT_DROP;
 }
 
 static int
@@ -163,7 +163,7 @@ tbf_requeue(struct sk_buff *skb, struct Qdisc* sch)
 {
 	__skb_queue_head(&sch->q, skb);
 	sch->stats.backlog += skb->len;
-	return 1;
+	return 0;
 }
 
 static int
@@ -186,7 +186,7 @@ static void tbf_watchdog(unsigned long arg)
 	struct Qdisc *sch = (struct Qdisc*)arg;
 
 	sch->flags &= ~TCQ_F_THROTTLED;
-	qdisc_wakeup(sch->dev);
+	netif_schedule(sch->dev);
 }
 
 static struct sk_buff *
@@ -226,15 +226,13 @@ tbf_dequeue(struct Qdisc* sch)
 			return skb;
 		}
 
-		if (!sch->dev->tbusy) {
+		if (!netif_queue_stopped(sch->dev)) {
 			long delay = PSCHED_US2JIFFIE(max(-toks, -ptoks));
 
 			if (delay == 0)
 				delay = 1;
 
-			del_timer(&q->wd_timer);
-			q->wd_timer.expires = jiffies + delay;
-			add_timer(&q->wd_timer);
+			mod_timer(&q->wd_timer, jiffies+delay);
 		}
 
 		/* Maybe we have a shorter packet in the queue,

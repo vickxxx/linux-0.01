@@ -14,8 +14,7 @@ struct cvf_format
   struct buffer_head* (*cvf_getblk) (struct super_block*sb,int block);
   void (*cvf_brelse) (struct super_block *sb,struct buffer_head *bh);
   void (*cvf_mark_buffer_dirty) (struct super_block *sb,
-                              struct buffer_head *bh,
-                              int dirty_val);
+                              struct buffer_head *bh);
   void (*cvf_set_uptodate) (struct super_block *sb,
                          struct buffer_head *bh,
                          int val);
@@ -27,7 +26,6 @@ struct cvf_format
   int (*fat_access) (struct super_block *sb,int nr,int new_value);
   int (*cvf_statfs) (struct super_block *sb,struct statfs *buf, int bufsiz);
   int (*cvf_bmap) (struct inode *inode,int block);
-  int (*cvf_smap) (struct inode *inode,int sector);
   ssize_t (*cvf_file_read) ( struct file *, char *, size_t, loff_t *);
   ssize_t (*cvf_file_write) ( struct file *, const char *, size_t, loff_t *);
   int (*cvf_mmap) (struct file *, struct vm_area_struct *);

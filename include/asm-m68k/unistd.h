@@ -116,7 +116,7 @@
 #define __NR_olduname		109
 #define __NR_iopl		/* 110 */ not supported
 #define __NR_vhangup		111
-#define __NR_idle		112
+#define __NR_idle		/* 112 */ Obsolete
 #define __NR_vm86		/* 113 */ not supported
 #define __NR_wait4		114
 #define __NR_swapoff		115
@@ -170,6 +170,7 @@
 #define __NR_mremap		163
 #define __NR_setresuid		164
 #define __NR_getresuid		165
+#define __NR_getpagesize	166
 #define __NR_query_module	167
 #define __NR_poll		168
 #define __NR_nfsservctl		169
@@ -194,6 +195,33 @@
 #define __NR_getpmsg		188	/* some people actually want streams */
 #define __NR_putpmsg		189	/* some people actually want streams */
 #define __NR_vfork		190
+#define __NR_ugetrlimit		191
+#define __NR_mmap2		192
+#define __NR_truncate64		193
+#define __NR_ftruncate64	194
+#define __NR_stat64		195
+#define __NR_lstat64		196
+#define __NR_fstat64		197
+#define __NR_chown32		198
+#define __NR_getuid32		199
+#define __NR_getgid32		200
+#define __NR_geteuid32		201
+#define __NR_getegid32		202
+#define __NR_setreuid32		203
+#define __NR_setregid32		204
+#define __NR_getgroups32	205
+#define __NR_setgroups32	206
+#define __NR_fchown32		207
+#define __NR_setresuid32	208
+#define __NR_getresuid32	209
+#define __NR_setresgid32	210
+#define __NR_getresgid32	211
+#define __NR_lchown32		212
+#define __NR_setuid32		213
+#define __NR_setgid32		214
+#define __NR_setfsuid32		215
+#define __NR_setfsgid32		216
+#define __NR_getdents64		220
 
 /* user-visible error numbers are in the range -1 - -122: see
    <asm-m68k/errno.h> */
@@ -309,7 +337,6 @@ __syscall_return(type,__res); \
  * some others too.
  */
 #define __NR__exit __NR_exit
-static inline _syscall0(int,idle)
 static inline _syscall0(int,pause)
 static inline _syscall0(int,sync)
 static inline _syscall0(pid_t,setsid)

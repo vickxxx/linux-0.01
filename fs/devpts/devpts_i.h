@@ -19,8 +19,6 @@
 
 struct devpts_sb_info {
 	u32 magic;
-	struct super_block *next;
-	struct super_block **back;
 	int setuid;
 	int setgid;
 	uid_t   uid;
@@ -40,4 +38,4 @@ extern inline struct devpts_sb_info *SBI(struct super_block *sb)
 }
 
 extern struct inode_operations devpts_root_inode_operations;
-extern struct inode_operations devpts_device_inode_operations;
+extern struct file_operations devpts_root_operations;

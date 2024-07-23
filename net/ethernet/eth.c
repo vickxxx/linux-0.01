@@ -60,33 +60,31 @@
 #include <asm/system.h>
 #include <asm/checksum.h>
 
-
-__initfunc(void eth_setup(char *str, int *ints))
+static int __init eth_setup(char *str)
 {
-	struct device *d;
+	int ints[5];
+	struct ifmap map;
 
+	str = get_options(str, ARRAY_SIZE(ints), ints);
 	if (!str || !*str)
-		return;
+		return 0;
 
-	d = dev_base;
-	while (d) 
-	{
-		if (!strcmp(str,d->name)) 
-		{
-			if (ints[0] > 0)
-				d->irq=ints[1];
-			if (ints[0] > 1)
-				d->base_addr=ints[2];
-			if (ints[0] > 2)
-				d->mem_start=ints[3];
-			if (ints[0] > 3)
-				d->mem_end=ints[4];
-			break;
-		}
-		d=d->next;
-	}
+ 	/* Save settings */
+ 	memset(&map, -1, sizeof(map));
+	if (ints[0] > 0)
+		map.irq = ints[1];
+	if (ints[0] > 1)
+		map.base_addr = ints[2];
+	if (ints[0] > 2)
+		map.mem_start = ints[3];
+	if (ints[0] > 3)
+		map.mem_end = ints[4];
+
+	/* Add new entry to the list */
+	return netdev_boot_setup_add(str, &map);
 }
 
+__setup("ether=", eth_setup);
 
 /*
  *	 Create the Ethernet MAC header for an arbitrary protocol layer 
@@ -95,7 +93,7 @@ __initfunc(void eth_setup(char *str, int *ints))
  *	daddr=NULL	means leave destination address (eg unresolved arp)
  */
 
-int eth_header(struct sk_buff *skb, struct device *dev, unsigned short type,
+int eth_header(struct sk_buff *skb, struct net_device *dev, unsigned short type,
 	   void *daddr, void *saddr, unsigned len)
 {
 	struct ethhdr *eth = (struct ethhdr *)skb_push(skb,ETH_HLEN);
@@ -151,7 +149,7 @@ int eth_header(struct sk_buff *skb, struct device *dev, unsigned short type,
 int eth_rebuild_header(struct sk_buff *skb)
 {
 	struct ethhdr *eth = (struct ethhdr *)skb->data;
-	struct device *dev = skb->dev;
+	struct net_device *dev = skb->dev;
 
 	switch (eth->h_proto)
 	{
@@ -178,7 +176,7 @@ int eth_rebuild_header(struct sk_buff *skb)
  *	This is normal practice and works for any 'now in use' protocol.
  */
  
-unsigned short eth_type_trans(struct sk_buff *skb, struct device *dev)
+unsigned short eth_type_trans(struct sk_buff *skb, struct net_device *dev)
 {
 	struct ethhdr *eth;
 	unsigned char *rawp;
@@ -203,7 +201,7 @@ unsigned short eth_type_trans(struct sk_buff *skb, struct device *dev)
 	 *	seems to set IFF_PROMISC.
 	 */
 	 
-	else if(dev->flags&(IFF_PROMISC/*|IFF_ALLMULTI*/))
+	else if(1 /*dev->flags&IFF_PROMISC*/)
 	{
 		if(memcmp(eth->h_dest,dev->dev_addr, ETH_ALEN))
 			skb->pkt_type=PACKET_OTHERHOST;
@@ -240,7 +238,7 @@ int eth_header_cache(struct neighbour *neigh, struct hh_cache *hh)
 {
 	unsigned short type = hh->hh_type;
 	struct ethhdr *eth = (struct ethhdr*)(((u8*)hh->hh_data) + 2);
-	struct device *dev = neigh->dev;
+	struct net_device *dev = neigh->dev;
 
 	if (type == __constant_htons(ETH_P_802_3))
 		return -1;
@@ -256,46 +254,7 @@ int eth_header_cache(struct neighbour *neigh, struct hh_cache *hh)
  * Called by Address Resolution module to notify changes in address.
  */
 
-void eth_header_cache_update(struct hh_cache *hh, struct device *dev, unsigned char * haddr)
+void eth_header_cache_update(struct hh_cache *hh, struct net_device *dev, unsigned char * haddr)
 {
 	memcpy(((u8*)hh->hh_data) + 2, haddr, dev->addr_len);
 }
-
-#ifndef CONFIG_IP_ROUTER
-
-/*
- *	Copy from an ethernet device memory space to an sk_buff while checksumming if IP
- */
- 
-void eth_copy_and_sum(struct sk_buff *dest, unsigned char *src, int length, int base)
-{
-	struct ethhdr *eth;
-	struct iphdr *iph;
-	int ip_length;
-
-	eth=(struct ethhdr *)src;
-	if(eth->h_proto!=htons(ETH_P_IP))
-	{
-		memcpy(dest->data,src,length);
-		return;
-	}
-	/*
-	 * We have to watch for padded packets. The csum doesn't include the
-	 * padding, and there is no point in copying the padding anyway.
-	 * We have to use the smaller of length and ip_length because it
-	 * can happen that ip_length > length.
-	 */
-	memcpy(dest->data,src,sizeof(struct iphdr)+ETH_HLEN);	/* ethernet is always >= 34 */
-	length -= sizeof(struct iphdr) + ETH_HLEN;
-	iph=(struct iphdr*)(src+ETH_HLEN);
-	ip_length = ntohs(iph->tot_len) - sizeof(struct iphdr);
-
-	/* Also watch out for bogons - min IP size is 8 (rfc-1042) */
-	if ((ip_length <= length) && (ip_length > 7))
-		length=ip_length;
-
-	dest->csum=csum_partial_copy(src+sizeof(struct iphdr)+ETH_HLEN,dest->data+sizeof(struct iphdr)+ETH_HLEN,length,base);
-	dest->ip_summed=1;
-}
-
-#endif /* !(CONFIG_IP_ROUTER) */

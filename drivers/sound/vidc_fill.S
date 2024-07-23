@@ -1,15 +1,19 @@
 /*
- * sound/vidc_fill.S
+ *  linux/drivers/sound/vidc_fill.S
  *
- * Filler routines for DMA buffers
+ *  Copyright (C) 1997 Russell King
  *
- * Copyright (C) 1997 Russell King
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Filler routines for DMA buffers
  */
 #define __ASSEMBLY__
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/hardware.h>
-#include <asm/iomd.h>
+#include <asm/hardware/iomd.h>
 
 		.text
 
@@ -191,24 +195,24 @@ ENTRY(vidc_sound_dma_irq)
 		.data
 		.globl	SYMBOL_NAME(dma_interrupt)
 SYMBOL_NAME(dma_interrupt):
-		.long	0
+		.long	0				@ r3
 		.globl	SYMBOL_NAME(dma_pbuf)
 SYMBOL_NAME(dma_pbuf):
-		.long	0
-		.long	0
+		.long	0				@ r4
+		.long	0				@ r5
 		.globl	SYMBOL_NAME(dma_start)
 SYMBOL_NAME(dma_start):
-		.long	0
+		.long	0				@ r0
 		.globl	SYMBOL_NAME(dma_count)
 SYMBOL_NAME(dma_count):
-		.long	0
+		.long	0				@ r1
 		.globl	SYMBOL_NAME(dma_buf)
 SYMBOL_NAME(dma_buf):
-		.long	0
-		.long	0
+		.long	0				@ r2
+		.long	0				@ r3
 		.globl	SYMBOL_NAME(vidc_filler)
 SYMBOL_NAME(vidc_filler):
-		.long	SYMBOL_NAME(vidc_fill_noaudio)
+		.long	SYMBOL_NAME(vidc_fill_noaudio)	@ r4
 		.globl	SYMBOL_NAME(dma_bufsize)
 SYMBOL_NAME(dma_bufsize):
-		.long	0x1000
+		.long	0x1000				@ r5

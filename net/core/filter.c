@@ -2,7 +2,7 @@
  * Linux Socket Filter - Kernel level socket filtering
  *
  * Author:
- *     Jay Schulist <Jay.Schulist@spacs.k12.wi.us>
+ *     Jay Schulist <jschlst@turbolinux.com>
  *
  * Based on the design of:
  *     - The Berkeley Packet Filter
@@ -49,12 +49,17 @@ static u8 *load_pointer(struct sk_buff *skb, int k)
 	else if (k>=SKF_LL_OFF)
 		ptr = skb->mac.raw + k - SKF_LL_OFF;
 
-	if (ptr<skb->head && ptr < skb->tail)
+	if (ptr >= skb->head && ptr < skb->tail)
 		return ptr;
 	return NULL;
 }
 
-/*
+/**
+ *	sk_run_filter	- 	run a filter on a socket
+ *	@skb: buffer to run the filter on
+ *	@filter: filter to apply
+ *	@flen: length of filter
+ *
  * Decode and apply filter instructions to the skb->data.
  * Return length to keep, 0 for none. skb is the data we are
  * filtering, filter is the array of filter instructions, and
@@ -248,6 +253,7 @@ load_b:
 						continue;
 					}
 				}
+				return 0;
 
 			case BPF_LD|BPF_W|BPF_LEN:
 				A = len;
@@ -340,9 +346,17 @@ load_b:
 	return (0);
 }
 
-/*
+/**
+ *	sk_chk_filter - verify socket filter code
+ *	@filter: filter to verify
+ *	@flen: length of filter
+ *
  * Check the user's filter code. If we let some ugly
- * filter code slip through kaboom!
+ * filter code slip through kaboom! The filter must contain
+ * no references or jumps that are out of range, no illegal instructions
+ * and no backward jumps. It must end with a RET instruction
+ *
+ * Returns 0 if the rule set is legal or a negative errno code if not.
  */
 
 int sk_chk_filter(struct sock_filter *filter, int flen)
@@ -412,9 +426,15 @@ int sk_chk_filter(struct sock_filter *filter, int flen)
         return (BPF_CLASS(filter[flen - 1].code) == BPF_RET)?0:-EINVAL;
 }
 
-/*
+/**
+ *	sk_attach_filter - attach a socket filter
+ *	@fprog: the filter program
+ *	@sk: the socket to use
+ *
  * Attach the user's filter code. We first run some sanity checks on
- * it to make sure it does not explode on us later.
+ * it to make sure it does not explode on us later. If an error
+ * occurs or there is insufficient memory for the filter a negative
+ * errno code is returned. On success the return is zero.
  */
 
 int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk)
@@ -440,9 +460,12 @@ int sk_attach_filter(struct sock_fprog *fprog, struct sock *sk)
 	fp->len = fprog->len;
 
 	if ((err = sk_chk_filter(fp->insns, fp->len))==0) {
-		struct sk_filter *old_fp = sk->filter;
+		struct sk_filter *old_fp;
+
+		spin_lock_bh(&sk->lock.slock);
+		old_fp = sk->filter;
 		sk->filter = fp;
-		synchronize_bh();
+		spin_unlock_bh(&sk->lock.slock);
 		fp = old_fp;
 	}
 

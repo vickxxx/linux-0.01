@@ -35,13 +35,12 @@
 #include <linux/openpic.h>
 #include <linux/ide.h>
 
+#include <asm/init.h>
 #include <asm/mmu.h>
 #include <asm/processor.h>
 #include <asm/residual.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <linux/ide.h>
-#include <asm/ide.h>
 #include <asm/cache.h>
 #include <asm/dma.h>
 #include <asm/machdep.h>
@@ -50,7 +49,7 @@
 #include <asm/raven.h>
 #include <asm/keyboard.h>
 
-#include "time.h"
+#include <asm/time.h>
 #include "local_irq.h"
 #include "i8259.h"
 #include "open_pic.h"
@@ -86,7 +85,6 @@ extern void pckbd_init_hw(void);
 extern unsigned char pckbd_sysrq_xlate[128];
 
 extern void prep_setup_pci_ptrs(void);
-extern void chrp_do_IRQ(struct pt_regs *regs, int cpu, int isfake);
 extern char saved_command_line[256];
 
 int _prep_type;
@@ -114,14 +112,13 @@ extern int rd_image_start;	/* starting block # of image */
 unsigned long vgacon_remap_base;
 #endif
 
-__prep
-int
+int __prep
 prep_get_cpuinfo(char *buffer)
 {
 	extern char *Motherboard_map_name;
 	int len, i;
   
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 #define CD(X)		(cpu_data[n].X)  
 #else
 #define CD(X) (X)
@@ -212,8 +209,8 @@ no_l2:
 	return len;
 }
 
-__initfunc(void
-prep_setup_arch(unsigned long * memory_start_p, unsigned long * memory_end_p))
+void __init
+prep_setup_arch(void)
 {
 	extern char cmd_line[];
 	unsigned char reg;
@@ -312,7 +309,7 @@ prep_setup_arch(unsigned long * memory_start_p, unsigned long * memory_end_p))
 	 * it's the only way to support both addrs from one binary.
 	 * -- Cort
 	 */
-	if ( is_prep )
+	if ( _machine == _MACH_prep )
 	{
 		extern struct card_info snd_installed_cards[];
 		struct card_info  *snd_ptr;
@@ -366,16 +363,15 @@ prep_setup_arch(unsigned long * memory_start_p, unsigned long * memory_end_p))
  * This allows for a faster boot as we do not need to calibrate the
  * decrementer against another clock. This is important for embedded systems.
  */
-__initfunc(void prep_res_calibrate_decr(void))
+void __init prep_res_calibrate_decr(void)
 {
-	int freq, divisor;
+	unsigned long freq, divisor=4;
 
 	freq = res->VitalProductData.ProcessorBusHz;
-	divisor = 4;
-	printk("time_init: decrementer frequency = %d/%d\n", freq, divisor);
-	decrementer_count = freq / HZ / divisor;
-	count_period_num = divisor;
-	count_period_den = freq / 1000000;
+	printk("time_init: decrementer frequency = %lu.%.6lu MHz\n",
+	       (freq/divisor)/1000000, (freq/divisor)%1000000);
+	tb_ticks_per_jiffy = freq / HZ / divisor;
+	tb_to_us = mulhwu_scale_factor(freq/divisor, 1000000);
 }
 
 /*
@@ -384,36 +380,34 @@ __initfunc(void prep_res_calibrate_decr(void))
  * but on prep we have to figure it out.
  * -- Cort
  */
-int calibrate_done = 0;
-volatile int *done_ptr = &calibrate_done;
+/* Done with 3 interrupts: the first one primes the cache and the
+ * 2 following ones measure the interval. The precision of the method
+ * is still doubtful due to the short interval sampled.
+ */
+static volatile int calibrate_steps __initdata = 3;
+static unsigned tbstamp __initdata = 0;
 
-__initfunc(void
+void __init
 prep_calibrate_decr_handler(int            irq,
 			    void           *dev,
-			    struct pt_regs *regs))
+			    struct pt_regs *regs)
 {
-	unsigned long freq, divisor;
-	static unsigned long t1 = 0, t2 = 0;
-	
-	if ( !t1 )
-		t1 = get_dec();
-	else if (!t2)
-	{
-		t2 = get_dec();
-		t2 = t1-t2;  /* decr's in 1/HZ */
-		t2 = t2*HZ;  /* # decrs in 1s - thus in Hz */
-		freq = t2 * 60;	/* try to make freq/1e6 an integer */
-		divisor = 60;
-		printk("time_init: decrementer frequency = %lu/%lu (%luMHz)\n",
-		       freq, divisor,t2>>20);
-		decrementer_count = freq / HZ / divisor;
-		count_period_num = divisor;
-		count_period_den = freq / 1000000;
-		*done_ptr = 1;
+	unsigned long t, freq;
+	int step=--calibrate_steps;
+
+	t = get_tbl();
+	if (step > 0) {
+		tbstamp = t;
+	} else {
+		freq = (t - tbstamp)*HZ;
+		printk("time_init: decrementer frequency = %lu.%.6lu MHz\n",
+		       freq/1000000, freq%1000000);
+		tb_ticks_per_jiffy = freq / HZ;
+		tb_to_us = mulhwu_scale_factor(freq, 1000000);
 	}
 }
 
-__initfunc(void prep_calibrate_decr(void))
+void __init prep_calibrate_decr(void)
 {
 	unsigned long flags;
 
@@ -431,17 +425,43 @@ __initfunc(void prep_calibrate_decr(void))
 	if (request_irq(0, prep_calibrate_decr_handler, 0, "timer", NULL) != 0)
 		panic("Could not allocate timer IRQ!");
 	__sti();
-	while ( ! *done_ptr ) /* nothing */; /* wait for calibrate */
+	while ( calibrate_steps ) /* nothing */; /* wait for calibrate */
         restore_flags(flags);
 	free_irq( 0, NULL);
 }
 
 
-/* We use the NVRAM RTC to time a second to calibrate the decrementer. */
-__initfunc(void mk48t59_calibrate_decr(void))
+static long __init mk48t59_init(void) {
+	unsigned char tmp;
+
+	tmp = ppc_md.nvram_read_val(MK48T59_RTC_CONTROLB);
+	if (tmp & MK48T59_RTC_CB_STOP) {
+		printk("Warning: RTC was stopped, date will be wrong.\n");
+		ppc_md.nvram_write_val(MK48T59_RTC_CONTROLB, 
+				       tmp & ~MK48T59_RTC_CB_STOP);
+		/* Low frequency crystal oscillators may take a very long
+		 * time to startup and stabilize. For now just ignore the
+		 * the issue, but attempting to calibrate the decrementer
+		 * from the RTC just after this wakeup is likely to be very 
+		 * inaccurate. Firmware should not allow to load
+		 * the OS with the clock stopped anyway...
+		 */
+	}
+	/* Ensure that the clock registers are updated */
+	tmp = ppc_md.nvram_read_val(MK48T59_RTC_CONTROLA);
+	tmp &= ~(MK48T59_RTC_CA_READ | MK48T59_RTC_CA_WRITE);
+	ppc_md.nvram_write_val(MK48T59_RTC_CONTROLA, tmp);
+	return 0;
+}
+
+/* We use the NVRAM RTC to time a second to calibrate the decrementer,
+ * the RTC registers have just been set up in the right state by the
+ * preceding routine.
+ */
+void __init mk48t59_calibrate_decr(void)
 {
-	unsigned long freq, divisor;
-	unsigned long t1, t2;
+	unsigned long freq;
+	unsigned long t1;
         unsigned char save_control;
         long i;
 	unsigned char sec;
@@ -461,38 +481,40 @@ __initfunc(void mk48t59_calibrate_decr(void))
 
 	/* Read the seconds value to see when it changes. */
 	sec = ppc_md.nvram_read_val(MK48T59_RTC_SECONDS);
+	/* Actually this is bad for precision, we should have a loop in
+	 * which we only read the seconds counter. nvram_read_val writes
+	 * the address bytes on every call and this takes a lot of time.
+	 * Perhaps an nvram_wait_change method returning a time
+	 * stamp with a loop count as parameter would be the  solution.
+	 */
 	for (i = 0 ; i < 1000000 ; i++)	{ /* may take up to 1 second... */
+	   t1 = get_tbl();
 	   if (ppc_md.nvram_read_val(MK48T59_RTC_SECONDS) != sec) {
 	      break;
 	   }
 	}
-	t1 = get_dec();
 
 	sec = ppc_md.nvram_read_val(MK48T59_RTC_SECONDS);
 	for (i = 0 ; i < 1000000 ; i++)	{ /* Should take up 1 second... */
+	   freq = get_tbl()-t1;
 	   if (ppc_md.nvram_read_val(MK48T59_RTC_SECONDS) != sec) {
 	      break;
 	   }
 	}
 
-	t2 = t1 - get_dec();
-
-	freq = t2 * 60;	/* try to make freq/1e6 an integer */
-	divisor = 60;
-	printk("time_init: decrementer frequency = %lu/%lu (%luMHz)\n",
-	       freq, divisor,t2>>20);
-	decrementer_count = freq / HZ / divisor;
-	count_period_num = divisor;
-	count_period_den = freq / 1000000;
+	printk("time_init: decrementer frequency = %lu.%.6lu MHz\n",
+	       freq/1000000, freq%1000000);
+	tb_ticks_per_jiffy = freq / HZ;
+	tb_to_us = mulhwu_scale_factor(freq, 1000000);
 }
 
-void
+void __prep
 prep_restart(char *cmd)
 {
         unsigned long i = 10000;
 
 
-        _disable_interrupts();
+	__cli();
 
         /* set exception prefix high - to the prom */
         _nmask_and_or_msr(0, MSR_IP);
@@ -509,7 +531,7 @@ prep_restart(char *cmd)
 /*
  * This function will restart a board regardless of port 92 functionality
  */
-void
+void __prep
 prep_direct_restart(char *cmd)
 {
 	u32 jumpaddr=0xfff00100;
@@ -519,7 +541,7 @@ prep_direct_restart(char *cmd)
 	 * This will ALWAYS work regardless of port 92
 	 * functionality
 	 */
-	_disable_interrupts();
+	__cli();
 
 	__asm__ __volatile__("\n\
 	mtspr   26, %1  /* SRR0 */
@@ -532,11 +554,11 @@ prep_direct_restart(char *cmd)
 	 */
 }
 
-void
+void __prep
 prep_halt(void)
 {
         unsigned long flags;
-	_disable_interrupts();
+	__cli();
 	/* set exception prefix high - to the prom */
 	save_flags( flags );
 	restore_flags( flags|MSR_IP );
@@ -552,13 +574,14 @@ prep_halt(void)
 	 */
 }
 
-void
+void __prep
 prep_power_off(void)
 {
 	prep_halt();
 }
 
-int prep_setup_residual(char *buffer)
+int __prep
+prep_setup_residual(char *buffer)
 {
         int len = 0;
 
@@ -576,7 +599,7 @@ int prep_setup_residual(char *buffer)
 	return len;
 }
 
-u_int
+u_int __prep
 prep_irq_cannonicalize(u_int irq)
 {
 	if (irq == 2)
@@ -589,7 +612,8 @@ prep_irq_cannonicalize(u_int irq)
 	}
 }
 
-void                           
+#if 0
+void __prep
 prep_do_IRQ(struct pt_regs *regs, int cpu, int isfake)
 {
         int irq;
@@ -602,45 +626,52 @@ prep_do_IRQ(struct pt_regs *regs, int cpu, int isfake)
 		return;
 	}
         ppc_irq_dispatch_handler( regs, irq );
+}
+#endif
+
+int __prep
+prep_get_irq(struct pt_regs *regs)
+{
+	return i8259_irq(smp_processor_id());
 }		
 
-__initfunc(void
-prep_init_IRQ(void))
+void __init
+prep_init_IRQ(void)
 {
 	int i;
 
 	if (OpenPIC != NULL) {
 		for ( i = 16 ; i < 36 ; i++ )
-			irq_desc[i].ctl = &open_pic;
+			irq_desc[i].handler = &open_pic;
 		openpic_init(1);
 	}
 	
         for ( i = 0 ; i < 16  ; i++ )
-                irq_desc[i].ctl = &i8259_pic;
+                irq_desc[i].handler = &i8259_pic;
         i8259_init();
-#ifdef __SMP__
+#ifdef CONFIG_SMP
 	request_irq(openpic_to_irq(OPENPIC_VEC_SPURIOUS), openpic_ipi_action,
 		    0, "IPI0", 0);
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
 }
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
 /*
  * IDE stuff.
  */
-void
+void __prep
 prep_ide_insw(ide_ioreg_t port, void *buf, int ns)
 {
 	_insw((unsigned short *)((port)+_IO_BASE), buf, ns);
 }
 
-void
+void __prep
 prep_ide_outsw(ide_ioreg_t port, void *buf, int ns)
 {
 	_outsw((unsigned short *)((port)+_IO_BASE), buf, ns);
 }
 
-int
+int __prep
 prep_ide_default_irq(ide_ioreg_t base)
 {
 	switch (base) {
@@ -653,7 +684,7 @@ prep_ide_default_irq(ide_ioreg_t base)
 	}
 }
 
-ide_ioreg_t
+ide_ioreg_t __prep
 prep_ide_default_io_base(int index)
 {
 	switch (index) {
@@ -666,13 +697,13 @@ prep_ide_default_io_base(int index)
 	}
 }
 
-int
+int __prep
 prep_ide_check_region(ide_ioreg_t from, unsigned int extent)
 {
         return check_region(from, extent);
 }
 
-void
+void __prep
 prep_ide_request_region(ide_ioreg_t from,
 			unsigned int extent,
 			const char *name)
@@ -680,20 +711,20 @@ prep_ide_request_region(ide_ioreg_t from,
         request_region(from, extent, name);
 }
 
-void
+void __prep
 prep_ide_release_region(ide_ioreg_t from,
 			unsigned int extent)
 {
         release_region(from, extent);
 }
 
-void
+void __prep
 prep_ide_fix_driveid(struct hd_driveid *id)
 {
 }
 
-__initfunc(void
-prep_ide_init_hwif_ports (hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl_port, int *irq))
+void __init
+prep_ide_init_hwif_ports (hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl_port, int *irq)
 {
 	ide_ioreg_t reg = data_port;
 	int i;
@@ -712,9 +743,9 @@ prep_ide_init_hwif_ports (hw_regs_t *hw, ide_ioreg_t data_port, ide_ioreg_t ctrl
 }
 #endif
 
-__initfunc(void
+void __init
 prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
-	  unsigned long r6, unsigned long r7))
+	  unsigned long r6, unsigned long r7)
 {
 	/* make a copy of residual data */
 	if ( r3 )
@@ -754,29 +785,13 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 
 	prep_setup_pci_ptrs();
 
-#ifdef CONFIG_BLK_DEV_INITRD
-	/* take care of initrd if we have one */
-	if ( r4 )
-	{
-		initrd_start = r4 + KERNELBASE;
-		initrd_end = r5 + KERNELBASE;
-	}
-#endif /* CONFIG_BLK_DEV_INITRD */
-
-	/* take care of cmd line */
-	if ( r6  && (((char *) r6) != '\0'))
-	{
-		*(char *)(r7+KERNELBASE) = 0;
-		strcpy(cmd_line, (char *)(r6+KERNELBASE));
-	}
-
 	ppc_md.setup_arch     = prep_setup_arch;
 	ppc_md.setup_residual = prep_setup_residual;
 	ppc_md.get_cpuinfo    = prep_get_cpuinfo;
 	ppc_md.irq_cannonicalize = prep_irq_cannonicalize;
 	ppc_md.init_IRQ       = prep_init_IRQ;
 	/* this gets changed later on if we have an OpenPIC -- Cort */
-	ppc_md.do_IRQ         = prep_do_IRQ;
+	ppc_md.get_irq        = prep_get_irq;
 	ppc_md.init           = NULL;
 
 	ppc_md.restart        = prep_restart;
@@ -798,6 +813,7 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 		{
 			ppc_md.set_rtc_time   = mk48t59_set_rtc_time;
 			ppc_md.get_rtc_time   = mk48t59_get_rtc_time;
+			ppc_md.time_init      = mk48t59_init;
 		}
 		else
 		{
@@ -818,6 +834,7 @@ prep_init(unsigned long r3, unsigned long r4, unsigned long r5,
 		ppc_md.set_rtc_time   = mk48t59_set_rtc_time;
 		ppc_md.get_rtc_time   = mk48t59_get_rtc_time;
 		ppc_md.calibrate_decr = mk48t59_calibrate_decr;
+		ppc_md.time_init      = mk48t59_init;
 	}
 
 #if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)

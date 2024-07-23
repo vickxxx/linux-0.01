@@ -32,6 +32,7 @@ static int device_check(int host_no);
 typedef struct {
     struct pardevice *dev;	/* Parport device entry         */
     int base;			/* Actual port address          */
+    int base_hi;		/* Hi Base address for ECP-ISA chipset */
     int mode;			/* Transfer mode                */
     int host;			/* Host number (for proc)       */
     Scsi_Cmnd *cur_cmd;		/* Current queued command       */
@@ -46,10 +47,11 @@ typedef struct {
 #define IMM_EMPTY \
 {	dev:		NULL,		\
 	base:		-1,		\
+	base_hi:	0,		\
 	mode:		IMM_AUTODETECT,	\
 	host:		-1,		\
 	cur_cmd:	NULL,		\
-	imm_tq:		{0, 0, imm_interrupt, NULL},    \
+	imm_tq:		{ routine: imm_interrupt },    \
 	jstart:		0,		\
 	failed:		0,		\
 	dp:		0,		\
@@ -63,6 +65,7 @@ static imm_struct imm_hosts[NO_HOSTS] =
 {IMM_EMPTY, IMM_EMPTY, IMM_EMPTY, IMM_EMPTY};
 
 #define IMM_BASE(x)	imm_hosts[(x)].base
+#define IMM_BASE_HI(x)     imm_hosts[(x)].base_hi
 
 int parbus_base[NO_HOSTS] =
 {0x03bc, 0x0378, 0x0278, 0x0000};
@@ -111,17 +114,22 @@ static int imm_pb_claim(int host_no)
  *                   Parallel port probing routines                        *
  ***************************************************************************/
 
-#ifdef MODULE
-Scsi_Host_Template driver_template = IMM;
+static Scsi_Host_Template driver_template = IMM;
 #include  "scsi_module.c"
-#endif
 
 int imm_detect(Scsi_Host_Template * host)
 {
     struct Scsi_Host *hreg;
     int ports;
     int i, nhosts, try_again;
-    struct parport *pb = parport_enumerate();
+    struct parport *pb;
+
+    /*
+     * unlock to allow the lowlevel parport driver to probe
+     * the irqs
+     */
+    spin_unlock_irq(&io_request_lock);
+    pb = parport_enumerate();
 
     printk("imm: Version %s\n", IMM_VERSION);
     nhosts = 0;
@@ -129,6 +137,7 @@ int imm_detect(Scsi_Host_Template * host)
 
     if (!pb) {
 	printk("imm: parport reports no devices.\n");
+	spin_lock_irq(&io_request_lock);
 	return 0;
     }
   retry_entry:
@@ -153,11 +162,13 @@ int imm_detect(Scsi_Host_Template * host)
 		    printk(KERN_ERR "imm%d: failed to claim parport because a "
 		      "pardevice is owning the port for too longtime!\n",
 			   i);
+		    spin_lock_irq(&io_request_lock);
 		    return 0;
 		}
 	    }
 	}
 	ppb = IMM_BASE(i) = imm_hosts[i].dev->port->base;
+	IMM_BASE_HI(i) = imm_hosts[i].dev->port->base_hi;
 	w_ctr(ppb, 0x0c);
 	modes = imm_hosts[i].dev->port->modes;
 
@@ -166,15 +177,8 @@ int imm_detect(Scsi_Host_Template * host)
 	 */
 	imm_hosts[i].mode = IMM_NIBBLE;
 
-	if (modes & PARPORT_MODE_PCPS2)
+	if (modes & PARPORT_MODE_TRISTATE)
 	    imm_hosts[i].mode = IMM_PS2;
-
-	if (modes & PARPORT_MODE_PCECPPS2) {
-	    w_ecr(ppb, 0x20);
-	    imm_hosts[i].mode = IMM_PS2;
-	}
-	if (modes & PARPORT_MODE_PCECPEPP)
-	    w_ecr(ppb, 0x80);
 
 	/* Done configuration */
 	imm_pb_release(i);
@@ -203,6 +207,8 @@ int imm_detect(Scsi_Host_Template * host)
 	host->can_queue = IMM_CAN_QUEUE;
 	host->sg_tablesize = imm_sg;
 	hreg = scsi_register(host, 0);
+	if(hreg == NULL)
+		continue;
 	hreg->io_port = pb->base;
 	hreg->n_io_port = ports;
 	hreg->dma_channel = -1;
@@ -211,12 +217,16 @@ int imm_detect(Scsi_Host_Template * host)
 	nhosts++;
     }
     if (nhosts == 0) {
-	if (try_again == 1)
+	if (try_again == 1) {
+	    spin_lock_irq(&io_request_lock);
 	    return 0;
+	}
 	try_again = 1;
 	goto retry_entry;
-    } else
+    } else {
+	spin_lock_irq (&io_request_lock);
 	return 1;		/* return number of hosts detected */
+    }
 }
 
 /* This is to give the imm driver a way to modify the timings (and other
@@ -337,7 +347,7 @@ static unsigned char imm_wait(int host_no)
 static int imm_negotiate(imm_struct * tmp)
 {
     /*
-     * The following is supposedly the IEEE 1248-1994 negotiate
+     * The following is supposedly the IEEE 1284-1994 negotiate
      * sequence. I have yet to obtain a copy of the above standard
      * so this is a bit of a guess...
      *
@@ -381,6 +391,9 @@ static int imm_negotiate(imm_struct * tmp)
     return a;
 }
 
+/* 
+ * Clear EPP timeout bit. 
+ */
 static inline void epp_reset(unsigned short ppb)
 {
     int i;
@@ -390,19 +403,23 @@ static inline void epp_reset(unsigned short ppb)
     w_str(ppb, i & 0xfe);
 }
 
-static inline void ecp_sync(unsigned short ppb)
+/* 
+ * Wait for empty ECP fifo (if we are in ECP fifo mode only)
+ */
+static inline void ecp_sync(unsigned short hostno)
 {
-    int i;
+    int i, ppb_hi=IMM_BASE_HI(hostno);
 
-    if ((r_ecr(ppb) & 0xe0) != 0x80)
-	return;
+    if (ppb_hi == 0) return;
 
-    for (i = 0; i < 100; i++) {
-	if (r_ecr(ppb) & 0x01)
-	    return;
-	udelay(5);
+    if ((r_ecr(ppb_hi) & 0xe0) == 0x60) { /* mode 011 == ECP fifo mode */
+        for (i = 0; i < 100; i++) {
+	    if (r_ecr(ppb_hi) & 0x01)
+	        return;
+	    udelay(5);
+	}
+        printk("imm: ECP sync failed as data still present in FIFO.\n");
     }
-    printk("imm: ECP sync failed as data still present in FIFO.\n");
 }
 
 static int imm_byte_out(unsigned short base, const char *buffer, int len)
@@ -490,7 +507,7 @@ static int imm_out(int host_no, char *buffer, int len)
 	w_ctr(ppb, 0xc);
 	r = !(r_str(ppb) & 0x01);
 	w_ctr(ppb, 0xc);
-	ecp_sync(ppb);
+	ecp_sync(host_no);
 	break;
 
     case IMM_NIBBLE:
@@ -552,7 +569,7 @@ static int imm_in(int host_no, char *buffer, int len)
 	w_ctr(ppb, 0x2c);
 	r = !(r_str(ppb) & 0x01);
 	w_ctr(ppb, 0x2c);
-	ecp_sync(ppb);
+	ecp_sync(host_no);
 	break;
 
     default:
@@ -822,10 +839,8 @@ static int imm_completion(Scsi_Cmnd * cmd)
 		 * Make sure that we transfer even number of bytes
 		 * otherwise it makes imm_byte_out() messy.
 		 */
-		if (cmd->SCp.this_residual & 0x01) {
+		if (cmd->SCp.this_residual & 0x01)
 		    cmd->SCp.this_residual++;
-		    printk("IMM: adjusted buffer for 16 bit transfer\n");
-		}
 	    }
 	}
 	/* Now check to see if the drive is ready to comunicate */
@@ -1001,10 +1016,8 @@ static int imm_engine(imm_struct * tmp, Scsi_Cmnd * cmd)
 	}
 	cmd->SCp.buffers_residual = cmd->use_sg;
 	cmd->SCp.phase++;
-	if (cmd->SCp.this_residual & 0x01) {
+	if (cmd->SCp.this_residual & 0x01)
 	    cmd->SCp.this_residual++;
-	    printk("IMM: adjusted buffer for 16 bit transfer\n");
-	}
 	/* Phase 5 - Pre-Data transfer stage */
     case 5:
 	/* Spin lock for BUSY */
@@ -1106,7 +1119,7 @@ int imm_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 }
 
 /*
- * Aimmrently the the disk->capacity attribute is off by 1 sector 
+ * Apparently the the disk->capacity attribute is off by 1 sector 
  * for all disk drives.  We add the one here, but it should really
  * be done in sd.c.  Even if it gets fixed there, this will still
  * work.
@@ -1120,8 +1133,6 @@ int imm_biosparam(Disk * disk, kdev_t dev, int ip[])
 	ip[0] = 0xff;
 	ip[1] = 0x3f;
 	ip[2] = (disk->capacity + 1) / (ip[0] * ip[1]);
-	if (ip[2] > 1023)
-	    ip[2] = 1023;
     }
     return 0;
 }
@@ -1246,7 +1257,7 @@ static int device_check(int host_no)
 	    return 1;
 	}
 	imm_disconnect(host_no);
-	printk("imm: Communication established with ID %i using %s\n", loop,
+	printk("imm: Communication established at 0x%x with ID %i using %s\n", ppb, loop,
 	       IMM_MODE_STRING[imm_hosts[host_no].mode]);
 	imm_connect(host_no, CONNECT_EPP_MAYBE);
 	imm_reset_pulse(IMM_BASE(host_no));

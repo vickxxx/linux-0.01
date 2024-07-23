@@ -1,10 +1,11 @@
 /*
  *  valkyriefb.c -- frame buffer device for the PowerMac 'valkyrie' display
  *
- *  Created 8 August 1998 by Martin Costabel and Kevin Schoedel
+ *  Created 8 August 1998 by 
+ *  Martin Costabel <costabel@wanadoo.fr> and Kevin Schoedel
  *
  *  Vmode-switching changes and vmode 15/17 modifications created 29 August
- *  1998 by Barry Nathan <barryn@pobox.com>.
+ *  1998 by Barry K. Nathan <barryn@pobox.com>.
  *
  *  Derived directly from:
  *
@@ -55,11 +56,11 @@
 #ifdef CONFIG_FB_COMPAT_XPMAC
 #include <asm/vc_ioctl.h>
 #endif
+#include <linux/adb.h>
+#include <linux/cuda.h>
 #include <asm/io.h>
 #include <asm/prom.h>
 #include <asm/pgtable.h>
-#include <asm/adb.h>
-#include <asm/cuda.h>
 
 #include <video/fbcon.h>
 #include <video/fbcon-cfb8.h>
@@ -113,26 +114,20 @@ struct fb_info_valkyrie {
 /*
  * Exported functions
  */
-void valkyriefb_init(void);
-void valkyrie_of_init(struct device_node *dp);
-void valkyriefb_setup(char *options, int *ints);
+int valkyriefb_init(void);
+int valkyriefb_setup(char*);
 
-static int valkyrie_open(struct fb_info *info, int user);
-static int valkyrie_release(struct fb_info *info, int user);
+static void valkyrie_of_init(struct device_node *dp);
 static int valkyrie_get_fix(struct fb_fix_screeninfo *fix, int con,
 			 struct fb_info *info);
 static int valkyrie_get_var(struct fb_var_screeninfo *var, int con,
 			 struct fb_info *info);
 static int valkyrie_set_var(struct fb_var_screeninfo *var, int con,
 			 struct fb_info *info);
-static int valkyrie_pan_display(struct fb_var_screeninfo *var, int con,
-			     struct fb_info *info);
 static int valkyrie_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info);
 static int valkyrie_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info);
-static int valkyrie_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info);
 
 static int read_valkyrie_sense(struct fb_info_valkyrie *p);
 static inline int valkyrie_vram_reqd(int video_mode, int color_mode);
@@ -151,15 +146,12 @@ static void valkyrie_par_to_fix(struct fb_par_valkyrie *par, struct fb_fix_scree
 static void valkyrie_init_fix(struct fb_fix_screeninfo *fix, struct fb_info_valkyrie *p);
 
 static struct fb_ops valkyriefb_ops = {
-	valkyrie_open,
-	valkyrie_release,
-	valkyrie_get_fix,
-	valkyrie_get_var,
-	valkyrie_set_var,
-	valkyrie_get_cmap,
-	valkyrie_set_cmap,
-	valkyrie_pan_display,
-	valkyrie_ioctl
+	owner:		THIS_MODULE,
+	fb_get_fix:	valkyrie_get_fix,
+	fb_get_var:	valkyrie_get_var,
+	fb_set_var:	valkyrie_set_var,
+	fb_get_cmap:	valkyrie_get_cmap,
+	fb_set_cmap:	valkyrie_set_cmap,
 };
 
 static int valkyriefb_getcolreg(u_int regno, u_int *red, u_int *green,
@@ -167,22 +159,6 @@ static int valkyriefb_getcolreg(u_int regno, u_int *red, u_int *green,
 static int valkyriefb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 			     u_int transp, struct fb_info *info);
 static void do_install_cmap(int con, struct fb_info *info);
-
-
-__openfirmware
-
-
-static int valkyrie_open(struct fb_info *info, int user)
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-static int valkyrie_release(struct fb_info *info, int user)
-{
-	MOD_DEC_USE_COUNT;
-	return 0;
-}
 
 static int valkyrie_get_fix(struct fb_fix_screeninfo *fix, int con,
 			 struct fb_info *info)
@@ -218,7 +194,7 @@ static int valkyrie_set_var(struct fb_var_screeninfo *var, int con,
 	}
 	
 	if ((var->activate & FB_ACTIVATE_MASK) != FB_ACTIVATE_NOW) {
-		/* printk("Not activating, in valkyrie_set_var.\n"); */
+		/* printk(KERN_ERR "Not activating, in valkyrie_set_var.\n"); */
 		valkyrie_par_to_var(&par, var);
 		return 0;
 	}
@@ -258,14 +234,6 @@ static int valkyrie_set_var(struct fb_var_screeninfo *var, int con,
 	return 0;
 }
 
-static int valkyrie_pan_display(struct fb_var_screeninfo *var, int con,
-			     struct fb_info *info)
-{
-	if (var->xoffset != 0 || var->yoffset != 0)
-		return -EINVAL;
-	return 0;
-}
-
 static int valkyrie_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			  struct fb_info *info)
 {
@@ -302,12 +270,6 @@ static int valkyrie_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 	}
 	fb_copy_cmap(cmap, &disp->cmap, kspc ? 0 : 1);
 	return 0;
-}
-
-static int valkyrie_ioctl(struct inode *inode, struct file *file, u_int cmd,
-		       u_long arg, int con, struct fb_info *info)
-{
-	return -EINVAL;
 }
 
 static int valkyriefb_switch(int con, struct fb_info *fb)
@@ -463,22 +425,24 @@ static void set_valkyrie_clock(unsigned char *params)
 	struct adb_request req;
 	int i;
 
+#ifdef CONFIG_ADB_CUDA
 	for (i = 0; i < 3; ++i) {
 		cuda_request(&req, NULL, 5, CUDA_PACKET, CUDA_GET_SET_IIC,
 			     0x50, i + 1, params[i]);
 		while (!req.complete)
 			cuda_poll();
 	}
+#endif
 }
 
-__initfunc(static void init_valkyrie(struct fb_info_valkyrie *p))
+static void __init init_valkyrie(struct fb_info_valkyrie *p)
 {
 	struct fb_par_valkyrie *par = &p->par;
 	struct fb_var_screeninfo var;
 	int j, k;
 
 	p->sense = read_valkyrie_sense(p);
-	printk("Monitor sense value = 0x%x, ", p->sense);
+	printk(KERN_INFO "Monitor sense value = 0x%x, ", p->sense);
 
 	/* Try to pick a video mode out of NVRAM if we have one. */
 	if (default_vmode == VMODE_NVRAM) {
@@ -504,7 +468,7 @@ __initfunc(static void init_valkyrie(struct fb_info_valkyrie *p))
 	 || valkyrie_vram_reqd(default_vmode, default_cmode) > p->total_vram)
 		default_cmode = CMODE_8;
 	
-	printk("using video mode %d and color mode %d.\n", default_vmode, default_cmode);
+	printk(KERN_INFO "using video mode %d and color mode %d.\n", default_vmode, default_cmode);
 
 	mac_vmode_to_var(default_vmode, default_cmode, &var);
 	if (valkyrie_var_to_par(&var, par, &p->info)) {
@@ -534,7 +498,7 @@ __initfunc(static void init_valkyrie(struct fb_info_valkyrie *p))
 		return;
 	}
 	
-	printk("fb%d: valkyrie frame buffer device\n", GET_FB_IDX(p->info.node));	
+	printk(KERN_INFO "fb%d: valkyrie frame buffer device\n", GET_FB_IDX(p->info.node));	
 }
 
 static void valkyrie_set_par(const struct fb_par_valkyrie *par,
@@ -584,24 +548,25 @@ static void valkyrie_set_par(const struct fb_par_valkyrie *par,
 #endif /* CONFIG_FB_COMPAT_XPMAC */
 }
 
-__initfunc(void valkyriefb_init(void))
+int __init valkyriefb_init(void)
 {
-#ifndef CONFIG_FB_OF
 	struct device_node *dp;
 
 	dp = find_devices("valkyrie");
 	if (dp != 0)
 		valkyrie_of_init(dp);
-#endif /* CONFIG_FB_OF */
+	return 0;
 }
 
-__initfunc(void valkyrie_of_init(struct device_node *dp))
+static void __init valkyrie_of_init(struct device_node *dp)
 {
 	struct fb_info_valkyrie	*p;
-	unsigned long addr, size;
+	unsigned long addr;
 	
-	if(dp->n_addrs != 1)
-		panic("expecting 1 address for valkyrie (got %d)", dp->n_addrs);
+	if(dp->n_addrs != 1) {
+		printk(KERN_ERR "expecting 1 address for valkyrie (got %d)", dp->n_addrs);
+		return;
+	}	
 
 	p = kmalloc(sizeof(*p), GFP_ATOMIC);
 	if (p == 0)
@@ -610,13 +575,16 @@ __initfunc(void valkyrie_of_init(struct device_node *dp))
 
 	/* Map in frame buffer and registers */
 	addr = dp->addrs[0].address;
-	size = 4096;
+	if (!request_mem_region(addr, dp->addrs[0].size, "valkyriefb")) {
+		kfree(p);
+		return;
+	}
 	p->frame_buffer_phys  = addr;
 	p->frame_buffer  = __ioremap(addr, 0x100000, _PAGE_WRITETHRU);
 	p->cmap_regs_phys     = addr + 0x304000;
-	p->cmap_regs     = ioremap(p->cmap_regs_phys,     size);
+	p->cmap_regs     = ioremap(p->cmap_regs_phys,4096);
 	p->valkyrie_regs_phys = addr + 0x30a000;
-	p->valkyrie_regs = ioremap(p->valkyrie_regs_phys, size);
+	p->valkyrie_regs = ioremap(p->valkyrie_regs_phys, 4096);
 
 	/*
 	 * kps: As far as I know, all Valkyries have fixed usable VRAM.
@@ -686,31 +654,9 @@ static int valkyrie_var_to_par(struct fb_var_screeninfo *var,
 	struct valkyrie_regvals *init;
 	struct fb_info_valkyrie *p = (struct fb_info_valkyrie *) fb_info;
 
-    /* these are old variables that are no longer needed with my new code
-       [bkn]
-
-	int xres = var->xres;
-	int yres = var->yres;
-     */
-
-    /*
-     *  Get the video params out of 'var'. If a value doesn't fit, round it up,
-     *  if it's too big, return -EINVAL.
-     *
-     *  Suggestion: Round up in the following order: bits_per_pixel, xres,
-     *  yres, xres_virtual, yres_virtual, xoffset, yoffset, grayscale,
-     *  bitfields, horizontal timing, vertical timing.
-     */
 
 	if(mac_var_to_vmode(var, &par->vmode, &par->cmode) != 0) {
-		printk(KERN_ERR "valkyrie_var_to_par: mac_var_to_vmode unsuccessful.\n");
-		printk(KERN_ERR "valkyrie_var_to_par: var->xres = %d\n", var->xres);
-		printk(KERN_ERR "valkyrie_var_to_par: var->yres = %d\n", var->yres);
-		printk(KERN_ERR "valkyrie_var_to_par: var->xres_virtual = %d\n", var->xres_virtual);
-		printk(KERN_ERR "valkyrie_var_to_par: var->yres_virtual = %d\n", var->yres_virtual);
-		printk(KERN_ERR "valkyrie_var_to_par: var->bits_per_pixel = %d\n", var->bits_per_pixel);
-		printk(KERN_ERR "valkyrie_var_to_par: var->pixclock = %d\n", var->pixclock);
-		printk(KERN_ERR "valkyrie_var_to_par: var->vmode = %d\n", var->vmode);
+		printk(KERN_ERR "valkyrie_var_to_par: %dx%dx%d unsuccessful.\n",var->xres,var->yres,var->bits_per_pixel);
 		return -EINVAL;
 	}
 
@@ -764,7 +710,7 @@ static void valkyrie_init_fix(struct fb_fix_screeninfo *fix, struct fb_info_valk
 {
 	memset(fix, 0, sizeof(*fix));
 	strcpy(fix->id, "valkyrie");
-	fix->mmio_start = (char *)p->valkyrie_regs_phys;
+	fix->mmio_start = p->valkyrie_regs_phys;
 	fix->mmio_len = sizeof(struct valkyrie_regs);
 	fix->type = FB_TYPE_PACKED_PIXELS;
 	
@@ -780,7 +726,7 @@ static void valkyrie_par_to_fix(struct fb_par_valkyrie *par,
 	struct fb_fix_screeninfo *fix,
 	struct fb_info_valkyrie *p)
 {
-	fix->smem_start = (void *)(p->frame_buffer_phys + 0x1000);
+	fix->smem_start = p->frame_buffer_phys + 0x1000;
 #if 1
 	fix->smem_len = valkyrie_vram_reqd(par->vmode, par->cmode);
 #else
@@ -848,12 +794,12 @@ static void __init valkyrie_init_info(struct fb_info *info, struct fb_info_valky
 /*
  * Parse user speficied options (`video=valkyriefb:')
  */
-__initfunc(void valkyriefb_setup(char *options, int *ints))
+int __init valkyriefb_setup(char *options)
 {
 	char *this_opt;
 
 	if (!options || !*options)
-		return;
+		return 0;
 
 	for (this_opt = strtok(options, ","); this_opt;
 	     this_opt = strtok(NULL, ",")) {
@@ -893,4 +839,5 @@ __initfunc(void valkyriefb_setup(char *options, int *ints))
 			can_soft_blank = 1;
 		}
 	}
+	return 0;
 }

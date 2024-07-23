@@ -6,6 +6,7 @@
  * Copyright (C) 1995, 1996 Olaf Kirch <okir@monad.swb.de>
  */
 
+#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/utsname.h>
@@ -19,35 +20,25 @@
 #include <linux/lockd/sm_inter.h>
 
 #define NLMDBG_FACILITY		NLMDBG_XDR
-#define NLM_MAXSTRLEN		1024
-
-#define QUADLEN(len)		(((len) + 3) >> 2)
 
 
-u32	nlm_granted, nlm_lck_denied, nlm_lck_denied_nolocks,
-	nlm_lck_blocked, nlm_lck_denied_grace_period;
-
-
-typedef struct nlm_args	nlm_args;
-
-/*
- * Initialization of NFS status variables
- */
-void
-nlmxdr_init(void)
+static inline loff_t
+s32_to_loff_t(__s32 offset)
 {
-	static int	inited = 0;
+	return (loff_t)offset;
+}
 
-	if (inited)
-		return;
-
-	nlm_granted = htonl(NLM_LCK_GRANTED);
-	nlm_lck_denied = htonl(NLM_LCK_DENIED);
-	nlm_lck_denied_nolocks = htonl(NLM_LCK_DENIED_NOLOCKS);
-	nlm_lck_blocked = htonl(NLM_LCK_BLOCKED);
-	nlm_lck_denied_grace_period = htonl(NLM_LCK_DENIED_GRACE_PERIOD);
-
-	inited = 1;
+static inline __s32
+loff_t_to_s32(loff_t offset)
+{
+	__s32 res;
+	if (offset >= NLM_OFFSET_MAX)
+		res = NLM_OFFSET_MAX;
+	else if (offset <= -NLM_OFFSET_MAX)
+		res = -NLM_OFFSET_MAX;
+	else
+		res = offset;
+	return res;
 }
 
 /*
@@ -93,22 +84,23 @@ nlm_decode_fh(u32 *p, struct nfs_fh *f)
 {
 	unsigned int	len;
 
-	if ((len = ntohl(*p++)) != sizeof(*f)) {
+	if ((len = ntohl(*p++)) != NFS2_FHSIZE) {
 		printk(KERN_NOTICE
 			"lockd: bad fhandle size %x (should be %d)\n",
-			len, sizeof(*f));
+			len, NFS2_FHSIZE);
 		return NULL;
 	}
-	memcpy(f, p, sizeof(*f));
-	return p + XDR_QUADLEN(sizeof(*f));
+	f->size = NFS2_FHSIZE;
+	memcpy(f->data, p, NFS2_FHSIZE);
+	return p + XDR_QUADLEN(NFS2_FHSIZE);
 }
 
 static inline u32 *
 nlm_encode_fh(u32 *p, struct nfs_fh *f)
 {
-	*p++ = htonl(sizeof(*f));
-	memcpy(p, f, sizeof(*f));
-	return p + XDR_QUADLEN(sizeof(*f));
+	*p++ = htonl(NFS2_FHSIZE);
+	memcpy(p, f->data, NFS2_FHSIZE);
+	return p + XDR_QUADLEN(NFS2_FHSIZE);
 }
 
 /*
@@ -130,22 +122,28 @@ static inline u32 *
 nlm_decode_lock(u32 *p, struct nlm_lock *lock)
 {
 	struct file_lock	*fl = &lock->fl;
-	int			len;
+	s32			start, len, end;
 
 	if (!(p = xdr_decode_string(p, &lock->caller, &len, NLM_MAXSTRLEN))
 	 || !(p = nlm_decode_fh(p, &lock->fh))
 	 || !(p = nlm_decode_oh(p, &lock->oh)))
 		return NULL;
 
-	memset(fl, 0, sizeof(*fl));
+	locks_init_lock(fl);
 	fl->fl_owner = current->files;
 	fl->fl_pid   = ntohl(*p++);
 	fl->fl_flags = FL_POSIX;
 	fl->fl_type  = F_RDLCK;		/* as good as anything else */
-	fl->fl_start = ntohl(*p++);
+	start = ntohl(*p++);
 	len = ntohl(*p++);
-	if (len == 0 || (fl->fl_end = fl->fl_start + len - 1) < 0)
-		fl->fl_end = NLM_OFFSET_MAX;
+	end = start + len - 1;
+
+	fl->fl_start = s32_to_loff_t(start);
+
+	if (len == 0 || end < 0)
+		fl->fl_end = OFFSET_MAX;
+	else
+		fl->fl_end = s32_to_loff_t(end);
 	return p;
 }
 
@@ -156,18 +154,26 @@ static u32 *
 nlm_encode_lock(u32 *p, struct nlm_lock *lock)
 {
 	struct file_lock	*fl = &lock->fl;
+	__s32			start, len;
 
 	if (!(p = xdr_encode_string(p, lock->caller))
 	 || !(p = nlm_encode_fh(p, &lock->fh))
 	 || !(p = nlm_encode_oh(p, &lock->oh)))
 		return NULL;
 
-	*p++ = htonl(fl->fl_pid);
-	*p++ = htonl(lock->fl.fl_start);
-	if (lock->fl.fl_end == NLM_OFFSET_MAX)
-		*p++ = xdr_zero;
+	if (fl->fl_start > NLM_OFFSET_MAX
+	 || (fl->fl_end > NLM_OFFSET_MAX && fl->fl_end != OFFSET_MAX))
+		return NULL;
+
+	start = loff_t_to_s32(fl->fl_start);
+	if (fl->fl_end == OFFSET_MAX)
+		len = 0;
 	else
-		*p++ = htonl(lock->fl.fl_end - lock->fl.fl_start + 1);
+		len = loff_t_to_s32(fl->fl_end - fl->fl_start + 1);
+
+	*p++ = htonl(fl->fl_pid);
+	*p++ = htonl(start);
+	*p++ = htonl(len);
 
 	return p;
 }
@@ -178,6 +184,8 @@ nlm_encode_lock(u32 *p, struct nlm_lock *lock)
 static u32 *
 nlm_encode_testres(u32 *p, struct nlm_res *resp)
 {
+	s32		start, len;
+
 	if (!(p = nlm_encode_cookie(p, &resp->cookie)))
 		return 0;
 	*p++ = resp->status;
@@ -192,11 +200,14 @@ nlm_encode_testres(u32 *p, struct nlm_res *resp)
 		if (!(p = xdr_encode_netobj(p, &resp->lock.oh)))
 			return 0;
 
-		*p++ = htonl(fl->fl_start);
-		if (fl->fl_end == NLM_OFFSET_MAX)
-			*p++ = xdr_zero;
+		start = loff_t_to_s32(fl->fl_start);
+		if (fl->fl_end == OFFSET_MAX)
+			len = 0;
 		else
-			*p++ = htonl(fl->fl_end - fl->fl_start + 1);
+			len = loff_t_to_s32(fl->fl_end - fl->fl_start + 1);
+
+		*p++ = htonl(start);
+		*p++ = htonl(len);
 	}
 
 	return p;
@@ -303,6 +314,7 @@ nlmsvc_decode_shareargs(struct svc_rqst *rqstp, u32 *p, nlm_args *argp)
 	int		len;
 
 	memset(lock, 0, sizeof(*lock));
+	locks_init_lock(&lock->fl);
 	lock->fl.fl_pid = ~(u32) 0;
 
 	if (!(p = nlm_decode_cookie(p, &argp->cookie))
@@ -415,9 +427,11 @@ nlmclt_decode_testres(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
 	resp->status = ntohl(*p++);
 	if (resp->status == NLM_LCK_DENIED) {
 		struct file_lock	*fl = &resp->lock.fl;
-		u32			excl, len;
+		u32			excl;
+		s32			start, len, end;
 
 		memset(&resp->lock, 0, sizeof(resp->lock));
+		locks_init_lock(fl);
 		excl = ntohl(*p++);
 		fl->fl_pid = ntohl(*p++);
 		if (!(p = nlm_decode_oh(p, &resp->lock.oh)))
@@ -425,10 +439,15 @@ nlmclt_decode_testres(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
 
 		fl->fl_flags = FL_POSIX;
 		fl->fl_type  = excl? F_WRLCK : F_RDLCK;
-		fl->fl_start = ntohl(*p++);
+		start = ntohl(*p++);
 		len = ntohl(*p++);
-		if (len == 0 || (fl->fl_end = fl->fl_start + len - 1) < 0)
-			fl->fl_end = NLM_OFFSET_MAX;
+		end = start + len - 1;
+
+		fl->fl_start = s32_to_loff_t(start);
+		if (len == 0 || end < 0)
+			fl->fl_end = OFFSET_MAX;
+		else
+			fl->fl_end = s32_to_loff_t(end);
 	}
 	return 0;
 }
@@ -515,7 +534,7 @@ nlmclt_decode_res(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
 #define NLM_caller_sz		1+QUADLEN(sizeof(system_utsname.nodename))
 #define NLM_netobj_sz		1+QUADLEN(XDR_MAX_NETOBJ)
 /* #define NLM_owner_sz		1+QUADLEN(NLM_MAXOWNER) */
-#define NLM_fhandle_sz		1+QUADLEN(NFS_FHSIZE)
+#define NLM_fhandle_sz		1+QUADLEN(NFS2_FHSIZE)
 #define NLM_lock_sz		3+NLM_caller_sz+NLM_netobj_sz+NLM_fhandle_sz
 #define NLM_holder_sz		4+NLM_netobj_sz
 
@@ -541,7 +560,8 @@ nlmclt_decode_res(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
     { "nlm_" #proc,						\
       (kxdrproc_t) nlmclt_encode_##argtype,			\
       (kxdrproc_t) nlmclt_decode_##restype,			\
-      MAX(NLM_##argtype##_sz, NLM_##restype##_sz) << 2		\
+      MAX(NLM_##argtype##_sz, NLM_##restype##_sz) << 2,		\
+      0								\
     }
 
 static struct rpc_procinfo	nlm_procedures[] = {
@@ -586,11 +606,18 @@ static struct rpc_version	nlm_version3 = {
 	3, 24, nlm_procedures,
 };
 
+#ifdef 	CONFIG_LOCKD_V4
+extern struct rpc_version nlm_version4;
+#endif
+
 static struct rpc_version *	nlm_versions[] = {
 	NULL,
 	&nlm_version1,
 	NULL,
 	&nlm_version3,
+#ifdef 	CONFIG_LOCKD_V4
+	&nlm_version4,
+#endif
 };
 
 static struct rpc_stat		nlm_stats;

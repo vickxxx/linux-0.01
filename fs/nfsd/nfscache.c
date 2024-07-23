@@ -34,11 +34,11 @@ struct nfscache_head {
 	struct svc_cacherep *	prev;
 };
 
-static struct nfscache_head	hash_list[HASHSIZE];
+static struct nfscache_head *	hash_list;
 static struct svc_cacherep *	lru_head;
 static struct svc_cacherep *	lru_tail;
-static struct svc_cacherep	nfscache[CACHESIZE];
-static int			cache_initialized = 0;
+static struct svc_cacherep *	nfscache;
+static int			cache_initialized;
 static int			cache_disabled = 1;
 
 static int	nfsd_cache_append(struct svc_rqst *rqstp, struct svc_buf *data);
@@ -48,10 +48,31 @@ nfsd_cache_init(void)
 {
 	struct svc_cacherep	*rp;
 	struct nfscache_head	*rh;
-	int			i;
+	size_t			i;
+	unsigned long		order;
 
 	if (cache_initialized)
 		return;
+
+	i = CACHESIZE * sizeof (struct svc_cacherep);
+	for (order = 0; (PAGE_SIZE << order) < i; order++)
+		;
+	nfscache = (struct svc_cacherep *)
+		__get_free_pages(GFP_KERNEL, order);
+	if (!nfscache) {
+		printk (KERN_ERR "nfsd: cannot allocate %Zd bytes for reply cache\n", i);
+		return;
+	}
+	memset(nfscache, 0, i);
+
+	i = HASHSIZE * sizeof (struct nfscache_head);
+	hash_list = kmalloc (i, GFP_KERNEL);
+	if (!hash_list) {
+		free_pages ((unsigned long)nfscache, order);
+		nfscache = NULL;
+		printk (KERN_ERR "nfsd: cannot allocate %Zd bytes for hash list\n", i);
+		return;
+	}
 
 	for (i = 0, rh = hash_list; i < HASHSIZE; i++, rh++)
 		rh->next = rh->prev = (struct svc_cacherep *) rh;
@@ -77,6 +98,8 @@ void
 nfsd_cache_shutdown(void)
 {
 	struct svc_cacherep	*rp;
+	size_t			i;
+	unsigned long		order;
 
 	if (!cache_initialized)
 		return;
@@ -88,6 +111,14 @@ nfsd_cache_shutdown(void)
 
 	cache_initialized = 0;
 	cache_disabled = 1;
+
+	i = CACHESIZE * sizeof (struct svc_cacherep);
+	for (order = 0; (PAGE_SIZE << order) < i; order++)
+		;
+	free_pages ((unsigned long)nfscache, order);
+	nfscache = NULL;
+	kfree (hash_list);
+	hash_list = NULL;
 }
 
 /*
@@ -143,8 +174,9 @@ int
 nfsd_cache_lookup(struct svc_rqst *rqstp, int type)
 {
 	struct svc_cacherep	*rh, *rp;
-	struct svc_client	*clp = rqstp->rq_client;
 	u32			xid = rqstp->rq_xid,
+				proto =  rqstp->rq_prot,
+				vers = rqstp->rq_vers,
 				proc = rqstp->rq_proc;
 	unsigned long		age;
 
@@ -158,7 +190,9 @@ nfsd_cache_lookup(struct svc_rqst *rqstp, int type)
 	while ((rp = rp->c_hash_next) != rh) {
 		if (rp->c_state != RC_UNUSED &&
 		    xid == rp->c_xid && proc == rp->c_proc &&
-		    exp_checkaddr(clp, rp->c_client)) {
+		    proto == rp->c_prot && vers == rp->c_vers &&
+		    time_before(jiffies, rp->c_timestamp + 120*HZ) &&
+		    memcmp((char*)&rqstp->rq_addr, (char*)&rp->c_addr, rqstp->rq_addrlen)==0) {
 			nfsdstats.rchits++;
 			goto found_entry;
 		}
@@ -181,7 +215,7 @@ nfsd_cache_lookup(struct svc_rqst *rqstp, int type)
 
 	/* This should not happen */
 	if (rp == NULL) {
-		static int	complaints = 0;
+		static int	complaints;
 
 		printk(KERN_WARNING "nfsd: all repcache entries locked!\n");
 		if (++complaints > 5) {
@@ -195,7 +229,11 @@ nfsd_cache_lookup(struct svc_rqst *rqstp, int type)
 	rp->c_state = RC_INPROG;
 	rp->c_xid = xid;
 	rp->c_proc = proc;
-	rp->c_client = rqstp->rq_addr.sin_addr;
+	rp->c_addr = rqstp->rq_addr;
+	rp->c_prot = proto;
+	rp->c_vers = vers;
+	rp->c_timestamp = jiffies;
+
 	hash_refile(rp);
 
 	/* release any buffer */

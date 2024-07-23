@@ -1,4 +1,4 @@
-/* $Id: rtc.c,v 1.14 1999/06/03 15:02:38 davem Exp $
+/* $Id: rtc.c,v 1.23 2000/08/29 07:01:55 davem Exp $
  *
  * Linux/SPARC Real Time Clock Driver
  * Copyright (C) 1996 Thomas K. Dyas (tdyas@eden.rutgers.edu)
@@ -8,7 +8,7 @@
  * use the modified clock utility.
  *
  * Get the modified clock utility from:
- *   ftp://vger.rutgers.edu/pub/linux/Sparc/userland/clock.c
+ *   ftp://vger.kernel.org/pub/linux/Sparc/userland/clock.c
  */
 
 #include <linux/module.h>
@@ -19,6 +19,7 @@
 #include <linux/fcntl.h>
 #include <linux/poll.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 #include <asm/mostek.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -29,12 +30,16 @@ static int rtc_busy = 0;
 /* Retrieve the current date and time from the real time clock. */
 void get_rtc_time(struct rtc_time *t)
 {
-	register struct mostek48t02 *regs = mstk48t02_regs;
+	unsigned long regs = mstk48t02_regs;
 	unsigned long flags;
+	u8 tmp;
 
 	save_flags(flags);
 	cli();
-	regs->creg |= MSTK_CREG_READ;
+
+	tmp = mostek_read(regs + MOSTEK_CREG);
+	tmp |= MSTK_CREG_READ;
+	mostek_write(regs + MOSTEK_CREG, tmp);
 
 	t->sec = MSTK_REG_SEC(regs);
 	t->min = MSTK_REG_MIN(regs);
@@ -44,19 +49,24 @@ void get_rtc_time(struct rtc_time *t)
 	t->month = MSTK_REG_MONTH(regs);
 	t->year = MSTK_CVT_YEAR( MSTK_REG_YEAR(regs) );
 
-	regs->creg &= ~MSTK_CREG_READ;
+	tmp = mostek_read(regs + MOSTEK_CREG);
+	tmp &= ~MSTK_CREG_READ;
+	mostek_write(regs + MOSTEK_CREG, tmp);
 	restore_flags(flags);
 }
 
 /* Set the current date and time inthe real time clock. */
 void set_rtc_time(struct rtc_time *t)
 {
-	register struct mostek48t02 *regs = mstk48t02_regs;
+	unsigned long regs = mstk48t02_regs;
 	unsigned long flags;
+	u8 tmp;
 
 	save_flags(flags);
 	cli();
-	regs->creg |= MSTK_CREG_WRITE;
+	tmp = mostek_read(regs + MOSTEK_CREG);
+	tmp |= MSTK_CREG_WRITE;
+	mostek_write(regs + MOSTEK_CREG, tmp);
 
 	MSTK_SET_REG_SEC(regs,t->sec);
 	MSTK_SET_REG_MIN(regs,t->min);
@@ -66,7 +76,9 @@ void set_rtc_time(struct rtc_time *t)
 	MSTK_SET_REG_MONTH(regs,t->month);
 	MSTK_SET_REG_YEAR(regs,t->year - MSTK_YEAR_ZERO);
 
-	regs->creg &= ~MSTK_CREG_WRITE;
+	tmp = mostek_read(regs + MOSTEK_CREG);
+	tmp &= ~MSTK_CREG_WRITE;
+	mostek_write(regs + MOSTEK_CREG, tmp);
 	restore_flags(flags);
 }
 
@@ -85,7 +97,8 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	case RTCGET:
 		get_rtc_time(&rtc_tm);
 
-		copy_to_user_ret((struct rtc_time*)arg, &rtc_tm, sizeof(struct rtc_time), -EFAULT);
+		if (copy_to_user((struct rtc_time*)arg, &rtc_tm, sizeof(struct rtc_time)))
+			return -EFAULT;
 
 		return 0;
 
@@ -94,7 +107,8 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		if (!capable(CAP_SYS_TIME))
 			return -EPERM;
 
-		copy_from_user_ret(&rtc_tm, (struct rtc_time*)arg, sizeof(struct rtc_time), -EFAULT);
+		if (copy_from_user(&rtc_tm, (struct rtc_time*)arg, sizeof(struct rtc_time)))
+			return -EFAULT;
 
 		set_rtc_time(&rtc_tm);
 
@@ -113,29 +127,23 @@ static int rtc_open(struct inode *inode, struct file *file)
 
 	rtc_busy = 1;
 
-	MOD_INC_USE_COUNT;
-
 	return 0;
 }
 
 static int rtc_release(struct inode *inode, struct file *file)
 {
-	MOD_DEC_USE_COUNT;
+	lock_kernel();
 	rtc_busy = 0;
+	unlock_kernel();
 	return 0;
 }
 
 static struct file_operations rtc_fops = {
-	rtc_lseek,
-	NULL,		/* rtc_read */
-	NULL,		/* rtc_write */
-	NULL,		/* rtc_readdir */
-	NULL,		/* rtc_poll */
-	rtc_ioctl,
-	NULL,		/* rtc_mmap */
-	rtc_open,
-	NULL,		/* flush */
-	rtc_release
+	owner:		THIS_MODULE,
+	llseek:		rtc_lseek,
+	ioctl:		rtc_ioctl,
+	open:		rtc_open,
+	release:	rtc_release,
 };
 
 static struct miscdevice rtc_dev = { RTC_MINOR, "rtc", &rtc_fops };
@@ -145,7 +153,7 @@ EXPORT_NO_SYMBOLS;
 #ifdef MODULE
 int init_module(void)
 #else
-__initfunc(int rtc_sun_init(void))
+int __init rtc_sun_init(void)
 #endif
 {
 	int error;

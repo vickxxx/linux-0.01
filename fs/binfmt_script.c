@@ -11,12 +11,14 @@
 #include <linux/malloc.h>
 #include <linux/binfmts.h>
 #include <linux/init.h>
+#include <linux/file.h>
+#include <linux/smp_lock.h>
 
-static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
+static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
-	char *cp, *i_name, *i_name_start, *i_arg;
-	struct dentry * dentry;
-	char interp[128];
+	char *cp, *i_name, *i_arg;
+	struct file *file;
+	char interp[BINPRM_BUF_SIZE];
 	int retval;
 
 	if ((bprm->buf[0] != '#') || (bprm->buf[1] != '!') || (bprm->sh_bang)) 
@@ -27,12 +29,13 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 */
 
 	bprm->sh_bang++;
-	dput(bprm->dentry);
-	bprm->dentry = NULL;
+	allow_write_access(bprm->file);
+	fput(bprm->file);
+	bprm->file = NULL;
 
-	bprm->buf[127] = '\0';
+	bprm->buf[BINPRM_BUF_SIZE - 1] = '\0';
 	if ((cp = strchr(bprm->buf, '\n')) == NULL)
-		cp = bprm->buf+127;
+		cp = bprm->buf+BINPRM_BUF_SIZE-1;
 	*cp = '\0';
 	while (cp > bprm->buf) {
 		cp--;
@@ -44,17 +47,15 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	for (cp = bprm->buf+2; (*cp == ' ') || (*cp == '\t'); cp++);
 	if (*cp == '\0') 
 		return -ENOEXEC; /* No interpreter name found */
-	i_name_start = i_name = cp;
+	i_name = cp;
 	i_arg = 0;
-	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++) {
- 		if (*cp == '/')
-			i_name = cp+1;
-	}
+	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++)
+		/* nothing */ ;
 	while ((*cp == ' ') || (*cp == '\t'))
 		*cp++ = '\0';
 	if (*cp)
 		i_arg = cp;
-	strcpy (interp, i_name_start);
+	strcpy (interp, i_name);
 	/*
 	 * OK, we've parsed out the interpreter name and
 	 * (optional) argument.
@@ -80,46 +81,30 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	/*
 	 * OK, now restart the process with the interpreter's dentry.
 	 */
-	dentry = open_namei(interp, 0, 0);
-	if (IS_ERR(dentry))
-		return PTR_ERR(dentry);
+	file = open_exec(interp);
+	if (IS_ERR(file))
+		return PTR_ERR(file);
 
-	bprm->dentry = dentry;
+	bprm->file = file;
 	retval = prepare_binprm(bprm);
 	if (retval < 0)
 		return retval;
 	return search_binary_handler(bprm,regs);
 }
 
-static int load_script(struct linux_binprm *bprm,struct pt_regs *regs)
-{
-	int retval;
-	MOD_INC_USE_COUNT;
-	retval = do_load_script(bprm,regs);
-	MOD_DEC_USE_COUNT;
-	return retval;
-}
-
 struct linux_binfmt script_format = {
-#ifndef MODULE
-	NULL, 0, load_script, NULL, NULL
-#else
-	NULL, &__this_module, load_script, NULL, NULL
-#endif
+	NULL, THIS_MODULE, load_script, NULL, NULL, 0
 };
 
-int __init init_script_binfmt(void)
+static int __init init_script_binfmt(void)
 {
 	return register_binfmt(&script_format);
 }
 
-#ifdef MODULE
-int init_module(void)
+static void __exit exit_script_binfmt(void)
 {
-	return init_script_binfmt();
-}
-
-void cleanup_module( void) {
 	unregister_binfmt(&script_format);
 }
-#endif
+
+module_init(init_script_binfmt)
+module_exit(exit_script_binfmt)

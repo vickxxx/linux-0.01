@@ -75,18 +75,20 @@
 #define MIN(a,b) ((a) < (b) ? (a) : (b))
 #endif
 
-DECLARE_TASK_QUEUE(tq_riscom);
+#define RS_EVENT_WRITE_WAKEUP	0
+
+static DECLARE_TASK_QUEUE(tq_riscom);
 
 #define RISCOM_TYPE_NORMAL	1
 #define RISCOM_TYPE_CALLOUT	2
 
-static struct riscom_board * IRQ_to_board[16] = { NULL, } ;
+static struct riscom_board * IRQ_to_board[16];
 static struct tty_driver riscom_driver, riscom_callout_driver;
-static int    riscom_refcount = 0;
-static struct tty_struct * riscom_table[RC_NBOARD * RC_NPORT] = { NULL, };
-static struct termios * riscom_termios[RC_NBOARD * RC_NPORT] = { NULL, };
-static struct termios * riscom_termios_locked[RC_NBOARD * RC_NPORT] = { NULL, };
-static unsigned char * tmp_buf = NULL;
+static int    riscom_refcount;
+static struct tty_struct * riscom_table[RC_NBOARD * RC_NPORT];
+static struct termios * riscom_termios[RC_NBOARD * RC_NPORT];
+static struct termios * riscom_termios_locked[RC_NBOARD * RC_NPORT];
+static unsigned char * tmp_buf;
 static DECLARE_MUTEX(tmp_buf_sem);
 
 static unsigned long baud_table[] =  {
@@ -101,9 +103,7 @@ static struct riscom_board rc_board[RC_NBOARD] =  {
 	{ 0, RC_IOBASE4, 0, },
 };
 
-static struct riscom_port rc_port[RC_NBOARD * RC_NPORT] =  {
-	{ 0, },
-};
+static struct riscom_port rc_port[RC_NBOARD * RC_NPORT];
 		
 /* RISCom/8 I/O ports addresses (without address translation) */
 static unsigned short rc_ioport[] =  {
@@ -146,38 +146,38 @@ static inline int rc_paranoia_check(struct riscom_port const * port,
  */
 
 /* Get board number from pointer */
-extern inline int board_No (struct riscom_board const * bp)
+static inline int board_No (struct riscom_board const * bp)
 {
 	return bp - rc_board;
 }
 
 /* Get port number from pointer */
-extern inline int port_No (struct riscom_port const * port)
+static inline int port_No (struct riscom_port const * port)
 {
 	return RC_PORT(port - rc_port); 
 }
 
 /* Get pointer to board from pointer to port */
-extern inline struct riscom_board * port_Board(struct riscom_port const * port)
+static inline struct riscom_board * port_Board(struct riscom_port const * port)
 {
 	return &rc_board[RC_BOARD(port - rc_port)];
 }
 
 /* Input Byte from CL CD180 register */
-extern inline unsigned char rc_in(struct riscom_board const * bp, unsigned short reg)
+static inline unsigned char rc_in(struct riscom_board const * bp, unsigned short reg)
 {
 	return inb(bp->base + RC_TO_ISA(reg));
 }
 
 /* Output Byte to CL CD180 register */
-extern inline void rc_out(struct riscom_board const * bp, unsigned short reg,
+static inline void rc_out(struct riscom_board const * bp, unsigned short reg,
 			  unsigned char val)
 {
 	outb(val, bp->base + RC_TO_ISA(reg));
 }
 
 /* Wait for Channel Command Register ready */
-extern inline void rc_wait_CCR(struct riscom_board const * bp)
+static inline void rc_wait_CCR(struct riscom_board const * bp)
 {
 	unsigned long delay;
 
@@ -193,7 +193,7 @@ extern inline void rc_wait_CCR(struct riscom_board const * bp)
  *  RISCom/8 probe functions.
  */
 
-extern inline int rc_check_io_range(struct riscom_board * const bp)
+static inline int rc_check_io_range(struct riscom_board * const bp)
 {
 	int i;
 	
@@ -206,7 +206,7 @@ extern inline int rc_check_io_range(struct riscom_board * const bp)
 	return 0;
 }
 
-extern inline void rc_request_io_range(struct riscom_board * const bp)
+static inline void rc_request_io_range(struct riscom_board * const bp)
 {
 	int i;
 	
@@ -214,7 +214,7 @@ extern inline void rc_request_io_range(struct riscom_board * const bp)
 		request_region(RC_TO_ISA(rc_ioport[i]) + bp->base, 1, "RISCom/8" );
 }
 
-extern inline void rc_release_io_range(struct riscom_board * const bp)
+static inline void rc_release_io_range(struct riscom_board * const bp)
 {
 	int i;
 	
@@ -224,7 +224,7 @@ extern inline void rc_release_io_range(struct riscom_board * const bp)
 
 	
 /* Must be called with enabled interrupts */
-extern inline void rc_long_delay(unsigned long delay)
+static inline void rc_long_delay(unsigned long delay)
 {
 	unsigned long i;
 	
@@ -232,7 +232,7 @@ extern inline void rc_long_delay(unsigned long delay)
 }
 
 /* Reset and setup CD180 chip */
-__initfunc(static void rc_init_CD180(struct riscom_board const * bp))
+static void __init rc_init_CD180(struct riscom_board const * bp)
 {
 	unsigned long flags;
 	
@@ -257,7 +257,7 @@ __initfunc(static void rc_init_CD180(struct riscom_board const * bp))
 }
 
 /* Main probing routine, also sets irq. */
-__initfunc(static int rc_probe(struct riscom_board *bp))
+static int __init rc_probe(struct riscom_board *bp)
 {
 	unsigned char val1, val2;
 	int irqs = 0;
@@ -326,7 +326,7 @@ __initfunc(static int rc_probe(struct riscom_board *bp))
  * 
  */
 
-extern inline void rc_mark_event(struct riscom_port * port, int event)
+static inline void rc_mark_event(struct riscom_port * port, int event)
 {
 	/* 
          * I'm not quite happy with current scheme all serial
@@ -341,7 +341,7 @@ extern inline void rc_mark_event(struct riscom_port * port, int event)
 	mark_bh(RISCOM8_BH);
 }
 
-extern inline struct riscom_port * rc_get_port(struct riscom_board const * bp,
+static inline struct riscom_port * rc_get_port(struct riscom_board const * bp,
 					       unsigned char const * what)
 {
 	unsigned char channel;
@@ -359,7 +359,7 @@ extern inline struct riscom_port * rc_get_port(struct riscom_board const * bp,
 	return NULL;
 }
 
-extern inline void rc_receive_exc(struct riscom_board const * bp)
+static inline void rc_receive_exc(struct riscom_board const * bp)
 {
 	struct riscom_port *port;
 	struct tty_struct *tty;
@@ -422,7 +422,7 @@ extern inline void rc_receive_exc(struct riscom_board const * bp)
 	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
-extern inline void rc_receive(struct riscom_board const * bp)
+static inline void rc_receive(struct riscom_board const * bp)
 {
 	struct riscom_port *port;
 	struct tty_struct *tty;
@@ -452,7 +452,7 @@ extern inline void rc_receive(struct riscom_board const * bp)
 	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
-extern inline void rc_transmit(struct riscom_board const * bp)
+static inline void rc_transmit(struct riscom_board const * bp)
 {
 	struct riscom_port *port;
 	struct tty_struct *tty;
@@ -521,7 +521,7 @@ extern inline void rc_transmit(struct riscom_board const * bp)
 		rc_mark_event(port, RS_EVENT_WRITE_WAKEUP);
 }
 
-extern inline void rc_check_modem(struct riscom_board const * bp)
+static inline void rc_check_modem(struct riscom_board const * bp)
 {
 	struct riscom_port *port;
 	struct tty_struct *tty;
@@ -537,8 +537,11 @@ extern inline void rc_check_modem(struct riscom_board const * bp)
 		if (rc_in(bp, CD180_MSVR) & MSVR_CD) 
 			wake_up_interruptible(&port->open_wait);
 		else if (!((port->flags & ASYNC_CALLOUT_ACTIVE) &&
-			   (port->flags & ASYNC_CALLOUT_NOHUP)))
-			queue_task(&port->tqueue_hangup,  &tq_scheduler);      
+			   (port->flags & ASYNC_CALLOUT_NOHUP))) {
+			MOD_INC_USE_COUNT;
+			if (schedule_task(&port->tqueue_hangup) == 0)
+				MOD_DEC_USE_COUNT;
+		}
 	}
 	
 #ifdef RISCOM_BRAIN_DAMAGED_CTS
@@ -634,7 +637,7 @@ static void rc_interrupt(int irq, void * dev_id, struct pt_regs * regs)
  */
 
 /* Called with disabled interrupts */
-extern inline int rc_setup_board(struct riscom_board * bp)
+static inline int rc_setup_board(struct riscom_board * bp)
 {
 	int error;
 
@@ -657,7 +660,7 @@ extern inline int rc_setup_board(struct riscom_board * bp)
 }
 
 /* Called with disabled interrupts */
-extern inline void rc_shutdown_board(struct riscom_board *bp)
+static inline void rc_shutdown_board(struct riscom_board *bp)
 {
 	if (!(bp->flags & RC_BOARD_ACTIVE))
 		return;
@@ -1027,7 +1030,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 			rc_out(bp, RC_DTR, bp->DTR);
 		}
 		sti();
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(port->flags & ASYNC_INITIALIZED)) {
 			if (port->flags & ASYNC_HUP_NOTIFY)
@@ -1399,7 +1402,7 @@ static int rc_set_modem_info(struct riscom_port * port, unsigned int cmd,
 	return 0;
 }
 
-extern inline void rc_send_break(struct riscom_port * port, unsigned long length)
+static inline void rc_send_break(struct riscom_port * port, unsigned long length)
 {
 	struct riscom_board *bp = port_Board(port);
 	unsigned long flags;
@@ -1417,7 +1420,7 @@ extern inline void rc_send_break(struct riscom_port * port, unsigned long length
 	restore_flags(flags);
 }
 
-extern inline int rc_set_serial_info(struct riscom_port * port,
+static inline int rc_set_serial_info(struct riscom_port * port,
 				     struct serial_struct * newinfo)
 {
 	struct serial_struct tmp;
@@ -1467,7 +1470,7 @@ extern inline int rc_set_serial_info(struct riscom_port * port,
 	return 0;
 }
 
-extern inline int rc_get_serial_info(struct riscom_port * port,
+static inline int rc_get_serial_info(struct riscom_port * port,
 				     struct serial_struct * retinfo)
 {
 	struct serial_struct tmp;
@@ -1648,10 +1651,9 @@ static void do_rc_hangup(void *private_)
 	struct tty_struct	*tty;
 	
 	tty = port->tty;
-	if (!tty)
-		return;
-
-	tty_hangup(tty);
+	if (tty)
+		tty_hangup(tty);	/* FIXME: module removal race still here */
+	MOD_DEC_USE_COUNT;
 }
 
 static void rc_hangup(struct tty_struct * tty)
@@ -1820,9 +1822,12 @@ static void rc_release_drivers(void)
  * addresses in this case.
  *
  */ 
-__initfunc(void riscom8_setup(char *str, int * ints))
+static int __init riscom8_setup(char *str)
 {
+	int ints[RC_NBOARD];
 	int i;
+
+	str = get_options(str, ARRAY_SIZE(ints), ints);
 
 	for (i = 0; i < RC_NBOARD; i++) {
 		if (i < ints[0])
@@ -1830,13 +1835,16 @@ __initfunc(void riscom8_setup(char *str, int * ints))
 		else 
 			rc_board[i].base = 0;
 	}
+	return 1;
 }
+
+__setup("riscom8=", riscom8_setup);
 #endif
 
 /* 
  * This routine must be called by kernel at boot time 
  */
-__initfunc(int riscom8_init(void))
+static int __init riscom8_init(void)
 {
 	int i;
 	int found = 0;
@@ -1859,22 +1867,24 @@ __initfunc(int riscom8_init(void))
 }
 
 #ifdef MODULE
-int iobase  = 0;
-int iobase1 = 0;
-int iobase2 = 0;
-int iobase3 = 0;
+static int iobase;
+static int iobase1;
+static int iobase2;
+static int iobase3;
 MODULE_PARM(iobase, "i");
 MODULE_PARM(iobase1, "i");
 MODULE_PARM(iobase2, "i");
 MODULE_PARM(iobase3, "i");
+#endif /* MODULE */
 
 /*
  * You can setup up to 4 boards (current value of RC_NBOARD)
  * by specifying "iobase=0xXXX iobase1=0xXXX ..." as insmod parameter.
  *
  */
-int init_module(void) 
+static int __init riscom8_init_module (void)
 {
+#ifdef MODULE
 	int i;
 
 	if (iobase || iobase1 || iobase2 || iobase3) {
@@ -1890,11 +1900,12 @@ int init_module(void)
 		rc_board[2].base = iobase2;
 	if (iobase3)
 		rc_board[3].base = iobase3;
-	
+#endif /* MODULE */
+
 	return riscom8_init();
 }
 	
-void cleanup_module(void)
+static void __exit riscom8_exit_module (void)
 {
 	int i;
 	
@@ -1904,4 +1915,7 @@ void cleanup_module(void)
 			rc_release_io_range(&rc_board[i]);
 	
 }
-#endif /* MODULE */
+
+module_init(riscom8_init_module);
+module_exit(riscom8_exit_module);
+

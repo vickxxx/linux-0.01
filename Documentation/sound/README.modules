@@ -26,12 +26,18 @@ Note that it is no longer necessary or possible to configure sound in the
 drivers/sound dir. Now one simply configures and makes one's kernel and
 modules in the usual way.
 
- Then, add to your /etc/modules.conf or /etc/conf.modules something like:
+ Then, add to your /etc/modules.conf something like:
 
 alias char-major-14 sb
 post-install sb /sbin/modprobe "-k" "adlib_card"
 options sb io=0x220 irq=7 dma=1 dma16=5 mpu_io=0x330
 options adlib_card io=0x388     # FM synthesizer
+
+ Alternatively, if you have compiled in kernel level ISAPnP support:
+
+alias char-major-14 sb
+post-install sb /sbin/modprobe "-k" "adlib_card"
+options adlib_card io=0x388
 
   The effect of this is that the sound driver and all necessary bits and
 pieces autoload on demand, assuming you use kerneld (a sound choice) and
@@ -71,7 +77,7 @@ Persistent DMA Buffers:
 The sound modules normally allocate DMA buffers during open() and
 deallocate them during close(). Linux can often have problems allocating
 DMA buffers for ISA cards on machines with more than 16MB RAM. This is
-because ISA DMA buffers must exist below the 16MB boundry and it is quite
+because ISA DMA buffers must exist below the 16MB boundary and it is quite
 possible that we can't find a large enough free block in this region after
 the machine has been running for any amount of time. The way to avoid this
 problem is to allocate the DMA buffers during module load and deallocate
@@ -82,7 +88,7 @@ wasteful of RAM, but it guarantees that sound always works.
 
 To make the sound driver use persistent DMA buffers we need to pass the
 sound.o module a "dmabuf=1" command-line argument. This is normally done
-in /etc/conf.modules (or the more proper /etc/modules.conf) like so:
+in /etc/modules.conf like so:
 
 options sound		dmabuf=1
 

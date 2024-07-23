@@ -1,9 +1,13 @@
 /*
- * linux/arch/arm/drivers/net/ether1.h
+ *  linux/drivers/acorn/net/ether1.h
  *
- * network driver for Acorn Ether1 cards.
+ *  Copyright (C) 1996 Russell King
  *
- * (c) 1996 Russell King
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2 as
+ * published by the Free Software Foundation.
+ *
+ *  Network driver for Acorn Ether1 cards.
  */
 
 #ifndef _LINUX_ether1_H
@@ -31,7 +35,7 @@
 #define IDPROM_ADDRESS	(dev->base_addr + 0x09)
 
 struct ether1_priv {
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 	unsigned int tx_link;
 	unsigned int tx_head;
 	volatile unsigned int tx_tail;
@@ -42,13 +46,6 @@ struct ether1_priv {
 	unsigned char initialising : 1;
 	unsigned char restart      : 1;
 };
-
-static int ether1_open (struct device *dev);
-static int ether1_sendpacket (struct sk_buff *skb, struct device *dev);
-static void ether1_interrupt (int irq, void *dev_id, struct pt_regs *regs);
-static int ether1_close (struct device *dev);
-static struct enet_statistics *ether1_getstats (struct device *dev);
-static void ether1_setmulticastlist (struct device *dev);
 
 #define I82586_NULL (-1)
 

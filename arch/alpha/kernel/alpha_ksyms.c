@@ -27,7 +27,7 @@
 #include <asm/fpu.h>
 #include <asm/irq.h>
 #include <asm/machvec.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/semaphore.h>
 
 #define __KERNEL_SYSCALLS__
@@ -36,6 +36,8 @@
 extern struct hwrpb_struct *hwrpb;
 extern void dump_thread(struct pt_regs *, struct user *);
 extern int dump_fpu(struct pt_regs *, elf_fpregset_t *);
+extern spinlock_t kernel_flag;
+extern spinlock_t rtc_lock;
 
 /* these are C runtime functions with special calling conventions: */
 extern void __divl (void);
@@ -48,11 +50,10 @@ extern void __divqu (void);
 extern void __remqu (void);
 
 EXPORT_SYMBOL(alpha_mv);
-EXPORT_SYMBOL(local_bh_count);
-EXPORT_SYMBOL(local_irq_count);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
 EXPORT_SYMBOL(disable_irq_nosync);
+EXPORT_SYMBOL(probe_irq_mask);
 EXPORT_SYMBOL(screen_info);
 EXPORT_SYMBOL(perf_irq);
 
@@ -98,16 +99,28 @@ EXPORT_SYMBOL(__memset);
 EXPORT_SYMBOL(__memsetw);
 EXPORT_SYMBOL(__constant_c_memset);
 
+EXPORT_SYMBOL(__direct_map_base);
+EXPORT_SYMBOL(__direct_map_size);
+EXPORT_SYMBOL(pci_alloc_consistent);
+EXPORT_SYMBOL(pci_free_consistent);
+EXPORT_SYMBOL(pci_map_single);
+EXPORT_SYMBOL(pci_unmap_single);
+EXPORT_SYMBOL(pci_map_sg);
+EXPORT_SYMBOL(pci_unmap_sg);
+EXPORT_SYMBOL(pci_dma_supported);
+
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(dump_fpu);
 EXPORT_SYMBOL(hwrpb);
 EXPORT_SYMBOL(wrusp);
 EXPORT_SYMBOL(start_thread);
 EXPORT_SYMBOL(alpha_read_fp_reg);
+EXPORT_SYMBOL(alpha_read_fp_reg_s);
 EXPORT_SYMBOL(alpha_write_fp_reg);
+EXPORT_SYMBOL(alpha_write_fp_reg_s);
 
 /* In-kernel system calls.  */
-EXPORT_SYMBOL(__kernel_thread);
+EXPORT_SYMBOL(kernel_thread);
 EXPORT_SYMBOL(sys_open);
 EXPORT_SYMBOL(sys_dup);
 EXPORT_SYMBOL(sys_exit);
@@ -124,6 +137,7 @@ EXPORT_SYMBOL(csum_tcpudp_magic);
 EXPORT_SYMBOL(ip_compute_csum);
 EXPORT_SYMBOL(ip_fast_csum);
 EXPORT_SYMBOL(csum_partial_copy);
+EXPORT_SYMBOL(csum_partial_copy_nocheck);
 EXPORT_SYMBOL(csum_partial_copy_from_user);
 EXPORT_SYMBOL(csum_ipv6_magic);
 
@@ -134,36 +148,48 @@ EXPORT_SYMBOL(alpha_fp_emul_imprecise);
 EXPORT_SYMBOL(alpha_fp_emul);
 #endif
 
+#ifdef CONFIG_ALPHA_BROKEN_IRQ_MASK
+EXPORT_SYMBOL(__min_ipl);
+#endif
+
 /*
  * The following are specially called from the uaccess assembly stubs.
  */
 EXPORT_SYMBOL_NOVERS(__copy_user);
 EXPORT_SYMBOL_NOVERS(__do_clear_user);
 EXPORT_SYMBOL(__strncpy_from_user);
-EXPORT_SYMBOL(__strlen_user);
+EXPORT_SYMBOL(__strnlen_user);
 
-/*
- * The following are specially called from the semaphore assembly stubs.
- */
-EXPORT_SYMBOL_NOVERS(__down_failed);
-EXPORT_SYMBOL_NOVERS(__down_failed_interruptible);
-EXPORT_SYMBOL_NOVERS(__up_wakeup);
+/* Semaphore helper functions.  */
+EXPORT_SYMBOL(__down_failed);
+EXPORT_SYMBOL(__down_failed_interruptible);
+EXPORT_SYMBOL(__up_wakeup);
+EXPORT_SYMBOL(down);
+EXPORT_SYMBOL(down_interruptible);
+EXPORT_SYMBOL(up);
+EXPORT_SYMBOL(__down_read_failed);
+EXPORT_SYMBOL(__down_write_failed);
+EXPORT_SYMBOL(__rwsem_wake);
+EXPORT_SYMBOL(down_read);
+EXPORT_SYMBOL(down_write);
+EXPORT_SYMBOL(up_read);
+EXPORT_SYMBOL(up_write);
 
 /* 
  * SMP-specific symbols.
  */
 
-#ifdef __SMP__
+#ifdef CONFIG_SMP
+EXPORT_SYMBOL(kernel_flag);
 EXPORT_SYMBOL(synchronize_irq);
 EXPORT_SYMBOL(flush_tlb_all);
 EXPORT_SYMBOL(flush_tlb_mm);
 EXPORT_SYMBOL(flush_tlb_page);
 EXPORT_SYMBOL(flush_tlb_range);
+EXPORT_SYMBOL(smp_imb);
 EXPORT_SYMBOL(cpu_data);
-EXPORT_SYMBOL(cpu_number_map);
-EXPORT_SYMBOL(global_bh_lock);
-EXPORT_SYMBOL(global_bh_count);
-EXPORT_SYMBOL(synchronize_bh);
+EXPORT_SYMBOL(__cpu_number_map);
+EXPORT_SYMBOL(smp_num_cpus);
 EXPORT_SYMBOL(global_irq_holder);
 EXPORT_SYMBOL(__global_cli);
 EXPORT_SYMBOL(__global_sti);
@@ -178,7 +204,9 @@ EXPORT_SYMBOL(debug_spin_trylock);
 EXPORT_SYMBOL(write_lock);
 EXPORT_SYMBOL(read_lock);
 #endif
-#endif /* __SMP__ */
+#endif /* CONFIG_SMP */
+
+EXPORT_SYMBOL(rtc_lock);
 
 /*
  * The following are special because they're not called
@@ -199,3 +227,5 @@ EXPORT_SYMBOL_NOVERS(__remq);
 EXPORT_SYMBOL_NOVERS(__remqu);
 EXPORT_SYMBOL_NOVERS(memcpy);
 EXPORT_SYMBOL_NOVERS(memset);
+
+EXPORT_SYMBOL(get_wchan);

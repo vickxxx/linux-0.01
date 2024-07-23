@@ -16,7 +16,7 @@
 #include <asm/setup.h>
 #include <asm/segment.h>
 #include <asm/page.h>
-#include <asm/pgtable.h>
+#include <asm/pgalloc.h>
 #include <asm/system.h>
 #include <asm/traps.h>
 #include <asm/io.h>
@@ -46,8 +46,8 @@ pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
 	pte = (pte_t *) __get_free_page(GFP_KERNEL);
 	if (pmd_none(*pmd)) {
 		if (pte) {
-			clear_page((unsigned long)pte);
-			flush_page_to_ram((unsigned long)pte);
+			clear_page(pte);
+			__flush_page_to_ram((unsigned long)pte);
 			flush_tlb_kernel_page((unsigned long)pte);
 			nocache_page((unsigned long)pte);
 			pmd_set(pmd, pte);
@@ -61,7 +61,7 @@ pte_t *get_pte_slow(pmd_t *pmd, unsigned long offset)
 		__bad_pte(pmd);
 		return NULL;
 	}
-	return (pte_t *) pmd_page(*pmd) + offset;
+	return (pte_t *)__pmd_page(*pmd) + offset;
 }
 
 pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long offset)
@@ -82,7 +82,7 @@ pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long offset)
 		__bad_pmd(pgd);
 		return NULL;
 	}
-	return (pmd_t *) pgd_page(*pgd) + offset;
+	return (pmd_t *)__pgd_page(*pgd) + offset;
 }
 
 
@@ -90,25 +90,25 @@ pmd_t *get_pmd_slow(pgd_t *pgd, unsigned long offset)
    struct page instead of separately kmalloced struct.  Stolen from
    arch/sparc/mm/srmmu.c ... */
 
-typedef struct page ptable_desc;
-static ptable_desc ptable_list = { &ptable_list, &ptable_list };
+typedef struct list_head ptable_desc;
+static LIST_HEAD(ptable_list);
 
-#define PD_MARKBITS(dp) (*(unsigned char *)&(dp)->offset)
-#define PAGE_PD(page) ((ptable_desc *)&mem_map[MAP_NR(page)])
+#define PD_PTABLE(page) ((ptable_desc *)virt_to_page(page))
+#define PD_PAGE(ptable) (list_entry(ptable, struct page, list))
+#define PD_MARKBITS(dp) (*(unsigned char *)&PD_PAGE(dp)->index)
 
 #define PTABLE_SIZE (PTRS_PER_PMD * sizeof(pmd_t))
 
-__initfunc(void init_pointer_table(unsigned long ptable))
+void __init init_pointer_table(unsigned long ptable)
 {
 	ptable_desc *dp;
 	unsigned long page = ptable & PAGE_MASK;
 	unsigned char mask = 1 << ((ptable - page)/PTABLE_SIZE);
 
-	dp = PAGE_PD(page);
+	dp = PD_PTABLE(page);
 	if (!(PD_MARKBITS(dp) & mask)) {
 		PD_MARKBITS(dp) = 0xff;
-		(dp->prev = ptable_list.prev)->next = dp;
-		(dp->next = &ptable_list)->prev = dp;
+		list_add(dp, &ptable_list);
 	}
 
 	PD_MARKBITS(dp) &= ~mask;
@@ -117,8 +117,8 @@ __initfunc(void init_pointer_table(unsigned long ptable))
 #endif
 
 	/* unreserve the page so it's possible to free that page */
-	dp->flags &= ~(1 << PG_reserved);
-	atomic_set(&dp->count, 1);
+	PD_PAGE(dp)->flags &= ~(1 << PG_reserved);
+	atomic_set(&PD_PAGE(dp)->count, 1);
 
 	return;
 }
@@ -146,36 +146,31 @@ pmd_t *get_pointer_table (void)
 		flush_tlb_kernel_page(page);
 		nocache_page (page);
 
-		new = PAGE_PD(page);
+		new = PD_PTABLE(page);
 		PD_MARKBITS(new) = 0xfe;
-		(new->prev = dp->prev)->next = new;
-		(new->next = dp)->prev = new;
+		list_add_tail(new, dp);
+
 		return (pmd_t *)page;
 	}
 
-	for (tmp = 1, off = 0; (mask & tmp) == 0; tmp <<= 1, off += PTABLE_SIZE);
+	for (tmp = 1, off = 0; (mask & tmp) == 0; tmp <<= 1, off += PTABLE_SIZE)
+		;
 	PD_MARKBITS(dp) = mask & ~tmp;
 	if (!PD_MARKBITS(dp)) {
-		ptable_desc *last, *next;
-
 		/* move to end of list */
-		next = dp->next;
-		(next->prev = dp->prev)->next = next;
-
-		last = ptable_list.prev;
-		(dp->next = last->next)->prev = dp;
-		(dp->prev = last)->next = dp;
+		list_del(dp);
+		list_add_tail(dp, &ptable_list);
 	}
-	return (pmd_t *) (page_address(dp) + off);
+	return (pmd_t *) (page_address(PD_PAGE(dp)) + off);
 }
 
 int free_pointer_table (pmd_t *ptable)
 {
-	ptable_desc *dp, *first;
+	ptable_desc *dp;
 	unsigned long page = (unsigned long)ptable & PAGE_MASK;
 	unsigned char mask = 1 << (((unsigned long)ptable - page)/PTABLE_SIZE);
 
-	dp = PAGE_PD(page);
+	dp = PD_PTABLE(page);
 	if (PD_MARKBITS (dp) & mask)
 		panic ("table already free!");
 
@@ -183,21 +178,17 @@ int free_pointer_table (pmd_t *ptable)
 
 	if (PD_MARKBITS(dp) == 0xff) {
 		/* all tables in page are free, free page */
-		ptable_desc *next = dp->next;
-		(next->prev = dp->prev)->next = next;
+		list_del(dp);
 		cache_page (page);
 		free_page (page);
 		return 1;
-	} else if ((first = ptable_list.next) != dp) {
+	} else if (ptable_list.next != dp) {
 		/*
 		 * move this descriptor to the front of the list, since
 		 * it has one or more free tables.
 		 */
-		ptable_desc *next = dp->next;
-		(next->prev = dp->prev)->next = next;
-
-		(dp->prev = first->prev)->next = dp;
-		(dp->next = first)->prev = dp;
+		list_del(dp);
+		list_add(dp, &ptable_list);
 	}
 	return 0;
 }
@@ -227,31 +218,33 @@ static unsigned long transp_transl_matches( unsigned long regval,
     /* address match? */
     base = regval & 0xff000000;
     mask = ~(regval << 8) & 0xff000000;
-    return ((vaddr ^ base) & mask) == 0;
+    return (((unsigned long)vaddr ^ base) & mask) == 0;
 }
+
+#if DEBUG_INVALID_PTOV
+int mm_inv_cnt = 5;
+#endif
 
 #ifndef CONFIG_SINGLE_MEMORY_CHUNK
 /*
  * The following two routines map from a physical address to a kernel
  * virtual address and vice versa.
  */
-unsigned long mm_vtop (unsigned long vaddr)
+unsigned long mm_vtop(unsigned long vaddr)
 {
 	int i=0;
-	unsigned long voff = vaddr;
-	unsigned long offset = 0;
+	unsigned long voff = (unsigned long)vaddr - PAGE_OFFSET;
 
-	do{
-		if (voff < offset + m68k_memory[i].size) {
+	do {
+		if (voff < m68k_memory[i].size) {
 #ifdef DEBUGPV
-			printk ("VTOP(%lx)=%lx\n", vaddr,
-				m68k_memory[i].addr + voff - offset);
+			printk ("VTOP(%p)=%lx\n", vaddr,
+				m68k_memory[i].addr + voff);
 #endif
-			return m68k_memory[i].addr + voff - offset;
-		} else
-			offset += m68k_memory[i].size;
-		i++;
-	}while (i < m68k_num_memory);
+			return m68k_memory[i].addr + voff;
+		}
+		voff -= m68k_memory[i].size;
+	} while (++i < m68k_num_memory);
 
 	return mm_vtop_fallback(vaddr);
 }
@@ -259,7 +252,7 @@ unsigned long mm_vtop (unsigned long vaddr)
 
 /* Separate function to make the common case faster (needs to save less
    registers) */
-unsigned long mm_vtop_fallback (unsigned long vaddr)
+unsigned long mm_vtop_fallback(unsigned long vaddr)
 {
 	/* not in one of the memory chunks; test for applying transparent
 	 * translation */
@@ -272,13 +265,13 @@ unsigned long mm_vtop_fallback (unsigned long vaddr)
 			  ".chip 68k"
 			  : : "a" (&ttreg) );
 	    if (transp_transl_matches( ttreg, vaddr ))
-		return vaddr;
+		return (unsigned long)vaddr;
 	    asm volatile( ".chip 68030\n\t"
 			  "pmove %/tt1,%0@\n\t"
 			  ".chip 68k"
 			  : : "a" (&ttreg) );
 	    if (transp_transl_matches( ttreg, vaddr ))
-		return vaddr;
+		return (unsigned long)vaddr;
 	}
 	else if (CPU_IS_040_OR_060) {
 	    unsigned long ttreg;
@@ -288,13 +281,13 @@ unsigned long mm_vtop_fallback (unsigned long vaddr)
 			  ".chip 68k"
 			  : "=d" (ttreg) );
 	    if (transp_transl_matches( ttreg, vaddr ))
-		return vaddr;
+		return (unsigned long)vaddr;
 	    asm volatile( ".chip 68040\n\t"
 			  "movec %%dtt1,%0\n\t"
 			  ".chip 68k"
 			  : "=d" (ttreg) );
 	    if (transp_transl_matches( ttreg, vaddr ))
-		return vaddr;
+		return (unsigned long)vaddr;
 	}
 
 	/* no match, too, so get the actual physical address from the MMU. */
@@ -306,11 +299,21 @@ unsigned long mm_vtop_fallback (unsigned long vaddr)
 	  set_fs (MAKE_MM_SEG(SUPER_DATA));
 
 	  /* The PLPAR instruction causes an access error if the translation
-	   * is not possible. We don't catch that here, so a bad kernel trap
-	   * will be reported in this case. */
-	  asm volatile (".chip 68060\n\t"
-			"plpar (%0)\n\t"
-			".chip 68k"
+	   * is not possible. To catch this we use the same exception mechanism
+	   * as for user space accesses in <asm/uaccess.h>. */
+	  asm volatile (".chip 68060\n"
+			"1: plpar (%0)\n"
+			".chip 68k\n"
+			"2:\n"
+			".section .fixup,\"ax\"\n"
+			"   .even\n"
+			"3: lea -1,%0\n"
+			"   jra 2b\n"
+			".previous\n"
+			".section __ex_table,\"a\"\n"
+			"   .align 4\n"
+			"   .long 1b,3b\n"
+			".previous"
 			: "=a" (paddr)
 			: "0" (vaddr));
 	  set_fs (fs);
@@ -332,12 +335,13 @@ unsigned long mm_vtop_fallback (unsigned long vaddr)
 	  set_fs (fs);
 
 	  if (mmusr & MMU_T_040) {
-	    return (vaddr);	/* Transparent translation */
+	    return (unsigned long)vaddr;	/* Transparent translation */
 	  }
 	  if (mmusr & MMU_R_040)
-	    return (mmusr & PAGE_MASK) | (vaddr & (PAGE_SIZE-1));
+	    return (mmusr & PAGE_MASK) | ((unsigned long)vaddr & (PAGE_SIZE-1));
 
-	  panic ("VTOP040: bad virtual address %08lx (%lx)", vaddr, mmusr);
+	  printk("VTOP040: bad virtual address %lx (%lx)", vaddr, mmusr);
+	  return -1;
 	} else {
 	  volatile unsigned short temp;
 	  unsigned short mmusr;
@@ -350,46 +354,51 @@ unsigned long mm_vtop_fallback (unsigned long vaddr)
 	  mmusr = temp;
 
 	  if (mmusr & (MMU_I|MMU_B|MMU_L))
-	    panic ("VTOP030: bad virtual address %08lx (%x)", vaddr, mmusr);
+	    printk("VTOP030: bad virtual address %lx (%x)\n", vaddr, mmusr);
 
 	  descaddr = phys_to_virt((unsigned long)descaddr);
 
 	  switch (mmusr & MMU_NUM) {
 	  case 1:
-	    return (*descaddr & 0xfe000000) | (vaddr & 0x01ffffff);
+	    return (*descaddr & 0xfe000000) | ((unsigned long)vaddr & 0x01ffffff);
 	  case 2:
-	    return (*descaddr & 0xfffc0000) | (vaddr & 0x0003ffff);
+	    return (*descaddr & 0xfffc0000) | ((unsigned long)vaddr & 0x0003ffff);
 	  case 3:
-	    return (*descaddr & PAGE_MASK) | (vaddr & (PAGE_SIZE-1));
+	    return (*descaddr & PAGE_MASK) | ((unsigned long)vaddr & (PAGE_SIZE-1));
 	  default:
-	    panic ("VTOP: bad levels (%u) for virtual address %08lx", 
+	    printk("VTOP: bad levels (%u) for virtual address %lx\n", 
 		   mmusr & MMU_NUM, vaddr);
 	  }
 	}
 
-	panic ("VTOP: bad virtual address %08lx", vaddr);
+	printk("VTOP: bad virtual address %lx\n", vaddr);
+	return -1;
 }
 
 #ifndef CONFIG_SINGLE_MEMORY_CHUNK
 unsigned long mm_ptov (unsigned long paddr)
 {
 	int i = 0;
-	unsigned long offset = 0;
+	unsigned long poff, voff = PAGE_OFFSET;
 
-	do{
-		if (paddr >= m68k_memory[i].addr &&
-		    paddr < (m68k_memory[i].addr
-			     + m68k_memory[i].size)) {
+	do {
+		poff = paddr - m68k_memory[i].addr;
+		if (poff < m68k_memory[i].size) {
 #ifdef DEBUGPV
-			printk ("PTOV(%lx)=%lx\n", paddr,
-				(paddr - m68k_memory[i].addr) + offset);
+			printk ("PTOV(%lx)=%lx\n", paddr, poff + voff);
 #endif
-			return (paddr - m68k_memory[i].addr) + offset;
-		} else
-			offset += m68k_memory[i].size;
-		i++;
-	}while (i < m68k_num_memory);
+			return poff + voff;
+		}
+		voff += m68k_memory[i].size;
+	} while (++i < m68k_num_memory);
 
+#if DEBUG_INVALID_PTOV
+	if (mm_inv_cnt > 0) {
+		mm_inv_cnt--;
+		printk("Invalid use of phys_to_virt(0x%lx) at 0x%p!\n",
+			paddr, __builtin_return_address(0));
+	}
+#endif
 	/*
 	 * assume that the kernel virtual address is the same as the
 	 * physical address.
@@ -413,7 +422,7 @@ unsigned long mm_ptov (unsigned long paddr)
 	if (MACH_IS_AMIGA && paddr < 16*1024*1024)
 		return ZTWO_VADDR(paddr);
 #endif
-	return paddr;
+	return -1;
 }
 #endif
 
@@ -473,14 +482,7 @@ unsigned long mm_ptov (unsigned long paddr)
  * this?). So we have to push first and then additionally to invalidate.
  */
 
-#ifdef CONFIG_M68K_L2_CACHE
-/*
- *	Jes was worried about performance (urhh ???) so its optional
- */
- 
-void (*mach_l2_flush)(int) = NULL;
-#endif
- 
+
 /*
  * cache_clear() semantics: Clear any cache entries for the area in question,
  * without writing back dirty entries first. This is useful if the data will

@@ -21,6 +21,7 @@
  *  the superblock.
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/sched.h>
@@ -32,6 +33,7 @@
 #include <linux/locks.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
+#include <linux/highuid.h>
 #include <asm/byteorder.h>
 #include <asm/uaccess.h>
 
@@ -41,7 +43,8 @@ void sysv_print_inode(struct inode * inode)
         printk("ino %lu  mode 0%6.6o  lk %d  uid %d  gid %d"
                "  sz %lu  blks %lu  cnt %u\n",
                inode->i_ino, inode->i_mode, inode->i_nlink, inode->i_uid,
-               inode->i_gid, inode->i_size, inode->i_blocks, inode->i_count);
+               inode->i_gid, inode->i_size, inode->i_blocks,
+               atomic_read(&inode->i_count));
         printk("  db <0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx 0x%lx"
                " 0x%lx 0x%lx>\n",
                 inode->u.sysv_i.i_data[0], inode->u.sysv_i.i_data[1],
@@ -58,27 +61,25 @@ void sysv_print_inode(struct inode * inode)
 
 static void sysv_delete_inode(struct inode *inode)
 {
+	lock_kernel();
 	inode->i_size = 0;
 	sysv_truncate(inode);
 	sysv_free_inode(inode);
+	unlock_kernel();
 }
 
 static void sysv_put_super(struct super_block *);
 static void sysv_write_super(struct super_block *);
 static void sysv_read_inode(struct inode *);
-static int sysv_notify_change(struct dentry *, struct iattr *);
-static int sysv_statfs(struct super_block *, struct statfs *, int);
+static int sysv_statfs(struct super_block *, struct statfs *);
 
 static struct super_operations sysv_sops = {
-	sysv_read_inode,
-	sysv_write_inode,
-	NULL,			/* nothing special on put_inode() */
-	sysv_delete_inode,
-	sysv_notify_change,
-	sysv_put_super,
-	sysv_write_super,
-	sysv_statfs,
-	NULL			/* remount_fs */
+	read_inode:	sysv_read_inode,
+	write_inode:	sysv_write_inode,
+	delete_inode:	sysv_delete_inode,
+	put_super:	sysv_put_super,
+	write_super:	sysv_write_super,
+	statfs:		sysv_statfs,
 };
 
 /* The following functions try to recognize specific filesystems.
@@ -362,8 +363,6 @@ static struct super_block *sysv_read_super(struct super_block *sb,
 		panic("Coherent FS: bad super-block size");
 	if (64 != sizeof (struct sysv_inode))
 		panic("sysv fs: bad i-node size");
-	MOD_INC_USE_COUNT;
-	lock_super(sb);
 	set_blocksize(dev,BLOCK_SIZE);
 	sb->sv_block_base = 0;
 
@@ -409,13 +408,10 @@ static struct super_block *sysv_read_super(struct super_block *sb,
 			}
 	}
 	bad_shift:
-	sb->s_dev = 0;
-	unlock_super(sb);
 	if (!silent)
 		printk("VFS: unable to read Xenix/SystemV/Coherent superblock on device "
 		       "%s\n", kdevname(dev));
 	failed:
-	MOD_DEC_USE_COUNT;
 	return NULL;
 
 	ok:
@@ -444,8 +440,6 @@ static struct super_block *sysv_read_super(struct super_block *sb,
 		goto superblock_ok;
 		bad_superblock:
 			brelse(bh);
-			sb->s_dev = 0;
-			unlock_super(sb);
 			printk("SysV FS: cannot read superblock in %d byte mode\n", sb->sv_block_size);
 			goto failed;
 		superblock_ok:
@@ -491,8 +485,6 @@ static struct super_block *sysv_read_super(struct super_block *sb,
 				brelse(bh1);
 				brelse(bh2);
 				set_blocksize(sb->s_dev,BLOCK_SIZE);
-				sb->s_dev = 0;
-				unlock_super(sb);
 				printk("SysV FS: cannot read superblock in 512 byte mode\n");
 				goto failed;
 		}
@@ -506,18 +498,17 @@ static struct super_block *sysv_read_super(struct super_block *sb,
 	sb->s_blocksize = sb->sv_block_size;
 	sb->s_blocksize_bits = sb->sv_block_size_bits;
 	/* set up enough so that it can read an inode */
-	sb->s_dev = dev;
 	sb->s_op = &sysv_sops;
 	root_inode = iget(sb,SYSV_ROOT_INO);
 	sb->s_root = d_alloc_root(root_inode);
 	if (!sb->s_root) {
 		printk("SysV FS: get root inode failed\n");
 		sysv_put_super(sb);
-		sb->s_dev = 0;
-		unlock_super(sb);
 		return NULL;
 	}
-	unlock_super(sb);
+#ifndef CONFIG_SYSV_FS_WRITE
+	sb->s_flags |= MS_RDONLY;
+#endif
 	sb->s_dirt = 1;
 	/* brelse(bh);  resp.  brelse(bh1); brelse(bh2);
 	   occurs when the disk is unmounted. */
@@ -527,7 +518,6 @@ static struct super_block *sysv_read_super(struct super_block *sb,
 /* This is only called on sync() and umount(), when s_dirt=1. */
 static void sysv_write_super(struct super_block *sb)
 {
-	lock_super(sb);
 	if (buffer_dirty(sb->sv_bh1) || buffer_dirty(sb->sv_bh2)) {
 		/* If we are going to write out the super block,
 		   then attach current time stamp.
@@ -542,10 +532,9 @@ static void sysv_write_super(struct super_block *sb)
 		if (sb->sv_convert)
 			time = to_coh_ulong(time);
 		*sb->sv_sb_time = time;
-		mark_buffer_dirty(sb->sv_bh2, 1);
+		mark_buffer_dirty(sb->sv_bh2);
 	}
 	sb->s_dirt = 0;
-	unlock_super(sb);
 }
 
 static void sysv_put_super(struct super_block *sb)
@@ -557,24 +546,20 @@ static void sysv_put_super(struct super_block *sb)
 	/* switch back to default block size */
 	if (sb->s_blocksize != BLOCK_SIZE)
 		set_blocksize(sb->s_dev,BLOCK_SIZE);
-
-	MOD_DEC_USE_COUNT;
 }
 
-static int sysv_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
+static int sysv_statfs(struct super_block *sb, struct statfs *buf)
 {
-	struct statfs tmp;
-
-	tmp.f_type = sb->s_magic;			/* type of filesystem */
-	tmp.f_bsize = sb->sv_block_size;		/* block size */
-	tmp.f_blocks = sb->sv_ndatazones;		/* total data blocks in file system */
-	tmp.f_bfree = sysv_count_free_blocks(sb);	/* free blocks in fs */
-	tmp.f_bavail = tmp.f_bfree;			/* free blocks available to non-superuser */
-	tmp.f_files = sb->sv_ninodes;			/* total file nodes in file system */
-	tmp.f_ffree = sysv_count_free_inodes(sb);	/* free file nodes in fs */
-	tmp.f_namelen = SYSV_NAMELEN;
-	/* Don't know what value to put in tmp.f_fsid */ /* file system id */
-	return copy_to_user(buf, &tmp, bufsiz) ? -EFAULT : 0;
+	buf->f_type = sb->s_magic;			/* type of filesystem */
+	buf->f_bsize = sb->sv_block_size;		/* block size */
+	buf->f_blocks = sb->sv_ndatazones;		/* total data blocks in file system */
+	buf->f_bfree = sysv_count_free_blocks(sb);	/* free blocks in fs */
+	buf->f_bavail = buf->f_bfree;			/* free blocks available to non-superuser */
+	buf->f_files = sb->sv_ninodes;			/* total file nodes in file system */
+	buf->f_ffree = sysv_count_free_inodes(sb);	/* free file nodes in fs */
+	buf->f_namelen = SYSV_NAMELEN;
+	/* Don't know what value to put in buf->f_fsid */ /* file system id */
+	return 0;
 }
 
 
@@ -700,20 +685,6 @@ repeat:
 			return NULL;
 		}
 	}
-	*err = -EFBIG;
-
-	/* Check file limits.. */
-	{
-		unsigned long limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
-		if (limit < RLIM_INFINITY) {
-			limit >>= sb->sv_block_size_bits;
-			if (new_block >= limit) {
-				send_sig(SIGXFSZ, current, 0);
-				*err = -EFBIG;
-				return NULL;
-			}
-		}
-	}
 
 	tmp = sysv_new_block(sb);
 	if (!tmp) {
@@ -757,7 +728,6 @@ static struct buffer_head *block_getblk(struct inode *inode,
 	u32 tmp, block;
 	sysv_zone_t *p;
 	struct buffer_head * result;
-	unsigned long limit;
 
 	result = NULL;
 	if (!bh)
@@ -786,16 +756,6 @@ repeat:
 			goto out;
 		}
 	}
-	*err = -EFBIG;
-
-	limit = current->rlim[RLIMIT_FSIZE].rlim_cur;
-	if (limit < RLIM_INFINITY) {
-		limit >>= sb->sv_block_size_bits;
-		if (new_block >= limit) {
-			send_sig(SIGXFSZ, current, 0);
-			goto out;
-		}
-	}
 
 	block = sysv_new_block(sb);
 	if (!block)
@@ -809,7 +769,7 @@ repeat:
 		}
 		memset(result->b_data, 0, sb->sv_block_size);
 		mark_buffer_uptodate(result, 1);
-		mark_buffer_dirty(result, 1);
+		mark_buffer_dirty(result);
 	} else {
 		*phys = tmp;
 		*new = 1;
@@ -820,14 +780,14 @@ repeat:
 		goto repeat;
 	}
 	*p = (sb->sv_convert ? to_coh_ulong(block) : block);
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	*err = 0;
 out:
 	brelse(bh);
 	return result;
 }
 
-int sysv_get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create)
+static int sysv_get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create)
 {
 	struct super_block *sb;
 	int ret, err, new;
@@ -912,15 +872,15 @@ abort:
 	return err;
 
 abort_negative:
-	printk("sysv_getblk: block < 0\n");
+	printk("sysv_get_block: block < 0\n");
 	goto abort;
 
 abort_too_big:
-	printk("sysv_getblk: block > big\n");
+	printk("sysv_get_block: block > big\n");
 	goto abort;
 }
 
-struct buffer_head *sysv_getblk(struct inode *inode, unsigned int block, int create)
+static struct buffer_head *sysv_getblk(struct inode *inode, unsigned int block, int create)
 {
 	struct buffer_head dummy;
 	int error;
@@ -930,11 +890,11 @@ struct buffer_head *sysv_getblk(struct inode *inode, unsigned int block, int cre
 	error = sysv_get_block(inode, block, &dummy, create);
 	if (!error && buffer_mapped(&dummy)) {
 		struct buffer_head *bh;
-		bh = getblk(dummy.b_dev, dummy.b_blocknr, BLOCK_SIZE);
+		bh = getblk(dummy.b_dev, dummy.b_blocknr, inode->i_sb->sv_block_size);
 		if (buffer_new(&dummy)) {
-			memset(bh->b_data, 0, BLOCK_SIZE);
+			memset(bh->b_data, 0, inode->i_sb->sv_block_size);
 			mark_buffer_uptodate(bh, 1);
-			mark_buffer_dirty(bh, 1);
+			mark_buffer_dirty(bh);
 		}
 		return bh;
 	}
@@ -955,6 +915,31 @@ struct buffer_head *sysv_file_bread(struct inode *inode, int block, int create)
 	brelse(bh);
 	return NULL;
 }
+
+static int sysv_writepage(struct page *page)
+{
+	return block_write_full_page(page,sysv_get_block);
+}
+static int sysv_readpage(struct file *file, struct page *page)
+{
+	return block_read_full_page(page,sysv_get_block);
+}
+static int sysv_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
+{
+	return block_prepare_write(page,from,to,sysv_get_block);
+}
+static int sysv_bmap(struct address_space *mapping, long block)
+{
+	return generic_block_bmap(mapping,block,sysv_get_block);
+}
+struct address_space_operations sysv_aops = {
+	readpage: sysv_readpage,
+	writepage: sysv_writepage,
+	sync_page: block_sync_page,
+	prepare_write: sysv_prepare_write,
+	commit_write: generic_commit_write,
+	bmap: sysv_bmap
+};
 
 #ifdef __BIG_ENDIAN
 
@@ -998,6 +983,12 @@ static inline void coh_write3byte (unsigned char * p, unsigned long val)
 	*(unsigned short *)(p+1) = (unsigned short) val;
 }
 
+struct inode_operations sysv_symlink_inode_operations = {
+	readlink:	page_readlink,
+	follow_link:	page_follow_link,
+	setattr:	sysv_notify_change,
+};
+
 static void sysv_read_inode(struct inode *inode)
 {
 	struct super_block * sb = inode->i_sb;
@@ -1007,7 +998,6 @@ static void sysv_read_inode(struct inode *inode)
 	umode_t mode;
 
 	ino = inode->i_ino;
-	inode->i_op = NULL;
 	inode->i_mode = 0;
 	if (!ino || ino > sb->sv_ninodes) {
 		printk("Bad inode number on dev %s"
@@ -1028,8 +1018,8 @@ static void sysv_read_inode(struct inode *inode)
 		mode = from_coh_imode(mode);
 	/* SystemV FS: kludge permissions if ino==SYSV_ROOT_INO ?? */
 	inode->i_mode = mode;
-	inode->i_uid = raw_inode->i_uid;
-	inode->i_gid = raw_inode->i_gid;
+	inode->i_uid = (uid_t)raw_inode->i_uid;
+	inode->i_gid = (gid_t)raw_inode->i_gid;
 	inode->i_nlink = raw_inode->i_nlink;
 	if (sb->sv_convert) {
 		inode->i_size = from_coh_ulong(raw_inode->i_size);
@@ -1054,19 +1044,23 @@ static void sysv_read_inode(struct inode *inode)
 		for (block = 0; block < 10+1+1+1; block++)
 			inode->u.sysv_i.i_data[block] =
 				read3byte(&raw_inode->i_a.i_addb[3*block]);
-	if (S_ISREG(inode->i_mode))
+	if (S_ISREG(inode->i_mode)) {
 		inode->i_op = &sysv_file_inode_operations;
-	else if (S_ISDIR(inode->i_mode))
+		inode->i_fop = &sysv_file_operations;
+		inode->i_mapping->a_ops = &sysv_aops;
+	} else if (S_ISDIR(inode->i_mode)) {
 		inode->i_op = &sysv_dir_inode_operations;
-	else if (S_ISLNK(inode->i_mode))
+		inode->i_fop = &sysv_dir_operations;
+	} else if (S_ISLNK(inode->i_mode)) {
 		inode->i_op = &sysv_symlink_inode_operations;
-	else
+		inode->i_mapping->a_ops = &sysv_aops;
+	} else
 		init_special_inode(inode, inode->i_mode,raw_inode->i_a.i_rdev);
 	brelse(bh);
 }
 
 /* To avoid inconsistencies between inodes in memory and inodes on disk. */
-static int sysv_notify_change(struct dentry *dentry, struct iattr *attr)
+int sysv_notify_change(struct dentry *dentry, struct iattr *attr)
 {
 	struct inode *inode = dentry->d_inode;
 	int error;
@@ -1109,8 +1103,8 @@ static struct buffer_head * sysv_update_inode(struct inode * inode)
 	if (sb->sv_kludge_symlinks)
 		mode = to_coh_imode(mode);
 	raw_inode->i_mode = mode;
-	raw_inode->i_uid = inode->i_uid;
-	raw_inode->i_gid = inode->i_gid;
+	raw_inode->i_uid = fs_high2lowuid(inode->i_uid);
+	raw_inode->i_gid = fs_high2lowgid(inode->i_gid);
 	raw_inode->i_nlink = inode->i_nlink;
 	if (sb->sv_convert) {
 		raw_inode->i_size = to_coh_ulong(inode->i_size);
@@ -1132,15 +1126,17 @@ static struct buffer_head * sysv_update_inode(struct inode * inode)
 	else
 		for (block = 0; block < 10+1+1+1; block++)
 			write3byte(&raw_inode->i_a.i_addb[3*block],inode->u.sysv_i.i_data[block]);
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	return bh;
 }
 
-void sysv_write_inode(struct inode * inode)
+void sysv_write_inode(struct inode * inode, int wait)
 {
 	struct buffer_head *bh;
+	lock_kernel();
 	bh = sysv_update_inode(inode);
 	brelse(bh);
+	unlock_kernel();
 }
 
 int sysv_sync_inode(struct inode * inode)
@@ -1168,39 +1164,19 @@ int sysv_sync_inode(struct inode * inode)
 
 /* Every kernel module contains stuff like this. */
 
-static struct file_system_type sysv_fs_type[3] = {
-	{"xenix",    FS_REQUIRES_DEV, sysv_read_super, NULL},
-	{"sysv",     FS_REQUIRES_DEV, sysv_read_super, NULL},
-	{"coherent", FS_REQUIRES_DEV, sysv_read_super, NULL}
-};
+static DECLARE_FSTYPE_DEV(sysv_fs_type, "sysv", sysv_read_super);
 
-__initfunc(int init_sysv_fs(void))
+static int __init init_sysv_fs(void)
 {
-	int i;
-	int ouch;
-
-	for (i = 0; i < 3; i++) {
-		if ((ouch = register_filesystem(&sysv_fs_type[i])) != 0)
-			break;
-	}
-        return ouch;
+	return register_filesystem(&sysv_fs_type);
 }
 
-#ifdef MODULE
+static void __exit exit_sysv_fs(void)
+{
+	unregister_filesystem(&sysv_fs_type);
+}
+
 EXPORT_NO_SYMBOLS;
 
-int init_module(void)
-{
-	return init_sysv_fs();
-}
-
-void cleanup_module(void)
-{
-	int i;
-
-	for (i = 0; i < 3; i++)
-		/* No error message if this breaks... that's OK... */
-		unregister_filesystem(&sysv_fs_type[i]);
-}
-
-#endif
+module_init(init_sysv_fs)
+module_exit(exit_sysv_fs)

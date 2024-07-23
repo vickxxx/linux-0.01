@@ -6,21 +6,14 @@
 #ifndef __ARCH_SPARC_ATOMIC__
 #define __ARCH_SPARC_ATOMIC__
 
-#ifdef __SMP__
-/* This is a temporary measure. -DaveM */
+#include <linux/config.h>
+
 typedef struct { volatile int counter; } atomic_t;
-#define ATOMIC_INIT(i)	{ (i << 8) }
-#else
-typedef struct { int counter; } atomic_t;
-#define ATOMIC_INIT(i)  { (i) }
-#endif
 
 #ifdef __KERNEL__
-#include <asm/system.h>
-#include <asm/psr.h>
+#ifndef CONFIG_SMP
 
-#ifndef __SMP__
-
+#define ATOMIC_INIT(i)  { (i) }
 #define atomic_read(v)          ((v)->counter)
 #define atomic_set(v, i)        (((v)->counter) = i)
 
@@ -38,6 +31,8 @@ typedef struct { int counter; } atomic_t;
  *	----------------------------------------
  *	 31                          8 7      0
  */
+
+#define ATOMIC_INIT(i)	{ (i << 8) }
 
 static __inline__ int atomic_read(atomic_t *v)
 {
@@ -137,6 +132,8 @@ static __inline__ int atomic_sub_return(int i, atomic_t *v)
 
 #define atomic_inc(v) atomic_add(1,(v))
 #define atomic_dec(v) atomic_sub(1,(v))
+
+#define atomic_add_negative(i, v) (atomic_add_return((i), (v)) < 0)
 
 #endif /* !(__KERNEL__) */
 

@@ -23,31 +23,15 @@
 #ifndef _aic7xxx_h
 #define _aic7xxx_h
 
-#define AIC7XXX_H_VERSION  "3.2.4"
-
-#ifndef LINUX_VERSION_CODE
-#include <linux/version.h>
-#endif
-
-#ifndef KERNEL_VERSION
-#define KERNEL_VERSION(x,y,z) (((x)<<16)+((y)<<8)+(z))
-#endif
-
-#if defined(__i386__)
-#  define AIC7XXX_BIOSPARAM aic7xxx_biosparam
-#else
-#  define AIC7XXX_BIOSPARAM NULL
-#endif
+#define AIC7XXX_H_VERSION  "5.2.0"
 
 /*
  * Scsi_Host_Template (see hosts.h) for AIC-7xxx - some fields
  * to do with card config are filled in after the card is detected.
  */
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,1,65)
 #define AIC7XXX	{						\
 	next: NULL,						\
 	module: NULL,						\
-	proc_dir: NULL,						\
 	proc_info: aic7xxx_proc_info,				\
 	name: NULL,						\
 	detect: aic7xxx_detect,					\
@@ -63,7 +47,7 @@
 	abort: aic7xxx_abort,					\
 	reset: aic7xxx_reset,					\
 	slave_attach: NULL,					\
-	bios_param: AIC7XXX_BIOSPARAM,				\
+	bios_param: aic7xxx_biosparam,				\
 	can_queue: 255,		/* max simultaneous cmds      */\
 	this_id: -1,		/* scsi id of host adapter    */\
 	sg_tablesize: 0,	/* max scatter-gather cmds    */\
@@ -73,31 +57,6 @@
 	use_clustering: ENABLE_CLUSTERING,			\
 	use_new_eh_code: 0					\
 }
-#else
-#define AIC7XXX	{						\
-	next: NULL,						\
-	usage_count: NULL,					\
-	proc_dir: NULL, 					\
-	proc_info: aic7xxx_proc_info,				\
-	name: NULL,						\
-	detect: aic7xxx_detect,					\
-	release: aic7xxx_release,				\
-	info: aic7xxx_info,					\
-	command: NULL,						\
-	queuecommand: aic7xxx_queue,				\
-	abort: aic7xxx_abort,					\
-	reset: aic7xxx_reset,					\
-	slave_attach: NULL,					\
-	bios_param: AIC7XXX_BIOSPARAM,				\
-	can_queue: 255,		/* max simultaneous cmds      */\
-	this_id: -1,		/* scsi id of host adapter    */\
-	sg_tablesize: 0,	/* max scatter-gather cmds    */\
-	cmd_per_lun: 3,		/* cmds per lun (linked cmds) */\
-	present: 0,		/* number of 7xxx's present   */\
-	unchecked_isa_dma: 0,	/* no memory DMA restrictions */\
-	use_clustering: ENABLE_CLUSTERING			\
-}
-#endif
 
 extern int aic7xxx_queue(Scsi_Cmnd *, void (*)(Scsi_Cmnd *));
 extern int aic7xxx_biosparam(Disk *, kdev_t, int[]);

@@ -12,6 +12,7 @@
  *	History
  *	LAPB 001	Jonathan Naylor	Started Coding
  *	LAPB 002	Jonathan Naylor	New timer architecture.
+ *	2000-10-29	Henner Eisen	lapb_data_indication() return status.
  */
  
 #include <linux/config.h>
@@ -196,12 +197,12 @@ int lapb_getparms(void *token, struct lapb_parms_struct *parms)
 	parms->window  = lapb->window;
 	parms->mode    = lapb->mode;
 
-	if (lapb->t1timer.prev == NULL && lapb->t1timer.next == NULL)
+	if (!timer_pending(&lapb->t1timer))
 		parms->t1timer = 0;
 	else
 		parms->t1timer = (lapb->t1timer.expires - jiffies) / HZ;
 
-	if (lapb->t2timer.prev == NULL && lapb->t2timer.next == NULL)
+	if (!timer_pending(&lapb->t2timer))
 		parms->t2timer = 0;
 	else
 		parms->t2timer = (lapb->t2timer.expires - jiffies) / HZ;
@@ -370,14 +371,11 @@ void lapb_disconnect_indication(lapb_cb *lapb, int reason)
 
 int lapb_data_indication(lapb_cb *lapb, struct sk_buff *skb)
 {
-	int used = 0;
-
 	if (lapb->callbacks.data_indication != NULL) {
-		(lapb->callbacks.data_indication)(lapb->token, skb);
-		used = 1;
+		return (lapb->callbacks.data_indication)(lapb->token, skb);
 	}
-
-	return used;
+	kfree_skb(skb);
+	return NET_RX_CN_HIGH; /* For now; must be != NET_RX_DROP */ 
 }
 
 int lapb_data_transmit(lapb_cb *lapb, struct sk_buff *skb)
@@ -401,25 +399,18 @@ EXPORT_SYMBOL(lapb_disconnect_request);
 EXPORT_SYMBOL(lapb_data_request);
 EXPORT_SYMBOL(lapb_data_received);
 
-__initfunc(void lapb_proto_init(struct net_proto *pro))
+static int __init lapb_init(void)
 {
 	printk(KERN_INFO "NET4: LAPB for Linux. Version 0.01 for NET4.0\n");
+	return 0;
 }
 
 #ifdef MODULE
 MODULE_AUTHOR("Jonathan Naylor <g4klx@g4klx.demon.co.uk>");
 MODULE_DESCRIPTION("The X.25 Link Access Procedure B link layer protocol");
-
-int init_module(void)
-{
-	lapb_proto_init(NULL);
-
-	return 0;
-}
-
-void cleanup_module(void)
-{
-}
 #endif
+
+
+module_init(lapb_init);
 
 #endif

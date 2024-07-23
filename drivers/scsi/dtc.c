@@ -134,13 +134,6 @@
 /*!!!! for dtc, it's a 128 byte buffer at 3900 !!! */
 #define DTC_DATA_BUF		0x3900  /* rw 128 bytes long */
 
-
-struct proc_dir_entry proc_scsi_dtc = {
-   PROC_SCSI_T128, 7, "dtc3x80",
-	S_IFDIR | S_IRUGO | S_IXUGO, 2
-     };
-
-
 static struct override {
    unsigned int address;
    int irq;
@@ -154,7 +147,7 @@ static struct override {
 #define NO_OVERRIDES (sizeof(overrides) / sizeof(struct override))
 
 static struct base {
-   unsigned int address;
+   unsigned long address;
    int noauto;
 } bases[] __initdata = {{0xcc000, 0}, {0xc8000, 0}, {0xdc000, 0}, {0xd8000, 0}};
 
@@ -177,7 +170,7 @@ static const struct signature {
  *
 */
 
-__initfunc(void dtc_setup(char *str, int *ints)) {
+void __init dtc_setup(char *str, int *ints){
    static int commandline_current = 0;
    int i;
    if (ints[0] != 2)
@@ -208,14 +201,13 @@ __initfunc(void dtc_setup(char *str, int *ints)) {
  *
 */
 
-
-__initfunc(int dtc_detect(Scsi_Host_Template * tpnt)) {
+int __init dtc_detect(Scsi_Host_Template * tpnt){
    static int current_override = 0, current_base = 0;
    struct Scsi_Host *instance;
    unsigned int base;
    int sig, count;
 
-   tpnt->proc_dir = &proc_scsi_dtc;
+   tpnt->proc_name = "dtc3x80";
    tpnt->proc_info = &dtc_proc_info;
 
    for (count = 0; current_override < NO_OVERRIDES; ++current_override) {
@@ -230,7 +222,7 @@ __initfunc(int dtc_detect(Scsi_Host_Template * tpnt)) {
 #endif
 	 for (sig = 0; sig < NO_SIGNATURES; ++sig)
 	    if (!bases[current_base].noauto && 
-		check_signature(bases[current_base].address +
+		isa_check_signature(bases[current_base].address +
 				signatures[sig].offset,
 	      signatures[sig].string, strlen(signatures[sig].string))) {
 	    base = bases[current_base].address;
@@ -249,7 +241,10 @@ __initfunc(int dtc_detect(Scsi_Host_Template * tpnt)) {
 	 break;
 
       instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
-      instance->base = (void *)base;
+      if(instance == NULL)
+      	break;
+      	
+      instance->base = base;
 
       NCR5380_init(instance, 0);
 
@@ -368,7 +363,7 @@ static inline int NCR5380_pread (struct Scsi_Host *instance,
       while (NCR5380_read(DTC_CONTROL_REG) & CSR_HOST_BUF_NOT_RDY)
 	 ++i;
       rtrc(3);
-      memcpy_fromio(d, base + DTC_DATA_BUF, 128);
+      isa_memcpy_fromio(d, base + DTC_DATA_BUF, 128);
       d += 128;
       len -= 128;
       rtrc(7);	/*** with int's on, it sometimes hangs after here.
@@ -418,7 +413,7 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance,
       while (NCR5380_read(DTC_CONTROL_REG) & CSR_HOST_BUF_NOT_RDY)
 	 ++i;
       rtrc(3);
-      memcpy_toio(base + DTC_DATA_BUF, src, 128);
+      isa_memcpy_toio(base + DTC_DATA_BUF, src, 128);
       src += 128;
       len -= 128;
    }
@@ -440,9 +435,6 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance,
 
 #include "NCR5380.c"
 
-#ifdef MODULE
 /* Eventually this will go into an include file, but this will be later */
-Scsi_Host_Template driver_template = DTC3x80;
-
+static Scsi_Host_Template driver_template = DTC3x80;
 #include "scsi_module.c"
-#endif

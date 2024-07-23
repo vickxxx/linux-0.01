@@ -8,11 +8,16 @@
  *  by James Banks
  *
  *  (C) 1997-1998 Caldera, Inc.
- *
+ *  (C) 1999-2000 Torben Mathiasen
+ * 
  *  This software may be used and distributed according to the terms
  *  of the GNU Public License, incorporated herein by reference.
  *
  ** This file is best viewed/edited with tabstop=4, colums>=132
+ *
+ *  
+ *  Dec 10, 1999	Torben Mathiasen <torben.mathiasen@compaq.com>
+ *			New Maintainer
  *
  ********************************************************************/
 
@@ -20,11 +25,6 @@
 #include <asm/io.h>
 #include <asm/types.h>
 #include <linux/netdevice.h>
-
-#if LINUX_VERSION_CODE <= 0x20100
-#define net_device_stats	enet_statistics
-#endif
-
 
 
 
@@ -36,8 +36,8 @@
 #define FALSE			0
 #define TRUE			1
 
-#define TLAN_MIN_FRAME_SIZE	64
-#define TLAN_MAX_FRAME_SIZE	1600
+#define TLAN_MIN_FRAME_SIZE	60
+#define TLAN_MAX_FRAME_SIZE	1536
 
 #define TLAN_NUM_RX_LISTS	4
 #define TLAN_NUM_TX_LISTS	8
@@ -45,12 +45,14 @@
 #define TLAN_IGNORE		0
 #define TLAN_RECORD		1
 
-#define TLAN_DBG(lvl, format, args...)	if (debug&lvl) printk( format, ##args );
+#define TLAN_DBG(lvl, format, args...)	if (debug&lvl) printk(KERN_DEBUG "TLAN: " format, ##args );
 #define TLAN_DEBUG_GNRL		0x0001
 #define TLAN_DEBUG_TX		0x0002
 #define TLAN_DEBUG_RX		0x0004 
 #define TLAN_DEBUG_LIST		0x0008
+#define TLAN_DEBUG_PROBE	0x0010
 
+#define TX_TIMEOUT		(10*HZ)	 /* We need time for auto-neg */
 
 
 
@@ -101,6 +103,24 @@ typedef struct tlan_adapter_entry {
 #define TLAN_DUPLEX_HALF	1
 #define TLAN_DUPLEX_FULL	2
 
+
+
+	/*****************************************************************
+	 * EISA Definitions
+	 *
+	 ****************************************************************/
+
+#define EISA_ID      0xc80   /* EISA ID Registers */ 
+#define EISA_ID0     0xc80   /* EISA ID Register 0 */ 
+#define EISA_ID1     0xc81   /* EISA ID Register 1 */ 
+#define EISA_ID2     0xc82   /* EISA ID Register 2 */ 
+#define EISA_ID3     0xc83   /* EISA ID Register 3 */ 
+#define EISA_CR      0xc84   /* EISA Control Register */
+#define EISA_REG0    0xc88   /* EISA Configuration Register 0 */
+#define EISA_REG1    0xc89   /* EISA Configuration Register 1 */
+#define EISA_REG2    0xc8a   /* EISA Configuration Register 2 */
+#define EISA_REG3    0xc8f   /* EISA Configuration Register 3 */
+#define EISA_APROM   0xc90   /* Ethernet Address PROM */
 
 
 
@@ -156,7 +176,7 @@ typedef u8 TLanBuffer[TLAN_MAX_FRAME_SIZE];
 	 ****************************************************************/
 
 typedef struct tlan_private_tag {
-	struct device           *nextDevice;
+	struct net_device       *nextDevice;
 	void			*dmaStorage;
 	u8			*padBuffer;
 	TLanList                *rxList;
@@ -175,18 +195,20 @@ typedef struct tlan_private_tag {
 	u32			timerType;
 	struct timer_list	timer;
 	struct net_device_stats	stats;
-	TLanAdapterEntry	*adapter;
+	struct board		*adapter;
 	u32			adapterRev;
 	u32			aui;
 	u32			debug;
 	u32			duplex;
 	u32			phy[2];
 	u32			phyNum;
-	u32			sa_int;
 	u32			speed;
 	u8			tlanRev;
 	u8			tlanFullDuplex;
 	char                    devName[8];
+	spinlock_t		lock;
+	u8			link;
+	u8			is_eisa;
 } TLanPrivateInfo;
 
 
@@ -197,7 +219,7 @@ typedef struct tlan_private_tag {
 	 *
 	 ****************************************************************/
 
-#define TLAN_TIMER_LINK			1
+#define TLAN_TIMER_LINK_BEAT		1
 #define TLAN_TIMER_ACTIVITY		2
 #define TLAN_TIMER_PHY_PDOWN		3
 #define TLAN_TIMER_PHY_PUP		4
@@ -206,7 +228,7 @@ typedef struct tlan_private_tag {
 #define TLAN_TIMER_PHY_FINISH_AN	7
 #define TLAN_TIMER_FINISH_RESET		8
 
-#define TLAN_TIMER_ACT_DELAY		10
+#define TLAN_TIMER_ACT_DELAY		(HZ/10)
 
 
 
@@ -404,7 +426,17 @@ typedef struct tlan_private_tag {
 #define		TLAN_TS_POLOK		0x2000
 #define		TLAN_TS_TPENERGY	0x1000
 #define		TLAN_TS_RESERVED	0x0FFF
+#define TLAN_TLPHY_PAR			0x19
+#define		TLAN_PHY_CIM_STAT	0x0020
+#define		TLAN_PHY_SPEED_100	0x0040
+#define		TLAN_PHY_DUPLEX_FULL	0x0080
+#define		TLAN_PHY_AN_EN_STAT     0x0400
 
+/* National Sem. & Level1 PHY id's */
+#define NAT_SEM_ID1			0x2000
+#define NAT_SEM_ID2			0x5C01
+#define LEVEL1_ID1			0x7810
+#define LEVEL1_ID2			0x0000
 
 #define CIRC_INC( a, b ) if ( ++a >= b ) a = 0
 

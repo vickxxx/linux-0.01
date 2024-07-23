@@ -1,4 +1,4 @@
-ide.txt -- Information regarding the Enhanced IDE drive in Linux 2.1/2.2
+ide.txt -- Information regarding the Enhanced IDE drive in Linux 2.2/2.3/2.4
 ===============================================================================
 
    +-----------------------------------------------------------------+
@@ -38,7 +38,7 @@ NEW!	- support for IDE ATAPI *floppy* drives
 		- interface PIO timing & prefetch parameter support
 	- experimental support for UMC 8672 interfaces
 	- support for secondary interface on the FGI/Holtek HT-6560B VLB i/f
-		- use kernel command line option:   ide0=ht6560
+		- use kernel command line option:   ide0=ht6560b
 	- experimental support for various IDE chipsets
 		- use appropriate kernel command line option from list below
 	- support for drives with a stuck WRERR_STAT bit
@@ -245,7 +245,7 @@ When using ide.c/ide-tape.c as modules in combination with kerneld, add:
 	alias block-major-3 ide-probe
 	alias char-major-37 ide-tape
 
-respectively to /etc/conf.modules.
+respectively to /etc/modules.conf.
 
 When ide.c is used as a module, you can pass command line parameters to the
 driver using the "options=" keyword to insmod, while replacing any ',' with
@@ -275,6 +275,8 @@ Summary of ide driver parameters for kernel "command line":
  "hdx=slow"		: insert a huge pause after each access to the data
 				port. Should be used only as a last resort.
  "hdx=swapdata"		: when the drive is a disk, byte swap all data
+
+ "hdxlun=xx"		: set the drive last logical unit
 
  "idebus=xx"		: inform IDE driver of VESA/PCI bus speed in MHz,
 				where "xx" is between 20 and 66 inclusive,

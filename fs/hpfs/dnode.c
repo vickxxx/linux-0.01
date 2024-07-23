@@ -337,7 +337,7 @@ int hpfs_add_to_dnode(struct inode *i, dnode_secno dno, unsigned char *name, uns
 		return 1;
 	}
 	fnode->u.external[0].disk_secno = rdno;
-	mark_buffer_dirty(bh, 1);
+	mark_buffer_dirty(bh);
 	brelse(bh);
 	d->up = ad->up = i->i_hpfs_dno = rdno;
 	d->root_dnode = ad->root_dnode = 0;
@@ -535,11 +535,11 @@ static void delete_empty_dnode(struct inode *i, dnode_secno dno)
 			}
 			if ((fnode = hpfs_map_fnode(i->i_sb, up, &bh))) {
 				fnode->u.external[0].disk_secno = down;
-				mark_buffer_dirty(bh, 1);
+				mark_buffer_dirty(bh);
 				brelse(bh);
 			}
 			i->i_hpfs_dno = down;
-			for_all_poss(i, hpfs_pos_subst, ((loff_t)dno << 4) | 1, (loff_t) -2);
+			for_all_poss(i, hpfs_pos_subst, ((loff_t)dno << 4) | 1, (loff_t) 12);
 			return;
 		}
 		if (!(dnode = hpfs_map_dnode(i->i_sb, up, &qbh))) return;
@@ -876,7 +876,7 @@ struct hpfs_dirent *map_pos_dirent(struct inode *inode, loff_t *posp,
 	hpfs_brelse4(&qbh0);
 	
 	bail:
-	*posp = -2;
+	*posp = 12;
 	return de;
 }
 

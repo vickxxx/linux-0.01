@@ -1,4 +1,4 @@
-/* $Id: su.c,v 1.21 1999/06/11 10:23:42 davem Exp $
+/* $Id: su.c,v 1.43 2000/11/15 07:28:09 davem Exp $
  * su.c: Small serial driver for keyboard/mouse interface on sparc32/PCI
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -54,6 +54,7 @@ do {									\
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
 #include <linux/serial.h>
+#include <linux/serialP.h>
 #include <linux/serial_reg.h>
 #include <linux/string.h>
 #include <linux/fcntl.h>
@@ -62,6 +63,7 @@ do {									\
 #include <linux/mm.h>
 #include <linux/malloc.h>
 #include <linux/init.h>
+#include <linux/bootmem.h>
 #include <linux/delay.h>
 #ifdef CONFIG_SERIAL_CONSOLE
 #include <linux/console.h>
@@ -113,6 +115,7 @@ struct su_struct {
 	int		 cflag;
 
 	enum su_type	 port_type;	/* Hookup type: e.g. mouse */
+	int		 is_console;
 	int		 port_node;
 
 	char		 name[16];
@@ -341,7 +344,7 @@ su_sched_event(struct su_struct *info, int event)
 }
 
 static __inline__ void
-receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs)
+receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs, int is_brk)
 {
 	unsigned char status = 0;
 	unsigned char ch;
@@ -368,7 +371,7 @@ receive_kbd_ms_chars(struct su_struct *info, struct pt_regs *regs)
                 	}
                 	sunkbd_inchar(ch, regs);
 		} else {
-			sun_mouse_inbyte(ch);
+			sun_mouse_inbyte(ch, is_brk);
 		}
 
 		status = su_inb(info, UART_LSR);
@@ -380,12 +383,15 @@ receive_serial_chars(struct su_struct *info, int *status, struct pt_regs *regs)
 {
 	struct tty_struct *tty = info->tty;
 	unsigned char ch;
-	int ignored = 0;
+	int ignored = 0, saw_console_brk = 0;
 	struct	async_icount *icount;
 
 	icount = &info->icount;
 	do {
 		ch = serial_inp(info, UART_RX);
+		if (info->is_console &&
+		    (ch == 0 || (*status &UART_LSR_BI)))
+			saw_console_brk = 1;
 		if (tty->flip.count >= TTY_FLIPBUF_SIZE)
 			break;
 		*tty->flip.char_buf_ptr = ch;
@@ -461,6 +467,8 @@ receive_serial_chars(struct su_struct *info, int *status, struct pt_regs *regs)
 	printk("E%02x.R%d", *status, tty->flip.count);
 #endif
 	tty_flip_buffer_push(tty);
+	if (saw_console_brk != 0)
+		batten_down_hatches();
 }
 
 static __inline__ void
@@ -598,8 +606,9 @@ su_kbd_ms_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 #ifdef SERIAL_DEBUG_INTR
 	printk("status = %x...", status);
 #endif
-	if (status & UART_LSR_DR)
-		receive_kbd_ms_chars(info, regs);
+	if ((status & UART_LSR_DR) || (status & UART_LSR_BI))
+		receive_kbd_ms_chars(info, regs,
+				     (status & UART_LSR_BI) != 0);
 
 #ifdef SERIAL_DEBUG_INTR
 	printk("end.\n");
@@ -1836,14 +1845,12 @@ su_wait_until_sent(struct tty_struct *tty, int timeout)
 		printk("lsr = %d (jiff=%lu)...", lsr, jiffies);
 #endif
 		current->state = TASK_INTERRUPTIBLE;
-		current->counter = 0;	/* make us low-priority */
 		schedule_timeout(char_time);
 		if (signal_pending(current))
 			break;
 		if (timeout && time_after(jiffies, orig_jiffies + timeout))
 			break;
 	}
-	current->state = TASK_RUNNING;
 #ifdef SERIAL_DEBUG_RS_WAIT_UNTIL_SENT
 	printk("lsr = %d (jiff=%lu)...done\n", lsr, jiffies);
 #endif
@@ -1966,7 +1973,7 @@ block_til_ready(struct tty_struct *tty, struct file * filp,
 				   serial_inp(info, UART_MCR) |
 				   (UART_MCR_DTR | UART_MCR_RTS));
 		restore_flags(flags);
-		current->state = TASK_INTERRUPTIBLE;
+		set_current_state(TASK_INTERRUPTIBLE);
 		if (tty_hung_up_p(filp) ||
 		    !(info->flags & ASYNC_INITIALIZED)) {
 #ifdef SERIAL_DO_RESTART
@@ -2117,14 +2124,12 @@ line_info(char *buf, struct su_struct *info)
 	int		ret;
 	unsigned long	flags;
 
-	ret = sprintf(buf, "%d: uart:%s port:%X irq:%s",
-		      info->line, uart_config[info->type].name, 
-		      (int)info->port, __irq_itoa(info->irq));
+	if (info->port == 0 || info->type == PORT_UNKNOWN)
+		return 0;
 
-	if (info->port == 0 || info->type == PORT_UNKNOWN) {
-		ret += sprintf(buf+ret, "\n");
-		return ret;
-	}
+	ret = sprintf(buf, "%u: uart:%s port:%lX irq:%s",
+		      info->line, uart_config[info->type].name, 
+		      (unsigned long)info->port, __irq_itoa(info->irq));
 
 	/*
 	 * Figure out the current RS-232 lines
@@ -2150,24 +2155,24 @@ line_info(char *buf, struct su_struct *info)
 		strcat(stat_buf, "|RI");
 
 	if (info->quot) {
-		ret += sprintf(buf+ret, " baud:%d",
+		ret += sprintf(buf+ret, " baud:%u",
 			       info->baud_base / info->quot);
 	}
 
-	ret += sprintf(buf+ret, " tx:%d rx:%d",
-		      info->icount.tx, info->icount.rx);
+	ret += sprintf(buf+ret, " tx:%u rx:%u",
+		       info->icount.tx, info->icount.rx);
 
 	if (info->icount.frame)
-		ret += sprintf(buf+ret, " fe:%d", info->icount.frame);
+		ret += sprintf(buf+ret, " fe:%u", info->icount.frame);
 
 	if (info->icount.parity)
-		ret += sprintf(buf+ret, " pe:%d", info->icount.parity);
+		ret += sprintf(buf+ret, " pe:%u", info->icount.parity);
 
 	if (info->icount.brk)
-		ret += sprintf(buf+ret, " brk:%d", info->icount.brk);	
+		ret += sprintf(buf+ret, " brk:%u", info->icount.brk);	
 
 	if (info->icount.overrun)
-		ret += sprintf(buf+ret, " oe:%d", info->icount.overrun);
+		ret += sprintf(buf+ret, " oe:%u", info->icount.overrun);
 
 	/*
 	 * Last thing is the RS-232 status lines
@@ -2196,7 +2201,7 @@ int su_read_proc(char *page, char **start, off_t off, int count,
 done:
 	if (off >= len+begin)
 		return 0;
-	*start = page + (begin-off);
+	*start = page + (off-begin);
 	return ((count < begin+len-off) ? count : begin+len-off);
 }
 
@@ -2213,9 +2218,9 @@ done:
  * number, and identifies which options were configured into this
  * driver.
  */
-__initfunc(static __inline__ void show_su_version(void))
+static __inline__ void __init show_su_version(void)
 {
-	char *revision = "$Revision: 1.21 $";
+	char *revision = "$Revision: 1.43 $";
 	char *version, *p;
 
 	version = strchr(revision, ' ');
@@ -2252,11 +2257,7 @@ autoconfig(struct su_struct *info)
 	for_each_ebus(ebus) {
 		for_each_ebusdev(dev, ebus) {
 			if (dev->prom_node == info->port_node) {
-				info->port = dev->base_address[0];
-#ifdef __sparc_v9__
-				if (check_region(info->port, 8))
-					return;
-#endif
+				info->port = dev->resource[0].start;
 				info->irq = dev->irqs[0];
 				goto ebus_done;
 			}
@@ -2278,8 +2279,13 @@ autoconfig(struct su_struct *info)
 		return;
 	}
 	prom_apply_obio_ranges(&reg0, 1);
-	if ((info->port = (unsigned long) sparc_alloc_io(reg0.phys_addr,
-	    0, reg0.reg_size, "su-regs", reg0.which_io, 0)) == 0) {
+	if (reg0.which_io != 0) {	/* Just in case... */
+		prom_printf("su: bus number nonzero: 0x%x:%x\n",
+		    reg0.which_io, reg0.phys_addr);
+		return;
+	}
+	if ((info->port = (unsigned long) ioremap(reg0.phys_addr,
+	    reg0.reg_size)) == 0) {
 		prom_printf("su: cannot map\n");
 		return;
 	}
@@ -2401,10 +2407,6 @@ ebus_done:
 
 	sprintf(info->name, "su(%s)", su_typev[info->port_type]);
 
-#ifdef __sparc_v9__
-	request_region(info->port, 8, info->name);
-#endif
-
 	/*
 	 * Reset the UART.
 	 */
@@ -2416,10 +2418,16 @@ ebus_done:
 	restore_flags(flags);
 }
 
+/* This is used by the SAB driver to adjust where its minor
+ * numbers start, we always are probed for first.
+ */
+int su_num_ports = 0;
+EXPORT_SYMBOL(su_num_ports);
+
 /*
  * The serial driver boot-time initialization code!
  */
-__initfunc(int su_serial_init(void))
+int __init su_serial_init(void)
 {
 	int i;
 	struct su_struct *info;
@@ -2432,7 +2440,11 @@ __initfunc(int su_serial_init(void))
 	memset(&serial_driver, 0, sizeof(struct tty_driver));
 	serial_driver.magic = TTY_DRIVER_MAGIC;
 	serial_driver.driver_name = "su";
+#ifdef CONFIG_DEVFS_FS
+	serial_driver.name = "tts/%d";
+#else
 	serial_driver.name = "ttyS";
+#endif
 	serial_driver.major = TTY_MAJOR;
 	serial_driver.minor_start = 64;
 	serial_driver.num = NR_PORTS;
@@ -2472,7 +2484,11 @@ __initfunc(int su_serial_init(void))
 	 * major number and the subtype code.
 	 */
 	callout_driver = serial_driver;
+#ifdef CONFIG_DEVFS_FS
+	callout_driver.name = "cua/%d";
+#else
 	callout_driver.name = "cua";
+#endif
 	callout_driver.major = TTYAUX_MAJOR;
 	callout_driver.subtype = SERIAL_TYPE_CALLOUT;
 	callout_driver.read_proc = 0;
@@ -2514,10 +2530,17 @@ __initfunc(int su_serial_init(void))
 		       uart_config[info->type].name);
 	}
 
+	for (i = 0, info = su_table; i < NR_PORTS; i++, info++)
+		if (info->type == PORT_UNKNOWN)
+			break;
+
+	su_num_ports = i;
+	serial_driver.num = callout_driver.num = i;
+
 	return 0;
 }
 
-__initfunc(int su_kbd_ms_init(void))
+int __init su_kbd_ms_init(void)
 {
 	int i;
 	struct su_struct *info;
@@ -2542,7 +2565,7 @@ __initfunc(int su_kbd_ms_init(void))
 		if (info->type == PORT_UNKNOWN)
 			continue;
 
-		printk(KERN_INFO "%s at %16lx (irq = %s) is a %s\n",
+		printk(KERN_INFO "%s at 0x%lx (irq = %s) is a %s\n",
 		       info->name, info->port, __irq_itoa(info->irq),
 		       uart_config[info->type].name);
 
@@ -2560,7 +2583,7 @@ __initfunc(int su_kbd_ms_init(void))
  * of device tree. 'su' may be found under obio, ebus, isa and pci.
  * We walk over the tree and find them wherever PROM hides them.
  */
-__initfunc(void su_probe_any(struct su_probe_scan *t, int sunode))
+void __init su_probe_any(struct su_probe_scan *t, int sunode)
 {
 	struct su_struct *info;
 	int len;
@@ -2581,8 +2604,20 @@ __initfunc(void su_probe_any(struct su_probe_scan *t, int sunode))
 				t->msx = t->devices;
 				info->port_type = SU_PORT_MS;
 			} else {
+#ifdef __sparc_v9__
+				/*
+				 * Do not attempt to use the truncated
+				 * keyboard/mouse ports as serial ports
+				 * on Ultras with PC keyboard attached.
+				 */
+				if (prom_getbool(sunode, "mouse"))
+					continue;
+				if (prom_getbool(sunode, "keyboard"))
+					continue;
+#endif
 				info->port_type = SU_PORT_PORT;
 			}
+			info->is_console = 0;
 			info->port_node = sunode;
 			++t->devices;
 		} else {
@@ -2591,7 +2626,7 @@ __initfunc(void su_probe_any(struct su_probe_scan *t, int sunode))
 	}
 }
 
-__initfunc(int su_probe (unsigned long *memory_start))
+int __init su_probe(void)
 {
 	int node;
 	int len;
@@ -2639,20 +2674,22 @@ __initfunc(int su_probe (unsigned long *memory_start))
 	 */
 	if (scan.msx != -1 && scan.kbx != -1) {
 		su_table[0].port_type = SU_PORT_MS;
+		su_table[0].is_console = 0;
 		su_table[0].port_node = scan.msnode;
 		su_table[1].port_type = SU_PORT_KBD;
+		su_table[1].is_console = 0;
 		su_table[1].port_node = scan.kbnode;
 
-        	sunserial_setinitfunc(memory_start, su_kbd_ms_init);
+        	sunserial_setinitfunc(su_kbd_ms_init);
         	rs_ops.rs_change_mouse_baud = su_change_mouse_baud;
-		sunkbd_setinitfunc(memory_start, sun_kbd_init);
+		sunkbd_setinitfunc(sun_kbd_init);
 		kbd_ops.compute_shiftstate = sun_compute_shiftstate;
 		kbd_ops.setledstate = sun_setledstate;
 		kbd_ops.getledstate = sun_getledstate;
 		kbd_ops.setkeycode = sun_setkeycode;
 		kbd_ops.getkeycode = sun_getkeycode;
 #ifdef CONFIG_PCI
-		sunkbd_install_keymaps(memory_start, sun_key_maps,
+		sunkbd_install_keymaps(sun_key_maps,
 		    sun_keymap_count, sun_func_buf, sun_func_table,
 		    sun_funcbufsize, sun_funcbufleft,
 		    sun_accent_table, sun_accent_table_size);
@@ -2672,9 +2709,9 @@ __initfunc(int su_probe (unsigned long *memory_start))
 	 * Console must be initiated after the generic initialization.
 	 * sunserial_setinitfunc inverts order, so call this before next one.
 	 */
-	sunserial_setinitfunc(memory_start, su_serial_console_init);
+	sunserial_setinitfunc(su_serial_console_init);
 #endif
-       	sunserial_setinitfunc(memory_start, su_serial_init);
+       	sunserial_setinitfunc(su_serial_init);
 	return 0;
 }
 
@@ -2793,7 +2830,7 @@ serial_console_device(struct console *c)
  *	- initialize the serial port
  *	Return non-zero if we didn't find a serial port.
  */
-__initfunc(static int serial_console_setup(struct console *co, char *options))
+static int __init serial_console_setup(struct console *co, char *options)
 {
 	struct su_struct *info;
 	unsigned cval;
@@ -2896,27 +2933,27 @@ __initfunc(static int serial_console_setup(struct console *co, char *options))
 	if (su_inb(info, UART_LSR) == 0xff)
 		return -1;
 
+	info->is_console = 1;
+
 	return 0;
 }
 
 static struct console sercons = {
-	"ttyS",
-	serial_console_write,
-	NULL,
-	serial_console_device,
-	serial_console_wait_key,
-	NULL,
-	serial_console_setup,
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	name:		"ttyS",
+	write:		serial_console_write,
+	device:		serial_console_device,
+	wait_key:	serial_console_wait_key,
+	setup:		serial_console_setup,
+	flags:		CON_PRINTBUFFER,
+	index:		-1,
 };
+
+int su_console_registered = 0;
 
 /*
  *	Register console.
  */
-__initfunc(int su_serial_console_init(void))
+int __init su_serial_console_init(void)
 {
 	extern int con_is_present(void);
 
@@ -2928,6 +2965,7 @@ __initfunc(int su_serial_console_init(void))
 		return 0;
 	sercons.index = 0;
 	register_console(&sercons);
+	su_console_registered = 1;
 	return 0;
 }
 

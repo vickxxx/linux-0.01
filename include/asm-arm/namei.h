@@ -1,18 +1,25 @@
 /* 
  * linux/include/asm-arm/namei.h
  *
+ * Routines to handle famous /usr/gnemul
+ * Derived from the Sparc version of this file
+ *
  * Included from linux/fs/namei.c
  */
 
 #ifndef __ASMARM_NAMEI_H
 #define __ASMARM_NAMEI_H
 
-/* This dummy routine maybe changed to something useful
- * for /usr/gnemul/ emulation stuff.
- * Look at asm-sparc/namei.h for details.
- */
+#define ARM_BSD_EMUL "usr/gnemul/bsd/"
 
-#define __prefix_lookup_dentry(name, lookup_flags) \
-        do {} while (0)
+static inline char *__emul_prefix(void)
+{
+	switch (current->personality) {
+	case PER_BSD:
+		return ARM_BSD_EMUL;
+	default:
+		return NULL;
+	}
+}
 
 #endif /* __ASMARM_NAMEI_H */

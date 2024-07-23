@@ -15,7 +15,6 @@
  */
 
 #include <linux/config.h>
-#if defined(CONFIG_ROSE) || defined(CONFIG_ROSE_MODULE)
 #define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/proc_fs.h>
@@ -52,12 +51,12 @@
  *	Only allow IP over ROSE frames through if the netrom device is up.
  */
 
-int rose_rx_ip(struct sk_buff *skb, struct device *dev)
+int rose_rx_ip(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
 
 #ifdef CONFIG_INET
-	if (!dev->start) {
+	if (!netif_running(dev)) {
 		stats->rx_errors++;
 		return 0;
 	}
@@ -80,7 +79,7 @@ int rose_rx_ip(struct sk_buff *skb, struct device *dev)
 	return 1;
 }
 
-static int rose_header(struct sk_buff *skb, struct device *dev, unsigned short type,
+static int rose_header(struct sk_buff *skb, struct net_device *dev, unsigned short type,
 	void *daddr, void *saddr, unsigned len)
 {
 	unsigned char *buff = skb_push(skb, ROSE_MIN_LEN + 2);
@@ -99,7 +98,7 @@ static int rose_header(struct sk_buff *skb, struct device *dev, unsigned short t
 
 static int rose_rebuild_header(struct sk_buff *skb)
 {
-	struct device *dev = skb->dev;
+	struct net_device *dev = skb->dev;
 	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
 	unsigned char *bp = (unsigned char *)skb->data;
 	struct sk_buff *skbn;
@@ -130,7 +129,7 @@ static int rose_rebuild_header(struct sk_buff *skb)
 	return 1;
 }
 
-static int rose_set_mac_address(struct device *dev, void *addr)
+static int rose_set_mac_address(struct net_device *dev, void *addr)
 {
 	struct sockaddr *sa = addr;
 
@@ -143,74 +142,43 @@ static int rose_set_mac_address(struct device *dev, void *addr)
 	return 0;
 }
 
-static int rose_open(struct device *dev)
+static int rose_open(struct net_device *dev)
 {
-	dev->tbusy = 0;
-	dev->start = 1;
-
 	MOD_INC_USE_COUNT;
-
+	netif_start_queue(dev);
 	rose_add_loopback_node((rose_address *)dev->dev_addr);
-
 	return 0;
 }
 
-static int rose_close(struct device *dev)
+static int rose_close(struct net_device *dev)
 {
-	dev->tbusy = 1;
-	dev->start = 0;
-
-	MOD_DEC_USE_COUNT;
-
+	netif_stop_queue(dev);
 	rose_del_loopback_node((rose_address *)dev->dev_addr);
-
+	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
-static int rose_xmit(struct sk_buff *skb, struct device *dev)
+static int rose_xmit(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_device_stats *stats = (struct net_device_stats *)dev->priv;
 
-	if (skb == NULL || dev == NULL)
-		return 0;
-
-	if (!dev->start) {
+	if (!netif_running(dev)) {
 		printk(KERN_ERR "ROSE: rose_xmit - called when iface is down\n");
 		return 1;
 	}
-
-	cli();
-
-	if (dev->tbusy != 0) {
-		sti();
-		stats->tx_errors++;
-		return 1;
-	}
-
-	dev->tbusy = 1;
-
-	sti();
-
-	kfree_skb(skb);
-
+	dev_kfree_skb(skb);
 	stats->tx_errors++;
-
-	dev->tbusy = 0;
-
-	mark_bh(NET_BH);
-
 	return 0;
 }
 
-static struct net_device_stats *rose_get_stats(struct device *dev)
+static struct net_device_stats *rose_get_stats(struct net_device *dev)
 {
 	return (struct net_device_stats *)dev->priv;
 }
 
-int rose_init(struct device *dev)
+int rose_init(struct net_device *dev)
 {
 	dev->mtu		= ROSE_MAX_PACKET_SIZE - 2;
-	dev->tbusy		= 0;
 	dev->hard_start_xmit	= rose_xmit;
 	dev->open		= rose_open;
 	dev->stop		= rose_close;
@@ -236,5 +204,3 @@ int rose_init(struct device *dev)
 
 	return 0;
 };
-
-#endif

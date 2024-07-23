@@ -12,14 +12,13 @@
  * Thomas Sailer   : ioctl code reworked (vmalloc/vfree removed)
  * Alan Cox	   : Swatted a double allocation of device bug. Made a few
  *		     more things module options.
+ * Bartlomiej Zolnierkiewicz : Added __init to pas_pcm_init()
  */
 
-#include <linux/config.h>
-
+#include <linux/init.h>
 #include "sound_config.h"
 
-#ifdef CONFIG_PAS
-#ifdef CONFIG_AUDIO
+#include "pas2.h"
 
 #ifndef DEB
 #define DEB(WHAT)
@@ -376,22 +375,19 @@ static int pas_audio_prepare_for_output(int dev, int bsize, int bcount)
 
 static struct audio_driver pas_audio_driver =
 {
-	pas_audio_open,
-	pas_audio_close,
-	pas_audio_output_block,
-	pas_audio_start_input,
-	pas_audio_ioctl,
-	pas_audio_prepare_for_input,
-	pas_audio_prepare_for_output,
-	pas_audio_reset,
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	pas_audio_trigger
+	owner:		THIS_MODULE,
+	open:		pas_audio_open,
+	close:		pas_audio_close,
+	output_block:	pas_audio_output_block,
+	start_input:	pas_audio_start_input,
+	ioctl:		pas_audio_ioctl,
+	prepare_for_input:	pas_audio_prepare_for_input,
+	prepare_for_output:	pas_audio_prepare_for_output,
+	halt_io:		pas_audio_reset,
+	trigger:	pas_audio_trigger
 };
 
-void pas_pcm_init(struct address_info *hw_config)
+void __init pas_pcm_init(struct address_info *hw_config)
 {
 	DEB(printk("pas2_pcm.c: long pas_pcm_init()\n"));
 
@@ -440,6 +436,3 @@ void pas_pcm_interrupt(unsigned char status, int cause)
 		}
 	}
 }
-
-#endif
-#endif

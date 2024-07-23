@@ -20,6 +20,7 @@
 #include <linux/major.h>
 #include <linux/mm.h>
 #include <linux/init.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -94,6 +95,7 @@ static void pty_close(struct tty_struct * tty, struct file * filp)
 			}
 		}
 #endif
+		tty_unregister_devfs (&tty->link->driver, MINOR (tty->device));
 		tty_vhangup(tty->link);
 	}
 }
@@ -136,7 +138,7 @@ static int pty_write(struct tty_struct * tty, int from_user,
 		       const unsigned char *buf, int count)
 {
 	struct tty_struct *to = tty->link;
-	int	c=0, n;
+	int	c=0, n, room;
 	char	*temp_buffer;
 
 	if (!to || tty->stopped)
@@ -147,7 +149,9 @@ static int pty_write(struct tty_struct * tty, int from_user,
 		temp_buffer = &tty->flip.char_buf[0];
 		while (count > 0) {
 			/* check space so we don't copy needlessly */ 
-			n = MIN(count, to->ldisc.receive_room(to));
+			n = to->ldisc.receive_room(to);
+			if (n > count)
+				n = count;
 			if (!n) break;
 
 			n  = MIN(n, PTY_BUF_SIZE);
@@ -159,7 +163,9 @@ static int pty_write(struct tty_struct * tty, int from_user,
 			}
 
 			/* check again in case the buffer filled up */
-			n = MIN(n, to->ldisc.receive_room(to));
+			room = to->ldisc.receive_room(to);
+			if (n > room)
+				n = room;
 			if (!n) break;
 			buf   += n; 
 			c     += n;
@@ -168,7 +174,9 @@ static int pty_write(struct tty_struct * tty, int from_user,
 		}
 		up(&tty->flip.pty_sem);
 	} else {
-		c = MIN(count, to->ldisc.receive_room(to));
+		c = to->ldisc.receive_room(to);
+		if (c > count)
+			c = count;
 		to->ldisc.receive_buf(to, buf, 0, c);
 	}
 	
@@ -323,6 +331,12 @@ static int pty_open(struct tty_struct *tty, struct file * filp)
 	clear_bit(TTY_OTHER_CLOSED, &tty->link->flags);
 	wake_up_interruptible(&pty->open_wait);
 	set_bit(TTY_THROTTLED, &tty->flags);
+	/*  Register a slave for the master  */
+	if (tty->driver.major == PTY_MASTER_MAJOR)
+		tty_register_devfs(&tty->link->driver,
+				   DEVFS_FL_AUTO_OWNER | DEVFS_FL_WAIT,
+				   tty->link->driver.minor_start +
+				   MINOR(tty->device)-tty->driver.minor_start);
 	retval = 0;
 out:
 	return retval;
@@ -334,7 +348,7 @@ static void pty_set_termios(struct tty_struct *tty, struct termios *old_termios)
         tty->termios->c_cflag |= (CS8 | CREAD);
 }
 
-__initfunc(int pty_init(void))
+int __init pty_init(void)
 {
 	int i;
 
@@ -346,7 +360,11 @@ __initfunc(int pty_init(void))
 	memset(&pty_driver, 0, sizeof(struct tty_driver));
 	pty_driver.magic = TTY_DRIVER_MAGIC;
 	pty_driver.driver_name = "pty_master";
+#ifdef CONFIG_DEVFS_FS
+	pty_driver.name = "pty/m%d";
+#else
 	pty_driver.name = "pty";
+#endif
 	pty_driver.major = PTY_MASTER_MAJOR;
 	pty_driver.minor_start = 0;
 	pty_driver.num = NR_PTYS;
@@ -377,12 +395,20 @@ __initfunc(int pty_init(void))
 	pty_slave_driver = pty_driver;
 	pty_slave_driver.driver_name = "pty_slave";
 	pty_slave_driver.proc_entry = 0;
+#ifdef CONFIG_DEVFS_FS
+	pty_slave_driver.name = "pty/s%d";
+#else
 	pty_slave_driver.name = "ttyp";
+#endif
 	pty_slave_driver.subtype = PTY_TYPE_SLAVE;
 	pty_slave_driver.major = PTY_SLAVE_MAJOR;
 	pty_slave_driver.minor_start = 0;
 	pty_slave_driver.init_termios = tty_std_termios;
 	pty_slave_driver.init_termios.c_cflag = B38400 | CS8 | CREAD;
+	/* Slave ptys are registered when their corresponding master pty
+	 * is opened, and unregistered when the pair is closed.
+	 */
+	pty_slave_driver.flags |= TTY_DRIVER_NO_DEVFS;
 	pty_slave_driver.table = ttyp_table;
 	pty_slave_driver.termios = ttyp_termios;
 	pty_slave_driver.termios_locked = ttyp_termios_locked;
@@ -403,6 +429,7 @@ __initfunc(int pty_init(void))
 
 	/* Unix98 devices */
 #ifdef CONFIG_UNIX98_PTYS
+	devfs_mk_dir (NULL, "pts", NULL);
 	printk("pty: %d Unix98 ptys configured\n", UNIX98_NR_MAJORS*NR_PTYS);
 	for ( i = 0 ; i < UNIX98_NR_MAJORS ; i++ ) {
 		int j;
@@ -415,6 +442,7 @@ __initfunc(int pty_init(void))
 		ptm_driver[i].name_base = i*NR_PTYS;
 		ptm_driver[i].num = NR_PTYS;
 		ptm_driver[i].other = &pts_driver[i];
+		ptm_driver[i].flags |= TTY_DRIVER_NO_DEVFS;
 		ptm_driver[i].table = ptm_table[i];
 		ptm_driver[i].termios = ptm_termios[i];
 		ptm_driver[i].termios_locked = ptm_termios_locked[i];
@@ -424,7 +452,11 @@ __initfunc(int pty_init(void))
 			init_waitqueue_head(&ptm_state[i][j].open_wait);
 		
 		pts_driver[i] = pty_slave_driver;
+#ifdef CONFIG_DEVFS_FS
+		pts_driver[i].name = "pts/%d";
+#else
 		pts_driver[i].name = "pts";
+#endif
 		pts_driver[i].proc_entry = 0;
 		pts_driver[i].major = UNIX98_PTY_SLAVE_MAJOR+i;
 		pts_driver[i].minor_start = 0;

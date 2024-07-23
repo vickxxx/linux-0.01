@@ -18,7 +18,7 @@ struct ax_disp {
 
 	/* Various fields. */
 	struct tty_struct  *tty;		/* ptr to TTY structure		*/
-	struct device      *dev;		/* easy for intr handling	*/
+	struct net_device      *dev;		/* easy for intr handling	*/
 	struct ax_disp     *mkiss;		/* mkiss txport if mkiss channel*/
 
 	/* These are pointers to the malloc()ed frame buffers. */
@@ -42,7 +42,8 @@ struct ax_disp {
 	int                 buffsize;		/* Max buffers sizes            */
 
 
-	unsigned char       flags;		/* Flag values/ mode etc	*/
+	unsigned long   flags;		/* Flag values/ mode etc	*/
+					/* long req'd: used by set_bit --RR */
 #define AXF_INUSE	0		/* Channel in use               */
 #define AXF_ESCAPE	1               /* ESC received                 */
 #define AXF_ERROR	2               /* Parity, etc. error           */

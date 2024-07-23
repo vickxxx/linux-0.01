@@ -3,7 +3,7 @@
  *
  *	Copyright (C) 1995 David A Rusling
  *	Copyright (C) 1996 Jay A Estabrook
- *	Copyright (C) 1998 Richard Henderson
+ *	Copyright (C) 1998, 1999, 2000 Richard Henderson
  *
  * Code supporting the SX164 (PCA56+PYXIS).
  */
@@ -23,84 +23,16 @@
 #include <asm/mmu_context.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
-#include <asm/core_pyxis.h>
+#include <asm/core_cia.h>
+#include <asm/hwrpb.h>
 
 #include "proto.h"
-#include "irq.h"
-#include "bios32.h"
-#include "machvec.h"
+#include "irq_impl.h"
+#include "pci_impl.h"
+#include "machvec_impl.h"
 
 
-static void
-sx164_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
-{
-	if (irq >= 16) {
-		/* Make CERTAIN none of the bogus ints get enabled */
-		*(vulp)PYXIS_INT_MASK =
-			~((long)mask >> 16) & ~0x000000000000003bUL;
-		mb();
-		/* ... and read it back to make sure it got written.  */
-		*(vulp)PYXIS_INT_MASK;
-	}
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);	/* ISA PIC2 */
-	else
-		outb(mask, 0x21);	/* ISA PIC1 */
-}
-
-static void
-sx164_srm_update_irq_hw(unsigned long irq, unsigned long mask, int unmask_p)
-{
-	if (irq >= 16) {
-		if (unmask_p)
-			cserve_ena(irq - 16);
-		else
-			cserve_dis(irq - 16);
-	}
-	else if (irq >= 8)
-		outb(mask >> 8, 0xA1);	/* ISA PIC2 */
-	else
-		outb(mask, 0x21);	/* ISA PIC1 */
-}
-
-static void 
-sx164_device_interrupt(unsigned long vector, struct pt_regs *regs)
-{
-	unsigned long pld, tmp;
-	unsigned int i;
-
-	/* Read the interrupt summary register of PYXIS */
-	pld = *(vulp)PYXIS_INT_REQ;
-
-	/*
-	 * For now, AND off any bits we are not interested in:
-	 *  HALT (2), timer (6), ISA Bridge (7)
-	 * then all the PCI slots/INTXs (8-23)
-	 */
-	/* Maybe HALT should only be used for SRM console boots? */
-	pld &= 0x0000000000ffffc0UL;
-
-	/*
-	 * Now for every possible bit set, work through them and call
-	 * the appropriate interrupt handler.
-	 */
-	while (pld) {
-		i = ffz(~pld);
-		pld &= pld - 1; /* clear least bit set */
-		if (i == 7) {
-			isa_device_interrupt(vector, regs);
-		} else if (i == 6) {
-			continue;
-		} else {
-			/* if not timer int */
-			handle_irq(16 + i, 16 + i, regs);
-		}
-		*(vulp)PYXIS_INT_REQ = 1UL << i; mb();
-		tmp = *(vulp)PYXIS_INT_REQ;
-	}
-}
-
-static void
+static void __init
 sx164_init_irq(void)
 {
 	outb(0, DMA1_RESET_REG);
@@ -108,20 +40,19 @@ sx164_init_irq(void)
 	outb(DMA_MODE_CASCADE, DMA2_MODE_REG);
 	outb(0, DMA2_MASK_REG);
 
-	if (alpha_using_srm) {
-		alpha_mv.update_irq_hw = sx164_srm_update_irq_hw;
+	if (alpha_using_srm)
 		alpha_mv.device_interrupt = srm_device_interrupt;
-	}
-	else {
-		/* Note invert on MASK bits. */
-		*(vulp)PYXIS_INT_MASK  = ~((long)alpha_irq_mask >> 16);
-		mb();
-		*(vulp)PYXIS_INT_MASK;
-	}
 
-	enable_irq(16 + 6);	/* enable timer */
-	enable_irq(16 + 7);	/* enable ISA PIC cascade */
-	enable_irq(2);		/* enable cascade */
+	init_i8259a_irqs();
+
+	/* Not interested in the bogus interrupts (0,3,4,5,40-47),
+	   NMI (1), or HALT (2).  */
+	if (alpha_using_srm)
+		init_srm_irqs(40, 0x3f0000);
+	else
+		init_pyxis_irqs(0xff00003f0000);
+
+	setup_irq(16+6, &timer_cascade_irqaction);
 }
 
 /*
@@ -160,13 +91,12 @@ sx164_init_irq(void)
  *   7  64 bit PCI option slot 1
  *   8  Cypress I/O
  *   9  32 bit PCI option slot 3
- * 
  */
 
 static int __init
-sx164_map_irq(struct pci_dev *dev, int slot, int pin)
+sx164_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
-	static char irq_tab[5][5] __initlocaldata = {
+	static char irq_tab[5][5] __initdata = {
 		/*INT    INTA   INTB   INTC   INTD */
 		{ 16+ 9, 16+ 9, 16+13, 16+17, 16+21}, /* IdSel 5 slot 2 J17 */
 		{ 16+11, 16+11, 16+15, 16+19, 16+23}, /* IdSel 6 slot 0 J19 */
@@ -178,14 +108,43 @@ sx164_map_irq(struct pci_dev *dev, int slot, int pin)
 	return COMMON_TABLE_LOOKUP;
 }
 
-void __init
-sx164_pci_fixup(void)
+static void __init
+sx164_init_pci(void)
 {
-	layout_all_busses(DEFAULT_IO_BASE, DEFAULT_MEM_BASE);
-	common_pci_fixup(sx164_map_irq, common_swizzle);
+	cia_init_pci();
 	SMC669_Init(0);
 }
 
+static void __init
+sx164_init_arch(void)
+{
+	/*
+	 * OSF palcode v1.23 forgets to enable PCA56 Motion Video
+	 * Instructions. Let's enable it.
+	 * We have to check palcode revision because CSERVE interface
+	 * is subject to change without notice. For example, it
+	 * has been changed completely since v1.16 (found in MILO
+	 * distribution). -ink
+	 */
+	struct percpu_struct *cpu = (struct percpu_struct*)
+		((char*)hwrpb + hwrpb->processor_offset);
+
+	if (alpha_using_srm && (cpu->pal_revision & 0xffff) == 0x117) {
+		__asm__ __volatile__(
+		"lda	$16,8($31)\n"
+		"call_pal 9\n"		/* Allow PALRES insns in kernel mode */
+		".long  0x64000118\n\n"	/* hw_mfpr $0,icsr */
+		"ldah	$16,(1<<(19-16))($31)\n"
+		"or	$0,$16,$0\n"	/* set MVE bit */
+		".long  0x74000118\n"	/* hw_mtpr $0,icsr */
+		"lda	$16,9($31)\n"
+		"call_pal 9"		/* Disable PALRES insns */
+		: : : "$0", "$16");
+		printk("PCA56 MVI set enabled\n");
+	}
+
+	pyxis_init_arch();
+}
 
 /*
  * The System Vector
@@ -196,20 +155,21 @@ struct alpha_machine_vector sx164_mv __initmv = {
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_PYXIS_IO,
-	DO_PYXIS_BUS,
-	machine_check:		pyxis_machine_check,
+	DO_CIA_BUS,
+	machine_check:		cia_machine_check,
 	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
+	min_io_address:		DEFAULT_IO_BASE,
+	min_mem_address:	DEFAULT_MEM_BASE,
 
-	nr_irqs:		40,
-	irq_probe_mask:		_PROBE_MASK(40),
-	update_irq_hw:		sx164_update_irq_hw,
-	ack_irq:		generic_ack_irq,
-	device_interrupt:	sx164_device_interrupt,
+	nr_irqs:		48,
+	device_interrupt:	pyxis_device_interrupt,
 
-	init_arch:		pyxis_init_arch,
+	init_arch:		sx164_init_arch,
 	init_irq:		sx164_init_irq,
-	init_pit:		generic_init_pit,
-	pci_fixup:		sx164_pci_fixup,
-	kill_arch:		generic_kill_arch,
+	init_rtc:		common_init_rtc,
+	init_pci:		sx164_init_pci,
+	kill_arch:		NULL,
+	pci_map_irq:		sx164_map_irq,
+	pci_swizzle:		common_swizzle,
 };
 ALIAS_MV(sx164)

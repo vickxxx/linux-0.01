@@ -1,3 +1,4 @@
+#ifdef __KERNEL__
 #ifndef _PPC_UACCESS_H
 #define _PPC_UACCESS_H
 
@@ -21,8 +22,8 @@
 #define USER_DS		((mm_segment_t) { 1 })
 
 #define get_ds()	(KERNEL_DS)
-#define get_fs()	(current->tss.fs)
-#define set_fs(val)	(current->tss.fs = (val))
+#define get_fs()	(current->thread.fs)
+#define set_fs(val)	(current->thread.fs = (val))
 
 #define segment_eq(a,b)	((a).seg == (b).seg)
 
@@ -57,7 +58,7 @@ struct exception_table_entry
 
 /* Returns 0 if exception not found and fixup otherwise.  */
 extern unsigned long search_exception_table(unsigned long);
-
+extern void sort_exception_table(void);
 
 /*
  * These are the main single-value transfer routines.  They automatically
@@ -86,25 +87,6 @@ extern unsigned long search_exception_table(unsigned long);
   __get_user_nocheck((x),(ptr),sizeof(*(ptr)))
 #define __put_user(x,ptr) \
   __put_user_nocheck((__typeof__(*(ptr)))(x),(ptr),sizeof(*(ptr)))
-
-/*
- * The "xxx_ret" versions return constant specified in third argument, if
- * something bad happens. These macros can be optimized for the
- * case of just returning from the function xxx_ret is used.
- */
-
-#define put_user_ret(x,ptr,ret) ({ \
-if (put_user(x,ptr)) return ret; })
-
-#define get_user_ret(x,ptr,ret) ({ \
-if (get_user(x,ptr)) return ret; })
-
-#define __put_user_ret(x,ptr,ret) ({ \
-if (__put_user(x,ptr)) return ret; })
-
-#define __get_user_ret(x,ptr,ret) ({ \
-if (__get_user(x,ptr)) return ret; })
-
 
 extern long __put_user_bad(void);
 
@@ -150,10 +132,11 @@ struct __large_struct { unsigned long buf[100]; };
 		".section .fixup,\"ax\"\n"			\
 		"3:	li %0,%3\n"				\
 		"	b 2b\n"					\
+		".previous\n"					\
 		".section __ex_table,\"a\"\n"			\
 		"	.align 2\n"				\
 		"	.long 1b,3b\n"				\
-		".text"						\
+		".previous"					\
 		: "=r"(err)					\
 		: "r"(x), "b"(addr), "i"(-EFAULT), "0"(err))
 
@@ -197,10 +180,11 @@ do {								\
 		"3:	li %0,%3\n"			\
 		"	li %1,0\n"			\
 		"	b 2b\n"				\
+		".previous\n"				\
 		".section __ex_table,\"a\"\n"		\
 		"	.align 2\n"			\
 		"	.long 1b,3b\n"			\
-		".text"					\
+		".previous"				\
 		: "=r"(err), "=r"(x)			\
 		: "b"(addr), "i"(-EFAULT), "0"(err))
 
@@ -211,22 +195,30 @@ extern int __copy_tofrom_user(void *to, const void *from, unsigned long size);
 extern inline unsigned long
 copy_from_user(void *to, const void *from, unsigned long n)
 {
+	unsigned long over;
+
 	if (access_ok(VERIFY_READ, from, n))
 		return __copy_tofrom_user(to, from, n);
+	if ((unsigned long)from < TASK_SIZE) {
+		over = (unsigned long)from + n - TASK_SIZE;
+		return __copy_tofrom_user(to, from, n - over) + over;
+	}
 	return n;
 }
 
 extern inline unsigned long
 copy_to_user(void *to, const void *from, unsigned long n)
 {
+	unsigned long over;
+
 	if (access_ok(VERIFY_WRITE, to, n))
 		return __copy_tofrom_user(to, from, n);
+	if ((unsigned long)to < TASK_SIZE) {
+		over = (unsigned long)to + n - TASK_SIZE;
+		return __copy_tofrom_user(to, from, n - over) + over;
+	}
 	return n;
 }
-
-#define copy_to_user_ret(to,from,n,retval) ({ if (copy_to_user(to,from,n)) return retval; })
-
-#define copy_from_user_ret(to,from,n,retval) ({ if (copy_from_user(to,from,n)) return retval; })
 
 #define __copy_from_user(to, from, size) \
 	__copy_tofrom_user((to), (from), (size))
@@ -259,8 +251,28 @@ strncpy_from_user(char *dst, const char *src, long count)
  * Return 0 for error
  */
 
-extern long strlen_user(const char *);
+extern int __strnlen_user(const char *str, long len, unsigned long top);
+
+/*
+ * Returns the length of the string at str (including the null byte),
+ * or 0 if we hit a page we can't access,
+ * or something > len if we didn't find a null byte.
+ *
+ * The `top' parameter to __strnlen_user is to make sure that
+ * we can never overflow from the user area into kernel space.
+ */
+extern __inline__ int strnlen_user(const char *str, long len)
+{
+	unsigned long top = __kernel_ok? ~0UL: TASK_SIZE - 1;
+
+	if ((unsigned long)str > top)
+		return 0;
+	return __strnlen_user(str, len, top);
+}
+
+#define strlen_user(str)	strnlen_user((str), 0x7ffffffe)
 
 #endif  /* __ASSEMBLY__ */
 
 #endif	/* _PPC_UACCESS_H */
+#endif /* __KERNEL__ */

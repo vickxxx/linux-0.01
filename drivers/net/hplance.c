@@ -54,10 +54,10 @@ struct hplance_private {
  * plus board-specific init, open and close actions. 
  * Oh, and we need to tell the generic code how to read and write LANCE registers...
  */
-int hplance_probe(struct device *dev);
-static int hplance_init(struct device *dev, int scode);
-static int hplance_open(struct device *dev);
-static int hplance_close(struct device *dev);
+int hplance_probe(struct net_device *dev);
+static int hplance_init(struct net_device *dev, int scode);
+static int hplance_open(struct net_device *dev);
+static int hplance_close(struct net_device *dev);
 static void hplance_writerap(struct hplance_private *lp, unsigned short value);
 static void hplance_writerdp(struct hplance_private *lp, unsigned short value);
 static unsigned short hplance_readrdp(struct hplance_private *lp);
@@ -67,7 +67,7 @@ static struct hplance_private *root_hplance_dev = NULL;
 #endif
 
 /* Find all the HP Lance boards and initialise them... */
-__initfunc(int hplance_probe(struct device *dev))
+int __init hplance_probe(struct net_device *dev)
 {
         int cards = 0, called = 0;
 
@@ -93,12 +93,12 @@ __initfunc(int hplance_probe(struct device *dev))
         }
         /* OK, return success, or ENODEV if we didn't find any cards */
         if (!cards)
-                return ENODEV;
+                return -ENODEV;
         return 0;
 }
 
 /* Initialise a single lance board at the given select code */
-__initfunc (static int hplance_init(struct device *dev, int scode))
+static int __init hplance_init(struct net_device *dev, int scode)
 {
         /* const char *name = dio_scodetoname(scode); */
         static const char name[] = "HP LANCE";
@@ -106,15 +106,18 @@ __initfunc (static int hplance_init(struct device *dev, int scode))
         struct hplance_private *lp;
         int i;
         
-        if (dev == NULL)
-                dev = init_etherdev(0, sizeof(struct hplance_private));
-        else
-        {
-                dev->priv = kmalloc(sizeof(struct hplance_private), GFP_KERNEL);
-                if (dev->priv == NULL)
-                        return -ENOMEM;
-                memset(dev->priv, 0, sizeof(struct hplance_private));
-        }
+#ifdef MODULE
+	dev = init_etherdev(0, sizeof(struct hplance_private));
+	if (!dev)
+		return -ENOMEM;
+#else
+	dev->priv = kmalloc(sizeof(struct hplance_private), GFP_KERNEL);
+	if (dev->priv == NULL)
+		return -ENOMEM;
+	memset(dev->priv, 0, sizeof(struct hplance_private));
+#endif
+	SET_MODULE_OWNER(dev);
+
         printk("%s: HP LANCE; select code %d, addr", dev->name, scode);
 
         /* reset the board */
@@ -198,7 +201,7 @@ static unsigned short hplance_readrdp(struct hplance_private *lp)
         return val;
 }
 
-static int hplance_open(struct device *dev)
+static int hplance_open(struct net_device *dev)
 {
         int status;
         struct hplance_private *lp = (struct hplance_private *)dev->priv;
@@ -210,17 +213,15 @@ static int hplance_open(struct device *dev)
         /* enable interrupts at board level. */
         writeb(LE_IE, &(hpregs->status));
 
-        MOD_INC_USE_COUNT;
         return 0;
 }
 
-static int hplance_close(struct device *dev)
+static int hplance_close(struct net_device *dev)
 {
         struct hplance_private *lp = (struct hplance_private *)dev->priv;
         struct hplance_reg *hpregs = (struct hplance_reg *)lp->base;
         writeb(0,&(hpregs->status));              /* disable interrupts at boardlevel */
         lance_close(dev);
-        MOD_DEC_USE_COUNT;
         return 0;
 }
 

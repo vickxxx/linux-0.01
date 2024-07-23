@@ -1,3 +1,9 @@
+/*
+ * 1999 Copyright (C) Pavel Machek, pavel@ucw.cz. This code is GPL.
+ * 1999/11/04 Copyright (C) 1999 VMware, Inc. (Regis "HPReg" Duchesne)
+ *            Made nbd_end_request() use the io_request_lock
+ */
+
 #ifndef LINUX_NBD_H
 #define LINUX_NBD_H
 
@@ -9,6 +15,7 @@
 #define NBD_CLEAR_QUE	_IO( 0xab, 5 )
 #define NBD_PRINT_DEBUG	_IO( 0xab, 6 )
 #define NBD_SET_SIZE_BLOCKS	_IO( 0xab, 7 )
+#define NBD_DISCONNECT  _IO( 0xab, 8 )
 
 #ifdef MAJOR_NR
 
@@ -24,15 +31,35 @@ extern int requests_in;
 extern int requests_out;
 #endif
 
-static void 
+static int 
 nbd_end_request(struct request *req)
 {
+	unsigned long flags;
+	int ret = 0;
+
 #ifdef PARANOIA
 	requests_out++;
 #endif
+	/*
+	 * This is a very dirty hack that we have to do to handle
+	 * merged requests because end_request stuff is a bit
+	 * broken. The fact we have to do this only if there
+	 * aren't errors looks even more silly.
+	 */
+	if (!req->errors) {
+		req->sector += req->current_nr_sectors;
+		req->nr_sectors -= req->current_nr_sectors;
+	}
+
+	spin_lock_irqsave(&io_request_lock, flags);
 	if (end_that_request_first( req, !req->errors, "nbd" ))
-		return;
+		goto out;
+	ret = 1;
 	end_that_request_last( req );
+
+out:
+	spin_unlock_irqrestore(&io_request_lock, flags);
+	return ret;
 }
 
 #define MAX_NBD 128
@@ -43,12 +70,10 @@ struct nbd_device {
 	int harderror;		/* Code of hard error			*/
 #define NBD_READ_ONLY 0x0001
 #define NBD_WRITE_NOCHK 0x0002
-#define NBD_INITIALISED 0x0004
 	struct socket * sock;
 	struct file * file; 		/* If == NULL, device is not ready, yet	*/
 	int magic;			/* FIXME: not if debugging is off	*/
-	struct request *head;	/* Requests are added here...			*/
-	struct request *tail;
+	struct list_head queue_head;	/* Requests are added here...			*/
 	struct semaphore queue_lock;
 };
 #endif

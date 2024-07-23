@@ -5,8 +5,8 @@
 #ifndef _SPARC_IO_UNIT_H
 #define _SPARC_IO_UNIT_H
 
+#include <linux/spinlock.h>
 #include <asm/page.h>
-#include <asm/spinlock.h>
 #include <asm/pgtable.h>
 
 /* The io-unit handles all virtual to physical address translations
@@ -55,8 +55,8 @@ struct iounit_struct {
 #define IOUNIT_BMAPM_START	IOUNIT_BMAP2_END
 #define IOUNIT_BMAPM_END	((IOUNIT_DMA_SIZE - IOUNIT_DVMA_SIZE) >> PAGE_SHIFT)
 
-extern __u32 iounit_map_dma_init(struct linux_sbus *, int);
+extern __u32 iounit_map_dma_init(struct sbus_bus *, int);
 #define iounit_map_dma_finish(sbus, addr, len) mmu_release_scsi_one(addr, len, sbus)
-extern __u32 iounit_map_dma_page(__u32, void *, struct linux_sbus *);
+extern __u32 iounit_map_dma_page(__u32, void *, struct sbus_bus *);
 
 #endif /* !(_SPARC_IO_UNIT_H) */

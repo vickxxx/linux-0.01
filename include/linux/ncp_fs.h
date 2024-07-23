@@ -12,18 +12,8 @@
 #include <linux/in.h>
 #include <linux/types.h>
 
-#include <linux/ncp_mount.h>
-
-/* NLS charsets by ioctl */
-#define NCP_IOCSNAME_LEN 20
-struct ncp_nls_ioctl
-{
-	unsigned char codepage[NCP_IOCSNAME_LEN+1];
-	unsigned char iocharset[NCP_IOCSNAME_LEN+1];
-};
-                
-#include <linux/ncp_fs_sb.h>
-#include <linux/ncp_fs_i.h>
+#include <linux/ipx.h>
+#include <linux/ncp_no.h>
 
 /*
  * ioctl commands
@@ -45,6 +35,20 @@ struct ncp_fs_info {
 
 	int volume_number;
 	__u32 directory_id;
+};
+
+struct ncp_fs_info_v2 {
+	int version;
+	unsigned long mounted_uid;
+	unsigned int connection;
+	unsigned int buffer_size;
+
+	unsigned int volume_number;
+	__u32 directory_id;
+
+	__u32 dummy1;
+	__u32 dummy2;
+	__u32 dummy3;
 };
 
 struct ncp_sign_init
@@ -91,20 +95,24 @@ struct ncp_privatedata_ioctl
 	void*		data;		/* ~1000 for NDS */
 };
 
-#define	NCP_IOC_NCPREQUEST		_IOR('n', 1, struct ncp_ioctl_request)
-#define	NCP_IOC_GETMOUNTUID		_IOW('n', 2, __kernel_uid_t)
+/* NLS charsets by ioctl */
+#define NCP_IOCSNAME_LEN 20
+struct ncp_nls_ioctl
+{
+	unsigned char codepage[NCP_IOCSNAME_LEN+1];
+	unsigned char iocharset[NCP_IOCSNAME_LEN+1];
+};
 
-#if 1
-#ifdef __KERNEL__
-/* remove after ncpfs-2.0.13 gets released or at the beginning of kernel-2.1. codefreeze */
-#define	NCP_IOC_GETMOUNTUID_INT		_IOW('n', 2, unsigned int)
-#endif
-#endif
+#define	NCP_IOC_NCPREQUEST		_IOR('n', 1, struct ncp_ioctl_request)
+#define	NCP_IOC_GETMOUNTUID		_IOW('n', 2, __kernel_old_uid_t)
+#define NCP_IOC_GETMOUNTUID2		_IOW('n', 2, unsigned long)
 
 #define NCP_IOC_CONN_LOGGED_IN          _IO('n', 3)
 
-#define NCP_GET_FS_INFO_VERSION (1)
+#define NCP_GET_FS_INFO_VERSION    (1)
 #define NCP_IOC_GET_FS_INFO             _IOWR('n', 4, struct ncp_fs_info)
+#define NCP_GET_FS_INFO_VERSION_V2 (2)
+#define NCP_IOC_GET_FS_INFO_V2		_IOWR('n', 4, struct ncp_fs_info_v2)
 
 #define NCP_IOC_SIGN_INIT		_IOR('n', 5, struct ncp_sign_init)
 #define NCP_IOC_SIGN_WANTED		_IOR('n', 6, int)
@@ -123,6 +131,9 @@ struct ncp_privatedata_ioctl
 #define NCP_IOC_GETCHARSETS		_IOWR('n', 11, struct ncp_nls_ioctl)
 #define NCP_IOC_SETCHARSETS		_IOR('n', 11, struct ncp_nls_ioctl)
 
+#define NCP_IOC_GETDENTRYTTL		_IOW('n', 12, __u32)
+#define NCP_IOC_SETDENTRYTTL		_IOR('n', 12, __u32)
+
 /*
  * The packet size to allocate. One page should be enough.
  */
@@ -135,69 +146,53 @@ struct ncp_privatedata_ioctl
 
 #include <linux/config.h>
 
+/* undef because public define in umsdos_fs.h (ncp_fs.h isn't public) */
+#undef PRINTK
+/* define because it is easy to change PRINTK to {*}PRINTK */
+#define PRINTK(format, args...) printk(KERN_DEBUG format , ## args)
+
 #undef NCPFS_PARANOIA
+#ifdef NCPFS_PARANOIA
+#define PPRINTK(format, args...) PRINTK(format , ## args)
+#else
+#define PPRINTK(format, args...)
+#endif
+
 #ifndef DEBUG_NCP
 #define DEBUG_NCP 0
 #endif
 #if DEBUG_NCP > 0
-#define DPRINTK(format, args...) printk(format , ## args)
+#define DPRINTK(format, args...) PRINTK(format , ## args)
 #else
 #define DPRINTK(format, args...)
 #endif
-
 #if DEBUG_NCP > 1
-#define DDPRINTK(format, args...) printk(format , ## args)
+#define DDPRINTK(format, args...) PRINTK(format , ## args)
 #else
 #define DDPRINTK(format, args...)
 #endif
 
-/* The readdir cache size controls how many directory entries are
- * cached.
- */
-#define NCP_READDIR_CACHE_SIZE        64
-
 #define NCP_MAX_RPC_TIMEOUT (6*HZ)
 
-/*
- * This is the ncpfs part of the inode structure. This must contain
- * all the information we need to work with an inode after creation.
- * (Move to ncp_fs_i.h once it stabilizes, and add a union in fs.h)
- */
-struct ncpfs_i {
-	__u32	dirEntNum __attribute__((packed));
-	__u32	DosDirNum __attribute__((packed));
-	__u32	volNumber __attribute__((packed));
-#ifdef CONFIG_NCPFS_SMALLDOS
-	__u32	origNS;
-#endif
-#ifdef CONFIG_NCPFS_STRONG
-	__u32	nwattr;
-#endif
-	int	opened;
-	int	access;
-	__u32	server_file_handle __attribute__((packed));
-	__u8	open_create_action __attribute__((packed));
-	__u8	file_handle[6] __attribute__((packed));
-};
 
-/*
- * This is an extension of the nw_file_info structure with
- * the additional information we need to create an inode.
- */
-struct ncpfs_inode_info {
-	ino_t	ino;		/* dummy inode number */
-	struct nw_file_info nw_info;
+struct ncp_entry_info {
+	struct nw_info_struct	i;
+	ino_t			ino;
+	int			opened;
+	int			access;
+	__u32			server_file_handle __attribute__((packed));
+	__u8			open_create_action __attribute__((packed));
+	__u8			file_handle[6] __attribute__((packed));
 };
 
 /* Guess, what 0x564c is :-) */
 #define NCP_SUPER_MAGIC  0x564c
 
 
-#define NCP_SBP(sb)          ((struct ncp_server *)((sb)->u.generic_sbp))
+#define NCP_SBP(sb)		(&((sb)->u.ncpfs_sb))
 
-#define NCP_SERVER(inode)    NCP_SBP((inode)->i_sb)
-/* We don't have an ncpfs union yet, so use smbfs ... */
-#define NCP_FINFO(inode)     ((struct ncpfs_i *)&((inode)->u.smbfs_i))
+#define NCP_SERVER(inode)	NCP_SBP((inode)->i_sb)
+#define NCP_FINFO(inode)	(&((inode)->u.ncpfs_i))
 
 #ifdef DEBUG_NCP_MALLOC
 
@@ -217,30 +212,27 @@ static inline void *
 static inline void ncp_kfree_s(void *obj, int size)
 {
 	ncp_current_malloced -= 1;
-	kfree_s(obj, size);
+	kfree(obj);
 }
 
 #else				/* DEBUG_NCP_MALLOC */
 
 #define ncp_kmalloc(s,p) kmalloc(s,p)
-#define ncp_kfree_s(o,s) kfree_s(o,s)
+#define ncp_kfree_s(o,s) kfree(o)
 
 #endif				/* DEBUG_NCP_MALLOC */
 
 /* linux/fs/ncpfs/inode.c */
-int ncp_notify_change(struct dentry *, struct iattr *attr);
+int ncp_notify_change(struct dentry *, struct iattr *);
 struct super_block *ncp_read_super(struct super_block *, void *, int);
-struct inode *ncp_iget(struct super_block *, struct ncpfs_inode_info *);
-void ncp_update_inode(struct inode *, struct nw_file_info *);
-void ncp_update_inode2(struct inode *, struct nw_file_info *);
-extern int init_ncp_fs(void);
+struct inode *ncp_iget(struct super_block *, struct ncp_entry_info *);
+void ncp_update_inode(struct inode *, struct ncp_entry_info *);
+void ncp_update_inode2(struct inode *, struct ncp_entry_info *);
 
 /* linux/fs/ncpfs/dir.c */
 extern struct inode_operations ncp_dir_inode_operations;
-int ncp_conn_logged_in(struct ncp_server *);
-void ncp_init_dir_cache(void);
-void ncp_invalid_dir_cache(struct inode *);
-void ncp_free_dir_cache(void);
+extern struct file_operations ncp_dir_operations;
+int ncp_conn_logged_in(struct super_block *);
 int ncp_date_dos2unix(__u16 time, __u16 date);
 void ncp_date_unix2dos(int unix_date, __u16 * time, __u16 * date);
 
@@ -260,6 +252,7 @@ void ncp_unlock_server(struct ncp_server *server);
 
 /* linux/fs/ncpfs/file.c */
 extern struct inode_operations ncp_file_inode_operations;
+extern struct file_operations ncp_file_operations;
 int ncp_make_open(struct inode *, int);
 
 /* linux/fs/ncpfs/mmap.c */
@@ -268,54 +261,24 @@ int ncp_mmap(struct file *, struct vm_area_struct *);
 /* linux/fs/ncpfs/ncplib_kernel.c */
 int ncp_make_closed(struct inode *);
 
-static inline void str_upper(char *name)
-{
-	while (*name) {
-		if (*name >= 'a' && *name <= 'z') {
-			*name -= ('a' - 'A');
-		}
-		name++;
-	}
-}
+#define ncp_namespace(i)	(NCP_SERVER(i)->name_space[NCP_FINFO(i)->volNumber])
 
-static inline void str_lower(char *name)
+static inline int ncp_preserve_entry_case(struct inode *i, __u32 nscreator)
 {
-	while (*name) {
-		if (*name >= 'A' && *name <= 'Z') {
-			*name += ('a' - 'A');
-		}
-		name++;
-	}
-}
-
-static inline int ncp_namespace(struct inode *inode)
-{
-	struct ncp_server *server = NCP_SERVER(inode);
-	return server->name_space[NCP_FINFO(inode)->volNumber];
-}
-
-static inline int ncp_preserve_entry_case(struct inode *i, __u32 nscreator) {
-#if defined(CONFIG_NCPFS_NFS_NS) || defined(CONFIG_NCPFS_OS2_NS)
+#ifdef CONFIG_NCPFS_SMALLDOS
 	int ns = ncp_namespace(i);
-#endif
-#if defined(CONFIG_NCPFS_SMALLDOS) && defined(CONFIG_NCPFS_OS2_NS)
-	if ((ns == NW_NS_OS2) && (nscreator == NW_NS_DOS))
-		return 0;
-#endif
-	return
+
+	if ((ns == NW_NS_DOS)
 #ifdef CONFIG_NCPFS_OS2_NS
-	(ns == NW_NS_OS2) ||
-#endif	/* CONFIG_NCPFS_OS2_NS */
-#ifdef CONFIG_NCPFS_NFS_NS
-	(ns == NW_NS_NFS) ||
-#endif	/* CONFIG_NCPFS_NFS_NS */
-	0;
+		|| ((ns == NW_NS_OS2) && (nscreator == NW_NS_DOS))
+#endif /* CONFIG_NCPFS_OS2_NS */
+				)
+		return 0;
+#endif /* CONFIG_NCPFS_SMALLDOS */
+	return 1;
 }
 
-static inline int ncp_preserve_case(struct inode *i)
-{
-	return ncp_preserve_entry_case(i, NW_NS_OS2);
-}
+#define ncp_preserve_case(i)	(ncp_namespace(i) != NW_NS_DOS)
 
 static inline int ncp_case_sensitive(struct inode *i)
 {

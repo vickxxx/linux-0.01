@@ -56,20 +56,3 @@ unsigned int csum_partial_copy_from_user (const char *src, char *dst,
 		
 	return csum_partial(dst, len, sum);
 }
-
-/*
- * Copy to userspace and compute checksum.
- */
-unsigned int csum_partial_copy_to_user (const char *src, char *dst,
-                                        int len, unsigned int sum,
-                                        int *err_ptr)
-{
-	sum = csum_partial(src, len, sum);
-
-	if (copy_to_user(dst, src, len)) {
-		*err_ptr = -EFAULT;
-		return sum;
-	}
-
-	return sum;
-}

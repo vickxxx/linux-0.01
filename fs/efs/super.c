@@ -13,41 +13,26 @@
 #include <linux/efs_vh.h>
 #include <linux/efs_fs_sb.h>
 
-static struct file_system_type efs_fs_type = {
-	"efs",			/* filesystem name */
-	FS_REQUIRES_DEV,	/* fs_flags */
-	efs_read_super,		/* entry function pointer */
-	NULL 			/* next */
-};
+static DECLARE_FSTYPE_DEV(efs_fs_type, "efs", efs_read_super);
 
 static struct super_operations efs_superblock_operations = {
-	efs_read_inode,	/* read_inode */
-	NULL,		/* write_inode */
-	NULL,		/* put_inode */
-	NULL,		/* delete_inode */
-	NULL,		/* notify_change */
-	efs_put_super,	/* put_super */
-	NULL,		/* write_super */
-	efs_statfs,	/* statfs */
-	NULL		/* remount */
+	read_inode:	efs_read_inode,
+	statfs:		efs_statfs,
 };
 
-__initfunc(int init_efs_fs(void)) {
+static int __init init_efs_fs(void) {
+	printk("EFS: "EFS_VERSION" - http://aeschi.ch.eu.org/efs/\n");
 	return register_filesystem(&efs_fs_type);
 }
 
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
-int init_module(void) {
-	printk("EFS: "EFS_VERSION" - http://aeschi.ch.eu.org/efs/\n");
-	return init_efs_fs();
-}
-
-void cleanup_module(void) {
+static void __exit exit_efs_fs(void) {
 	unregister_filesystem(&efs_fs_type);
 }
-#endif
+
+EXPORT_NO_SYMBOLS;
+
+module_init(init_efs_fs)
+module_exit(exit_efs_fs)
 
 static efs_block_t efs_validate_vh(struct volume_header *vh) {
 	int		i;
@@ -151,9 +136,6 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 	struct efs_sb_info *sb;
 	struct buffer_head *bh;
 
-	MOD_INC_USE_COUNT;
-	lock_super(s);
-  
  	sb = SUPER_INFO(s);
 
 	set_blocksize(dev, EFS_BLOCKSIZE);
@@ -203,52 +185,37 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 		s->s_flags |= MS_RDONLY;
 	}
 	s->s_op   = &efs_superblock_operations;
-	s->s_dev  = dev;
 	s->s_root = d_alloc_root(iget(s, EFS_ROOTINODE));
-	unlock_super(s);
  
 	if (!(s->s_root)) {
 		printk(KERN_ERR "EFS: get root inode failed\n");
 		goto out_no_fs;
 	}
 
-	if (check_disk_change(s->s_dev)) {
-		printk(KERN_ERR "EFS: device changed\n");
-		goto out_no_fs;
-	}
-
 	return(s);
 
 out_no_fs_ul:
-	unlock_super(s);
 out_no_fs:
-	s->s_dev = 0;
-	MOD_DEC_USE_COUNT;
 	return(NULL);
 }
 
-void efs_put_super(struct super_block *s) {
-	MOD_DEC_USE_COUNT;
-}
-
-int efs_statfs(struct super_block *s, struct statfs *buf, int bufsiz) {
-	struct statfs ret;
+int efs_statfs(struct super_block *s, struct statfs *buf) {
 	struct efs_sb_info *sb = SUPER_INFO(s);
 
-	ret.f_type    = EFS_SUPER_MAGIC;	/* efs magic number */
-	ret.f_bsize   = EFS_BLOCKSIZE;		/* blocksize */
-	ret.f_blocks  = sb->total_groups *	/* total data blocks */
+	buf->f_type    = EFS_SUPER_MAGIC;	/* efs magic number */
+	buf->f_bsize   = EFS_BLOCKSIZE;		/* blocksize */
+	buf->f_blocks  = sb->total_groups *	/* total data blocks */
 			(sb->group_size - sb->inode_blocks);
-	ret.f_bfree   = sb->data_free;		/* free data blocks */
-	ret.f_bavail  = sb->data_free;		/* free blocks for non-root */
-	ret.f_files   = sb->total_groups *	/* total inodes */
+	buf->f_bfree   = sb->data_free;		/* free data blocks */
+	buf->f_bavail  = sb->data_free;		/* free blocks for non-root */
+	buf->f_files   = sb->total_groups *	/* total inodes */
 			sb->inode_blocks *
 			(EFS_BLOCKSIZE / sizeof(struct efs_dinode));
-	ret.f_ffree   = sb->inode_free;	/* free inodes */
-	ret.f_fsid.val[0] = (sb->fs_magic >> 16) & 0xffff; /* fs ID */
-	ret.f_fsid.val[1] =  sb->fs_magic        & 0xffff; /* fs ID */
-	ret.f_namelen = EFS_MAXNAMELEN;		/* max filename length */
+	buf->f_ffree   = sb->inode_free;	/* free inodes */
+	buf->f_fsid.val[0] = (sb->fs_magic >> 16) & 0xffff; /* fs ID */
+	buf->f_fsid.val[1] =  sb->fs_magic        & 0xffff; /* fs ID */
+	buf->f_namelen = EFS_MAXNAMELEN;	/* max filename length */
 
-	return copy_to_user(buf, &ret, bufsiz) ? -EFAULT : 0;
+	return 0;
 }
 
