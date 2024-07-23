@@ -40,6 +40,7 @@ struct consw {
 	int	(*con_switch)(struct vc_data *);
 	int	(*con_blank)(struct vc_data *, int);
 	int	(*con_font_op)(struct vc_data *, struct console_font_op *);
+	int	(*con_resize)(struct vc_data *, unsigned int, unsigned int);
 	int	(*con_set_palette)(struct vc_data *, unsigned char *);
 	int	(*con_scrolldelta)(struct vc_data *, int);
 	int	(*con_set_origin)(struct vc_data *);
@@ -95,14 +96,14 @@ struct console
 {
 	char	name[8];
 	void	(*write)(struct console *, const char *, unsigned);
-	int	(*read)(struct console *, const char *, unsigned);
-	kdev_t	(*device)(struct console *);
-	int	(*wait_key)(struct console *);
+	int	(*read)(struct console *, char *, unsigned);
+	struct tty_driver *(*device)(struct console *, int *);
 	void	(*unblank)(void);
 	int	(*setup)(struct console *, char *);
 	short	flags;
 	short	index;
 	int	cflag;
+	void	*data;
 	struct	 console *next;
 };
 

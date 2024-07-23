@@ -160,7 +160,6 @@ struct iso_directory_record {
 
 #define ISOFS_BUFFER_SIZE(INODE) ((INODE)->i_sb->s_blocksize)
 #define ISOFS_BUFFER_BITS(INODE) ((INODE)->i_sb->s_blocksize_bits)
-#define ISOFS_ZONE_BITS(INODE)   ((INODE)->i_sb->u.isofs_sb.s_log_zone_size)
 
 #define ISOFS_SUPER_MAGIC 0x9660
 
@@ -170,6 +169,18 @@ struct iso_directory_record {
 
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
+#include <linux/iso_fs_i.h>
+#include <linux/iso_fs_sb.h>
+
+static inline struct isofs_sb_info *ISOFS_SB(struct super_block *sb)
+{
+	return sb->s_fs_info;
+}
+
+static inline struct iso_inode_info *ISOFS_I(struct inode *inode)
+{
+	return container_of(inode, struct iso_inode_info, vfs_inode);
+}
 
 static inline int isonum_711(char *p)
 {
@@ -213,14 +224,12 @@ extern int parse_rock_ridge_inode(struct iso_directory_record *, struct inode *)
 extern int get_rock_ridge_filename(struct iso_directory_record *, char *, struct inode *);
 extern int isofs_name_translate(struct iso_directory_record *, char *, struct inode *);
 
-extern int find_rock_ridge_relocation(struct iso_directory_record *, struct inode *);
-
 int get_joliet_filename(struct iso_directory_record *, unsigned char *, struct inode *);
 int get_acorn_filename(struct iso_directory_record *, char *, struct inode *);
 
-extern struct dentry *isofs_lookup(struct inode *, struct dentry *);
-extern struct buffer_head *isofs_bread(struct inode *, unsigned int, unsigned int);
-extern int isofs_get_blocks(struct inode *, long, struct buffer_head **, unsigned long);
+extern struct dentry *isofs_lookup(struct inode *, struct dentry *, struct nameidata *);
+extern struct buffer_head *isofs_bread(struct inode *, sector_t);
+extern int isofs_get_blocks(struct inode *, sector_t, struct buffer_head **, unsigned long);
 
 extern struct inode_operations isofs_dir_inode_operations;
 extern struct file_operations isofs_dir_operations;
@@ -230,11 +239,11 @@ extern struct address_space_operations isofs_symlink_aops;
 #ifdef LEAK_CHECK
 #define free_s leak_check_free_s
 #define malloc leak_check_malloc
-#define bread leak_check_bread
+#define sb_bread leak_check_bread
 #define brelse leak_check_brelse
 extern void * leak_check_malloc(unsigned int size);
 extern void leak_check_free_s(void * obj, int size);
-extern struct buffer_head * leak_check_bread(int dev, int block, int size);
+extern struct buffer_head * leak_check_bread(struct super_block *sb, int block);
 extern void leak_check_brelse(struct buffer_head * bh);
 #endif /* LEAK_CHECK */
 

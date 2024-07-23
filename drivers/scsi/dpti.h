@@ -5,7 +5,8 @@
     copyright            : (C) 2001 by Adaptec
     email                : deanna_bonds@adaptec.com
 
-    See README.dpti for history, notes, license info, and credits
+    See Documentation/scsi/dpti.txt for history, notes, license info
+    and credits
  ***************************************************************************/
 
 /***************************************************************************
@@ -36,16 +37,16 @@
  * SCSI interface function Prototypes
  */
 
-static int adpt_proc_info(char *buffer, char **start, off_t offset,
-		  int length, int inode, int inout);
 static int adpt_detect(Scsi_Host_Template * sht);
 static int adpt_queue(Scsi_Cmnd * cmd, void (*cmdcomplete) (Scsi_Cmnd *));
 static int adpt_abort(Scsi_Cmnd * cmd);
 static int adpt_reset(Scsi_Cmnd* cmd);
 static int adpt_release(struct Scsi_Host *host);
+static int adpt_slave_configure(Scsi_Device *);
 
 static const char *adpt_info(struct Scsi_Host *pSHost);
-static int adpt_bios_param(Disk * disk, kdev_t dev, int geom[]);
+static int adpt_bios_param(struct scsi_device * sdev, struct block_device *dev,
+		sector_t, int geom[]);
 
 static int adpt_bus_reset(Scsi_Cmnd* cmd);
 static int adpt_device_reset(Scsi_Cmnd* cmd);
@@ -56,49 +57,6 @@ static int adpt_device_reset(Scsi_Cmnd* cmd);
  */
 
 #define DPT_DRIVER_NAME	"Adaptec I2O RAID"
-
-#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,00)
-#define DPT_I2O { \
-	proc_info: adpt_proc_info,					\
-	detect: adpt_detect,						\
-	release: adpt_release,						\
-	info: adpt_info,						\
-	queuecommand: adpt_queue,					\
-	eh_abort_handler: adpt_abort,					\
-	eh_device_reset_handler: adpt_device_reset,			\
-	eh_bus_reset_handler: adpt_bus_reset,				\
-	eh_host_reset_handler: adpt_reset,				\
-	bios_param: adpt_bios_param,					\
-	can_queue: MAX_TO_IOP_MESSAGES ,/* max simultaneous cmds      */\
-	this_id: 7,			/* scsi id of host adapter    */\
-	sg_tablesize: 0,		/* max scatter-gather cmds    */\
-	cmd_per_lun: 256,		/* cmds per lun (linked cmds) */\
-	use_clustering: ENABLE_CLUSTERING,				\
-	use_new_eh_code: 1						\
-}
-
-#else				/* KERNEL_VERSION > 2.2.16 */
-
-#define DPT_I2O { \
-	proc_info: adpt_proc_info,					\
-	detect: adpt_detect,						\
-	release: adpt_release,						\
-	info: adpt_info,						\
-	queuecommand: adpt_queue,					\
-	eh_abort_handler: adpt_abort,					\
-	eh_device_reset_handler: adpt_device_reset,			\
-	eh_bus_reset_handler: adpt_bus_reset,				\
-	eh_host_reset_handler: adpt_reset,				\
-	bios_param: adpt_bios_param,					\
-	can_queue: MAX_TO_IOP_MESSAGES,	/* max simultaneous cmds      */\
-	this_id: 7,			/* scsi id of host adapter    */\
-	sg_tablesize: 0,		/* max scatter-gather cmds    */\
-	cmd_per_lun: 256,		/* cmds per lun (linked cmds) */\
-	use_clustering: ENABLE_CLUSTERING,				\
-	use_new_eh_code: 1,						\
-	proc_name: "dpt_i2o"	/* this is the name of our proc node*/	\
-}
-#endif
 
 #ifndef HOSTS_C
 
@@ -347,7 +305,6 @@ static s32 adpt_rescan(adpt_hba* pHba);
 static s32 adpt_i2o_reparse_lct(adpt_hba* pHba);
 static s32 adpt_send_nop(adpt_hba*pHba,u32 m);
 static void adpt_i2o_delete_hba(adpt_hba* pHba);
-static void adpt_select_queue_depths(struct Scsi_Host *host, Scsi_Device * devicelist);
 static void adpt_inquiry(adpt_hba* pHba);
 static void adpt_fail_posted_scbs(adpt_hba* pHba);
 static struct adpt_device* adpt_find_device(adpt_hba* pHba, u32 chan, u32 id, u32 lun);

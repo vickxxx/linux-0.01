@@ -23,11 +23,11 @@
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 
 #include "scsi.h"
 #include "hosts.h"
 #include "NCR53C9x.h"
-#include "mac_esp.h"
 
 #include <asm/io.h>
 
@@ -40,6 +40,8 @@
 #include <asm/pgtable.h>
 
 #include <asm/macintosh.h>
+
+/* #define DEBUG_MAC_ESP */
 
 #define mac_turnon_irq(x)	mac_enable_irq(x)
 #define mac_turnoff_irq(x)	mac_disable_irq(x)
@@ -140,9 +142,10 @@ void fake_intr(int irq, void *dev_id, struct pt_regs *pregs)
 	mac_esp_intr(irq, dev_id, pregs);
 }
 
-void fake_drq(int irq, void *dev_id, struct pt_regs *pregs)
+irqreturn_t fake_drq(int irq, void *dev_id, struct pt_regs *pregs)
 {
 	printk("mac_esp: got drq\n");
+	return IRQ_HANDLED;
 }
 
 #define DRIVER_SETUP
@@ -360,14 +363,14 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 			} else {
 				/* q950, 900, 700 */
 				quick = 1;
-				writel(0x1d1, 0xf9800024);
+				out_be32(0xf9800024, 0x1d1);
 				esp->dregs = (void *) 0xf9800024;
 			}
 
 		} else { /* chipnum */
 
 			quick = 1;
-			writel(0x1d1, 0xf9800028);
+			out_be32(0xf9800028, 0x1d1);
 			esp->dregs = (void *) 0xf9800028;
 
 		} /* chipnum == 0 */
@@ -377,7 +380,7 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 
 		/* Set the command buffer */
 		esp->esp_command = (volatile unsigned char*) cmd_buffer;
-		esp->esp_command_dvma = (volatile unsigned char*) cmd_buffer;
+		esp->esp_command_dvma = (__u32) cmd_buffer;
 
 		/* various functions */
 		esp->dma_bytes_sent = &dma_bytes_sent;
@@ -417,9 +420,9 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 
 			esp->irq = IRQ_MAC_SCSI;
 
-			request_irq(IRQ_MAC_SCSI, esp_intr, 0, "Mac ESP SCSI", esp);
+			request_irq(IRQ_MAC_SCSI, esp_intr, 0, "Mac ESP SCSI", esp->ehost);
 #if 0	/* conflicts with IOP ADB */
-			request_irq(IRQ_MAC_SCSIDRQ, fake_drq, 0, "Mac ESP DRQ", esp);
+			request_irq(IRQ_MAC_SCSIDRQ, fake_drq, 0, "Mac ESP DRQ", esp->ehost);
 #endif
 
 			if (macintosh_config->scsi_type == MAC_SCSI_QUADRA) {
@@ -433,7 +436,7 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 
 			esp->irq = IRQ_MAC_SCSIDRQ;
 #if 0	/* conflicts with IOP ADB */
-			request_irq(IRQ_MAC_SCSIDRQ, esp_intr, 0, "Mac ESP SCSI 2", esp);
+			request_irq(IRQ_MAC_SCSIDRQ, esp_intr, 0, "Mac ESP SCSI 2", esp->ehost);
 #endif
 
 			esp->cfreq = 25000000;
@@ -459,6 +462,16 @@ int mac_esp_detect(Scsi_Host_Template * tpnt)
 	esp_initialized = chipspresent;
 
 	return chipspresent;
+}
+
+static int mac_esp_release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
 }
 
 /*
@@ -710,6 +723,23 @@ static void dma_setup_quick(struct NCR_ESP * esp, __u32 addr, int count, int wri
 #endif
 }
 
-static Scsi_Host_Template driver_template = SCSI_MAC_ESP;
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp",
+	.name			= "Mac 53C9x SCSI",
+	.detect			= mac_esp_detect,
+	.release		= mac_esp_release,
+	.info			= esp_info,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= DISABLE_CLUSTERING
+};
+
 
 #include "scsi_module.c"
+
+MODULE_LICENSE("GPL");

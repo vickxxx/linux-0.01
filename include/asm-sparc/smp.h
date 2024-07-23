@@ -48,7 +48,6 @@ extern unsigned long cpu_offset[NR_CPUS];
  *	Private routines/data
  */
  
-extern int smp_found_cpus;
 extern unsigned char boot_cpu_id;
 extern unsigned long cpu_present_map;
 #define cpu_online_map cpu_present_map
@@ -170,9 +169,6 @@ extern __inline__ int hard_smp_processor_id(void)
 #endif
 
 #define smp_processor_id() hard_smp_processor_id()
-/* XXX We really need to implement this now.  -DaveM */
-extern __inline__ void smp_send_reschedule(int cpu) { }
-extern __inline__ void smp_send_stop(void) { }
 
 #endif /* !(__ASSEMBLY__) */
 
@@ -189,8 +185,6 @@ extern __inline__ void smp_send_stop(void) { }
 #define MBOX_IDLECPU          0xFC
 #define MBOX_IDLECPU2         0xFD
 #define MBOX_STOPCPU2         0xFE
-
-#define PROC_CHANGE_PENALTY     15
 
 #endif /* !(CONFIG_SMP) */
 

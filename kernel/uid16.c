@@ -12,6 +12,7 @@
 #include <linux/prctl.h>
 #include <linux/init.h>
 #include <linux/highuid.h>
+#include <linux/security.h>
 
 #include <asm/uaccess.h>
 
@@ -106,7 +107,7 @@ asmlinkage long sys_setfsgid16(old_gid_t gid)
 	return sys_setfsgid((gid_t)gid);
 }
 
-asmlinkage long sys_getgroups16(int gidsetsize, old_gid_t *grouplist)
+asmlinkage long sys_getgroups16(int gidsetsize, old_gid_t __user *grouplist)
 {
 	old_gid_t groups[NGROUPS];
 	int i,j;
@@ -125,9 +126,10 @@ asmlinkage long sys_getgroups16(int gidsetsize, old_gid_t *grouplist)
 	return i;
 }
 
-asmlinkage long sys_setgroups16(int gidsetsize, old_gid_t *grouplist)
+asmlinkage long sys_setgroups16(int gidsetsize, old_gid_t __user *grouplist)
 {
 	old_gid_t groups[NGROUPS];
+	gid_t new_groups[NGROUPS];
 	int i;
 
 	if (!capable(CAP_SETGID))
@@ -137,7 +139,11 @@ asmlinkage long sys_setgroups16(int gidsetsize, old_gid_t *grouplist)
 	if (copy_from_user(groups, grouplist, gidsetsize * sizeof(old_gid_t)))
 		return -EFAULT;
 	for (i = 0 ; i < gidsetsize ; i++)
-		current->groups[i] = (gid_t)groups[i];
+		new_groups[i] = (gid_t)groups[i];
+	i = security_task_setgroups(gidsetsize, new_groups);
+	if (i)
+		return i;
+	memcpy(current->groups, new_groups, gidsetsize * sizeof(gid_t));
 	current->ngroups = gidsetsize;
 	return 0;
 }

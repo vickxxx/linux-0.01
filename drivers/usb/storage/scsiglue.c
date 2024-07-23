@@ -1,10 +1,10 @@
 /* Driver for USB Mass Storage compliant devices
  * SCSI layer glue code
  *
- * $Id: scsiglue.c,v 1.24 2001/11/11 03:33:58 mdharm Exp $
+ * $Id: scsiglue.c,v 1.26 2002/04/22 03:39:43 mdharm Exp $
  *
  * Current development and maintenance by:
- *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+ *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
  *
  * Developed with the assistance of:
  *   (c) 2000 David L. Brown, Jr. (usb-storage@davidb.org)
@@ -50,16 +50,8 @@
 #include "transport.h"
 
 #include <linux/slab.h>
+#include <linux/module.h>
 
-/*
- * kernel thread actions
- */
-
-#define US_ACT_COMMAND		1
-#define US_ACT_DEVICE_RESET	2
-#define US_ACT_BUS_RESET	3
-#define US_ACT_HOST_RESET	4
-#define US_ACT_EXIT		5
 
 /***********************************************************************
  * Host functions 
@@ -70,95 +62,36 @@ static const char* host_info(struct Scsi_Host *host)
 	return "SCSI emulation for USB Mass Storage devices";
 }
 
-/* detect a virtual adapter (always works) */
-static int detect(struct SHT *sht)
+static int slave_configure (struct scsi_device *sdev)
 {
-	struct us_data *us;
-	char local_name[32];
+	/* set device to use 10-byte commands where possible */
+	sdev->use_10_for_ms = 1;
+	sdev->use_10_for_rw = 1;
 
-	/* This is not nice at all, but how else are we to get the
-	 * data here? */
-	us = (struct us_data *)sht->proc_dir;
-
-	/* set up the name of our subdirectory under /proc/scsi/ */
-	sprintf(local_name, "usb-storage-%d", us->host_number);
-	sht->proc_name = kmalloc (strlen(local_name) + 1, GFP_KERNEL);
-	if (!sht->proc_name)
-		return 0;
-	strcpy(sht->proc_name, local_name);
-
-	/* we start with no /proc directory entry */
-	sht->proc_dir = NULL;
-
-	/* register the host */
-	us->host = scsi_register(sht, sizeof(us));
-	if (us->host) {
-		us->host->hostdata[0] = (unsigned long)us;
-		us->host_no = us->host->host_no;
-		return 1;
-	}
-
-	/* odd... didn't register properly.  Abort and free pointers */
-	kfree(sht->proc_name);
-	sht->proc_name = NULL;
+	/* this is to satisify the compiler, tho I don't think the 
+	 * return code is ever checked anywhere. */
 	return 0;
 }
 
-/* Release all resources used by the virtual host
- *
- * NOTE: There is no contention here, because we're already deregistered
- * the driver and we're doing each virtual host in turn, not in parallel
- */
-static int release(struct Scsi_Host *psh)
-{
-	struct us_data *us = (struct us_data *)psh->hostdata[0];
-
-	US_DEBUGP("release() called for host %s\n", us->htmplt.name);
-
-	/* Kill the control threads
-	 *
-	 * Enqueue the command, wake up the thread, and wait for 
-	 * notification that it's exited.
-	 */
-	US_DEBUGP("-- sending US_ACT_EXIT command to thread\n");
-	us->action = US_ACT_EXIT;
-	
-	up(&(us->sema));
-	wait_for_completion(&(us->notify));
-
-	/* remove the pointer to the data structure we were using */
-	(struct us_data*)psh->hostdata[0] = NULL;
-
-	/* we always have a successful release */
-	return 0;
-}
-
-/* run command */
-static int command( Scsi_Cmnd *srb )
-{
-	US_DEBUGP("Bad use of us_command\n");
-
-	return DID_BAD_TARGET << 16;
-}
-
-/* run command */
+/* queue a command */
+/* This is always called with scsi_lock(srb->host) held */
 static int queuecommand( Scsi_Cmnd *srb , void (*done)(Scsi_Cmnd *))
 {
-	struct us_data *us = (struct us_data *)srb->host->hostdata[0];
+	struct us_data *us = (struct us_data *)srb->device->host->hostdata[0];
 
-	US_DEBUGP("queuecommand() called\n");
+	US_DEBUGP("%s called\n", __FUNCTION__);
 	srb->host_scribble = (unsigned char *)us;
 
-	/* get exclusive access to the structures we want */
-	down(&(us->queue_exclusion));
-
 	/* enqueue the command */
-	us->queue_srb = srb;
-	srb->scsi_done = done;
-	us->action = US_ACT_COMMAND;
+	if (us->sm_state != US_STATE_IDLE || us->srb != NULL) {
+		printk(KERN_ERR USB_STORAGE "Error in %s: " 
+			"state = %d, us->srb = %p\n",
+			__FUNCTION__, us->sm_state, us->srb);
+		return SCSI_MLQUEUE_HOST_BUSY;
+	}
 
-	/* release the lock on the structure */
-	up(&(us->queue_exclusion));
+	srb->scsi_done = done;
+	us->srb = srb;
 
 	/* wake up the process task */
 	up(&(us->sema));
@@ -171,127 +104,122 @@ static int queuecommand( Scsi_Cmnd *srb , void (*done)(Scsi_Cmnd *))
  ***********************************************************************/
 
 /* Command abort */
+/* This is always called with scsi_lock(srb->host) held */
 static int command_abort( Scsi_Cmnd *srb )
 {
-	struct us_data *us = (struct us_data *)srb->host->hostdata[0];
+	struct Scsi_Host *host = srb->device->host;
+	struct us_data *us = (struct us_data *) host->hostdata[0];
 
-	US_DEBUGP("command_abort() called\n");
+	US_DEBUGP("%s called\n", __FUNCTION__);
 
-	/* if we're stuck waiting for an IRQ, simulate it */
-	if (atomic_read(us->ip_wanted)) {
-		US_DEBUGP("-- simulating missing IRQ\n");
-		up(&(us->ip_waitq));
+	/* Is this command still active? */
+	if (us->srb != srb) {
+		US_DEBUGP ("-- nothing to abort\n");
+		return FAILED;
 	}
 
-	/* if the device has been removed, this worked */
-	if (!us->pusb_dev) {
-		US_DEBUGP("-- device removed already\n");
-		return SUCCESS;
+	/* Normally the current state is RUNNING.  If the control thread
+	 * hasn't even started processing this command, the state will be
+	 * IDLE.  Anything else is a bug. */
+	if (us->sm_state != US_STATE_RUNNING
+				&& us->sm_state != US_STATE_IDLE) {
+		printk(KERN_ERR USB_STORAGE "Error in %s: "
+			"invalid state %d\n", __FUNCTION__, us->sm_state);
+		return FAILED;
 	}
 
-	/* if we have an urb pending, let's wake the control thread up */
-	if (us->current_urb->status == -EINPROGRESS) {
-		/* cancel the URB -- this will automatically wake the thread */
-		usb_unlink_urb(us->current_urb);
+	/* Set state to ABORTING, set the ABORTING bit, and release the lock */
+	us->sm_state = US_STATE_ABORTING;
+	set_bit(US_FLIDX_ABORTING, &us->flags);
+	scsi_unlock(host);
 
-		/* wait for us to be done */
-		wait_for_completion(&(us->notify));
-		return SUCCESS;
-	}
+	/* Stop an ongoing USB transfer */
+	usb_stor_stop_transport(us);
 
-	US_DEBUGP ("-- nothing to abort\n");
-	return FAILED;
+	/* Wait for the aborted command to finish */
+	wait_for_completion(&us->notify);
+
+	/* Reacquire the lock and allow USB transfers to resume */
+	scsi_lock(host);
+	clear_bit(US_FLIDX_ABORTING, &us->flags);
+	return SUCCESS;
 }
 
 /* This invokes the transport reset mechanism to reset the state of the
  * device */
+/* This is always called with scsi_lock(srb->host) held */
 static int device_reset( Scsi_Cmnd *srb )
 {
-	struct us_data *us = (struct us_data *)srb->host->hostdata[0];
-
-	US_DEBUGP("device_reset() called\n" );
-	return us->transport_reset(us);
-}
-
-/* This resets the device port, and simulates the device
- * disconnect/reconnect for all drivers which have claimed other
- * interfaces. */
-static int bus_reset( Scsi_Cmnd *srb )
-{
-	struct us_data *us = (struct us_data *)srb->host->hostdata[0];
-	int i;
+	struct us_data *us = (struct us_data *)srb->device->host->hostdata[0];
 	int result;
 
-	/* we use the usb_reset_device() function to handle this for us */
-	US_DEBUGP("bus_reset() called\n");
-
-	/* if the device has been removed, this worked */
-	if (!us->pusb_dev) {
-		US_DEBUGP("-- device removed already\n");
-		return SUCCESS;
-	}
-
-	/* release the IRQ, if we have one */
-	down(&(us->irq_urb_sem));
-	if (us->irq_urb) {
-		US_DEBUGP("-- releasing irq URB\n");
-		result = usb_unlink_urb(us->irq_urb);
-		US_DEBUGP("-- usb_unlink_urb() returned %d\n", result);
-	}
-	up(&(us->irq_urb_sem));
-
-	/* attempt to reset the port */
-	if (usb_reset_device(us->pusb_dev) < 0)
+	US_DEBUGP("%s called\n", __FUNCTION__);
+	if (us->sm_state != US_STATE_IDLE) {
+		printk(KERN_ERR USB_STORAGE "Error in %s: "
+			"invalid state %d\n", __FUNCTION__, us->sm_state);
 		return FAILED;
-
-	/* FIXME: This needs to lock out driver probing while it's working
-	 * or we can have race conditions */
-        for (i = 0; i < us->pusb_dev->actconfig->bNumInterfaces; i++) {
- 		struct usb_interface *intf =
-			&us->pusb_dev->actconfig->interface[i];
-		const struct usb_device_id *id;
-
-		/* if this is an unclaimed interface, skip it */
-		if (!intf->driver) {
-			continue;
-		}
-
-		US_DEBUGP("Examinging driver %s...", intf->driver->name);
-		/* skip interfaces which we've claimed */
-		if (intf->driver == &usb_storage_driver) {
-			US_DEBUGPX("skipping ourselves.\n");
-			continue;
-		}
-
-		/* simulate a disconnect and reconnect for all interfaces */
-		US_DEBUGPX("simulating disconnect/reconnect.\n");
-		down(&intf->driver->serialize);
-		intf->driver->disconnect(us->pusb_dev, intf->private_data);
-		id = usb_match_id(us->pusb_dev, intf, intf->driver->id_table);
-		intf->driver->probe(us->pusb_dev, i, id);
-		up(&intf->driver->serialize);
 	}
 
-	/* re-allocate the IRQ URB and submit it to restore connectivity
-	 * for CBI devices
-	 */
-	if (us->protocol == US_PR_CBI) {
-		down(&(us->irq_urb_sem));
-		us->irq_urb->dev = us->pusb_dev;
-		result = usb_submit_urb(us->irq_urb);
-		US_DEBUGP("usb_submit_urb() returns %d\n", result);
-		up(&(us->irq_urb_sem));
-	}
+	/* set the state and release the lock */
+	us->sm_state = US_STATE_RESETTING;
+	scsi_unlock(srb->device->host);
 
-	US_DEBUGP("bus_reset() complete\n");
-	return SUCCESS;
+	/* lock the device pointers and do the reset */
+	down(&(us->dev_semaphore));
+	if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
+		result = FAILED;
+		US_DEBUGP("No reset during disconnect\n");
+	} else
+		result = us->transport_reset(us);
+	up(&(us->dev_semaphore));
+
+	/* lock access to the state and clear it */
+	scsi_lock(srb->device->host);
+	us->sm_state = US_STATE_IDLE;
+	return result;
 }
 
-/* FIXME: This doesn't do anything right now */
-static int host_reset( Scsi_Cmnd *srb )
+/* This resets the device's USB port. */
+/* It refuses to work if there's more than one interface in
+ * the device, so that other users are not affected. */
+/* This is always called with scsi_lock(srb->host) held */
+static int bus_reset( Scsi_Cmnd *srb )
 {
-	printk(KERN_CRIT "usb-storage: host_reset() requested but not implemented\n" );
-	return FAILED;
+	struct us_data *us = (struct us_data *)srb->device->host->hostdata[0];
+	int result;
+
+	US_DEBUGP("%s called\n", __FUNCTION__);
+	if (us->sm_state != US_STATE_IDLE) {
+		printk(KERN_ERR USB_STORAGE "Error in %s: "
+			"invalid state %d\n", __FUNCTION__, us->sm_state);
+		return FAILED;
+	}
+
+	/* set the state and release the lock */
+	us->sm_state = US_STATE_RESETTING;
+	scsi_unlock(srb->device->host);
+
+	/* The USB subsystem doesn't handle synchronisation between
+	 * a device's several drivers. Therefore we reset only devices
+	 * with just one interface, which we of course own. */
+
+	down(&(us->dev_semaphore));
+	if (test_bit(US_FLIDX_DISCONNECTING, &us->flags)) {
+		result = -EIO;
+		US_DEBUGP("No reset during disconnect\n");
+	} else if (us->pusb_dev->actconfig->desc.bNumInterfaces != 1) {
+		result = -EBUSY;
+		US_DEBUGP("Refusing to reset a multi-interface device\n");
+	} else {
+		result = usb_reset_device(us->pusb_dev);
+		US_DEBUGP("usb_reset_device returns %d\n", result);
+	}
+	up(&(us->dev_semaphore));
+
+	/* lock access to the state and clear it */
+	scsi_lock(srb->device->host);
+	us->sm_state = US_STATE_IDLE;
+	return result < 0 ? FAILED : SUCCESS;
 }
 
 /***********************************************************************
@@ -303,37 +231,21 @@ static int host_reset( Scsi_Cmnd *srb )
 #define SPRINTF(args...) \
 	do { if (pos < buffer+length) pos += sprintf(pos, ## args); } while (0)
 
-static int proc_info (char *buffer, char **start, off_t offset, int length,
-		int hostno, int inout)
+static int proc_info (struct Scsi_Host *hostptr, char *buffer, char **start, off_t offset,
+		int length, int inout)
 {
 	struct us_data *us;
 	char *pos = buffer;
+	unsigned long f;
 
 	/* if someone is sending us data, just throw it away */
 	if (inout)
 		return length;
 
-	/* lock the data structures */
-	down(&us_list_semaphore);
-
-	/* find our data from hostno */
-	us = us_list;
-	while (us) {
-		if (us->host_no == hostno)
-			break;
-		us = us->next;
-	}
-
-	/* release our lock on the data structures */
-	up(&us_list_semaphore);
-
-	/* if we couldn't find it, we return an error */
-	if (!us) {
-		return -ESRCH;
-	}
+	us = (struct us_data*)hostptr->hostdata[0];
 
 	/* print the controller name */
-	SPRINTF("   Host scsi%d: usb-storage\n", hostno);
+	SPRINTF("   Host scsi%d: usb-storage\n", hostptr->host_no);
 
 	/* print product, vendor, and serial number strings */
 	SPRINTF("       Vendor: %s\n", us->vendor);
@@ -344,9 +256,21 @@ static int proc_info (char *buffer, char **start, off_t offset, int length,
 	SPRINTF("     Protocol: %s\n", us->protocol_name);
 	SPRINTF("    Transport: %s\n", us->transport_name);
 
-	/* show the GUID of the device */
-	SPRINTF("         GUID: " GUID_FORMAT "\n", GUID_ARGS(us->guid));
-	SPRINTF("     Attached: %s\n", us->pusb_dev ? "Yes" : "No");
+	/* show the device flags */
+	if (pos < buffer + length) {
+		pos += sprintf(pos, "       Quirks:");
+		f = us->flags;
+
+#define DO_FLAG(a)  	if (f & US_FL_##a)  pos += sprintf(pos, " " #a)
+		DO_FLAG(SINGLE_LUN);
+		DO_FLAG(MODE_XLATE);
+		DO_FLAG(SCM_MULT_TARG);
+		DO_FLAG(FIX_INQUIRY);
+		DO_FLAG(FIX_CAPACITY);
+#undef DO_FLAG
+
+		*(pos++) = '\n';
+		}
 
 	/*
 	 * Calculate start of next buffer, and return value.
@@ -362,42 +286,64 @@ static int proc_info (char *buffer, char **start, off_t offset, int length,
 }
 
 /*
- * this defines our 'host'
+ * this defines our host template, with which we'll allocate hosts
  */
 
-Scsi_Host_Template usb_stor_host_template = {
-	name:			"usb-storage",
-	proc_info:		proc_info,
-	info:			host_info,
+struct scsi_host_template usb_stor_host_template = {
+	/* basic userland interface stuff */
+	.name =				"usb-storage",
+	.proc_name =			"usb-storage",
+	.proc_info =			proc_info,
+	.info =				host_info,
 
-	detect:			detect,
-	release:		release,
-	command:		command,
-	queuecommand:		queuecommand,
+	/* command interface -- queued only */
+	.queuecommand =			queuecommand,
 
-	eh_abort_handler:	command_abort,
-	eh_device_reset_handler:device_reset,
-	eh_bus_reset_handler:	bus_reset,
-	eh_host_reset_handler:	host_reset,
+	/* error and abort handlers */
+	.eh_abort_handler =		command_abort,
+	.eh_device_reset_handler =	device_reset,
+	.eh_bus_reset_handler =		bus_reset,
 
-	can_queue:		1,
-	this_id:		-1,
+	/* queue commands only, only one command per LUN */
+	.can_queue =			1,
+	.cmd_per_lun =			1,
 
-	sg_tablesize:		SG_ALL,
-	cmd_per_lun:		1,
-	present:		0,
-	unchecked_isa_dma:	FALSE,
-	use_clustering:		TRUE,
-	use_new_eh_code:	TRUE,
-	emulated:		TRUE
+	/* unknown initiator id */
+	.this_id =			-1,
+
+	.slave_configure =		slave_configure,
+
+	/* lots of sg segments can be handled */
+	.sg_tablesize =			SG_ALL,
+
+	/* merge commands... this seems to help performance, but
+	 * periodically someone should test to see which setting is more
+	 * optimal.
+	 */
+	.use_clustering =		TRUE,
+
+	/* emulated HBA */
+	.emulated =			TRUE,
+
+	/* module management */
+	.module =			THIS_MODULE
 };
 
+/* For a device that is "Not Ready" */
 unsigned char usb_stor_sense_notready[18] = {
 	[0]	= 0x70,			    /* current error */
 	[2]	= 0x02,			    /* not ready */
-	[5]	= 0x0a,			    /* additional length */
-	[10]	= 0x04,			    /* not ready */
-	[11]	= 0x03			    /* manual intervention */
+	[7]	= 0x0a,			    /* additional length */
+	[12]	= 0x04,			    /* not ready */
+	[13]	= 0x03			    /* manual intervention */
+};
+
+/* To Report "Illegal Request: Invalid Field in CDB */
+unsigned char usb_stor_sense_invalidCDB[18] = {
+	[0]	= 0x70,			    /* current error */
+	[2]	= ILLEGAL_REQUEST,	    /* Illegal Request = 0x05 */
+	[7]	= 0x0a,			    /* additional length */
+	[12]	= 0x24			    /* Invalid Field in CDB */
 };
 
 #define USB_STOR_SCSI_SENSE_HDRSZ 4
@@ -565,7 +511,12 @@ int usb_stor_scsiSense10to6( Scsi_Cmnd* the10 )
 	    }
 
 	  /* copy one byte */
-	  sg[db].address[di] = sg[sb].address[si];
+	  {
+		char *src = sg_address(sg[sb]) + si;
+		char *dst = sg_address(sg[db]) + di;
+
+		 *dst = *src;
+	  }
 
 	  /* get next destination */
 	  if ( sg[db].length-1 == di )
@@ -603,7 +554,7 @@ int usb_stor_scsiSense10to6( Scsi_Cmnd* the10 )
 	      break;
 	    }
 
-	  sg[db].address[di] = 0;
+	  *(char*)(sg_address(sg[db])) = 0;
 
 	  /* get next destination */
 	  if ( sg[db].length-1 == di )
@@ -753,7 +704,12 @@ int usb_stor_scsiSense6to10( Scsi_Cmnd* the6 )
 	    }
 
 	  /* copy one byte */
-	  sg[db].address[di] = sg[sb].address[si];
+	  {
+		char *src = sg_address(sg[sb]) + si;
+		char *dst = sg_address(sg[db]) + di;
+
+		 *dst = *src;
+	  }
 
 	  /* get next destination */
 	  if ( di == 0 )
@@ -790,7 +746,12 @@ int usb_stor_scsiSense6to10( Scsi_Cmnd* the6 )
 	      break;
 	    }
 
-	  sg[db].address[di] = tempBuffer[element-USB_STOR_SCSI_SENSE_HDRSZ];
+	 {
+		 char *dst = sg_address(sg[db]) + di;
+
+		 *dst = tempBuffer[element-USB_STOR_SCSI_SENSE_HDRSZ];
+	 }
+
 
 	  /* get next destination */
 	  if ( di == 0 )
@@ -840,13 +801,15 @@ void usb_stor_scsiSenseParseBuffer( Scsi_Cmnd* srb, Usb_Stor_Scsi_Sense_Hdr_u* t
 		  if ( element < USB_STOR_SCSI_SENSE_HDRSZ )
 		    {
 		      /* fill in the pointers for both header types */
-		      the6->array[element] = &(sg[i].address[j]);
-		      the10->array[element] = &(sg[i].address[j]);
+		      the6->array[element] = sg_address(sg[i]) + j;
+		      the10->array[element] = sg_address(sg[i]) + j;
+
 		    }
 		  else if ( element < USB_STOR_SCSI_SENSE_10_HDRSZ )
 		    {
 		      /* only the longer headers still cares now */
-		      the10->array[element] = &(sg[i].address[j]);
+		      the10->array[element] = sg_address(sg[i]) + j;
+		       
 		    }
 		  /* increase element counter */
 		  element++;

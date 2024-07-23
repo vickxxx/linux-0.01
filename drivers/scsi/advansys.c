@@ -1,4 +1,4 @@
-#define ASC_VERSION "3.3G"    /* AdvanSys Driver Version */
+#define ASC_VERSION "3.3GJ"    /* AdvanSys Driver Version */
 
 /*
  * advansys.c - Linux Host Driver for AdvanSys SCSI Adapters
@@ -670,6 +670,13 @@
          1. Return an error from narrow boards if passed a 16 byte
             CDB. The wide board can already handle 16 byte CDBs.
 
+     3.3GJ (4/15/02):
+	 1. hacks for lk 2.5 series (D. Gilbert)
+
+     3.3GJD (10/14/02):
+         1. change select_queue_depths to slave_configure
+	 2. make cmd_per_lun be sane again
+
   I. Known Problems/Fix List (XXX)
 
      1. Need to add memory mapping workaround. Test the memory mapping.
@@ -782,28 +789,25 @@
 #endif /* CONFIG_X86 && !CONFIG_ISA */
 
 #include <linux/string.h>
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
+#include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/proc_fs.h>
 #include <linux/init.h>
+#include <linux/blk.h>
+#include <linux/stat.h>
+#include <linux/spinlock.h>
+
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/dma.h>
-#include <linux/blk.h>
-#include <linux/stat.h>
-#if ASC_LINUX_KERNEL24
-#include <linux/spinlock.h>
-#elif ASC_LINUX_KERNEL22
-#include <asm/spinlock.h>
-#endif
+
 #include "scsi.h"
 #include "hosts.h"
-#include "sd.h"
 #include "advansys.h"
 #ifdef CONFIG_PCI
 #include <linux/pci.h>
@@ -1563,7 +1567,6 @@ typedef struct asc_dvc_cfg {
     uchar               isa_dma_speed;
     uchar               isa_dma_channel;
     uchar               chip_version;
-    ushort              pci_device_id;
     ushort              lib_serial_no;
     ushort              lib_version;
     ushort              mcode_date;
@@ -1573,6 +1576,7 @@ typedef struct asc_dvc_cfg {
     uchar               sdtr_period_offset[ASC_MAX_TID + 1];
     ushort              pci_slot_info;
     uchar               adapter_info[6];
+    struct pci_dev	*pci_dev;
 } ASC_DVC_CFG;
 
 #define ASC_DEF_DVC_CNTL       0xFFFF
@@ -3068,7 +3072,6 @@ typedef struct adv_dvc_cfg {
   ushort disc_enable;       /* enable disconnection */
   uchar  chip_version;      /* chip version */
   uchar  termination;       /* Term. Ctrl. bits 6-5 of SCSI_CFG1 register */
-  ushort pci_device_id;     /* PCI device code number */
   ushort lib_version;       /* Adv Library version number */
   ushort control_flag;      /* Microcode Control Flag */
   ushort mcode_date;        /* Microcode date */
@@ -3079,6 +3082,7 @@ typedef struct adv_dvc_cfg {
   ushort serial1;           /* EEPROM serial number word 1 */
   ushort serial2;           /* EEPROM serial number word 2 */
   ushort serial3;           /* EEPROM serial number word 3 */
+  struct pci_dev *pci_dev;  /* pointer to the pci dev structure for this board */
 } ADV_DVC_CFG;
 
 struct adv_dvc_var;
@@ -3610,36 +3614,6 @@ typedef struct {
 #define ASC_MIN(a, b) (((a) < (b)) ? (a) : (b))
 #endif /* CONFIG_PROC_FS */
 
-/*
- * XXX - Release and acquire the io_request_lock. These macros are needed
- * because the 2.4 kernel SCSI mid-level driver holds the 'io_request_lock'
- * on entry to SCSI low-level drivers.
- *
- * These definitions and all code that uses code should be removed when the
- * SCSI mid-level driver no longer holds the 'io_request_lock' on entry to
- * SCSI low-level driver detect, queuecommand, and reset entrypoints.
- *
- * The interrupt flags values doesn't matter in the macros because the
- * SCSI mid-level will save and restore the flags values before and after
- * calling advansys_detect, advansys_queuecommand, and advansys_reset where
- * these macros are used. We do want interrupts enabled after the lock is
- * released so an explicit sti() is done. The driver only needs interrupts
- * disabled when it acquires the per board lock.
- */
-#define ASC_UNLOCK_IO_REQUEST_LOCK \
-    { \
-        ulong flags; /* flags value not needed, cf. comment above. */ \
-        save_flags(flags); \
-        spin_unlock_irqrestore(&io_request_lock, flags); \
-        sti(); /* enable interrupts */ \
-    }
-
-#define ASC_LOCK_IO_REQUEST_LOCK \
-    { \
-        ulong flags; /* flags value not needed, cf. comment above. */ \
-        spin_lock_irqsave(&io_request_lock, flags); \
-    }
-
 /* Asc Library return codes */
 #define ASC_TRUE        1
 #define ASC_FALSE       0
@@ -3667,7 +3641,7 @@ typedef struct {
 typedef Scsi_Cmnd            REQ, *REQP;
 #define REQPNEXT(reqp)       ((REQP) ((reqp)->host_scribble))
 #define REQPNEXTP(reqp)      ((REQP *) &((reqp)->host_scribble))
-#define REQPTID(reqp)        ((reqp)->target)
+#define REQPTID(reqp)        ((reqp)->device->id)
 #define REQPTIME(reqp)       ((reqp)->SCp.this_residual)
 #define REQTIMESTAMP()       (jiffies)
 
@@ -4234,10 +4208,9 @@ STATIC PortAddr     _asc_def_iop_base[];
  * advansys.h contains function prototypes for functions global to Linux.
  */
 
-STATIC void       advansys_interrupt(int, void *, struct pt_regs *);
-STATIC void       advansys_select_queue_depths(struct Scsi_Host *,
-                                               Scsi_Device *);
-STATIC void       asc_scsi_done_list(Scsi_Cmnd *);
+STATIC irqreturn_t advansys_interrupt(int, void *, struct pt_regs *);
+STATIC int	  advansys_slave_configure(Scsi_Device *);
+STATIC void       asc_scsi_done_list(Scsi_Cmnd *, int from_isr);
 STATIC int        asc_execute_scsi_cmnd(Scsi_Cmnd *);
 STATIC int        asc_build_req(asc_board_t *, Scsi_Cmnd *);
 STATIC int        adv_build_req(asc_board_t *, Scsi_Cmnd *, ADV_SCSI_REQ_Q **);
@@ -4317,20 +4290,19 @@ STATIC void         asc_prt_hex(char *f, uchar *, int);
  * user just won't get all the available statistics.
  */
 int
-advansys_proc_info(char *buffer, char **start, off_t offset, int length,
-                   int hostno, int inout)
+advansys_proc_info(struct Scsi_Host *shost, char *buffer, char **start,
+		off_t offset, int length, int inout)
 {
     struct Scsi_Host    *shp;
     asc_board_t         *boardp;
     int                 i;
     char                *cp;
-    int                 cplen;
+    int			cplen;
     int                 cnt;
     int                 totcnt;
     int                 leftlen;
     char                *curbuf;
     off_t               advoffset;
-    Scsi_Device         *scd;
 #ifdef ADVANSYS_STATS
     int                 tgt_id;
 #endif /* ADVANSYS_STATS */
@@ -4350,7 +4322,7 @@ advansys_proc_info(char *buffer, char **start, off_t offset, int length,
 
     /* Find the specified board. */
     for (i = 0; i < asc_board_count; i++) {
-        if (asc_host[i]->host_no == hostno) {
+        if (asc_host[i]->host_no == shost->host_no) {
             break;
         }
     }
@@ -4420,32 +4392,6 @@ advansys_proc_info(char *buffer, char **start, off_t offset, int length,
     }
     advoffset += cplen;
     curbuf += cnt;
-
-    /*
-     * Display target driver information for each device attached
-     * to the board.
-     */
-    for (scd = shp->host_queue; scd; scd = scd->next)
-    {
-        if (scd->host == shp) {
-            cp = boardp->prtbuf;
-            /*
-             * Note: If proc_print_scsidevice() writes more than
-             * ASC_PRTBUF_SIZE bytes, it will overrun 'prtbuf'.
-             */
-            proc_print_scsidevice(scd, cp, &cplen, 0);
-            ASC_ASSERT(cplen < ASC_PRTBUF_SIZE);
-            cnt = asc_proc_copy(advoffset, offset, curbuf, leftlen, cp, cplen);
-            totcnt += cnt;
-            leftlen -= cnt;
-            if (leftlen == 0) {
-                ASC_DBG1(1, "advansys_proc_info: totcnt %d\n", totcnt);
-                return totcnt;
-            }
-            advoffset += cplen;
-            curbuf += cnt;
-        }
-    }
 
     /*
      * Display EEPROM configuration for the board.
@@ -4603,13 +4549,6 @@ advansys_detect(Scsi_Host_Template *tpnt)
     }
 
     ASC_DBG(1, "advansys_detect: begin\n");
-
-    /*
-     * XXX - Remove this comment and the next line when SCSI mid-level
-     * no longer acquires 'io_request_lock' before calling the SCSI
-     * low-level detect entrypoint.
-     */
-    ASC_UNLOCK_IO_REQUEST_LOCK
 
 #if ASC_LINUX_KERNEL24
     tpnt->proc_name = "advansys";
@@ -4825,11 +4764,10 @@ advansys_detect(Scsi_Host_Template *tpnt)
             if (shp == NULL) {
                 continue;
             }
-#ifdef CONFIG_PCI
-	    scsi_set_pci_device(shp, pci_devp);
-#endif
 
-            /* Save a pointer to the Scsi_host of each board found. */
+	    scsi_set_device(shp, &pci_devp->dev);
+
+            /* Save a pointer to the Scsi_Host of each board found. */
             asc_host[asc_board_count++] = shp;
 
             /* Initialize private per board data */
@@ -4988,7 +4926,7 @@ advansys_detect(Scsi_Host_Template *tpnt)
 #ifdef CONFIG_PCI
                 case ASC_IS_PCI:
                     shp->irq = asc_dvc_varp->irq_no = pci_devp->irq;
-                    asc_dvc_varp->cfg->pci_device_id = pci_devp->device;
+                    asc_dvc_varp->cfg->pci_dev = pci_devp;
                     asc_dvc_varp->cfg->pci_slot_info =
                         ASC_PCI_MKID(pci_devp->bus->number,
                             PCI_SLOT(pci_devp->devfn),
@@ -5012,7 +4950,7 @@ advansys_detect(Scsi_Host_Template *tpnt)
                  */
 #ifdef CONFIG_PCI
                 shp->irq = adv_dvc_varp->irq_no = pci_devp->irq;
-                adv_dvc_varp->cfg->pci_device_id = pci_devp->device;
+                adv_dvc_varp->cfg->pci_dev = pci_devp;
                 adv_dvc_varp->cfg->pci_slot_info =
                     ASC_PCI_MKID(pci_devp->bus->number,
                         PCI_SLOT(pci_devp->devfn),
@@ -5131,7 +5069,6 @@ advansys_detect(Scsi_Host_Template *tpnt)
                 ep->adapter_info[3] = asc_dvc_varp->cfg->adapter_info[3];
                 ep->adapter_info[4] = asc_dvc_varp->cfg->adapter_info[4];
                 ep->adapter_info[5] = asc_dvc_varp->cfg->adapter_info[5];
-                ep->adapter_info[6] = asc_dvc_varp->cfg->adapter_info[6];
 
                /*
                 * Modify board configuration.
@@ -5341,17 +5278,15 @@ advansys_detect(Scsi_Host_Template *tpnt)
              * compiled as a module and 'cmd_per_lun' is zero, the Mid-Level
              * SCSI function 'allocate_device' will panic. To allow the driver
              * to work as a module in these kernels set 'cmd_per_lun' to 1.
-             */
+	     *
+	     * Note: This is wrong.  cmd_per_lun should be set to the depth
+	     * you want on untagged devices always.
 #ifdef MODULE
-            shp->cmd_per_lun = 1;
-#else /* MODULE */
-            shp->cmd_per_lun = 0;
-#endif /* MODULE */
-            /*
-             * Use the host 'select_queue_depths' function to determine
-             * the number of commands to queue per device.
              */
-            shp->select_queue_depths = advansys_select_queue_depths;
+            shp->cmd_per_lun = 1;
+/* #else
+            shp->cmd_per_lun = 0;
+#endif */
 
             /*
              * Set the maximum number of scatter-gather elements the
@@ -5552,7 +5487,7 @@ advansys_detect(Scsi_Host_Template *tpnt)
                 }
             } else {
                 ADV_CARR_T      *carrp;
-                int             req_cnt;
+                int             req_cnt = 0;
                 adv_req_t       *reqp = NULL;
                 int             sg_cnt = 0;
 
@@ -5723,13 +5658,6 @@ advansys_detect(Scsi_Host_Template *tpnt)
         }
     }
 
-    /*
-     * XXX - Remove this comment and the next line when SCSI mid-level
-     * no longer acquires 'io_request_lock' before calling the SCSI
-     * low-level detect entrypoint.
-     */
-    ASC_LOCK_IO_REQUEST_LOCK
-
     ASC_DBG1(1, "advansys_detect: done: asc_board_count %d\n", asc_board_count);
     return asc_board_count;
 }
@@ -5889,17 +5817,12 @@ advansys_queuecommand(Scsi_Cmnd *scp, void (*done)(Scsi_Cmnd *))
     ulong               flags;
     Scsi_Cmnd           *done_scp;
 
-    shp = scp->host;
+    shp = scp->device->host;
     boardp = ASC_BOARDP(shp);
     ASC_STATS(shp, queuecommand);
 
-    /*
-     * XXX - Remove this comment and the next line when SCSI mid-level
-     * no longer acquires 'io_request_lock' before calling the SCSI
-     * low-level queuecommand entrypoint.
-     */
-    ASC_UNLOCK_IO_REQUEST_LOCK
-
+    /* host_lock taken by mid-level prior to call but need to protect */
+    /* against own ISR */
     spin_lock_irqsave(&boardp->lock, flags);
 
     /*
@@ -5917,7 +5840,7 @@ advansys_queuecommand(Scsi_Cmnd *scp, void (*done)(Scsi_Cmnd *))
          * handling.
          */
         asc_enqueue(&boardp->done, scp, ASC_BACK);
-        spin_unlock_irqrestore(&boardp->lock, flags);
+	spin_unlock_irqrestore(&boardp->lock, flags);
         return 0;
     }
 
@@ -5957,18 +5880,10 @@ advansys_queuecommand(Scsi_Cmnd *scp, void (*done)(Scsi_Cmnd *))
     default:
         done_scp = asc_dequeue_list(&boardp->done, NULL, ASC_TID_ALL);
         /* Interrupts could be enabled here. */
-        asc_scsi_done_list(done_scp);
+        asc_scsi_done_list(done_scp, 0);
         break;
     }
-
     spin_unlock_irqrestore(&boardp->lock, flags);
-
-    /*
-     * XXX - Remove this comment and the next line when SCSI mid-level
-     * no longer acquires 'io_request_lock' before calling the SCSI
-     * low-level queuecommand entrypoint.
-     */
-    ASC_LOCK_IO_REQUEST_LOCK
 
     return 0;
 }
@@ -5998,12 +5913,12 @@ advansys_reset(Scsi_Cmnd *scp)
     ASC_DBG1(1, "advansys_reset: 0x%lx\n", (ulong) scp);
 
 #ifdef ADVANSYS_STATS
-    if (scp->host != NULL) {
-        ASC_STATS(scp->host, reset);
+    if (scp->device->host != NULL) {
+        ASC_STATS(scp->device->host, reset);
     }
 #endif /* ADVANSYS_STATS */
 
-    if ((shp = scp->host) == NULL) {
+    if ((shp = scp->device->host) == NULL) {
         scp->result = HOST_BYTE(DID_ERROR);
         return FAILED;
     }
@@ -6017,18 +5932,11 @@ advansys_reset(Scsi_Cmnd *scp)
      */
     spin_lock_irqsave(&boardp->lock, flags);
     if (boardp->flags & ASC_HOST_IN_RESET) {
-        spin_unlock_irqrestore(&boardp->lock, flags);
+	spin_unlock_irqrestore(&boardp->lock, flags);
         return FAILED;
     }
     boardp->flags |= ASC_HOST_IN_RESET;
     spin_unlock_irqrestore(&boardp->lock, flags);
-
-    /*
-     * XXX - Remove this comment and the next line when SCSI mid-level
-     * no longer acquires 'io_request_lock' before calling the SCSI
-     * low-level reset entrypoint.
-     */
-    ASC_UNLOCK_IO_REQUEST_LOCK
 
     if (ASC_NARROW_BOARD(boardp)) {
         /*
@@ -6059,11 +5967,7 @@ advansys_reset(Scsi_Cmnd *scp)
         }
 
         ASC_DBG(1, "advansys_reset: after AscInitAsc1000Driver()\n");
-
-        /*
-         * Acquire the board lock.
-         */
-        spin_lock_irqsave(&boardp->lock, flags);
+	spin_lock_irqsave(&boardp->lock, flags);
 
     } else {
         /*
@@ -6090,14 +5994,9 @@ advansys_reset(Scsi_Cmnd *scp)
             ret = FAILED;
             break;
         }
-        /*
-         * Acquire the board lock and ensure all requests completed by the
-         * microcode have been processed by calling AdvISR().
-         */
-        spin_lock_irqsave(&boardp->lock, flags);
+	spin_lock_irqsave(&boardp->lock, flags);
         (void) AdvISR(adv_dvc_varp);
     }
-
     /* Board lock is held. */
 
     /*
@@ -6158,23 +6057,14 @@ advansys_reset(Scsi_Cmnd *scp)
 
     /* Clear reset flag. */
     boardp->flags &= ~ASC_HOST_IN_RESET;
-
-    /* Release the board. */
     spin_unlock_irqrestore(&boardp->lock, flags);
 
     /*
      * Complete all the 'done_scp' requests.
      */
     if (done_scp != NULL) {
-        asc_scsi_done_list(done_scp);
+        asc_scsi_done_list(done_scp, 0);
     }
-
-    /*
-     * XXX - Remove this comment and the next line when SCSI mid-level
-     * no longer acquires 'io_request_lock' before calling the SCSI
-     * low-level reset entrypoint.
-     */
-    ASC_LOCK_IO_REQUEST_LOCK
 
     ASC_DBG1(1, "advansys_reset: ret %d\n", ret);
 
@@ -6193,16 +6083,17 @@ advansys_reset(Scsi_Cmnd *scp)
  * ip[2]: cylinders
  */
 int
-advansys_biosparam(Disk *dp, kdev_t dep, int ip[])
+advansys_biosparam(struct scsi_device *sdev, struct block_device *bdev,
+		sector_t capacity, int ip[])
 {
     asc_board_t     *boardp;
 
     ASC_DBG(1, "advansys_biosparam: begin\n");
-    ASC_STATS(dp->device->host, biosparam);
-    boardp = ASC_BOARDP(dp->device->host);
+    ASC_STATS(sdev->host, biosparam);
+    boardp = ASC_BOARDP(sdev->host);
     if (ASC_NARROW_BOARD(boardp)) {
         if ((boardp->dvc_var.asc_dvc_var.dvc_cntl &
-             ASC_CNTL_BIOS_GT_1GB) && dp->capacity > 0x200000) {
+             ASC_CNTL_BIOS_GT_1GB) && capacity > 0x200000) {
                 ip[0] = 255;
                 ip[1] = 63;
         } else {
@@ -6211,7 +6102,7 @@ advansys_biosparam(Disk *dp, kdev_t dep, int ip[])
         }
     } else {
         if ((boardp->dvc_var.adv_dvc_var.bios_ctrl &
-             BIOS_CTRL_EXTENDED_XLAT) && dp->capacity > 0x200000) {
+             BIOS_CTRL_EXTENDED_XLAT) && capacity > 0x200000) {
                 ip[0] = 255;
                 ip[1] = 63;
         } else {
@@ -6219,7 +6110,7 @@ advansys_biosparam(Disk *dp, kdev_t dep, int ip[])
                 ip[1] = 32;
         }
     }
-    ip[2] = dp->capacity / (ip[0] * ip[1]);
+    ip[2] = (unsigned long)capacity / (ip[0] * ip[1]);
     ASC_DBG(1, "advansys_biosparam: end\n");
     return 0;
 }
@@ -6306,13 +6197,33 @@ advansys_setup(char *str, int *ints)
  * --- Loadable Driver Support
  */
 
-#if ASC_LINUX_KERNEL24
-static
-#endif
-#if ASC_LINUX_KERNEL24 || (ASC_LINUX_KERNEL22 && defined(MODULE))
-Scsi_Host_Template driver_template = ADVANSYS;
-# include "scsi_module.c"
-#endif
+static Scsi_Host_Template driver_template = {
+    .proc_name                  = "advansys",
+    .proc_info                  = advansys_proc_info,
+    .name                       = "advansys",
+    .detect                     = advansys_detect, 
+    .release                    = advansys_release,
+    .info                       = advansys_info,
+    .queuecommand               = advansys_queuecommand,
+    .eh_bus_reset_handler	= advansys_reset,
+    .bios_param                 = advansys_biosparam,
+    .slave_configure		= advansys_slave_configure,
+    /*
+     * Because the driver may control an ISA adapter 'unchecked_isa_dma'
+     * must be set. The flag will be cleared in advansys_detect for non-ISA
+     * adapters. Refer to the comment in scsi_module.c for more information.
+     */
+    .unchecked_isa_dma          = 1,
+    /*
+     * All adapters controlled by this driver are capable of large
+     * scatter-gather lists. According to the mid-level SCSI documentation
+     * this obviates any performance gain provided by setting
+     * 'use_clustering'. But empirically while CPU utilization is increased
+     * by enabling clustering, I/O throughput increases as well.
+     */
+    .use_clustering             = ENABLE_CLUSTERING,
+};
+#include "scsi_module.c"
 
 
 /*
@@ -6328,7 +6239,7 @@ Scsi_Host_Template driver_template = ADVANSYS;
  * to the AdvanSys driver which is for a device sharing an interrupt with
  * an AdvanSys adapter.
  */
-STATIC void
+STATIC irqreturn_t
 advansys_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
     ulong           flags;
@@ -6336,6 +6247,7 @@ advansys_interrupt(int irq, void *dev_id, struct pt_regs *regs)
     asc_board_t     *boardp;
     Scsi_Cmnd       *done_scp = NULL, *last_scp = NULL;
     Scsi_Cmnd       *new_last_scp;
+    struct Scsi_Host *shp;
 
     ASC_DBG(1, "advansys_interrupt: begin\n");
 
@@ -6344,7 +6256,8 @@ advansys_interrupt(int irq, void *dev_id, struct pt_regs *regs)
      * AscISR() will call asc_isr_callback().
      */
     for (i = 0; i < asc_board_count; i++) {
-        boardp = ASC_BOARDP(asc_host[i]);
+	shp = asc_host[i];
+        boardp = ASC_BOARDP(shp);
         ASC_DBG2(2, "advansys_interrupt: i %d, boardp 0x%lx\n",
             i, (ulong) boardp);
         spin_lock_irqsave(&boardp->lock, flags);
@@ -6352,8 +6265,8 @@ advansys_interrupt(int irq, void *dev_id, struct pt_regs *regs)
             /*
              * Narrow Board
              */
-            if (AscIsIntPending(asc_host[i]->io_port)) {
-                ASC_STATS(asc_host[i], interrupt);
+            if (AscIsIntPending(shp->io_port)) {
+                ASC_STATS(shp, interrupt);
                 ASC_DBG(1, "advansys_interrupt: before AscISR()\n");
                 AscISR(&boardp->dvc_var.asc_dvc_var);
             }
@@ -6363,7 +6276,7 @@ advansys_interrupt(int irq, void *dev_id, struct pt_regs *regs)
              */
             ASC_DBG(1, "advansys_interrupt: before AdvISR()\n");
             if (AdvISR(&boardp->dvc_var.adv_dvc_var)) {
-                ASC_STATS(asc_host[i], interrupt);
+                ASC_STATS(shp, interrupt);
             }
         }
 
@@ -6412,44 +6325,44 @@ advansys_interrupt(int irq, void *dev_id, struct pt_regs *regs)
      *
      * Complete all requests on the done list.
      */
-    asc_scsi_done_list(done_scp);
+
+    asc_scsi_done_list(done_scp, 1);
 
     ASC_DBG(1, "advansys_interrupt: end\n");
-    return;
+    return IRQ_HANDLED;
 }
 
 /*
  * Set the number of commands to queue per device for the
  * specified host adapter.
  */
-STATIC void
-advansys_select_queue_depths(struct Scsi_Host *shp, Scsi_Device *devicelist)
+STATIC int
+advansys_slave_configure(Scsi_Device *device)
 {
-    Scsi_Device        *device;
     asc_board_t        *boardp;
 
-    boardp = ASC_BOARDP(shp);
+    boardp = ASC_BOARDP(device->host);
     boardp->flags |= ASC_SELECT_QUEUE_DEPTHS;
-    for (device = devicelist; device != NULL; device = device->next) {
-        if (device->host != shp) {
-            continue;
-        }
-        /*
-         * Save a pointer to the device and set its initial/maximum
-         * queue depth.
-         */
+    /*
+     * Save a pointer to the device and set its initial/maximum
+     * queue depth.  Only save the pointer for a lun0 dev though.
+     */
+    if(device->lun == 0)
         boardp->device[device->id] = device;
+    if(device->tagged_supported) {
         if (ASC_NARROW_BOARD(boardp)) {
-            device->queue_depth =
-                boardp->dvc_var.asc_dvc_var.max_dvc_qng[device->id];
+	    scsi_adjust_queue_depth(device, MSG_ORDERED_TAG,
+                boardp->dvc_var.asc_dvc_var.max_dvc_qng[device->id]);
         } else {
-            device->queue_depth =
-                boardp->dvc_var.adv_dvc_var.max_dvc_qng;
+	    scsi_adjust_queue_depth(device, MSG_ORDERED_TAG,
+                boardp->dvc_var.adv_dvc_var.max_dvc_qng);
         }
-        ASC_DBG3(1,
-            "advansys_select_queue_depths: shp 0x%lx, id %d, depth %d\n",
-            (ulong) shp, device->id, device->queue_depth);
+    } else {
+	scsi_adjust_queue_depth(device, 0, device->host->cmd_per_lun);
     }
+    ASC_DBG3(1, "advansys_slave_configure: shp 0x%lx, id %d, depth %d\n",
+            (ulong) shp, device->id, device->queue_depth);
+    return 0;
 }
 
 /*
@@ -6459,18 +6372,23 @@ advansys_select_queue_depths(struct Scsi_Host *shp, Scsi_Device *devicelist)
  * Interrupts can be enabled on entry.
  */
 STATIC void
-asc_scsi_done_list(Scsi_Cmnd *scp)
+asc_scsi_done_list(Scsi_Cmnd *scp, int from_isr)
 {
     Scsi_Cmnd    *tscp;
+    ulong	  flags = 0;
 
     ASC_DBG(2, "asc_scsi_done_list: begin\n");
     while (scp != NULL) {
         ASC_DBG1(3, "asc_scsi_done_list: scp 0x%lx\n", (ulong) scp);
         tscp = REQPNEXT(scp);
         REQPNEXT(scp) = NULL;
-        ASC_STATS(scp->host, done);
+        ASC_STATS(scp->device->host, done);
         ASC_ASSERT(scp->scsi_done != NULL);
+	if (from_isr)
+	    spin_lock_irqsave(scp->device->host->host_lock, flags);
         scp->scsi_done(scp);
+	if (from_isr)
+	    spin_unlock_irqrestore(scp->device->host->host_lock, flags);
         scp = tscp;
     }
     ASC_DBG(2, "asc_scsi_done_list: done\n");
@@ -6536,8 +6454,8 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
     ASC_DBG2(1, "asc_execute_scsi_cmnd: scp 0x%lx, done 0x%lx\n",
         (ulong) scp, (ulong) scp->scsi_done);
 
-    boardp = ASC_BOARDP(scp->host);
-    device = boardp->device[scp->target];
+    boardp = ASC_BOARDP(scp->device->host);
+    device = boardp->device[scp->device->id];
 
     if (ASC_NARROW_BOARD(boardp)) {
         /*
@@ -6557,7 +6475,7 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
          * asc_build_req() can not return ASC_BUSY.
          */
         if (asc_build_req(boardp, scp) == ASC_ERROR) {
-            ASC_STATS(scp->host, build_error);
+            ASC_STATS(scp->device->host, build_error);
             return ASC_ERROR;
         }
 
@@ -6567,12 +6485,12 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
          */
         switch (ret = AscExeScsiQueue(asc_dvc_varp, &asc_scsi_q)) {
         case ASC_NOERROR:
-            ASC_STATS(scp->host, exe_noerror);
+            ASC_STATS(scp->device->host, exe_noerror);
             /*
              * Increment monotonically increasing per device successful
              * request counter. Wrapping doesn't matter.
              */
-            boardp->reqcnt[scp->target]++;
+            boardp->reqcnt[scp->device->id]++;
             asc_enqueue(&boardp->active, scp, ASC_BACK);
             ASC_DBG(1,
                 "asc_execute_scsi_cmnd: AscExeScsiQueue(), ASC_NOERROR\n");
@@ -6582,13 +6500,13 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
              * Caller will enqueue request on the target's waiting queue
              * and retry later.
              */
-            ASC_STATS(scp->host, exe_busy);
+            ASC_STATS(scp->device->host, exe_busy);
             break;
         case ASC_ERROR:
             ASC_PRINT2(
 "asc_execute_scsi_cmnd: board %d: AscExeScsiQueue() ASC_ERROR, err_code 0x%x\n",
                 boardp->id, asc_dvc_varp->err_code);
-            ASC_STATS(scp->host, exe_error);
+            ASC_STATS(scp->device->host, exe_error);
             scp->result = HOST_BYTE(DID_ERROR);
             asc_enqueue(&boardp->done, scp, ASC_BACK);
             break;
@@ -6596,7 +6514,7 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
             ASC_PRINT2(
 "asc_execute_scsi_cmnd: board %d: AscExeScsiQueue() unknown, err_code 0x%x\n",
                 boardp->id, asc_dvc_varp->err_code);
-            ASC_STATS(scp->host, exe_unknown);
+            ASC_STATS(scp->device->host, exe_unknown);
             scp->result = HOST_BYTE(DID_ERROR);
             asc_enqueue(&boardp->done, scp, ASC_BACK);
             break;
@@ -6637,7 +6555,7 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
               */
         default:
             ASC_DBG(1, "asc_execute_scsi_cmnd: adv_build_req ASC_ERROR\n");
-            ASC_STATS(scp->host, build_error);
+            ASC_STATS(scp->device->host, build_error);
             return ASC_ERROR;
         }
 
@@ -6647,12 +6565,12 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
          */
         switch (ret = AdvExeScsiQueue(adv_dvc_varp, adv_scsiqp)) {
         case ASC_NOERROR:
-            ASC_STATS(scp->host, exe_noerror);
+            ASC_STATS(scp->device->host, exe_noerror);
             /*
              * Increment monotonically increasing per device successful
              * request counter. Wrapping doesn't matter.
              */
-            boardp->reqcnt[scp->target]++;
+            boardp->reqcnt[scp->device->id]++;
             asc_enqueue(&boardp->active, scp, ASC_BACK);
             ASC_DBG(1,
                 "asc_execute_scsi_cmnd: AdvExeScsiQueue(), ASC_NOERROR\n");
@@ -6662,13 +6580,13 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
              * Caller will enqueue request on the target's waiting queue
              * and retry later.
              */
-            ASC_STATS(scp->host, exe_busy);
+            ASC_STATS(scp->device->host, exe_busy);
             break;
         case ASC_ERROR:
             ASC_PRINT2(
 "asc_execute_scsi_cmnd: board %d: AdvExeScsiQueue() ASC_ERROR, err_code 0x%x\n",
                 boardp->id, adv_dvc_varp->err_code);
-            ASC_STATS(scp->host, exe_error);
+            ASC_STATS(scp->device->host, exe_error);
             scp->result = HOST_BYTE(DID_ERROR);
             asc_enqueue(&boardp->done, scp, ASC_BACK);
             break;
@@ -6676,7 +6594,7 @@ asc_execute_scsi_cmnd(Scsi_Cmnd *scp)
             ASC_PRINT2(
 "asc_execute_scsi_cmnd: board %d: AdvExeScsiQueue() unknown, err_code 0x%x\n",
                 boardp->id, adv_dvc_varp->err_code);
-            ASC_STATS(scp->host, exe_unknown);
+            ASC_STATS(scp->device->host, exe_unknown);
             scp->result = HOST_BYTE(DID_ERROR);
             asc_enqueue(&boardp->done, scp, ASC_BACK);
             break;
@@ -6726,9 +6644,9 @@ asc_build_req(asc_board_t *boardp, Scsi_Cmnd *scp)
     }
     asc_scsi_q.cdbptr = &scp->cmnd[0];
     asc_scsi_q.q2.cdb_len = scp->cmd_len;
-    asc_scsi_q.q1.target_id = ASC_TID_TO_TARGET_ID(scp->target);
-    asc_scsi_q.q1.target_lun = scp->lun;
-    asc_scsi_q.q2.target_ix = ASC_TIDLUN_TO_IX(scp->target, scp->lun);
+    asc_scsi_q.q1.target_id = ASC_TID_TO_TARGET_ID(scp->device->id);
+    asc_scsi_q.q1.target_lun = scp->device->lun;
+    asc_scsi_q.q2.target_ix = ASC_TIDLUN_TO_IX(scp->device->id, scp->device->lun);
     asc_scsi_q.q1.sense_addr = cpu_to_le32(virt_to_bus(&scp->sense_buffer[0]));
     asc_scsi_q.q1.sense_len = sizeof(scp->sense_buffer);
 
@@ -6743,8 +6661,8 @@ asc_build_req(asc_board_t *boardp, Scsi_Cmnd *scp)
      * started request.
      *
      */
-    if ((boardp->dvc_var.asc_dvc_var.cur_dvc_qng[scp->target] > 0) &&
-        (boardp->reqcnt[scp->target] % 255) == 0) {
+    if ((boardp->dvc_var.asc_dvc_var.cur_dvc_qng[scp->device->id] > 0) &&
+        (boardp->reqcnt[scp->device->id] % 255) == 0) {
         asc_scsi_q.q2.tag_code = M2_QTAG_MSG_ORDERED;
     } else {
         asc_scsi_q.q2.tag_code = M2_QTAG_MSG_SIMPLE;
@@ -6758,11 +6676,11 @@ asc_build_req(asc_board_t *boardp, Scsi_Cmnd *scp)
         /*
          * CDB request of single contiguous buffer.
          */
-        ASC_STATS(scp->host, cont_cnt);
+        ASC_STATS(scp->device->host, cont_cnt);
         asc_scsi_q.q1.data_addr =
             cpu_to_le32(virt_to_bus(scp->request_buffer));
         asc_scsi_q.q1.data_cnt = cpu_to_le32(scp->request_bufflen);
-        ASC_STATS_ADD(scp->host, cont_xfer,
+        ASC_STATS_ADD(scp->device->host, cont_xfer,
                       ASC_CEILING(scp->request_bufflen, 512));
         asc_scsi_q.q1.sg_queue_cnt = 0;
         asc_scsi_q.sg_head = NULL;
@@ -6773,16 +6691,16 @@ asc_build_req(asc_board_t *boardp, Scsi_Cmnd *scp)
         int                     sgcnt;
         struct scatterlist      *slp;
 
-        if (scp->use_sg > scp->host->sg_tablesize) {
+        if (scp->use_sg > scp->device->host->sg_tablesize) {
             ASC_PRINT3(
 "asc_build_req: board %d: use_sg %d > sg_tablesize %d\n",
-                boardp->id, scp->use_sg, scp->host->sg_tablesize);
+                boardp->id, scp->use_sg, scp->device->host->sg_tablesize);
             scp->result = HOST_BYTE(DID_ERROR);
             asc_enqueue(&boardp->done, scp, ASC_BACK);
             return ASC_ERROR;
         }
 
-        ASC_STATS(scp->host, sg_cnt);
+        ASC_STATS(scp->device->host, sg_cnt);
 
         /*
          * Use global ASC_SG_HEAD structure and set the ASC_SCSI_Q
@@ -6796,7 +6714,7 @@ asc_build_req(asc_board_t *boardp, Scsi_Cmnd *scp)
         asc_scsi_q.q1.data_addr = 0;
         /* This is a byte value, otherwise it would need to be swapped. */
         asc_sg_head.entry_cnt = asc_scsi_q.q1.sg_queue_cnt = scp->use_sg;
-        ASC_STATS_ADD(scp->host, sg_elem, asc_sg_head.entry_cnt);
+        ASC_STATS_ADD(scp->device->host, sg_elem, asc_sg_head.entry_cnt);
 
         /*
          * Convert scatter-gather list into ASC_SG_HEAD list.
@@ -6804,9 +6722,10 @@ asc_build_req(asc_board_t *boardp, Scsi_Cmnd *scp)
         slp = (struct scatterlist *) scp->request_buffer;
         for (sgcnt = 0; sgcnt < scp->use_sg; sgcnt++, slp++) {
             asc_sg_head.sg_list[sgcnt].addr =
-                cpu_to_le32(virt_to_bus(slp->address));
+                cpu_to_le32(virt_to_bus(
+		(unsigned char *)page_address(slp->page) + slp->offset));
             asc_sg_head.sg_list[sgcnt].bytes = cpu_to_le32(slp->length);
-            ASC_STATS_ADD(scp->host, sg_xfer, ASC_CEILING(slp->length, 512));
+            ASC_STATS_ADD(scp->device->host, sg_xfer, ASC_CEILING(slp->length, 512));
         }
     }
 
@@ -6841,7 +6760,7 @@ adv_build_req(asc_board_t *boardp, Scsi_Cmnd *scp,
      */
     if (boardp->adv_reqp == NULL) {
         ASC_DBG(1, "adv_build_req: no free adv_req_t\n");
-        ASC_STATS(scp->host, adv_build_noreq);
+        ASC_STATS(scp->device->host, adv_build_noreq);
         return ASC_BUSY;
     } else {
         reqp = boardp->adv_reqp;
@@ -6896,8 +6815,8 @@ adv_build_req(asc_board_t *boardp, Scsi_Cmnd *scp,
         scsiqp->cdb16[i - 12] = scp->cmnd[i];
     }
 
-    scsiqp->target_id = scp->target;
-    scsiqp->target_lun = scp->lun;
+    scsiqp->target_id = scp->device->id;
+    scsiqp->target_lun = scp->device->lun;
 
     scsiqp->sense_addr = cpu_to_le32(virt_to_bus(&scp->sense_buffer[0]));
     scsiqp->sense_len = sizeof(scp->sense_buffer);
@@ -6917,8 +6836,8 @@ adv_build_req(asc_board_t *boardp, Scsi_Cmnd *scp,
         reqp->sgblkp = NULL;
         scsiqp->sg_list_ptr = NULL;
         scsiqp->sg_real_addr = 0;
-        ASC_STATS(scp->host, cont_cnt);
-        ASC_STATS_ADD(scp->host, cont_xfer,
+        ASC_STATS(scp->device->host, cont_cnt);
+        ASC_STATS_ADD(scp->device->host, cont_xfer,
                       ASC_CEILING(scp->request_bufflen, 512));
     } else {
         /*
@@ -6927,7 +6846,7 @@ adv_build_req(asc_board_t *boardp, Scsi_Cmnd *scp,
         if (scp->use_sg > ADV_MAX_SG_LIST) {
             ASC_PRINT3(
 "adv_build_req: board %d: use_sg %d > ADV_MAX_SG_LIST %d\n",
-                boardp->id, scp->use_sg, scp->host->sg_tablesize);
+                boardp->id, scp->use_sg, scp->device->host->sg_tablesize);
             scp->result = HOST_BYTE(DID_ERROR);
             asc_enqueue(&boardp->done, scp, ASC_BACK);
 
@@ -6952,8 +6871,8 @@ adv_build_req(asc_board_t *boardp, Scsi_Cmnd *scp,
             return ret;
         }
 
-        ASC_STATS(scp->host, sg_cnt);
-        ASC_STATS_ADD(scp->host, sg_elem, scp->use_sg);
+        ASC_STATS(scp->device->host, sg_cnt);
+        ASC_STATS_ADD(scp->device->host, sg_elem, scp->use_sg);
     }
 
     ASC_DBG_PRT_ADV_SCSI_REQ_Q(2, scsiqp);
@@ -7002,7 +6921,7 @@ adv_get_sglist(asc_board_t *boardp, adv_req_t *reqp, Scsi_Cmnd *scp)
          */
         if ((sgblkp = boardp->adv_sgblkp) == NULL) {
             ASC_DBG(1, "adv_get_sglist: no free adv_sgblk_t\n");
-            ASC_STATS(scp->host, adv_build_nosg);
+            ASC_STATS(scp->device->host, adv_build_nosg);
 
             /*
              * Allocation failed. Free 'adv_sgblk_t' structures already
@@ -7062,9 +6981,10 @@ adv_get_sglist(asc_board_t *boardp, adv_req_t *reqp, Scsi_Cmnd *scp)
         for (i = 0; i < NO_OF_SG_PER_BLOCK; i++)
         {
             sg_block->sg_list[i].sg_addr =
-                cpu_to_le32(virt_to_bus(slp->address));
+                cpu_to_le32(virt_to_bus(
+                   (unsigned char *)page_address(slp->page) + slp->offset));
             sg_block->sg_list[i].sg_count = cpu_to_le32(slp->length);
-            ASC_STATS_ADD(scp->host, sg_xfer, ASC_CEILING(slp->length, 512));
+            ASC_STATS_ADD(scp->device->host, sg_xfer, ASC_CEILING(slp->length, 512));
 
             if (--sg_elem_cnt == 0)
             {   /* Last ADV_SG_BLOCK and scatter-gather entry. */
@@ -7115,7 +7035,7 @@ asc_isr_callback(ASC_DVC_VAR *asc_dvc_varp, ASC_QDONE_INFO *qdonep)
      * If the request's host pointer is not valid, display a
      * message and return.
      */
-    shp = scp->host;
+    shp = scp->device->host;
     for (i = 0; i < asc_board_count; i++) {
         if (asc_host[i] == shp) {
             break;
@@ -7157,10 +7077,10 @@ asc_isr_callback(ASC_DVC_VAR *asc_dvc_varp, ASC_QDONE_INFO *qdonep)
          * If an INQUIRY command completed successfully, then call
          * the AscInquiryHandling() function to set-up the device.
          */
-        if (scp->cmnd[0] == SCSICMD_Inquiry && scp->lun == 0 &&
+        if (scp->cmnd[0] == SCSICMD_Inquiry && scp->device->lun == 0 &&
             (scp->request_bufflen - qdonep->remain_bytes) >= 8)
         {
-            AscInquiryHandling(asc_dvc_varp, scp->target & 0x7,
+            AscInquiryHandling(asc_dvc_varp, scp->device->id & 0x7,
                 (ASC_SCSI_INQUIRY *) scp->request_buffer);
         }
 
@@ -7172,7 +7092,7 @@ asc_isr_callback(ASC_DVC_VAR *asc_dvc_varp, ASC_QDONE_INFO *qdonep)
          * then return the number of underrun bytes.
          */
         if (scp->request_bufflen != 0 && qdonep->remain_bytes != 0 &&
-            qdonep->remain_bytes <= scp->request_bufflen != 0) {
+            qdonep->remain_bytes <= scp->request_bufflen) {
             ASC_DBG1(1, "asc_isr_callback: underrun condition %u bytes\n",
             (unsigned) qdonep->remain_bytes);
             scp->resid = qdonep->remain_bytes;
@@ -7232,10 +7152,10 @@ asc_isr_callback(ASC_DVC_VAR *asc_dvc_varp, ASC_QDONE_INFO *qdonep)
      * current request finished normally, then set the bit for the target
      * to indicate that a device is present.
      */
-    if ((boardp->init_tidmask & ADV_TID_TO_TIDMASK(scp->target)) == 0 &&
+    if ((boardp->init_tidmask & ADV_TID_TO_TIDMASK(scp->device->id)) == 0 &&
         qdonep->d3.done_stat == QD_NO_ERROR &&
         qdonep->d3.host_stat == QHSTA_NO_ERROR) {
-        boardp->init_tidmask |= ADV_TID_TO_TIDMASK(scp->target);
+        boardp->init_tidmask |= ADV_TID_TO_TIDMASK(scp->device->id);
     }
 
     /*
@@ -7304,7 +7224,7 @@ adv_isr_callback(ADV_DVC_VAR *adv_dvc_varp, ADV_SCSI_REQ_Q *scsiqp)
      * If the request's host pointer is not valid, display a message
      * and return.
      */
-    shp = scp->host;
+    shp = scp->device->host;
     for (i = 0; i < asc_board_count; i++) {
         if (asc_host[i] == shp) {
             break;
@@ -7415,10 +7335,10 @@ adv_isr_callback(ADV_DVC_VAR *adv_dvc_varp, ADV_SCSI_REQ_Q *scsiqp)
      * current request finished normally, then set the bit for the target
      * to indicate that a device is present.
      */
-    if ((boardp->init_tidmask & ADV_TID_TO_TIDMASK(scp->target)) == 0 &&
+    if ((boardp->init_tidmask & ADV_TID_TO_TIDMASK(scp->device->id)) == 0 &&
         scsiqp->done_status == QD_NO_ERROR &&
         scsiqp->host_status == QHSTA_NO_ERROR) {
-        boardp->init_tidmask |= ADV_TID_TO_TIDMASK(scp->target);
+        boardp->init_tidmask |= ADV_TID_TO_TIDMASK(scp->device->id);
     }
 
     /*
@@ -7658,7 +7578,7 @@ asc_dequeue_list(asc_queue_t *ascq, REQP *lastpp, int tid)
         {
             REQP reqp;
             for (reqp = firstp; reqp; reqp = REQPNEXT(reqp)) {
-                REQTIMESTAT("asc_dequeue_list", ascq, reqp, reqp->target);
+                REQTIMESTAT("asc_dequeue_list", ascq, reqp, reqp->device->id);
             }
         }
 #endif /* ADVANSYS_STATS */
@@ -8443,7 +8363,6 @@ asc_prt_driver_conf(struct Scsi_Host *shp, char *cp, int cplen)
     int                    totlen;
     int                    len;
     int                    chip_scsi_id;
-    int                    i;
 
     boardp = ASC_BOARDP(shp);
 
@@ -8468,8 +8387,8 @@ asc_prt_driver_conf(struct Scsi_Host *shp, char *cp, int cplen)
     ASC_PRT_NEXT();
 
     len = asc_prt_line(cp, leftlen,
-" unchecked_isa_dma %d, use_clustering %d, loaded_as_module %d\n",
-        shp->unchecked_isa_dma, shp->use_clustering, shp->loaded_as_module);
+" unchecked_isa_dma %d, use_clustering %d\n",
+        shp->unchecked_isa_dma, shp->use_clustering);
     ASC_PRT_NEXT();
 
     len = asc_prt_line(cp, leftlen,
@@ -8487,25 +8406,6 @@ asc_prt_driver_conf(struct Scsi_Host *shp, char *cp, int cplen)
         chip_scsi_id = boardp->dvc_cfg.asc_dvc_cfg.chip_scsi_id;
     } else {
         chip_scsi_id = boardp->dvc_var.adv_dvc_var.chip_scsi_id;
-    }
-
-    if (boardp->flags & ASC_SELECT_QUEUE_DEPTHS) {
-        len = asc_prt_line(cp, leftlen, " queue_depth:");
-        ASC_PRT_NEXT();
-        for (i = 0; i <= ADV_MAX_TID; i++) {
-            if ((chip_scsi_id == i) ||
-                ((boardp->init_tidmask & ADV_TID_TO_TIDMASK(i)) == 0)) {
-                continue;
-            }
-            if (boardp->device[i] == NULL) {
-                continue;
-            }
-            len = asc_prt_line(cp, leftlen, " %X:%d",
-                i, boardp->device[i]->queue_depth);
-            ASC_PRT_NEXT();
-        }
-        len = asc_prt_line(cp, leftlen, "\n");
-        ASC_PRT_NEXT();
     }
 
     return totlen;
@@ -9109,10 +9009,7 @@ DvcReadPCIConfigByte(
 {
 #ifdef CONFIG_PCI
     uchar byte_data;
-    pcibios_read_config_byte(ASC_PCI_ID2BUS(asc_dvc->cfg->pci_slot_info),
-        PCI_DEVFN(ASC_PCI_ID2DEV(asc_dvc->cfg->pci_slot_info),
-            ASC_PCI_ID2FUNC(asc_dvc->cfg->pci_slot_info)),
-        offset, &byte_data);
+    pci_read_config_byte(asc_dvc->cfg->pci_dev, offset, &byte_data);
     return byte_data;
 #else /* !defined(CONFIG_PCI) */
     return 0;
@@ -9131,10 +9028,7 @@ DvcWritePCIConfigByte(
 )
 {
 #ifdef CONFIG_PCI
-    pcibios_write_config_byte(ASC_PCI_ID2BUS(asc_dvc->cfg->pci_slot_info),
-        PCI_DEVFN(ASC_PCI_ID2DEV(asc_dvc->cfg->pci_slot_info),
-            ASC_PCI_ID2FUNC(asc_dvc->cfg->pci_slot_info)),
-        offset, byte_data);
+    pci_write_config_byte(asc_dvc->cfg->pci_dev, offset, byte_data);
 #endif /* CONFIG_PCI */
 }
 
@@ -9232,10 +9126,7 @@ DvcAdvReadPCIConfigByte(
 {
 #ifdef CONFIG_PCI
     uchar byte_data;
-    pcibios_read_config_byte(ASC_PCI_ID2BUS(asc_dvc->cfg->pci_slot_info),
-        PCI_DEVFN(ASC_PCI_ID2DEV(asc_dvc->cfg->pci_slot_info),
-            ASC_PCI_ID2FUNC(asc_dvc->cfg->pci_slot_info)),
-        offset, &byte_data);
+    pci_read_config_byte(asc_dvc->cfg->pci_dev, offset, &byte_data);
     return byte_data;
 #else /* CONFIG_PCI */
     return 0;
@@ -9254,10 +9145,7 @@ DvcAdvWritePCIConfigByte(
 )
 {
 #ifdef CONFIG_PCI
-    pcibios_write_config_byte(ASC_PCI_ID2BUS(asc_dvc->cfg->pci_slot_info),
-        PCI_DEVFN(ASC_PCI_ID2DEV(asc_dvc->cfg->pci_slot_info),
-            ASC_PCI_ID2FUNC(asc_dvc->cfg->pci_slot_info)),
-        offset, byte_data);
+    pci_write_config_byte(asc_dvc->cfg->pci_dev, offset, byte_data);
 #else /* CONFIG_PCI */
     return 0;
 #endif /* CONFIG_PCI */
@@ -9464,14 +9352,14 @@ asc_prt_scsi_host(struct Scsi_Host *s)
 
     printk("Scsi_Host at addr 0x%lx\n", (ulong) s);
     printk(
-" next 0x%lx, extra_bytes %u, host_busy %u, host_no %d, last_reset %d,\n",
-        (ulong) s->next, s->extra_bytes, s->host_busy, s->host_no,
+" next 0x%lx, host_busy %u, host_no %d, last_reset %d,\n",
+        (ulong) s->next, s->host_busy, s->host_no,
         (unsigned) s->last_reset);
 
 #if ASC_LINUX_KERNEL24
     printk(
-" host_queue 0x%lx, hostt 0x%lx\n",
-        (ulong) s->host_queue, (ulong) s->hostt);
+" hostt 0x%lx\n",
+        (ulong) s->hostt);
 #elif ASC_LINUX_KERNEL22
     printk(
 " host_queue 0x%lx, hostt 0x%lx, block 0x%lx,\n",
@@ -9487,9 +9375,8 @@ asc_prt_scsi_host(struct Scsi_Host *s)
         s->dma_channel, s->this_id, s->can_queue);
 
     printk(
-" cmd_per_lun %d, sg_tablesize %d, unchecked_isa_dma %d, loaded_as_module %d\n",
-        s->cmd_per_lun, s->sg_tablesize, s->unchecked_isa_dma,
-        s->loaded_as_module);
+" cmd_per_lun %d, sg_tablesize %d, unchecked_isa_dma %d\n",
+        s->cmd_per_lun, s->sg_tablesize, s->unchecked_isa_dma);
 
     if (ASC_NARROW_BOARD(boardp)) {
         asc_prt_asc_dvc_var(&ASC_BOARDP(s)->dvc_var.asc_dvc_var);
@@ -9618,7 +9505,7 @@ asc_prt_asc_dvc_cfg(ASC_DVC_CFG *h)
 
     printk(
 " pci_device_id %d, lib_serial_no %u, lib_version %u, mcode_date 0x%x,\n",
-          h->pci_device_id, h->lib_serial_no, h->lib_version, h->mcode_date);
+          h->pci_dev->device, h->lib_serial_no, h->lib_version, h->mcode_date);
 
     printk(
 " mcode_version %d, overrun_buf 0x%lx\n",
@@ -9743,7 +9630,7 @@ asc_prt_adv_dvc_cfg(ADV_DVC_CFG *h)
 
     printk(
 "  mcode_version 0x%x, pci_device_id 0x%x, lib_version %u\n",
-       h->mcode_version, h->pci_device_id, h->lib_version);
+       h->mcode_version, h->pci_dev->device, h->lib_version);
 
     printk(
 "  control_flag 0x%x, pci_slot_info 0x%x\n",
@@ -12412,7 +12299,7 @@ AscInitFromAscDvcVar(
     ushort              pci_device_id;
 
     iop_base = asc_dvc->iop_base;
-    pci_device_id = asc_dvc->cfg->pci_device_id;
+    pci_device_id = asc_dvc->cfg->pci_dev->device;
     warn_code = 0;
     cfg_msw = AscGetChipCfgMsw(iop_base);
     if ((cfg_msw & ASC_CFG_MSW_CLR_MASK) != 0) {

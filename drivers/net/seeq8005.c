@@ -32,26 +32,25 @@ static const char version[] =
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/errno.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
+
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <linux/errno.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
 #include "seeq8005.h"
 
 /* First, a few definitions that the brave might change. */
@@ -85,7 +84,7 @@ static int seeq8005_probe1(struct net_device *dev, int ioaddr);
 static int seeq8005_open(struct net_device *dev);
 static void seeq8005_timeout(struct net_device *dev);
 static int seeq8005_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void seeq8005_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t seeq8005_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void seeq8005_rx(struct net_device *dev);
 static int seeq8005_close(struct net_device *dev);
 static struct net_device_stats *seeq8005_get_stats(struct net_device *dev);
@@ -378,9 +377,15 @@ static void seeq8005_timeout(struct net_device *dev)
 static int seeq8005_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
-	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	short length = skb->len;
 	unsigned char *buf = skb->data;
 
+	if (length < ETH_ZLEN) {
+		skb = skb_padto(skb, ETH_ZLEN);
+		if (skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
 	/* Block a timer-based transmit from overlapping */
 	netif_stop_queue(dev);
 	
@@ -395,11 +400,12 @@ static int seeq8005_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
-static void seeq8005_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t seeq8005_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device *dev = dev_id;
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 0;
+	int handled = 0;
 
 	ioaddr = dev->base_addr;
 	lp = (struct net_local *)dev->priv;
@@ -411,17 +417,20 @@ static void seeq8005_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		}
 		
 		if (status & SEEQSTAT_WINDOW_INT) {
+			handled = 1;
 			outw( SEEQCMD_WINDOW_INT_ACK | (status & SEEQCMD_INT_MASK), SEEQ_CMD);
 			if (net_debug) {
 				printk("%s: window int!\n",dev->name);
 			}
 		}
 		if (status & SEEQSTAT_TX_INT) {
+			handled = 1;
 			outw( SEEQCMD_TX_INT_ACK | (status & SEEQCMD_INT_MASK), SEEQ_CMD);
 			lp->stats.tx_packets++;
 			netif_wake_queue(dev);	/* Inform upper layers. */
 		}
 		if (status & SEEQSTAT_RX_INT) {
+			handled = 1;
 			/* Got a packet(s). */
 			seeq8005_rx(dev);
 		}
@@ -431,6 +440,7 @@ static void seeq8005_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	if(net_debug>2) {
 		printk("%s: eoi\n",dev->name);
 	}
+	return IRQ_RETVAL(handled);
 }
 
 /* We have a good packet(s), get it/them out of the buffers. */
@@ -708,7 +718,7 @@ inline void wait_for_buffer(struct net_device * dev)
 	
 #ifdef MODULE
 
-static struct net_device dev_seeq = { init: seeq8005_probe };
+static struct net_device dev_seeq = { .init = seeq8005_probe };
 static int io = 0x320;
 static int irq = 10;
 MODULE_LICENSE("GPL");
@@ -728,10 +738,6 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	/*
-	 *	No need to check MOD_IN_USE, as sys_delete_module() checks.
-	 */
-
 	unregister_netdev(&dev_seeq);
 
 	/*

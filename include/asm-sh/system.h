@@ -3,6 +3,7 @@
 
 /*
  * Copyright (C) 1999, 2000  Niibe Yutaka  &  Kaz Kojima
+ * Copyright (C) 2002 Paul Mundt
  */
 
 #include <linux/config.h>
@@ -12,62 +13,49 @@
  *	switch_to() should switch tasks to task nr n, first
  */
 
-typedef struct {
-	unsigned long seg;
-} mm_segment_t;
-
-#ifdef CONFIG_SMP
-#error no SMP SuperH
-#else
-#define prepare_to_switch()	do { } while(0)
-#define switch_to(prev,next,last) do { \
- register struct task_struct *__last; \
- register unsigned long *__ts1 __asm__ ("r1") = &prev->thread.sp; \
- register unsigned long *__ts2 __asm__ ("r2") = &prev->thread.pc; \
- register unsigned long *__ts4 __asm__ ("r4") = (unsigned long *)prev; \
- register unsigned long *__ts5 __asm__ ("r5") = (unsigned long *)next; \
- register unsigned long *__ts6 __asm__ ("r6") = &next->thread.sp; \
- register unsigned long __ts7 __asm__ ("r7") = next->thread.pc; \
- __asm__ __volatile__ (".balign 4\n\t" \
-		       "stc.l	gbr, @-r15\n\t" \
-		       "sts.l	pr, @-r15\n\t" \
-		       "mov.l	r8, @-r15\n\t" \
-		       "mov.l	r9, @-r15\n\t" \
-		       "mov.l	r10, @-r15\n\t" \
-		       "mov.l	r11, @-r15\n\t" \
-		       "mov.l	r12, @-r15\n\t" \
-		       "mov.l	r13, @-r15\n\t" \
-		       "mov.l	r14, @-r15\n\t" \
-		       "mov.l	r15, @r1	! save SP\n\t" \
+#define switch_to(prev, next, last) do {				\
+ register unsigned long __dummy;					\
+ register unsigned long *__ts1 __asm__ ("r1") = &prev->thread.sp;	\
+ register unsigned long *__ts2 __asm__ ("r2") = &prev->thread.pc;	\
+ register unsigned long *__ts4 __asm__ ("r4") = (unsigned long *)prev;	\
+ register unsigned long *__ts5 __asm__ ("r5") = (unsigned long *)next;	\
+ register unsigned long *__ts6 __asm__ ("r6") = &next->thread.sp;	\
+ register unsigned long __ts7 __asm__ ("r7") = next->thread.pc;		\
+ __asm__ __volatile__ (".balign 4\n\t" 					\
+		       "stc.l	gbr, @-r15\n\t" 			\
+		       "sts.l	pr, @-r15\n\t" 				\
+		       "mov.l	r8, @-r15\n\t" 				\
+		       "mov.l	r9, @-r15\n\t" 				\
+		       "mov.l	r10, @-r15\n\t" 			\
+		       "mov.l	r11, @-r15\n\t" 			\
+		       "mov.l	r12, @-r15\n\t" 			\
+		       "mov.l	r13, @-r15\n\t" 			\
+		       "mov.l	r14, @-r15\n\t" 			\
+		       "mov.l	r15, @r1	! save SP\n\t"		\
 		       "mov.l	@r6, r15	! change to new stack\n\t" \
-		       "mov.l	%0, @-r15	! push R0 onto new stack\n\t" \
-		       "mova	1f, %0\n\t" \
-		       "mov.l	%0, @r2	! save PC\n\t" \
-		       "mov.l	2f, %0\n\t" \
+		       "mova	1f, %0\n\t" 				\
+		       "mov.l	%0, @r2		! save PC\n\t" 		\
+		       "mov.l	2f, %0\n\t" 				\
 		       "jmp	@%0		! call __switch_to\n\t" \
-		       " lds	r7, pr	!  with return to new PC\n\t" \
-		       ".balign	4\n"	\
-		       "2:\n\t" \
-		       ".long	" "__switch_to\n" \
-		       "1:\n\t" \
-		       "mov.l	@r15+, %0	! pop R0 from new stack\n\t" \
-		       "mov.l	@r15+, r14\n\t" \
-		       "mov.l	@r15+, r13\n\t" \
-		       "mov.l	@r15+, r12\n\t" \
-		       "mov.l	@r15+, r11\n\t" \
-		       "mov.l	@r15+, r10\n\t" \
-		       "mov.l	@r15+, r9\n\t" \
-		       "mov.l	@r15+, r8\n\t" \
-		       "lds.l	@r15+, pr\n\t" \
-		       "ldc.l	@r15+, gbr\n\t" \
-		       :"=&z" (__last) \
-		       :"0" (prev), \
-			"r" (__ts1), "r" (__ts2), \
-			"r" (__ts4), "r" (__ts5), "r" (__ts6), "r" (__ts7) \
-		       :"r3", "t"); \
-  last = __last; \
+		       " lds	r7, pr		!  with return to new PC\n\t" \
+		       ".balign	4\n"					\
+		       "2:\n\t"						\
+		       ".long	__switch_to\n"				\
+		       "1:\n\t"						\
+		       "mov.l	@r15+, r14\n\t"				\
+		       "mov.l	@r15+, r13\n\t"				\
+		       "mov.l	@r15+, r12\n\t"				\
+		       "mov.l	@r15+, r11\n\t"				\
+		       "mov.l	@r15+, r10\n\t"				\
+		       "mov.l	@r15+, r9\n\t"				\
+		       "mov.l	@r15+, r8\n\t"				\
+		       "lds.l	@r15+, pr\n\t"				\
+		       "ldc.l	@r15+, gbr\n\t"				\
+		       : "=z" (__dummy)					\
+		       : "r" (__ts1), "r" (__ts2), "r" (__ts4), 	\
+			 "r" (__ts5), "r" (__ts6), "r" (__ts7) 		\
+		       : "r3", "t");					\
 } while (0)
-#endif
 
 #define nop() __asm__ __volatile__ ("nop")
 
@@ -89,22 +77,25 @@ extern void __xchg_called_with_bad_pointer(void);
 #define mb()	__asm__ __volatile__ ("": : :"memory")
 #define rmb()	mb()
 #define wmb()	__asm__ __volatile__ ("": : :"memory")
+#define read_barrier_depends()	do { } while(0)
 
 #ifdef CONFIG_SMP
 #define smp_mb()	mb()
 #define smp_rmb()	rmb()
 #define smp_wmb()	wmb()
+#define smp_read_barrier_depends()	read_barrier_depends()
 #else
 #define smp_mb()	barrier()
 #define smp_rmb()	barrier()
 #define smp_wmb()	barrier()
+#define smp_read_barrier_depends()	do { } while(0)
 #endif
 
 #define set_mb(var, value) do { xchg(&var, value); } while (0)
 #define set_wmb(var, value) do { var = value; wmb(); } while (0)
 
 /* Interrupt Control */
-static __inline__ void __sti(void)
+static __inline__ void local_irq_enable(void)
 {
 	unsigned long __dummy0, __dummy1;
 
@@ -118,7 +109,7 @@ static __inline__ void __sti(void)
 			     : "memory");
 }
 
-static __inline__ void __cli(void)
+static __inline__ void local_irq_disable(void)
 {
 	unsigned long __dummy;
 	__asm__ __volatile__("stc	sr, %0\n\t"
@@ -129,10 +120,17 @@ static __inline__ void __cli(void)
 			     : "memory");
 }
 
-#define __save_flags(x) \
+#define local_save_flags(x) \
 	__asm__("stc sr, %0; and #0xf0, %0" : "=&z" (x) :/**/: "memory" )
 
-static __inline__ unsigned long __save_and_cli(void)
+#define irqs_disabled()			\
+({					\
+	unsigned long flags;		\
+	local_save_flags(flags);	\
+	(flags != 0);			\
+})
+
+static __inline__ unsigned long local_irq_save(void)
 {
 	unsigned long flags, __dummy;
 
@@ -149,34 +147,34 @@ static __inline__ unsigned long __save_and_cli(void)
 }
 
 #ifdef DEBUG_CLI_STI
-static __inline__ void  __restore_flags(unsigned long x)
+static __inline__ void  local_irq_restore(unsigned long x)
 {
 	if ((x & 0x000000f0) != 0x000000f0)
-		__sti();
+		local_irq_enable();
 	else {
 		unsigned long flags;
-		__save_flags(flags);
+		local_save_flags(flags);
 
 		if (flags == 0) {
 			extern void dump_stack(void);
 			printk(KERN_ERR "BUG!\n");
 			dump_stack();
-			__cli();
+			local_irq_disable();
 		}
 	}
 }
 #else
-#define __restore_flags(x) do { 			\
+#define local_irq_restore(x) do { 			\
 	if ((x & 0x000000f0) != 0x000000f0)		\
-		__sti();				\
+		local_irq_enable();				\
 } while (0)
 #endif
 
 #define really_restore_flags(x) do { 			\
 	if ((x & 0x000000f0) != 0x000000f0)		\
-		__sti();				\
+		local_irq_enable();				\
 	else						\
-		__cli();				\
+		local_irq_disable();				\
 } while (0)
 
 /*
@@ -216,40 +214,16 @@ do {							\
 } while (0)
 
 /* For spinlocks etc */
-#define local_irq_save(x)	x = __save_and_cli()
-#define local_irq_restore(x)	__restore_flags(x)
-#define local_irq_disable()	__cli()
-#define local_irq_enable()	__sti()
-
-#ifdef CONFIG_SMP
-
-extern void __global_cli(void);
-extern void __global_sti(void);
-extern unsigned long __global_save_flags(void);
-extern void __global_restore_flags(unsigned long);
-#define cli() __global_cli()
-#define sti() __global_sti()
-#define save_flags(x) ((x)=__global_save_flags())
-#define restore_flags(x) __global_restore_flags(x)
-
-#else
-
-#define cli() __cli()
-#define sti() __sti()
-#define save_flags(x) __save_flags(x)
-#define save_and_cli(x) x = __save_and_cli()
-#define restore_flags(x) __restore_flags(x)
-
-#endif
+#define local_irq_save(x)	x = local_irq_save()
 
 static __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
 {
 	unsigned long flags, retval;
 
-	save_and_cli(flags);
+	local_irq_save(flags);
 	retval = *m;
 	*m = val;
-	restore_flags(flags);
+	local_irq_restore(flags);
 	return retval;
 }
 
@@ -257,10 +231,10 @@ static __inline__ unsigned long xchg_u8(volatile unsigned char * m, unsigned lon
 {
 	unsigned long flags, retval;
 
-	save_and_cli(flags);
+	local_irq_save(flags);
 	retval = *m;
 	*m = val & 0xff;
-	restore_flags(flags);
+	local_irq_restore(flags);
 	return retval;
 }
 

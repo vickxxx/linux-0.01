@@ -202,7 +202,7 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 			return sys_semctl (first, second, third, fourth);
 			}
 		default:
-			return -EINVAL;
+			return -ENOSYS;
 		}
 	if (call <= MSGCTL) 
 		switch (call) {
@@ -233,7 +233,7 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 			return sys_msgctl (first, second,
 					   (struct msqid_ds *) ptr);
 		default:
-			return -EINVAL;
+			return -ENOSYS;
 		}
 	if (call <= SHMCTL) 
 		switch (call) {
@@ -256,7 +256,7 @@ asmlinkage int sys_ipc (uint call, int first, int second,
 			return sys_shmctl (first, second,
 					   (struct shmid_ds *) ptr);
 		default:
-			return -EINVAL;
+			return -ENOSYS;
 		}
 
 	return -EINVAL;
@@ -675,14 +675,4 @@ out:
 asmlinkage int sys_getpagesize(void)
 {
 	return PAGE_SIZE;
-}
-
-/*
- * Old cruft
- */
-asmlinkage int sys_pause(void)
-{
-	current->state = TASK_INTERRUPTIBLE;
-	schedule();
-	return -ERESTARTNOHAND;
 }

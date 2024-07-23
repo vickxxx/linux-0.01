@@ -115,9 +115,9 @@
  * socket is then connected in the originating node to the pppd instance.
  * At this point, in the originating node, the first socket is closed.
  *
- * I admit, this is a bit messy and waste some ressources. The alternative
+ * I admit, this is a bit messy and waste some resources. The alternative
  * is caching incoming socket, and that's also quite messy and waste
- * ressources.
+ * resources.
  * We also make connection time slower. For example, on a 115 kb/s link it
  * adds 60ms to the connection time (770 ms). However, this is slower than
  * the time it takes to fire up pppd on my P133...
@@ -222,6 +222,18 @@
  *	o Fix race condition in irnet_connect_indication().
  *	  If the socket was already trying to connect, drop old connection
  *	  and use new one only if acting as primary. See comments.
+ *
+ * v13 - 30.5.02 - Jean II
+ *	o Update module init code
+ *
+ * v14 - 20.2.03 - Jean II
+ *	o Add discovery hint bits in the control channel.
+ *	o Remove obsolete MOD_INC/DEC_USE_COUNT in favor of .owner
+ *
+ * v15 - 7.4.03 - Jean II
+ *	o Replace spin_lock_irqsave() with spin_lock_bh() so that we can
+ *	  use ppp_unit_number(). It's probably also better overall...
+ *	o Disable call to ppp_unregister_channel(), because we can't do it.
  */
 
 /***************************** INCLUDES *****************************/
@@ -239,6 +251,7 @@
 #include <linux/config.h>
 #include <linux/ctype.h>	/* isspace() */
 #include <asm/uaccess.h>
+#include <linux/init.h>
 
 #include <linux/ppp_defs.h>
 #include <linux/if_ppp.h>
@@ -268,6 +281,7 @@
 #undef CONNECT_INDIC_KICK	/* Might mess IrDA, not needed */
 #undef FAIL_SEND_DISCONNECT	/* Might mess IrDA, not needed */
 #undef PASS_CONNECT_PACKETS	/* Not needed ? Safe */
+#undef MISSING_PPP_API		/* Stuff I wish I could do */
 
 /* PPP side of the business */
 #define BLOCK_WHEN_CONNECT	/* Block packets when connecting */
@@ -280,7 +294,7 @@
 /*
  * This set of flags enable and disable all the various warning,
  * error and debug message of this driver.
- * Each section can be enabled and disabled independantly
+ * Each section can be enabled and disabled independently
  */
 /* In the PPP part */
 #define DEBUG_CTRL_TRACE	0	/* Control channel */
@@ -409,8 +423,8 @@ typedef struct irnet_socket
 
   /* ------------------------ IrTTP part ------------------------ */
   /* We create a pseudo "socket" over the IrDA tranport */
-  int			ttp_open;	/* Set when IrTTP is ready */
-  int			ttp_connect;	/* Set when IrTTP is connecting */
+  unsigned long		ttp_open;	/* Set when IrTTP is ready */
+  unsigned long		ttp_connect;	/* Set when IrTTP is connecting */
   struct tsap_cb *	tsap;		/* IrTTP instance (the connection) */
 
   char			rname[NICKNAME_MAX_LEN + 1];
@@ -430,7 +444,7 @@ typedef struct irnet_socket
 
   /* ------------------- IrLMP and IrIAS part ------------------- */
   /* Used for IrDA Discovery and socket name resolution */
-  __u32			ckey;		/* IrLMP client handle */
+  void *		ckey;		/* IrLMP client handle */
   __u16			mask;		/* Hint bits mask (filter discov.)*/
   int			nslots;		/* Number of slots for discovery */
 
@@ -472,6 +486,7 @@ typedef struct irnet_log
   __u32		saddr;
   __u32		daddr;
   char		name[NICKNAME_MAX_LEN + 1];	/* 21 + 1 */
+  __u16_host_order hints;			/* Discovery hint bits */
 } irnet_log;
 
 /*
@@ -502,16 +517,11 @@ extern int
 	irda_irnet_init(void);		/* Initialise IrDA part of IrNET */
 extern void
 	irda_irnet_cleanup(void);	/* Teardown IrDA part of IrNET */
-/* --------------------------- PPP PART --------------------------- */
-extern int
-	ppp_irnet_init(void);		/* Initialise PPP part of IrNET */
-extern void
-	ppp_irnet_cleanup(void);	/* Teardown PPP part of IrNET */
 /* ---------------------------- MODULE ---------------------------- */
 extern int
-	init_module(void);		/* Initialise IrNET module */
+	irnet_init(void);		/* Initialise IrNET module */
 extern void
-	cleanup_module(void);		/* Teardown IrNET module  */
+	irnet_cleanup(void);		/* Teardown IrNET module */
 
 /**************************** VARIABLES ****************************/
 

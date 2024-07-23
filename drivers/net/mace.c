@@ -15,6 +15,8 @@
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
+#include <linux/spinlock.h>
 #include <asm/prom.h>
 #include <asm/dbdma.h>
 #include <asm/io.h>
@@ -24,15 +26,15 @@
 static struct net_device *mace_devs;
 static int port_aaui = -1;
 
-MODULE_PARM(port_aaui, "i");
-MODULE_PARM_DESC(port_aaui, "MACE uses AAUI port (0-1)");
-
 #define N_RX_RING	8
 #define N_TX_RING	6
 #define MAX_TX_ACTIVE	1
 #define NCMDS_TX	1	/* dma commands per element in tx ring */
 #define RX_BUFLEN	(ETH_FRAME_LEN + 8)
 #define TX_TIMEOUT	HZ	/* 1 second */
+
+/* Chip rev needs workaround on HW & multicast addr change */
+#define BROKEN_ADDRCHG_REV	0x0941
 
 /* Bits in transmit DMA status */
 #define TX_DMA_ERR	0x80
@@ -59,7 +61,10 @@ struct mace_data {
     struct timer_list tx_timeout;
     int timeout_active;
     int port_aaui;
+    int chipid;
+    struct device_node* of_node;
     struct net_device *next_mace;
+    spinlock_t lock;
 };
 
 /*
@@ -81,9 +86,9 @@ static struct net_device_stats *mace_stats(struct net_device *dev);
 static void mace_set_multicast(struct net_device *dev);
 static void mace_reset(struct net_device *dev);
 static int mace_set_address(struct net_device *dev, void *addr);
-static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static void mace_txdma_intr(int irq, void *dev_id, struct pt_regs *regs);
-static void mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t mace_txdma_intr(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs);
 static void mace_set_timeout(struct net_device *dev);
 static void mace_tx_timeout(unsigned long data);
 static inline void dbdma_reset(volatile struct dbdma_regs *dma);
@@ -152,6 +157,22 @@ static void __init mace_probe1(struct device_node *mace)
 	SET_MODULE_OWNER(dev);
 
 	mp = dev->priv;
+	mp->of_node = mace;
+	
+	if (!request_OF_resource(mace, 0, " (mace)")) {
+		printk(KERN_ERR "MACE: can't request IO resource !\n");
+		goto err_out;
+	}
+	if (!request_OF_resource(mace, 1, " (mace tx dma)")) {
+		printk(KERN_ERR "MACE: can't request TX DMA resource !\n");
+		goto err_out;
+	}
+
+	if (!request_OF_resource(mace, 2, " (mace tx dma)")) {
+		printk(KERN_ERR "MACE: can't request RX DMA resource !\n");
+		goto err_out;
+	}
+
 	dev->base_addr = mace->addrs[0].address;
 	mp->mace = (volatile struct mace *)
 		ioremap(mace->addrs[0].address, 0x1000);
@@ -163,8 +184,10 @@ static void __init mace_probe1(struct device_node *mace)
 		dev->dev_addr[j] = rev? bitrev(addr[j]): addr[j];
 		printk("%c%.2x", (j? ':': ' '), dev->dev_addr[j]);
 	}
-	printk(", chip revision %d.%d\n",
-		in_8(&mp->mace->chipid_hi), in_8(&mp->mace->chipid_lo));
+	mp->chipid = (in_8(&mp->mace->chipid_hi) << 8) |
+			in_8(&mp->mace->chipid_lo);
+	printk(", chip revision %d.%d\n", mp->chipid >> 8, mp->chipid & 0xff);
+		
 
 	mp = (struct mace_data *) dev->priv;
 	mp->maccc = ENXMT | ENRCV;
@@ -182,6 +205,7 @@ static void __init mace_probe1(struct device_node *mace)
 	memset((char *) mp->tx_cmds, 0,
 	       (NCMDS_TX*N_TX_RING + N_RX_RING + 2) * sizeof(struct dbdma_cmd));
 	init_timer(&mp->tx_timeout);
+	spin_lock_init(&mp->lock);
 	mp->timeout_active = 0;
 
 	if (port_aaui >= 0)
@@ -221,6 +245,16 @@ static void __init mace_probe1(struct device_node *mace)
 
 	mp->next_mace = mace_devs;
 	mace_devs = dev;
+	return;
+	
+err_out:
+	unregister_netdev(dev);
+	if (mp->of_node) {
+		release_OF_resource(mp->of_node, 0);
+		release_OF_resource(mp->of_node, 1);
+		release_OF_resource(mp->of_node, 2);
+	}
+	kfree(dev);
 }
 
 static void dbdma_reset(volatile struct dbdma_regs *dma)
@@ -273,14 +307,19 @@ static void mace_reset(struct net_device *dev)
     __mace_set_address(dev, dev->dev_addr);
 
     /* clear the multicast filter */
-    out_8(&mb->iac, ADDRCHG | LOGADDR);
-    while ((in_8(&mb->iac) & ADDRCHG) != 0)
-	;
-    for (i = 0; i < 8; ++i) {
-	out_8(&mb->ladrf, 0);
+    if (mp->chipid == BROKEN_ADDRCHG_REV)
+	out_8(&mb->iac, LOGADDR);
+    else {
+	out_8(&mb->iac, ADDRCHG | LOGADDR);
+	while ((in_8(&mb->iac) & ADDRCHG) != 0)
+		;
     }
+    for (i = 0; i < 8; ++i)
+	out_8(&mb->ladrf, 0);
+
     /* done changing address */
-    out_8(&mb->iac, 0);
+    if (mp->chipid != BROKEN_ADDRCHG_REV)
+	out_8(&mb->iac, 0);
 
     if (mp->port_aaui)
     	out_8(&mb->plscc, PORTSEL_AUI + ENPLSIO);
@@ -290,16 +329,23 @@ static void mace_reset(struct net_device *dev)
 
 static void __mace_set_address(struct net_device *dev, void *addr)
 {
-    volatile struct mace *mb = ((struct mace_data *) dev->priv)->mace;
+    struct mace_data *mp = (struct mace_data *) dev->priv;
+    volatile struct mace *mb = mp->mace;
     unsigned char *p = addr;
     int i;
 
     /* load up the hardware address */
-    out_8(&mb->iac, ADDRCHG | PHYADDR);
-    while ((in_8(&mb->iac) & ADDRCHG) != 0)
-	;
+    if (mp->chipid == BROKEN_ADDRCHG_REV)
+    	out_8(&mb->iac, PHYADDR);
+    else {
+    	out_8(&mb->iac, ADDRCHG | PHYADDR);
+	while ((in_8(&mb->iac) & ADDRCHG) != 0)
+	    ;
+    }
     for (i = 0; i < 6; ++i)
 	out_8(&mb->padr, dev->dev_addr[i] = p[i]);
+    if (mp->chipid != BROKEN_ADDRCHG_REV)
+        out_8(&mb->iac, 0);
 }
 
 static int mace_set_address(struct net_device *dev, void *addr)
@@ -308,16 +354,33 @@ static int mace_set_address(struct net_device *dev, void *addr)
     volatile struct mace *mb = mp->mace;
     unsigned long flags;
 
-    save_flags(flags); cli();
+    spin_lock_irqsave(&mp->lock, flags);
 
     __mace_set_address(dev, addr);
 
-    out_8(&mb->iac, 0);
     /* note: setting ADDRCHG clears ENRCV */
     out_8(&mb->maccc, mp->maccc);
 
-    restore_flags(flags);
+    spin_unlock_irqrestore(&mp->lock, flags);
     return 0;
+}
+
+static inline void mace_clean_rings(struct mace_data *mp)
+{
+    int i;
+
+    /* free some skb's */
+    for (i = 0; i < N_RX_RING; ++i) {
+	if (mp->rx_bufs[i] != 0) {
+	    dev_kfree_skb(mp->rx_bufs[i]);
+	    mp->rx_bufs[i] = 0;
+	}
+    }
+    for (i = mp->tx_empty; i != mp->tx_fill; ) {
+	dev_kfree_skb(mp->tx_bufs[i]);
+	if (++i >= N_TX_RING)
+	    i = 0;
+    }
 }
 
 static int mace_open(struct net_device *dev)
@@ -390,24 +453,6 @@ static int mace_open(struct net_device *dev)
     return 0;
 }
 
-static inline void mace_clean_rings(struct mace_data *mp)
-{
-    int i;
-
-    /* free some skb's */
-    for (i = 0; i < N_RX_RING; ++i) {
-	if (mp->rx_bufs[i] != 0) {
-	    dev_kfree_skb(mp->rx_bufs[i]);
-	    mp->rx_bufs[i] = 0;
-	}
-    }
-    for (i = mp->tx_empty; i != mp->tx_fill; ) {
-	dev_kfree_skb(mp->tx_bufs[i]);
-	if (++i >= N_TX_RING)
-	    i = 0;
-    }
-}
-
 static int mace_close(struct net_device *dev)
 {
     struct mace_data *mp = (struct mace_data *) dev->priv;
@@ -431,10 +476,7 @@ static int mace_close(struct net_device *dev)
 static inline void mace_set_timeout(struct net_device *dev)
 {
     struct mace_data *mp = (struct mace_data *) dev->priv;
-    unsigned long flags;
 
-    save_flags(flags);
-    cli();
     if (mp->timeout_active)
 	del_timer(&mp->tx_timeout);
     mp->tx_timeout.expires = jiffies + TX_TIMEOUT;
@@ -442,7 +484,6 @@ static inline void mace_set_timeout(struct net_device *dev)
     mp->tx_timeout.data = (unsigned long) dev;
     add_timer(&mp->tx_timeout);
     mp->timeout_active = 1;
-    restore_flags(flags);
 }
 
 static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
@@ -454,7 +495,7 @@ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
     int fill, next, len;
 
     /* see if there's a free slot in the tx ring */
-    save_flags(flags); cli();
+    spin_lock_irqsave(&mp->lock, flags);
     fill = mp->tx_fill;
     next = fill + 1;
     if (next >= N_TX_RING)
@@ -462,10 +503,10 @@ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
     if (next == mp->tx_empty) {
 	netif_stop_queue(dev);
 	mp->tx_fullup = 1;
-	restore_flags(flags);
+	spin_unlock_irqrestore(&mp->lock, flags);
 	return 1;		/* can't take it at the moment */
     }
-    restore_flags(flags);
+    spin_unlock_irqrestore(&mp->lock, flags);
 
     /* partially fill in the dma command block */
     len = skb->len;
@@ -482,8 +523,7 @@ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
     out_le16(&np->command, DBDMA_STOP);
 
     /* poke the tx dma channel */
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(&mp->lock, flags);
     mp->tx_fill = next;
     if (!mp->tx_bad_runt && mp->tx_active < MAX_TX_ACTIVE) {
 	out_le16(&cp->xfer_status, 0);
@@ -496,7 +536,7 @@ static int mace_xmit_start(struct sk_buff *skb, struct net_device *dev)
 	next = 0;
     if (next == mp->tx_empty)
 	netif_stop_queue(dev);
-    restore_flags(flags);
+    spin_unlock_irqrestore(&mp->lock, flags);
 
     return 0;
 }
@@ -508,18 +548,15 @@ static struct net_device_stats *mace_stats(struct net_device *dev)
     return &p->stats;
 }
 
-/*
- * CRC polynomial - used in working out multicast filter bits.
- */
-#define CRC_POLY	0xedb88320
-
 static void mace_set_multicast(struct net_device *dev)
 {
     struct mace_data *mp = (struct mace_data *) dev->priv;
     volatile struct mace *mb = mp->mace;
-    int i, j, k, b;
-    unsigned long crc;
+    int i, j;
+    u32 crc;
+    unsigned long flags;
 
+    spin_lock_irqsave(&mp->lock, flags);
     mp->maccc &= ~PROM;
     if (dev->flags & IFF_PROMISC) {
 	mp->maccc |= PROM;
@@ -534,17 +571,7 @@ static void mace_set_multicast(struct net_device *dev)
 	    for (i = 0; i < 8; i++)
 		multicast_filter[i] = 0;
 	    for (i = 0; i < dev->mc_count; i++) {
-		crc = ~0;
-		for (j = 0; j < 6; ++j) {
-		    b = dmi->dmi_addr[j];
-		    for (k = 0; k < 8; ++k) {
-			if ((crc ^ b) & 1)
-			    crc = (crc >> 1) ^ CRC_POLY;
-			else
-			    crc >>= 1;
-			b >>= 1;
-		    }
-		}
+	        crc = ether_crc_le(6, dmi->dmi_addr);
 		j = crc >> 26;	/* bit number in multicast_filter */
 		multicast_filter[j >> 3] |= 1 << (j & 7);
 		dmi = dmi->next;
@@ -557,15 +584,21 @@ static void mace_set_multicast(struct net_device *dev)
 	printk("\n");
 #endif
 
-	out_8(&mb->iac, ADDRCHG | LOGADDR);
-	while ((in_8(&mb->iac) & ADDRCHG) != 0)
-	    ;
-	for (i = 0; i < 8; ++i) {
-	    out_8(&mb->ladrf, multicast_filter[i]);
+	if (mp->chipid == BROKEN_ADDRCHG_REV)
+	    out_8(&mb->iac, LOGADDR);
+	else {
+	    out_8(&mb->iac, ADDRCHG | LOGADDR);
+	    while ((in_8(&mb->iac) & ADDRCHG) != 0)
+		;
 	}
+	for (i = 0; i < 8; ++i)
+	    out_8(&mb->ladrf, multicast_filter[i]);
+	if (mp->chipid != BROKEN_ADDRCHG_REV)
+	    out_8(&mb->iac, 0);
     }
     /* reset maccc */
     out_8(&mb->maccc, mp->maccc);
+    spin_unlock_irqrestore(&mp->lock, flags);
 }
 
 static void mace_handle_misc_intrs(struct mace_data *mp, int intr)
@@ -589,7 +622,7 @@ static void mace_handle_misc_intrs(struct mace_data *mp, int intr)
 	    printk(KERN_DEBUG "mace: jabbering transceiver\n");
 }
 
-static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
     struct net_device *dev = (struct net_device *) dev_id;
     struct mace_data *mp = (struct mace_data *) dev->priv;
@@ -598,8 +631,10 @@ static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
     volatile struct dbdma_cmd *cp;
     int intr, fs, i, stat, x;
     int xcount, dstat;
+    unsigned long flags;
     /* static int mace_last_fs, mace_last_xcount; */
 
+    spin_lock_irqsave(&mp->lock, flags);
     intr = in_8(&mb->ir);		/* read interrupt register */
     in_8(&mb->xmtrc);			/* get retries */
     mace_handle_misc_intrs(mp, intr);
@@ -729,6 +764,8 @@ static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	out_le32(&td->control, ((RUN|WAKE) << 16) + (RUN|WAKE));
 	mace_set_timeout(dev);
     }
+    spin_unlock_irqrestore(&mp->lock, flags);
+    return IRQ_HANDLED;
 }
 
 static void mace_tx_timeout(unsigned long data)
@@ -742,8 +779,7 @@ static void mace_tx_timeout(unsigned long data)
     unsigned long flags;
     int i;
 
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(&mp->lock, flags);
     mp->timeout_active = 0;
     if (mp->tx_active == 0 && !mp->tx_bad_runt)
 	goto out;
@@ -795,14 +831,15 @@ static void mace_tx_timeout(unsigned long data)
     out_8(&mb->maccc, mp->maccc);
 
 out:
-    restore_flags(flags);
+    spin_unlock_irqrestore(&mp->lock, flags);
 }
 
-static void mace_txdma_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mace_txdma_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
+	return IRQ_HANDLED;
 }
 
-static void mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
     struct net_device *dev = (struct net_device *) dev_id;
     struct mace_data *mp = (struct mace_data *) dev->priv;
@@ -813,7 +850,9 @@ static void mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs)
     unsigned frame_status;
     static int mace_lost_status;
     unsigned char *data;
+    unsigned long flags;
 
+    spin_lock_irqsave(&mp->lock, flags);
     for (i = mp->rx_empty; i != mp->rx_fill; ) {
 	cp = mp->rx_cmds + i;
 	stat = ld_le16(&cp->xfer_status);
@@ -909,10 +948,14 @@ static void mace_rxdma_intr(int irq, void *dev_id, struct pt_regs *regs)
 	out_le32(&rd->control, ((RUN|WAKE) << 16) | (RUN|WAKE));
 	mp->rx_fill = i;
     }
+    spin_unlock_irqrestore(&mp->lock, flags);
+    return IRQ_HANDLED;
 }
 
 MODULE_AUTHOR("Paul Mackerras");
 MODULE_DESCRIPTION("PowerMac MACE driver.");
+MODULE_PARM(port_aaui, "i");
+MODULE_PARM_DESC(port_aaui, "MACE uses AAUI port (0-1)");
 MODULE_LICENSE("GPL");
 
 static void __exit mace_cleanup (void)
@@ -921,19 +964,23 @@ static void __exit mace_cleanup (void)
     struct mace_data *mp;
 
     while ((dev = mace_devs) != 0) {
-	mp = (struct mace_data *) mace_devs->priv;
-	mace_devs = mp->next_mace;
+		mp = (struct mace_data *) mace_devs->priv;
+		mace_devs = mp->next_mace;
 
-	free_irq(dev->irq, dev);
-	free_irq(mp->tx_dma_intr, dev);
-	free_irq(mp->rx_dma_intr, dev);
+		unregister_netdev(dev);
+		free_irq(dev->irq, dev);
+		free_irq(mp->tx_dma_intr, dev);
+		free_irq(mp->rx_dma_intr, dev);
 
-	unregister_netdev(dev);
-	kfree(dev);
+		release_OF_resource(mp->of_node, 0);
+		release_OF_resource(mp->of_node, 1);
+		release_OF_resource(mp->of_node, 2);
+
+		kfree(dev);
     }
     if (dummy_buf != NULL) {
-	kfree(dummy_buf);
-	dummy_buf = NULL;
+		kfree(dummy_buf);
+		dummy_buf = NULL;
     }
 }
 

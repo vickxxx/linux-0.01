@@ -49,8 +49,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	switch (cmd) {
 	case RTC_RD_TIME:	/* Read the time/date from RTC	*/
 	{
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		/* Ensure clock and real-time-mode-register are accessible */
 		msr = rtc->msr & 0xc0;
 		rtc->msr = 0x40;
@@ -66,7 +65,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			wtime.tm_wday = BCD2BIN(rtc->bcd_dow)-1;
 		} while (wtime.tm_sec != BCD2BIN(rtc->bcd_sec));
 		rtc->msr = msr;
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return copy_to_user((void *)arg, &wtime, sizeof wtime) ?
 								-EFAULT : 0;
 	}
@@ -94,7 +93,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 
 		leap_yr = ((!(yrs % 4) && (yrs % 100)) || !(yrs % 400));
 
-		if ((mon > 12) || (day == 0))
+		if ((mon > 12) || (mon < 1) || (day == 0))
 			return -EINVAL;
 
 		if (day > (days_in_mo[mon] + ((mon == 2) && leap_yr)))
@@ -106,8 +105,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		if (yrs >= 2070)
 			return -EINVAL;
 		
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		/* Ensure clock and real-time-mode-register are accessible */
 		msr = rtc->msr & 0xc0;
 		rtc->msr = 0x40;
@@ -125,7 +123,7 @@ static int rtc_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 		rtc->t0cr_rtmr = yrs%4 | 0x08;
 
 		rtc->msr = msr;
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return 0;
 	}
 	default:
@@ -161,9 +159,9 @@ static int rtc_release(struct inode *inode, struct file *file)
  */
 
 static struct file_operations rtc_fops = {
-	ioctl:		rtc_ioctl,
-	open:		rtc_open,
-	release:	rtc_release,
+	.ioctl =	rtc_ioctl,
+	.open =		rtc_open,
+	.release =	rtc_release,
 };
 
 static struct miscdevice rtc_dev=
@@ -179,7 +177,6 @@ int __init rtc_DP8570A_init(void)
 		return -ENODEV;
 
 	printk(KERN_INFO "DP8570A Real Time Clock Driver v%s\n", RTC_VERSION);
-	misc_register(&rtc_dev);
-	return 0;
+	return misc_register(&rtc_dev);
 }
 

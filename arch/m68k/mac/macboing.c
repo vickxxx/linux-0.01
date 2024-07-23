@@ -56,7 +56,8 @@ static void ( *mac_special_bell )( unsigned int, unsigned int, unsigned int ) = 
 /*
  * our timer to start/continue/stop the bell
  */
-static struct timer_list mac_sound_timer = { function: mac_nosound };
+static struct timer_list mac_sound_timer =
+		TIMER_INITIALIZER(mac_nosound, 0, 0);
 
 /*
  * Sort of initialize the sound chip (called from mac_mksound on the first
@@ -186,8 +187,7 @@ void mac_mksound( unsigned int freq, unsigned int length )
 		return;
 	}
 
-	save_flags( flags );
-	cli();
+	local_irq_save(flags);
 
 	del_timer( &mac_sound_timer );
 
@@ -209,7 +209,7 @@ void mac_mksound( unsigned int freq, unsigned int length )
 	mac_sound_timer.expires = jiffies + length;
 	add_timer( &mac_sound_timer );
 
-	restore_flags( flags );	
+	local_irq_restore(flags);
 }
 
 /*
@@ -239,8 +239,7 @@ static void mac_quadra_start_bell( unsigned int freq, unsigned int length, unsig
 	mac_bell_phasepersample = ( freq * sizeof( mac_asc_wave_tab ) ) / mac_asc_samplespersec;
 	/* this is reasonably big for small frequencies */ 
 
-	save_flags( flags );
-	cli();
+	local_irq_save(flags);
 
 	/* set the volume */
 	mac_asc_regs[ 0x806 ] = volume;
@@ -262,7 +261,7 @@ static void mac_quadra_start_bell( unsigned int freq, unsigned int length, unsig
 	mac_sound_timer.expires = jiffies + 1;
 	add_timer( &mac_sound_timer );
 
-	restore_flags( flags );
+	local_irq_restore(flags);
 }
 
 /*
@@ -282,8 +281,7 @@ static void mac_quadra_ring_bell( unsigned long ignored )
 	 * ...and the possibility to use a real sample (a boingy noise, maybe...)
 	 */
 
-	save_flags( flags );
-	cli();
+	local_irq_save(flags);
 	
 	del_timer( &mac_sound_timer );
 
@@ -300,7 +298,7 @@ static void mac_quadra_ring_bell( unsigned long ignored )
 	else
 		mac_asc_regs[ 0x801 ] = 0;
 	
-	restore_flags( flags );
+	local_irq_restore(flags);
 }
 
 /*

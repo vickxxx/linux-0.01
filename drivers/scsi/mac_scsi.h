@@ -29,19 +29,9 @@
 #ifndef MAC_NCR5380_H
 #define MAC_NCR5380_H
 
-#define MACSCSI_PUBLIC_RELEASE 1
-
+#define MACSCSI_PUBLIC_RELEASE 2
 
 #ifndef ASM
-int macscsi_abort (Scsi_Cmnd *);
-int macscsi_detect (Scsi_Host_Template *);
-int macscsi_release (struct Scsi_Host *);
-const char *macscsi_info (struct Scsi_Host *);
-int macscsi_reset(Scsi_Cmnd *, unsigned int);
-int macscsi_queue_command (Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int macscsi_proc_info (char *buffer, char **start, off_t offset,
-			int length, int hostno, int inout);
-
 #ifndef NULL
 #define NULL 0
 #endif
@@ -64,23 +54,6 @@ int macscsi_proc_info (char *buffer, char **start, off_t offset,
 
 #include <scsi/scsicam.h>
 
-#define MAC_NCR5380 {						\
-name:			"Macintosh NCR5380 SCSI",			\
-detect:			macscsi_detect,					\
-release:		macscsi_release,	/* Release */		\
-info:			macscsi_info,					\
-queuecommand:		macscsi_queue_command,				\
-abort:			macscsi_abort,			 		\
-reset:			macscsi_reset,					\
-bios_param:		scsicam_bios_param,	/* biosparam */		\
-can_queue:		CAN_QUEUE,		/* can queue */		\
-this_id:		7,			/* id */		\
-sg_tablesize:		SG_ALL,			/* sg_tablesize */	\
-cmd_per_lun:		CMD_PER_LUN,		/* cmd per lun */	\
-unchecked_isa_dma:	0,			/* unchecked_isa_dma */	\
-use_clustering:		DISABLE_CLUSTERING				\
-	}
-
 #ifndef HOSTS_C
 
 #define NCR5380_implementation_fields \
@@ -95,10 +68,15 @@ use_clustering:		DISABLE_CLUSTERING				\
 #define NCR5380_read(reg) macscsi_read(_instance, reg)
 #define NCR5380_write(reg, value) macscsi_write(_instance, reg, value)
 
+#define NCR5380_pread 	macscsi_pread
+#define NCR5380_pwrite 	macscsi_pwrite
+	
 #define NCR5380_intr macscsi_intr
 #define NCR5380_queue_command macscsi_queue_command
 #define NCR5380_abort macscsi_abort
-#define NCR5380_reset macscsi_reset
+#define NCR5380_bus_reset macscsi_bus_reset
+#define NCR5380_device_reset macscsi_device_reset
+#define NCR5380_host_reset macscsi_host_reset
 #define NCR5380_proc_info macscsi_proc_info
 
 #define BOARD_NORMAL	0

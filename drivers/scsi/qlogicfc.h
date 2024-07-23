@@ -65,7 +65,7 @@
 #define DATASEGS_PER_COMMAND 2
 #define DATASEGS_PER_CONT 5
 
-#define QLOGICFC_REQ_QUEUE_LEN	127	/* must be power of two - 1 */
+#define QLOGICFC_REQ_QUEUE_LEN 255     /* must be power of two - 1 */
 #define QLOGICFC_MAX_SG(ql)	(DATASEGS_PER_COMMAND + (((ql) > 0) ? DATASEGS_PER_CONT*((ql) - 1) : 0))
 #define QLOGICFC_CMD_PER_LUN    8
 
@@ -75,30 +75,11 @@ const char * isp2x00_info(struct Scsi_Host *);
 int isp2x00_queuecommand(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
 int isp2x00_abort(Scsi_Cmnd *);
 int isp2x00_reset(Scsi_Cmnd *, unsigned int);
-int isp2x00_biosparam(Disk *, kdev_t, int[]);
+int isp2x00_biosparam(struct scsi_device *, struct block_device *,
+		sector_t, int[]);
 
 #ifndef NULL
 #define NULL (0)
 #endif
 
-#define QLOGICFC {							   \
-        detect:                 isp2x00_detect,                            \
-        release:                isp2x00_release,                           \
-        info:                   isp2x00_info,                              \
-        queuecommand:           isp2x00_queuecommand,                      \
-        eh_abort_handler:       isp2x00_abort,                             \
-        reset:                  isp2x00_reset,                             \
-        bios_param:             isp2x00_biosparam,                         \
-        can_queue:              QLOGICFC_REQ_QUEUE_LEN,                    \
-        this_id:                -1,                                        \
-        sg_tablesize:           QLOGICFC_MAX_SG(QLOGICFC_REQ_QUEUE_LEN),   \
-	cmd_per_lun:		QLOGICFC_CMD_PER_LUN, 			   \
-        present:                0,                                         \
-        unchecked_isa_dma:      0,                                         \
-        use_clustering:         ENABLE_CLUSTERING 			   \
-}
-
 #endif /* _QLOGICFC_H */
-
-
-

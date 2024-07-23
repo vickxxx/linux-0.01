@@ -105,7 +105,7 @@ linux-kernel@vger.kernel.org.  Most kernel developers monitor this
 e-mail list, and can comment on your changes.
 
 Linus Torvalds is the final arbiter of all changes accepted into the
-Linux kernel.  His e-mail address is torvalds@transmeta.com.  He gets
+Linux kernel.  His e-mail address is <torvalds@osdl.org>.  He gets
 a lot of e-mail, so typically you should do your best to -avoid- sending
 him e-mail.
 
@@ -161,7 +161,7 @@ you to re-send them using MIME.
 When sending patches to Linus, always follow step #6.
 
 Large changes are not appropriate for mailing lists, and some
-maintainers.  If your patch, uncompressed, exceeds 40Kb in size,
+maintainers.  If your patch, uncompressed, exceeds 40 kB in size,
 it is preferred that you store your patch on an Internet-accessible
 server, and provide instead a URL (link) pointing to your patch.
 
@@ -243,7 +243,7 @@ Simple example, of poor code:
 	if (!dev)
 		return -ENODEV;
 	#ifdef CONFIG_NET_FUNKINESS
-		init_funky_net(dev);
+	init_funky_net(dev);
 	#endif
 
 Cleaned-up example:

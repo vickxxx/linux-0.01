@@ -4,20 +4,31 @@
 # Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
 # Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
 
-ROOT_IMG	=/usr/src/root.img
-ELFTOAOUT	=elftoaout
+ROOT_IMG	:= /usr/src/root.img
+ELFTOAOUT	:= elftoaout
 
-all: boot
+host-progs	:= piggyback
+targets		:= image tftpboot.img vmlinux.aout
 
-boot:
-	@echo "Nothing special to be done for 'boot' on Linux/UltraSPARC."
+quiet_cmd_elftoaout = ELF2AOUT $@
+      cmd_elftoaout = $(ELFTOAOUT) vmlinux -o $@
+quiet_cmd_piggy     = PIGGY   $@
+      cmd_piggy     = $(obj)/piggyback $@ System.map $(ROOT_IMG)
+quiet_cmd_strip     = STRIP   $@
+      cmd_strip     = $(STRIP) -R .comment -R .note -K sun4u_init -K _end -K _start vmlinux -o $@
 
-tftpboot.img: piggyback $(TOPDIR)/vmlinux $(ROOT_IMG)
-	$(ELFTOAOUT) $(TOPDIR)/vmlinux -o tftpboot.img
-	./piggyback tftpboot.img $(TOPDIR)/System.map $(ROOT_IMG)
 
-piggyback: piggyback.c
-	$(HOSTCC) $(HOSTCFLAGS) -o piggyback piggyback.c
+# Actual linking
+$(obj)/image: vmlinux FORCE
+	$(call if_changed,strip)
+	@echo '  kernel: $@ is ready'
 
-dep:
+$(obj)/tftpboot.img: vmlinux $(obj)/piggyback System.map $(ROOT_IMG) FORCE
+	$(call if_changed,elftoaout)
+	$(call if_changed,piggy)
+	@echo '  kernel: $@ is ready'
+
+$(obj)/vmlinux.aout: vmlinux FORCE
+	$(call if_changed,elftoaout)
+	@echo '  kernel: $@ is ready'
 

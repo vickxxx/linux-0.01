@@ -2,9 +2,8 @@
 #define _AFFS_FS_I
 
 #include <linux/a.out.h>
-
-// move this to linux/coda.h!!!
-#include <linux/time.h>
+#include <linux/fs.h>
+#include <asm/semaphore.h>
 
 #define AFFS_CACHE_SIZE		PAGE_SIZE
 //#define AFFS_CACHE_SIZE		(4*4)
@@ -36,7 +35,7 @@ struct affs_inode_info {
 	struct affs_ext_key *i_ac;		/* associative cache of extended blocks */
 	u32	 i_ext_last;			/* last accessed extended block */
 	struct buffer_head *i_ext_bh;		/* bh of last extended block */
-	unsigned long mmu_private;
+	loff_t	 mmu_private;
 	u32	 i_protect;			/* unused attribute bits */
 	u32	 i_lastalloc;			/* last allocated block */
 	int	 i_pa_cnt;			/* number of preallocated blocks */
@@ -48,10 +47,13 @@ struct affs_inode_info {
 	unsigned char i_pad;
 	s32	 i_parent;			/* parent ino */
 #endif
+	struct inode vfs_inode;
 };
 
 /* short cut to get to the affs specific inode data */
-#define AFFS_INODE	(&inode->u.affs_i)
-#define AFFS_DIR	(&dir->u.affs_i)
+static inline struct affs_inode_info *AFFS_I(struct inode *inode)
+{
+	return list_entry(inode, struct affs_inode_info, vfs_inode);
+}
 
 #endif

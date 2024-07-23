@@ -10,14 +10,4 @@
 #ifndef LINUX_NFSD_INTERFACE_H
 #define LINUX_NFSD_INTERFACE_H
 
-#include <linux/config.h>
-
-#ifdef CONFIG_NFSD_MODULE
-
-extern struct nfsd_linkage {
-	long (*do_nfsservctl)(int cmd, void *argp, void *resp);
-} * nfsd_linkage;
-
-#endif
-
 #endif /* LINUX_NFSD_INTERFACE_H */

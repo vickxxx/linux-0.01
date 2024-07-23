@@ -55,7 +55,6 @@
  *
  */
 
-#define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/slab.h>
@@ -63,12 +62,11 @@
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/pagemap.h>
-#include <linux/locks.h>
 #include <asm/semaphore.h>
 #include <asm/byteorder.h>
 #include <linux/version.h>
 #include <linux/smp_lock.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/ctype.h>
 
 #include "intrep.h"
@@ -428,7 +426,7 @@ jffs_create_file(struct jffs_control *c,
 
 /* Build a control block for the file system.  */
 static struct jffs_control *
-jffs_create_control(kdev_t dev)
+jffs_create_control(struct super_block *sb)
 {
 	struct jffs_control *c;
 	register int s = sizeof(struct jffs_control);
@@ -451,7 +449,7 @@ jffs_create_control(kdev_t dev)
 	DJM(no_hash++);
 	for (i = 0; i < c->hash_len; i++)
 		INIT_LIST_HEAD(&c->hash[i]);
-	if (!(c->fmc = jffs_build_begin(c, dev))) {
+	if (!(c->fmc = jffs_build_begin(c, MINOR(sb->s_dev)))) {
 		goto fail_fminit;
 	}
 	c->next_ino = JFFS_MIN_INO + 1;
@@ -531,7 +529,7 @@ jffs_add_virtual_root(struct jffs_control *c)
 	root->ino = JFFS_MIN_INO;
 	root->mode = S_IFDIR | S_IRWXU | S_IRGRP
 		     | S_IXGRP | S_IROTH | S_IXOTH;
-	root->atime = root->mtime = root->ctime = CURRENT_TIME;
+	root->atime = root->mtime = root->ctime = get_seconds();
 	root->nlink = 1;
 	root->c = c;
 	root->version_head = root->version_tail = node;
@@ -549,7 +547,7 @@ jffs_build_fs(struct super_block *sb)
 
 	D2(printk("jffs_build_fs()\n"));
 
-	if (!(c = jffs_create_control(sb->s_dev))) {
+	if (!(c = jffs_create_control(sb))) {
 		return -ENOMEM;
 	}
 	c->building_fs = 1;
@@ -563,7 +561,7 @@ jffs_build_fs(struct super_block *sb)
 			D1(printk("jffs_build_fs: Cleaning up all control structures,"
 				  " reallocating them and trying mount again.\n"));
 			jffs_cleanup_control(c);
-			if (!(c = jffs_create_control(sb->s_dev))) {
+			if (!(c = jffs_create_control(sb))) {
 				return -ENOMEM;
 			}
 			c->building_fs = 1;
@@ -615,7 +613,7 @@ jffs_build_fs(struct super_block *sb)
 		printk("JFFS: Failed to build file system.\n");
 		goto jffs_build_fs_fail;
 	}
-	sb->u.generic_sbp = (void *)c;
+	sb->s_fs_info = (void *)c;
 	c->building_fs = 0;
 
 	D1(jffs_print_hash_table(c));
@@ -1910,7 +1908,7 @@ retry:
 	}
 
 	if ((err = flash_safe_writev(fmc->mtd, node_iovec, iovec_cnt,
-				    pos) < 0)) {
+				    pos)) < 0) {
 		jffs_fmfree_partly(fmc, fm, 0);
 		jffs_fm_write_unlock(fmc);
 		printk(KERN_ERR "JFFS: jffs_write_node: Failed to write, "
@@ -1932,8 +1930,7 @@ retry:
    the buffer.  */
 static int
 jffs_get_node_data(struct jffs_file *f, struct jffs_node *node, 
-		   unsigned char *buf,__u32 node_offset, __u32 max_size,
-		   kdev_t dev)
+		   unsigned char *buf,__u32 node_offset, __u32 max_size)
 {
 	struct jffs_fmcontrol *fmc = f->c->fmc;
 	__u32 pos = node->fm->offset + node->fm_offset + node_offset;
@@ -2003,8 +2000,7 @@ jffs_read_data(struct jffs_file *f, unsigned char *buf, __u32 read_offset,
 		}
 		else if ((r = jffs_get_node_data(f, node, &buf[read_data],
 						 node_offset,
-						 size - read_data,
-						 f->c->sb->s_dev)) < 0) {
+						 size - read_data)) < 0) {
 			return r;
 		}
 		read_data += r;
@@ -2643,7 +2639,7 @@ jffs_print_tree(struct jffs_file *first_file, int indent)
 void
 jffs_print_memory_allocation_statistics(void)
 {
-	static long printout = 0;
+	static long printout;
 	printk("________ Memory printout #%ld ________\n", ++printout);
 	printk("no_jffs_file = %ld\n", no_jffs_file);
 	printk("no_jffs_node = %ld\n", no_jffs_node);
@@ -3151,7 +3147,7 @@ jffs_try_to_erase(struct jffs_control *c)
 		__u32 pos;
 		__u32 end;
 
-		pos = (__u32)flash_get_direct_pointer(c->sb->s_dev, offset);
+		pos = (__u32)flash_get_direct_pointer(to_kdev_t(c->sb->s_dev), offset);
 		end = pos + erase_size;
 
 		D2(printk("JFFS: Checking erased sector(s)...\n"));
@@ -3347,13 +3343,12 @@ jffs_garbage_collect_thread(void *ptr)
 	lock_kernel();
 	exit_mm(c->gc_task);
 
-	current->session = 1;
-	current->pgrp = 1;
+	set_special_pids(1, 1);
 	init_completion(&c->gc_thread_comp); /* barrier */ 
-	spin_lock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
 	siginitsetinv (&current->blocked, sigmask(SIGHUP) | sigmask(SIGKILL) | sigmask(SIGSTOP) | sigmask(SIGCONT));
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 	strcpy(current->comm, "jffs_gcd");
 
 	D1(printk (KERN_NOTICE "jffs_garbage_collect_thread(): Starting infinite loop.\n"));
@@ -3379,11 +3374,11 @@ jffs_garbage_collect_thread(void *ptr)
 		 */
 		while (signal_pending(current)) {
 			siginfo_t info;
-			unsigned long signr;
+			unsigned long signr = 0;
 
-			spin_lock_irq(&current->sigmask_lock);
-			signr = dequeue_signal(&current->blocked, &info);
-			spin_unlock_irq(&current->sigmask_lock);
+			spin_lock_irq(&current->sighand->siglock);
+			signr = dequeue_signal(current, &current->blocked, &info);
+			spin_unlock_irq(&current->sighand->siglock);
 
 			switch(signr) {
 			case SIGSTOP:

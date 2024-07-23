@@ -2,7 +2,7 @@
  * IA-32 exception handlers
  *
  * Copyright (C) 2000 Asit K. Mallick <asit.k.mallick@intel.com>
- * Copyright (C) 2001 Hewlett-Packard Co
+ * Copyright (C) 2001-2002 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
  * 06/16/00	A. Mallick	added siginfo for most cases (close to IA32)
@@ -12,7 +12,8 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 
-#include <asm/ia32.h>
+#include "ia32priv.h"
+
 #include <asm/ptrace.h>
 
 int
@@ -20,7 +21,7 @@ ia32_intercept (struct pt_regs *regs, unsigned long isr)
 {
 	switch ((isr >> 16) & 0xff) {
 	      case 0:	/* Instruction intercept fault */
-	      case 3:	/* Locked Data reference fault */
+	      case 4:	/* Locked Data reference fault */
 	      case 1:	/* Gate intercept trap */
 		return -1;
 
@@ -40,7 +41,11 @@ ia32_exception (struct pt_regs *regs, unsigned long isr)
 {
 	struct siginfo siginfo;
 
+	/* initialize these fields to avoid leaking kernel bits to user space: */
 	siginfo.si_errno = 0;
+	siginfo.si_flags = 0;
+	siginfo.si_isr = 0;
+	siginfo.si_imm = 0;
 	switch ((isr >> 16) & 0xff) {
 	      case 1:
 	      case 2:
@@ -99,10 +104,12 @@ ia32_exception (struct pt_regs *regs, unsigned long isr)
 			 * C1 reg you need in case of a stack fault, 0x040 is the stack
 			 * fault bit.  We should only be taking one exception at a time,
 			 * so if this combination doesn't produce any single exception,
-			 * then we have a bad program that isn't syncronizing its FPU usage
+			 * then we have a bad program that isn't synchronizing its FPU usage
 			 * and it will suffer the consequences since we won't be able to
 			 * fully reproduce the context of the exception
 			 */
+			siginfo.si_isr = isr;
+			siginfo.si_flags = __ISR_VALID;
 			switch(((~fcr) & (fsr & 0x3f)) | (fsr & 0x240)) {
 				case 0x000:
 				default:

@@ -14,8 +14,8 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/sched.h>
-#include <linux/tqueue.h>
 #include <linux/interrupt.h>
+
 #include <linux/init.h>
 #include <asm/io.h>
 
@@ -132,6 +132,7 @@ static int __devinit tpam_probe(struct pci_dev *dev, const struct pci_device_id 
 	copy_to_pam_dword(card, (void *)0x01840070, 0x00000010);
 
 	/* fill the ISDN link layer structure */
+	card->interface.owner = THIS_MODULE;
 	card->interface.channels = TPAM_NBCHANNEL;
 	card->interface.maxbufsize = TPAM_MAXBUFSIZE;
 	card->interface.features = 
@@ -176,10 +177,8 @@ static int __devinit tpam_probe(struct pci_dev *dev, const struct pci_device_id 
 	card->loopmode = 0;
 	skb_queue_head_init(&card->sendq);
 	skb_queue_head_init(&card->recvq);
-	card->recv_tq.routine = (void *) (void *) tpam_recv_tq;
-	card->recv_tq.data = card;
-	card->send_tq.routine = (void *) (void *) tpam_send_tq;
-	card->send_tq.data = card;
+	INIT_WORK(&card->recv_tq, (void *) (void *) tpam_recv_tq, card);
+	INIT_WORK(&card->send_tq, (void *) (void *) tpam_send_tq, card);
 
 	/* add the board at the end of the list of boards */
 	card->next = NULL;
@@ -251,10 +250,10 @@ static struct pci_device_id tpam_pci_tbl[] __devinitdata = {
 MODULE_DEVICE_TABLE(pci, tpam_pci_tbl);
 
 static struct pci_driver tpam_driver = {
-	name:		"tpam",
-	id_table:	tpam_pci_tbl,
-	probe:		tpam_probe,
-	remove:		tpam_remove,
+	.name		= "tpam",
+	.id_table	= tpam_pci_tbl,
+	.probe		= tpam_probe,
+	.remove		= __devexit_p(tpam_remove),
 };
 
 static int __init tpam_init(void) {

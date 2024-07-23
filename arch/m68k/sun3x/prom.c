@@ -26,8 +26,6 @@ int (*sun3x_mayget)(void);
 int (*sun3x_mayput)(int);
 void (*sun3x_prom_reboot)(void);
 e_vector sun3x_prom_abort;
-struct idprom *idprom;
-static struct idprom idprom_buffer;
 struct linux_romvec *romvec;
 
 /* prom vector table */
@@ -39,9 +37,9 @@ extern e_vector vectors[256];  /* arch/m68k/kernel/traps.c */
 void sun3x_halt(void)
 {
     unsigned long flags;
-    
+
     /* Disable interrupts while we mess with things */
-    save_flags(flags); cli();
+    local_irq_save(flags);
 
     /* Restore prom vbr */
     __asm__ volatile ("movec %0,%%vbr" : : "r" ((void*)sun3x_prom_vbr));
@@ -58,13 +56,13 @@ void sun3x_halt(void)
     sun3_enable_irq(5);
 
     __asm__ volatile ("movec %0,%%vbr" : : "r" ((void*)vectors));
-    restore_flags(flags);
+    local_irq_restore(flags);
 }
 
 void sun3x_reboot(void)
 {
     /* This never returns, don't bother saving things */
-    cli();
+    local_irq_disable();
 
     /* Restore prom vbr */
     __asm__ volatile ("movec %0,%%vbr" : : "r" ((void*)sun3x_prom_vbr));
@@ -92,24 +90,15 @@ static void sun3x_prom_write(struct console *co, const char *s,
 /* debug console - write-only */
 
 static struct console sun3x_debug = {
-	"debug",
-	sun3x_prom_write,  	/* write */
-	NULL,			/* read */
-	NULL,			/* device */
-	NULL,			/* wait_key */
-	NULL,			/* unblank */
-	NULL,			/* setup */
-	CON_PRINTBUFFER,
-	-1,
-	0,
-	NULL
+	.name  =	"debug",
+	.write =	sun3x_prom_write,
+	.flags =	CON_PRINTBUFFER,
+	.index =	-1,
 };
 
 void sun3x_prom_init(void)
 {
     /* Read the vector table */
-	int i;
-
 
     sun3x_putchar = *(void (**)(int)) (SUN3X_P_PUTCHAR);
     sun3x_getchar = *(int (**)(void)) (SUN3X_P_GETCHAR);
@@ -119,13 +108,11 @@ void sun3x_prom_init(void)
     sun3x_prom_abort = *(e_vector *)  (SUN3X_P_ABORT);
     romvec = (struct linux_romvec *)SUN3X_PROM_BASE;
 
-    /* make a copy of the idprom structure */
-    for(i = 0; i < sizeof(struct idprom); i++) 
-	    ((unsigned char *)(&idprom_buffer))[i] = ((unsigned char *)SUN3X_IDPROM)[i];
-    idprom = &idprom_buffer;
+    idprom_init();
 
-    if((idprom->id_machtype & SM_ARCH_MASK) != SM_SUN3X) {
-	    printk("Warning: machine reports strange type %02x\n");
+    if(!((idprom->id_machtype & SM_ARCH_MASK) == SM_SUN3X)) {
+	    printk("Warning: machine reports strange type %02x\n",
+		   idprom->id_machtype);
 	    printk("Pretending it's a 3/80, but very afraid...\n");
 	    idprom->id_machtype = SM_SUN3X | SM_3_80;
     }
@@ -162,4 +149,20 @@ void prom_printf(char *fmt, ...)
 void prom_halt (void)
 {
 	sun3x_halt();
+}
+
+/* Get the idprom and stuff it into buffer 'idbuf'.  Returns the
+ * format type.  'num_bytes' is the number of bytes that your idbuf
+ * has space for.  Returns 0xff on error.
+ */
+unsigned char
+prom_get_idprom(char *idbuf, int num_bytes)
+{
+        int i;
+
+	/* make a copy of the idprom structure */
+	for(i = 0; i < num_bytes; i++) 
+		idbuf[i] = ((char *)SUN3X_IDPROM)[i];
+
+        return idbuf[0];
 }

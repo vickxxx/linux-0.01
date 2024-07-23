@@ -46,6 +46,7 @@
 #include <linux/slab.h>
 #include <linux/random.h>
 #include <linux/serial_reg.h>
+#include <linux/seq_file.h>
 
 #include <asm/bitops.h>
 #include <asm/bootinfo.h>
@@ -217,34 +218,40 @@ static struct hw_interrupt_type it8172_irq_type = {
 };
 
 
-int get_irq_list(char *buf)
+int show_interrupts(struct seq_file *p, void *v)
 {
-        int i, len = 0, j;
+        int i, j;
         struct irqaction * action;
+	unsigned long flags;
 
-        len += sprintf(buf+len, "           ");
+        seq_printf(p, "           ");
         for (j=0; j<smp_num_cpus; j++)
-                len += sprintf(buf+len, "CPU%d       ",j);
-        *(char *)(buf+len++) = '\n';
+		seq_printf(p, "CPU%d       ",j);
+	seq_putc(p, '\n');
 
         for (i = 0 ; i < NR_IRQS ; i++) {
+		spin_lock_irqsave(&irq_desc[i].lock, flags);
                 action = irq_desc[i].action;
+
                 if ( !action || !action->handler )
-                        continue;
-                len += sprintf(buf+len, "%3d: ", i);		
-                len += sprintf(buf+len, "%10u ", kstat_irqs(i));
+                        goto skip;
+                seq_printf(p, "%3d: ", i);		
+                seq_printf(p, "%10u ", kstat_irqs(i));
                 if ( irq_desc[i].handler )		
-                        len += sprintf(buf+len, " %s ", irq_desc[i].handler->typename );
+                        seq_printf(p, " %s ", irq_desc[i].handler->typename );
                 else
-                        len += sprintf(buf+len, "  None      ");
-                len += sprintf(buf+len, "    %s",action->name);
+                        seq_puts(p, "  None      ");
+
+                seq_printf(p, "    %s",action->name);
                 for (action=action->next; action; action = action->next) {
-                        len += sprintf(buf+len, ", %s", action->name);
+                        seq_printf(p, ", %s", action->name);
                 }
-                len += sprintf(buf+len, "\n");
+                seq_putc(p, '\n');
+skip:
+		spin_unlock_irqrestore(&irq_desc[i].lock, flags);
         }
-        len += sprintf(buf+len, "BAD: %10lu\n", spurious_count);
-        return len;
+        seq_printf(p, "BAD: %10lu\n", spurious_count);
+        return 0;
 }
 
 asmlinkage void do_IRQ(int irq, struct pt_regs *regs)
@@ -255,7 +262,7 @@ asmlinkage void do_IRQ(int irq, struct pt_regs *regs)
 	cpu = smp_processor_id();
 	irq_enter(cpu, irq);
 
-	kstat.irqs[cpu][irq]++;
+	kstat_cpu(cpu).irqs[irq]++;
 #if 0
 	if (irq_desc[irq].handler && irq_desc[irq].handler->ack) {
 	//	printk("invoking ack handler\n");
@@ -270,12 +277,12 @@ asmlinkage void do_IRQ(int irq, struct pt_regs *regs)
 		//mask_irq(1<<irq);
 		//printk("action->handler %x\n", action->handler);
 		disable_it8172_irq(irq);
-		//if (!(action->flags & SA_INTERRUPT)) __sti(); /* reenable ints */
+		//if (!(action->flags & SA_INTERRUPT)) local_irq_enable(); /* reenable ints */
 		do { 
 			action->handler(irq, action->dev_id, regs);
 			action = action->next;
 		} while ( action );
-		//__cli(); /* disable ints */
+		//local_irq_disable(); /* disable ints */
 		if (irq_desc[irq].handler)
 		{
 		}
@@ -436,6 +443,7 @@ void __init init_IRQ(void)
 		irq_desc[i].action	= 0;
 		irq_desc[i].depth	= 1;
 		irq_desc[i].handler	= &it8172_irq_type;
+		spin_lock_init(&irq_desc[i].lock);
 	}
 
 	/*

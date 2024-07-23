@@ -43,15 +43,6 @@ static int ixj_event(event_t event, int priority, event_callback_args_t * args);
 static dev_info_t dev_info = "ixj_cs";
 static dev_link_t *dev_list = NULL;
 
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-	error_info_t err =
-	{
-		func, ret
-	};
-	CardServices(ReportError, handle, &err);
-}
-
 static dev_link_t *ixj_attach(void)
 {
 	client_reg_t client_reg;
@@ -63,6 +54,7 @@ static dev_link_t *ixj_attach(void)
 	if (!link)
 		return NULL;
 	memset(link, 0, sizeof(struct dev_link_t));
+	init_timer(&link->release);
 	link->release.function = &ixj_cs_release;
 	link->release.data = (u_long) link;
 	link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
@@ -98,7 +90,6 @@ static dev_link_t *ixj_attach(void)
 static void ixj_detach(dev_link_t * link)
 {
 	dev_link_t **linkp;
-	long flags;
 	int ret;
 	DEBUG(0, "ixj_detach(0x%p)\n", link);
 	for (linkp = &dev_list; *linkp; linkp = &(*linkp)->next)
@@ -106,13 +97,8 @@ static void ixj_detach(dev_link_t * link)
 			break;
 	if (*linkp == NULL)
 		return;
-	save_flags(flags);
-	cli();
-	if (link->state & DEV_RELEASE_PENDING) {
-		del_timer(&link->release);
-		link->state &= ~DEV_RELEASE_PENDING;
-	}
-	restore_flags(flags);
+	del_timer_sync(&link->release);
+	link->state &= ~DEV_RELEASE_PENDING;
 	if (link->state & DEV_CONFIG)
 		ixj_cs_release((u_long) link);
 	if (link->handle) {
@@ -315,29 +301,30 @@ static int ixj_event(event_t event, int priority, event_callback_args_t * args)
 	return 0;
 }
 
-int __init ixj_register_pcmcia(void)
+static struct pcmcia_driver ixj_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "ixj_cs",
+	},
+	.attach		= ixj_attach,
+	.detach		= ixj_detach,
+};
+
+static int __init ixj_pcmcia_init(void)
 {
-	servinfo_t serv;
-	DEBUG(0, "%s\n", version);
-	CardServices(GetCardServicesInfo, &serv);
-	if (serv.Revision != CS_RELEASE_CODE) {
-		printk(KERN_NOTICE "ixj_cs: Card Services release does not match!\n");
-		return -EINVAL;
-	}
-	register_pcmcia_driver(&dev_info, &ixj_attach, &ixj_detach);
-	return 0;
+	return pcmcia_register_driver(&ixj_driver);
 }
 
-static void ixj_pcmcia_unload(void)
+static void ixj_pcmcia_exit(void)
 {
-	DEBUG(0, "ixj_cs: unloading\n");
-	unregister_pcmcia_driver(&dev_info);
+	pcmcia_unregister_driver(&ixj_driver);
+
+	/* XXX: this really needs to move into generic code.. */
 	while (dev_list != NULL)
 		ixj_detach(dev_list);
 }
 
-module_init(ixj_register_pcmcia);
-module_exit(ixj_pcmcia_unload);
+module_init(ixj_pcmcia_init);
+module_exit(ixj_pcmcia_exit);
 
 MODULE_LICENSE("GPL");
-

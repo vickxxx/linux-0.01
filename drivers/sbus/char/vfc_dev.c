@@ -44,7 +44,6 @@
 #include <asm/vfc_ioctls.h>
 
 static struct file_operations vfc_fops;
-static devfs_handle_t devfs_handle;  /*  For the directory  */
 struct vfc_dev **vfc_dev_lst;
 static char vfcstr[]="vfc";
 static unsigned char saa9051_init_array[VFC_SAA9051_NR] = {
@@ -144,8 +143,6 @@ int init_vfc_devstruct(struct vfc_dev *dev, int instance)
 
 int init_vfc_device(struct sbus_dev *sdev,struct vfc_dev *dev, int instance)
 {
-	char devname[8];
-
 	if(dev == NULL) {
 		printk(KERN_ERR "VFC: Bogus pointer passed\n");
 		return -ENOMEM;
@@ -168,11 +165,9 @@ int init_vfc_device(struct sbus_dev *sdev,struct vfc_dev *dev, int instance)
 	if (init_vfc_hw(dev))
 		return -EIO;
 
-	sprintf (devname, "%d", instance);
-	dev->de = devfs_register (devfs_handle, devname, DEVFS_FL_DEFAULT,
-				  VFC_MAJOR, instance,
-				  S_IFCHR | S_IRUSR | S_IWUSR,
-				  &vfc_fops, NULL);
+	devfs_mk_cdev(MKDEV(VFC_MAJOR, instance),
+			S_IFCHR | S_IRUSR | S_IWUSR,
+			"vfc/%d", instance);
 	return 0;
 }
 
@@ -632,7 +627,7 @@ static int vfc_mmap(struct inode *inode, struct file *file,
 	vma->vm_flags |=
 		(VM_SHM | VM_LOCKED | VM_IO | VM_MAYREAD | VM_MAYWRITE | VM_MAYSHARE);
 	map_offset = (unsigned int) (long)dev->phys_regs;
-	ret = io_remap_page_range(vma->vm_start, map_offset, map_size, 
+	ret = io_remap_page_range(vma, vma->vm_start, map_offset, map_size, 
 				  vma->vm_page_prot, dev->which_io);
 
 	if(ret)
@@ -643,12 +638,12 @@ static int vfc_mmap(struct inode *inode, struct file *file,
 
 
 static struct file_operations vfc_fops = {
-	owner:		THIS_MODULE,
-	llseek:		no_llseek,
-	ioctl:		vfc_ioctl,
-	mmap:		vfc_mmap,
-	open:		vfc_open,
-	release:	vfc_release,
+	.owner =	THIS_MODULE,
+	.llseek =	no_llseek,
+	.ioctl =	vfc_ioctl,
+	.mmap =		vfc_mmap,
+	.open =		vfc_open,
+	.release =	vfc_release,
 };
 
 static int vfc_probe(void)
@@ -676,14 +671,13 @@ static int vfc_probe(void)
 	memset(vfc_dev_lst, 0, sizeof(struct vfc_dev *) * (cards + 1));
 	vfc_dev_lst[cards] = NULL;
 
-	ret = devfs_register_chrdev(VFC_MAJOR, vfcstr, &vfc_fops);
+	ret = register_chrdev(VFC_MAJOR, vfcstr, &vfc_fops);
 	if(ret) {
 		printk(KERN_ERR "Unable to get major number %d\n", VFC_MAJOR);
 		kfree(vfc_dev_lst);
 		return -EIO;
 	}
-	devfs_handle = devfs_mk_dir (NULL, "vfc", NULL);
-
+	devfs_mk_dir("vfc");
 	instance = 0;
 	for_all_sbusdev(sdev, sbus) {
 		if (strcmp(sdev->prom_name, "vfc") == 0) {
@@ -723,7 +717,7 @@ static void deinit_vfc_device(struct vfc_dev *dev)
 {
 	if(dev == NULL)
 		return;
-	devfs_unregister (dev->de);
+	devfs_remove("vfc/%d", dev->instance);
 	sbus_iounmap((unsigned long)dev->regs, sizeof(struct vfc_regs));
 	kfree(dev);
 }
@@ -732,12 +726,12 @@ void cleanup_module(void)
 {
 	struct vfc_dev **devp;
 
-	devfs_unregister_chrdev(VFC_MAJOR,vfcstr);
+	unregister_chrdev(VFC_MAJOR,vfcstr);
 
 	for (devp = vfc_dev_lst; *devp; devp++)
 		deinit_vfc_device(*devp);
 
-	devfs_unregister (devfs_handle);
+	devfs_remove("vfc");
 	kfree(vfc_dev_lst);
 	return;
 }

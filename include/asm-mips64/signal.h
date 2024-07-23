@@ -16,11 +16,10 @@
 #define _NSIG_WORDS	(_NSIG / _NSIG_BPW)
 
 typedef struct {
-	long sig[_NSIG_WORDS];
+	unsigned long sig[_NSIG_WORDS];
 } sigset_t;
 
 typedef unsigned long old_sigset_t;		/* at least 32 bits */
-typedef unsigned int old_sigset_t32;
 
 #define SIGHUP		 1	/* Hangup (POSIX).  */
 #define SIGINT		 2	/* Interrupt (ANSI).  */
@@ -80,16 +79,16 @@ typedef unsigned int old_sigset_t32;
 #define SA_RESTART	0x10000000
 #define SA_SIGINFO	0x00000008
 #define SA_NODEFER	0x40000000
-#define SA_NOCLDWAIT	0x00010000	/* Not supported yet */
+#define SA_NOCLDWAIT	0x00010000
 #define SA_NOCLDSTOP	0x00000001
 
 #define SA_NOMASK	SA_NODEFER
 #define SA_ONESHOT	SA_RESETHAND
 #define SA_INTERRUPT	0x20000000	/* dummy -- ignored */
 
-#define SA_RESTORER	0x04000000
+#define SA_RESTORER	0x04000000	/* Only for o32 compat code */
 
-/* 
+/*
  * sigaltstack controls
  */
 #define SS_ONSTACK     1
@@ -131,8 +130,6 @@ struct sigaction {
 	unsigned int	sa_flags;
 	__sighandler_t	sa_handler;
 	sigset_t	sa_mask;
-	void		(*sa_restorer)(void);
-	int		sa_resv[1];	/* reserved */
 };
 
 struct k_sigaction {
@@ -149,25 +146,8 @@ typedef struct sigaltstack {
 #ifdef __KERNEL__
 #include <asm/sigcontext.h>
 
-/*
- * The following break codes are or were in use for specific purposes in
- * other MIPS operating systems.  Linux/MIPS doesn't use all of them.  The
- * unused ones are here as placeholders; we might encounter them in
- * non-Linux/MIPS object files or make use of them in the future.
- */
-#define BRK_USERBP	0	/* User bp (used by debuggers) */
-#define BRK_KERNELBP	1	/* Break in the kernel */
-#define BRK_ABORT	2	/* Sometimes used by abort(3) to SIGIOT */
-#define BRK_BD_TAKEN	3	/* For bd slot emulation - not implemented */
-#define BRK_BD_NOTTAKEN	4	/* For bd slot emulation - not implemented */
-#define BRK_SSTEPBP	5	/* User bp (used by debuggers) */
-#define BRK_OVERFLOW	6	/* Overflow check */
-#define BRK_DIVZERO	7	/* Divide by zero check */
-#define BRK_RANGE	8	/* Range error check */
-#define BRK_STACKOVERFLOW 9	/* For Ada stackchecking */
-#define BRK_NORLD	10	/* No rld found - not used by Linux/MIPS */
-#define _BRK_THREADBP	11	/* For threads, user bp (used by debuggers) */
-#define BRK_MULOVF	1023	/* Multiply overflow */
-#endif /* defined (__KERNEL__) || defined (__USE_MISC) */
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
+
+#endif /* __KERNEL__ */
 
 #endif /* !defined (_ASM_SIGNAL_H) */

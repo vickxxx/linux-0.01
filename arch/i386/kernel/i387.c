@@ -10,6 +10,7 @@
 
 #include <linux/config.h>
 #include <linux/sched.h>
+#include <linux/spinlock.h>
 #include <asm/processor.h>
 #include <asm/i387.h>
 #include <asm/math_emu.h>
@@ -30,43 +31,34 @@
  * value at reset if we support XMM instructions and then
  * remeber the current task has used the FPU.
  */
-void init_fpu(void)
+void init_fpu(struct task_struct *tsk)
 {
-	__asm__("fninit");
-	if ( cpu_has_xmm )
-		load_mxcsr(0x1f80);
-		
-	current->used_math = 1;
+	if (cpu_has_fxsr) {
+		memset(&tsk->thread.i387.fxsave, 0, sizeof(struct i387_fxsave_struct));
+		tsk->thread.i387.fxsave.cwd = 0x37f;
+		if (cpu_has_xmm)
+			tsk->thread.i387.fxsave.mxcsr = 0x1f80;
+	} else {
+		memset(&tsk->thread.i387.fsave, 0, sizeof(struct i387_fsave_struct));
+		tsk->thread.i387.fsave.cwd = 0xffff037fu;
+		tsk->thread.i387.fsave.swd = 0xffff0000u;
+		tsk->thread.i387.fsave.twd = 0xffffffffu;
+		tsk->thread.i387.fsave.fos = 0xffff0000u;
+	}
+	tsk->used_math = 1;
 }
 
 /*
  * FPU lazy state save handling.
  */
 
-static inline void __save_init_fpu( struct task_struct *tsk )
-{
-	if ( cpu_has_fxsr ) {
-		asm volatile( "fxsave %0 ; fnclex"
-			      : "=m" (tsk->thread.i387.fxsave) );
-	} else {
-		asm volatile( "fnsave %0 ; fwait"
-			      : "=m" (tsk->thread.i387.fsave) );
-	}
-	tsk->flags &= ~PF_USEDFPU;
-}
-
-void save_init_fpu( struct task_struct *tsk )
-{
-	__save_init_fpu(tsk);
-	stts();
-}
-
 void kernel_fpu_begin(void)
 {
-	struct task_struct *tsk = current;
+	struct thread_info *thread = current_thread_info();
 
-	if (tsk->flags & PF_USEDFPU) {
-		__save_init_fpu(tsk);
+	preempt_disable();
+	if (thread->status & TS_USEDFPU) {
+		__save_init_fpu(thread->task);
 		return;
 	}
 	clts();
@@ -106,7 +98,7 @@ static inline unsigned long twd_fxsr_to_i387( struct i387_fxsave_struct *fxsave 
 	struct _fpxreg *st = NULL;
 	unsigned long twd = (unsigned long) fxsave->twd;
 	unsigned long tag;
-	unsigned long ret = 0xffff0000;
+	unsigned long ret = 0xffff0000u;
 	int i;
 
 #define FPREG_ADDR(f, n)	((char *)&(f)->st_space + (n) * 16);
@@ -191,7 +183,7 @@ void set_fpu_cwd( struct task_struct *tsk, unsigned short cwd )
 	if ( cpu_has_fxsr ) {
 		tsk->thread.i387.fxsave.cwd = cwd;
 	} else {
-		tsk->thread.i387.fsave.cwd = ((long)cwd | 0xffff0000);
+		tsk->thread.i387.fsave.cwd = ((long)cwd | 0xffff0000u);
 	}
 }
 
@@ -200,7 +192,7 @@ void set_fpu_swd( struct task_struct *tsk, unsigned short swd )
 	if ( cpu_has_fxsr ) {
 		tsk->thread.i387.fxsave.swd = swd;
 	} else {
-		tsk->thread.i387.fsave.swd = ((long)swd | 0xffff0000);
+		tsk->thread.i387.fsave.swd = ((long)swd | 0xffff0000u);
 	}
 }
 
@@ -209,7 +201,7 @@ void set_fpu_twd( struct task_struct *tsk, unsigned short twd )
 	if ( cpu_has_fxsr ) {
 		tsk->thread.i387.fxsave.twd = twd_i387_to_fxsr(twd);
 	} else {
-		tsk->thread.i387.fsave.twd = ((long)twd | 0xffff0000);
+		tsk->thread.i387.fsave.twd = ((long)twd | 0xffff0000u);
 	}
 }
 
@@ -224,16 +216,16 @@ void set_fpu_mxcsr( struct task_struct *tsk, unsigned short mxcsr )
  * FXSR floating point environment conversions.
  */
 
-static inline int convert_fxsr_to_user( struct _fpstate *buf,
+static int convert_fxsr_to_user( struct _fpstate __user *buf,
 					struct i387_fxsave_struct *fxsave )
 {
 	unsigned long env[7];
-	struct _fpreg *to;
+	struct _fpreg __user *to;
 	struct _fpxreg *from;
 	int i;
 
-	env[0] = (unsigned long)fxsave->cwd | 0xffff0000;
-	env[1] = (unsigned long)fxsave->swd | 0xffff0000;
+	env[0] = (unsigned long)fxsave->cwd | 0xffff0000ul;
+	env[1] = (unsigned long)fxsave->swd | 0xffff0000ul;
 	env[2] = twd_fxsr_to_i387(fxsave);
 	env[3] = fxsave->fip;
 	env[4] = fxsave->fcs | ((unsigned long)fxsave->fop << 16);
@@ -246,18 +238,23 @@ static inline int convert_fxsr_to_user( struct _fpstate *buf,
 	to = &buf->_st[0];
 	from = (struct _fpxreg *) &fxsave->st_space[0];
 	for ( i = 0 ; i < 8 ; i++, to++, from++ ) {
-		if ( __copy_to_user( to, from, sizeof(*to) ) )
+		unsigned long *t = (unsigned long *)to;
+		unsigned long *f = (unsigned long *)from;
+
+		if (__put_user(*f, t) ||
+				__put_user(*(f + 1), t + 1) ||
+				__put_user(from->exponent, &to->exponent))
 			return 1;
 	}
 	return 0;
 }
 
-static inline int convert_fxsr_from_user( struct i387_fxsave_struct *fxsave,
-					  struct _fpstate *buf )
+static int convert_fxsr_from_user( struct i387_fxsave_struct *fxsave,
+					  struct _fpstate __user *buf )
 {
 	unsigned long env[7];
 	struct _fpxreg *to;
-	struct _fpreg *from;
+	struct _fpreg __user *from;
 	int i;
 
 	if ( __copy_from_user( env, buf, 7 * sizeof(long) ) )
@@ -267,7 +264,7 @@ static inline int convert_fxsr_from_user( struct i387_fxsave_struct *fxsave,
 	fxsave->swd = (unsigned short)(env[1] & 0xffff);
 	fxsave->twd = twd_i387_to_fxsr((unsigned short)(env[2] & 0xffff));
 	fxsave->fip = env[3];
-	fxsave->fop = (unsigned short)((env[4] & 0xffff0000) >> 16);
+	fxsave->fop = (unsigned short)((env[4] & 0xffff0000ul) >> 16);
 	fxsave->fcs = (env[4] & 0xffff);
 	fxsave->foo = env[5];
 	fxsave->fos = env[6];
@@ -275,7 +272,12 @@ static inline int convert_fxsr_from_user( struct i387_fxsave_struct *fxsave,
 	to = (struct _fpxreg *) &fxsave->st_space[0];
 	from = &buf->_st[0];
 	for ( i = 0 ; i < 8 ; i++, to++, from++ ) {
-		if ( __copy_from_user( to, from, sizeof(*from) ) )
+		unsigned long *t = (unsigned long *)to;
+		unsigned long *f = (unsigned long *)from;
+
+		if (__get_user(*t, f) ||
+				__get_user(*(t + 1), f + 1) ||
+				__get_user(to->exponent, &from->exponent))
 			return 1;
 	}
 	return 0;
@@ -285,7 +287,7 @@ static inline int convert_fxsr_from_user( struct i387_fxsave_struct *fxsave,
  * Signal frame handlers.
  */
 
-static inline int save_i387_fsave( struct _fpstate *buf )
+static inline int save_i387_fsave( struct _fpstate __user *buf )
 {
 	struct task_struct *tsk = current;
 
@@ -297,7 +299,7 @@ static inline int save_i387_fsave( struct _fpstate *buf )
 	return 1;
 }
 
-static inline int save_i387_fxsave( struct _fpstate *buf )
+static int save_i387_fxsave( struct _fpstate __user *buf )
 {
 	struct task_struct *tsk = current;
 	int err = 0;
@@ -318,7 +320,7 @@ static inline int save_i387_fxsave( struct _fpstate *buf )
 	return 1;
 }
 
-int save_i387( struct _fpstate *buf )
+int save_i387( struct _fpstate __user *buf )
 {
 	if ( !current->used_math )
 		return 0;
@@ -339,7 +341,7 @@ int save_i387( struct _fpstate *buf )
 	}
 }
 
-static inline int restore_i387_fsave( struct _fpstate *buf )
+static inline int restore_i387_fsave( struct _fpstate __user *buf )
 {
 	struct task_struct *tsk = current;
 	clear_fpu( tsk );
@@ -347,25 +349,25 @@ static inline int restore_i387_fsave( struct _fpstate *buf )
 				 sizeof(struct i387_fsave_struct) );
 }
 
-static inline int restore_i387_fxsave( struct _fpstate *buf )
+static int restore_i387_fxsave( struct _fpstate __user *buf )
 {
+	int err;
 	struct task_struct *tsk = current;
 	clear_fpu( tsk );
-	if ( __copy_from_user( &tsk->thread.i387.fxsave, &buf->_fxsr_env[0],
-			       sizeof(struct i387_fxsave_struct) ) )
-		return 1;
+	err = __copy_from_user( &tsk->thread.i387.fxsave, &buf->_fxsr_env[0],
+				sizeof(struct i387_fxsave_struct) );
 	/* mxcsr bit 6 and 31-16 must be zero for security reasons */
 	tsk->thread.i387.fxsave.mxcsr &= 0xffbf;
-	return convert_fxsr_from_user( &tsk->thread.i387.fxsave, buf );
+	return err ? 1 : convert_fxsr_from_user( &tsk->thread.i387.fxsave, buf );
 }
 
-int restore_i387( struct _fpstate *buf )
+int restore_i387( struct _fpstate __user *buf )
 {
 	int err;
 
 	if ( HAVE_HWFP ) {
 		if ( cpu_has_fxsr ) {
-			err =  restore_i387_fxsave( buf );
+			err = restore_i387_fxsave( buf );
 		} else {
 			err = restore_i387_fsave( buf );
 		}
@@ -380,21 +382,21 @@ int restore_i387( struct _fpstate *buf )
  * ptrace request handlers.
  */
 
-static inline int get_fpregs_fsave( struct user_i387_struct *buf,
+static inline int get_fpregs_fsave( struct user_i387_struct __user *buf,
 				    struct task_struct *tsk )
 {
 	return __copy_to_user( buf, &tsk->thread.i387.fsave,
 			       sizeof(struct user_i387_struct) );
 }
 
-static inline int get_fpregs_fxsave( struct user_i387_struct *buf,
+static inline int get_fpregs_fxsave( struct user_i387_struct __user *buf,
 				     struct task_struct *tsk )
 {
-	return convert_fxsr_to_user( (struct _fpstate *)buf,
+	return convert_fxsr_to_user( (struct _fpstate __user *)buf,
 				     &tsk->thread.i387.fxsave );
 }
 
-int get_fpregs( struct user_i387_struct *buf, struct task_struct *tsk )
+int get_fpregs( struct user_i387_struct __user *buf, struct task_struct *tsk )
 {
 	if ( HAVE_HWFP ) {
 		if ( cpu_has_fxsr ) {
@@ -404,25 +406,25 @@ int get_fpregs( struct user_i387_struct *buf, struct task_struct *tsk )
 		}
 	} else {
 		return save_i387_soft( &tsk->thread.i387.soft,
-				       (struct _fpstate *)buf );
+				       (struct _fpstate __user *)buf );
 	}
 }
 
 static inline int set_fpregs_fsave( struct task_struct *tsk,
-				    struct user_i387_struct *buf )
+				    struct user_i387_struct __user *buf )
 {
 	return __copy_from_user( &tsk->thread.i387.fsave, buf,
 				 sizeof(struct user_i387_struct) );
 }
 
 static inline int set_fpregs_fxsave( struct task_struct *tsk,
-				     struct user_i387_struct *buf )
+				     struct user_i387_struct __user *buf )
 {
 	return convert_fxsr_from_user( &tsk->thread.i387.fxsave,
-				       (struct _fpstate *)buf );
+				       (struct _fpstate __user *)buf );
 }
 
-int set_fpregs( struct task_struct *tsk, struct user_i387_struct *buf )
+int set_fpregs( struct task_struct *tsk, struct user_i387_struct __user *buf )
 {
 	if ( HAVE_HWFP ) {
 		if ( cpu_has_fxsr ) {
@@ -432,14 +434,14 @@ int set_fpregs( struct task_struct *tsk, struct user_i387_struct *buf )
 		}
 	} else {
 		return restore_i387_soft( &tsk->thread.i387.soft,
-					  (struct _fpstate *)buf );
+					  (struct _fpstate __user *)buf );
 	}
 }
 
-int get_fpxregs( struct user_fxsr_struct *buf, struct task_struct *tsk )
+int get_fpxregs( struct user_fxsr_struct __user *buf, struct task_struct *tsk )
 {
 	if ( cpu_has_fxsr ) {
-		if (__copy_to_user( (void *)buf, &tsk->thread.i387.fxsave,
+		if (__copy_to_user( buf, &tsk->thread.i387.fxsave,
 				    sizeof(struct user_fxsr_struct) ))
 			return -EFAULT;
 		return 0;
@@ -448,10 +450,10 @@ int get_fpxregs( struct user_fxsr_struct *buf, struct task_struct *tsk )
 	}
 }
 
-int set_fpxregs( struct task_struct *tsk, struct user_fxsr_struct *buf )
+int set_fpxregs( struct task_struct *tsk, struct user_fxsr_struct __user *buf )
 {
 	if ( cpu_has_fxsr ) {
-		__copy_from_user( &tsk->thread.i387.fxsave, (void *)buf,
+		__copy_from_user( &tsk->thread.i387.fxsave, buf,
 				  sizeof(struct user_fxsr_struct) );
 		/* mxcsr bit 6 and 31-16 must be zero for security reasons */
 		tsk->thread.i387.fxsave.mxcsr &= 0xffbf;
@@ -520,3 +522,40 @@ int dump_extended_fpu( struct pt_regs *regs, struct user_fxsr_struct *fpu )
 
 	return fpvalid;
 }
+
+int dump_task_fpu(struct task_struct *tsk, struct user_i387_struct *fpu)
+{
+	int fpvalid = tsk->used_math;
+
+	if (fpvalid) {
+		if (tsk == current)
+			unlazy_fpu(tsk);
+		if (cpu_has_fxsr)
+			copy_fpu_fxsave(tsk, fpu);
+		else
+			copy_fpu_fsave(tsk, fpu);
+	}
+	return fpvalid;
+}
+
+int dump_task_extended_fpu(struct task_struct *tsk, struct user_fxsr_struct *fpu)
+{
+	int fpvalid = tsk->used_math && cpu_has_fxsr;
+
+	if (fpvalid) {
+		if (tsk == current)
+		       unlazy_fpu(tsk);
+		memcpy(fpu, &tsk->thread.i387.fxsave, sizeof(*fpu));
+	}
+	return fpvalid;
+}
+
+
+#ifdef CONFIG_SMP
+void dump_smp_unlazy_fpu(void)
+{
+	unlazy_fpu(current);
+	return;
+}
+#endif
+

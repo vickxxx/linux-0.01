@@ -53,32 +53,23 @@ static int c_show(struct seq_file *m, void *p)
 	struct crypto_alg *alg = (struct crypto_alg *)p;
 	
 	seq_printf(m, "name         : %s\n", alg->cra_name);
-	seq_printf(m, "module       : %s\n",
-		   (alg->cra_module ?
-		    alg->cra_module->name :
-		    "kernel"));
+	seq_printf(m, "module       : %s\n", module_name(alg->cra_module));
 	
 	switch (alg->cra_flags & CRYPTO_ALG_TYPE_MASK) {
 	case CRYPTO_ALG_TYPE_CIPHER:
-		seq_printf(m, "type         : cipher\n");
 		seq_printf(m, "blocksize    : %u\n", alg->cra_blocksize);
 		seq_printf(m, "min keysize  : %u\n",
 					alg->cra_cipher.cia_min_keysize);
 		seq_printf(m, "max keysize  : %u\n",
 					alg->cra_cipher.cia_max_keysize);
+		seq_printf(m, "ivsize       : %u\n",
+					alg->cra_cipher.cia_ivsize);
 		break;
 		
 	case CRYPTO_ALG_TYPE_DIGEST:
-		seq_printf(m, "type         : digest\n");
 		seq_printf(m, "blocksize    : %u\n", alg->cra_blocksize);
 		seq_printf(m, "digestsize   : %u\n",
 		           alg->cra_digest.dia_digestsize);
-		break;
-	case CRYPTO_ALG_TYPE_COMPRESS:
-		seq_printf(m, "type         : compression\n");
-		break;
-	default:
-		seq_printf(m, "type         : unknown\n");
 		break;
 	}
 

@@ -8,17 +8,10 @@
 
 #define NWD		16
 #define NWD_SHIFT	4
-#define MAX_PART	16
+#define MAX_PART	(1 << NWD_SHIFT)
 
 #define IO_OK		0
 #define IO_ERROR	1
-
-#define MAJOR_NR COMPAQ_CISS_MAJOR 
-
-struct my_sg {
-	int len;
-	char *start_addr;
-};
 
 struct ctlr_info;
 typedef struct ctlr_info ctlr_info_t;
@@ -34,7 +27,7 @@ typedef struct _drive_info_struct
 {
  	__u32   LunID;	
 	int 	usage_count;
-	int 	nr_blocks;
+	sector_t nr_blocks;
 	int	block_size;
 	int 	heads;
 	int	sectors;
@@ -51,6 +44,8 @@ struct ctlr_info
 	__u32	board_id;
 	ulong   vaddr;
 	__u32	paddr;	
+	unsigned long io_mem_addr;
+	unsigned long io_mem_length;
 	CfgTable_struct *cfgtable;
 	int	intr;
 
@@ -58,6 +53,7 @@ struct ctlr_info
 	int	commands_outstanding;
 	int 	max_outstanding; /* Debug */ 
 	int	num_luns;
+	int 	highest_lun;
 	int	usage_count;  /* number of opens all all minor devices */
 
 	// information about each logical volume
@@ -71,23 +67,23 @@ struct ctlr_info
 	unsigned int Qdepth;
 	unsigned int maxQsinceinit;
 	unsigned int maxSG;
+	spinlock_t lock;
+	struct request_queue queue;
 
 	//* pointers to command and error info pool */ 
 	CommandList_struct 	*cmd_pool;
 	dma_addr_t		cmd_pool_dhandle; 
 	ErrorInfo_struct 	*errinfo_pool;
 	dma_addr_t		errinfo_pool_dhandle; 
-        __u32   		*cmd_pool_bits;
+        unsigned long  		*cmd_pool_bits;
 	int			nr_allocs;
 	int			nr_frees; 
 
 	// Disk structures we need to pass back
-	struct gendisk   gendisk;
-	   // indexed by minor numbers
-	struct hd_struct hd[256];
-	int              sizes[256];
-	int              blocksizes[256];
-	int              hardsizes[256];
+	struct gendisk   *gendisk[NWD];
+#ifdef CONFIG_CISS_SCSI_TAPE
+	void *scsi_ctlr; /* ptr to structure containing scsi related stuff */
+#endif
 };
 
 /*  Defining the diffent access_menthods */
@@ -99,6 +95,7 @@ struct ctlr_info
 #define SA5_REPLY_INTR_MASK_OFFSET	0x34
 #define SA5_REPLY_PORT_OFFSET		0x44
 #define SA5_INTR_STATUS		0x30
+#define SA5_SCRATCHPAD_OFFSET	0xB0
 
 #define SA5_CTCFG_OFFSET	0xB4
 #define SA5_CTMEM_OFFSET	0xB8
@@ -108,6 +105,7 @@ struct ctlr_info
 #define SA5_INTR_PENDING	0x08
 #define SA5B_INTR_PENDING	0x04
 #define FIFO_EMPTY		0xffffffff	
+#define CCISS_FIRMWARE_READY	0xffff0000 /* value in scratchpad register */
 
 #define  CISS_ERROR_BIT		0x02
 
@@ -247,5 +245,8 @@ struct board_type {
 	char	*product_name;
 	struct access_method *access;
 };
+
+#define CCISS_LOCK(i)	(hba[i]->queue.queue_lock)
+
 #endif /* CCISS_H */
 

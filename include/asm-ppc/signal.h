@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.signal.h 1.5 05/17/01 18:14:25 cort
- */
 #ifndef _ASMPPC_SIGNAL_H
 #define _ASMPPC_SIGNAL_H
 
@@ -81,7 +78,7 @@ typedef struct {
  * Unix names RESETHAND and NODEFER respectively.
  */
 #define SA_NOCLDSTOP	0x00000001
-#define SA_NOCLDWAIT	0x00000002 /* not supported yet */
+#define SA_NOCLDWAIT	0x00000002
 #define SA_SIGINFO	0x00000004
 #define SA_ONSTACK	0x08000000
 #define SA_RESTART	0x10000000
@@ -114,7 +111,7 @@ typedef struct {
 #define SA_PROBE		SA_ONESHOT
 #define SA_SAMPLE_RANDOM	SA_RESTART
 #define SA_SHIRQ		0x04000000
-#endif
+#endif /* __KERNEL__ */
 
 #define SIG_BLOCK          0	/* for blocking signals */
 #define SIG_UNBLOCK        1	/* for unblocking signals */
@@ -153,7 +150,7 @@ typedef struct sigaltstack {
 
 #ifdef __KERNEL__
 #include <asm/sigcontext.h>
-
-#endif
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
+#endif /* __KERNEL__ */
 
 #endif

@@ -20,6 +20,7 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/pagemap.h>
 #include <linux/smp_lock.h>
 
 /*================ Variable-like macros ================*/
@@ -117,17 +118,18 @@ static int __hfs_notify_change(struct dentry *dentry, struct iattr * attr, int k
 	struct hfs_cat_entry *entry = HFS_I(inode)->entry;
 	struct dentry **de = entry->sys_entry;
 	struct hfs_sb_info *hsb = HFS_SB(inode->i_sb);
-	int error, i;
+	int error=0, i;
+
+	lock_kernel();
 
 	error = inode_change_ok(inode, attr); /* basic permission checks */
 	if (error) {
 		/* Let netatalk's afpd think chmod() always succeeds */
 		if (hsb->s_afpd &&
 		    (attr->ia_valid == (ATTR_MODE | ATTR_CTIME))) {
-			return 0;
-		} else {
-			return error;
+			error = 0;
 		}
+		goto out; 
 	}
 
 	/* no uig/gid changes and limit which mode bits can be set */
@@ -139,7 +141,10 @@ static int __hfs_notify_change(struct dentry *dentry, struct iattr * attr, int k
 	     (((entry->type == HFS_CDR_DIR) &&
 	       (attr->ia_mode != inode->i_mode))||
 	      (attr->ia_mode & ~HFS_VALID_MODE_BITS)))) {
-		return hsb->s_quiet ? 0 : error;
+		if( hsb->s_quiet ) { 
+			error = 0;
+			goto out;
+		}
 	}
 	
 	if (entry->type == HFS_CDR_DIR) {
@@ -170,9 +175,9 @@ static int __hfs_notify_change(struct dentry *dentry, struct iattr * attr, int k
 		}
 	}
 	error = inode_setattr(inode, attr);
-	if (error)
-		return error;
-
+	if (error) 
+		goto out;
+	
 	/* We wouldn't want to mess with the sizes of the other fork */
 	attr->ia_valid &= ~ATTR_SIZE;
 
@@ -185,7 +190,7 @@ static int __hfs_notify_change(struct dentry *dentry, struct iattr * attr, int k
 
 	/* Change the catalog entry if needed */
 	if (attr->ia_valid & ATTR_MTIME) {
-		entry->modify_date = hfs_u_to_mtime(inode->i_mtime);
+		entry->modify_date = hfs_u_to_mtime(inode->i_mtime.tv_sec);
 		hfs_cat_mark_dirty(entry);
 	}
 	if (attr->ia_valid & ATTR_MODE) {
@@ -204,7 +209,9 @@ static int __hfs_notify_change(struct dentry *dentry, struct iattr * attr, int k
 	}
 	/* size changes handled in hfs_extent_adj() */
 
-	return 0;
+out:
+	unlock_kernel();
+	return error;
 }
 
 int hfs_notify_change(struct dentry *dentry, struct iattr * attr)
@@ -222,9 +229,9 @@ int hfs_notify_change_hdr(struct dentry *dentry, struct iattr * attr)
 	return __hfs_notify_change(dentry, attr, HFS_HDR);
 }
 
-static int hfs_writepage(struct page *page)
+static int hfs_writepage(struct page *page, struct writeback_control *wbc)
 {
-	return block_write_full_page(page,hfs_get_block);
+	return block_write_full_page(page,hfs_get_block, wbc);
 }
 static int hfs_readpage(struct file *file, struct page *page)
 {
@@ -233,19 +240,19 @@ static int hfs_readpage(struct file *file, struct page *page)
 static int hfs_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
 {
 	return cont_prepare_write(page,from,to,hfs_get_block,
-		&page->mapping->host->u.hfs_i.mmu_private);
+		&HFS_I(page->mapping->host)->mmu_private);
 }
-static int hfs_bmap(struct address_space *mapping, long block)
+static sector_t hfs_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping,block,hfs_get_block);
 }
 struct address_space_operations hfs_aops = {
-	readpage: hfs_readpage,
-	writepage: hfs_writepage,
-	sync_page: block_sync_page,
-	prepare_write: hfs_prepare_write,
-	commit_write: generic_commit_write,
-	bmap: hfs_bmap
+	.readpage = hfs_readpage,
+	.writepage = hfs_writepage,
+	.sync_page = block_sync_page,
+	.prepare_write = hfs_prepare_write,
+	.commit_write = generic_commit_write,
+	.bmap = hfs_bmap
 };
 
 /*
@@ -311,21 +318,27 @@ struct inode *hfs_iget(struct hfs_cat_entry *entry, ino_t type,
 	        return NULL;
 	}
 
-	if (inode->i_dev != sb->s_dev) {
-	        iput(inode); /* automatically does an hfs_cat_put */
-		inode = NULL;
-	} else if (!inode->i_mode || (*sys_entry == NULL)) {
+	if (!inode->i_mode || (*sys_entry == NULL)) {
 		/* Initialize the inode */
 		struct hfs_sb_info *hsb = HFS_SB(sb);
 
-		inode->i_rdev = 0;
-		inode->i_ctime = inode->i_atime = inode->i_mtime =
+		inode->i_rdev = NODEV;
+		inode->i_ctime.tv_sec = inode->i_atime.tv_sec = inode->i_mtime.tv_sec =
 					hfs_m_to_utime(entry->modify_date);
+		inode->i_ctime.tv_nsec = 0;
+		inode->i_mtime.tv_nsec = 0;
+		inode->i_atime.tv_nsec = 0;
 		inode->i_blksize = HFS_SECTOR_SIZE;
 		inode->i_uid = hsb->s_uid;
 		inode->i_gid = hsb->s_gid;
 
-		memset(HFS_I(inode), 0, sizeof(struct hfs_inode_info));
+		HFS_I(inode)->mmu_private = 0;
+		HFS_I(inode)->fork = NULL;
+		HFS_I(inode)->convert = 0;
+		HFS_I(inode)->file_type = 0;
+		HFS_I(inode)->dir_size = 0;
+		HFS_I(inode)->default_layout = NULL;
+		HFS_I(inode)->layout = NULL;
 		HFS_I(inode)->magic = HFS_INO_MAGIC;
 		HFS_I(inode)->entry = entry;
 		HFS_I(inode)->tz_secondswest = hfs_to_utc(0);
@@ -375,7 +388,7 @@ void hfs_cap_ifill(struct inode * inode, ino_t type, const int version)
 		inode->i_op = &hfs_file_inode_operations;
 		inode->i_fop = &hfs_file_operations;
 		inode->i_mapping->a_ops = &hfs_aops;
-		inode->u.hfs_i.mmu_private = inode->i_size;
+		HFS_I(inode)->mmu_private = inode->i_size;
 	} else { /* Directory */
 		struct hfs_dir *hdir = &entry->u.dir;
 
@@ -435,7 +448,7 @@ void hfs_dbl_ifill(struct inode * inode, ino_t type, const int version)
 		inode->i_op = &hfs_file_inode_operations;
 		inode->i_fop = &hfs_file_operations;
 		inode->i_mapping->a_ops = &hfs_aops;
-		inode->u.hfs_i.mmu_private = inode->i_size;
+		HFS_I(inode)->mmu_private = inode->i_size;
 	} else { /* Directory */
 		struct hfs_dir *hdir = &entry->u.dir;
 
@@ -481,7 +494,7 @@ void hfs_nat_ifill(struct inode * inode, ino_t type, const int version)
 		inode->i_op = &hfs_file_inode_operations;
 		inode->i_fop = &hfs_file_operations;
 		inode->i_mapping->a_ops = &hfs_aops;
-		inode->u.hfs_i.mmu_private = inode->i_size;
+		HFS_I(inode)->mmu_private = inode->i_size;
 	} else { /* Directory */
 		struct hfs_dir *hdir = &entry->u.dir;
 

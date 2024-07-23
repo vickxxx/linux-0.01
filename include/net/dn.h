@@ -9,8 +9,6 @@ typedef unsigned short dn_address;
 #define dn_ntohs(x) le16_to_cpu((unsigned short)(x))
 #define dn_htons(x) cpu_to_le16((unsigned short)(x))
 
-#define DN_SK(sk) (&sk->protinfo.dn)
-
 struct dn_scp                                   /* Session Control Port */
 {
         unsigned char           state;
@@ -135,6 +133,8 @@ struct dn_scp                                   /* Session Control Port */
 
 };
 
+#define DN_SK(__sk) ((struct dn_scp *)(__sk)->sk_protinfo)
+
 /*
  * src,dst : Source and Destination DECnet addresses
  * hops : Number of hops through the network
@@ -171,17 +171,17 @@ struct dn_skb_cb {
 	int iif;
 };
 
-static __inline__ dn_address dn_eth2dn(unsigned char *ethaddr)
+static inline dn_address dn_eth2dn(unsigned char *ethaddr)
 {
 	return ethaddr[4] | (ethaddr[5] << 8);
 }
 
-static __inline__ dn_address dn_saddr2dn(struct sockaddr_dn *saddr)
+static inline dn_address dn_saddr2dn(struct sockaddr_dn *saddr)
 {
 	return *(dn_address *)saddr->sdn_nodeaddr;
 }
 
-static __inline__ void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
+static inline void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
 {
 	ethaddr[0] = 0xAA;
 	ethaddr[1] = 0x00;
@@ -190,6 +190,19 @@ static __inline__ void dn_dn2eth(unsigned char *ethaddr, dn_address addr)
 	ethaddr[4] = (unsigned char)(addr & 0xff);
 	ethaddr[5] = (unsigned char)(addr >> 8);
 }
+
+static inline void dn_sk_ports_copy(struct flowi *fl, struct dn_scp *scp)
+{
+	fl->uli_u.dnports.sport = scp->addrloc;
+	fl->uli_u.dnports.dport = scp->addrrem;
+	fl->uli_u.dnports.objnum = scp->addr.sdn_objnum;
+	if (fl->uli_u.dnports.objnum == 0) {
+		fl->uli_u.dnports.objnamel = scp->addr.sdn_objnamel;
+		memcpy(fl->uli_u.dnports.objname, scp->addr.sdn_objname, 16);
+	}
+}
+
+extern unsigned dn_mss_from_pmtu(struct net_device *dev, int mtu);
 
 #define DN_MENUVER_ACC 0x01
 #define DN_MENUVER_USR 0x02
@@ -211,7 +224,6 @@ extern void dn_start_fast_timer(struct sock *sk);
 extern void dn_stop_fast_timer(struct sock *sk);
 
 extern dn_address decnet_address;
-extern unsigned char decnet_ether_address[6];
 extern int decnet_debug_level;
 extern int decnet_time_wait;
 extern int decnet_dn_count;

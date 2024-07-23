@@ -29,10 +29,9 @@
 #include <linux/delay.h>
 #include <linux/config.h>
 #include <linux/init.h>
-#ifdef CONFIG_BLK_DEV_RAM
-#include <linux/blk.h>
-#endif
+#include <linux/initrd.h>
 #include <linux/bootmem.h>
+#include <linux/root_dev.h>
 #include <linux/console.h>
 #include <linux/seq_file.h>
 #include <asm/uaccess.h>
@@ -40,18 +39,19 @@
 #include <asm/smp.h>
 #include <asm/mmu_context.h>
 #include <asm/cpcmd.h>
+#include <asm/lowcore.h>
 
 /*
  * Machine setup..
  */
 unsigned int console_mode = 0;
 unsigned int console_device = -1;
+unsigned int console_irq = -1;
 unsigned long memory_size = 0;
 unsigned long machine_flags = 0;
-struct { unsigned long addr, size, type; } memory_chunk[16];
+struct { unsigned long addr, size, type; } memory_chunk[16] = { { 0 } };
 #define CHUNK_READ_WRITE 0
 #define CHUNK_READ_ONLY 1
-__u16 boot_cpu_addr;
 int cpus_initialized = 0;
 unsigned long cpu_initialized = 0;
 volatile int __cpu_logical_map[NR_CPUS]; /* logical cpu to cpu address */
@@ -78,14 +78,14 @@ static struct resource data_resource = { "Kernel data", 0, 0 };
 /*
  * cpu_init() initializes state that is per-CPU.
  */
-void __init cpu_init (void)
+void __devinit cpu_init (void)
 {
         int nr = smp_processor_id();
         int addr = hard_smp_processor_id();
 
         if (test_and_set_bit(nr,&cpu_initialized)) {
                 printk("CPU#%d ALREADY INITIALIZED!!!!!!!!!\n", nr);
-                for (;;) __sti();
+                for (;;) local_irq_enable();
         }
         cpus_initialized++;
 
@@ -99,7 +99,7 @@ void __init cpu_init (void)
         /*
          * Force FPU initialization:
          */
-        current->flags &= ~PF_USEDFPU;
+        clear_thread_flag(TIF_USEDFPU);
         current->used_math = 0;
 
         /* Setup active_mm for idle_task  */
@@ -107,7 +107,7 @@ void __init cpu_init (void)
         current->active_mm = &init_mm;
         if (current->mm)
                 BUG();
-        enter_lazy_tlb(&init_mm, current, nr);
+        enter_lazy_tlb(&init_mm, current);
 }
 
 /*
@@ -164,16 +164,16 @@ __setup("condev=", condev_setup);
 
 static int __init conmode_setup(char *str)
 {
-#if defined(CONFIG_HWC_CONSOLE)
-	if (strncmp(str, "hwc", 4) == 0 && !MACHINE_IS_P390)
-                SET_CONSOLE_HWC;
+#if defined(CONFIG_SCLP_CONSOLE)
+	if (strncmp(str, "hwc", 4) == 0 || strncmp(str, "sclp", 5) == 0)
+                SET_CONSOLE_SCLP;
 #endif
 #if defined(CONFIG_TN3215_CONSOLE)
-	if (strncmp(str, "3215", 5) == 0 && (MACHINE_IS_VM || MACHINE_IS_P390))
+	if (strncmp(str, "3215", 5) == 0)
 		SET_CONSOLE_3215;
 #endif
 #if defined(CONFIG_TN3270_CONSOLE)
-	if (strncmp(str, "3270", 5) == 0 && (MACHINE_IS_VM || MACHINE_IS_P390))
+	if (strncmp(str, "3270", 5) == 0)
 		SET_CONSOLE_3270;
 #endif
         return 1;
@@ -187,6 +187,10 @@ static void __init conmode_default(void)
 	char *ptr;
 
         if (MACHINE_IS_VM) {
+		cpcmd("QUERY CONSOLE", query_buffer, 1024);
+		console_device = simple_strtoul(query_buffer + 5, NULL, 16);
+		ptr = strstr(query_buffer, "SUBCHANNEL =");
+		console_irq = simple_strtoul(ptr + 13, NULL, 16);
 		cpcmd("QUERY TERM", query_buffer, 1024);
 		ptr = strstr(query_buffer, "CONMODE");
 		/*
@@ -198,8 +202,8 @@ static void __init conmode_default(void)
 		 */
 		cpcmd("TERM CONMODE 3215", NULL, 0);
 		if (ptr == NULL) {
-#if defined(CONFIG_HWC_CONSOLE)
-			SET_CONSOLE_HWC;
+#if defined(CONFIG_SCLP_CONSOLE)
+			SET_CONSOLE_SCLP;
 #endif
 			return;
 		}
@@ -208,16 +212,16 @@ static void __init conmode_default(void)
 			SET_CONSOLE_3270;
 #elif defined(CONFIG_TN3215_CONSOLE)
 			SET_CONSOLE_3215;
-#elif defined(CONFIG_HWC_CONSOLE)
-			SET_CONSOLE_HWC;
+#elif defined(CONFIG_SCLP_CONSOLE)
+			SET_CONSOLE_SCLP;
 #endif
 		} else if (strncmp(ptr + 8, "3215", 4) == 0) {
 #if defined(CONFIG_TN3215_CONSOLE)
 			SET_CONSOLE_3215;
 #elif defined(CONFIG_TN3270_CONSOLE)
 			SET_CONSOLE_3270;
-#elif defined(CONFIG_HWC_CONSOLE)
-			SET_CONSOLE_HWC;
+#elif defined(CONFIG_SCLP_CONSOLE)
+			SET_CONSOLE_SCLP;
 #endif
 		}
         } else if (MACHINE_IS_P390) {
@@ -227,36 +231,71 @@ static void __init conmode_default(void)
 		SET_CONSOLE_3270;
 #endif
 	} else {
-#if defined(CONFIG_HWC_CONSOLE)
-		SET_CONSOLE_HWC;
+#if defined(CONFIG_SCLP_CONSOLE)
+		SET_CONSOLE_SCLP;
 #endif
 	}
 }
 
+#ifdef CONFIG_SMP
+extern void machine_restart_smp(char *);
+extern void machine_halt_smp(void);
+extern void machine_power_off_smp(void);
+
+void (*_machine_restart)(char *command) = machine_restart_smp;
+void (*_machine_halt)(void) = machine_halt_smp;
+void (*_machine_power_off)(void) = machine_power_off_smp;
+#else
 /*
  * Reboot, halt and power_off routines for non SMP.
  */
-
-#ifndef CONFIG_SMP
-void machine_restart(char * __unused)
+extern void do_reipl(unsigned long devno);
+static void do_machine_restart_nonsmp(char * __unused)
 {
-	reipl(S390_lowcore.ipl_device);
+	if (MACHINE_IS_VM)
+		cpcmd ("IPL", NULL, 0);
+	else
+		do_reipl (0x10000 | S390_lowcore.ipl_device);
 }
 
-void machine_halt(void)
+static void do_machine_halt_nonsmp(void)
 {
         if (MACHINE_IS_VM && strlen(vmhalt_cmd) > 0)
                 cpcmd(vmhalt_cmd, NULL, 0);
         signal_processor(smp_processor_id(), sigp_stop_and_store_status);
 }
 
-void machine_power_off(void)
+static void do_machine_power_off_nonsmp(void)
 {
         if (MACHINE_IS_VM && strlen(vmpoff_cmd) > 0)
                 cpcmd(vmpoff_cmd, NULL, 0);
         signal_processor(smp_processor_id(), sigp_stop_and_store_status);
 }
+
+void (*_machine_restart)(char *command) = do_machine_restart_nonsmp;
+void (*_machine_halt)(void) = do_machine_halt_nonsmp;
+void (*_machine_power_off)(void) = do_machine_power_off_nonsmp;
 #endif
+
+ /*
+ * Reboot, halt and power_off stubs. They just call _machine_restart,
+ * _machine_halt or _machine_power_off. 
+ */
+
+void machine_restart(char *command)
+{
+	_machine_restart(command);
+}
+
+void machine_halt(void)
+{
+	_machine_halt();
+}
+
+void machine_power_off(void)
+{
+	_machine_power_off();
+}
 
 /*
  * Setup function called from init/main.c just after the banner
@@ -273,7 +312,7 @@ void __init setup_arch(char **cmdline_p)
 	unsigned long start_pfn, end_pfn;
         static unsigned int smptrap=0;
         unsigned long delay = 0;
-	struct _lowcore *lowcore;
+	struct _lowcore *lc;
 	int i;
 
         if (smptrap)
@@ -283,15 +322,22 @@ void __init setup_arch(char **cmdline_p)
         /*
          * print what head.S has found out about the machine 
          */
+#ifndef CONFIG_ARCH_S390X
 	printk((MACHINE_IS_VM) ?
-	       "We are running under VM\n" :
-	       "We are running native\n");
+	       "We are running under VM (31 bit mode)\n" :
+	       "We are running native (31 bit mode)\n");
 	printk((MACHINE_HAS_IEEE) ?
 	       "This machine has an IEEE fpu\n" :
 	       "This machine has no IEEE fpu\n");
+#else /* CONFIG_ARCH_S390X */
+	printk((MACHINE_IS_VM) ?
+	       "We are running under VM (64 bit mode)\n" :
+	       "We are running native (64 bit mode)\n");
+#endif /* CONFIG_ARCH_S390X */
 
-        ROOT_DEV = to_kdev_t(0x0100);
+        ROOT_DEV = Root_RAM0;
         memory_start = (unsigned long) &_end;    /* fixit if use $CODELO etc*/
+#ifndef CONFIG_ARCH_S390X
 	memory_end = memory_size & ~0x400000UL;  /* align memory end to 4MB */
         /*
          * We need some free virtual space to be able to do vmalloc.
@@ -300,6 +346,9 @@ void __init setup_arch(char **cmdline_p)
          */
         if (memory_end > 1920*1024*1024)
                 memory_end = 1920*1024*1024;
+#else /* CONFIG_ARCH_S390X */
+	memory_end = memory_size & ~0x200000UL;  /* detected in head.s */
+#endif /* CONFIG_ARCH_S390X */
         init_mm.start_code = PAGE_OFFSET;
         init_mm.end_code = (unsigned long) &_etext;
         init_mm.end_data = (unsigned long) &_edata;
@@ -420,29 +469,48 @@ void __init setup_arch(char **cmdline_p)
         /*
          * Setup lowcore for boot cpu
          */
-	lowcore = (struct _lowcore *)
-		__alloc_bootmem(PAGE_SIZE, PAGE_SIZE, 0);
-	memset(lowcore, 0, PAGE_SIZE);
-	lowcore->restart_psw.mask = _RESTART_PSW_MASK;
-	lowcore->restart_psw.addr = _ADDR_31 + (addr_t) &restart_int_handler;
-	lowcore->external_new_psw.mask = _EXT_PSW_MASK;
-	lowcore->external_new_psw.addr = _ADDR_31 + (addr_t) &ext_int_handler;
-	lowcore->svc_new_psw.mask = _SVC_PSW_MASK;
-	lowcore->svc_new_psw.addr = _ADDR_31 + (addr_t) &system_call;
-	lowcore->program_new_psw.mask = _PGM_PSW_MASK;
-	lowcore->program_new_psw.addr = _ADDR_31 + (addr_t) &pgm_check_handler;
-        lowcore->mcck_new_psw.mask = _MCCK_PSW_MASK;
-	lowcore->mcck_new_psw.addr = _ADDR_31 + (addr_t) &mcck_int_handler;
-	lowcore->io_new_psw.mask = _IO_PSW_MASK;
-	lowcore->io_new_psw.addr = _ADDR_31 + (addr_t) &io_int_handler;
-	lowcore->ipl_device = S390_lowcore.ipl_device;
-	lowcore->kernel_stack = ((__u32) &init_task_union) + 8192;
-	lowcore->async_stack = (__u32)
+#ifndef CONFIG_ARCH_S390X
+	lc = (struct _lowcore *) __alloc_bootmem(PAGE_SIZE, PAGE_SIZE, 0);
+	memset(lc, 0, PAGE_SIZE);
+#else /* CONFIG_ARCH_S390X */
+	lc = (struct _lowcore *) __alloc_bootmem(2*PAGE_SIZE, 2*PAGE_SIZE, 0);
+	memset(lc, 0, 2*PAGE_SIZE);
+#endif /* CONFIG_ARCH_S390X */
+	lc->restart_psw.mask = PSW_BASE_BITS;
+	lc->restart_psw.addr =
+		PSW_ADDR_AMODE + (unsigned long) restart_int_handler;
+	lc->external_new_psw.mask = PSW_KERNEL_BITS;
+	lc->external_new_psw.addr =
+		PSW_ADDR_AMODE + (unsigned long) ext_int_handler;
+	lc->svc_new_psw.mask = PSW_KERNEL_BITS;
+	lc->svc_new_psw.addr = PSW_ADDR_AMODE + (unsigned long) system_call;
+	lc->program_new_psw.mask = PSW_KERNEL_BITS;
+	lc->program_new_psw.addr =
+		PSW_ADDR_AMODE + (unsigned long)pgm_check_handler;
+	lc->mcck_new_psw.mask = PSW_KERNEL_BITS;
+	lc->mcck_new_psw.addr =
+		PSW_ADDR_AMODE + (unsigned long) mcck_int_handler;
+	lc->io_new_psw.mask = PSW_KERNEL_BITS;
+	lc->io_new_psw.addr = PSW_ADDR_AMODE + (unsigned long) io_int_handler;
+	lc->ipl_device = S390_lowcore.ipl_device;
+	lc->jiffy_timer = -1LL;
+#ifndef CONFIG_ARCH_S390X
+	lc->kernel_stack = ((__u32) &init_thread_union) + 8192;
+	lc->async_stack = (__u32)
 		__alloc_bootmem(2*PAGE_SIZE, 2*PAGE_SIZE, 0) + 8192;
-	set_prefix((__u32) lowcore);
+	set_prefix((__u32) lc);
+#else /* CONFIG_ARCH_S390X */
+	lc->kernel_stack = ((__u64) &init_thread_union) + 16384;
+	lc->async_stack = (__u64)
+		__alloc_bootmem(4*PAGE_SIZE, 4*PAGE_SIZE, 0) + 16384;
+	if (MACHINE_HAS_DIAG44)
+		lc->diag44_opcode = 0x83000044;
+	else
+		lc->diag44_opcode = 0x07000700;
+	set_prefix((__u32)(__u64) lc);
+#endif /* CONFIG_ARCH_S390X */
         cpu_init();
-        boot_cpu_addr = S390_lowcore.cpu_data.cpu_addr;
-        __cpu_logical_map[0] = boot_cpu_addr;
+        __cpu_logical_map[0] = S390_lowcore.cpu_data.cpu_addr;
 
 	/*
 	 * Create kernel page tables and switch to virtual addressing.
@@ -485,17 +553,25 @@ void print_cpu_info(struct cpuinfo_S390 *cpuinfo)
 static int show_cpuinfo(struct seq_file *m, void *v)
 {
         struct cpuinfo_S390 *cpuinfo;
-	unsigned n = v;
+	unsigned long n = (unsigned long) v - 1;
 
-	if (!n--) {
+	if (!n) {
 		seq_printf(m, "vendor_id       : IBM/S390\n"
 			       "# processors    : %i\n"
 			       "bogomips per cpu: %lu.%02lu\n",
-			       smp_num_cpus, loops_per_jiffy/(500000/HZ),
+			       num_online_cpus(), loops_per_jiffy/(500000/HZ),
 			       (loops_per_jiffy/(5000/HZ))%100);
-	} else if (cpu_online_map & (1 << n)) {
-		cpuinfo = &safe_get_cpu_lowcore(n).cpu_data;
-		seq_printf(m, "processor %i: "
+	}
+	if (cpu_online_map & (1 << n)) {
+#ifdef CONFIG_SMP
+		if (smp_processor_id() == n)
+			cpuinfo = &S390_lowcore.cpu_data;
+		else
+			cpuinfo = &lowcore_ptr[n]->cpu_data;
+#else
+		cpuinfo = &S390_lowcore.cpu_data;
+#endif
+		seq_printf(m, "processor %li: "
 			       "version = %02X,  "
 			       "identification = %06X,  "
 			       "machine = %04X\n",
@@ -508,7 +584,7 @@ static int show_cpuinfo(struct seq_file *m, void *v)
 
 static void *c_start(struct seq_file *m, loff_t *pos)
 {
-	return *pos <= NR_CPUS ? (void)(*pos+1) : NULL;
+	return *pos < NR_CPUS ? (void *)((unsigned long) *pos + 1) : NULL;
 }
 static void *c_next(struct seq_file *m, void *v, loff_t *pos)
 {
@@ -519,8 +595,8 @@ static void c_stop(struct seq_file *m, void *v)
 {
 }
 struct seq_operations cpuinfo_op = {
-	start:	c_start,
-	next:	c_next,
-	stop:	c_stop,
-	show:	show_cpuinfo,
+	.start	= c_start,
+	.next	= c_next,
+	.stop	= c_stop,
+	.show	= show_cpuinfo,
 };

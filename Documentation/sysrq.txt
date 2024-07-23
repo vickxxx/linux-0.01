@@ -36,6 +36,10 @@ On PowerPC - Press 'ALT - Print Screen (or F13) - <command key>,
 On other - If you know of the key combos for other architectures, please
            let me know so I can add them to this section.
 
+On all -  write a character to /proc/sysrq-trigger.  eg:
+
+		echo t > /proc/sysrq-trigger
+
 *  What are the 'command' keys?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 'r'     - Turns off keyboard raw mode and sets it to XLATE.
@@ -58,6 +62,8 @@ On other - If you know of the key combos for other architectures, please
           console.
 
 'm'     - Will dump current memory info to your console.
+
+'v'	- Dumps Voyager SMP processor info to your console.
 
 '0'-'9' - Sets the console log level, controlling which kernel messages
           will be printed to your console. ('0', for example would make
@@ -153,7 +159,7 @@ a number of operations registered into it at compile time, but is mutable,
 and 4 functions are exported for interface to it: __sysrq_lock_table,
 __sysrq_unlock_table, __sysrq_get_key_op, and __sysrq_put_key_op. The
 functions __sysrq_swap_key_ops and __sysrq_swap_key_ops_nolock are defined
-in the header itself, and the REGISTER and UNREGISTER macros are built fromi
+in the header itself, and the REGISTER and UNREGISTER macros are built from
 these. More complex (and dangerous!) manipulations of the table are possible
 using these functions, but you must be careful to always lock the table before
 you read or write from it, and to unlock it again when you are done. (And of
@@ -162,7 +168,7 @@ the table are always safe :)
 
 If for some reason you feel the need to call the handle_sysrq function from
 within a function called by handle_sysrq, you must be aware that you are in
-a lock (you are also in an interupt handler, which means don't sleep!), so
+a lock (you are also in an interrupt handler, which means don't sleep!), so
 you must call __handle_sysrq_nolock instead.
 
 *  I have more questions, who can I ask?

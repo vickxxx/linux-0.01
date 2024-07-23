@@ -7,7 +7,7 @@
  *
  * Version:	$Id: protocol.c,v 1.10 2001/05/18 02:25:49 davem Exp $
  *
- * Authors:	Pedro Roque	<pedro_m@yahoo.com>
+ * Authors:	Pedro Roque	<roque@di.fc.ul.pt>
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -32,7 +32,6 @@
 #include <linux/in6.h>
 #include <linux/netdevice.h>
 #include <linux/if_arp.h>
-#include <linux/brlock.h>
 
 #include <net/sock.h>
 #include <net/snmp.h>
@@ -41,78 +40,47 @@
 #include <net/protocol.h>
 
 struct inet6_protocol *inet6_protos[MAX_INET_PROTOS];
+static spinlock_t inet6_proto_lock = SPIN_LOCK_UNLOCKED;
 
-void inet6_add_protocol(struct inet6_protocol *prot)
+
+int inet6_add_protocol(struct inet6_protocol *prot, unsigned char protocol)
 {
-	unsigned char hash;
-	struct inet6_protocol *p2;
+	int ret, hash = protocol & (MAX_INET_PROTOS - 1);
 
-	hash = prot->protocol & (MAX_INET_PROTOS - 1);
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	prot->next = inet6_protos[hash];
-	inet6_protos[hash] = prot;
-	prot->copy = 0;
+	spin_lock_bh(&inet6_proto_lock);
 
-	/*
-	 *	Set the copy bit if we need to. 
-	 */
-	 
-	p2 = (struct inet6_protocol *) prot->next;
-	while(p2 != NULL) {
-		if (p2->protocol == prot->protocol) {
-			prot->copy = 1;
-			break;
-		}
-		p2 = (struct inet6_protocol *) p2->next;
+	if (inet6_protos[hash]) {
+		ret = -1;
+	} else {
+		inet6_protos[hash] = prot;
+		ret = 0;
 	}
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+
+	spin_unlock_bh(&inet6_proto_lock);
+
+	return ret;
 }
 
 /*
  *	Remove a protocol from the hash tables.
  */
  
-int inet6_del_protocol(struct inet6_protocol *prot)
+int inet6_del_protocol(struct inet6_protocol *prot, unsigned char protocol)
 {
-	struct inet6_protocol *p;
-	struct inet6_protocol *lp = NULL;
-	unsigned char hash;
+	int ret, hash = protocol & (MAX_INET_PROTOS - 1);
 
-	hash = prot->protocol & (MAX_INET_PROTOS - 1);
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	if (prot == inet6_protos[hash]) {
-		inet6_protos[hash] = (struct inet6_protocol *) inet6_protos[hash]->next;
-		br_write_unlock_bh(BR_NETPROTO_LOCK);
-		return(0);
+	spin_lock_bh(&inet6_proto_lock);
+
+	if (inet6_protos[hash] != prot) {
+		ret = -1;
+	} else {
+		inet6_protos[hash] = NULL;
+		ret = 0;
 	}
 
-	p = (struct inet6_protocol *) inet6_protos[hash];
+	spin_unlock_bh(&inet6_proto_lock);
 
-        if (p != NULL && p->protocol == prot->protocol)
-                lp = p;
+	synchronize_net();
 
-	while(p != NULL) {
-		/*
-		 * We have to worry if the protocol being deleted is
-		 * the last one on the list, then we may need to reset
-		 * someone's copied bit.
-		 */
-		if (p->next != NULL && p->next == prot) {
-			/*
-			 * if we are the last one with this protocol and
-			 * there is a previous one, reset its copy bit.
-			 */
-			if (prot->copy == 0 && lp != NULL)
-				lp->copy = 0;
-			p->next = prot->next;
-			br_write_unlock_bh(BR_NETPROTO_LOCK);
-			return(0);
-		}
-		if (p->next != NULL && p->next->protocol == prot->protocol) 
-			lp = p->next;
-
-		p = (struct inet6_protocol *) p->next;
-	}
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
-	return(-1);
+	return ret;
 }

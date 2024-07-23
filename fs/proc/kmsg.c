@@ -7,9 +7,10 @@
 
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/poll.h>
+#include <linux/fs.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -45,8 +46,8 @@ static unsigned int kmsg_poll(struct file *file, poll_table * wait)
 
 
 struct file_operations proc_kmsg_operations = {
-	read:		kmsg_read,
-	poll:		kmsg_poll,
-	open:		kmsg_open,
-	release:	kmsg_release,
+	.read		= kmsg_read,
+	.poll		= kmsg_poll,
+	.open		= kmsg_open,
+	.release	= kmsg_release,
 };

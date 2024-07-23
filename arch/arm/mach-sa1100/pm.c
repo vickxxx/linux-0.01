@@ -18,57 +18,45 @@
  * 2001-08-29:	Nicolas Pitre <nico@cam.org>
  * 			Cleaned up, pushed platform dependent stuff
  * 			in the platform specific files.
+ *
+ * 2002-05-27:	Nicolas Pitre	Killed sleep.h and the kmalloced save array.
+ * 				Storage is local on the stack now.
  */
-
-/*
- * Debug macros
- */
-#define DEBUG 1
-#ifdef DEBUG
-#  define DPRINTK(fmt, args...)	printk("%s: " fmt, __FUNCTION__ , ## args)
-#else
-#  define DPRINTK(fmt, args...)
-#endif
-
-
-#include <linux/init.h>
-#include <linux/pm.h>
-#include <linux/slab.h>
-#include <linux/sysctl.h>
-#include <linux/acpi.h>
+#include <linux/errno.h>
+#include <linux/time.h>
 
 #include <asm/hardware.h>
 #include <asm/memory.h>
 #include <asm/system.h>
 
-#include "sleep.h"
-
 extern void sa1100_cpu_suspend(void);
 extern void sa1100_cpu_resume(void);
-
-extern unsigned long *sleep_save;	/* virtual address */
-extern unsigned long  sleep_save_p;	/* physical address */
 
 #define SAVE(x)		sleep_save[SLEEP_SAVE_##x] = x
 #define RESTORE(x)	x = sleep_save[SLEEP_SAVE_##x]
 
+/*
+ * List of global SA11x0 peripheral registers to preserve.
+ * More ones like CP and general purpose register values are preserved
+ * on the stack and then the stack pointer is stored last in sleep.S.
+ */
+enum {	SLEEP_SAVE_SP = 0,
+
+	SLEEP_SAVE_OSCR, SLEEP_SAVE_OIER,
+	SLEEP_SAVE_OSMR0, SLEEP_SAVE_OSMR1, SLEEP_SAVE_OSMR2, SLEEP_SAVE_OSMR3,
+
+	SLEEP_SAVE_GPDR, SLEEP_SAVE_GAFR,
+	SLEEP_SAVE_PPDR, SLEEP_SAVE_PPSR, SLEEP_SAVE_PPAR, SLEEP_SAVE_PSDR,
+
+	SLEEP_SAVE_Ser1SDCR0,
+
+	SLEEP_SAVE_SIZE
+};
+
+
 int pm_do_suspend(void)
 {
-	int retval;
-
-	/* set up pointer to sleep parameters */
-	sleep_save = kmalloc (SLEEP_SAVE_SIZE*sizeof(long), GFP_ATOMIC);
-	if (!sleep_save)
-		return -ENOMEM;
-	sleep_save_p = virt_to_phys(sleep_save);
-
-	retval = pm_send_all(PM_SUSPEND, (void *)2);
-	if (retval) {
-		kfree(sleep_save);
-		return retval;
-	}
-
-	cli();
+	unsigned long sleep_save[SLEEP_SAVE_SIZE];
 
 	/* preserve current time */
 	RCNR = xtime.tv_sec;
@@ -82,8 +70,6 @@ int pm_do_suspend(void)
 	SAVE(OIER);
 
 	SAVE(GPDR);
-	SAVE(GRER);
-	SAVE(GFER);
 	SAVE(GAFR);
 
 	SAVE(PPDR);
@@ -92,13 +78,6 @@ int pm_do_suspend(void)
 	SAVE(PSDR);
 
 	SAVE(Ser1SDCR0);
-
-	SAVE(ICMR);
-
-	/* ... maybe a global variable initialized by arch code to set this? */
-	GRER = PWER;
-	GFER = 0;
-	GEDR = GEDR;
 
 	/* Clear previous reset status */
 	RCSR = RCSR_HWR | RCSR_SWR | RCSR_WDR | RCSR_SMR;
@@ -109,19 +88,22 @@ int pm_do_suspend(void)
 	/* go zzz */
 	sa1100_cpu_suspend();
 
-	/* ensure not to come back here if it wasn't intended */
+	/*
+	 * Ensure not to come back here if it wasn't intended
+	 */
 	PSPR = 0;
 
-	DPRINTK("*** made it back from resume\n");
+	/*
+	 * Ensure interrupt sources are disabled; we will re-init
+	 * the interrupt subsystem via the device manager.
+	 */
+	ICLR = 0;
+	ICCR = 1;
+	ICMR = 0;
 
 	/* restore registers */
 	RESTORE(GPDR);
-	RESTORE(GRER);
-	RESTORE(GFER);
 	RESTORE(GAFR);
-
-	/* clear any edge detect bit */
-	GEDR = GEDR;
 
 	RESTORE(PPDR);
 	RESTORE(PPSR);
@@ -130,6 +112,9 @@ int pm_do_suspend(void)
 
 	RESTORE(Ser1SDCR0);
 
+	/*
+	 * Clear the peripheral sleep-hold bit.
+	 */
 	PSSR = PSSR_PH;
 
 	RESTORE(OSMR0);
@@ -139,45 +124,13 @@ int pm_do_suspend(void)
 	RESTORE(OSCR);
 	RESTORE(OIER);
 
-	ICLR = 0;
-	ICCR = 1;
-	RESTORE(ICMR);
-
 	/* restore current time */
 	xtime.tv_sec = RCNR;
 
-	sti();
-
-	kfree (sleep_save);
-
-	retval = pm_send_all(PM_RESUME, (void *)0);
-	if (retval)
-		return retval;
-
 	return 0;
 }
 
-
-static struct ctl_table pm_table[] =
+unsigned long sleep_phys_sp(void *sp)
 {
-	{ACPI_S1_SLP_TYP, "suspend", NULL, 0, 0600, NULL, (proc_handler *)&pm_do_suspend},
-	{0}
-};
-
-static struct ctl_table pm_dir_table[] =
-{
-	{CTL_ACPI, "pm", NULL, 0, 0555, pm_table},
-	{0}
-};
-
-/*
- * Initialize power interface
- */
-static int __init pm_init(void)
-{
-	register_sysctl_table(pm_dir_table, 1);
-	return 0;
+	return virt_to_phys(sp);
 }
-
-__initcall(pm_init);
-

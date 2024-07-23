@@ -62,7 +62,6 @@ struct kbd_ops {
 };
 
 extern struct kbd_ops *kbd_ops;
-#define kbd_controller_present() (kbd_ops != 0)
 
 /* Do the actual calls via kbd_ops vector  */
 #define kbd_request_region() kbd_ops->kbd_request_region()

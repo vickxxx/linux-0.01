@@ -20,19 +20,15 @@
 
 #include <linux/types.h>
 #include <linux/time.h>
+#include <linux/bcd.h>
 
 #include <asm/time.h>
 #include <asm/addrspace.h>
 
-#include <asm/ddb5xxx/debug.h>
+#include <asm/mc146818rtc.h>
+#include <asm/debug.h>
 
 #define	EPOCH		2000
-
-#undef BCD_TO_BIN
-#define BCD_TO_BIN(val) (((val)&15) + ((val)>>4)*10)
-
-#undef BIN_TO_BCD
-#define BIN_TO_BCD(val) ((((val)/10)<<4) + (val)%10)
 
 #define	READ_RTC(x)	*(volatile unsigned char*)(rtc_base+x)
 #define	WRITE_RTC(x, y)	*(volatile unsigned char*)(rtc_base+x) = y
@@ -41,7 +37,7 @@ static unsigned long rtc_base;
 
 static unsigned long
 rtc_ds1386_get_time(void)
-{	
+{
 	u8 byte;
 	u8 temp;
 	unsigned int year, month, day, hour, minute, second;
@@ -52,11 +48,11 @@ rtc_ds1386_get_time(void)
 	WRITE_RTC(0xB, byte);
 
 	/* read time data */
-	year = BCD_TO_BIN(READ_RTC(0xA)) + EPOCH;
-	month = BCD_TO_BIN(READ_RTC(0x9) & 0x1f);
-	day = BCD_TO_BIN(READ_RTC(0x8));
-	minute = BCD_TO_BIN(READ_RTC(0x2));
-	second = BCD_TO_BIN(READ_RTC(0x1));
+	year = BCD2BIN(READ_RTC(0xA)) + EPOCH;
+	month = BCD2BIN(READ_RTC(0x9) & 0x1f);
+	day = BCD2BIN(READ_RTC(0x8));
+	minute = BCD2BIN(READ_RTC(0x2));
+	second = BCD2BIN(READ_RTC(0x1));
 
 	/* hour is special - deal with it later */
 	temp = READ_RTC(0x4);
@@ -68,17 +64,17 @@ rtc_ds1386_get_time(void)
 	/* calc hour */
 	if (temp & 0x40) {
 		/* 12 hour format */
-		hour = BCD_TO_BIN(temp & 0x1f);
+		hour = BCD2BIN(temp & 0x1f);
 		if (temp & 0x20) hour += 12; 		/* PM */
 	} else {
 		/* 24 hour format */
-		hour = BCD_TO_BIN(temp & 0x3f);
+		hour = BCD2BIN(temp & 0x3f);
 	}
 
 	return mktime(year, month, day, hour, minute, second);
 }
 
-static int 
+static int
 rtc_ds1386_set_time(unsigned long t)
 {
 	struct rtc_time tm;
@@ -94,20 +90,21 @@ rtc_ds1386_set_time(unsigned long t)
 	/* convert */
 	to_tm(t, &tm);
 
+
 	/* check each field one by one */
-	year = BIN_TO_BCD(tm.tm_year - EPOCH);
+	year = BIN2BCD(tm.tm_year - EPOCH);
 	if (year != READ_RTC(0xA)) {
 		WRITE_RTC(0xA, year);
 	}
 
 	temp = READ_RTC(0x9);
-	month = BIN_TO_BCD(tm.tm_mon);
+	month = BIN2BCD(tm.tm_mon+1);	/* tm_mon starts from 0 to 11 */
 	if (month != (temp & 0x1f)) {
 		WRITE_RTC( 0x9,
 			   (month & 0x1f) | (temp & ~0x1f) );
 	}
 
-	day = BIN_TO_BCD(tm.tm_mday);
+	day = BIN2BCD(tm.tm_mday);
 	if (day != READ_RTC(0x8)) {
 		WRITE_RTC(0x8, day);
 	}
@@ -117,26 +114,26 @@ rtc_ds1386_set_time(unsigned long t)
 		/* 12 hour format */
 		hour = 0x40;
 		if (tm.tm_hour > 12) {
-			hour |= 0x20 | (BIN_TO_BCD(hour-12) & 0x1f);
+			hour |= 0x20 | (BIN2BCD(hour-12) & 0x1f);
 		} else {
-			hour |= BIN_TO_BCD(tm.tm_hour);
+			hour |= BIN2BCD(tm.tm_hour);
 		}
 	} else {
 		/* 24 hour format */
-		hour = BIN_TO_BCD(tm.tm_hour) & 0x3f;
+		hour = BIN2BCD(tm.tm_hour) & 0x3f;
 	}
 	if (hour != temp) WRITE_RTC(0x4, hour);
 
-	minute = BIN_TO_BCD(tm.tm_min);
+	minute = BIN2BCD(tm.tm_min);
 	if (minute != READ_RTC(0x2)) {
 		WRITE_RTC(0x2, minute);
 	}
 
-	second = BIN_TO_BCD(tm.tm_sec);
+	second = BIN2BCD(tm.tm_sec);
 	if (second != READ_RTC(0x1)) {
 		WRITE_RTC(0x1, second);
 	}
-	
+
 	return 0;
 }
 
@@ -144,10 +141,10 @@ void
 rtc_ds1386_init(unsigned long base)
 {
 	unsigned char byte;
-	
+
 	/* remember the base */
 	rtc_base = base;
-	MIPS_ASSERT((rtc_base & 0xe0000000) == KSEG1);
+	db_assert((rtc_base & 0xe0000000) == KSEG1);
 
 	/* turn on RTC if it is not on */
 	byte = READ_RTC(0x9);

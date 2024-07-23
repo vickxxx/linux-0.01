@@ -32,26 +32,24 @@
 #ifndef _GAMMA_DRV_H_
 #define _GAMMA_DRV_H_
 
-
 typedef struct drm_gamma_private {
+	drm_gamma_sarea_t *sarea_priv;
+	drm_map_t *sarea;
 	drm_map_t *buffers;
 	drm_map_t *mmio0;
 	drm_map_t *mmio1;
 	drm_map_t *mmio2;
 	drm_map_t *mmio3;
+	int num_rast;
 } drm_gamma_private_t;
 
-#define LOCK_TEST_WITH_RETURN( dev )					\
-do {									\
-	if ( !_DRM_LOCK_IS_HELD( dev->lock.hw_lock->lock ) ||		\
-	     dev->lock.pid != current->pid ) {				\
-		DRM_ERROR( "%s called without lock held\n",		\
-			   __FUNCTION__ );				\
-		return -EINVAL;						\
-	}								\
-} while (0)
+				/* gamma_dma.c */
+extern int gamma_dma_init( struct inode *inode, struct file *filp,
+			 unsigned int cmd, unsigned long arg );
+extern int gamma_dma_copy( struct inode *inode, struct file *filp,
+			 unsigned int cmd, unsigned long arg );
 
-
+extern int gamma_do_cleanup_dma( drm_device_t *dev );
 extern void gamma_dma_ready(drm_device_t *dev);
 extern void gamma_dma_quiescent_single(drm_device_t *dev);
 extern void gamma_dma_quiescent_dual(drm_device_t *dev);
@@ -63,6 +61,39 @@ extern int  gamma_dma(struct inode *inode, struct file *filp,
 extern int  gamma_find_devices(void);
 extern int  gamma_found(void);
 
+/* Gamma-specific code pulled from drm_fops.h:
+ */
+extern int	     DRM(finish)(struct inode *inode, struct file *filp,
+				 unsigned int cmd, unsigned long arg);
+extern int	     DRM(flush_unblock)(drm_device_t *dev, int context,
+					drm_lock_flags_t flags);
+extern int	     DRM(flush_block_and_flush)(drm_device_t *dev, int context,
+						drm_lock_flags_t flags);
+
+/* Gamma-specific code pulled from drm_dma.h:
+ */
+extern void	     DRM(clear_next_buffer)(drm_device_t *dev);
+extern int	     DRM(select_queue)(drm_device_t *dev,
+				       void (*wrapper)(unsigned long));
+extern int	     DRM(dma_enqueue)(struct file *filp, drm_dma_t *dma);
+extern int	     DRM(dma_get_buffers)(struct file *filp, drm_dma_t *dma);
+
+
+/* Gamma-specific code pulled from drm_lists.h (now renamed gamma_lists.h):
+ */
+extern int	     DRM(waitlist_create)(drm_waitlist_t *bl, int count);
+extern int	     DRM(waitlist_destroy)(drm_waitlist_t *bl);
+extern int	     DRM(waitlist_put)(drm_waitlist_t *bl, drm_buf_t *buf);
+extern drm_buf_t     *DRM(waitlist_get)(drm_waitlist_t *bl);
+extern int	     DRM(freelist_create)(drm_freelist_t *bl, int count);
+extern int	     DRM(freelist_destroy)(drm_freelist_t *bl);
+extern int	     DRM(freelist_put)(drm_device_t *dev, drm_freelist_t *bl,
+				       drm_buf_t *buf);
+extern drm_buf_t     *DRM(freelist_get)(drm_freelist_t *bl, int block);
+
+
+
+#define GLINT_DRI_BUF_COUNT 256
 
 #define GAMMA_OFF(reg)						   \
 	((reg < 0x1000)						   \
@@ -78,7 +109,6 @@ extern int  gamma_found(void);
 			   ((reg < 0x10000)  ? dev_priv->mmio1->handle :     \
 			    ((reg < 0x11000) ? dev_priv->mmio2->handle :     \
 					       dev_priv->mmio3->handle))))
-	
 #define GAMMA_ADDR(reg)	 (GAMMA_BASE(reg) + GAMMA_OFF(reg))
 #define GAMMA_DEREF(reg) *(__volatile__ int *)GAMMA_ADDR(reg)
 #define GAMMA_READ(reg)	 GAMMA_DEREF(reg)
@@ -91,9 +121,11 @@ extern int  gamma_found(void);
 #define GAMMA_FILTERMODE       0x8c00
 #define GAMMA_GCOMMANDINTFLAGS 0x0c50
 #define GAMMA_GCOMMANDMODE     0x0c40
+#define		GAMMA_QUEUED_DMA_MODE		1<<1
 #define GAMMA_GCOMMANDSTATUS   0x0c60
 #define GAMMA_GDELAYTIMER      0x0c38
 #define GAMMA_GDMACONTROL      0x0060
+#define 	GAMMA_USE_AGP			1<<1
 #define GAMMA_GINTENABLE       0x0808
 #define GAMMA_GINTFLAGS	       0x0810
 #define GAMMA_INFIFOSPACE      0x0018
@@ -101,5 +133,12 @@ extern int  gamma_found(void);
 #define GAMMA_OUTPUTFIFO       0x2000
 #define GAMMA_SYNC	       0x8c40
 #define GAMMA_SYNC_TAG	       0x0188
+#define GAMMA_PAGETABLEADDR    0x0C00
+#define GAMMA_PAGETABLELENGTH  0x0C08
+
+#define GAMMA_PASSTHROUGH	0x1FE
+#define GAMMA_DMAADDRTAG	0x530
+#define GAMMA_DMACOUNTTAG	0x531
+#define GAMMA_COMMANDINTTAG	0x532
 
 #endif

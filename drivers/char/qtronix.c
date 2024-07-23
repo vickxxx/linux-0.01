@@ -51,6 +51,7 @@
 
 #ifdef CONFIG_QTRONIX_KEYBOARD
 
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/kernel.h>
@@ -121,7 +122,7 @@ static unsigned char fn_keys[NUM_FN_KEYS] = {
 
 };
 
-void init_qtronix_990P_kbd(void)
+void __init init_qtronix_990P_kbd(void)
 {
 	int retval;
 
@@ -492,10 +493,8 @@ static int fasync_aux(int fd, struct file *filp, int on)
 
 static int release_aux(struct inode * inode, struct file * file)
 {
-	lock_kernel();
 	fasync_aux(-1, file, 0);
 	aux_count--;
-	unlock_kernel();
 	return 0;
 }
 
@@ -569,12 +568,12 @@ static unsigned int aux_poll(struct file *file, poll_table * wait)
 }
 
 struct file_operations psaux_fops = {
-	read:		read_aux,
-	write:		write_aux,
-	poll:		aux_poll,
-	open:		open_aux,
-	release:	release_aux,
-	fasync:		fasync_aux,
+	.read		= read_aux,
+	.write		= write_aux,
+	.poll		= aux_poll,
+	.open		= open_aux,
+	.release	= release_aux,
+	.fasync		= fasync_aux,
 };
 
 /*
@@ -586,7 +585,12 @@ static struct miscdevice psaux_mouse = {
 
 static int __init psaux_init(void)
 {
-	misc_register(&psaux_mouse);
+	int retval;
+
+	retval = misc_register(&psaux_mouse);
+	if(retval < 0)
+		return retval;
+
 	queue = (struct aux_queue *) kmalloc(sizeof(*queue), GFP_KERNEL);
 	memset(queue, 0, sizeof(*queue));
 	queue->head = queue->tail = 0;
@@ -594,4 +598,5 @@ static int __init psaux_init(void)
 
 	return 0;
 }
+module_init(init_qtronix_990P_kbd);
 #endif

@@ -22,7 +22,6 @@
 #define _PCI2000_H
 
 #include <linux/types.h>
-#include <linux/kdev_t.h>
 
 #ifndef	PSI_EIDE_SCSIOP
 #define	PSI_EIDE_SCSIOP	1
@@ -194,31 +193,12 @@ int Pci2000_QueueCommand	(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *));
 int Pci2000_Abort			(Scsi_Cmnd *SCpnt);
 int Pci2000_Reset			(Scsi_Cmnd *SCpnt, unsigned int flags);
 int Pci2000_Release			(struct Scsi_Host *pshost);
-int Pci2000_BiosParam		(Disk *disk, kdev_t dev, int geom[]);
+int Pci2000_BiosParam		(struct scsi_device *sdev,
+					struct block_device *bdev,
+					sector_t capacity, int geom[]);
 
 #ifndef NULL
 	#define NULL 0
 #endif
-
-/* screen is 80 columns wide, damnit! */
-#define PCI2000 {				\
-	proc_name:	"pci2000",					\
-	name:		"PCI-2000 SCSI Intelligent Disk Controller",	\
-	detect:		Pci2000_Detect,					\
-	release:	Pci2000_Release,				\
-	command:	Pci2000_Command,				\
-	queuecommand:	Pci2000_QueueCommand,				\
-	abort:		Pci2000_Abort,					\
-	reset:		Pci2000_Reset,					\
-	bios_param:	Pci2000_BiosParam,				\
-	can_queue:	16,						\
-	this_id:	-1,						\
-	sg_tablesize:	16,						\
-	cmd_per_lun:	1,						\
-	present:	0,						\
-	unchecked_isa_dma:0,						\
-	use_clustering:	DISABLE_CLUSTERING,				\
-	use_new_eh_code:0						\
-}
 
 #endif

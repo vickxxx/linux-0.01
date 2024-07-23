@@ -48,9 +48,6 @@ typedef struct lmc___ctl lmc_ctl_t;
 #define u_int16_t	u16
 #define u_int8_t	u8
 #define tulip_uint32_t	u32
-#if LINUX_VERSION_CODE < 0x20155
-#define u_int32_t	u32
-#endif
 
 #define LMC_REG_RANGE 0x80
 
@@ -87,7 +84,7 @@ typedef struct lmc___ctl lmc_ctl_t;
 		lmc_delay(); \
 		LMC_CSR_WRITE((sc), csr_9, 0x30000); \
                 lmc_delay(); \
-		n--; }} while(0);
+		n--; }} while(0)
 
 struct lmc_regfile_t {
     lmc_csrptr_t csr_busmode;                  /* CSR0 */
@@ -410,9 +407,7 @@ struct lmc___softc {
         u32                     last_int;
         u32                     num_int;
 
-#if LINUX_VERSION_CODE >= 0x20200
 	spinlock_t              lmc_lock;
-#endif
         u_int16_t               if_type;       /* PPP or NET */
         struct ppp_device       *pd;
 
@@ -549,10 +544,6 @@ struct lmc___softc {
 
 #define LMC_CRC_LEN_16 2  /* 16-bit CRC */
 #define LMC_CRC_LEN_32 4
-
-#if LINUX_VERSION_CODE < 0x20100
-#define test_and_set_bit(val, addr) set_bit(val, addr)
-#endif
 
 #ifdef LMC_HDLC
 /* definition of an hdlc header. */

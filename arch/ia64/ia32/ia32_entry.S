@@ -1,6 +1,7 @@
 #include <asm/asmmacro.h>
 #include <asm/offsets.h>
 #include <asm/signal.h>
+#include <asm/thread_info.h>
 
 #include "../kernel/minstate.h"
 
@@ -37,9 +38,9 @@ ENTRY(ia32_clone)
 	mov loc1=r16				// save ar.pfs across do_fork
 	.body
 	zxt4 out1=in1				// newsp
-	mov out3=0				// stacksize
+	mov out3=16				// stacksize (compensates for 16-byte scratch area)
 	adds out2=IA64_SWITCH_STACK_SIZE+16,sp	// out2 = &regs
-	zxt4 out0=in0				// out0 = clone_flags
+	dep out0=0,in0,CLONE_IDLETASK_BIT,1	// out0 = clone_flags & ~CLONE_IDLETASK
 	br.call.sptk.many rp=do_fork
 .ret0:	.restore sp
 	adds sp=IA64_SWITCH_STACK_SIZE,sp	// pop the switch stack
@@ -87,18 +88,28 @@ END(sys32_sigsuspend)
 
 GLOBAL_ENTRY(ia32_ret_from_clone)
 	PT_REGS_UNWIND_INFO(0)
+#if defined(CONFIG_SMP) || defined(CONFIG_PREEMPT)
+{	/*
+	 * Some versions of gas generate bad unwind info if the first instruction of a
+	 * procedure doesn't go into the first slot of a bundle.  This is a workaround.
+	 */
+	nop.m 0
+	nop.i 0
 	/*
 	 * We need to call schedule_tail() to complete the scheduling process.
 	 * Called by ia64_switch_to after do_fork()->copy_thread().  r8 contains the
 	 * address of the previously executing task.
 	 */
 	br.call.sptk.many rp=ia64_invoke_schedule_tail
-.ret1:	adds r2=IA64_TASK_PTRACE_OFFSET,r13
+}
+.ret1:
+#endif
+	adds r2=TI_FLAGS+IA64_TASK_SIZE,r13
 	;;
-	ld8 r2=[r2]
+	ld4 r2=[r2]
 	;;
 	mov r8=0
-	tbit.nz p6,p0=r2,PT_TRACESYS_BIT
+	tbit.nz p6,p0=r2,TIF_SYSCALL_TRACE
 (p6)	br.cond.spnt .ia32_strace_check_retval
 	;;					// prevent RAW on r8
 END(ia32_ret_from_clone)
@@ -164,9 +175,9 @@ GLOBAL_ENTRY(sys32_fork)
 	mov out3=0
 	adds out2=IA64_SWITCH_STACK_SIZE+16,sp	// out2 = &regs
 	br.call.sptk.few rp=do_fork
-.ret5:	mov ar.pfs=loc1
-	.restore sp
+.ret5:	.restore sp
 	adds sp=IA64_SWITCH_STACK_SIZE,sp	// pop the switch stack
+	mov ar.pfs=loc1
 	mov rp=loc0
 	br.ret.sptk.many rp
 END(sys32_fork)
@@ -180,7 +191,7 @@ ia32_syscall_table:
 	data8 sys32_fork
 	data8 sys_read
 	data8 sys_write
-	data8 sys_open		  /* 5 */
+	data8 sys32_open	  /* 5 */
 	data8 sys_close
 	data8 sys32_waitpid
 	data8 sys_creat
@@ -205,7 +216,7 @@ ia32_syscall_table:
 	data8 sys32_alarm
 	data8 sys32_ni_syscall
 	data8 sys32_pause
-	data8 sys32_utime	  /* 30 */
+	data8 compat_sys_utime	  /* 30 */
 	data8 sys32_ni_syscall	  /* old stty syscall holder */
 	data8 sys32_ni_syscall	  /* old gtty syscall holder */
 	data8 sys_access
@@ -218,9 +229,9 @@ ia32_syscall_table:
 	data8 sys_rmdir		  /* 40 */
 	data8 sys_dup
 	data8 sys32_pipe
-	data8 sys32_times
+	data8 compat_sys_times
 	data8 sys32_ni_syscall	  /* old prof syscall holder */
-	data8 sys_brk		  /* 45 */
+	data8 sys32_brk		  /* 45 */
 	data8 sys_setgid	/* 16-bit version */
 	data8 sys_getgid	/* 16-bit version */
 	data8 sys32_signal
@@ -229,8 +240,8 @@ ia32_syscall_table:
 	data8 sys_acct
 	data8 sys_umount	  /* recycled never used phys( */
 	data8 sys32_ni_syscall	  /* old lock syscall holder */
-	data8 sys32_ioctl
-	data8 sys32_fcntl	  /* 55 */
+	data8 compat_sys_ioctl
+	data8 compat_sys_fcntl	  /* 55 */
 	data8 sys32_ni_syscall	  /* old mpx syscall holder */
 	data8 sys_setpgid
 	data8 sys32_ni_syscall	  /* old ulimit syscall holder */
@@ -248,11 +259,11 @@ ia32_syscall_table:
 	data8 sys_setreuid	/* 16-bit version */	  /* 70 */
 	data8 sys_setregid	/* 16-bit version */
 	data8 sys32_sigsuspend
-	data8 sys32_sigpending
+	data8 compat_sys_sigpending
 	data8 sys_sethostname
-	data8 sys32_setrlimit	  /* 75 */
-	data8 sys32_old_getrlimit
-	data8 sys32_getrusage
+	data8 compat_sys_setrlimit	  /* 75 */
+	data8 compat_sys_old_getrlimit
+	data8 compat_sys_getrusage
 	data8 sys32_gettimeofday
 	data8 sys32_settimeofday
 	data8 sys32_getgroups16	  /* 80 */
@@ -274,22 +285,22 @@ ia32_syscall_table:
 	data8 sys_getpriority
 	data8 sys_setpriority
 	data8 sys32_ni_syscall	  /* old profil syscall holder */
-	data8 sys32_statfs
-	data8 sys32_fstatfs	  /* 100 */
+	data8 compat_sys_statfs
+	data8 compat_sys_fstatfs	  /* 100 */
 	data8 sys32_ioperm
-	data8 sys32_socketcall
+	data8 compat_sys_socketcall
 	data8 sys_syslog
-	data8 sys32_setitimer
-	data8 sys32_getitimer	  /* 105 */
-	data8 sys32_newstat
-	data8 sys32_newlstat
-	data8 sys32_newfstat
+	data8 compat_sys_setitimer
+	data8 compat_sys_getitimer	  /* 105 */
+	data8 compat_sys_newstat
+	data8 compat_sys_newlstat
+	data8 compat_sys_newfstat
 	data8 sys32_ni_syscall
 	data8 sys32_iopl		  /* 110 */
 	data8 sys_vhangup
 	data8 sys32_ni_syscall		/* used to be sys_idle */
 	data8 sys32_ni_syscall
-	data8 sys32_wait4
+	data8 compat_sys_wait4
 	data8 sys_swapoff	  /* 115 */
 	data8 sys32_sysinfo
 	data8 sys32_ipc
@@ -301,12 +312,12 @@ ia32_syscall_table:
 	data8 sys32_modify_ldt
 	data8 sys32_ni_syscall	/* adjtimex */
 	data8 sys32_mprotect	  /* 125 */
-	data8 sys32_sigprocmask
+	data8 compat_sys_sigprocmask
 	data8 sys32_ni_syscall	/* create_module */
 	data8 sys32_ni_syscall	/* init_module */
 	data8 sys32_ni_syscall	/* delete_module */
 	data8 sys32_ni_syscall	/* get_kernel_syms */  /* 130 */
-	data8 sys32_quotactl
+	data8 sys_quotactl
 	data8 sys_getpgid
 	data8 sys_fchdir
 	data8 sys32_ni_syscall	/* sys_bdflush */
@@ -337,7 +348,7 @@ ia32_syscall_table:
 	data8 sys_sched_get_priority_max
 	data8 sys_sched_get_priority_min	 /* 160 */
 	data8 sys32_sched_rr_get_interval
-	data8 sys32_nanosleep
+	data8 compat_sys_nanosleep
 	data8 sys_mremap
 	data8 sys_setresuid	/* 16-bit version */
 	data8 sys32_getresuid16	/* 16-bit version */	  /* 165 */
@@ -366,7 +377,7 @@ ia32_syscall_table:
 	data8 sys32_ni_syscall		  /* streams1 */
 	data8 sys32_ni_syscall		  /* streams2 */
 	data8 sys32_vfork	  /* 190 */
-	data8 sys32_getrlimit
+	data8 compat_sys_getrlimit
 	data8 sys32_mmap2
 	data8 sys32_truncate64
 	data8 sys32_ftruncate64
@@ -396,7 +407,7 @@ ia32_syscall_table:
 	data8 sys_mincore
 	data8 sys_madvise
 	data8 sys_getdents64	  /* 220 */
-	data8 sys32_fcntl64
+	data8 compat_sys_fcntl64
 	data8 sys_ni_syscall		/* reserved for TUX */
 	data8 sys_ni_syscall		/* reserved for Security */
 	data8 sys_gettid
@@ -405,6 +416,48 @@ ia32_syscall_table:
 	data8 sys_ni_syscall
 	data8 sys_ni_syscall
 	data8 sys_ni_syscall
+	data8 sys_ni_syscall	/* 230 */
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall	/* 235 */
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 compat_sys_futex	/* 240 */
+	data8 compat_sys_sched_setaffinity
+	data8 compat_sys_sched_getaffinity
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall	/* 245 */
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall	/* 250 */
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall	/*255*/
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall	/* 260 */
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall	/* 265 */
+	data8 sys_ni_syscall
+	data8 sys_ni_syscall
+	data8 sys_statfs64
+	data8 sys_fstatfs64
+	data8 sys_ni_syscall
+	
 	/*
 	 *  CAUTION: If any system calls are added beyond this point
 	 *	then the check in `arch/ia64/kernel/ivt.S' will have

@@ -1,8 +1,9 @@
 #ifndef __S390_DIV64
 #define __S390_DIV64
 
+#ifndef __s390x__
+
 /* for do_div "base" needs to be smaller than 2^31-1 */
- 
 #define do_div(n, base) ({                                      \
 	unsigned long long __n = (n);				\
 	unsigned long __r;					\
@@ -40,5 +41,9 @@
 	(n) = (__n);						\
         __r;                                                    \
 })
+
+#else /* __s390x__ */
+#include <asm-generic/div64.h>
+#endif /* __s390x__ */
 
 #endif

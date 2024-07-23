@@ -31,8 +31,6 @@
     
 ======================================================================*/
 
-#define __NO_VERSION__
-
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
@@ -41,7 +39,6 @@
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/timer.h>
-#include <linux/proc_fs.h>
 
 #define IN_CARD_SERVICES
 #include <pcmcia/cs_types.h>
@@ -65,7 +62,7 @@ static int do_mtd_request(memory_handle_t handle, mtd_request_t *req,
 {
     int ret, tries;
     client_t *mtd;
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     
     mtd = handle->mtd;
     if (mtd == NULL)
@@ -132,7 +129,7 @@ static void retry_erase(erase_busy_t *busy, u_int cause)
     eraseq_entry_t *erase = busy->erase;
     mtd_request_t req;
     client_t *mtd;
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     int ret;
 
     DEBUG(2, "cs: trying erase request 0x%p...\n", busy);
@@ -211,7 +208,7 @@ static void handle_erase_timeout(u_long arg)
     retry_erase((erase_busy_t *)arg, MTD_REQ_TIMEOUT);
 }
 
-static int setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
+static void setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
 {
     erase_busy_t *busy;
     region_info_t *info;
@@ -229,8 +226,10 @@ static int setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
 	else {
 	    erase->State = 1;
 	    busy = kmalloc(sizeof(erase_busy_t), GFP_KERNEL);
-	    if (!busy)
-		return CS_GENERAL_FAILURE;
+	    if (!busy) {
+		erase->State = ERASE_FAILED;
+		return;
+	    }
 	    busy->erase = erase;
 	    busy->client = handle;
 	    init_timer(&busy->timeout);
@@ -240,7 +239,6 @@ static int setup_erase_request(client_handle_t handle, eraseq_entry_t *erase)
 	    retry_erase(busy, 0);
 	}
     }
-    return CS_SUCCESS;
 } /* setup_erase_request */
 
 /*======================================================================
@@ -260,27 +258,27 @@ static int mtd_modify_window(window_handle_t win, mtd_mod_win_t *req)
 	win->ctl.flags |= MAP_ATTRIB;
     win->ctl.speed = req->AccessSpeed;
     win->ctl.card_start = req->CardOffset;
-    win->sock->ss_entry->set_mem_map(win->sock->sock, &win->ctl);
+    win->sock->ss_entry->set_mem_map(win->sock, &win->ctl);
     return CS_SUCCESS;
 }
 
 static int mtd_set_vpp(client_handle_t handle, mtd_vpp_req_t *req)
 {
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     if (CHECK_HANDLE(handle))
 	return CS_BAD_HANDLE;
     if (req->Vpp1 != req->Vpp2)
 	return CS_BAD_VPP;
     s = SOCKET(handle);
     s->socket.Vpp = req->Vpp1;
-    if (s->ss_entry->set_socket(s->sock, &s->socket))
+    if (s->ss_entry->set_socket(s, &s->socket))
 	return CS_BAD_VPP;
     return CS_SUCCESS;
 }
 
 static int mtd_rdy_mask(client_handle_t handle, mtd_rdy_req_t *req)
 {
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     if (CHECK_HANDLE(handle))
 	return CS_BAD_HANDLE;
     s = SOCKET(handle);
@@ -288,7 +286,7 @@ static int mtd_rdy_mask(client_handle_t handle, mtd_rdy_req_t *req)
 	s->socket.csc_mask |= SS_READY;
     else
 	s->socket.csc_mask &= ~SS_READY;
-    if (s->ss_entry->set_socket(s->sock, &s->socket))
+    if (s->ss_entry->set_socket(s, &s->socket))
 	return CS_GENERAL_FAILURE;
     return CS_SUCCESS;
 }
@@ -325,7 +323,7 @@ int MTDHelperEntry(int func, void *a1, void *a2)
     
 ======================================================================*/
 
-static int setup_regions(client_handle_t handle, int attr,
+static void setup_regions(client_handle_t handle, int attr,
 			  memory_handle_t *list)
 {
     int i, code, has_jedec, has_geo;
@@ -340,7 +338,7 @@ static int setup_regions(client_handle_t handle, int attr,
 
     code = (attr) ? CISTPL_DEVICE_A : CISTPL_DEVICE;
     if (read_tuple(handle, code, &device) != CS_SUCCESS)
-	return CS_GENERAL_FAILURE;
+	return;
     code = (attr) ? CISTPL_JEDEC_A : CISTPL_JEDEC_C;
     has_jedec = (read_tuple(handle, code, &jedec) == CS_SUCCESS);
     if (has_jedec && (device.ndev != jedec.nid)) {
@@ -363,8 +361,10 @@ static int setup_regions(client_handle_t handle, int attr,
 	if ((device.dev[i].type != CISTPL_DTYPE_NULL) &&
 	    (device.dev[i].size != 0)) {
 	    r = kmalloc(sizeof(*r), GFP_KERNEL);
-	    if (!r)
-		return CS_GENERAL_FAILURE;
+	    if (!r) {
+		printk(KERN_NOTICE "cs: setup_regions: kmalloc failed!\n");
+		return;
+	    }
 	    r->region_magic = REGION_MAGIC;
 	    r->state = 0;
 	    r->dev_info[0] = '\0';
@@ -389,7 +389,6 @@ static int setup_regions(client_handle_t handle, int attr,
 	}
 	offset += device.dev[i].size;
     }
-    return CS_SUCCESS;
 } /* setup_regions */
 
 /*======================================================================
@@ -417,16 +416,14 @@ static int match_region(client_handle_t handle, memory_handle_t list,
 
 int pcmcia_get_first_region(client_handle_t handle, region_info_t *rgn)
 {
-    socket_info_t *s = SOCKET(handle);
+    struct pcmcia_socket *s = SOCKET(handle);
     if (CHECK_HANDLE(handle))
 	return CS_BAD_HANDLE;
     
     if ((handle->Attributes & INFO_MASTER_CLIENT) &&
 	(!(s->state & SOCKET_REGION_INFO))) {
-	if (setup_regions(handle, 0, &s->c_region) != CS_SUCCESS)
-	    return CS_GENERAL_FAILURE;
-	if (setup_regions(handle, 1, &s->a_region) != CS_SUCCESS)
-	    return CS_GENERAL_FAILURE;
+	setup_regions(handle, 0, &s->c_region);
+	setup_regions(handle, 1, &s->a_region);
 	s->state |= SOCKET_REGION_INFO;
     }
 
@@ -452,7 +449,7 @@ int pcmcia_get_next_region(client_handle_t handle, region_info_t *rgn)
 int pcmcia_register_mtd(client_handle_t handle, mtd_reg_t *reg)
 {
     memory_handle_t list;
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     
     if (CHECK_HANDLE(handle))
 	return CS_BAD_HANDLE;
@@ -535,12 +532,12 @@ int pcmcia_check_erase_queue(eraseq_handle_t eraseq)
 
 int pcmcia_open_memory(client_handle_t *handle, open_mem_t *open, memory_handle_t *mh)
 {
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     memory_handle_t region;
     
     if ((handle == NULL) || CHECK_HANDLE(*handle))
 	return CS_BAD_HANDLE;
-    s = SOCKET(*handle);
+    s = (*handle)->Socket;
     if (open->Attributes & MEMORY_TYPE_AM)
 	region = s->a_region;
     else

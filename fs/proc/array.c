@@ -55,7 +55,7 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/kernel_stat.h>
 #include <linux/tty.h>
@@ -64,12 +64,15 @@
 #include <linux/proc_fs.h>
 #include <linux/ioport.h>
 #include <linux/mm.h>
+#include <linux/hugetlb.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
 #include <linux/signal.h>
 #include <linux/highmem.h>
+#include <linux/file.h>
+#include <linux/times.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -123,9 +126,9 @@ static const char *task_state_array[] = {
 	"R (running)",		/*  0 */
 	"S (sleeping)",		/*  1 */
 	"D (disk sleep)",	/*  2 */
-	"Z (zombie)",		/*  4 */
-	"T (stopped)",		/*  8 */
-	"W (paging)"		/* 16 */
+	"T (stopped)",		/*  4 */
+	"Z (zombie)",		/*  8 */
+	"X (dead)"		/* 16 */
 };
 
 static inline const char * get_task_state(struct task_struct *tsk)
@@ -158,7 +161,8 @@ static inline char * task_state(struct task_struct *p, char *buffer)
 		"Uid:\t%d\t%d\t%d\t%d\n"
 		"Gid:\t%d\t%d\t%d\t%d\n",
 		get_task_state(p), p->tgid,
-		p->pid, p->pid ? p->p_opptr->pid : 0, 0,
+		p->pid, p->pid ? p->real_parent->pid : 0,
+		p->pid && p->ptrace ? p->parent->pid : 0,
 		p->uid, p->euid, p->suid, p->fsuid,
 		p->gid, p->egid, p->sgid, p->fsgid);
 	read_unlock(&tasklist_lock);	
@@ -176,44 +180,28 @@ static inline char * task_state(struct task_struct *p, char *buffer)
 	return buffer;
 }
 
-static inline char * task_mem(struct mm_struct *mm, char *buffer)
+static char * render_sigset_t(const char *header, sigset_t *set, char *buffer)
 {
-	struct vm_area_struct * vma;
-	unsigned long data = 0, stack = 0;
-	unsigned long exec = 0, lib = 0;
+	int i, len;
 
-	down_read(&mm->mmap_sem);
-	for (vma = mm->mmap; vma; vma = vma->vm_next) {
-		unsigned long len = (vma->vm_end - vma->vm_start) >> 10;
-		if (!vma->vm_file) {
-			data += len;
-			if (vma->vm_flags & VM_GROWSDOWN)
-				stack += len;
-			continue;
-		}
-		if (vma->vm_flags & VM_WRITE)
-			continue;
-		if (vma->vm_flags & VM_EXEC) {
-			exec += len;
-			if (vma->vm_flags & VM_EXECUTABLE)
-				continue;
-			lib += len;
-		}
-	}
-	buffer += sprintf(buffer,
-		"VmSize:\t%8lu kB\n"
-		"VmLck:\t%8lu kB\n"
-		"VmRSS:\t%8lu kB\n"
-		"VmData:\t%8lu kB\n"
-		"VmStk:\t%8lu kB\n"
-		"VmExe:\t%8lu kB\n"
-		"VmLib:\t%8lu kB\n",
-		mm->total_vm << (PAGE_SHIFT-10),
-		mm->locked_vm << (PAGE_SHIFT-10),
-		mm->rss << (PAGE_SHIFT-10),
-		data - stack, stack,
-		exec - lib, lib);
-	up_read(&mm->mmap_sem);
+	len = strlen(header);
+	memcpy(buffer, header, len);
+	buffer += len;
+
+	i = _NSIG;
+	do {
+		int x = 0;
+
+		i -= 4;
+		if (sigismember(set, i+1)) x |= 1;
+		if (sigismember(set, i+2)) x |= 2;
+		if (sigismember(set, i+3)) x |= 4;
+		if (sigismember(set, i+4)) x |= 8;
+		*buffer++ = (x < 10 ? '0' : 'a' - 10) + x;
+	} while (i >= 4);
+
+	*buffer++ = '\n';
+	*buffer = 0;
 	return buffer;
 }
 
@@ -223,38 +211,43 @@ static void collect_sigign_sigcatch(struct task_struct *p, sigset_t *ign,
 	struct k_sigaction *k;
 	int i;
 
-	sigemptyset(ign);
-	sigemptyset(catch);
-
-	if (p->sig) {
-		k = p->sig->action;
-		for (i = 1; i <= _NSIG; ++i, ++k) {
-			if (k->sa.sa_handler == SIG_IGN)
-				sigaddset(ign, i);
-			else if (k->sa.sa_handler != SIG_DFL)
-				sigaddset(catch, i);
-		}
+	k = p->sighand->action;
+	for (i = 1; i <= _NSIG; ++i, ++k) {
+		if (k->sa.sa_handler == SIG_IGN)
+			sigaddset(ign, i);
+		else if (k->sa.sa_handler != SIG_DFL)
+			sigaddset(catch, i);
 	}
 }
 
 static inline char * task_sig(struct task_struct *p, char *buffer)
 {
-	sigset_t ign, catch;
+	sigset_t pending, shpending, blocked, ignored, caught;
 
-	buffer += sprintf(buffer, "SigPnd:\t");
-	buffer = render_sigset_t(&p->pending.signal, buffer);
-	*buffer++ = '\n';
-	buffer += sprintf(buffer, "SigBlk:\t");
-	buffer = render_sigset_t(&p->blocked, buffer);
-	*buffer++ = '\n';
+	sigemptyset(&pending);
+	sigemptyset(&shpending);
+	sigemptyset(&blocked);
+	sigemptyset(&ignored);
+	sigemptyset(&caught);
 
-	collect_sigign_sigcatch(p, &ign, &catch);
-	buffer += sprintf(buffer, "SigIgn:\t");
-	buffer = render_sigset_t(&ign, buffer);
-	*buffer++ = '\n';
-	buffer += sprintf(buffer, "SigCgt:\t"); /* Linux 2.0 uses "SigCgt" */
-	buffer = render_sigset_t(&catch, buffer);
-	*buffer++ = '\n';
+	/* Gather all the data with the appropriate locks held */
+	read_lock(&tasklist_lock);
+	if (p->sighand) {
+		spin_lock_irq(&p->sighand->siglock);
+		pending = p->pending.signal;
+		shpending = p->signal->shared_pending.signal;
+		blocked = p->blocked;
+		collect_sigign_sigcatch(p, &ignored, &caught);
+		spin_unlock_irq(&p->sighand->siglock);
+	}
+	read_unlock(&tasklist_lock);
+
+	/* render them all */
+	buffer = render_sigset_t("SigPnd:\t", &pending, buffer);
+	buffer = render_sigset_t("ShdPnd:\t", &shpending, buffer);
+	buffer = render_sigset_t("SigBlk:\t", &blocked, buffer);
+	buffer = render_sigset_t("SigIgn:\t", &ignored, buffer);
+	buffer = render_sigset_t("SigCgt:\t", &caught, buffer);
 
 	return buffer;
 }
@@ -269,19 +262,15 @@ static inline char *task_cap(struct task_struct *p, char *buffer)
 			    cap_t(p->cap_effective));
 }
 
-
+extern char *task_mem(struct mm_struct *, char *);
 int proc_pid_status(struct task_struct *task, char * buffer)
 {
 	char * orig = buffer;
-	struct mm_struct *mm;
+	struct mm_struct *mm = get_task_mm(task);
 
 	buffer = task_name(task, buffer);
 	buffer = task_state(task, buffer);
-	task_lock(task);
-	mm = task->mm;
-	if(mm)
-		atomic_inc(&mm->mm_users);
-	task_unlock(task);
+ 
 	if (mm) {
 		buffer = task_mem(mm, buffer);
 		mmput(mm);
@@ -294,6 +283,7 @@ int proc_pid_status(struct task_struct *task, char * buffer)
 	return buffer - orig;
 }
 
+extern unsigned long task_vsize(struct mm_struct *);
 int proc_pid_stat(struct task_struct *task, char * buffer)
 {
 	unsigned long vsize, eip, esp, wchan;
@@ -313,17 +303,12 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 		atomic_inc(&mm->mm_users);
 	if (task->tty) {
 		tty_pgrp = task->tty->pgrp;
-		tty_nr = kdev_t_to_nr(task->tty->device);
+		tty_nr = task->tty->device;
 	}
 	task_unlock(task);
 	if (mm) {
-		struct vm_area_struct *vma;
 		down_read(&mm->mmap_sem);
-		vma = mm->mmap;
-		while (vma) {
-			vsize += vma->vm_end - vma->vm_start;
-			vma = vma->vm_next;
-		}
+		vsize = task_vsize(mm);
 		eip = KSTK_EIP(task);
 		esp = KSTK_ESP(task);
 		up_read(&mm->mmap_sem);
@@ -331,42 +316,50 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 
 	wchan = get_wchan(task);
 
-	collect_sigign_sigcatch(task, &sigign, &sigcatch);
+	sigemptyset(&sigign);
+	sigemptyset(&sigcatch);
+	read_lock(&tasklist_lock);
+	if (task->sighand) {
+		spin_lock_irq(&task->sighand->siglock);
+		collect_sigign_sigcatch(task, &sigign, &sigcatch);
+		spin_unlock_irq(&task->sighand->siglock);
+	}
+	read_unlock(&tasklist_lock);		
 
 	/* scale priority and nice values from timeslices to -20..20 */
 	/* to make it look like a "normal" Unix priority/nice value  */
-	priority = task->counter;
-	priority = 20 - (priority * 10 + DEF_COUNTER / 2) / DEF_COUNTER;
-	nice = task->nice;
+	priority = task_prio(task);
+	nice = task_nice(task);
 
 	read_lock(&tasklist_lock);
-	ppid = task->pid ? task->p_opptr->pid : 0;
+	ppid = task->pid ? task->real_parent->pid : 0;
 	read_unlock(&tasklist_lock);
 	res = sprintf(buffer,"%d (%s) %c %d %d %d %d %d %lu %lu \
-%lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %lu %lu %ld %lu %lu %lu %lu %lu \
-%lu %lu %lu %lu %lu %lu %lu %lu %d %d\n",
+%lu %lu %lu %lu %lu %ld %ld %ld %ld %ld %ld %llu %lu %ld %lu %lu %lu %lu %lu \
+%lu %lu %lu %lu %lu %lu %lu %lu %d %d %lu %lu\n",
 		task->pid,
 		task->comm,
 		state,
 		ppid,
 		task->pgrp,
 		task->session,
-	        tty_nr,
+		tty_nr,
 		tty_pgrp,
 		task->flags,
 		task->min_flt,
 		task->cmin_flt,
 		task->maj_flt,
 		task->cmaj_flt,
-		task->times.tms_utime,
-		task->times.tms_stime,
-		task->times.tms_cutime,
-		task->times.tms_cstime,
+		jiffies_to_clock_t(task->utime),
+		jiffies_to_clock_t(task->stime),
+		jiffies_to_clock_t(task->cutime),
+		jiffies_to_clock_t(task->cstime),
 		priority,
 		nice,
 		0UL /* removed */,
-		task->it_real_value,
-		task->start_time,
+		jiffies_to_clock_t(task->it_real_value),
+		(unsigned long long)
+		    jiffies_64_to_clock_t(task->start_time - INITIAL_JIFFIES),
 		vsize,
 		mm ? mm->rss : 0, /* you might want to shift this left 3 */
 		task->rlim[RLIMIT_RSS].rlim_cur,
@@ -387,310 +380,28 @@ int proc_pid_stat(struct task_struct *task, char * buffer)
 		task->nswap,
 		task->cnswap,
 		task->exit_signal,
-		task->processor);
+		task_cpu(task),
+		task->rt_priority,
+		task->policy);
 	if(mm)
 		mmput(mm);
 	return res;
 }
-		
-static inline void statm_pte_range(pmd_t * pmd, unsigned long address, unsigned long size,
-	int * pages, int * shared, int * dirty, int * total)
+
+extern int task_statm(struct mm_struct *, int *, int *, int *, int *);
+int proc_pid_statm(struct task_struct *task, char *buffer)
 {
-	pte_t * pte;
-	unsigned long end;
-
-	if (pmd_none(*pmd))
-		return;
-	if (pmd_bad(*pmd)) {
-		pmd_ERROR(*pmd);
-		pmd_clear(pmd);
-		return;
-	}
-	pte = pte_offset(pmd, address);
-	address &= ~PMD_MASK;
-	end = address + size;
-	if (end > PMD_SIZE)
-		end = PMD_SIZE;
-	do {
-		pte_t page = *pte;
-		struct page *ptpage;
-
-		address += PAGE_SIZE;
-		pte++;
-		if (pte_none(page))
-			continue;
-		++*total;
-		if (!pte_present(page))
-			continue;
-		ptpage = pte_page(page);
-		if ((!VALID_PAGE(ptpage)) || PageReserved(ptpage))
-			continue;
-		++*pages;
-		if (pte_dirty(page))
-			++*dirty;
-		if (page_count(pte_page(page)) > 1)
-			++*shared;
-	} while (address < end);
-}
-
-static inline void statm_pmd_range(pgd_t * pgd, unsigned long address, unsigned long size,
-	int * pages, int * shared, int * dirty, int * total)
-{
-	pmd_t * pmd;
-	unsigned long end;
-
-	if (pgd_none(*pgd))
-		return;
-	if (pgd_bad(*pgd)) {
-		pgd_ERROR(*pgd);
-		pgd_clear(pgd);
-		return;
-	}
-	pmd = pmd_offset(pgd, address);
-	address &= ~PGDIR_MASK;
-	end = address + size;
-	if (end > PGDIR_SIZE)
-		end = PGDIR_SIZE;
-	do {
-		statm_pte_range(pmd, address, end - address, pages, shared, dirty, total);
-		address = (address + PMD_SIZE) & PMD_MASK;
-		pmd++;
-	} while (address < end);
-}
-
-static void statm_pgd_range(pgd_t * pgd, unsigned long address, unsigned long end,
-	int * pages, int * shared, int * dirty, int * total)
-{
-	while (address < end) {
-		statm_pmd_range(pgd, address, end - address, pages, shared, dirty, total);
-		address = (address + PGDIR_SIZE) & PGDIR_MASK;
-		pgd++;
-	}
-}
-
-int proc_pid_statm(struct task_struct *task, char * buffer)
-{
-	struct mm_struct *mm;
-	int size=0, resident=0, share=0, trs=0, lrs=0, drs=0, dt=0;
-
-	task_lock(task);
-	mm = task->mm;
-	if(mm)
-		atomic_inc(&mm->mm_users);
-	task_unlock(task);
+	int size = 0, resident = 0, shared = 0, text = 0, lib = 0, data = 0;
+	struct mm_struct *mm = get_task_mm(task);
+	
 	if (mm) {
-		struct vm_area_struct * vma;
 		down_read(&mm->mmap_sem);
-		vma = mm->mmap;
-		while (vma) {
-			pgd_t *pgd = pgd_offset(mm, vma->vm_start);
-			int pages = 0, shared = 0, dirty = 0, total = 0;
-
-			statm_pgd_range(pgd, vma->vm_start, vma->vm_end, &pages, &shared, &dirty, &total);
-			resident += pages;
-			share += shared;
-			dt += dirty;
-			size += total;
-			if (vma->vm_flags & VM_EXECUTABLE)
-				trs += pages;	/* text */
-			else if (vma->vm_flags & VM_GROWSDOWN)
-				drs += pages;	/* stack */
-			else if (vma->vm_end > 0x60000000)
-				lrs += pages;	/* library */
-			else
-				drs += pages;
-			vma = vma->vm_next;
-		}
+		size = task_statm(mm, &shared, &text, &data, &resident);
 		up_read(&mm->mmap_sem);
+
 		mmput(mm);
 	}
+
 	return sprintf(buffer,"%d %d %d %d %d %d %d\n",
-		       size, resident, share, trs, lrs, drs, dt);
+		       size, resident, shared, text, lib, data, 0);
 }
-
-/*
- * The way we support synthetic files > 4K
- * - without storing their contents in some buffer and
- * - without walking through the entire synthetic file until we reach the
- *   position of the requested data
- * is to cleverly encode the current position in the file's f_pos field.
- * There is no requirement that a read() call which returns `count' bytes
- * of data increases f_pos by exactly `count'.
- *
- * This idea is Linus' one. Bruno implemented it.
- */
-
-/*
- * For the /proc/<pid>/maps file, we use fixed length records, each containing
- * a single line.
- *
- * f_pos = (number of the vma in the task->mm->mmap list) * PAGE_SIZE
- *         + (index into the line)
- */
-/* for systems with sizeof(void*) == 4: */
-#define MAPS_LINE_FORMAT4	  "%08lx-%08lx %s %08lx %s %lu"
-#define MAPS_LINE_MAX4	49 /* sum of 8  1  8  1 4 1 8 1 5 1 10 1 */
-
-/* for systems with sizeof(void*) == 8: */
-#define MAPS_LINE_FORMAT8	  "%016lx-%016lx %s %016lx %s %lu"
-#define MAPS_LINE_MAX8	73 /* sum of 16  1  16  1 4 1 16 1 5 1 10 1 */
-
-#define MAPS_LINE_FORMAT	(sizeof(void*) == 4 ? MAPS_LINE_FORMAT4 : MAPS_LINE_FORMAT8)
-#define MAPS_LINE_MAX	(sizeof(void*) == 4 ?  MAPS_LINE_MAX4 :  MAPS_LINE_MAX8)
-
-static int proc_pid_maps_get_line (char *buf, struct vm_area_struct *map)
-{
-	/* produce the next line */
-	char *line;
-	char str[5];
-	int flags;
-	kdev_t dev;
-	unsigned long ino;
-	int len;
-
-	flags = map->vm_flags;
-
-	str[0] = flags & VM_READ ? 'r' : '-';
-	str[1] = flags & VM_WRITE ? 'w' : '-';
-	str[2] = flags & VM_EXEC ? 'x' : '-';
-	str[3] = flags & VM_MAYSHARE ? 's' : 'p';
-	str[4] = 0;
-
-	dev = 0;
-	ino = 0;
-	if (map->vm_file != NULL) {
-		dev = map->vm_file->f_dentry->d_inode->i_dev;
-		ino = map->vm_file->f_dentry->d_inode->i_ino;
-		line = d_path(map->vm_file->f_dentry,
-			      map->vm_file->f_vfsmnt,
-			      buf, PAGE_SIZE);
-		buf[PAGE_SIZE-1] = '\n';
-		line -= MAPS_LINE_MAX;
-		if(line < buf)
-			line = buf;
-	} else
-		line = buf;
-
-	len = sprintf(line,
-		      MAPS_LINE_FORMAT,
-		      map->vm_start, map->vm_end, str, map->vm_pgoff << PAGE_SHIFT,
-		      kdevname(dev), ino);
-
-	if(map->vm_file) {
-		int i;
-		for(i = len; i < MAPS_LINE_MAX; i++)
-			line[i] = ' ';
-		len = buf + PAGE_SIZE - line;
-		memmove(buf, line, len);
-	} else
-		line[len++] = '\n';
-	return len;
-}
-
-ssize_t proc_pid_read_maps (struct task_struct *task, struct file * file, char * buf,
-			  size_t count, loff_t *ppos)
-{
-	struct mm_struct *mm;
-	struct vm_area_struct * map;
-	char *tmp, *kbuf;
-	long retval;
-	int off, lineno, loff;
-
-	/* reject calls with out of range parameters immediately */
-	retval = 0;
-	if (*ppos > LONG_MAX)
-		goto out;
-	if (count == 0)
-		goto out;
-	off = (long)*ppos;
-	/*
-	 * We might sleep getting the page, so get it first.
-	 */
-	retval = -ENOMEM;
-	kbuf = (char*)__get_free_page(GFP_KERNEL);
-	if (!kbuf)
-		goto out;
-
-	tmp = (char*)__get_free_page(GFP_KERNEL);
-	if (!tmp)
-		goto out_free1;
-
-	task_lock(task);
-	mm = task->mm;
-	if (mm)
-		atomic_inc(&mm->mm_users);
-	task_unlock(task);
-	retval = 0;
-	if (!mm)
-		goto out_free2;
-
-	down_read(&mm->mmap_sem);
-	map = mm->mmap;
-	lineno = 0;
-	loff = 0;
-	if (count > PAGE_SIZE)
-		count = PAGE_SIZE;
-	while (map) {
-		int len;
-		if (off > PAGE_SIZE) {
-			off -= PAGE_SIZE;
-			goto next;
-		}
-		len = proc_pid_maps_get_line(tmp, map);
-		len -= off;
-		if (len > 0) {
-			if (retval+len > count) {
-				/* only partial line transfer possible */
-				len = count - retval;
-				/* save the offset where the next read
-				 * must start */
-				loff = len+off;
-			}
-			memcpy(kbuf+retval, tmp+off, len);
-			retval += len;
-		}
-		off = 0;
-next:
-		if (!loff)
-			lineno++;
-		if (retval >= count)
-			break;
-		if (loff) BUG();
-		map = map->vm_next;
-	}
-	up_read(&mm->mmap_sem);
-	mmput(mm);
-
-	if (retval > count) BUG();
-	if (copy_to_user(buf, kbuf, retval))
-		retval = -EFAULT;
-	else
-		*ppos = (lineno << PAGE_SHIFT) + loff;
-
-out_free2:
-	free_page((unsigned long)tmp);
-out_free1:
-	free_page((unsigned long)kbuf);
-out:
-	return retval;
-}
-
-#ifdef CONFIG_SMP
-int proc_pid_cpu(struct task_struct *task, char * buffer)
-{
-	int i, len;
-
-	len = sprintf(buffer,
-		"cpu  %lu %lu\n",
-		task->times.tms_utime,
-		task->times.tms_stime);
-		
-	for (i = 0 ; i < smp_num_cpus; i++)
-		len += sprintf(buffer + len, "cpu%d %lu %lu\n",
-			i,
-			task->per_cpu_utime[cpu_logical_map(i)],
-			task->per_cpu_stime[cpu_logical_map(i)]);
-
-	return len;
-}
-#endif

@@ -11,7 +11,7 @@
  */
 
 #define NFS_NEED_XDR_TYPES
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/errno.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/nfs.h>
@@ -29,7 +29,6 @@
  */
 static int nfs_symlink_filler(struct inode *inode, struct page *page)
 {
-	void *buffer = kmap(page);
 	int error;
 
 	/* We place the length at the beginning of the page,
@@ -37,20 +36,17 @@ static int nfs_symlink_filler(struct inode *inode, struct page *page)
 	 * XDR response verification will NULL terminate it.
 	 */
 	lock_kernel();
-	error = NFS_PROTO(inode)->readlink(inode, buffer,
-					   PAGE_CACHE_SIZE - sizeof(u32)-4);
+	error = NFS_PROTO(inode)->readlink(inode, page);
 	unlock_kernel();
 	if (error < 0)
 		goto error;
 	SetPageUptodate(page);
-	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return 0;
 
 error:
 	SetPageError(page);
-	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return -EIO;
 }
 
@@ -59,25 +55,27 @@ static char *nfs_getlink(struct inode *inode, struct page **ppage)
 	struct page *page;
 	u32 *p;
 
-	/* Caller revalidated the directory inode already. */
+	page = ERR_PTR(nfs_revalidate_inode(NFS_SERVER(inode), inode));
+	if (page)
+		goto read_failed;
 	page = read_cache_page(&inode->i_data, 0,
 				(filler_t *)nfs_symlink_filler, inode);
 	if (IS_ERR(page))
 		goto read_failed;
-	if (!Page_Uptodate(page))
+	if (!PageUptodate(page))
 		goto getlink_read_error;
 	*ppage = page;
 	p = kmap(page);
 	return (char*)(p+1);
-		
+
 getlink_read_error:
 	page_cache_release(page);
-	return ERR_PTR(-EIO);
+	page = ERR_PTR(-EIO);
 read_failed:
 	return (char*)page;
 }
 
-static int nfs_readlink(struct dentry *dentry, char *buffer, int buflen)
+static int nfs_readlink(struct dentry *dentry, char __user *buffer, int buflen)
 {
 	struct inode *inode = dentry->d_inode;
 	struct page *page = NULL;
@@ -105,8 +103,8 @@ static int nfs_follow_link(struct dentry *dentry, struct nameidata *nd)
  * symlinks can't do much...
  */
 struct inode_operations nfs_symlink_inode_operations = {
-	readlink:	nfs_readlink,
-	follow_link:	nfs_follow_link,
-	revalidate:	nfs_revalidate,
-	setattr:	nfs_notify_change,
+	.readlink	= nfs_readlink,
+	.follow_link	= nfs_follow_link,
+	.getattr	= nfs_getattr,
+	.setattr	= nfs_setattr,
 };

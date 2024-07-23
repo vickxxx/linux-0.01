@@ -4,8 +4,6 @@
  * Thomas Horsten <thh@lasat.com>
  * Copyright (C) 2000 LASAT Networks A/S.
  *
- * ########################################################################
- *
  *  This program is free software; you can distribute it and/or modify it
  *  under the terms of the GNU General Public License (Version 2) as
  *  published by the Free Software Foundation.
@@ -19,10 +17,7 @@
  *  with this program; if not, write to the Free Software Foundation, Inc.,
  *  59 Temple Place - Suite 330, Boston MA 02111-1307, USA.
  *
- * ########################################################################
- *
  * Configuration for LASAT boards, loads the appropriate include files.
- *
  */
 #ifndef _LASAT_H
 #define _LASAT_H
@@ -226,18 +221,6 @@ extern void lasat_write_eeprom_info(void);
 /* for calibration of delays */
 
 #include <asm/delay.h>
-#include <asm/bootinfo.h>
-/* calculating with the slowest board with 100 MHz clock */
-#define LASAT_100_DIVIDER 20
-/* All 200's run at 250 MHz clock */
-#define LASAT_200_DIVIDER 8
-
-extern unsigned int lasat_ndelay_divider;
-
-static inline void lasat_ndelay(unsigned int ns)
-{
-	__delay(ns / lasat_ndelay_divider);
-}
 
 extern void (* prom_printf)(const char *fmt, ...);
 
@@ -245,6 +228,9 @@ extern void (* prom_printf)(const char *fmt, ...);
 
 #define LASAT_SERVICEMODE_MAGIC_1     0xdeadbeef
 #define LASAT_SERVICEMODE_MAGIC_2     0xfedeabba
+
+/* Lasat 100 boards */
+#define LASAT_GT_BASE           (KSEG1ADDR(0x14000000))
 
 /* Lasat 200 boards */
 #define Vrc5074_PHYS_BASE       0x1fa00000

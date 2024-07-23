@@ -20,7 +20,7 @@
 #include "br_private.h"
 #include "br_private_stp.h"
 
-__u16 br_make_port_id(struct net_bridge_port *p)
+static inline __u16 br_make_port_id(const struct net_bridge_port *p)
 {
 	return (p->priority << 8) | p->port_no;
 }
@@ -33,59 +33,49 @@ void br_init_port(struct net_bridge_port *p)
 	p->state = BR_STATE_BLOCKING;
 	p->topology_change_ack = 0;
 	p->config_pending = 0;
-	br_timer_clear(&p->message_age_timer);
-	br_timer_clear(&p->forward_delay_timer);
-	br_timer_clear(&p->hold_timer);
+
+	br_stp_port_timer_init(p);
 }
 
 /* called under bridge lock */
 void br_stp_enable_bridge(struct net_bridge *br)
 {
 	struct net_bridge_port *p;
-	struct timer_list *timer = &br->tick;
 
-	init_timer(timer);
-	timer->data = (unsigned long) br;
-	timer->function = br_tick;
-	timer->expires = jiffies + 1;
-	add_timer(timer);
-
-	br_timer_set(&br->hello_timer, jiffies);
+	spin_lock_bh(&br->lock);
+	br->hello_timer.expires = jiffies + br->hello_time;
+	add_timer(&br->hello_timer);
 	br_config_bpdu_generation(br);
 
-	p = br->port_list;
-	while (p != NULL) {
+	list_for_each_entry(p, &br->port_list, list) {
 		if (p->dev->flags & IFF_UP)
 			br_stp_enable_port(p);
 
-		p = p->next;
 	}
-
-	br_timer_set(&br->gc_timer, jiffies);
+	spin_unlock_bh(&br->lock);
 }
 
-/* called under bridge lock */
+/* NO locks held */
 void br_stp_disable_bridge(struct net_bridge *br)
 {
 	struct net_bridge_port *p;
 
-	br->topology_change = 0;
-	br->topology_change_detected = 0;
-	br_timer_clear(&br->hello_timer);
-	br_timer_clear(&br->topology_change_timer);
-	br_timer_clear(&br->tcn_timer);
-	br_timer_clear(&br->gc_timer);
-	br_fdb_cleanup(br);
-
-	p = br->port_list;
-	while (p != NULL) {
+	spin_lock(&br->lock);
+	list_for_each_entry(p, &br->port_list, list) {
 		if (p->state != BR_STATE_DISABLED)
 			br_stp_disable_port(p);
 
-		p = p->next;
 	}
 
-	del_timer(&br->tick);
+	br->topology_change = 0;
+	br->topology_change_detected = 0;
+	spin_unlock(&br->lock);
+
+	del_timer_sync(&br->hello_timer);
+	del_timer_sync(&br->topology_change_timer);
+	del_timer_sync(&br->tcn_timer);
+	del_timer_sync(&br->gc_timer);
+
 }
 
 /* called under bridge lock */
@@ -103,17 +93,20 @@ void br_stp_disable_port(struct net_bridge_port *p)
 
 	br = p->br;
 	printk(KERN_INFO "%s: port %i(%s) entering %s state\n",
-	       br->dev.name, p->port_no, p->dev->name, "disabled");
+	       br->dev->name, p->port_no, p->dev->name, "disabled");
 
 	wasroot = br_is_root_bridge(br);
 	br_become_designated_port(p);
 	p->state = BR_STATE_DISABLED;
 	p->topology_change_ack = 0;
 	p->config_pending = 0;
-	br_timer_clear(&p->message_age_timer);
-	br_timer_clear(&p->forward_delay_timer);
-	br_timer_clear(&p->hold_timer);
+
+	del_timer(&p->message_age_timer);
+	del_timer(&p->forward_delay_timer);
+	del_timer(&p->hold_timer);
+
 	br_configuration_update(br);
+
 	br_port_state_selection(br);
 
 	if (br_is_root_bridge(br) && !wasroot)
@@ -131,17 +124,15 @@ static void br_stp_change_bridge_id(struct net_bridge *br, unsigned char *addr)
 
 	memcpy(oldaddr, br->bridge_id.addr, ETH_ALEN);
 	memcpy(br->bridge_id.addr, addr, ETH_ALEN);
-	memcpy(br->dev.dev_addr, addr, ETH_ALEN);
+	memcpy(br->dev->dev_addr, addr, ETH_ALEN);
 
-	p = br->port_list;
-	while (p != NULL) {
+	list_for_each_entry(p, &br->port_list, list) {
 		if (!memcmp(p->designated_bridge.addr, oldaddr, ETH_ALEN))
 			memcpy(p->designated_bridge.addr, addr, ETH_ALEN);
 
 		if (!memcmp(p->designated_root.addr, oldaddr, ETH_ALEN))
 			memcpy(p->designated_root.addr, addr, ETH_ALEN);
 
-		p = p->next;
 	}
 
 	br_configuration_update(br);
@@ -160,13 +151,11 @@ void br_stp_recalculate_bridge_id(struct net_bridge *br)
 
 	addr = br_mac_zero;
 
-	p = br->port_list;
-	while (p != NULL) {
+	list_for_each_entry(p, &br->port_list, list) {
 		if (addr == br_mac_zero ||
 		    memcmp(p->dev->dev_addr, addr, ETH_ALEN) < 0)
 			addr = p->dev->dev_addr;
 
-		p = p->next;
 	}
 
 	if (memcmp(br->bridge_id.addr, addr, ETH_ALEN))
@@ -181,15 +170,13 @@ void br_stp_set_bridge_priority(struct net_bridge *br, int newprio)
 
 	wasroot = br_is_root_bridge(br);
 
-	p = br->port_list;
-	while (p != NULL) {
+	list_for_each_entry(p, &br->port_list, list) {
 		if (p->state != BR_STATE_DISABLED &&
 		    br_is_designated_port(p)) {
 			p->designated_bridge.prio[0] = (newprio >> 8) & 0xFF;
 			p->designated_bridge.prio[1] = newprio & 0xFF;
 		}
 
-		p = p->next;
 	}
 
 	br->bridge_id.prio[0] = (newprio >> 8) & 0xFF;

@@ -12,10 +12,13 @@
 #include <linux/config.h>
 
 #include <linux/types.h>
+#include <linux/mm.h>
+#include <linux/security.h>
 
 #include <asm/param.h>
 #include <asm/signal.h>
-#include <asm/ia32.h>
+
+#include "ia32priv.h"
 
 #define CONFIG_BINFMT_ELF32
 
@@ -40,13 +43,13 @@
 #define CLOCKS_PER_SEC	IA32_CLOCKS_PER_SEC
 
 extern void ia64_elf32_init (struct pt_regs *regs);
-extern void put_dirty_page (struct task_struct * tsk, struct page *page, unsigned long address);
 
 static void elf32_set_personality (void);
 
-#define ELF_PLAT_INIT(_r)		ia64_elf32_init(_r)
 #define setup_arg_pages(bprm)		ia32_setup_arg_pages(bprm)
 #define elf_map				elf32_map
+
+#undef SET_PERSONALITY
 #define SET_PERSONALITY(ex, ibcs2)	elf32_set_personality()
 
 /* Ugly but avoids duplication */
@@ -65,7 +68,7 @@ ia32_install_shared_page (struct vm_area_struct *vma, unsigned long address, int
 }
 
 static struct vm_operations_struct ia32_shared_page_vm_ops = {
-	nopage:	ia32_install_shared_page
+	.nopage =ia32_install_shared_page
 };
 
 void
@@ -142,10 +145,11 @@ ia64_elf32_init (struct pt_regs *regs)
 	/*
 	 * Setup GDTD.  Note: GDTD is the descrambled version of the pseudo-descriptor
 	 * format defined by Figure 3-11 "Pseudo-Descriptor Format" in the IA-32
-	 * architecture manual.
+	 * architecture manual. Also note that the only fields that are not ignored are
+	 * `base', `limit', 'G', `P' (must be 1) and `S' (must be 0).
 	 */
-	regs->r31 = IA32_SEG_UNSCRAMBLE(IA32_SEG_DESCRIPTOR(IA32_GDT_OFFSET, IA32_PAGE_SIZE - 1, 0,
-							    0, 0, 0, 0, 0, 0));
+	regs->r31 = IA32_SEG_UNSCRAMBLE(IA32_SEG_DESCRIPTOR(IA32_GDT_OFFSET, IA32_PAGE_SIZE - 1,
+							    0, 0, 0, 1, 0, 0, 0));
 	/* Setup the segment selectors */
 	regs->r16 = (__USER_DS << 16) | __USER_DS; /* ES == DS, GS, FS are zero */
 	regs->r17 = (__USER_DS << 16) | __USER_CS; /* SS, CS; ia32_load_state() sets TSS and LDT */
@@ -159,9 +163,11 @@ ia32_setup_arg_pages (struct linux_binprm *bprm)
 {
 	unsigned long stack_base;
 	struct vm_area_struct *mpnt;
+	struct mm_struct *mm = current->mm;
 	int i;
 
 	stack_base = IA32_STACK_TOP - MAX_ARG_PAGES*PAGE_SIZE;
+	mm->arg_start = bprm->p + stack_base;
 
 	bprm->p += stack_base;
 	if (bprm->loader)
@@ -171,6 +177,11 @@ ia32_setup_arg_pages (struct linux_binprm *bprm)
 	mpnt = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!mpnt)
 		return -ENOMEM;
+
+	if (security_vm_enough_memory((IA32_STACK_TOP - (PAGE_MASK & (unsigned long) bprm->p))>>PAGE_SHIFT)) {
+		kmem_cache_free(vm_area_cachep, mpnt);
+		return -ENOMEM;
+	}
 
 	down_write(&current->mm->mmap_sem);
 	{
@@ -191,7 +202,7 @@ ia32_setup_arg_pages (struct linux_binprm *bprm)
 		struct page *page = bprm->page[i];
 		if (page) {
 			bprm->page[i] = NULL;
-			put_dirty_page(current, page, stack_base);
+			put_dirty_page(current, page, stack_base, PAGE_COPY);
 		}
 		stack_base += PAGE_SIZE;
 	}
@@ -206,6 +217,7 @@ elf32_set_personality (void)
 	set_personality(PER_LINUX32);
 	current->thread.map_base  = IA32_PAGE_OFFSET/3;
 	current->thread.task_size = IA32_PAGE_OFFSET;	/* use what Linux/x86 uses... */
+	current->thread.flags |= IA64_THREAD_XSTACK;	/* data must be executable */
 	set_fs(USER_DS);				/* set addr limit for new TASK_SIZE */
 }
 

@@ -10,9 +10,11 @@
 #define _ASMS390_SIGNAL_H
 
 #include <linux/types.h>
+#include <linux/time.h>
 
 /* Avoid too many header ordering problems.  */
 struct siginfo;
+struct pt_regs;
 
 #ifdef __KERNEL__
 /* Most things should be clean enough to redefine this at will, if care
@@ -93,7 +95,7 @@ typedef unsigned long sigset_t;
  * Unix names RESETHAND and NODEFER respectively.
  */
 #define SA_NOCLDSTOP    0x00000001
-#define SA_NOCLDWAIT    0x00000002 /* not supported yet */
+#define SA_NOCLDWAIT    0x00000002
 #define SA_SIGINFO      0x00000004
 #define SA_ONSTACK      0x08000000
 #define SA_RESTART      0x10000000
@@ -158,6 +160,9 @@ struct sigaction {
 struct k_sigaction {
         struct sigaction sa;
 };
+
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
+
 #else
 /* Here we must cater to libcs that poke about in kernel headers.  */
 
@@ -166,9 +171,15 @@ struct sigaction {
           __sighandler_t _sa_handler;
           void (*_sa_sigaction)(int, struct siginfo *, void *);
         } _u;
+#ifndef __s390x__ /* lovely */
         sigset_t sa_mask;
         unsigned long sa_flags;
         void (*sa_restorer)(void);
+#else  /* __s390x__ */
+        unsigned long sa_flags;
+        void (*sa_restorer)(void);
+	sigset_t sa_mask;
+#endif /* __s390x__ */
 };
 
 #define sa_handler      _u._sa_handler

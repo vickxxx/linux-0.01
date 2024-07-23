@@ -6,9 +6,11 @@
  *  file VFS functions
  */
 
+#include <linux/buffer_head.h>
 #include <linux/string.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/smp_lock.h>
+#include <linux/pagemap.h>
 #include "hpfs_fn.h"
 
 #define BLOCKS(size) (((size) + 511) >> 9)
@@ -45,12 +47,13 @@ int hpfs_file_fsync(struct file *file, struct dentry *dentry, int datasync)
 
 secno hpfs_bmap(struct inode *inode, unsigned file_secno)
 {
+	struct hpfs_inode_info *hpfs_inode = hpfs_i(inode);
 	unsigned n, disk_secno;
 	struct fnode *fnode;
 	struct buffer_head *bh;
-	if (BLOCKS(inode->u.hpfs_i.mmu_private) <= file_secno) return 0;
-	n = file_secno - inode->i_hpfs_file_sec;
-	if (n < inode->i_hpfs_n_secs) return inode->i_hpfs_disk_sec + n;
+	if (BLOCKS(hpfs_i(inode)->mmu_private) <= file_secno) return 0;
+	n = file_secno - hpfs_inode->i_file_sec;
+	if (n < hpfs_inode->i_n_secs) return hpfs_inode->i_disk_sec + n;
 	if (!(fnode = hpfs_map_fnode(inode->i_sb, inode->i_ino, &bh))) return 0;
 	disk_secno = hpfs_bplus_lookup(inode->i_sb, inode, &fnode->btree, file_secno, bh);
 	if (disk_secno == -1) return 0;
@@ -61,25 +64,26 @@ secno hpfs_bmap(struct inode *inode, unsigned file_secno)
 void hpfs_truncate(struct inode *i)
 {
 	if (IS_IMMUTABLE(i)) return /*-EPERM*/;
-	i->i_hpfs_n_secs = 0;
+	lock_kernel();
+	hpfs_i(i)->i_n_secs = 0;
 	i->i_blocks = 1 + ((i->i_size + 511) >> 9);
-	i->u.hpfs_i.mmu_private = i->i_size;
+	hpfs_i(i)->mmu_private = i->i_size;
 	hpfs_truncate_btree(i->i_sb, i->i_ino, 1, ((i->i_size + 511) >> 9));
 	hpfs_write_inode(i);
+	hpfs_i(i)->i_n_secs = 0;
+	unlock_kernel();
 }
 
-int hpfs_get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create)
+int hpfs_get_block(struct inode *inode, sector_t iblock, struct buffer_head *bh_result, int create)
 {
 	secno s;
 	s = hpfs_bmap(inode, iblock);
 	if (s) {
-		bh_result->b_dev = inode->i_dev;
-		bh_result->b_blocknr = s;
-		bh_result->b_state |= (1UL << BH_Mapped);
+		map_bh(bh_result, inode->i_sb, s);
 		return 0;
 	}
 	if (!create) return 0;
-	if (iblock<<9 != inode->u.hpfs_i.mmu_private) {
+	if (iblock<<9 != hpfs_i(inode)->mmu_private) {
 		BUG();
 		return -EIO;
 	}
@@ -88,16 +92,15 @@ int hpfs_get_block(struct inode *inode, long iblock, struct buffer_head *bh_resu
 		return -ENOSPC;
 	}
 	inode->i_blocks++;
-	inode->u.hpfs_i.mmu_private += 512;
-	bh_result->b_dev = inode->i_dev;
-	bh_result->b_blocknr = s;
-	bh_result->b_state |= (1UL << BH_Mapped) | (1UL << BH_New);
+	hpfs_i(inode)->mmu_private += 512;
+	set_buffer_new(bh_result);
+	map_bh(bh_result, inode->i_sb, s);
 	return 0;
 }
 
-static int hpfs_writepage(struct page *page)
+static int hpfs_writepage(struct page *page, struct writeback_control *wbc)
 {
-	return block_write_full_page(page,hpfs_get_block);
+	return block_write_full_page(page,hpfs_get_block, wbc);
 }
 static int hpfs_readpage(struct file *file, struct page *page)
 {
@@ -106,19 +109,19 @@ static int hpfs_readpage(struct file *file, struct page *page)
 static int hpfs_prepare_write(struct file *file, struct page *page, unsigned from, unsigned to)
 {
 	return cont_prepare_write(page,from,to,hpfs_get_block,
-		&page->mapping->host->u.hpfs_i.mmu_private);
+		&hpfs_i(page->mapping->host)->mmu_private);
 }
-static int _hpfs_bmap(struct address_space *mapping, long block)
+static sector_t _hpfs_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping,block,hpfs_get_block);
 }
 struct address_space_operations hpfs_aops = {
-	readpage: hpfs_readpage,
-	writepage: hpfs_writepage,
-	sync_page: block_sync_page,
-	prepare_write: hpfs_prepare_write,
-	commit_write: generic_commit_write,
-	bmap: _hpfs_bmap
+	.readpage = hpfs_readpage,
+	.writepage = hpfs_writepage,
+	.sync_page = block_sync_page,
+	.prepare_write = hpfs_prepare_write,
+	.commit_write = generic_commit_write,
+	.bmap = _hpfs_bmap
 };
 
 ssize_t hpfs_file_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
@@ -129,7 +132,7 @@ ssize_t hpfs_file_write(struct file *file, const char *buf, size_t count, loff_t
 	if (retval > 0) {
 		struct inode *inode = file->f_dentry->d_inode;
 		inode->i_mtime = CURRENT_TIME;
-		inode->i_hpfs_dirty = 1;
+		hpfs_i(inode)->i_dirty = 1;
 	}
 	return retval;
 }

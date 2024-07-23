@@ -58,7 +58,7 @@ ip6t_eui64_checkentry(const char *tablename,
 {
 	if (hook_mask
 	    & ~((1 << NF_IP6_PRE_ROUTING) | (1 << NF_IP6_LOCAL_IN) |
-		(1 << NF_IP6_FORWARD))) {
+		(1 << NF_IP6_PRE_ROUTING) )) {
 		printk("ip6t_eui64: only valid for PRE_ROUTING, LOCAL_IN or FORWARD.\n");
 		return 0;
 	}
@@ -69,8 +69,12 @@ ip6t_eui64_checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ip6t_match eui64_match
-= { { NULL, NULL }, "eui64", &match, &ip6t_eui64_checkentry, NULL, THIS_MODULE };
+static struct ip6t_match eui64_match = {
+	.name		= "eui64",
+	.match		= &match,
+	.checkentry	= &ip6t_eui64_checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

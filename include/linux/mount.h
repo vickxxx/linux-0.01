@@ -12,6 +12,8 @@
 #define _LINUX_MOUNT_H
 #ifdef __KERNEL__
 
+#include <linux/list.h>
+
 #define MNT_NOSUID	1
 #define MNT_NODEV	2
 #define MNT_NOEXEC	4
@@ -47,6 +49,11 @@ static inline void mntput(struct vfsmount *mnt)
 			__mntput(mnt);
 	}
 }
+
+extern void free_vfsmnt(struct vfsmount *mnt);
+extern struct vfsmount *alloc_vfsmnt(const char *name);
+extern struct vfsmount *do_kern_mount(const char *fstype, int flags,
+				      const char *name, void *data);
 
 #endif
 #endif /* _LINUX_MOUNT_H */

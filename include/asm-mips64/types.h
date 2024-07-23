@@ -9,6 +9,8 @@
 #ifndef _ASM_TYPES_H
 #define _ASM_TYPES_H
 
+#ifndef __ASSEMBLY__
+
 typedef unsigned int umode_t;
 
 /*
@@ -31,18 +33,24 @@ typedef __signed__ long __s64;
 typedef unsigned long __u64;
 
 #else
- 
+
 #if defined(__GNUC__) && !defined(__STRICT_ANSI__)
 typedef __signed__ long long __s64;
 typedef unsigned long long __u64;
 #endif
- 
+
 #endif
+
+#endif /* __ASSEMBLY__ */
 
 /*
  * These aren't exported outside the kernel to avoid name space clashes
  */
 #ifdef __KERNEL__
+
+#define BITS_PER_LONG _MIPS_SZLONG
+
+#ifndef __ASSEMBLY__
 
 typedef __signed char s8;
 typedef unsigned char u8;
@@ -67,9 +75,12 @@ typedef unsigned long long u64;
 
 #endif
 
-#define BITS_PER_LONG _MIPS_SZLONG
+typedef u64 dma_addr_t;
+typedef u64 dma64_addr_t;
 
-typedef unsigned long dma_addr_t;
+typedef unsigned long phys_t;
+
+#endif /* __ASSEMBLY__ */
 
 #endif /* __KERNEL__ */
 

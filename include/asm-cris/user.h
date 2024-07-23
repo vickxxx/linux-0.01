@@ -4,6 +4,7 @@
 #include <linux/types.h>
 #include <asm/ptrace.h>
 #include <asm/page.h>
+#include <asm/arch/user.h>
 
 /*
  * Core file format: The core file is written in such a way that gdb
@@ -27,9 +28,9 @@
  *	current->start_stack, so we round each of these in order to be able
  *	to write an integer number of pages.
  */
-
+        
 struct user {
-	struct pt_regs	regs;			/* entire machine state */
+	struct user_regs_struct	regs;		/* entire machine state */
 	size_t		u_tsize;		/* text size (pages) */
 	size_t		u_dsize;		/* data size (pages) */
 	size_t		u_ssize;		/* stack size (pages) */

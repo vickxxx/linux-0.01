@@ -9,6 +9,8 @@
 #ifndef _MACSERIAL_H
 #define _MACSERIAL_H
 
+#include <linux/spinlock.h>
+
 #define NUM_ZSREGS    16
 
 struct serial_struct {
@@ -105,14 +107,15 @@ struct mac_serial {
 	struct mac_zschannel *zs_chan_a;	/* A side registers */
 	unsigned char read_reg_zero;
 	struct device_node* dev_node;
+	spinlock_t lock;
 
 	char soft_carrier;  /* Use soft carrier on this channel */
 	char break_abort;   /* Is serial console in, so process brk/abrt */
 	char kgdb_channel;  /* Kgdb is running on this channel */
 	char is_cons;       /* Is this our console. */
 	char is_internal_modem; /* is connected to an internal modem */
-	char is_cobalt_modem;	/* is a gatwick-based cobalt modem */
 	char is_irda;		/* is connected to an IrDA codec */
+	int port_type;		/* Port type for pmac_feature */
 	unsigned char tx_active; /* character is being xmitted */
 	unsigned char tx_stopped; /* output is suspended */
 	unsigned char power_wait; /* waiting for power-up delay to expire */
@@ -153,16 +156,11 @@ struct mac_serial {
 	int			line;
 	int			count;	    /* # of fd on device */
 	int			blocked_open; /* # of blocked opens */
-	long			session; /* Session of opening process */
-	long			pgrp; /* pgrp of opening process */
 	unsigned char 		*xmit_buf;
 	int			xmit_head;
 	int			xmit_tail;
 	int			xmit_cnt;
-	struct tq_struct	tqueue;
-	struct tq_struct	tqueue_hangup;
-	struct termios		normal_termios;
-	struct termios		callout_termios;
+	struct work_struct	tqueue;
 	wait_queue_head_t	open_wait;
 	wait_queue_head_t	close_wait;
 

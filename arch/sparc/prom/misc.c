@@ -12,6 +12,7 @@
 #include <asm/openprom.h>
 #include <asm/oplib.h>
 #include <asm/auxio.h>
+#include <asm/system.h>
 
 extern void restore_current(void);
 
@@ -46,10 +47,7 @@ prom_feval(char *fstring)
 }
 
 /* We want to do this more nicely some day. */
-#ifdef CONFIG_SUN_CONSOLE
 extern void (*prom_palette)(int);
-extern int serial_console;
-#endif
 
 /* Drop into the prom, with the chance to continue with the 'go'
  * prom command.
@@ -57,29 +55,23 @@ extern int serial_console;
 void
 prom_cmdline(void)
 {
-	extern void kernel_enter_debugger(void);
 	extern void install_obp_ticker(void);
 	extern void install_linux_ticker(void);
 	unsigned long flags;
-    
-	kernel_enter_debugger();
-#ifdef CONFIG_SUN_CONSOLE
+
 	if(!serial_console && prom_palette)
 		prom_palette (1);
-#endif
-	install_obp_ticker();
 	spin_lock_irqsave(&prom_lock, flags);
+	install_obp_ticker();
 	(*(romvec->pv_abort))();
 	restore_current();
-	spin_unlock_irqrestore(&prom_lock, flags);
 	install_linux_ticker();
+	spin_unlock_irqrestore(&prom_lock, flags);
 #ifdef CONFIG_SUN_AUXIO
-	TURN_ON_LED;
+	set_auxio(AUXIO_LED, 0);
 #endif
-#ifdef CONFIG_SUN_CONSOLE
 	if(!serial_console && prom_palette)
 		prom_palette (0);
-#endif
 }
 
 /* Drop into the prom, but completely terminate the program.

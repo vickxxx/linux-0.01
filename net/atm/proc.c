@@ -55,11 +55,13 @@ static ssize_t proc_spec_atm_read(struct file *file,char *buf,size_t count,
     loff_t *pos);
 
 static struct file_operations proc_dev_atm_operations = {
-	read:		proc_dev_atm_read,
+	.owner =	THIS_MODULE,
+	.read =		proc_dev_atm_read,
 };
 
 static struct file_operations proc_spec_atm_operations = {
-	read:		proc_spec_atm_read,
+	.owner =	THIS_MODULE,
+	.read =		proc_spec_atm_read,
 };
 
 static void add_stats(char *buf,const char *aal,
@@ -72,7 +74,7 @@ static void add_stats(char *buf,const char *aal,
 }
 
 
-static void dev_info(const struct atm_dev *dev,char *buf)
+static void atm_dev_info(const struct atm_dev *dev,char *buf)
 {
 	int off,i;
 
@@ -90,205 +92,74 @@ static void dev_info(const struct atm_dev *dev,char *buf)
 
 #if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
 
-#define SEQ_NO_VCC_TOKEN   ((void *) 2)
 
-static void svc_addr(struct seq_file *seq, struct sockaddr_atmsvc *addr)
+static int svc_addr(char *buf,struct sockaddr_atmsvc *addr)
 {
 	static int code[] = { 1,2,10,6,1,0 };
 	static int e164[] = { 1,8,4,6,1,0 };
+	int *fields;
+	int len,i,j,pos;
 
+	len = 0;
 	if (*addr->sas_addr.pub) {
-		seq_printf(seq, "%s", addr->sas_addr.pub);
-		if (*addr->sas_addr.prv)
-			seq_putc(seq, '+');
-	} else if (!*addr->sas_addr.prv) {
-		seq_printf(seq, "%s", "(none)");
-		return;
+		strcpy(buf,addr->sas_addr.pub);
+		len = strlen(addr->sas_addr.pub);
+		buf += len;
+		if (*addr->sas_addr.prv) {
+			*buf++ = '+';
+			len++;
+		}
 	}
+	else if (!*addr->sas_addr.prv) {
+			strcpy(buf,"(none)");
+			return strlen(buf);
+		}
 	if (*addr->sas_addr.prv) {
-		unsigned char *prv = addr->sas_addr.prv;
-		int *fields;
-		int i, j;
-
-		fields = *prv == ATM_AFI_E164 ? e164 : code;
+		len += 44;
+		pos = 0;
+		fields = *addr->sas_addr.prv == ATM_AFI_E164 ? e164 : code;
 		for (i = 0; fields[i]; i++) {
-			for (j = fields[i]; j; j--)
-				seq_printf(seq, "%02X", *prv++);
-			if (fields[i+1]) 
-				seq_putc(seq, '.');
+			for (j = fields[i]; j; j--) {
+				sprintf(buf,"%02X",addr->sas_addr.prv[pos++]);
+				buf += 2;
+			}
+			if (fields[i+1]) *buf++ = '.';
 		}
 	}
+	return len;
 }
 
 
-static void atmarp_info(struct seq_file *seq, struct net_device *dev,struct
-			atmarp_entry *entry, struct clip_vcc *clip_vcc) {
-	unsigned long exp;
-	char buf[17];
-	int svc, llc, off;
+static void atmarp_info(struct net_device *dev,struct atmarp_entry *entry,
+    struct clip_vcc *clip_vcc,char *buf)
+{
+	unsigned char *ip;
+	int svc,off,ip_len;
 
-	svc = ((clip_vcc == SEQ_NO_VCC_TOKEN) ||
-	       (clip_vcc->vcc->sk->family == AF_ATMSVC));
-
-	llc = ((clip_vcc == SEQ_NO_VCC_TOKEN) ||
-	       (clip_vcc->encap));
-
-	if (clip_vcc == SEQ_NO_VCC_TOKEN)
-		exp = entry->neigh->used;
-	else
-		exp = clip_vcc->last_use;
-
-	exp = (jiffies - exp) / HZ;
-
-	seq_printf(seq, "%-6s%-4s%-4s%5ld ",
-		   dev->name,
-		   svc ? "SVC" : "PVC",
-		   llc ? "LLC" : "NULL",
-		   exp);
-
-	off = snprintf(buf, sizeof(buf)-1, "%d.%d.%d.%d", NIPQUAD(entry->ip));
-	while (off < 16)
-		buf[off++] = ' ';
-	buf[off] = '\0';
-	seq_printf(seq, "%s", buf);
-
-	if (clip_vcc == SEQ_NO_VCC_TOKEN) {
+	svc = !clip_vcc || clip_vcc->vcc->sk->sk_family == AF_ATMSVC;
+	off = sprintf(buf,"%-6s%-4s%-4s%5ld ",dev->name,svc ? "SVC" : "PVC",
+	    !clip_vcc || clip_vcc->encap ? "LLC" : "NULL",
+	    (jiffies-(clip_vcc ? clip_vcc->last_use : entry->neigh->used))/
+	    HZ);
+	ip = (unsigned char *) &entry->ip;
+	ip_len = sprintf(buf+off,"%d.%d.%d.%d",ip[0],ip[1],ip[2],ip[3]);
+	off += ip_len;
+	while (ip_len++ < 16) buf[off++] = ' ';
+	if (!clip_vcc)
 		if (time_before(jiffies, entry->expires))
-			seq_printf(seq, "(resolving)\n");
-		else
-			seq_printf(seq, "(expired, ref %d)\n",
-				   atomic_read(&entry->neigh->refcnt));
-	} else if (!svc) {
-		seq_printf(seq, "%d.%d.%d\n",
-			   clip_vcc->vcc->dev->number,
-			   clip_vcc->vcc->vpi,
-			   clip_vcc->vcc->vci);
-	} else {
-		svc_addr(seq, &clip_vcc->vcc->remote);
-		seq_putc(seq, '\n');
-	}
-}
-
-struct clip_seq_state {
-	/* This member must be first. */
-	struct neigh_seq_state ns;
-
-	/* Local to clip specific iteration. */
-	struct clip_vcc *vcc;
-};
-
-static struct clip_vcc *clip_seq_next_vcc(struct atmarp_entry *e,
-					  struct clip_vcc *curr)
-{
-	if (!curr) {
-		curr = e->vccs;
-		if (!curr)
-			return SEQ_NO_VCC_TOKEN;
-		return curr;
-	}
-
-	if (curr == SEQ_NO_VCC_TOKEN)
-		return NULL;
-
-	curr = curr->next;
-
-	return curr;
-}
-
-static void *clip_seq_vcc_walk(struct clip_seq_state *state,
-			       struct atmarp_entry *e, loff_t *pos)
-{
-	struct clip_vcc *vcc = state->vcc;
-
-	vcc = clip_seq_next_vcc(e, vcc);
-	if (vcc && pos != NULL) {
-		while (*pos) {
-			vcc = clip_seq_next_vcc(e, vcc);
-			if (!vcc)
-				break;
-			--(*pos);
+			strcpy(buf+off,"(resolving)\n");
+		else sprintf(buf+off,"(expired, ref %d)\n",
+			    atomic_read(&entry->neigh->refcnt));
+	else if (!svc)
+			sprintf(buf+off,"%d.%d.%d\n",clip_vcc->vcc->dev->number,
+			    clip_vcc->vcc->vpi,clip_vcc->vcc->vci);
+		else {
+			off += svc_addr(buf+off,&clip_vcc->vcc->remote);
+			strcpy(buf+off,"\n");
 		}
-	}
-	state->vcc = vcc;
-
-	return vcc;
 }
 
-static void *clip_seq_sub_iter(struct neigh_seq_state *_state,
-			       struct neighbour *n, loff_t *pos)
-{
-	struct clip_seq_state *state = (struct clip_seq_state *) _state;
 
-	return clip_seq_vcc_walk(state, NEIGH2ENTRY(n), pos);
-}
-
-static void *clip_seq_start(struct seq_file *seq, loff_t *pos)
-{
-	return neigh_seq_start(seq, pos, clip_tbl_hook, NEIGH_SEQ_NEIGH_ONLY);
-}
-
-static int clip_seq_show(struct seq_file *seq, void *v)
-{
-	static char atm_arp_banner[] = 
-		"IPitf TypeEncp Idle IP address      ATM address\n";
-
-	if (v == SEQ_START_TOKEN) {
-		seq_puts(seq, atm_arp_banner);
-	} else {
-		struct clip_seq_state *state = seq->private;
-		struct neighbour *n = v;
-		struct clip_vcc *vcc = state->vcc;
-
-		atmarp_info(seq, n->dev, NEIGH2ENTRY(n), vcc);
-	}
-	return 0;
-}
-
-static struct seq_operations arp_seq_ops = {
-	.start	= clip_seq_start,
-	.next	= neigh_seq_next,
-	.stop	= neigh_seq_stop,
-	.show	= clip_seq_show,
-};
-
-static int arp_seq_open(struct inode *inode, struct file *file)
-{
-	struct clip_seq_state *state;
-	struct seq_file *seq;
-	int rc = -EAGAIN;
-
-	if (!clip_tbl_hook)
-		goto out;
-
-	state = kmalloc(sizeof(*state), GFP_KERNEL);
-	if (!state) {
-		rc = -ENOMEM;
-		goto out_kfree;
-	}
-	memset(state, 0, sizeof(*state));
-	state->ns.neigh_sub_iter = clip_seq_sub_iter;
-
-	rc = seq_open(file, &arp_seq_ops);
-	if (rc)
-		goto out_kfree;
-
-	seq = file->private_data;
-	seq->private = state;
-out:
-	return rc;
-
-out_kfree:
-	kfree(state);
-	goto out;
-}
-
-static struct file_operations arp_seq_fops = {
-	.open		= arp_seq_open,
-	.read		= seq_read,
-	.llseek		= seq_lseek,
-	.release	= seq_release_private,
-	.owner		= THIS_MODULE,
-};
 #endif
 
 
@@ -342,7 +213,7 @@ static void vc_info(struct atm_vcc *vcc,char *buf)
 	if (!vcc->dev) here += sprintf(here,"Unassigned    ");
 	else here += sprintf(here,"%3d %3d %5d ",vcc->dev->number,vcc->vpi,
 		    vcc->vci);
-	switch (vcc->sk->family) {
+	switch (vcc->sk->sk_family) {
 		case AF_ATMPVC:
 			here += sprintf(here,"PVC");
 			break;
@@ -350,12 +221,12 @@ static void vc_info(struct atm_vcc *vcc,char *buf)
 			here += sprintf(here,"SVC");
 			break;
 		default:
-			here += sprintf(here,"%3d",vcc->sk->family);
+			here += sprintf(here, "%3d", vcc->sk->sk_family);
 	}
-	here += sprintf(here," %04lx  %5d %7d/%7d %7d/%7d\n",vcc->flags.bits,
+	here += sprintf(here," %04lx  %5d %7d/%7d %7d/%7d\n",vcc->flags,
 	    vcc->reply,
-	    atomic_read(&vcc->sk->wmem_alloc),vcc->sk->sndbuf,
-	    atomic_read(&vcc->sk->rmem_alloc),vcc->sk->rcvbuf);
+	    atomic_read(&vcc->sk->sk_wmem_alloc), vcc->sk->sk_sndbuf,
+	    atomic_read(&vcc->sk->sk_rmem_alloc), vcc->sk->sk_rcvbuf);
 }
 
 
@@ -447,7 +318,7 @@ static int atm_devices_info(loff_t pos,char *buf)
 	list_for_each(p, &atm_devs) {
 		dev = list_entry(p, struct atm_dev, dev_list);
 		if (left-- == 0) {
-			dev_info(dev,buf);
+			atm_dev_info(dev,buf);
 			spin_unlock(&atm_dev_lock);
 			return strlen(buf);
 		}
@@ -463,6 +334,7 @@ static int atm_devices_info(loff_t pos,char *buf)
 
 static int atm_pvc_info(loff_t pos,char *buf)
 {
+	struct hlist_node *node;
 	struct sock *s;
 	struct atm_vcc *vcc;
 	int left, clip_info = 0;
@@ -477,22 +349,22 @@ static int atm_pvc_info(loff_t pos,char *buf)
 		clip_info = 1;
 #endif
 	read_lock(&vcc_sklist_lock);
-	for(s = vcc_sklist; s; s = s->next) {
-		vcc = s->protinfo.af_atm;
-		if (vcc->sk->family == PF_ATMPVC && vcc->dev && !left--) {
+	sk_for_each(s, node, &vcc_sklist) {
+		vcc = atm_sk(s);
+		if (vcc->sk->sk_family == PF_ATMPVC && vcc->dev && !left--) {
 			pvc_info(vcc,buf,clip_info);
 			read_unlock(&vcc_sklist_lock);
 #if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
-			if (clip_info && atm_clip_ops->owner)
-				__MOD_DEC_USE_COUNT(atm_clip_ops->owner);
+			if (clip_info)
+				module_put(atm_clip_ops->owner);
 #endif
 			return strlen(buf);
 		}
 	}
 	read_unlock(&vcc_sklist_lock);
 #if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
-	if (clip_info && atm_clip_ops->owner)
-			__MOD_DEC_USE_COUNT(atm_clip_ops->owner);
+	if (clip_info)
+		module_put(atm_clip_ops->owner);
 #endif
 	return 0;
 }
@@ -501,6 +373,7 @@ static int atm_pvc_info(loff_t pos,char *buf)
 static int atm_vc_info(loff_t pos,char *buf)
 {
 	struct atm_vcc *vcc;
+	struct hlist_node *node;
 	struct sock *s;
 	int left;
 
@@ -510,8 +383,8 @@ static int atm_vc_info(loff_t pos,char *buf)
 		    "     Recv buffer\n");
 	left = pos-1;
 	read_lock(&vcc_sklist_lock);
-	for(s = vcc_sklist; s; s = s->next) {
-		vcc = s->protinfo.af_atm;
+	sk_for_each(s, node, &vcc_sklist) {
+		vcc = atm_sk(s);
 		if (!left--) {
 			vc_info(vcc,buf);
 			read_unlock(&vcc_sklist_lock);
@@ -526,6 +399,7 @@ static int atm_vc_info(loff_t pos,char *buf)
 
 static int atm_svc_info(loff_t pos,char *buf)
 {
+	struct hlist_node *node;
 	struct sock *s;
 	struct atm_vcc *vcc;
 	int left;
@@ -534,9 +408,9 @@ static int atm_svc_info(loff_t pos,char *buf)
 		return sprintf(buf,"Itf VPI VCI           State      Remote\n");
 	left = pos-1;
 	read_lock(&vcc_sklist_lock);
-	for(s = vcc_sklist; s; s = s->next) {
-		vcc = s->protinfo.af_atm;
-		if (vcc->sk->family == PF_ATMSVC && !left--) {
+	sk_for_each(s, node, &vcc_sklist) {
+		vcc = atm_sk(s);
+		if (vcc->sk->sk_family == PF_ATMSVC && !left--) {
 			svc_info(vcc,buf);
 			read_unlock(&vcc_sklist_lock);
 			return strlen(buf);
@@ -546,6 +420,47 @@ static int atm_svc_info(loff_t pos,char *buf)
 
 	return 0;
 }
+
+#if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
+static int atm_arp_info(loff_t pos,char *buf)
+{
+	struct neighbour *n;
+	int i,count;
+
+	if (!pos) {
+		return sprintf(buf,"IPitf TypeEncp Idle IP address      "
+		    "ATM address\n");
+	}
+	if (!try_atm_clip_ops())
+		return 0;
+	count = pos;
+	read_lock_bh(&clip_tbl_hook->lock);
+	for (i = 0; i <= NEIGH_HASHMASK; i++)
+		for (n = clip_tbl_hook->hash_buckets[i]; n; n = n->next) {
+			struct atmarp_entry *entry = NEIGH2ENTRY(n);
+			struct clip_vcc *vcc;
+
+			if (!entry->vccs) {
+				if (--count) continue;
+				atmarp_info(n->dev,entry,NULL,buf);
+				read_unlock_bh(&clip_tbl_hook->lock);
+				module_put(atm_clip_ops->owner);
+				return strlen(buf);
+			}
+			for (vcc = entry->vccs; vcc;
+			    vcc = vcc->next) {
+				if (--count) continue;
+				atmarp_info(n->dev,entry,vcc,buf);
+				read_unlock_bh(&clip_tbl_hook->lock);
+				module_put(atm_clip_ops->owner);
+				return strlen(buf);
+			}
+		}
+	read_unlock_bh(&clip_tbl_hook->lock);
+	module_put(atm_clip_ops->owner);
+	return 0;
+}
+#endif
 
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 static int atm_lec_info(loff_t pos,char *buf)
@@ -578,8 +493,7 @@ static int atm_lec_info(loff_t pos,char *buf)
 				lec_info(entry, buf+e);
 				spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 				dev_put(dev);
-				if (atm_lane_ops->owner)
-					__MOD_DEC_USE_COUNT(atm_lane_ops->owner);
+				module_put(atm_lane_ops->owner);
 				return strlen(buf);
 			}
 		}
@@ -590,8 +504,7 @@ static int atm_lec_info(loff_t pos,char *buf)
 			lec_info(entry, buf+e);
 			spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 			dev_put(dev);
-			if (atm_lane_ops->owner)
-				__MOD_DEC_USE_COUNT(atm_lane_ops->owner);
+			module_put(atm_lane_ops->owner);
 			return strlen(buf);
 		}
 		for(entry = priv->lec_no_forward; entry; entry=entry->next) {
@@ -601,8 +514,7 @@ static int atm_lec_info(loff_t pos,char *buf)
 			lec_info(entry, buf+e);
 			spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 			dev_put(dev);
-			if (atm_lane_ops->owner)
-				__MOD_DEC_USE_COUNT(atm_lane_ops->owner);
+			module_put(atm_lane_ops->owner);
 			return strlen(buf);
 		}
 		for(entry = priv->mcast_fwds; entry; entry = entry->next) {
@@ -612,15 +524,13 @@ static int atm_lec_info(loff_t pos,char *buf)
 			lec_info(entry, buf+e);
 			spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 			dev_put(dev);
-			if (atm_lane_ops->owner)
-				__MOD_DEC_USE_COUNT(atm_lane_ops->owner);
+			module_put(atm_lane_ops->owner);
 			return strlen(buf);
 		}
 		spin_unlock_irqrestore(&priv->lec_arp_lock, flags);
 		dev_put(dev);
 	}
-	if (atm_lane_ops->owner)
-		__MOD_DEC_USE_COUNT(atm_lane_ops->owner);
+	module_put(atm_lane_ops->owner);
 	return 0;
 }
 #endif
@@ -634,10 +544,9 @@ static ssize_t proc_dev_atm_read(struct file *file,char *buf,size_t count,
 	int length;
 
 	if (count == 0) return 0;
-	page = get_free_page(GFP_KERNEL);
+	page = get_zeroed_page(GFP_KERNEL);
 	if (!page) return -ENOMEM;
-	dev = ((struct proc_dir_entry *) file->f_dentry->d_inode->u.generic_ip)
-	    ->data;
+	dev = PDE(file->f_dentry->d_inode)->data;
 	if (!dev->ops->proc_read)
 		length = -EINVAL;
 	else {
@@ -659,11 +568,10 @@ static ssize_t proc_spec_atm_read(struct file *file,char *buf,size_t count,
 	unsigned long page;
 	int length;
 	int (*info)(loff_t,char *);
-	info = ((struct proc_dir_entry *) file->f_dentry->d_inode->u.generic_ip)
-	    ->data;
+	info = PDE(file->f_dentry->d_inode)->data;
 
 	if (count == 0) return 0;
-	page = get_free_page(GFP_KERNEL);
+	page = get_zeroed_page(GFP_KERNEL);
 	if (!page) return -ENOMEM;
 	length = (*info)(*pos,(char *) page);
 	if (length > count) length = -EINVAL;
@@ -690,7 +598,7 @@ int atm_proc_dev_register(struct atm_dev *dev)
 	for (num = dev->number; num; num /= 10) digits++;
 	if (!digits) digits++;
 
-	dev->proc_name = kmalloc(strlen(dev->type) + digits + 2, GFP_ATOMIC);
+	dev->proc_name = kmalloc(strlen(dev->type) + digits + 2, GFP_KERNEL);
 	if (!dev->proc_name)
 		goto fail1;
 	sprintf(dev->proc_name,"%s:%d",dev->type, dev->number);
@@ -743,7 +651,7 @@ static void atm_proc_cleanup(void)
 	remove_proc_entry("net/atm",NULL);
 }
 
-int atm_proc_init(void)
+int __init atm_proc_init(void)
 {
 	atm_proc_root = proc_mkdir("net/atm",NULL);
 	if (!atm_proc_root)
@@ -753,10 +661,7 @@ int atm_proc_init(void)
 	CREATE_ENTRY(svc);
 	CREATE_ENTRY(vc);
 #if defined(CONFIG_ATM_CLIP) || defined(CONFIG_ATM_CLIP_MODULE)
-	arp  = create_proc_entry("arp", S_IRUGO, atm_proc_root);
-	if (!arp)
-		goto cleanup;
-	arp->proc_fops = &arp_seq_fops;
+	CREATE_ENTRY(arp);
 #endif
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 	CREATE_ENTRY(lec);

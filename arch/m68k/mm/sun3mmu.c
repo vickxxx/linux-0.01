@@ -33,8 +33,6 @@ extern void mmu_emu_init (unsigned long bootmem_end);
 
 const char bad_pmd_string[] = "Bad pmd in pte_alloc: %08lx\n";
 
-extern unsigned long empty_bad_page_table;
-extern unsigned long empty_bad_page;
 extern unsigned long num_pages;
 
 void free_initmem(void)
@@ -59,10 +57,8 @@ void __init paging_init(void)
 #ifdef TEST_VERIFY_AREA
 	wp_works_ok = 0;
 #endif
-	empty_bad_page_table = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	empty_bad_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	empty_zero_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	memset((void *)empty_zero_page, 0, PAGE_SIZE);
+	empty_zero_page = alloc_bootmem_pages(PAGE_SIZE);
+	memset(empty_zero_page, 0, PAGE_SIZE);
 
 	address = PAGE_OFFSET;
 	pg_dir = swapper_pg_dir;
@@ -87,7 +83,7 @@ void __init paging_init(void)
 		/* now change pg_table to kernel virtual addresses */
 		pg_table = (pte_t *) __va ((unsigned long) pg_table);
 		for (i=0; i<PTRS_PER_PTE; ++i, ++pg_table) {
-			pte_t pte = __mk_pte(address, PAGE_INIT);
+			pte_t pte = pfn_pte(virt_to_pfn(address), PAGE_INIT);
 			if (address >= (unsigned long)high_memory)
 				pte_val (pte) = 0;
 			set_pte (pg_table, pte);
@@ -96,13 +92,12 @@ void __init paging_init(void)
 	}
 
 	mmu_emu_init(bootmem_end);
-	
+
 	current->mm = NULL;
 
 	/* memory sizing is a hack stolen from motorola.c..  hope it works for us */
-	zones_size[1] = ((unsigned long)high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
-	zones_size[0] = zones_size[1]/2;
-	zones_size[1] -= zones_size[0];
+	zones_size[0] = ((unsigned long)high_memory - PAGE_OFFSET) >> PAGE_SHIFT;
+	zones_size[1] = 0;
 	
 	free_area_init(zones_size);
 

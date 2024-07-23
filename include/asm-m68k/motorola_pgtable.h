@@ -14,7 +14,7 @@
 #define _PAGE_SUPER	0x080	/* 68040 supervisor only */
 #define _PAGE_FAKE_SUPER 0x200	/* fake supervisor only on 680[23]0 */
 #define _PAGE_GLOBAL040	0x400	/* 68040 global bit, used for kva descs */
-#define _PAGE_COW	0x800	/* implemented in software */
+#define _PAGE_FILE	0x800	/* pagecache or swap? */
 #define _PAGE_NOCACHE030 0x040	/* 68030 no-cache mode */
 #define _PAGE_NOCACHE	0x060	/* 68040 cache mode, non-serialized */
 #define _PAGE_NOCACHE_S	0x040	/* 68040 no-cache mode, serialized */
@@ -93,21 +93,7 @@ extern unsigned long mm_cachebits;
  * Conversion functions: convert a page and protection to a page entry,
  * and a page entry and page directory to the page they refer to.
  */
-#define __mk_pte(page, pgprot) \
-({									\
-	pte_t __pte;							\
-									\
-	pte_val(__pte) = __pa(page) + pgprot_val(pgprot);	        \
-	__pte;								\
-})
-#define mk_pte(page, pgprot) __mk_pte(page_address(page), (pgprot))
-#define mk_pte_phys(physpage, pgprot) \
-({									\
-	pte_t __pte;							\
-									\
-	pte_val(__pte) = (physpage) + pgprot_val(pgprot);		\
-	__pte;								\
-})
+#define mk_pte(page, pgprot) pfn_pte(page_to_pfn(page), (pgprot))
 
 extern inline pte_t pte_modify(pte_t pte, pgprot_t newprot)
 { pte_val(pte) = (pte_val(pte) & _PAGE_CHG_MASK) | pgprot_val(newprot); return pte; }
@@ -134,7 +120,10 @@ extern inline void pgd_set(pgd_t * pgdp, pmd_t * pmdp)
 #define pte_none(pte)		(!pte_val(pte))
 #define pte_present(pte)	(pte_val(pte) & (_PAGE_PRESENT | _PAGE_FAKE_SUPER))
 #define pte_clear(ptep)		({ pte_val(*(ptep)) = 0; })
-#define pte_pagenr(pte)		((__pte_page(pte) - PAGE_OFFSET) >> PAGE_SHIFT)
+
+#define pte_page(pte)		(mem_map + ((unsigned long)(__va(pte_val(pte)) - PAGE_OFFSET) >> PAGE_SHIFT))
+#define pte_pfn(pte)		(pte_val(pte) >> PAGE_SHIFT)
+#define pfn_pte(pfn, prot)	__pte(((pfn) << PAGE_SHIFT) | pgprot_val(prot))
 
 #define pmd_none(pmd)		(!pmd_val(pmd))
 #define pmd_bad(pmd)		((pmd_val(pmd) & _DESCTYPE_MASK) != _PAGE_TABLE)
@@ -145,16 +134,13 @@ extern inline void pgd_set(pgd_t * pgdp, pmd_t * pmdp)
 	while (--__i >= 0)			\
 		*__ptr++ = 0;			\
 })
+#define pmd_page(pmd)		(mem_map + ((unsigned long)(__va(pmd_val(pmd)) - PAGE_OFFSET) >> PAGE_SHIFT))
 
 
 #define pgd_none(pgd)		(!pgd_val(pgd))
 #define pgd_bad(pgd)		((pgd_val(pgd) & _DESCTYPE_MASK) != _PAGE_TABLE)
 #define pgd_present(pgd)	(pgd_val(pgd) & _PAGE_TABLE)
 #define pgd_clear(pgdp)		({ pgd_val(*pgdp) = 0; })
-/* Permanent address of a page. */
-#define page_address(page)	({ if (!(page)->virtual) BUG(); (page)->virtual; })
-#define __page_address(page)	(PAGE_OFFSET + (((page) - mem_map) << PAGE_SHIFT))
-#define pte_page(pte)		(mem_map+pte_pagenr(pte))
 
 #define pte_ERROR(e) \
 	printk("%s:%d: bad pte %08lx.\n", __FILE__, __LINE__, pte_val(e))
@@ -173,6 +159,7 @@ extern inline int pte_write(pte_t pte)		{ return !(pte_val(pte) & _PAGE_RONLY); 
 extern inline int pte_exec(pte_t pte)		{ return 1; }
 extern inline int pte_dirty(pte_t pte)		{ return pte_val(pte) & _PAGE_DIRTY; }
 extern inline int pte_young(pte_t pte)		{ return pte_val(pte) & _PAGE_ACCESSED; }
+static inline int pte_file(pte_t pte)		{ return pte_val(pte) & _PAGE_FILE; }
 
 extern inline pte_t pte_wrprotect(pte_t pte)	{ pte_val(pte) |= _PAGE_RONLY; return pte; }
 extern inline pte_t pte_rdprotect(pte_t pte)	{ return pte; }
@@ -217,11 +204,15 @@ extern inline pmd_t * pmd_offset(pgd_t * dir, unsigned long address)
 }
 
 /* Find an entry in the third-level page table.. */ 
-extern inline pte_t * pte_offset(pmd_t * pmdp, unsigned long address)
+extern inline pte_t * pte_offset_kernel(pmd_t * pmdp, unsigned long address)
 {
 	return (pte_t *)__pmd_page(*pmdp) + ((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1));
 }
 
+#define pte_offset_map(pmdp,address) ((pte_t *)kmap(pmd_page(*pmdp)) + ((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1)))
+#define pte_offset_map_nested(pmdp, address) pte_offset_map(pmdp, address)
+#define pte_unmap(pte) kunmap(pte)
+#define pte_unmap_nested(pte) kunmap(pte)
 
 /*
  * Allocate and free page tables. The xxx_kernel() versions are
@@ -233,34 +224,57 @@ extern inline pte_t * pte_offset(pmd_t * pmdp, unsigned long address)
  * from both the cache and ATC, or the CPU might not notice that the
  * cache setting for the page has been changed. -jskov
  */
-static inline void nocache_page (unsigned long vaddr)
+static inline void nocache_page(void *vaddr)
 {
+	unsigned long addr = (unsigned long)vaddr;
+
 	if (CPU_IS_040_OR_060) {
 		pgd_t *dir;
 		pmd_t *pmdp;
 		pte_t *ptep;
 
-		dir = pgd_offset_k(vaddr);
-		pmdp = pmd_offset(dir,vaddr);
-		ptep = pte_offset(pmdp,vaddr);
+		dir = pgd_offset_k(addr);
+		pmdp = pmd_offset(dir, addr);
+		ptep = pte_offset_kernel(pmdp, addr);
 		*ptep = pte_mknocache(*ptep);
 	}
 }
 
-static inline void cache_page (unsigned long vaddr)
+static inline void cache_page(void *vaddr)
 {
+	unsigned long addr = (unsigned long)vaddr;
+
 	if (CPU_IS_040_OR_060) {
 		pgd_t *dir;
 		pmd_t *pmdp;
 		pte_t *ptep;
 
-		dir = pgd_offset_k(vaddr);
-		pmdp = pmd_offset(dir,vaddr);
-		ptep = pte_offset(pmdp,vaddr);
+		dir = pgd_offset_k(addr);
+		pmdp = pmd_offset(dir, addr);
+		ptep = pte_offset_kernel(pmdp, addr);
 		*ptep = pte_mkcache(*ptep);
 	}
 }
 
+#define PTE_FILE_MAX_BITS	29
+
+static inline unsigned long pte_to_pgoff(pte_t pte)
+{
+	return ((pte.pte >> 12) << 7) + ((pte.pte >> 2) & 0x1ff);
+}
+
+static inline pte_t pgoff_to_pte(inline unsigned off)
+{
+	pte_t pte = { ((off >> 7) << 12) + ((off & 0x1ff) << 2) + _PAGE_FILE };
+	return pte;
+}
+
+/* Encode and de-code a swap entry (must be !pte_none(e) && !pte_present(e)) */
+#define __swp_type(x)		(((x).val >> 2) & 0x1ff)
+#define __swp_offset(x)		((x).val >> 12)
+#define __swp_entry(type, offset) ((swp_entry_t) { ((type) << 2) | ((offset) << 12) })
+#define __pte_to_swp_entry(pte)	((swp_entry_t) { pte_val(pte) })
+#define __swp_entry_to_pte(x)	((pte_t) { (x).val })
 
 #endif	/* !__ASSEMBLY__ */
 #endif /* _MOTOROLA_PGTABLE_H */

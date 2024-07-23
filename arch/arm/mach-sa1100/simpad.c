@@ -1,6 +1,5 @@
 /*
  * linux/arch/arm/mach-sa1100/simpad.c
- *
  */
 
 #include <linux/config.h>
@@ -23,18 +22,6 @@
 
 long cs3_shadow;
 
-static int __init simpad_init(void)
-{
-	PSPR = 0xc0008000;
-	GPDR &= ~GPIO_GPIO0;
-	cs3_shadow = (EN1 | EN0 | LED2_ON | DISPLAY_ON | RS232_ON | 
-		      ENABLE_5V | RESET_SIMCARD);
-	*(CS3BUSTYPE *)(CS3_BASE) = cs3_shadow;
-	return 0;
-}
-
-__initcall(simpad_init);
-
 long get_cs3_shadow()
 {
 	return cs3_shadow;
@@ -52,28 +39,10 @@ void clear_cs3_bit(int value)
 	*(CS3BUSTYPE *)(CS3_BASE) = cs3_shadow;
 }
 
-static void __init
-fixup_simpad(struct machine_desc *desc, struct param_struct *params,
-		   char **cmdline, struct meminfo *mi)
-{
-#ifdef CONFIG_SA1100_SIMPAD_DRAM_64MB /* DRAM */
-	SET_BANK( 0, 0xc0000000, 64*1024*1024 );
-#else
-	SET_BANK( 0, 0xc0000000, 32*1024*1024 );
-#endif
-	mi->nr_banks = 1;
-	ROOT_DEV = MKDEV(RAMDISK_MAJOR,0);
-	setup_ramdisk( 1, 0, 0, 8192 );
-	setup_initrd( __phys_to_virt(0xc0800000), 4*1024*1024 );
-}
-
-
 static struct map_desc simpad_io_desc[] __initdata = {
-  /* virtual	physical    length	domain	   r  w  c  b */
-  { 0xe8000000, 0x00000000, 0x02000000, DOMAIN_IO, 1, 1, 0, 0 }, 
-  { 0xf2800000, 0x4b800000, 0x00800000, DOMAIN_IO, 1, 1, 0, 0 }, /* MQ200 */  
-  { 0xf1000000, 0x18000000, 0x00100000, DOMAIN_IO, 0, 1, 0, 0 }, /* Paules CS3, write only */
-  LAST_DESC
+  /* virtual	physical    length	type */
+  { 0xf2800000, 0x4b800000, 0x00800000, MT_DEVICE }, /* MQ200 */  
+  { 0xf1000000, 0x18000000, 0x00100000, MT_DEVICE }  /* Paules CS3, write only */
 };
 
 
@@ -88,19 +57,25 @@ static void simpad_uart_pm(struct uart_port *port, u_int state, u_int oldstate)
 }
 
 static struct sa1100_port_fns simpad_port_fns __initdata = {
-	pm:	simpad_uart_pm,
+	.pm	= simpad_uart_pm,
 };
 
 static void __init simpad_map_io(void)
 {
 	sa1100_map_io();
-	iotable_init(simpad_io_desc);
+	iotable_init(simpad_io_desc, ARRAY_SIZE(simpad_io_desc));
 
-#ifndef CONFIG_SERIAL_SA1100_OLD
+	PSPR = 0xc0008000;
+	GPDR &= ~GPIO_GPIO0;
+	cs3_shadow = (EN1 | EN0 | LED2_ON | DISPLAY_ON | RS232_ON | 
+		      ENABLE_5V | RESET_SIMCARD);
+	*(CS3BUSTYPE *)(CS3_BASE) = cs3_shadow;
+
 	//It is only possible to register 3 UART in serial_sa1100.c
 	sa1100_register_uart(0, 3);
 	sa1100_register_uart(1, 1);
-#endif
+
+	set_irq_type(IRQ_GPIO_UCB1300_IRQ, IRQT_RISING);
 }
 
 #ifdef CONFIG_PROC_FS
@@ -148,30 +123,21 @@ static int proc_cs3_read(char *page, char **start, off_t off,
 }
  
  
-static struct proc_dir_entry *proc_cs3;
- 
 static int __init cs3_init(void)
 {
-	proc_cs3 = create_proc_entry("cs3", 0, 0);
+	struct proc_dir_entry *proc_cs3 = create_proc_entry("cs3", 0, 0);
 	if (proc_cs3)
 		proc_cs3->read_proc = proc_cs3_read;
 	return 0;
 }
  
-static int __exit cs3_exit(void)
-{
-	if (proc_cs3)
-		remove_proc_entry( "cs3", 0);
-	return 0;
-}		   
-__initcall(cs3_init);
+arch_initcall(cs3_init);
 
 #endif // CONFIG_PROC_FS
 
 MACHINE_START(SIMPAD, "Simpad")
 	MAINTAINER("Juergen Messerer")
 	BOOT_MEM(0xc0000000, 0x80000000, 0xf8000000)
-	FIXUP(fixup_simpad)
 	MAPIO(simpad_map_io)
 	INITIRQ(sa1100_init_irq)
 MACHINE_END

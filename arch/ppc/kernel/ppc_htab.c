@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.ppc_htab.c 1.19 10/16/01 15:58:42 trini
- */
-/*
  * PowerPC hash table management proc entry.  Will show information
  * about the current hash table and will allow changes to it.
  *
@@ -21,6 +18,7 @@
 #include <linux/sysctl.h>
 #include <linux/ctype.h>
 #include <linux/threads.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 #include <asm/bitops.h>
@@ -32,13 +30,13 @@
 #include <asm/cputable.h>
 #include <asm/system.h>
 
-static ssize_t ppc_htab_read(struct file * file, char * buf,
+static ssize_t ppc_htab_read(struct file * file, char __user * buf,
 			     size_t count, loff_t *ppos);
-static ssize_t ppc_htab_write(struct file * file, const char * buffer,
+static ssize_t ppc_htab_write(struct file * file, const char __user * buffer,
 			      size_t count, loff_t *ppos);
 static long long ppc_htab_lseek(struct file * file, loff_t offset, int orig);
 int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp);
+		  void __user *buffer, size_t *lenp);
 
 extern PTE *Hash, *Hash_end;
 extern unsigned long Hash_size, Hash_mask;
@@ -65,9 +63,9 @@ extern unsigned int htab_hash_searches;
 #define PMC2 954
 
 struct file_operations ppc_htab_operations = {
-        llseek:         ppc_htab_lseek,
-        read:           ppc_htab_read,
-        write:          ppc_htab_write,
+        .llseek =       ppc_htab_lseek,
+        .read =         ppc_htab_read,
+        .write =        ppc_htab_write,
 };
 
 static char *pmc1_lookup(unsigned long mmcr0)
@@ -111,16 +109,14 @@ static char *pmc2_lookup(unsigned long mmcr0)
  * is _REALLY_ slow (see the nested for loops below) but nothing
  * in here should be really timing critical. -- Cort
  */
-static ssize_t ppc_htab_read(struct file * file, char * buf,
+static ssize_t ppc_htab_read(struct file * file, char __user * buf,
 			     size_t count, loff_t *ppos)
 {
 	unsigned long mmcr0 = 0, pmc1 = 0, pmc2 = 0;
 	int n = 0;
 #ifdef CONFIG_PPC_STD_MMU
-	int valid;
-	unsigned int kptes = 0, uptes = 0, zombie_ptes = 0;
+	unsigned int kptes = 0, uptes = 0;
 	PTE *ptr;
-	struct task_struct *p;
 #endif /* CONFIG_PPC_STD_MMU */
 	char buffer[512];
 
@@ -153,32 +149,18 @@ static ssize_t ppc_htab_read(struct file * file, char * buf,
 		goto return_string;
 	}
 
-	for ( ptr = Hash ; ptr < Hash_end ; ptr++)
-	{
-		unsigned int ctx, mctx, vsid;
+	for (ptr = Hash; ptr < Hash_end; ptr++) {
+		unsigned int mctx, vsid;
 
 		if (!ptr->v)
 			continue;
-		/* make sure someone is using this context/vsid */
-		/* first undo the esid skew */
+		/* undo the esid skew */
 		vsid = ptr->vsid;
 		mctx = ((vsid - (vsid & 0xf) * 0x111) >> 4) & 0xfffff;
-		if (mctx == 0) {
+		if (mctx == 0)
 			kptes++;
-			continue;
-		}
-		/* now undo the context skew; 801921 * 897 == 1 mod 2^20 */
-		ctx = (mctx * 801921) & 0xfffff;
-		valid = 0;
-		for_each_task(p) {
-			if (p->mm != NULL && ctx == p->mm->context) {
-				valid = 1;
-				uptes++;
-				break;
-			}
-		}
-		if (!valid)
-			zombie_ptes++;
+		else
+			uptes++;
 	}
 	
 	n += sprintf( buffer + n,
@@ -189,7 +171,6 @@ static ssize_t ppc_htab_read(struct file * file, char * buf,
 		      "Entries\t\t: %lu\n"
 		      "User ptes\t: %u\n"
 		      "Kernel ptes\t: %u\n"
-		      "Zombies\t\t: %u\n"
 		      "Percent full\t: %lu%%\n",
                       (unsigned long)(Hash_size>>10),
 		      (Hash_size/(sizeof(PTE)*8)),
@@ -197,7 +178,6 @@ static ssize_t ppc_htab_read(struct file * file, char * buf,
 		      Hash_size/sizeof(PTE),
                       uptes,
 		      kptes,
-		      zombie_ptes,
 		      ((kptes+uptes)*100) / (Hash_size/sizeof(PTE))
 		);
 
@@ -211,7 +191,7 @@ static ssize_t ppc_htab_read(struct file * file, char * buf,
 		      primary_pteg_full, htab_evicts);
 return_string:
 #endif /* CONFIG_PPC_STD_MMU */
-	
+
 	n += sprintf( buffer + n,
 		      "Non-error misses: %lu\n"
 		      "Error misses\t: %lu\n",
@@ -222,7 +202,8 @@ return_string:
 		n = strlen(buffer) - *ppos;
 	if (n > count)
 		n = count;
-	copy_to_user(buf, buffer + *ppos, n);
+	if (copy_to_user(buf, buffer + *ppos, n))
+		return -EFAULT;
 	*ppos += n;
 	return n;
 }
@@ -230,13 +211,19 @@ return_string:
 /*
  * Allow user to define performance counters and resize the hash table
  */
-static ssize_t ppc_htab_write(struct file * file, const char * buffer,
+static ssize_t ppc_htab_write(struct file * file, const char __user * ubuffer,
 			      size_t count, loff_t *ppos)
 {
 #ifdef CONFIG_PPC_STD_MMU
 	unsigned long tmp;
+	char buffer[16];
+
 	if ( current->uid != 0 )
 		return -EACCES;
+	if (strncpy_from_user(buffer, ubuffer, 15))
+		return -EFAULT;
+	buffer[15] = 0;
+
 	/* don't set the htab size for now */
 	if ( !strncmp( buffer, "size ", 5) )
 		return -EBUSY;
@@ -379,47 +366,6 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 		}
 	}	
 	
-
-	return count;
-	
-#if 0 /* resizing htab is a bit difficult right now -- Cort */
-	unsigned long size;
-	extern void reset_SDR1(void);
-	
-	/* only know how to set size right now */
-	if ( strncmp( buffer, "size ", 5) )
-		return -EINVAL;
-
-	size = simple_strtoul( &buffer[5], NULL, 10 );
-	
-	/* only allow to shrink */
-	if ( size >= Hash_size>>10 )
-		return -EINVAL;
-
-	/* minimum size of htab */
-	if ( size < 64 )
-		return -EINVAL;
-	
-	/* make sure it's a multiple of 64k */
-	if ( size % 64 )
-		return -EINVAL;
-	
-	printk("Hash table resize to %luk\n", size);
-	/*
-	 * We need to rehash all kernel entries for the new htab size.
-	 * Kernel only since we do a flush_tlb_all().  Since it's kernel
-	 * we only need to bother with vsids 0-15.  To avoid problems of
-	 * clobbering un-rehashed values we put the htab at a new spot
-	 * and put everything there.
-	 * -- Cort
-	 */
-	Hash_size = size<<10;
-	Hash_mask = (Hash_size >> 6) - 1;
-        _SDR1 = __pa(Hash) | (Hash_mask >> 10);
-	flush_tlb_all();
-
-	reset_SDR1();
-#endif	
 	return count;
 #else /* CONFIG_PPC_STD_MMU */
 	return 0;
@@ -430,24 +376,27 @@ static ssize_t ppc_htab_write(struct file * file, const char * buffer,
 static long long
 ppc_htab_lseek(struct file * file, loff_t offset, int orig)
 {
+    long long ret = -EINVAL;
+
+    lock_kernel();
     switch (orig) {
     case 0:
 	file->f_pos = offset;
-	return(file->f_pos);
+	ret = file->f_pos;
+	break;
     case 1:
 	file->f_pos += offset;
-	return(file->f_pos);
-    case 2:
-	return(-EINVAL);
-    default:
-	return(-EINVAL);
+	ret = file->f_pos;
     }
+    unlock_kernel();
+    return ret;
 }
 
 int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp)
+		  void __user *buffer_arg, size_t *lenp)
 {
 	int vleft, first=1, len, left, val;
+	char __user *buffer = (char __user *) buffer_arg;
 	#define TMPBUFLEN 256
 	char buf[TMPBUFLEN], *p;
 	static const char *sizestrings[4] = {
@@ -480,12 +429,12 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 		if (write) {
 			while (left) {
 				char c;
-				if(get_user(c,(char *) buffer))
+				if(get_user(c, buffer))
 					return -EFAULT;
 				if (!isspace(c))
 					break;
 				left--;
-				((char *) buffer)++;
+				buffer++;
 			}
 			if (!left)
 				break;
@@ -532,7 +481,7 @@ int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
 			len = strlen(buf);
 			if (len > left)
 				len = left;
-			if(copy_to_user(buffer, buf, len))
+			if (copy_to_user(buffer, buf, len))
 				return -EFAULT;
 			left -= len;
 			buffer += len;

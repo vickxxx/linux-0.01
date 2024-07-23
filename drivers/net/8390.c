@@ -52,10 +52,9 @@ static const char version[] =
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/fs.h>
 #include <linux/types.h>
-#include <linux/ptrace.h>
 #include <linux/string.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -68,6 +67,7 @@ static const char version[] =
 #include <linux/in.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -270,13 +270,14 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	struct ei_device *ei_local = (struct ei_device *) dev->priv;
 	int length, send_length, output_page;
 	unsigned long flags;
+	char scratch[ETH_ZLEN];
 
 	length = skb->len;
 
 	/* Mask interrupts from the ethercard. 
 	   SMP: We have to grab the lock here otherwise the IRQ handler
 	   on another CPU can flip window and race the IRQ mask set. We end
-	   up trashing the mcast filter not disabling irqs if we dont lock */
+	   up trashing the mcast filter not disabling irqs if we don't lock */
 	   
 	spin_lock_irqsave(&ei_local->page_lock, flags);
 	outb_p(0x00, e8390_base + EN0_IMR);
@@ -340,8 +341,15 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * isn't already sending. If it is busy, the interrupt handler will
 	 * trigger the send later, upon receiving a Tx done interrupt.
 	 */
-
-	ei_block_output(dev, length, skb->data, output_page);
+	 
+	if (length == send_length)
+		ei_block_output(dev, length, skb->data, output_page);
+	else {
+		memset(scratch, 0, ETH_ZLEN);
+		memcpy(scratch, skb->data, skb->len);
+		ei_block_output(dev, ETH_ZLEN, scratch, output_page);
+	}
+		
 	if (! ei_local->txing) 
 	{
 		ei_local->txing = 1;
@@ -373,7 +381,13 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	 * reasonable hardware if you only use one Tx buffer.
 	 */
 
-	ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
+	if (length == send_length)
+		ei_block_output(dev, length, skb->data, ei_local->tx_start_page);
+	else {
+		memset(scratch, 0, ETH_ZLEN);
+		memcpy(scratch, skb->data, skb->len);
+		ei_block_output(dev, ETH_ZLEN, scratch, ei_local->tx_start_page);
+	}
 	ei_local->txing = 1;
 	NS8390_trigger_send(dev, send_length, ei_local->tx_start_page);
 	dev->trans_start = jiffies;
@@ -403,11 +417,11 @@ static int ei_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * Handle the ether interface interrupts. We pull packets from
  * the 8390 via the card specific functions and fire them at the networking
  * stack. We also handle transmit completions and wake the transmit path if
- * neccessary. We also update the counters and do other housekeeping as
+ * necessary. We also update the counters and do other housekeeping as
  * needed.
  */
 
-void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+irqreturn_t ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device *dev = dev_id;
 	long e8390_base;
@@ -417,7 +431,7 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	if (dev == NULL) 
 	{
 		printk ("net_interrupt(): irq %d for unknown device.\n", irq);
-		return;
+		return IRQ_NONE;
 	}
     
 	e8390_base = dev->base_addr;
@@ -440,7 +454,7 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			   inb_p(e8390_base + EN0_IMR));
 #endif
 		spin_unlock(&ei_local->page_lock);
-		return;
+		return IRQ_NONE;
 	}
     
 	/* Change to page 0 and read the intr status reg. */
@@ -506,7 +520,7 @@ void ei_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		}
 	}
 	spin_unlock(&ei_local->page_lock);
-	return;
+	return IRQ_HANDLED;
 }
 
 /**
@@ -885,27 +899,6 @@ static struct net_device_stats *get_stats(struct net_device *dev)
 }
 
 /*
- * Update the given Autodin II CRC value with another data byte.
- */
-
-static inline u32 update_crc(u8 byte, u32 current_crc)
-{
-	int bit;
-	u8 ah = 0;
-	for (bit=0; bit<8; bit++) 
-	{
-		u8 carry = (current_crc>>31);
-		current_crc <<= 1;
-		ah = ((ah<<1) | carry) ^ byte;
-		if (ah&1)
-			current_crc ^= 0x04C11DB7;	/* CRC polynomial */
-		ah >>= 1;
-		byte >>= 1;
-	}
-	return current_crc;
-}
-
-/*
  * Form the 64 bit 8390 multicast table from the linked list of addresses
  * associated with this dev structure.
  */
@@ -916,16 +909,13 @@ static inline void make_mc_bits(u8 *bits, struct net_device *dev)
 
 	for (dmi=dev->mc_list; dmi; dmi=dmi->next) 
 	{
-		int i;
 		u32 crc;
 		if (dmi->dmi_addrlen != ETH_ALEN) 
 		{
 			printk(KERN_INFO "%s: invalid multicast address length given.\n", dev->name);
 			continue;
 		}
-		crc = 0xffffffff;	/* initial CRC value */
-		for (i=0; i<ETH_ALEN; i++)
-			crc = update_crc(dmi->dmi_addr[i], crc);
+		crc = ether_crc(ETH_ALEN, dmi->dmi_addr);
 		/* 
 		 * The 8390 uses the 6 most significant bits of the
 		 * CRC to index the multicast table.

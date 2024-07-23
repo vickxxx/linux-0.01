@@ -48,6 +48,13 @@
 
 #ifdef CONFIG_SUN3
 #include <asm/oplib.h>
+#include <asm/machines.h>
+#include <asm/idprom.h>
+
+#define CGFOUR_OBMEM_ADDR 0x1f300000
+#define BWTWO_OBMEM_ADDR 0x1f000000
+#define BWTWO_OBMEM50_ADDR 0x00100000
+
 #endif
 #ifdef CONFIG_SUN3X
 #include <asm/sun3x.h>
@@ -59,14 +66,15 @@
 #define CURSOR_SHAPE			1
 #define CURSOR_BLINK			2
 
+#define mymemset(x,y) memset(x,0,y)
+
     /*
      *  Interface used by the world
      */
 
 int sun3fb_init(void);
-int sun3fb_setup(char *options);
+void sun3fb_setup(char *options);
 
-static int currcon;
 static char fontname[40] __initdata = { 0 };
 static int curblink __initdata = 1;
 
@@ -80,9 +88,11 @@ static int sun3fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			struct fb_info *info);
 static int sun3fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 			struct fb_info *info);
+static int sun3fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
+			    u_int transp, struct fb_info *info);
+static int sun3fb_blank(int blank, struct fb_info *info);
 static void sun3fb_cursor(struct display *p, int mode, int x, int y);
 static void sun3fb_clear_margin(struct display *p, int s);
-			    
 
     /*
      *  Interface to the low level console driver
@@ -90,8 +100,6 @@ static void sun3fb_clear_margin(struct display *p, int s);
 
 static int sun3fbcon_switch(int con, struct fb_info *info);
 static int sun3fbcon_updatevar(int con, struct fb_info *info);
-static void sun3fbcon_blank(int blank, struct fb_info *info);
-
 
     /*
      *  Internal routines
@@ -99,22 +107,23 @@ static void sun3fbcon_blank(int blank, struct fb_info *info);
 
 static int sun3fb_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
 			    u_int *transp, struct fb_info *info);
-static int sun3fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
-			    u_int transp, struct fb_info *info);
-static void do_install_cmap(int con, struct fb_info *info);
 
 static struct fb_ops sun3fb_ops = {
-	owner:		THIS_MODULE,
-	fb_get_fix:	sun3fb_get_fix,
-	fb_get_var:	sun3fb_get_var,
-	fb_set_var:	sun3fb_set_var,
-	fb_get_cmap:	sun3fb_get_cmap,
-	fb_set_cmap:	sun3fb_set_cmap,
+	.owner =	THIS_MODULE,
+	.fb_get_fix =	sun3fb_get_fix,
+	.fb_get_var =	sun3fb_get_var,
+	.fb_set_var =	sun3fb_set_var,
+	.fb_get_cmap =	sun3fb_get_cmap,
+	.fb_set_cmap =	sun3fb_set_cmap,
+	.fb_setcolreg =	sun3fb_setcolreg,
+	.fb_blank =	sun3fb_blank,
 };
 
 static void sun3fb_clear_margin(struct display *p, int s)
 {
 	struct fb_info_sbusfb *fb = sbusfbinfod(p);
+	
+	return;
 
 	if (fb->switch_from_graph)
 		(*fb->switch_from_graph)(fb);
@@ -139,7 +148,7 @@ static void sun3fb_clear_margin(struct display *p, int s)
 		rects [15] = fb->var.yres_virtual;
 		(*fb->fill)(fb, p, s, 4, rects);
 	} else {
-		unsigned char *fb_base = p->screen_base, *q;
+		unsigned char *fb_base = fb->info.screen_base, *q;
 		int skip_bytes = fb->y_margin * fb->var.xres_virtual;
 		int scr_size = fb->var.xres_virtual * fb->var.yres_virtual;
 		int h, he, incr, size;
@@ -294,7 +303,7 @@ static void sun3fb_cursor(struct display *p, int mode, int x, int y)
 static int sun3fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
 			 struct fb_info *info)
 {
-	if (con == currcon) /* current console? */
+	if (con == info->currcon) /* current console? */
 		return fb_get_cmap(cmap, kspc, sun3fb_getcolreg, info);
 	else if (fb_display[con].cmap.len) /* non default colormap? */
 		fb_copy_cmap(&fb_display[con].cmap, cmap, kspc ? 0 : 2);
@@ -316,8 +325,8 @@ static int sun3fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 		if ((err = fb_alloc_cmap(&fb_display[con].cmap, 1<<fb_display[con].var.bits_per_pixel, 0)))
 			return err;
 	}
-	if (con == currcon) {			/* current console? */
-		err = fb_set_cmap(cmap, kspc, sun3fb_setcolreg, info);
+	if (con == info->currcon) {			/* current console? */
+		err = fb_set_cmap(cmap, kspc, info);
 		if (!err) {
 			struct fb_info_sbusfb *fb = sbusfbinfo(info);
 			
@@ -354,7 +363,7 @@ void __init sun3fb_setup(char *options)
 		p++;
 	}
 
-	return 0;
+	return;
 }
 
 static int sun3fbcon_switch(int con, struct fb_info *info)
@@ -364,8 +373,8 @@ static int sun3fbcon_switch(int con, struct fb_info *info)
 	int lastconsole;
     
 	/* Do we have to save the colormap? */
-	if (fb_display[currcon].cmap.len)
-		fb_get_cmap(&fb_display[currcon].cmap, 1, sun3fb_getcolreg, info);
+	if (fb_display[info->currcon].cmap.len)
+		fb_get_cmap(&fb_display[info->currcon].cmap, 1, sun3fb_getcolreg, info);
 
 	if (info->display_fg) {
 		lastconsole = info->display_fg->vc_num;
@@ -382,7 +391,7 @@ static int sun3fbcon_switch(int con, struct fb_info *info)
 		fb->x_margin = x_margin; fb->y_margin = y_margin;
 		sun3fb_clear_margin(&fb_display[con], 0);
 	}
-	currcon = con;
+	info->currcon = con;
 	/* Install new colormap */
 	do_install_cmap(con, info);
 	return 0;
@@ -402,7 +411,7 @@ static int sun3fbcon_updatevar(int con, struct fb_info *info)
      *  Blank the display.
      */
 
-static void sun3fbcon_blank(int blank, struct fb_info *info)
+static int sun3fb_blank(int blank, struct fb_info *info)
 {
     struct fb_info_sbusfb *fb = sbusfbinfo(info);
     
@@ -410,6 +419,7 @@ static void sun3fbcon_blank(int blank, struct fb_info *info)
     	return fb->blank(fb);
     else if (!blank && fb->unblank)
     	return fb->unblank(fb);
+    return 0;
 }
 
     /*
@@ -452,22 +462,6 @@ static int sun3fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
 	fb->color_map CM(regno, 1) = green;
 	fb->color_map CM(regno, 2) = blue;
 	return 0;
-}
-
-
-static void do_install_cmap(int con, struct fb_info *info)
-{
-	struct fb_info_sbusfb *fb = sbusfbinfo(info);
-	
-	if (con != currcon)
-		return;
-	if (fb_display[con].cmap.len)
-		fb_set_cmap(&fb_display[con].cmap, 1, sun3fb_setcolreg, info);
-	else
-		fb_set_cmap(fb_default_cmap(1<<fb_display[con].var.bits_per_pixel),
-			    1, sun3fb_setcolreg, info);
-	if (fb->loadcmap)
-		(*fb->loadcmap)(fb, &fb_display[con], 0, 256);
 }
 
 static int sun3fb_set_font(struct display *p, int width, int height)
@@ -523,7 +517,7 @@ void sun3fb_palette(int enter)
      */
 static int __init sun3fb_init_fb(int fbtype, unsigned long addr)
 {
-	static struct linux_sbus_device sdb;
+	static struct sbus_dev sdb;
 	struct fb_fix_screeninfo *fix;
 	struct fb_var_screeninfo *var;
 	struct display *disp;
@@ -531,7 +525,7 @@ static int __init sun3fb_init_fb(int fbtype, unsigned long addr)
 	struct fbtype *type;
 	int linebytes, w, h, depth;
 	char *p = NULL;
-
+	
 	fb = kmalloc(sizeof(struct fb_info_sbusfb), GFP_ATOMIC);
 	if (!fb)
 		return -ENOMEM;
@@ -553,9 +547,11 @@ sizechange:
 	type->fb_depth  = depth = (fbtype == FBTYPE_SUN2BW) ? 1 : 8;
 	linebytes = w * depth / 8;
 	type->fb_size   = PAGE_ALIGN((linebytes) * h);
-	
+/*	
 	fb->x_margin = (w & 7) / 2;
 	fb->y_margin = (h & 15) / 2;
+*/
+	fb->x_margin = fb->y_margin = 0;
 
 	var->xres_virtual = w;
 	var->yres_virtual = h;
@@ -573,14 +569,13 @@ sizechange:
 	fix->type = FB_TYPE_PACKED_PIXELS;
 	fix->visual = FB_VISUAL_PSEUDOCOLOR;
 	
-	fb->info.node = -1;
 	fb->info.fbops = &sun3fb_ops;
 	fb->info.disp = disp;
+	fb->info.currcon = -1;
 	strcpy(fb->info.fontname, fontname);
 	fb->info.changevar = NULL;
 	fb->info.switch_con = &sun3fbcon_switch;
 	fb->info.updatevar = &sun3fbcon_updatevar;
-	fb->info.blank = &sun3fbcon_blank;
 	fb->info.flags = FBINFO_FLAG_DEFAULT;
 	
 	fb->cursor.hwsize.fbx = 32;
@@ -600,8 +595,14 @@ sizechange:
 	case FBTYPE_SUN2BW:
 		p = bwtwofb_init(fb); break;
 #endif
+#ifdef CONFIG_FB_CGTHREE
+	case FBTYPE_SUN4COLOR:
+	case FBTYPE_SUN3COLOR:
+		type->fb_size = 0x100000;
+		p = cgthreefb_init(fb); break;
+#endif
 	}
-	fix->smem_start = fb->disp.screen_base;
+	fix->smem_start = (unsigned long)fb->info.screen_base;	// FIXME
 	
 	if (!p) {
 		kfree(fb);
@@ -644,7 +645,7 @@ sizechange:
 		kfree(fb);
 		return -EINVAL;
 	}
-	printk("fb%d: %s\n", GET_FB_IDX(fb->info.node), p);
+	printk("fb%d: %s\n", fb->info.node, p);
 
 	return 0;
 }
@@ -656,17 +657,25 @@ int __init sun3fb_init(void)
 	unsigned long addr;
 	char p4id;
 	
-	if (!con_is_present()) return;
-	printk("sun3fb_init()\n");
+	if (!con_is_present()) return -ENODEV;
 #ifdef CONFIG_SUN3
-	addr = 0xfe20000;
         switch(*(romvec->pv_fbtype))
         {
-		case FBTYPE_SUN2BW:
-			return sun3fb_init_fb(FBTYPE_SUN2BW, addr);
-		case FBTYPE_SUN3COLOR:
-			printk("cg3 detected but not supported\n");
-			return -EINVAL;
+	case FBTYPE_SUN2BW:
+		addr = 0xfe20000;
+		return sun3fb_init_fb(FBTYPE_SUN2BW, addr);
+	case FBTYPE_SUN3COLOR:
+	case FBTYPE_SUN4COLOR:
+		if(idprom->id_machtype != (SM_SUN3|SM_3_60)) {
+			printk("sun3fb: cgthree/four only supported on 3/60\n");
+			return -ENODEV;
+		}
+		
+		addr = CGFOUR_OBMEM_ADDR;
+		return sun3fb_init_fb(*(romvec->pv_fbtype), addr);
+	default:
+		printk("sun3fb: unsupported framebuffer\n");
+		return -ENODEV;
 	}
 #else
 	addr = SUN3X_VIDEO_BASE;
@@ -678,16 +687,18 @@ int __init sun3fb_init(void)
 			return sun3fb_init_fb(FBTYPE_SUN2BW, addr);
 #if 0 /* not yet */
 		case 0x40:
-			sun3fb_init_fb(FBTYPE_SUN4COLOR, addr);
+			return sun3fb_init_fb(FBTYPE_SUN4COLOR, addr);
 			break;
 		case 0x45:
-			sun3fb_init_fb(FBTYPE_SUN8COLOR, addr);
+			return sun3fb_init_fb(FBTYPE_SUN8COLOR, addr);
 			break;
 #endif
 		case 0x60:
 			return sun3fb_init_fb(FBTYPE_SUNFAST_COLOR, addr);
 	}
 #endif			
+	
+	return -ENODEV;
 }
 
 MODULE_LICENSE("GPL");

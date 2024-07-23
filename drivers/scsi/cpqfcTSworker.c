@@ -41,9 +41,7 @@
 #include <asm/irq.h>
 #include <asm/dma.h>
 
-
-
-#include "sd.h"
+#include "scsi.h"
 #include "hosts.h"   // struct Scsi_Host definition for T handler
 #include "cpqfcTSchip.h"
 #include "cpqfcTSstructs.h"
@@ -81,7 +79,7 @@
 // synchronously (i.e. each of the 30k I/O had to be started one at a
 // time by sending a starting frame via Tachyon's outbound que).  
 
-// To accomodate kernel "module" build, this driver limits the exchanges
+// To accommodate kernel "module" build, this driver limits the exchanges
 // to 256, because of the contiguous physical memory limitation of 128M.
 
 // Typical FC Exchanges are opened presuming the FC frames start without errors,
@@ -159,7 +157,6 @@ void cpqfcTSWorkerThread( void *host)
 #ifdef PCI_KERNEL_TRACE
   PTACHYON fcChip = &cpqfcHBAdata->fcChip;
 #endif
-  struct fs_struct *fs;
   DECLARE_MUTEX_LOCKED(fcQueReady);
   DECLARE_MUTEX_LOCKED(fcTYOBcomplete); 
   DECLARE_MUTEX_LOCKED(TachFrozen);  
@@ -168,40 +165,9 @@ void cpqfcTSWorkerThread( void *host)
   ENTER("WorkerThread");
 
   lock_kernel();
-	/*
-	 * If we were started as result of loading a module, close all of the
-	 * user space pages.  We don't need them, and if we didn't close them
-	 * they would be locked into memory.
-	 */
-  exit_mm(current);
-
-  current->session = 1;
-  current->pgrp = 1;
-	
-  /* Become as one with the init task */
-	
-  exit_fs(current);	/* current->fs->count--; */
-  fs = init_task.fs;
-  // Some kernels compiled for SMP, while actually running
-  // on a uniproc machine, will return NULL for this call
-  if( !fs)
-  {
-    printk(" cpqfcTS FATAL: fs is NULL! Is this an SMP kernel on uniproc machine?\n ");
-  }
- 
-  else
-  { 
-    current->fs = fs;
-    atomic_inc(&fs->count);
-  }
-
+  daemonize("cpqfcTS_wt_%d", HostAdapter->host_no);
   siginitsetinv(&current->blocked, SHUTDOWN_SIGS);
 
-
-  /*
-   * Set the name of this process.
-   */
-  sprintf(current->comm, "cpqfcTS_wt_%d", HostAdapter->host_no);
 
   cpqfcHBAdata->fcQueReady = &fcQueReady;  // primary wait point
   cpqfcHBAdata->TYOBcomplete = &fcTYOBcomplete;
@@ -227,7 +193,7 @@ void cpqfcTSWorkerThread( void *host)
     PCI_TRACE( 0x90)
     // first, take the IO lock so the SCSI upper layers can't call
     // into our _quecommand function (this also disables INTs)
-    spin_lock_irqsave( &io_request_lock, flags); // STOP _que function
+    spin_lock_irqsave( HostAdapter->host_lock, flags); // STOP _que function
     PCI_TRACE( 0x90)
          
     CPQ_SPINLOCK_HBA( cpqfcHBAdata)
@@ -241,7 +207,7 @@ void cpqfcTSWorkerThread( void *host)
     PCI_TRACE( 0x90)
 
     // release the IO lock (and re-enable interrupts)
-    spin_unlock_irqrestore( &io_request_lock, flags);
+    spin_unlock_irqrestore( HostAdapter->host_lock, flags);
 
     // disable OUR HBA interrupt (keep them off as much as possible
     // during error recovery)
@@ -477,7 +443,7 @@ void cpqfcTS_WorkTask( struct Scsi_Host *HostAdapter)
       LONG x_ID = fcLQ->Qitem[QconsumerNdx].ulBuff[0];
       BOOLEAN FrozeTach = FALSE;   
      
-      if( x_ID > TACH_SEST_LEN )  // (in)sanity check
+      if ( x_ID >= TACH_SEST_LEN )  // (in)sanity check
       {
 //	printk( " cpqfcTS ERROR! BOGUS x_ID %Xh", x_ID);
 	break;
@@ -2914,15 +2880,22 @@ static void ScsiReportLunsDone(Scsi_Cmnd *Cmnd)
 Done:  
 }
 
+extern int is_private_data_of_cpqfc(CPQFCHBA *hba, void * pointer);
+extern void cpqfc_free_private_data(CPQFCHBA *hba, cpqfc_passthru_private_t *data);
+
 static void 
 call_scsi_done(Scsi_Cmnd *Cmnd)
 {
-	// We have to reinitialize sent_command here, so the scsi-mid
-	// layer won't re-use the scsi command leaving it set incorrectly.
-	// (incorrectly for our purposes...it's normally unused.)
-
-        if (Cmnd->SCp.sent_command != 0) {	// was it a passthru?
-		Cmnd->SCp.sent_command = 0;
+	CPQFCHBA *hba;
+	hba = (CPQFCHBA *) Cmnd->host->hostdata;
+	// Was this command a cpqfc passthru ioctl ?
+        if (Cmnd->sc_request != NULL && Cmnd->host != NULL && 
+		Cmnd->host->hostdata != NULL &&
+		is_private_data_of_cpqfc((CPQFCHBA *) Cmnd->host->hostdata,
+			Cmnd->sc_request->upper_private_data)) {
+		cpqfc_free_private_data(hba, 
+			Cmnd->sc_request->upper_private_data);	
+		Cmnd->sc_request->upper_private_data = NULL;
 		Cmnd->result &= 0xff00ffff;
 		Cmnd->result |= (DID_PASSTHROUGH << 16);  // prevents retry
 	}
@@ -3077,7 +3050,8 @@ void cpqfcTSheartbeat( unsigned long ptr )
   if( cpqfcHBAdata->BoardLock) // Worker Task Running?
     goto Skip;
 
-  spin_lock_irqsave( &io_request_lock, flags); // STOP _que function
+  // STOP _que function
+  spin_lock_irqsave( cpqfcHBAdata->HostAdapter->host_lock, flags); 
 
   PCI_TRACE( 0xA8)
 
@@ -3085,7 +3059,7 @@ void cpqfcTSheartbeat( unsigned long ptr )
   cpqfcHBAdata->BoardLock = &BoardLock; // stop Linux SCSI command queuing
   
   // release the IO lock (and re-enable interrupts)
-  spin_unlock_irqrestore( &io_request_lock, flags);
+  spin_unlock_irqrestore( cpqfcHBAdata->HostAdapter->host_lock, flags);
   
   // Ensure no contention from  _quecommand or Worker process 
   CPQ_SPINLOCK_HBA( cpqfcHBAdata)
@@ -3319,6 +3293,7 @@ static int GetLoopID( ULONG al_pa )
 }
 #endif
 
+extern cpqfc_passthru_private_t *cpqfc_private(Scsi_Request *sr);
 
 // Search the singly (forward) linked list "fcPorts" looking for 
 // either the SCSI target (if != -1), port_id (if not NULL), 
@@ -3392,8 +3367,18 @@ PFC_LOGGEDIN_PORT  fcFindLoggedInPort(
       {
         // For "passthru" modes, the IOCTL caller is responsible
 	// for setting the FCP-LUN addressing
-	if( !Cmnd->SCp.sent_command ) // NOT passthru?
-	{
+	if (Cmnd->sc_request != NULL && Cmnd->host != NULL && 
+		Cmnd->host->hostdata != NULL &&
+		is_private_data_of_cpqfc((CPQFCHBA *) Cmnd->host->hostdata,
+			Cmnd->sc_request->upper_private_data)) { 
+		/* This is a passthru... */
+		cpqfc_passthru_private_t *pd;
+		pd = Cmnd->sc_request->upper_private_data;
+        	Cmnd->SCp.phase = pd->bus;
+		// Cmnd->SCp.have_data_in = pd->pdrive;
+		Cmnd->SCp.have_data_in = Cmnd->lun;
+	} else {
+	  /* This is not a passthru... */
 	
           // set the FCP-LUN addressing type
           Cmnd->SCp.phase = pLoggedInPort->ScsiNexus.VolumeSetAddressing;	
@@ -3406,6 +3391,8 @@ PFC_LOGGEDIN_PORT  fcFindLoggedInPort(
 	  // Report Luns command
           if( pLoggedInPort->ScsiNexus.LunMasking == 1) 
 	  {
+	    if (Cmnd->lun > sizeof(pLoggedInPort->ScsiNexus.lun))
+		return NULL;
             // we KNOW all the valid LUNs... 0xFF is invalid!
             Cmnd->SCp.have_data_in = pLoggedInPort->ScsiNexus.lun[Cmnd->lun];
 	    if (pLoggedInPort->ScsiNexus.lun[Cmnd->lun] == 0xFF)
@@ -3495,7 +3482,6 @@ static void RevalidateSEST( struct Scsi_Host *HostAdapter,
 static void UnblockScsiDevice( struct Scsi_Host *HostAdapter, 
 		        PFC_LOGGEDIN_PORT pLoggedInPort)
 {
-//  Scsi_Device *sdev = HostAdapter->host_queue;
   CPQFCHBA *cpqfcHBAdata = (CPQFCHBA *)HostAdapter->hostdata;
   Scsi_Cmnd* *SCptr = &cpqfcHBAdata->LinkDnCmnd[0];
   Scsi_Cmnd *Cmnd;
@@ -3530,7 +3516,6 @@ static void UnblockScsiDevice( struct Scsi_Host *HostAdapter,
 	{
           printk("LinkDnCmnd scsi_done ptr null, port_id %Xh\n",
 		  pLoggedInPort->port_id);
-	  Cmnd->SCp.sent_command = 0;
 	}
 	else
 	  call_scsi_done(Cmnd);
@@ -5258,7 +5243,6 @@ static ULONG build_SEST_sgList(
 	sgl = (struct scatterlist*)Cmnd->request_buffer;  
 	sg_count = pci_map_sg(pcidev, sgl, Cmnd->use_sg, 
 		scsi_to_pci_dma_dir(Cmnd->sc_data_direction));
-        // printk("sgl = %p, sg_count = %d\n", (void *) sgl, sg_count);
   	if( sg_count <= 3 ) {
 
 	// we need to be careful here that no individual mapping
@@ -5287,7 +5271,6 @@ static ULONG build_SEST_sgList(
 	//	printk("totalsgs = %d, sgcount=%d\n",totalsgs,sg_count);
   }
 
-  // printk("totalsgs = %d, sgcount=%d\n", totalsgs, sg_count);
   if( totalsgs <= 3 ) // can (must) use "local" SEST list
   {
     while( bytes_to_go)
@@ -6190,13 +6173,11 @@ void cpqfcTSCompleteExchange(
       }
       else
       {
-	Exchanges->fcExchange[ x_ID ].Cmnd->SCp.sent_command = 0;
 //	printk(" not calling scsi_done on x_ID %Xh, Cmnd %p\n",
 //			x_ID, Exchanges->fcExchange[ x_ID ].Cmnd);
       }
     }
     else{
-	Exchanges->fcExchange[ x_ID ].Cmnd->SCp.sent_command = 0;
       printk(" x_ID %Xh, type %Xh, Cdb0 %Xh\n", x_ID,
 	Exchanges->fcExchange[ x_ID ].type, 
 	Exchanges->fcExchange[ x_ID ].Cmnd->cmnd[0]);	      
@@ -6489,10 +6470,10 @@ static int build_FCP_payload( Scsi_Cmnd *Cmnd,
       for( i=0; (i < Cmnd->cmd_len) && i < MAX_COMMAND_SIZE; i++)
 	*payload++ = Cmnd->cmnd[i];
 
-      if( Cmnd->cmd_len == 16 )
-      {
-        memcpy( payload, &Cmnd->SCp.buffers_residual, 4);
-      }
+      // if( Cmnd->cmd_len == 16 )
+      // {
+      //  memcpy( payload, &Cmnd->SCp.buffers_residual, 4);
+      // }
       payload+= (16 - i);  
 
 		      // FCP_DL is largest number of expected data bytes

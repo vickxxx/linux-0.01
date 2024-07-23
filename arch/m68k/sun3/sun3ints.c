@@ -15,8 +15,10 @@
 #include <asm/intersil.h>
 #include <asm/oplib.h>
 #include <asm/sun3ints.h>
+#include <linux/seq_file.h>
 
 extern void sun3_leds (unsigned char);
+static irqreturn_t sun3_inthandle(int irq, void *dev_id, struct pt_regs *fp);
 
 void sun3_disable_interrupts(void)
 {
@@ -57,26 +59,23 @@ void sun3_disable_irq(unsigned int irq)
 
 inline void sun3_do_irq(int irq, struct pt_regs *fp)
 {
-	kstat.irqs[0][SYS_IRQS + irq]++;
+	kstat_cpu(0).irqs[SYS_IRQS + irq]++;
 	*sun3_intreg &= ~(1<<irq);
 	*sun3_intreg |=  (1<<irq);
 }
 
-int sun3_get_irq_list(char *buf)
-{
-	return 0;
-}
-
-static void sun3_int7(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t sun3_int7(int irq, void *dev_id, struct pt_regs *fp)
 {
 	sun3_do_irq(irq,fp);
-	if(!(kstat.irqs[0][SYS_IRQS + irq] % 2000)) 
-		sun3_leds(led_pattern[(kstat.irqs[0][SYS_IRQS+irq]%16000)/2000]);
+	if(!(kstat_cpu(0).irqs[SYS_IRQS + irq] % 2000)) 
+		sun3_leds(led_pattern[(kstat_cpu(0).irqs[SYS_IRQS+irq]%16000)
+			  /2000]);
+	return IRQ_HANDLED;
 }
 
-static void sun3_int5(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t sun3_int5(int irq, void *dev_id, struct pt_regs *fp)
 {
-        kstat.irqs[0][SYS_IRQS + irq]++;
+        kstat_cpu(0).irqs[SYS_IRQS + irq]++;
 #ifdef CONFIG_SUN3
 	intersil_clear();
 #endif
@@ -86,44 +85,64 @@ static void sun3_int5(int irq, void *dev_id, struct pt_regs *fp)
 	intersil_clear();
 #endif
         do_timer(fp);
-        if(!(kstat.irqs[0][SYS_IRQS + irq] % 20))
-                sun3_leds(led_pattern[(kstat.irqs[0][SYS_IRQS+irq]%160)
+        if(!(kstat_cpu(0).irqs[SYS_IRQS + irq] % 20))
+                sun3_leds(led_pattern[(kstat_cpu(0).irqs[SYS_IRQS+irq]%160)
                 /20]);
+	return IRQ_HANDLED;
 }
 
 /* handle requested ints, excepting 5 and 7, which always do the same
    thing */
-static void *dev_ids[SYS_IRQS];
-static void (*sun3_inthandler[SYS_IRQS])(int, void *, struct pt_regs *) = {
-	NULL, NULL, NULL, NULL, NULL, sun3_int5, NULL, sun3_int7
-};
-static void (*sun3_vechandler[192])(int, void *, struct pt_regs *);
-static void *vec_ids[192];
-static char *vec_names[192];
-
-static void sun3_inthandle(int irq, void *dev_id, struct pt_regs *fp)
-{
-	if(sun3_inthandler[irq] == NULL)
-		panic ("bad interrupt %d received (id %p)\n",irq, dev_id);
-
-        kstat.irqs[0][SYS_IRQS + irq]++;
-        *sun3_intreg &= ~(1<<irq);
-
-	sun3_inthandler[irq](irq, dev_ids[irq], fp);
-}
-
-static void sun3_vec255(int irq, void *dev_id, struct pt_regs *fp)
-{
-//	intersil_clear();
-}
-
-void (*sun3_default_handler[SYS_IRQS])(int, void *, struct pt_regs *) = {
+irqreturn_t (*sun3_default_handler[SYS_IRQS])(int, void *, struct pt_regs *) = {
 	sun3_inthandle, sun3_inthandle, sun3_inthandle, sun3_inthandle,
 	sun3_inthandle, sun3_int5, sun3_inthandle, sun3_int7
 };
 
-static char *dev_names[SYS_IRQS] = { NULL, NULL, NULL, NULL, 
-				     NULL, "timer", NULL, NULL };
+static const char *dev_names[SYS_IRQS] = { NULL, NULL, NULL, NULL, 
+				     NULL, "timer", NULL, "int7 handler" };
+static void *dev_ids[SYS_IRQS];
+static irqreturn_t (*sun3_inthandler[SYS_IRQS])(int, void *, struct pt_regs *) = {
+	NULL, NULL, NULL, NULL, NULL, sun3_int5, NULL, sun3_int7
+};
+static irqreturn_t (*sun3_vechandler[SUN3_INT_VECS])(int, void *, struct pt_regs *);
+static void *vec_ids[SUN3_INT_VECS];
+static const char *vec_names[SUN3_INT_VECS];
+static int vec_ints[SUN3_INT_VECS];
+
+
+int show_sun3_interrupts(struct seq_file *p, void *v)
+{
+	int i;
+
+	for(i = 0; i < (SUN3_INT_VECS-1); i++) {
+		if(sun3_vechandler[i] != NULL) {
+			seq_printf(p, "vec %3d: %10u %s\n", i+64, 
+				   vec_ints[i],
+				   (vec_names[i]) ? vec_names[i] :
+				   "sun3_vechandler");
+		}
+	}
+
+	return 0;
+}
+
+static irqreturn_t sun3_inthandle(int irq, void *dev_id, struct pt_regs *fp)
+{
+	if(sun3_inthandler[irq] == NULL)
+		panic ("bad interrupt %d received (id %p)\n",irq, dev_id);
+
+        kstat_cpu(0).irqs[SYS_IRQS + irq]++;
+        *sun3_intreg &= ~(1<<irq);
+
+	sun3_inthandler[irq](irq, dev_ids[irq], fp);
+	return IRQ_HANDLED;
+}
+
+static irqreturn_t sun3_vec255(int irq, void *dev_id, struct pt_regs *fp)
+{
+//	intersil_clear();
+	return IRQ_HANDLED;
+}
 
 void sun3_init_IRQ(void)
 {
@@ -144,7 +163,7 @@ void sun3_init_IRQ(void)
 	sun3_vechandler[191] = sun3_vec255;
 }
                                 
-int sun3_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+int sun3_request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *),
                       unsigned long flags, const char *devname, void *dev_id)
 {
 
@@ -175,6 +194,7 @@ int sun3_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_re
 			sun3_vechandler[vec] = handler;
 			vec_ids[vec] = dev_id;
 			vec_names[vec] = devname;
+			vec_ints[vec] = 0;
 			
 			return 0;
 		}
@@ -212,7 +232,7 @@ void sun3_free_irq(unsigned int irq, void *dev_id)
 	}		
 }
 
-void sun3_process_int(int irq, struct pt_regs *regs)
+irqreturn_t sun3_process_int(int irq, struct pt_regs *regs)
 {
 
 	if((irq >= 64) && (irq <= 255)) {
@@ -221,9 +241,9 @@ void sun3_process_int(int irq, struct pt_regs *regs)
 		vec = irq - 64;
 		if(sun3_vechandler[vec] == NULL) 
 			panic ("bad interrupt vector %d received\n",irq);
-			
-		sun3_vechandler[vec](irq, vec_ids[vec], regs);
-		return;
+
+		vec_ints[vec]++;
+		return sun3_vechandler[vec](irq, vec_ids[vec], regs);
 	} else {
 		panic("sun3_process_int: unable to handle interrupt vector %d\n",
 		      irq);

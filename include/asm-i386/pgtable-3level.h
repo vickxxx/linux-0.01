@@ -49,6 +49,8 @@ static inline void set_pte(pte_t *ptep, pte_t pte)
 	smp_wmb();
 	ptep->pte_low = pte.pte_low;
 }
+#define set_pte_atomic(pteptr,pteval) \
+		set_64bit((unsigned long long *)(pteptr),pte_val(pteval))
 #define set_pmd(pmdptr,pmdval) \
 		set_64bit((unsigned long long *)(pmdptr),pmd_val(pmdval))
 #define set_pgd(pgdptr,pgdval) \
@@ -67,7 +69,7 @@ static inline void pgd_clear (pgd_t * pgd) { }
 
 /* Find an entry in the second-level page table.. */
 #define pmd_offset(dir, address) ((pmd_t *) pgd_page(*(dir)) + \
-			__pmd_offset(address))
+			pmd_index(address))
 
 static inline pte_t ptep_get_and_clear(pte_t *ptep)
 {
@@ -86,10 +88,20 @@ static inline int pte_same(pte_t a, pte_t b)
 	return a.pte_low == b.pte_low && a.pte_high == b.pte_high;
 }
 
-#define pte_page(x)	(mem_map+(((x).pte_low >> PAGE_SHIFT) | ((x).pte_high << (32 - PAGE_SHIFT))))
-#define pte_none(x)	(!(x).pte_low && !(x).pte_high)
+#define pte_page(x)	pfn_to_page(pte_pfn(x))
 
-static inline pte_t __mk_pte(unsigned long page_nr, pgprot_t pgprot)
+static inline int pte_none(pte_t pte)
+{
+	return !pte.pte_low && !pte.pte_high;
+}
+
+static inline unsigned long pte_pfn(pte_t pte)
+{
+	return (pte.pte_low >> PAGE_SHIFT) |
+		(pte.pte_high << (32 - PAGE_SHIFT));
+}
+
+static inline pte_t pfn_pte(unsigned long page_nr, pgprot_t pgprot)
 {
 	pte_t pte;
 
@@ -97,5 +109,20 @@ static inline pte_t __mk_pte(unsigned long page_nr, pgprot_t pgprot)
 	pte.pte_low = (page_nr << PAGE_SHIFT) | pgprot_val(pgprot);
 	return pte;
 }
+
+static inline pmd_t pfn_pmd(unsigned long page_nr, pgprot_t pgprot)
+{
+	return __pmd(((unsigned long long)page_nr << PAGE_SHIFT) | pgprot_val(pgprot));
+}
+
+/*
+ * Bits 0, 6 and 7 are taken in the low part of the pte,
+ * put the 32 bits of offset into the high part.
+ */
+#define pte_to_pgoff(pte) ((pte).pte_high)
+#define pgoff_to_pte(off) ((pte_t) { _PAGE_FILE, (off) })
+#define PTE_FILE_MAX_BITS       32
+
+extern struct kmem_cache_s *pae_pgd_cachep;
 
 #endif /* _I386_PGTABLE_3LEVEL_H */

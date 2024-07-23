@@ -1,30 +1,7 @@
 #
 # Makefile for the memory technology device drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now inherited from the
-# parent makes..
-#
-# $Id: Makefile,v 1.63 2001/06/13 09:43:07 dwmw2 Exp $
-
-
-obj-y           += chips/chipslink.o maps/mapslink.o \
-			devices/devlink.o nand/nandlink.o
-obj-m           :=
-obj-n           :=
-obj-            :=
-
-O_TARGET	:= mtdlink.o
-
-export-objs	:= mtdcore.o mtdpart.o redboot.o bootldr.o afs.o
-list-multi	:= nftl.o
-
-mod-subdirs	:= 
-subdir-y	:= chips maps devices nand
-subdir-m	:= $(subdir-y)
+# $Id: Makefile.common,v 1.2 2003/05/23 11:38:29 dwmw2 Exp $
 
 #                       *** BIG UGLY NOTE ***
 #
@@ -44,22 +21,21 @@ subdir-m	:= $(subdir-y)
 
 # Core functionality.
 obj-$(CONFIG_MTD)		+= mtdcore.o
+obj-$(CONFIG_MTD_CONCAT)	+= mtdconcat.o
 obj-$(CONFIG_MTD_PARTITIONS)	+= mtdpart.o
 obj-$(CONFIG_MTD_REDBOOT_PARTS) += redboot.o
-obj-$(CONFIG_MTD_BOOTLDR_PARTS) += bootldr.o
+obj-$(CONFIG_MTD_CMDLINE_PARTS) += cmdlinepart.o
 obj-$(CONFIG_MTD_AFS_PARTS)	+= afs.o
 
 # 'Users' - code which presents functionality to userspace.
 obj-$(CONFIG_MTD_CHAR)		+= mtdchar.o
-obj-$(CONFIG_MTD_BLOCK)		+= mtdblock.o
-obj-$(CONFIG_MTD_BLOCK_RO)	+= mtdblock_ro.o
-obj-$(CONFIG_FTL)		+= ftl.o
-obj-$(CONFIG_NFTL)		+= nftl.o
+obj-$(CONFIG_MTD_BLOCK)		+= mtdblock.o mtd_blkdevs.o
+obj-$(CONFIG_MTD_BLOCK_RO)	+= mtdblock_ro.o mtd_blkdevs.o
+obj-$(CONFIG_FTL)		+= ftl.o mtd_blkdevs.o
+obj-$(CONFIG_NFTL)		+= nftl.o mtd_blkdevs.o
+obj-$(CONFIG_INFTL)		+= inftl.o mtd_blkdevs.o
 
-nftl-objs	:= nftlcore.o nftlmount.o
+nftl-objs		:= nftlcore.o nftlmount.o
+inftl-objs		:= inftlcore.o inftlmount.o
 
-include $(TOPDIR)/Rules.make
-
-nftl.o: $(nftl-objs)
-	$(LD) -r -o $@ $(nftl-objs)
-
+obj-y		+= chips/ maps/ devices/ nand/

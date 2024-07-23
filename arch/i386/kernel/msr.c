@@ -33,7 +33,9 @@
 #include <linux/init.h>
 #include <linux/poll.h>
 #include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/major.h>
+#include <linux/fs.h>
 
 #include <asm/processor.h>
 #include <asm/msr.h>
@@ -113,9 +115,11 @@ static void msr_smp_rdmsr(void *cmd_block)
 static inline int do_wrmsr(int cpu, u32 reg, u32 eax, u32 edx)
 {
   struct msr_command cmd;
+  int ret;
 
+  preempt_disable();
   if ( cpu == smp_processor_id() ) {
-    return wrmsr_eio(reg, eax, edx);
+    ret = wrmsr_eio(reg, eax, edx);
   } else {
     cmd.cpu = cpu;
     cmd.reg = reg;
@@ -123,16 +127,20 @@ static inline int do_wrmsr(int cpu, u32 reg, u32 eax, u32 edx)
     cmd.data[1] = edx;
     
     smp_call_function(msr_smp_wrmsr, &cmd, 1, 1);
-    return cmd.err;
+    ret = cmd.err;
   }
+  preempt_enable();
+  return ret;
 }
 
 static inline int do_rdmsr(int cpu, u32 reg, u32 *eax, u32 *edx)
 {
   struct msr_command cmd;
+  int ret;
 
+  preempt_disable();
   if ( cpu == smp_processor_id() ) {
-    return rdmsr_eio(reg, eax, edx);
+    ret = rdmsr_eio(reg, eax, edx);
   } else {
     cmd.cpu = cpu;
     cmd.reg = reg;
@@ -142,8 +150,10 @@ static inline int do_rdmsr(int cpu, u32 reg, u32 *eax, u32 *edx)
     *eax = cmd.data[0];
     *edx = cmd.data[1];
 
-    return cmd.err;
+    ret = cmd.err;
   }
+  preempt_enable();
+  return ret;
 }
 
 #else /* ! CONFIG_SMP */
@@ -162,16 +172,19 @@ static inline int do_rdmsr(int cpu, u32 reg, u32 *eax, u32 *edx)
 
 static loff_t msr_seek(struct file *file, loff_t offset, int orig)
 {
+  loff_t ret = -EINVAL;
+  lock_kernel();
   switch (orig) {
   case 0:
     file->f_pos = offset;
-    return file->f_pos;
+    ret = file->f_pos;
+    break;
   case 1:
     file->f_pos += offset;
-    return file->f_pos;
-  default:
-    return -EINVAL;	/* SEEK_END not supported */
+    ret = file->f_pos;
   }
+  unlock_kernel();
+  return ret;
 }
 
 static ssize_t msr_read(struct file * file, char * buf,
@@ -181,7 +194,7 @@ static ssize_t msr_read(struct file * file, char * buf,
   u32 data[2];
   size_t rv;
   u32 reg = *ppos;
-  int cpu = MINOR(file->f_dentry->d_inode->i_rdev);
+  int cpu = minor(file->f_dentry->d_inode->i_rdev);
   int err;
 
   if ( count % 8 )
@@ -206,7 +219,7 @@ static ssize_t msr_write(struct file * file, const char * buf,
   u32 data[2];
   size_t rv;
   u32 reg = *ppos;
-  int cpu = MINOR(file->f_dentry->d_inode->i_rdev);
+  int cpu = minor(file->f_dentry->d_inode->i_rdev);
   int err;
 
   if ( count % 8 )
@@ -226,12 +239,12 @@ static ssize_t msr_write(struct file * file, const char * buf,
 
 static int msr_open(struct inode *inode, struct file *file)
 {
-  int cpu = MINOR(file->f_dentry->d_inode->i_rdev);
+  int cpu = minor(file->f_dentry->d_inode->i_rdev);
   struct cpuinfo_x86 *c = &(cpu_data)[cpu];
   
   if ( !(cpu_online_map & (1UL << cpu)) )
     return -ENXIO;		/* No such CPU */
-  if ( !test_bit(X86_FEATURE_MSR, &c->x86_capability) )
+  if ( !cpu_has(c, X86_FEATURE_MSR) )
     return -EIO;		/* MSR not supported */
   
   return 0;
@@ -241,11 +254,11 @@ static int msr_open(struct inode *inode, struct file *file)
  * File operations we support
  */
 static struct file_operations msr_fops = {
-  owner:	THIS_MODULE,
-  llseek:	msr_seek,
-  read:		msr_read,
-  write:	msr_write,
-  open:		msr_open,
+  .owner	= THIS_MODULE,
+  .llseek	= msr_seek,
+  .read		= msr_read,
+  .write	= msr_write,
+  .open		= msr_open,
 };
 
 int __init msr_init(void)
@@ -266,8 +279,6 @@ void __exit msr_exit(void)
 
 module_init(msr_init);
 module_exit(msr_exit)
-
-EXPORT_NO_SYMBOLS;
 
 MODULE_AUTHOR("H. Peter Anvin <hpa@zytor.com>");
 MODULE_DESCRIPTION("x86 generic MSR driver");

@@ -12,6 +12,8 @@
 #include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/smp_lock.h>
+#include <linux/fs.h>
+#include <linux/pipe_fs_i.h>
 
 static void wait_for_partner(struct inode* inode, unsigned int* cnt)
 {
@@ -33,7 +35,6 @@ static int fifo_open(struct inode *inode, struct file *filp)
 	int ret;
 
 	ret = -ERESTARTSYS;
-	lock_kernel();
 	if (down_interruptible(PIPE_SEM(*inode)))
 		goto err_nolock_nocleanup;
 
@@ -116,7 +117,6 @@ static int fifo_open(struct inode *inode, struct file *filp)
 
 	/* Ok! */
 	up(PIPE_SEM(*inode));
-	unlock_kernel();
 	return 0;
 
 err_rd:
@@ -143,7 +143,6 @@ err_nocleanup:
 	up(PIPE_SEM(*inode));
 
 err_nolock_nocleanup:
-	unlock_kernel();
 	return ret;
 }
 
@@ -153,5 +152,5 @@ err_nolock_nocleanup:
  * depending on the access mode of the file...
  */
 struct file_operations def_fifo_fops = {
-	open:		fifo_open,	/* will set read or write pipe_fops */
+	.open		= fifo_open,	/* will set read or write pipe_fops */
 };

@@ -118,10 +118,10 @@ struct sigstack {
 };
 
 /* Sigvec flags */
-#define SV_SSTACK    1     /* This signal handler should use sig-stack */
-#define SV_INTR      2     /* Sig return should not restart system call */
-#define SV_RESET     4     /* Set handler to SIG_DFL upon taken signal */
-#define SV_IGNCHILD  8     /* Do not send SIGCHLD */
+#define _SV_SSTACK    1u    /* This signal handler should use sig-stack */
+#define _SV_INTR      2u    /* Sig return should not restart system call */
+#define _SV_RESET     4u    /* Set handler to SIG_DFL upon taken signal */
+#define _SV_IGNCHILD  8u    /* Do not send SIGCHLD */
 
 /*
  * sa_flags values: SA_STACK is not currently supported, but will allow the
@@ -132,16 +132,16 @@ struct sigstack {
  * SA_RESTART flag to get restarting signals (which were the default long ago)
  * SA_SHIRQ flag is for shared interrupt support on PCI and EISA.
  */
-#define SA_NOCLDSTOP	SV_IGNCHILD
-#define SA_STACK	SV_SSTACK
-#define SA_ONSTACK	SV_SSTACK
-#define SA_RESTART	SV_INTR
-#define SA_ONESHOT	SV_RESET
-#define SA_INTERRUPT	0x10
-#define SA_NOMASK	0x20
-#define SA_SHIRQ	0x40
-#define SA_NOCLDWAIT	0x100	/* not supported yet */
-#define SA_SIGINFO	0x200
+#define SA_NOCLDSTOP	_SV_IGNCHILD
+#define SA_STACK	_SV_SSTACK
+#define SA_ONSTACK	_SV_SSTACK
+#define SA_RESTART	_SV_INTR
+#define SA_ONESHOT	_SV_RESET
+#define SA_INTERRUPT	0x10u
+#define SA_NOMASK	0x20u
+#define SA_SHIRQ	0x40u
+#define SA_NOCLDWAIT	0x100u
+#define SA_SIGINFO	0x200u
 
 #define SIG_BLOCK          0x01	/* for blocking signals */
 #define SIG_UNBLOCK        0x02	/* for unblocking signals */
@@ -215,6 +215,33 @@ typedef struct sigaltstack {
 	int		ss_flags;
 	size_t		ss_size;
 } stack_t;
+
+struct sparc_deliver_cookie {
+	int restart_syscall;
+	unsigned long orig_i0;
+};
+
+#define ptrace_signal_deliver(REGS, COOKIE) \
+do {	struct sparc_deliver_cookie *cp = (COOKIE); \
+	if (cp->restart_syscall && \
+	    (regs->u_regs[UREG_I0] == ERESTARTNOHAND || \
+	     regs->u_regs[UREG_I0] == ERESTARTSYS || \
+	     regs->u_regs[UREG_I0] == ERESTARTNOINTR)) { \
+		/* replay the system call when we are done */ \
+		regs->u_regs[UREG_I0] = cp->orig_i0; \
+		regs->pc -= 4; \
+		regs->npc -= 4; \
+		cp->restart_syscall = 0; \
+	} \
+	if (cp->restart_syscall && \
+	    regs->u_regs[UREG_I0] == ERESTART_RESTARTBLOCK) { \
+		regs->u_regs[UREG_G1] = __NR_restart_syscall; \
+		regs->pc -= 4; \
+		regs->npc -= 4; \
+		cp->restart_syscall = 0; \
+	} \
+} while (0)
+
 
 #endif /* !(__ASSEMBLY__) */
 

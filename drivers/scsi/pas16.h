@@ -114,13 +114,14 @@
 
 
 #ifndef ASM
-int pas16_abort(Scsi_Cmnd *);
-int pas16_biosparam(Disk *, kdev_t, int*);
-int pas16_detect(Scsi_Host_Template *);
-int pas16_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int pas16_reset(Scsi_Cmnd *, unsigned int);
-int pas16_proc_info (char *buffer ,char **start, off_t offset,
-		     int length, int hostno, int inout);
+static int pas16_abort(Scsi_Cmnd *);
+static int pas16_biosparam(struct scsi_device *, struct block_device *,
+			   sector_t, int*);
+static int pas16_detect(Scsi_Host_Template *);
+static int pas16_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
+static int pas16_bus_reset(Scsi_Cmnd *);
+static int pas16_host_reset(Scsi_Cmnd *);
+static int pas16_device_reset(Scsi_Cmnd *);
 
 #ifndef NULL
 #define NULL 0
@@ -133,25 +134,6 @@ int pas16_proc_info (char *buffer ,char **start, off_t offset,
 #ifndef CAN_QUEUE
 #define CAN_QUEUE 32 
 #endif
-
-/* 
- * I hadn't thought of this with the earlier drivers - but to prevent
- * macro definition conflicts, we shouldn't define all of the internal
- * macros when this is being used solely for the host stub.
- */
-
-#define MV_PAS16 {					\
-	name:           "Pro Audio Spectrum-16 SCSI", 	\
-	detect:         pas16_detect, 			\
-	queuecommand:   pas16_queue_command,		\
-	abort:          pas16_abort,			\
-	reset:          pas16_reset,			\
-	bios_param:     pas16_biosparam, 		\
-	can_queue:      CAN_QUEUE,			\
-	this_id:        7,				\
-	sg_tablesize:   SG_ALL,				\
-	cmd_per_lun:    CMD_PER_LUN ,			\
-	use_clustering: DISABLE_CLUSTERING}
 
 #ifndef HOSTS_C
 
@@ -186,7 +168,9 @@ int pas16_proc_info (char *buffer ,char **start, off_t offset,
 #define do_NCR5380_intr do_pas16_intr
 #define NCR5380_queue_command pas16_queue_command
 #define NCR5380_abort pas16_abort
-#define NCR5380_reset pas16_reset
+#define NCR5380_device_reset pas16_device_reset
+#define NCR5380_bus_reset pas16_bus_reset
+#define NCR5380_host_reset pas16_host_reset
 #define NCR5380_proc_info pas16_proc_info
 
 /* 15 14 12 10 7 5 3 

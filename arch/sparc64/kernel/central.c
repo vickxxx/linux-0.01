@@ -1,4 +1,4 @@
-/* $Id: central.c,v 1.14 2000/09/21 06:25:14 anton Exp $
+/* $Id: central.c,v 1.15 2001/12/19 00:29:51 davem Exp $
  * central.c: Central FHC driver for Sunfire/Starfire/Wildfire.
  *
  * Copyright (C) 1997, 1999 David S. Miller (davem@redhat.com)
@@ -67,6 +67,7 @@ static void adjust_regs(struct linux_prom_registers *regp, int nregs,
 		if (rngc == nranges) /* oops */
 			prom_printf("adjust_regs: Could not find range with matching bus type...\n");
 		regp[regc].which_io = rangep[rngc].ot_parent_space;
+		regp[regc].phys_addr -= rangep[rngc].ot_child_base;
 		regp[regc].phys_addr += rangep[rngc].ot_parent_base;
 	}
 }
@@ -76,7 +77,7 @@ void apply_fhc_ranges(struct linux_fhc *fhc,
 		      struct linux_prom_registers *regs,
 		      int nregs)
 {
-	if(fhc->num_fhc_ranges)
+	if (fhc->num_fhc_ranges)
 		adjust_regs(regs, nregs, fhc->fhc_ranges,
 			    fhc->num_fhc_ranges);
 }
@@ -85,7 +86,7 @@ void apply_fhc_ranges(struct linux_fhc *fhc,
 void apply_central_ranges(struct linux_central *central,
 			  struct linux_prom_registers *regs, int nregs)
 {
-	if(central->num_central_ranges)
+	if (central->num_central_ranges)
 		adjust_regs(regs, nregs, central->central_ranges,
 			    central->num_central_ranges);
 }
@@ -113,7 +114,7 @@ static void probe_other_fhcs(void)
 		prom_printf("FHC: Cannot find any toplevel firehose controllers.\n");
 		prom_halt();
 	}
-	while(node) {
+	while (node) {
 		struct linux_fhc *fhc;
 		int board;
 		u32 tmp;
@@ -138,7 +139,7 @@ static void probe_other_fhcs(void)
 		fhc_ranges_init(node, fhc);
 
 		/* Non-central FHC's have 64-bit OBP format registers. */
-		if(prom_getproperty(node, "reg",
+		if (prom_getproperty(node, "reg",
 				    (char *)&fpregs[0], sizeof(fpregs)) == -1) {
 			prom_printf("FHC: Fatal error, cannot get fhc regs.\n");
 			prom_halt();
@@ -156,7 +157,7 @@ static void probe_other_fhcs(void)
 		fhc->board = board;
 
 		tmp = upa_readl(fhc->fhc_regs.pregs + FHC_PREGS_JCTRL);
-		if((tmp & FHC_JTAG_CTRL_MENAB) != 0)
+		if ((tmp & FHC_JTAG_CTRL_MENAB) != 0)
 			fhc->jtag_master = 1;
 		else
 			fhc->jtag_master = 0;
@@ -179,10 +180,10 @@ static void probe_other_fhcs(void)
 
 		/* Look for the next FHC. */
 		node = prom_getsibling(node);
-		if(node == 0)
+		if (node == 0)
 			break;
 		node = prom_searchsiblings(node, "fhc");
-		if(node == 0)
+		if (node == 0)
 			break;
 	}
 }
@@ -195,7 +196,7 @@ static void probe_clock_board(struct linux_central *central,
 	int clknode, nslots, tmp, nregs;
 
 	clknode = prom_searchsiblings(prom_getchild(fnode), "clock-board");
-	if(clknode == 0 || clknode == -1) {
+	if (clknode == 0 || clknode == -1) {
 		prom_printf("Critical error, central lacks clock-board.\n");
 		prom_halt();
 	}
@@ -212,7 +213,7 @@ static void probe_clock_board(struct linux_central *central,
 	central->clkregs = ((((unsigned long)cregs[1].which_io) << 32UL) |
 			    ((unsigned long)cregs[1].phys_addr));
 
-	if(nregs == 2)
+	if (nregs == 2)
 		central->clkver = 0UL;
 	else
 		central->clkver = ((((unsigned long)cregs[2].which_io) << 32UL) |
@@ -228,9 +229,9 @@ static void probe_clock_board(struct linux_central *central,
 		nslots = 8;
 		break;
 	case 0x80:
-		if(central->clkver != 0UL &&
+		if (central->clkver != 0UL &&
 		   upa_readb(central->clkver) != 0) {
-			if((upa_readb(central->clkver) & 0x80) != 0)
+			if ((upa_readb(central->clkver) & 0x80) != 0)
 				nslots = 4;
 			else
 				nslots = 5;
@@ -246,6 +247,55 @@ static void probe_clock_board(struct linux_central *central,
 	       (central->clkver ? upa_readb(central->clkver) : 0x00));
 }
 
+static void init_all_fhc_hw(void)
+{
+	struct linux_fhc *fhc;
+
+	for (fhc = fhc_list; fhc != NULL; fhc = fhc->next) {
+		u32 tmp;
+
+		/* Clear all of the interrupt mapping registers
+		 * just in case OBP left them in a foul state.
+		 */
+#define ZAP(ICLR, IMAP) \
+do {	u32 imap_tmp; \
+	upa_writel(0, (ICLR)); \
+	upa_readl(ICLR); \
+	imap_tmp = upa_readl(IMAP); \
+	imap_tmp &= ~(0x80000000); \
+	upa_writel(imap_tmp, (IMAP)); \
+	upa_readl(IMAP); \
+} while (0)
+
+		ZAP(fhc->fhc_regs.ffregs + FHC_FFREGS_ICLR,
+		    fhc->fhc_regs.ffregs + FHC_FFREGS_IMAP);
+		ZAP(fhc->fhc_regs.sregs + FHC_SREGS_ICLR,
+		    fhc->fhc_regs.sregs + FHC_SREGS_IMAP);
+		ZAP(fhc->fhc_regs.uregs + FHC_UREGS_ICLR,
+		    fhc->fhc_regs.uregs + FHC_UREGS_IMAP);
+		ZAP(fhc->fhc_regs.tregs + FHC_TREGS_ICLR,
+		    fhc->fhc_regs.tregs + FHC_TREGS_IMAP);
+
+#undef ZAP
+
+		/* Setup FHC control register. */
+		tmp = upa_readl(fhc->fhc_regs.pregs + FHC_PREGS_CTRL);
+
+		/* All non-central boards have this bit set. */
+		if (! IS_CENTRAL_FHC(fhc))
+			tmp |= FHC_CONTROL_IXIST;
+
+		/* For all FHCs, clear the firmware synchronization
+		 * line and both low power mode enables.
+		 */
+		tmp &= ~(FHC_CONTROL_AOFF | FHC_CONTROL_BOFF | FHC_CONTROL_SLINE);
+
+		upa_writel(tmp, fhc->fhc_regs.pregs + FHC_PREGS_CTRL);
+		upa_readl(fhc->fhc_regs.pregs + FHC_PREGS_CTRL);
+	}
+
+}
+
 void central_probe(void)
 {
 	struct linux_prom_registers fpregs[6];
@@ -254,7 +304,7 @@ void central_probe(void)
 	int cnode, fnode, err;
 
 	cnode = prom_finddevice("/central");
-	if(cnode == 0 || cnode == -1) {
+	if (cnode == 0 || cnode == -1) {
 		if (this_is_starfire)
 			starfire_cpu_setup();
 		return;
@@ -290,7 +340,7 @@ void central_probe(void)
 
 	fhc->parent = central_bus;
 	fnode = prom_searchsiblings(prom_getchild(cnode), "fhc");
-	if(fnode == 0 || fnode == -1) {
+	if (fnode == 0 || fnode == -1) {
 		prom_printf("Critical error, central board lacks fhc.\n");
 		prom_halt();
 	}
@@ -340,6 +390,8 @@ void central_probe(void)
 	       ((err & FHC_ID_MANUF) >> 1));
 
 	probe_other_fhcs();
+
+	init_all_fhc_hw();
 }
 
 static __inline__ void fhc_ledblink(struct linux_fhc *fhc, int on)
@@ -366,7 +418,7 @@ static __inline__ void central_ledblink(struct linux_central *central, int on)
 	tmp = upa_readb(central->clkregs + CLOCK_CTRL);
 
 	/* NOTE: reverse logic on this bit */
-	if(on)
+	if (on)
 		tmp &= ~(CLOCK_CTRL_RLED);
 	else
 		tmp |= CLOCK_CTRL_RLED;
@@ -383,8 +435,8 @@ static void sunfire_timer(unsigned long __ignored)
 	struct linux_fhc *fhc;
 
 	central_ledblink(central_bus, led_state);
-	for(fhc = fhc_list; fhc != NULL; fhc = fhc->next)
-		if(! IS_CENTRAL_FHC(fhc))
+	for (fhc = fhc_list; fhc != NULL; fhc = fhc->next)
+		if (! IS_CENTRAL_FHC(fhc))
 			fhc_ledblink(fhc, led_state);
 	led_state = ! led_state;
 	sftimer.expires = jiffies + (HZ >> 1);
@@ -397,55 +449,11 @@ static void sunfire_timer(unsigned long __ignored)
 void firetruck_init(void)
 {
 	struct linux_central *central = central_bus;
-	struct linux_fhc *fhc;
 	u8 ctrl;
 
 	/* No central bus, nothing to do. */
 	if (central == NULL)
 		return;
-
-	for(fhc = fhc_list; fhc != NULL; fhc = fhc->next) {
-		u32 tmp;
-
-		/* Clear all of the interrupt mapping registers
-		 * just in case OBP left them in a foul state.
-		 */
-#define ZAP(ICLR, IMAP) \
-do {	u32 imap_tmp; \
-	upa_writel(0, (ICLR)); \
-	upa_readl(ICLR); \
-	imap_tmp = upa_readl(IMAP); \
-	imap_tmp &= ~(0x80000000); \
-	upa_writel(imap_tmp, (IMAP)); \
-	upa_readl(IMAP); \
-} while (0)
-
-		ZAP(fhc->fhc_regs.ffregs + FHC_FFREGS_ICLR,
-		    fhc->fhc_regs.ffregs + FHC_FFREGS_IMAP);
-		ZAP(fhc->fhc_regs.sregs + FHC_SREGS_ICLR,
-		    fhc->fhc_regs.sregs + FHC_SREGS_IMAP);
-		ZAP(fhc->fhc_regs.uregs + FHC_UREGS_ICLR,
-		    fhc->fhc_regs.uregs + FHC_UREGS_IMAP);
-		ZAP(fhc->fhc_regs.tregs + FHC_TREGS_ICLR,
-		    fhc->fhc_regs.tregs + FHC_TREGS_IMAP);
-
-#undef ZAP
-
-		/* Setup FHC control register. */
-		tmp = upa_readl(fhc->fhc_regs.pregs + FHC_PREGS_CTRL);
-
-		/* All non-central boards have this bit set. */
-		if(! IS_CENTRAL_FHC(fhc))
-			tmp |= FHC_CONTROL_IXIST;
-
-		/* For all FHCs, clear the firmware synchronization
-		 * line and both low power mode enables.
-		 */
-		tmp &= ~(FHC_CONTROL_AOFF | FHC_CONTROL_BOFF | FHC_CONTROL_SLINE);
-
-		upa_writel(tmp, fhc->fhc_regs.pregs + FHC_PREGS_CTRL);
-		upa_readl(fhc->fhc_regs.pregs + FHC_PREGS_CTRL);
-	}
 
 	/* OBP leaves it on, turn it off so clock board timer LED
 	 * is in sync with FHC ones.

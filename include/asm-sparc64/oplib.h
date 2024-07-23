@@ -1,4 +1,4 @@
-/* $Id: oplib.h,v 1.13 2000/05/09 17:40:15 davem Exp $
+/* $Id: oplib.h,v 1.14 2001/12/19 00:29:51 davem Exp $
  * oplib.h:  Describes the interface and available routines in the
  *           Linux Prom library.
  *
@@ -113,6 +113,9 @@ extern void prom_cmdline(void);
  */
 extern void prom_halt(void) __attribute__ ((noreturn));
 
+/* Halt and power-off the machine. */
+extern void prom_halt_power_off(void) __attribute__ ((noreturn));
+
 /* Set the PROM 'sync' callback function to the passed function pointer.
  * When the user gives the 'sync' command at the prom prompt while the
  * kernel is still active, the prom will call this routine.
@@ -150,8 +153,9 @@ extern char prom_getchar(void);
 /* Blocking put character to console. */
 extern void prom_putchar(char character);
 
-/* Prom's internal printf routine, don't use in kernel/boot code. */
-void prom_printf(char *fmt, ...);
+/* Prom's internal routines, don't use in kernel/boot code. */
+extern void prom_printf(char *fmt, ...);
+extern void prom_write(const char *buf, unsigned int len);
 
 /* Query for input device type */
 
@@ -326,20 +330,6 @@ extern int prom_inst2pkg(int);
 /* Client interface level routines. */
 extern void prom_set_trap_table(unsigned long tba);
 
-/* Dorking with Bus ranges... */
-
-/* Adjust reg values with the passed ranges. */
-extern void prom_adjust_regs(struct linux_prom_registers *regp, int nregs,
-			     struct linux_prom_ranges *rangep, int nranges);
-
-/* Adjust child ranges with the passed parent ranges. */
-extern void prom_adjust_ranges(struct linux_prom_ranges *cranges, int ncranges,
-			       struct linux_prom_ranges *pranges, int npranges);
-
-/* Apply ranges of any prom node (and optionally parent node as well) to registers. */
-extern void prom_apply_generic_ranges(int node, int parent, 
-				      struct linux_prom_registers *sbusregs, int nregs);
-				      
 extern long p1275_cmd (char *, long, ...);
 				   
 

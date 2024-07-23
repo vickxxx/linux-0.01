@@ -34,7 +34,6 @@ Qua Jun 27 15:02:26 BRT 2001
 #include <linux/mm.h>
 #include <linux/major.h>
 #include <linux/param.h>
-#include <linux/tqueue.h>
 #include <linux/interrupt.h>
 #include <linux/serial.h>
 #include <linux/serialP.h>
@@ -51,7 +50,6 @@ Qua Jun 27 15:02:26 BRT 2001
 
 #include <linux/tty.h>
 #include <linux/tty_flip.h>
-#include <linux/serial.h>
 
 #include <asm/uaccess.h>
 #include <asm/irq.h>
@@ -75,7 +73,6 @@ extern int (*prom_printf) (char *,...);
 
 DECLARE_TASK_QUEUE(tq_serial);
 
-extern wait_queue_head_t keypress_wait; 
 static struct dz_serial *lines[4];
 static unsigned char tmp_buffer[256];
 
@@ -228,8 +225,6 @@ static inline void receive_chars (struct dz_serial *info_in)
 		if (info->is_console) {
 			if (ch == 0)
 				return;			/* it's a break ... */
-
-			wake_up (&keypress_wait);       /* It is a 'keyboard interrupt' ;-) */
 		}
 #endif
 
@@ -469,7 +464,7 @@ static int startup (struct dz_serial *info)
 	}
 
 	if (!info->xmit_buf) {
-		page = get_free_page(GFP_KERNEL);
+		page = get_zeroed_page(GFP_KERNEL);
 		if (!page) {
 			restore_flags (flags);
 		return -ENOMEM;
@@ -1095,14 +1090,6 @@ static void dz_close(struct tty_struct *tty, struct file *filp)
 	}
 	info->flags |= DZ_CLOSING;
 	/*
-	 * Save the termios structure, since this port may have
-	 * separate termios for callout and dialin.
-	 */
-	if (info->flags & DZ_NORMAL_ACTIVE)
-		info->normal_termios = *tty->termios;
-	if (info->flags & DZ_CALLOUT_ACTIVE)
-		info->callout_termios = *tty->termios;
-	/*
 	 * Now we wait for the transmit buffer to clear; and we notify the line
 	 * discipline to only process XON/XOFF characters.
 	 */
@@ -1117,8 +1104,8 @@ static void dz_close(struct tty_struct *tty, struct file *filp)
 	 */
 	shutdown(info);
 
-	if (tty->driver.flush_buffer)
-		tty->driver.flush_buffer (tty);
+	if (tty->driver->flush_buffer)
+		tty->driver->flush_buffer (tty);
 	if (tty->ldisc.flush_buffer)
 		tty->ldisc.flush_buffer (tty);
 	tty->closing = 0;
@@ -1141,7 +1128,7 @@ static void dz_close(struct tty_struct *tty, struct file *filp)
 		wake_up_interruptible(&info->open_wait);
 	}
 
-	info->flags &= ~(DZ_NORMAL_ACTIVE | DZ_CALLOUT_ACTIVE | DZ_CLOSING);
+	info->flags &= ~(DZ_NORMAL_ACTIVE | DZ_CLOSING);
 	wake_up_interruptible(&info->close_wait);
 
 	restore_flags(flags);
@@ -1158,7 +1145,7 @@ static void dz_hangup (struct tty_struct *tty)
 	shutdown(info);
 	info->event = 0;
 	info->count = 0;
-	info->flags &= ~(DZ_NORMAL_ACTIVE | DZ_CALLOUT_ACTIVE);
+	info->flags &= ~DZ_NORMAL_ACTIVE;
 	info->tty = 0;
 	wake_up_interruptible(&info->open_wait);
 }
@@ -1185,47 +1172,18 @@ static int block_til_ready(struct tty_struct *tty, struct file *filp,
 	}
 
 	/*
-	 * If this is a callout device, then just make sure the normal
-	 * device isn't being used.
-	 */
-	if (tty->driver.subtype == SERIAL_TYPE_CALLOUT) {
-		if (info->flags & DZ_NORMAL_ACTIVE)
-			return -EBUSY;
-    
-		if ((info->flags & DZ_CALLOUT_ACTIVE) &&
-		    (info->flags & DZ_SESSION_LOCKOUT) &&
-		    (info->session != current->session))
-			return -EBUSY;
-    
-		if ((info->flags & DZ_CALLOUT_ACTIVE) &&
-		    (info->flags & DZ_PGRP_LOCKOUT) &&
-		    (info->pgrp != current->pgrp))
-			return -EBUSY;
-
-		info->flags |= DZ_CALLOUT_ACTIVE;
-		return 0;
-	}
-
-	/*
 	 * If non-blocking mode is set, or the port is not enabled, then make
 	 * the check up front and then exit.
 	 */
 	if ((filp->f_flags & O_NONBLOCK) ||
 	    (tty->flags & (1 << TTY_IO_ERROR))) {
-		if (info->flags & DZ_CALLOUT_ACTIVE)
-			return -EBUSY;
 		info->flags |= DZ_NORMAL_ACTIVE;
 
 		return 0;
 	}
 
-	if (info->flags & DZ_CALLOUT_ACTIVE) {
-		if (info->normal_termios.c_cflag & CLOCAL)
-			do_clocal = 1;
-	} else {
-		if (tty->termios->c_cflag & CLOCAL)
+	if (tty->termios->c_cflag & CLOCAL)
 		do_clocal = 1;
-	}
 
 	/*
 	 * Block waiting for the carrier detect and the line to become free
@@ -1244,8 +1202,7 @@ static int block_til_ready(struct tty_struct *tty, struct file *filp,
 			retval = -EAGAIN;
 			break;
 		}
-		if (!(info->flags & DZ_CALLOUT_ACTIVE) &&
-		    !(info->flags & DZ_CLOSING) && do_clocal)
+		if (!(info->flags & DZ_CLOSING) && do_clocal)
 			break;
 		if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
@@ -1276,7 +1233,7 @@ static int dz_open (struct tty_struct *tty, struct file *filp)
 	struct dz_serial *info;
 	int retval, line;
 
-	line = MINOR(tty->device) - tty->driver.minor_start;
+	line = tty->index;
 
 	/*
 	 * The dz lines for the mouse/keyboard must be opened using their
@@ -1305,17 +1262,6 @@ static int dz_open (struct tty_struct *tty, struct file *filp)
 	if (retval)
 		return retval;
 
-	if ((info->count == 1) && (info->flags & DZ_SPLIT_TERMIOS)) {
-		if (tty->driver.subtype == SERIAL_TYPE_NORMAL)
-			*tty->termios = info->normal_termios;
-		else 
-			*tty->termios = info->callout_termios;
-		change_speed(info);
-	}
-
-	info->session = current->session;
-	info->pgrp = current->pgrp;
-
 	return 0;
 }
 
@@ -1324,72 +1270,55 @@ static void show_serial_version (void)
 	printk("%s%s\n", dz_name, dz_version);
 }
 
+static struct tty_driver *serial_driver;
+
+static struct tty_operations serial_ops = {
+	.open = dz_open,
+	.close = dz_close,
+	.write = dz_write,
+	.flush_chars = dz_flush_chars,
+	.write_room = dz_write_room,
+	.chars_in_buffer = dz_chars_in_buffer,
+	.flush_buffer = dz_flush_buffer,
+	.ioctl = dz_ioctl,
+	.throttle = dz_throttle,
+	.unthrottle = dz_unthrottle,
+	.send_xchar = dz_send_xchar,
+	.set_termios = dz_set_termios,
+	.stop = dz_stop,
+	.start = dz_start,
+	.hangup = dz_hangup,
+};
 
 int __init dz_init(void)
 {
 	int i, flags;
 	struct dz_serial *info;
 
+	serial_driver = alloc_tty_driver(DZ_NB_PORT);
+	if (!serial_driver)
+		return -ENOMEM;
+
 	/* Setup base handler, and timer table. */
 	init_bh(SERIAL_BH, do_serial_bh);
 
 	show_serial_version();
 
-	memset(&serial_driver, 0, sizeof(struct tty_driver));
-	serial_driver.magic = TTY_DRIVER_MAGIC;
-#if (LINUX_VERSION_CODE > 0x2032D && defined(CONFIG_DEVFS_FS))
-	serial_driver.name = "ttyS";
-#else
-	serial_driver.name = "tts/%d";
-#endif
-	serial_driver.major = TTY_MAJOR;
-	serial_driver.minor_start = 64;
-	serial_driver.num = DZ_NB_PORT;
-	serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
-	serial_driver.subtype = SERIAL_TYPE_NORMAL;
-	serial_driver.init_termios = tty_std_termios;
-
-	serial_driver.init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL |
+	serial_driver->owner = THIS_MODULE;
+	serial_driver->devfs_name = "tts/";
+	serial_driver->name = "ttyS";
+	serial_driver->major = TTY_MAJOR;
+	serial_driver->minor_start = 64;
+	serial_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	serial_driver->subtype = SERIAL_TYPE_NORMAL;
+	serial_driver->init_termios = tty_std_termios;
+	serial_driver->init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL |
 	                                     CLOCAL;
-	serial_driver.flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS;
-	serial_driver.refcount = &serial_refcount;
-	serial_driver.table = serial_table;
-	serial_driver.termios = serial_termios;
-	serial_driver.termios_locked = serial_termios_locked;
+	serial_driver->flags = TTY_DRIVER_REAL_RAW | TTY_DRIVER_NO_DEVFS;
+	tty_set_operations(serial_driver, &serial_ops);
 
-	serial_driver.open = dz_open;
-	serial_driver.close = dz_close;
-	serial_driver.write = dz_write;
-	serial_driver.flush_chars = dz_flush_chars;
-	serial_driver.write_room = dz_write_room;
-	serial_driver.chars_in_buffer = dz_chars_in_buffer;
-	serial_driver.flush_buffer = dz_flush_buffer;
-	serial_driver.ioctl = dz_ioctl;
-	serial_driver.throttle = dz_throttle;
-	serial_driver.unthrottle = dz_unthrottle;
-	serial_driver.send_xchar = dz_send_xchar;
-	serial_driver.set_termios = dz_set_termios;
-	serial_driver.stop = dz_stop;
-	serial_driver.start = dz_start;
-	serial_driver.hangup = dz_hangup;
-
-	/*
-	 * The callout device is just like normal device except for major
-	 * number and the subtype code.
-	 */
-	callout_driver = serial_driver;
-#if (LINUX_VERSION_CODE > 0x2032D && defined(CONFIG_DEVFS_FS))
-	callout_driver.name = "cua";
-#else
-	callout_driver.name = "cua/%d";
-#endif
-	callout_driver.major = TTYAUX_MAJOR;
-	callout_driver.subtype = SERIAL_TYPE_CALLOUT;
-
-	if (tty_register_driver (&serial_driver))
+	if (tty_register_driver(serial_driver))
 		panic("Couldn't register serial driver\n");
-	if (tty_register_driver (&callout_driver))
-		panic("Couldn't register callout driver\n");
 
 	save_flags(flags); cli();
 	for (i=0; i < DZ_NB_PORT;  i++) {
@@ -1415,8 +1344,6 @@ int __init dz_init(void)
 		info->tqueue.data = info;
 		info->tqueue_hangup.routine = do_serial_hangup;
 		info->tqueue_hangup.data = info;
-		info->callout_termios = callout_driver.init_termios;
-		info->normal_termios = serial_driver.init_termios;
 		init_waitqueue_head(&info->open_wait); 
 		init_waitqueue_head(&info->close_wait); 
 
@@ -1430,10 +1357,7 @@ int __init dz_init(void)
 		printk("ttyS%02d at 0x%08x (irq = %d)\n", info->line,
 		       info->port, SERIAL);
 
-		tty_register_devfs(&serial_driver, 0,
-		                   serial_driver.minor_start + info->line);
-		tty_register_devfs(&callout_driver, 0,
-		                   callout_driver.minor_start + info->line);
+		tty_register_device(serial_driver, info->line, NULL);
 	}
 
 	/* Reset the chip */
@@ -1509,14 +1433,10 @@ static void dz_console_print (struct console *cons,
 	}
 }
 
-static int dz_console_wait_key(struct console *co)
+static struct tty_driver *dz_console_device(struct console *c, int *index)
 {
-	return 0;
-}
-
-static kdev_t dz_console_device(struct console *c)
-{
-	return MKDEV(TTY_MAJOR, 64 + c->index);
+	*index = c->index;
+	return serial_driver;
 }
 
 static int __init dz_console_setup(struct console *co, char *options)
@@ -1611,13 +1531,12 @@ static int __init dz_console_setup(struct console *co, char *options)
 }
 
 static struct console dz_sercons = {
-    name:	"ttyS",
-    write:	dz_console_print,
-    device:	dz_console_device,
-    wait_key:	dz_console_wait_key,
-    setup:	dz_console_setup,
-    flags:	CON_CONSDEV | CON_PRINTBUFFER,
-    index:	CONSOLE_LINE,
+    .name	= "ttyS",
+    .write	= dz_console_print,
+    .device	= dz_console_device,
+    .setup	= dz_console_setup,
+    .flags	= CON_CONSDEV | CON_PRINTBUFFER,
+    .index	= CONSOLE_LINE,
 };
 
 void __init dz_serial_console_init(void)

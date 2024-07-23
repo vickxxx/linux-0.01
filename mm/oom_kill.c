@@ -18,8 +18,8 @@
 #include <linux/mm.h>
 #include <linux/sched.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
 #include <linux/timex.h>
+#include <linux/jiffies.h>
 
 /* #define DEBUG */
 
@@ -51,7 +51,7 @@ static unsigned int int_sqrt(unsigned int x)
  * 3) we don't kill anything innocent of eating tons of memory
  * 4) we want to kill the minimum amount of processes (one)
  * 5) we try to kill the process the user expects us to kill, this
- *    algorithm has been meticulously tuned to meet the priniciple
+ *    algorithm has been meticulously tuned to meet the principle
  *    of least surprise ... (be careful when you change it)
  */
 
@@ -64,7 +64,6 @@ static int badness(struct task_struct *p)
 
 	if (p->flags & PF_MEMDIE)
 		return 0;
-
 	/*
 	 * The memory size of the process is the basis for the badness.
 	 */
@@ -73,11 +72,10 @@ static int badness(struct task_struct *p)
 	/*
 	 * CPU time is in seconds and run time is in minutes. There is no
 	 * particular reason for this other than that it turned out to work
-	 * very well in practice. This is not safe against jiffie wraps
-	 * but we don't care _that_ much...
+	 * very well in practice.
 	 */
-	cpu_time = (p->times.tms_utime + p->times.tms_stime) >> (SHIFT_HZ + 3);
-	run_time = (jiffies - p->start_time) >> (SHIFT_HZ + 10);
+	cpu_time = (p->utime + p->stime) >> (SHIFT_HZ + 3);
+	run_time = (get_jiffies_64() - p->start_time) >> (SHIFT_HZ + 10);
 
 	points /= int_sqrt(cpu_time);
 	points /= int_sqrt(int_sqrt(run_time));
@@ -86,7 +84,7 @@ static int badness(struct task_struct *p)
 	 * Niced processes are most likely less important, so double
 	 * their badness points.
 	 */
-	if (p->nice > 0)
+	if (task_nice(p) > 0)
 		points *= 2;
 
 	/*
@@ -121,18 +119,20 @@ static int badness(struct task_struct *p)
 static struct task_struct * select_bad_process(void)
 {
 	int maxpoints = 0;
-	struct task_struct *p = NULL;
+	struct task_struct *g, *p;
 	struct task_struct *chosen = NULL;
 
-	for_each_task(p) {
+	do_each_thread(g, p)
 		if (p->pid) {
 			int points = badness(p);
 			if (points > maxpoints) {
 				chosen = p;
 				maxpoints = points;
 			}
+			if (p->flags & PF_SWAPOFF)
+				return p;
 		}
-	}
+	while_each_thread(g, p);
 	return chosen;
 }
 
@@ -141,7 +141,7 @@ static struct task_struct * select_bad_process(void)
  * CAP_SYS_RAW_IO set, send SIGTERM instead (but it's unlikely that
  * we select a process with CAP_SYS_RAW_IO set).
  */
-static void __oom_kill_task(struct task_struct *p)
+void oom_kill_task(struct task_struct *p)
 {
 	printk(KERN_ERR "Out of Memory: Killed process %d (%s).\n", p->pid, p->comm);
 
@@ -150,7 +150,7 @@ static void __oom_kill_task(struct task_struct *p)
 	 * all the memory it needs. That way it should be able to
 	 * exit() and clear out its resources quickly...
 	 */
-	p->counter = 5 * HZ;
+	p->time_slice = HZ;
 	p->flags |= PF_MEMALLOC | PF_MEMDIE;
 
 	/* This process has hardware access, be more careful. */
@@ -159,26 +159,6 @@ static void __oom_kill_task(struct task_struct *p)
 	} else {
 		force_sig(SIGKILL, p);
 	}
-}
-
-static struct mm_struct *oom_kill_task(struct task_struct *p)
-{
-	struct mm_struct *mm;
-
-	task_lock(p);
-	mm = p->mm;
-	if (mm) {
-		spin_lock(&mmlist_lock);
-		if (atomic_read(&mm->mm_users))
-			atomic_inc(&mm->mm_users);
-		else
-			mm = NULL;
-		spin_unlock(&mmlist_lock);
-	}
-	task_unlock(p);
-	if (mm)
-		__oom_kill_task(p);
-	return mm;
 }
 
 /**
@@ -191,28 +171,29 @@ static struct mm_struct *oom_kill_task(struct task_struct *p)
  */
 static void oom_kill(void)
 {
-	struct task_struct *p, *q;
-	struct mm_struct *mm;
-
-retry:
+	struct task_struct *g, *p, *q;
+	
 	read_lock(&tasklist_lock);
 	p = select_bad_process();
 
 	/* Found nothing?!?! Either we hang forever, or we panic. */
-	if (p == NULL)
+	if (!p) {
+		show_free_areas();
 		panic("Out of memory and no killable processes...\n");
-	mm = oom_kill_task(p);
-	if (!mm) {
-		read_unlock(&tasklist_lock);
-		goto retry;
 	}
-	/* kill all processes that share the ->mm (i.e. all threads) */
-	for_each_task(q) {
-		if (q->mm == mm)
-			__oom_kill_task(q);
-	}
+
+	oom_kill_task(p);
+	/*
+	 * kill all processes that share the ->mm (i.e. all threads),
+	 * but are in a different thread group
+	 */
+	do_each_thread(g, q)
+		if (q->mm == p->mm && q->tgid != p->tgid)
+			oom_kill_task(q);
+	while_each_thread(g, q);
+
 	read_unlock(&tasklist_lock);
-	mmput(mm);
+
 	/*
 	 * Make kswapd go out of the way, so "p" has a good chance of
 	 * killing itself before someone else gets the chance to ask
@@ -283,13 +264,17 @@ void out_of_memory(void)
 	 */
 	lastkill = now;
 
-	/* oom_kill() can sleep */
+	/* oom_kill() sleeps */
 	spin_unlock(&oom_lock);
 	oom_kill();
 	spin_lock(&oom_lock);
 
 reset:
-	if ((long)first - (long)now < 0)
+	/*
+	 * We dropped the lock above, so check to be sure the variable
+	 * first only ever increases to prevent false OOM's.
+	 */
+	if (time_after(now, first))
 		first = now;
 	count = 0;
 

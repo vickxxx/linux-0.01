@@ -16,7 +16,7 @@
 #include <asm/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/socket.h>
@@ -166,7 +166,7 @@ static unsigned sfq_hash(struct sfq_sched_data *q, struct sk_buff *skb)
 	return sfq_fold_hash(q, h, h2);
 }
 
-extern __inline__ void sfq_link(struct sfq_sched_data *q, sfq_index x)
+static inline void sfq_link(struct sfq_sched_data *q, sfq_index x)
 {
 	sfq_index p, n;
 	int d = q->qs[x].qlen + SFQ_DEPTH;
@@ -178,7 +178,7 @@ extern __inline__ void sfq_link(struct sfq_sched_data *q, sfq_index x)
 	q->dep[p].next = q->dep[n].prev = x;
 }
 
-extern __inline__ void sfq_dec(struct sfq_sched_data *q, sfq_index x)
+static inline void sfq_dec(struct sfq_sched_data *q, sfq_index x)
 {
 	sfq_index p, n;
 
@@ -193,7 +193,7 @@ extern __inline__ void sfq_dec(struct sfq_sched_data *q, sfq_index x)
 	sfq_link(q, x);
 }
 
-extern __inline__ void sfq_inc(struct sfq_sched_data *q, sfq_index x)
+static inline void sfq_inc(struct sfq_sched_data *q, sfq_index x)
 {
 	sfq_index p, n;
 	int d;
@@ -341,7 +341,6 @@ sfq_dequeue(struct Qdisc* sch)
 
 	/* Is the slot empty? */
 	if (q->qs[a].qlen == 0) {
-		q->ht[q->hash[a]] = SFQ_DEPTH;
 		a = q->next[a];
 		if (a == old_a) {
 			q->tail = SFQ_DEPTH;
@@ -411,9 +410,9 @@ static int sfq_init(struct Qdisc *sch, struct rtattr *opt)
 	struct sfq_sched_data *q = (struct sfq_sched_data *)sch->data;
 	int i;
 
+	init_timer(&q->perturb_timer);
 	q->perturb_timer.data = (unsigned long)sch;
 	q->perturb_timer.function = sfq_perturbation;
-	init_timer(&q->perturb_timer);
 
 	for (i=0; i<SFQ_HASH_DIVISOR; i++)
 		q->ht[i] = SFQ_DEPTH;
@@ -435,7 +434,6 @@ static int sfq_init(struct Qdisc *sch, struct rtattr *opt)
 	}
 	for (i=0; i<SFQ_DEPTH; i++)
 		sfq_link(q, i);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -443,7 +441,6 @@ static void sfq_destroy(struct Qdisc *sch)
 {
 	struct sfq_sched_data *q = (struct sfq_sched_data *)sch->data;
 	del_timer(&q->perturb_timer);
-	MOD_DEC_USE_COUNT;
 }
 
 static int sfq_dump(struct Qdisc *sch, struct sk_buff *skb)
@@ -468,24 +465,21 @@ rtattr_failure:
 	return -1;
 }
 
-struct Qdisc_ops sfq_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"sfq",
-	sizeof(struct sfq_sched_data),
-
-	sfq_enqueue,
-	sfq_dequeue,
-	sfq_requeue,
-	sfq_drop,
-
-	sfq_init,
-	sfq_reset,
-	sfq_destroy,
-	NULL, /* sfq_change */
-
-	sfq_dump,
+struct Qdisc_ops sfq_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"sfq",
+	.priv_size	=	sizeof(struct sfq_sched_data),
+	.enqueue	=	sfq_enqueue,
+	.dequeue	=	sfq_dequeue,
+	.requeue	=	sfq_requeue,
+	.drop		=	sfq_drop,
+	.init		=	sfq_init,
+	.reset		=	sfq_reset,
+	.destroy	=	sfq_destroy,
+	.change		=	NULL,
+	.dump		=	sfq_dump,
+	.owner		=	THIS_MODULE,
 };
 
 #ifdef MODULE

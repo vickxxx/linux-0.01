@@ -11,9 +11,6 @@
 #include <linux/coda_fs_i.h>
 #include <linux/coda_psdev.h>
 
-extern int coda_debug;
-extern int coda_print_entry;
-
 inline int coda_fideq(ViceFid *fid1, ViceFid *fid2)
 {
 	if (fid1->Vnode != fid2->Vnode)   return 0;
@@ -28,25 +25,15 @@ inline int coda_isnullfid(ViceFid *fid)
 	return 1;
 }
 
-static int coda_inocmp(struct inode *inode, unsigned long ino, void *opaque)
-{
-	return (coda_fideq((ViceFid *)opaque, &(ITOC(inode)->c_fid)));
-}
-
 static struct inode_operations coda_symlink_inode_operations = {
-	readlink:	page_readlink,
-	follow_link:	page_follow_link,
-	setattr:	coda_notify_change,
+	.readlink	= page_readlink,
+	.follow_link	= page_follow_link,
+	.setattr	= coda_setattr,
 };
 
 /* cnode.c */
 static void coda_fill_inode(struct inode *inode, struct coda_vattr *attr)
 {
-        CDEBUG(D_SUPER, "ino: %ld\n", inode->i_ino);
-
-        if (coda_debug & D_SUPER ) 
-		print_vattr(attr);
-
         coda_vattr_to_iattr(inode, attr);
 
         if (S_ISREG(inode->i_mode)) {
@@ -63,28 +50,45 @@ static void coda_fill_inode(struct inode *inode, struct coda_vattr *attr)
                 init_special_inode(inode, inode->i_mode, attr->va_rdev);
 }
 
+static int coda_test_inode(struct inode *inode, void *data)
+{
+	ViceFid *fid = (ViceFid *)data;
+	return coda_fideq(&(ITOC(inode)->c_fid), fid);
+}
+
+static int coda_set_inode(struct inode *inode, void *data)
+{
+	ViceFid *fid = (ViceFid *)data;
+	ITOC(inode)->c_fid = *fid;
+	return 0;
+}
+
+static int coda_fail_inode(struct inode *inode, void *data)
+{
+	return -1;
+}
+
 struct inode * coda_iget(struct super_block * sb, ViceFid * fid,
 			 struct coda_vattr * attr)
 {
 	struct inode *inode;
 	struct coda_inode_info *cii;
-	ino_t ino = coda_f2i(fid);
+	struct coda_sb_info *sbi = coda_sbp(sb);
+	unsigned long hash = coda_f2i(fid);
 
-	inode = iget4(sb, ino, coda_inocmp, fid);
+	inode = iget5_locked(sb, hash, coda_test_inode, coda_set_inode, fid);
 
-	if ( !inode ) { 
-		CDEBUG(D_CNODE, "coda_iget: no inode\n");
+	if (!inode)
 		return ERR_PTR(-ENOMEM);
+
+	if (inode->i_state & I_NEW) {
+		cii = ITOC(inode);
+		/* we still need to set i_ino for things like stat(2) */
+		inode->i_ino = hash;
+		cii->c_mapcount = 0;
+		list_add(&cii->c_cilist, &sbi->sbi_cihead);
+		unlock_new_inode(inode);
 	}
-
-	/* check if the inode is already initialized */
-	cii = ITOC(inode);
-	if (coda_isnullfid(&cii->c_fid))
-		/* new, empty inode found... initializing */
-		cii->c_fid = *fid;
-
-	/* we shouldnt see inode collisions anymore */
-	if (!coda_fideq(fid, &cii->c_fid)) BUG();
 
 	/* always replace the attributes, type might have changed */
 	coda_fill_inode(inode, attr);
@@ -102,30 +106,18 @@ int coda_cnode_make(struct inode **inode, ViceFid *fid, struct super_block *sb)
         struct coda_vattr attr;
         int error;
         
-        ENTRY;
-
 	/* We get inode numbers from Venus -- see venus source */
 	error = venus_getattr(sb, fid, &attr);
 	if ( error ) {
-	    CDEBUG(D_CNODE, 
-		   "coda_cnode_make: coda_getvattr returned %d for %s.\n", 
-		   error, coda_f2s(fid));
 	    *inode = NULL;
-	    EXIT;
 	    return error;
 	} 
 
 	*inode = coda_iget(sb, fid, &attr);
 	if ( IS_ERR(*inode) ) {
 		printk("coda_cnode_make: coda_iget failed\n");
-		EXIT;
                 return PTR_ERR(*inode);
         }
-
-	CDEBUG(D_DOWNCALL, "Done making inode: ino %ld, count %d with %s\n",
-		(*inode)->i_ino, atomic_read(&(*inode)->i_count), 
-		coda_f2s(&ITOC(*inode)->c_fid));
-        EXIT;
 	return 0;
 }
 
@@ -134,6 +126,7 @@ void coda_replace_fid(struct inode *inode, struct ViceFid *oldfid,
 		      struct ViceFid *newfid)
 {
 	struct coda_inode_info *cii;
+	unsigned long hash = coda_f2i(newfid);
 	
 	cii = ITOC(inode);
 
@@ -144,64 +137,46 @@ void coda_replace_fid(struct inode *inode, struct ViceFid *oldfid,
 	/* XXX we probably need to hold some lock here! */
 	remove_inode_hash(inode);
 	cii->c_fid = *newfid;
-	inode->i_ino = coda_f2i(newfid);
-	insert_inode_hash(inode);
+	inode->i_ino = hash;
+	__insert_inode_hash(inode, hash);
 }
 
 /* convert a fid to an inode. */
 struct inode *coda_fid_to_inode(ViceFid *fid, struct super_block *sb) 
 {
-	ino_t nr;
 	struct inode *inode;
-	struct coda_inode_info *cii;
-	ENTRY;
+	unsigned long hash = coda_f2i(fid);
 
 	if ( !sb ) {
 		printk("coda_fid_to_inode: no sb!\n");
 		return NULL;
 	}
 
-	CDEBUG(D_INODE, "%s\n", coda_f2s(fid));
-
-	nr = coda_f2i(fid);
-	inode = iget4(sb, nr, coda_inocmp, fid);
-	if ( !inode ) {
-		printk("coda_fid_to_inode: null from iget, sb %p, nr %ld.\n",
-		       sb, (long)nr);
+	inode = iget5_locked(sb, hash, coda_test_inode, coda_fail_inode, fid);
+	if ( !inode )
 		return NULL;
-	}
 
-	cii = ITOC(inode);
+	/* we should never see newly created inodes because we intentionally
+	 * fail in the initialization callback */
+	BUG_ON(inode->i_state & I_NEW);
 
-	/* The inode could already be purged due to memory pressure */
-	if (coda_isnullfid(&cii->c_fid)) {
-		inode->i_nlink = 0;
-		iput(inode);
-		return NULL;
-	}
-
-	/* we shouldn't see inode collisions anymore */
-	if ( !coda_fideq(fid, &cii->c_fid) ) BUG();
-
-        CDEBUG(D_INODE, "found %ld\n", inode->i_ino);
-        return inode;
+	return inode;
 }
 
 /* the CONTROL inode is made without asking attributes from Venus */
 int coda_cnode_makectl(struct inode **inode, struct super_block *sb)
 {
-    int error = 0;
+	int error = -ENOMEM;
 
-    *inode = iget(sb, CTL_INO);
-    if ( *inode ) {
-	(*inode)->i_op = &coda_ioctl_inode_operations;
-	(*inode)->i_fop = &coda_ioctl_operations;
-	(*inode)->i_mode = 0444;
-	error = 0;
-    } else { 
-	error = -ENOMEM;
-    }
-    
-    return error;
+	*inode = new_inode(sb);
+	if (*inode) {
+		(*inode)->i_ino = CTL_INO;
+		(*inode)->i_op = &coda_ioctl_inode_operations;
+		(*inode)->i_fop = &coda_ioctl_operations;
+		(*inode)->i_mode = 0444;
+		error = 0;
+	}
+
+	return error;
 }
 

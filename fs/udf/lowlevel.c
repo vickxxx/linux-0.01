@@ -15,7 +15,7 @@
  *		ftp://prep.ai.mit.edu/pub/gnu/GPL
  *	Each contributing author retains all rights to their own work.
  *
- *  (C) 1999-2000 Ben Fennema
+ *  (C) 1999-2001 Ben Fennema
  *
  * HISTORY
  *
@@ -71,20 +71,12 @@ unsigned long
 udf_get_last_block(struct super_block *sb)
 {
 	struct block_device *bdev = sb->s_bdev;
-	int ret;
 	unsigned long lblock = 0;
 
-	ret = ioctl_by_bdev(bdev, CDROM_LAST_WRITTEN, (unsigned long) &lblock);
+	if (ioctl_by_bdev(bdev, CDROM_LAST_WRITTEN, (unsigned long) &lblock))
+		lblock = bdev->bd_inode->i_size >> sb->s_blocksize_bits;
 
-	if (ret) /* Hard Disk */
-	{
-		ret = ioctl_by_bdev(bdev, BLKGETSIZE, (unsigned long) &lblock);
-
-		if (!ret && lblock != 0x7FFFFFFF)
-			lblock = ((512 * lblock) / sb->s_blocksize);
-	}
-
-	if (!ret && lblock)
+	if (lblock)
 		return lblock - 1;
 	else
 		return 0;

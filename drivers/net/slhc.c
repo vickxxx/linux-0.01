@@ -60,7 +60,6 @@
 
 #ifdef CONFIG_INET
 /* Entire module is for IP only */
-#include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
@@ -96,7 +95,6 @@ slhc_init(int rslots, int tslots)
 	register struct cstate *ts;
 	struct slcompress *comp;
 
-	MOD_INC_USE_COUNT;
 	comp = (struct slcompress *)kmalloc(sizeof(struct slcompress),
 					    GFP_KERNEL);
 	if (! comp)
@@ -148,7 +146,6 @@ out_free2:
 out_free:
 	kfree((unsigned char *)comp);
 out_fail:
-	MOD_DEC_USE_COUNT;
 	return NULL;
 }
 
@@ -167,7 +164,6 @@ slhc_free(struct slcompress *comp)
 		kfree( comp->rstate );
 
 	kfree( comp );
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -269,7 +265,7 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 
 	/*  Bail if the TCP packet isn't `compressible' (i.e., ACK isn't set or
 	 *  some other control bit is set). Also uncompressible if
-	 *  its a runt.
+	 *  it's a runt.
 	 */
 	if(hlen > isize || th->syn || th->fin || th->rst ||
 	    ! (th->ack)){
@@ -685,7 +681,6 @@ slhc_remember(struct slcompress *comp, unsigned char *icp, int isize)
 	comp->sls_i_uncompressed++;
 	return isize;
 }
-
 
 int
 slhc_toss(struct slcompress *comp)

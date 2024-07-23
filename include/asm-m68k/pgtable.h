@@ -6,6 +6,7 @@
 
 #ifndef __ASSEMBLY__
 #include <asm/processor.h>
+#include <linux/sched.h>
 #include <linux/threads.h>
 
 /*
@@ -88,20 +89,12 @@ extern unsigned long vmalloc_end;
 #endif /* CONFIG_SUN3 */
 
 /* zero page used for uninitialized stuff */
-extern unsigned long empty_zero_page;
+extern void *empty_zero_page;
 
 /*
- * BAD_PAGETABLE is used when we need a bogus page-table, while
- * BAD_PAGE is used for a bogus page.
- *
  * ZERO_PAGE is a global shared page that is always zero: used
  * for zero-mapped memory areas etc..
  */
-extern pte_t __bad_page(void);
-extern pte_t * __bad_pagetable(void);
-
-#define BAD_PAGETABLE __bad_pagetable()
-#define BAD_PAGE __bad_page()
 #define ZERO_PAGE(vaddr)	(virt_to_page(empty_zero_page))
 
 /* number of bits that fit into a memory pointer */
@@ -143,29 +136,8 @@ extern inline void update_mmu_cache(struct vm_area_struct * vma,
 {
 }
 
-#ifdef CONFIG_SUN3
-/* Macros to (de)construct the fake PTEs representing swap pages. */
-#define SWP_TYPE(x)                ((x).val & 0x7F)
-#define SWP_OFFSET(x)      (((x).val) >> 7)
-#define SWP_ENTRY(type,offset) ((swp_entry_t) { ((type) | ((offset) << 7)) })
-#define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
-#define swp_entry_to_pte(x)		((pte_t) { (x).val })
-
-#else
-
-/* Encode and de-code a swap entry (must be !pte_none(e) && !pte_present(e)) */
-#define SWP_TYPE(x)			(((x).val >> 1) & 0xff)
-#define SWP_OFFSET(x)			((x).val >> 10)
-#define SWP_ENTRY(type, offset)		((swp_entry_t) { ((type) << 1) | ((offset) << 10) })
-#define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
-#define swp_entry_to_pte(x)		((pte_t) { (x).val })
-
-#endif /* CONFIG_SUN3 */
-
 #endif /* !__ASSEMBLY__ */
 
-/* Needs to be defined here and not in linux/mm.h, as it is arch dependent */
-#define PageSkip(page)		(0)
 #define kern_addr_valid(addr)	(1)
 
 #define io_remap_page_range remap_page_range
@@ -180,11 +152,33 @@ extern inline void update_mmu_cache(struct vm_area_struct * vma,
 
 #ifndef __ASSEMBLY__
 #include <asm-generic/pgtable.h>
+
+/*
+ * Macro to mark a page protection value as "uncacheable".
+ */
+#ifdef SUN3_PAGE_NOCACHE
+# define __SUN3_PAGE_NOCACHE	SUN3_PAGE_NOCACHE
+#else
+# define __SUN3_PAGE_NOCACHE	0
+#endif
+#define pgprot_noncached(prot)							\
+	(MMU_IS_SUN3								\
+	 ? (__pgprot(pgprot_val(prot) | __SUN3_PAGE_NOCACHE))			\
+	 : ((MMU_IS_851 || MMU_IS_030)						\
+	    ? (__pgprot(pgprot_val(prot) | _PAGE_NOCACHE030))			\
+	    : (MMU_IS_040 || MMU_IS_060)					\
+	    ? (__pgprot((pgprot_val(prot) & _CACHEMASK040) | _PAGE_NOCACHE_S))	\
+	    : (prot)))
+
+typedef pte_t *pte_addr_t;
+
 #endif /* !__ASSEMBLY__ */
 
 /*
  * No page table caches to initialise
  */
 #define pgtable_cache_init()	do { } while (0)
+
+#define check_pgt_cache()	do { } while (0)
 
 #endif /* _M68K_PGTABLE_H */

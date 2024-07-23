@@ -1,10 +1,10 @@
 /* Driver for USB Mass Storage compliant devices
  * Main Header File
  *
- * $Id: usb.h,v 1.18 2001/07/30 00:27:59 mdharm Exp $
+ * $Id: usb.h,v 1.21 2002/04/21 02:57:59 mdharm Exp $
  *
  * Current development and maintenance by:
- *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+ *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
  *
  * Initial work by:
  *   (c) 1999 Michael Gee (michael@linuxspecific.com)
@@ -48,35 +48,9 @@
 #include <linux/blk.h>
 #include <linux/smp_lock.h>
 #include <linux/completion.h>
+#include <linux/version.h>
 #include "scsi.h"
 #include "hosts.h"
-
-/* 
- * GUID definitions
- */
-
-#define GUID(x) __u32 x[3]
-#define GUID_EQUAL(x, y) (x[0] == y[0] && x[1] == y[1] && x[2] == y[2])
-#define GUID_CLEAR(x) x[0] = x[1] = x[2] = 0;
-#define GUID_NONE(x) (!x[0] && !x[1] && !x[2])
-#define GUID_FORMAT "%08x%08x%08x"
-#define GUID_ARGS(x) x[0], x[1], x[2]
-
-static inline void make_guid( __u32 *pg, __u16 vendor, __u16 product, char *serial)
-{
-	pg[0] = (vendor << 16) | product;
-	pg[1] = pg[2] = 0;
-	while (*serial) {
-		pg[1] <<= 4;
-		pg[1] |= pg[2] >> 28;
-		pg[2] <<= 4;
-		if (*serial >= 'a')
-			*serial -= 'a' - 'A';
-		pg[2] |= (*serial <= '9' && *serial >= '0') ? *serial - '0'
-			: *serial - 'A' + 10;
-		serial++;
-	}
-}
 
 struct us_data;
 
@@ -93,16 +67,40 @@ struct us_unusual_dev {
 	unsigned int flags;
 };
 
-/* Flag definitions */
+/* Flag definitions: these entries are static */
 #define US_FL_SINGLE_LUN      0x00000001 /* allow access to only LUN 0	    */
 #define US_FL_MODE_XLATE      0x00000002 /* translate _6 to _10 commands for
 						    Win/MacOS compatibility */
-#define US_FL_START_STOP      0x00000004 /* ignore START_STOP commands	    */
-#define US_FL_IGNORE_SER      0x00000010 /* Ignore the serial number given  */
-#define US_FL_SCM_MULT_TARG   0x00000020 /* supports multiple targets */
-#define US_FL_FIX_INQUIRY     0x00000040 /* INQUIRY response needs fixing */
+#define US_FL_IGNORE_SER      0		 /* [no longer used]		    */
+#define US_FL_SCM_MULT_TARG   0x00000020 /* supports multiple targets	    */
+#define US_FL_FIX_INQUIRY     0x00000040 /* INQUIRY response needs fixing   */
+#define US_FL_FIX_CAPACITY    0x00000080 /* READ CAPACITY response too big  */
+
+/* Dynamic flag definitions: used in set_bit() etc. */
+#define US_FLIDX_URB_ACTIVE	18  /* 0x00040000  current_urb is in use  */
+#define US_FLIDX_SG_ACTIVE	19  /* 0x00080000  current_sg is in use   */
+#define US_FLIDX_ABORTING	20  /* 0x00100000  abort is in progress   */
+#define US_FLIDX_DISCONNECTING	21  /* 0x00200000  disconnect in progress */
+#define DONT_SUBMIT	((1UL << US_FLIDX_ABORTING) | \
+			 (1UL << US_FLIDX_DISCONNECTING))
+
+
+/* processing state machine states */
+#define US_STATE_IDLE		1
+#define US_STATE_RUNNING	2
+#define US_STATE_RESETTING	3
+#define US_STATE_ABORTING	4
 
 #define USB_STOR_STRING_LEN 32
+
+/*
+ * We provide a DMA-mapped I/O buffer for use with small USB transfers.
+ * It turns out that CB[I] needs a 12-byte buffer and Bulk-only needs a
+ * 31-byte buffer.  But Freecom needs a 64-byte buffer, so that's the
+ * size we'll allocate.
+ */
+
+#define US_IOBUF_SIZE		64	/* Size of the DMA-mapped I/O buffer */
 
 typedef int (*trans_cmnd)(Scsi_Cmnd*, struct us_data*);
 typedef int (*trans_reset)(struct us_data*);
@@ -111,15 +109,22 @@ typedef void (*extra_data_destructor)(void *);	 /* extra data destructor   */
 
 /* we allocate one of these for every device that we remember */
 struct us_data {
-	struct us_data		*next;		 /* next device */
-
-	/* the device we're working with */
+	/* The device we're working with
+	 * It's important to note:
+	 *    (o) you must hold dev_semaphore to change pusb_dev
+	 */
 	struct semaphore	dev_semaphore;	 /* protect pusb_dev */
 	struct usb_device	*pusb_dev;	 /* this usb_device */
+	struct usb_interface	*pusb_intf;	 /* this interface */
+	struct us_unusual_dev   *unusual_dev;	 /* device-filter entry     */
+	unsigned long		flags;		 /* from filter initially */
+	unsigned int		send_bulk_pipe;	 /* cached pipe values */
+	unsigned int		recv_bulk_pipe;
+	unsigned int		send_ctrl_pipe;
+	unsigned int		recv_ctrl_pipe;
+	unsigned int		recv_intr_pipe;
 
-	unsigned int		flags;		 /* from filter initially */
-
-	/* information about the device -- always good */
+	/* information about the device */
 	char			vendor[USB_STOR_STRING_LEN];
 	char			product[USB_STOR_STRING_LEN];
 	char			serial[USB_STOR_STRING_LEN];
@@ -129,11 +134,8 @@ struct us_data {
 	u8			protocol;
 	u8			max_lun;
 
-	/* information about the device -- only good if device is attached */
 	u8			ifnum;		 /* interface number   */
-	u8			ep_in;		 /* bulk in endpoint   */
-	u8			ep_out;		 /* bulk out endpoint  */
-	struct usb_endpoint_descriptor *ep_int;	 /* interrupt endpoint */ 
+	u8			ep_bInterval;	 /* interrupt interval */ 
 
 	/* function pointers for this device */
 	trans_cmnd		transport;	 /* transport function	   */
@@ -141,46 +143,29 @@ struct us_data {
 	proto_cmnd		proto_handler;	 /* protocol handler	   */
 
 	/* SCSI interfaces */
-	GUID(guid);				 /* unique dev id	*/
 	struct Scsi_Host	*host;		 /* our dummy host data */
-	Scsi_Host_Template	htmplt;		 /* own host template	*/
-	int			host_number;	 /* to find us		*/
-	int			host_no;	 /* allocated by scsi	*/
 	Scsi_Cmnd		*srb;		 /* current srb		*/
 
 	/* thread information */
-	Scsi_Cmnd		*queue_srb;	 /* the single queue slot */
-	int			action;		 /* what to do		  */
-	int			pid;		 /* control thread	  */
-
-	/* interrupt info for CBI devices -- only good if attached */
-	struct semaphore	ip_waitq;	 /* for CBI interrupts	 */
-	atomic_t		ip_wanted[1];	 /* is an IRQ expected?	 */
-
-	/* interrupt communications data */
-	struct semaphore	irq_urb_sem;	 /* to protect irq_urb	 */
-	struct urb		*irq_urb;	 /* for USB int requests */
-	unsigned char		irqbuf[2];	 /* buffer for USB IRQ	 */
-	unsigned char		irqdata[2];	 /* data from USB IRQ	 */
+	int			pid;		 /* control thread	 */
+	int			sm_state;	 /* what we are doing	 */
 
 	/* control and bulk communications data */
-	struct semaphore	current_urb_sem; /* to protect irq_urb	 */
-	struct urb		*current_urb;	 /* non-int USB requests */
-
-	/* the semaphore for sleeping the control thread */
-	struct semaphore	sema;		 /* to sleep thread on   */
+	struct urb		*current_urb;	 /* USB requests	 */
+	struct usb_ctrlrequest	*cr;		 /* control requests	 */
+	struct usb_sg_request	current_sg;	 /* scatter-gather req.  */
+	unsigned char		*iobuf;		 /* I/O buffer		 */
+	dma_addr_t		cr_dma;		 /* buffer DMA addresses */
+	dma_addr_t		iobuf_dma;
 
 	/* mutual exclusion structures */
+	struct semaphore	sema;		 /* to sleep thread on   */
 	struct completion	notify;		 /* thread begin/end	    */
-	struct semaphore	queue_exclusion; /* to protect data structs */
-	struct us_unusual_dev   *unusual_dev;	 /* If unusual device       */
+
+	/* subdriver information */
 	void			*extra;		 /* Any extra data          */
 	extra_data_destructor	extra_destructor;/* extra data destructor   */
 };
-
-/* The list of structures and the protective lock for them */
-extern struct us_data *us_list;
-extern struct semaphore us_list_semaphore;
 
 /* The structure which defines our driver */
 extern struct usb_driver usb_storage_driver;
@@ -188,4 +173,11 @@ extern struct usb_driver usb_storage_driver;
 /* Function to fill an inquiry response. See usb.c for details */
 extern void fill_inquiry_response(struct us_data *us,
 	unsigned char *data, unsigned int data_len);
+
+/* The scsi_lock() and scsi_unlock() macros protect the sm_state and the
+ * single queue element srb for write access */
+#define scsi_unlock(host)	spin_unlock_irq(host->host_lock)
+#define scsi_lock(host)		spin_lock_irq(host->host_lock)
+#define sg_address(psg)		(page_address((psg).page) + (psg).offset)
+
 #endif

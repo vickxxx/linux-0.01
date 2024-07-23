@@ -25,7 +25,7 @@
 ** implied warranty.
 */
 
-#define MAJOR_NR    Z2RAM_MAJOR
+#define DEVICE_NAME "Z2RAM"
 
 #include <linux/major.h>
 #include <linux/slab.h>
@@ -38,7 +38,7 @@
 #include <asm/bitops.h>
 #include <asm/amigahw.h>
 #include <asm/pgtable.h>
-#include <asm/io.h>
+
 #include <linux/zorro.h>
 
 
@@ -61,61 +61,44 @@ extern struct mem_info m68k_memory[NUM_MEMINFO];
 
 static u_long *z2ram_map    = NULL;
 static u_long z2ram_size    = 0;
-static int z2_blocksizes[Z2MINOR_COUNT];
-static int z2_sizes[Z2MINOR_COUNT];
 static int z2_count         = 0;
 static int chip_count       = 0;
 static int list_count       = 0;
 static int current_device   = -1;
 
-static void
-do_z2_request( request_queue_t * q )
+static spinlock_t z2ram_lock = SPIN_LOCK_UNLOCKED;
+
+static struct block_device_operations z2_fops;
+static struct gendisk *z2ram_gendisk;
+
+static void do_z2_request(request_queue_t *q)
 {
-    u_long start, len, addr, size;
+	struct request *req;
+	while ((req = elv_next_request(q)) != NULL) {
+		unsigned long start = req->sector << 9;
+		unsigned long len  = req->current_nr_sectors << 9;
 
-    while ( TRUE )
-    {
-	INIT_REQUEST;
-
-	start = CURRENT->sector << 9;
-	len  = CURRENT->current_nr_sectors << 9;
-
-	if ( ( start + len ) > z2ram_size )
-	{
-	    printk( KERN_ERR DEVICE_NAME ": bad access: block=%ld, count=%ld\n",
-		CURRENT->sector,
-		CURRENT->current_nr_sectors);
-	    end_request( FALSE );
-	    continue;
+		if (start + len > z2ram_size) {
+			printk( KERN_ERR DEVICE_NAME ": bad access: block=%lu, count=%u\n",
+				req->sector, req->current_nr_sectors);
+			end_request(req, 0);
+			continue;
+		}
+		while (len) {
+			unsigned long addr = start & Z2RAM_CHUNKMASK;
+			unsigned long size = Z2RAM_CHUNKSIZE - addr;
+			if (len < size)
+				size = len;
+			addr += z2ram_map[ start >> Z2RAM_CHUNKSHIFT ];
+			if (rq_data_dir(req) == READ)
+				memcpy(req->buffer, (char *)addr, size);
+			else
+				memcpy((char *)addr, req->buffer, size);
+			start += size;
+			len -= size;
+		}
+		end_request(req, 1);
 	}
-
-	if ( ( CURRENT->cmd != READ ) && ( CURRENT->cmd != WRITE ) )
-	{
-	    printk( KERN_ERR DEVICE_NAME ": bad command: %d\n", CURRENT->cmd );
-	    end_request( FALSE );
-	    continue;
-	}
-
-	while ( len ) 
-	{
-	    addr = start & Z2RAM_CHUNKMASK;
-	    size = Z2RAM_CHUNKSIZE - addr;
-	    if ( len < size )
-		size = len;
-
-	    addr += z2ram_map[ start >> Z2RAM_CHUNKSHIFT ];
-
-	    if ( CURRENT->cmd == READ )
-		memcpy( CURRENT->buffer, (char *)addr, size );
-	    else
-		memcpy( (char *)addr, CURRENT->buffer, size );
-
-	    start += size;
-	    len -= size;
-	}
-
-	end_request( TRUE );
-    }
 }
 
 static void
@@ -168,7 +151,7 @@ z2_open( struct inode *inode, struct file *filp )
 	sizeof( z2ram_map[0] );
     int rc = -ENOMEM;
 
-    device = DEVICE_NR( inode->i_rdev );
+    device = minor( inode->i_rdev );
 
     if ( current_device != -1 && current_device != device )
     {
@@ -207,7 +190,7 @@ z2_open( struct inode *inode, struct file *filp )
 						   _PAGE_WRITETHRU);
 
 #else
-		vaddr = (unsigned long)ioremap(paddr, size);
+		vaddr = (unsigned long)z_remap_nocache_nonser(paddr, size);
 #endif
 		z2ram_map = 
 			kmalloc((size/Z2RAM_CHUNKSIZE)*sizeof(z2ram_map[0]),
@@ -308,8 +291,7 @@ z2_open( struct inode *inode, struct file *filp )
 
 	current_device = device;
 	z2ram_size <<= Z2RAM_CHUNKSHIFT;
-	z2_sizes[ device ] = z2ram_size >> 10;
-	blk_size[ MAJOR_NR ] = z2_sizes;
+	set_capacity(z2ram_gendisk, z2ram_size >> 9);
     }
 
     return 0;
@@ -335,38 +317,44 @@ z2_release( struct inode *inode, struct file *filp )
 
 static struct block_device_operations z2_fops =
 {
-	owner:		THIS_MODULE,
-	open:		z2_open,
-	release:	z2_release,
+	.owner		= THIS_MODULE,
+	.open		= z2_open,
+	.release	= z2_release,
 };
 
+static struct kobject *z2_find(dev_t dev, int *part, void *data)
+{
+	*part = 0;
+	return get_disk(z2ram_gendisk);
+}
+
+static struct request_queue z2_queue;
+
 int __init 
-z2_init( void )
+z2_init(void)
 {
 
-    if ( !MACH_IS_AMIGA )
+    if (!MACH_IS_AMIGA)
 	return -ENXIO;
 
-    if ( register_blkdev( MAJOR_NR, DEVICE_NAME, &z2_fops ) )
-    {
-	printk( KERN_ERR DEVICE_NAME ": Unable to get major %d\n",
-	    MAJOR_NR );
+    if (register_blkdev(Z2RAM_MAJOR, DEVICE_NAME))
 	return -EBUSY;
+
+    z2ram_gendisk = alloc_disk(1);
+    if (!z2ram_gendisk) {
+	unregister_blkdev(Z2RAM_MAJOR, DEVICE_NAME);
+	return -ENOMEM;
     }
+    z2ram_gendisk->major = Z2RAM_MAJOR;
+    z2ram_gendisk->first_minor = 0;
+    z2ram_gendisk->fops = &z2_fops;
+    sprintf(z2ram_gendisk->disk_name, "z2ram");
 
-    {
-	    /* Initialize size arrays. */
-	    int i;
-
-	    for (i = 0; i < Z2MINOR_COUNT; i++) {
-		    z2_blocksizes[ i ] = 1024;
-		    z2_sizes[ i ] = 0;
-	    }
-    }    
-   
-    blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-    blksize_size[ MAJOR_NR ] = z2_blocksizes;
-    blk_size[ MAJOR_NR ] = z2_sizes;
+    blk_init_queue(&z2_queue, do_z2_request, &z2ram_lock);
+    z2ram_gendisk->queue = &z2_queue;
+    add_disk(z2ram_gendisk);
+    blk_register_region(MKDEV(Z2RAM_MAJOR, 0), Z2MINOR_COUNT, THIS_MODULE,
+				z2_find, NULL, NULL);
 
     return 0;
 }
@@ -393,11 +381,13 @@ void
 cleanup_module( void )
 {
     int i, j;
-
-    if ( unregister_blkdev( MAJOR_NR, DEVICE_NAME ) != 0 )
+    blk_unregister_region(MKDEV(Z2RAM_MAJOR, 0), 256);
+    if ( unregister_blkdev( Z2RAM_MAJOR, DEVICE_NAME ) != 0 )
 	printk( KERN_ERR DEVICE_NAME ": unregister of device failed\n");
 
-    blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+    del_gendisk(z2ram_gendisk);
+    put_disk(z2ram_gendisk);
+    blk_cleanup_queue(&z2_queue);
 
     if ( current_device != -1 )
     {

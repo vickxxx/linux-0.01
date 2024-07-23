@@ -3,32 +3,114 @@
  *
  * Copyright (C) 2000 VA Linux Co
  * Copyright (C) 2000 Don Dugger <n0ano@valinux.com>
- * Copyright (C) 2001 Hewlett-Packard Co
+ * Copyright (C) 2001-2003 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <linux/types.h>
 #include <linux/dirent.h>
-#include <linux/msdos_fs.h>
-#include <linux/mtio.h>
-#include <linux/ncp_fs.h>
-#include <linux/capi.h>
-#include <linux/videodev.h>
-#include <linux/synclink.h>
-#include <linux/atmdev.h>
-#include <linux/atm_eni.h>
-#include <linux/atm_nicstar.h>
-#include <linux/atm_zatm.h>
-#include <linux/atm_idt77105.h>
+#include <linux/fs.h>		/* argh, msdos_fs.h isn't self-contained... */
+#include <linux/signal.h>	/* argh, msdos_fs.h isn't self-contained... */
+#include <linux/compat.h>
+
+#include "ia32priv.h"
+
+#include <linux/config.h>
+#include <linux/kernel.h>
+#include <linux/sched.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
+#include <linux/ioctl.h>
+#include <linux/if.h>
+#include <linux/slab.h>
+#include <linux/hdreg.h>
+#include <linux/raid/md.h>
+#include <linux/kd.h>
+#include <linux/route.h>
+#include <linux/in6.h>
+#include <linux/ipv6_route.h>
+#include <linux/skbuff.h>
+#include <linux/netlink.h>
+#include <linux/vt.h>
+#include <linux/file.h>
+#include <linux/fd.h>
 #include <linux/ppp_defs.h>
 #include <linux/if_ppp.h>
-#include <linux/ixjuser.h>
-#include <linux/i2o-dev.h>
+#include <linux/if_pppox.h>
+#include <linux/mtio.h>
+#include <linux/cdrom.h>
+#include <linux/loop.h>
+#include <linux/auto_fs.h>
+#include <linux/auto_fs4.h>
+#include <linux/devfs_fs.h>
+#include <linux/tty.h>
+#include <linux/vt_kern.h>
+#include <linux/fb.h>
+#include <linux/ext2_fs.h>
+#include <linux/videodev.h>
+#include <linux/netdevice.h>
+#include <linux/raw.h>
+#include <linux/smb_fs.h>
+#include <linux/blkpg.h>
+#include <linux/blk.h>
+#include <linux/elevator.h>
+#include <linux/rtc.h>
+#include <linux/pci.h>
+#include <linux/rtc.h>
+#include <linux/module.h>
+#include <linux/serial.h>
+#include <linux/reiserfs_fs.h>
+#include <linux/if_tun.h>
+#include <linux/dirent.h>
+#include <linux/ctype.h>
+#include <linux/ncp_fs.h>
+#include <net/bluetooth/bluetooth.h>
+#include <net/bluetooth/rfcomm.h>
 
-#include <asm/ia32.h>
+#include <scsi/scsi.h>
+/* Ugly hack. */
+#undef __KERNEL__
+#include <scsi/scsi_ioctl.h>
+#define __KERNEL__
+#include <scsi/sg.h>
+
+#include <asm/types.h>
+#include <asm/uaccess.h>
+#include <linux/ethtool.h>
+#include <linux/mii.h>
+#include <linux/if_bonding.h>
+#include <linux/watchdog.h>
+
+#include <asm/module.h>
+#include <asm/ioctl32.h>
+#include <linux/soundcard.h>
+#include <linux/lp.h>
+
+#include <linux/atm.h>
+#include <linux/atmarp.h>
+#include <linux/atmclip.h>
+#include <linux/atmdev.h>
+#include <linux/atmioc.h>
+#include <linux/atmlec.h>
+#include <linux/atmmpc.h>
+#include <linux/atmsvc.h>
+#include <linux/atm_tcp.h>
+#include <linux/sonet.h>
+#include <linux/atm_suni.h>
+#include <linux/mtd/mtd.h>
+
+#include <net/bluetooth/bluetooth.h>
+#include <net/bluetooth/hci.h>
+
+#include <linux/usb.h>
+#include <linux/usbdevice_fs.h>
+#include <linux/nbd.h>
+#include <linux/random.h>
+#include <linux/filter.h>
 
 #include <../drivers/char/drm/drm.h>
-
+#include <../drivers/char/drm/mga_drm.h>
+#include <../drivers/char/drm/i810_drm.h>
 
 #define IOCTL_NR(a)	((a) & ~(_IOC_SIZEMASK << _IOC_SIZESHIFT))
 
@@ -46,6 +128,9 @@
 
 asmlinkage long sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg);
 
+#define	VFAT_IOCTL_READDIR_BOTH32	_IOR('r', 1, struct linux32_dirent[2])
+#define	VFAT_IOCTL_READDIR_SHORT32	_IOR('r', 2, struct linux32_dirent[2])
+
 static long
 put_dirent32 (struct dirent *d, struct linux32_dirent *d32)
 {
@@ -57,185 +142,326 @@ put_dirent32 (struct dirent *d, struct linux32_dirent *d32)
 		|| copy_to_user(d32->d_name, d->d_name, namelen + 1));
 }
 
-asmlinkage long
-sys32_ioctl (unsigned int fd, unsigned int cmd, unsigned int arg)
+static int vfat_ioctl32(unsigned fd, unsigned cmd,  void *ptr) 
 {
-	long ret;
+	int ret;
+	mm_segment_t oldfs = get_fs();
+	struct dirent d[2]; 
 
-	switch (IOCTL_NR(cmd)) {
-	      case IOCTL_NR(VFAT_IOCTL_READDIR_SHORT):
-	      case IOCTL_NR(VFAT_IOCTL_READDIR_BOTH): {
-		      struct linux32_dirent *d32 = P(arg);
-		      struct dirent d[2];
-
-		      ret = DO_IOCTL(fd, _IOR('r', _IOC_NR(cmd),
-					      struct dirent [2]),
-				     (unsigned long) d);
-		      if (ret < 0)
-			  return ret;
-
-		      if (put_dirent32(d, d32) || put_dirent32(d + 1, d32 + 1))
-			  return -EFAULT;
-
-		      return ret;
-	      }
-
-	      case IOCTL_NR(DRM_IOCTL_VERSION):
-	      {
-		      drm_version_t ver;
-		      struct {
-			      int	version_major;
-			      int	version_minor;
-			      int	version_patchlevel;
-			      unsigned int name_len;
-			      unsigned int name; /* pointer */
-			      unsigned int date_len;
-			      unsigned int date; /* pointer */
-			      unsigned int desc_len;
-			      unsigned int desc; /* pointer */
-		      } ver32;
-
-		      if (copy_from_user(&ver32, P(arg), sizeof(ver32)))
-			      return -EFAULT;
-		      ver.name_len = ver32.name_len;
-		      ver.name = P(ver32.name);
-		      ver.date_len = ver32.date_len;
-		      ver.date = P(ver32.date);
-		      ver.desc_len = ver32.desc_len;
-		      ver.desc = P(ver32.desc);
-		      ret = DO_IOCTL(fd, DRM_IOCTL_VERSION, &ver);
-		      if (ret >= 0) {
-			      ver32.version_major = ver.version_major;
-			      ver32.version_minor = ver.version_minor;
-			      ver32.version_patchlevel = ver.version_patchlevel;
-			      ver32.name_len = ver.name_len;
-			      ver32.date_len = ver.date_len;
-			      ver32.desc_len = ver.desc_len;
-			      if (copy_to_user(P(arg), &ver32, sizeof(ver32)))
-				      return -EFAULT;
-		      }
-		      return ret;
-	      }
-
-	      case IOCTL_NR(DRM_IOCTL_GET_UNIQUE):
-	      {
-		      drm_unique_t un;
-		      struct {
-			      unsigned int unique_len;
-			      unsigned int unique;
-		      } un32;
-
-		      if (copy_from_user(&un32, P(arg), sizeof(un32)))
-			      return -EFAULT;
-		      un.unique_len = un32.unique_len;
-		      un.unique = P(un32.unique);
-		      ret = DO_IOCTL(fd, DRM_IOCTL_GET_UNIQUE, &un);
-		      if (ret >= 0) {
-			      un32.unique_len = un.unique_len;
-			      if (copy_to_user(P(arg), &un32, sizeof(un32)))
-				      return -EFAULT;
-		      }
-		      return ret;
-	      }
-	      case IOCTL_NR(DRM_IOCTL_SET_UNIQUE):
-	      case IOCTL_NR(DRM_IOCTL_ADD_MAP):
-	      case IOCTL_NR(DRM_IOCTL_ADD_BUFS):
-	      case IOCTL_NR(DRM_IOCTL_MARK_BUFS):
-	      case IOCTL_NR(DRM_IOCTL_INFO_BUFS):
-	      case IOCTL_NR(DRM_IOCTL_MAP_BUFS):
-	      case IOCTL_NR(DRM_IOCTL_FREE_BUFS):
-	      case IOCTL_NR(DRM_IOCTL_ADD_CTX):
-	      case IOCTL_NR(DRM_IOCTL_RM_CTX):
-	      case IOCTL_NR(DRM_IOCTL_MOD_CTX):
-	      case IOCTL_NR(DRM_IOCTL_GET_CTX):
-	      case IOCTL_NR(DRM_IOCTL_SWITCH_CTX):
-	      case IOCTL_NR(DRM_IOCTL_NEW_CTX):
-	      case IOCTL_NR(DRM_IOCTL_RES_CTX):
-
-	      case IOCTL_NR(DRM_IOCTL_AGP_ACQUIRE):
-	      case IOCTL_NR(DRM_IOCTL_AGP_RELEASE):
-	      case IOCTL_NR(DRM_IOCTL_AGP_ENABLE):
-	      case IOCTL_NR(DRM_IOCTL_AGP_INFO):
-	      case IOCTL_NR(DRM_IOCTL_AGP_ALLOC):
-	      case IOCTL_NR(DRM_IOCTL_AGP_FREE):
-	      case IOCTL_NR(DRM_IOCTL_AGP_BIND):
-	      case IOCTL_NR(DRM_IOCTL_AGP_UNBIND):
-
-		/* Mga specific ioctls */
-
-	      case IOCTL_NR(DRM_IOCTL_MGA_INIT):
-
-		/* I810 specific ioctls */
-
-	      case IOCTL_NR(DRM_IOCTL_I810_GETBUF):
-	      case IOCTL_NR(DRM_IOCTL_I810_COPY):
-
-	      case IOCTL_NR(MTIOCGET):
-	      case IOCTL_NR(MTIOCPOS):
-	      case IOCTL_NR(MTIOCGETCONFIG):
-	      case IOCTL_NR(MTIOCSETCONFIG):
-	      case IOCTL_NR(PPPIOCSCOMPRESS):
-	      case IOCTL_NR(PPPIOCGIDLE):
-	      case IOCTL_NR(NCP_IOC_GET_FS_INFO_V2):
-	      case IOCTL_NR(NCP_IOC_GETOBJECTNAME):
-	      case IOCTL_NR(NCP_IOC_SETOBJECTNAME):
-	      case IOCTL_NR(NCP_IOC_GETPRIVATEDATA):
-	      case IOCTL_NR(NCP_IOC_SETPRIVATEDATA):
-	      case IOCTL_NR(NCP_IOC_GETMOUNTUID2):
-	      case IOCTL_NR(CAPI_MANUFACTURER_CMD):
-	      case IOCTL_NR(VIDIOCGTUNER):
-	      case IOCTL_NR(VIDIOCSTUNER):
-	      case IOCTL_NR(VIDIOCGWIN):
-	      case IOCTL_NR(VIDIOCSWIN):
-	      case IOCTL_NR(VIDIOCGFBUF):
-	      case IOCTL_NR(VIDIOCSFBUF):
-	      case IOCTL_NR(MGSL_IOCSPARAMS):
-	      case IOCTL_NR(MGSL_IOCGPARAMS):
-	      case IOCTL_NR(ATM_GETNAMES):
-	      case IOCTL_NR(ATM_GETLINKRATE):
-	      case IOCTL_NR(ATM_GETTYPE):
-	      case IOCTL_NR(ATM_GETESI):
-	      case IOCTL_NR(ATM_GETADDR):
-	      case IOCTL_NR(ATM_RSTADDR):
-	      case IOCTL_NR(ATM_ADDADDR):
-	      case IOCTL_NR(ATM_DELADDR):
-	      case IOCTL_NR(ATM_GETCIRANGE):
-	      case IOCTL_NR(ATM_SETCIRANGE):
-	      case IOCTL_NR(ATM_SETESI):
-	      case IOCTL_NR(ATM_SETESIF):
-	      case IOCTL_NR(ATM_GETSTAT):
-	      case IOCTL_NR(ATM_GETSTATZ):
-	      case IOCTL_NR(ATM_GETLOOP):
-	      case IOCTL_NR(ATM_SETLOOP):
-	      case IOCTL_NR(ATM_QUERYLOOP):
-	      case IOCTL_NR(ENI_SETMULT):
-	      case IOCTL_NR(NS_GETPSTAT):
-		/* case IOCTL_NR(NS_SETBUFLEV): This is a duplicate case with ZATM_GETPOOLZ */
-	      case IOCTL_NR(ZATM_GETPOOLZ):
-	      case IOCTL_NR(ZATM_GETPOOL):
-	      case IOCTL_NR(ZATM_SETPOOL):
-	      case IOCTL_NR(ZATM_GETTHIST):
-	      case IOCTL_NR(IDT77105_GETSTAT):
-	      case IOCTL_NR(IDT77105_GETSTATZ):
-	      case IOCTL_NR(IXJCTL_TONE_CADENCE):
-	      case IOCTL_NR(IXJCTL_FRAMES_READ):
-	      case IOCTL_NR(IXJCTL_FRAMES_WRITTEN):
-	      case IOCTL_NR(IXJCTL_READ_WAIT):
-	      case IOCTL_NR(IXJCTL_WRITE_WAIT):
-	      case IOCTL_NR(IXJCTL_DRYBUFFER_READ):
-	      case IOCTL_NR(I2OHRTGET):
-	      case IOCTL_NR(I2OLCTGET):
-	      case IOCTL_NR(I2OPARMSET):
-	      case IOCTL_NR(I2OPARMGET):
-	      case IOCTL_NR(I2OSWDL):
-	      case IOCTL_NR(I2OSWUL):
-	      case IOCTL_NR(I2OSWDEL):
-	      case IOCTL_NR(I2OHTML):
-		break;
-	      default:
-		return sys_ioctl(fd, cmd, (unsigned long)arg);
-
+	set_fs(KERNEL_DS);
+	ret = sys_ioctl(fd,cmd,(unsigned long)&d); 
+	set_fs(oldfs); 
+	if (!ret) { 
+		ret |= put_dirent32(&d[0], (struct linux32_dirent *)ptr); 
+		ret |= put_dirent32(&d[1], ((struct linux32_dirent *)ptr) + 1); 
 	}
-	printk("%x:unimplemented IA32 ioctl system call\n", cmd);
-	return -EINVAL;
+	return ret; 
+} 
+
+/*
+ *  The transform code for the SG_IO ioctl was brazenly lifted from
+ *  the Sparc64 port in the file `arch/sparc64/kernel/ioctl32.c'.
+ *  Thanks to Jakub Jelinek & Eddie C. Dost.
+ */
+typedef struct sg_io_hdr32 {
+	int interface_id;	/* [i] 'S' for SCSI generic (required) */
+	int dxfer_direction;	/* [i] data transfer direction  */
+	char  cmd_len;		/* [i] SCSI command length ( <= 16 bytes) */
+	char  mx_sb_len;		/* [i] max length to write to sbp */
+	short iovec_count;	/* [i] 0 implies no scatter gather */
+	int dxfer_len;		/* [i] byte count of data transfer */
+	int dxferp;		/* [i], [*io] points to data transfer memory
+					      or scatter gather list */
+	int cmdp;		/* [i], [*i] points to command to perform */
+	int sbp;		/* [i], [*o] points to sense_buffer memory */
+	int timeout;		/* [i] MAX_UINT->no timeout (unit: millisec) */
+	int flags;		/* [i] 0 -> default, see SG_FLAG... */
+	int pack_id;		/* [i->o] unused internally (normally) */
+	int usr_ptr;		/* [i->o] unused internally */
+	char  status;		/* [o] scsi status */
+	char  masked_status;	/* [o] shifted, masked scsi status */
+	char  msg_status;	/* [o] messaging level data (optional) */
+	char  sb_len_wr;	/* [o] byte count actually written to sbp */
+	short host_status;	/* [o] errors from host adapter */
+	short driver_status;	/* [o] errors from software driver */
+	int resid;		/* [o] dxfer_len - actual_transferred */
+	int duration;		/* [o] time taken by cmd (unit: millisec) */
+	int info;		/* [o] auxiliary information */
+} sg_io_hdr32_t;  /* 64 bytes long (on IA32) */
+
+static int alloc_sg_iovec(sg_io_hdr_t *sgp, int uptr32)
+{
+	struct compat_iovec *uiov = (struct compat_iovec *) P(uptr32);
+	sg_iovec_t *kiov;
+	int i;
+
+	sgp->dxferp = kmalloc(sgp->iovec_count *
+			      sizeof(sg_iovec_t), GFP_KERNEL);
+	if (!sgp->dxferp)
+		return -ENOMEM;
+	memset(sgp->dxferp, 0,
+	       sgp->iovec_count * sizeof(sg_iovec_t));
+
+	kiov = (sg_iovec_t *) sgp->dxferp;
+	for (i = 0; i < sgp->iovec_count; i++) {
+		int iov_base32;
+		if (__get_user(iov_base32, &uiov->iov_base) ||
+		    __get_user(kiov->iov_len, &uiov->iov_len))
+			return -EFAULT;
+
+		kiov->iov_base = kmalloc(kiov->iov_len, GFP_KERNEL);
+		if (!kiov->iov_base)
+			return -ENOMEM;
+		if (copy_from_user(kiov->iov_base,
+				   (void *) P(iov_base32),
+				   kiov->iov_len))
+			return -EFAULT;
+
+		uiov++;
+		kiov++;
+	}
+
+	return 0;
 }
+
+static int copy_back_sg_iovec(sg_io_hdr_t *sgp, int uptr32)
+{
+	struct compat_iovec *uiov = (struct compat_iovec *) P(uptr32);
+	sg_iovec_t *kiov = (sg_iovec_t *) sgp->dxferp;
+	int i;
+
+	for (i = 0; i < sgp->iovec_count; i++) {
+		int iov_base32;
+
+		if (__get_user(iov_base32, &uiov->iov_base))
+			return -EFAULT;
+
+		if (copy_to_user((void *) P(iov_base32),
+				 kiov->iov_base,
+				 kiov->iov_len))
+			return -EFAULT;
+
+		uiov++;
+		kiov++;
+	}
+
+	return 0;
+}
+
+static void free_sg_iovec(sg_io_hdr_t *sgp)
+{
+	sg_iovec_t *kiov = (sg_iovec_t *) sgp->dxferp;
+	int i;
+
+	for (i = 0; i < sgp->iovec_count; i++) {
+		if (kiov->iov_base) {
+			kfree(kiov->iov_base);
+			kiov->iov_base = NULL;
+		}
+		kiov++;
+	}
+	kfree(sgp->dxferp);
+	sgp->dxferp = NULL;
+}
+
+static int sg_ioctl_trans(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	sg_io_hdr32_t *sg_io32;
+	sg_io_hdr_t sg_io64;
+	int dxferp32, cmdp32, sbp32;
+	mm_segment_t old_fs;
+	int err = 0;
+
+	sg_io32 = (sg_io_hdr32_t *)arg;
+	err = __get_user(sg_io64.interface_id, &sg_io32->interface_id);
+	err |= __get_user(sg_io64.dxfer_direction, &sg_io32->dxfer_direction);
+	err |= __get_user(sg_io64.cmd_len, &sg_io32->cmd_len);
+	err |= __get_user(sg_io64.mx_sb_len, &sg_io32->mx_sb_len);
+	err |= __get_user(sg_io64.iovec_count, &sg_io32->iovec_count);
+	err |= __get_user(sg_io64.dxfer_len, &sg_io32->dxfer_len);
+	err |= __get_user(sg_io64.timeout, &sg_io32->timeout);
+	err |= __get_user(sg_io64.flags, &sg_io32->flags);
+	err |= __get_user(sg_io64.pack_id, &sg_io32->pack_id);
+
+	sg_io64.dxferp = NULL;
+	sg_io64.cmdp = NULL;
+	sg_io64.sbp = NULL;
+
+	err |= __get_user(cmdp32, &sg_io32->cmdp);
+	sg_io64.cmdp = kmalloc(sg_io64.cmd_len, GFP_KERNEL);
+	if (!sg_io64.cmdp) {
+		err = -ENOMEM;
+		goto out;
+	}
+	if (copy_from_user(sg_io64.cmdp,
+			   (void *) P(cmdp32),
+			   sg_io64.cmd_len)) {
+		err = -EFAULT;
+		goto out;
+	}
+
+	err |= __get_user(sbp32, &sg_io32->sbp);
+	sg_io64.sbp = kmalloc(sg_io64.mx_sb_len, GFP_KERNEL);
+	if (!sg_io64.sbp) {
+		err = -ENOMEM;
+		goto out;
+	}
+	if (copy_from_user(sg_io64.sbp,
+			   (void *) P(sbp32),
+			   sg_io64.mx_sb_len)) {
+		err = -EFAULT;
+		goto out;
+	}
+
+	err |= __get_user(dxferp32, &sg_io32->dxferp);
+	if (sg_io64.iovec_count) {
+		int ret;
+
+		if ((ret = alloc_sg_iovec(&sg_io64, dxferp32))) {
+			err = ret;
+			goto out;
+		}
+	} else {
+		sg_io64.dxferp = kmalloc(sg_io64.dxfer_len, GFP_KERNEL);
+		if (!sg_io64.dxferp) {
+			err = -ENOMEM;
+			goto out;
+		}
+		if (copy_from_user(sg_io64.dxferp,
+				   (void *) P(dxferp32),
+				   sg_io64.dxfer_len)) {
+			err = -EFAULT;
+			goto out;
+		}
+	}
+
+	/* Unused internally, do not even bother to copy it over. */
+	sg_io64.usr_ptr = NULL;
+
+	if (err)
+		return -EFAULT;
+
+	old_fs = get_fs();
+	set_fs (KERNEL_DS);
+	err = sys_ioctl (fd, cmd, (unsigned long) &sg_io64);
+	set_fs (old_fs);
+
+	if (err < 0)
+		goto out;
+
+	err = __put_user(sg_io64.pack_id, &sg_io32->pack_id);
+	err |= __put_user(sg_io64.status, &sg_io32->status);
+	err |= __put_user(sg_io64.masked_status, &sg_io32->masked_status);
+	err |= __put_user(sg_io64.msg_status, &sg_io32->msg_status);
+	err |= __put_user(sg_io64.sb_len_wr, &sg_io32->sb_len_wr);
+	err |= __put_user(sg_io64.host_status, &sg_io32->host_status);
+	err |= __put_user(sg_io64.driver_status, &sg_io32->driver_status);
+	err |= __put_user(sg_io64.resid, &sg_io32->resid);
+	err |= __put_user(sg_io64.duration, &sg_io32->duration);
+	err |= __put_user(sg_io64.info, &sg_io32->info);
+	err |= copy_to_user((void *)P(sbp32), sg_io64.sbp, sg_io64.mx_sb_len);
+	if (sg_io64.dxferp) {
+		if (sg_io64.iovec_count)
+			err |= copy_back_sg_iovec(&sg_io64, dxferp32);
+		else
+			err |= copy_to_user((void *)P(dxferp32),
+					    sg_io64.dxferp,
+					    sg_io64.dxfer_len);
+	}
+	if (err)
+		err = -EFAULT;
+
+out:
+	if (sg_io64.cmdp)
+		kfree(sg_io64.cmdp);
+	if (sg_io64.sbp)
+		kfree(sg_io64.sbp);
+	if (sg_io64.dxferp) {
+		if (sg_io64.iovec_count) {
+			free_sg_iovec(&sg_io64);
+		} else {
+			kfree(sg_io64.dxferp);
+		}
+	}
+	return err;
+}
+
+static __inline__ void *alloc_user_space(long len)
+{
+	struct pt_regs	*regs = ((struct pt_regs *)((unsigned long) current +
+						    IA64_STK_OFFSET)) - 1;
+	return (void *)regs->r12 - len; 
+}
+
+struct ifmap32 {
+	u32 mem_start;
+	u32 mem_end;
+	unsigned short base_addr;
+	unsigned char irq;
+	unsigned char dma;
+	unsigned char port;
+};
+
+struct ifreq32 {
+#define IFHWADDRLEN     6
+#define IFNAMSIZ        16
+        union {
+                char    ifrn_name[IFNAMSIZ];            /* if name, e.g. "en0" */
+        } ifr_ifrn;
+        union {
+                struct  sockaddr ifru_addr;
+                struct  sockaddr ifru_dstaddr;
+                struct  sockaddr ifru_broadaddr;
+                struct  sockaddr ifru_netmask;
+                struct  sockaddr ifru_hwaddr;
+                short   ifru_flags;
+                int     ifru_ivalue;
+                int     ifru_mtu;
+                struct  ifmap32 ifru_map;
+                char    ifru_slave[IFNAMSIZ];   /* Just fits the size */
+		char	ifru_newname[IFNAMSIZ];
+                compat_caddr_t ifru_data;
+        } ifr_ifru;
+};
+
+int siocdevprivate_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg)
+{
+	struct ifreq *u_ifreq64;
+	struct ifreq32 *u_ifreq32 = (struct ifreq32 *) arg;
+	char tmp_buf[IFNAMSIZ];
+	void *data64;
+	u32 data32;
+
+	if (copy_from_user(&tmp_buf[0], &(u_ifreq32->ifr_ifrn.ifrn_name[0]),
+			   IFNAMSIZ))
+		return -EFAULT;
+	if (__get_user(data32, &u_ifreq32->ifr_ifru.ifru_data))
+		return -EFAULT;
+	data64 = (void *) P(data32);
+
+	u_ifreq64 = alloc_user_space(sizeof(*u_ifreq64));
+
+	/* Don't check these user accesses, just let that get trapped
+	 * in the ioctl handler instead.
+	 */
+	copy_to_user(&u_ifreq64->ifr_ifrn.ifrn_name[0], &tmp_buf[0], IFNAMSIZ);
+	__put_user(data64, &u_ifreq64->ifr_ifru.ifru_data);
+
+	return sys_ioctl(fd, cmd, (unsigned long) u_ifreq64);
+}
+
+typedef int (* ioctl32_handler_t)(unsigned int, unsigned int, unsigned long, struct file *);
+
+#define COMPATIBLE_IOCTL(cmd)		HANDLE_IOCTL((cmd),sys_ioctl)
+#define HANDLE_IOCTL(cmd,handler)	{ (cmd), (ioctl32_handler_t)(handler), NULL },
+#define IOCTL_TABLE_START \
+	struct ioctl_trans ioctl_start[] = {
+#define IOCTL_TABLE_END \
+	}; struct ioctl_trans ioctl_end[0];
+
+IOCTL_TABLE_START
+#include <linux/compat_ioctl.h>
+HANDLE_IOCTL(VFAT_IOCTL_READDIR_BOTH32, vfat_ioctl32)
+HANDLE_IOCTL(VFAT_IOCTL_READDIR_SHORT32, vfat_ioctl32)
+HANDLE_IOCTL(SG_IO,sg_ioctl_trans)
+IOCTL_TABLE_END

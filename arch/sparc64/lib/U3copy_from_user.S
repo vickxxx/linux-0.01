@@ -1,4 +1,4 @@
-/* $Id: U3copy_from_user.S,v 1.3 2000/11/01 09:29:19 davem Exp $
+/* $Id: U3copy_from_user.S,v 1.4 2002/01/15 07:16:26 davem Exp $
  * U3memcpy.S: UltraSparc-III optimized copy from userspace.
  *
  * Copyright (C) 1999, 2000 David S. Miller (davem@redhat.com)
@@ -7,13 +7,15 @@
 #ifdef __KERNEL__
 #include <asm/visasm.h>
 #include <asm/asi.h>
+#include <asm/dcu.h>
+#include <asm/spitfire.h>
 #undef SMALL_COPY_USES_FPU
 #define EXNV(x,y,a,b)			\
 98:	x,y;				\
 	.section .fixup;		\
 	.align 4;			\
 99:	VISExitHalf;			\
-	ba,pt %xcc, U3cfu_fixup;	\
+	ba U3cfu_fixup;			\
 	 a, b, %o1;			\
 	.section __ex_table;		\
 	.align 4;			\
@@ -25,7 +27,7 @@
 	.section .fixup;		\
 	.align 4;			\
 99:	VISExitHalf;			\
-	ba,pt %xcc, U3cfu_fixup;	\
+	ba U3cfu_fixup;			\
 	 a, b, %o1;			\
 	.section __ex_table;		\
 	.align 4;			\
@@ -39,7 +41,7 @@
 99:	VISExitHalf;			\
 	and %o2, (0x40 - 1), %o1;	\
 	add %o1, %o4, %o1;		\
-	ba,pt %xcc, U3cfu_fixup;	\
+	ba U3cfu_fixup;			\
 	 add %o1, 0x1c0, %o1;		\
 	.section __ex_table;		\
 	.align 4;			\
@@ -54,7 +56,7 @@
 	and %o2, (0x40 - 1), %o1;	\
 	sll %g3, 6, %g3;		\
 	add %o1, 0x80, %o1;		\
-	ba,pt %xcc, U3cfu_fixup;	\
+	ba U3cfu_fixup;			\
 	 add %o1, %g3, %o1;		\
 	.section __ex_table;		\
 	.align 4;			\
@@ -68,7 +70,7 @@
 99:	VISExitHalf;			\
 	and %o2, (0x40 - 1), %o1;	\
 	add %o1, 0x40, %o1;		\
-	ba,pt %xcc, U3cfu_fixup;	\
+	ba U3cfu_fixup;			\
 	 add %o1, %g3, %o1;		\
 	.section __ex_table;		\
 	.align 4;			\
@@ -181,6 +183,16 @@ U3copy_from_user_enter:
 
 	.align		64
 U3copy_from_user_begin:
+#ifdef __KERNEL__
+	.globl		U3copy_from_user_nop_1_6
+U3copy_from_user_nop_1_6:
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g3
+	sethi		%uhi(DCU_PE), %o3
+	sllx		%o3, 32, %o3
+	or		%g3, %o3, %o3
+	stxa		%o3, [%g0] ASI_DCU_CONTROL_REG	! Enable P-cache
+	membar		#Sync
+#endif
 	prefetcha	[%o1 + 0x000] %asi, #one_read	! MS	Group1
 	prefetcha	[%o1 + 0x040] %asi, #one_read	! MS	Group2
 	andn		%o2, (0x40 - 1), %o4		! A0
@@ -321,6 +333,13 @@ U3copy_from_user_loopfini:
 	stda		%f16, [%o0] ASI_BLK_P		! MS
 	add		%o0, 0x40, %o0			! A0
 	add		%o1, 0x40, %o1			! A1
+#ifdef __KERNEL__
+	.globl		U3copy_from_user_nop_2_3
+U3copy_from_user_nop_2_3:
+	mov		PRIMARY_CONTEXT, %o3
+	stxa		%g0, [%o3] ASI_DMMU		! Flush P-cache
+	stxa		%g3, [%g0] ASI_DCU_CONTROL_REG	! Disable P-cache
+#endif
 	membar		#Sync				! MS	Group26 (7-cycle stall)
 
 	/* Now we copy the (len modulo 64) bytes at the end.
@@ -397,7 +416,7 @@ U3copy_from_user_toosmall:
 
 2:	VISEntryHalf					! MS+MS
 
-	/* Compute (len - (len % 8)) into %g2.  This is guarenteed
+	/* Compute (len - (len % 8)) into %g2.  This is guaranteed
 	 * to be nonzero.
 	 */
 	andn		%o2, 0x7, %g2			! A0	Group
@@ -406,7 +425,7 @@ U3copy_from_user_toosmall:
 	 * one 8-byte longword past the end of src.  It actually
 	 * does not, as %g2 is subtracted as loads are done from
 	 * src, so we always stop before running off the end.
-	 * Also, we are guarenteed to have at least 0x10 bytes
+	 * Also, we are guaranteed to have at least 0x10 bytes
 	 * to move here.
 	 */
 	sub		%g2, 0x8, %g2			! A0	Group (reg-dep)

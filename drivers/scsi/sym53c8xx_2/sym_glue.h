@@ -77,12 +77,12 @@
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/string.h>
-#include <linux/slab.h>
 #include <linux/mm.h>
 #include <linux/ioport.h>
 #include <linux/time.h>
 #include <linux/timer.h>
 #include <linux/stat.h>
+#include <linux/interrupt.h>
 
 #include <linux/blk.h>
 
@@ -100,8 +100,6 @@
 
 #include "../scsi.h"
 #include "../hosts.h"
-#include "../constants.h"
-#include "../sd.h"
 
 #include <linux/types.h>
 
@@ -190,7 +188,7 @@ typedef struct sym_sccb *sccb_p;
 typedef struct sym_shcb *shcb_p;
 
 /*
- *  Define a reference to the O/S dependant IO request.
+ *  Define a reference to the O/S dependent IO request.
  */
 typedef Scsi_Cmnd *cam_ccb_p;	/* Generic */
 typedef Scsi_Cmnd *cam_scsiio_p;/* SCSI I/O */
@@ -265,7 +263,7 @@ typedef Scsi_Cmnd *cam_scsiio_p;/* SCSI I/O */
 #endif
 
 /*
- *  If the CPU and the chip use same endian-ness adressing,
+ *  If the CPU and the chip use same endian-ness addressing,
  *  no byte reordering is needed for script patching.
  *  Macro cpu_to_scr() is to be used for script patching.
  *  Macro scr_to_cpu() is to be used for getting a DWORD 
@@ -299,7 +297,7 @@ typedef Scsi_Cmnd *cam_scsiio_p;/* SCSI I/O */
  *  would have been correctly designed for PCI, this 
  *  option would be useless.
  *
- *  If the CPU and the chip use same endian-ness adressing,
+ *  If the CPU and the chip use same endian-ness addressing,
  *  no byte reordering is needed for accessing chip io 
  *  registers. Functions suffixed by '_raw' are assumed 
  *  to access the chip over the PCI without doing byte 
@@ -456,14 +454,14 @@ struct sym_shcb {
 	char		chip_name[8];
 	struct pci_dev	*device;
 
+	struct Scsi_Host *host;
+
 	u_char		bus;		/* PCI BUS number		*/
 	u_char		device_fn;	/* PCI BUS device and function	*/
 
-	spinlock_t	smp_lock;	/* Lock for SMP threading       */
-
 	vm_offset_t	mmio_va;	/* MMIO kernel virtual address	*/
 	vm_offset_t	ram_va;		/* RAM  kernel virtual address	*/
-	u32		io_port;	/* IO port address		*/
+	u_long		io_port;	/* IO port address cookie	*/
 	u_short		io_ws;		/* IO window size		*/
 	int		irq;		/* IRQ number			*/
 

@@ -1,10 +1,6 @@
 /* net/atm/clip.c - RFC1577 Classical IP over ATM */
 
-/* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA 
- *
- * Changes:
- * 	Harald Welte <laforge@gnumonks.org>:
- * 	- backport DaveM's generalized neighbour cache from 2.6.9-rcX */
+/* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
 
 
 #include <linux/config.h>
@@ -28,7 +24,6 @@
 #include <linux/if.h> /* for IFF_UP */
 #include <linux/inetdevice.h>
 #include <linux/bitops.h>
-#include <linux/jhash.h>
 #include <net/route.h> /* for struct rtable and routing */
 #include <net/icmp.h> /* icmp_send */
 #include <asm/param.h> /* for HZ */
@@ -71,7 +66,7 @@ static int to_atmarpd(enum atmarp_ctrl_type type,int itf,unsigned long ip)
 	ctrl->itf_num = itf;
 	ctrl->ip = ip;
 	atm_force_charge(atmarpd,skb->truesize);
-	skb_queue_tail(&atmarpd->sk->receive_queue,skb);
+	skb_queue_tail(&atmarpd->sk->sk_receive_queue, skb);
 	wake_up(&atmarpd->sleep);
 	return 0;
 }
@@ -98,7 +93,6 @@ static void unlink_clip_vcc(struct clip_vcc *clip_vcc)
 		printk(KERN_CRIT "!clip_vcc->entry (clip_vcc %p)\n",clip_vcc);
 		return;
 	}
-	spin_lock_bh(&entry->neigh->dev->xmit_lock);	/* block clip_start_xmit() */
 	entry->neigh->used = jiffies;
 	for (walk = &entry->vccs; *walk; walk = &(*walk)->next)
 		if (*walk == clip_vcc) {
@@ -108,64 +102,76 @@ static void unlink_clip_vcc(struct clip_vcc *clip_vcc)
 			clip_vcc->entry = NULL;
 			if (clip_vcc->xoff)
 				netif_wake_queue(entry->neigh->dev);
-			if (entry->vccs)
-				goto out;
+			if (entry->vccs) return;
 			entry->expires = jiffies-1;
 				/* force resolution or expiration */
 			error = neigh_update(entry->neigh,NULL,NUD_NONE,0,0);
 			if (error)
 				printk(KERN_CRIT "unlink_clip_vcc: "
 				    "neigh_update failed with %d\n",error);
-			goto out;
+			return;
 		}
 	printk(KERN_CRIT "ATMARP: unlink_clip_vcc failed (entry %p, vcc "
 	  "0x%p)\n",entry,clip_vcc);
-out:
-	spin_unlock_bh(&entry->neigh->dev->xmit_lock);
 }
 
-/* The neighbour entry n->lock is held. */
-static int neigh_check_cb(struct neighbour *n)
-{
-	struct atmarp_entry *entry = NEIGH2ENTRY(n);
-	struct clip_vcc *cv;
-
-	for (cv = entry->vccs; cv; cv = cv->next) {
-		unsigned long exp = cv->last_use + cv->idle_timeout;
-
-		if (cv->idle_timeout && time_after(jiffies, exp)) {
-			DPRINTK("releasing vcc %p->%p of entry %p\n",
-				cv, cv->vcc, entry);
-			vcc_release_async(cv->vcc, -ETIMEDOUT);
-		}
-	}
-
-	if (entry->vccs || time_before(jiffies, entry->expires))
-		return 0;
-
-	if (atomic_read(&n->refcnt) > 1) {
-		struct sk_buff *skb;
-
-		DPRINTK("destruction postponed with ref %d\n",
-			atomic_read(&n->refcnt));
-
-		while ((skb = skb_dequeue(&n->arp_queue)) != NULL) 
-			dev_kfree_skb(skb);
-
-		return 0;
-	}
-
-	DPRINTK("expired neigh %p\n",n);
-	return 1;
-}
 
 static void idle_timer_check(unsigned long dummy)
 {
+	int i;
+
+	/*DPRINTK("idle_timer_check\n");*/
 	write_lock(&clip_tbl.lock);
-	__neigh_for_each_release(&clip_tbl, neigh_check_cb);
+	for (i = 0; i <= NEIGH_HASHMASK; i++) {
+		struct neighbour **np;
+
+		for (np = &clip_tbl.hash_buckets[i]; *np;) {
+			struct neighbour *n = *np;
+			struct atmarp_entry *entry = NEIGH2ENTRY(n);
+			struct clip_vcc *clip_vcc;
+
+			write_lock(&n->lock);
+
+			for (clip_vcc = entry->vccs; clip_vcc;
+			    clip_vcc = clip_vcc->next)
+				if (clip_vcc->idle_timeout &&
+				    time_after(jiffies, clip_vcc->last_use+
+				    clip_vcc->idle_timeout)) {
+					DPRINTK("releasing vcc %p->%p of "
+					    "entry %p\n",clip_vcc,clip_vcc->vcc,
+					    entry);
+					vcc_release_async(clip_vcc->vcc,
+							  -ETIMEDOUT);
+				}
+			if (entry->vccs ||
+			    time_before(jiffies, entry->expires)) {
+				np = &n->next;
+				write_unlock(&n->lock);
+				continue;
+			}
+			if (atomic_read(&n->refcnt) > 1) {
+				struct sk_buff *skb;
+
+				DPRINTK("destruction postponed with ref %d\n",
+				    atomic_read(&n->refcnt));
+				while ((skb = skb_dequeue(&n->arp_queue)) !=
+				     NULL) 
+					dev_kfree_skb(skb);
+				np = &n->next;
+				write_unlock(&n->lock);
+				continue;
+			}
+			*np = n->next;
+			DPRINTK("expired neigh %p\n",n);
+			n->dead = 1;
+			write_unlock(&n->lock);
+			neigh_release(n);
+		}
+	}
 	mod_timer(&idle_timer, jiffies+CLIP_CHECK_INTERVAL*HZ);
 	write_unlock(&clip_tbl.lock);
 }
+
 
 static int clip_arp_rcv(struct sk_buff *skb)
 {
@@ -277,14 +283,14 @@ static void clip_neigh_error(struct neighbour *neigh,struct sk_buff *skb)
 
 
 static struct neigh_ops clip_neigh_ops = {
-	family:			AF_INET,
-	destructor:		clip_neigh_destroy,
-	solicit:		clip_neigh_solicit,
-	error_report:		clip_neigh_error,
-	output:			dev_queue_xmit,
-	connected_output:	dev_queue_xmit,
-	hh_output:		dev_queue_xmit,
-	queue_xmit:		dev_queue_xmit,
+	.family =		AF_INET,
+	.destructor =		clip_neigh_destroy,
+	.solicit =		clip_neigh_solicit,
+	.error_report =		clip_neigh_error,
+	.output =		dev_queue_xmit,
+	.connected_output =	dev_queue_xmit,
+	.hh_output =		dev_queue_xmit,
+	.queue_xmit =		dev_queue_xmit,
 };
 
 
@@ -310,43 +316,45 @@ static int clip_constructor(struct neighbour *neigh)
 
 static u32 clip_hash(const void *pkey, const struct net_device *dev)
 {
-	return jhash_2words(*(u32 *)pkey, dev->ifindex, clip_tbl.hash_rnd);
+	u32 hash_val;
+
+	hash_val = *(u32*)pkey;
+	hash_val ^= (hash_val>>16);
+	hash_val ^= hash_val>>8;
+	hash_val ^= hash_val>>3;
+	hash_val = (hash_val^dev->ifindex)&NEIGH_HASHMASK;
+
+	return hash_val;
 }
 
-
 static struct neigh_table clip_tbl = {
-	NULL,			/* next */
-	AF_INET,		/* family */
-	sizeof(struct neighbour)+sizeof(struct atmarp_entry), /* entry_size */
-	4,			/* key_len */
-	clip_hash,
-	clip_constructor,	/* constructor */
-	NULL,			/* pconstructor */
-	NULL,			/* pdestructor */
-	NULL,			/* proxy_redo */
-	"clip_arp_cache",
-	{			/* neigh_parms */
-		NULL,		/* next */
-		NULL,		/* neigh_setup */
-		&clip_tbl,	/* tbl */
-		0,		/* entries */
-		NULL,		/* priv */
-		NULL,		/* sysctl_table */
-		30*HZ,		/* base_reachable_time */
-		1*HZ,		/* retrans_time */
-		60*HZ,		/* gc_staletime */
-		30*HZ,		/* reachable_time */
-		5*HZ,		/* delay_probe_time */
-		3,		/* queue_len */
-		3,		/* ucast_probes */
-		0,		/* app_probes */
-		3,		/* mcast_probes */
-		1*HZ,		/* anycast_delay */
-		(8*HZ)/10,	/* proxy_delay */
-		1*HZ,		/* proxy_qlen */
-		64		/* locktime */
+	.family 	= AF_INET,
+	.entry_size 	= sizeof(struct neighbour)+sizeof(struct atmarp_entry),
+	.key_len 	= 4,
+	.hash 		= clip_hash,
+	.constructor 	= clip_constructor,
+	.id 		= "clip_arp_cache",
+
+	/* parameters are copied from ARP ... */
+	.parms = {
+		.tbl 			= &clip_tbl,
+		.base_reachable_time 	= 30 * HZ,
+		.retrans_time 		= 1 * HZ,
+		.gc_staletime 		= 60 * HZ,
+		.reachable_time 	= 30 * HZ,
+		.delay_probe_time 	= 5 * HZ,
+		.queue_len 		= 3,
+		.ucast_probes 		= 3,
+		.mcast_probes 		= 3,
+		.anycast_delay 		= 1 * HZ,
+		.proxy_delay 		= (8 * HZ) / 10,
+		.proxy_qlen 		= 64,
+		.locktime 		= 1 * HZ,
 	},
-	30*HZ,128,512,1024	/* copied from ARP ... */
+	.gc_interval 	= 30 * HZ,
+	.gc_thresh1 	= 128,
+	.gc_thresh2 	= 512,
+	.gc_thresh3 	= 1024,
 };
 
 
@@ -421,7 +429,7 @@ static int clip_start_xmit(struct sk_buff *skb,struct net_device *dev)
 		memcpy(here,llc_oui,sizeof(llc_oui));
 		((u16 *) here)[3] = skb->protocol;
 	}
-	atomic_add(skb->truesize,&vcc->sk->wmem_alloc);
+	atomic_add(skb->truesize, &vcc->sk->sk_wmem_alloc);
 	ATM_SKB(skb)->atm_options = vcc->atm_options;
 	entry->vccs->last_use = jiffies;
 	DPRINTK("atm_skb(%p)->vcc(%p)->dev(%p)\n",skb,vcc,vcc->dev);
@@ -479,7 +487,7 @@ static int clip_mkip(struct atm_vcc *vcc,int timeout)
 	vcc->push = clip_push;
 	vcc->pop = clip_pop;
 	skb_queue_head_init(&copy);
-	skb_migrate(&vcc->sk->receive_queue,&copy);
+	skb_migrate(&vcc->sk->sk_receive_queue, &copy);
 	/* re-process everything received between connection setup and MKIP */
 	while ((skb = skb_dequeue(&copy)))
 		if (!clip_devs) {
@@ -489,11 +497,9 @@ static int clip_mkip(struct atm_vcc *vcc,int timeout)
 		else {
 			unsigned int len = skb->len;
 
-			skb_get(skb);
 			clip_push(vcc,skb);
 			PRIV(skb->dev)->stats.rx_packets--;
 			PRIV(skb->dev)->stats.rx_bytes -= len;
-			kfree_skb(skb);
 		}
 	return 0;
 }
@@ -505,6 +511,7 @@ static int clip_setentry(struct atm_vcc *vcc,u32 ip)
 	struct atmarp_entry *entry;
 	int error;
 	struct clip_vcc *clip_vcc;
+	struct flowi fl = { .nl_u = { .ip4_u = { .daddr = ip, .tos = 1 } } };
 	struct rtable *rt;
 
 	if (vcc->push != clip_push) {
@@ -521,7 +528,7 @@ static int clip_setentry(struct atm_vcc *vcc,u32 ip)
 		unlink_clip_vcc(clip_vcc);
 		return 0;
 	}
-	error = ip_route_output(&rt,ip,0,1,0);
+	error = ip_route_output_key(&rt,&fl);
 	if (error) return error;
 	neigh = __neigh_lookup(&clip_tbl,&ip,rt->u.dst.dev,1);
 	ip_rt_put(rt);
@@ -686,25 +693,25 @@ static void atmarpd_close(struct atm_vcc *vcc)
 	barrier();
 	unregister_inetaddr_notifier(&clip_inet_notifier);
 	unregister_netdevice_notifier(&clip_dev_notifier);
-	if (skb_peek(&vcc->sk->receive_queue))
+	if (skb_peek(&vcc->sk->sk_receive_queue))
 		printk(KERN_ERR "atmarpd_close: closing with requests "
 		    "pending\n");
-	skb_queue_purge(&vcc->sk->receive_queue);
+	skb_queue_purge(&vcc->sk->sk_receive_queue);
 	DPRINTK("(done)\n");
-	MOD_DEC_USE_COUNT;
+	module_put(THIS_MODULE);
 }
 
 
 static struct atmdev_ops atmarpd_dev_ops = {
-	.close = atmarpd_close,
+	.close = atmarpd_close
 };
 
 
 static struct atm_dev atmarpd_dev = {
-	.ops =		&atmarpd_dev_ops,
-	.type =		"arpd",
-	.number =	999,
-	.lock =		SPIN_LOCK_UNLOCKED
+	.ops =			&atmarpd_dev_ops,
+	.type =			"arpd",
+	.number = 		999,
+	.lock =			SPIN_LOCK_UNLOCKED
 };
 
 
@@ -736,7 +743,6 @@ static int atm_init_atmarp(struct atm_vcc *vcc)
 	for (dev = clip_devs; dev; dev = PRIV(dev)->next)
 		if (dev->flags & IFF_UP)
 			(void) to_atmarpd(act_up,PRIV(dev)->number,0);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -752,7 +758,16 @@ static struct atm_clip_ops __atm_clip_ops = {
 
 static int __init atm_clip_init(void)
 {
-	neigh_table_init(&clip_tbl);
+	/* we should use neigh_table_init() */
+	clip_tbl.lock = RW_LOCK_UNLOCKED;
+	clip_tbl.kmem_cachep = kmem_cache_create(clip_tbl.id,
+	    clip_tbl.entry_size, 0, SLAB_HWCACHE_ALIGN, NULL, NULL);
+
+	/* so neigh_ifdown() doesn't complain */
+	clip_tbl.proxy_timer.data = 0;
+	clip_tbl.proxy_timer.function = 0;
+	init_timer(&clip_tbl.proxy_timer);
+	skb_queue_head_init(&clip_tbl.proxy_queue);
 
 	clip_tbl_hook = &clip_tbl;
 	atm_clip_ops_set(&__atm_clip_ops);
@@ -766,18 +781,7 @@ static void __exit atm_clip_exit(void)
 
 	atm_clip_ops_set(NULL);
 
-	/* First, stop the idle timer, so it stops banging
-	 * on the table.
-	 */
-	if (start_timer == 0)
-		del_timer(&idle_timer);
-
-	/* Next, purge the table, so that the device
-	 * unregister loop below does not hang due to
-	 * device references remaining in the table.
-	 */
 	neigh_ifdown(&clip_tbl, NULL);
-
 	dev = clip_devs;
 	while (dev) {
 		next = PRIV(dev)->next;
@@ -785,9 +789,9 @@ static void __exit atm_clip_exit(void)
 		kfree(dev);
 		dev = next;
 	}
+	if (start_timer == 0) del_timer(&idle_timer);
 
-	/* Now it is safe to fully shutdown whole table. */
-	neigh_table_clear(&clip_tbl);
+	kmem_cache_destroy(clip_tbl.kmem_cachep);
 
 	clip_tbl_hook = NULL;
 }

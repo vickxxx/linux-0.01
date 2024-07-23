@@ -3,10 +3,11 @@
  */
 
 #include <linux/config.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/reiserfs_fs.h>
 #include <linux/string.h>
+#include <linux/buffer_head.h>
 
 #include <stdarg.h>
 
@@ -109,7 +110,7 @@ static void sprintf_de_head( char *buf, struct reiserfs_de_head *deh )
 static void sprintf_item_head (char * buf, struct item_head * ih)
 {
     if (ih) {
-	sprintf (buf, "%s", (ih_version (ih) == ITEM_VERSION_2) ? "*NEW* " : "*OLD*");
+	sprintf (buf, "%s", (ih_version (ih) == KEY_FORMAT_3_6) ? "*3.6* " : "*3.5*");
 	sprintf_le_key (buf + strlen (buf), &(ih->ih_key));
 	sprintf (buf + strlen (buf), ", item_len %d, item_location %d, "
 		 "free_space(entry_count) %d",
@@ -138,8 +139,12 @@ static void sprintf_block_head (char * buf, struct buffer_head * bh)
 
 static void sprintf_buffer_head (char * buf, struct buffer_head * bh) 
 {
-  sprintf (buf, "dev %s, size %d, blocknr %ld, count %d, list %d, state 0x%lx, page %p, (%s, %s, %s)",
-	   kdevname (bh->b_dev), bh->b_size, bh->b_blocknr, atomic_read (&(bh->b_count)), bh->b_list,
+  char b[BDEVNAME_SIZE];
+
+  sprintf (buf, "dev %s, size %d, blocknr %llu, count %d, state 0x%lx, page %p, (%s, %s, %s)",
+	   bdevname (bh->b_bdev, b), bh->b_size,
+	   (unsigned long long)bh->b_blocknr,
+	   atomic_read (&(bh->b_count)),
 	   bh->b_state, bh->b_page,
 	   buffer_uptodate (bh) ? "UPTODATE" : "!UPTODATE",
 	   buffer_dirty (bh) ? "DIRTY" : "CLEAN",
@@ -159,7 +164,7 @@ static char * is_there_reiserfs_struct (char * fmt, int * what, int * skip)
 
   *skip = 0;
   
-  while ((k = strstr (k, "%")) != NULL)
+  while ((k = strchr (k, '%')) != NULL)
   {
     if (k[1] == 'k' || k[1] == 'K' || k[1] == 'h' || k[1] == 't' ||
 	      k[1] == 'z' || k[1] == 'b' || k[1] == 'y' || k[1] == 'a' ) {
@@ -335,7 +340,7 @@ void reiserfs_panic (struct super_block * sb, const char * fmt, ...)
 
   /* this is not actually called, but makes reiserfs_panic() "noreturn" */
   panic ("REISERFS: panic (device %s): %s\n",
-	 sb ? kdevname(sb->s_dev) : "sb == 0", error_buf);
+	 reiserfs_bdevname (sb), error_buf);
 }
 
 
@@ -365,7 +370,7 @@ void print_path (struct tree_balance * tb, struct path * path)
     if (tb) {
 	while (tb->insert_size[h]) {
 	    bh = PATH_H_PBUFFER (path, h);
-	    printk ("block %lu (level=%d), position %d\n", bh ? bh->b_blocknr : 0,
+	    printk ("block %llu (level=%d), position %d\n", bh ? (unsigned long long)bh->b_blocknr : 0LL,
 		    bh ? B_LEVEL (bh) : 0, PATH_H_POSITION (path, h));
 	    h ++;
 	}
@@ -375,8 +380,8 @@ void print_path (struct tree_balance * tb, struct path * path)
       printk ("Offset    Bh     (b_blocknr, b_count) Position Nr_item\n");
       while ( offset > ILLEGAL_PATH_ELEMENT_OFFSET ) {
 	  bh = PATH_OFFSET_PBUFFER (path, offset);
-	  printk ("%6d %10p (%9lu, %7d) %8d %7d\n", offset, 
-		  bh, bh ? bh->b_blocknr : 0, bh ? atomic_read (&(bh->b_count)) : 0,
+	  printk ("%6d %10p (%9llu, %7d) %8d %7d\n", offset, 
+		  bh, bh ? (unsigned long long)bh->b_blocknr : 0LL, bh ? atomic_read (&(bh->b_count)) : 0,
 		  PATH_OFFSET_POSITION (path, offset), bh ? B_NR_ITEMS (bh) : -1);
 	  
 	  offset --;
@@ -477,26 +482,39 @@ static int print_leaf (struct buffer_head * bh, int print_mode, int first, int l
     return 0;
 }
 
+char * reiserfs_hashname(int code)
+{
+    if ( code == YURA_HASH)
+	return "rupasov";
+    if ( code == TEA_HASH)
+	return "tea";
+    if ( code == R5_HASH)
+	return "r5";
+
+    return "unknown";
+}
+
 /* return 1 if this is not super block */
 static int print_super_block (struct buffer_head * bh)
 {
     struct reiserfs_super_block * rs = (struct reiserfs_super_block *)(bh->b_data);
     int skipped, data_blocks;
     char *version;
-    
+    char b[BDEVNAME_SIZE];
 
-    if (strncmp (rs->s_magic,  REISERFS_SUPER_MAGIC_STRING,
-                 strlen ( REISERFS_SUPER_MAGIC_STRING)) == 0) {
+    if (is_reiserfs_3_5(rs)) {
         version = "3.5";
-    } else if( strncmp (rs->s_magic,  REISER2FS_SUPER_MAGIC_STRING,
-                        strlen ( REISER2FS_SUPER_MAGIC_STRING)) == 0) {
+    } else if (is_reiserfs_3_6(rs)) {
         version = "3.6";
+    } else if (is_reiserfs_jr(rs)) {
+      version = ((sb_version(rs) == REISERFS_VERSION_2) ?
+ 		 "3.6" : "3.5");  
     } else {
 	return 1;
     }
 
-    printk ("%s\'s super block in block %ld\n======================\n",
-            kdevname (bh->b_dev), bh->b_blocknr);
+    printk ("%s\'s super block is in block %llu\n", bdevname (bh->b_bdev, b),
+            (unsigned long long)bh->b_blocknr);
     printk ("Reiserfs version %s\n", version );
     printk ("Block count %u\n", sb_block_count(rs));
     printk ("Blocksize %d\n", sb_blocksize(rs));
@@ -505,38 +523,36 @@ static int print_super_block (struct buffer_head * bh)
     // someone stores reiserfs super block in some data block ;)
 //    skipped = (bh->b_blocknr * bh->b_size) / sb_blocksize(rs);
     skipped = bh->b_blocknr;
-    data_blocks = sb_block_count(rs) - skipped - 1 -
-                  sb_bmap_nr(rs) - (sb_orig_journal_size(rs) + 1) -
-                  sb_free_blocks(rs);
-    printk ("Busy blocks (skipped %d, bitmaps - %d, journal blocks - %d\n"
-	    "1 super blocks, %d data blocks\n", 
-	    skipped, sb_bmap_nr(rs), 
-	    (sb_orig_journal_size(rs) + 1), data_blocks);
+    data_blocks = sb_block_count(rs) - skipped - 1 - sb_bmap_nr(rs) -
+	    (!is_reiserfs_jr(rs) ? sb_jp_journal_size(rs) + 1 : sb_reserved_for_journal(rs)) -	    
+	    sb_free_blocks(rs);
+    printk ("Busy blocks (skipped %d, bitmaps - %d, journal (or reserved) blocks - %d\n"
+	    "1 super block, %d data blocks\n", 
+	    skipped, sb_bmap_nr(rs), (!is_reiserfs_jr(rs) ? (sb_jp_journal_size(rs) + 1) :
+				      sb_reserved_for_journal(rs)) , data_blocks);
     printk ("Root block %u\n", sb_root_block(rs));
-    printk ("Journal block (first) %d\n", sb_journal_block(rs));
-    printk ("Journal dev %d\n", sb_journal_dev(rs));
-    printk ("Journal orig size %d\n", sb_orig_journal_size(rs));
-    printk ("Filesystem state %s\n", 
-	    (sb_state(rs) == REISERFS_VALID_FS) ? "VALID" : "ERROR");
+    printk ("Journal block (first) %d\n", sb_jp_journal_1st_block(rs));
+    printk ("Journal dev %d\n", sb_jp_journal_dev(rs));
+    printk ("Journal orig size %d\n", sb_jp_journal_size(rs));
+    printk ("FS state %d\n", sb_fs_state(rs));
     printk ("Hash function \"%s\"\n",
-            sb_hash_function_code(rs) == TEA_HASH ? "tea" :
-	    ( sb_hash_function_code(rs) == YURA_HASH ? "rupasov" : (sb_hash_function_code(rs) == R5_HASH ? "r5" : "unknown")));
-
+	    reiserfs_hashname(sb_hash_function_code(rs)));
+    
     printk ("Tree height %d\n", sb_tree_height(rs));
     return 0;
 }
-
 
 static int print_desc_block (struct buffer_head * bh)
 {
     struct reiserfs_journal_desc * desc;
 
-    desc = (struct reiserfs_journal_desc *)(bh->b_data);
-    if (memcmp(desc->j_magic, JOURNAL_DESC_MAGIC, 8))
+    if (memcmp(get_journal_desc_magic (bh), JOURNAL_DESC_MAGIC, 8))
 	return 1;
 
-    printk ("Desc block %lu (j_trans_id %d, j_mount_id %d, j_len %d)",
-	    bh->b_blocknr, desc->j_trans_id, desc->j_mount_id, desc->j_len);
+    desc = (struct reiserfs_journal_desc *)(bh->b_data);
+    printk ("Desc block %llu (j_trans_id %d, j_mount_id %d, j_len %d)",
+	    (unsigned long long)bh->b_blocknr, get_desc_trans_id (desc), get_desc_mount_id (desc),
+	    get_desc_trans_len (desc));
 
     return 0;
 }
@@ -561,7 +577,7 @@ void print_block (struct buffer_head * bh, ...)//int print_mode, int first, int 
 	if (print_internal (bh, first, last))
 	    if (print_super_block (bh))
 		if (print_desc_block (bh))
-		    printk ("Block %ld contains unformatted data\n", bh->b_blocknr);
+		    printk ("Block %llu contains unformatted data\n", (unsigned long long)bh->b_blocknr);
 }
 
 
@@ -583,7 +599,7 @@ void store_print_tb (struct tree_balance * tb)
 	     "MODE=%c, ITEM_POS=%d POS_IN_ITEM=%d\n" 
 	     "=====================================================================\n"
 	     "* h *    S    *    L    *    R    *   F   *   FL  *   FR  *  CFL  *  CFR  *\n",
-	     tb->tb_sb->u.reiserfs_sb.s_do_balance,
+	     REISERFS_SB(tb->tb_sb)->s_do_balance,
 	     tb->tb_mode, PATH_LAST_POSITION (tb->tb_path), tb->tb_path->pos_in_item);
   
     for (h = 0; h < sizeof(tb->insert_size) / sizeof (tb->insert_size[0]); h ++) {
@@ -596,19 +612,19 @@ void store_print_tb (struct tree_balance * tb)
 	    tbFh = 0;
 	}
 	sprintf (print_tb_buf + strlen (print_tb_buf),
-		 "* %d * %3ld(%2d) * %3ld(%2d) * %3ld(%2d) * %5ld * %5ld * %5ld * %5ld * %5ld *\n",
+		 "* %d * %3lld(%2d) * %3lld(%2d) * %3lld(%2d) * %5lld * %5lld * %5lld * %5lld * %5lld *\n",
 		 h, 
-		 (tbSh) ? (tbSh->b_blocknr):(-1),
+		 (tbSh) ? (long long)(tbSh->b_blocknr):(-1LL),
 		 (tbSh) ? atomic_read (&(tbSh->b_count)) : -1,
-		 (tb->L[h]) ? (tb->L[h]->b_blocknr):(-1),
+		 (tb->L[h]) ? (long long)(tb->L[h]->b_blocknr):(-1LL),
 		 (tb->L[h]) ? atomic_read (&(tb->L[h]->b_count)) : -1,
-		 (tb->R[h]) ? (tb->R[h]->b_blocknr):(-1),
+		 (tb->R[h]) ? (long long)(tb->R[h]->b_blocknr):(-1LL),
 		 (tb->R[h]) ? atomic_read (&(tb->R[h]->b_count)) : -1,
-		 (tbFh) ? (tbFh->b_blocknr):(-1),
-		 (tb->FL[h]) ? (tb->FL[h]->b_blocknr):(-1),
-		 (tb->FR[h]) ? (tb->FR[h]->b_blocknr):(-1),
-		 (tb->CFL[h]) ? (tb->CFL[h]->b_blocknr):(-1),
-		 (tb->CFR[h]) ? (tb->CFR[h]->b_blocknr):(-1));
+		 (tbFh) ? (long long)(tbFh->b_blocknr):(-1LL),
+		 (tb->FL[h]) ? (long long)(tb->FL[h]->b_blocknr):(-1LL),
+		 (tb->FR[h]) ? (long long)(tb->FR[h]->b_blocknr):(-1LL),
+		 (tb->CFL[h]) ? (long long)(tb->CFL[h]->b_blocknr):(-1LL),
+		 (tb->CFR[h]) ? (long long)(tb->CFR[h]->b_blocknr):(-1LL));
     }
 
     sprintf (print_tb_buf + strlen (print_tb_buf), 
@@ -635,7 +651,7 @@ void store_print_tb (struct tree_balance * tb)
     h = 0;
     for (i = 0; i < sizeof (tb->FEB) / sizeof (tb->FEB[0]); i ++)
 	sprintf (print_tb_buf + strlen (print_tb_buf),
-		 "%p (%lu %d)%s", tb->FEB[i], tb->FEB[i] ? tb->FEB[i]->b_blocknr : 0,
+		 "%p (%llu %d)%s", tb->FEB[i], tb->FEB[i] ? (unsigned long long)tb->FEB[i]->b_blocknr : 0ULL,
 		 tb->FEB[i] ? atomic_read (&(tb->FEB[i]->b_count)) : 0, 
 		 (i == sizeof (tb->FEB) / sizeof (tb->FEB[0]) - 1) ? "\n" : ", ");
 
@@ -708,9 +724,9 @@ void print_statistics (struct super_block * s)
   /*
   printk ("reiserfs_put_super: session statistics: balances %d, fix_nodes %d, \
 bmap with search %d, without %d, dir2ind %d, ind2dir %d\n",
-	  s->u.reiserfs_sb.s_do_balance, s->u.reiserfs_sb.s_fix_nodes,
-	  s->u.reiserfs_sb.s_bmaps, s->u.reiserfs_sb.s_bmaps_without_search,
-	  s->u.reiserfs_sb.s_direct2indirect, s->u.reiserfs_sb.s_indirect2direct);
+	  REISERFS_SB(s)->s_do_balance, REISERFS_SB(s)->s_fix_nodes,
+	  REISERFS_SB(s)->s_bmaps, REISERFS_SB(s)->s_bmaps_without_search,
+	  REISERFS_SB(s)->s_direct2indirect, REISERFS_SB(s)->s_indirect2direct);
   */
 
 }

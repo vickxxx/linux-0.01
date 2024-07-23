@@ -16,7 +16,7 @@
    many places throughout the kernel to size static arrays.  That's ok,
    we'll use alpha_mv.nr_irqs when we want the real thing.  */
 
-# define NR_IRQS	2048 /* enuff for WILDFIRE with 8 QBBs */
+# define NR_IRQS	(32768 + 16) 	/* marvel - 32 pids*/
 
 #elif defined(CONFIG_ALPHA_CABRIOLET) || \
       defined(CONFIG_ALPHA_EB66P)     || \
@@ -31,7 +31,6 @@
 # define NR_IRQS	32
 
 #elif defined(CONFIG_ALPHA_ALCOR)     || \
-      defined(CONFIG_ALPHA_XLT)       || \
       defined(CONFIG_ALPHA_MIATA)     || \
       defined(CONFIG_ALPHA_RUFFIAN)   || \
       defined(CONFIG_ALPHA_RX164)     || \
@@ -43,6 +42,7 @@
 # define NR_IRQS	40
 
 #elif defined(CONFIG_ALPHA_DP264) || \
+      defined(CONFIG_ALPHA_LYNX)  || \
       defined(CONFIG_ALPHA_SHARK) || \
       defined(CONFIG_ALPHA_EIGER)
 # define NR_IRQS	64
@@ -57,11 +57,14 @@
 #elif defined(CONFIG_ALPHA_WILDFIRE)
 # define NR_IRQS	2048 /* enuff for 8 QBBs */
 
+#elif defined(CONFIG_ALPHA_MARVEL)
+# define NR_IRQS	(32768 + 16) 	/* marvel - 32 pids*/
+
 #else /* everyone else */
 # define NR_IRQS	16
 #endif
 
-static __inline__ int irq_cannonicalize(int irq)
+static __inline__ int irq_canonicalize(int irq)
 {
 	/*
 	 * XXX is this true for all Alpha's?  The old serial driver

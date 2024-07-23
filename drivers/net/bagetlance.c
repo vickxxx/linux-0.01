@@ -15,25 +15,20 @@
 static char *version = "bagetlance.c: v1.1 11/10/98\n";
 
 #include <linux/module.h>
-
 #include <linux/stddef.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
-
-#include <asm/irq.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 
+#include <asm/irq.h>
+#include <asm/bitops.h>
+#include <asm/io.h>
 #include <asm/baget/baget.h>
 
 #define BAGET_LANCE_IRQ  BAGET_IRQ_MASK(0xdf)
@@ -335,7 +330,7 @@ static int lance_probe1( struct net_device *dev, struct lance_addr *init_rec );
 static int lance_open( struct net_device *dev );
 static void lance_init_ring( struct net_device *dev );
 static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev );
-static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp );
+static irqreturn_t lance_interrupt( int irq, void *dev_id, struct pt_regs *fp );
 static int lance_rx( struct net_device *dev );
 static int lance_close( struct net_device *dev );
 static struct net_device_stats *lance_get_stats( struct net_device *dev );
@@ -835,6 +830,18 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 	struct lance_tx_head *head;
 	unsigned long flags;
 
+	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
+	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
+	/* PAM-Card has a bug: Can only send packets with even number of bytes! */
+	if (lp->cardtype == PAM_CARD && (len & 1))
+		++len;
+
+	if (len > skb->len) {
+		skb = skb_padto(skb, len);
+		if (skb == NULL)
+			return 0;
+	}	
+
 	/* Transmitter timeout, serious problems. */
 	if (dev->tbusy) {
 		int tickssofar = jiffies - dev->trans_start;
@@ -921,12 +928,6 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 	 * last.
 	 */
 
-	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
-	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
-	/* PAM-Card has a bug: Can only send packets with even number of bytes! */
-	if (lp->cardtype == PAM_CARD && (len & 1))
-		++len;
-
 	head->length = -len;
 	head->misc = 0;
 	lp->memcpy_f( PKTBUF_ADDR(head), (void *)skb->data, skb->len );
@@ -964,16 +965,17 @@ static int lance_start_xmit( struct sk_buff *skb, struct net_device *dev )
 
 /* The LANCE interrupt handler. */
 
-static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
 {
 	struct net_device *dev = dev_id;
 	struct lance_private *lp;
 	struct lance_ioreg	 *IO;
 	int csr0, boguscnt = 10;
+	int handled = 0;
 
 	if (dev == NULL) {
 		DPRINTK( 1, ( "lance_interrupt(): interrupt for unknown device.\n" ));
-		return;
+		return IRQ_NONE;
 	}
 
 	lp = (struct lance_private *)dev->priv;
@@ -991,6 +993,7 @@ static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
 
 	while( ((csr0 = DREG) & (CSR0_ERR | CSR0_TINT | CSR0_RINT)) &&
 		   --boguscnt >= 0) {
+		handled = 1;
 		/* Acknowledge all of the current interrupt sources ASAP. */
 		DREG = csr0 & ~(CSR0_INIT | CSR0_STRT | CSR0_STOP |
 									CSR0_TDMD | CSR0_INEA);
@@ -1082,7 +1085,7 @@ static void lance_interrupt( int irq, void *dev_id, struct pt_regs *fp)
 	DPRINTK( 2, ( "%s: exiting interrupt, csr0=%#04x.\n",
 				  dev->name, DREG ));
 	dev->interrupt = 0;
-	return;
+	return IRQ_RETVAL(handled);
 }
 
 

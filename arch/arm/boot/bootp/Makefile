@@ -2,25 +2,21 @@
 # linux/arch/arm/boot/bootp/Makefile
 #
 
-ZSYSTEM		=$(TOPDIR)/arch/arm/boot/zImage
-ZLDFLAGS	=-p -X -T bootp.lds \
+ZSYSTEM		= arch/arm/boot/zImage
+ZLDFLAGS	=-p -X -T $(obj)/bootp.lds \
 		 --defsym initrd_addr=$(INITRD_PHYS) \
-		 --defsym initrd_virt=$(INITRD_VIRT) \
-		 --defsym params=$(PARAMS_PHYS) \
-		 --defsym kernel_addr=$(ZTEXTADDR)
+		 --defsym params=$(PARAMS_PHYS)
 
-all:		bootp
+extra-y := bootp
 
 # Note that bootp.lds picks up kernel.o and initrd.o
-bootp:		init.o kernel.o initrd.o bootp.lds
-		$(LD) $(ZLDFLAGS) -o $@ init.o
+$(obj)/bootp:	$(addprefix $(obj)/,init.o kernel.o initrd.o bootp.lds)
+		$(LD) $(ZLDFLAGS) -o $@ $(obj)/init.o
 
-kernel.o:	$(ZSYSTEM)
+$(obj)/kernel.o: $(ZSYSTEM)
 		$(LD) -r -s -o $@ -b binary $(ZSYSTEM)
 
-initrd.o:	$(INITRD)
+$(obj)/initrd.o: $(INITRD)
 		$(LD) -r -s -o $@ -b binary $(INITRD)
 
 .PHONY:		$(INITRD) $(ZSYSTEM)
-
-clean:;		$(RM) bootp

@@ -2,6 +2,7 @@
 #define _LINUX_SEM_H
 
 #include <linux/ipc.h>
+#include <asm/atomic.h>
 
 /* semop flags */
 #define SEM_UNDO        0x1000  /* undo the operation on exit */
@@ -108,7 +109,6 @@ struct sem_queue {
 	int			id;	 /* internal sem id */
 	struct sembuf *		sops;	 /* array of pending operations */
 	int			nsops;	 /* number of operations */
-	int			alter;	 /* operation will alter semaphore */
 };
 
 /* Each task has a list of undo requests. They are executed automatically
@@ -121,9 +121,26 @@ struct sem_undo {
 	short *			semadj;		/* array of adjustments, one per semaphore */
 };
 
+/* sem_undo_list controls shared access to the list of sem_undo structures
+ * that may be shared among all a CLONE_SYSVSEM task group.
+ */ 
+struct sem_undo_list {
+	atomic_t	refcnt;
+	spinlock_t	lock;
+	struct sem_undo	*proc_list;
+};
+
+struct sysv_sem {
+	struct sem_undo_list *undo_list;
+};
+
 asmlinkage long sys_semget (key_t key, int nsems, int semflg);
-asmlinkage long sys_semop (int semid, struct sembuf *sops, unsigned nsops);
+asmlinkage long sys_semop (int semid, struct sembuf __user *sops, unsigned nsops);
 asmlinkage long sys_semctl (int semid, int semnum, int cmd, union semun arg);
+asmlinkage long sys_semtimedop(int semid, struct sembuf __user *sops,
+			unsigned nsops, const struct timespec __user *timeout);
+
+void exit_sem(struct task_struct *p);
 
 #endif /* __KERNEL__ */
 

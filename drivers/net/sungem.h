@@ -1,4 +1,4 @@
-/* $Id: sungem.h,v 1.8 2001/10/17 05:55:39 davem Exp $
+/* $Id: sungem.h,v 1.10.2.4 2002/03/11 08:54:48 davem Exp $
  * sungem.h: Definitions for Sun GEM ethernet driver.
  *
  * Copyright (C) 2000 David S. Miller (davem@redhat.com)
@@ -94,6 +94,8 @@
 #define GREG_SWRST_TXRST	0x00000001	/* TX Software Reset		*/
 #define GREG_SWRST_RXRST	0x00000002	/* RX Software Reset		*/
 #define GREG_SWRST_RSTOUT	0x00000004	/* Force RST# pin active	*/
+#define GREG_SWRST_CACHESIZE	0x00ff0000	/* RIO only: cache line size	*/
+#define GREG_SWRST_CACHE_SHIFT	16
 
 /* TX DMA Registers */
 #define TXDMA_KICK	0x2000UL	/* TX Kick Register		*/
@@ -560,7 +562,7 @@
  */
 
 /* Statistics Registers.  All of these registers are 16-bits and
- * track occurances of a specific event.  GEM can be configured
+ * track occurrences of a specific event.  GEM can be configured
  * to interrupt the host cpu when any of these counters overflow.
  * They should all be explicitly initialized to zero when the interface
  * is brought up.
@@ -753,64 +755,38 @@
 #define PROM_SIZE	0x0fffffUL	/* Size of ROM			*/
 #define PROM_END	0x200000UL	/* End of ROM			*/
 
-/* MII phy registers */
-#define PHY_CTRL	0x00
-#define PHY_STAT	0x01
-#define PHY_ID0		0x02
-#define PHY_ID1		0x03
-#define PHY_ADV		0x04
-#define PHY_LPA		0x05
+/* MII definitions missing from mii.h */
 
-#define PHY_CTRL_SPD2	0x0040		/* Gigabit enable? (bcm5411)	*/
-#define PHY_CTRL_FDPLX	0x0100		/* Full duplex			*/
-#define PHY_CTRL_ISO	0x0400		/* Isloate MII from PHY		*/
-#define PHY_CTRL_ANRES	0x0200		/* Auto-negotiation restart	*/
-#define PHY_CTRL_ANENAB	0x1000		/* Auto-negotiation enable	*/
-#define PHY_CTRL_SPD100	0x2000		/* Select 100Mbps		*/
-#define PHY_CTRL_RST	0x8000		/* Reset PHY			*/
-
-#define PHY_STAT_LSTAT	0x0004		/* Link status			*/
-#define PHY_STAT_ANEGC	0x0020		/* Auto-negotiation complete	*/
-
-#define PHY_ADV_10HALF	0x0020
-#define PHY_ADV_10FULL	0x0040
-#define PHY_ADV_100HALF	0x0080
-#define PHY_ADV_100FULL	0x0100
-
-#define PHY_LPA_10HALF	0x0020
-#define PHY_LPA_10FULL	0x0040
-#define PHY_LPA_100HALF	0x0080
-#define PHY_LPA_100FULL	0x0100
-#define PHY_LPA_PAUSE	0x0400
-#define PHY_LPA_FAULT	0x2000
+#define BMCR_SPD2	0x0040		/* Gigabit enable? (bcm5411)	*/
+#define LPA_PAUSE	0x0400
 
 /* More PHY registers (specific to Broadcom models) */
 
 /* MII BCM5201 MULTIPHY interrupt register */
-#define PHY_BCM5201_INTERRUPT			0x1A
-#define PHY_BCM5201_INTERRUPT_INTENABLE		0x4000
+#define MII_BCM5201_INTERRUPT			0x1A
+#define MII_BCM5201_INTERRUPT_INTENABLE		0x4000
 
-#define PHY_BCM5201_AUXMODE2			0x1B
-#define PHY_BCM5201_AUXMODE2_LOWPOWER		0x0008
+#define MII_BCM5201_AUXMODE2			0x1B
+#define MII_BCM5201_AUXMODE2_LOWPOWER		0x0008
 
-#define PHY_BCM5201_MULTIPHY                    0x1E
+#define MII_BCM5201_MULTIPHY                    0x1E
 
 /* MII BCM5201 MULTIPHY register bits */
-#define PHY_BCM5201_MULTIPHY_SERIALMODE         0x0002
-#define PHY_BCM5201_MULTIPHY_SUPERISOLATE       0x0008
+#define MII_BCM5201_MULTIPHY_SERIALMODE         0x0002
+#define MII_BCM5201_MULTIPHY_SUPERISOLATE       0x0008
 
 /* MII BCM5400 1000-BASET Control register */
-#define PHY_BCM5400_GB_CONTROL			0x09
-#define PHY_BCM5400_GB_CONTROL_FULLDUPLEXCAP	0x0200
+#define MII_BCM5400_GB_CONTROL			0x09
+#define MII_BCM5400_GB_CONTROL_FULLDUPLEXCAP	0x0200
 
 /* MII BCM5400 AUXCONTROL register */
-#define PHY_BCM5400_AUXCONTROL                  0x18
-#define PHY_BCM5400_AUXCONTROL_PWR10BASET       0x0004
+#define MII_BCM5400_AUXCONTROL                  0x18
+#define MII_BCM5400_AUXCONTROL_PWR10BASET       0x0004
 
 /* MII BCM5400 AUXSTATUS register */
-#define PHY_BCM5400_AUXSTATUS                   0x19
-#define PHY_BCM5400_AUXSTATUS_LINKMODE_MASK     0x0700
-#define PHY_BCM5400_AUXSTATUS_LINKMODE_SHIFT    8  
+#define MII_BCM5400_AUXSTATUS                   0x19
+#define MII_BCM5400_AUXSTATUS_LINKMODE_MASK     0x0700
+#define MII_BCM5400_AUXSTATUS_LINKMODE_SHIFT    8  
 
 /* When it can, GEM internally caches 4 aligned TX descriptors
  * at a time, so that it can use full cacheline DMA reads.
@@ -829,14 +805,14 @@ struct gem_txd {
 	u64	buffer;
 };
 
-#define TXDCTRL_BUFSZ	0x0000000000007fff	/* Buffer Size		*/
-#define TXDCTRL_CSTART	0x00000000001f8000	/* CSUM Start Offset	*/
-#define TXDCTRL_COFF	0x000000001fe00000	/* CSUM Stuff Offset	*/
-#define TXDCTRL_CENAB	0x0000000020000000	/* CSUM Enable		*/
-#define TXDCTRL_EOF	0x0000000040000000	/* End of Frame		*/
-#define TXDCTRL_SOF	0x0000000080000000	/* Start of Frame	*/
-#define TXDCTRL_INTME	0x0000000100000000	/* "Interrupt Me"	*/
-#define TXDCTRL_NOCRC	0x0000000200000000	/* No CRC Present	*/
+#define TXDCTRL_BUFSZ	0x0000000000007fffULL	/* Buffer Size		*/
+#define TXDCTRL_CSTART	0x00000000001f8000ULL	/* CSUM Start Offset	*/
+#define TXDCTRL_COFF	0x000000001fe00000ULL	/* CSUM Stuff Offset	*/
+#define TXDCTRL_CENAB	0x0000000020000000ULL	/* CSUM Enable		*/
+#define TXDCTRL_EOF	0x0000000040000000ULL	/* End of Frame		*/
+#define TXDCTRL_SOF	0x0000000080000000ULL	/* Start of Frame	*/
+#define TXDCTRL_INTME	0x0000000100000000ULL	/* "Interrupt Me"	*/
+#define TXDCTRL_NOCRC	0x0000000200000000ULL	/* No CRC Present	*/
 
 /* GEM requires that RX descriptors are provided four at a time,
  * aligned.  Also, the RX ring may not wrap around.  This means that
@@ -854,7 +830,7 @@ struct gem_txd {
  * RX Kick register) by the driver it must make sure the buffers are
  * truly ready and that the ownership bits are set properly.
  *
- * Even though GEM modifies the RX descriptors, it guarentees that the
+ * Even though GEM modifies the RX descriptors, it guarantees that the
  * buffer DMA address field will stay the same when it performs these
  * updates.  Therefore it can be used to keep track of DMA mappings
  * by the host driver just as in the TX descriptor case above.
@@ -864,13 +840,13 @@ struct gem_rxd {
 	u64	buffer;
 };
 
-#define RXDCTRL_TCPCSUM	0x000000000000ffff	/* TCP Pseudo-CSUM	*/
-#define RXDCTRL_BUFSZ	0x000000007fff0000	/* Buffer Size		*/
-#define RXDCTRL_OWN	0x0000000080000000	/* GEM owns this entry	*/
-#define RXDCTRL_HASHVAL	0x0ffff00000000000	/* Hash Value		*/
-#define RXDCTRL_HPASS	0x1000000000000000	/* Passed Hash Filter	*/
-#define RXDCTRL_ALTMAC	0x2000000000000000	/* Matched ALT MAC	*/
-#define RXDCTRL_BAD	0x4000000000000000	/* Frame has bad CRC	*/
+#define RXDCTRL_TCPCSUM	0x000000000000ffffULL	/* TCP Pseudo-CSUM	*/
+#define RXDCTRL_BUFSZ	0x000000007fff0000ULL	/* Buffer Size		*/
+#define RXDCTRL_OWN	0x0000000080000000ULL	/* GEM owns this entry	*/
+#define RXDCTRL_HASHVAL	0x0ffff00000000000ULL	/* Hash Value		*/
+#define RXDCTRL_HPASS	0x1000000000000000ULL	/* Passed Hash Filter	*/
+#define RXDCTRL_ALTMAC	0x2000000000000000ULL	/* Matched ALT MAC	*/
+#define RXDCTRL_BAD	0x4000000000000000ULL	/* Frame has bad CRC	*/
 
 #define RXDCTRL_FRESH(gp)	\
 	((((RX_BUF_ALLOC_SIZE(gp) - RX_OFFSET) << 16) & RXDCTRL_BUFSZ) | \
@@ -936,9 +912,21 @@ struct gem_rxd {
 
 #define RX_COPY_THRESHOLD  256
 
+#if TX_RING_SIZE < 128
+#define INIT_BLOCK_TX_RING_SIZE		128
+#else
+#define INIT_BLOCK_TX_RING_SIZE		TX_RING_SIZE
+#endif
+
+#if RX_RING_SIZE < 128
+#define INIT_BLOCK_RX_RING_SIZE		128
+#else
+#define INIT_BLOCK_RX_RING_SIZE		RX_RING_SIZE
+#endif
+
 struct gem_init_block {
-	struct gem_txd	txd[TX_RING_SIZE];
-	struct gem_rxd	rxd[RX_RING_SIZE];
+	struct gem_txd	txd[INIT_BLOCK_TX_RING_SIZE];
+	struct gem_rxd	rxd[INIT_BLOCK_RX_RING_SIZE];
 };
 
 enum gem_phy_type {
@@ -948,19 +936,13 @@ enum gem_phy_type {
 	phy_serdes,
 };
 
-enum gem_phy_model {
-	phymod_generic,
-	phymod_bcm5201,
-	phymod_bcm5221,
-	phymod_bcm5400,
-	phymod_bcm5401,
-	phymod_bcm5411,
-};
-
 enum link_state {
-	aneg_wait,
-	force_wait,
-	aneg_up,
+	link_down = 0,	/* No link, will retry */
+	link_aneg,	/* Autoneg in progress */
+	link_force_try,	/* Try Forced link speed */
+	link_force_ret,	/* Forced mode worked, retrying autoneg */
+	link_force_ok,	/* Stay in forced mode */
+	link_up		/* Link is up */
 };
 
 struct gem {
@@ -973,38 +955,57 @@ struct gem {
 	 * (ie. not power managed)
 	 */
 	int hw_running;
+	int opened;
+	struct semaphore pm_sem;
+	struct work_struct pm_task;
+	struct timer_list pm_timer;
 
 	struct gem_init_block *init_block;
 
 	struct sk_buff *rx_skbs[RX_RING_SIZE];
 	struct sk_buff *tx_skbs[RX_RING_SIZE];
 
+	u32			msg_enable;
+
 	struct net_device_stats net_stats;
 
 	enum gem_phy_type	phy_type;
-	enum gem_phy_model	phy_mod;
+	struct mii_phy		phy_mii;
+	
 	int			tx_fifo_sz;
 	int			rx_fifo_sz;
 	int			rx_pause_off;
 	int			rx_pause_on;
 	int			mii_phy_addr;
 
-	/* Diagnostic counters and state. */
-	u64 pause_entered;
-	u16 pause_last_time_recvd;
+	u32			mac_rx_cfg;
+	u32			swrst_base;
 
-	struct timer_list link_timer;
-	int timer_ticks;
-	enum link_state lstate;
+	/* Autoneg & PHY control */
+	int			want_autoneg;
+	int			last_forced_speed;
+	enum link_state		lstate;
+	struct timer_list	link_timer;
+	int			timer_ticks;
+	int			wake_on_lan;
+	struct work_struct	reset_task;
+	volatile int		reset_task_pending;
+	
+	/* Diagnostic counters and state. */
+	u64			pause_entered;
+	u16			pause_last_time_recvd;
 
 	dma_addr_t gblock_dvma;
 	struct pci_dev *pdev;
 	struct net_device *dev;
-#ifdef CONFIG_ALL_PPC
+#ifdef CONFIG_PPC_PMAC
 	struct device_node	*of_node;
 #endif
 };
 
+#define found_mii_phy(gp) ((gp->phy_type == phy_mii_mdio0 || gp->phy_type == phy_mii_mdio1) \
+				&& gp->phy_mii.def && gp->phy_mii.def->ops)
+			
 #define ALIGNED_RX_SKB_ADDR(addr) \
         ((((unsigned long)(addr) + (64UL - 1UL)) & ~(64UL - 1UL)) - (unsigned long)(addr))
 static __inline__ struct sk_buff *gem_alloc_skb(int size, int gfp_flags)

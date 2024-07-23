@@ -4,6 +4,7 @@
 #define PROT_READ	0x1		/* page can be read */
 #define PROT_WRITE	0x2		/* page can be written */
 #define PROT_EXEC	0x4		/* page can be executed */
+#define PROT_SEM	0x8		/* page may be used for atomic ops */
 #define PROT_NONE	0x0		/* page can not be accessed */
 
 #define MAP_SHARED	0x01		/* Share changes */
@@ -18,11 +19,13 @@
 #define _MAP_UNALIGNED	0x0800
 
 /* These are linux-specific */
-#define MAP_GROWSDOWN	0x1000		/* stack-like segment */
-#define MAP_DENYWRITE	0x2000		/* ETXTBSY */
-#define MAP_EXECUTABLE	0x4000		/* mark it as an executable */
-#define MAP_LOCKED	0x8000		/* lock the mapping */
+#define MAP_GROWSDOWN	0x01000		/* stack-like segment */
+#define MAP_DENYWRITE	0x02000		/* ETXTBSY */
+#define MAP_EXECUTABLE	0x04000		/* mark it as an executable */
+#define MAP_LOCKED	0x08000		/* lock the mapping */
 #define MAP_NORESERVE	0x10000		/* don't check for reservations */
+#define MAP_POPULATE	0x20000		/* populate (prefault) pagetables */
+#define MAP_NONBLOCK	0x40000		/* do not block on IO */
 
 #define MS_ASYNC	1		/* sync memory asynchronously */
 #define MS_SYNC		2		/* synchronous memory sync */
@@ -36,7 +39,7 @@
 #define MADV_SEQUENTIAL	2		/* expect sequential page references */
 #define MADV_WILLNEED	3		/* will need these pages */
 #define	MADV_SPACEAVAIL	5		/* ensure resources are available */
-#define MADV_DONTNEED	6		/* dont need these pages */
+#define MADV_DONTNEED	6		/* don't need these pages */
 
 /* compatibility flags */
 #define MAP_ANON	MAP_ANONYMOUS

@@ -12,6 +12,8 @@
 #include <linux/in.h>
 #include <linux/types.h>
 
+#include <linux/ncp_fs_i.h>
+#include <linux/ncp_fs_sb.h>
 #include <linux/ipx.h>
 #include <linux/ncp_no.h>
 
@@ -180,19 +182,24 @@ struct ncp_entry_info {
 	ino_t			ino;
 	int			opened;
 	int			access;
-	__u32			server_file_handle __attribute__((packed));
-	__u8			open_create_action __attribute__((packed));
-	__u8			file_handle[6] __attribute__((packed));
+	unsigned int		volume;
+	__u8			file_handle[6];
 };
 
 /* Guess, what 0x564c is :-) */
 #define NCP_SUPER_MAGIC  0x564c
 
 
-#define NCP_SBP(sb)		(&((sb)->u.ncpfs_sb))
+static inline struct ncp_server *NCP_SBP(struct super_block *sb)
+{
+	return sb->s_fs_info;
+}
 
 #define NCP_SERVER(inode)	NCP_SBP((inode)->i_sb)
-#define NCP_FINFO(inode)	(&((inode)->u.ncpfs_i))
+static inline struct ncp_inode_info *NCP_FINFO(struct inode *inode)
+{
+	return container_of(inode, struct ncp_inode_info, vfs_inode);
+}
 
 #ifdef DEBUG_NCP_MALLOC
 
@@ -224,7 +231,6 @@ static inline void ncp_kfree_s(void *obj, int size)
 
 /* linux/fs/ncpfs/inode.c */
 int ncp_notify_change(struct dentry *, struct iattr *);
-struct super_block *ncp_read_super(struct super_block *, void *, int);
 struct inode *ncp_iget(struct super_block *, struct ncp_entry_info *);
 void ncp_update_inode(struct inode *, struct ncp_entry_info *);
 void ncp_update_inode2(struct inode *, struct ncp_entry_info *);
@@ -242,7 +248,7 @@ int ncp_ioctl(struct inode *, struct file *, unsigned int, unsigned long);
 /* linux/fs/ncpfs/sock.c */
 int ncp_request2(struct ncp_server *server, int function,
 	void* reply, int max_reply_size);
-static int inline ncp_request(struct ncp_server *server, int function) {
+static inline int ncp_request(struct ncp_server *server, int function) {
 	return ncp_request2(server, function, server->packet, server->packet_size);
 }
 int ncp_connect(struct ncp_server *server);

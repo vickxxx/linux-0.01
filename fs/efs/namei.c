@@ -6,8 +6,10 @@
  * Portions derived from work (c) 1995,1996 Christian Vogelgsang.
  */
 
+#include <linux/buffer_head.h>
 #include <linux/string.h>
 #include <linux/efs_fs.h>
+#include <linux/smp_lock.h>
 
 static efs_ino_t efs_find_entry(struct inode *inode, const char *name, int len) {
 	struct buffer_head *bh;
@@ -24,7 +26,7 @@ static efs_ino_t efs_find_entry(struct inode *inode, const char *name, int len) 
 
 	for(block = 0; block < inode->i_blocks; block++) {
 
-		bh = bread(inode->i_dev, efs_bmap(inode, block), EFS_DIRBSIZE);
+		bh = sb_bread(inode->i_sb, efs_bmap(inode, block));
 		if (!bh) {
 			printk(KERN_ERR "EFS: find_entry(): failed to read dir block %d\n", block);
 			return 0;
@@ -55,20 +57,19 @@ static efs_ino_t efs_find_entry(struct inode *inode, const char *name, int len) 
 	return(0);
 }
 
-struct dentry *efs_lookup(struct inode *dir, struct dentry *dentry) {
+struct dentry *efs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd) {
 	efs_ino_t inodenum;
-	struct inode * inode;
+	struct inode * inode = NULL;
 
-	if (!dir || !S_ISDIR(dir->i_mode))
-		return ERR_PTR(-ENOENT);
-
-	inode = NULL;
-
+	lock_kernel();
 	inodenum = efs_find_entry(dir, dentry->d_name.name, dentry->d_name.len);
 	if (inodenum) {
-		if (!(inode = iget(dir->i_sb, inodenum)))
+		if (!(inode = iget(dir->i_sb, inodenum))) {
+			unlock_kernel();
 			return ERR_PTR(-EACCES);
+		}
 	}
+	unlock_kernel();
 
 	d_add(dentry, inode);
 	return NULL;

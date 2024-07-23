@@ -155,6 +155,8 @@ CD_sizeof	= CD_Unused+(4*4)
 #include <linux/init.h>
 #include <linux/ioport.h>
 
+#include <asm/zorro.h>
+
 struct zorro_dev {
     struct ExpansionRom rom;
     zorro_id id;
@@ -172,7 +174,6 @@ extern struct zorro_dev zorro_autocon[ZORRO_NUM_AUTO];
      *  Zorro Functions
      */
 
-extern void zorro_init(void);
 extern void zorro_name_device(struct zorro_dev *dev);
 
 extern struct zorro_dev *zorro_find_device(zorro_id id,
@@ -198,7 +199,7 @@ extern struct zorro_dev *zorro_find_device(zorro_id id,
      *  the corresponding bits.
      */
 
-extern __u32 zorro_unused_z2ram[4];
+extern DECLARE_BITMAP(zorro_unused_z2ram, 128);
 
 #define Z2RAM_START		(0x00200000)
 #define Z2RAM_END		(0x00a00000)

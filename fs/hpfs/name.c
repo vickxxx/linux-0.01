@@ -20,8 +20,9 @@ char *text_prefix[]={
 
 void hpfs_decide_conv(struct inode *inode, unsigned char *name, unsigned len)
 {
+	struct hpfs_inode_info *hpfs_inode = hpfs_i(inode);
 	int i;
-	if (inode->i_hpfs_conv != CONV_AUTO) return;
+	if (hpfs_inode->i_conv != CONV_AUTO) return;
 	for (i = 0; *text_postfix[i]; i++) {
 		int l = strlen(text_postfix[i]);
 		if (l <= len)
@@ -34,10 +35,10 @@ void hpfs_decide_conv(struct inode *inode, unsigned char *name, unsigned len)
 			if (!hpfs_compare_names(inode->i_sb, text_prefix[i], l, name, l, 0))
 				goto text;
 	}
-	inode->i_hpfs_conv = CONV_BINARY;
+	hpfs_inode->i_conv = CONV_BINARY;
 	return;
 	text:
-	inode->i_hpfs_conv = CONV_TEXT;
+	hpfs_inode->i_conv = CONV_TEXT;
 	return;
 }
 
@@ -88,7 +89,7 @@ char *hpfs_translate_name(struct super_block *s, unsigned char *from,
 {
 	char *to;
 	int i;
-	if (s->s_hpfs_chk >= 2) if (hpfs_is_name_long(from, len) != lng) {
+	if (hpfs_sb(s)->sb_chk >= 2) if (hpfs_is_name_long(from, len) != lng) {
 		printk("HPFS: Long name flag mismatch - name ");
 		for (i=0; i<len; i++) printk("%c", from[i]);
 		printk(" misidentified as %s.\n", lng ? "short" : "long");
@@ -99,7 +100,7 @@ char *hpfs_translate_name(struct super_block *s, unsigned char *from,
 		printk("HPFS: can't allocate memory for name conversion buffer\n");
 		return from;
 	}
-	for (i = 0; i < len; i++) to[i] = locase(s->s_hpfs_cp_table,from[i]);
+	for (i = 0; i < len; i++) to[i] = locase(hpfs_sb(s)->sb_cp_table,from[i]);
 	return to;
 }
 
@@ -110,8 +111,8 @@ int hpfs_compare_names(struct super_block *s, unsigned char *n1, unsigned l1,
 	unsigned i;
 	if (last) return -1;
 	for (i = 0; i < l; i++) {
-		unsigned char c1 = upcase(s->s_hpfs_cp_table,n1[i]);
-		unsigned char c2 = upcase(s->s_hpfs_cp_table,n2[i]);
+		unsigned char c1 = upcase(hpfs_sb(s)->sb_cp_table,n1[i]);
+		unsigned char c2 = upcase(hpfs_sb(s)->sb_cp_table,n2[i]);
 		if (c1 < c2) return -1;
 		if (c1 > c2) return 1;
 	}

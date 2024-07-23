@@ -53,7 +53,10 @@ struct econet_opt
   unsigned char port;
   unsigned char station;
   unsigned char net;
+  unsigned short num;
 };
+
+#define ec_sk(__sk) ((struct econet_opt *)(__sk)->sk_protinfo)
 
 struct ec_device
 {

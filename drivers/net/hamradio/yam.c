@@ -34,7 +34,7 @@
  *   0.5 F6FBB 01.08.98  Shared IRQs, /proc/net and network statistics
  *   0.6 F6FBB 25.08.98  Added 1200Bds format
  *   0.7 F6FBB 12.09.98  Added to the kernel configuration
- *   0.8 F6FBB 14.10.98  Fixed slottime/persistance timing bug
+ *   0.8 F6FBB 14.10.98  Fixed slottime/persistence timing bug
  *       OK1ZIA 2.09.01  Fixed "kfree_skb on hard IRQ" 
  *                       using dev_kfree_skb_any(). (important in 2.4 kernel)
  *   
@@ -170,7 +170,7 @@ static char ax25_bcast[7] =
 static char ax25_test[7] =
 {'L' << 1, 'I' << 1, 'N' << 1, 'U' << 1, 'X' << 1, ' ' << 1, '1' << 1};
 
-static struct timer_list yam_timer;
+static struct timer_list yam_timer = TIMER_INITIALIZER(NULL, 0, 0);
 
 /* --------------------------------------------------------------------- */
 
@@ -308,7 +308,8 @@ static const unsigned char chktabh[256] =
 static void delay(int ms)
 {
 	unsigned long timeout = jiffies + ((ms * HZ) / 1000);
-	while (jiffies < timeout);
+	while (time_before(jiffies, timeout))
+		cpu_relax();
 }
 
 /*
@@ -349,7 +350,7 @@ static int fpga_write(int iobase, unsigned char wrd)
 		wrd <<= 1;
 		outb(0xfc, THR(iobase));
 		while ((inb(LSR(iobase)) & LSR_TSRE) == 0)
-			if (jiffies > timeout)
+			if (time_after(jiffies, timeout))
 				return -1;
 	}
 
@@ -528,6 +529,7 @@ static inline void yam_rx_flag(struct net_device *dev, struct yam_port *yp)
 				skb->protocol = htons(ETH_P_AX25);
 				skb->mac.raw = skb->data;
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 				++yp->stats.rx_packets;
 			}
 		}
@@ -712,15 +714,14 @@ static void yam_tx_byte(struct net_device *dev, struct yam_port *yp)
 * ISR routine
 ************************************************************************************/
 
-static void yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev;
 	struct yam_port *yp;
 	unsigned char iir;
 	int counter = 100;
 	int i;
-
-	sti();
+	int handled = 0;
 
 	for (i = 0; i < NR_PORTS; i++) {
 		yp = &yam_ports[i];
@@ -734,14 +735,17 @@ static void yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			unsigned char lsr = inb(LSR(dev->base_addr));
 			unsigned char rxb;
 
+			handled = 1;
+
 			if (lsr & LSR_OE)
 				++yp->stats.rx_fifo_errors;
 
 			yp->dcd = (msr & RX_DCD) ? 1 : 0;
 
 			if (--counter <= 0) {
-				printk(KERN_ERR "%s: too many irq iir=%d\n", dev->name, iir);
-				return;
+				printk(KERN_ERR "%s: too many irq iir=%d\n",
+						dev->name, iir);
+				goto out;
 			}
 			if (msr & TX_RDY) {
 				++yp->nb_mdint;
@@ -757,6 +761,8 @@ static void yam_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			}
 		}
 	}
+out:
+	return IRQ_RETVAL(handled);
 }
 
 static int yam_net_get_info(char *buffer, char **start, off_t offset, int length)
@@ -766,7 +772,6 @@ static int yam_net_get_info(char *buffer, char **start, off_t offset, int length
 	off_t pos = 0;
 	off_t begin = 0;
 
-	cli();
 
 	for (i = 0; i < NR_PORTS; i++) {
 		if (yam_ports[i].iobase == 0 || yam_ports[i].irq == 0)
@@ -800,8 +805,6 @@ static int yam_net_get_info(char *buffer, char **start, off_t offset, int length
 		if (pos > offset + length)
 			break;
 	}
-
-	sti();
 
 	*start = buffer + (offset - begin);
 	len -= (offset - begin);
@@ -839,6 +842,7 @@ static int yam_open(struct net_device *dev)
 	struct yam_port *yp = (struct yam_port *) dev->priv;
 	enum uart u;
 	int i;
+	int ret=0;
 
 	printk(KERN_INFO "Trying %s at iobase 0x%lx irq %u\n", dev->name, dev->base_addr, dev->irq);
 
@@ -848,24 +852,27 @@ static int yam_open(struct net_device *dev)
 		dev->irq < 2 || dev->irq > 15) {
 		return -ENXIO;
 	}
-	if (check_region(dev->base_addr, YAM_EXTENT)) {
+	if (!request_region(dev->base_addr, YAM_EXTENT, dev->name))
+	{
 		printk(KERN_ERR "%s: cannot 0x%lx busy\n", dev->name, dev->base_addr);
 		return -EACCES;
 	}
 	if ((u = yam_check_uart(dev->base_addr)) == c_uart_unknown) {
 		printk(KERN_ERR "%s: cannot find uart type\n", dev->name);
-		return -EIO;
+		ret = -EIO;
+		goto out_release_base;
 	}
 	if (fpga_download(dev->base_addr, yp->bitrate)) {
 		printk(KERN_ERR "%s: cannot init FPGA\n", dev->name);
-		return -EIO;
+		ret = -EIO;
+		goto out_release_base;
 	}
 	outb(0, IER(dev->base_addr));
 	if (request_irq(dev->irq, yam_interrupt, SA_INTERRUPT | SA_SHIRQ, dev->name, dev)) {
 		printk(KERN_ERR "%s: irq %d busy\n", dev->name, dev->irq);
-		return -EBUSY;
+		ret = -EBUSY;
+		goto out_release_base;
 	}
-	request_region(dev->base_addr, YAM_EXTENT, dev->name);
 
 	yam_set_uart(dev);
 
@@ -882,6 +889,10 @@ static int yam_open(struct net_device *dev)
 	printk(KERN_INFO "%s at iobase 0x%lx irq %u uart %s\n", dev->name, dev->base_addr, dev->irq,
 		   uart_str[u]);
 	return 0;
+
+out_release_base:
+	release_region(dev->base_addr, YAM_EXTENT);
+	return ret;
 }
 
 /* --------------------------------------------------------------------- */
@@ -1177,6 +1188,7 @@ static void __exit yam_cleanup_driver(void)
 
 MODULE_AUTHOR("Frederic Rible F1OAT frible@teaser.fr");
 MODULE_DESCRIPTION("Yam amateur radio modem driver");
+MODULE_LICENSE("GPL");
 
 module_init(yam_init_driver);
 module_exit(yam_cleanup_driver);

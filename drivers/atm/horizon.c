@@ -603,8 +603,7 @@ static int make_rate (const hrz_dev * dev, u32 c, rounding r,
   
   // note: rounding the rate down means rounding 'p' up
   
-  const unsigned long br = test_bit (ultra, (hrz_flags *) &dev->flags) ?
-    BR_ULT : BR_HRZ;
+  const unsigned long br = test_bit(ultra, &dev->flags) ? BR_ULT : BR_HRZ;
   
   u32 div = CR_MIND;
   u32 pre;
@@ -1049,7 +1048,7 @@ static void rx_schedule (hrz_dev * dev, int irq) {
 	  struct atm_vcc * vcc = ATM_SKB(skb)->vcc;
 	  // VC layer stats
 	  atomic_inc(&vcc->stats->rx);
-	  skb->stamp = xtime;
+	  do_gettimeofday(&skb->stamp);
 	  // end of our responsability
 	  vcc->push (vcc, skb);
 	}
@@ -1106,9 +1105,9 @@ static inline void rx_bus_master_complete_handler (hrz_dev * dev) {
 
 static inline int tx_hold (hrz_dev * dev) {
   while (test_and_set_bit (tx_busy, &dev->flags)) {
-    PRINTD (DBG_TX, "sleeping at tx lock %p %u", dev, dev->flags);
+    PRINTD (DBG_TX, "sleeping at tx lock %p %lu", dev, dev->flags);
     interruptible_sleep_on (&dev->tx_queue);
-    PRINTD (DBG_TX, "woken at tx lock %p %u", dev, dev->flags);
+    PRINTD (DBG_TX, "woken at tx lock %p %lu", dev, dev->flags);
     if (signal_pending (current))
       return -1;
   }
@@ -1399,7 +1398,8 @@ static inline void rx_data_av_handler (hrz_dev * dev) {
 
 /********** interrupt handler **********/
 
-static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs) {
+static irqreturn_t interrupt_handler(int irq, void *dev_id,
+					struct pt_regs *pt_regs) {
   hrz_dev * dev = hrz_devs;
   u32 int_source;
   unsigned int irq_ok;
@@ -1409,7 +1409,7 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
   
   if (!dev_id) {
     PRINTD (DBG_IRQ|DBG_ERR, "irq with NULL dev_id: %d", irq);
-    return;
+    return IRQ_NONE;
   }
   // Did one of our cards generate the interrupt?
   while (dev) {
@@ -1419,11 +1419,11 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
   }
   if (!dev) {
     PRINTD (DBG_IRQ, "irq not for me: %d", irq);
-    return;
+    return IRQ_NONE;
   }
   if (irq != dev->irq) {
     PRINTD (DBG_IRQ|DBG_ERR, "irq mismatch: %d", irq);
-    return;
+    return IRQ_NONE;
   }
   
   // definitely for us
@@ -1469,6 +1469,9 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
   }
   
   PRINTD (DBG_IRQ|DBG_FLOW, "interrupt_handler done: %p", dev_id);
+  if (irq_ok)
+	return IRQ_HANDLED;
+  return IRQ_NONE;
 }
 
 /********** housekeeping **********/
@@ -1765,17 +1768,20 @@ static int hrz_send (struct atm_vcc * atm_vcc, struct sk_buff * skb) {
   
   {
     unsigned int tx_len = skb->len;
-    unsigned int tx_iovcnt = ATM_SKB(skb)->iovcnt;
+    unsigned int tx_iovcnt = skb_shinfo(skb)->nr_frags;
     // remember this so we can free it later
     dev->tx_skb = skb;
     
     if (tx_iovcnt) {
       // scatter gather transfer
       dev->tx_regions = tx_iovcnt;
-      dev->tx_iovec = (struct iovec *) skb->data;
+      dev->tx_iovec = 0;		/* @@@ needs rewritten */
       dev->tx_bytes = 0;
       PRINTD (DBG_TX|DBG_BUS, "TX start scatter-gather transfer (iovec %p, len %d)",
 	      skb->data, tx_len);
+      tx_release (dev);
+      hrz_kfree_skb (skb);
+      return -EIO;
     } else {
       // simple transfer
       dev->tx_regions = 0;
@@ -2739,12 +2745,12 @@ static int hrz_proc_read (struct atm_dev * atm_dev, loff_t * pos, char * page) {
 }
 
 static const struct atmdev_ops hrz_ops = {
-  open:		hrz_open,
-  close:	hrz_close,
-  send:		hrz_send,
-  sg_send:	hrz_sg_send,
-  proc_read:	hrz_proc_read,
-  owner:	THIS_MODULE,
+  .open	= hrz_open,
+  .close	= hrz_close,
+  .send	= hrz_send,
+  .sg_send	= hrz_sg_send,
+  .proc_read	= hrz_proc_read,
+  .owner	= THIS_MODULE,
 };
 
 static int __init hrz_probe (void) {
@@ -2765,15 +2771,13 @@ static int __init hrz_probe (void) {
     u32 * membase = bus_to_virt (pci_resource_start (pci_dev, 1));
     u8 irq = pci_dev->irq;
     
-    // check IO region
-    if (check_region (iobase, HRZ_IO_EXTENT)) {
-      PRINTD (DBG_WARN, "IO range already in use");
-      continue;
-    }
+    /* XXX DEV_LABEL is a guess */
+    if (!request_region (iobase, HRZ_IO_EXTENT, DEV_LABEL))
+  	  continue;
 
     if (pci_enable_device (pci_dev))
       continue;
-
+    
     dev = kmalloc (sizeof(hrz_dev), GFP_KERNEL);
     if (!dev) {
       // perhaps we should be nice: deregister all adapters and abort?
@@ -2806,9 +2810,6 @@ static int __init hrz_probe (void) {
 		dev->atm_dev->number, dev, dev->atm_dev);
 	dev->atm_dev->dev_data = (void *) dev;
 	dev->pci_dev = pci_dev; 
-	
-	/* XXX DEV_LABEL is a guess */
-	request_region (iobase, HRZ_IO_EXTENT, DEV_LABEL);
 	
 	// enable bus master accesses
 	pci_set_master (pci_dev);
@@ -2880,11 +2881,7 @@ static int __init hrz_probe (void) {
 	// writes to adapter memory (handles IRQ and SMP)
 	spin_lock_init (&dev->mem_lock);
 	
-#if LINUX_VERSION_CODE >= 0x20303
 	init_waitqueue_head (&dev->tx_queue);
-#else
-	dev->tx_queue = 0;
-#endif
 	
 	// vpi in 0..4, vci in 6..10
 	dev->atm_dev->ci_range.vpi_bits = vpi_bits;
@@ -2901,8 +2898,10 @@ static int __init hrz_probe (void) {
 	atm_dev_deregister (dev->atm_dev);
       } /* atm_dev_register */
       free_irq (irq, dev);
+	
     } /* request_irq */
     kfree (dev);
+    release_region(iobase, HRZ_IO_EXTENT);
   } /* kmalloc and while */
   return devs;
 }
@@ -2930,9 +2929,6 @@ static void __init hrz_check_args (void) {
   return;
 }
 
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
 MODULE_AUTHOR(maintainer_string);
 MODULE_DESCRIPTION(description_string);
 MODULE_LICENSE("GPL");
@@ -2949,7 +2945,7 @@ MODULE_PARM_DESC(pci_lat, "PCI latency in bus cycles");
 
 /********** module entry **********/
 
-int init_module (void) {
+static int __init hrz_module_init (void) {
   int devs;
   
   // sanity check - cast is needed since printk does not support %Zu
@@ -2982,7 +2978,7 @@ int init_module (void) {
 
 /********** module exit **********/
 
-void cleanup_module (void) {
+static void __exit hrz_module_exit (void) {
   hrz_dev * dev;
   PRINTD (DBG_FLOW, "cleanup_module");
   
@@ -3005,40 +3001,5 @@ void cleanup_module (void) {
   return;
 }
 
-#else
-
-/********** monolithic entry **********/
-
-int __init hrz_detect (void) {
-  int devs;
-  
-  // sanity check - cast is needed since printk does not support %Zu
-  if (sizeof(struct MEMMAP) != 128*1024/4) {
-    PRINTK (KERN_ERR, "Fix struct MEMMAP (is %lu fakewords).",
-	    (unsigned long) sizeof(struct MEMMAP));
-    return 0;
-  }
-  
-  show_version();
-  
-  // what about command line arguments?
-  // check arguments
-  hrz_check_args();
-  
-  // get the juice
-  devs = hrz_probe();
-  
-  if (devs) {
-    init_timer (&housekeeping);
-    housekeeping.function = do_housekeeping;
-    // paranoia
-    housekeeping.data = 1;
-    set_timer (&housekeeping, 0);
-  } else {
-    PRINTK (KERN_ERR, "no (usable) adapters found");
-  }
-
-  return devs;
-}
-
-#endif
+module_init(hrz_module_init);
+module_exit(hrz_module_exit);

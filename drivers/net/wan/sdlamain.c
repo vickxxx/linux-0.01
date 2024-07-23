@@ -38,7 +38,7 @@
 *				replaced it with 'wandev->enable_tx_int'. 
 * May 29, 1997	Jaspreet Singh	Flow Control Problem
 *				added "wandev->tx_int_enabled=1" line in the
-*				init module. This line intializes the flag for 
+*				init module. This line initializes the flag for 
 *				preventing Interrupt disabled with device set to
 *				busy
 * Jan 15, 1997	Gene Kozin	Version 3.1.0
@@ -64,26 +64,8 @@
 #include <linux/sdlapci.h>
 #include <linux/if_wanpipe_common.h>
 
-#if defined(LINUX_2_4)
-
- #include <asm/uaccess.h>	/* kernel <-> user copy */
- #include <linux/inetdevice.h>
- #define netdevice_t struct net_device 
-
-#elif defined(LINUX_2_1)
-
- #include <asm/uaccess.h>	/* kernel <-> user copy */
- #include <linux/inetdevice.h>
- #define netdevice_t struct device 
-
-#else
-
- #include <asm/segment.h>
- #define devinet_ioctl(x,y) dev_ioctl(x,y)
- #define netdevice_t struct device 
- #define test_and_set_bit set_bit
- typedef unsigned long mm_segment_t; 
-#endif
+#include <asm/uaccess.h>	/* kernel <-> user copy */
+#include <linux/inetdevice.h>
 
 #include <linux/ip.h>
 #include <net/route.h>
@@ -200,16 +182,16 @@ int init_module (void);
 void cleanup_module (void);
 
 /* WAN link driver entry points */
-static int setup    (wan_device_t* wandev, wandev_conf_t* conf);
-static int shutdown (wan_device_t* wandev);
-static int ioctl    (wan_device_t* wandev, unsigned cmd, unsigned long arg);
+static int setup(struct wan_device* wandev, wandev_conf_t* conf);
+static int shutdown(struct wan_device* wandev);
+static int ioctl(struct wan_device* wandev, unsigned cmd, unsigned long arg);
 
 /* IOCTL handlers */
 static int ioctl_dump	(sdla_t* card, sdla_dump_t* u_dump);
 static int ioctl_exec	(sdla_t* card, sdla_exec_t* u_exec, int);
 
 /* Miscellaneous functions */
-STATIC void sdla_isr	(int irq, void* dev_id, struct pt_regs *regs);
+STATIC irqreturn_t sdla_isr	(int irq, void* dev_id, struct pt_regs *regs);
 static void release_hw  (sdla_t *card);
 static void run_wanpipe_tq (unsigned long);
 
@@ -240,23 +222,12 @@ static sdla_t* card_array = NULL;	/* adapter data space */
  * function, which will execute all pending,
  * tasks in wanpipe_tq_custom queue */
 
-#ifdef LINUX_2_4
 DECLARE_TASK_QUEUE(wanpipe_tq_custom);
 static struct tq_struct wanpipe_tq_task = 
 {
-	routine: (void (*)(void *)) run_wanpipe_tq,
-	data: &wanpipe_tq_custom
+	.routine = (void (*)(void *)) run_wanpipe_tq,
+	.data = &wanpipe_tq_custom
 };
-#else
-static struct tq_struct *wanpipe_tq_custom = NULL;
-static struct tq_struct wanpipe_tq_task = 
-{
-	NULL,
-	0,
-	(void *)(void *) run_wanpipe_tq,
-	&wanpipe_tq_custom
-};
-#endif
 
 static int wanpipe_bh_critical=0;
 
@@ -306,7 +277,7 @@ int wanpipe_init(void)
 	/* Register adapters with WAN router */
 	for (cnt = 0; cnt < ncards; ++ cnt) {
 		sdla_t* card = &card_array[cnt];
-		wan_device_t* wandev = &card->wandev;
+		struct wan_device* wandev = &card->wandev;
 
 		card->next = NULL;
 		sprintf(card->devname, "%s%d", drvname, cnt + 1);
@@ -379,7 +350,7 @@ void cleanup_module (void)
  * any).
  */
  
-static int setup (wan_device_t* wandev, wandev_conf_t* conf)
+static int setup(struct wan_device* wandev, wandev_conf_t* conf)
 {
 	sdla_t* card;
 	int err = 0;
@@ -434,7 +405,7 @@ static int setup (wan_device_t* wandev, wandev_conf_t* conf)
 	}
 
 	/* If the current card has already been configured
-         * or its a piggyback card, do not try to allocate
+         * or it's a piggyback card, do not try to allocate
          * resources.
 	 */
 	if (!card->wandev.piggyback && !card->configured){
@@ -503,7 +474,7 @@ static int setup (wan_device_t* wandev, wandev_conf_t* conf)
 		}
 
 	}else{
-		printk(KERN_INFO "%s: Card Configured %i or Piggybacking %i!\n",
+		printk(KERN_INFO "%s: Card Configured %lu or Piggybacking %i!\n",
 			wandev->name,card->configured,card->wandev.piggyback);
 	} 
 
@@ -511,9 +482,7 @@ static int setup (wan_device_t* wandev, wandev_conf_t* conf)
 	if (!card->configured){
 
 		/* Initialize the Spin lock */
-#if defined(__SMP__) || defined(LINUX_2_4) 
 		printk(KERN_INFO "%s: Initializing for SMP\n",wandev->name);
-#endif
 
 		/* Piggyback spin lock has already been initialized,
 		 * in check_s514/s508_conflicts() */
@@ -604,7 +573,13 @@ static int setup (wan_device_t* wandev, wandev_conf_t* conf)
 
   	/* Reserve I/O region and schedule background task */
         if(card->hw.type != SDLA_S514 && !card->wandev.piggyback)
-                request_region(card->hw.port, card->hw.io_range, wandev->name);
+		if (!request_region(card->hw.port, card->hw.io_range, 
+				wandev->name)) {
+			printk(KERN_WARNING "port 0x%04x busy\n", card->hw.port);
+			release_hw(card);
+			wandev->state = WAN_UNCONFIGURED;
+			return -EBUSY;
+	  }
 
 	/* Only use the polling routine for the X25 protocol */
 	
@@ -802,7 +777,7 @@ static int check_s514_conflicts(sdla_t* card,wandev_conf_t* conf, int *irq)
  * This function is called by the router when device is being unregistered or
  * when it handles ROUTER_DOWN IOCTL.
  */
-static int shutdown (wan_device_t* wandev)
+static int shutdown(struct wan_device* wandev)
 {
 	sdla_t *card;
 	int err=0;
@@ -911,7 +886,7 @@ static void release_hw (sdla_t *card)
  * This function is called when router handles one of the reserved user
  * IOCTLs.  Note that 'arg' stil points to user address space.
  */
-static int ioctl (wan_device_t* wandev, unsigned cmd, unsigned long arg)
+static int ioctl(struct wan_device* wandev, unsigned cmd, unsigned long arg)
 {
 	sdla_t* card;
 	int err;
@@ -968,26 +943,13 @@ static int ioctl_dump (sdla_t* card, sdla_dump_t* u_dump)
 	unsigned long smp_flags;
 	int err = 0;
 
-      #if defined(LINUX_2_1) || defined(LINUX_2_4)
 	if(copy_from_user((void*)&dump, (void*)u_dump, sizeof(sdla_dump_t)))
 		return -EFAULT;
-      #else
-        if ((u_dump == NULL) ||
-            verify_area(VERIFY_READ, u_dump, sizeof(sdla_dump_t)))
-                return -EFAULT;
-        memcpy_fromfs((void*)&dump, (void*)u_dump, sizeof(sdla_dump_t));
-      #endif
 		
 	if ((dump.magic != WANPIPE_MAGIC) ||
 	    (dump.offset + dump.length > card->hw.memory))
 		return -EINVAL;
 	
-      #ifdef LINUX_2_0
-        if ((dump.ptr == NULL) ||
-            verify_area(VERIFY_WRITE, dump.ptr, dump.length))
-                return -EFAULT;
-      #endif	
-
 	winsize = card->hw.dpmsize;
 
 	if(card->hw.type != SDLA_S514) {
@@ -1008,17 +970,13 @@ static int ioctl_dump (sdla_t* card, sdla_dump_t* u_dump)
                                 break;
                         }
 			
-                      #if defined(LINUX_2_1) || defined(LINUX_2_4)
                         if(copy_to_user((void *)dump.ptr,
                                 (u8 *)card->hw.dpmbase + pos, len)){ 
 				
 				unlock_adapter_irq(&card->wandev.lock, &smp_flags);
 				return -EFAULT;
 			}
-                      #else
-			memcpy_tofs((void*)(dump.ptr),
-                        	(void*)(card->hw.dpmbase + pos), len);
-                      #endif
+
                         dump.length     -= len;
                         dump.offset     += len;
                         (char*)dump.ptr += len;
@@ -1029,15 +987,10 @@ static int ioctl_dump (sdla_t* card, sdla_dump_t* u_dump)
         
 	}else {
 
-	     #if defined(LINUX_2_1) || defined(LINUX_2_4) 
                if(copy_to_user((void *)dump.ptr,
 			       (u8 *)card->hw.dpmbase + dump.offset, dump.length)){
 			return -EFAULT;
 		}
-             #else
-                memcpy_tofs((void*)(dump.ptr),
-                (void*)(card->hw.dpmbase + dump.offset), dump.length);
-             #endif
 	}
 
 	return err;
@@ -1058,15 +1011,8 @@ static int ioctl_exec (sdla_t* card, sdla_exec_t* u_exec, int cmd)
 		return -ENODEV;
 	}
 
-      #if defined(LINUX_2_1) || defined(LINUX_2_4)	
 	if(copy_from_user((void*)&exec, (void*)u_exec, sizeof(sdla_exec_t)))
 		return -EFAULT;
-      #else
-        if ((u_exec == NULL) ||
-            verify_area(VERIFY_READ, u_exec, sizeof(sdla_exec_t)))
-                return -EFAULT;
-        memcpy_fromfs((void*)&exec, (void*)u_exec, sizeof(sdla_exec_t));
-      #endif
 
 	if ((exec.magic != WANPIPE_MAGIC) || (exec.cmd == NULL))
 		return -EINVAL;
@@ -1086,9 +1032,10 @@ static int ioctl_exec (sdla_t* card, sdla_exec_t* u_exec, int cmd)
  * o acknowledge SDLA hardware interrupt.
  * o call protocol-specific interrupt service routine, if any.
  */
-STATIC void sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
+STATIC irqreturn_t sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
 {
 #define	card	((sdla_t*)dev_id)
+	int handled = 0;
 
 	if(card->hw.type == SDLA_S514) {	/* handle interrrupt on S514 */
                 u32 int_status;
@@ -1103,7 +1050,7 @@ STATIC void sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
 			/* check if the interrupt is for this device */
  			if(!((unsigned char)int_status &
 				(IRQ_CPU_A | IRQ_CPU_B)))
-                	        return;
+                	        return IRQ_HANDLED;
 
 			/* if the IRQ is for both CPUs on the same adapter, */
 			/* then alter the interrupt status so as to handle */
@@ -1135,7 +1082,7 @@ STATIC void sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
 			/* exit if the interrupt is for another CPU on the */
 			/* same IRQ */
 			if(!card_found_for_IRQ)
-				return;
+				return IRQ_HANDLED;
 
        	 		if (!card || 
 			   (card->wandev.state == WAN_UNCONFIGURED && !card->configured)){
@@ -1145,7 +1092,7 @@ STATIC void sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
 					printk(KERN_INFO
 						"IRQ for unconfigured adapter\n");
 					S514_intack(&card->hw, int_status);
-					return;
+					return IRQ_HANDLED;
        			}
 
 	        	if (card->in_isr) {
@@ -1153,7 +1100,7 @@ STATIC void sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
 					"%s: interrupt re-entrancy on IRQ %d\n",
                        			card->devname, card->wandev.irq);
 				S514_intack(&card->hw, int_status);
- 				return;
+ 				return IRQ_HANDLED;
        			}
 
 			spin_lock(&card->wandev.lock);
@@ -1173,20 +1120,20 @@ STATIC void sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
 			/* handle a maximum of two interrupts (one for each */
 			/* CPU on the adapter) before returning */  
 			if((++ IRQ_count) == 2)
-				return;
+				return IRQ_HANDLED;
 		}
 	}
 
 	else {			/* handle interrupt on S508 adapter */
 
 		if (!card || ((card->wandev.state == WAN_UNCONFIGURED) && !card->configured))
-			return;
+			return IRQ_HANDLED;
 
 		if (card->in_isr) {
 			printk(KERN_INFO
 				"%s: interrupt re-entrancy on IRQ %d!\n",
 				card->devname, card->wandev.irq);
-			return;
+			return IRQ_HANDLED;
 		}
 
 		spin_lock(&card->wandev.lock);
@@ -1204,7 +1151,7 @@ STATIC void sdla_isr (int irq, void* dev_id, struct pt_regs *regs)
 		spin_unlock(&card->wandev.lock);
 
 	}
-                
+        return IRQ_HANDLED;
 #undef	card
 }
 
@@ -1306,7 +1253,7 @@ void wanpipe_mark_bh (void)
 	}
 } 
 
-void wakeup_sk_bh (netdevice_t *dev)
+void wakeup_sk_bh(struct net_device *dev)
 {
 	wanpipe_common_t *chan = dev->priv;
 
@@ -1319,7 +1266,7 @@ void wakeup_sk_bh (netdevice_t *dev)
 	}
 }
 
-int change_dev_flags (netdevice_t *dev, unsigned flags)
+int change_dev_flags(struct net_device *dev, unsigned flags)
 {
 	struct ifreq if_info;
 	mm_segment_t fs = get_fs();
@@ -1336,63 +1283,36 @@ int change_dev_flags (netdevice_t *dev, unsigned flags)
 	return err;
 }
 
-unsigned long get_ip_address (netdevice_t *dev, int option)
+unsigned long get_ip_address(struct net_device *dev, int option)
 {
 	
-      #ifdef LINUX_2_4
 	struct in_ifaddr *ifaddr;
 	struct in_device *in_dev;
 
 	if ((in_dev = __in_dev_get(dev)) == NULL){
 		return 0;
 	}
-      #elif defined(LINUX_2_1)
-	struct in_ifaddr *ifaddr;
-	struct in_device *in_dev;
-	
-	if ((in_dev = dev->ip_ptr) == NULL){
-		return 0;
-	}
-      #endif
 
-      #if defined(LINUX_2_1) || defined(LINUX_2_4)
 	if ((ifaddr = in_dev->ifa_list)== NULL ){
 		return 0;
 	}
-      #endif
 	
 	switch (option){
 
 	case WAN_LOCAL_IP:
-	      #ifdef LINUX_2_0
-		return dev->pa_addr;
-	      #else	
 		return ifaddr->ifa_local;
-	      #endif	
 		break;
 	
 	case WAN_POINTOPOINT_IP:
-	      #ifdef LINUX_2_0
-		return dev->pa_dstaddr;
-	      #else	
 		return ifaddr->ifa_address;
-	      #endif	
 		break;	
 
 	case WAN_NETMASK_IP:
-	      #ifdef LINUX_2_0
-		return dev->pa_mask;
-	      #else	
 		return ifaddr->ifa_mask;
-	      #endif	
 		break;
 
 	case WAN_BROADCAST_IP:
-	      #ifdef LINUX_2_0
-		return dev->pa_brdaddr;
-	      #else	
 		return ifaddr->ifa_broadcast;
-	      #endif	
 		break;
 	default:
 		return 0;
@@ -1401,7 +1321,7 @@ unsigned long get_ip_address (netdevice_t *dev, int option)
 	return 0;
 }	
 
-void add_gateway(sdla_t *card, netdevice_t *dev)
+void add_gateway(sdla_t *card, struct net_device *dev)
 {
 	mm_segment_t oldfs;
 	struct rtentry route;
@@ -1425,11 +1345,7 @@ void add_gateway(sdla_t *card, netdevice_t *dev)
 
 	oldfs = get_fs();
 	set_fs(get_ds());
-      #if defined(LINUX_2_1) || defined(LINUX_2_4)
 	res = ip_rt_ioctl(SIOCADDRT,&route);
-      #else
-	res = ip_rt_new(&route);
-      #endif
 	set_fs(oldfs);
 
 	if (res == 0){

@@ -5,7 +5,6 @@
  *
  * Copyright (C) 2001 Mountainview Data, Inc.
  */
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
@@ -13,8 +12,8 @@
 #include <linux/slab.h>
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
-#include <linux/intermezzo_fs.h>
-#include <linux/intermezzo_kml.h>
+#include "intermezzo_fs.h"
+#include "intermezzo_kml.h"
 
 static int size_round (int val);
 static int unpack_create (struct kml_create *rec, char *buf,

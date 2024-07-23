@@ -30,7 +30,7 @@
 #include <linux/skbuff.h>
 #include <linux/netdevice.h>
 
-#include <net/irda/irda_device.h>
+#include <net/irda/irda_device.h>	/* iobuff_t */
 
 #define BOF  0xc0 /* Beginning of frame */
 #define XBOF 0xff
@@ -52,8 +52,6 @@ enum {
 
 /* Proto definitions */
 int async_wrap_skb(struct sk_buff *skb, __u8 *tx_buff, int buffsize);
-void async_bump(struct net_device *dev, struct net_device_stats *stats,
-		__u8 *buf, int len);
 void async_unwrap_char(struct net_device *dev, struct net_device_stats *stats,
 		       iobuff_t *buf, __u8 byte);
 

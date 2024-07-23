@@ -1,9 +1,6 @@
-/*
+/* 
  * Oct 15, 2000 Matt Domsch <Matt_Domsch@dell.com>
  * Nicer crc32 functions/docs submitted by linux@horizon.com.  Thanks!
- * Code was from the public domain, copyright abandoned.  Code was
- * subsequently included in the kernel, thus was re-licensed under the
- * GNU GPL v2.
  *
  * Oct 12, 2000 Matt Domsch <Matt_Domsch@dell.com>
  * Same crc32 function was used in 5 other places in the kernel.
@@ -15,15 +12,12 @@
  *   drivers/net/smc9194.c uses seed ~0, doesn't xor with ~0.
  *   fs/jffs2 uses seed 0, doesn't xor with ~0.
  *   fs/partitions/efi.c uses seed ~0, xor's with ~0.
- *
- * This source code is licensed under the GNU General Public License,
- * Version 2.  See the file COPYING for more details.
+ * 
  */
 
 #include <linux/crc32.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
-#include <linux/config.h>
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/init.h>
@@ -44,10 +38,16 @@
 #define attribute(x)
 #endif
 
+/*
+ * This code is in the public domain; copyright abandoned.
+ * Liability for non-performance of this code is limited to the amount
+ * you paid for it.  Since it is distributed for free, your refund will
+ * be very very small.  If it breaks, you get to keep both pieces.
+ */
 
 MODULE_AUTHOR("Matt Domsch <Matt_Domsch@dell.com>");
 MODULE_DESCRIPTION("Ethernet CRC32 calculations");
-MODULE_LICENSE("GPL");
+MODULE_LICENSE("GPL and additional rights");
 
 #if CRC_LE_BITS == 1
 /*
@@ -99,9 +99,7 @@ u32 attribute((pure)) crc32_le(u32 crc, unsigned char const *p, size_t len)
 	/* Align it */
 	if(unlikely(((long)b)&3 && len)){
 		do {
-			u8 *p = (u8 *)b;
-			DO_CRC(*p++);
-			b = (void *)p;
+			DO_CRC(*((u8 *)b)++);
 		} while ((--len) && ((long)b)&3 );
 	}
 	if(likely(len >= 4)){
@@ -122,9 +120,7 @@ u32 attribute((pure)) crc32_le(u32 crc, unsigned char const *p, size_t len)
 	/* And the last few bytes */
 	if(len){
 		do {
-			u8 *p = (u8 *)b;
-			DO_CRC(*p++);
-			b = (void *)p;
+			DO_CRC(*((u8 *)b)++);
 		} while (--len);
 	}
 
@@ -204,9 +200,7 @@ u32 attribute((pure)) crc32_be(u32 crc, unsigned char const *p, size_t len)
 	/* Align it */
 	if(unlikely(((long)b)&3 && len)){
 		do {
-			u8 *p = (u8 *)b;
-			DO_CRC(*p++);
-			b = (u32 *)p;
+			DO_CRC(*((u8 *)b)++);
 		} while ((--len) && ((long)b)&3 );
 	}
 	if(likely(len >= 4)){
@@ -227,9 +221,7 @@ u32 attribute((pure)) crc32_be(u32 crc, unsigned char const *p, size_t len)
 	/* And the last few bytes */
 	if(len){
 		do {
-			u8 *p = (u8 *)b;
-			DO_CRC(*p++);
-			b = (void *)p;
+			DO_CRC(*((u8 *)b)++);
 		} while (--len);
 	}
 	return __be32_to_cpu(crc);
@@ -266,16 +258,9 @@ u32 bitreverse(u32 x)
 	return x;
 }
 
-#ifndef CONFIG_CRC32 
-	/* To ensure that this file is pulled in from lib/lib.a if it's
-	   configured in but nothing in-kernel uses it, we export its
-	   symbols from kernel/ksyms.c in the CONFIG_CRC32=y case.
-	   Otherwise (either modular or pulled in by the makefile magic)
-	   we export them from here. */
 EXPORT_SYMBOL(crc32_le);
 EXPORT_SYMBOL(crc32_be);
 EXPORT_SYMBOL(bitreverse);
-#endif
 
 /*
  * A brief CRC tutorial.

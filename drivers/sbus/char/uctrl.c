@@ -107,7 +107,7 @@ struct uctrl_status {
 	u8 speaker_volume; /* 0x23 */
 	u8 control_tft_brightness; /* 0x24 */
 	u8 control_kbd_repeat_delay; /* 0x28 */
-	u8 control_kbd_repeat_rate; /* 0x29 */
+	u8 control_kbd_repeat_period; /* 0x29 */
 	u8 control_screen_contrast; /* 0x2F */
 };
 
@@ -217,17 +217,18 @@ uctrl_open(struct inode *inode, struct file *file)
 	return 0;
 }
 
-void uctrl_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t uctrl_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct uctrl_driver *driver = (struct uctrl_driver *)dev_id;
 	printk("in uctrl_interrupt\n");
+	return IRQ_HANDLED;
 }
 
 static struct file_operations uctrl_fops = {
-	owner:		THIS_MODULE,
-	llseek:		no_llseek,
-	ioctl:		uctrl_ioctl,
-	open:		uctrl_open,
+	.owner =	THIS_MODULE,
+	.llseek =	no_llseek,
+	.ioctl =	uctrl_ioctl,
+	.open =		uctrl_open,
 };
 
 static struct miscdevice uctrl_dev = {
@@ -389,15 +390,11 @@ static int __init ts102_uctrl_init(void)
 	if(!driver->irq) 
 		driver->irq = tmp_irq[0].pri;
 
-	request_irq(driver->irq, uctrl_interrupt, 0, 
-		    "uctrl", driver);
-
-	enable_irq(driver->irq);
+	request_irq(driver->irq, uctrl_interrupt, 0, "uctrl", driver);
 
 	if (misc_register(&uctrl_dev)) {
 		printk("%s: unable to get misc minor %d\n",
 		       __FUNCTION__, uctrl_dev.minor);
-		disable_irq(driver->irq);
 		free_irq(driver->irq, driver);
 		return -ENODEV;
 	}
@@ -414,10 +411,8 @@ static void __exit ts102_uctrl_cleanup(void)
 	struct uctrl_driver *driver = &drv;
 
 	misc_deregister(&uctrl_dev);
-	if (driver->irq) {
-		disable_irq(driver->irq);
+	if (driver->irq)
 		free_irq(driver->irq, driver);
-	}
 	if (driver->regs)
 		driver->regs = 0;
 }

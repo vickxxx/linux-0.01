@@ -1,7 +1,7 @@
 /*
- * linux/include/linux/auth.h
+ * linux/include/linux/sunrpc/auth.h
  *
- * Declarations for the RPC authentication machinery.
+ * Declarations for the RPC client authentication machinery.
  *
  * Copyright (C) 1996, Olaf Kirch <okir@monad.swb.de>
  */
@@ -13,17 +13,30 @@
 
 #include <linux/config.h>
 #include <linux/sunrpc/sched.h>
+#include <linux/sunrpc/msg_prot.h>
+#include <linux/sunrpc/xdr.h>
 
 #include <asm/atomic.h>
 
 /* size of the nodename buffer */
 #define UNX_MAXNODENAME	32
 
+/* Maximum size (in bytes) of an rpc credential or verifier */
+#define RPC_MAX_AUTH_SIZE (400)
+
+/* Work around the lack of a VFS credential */
+struct auth_cred {
+	uid_t	uid;
+	gid_t	gid;
+	int	ngroups;
+	gid_t	*groups;
+};
+
 /*
  * Client user credentials
  */
 struct rpc_cred {
-	struct rpc_cred *	cr_next;	/* linked list */
+	struct list_head	cr_hash;	/* hash chain */
 	struct rpc_auth *	cr_auth;
 	struct rpc_credops *	cr_ops;
 	unsigned long		cr_expire;	/* when to gc */
@@ -49,13 +62,17 @@ struct rpc_cred {
 #define RPC_CREDCACHE_NR	8
 #define RPC_CREDCACHE_MASK	(RPC_CREDCACHE_NR - 1)
 struct rpc_auth {
-	struct rpc_cred *	au_credcache[RPC_CREDCACHE_NR];
+	struct list_head	au_credcache[RPC_CREDCACHE_NR];
 	unsigned long		au_expire;	/* cache expiry interval */
 	unsigned long		au_nextgc;	/* next garbage collection */
 	unsigned int		au_cslack;	/* call cred size estimate */
 	unsigned int		au_rslack;	/* reply verf size guess */
 	unsigned int		au_flags;	/* various flags */
 	struct rpc_authops *	au_ops;		/* operations */
+	rpc_authflavor_t	au_flavor;	/* pseudoflavor (note may
+						 * differ from the flavor in
+						 * au_ops->au_flavor in gss
+						 * case) */
 
 	/* per-flavor data */
 };
@@ -67,20 +84,21 @@ struct rpc_auth {
  * Client authentication ops
  */
 struct rpc_authops {
-	unsigned int		au_flavor;	/* flavor (RPC_AUTH_*) */
+	struct module		*owner;
+	rpc_authflavor_t	au_flavor;	/* flavor (RPC_AUTH_*) */
 #ifdef RPC_DEBUG
 	char *			au_name;
 #endif
-	struct rpc_auth *	(*create)(struct rpc_clnt *);
+	struct rpc_auth *	(*create)(struct rpc_clnt *, rpc_authflavor_t);
 	void			(*destroy)(struct rpc_auth *);
 
-	struct rpc_cred *	(*crcreate)(int);
+	struct rpc_cred *	(*crcreate)(struct rpc_auth*, struct auth_cred *, int);
 };
 
 struct rpc_credops {
 	void			(*crdestroy)(struct rpc_cred *);
 
-	int			(*crmatch)(struct rpc_cred *, int);
+	int			(*crmatch)(struct auth_cred *, struct rpc_cred *, int);
 	u32 *			(*crmarshal)(struct rpc_task *, u32 *, int);
 	int			(*crrefresh)(struct rpc_task *);
 	u32 *			(*crvalidate)(struct rpc_task *, u32 *);
@@ -92,26 +110,26 @@ extern struct rpc_authops	authnull_ops;
 extern struct rpc_authops	authdes_ops;
 #endif
 
+u32			pseudoflavor_to_flavor(rpc_authflavor_t);
+
 int			rpcauth_register(struct rpc_authops *);
 int			rpcauth_unregister(struct rpc_authops *);
-struct rpc_auth *	rpcauth_create(unsigned int, struct rpc_clnt *);
+struct rpc_auth *	rpcauth_create(rpc_authflavor_t, struct rpc_clnt *);
 void			rpcauth_destroy(struct rpc_auth *);
+struct rpc_cred *	rpcauth_lookup_credcache(struct rpc_auth *, struct auth_cred *, int);
 struct rpc_cred *	rpcauth_lookupcred(struct rpc_auth *, int);
 struct rpc_cred *	rpcauth_bindcred(struct rpc_task *);
 void			rpcauth_holdcred(struct rpc_task *);
 void			put_rpccred(struct rpc_cred *);
 void			rpcauth_unbindcred(struct rpc_task *);
-int			rpcauth_matchcred(struct rpc_auth *,
-					  struct rpc_cred *, int);
 u32 *			rpcauth_marshcred(struct rpc_task *, u32 *);
 u32 *			rpcauth_checkverf(struct rpc_task *, u32 *);
 int			rpcauth_refreshcred(struct rpc_task *);
 void			rpcauth_invalcred(struct rpc_task *);
 int			rpcauth_uptodatecred(struct rpc_task *);
+int			rpcauth_deadcred(struct rpc_task *);
 void			rpcauth_init_credcache(struct rpc_auth *);
 void			rpcauth_free_credcache(struct rpc_auth *);
-void			rpcauth_insert_credcache(struct rpc_auth *,
-						struct rpc_cred *);
 
 static inline
 struct rpc_cred *	get_rpccred(struct rpc_cred *cred)

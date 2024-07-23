@@ -11,20 +11,21 @@
 #include <linux/jbd.h>
 #include <linux/ext3_fs.h>
 #include <linux/ext3_jbd.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <asm/uaccess.h>
 
 
 int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		unsigned long arg)
 {
+	struct ext3_inode_info *ei = EXT3_I(inode);
 	unsigned int flags;
 
 	ext3_debug ("cmd = %u, arg = %lu\n", cmd, arg);
 
 	switch (cmd) {
 	case EXT3_IOC_GETFLAGS:
-		flags = inode->u.ext3_i.i_flags & EXT3_FL_USER_VISIBLE;
+		flags = ei->i_flags & EXT3_FL_USER_VISIBLE;
 		return put_user(flags, (int *) arg);
 	case EXT3_IOC_SETFLAGS: {
 		handle_t *handle = NULL;
@@ -37,12 +38,15 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 			return -EROFS;
 
 		if ((current->fsuid != inode->i_uid) && !capable(CAP_FOWNER))
-			return -EPERM;
+			return -EACCES;
 
 		if (get_user(flags, (int *) arg))
 			return -EFAULT;
 
-		oldflags = inode->u.ext3_i.i_flags;
+		if (!S_ISDIR(inode->i_mode))
+			flags &= ~EXT3_DIRSYNC_FL;
+
+		oldflags = ei->i_flags;
 
 		/* The JOURNAL_DATA flag is modifiable only by root */
 		jflag = flags & EXT3_JOURNAL_DATA_FL;
@@ -57,7 +61,7 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 			if (!capable(CAP_LINUX_IMMUTABLE))
 				return -EPERM;
 		}
-		
+
 		/*
 		 * The JOURNAL_DATA flag can only be changed by
 		 * the relevant capability.
@@ -76,35 +80,20 @@ int ext3_ioctl (struct inode * inode, struct file * filp, unsigned int cmd,
 		err = ext3_reserve_inode_write(handle, inode, &iloc);
 		if (err)
 			goto flags_err;
-		
+
 		flags = flags & EXT3_FL_USER_MODIFIABLE;
 		flags |= oldflags & ~EXT3_FL_USER_MODIFIABLE;
-		inode->u.ext3_i.i_flags = flags;
+		ei->i_flags = flags;
 
-		if (flags & EXT3_SYNC_FL)
-			inode->i_flags |= S_SYNC;
-		else
-			inode->i_flags &= ~S_SYNC;
-		if (flags & EXT3_APPEND_FL)
-			inode->i_flags |= S_APPEND;
-		else
-			inode->i_flags &= ~S_APPEND;
-		if (flags & EXT3_IMMUTABLE_FL)
-			inode->i_flags |= S_IMMUTABLE;
-		else
-			inode->i_flags &= ~S_IMMUTABLE;
-		if (flags & EXT3_NOATIME_FL)
-			inode->i_flags |= S_NOATIME;
-		else
-			inode->i_flags &= ~S_NOATIME;
+		ext3_set_inode_flags(inode);
 		inode->i_ctime = CURRENT_TIME;
 
 		err = ext3_mark_iloc_dirty(handle, inode, &iloc);
 flags_err:
-		ext3_journal_stop(handle, inode);
+		ext3_journal_stop(handle);
 		if (err)
 			return err;
-		
+
 		if ((jflag ^ oldflags) & (EXT3_JOURNAL_DATA_FL))
 			err = ext3_change_inode_journal_flag(inode, jflag);
 		return err;
@@ -130,14 +119,12 @@ flags_err:
 		if (IS_ERR(handle))
 			return PTR_ERR(handle);
 		err = ext3_reserve_inode_write(handle, inode, &iloc);
-		if (err)
-			return err;
-
-		inode->i_ctime = CURRENT_TIME;
-		inode->i_generation = generation;
-
-		err = ext3_mark_iloc_dirty(handle, inode, &iloc);
-		ext3_journal_stop(handle, inode);
+		if (err == 0) {
+			inode->i_ctime = CURRENT_TIME;
+			inode->i_generation = generation;
+			err = ext3_mark_iloc_dirty(handle, inode, &iloc);
+		}
+		ext3_journal_stop(handle);
 		return err;
 	}
 #ifdef CONFIG_JBD_DEBUG
@@ -155,12 +142,12 @@ flags_err:
 			int ret = 0;
 
 			set_current_state(TASK_INTERRUPTIBLE);
-			add_wait_queue(&sb->u.ext3_sb.ro_wait_queue, &wait);
-			if (timer_pending(&sb->u.ext3_sb.turn_ro_timer)) {
+			add_wait_queue(&EXT3_SB(sb)->ro_wait_queue, &wait);
+			if (timer_pending(&EXT3_SB(sb)->turn_ro_timer)) {
 				schedule();
 				ret = 1;
 			}
-			remove_wait_queue(&sb->u.ext3_sb.ro_wait_queue, &wait);
+			remove_wait_queue(&EXT3_SB(sb)->ro_wait_queue, &wait);
 			return ret;
 		}
 #endif

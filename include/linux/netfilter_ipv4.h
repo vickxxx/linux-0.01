@@ -52,25 +52,35 @@
 enum nf_ip_hook_priorities {
 	NF_IP_PRI_FIRST = INT_MIN,
 	NF_IP_PRI_CONNTRACK = -200,
+	NF_IP_PRI_BRIDGE_SABOTAGE_FORWARD = -175,
 	NF_IP_PRI_MANGLE = -150,
 	NF_IP_PRI_NAT_DST = -100,
+	NF_IP_PRI_BRIDGE_SABOTAGE_LOCAL_OUT = -50,
 	NF_IP_PRI_FILTER = 0,
 	NF_IP_PRI_NAT_SRC = 100,
 	NF_IP_PRI_LAST = INT_MAX,
 };
-
-#ifdef CONFIG_NETFILTER_DEBUG
-#ifdef __KERNEL__
-void nf_debug_ip_local_deliver(struct sk_buff *skb);
-void nf_debug_ip_loopback_xmit(struct sk_buff *newskb);
-void nf_debug_ip_finish_output2(struct sk_buff *skb);
-#endif /*__KERNEL__*/
-#endif /*CONFIG_NETFILTER_DEBUG*/
 
 /* Arguments for setsockopt SOL_IP: */
 /* 2.0 firewalling went from 64 through 71 (and +256, +512, etc). */
 /* 2.2 firewalling (+ masq) went from 64 through 76 */
 /* 2.4 firewalling went 64 through 67. */
 #define SO_ORIGINAL_DST 80
+
+#ifdef __KERNEL__
+#ifdef CONFIG_NETFILTER_DEBUG
+void nf_debug_ip_local_deliver(struct sk_buff *skb);
+void nf_debug_ip_loopback_xmit(struct sk_buff *newskb);
+void nf_debug_ip_finish_output2(struct sk_buff *skb);
+#endif /*CONFIG_NETFILTER_DEBUG*/
+
+extern int ip_route_me_harder(struct sk_buff **pskb);
+
+/* Call this before modifying an existing IP packet: ensures it is
+   modifiable and linear to the point you care about (writable_len).
+   Returns true or false. */
+extern int skb_ip_make_writable(struct sk_buff **pskb,
+				unsigned int writable_len);
+#endif /*__KERNEL__*/
 
 #endif /*__LINUX_IP_NETFILTER_H*/

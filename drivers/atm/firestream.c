@@ -105,7 +105,7 @@ int rx_pool_sizes[NP] = {128,  128,  128, 64,   64,   64,   32,    32};
    The FS50 CAM (VP/VC match registers) always take the lowest channel
    number that matches. This is not a problem.
 
-   However, they also ignore wether the channel is enabled or
+   However, they also ignore whether the channel is enabled or
    not. This means that if you allocate channel 0 to 1.2 and then
    channel 1 to 0.0, then disabeling channel 0 and writing 0 to the
    match channel for channel 0 will "steal" the traffic from channel
@@ -330,8 +330,8 @@ MODULE_PARM(fs_keystream, "i");
 #define FS_DEBUG_QSIZE   0x00001000
 
 
-#define func_enter() fs_dprintk (FS_DEBUG_FLOW, "fs: enter " __FUNCTION__ "\n")
-#define func_exit()  fs_dprintk (FS_DEBUG_FLOW, "fs: exit  " __FUNCTION__ "\n")
+#define func_enter() fs_dprintk (FS_DEBUG_FLOW, "fs: enter %s\n", __FUNCTION__)
+#define func_exit()  fs_dprintk (FS_DEBUG_FLOW, "fs: exit  %s\n", __FUNCTION__)
 
 
 struct fs_dev *fs_boards = NULL;
@@ -760,6 +760,7 @@ static void process_txdone_queue (struct fs_dev *dev, struct queue *q)
 		default:
 			/* Here we get the tx purge inhibit command ... */
 			/* Action, I believe, is "don't do anything". -- REW */
+			;
 		}
     
 		write_fs (dev, Q_RP(q->offset), Q_INCWRAP);
@@ -814,7 +815,7 @@ static void process_incoming (struct fs_dev *dev, struct queue *q)
 				skb_put (skb, qe->p1 & 0xffff); 
 				ATM_SKB(skb)->vcc = atm_vcc;
 				atomic_inc(&atm_vcc->stats->rx);
-				skb->stamp = xtime;
+				do_gettimeofday(&skb->stamp);
 				fs_dprintk (FS_DEBUG_ALLOC, "Free rec-skb: %p (pushed)\n", skb);
 				atm_vcc->push (atm_vcc, skb);
 				fs_dprintk (FS_DEBUG_ALLOC, "Free rec-d: %p\n", pe);
@@ -1286,11 +1287,11 @@ static int fs_change_qos(struct atm_vcc *vcc,struct atm_qos *qos,int flags)
 
 
 static const struct atmdev_ops ops = {
-	open:           fs_open,
-	close:          fs_close,
-	send:           fs_send,
+	.open =         fs_open,
+	.close =        fs_close,
+	.send =         fs_send,
 #if 0
-	owner:          THIS_MODULE,
+	.owner =        THIS_MODULE,
 #endif
 	/*                 fs_sg_send */
 	/* ioctl:          fs_ioctl, */
@@ -1530,7 +1531,7 @@ static void top_off_fp (struct fs_dev *dev, struct freepool *fp, int gfp_flags)
 	fs_dprintk (FS_DEBUG_QUEUE, "Added %d entries. \n", n);
 }
 
-static void __exit free_queue (struct fs_dev *dev, struct queue *txq)
+static void __devexit free_queue (struct fs_dev *dev, struct queue *txq)
 {
 	func_enter ();
 
@@ -1546,7 +1547,7 @@ static void __exit free_queue (struct fs_dev *dev, struct queue *txq)
 	func_exit ();
 }
 
-static void __exit free_freepool (struct fs_dev *dev, struct freepool *fp)
+static void __devexit free_freepool (struct fs_dev *dev, struct freepool *fp)
 {
 	func_enter ();
 
@@ -1561,14 +1562,15 @@ static void __exit free_freepool (struct fs_dev *dev, struct freepool *fp)
 
 
 
-static void fs_irq (int irq, void *dev_id,  struct pt_regs * pt_regs) 
+static irqreturn_t fs_irq (int irq, void *dev_id,  struct pt_regs * pt_regs) 
 {
 	int i;
 	u32 status;
 	struct fs_dev *dev = dev_id;
 
 	status = read_fs (dev, ISR);
-	if (!status) return;
+	if (!status)
+		return IRQ_NONE;
 
 	func_enter ();
 
@@ -1648,6 +1650,7 @@ static void fs_irq (int irq, void *dev_id,  struct pt_regs * pt_regs)
 	}
 
 	func_exit ();
+	return IRQ_HANDLED;
 }
 
 
@@ -1791,7 +1794,7 @@ static int __init fs_init (struct fs_dev *dev)
 		write_fs (dev, RAC, 0);
 
 		/* Manual (AN9, page 6) says ASF1=0 means compare Utopia address
-		 * too.  I can't find ASF1 anywhere. Anyway, we AND with just hte
+		 * too.  I can't find ASF1 anywhere. Anyway, we AND with just the
 		 * other bits, then compare with 0, which is exactly what we
 		 * want. */
 		write_fs (dev, RAM, (1 << (28 - FS155_VPI_BITS - FS155_VCI_BITS)) - 1);
@@ -2088,7 +2091,7 @@ int __init init_PCI (void)
 #endif 
 */
 
-const static struct pci_device_id firestream_pci_tbl[] __devinitdata = {
+static struct pci_device_id firestream_pci_tbl[] __devinitdata = {
 	{ PCI_VENDOR_ID_FUJITSU_ME, PCI_DEVICE_ID_FUJITSU_FS50, 
 	  PCI_ANY_ID, PCI_ANY_ID, 0, 0, FS_IS50},
 	{ PCI_VENDOR_ID_FUJITSU_ME, PCI_DEVICE_ID_FUJITSU_FS155, 
@@ -2099,10 +2102,10 @@ const static struct pci_device_id firestream_pci_tbl[] __devinitdata = {
 MODULE_DEVICE_TABLE(pci, firestream_pci_tbl);
 
 static struct pci_driver firestream_driver = {
-	name:           "firestream",
-	id_table:       firestream_pci_tbl,
-	probe:          firestream_init_one,
-	remove:         firestream_remove_one,
+	.name		= "firestream",
+	.id_table	= firestream_pci_tbl,
+	.probe		= firestream_init_one,
+	.remove		= __devexit_p(firestream_remove_one),
 };
 
 static int __init firestream_init_module (void)
@@ -2124,4 +2127,4 @@ module_init(firestream_init_module);
 module_exit(firestream_cleanup_module);
 
 MODULE_LICENSE("GPL");
-EXPORT_NO_SYMBOLS;
+

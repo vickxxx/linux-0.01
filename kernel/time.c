@@ -24,10 +24,9 @@
  *	(Even though the technical memorandum forbids it)
  */
 
-#include <linux/mm.h>
 #include <linux/timex.h>
+#include <linux/errno.h>
 #include <linux/smp_lock.h>
-
 #include <asm/uaccess.h>
 
 /* 
@@ -35,10 +34,6 @@
  * programs who obtain this value by using gettimeofday.
  */
 struct timezone sys_tz;
-
-/* The xtime_lock is not only serializing the xtime read/writes but it's also
-   serializing all accesses to the global NTP variables now. */
-extern rwlock_t xtime_lock;
 
 #if !defined(__alpha__) && !defined(__ia64__)
 
@@ -52,11 +47,11 @@ extern rwlock_t xtime_lock;
  */
 asmlinkage long sys_time(int * tloc)
 {
-	struct timeval now; 
-	int i; 
+	int i;
 
-	do_gettimeofday(&now);
-	i = now.tv_sec;
+	/* SMP: This is fairly trivial. We grab CURRENT_TIME and 
+	   stuff it to user space. No side effects */
+	i = get_seconds();
 	if (tloc) {
 		if (put_user(i,tloc))
 			i = -EFAULT;
@@ -73,36 +68,29 @@ asmlinkage long sys_time(int * tloc)
  
 asmlinkage long sys_stime(int * tptr)
 {
-	int value;
+	struct timespec tv;
 
 	if (!capable(CAP_SYS_TIME))
 		return -EPERM;
-	if (get_user(value, tptr))
+	if (get_user(tv.tv_sec, tptr))
 		return -EFAULT;
-	write_lock_irq(&xtime_lock);
-	vxtime_lock();
-	xtime.tv_sec = value;
-	xtime.tv_usec = 0;
-	vxtime_unlock();
-	time_adjust = 0;	/* stop active adjtime() */
-	time_status |= STA_UNSYNC;
-	time_maxerror = NTP_PHASE_LIMIT;
-	time_esterror = NTP_PHASE_LIMIT;
-	write_unlock_irq(&xtime_lock);
+
+	tv.tv_nsec = 0;
+	do_settimeofday(&tv);
 	return 0;
 }
 
 #endif
 
-asmlinkage long sys_gettimeofday(struct timeval *tv, struct timezone *tz)
+asmlinkage long sys_gettimeofday(struct timeval __user *tv, struct timezone __user *tz)
 {
-	if (tv) {
+	if (likely(tv != NULL)) {
 		struct timeval ktv;
 		do_gettimeofday(&ktv);
 		if (copy_to_user(tv, &ktv, sizeof(ktv)))
 			return -EFAULT;
 	}
-	if (tz) {
+	if (unlikely(tz != NULL)) {
 		if (copy_to_user(tz, &sys_tz, sizeof(sys_tz)))
 			return -EFAULT;
 	}
@@ -127,11 +115,12 @@ asmlinkage long sys_gettimeofday(struct timeval *tv, struct timezone *tz)
  */
 inline static void warp_clock(void)
 {
-	write_lock_irq(&xtime_lock);
-	vxtime_lock();
+	write_seqlock_irq(&xtime_lock);
+	wall_to_monotonic.tv_sec -= sys_tz.tz_minuteswest * 60;
 	xtime.tv_sec += sys_tz.tz_minuteswest * 60;
-	vxtime_unlock();
-	write_unlock_irq(&xtime_lock);
+	time_interpolator_update(sys_tz.tz_minuteswest * 60 * NSEC_PER_SEC);
+	write_sequnlock_irq(&xtime_lock);
+	clock_was_set();
 }
 
 /*
@@ -145,7 +134,7 @@ inline static void warp_clock(void)
  * various programs will get confused when the clock gets warped.
  */
 
-int do_sys_settimeofday(struct timeval *tv, struct timezone *tz)
+int do_sys_settimeofday(struct timespec *tv, struct timezone *tz)
 {
 	static int firsttime = 1;
 
@@ -166,19 +155,20 @@ int do_sys_settimeofday(struct timeval *tv, struct timezone *tz)
 		/* SMP safe, again the code in arch/foo/time.c should
 		 * globally block out interrupts when it runs.
 		 */
-		do_settimeofday(tv);
+		return do_settimeofday(tv);
 	}
 	return 0;
 }
 
-asmlinkage long sys_settimeofday(struct timeval *tv, struct timezone *tz)
+asmlinkage long sys_settimeofday(struct timeval __user *tv, struct timezone __user *tz)
 {
-	struct timeval	new_tv;
+	struct timespec	new_tv;
 	struct timezone new_tz;
 
 	if (tv) {
 		if (copy_from_user(&new_tv, tv, sizeof(*tv)))
 			return -EFAULT;
+		new_tv.tv_nsec *= NSEC_PER_USEC;
 	}
 	if (tz) {
 		if (copy_from_user(&new_tz, tz, sizeof(*tz)))
@@ -232,10 +222,11 @@ int do_adjtimex(struct timex *txc)
 
 	/* if the quartz is off by more than 10% something is VERY wrong ! */
 	if (txc->modes & ADJ_TICK)
-		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ)
+		if (txc->tick <  900000/USER_HZ ||
+		    txc->tick > 1100000/USER_HZ)
 			return -EINVAL;
 
-	write_lock_irq(&xtime_lock);
+	write_seqlock_irq(&xtime_lock);
 	result = time_state;	/* mostly `TIME_OK' */
 
 	/* Save for later - semantics of adjtime is to return old value */
@@ -345,13 +336,8 @@ int do_adjtimex(struct timex *txc)
 		} /* STA_PLL || STA_PPSTIME */
 	    } /* txc->modes & ADJ_OFFSET */
 	    if (txc->modes & ADJ_TICK) {
-		/* if the quartz is off by more than 10% something is
-		   VERY wrong ! */
-		if (txc->tick < 900000/HZ || txc->tick > 1100000/HZ) {
-		    result = -EINVAL;
-		    goto leave;
-		}
-		tick = txc->tick;
+		tick_usec = txc->tick;
+		tick_nsec = TICK_USEC_TO_NSEC(tick_usec);
 	    }
 	} /* txc->modes */
 leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
@@ -381,7 +367,7 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	txc->constant	   = time_constant;
 	txc->precision	   = time_precision;
 	txc->tolerance	   = time_tolerance;
-	txc->tick	   = tick;
+	txc->tick	   = tick_usec;
 	txc->ppsfreq	   = pps_freq;
 	txc->jitter	   = pps_jitter >> PPS_AVG;
 	txc->shift	   = pps_shift;
@@ -390,12 +376,12 @@ leave:	if ((time_status & (STA_UNSYNC|STA_CLOCKERR)) != 0
 	txc->calcnt	   = pps_calcnt;
 	txc->errcnt	   = pps_errcnt;
 	txc->stbcnt	   = pps_stbcnt;
-	write_unlock_irq(&xtime_lock);
+	write_sequnlock_irq(&xtime_lock);
 	do_gettimeofday(&txc->time);
 	return(result);
 }
 
-asmlinkage long sys_adjtimex(struct timex *txc_p)
+asmlinkage long sys_adjtimex(struct timex __user *txc_p)
 {
 	struct timex txc;		/* Local copy of parameter */
 	int ret;
@@ -409,3 +395,31 @@ asmlinkage long sys_adjtimex(struct timex *txc_p)
 	ret = do_adjtimex(&txc);
 	return copy_to_user(txc_p, &txc, sizeof(struct timex)) ? -EFAULT : ret;
 }
+
+struct timespec current_kernel_time(void)
+{
+        struct timespec now;
+        unsigned long seq;
+
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		
+		now = xtime;
+	} while (read_seqretry(&xtime_lock, seq));
+
+	return now; 
+}
+
+#if (BITS_PER_LONG < 64)
+u64 get_jiffies_64(void)
+{
+	unsigned long seq;
+	u64 ret;
+
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		ret = jiffies_64;
+	} while (read_seqretry(&xtime_lock, seq));
+	return ret;
+}
+#endif

@@ -1,7 +1,7 @@
 /*
  * Device driver framework for the COMX line of synchronous serial boards
  * 
- * for Linux kernel 2.2.X
+ * for Linux kernel 2.2.X / 2.4.X
  *
  * Original authors:  Arpad Bakay <bakay.arpad@synergon.hu>,
  *                    Peter Bajan <bajan.peter@synergon.hu>,
@@ -58,12 +58,13 @@
 #include <linux/version.h>
 
 #include <linux/types.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <asm/uaccess.h>
 #include <linux/ctype.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
@@ -80,26 +81,17 @@ MODULE_AUTHOR("Gergely Madarasz <gorgo@itc.hu>");
 MODULE_DESCRIPTION("Common code for the COMX synchronous serial adapters");
 MODULE_LICENSE("GPL");
 
-extern int comx_hw_comx_init(void);
-extern int comx_hw_locomx_init(void);
-extern int comx_hw_mixcom_init(void);
-extern int comx_proto_hdlc_init(void);
-extern int comx_proto_ppp_init(void);
-extern int comx_proto_syncppp_init(void);
-extern int comx_proto_lapb_init(void);
-extern int comx_proto_fr_init(void);
-
 static struct comx_hardware *comx_channels = NULL;
 static struct comx_protocol *comx_lines = NULL;
 
 static int comx_mkdir(struct inode *, struct dentry *, int);
 static int comx_rmdir(struct inode *, struct dentry *);
-static struct dentry *comx_lookup(struct inode *, struct dentry *);
+static struct dentry *comx_lookup(struct inode *, struct dentry *, struct nameidata *);
 
 static struct inode_operations comx_root_inode_ops = {
-	lookup:	comx_lookup,
-	mkdir: comx_mkdir,
-	rmdir: comx_rmdir,
+	.lookup = comx_lookup,
+	.mkdir = comx_mkdir,
+	.rmdir = comx_rmdir,
 };
 
 static int comx_delete_dentry(struct dentry *dentry);
@@ -107,7 +99,7 @@ static struct proc_dir_entry *create_comx_proc_entry(char *name, int mode,
 	int size, struct proc_dir_entry *dir);
 
 static struct dentry_operations comx_dentry_operations = {
-	d_delete:	comx_delete_dentry,
+	.d_delete	= comx_delete_dentry,
 };
 
 
@@ -612,7 +604,6 @@ static int comx_write_proc(struct file *file, const char *buffer, u_long count,
 	char *page;
 	struct comx_hardware *hw = comx_channels;
 	struct comx_protocol *line = comx_lines;
-	char str[30];
 	int ret=0;
 
 	if (count > PAGE_SIZE) {
@@ -690,8 +681,7 @@ static int comx_write_proc(struct file *file, const char *buffer, u_long count,
 		}
 #ifdef CONFIG_KMOD
 		if(!hw && comx_strcasecmp(HWNAME_NONE,page) != 0){
-			sprintf(str,"comx-hw-%s",page);
-			request_module(str);
+			request_module("comx-hw-%s",page);
 		}		
 		hw=comx_channels;
 		while (hw) {
@@ -733,8 +723,7 @@ static int comx_write_proc(struct file *file, const char *buffer, u_long count,
 		}
 #ifdef CONFIG_KMOD
 		if(!line && comx_strcasecmp(PROTONAME_NONE, page) != 0) {
-			sprintf(str,"comx-proto-%s",page);
-			request_module(str);
+			request_module("comx-proto-%s",page);
 		}		
 		line=comx_lines;
 		while (line) {
@@ -793,6 +782,7 @@ static int comx_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 	}
 	memset(dev, 0, sizeof(struct net_device));
 
+	lock_kernel();
 	if ((new_dir = create_proc_entry(dentry->d_name.name, mode | S_IFDIR, 
 		comx_root_dir)) == NULL) {
 		goto cleanup_dev;
@@ -852,6 +842,7 @@ static int comx_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 	ch->lineup_delay = DEFAULT_LINEUP_DELAY;
 
 	MOD_INC_USE_COUNT;
+	unlock_kernel();
 	return 0;
 cleanup_if_ptr:
 	kfree(ch->if_ptr);
@@ -871,23 +862,29 @@ cleanup_new_dir:
 	remove_proc_entry(dentry->d_name.name, comx_root_dir);
 cleanup_dev:
 	kfree(dev);
+	unlock_kernel();
 	return ret;
 }
 
 static int comx_rmdir(struct inode *dir, struct dentry *dentry)
 {
-	struct proc_dir_entry *entry = dentry->d_inode->u.generic_ip;
-	struct net_device *dev = entry->data;
-	struct comx_channel *ch = dev->priv;
+	struct proc_dir_entry *entry = PDE(dentry->d_inode);
+	struct net_device *dev;
+	struct comx_channel *ch;
 	int ret;
 
+	lock_kernel();
+	dev = entry->data;
+	ch = dev->priv;
 	if (dev->flags & IFF_UP) {
 		printk(KERN_ERR "%s: down interface before removing it\n", dev->name);
+		unlock_kernel();
 		return -EBUSY;
 	}
 
 	if (ch->protocol && ch->protocol->line_exit && 
 	    (ret=ch->protocol->line_exit(dev))) {
+		unlock_kernel();
 		return ret;
 	}
 	if (ch->hardware && ch->hardware->hw_exit && 
@@ -895,6 +892,7 @@ static int comx_rmdir(struct inode *dir, struct dentry *dentry)
 		if(ch->protocol && ch->protocol->line_init) {
 			ch->protocol->line_init(dev);
 		}
+		unlock_kernel();
 		return ret;
 	}
 	ch->protocol = NULL;
@@ -920,29 +918,32 @@ static int comx_rmdir(struct inode *dir, struct dentry *dentry)
 	remove_proc_entry(dentry->d_name.name, comx_root_dir);
 
 	MOD_DEC_USE_COUNT;
+	unlock_kernel();
 	return 0;
 }
 
-static struct dentry *comx_lookup(struct inode *dir, struct dentry *dentry)
+static struct dentry *comx_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
 	struct proc_dir_entry *de;
 	struct inode *inode = NULL;
 
-	if ((de = (struct proc_dir_entry *) dir->u.generic_ip) != NULL) {
+	lock_kernel();
+	if ((de = PDE(dir)) != NULL) {
 		for (de = de->subdir ; de ; de = de->next) {
-			if ((de && de->low_ino) && 
-			    (de->namelen == dentry->d_name.len) &&
+			if ((de->namelen == dentry->d_name.len) &&
 			    (memcmp(dentry->d_name.name, de->name, 
 			    de->namelen) == 0))	{
 			 	if ((inode = proc_get_inode(dir->i_sb, 
 			 	    de->low_ino, de)) == NULL) { 
 			 		printk(KERN_ERR "COMX: lookup error\n"); 
+					unlock_kernel();
 			 		return ERR_PTR(-EINVAL); 
 			 	}
 				break;
 			}
 		}
 	}
+	unlock_kernel();
 	dentry->d_op = &comx_dentry_operations;
 	d_add(dentry, inode);
 	return NULL;
@@ -1068,11 +1069,7 @@ int comx_unregister_protocol(char *name)
 	return -1;
 }
 
-#ifdef MODULE
-#define comx_init init_module
-#endif
-
-int __init comx_init(void)
+static int __init comx_init(void)
 {
 	struct proc_dir_entry *new_file;
 
@@ -1105,42 +1102,18 @@ int __init comx_init(void)
 
 	printk(KERN_INFO "COMX: driver version %s (C) 1995-1999 ITConsult-Pro Co. <info@itc.hu>\n", 
 		VERSION);
-
-#ifndef MODULE
-#ifdef CONFIG_COMX_HW_COMX
-	comx_hw_comx_init();
-#endif
-#ifdef CONFIG_COMX_HW_LOCOMX
-	comx_hw_locomx_init();
-#endif
-#ifdef CONFIG_COMX_HW_MIXCOM
-	comx_hw_mixcom_init();
-#endif
-#ifdef CONFIG_COMX_PROTO_HDLC
-	comx_proto_hdlc_init();
-#endif
-#ifdef CONFIG_COMX_PROTO_PPP
-	comx_proto_ppp_init();
-#endif
-#ifdef CONFIG_COMX_PROTO_LAPB
-	comx_proto_lapb_init();
-#endif
-#ifdef CONFIG_COMX_PROTO_FR
-	comx_proto_fr_init();
-#endif
-#endif
-
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit comx_exit(void)
 {
 	remove_proc_entry(FILENAME_HARDWARELIST, comx_root_dir);
 	remove_proc_entry(FILENAME_PROTOCOLLIST, comx_root_dir);
 	remove_proc_entry(comx_root_dir->name, &proc_root);
 }
-#endif
+
+module_init(comx_init);
+module_exit(comx_exit);
 
 EXPORT_SYMBOL(comx_register_hardware);
 EXPORT_SYMBOL(comx_unregister_hardware);

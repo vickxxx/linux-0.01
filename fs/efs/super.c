@@ -8,28 +8,103 @@
 
 #include <linux/init.h>
 #include <linux/module.h>
-#include <linux/locks.h>
 #include <linux/efs_fs.h>
 #include <linux/efs_vh.h>
 #include <linux/efs_fs_sb.h>
+#include <linux/slab.h>
+#include <linux/buffer_head.h>
+#include <linux/vfs.h>
 
-static DECLARE_FSTYPE_DEV(efs_fs_type, "efs", efs_read_super);
+static struct super_block *efs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_bdev(fs_type, flags, dev_name, data, efs_fill_super);
+}
+
+static struct file_system_type efs_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "efs",
+	.get_sb		= efs_get_sb,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
+
+static kmem_cache_t * efs_inode_cachep;
+
+static struct inode *efs_alloc_inode(struct super_block *sb)
+{
+	struct efs_inode_info *ei;
+	ei = (struct efs_inode_info *)kmem_cache_alloc(efs_inode_cachep, SLAB_KERNEL);
+	if (!ei)
+		return NULL;
+	return &ei->vfs_inode;
+}
+
+static void efs_destroy_inode(struct inode *inode)
+{
+	kmem_cache_free(efs_inode_cachep, INODE_INFO(inode));
+}
+
+static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+{
+	struct efs_inode_info *ei = (struct efs_inode_info *) foo;
+
+	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
+	    SLAB_CTOR_CONSTRUCTOR)
+		inode_init_once(&ei->vfs_inode);
+}
+ 
+static int init_inodecache(void)
+{
+	efs_inode_cachep = kmem_cache_create("efs_inode_cache",
+				sizeof(struct efs_inode_info),
+				0, SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT,
+				init_once, NULL);
+	if (efs_inode_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
+static void destroy_inodecache(void)
+{
+	if (kmem_cache_destroy(efs_inode_cachep))
+		printk(KERN_INFO "efs_inode_cache: not all structures were freed\n");
+}
+
+void efs_put_super(struct super_block *s)
+{
+	kfree(s->s_fs_info);
+	s->s_fs_info = NULL;
+}
 
 static struct super_operations efs_superblock_operations = {
-	read_inode:	efs_read_inode,
-	statfs:		efs_statfs,
+	.alloc_inode	= efs_alloc_inode,
+	.destroy_inode	= efs_destroy_inode,
+	.read_inode	= efs_read_inode,
+	.put_super	= efs_put_super,
+	.statfs		= efs_statfs,
 };
 
 static int __init init_efs_fs(void) {
+	int err;
 	printk("EFS: "EFS_VERSION" - http://aeschi.ch.eu.org/efs/\n");
-	return register_filesystem(&efs_fs_type);
+	err = init_inodecache();
+	if (err)
+		goto out1;
+	err = register_filesystem(&efs_fs_type);
+	if (err)
+		goto out;
+	return 0;
+out:
+	destroy_inodecache();
+out1:
+	return err;
 }
 
 static void __exit exit_efs_fs(void) {
 	unregister_filesystem(&efs_fs_type);
+	destroy_inodecache();
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(init_efs_fs)
 module_exit(exit_efs_fs)
@@ -131,17 +206,22 @@ static int efs_validate_super(struct efs_sb_info *sb, struct efs_super *super) {
 	return 0;    
 }
 
-struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
-	kdev_t dev = s->s_dev;
+int efs_fill_super(struct super_block *s, void *d, int silent)
+{
 	struct efs_sb_info *sb;
 	struct buffer_head *bh;
 
- 	sb = SUPER_INFO(s);
-
-	set_blocksize(dev, EFS_BLOCKSIZE);
+ 	sb = kmalloc(sizeof(struct efs_sb_info), GFP_KERNEL);
+	if (!sb)
+		return -ENOMEM;
+	s->s_fs_info = sb;
+	memset(sb, 0, sizeof(struct efs_sb_info));
+ 
+	s->s_magic		= EFS_SUPER_MAGIC;
+	sb_set_blocksize(s, EFS_BLOCKSIZE);
   
 	/* read the vh (volume header) block */
-	bh = bread(dev, 0, EFS_BLOCKSIZE);
+	bh = sb_bread(s, 0);
 
 	if (!bh) {
 		printk(KERN_ERR "EFS: cannot read volume header\n");
@@ -160,7 +240,7 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 		goto out_no_fs_ul;
 	}
 
-	bh = bread(dev, sb->fs_start + EFS_SUPER, EFS_BLOCKSIZE);
+	bh = sb_bread(s, sb->fs_start + EFS_SUPER);
 	if (!bh) {
 		printk(KERN_ERR "EFS: cannot read superblock\n");
 		goto out_no_fs_ul;
@@ -174,10 +254,6 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 		goto out_no_fs_ul;
 	}
 	brelse(bh);
- 
-	s->s_magic		= EFS_SUPER_MAGIC;
-	s->s_blocksize		= EFS_BLOCKSIZE;
-	s->s_blocksize_bits	= EFS_BLOCKSIZE_BITS;
 
 	if (!(s->s_flags & MS_RDONLY)) {
 #ifdef DEBUG
@@ -193,14 +269,16 @@ struct super_block *efs_read_super(struct super_block *s, void *d, int silent) {
 		goto out_no_fs;
 	}
 
-	return(s);
+	return 0;
 
 out_no_fs_ul:
 out_no_fs:
-	return(NULL);
+	s->s_fs_info = NULL;
+	kfree(sb);
+	return -EINVAL;
 }
 
-int efs_statfs(struct super_block *s, struct statfs *buf) {
+int efs_statfs(struct super_block *s, struct kstatfs *buf) {
 	struct efs_sb_info *sb = SUPER_INFO(s);
 
 	buf->f_type    = EFS_SUPER_MAGIC;	/* efs magic number */

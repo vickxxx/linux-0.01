@@ -27,12 +27,12 @@
  * numbers + offsets, and vice versa.
  */
 
-extern __inline__ unsigned long sbus_devaddr(int slotnum, unsigned long offset)
+static __inline__ unsigned long sbus_devaddr(int slotnum, unsigned long offset)
 {
   return (unsigned long) (SUN_SBUS_BVADDR+((slotnum)<<28)+(offset));
 }
 
-extern __inline__ int sbus_dev_slot(unsigned long dev_addr)
+static __inline__ int sbus_dev_slot(unsigned long dev_addr)
 {
   return (int) (((dev_addr)-SUN_SBUS_BVADDR)>>28);
 }
@@ -87,7 +87,8 @@ extern struct sbus_bus *sbus_root;
         for((device) = (bus)->devices; (device); (device)=(device)->next)
         
 #define for_all_sbusdev(device, bus) \
-	for((bus) = sbus_root, ((device) = (bus) ? (bus)->devices : 0); (bus); (device)=((device)->next ? (device)->next : ((bus) = (bus)->next, (bus) ? (bus)->devices : 0)))
+	for ((bus) = sbus_root; (bus); (bus) = (bus)->next) \
+		for ((device) = (bus)->devices; (device); (device) = (device)->next)
 
 /* Driver DVMA interfaces. */
 #define sbus_can_dma_64bit(sdev)	(1)

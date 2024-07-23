@@ -42,6 +42,8 @@ struct pci_controller {
 
 	struct pci_iommu_arena *sg_pci;
 	struct pci_iommu_arena *sg_isa;
+
+	void *sysdata;
 };
 
 /* Override the logic in pci_scan_bus for skipping already-configured
@@ -66,17 +68,17 @@ extern inline void pcibios_penalize_isa_irq(int irq)
    decisions.  */
 #define PCI_DMA_BUS_IS_PHYS  0
 
-/* Allocate and map kernel buffer using consistant mode DMA for PCI
+/* Allocate and map kernel buffer using consistent mode DMA for PCI
    device.  Returns non-NULL cpu-view pointer to the buffer if
    successful and sets *DMA_ADDRP to the pci side dma address as well,
    else DMA_ADDRP is undefined.  */
 
 extern void *pci_alloc_consistent(struct pci_dev *, size_t, dma_addr_t *);
 
-/* Free and unmap a consistant DMA buffer.  CPU_ADDR and DMA_ADDR must
-   be values that were returned from pci_alloc_consistant.  SIZE must
-   be the same as what as passed into pci_alloc_consistant.
-   References to the memory and mappings assosciated with CPU_ADDR or
+/* Free and unmap a consistent DMA buffer.  CPU_ADDR and DMA_ADDR must
+   be values that were returned from pci_alloc_consistent.  SIZE must
+   be the same as what as passed into pci_alloc_consistent.
+   References to the memory and mappings associated with CPU_ADDR or
    DMA_ADDR past this call are illegal.  */
 
 extern void pci_free_consistent(struct pci_dev *, size_t, void *, dma_addr_t);
@@ -95,14 +97,28 @@ extern dma_addr_t pci_map_page(struct pci_dev *, struct page *,
 /* Unmap a single streaming mode DMA translation.  The DMA_ADDR and
    SIZE must match what was provided for in a previous pci_map_single
    call.  All other usages are undefined.  After this call, reads by
-   the cpu to the buffer are guarenteed to see whatever the device
+   the cpu to the buffer are guaranteed to see whatever the device
    wrote there.  */
 
 extern void pci_unmap_single(struct pci_dev *, dma_addr_t, size_t, int);
 extern void pci_unmap_page(struct pci_dev *, dma_addr_t, size_t, int);
 
+/* pci_unmap_{single,page} is not a nop, thus... */
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)	\
+	dma_addr_t ADDR_NAME;
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)		\
+	__u32 LEN_NAME;
+#define pci_unmap_addr(PTR, ADDR_NAME)			\
+	((PTR)->ADDR_NAME)
+#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)		\
+	(((PTR)->ADDR_NAME) = (VAL))
+#define pci_unmap_len(PTR, LEN_NAME)			\
+	((PTR)->LEN_NAME)
+#define pci_unmap_len_set(PTR, LEN_NAME, VAL)		\
+	(((PTR)->LEN_NAME) = (VAL))
+
 /* Map a set of buffers described by scatterlist in streaming mode for
-   PCI DMA.  This is the scather-gather version of the above
+   PCI DMA.  This is the scatter-gather version of the above
    pci_map_single interface.  Here the scatter gather list elements
    are each tagged with the appropriate PCI dma address and length.
    They are obtained via sg_dma_{address,length}(SG).
@@ -123,7 +139,7 @@ extern int pci_map_sg(struct pci_dev *, struct scatterlist *, int, int);
 
 extern void pci_unmap_sg(struct pci_dev *, struct scatterlist *, int, int);
 
-/* Make physical memory consistant for a single streaming mode DMA
+/* Make physical memory consistent for a single streaming mode DMA
    translation after a transfer.
 
    If you perform a pci_map_single() but wish to interrogate the
@@ -139,7 +155,7 @@ pci_dma_sync_single(struct pci_dev *dev, dma_addr_t dma_addr, long size,
 	/* Nothing to do.  */
 }
 
-/* Make physical memory consistant for a set of streaming mode DMA
+/* Make physical memory consistent for a set of streaming mode DMA
    translations after a transfer.  The same as pci_dma_sync_single but
    for a scatter-gather list, same rules and usage.  */
 
@@ -172,8 +188,25 @@ pci_dac_dma_sync_single(struct pci_dev *pdev, dma64_addr_t dma_addr, size_t len,
 	/* Nothing to do. */
 }
 
-/* Return the index of the PCI controller for device PDEV. */
-extern int pci_controller_num(struct pci_dev *pdev);
+extern void
+pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
+			 struct resource *res);
+
+#define pci_domain_nr(bus) ((struct pci_controller *)(bus)->sysdata)->index
+
+/* Bus number == domain number until we get above 256 busses */
+static inline int pci_name_bus(char *name, struct pci_bus *bus)
+{
+	int domain = pci_domain_nr(bus);
+
+	if (domain < 256) {
+		sprintf(name, "%02x", domain);
+	} else {
+		sprintf(name, "%04x:%02x", domain, bus->number);
+	}
+	return 0;
+}
+
 #endif /* __KERNEL__ */
 
 /* Values for the `which' argument to sys_pciconfig_iobase.  */

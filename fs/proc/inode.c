@@ -4,25 +4,25 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/proc_fs.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/file.h>
-#include <linux/locks.h>
 #include <linux/limits.h>
-#define __NO_VERSION__
+#include <linux/init.h>
 #include <linux/module.h>
 #include <linux/smp_lock.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
 extern void free_proc_entry(struct proc_dir_entry *);
 
-struct proc_dir_entry * de_get(struct proc_dir_entry *de)
+static inline struct proc_dir_entry * de_get(struct proc_dir_entry *de)
 {
 	if (de)
 		atomic_inc(&de->count);
@@ -32,7 +32,7 @@ struct proc_dir_entry * de_get(struct proc_dir_entry *de)
 /*
  * Decrements the use count and checks for deferred deletion.
  */
-void de_put(struct proc_dir_entry *de)
+static void de_put(struct proc_dir_entry *de)
 {
 	if (de) {	
 		lock_kernel();		
@@ -58,19 +58,22 @@ void de_put(struct proc_dir_entry *de)
  */
 static void proc_delete_inode(struct inode *inode)
 {
-	struct proc_dir_entry *de = inode->u.generic_ip;
+	struct proc_dir_entry *de;
+	struct task_struct *tsk;
 
-	inode->i_state = I_CLEAR;
+	/* Let go of any associated process */
+	tsk = PROC_I(inode)->task;
+	if (tsk)
+		put_task_struct(tsk);
 
-	if (PROC_INODE_PROPER(inode)) {
-		proc_pid_delete_inode(inode);
-		return;
-	}
+	/* Let go of any associated proc directory entry */
+	de = PROC_I(inode)->pde;
 	if (de) {
 		if (de->owner)
-			__MOD_DEC_USE_COUNT(de->owner);
+			module_put(de->owner);
 		de_put(de);
 	}
+	clear_inode(inode);
 }
 
 struct vfsmount *proc_mnt;
@@ -80,24 +83,58 @@ static void proc_read_inode(struct inode * inode)
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
 }
 
-static int proc_statfs(struct super_block *sb, struct statfs *buf)
+static kmem_cache_t * proc_inode_cachep;
+
+static struct inode *proc_alloc_inode(struct super_block *sb)
 {
-	buf->f_type = PROC_SUPER_MAGIC;
-	buf->f_bsize = PAGE_SIZE/sizeof(long);
-	buf->f_bfree = 0;
-	buf->f_bavail = 0;
-	buf->f_ffree = 0;
-	buf->f_namelen = NAME_MAX;
+	struct proc_inode *ei;
+	struct inode *inode;
+
+	ei = (struct proc_inode *)kmem_cache_alloc(proc_inode_cachep, SLAB_KERNEL);
+	if (!ei)
+		return NULL;
+	ei->task = NULL;
+	ei->type = 0;
+	ei->op.proc_get_link = NULL;
+	ei->pde = NULL;
+	inode = &ei->vfs_inode;
+	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
+	return inode;
+}
+
+static void proc_destroy_inode(struct inode *inode)
+{
+	kmem_cache_free(proc_inode_cachep, PROC_I(inode));
+}
+
+static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+{
+	struct proc_inode *ei = (struct proc_inode *) foo;
+
+	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
+	    SLAB_CTOR_CONSTRUCTOR)
+		inode_init_once(&ei->vfs_inode);
+}
+ 
+int __init proc_init_inodecache(void)
+{
+	proc_inode_cachep = kmem_cache_create("proc_inode_cache",
+					     sizeof(struct proc_inode),
+					     0, SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT,
+					     init_once, NULL);
+	if (proc_inode_cachep == NULL)
+		return -ENOMEM;
 	return 0;
 }
 
 static struct super_operations proc_sops = { 
-	read_inode:	proc_read_inode,
-	put_inode:	force_delete,
-	delete_inode:	proc_delete_inode,
-	statfs:		proc_statfs,
+	.alloc_inode	= proc_alloc_inode,
+	.destroy_inode	= proc_destroy_inode,
+	.read_inode	= proc_read_inode,
+	.drop_inode	= generic_delete_inode,
+	.delete_inode	= proc_delete_inode,
+	.statfs		= simple_statfs,
 };
-
 
 static int parse_options(char *options,uid_t *uid,gid_t *gid)
 {
@@ -105,8 +142,11 @@ static int parse_options(char *options,uid_t *uid,gid_t *gid)
 
 	*uid = current->uid;
 	*gid = current->gid;
-	if (!options) return 1;
-	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
+	if (!options)
+		return 1;
+	while ((this_char = strsep(&options,",")) != NULL) {
+		if (!*this_char)
+			continue;
 		if ((value = strchr(this_char,'=')) != NULL)
 			*value++ = 0;
 		if (!strcmp(this_char,"uid")) {
@@ -147,7 +187,7 @@ printk("proc_iget: using deleted entry %s, count=%d\n", de->name, atomic_read(&d
 	if (!inode)
 		goto out_fail;
 	
-	inode->u.generic_ip = (void *) de;
+	PROC_I(inode)->pde = de;
 	if (de) {
 		if (de->mode) {
 			inode->i_mode = de->mode;
@@ -158,8 +198,8 @@ printk("proc_iget: using deleted entry %s, count=%d\n", de->name, atomic_read(&d
 			inode->i_size = de->size;
 		if (de->nlink)
 			inode->i_nlink = de->nlink;
-		if (de->owner)
-			__MOD_INC_USE_COUNT(de->owner);
+		if (!try_module_get(de->owner))
+			goto out_fail;
 		if (de->proc_iops)
 			inode->i_op = de->proc_iops;
 		if (de->proc_fops)
@@ -176,11 +216,9 @@ out_fail:
 	goto out;
 }			
 
-struct super_block *proc_read_super(struct super_block *s,void *data, 
-				    int silent)
+int proc_fill_super(struct super_block *s, void *data, int silent)
 {
 	struct inode * root_inode;
-	struct task_struct *p;
 
 	s->s_blocksize = 1024;
 	s->s_blocksize_bits = 10;
@@ -193,18 +231,16 @@ struct super_block *proc_read_super(struct super_block *s,void *data,
 	/*
 	 * Fixup the root inode's nlink value
 	 */
-	read_lock(&tasklist_lock);
-	for_each_task(p) if (p->pid) root_inode->i_nlink++;
-	read_unlock(&tasklist_lock);
+	root_inode->i_nlink += nr_processes();
 	s->s_root = d_alloc_root(root_inode);
 	if (!s->s_root)
 		goto out_no_root;
 	parse_options(data, &root_inode->i_uid, &root_inode->i_gid);
-	return s;
+	return 0;
 
 out_no_root:
 	printk("proc_read_super: get root inode failed\n");
 	iput(root_inode);
-	return NULL;
+	return -ENOMEM;
 }
 MODULE_LICENSE("GPL");

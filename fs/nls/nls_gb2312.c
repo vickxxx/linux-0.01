@@ -11,12 +11,8 @@
 static struct nls_table *p_nls;
 
 static struct nls_table table = {
-	"gb2312",
-	NULL,
-	NULL,
-	NULL,
-	NULL,
-	THIS_MODULE,
+	.charset	= "gb2312",
+	.owner		= THIS_MODULE,
 };
 
 static int __init init_nls_gb2312(void)
@@ -42,6 +38,7 @@ static void __exit exit_nls_gb2312(void)
 
 module_init(init_nls_gb2312)
 module_exit(exit_nls_gb2312)
+MODULE_LICENSE("Dual BSD/GPL");
 
 /*
  * Overrides for Emacs so that we follow Linus's tabbing style.

@@ -1,9 +1,16 @@
-/*
- * BK Id: SCCS/s.pci.h 1.16 10/15/01 22:51:33 paulus
- */
 #ifndef __PPC_PCI_H
 #define __PPC_PCI_H
 #ifdef __KERNEL__
+
+#include <linux/types.h>
+#include <linux/slab.h>
+#include <linux/string.h>
+#include <linux/mm.h>
+#include <asm/scatterlist.h>
+#include <asm/io.h>
+#include <asm/pci-bridge.h>
+
+struct pci_dev;
 
 /* Values for the `which' argument to sys_pciconfig_iobase syscall.  */
 #define IOBASE_BRIDGE_NUMBER	0
@@ -12,8 +19,13 @@
 #define IOBASE_ISA_IO		3
 #define IOBASE_ISA_MEM		4
 
+/*
+ * Set this to 1 if you want the kernel to re-assign all PCI
+ * bus numbers
+ */
+extern int pci_assign_all_busses;
 
-extern int pcibios_assign_all_busses(void);
+#define pcibios_assign_all_busses()	(pci_assign_all_busses)
 
 #define PCIBIOS_MIN_IO		0x1000
 #define PCIBIOS_MIN_MEM		0x10000000
@@ -91,6 +103,9 @@ static inline dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr,
 {
 	if (direction == PCI_DMA_NONE)
 		BUG();
+
+	consistent_sync(ptr, size, direction);
+
 	return virt_to_bus(ptr);
 }
 
@@ -102,6 +117,13 @@ static inline void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr,
 	/* nothing to do */
 }
 
+/* pci_unmap_{page,single} is a nop so... */
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)
+#define pci_unmap_addr(PTR, ADDR_NAME)		(0)
+#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)	do { } while (0)
+#define pci_unmap_len(PTR, LEN_NAME)		(0)
+#define pci_unmap_len_set(PTR, LEN_NAME, VAL)	do { } while (0)
 
 /*
  * pci_{map,unmap}_single_page maps a kernel page to a dma_addr_t. identical
@@ -150,15 +172,9 @@ static inline int pci_map_sg(struct pci_dev *hwdev, struct scatterlist *sg,
 	 * temporary 2.4 hack
 	 */
 	for (i = 0; i < nents; i++) {
-		if (sg[i].address && sg[i].page)
+		if (!sg[i].page)
 			BUG();
-		else if (!sg[i].address && !sg[i].page)
-			BUG();
-
-		if (sg[i].address)
-			sg[i].dma_address = virt_to_bus(sg[i].address);
-		else
-			sg[i].dma_address = page_to_bus(sg[i].page) + sg[i].offset;
+		sg[i].dma_address = page_to_bus(sg[i].page) + sg[i].offset;
 	}
 
 	return nents;
@@ -191,7 +207,8 @@ static inline void pci_dma_sync_single(struct pci_dev *hwdev,
 {
 	if (direction == PCI_DMA_NONE)
 		BUG();
-	/* nothing to do */
+
+	consistent_sync(bus_to_virt(dma_handle), size, direction);
 }
 
 /* Make physical memory consistent for a set of streaming
@@ -249,16 +266,15 @@ pci_dac_dma_sync_single(struct pci_dev *pdev, dma64_addr_t dma_addr, size_t len,
 	/* Nothing to do. */
 }
 
-/* These macros should be used after a pci_map_sg call has been done
- * to get bus addresses of each of the SG entries and their lengths.
- * You should only work with the number of sg entries pci_map_sg
- * returns.
- */
-#define sg_dma_address(sg)	((sg)->dma_address)
-#define sg_dma_len(sg)		((sg)->length)
-
 /* Return the index of the PCI controller for device PDEV. */
-extern int pci_controller_num(struct pci_dev *pdev);
+#define pci_domain_nr(bus) ((struct pci_controller *)(bus)->sysdata)->index
+
+/* Set the name of the bus as it appears in /proc/bus/pci */
+static inline int pci_name_bus(char *name, struct pci_bus *bus)
+{
+	sprintf(name, "%02x", bus->number);
+	return 0;
+}
 
 /* Map a range of PCI memory or I/O space for a device into user space */
 int pci_mmap_page_range(struct pci_dev *pdev, struct vm_area_struct *vma,
@@ -266,6 +282,10 @@ int pci_mmap_page_range(struct pci_dev *pdev, struct vm_area_struct *vma,
 
 /* Tell drivers/pci/proc.c that we have pci_mmap_page_range() */
 #define HAVE_PCI_MMAP	1
+
+extern void
+pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
+			struct resource *res);
 
 #endif	/* __KERNEL__ */
 

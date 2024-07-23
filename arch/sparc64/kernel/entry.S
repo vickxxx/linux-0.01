@@ -1,4 +1,4 @@
-/* $Id: entry.S,v 1.137 2001/10/18 09:06:36 davem Exp $
+/* $Id: entry.S,v 1.144 2002/02/09 19:49:30 davem Exp $
  * arch/sparc64/kernel/entry.S:  Sparc64 trap low-level entry points.
  *
  * Copyright (C) 1995,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -20,6 +20,7 @@
 #include <asm/processor.h>
 #include <asm/visasm.h>
 #include <asm/estate.h>
+#include <asm/auxio.h>
 
 /* #define SYSCALL_TRACING	1 */
 
@@ -151,12 +152,12 @@ do_fpdis:
 	add		%g0, %g0, %g0
 	ba,a,pt		%xcc, rtrap_clr_l6
 
-1:	ldub		[%g6 + AOFF_task_thread + AOFF_thread_fpsaved], %g5	! Load	Group
+1:	ldub		[%g6 + TI_FPSAVED], %g5					! Load	Group
 	wr		%g0, FPRS_FEF, %fprs					! LSU	Group+4bubbles
 	andcc		%g5, FPRS_FEF, %g0					! IEU1	Group
 	be,a,pt		%icc, 1f						! CTI
 	 clr		%g7							! IEU0
-	ldx		[%g6 + AOFF_task_thread + AOFF_thread_gsr], %g7		! Load	Group
+	ldx		[%g6 + TI_GSR], %g7					! Load	Group
 1:	andcc		%g5, FPRS_DL, %g0					! IEU1
 	bne,pn		%icc, 2f						! CTI
 	 fzero		%f0							! FPA
@@ -194,11 +195,11 @@ do_fpdis:
 	b,pt		%xcc, fpdis_exit2
 	 faddd		%f0, %f2, %f60
 1:	mov		SECONDARY_CONTEXT, %g3
-	add		%g6, AOFF_task_fpregs + 0x80, %g1
+	add		%g6, TI_FPREGS + 0x80, %g1
 	faddd		%f0, %f2, %f4
 	fmuld		%f0, %f2, %f6
 	ldxa		[%g3] ASI_DMMU, %g5
-	add		%g6, AOFF_task_fpregs + 0xc0, %g2
+	add		%g6, TI_FPREGS + 0xc0, %g2
 	stxa		%g0, [%g3] ASI_DMMU
 	membar		#Sync
 	faddd		%f0, %f2, %f8
@@ -223,10 +224,10 @@ do_fpdis:
 	mov		SECONDARY_CONTEXT, %g3
 	fzero		%f34
 	ldxa		[%g3] ASI_DMMU, %g5
-	add		%g6, AOFF_task_fpregs, %g1
+	add		%g6, TI_FPREGS, %g1
 	stxa		%g0, [%g3] ASI_DMMU
 	membar		#Sync
-	add		%g6, AOFF_task_fpregs + 0x40, %g2
+	add		%g6, TI_FPREGS + 0x40, %g2
 	faddd		%f32, %f34, %f36
 	fmuld		%f32, %f34, %f38
 	ldda		[%g1] ASI_BLK_S, %f0	! grrr, where is ASI_BLK_NUCLEUS 8-(
@@ -246,7 +247,7 @@ do_fpdis:
 	ba,pt		%xcc, fpdis_exit
 	 membar		#Sync
 3:	mov		SECONDARY_CONTEXT, %g3
-	add		%g6, AOFF_task_fpregs, %g1
+	add		%g6, TI_FPREGS, %g1
 	ldxa		[%g3] ASI_DMMU, %g5
 	mov		0x40, %g2
 	stxa		%g0, [%g3] ASI_DMMU
@@ -262,7 +263,7 @@ fpdis_exit:
 	membar		#Sync
 fpdis_exit2:
 	wr		%g7, 0, %gsr
-	ldx		[%g6 + AOFF_task_thread + AOFF_thread_xfsr], %fsr
+	ldx		[%g6 + TI_XFSR], %fsr
 	rdpr		%tstate, %g3
 	or		%g3, %g4, %g3		! anal...
 	wrpr		%g3, %tstate
@@ -272,7 +273,7 @@ fpdis_exit2:
 	.align		32
 fp_other_bounce:
 	call		do_fpother
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
@@ -285,12 +286,12 @@ do_fpother_check_fitos:
 	/* NOTE: Need to preserve %g7 until we fully commit
 	 *       to the fitos fixup.
 	 */
-	stx		%fsr, [%g6 + AOFF_task_thread + AOFF_thread_xfsr]
+	stx		%fsr, [%g6 + TI_XFSR]
 	rdpr		%tstate, %g3
 	andcc		%g3, TSTATE_PRIV, %g0
 	bne,pn		%xcc, do_fptrap_after_fsr
 	 nop
-	ldx		[%g6 + AOFF_task_thread + AOFF_thread_xfsr], %g3
+	ldx		[%g6 + TI_XFSR], %g3
 	srlx		%g3, 14, %g1
 	and		%g1, 7, %g1
 	cmp		%g1, 2			! Unfinished FP-OP
@@ -310,7 +311,7 @@ do_fpother_check_fitos:
 	cmp		%g1, %g2
 	bne,pn		%xcc, do_fptrap_after_fsr
 	 nop
-	std		%f62, [%g6 + AOFF_task_fpregs + (62 * 4)]
+	std		%f62, [%g6 + TI_FPREGS + (62 * 4)]
 	sethi		%hi(fitos_table_1), %g1
 	and		%g3, 0x1f, %g2
 	or		%g1, %lo(fitos_table_1),  %g1
@@ -396,22 +397,22 @@ fitos_table_2:
 	fdtos		%f62, %f31
 
 fitos_emul_fini:
-	ldd		[%g6 + AOFF_task_fpregs + (62 * 4)], %f62
+	ldd		[%g6 + TI_FPREGS + (62 * 4)], %f62
 	done
 
 	.globl		do_fptrap
 	.align		32
 do_fptrap:
-	stx		%fsr, [%g6 + AOFF_task_thread + AOFF_thread_xfsr]
+	stx		%fsr, [%g6 + TI_XFSR]
 do_fptrap_after_fsr:
-	ldub		[%g6 + AOFF_task_thread + AOFF_thread_fpsaved], %g3
+	ldub		[%g6 + TI_FPSAVED], %g3
 	rd		%fprs, %g1
 	or		%g3, %g1, %g3
-	stb		%g3, [%g6 + AOFF_task_thread + AOFF_thread_fpsaved]
+	stb		%g3, [%g6 + TI_FPSAVED]
 	rd		%gsr, %g3
-	stx		%g3, [%g6 + AOFF_task_thread + AOFF_thread_gsr]
+	stx		%g3, [%g6 + TI_GSR]
 	mov		SECONDARY_CONTEXT, %g3
-	add		%g6, AOFF_task_fpregs, %g2
+	add		%g6, TI_FPREGS, %g2
 	ldxa		[%g3] ASI_DMMU, %g5
 	stxa		%g0, [%g3] ASI_DMMU
 	membar		#Sync
@@ -483,7 +484,11 @@ do_ivec_xcall:
 	ldxa		[%g7 + %g0] ASI_INTR_R, %g7
 	stxa		%g0, [%g0] ASI_INTR_RECEIVE
 	membar		#Sync
-	jmpl		%g3, %g0
+	ba,pt		%xcc, 1f
+	 nop
+
+	.align		32
+1:	jmpl		%g3, %g0
 	 nop
 
 do_ivec_spurious:
@@ -495,7 +500,7 @@ do_ivec_spurious:
 	ba,pt		%xcc, etrap
 109:	 or		%g7, %lo(109b), %g7
 	call		catch_disabled_ivec
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
@@ -602,7 +607,7 @@ utrap:	brz,pn		%g1, etrap
 	done
 utrap_ill:
         call		bad_trap
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
@@ -657,15 +662,17 @@ floppy_tdone:
 	stx		%g5, [%g1 + %lo(pdma_size)]
 	sethi		%hi(auxio_register), %g1
 	ldx		[%g1 + %lo(auxio_register)], %g7
-	ldub		[%g7], %g5
-	or		%g5, 0xc2, %g5
-	stb		%g5, [%g7]
-	andn		%g5, 0x02, %g5
+	lduba		[%g7] ASI_PHYS_BYPASS_EC_E, %g5
+	or		%g5, AUXIO_AUX1_FTCNT, %g5
+/*	andn		%g5, AUXIO_AUX1_MASK, %g5 */
+	stba		%g5, [%g7] ASI_PHYS_BYPASS_EC_E
+	andn		%g5, AUXIO_AUX1_FTCNT, %g5
+/*	andn		%g5, AUXIO_AUX1_MASK, %g5 */
 
 	nop; nop;  nop; nop;  nop; nop;
 	nop; nop;  nop; nop;  nop; nop;
 
-	stb		%g5, [%g7]
+	stba		%g5, [%g7] ASI_PHYS_BYPASS_EC_E
 	sethi		%hi(doing_pdma), %g1
 	b,pt		%xcc, floppy_dosoftint
 	 st		%g0, [%g1 + %lo(doing_pdma)]
@@ -678,7 +685,12 @@ floppy_fifo_emptied:
 	sethi		%hi(irq_action), %g1
 	or		%g1, %lo(irq_action), %g1
 	ldx		[%g1 + (11 << 3)], %g3		! irqaction[floppy_irq]
-	ldx		[%g3 + 0x10], %g4		! action->mask == ino_bucket ptr
+	ldx		[%g3 + 0x08], %g4		! action->flags>>48==ino
+	sethi		%hi(ivector_table), %g3
+	srlx		%g4, 48, %g4
+	or		%g3, %lo(ivector_table), %g3
+	sllx		%g4, 5, %g4
+	ldx		[%g3 + %g4], %g4		! &ivector_table[ino]
 	ldx		[%g4 + 0x10], %g4		! bucket->iclr
 	stwa		%g0, [%g4] ASI_PHYS_BYPASS_EC_E	! ICLR_IDLE
 	membar		#Sync				! probably not needed...
@@ -702,10 +714,10 @@ floppy_dosoftint:
 	mov		11, %o0
 	mov		0, %o1
 	call		sparc_floppy_irq
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o2
+	 add		%sp, PTREGS_OFF, %o2
 
-	b,pt		%xcc, rtrap
-	 clr		%l6
+	b,pt		%xcc, rtrap_irq
+	 nop
 
 #endif /* CONFIG_BLK_DEV_FD */
 
@@ -748,7 +760,7 @@ __do_data_access_exception:
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		data_access_exception
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
@@ -765,7 +777,14 @@ __do_instruction_access_exception_tl1:
 	membar		#Sync
 	sethi		%hi(109f), %g7
 	ba,pt		%xcc, etraptl1
-	 or		%g7, %lo(109f), %g7	! Merge in below
+109:	 or		%g7, %lo(109b), %g7
+	mov		%l4, %o1
+	mov		%l5, %o2
+	call		instruction_access_exception_tl1
+	 add		%sp, PTREGS_OFF, %o0
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
 __do_instruction_access_exception:
 	rdpr		%pstate, %g4
 	wrpr		%g4, PSTATE_MG|PSTATE_AG, %pstate
@@ -781,7 +800,7 @@ __do_instruction_access_exception:
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		instruction_access_exception
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
@@ -873,8 +892,8 @@ cee_trap:
 
 	mov	%l5, %o1
 	call	cee_log
-	 add	%sp, STACK_BIAS + REGWIN_SZ, %o2
-	ba,a,pt	%xcc, rtrap_clr_l6
+	 add	%sp, PTREGS_OFF, %o2
+	ba,a,pt	%xcc, rtrap_irq
 
 	/* Capture I/D/E-cache state into per-cpu error scoreboard.
 	 *
@@ -1065,6 +1084,181 @@ cheetah_deferred_trap_vector_tl1:
 	jmpl		%g2 + %lo(cheetah_deferred_trap), %g0
 	 mov		1, %g1
 
+	/* Cheetah+ specific traps. These are for the new I/D cache parity
+	 * error traps.  The first argument to cheetah_plus_parity_handler
+	 * is encoded as follows:
+	 *
+	 * Bit0:	0=dcache,1=icache
+	 * Bit1:	0=recoverable,1=unrecoverable
+	 */
+	.globl		cheetah_plus_dcpe_trap_vector, cheetah_plus_dcpe_trap_vector_tl1
+cheetah_plus_dcpe_trap_vector:
+	membar		#Sync
+	sethi		%hi(do_cheetah_plus_data_parity), %g7
+	jmpl		%g7 + %lo(do_cheetah_plus_data_parity), %g0
+	 nop
+	nop
+	nop
+	nop
+	nop
+
+do_cheetah_plus_data_parity:
+	ba,pt		%xcc, etrap
+	 rd		%pc, %g7
+	mov		0x0, %o0
+	call		cheetah_plus_parity_error
+	 add		%sp, PTREGS_OFF, %o1
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
+cheetah_plus_dcpe_trap_vector_tl1:
+	membar		#Sync
+	wrpr		PSTATE_IG | PSTATE_PEF | PSTATE_PRIV, %pstate
+	sethi		%hi(do_dcpe_tl1), %g3
+	jmpl		%g3 + %lo(do_dcpe_tl1), %g0
+	 nop
+	nop
+	nop
+	nop
+
+	.globl		cheetah_plus_icpe_trap_vector, cheetah_plus_icpe_trap_vector_tl1
+cheetah_plus_icpe_trap_vector:
+	membar		#Sync
+	sethi		%hi(do_cheetah_plus_insn_parity), %g7
+	jmpl		%g7 + %lo(do_cheetah_plus_insn_parity), %g0
+	 nop
+	nop
+	nop
+	nop
+	nop
+
+do_cheetah_plus_insn_parity:
+	ba,pt		%xcc, etrap
+	 rd		%pc, %g7
+	mov		0x1, %o0
+	call		cheetah_plus_parity_error
+	 add		%sp, PTREGS_OFF, %o1
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
+cheetah_plus_icpe_trap_vector_tl1:
+	membar		#Sync
+	wrpr		PSTATE_IG | PSTATE_PEF | PSTATE_PRIV, %pstate
+	sethi		%hi(do_icpe_tl1), %g3
+	jmpl		%g3 + %lo(do_icpe_tl1), %g0
+	 nop
+	nop
+	nop
+	nop
+
+	/* If we take one of these traps when tl >= 1, then we
+	 * jump to interrupt globals.  If some trap level above us
+	 * was also using interrupt globals, we cannot recover.
+	 * We may use all interrupt global registers except %g6.
+	 */
+	.globl		do_dcpe_tl1, do_icpe_tl1
+do_dcpe_tl1:
+	rdpr		%tl, %g1		! Save original trap level
+	mov		1, %g2			! Setup TSTATE checking loop
+	sethi		%hi(TSTATE_IG), %g3	! TSTATE mask bit
+1:	wrpr		%g2, %tl		! Set trap level to check
+	rdpr		%tstate, %g4		! Read TSTATE for this level
+	andcc		%g4, %g3, %g0		! Interrupt globals in use?
+	bne,a,pn	%xcc, do_dcpe_tl1_fatal	! Yep, irrecoverable
+	 wrpr		%g1, %tl		! Restore original trap level
+	add		%g2, 1, %g2		! Next trap level
+	cmp		%g2, %g1		! Hit them all yet?
+	ble,pt		%icc, 1b		! Not yet
+	 nop
+	wrpr		%g1, %tl		! Restore original trap level
+do_dcpe_tl1_nonfatal:	/* Ok we may use interrupt globals safely. */
+	/* Reset D-cache parity */
+	sethi		%hi(1 << 16), %g1	! D-cache size
+	mov		(1 << 5), %g2		! D-cache line size
+	sub		%g1, %g2, %g1		! Move down 1 cacheline
+1:	srl		%g1, 14, %g3		! Compute UTAG
+	membar		#Sync
+	stxa		%g3, [%g1] ASI_DCACHE_UTAG
+	membar		#Sync
+	sub		%g2, 8, %g3		! 64-bit data word within line
+2:	membar		#Sync
+	stxa		%g0, [%g1 + %g3] ASI_DCACHE_DATA
+	membar		#Sync
+	subcc		%g3, 8, %g3		! Next 64-bit data word
+	bge,pt		%icc, 2b
+	 nop
+	subcc		%g1, %g2, %g1		! Next cacheline
+	bge,pt		%icc, 1b
+	 nop
+	ba,pt		%xcc, dcpe_icpe_tl1_common
+	 nop
+
+do_dcpe_tl1_fatal:
+	sethi		%hi(1f), %g7
+	ba,pt		%xcc, etraptl1
+1:	or		%g7, %lo(1b), %g7
+	mov		0x2, %o0
+	call		cheetah_plus_parity_error
+	 add		%sp, PTREGS_OFF, %o1
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+
+do_icpe_tl1:
+	rdpr		%tl, %g1		! Save original trap level
+	mov		1, %g2			! Setup TSTATE checking loop
+	sethi		%hi(TSTATE_IG), %g3	! TSTATE mask bit
+1:	wrpr		%g2, %tl		! Set trap level to check
+	rdpr		%tstate, %g4		! Read TSTATE for this level
+	andcc		%g4, %g3, %g0		! Interrupt globals in use?
+	bne,a,pn	%xcc, do_icpe_tl1_fatal	! Yep, irrecoverable
+	 wrpr		%g1, %tl		! Restore original trap level
+	add		%g2, 1, %g2		! Next trap level
+	cmp		%g2, %g1		! Hit them all yet?
+	ble,pt		%icc, 1b		! Not yet
+	 nop
+	wrpr		%g1, %tl		! Restore original trap level
+do_icpe_tl1_nonfatal:	/* Ok we may use interrupt globals safely. */
+	/* Flush I-cache */
+	sethi		%hi(1 << 15), %g1	! I-cache size
+	mov		(1 << 5), %g2		! I-cache line size
+	sub		%g1, %g2, %g1
+1:	or		%g1, (2 << 3), %g3
+	stxa		%g0, [%g3] ASI_IC_TAG
+	membar		#Sync
+	subcc		%g1, %g2, %g1
+	bge,pt		%icc, 1b
+	 nop
+	ba,pt		%xcc, dcpe_icpe_tl1_common
+	 nop
+
+do_icpe_tl1_fatal:
+	sethi		%hi(1f), %g7
+	ba,pt		%xcc, etraptl1
+1:	or		%g7, %lo(1b), %g7
+	mov		0x3, %o0
+	call		cheetah_plus_parity_error
+	 add		%sp, PTREGS_OFF, %o1
+	ba,pt		%xcc, rtrap
+	 clr		%l6
+	
+dcpe_icpe_tl1_common:
+	/* Flush D-cache, re-enable D/I caches in DCU and finally
+	 * retry the trapping instruction.
+	 */
+	sethi		%hi(1 << 16), %g1	! D-cache size
+	mov		(1 << 5), %g2		! D-cache line size
+	sub		%g1, %g2, %g1
+1:	stxa		%g0, [%g1] ASI_DCACHE_TAG
+	membar		#Sync
+	subcc		%g1, %g2, %g1
+	bge,pt		%icc, 1b
+	 nop
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g1
+	or		%g1, (DCU_DC | DCU_IC), %g1
+	stxa		%g1, [%g0] ASI_DCU_CONTROL_REG
+	membar		#Sync
+	retry
+
 	/* Cheetah FECC trap handling, we get here from tl{0,1}_fecc
 	 * in the trap table.  That code has done a memory barrier
 	 * and has disabled both the I-cache and D-cache in the DCU
@@ -1073,7 +1267,7 @@ cheetah_deferred_trap_vector_tl1:
 	 * because corrupt data may have been placed there and we don't
 	 * want to reference it.
 	 *
-	 * %g1 is one if this trap occured at %tl >= 1.
+	 * %g1 is one if this trap occurred at %tl >= 1.
 	 *
 	 * Next, we turn off error reporting so that we don't recurse.
 	 */
@@ -1099,8 +1293,8 @@ cheetah_fast_ecc:
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		cheetah_fecc_handler
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
-	ba,a,pt		%xcc, rtrap_clr_l6
+	 add		%sp, PTREGS_OFF, %o0
+	ba,a,pt		%xcc, rtrap_irq
 
 	/* Our caller has disabled I-cache and performed membar Sync. */
 	.globl		cheetah_cee
@@ -1125,8 +1319,8 @@ cheetah_cee:
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		cheetah_cee_handler
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
-	ba,a,pt		%xcc, rtrap_clr_l6
+	 add		%sp, PTREGS_OFF, %o0
+	ba,a,pt		%xcc, rtrap_irq
 
 	/* Our caller has disabled I-cache+D-cache and performed membar Sync. */
 	.globl		cheetah_deferred_trap
@@ -1151,8 +1345,8 @@ cheetah_deferred_trap:
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		cheetah_deferred_handler
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
-	ba,a,pt		%xcc, rtrap_clr_l6
+	 add		%sp, PTREGS_OFF, %o0
+	ba,a,pt		%xcc, rtrap_irq
 
 	.globl		__do_privact
 __do_privact:
@@ -1163,7 +1357,7 @@ __do_privact:
 	ba,pt		%xcc, etrap
 109:	or		%g7, %lo(109b), %g7
 	call		do_privact
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
@@ -1190,7 +1384,7 @@ do_mna:
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		mem_address_unaligned
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
@@ -1208,7 +1402,7 @@ do_lddfmna:
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		handle_lddfmna
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
@@ -1226,14 +1420,14 @@ do_stdfmna:
 	mov		%l4, %o1
 	mov		%l5, %o2
 	call		handle_stdfmna
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 clr		%l6
 
 	.globl	breakpoint_trap
 breakpoint_trap:
 	call		sparc_breakpoint
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	ba,pt		%xcc, rtrap
 	 nop
 
@@ -1269,9 +1463,9 @@ sunos_getpid:
 	call	sys_getppid
 	 nop
 	call	sys_getpid
-	 stx	%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I1]
+	 stx	%o0, [%sp + PTREGS_OFF + PT_V9_I1]
 	b,pt	%xcc, ret_sys_call
-	 stx	%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0]
+	 stx	%o0, [%sp + PTREGS_OFF + PT_V9_I0]
 
 	/* SunOS getuid() returns uid in %o0 and euid in %o1 */
 	.globl	sunos_getuid
@@ -1279,9 +1473,9 @@ sunos_getuid:
 	call	sys32_geteuid16
 	 nop
 	call	sys32_getuid16
-	 stx	%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I1]
+	 stx	%o0, [%sp + PTREGS_OFF + PT_V9_I1]
 	b,pt	%xcc, ret_sys_call
-	 stx	%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0]
+	 stx	%o0, [%sp + PTREGS_OFF + PT_V9_I0]
 
 	/* SunOS getgid() returns gid in %o0 and egid in %o1 */
 	.globl	sunos_getgid
@@ -1289,9 +1483,9 @@ sunos_getgid:
 	call	sys32_getegid16
 	 nop
 	call	sys32_getgid16
-	 stx	%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I1]
+	 stx	%o0, [%sp + PTREGS_OFF + PT_V9_I1]
 	b,pt	%xcc, ret_sys_call
-	 stx	%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0]
+	 stx	%o0, [%sp + PTREGS_OFF + PT_V9_I0]
 #endif
 
 	/* SunOS's execv() call only specifies the argv argument, the
@@ -1303,14 +1497,14 @@ sys_execve:
 	ba,pt		%xcc, execve_merge
 	 or		%g1, %lo(sparc_execve), %g1
 sunos_execv:
-	stx		%g0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I2]
+	stx		%g0, [%sp + PTREGS_OFF + PT_V9_I2]
 sys32_execve:
 	sethi		%hi(sparc32_execve), %g1
 	or		%g1, %lo(sparc32_execve), %g1
 execve_merge:
 	flushw
 	jmpl		%g1, %g0
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 
 	.globl	sys_pipe, sys_sigpause, sys_nis_syscall
 	.globl	sys_sigsuspend, sys_rt_sigsuspend, sys32_rt_sigsuspend
@@ -1321,12 +1515,12 @@ execve_merge:
 	.globl	sys32_sigstack
 	.align	32
 sys_pipe:	ba,pt		%xcc, sparc_pipe
-		 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+		 add		%sp, PTREGS_OFF, %o0
 sys_nis_syscall:ba,pt		%xcc, c_sys_nis_syscall
-		 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+		 add		%sp, PTREGS_OFF, %o0
 sys_memory_ordering:
 		ba,pt		%xcc, sparc_memory_ordering
-		 add		%sp, STACK_BIAS + REGWIN_SZ, %o1
+		 add		%sp, PTREGS_OFF, %o1
 sys_sigaltstack:ba,pt		%xcc, do_sigaltstack
 		 add		%i6, STACK_BIAS, %o2
 sys32_sigstack:	ba,pt		%xcc, do_sys32_sigstack
@@ -1336,47 +1530,47 @@ sys32_sigaltstack:
 		 mov		%i6, %o2
 
 		.align		32
-sys_sigsuspend:	add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+sys_sigsuspend:	add		%sp, PTREGS_OFF, %o0
 		call		do_sigsuspend
 		 add		%o7, 1f-.-4, %o7
 		nop
 sys_rt_sigsuspend: /* NOTE: %o0,%o1 have a correct value already */
-		add		%sp, STACK_BIAS + REGWIN_SZ, %o2
+		add		%sp, PTREGS_OFF, %o2
 		call		do_rt_sigsuspend
 		 add		%o7, 1f-.-4, %o7
 		nop
 sys32_rt_sigsuspend: /* NOTE: %o0,%o1 have a correct value already */
 		srl		%o0, 0, %o0
-		add		%sp, STACK_BIAS + REGWIN_SZ, %o2
+		add		%sp, PTREGS_OFF, %o2
 		call		do_rt_sigsuspend32
 		 add		%o7, 1f-.-4, %o7
 		/* NOTE: %o0 has a correct value already */
-sys_sigpause:	add		%sp, STACK_BIAS + REGWIN_SZ, %o1
+sys_sigpause:	add		%sp, PTREGS_OFF, %o1
 		call		do_sigpause
 		 add		%o7, 1f-.-4, %o7
 		nop
 sys32_sigreturn:
-		add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+		add		%sp, PTREGS_OFF, %o0
 		call		do_sigreturn32
 		 add		%o7, 1f-.-4, %o7
 		nop
 sys_rt_sigreturn:
-		add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+		add		%sp, PTREGS_OFF, %o0
 		call		do_rt_sigreturn
 		 add		%o7, 1f-.-4, %o7
 		nop
 sys32_rt_sigreturn:
-		add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+		add		%sp, PTREGS_OFF, %o0
 		call		do_rt_sigreturn32
 		 add		%o7, 1f-.-4, %o7
 		nop
-sys_ptrace:	add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+sys_ptrace:	add		%sp, PTREGS_OFF, %o0
 		call		do_ptrace
 		 add		%o7, 1f-.-4, %o7
 		nop
 		.align		32
-1:		ldx		[%curptr + AOFF_task_ptrace], %l5
-		andcc		%l5, 0x02, %g0
+1:		ldx		[%curptr + TI_FLAGS], %l5
+		andcc		%l5, _TIF_SYSCALL_TRACE, %g0
 		be,pt		%icc, rtrap
 		 clr		%l6
 		call		syscall_trace
@@ -1420,20 +1614,20 @@ sys_fork:	 clr		%o1
 sys_clone:	flushw
 		movrz		%o1, %fp, %o1
 		mov		0, %o3
-		ba,pt		%xcc, do_fork
-		 add		%sp, STACK_BIAS + REGWIN_SZ, %o2
+		ba,pt		%xcc, sparc_do_fork
+		 add		%sp, PTREGS_OFF, %o2
 ret_from_syscall:
 		/* Clear SPARC_FLAG_NEWCHILD, switch_to leaves thread.flags in
 		 * %o7 for us.  Check performance counter stuff too.
 		 */
-		andn		%o7, SPARC_FLAG_NEWCHILD, %l0
-		mov		%g5, %o0	/* 'prev' */
+		andn		%o7, _TIF_NEWCHILD, %l0
+		stx		%l0, [%g6 + TI_FLAGS]
 		call		schedule_tail
-		 stb		%l0, [%g6 + AOFF_task_thread + AOFF_thread_flags]
-		andcc		%l0, SPARC_FLAG_PERFCTR, %g0
+		 mov		%g5, %o0
+		andcc		%l0, _TIF_PERFCTR, %g0
 		be,pt		%icc, 1f
 		 nop
-		ldx		[%g6 + AOFF_task_thread + AOFF_thread_pcr_reg], %o7
+		ldx		[%g6 + TI_PCR], %o7
 		wr		%g0, %o7, %pcr
 
 		/* Blackbird errata workaround.  See commentary in
@@ -1447,7 +1641,7 @@ ret_from_syscall:
 		rd		%pic, %g0
 
 1:		b,pt		%xcc, ret_sys_call
-		 ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0], %o0
+		 ldx		[%sp + PTREGS_OFF + PT_V9_I0], %o0
 sparc_exit:	wrpr		%g0, (PSTATE_RMO | PSTATE_PEF | PSTATE_PRIV), %pstate
 		rdpr		%otherwin, %g1
 		rdpr		%cansave, %g3
@@ -1456,7 +1650,7 @@ sparc_exit:	wrpr		%g0, (PSTATE_RMO | PSTATE_PEF | PSTATE_PRIV), %pstate
 		wrpr		%g0, 0x0, %otherwin
 		wrpr		%g0, (PSTATE_RMO | PSTATE_PEF | PSTATE_PRIV | PSTATE_IE), %pstate
 		ba,pt		%xcc, sys_exit
-		 stb		%g0, [%g6 + AOFF_task_thread + AOFF_thread_w_saved]
+		 stb		%g0, [%g6 + TI_WSAVED]
 
 linux_sparc_ni_syscall:
 	sethi		%hi(sys_ni_syscall), %l7
@@ -1495,17 +1689,17 @@ linux_sparc_syscall32:
 	sll		%g1, 2, %l4				! IEU0	Group
 #ifdef SYSCALL_TRACING
 	call		syscall_trace_entry
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	srl		%i0, 0, %o0
 #endif
 	mov		%i4, %o4				! IEU1
 	lduw		[%l7 + %l4], %l7			! Load
 	srl		%i1, 0, %o1				! IEU0	Group
-	ldx		[%curptr + AOFF_task_ptrace], %l0	! Load
+	ldx		[%curptr + TI_FLAGS], %l0		! Load
 
 	mov		%i5, %o5				! IEU1
 	srl		%i2, 0, %o2				! IEU0	Group
-	andcc		%l0, 0x02, %g0				! IEU0	Group
+	andcc		%l0, _TIF_SYSCALL_TRACE, %g0		! IEU0	Group
 	bne,pn		%icc, linux_syscall_trace32		! CTI
 	 mov		%i0, %l5				! IEU1
 	call		%l7					! CTI	Group brk forced
@@ -1523,47 +1717,47 @@ linux_sparc_syscall:
 	sll		%g1, 2, %l4				! IEU0	Group
 #ifdef SYSCALL_TRACING
 	call		syscall_trace_entry
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	mov		%i0, %o0
 #endif
 	mov		%i1, %o1				! IEU1
 	lduw		[%l7 + %l4], %l7			! Load
 4:	mov		%i2, %o2				! IEU0	Group
-	ldx		[%curptr + AOFF_task_ptrace], %l0	! Load
+	ldx		[%curptr + TI_FLAGS], %l0		! Load
 
 	mov		%i3, %o3				! IEU1
 	mov		%i4, %o4				! IEU0	Group
-	andcc		%l0, 0x02, %g0				! IEU1	Group+1 bubble
+	andcc		%l0, _TIF_SYSCALL_TRACE, %g0		! IEU1	Group+1 bubble
 	bne,pn		%icc, linux_syscall_trace		! CTI	Group
 	 mov		%i0, %l5				! IEU0
 2:	call		%l7					! CTI	Group brk forced
 	 mov		%i5, %o5				! IEU0
 	nop
 
-3:	stx		%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0]
+3:	stx		%o0, [%sp + PTREGS_OFF + PT_V9_I0]
 ret_sys_call:
 #ifdef SYSCALL_TRACING
 	mov		%o0, %o1
 	call		syscall_trace_exit
-	 add		%sp, STACK_BIAS + REGWIN_SZ, %o0
+	 add		%sp, PTREGS_OFF, %o0
 	mov		%o1, %o0
 #endif
-	ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TSTATE], %g3
-	ldx		[%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC], %l1 ! pc = npc
+	ldx		[%sp + PTREGS_OFF + PT_V9_TSTATE], %g3
+	ldx		[%sp + PTREGS_OFF + PT_V9_TNPC], %l1 ! pc = npc
 	sra		%o0, 0, %o0
 	mov		%ulo(TSTATE_XCARRY | TSTATE_ICARRY), %g2
 	cmp		%o0, -ENOIOCTLCMD
 	sllx		%g2, 32, %g2
 	bgeu,pn		%xcc, 1f
 
-	 andcc		%l0, 0x02, %l6	
+	 andcc		%l0, _TIF_SYSCALL_TRACE, %l6	
 	andn		%g3, %g2, %g3		/* System call success, clear Carry condition code. */
-	stx		%g3, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TSTATE]	
+	stx		%g3, [%sp + PTREGS_OFF + PT_V9_TSTATE]	
 	bne,pn		%icc, linux_syscall_trace2
 	 add		%l1, 0x4, %l2				         ! npc = npc+4
-	stx		%l1, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TPC]
+	stx		%l1, [%sp + PTREGS_OFF + PT_V9_TPC]
 	ba,pt		%xcc, rtrap_clr_l6
-	 stx		%l2, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC]
+	 stx		%l2, [%sp + PTREGS_OFF + PT_V9_TNPC]
 
 1:
 	/* System call failure, set Carry condition code.
@@ -1571,21 +1765,21 @@ ret_sys_call:
 	 */
 	sub		%g0, %o0, %o0
 	or		%g3, %g2, %g3
-	stx		%o0, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_I0]
+	stx		%o0, [%sp + PTREGS_OFF + PT_V9_I0]
 	mov		1, %l6
-	stx		%g3, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TSTATE]
+	stx		%g3, [%sp + PTREGS_OFF + PT_V9_TSTATE]
 	bne,pn		%icc, linux_syscall_trace2
 	 add		%l1, 0x4, %l2				         !npc = npc+4
-	stx		%l1, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TPC]
+	stx		%l1, [%sp + PTREGS_OFF + PT_V9_TPC]
 
 	b,pt		%xcc, rtrap
-	 stx		%l2, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC]
+	 stx		%l2, [%sp + PTREGS_OFF + PT_V9_TNPC]
 linux_syscall_trace2:
 	call		syscall_trace
 	 nop
-	stx		%l1, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TPC]
+	stx		%l1, [%sp + PTREGS_OFF + PT_V9_TPC]
 	ba,pt		%xcc, rtrap
-	 stx		%l2, [%sp + STACK_BIAS + REGWIN_SZ + PT_V9_TNPC]
+	 stx		%l2, [%sp + PTREGS_OFF + PT_V9_TNPC]
 
 	.align		32
 	.globl		__flushw_user
@@ -1602,67 +1796,3 @@ __flushw_user:
 	 restore	%g0, %g0, %g0
 2:	retl
 	 nop
-
-/* This need not obtain the xtime_lock as it is coded in
- * an implicitly SMP safe way already.
- */
-	.align		64
-	.globl		do_gettimeofday
-do_gettimeofday:	/* %o0 = timevalp */
-	/* Load doubles must be used on xtime so that what we get
-	 * is guarenteed to be atomic, this is why we can run this
-	 * with interrupts on full blast.  Don't touch this... -DaveM
-	 *
-	 * Note with time_t changes to the timeval type, I must now use
-	 * nucleus atomic quad 128-bit loads.
-	 */
-	sethi	%hi(timer_tick_offset), %g3
-	sethi	%hi(xtime), %g2
-	sethi	%hi(timer_tick_compare), %g1
-	ldx	[%g3 + %lo(timer_tick_offset)], %g3
-	or	%g2, %lo(xtime), %g2
-	or	%g1, %lo(timer_tick_compare), %g1
-1:	rdpr	%ver, %o2
-	sethi	%hi(0x003e0014), %o1
-	srlx	%o2, 32, %o2
-	or	%o1, %lo(0x003e0014), %o1
-	ldda	[%g2] ASI_NUCLEUS_QUAD_LDD, %o4
-	cmp	%o2, %o1
-	bne,pt	%xcc, 2f
-	 nop
-	ba,pt	%xcc, 3f
-	 rd	%asr24, %o1
-2:	rd	%tick, %o1
-3:	ldx	[%g1], %g7
-	ldda	[%g2] ASI_NUCLEUS_QUAD_LDD, %o2
-	xor	%o4, %o2, %o2
-	xor	%o5, %o3, %o3
-	orcc	%o2, %o3, %g0
-	bne,pn	%xcc, 1b
-	 sethi	%hi(wall_jiffies), %o2
-	sethi	%hi(jiffies), %o3
-	ldx	[%o2 + %lo(wall_jiffies)], %o2
-	ldx	[%o3 + %lo(jiffies)], %o3
-	sub	%o3, %o2, %o2
-	sethi	%hi(timer_ticks_per_usec_quotient), %o3
-	add	%g3, %o1, %o1
-	ldx	[%o3 + %lo(timer_ticks_per_usec_quotient)], %o3
-	sub	%o1, %g7, %o1
-	mulx	%o3, %o1, %o1
-	brz,pt	%o2, 1f
-	 srlx	%o1, 32, %o1
-	sethi	%hi(10000), %g2
-	or	%g2, %lo(10000), %g2
-	add	%o1, %g2, %o1
-1:	sethi	%hi(1000000), %o2
-	srlx	%o5, 32, %o5
-	or	%o2, %lo(1000000), %o2
-	add	%o5, %o1, %o5
-	cmp	%o5, %o2
-	bl,a,pn	%xcc, 1f
-	 stx	%o4, [%o0 + 0x0]
-	add	%o4, 0x1, %o4
-	sub	%o5, %o2, %o5
-	stx	%o4, [%o0 + 0x0]
-1:	retl
-	 st	%o5, [%o0 + 0x8]

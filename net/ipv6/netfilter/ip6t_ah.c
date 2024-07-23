@@ -9,7 +9,6 @@
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #include <linux/netfilter_ipv6/ip6t_ah.h>
 
-EXPORT_NO_SYMBOLS;
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("IPv6 AH match");
 MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
@@ -19,13 +18,6 @@ MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
 #else
 #define DEBUGP(format, args...)
 #endif
-
-struct ahhdr {
-       __u8    nexthdr;
-       __u8    hdrlen;
-       __u16   reserved;
-       __u32   spi;
-};
 
 /* Returns 1 if the spi is matched by the range, 0 otherwise */
 static inline int
@@ -49,7 +41,7 @@ match(const struct sk_buff *skb,
       u_int16_t datalen,
       int *hotdrop)
 {
-       struct ahhdr *ah = NULL;
+       struct ip_auth_hdr *ah = NULL;
        const struct ip6t_ah *ahinfo = matchinfo;
        unsigned int temp;
        int len;
@@ -129,12 +121,12 @@ match(const struct sk_buff *skb,
        /* AH header not found */
        if ( temp != MASK_AH ) return 0;
 
-       if (len < (int)sizeof(struct ahhdr)){
+       if (len < (int)sizeof(struct ip_auth_hdr)){
 	       *hotdrop = 1;
        		return 0;
        }
 
-       ah = (struct ahhdr *) (skb->data + ptr);
+       ah = (struct ip_auth_hdr *) (skb->data + ptr);
 
        DEBUGP("IPv6 AH LEN %u %u ", hdrlen, ah->hdrlen);
        DEBUGP("RES %04X ", ah->reserved);
@@ -190,8 +182,12 @@ checkentry(const char *tablename,
        return 1;
 }
 
-static struct ip6t_match ah_match
-= { { NULL, NULL }, "ah", &match, &checkentry, NULL, THIS_MODULE };
+static struct ip6t_match ah_match = {
+	.name		= "ah",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

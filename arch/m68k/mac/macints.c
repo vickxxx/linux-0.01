@@ -30,7 +30,7 @@
  *		  - slot 0: SCSI interrupt
  *		  - slot 1: Sound interrupt
  *
- * Levels 3-6 vary by machine type. For VIA or RBV Macintohes:
+ * Levels 3-6 vary by machine type. For VIA or RBV Macintoshes:
  *
  *	3	- unused (?)
  *
@@ -120,6 +120,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/interrupt.h> /* for intr_count */
 #include <linux/delay.h>
+#include <linux/seq_file.h>
 
 #include <asm/system.h>
 #include <asm/irq.h>
@@ -130,6 +131,7 @@
 #include <asm/mac_via.h>
 #include <asm/mac_psc.h>
 #include <asm/hwtest.h>
+#include <asm/errno.h>
 
 #include <asm/macints.h>
 
@@ -215,10 +217,9 @@ static void scc_irq_disable(int);
  * console_loglevel determines NMI handler function
  */
 
-extern void mac_bang(int, void *, struct pt_regs *);
-
-void mac_nmi_handler(int, void *, struct pt_regs *);
-void mac_debug_handler(int, void *, struct pt_regs *);
+extern irqreturn_t mac_bang(int, void *, struct pt_regs *);
+irqreturn_t mac_nmi_handler(int, void *, struct pt_regs *);
+irqreturn_t mac_debug_handler(int, void *, struct pt_regs *);
 
 /* #define DEBUG_MACINTS */
 
@@ -249,7 +250,7 @@ void mac_init_IRQ(void)
 #endif /* SHUTUP_SONIC */
 
 	/* 
-	 * Now register the handlers for the the master IRQ handlers
+	 * Now register the handlers for the master IRQ handlers
 	 * at levels 1-7. Most of the work is done elsewhere.
 	 */
 
@@ -274,15 +275,14 @@ void mac_init_IRQ(void)
 
 static inline void mac_insert_irq(irq_node_t **list, irq_node_t *node)
 {
-	unsigned long cpu_flags;
+	unsigned long flags;
 	irq_node_t *cur;
 
 	if (!node->dev_id)
 		printk("%s: Warning: dev_id of %s is zero\n",
 		       __FUNCTION__, node->devname);
 
-	save_flags(cpu_flags);
-	cli();
+	local_irq_save(flags);
 
 	cur = *list;
 
@@ -307,27 +307,26 @@ static inline void mac_insert_irq(irq_node_t **list, irq_node_t *node)
 	node->next = cur;
 	*list = node;
 
-	restore_flags(cpu_flags);
+	local_irq_restore(flags);
 }
 
 static inline void mac_delete_irq(irq_node_t **list, void *dev_id)
 {
-	unsigned long cpu_flags;
+	unsigned long flags;
 	irq_node_t *node;
 
-	save_flags(cpu_flags);
-	cli();
+	local_irq_save(flags);
 
 	for (node = *list; node; list = &node->next, node = *list) {
 		if (node->dev_id == dev_id) {
 			*list = node->next;
 			/* Mark it as free. */
 			node->handler = NULL;
-			restore_flags(cpu_flags);
+			local_irq_restore(flags);
 			return;
 		}
 	}
-	restore_flags(cpu_flags);
+	local_irq_restore(flags);
 	printk ("%s: tried to remove invalid irq\n", __FUNCTION__);
 }
 
@@ -341,9 +340,9 @@ static inline void mac_delete_irq(irq_node_t **list, void *dev_id)
 void mac_do_irq_list(int irq, struct pt_regs *fp)
 {
 	irq_node_t *node, *slow_nodes;
-	unsigned long cpu_flags;
+	unsigned long flags;
 
-	kstat.irqs[0][irq]++;
+	kstat_cpu(0).irqs[irq]++;
 
 #ifdef DEBUG_SPURIOUS
 	if (!mac_irq_list[irq] && (console_loglevel > 7)) {
@@ -358,8 +357,8 @@ void mac_do_irq_list(int irq, struct pt_regs *fp)
 	     node = node->next)
 		node->handler(irq, node->dev_id, fp);
 	if (!node) return;
-	save_flags(cpu_flags);
-	restore_flags((cpu_flags & ~0x0700) | (fp->sr & 0x0700));
+	local_save_flags(flags);
+	local_irq_restore((flags & ~0x0700) | (fp->sr & 0x0700));
 	/* if slow handlers exists, serve them now */
 	slow_nodes = node;
 	for (; node; node = node->next) {
@@ -494,12 +493,12 @@ int mac_irq_pending( unsigned int irq )
  * Add an interrupt service routine to an interrupt source.
  * Returns 0 on success.
  *
- * FIXME: You can register interrupts on nonexistant source (ie PSC4 on a
+ * FIXME: You can register interrupts on nonexistent source (ie PSC4 on a
  *        non-PSC machine). We should return -EINVAL in those cases.
  */
  
 int mac_request_irq(unsigned int irq,
-		    void (*handler)(int, void *, struct pt_regs *),
+		    irqreturn_t (*handler)(int, void *, struct pt_regs *),
 		    unsigned long flags, const char *devname, void *dev_id)
 {
 	irq_node_t *node;
@@ -576,9 +575,9 @@ void mac_free_irq(unsigned int irq, void *dev_id)
  *		  displayed for us as autovector irq 0.
  */
 
-int mac_get_irq_list (char *buf)
+int show_mac_interrupts(struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i;
 	irq_node_t *node;
 	char *base;
 
@@ -618,25 +617,24 @@ int mac_get_irq_list (char *buf)
 			case 8: base = "bbn";
 				break;
 		}
-		len += sprintf(buf+len, "%4s %2d: %10u ",
-				base, i, kstat.irqs[0][i]);
+		seq_printf(p, "%4s %2d: %10u ", base, i, kstat_cpu(0).irqs[i]);
 
 		do {
 			if (node->flags & IRQ_FLG_FAST) {
-				len += sprintf(buf+len, "F ");
+				seq_puts(p, "F ");
 			} else if (node->flags & IRQ_FLG_SLOW) {
-				len += sprintf(buf+len, "S ");
+				seq_puts(p, "S ");
 			} else {
-				len += sprintf(buf+len, "  ");
+				seq_puts(p, "  ");
 			}
-			len += sprintf(buf+len, "%s\n", node->devname);
+			seq_printf(p, "%s\n", node->devname);
 			if ((node = node->next)) {
-				len += sprintf(buf+len, "                    ");
+				seq_puts(p, "                    ");
 			}
 		} while(node);
 
 	}
-	return len;
+	return 0;
 }
 
 void mac_default_handler(int irq, void *dev_id, struct pt_regs *regs)
@@ -648,18 +646,19 @@ void mac_default_handler(int irq, void *dev_id, struct pt_regs *regs)
 
 static int num_debug[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
 
-void mac_debug_handler(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t mac_debug_handler(int irq, void *dev_id, struct pt_regs *regs)
 {
 	if (num_debug[irq] < 10) {
 		printk("DEBUG: Unexpected IRQ %d\n", irq);
 		num_debug[irq]++;
 	}
+	return IRQ_HANDLED;
 }
 
 static int in_nmi = 0;
 static volatile int nmi_hold = 0;
 
-void mac_nmi_handler(int irq, void *dev_id, struct pt_regs *fp)
+irqreturn_t mac_nmi_handler(int irq, void *dev_id, struct pt_regs *fp)
 {
 	int i;
 	/* 
@@ -704,6 +703,7 @@ void mac_nmi_handler(int irq, void *dev_id, struct pt_regs *fp)
 #endif
 	}
 	in_nmi--;
+	return IRQ_HANDLED;
 }
 
 /*
@@ -734,15 +734,15 @@ void mac_scc_dispatch(int irq, void *dev_id, struct pt_regs *regs)
 {
 	volatile unsigned char *scc = (unsigned char *) mac_bi_data.sccbase + 2;
 	unsigned char reg;
-	unsigned long cpu_flags;
+	unsigned long flags;
 
 	/* Read RR3 from the chip. Always do this on channel A */
 	/* This must be an atomic operation so disable irqs.   */
 
-	save_flags(cpu_flags); cli();
+	local_irq_save(flags);
 	*scc = 3;
 	reg = *scc;
-	restore_flags(cpu_flags);
+	local_irq_restore(flags);
 
 	/* Now dispatch. Bits 0-2 are for channel B and */
 	/* bits 3-5 are for channel A. We can safely    */
@@ -750,7 +750,7 @@ void mac_scc_dispatch(int irq, void *dev_id, struct pt_regs *regs)
 	/*                                              */
 	/* Note that we're ignoring scc_mask for now.   */
 	/* If we actually mask the ints then we tend to */
-	/* get hammered by very persistant SCC irqs,    */
+	/* get hammered by very persistent SCC irqs,    */
 	/* and since they're autovector interrupts they */
 	/* pretty much kill the system.                 */
 

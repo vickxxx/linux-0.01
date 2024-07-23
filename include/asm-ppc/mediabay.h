@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.mediabay.h 1.5 05/17/01 18:14:25 cort
- */
-/*
  * mediabay.h: definitions for using the media bay
  * on PowerBook 3400 and similar computers.
  *
@@ -12,12 +9,14 @@
 
 #ifdef __KERNEL__
 
-#define MB_FD	0		/* media bay contains floppy drive */
-#define MB_FD1	1		/* media bay contains floppy drive */
-#define MB_CD	3		/* media bay contains ATA drive such as CD */
-#define MB_NO	7		/* media bay contains nothing */
+#define MB_FD		0	/* media bay contains floppy drive (automatic eject ?) */
+#define MB_FD1		1	/* media bay contains floppy drive (manual eject ?) */
+#define MB_SOUND	2	/* sound device ? */
+#define MB_CD		3	/* media bay contains ATA drive such as CD or ZIP */
+#define MB_PCI		5	/* media bay contains a PCI device */
+#define MB_POWER	6	/* media bay contains a Power device (???) */
+#define MB_NO		7	/* media bay contains nothing */
 
-void media_bay_init(void);
 int check_media_bay(struct device_node *which_bay, int what);
 int check_media_bay_by_base(unsigned long base, int what);
 

@@ -78,7 +78,7 @@
  Please note that the drive ordering that Future Domain implemented in BIOS
  versions 3.4 and 3.5 is the opposite of the order (currently) used by the
  rest of the SCSI industry.  If you have BIOS version 3.4 or 3.5, and have
- more then one drive, then the drive ordering will be the reverse of that
+ more than one drive, then the drive ordering will be the reverse of that
  which you see under DOS.  For example, under DOS SCSI ID 0 will be D: and
  SCSI ID 1 will be C: (the boot device).  Under Linux, SCSI ID 0 will be
  /dev/sda and SCSI ID 1 will be /dev/sdb.  The Linux ordering is consistent
@@ -255,11 +255,6 @@
  be increased by changing this value to values which are close to 2.
  Please let me know if you try any different values.
 
- DO_DETECT: This activates some old scan code which was needed before the
- high level drivers got fixed.  If you are having trouble with the driver,
- turning this on should not hurt, and might help.  Please let me know if
- this is the case, since this code will be removed from future drivers.
-
  RESELECTION: This is no longer an option, since I gave up trying to
  implement it in version 4.x of this driver.  It did not improve
  performance at all and made the driver unstable (because I never found one
@@ -271,20 +266,11 @@
 
  **************************************************************************/
 
+#include <linux/config.h>
 #include <linux/module.h>
-
-#ifdef PCMCIA
-#undef MODULE
-#endif
-
 #include <linux/init.h>
-#include <linux/sched.h>
-#include <asm/io.h>
+#include <linux/interrupt.h>
 #include <linux/blk.h>
-#include "scsi.h"
-#include "hosts.h"
-#include "fdomain.h"
-#include <asm/system.h>
 #include <linux/spinlock.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -294,16 +280,24 @@
 #include <linux/stat.h>
 #include <linux/delay.h>
 
-#include <linux/config.h>	/* for CONFIG_PCI */
+#include <asm/io.h>
+#include <asm/system.h>
+
+#include "scsi.h"
+#include "hosts.h"
+
+MODULE_AUTHOR("Rickard E. Faith");
+MODULE_DESCRIPTION("Future domain SCSI driver");
+MODULE_LICENSE("GPL");
+
   
-#define VERSION          "$Revision: 5.50 $"
+#define VERSION          "$Revision: 5.51 $"
 
 /* START OF USER DEFINABLE OPTIONS */
 
-#define DEBUG            1	/* Enable debugging output */
+#define DEBUG            0	/* Enable debugging output */
 #define ENABLE_PARITY    1	/* Enable SCSI Parity */
 #define FIFO_COUNT       2	/* Number of 512 byte blocks before INTR */
-#define DO_DETECT        0	/* Do device detection here (see scsi.c) */
 
 /* END OF USER DEFINABLE OPTIONS */
 
@@ -382,22 +376,23 @@ enum out_port_type {
    Write_FIFO       = 12
 };
 
-static int               port_base         = 0;
-static unsigned long     bios_base         = 0;
-static int               bios_major        = 0;
-static int               bios_minor        = 0;
-static int               PCI_bus           = 0;
-static int               Quantum           = 0;	/* Quantum board variant */
-static int               interrupt_level   = 0;
-static volatile int      in_command        = 0;
-static Scsi_Cmnd         *current_SC       = NULL;
+/* .bss will zero all the static variables below */
+static int               port_base;
+static unsigned long     bios_base;
+static int               bios_major;
+static int               bios_minor;
+static int               PCI_bus;
+static int               Quantum;	/* Quantum board variant */
+static int               interrupt_level;
+static volatile int      in_command;
+static Scsi_Cmnd         *current_SC;
 static enum chip_type    chip              = unknown;
-static int               adapter_mask      = 0;
-static int               this_id           = 0;
-static int               setup_called      = 0;
+static int               adapter_mask;
+static int               this_id;
+static int               setup_called;
 
 #if DEBUG_RACE
-static volatile int      in_interrupt_flag = 0;
+static volatile int      in_interrupt_flag;
 #endif
 
 static int               SCSI_Mode_Cntl_port;
@@ -417,17 +412,14 @@ static int               Write_SCSI_Data_port;
 static int               FIFO_Size = 0x2000; /* 8k FIFO for
 						pre-tmc18c30 chips */
 
-extern void              do_fdomain_16x0_intr( int irq, void *dev_id,
+static irqreturn_t       do_fdomain_16x0_intr( int irq, void *dev_id,
 					    struct pt_regs * regs );
+int		 	fdomain_16x0_bus_reset(Scsi_Cmnd *SCpnt);
 
-#ifdef MODULE
-				/* Allow insmod parameters to be like LILO
-                                   parameters.  For example:
-				   insmod fdomain fdomain=0x140,11
-				*/
+/* Allow insmod parameters to be like LILO parameters.  For example:
+   insmod fdomain fdomain=0x140,11 */
 static char * fdomain = NULL;
 MODULE_PARM(fdomain, "s");
-#endif
 
 static unsigned long addresses[] = {
    0xc8000,
@@ -527,16 +519,16 @@ static void print_banner( struct Scsi_Host *shpnt )
    if (!shpnt) return;		/* This won't ever happen */
 
    if (bios_major < 0 && bios_minor < 0) {
-      printk( "scsi%d: <fdomain> No BIOS; using scsi id %d\n",
-	      shpnt->host_no, shpnt->this_id );
+      printk(KERN_INFO "scsi%d: <fdomain> No BIOS; using scsi id %d\n",
+	      shpnt->host_no, shpnt->this_id);
    } else {
-      printk( "scsi%d: <fdomain> BIOS version ", shpnt->host_no );
+      printk(KERN_INFO "scsi%d: <fdomain> BIOS version ", shpnt->host_no);
 
-      if (bios_major >= 0) printk( "%d.", bios_major );
-      else                 printk( "?." );
+      if (bios_major >= 0) printk("%d.", bios_major);
+      else                 printk("?.");
 
-      if (bios_minor >= 0) printk( "%d", bios_minor );
-      else                 printk( "?." );
+      if (bios_minor >= 0) printk("%d", bios_minor);
+      else                 printk("?.");
    
       printk( " at 0x%lx using scsi id %d\n",
 	      bios_base, shpnt->this_id );
@@ -546,31 +538,28 @@ static void print_banner( struct Scsi_Host *shpnt )
 				   boards, we will have to modify banner
 				   for additional PCI cards, but for now if
 				   it's PCI it's a TMC-3260 - JTM */
-   printk( "scsi%d: <fdomain> %s chip at 0x%x irq ",
+   printk(KERN_INFO "scsi%d: <fdomain> %s chip at 0x%x irq ",
 	   shpnt->host_no,
-	   chip == tmc1800 ? "TMC-1800"
-	   : (chip == tmc18c50 ? "TMC-18C50"
-	      : (chip == tmc18c30 ?
-		 (PCI_bus ? "TMC-36C70 (PCI bus)" : "TMC-18C30")
-		 : "Unknown")),
-	   port_base );
+	   chip == tmc1800 ? "TMC-1800" : (chip == tmc18c50 ? "TMC-18C50" : (chip == tmc18c30 ? (PCI_bus ? "TMC-36C70 (PCI bus)" : "TMC-18C30") : "Unknown")),
+	   port_base);
 
-   if (interrupt_level) printk( "%d", interrupt_level );
-   else                 printk( "<none>" );
+   if (interrupt_level)
+   	printk("%d", interrupt_level);
+   else
+        printk("<none>");
 
    printk( "\n" );
 }
 
-static int __init fdomain_setup( char *str )
+int __init fdomain_setup(char *str)
 {
 	int ints[4];
 
 	(void)get_options(str, ARRAY_SIZE(ints), ints);
 
 	if (setup_called++ || ints[0] < 2 || ints[0] > 3) {
-		printk( "scsi: <fdomain>"
-		" Usage: fdomain=<PORT_BASE>,<IRQ>[,<ADAPTER_ID>]\n" );
-		printk( "scsi: <fdomain> Bad LILO/INSMOD parameters?\n" );
+		printk(KERN_INFO "scsi: <fdomain> Usage: fdomain=<PORT_BASE>,<IRQ>[,<ADAPTER_ID>]\n");
+		printk(KERN_ERR "scsi: <fdomain> Bad LILO/INSMOD parameters?\n");
 		return 0;
 	}
 
@@ -586,9 +575,9 @@ static int __init fdomain_setup( char *str )
 __setup("fdomain=", fdomain_setup);
 
 
-static void do_pause( unsigned amount )	/* Pause for amount*10 milliseconds */
+static void do_pause(unsigned amount)	/* Pause for amount*10 milliseconds */
 {
-   mdelay(10*amount);
+	mdelay(10*amount);
 }
 
 inline static void fdomain_make_bus_idle( void )
@@ -671,22 +660,20 @@ static int fdomain_test_loopback( void )
 
 static int fdomain_get_irq( int base )
 {
-   int options = inb( base + Configuration1 );
+   int options = inb(base + Configuration1);
 
 #if DEBUG_DETECT
-   printk( "scsi: <fdomain> Options = %x\n", options );
+   printk("scsi: <fdomain> Options = %x\n", options);
 #endif
-   
-				/* Check for board with lowest bios_base --
-				   this isn't valid for the 18c30 or for
-				   boards on the PCI bus, so just assume we
-				   have the right board. */
+ 
+   /* Check for board with lowest bios_base --
+      this isn't valid for the 18c30 or for
+      boards on the PCI bus, so just assume we
+      have the right board. */
 
-   if (chip != tmc18c30
-       && !PCI_bus
-       && addresses[ (options & 0xc0) >> 6 ] != bios_base) return 0;
-
-   return ints[ (options & 0x0e) >> 1 ];
+   if (chip != tmc18c30 && !PCI_bus && addresses[(options & 0xc0) >> 6 ] != bios_base)
+   	return 0;
+   return ints[(options & 0x0e) >> 1];
 }
 
 static int fdomain_isa_detect( int *irq, int *iobase )
@@ -698,7 +685,6 @@ static int fdomain_isa_detect( int *irq, int *iobase )
 #if DEBUG_DETECT
    printk( "scsi: <fdomain> fdomain_isa_detect:" );
 #endif
-
 
    for (i = 0; !bios_base && i < ADDRESS_COUNT; i++) {
 #if DEBUG_DETECT
@@ -729,13 +715,13 @@ static int fdomain_isa_detect( int *irq, int *iobase )
       switch (Quantum) {
       case 2:			/* ISA_200S */
       case 3:			/* ISA_250MG */
-	 base = readb(bios_base + 0x1fa2) + (readb(bios_base + 0x1fa3) << 8);
+	 base = isa_readb(bios_base + 0x1fa2) + (isa_readb(bios_base + 0x1fa3) << 8);
 	 break;
       case 4:			/* ISA_200S (another one) */
-	 base = readb(bios_base + 0x1fa3) + (readb(bios_base + 0x1fa4) << 8);
+	 base = isa_readb(bios_base + 0x1fa3) + (isa_readb(bios_base + 0x1fa4) << 8);
 	 break;
       default:
-	 base = readb(bios_base + 0x1fcc) + (readb(bios_base + 0x1fcd) << 8);
+	 base = isa_readb(bios_base + 0x1fcc) + (isa_readb(bios_base + 0x1fcd) << 8);
 	 break;
       }
    
@@ -810,8 +796,6 @@ static int fdomain_pci_bios_detect( int *irq, int *iobase, struct pci_dev **ret_
    unsigned long    pci_base;               /* PCI I/O base address */
    struct pci_dev   *pdev = NULL;
 
-   if (!pci_present()) return 0;
-
 #if DEBUG_DETECT
    /* Tell how to print a list of the known PCI devices from bios32 and
       list vendor and device IDs being used if in debug mode.  */
@@ -823,10 +807,8 @@ static int fdomain_pci_bios_detect( int *irq, int *iobase, struct pci_dev **ret_
 	   PCI_DEVICE_ID_FD_36C70 );
 #endif 
 
-   if ((pdev = pci_find_device(PCI_VENDOR_ID_FD,
-			       PCI_DEVICE_ID_FD_36C70,
-			       pdev)) == NULL)
-     return 0;
+   if ((pdev = pci_find_device(PCI_VENDOR_ID_FD, PCI_DEVICE_ID_FD_36C70, pdev)) == NULL)
+		return 0;
    if (pci_enable_device(pdev)) return 0;
        
 #if DEBUG_DETECT
@@ -856,8 +838,7 @@ static int fdomain_pci_bios_detect( int *irq, int *iobase, struct pci_dev **ret_
 #endif
 
    if (!fdomain_is_valid_port( *iobase )) {
-      printk( "scsi: <fdomain>"
-	      " PCI card detected, but driver not loaded (invalid port)\n" );
+      printk(KERN_ERR "scsi: <fdomain> PCI card detected, but driver not loaded (invalid port)\n" );
       return 0;
    }
 
@@ -871,30 +852,12 @@ static int fdomain_pci_bios_detect( int *irq, int *iobase, struct pci_dev **ret_
 }
 #endif
 
-int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
+struct Scsi_Host *__fdomain_16x0_detect( Scsi_Host_Template *tpnt )
 {
    int              retcode;
    struct Scsi_Host *shpnt;
    struct pci_dev *pdev = NULL;
-#if DO_DETECT
-   int i = 0;
-   int j = 0;
-   const int        buflen = 255;
-   Scsi_Cmnd        SCinit;
-   unsigned char    do_inquiry[] =       { INQUIRY, 0, 0, 0, buflen, 0 };
-   unsigned char    do_request_sense[] = { REQUEST_SENSE, 0, 0, 0, buflen, 0 };
-   unsigned char    do_read_capacity[] = { READ_CAPACITY,
-					   0, 0, 0, 0, 0, 0, 0, 0, 0 };
-   unsigned char    buf[buflen];
-#endif
 
-   tpnt->proc_name = "fdomain";
-
-#ifdef MODULE
-	if (fdomain)
-		fdomain_setup(fdomain);
-#endif
-   
    if (setup_called) {
 #if DEBUG_DETECT
       printk( "scsi: <fdomain> No BIOS, using port_base = 0x%x, irq = %d\n",
@@ -904,7 +867,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
 	 printk( "scsi: <fdomain> Cannot locate chip at port base 0x%x\n",
 		 port_base );
 	 printk( "scsi: <fdomain> Bad LILO/INSMOD parameters?\n" );
-	 return 0;
+	 return NULL;
       }
    } else {
       int flag = 0;
@@ -919,7 +882,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
 
 	 if (!flag) {
 	    printk( "scsi: <fdomain> Detection failed (no card)\n" );
-	    return 0;
+	    return NULL;
 	 }
       }
    }
@@ -938,15 +901,14 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
    Write_FIFO_port       = port_base + Write_FIFO;
    Write_SCSI_Data_port  = port_base + Write_SCSI_Data;
 
-   fdomain_16x0_reset( NULL, 0 );
+   fdomain_16x0_bus_reset( NULL);
 
    if (fdomain_test_loopback()) {
-      printk( "scsi: <fdomain> Detection failed"
-	      " (loopback test failed at port base 0x%x)\n", port_base );
+      printk(KERN_ERR  "scsi: <fdomain> Detection failed (loopback test failed at port base 0x%x)\n", port_base);
       if (setup_called) {
-	 printk( "scsi: <fdomain> Bad LILO/INSMOD parameters?\n" );
+	 printk(KERN_ERR "scsi: <fdomain> Bad LILO/INSMOD parameters?\n");
       }
-      return 0;
+      return NULL;
    }
 
    if (this_id) {
@@ -962,109 +924,60 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
       }
    }
 
-				/* Print out a banner here in case we can't
-				   get resources.  */
+/* Print out a banner here in case we can't
+   get resources.  */
 
    shpnt = scsi_register( tpnt, 0 );
    if(shpnt == NULL)
-   	return 0;
+   	return NULL;
    shpnt->irq = interrupt_level;
    shpnt->io_port = port_base;
-   scsi_set_pci_device(shpnt, pdev);
+   scsi_set_device(shpnt, &pdev->dev);
    shpnt->n_io_port = 0x10;
    print_banner( shpnt );
 
-				/* Log IRQ with kernel */   
+   /* Log IRQ with kernel */   
    if (!interrupt_level) {
-      printk( "scsi: <fdomain>"
-	      " Card Detected, but driver not loaded (no IRQ)\n" );
-      return 0;
+      printk(KERN_ERR "scsi: <fdomain> Card Detected, but driver not loaded (no IRQ)\n" );
+      return NULL;
    } else {
       /* Register the IRQ with the kernel */
 
       retcode = request_irq( interrupt_level,
-			     do_fdomain_16x0_intr, pdev?SA_SHIRQ:0, "fdomain", NULL);
+			     do_fdomain_16x0_intr, pdev?SA_SHIRQ:0, "fdomain", shpnt);
 
       if (retcode < 0) {
 	 if (retcode == -EINVAL) {
-	    printk( "scsi: <fdomain> IRQ %d is bad!\n", interrupt_level );
-	    printk( "                This shouldn't happen!\n" );
-	    printk( "                Send mail to faith@acm.org\n" );
+	    printk(KERN_ERR "scsi: <fdomain> IRQ %d is bad!\n", interrupt_level );
+	    printk(KERN_ERR "                This shouldn't happen!\n" );
+	    printk(KERN_ERR "                Send mail to faith@acm.org\n" );
 	 } else if (retcode == -EBUSY) {
-	    printk( "scsi: <fdomain> IRQ %d is already in use!\n",
-		    interrupt_level );
-	    printk( "                Please use another IRQ!\n" );
+	    printk(KERN_ERR "scsi: <fdomain> IRQ %d is already in use!\n", interrupt_level );
+	    printk(KERN_ERR "                Please use another IRQ!\n" );
 	 } else {
-	    printk( "scsi: <fdomain> Error getting IRQ %d\n",
-		    interrupt_level );
-	    printk( "                This shouldn't happen!\n" );
-	    printk( "                Send mail to faith@acm.org\n" );
+	    printk(KERN_ERR "scsi: <fdomain> Error getting IRQ %d\n", interrupt_level );
+	    printk(KERN_ERR "                This shouldn't happen!\n" );
+	    printk(KERN_ERR "                Send mail to faith@acm.org\n" );
 	 }
-	 printk( "scsi: <fdomain> Detected, but driver not loaded (IRQ)\n" );
-	 return 0;
+	 printk(KERN_ERR "scsi: <fdomain> Detected, but driver not loaded (IRQ)\n" );
+	 return NULL;
       }
    }
 
-				/* Log I/O ports with kernel */
+   /* Log I/O ports with kernel */
    request_region( port_base, 0x10, "fdomain" );
 
-#if DO_DETECT
-
-   /* These routines are here because of the way the SCSI bus behaves after
-      a reset.  This appropriate behavior was not handled correctly by the
-      higher level SCSI routines when I first wrote this driver.  Now,
-      however, correct scan routines are part of scsi.c and these routines
-      are no longer needed.  However, this code is still good for
-      debugging.  */
-
-   SCinit.request_buffer  = SCinit.buffer = buf;
-   SCinit.request_bufflen = SCinit.bufflen = sizeof(buf)-1;
-   SCinit.use_sg          = 0;
-   SCinit.lun             = 0;
-
-   printk( "scsi: <fdomain> detection routine scanning for devices:\n" );
-   for (i = 0; i < 8; i++) {
-      SCinit.target = i;
-      if (i == tpnt->this_id)	/* Skip host adapter */
-	    continue;
-      memcpy(SCinit.cmnd, do_request_sense, sizeof(do_request_sense));
-      retcode = fdomain_16x0_command(&SCinit);
-      if (!retcode) {
-	 memcpy(SCinit.cmnd, do_inquiry, sizeof(do_inquiry));
-	 retcode = fdomain_16x0_command(&SCinit);
-	 if (!retcode) {
-	    printk( "     SCSI ID %d: ", i );
-	    for (j = 8; j < (buf[4] < 32 ? buf[4] : 32); j++)
-		  printk( "%c", buf[j] >= 20 ? buf[j] : ' ' );
-	    memcpy(SCinit.cmnd, do_read_capacity, sizeof(do_read_capacity));
-	    retcode = fdomain_16x0_command(&SCinit);
-	    if (!retcode) {
-	       unsigned long blocks, size, capacity;
-	       
-	       blocks = (buf[0] << 24) | (buf[1] << 16)
-		     | (buf[2] << 8) | buf[3];
-	       size = (buf[4] << 24) | (buf[5] << 16) | (buf[6] << 8) | buf[7];
-	       capacity = +( +(blocks / 1024L) * +(size * 10L)) / 1024L;
-	       
-	       printk( "%lu MB (%lu byte blocks)",
-		       ((capacity + 5L) / 10L), size );
-	    } else {
-	       memcpy(SCinit.cmnd, do_request_sense, sizeof(do_request_sense));
-	       retcode = fdomain_16x0_command(&SCinit);
-	    }
-	    printk ("\n" );
-	 } else {
-	    memcpy(SCinit.cmnd, do_request_sense, sizeof(do_request_sense));
-	    retcode = fdomain_16x0_command(&SCinit);
-	 }
-      }
-   }
-#endif
-
-   return 1;			/* Maximum of one adapter will be detected. */
+   return shpnt;
 }
 
-const char *fdomain_16x0_info( struct Scsi_Host *ignore )
+static int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
+{
+	if (fdomain)
+		fdomain_setup(fdomain);
+	return (__fdomain_16x0_detect(tpnt) != NULL);
+}
+
+static const char *fdomain_16x0_info( struct Scsi_Host *ignore )
 {
    static char buffer[128];
    char        *pt;
@@ -1085,45 +998,6 @@ const char *fdomain_16x0_info( struct Scsi_Host *ignore )
    return buffer;
 }
 
-				/* First pass at /proc information routine. */
-/*
- * inout : decides on the direction of the dataflow and the meaning of the 
- *         variables
- * buffer: If inout==FALSE data is being written to it else read from it
- * *start: If inout==FALSE start of the valid data in the buffer
- * offset: If inout==FALSE offset from the beginning of the imaginary file 
- *         from which we start writing into the buffer
- * length: If inout==FALSE max number of bytes to be written into the buffer 
- *         else number of bytes in the buffer
- */
-int fdomain_16x0_proc_info( char *buffer, char **start, off_t offset,
-			    int length, int hostno, int inout )
-{
-   const char *info = fdomain_16x0_info( NULL );
-   int        len;
-   int        pos;
-   int        begin;
-
-   if (inout) return(-ENOSYS);
-    
-   begin = 0;
-   strcpy( buffer, info );
-   strcat( buffer, "\n" );
-
-   pos = len = strlen( buffer );
-
-   if(pos < offset) {
-      len = 0;
-      begin = pos;
-   }
-    
-   *start = buffer + (offset - begin);   /* Start of wanted data */
-   len -= (offset - begin);
-   if(len > length) len = length;
-   
-   return(len);
-}
-   
 #if 0
 static int fdomain_arbitrate( void )
 {
@@ -1163,8 +1037,9 @@ static int fdomain_select( int target )
 {
    int           status;
    unsigned long timeout;
+#if ERRORS_ONLY
    static int    flag = 0;
-
+#endif
 
    outb( 0x82, SCSI_Cntl_port ); /* Bus Enable + Select */
    outb( adapter_mask | (1 << target), SCSI_Data_NoACK_port );
@@ -1199,7 +1074,7 @@ static int fdomain_select( int target )
    return 1;
 }
 
-void my_done( int error )
+static void my_done(int error)
 {
    if (in_command) {
       in_command = 0;
@@ -1217,7 +1092,8 @@ void my_done( int error )
 #endif
 }
 
-void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
+static irqreturn_t do_fdomain_16x0_intr(int irq, void *dev_id,
+					struct pt_regs * regs )
 {
    unsigned long flags;
    int      status;
@@ -1232,7 +1108,7 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 
    /* Check for other IRQ sources */
    if((inb(TMC_Status_port)&0x01)==0)   
-   	return;
+   	return IRQ_NONE;
 
    /* It is our IRQ */   	
    outb( 0x00, Interrupt_Cntl_port );
@@ -1243,7 +1119,7 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
       printk( "Spurious interrupt, in_command = %d, current_SC = %x\n",
 	      in_command, current_SC );
 #endif
-      return;
+      return IRQ_NONE;
    }
 
    /* Abort calls my_done, so we do nothing here. */
@@ -1252,7 +1128,7 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
       printk( "scsi: <fdomain> Interrupt after abort, ignoring\n" );
 #endif
       /*
-      return; */
+      return IRQ_HANDLED; */
    }
 
 #if DEBUG_RACE
@@ -1265,36 +1141,36 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 #if EVERY_ACCESS
 	 printk( " AFAIL " );
 #endif
-         spin_lock_irqsave(&io_request_lock, flags);
+         spin_lock_irqsave(current_SC->device->host->host_lock, flags);
 	 my_done( DID_BUS_BUSY << 16 );
-         spin_unlock_irqrestore(&io_request_lock, flags);
-	 return;
+         spin_unlock_irqrestore(current_SC->device->host->host_lock, flags);
+	 return IRQ_HANDLED;
       }
       current_SC->SCp.phase = in_selection;
       
       outb( 0x40 | FIFO_COUNT, Interrupt_Cntl_port );
 
       outb( 0x82, SCSI_Cntl_port ); /* Bus Enable + Select */
-      outb( adapter_mask | (1 << current_SC->target), SCSI_Data_NoACK_port );
+      outb( adapter_mask | (1 << current_SC->device->id), SCSI_Data_NoACK_port );
       
       /* Stop arbitration and enable parity */
       outb( 0x10 | PARITY_MASK, TMC_Cntl_port );
 #if DEBUG_RACE
       in_interrupt_flag = 0;
 #endif
-      return;
+      return IRQ_HANDLED;
    } else if (current_SC->SCp.phase & in_selection) {
       status = inb( SCSI_Status_port );
       if (!(status & 0x01)) {
 	 /* Try again, for slow devices */
-	 if (fdomain_select( current_SC->target )) {
+	 if (fdomain_select( current_SC->device->id )) {
 #if EVERY_ACCESS
 	    printk( " SFAIL " );
 #endif
-            spin_lock_irqsave(&io_request_lock, flags);
+            spin_lock_irqsave(current_SC->device->host->host_lock, flags);
 	    my_done( DID_NO_CONNECT << 16 );
-            spin_unlock_irqrestore(&io_request_lock, flags);
-	    return;
+            spin_unlock_irqrestore(current_SC->device->host->host_lock, flags);
+	    return IRQ_HANDLED;
 	 } else {
 #if EVERY_ACCESS
 	    printk( " AltSel " );
@@ -1309,7 +1185,7 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 #if DEBUG_RACE
       in_interrupt_flag = 0;
 #endif
-      return;
+      return IRQ_HANDLED;
    }
    
    /* current_SC->SCp.phase == in_other: this is the body of the routine */
@@ -1350,7 +1226,7 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 	     && current_SC->SCp.Status != 2
 	     && current_SC->SCp.Status != 8) {
 	    printk( "scsi: <fdomain> target = %d, command = %x, status = %x\n",
-		    current_SC->target,
+		    current_SC->device->id,
 		    current_SC->cmnd[0],
 		    current_SC->SCp.Status );
 	 }
@@ -1375,167 +1251,18 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
       }
    }
 
-   if (chip == tmc1800
-       && !current_SC->SCp.have_data_in
-       && (current_SC->SCp.sent_command
-	   >= current_SC->cmd_len)) {
-				/* We have to get the FIFO direction
-				   correct, so I've made a table based
-				   on the SCSI Standard of which commands
-				   appear to require a DATA OUT phase.
-				 */
-      /*
-	p. 94: Command for all device types
-	CHANGE DEFINITION            40 DATA OUT
-	COMPARE                      39 DATA OUT
-	COPY                         18 DATA OUT
-	COPY AND VERIFY              3a DATA OUT
-	INQUIRY                      12 
-	LOG SELECT                   4c DATA OUT
-	LOG SENSE                    4d
-	MODE SELECT (6)              15 DATA OUT
-	MODE SELECT (10)             55 DATA OUT
-	MODE SENSE (6)               1a
-	MODE SENSE (10)              5a
-	READ BUFFER                  3c
-	RECEIVE DIAGNOSTIC RESULTS   1c
-	REQUEST SENSE                03
-	SEND DIAGNOSTIC              1d DATA OUT
-	TEST UNIT READY              00
-	WRITE BUFFER                 3b DATA OUT
-
-	p.178: Commands for direct-access devices (not listed on p. 94)
-	FORMAT UNIT                  04 DATA OUT
-	LOCK-UNLOCK CACHE            36
-	PRE-FETCH                    34
-	PREVENT-ALLOW MEDIUM REMOVAL 1e
-	READ (6)/RECEIVE             08
-	READ (10)                    3c
-	READ CAPACITY                25
-	READ DEFECT DATA (10)        37
-	READ LONG                    3e
-	REASSIGN BLOCKS              07 DATA OUT
-	RELEASE                      17
-	RESERVE                      16 DATA OUT
-	REZERO UNIT/REWIND           01
-	SEARCH DATA EQUAL (10)       31 DATA OUT
-	SEARCH DATA HIGH (10)        30 DATA OUT
-	SEARCH DATA LOW (10)         32 DATA OUT
-	SEEK (6)                     0b
-	SEEK (10)                    2b
-	SET LIMITS (10)              33
-	START STOP UNIT              1b
-	SYNCHRONIZE CACHE            35
-	VERIFY (10)                  2f
-	WRITE (6)/PRINT/SEND         0a DATA OUT
-	WRITE (10)/SEND              2a DATA OUT
-	WRITE AND VERIFY (10)        2e DATA OUT
-	WRITE LONG                   3f DATA OUT
-	WRITE SAME                   41 DATA OUT ?
-
-	p. 261: Commands for sequential-access devices (not previously listed)
-	ERASE                        19
-	LOAD UNLOAD                  1b
-	LOCATE                       2b
-	READ BLOCK LIMITS            05
-	READ POSITION                34
-	READ REVERSE                 0f
-	RECOVER BUFFERED DATA        14
-	SPACE                        11
-	WRITE FILEMARKS              10 ?
-
-	p. 298: Commands for printer devices (not previously listed)
-	****** NOT SUPPORTED BY THIS DRIVER, since 0b is SEEK (6) *****
-	SLEW AND PRINT               0b DATA OUT  -- same as seek
-	STOP PRINT                   1b
-	SYNCHRONIZE BUFFER           10
-
-	p. 315: Commands for processor devices (not previously listed)
-	
-	p. 321: Commands for write-once devices (not previously listed)
-	MEDIUM SCAN                  38
-	READ (12)                    a8
-	SEARCH DATA EQUAL (12)       b1 DATA OUT
-	SEARCH DATA HIGH (12)        b0 DATA OUT
-	SEARCH DATA LOW (12)         b2 DATA OUT
-	SET LIMITS (12)              b3
-	VERIFY (12)                  af
-	WRITE (12)                   aa DATA OUT
-	WRITE AND VERIFY (12)        ae DATA OUT
-
-	p. 332: Commands for CD-ROM devices (not previously listed)
-	PAUSE/RESUME                 4b
-	PLAY AUDIO (10)              45
-	PLAY AUDIO (12)              a5
-	PLAY AUDIO MSF               47
-	PLAY TRACK RELATIVE (10)     49
-	PLAY TRACK RELATIVE (12)     a9
-	READ HEADER                  44
-	READ SUB-CHANNEL             42
-	READ TOC                     43
-
-	p. 370: Commands for scanner devices (not previously listed)
-	GET DATA BUFFER STATUS       34
-	GET WINDOW                   25
-	OBJECT POSITION              31
-	SCAN                         1b
-	SET WINDOW                   24 DATA OUT
-
-	p. 391: Commands for optical memory devices (not listed)
-	ERASE (10)                   2c
-	ERASE (12)                   ac
-	MEDIUM SCAN                  38 DATA OUT
-	READ DEFECT DATA (12)        b7
-	READ GENERATION              29
-	READ UPDATED BLOCK           2d
-	UPDATE BLOCK                 3d DATA OUT
-
-	p. 419: Commands for medium changer devices (not listed)
-	EXCHANGE MEDIUM              46
-	INITIALIZE ELEMENT STATUS    07
-	MOVE MEDIUM                  a5
-	POSITION TO ELEMENT          2b
-	READ ELEMENT STATUS          b8
-	REQUEST VOL. ELEMENT ADDRESS b5
-	SEND VOLUME TAG              b6 DATA OUT
-
-	p. 454: Commands for communications devices (not listed previously)
-	GET MESSAGE (6)              08
-	GET MESSAGE (10)             28
-	GET MESSAGE (12)             a8
-      */
-	
-      switch (current_SC->cmnd[0]) {
-      case CHANGE_DEFINITION: case COMPARE:         case COPY:
-      case COPY_VERIFY:       case LOG_SELECT:      case MODE_SELECT:
-      case MODE_SELECT_10:    case SEND_DIAGNOSTIC: case WRITE_BUFFER:
-
-      case FORMAT_UNIT:       case REASSIGN_BLOCKS: case RESERVE:
-      case SEARCH_EQUAL:      case SEARCH_HIGH:     case SEARCH_LOW:
-      case WRITE_6:           case WRITE_10:        case WRITE_VERIFY:
-      case 0x3f:              case 0x41:
-
-      case 0xb1:              case 0xb0:            case 0xb2:
-      case 0xaa:              case 0xae:
-
-      case 0x24:
-
-      case 0x38:              case 0x3d:
-
-      case 0xb6:
-	 
-      case 0xea:		/* alternate number for WRITE LONG */
-	 
+   if (chip == tmc1800 && !current_SC->SCp.have_data_in
+       && (current_SC->SCp.sent_command >= current_SC->cmd_len)) {
+      
+      if(scsi_to_pci_dma_dir(current_SC->sc_data_direction)	== PCI_DMA_TODEVICE)
+      {
 	 current_SC->SCp.have_data_in = -1;
 	 outb( 0xd0 | PARITY_MASK, TMC_Cntl_port );
-	 break;
-
-      case 0x00:
-      default:
-	 
+      }
+      else
+      {
 	 current_SC->SCp.have_data_in = 1;
 	 outb( 0x90 | PARITY_MASK, TMC_Cntl_port );
-	 break;
       }
    }
 
@@ -1564,7 +1291,7 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 	    if (current_SC->SCp.buffers_residual) {
 	       --current_SC->SCp.buffers_residual;
 	       ++current_SC->SCp.buffer;
-	       current_SC->SCp.ptr = current_SC->SCp.buffer->address;
+	       current_SC->SCp.ptr = page_address(current_SC->SCp.buffer->page) + current_SC->SCp.buffer->offset;
 	       current_SC->SCp.this_residual = current_SC->SCp.buffer->length;
 	    } else
 		  break;
@@ -1597,7 +1324,7 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 	     && current_SC->SCp.buffers_residual) {
 	    --current_SC->SCp.buffers_residual;
 	    ++current_SC->SCp.buffer;
-	    current_SC->SCp.ptr = current_SC->SCp.buffer->address;
+	    current_SC->SCp.ptr = page_address(current_SC->SCp.buffer->page) + current_SC->SCp.buffer->offset;
 	    current_SC->SCp.this_residual = current_SC->SCp.buffer->length;
 	 }
       }
@@ -1638,10 +1365,10 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 #if EVERY_ACCESS
       printk( "BEFORE MY_DONE. . ." );
 #endif
-      spin_lock_irqsave(&io_request_lock, flags);
+      spin_lock_irqsave(current_SC->device->host->host_lock, flags);
       my_done( (current_SC->SCp.Status & 0xff)
 	       | ((current_SC->SCp.Message & 0xff) << 8) | (DID_OK << 16) );
-      spin_unlock_irqrestore(&io_request_lock, flags);
+      spin_unlock_irqrestore(current_SC->device->host->host_lock, flags);
 #if EVERY_ACCESS
       printk( "RETURNING.\n" );
 #endif
@@ -1657,10 +1384,10 @@ void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 #if DEBUG_RACE
    in_interrupt_flag = 0;
 #endif
-   return;
+   return IRQ_HANDLED;
 }
 
-int fdomain_16x0_queue( Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
+static int fdomain_16x0_queue( Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
 {
    if (in_command) {
       panic( "scsi: <fdomain> fdomain_16x0_queue() NOT REENTRANT!\n" );
@@ -1683,7 +1410,7 @@ int fdomain_16x0_queue( Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
    if (current_SC->use_sg) {
       current_SC->SCp.buffer =
 	    (struct scatterlist *)current_SC->request_buffer;
-      current_SC->SCp.ptr              = current_SC->SCp.buffer->address;
+      current_SC->SCp.ptr              = page_address(current_SC->SCp.buffer->page) + current_SC->SCp.buffer->offset;
       current_SC->SCp.this_residual    = current_SC->SCp.buffer->length;
       current_SC->SCp.buffers_residual = current_SC->use_sg - 1;
    } else {
@@ -1711,54 +1438,30 @@ int fdomain_16x0_queue( Scsi_Cmnd * SCpnt, void (*done)(Scsi_Cmnd *))
    return 0;
 }
 
-/* The following code, which simulates the old-style command function, was
-   taken from Tommy Thorn's aha1542.c file.  This code is Copyright (C)
-   1992 Tommy Thorn. */
-
-static volatile int internal_done_flag    = 0;
-static volatile int internal_done_errcode = 0;
-
-static void internal_done( Scsi_Cmnd *SCpnt )
-{
-    internal_done_errcode = SCpnt->result;
-    ++internal_done_flag;
-}
-
-int fdomain_16x0_command( Scsi_Cmnd *SCpnt )
-{
-    fdomain_16x0_queue( SCpnt, internal_done );
-
-    while (!internal_done_flag)
-	  ;
-    internal_done_flag = 0;
-    return internal_done_errcode;
-}
-
-/* End of code derived from Tommy Thorn's work. */
-
-void print_info( Scsi_Cmnd *SCpnt )
+#if DEBUG_ABORT
+static void print_info(Scsi_Cmnd *SCpnt)
 {
    unsigned int imr;
    unsigned int irr;
    unsigned int isr;
 
-   if (!SCpnt || !SCpnt->host) {
-      printk( "scsi: <fdomain> Cannot provide detailed information\n" );
+   if (!SCpnt || !SCpnt->device || !SCpnt->device->host) {
+      printk(KERN_WARNING "scsi: <fdomain> Cannot provide detailed information\n");
       return;
    }
    
-   printk( "%s\n", fdomain_16x0_info( SCpnt->host ) );
-   print_banner( SCpnt->host );
+   printk(KERN_INFO "%s\n", fdomain_16x0_info( SCpnt->device->host ) );
+   print_banner(SCpnt->device->host);
    switch (SCpnt->SCp.phase) {
-   case in_arbitration: printk( "arbitration " ); break;
-   case in_selection:   printk( "selection " );   break;
-   case in_other:       printk( "other " );       break;
-   default:             printk( "unknown " );     break;
+   case in_arbitration: printk("arbitration"); break;
+   case in_selection:   printk("selection");   break;
+   case in_other:       printk("other");       break;
+   default:             printk("unknown");     break;
    }
 
-   printk( "(%d), target = %d cmnd = 0x%02x pieces = %d size = %u\n",
+   printk( " (%d), target = %d cmnd = 0x%02x pieces = %d size = %u\n",
 	   SCpnt->SCp.phase,
-	   SCpnt->target,
+	   SCpnt->device->id,
 	   *(unsigned char *)SCpnt->cmnd,
 	   SCpnt->use_sg,
 	   SCpnt->request_bufflen );
@@ -1805,22 +1508,19 @@ void print_info( Scsi_Cmnd *SCpnt )
 	 printk( "Configuration 2  = 0x%02x\n",
 		 inb( port_base + Configuration2 ) );
 }
+#endif
 
-int fdomain_16x0_abort( Scsi_Cmnd *SCpnt)
+static int fdomain_16x0_abort( Scsi_Cmnd *SCpnt)
 {
-   unsigned long flags;
 #if EVERY_ACCESS || ERRORS_ONLY || DEBUG_ABORT
    printk( "scsi: <fdomain> abort " );
 #endif
 
-   save_flags( flags );
-   cli();
    if (!in_command) {
 #if EVERY_ACCESS || ERRORS_ONLY
       printk( " (not in command)\n" );
 #endif
-      restore_flags( flags );
-      return SCSI_ABORT_NOT_RUNNING;
+      return FAILED;
    } else printk( "\n" );
 
 #if DEBUG_ABORT
@@ -1828,57 +1528,45 @@ int fdomain_16x0_abort( Scsi_Cmnd *SCpnt)
 #endif
 
    fdomain_make_bus_idle();
-
    current_SC->SCp.phase |= aborted;
-
    current_SC->result = DID_ABORT << 16;
-
-   restore_flags( flags );
    
    /* Aborts are not done well. . . */
-   my_done( DID_ABORT << 16 );
-
-   return SCSI_ABORT_SUCCESS;
+   my_done(DID_ABORT << 16);
+   return SUCCESS;
 }
 
-int fdomain_16x0_reset( Scsi_Cmnd *SCpnt, unsigned int ignored )
+int fdomain_16x0_bus_reset(Scsi_Cmnd *SCpnt)
 {
-#if DEBUG_RESET
-   static int called_once = 0;
-#endif
-
-#if ERRORS_ONLY
-   if (SCpnt) printk( "scsi: <fdomain> SCSI Bus Reset\n" );
-#endif
-
-#if DEBUG_RESET
-   if (called_once) print_info( current_SC );
-   called_once = 1;
-#endif
-   
    outb( 1, SCSI_Cntl_port );
    do_pause( 2 );
    outb( 0, SCSI_Cntl_port );
    do_pause( 115 );
    outb( 0, SCSI_Mode_Cntl_port );
    outb( PARITY_MASK, TMC_Cntl_port );
-
-   /* Unless this is the very first call (i.e., SCPnt == NULL), everything
-      is probably hosed at this point.  We will, however, try to keep
-      things going by informing the high-level code that we need help. */
-
-   return SCSI_RESET_WAKEUP;
+   return SUCCESS;
 }
 
-#include "sd.h"
+static int fdomain_16x0_host_reset(Scsi_Cmnd *SCpnt)
+{
+  return FAILED;
+}
+
+static int fdomain_16x0_device_reset(Scsi_Cmnd *SCpnt)
+{
+  return FAILED;
+}
+
 #include <scsi/scsi_ioctl.h>
 
-int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
+static int fdomain_16x0_biosparam(struct scsi_device *sdev,
+		struct block_device *bdev,
+		sector_t capacity, int *info_array)
 {
    int              drive;
    unsigned char    buf[512 + sizeof (Scsi_Ioctl_Command)];
    Scsi_Ioctl_Command *sic = (Scsi_Ioctl_Command *) buf;
-   int		    size      = disk->capacity;
+   int		    size      = capacity;
    unsigned char    *data     = sic->data;
    unsigned char    do_read[] = { READ_6, 0, 0, 0, 1, 0 };
    int              retcode;
@@ -1932,11 +1620,11 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
       0x0a bytes long.  Heads are one less than we need to report.
     */
 
-   if (MAJOR(dev) != SCSI_DISK0_MAJOR) {
+   if (MAJOR(bdev->bd_dev) != SCSI_DISK0_MAJOR) {
       printk("scsi: <fdomain> fdomain_16x0_biosparam: too many disks");
       return 0;
    }
-   drive = MINOR(dev) >> 4;
+   drive = MINOR(bdev->bd_dev) >> 4;
 
    if (bios_major == 2) {
       switch (Quantum) {
@@ -1955,7 +1643,7 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
 	 offset = bios_base + 0x1f31 + drive * 25;
 	 break;
       }
-      memcpy_fromio( &i, offset, sizeof( struct drive_info ) );
+      isa_memcpy_fromio( &i, offset, sizeof( struct drive_info ) );
       info_array[0] = i.heads;
       info_array[1] = i.sectors;
       info_array[2] = i.cylinders;
@@ -1973,7 +1661,7 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
       sic->inlen  = 0;		/* zero bytes out */
       sic->outlen = 512;		/* one sector in */
       memcpy( data, do_read, sizeof( do_read ) );
-      retcode = kernel_scsi_ioctl( disk->device,
+      retcode = kernel_scsi_ioctl( sdev,
 				   SCSI_IOCTL_SEND_COMMAND,
 				   sic );
       if (!retcode				    /* SCSI command ok */
@@ -2035,9 +1723,36 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
    return 0;
 }
 
-MODULE_LICENSE("GPL");
+static int fdomain_16x0_release(struct Scsi_Host *shpnt)
+{
+	if (shpnt->irq)
+		free_irq(shpnt->irq, shpnt);
+	if (shpnt->io_port && shpnt->n_io_port)
+		release_region(shpnt->io_port, shpnt->n_io_port);
+	return 0;
+}
 
-/* Eventually this will go into an include file, but this will be later */
-static Scsi_Host_Template driver_template = FDOMAIN_16X0;
+Scsi_Host_Template fdomain_driver_template = {
+	.module			= THIS_MODULE,
+	.name			= "fdomain",
+	.proc_name		= "fdomain",
+	.detect			= fdomain_16x0_detect,
+	.info			= fdomain_16x0_info,
+	.queuecommand		= fdomain_16x0_queue,
+	.eh_abort_handler	= fdomain_16x0_abort,
+	.eh_bus_reset_handler	= fdomain_16x0_bus_reset,
+	.eh_device_reset_handler = fdomain_16x0_device_reset,
+	.eh_host_reset_handler	= fdomain_16x0_host_reset,
+	.bios_param		= fdomain_16x0_biosparam,
+	.release		= fdomain_16x0_release,
+	.can_queue		= 1,
+	.this_id		= 6,
+	.sg_tablesize		= 64,
+	.cmd_per_lun		= 1,
+	.use_clustering		= DISABLE_CLUSTERING,
+};
 
+#ifndef PCMCIA
+#define driver_template fdomain_driver_template
 #include "scsi_module.c"
+#endif

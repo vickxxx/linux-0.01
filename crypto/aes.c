@@ -102,10 +102,10 @@ struct aes_ctx {
 #define E_KEY ctx->E
 #define D_KEY ctx->D
 
-static u8 pow_tab[256] __initdata;
-static u8 log_tab[256] __initdata;
-static u8 sbx_tab[256] __initdata;
-static u8 isb_tab[256] __initdata;
+static u8 pow_tab[256];
+static u8 log_tab[256];
+static u8 sbx_tab[256];
+static u8 isb_tab[256];
 static u32 rco_tab[10];
 static u32 ft_tab[4][256];
 static u32 it_tab[4][256];
@@ -113,7 +113,7 @@ static u32 it_tab[4][256];
 static u32 fl_tab[4][256];
 static u32 il_tab[4][256];
 
-static inline u8 __init
+static inline u8
 f_mult (u8 a, u8 b)
 {
 	u8 aa = log_tab[a], cc = aa + log_tab[b];
@@ -153,14 +153,14 @@ f_mult (u8 a, u8 b)
              il_tab[2][byte(bi[(n + 2) & 3],2)] ^		\
              il_tab[3][byte(bi[(n + 1) & 3],3)] ^ *(k + n)
 
-static void __init
+static void
 gen_tabs (void)
 {
 	u32 i, t;
 	u8 p, q;
 
 	/* log and power tables for GF(2**8) finite field with
-	   0x011b as modular polynomial - the simplest primitive
+	   0x011b as modular polynomial - the simplest prmitive
 	   root is 0x03, used here to generate the tables */
 
 	for (i = 0, p = 1; i < 256; ++i) {
@@ -442,6 +442,7 @@ static struct crypto_alg aes_alg = {
 		.cipher = {
 			.cia_min_keysize	=	AES_MIN_KEY_SIZE,
 			.cia_max_keysize	=	AES_MAX_KEY_SIZE,
+			.cia_ivsize		=	AES_BLOCK_SIZE,
 			.cia_setkey	   	= 	aes_set_key,
 			.cia_encrypt	 	=	aes_encrypt,
 			.cia_decrypt	  	=	aes_decrypt

@@ -22,14 +22,13 @@ make --version 2>&1 | awk -F, '{print $1}' | awk \
       '/GNU Make/{print "Gnu make              ",$NF}'
 
 ld -v 2>&1 | awk -F\) '{print $1}' | awk \
-      '/BFD/{print "binutils              ",$NF} \
-       /^GNU/{print "binutils              ",$4}'
+      '/BFD/{print "binutils              ",$NF}'
 
 fdformat --version | awk -F\- '{print "util-linux            ", $NF}'
 
 mount --version | awk -F\- '{print "mount                 ", $NF}'
 
-insmod -V  2>&1 | awk 'NR==1 {print "modutils              ",$NF}'
+depmod -V  2>&1 | grep version | awk 'NR==1 {print "module-init-tools     ",$NF}'
 
 tune2fs 2>&1 | grep "^tune2fs" | sed 's/,//' |  awk \
 'NR==1 {print "e2fsprogs             ", $2}'

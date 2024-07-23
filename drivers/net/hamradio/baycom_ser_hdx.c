@@ -143,7 +143,7 @@ struct baycom_state {
 
 /* --------------------------------------------------------------------- */
 
-static void inline baycom_int_freq(struct baycom_state *bc)
+static inline void baycom_int_freq(struct baycom_state *bc)
 {
 #ifdef BAYCOM_DEBUG
 	unsigned long cur_jiffies = jiffies;
@@ -166,7 +166,7 @@ static void inline baycom_int_freq(struct baycom_state *bc)
  * ===================== SER12 specific routines =========================
  */
 
-static void inline ser12_set_divisor(struct net_device *dev,
+static inline void ser12_set_divisor(struct net_device *dev,
 				     unsigned char divisor)
 {
 	outb(0x81, LCR(dev->base_addr));	/* DLAB = 1 */
@@ -373,17 +373,17 @@ static inline void ser12_rx(struct net_device *dev, struct baycom_state *bc)
 
 /* --------------------------------------------------------------------- */
 
-static void ser12_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ser12_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = (struct net_device *)dev_id;
 	struct baycom_state *bc = (struct baycom_state *)dev->priv;
 	unsigned char iir;
 
 	if (!dev || !bc || bc->hdrv.magic != HDLCDRV_MAGIC)
-		return;
+		return IRQ_NONE;
 	/* fast way out */
 	if ((iir = inb(IIR(dev->base_addr))) & 1)
-		return;
+		return IRQ_NONE;
 	baycom_int_freq(bc);
 	do {
 		switch (iir & 6) {
@@ -416,13 +416,14 @@ static void ser12_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	} while (!(iir & 1));
 	if (bc->modem.arb_divider <= 0) {
 		bc->modem.arb_divider = SER12_ARB_DIVIDER(bc);
-		__sti();
+		local_irq_enable();
 		hdlcdrv_arbitrate(dev, &bc->hdrv);
 	}
-	__sti();
+	local_irq_enable();
 	hdlcdrv_transmitter(dev, &bc->hdrv);
 	hdlcdrv_receiver(dev, &bc->hdrv);
-	__cli();
+	local_irq_disable();
+	return IRQ_HANDLED;
 }
 
 /* --------------------------------------------------------------------- */
@@ -476,19 +477,22 @@ static int ser12_open(struct net_device *dev)
 	if (!dev->base_addr || dev->base_addr > 0x1000-SER12_EXTENT ||
 	    dev->irq < 2 || dev->irq > 15)
 		return -ENXIO;
-	if (check_region(dev->base_addr, SER12_EXTENT))
+	if (!request_region(dev->base_addr, SER12_EXTENT, "baycom_ser12"))
 		return -EACCES;
 	memset(&bc->modem, 0, sizeof(bc->modem));
 	bc->hdrv.par.bitrate = 1200;
-	if ((u = ser12_check_uart(dev->base_addr)) == c_uart_unknown)
+	if ((u = ser12_check_uart(dev->base_addr)) == c_uart_unknown) {
+		release_region(dev->base_addr, SER12_EXTENT);       
 		return -EIO;
+	}
 	outb(0, FCR(dev->base_addr));  /* disable FIFOs */
 	outb(0x0d, MCR(dev->base_addr));
 	outb(0, IER(dev->base_addr));
 	if (request_irq(dev->irq, ser12_interrupt, SA_INTERRUPT | SA_SHIRQ,
-			"baycom_ser12", dev))
+			"baycom_ser12", dev)) {
+		release_region(dev->base_addr, SER12_EXTENT);       
 		return -EBUSY;
-	request_region(dev->base_addr, SER12_EXTENT, "baycom_ser12");
+	}
 	/*
 	 * enable transmitter empty interrupt
 	 */
@@ -649,6 +653,7 @@ MODULE_PARM_DESC(irq, "baycom irq number");
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
 MODULE_DESCRIPTION("Baycom ser12 half duplex amateur radio modem driver");
+MODULE_LICENSE("GPL");
 
 /* --------------------------------------------------------------------- */
 

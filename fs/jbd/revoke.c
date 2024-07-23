@@ -60,12 +60,11 @@
 #ifndef __KERNEL__
 #include "jfs_user.h"
 #else
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd.h>
 #include <linux/errno.h>
 #include <linux/slab.h>
-#include <linux/locks.h>
 #include <linux/list.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
@@ -82,7 +81,7 @@ struct jbd_revoke_record_s
 {
 	struct list_head  hash;
 	tid_t		  sequence;	/* Used for recovery only */
-	unsigned long	  blocknr;	
+	unsigned long	  blocknr;
 };
 
 
@@ -111,7 +110,7 @@ static inline int hash(journal_t *journal, unsigned long block)
 {
 	struct jbd_revoke_table_s *table = journal->j_revoke;
 	int hash_shift = table->hash_shift;
-	
+
 	return ((block << (hash_shift - 6)) ^
 		(block >> 13) ^
 		(block << (hash_shift - 12))) & (table->hash_size - 1);
@@ -130,15 +129,16 @@ repeat:
 	record->sequence = seq;
 	record->blocknr = blocknr;
 	hash_list = &journal->j_revoke->hash_table[hash(journal, blocknr)];
+	spin_lock(&journal->j_revoke_lock);
 	list_add(&record->hash, hash_list);
+	spin_unlock(&journal->j_revoke_lock);
 	return 0;
 
 oom:
 	if (!journal_oom_retry)
 		return -ENOMEM;
-	jbd_debug(1, "ENOMEM in " __FUNCTION__ ", retrying.\n");
-	current->policy |= SCHED_YIELD;
-	schedule();
+	jbd_debug(1, "ENOMEM in %s, retrying\n", __FUNCTION__);
+	yield();
 	goto repeat;
 }
 
@@ -149,15 +149,19 @@ static struct jbd_revoke_record_s *find_revoke_record(journal_t *journal,
 {
 	struct list_head *hash_list;
 	struct jbd_revoke_record_s *record;
-	
+
 	hash_list = &journal->j_revoke->hash_table[hash(journal, blocknr)];
 
+	spin_lock(&journal->j_revoke_lock);
 	record = (struct jbd_revoke_record_s *) hash_list->next;
 	while (&(record->hash) != hash_list) {
-		if (record->blocknr == blocknr)
+		if (record->blocknr == blocknr) {
+			spin_unlock(&journal->j_revoke_lock);
 			return record;
+		}
 		record = (struct jbd_revoke_record_s *) record->hash.next;
 	}
+	spin_unlock(&journal->j_revoke_lock);
 	return NULL;
 }
 
@@ -178,7 +182,7 @@ int __init journal_init_revoke_caches(void)
 		return -ENOMEM;
 	}
 	return 0;
-}	
+}
 
 void journal_destroy_revoke_caches(void)
 {
@@ -193,35 +197,68 @@ void journal_destroy_revoke_caches(void)
 int journal_init_revoke(journal_t *journal, int hash_size)
 {
 	int shift, tmp;
-	
-	J_ASSERT (journal->j_revoke == NULL);
-	
-	journal->j_revoke = kmem_cache_alloc(revoke_table_cache, GFP_KERNEL);
-	if (!journal->j_revoke)
-		return -ENOMEM;
-	
-	/* Check that the hash_size is a power of two */
-	J_ASSERT ((hash_size & (hash_size-1)) == 0);
 
-	journal->j_revoke->hash_size = hash_size;
+	J_ASSERT (journal->j_revoke_table[0] == NULL);
 
 	shift = 0;
 	tmp = hash_size;
 	while((tmp >>= 1UL) != 0UL)
 		shift++;
+
+	journal->j_revoke_table[0] = kmem_cache_alloc(revoke_table_cache, GFP_KERNEL);
+	if (!journal->j_revoke_table[0])
+		return -ENOMEM;
+	journal->j_revoke = journal->j_revoke_table[0];
+
+	/* Check that the hash_size is a power of two */
+	J_ASSERT ((hash_size & (hash_size-1)) == 0);
+
+	journal->j_revoke->hash_size = hash_size;
+
 	journal->j_revoke->hash_shift = shift;
 
 	journal->j_revoke->hash_table =
 		kmalloc(hash_size * sizeof(struct list_head), GFP_KERNEL);
 	if (!journal->j_revoke->hash_table) {
-		kmem_cache_free(revoke_table_cache, journal->j_revoke);
+		kmem_cache_free(revoke_table_cache, journal->j_revoke_table[0]);
 		journal->j_revoke = NULL;
 		return -ENOMEM;
 	}
-	
+
 	for (tmp = 0; tmp < hash_size; tmp++)
 		INIT_LIST_HEAD(&journal->j_revoke->hash_table[tmp]);
-	
+
+	journal->j_revoke_table[1] = kmem_cache_alloc(revoke_table_cache, GFP_KERNEL);
+	if (!journal->j_revoke_table[1]) {
+		kfree(journal->j_revoke_table[0]->hash_table);
+		kmem_cache_free(revoke_table_cache, journal->j_revoke_table[0]);
+		return -ENOMEM;
+	}
+
+	journal->j_revoke = journal->j_revoke_table[1];
+
+	/* Check that the hash_size is a power of two */
+	J_ASSERT ((hash_size & (hash_size-1)) == 0);
+
+	journal->j_revoke->hash_size = hash_size;
+
+	journal->j_revoke->hash_shift = shift;
+
+	journal->j_revoke->hash_table =
+		kmalloc(hash_size * sizeof(struct list_head), GFP_KERNEL);
+	if (!journal->j_revoke->hash_table) {
+		kfree(journal->j_revoke_table[0]->hash_table);
+		kmem_cache_free(revoke_table_cache, journal->j_revoke_table[0]);
+		kmem_cache_free(revoke_table_cache, journal->j_revoke_table[1]);
+		journal->j_revoke = NULL;
+		return -ENOMEM;
+	}
+
+	for (tmp = 0; tmp < hash_size; tmp++)
+		INIT_LIST_HEAD(&journal->j_revoke->hash_table[tmp]);
+
+	spin_lock_init(&journal->j_revoke_lock);
+
 	return 0;
 }
 
@@ -232,16 +269,29 @@ void journal_destroy_revoke(journal_t *journal)
 	struct jbd_revoke_table_s *table;
 	struct list_head *hash_list;
 	int i;
-	
-	table = journal->j_revoke;
+
+	table = journal->j_revoke_table[0];
 	if (!table)
 		return;
-	
+
 	for (i=0; i<table->hash_size; i++) {
 		hash_list = &table->hash_table[i];
 		J_ASSERT (list_empty(hash_list));
 	}
-	
+
+	kfree(table->hash_table);
+	kmem_cache_free(revoke_table_cache, table);
+	journal->j_revoke = NULL;
+
+	table = journal->j_revoke_table[1];
+	if (!table)
+		return;
+
+	for (i=0; i<table->hash_size; i++) {
+		hash_list = &table->hash_table[i];
+		J_ASSERT (list_empty(hash_list));
+	}
+
 	kfree(table->hash_table);
 	kmem_cache_free(revoke_table_cache, table);
 	journal->j_revoke = NULL;
@@ -279,7 +329,7 @@ int journal_revoke(handle_t *handle, unsigned long blocknr,
 {
 	struct buffer_head *bh = NULL;
 	journal_t *journal;
-	kdev_t dev;
+	struct block_device *bdev;
 	int err;
 
 	if (bh_in)
@@ -291,11 +341,11 @@ int journal_revoke(handle_t *handle, unsigned long blocknr,
 		return -EINVAL;
 	}
 
-	dev = journal->j_fs_dev;
+	bdev = journal->j_fs_dev;
 	bh = bh_in;
 
 	if (!bh) {
-		bh = get_hash_table(dev, blocknr, journal->j_blocksize);
+		bh = __find_get_block(bdev, blocknr, journal->j_blocksize);
 		if (bh)
 			BUFFER_TRACE(bh, "found on hash");
 	}
@@ -305,7 +355,7 @@ int journal_revoke(handle_t *handle, unsigned long blocknr,
 
 		/* If there is a different buffer_head lying around in
 		 * memory anywhere... */
-		bh2 = get_hash_table(dev, blocknr, journal->j_blocksize);
+		bh2 = __find_get_block(bdev, blocknr, journal->j_blocksize);
 		if (bh2) {
 			/* ... and it has RevokeValid status... */
 			if ((bh2 != bh) &&
@@ -339,11 +389,9 @@ int journal_revoke(handle_t *handle, unsigned long blocknr,
 		}
 	}
 
-	lock_journal(journal);
 	jbd_debug(2, "insert revoke for block %lu, bh_in=%p\n", blocknr, bh_in);
 	err = insert_revoke_hash(journal, blocknr,
 				handle->h_transaction->t_tid);
-	unlock_journal(journal);
 	BUFFER_TRACE(bh_in, "exit");
 	return err;
 }
@@ -372,7 +420,7 @@ int journal_cancel_revoke(handle_t *handle, struct journal_head *jh)
 	int need_cancel;
 	int did_revoke = 0;	/* akpm: debug */
 	struct buffer_head *bh = jh2bh(jh);
-	
+
 	jbd_debug(4, "journal_head %p, cancelling revoke\n", jh);
 
 	/* Is the existing Revoke bit valid?  If so, we trust it, and
@@ -390,8 +438,10 @@ int journal_cancel_revoke(handle_t *handle, struct journal_head *jh)
 		record = find_revoke_record(journal, bh->b_blocknr);
 		if (record) {
 			jbd_debug(4, "cancelled existing revoke on "
-				  "blocknr %lu\n", bh->b_blocknr);
+				  "blocknr %llu\n", (u64)bh->b_blocknr);
+			spin_lock(&journal->j_revoke_lock);
 			list_del(&record->hash);
+			spin_unlock(&journal->j_revoke_lock);
 			kmem_cache_free(revoke_record_cache, record);
 			did_revoke = 1;
 		}
@@ -407,18 +457,34 @@ int journal_cancel_revoke(handle_t *handle, struct journal_head *jh)
 	 * buffer_head?  If so, we'd better make sure we clear the
 	 * revoked status on any hashed alias too, otherwise the revoke
 	 * state machine will get very upset later on. */
-	if (need_cancel && !bh->b_pprev) {
+	if (need_cancel) {
 		struct buffer_head *bh2;
-		bh2 = get_hash_table(bh->b_dev, bh->b_blocknr, bh->b_size);
+		bh2 = __find_get_block(bh->b_bdev, bh->b_blocknr, bh->b_size);
 		if (bh2) {
-			clear_bit(BH_Revoked, &bh2->b_state);
+			if (bh2 != bh)
+				clear_bit(BH_Revoked, &bh2->b_state);
 			__brelse(bh2);
 		}
 	}
-	
 	return did_revoke;
 }
 
+/* journal_switch_revoke table select j_revoke for next transaction
+ * we do not want to suspend any processing until all revokes are
+ * written -bzzz
+ */
+void journal_switch_revoke_table(journal_t *journal)
+{
+	int i;
+
+	if (journal->j_revoke == journal->j_revoke_table[0])
+		journal->j_revoke = journal->j_revoke_table[1];
+	else
+		journal->j_revoke = journal->j_revoke_table[0];
+
+	for (i = 0; i < journal->j_revoke->hash_size; i++) 
+		INIT_LIST_HEAD(&journal->j_revoke->hash_table[i]);
+}
 
 /*
  * Write revoke records to the journal for all entries in the current
@@ -439,8 +505,11 @@ void journal_write_revoke_records(journal_t *journal,
 	descriptor = NULL; 
 	offset = 0;
 	count = 0;
-	revoke = journal->j_revoke;
-	
+
+	/* select revoke table for committing transaction */
+	revoke = journal->j_revoke == journal->j_revoke_table[0] ?
+		journal->j_revoke_table[1] : journal->j_revoke_table[0];
+
 	for (i = 0; i < revoke->hash_size; i++) {
 		hash_list = &revoke->hash_table[i];
 
@@ -492,9 +561,11 @@ static void write_one_revoke_record(journal_t *journal,
 			descriptor = NULL;
 		}
 	}
-	
+
 	if (!descriptor) {
 		descriptor = journal_get_descriptor_buffer(journal);
+		if (!descriptor)
+			return;
 		header = (journal_header_t *) &jh2bh(descriptor)->b_data[0];
 		header->h_magic     = htonl(JFS_MAGIC_NUMBER);
 		header->h_blocktype = htonl(JFS_REVOKE_BLOCK);
@@ -507,7 +578,7 @@ static void write_one_revoke_record(journal_t *journal,
 		offset = sizeof(journal_revoke_header_t);
 		*descriptorp = descriptor;
 	}
-	
+
 	* ((unsigned int *)(&jh2bh(descriptor)->b_data[offset])) = 
 		htonl(record->blocknr);
 	offset += 4;
@@ -532,13 +603,14 @@ static void flush_descriptor(journal_t *journal,
 		__brelse(jh2bh(descriptor));
 		return;
 	}
-	
+
 	header = (journal_revoke_header_t *) jh2bh(descriptor)->b_data;
 	header->r_count = htonl(offset);
 	set_bit(BH_JWrite, &jh2bh(descriptor)->b_state);
 	{
 		struct buffer_head *bh = jh2bh(descriptor);
 		BUFFER_TRACE(bh, "write");
+		set_buffer_uptodate(bh);
 		ll_rw_block (WRITE, 1, &bh);
 	}
 }
@@ -572,10 +644,10 @@ int journal_set_revoke(journal_t *journal,
 		       tid_t sequence)
 {
 	struct jbd_revoke_record_s *record;
-	
+
 	record = find_revoke_record(journal, blocknr);
 	if (record) {
-		/* If we have multiple occurences, only record the
+		/* If we have multiple occurrences, only record the
 		 * latest sequence number in the hashed record */
 		if (tid_gt(sequence, record->sequence))
 			record->sequence = sequence;
@@ -596,7 +668,7 @@ int journal_test_revoke(journal_t *journal,
 			tid_t sequence)
 {
 	struct jbd_revoke_record_s *record;
-	
+
 	record = find_revoke_record(journal, blocknr);
 	if (!record)
 		return 0;
@@ -616,9 +688,9 @@ void journal_clear_revoke(journal_t *journal)
 	struct list_head *hash_list;
 	struct jbd_revoke_record_s *record;
 	struct jbd_revoke_table_s *revoke;
-	
+
 	revoke = journal->j_revoke;
-	
+
 	for (i = 0; i < revoke->hash_size; i++) {
 		hash_list = &revoke->hash_table[i];
 		while (!list_empty(hash_list)) {
@@ -628,4 +700,3 @@ void journal_clear_revoke(journal_t *journal)
 		}
 	}
 }
-

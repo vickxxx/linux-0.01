@@ -22,11 +22,12 @@
 
 #include <linux/fs.h>
 #include <linux/ufs_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/string.h>
-#include <linux/locks.h>
 #include <linux/quotaops.h>
+#include <linux/buffer_head.h>
+#include <linux/sched.h>
 #include <asm/bitops.h>
 #include <asm/byteorder.h>
 
@@ -70,7 +71,7 @@ void ufs_free_inode (struct inode * inode)
 	UFSD(("ENTER, ino %lu\n", inode->i_ino))
 
 	sb = inode->i_sb;
-	uspi = sb->u.ufs_sb.s_uspi;
+	uspi = UFS_SB(sb)->s_uspi;
 	usb1 = ubh_get_usb_first(USPI_UBH);
 	
 	ino = inode->i_ino;
@@ -94,7 +95,7 @@ void ufs_free_inode (struct inode * inode)
 	if (!ufs_cg_chkmagic(sb, ucg))
 		ufs_panic (sb, "ufs_free_fragments", "internal error, bad cg magic number");
 
-	ucg->cg_time = cpu_to_fs32(sb, CURRENT_TIME);
+	ucg->cg_time = cpu_to_fs32(sb, get_seconds());
 
 	is_directory = S_ISDIR(inode->i_mode);
 
@@ -111,18 +112,19 @@ void ufs_free_inode (struct inode * inode)
 			ucpi->c_irotor = ino;
 		fs32_add(sb, &ucg->cg_cs.cs_nifree, 1);
 		fs32_add(sb, &usb1->fs_cstotal.cs_nifree, 1);
-		fs32_add(sb, &sb->fs_cs(cg).cs_nifree, 1);
+		fs32_add(sb, &UFS_SB(sb)->fs_cs(cg).cs_nifree, 1);
 
 		if (is_directory) {
 			fs32_sub(sb, &ucg->cg_cs.cs_ndir, 1);
 			fs32_sub(sb, &usb1->fs_cstotal.cs_ndir, 1);
-			fs32_sub(sb, &sb->fs_cs(cg).cs_ndir, 1);
+			fs32_sub(sb, &UFS_SB(sb)->fs_cs(cg).cs_ndir, 1);
 		}
 	}
 
 	ubh_mark_buffer_dirty (USPI_UBH);
 	ubh_mark_buffer_dirty (UCPI_UBH);
 	if (sb->s_flags & MS_SYNCHRONOUS) {
+		ubh_wait_on_buffer (UCPI_UBH);
 		ubh_ll_rw_block (WRITE, 1, (struct ufs_buffer_head **) &ucpi);
 		ubh_wait_on_buffer (UCPI_UBH);
 	}
@@ -142,15 +144,17 @@ void ufs_free_inode (struct inode * inode)
  * For other inodes, search forward from the parent directory's block
  * group to find a free inode.
  */
-struct inode * ufs_new_inode (const struct inode * dir,	int mode)
+struct inode * ufs_new_inode(struct inode * dir, int mode)
 {
 	struct super_block * sb;
+	struct ufs_sb_info * sbi;
 	struct ufs_sb_private_info * uspi;
 	struct ufs_super_block_first * usb1;
 	struct ufs_cg_private_info * ucpi;
 	struct ufs_cylinder_group * ucg;
 	struct inode * inode;
 	unsigned cg, bit, i, j, start;
+	struct ufs_inode_info *ufsi;
 
 	UFSD(("ENTER\n"))
 	
@@ -161,7 +165,9 @@ struct inode * ufs_new_inode (const struct inode * dir,	int mode)
 	inode = new_inode(sb);
 	if (!inode)
 		return ERR_PTR(-ENOMEM);
-	uspi = sb->u.ufs_sb.s_uspi;
+	ufsi = UFS_I(inode);
+	sbi = UFS_SB(sb);
+	uspi = sbi->s_uspi;
 	usb1 = ubh_get_usb_first(USPI_UBH);
 
 	lock_super (sb);
@@ -170,7 +176,7 @@ struct inode * ufs_new_inode (const struct inode * dir,	int mode)
 	 * Try to place the inode in its parent directory
 	 */
 	i = ufs_inotocg(dir->i_ino);
-	if (sb->fs_cs(i).cs_nifree) {
+	if (sbi->fs_cs(i).cs_nifree) {
 		cg = i;
 		goto cg_found;
 	}
@@ -182,7 +188,7 @@ struct inode * ufs_new_inode (const struct inode * dir,	int mode)
 		i += j;
 		if (i >= uspi->s_ncg)
 			i -= uspi->s_ncg;
-		if (sb->fs_cs(i).cs_nifree) {
+		if (sbi->fs_cs(i).cs_nifree) {
 			cg = i;
 			goto cg_found;
 		}
@@ -196,7 +202,7 @@ struct inode * ufs_new_inode (const struct inode * dir,	int mode)
 		i++;
 		if (i >= uspi->s_ncg)
 			i = 0;
-		if (sb->fs_cs(i).cs_nifree) {
+		if (sbi->fs_cs(i).cs_nifree) {
 			cg = i;
 			goto cg_found;
 		}
@@ -232,17 +238,18 @@ cg_found:
 	
 	fs32_sub(sb, &ucg->cg_cs.cs_nifree, 1);
 	fs32_sub(sb, &usb1->fs_cstotal.cs_nifree, 1);
-	fs32_sub(sb, &sb->fs_cs(cg).cs_nifree, 1);
+	fs32_sub(sb, &sbi->fs_cs(cg).cs_nifree, 1);
 	
 	if (S_ISDIR(mode)) {
 		fs32_add(sb, &ucg->cg_cs.cs_ndir, 1);
 		fs32_add(sb, &usb1->fs_cstotal.cs_ndir, 1);
-		fs32_add(sb, &sb->fs_cs(cg).cs_ndir, 1);
+		fs32_add(sb, &sbi->fs_cs(cg).cs_ndir, 1);
 	}
 
 	ubh_mark_buffer_dirty (USPI_UBH);
 	ubh_mark_buffer_dirty (UCPI_UBH);
 	if (sb->s_flags & MS_SYNCHRONOUS) {
+		ubh_wait_on_buffer (UCPI_UBH);
 		ubh_ll_rw_block (WRITE, 1, (struct ufs_buffer_head **) &ucpi);
 		ubh_wait_on_buffer (UCPI_UBH);
 	}
@@ -261,8 +268,13 @@ cg_found:
 	inode->i_blksize = PAGE_SIZE;	/* This is the optimal IO size (for stat), not the fs block size */
 	inode->i_blocks = 0;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
-	inode->u.ufs_i.i_flags = dir->u.ufs_i.i_flags;
-	inode->u.ufs_i.i_lastfrag = 0;
+	ufsi->i_flags = UFS_I(dir)->i_flags;
+	ufsi->i_lastfrag = 0;
+	ufsi->i_gen = 0;
+	ufsi->i_shadow = 0;
+	ufsi->i_osync = 0;
+	ufsi->i_oeftflag = 0;
+	memset(&ufsi->i_u1, 0, sizeof(ufsi->i_u1));
 
 	insert_inode_hash(inode);
 	mark_inode_dirty(inode);

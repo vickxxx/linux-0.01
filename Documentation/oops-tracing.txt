@@ -52,7 +52,7 @@ latter, man ksymoops for details.
 Full Information
 ----------------
 
-From: Linus Torvalds <torvalds@transmeta.com>
+From: Linus Torvalds <torvalds@osdl.org>
 
 How to track down an Oops.. [originally a mail to linux-kernel]
 
@@ -218,6 +218,11 @@ characters, each representing a particular tainted value.
 
   2: 'F' if any module was force loaded by insmod -f, ' ' if all
      modules were loaded normally.
+
+  3: 'S' if the oops occurred on an SMP kernel running on hardware that
+      hasn't been certified as safe to run multiprocessor.
+	  Currently this occurs only on various Athlons that are not
+	  SMP capable.
 
 The primary reason for the 'Tainted: ' string is to tell kernel
 debuggers if this is a clean kernel or if anything unusual has

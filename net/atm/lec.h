@@ -2,7 +2,7 @@
  *
  * Lan Emulation client header file
  *
- * Marko Kiiskila mkiiskila@yahoo.com
+ * Marko Kiiskila carnil@cs.tut.fi
  *
  */
 

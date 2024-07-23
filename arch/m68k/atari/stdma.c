@@ -33,6 +33,7 @@
 #include <linux/genhd.h>
 #include <linux/sched.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 
 #include <asm/atari_stdma.h>
 #include <asm/atariints.h>
@@ -42,8 +43,8 @@
 
 static int stdma_locked = 0;			/* the semaphore */
 						/* int func to be called */
-static void (*stdma_isr)(int, void *, struct pt_regs *) = NULL;
-static void	*stdma_isr_data = NULL;		/* data passed to isr */
+static irqreturn_t (*stdma_isr)(int, void *, struct pt_regs *) = NULL;
+static void *stdma_isr_data = NULL;		/* data passed to isr */
 static DECLARE_WAIT_QUEUE_HEAD(stdma_wait);	/* wait queue for ST-DMA */
 
 
@@ -51,7 +52,7 @@ static DECLARE_WAIT_QUEUE_HEAD(stdma_wait);	/* wait queue for ST-DMA */
 
 /***************************** Prototypes *****************************/
 
-static void stdma_int (int irq, void *dummy, struct pt_regs *fp);
+static irqreturn_t stdma_int (int irq, void *dummy, struct pt_regs *fp);
 
 /************************* End of Prototypes **************************/
 
@@ -73,12 +74,12 @@ static void stdma_int (int irq, void *dummy, struct pt_regs *fp);
  *
  */
 
-void stdma_lock(void (*handler)(int, void *, struct pt_regs *), void *data)
+void stdma_lock(irqreturn_t (*handler)(int, void *, struct pt_regs *),
+		void *data)
 {
-	unsigned long	oldflags;
+	unsigned long flags;
 
-	save_flags(oldflags);
-	cli();		/* protect lock */
+	local_irq_save(flags);		/* protect lock */
 
 	while(stdma_locked)
 		/* Since the DMA is used for file system purposes, we
@@ -89,7 +90,7 @@ void stdma_lock(void (*handler)(int, void *, struct pt_regs *), void *data)
 	stdma_locked   = 1;
 	stdma_isr      = handler;
 	stdma_isr_data = data;
-	restore_flags(oldflags);
+	local_irq_restore(flags);
 }
 
 
@@ -106,17 +107,16 @@ void stdma_lock(void (*handler)(int, void *, struct pt_regs *), void *data)
 
 void stdma_release(void)
 {
-	unsigned long	oldflags;
+	unsigned long flags;
 
-	save_flags(oldflags);
-	cli();
-	
+	local_irq_save(flags);
+
 	stdma_locked   = 0;
 	stdma_isr      = NULL;
 	stdma_isr_data = NULL;
 	wake_up(&stdma_wait);
 
-	restore_flags(oldflags);
+	local_irq_restore(flags);
 }
 
 
@@ -188,8 +188,9 @@ void __init stdma_init(void)
  *
  */
 
-static void stdma_int(int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t stdma_int(int irq, void *dummy, struct pt_regs *fp)
 {
   if (stdma_isr)
       (*stdma_isr)(irq, stdma_isr_data, fp);
+  return IRQ_HANDLED;
 }

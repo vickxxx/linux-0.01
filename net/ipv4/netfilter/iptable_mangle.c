@@ -48,16 +48,16 @@ static struct
 } initial_table __initdata
 = { { "mangle", MANGLE_VALID_HOOKS, 6,
       sizeof(struct ipt_standard) * 5 + sizeof(struct ipt_error),
-      { [NF_IP_PRE_ROUTING] 	0,
-	[NF_IP_LOCAL_IN] 	sizeof(struct ipt_standard),
-	[NF_IP_FORWARD] 	sizeof(struct ipt_standard) * 2,
-	[NF_IP_LOCAL_OUT] 	sizeof(struct ipt_standard) * 3,
-	[NF_IP_POST_ROUTING] 	sizeof(struct ipt_standard) * 4 },
-      { [NF_IP_PRE_ROUTING] 	0,
-	[NF_IP_LOCAL_IN] 	sizeof(struct ipt_standard),
-	[NF_IP_FORWARD] 	sizeof(struct ipt_standard) * 2,
-	[NF_IP_LOCAL_OUT] 	sizeof(struct ipt_standard) * 3,
-	[NF_IP_POST_ROUTING]	sizeof(struct ipt_standard) * 4 },
+      { [NF_IP_PRE_ROUTING] 	= 0,
+	[NF_IP_LOCAL_IN] 	= sizeof(struct ipt_standard),
+	[NF_IP_FORWARD] 	= sizeof(struct ipt_standard) * 2,
+	[NF_IP_LOCAL_OUT] 	= sizeof(struct ipt_standard) * 3,
+	[NF_IP_POST_ROUTING] 	= sizeof(struct ipt_standard) * 4 },
+      { [NF_IP_PRE_ROUTING] 	= 0,
+	[NF_IP_LOCAL_IN] 	= sizeof(struct ipt_standard),
+	[NF_IP_FORWARD] 	= sizeof(struct ipt_standard) * 2,
+	[NF_IP_LOCAL_OUT] 	= sizeof(struct ipt_standard) * 3,
+	[NF_IP_POST_ROUTING]	= sizeof(struct ipt_standard) * 4 },
       0, NULL, { } },
     {
 	    /* PRE_ROUTING */
@@ -114,9 +114,13 @@ static struct
     }
 };
 
-static struct ipt_table packet_mangler
-= { { NULL, NULL }, "mangle", &initial_table.repl,
-    MANGLE_VALID_HOOKS, RW_LOCK_UNLOCKED, NULL, THIS_MODULE };
+static struct ipt_table packet_mangler = {
+	.name		= "mangle",
+	.table		= &initial_table.repl,
+	.valid_hooks	= MANGLE_VALID_HOOKS,
+	.lock		= RW_LOCK_UNLOCKED,
+	.me		= THIS_MODULE,
+};
 
 /* The work comes in here from netfilter.c. */
 static unsigned int
@@ -160,26 +164,49 @@ ipt_local_hook(unsigned int hook,
 	if (ret != NF_DROP && ret != NF_STOLEN && ret != NF_QUEUE
 	    && ((*pskb)->nh.iph->saddr != saddr
 		|| (*pskb)->nh.iph->daddr != daddr
-#ifdef CONFIG_IP_ROUTE_FWMARK
 		|| (*pskb)->nfmark != nfmark
-#endif
 		|| (*pskb)->nh.iph->tos != tos))
 		return ip_route_me_harder(pskb) == 0 ? ret : NF_DROP;
 
 	return ret;
 }
 
-static struct nf_hook_ops ipt_ops[]
-= { { { NULL, NULL }, ipt_route_hook, PF_INET, NF_IP_PRE_ROUTING, 
-	NF_IP_PRI_MANGLE },
-    { { NULL, NULL }, ipt_route_hook, PF_INET, NF_IP_LOCAL_IN,
-	NF_IP_PRI_MANGLE },
-    { { NULL, NULL }, ipt_route_hook, PF_INET, NF_IP_FORWARD,
-	NF_IP_PRI_MANGLE },
-    { { NULL, NULL }, ipt_local_hook, PF_INET, NF_IP_LOCAL_OUT,
-	NF_IP_PRI_MANGLE },
-    { { NULL, NULL }, ipt_route_hook, PF_INET, NF_IP_POST_ROUTING,
-	NF_IP_PRI_MANGLE }
+static struct nf_hook_ops ipt_ops[] = {
+	{
+		.hook		= ipt_route_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_PRE_ROUTING, 
+		.priority	= NF_IP_PRI_MANGLE,
+	},
+	{
+		.hook		= ipt_route_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_LOCAL_IN,
+		.priority	= NF_IP_PRI_MANGLE,
+	},
+	{
+		.hook		= ipt_route_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_FORWARD,
+		.priority	= NF_IP_PRI_MANGLE,
+	},
+	{
+		.hook		= ipt_local_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_LOCAL_OUT,
+		.priority	= NF_IP_PRI_MANGLE,
+	},
+	{
+		.hook		= ipt_route_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET,
+		.hooknum	= NF_IP_POST_ROUTING,
+		.priority	= NF_IP_PRI_MANGLE,
+	},
 };
 
 static int __init init(void)

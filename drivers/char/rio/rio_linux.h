@@ -87,9 +87,6 @@ struct vpd_prom {
 #endif
 
 
-void rio_dec_mod_count (void);
-void rio_inc_mod_count (void);
-
 /* Allow us to debug "in the field" without requiring clients to
    recompile.... */
 #if 1
@@ -178,10 +175,9 @@ static inline void *rio_memcpy_fromio (void *dest, void *source, int n)
 
 #ifdef DEBUG
 #define rio_dprintk(f, str...) do { if (rio_debug & f) printk (str);} while (0)
-#define func_enter() rio_dprintk (RIO_DEBUG_FLOW, "rio: enter " __FUNCTION__ "\n")
-#define func_exit()  rio_dprintk (RIO_DEBUG_FLOW, "rio: exit  " __FUNCTION__ "\n")
-#define func_enter2() rio_dprintk (RIO_DEBUG_FLOW, "rio: enter " __FUNCTION__ \
-                                   "(port %d)\n", port->line)
+#define func_enter() rio_dprintk (RIO_DEBUG_FLOW, "rio: enter %s\n", __FUNCTION__)
+#define func_exit()  rio_dprintk (RIO_DEBUG_FLOW, "rio: exit  %s\n", __FUNCTION__)
+#define func_enter2() rio_dprintk (RIO_DEBUG_FLOW, "rio: enter %s (port %d)\n",__FUNCTION__, port->line)
 #else
 #define rio_dprintk(f, str...) /* nothing */
 #define func_enter()

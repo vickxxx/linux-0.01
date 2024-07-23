@@ -34,7 +34,6 @@
 static char *_rioparam_c_sccs_ = "@(#)rioparam.c	1.3";
 #endif
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -48,7 +47,6 @@ static char *_rioparam_c_sccs_ = "@(#)rioparam.c	1.3";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 
@@ -714,7 +712,7 @@ PKT *PktP;
 /*
 ** can_remove_receive(PktP,P) returns non-zero if PKT_IN_USE is set
 ** for the next packet on the queue. It will also set PktP to point to the
-** relevent packet, [having cleared the PKT_IN_USE bit]. If PKT_IN_USE is clear,
+** relevant packet, [having cleared the PKT_IN_USE bit]. If PKT_IN_USE is clear,
 ** then can_remove_receive() returns 0.
 */
 int

@@ -1,14 +1,12 @@
-# File: drivers/sk98lin/Makefile
 #
 # Makefile for the SysKonnect SK-98xx device driver.
 #
 
-O_TARGET := sk98lin.o
+obj-$(CONFIG_SK98LIN) += sk98lin.o
 
-obj-y :=     skge.o skaddr.o skgehwt.o skgeinit.o skgepnmi.o skgesirq.o \
-             ski2c.o sklm80.o skqueue.o skrlmt.o sktimer.o skvpd.o \
-             skxmac2.o skproc.o skcsum.o
-obj-m := $(O_TARGET)
+sk98lin-objs := skge.o skaddr.o skgehwt.o skgeinit.o skgepnmi.o skgesirq.o \
+		ski2c.o sklm80.o skqueue.o skrlmt.o sktimer.o skvpd.o \
+		skxmac2.o skproc.o skcsum.o
 
 # DBGDEF =  \
 # -DDEBUG
@@ -57,15 +55,4 @@ endif
 # SK_DBGCAT_DRV_INT_SRC         0x04000000      interrupts sources
 # SK_DBGCAT_DRV_EVENT           0x08000000      driver events
 
-EXTRA_CFLAGS += -I. -DSK_USE_CSUM $(DBGDEF)
-
-include $(TOPDIR)/Rules.make
-
-clean:
-	rm -f core *.o *.a *.s
-
-
-
-
-
-
+EXTRA_CFLAGS += -Idrivers/net/sk98lin -DSK_USE_CSUM $(DBGDEF)

@@ -337,9 +337,9 @@ static struct proc_dir_entry *proc_therm_ds1620;
 #endif
 
 static struct file_operations ds1620_fops = {
-	owner:		THIS_MODULE,
-	read:		ds1620_read,
-	ioctl:		ds1620_ioctl,
+	.owner		= THIS_MODULE,
+	.read		= ds1620_read,
+	.ioctl		= ds1620_ioctl,
 };
 
 static struct miscdevice ds1620_miscdev = {
@@ -348,7 +348,7 @@ static struct miscdevice ds1620_miscdev = {
 	&ds1620_fops
 };
 
-int __init ds1620_init(void)
+static int __init ds1620_init(void)
 {
 	int ret;
 	struct therm th, th_start;
@@ -400,7 +400,7 @@ int __init ds1620_init(void)
 	return 0;
 }
 
-void __exit ds1620_exit(void)
+static void __exit ds1620_exit(void)
 {
 #ifdef THERM_USE_PROC
 	remove_proc_entry("therm", NULL);

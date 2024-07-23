@@ -14,7 +14,8 @@
  * 2 of the License, or (at your option) any later version.
  */
 
-static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	static int count = 25;
 	unsigned char stat = __raw_readb(DUART_BASE + 0x14);
@@ -40,10 +41,12 @@ static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	__raw_readb(DUART_BASE + 0x14);
 	__raw_readb(DUART_BASE + 0x14);
 
-	do_timer(regs);	
+	do_timer(regs);
+
+	return IRQ_HANDLED;
 }
 
-static inline void setup_timer(void)
+void __init time_init(void)
 {
 	int tick = 3686400 / 16 / 2 / 100;
 
@@ -55,5 +58,5 @@ static inline void setup_timer(void)
 	timer_irq.handler = timer_interrupt;
 	timer_irq.flags = SA_SHIRQ;
 
-	setup_arm_irq(IRQ_TIMER, &timer_irq);
+	setup_irq(IRQ_TIMER, &timer_irq);
 }

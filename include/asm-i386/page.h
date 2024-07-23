@@ -6,6 +6,9 @@
 #define PAGE_SIZE	(1UL << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
+#define LARGE_PAGE_MASK (~(LARGE_PAGE_SIZE-1))
+#define LARGE_PAGE_SIZE (1UL << PMD_SHIFT)
+
 #ifdef __KERNEL__
 #ifndef __ASSEMBLY__
 
@@ -21,7 +24,7 @@
 #else
 
 /*
- *	On older X86 processors its not a win to use MMX here it seems.
+ *	On older X86 processors it's not a win to use MMX here it seems.
  *	Maybe the K6-III ?
  */
  
@@ -30,24 +33,33 @@
 
 #endif
 
-#define clear_user_page(page, vaddr)	clear_page(page)
-#define copy_user_page(to, from, vaddr)	copy_page(to, from)
+#define clear_user_page(page, vaddr, pg)	clear_page(page)
+#define copy_user_page(to, from, vaddr, pg)	copy_page(to, from)
 
 /*
  * These are used to make use of C type-checking..
  */
-#if CONFIG_X86_PAE
+#ifdef CONFIG_X86_PAE
 typedef struct { unsigned long pte_low, pte_high; } pte_t;
 typedef struct { unsigned long long pmd; } pmd_t;
 typedef struct { unsigned long long pgd; } pgd_t;
 #define pte_val(x)	((x).pte_low | ((unsigned long long)(x).pte_high << 32))
+#define HPAGE_SHIFT	21
 #else
 typedef struct { unsigned long pte_low; } pte_t;
 typedef struct { unsigned long pmd; } pmd_t;
 typedef struct { unsigned long pgd; } pgd_t;
+#define boot_pte_t pte_t /* or would you rather have a typedef */
 #define pte_val(x)	((x).pte_low)
+#define HPAGE_SHIFT	22
 #endif
 #define PTE_MASK	PAGE_MASK
+
+#ifdef CONFIG_HUGETLB_PAGE
+#define HPAGE_SIZE	((1UL) << HPAGE_SHIFT)
+#define HPAGE_MASK	(~(HPAGE_SIZE - 1))
+#define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
+#endif
 
 typedef struct { unsigned long pgprot; } pgprot_t;
 
@@ -78,28 +90,13 @@ typedef struct { unsigned long pgprot; } pgprot_t;
  * and CONFIG_HIGHMEM64G options in the kernel configuration.
  */
 
-#define __PAGE_OFFSET		(0xC0000000)
+/*
+ * This much address space is reserved for vmalloc() and iomap()
+ * as well as fixmap mappings.
+ */
+#define __VMALLOC_RESERVE	(128 << 20)
 
 #ifndef __ASSEMBLY__
-
-/*
- * Tell the user there is some problem. Beep too, so we can
- * see^H^H^Hhear bugs in early bootup as well!
- */
-
-#ifdef CONFIG_DEBUG_BUGVERBOSE
-extern void do_BUG(const char *file, int line);
-#define BUG() do {					\
-	do_BUG(__FILE__, __LINE__);			\
-	__asm__ __volatile__("ud2");			\
-} while (0)
-#else
-#define BUG() __asm__ __volatile__(".byte 0x0f,0x0b")
-#endif
-
-#define PAGE_BUG(page) do { \
-	BUG(); \
-} while (0)
 
 /* Pure 2^n version of get_order */
 static __inline__ int get_order(unsigned long size)
@@ -117,11 +114,30 @@ static __inline__ int get_order(unsigned long size)
 
 #endif /* __ASSEMBLY__ */
 
+#ifdef __ASSEMBLY__
+#define __PAGE_OFFSET		(0xC0000000)
+#else
+#define __PAGE_OFFSET		(0xC0000000UL)
+#endif
+
+
 #define PAGE_OFFSET		((unsigned long)__PAGE_OFFSET)
+#define VMALLOC_RESERVE		((unsigned long)__VMALLOC_RESERVE)
+#define MAXMEM			(-__PAGE_OFFSET-__VMALLOC_RESERVE)
 #define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
-#define virt_to_page(kaddr)	(mem_map + (__pa(kaddr) >> PAGE_SHIFT))
-#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+#define pfn_to_kaddr(pfn)      __va((pfn) << PAGE_SHIFT)
+#ifndef CONFIG_DISCONTIGMEM
+#define pfn_to_page(pfn)	(mem_map + (pfn))
+#define page_to_pfn(page)	((unsigned long)((page) - mem_map))
+#define pfn_valid(pfn)		((pfn) < max_mapnr)
+#endif /* !CONFIG_DISCONTIGMEM */
+#define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
+
+#define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
+
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
 
 #endif /* __KERNEL__ */
 

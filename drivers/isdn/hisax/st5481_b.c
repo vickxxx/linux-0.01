@@ -82,12 +82,7 @@ static void usb_b_out(struct st5481_bcs *bcs,int buf_nr)
 			if (!skb->len) {
 				// Frame sent
 				b_out->tx_skb = NULL;
-				B_L1L2(bcs, PH_DATA | CONFIRM, (void *) skb->truesize);
-				dev_kfree_skb_any(skb);
-				
-/* 				if (!(bcs->tx_skb = skb_dequeue(&bcs->sq))) { */
-/* 					st5481B_sched_event(bcs, B_XMTBUFREADY); */
-/* 				} */
+				B_L1L2(bcs, PH_DATA | CONFIRM, skb);
 			}
 		} else {
 			if (bcs->mode == L1_MODE_TRANS) {
@@ -115,7 +110,7 @@ static void usb_b_out(struct st5481_bcs *bcs,int buf_nr)
 
 	DBG_ISO_PACKET(0x200,urb);
 
-	SUBMIT_URB(urb);
+	SUBMIT_URB(urb, GFP_KERNEL);
 }
 
 /*
@@ -141,7 +136,7 @@ static void st5481B_start_xfer(void *context)
  */
 static void led_blink(struct st5481_adapter *adapter)
 {
-	u_char leds = adapter->leds;
+	u8 leds = adapter->leds;
 
 	// 50 frames/sec for each channel
 	if (++adapter->led_counter % 50) {
@@ -157,7 +152,7 @@ static void led_blink(struct st5481_adapter *adapter)
 	st5481_usb_device_ctrl_msg(adapter, GPIO_OUT, leds, NULL, NULL);
 }
 
-static void usb_b_out_complete(struct urb *urb)
+static void usb_b_out_complete(struct urb *urb, struct pt_regs *regs)
 {
 	struct st5481_bcs *bcs = urb->context;
 	struct st5481_b_out *b_out = &bcs->b_out;
@@ -168,7 +163,7 @@ static void usb_b_out_complete(struct urb *urb)
 	test_and_clear_bit(buf_nr, &b_out->busy);
 
 	if (urb->status < 0) {
-		if (urb->status != USB_ST_URB_KILLED) {
+		if (urb->status != -ENOENT) {
 			WARN("urb status %d",urb->status);
 			if (b_out->busy == 0) {
 				st5481_usb_pipe_reset(adapter, (bcs->channel+1)*2 | USB_DIR_OUT, NULL, NULL);
@@ -253,8 +248,8 @@ static void st5481B_mode(struct st5481_bcs *bcs, int mode)
 static int __devinit st5481_setup_b_out(struct st5481_bcs *bcs)
 {
 	struct usb_device *dev = bcs->adapter->usb_dev;
-	struct usb_interface_descriptor *altsetting;
-	struct usb_endpoint_descriptor *endpoint;
+	struct usb_host_interface *altsetting;
+	struct usb_host_endpoint *endpoint;
   	struct st5481_b_out *b_out = &bcs->b_out;
 
 	DBG(4,"");
@@ -265,17 +260,17 @@ static int __devinit st5481_setup_b_out(struct st5481_bcs *bcs)
 	endpoint = &altsetting->endpoint[EP_B1_OUT - 1 + bcs->channel * 2];
 
 	DBG(4,"endpoint address=%02x,packet size=%d",
-	    endpoint->bEndpointAddress,endpoint->wMaxPacketSize);
+	    endpoint->desc.bEndpointAddress,endpoint->desc.wMaxPacketSize);
 
 	// Allocate memory for 8000bytes/sec + extra bytes if underrun
 	return st5481_setup_isocpipes(b_out->urb, dev, 
-				      usb_sndisocpipe(dev, endpoint->bEndpointAddress),
+				      usb_sndisocpipe(dev, endpoint->desc.bEndpointAddress),
 				      NUM_ISO_PACKETS_B, SIZE_ISO_PACKETS_B_OUT,
 				      NUM_ISO_PACKETS_B * SIZE_ISO_PACKETS_B_OUT + B_FLOW_ADJUST,
 				      usb_b_out_complete, bcs);
 }
 
-static void __devexit st5481_release_b_out(struct st5481_bcs *bcs)
+static void st5481_release_b_out(struct st5481_bcs *bcs)
 {
 	struct st5481_b_out *b_out = &bcs->b_out;
 
@@ -316,7 +311,7 @@ int __devinit st5481_setup_b(struct st5481_bcs *bcs)
 /*
  * Release buffers and URBs for the B channels
  */
-void __devexit st5481_release_b(struct st5481_bcs *bcs)
+void st5481_release_b(struct st5481_bcs *bcs)
 {
 	DBG(4,"");
 

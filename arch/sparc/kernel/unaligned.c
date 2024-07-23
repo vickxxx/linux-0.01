@@ -1,4 +1,4 @@
-/* $Id: unaligned.c,v 1.22 2000/04/29 08:05:21 anton Exp $
+/* $Id: unaligned.c,v 1.23 2001/12/21 00:54:31 davem Exp $
  * unaligned.c: Unaligned load/store trap handling with special
  *              cases for the kernel to do them more quickly.
  *
@@ -10,6 +10,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/module.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
 #include <asm/system.h>
@@ -224,7 +225,7 @@ __asm__ __volatile__ (								\
 	"or	%%l1, %%g7, %%g7\n\t"						\
 	"st	%%g7, [%0 + 4]\n"						\
 "0:\n\n\t"									\
-	".section __ex_table\n\t"						\
+	".section __ex_table,#alloc\n\t"					\
 	".word	4b, " #errh "\n\t"						\
 	".word	5b, " #errh "\n\t"						\
 	".word	6b, " #errh "\n\t"						\
@@ -277,7 +278,7 @@ __asm__ __volatile__ (								\
 "16:\t"	"stb	%%l2, [%0]\n"							\
 "17:\t"	"stb	%%l1, [%0 + 1]\n"						\
 "0:\n\n\t"									\
-	".section __ex_table\n\t"						\
+	".section __ex_table,#alloc\n\t"					\
 	".word	4b, " #errh "\n\t"						\
 	".word	5b, " #errh "\n\t"						\
 	".word	6b, " #errh "\n\t"						\
@@ -342,7 +343,7 @@ void kernel_mna_trap_fault(struct pt_regs *regs, unsigned int insn) __asm__ ("ke
 void kernel_mna_trap_fault(struct pt_regs *regs, unsigned int insn)
 {
 	unsigned long g2 = regs->u_regs [UREG_G2];
-	unsigned long fixup = search_exception_table (regs->pc, &g2);
+	unsigned long fixup = search_extables_range(regs->pc, &g2);
 
 	if (!fixup) {
 		unsigned long address = compute_effective_address(regs, insn);
@@ -506,9 +507,18 @@ asmlinkage void user_unaligned_trap(struct pt_regs *regs, unsigned int insn)
 			break;
 
 		case both:
+#if 0 /* unsupported */
 			do_atomic(fetch_reg_addr(((insn>>25)&0x1f), regs),
 				  (unsigned long *) addr,
 				  user_unaligned_trap_fault);
+#else
+			/*
+			 * This was supported in 2.4. However, we question
+			 * the value of SWAP instruction across word boundaries.
+			 */
+			printk("Unaligned SWAP unsupported.\n");
+			goto kill_user;
+#endif
 			break;
 
 		default:

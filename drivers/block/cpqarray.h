@@ -27,7 +27,6 @@
 
 #ifdef __KERNEL__
 #include <linux/blkdev.h>
-#include <linux/locks.h>
 #include <linux/slab.h>
 #include <linux/proc_fs.h>
 #include <linux/timer.h>
@@ -55,11 +54,6 @@ typedef struct {
 } drv_info_t;
 
 #ifdef __KERNEL__
-
-struct my_sg {
-	int size;
-	char *start_addr;
-};
 
 struct ctlr_info;
 typedef struct ctlr_info ctlr_info_t;
@@ -110,7 +104,9 @@ struct ctlr_info {
 	cmdlist_t *cmpQ;
 	cmdlist_t *cmd_pool;
 	dma_addr_t cmd_pool_dhandle;
-	__u32	*cmd_pool_bits;
+	unsigned long *cmd_pool_bits;
+	struct request_queue queue;
+	spinlock_t lock;
 
 	unsigned int Qdepth;
 	unsigned int maxQsinceinit;
@@ -121,6 +117,9 @@ struct ctlr_info {
 	struct timer_list timer;
 	unsigned int misc_tflags;
 };
+
+#define IDA_LOCK(i)	(&hba[i]->lock)
+
 #endif
 
 #endif /* CPQARRAY_H */

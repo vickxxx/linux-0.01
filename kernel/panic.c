@@ -16,11 +16,12 @@
 #include <linux/init.h>
 #include <linux/sysrq.h>
 #include <linux/interrupt.h>
-#include <linux/console.h>
 
 asmlinkage void sys_sync(void);	/* it's really int */
 
 int panic_timeout;
+int panic_on_oops;
+int tainted;
 
 struct notifier_block *panic_notifier_list;
 
@@ -29,10 +30,7 @@ static int __init panic_setup(char *str)
 	panic_timeout = simple_strtoul(str, NULL, 0);
 	return 1;
 }
-
 __setup("panic=", panic_setup);
-
-int machine_paniced; 
 
 /**
  *	panic - halt the system
@@ -52,11 +50,6 @@ NORET_TYPE void panic(const char * fmt, ...)
         unsigned long caller = (unsigned long) __builtin_return_address(0);
 #endif
 
-#ifdef CONFIG_VT
-	disable_console_blank();
-#endif
-	machine_paniced = 1;
-	
 	bust_spinlocks(1);
 	va_start(args, fmt);
 	vsnprintf(buf, sizeof(buf), fmt, args);
@@ -74,7 +67,7 @@ NORET_TYPE void panic(const char * fmt, ...)
 	smp_send_stop();
 #endif
 
-	notifier_call_chain(&panic_notifier_list, 0, NULL);
+       notifier_call_chain(&panic_notifier_list, 0, buf);
 
 	if (panic_timeout > 0)
 	{
@@ -96,59 +89,37 @@ NORET_TYPE void panic(const char * fmt, ...)
 		extern int stop_a_enabled;
 		/* Make sure the user can actually press L1-A */
 		stop_a_enabled = 1;
-		printk("Press L1-A to return to the boot prom\n");
+		printk(KERN_EMERG "Press L1-A to return to the boot prom\n");
 	}
 #endif
 #if defined(CONFIG_ARCH_S390)
         disabled_wait(caller);
 #endif
-	sti();
-	for(;;) {
-#if defined(CONFIG_X86) && defined(CONFIG_VT) && !defined(CONFIG_DUMMY_KEYB) 
-		extern void panic_blink(void);
-		panic_blink(); 
-#endif
-		CHECK_EMERGENCY_SYNC
-	}
+	local_irq_enable();
+	for (;;)
+		;
 }
 
 /**
  *	print_tainted - return a string to represent the kernel taint state.
  *
+ *  'P' - Proprietary module has been loaded.
+ *  'F' - Module has been forcibly loaded.
+ *  'S' - SMP with CPUs not designed for SMP.
+ *
  *	The string is overwritten by the next call to print_taint().
  */
  
-const char *print_tainted()
+const char *print_tainted(void)
 {
 	static char buf[20];
 	if (tainted) {
-		snprintf(buf, sizeof(buf), "Tainted: %c%c",
-			tainted & 1 ? 'P' : 'G',
-			tainted & 2 ? 'F' : ' ');
+		snprintf(buf, sizeof(buf), "Tainted: %c%c%c",
+			tainted & TAINT_PROPRIETARY_MODULE ? 'P' : 'G',
+			tainted & TAINT_FORCED_MODULE ? 'F' : ' ',
+			tainted & TAINT_UNSAFE_SMP ? 'S' : ' ');
 	}
 	else
 		snprintf(buf, sizeof(buf), "Not tainted");
 	return(buf);
-}
-
-int tainted = 0;
-
-/*
- * A BUG() call in an inline function in a header should be avoided,
- * because it can seriously bloat the kernel.  So here we have
- * helper functions.
- * We lose the BUG()-time file-and-line info this way, but it's
- * usually not very useful from an inline anyway.  The backtrace
- * tells us what we want to know.
- */
-
-void __out_of_line_bug(int line)
-{
-	printk("kernel BUG in header file at line %d\n", line);
-
-	BUG();
-
-	/* Satisfy __attribute__((noreturn)) */
-	for ( ; ; )
-		;
 }

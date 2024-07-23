@@ -8,11 +8,6 @@
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
  * published by the Free Software Foundation.
- *
- * Since this file should be linked before any other machine specific file,
- * the __initcall() here will be executed first.  This serves as default
- * initialization stuff for SA1100 machines which can be overriden later if
- * need be.
  */
 #include <linux/config.h>
 #include <linux/module.h>
@@ -21,11 +16,13 @@
 #include <linux/delay.h>
 #include <linux/pm.h>
 #include <linux/cpufreq.h>
+#include <linux/ioport.h>
 
 #include <asm/hardware.h>
 #include <asm/system.h>
 #include <asm/pgtable.h>
 #include <asm/mach/map.h>
+#include <asm/irq.h>
 
 #include "generic.h"
 
@@ -53,61 +50,64 @@ static const unsigned short cclk_frequency_100khz[NR_FREQS] = {
 	2802    /* 280.2 MHz */
 };
 
-/*
- * Return the current CPU clock frequency in units of 100kHz
- */
-unsigned short get_cclk_frequency(void)
-{
-	return cclk_frequency_100khz[PPCR & 0xf];
-}
-
-EXPORT_SYMBOL(get_cclk_frequency);
-
-#ifdef CONFIG_CPU_FREQ
-
-/*
- * Validate the speed in khz.  If we can't generate the precise
- * frequency requested, round it down (to be on the safe side).
- */
-unsigned int sa1100_validatespeed(unsigned int khz)
+#if defined(CONFIG_CPU_FREQ_SA1100) || defined(CONFIG_CPU_FREQ_SA1110)
+/* rounds up(!)  */
+unsigned int sa11x0_freq_to_ppcr(unsigned int khz)
 {
 	int i;
 
 	khz /= 100;
 
-	for (i = NR_FREQS - 1; i > 0; i--)
-		if (cclk_frequency_100khz[i] <= khz)
+	for (i = 0; i < NR_FREQS; i++)
+		if (cclk_frequency_100khz[i] >= khz)
 			break;
 
-	return cclk_frequency_100khz[i] * 100;
+	return i;
 }
 
-/*
- * Ok, set the CPU frequency.  Since we've done the validation
- * above, we can match for an exact frequency.  If we don't find
- * an exact match, we will to set the lowest frequency to be safe.
+unsigned int sa11x0_ppcr_to_freq(unsigned int idx)
+{
+	unsigned int freq = 0;
+	if (idx < NR_FREQS)
+		freq = cclk_frequency_100khz[idx] * 100;
+	return freq;
+}
+
+
+/* make sure that only the "userspace" governor is run -- anything else wouldn't make sense on
+ * this platform, anyway.
  */
-void sa1100_setspeed(unsigned int khz)
+int sa11x0_verify_speed(struct cpufreq_policy *policy)
 {
-	int i;
+	unsigned int tmp;
+	if (policy->cpu)
+		return -EINVAL;
 
-	khz /= 100;
+	cpufreq_verify_within_limits(policy, policy->cpuinfo.min_freq, policy->cpuinfo.max_freq);
 
-	for (i = NR_FREQS - 1; i > 0; i--)
-		if (cclk_frequency_100khz[i] == khz)
-			break;
-//printk("setting ppcr to %d\n", i);
-	PPCR = i;
-}
+	/* make sure that at least one frequency is within the policy */
+	tmp = cclk_frequency_100khz[sa11x0_freq_to_ppcr(policy->min)] * 100;
+	if (tmp > policy->max)
+		policy->max = tmp;
 
-static int __init sa1100_init_clock(void)
-{
-	cpufreq_init(get_cclk_frequency() * 100);
-	cpufreq_setfunctions(sa1100_validatespeed, sa1100_setspeed);
+	cpufreq_verify_within_limits(policy, policy->cpuinfo.min_freq, policy->cpuinfo.max_freq);
+
 	return 0;
 }
 
-__initcall(sa1100_init_clock);
+unsigned int sa11x0_getspeed(void)
+{
+	return cclk_frequency_100khz[PPCR & 0xf] * 100;
+}
+#else
+/*
+ * We still need to provide this so building without cpufreq works.
+ */ 
+unsigned int cpufreq_get(unsigned int cpu)
+{
+	return cclk_frequency_100khz[PPCR & 0xf] * 100;
+}
+EXPORT_SYMBOL(cpufreq_get);
 #endif
 
 /*
@@ -116,7 +116,7 @@ __initcall(sa1100_init_clock);
 static void sa1100_power_off(void)
 {
 	mdelay(100);
-	cli();
+	local_irq_disable();
 	/* disable internal oscillator, float CS lines */
 	PCFR = (PCFR_OPDE | PCFR_FP | PCFR_FS);
 	/* enable wake-up on GPIO0 (Assabet...) */
@@ -130,13 +130,119 @@ static void sa1100_power_off(void)
 	PMCR = PMCR_SF;
 }
 
-static int __init sa1100_set_poweroff(void)
+static struct resource sa11x0udc_resources[] = {
+	[0] = {
+		.start	= 0x80000000,
+		.end	= 0x8000ffff,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static u64 sa11x0udc_dma_mask = 0xffffffffUL;
+
+static struct platform_device sa11x0udc_device = {
+	.name		= "sa11x0-udc",
+	.id		= 0,
+	.dev		= {
+		.name	= "Intel Corporation SA11x0 [UDC]",
+		.dma_mask = &sa11x0udc_dma_mask,
+	},
+	.num_resources	= ARRAY_SIZE(sa11x0udc_resources),
+	.resource	= sa11x0udc_resources,
+};
+
+static struct resource sa11x0mcp_resources[] = {
+	[0] = {
+		.start	= 0x80060000,
+		.end	= 0x8006ffff,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static struct platform_device sa11x0mcp_device = {
+	.name		= "sa11x0-mcp",
+	.id		= 0,
+	.dev = {
+		.name	= "Intel Corporation SA11x0 [MCP]",
+	},
+	.num_resources	= ARRAY_SIZE(sa11x0mcp_resources),
+	.resource	= sa11x0mcp_resources,
+};
+
+static struct resource sa11x0ssp_resources[] = {
+	[0] = {
+		.start	= 0x80070000,
+		.end	= 0x8007ffff,
+		.flags	= IORESOURCE_MEM,
+	},
+};
+
+static u64 sa11x0ssp_dma_mask = 0xffffffffUL;
+
+static struct platform_device sa11x0ssp_device = {
+	.name		= "sa11x0-ssp",
+	.id		= 0,
+	.dev = {
+		.name	= "Intel Corporation SA11x0 [SSP]",
+		.dma_mask = &sa11x0ssp_dma_mask,
+	},
+	.num_resources	= ARRAY_SIZE(sa11x0ssp_resources),
+	.resource	= sa11x0ssp_resources,
+};
+
+static struct resource sa11x0fb_resources[] = {
+	[0] = {
+		.start	= 0xb0100000,
+		.end	= 0xb010ffff,
+		.flags	= IORESOURCE_MEM,
+	},
+	[1] = {
+		.start	= IRQ_LCD,
+		.end	= IRQ_LCD,
+		.flags	= IORESOURCE_IRQ,
+	},
+};
+
+static struct platform_device sa11x0fb_device = {
+	.name		= "sa11x0-fb",
+	.id		= 0,
+	.dev		= {
+		.name	= "Intel Corporation SA11x0 [LCD]",
+	},
+	.num_resources	= ARRAY_SIZE(sa11x0fb_resources),
+	.resource	= sa11x0fb_resources,
+};
+
+static struct platform_device sa11x0pcmcia_device = {
+	.name		= "sa11x0-pcmcia",
+	.id		= 0,
+	.dev		= {
+		.name	= "Intel Corporation SA11x0 [PCMCIA]",
+	},
+};
+
+static struct platform_device *sa11x0_devices[] __initdata = {
+	&sa11x0udc_device,
+	&sa11x0mcp_device,
+	&sa11x0ssp_device,
+	&sa11x0pcmcia_device,
+	&sa11x0fb_device,
+};
+
+static int __init sa1100_init(void)
 {
 	pm_power_off = sa1100_power_off;
-	return 0;
+
+	return platform_add_devices(sa11x0_devices, ARRAY_SIZE(sa11x0_devices));
 }
 
-__initcall(sa1100_set_poweroff);
+arch_initcall(sa1100_init);
+
+void (*sa1100fb_backlight_power)(int on);
+void (*sa1100fb_lcd_power)(int on);
+
+EXPORT_SYMBOL(sa1100fb_backlight_power);
+EXPORT_SYMBOL(sa1100fb_lcd_power);
 
 
 /*
@@ -144,12 +250,12 @@ __initcall(sa1100_set_poweroff);
  *
  * Typically, static virtual address mappings are as follow:
  *
- * 0xe8000000-0xefffffff:	flash memory (especially when multiple flash
- * 				banks need to be mapped contigously)
  * 0xf0000000-0xf3ffffff:	miscellaneous stuff (CPLDs, etc.)
  * 0xf4000000-0xf4ffffff:	SA-1111
  * 0xf5000000-0xf5ffffff:	reserved (used by cache flushing area)
- * 0xf6000000-0xffffffff:	reserved (internal SA1100 IO defined above)
+ * 0xf6000000-0xfffeffff:	reserved (internal SA1100 IO defined above)
+ * 0xffff0000-0xffff0fff:	SA1100 exception vectors
+ * 0xffff2000-0xffff2fff:	Minicache copy_user_page area
  *
  * Below 0xe8000000 is reserved for vm allocation.
  *
@@ -158,17 +264,56 @@ __initcall(sa1100_set_poweroff);
  */
 
 static struct map_desc standard_io_desc[] __initdata = {
- /* virtual     physical    length      domain     r  w  c  b */
-  { 0xf6000000, 0x20000000, 0x01000000, DOMAIN_IO, 1, 1, 0, 0 }, /* PCMCIA0 IO */
-  { 0xf7000000, 0x30000000, 0x01000000, DOMAIN_IO, 1, 1, 0, 0 }, /* PCMCIA1 IO */
-  { 0xf8000000, 0x80000000, 0x00100000, DOMAIN_IO, 0, 1, 0, 0 }, /* PCM */
-  { 0xfa000000, 0x90000000, 0x00100000, DOMAIN_IO, 0, 1, 0, 0 }, /* SCM */
-  { 0xfc000000, 0xa0000000, 0x00100000, DOMAIN_IO, 0, 1, 0, 0 }, /* MER */
-  { 0xfe000000, 0xb0000000, 0x00200000, DOMAIN_IO, 0, 1, 0, 0 }, /* LCD + DMA */
-  LAST_DESC
+ /* virtual     physical    length      type */
+  { 0xf8000000, 0x80000000, 0x00100000, MT_DEVICE }, /* PCM */
+  { 0xfa000000, 0x90000000, 0x00100000, MT_DEVICE }, /* SCM */
+  { 0xfc000000, 0xa0000000, 0x00100000, MT_DEVICE }, /* MER */
+  { 0xfe000000, 0xb0000000, 0x00200000, MT_DEVICE }  /* LCD + DMA */
 };
 
 void __init sa1100_map_io(void)
 {
-	iotable_init(standard_io_desc);
+	iotable_init(standard_io_desc, ARRAY_SIZE(standard_io_desc));
 }
+
+/*
+ * Disable the memory bus request/grant signals on the SA1110 to
+ * ensure that we don't receive spurious memory requests.  We set
+ * the MBGNT signal false to ensure the SA1111 doesn't own the
+ * SDRAM bus.
+ */
+void __init sa1110_mb_disable(void)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+	
+	PGSR &= ~GPIO_MBGNT;
+	GPCR = GPIO_MBGNT;
+	GPDR = (GPDR & ~GPIO_MBREQ) | GPIO_MBGNT;
+
+	GAFR &= ~(GPIO_MBGNT | GPIO_MBREQ);
+
+	local_irq_restore(flags);
+}
+
+/*
+ * If the system is going to use the SA-1111 DMA engines, set up
+ * the memory bus request/grant pins.
+ */
+void __init sa1110_mb_enable(void)
+{
+	unsigned long flags;
+
+	local_irq_save(flags);
+
+	PGSR &= ~GPIO_MBGNT;
+	GPCR = GPIO_MBGNT;
+	GPDR = (GPDR & ~GPIO_MBREQ) | GPIO_MBGNT;
+
+	GAFR |= (GPIO_MBGNT | GPIO_MBREQ);
+	TUCR |= TUCR_MR;
+
+	local_irq_restore(flags);
+}
+

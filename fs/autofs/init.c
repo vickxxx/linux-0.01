@@ -14,7 +14,18 @@
 #include <linux/init.h>
 #include "autofs_i.h"
 
-static DECLARE_FSTYPE(autofs_fs_type, "autofs", autofs_read_super, 0);
+static struct super_block *autofs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_nodev(fs_type, flags, data, autofs_fill_super);
+}
+
+static struct file_system_type autofs_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "autofs",
+	.get_sb		= autofs_get_sb,
+	.kill_sb	= kill_anon_super,
+};
 
 static int __init init_autofs_fs(void)
 {

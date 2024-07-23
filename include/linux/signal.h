@@ -1,6 +1,8 @@
 #ifndef _LINUX_SIGNAL_H
 #define _LINUX_SIGNAL_H
 
+#include <linux/list.h>
+#include <linux/spinlock.h>
 #include <asm/signal.h>
 #include <asm/siginfo.h>
 
@@ -10,12 +12,17 @@
  */
 
 struct sigqueue {
-	struct sigqueue *next;
+	struct list_head list;
+	spinlock_t *lock;
+	int flags;
 	siginfo_t info;
 };
 
+/* flags values. */
+#define SIGQUEUE_PREALLOC	1
+
 struct sigpending {
-	struct sigqueue *head, **tail;
+	struct list_head list;
 	sigset_t signal;
 };
 
@@ -24,9 +31,9 @@ struct sigpending {
  */
 
 #ifndef __HAVE_ARCH_SIG_BITOPS
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 
-/* We don't use <asm/bitops.h> for these because there is no need to
+/* We don't use <linux/bitops.h> for these because there is no need to
    be atomic.  */
 static inline void sigaddset(sigset_t *set, int _sig)
 {
@@ -60,9 +67,9 @@ static inline int sigfindinword(unsigned long word)
 	return ffz(~word);
 }
 
-#define sigmask(sig)	(1UL << ((sig) - 1))
-
 #endif /* __HAVE_ARCH_SIG_BITOPS */
+
+#define sigmask(sig)	(1UL << ((sig) - 1))
 
 #ifndef __HAVE_ARCH_SIG_SETOPS
 #include <linux/string.h>
@@ -70,37 +77,24 @@ static inline int sigfindinword(unsigned long word)
 #define _SIG_SET_BINOP(name, op)					\
 static inline void name(sigset_t *r, const sigset_t *a, const sigset_t *b) \
 {									\
+	extern void _NSIG_WORDS_is_unsupported_size(void);		\
 	unsigned long a0, a1, a2, a3, b0, b1, b2, b3;			\
-	unsigned long i;						\
 									\
-	for (i = 0; i < _NSIG_WORDS/4; ++i) {				\
-		a0 = a->sig[4*i+0]; a1 = a->sig[4*i+1];			\
-		a2 = a->sig[4*i+2]; a3 = a->sig[4*i+3];			\
-		b0 = b->sig[4*i+0]; b1 = b->sig[4*i+1];			\
-		b2 = b->sig[4*i+2]; b3 = b->sig[4*i+3];			\
-		r->sig[4*i+0] = op(a0, b0);				\
-		r->sig[4*i+1] = op(a1, b1);				\
-		r->sig[4*i+2] = op(a2, b2);				\
-		r->sig[4*i+3] = op(a3, b3);				\
-	}								\
-	switch (_NSIG_WORDS % 4) {					\
-	    case 3:							\
-		a0 = a->sig[4*i+0]; a1 = a->sig[4*i+1]; a2 = a->sig[4*i+2]; \
-		b0 = b->sig[4*i+0]; b1 = b->sig[4*i+1]; b2 = b->sig[4*i+2]; \
-		r->sig[4*i+0] = op(a0, b0);				\
-		r->sig[4*i+1] = op(a1, b1);				\
-		r->sig[4*i+2] = op(a2, b2);				\
-		break;							\
+	switch (_NSIG_WORDS) {						\
+	    case 4:							\
+		a3 = a->sig[3]; a2 = a->sig[2];				\
+		b3 = b->sig[3]; b2 = b->sig[2];				\
+		r->sig[3] = op(a3, b3);					\
+		r->sig[2] = op(a2, b2);					\
 	    case 2:							\
-		a0 = a->sig[4*i+0]; a1 = a->sig[4*i+1];			\
-		b0 = b->sig[4*i+0]; b1 = b->sig[4*i+1];			\
-		r->sig[4*i+0] = op(a0, b0);				\
-		r->sig[4*i+1] = op(a1, b1);				\
-		break;							\
+		a1 = a->sig[1]; b1 = b->sig[1];				\
+		r->sig[1] = op(a1, b1);					\
 	    case 1:							\
-		a0 = a->sig[4*i+0]; b0 = b->sig[4*i+0];			\
-		r->sig[4*i+0] = op(a0, b0);				\
+		a0 = a->sig[0]; b0 = b->sig[0];				\
+		r->sig[0] = op(a0, b0);					\
 		break;							\
+	    default:							\
+		_NSIG_WORDS_is_unsupported_size();			\
 	}								\
 }
 
@@ -121,18 +115,16 @@ _SIG_SET_BINOP(signandsets, _sig_nand)
 #define _SIG_SET_OP(name, op)						\
 static inline void name(sigset_t *set)					\
 {									\
-	unsigned long i;						\
+	extern void _NSIG_WORDS_is_unsupported_size(void);		\
 									\
-	for (i = 0; i < _NSIG_WORDS/4; ++i) {				\
-		set->sig[4*i+0] = op(set->sig[4*i+0]);			\
-		set->sig[4*i+1] = op(set->sig[4*i+1]);			\
-		set->sig[4*i+2] = op(set->sig[4*i+2]);			\
-		set->sig[4*i+3] = op(set->sig[4*i+3]);			\
-	}								\
-	switch (_NSIG_WORDS % 4) {					\
-	    case 3: set->sig[4*i+2] = op(set->sig[4*i+2]);		\
-	    case 2: set->sig[4*i+1] = op(set->sig[4*i+1]);		\
-	    case 1: set->sig[4*i+0] = op(set->sig[4*i+0]);		\
+	switch (_NSIG_WORDS) {						\
+	    case 4: set->sig[3] = op(set->sig[3]);			\
+		    set->sig[2] = op(set->sig[2]);			\
+	    case 2: set->sig[1] = op(set->sig[1]);			\
+	    case 1: set->sig[0] = op(set->sig[0]);			\
+		    break;						\
+	    default:							\
+		_NSIG_WORDS_is_unsupported_size();			\
 	}								\
 }
 
@@ -165,8 +157,6 @@ static inline void sigfillset(sigset_t *set)
 		break;
 	}
 }
-
-extern char * render_sigset_t(sigset_t *set, char *buffer);
 
 /* Some extensions for manipulating the low 32 signals in particular.  */
 
@@ -214,12 +204,17 @@ static inline void siginitsetinv(sigset_t *set, unsigned long mask)
 static inline void init_sigpending(struct sigpending *sig)
 {
 	sigemptyset(&sig->signal);
-	sig->head = NULL;
-	sig->tail = &sig->head;
+	INIT_LIST_HEAD(&sig->list);
 }
 
-extern long do_sigpending(void *, unsigned long);
+extern long do_sigpending(void __user *, unsigned long);
+extern int sigprocmask(int, sigset_t *, sigset_t *);
 
+#ifndef HAVE_ARCH_GET_SIGNAL_TO_DELIVER
+struct pt_regs;
+extern int get_signal_to_deliver(siginfo_t *info, struct pt_regs *regs, void *cookie);
+#endif
+#define FOLD_NANO_SLEEP_INTO_CLOCK_NANO_SLEEP
 #endif /* __KERNEL__ */
 
 #endif /* _LINUX_SIGNAL_H */

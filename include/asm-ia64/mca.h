@@ -7,14 +7,14 @@
  * Copyright (C) Srinivasa Thirumalachar (sprasad@engr.sgi.com)
  */
 
-/* XXX use this temporary define for MP systems trying to INIT */
-#undef SAL_MPINIT_WORKAROUND
-
 #ifndef _ASM_IA64_MCA_H
 #define _ASM_IA64_MCA_H
 
 #if !defined(__ASSEMBLY__)
+
+#include <linux/interrupt.h>
 #include <linux/types.h>
+
 #include <asm/param.h>
 #include <asm/sal.h>
 #include <asm/processor.h>
@@ -27,7 +27,7 @@ enum {
 	IA64_MCA_FAILURE	=	1
 };
 
-#define IA64_MCA_RENDEZ_TIMEOUT		(100 * HZ)	/* 1000 milliseconds */
+#define IA64_MCA_RENDEZ_TIMEOUT		(20 * 1000)	/* value in milliseconds - 20 seconds */
 
 #define IA64_CMC_INT_DISABLE		0
 #define IA64_CMC_INT_ENABLE		1
@@ -92,6 +92,8 @@ typedef struct ia64_mca_sal_to_os_state_s {
 	u64		imsto_sal_check_ra;	/* Return address in SAL_CHECK while going
 						 * back to SAL from OS after MCA handling.
 						 */
+	u64		pal_min_state;		/* from PAL in r17 */
+	u64		proc_state_param;	/* from PAL in r18. See SDV 2:268 11.3.2.1 */
 } ia64_mca_sal_to_os_state_t;
 
 enum {
@@ -101,12 +103,21 @@ enum {
 	IA64_MCA_HALT		=	-3	/* System to be halted by SAL */
 };
 
+enum {
+	IA64_MCA_SAME_CONTEXT	=	0x0,	/* SAL to return to same context */
+	IA64_MCA_NEW_CONTEXT	=	-1	/* SAL to return to new context */
+};
+
+#define MIN_STATE_AREA_SIZE     57
+
 typedef struct ia64_mca_os_to_sal_state_s {
 	u64		imots_os_status;	/*   OS status to SAL as to what happened
 						 *   with the MCA handling.
 						 */
 	u64		imots_sal_gp;		/* GP of the SAL - physical */
-	u64		imots_new_min_state;	/* Pointer to structure containing
+	u64		imots_context;		/* 0 if return to same context
+						   1 if return to new context */
+	u64		*imots_new_min_state;	/* Pointer to structure containing
 						 * new values of registers in the min state
 						 * save area.
 						 */
@@ -123,16 +134,23 @@ extern void ia64_os_mca_dispatch_end(void);
 extern void ia64_mca_ucmc_handler(void);
 extern void ia64_monarch_init_handler(void);
 extern void ia64_slave_init_handler(void);
-extern void ia64_mca_rendez_int_handler(int,void *,struct pt_regs *);
-extern void ia64_mca_wakeup_int_handler(int,void *,struct pt_regs *);
-extern void ia64_mca_cmc_int_handler(int,void *,struct pt_regs *);
-extern void ia64_mca_cpe_int_handler(int,void *,struct pt_regs *);
-extern void ia64_log_print(int,prfunc_t);
+extern irqreturn_t ia64_mca_rendez_int_handler(int,void *,struct pt_regs *);
+extern irqreturn_t ia64_mca_wakeup_int_handler(int,void *,struct pt_regs *);
+extern irqreturn_t ia64_mca_cmc_int_handler(int,void *,struct pt_regs *);
+extern irqreturn_t ia64_mca_cpe_int_handler(int,void *,struct pt_regs *);
+extern int  ia64_log_print(int,prfunc_t);
 extern void ia64_mca_cmc_vector_setup(void);
-extern void ia64_mca_check_errors( void );
+extern int  ia64_mca_check_errors(void);
 extern u64  ia64_log_get(int, prfunc_t);
 
 #define PLATFORM_CALL(fn, args)	printk("Platform call TBD\n")
+
+#define platform_mem_dev_err_print ia64_log_prt_oem_data
+#define platform_pci_bus_err_print ia64_log_prt_oem_data
+#define platform_pci_comp_err_print ia64_log_prt_oem_data
+#define platform_plat_specific_err_print ia64_log_prt_oem_data
+#define platform_host_ctlr_err_print ia64_log_prt_oem_data
+#define platform_plat_bus_err_print ia64_log_prt_oem_data
 
 #undef	MCA_TEST
 

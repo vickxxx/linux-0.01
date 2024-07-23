@@ -85,7 +85,7 @@
  * Description:
  *
  * This is the second include file of the driver, which includes all other
- * neccessary files and defines all structures and constants used by the
+ * necessary files and defines all structures and constants used by the
  * driver and the common modules.
  *
  * Include File Hierarchy:
@@ -383,6 +383,7 @@ struct s_DevNet {
 	int             Mtu;
 	int             Up;
 	SK_AC   *pAC;
+	struct proc_dir_entry *proc;
 };  
 
 typedef struct s_TxPort		TX_PORT;

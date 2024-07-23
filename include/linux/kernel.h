@@ -11,6 +11,9 @@
 #include <linux/linkage.h>
 #include <linux/stddef.h>
 #include <linux/types.h>
+#include <linux/compiler.h>
+#include <asm/byteorder.h>
+#include <asm/bug.h>
 
 /* Optimization barrier */
 /* The "volatile" is due to gcc bugs */
@@ -26,6 +29,7 @@
 #define STACK_MAGIC	0xdeadbeef
 
 #define ARRAY_SIZE(x) (sizeof(x) / sizeof((x)[0]))
+#define ALIGN(x,a) (((x)+(a)-1)&~((a)-1))
 
 #define	KERN_EMERG	"<0>"	/* system is unusable			*/
 #define	KERN_ALERT	"<1>"	/* action must be taken immediately	*/
@@ -36,17 +40,21 @@
 #define	KERN_INFO	"<6>"	/* informational			*/
 #define	KERN_DEBUG	"<7>"	/* debug-level messages			*/
 
-# define NORET_TYPE    /**/
-# define ATTRIB_NORET  __attribute__((noreturn))
-# define NORET_AND     noreturn,
+extern int console_printk[];
 
-#ifdef __i386__
-#define FASTCALL(x)	x __attribute__((regparm(3)))
-#else
-#define FASTCALL(x)	x
-#endif
+#define console_loglevel (console_printk[0])
+#define default_message_loglevel (console_printk[1])
+#define minimum_console_loglevel (console_printk[2])
+#define default_console_loglevel (console_printk[3])
 
 struct completion;
+
+#ifdef CONFIG_DEBUG_SPINLOCK_SLEEP
+void __might_sleep(char *file, int line);
+#define might_sleep() __might_sleep(__FILE__, __LINE__)
+#else
+#define might_sleep() do {} while(0)
+#endif
 
 extern struct notifier_block *panic_notifier_list;
 NORET_TYPE void panic(const char * fmt, ...)
@@ -72,17 +80,14 @@ extern int sscanf(const char *, const char *, ...)
 extern int vsscanf(const char *, const char *, va_list);
 
 extern int get_option(char **str, int *pint);
-extern char *get_options(char *str, int nints, int *ints);
+extern char *get_options(const char *str, int nints, int *ints);
 extern unsigned long long memparse(char *ptr, char **retptr);
-extern void dev_probe_lock(void);
-extern void dev_probe_unlock(void);
 
+extern int kernel_text_address(unsigned long addr);
 extern int session_of_pgrp(int pgrp);
 
 asmlinkage int printk(const char * fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
-
-extern int console_loglevel;
 
 static inline void console_silent(void)
 {
@@ -97,11 +102,18 @@ static inline void console_verbose(void)
 
 extern void bust_spinlocks(int yes);
 extern int oops_in_progress;		/* If set, an oops, panic(), BUG() or die() is in progress */
+extern int panic_on_oops;
 
 extern int tainted;
 extern const char *print_tainted(void);
+#define TAINT_PROPRIETARY_MODULE	(1<<0)
+#define TAINT_FORCED_MODULE		(1<<1)
+#define TAINT_UNSAFE_SMP		(1<<2)
+#define TAINT_FORCED_RMMOD		(1<<3)
 
-#if DEBUG
+extern void dump_stack(void);
+
+#ifdef DEBUG
 #define pr_debug(fmt,arg...) \
 	printk(KERN_DEBUG fmt,##arg)
 #else
@@ -122,11 +134,27 @@ extern const char *print_tainted(void);
 	((unsigned char *)&addr)[2], \
 	((unsigned char *)&addr)[3]
 
+#define NIP6(addr) \
+	ntohs((addr).s6_addr16[0]), \
+	ntohs((addr).s6_addr16[1]), \
+	ntohs((addr).s6_addr16[2]), \
+	ntohs((addr).s6_addr16[3]), \
+	ntohs((addr).s6_addr16[4]), \
+	ntohs((addr).s6_addr16[5]), \
+	ntohs((addr).s6_addr16[6]), \
+	ntohs((addr).s6_addr16[7])
+
+#if defined(__LITTLE_ENDIAN)
 #define HIPQUAD(addr) \
 	((unsigned char *)&addr)[3], \
 	((unsigned char *)&addr)[2], \
 	((unsigned char *)&addr)[1], \
 	((unsigned char *)&addr)[0]
+#elif defined(__BIG_ENDIAN)
+#define HIPQUAD	NIPQUAD
+#else
+#error "Please fix asm/byteorder.h"
+#endif /* __LITTLE_ENDIAN */
 
 /*
  * min()/max() macros that also do
@@ -156,6 +184,30 @@ extern const char *print_tainted(void);
 #define max_t(type,x,y) \
 	({ type __x = (x); type __y = (y); __x > __y ? __x: __y; })
 
+
+/**
+ * container_of - cast a member of a structure out to the containing structure
+ *
+ * @ptr:	the pointer to the member.
+ * @type:	the type of the container struct this is embedded in.
+ * @member:	the name of the member within the struct.
+ *
+ */
+#define container_of(ptr, type, member) ({			\
+        const typeof( ((type *)0)->member ) *__mptr = (ptr);	\
+        (type *)( (char *)__mptr - offsetof(type,member) );})
+
+/*
+ * Check at compile time that something is of a particular type.
+ * Always evaluates to 1 so you may use it easily in comparisons.
+ */
+#define typecheck(type,x) \
+({	type __dummy; \
+	typeof(x) __dummy2; \
+	(void)(&__dummy == &__dummy2); \
+	1; \
+})
+
 #endif /* __KERNEL__ */
 
 #define SI_LOAD_SHIFT	16
@@ -175,5 +227,13 @@ struct sysinfo {
 	unsigned int mem_unit;		/* Memory unit size in bytes */
 	char _f[20-2*sizeof(long)-sizeof(int)];	/* Padding: libc5 uses this.. */
 };
+
+extern void BUILD_BUG(void);
+#define BUILD_BUG_ON(condition) do { if (condition) BUILD_BUG(); } while(0)
+
+/* Trap pasters of __FUNCTION__ at compile-time */
+#if __GNUC__ > 2 || __GNUC_MINOR__ >= 95
+#define __FUNCTION__ (__func__)
+#endif
 
 #endif

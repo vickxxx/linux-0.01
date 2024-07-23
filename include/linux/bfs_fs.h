@@ -76,16 +76,4 @@ struct bfs_super_block {
 #define BFS_UNCLEAN(bfs_sb, sb)	\
 	((bfs_sb->s_from != -1) && (bfs_sb->s_to != -1) && !(sb->s_flags & MS_RDONLY))
 
-#ifdef __KERNEL__
-
-/* file.c */
-extern struct inode_operations bfs_file_inops;
-extern struct file_operations bfs_file_operations;
-extern struct address_space_operations bfs_aops;
-
-/* dir.c */
-extern struct inode_operations bfs_dir_inops;
-extern struct file_operations bfs_dir_operations;
-
-#endif /* __KERNEL__ */
 #endif	/* _LINUX_BFS_FS_H */

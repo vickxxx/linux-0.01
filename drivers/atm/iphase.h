@@ -200,7 +200,13 @@ struct cpcs_trailer
 	u_short length;  
 	u_int	crc32;  
 };  
-  
+
+struct cpcs_trailer_desc
+{
+	struct cpcs_trailer *cpcs;
+	dma_addr_t dma_addr;
+};
+
 struct ia_vcc 
 { 
 	int rxing;	 
@@ -272,6 +278,7 @@ struct ext_vc
 #define DLE_ENTRIES 256  
 #define DMA_INT_ENABLE 0x0002	/* use for both Tx and Rx */  
 #define TX_DLE_PSI 0x0001  
+#define DLE_TOTAL_SIZE (sizeof(struct dle)*DLE_ENTRIES)
   
 /* Descriptor List Entries (DLE) */  
 struct dle 
@@ -801,7 +808,6 @@ typedef struct {
 } r_vc_abr_entry;   
 
 #define MRM 3
-#define MIN(x,y)	((x) < (y)) ? (x) : (y)
 
 typedef struct srv_cls_param {
         u32 class_type;         /* CBR/VBR/ABR/UBR; use the enum above */
@@ -1010,14 +1016,9 @@ typedef struct iadev_t {
         spinlock_t            tx_lock;
         IARTN_Q               tx_return_q;
         u32                   close_pending;
-#if LINUX_VERSION_CODE >= 0x20303
         wait_queue_head_t    close_wait;
         wait_queue_head_t    timeout_wait;
-#else
-        struct wait_queue     *close_wait;
-        struct wait_queue     *timeout_wait;
-#endif
-	caddr_t *tx_buf;  
+	struct cpcs_trailer_desc *tx_buf;
         u16 num_tx_desc, tx_buf_sz, rate_limit;
         u32 tx_cell_cnt, tx_pkt_cnt;
         u32 MAIN_VC_TABLE_ADDR, EXT_VC_TABLE_ADDR, ABR_SCHED_TABLE_ADDR;
@@ -1063,7 +1064,9 @@ typedef struct iadev_t {
         struct desc_tbl_t *desc_tbl;
         u_short host_tcq_wr;
         struct testTable_t **testTable;
-} IADEV;  
+	dma_addr_t tx_dle_dma;
+	dma_addr_t rx_dle_dma;
+} IADEV;
   
   
 #define INPH_IA_DEV(d) ((IADEV *) (d)->dev_data)  

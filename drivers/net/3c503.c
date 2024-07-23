@@ -29,23 +29,29 @@
     Paul Gortmaker	: add support for the 2nd 8kB of RAM on 16 bit cards.
     Paul Gortmaker	: multiple card support for module users.
     rjohnson@analogic.com : Fix up PIO interface for efficient operation.
+    Jeff Garzik		: ethtool support
 
 */
 
+#define DRV_NAME	"3c503"
+#define DRV_VERSION	"1.10a"
+#define DRV_RELDATE	"11/17/2001"
+
+
 static const char version[] =
-    "3c503.c:v1.10 9/23/93  Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
+    DRV_NAME ".c:v" DRV_VERSION " " DRV_RELDATE "  Donald Becker (becker@scyld.com)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/init.h>
+#include <linux/ethtool.h>
 
+#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/system.h>
 #include <asm/byteorder.h>
@@ -74,6 +80,7 @@ static void el2_block_input(struct net_device *dev, int count, struct sk_buff *s
 			   int ring_offset);
 static void el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr,
 			 int ring_page);
+static int netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd);
 
 
 /* This routine probes for a memory-mapped 3c503 board by looking for
@@ -254,13 +261,13 @@ el2_probe1(struct net_device *dev, int ioaddr)
 #endif  /* EL2MEMTEST */
 
 	if (dev->mem_start)
-		dev->mem_end = dev->rmem_end = dev->mem_start + EL2_MEMSIZE;
+		dev->mem_end = ei_status.rmem_end = dev->mem_start + EL2_MEMSIZE;
 
 	if (wordlength) {	/* No Tx pages to skip over to get to Rx */
-		dev->rmem_start = dev->mem_start;
+		ei_status.rmem_start = dev->mem_start;
 		ei_status.name = "3c503/16";
 	} else {
-		dev->rmem_start = TX_PAGES*256 + dev->mem_start;
+		ei_status.rmem_start = TX_PAGES*256 + dev->mem_start;
 		ei_status.name = "3c503";
 	}
     }
@@ -301,6 +308,7 @@ el2_probe1(struct net_device *dev, int ioaddr)
 
     dev->open = &el2_open;
     dev->stop = &el2_close;
+    dev->do_ioctl = &netdev_ioctl;
 
     if (dev->mem_start)
 	printk("%s: %s - %dkB RAM, 8kB shared mem window at %#6lx-%#6lx.\n",
@@ -502,6 +510,7 @@ el2_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_pag
 
     if (dev->mem_start) {       /* Use the shared memory. */
 	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	hdr->count = le16_to_cpu(hdr->count);
 	return;
     }
 
@@ -539,7 +548,7 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
     unsigned short int *buf;
     unsigned short word;
 
-    int end_of_ring = dev->rmem_end;
+    int end_of_ring = ei_status.rmem_end;
 
     /* Maybe enable shared memory just be to be safe... nahh.*/
     if (dev->mem_start) {	/* Use the shared memory. */
@@ -549,7 +558,7 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
 	    int semi_count = end_of_ring - (dev->mem_start + ring_offset);
 	    isa_memcpy_fromio(skb->data, dev->mem_start + ring_offset, semi_count);
 	    count -= semi_count;
-	    isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+	    isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
 		isa_eth_io_copy_and_sum(skb, dev->mem_start + ring_offset, count, 0);
@@ -607,6 +616,71 @@ el2_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ring
     outb_p(ei_status.interface_num == 0 ? ECNTRL_THIN : ECNTRL_AUI, E33G_CNTRL);
     return;
 }
+
+/**
+ * netdev_ethtool_ioctl: Handle network interface SIOCETHTOOL ioctls
+ * @dev: network interface on which out-of-band action is to be performed
+ * @useraddr: userspace address to which data is to be read and returned
+ *
+ * Process the various commands of the SIOCETHTOOL interface.
+ */
+
+static int netdev_ethtool_ioctl (struct net_device *dev, void *useraddr)
+{
+	u32 ethcmd;
+
+	/* dev_ioctl() in ../../net/core/dev.c has already checked
+	   capable(CAP_NET_ADMIN), so don't bother with that here.  */
+
+	if (get_user(ethcmd, (u32 *)useraddr))
+		return -EFAULT;
+
+	switch (ethcmd) {
+
+	case ETHTOOL_GDRVINFO: {
+		struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
+		strcpy (info.driver, DRV_NAME);
+		strcpy (info.version, DRV_VERSION);
+		sprintf(info.bus_info, "ISA 0x%lx", dev->base_addr);
+		if (copy_to_user (useraddr, &info, sizeof (info)))
+			return -EFAULT;
+		return 0;
+	}
+
+	default:
+		break;
+	}
+
+	return -EOPNOTSUPP;
+}
+
+/**
+ * netdev_ioctl: Handle network interface ioctls
+ * @dev: network interface on which out-of-band action is to be performed
+ * @rq: user request data
+ * @cmd: command issued by user
+ *
+ * Process the various out-of-band ioctls passed to this driver.
+ */
+
+static int netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
+{
+	int rc = 0;
+
+	switch (cmd) {
+	case SIOCETHTOOL:
+		rc = netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
+		break;
+
+	default:
+		rc = -EOPNOTSUPP;
+		break;
+	}
+
+	return rc;
+}
+ 
+
 #ifdef MODULE
 #define MAX_EL2_CARDS	4	/* Max number of EL2 cards per module */
 
@@ -617,9 +691,11 @@ static int xcvr[MAX_EL2_CARDS];	/* choose int. or ext. xcvr */
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
-MODULE_PARM_DESC(io, "EtherLink II I/O base address(es)");
-MODULE_PARM_DESC(irq, "EtherLink II IRQ number(s) (assigned)");
-MODULE_PARM_DESC(xcvr, "EtherLink II tranceiver(s) (0=internal, 1=external)");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
+MODULE_PARM_DESC(xcvr, "transceiver(s) (0=internal, 1=external)");
+MODULE_DESCRIPTION("3Com ISA EtherLink II, II/16 (3c503, 3c503/16) driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -667,7 +743,6 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
-MODULE_LICENSE("GPL");
 
 
 /*

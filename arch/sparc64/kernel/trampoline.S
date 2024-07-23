@@ -1,4 +1,4 @@
-/* $Id: trampoline.S,v 1.22 2001/09/07 21:04:40 kanoj Exp $
+/* $Id: trampoline.S,v 1.26 2002/02/09 19:49:30 davem Exp $
  * trampoline.S: Jump start slave processors on sparc64.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -14,7 +14,7 @@
 #include <asm/pgtable.h>
 #include <asm/spitfire.h>
 #include <asm/processor.h>
-#include <asm/asm_offsets.h>
+#include <asm/thread_info.h>
 
 	.data
 	.align	8
@@ -33,25 +33,29 @@ dtlb_load:
 sparc64_cpu_startup:
 	flushw
 
-	rdpr		%ver, %g1
-	sethi		%hi(0x003e0014), %g5
-	srlx		%g1, 32, %g1
-	or		%g5, %lo(0x003e0014), %g5
-	cmp		%g1, %g5
-	bne,pt		%icc, spitfire_startup
+	BRANCH_IF_CHEETAH_BASE(g1,g5,cheetah_startup)
+	BRANCH_IF_CHEETAH_PLUS_OR_FOLLOWON(g1,g5,cheetah_plus_startup)
+
+	ba,pt	%xcc, spitfire_startup
+	 nop
+
+cheetah_plus_startup:
+	/* Preserve OBP chosen DCU and DCR register settings.  */
+	ba,pt	%xcc, cheetah_generic_startup
 	 nop
 
 cheetah_startup:
-	mov		DCR_BPE | DCR_RPE | DCR_SI | DCR_IFPOE | DCR_MS, %g1
-	wr		%g1, %asr18
+	mov	DCR_BPE | DCR_RPE | DCR_SI | DCR_IFPOE | DCR_MS, %g1
+	wr	%g1, %asr18
 
-	sethi		%uhi(DCU_ME | DCU_RE | /*DCU_PE |*/ DCU_HPE | DCU_SPE | DCU_SL | DCU_WE), %g5
-	or		%g5, %ulo(DCU_ME | DCU_RE | /*DCU_PE |*/ DCU_HPE | DCU_SPE | DCU_SL | DCU_WE), %g5
-	sllx		%g5, 32, %g5
-	or		%g5, DCU_DM | DCU_IM | DCU_DC | DCU_IC, %g5
-	stxa		%g5, [%g0] ASI_DCU_CONTROL_REG
-	membar		#Sync
+	sethi	%uhi(DCU_ME|DCU_RE|DCU_HPE|DCU_SPE|DCU_SL|DCU_WE), %g5
+	or	%g5, %ulo(DCU_ME|DCU_RE|DCU_HPE|DCU_SPE|DCU_SL|DCU_WE), %g5
+	sllx	%g5, 32, %g5
+	or	%g5, DCU_DM | DCU_IM | DCU_DC | DCU_IC, %g5
+	stxa	%g5, [%g0] ASI_DCU_CONTROL_REG
+	membar	#Sync
 
+cheetah_generic_startup:
 	mov	TSB_EXTENSION_P, %g3
 	stxa	%g0, [%g3] ASI_DMMU
 	stxa	%g0, [%g3] ASI_IMMU
@@ -81,7 +85,10 @@ spitfire_startup:
 
 startup_continue:
 	wrpr		%g0, 15, %pil
-	wr		%g0, 0, %tick_cmpr
+
+	sethi		%hi(0x80000000), %g2
+	sllx		%g2, 32, %g2
+	wr		%g2, 0, %tick_cmpr
 
 	/* Call OBP by hand to lock KERNBASE into i/d tlbs. */
 	mov		%o0, %l0
@@ -117,14 +124,10 @@ startup_continue:
 	ldx		[%g2 + %lo(kern_locked_tte_data)], %g2
 	stx		%g2, [%sp + 2047 + 128 + 0x30]
 
-	rdpr		%ver, %g1
-	sethi		%hi(0x003e0014), %g5
-	srlx		%g1, 32, %g1
-	or		%g5, %lo(0x003e0014), %g5
-	cmp		%g1, %g5
-	bne,a,pt	%icc, 1f
-	 mov		63, %g2
 	mov		15, %g2
+	BRANCH_IF_ANY_CHEETAH(g1,g5,1f)
+
+	mov		63, %g2
 1:
 	stx		%g2, [%sp + 2047 + 128 + 0x38]
 	sethi		%hi(p1275buf), %g2
@@ -152,14 +155,10 @@ startup_continue:
 	ldx		[%g2 + %lo(kern_locked_tte_data)], %g2
 	stx		%g2, [%sp + 2047 + 128 + 0x30]
 
-	rdpr		%ver, %g1
-	sethi		%hi(0x003e0014), %g5
-	srlx		%g1, 32, %g1
-	or		%g5, %lo(0x003e0014), %g5
-	cmp		%g1, %g5
-	bne,a,pt	%icc, 1f
-	 mov		63, %g2
 	mov		15, %g2
+	BRANCH_IF_ANY_CHEETAH(g1,g5,1f)
+
+	mov		63, %g2
 1:
 
 	stx		%g2, [%sp + 2047 + 128 + 0x38]
@@ -181,9 +180,6 @@ startup_continue:
 	wrpr		%g0, (PSTATE_PRIV | PSTATE_PEF), %pstate
 	wr		%g0, 0, %fprs
 
-	sethi		%uhi(PAGE_OFFSET), %g4
-	sllx		%g4, 32, %g4
-
 	/* XXX Buggy PROM... */
 	srl		%o0, 0, %o0
 	ldx		[%o0], %g6
@@ -199,7 +195,7 @@ startup_continue:
 
 	mov		1, %g5
 	sllx		%g5, THREAD_SHIFT, %g5
-	sub		%g5, (REGWIN_SZ + STACK_BIAS), %g5
+	sub		%g5, (STACKFRAME_SZ + STACK_BIAS), %g5
 	add		%g6, %g5, %sp
 	mov		0, %fp
 
@@ -218,13 +214,6 @@ startup_continue:
 #define KERN_HIGHBITS		((_PAGE_VALID|_PAGE_SZ4MB)^0xfffff80000000000)
 #define KERN_LOWBITS		(_PAGE_CP | _PAGE_CV | _PAGE_P | _PAGE_W)
 
-#define VPTE_BASE_SPITFIRE	0xfffffffe00000000
-#if 1
-#define VPTE_BASE_CHEETAH	VPTE_BASE_SPITFIRE
-#else
-#define VPTE_BASE_CHEETAH	0xffe0000000000000
-#endif
-
 	mov		TSB_REG, %g1
 	stxa		%g0, [%g1] ASI_DMMU
 	membar		#Sync
@@ -234,14 +223,12 @@ startup_continue:
 	sllx		%g2, 32, %g2
 	or		%g2, KERN_LOWBITS, %g2
 
-	rdpr		%ver, %g3
-	sethi		%hi(0x003e0014), %g7
-	srlx		%g3, 32, %g3
-	or		%g7, %lo(0x003e0014), %g7
-	cmp		%g3, %g7
-	bne,pt		%icc, 1f
+	BRANCH_IF_ANY_CHEETAH(g3,g7,9f)
+
+	ba,pt		%xcc, 1f
 	 nop
 
+9:
 	sethi		%uhi(VPTE_BASE_CHEETAH), %g3
 	or		%g3, %ulo(VPTE_BASE_CHEETAH), %g3
 	ba,pt		%xcc, 2f
@@ -255,14 +242,15 @@ startup_continue:
 	clr	%g7
 #undef KERN_HIGHBITS
 #undef KERN_LOWBITS
-#undef VPTE_BASE_SPITFIRE
-#undef VPTE_BASE_CHEETAH
+
+	wrpr		%o1, 0x0, %pstate
+	ldx		[%g6 + TI_TASK], %g4
 
 	/* Setup interrupt globals, we are always SMP. */
 	wrpr		%o1, PSTATE_IG, %pstate
 
 	/* Get our UPA MID. */
-	lduw		[%o2 + AOFF_task_processor], %g1
+	ldub		[%o2 + TI_CPU], %g1
 	sethi		%hi(cpu_data), %g5
 	or		%g5, %lo(cpu_data), %g5
 

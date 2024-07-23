@@ -106,6 +106,10 @@ Log: nmclan_cs.c,v
 
 ---------------------------------------------------------------------------- */
 
+#define DRV_NAME	"nmclan_cs"
+#define DRV_VERSION	"0.16"
+
+
 /* ----------------------------------------------------------------------------
 Conditional Compilation Options
 ---------------------------------------------------------------------------- */
@@ -122,7 +126,6 @@ Include Files
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
@@ -130,10 +133,7 @@ Include Files
 #include <linux/interrupt.h>
 #include <linux/in.h>
 #include <linux/delay.h>
-#include <asm/io.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-
+#include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -146,6 +146,11 @@ Include Files
 #include <pcmcia/cisreg.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
+
+#include <asm/uaccess.h>
+#include <asm/io.h>
+#include <asm/system.h>
+#include <asm/bitops.h>
 
 /* ----------------------------------------------------------------------------
 Defines
@@ -354,7 +359,6 @@ typedef struct _mace_statistics {
 
 typedef struct _mace_private {
     dev_link_t link;
-    struct net_device dev;
     dev_node_t node;
     struct net_device_stats linux_stats; /* Linux statistics counters */
     mace_statistics mace_stats; /* MACE chip statistics counters */
@@ -375,7 +379,7 @@ Private Global Variables
 static char rcsid[] =
 "nmclan_cs.c,v 0.16 1995/07/01 06:42:17 rpao Exp rpao";
 static char *version =
-"nmclan_cs 0.16 (Roger C. Pao)";
+DRV_NAME " " DRV_VERSION " (Roger C. Pao)";
 #endif
 
 static dev_info_t dev_info="nmclan_cs";
@@ -426,12 +430,12 @@ static int mace_open(struct net_device *dev);
 static int mace_close(struct net_device *dev);
 static int mace_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static void mace_tx_timeout(struct net_device *dev);
-static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static struct net_device_stats *mace_get_stats(struct net_device *dev);
 static int mace_rx(struct net_device *dev, unsigned char RxCnt);
 static void restore_multicast_list(struct net_device *dev);
-
 static void set_multicast_list(struct net_device *dev);
+static int mace_ioctl(struct net_device *dev, struct ifreq *rq, int cmd);
 
 static dev_link_t *nmclan_attach(void);
 static void nmclan_detach(dev_link_t *);
@@ -449,17 +453,6 @@ static void flush_stale_links(void)
 	if (link->state & DEV_STALE_LINK)
 	    nmclan_detach(link);
     }
-}
-
-/* ----------------------------------------------------------------------------
-cs_error
-	Report a Card Services related error.
----------------------------------------------------------------------------- */
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-    error_info_t err = { func, ret };
-    CardServices(ReportError, handle, &err);
 }
 
 /* ----------------------------------------------------------------------------
@@ -482,12 +475,14 @@ static dev_link_t *nmclan_attach(void)
     flush_stale_links();
 
     /* Create new ethernet device */
-    lp = kmalloc(sizeof(*lp), GFP_KERNEL);
-    if (!lp) return NULL;
-    memset(lp, 0, sizeof(*lp));
-    link = &lp->link; dev = &lp->dev;
-    link->priv = dev->priv = link->irq.Instance = lp;
-
+    dev = alloc_etherdev(sizeof(mace_private));
+    if (!dev)
+	return NULL;
+    lp = dev->priv;
+    link = &lp->link;
+    link->priv = dev;
+    
+    init_timer(&link->release);
     link->release.function = &nmclan_release;
     link->release.data = (u_long)link;
     link->io.NumPorts1 = 32;
@@ -501,6 +496,7 @@ static dev_link_t *nmclan_attach(void)
 	for (i = 0; i < 4; i++)
 	    link->irq.IRQInfo2 |= 1 << irq_list[i];
     link->irq.Handler = &mace_interrupt;
+    link->irq.Instance = dev;
     link->conf.Attributes = CONF_ENABLE_IRQ;
     link->conf.Vcc = 50;
     link->conf.IntType = INT_MEMORY_AND_IO;
@@ -509,11 +505,12 @@ static dev_link_t *nmclan_attach(void)
 
     lp->tx_free_frames=AM2150_MAX_TX_FRAMES;
 
+    SET_MODULE_OWNER(dev);
     dev->hard_start_xmit = &mace_start_xmit;
     dev->set_config = &mace_config;
     dev->get_stats = &mace_get_stats;
     dev->set_multicast_list = &set_multicast_list;
-    ether_setup(dev);
+    dev->do_ioctl = &mace_ioctl;
     dev->open = &mace_open;
     dev->stop = &mace_close;
 #ifdef HAVE_TX_TIMEOUT
@@ -553,7 +550,7 @@ nmclan_detach
 
 static void nmclan_detach(dev_link_t *link)
 {
-    mace_private *lp = link->priv;
+    struct net_device *dev = link->priv;
     dev_link_t **linkp;
 
     DEBUG(0, "nmclan_detach(0x%p)\n", link);
@@ -579,8 +576,8 @@ static void nmclan_detach(dev_link_t *link)
     /* Unlink device structure, free bits */
     *linkp = link->next;
     if (link->dev)
-	unregister_netdev(&lp->dev);
-    kfree(lp);
+	unregister_netdev(dev);
+    kfree(dev);
 
 } /* nmclan_detach */
 
@@ -713,8 +710,8 @@ while ((last_ret=CardServices(last_fn=(fn), args))!=0) goto cs_failed
 static void nmclan_config(dev_link_t *link)
 {
   client_handle_t handle = link->handle;
-  mace_private *lp = link->priv;
-  struct net_device *dev = &lp->dev;
+  struct net_device *dev = link->priv;
+  mace_private *lp = dev->priv;
   tuple_t tuple;
   cisparse_t parse;
   u_char buf[64];
@@ -839,8 +836,7 @@ static int nmclan_event(event_t event, int priority,
 		       event_callback_args_t *args)
 {
   dev_link_t *link = args->client_data;
-  mace_private *lp = link->priv;
-  struct net_device *dev = &lp->dev;
+  struct net_device *dev = link->priv;
 
   DEBUG(1, "nmclan_event(0x%06x)\n", event);
 
@@ -967,7 +963,6 @@ static int mace_open(struct net_device *dev)
     return -ENODEV;
 
   link->open++;
-  MOD_INC_USE_COUNT;
 
   MACEBANK(0);
 
@@ -997,10 +992,68 @@ static int mace_close(struct net_device *dev)
   if (link->state & DEV_STALE_CONFIG)
     mod_timer(&link->release, jiffies + HZ/20);
 
-  MOD_DEC_USE_COUNT;
-
   return 0;
 } /* mace_close */
+
+static int netdev_ethtool_ioctl (struct net_device *dev, void *useraddr)
+{
+	u32 ethcmd;
+
+	/* dev_ioctl() in ../../net/core/dev.c has already checked
+	   capable(CAP_NET_ADMIN), so don't bother with that here.  */
+
+	if (get_user(ethcmd, (u32 *)useraddr))
+		return -EFAULT;
+
+	switch (ethcmd) {
+
+	case ETHTOOL_GDRVINFO: {
+		struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
+		strcpy (info.driver, DRV_NAME);
+		strcpy (info.version, DRV_VERSION);
+		sprintf(info.bus_info, "PCMCIA 0x%lx", dev->base_addr);
+		if (copy_to_user (useraddr, &info, sizeof (info)))
+			return -EFAULT;
+		return 0;
+	}
+
+#ifdef PCMCIA_DEBUG
+	/* get message-level */
+	case ETHTOOL_GMSGLVL: {
+		struct ethtool_value edata = {ETHTOOL_GMSGLVL};
+		edata.data = pc_debug;
+		if (copy_to_user(useraddr, &edata, sizeof(edata)))
+			return -EFAULT;
+		return 0;
+	}
+	/* set message-level */
+	case ETHTOOL_SMSGLVL: {
+		struct ethtool_value edata;
+		if (copy_from_user(&edata, useraddr, sizeof(edata)))
+			return -EFAULT;
+		pc_debug = edata.data;
+		return 0;
+	}
+#endif
+
+	default:
+		break;
+	}
+
+	return -EOPNOTSUPP;
+}
+
+static int mace_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+{
+	switch (cmd) {
+	case SIOCETHTOOL:
+		return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
+
+	default:
+		return -EOPNOTSUPP;
+	}
+	return 0;
+}
 
 /* ----------------------------------------------------------------------------
 mace_start_xmit
@@ -1089,10 +1142,10 @@ static int mace_start_xmit(struct sk_buff *skb, struct net_device *dev)
 mace_interrupt
 	The interrupt handler.
 ---------------------------------------------------------------------------- */
-static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
-  mace_private *lp = (mace_private *)dev_id;
-  struct net_device *dev = &lp->dev;
+  struct net_device *dev = (struct net_device *) dev_id;
+  mace_private *lp = dev->priv;
   ioaddr_t ioaddr = dev->base_addr;
   int status;
   int IntrCnt = MACE_MAX_IR_ITERATIONS;
@@ -1100,7 +1153,7 @@ static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
   if (dev == NULL) {
     DEBUG(2, "mace_interrupt(): irq 0x%X for unknown device.\n",
 	  irq);
-    return;
+    return IRQ_NONE;
   }
 
   if (lp->tx_irq_disabled) {
@@ -1115,12 +1168,12 @@ static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
       inb(ioaddr + AM2150_MACE_BASE + MACE_IMR)
     );
     /* WARNING: MACE_IR has been read! */
-    return;
+    return IRQ_NONE;
   }
 
   if (!netif_device_present(dev)) {
     DEBUG(2, "%s: interrupt from dead card\n", dev->name);
-    goto exception;
+    return IRQ_NONE;
   }
 
   do {
@@ -1225,8 +1278,7 @@ static void mace_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
   } while ((status & ~MACE_IMR_DEFAULT) && (--IntrCnt));
 
-exception:
-  return;
+  return IRQ_HANDLED;
 } /* mace_interrupt */
 
 /* ----------------------------------------------------------------------------
@@ -1676,33 +1728,25 @@ static void set_multicast_list(struct net_device *dev)
 
 } /* set_multicast_list */
 
-/* ----------------------------------------------------------------------------
-init_nmclan_cs
----------------------------------------------------------------------------- */
+static struct pcmcia_driver nmclan_cs_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "nmclan_cs",
+	},
+	.attach		= nmclan_attach,
+	.detach		= nmclan_detach,
+};
 
 static int __init init_nmclan_cs(void)
 {
-  servinfo_t serv;
-  DEBUG(0, "%s\n", version);
-  CardServices(GetCardServicesInfo, &serv);
-  if (serv.Revision != CS_RELEASE_CODE) {
-    printk(KERN_NOTICE "nmclan_cs: Card Services release does not match!\n");
-    return -1;
-  }
-  register_pccard_driver(&dev_info, &nmclan_attach, &nmclan_detach);
-  return 0;
+	return pcmcia_register_driver(&nmclan_cs_driver);
 }
-
-/* ----------------------------------------------------------------------------
-exit_nmclan_cs
----------------------------------------------------------------------------- */
 
 static void __exit exit_nmclan_cs(void)
 {
-    DEBUG(0, "nmclan_cs: unloading\n");
-    unregister_pccard_driver(&dev_info);
-    while (dev_list != NULL)
-	nmclan_detach(dev_list);
+	pcmcia_unregister_driver(&nmclan_cs_driver);
+	while (dev_list != NULL)
+		nmclan_detach(dev_list);
 }
 
 module_init(init_nmclan_cs);

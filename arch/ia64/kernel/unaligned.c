@@ -1,10 +1,14 @@
 /*
  * Architecture-specific unaligned trap handling.
  *
- * Copyright (C) 1999-2001 Hewlett-Packard Co
- * Copyright (C) 1999-2000 Stephane Eranian <eranian@hpl.hp.com>
- * Copyright (C) 2001 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999-2002 Hewlett-Packard Co
+ *	Stephane Eranian <eranian@hpl.hp.com>
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  *
+ * 2002/12/09   Fix rotating register handling (off-by-1 error, missing fr-rotation).  Fix
+ *		get_rse_reg() to not leak kernel bits to user-level (reading an out-of-frame
+ *		stacked register returns an undefined value; it does NOT trigger a
+ *		"rsvd register fault").
  * 2001/10/11	Fix unaligned access to rotating registers in s/w pipelined loops.
  * 2001/08/13	Correct size of extended floats (float_fsz) from 16 to 10 bytes.
  * 2001/01/17	Add support emulation of unaligned kernel accesses.
@@ -12,6 +16,7 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/smp_lock.h>
+#include <linux/tty.h>
 
 #include <asm/uaccess.h>
 #include <asm/rse.h>
@@ -23,7 +28,7 @@ extern void die_if_kernel(char *str, struct pt_regs *regs, long err) __attribute
 #undef DEBUG_UNALIGNED_TRAP
 
 #ifdef DEBUG_UNALIGNED_TRAP
-# define DPRINT(a...)	do { printk("%s.%u: ", __FUNCTION__, __LINE__); printk (a); } while (0)
+# define DPRINT(a...)	do { printk("%s %u: ", __FUNCTION__, __LINE__); printk (a); } while (0)
 # define DDUMP(str,vp,len)	dump(str, vp, len)
 
 static void
@@ -213,8 +218,9 @@ static u16 fr_info[32]={
 	RSW(f2), RSW(f3), RSW(f4), RSW(f5),
 
 	RPT(f6), RPT(f7), RPT(f8), RPT(f9),
+	RPT(f10), RPT(f11),
 
-	RSW(f10), RSW(f11), RSW(f12), RSW(f13), RSW(f14),
+	RSW(f12), RSW(f13), RSW(f14),
 	RSW(f15), RSW(f16), RSW(f17), RSW(f18), RSW(f19),
 	RSW(f20), RSW(f21), RSW(f22), RSW(f23), RSW(f24),
 	RSW(f25), RSW(f26), RSW(f27), RSW(f28), RSW(f29),
@@ -275,6 +281,15 @@ invala_fr (int regno)
 #	undef F
 }
 
+static inline unsigned long
+rotate_reg (unsigned long sor, unsigned long rrb, unsigned long reg)
+{
+	reg += rrb;
+	if (reg >= sor)
+		reg -= sor;
+	return reg;
+}
+
 static void
 set_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long val, int nat)
 {
@@ -286,26 +301,22 @@ set_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long val, int nat)
 	long sof = (regs->cr_ifs) & 0x7f;
 	long sor = 8 * ((regs->cr_ifs >> 14) & 0xf);
 	long rrb_gr = (regs->cr_ifs >> 18) & 0x7f;
-	long ridx;
+	long ridx = r1 - 32;
 
-	if ((r1 - 32) > sor)
-		ridx = -sof + (r1 - 32);
-	else if ((r1 - 32) < (sor - rrb_gr))
-		ridx = -sof + (r1 - 32) + rrb_gr;
-	else
-		ridx = -sof + (r1 - 32) - (sor - rrb_gr);
-
-	DPRINT("r%lu, sw.bspstore=%lx pt.bspstore=%lx sof=%ld sol=%ld ridx=%ld\n",
-	       r1, sw->ar_bspstore, regs->ar_bspstore, sof, (regs->cr_ifs >> 7) & 0x7f, ridx);
-
-	if ((r1 - 32) >= sof) {
+	if (ridx >= sof) {
 		/* this should never happen, as the "rsvd register fault" has higher priority */
 		DPRINT("ignoring write to r%lu; only %lu registers are allocated!\n", r1, sof);
 		return;
 	}
 
+	if (ridx < sor)
+		ridx = rotate_reg(sor, rrb_gr, ridx);
+
+	DPRINT("r%lu, sw.bspstore=%lx pt.bspstore=%lx sof=%ld sol=%ld ridx=%ld\n",
+	       r1, sw->ar_bspstore, regs->ar_bspstore, sof, (regs->cr_ifs >> 7) & 0x7f, ridx);
+
 	on_kbs = ia64_rse_num_regs(kbs, (unsigned long *) sw->ar_bspstore);
-	addr = ia64_rse_skip_regs((unsigned long *) sw->ar_bspstore, ridx);
+	addr = ia64_rse_skip_regs((unsigned long *) sw->ar_bspstore, -sof + ridx);
 	if (addr >= kbs) {
 		/* the register is on the kernel backing store: easy... */
 		rnat_addr = ia64_rse_rnat_addr(addr);
@@ -321,19 +332,15 @@ set_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long val, int nat)
 		return;
 	}
 
-	/*
-	 * Avoid using user_mode() here: with "epc", we cannot use the privilege level to
-	 * infer whether the interrupt task was running on the kernel backing store.
-	 */
-	if (regs->r12 >= TASK_SIZE) {
-		DPRINT("ignoring kernel write to r%lu; register isn't on the RBS!", r1);
+	if (!user_stack(current, regs)) {
+		DPRINT("ignoring kernel write to r%lu; register isn't on the kernel RBS!", r1);
 		return;
 	}
 
 	bspstore = (unsigned long *)regs->ar_bspstore;
 	ubs_end = ia64_rse_skip_regs(bspstore, on_kbs);
 	bsp     = ia64_rse_skip_regs(ubs_end, -sof);
-	addr    = ia64_rse_skip_regs(bsp, ridx + sof);
+	addr    = ia64_rse_skip_regs(bsp, ridx);
 
 	DPRINT("ubs_end=%p bsp=%p addr=%p\n", (void *) ubs_end, (void *) bsp, (void *) addr);
 
@@ -367,26 +374,22 @@ get_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long *val, int *na
 	long sof = (regs->cr_ifs) & 0x7f;
 	long sor = 8 * ((regs->cr_ifs >> 14) & 0xf);
 	long rrb_gr = (regs->cr_ifs >> 18) & 0x7f;
-	long ridx;
+	long ridx = r1 - 32;
 
-	if ((r1 - 32) > sor)
-		ridx = -sof + (r1 - 32);
-	else if ((r1 - 32) < (sor - rrb_gr))
-		ridx = -sof + (r1 - 32) + rrb_gr;
-	else
-		ridx = -sof + (r1 - 32) - (sor - rrb_gr);
+	if (ridx >= sof) {
+		/* read of out-of-frame register returns an undefined value; 0 in our case.  */
+		DPRINT("ignoring read from r%lu; only %lu registers are allocated!\n", r1, sof);
+		goto fail;
+	}
+
+	if (ridx < sor)
+		ridx = rotate_reg(sor, rrb_gr, ridx);
 
 	DPRINT("r%lu, sw.bspstore=%lx pt.bspstore=%lx sof=%ld sol=%ld ridx=%ld\n",
 	       r1, sw->ar_bspstore, regs->ar_bspstore, sof, (regs->cr_ifs >> 7) & 0x7f, ridx);
 
-	if ((r1 - 32) >= sof) {
-		/* this should never happen, as the "rsvd register fault" has higher priority */
-		DPRINT("ignoring read from r%lu; only %lu registers are allocated!\n", r1, sof);
-		return;
-	}
-
 	on_kbs = ia64_rse_num_regs(kbs, (unsigned long *) sw->ar_bspstore);
-	addr = ia64_rse_skip_regs((unsigned long *) sw->ar_bspstore, ridx);
+	addr = ia64_rse_skip_regs((unsigned long *) sw->ar_bspstore, -sof + ridx);
 	if (addr >= kbs) {
 		/* the register is on the kernel backing store: easy... */
 		*val = *addr;
@@ -400,19 +403,15 @@ get_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long *val, int *na
 		return;
 	}
 
-	/*
-	 * Avoid using user_mode() here: with "epc", we cannot use the privilege level to
-	 * infer whether the interrupt task was running on the kernel backing store.
-	 */
-	if (regs->r12 >= TASK_SIZE) {
+	if (!user_stack(current, regs)) {
 		DPRINT("ignoring kernel read of r%lu; register isn't on the RBS!", r1);
-		return;
+		goto fail;
 	}
 
 	bspstore = (unsigned long *)regs->ar_bspstore;
 	ubs_end = ia64_rse_skip_regs(bspstore, on_kbs);
 	bsp     = ia64_rse_skip_regs(ubs_end, -sof);
-	addr    = ia64_rse_skip_regs(bsp, ridx + sof);
+	addr    = ia64_rse_skip_regs(bsp, ridx);
 
 	DPRINT("ubs_end=%p bsp=%p addr=%p\n", (void *) ubs_end, (void *) bsp, (void *) addr);
 
@@ -427,6 +426,13 @@ get_rse_reg (struct pt_regs *regs, unsigned long r1, unsigned long *val, int *na
 		ia64_peek(current, sw, (unsigned long) ubs_end, (unsigned long) rnat_addr, &rnats);
 		*nat = (rnats & nat_mask) != 0;
 	}
+	return;
+
+  fail:
+	*val = 0;
+	if (nat)
+		*nat = 0;
+	return;
 }
 
 
@@ -485,7 +491,16 @@ setreg (unsigned long regnum, unsigned long val, int nat, struct pt_regs *regs)
 	DPRINT("*0x%lx=0x%lx NaT=%d new unat: %p=%lx\n", addr, val, nat, (void *) unat,*unat);
 }
 
-#define IA64_FPH_OFFS(r) (r - IA64_FIRST_ROTATING_FR)
+/*
+ * Return the (rotated) index for floating point register REGNUM (REGNUM must be in the
+ * range from 32-127, result is in the range from 0-95.
+ */
+static inline unsigned long
+fph_index (struct pt_regs *regs, long regnum)
+{
+	unsigned long rrb_fr = (regs->cr_ifs >> 25) & 0x7f;
+	return rotate_reg(96, rrb_fr, (regnum - IA64_FIRST_ROTATING_FR));
+}
 
 static void
 setfpreg (unsigned long regnum, struct ia64_fpreg *fpval, struct pt_regs *regs)
@@ -506,7 +521,7 @@ setfpreg (unsigned long regnum, struct ia64_fpreg *fpval, struct pt_regs *regs)
 	 */
 	if (regnum >= IA64_FIRST_ROTATING_FR) {
 		ia64_sync_fph(current);
-		current->thread.fph[IA64_FPH_OFFS(regnum)] = *fpval;
+		current->thread.fph[fph_index(regs, regnum)] = *fpval;
 	} else {
 		/*
 		 * pt_regs or switch_stack ?
@@ -565,7 +580,7 @@ getfpreg (unsigned long regnum, struct ia64_fpreg *fpval, struct pt_regs *regs)
 	 */
 	if (regnum >= IA64_FIRST_ROTATING_FR) {
 		ia64_flush_fph(current);
-		*fpval = current->thread.fph[IA64_FPH_OFFS(regnum)];
+		*fpval = current->thread.fph[fph_index(regs, regnum)];
 	} else {
 		/*
 		 * f0 = 0.0, f1= 1.0. Those registers are constant and are thus
@@ -650,8 +665,8 @@ emulate_load_updates (update_t type, load_store_t ld, struct pt_regs *regs, unsi
 	 * just in case.
 	 */
 	if (ld.x6_op == 1 || ld.x6_op == 3) {
-		printk(KERN_ERR __FUNCTION__": register update on speculative load, error\n");
-		die_if_kernel("unaligned reference on specualtive load with register update\n",
+		printk(KERN_ERR "%s: register update on speculative load, error\n", __FUNCTION__);
+		die_if_kernel("unaligned reference on speculative load with register update\n",
 			      regs, 30);
 	}
 
@@ -775,7 +790,7 @@ emulate_load_int (unsigned long ifa, load_store_t ld, struct pt_regs *regs)
 	 *
 	 * ldX.a (advanced load):
 	 *	- suppose ldX.a r1=[r3]. If we get to the unaligned trap it's because the
-	 *	  address doesn't match requested size alignement. This means that we would
+	 *	  address doesn't match requested size alignment. This means that we would
 	 *	  possibly need more than one load to get the result.
 	 *
 	 *	  The load part can be handled just like a normal load, however the difficult
@@ -1080,8 +1095,8 @@ emulate_load_floatpair (unsigned long ifa, load_store_t ld, struct pt_regs *regs
 		 * For this reason we keep this sanity check
 		 */
 		if (ld.x6_op == 1 || ld.x6_op == 3)
-			printk(KERN_ERR __FUNCTION__": register update on speculative load pair, "
-			       "error\n");
+			printk(KERN_ERR "%s: register update on speculative load pair, error\n",
+			       __FUNCTION__);
 
 		setreg(ld.r3, ifa, 0, regs);
 	}
@@ -1280,12 +1295,12 @@ within_logging_rate_limit (void)
 void
 ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 {
-	struct exception_fixup fix = { 0 };
 	struct ia64_psr *ipsr = ia64_psr(regs);
 	mm_segment_t old_fs = get_fs();
 	unsigned long bundle[2];
 	unsigned long opcode;
 	struct siginfo si;
+	const struct exception_table_entry *eh = NULL;
 	union {
 		unsigned long l;
 		load_store_t insn;
@@ -1303,14 +1318,9 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	 * user-level unaligned accesses.  Otherwise, a clever program could trick this
 	 * handler into reading an arbitrary kernel addresses...
 	 */
-	if (!user_mode(regs)) {
-#ifdef GAS_HAS_LOCAL_TAGS
-		fix = search_exception_table(regs->cr_iip + ia64_psr(regs)->ri);
-#else
-		fix = search_exception_table(regs->cr_iip);
-#endif
-	}
-	if (user_mode(regs) || fix.cont) {
+	if (!user_mode(regs))
+		eh = SEARCH_EXCEPTION_TABLE(regs);
+	if (user_mode(regs) || eh) {
 		if ((current->thread.flags & IA64_THREAD_UAC_SIGBUS) != 0)
 			goto force_sigbus;
 
@@ -1476,8 +1486,8 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
   failure:
 	/* something went wrong... */
 	if (!user_mode(regs)) {
-		if (fix.cont) {
-			handle_exception(regs, fix);
+		if (eh) {
+			handle_exception(regs, eh);
 			goto done;
 		}
 		die_if_kernel("error during unaligned kernel access\n", regs, ret);
@@ -1488,6 +1498,9 @@ ia64_handle_unaligned (unsigned long ifa, struct pt_regs *regs)
 	si.si_errno = 0;
 	si.si_code = BUS_ADRALN;
 	si.si_addr = (void *) ifa;
+	si.si_flags = 0;
+	si.si_isr = 0;
+	si.si_imm = 0;
 	force_sig_info(SIGBUS, &si, current);
 	goto done;
 }

@@ -23,10 +23,20 @@ EXPORT_SYMBOL(msdos_mkdir);
 EXPORT_SYMBOL(msdos_rename);
 EXPORT_SYMBOL(msdos_rmdir);
 EXPORT_SYMBOL(msdos_unlink);
-EXPORT_SYMBOL(msdos_read_super);
-EXPORT_SYMBOL(msdos_put_super);
 
-static DECLARE_FSTYPE_DEV(msdos_fs_type, "msdos", msdos_read_super);
+static struct super_block *msdos_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_bdev(fs_type, flags, dev_name, data, msdos_fill_super);
+}
+
+static struct file_system_type msdos_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "msdos",
+	.get_sb		= msdos_get_sb,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
 
 static int __init init_msdos_fs(void)
 {
@@ -40,3 +50,4 @@ static void __exit exit_msdos_fs(void)
 
 module_init(init_msdos_fs)
 module_exit(exit_msdos_fs)
+MODULE_LICENSE("GPL");

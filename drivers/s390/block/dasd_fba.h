@@ -1,9 +1,16 @@
+/* 
+ * File...........: linux/drivers/s390/block/dasd_fba.h
+ * Author(s)......: Holger Smolinski <Holger.Smolinski@de.ibm.com>
+ * Bugreports.to..: <Linux390@de.ibm.com>
+ * (C) IBM Corporation, IBM Deutschland Entwicklung GmbH, 1999,2000
+ *
+ * $Revision: 1.6 $
+ */
 
 #ifndef DASD_FBA_H
 #define DASD_FBA_H
 
-typedef
-    struct DE_fba_data_t {
+struct DE_fba_data {
 	struct {
 		unsigned char perm:2;	/* Permissions on this extent */
 		unsigned char zero:2;	/* Must be zero */
@@ -16,12 +23,9 @@ typedef
 	__u32 ext_loc;		/* Extent locator */
 	__u32 ext_beg;		/* logical number of block 0 in extent */
 	__u32 ext_end;		/* logocal number of last block in extent */
-} __attribute__ ((packed))
+} __attribute__ ((packed));
 
-    DE_fba_data_t;
-
-typedef
-    struct LO_fba_data_t {
+struct LO_fba_data {
 	struct {
 		unsigned char zero:4;
 		unsigned char cmd:4;
@@ -29,12 +33,9 @@ typedef
 	__u8 auxiliary;
 	__u16 blk_ct;
 	__u32 blk_nr;
-} __attribute__ ((packed))
+} __attribute__ ((packed));
 
-    LO_fba_data_t;
-
-typedef
-    struct dasd_fba_characteristics_t {
+struct dasd_fba_characteristics {
 	union {
 		__u8 c;
 		struct {
@@ -67,10 +68,6 @@ typedef
 	__u16 blk_ce;
 	__u32 reserved2;
 	__u16 reserved3;
-} __attribute__ ((packed))
+} __attribute__ ((packed));
 
-    dasd_fba_characteristics_t;
-
-int dasd_fba_init (void);
-void dasd_fba_cleanup (void);
 #endif				/* DASD_FBA_H */

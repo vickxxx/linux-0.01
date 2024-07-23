@@ -35,7 +35,6 @@
 #include <asm/page.h>
 #include <linux/sched.h>
 #include <linux/video_decoder.h>
-#include <asm/segment.h>
 
 #include <linux/version.h>
 #include <asm/uaccess.h>
@@ -87,7 +86,7 @@ static struct zoran zorans[ZORAN_MAX];
  * 0x28 and 0x2C. How you do that is left as an exercise
  * to the impatient reader :)
  */
-#define T 1	/* to seperate the bools from the ints */
+#define T 1	/* to separate the bools from the ints */
 #define F 0
 static struct tvcard tvcards[] = {
 	/* reported working by <middelin@polyware.nl> */
@@ -944,7 +943,6 @@ long zoran_write(struct video_device* dev, const char* buf, unsigned long count,
 	return -EINVAL;
 }
 
-#if LINUX_VERSION_CODE >= 0x020100
 static
 unsigned int zoran_poll(struct video_device *dev, struct file *file, poll_table *wait)
 {
@@ -965,7 +963,6 @@ unsigned int zoran_poll(struct video_device *dev, struct file *file, poll_table 
 
 	return mask;
 }
-#endif
 
 /* append a new clipregion to the vector of video_clips */
 static
@@ -1292,11 +1289,7 @@ int zoran_ioctl(struct video_device* dev, unsigned int cmd, void *arg)
 	 case VIDIOCSFBUF:
 	 {
 		struct video_buffer v;
-#if LINUX_VERSION_CODE >= 0x020100
-			if(!capable(CAP_SYS_ADMIN) && !capable(CAP_SYS_ADMIN))
-#else
-			if(!suser())
-#endif
+		if(!capable(CAP_SYS_ADMIN))
 			return -EPERM;
 		if (copy_from_user(&v, arg,sizeof(v)))
 			return -EFAULT;
@@ -1468,7 +1461,7 @@ int zoran_ioctl(struct video_device* dev, unsigned int cmd, void *arg)
 }
 
 static
-int zoran_mmap(struct video_device* dev, const char* adr, unsigned long size)
+int zoran_mmap(struct vm_area_struct *vma, struct video_device* dev, const char* adr, unsigned long size)
 {
 	struct zoran* ztv = (struct zoran*)dev;
 	unsigned long start = (unsigned long)adr;
@@ -1484,7 +1477,7 @@ int zoran_mmap(struct video_device* dev, const char* adr, unsigned long size)
 	pos = (unsigned long)ztv->fbuffer;
 	while (size>0) {
 		unsigned long page = virt_to_phys((void*)pos);
-		if (remap_page_range(start, page, PAGE_SIZE, PAGE_SHARED))
+		if (remap_page_range(vma, start, page, PAGE_SIZE, PAGE_SHARED))
 			return -EAGAIN;
 		start += PAGE_SIZE;
 		pos += PAGE_SIZE;
@@ -1495,18 +1488,18 @@ int zoran_mmap(struct video_device* dev, const char* adr, unsigned long size)
 
 static struct video_device zr36120_template=
 {
-	owner:		THIS_MODULE,
-	name:		"UNSET",
-	type:		VID_TYPE_TUNER|VID_TYPE_CAPTURE|VID_TYPE_OVERLAY,
-	hardware:	VID_HARDWARE_ZR36120,
-	open:		zoran_open,
-	close:		zoran_close,
-	read:		zoran_read,
-	write:		zoran_write,
-	poll:		zoran_poll,
-	ioctl:		zoran_ioctl,
-	mmap:		zoran_mmap,
-	minor:		-1,
+	.owner		= THIS_MODULE,
+	.name		= "UNSET",
+	.type		= VID_TYPE_TUNER|VID_TYPE_CAPTURE|VID_TYPE_OVERLAY,
+	.hardware	= VID_HARDWARE_ZR36120,
+	.open		= zoran_open,
+	.close		= zoran_close,
+	.read		= zoran_read,
+	.write		= zoran_write,
+	.poll		= zoran_poll,
+	.ioctl		= zoran_ioctl,
+	.mmap		= zoran_mmap,
+	.minor		= -1,
 };
 
 static
@@ -1700,12 +1693,12 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 			for (x=0; optr+1<eptr && x<-done->w; x++)
 			{
 				unsigned char a = iptr[x*2];
-				*optr++ = a;
-				*optr++ = a;
+				__put_user(a, optr++);
+				__put_user(a, optr++);
 			}
 			/* and clear the rest of the line */
 			for (x*=2; optr<eptr && x<done->bpl; x++)
-				*optr++ = 0;
+				__put_user(0, optr++);
 			/* next line */
 			iptr += done->bpl;
 		}
@@ -1722,10 +1715,10 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 		{
 			/* copy to doubled data to userland */
 			for (x=0; optr<eptr && x<-done->w; x++)
-				*optr++ = iptr[x*2];
+				__put_user(iptr[x*2], optr++);
 			/* and clear the rest of the line */
 			for (;optr<eptr && x<done->bpl; x++)
-				*optr++ = 0;
+				__put_user(0, optr++);
 			/* next line */
 			iptr += done->bpl;
 		}
@@ -1734,7 +1727,7 @@ long vbi_read(struct video_device* dev, char* buf, unsigned long count, int nonb
 	/* API compliance:
 	 * place the framenumber (half fieldnr) in the last long
 	 */
-	((ulong*)eptr)[-1] = done->fieldnr/2;
+	__put_user(done->fieldnr/2, ((ulong*)eptr)[-1]);
 	}
 
 	/* keep the engine running */
@@ -1750,7 +1743,6 @@ out:
 	return count;
 }
 
-#if LINUX_VERSION_CODE >= 0x020100
 static
 unsigned int vbi_poll(struct video_device *dev, struct file *file, poll_table *wait)
 {
@@ -1771,7 +1763,6 @@ unsigned int vbi_poll(struct video_device *dev, struct file *file, poll_table *w
 
 	return mask;
 }
-#endif
 
 static
 int vbi_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
@@ -1831,17 +1822,17 @@ int vbi_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 
 static struct video_device vbi_template=
 {
-	owner:		THIS_MODULE,
-	name:		"UNSET",
-	type:		VID_TYPE_CAPTURE|VID_TYPE_TELETEXT,
-	hardware:	VID_HARDWARE_ZR36120,
-	open:		vbi_open,
-	close:		vbi_close,
-	read:		vbi_read,
-	write:		zoran_write,
-	poll:		vbi_poll,
-	ioctl:		vbi_ioctl,
-	minor:		-1,
+	.owner		= THIS_MODULE,
+	.name		= "UNSET",
+	.type		= VID_TYPE_CAPTURE|VID_TYPE_TELETEXT,
+	.hardware	= VID_HARDWARE_ZR36120,
+	.open		= vbi_open,
+	.close		= vbi_close,
+	.read		= vbi_read,
+	.write		= zoran_write,
+	.poll		= vbi_poll,
+	.ioctl		= vbi_ioctl,
+	.minor		= -1,
 };
 
 /*
@@ -2025,7 +2016,7 @@ int __init init_zoran(int card)
 }
 
 static
-void __exit release_zoran(int max)
+void release_zoran(int max)
 {
 	struct zoran *ztv;
 	int i;

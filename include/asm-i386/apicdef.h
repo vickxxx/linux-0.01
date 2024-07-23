@@ -11,8 +11,6 @@
 #define		APIC_DEFAULT_PHYS_BASE	0xfee00000
  
 #define		APIC_ID		0x20
-#define			APIC_ID_MASK		(0x0F<<24)
-#define			GET_APIC_ID(x)		(((x)>>24)&0x0F)
 #define		APIC_LVR	0x30
 #define			APIC_LVR_MASK		0xFF00FF
 #define			GET_APIC_VERSION(x)	((x)&0xFF)
@@ -32,6 +30,8 @@
 #define			SET_APIC_LOGICAL_ID(x)	(((x)<<24))
 #define			APIC_ALL_CPUS		0xFF
 #define		APIC_DFR	0xE0
+#define			APIC_DFR_CLUSTER		0x0FFFFFFFul
+#define			APIC_DFR_FLAT			0xFFFFFFFFul
 #define		APIC_SPIV	0xF0
 #define			APIC_SPIV_FOCUS_DISABLED	(1<<9)
 #define			APIC_SPIV_APIC_ENABLED		(1<<8)
@@ -71,6 +71,7 @@
 #define			GET_APIC_DEST_FIELD(x)	(((x)>>24)&0xFF)
 #define			SET_APIC_DEST_FIELD(x)	((x)<<24)
 #define		APIC_LVTT	0x320
+#define		APIC_LVTTHMR	0x330
 #define		APIC_LVTPC	0x340
 #define		APIC_LVT0	0x350
 #define			APIC_LVT_TIMER_BASE_MASK	(0x3<<18)
@@ -107,7 +108,11 @@
 
 #define APIC_BASE (fix_to_virt(FIX_APIC_BASE))
 
-#define MAX_IO_APICS 8
+#ifdef CONFIG_NUMA
+ #define MAX_IO_APICS 32
+#else
+ #define MAX_IO_APICS 8
+#endif
 
 /*
  * the local APIC register structure, memory mapped. Not terribly well
@@ -280,7 +285,16 @@ struct local_apic {
 		u32 __reserved_4[3];
 	} lvt_timer;
 
-/*330*/	struct { u32 __reserved[4]; } __reserved_15;
+/*330*/	struct { /* LVT - Thermal Sensor */
+		u32  vector		:  8,
+			delivery_mode	:  3,
+			__reserved_1	:  1,
+			delivery_status	:  1,
+			__reserved_2	:  3,
+			mask		:  1,
+			__reserved_3	: 15;
+		u32 __reserved_4[3];
+	} lvt_thermal;
 
 /*340*/	struct { /* LVT - Performance Counter */
 		u32   vector		:  8,

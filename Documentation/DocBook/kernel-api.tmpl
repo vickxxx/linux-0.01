@@ -46,9 +46,13 @@
 !Iinclude/asm-i386/unaligned.h
      </sect1>
 
+<!-- FIXME:
+  kernel/sched.c has no docs, which stuffs up the sgml.  Comment
+  out until somebody adds docs.  KAO
      <sect1><title>Delaying, scheduling, and timer routines</title>
-!Ekernel/sched.c
+X!Ekernel/sched.c
      </sect1>
+KAO -->
   </chapter>
 
   <chapter id="adt">
@@ -75,6 +79,7 @@
      </sect1>
      <sect1><title>String Manipulation</title>
 !Ilib/string.c
+!Elib/string.c
      </sect1>
      <sect1><title>Bit Operations</title>
 !Iinclude/asm-i386/bitops.h
@@ -85,7 +90,11 @@
      <title>Memory Management in Linux</title>
      <sect1><title>The Slab Cache</title>
 !Emm/slab.c
-      </sect1>
+     </sect1>
+     <sect1><title>User Space Memory Access</title>
+!Iinclude/asm-i386/uaccess.h
+!Iarch/i386/lib/usercopy.c
+     </sect1>
   </chapter>
 
   <chapter id="proc">
@@ -146,7 +155,12 @@
 !Ekernel/kmod.c
      </sect1>
      <sect1><title>Inter Module support</title>
-!Ekernel/module.c
+        <para>
+           Refer to the file kernel/module.c for more information.
+        </para>
+<!-- FIXME: Removed for now since no structured comments in source
+X!Ekernel/module.c
+-->
      </sect1>
   </chapter>
 
@@ -157,14 +171,22 @@
      </sect1>
 
      <sect1><title>MTRR Handling</title>
-!Earch/i386/kernel/mtrr.c
+!Earch/i386/kernel/cpu/mtrr/main.c
      </sect1>
      <sect1><title>PCI Support Library</title>
 !Edrivers/pci/pci.c
      </sect1>
+     <sect1><title>PCI Hotplug Support Library</title>
+!Edrivers/pci/hotplug/pci_hotplug_core.c
+     </sect1>
      <sect1><title>MCA Architecture</title>
 	<sect2><title>MCA Device Functions</title>
-!Earch/i386/kernel/mca.c
+           <para>
+              Refer to the file arch/i386/kernel/mca.c for more information.
+           </para>
+<!-- FIXME: Removed for now since no structured comments in source
+X!Earch/i386/kernel/mca.c
+-->
 	</sect2>
 	<sect2><title>MCA Bus DMA</title>
 !Iinclude/asm-i386/mca_dma.h
@@ -175,6 +197,11 @@
   <chapter id="devfs">
      <title>The Device File System</title>
 !Efs/devfs/base.c
+  </chapter>
+
+  <chapter id="security">
+     <title>Security Framework</title>
+!Esecurity/security.c
   </chapter>
 
   <chapter id="pmfuncs">
@@ -199,18 +226,16 @@
 
   <chapter id="snddev">
      <title>Sound Devices</title>
-!Edrivers/sound/sound_core.c
-!Idrivers/sound/sound_firmware.c
-  </chapter>
-
-  <chapter id="usb">
-     <title>USB Devices</title>
-!Edrivers/usb/usb.c
+!Esound/sound_core.c
+<!-- FIXME: Removed for now since no structured comments in source
+X!Isound/sound_firmware.c
+-->
   </chapter>
 
   <chapter id="uart16x50">
      <title>16x50 UART Driver</title>
-!Edrivers/char/serial.c
+!Edrivers/serial/core.c
+!Edrivers/serial/8250.c
   </chapter>
 
   <chapter id="z85230">
@@ -262,14 +287,18 @@
 !Edrivers/video/fbmem.c
      </sect1>
      <sect1><title>Frame Buffer Console</title>
-!Edrivers/video/fbcon.c
+!Edrivers/video/console/fbcon.c
      </sect1>
      <sect1><title>Frame Buffer Colormap</title>
 !Edrivers/video/fbcmap.c
      </sect1>
+<!-- FIXME:
+  drivers/video/fbgen.c has no docs, which stuffs up the sgml.  Comment
+  out until somebody adds docs.  KAO
      <sect1><title>Frame Buffer Generic Functions</title>
-!Idrivers/video/fbgen.c
+X!Idrivers/video/fbgen.c
      </sect1>
+KAO -->
      <sect1><title>Frame Buffer Video Mode Database</title>
 !Idrivers/video/modedb.c
 !Edrivers/video/modedb.c
@@ -278,8 +307,17 @@
 !Idrivers/video/macmodes.c
      </sect1>
      <sect1><title>Frame Buffer Fonts</title>
-!Idrivers/video/fonts.c
+        <para>
+           Refer to the file drivers/video/console/fonts.c for more information.
+        </para>
+<!-- FIXME: Removed for now since no structured comments in source
+X!Idrivers/video/console/fonts.c
+-->
      </sect1>
   </chapter>
-
+<!-- Needs ksyms to list additional exported symbols, but no specific doc.
+     docproc do not care about sgml commants.
+!Dkernel/ksyms.c
+!Dnet/netsyms.c
+-->
 </book>

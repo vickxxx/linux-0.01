@@ -5,6 +5,7 @@
 #include <asm/irq.h>
 #include <linux/smp.h>
 #include <linux/threads.h>
+#include <linux/percpu.h>
 
 /*
  * 'kernel_stat.h' contains the definitions needed for doing
@@ -12,41 +13,40 @@
  * used by rstatd/perfmeter
  */
 
-#define DK_MAX_MAJOR 16
-#define DK_MAX_DISK 16
-
-struct kernel_stat {
-	unsigned int per_cpu_user[NR_CPUS],
-	             per_cpu_nice[NR_CPUS],
-	             per_cpu_system[NR_CPUS];
-	unsigned int dk_drive[DK_MAX_MAJOR][DK_MAX_DISK];
-	unsigned int dk_drive_rio[DK_MAX_MAJOR][DK_MAX_DISK];
-	unsigned int dk_drive_wio[DK_MAX_MAJOR][DK_MAX_DISK];
-	unsigned int dk_drive_rblk[DK_MAX_MAJOR][DK_MAX_DISK];
-	unsigned int dk_drive_wblk[DK_MAX_MAJOR][DK_MAX_DISK];
-	unsigned int pgpgin, pgpgout;
-	unsigned int pswpin, pswpout;
-#if !defined(CONFIG_ARCH_S390)
-	unsigned int irqs[NR_CPUS][NR_IRQS];
-#endif
-	unsigned int ipackets, opackets;
-	unsigned int ierrors, oerrors;
-	unsigned int collisions;
-	unsigned int context_swtch;
+struct cpu_usage_stat {
+	unsigned int user;
+	unsigned int nice;
+	unsigned int system;
+	unsigned int idle;
+	unsigned int iowait;
 };
 
-extern struct kernel_stat kstat;
+struct kernel_stat {
+	struct cpu_usage_stat	cpustat;
+#if !defined(CONFIG_ARCH_S390)
+	unsigned int irqs[NR_IRQS];
+#endif
+};
+
+DECLARE_PER_CPU(struct kernel_stat, kstat);
+
+#define kstat_cpu(cpu)	per_cpu(kstat, cpu)
+/* Must have preemption disabled for this to be meaningful. */
+#define kstat_this_cpu	__get_cpu_var(kstat)
+
+extern unsigned long nr_context_switches(void);
 
 #if !defined(CONFIG_ARCH_S390)
 /*
  * Number of interrupts per specific IRQ source, since bootup
  */
-static inline int kstat_irqs (int irq)
+static inline int kstat_irqs(int irq)
 {
 	int i, sum=0;
 
-	for (i = 0 ; i < smp_num_cpus ; i++)
-		sum += kstat.irqs[cpu_logical_map(i)][irq];
+	for (i = 0; i < NR_CPUS; i++)
+		if (cpu_possible(i))
+			sum += kstat_cpu(i).irqs[irq];
 
 	return sum;
 }

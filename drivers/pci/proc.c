@@ -6,23 +6,26 @@
  *	Copyright (c) 1997--1999 Martin Mares <mj@ucw.cz>
  */
 
-#include <linux/types.h>
-#include <linux/kernel.h>
-#include <linux/pci.h>
-#include <linux/proc_fs.h>
 #include <linux/init.h>
+#include <linux/pci.h>
+#include <linux/module.h>
+#include <linux/proc_fs.h>
 #include <linux/seq_file.h>
+#include <linux/smp_lock.h>
 
 #include <asm/uaccess.h>
 #include <asm/byteorder.h>
 
 #define PCI_CFG_SPACE_SIZE 256
 
+static int proc_initialized;	/* = 0 */
+
 static loff_t
 proc_bus_pci_lseek(struct file *file, loff_t off, int whence)
 {
-	loff_t new;
+	loff_t new = -1;
 
+	lock_kernel();
 	switch (whence) {
 	case 0:
 		new = off;
@@ -33,19 +36,18 @@ proc_bus_pci_lseek(struct file *file, loff_t off, int whence)
 	case 2:
 		new = PCI_CFG_SPACE_SIZE + off;
 		break;
-	default:
-		return -EINVAL;
 	}
+	unlock_kernel();
 	if (new < 0 || new > PCI_CFG_SPACE_SIZE)
 		return -EINVAL;
 	return (file->f_pos = new);
 }
 
 static ssize_t
-proc_bus_pci_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
+proc_bus_pci_read(struct file *file, char __user *buf, size_t nbytes, loff_t *ppos)
 {
 	const struct inode *ino = file->f_dentry->d_inode;
-	const struct proc_dir_entry *dp = ino->u.generic_ip;
+	const struct proc_dir_entry *dp = PDE(ino);
 	struct pci_dev *dev = dp->data;
 	unsigned int pos = *ppos;
 	unsigned int cnt, size;
@@ -124,10 +126,10 @@ proc_bus_pci_read(struct file *file, char *buf, size_t nbytes, loff_t *ppos)
 }
 
 static ssize_t
-proc_bus_pci_write(struct file *file, const char *buf, size_t nbytes, loff_t *ppos)
+proc_bus_pci_write(struct file *file, const char __user *buf, size_t nbytes, loff_t *ppos)
 {
 	const struct inode *ino = file->f_dentry->d_inode;
-	const struct proc_dir_entry *dp = ino->u.generic_ip;
+	const struct proc_dir_entry *dp = PDE(ino);
 	struct pci_dev *dev = dp->data;
 	int pos = *ppos;
 	int cnt;
@@ -199,7 +201,7 @@ struct pci_filp_private {
 
 static int proc_bus_pci_ioctl(struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg)
 {
-	const struct proc_dir_entry *dp = inode->u.generic_ip;
+	const struct proc_dir_entry *dp = PDE(inode);
 	struct pci_dev *dev = dp->data;
 #ifdef HAVE_PCI_MMAP
 	struct pci_filp_private *fpriv = file->private_data;
@@ -208,7 +210,7 @@ static int proc_bus_pci_ioctl(struct inode *inode, struct file *file, unsigned i
 
 	switch (cmd) {
 	case PCIIOC_CONTROLLER:
-		ret = pci_controller_num(dev);
+		ret = pci_domain_nr(dev->bus);
 		break;
 
 #ifdef HAVE_PCI_MMAP
@@ -241,7 +243,7 @@ static int proc_bus_pci_ioctl(struct inode *inode, struct file *file, unsigned i
 static int proc_bus_pci_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	const struct proc_dir_entry *dp = inode->u.generic_ip;
+	const struct proc_dir_entry *dp = PDE(inode);
 	struct pci_dev *dev = dp->data;
 	struct pci_filp_private *fpriv = file->private_data;
 	int ret;
@@ -283,16 +285,16 @@ static int proc_bus_pci_release(struct inode *inode, struct file *file)
 #endif /* HAVE_PCI_MMAP */
 
 static struct file_operations proc_bus_pci_operations = {
-	llseek:		proc_bus_pci_lseek,
-	read:		proc_bus_pci_read,
-	write:		proc_bus_pci_write,
-	ioctl:		proc_bus_pci_ioctl,
+	.llseek		= proc_bus_pci_lseek,
+	.read		= proc_bus_pci_read,
+	.write		= proc_bus_pci_write,
+	.ioctl		= proc_bus_pci_ioctl,
 #ifdef HAVE_PCI_MMAP
-	open:		proc_bus_pci_open,
-	release:	proc_bus_pci_release,
-	mmap:		proc_bus_pci_mmap,
+	.open		= proc_bus_pci_open,
+	.release	= proc_bus_pci_release,
+	.mmap		= proc_bus_pci_mmap,
 #ifdef HAVE_ARCH_PCI_GET_UNMAPPED_AREA
-	get_unmapped_area: get_pci_unmapped_area,
+	.get_unmapped_area = get_pci_unmapped_area,
 #endif /* HAVE_ARCH_PCI_GET_UNMAPPED_AREA */
 #endif /* HAVE_PCI_MMAP */
 };
@@ -306,39 +308,45 @@ static struct file_operations proc_bus_pci_operations = {
 /* iterator */
 static void *pci_seq_start(struct seq_file *m, loff_t *pos)
 {
-	struct list_head *p = &pci_devices;
+	struct pci_dev *dev = NULL;
 	loff_t n = *pos;
 
-	/* XXX: surely we need some locking for traversing the list? */
+	dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev);
 	while (n--) {
-		p = p->next;
-		if (p == &pci_devices)
-			return NULL;
+		dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev);
+		if (dev == NULL)
+			goto exit;
 	}
-	return p;
+exit:
+	return dev;
 }
+
 static void *pci_seq_next(struct seq_file *m, void *v, loff_t *pos)
 {
-	struct list_head *p = v;
+	struct pci_dev *dev = v;
+
 	(*pos)++;
-	return p->next != &pci_devices ? p->next : NULL;
+	dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, dev);
+	return dev;
 }
+
 static void pci_seq_stop(struct seq_file *m, void *v)
 {
-	/* release whatever locks we need */
+	if (v) {
+		struct pci_dev *dev = v;
+		pci_dev_put(dev);
+	}
 }
 
 static int show_device(struct seq_file *m, void *v)
 {
-	struct list_head *p = v;
-	const struct pci_dev *dev;
+	const struct pci_dev *dev = v;
 	const struct pci_driver *drv;
 	int i;
 
-	if (p == &pci_devices)
+	if (dev == NULL)
 		return 0;
 
-	dev = pci_dev_g(p);
 	drv = pci_dev_driver(dev);
 	seq_printf(m, "%02x%02x\t%04x%04x\t%x",
 			dev->bus->number,
@@ -363,13 +371,13 @@ static int show_device(struct seq_file *m, void *v)
 }
 
 static struct seq_operations proc_bus_pci_devices_op = {
-	start:	pci_seq_start,
-	next:	pci_seq_next,
-	stop:	pci_seq_stop,
-	show:	show_device
+	.start	= pci_seq_start,
+	.next	= pci_seq_next,
+	.stop	= pci_seq_stop,
+	.show	= show_device
 };
 
-static struct proc_dir_entry *proc_bus_pci_dir;
+struct proc_dir_entry *proc_bus_pci_dir;
 
 int pci_proc_attach_device(struct pci_dev *dev)
 {
@@ -377,8 +385,12 @@ int pci_proc_attach_device(struct pci_dev *dev)
 	struct proc_dir_entry *de, *e;
 	char name[16];
 
+	if (!proc_initialized)
+		return -EACCES;
+
 	if (!(de = bus->procdir)) {
-		sprintf(name, "%02x", bus->number);
+		if (pci_name_bus(name, bus))
+			return -EEXIST;
 		de = bus->procdir = proc_mkdir(name, proc_bus_pci_dir);
 		if (!de)
 			return -ENOMEM;
@@ -390,6 +402,7 @@ int pci_proc_attach_device(struct pci_dev *dev)
 	e->proc_fops = &proc_bus_pci_operations;
 	e->data = dev;
 	e->size = PCI_CFG_SPACE_SIZE;
+
 	return 0;
 }
 
@@ -410,6 +423,9 @@ int pci_proc_attach_bus(struct pci_bus* bus)
 {
 	struct proc_dir_entry *de = bus->procdir;
 
+	if (!proc_initialized)
+		return -EACCES;
+
 	if (!de) {
 		char name[16];
 		sprintf(name, "%02x", bus->number);
@@ -428,6 +444,7 @@ int pci_proc_detach_bus(struct pci_bus* bus)
 	return 0;
 }
 
+#ifdef CONFIG_PCI_LEGACY_PROC
 
 /*
  *  Backward compatible /proc/pci interface.
@@ -441,19 +458,18 @@ int pci_proc_detach_bus(struct pci_bus* bus)
  */
 static int show_dev_config(struct seq_file *m, void *v)
 {
-	struct list_head *p = v;
-	struct pci_dev *dev;
+	struct pci_dev *dev = v;
+	struct pci_dev *first_dev;
 	struct pci_driver *drv;
 	u32 class_rev;
 	unsigned char latency, min_gnt, max_lat, *class;
 	int reg;
 
-	if (p == &pci_devices) {
+	first_dev = pci_get_device(PCI_ANY_ID, PCI_ANY_ID, NULL);
+	if (dev == first_dev)
 		seq_puts(m, "PCI devices found:\n");
-		return 0;
-	}
+	pci_dev_put(first_dev);
 
-	dev = pci_dev_g(p);
 	drv = pci_dev_driver(dev);
 
 	pci_read_config_dword(dev, PCI_CLASS_REVISION, &class_rev);
@@ -467,7 +483,7 @@ static int show_dev_config(struct seq_file *m, void *v)
 		seq_printf(m, "    %s", class);
 	else
 		seq_printf(m, "    Class %04x", class_rev >> 16);
-	seq_printf(m, ": %s (rev %d).\n", dev->name, class_rev & 0xff);
+	seq_printf(m, ": %s (rev %d).\n", dev->dev.name, class_rev & 0xff);
 
 	if (dev->irq)
 		seq_printf(m, "      IRQ %d.\n", dev->irq);
@@ -523,50 +539,72 @@ static int show_dev_config(struct seq_file *m, void *v)
 }
 
 static struct seq_operations proc_pci_op = {
-	start:	pci_seq_start,
-	next:	pci_seq_next,
-	stop:	pci_seq_stop,
-	show:	show_dev_config
+	.start	= pci_seq_start,
+	.next	= pci_seq_next,
+	.stop	= pci_seq_stop,
+	.show	= show_dev_config
 };
+
+static int proc_pci_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &proc_pci_op);
+}
+static struct file_operations proc_pci_operations = {
+	.open		= proc_pci_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
+static void legacy_proc_init(void)
+{
+	struct proc_dir_entry * entry = create_proc_entry("pci", 0, NULL);
+	if (entry)
+		entry->proc_fops = &proc_pci_operations;
+}
+
+#else
+
+static void legacy_proc_init(void)
+{
+
+}
+
+#endif /* CONFIG_PCI_LEGACY_PROC */
 
 static int proc_bus_pci_dev_open(struct inode *inode, struct file *file)
 {
 	return seq_open(file, &proc_bus_pci_devices_op);
 }
 static struct file_operations proc_bus_pci_dev_operations = {
-	open:		proc_bus_pci_dev_open,
-	read:		seq_read,
-	llseek:		seq_lseek,
-	release:	seq_release,
-};
-static int proc_pci_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &proc_pci_op);
-}
-static struct file_operations proc_pci_operations = {
-	open:		proc_pci_open,
-	read:		seq_read,
-	llseek:		seq_lseek,
-	release:	seq_release,
+	.open		= proc_bus_pci_dev_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
 };
 
 static int __init pci_proc_init(void)
 {
-	if (pci_present()) {
-		struct proc_dir_entry *entry;
-		struct pci_dev *dev;
-		proc_bus_pci_dir = proc_mkdir("pci", proc_bus);
-		entry = create_proc_entry("devices", 0, proc_bus_pci_dir);
-		if (entry)
-			entry->proc_fops = &proc_bus_pci_dev_operations;
-		pci_for_each_dev(dev) {
-			pci_proc_attach_device(dev);
-		}
-		entry = create_proc_entry("pci", 0, NULL);
-		if (entry)
-			entry->proc_fops = &proc_pci_operations;
+	struct proc_dir_entry *entry;
+	struct pci_dev *dev = NULL;
+	proc_bus_pci_dir = proc_mkdir("pci", proc_bus);
+	entry = create_proc_entry("devices", 0, proc_bus_pci_dir);
+	if (entry)
+		entry->proc_fops = &proc_bus_pci_dev_operations;
+	proc_initialized = 1;
+	while ((dev = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
+		pci_proc_attach_device(dev);
 	}
+	legacy_proc_init();
 	return 0;
 }
 
 __initcall(pci_proc_init);
+
+#ifdef CONFIG_HOTPLUG
+EXPORT_SYMBOL(pci_proc_attach_device);
+EXPORT_SYMBOL(pci_proc_attach_bus);
+EXPORT_SYMBOL(pci_proc_detach_bus);
+EXPORT_SYMBOL(proc_bus_pci_dir);
+#endif
+

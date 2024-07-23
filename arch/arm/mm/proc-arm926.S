@@ -1,5 +1,5 @@
 /*
- *  linux/arch/arm/mm/arm926.S: MMU functions for ARM926EJ-S
+ *  linux/arch/arm/mm/proc-arm926.S: MMU functions for ARM926EJ-S
  *
  *  Copyright (C) 1999-2001 ARM Limited
  *  Copyright (C) 2000 Deep Blue Solutions Ltd.
@@ -21,13 +21,17 @@
  *
  * These are the low level assembler for performing cache and TLB
  * functions on the arm926.
+ *
+ *  CONFIG_CPU_ARM926_CPU_IDLE -> nohlt
  */
 #include <linux/linkage.h>
 #include <linux/config.h>
+#include <linux/init.h>
 #include <asm/assembler.h>
-#include <asm/constants.h>
 #include <asm/procinfo.h>
 #include <asm/hardware.h>
+#include <asm/page.h>
+#include "proc-macros.S"
 
 /*
  * This is the maximum size of an area which will be invalidated
@@ -37,65 +41,14 @@
  * This value should be chosen such that we choose the cheapest
  * alternative.
  */
-#define MAX_AREA_SIZE	16384
+#define CACHE_DLIMIT	16384
 
 /*
  * the cache line size of the I and D cache
  */
-#define DCACHELINESIZE	32
-#define ICACHELINESIZE	32
-
-/*
- * and the page size
- */
-#define PAGESIZE	4096
+#define CACHE_DLINESIZE	32
 
 	.text
-
-/*
- * cpu_arm926_data_abort()
- *
- * obtain information about current aborted instruction
- *
- * Inputs:
- *  r0 = address of abort 
- *  r1 = cpsr of abort 
- *
- * Returns:
- *  r0 = address of abort
- *  r1 != 0 if writing
- *  r3 = FSR
- */
-	.align	5
-ENTRY(cpu_arm926_data_abort)
-	tst	r1, #1<<24			@ Check for Jbit (NE -> found)
-	movne	r1, #-1 			@ Mark as writing
-	bne	2f
-
-	tst	r1, #1<<5			@ Check for Thumb-bit (NE -> found)
-	ldrneh	r1, [r0]			@ Read aborted Thumb instruction        
-	tstne	r1, r1, lsr #12 		@ C = bit 11
-
-	ldreq	r1, [r0]			@ Read aborted ARM instruction
-	tsteq	r1, r1, lsr #21 		@ C = bit 20
-
-	sbc	r1, r1, r1			@ r1 = C - 1
-2:
-	mrc	p15, 0, r3, c5, c0, 0		@ get FSR
-	and	r3, r3, #255
-	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
-
-	mov	pc, lr
-
-/*
- * cpu_arm926_check_bugs()
- */
-ENTRY(cpu_arm926_check_bugs)
-	mrs	ip, cpsr
-	bic	ip, ip, #F_BIT
-	msr	cpsr, ip
-	mov	pc, lr
-
 /*
  * cpu_arm926_proc_init()
  */
@@ -107,19 +60,19 @@ ENTRY(cpu_arm926_proc_init)
  */
 ENTRY(cpu_arm926_proc_fin)
 	stmfd	sp!, {lr}
-	mov	ip, #F_BIT | I_BIT | SVC_MODE
+	mov	ip, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
 	msr	cpsr_c, ip
-	bl	cpu_arm926_cache_clean_invalidate_all
+	bl	arm926_flush_kern_cache_all
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
-	bic	r0, r0, #0x1000 		@ ...i............
-	bic	r0, r0, #0x000e 		@ ............wca.
+	bic	r0, r0, #0x1000			@ ...i............
+	bic	r0, r0, #0x000e			@ ............wca.
 	mcr	p15, 0, r0, c1, c0, 0		@ disable caches
 	ldmfd	sp!, {pc}
 
 /*
  * cpu_arm926_reset(loc)
  *
- * Perform a soft reset of the system.	Put the CPU into the
+ * Perform a soft reset of the system.  Put the CPU into the
  * same state as it would be if it had been reset, and branch
  * to what would be the reset vector.
  *
@@ -132,327 +85,236 @@ ENTRY(cpu_arm926_reset)
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
 	mcr	p15, 0, ip, c8, c7, 0		@ invalidate I & D TLBs
 	mrc	p15, 0, ip, c1, c0, 0		@ ctrl register
-	bic	ip, ip, #0x000f 		@ ............wcam
-	bic	ip, ip, #0x1100 		@ ...i...s........
+	bic	ip, ip, #0x000f			@ ............wcam
+	bic	ip, ip, #0x1100			@ ...i...s........
 	mcr	p15, 0, ip, c1, c0, 0		@ ctrl register
 	mov	pc, r0
 
 /*
  * cpu_arm926_do_idle()
+ *
+ * Called with IRQs disabled
  */
-	.align	5
+	.align	10
 ENTRY(cpu_arm926_do_idle)
-#if defined(CONFIG_CPU_ARM926_CPU_IDLE)
+	mov	r0, #0
+	mrc	p15, 0, r1, c1, c0, 0		@ Read control register
+	mcr	p15, 0, r0, c7, c10, 4		@ Drain write buffer
+	bic	r2, r1, #1 << 12
+	mcr	p15, 0, r2, c1, c0, 0		@ Disable I cache
 	mcr	p15, 0, r0, c7, c0, 4		@ Wait for interrupt
-#endif
+	mcr	p15, 0, r1, c1, c0, 0		@ Restore ICache enable
 	mov	pc, lr
 
-/* ================================= CACHE ================================ */
-
+/*
+ *	flush_user_cache_all()
+ *
+ *	Clean and invalidate all cache entries in a particular
+ *	address space.
+ */
+ENTRY(arm926_flush_user_cache_all)
+	/* FALLTHROUGH */
 
 /*
- * cpu_arm926_cache_clean_invalidate_all()
+ *	flush_kern_cache_all()
  *
- * clean and invalidate all cache lines
- *
- * Note:
- *  1. we should preserve r0 at all times
+ *	Clean and invalidate the entire cache.
  */
-	.align	5
-ENTRY(cpu_arm926_cache_clean_invalidate_all)
-	mov	r2, #1
-cpu_arm926_cache_clean_invalidate_all_r2:
+ENTRY(arm926_flush_kern_cache_all)
+	mov	r2, #VM_EXEC
 	mov	ip, #0
-#ifdef CONFIG_CPU_ARM926_WRITETHROUGH
+__flush_whole_cache:
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
 #else
 1:	mrc	p15, 0, r15, c7, c14, 3 	@ test,clean,invalidate
 	bne	1b
 #endif
-	teq	r2, #0
+	tst	r2, #VM_EXEC
 	mcrne	p15, 0, ip, c7, c5, 0		@ invalidate I cache
-	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm926_cache_clean_invalidate_range(start, end, flags)
+ *	flush_user_cache_range(start, end, flags)
  *
- * clean and invalidate all cache lines associated with this area of memory
+ *	Clean and invalidate a range of cache entries in the
+ *	specified address range.
  *
- * This is a little misleading, it is not intended to clean out
- * the i-cache but to make sure that any data written to the
- * range is made consistant.  This means that when we execute code
- * in that region, everything works as we expect.
- *
- * This generally means writing back data in the Dcache and
- * write buffer and flushing the Icache over that region
- * start: Area start address
- * end:   Area end address
- * flags: nonzero for I cache as well
+ *	- start	- start address (inclusive)
+ *	- end	- end address (exclusive)
+ *	- flags	- vm_flags describing address space
  */
-	.align	5
-ENTRY(cpu_arm926_cache_clean_invalidate_range)
-	bic	r0, r0, #DCACHELINESIZE - 1	@ && added by PGM
-	bic	r1, r1, #DCACHELINESIZE - 1	@ && added by DHM
-	sub	r3, r1, r0
-	cmp	r3, #MAX_AREA_SIZE
-	bgt	cpu_arm926_cache_clean_invalidate_all_r2
-
-1:	teq	r2, #0
-#ifdef CONFIG_CPU_ARM926_WRITETHROUGH
+ENTRY(arm926_flush_user_cache_range)
+	mov	ip, #0
+	sub	r3, r1, r0			@ calculate total size
+	cmp	r3, #CACHE_DLIMIT
+	bgt	__flush_whole_cache
+1:	tst	r2, #VM_EXEC
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 #else
 	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
 	mcrne	p15, 0, r0, c7, c5, 1		@ invalidate I entry
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 #endif
-        
 	cmp	r0, r1
-	blt	1b
-
-	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
-
+	blo	1b
+	tst	r2, #VM_EXEC
+	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm926_flush_ram_page(page)
+ *	coherent_kern_range(start, end)
  *
- * clean and invalidate all cache lines associated with this area of memory
+ *	Ensure coherency between the Icache and the Dcache in the
+ *	region described by start, end.  If you have non-snooping
+ *	Harvard caches, you need to implement this function.
  *
- * page: page to clean and invalidate
+ *	- start	- virtual start address
+ *	- end	- virtual end address
  */
-	.align	5
-ENTRY(cpu_arm926_flush_ram_page)
-	mov	r1, #PAGESIZE
-#ifdef CONFIG_CPU_ARM926_WRITETHROUGH
-1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
-#else
-1:	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
-#endif
-	subs	r1, r1, #2 * DCACHELINESIZE
-	bne	1b
-	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-/* ================================ D-CACHE =============================== */
-
-/*
- * cpu_arm926_dcache_invalidate_range(start, end)
- *
- * throw away all D-cached data in specified region without an obligation
- * to write them back.	Note however that we must clean the D-cached entries
- * around the boundaries if the start and/or end address are not cache
- * aligned.
- *
- * start: virtual start address
- * end:   virtual end address
- */
-	.align	5
-ENTRY(cpu_arm926_dcache_invalidate_range)
-#ifndef CONFIG_CPU_ARM926_WRITETHROUGH
-	tst	r0, #DCACHELINESIZE - 1
-	mcrne	p15, 0, r0, c7, c10, 1		@ clean D entry
-	tst	r1, #DCACHELINESIZE - 1
-	mcrne	p15, 0, r1, c7, c10, 1
-#endif		@ clean D entry
-	bic	r0, r0, #DCACHELINESIZE - 1
-	bic	r1, r1, #DCACHELINESIZE - 1
-1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
-	add	r0, r0, #DCACHELINESIZE
+ENTRY(arm926_coherent_kern_range)
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	mcr	p15, 0, r0, c7, c5, 1		@ invalidate I entry
+	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
-	blt	1b
-	mov	pc, lr
-
-/*
- * cpu_arm926_dcache_clean_range(start, end)
- *
- * For the specified virtual address range, ensure that all caches contain
- * clean data, such that peripheral accesses to the physical RAM fetch
- * correct data.
- *
- * start: virtual start address
- * end:   virtual end address
- */
-	.align	5
-ENTRY(cpu_arm926_dcache_clean_range)
-#ifndef CONFIG_CPU_ARM926_WRITETHROUGH
-	bic	r0, r0, #DCACHELINESIZE - 1
-	sub	r1, r1, r0
-	cmp	r1, #MAX_AREA_SIZE
-	mov	r2, #0
-	bgt	cpu_arm926_cache_clean_invalidate_all_r2
-
-	bic	r1, r1, #DCACHELINESIZE -1
-	add	r1, r1, #DCACHELINESIZE
-
-1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	add	r0, r0, #DCACHELINESIZE
-	subs	r1, r1, #DCACHELINESIZE
-	bpl	1b
-#endif
-	mcr	p15, 0, r2, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-/*
- * cpu_arm926_dcache_clean_page(page)
- *
- * Cleans a single page of dcache so that if we have any future aliased
- * mappings, they will be consistent at the time that they are created.
- *
- * page: virtual address of page to clean from dcache
- *
- * Note:
- *  1. we don't need to flush the write buffer in this case.
- *  2. we don't invalidate the entries since when we write the page
- *     out to disk, the entries may get reloaded into the cache.
- */
-	.align	5
-ENTRY(cpu_arm926_dcache_clean_page)
-#ifndef CONFIG_CPU_ARM926_WRITETHROUGH
-	mov	r1, #PAGESIZE
-1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	add	r0, r0, #DCACHELINESIZE
-	subs	r1, r1, #2 * DCACHELINESIZE
-	bne	1b
-#endif
-	mov	pc, lr
-
-/*
- * cpu_arm926_dcache_clean_entry(addr)
- *
- * Clean the specified entry of any caches such that the MMU
- * translation fetches will obtain correct data.
- *
- * addr: cache-unaligned virtual address
- */
-	.align	5
-ENTRY(cpu_arm926_dcache_clean_entry)
-#ifndef CONFIG_CPU_ARM926_WRITETHROUGH
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-#endif
+	blo	1b
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
-/* ================================ I-CACHE =============================== */
-
 /*
- * cpu_arm926_icache_invalidate_range(start, end)
+ *	flush_kern_dcache_page(void *page)
  *
- * invalidate a range of virtual addresses from the Icache
+ *	Ensure no D cache aliasing occurs, either with itself or
+ *	the I cache
  *
- * start: virtual start address
- * end:   virtual end address
+ *	- addr	- page aligned address
  */
-	.align	5
-ENTRY(cpu_arm926_icache_invalidate_range)
-	bic	r0, r0, #DCACHELINESIZE - 1	@ Safety check
-	sub	r1, r1, r0
-	cmp	r1, #MAX_AREA_SIZE
-	bgt	cpu_arm926_cache_clean_invalidate_all_r2
-
-	bic	r1, r1, #DCACHELINESIZE - 1
-	add	r1, r1, #DCACHELINESIZE
-
-1:	mcr	p15, 0, r0, c7, c5, 1		@ clean I entries
-	add	r0, r0, #DCACHELINESIZE
-	subs	r1, r1, #DCACHELINESIZE
-	bne	1b
-
+ENTRY(arm926_flush_kern_dcache_page)
+	add	r1, r0, #PAGE_SZ
+1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
 	mov	r0, #0
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-ENTRY(cpu_arm926_icache_invalidate_page)
 	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
-	mov	pc, lr
-
-
-/* ================================== TLB ================================= */
-
-/*
- * cpu_arm926_tlb_invalidate_all()
- *
- * Invalidate all TLB entries
- */
-	.align	5
-ENTRY(cpu_arm926_tlb_invalidate_all)
-	mov	r0, #0
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mcr	p15, 0, r0, c8, c7, 0		@ invalidate I & D TLBs
 	mov	pc, lr
 
 /*
- * cpu_arm926_tlb_invalidate_range(start, end)
+ *	dma_inv_range(start, end)
  *
- * invalidate TLB entries covering the specified range
+ *	Invalidate (discard) the specified virtual address range.
+ *	May not write back any entries.  If 'start' or 'end'
+ *	are not cache line aligned, those lines must be written
+ *	back.
  *
- * start: range start address
- * end:   range end address
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ *
+ * (same as v4wb)
  */
-	.align	5
-ENTRY(cpu_arm926_tlb_invalidate_range)
-	mov	r3, #0
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-
-	mov	r3, #PAGESIZE
-	sub	r3, r3, #1
-	bic	r0, r0, r3
-	bic	r1, r1, r3
-
-1:	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
-	mcr	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
-	add	r0, r0, #PAGESIZE
+ENTRY(arm926_dma_inv_range)
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+	tst	r0, #CACHE_DLINESIZE - 1
+	mcrne	p15, 0, r0, c7, c10, 1		@ clean D entry
+	tst	r1, #CACHE_DLINESIZE - 1
+	mcrne	p15, 0, r1, c7, c10, 1		@ clean D entry
+#endif
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
+	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
-	blt	1b
+	blo	1b
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm926_tlb_invalidate_page(page, flags)
+ *	dma_clean_range(start, end)
  *
- * invalidate the TLB entries for the specified page.
+ *	Clean the specified virtual address range.
  *
- * page:  page to invalidate
- * flags: non-zero if we include the I TLB
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ *
+ * (same as v4wb)
  */
-	.align	5
-ENTRY(cpu_arm926_tlb_invalidate_page)
-	mov	r3, #0
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-	teq	r1, #0
-	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
-	mcrne	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
+ENTRY(arm926_dma_clean_range)
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
+#endif
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+/*
+ *	dma_flush_range(start, end)
+ *
+ *	Clean and invalidate the specified virtual address range.
+ *
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ */
+ENTRY(arm926_dma_flush_range)
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+1:
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
+#else
+	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+#endif
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+ENTRY(arm926_cache_fns)
+	.long	arm926_flush_kern_cache_all
+	.long	arm926_flush_user_cache_all
+	.long	arm926_flush_user_cache_range
+	.long	arm926_coherent_kern_range
+	.long	arm926_flush_kern_dcache_page
+	.long	arm926_dma_inv_range
+	.long	arm926_dma_clean_range
+	.long	arm926_dma_flush_range
+
+ENTRY(cpu_arm926_dcache_clean_area)
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
+1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	add	r0, r0, #CACHE_DLINESIZE
+	subs	r1, r1, #CACHE_DLINESIZE
+	bhi	1b
+#endif
+	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /* =============================== PageTable ============================== */
 
 /*
- * cpu_arm926_set_pgd(pgd)
+ * cpu_arm926_switch_mm(pgd)
  *
  * Set the translation base pointer to be as described by pgd.
  *
  * pgd: new page tables
  */
 	.align	5
-ENTRY(cpu_arm926_set_pgd)
+ENTRY(cpu_arm926_switch_mm)
 	mov	ip, #0
-#ifdef CONFIG_CPU_ARM926_WRITETHROUGH
-	/* Any reason why we don't use mcr p15, 0, r0, c7, c7, 0 here? --rmk */
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, ip, c7, c6, 0		@ invalidate D cache
 #else
 @ && 'Clean & Invalidate whole DCache'
@@ -466,36 +328,13 @@ ENTRY(cpu_arm926_set_pgd)
 	mov	pc, lr
 
 /*
- * cpu_arm926_set_pmd(pmdp, pmd)
- *
- * Set a level 1 translation table entry, and clean it out of
- * any caches such that the MMUs can load it correctly.
- *
- * pmdp: pointer to PMD entry
- * pmd:  PMD value to store
- */
-	.align	5
-ENTRY(cpu_arm926_set_pmd)
-#ifdef CONFIG_CPU_ARM926_WRITETHROUGH
-	eor	r2, r1, #0x0a			@ C & Section
-	tst	r2, #0x0b
-	biceq	r1, r1, #4			@ clear bufferable bit
-#endif
-	str	r1, [r0]
-#ifndef CONFIG_CPU_ARM926_WRITETHROUGH
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-#endif
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mov	pc, lr
-
-/*
  * cpu_arm926_set_pte(ptep, pte)
  *
  * Set a PTE and flush it out
  */
 	.align	5
 ENTRY(cpu_arm926_set_pte)
-	str	r1, [r0], #-1024		@ linux version
+	str	r1, [r0], #-2048		@ linux version
 
 	eor	r1, r1, #LPTE_PRESENT | LPTE_YOUNG | LPTE_WRITE | LPTE_DIRTY
 
@@ -503,7 +342,7 @@ ENTRY(cpu_arm926_set_pte)
 	bic	r2, r2, #3
 	orr	r2, r2, #HPTE_TYPE_SMALL
 
-	tst	r1, #LPTE_USER | LPTE_EXEC	@ User or Exec?
+	tst	r1, #LPTE_USER			@ User?
 	orrne	r2, r2, #HPTE_AP_READ
 
 	tst	r1, #LPTE_WRITE | LPTE_DIRTY	@ Write and Dirty?
@@ -512,45 +351,40 @@ ENTRY(cpu_arm926_set_pte)
 	tst	r1, #LPTE_PRESENT | LPTE_YOUNG	@ Present and Young?
 	movne	r2, #0
 
-#ifdef CONFIG_CPU_ARM926_WRITETHROUGH
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	eor	r3, r2, #0x0a			@ C & small page?
 	tst	r3, #0x0b
 	biceq	r2, r2, #4
 #endif
 	str	r2, [r0]			@ hardware version
 	mov	r0, r0
-#ifndef CONFIG_CPU_ARM926_WRITETHROUGH
+#ifndef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 #endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 
-cpu_manu_name:
-	.asciz	"ARM"
 ENTRY(cpu_arm926_name)
 	.ascii	"ARM926EJ-S"
-#if defined(CONFIG_CPU_ARM926_CPU_IDLE)
-	.ascii	"s"
-#endif
-#if defined(CONFIG_CPU_ARM926_I_CACHE_ON)
+#ifndef CONFIG_CPU_ICACHE_DISABLE
 	.ascii	"i"
 #endif
-#if defined(CONFIG_CPU_ARM926_D_CACHE_ON)
+#ifndef CONFIG_CPU_DCACHE_DISABLE
 	.ascii	"d"
-#if defined(CONFIG_CPU_ARM926_WRITETHROUGH)
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	.ascii	"(wt)"
 #else
 	.ascii	"(wb)"
 #endif
-#ifdef CONFIG_CPU_ARM926_ROUND_ROBIN
+#ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
 	.ascii	"RR"
 #endif
 #endif
 	.ascii	"\0"
 	.align
 
-	.section ".text.init", #alloc, #execinstr
+	__INIT
 
 __arm926_setup:
 	mov	r0, #0
@@ -560,7 +394,7 @@ __arm926_setup:
 	mcr	p15, 0, r4, c2, c0		@ load page table pointer
 
 
-#if defined(CONFIG_CPU_ARM926_WRITETHROUGH) 
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	mov	r0, #4				@ disable write-back on caches explicitly
 	mcr	p15, 7, r0, c15, c0, 0
 #endif 
@@ -575,21 +409,21 @@ __arm926_setup:
 	bic	r0, r0, #0x0e00
 	bic	r0, r0, #0x0002
 	bic	r0, r0, #0x000c
-	bic	r0, r0, #0x1000 		@ ...0 000. .... 000.
+	bic	r0, r0, #0x1000			@ ...0 000. .... 000.
 /*
  * Turn on what we want
  */
 	orr	r0, r0, #0x0031
-	orr	r0, r0, #0x2100 		@ ..1. ...1 ..11 ...1
+	orr	r0, r0, #0x2100			@ ..1. ...1 ..11 ...1
 
-#ifdef CONFIG_CPU_ARM926_ROUND_ROBIN
-	orr	r0, r0, #0x4000 		@ .1.. .... .... ....
+#ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
+	orr	r0, r0, #0x4000			@ .1.. .... .... ....
 #endif
-#ifdef CONFIG_CPU_ARM926_D_CACHE_ON
-	orr	r0, r0, #0x0004 		@ .... .... .... .1..
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	orr	r0, r0, #0x0004			@ .... .... .... .1..
 #endif
-#ifdef CONFIG_CPU_ARM926_I_CACHE_ON
-	orr	r0, r0, #0x1000 		@ ...1 .... .... ....
+#ifndef CONFIG_CPU_ICACHE_DISABLE
+	orr	r0, r0, #0x1000			@ ...1 .... .... ....
 #endif
 	mov	pc, lr
 
@@ -601,53 +435,24 @@ __arm926_setup:
  */
 	.type	arm926_processor_functions, #object
 arm926_processor_functions:
-	.word	cpu_arm926_data_abort
-	.word	cpu_arm926_check_bugs
+	.word	v5tej_early_abort
 	.word	cpu_arm926_proc_init
 	.word	cpu_arm926_proc_fin
 	.word	cpu_arm926_reset
 	.word	cpu_arm926_do_idle
-
-	/* cache */
-	.word	cpu_arm926_cache_clean_invalidate_all
-	.word	cpu_arm926_cache_clean_invalidate_range
-	.word	cpu_arm926_flush_ram_page
-
-	/* dcache */
-	.word	cpu_arm926_dcache_invalidate_range
-	.word	cpu_arm926_dcache_clean_range
-	.word	cpu_arm926_dcache_clean_page
-	.word	cpu_arm926_dcache_clean_entry
-
-	/* icache */
-	.word	cpu_arm926_icache_invalidate_range
-	.word	cpu_arm926_icache_invalidate_page
-
-	/* tlb */
-	.word	cpu_arm926_tlb_invalidate_all
-	.word	cpu_arm926_tlb_invalidate_range
-	.word	cpu_arm926_tlb_invalidate_page
-
-	/* pgtable */
-	.word	cpu_arm926_set_pgd
-	.word	cpu_arm926_set_pmd
+	.word	cpu_arm926_dcache_clean_area
+	.word	cpu_arm926_switch_mm
 	.word	cpu_arm926_set_pte
 	.size	arm926_processor_functions, . - arm926_processor_functions
 
-	.type	cpu_arm926_info, #object
-cpu_arm926_info:
-	.long	cpu_manu_name
-	.long	cpu_arm926_name
-	.size	cpu_arm926_info, . - cpu_arm926_info
-
 	.type	cpu_arch_name, #object
 cpu_arch_name:
-	.asciz	"armv5EJ"
+	.asciz	"armv5tej"
 	.size	cpu_arch_name, . - cpu_arch_name
 
 	.type	cpu_elf_name, #object
 cpu_elf_name:
-	.asciz	"v5EJ"
+	.asciz	"v5"
 	.size	cpu_elf_name, . - cpu_elf_name
 	.align
 
@@ -661,7 +466,10 @@ __arm926_proc_info:
 	b	__arm926_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT
-	.long	cpu_arm926_info
+	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB | HWCAP_FAST_MULT | HWCAP_JAVA
+	.long	cpu_arm926_name
 	.long	arm926_processor_functions
+	.long	v4wbi_tlb_fns
+	.long	v4wb_user_fns
+	.long	arm926_cache_fns
 	.size	__arm926_proc_info, . - __arm926_proc_info

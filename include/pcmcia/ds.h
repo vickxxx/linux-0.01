@@ -30,8 +30,8 @@
 #ifndef _LINUX_DS_H
 #define _LINUX_DS_H
 
-#include <pcmcia/driver_ops.h>
 #include <pcmcia/bulkmem.h>
+#include <pcmcia/cs_types.h>
 
 typedef struct tuple_parse_t {
     tuple_t		tuple;
@@ -106,6 +106,13 @@ typedef union ds_ioctl_arg_t {
 #define DS_BIND_MTD			_IOWR('d', 64, mtd_info_t)
 
 #ifdef __KERNEL__
+#include <linux/device.h>
+
+typedef struct dev_node_t {
+    char		dev_name[DEV_NAME_LEN];
+    u_short		major, minor;
+    struct dev_node_t	*next;
+} dev_node_t;
 
 typedef struct dev_link_t {
     dev_node_t		*dev;
@@ -134,15 +141,23 @@ typedef struct dev_link_t {
 #define DEV_OK(l) \
     ((l) && ((l->state & ~DEV_BUSY) == (DEV_CONFIG|DEV_PRESENT)))
 
-int register_pccard_driver(dev_info_t *dev_info,
-			   dev_link_t *(*attach)(void),
-			   void (*detach)(dev_link_t *));
 
-int unregister_pccard_driver(dev_info_t *dev_info);
+extern struct bus_type pcmcia_bus_type;
 
-#define register_pcmcia_driver register_pccard_driver
-#define unregister_pcmcia_driver unregister_pccard_driver
+struct pcmcia_driver {
+	int			use_count;
+	dev_link_t		*(*attach)(void);
+	void			(*detach)(dev_link_t *);
+	struct module		*owner;
+	struct device_driver	drv;
+};
+
+/* driver registration */
+int pcmcia_register_driver(struct pcmcia_driver *driver);
+void pcmcia_unregister_driver(struct pcmcia_driver *driver);
+
+/* error reporting */
+void cs_error(client_handle_t handle, int func, int ret);
 
 #endif /* __KERNEL__ */
-
 #endif /* _LINUX_DS_H */

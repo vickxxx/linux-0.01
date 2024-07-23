@@ -1,4 +1,4 @@
-/* $Id: display7seg.c,v 1.5 2001/10/08 22:19:51 davem Exp $
+/* $Id: display7seg.c,v 1.6 2002/01/08 16:00:16 davem Exp $
  *
  * display7seg - Driver implementation for the 7-segment display
  * present on Sun Microsystems CP1400 and CP1500
@@ -16,6 +16,7 @@
 #include <linux/init.h>
 #include <linux/miscdevice.h>
 #include <linux/ioport.h>		/* request_region, check_region */
+#include <asm/atomic.h>
 #include <asm/ebus.h>			/* EBus device					*/
 #include <asm/oplib.h>			/* OpenProm Library 			*/
 #include <asm/uaccess.h>		/* put_/get_user			*/
@@ -29,7 +30,6 @@
 static int sol_compat = 0;		/* Solaris compatibility mode	*/
 
 #ifdef MODULE
-EXPORT_NO_SYMBOLS;
 
 /* Solaris compatibility flag -
  * The Solaris implementation omits support for several
@@ -87,27 +87,23 @@ static inline int d7s_obpflipped(void)
 	return ((-1 != prom_getintdefault(opt_node, "d7s-flipped?", -1)) ? 0 : 1);
 }
 
+static atomic_t d7s_users = ATOMIC_INIT(0);
+
 static int d7s_open(struct inode *inode, struct file *f)
 {
-	if (D7S_MINOR != MINOR(inode->i_rdev))
+	if (D7S_MINOR != minor(inode->i_rdev))
 		return -ENODEV;
-
-	MOD_INC_USE_COUNT;
+	atomic_inc(&d7s_users);
 	return 0;
 }
 
 static int d7s_release(struct inode *inode, struct file *f)
 {
-	if (D7S_MINOR != MINOR(inode->i_rdev))
-		return -ENODEV;
-	
-	MOD_DEC_USE_COUNT;
-
 	/* Reset flipped state to OBP default only if
 	 * no other users have the device open and we
 	 * are not operating in solaris-compat mode
 	 */
-	if (0 == MOD_IN_USE && 0 == sol_compat) {
+	if (atomic_dec_and_test(&d7s_users) && !sol_compat) {
 		int regval = 0;
 
 		regval = readb(d7s_regs);
@@ -125,7 +121,7 @@ static int d7s_ioctl(struct inode *inode, struct file *f,
 	__u8 regs = readb(d7s_regs);
 	__u8 ireg = 0;
 
-	if (D7S_MINOR != MINOR(inode->i_rdev))
+	if (D7S_MINOR != minor(inode->i_rdev))
 		return -ENODEV;
 
 	switch (cmd) {
@@ -165,10 +161,10 @@ static int d7s_ioctl(struct inode *inode, struct file *f,
 }
 
 static struct file_operations d7s_fops = {
-	owner:		THIS_MODULE,
-	ioctl:		d7s_ioctl,
-	open:		d7s_open,
-	release:	d7s_release,
+	.owner =	THIS_MODULE,
+	.ioctl =	d7s_ioctl,
+	.open =		d7s_open,
+	.release =	d7s_release,
 };
 
 static struct miscdevice d7s_miscdev = { D7S_MINOR, D7S_DEVNAME, &d7s_fops };
@@ -198,6 +194,7 @@ ebus_done:
 	if (0 != iTmp) {
 		printk("%s: unable to acquire miscdevice minor %i\n",
 		       D7S_DEVNAME, D7S_MINOR);
+		iounmap(d7s_regs);
 		return iTmp;
 	}
 

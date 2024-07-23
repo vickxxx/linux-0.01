@@ -105,15 +105,12 @@
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
 #include <linux/timer.h>
-#include <linux/tqueue.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/genhd.h>
 #include <linux/major.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
-
-#define MAJOR_NR	MFM_ACORN_MAJOR
 #include <linux/blk.h>
 #include <linux/blkpg.h>
 
@@ -126,6 +123,13 @@
 #include <asm/ecard.h>
 #include <asm/hardware/ioc.h>
 
+static void (*do_mfm)(void) = NULL;
+static struct request_queue mfm_queue;
+static spinlock_t mfm_lock = SPIN_LOCK_UNLOCKED;
+
+#define MAJOR_NR	MFM_ACORN_MAJOR
+#define QUEUE (&mfm_queue)
+#define CURRENT elv_next_request(&mfm_queue)
 /*
  * This sort of stuff should be in a header file shared with ide.c, hd.c, xd.c etc
  */
@@ -157,13 +161,6 @@ struct hd_geometry {
 /*#define DEBUG */
 #endif
 /*
- * List of card types that we recognise
- */
-static const card_ids mfm_cids[] = {
-	{ MANU_ACORN, PROD_ACORN_MFM },
-	{ 0xffff, 0xffff }
-};
-/*
  * End of configuration
  */
 
@@ -182,8 +179,6 @@ struct mfm_info {
 #define NEED_1_RECAL -2
 #define NEED_2_RECAL -3
 		 int cylinder;
-	unsigned int access_count;
-	unsigned int busy;
 	struct {
 		char recal;
 		char report;
@@ -192,12 +187,6 @@ struct mfm_info {
 } mfm_info[MFM_MAXDRIVES];
 
 #define MFM_DRV_INFO mfm_info[raw_cmd.dev]
-
-static struct hd_struct mfm[MFM_MAXDRIVES << 6];
-static int mfm_sizes[MFM_MAXDRIVES << 6];
-static int mfm_blocksizes[MFM_MAXDRIVES << 6];
-static int mfm_sectsizes[MFM_MAXDRIVES << 6];
-static DECLARE_WAIT_QUEUE_HEAD(mfm_wait_open);
 
 /* Stuff from the assembly routines */
 extern unsigned int hdc63463_baseaddress;	/* Controller base address */
@@ -230,9 +219,8 @@ static char *Copy_buffer;
 static void mfm_seek(void);
 static void mfm_rerequest(void);
 static void mfm_request(void);
-static int mfm_reread_partitions(kdev_t dev);
 static void mfm_specify (void);
-static void issue_request(int dev, unsigned int block, unsigned int nsect,
+static void issue_request(unsigned int block, unsigned int nsect,
 			  struct request *req);
 
 static unsigned int mfm_addr;		/* Controller address */
@@ -321,14 +309,14 @@ static void console_printf(const char *fmt,...)
 	unsigned long flags;
 	va_list ap;
 
-	save_flags_cli(flags);
+	local_irq_save(flags);
 
 	va_start(ap, fmt);
 	vsprintf(buffer, fmt, ap);
 	console_print(buffer);
 	va_end(fmt);
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 };	/* console_printf */
 
 #define DBG(x...) console_printf(x)
@@ -418,7 +406,7 @@ static void issue_command(int command, unsigned char *cmdb, int len)
 
 	outw(command, MFM_COMMAND);
 	status = inw(MFM_STATUS);
-	DBG("issue_command: status immediatly after command issue: %02X:\n ", status >> 8);
+	DBG("issue_command: status immediately after command issue: %02X:\n ", status >> 8);
 }
 
 static void wait_for_completion(void)
@@ -463,7 +451,7 @@ static void mfm_rw_intr(void)
 		return;
 	};
 
-	/* OK so what ever happend its not an error, now I reckon we are left between
+	/* OK so what ever happened it's not an error, now I reckon we are left between
 	   a choice of command end or some data which is ready to be collected */
 	/* I think we have to transfer data while the interrupt line is on and its
 	   not any other type of interrupt */
@@ -512,7 +500,7 @@ static void mfm_rw_intr(void)
 			CURRENT->sector += CURRENT->current_nr_sectors;
 			SectorsLeftInRequest -= CURRENT->current_nr_sectors;
 
-			end_request(1);
+			end_request(CURRENT, 1);
 			if (SectorsLeftInRequest) {
 				hdc63463_dataptr = (unsigned int) CURRENT->buffer;
 				Copy_buffer = CURRENT->buffer;
@@ -572,7 +560,7 @@ static void mfm_rw_intr(void)
 		DBG("mfm_rw_intr: returned from cont->done\n");
 	} else {
 		/* Its going to generate another interrupt */
-		SET_INTR(mfm_rw_intr);
+		do_mfm = mfm_rw_intr;
 	};
 }
 
@@ -580,7 +568,7 @@ static void mfm_setup_rw(void)
 {
 	DBG("setting up for rw...\n");
 
-	SET_INTR(mfm_rw_intr);
+	do_mfm = mfm_rw_intr;
 	issue_command(raw_cmd.cmdcode, raw_cmd.cmddata, raw_cmd.cmdlen);
 }
 
@@ -610,7 +598,7 @@ static void mfm_recal_intr(void)
 	/* Command end without seek end (see data sheet p.20) for parallel seek
 	   - we have to send a POL command to wait for the seek */
 	if (mfm_status & STAT_CED) {
-		SET_INTR(mfm_recal_intr);
+		do_mfm = mfm_recal_intr;
 		issue_command(CMD_POL, NULL, 0);
 		return;
 	}
@@ -640,7 +628,7 @@ static void mfm_seek_intr(void)
 		return;
 	}
 	if (mfm_status & STAT_CED) {
-		SET_INTR(mfm_seek_intr);
+		do_mfm = mfm_seek_intr;
 		issue_command(CMD_POL, NULL, 0);
 		return;
 	}
@@ -698,7 +686,7 @@ static void mfm_seek(void)
 
 	DBG("seeking...\n");
 	if (MFM_DRV_INFO.cylinder < 0) {
-		SET_INTR(mfm_recal_intr);
+		do_mfm = mfm_recal_intr;
 		DBG("mfm_seek: about to call specify\n");
 		mfm_specify ();	/* DAG added this */
 
@@ -714,7 +702,7 @@ static void mfm_seek(void)
 		cmdb[2] = raw_cmd.cylinder >> 8;
 		cmdb[3] = raw_cmd.cylinder;
 
-		SET_INTR(mfm_seek_intr);
+		do_mfm = mfm_seek_intr;
 		issue_command(CMD_SEK, cmdb, 4);
 	} else
 		mfm_setup_rw();
@@ -735,7 +723,7 @@ static void request_done(int uptodate)
 		/* Apparently worked - let's check bytes left to DMA */
 		if (hdc63463_dataleft != (PartFragRead_SectorsLeft * 256)) {
 			printk("mfm: request_done - dataleft=%d - should be %d - Eek!\n", hdc63463_dataleft, PartFragRead_SectorsLeft * 256);
-			end_request(0);
+			end_request(CURRENT, 0);
 			Busy = 0;
 		};
 		/* Potentially this means that we've done; but we might be doing
@@ -746,7 +734,7 @@ static void request_done(int uptodate)
 			/* Yep - a partial access */
 
 			/* and issue the remainder */
-			issue_request(MINOR(CURRENT->rq_dev), PartFragRead_RestartBlock, PartFragRead_SectorsLeft, CURRENT);
+			issue_request(PartFragRead_RestartBlock, PartFragRead_SectorsLeft, CURRENT);
 			return;
 		}
 
@@ -758,7 +746,7 @@ static void request_done(int uptodate)
 		/* No - its the end of the line */
 		/* end_request's should have happened at the end of sector DMAs */
 		/* Turns Drive LEDs off - may slow it down? */
-		if (QUEUE_EMPTY)
+		if (!elv_next_request(QUEUE))
 			issue_command(CMD_CKV, block, 2);
 
 		Busy = 0;
@@ -768,7 +756,7 @@ static void request_done(int uptodate)
 		DBG("request_done: returned from mfm_request\n");
 	} else {
 		printk("mfm:request_done: update=0\n");
-		end_request(0);
+		end_request(CURRENT, 0);
 		Busy = 0;
 	}
 }
@@ -801,30 +789,31 @@ static struct cont rw_cont =
  * Actually gets round to issuing the request - note everything at this
  * point is in 256 byte sectors not Linux 512 byte blocks
  */
-static void issue_request(int dev, unsigned int block, unsigned int nsect,
+static void issue_request(unsigned int block, unsigned int nsect,
 			  struct request *req)
 {
+	struct gendisk *disk = req->rq_disk;
+	struct mfm_info *p = disk->private_data;
 	int track, start_head, start_sector;
 	int sectors_to_next_cyl;
+	dev = p - mfm_info;
 
-	dev >>= 6;
-
-	track = block / mfm_info[dev].sectors;
-	start_sector = block % mfm_info[dev].sectors;
-	start_head = track % mfm_info[dev].heads;
+	track = block / p->sectors;
+	start_sector = block % p->sectors;
+	start_head = track % p->heads;
 
 	/* First get the number of whole tracks which are free before the next
 	   track */
-	sectors_to_next_cyl = (mfm_info[dev].heads - (start_head + 1)) * mfm_info[dev].sectors;
+	sectors_to_next_cyl = (p->heads - (start_head + 1)) * p->sectors;
 	/* Then add in the number of sectors left on this track */
-	sectors_to_next_cyl += (mfm_info[dev].sectors - start_sector);
+	sectors_to_next_cyl += (p->sectors - start_sector);
 
-	DBG("issue_request: mfm_info[dev].sectors=%d track=%d\n", mfm_info[dev].sectors, track);
+	DBG("issue_request: mfm_info[dev].sectors=%d track=%d\n", p->sectors, track);
 
 	raw_cmd.dev = dev;
 	raw_cmd.sector = start_sector;
 	raw_cmd.head = start_head;
-	raw_cmd.cylinder = track / mfm_info[dev].heads;
+	raw_cmd.cylinder = track / p->heads;
 	raw_cmd.cmdtype = CURRENT->cmd;
 	raw_cmd.cmdcode = CURRENT->cmd == WRITE ? CMD_WD : CMD_RD;
 	raw_cmd.cmddata[0] = dev + 1;	/* DAG: +1 to get US */
@@ -887,20 +876,11 @@ static void mfm_rerequest(void)
 	mfm_request();
 }
 
+static struct gendisk *mfm_gendisk[2];
+
 static void mfm_request(void)
 {
 	DBG("mfm_request CURRENT=%p Busy=%d\n", CURRENT, Busy);
-
-	if (QUEUE_EMPTY) {
-		DBG("mfm_request: Exited due to NULL Current 1\n");
-		return;
-	}
-
-	if (CURRENT->rq_status == RQ_INACTIVE) {
-		/* Hmm - seems to be happening a lot on 1.3.45 */
-		/*console_printf("mfm_request: Exited due to INACTIVE Current\n"); */
-		return;
-	}
 
 	/* If we are still processing then return; we will get called again */
 	if (Busy) {
@@ -911,44 +891,35 @@ static void mfm_request(void)
 	Busy = 1;
 
 	while (1) {
-		unsigned int dev, block, nsect;
+		unsigned int block, nsect;
+		struct gendisk *disk;
 
 		DBG("mfm_request: loop start\n");
 		sti();
 
-		DBG("mfm_request: before INIT_REQUEST\n");
+		DBG("mfm_request: before !CURRENT\n");
 
-		if (QUEUE_EMPTY) {
-			printk("mfm_request: Exiting due to !CURRENT (pre)\n");
-			CLEAR_INTR;
+		if (!CURRENT) {
+			printk("mfm_request: Exiting due to empty queue (pre)\n");
+			do_mfm = NULL;
 			Busy = 0;
 			return;
-		};
-
-		INIT_REQUEST;
+		}
 
 		DBG("mfm_request:                 before arg extraction\n");
 
-		dev = MINOR(CURRENT->rq_dev);
+		disk = CURRENT->rq_disk;
 		block = CURRENT->sector;
 		nsect = CURRENT->nr_sectors;
-#ifdef DEBUG
-		/*if ((dev>>6)==1) */ console_printf("mfm_request:                                raw vals: dev=%d (block=512 bytes) block=%d nblocks=%d\n", dev, block, nsect);
-#endif
-		if (dev >= (mfm_drives << 6) ||
-		    block >= mfm[dev].nr_sects || ((block+nsect) > mfm[dev].nr_sects)) {
-			if (dev >= (mfm_drives << 6))
-				printk("mfm: bad minor number: device=%s\n", kdevname(CURRENT->rq_dev));
-			else
-				printk("mfm%c: bad access: block=%d, count=%d, nr_sects=%ld\n", (dev >> 6)+'a',
-				       block, nsect, mfm[dev].nr_sects);
+		if (block >= get_capacity(disk) ||
+		    block+nsect > get_capacity(disk)) {
+			printk("%s: bad access: block=%d, count=%d, nr_sects=%ld\n",
+			       disk->disk_name, block, nsect, get_capacity(disk));
 			printk("mfm: continue 1\n");
-			end_request(0);
+			end_request(CURRENT, 0);
 			Busy = 0;
 			continue;
 		}
-
-		block += mfm[dev].start_sect;
 
 		/* DAG: Linux doesn't cope with this - even though it has an array telling
 		   it the hardware block size - silly */
@@ -964,12 +935,12 @@ static void mfm_request(void)
 
 		if (CURRENT->cmd != READ && CURRENT->cmd != WRITE) {
 			printk("unknown mfm-command %d\n", CURRENT->cmd);
-			end_request(0);
+			end_request(CURRENT, 0);
 			Busy = 0;
 			printk("mfm: continue 4\n");
 			continue;
 		}
-		issue_request(dev, block, nsect, CURRENT);
+		issue_request(block, nsect, CURRENT);
 
 		break;
 	}
@@ -984,9 +955,9 @@ static void do_mfm_request(request_queue_t *q)
 
 static void mfm_interrupt_handler(int unused, void *dev_id, struct pt_regs *regs)
 {
-	void (*handler) (void) = DEVICE_INTR;
+	void (*handler) (void) = do_mfm;
 
-	CLEAR_INTR;
+	do_mfm = NULL;
 
 	DBG("mfm_interrupt_handler (handler=0x%p)\n", handler);
 
@@ -1020,13 +991,18 @@ static void mfm_interrupt_handler(int unused, void *dev_id, struct pt_regs *regs
 /*
  * Tell the user about the drive if we decided it exists.
  */
-static void mfm_geometry (int drive)
+static void mfm_geometry(int drive)
 {
-	if (mfm_info[drive].cylinders)
-		printk ("mfm%c: %dMB CHS=%d/%d/%d LCC=%d RECOMP=%d\n", 'a' + drive,
-			mfm_info[drive].cylinders * mfm_info[drive].heads * mfm_info[drive].sectors / 4096,
-			mfm_info[drive].cylinders, mfm_info[drive].heads, mfm_info[drive].sectors,
-			mfm_info[drive].lowcurrent, mfm_info[drive].precomp);
+	struct mfm_info *p = mfm_info + drive;
+	struct gendisk *disk = mfm_gendisk[drive];
+	disk->private_data = p;
+	if (p->cylinders)
+		printk ("%s: %dMB CHS=%d/%d/%d LCC=%d RECOMP=%d\n",
+			disk->disk_name,
+			p->cylinders * p->heads * p->sectors / 4096,
+			p->cylinders, p->heads, p->sectors,
+			p->lowcurrent, p->precomp);
+	set_capacity(disk, p->cylinders * p->heads * p->sectors / 2);
 }
 
 #ifdef CONFIG_BLK_DEV_MFM_AUTODETECT
@@ -1180,87 +1156,20 @@ static int mfm_initdrives(void)
 
 static int mfm_ioctl(struct inode *inode, struct file *file, u_int cmd, u_long arg)
 {
+	struct mfm_info *p = inode->i_bdev->bd_disk->private_data;
 	struct hd_geometry *geo = (struct hd_geometry *) arg;
-	kdev_t dev;
-	int device, major, minor, err;
-
-	if (!inode || !(dev = inode->i_rdev))
+	if (cmd != HDIO_GETGEO)
 		return -EINVAL;
-
-	major = MAJOR(dev);
-	minor = MINOR(dev);
-
-	device = DEVICE_NR(MINOR(inode->i_rdev)), err;
-	if (device >= mfm_drives)
+	if (!arg)
 		return -EINVAL;
-
-	switch (cmd) {
-	case HDIO_GETGEO:
-		if (!arg)
-			return -EINVAL;
-		if (put_user (mfm_info[device].heads, &geo->heads))
-			return -EFAULT;
-		if (put_user (mfm_info[device].sectors, &geo->sectors))
-			return -EFAULT;
-		if (put_user (mfm_info[device].cylinders, &geo->cylinders))
-			return -EFAULT;
-		if (put_user (mfm[minor].start_sect, &geo->start))
-			return -EFAULT;
-		return 0;
-
-	case BLKFRASET:
-		if (!capable(CAP_SYS_ADMIN))
-			return -EACCES;
-		max_readahead[major][minor] = arg;
-		return 0;
-
-	case BLKFRAGET:
-		return put_user(max_readahead[major][minor], (long *) arg);
-
-	case BLKSECTGET:
-		return put_user(max_sectors[major][minor], (long *) arg);
-
-	case BLKRRPART:
-		if (!capable(CAP_SYS_ADMIN))
-			return -EACCES;
-		return mfm_reread_partitions(dev);
-
-	case BLKGETSIZE:
-	case BLKGETSIZE64:
-	case BLKFLSBUF:
-	case BLKROSET:
-	case BLKROGET:
-	case BLKRASET:
-	case BLKRAGET:
-	case BLKPG:
-		return blk_ioctl(dev, cmd, arg);
-
-	default:
-		return -EINVAL;
-	}
-}
-
-static int mfm_open(struct inode *inode, struct file *file)
-{
-	int dev = DEVICE_NR(MINOR(inode->i_rdev));
-
-	if (dev >= mfm_drives)
-		return -ENODEV;
-
-	while (mfm_info[dev].busy)
-		sleep_on (&mfm_wait_open);
-
-	mfm_info[dev].access_count++;
-	return 0;
-}
-
-/*
- * Releasing a block device means we sync() it, so that it can safely
- * be forgotten about...
- */
-static int mfm_release(struct inode *inode, struct file *file)
-{
-	mfm_info[DEVICE_NR(MINOR(inode->i_rdev))].access_count--;
+	if (put_user (p->heads, &geo->heads))
+		return -EFAULT;
+	if (put_user (p->sectors, &geo->sectors))
+		return -EFAULT;
+	if (put_user (p->cylinders, &geo->cylinders))
+		return -EFAULT;
+	if (put_user (get_start_sect(inode->i_bdev), &geo->start))
+		return -EFAULT;
 	return 0;
 }
 
@@ -1278,87 +1187,41 @@ void mfm_setup(char *str, int *ints)
  * since if there are any non-ADFS partitions on the disk, this won't work!
  * Hence, I want to get rid of this...
  */
-void xd_set_geometry(kdev_t dev, unsigned char secsptrack, unsigned char heads,
-		     unsigned long discsize, unsigned int secsize)
+void xd_set_geometry(struct block_device *bdev, unsigned char secsptrack,
+			unsigned char heads, unsigned int secsize)
 {
-	int drive = MINOR(dev) >> 6;
+	struct mfm_info *p = bdev->bd_disk->private_data;
+	int drive = p - mfm_info;
+	unsigned long disksize = bdev->bd_inode->i_size;
 
-	if (mfm_info[drive].cylinders == 1) {
-		mfm_info[drive].sectors = secsptrack;
-		mfm_info[drive].heads = heads;
-		mfm_info[drive].cylinders = discsize / (secsptrack * heads * secsize);
+	if (p->cylinders == 1) {
+		p->sectors = secsptrack;
+		p->heads = heads;
+		p->cylinders = discsize / (secsptrack * heads * secsize);
 
-		if ((heads < 1) || (mfm_info[drive].cylinders > 1024)) {
-			printk("mfm%c: Insane disc shape! Setting to 512/4/32\n",'a' + (dev >> 6));
+		if ((heads < 1) || (p->cylinders > 1024)) {
+			printk("%s: Insane disc shape! Setting to 512/4/32\n",
+				bdev->bd_disk->disk_name);
 
 			/* These values are fairly arbitary, but are there so that if your
 			 * lucky you can pick apart your disc to find out what is going on -
 			 * I reckon these figures won't hurt MOST drives
 			 */
-			mfm_info[drive].sectors = 32;
-			mfm_info[drive].heads = 4;
-			mfm_info[drive].cylinders = 512;
+			p->sectors = 32;
+			p->heads = 4;
+			p->cylinders = 512;
 		}
 		if (raw_cmd.dev == drive)
 			mfm_specify ();
 		mfm_geometry (drive);
-		mfm[drive << 6].start_sect = 0;
-		mfm[drive << 6].nr_sects = mfm_info[drive].cylinders * mfm_info[drive].heads * mfm_info[drive].sectors / 2;
 	}
 }
-
-static struct gendisk mfm_gendisk = {
-	major:		MAJOR_NR,
-	major_name:	"mfm",
-	minor_shift:	6,
-	max_p:		1 << 6,
-	part:		mfm,
-	sizes:		mfm_sizes,
-	real_devices:	(void *)mfm_info,
-};
 
 static struct block_device_operations mfm_fops =
 {
-	owner:		THIS_MODULE,
-	open:		mfm_open,
-	release:	mfm_release,
-	ioctl:		mfm_ioctl,
+	.owner		= THIS_MODULE,
+	.ioctl		= mfm_ioctl,
 };
-
-static void mfm_geninit (void)
-{
-	int i;
-
-	for (i = 0; i < (MFM_MAXDRIVES << 6); i++) {
-		/* Can't increase this - if you do all hell breaks loose */
-		mfm_blocksizes[i] = 1024;
-		mfm_sectsizes[i] = 512;
-	}
-	blksize_size[MAJOR_NR] = mfm_blocksizes;
-	hardsect_size[MAJOR_NR] = mfm_sectsizes;
-
-	mfm_drives = mfm_initdrives();
-
-	printk("mfm: detected %d hard drive%s\n", mfm_drives,
-				mfm_drives == 1 ? "" : "s");
-	mfm_gendisk.nr_real = mfm_drives;
-
-	if (request_irq(mfm_irq, mfm_interrupt_handler, SA_INTERRUPT, "MFM harddisk", NULL))
-		printk("mfm: unable to get IRQ%d\n", mfm_irq);
-
-	if (mfm_irqenable)
-		outw(0x80, mfm_irqenable);	/* Required to enable IRQs from MFM podule */
-
-	for (i = 0; i < mfm_drives; i++) {
-		mfm_geometry (i);
-		register_disk(&mfm_gendisk, MKDEV(MAJOR_NR,i<<6), 1<<6,
-				&mfm_fops,
-				mfm_info[i].cylinders * mfm_info[i].heads *
-				mfm_info[i].sectors / 2);
-	}
-}
-
-static struct expansion_card *ecs;
 
 /*
  * See if there is a controller at the address presently at mfm_addr
@@ -1369,9 +1232,6 @@ static struct expansion_card *ecs;
  */
 static int mfm_probecontroller (unsigned int mfm_addr)
 {
-	if (check_region (mfm_addr, 10))
-		return 0;
-
 	if (inw (MFM_STATUS) & STAT_BSY) {
 		outw (CMD_ABT, MFM_COMMAND);
 		udelay (50);
@@ -1397,13 +1257,136 @@ static int mfm_probecontroller (unsigned int mfm_addr)
 	return 1;
 }
 
+static int mfm_do_init(unsigned char irqmask)
+{
+	int i, ret;
+
+	printk("mfm: found at address %08X, interrupt %d\n", mfm_addr, mfm_irq);
+
+	ret = -EBUSY;
+	if (!request_region (mfm_addr, 10, "mfm"))
+		goto out1;
+
+	ret = register_blkdev(MAJOR_NR, "mfm");
+	if (ret)
+		goto out2;
+
+	/* Stuff for the assembler routines to get to */
+	hdc63463_baseaddress	= ioaddr(mfm_addr);
+	hdc63463_irqpolladdress	= mfm_IRQPollLoc;
+	hdc63463_irqpollmask	= irqmask;
+
+	blk_init_queue(&mfm_queue, do_mfm_request, &mfm_lock);
+
+	Busy = 0;
+	lastspecifieddrive = -1;
+
+	mfm_drives = mfm_initdrives();
+	if (!mfm_drives) {
+		ret = -ENODEV;
+		goto out3;
+	}
+	
+	for (i = 0; i < mfm_drives; i++) {
+		struct gendisk *disk = alloc_disk(64);
+		if (!disk)
+			goto Enomem;
+		disk->major = MAJOR_NR;
+		disk->first_minor = i << 6;
+		disk->fops = &mfm_fops;
+		sprintf(disk->disk_name, "mfm%c", 'a'+i);
+		mfm_gendisk[i] = disk;
+	}
+
+	printk("mfm: detected %d hard drive%s\n", mfm_drives,
+				mfm_drives == 1 ? "" : "s");
+	ret = request_irq(mfm_irq, mfm_interrupt_handler, SA_INTERRUPT, "MFM harddisk", NULL);
+	if (ret) {
+		printk("mfm: unable to get IRQ%d\n", mfm_irq);
+		goto out4;
+	}
+
+	if (mfm_irqenable)
+		outw(0x80, mfm_irqenable);	/* Required to enable IRQs from MFM podule */
+
+	for (i = 0; i < mfm_drives; i++) {
+		mfm_geometry(i);
+		mfm_gendisk[i]->queue = &mfm_queue;
+		add_disk(mfm_gendisk[i]);
+	}
+	return 0;
+
+out4:
+	for (i = 0; i < mfm_drives; i++)
+		put_disk(mfm_gendisk[i]);
+out3:
+	blk_cleanup_queue(&mfm_queue);
+	unregister_blkdev(MAJOR_NR, "mfm");
+out2:
+	release_region(mfm_addr, 10);
+out1:
+	return ret;
+Enomem:
+	while (i--)
+		put_disk(mfm_gendisk[i]);
+	goto out3;
+}
+
+static void mfm_do_exit(void)
+{
+	int i;
+
+	free_irq(mfm_irq, NULL);
+	for (i = 0; i < mfm_drives; i++) {
+		del_gendisk(mfm_gendisk[i]);
+		put_disk(mfm_gendisk[i]);
+	}
+	blk_cleanup_queue(&mfm_queue);
+	unregister_blkdev(MAJOR_NR, "mfm");
+	if (mfm_addr)
+		release_region(mfm_addr, 10);
+}
+
+static int __devinit mfm_probe(struct expansion_card *ec, struct ecard_id *id)
+{
+	if (mfm_addr)
+		return -EBUSY;
+
+	mfm_addr	= ecard_address(ec, ECARD_IOC, ECARD_MEDIUM) + 0x800;
+	mfm_IRQPollLoc	= ioaddr(mfm_addr + 0x400);
+	mfm_irqenable	= mfm_IRQPollLoc;
+	mfm_irq		= ec->irq;
+
+	return mfm_do_init(0x08);
+}
+
+static void __devexit mfm_remove(struct expansion_card *ec)
+{
+	outw (0, mfm_irqenable);	/* Required to enable IRQs from MFM podule */
+	mfm_do_exit();
+}
+
+static const struct ecard_id mfm_cids[] = {
+	{ MANU_ACORN, PROD_ACORN_MFM },
+	{ 0xffff, 0xffff },
+};
+
+static struct ecard_driver mfm_driver = {
+	.probe		= mfm_probe,
+	.remove		= __devexit(mfm_remove),
+	.id_table	= mfm_cids,
+	.drv = {
+		.name	= "mfm",
+	},
+};
+
 /*
  * Look for a MFM controller - first check the motherboard, then the podules
  * The podules have an extra interrupt enable that needs to be played with
  *
  * The HDC is accessed at MEDIUM IOC speeds.
  */
-int mfm_init (void)
+static int __init mfm_init (void)
 {
 	unsigned char irqmask;
 
@@ -1412,107 +1395,20 @@ int mfm_init (void)
 		mfm_IRQPollLoc	= IOC_IRQSTATB;
 		mfm_irqenable	= 0;
 		mfm_irq		= IRQ_HARDDISK;
-		irqmask		= 0x08;			/* IL3 pin */
+		return mfm_do_init(0x08);	/* IL3 pin */
 	} else {
-		ecs = ecard_find(0, mfm_cids);
-		if (!ecs) {
-			mfm_addr = 0;
-			return -1;
-		}
-
-		mfm_addr	= ecard_address(ecs, ECARD_IOC, ECARD_MEDIUM) + 0x800;
-		mfm_IRQPollLoc	= ioaddr(mfm_addr + 0x400);
-		mfm_irqenable	= mfm_IRQPollLoc;
-		mfm_irq		= ecs->irq;
-		irqmask		= 0x08;
-
-		ecard_claim(ecs);
+		return ecard_register_driver(&mfm_driver);
 	}
-
-	if (register_blkdev(MAJOR_NR, "mfm", &mfm_fops)) {
-		printk("mfm_init: unable to get major number %d\n", MAJOR_NR);
-		ecard_release(ecs);
-		return -1;
-	}
-
-	printk("mfm: found at address %08X, interrupt %d\n", mfm_addr, mfm_irq);
-	request_region (mfm_addr, 10, "mfm");
-
-	/* Stuff for the assembler routines to get to */
-	hdc63463_baseaddress	= ioaddr(mfm_addr);
-	hdc63463_irqpolladdress	= mfm_IRQPollLoc;
-	hdc63463_irqpollmask	= irqmask;
-
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	read_ahead[MAJOR_NR] = 8;	/* 8 sector (4kB?) read ahread */
-
-	add_gendisk(&mfm_gendisk);
-
-	Busy = 0;
-	lastspecifieddrive = -1;
-
-	mfm_geninit();
-	return 0;
 }
 
-/*
- * This routine is called to flush all partitions and partition tables
- * for a changed MFM disk, and then re-read the new partition table.
- * If we are revalidating due to an ioctl, we have USAGE == 1.
- */
-static int mfm_reread_partitions(kdev_t dev)
+static void __exit mfm_exit(void)
 {
-	unsigned int start, i, maxp, target = DEVICE_NR(MINOR(dev));
-	unsigned long flags;
-
-	save_flags_cli(flags);
-	if (mfm_info[target].busy || mfm_info[target].access_count > 1) {
-		restore_flags (flags);
-		return -EBUSY;
-	}
-	mfm_info[target].busy = 1;
-	restore_flags (flags);
-
-	maxp = mfm_gendisk.max_p;
-	start = target << mfm_gendisk.minor_shift;
-
-	for (i = maxp - 1; i >= 0; i--) {
-		int minor = start + i;
-		invalidate_device (MKDEV(MAJOR_NR, minor), 1);
-		mfm_gendisk.part[minor].start_sect = 0;
-		mfm_gendisk.part[minor].nr_sects = 0;
-	}
-
-	/* Divide by 2, since sectors are 2 times smaller than usual ;-) */
-
-	grok_partitions(&mfm_gendisk, target, 1<<6, mfm_info[target].heads *
-		    mfm_info[target].cylinders * mfm_info[target].sectors / 2);
-
-	mfm_info[target].busy = 0;
-	wake_up (&mfm_wait_open);
-	return 0;
+	if (mfm_addr == ONBOARD_MFM_ADDRESS)
+		mfm_do_exit();
+	else
+		ecard_unregister_driver(&mfm_driver);
 }
 
-#ifdef MODULE
-
-EXPORT_NO_SYMBOLS;
+module_init(mfm_init)
+module_exit(mfm_exit)
 MODULE_LICENSE("GPL");
-
-int init_module(void)
-{
-	return mfm_init();
-}
-
-void cleanup_module(void)
-{
-	if (ecs && mfm_irqenable)
-		outw (0, mfm_irqenable);	/* Required to enable IRQs from MFM podule */
-	free_irq(mfm_irq, NULL);
-	unregister_blkdev(MAJOR_NR, "mfm");
-	del_gendisk(&mfm_gendisk);
-	if (ecs)
-		ecard_release(ecs);
-	if (mfm_addr)
-		release_region(mfm_addr, 10);
-}
-#endif

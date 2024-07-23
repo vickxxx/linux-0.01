@@ -16,7 +16,6 @@
 #include <linux/tty.h>
 #include <linux/major.h>
 #include <linux/ptrace.h>
-#include <linux/init.h>
 #include <linux/console.h>
 #include <linux/fs.h>
 #include <linux/mm.h>
@@ -42,34 +41,26 @@ static int rs_get_CD (void * ptr);
 static void rs_shutdown_port (void * ptr); 
 static int rs_set_real_termios (void *ptr);
 static int rs_chars_in_buffer (void * ptr); 
-static void rs_hungup (void *ptr);
-static void rs_close (void *ptr);
 
 /*
  * Used by generic serial driver to access hardware
  */
 static struct real_driver rs_real_driver = { 
-	disable_tx_interrupts: rs_disable_tx_interrupts, 
-	enable_tx_interrupts:  rs_enable_tx_interrupts, 
-	disable_rx_interrupts: rs_disable_rx_interrupts, 
-	enable_rx_interrupts:  rs_enable_rx_interrupts, 
-	get_CD:                rs_get_CD, 
-	shutdown_port:         rs_shutdown_port,  
-	set_real_termios:      rs_set_real_termios,  
-	chars_in_buffer:       rs_chars_in_buffer, 
-	close:                 rs_close, 
-	hungup:                rs_hungup,
+	.disable_tx_interrupts = rs_disable_tx_interrupts, 
+	.enable_tx_interrupts  = rs_enable_tx_interrupts, 
+	.disable_rx_interrupts = rs_disable_rx_interrupts, 
+	.enable_rx_interrupts  = rs_enable_rx_interrupts, 
+	.get_CD                = rs_get_CD, 
+	.shutdown_port         = rs_shutdown_port,  
+	.set_real_termios      = rs_set_real_termios,  
+	.chars_in_buffer       = rs_chars_in_buffer, 
 }; 
 
 /*
  * Structures and such for TTY sessions and usage counts
  */
-static struct tty_driver rs_driver, rs_callout_driver;
-static struct tty_struct * rs_table[TX3912_UART_NPORTS] = { NULL, };
-static struct termios ** rs_termios;
-static struct termios ** rs_termios_locked;
+static struct tty_driver *rs_driver;
 struct rs_port *rs_ports;
-int rs_refcount;
 int rs_initialized = 0;
 
 /*
@@ -548,7 +539,7 @@ static int rs_open  (struct tty_struct * tty, struct file * filp)
 		return -EIO;
 	}
 
-	line = MINOR(tty->device) - tty->driver.minor_start;
+	line = tty->index;
 	rs_dprintk (TX3912_UART_DEBUG_OPEN, "%d: opening line %d. tty=%p ctty=%p)\n", 
 	            (int) current->pid, line, tty, current->tty);
 
@@ -580,9 +571,6 @@ static int rs_open  (struct tty_struct * tty, struct file * filp)
 
 	rs_dprintk (TX3912_UART_DEBUG_OPEN, "before inc_use_count (count=%d.\n", 
 	            port->gs.count);
-	if (port->gs.count == 1) {
-		MOD_INC_USE_COUNT;
-	}
 	rs_dprintk (TX3912_UART_DEBUG_OPEN, "after inc_use_count\n");
 
 	/* Jim: Initialize port hardware here */
@@ -596,22 +584,11 @@ static int rs_open  (struct tty_struct * tty, struct file * filp)
 	            retval, port->gs.count);
 
 	if (retval) {
-		MOD_DEC_USE_COUNT;
 		port->gs.count--;
 		return retval;
 	}
 	/* tty->low_latency = 1; */
 
-	if ((port->gs.count == 1) && (port->gs.flags & ASYNC_SPLIT_TERMIOS)) {
-		if (tty->driver.subtype == SERIAL_TYPE_NORMAL)
-			*tty->termios = port->gs.normal_termios;
-		else 
-			*tty->termios = port->gs.callout_termios;
-		rs_set_real_termios (port);
-	}
-
-	port->gs.session = current->session;
-	port->gs.pgrp = current->pgrp;
 	func_exit();
 
 	/* Jim */
@@ -621,32 +598,6 @@ static int rs_open  (struct tty_struct * tty, struct file * filp)
 
 }
 
-
-
-static void rs_close (void *ptr)
-{
-	func_enter ();
-
-	/* Anything to do here? */
-
-	MOD_DEC_USE_COUNT;
-	func_exit ();
-}
-
-
-/* I haven't the foggiest why the decrement use count has to happen
-   here. The whole linux serial drivers stuff needs to be redesigned.
-   My guess is that this is a hack to minimize the impact of a bug
-   elsewhere. Thinking about it some more. (try it sometime) Try
-   running minicom on a serial port that is driven by a modularized
-   driver. Have the modem hangup. Then remove the driver module. Then
-   exit minicom.  I expect an "oops".  -- REW */
-static void rs_hungup (void *ptr)
-{
-	func_enter ();
-	MOD_DEC_USE_COUNT;
-	func_exit ();
-}
 
 static int rs_ioctl (struct tty_struct * tty, struct file * filp, 
                      unsigned int cmd, unsigned long arg)
@@ -673,7 +624,7 @@ static int rs_ioctl (struct tty_struct * tty, struct file * filp,
 	case TIOCGSERIAL:
 		if ((rc = verify_area(VERIFY_WRITE, (void *) arg,
 		                      sizeof(struct serial_struct))) == 0)
-			gs_getserial(&port->gs, (struct serial_struct *) arg);
+			rc = gs_getserial(&port->gs, (struct serial_struct *) arg);
 		break;
 	case TIOCSSERIAL:
 		if ((rc = verify_area(VERIFY_READ, (void *) arg,
@@ -788,28 +739,9 @@ static int rs_init_portstructs(void)
 	if (!rs_ports)
 		return -ENOMEM;
 
-	rs_termios        = ckmalloc(TX3912_UART_NPORTS * sizeof (struct termios *));
-	if (!rs_termios) {
-		kfree (rs_ports);
-		return -ENOMEM;
-	}
-
-	rs_termios_locked = ckmalloc(TX3912_UART_NPORTS * sizeof (struct termios *));
-	if (!rs_termios_locked) {
-		kfree (rs_ports);
-		kfree (rs_termios);
-		return -ENOMEM;
-	}
-
-	/* Adjust the values in the "driver" */
-	rs_driver.termios = rs_termios;
-	rs_driver.termios_locked = rs_termios_locked;
-
 	port = rs_ports;
 	for (i=0; i < TX3912_UART_NPORTS;i++) {
 		rs_dprintk (TX3912_UART_DEBUG_INIT, "initing port %d\n", i);
-		port->gs.callout_termios = tty_std_termios;
-		port->gs.normal_termios	= tty_std_termios;
 		port->gs.magic = SERIAL_MAGIC;
 		port->gs.close_delay = HZ/2;
 		port->gs.closing_wait = 30 * HZ;
@@ -832,63 +764,50 @@ static int rs_init_portstructs(void)
 	return 0;
 }
 
+static struct tty_operations rs_ops = {
+	.open	= rs_open,
+	.close = gs_close,
+	.write = gs_write,
+	.put_char = gs_put_char, 
+	.flush_chars = gs_flush_chars,
+	.write_room = gs_write_room,
+	.chars_in_buffer = gs_chars_in_buffer,
+	.flush_buffer = gs_flush_buffer,
+	.ioctl = rs_ioctl,
+	.throttle = rs_throttle,
+	.unthrottle = rs_unthrottle,
+	.set_termios = gs_set_termios,
+	.stop = gs_stop,
+	.start = gs_start,
+	.hangup = gs_hangup,
+};
+
 static int rs_init_drivers(void)
 {
 	int error;
 
 	func_enter();
 
-	memset(&rs_driver, 0, sizeof(rs_driver));
-	rs_driver.magic = TTY_DRIVER_MAGIC;
-	rs_driver.driver_name = "serial";
-	rs_driver.name = "ttyS";
-	rs_driver.major = TTY_MAJOR;
-	rs_driver.minor_start = 64;
-	rs_driver.num = TX3912_UART_NPORTS;
-	rs_driver.type = TTY_DRIVER_TYPE_SERIAL;
-	rs_driver.subtype = SERIAL_TYPE_NORMAL;
-	rs_driver.init_termios = tty_std_termios;
-	rs_driver.init_termios.c_cflag =
+	rs_driver = alloc_tty_driver(TX3912_UART_NPORTS);
+	if (!rs_driver)
+		return -ENOMEM;
+	rs_driver->owner = THIS_MODULE;
+	rs_driver->driver_name = "serial";
+	rs_driver->name = "ttyS";
+	rs_driver->major = TTY_MAJOR;
+	rs_driver->minor_start = 64;
+	rs_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	rs_driver->subtype = SERIAL_TYPE_NORMAL;
+	rs_driver->init_termios = tty_std_termios;
+	rs_driver->init_termios.c_cflag =
 		B115200 | CS8 | CREAD | HUPCL | CLOCAL;
-	rs_driver.refcount = &rs_refcount;
-	rs_driver.table = rs_table;
-	rs_driver.termios = rs_termios;
-	rs_driver.termios_locked = rs_termios_locked;
-
-	rs_driver.open	= rs_open;
-	rs_driver.close = gs_close;
-	rs_driver.write = gs_write;
-	rs_driver.put_char = gs_put_char; 
-	rs_driver.flush_chars = gs_flush_chars;
-	rs_driver.write_room = gs_write_room;
-	rs_driver.chars_in_buffer = gs_chars_in_buffer;
-	rs_driver.flush_buffer = gs_flush_buffer;
-	rs_driver.ioctl = rs_ioctl;
-	rs_driver.throttle = rs_throttle;
-	rs_driver.unthrottle = rs_unthrottle;
-	rs_driver.set_termios = gs_set_termios;
-	rs_driver.stop = gs_stop;
-	rs_driver.start = gs_start;
-	rs_driver.hangup = gs_hangup;
-
-	rs_callout_driver = rs_driver;
-	rs_callout_driver.name = "cua";
-	rs_callout_driver.major = TTYAUX_MAJOR;
-	rs_callout_driver.subtype = SERIAL_TYPE_CALLOUT;
-
-	if ((error = tty_register_driver(&rs_driver))) {
+	tty_set_operations(rs_driver, &rs_ops);
+	if ((error = tty_register_driver(rs_driver))) {
 		printk(KERN_ERR "Couldn't register serial driver, error = %d\n",
 		       error);
+		put_tty_driver(rs_driver);
 		return 1;
 	}
-	if ((error = tty_register_driver(&rs_callout_driver))) {
-		tty_unregister_driver(&rs_driver);
-		printk(KERN_ERR "Couldn't register callout driver, error = %d\n",
-		       error);
-		return 1;
-	}
-
-	func_exit();
 	return 0;
 }
 
@@ -993,21 +912,6 @@ void serial_outc(unsigned char c)
 	IntEnable2 = int2;
 }
 
-static int serial_console_wait_key(struct console *co)
-{
-	unsigned int int2, res;
-
-	int2 = IntEnable2;
-	IntEnable2 = 0;
-
-	while (!(UartA_Ctrl1 & UART_RX_HOLD_FULL));
-	res = UartA_Data;
-	udelay(10);
-	
-	IntEnable2 = int2;
-	return res;
-}
-
 static void serial_console_write(struct console *co, const char *s,
 		unsigned count)
 {
@@ -1020,9 +924,10 @@ static void serial_console_write(struct console *co, const char *s,
     	}
 }
 
-static kdev_t serial_console_device(struct console *c)
+static struct tty_driver *serial_console_device(struct console *c, int *index)
 {
-	return MKDEV(TTY_MAJOR, 64 + c->index);
+	*index = c->index;
+	return rs_driver;
 }
 
 static __init int serial_console_setup(struct console *co, char *options)
@@ -1062,18 +967,19 @@ static __init int serial_console_setup(struct console *co, char *options)
 }
 
 static struct console sercons = {
-	name:     "ttyS",
-	write:    serial_console_write,
-	device:   serial_console_device,
-	wait_key: serial_console_wait_key,
-	setup:    serial_console_setup,
-	flags:    CON_PRINTBUFFER,
-	index:    -1
+	.name     = "ttyS",
+	.write    = serial_console_write,
+	.device   = serial_console_device,
+	.setup    = serial_console_setup,
+	.flags    = CON_PRINTBUFFER,
+	.index    = -1
 };
 
-void __init tx3912_console_init(void)
+static int __init tx3912_console_init(void)
 {
 	register_console(&sercons);
+	return 0;
 }
+console_initcall(tx3912_console_init);
 
 #endif

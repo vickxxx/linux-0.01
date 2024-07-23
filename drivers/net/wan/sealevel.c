@@ -56,13 +56,13 @@ struct slvl_board
  
 static void sealevel_input(struct z8530_channel *c, struct sk_buff *skb)
 {
-	/* Drop the CRC - its not a good idea to try and negotiate it ;) */
+	/* Drop the CRC - it's not a good idea to try and negotiate it ;) */
 	skb_trim(skb, skb->len-2);
 	skb->protocol=htons(ETH_P_WAN_PPP);
 	skb->mac.raw=skb->data;
 	skb->dev=c->netdevice;
 	/*
-	 *	Send it to the PPP layer. We dont have time to process
+	 *	Send it to the PPP layer. We don't have time to process
 	 *	it right now.
 	 */
 	netif_rx(skb);
@@ -211,20 +211,17 @@ static struct slvl_board *slvl_init(int iobase, int irq, int txdma, int rxdma, i
 	struct z8530_dev *dev;
 	struct slvl_device *sv;
 	struct slvl_board *b;
-	
-	unsigned long flags;
 	int u;
 	
 	/*
 	 *	Get the needed I/O space
 	 */
 	 
-	if(check_region(iobase, 8))
+	if(!request_region(iobase, 8, "Sealevel 4021")) 
 	{	
 		printk(KERN_WARNING "sealevel: I/O 0x%X already in use.\n", iobase);
 		return NULL;
 	}
-	request_region(iobase, 8, "Sealevel 4021");
 	
 	b=(struct slvl_board *)kmalloc(sizeof(struct slvl_board), GFP_KERNEL);
 	if(!b)
@@ -303,9 +300,8 @@ static struct slvl_board *slvl_init(int iobase, int irq, int txdma, int rxdma, i
 	if(request_dma(dev->chanA.rxdma, "SeaLevel (RX)")!=0)
 		goto dmafail;
 	
-	save_flags(flags);
-	cli();
-	
+	disable_irq(irq);
+		
 	/*
 	 *	Begin normal initialise
 	 */
@@ -313,7 +309,7 @@ static struct slvl_board *slvl_init(int iobase, int irq, int txdma, int rxdma, i
 	if(z8530_init(dev)!=0)
 	{
 		printk(KERN_ERR "Z8530 series device not found.\n");
-		restore_flags(flags);
+		enable_irq(irq);
 		goto dmafail2;
 	}
 	if(dev->type==Z85C30)
@@ -331,7 +327,7 @@ static struct slvl_board *slvl_init(int iobase, int irq, int txdma, int rxdma, i
 	 *	Now we can take the IRQ
 	 */
 	
-	restore_flags(flags);
+	enable_irq(irq);
 
 	for(u=0; u<2; u++)
 	{
@@ -447,7 +443,7 @@ static struct slvl_board *slvl_unit;
 
 int init_module(void)
 {
-	printk(KERN_INFO "SeaLevel Z85230 Synchronous Driver v 0.01.\n");
+	printk(KERN_INFO "SeaLevel Z85230 Synchronous Driver v 0.02.\n");
 	printk(KERN_INFO "(c) Copyright 1998, Building Number Three Ltd.\n");	
 	if((slvl_unit=slvl_init(io,irq, txdma, rxdma, slow))==NULL)
 		return -ENODEV;

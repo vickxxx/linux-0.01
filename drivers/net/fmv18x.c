@@ -36,29 +36,26 @@ static const char version[] =
 	"fmv18x.c:v2.2.0 09/24/98  Yutaka TAMIYA (tamy@flab.fujitsu.co.jp)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
 #include <linux/errno.h>
 #include <linux/spinlock.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>
+
+#include <asm/system.h>
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/dma.h>
 
 static int fmv18x_probe_list[] __initdata = {
 	0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x300, 0x340, 0
@@ -117,7 +114,7 @@ extern int fmv18x_probe(struct net_device *dev);
 static int fmv18x_probe1(struct net_device *dev, short ioaddr);
 static int net_open(struct net_device *dev);
 static int net_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void net_rx(struct net_device *dev);
 static void net_timeout(struct net_device *dev);
 static int net_close(struct net_device *dev);
@@ -369,7 +366,7 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
 	struct net_local *lp = dev->priv;
 	int ioaddr = dev->base_addr;
-	short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	short length = skb->len;
 	unsigned char *buf = skb->data;
 	unsigned long flags;
 
@@ -381,6 +378,14 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 				dev->name, length);
 		return 1;
 	}
+	
+	if (length < ETH_ZLEN) {
+		skb = skb_padto(skb, ETH_ZLEN);
+		if (skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
+	
 	if (net_debug > 4)
 		printk("%s: Transmitting a packet of length %lu.\n", dev->name,
 			   (unsigned long)skb->len);
@@ -418,7 +423,7 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
-static void
+static irqreturn_t
 net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
@@ -471,7 +476,7 @@ net_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 			spin_unlock(&lp->lock);
 		}
 	}
-	return;
+	return IRQ_RETVAL(status);
 }
 
 /* We have a good packet(s), get it/them out of the buffers. */

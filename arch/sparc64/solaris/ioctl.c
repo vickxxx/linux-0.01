@@ -1,4 +1,4 @@
-/* $Id: ioctl.c,v 1.16 2000/11/18 02:10:59 davem Exp $
+/* $Id: ioctl.c,v 1.17 2002/02/08 03:57:14 davem Exp $
  * ioctl.c: Solaris ioctl emulation.
  *
  * Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -23,6 +23,9 @@
 #include <linux/netdevice.h>
 #include <linux/mtio.h>
 #include <linux/time.h>
+#include <linux/compat.h>
+
+#include <net/sock.h>
 
 #include <asm/uaccess.h>
 #include <asm/termios.h>
@@ -33,7 +36,7 @@
 
 extern asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, 
 	unsigned long arg);
-extern asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd,
+extern asmlinkage int compat_sys_ioctl(unsigned int fd, unsigned int cmd,
 	u32 arg);
 asmlinkage int solaris_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 
@@ -289,11 +292,15 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 {
 	struct inode *ino;
 	/* I wonder which of these tests are superfluous... --patrik */
+	spin_lock(&current->files->file_lock);
 	if (! current->files->fd[fd] ||
 	    ! current->files->fd[fd]->f_dentry ||
 	    ! (ino = current->files->fd[fd]->f_dentry->d_inode) ||
-	    ! ino->i_sock)
+	    ! ino->i_sock) {
+		spin_unlock(&current->files->file_lock);
 		return TBADF;
+	}
+	spin_unlock(&current->files->file_lock);
 	
 	switch (cmd & 0xff) {
 	case 109: /* SI_SOCKPARAMS */
@@ -308,7 +315,7 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 	case 110: /* SI_GETUDATA */
 	{
 		int etsdusize, servtype;
-		switch (ino->u.socket_i.type) {
+		switch (SOCKET_I(ino)->type) {
 		case SOCK_STREAM:
 			etsdusize = 1;
 			servtype = 2;
@@ -326,16 +333,16 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 		    __put_user(0, &((struct solaris_si_udata *)A(arg))->so_state) ||
 		    __put_user(0, &((struct solaris_si_udata *)A(arg))->so_options) ||
 		    __put_user(16384, &((struct solaris_si_udata *)A(arg))->tsdusize) ||
-		    __put_user(ino->u.socket_i.ops->family, &((struct solaris_si_udata *)A(arg))->sockparams.sp_family) ||
-		    __put_user(ino->u.socket_i.type, &((struct solaris_si_udata *)A(arg))->sockparams.sp_type) ||
-		    __put_user(ino->u.socket_i.ops->family, &((struct solaris_si_udata *)A(arg))->sockparams.sp_protocol))
+		    __put_user(SOCKET_I(ino)->ops->family, &((struct solaris_si_udata *)A(arg))->sockparams.sp_family) ||
+		    __put_user(SOCKET_I(ino)->type, &((struct solaris_si_udata *)A(arg))->sockparams.sp_type) ||
+		    __put_user(SOCKET_I(ino)->ops->family, &((struct solaris_si_udata *)A(arg))->sockparams.sp_protocol))
 			return (EFAULT << 8) | TSYSERR;
 		return 0;
 	}
 	case 101: /* O_SI_GETUDATA */
 	{
 		int etsdusize, servtype;
-		switch (ino->u.socket_i.type) {
+		switch (SOCKET_I(ino)->type) {
 		case SOCK_STREAM:
 			etsdusize = 1;
 			servtype = 2;
@@ -363,6 +370,7 @@ static inline int solaris_sockmod(unsigned int fd, unsigned int cmd, u32 arg)
 	case 106: /* SI_GETINTRANSIT */
 	case 107: /* SI_TCL_LINK */
 	case 108: /* SI_TCL_UNLINK */
+		;
 	}
 	return TNOTSUPPORT;
 }
@@ -450,6 +458,7 @@ static inline int solaris_timod(unsigned int fd, unsigned int cmd, u32 arg,
 	case 145: /* TI_GETPEERNAME */
 	case 146: /* TI_SETMYNAME */
 	case 147: /* TI_SETPEERNAME */
+		;
 	}
 	return TNOTSUPPORT;
 }
@@ -589,9 +598,9 @@ static inline int solaris_r(unsigned int fd, unsigned int cmd, u32 arg)
 {
 	switch (cmd & 0xff) {
 	case 10: /* SIOCADDRT */
-		return sys32_ioctl(fd, SIOCADDRT, arg);
+		return compat_sys_ioctl(fd, SIOCADDRT, arg);
 	case 11: /* SIOCDELRT */
-		return sys32_ioctl(fd, SIOCDELRT, arg);
+		return compat_sys_ioctl(fd, SIOCDELRT, arg);
 	}
 	return -ENOSYS;
 }
@@ -600,45 +609,45 @@ static inline int solaris_i(unsigned int fd, unsigned int cmd, u32 arg)
 {
 	switch (cmd & 0xff) {
 	case 12: /* SIOCSIFADDR */
-		return sys32_ioctl(fd, SIOCSIFADDR, arg);
+		return compat_sys_ioctl(fd, SIOCSIFADDR, arg);
 	case 13: /* SIOCGIFADDR */
-		return sys32_ioctl(fd, SIOCGIFADDR, arg);
+		return compat_sys_ioctl(fd, SIOCGIFADDR, arg);
 	case 14: /* SIOCSIFDSTADDR */
-		return sys32_ioctl(fd, SIOCSIFDSTADDR, arg);
+		return compat_sys_ioctl(fd, SIOCSIFDSTADDR, arg);
 	case 15: /* SIOCGIFDSTADDR */
-		return sys32_ioctl(fd, SIOCGIFDSTADDR, arg);
+		return compat_sys_ioctl(fd, SIOCGIFDSTADDR, arg);
 	case 16: /* SIOCSIFFLAGS */
-		return sys32_ioctl(fd, SIOCSIFFLAGS, arg);
+		return compat_sys_ioctl(fd, SIOCSIFFLAGS, arg);
 	case 17: /* SIOCGIFFLAGS */
-		return sys32_ioctl(fd, SIOCGIFFLAGS, arg);
+		return compat_sys_ioctl(fd, SIOCGIFFLAGS, arg);
 	case 18: /* SIOCSIFMEM */
-		return sys32_ioctl(fd, SIOCSIFMEM, arg);
+		return compat_sys_ioctl(fd, SIOCSIFMEM, arg);
 	case 19: /* SIOCGIFMEM */
-		return sys32_ioctl(fd, SIOCGIFMEM, arg);
+		return compat_sys_ioctl(fd, SIOCGIFMEM, arg);
 	case 20: /* SIOCGIFCONF */
-		return sys32_ioctl(fd, SIOCGIFCONF, arg);
+		return compat_sys_ioctl(fd, SIOCGIFCONF, arg);
 	case 21: /* SIOCSIFMTU */
-		return sys32_ioctl(fd, SIOCSIFMTU, arg);
+		return compat_sys_ioctl(fd, SIOCSIFMTU, arg);
 	case 22: /* SIOCGIFMTU */
-		return sys32_ioctl(fd, SIOCGIFMTU, arg);
+		return compat_sys_ioctl(fd, SIOCGIFMTU, arg);
 	case 23: /* SIOCGIFBRDADDR */
-		return sys32_ioctl(fd, SIOCGIFBRDADDR, arg);
+		return compat_sys_ioctl(fd, SIOCGIFBRDADDR, arg);
 	case 24: /* SIOCSIFBRDADDR */
-		return sys32_ioctl(fd, SIOCSIFBRDADDR, arg);
+		return compat_sys_ioctl(fd, SIOCSIFBRDADDR, arg);
 	case 25: /* SIOCGIFNETMASK */
-		return sys32_ioctl(fd, SIOCGIFNETMASK, arg);
+		return compat_sys_ioctl(fd, SIOCGIFNETMASK, arg);
 	case 26: /* SIOCSIFNETMASK */
-		return sys32_ioctl(fd, SIOCSIFNETMASK, arg);
+		return compat_sys_ioctl(fd, SIOCSIFNETMASK, arg);
 	case 27: /* SIOCGIFMETRIC */
-		return sys32_ioctl(fd, SIOCGIFMETRIC, arg);
+		return compat_sys_ioctl(fd, SIOCGIFMETRIC, arg);
 	case 28: /* SIOCSIFMETRIC */
-		return sys32_ioctl(fd, SIOCSIFMETRIC, arg);
+		return compat_sys_ioctl(fd, SIOCSIFMETRIC, arg);
 	case 30: /* SIOCSARP */
-		return sys32_ioctl(fd, SIOCSARP, arg);
+		return compat_sys_ioctl(fd, SIOCSARP, arg);
 	case 31: /* SIOCGARP */
-		return sys32_ioctl(fd, SIOCGARP, arg);
+		return compat_sys_ioctl(fd, SIOCGARP, arg);
 	case 32: /* SIOCDARP */
-		return sys32_ioctl(fd, SIOCDARP, arg);
+		return compat_sys_ioctl(fd, SIOCDARP, arg);
 	case 52: /* SIOCGETNAME */
 	case 53: /* SIOCGETPEER */
 		{

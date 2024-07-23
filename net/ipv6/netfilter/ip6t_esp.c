@@ -9,7 +9,6 @@
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #include <linux/netfilter_ipv6/ip6t_esp.h>
 
-EXPORT_NO_SYMBOLS;
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("IPv6 ESP match");
 MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
@@ -19,11 +18,6 @@ MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
 #else
 #define DEBUGP(format, args...)
 #endif
-
-struct esphdr {
-	__u32   spi;
-	__u32   seq_no;
-};
 
 /* Returns 1 if the spi is matched by the range, 0 otherwise */
 static inline int
@@ -47,7 +41,7 @@ match(const struct sk_buff *skb,
       u_int16_t datalen,
       int *hotdrop)
 {
-	struct esphdr *esp = NULL;
+	struct ip_esp_hdr *esp = NULL;
 	const struct ip6t_esp *espinfo = matchinfo;
 	unsigned int temp;
 	int len;
@@ -120,12 +114,12 @@ match(const struct sk_buff *skb,
 	/* ESP header not found */
 	if ( temp != MASK_ESP ) return 0;
 
-       if (len < (int)sizeof(struct esphdr)){
+       if (len < (int)sizeof(struct ip_esp_hdr)){
 	       *hotdrop = 1;
        		return 0;
        }
 
-	esp = (struct esphdr *) (skb->data + ptr);
+	esp = (struct ip_esp_hdr *) (skb->data + ptr);
 
 	DEBUGP("IPv6 ESP SPI %u %08X\n", ntohl(esp->spi), ntohl(esp->spi));
 
@@ -159,8 +153,12 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ip6t_match esp_match
-= { { NULL, NULL }, "esp", &match, &checkentry, NULL, THIS_MODULE };
+static struct ip6t_match esp_match = {
+	.name		= "esp",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

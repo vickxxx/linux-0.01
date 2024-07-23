@@ -190,8 +190,8 @@ struct ArcProto {
 
 	void (*rx) (struct net_device * dev, int bufnum,
 		    struct archdr * pkthdr, int length);
-	int (*build_header) (struct sk_buff * skb, unsigned short ethproto,
-			     uint8_t daddr);
+	int (*build_header) (struct sk_buff * skb, struct net_device *dev,
+			     unsigned short ethproto, uint8_t daddr);
 
 	/* these functions return '1' if the skb can now be freed */
 	int (*prepare_tx) (struct net_device * dev, struct archdr * pkt, int length,
@@ -329,18 +329,9 @@ void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc);
 #endif
 
 void arcnet_unregister_proto(struct ArcProto *proto);
-void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+irqreturn_t arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 void arcdev_setup(struct net_device *dev);
 void arcnet_rx(struct net_device *dev, int bufnum);
 
-void arcnet_init(void);
-
-void arcnet_rfc1201_init(void);
-void arcnet_rfc1051_init(void);
-void arcnet_raw_init(void);
-
-int com90xx_probe(struct net_device *dev);
-
 #endif				/* __KERNEL__ */
-
 #endif				/* _LINUX_ARCDEVICE_H */

@@ -1,8 +1,8 @@
-/* $Id: srmmu.c,v 1.233 2001/11/13 00:49:27 davem Exp $
+/*
  * srmmu.c:  SRMMU specific routines for memory management.
  *
  * Copyright (C) 1995 David S. Miller  (davem@caip.rutgers.edu)
- * Copyright (C) 1995 Pete Zaitcev
+ * Copyright (C) 1995,2002 Pete Zaitcev (zaitcev@yahoo.com)
  * Copyright (C) 1996 Eddie C. Dost    (ecd@skynet.be)
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  * Copyright (C) 1999,2000 Anton Blanchard (anton@samba.org)
@@ -21,6 +21,7 @@
 #include <linux/fs.h>
 #include <linux/seq_file.h>
 
+#include <asm/bitext.h>
 #include <asm/page.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
@@ -38,6 +39,8 @@
 #include <asm/a.out.h>
 #include <asm/mmu_context.h>
 #include <asm/io-unit.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 /* Now the cpu specific definitions. */
 #include <asm/viking.h>
@@ -48,6 +51,26 @@
 #include <asm/turbosparc.h>
 
 #include <asm/btfixup.h>
+
+/*
+ * To support pagetables in highmem, Linux introduces APIs which
+ * return struct page* and generally manipulate page tables when
+ * they are not mapped into kernel space. Our hardware page tables
+ * are smaller than pages. We lump hardware tabes into big, page sized
+ * software tables.
+ *
+ * PMD_SHIFT determines the size of the area a second-level page table entry
+ * can map, and our pmd_t is 16 times larger than normal.
+ */
+#define SRMMU_PTRS_PER_PMD_SOFT    0x4	/* Each pmd_t contains 16 hard PTPs */
+#define SRMMU_PTRS_PER_PTE_SOFT  0x400	/* 16 hard tables per 4K page */
+#define SRMMU_PTE_SZ_SOFT       0x1000	/* same as above, in bytes */
+
+#define SRMMU_PMD_SHIFT_SOFT	22
+#define SRMMU_PMD_SIZE_SOFT	(1UL << SRMMU_PMD_SHIFT_SOFT)
+#define SRMMU_PMD_MASK_SOFT	(~(SRMMU_PMD_SIZE_SOFT-1))
+// #define SRMMU_PMD_ALIGN(addr)  (((addr)+SRMMU_PMD_SIZE-1)&SRMMU_PMD_MASK)
+
 
 enum mbus_module srmmu_modtype;
 unsigned int hwbug_bitmask;
@@ -86,7 +109,7 @@ ctxd_t *srmmu_ctx_table_phys;
 ctxd_t *srmmu_context_table;
 
 int viking_mxcc_present;
-spinlock_t srmmu_context_spinlock = SPIN_LOCK_UNLOCKED;
+static spinlock_t srmmu_context_spinlock = SPIN_LOCK_UNLOCKED;
 
 int is_hypersparc;
 
@@ -114,29 +137,49 @@ static inline int srmmu_device_memory(unsigned long x)
 
 int srmmu_cache_pagetables;
 
-/* XXX Make this dynamic based on ram size - Anton */
-#define SRMMU_NOCACHE_BITMAP_SIZE (SRMMU_NOCACHE_NPAGES * 16)
+/* these will be initialized in srmmu_nocache_calcsize() */
+unsigned long srmmu_nocache_size;
+unsigned long srmmu_nocache_end;
+unsigned long pkmap_base;
+unsigned long pkmap_base_end;
+extern unsigned long fix_kmap_begin;
+extern unsigned long fix_kmap_end;
+
+/* 1 bit <=> 256 bytes of nocache <=> 64 PTEs */
 #define SRMMU_NOCACHE_BITMAP_SHIFT (PAGE_SHIFT - 4)
 
 void *srmmu_nocache_pool;
 void *srmmu_nocache_bitmap;
-int srmmu_nocache_low;
-int srmmu_nocache_used;
-spinlock_t srmmu_nocache_spinlock;
+static struct bit_map srmmu_nocache_map;
 
 /* This makes sense. Honest it does - Anton */
 #define __nocache_pa(VADDR) (((unsigned long)VADDR) - SRMMU_NOCACHE_VADDR + __pa((unsigned long)srmmu_nocache_pool))
 #define __nocache_va(PADDR) (__va((unsigned long)PADDR) - (unsigned long)srmmu_nocache_pool + SRMMU_NOCACHE_VADDR)
 #define __nocache_fix(VADDR) __va(__nocache_pa(VADDR))
 
+static unsigned long srmmu_pte_pfn(pte_t pte)
+{
+	if (srmmu_device_memory(pte_val(pte))) {
+		/* XXX Anton obviously had something in mind when he did this.
+		 * But what?
+		 */
+		/* return (struct page *)~0; */
+		BUG();
+	}
+	return (pte_val(pte) & SRMMU_PTE_PMASK) >> (PAGE_SHIFT-4);
+}
+
+static struct page *srmmu_pmd_page(pmd_t pmd)
+{
+
+	if (srmmu_device_memory(pmd_val(pmd)))
+		BUG();
+	return pfn_to_page((pmd_val(pmd) & SRMMU_PTD_PMASK) >> (PAGE_SHIFT-4));
+}
+
 static inline unsigned long srmmu_pgd_page(pgd_t pgd)
 { return srmmu_device_memory(pgd_val(pgd))?~0:(unsigned long)__nocache_va((pgd_val(pgd) & SRMMU_PTD_PMASK) << 4); }
 
-static inline unsigned long srmmu_pmd_page(pmd_t pmd)
-{ return srmmu_device_memory(pmd_val(pmd))?~0:(unsigned long)__nocache_va((pmd_val(pmd) & SRMMU_PTD_PMASK) << 4); }
-
-static inline struct page *srmmu_pte_page(pte_t pte)
-{ return (mem_map + (unsigned long)(srmmu_device_memory(pte_val(pte))?~0:(((pte_val(pte) & SRMMU_PTE_PMASK) << 4) >> PAGE_SHIFT))); }
 
 static inline int srmmu_pte_none(pte_t pte)
 { return !(pte_val(pte) & 0xFFFFFFF); }
@@ -156,8 +199,11 @@ static inline int srmmu_pmd_bad(pmd_t pmd)
 static inline int srmmu_pmd_present(pmd_t pmd)
 { return ((pmd_val(pmd) & SRMMU_ET_MASK) == SRMMU_ET_PTD); }
 
-static inline void srmmu_pmd_clear(pmd_t *pmdp)
-{ srmmu_set_pte((pte_t *)pmdp, __pte(0)); }
+static inline void srmmu_pmd_clear(pmd_t *pmdp) {
+	int i;
+	for (i = 0; i < SRMMU_PTRS_PER_PTE_SOFT/SRMMU_PTRS_PER_PTE; i++)
+		srmmu_set_pte((pte_t *)&pmdp->pmdv[i], __pte(0));
+}
 
 static inline int srmmu_pgd_none(pgd_t pgd)          
 { return !(pgd_val(pgd) & 0xFFFFFFF); }
@@ -170,15 +216,6 @@ static inline int srmmu_pgd_present(pgd_t pgd)
 
 static inline void srmmu_pgd_clear(pgd_t * pgdp)
 { srmmu_set_pte((pte_t *)pgdp, __pte(0)); }
-
-static inline int srmmu_pte_write(pte_t pte)
-{ return pte_val(pte) & SRMMU_WRITE; }
-
-static inline int srmmu_pte_dirty(pte_t pte)
-{ return pte_val(pte) & SRMMU_DIRTY; }
-
-static inline int srmmu_pte_young(pte_t pte)
-{ return pte_val(pte) & SRMMU_REF; }
 
 static inline pte_t srmmu_pte_wrprotect(pte_t pte)
 { return __pte(pte_val(pte) & ~SRMMU_WRITE);}
@@ -203,7 +240,7 @@ static inline pte_t srmmu_pte_mkyoung(pte_t pte)
  * and a page entry and page directory to the page they refer to.
  */
 static pte_t srmmu_mk_pte(struct page *page, pgprot_t pgprot)
-{ return __pte((((page - mem_map) << PAGE_SHIFT) >> 4) | pgprot_val(pgprot)); }
+{ return __pte(((page - mem_map) << (PAGE_SHIFT-4)) | pgprot_val(pgprot)); }
 
 static pte_t srmmu_mk_pte_phys(unsigned long page, pgprot_t pgprot)
 { return __pte(((page) >> 4) | pgprot_val(pgprot)); }
@@ -218,8 +255,29 @@ static inline void srmmu_ctxd_set(ctxd_t *ctxp, pgd_t *pgdp)
 static inline void srmmu_pgd_set(pgd_t * pgdp, pmd_t * pmdp)
 { srmmu_set_pte((pte_t *)pgdp, (SRMMU_ET_PTD | (__nocache_pa((unsigned long) pmdp) >> 4))); }
 
-static inline void srmmu_pmd_set(pmd_t * pmdp, pte_t * ptep)
-{ srmmu_set_pte((pte_t *)pmdp, (SRMMU_ET_PTD | (__nocache_pa((unsigned long) ptep) >> 4))); }
+static void srmmu_pmd_set(pmd_t *pmdp, pte_t *ptep)
+{
+	unsigned long ptp;	/* Physical address, shifted right by 4 */
+	int i;
+
+	ptp = __nocache_pa((unsigned long) ptep) >> 4;
+	for (i = 0; i < SRMMU_PTRS_PER_PTE_SOFT/SRMMU_PTRS_PER_PTE; i++) {
+		srmmu_set_pte((pte_t *)&pmdp->pmdv[i], SRMMU_ET_PTD | ptp);
+		ptp += (SRMMU_PTRS_PER_PTE*sizeof(pte_t) >> 4);
+	}
+}
+
+static void srmmu_pmd_populate(pmd_t *pmdp, struct page *ptep)
+{
+	unsigned long ptp;	/* Physical address, shifted right by 4 */
+	int i;
+
+	ptp = (ptep - mem_map) << (PAGE_SHIFT-4);	/* watch for overflow */
+	for (i = 0; i < SRMMU_PTRS_PER_PTE_SOFT/SRMMU_PTRS_PER_PTE; i++) {
+		srmmu_set_pte((pte_t *)&pmdp->pmdv[i], SRMMU_ET_PTD | ptp);
+		ptp += (SRMMU_PTRS_PER_PTE*sizeof(pte_t) >> 4);
+	}
+}
 
 static inline pte_t srmmu_pte_modify(pte_t pte, pgprot_t newprot)
 { return __pte((pte_val(pte) & SRMMU_CHG_MASK) | pgprot_val(newprot)); }
@@ -230,61 +288,51 @@ extern inline pgd_t *srmmu_pgd_offset(struct mm_struct * mm, unsigned long addre
 
 /* Find an entry in the second-level page table.. */
 static inline pmd_t *srmmu_pmd_offset(pgd_t * dir, unsigned long address)
-{ return (pmd_t *) srmmu_pgd_page(*dir) + ((address >> SRMMU_PMD_SHIFT) & (SRMMU_PTRS_PER_PMD - 1)); }
+{
+	return (pmd_t *) srmmu_pgd_page(*dir) +
+	    ((address >> SRMMU_PMD_SHIFT_SOFT) & (SRMMU_PTRS_PER_PMD_SOFT - 1));
+}
 
 /* Find an entry in the third-level page table.. */ 
 static inline pte_t *srmmu_pte_offset(pmd_t * dir, unsigned long address)
-{ return (pte_t *) srmmu_pmd_page(*dir) + ((address >> PAGE_SHIFT) & (SRMMU_PTRS_PER_PTE - 1)); }
-
-unsigned long __srmmu_get_nocache(int size, int align)
 {
-	int offset = srmmu_nocache_low;
-	int i;
-	unsigned long va_tmp, phys_tmp;
-	int lowest_failed = 0;
+	void *pte;
 
-	size = size >> SRMMU_NOCACHE_BITMAP_SHIFT;
+	pte = __nocache_va((dir->pmdv[0] & SRMMU_PTD_PMASK) << 4);
+	return (pte_t *) pte +
+	    ((address >> PAGE_SHIFT) & (SRMMU_PTRS_PER_PTE_SOFT - 1));
+}
 
-	spin_lock(&srmmu_nocache_spinlock);
+/*
+ * size: bytes to allocate in the nocache area.
+ * align: bytes, number to align at.
+ * Returns the virtual address of the allocated area.
+ */
+static unsigned long __srmmu_get_nocache(int size, int align)
+{
+	int offset;
 
-repeat:
-	offset = find_next_zero_bit(srmmu_nocache_bitmap, SRMMU_NOCACHE_BITMAP_SIZE, offset);
-
-	/* we align on physical address */
-	if (align) {
-		va_tmp = (SRMMU_NOCACHE_VADDR + (offset << SRMMU_NOCACHE_BITMAP_SHIFT));
-		phys_tmp = (__nocache_pa(va_tmp) + align - 1) & ~(align - 1);
-		va_tmp = (unsigned long)__nocache_va(phys_tmp);
-		offset = (va_tmp - SRMMU_NOCACHE_VADDR) >> SRMMU_NOCACHE_BITMAP_SHIFT;
+	if (size < SRMMU_NOCACHE_BITMAP_SHIFT) {
+		printk("Size 0x%x too small for nocache request\n", size);
+		size = SRMMU_NOCACHE_BITMAP_SHIFT;
+	}
+	if (size & (SRMMU_NOCACHE_BITMAP_SHIFT-1)) {
+		printk("Size 0x%x unaligned int nocache request\n", size);
+		size += SRMMU_NOCACHE_BITMAP_SHIFT-1;
 	}
 
-	if ((SRMMU_NOCACHE_BITMAP_SIZE - offset) < size) {
-		printk("Run out of nocached RAM!\n");
-		spin_unlock(&srmmu_nocache_spinlock);
+	offset = bit_map_string_get(&srmmu_nocache_map,
+		       			size >> SRMMU_NOCACHE_BITMAP_SHIFT,
+					align >> SRMMU_NOCACHE_BITMAP_SHIFT);
+/* P3 */ /* printk("srmmu: get size %d align %d, got %d (0x%x)\n",
+   size >> SRMMU_NOCACHE_BITMAP_SHIFT, align >> SRMMU_NOCACHE_BITMAP_SHIFT,
+   offset, offset); */
+	if (offset == -1) {
+		printk("srmmu: out of nocache %d: %d/%d\n",
+		    size, (int) srmmu_nocache_size,
+		    srmmu_nocache_map.used << SRMMU_NOCACHE_BITMAP_SHIFT);
 		return 0;
 	}
-
-	i = 0;
-	while(i < size) {
-		if (test_bit(offset + i, srmmu_nocache_bitmap)) {
-			lowest_failed = 1;
-			offset = offset + i + 1;
-			goto repeat;
-		}
-		i++;
-	}
-
-	i = 0;
-	while(i < size) {
-		set_bit(offset + i, srmmu_nocache_bitmap);
-		i++;
-		srmmu_nocache_used++;
-	}
-
-	if (!lowest_failed && ((align >> SRMMU_NOCACHE_BITMAP_SHIFT) <= 1) && (offset > srmmu_nocache_low))
-		srmmu_nocache_low = offset;
-
-	spin_unlock(&srmmu_nocache_spinlock);
 
 	return (SRMMU_NOCACHE_VADDR + (offset << SRMMU_NOCACHE_BITMAP_SHIFT));
 }
@@ -303,51 +351,99 @@ unsigned inline long srmmu_get_nocache(int size, int align)
 
 void srmmu_free_nocache(unsigned long vaddr, int size)
 {
-	int offset = (vaddr - SRMMU_NOCACHE_VADDR) >> SRMMU_NOCACHE_BITMAP_SHIFT;
+	int offset;
 
-	size = size >> SRMMU_NOCACHE_BITMAP_SHIFT;
-
-	spin_lock(&srmmu_nocache_spinlock);
-
-	while(size--) {
-		clear_bit(offset + size, srmmu_nocache_bitmap);
-		srmmu_nocache_used--;
+	if (vaddr < SRMMU_NOCACHE_VADDR) {
+		printk("Vaddr %lx is smaller than nocache base 0x%lx\n",
+		    vaddr, (unsigned long)SRMMU_NOCACHE_VADDR);
+		BUG();
+	}
+	if (vaddr >= srmmu_nocache_end) {
+		printk("Vaddr %lx is bigger than nocache end 0x%lx\n",
+		    vaddr, srmmu_nocache_end);
+		BUG();
+	}
+	if (size & (size-1)) {
+		printk("Size 0x%x is not a power of 2\n", size);
+		BUG();
+	}
+	if (size < SRMMU_NOCACHE_BITMAP_SHIFT) {
+		printk("Size 0x%x is too small\n", size);
+		BUG();
+	}
+	if (vaddr & (size-1)) {
+		printk("Vaddr %lx is not aligned to size 0x%x\n", vaddr, size);
+		BUG();
 	}
 
-	if (offset < srmmu_nocache_low)
-		srmmu_nocache_low = offset;
+	offset = (vaddr - SRMMU_NOCACHE_VADDR) >> SRMMU_NOCACHE_BITMAP_SHIFT;
+	size = size >> SRMMU_NOCACHE_BITMAP_SHIFT;
 
-	spin_unlock(&srmmu_nocache_spinlock);
+/* P3 */ /* printk("srmmu: free off %d (0x%x) size %d\n", offset, offset, size); */
+	bit_map_clear(&srmmu_nocache_map, offset, size);
 }
 
 void srmmu_early_allocate_ptable_skeleton(unsigned long start, unsigned long end);
 
+extern unsigned long probe_memory(void);	/* in fault.c */
+
+/*
+ * Reserve nocache dynamically proportionally to the amount of
+ * system RAM. -- Tomas Szepe <szepe@pinerecords.com>, June 2002
+ */
+void srmmu_nocache_calcsize(void)
+{
+	unsigned long sysmemavail = probe_memory() / 1024;
+	int srmmu_nocache_npages;
+
+	srmmu_nocache_npages =
+		sysmemavail / SRMMU_NOCACHE_ALCRATIO / 1024 * 256;
+
+ /* P3 XXX The 4x overuse: corroborated by /proc/meminfo. */
+	// if (srmmu_nocache_npages < 256) srmmu_nocache_npages = 256;
+	if (srmmu_nocache_npages < 550) srmmu_nocache_npages = 550;
+
+	/* anything above 1280 blows up */
+	if (srmmu_nocache_npages > 1280) srmmu_nocache_npages = 1280;
+
+	srmmu_nocache_size = srmmu_nocache_npages * PAGE_SIZE;
+	srmmu_nocache_end = SRMMU_NOCACHE_VADDR + srmmu_nocache_size;
+	fix_kmap_begin = srmmu_nocache_end;
+	fix_kmap_end = fix_kmap_begin + (KM_TYPE_NR * NR_CPUS - 1) * PAGE_SIZE;
+	pkmap_base = SRMMU_NOCACHE_VADDR + srmmu_nocache_size + 0x40000;
+	pkmap_base_end = pkmap_base + LAST_PKMAP * PAGE_SIZE;
+}
+
 void srmmu_nocache_init(void)
 {
+	unsigned int bitmap_bits;
 	pgd_t *pgd;
 	pmd_t *pmd;
 	pte_t *pte;
 	unsigned long paddr, vaddr;
 	unsigned long pteval;
 
-	srmmu_nocache_pool = __alloc_bootmem(SRMMU_NOCACHE_SIZE, PAGE_SIZE, 0UL);
-	memset(srmmu_nocache_pool, 0, SRMMU_NOCACHE_SIZE);
+	bitmap_bits = srmmu_nocache_size >> SRMMU_NOCACHE_BITMAP_SHIFT;
 
-	srmmu_nocache_bitmap = __alloc_bootmem(SRMMU_NOCACHE_BITMAP_SIZE, SMP_CACHE_BYTES, 0UL);
-	memset(srmmu_nocache_bitmap, 0, SRMMU_NOCACHE_BITMAP_SIZE);
+	srmmu_nocache_pool = __alloc_bootmem(srmmu_nocache_size, PAGE_SIZE, 0UL);
+	memset(srmmu_nocache_pool, 0, srmmu_nocache_size);
+
+	srmmu_nocache_bitmap = __alloc_bootmem(bitmap_bits >> 3, SMP_CACHE_BYTES, 0UL);
+	bit_map_init(&srmmu_nocache_map, srmmu_nocache_bitmap, bitmap_bits);
 
 	srmmu_swapper_pg_dir = (pgd_t *)__srmmu_get_nocache(SRMMU_PGD_TABLE_SIZE, SRMMU_PGD_TABLE_SIZE);
 	memset(__nocache_fix(srmmu_swapper_pg_dir), 0, SRMMU_PGD_TABLE_SIZE);
 	init_mm.pgd = srmmu_swapper_pg_dir;
 
-	srmmu_early_allocate_ptable_skeleton(SRMMU_NOCACHE_VADDR, SRMMU_NOCACHE_END);
-
-	spin_lock_init(&srmmu_nocache_spinlock);
+	srmmu_early_allocate_ptable_skeleton(SRMMU_NOCACHE_VADDR, srmmu_nocache_end);
 
 	paddr = __pa((unsigned long)srmmu_nocache_pool);
 	vaddr = SRMMU_NOCACHE_VADDR;
 
-	while (vaddr < SRMMU_NOCACHE_END) {
+/* P3 */ printk("srmmu: pool 0x%x vaddr 0x%x bitmap 0x%x bits %d (0x%x)\n",
+  (int)srmmu_nocache_pool, vaddr, srmmu_nocache_bitmap, bitmap_bits, bitmap_bits);
+
+	while (vaddr < srmmu_nocache_end) {
 		pgd = pgd_offset_k(vaddr);
 		pmd = srmmu_pmd_offset(__nocache_fix(pgd), vaddr);
 		pte = srmmu_pte_offset(__nocache_fix(pmd), vaddr);
@@ -387,32 +483,59 @@ static void srmmu_free_pgd_fast(pgd_t *pgd)
 	srmmu_free_nocache((unsigned long)pgd, SRMMU_PGD_TABLE_SIZE);
 }
 
-static pte_t *srmmu_pte_alloc_one_fast(struct mm_struct *mm, unsigned long address)
-{
-	return (pte_t *)srmmu_get_nocache(SRMMU_PTE_TABLE_SIZE, SRMMU_PTE_TABLE_SIZE);
-}
-
-static pte_t *srmmu_pte_alloc_one(struct mm_struct *mm, unsigned long address)
-{
-	BUG();
-	return NULL;
-}
-
-static void srmmu_free_pte_fast(pte_t *pte)
-{
-	srmmu_free_nocache((unsigned long)pte, SRMMU_PTE_TABLE_SIZE);
-}
-
-static pmd_t *srmmu_pmd_alloc_one_fast(struct mm_struct *mm, unsigned long address)
+static pmd_t *srmmu_pmd_alloc_one(struct mm_struct *mm, unsigned long address)
 {
 	return (pmd_t *)srmmu_get_nocache(SRMMU_PMD_TABLE_SIZE, SRMMU_PMD_TABLE_SIZE);
 }
 
-static void srmmu_free_pmd_fast(pmd_t * pmd)
+static void srmmu_pmd_free(pmd_t * pmd)
 {
 	srmmu_free_nocache((unsigned long)pmd, SRMMU_PMD_TABLE_SIZE);
 }
 
+/*
+ * Hardware needs alignment to 256 only, but we align to whole page size
+ * to reduce fragmentation problems due to the buddy principle.
+ * XXX Provide actual fragmentation statistics in /proc.
+ *
+ * Alignments up to the page size are the same for physical and virtual
+ * addresses of the nocache area.
+ */
+static pte_t *
+srmmu_pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
+{
+	return (pte_t *)srmmu_get_nocache(SRMMU_PTE_SZ_SOFT, SRMMU_PTE_SZ_SOFT);
+}
+
+static struct page *
+srmmu_pte_alloc_one(struct mm_struct *mm, unsigned long address)
+{
+	unsigned long pte;
+
+	if ((pte = (unsigned long)srmmu_pte_alloc_one_kernel(mm, address)) == 0)
+		return NULL;
+	return mem_map + (__nocache_pa(pte) >> PAGE_SHIFT);
+}
+
+static void srmmu_free_pte_fast(pte_t *pte)
+{
+	srmmu_free_nocache((unsigned long)pte, SRMMU_PTE_SZ_SOFT);
+}
+
+static void srmmu_pte_free(struct page *pte)
+{
+	unsigned long p;
+
+	p = (unsigned long)page_address(pte);	/* Cached address (for test) */
+	if (p == 0)
+		BUG();
+	p = ((pte - mem_map) << PAGE_SHIFT);	/* Physical address */
+	p = (unsigned long) __nocache_va(p);	/* Nocached virtual */
+	srmmu_free_nocache(p, SRMMU_PTE_SZ_SOFT);
+}
+
+/*
+ */
 static inline void alloc_context(struct mm_struct *old_mm, struct mm_struct *mm)
 {
 	struct ctx_list *ctxp;
@@ -466,7 +589,8 @@ static void srmmu_switch_mm(struct mm_struct *old_mm, struct mm_struct *mm,
 }
 
 /* Low level IO area allocation on the SRMMU. */
-void srmmu_mapioaddr(unsigned long physaddr, unsigned long virt_addr, int bus_type, int rdonly)
+static inline void srmmu_mapioaddr(unsigned long physaddr,
+    unsigned long virt_addr, int bus_type)
 {
 	pgd_t *pgdp;
 	pmd_t *pmdp;
@@ -485,16 +609,24 @@ void srmmu_mapioaddr(unsigned long physaddr, unsigned long virt_addr, int bus_ty
 	 * 36-bit physical address on the I/O space lines...
 	 */
 	tmp |= (bus_type << 28);
-	if(rdonly)
-		tmp |= SRMMU_PRIV_RDONLY;
-	else
-		tmp |= SRMMU_PRIV;
+	tmp |= SRMMU_PRIV;
 	__flush_page_to_ram(virt_addr);
 	srmmu_set_pte(ptep, __pte(tmp));
+}
+
+static void srmmu_mapiorange(unsigned int bus, unsigned long xpa,
+    unsigned long xva, unsigned int len)
+{
+	while (len != 0) {
+		len -= PAGE_SIZE;
+		srmmu_mapioaddr(xpa, xva, bus);
+		xva += PAGE_SIZE;
+		xpa += PAGE_SIZE;
+	}
 	flush_tlb_all();
 }
 
-void srmmu_unmapioaddr(unsigned long virt_addr)
+static inline void srmmu_unmapioaddr(unsigned long virt_addr)
 {
 	pgd_t *pgdp;
 	pmd_t *pmdp;
@@ -506,6 +638,15 @@ void srmmu_unmapioaddr(unsigned long virt_addr)
 
 	/* No need to flush uncacheable page. */
 	srmmu_pte_clear(ptep);
+}
+
+static void srmmu_unmapiorange(unsigned long virt_addr, unsigned int len)
+{
+	while (len != 0) {
+		len -= PAGE_SIZE;
+		srmmu_unmapioaddr(virt_addr);
+		virt_addr += PAGE_SIZE;
+	}
 	flush_tlb_all();
 }
 
@@ -518,32 +659,28 @@ void srmmu_unmapioaddr(unsigned long virt_addr)
  * mappings on the kernel stack without any special code as we did
  * need on the sun4c.
  */
-struct task_struct *srmmu_alloc_task_struct(void)
+struct thread_info *srmmu_alloc_thread_info(void)
 {
-	return (struct task_struct *) __get_free_pages(GFP_KERNEL, 1);
+	return (struct thread_info *)
+	    __get_free_pages(GFP_KERNEL, THREAD_INFO_ORDER);
 }
 
-static void srmmu_free_task_struct(struct task_struct *tsk)
+static void srmmu_free_thread_info(struct thread_info *ti)
 {
-	free_pages((unsigned long)tsk, 1);
-}
-
-static void srmmu_get_task_struct(struct task_struct *tsk)
-{
-	atomic_inc(&virt_to_page(tsk)->count);
+	free_pages((unsigned long)ti, THREAD_INFO_ORDER);
 }
 
 /* tsunami.S */
 extern void tsunami_flush_cache_all(void);
 extern void tsunami_flush_cache_mm(struct mm_struct *mm);
-extern void tsunami_flush_cache_range(struct mm_struct *mm, unsigned long start, unsigned long end);
+extern void tsunami_flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end);
 extern void tsunami_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
 extern void tsunami_flush_page_to_ram(unsigned long page);
 extern void tsunami_flush_page_for_dma(unsigned long page);
 extern void tsunami_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr);
 extern void tsunami_flush_tlb_all(void);
 extern void tsunami_flush_tlb_mm(struct mm_struct *mm);
-extern void tsunami_flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end);
+extern void tsunami_flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned long end);
 extern void tsunami_flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
 extern void tsunami_setup_blockops(void);
 
@@ -582,7 +719,7 @@ static void swift_update_mmu_cache(struct vm_area_struct * vma, unsigned long ad
 /* swift.S */
 extern void swift_flush_cache_all(void);
 extern void swift_flush_cache_mm(struct mm_struct *mm);
-extern void swift_flush_cache_range(struct mm_struct *mm,
+extern void swift_flush_cache_range(struct vm_area_struct *vma,
 				    unsigned long start, unsigned long end);
 extern void swift_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
 extern void swift_flush_page_to_ram(unsigned long page);
@@ -590,7 +727,7 @@ extern void swift_flush_page_for_dma(unsigned long page);
 extern void swift_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr);
 extern void swift_flush_tlb_all(void);
 extern void swift_flush_tlb_mm(struct mm_struct *mm);
-extern void swift_flush_tlb_range(struct mm_struct *mm,
+extern void swift_flush_tlb_range(struct vm_area_struct *vma,
 				  unsigned long start, unsigned long end);
 extern void swift_flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
 
@@ -658,7 +795,7 @@ static void cypress_flush_cache_mm(struct mm_struct *mm)
 
 	FLUSH_BEGIN(mm)
 	flush_user_windows();
-	__save_and_cli(flags);
+	local_irq_save(flags);
 	octx = srmmu_get_context();
 	srmmu_set_context(mm->context);
 	a = 0x20; b = 0x40; c = 0x60;
@@ -682,19 +819,20 @@ static void cypress_flush_cache_mm(struct mm_struct *mm)
 				     "r" (e), "r" (f), "r" (g));
 	} while(faddr);
 	srmmu_set_context(octx);
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	FLUSH_END
 }
 
-static void cypress_flush_cache_range(struct mm_struct *mm, unsigned long start, unsigned long end)
+static void cypress_flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end)
 {
+	struct mm_struct *mm = vma->vm_mm;
 	register unsigned long a, b, c, d, e, f, g;
 	unsigned long flags, faddr;
 	int octx;
 
 	FLUSH_BEGIN(mm)
 	flush_user_windows();
-	__save_and_cli(flags);
+	local_irq_save(flags);
 	octx = srmmu_get_context();
 	srmmu_set_context(mm->context);
 	a = 0x20; b = 0x40; c = 0x60;
@@ -723,7 +861,7 @@ static void cypress_flush_cache_range(struct mm_struct *mm, unsigned long start,
 		start += SRMMU_PMD_SIZE;
 	}
 	srmmu_set_context(octx);
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	FLUSH_END
 }
 
@@ -736,7 +874,7 @@ static void cypress_flush_cache_page(struct vm_area_struct *vma, unsigned long p
 
 	FLUSH_BEGIN(mm)
 	flush_user_windows();
-	__save_and_cli(flags);
+	local_irq_save(flags);
 	octx = srmmu_get_context();
 	srmmu_set_context(mm->context);
 	a = 0x20; b = 0x40; c = 0x60;
@@ -762,7 +900,7 @@ static void cypress_flush_cache_page(struct vm_area_struct *vma, unsigned long p
 					     "r" (e), "r" (f), "r" (g));
 	} while(line != page);
 	srmmu_set_context(octx);
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	FLUSH_END
 }
 
@@ -827,8 +965,9 @@ static void cypress_flush_tlb_mm(struct mm_struct *mm)
 	FLUSH_END
 }
 
-static void cypress_flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end)
+static void cypress_flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned long end)
 {
+	struct mm_struct *mm = vma->vm_mm;
 	unsigned long size;
 
 	FLUSH_BEGIN(mm)
@@ -870,7 +1009,7 @@ static void cypress_flush_tlb_page(struct vm_area_struct *vma, unsigned long pag
 /* viking.S */
 extern void viking_flush_cache_all(void);
 extern void viking_flush_cache_mm(struct mm_struct *mm);
-extern void viking_flush_cache_range(struct mm_struct *mm, unsigned long start,
+extern void viking_flush_cache_range(struct vm_area_struct *vma, unsigned long start,
 				     unsigned long end);
 extern void viking_flush_cache_page(struct vm_area_struct *vma,
 				    unsigned long page);
@@ -881,13 +1020,13 @@ extern void viking_flush_page(unsigned long page);
 extern void viking_mxcc_flush_page(unsigned long page);
 extern void viking_flush_tlb_all(void);
 extern void viking_flush_tlb_mm(struct mm_struct *mm);
-extern void viking_flush_tlb_range(struct mm_struct *mm, unsigned long start,
+extern void viking_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 				   unsigned long end);
 extern void viking_flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long page);
 extern void sun4dsmp_flush_tlb_all(void);
 extern void sun4dsmp_flush_tlb_mm(struct mm_struct *mm);
-extern void sun4dsmp_flush_tlb_range(struct mm_struct *mm, unsigned long start,
+extern void sun4dsmp_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 				   unsigned long end);
 extern void sun4dsmp_flush_tlb_page(struct vm_area_struct *vma,
 				  unsigned long page);
@@ -895,14 +1034,14 @@ extern void sun4dsmp_flush_tlb_page(struct vm_area_struct *vma,
 /* hypersparc.S */
 extern void hypersparc_flush_cache_all(void);
 extern void hypersparc_flush_cache_mm(struct mm_struct *mm);
-extern void hypersparc_flush_cache_range(struct mm_struct *mm, unsigned long start, unsigned long end);
+extern void hypersparc_flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end);
 extern void hypersparc_flush_cache_page(struct vm_area_struct *vma, unsigned long page);
 extern void hypersparc_flush_page_to_ram(unsigned long page);
 extern void hypersparc_flush_page_for_dma(unsigned long page);
 extern void hypersparc_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr);
 extern void hypersparc_flush_tlb_all(void);
 extern void hypersparc_flush_tlb_mm(struct mm_struct *mm);
-extern void hypersparc_flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end);
+extern void hypersparc_flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned long end);
 extern void hypersparc_flush_tlb_page(struct vm_area_struct *vma, unsigned long page);
 extern void hypersparc_setup_blockops(void);
 
@@ -928,7 +1067,8 @@ void __init srmmu_early_allocate_ptable_skeleton(unsigned long start, unsigned l
 	while(start < end) {
 		pgdp = pgd_offset_k(start);
 		if(srmmu_pgd_none(*(pgd_t *)__nocache_fix(pgdp))) {
-			pmdp = (pmd_t *)__srmmu_get_nocache(SRMMU_PMD_TABLE_SIZE, SRMMU_PMD_TABLE_SIZE);
+			pmdp = (pmd_t *) __srmmu_get_nocache(
+			    SRMMU_PMD_TABLE_SIZE, SRMMU_PMD_TABLE_SIZE);
 			if (pmdp == NULL)
 				early_pgtable_allocfail("pmd");
 			memset(__nocache_fix(pmdp), 0, SRMMU_PMD_TABLE_SIZE);
@@ -936,10 +1076,11 @@ void __init srmmu_early_allocate_ptable_skeleton(unsigned long start, unsigned l
 		}
 		pmdp = srmmu_pmd_offset(__nocache_fix(pgdp), start);
 		if(srmmu_pmd_none(*(pmd_t *)__nocache_fix(pmdp))) {
-			ptep = (pte_t *)__srmmu_get_nocache(SRMMU_PTE_TABLE_SIZE, SRMMU_PTE_TABLE_SIZE);
+			ptep = (pte_t *)__srmmu_get_nocache(SRMMU_PTE_SZ_SOFT,
+			    SRMMU_PTE_SZ_SOFT);
 			if (ptep == NULL)
 				early_pgtable_allocfail("pte");
-			memset(__nocache_fix(ptep), 0, SRMMU_PTE_TABLE_SIZE);
+			memset(__nocache_fix(ptep), 0, SRMMU_PTE_SZ_SOFT);
 			srmmu_pmd_set(__nocache_fix(pmdp), ptep);
 		}
 		start = (start + SRMMU_PMD_SIZE) & SRMMU_PMD_MASK;
@@ -963,10 +1104,11 @@ void __init srmmu_allocate_ptable_skeleton(unsigned long start, unsigned long en
 		}
 		pmdp = srmmu_pmd_offset(pgdp, start);
 		if(srmmu_pmd_none(*pmdp)) {
-			ptep = (pte_t *)__srmmu_get_nocache(SRMMU_PTE_TABLE_SIZE, SRMMU_PTE_TABLE_SIZE);
+			ptep = (pte_t *) __srmmu_get_nocache(SRMMU_PTE_SZ_SOFT,
+			    SRMMU_PTE_SZ_SOFT);
 			if (ptep == NULL)
 				early_pgtable_allocfail("pte");
-			memset(ptep, 0, SRMMU_PTE_TABLE_SIZE);
+			memset(ptep, 0, SRMMU_PTE_SZ_SOFT);
 			srmmu_pmd_set(pmdp, ptep);
 		}
 		start = (start + SRMMU_PMD_SIZE) & SRMMU_PMD_MASK;
@@ -1024,17 +1166,25 @@ void __init srmmu_inherit_prom_mappings(unsigned long start,unsigned long end)
 			srmmu_pgd_set(__nocache_fix(pgdp), pmdp);
 		}
 		pmdp = srmmu_pmd_offset(__nocache_fix(pgdp), start);
-		if(what == 1) {
-			*(pmd_t *)__nocache_fix(pmdp) = __pmd(prompte);
-			start += SRMMU_PMD_SIZE;
-			continue;
-		}
 		if(srmmu_pmd_none(*(pmd_t *)__nocache_fix(pmdp))) {
-			ptep = (pte_t *)__srmmu_get_nocache(SRMMU_PTE_TABLE_SIZE, SRMMU_PTE_TABLE_SIZE);
+			ptep = (pte_t *) __srmmu_get_nocache(SRMMU_PTE_SZ_SOFT,
+			    SRMMU_PTE_SZ_SOFT);
 			if (ptep == NULL)
 				early_pgtable_allocfail("pte");
-			memset(__nocache_fix(ptep), 0, SRMMU_PTE_TABLE_SIZE);
+			memset(__nocache_fix(ptep), 0, SRMMU_PTE_SZ_SOFT);
 			srmmu_pmd_set(__nocache_fix(pmdp), ptep);
+		}
+		if(what == 1) {
+			/*
+			 * We bend the rule where all 16 PTPs in a pmd_t point
+			 * inside the same PTE page, and we leak a perfectly
+			 * good hardware PTE piece. Alternatives seem worse.
+			 */
+			unsigned int x;	/* Index of HW PMD in soft cluster */
+			x = (start >> SRMMU_PMD_SHIFT) & 15;
+			*(unsigned long *)__nocache_fix(&pmdp->pmdv[x]) = prompte;
+			start += SRMMU_PMD_SIZE;
+			continue;
 		}
 		ptep = srmmu_pte_offset(__nocache_fix(pmdp), start);
 		*(pte_t *)__nocache_fix(ptep) = __pte(prompte);
@@ -1103,12 +1253,10 @@ static inline void map_kernel(void)
 extern void sparc_context_init(int);
 
 extern int linux_num_cpus;
-extern unsigned long totalhigh_pages;
 
 void (*poke_srmmu)(void) __initdata = NULL;
 
 extern unsigned long bootmem_init(unsigned long *pages_avail);
-extern void sun_serial_setup(void);
 
 void __init srmmu_paging_init(void)
 {
@@ -1145,6 +1293,7 @@ void __init srmmu_paging_init(void)
 	pages_avail = 0;
 	last_valid_pfn = bootmem_init(&pages_avail);
 
+	srmmu_nocache_calcsize();
 	srmmu_nocache_init();
         srmmu_inherit_prom_mappings(0xfe400000,(LINUX_OPPROM_ENDVM-PAGE_SIZE));
 	map_kernel();
@@ -1161,28 +1310,21 @@ void __init srmmu_paging_init(void)
 	flush_tlb_all();
 	poke_srmmu();
 
-#if CONFIG_SUN_IO
+#ifdef CONFIG_SUN_IO
 	srmmu_allocate_ptable_skeleton(sparc_iomap.start, IOBASE_END);
 	srmmu_allocate_ptable_skeleton(DVMA_VADDR, DVMA_END);
 #endif
 
-	srmmu_allocate_ptable_skeleton(FIX_KMAP_BEGIN, FIX_KMAP_END);
-	srmmu_allocate_ptable_skeleton(PKMAP_BASE, PKMAP_BASE_END);
+	srmmu_allocate_ptable_skeleton(fix_kmap_begin, fix_kmap_end);
+	srmmu_allocate_ptable_skeleton(pkmap_base, pkmap_base_end);
 
-	pgd = pgd_offset_k(PKMAP_BASE);
-	pmd = pmd_offset(pgd, PKMAP_BASE);
-	pte = pte_offset(pmd, PKMAP_BASE);
+	pgd = pgd_offset_k(pkmap_base);
+	pmd = srmmu_pmd_offset(pgd, pkmap_base);
+	pte = srmmu_pte_offset(pmd, pkmap_base);
 	pkmap_page_table = pte;
 
 	flush_cache_all();
 	flush_tlb_all();
-
-	/*
-	 * This does not logically belong here, but we need to
-	 * call it at the moment we are able to use the bootmem
-	 * allocator.
-	 */
-	sun_serial_setup();
 
 	sparc_context_init(num_contexts);
 
@@ -1206,9 +1348,14 @@ void __init srmmu_paging_init(void)
 		zones_size[ZONE_HIGHMEM] = npages;
 		zholes_size[ZONE_HIGHMEM] = npages - calc_highpages();
 
-		free_area_init_node(0, NULL, NULL, zones_size,
-				    phys_base, zholes_size);
+		free_area_init_node(0, &contig_page_data, NULL, zones_size,
+				    phys_base >> PAGE_SHIFT, zholes_size);
+		mem_map = contig_page_data.node_mem_map;
 	}
+
+/* P3: easy to fix, todo. Current code is utterly broken, though. */
+	if (phys_base != 0)
+		panic("phys_base nonzero");
 }
 
 static void srmmu_mmu_info(struct seq_file *m)
@@ -1220,8 +1367,8 @@ static void srmmu_mmu_info(struct seq_file *m)
 		   "nocache used\t: %d\n",
 		   srmmu_name,
 		   num_contexts,
-		   SRMMU_NOCACHE_SIZE,
-		   (srmmu_nocache_used << SRMMU_NOCACHE_BITMAP_SHIFT));
+		   srmmu_nocache_size,
+		   srmmu_nocache_map.used << SRMMU_NOCACHE_BITMAP_SHIFT);
 }
 
 static void srmmu_update_mmu_cache(struct vm_area_struct * vma, unsigned long address, pte_t pte)
@@ -1282,7 +1429,7 @@ static void __init init_vac_layout(void)
 			if(vac_line_size < min_line_size)
 				min_line_size = vac_line_size;
 			cpu++;
-			if(cpu == smp_num_cpus)
+			if (cpu >= NR_CPUS || !cpu_online(cpu))
 				break;
 #else
 			break;
@@ -1559,8 +1706,10 @@ static void turbosparc_flush_cache_mm(struct mm_struct *mm)
 	FLUSH_END
 }
 
-static void turbosparc_flush_cache_range(struct mm_struct *mm, unsigned long start, unsigned long end)
+static void turbosparc_flush_cache_range(struct vm_area_struct *vma, unsigned long start, unsigned long end)
 {
+	struct mm_struct *mm = vma->vm_mm;
+
 	FLUSH_BEGIN(mm)
 	flush_user_windows();
 	turbosparc_idflash_clear();
@@ -1610,8 +1759,10 @@ static void turbosparc_flush_tlb_mm(struct mm_struct *mm)
 	FLUSH_END
 }
 
-static void turbosparc_flush_tlb_range(struct mm_struct *mm, unsigned long start, unsigned long end)
+static void turbosparc_flush_tlb_range(struct vm_area_struct *vma, unsigned long start, unsigned long end)
 {
+	struct mm_struct *mm = vma->vm_mm;
+
 	FLUSH_BEGIN(mm)
 	srmmu_flush_whole_tlb();
 	FLUSH_END
@@ -1733,7 +1884,7 @@ static void __init init_tsunami(void)
 static void __init poke_viking(void)
 {
 	unsigned long mreg = srmmu_get_mmureg();
-	static int smp_catch = 0;
+	static int smp_catch;
 
 	if(viking_mxcc_present) {
 		unsigned long mxcc_control = mxcc_get_creg();
@@ -1939,10 +2090,9 @@ static void __init get_srmmu_type(void)
 	srmmu_is_bad();
 }
 
-/* dont laugh, static pagetables */
-static int srmmu_check_pgt_cache(int low, int high)
+/* don't laugh, static pagetables */
+static void srmmu_check_pgt_cache(int low, int high)
 {
-	return 0;
 }
 
 extern unsigned long spwin_mmu_patchme, fwin_mmu_patchme,
@@ -1957,7 +2107,7 @@ extern unsigned long srmmu_fault;
 		iaddr = &(insn); \
 		daddr = &(dest); \
 		*iaddr = SPARC_BRANCH((unsigned long) daddr, (unsigned long) iaddr); \
-	} while(0);
+	} while(0)
 
 static void __init patch_window_trap_handlers(void)
 {
@@ -1982,23 +2132,33 @@ static void smp_flush_page_for_dma(unsigned long page)
 
 #endif
 
+static pte_t srmmu_pgoff_to_pte(unsigned long pgoff)
+{
+	return __pte((pgoff << SRMMU_PTE_FILE_SHIFT) | SRMMU_FILE);
+}
+
+static unsigned long srmmu_pte_to_pgoff(pte_t pte)
+{
+	return pte_val(pte) >> SRMMU_PTE_FILE_SHIFT;
+}
+
 /* Load up routines and constants for sun4m and sun4d mmu */
 void __init ld_mmu_srmmu(void)
 {
 	extern void ld_mmu_iommu(void);
 	extern void ld_mmu_iounit(void);
 	extern void ___xchg32_sun4md(void);
-	
-	/* First the constants */
-	BTFIXUPSET_SIMM13(pmd_shift, SRMMU_PMD_SHIFT);
-	BTFIXUPSET_SETHI(pmd_size, SRMMU_PMD_SIZE);
-	BTFIXUPSET_SETHI(pmd_mask, SRMMU_PMD_MASK);
+
+	BTFIXUPSET_SIMM13(pmd_shift, SRMMU_PMD_SHIFT_SOFT);
+	BTFIXUPSET_SETHI(pmd_size, SRMMU_PMD_SIZE_SOFT);
+	BTFIXUPSET_SETHI(pmd_mask, SRMMU_PMD_MASK_SOFT);
+
 	BTFIXUPSET_SIMM13(pgdir_shift, SRMMU_PGDIR_SHIFT);
 	BTFIXUPSET_SETHI(pgdir_size, SRMMU_PGDIR_SIZE);
 	BTFIXUPSET_SETHI(pgdir_mask, SRMMU_PGDIR_MASK);
 
-	BTFIXUPSET_SIMM13(ptrs_per_pte, SRMMU_PTRS_PER_PTE);
-	BTFIXUPSET_SIMM13(ptrs_per_pmd, SRMMU_PTRS_PER_PMD);
+	BTFIXUPSET_SIMM13(ptrs_per_pte, SRMMU_PTRS_PER_PTE_SOFT);
+	BTFIXUPSET_SIMM13(ptrs_per_pmd, SRMMU_PTRS_PER_PMD_SOFT);
 	BTFIXUPSET_SIMM13(ptrs_per_pgd, SRMMU_PTRS_PER_PGD);
 
 	BTFIXUPSET_INT(page_none, pgprot_val(SRMMU_PAGE_NONE));
@@ -2008,21 +2168,21 @@ void __init ld_mmu_srmmu(void)
 	BTFIXUPSET_INT(page_kernel, pgprot_val(SRMMU_PAGE_KERNEL));
 	page_kernel = pgprot_val(SRMMU_PAGE_KERNEL);
 	pg_iobits = SRMMU_VALID | SRMMU_WRITE | SRMMU_REF;
-	
+
 	/* Functions */
 #ifndef CONFIG_SMP	
 	BTFIXUPSET_CALL(___xchg32, ___xchg32_sun4md, BTFIXUPCALL_SWAPG1G2);
 #endif
-	BTFIXUPSET_CALL(do_check_pgt_cache, srmmu_check_pgt_cache, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(do_check_pgt_cache, srmmu_check_pgt_cache, BTFIXUPCALL_NOP);
 
 	BTFIXUPSET_CALL(set_pte, srmmu_set_pte, BTFIXUPCALL_SWAPO0O1);
 	BTFIXUPSET_CALL(switch_mm, srmmu_switch_mm, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_CALL(pte_page, srmmu_pte_page, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pte_pfn, srmmu_pte_pfn, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(pmd_page, srmmu_pmd_page, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(pgd_page, srmmu_pgd_page, BTFIXUPCALL_NORM);
 
-	BTFIXUPSET_SETHI(none_mask, 0xF0000000); /* XXX P3: is it used? */
+	BTFIXUPSET_SETHI(none_mask, 0xF0000000);
 
 	BTFIXUPSET_CALL(pte_present, srmmu_pte_present, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(pte_clear, srmmu_pte_clear, BTFIXUPCALL_SWAPO0G0);
@@ -2041,21 +2201,25 @@ void __init ld_mmu_srmmu(void)
 	BTFIXUPSET_CALL(mk_pte_io, srmmu_mk_pte_io, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(pgd_set, srmmu_pgd_set, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(pmd_set, srmmu_pmd_set, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pmd_populate, srmmu_pmd_populate, BTFIXUPCALL_NORM);
 	
 	BTFIXUPSET_INT(pte_modify_mask, SRMMU_CHG_MASK);
 	BTFIXUPSET_CALL(pmd_offset, srmmu_pmd_offset, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pte_offset, srmmu_pte_offset, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pte_offset_kernel, srmmu_pte_offset, BTFIXUPCALL_NORM);
+
 	BTFIXUPSET_CALL(free_pte_fast, srmmu_free_pte_fast, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pte_alloc_one_fast, srmmu_pte_alloc_one_fast, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pte_free, srmmu_pte_free, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pte_alloc_one_kernel, srmmu_pte_alloc_one_kernel, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(pte_alloc_one, srmmu_pte_alloc_one, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(free_pmd_fast, srmmu_free_pmd_fast, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(pmd_alloc_one_fast, srmmu_pmd_alloc_one_fast, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(free_pmd_fast, srmmu_pmd_free, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pmd_alloc_one, srmmu_pmd_alloc_one, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(free_pgd_fast, srmmu_free_pgd_fast, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(get_pgd_fast, srmmu_get_pgd_fast, BTFIXUPCALL_NORM);
 
 	BTFIXUPSET_HALF(pte_writei, SRMMU_WRITE);
 	BTFIXUPSET_HALF(pte_dirtyi, SRMMU_DIRTY);
 	BTFIXUPSET_HALF(pte_youngi, SRMMU_REF);
+	BTFIXUPSET_HALF(pte_filei, SRMMU_FILE);
 	BTFIXUPSET_HALF(pte_wrprotecti, SRMMU_WRITE);
 	BTFIXUPSET_HALF(pte_mkcleani, SRMMU_DIRTY);
 	BTFIXUPSET_HALF(pte_mkoldi, SRMMU_REF);
@@ -2064,13 +2228,17 @@ void __init ld_mmu_srmmu(void)
 	BTFIXUPSET_CALL(pte_mkyoung, srmmu_pte_mkyoung, BTFIXUPCALL_ORINT(SRMMU_REF));
 	BTFIXUPSET_CALL(update_mmu_cache, srmmu_update_mmu_cache, BTFIXUPCALL_NOP);
 	BTFIXUPSET_CALL(destroy_context, srmmu_destroy_context, BTFIXUPCALL_NORM);
-	
+
+	BTFIXUPSET_CALL(sparc_mapiorange, srmmu_mapiorange, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(sparc_unmapiorange, srmmu_unmapiorange, BTFIXUPCALL_NORM);
+
 	BTFIXUPSET_CALL(mmu_info, srmmu_mmu_info, BTFIXUPCALL_NORM);
 
-	/* Task struct and kernel stack allocating/freeing. */
-	BTFIXUPSET_CALL(alloc_task_struct, srmmu_alloc_task_struct, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(free_task_struct, srmmu_free_task_struct, BTFIXUPCALL_NORM);
-	BTFIXUPSET_CALL(get_task_struct, srmmu_get_task_struct, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(alloc_thread_info, srmmu_alloc_thread_info, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(free_thread_info, srmmu_free_thread_info, BTFIXUPCALL_NORM);
+
+	BTFIXUPSET_CALL(pte_to_pgoff, srmmu_pte_to_pgoff, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(pgoff_to_pte, srmmu_pgoff_to_pte, BTFIXUPCALL_NORM);
 
 	get_srmmu_type();
 	patch_window_trap_handlers();

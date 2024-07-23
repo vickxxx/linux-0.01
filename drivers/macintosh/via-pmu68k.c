@@ -28,6 +28,7 @@
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 
 #include <linux/adb.h>
 #include <linux/pmu.h>
@@ -106,7 +107,7 @@ struct notifier_block *sleep_notifier_list;
 static int pmu_probe(void);
 static int pmu_init(void);
 static void pmu_start(void);
-static void pmu_interrupt(int irq, void *arg, struct pt_regs *regs);
+static irqreturn_t pmu_interrupt(int irq, void *arg, struct pt_regs *regs);
 static int pmu_send_request(struct adb_request *req, int sync);
 static int pmu_autopoll(int devs);
 void pmu_poll(void);
@@ -120,6 +121,8 @@ static void pmu_done(struct adb_request *req);
 static void pmu_handle_data(unsigned char *data, int len,
 			    struct pt_regs *regs);
 static void set_volume(int level);
+static void pmu_enable_backlight(int on);
+static void pmu_set_brightness(int level);
 
 struct adb_driver via_pmu_driver = {
 	"68K PMU",
@@ -493,7 +496,7 @@ pmu_queue_request(struct adb_request *req)
 	req->next = 0;
 	req->sent = 0;
 	req->complete = 0;
-	save_flags(flags); cli();
+	local_irq_save(flags);
 
 	if (current_req != 0) {
 		last_req->next = req;
@@ -505,7 +508,7 @@ pmu_queue_request(struct adb_request *req)
 			pmu_start();
 	}
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 	return 0;
 }
 
@@ -535,7 +538,7 @@ pmu_start()
 
 	/* assert pmu_state == idle */
 	/* get the packet to send */
-	save_flags(flags); cli();
+	local_irq_save(flags);
 	req = current_req;
 	if (req == 0 || pmu_state != idle
 	    || (req->reply_expected && req_awaiting_reply))
@@ -549,16 +552,15 @@ pmu_start()
 	send_byte(req->data[0]);
 
 out:
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 void 
 pmu_poll()
 {
-	unsigned long cpu_flags;
+	unsigned long flags;
 
-	save_flags(cpu_flags);
-	cli();
+	local_irq_save(flags);
 	if (via1[IFR] & SR_INT) {
 		via1[IFR] = SR_INT;
 		pmu_interrupt(IRQ_MAC_ADB_SR, NULL, NULL);
@@ -567,10 +569,10 @@ pmu_poll()
 		via1[IFR] = CB1_INT;
 		pmu_interrupt(IRQ_MAC_ADB_CL, NULL, NULL);
 	}
-	restore_flags(cpu_flags);
+	local_irq_restore(flags);
 }
 
-static void 
+static irqreturn_t
 pmu_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct adb_request *req;
@@ -686,6 +688,7 @@ finish:
 	printk("pmu_interrupt: exit state %d acr %02X, b %02X data_index %d/%d adb_int_pending %d\n",
 		pmu_state, (uint) via1[ACR], (uint) via2[B], data_index, data_len, adb_int_pending);
 #endif
+	return IRQ_HANDLED;
 }
 
 static void 
@@ -746,7 +749,7 @@ int backlight_enabled = 0;
 
 #define LEVEL_TO_BRIGHT(lev)	((lev) < 1? 0x7f: 0x4a - ((lev) << 1))
 
-void 
+static void 
 pmu_enable_backlight(int on)
 {
 	struct adb_request req;
@@ -780,7 +783,7 @@ pmu_enable_backlight(int on)
 	backlight_enabled = on;
 }
 
-void 
+static void 
 pmu_set_brightness(int level)
 {
 	int bright;
@@ -836,11 +839,11 @@ static inline void __openfirmware
 pbook_pci_save(void)
 {
 	int npci;
-	struct pci_dev *pd;
+	struct pci_dev *pd = NULL;
 	struct pci_save *ps;
 
 	npci = 0;
-	for (pd = pci_devices; pd != NULL; pd = pd->next)
+	while ((pd = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, pd)) != NULL)
 		++npci;
 	n_pbook_pci_saves = npci;
 	if (npci == 0)
@@ -850,7 +853,8 @@ pbook_pci_save(void)
 	if (ps == NULL)
 		return;
 
-	for (pd = pci_devices; pd != NULL && npci != 0; pd = pd->next) {
+	pd = NULL;
+	while ((pd = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, pd)) != NULL) {
 		pci_read_config_word(pd, PCI_COMMAND, &ps->command);
 		pci_read_config_word(pd, PCI_CACHE_LINE_SIZE, &ps->cache_lat);
 		pci_read_config_word(pd, PCI_INTERRUPT_LINE, &ps->intr);
@@ -864,10 +868,10 @@ pbook_pci_restore(void)
 {
 	u16 cmd;
 	struct pci_save *ps = pbook_pci_saves;
-	struct pci_dev *pd;
+	struct pci_dev *pd = NULL;
 	int j;
 
-	for (pd = pci_devices; pd != NULL; pd = pd->next, ++ps) {
+	while ((pd = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, pd)) != NULL) {
 		if (ps->command == 0)
 			continue;
 		pci_read_config_word(pd, PCI_COMMAND, &cmd);
@@ -916,7 +920,7 @@ int __openfirmware powerbook_sleep(void)
 	/* Sync the disks. */
 	/* XXX It would be nice to have some way to ensure that
 	 * nobody is dirtying any new buffers while we wait. */
-	fsync_dev(0);
+	sys_sync();
 
 	/* Turn off the display backlight */
 	save_backlight = backlight_enabled;
@@ -961,9 +965,9 @@ int __openfirmware powerbook_sleep(void)
 	asm volatile("mfspr %0,1008" : "=r" (hid0) :);
 	hid0 = (hid0 & ~(HID0_NAP | HID0_DOZE)) | HID0_SLEEP;
 	asm volatile("mtspr 1008,%0" : : "r" (hid0));
-	save_flags(msr);
+	local_save_flags(msr);
 	msr |= MSR_POW | MSR_EE;
-	restore_flags(msr);
+	local_irq_restore(msr);
 	udelay(10);
 
 	/* OK, we're awake again, start restoring things */
@@ -1038,10 +1042,10 @@ static int /*__openfirmware*/ pmu_ioctl(struct inode * inode, struct file *filp,
 }
 
 static struct file_operations pmu_device_fops = {
-	read:		pmu_read,
-	write:		pmu_write,
-	ioctl:		pmu_ioctl,
-	open:		pmu_open,
+	.read		= pmu_read,
+	.write		= pmu_write,
+	.ioctl		= pmu_ioctl,
+	.open		= pmu_open,
 };
 
 static struct miscdevice pmu_device = {
@@ -1050,8 +1054,10 @@ static struct miscdevice pmu_device = {
 
 void pmu_device_init(void)
 {
-	if (via)
-		misc_register(&pmu_device);
+	if (!via)
+		return;
+	if (misc_register(&pmu_device) < 0)
+		printk(KERN_ERR "via-pmu68k: cannot register misc device.\n");
 }
 #endif /* CONFIG_PMAC_PBOOK */
 

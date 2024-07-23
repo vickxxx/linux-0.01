@@ -46,19 +46,19 @@ static int options[MAX_UNITS];
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/ethtool.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/uaccess.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
 #include "8390.h"
 
 /* These identify the driver base version and may not be removed. */
@@ -82,9 +82,9 @@ MODULE_LICENSE("GPL");
 MODULE_PARM(debug, "i");
 MODULE_PARM(options, "1-" __MODULE_STRING(MAX_UNITS) "i");
 MODULE_PARM(full_duplex, "1-" __MODULE_STRING(MAX_UNITS) "i");
-MODULE_PARM_DESC(debug, "PCI NE2000 debug level (1-2)");
-MODULE_PARM_DESC(options, "PCI NE2000: Bit 5: full duplex");
-MODULE_PARM_DESC(full_duplex, "PCI NE2000 full duplex setting(s) (1)");
+MODULE_PARM_DESC(debug, "debug level (1-2)");
+MODULE_PARM_DESC(options, "Bit 5: full duplex");
+MODULE_PARM_DESC(full_duplex, "full duplex setting(s) (1)");
 
 /* Some defines that people can play with if so inclined. */
 
@@ -265,6 +265,7 @@ static int __devinit ne2k_pci_init_one (struct pci_dev *pdev,
 		goto err_out_free_res;
 	}
 	SET_MODULE_OWNER(dev);
+	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	/* Reset card. Who knows what dain-bramaged state it was left in. */
 	{
@@ -640,10 +641,10 @@ static void __devexit ne2k_pci_remove_one (struct pci_dev *pdev)
 
 
 static struct pci_driver ne2k_driver = {
-	name:		DRV_NAME,
-	probe:		ne2k_pci_init_one,
-	remove:		ne2k_pci_remove_one,
-	id_table:	ne2k_pci_tbl,
+	.name		= DRV_NAME,
+	.probe		= ne2k_pci_init_one,
+	.remove		= __devexit_p(ne2k_pci_remove_one),
+	.id_table	= ne2k_pci_tbl,
 };
 
 

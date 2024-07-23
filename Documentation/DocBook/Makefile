@@ -1,185 +1,180 @@
-BOOKS	:= wanbook.sgml z8530book.sgml mcabook.sgml videobook.sgml \
-	   kernel-api.sgml parportbook.sgml kernel-hacking.sgml \
-	   kernel-locking.sgml via-audio.sgml mousedrivers.sgml sis900.sgml \
-	   deviceiobook.sgml procfs-guide.sgml tulip-user.sgml
+###
+# This makefile is used to generate the kernel documentation,
+# primarily based on in-line comments in various source files.
+# See Documentation/kernel-doc-nano-HOWTO.txt for instruction in how
+# to ducument the SRC - and how to read it.
+# To add a new book the only step required is to add the book to the
+# list of DOCBOOKS.
 
-PS	:=	$(patsubst %.sgml, %.ps, $(BOOKS))
-PDF	:=	$(patsubst %.sgml, %.pdf, $(BOOKS))
-HTML    :=      $(patsubst %.sgml, %, $(BOOKS))
-IMG-parportbook := parport-share.fig parport-multi.fig parport-structure.fig
-EPS-parportbook := $(patsubst %.fig, %.eps, $(IMG-parportbook))
-PNG-parportbook := $(patsubst %.fig, %.png, $(IMG-parportbook))
+DOCBOOKS := wanbook.sgml z8530book.sgml mcabook.sgml videobook.sgml \
+	    parportbook.sgml kernel-hacking.sgml \
+	    kernel-locking.sgml via-audio.sgml mousedrivers.sgml \
+	    deviceiobook.sgml procfs-guide.sgml tulip-user.sgml \
+	    writing_usb_driver.sgml scsidrivers.sgml sis900.sgml \
+	    kernel-api.sgml journal-api.sgml lsm.sgml usb.sgml \
+	    gadget.sgml
+
+###
+# The build process is as follows (targets):
+#              (sgmldocs)
+# file.tmpl --> file.sgml +--> file.ps  (psdocs)
+#                         +--> file.pdf  (pdfdocs)
+#                         +--> DIR=file  (htmldocs)
+
+###
+# The targets that may be used.
+.PHONY:	sgmldocs psdocs pdfdocs htmldocs clean mrproper
+
+BOOKS := $(addprefix $(obj)/,$(DOCBOOKS))
+sgmldocs: $(BOOKS)
+
+PS := $(patsubst %.sgml, %.ps, $(BOOKS))
+psdocs: $(PS)
+
+PDF := $(patsubst %.sgml, %.pdf, $(BOOKS))
+pdfdocs: $(PDF)
+
+HTML := $(patsubst %.sgml, %.html, $(BOOKS))
+htmldocs: $(HTML)
+
+###
+#External programs used
+KERNELDOC = scripts/kernel-doc
+DOCPROC   = scripts/docproc
+
+###
+# DOCPROC is used for two purposes:
+# 1) To generate a dependency list for a .tmpl file
+# 2) To preprocess a .tmpl file and call kernel-doc with
+#     appropriate parameters.
+# The following rules are used to generate the .sgml documentation
+# required to generate the final targets. (ps, pdf, html).
+quiet_cmd_docproc = DOCPROC $@
+      cmd_docproc = $(DOCPROC) doc $< >$@
+define rule_docproc
+	set -e;								\
+        $(if $($(quiet)cmd_$(1)),echo '  $($(quiet)cmd_$(1))';) 	\
+        $(cmd_$(1)); 							\
+        ( 								\
+          echo 'cmd_$@ := $(cmd_$(1))'; 				\
+          echo $@: `$(DOCPROC) depend $<`; 				\
+        ) > $(dir $@).$(notdir $@).cmd
+endef
+
+%.sgml: %.tmpl FORCE
+	$(call if_changed_rule,docproc)
+
+###
+#Read in all saved dependency files 
+cmd_files := $(wildcard $(foreach f,$(BOOKS),$(dir $(f)).$(notdir $(f)).cmd))
+
+ifneq ($(cmd_files),)
+  include $(cmd_files)
+endif
+
+###
+# Changes in kernel-doc force a rebuild of all documentation
+$(BOOKS): $(KERNELDOC)
+
+###
+# procfs guide uses a .c file as example code.
+# This requires an explicit dependency
 C-procfs-example = procfs_example.sgml
+C-procfs-example2 = $(addprefix $(obj)/,$(C-procfs-example))
+$(obj)/procfs-guide.sgml: $(C-procfs-example2)
 
-books:	$(BOOKS)
+###
+# The parportbook includes a few images.
+# Force them to be build before the books 
+IMG-parportbook := parport-share.fig parport-multi.fig parport-structure.fig
+IMG-parportbook2 := $(addprefix $(obj)/,$(IMG-parportbook))
+EPS-parportbook := $(patsubst %.fig,%.eps, $(IMG-parportbook2))
+PNG-parportbook := $(patsubst %.fig,%.png, $(IMG-parportbook2))
+$(obj)/parportbook.html: $(PNG-parportbook)
+$(obj)/parportbook.ps $(obj)/parportbook.pdf: $(EPS-parportbook) $(PNG-parportbook)
 
-$(BOOKS): $(TOPDIR)/scripts/docproc
+###
+# Rules to generate postscript, PDF and HTML
+# db2html creates a directory. Generate a html file used for timestamp
 
-.PHONY:	books ps pdf html clean mrproper
-
-ps:	$(PS)
-
-pdf:	$(PDF)
-
-html:	$(HTML)
-
-%.eps: %.fig
-	fig2dev -Leps $< $@
-
-%.png: %.fig
-	fig2dev -Lpng $< $@
-
-%.sgml: %.c
-	echo "<programlisting>" > $@
-	expand --tabs=8 < $< | \
-	sed -e "s/&/\\&amp;/g" \
-	    -e "s/</\\&lt;/g" \
-	    -e "s/>/\\&gt;/g" >> $@
-	echo "</programlisting>" >> $@
-
-
-$(TOPDIR)/scripts/docproc:
-	$(MAKE) -C $(TOPDIR)/scripts docproc
-
-mousedrivers.sgml: mousedrivers.tmpl
-	$(TOPDIR)/scripts/docgen <$< >$@
-
-kernel-hacking.sgml: kernel-hacking.tmpl
-	$(TOPDIR)/scripts/docgen <$< >$@
-
-kernel-locking.sgml: kernel-locking.tmpl
-	$(TOPDIR)/scripts/docgen <$< >$@
-
-wanbook.sgml: wanbook.tmpl $(TOPDIR)/drivers/net/wan/syncppp.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/net/wan/syncppp.c \
-		<wanbook.tmpl >wanbook.sgml
-
-z8530book.sgml: z8530book.tmpl $(TOPDIR)/drivers/net/wan/z85230.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/net/wan/z85230.c \
-		<z8530book.tmpl >z8530book.sgml
-
-via-audio.sgml: via-audio.tmpl $(TOPDIR)/drivers/sound/via82cxxx_audio.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/sound/via82cxxx_audio.c \
-		<via-audio.tmpl >via-audio.sgml
-
-tulip-user.sgml: tulip-user.tmpl
-	$(TOPDIR)/scripts/docgen <$< >$@
-
-sis900.sgml: sis900.tmpl $(TOPDIR)/drivers/net/sis900.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/net/sis900.c \
-		<sis900.tmpl >sis900.sgml
-
-deviceiobook.sgml: deviceiobook.tmpl
-	$(TOPDIR)/scripts/docgen <deviceiobook.tmpl >deviceiobook.sgml
-
-mcabook.sgml: mcabook.tmpl $(TOPDIR)/arch/i386/kernel/mca.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/arch/i386/kernel/mca.c \
-		<mcabook.tmpl >mcabook.sgml
-
-videobook.sgml: videobook.tmpl $(TOPDIR)/drivers/media/video/videodev.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/media/video/videodev.c \
-		<videobook.tmpl >videobook.sgml
-
-procfs-guide.sgml:  procfs-guide.tmpl procfs_example.sgml
-	$(TOPDIR)/scripts/docgen < procfs-guide.tmpl >$@
-
-APISOURCES :=	$(TOPDIR)/drivers/media/video/videodev.c \
-		$(TOPDIR)/arch/i386/kernel/irq.c \
-		$(TOPDIR)/arch/i386/kernel/mca.c \
-		$(TOPDIR)/arch/i386/kernel/mtrr.c \
-		$(TOPDIR)/drivers/char/misc.c \
-		$(TOPDIR)/kernel/printk.c \
-		$(TOPDIR)/drivers/net/net_init.c \
-		$(TOPDIR)/drivers/net/8390.c \
-		$(TOPDIR)/drivers/char/serial.c \
-		$(TOPDIR)/drivers/pci/pci.c \
-		$(TOPDIR)/drivers/block/ll_rw_blk.c \
-		$(TOPDIR)/drivers/sound/sound_core.c \
-		$(TOPDIR)/drivers/sound/sound_firmware.c \
-		$(TOPDIR)/drivers/net/wan/syncppp.c \
-		$(TOPDIR)/drivers/net/wan/z85230.c \
-		$(TOPDIR)/drivers/usb/usb.c \
-		$(TOPDIR)/drivers/video/fbmem.c \
-		$(TOPDIR)/drivers/video/fbcmap.c \
-		$(TOPDIR)/drivers/video/fbcon.c \
-		$(TOPDIR)/drivers/video/fbgen.c \
-		$(TOPDIR)/drivers/video/fonts.c \
-		$(TOPDIR)/drivers/video/macmodes.c \
-		$(TOPDIR)/drivers/video/modedb.c \
-		$(TOPDIR)/fs/devfs/base.c \
-		$(TOPDIR)/fs/locks.c \
-		$(TOPDIR)/include/asm-i386/bitops.h \
-		$(TOPDIR)/kernel/pm.c \
-		$(TOPDIR)/kernel/ksyms.c \
-		$(TOPDIR)/kernel/kmod.c \
-		$(TOPDIR)/kernel/module.c \
-		$(TOPDIR)/kernel/printk.c \
-		$(TOPDIR)/kernel/sched.c \
-		$(TOPDIR)/kernel/sysctl.c \
-		$(TOPDIR)/lib/string.c \
-		$(TOPDIR)/lib/vsprintf.c \
-		$(TOPDIR)/net/netsyms.c
- 
-kernel-api.sgml: kernel-api.tmpl $(APISOURCES)
-	$(TOPDIR)/scripts/docgen $(APISOURCES) \
-		<kernel-api.tmpl >kernel-api.sgml
-
-kernel-api-man: $(APISOURCES)
-	@rm -rf $(TOPDIR)/Documentation/man
-	$(TOPDIR)/scripts/kernel-doc -man $^ | \
-		$(PERL) $(TOPDIR)/scripts/split-man $(TOPDIR)/Documentation/man
-
-parportbook parportbook.pdf: $(PNG-parportbook)
-parportbook.ps: $(EPS-parportbook)
-parportbook.sgml: parportbook.tmpl $(TOPDIR)/drivers/parport/init.c
-	$(TOPDIR)/scripts/docgen $(TOPDIR)/drivers/parport/init.c <$< >$@
-
-DVI	:=	$(patsubst %.sgml, %.dvi, $(BOOKS))
-AUX	:=	$(patsubst %.sgml, %.aux, $(BOOKS))
-TEX	:=	$(patsubst %.sgml, %.tex, $(BOOKS))
-LOG	:=	$(patsubst %.sgml, %.log, $(BOOKS))
-OUT	:=	$(patsubst %.sgml, %.out, $(BOOKS))
-
-clean:
-	rm -f core *~
-	rm -f $(BOOKS)
-	rm -f $(DVI) $(AUX) $(TEX) $(LOG) $(OUT)
-	rm -f $(PNG-parportbook) $(EPS-parportbook)
-	rm -f $(C-procfs-example)
-
-mrproper: clean
-	rm -f $(PS) $(PDF)
-	rm -f -r $(HTML)
-	rm -f .depend
-	rm -f $(TOPDIR)/scripts/mkdep-docbook
-	rm -rf DBTOHTML_OUTPUT*
-
+quiet_cmd_db2ps = DB2PS   $@
+      cmd_db2ps = db2ps -o $(dir $@) $<
 %.ps : %.sgml
 	@(which db2ps > /dev/null 2>&1) || \
 	 (echo "*** You need to install DocBook stylesheets ***"; \
 	  exit 1)
-	db2ps $<
+	$(call cmd,db2ps)
 
+quiet_cmd_db2pdf = DB2PDF  $@
+      cmd_db2pdf = db2pdf -o $(dir $@) $<
 %.pdf : %.sgml
 	@(which db2pdf > /dev/null 2>&1) || \
 	 (echo "*** You need to install DocBook stylesheets ***"; \
 	  exit 1)
-	db2pdf $<
+	$(call cmd,db2pdf)
 
-%:	%.sgml
+quiet_cmd_db2html = DB2HTML $@
+      cmd_db2html = db2html -o $(patsubst %.html,%,$@) $< &&		      \
+		echo '<a HREF="$(patsubst %.html,%,$(notdir $@))/book1.html"> \
+         Goto $(patsubst %.html,%,$(notdir $@))</a><p>' > $@
+
+%.html:	%.sgml
 	@(which db2html > /dev/null 2>&1) || \
 	 (echo "*** You need to install DocBook stylesheets ***"; \
 	  exit 1)
-	rm -rf $@
-	db2html $<
-	if [ ! -z "$(PNG-$@)" ]; then cp $(PNG-$@) $@; fi
+	@rm -rf $@ $(patsubst %.html,%,$@)
+	$(call cmd,db2html)
+	@if [ ! -z "$(PNG-$(basename $(notdir $@)))" ]; then \
+            cp $(PNG-$(basename $(notdir $@))) $(patsubst %.html,%,$@); fi
 
-#
-# we could have our own dependency generator
-#
-#
-# .depend: $(TOPDIR)/scripts/mkdep-docbook
-#	$(TOPDIR)/scripts/mkdep-docbook $(wildcard *.tmpl) > .depend
+###
+# Rules to generate postscripts and PNG imgages from .fig format files
+quiet_cmd_fig2eps = FIG2EPS $@
+      cmd_fig2eps = fig2dev -Leps $< $@
 
-include $(TOPDIR)/Rules.make
+%.eps: %.fig
+	$(call cmd,fig2eps)
 
+quiet_cmd_fig2png = FIG2PNG $@
+      cmd_fig2png = fig2dev -Lpng $< $@
+
+%.png: %.fig
+	$(call cmd,fig2png)
+
+###
+# Rule to convert a .c file to inline SGML documentation
+%.sgml: %.c
+	@echo '  GEN     $@'
+	@(                            \
+	   echo "<programlisting>";   \
+	   expand --tabs=8 < $< |     \
+	   sed -e "s/&/\\&amp;/g"     \
+	       -e "s/</\\&lt;/g"      \
+	       -e "s/>/\\&gt;/g";     \
+	   echo "</programlisting>")  > $@
+
+###
+# Help targets as used by the top-level makefile
+dochelp:
+	@echo  '  Linux kernel internal documentation in different formats:'
+	@echo  '  sgmldocs (SGML), psdocs (Postscript), pdfdocs (PDF), htmldocs (HTML)'
+
+###
+# clean and mrproper as used by the top-level makefile 
+# Temporary files left by various tools
+clean-files := $(DOCBOOKS) \
+	$(patsubst %.sgml, %.dvi,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.aux,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.tex,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.log,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.out,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.ps,   $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.pdf,  $(DOCBOOKS)) \
+	$(patsubst %.sgml, %.html, $(DOCBOOKS)) \
+	$(patsubst %.fig,%.eps, $(IMG-parportbook)) \
+	$(patsubst %.fig,%.png, $(IMG-parportbook)) \
+	$(C-procfs-example)
+
+ifneq ($(wildcard $(patsubst %.html,%,$(HTML))),)
+clean-rule := rm -rf $(wildcard $(patsubst %.html,%,$(HTML)))
+endif

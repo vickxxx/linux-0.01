@@ -47,6 +47,9 @@ CONFIG_MODULES=y
 #
 # General setup
 #
+CONFIG_ZBOOT_ROM=y
+CONFIG_ZBOOT_ROM_TEXT=0x00050000
+CONFIG_ZBOOT_ROM_BSS=0xc0200000
 # CONFIG_NET is not set
 # CONFIG_SYSVIPC is not set
 # CONFIG_BSD_PROCESS_ACCT is not set
@@ -57,7 +60,7 @@ CONFIG_BINFMT_ELF=y
 # CONFIG_BINFMT_MISC is not set
 # CONFIG_ARTHUR is not set
 # CONFIG_PARPORT is not set
-CONFIG_CMDLINE=""
+CONFIG_CMDLINE="mem=64M@0xc0000000 mem=64M@0xc8000000 root=/dev/mtdblock2"
 
 #
 # Plug and Play support
@@ -148,6 +151,8 @@ CONFIG_SERIAL_SA1100_CONSOLE=y
 # CONFIG_JOLIET is not set
 # CONFIG_MINIX_FS is not set
 # CONFIG_NTFS_FS is not set
+# CONFIG_NTFS_DEBUG is not set
+# CONFIG_NTFS_RW is not set
 # CONFIG_HPFS_FS is not set
 CONFIG_PROC_FS=y
 # CONFIG_QNX4FS_FS is not set

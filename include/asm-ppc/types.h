@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.types.h 1.10 10/15/01 22:51:33 paulus
- */
 #ifndef _PPC_TYPES_H
 #define _PPC_TYPES_H
 
@@ -22,12 +19,24 @@ typedef unsigned long long __u64;
 
 typedef struct {
 	__u32 u[4];
-} __attribute((aligned(16))) __vector128;
+} __vector128;
+
+/*
+ * XXX allowed outside of __KERNEL__ for now, until glibc gets
+ * a proper set of asm headers of its own.  -- paulus
+ */
+typedef unsigned short umode_t;
+
+#endif /* __ASSEMBLY__ */
 
 #ifdef __KERNEL__
 /*
  * These aren't exported outside the kernel to avoid name space clashes
  */
+#define BITS_PER_LONG 32
+
+#ifndef __ASSEMBLY__
+
 typedef signed char s8;
 typedef unsigned char u8;
 
@@ -42,20 +51,17 @@ typedef unsigned long long u64;
 
 typedef __vector128 vector128;
 
-#define BITS_PER_LONG 32
-
 /* DMA addresses are 32-bits wide */
 typedef u32 dma_addr_t;
 typedef u64 dma64_addr_t;
 
-#endif /* __KERNEL__ */
-
-/*
- * XXX allowed outside of __KERNEL__ for now, until glibc gets
- * a proper set of asm headers of its own.  -- paulus
- */
-typedef unsigned short umode_t;
+#ifdef CONFIG_LBD
+typedef u64 sector_t;
+#define HAVE_SECTOR_T
+#endif
 
 #endif /* __ASSEMBLY__ */
+
+#endif /* __KERNEL__ */
 
 #endif

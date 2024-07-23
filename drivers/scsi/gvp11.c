@@ -4,6 +4,7 @@
 #include <linux/sched.h>
 #include <linux/version.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 
 #include <asm/setup.h>
 #include <asm/page.h>
@@ -27,11 +28,12 @@
 static struct Scsi_Host *first_instance = NULL;
 static Scsi_Host_Template *gvp11_template;
 
-static void gvp11_intr (int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t gvp11_intr (int irq, void *dummy, struct pt_regs *fp)
 {
     unsigned long flags;
     unsigned int status;
     struct Scsi_Host *instance;
+    int handled = 0;
 
     for (instance = first_instance; instance &&
 	 instance->hostt == gvp11_template; instance = instance->next)
@@ -40,10 +42,12 @@ static void gvp11_intr (int irq, void *dummy, struct pt_regs *fp)
 	if (!(status & GVP11_DMAC_INT_PENDING))
 	    continue;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(&instance->host_lock, flags);
 	wd33c93_intr (instance);
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(&instance->host_lock, flags);
+	handled = 1;
     }
+    return IRQ_RETVAL(handled);
 }
 
 static int gvp11_xfer_mask = 0;
@@ -61,62 +65,62 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
     static int scsi_alloc_out_of_range = 0;
 
     /* use bounce buffer if the physical address is bad */
-    if (addr & HDATA(cmd->host)->dma_xfer_mask ||
+    if (addr & HDATA(cmd->device->host)->dma_xfer_mask ||
 	(!dir_in && mm_end_of_chunk (addr, cmd->SCp.this_residual)))
     {
-	HDATA(cmd->host)->dma_bounce_len = (cmd->SCp.this_residual + 511)
+	HDATA(cmd->device->host)->dma_bounce_len = (cmd->SCp.this_residual + 511)
 	    & ~0x1ff;
 
  	if( !scsi_alloc_out_of_range ) {
-	    HDATA(cmd->host)->dma_bounce_buffer =
-		scsi_malloc (HDATA(cmd->host)->dma_bounce_len);
-	    HDATA(cmd->host)->dma_buffer_pool = BUF_SCSI_ALLOCED;
+	    HDATA(cmd->device->host)->dma_bounce_buffer =
+		kmalloc (HDATA(cmd->device->host)->dma_bounce_len, GFP_KERNEL);
+	    HDATA(cmd->device->host)->dma_buffer_pool = BUF_SCSI_ALLOCED;
 	}
 
-	if ( scsi_alloc_out_of_range || !HDATA(cmd->host)->dma_bounce_buffer) {
-	    HDATA(cmd->host)->dma_bounce_buffer =
-		amiga_chip_alloc(HDATA(cmd->host)->dma_bounce_len,
+	if (scsi_alloc_out_of_range ||
+	    !HDATA(cmd->device->host)->dma_bounce_buffer) {
+	    HDATA(cmd->device->host)->dma_bounce_buffer =
+		amiga_chip_alloc(HDATA(cmd->device->host)->dma_bounce_len,
 				       "GVP II SCSI Bounce Buffer");
 
-	    if(!HDATA(cmd->host)->dma_bounce_buffer)
+	    if(!HDATA(cmd->device->host)->dma_bounce_buffer)
 	    {
-		HDATA(cmd->host)->dma_bounce_len = 0;
+		HDATA(cmd->device->host)->dma_bounce_len = 0;
 		return 1;
 	    }
 
-	    HDATA(cmd->host)->dma_buffer_pool = BUF_CHIP_ALLOCED;
+	    HDATA(cmd->device->host)->dma_buffer_pool = BUF_CHIP_ALLOCED;
 	}
 
 	/* check if the address of the bounce buffer is OK */
-	addr = virt_to_bus(HDATA(cmd->host)->dma_bounce_buffer);
+	addr = virt_to_bus(HDATA(cmd->device->host)->dma_bounce_buffer);
 
-	if (addr & HDATA(cmd->host)->dma_xfer_mask) {
+	if (addr & HDATA(cmd->device->host)->dma_xfer_mask) {
 	    /* fall back to Chip RAM if address out of range */
-	    if( HDATA(cmd->host)->dma_buffer_pool == BUF_SCSI_ALLOCED) {
-		scsi_free (HDATA(cmd->host)->dma_bounce_buffer,
-			   HDATA(cmd->host)->dma_bounce_len);
+	    if( HDATA(cmd->device->host)->dma_buffer_pool == BUF_SCSI_ALLOCED) {
+		kfree (HDATA(cmd->device->host)->dma_bounce_buffer);
 		scsi_alloc_out_of_range = 1;
 	    } else {
-		amiga_chip_free (HDATA(cmd->host)->dma_bounce_buffer);
+		amiga_chip_free (HDATA(cmd->device->host)->dma_bounce_buffer);
             }
 		
-	    HDATA(cmd->host)->dma_bounce_buffer =
-		amiga_chip_alloc(HDATA(cmd->host)->dma_bounce_len,
+	    HDATA(cmd->device->host)->dma_bounce_buffer =
+		amiga_chip_alloc(HDATA(cmd->device->host)->dma_bounce_len,
 				       "GVP II SCSI Bounce Buffer");
 
-	    if(!HDATA(cmd->host)->dma_bounce_buffer)
+	    if(!HDATA(cmd->device->host)->dma_bounce_buffer)
 	    {
-		HDATA(cmd->host)->dma_bounce_len = 0;
+		HDATA(cmd->device->host)->dma_bounce_len = 0;
 		return 1;
 	    }
 
-	    addr = virt_to_bus(HDATA(cmd->host)->dma_bounce_buffer);
-	    HDATA(cmd->host)->dma_buffer_pool = BUF_CHIP_ALLOCED;
+	    addr = virt_to_bus(HDATA(cmd->device->host)->dma_bounce_buffer);
+	    HDATA(cmd->device->host)->dma_buffer_pool = BUF_CHIP_ALLOCED;
 	}
 	    
 	if (!dir_in) {
 	    /* copy to bounce buffer for a write */
-	    memcpy (HDATA(cmd->host)->dma_bounce_buffer,
+	    memcpy (HDATA(cmd->device->host)->dma_bounce_buffer,
 		    cmd->SCp.ptr, cmd->SCp.this_residual);
 	}
     }
@@ -125,11 +129,11 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
     if (!dir_in)
 	cntr |= GVP11_DMAC_DIR_WRITE;
 
-    HDATA(cmd->host)->dma_dir = dir_in;
-    DMA(cmd->host)->CNTR = cntr;
+    HDATA(cmd->device->host)->dma_dir = dir_in;
+    DMA(cmd->device->host)->CNTR = cntr;
 
     /* setup DMA *physical* address */
-    DMA(cmd->host)->ACR = addr;
+    DMA(cmd->device->host)->ACR = addr;
 
     if (dir_in)
 	/* invalidate any cache */
@@ -138,11 +142,11 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 	/* push any dirty cache */
 	cache_push (addr, cmd->SCp.this_residual);
 
-    if ((bank_mask = (~HDATA(cmd->host)->dma_xfer_mask >> 18) & 0x01c0))
-	    DMA(cmd->host)->BANK = bank_mask & (addr >> 18);
+    if ((bank_mask = (~HDATA(cmd->device->host)->dma_xfer_mask >> 18) & 0x01c0))
+	    DMA(cmd->device->host)->BANK = bank_mask & (addr >> 18);
 
     /* start DMA */
-    DMA(cmd->host)->ST_DMA = 1;
+    DMA(cmd->device->host)->ST_DMA = 1;
 
     /* return success */
     return 0;
@@ -164,8 +168,7 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
 		    SCpnt->SCp.this_residual);
 	
 	if (HDATA(instance)->dma_buffer_pool == BUF_SCSI_ALLOCED)
-	    scsi_free (HDATA(instance)->dma_bounce_buffer,
-		       HDATA(instance)->dma_bounce_len);
+	    kfree (HDATA(instance)->dma_bounce_buffer);
 	else
 	    amiga_chip_free(HDATA(instance)->dma_bounce_buffer);
 	
@@ -352,12 +355,34 @@ release:
     return num_gvp11;
 }
 
+static int gvp11_bus_reset(Scsi_Cmnd *cmd)
+{
+	/* FIXME perform bus-specific reset */
+	wd33c93_host_reset(cmd);
+	return SUCCESS;
+}
+
 
 #define HOSTS_C
 
 #include "gvp11.h"
 
-static Scsi_Host_Template driver_template = GVP11_SCSI;
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "GVP11",
+	.name			= "GVP Series II SCSI",
+	.detect			= gvp11_detect,
+	.release		= gvp11_release,
+	.queuecommand		= wd33c93_queuecommand,
+	.eh_abort_handler	= wd33c93_abort,
+	.eh_bus_reset_handler	= gvp11_bus_reset,
+	.eh_host_reset_handler	= wd33c93_host_reset,
+	.can_queue		= CAN_QUEUE,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= CMD_PER_LUN,
+	.use_clustering		= DISABLE_CLUSTERING
+};
+
 
 #include "scsi_module.c"
 
@@ -372,3 +397,5 @@ int gvp11_release(struct Scsi_Host *instance)
 #endif
     return 1;
 }
+
+MODULE_LICENSE("GPL");

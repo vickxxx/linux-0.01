@@ -82,8 +82,8 @@
 #include <linux/module.h>
 
 #include <linux/errno.h>
+#include <linux/interrupt.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
 #include <linux/mm.h>
 #include <linux/timer.h>
 #include <linux/fs.h>
@@ -99,16 +99,12 @@
 /* #define REALLY_SLOW_IO  */
 #include <asm/system.h>
 #include <asm/io.h>
+#include <asm/current.h>
 #include <asm/uaccess.h>
-
-#define MAJOR_NR MITSUMI_CDROM_MAJOR
 #include <linux/blk.h>
 
 #define mcd_port mcd		/* for compatible parameter passing with "insmod" */
 #include "mcd.h"
-
-static int mcd_blocksizes[1];
-
 
 /* I added A flag to drop to 1x speed if too many errors 0 = 1X ; 1 = 2X */
 static int mcdDouble;
@@ -118,13 +114,21 @@ static int mcd1xhold;
 
 /* Is the drive connected properly and responding?? */
 static int mcdPresent;
+static struct request_queue mcd_queue;
+
+#define MAJOR_NR MITSUMI_CDROM_MAJOR
+#define QUEUE (&mcd_queue)
+#define CURRENT elv_next_request(&mcd_queue)
 
 #define QUICK_LOOP_DELAY udelay(45)	/* use udelay */
 #define QUICK_LOOP_COUNT 20
 
-#define CURRENT_VALID \
-(!QUEUE_EMPTY && MAJOR(CURRENT -> rq_dev) == MAJOR_NR && CURRENT -> cmd == READ \
-&& CURRENT -> sector != -1)
+static int current_valid(void)
+{
+        return CURRENT &&
+		CURRENT->cmd == READ &&
+		CURRENT->sector != -1;
+}
 
 #define MFL_STATUSorDATA (MFL_STATUS | MFL_DATA)
 #define MCD_BUF_SIZ 16
@@ -185,38 +189,62 @@ static int mcd_open(struct cdrom_device_info *cdi, int purpose);
 static void mcd_release(struct cdrom_device_info *cdi);
 static int mcd_media_changed(struct cdrom_device_info *cdi, int disc_nr);
 static int mcd_tray_move(struct cdrom_device_info *cdi, int position);
-int mcd_audio_ioctl(struct cdrom_device_info *cdi, unsigned int cmd,
+static spinlock_t mcd_spinlock = SPIN_LOCK_UNLOCKED;
+static int mcd_audio_ioctl(struct cdrom_device_info *cdi, unsigned int cmd,
 		    void *arg);
-int mcd_drive_status(struct cdrom_device_info *cdi, int slot_nr);
+static int mcd_drive_status(struct cdrom_device_info *cdi, int slot_nr);
 
-struct block_device_operations mcd_bdops =
-{
-	owner:			THIS_MODULE,
-	open:			cdrom_open,
-	release:		cdrom_release,
-	ioctl:			cdrom_ioctl,
-	check_media_change:	cdrom_media_changed,
-};
-
-static struct timer_list mcd_timer;
+static struct timer_list mcd_timer = TIMER_INITIALIZER(NULL, 0, 0);
 
 static struct cdrom_device_ops mcd_dops = {
-	open:mcd_open,
-	release:mcd_release,
-	drive_status:mcd_drive_status,
-	media_changed:mcd_media_changed,
-	tray_move:mcd_tray_move,
-	audio_ioctl:mcd_audio_ioctl,
-	capability:CDC_OPEN_TRAY | CDC_MEDIA_CHANGED |
-	    CDC_PLAY_AUDIO | CDC_DRIVE_STATUS,
+	.open			= mcd_open,
+	.release		= mcd_release,
+	.drive_status		= mcd_drive_status,
+	.media_changed		= mcd_media_changed,
+	.tray_move		= mcd_tray_move,
+	.audio_ioctl		= mcd_audio_ioctl,
+	.capability		= CDC_OPEN_TRAY | CDC_MEDIA_CHANGED |
+				  CDC_PLAY_AUDIO | CDC_DRIVE_STATUS,
 };
 
 static struct cdrom_device_info mcd_info = {
-	ops:&mcd_dops,
-	speed:2,
-	capacity:1,
-	name:"mcd",
+	.ops		= &mcd_dops,
+	.speed		= 2,
+	.capacity	= 1,
+	.name		= "mcd",
 };
+
+static int mcd_block_open(struct inode *inode, struct file *file)
+{
+	return cdrom_open(&mcd_info, inode, file);
+}
+
+static int mcd_block_release(struct inode *inode, struct file *file)
+{
+	return cdrom_release(&mcd_info, file);
+}
+
+static int mcd_block_ioctl(struct inode *inode, struct file *file,
+				unsigned cmd, unsigned long arg)
+{
+	return cdrom_ioctl(&mcd_info, inode, cmd, arg);
+}
+
+static int mcd_block_media_changed(struct gendisk *disk)
+{
+	return cdrom_media_changed(&mcd_info);
+}
+
+static struct block_device_operations mcd_bdops =
+{
+	.owner		= THIS_MODULE,
+	.open		= mcd_block_open,
+	.release	= mcd_block_release,
+	.ioctl		= mcd_block_ioctl,
+	.media_changed	= mcd_block_media_changed,
+};
+
+static struct gendisk *mcd_gendisk;
 
 #ifndef MODULE
 static int __init mcd_setup(char *str)
@@ -558,33 +586,33 @@ int mcd_audio_ioctl(struct cdrom_device_info *cdi, unsigned int cmd,
 
 static void mcd_transfer(void)
 {
-	if (CURRENT_VALID) {
-		while (CURRENT->nr_sectors) {
-			int bn = CURRENT->sector / 4;
-			int i;
-			for (i = 0; i < MCD_BUF_SIZ && mcd_buf_bn[i] != bn;
-			     ++i);
-			if (i < MCD_BUF_SIZ) {
-				int offs =(i * 4 + (CURRENT->sector & 3)) * 512;
-				int nr_sectors = 4 - (CURRENT->sector & 3);
-				if (mcd_buf_out != i) {
-					mcd_buf_out = i;
-					if (mcd_buf_bn[i] != bn) {
-						mcd_buf_out = -1;
-						continue;
-					}
+	if (!current_valid())
+		return;
+
+	while (CURRENT->nr_sectors) {
+		int bn = CURRENT->sector / 4;
+		int i;
+		for (i = 0; i < MCD_BUF_SIZ && mcd_buf_bn[i] != bn; ++i)
+			;
+		if (i < MCD_BUF_SIZ) {
+			int offs =(i * 4 + (CURRENT->sector & 3)) * 512;
+			int nr_sectors = 4 - (CURRENT->sector & 3);
+			if (mcd_buf_out != i) {
+				mcd_buf_out = i;
+				if (mcd_buf_bn[i] != bn) {
+					mcd_buf_out = -1;
+					continue;
 				}
-				if (nr_sectors > CURRENT->nr_sectors)
-					nr_sectors = CURRENT->nr_sectors;
-				memcpy(CURRENT->buffer, mcd_buf + offs,
-				       nr_sectors * 512);
-				CURRENT->nr_sectors -= nr_sectors;
-				CURRENT->sector += nr_sectors;
-				CURRENT->buffer += nr_sectors * 512;
-			} else {
-				mcd_buf_out = -1;
-				break;
 			}
+			if (nr_sectors > CURRENT->nr_sectors)
+				nr_sectors = CURRENT->nr_sectors;
+			memcpy(CURRENT->buffer, mcd_buf + offs, nr_sectors * 512);
+			CURRENT->nr_sectors -= nr_sectors;
+			CURRENT->sector += nr_sectors;
+			CURRENT->buffer += nr_sectors * 512;
+		} else {
+		        mcd_buf_out = -1;
+			break;
 		}
 	}
 }
@@ -595,7 +623,7 @@ static void mcd_transfer(void)
  * Just take the interrupt and clear out the status reg.
  */
 
-static void mcd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mcd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	int st;
 
@@ -607,6 +635,7 @@ static void mcd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		if ((st & 0xFF) != 0xFF)
 			mcd_error = st ? st & 0xFF : -1;
 	}
+	return IRQ_HANDLED;
 }
 
 
@@ -616,21 +645,17 @@ static void do_mcd_request(request_queue_t * q)
 	       CURRENT->nr_sectors));
 
 		mcd_transfer_is_active = 1;
-	while (CURRENT_VALID) {
-		if (CURRENT->bh) {
-			if (!buffer_locked(CURRENT->bh))
-				panic(DEVICE_NAME ": block not locked");
-		}
+	while (current_valid()) {
 		mcd_transfer();
 		if (CURRENT->nr_sectors == 0) {
-			end_request(1);
+			end_request(CURRENT, 1);
 		} else {
 			mcd_buf_out = -1;	/* Want to read a block not in buffer */
 			if (mcd_state == MCD_S_IDLE) {
 				if (!tocUpToDate) {
 					if (updateToc() < 0) {
-						while (CURRENT_VALID)
-							end_request(0);
+						while (current_valid())
+							end_request(CURRENT, 0);
 						break;
 					}
 				}
@@ -694,8 +719,8 @@ static void mcd_poll(unsigned long dummy)
 					McdTries = 0;
 					goto ret;
 				}
-				if (CURRENT_VALID)
-					end_request(0);
+				if (current_valid())
+					end_request(CURRENT, 0);
 				McdTries = MCD_RETRY_ATTEMPTS;
 			}
 		}
@@ -751,8 +776,8 @@ set_mode_immediately:
 				       "mcd: door open\n" :
 				       "mcd: disk removed\n");
 				mcd_state = MCD_S_IDLE;
-				while (CURRENT_VALID)
-					end_request(0);
+				while (current_valid())
+					end_request(CURRENT, 0);
 				goto out;
 			}
 			outb(MCMD_SET_MODE, MCDPORT(0));
@@ -785,12 +810,12 @@ read_immediately:
 				       "mcd: door open\n" :
 				       "mcd: disk removed\n");
 				mcd_state = MCD_S_IDLE;
-				while (CURRENT_VALID)
-					end_request(0);
+				while (current_valid())
+					end_request(CURRENT, 0);
 				goto out;
 			}
 
-			if (CURRENT_VALID) {
+			if (current_valid()) {
 				struct mcd_Play_msf msf;
 				mcd_next_bn = CURRENT->sector / 4;
 				hsg2msf(mcd_next_bn, &msf.start);
@@ -826,8 +851,8 @@ data_immediately:
 					McdTries = 0;
 					break;
 				}
-				if (CURRENT_VALID)
-					end_request(0);
+				if (current_valid())
+					end_request(CURRENT, 0);
 				McdTries = 5;
 			}
 			mcd_state = MCD_S_START;
@@ -839,7 +864,7 @@ data_immediately:
 
 		default:
 			McdTries = 5;
-			if (!CURRENT_VALID && mcd_buf_in == mcd_buf_out) {
+			if (!current_valid() && mcd_buf_in == mcd_buf_out) {
 				mcd_state = MCD_S_STOP;
 				goto immediately;
 			}
@@ -851,16 +876,16 @@ data_immediately:
 				mcd_buf_out = mcd_buf_in;
 			mcd_buf_in = mcd_buf_in + 1 == MCD_BUF_SIZ ? 0 : mcd_buf_in + 1;
 			if (!mcd_transfer_is_active) {
-				while (CURRENT_VALID) {
+				while (current_valid()) {
 					mcd_transfer();
 					if (CURRENT->nr_sectors == 0)
-						end_request(1);
+						end_request(CURRENT, 1);
 					else
 						break;
 				}
 			}
 
-			if (CURRENT_VALID
+			if (current_valid()
 			    && (CURRENT->sector / 4 < mcd_next_bn ||
 				CURRENT->sector / 4 > mcd_next_bn + 16)) {
 				mcd_state = MCD_S_STOP;
@@ -939,8 +964,9 @@ do_not_work_around_mitsumi_bug_93_1:
 		st = -1;
 
 do_not_work_around_mitsumi_bug_93_2:
-		test3(printk("CURRENT_VALID %d mcd_mode %d\n", CURRENT_VALID, mcd_mode));
-		if (CURRENT_VALID) {
+		test3(printk("CURRENT_VALID %d mcd_mode %d\n", current_valid(),
+			    mcd_mode));
+		if (current_valid()) {
 			if (st != -1) {
 				if (mcd_mode == 1)
 					goto read_immediately;
@@ -1023,61 +1049,36 @@ static void mcd_release(struct cdrom_device_info *cdi)
 	}
 }
 
-
-
-/* This routine gets called during initialization if things go wrong,
- * and is used in mcd_exit as well. */
-static void cleanup(int level)
-{
-	switch (level) {
-	case 3:
-		if (unregister_cdrom(&mcd_info)) {
-			printk(KERN_WARNING "Can't unregister cdrom mcd\n");
-			return;
-		}
-		free_irq(mcd_irq, NULL);
-	case 2:
-		release_region(mcd_port, 4);
-	case 1:
-		if (devfs_unregister_blkdev(MAJOR_NR, "mcd")) {
-			printk(KERN_WARNING "Can't unregister major mcd\n");
-			return;
-		}
-		blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
-	default:;
-	}
-}
-
-
-
 /*
  * Test for presence of drive and initialize it.  Called at boot time.
  */
 
 int __init mcd_init(void)
 {
+	struct gendisk *disk = alloc_disk(1);
 	int count;
 	unsigned char result[3];
 	char msg[80];
 
+	if (!disk) {
+		printk(KERN_INFO "mcd: can't allocated disk.\n");
+		return -ENOMEM;
+	}
 	if (mcd_port <= 0 || mcd_irq <= 0) {
 		printk(KERN_INFO "mcd: not probing.\n");
+		put_disk(disk);
 		return -EIO;
 	}
-
-	if (devfs_register_blkdev(MAJOR_NR, "mcd", &mcd_bdops) != 0) {
-		printk(KERN_ERR "mcd: Unable to get major %d for Mitsumi CD-ROM\n", MAJOR_NR);
+	if (register_blkdev(MAJOR_NR, "mcd")) {
+		put_disk(disk);
 		return -EIO;
 	}
-	if (check_region(mcd_port, 4)) {
-		cleanup(1);
+	if (!request_region(mcd_port, 4, "mcd")) {
 		printk(KERN_ERR "mcd: Initialization failed, I/O port (%X) already in use\n", mcd_port);
-		return -EIO;
+		goto out_region;
 	}
 
-	blksize_size[MAJOR_NR] = mcd_blocksizes;
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	read_ahead[MAJOR_NR] = 4;
+	blk_init_queue(&mcd_queue, do_mcd_request, &mcd_spinlock);
 
 	/* check for card */
 
@@ -1093,8 +1094,7 @@ int __init mcd_init(void)
 	if (count >= 2000000) {
 		printk(KERN_INFO "mcd: initialisation failed - No mcd device at 0x%x irq %d\n",
 		       mcd_port, mcd_irq);
-		cleanup(1);
-		return -EIO;
+		goto out_probe;
 	}
 	count = inb(MCDPORT(0));	/* pick up the status */
 
@@ -1103,14 +1103,11 @@ int __init mcd_init(void)
 		if (getValue(result + count)) {
 			printk(KERN_ERR "mcd: mitsumi get version failed at 0x%x\n",
 			       mcd_port);
-			cleanup(1);
-			return -EIO;
+			goto out_probe;
 		}
 
-	if (result[0] == result[1] && result[1] == result[2]) {
-		cleanup(1);
-		return -EIO;
-	}
+	if (result[0] == result[1] && result[1] == result[2])
+		goto out_probe;
 
 	mcdVersion = result[2];
 
@@ -1121,8 +1118,7 @@ int __init mcd_init(void)
 
 	if (request_irq(mcd_irq, mcd_interrupt, SA_INTERRUPT, "Mitsumi CD", NULL)) {
 		printk(KERN_ERR "mcd: Unable to get IRQ%d for Mitsumi CD-ROM\n", mcd_irq);
-		cleanup(1);
-		return -EIO;
+		goto out_probe;
 	}
 
 	if (result[1] == 'D') {
@@ -1134,8 +1130,6 @@ int __init mcd_init(void)
 	sprintf(msg, " mcd: Mitsumi %s Speed CD-ROM at port=0x%x,"
 		" irq=%d\n", mcd_info.speed == 1 ? "Single" : "Double",
 		mcd_port, mcd_irq);
-
-	request_region(mcd_port, 4, "mcd");
 
 	outb(MCMD_CONFIG_DRIVE, MCDPORT(0));
 	outb(0x02, MCDPORT(0));
@@ -1150,17 +1144,31 @@ int __init mcd_init(void)
 	mcd_invalidate_buffers();
 	mcdPresent = 1;
 
-	mcd_info.dev = MKDEV(MAJOR_NR, 0);
+	disk->major = MAJOR_NR;
+	disk->first_minor = 0;
+	sprintf(disk->disk_name, "mcd");
+	disk->fops = &mcd_bdops;
+	disk->flags = GENHD_FL_CD;
+	mcd_gendisk = disk;
 
 	if (register_cdrom(&mcd_info) != 0) {
 		printk(KERN_ERR "mcd: Unable to register Mitsumi CD-ROM.\n");
-		cleanup(3);
-		return -EIO;
+		goto out_cdrom;
 	}
-	devfs_plain_cdrom(&mcd_info, &mcd_bdops);
+	disk->queue = &mcd_queue;
+	add_disk(disk);
 	printk(msg);
-
 	return 0;
+
+out_cdrom:
+	free_irq(mcd_irq, NULL);
+out_probe:
+	release_region(mcd_port, 4);
+out_region:
+	unregister_blkdev(MAJOR_NR, "mcd");
+	blk_cleanup_queue(&mcd_queue);
+	put_disk(disk);
+	return -EIO;
 }
 
 
@@ -1525,7 +1533,19 @@ static int GetToc(void)
 
 void __exit mcd_exit(void)
 {
-	cleanup(3);
+	del_gendisk(mcd_gendisk);
+	put_disk(mcd_gendisk);
+	if (unregister_cdrom(&mcd_info)) {
+		printk(KERN_WARNING "Can't unregister cdrom mcd\n");
+		return;
+	}
+	free_irq(mcd_irq, NULL);
+	release_region(mcd_port, 4);
+	if (unregister_blkdev(MAJOR_NR, "mcd")) {
+		printk(KERN_WARNING "Can't unregister major mcd\n");
+		return;
+	}
+	blk_cleanup_queue(&mcd_queue);
 	del_timer_sync(&mcd_timer);
 }
 

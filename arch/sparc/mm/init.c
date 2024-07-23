@@ -1,4 +1,4 @@
-/*  $Id: init.c,v 1.100 2001/09/21 22:51:47 davem Exp $
+/*  $Id: init.c,v 1.103 2001/11/19 19:03:08 davem Exp $
  *  linux/arch/sparc/mm/init.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -18,10 +18,7 @@
 #include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
-#ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>
-#endif
+#include <linux/initrd.h>
 #include <linux/init.h>
 #include <linux/highmem.h>
 #include <linux/bootmem.h>
@@ -32,9 +29,10 @@
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/vaddrs.h>
+#include <asm/pgalloc.h>	/* bug in asm-generic/tlb.h: check_pgt_cache */
 #include <asm/tlb.h>
 
-mmu_gather_t mmu_gathers[NR_CPUS];
+DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 unsigned long *sparc_valid_addr_bitmap;
 
@@ -55,19 +53,21 @@ extern unsigned int sparc_ramdisk_image;
 extern unsigned int sparc_ramdisk_size;
 
 unsigned long highstart_pfn, highend_pfn;
-unsigned long totalram_pages;
-unsigned long totalhigh_pages;
 
 pte_t *kmap_pte;
 pgprot_t kmap_prot;
 
+/* These are set in {srmmu,sun4c}_paging_init() */
+unsigned long fix_kmap_begin;
+unsigned long fix_kmap_end;
+
 #define kmap_get_fixed_pte(vaddr) \
-	pte_offset(pmd_offset(pgd_offset_k(vaddr), (vaddr)), (vaddr))
+	pte_offset_kernel(pmd_offset(pgd_offset_k(vaddr), (vaddr)), (vaddr))
 
 void __init kmap_init(void)
 {
 	/* cache the first kmap pte */
-	kmap_pte = kmap_get_fixed_pte(FIX_KMAP_BEGIN);
+	kmap_pte = kmap_get_fixed_pte(fix_kmap_begin);
 	kmap_prot = __pgprot(SRMMU_ET_PTE | SRMMU_PRIV | SRMMU_CACHE);
 }
 
@@ -79,15 +79,14 @@ void show_mem(void)
 	       nr_swap_pages << (PAGE_SHIFT-10));
 	printk("%ld pages of RAM\n", totalram_pages);
 	printk("%d free pages\n", nr_free_pages());
+#if 0 /* undefined pgtable_cache_size, pgd_cache_size */
 	printk("%ld pages in page table cache\n",pgtable_cache_size);
 #ifndef CONFIG_SMP
 	if (sparc_cpu_model == sun4m || sparc_cpu_model == sun4d)
 		printk("%ld entries in page dir cache\n",pgd_cache_size);
 #endif	
-	show_buffers();
+#endif
 }
-
-extern pgprot_t protection_map[16];
 
 void __init sparc_context_init(int numctx)
 {
@@ -107,8 +106,6 @@ void __init sparc_context_init(int numctx)
 	for(ctx = 0; ctx < numctx; ctx++)
 		add_to_free_ctxlist(ctx_list_pool + ctx);
 }
-
-#define DEBUG_BOOTMEM
 
 extern unsigned long cmdline_memory_size;
 unsigned long last_valid_pfn;
@@ -158,14 +155,11 @@ unsigned long calc_max_low_pfn(void)
 
 unsigned long __init bootmem_init(unsigned long *pages_avail)
 {
-	unsigned long bootmap_size, start_pfn, max_pfn;
+	unsigned long bootmap_size, start_pfn;
 	unsigned long end_of_phys_memory = 0UL;
 	unsigned long bootmap_pfn, bytes_avail, size;
 	int i;
 
-#ifdef DEBUG_BOOTMEM
-	prom_printf("bootmem_init: Scan sp_banks,  ");
-#endif
 	bytes_avail = 0UL;
 	for (i = 0; sp_banks[i].num_bytes != 0; i++) {
 		end_of_phys_memory = sp_banks[i].base_addr +
@@ -235,10 +229,6 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 	}
 #endif	
 	/* Initialize the boot-time allocator. */
-#ifdef DEBUG_BOOTMEM
-	prom_printf("init_bootmem(spfn[%lx],bpfn[%lx],mlpfn[%lx])\n",
-		    start_pfn, bootmap_pfn, max_low_pfn);
-#endif
 	bootmap_size = init_bootmem_node(NODE_DATA(0), bootmap_pfn, phys_base>>PAGE_SHIFT, max_low_pfn);
 
 	/* Now register the available physical memory with the
@@ -265,23 +255,14 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 
 		size = (last_pfn - curr_pfn) << PAGE_SHIFT;
 		*pages_avail += last_pfn - curr_pfn;
-#ifdef DEBUG_BOOTMEM
-		prom_printf("free_bootmem: base[%lx] size[%lx]\n",
-			    sp_banks[i].base_addr,
-			    size);
-#endif
-		free_bootmem(sp_banks[i].base_addr,
-			     size);
+
+		free_bootmem(sp_banks[i].base_addr, size);
 	}
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start) {
-		size = initrd_end - initrd_start;
-#ifdef DEBUG_BOOTMEM
-		prom_printf("reserve_bootmem: base[%lx] size[%lx]\n",
-			     initrd_start, size);
-#endif
 		/* Reserve the initrd image area. */
+		size = initrd_end - initrd_start;
 		reserve_bootmem(initrd_start, size);
 		*pages_avail -= PAGE_ALIGN(size) >> PAGE_SHIFT;
 
@@ -291,9 +272,6 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 #endif
 	/* Reserve the kernel text/data/bss. */
 	size = (start_pfn << PAGE_SHIFT) - phys_base;
-#ifdef DEBUG_BOOTMEM
-	prom_printf("reserve_bootmem: base[%lx] size[%lx]\n", phys_base, size);
-#endif
 	reserve_bootmem(phys_base, size);
 	*pages_avail -= PAGE_ALIGN(size) >> PAGE_SHIFT;
 
@@ -302,14 +280,27 @@ unsigned long __init bootmem_init(unsigned long *pages_avail)
 	 * in free_all_bootmem.
 	 */
 	size = bootmap_size;
-#ifdef DEBUG_BOOTMEM
-	prom_printf("reserve_bootmem: base[%lx] size[%lx]\n",
-		    (bootmap_pfn << PAGE_SHIFT), size);
-#endif
 	reserve_bootmem((bootmap_pfn << PAGE_SHIFT), size);
 	*pages_avail -= PAGE_ALIGN(size) >> PAGE_SHIFT;
 
 	return max_pfn;
+}
+
+/*
+ * check_pgt_cache
+ *
+ * This is called at the end of unmapping of VMA (zap_page_range),
+ * to rescan the page cache for architecture specific things,
+ * presumably something like sun4/sun4c PMEGs. Most architectures
+ * define check_pgt_cache empty.
+ *
+ * We simply copy the 2.4 implementation for now.
+ */
+int pgt_cache_water[2] = { 25, 50 };
+
+void check_pgt_cache(void)
+{
+	do_check_pgt_cache(pgt_cache_water[0], pgt_cache_water[1]);
 }
 
 /*
@@ -410,9 +401,6 @@ void __init mem_init(void)
 	int datapages = 0;
 	int initpages = 0; 
 	int i;
-#ifdef CONFIG_BLK_DEV_INITRD
-	unsigned long addr, last;
-#endif
 
 	highmem_start_page = mem_map + highstart_pfn;
 
@@ -435,9 +423,6 @@ void __init mem_init(void)
 	max_mapnr = last_valid_pfn - (phys_base >> PAGE_SHIFT);
 	high_memory = __va(max_low_pfn << PAGE_SHIFT);
 
-#ifdef DEBUG_BOOTMEM
-	prom_printf("mem_init: Calling free_all_bootmem().\n");
-#endif
 	num_physpages = totalram_pages = free_all_bootmem();
 
 	for (i = 0; sp_banks[i].num_bytes != 0; i++) {
@@ -462,7 +447,7 @@ void __init mem_init(void)
 	initpages = (((unsigned long) &__init_end) - ((unsigned long) &__init_begin));
 	initpages = PAGE_ALIGN(initpages) >> PAGE_SHIFT;
 
-	printk("Memory: %dk available (%dk kernel code, %dk data, %dk init, %ldk highmem) [%08lx,%08lx]\n",
+	printk(KERN_INFO "Memory: %dk available (%dk kernel code, %dk data, %dk init, %ldk highmem) [%08lx,%08lx]\n",
 	       nr_free_pages() << (PAGE_SHIFT-10),
 	       codepages << (PAGE_SHIFT-10),
 	       datapages << (PAGE_SHIFT-10), 
@@ -489,14 +474,14 @@ void free_initmem (void)
 		totalram_pages++;
 		num_physpages++;
 	}
-	printk ("Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
+	printk (KERN_INFO "Freeing unused kernel memory: %dk freed\n", (&__init_end - &__init_begin) >> 10);
 }
 
 #ifdef CONFIG_BLK_DEV_INITRD
 void free_initrd_mem(unsigned long start, unsigned long end)
 {
 	if (start < end)
-		printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
+		printk (KERN_INFO "Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 	for (; start < end; start += PAGE_SIZE) {
 		struct page *p = virt_to_page(start);
 
@@ -508,19 +493,7 @@ void free_initrd_mem(unsigned long start, unsigned long end)
 }
 #endif
 
-void si_meminfo(struct sysinfo *val)
-{
-	val->totalram = totalram_pages;
-	val->sharedram = 0;
-	val->freeram = nr_free_pages();
-	val->bufferram = atomic_read(&buffermem_pages);
-	val->totalhigh = totalhigh_pages;
-	val->freehigh = nr_free_highpages();
-
-	val->mem_unit = PAGE_SIZE;
-}
-
-void flush_page_to_ram(struct page *page)
+void sparc_flush_page_to_ram(struct page *page)
 {
 	unsigned long vaddr = (unsigned long)page_address(page);
 

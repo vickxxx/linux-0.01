@@ -1,11 +1,16 @@
-# Rules for making the NTFS driver
+# Rules for making the NTFS driver.
 
-O_TARGET := ntfs.o
+obj-$(CONFIG_NTFS_FS) += ntfs.o
 
-obj-y   := fs.o sysctl.o support.o util.o inode.o dir.o super.o attr.o unistr.o
-obj-m   := $(O_TARGET)
-# New version format started 3 February 2001.
-EXTRA_CFLAGS = -DNTFS_VERSION=\"1.1.20\" #-DDEBUG
+ntfs-objs := aops.o attrib.o compress.o debug.o dir.o file.o inode.o mft.o \
+	     mst.o namei.o super.o sysctl.o time.o unistr.o upcase.o
 
-include $(TOPDIR)/Rules.make
+EXTRA_CFLAGS = -DNTFS_VERSION=\"2.1.4\"
 
+ifeq ($(CONFIG_NTFS_DEBUG),y)
+EXTRA_CFLAGS += -DDEBUG
+endif
+
+ifeq ($(CONFIG_NTFS_RW),y)
+EXTRA_CFLAGS += -DNTFS_RW
+endif

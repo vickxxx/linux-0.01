@@ -1,4 +1,4 @@
-/* $Id: generic.c,v 1.13 2001/07/17 16:17:33 anton Exp $
+/* $Id: generic.c,v 1.14 2001/12/21 04:56:15 davem Exp $
  * generic.c: Generic Sparc mm routines that are not dependent upon
  *            MMU type but are Sparc specific.
  *
@@ -13,19 +13,32 @@
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/page.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 static inline void forget_pte(pte_t page)
 {
+#if 0 /* old 2.4 code */
 	if (pte_none(page))
 		return;
 	if (pte_present(page)) {
-		struct page *ptpage = pte_page(page);
-		if ((!VALID_PAGE(ptpage)) || PageReserved(ptpage))
+		unsigned long pfn = pte_pfn(page);
+		struct page *ptpage;
+		if (!pfn_valid(pfn))
+			return;
+		ptpage = pfn_to_page(pfn);
+		if (PageReserved(ptpage))
 			return;
 		page_cache_release(ptpage);
 		return;
 	}
 	swap_free(pte_to_swp_entry(page));
+#else
+	if (!pte_none(page)) {
+		printk("forget_pte: old mapping existed!\n");
+		BUG();
+	}
+#endif
 }
 
 /* Remap IO memory, the same way as remap_page_range(), but use
@@ -65,7 +78,7 @@ static inline int io_remap_pmd_range(pmd_t * pmd, unsigned long address, unsigne
 		end = PGDIR_SIZE;
 	offset -= address;
 	do {
-		pte_t * pte = pte_alloc(current->mm, pmd, address);
+		pte_t * pte = pte_alloc_map(current->mm, pmd, address);
 		if (!pte)
 			return -ENOMEM;
 		io_remap_pte_range(pte, address, end - address, address + offset, prot, space);
@@ -75,18 +88,18 @@ static inline int io_remap_pmd_range(pmd_t * pmd, unsigned long address, unsigne
 	return 0;
 }
 
-int io_remap_page_range(unsigned long from, unsigned long offset, unsigned long size, pgprot_t prot, int space)
+int io_remap_page_range(struct vm_area_struct *vma, unsigned long from, unsigned long offset, unsigned long size, pgprot_t prot, int space)
 {
 	int error = 0;
 	pgd_t * dir;
 	unsigned long beg = from;
 	unsigned long end = from + size;
-	struct mm_struct *mm = current->mm;
+	struct mm_struct *mm = vma->vm_mm;
 
 	prot = __pgprot(pg_iobits);
 	offset -= from;
 	dir = pgd_offset(mm, from);
-	flush_cache_range(mm, beg, end);
+	flush_cache_range(vma, beg, end);
 
 	spin_lock(&mm->page_table_lock);
 	while (from < end) {
@@ -102,6 +115,6 @@ int io_remap_page_range(unsigned long from, unsigned long offset, unsigned long 
 	}
 	spin_unlock(&mm->page_table_lock);
 
-	flush_tlb_range(current->mm, beg, end);
+	flush_tlb_range(vma, beg, end);
 	return error;
 }

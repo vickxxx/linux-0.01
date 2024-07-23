@@ -1,4 +1,4 @@
-/* $Id: chmc.c,v 1.3 2001/04/03 12:49:47 davem Exp $
+/* $Id: chmc.c,v 1.4 2002/01/08 16:00:14 davem Exp $
  * memctrlr.c: Driver for UltraSPARC-III memory controller.
  *
  * Copyright (C) 2001 David S. Miller (davem@redhat.com)
@@ -9,6 +9,10 @@
 #include <linux/types.h>
 #include <linux/slab.h>
 #include <linux/list.h>
+#include <linux/string.h>
+#include <linux/sched.h>
+#include <linux/smp.h>
+#include <linux/errno.h>
 #include <linux/init.h>
 #include <asm/spitfire.h>
 #include <asm/chmctrl.h>
@@ -220,7 +224,7 @@ int chmc_getunumber(int syndrome_code,
 		int dimm;
 
 		/* Multi-bit error, we just dump out all the
-		 * dimm labels assosciated with this bank.
+		 * dimm labels associated with this bank.
 		 */
 		for (dimm = 0; dimm < CHMCTRL_NDIMMS; dimm++) {
 			sprintf(buf, "%s ",
@@ -420,7 +424,7 @@ static int __init chmc_init(void)
 	int index;
 
 	/* This driver is only for cheetah platforms. */
-	if (tlb_type != cheetah)
+	if (tlb_type != cheetah && tlb_type != cheetah_plus)
 		return -ENODEV;
 
 	index = probe_for_string("memory-controller", 0);

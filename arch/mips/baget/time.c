@@ -11,6 +11,7 @@
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/time.h>
 #include <linux/interrupt.h>
 #include <linux/timex.h>
 #include <linux/spinlock.h>
@@ -19,25 +20,23 @@
 #include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/ptrace.h>
-#include <asm/system.h>  
+#include <asm/system.h>
 
 #include <asm/baget/baget.h>
 
-extern rwlock_t xtime_lock;
-
-/* 
+/*
  *  To have precision clock, we need to fix available clock frequency
  */
 #define FREQ_NOM  79125  /* Baget frequency ratio */
 #define FREQ_DEN  10000
 
-static inline int timer_intr_valid(void) 
+static inline int timer_intr_valid(void)
 {
 	static unsigned long long ticks, valid_ticks;
 
 	if (ticks++ * FREQ_DEN >= valid_ticks * FREQ_NOM) {
-		/* 
-		 *  We need no overflow checks, 
+		/*
+		 *  We need no overflow checks,
 		 *  due baget unable to work 3000 years...
 		 *  At least without reboot...
 		 */
@@ -63,10 +62,10 @@ static void __init timer_enable(void)
 	vic_outb(ss0cr0, VIC_SS0CR0);
 
 	vic_outb(VIC_INT_IPL(6)|VIC_INT_NOAUTO|VIC_INT_EDGE|
-		 VIC_INT_LOW|VIC_INT_ENABLE, VIC_LINT2); 
+		 VIC_INT_LOW|VIC_INT_ENABLE, VIC_LINT2);
 }
 
-static struct irqaction timer_irq  = 
+static struct irqaction timer_irq  =
 { timer_interrupt, SA_INTERRUPT, 0, "timer", NULL, NULL};
 
 void __init time_init(void)
@@ -79,20 +78,23 @@ void __init time_init(void)
 
 void do_gettimeofday(struct timeval *tv)
 {
-	unsigned long flags;
+	unsigned long seq;
 
-	read_lock_irqsave (&xtime_lock, flags);
-	*tv = xtime;
-	read_unlock_irqrestore (&xtime_lock, flags);
+	do {
+		seq = read_seqbegin(&xtime_lock);
+		tv->tv_sec = xtime.tv_sec;
+		tv->tv_usec = xtime.tv_nsec / 1000;
+	} while (read_seqretry(&xtime_lock, seq));
 }
 
 void do_settimeofday(struct timeval *tv)
 {
-	write_lock_irq (&xtime_lock);
-	xtime = *tv;
+	write_seqlock_irq(&xtime_lock);
+	xtime.tv_usec = tv->tv_sec;
+	xtime.tv_nsec = tv->tv_usec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	write_unlock_irq (&xtime_lock);
+	write_sequnlock_irq(&xtime_lock);
 }

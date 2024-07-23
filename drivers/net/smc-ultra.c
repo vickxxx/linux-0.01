@@ -59,18 +59,17 @@ static const char version[] =
 
 #include <linux/config.h>
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/init.h>
 #include <linux/isapnp.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+
 #include <asm/io.h>
 #include <asm/system.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
 #include "8390.h"
 
 /* A zero-terminated list of I/O addresses to be probed. */
@@ -80,7 +79,7 @@ static unsigned int ultra_portlist[] __initdata =
 int ultra_probe(struct net_device *dev);
 static int ultra_probe1(struct net_device *dev, int ioaddr);
 
-#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
+#ifdef __ISAPNP__
 static int ultra_probe_isapnp(struct net_device *dev);
 #endif
 
@@ -100,7 +99,7 @@ static void ultra_pio_output(struct net_device *dev, int count,
 							 const unsigned char *buf, const int start_page);
 static int ultra_close_card(struct net_device *dev);
 
-#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
+#ifdef __ISAPNP__
 static struct isapnp_device_id ultra_device_ids[] __initdata = {
         {       ISAPNP_VENDOR('S','M','C'), ISAPNP_FUNCTION(0x8416),
                 ISAPNP_VENDOR('S','M','C'), ISAPNP_FUNCTION(0x8416),
@@ -140,7 +139,7 @@ int __init ultra_probe(struct net_device *dev)
 	else if (base_addr != 0)	/* Don't probe at all. */
 		return -ENXIO;
 
-#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
+#ifdef __ISAPNP__
 	/* Look for any installed ISAPnP cards */
 	if (isapnp_present() && (ultra_probe_isapnp(dev) == 0))
 		return 0;
@@ -251,8 +250,8 @@ static int __init ultra_probe1(struct net_device *dev, int ioaddr)
 	ei_status.rx_start_page = START_PG + TX_PAGES;
 	ei_status.stop_page = num_pages;
 
-	dev->rmem_start = dev->mem_start + TX_PAGES*256;
-	dev->mem_end = dev->rmem_end
+	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
+	dev->mem_end = ei_status.rmem_end
 		= dev->mem_start + (ei_status.stop_page - START_PG)*256;
 
 	if (piomode) {
@@ -279,35 +278,39 @@ out:
 	return retval;
 }
 
-#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
+#ifdef __ISAPNP__
 static int __init ultra_probe_isapnp(struct net_device *dev)
 {
         int i;
 
         for (i = 0; ultra_device_ids[i].vendor != 0; i++) {
-                struct pci_dev *idev = NULL;
+		struct pnp_dev *idev = NULL;
 
-                while ((idev = isapnp_find_dev(NULL,
-                                               ultra_device_ids[i].vendor,
-                                               ultra_device_ids[i].function,
-                                               idev))) {
+                while ((idev = pnp_find_dev(NULL,
+                                            ultra_device_ids[i].vendor,
+                                            ultra_device_ids[i].function,
+                                            idev))) {
                         /* Avoid already found cards from previous calls */
-                        if (idev->prepare(idev))
-                                continue;
-                        if (idev->activate(idev))
-                                continue;
-                        /* if no irq, search for next */
-                        if (idev->irq_resource[0].start == 0)
-                                continue;
+                        if (pnp_device_attach(idev) < 0)
+                        	continue;
+                        if (pnp_activate_dev(idev) < 0) {
+                              __again:
+                        	pnp_device_detach(idev);
+                        	continue;
+                        }
+			/* if no io and irq, search for next */
+			if (!pnp_port_valid(idev, 0) || !pnp_irq_valid(idev, 0))
+				goto __again;
                         /* found it */
-                        dev->base_addr = idev->resource[0].start;
-                        dev->irq = idev->irq_resource[0].start;
+			dev->base_addr = pnp_port_start(idev, 0);
+			dev->irq = pnp_irq(idev, 0);
                         printk(KERN_INFO "smc-ultra.c: ISAPnP reports %s at i/o %#lx, irq %d.\n",
                                 (char *) ultra_device_ids[i].driver_data,
-
                                 dev->base_addr, dev->irq);
                         if (ultra_probe1(dev, dev->base_addr) != 0) {      /* Shouldn't happen. */
-                                printk(KERN_ERR "smc-ultra.c: Probe of ISAPnP card at %#lx failed.\n", dev->base_addr);                                return -ENXIO;
+                                printk(KERN_ERR "smc-ultra.c: Probe of ISAPnP card at %#lx failed.\n", dev->base_addr);
+                                pnp_device_detach(idev);
+				return -ENXIO;
                         }
                         ei_status.priv = (unsigned long)idev;
                         break;
@@ -383,9 +386,11 @@ ultra_get_8390_hdr(struct net_device *dev, struct e8390_pkt_hdr *hdr, int ring_p
 	unsigned long hdr_start = dev->mem_start + ((ring_page - START_PG)<<8);
 
 	outb(ULTRA_MEMENB, dev->base_addr - ULTRA_NIC_OFFSET);	/* shmem on */
-#ifdef notdef
+#ifdef __BIG_ENDIAN
 	/* Officially this is what we are doing, but the readl() is faster */
+	/* unfortunately it isn't endian aware of the struct               */
 	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	hdr->count = le16_to_cpu(hdr->count);
 #else
 	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
 #endif
@@ -403,12 +408,12 @@ ultra_block_input(struct net_device *dev, int count, struct sk_buff *skb, int ri
 	/* Enable shared memory. */
 	outb(ULTRA_MEMENB, dev->base_addr - ULTRA_NIC_OFFSET);
 
-	if (xfer_start + count > dev->rmem_end) {
+	if (xfer_start + count > ei_status.rmem_end) {
 		/* We must wrap the input move. */
-		int semi_count = dev->rmem_end - xfer_start;
+		int semi_count = ei_status.rmem_end - xfer_start;
 		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+		isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
 		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
@@ -501,10 +506,10 @@ static int irq[MAX_ULTRA_CARDS];
 
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_ULTRA_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_ULTRA_CARDS) "i");
-MODULE_PARM_DESC(io, "SMC Ultra I/O base address(es)");
-MODULE_PARM_DESC(irq, "SMC Ultra IRQ number(s) (assigned)");
-
-EXPORT_NO_SYMBOLS;
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s) (assigned)");
+MODULE_DESCRIPTION("SMC Ultra/EtherEZ ISA/PnP Ethernet driver");
+MODULE_LICENSE("GPL");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -544,10 +549,10 @@ cleanup_module(void)
 			/* NB: ultra_close_card() does free_irq */
 			int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET;
 
-#if defined CONFIG_ISAPNP || defined CONFIG_ISAPNP_MODULE
-			struct pci_dev *idev = (struct pci_dev *)ei_status.priv;
+#ifdef __ISAPNP__
+			struct pnp_dev *idev = (struct pnp_dev *)ei_status.priv;
 			if (idev)
-				idev->deactivate(idev);
+				pnp_device_detach(idev);
 #endif
 
 			unregister_netdev(dev);
@@ -557,7 +562,6 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
-MODULE_LICENSE("GPL");
 
 
 

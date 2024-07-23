@@ -57,21 +57,17 @@
 #include <net/icmp.h>
 #include <net/snmp.h>
 #include <net/sock.h>
-#include <linux/ipsec.h>
+#include <net/xfrm.h>
 #include <net/sctp/sctp.h>
 #include <net/sctp/sm.h>
 
 /* Forward declarations for internal helpers. */
 static int sctp_rcv_ootb(struct sk_buff *);
-static struct sctp_association *__sctp_rcv_lookup(struct sk_buff *skb,
+struct sctp_association *__sctp_rcv_lookup(struct sk_buff *skb,
 				      const union sctp_addr *laddr,
 				      const union sctp_addr *paddr,
 				      struct sctp_transport **transportp);
-static struct sctp_endpoint *__sctp_rcv_lookup_endpoint(const union sctp_addr *laddr);
-static struct sctp_association *__sctp_lookup_association(
-					const union sctp_addr *local,
-					const union sctp_addr *peer,
-					struct sctp_transport **pt);
+struct sctp_endpoint *__sctp_rcv_lookup_endpoint(const union sctp_addr *laddr);
 
 
 /* Calculate the SCTP checksum of an SCTP packet.  */
@@ -123,28 +119,21 @@ int sctp_rcv(struct sk_buff *skb)
 
 	SCTP_INC_STATS_BH(SctpInSCTPPacks);
 
-	if (skb_linearize(skb, GFP_ATOMIC) != 0)
-		goto discard_it;
-
 	sh = (struct sctphdr *) skb->h.raw;
 
 	/* Pull up the IP and SCTP headers. */
 	__skb_pull(skb, skb->h.raw - skb->data);
 	if (skb->len < sizeof(struct sctphdr))
-		goto discard_it;
+		goto bad_packet;
 	if (sctp_rcv_checksum(skb) < 0)
-		goto discard_it;
+		goto bad_packet;
 
 	skb_pull(skb, sizeof(struct sctphdr));
-
-	/* Make sure we at least have chunk headers worth of data left. */
-	if (skb->len < sizeof(struct sctp_chunkhdr))
-		goto discard_it;
 
 	family = ipver2af(skb->nh.iph->version);
 	af = sctp_get_af_specific(family);
 	if (unlikely(!af))
-		goto discard_it;
+		goto bad_packet;
 
 	/* Initialize local addresses for lookups. */
 	af->from_skb(&src, skb, 1);
@@ -161,7 +150,7 @@ int sctp_rcv(struct sk_buff *skb)
 	 * IP broadcast addresses cannot be used in an SCTP transport
 	 * address."
 	 */
-	if (!af->addr_valid(&src, NULL) || !af->addr_valid(&dest, NULL))
+	if (!af->addr_valid(&src) || !af->addr_valid(&dest))
 		goto discard_it;
 
 	asoc = __sctp_rcv_lookup(skb, &src, &dest, &transport);
@@ -186,7 +175,7 @@ int sctp_rcv(struct sk_buff *skb)
 	rcvr = asoc ? &asoc->base : &ep->base;
 	sk = rcvr->sk;
 
-	if (!ipsec_sk_policy(sk, skb))
+	if (!xfrm_policy_check(sk, XFRM_POLICY_IN, skb, family))
 		goto discard_release;
 
 	ret = sk_filter(sk, skb, 1);
@@ -233,6 +222,9 @@ int sctp_rcv(struct sk_buff *skb)
 		sctp_endpoint_put(ep);
 	sock_put(sk);
 	return ret;
+
+bad_packet:
+	SCTP_INC_STATS(SctpChecksumErrors);
 
 discard_it:
 	kfree_skb(skb);
@@ -289,31 +281,6 @@ void sctp_icmp_frag_needed(struct sock *sk, struct sctp_association *asoc,
 	}
 }
 
-/*
- * SCTP Implementer's Guide, 2.37 ICMP handling procedures
- *
- * ICMP8) If the ICMP code is a "Unrecognized next header type encountered"
- *        or a "Protocol Unreachable" treat this message as an abort
- *        with the T bit set.
- *
- * This function sends an event to the state machine, which will abort the
- * association.
- *
- */
-void sctp_icmp_proto_unreachable(struct sock *sk,
-                           struct sctp_endpoint *ep,
-                           struct sctp_association *asoc,
-                           struct sctp_transport *t)
-{
-	SCTP_DEBUG_PRINTK("%s\n",  __FUNCTION__);
-
-	sctp_do_sm(SCTP_EVENT_T_OTHER,
-		   SCTP_ST_OTHER(SCTP_EVENT_ICMP_PROTO_UNREACH),
-		   asoc->state, asoc->ep, asoc, NULL,
-		   GFP_ATOMIC);
-
-}
-
 /* Common lookup code for icmp/icmpv6 error handler. */
 struct sock *sctp_err_lookup(int family, struct sk_buff *skb,
 			     struct sctphdr *sctphdr,
@@ -356,12 +323,11 @@ struct sock *sctp_err_lookup(int family, struct sk_buff *skb,
 	}
 
 	if (asoc) {
-		sk = asoc->base.sk;
-
 		if (ntohl(sctphdr->vtag) != asoc->c.peer_vtag) {
 			ICMP_INC_STATS_BH(IcmpInErrors);
 			goto out;
 		}
+		sk = asoc->base.sk;
 	} else
 		sk = ep->base.sk;
 
@@ -463,13 +429,7 @@ void sctp_v4_err(struct sk_buff *skb, __u32 info)
 			sctp_icmp_frag_needed(sk, asoc, transport, info);
 			goto out_unlock;
 		}
-		else {
-			if (ICMP_PROT_UNREACH == code) {
-				sctp_icmp_proto_unreachable(sk, ep, asoc,
-							    transport);
-				goto out_unlock;
-			}
-		}
+
 		err = icmp_err_convert[code].errno;
 		break;
 	case ICMP_TIME_EXCEEDED:
@@ -487,10 +447,10 @@ void sctp_v4_err(struct sk_buff *skb, __u32 info)
 
 	inet = inet_sk(sk);
 	if (!sock_owned_by_user(sk) && inet->recverr) {
-		sk->err = err;
-		sk->error_report(sk);
+		sk->sk_err = err;
+		sk->sk_error_report(sk);
 	} else {  /* Only an error on timeout */
-		sk->err_soft = err;
+		sk->sk_err_soft = err;
 	}
 
 out_unlock:
@@ -516,10 +476,10 @@ int sctp_rcv_ootb(struct sk_buff *skb)
 	sctp_errhdr_t *err;
 
 	ch = (sctp_chunkhdr_t *) skb->data;
-	ch_end = ((__u8 *) ch) + WORD_ROUND(ntohs(ch->length));
 
 	/* Scan through all the chunks in the packet.  */
-	while (ch_end > (__u8 *)ch && ch_end < skb->tail) {
+	do {
+		ch_end = ((__u8 *) ch) + WORD_ROUND(ntohs(ch->length));
 
 		/* RFC 8.4, 2) If the OOTB packet contains an ABORT chunk, the
 		 * receiver MUST silently discard the OOTB packet and take no
@@ -550,8 +510,7 @@ int sctp_rcv_ootb(struct sk_buff *skb)
 		}
 
 		ch = (sctp_chunkhdr_t *) ch_end;
-	        ch_end = ((__u8 *) ch) + WORD_ROUND(ntohs(ch->length));
-	}
+	} while (ch_end < skb->tail);
 
 	return 0;
 
@@ -560,7 +519,7 @@ discard:
 }
 
 /* Insert endpoint into the hash table.  */
-static void __sctp_hash_endpoint(struct sctp_endpoint *ep)
+void __sctp_hash_endpoint(struct sctp_endpoint *ep)
 {
 	struct sctp_ep_common **epp;
 	struct sctp_ep_common *epb;
@@ -569,7 +528,7 @@ static void __sctp_hash_endpoint(struct sctp_endpoint *ep)
 	epb = &ep->base;
 
 	epb->hashent = sctp_ep_hashfn(epb->bind_addr.port);
-	head = &sctp_ep_hashtable[epb->hashent];
+	head = &sctp_ep_hashbucket[epb->hashent];
 
 	sctp_write_lock(&head->lock);
 	epp = &head->chain;
@@ -590,7 +549,7 @@ void sctp_hash_endpoint(struct sctp_endpoint *ep)
 }
 
 /* Remove endpoint from the hash table.  */
-static void __sctp_unhash_endpoint(struct sctp_endpoint *ep)
+void __sctp_unhash_endpoint(struct sctp_endpoint *ep)
 {
 	struct sctp_hashbucket *head;
 	struct sctp_ep_common *epb;
@@ -599,7 +558,7 @@ static void __sctp_unhash_endpoint(struct sctp_endpoint *ep)
 
 	epb->hashent = sctp_ep_hashfn(epb->bind_addr.port);
 
-	head = &sctp_ep_hashtable[epb->hashent];
+	head = &sctp_ep_hashbucket[epb->hashent];
 
 	sctp_write_lock(&head->lock);
 
@@ -622,7 +581,7 @@ void sctp_unhash_endpoint(struct sctp_endpoint *ep)
 }
 
 /* Look up an endpoint. */
-static struct sctp_endpoint *__sctp_rcv_lookup_endpoint(const union sctp_addr *laddr)
+struct sctp_endpoint *__sctp_rcv_lookup_endpoint(const union sctp_addr *laddr)
 {
 	struct sctp_hashbucket *head;
 	struct sctp_ep_common *epb;
@@ -630,7 +589,7 @@ static struct sctp_endpoint *__sctp_rcv_lookup_endpoint(const union sctp_addr *l
 	int hash;
 
 	hash = sctp_ep_hashfn(laddr->v4.sin_port);
-	head = &sctp_ep_hashtable[hash];
+	head = &sctp_ep_hashbucket[hash];
 	read_lock(&head->lock);
 	for (epb = head->chain; epb; epb = epb->next) {
 		ep = sctp_ep(epb);
@@ -648,8 +607,16 @@ hit:
 	return ep;
 }
 
+/* Add an association to the hash. Local BH-safe. */
+void sctp_hash_established(struct sctp_association *asoc)
+{
+	sctp_local_bh_disable();
+	__sctp_hash_established(asoc);
+	sctp_local_bh_enable();
+}
+
 /* Insert association into the hash table.  */
-static void __sctp_hash_established(struct sctp_association *asoc)
+void __sctp_hash_established(struct sctp_association *asoc)
 {
 	struct sctp_ep_common **epp;
 	struct sctp_ep_common *epb;
@@ -660,7 +627,7 @@ static void __sctp_hash_established(struct sctp_association *asoc)
 	/* Calculate which chain this entry will belong to. */
 	epb->hashent = sctp_assoc_hashfn(epb->bind_addr.port, asoc->peer.port);
 
-	head = &sctp_assoc_hashtable[epb->hashent];
+	head = &sctp_assoc_hashbucket[epb->hashent];
 
 	sctp_write_lock(&head->lock);
 	epp = &head->chain;
@@ -672,16 +639,16 @@ static void __sctp_hash_established(struct sctp_association *asoc)
 	sctp_write_unlock(&head->lock);
 }
 
-/* Add an association to the hash. Local BH-safe. */
-void sctp_hash_established(struct sctp_association *asoc)
+/* Remove association from the hash table.  Local BH-safe. */
+void sctp_unhash_established(struct sctp_association *asoc)
 {
 	sctp_local_bh_disable();
-	__sctp_hash_established(asoc);
+	__sctp_unhash_established(asoc);
 	sctp_local_bh_enable();
 }
 
 /* Remove association from the hash table.  */
-static void __sctp_unhash_established(struct sctp_association *asoc)
+void __sctp_unhash_established(struct sctp_association *asoc)
 {
 	struct sctp_hashbucket *head;
 	struct sctp_ep_common *epb;
@@ -691,7 +658,7 @@ static void __sctp_unhash_established(struct sctp_association *asoc)
 	epb->hashent = sctp_assoc_hashfn(epb->bind_addr.port,
 					 asoc->peer.port);
 
-	head = &sctp_assoc_hashtable[epb->hashent];
+	head = &sctp_assoc_hashbucket[epb->hashent];
 
 	sctp_write_lock(&head->lock);
 
@@ -705,16 +672,8 @@ static void __sctp_unhash_established(struct sctp_association *asoc)
 	sctp_write_unlock(&head->lock);
 }
 
-/* Remove association from the hash table.  Local BH-safe. */
-void sctp_unhash_established(struct sctp_association *asoc)
-{
-	sctp_local_bh_disable();
-	__sctp_unhash_established(asoc);
-	sctp_local_bh_enable();
-}
-
 /* Look up an association. */
-static struct sctp_association *__sctp_lookup_association(
+struct sctp_association *__sctp_lookup_association(
 					const union sctp_addr *local,
 					const union sctp_addr *peer,
 					struct sctp_transport **pt)
@@ -729,7 +688,7 @@ static struct sctp_association *__sctp_lookup_association(
 	 * have wildcards anyways.
 	 */
 	hash = sctp_assoc_hashfn(local->v4.sin_port, peer->v4.sin_port);
-	head = &sctp_assoc_hashtable[hash];
+	head = &sctp_assoc_hashbucket[hash];
 	read_lock(&head->lock);
 	for (epb = head->chain; epb; epb = epb->next) {
 		asoc = sctp_assoc(epb);
@@ -751,9 +710,8 @@ hit:
 }
 
 /* Look up an association. BH-safe. */
-SCTP_STATIC
 struct sctp_association *sctp_lookup_association(const union sctp_addr *laddr,
-						 const union sctp_addr *paddr,
+					    const union sctp_addr *paddr,
 					    struct sctp_transport **transportp)
 {
 	struct sctp_association *asoc;
@@ -810,7 +768,6 @@ static struct sctp_association *__sctp_rcv_init_lookup(struct sk_buff *skb,
 	union sctp_params params;
 	sctp_init_chunk_t *init;
 	struct sctp_transport *transport;
-	struct sctp_af *af;
 
 	ch = (sctp_chunkhdr_t *) skb->data;
 
@@ -822,14 +779,6 @@ static struct sctp_association *__sctp_rcv_init_lookup(struct sk_buff *skb,
 	default:
 		return NULL;
 	}
-
-	/* The code below will attempt to walk the chunk and extract
-	 * parameter information.  Before we do that, we need to verify
-	 * that the chunk length doesn't cause overflow.  Otherwise, we'll
-	 * walk off the end.
-	 */
-	if (WORD_ROUND(ntohs(ch->length)) > skb->len)
-		return NULL;
 
 	/*
 	 * This code will NOT touch anything inside the chunk--it is
@@ -853,12 +802,11 @@ static struct sctp_association *__sctp_rcv_init_lookup(struct sk_buff *skb,
 	sctp_walk_params(params, init, init_hdr.params) {
 
 		/* Note: Ignoring hostname addresses. */
-		af = sctp_get_af_specific(param_type2af(params.p->type));
-		if (!af)
+		if ((SCTP_PARAM_IPV4_ADDRESS != params.p->type) &&
+		    (SCTP_PARAM_IPV6_ADDRESS != params.p->type))
 			continue;
 
-		af->from_addr_param(paddr, params.addr, ntohs(sh->source), 0);
-
+		sctp_param2sockaddr(paddr, params.addr, ntohs(sh->source), 0);
 		asoc = __sctp_lookup_association(laddr, paddr, &transport);
 		if (asoc)
 			return asoc;
@@ -868,7 +816,7 @@ static struct sctp_association *__sctp_rcv_init_lookup(struct sk_buff *skb,
 }
 
 /* Lookup an association for an inbound skb. */
-static struct sctp_association *__sctp_rcv_lookup(struct sk_buff *skb,
+struct sctp_association *__sctp_rcv_lookup(struct sk_buff *skb,
 				      const union sctp_addr *paddr,
 				      const union sctp_addr *laddr,
 				      struct sctp_transport **transportp)

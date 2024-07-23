@@ -1,5 +1,5 @@
 /* $Id: sys32.S,v 1.12 2000/03/24 04:17:37 davem Exp $
- * sys32.S: I-cache tricks for 32-bit compatability layer simple
+ * sys32.S: I-cache tricks for 32-bit compatibility layer simple
  *          conversions.
  *
  * Copyright (C) 1997 David S. Miller (davem@caip.rutgers.edu)
@@ -42,7 +42,7 @@ sys32_mknod:
 	 and		%o2, %g2, %o2
 
 	.align		32
-	.globl		sys32_sendto, sys32_recvfrom, sys32_getsockopt
+	.globl		sys32_sendto, sys32_recvfrom
 sys32_sendto:
 	sethi		%hi(sys_sendto), %g1
 	jmpl		%g1 + %lo(sys_sendto), %g0
@@ -52,10 +52,6 @@ sys32_recvfrom:
 	sethi		%hi(sys_recvfrom), %g1
 	jmpl		%g1 + %lo(sys_recvfrom), %g0
 	 srl		%o5, 0, %o5
-sys32_getsockopt:
-	sethi		%hi(sys_getsockopt), %g1
-	jmpl		%g1 + %lo(sys_getsockopt), %g0
-	 srl		%o4, 0, %o4
 
 	.globl		sys32_bdflush
 sys32_bdflush:
@@ -179,7 +175,7 @@ do_sys_recv: /* sys_recv(int, void *, size_t, unsigned int) */
 	 lduwa		[%o1 + 0x4] %asi, %o1
 	nop
 	nop
-do_sys_sendto: /* sys32_sendto(int, u32, __kernel_size_t32, unsigned int, u32, int) */
+do_sys_sendto: /* sys32_sendto(int, u32, compat_size_t, unsigned int, u32, int) */
 	ldswa		[%o1 + 0x0] %asi, %o0
 	sethi		%hi(sys32_sendto), %g1
 	lduwa		[%o1 + 0x8] %asi, %o2
@@ -188,7 +184,7 @@ do_sys_sendto: /* sys32_sendto(int, u32, __kernel_size_t32, unsigned int, u32, i
 	ldswa		[%o1 + 0x14] %asi, %o5
 	jmpl		%g1 + %lo(sys32_sendto), %g0
 	 lduwa		[%o1 + 0x4] %asi, %o1
-do_sys_recvfrom: /* sys32_recvfrom(int, u32, __kernel_size_t32, unsigned int, u32, u32) */
+do_sys_recvfrom: /* sys32_recvfrom(int, u32, compat_size_t, unsigned int, u32, u32) */
 	ldswa		[%o1 + 0x0] %asi, %o0
 	sethi		%hi(sys32_recvfrom), %g1
 	lduwa		[%o1 + 0x8] %asi, %o2
@@ -206,38 +202,38 @@ do_sys_shutdown: /* sys_shutdown(int, int) */
 	nop
 	nop
 	nop
-do_sys_setsockopt: /* sys32_setsockopt(int, int, int, char *, int) */
+do_sys_setsockopt: /* compat_sys_setsockopt(int, int, int, char *, int) */
 	ldswa		[%o1 + 0x0] %asi, %o0
-	sethi		%hi(sys32_setsockopt), %g1
+	sethi		%hi(compat_sys_setsockopt), %g1
 	ldswa		[%o1 + 0x8] %asi, %o2
 	lduwa		[%o1 + 0xc] %asi, %o3
 	ldswa		[%o1 + 0x10] %asi, %o4
-	jmpl		%g1 + %lo(sys32_setsockopt), %g0
+	jmpl		%g1 + %lo(compat_sys_setsockopt), %g0
 	 ldswa		[%o1 + 0x4] %asi, %o1
 	nop
-do_sys_getsockopt: /* sys32_getsockopt(int, int, int, u32, u32) */
+do_sys_getsockopt: /* compat_sys_getsockopt(int, int, int, u32, u32) */
 	ldswa		[%o1 + 0x0] %asi, %o0
-	sethi		%hi(sys32_getsockopt), %g1
+	sethi		%hi(compat_sys_getsockopt), %g1
 	ldswa		[%o1 + 0x8] %asi, %o2
 	lduwa		[%o1 + 0xc] %asi, %o3
 	lduwa		[%o1 + 0x10] %asi, %o4
-	jmpl		%g1 + %lo(sys32_getsockopt), %g0
+	jmpl		%g1 + %lo(compat_sys_getsockopt), %g0
 	 ldswa		[%o1 + 0x4] %asi, %o1
 	nop
-do_sys_sendmsg: /* sys32_sendmsg(int, struct msghdr32 *, unsigned int) */
+do_sys_sendmsg: /* compat_sys_sendmsg(int, struct compat_msghdr *, unsigned int) */
 	ldswa		[%o1 + 0x0] %asi, %o0
-	sethi		%hi(sys32_sendmsg), %g1
+	sethi		%hi(compat_sys_sendmsg), %g1
 	lduwa		[%o1 + 0x8] %asi, %o2
-	jmpl		%g1 + %lo(sys32_sendmsg), %g0
+	jmpl		%g1 + %lo(compat_sys_sendmsg), %g0
 	 lduwa		[%o1 + 0x4] %asi, %o1
 	nop
 	nop
 	nop
-do_sys_recvmsg: /* sys32_recvmsg(int, struct msghdr32 *, unsigned int) */
+do_sys_recvmsg: /* compat_sys_recvmsg(int, struct compat_msghdr *, unsigned int) */
 	ldswa		[%o1 + 0x0] %asi, %o0
-	sethi		%hi(sys32_recvmsg), %g1
+	sethi		%hi(compat_sys_recvmsg), %g1
 	lduwa		[%o1 + 0x8] %asi, %o2
-	jmpl		%g1 + %lo(sys32_recvmsg), %g0
+	jmpl		%g1 + %lo(compat_sys_recvmsg), %g0
 	 lduwa		[%o1 + 0x4] %asi, %o1
 	nop
 	nop

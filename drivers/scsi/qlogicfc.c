@@ -60,10 +60,10 @@
 #include <linux/delay.h>
 #include <linux/unistd.h>
 #include <linux/spinlock.h>
+#include <linux/interrupt.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-
-#include "sd.h"
+#include "scsi.h"
 #include "hosts.h"
 
 #define pci64_dma_hi32(a) ((u32) (0xffffffff & (((u64)(a))>>32)))
@@ -397,7 +397,7 @@ struct Status_Entry {
 #define MBOX_PORT_LOGOUT                0x0071
 
 /*
- *	Firmware if needed (note this is a hack, it belongs in a seperate
+ *	Firmware if needed (note this is a hack, it belongs in a separate
  *	module.
  */
  
@@ -643,6 +643,7 @@ struct isp2x00_hostdata {
 	u_char queued;
 	u_char host_id;
         struct timer_list explore_timer;
+	struct id_name_map tempmap[QLOGICFC_MAX_ID + 1];
 };
 
 
@@ -659,7 +660,7 @@ static int isp2x00_reset_hardware(struct Scsi_Host *);
 static int isp2x00_mbox_command(struct Scsi_Host *, u_short[]);
 static int isp2x00_return_status(Scsi_Cmnd *, struct Status_Entry *);
 static void isp2x00_intr_handler(int, void *, struct pt_regs *);
-static void do_isp2x00_intr_handler(int, void *, struct pt_regs *);
+static irqreturn_t do_isp2x00_intr_handler(int, void *, struct pt_regs *);
 static int isp2x00_make_portdb(struct Scsi_Host *);
 
 #if ISP2x00_FABRIC
@@ -694,7 +695,7 @@ static inline void isp2x00_disable_irqs(struct Scsi_Host *host)
 int isp2x00_detect(Scsi_Host_Template * tmpt)
 {
 	int hosts = 0;
-	int wait_time;
+	unsigned long wait_time;
 	struct Scsi_Host *host = NULL;
 	struct isp2x00_hostdata *hostdata;
 	struct pci_dev *pdev;
@@ -709,11 +710,6 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 	device_ids[1] = PCI_DEVICE_ID_QLOGIC_ISP2200;
 
 	tmpt->proc_name = "isp2x00";
-
-	if (pci_present() == 0) {
-		printk(KERN_INFO "qlogicfc : PCI not present\n");
-		return 0;
-	}
 
 	for (i=0; i<2; i++){
 		pdev = NULL;
@@ -731,10 +727,9 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 			        printk("qlogicfc%d : could not register host.\n", hosts);
 				continue;
 			}
- 			scsi_set_pci_device(host, pdev);
+ 			scsi_set_device(host, &pdev->dev);
 			host->max_id = QLOGICFC_MAX_ID + 1;
 			host->max_lun = QLOGICFC_MAX_LUN;
-			host->hostt->use_new_eh_code = 1;
 			hostdata = (struct isp2x00_hostdata *) host->hostdata;
 
 			memset(hostdata, 0, sizeof(struct isp2x00_hostdata));
@@ -803,7 +798,7 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 			outw(HCCR_CLEAR_RISC_INTR, host->io_port + HOST_HCCR);
 			isp2x00_enable_irqs(host);
 			/* wait for the loop to come up */
-			for (wait_time = jiffies + 10 * HZ; wait_time > jiffies && hostdata->adapter_state == AS_LOOP_DOWN;) {
+			for (wait_time = jiffies + 10 * HZ; time_before(jiffies, wait_time) && hostdata->adapter_state == AS_LOOP_DOWN;) {
 			        barrier();
 				cpu_relax();
 			}
@@ -820,7 +815,7 @@ int isp2x00_detect(Scsi_Host_Template * tmpt)
 	   some time before recognizing it is attached to a fabric */
 
 #if ISP2x00_FABRIC
-	for (wait_time = jiffies + 5 * HZ; wait_time > jiffies;) {
+	for (wait_time = jiffies + 5 * HZ; time_before(jiffies, wait_time);) {
 		barrier();
 		cpu_relax();
 	}
@@ -837,13 +832,12 @@ static int isp2x00_make_portdb(struct Scsi_Host *host)
 
 	short param[8];
 	int i, j;
-	struct id_name_map temp[QLOGICFC_MAX_ID + 1];
 	struct isp2x00_hostdata *hostdata;
 
 	isp2x00_disable_irqs(host);
 
-	memset(temp, 0, sizeof(temp));
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
+	memset(hostdata->tempmap, 0, sizeof(hostdata->tempmap));
 
 #if ISP2x00_FABRIC
 	for (i = 0x81; i < QLOGICFC_MAX_ID; i++) {
@@ -869,15 +863,15 @@ static int isp2x00_make_portdb(struct Scsi_Host *host)
 	if (param[0] == MBOX_COMMAND_COMPLETE) {
 		hostdata->port_id = ((u_int) param[3]) << 16;
 		hostdata->port_id |= param[2];
-		temp[0].loop_id = param[1];
-		temp[0].wwn = hostdata->wwn;
+		hostdata->tempmap[0].loop_id = param[1];
+		hostdata->tempmap[0].wwn = hostdata->wwn;
 	}
 	else {
 	        printk("qlogicfc%d : error getting scsi id.\n", hostdata->host_id);
 	}
 
         for (i = 0; i <=QLOGICFC_MAX_ID; i++)
-                temp[i].loop_id = temp[0].loop_id;
+                hostdata->tempmap[i].loop_id = hostdata->tempmap[0].loop_id;
    
         for (i = 0, j = 1; i <= QLOGICFC_MAX_LOOP_ID; i++) {
                 param[0] = MBOX_GET_PORT_NAME;
@@ -886,15 +880,15 @@ static int isp2x00_make_portdb(struct Scsi_Host *host)
 		isp2x00_mbox_command(host, param);
 
 		if (param[0] == MBOX_COMMAND_COMPLETE) {
-			temp[j].loop_id = i;
-			temp[j].wwn = ((u64) (param[2] & 0xff)) << 56;
-			temp[j].wwn |= ((u64) ((param[2] >> 8) & 0xff)) << 48;
-			temp[j].wwn |= ((u64) (param[3] & 0xff)) << 40;
-			temp[j].wwn |= ((u64) ((param[3] >> 8) & 0xff)) << 32;
-			temp[j].wwn |= ((u64) (param[6] & 0xff)) << 24;
-			temp[j].wwn |= ((u64) ((param[6] >> 8) & 0xff)) << 16;
-			temp[j].wwn |= ((u64) (param[7] & 0xff)) << 8;
-			temp[j].wwn |= ((u64) ((param[7] >> 8) & 0xff));
+			hostdata->tempmap[j].loop_id = i;
+			hostdata->tempmap[j].wwn = ((u64) (param[2] & 0xff)) << 56;
+			hostdata->tempmap[j].wwn |= ((u64) ((param[2] >> 8) & 0xff)) << 48;
+			hostdata->tempmap[j].wwn |= ((u64) (param[3] & 0xff)) << 40;
+			hostdata->tempmap[j].wwn |= ((u64) ((param[3] >> 8) & 0xff)) << 32;
+			hostdata->tempmap[j].wwn |= ((u64) (param[6] & 0xff)) << 24;
+			hostdata->tempmap[j].wwn |= ((u64) ((param[6] >> 8) & 0xff)) << 16;
+			hostdata->tempmap[j].wwn |= ((u64) (param[7] & 0xff)) << 8;
+			hostdata->tempmap[j].wwn |= ((u64) ((param[7] >> 8) & 0xff));
 
 			j++;
 
@@ -903,33 +897,33 @@ static int isp2x00_make_portdb(struct Scsi_Host *host)
 
 
 #if ISP2x00_FABRIC
-	isp2x00_init_fabric(host, temp, j);
+	isp2x00_init_fabric(host, hostdata->tempmap, j);
 #endif
 
 	for (i = 0; i <= QLOGICFC_MAX_ID; i++) {
-		if (temp[i].wwn != hostdata->port_db[i].wwn) {
+		if (hostdata->tempmap[i].wwn != hostdata->port_db[i].wwn) {
 			for (j = 0; j <= QLOGICFC_MAX_ID; j++) {
-				if (temp[j].wwn == hostdata->port_db[i].wwn) {
-					hostdata->port_db[i].loop_id = temp[j].loop_id;
+				if (hostdata->tempmap[j].wwn == hostdata->port_db[i].wwn) {
+					hostdata->port_db[i].loop_id = hostdata->tempmap[j].loop_id;
 					break;
 				}
 			}
 			if (j == QLOGICFC_MAX_ID + 1)
-				hostdata->port_db[i].loop_id = temp[0].loop_id;
+				hostdata->port_db[i].loop_id = hostdata->tempmap[0].loop_id;
 
 			for (j = 0; j <= QLOGICFC_MAX_ID; j++) {
-				if (hostdata->port_db[j].wwn == temp[i].wwn || !hostdata->port_db[j].wwn) {
+				if (hostdata->port_db[j].wwn == hostdata->tempmap[i].wwn || !hostdata->port_db[j].wwn) {
 					break;
 				}
 			}
 			if (j == QLOGICFC_MAX_ID + 1)
 				printk("qlogicfc%d : Too many scsi devices, no more room in port map.\n", hostdata->host_id);
 			if (!hostdata->port_db[j].wwn) {
-				hostdata->port_db[j].loop_id = temp[i].loop_id;
-				hostdata->port_db[j].wwn = temp[i].wwn;
+				hostdata->port_db[j].loop_id = hostdata->tempmap[i].loop_id;
+				hostdata->port_db[j].wwn = hostdata->tempmap[i].wwn;
 			}
 		} else
-			hostdata->port_db[i].loop_id = temp[i].loop_id;
+			hostdata->port_db[i].loop_id = hostdata->tempmap[i].loop_id;
 
 	}
 
@@ -1149,7 +1143,7 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	ENTER("isp2x00_queuecommand");
 
-	host = Cmnd->host;
+	host = Cmnd->device->host;
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
 	Cmnd->scsi_done = done;
 
@@ -1234,10 +1228,10 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	cmd->hdr.entry_type = ENTRY_COMMAND;
 	cmd->hdr.entry_cnt = 1;
-	cmd->target_lun = Cmnd->lun;
-	cmd->expanded_lun = cpu_to_le16(Cmnd->lun);
+	cmd->target_lun = Cmnd->device->lun;
+	cmd->expanded_lun = cpu_to_le16(Cmnd->device->lun);
 #if ISP2x00_PORTDB
-	cmd->target_id = hostdata->port_db[Cmnd->target].loop_id;
+	cmd->target_id = hostdata->port_db[Cmnd->device->id].loop_id;
 #else
 	cmd->target_id = Cmnd->target;
 #endif
@@ -1313,9 +1307,9 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 		cmd->control_flags = cpu_to_le16(CFLAG_READ);
 
 	if (Cmnd->device->tagged_supported) {
-		if ((jiffies - hostdata->tag_ages[Cmnd->target]) > (2 * SCSI_TIMEOUT)) {
+		if ((jiffies - hostdata->tag_ages[Cmnd->device->id]) > (2 * SCSI_TIMEOUT)) {
 			cmd->control_flags |= cpu_to_le16(CFLAG_ORDERED_TAG);
-			hostdata->tag_ages[Cmnd->target] = jiffies;
+			hostdata->tag_ages[Cmnd->device->id] = jiffies;
 		} else
 			switch (Cmnd->tag) {
 			case HEAD_OF_QUEUE_TAG:
@@ -1343,17 +1337,10 @@ int isp2x00_queuecommand(Scsi_Cmnd * Cmnd, void (*done) (Scsi_Cmnd *))
 
 	num_free = QLOGICFC_REQ_QUEUE_LEN - REQ_QUEUE_DEPTH(in_ptr, out_ptr);
 	num_free = (num_free > 2) ? num_free - 2 : 0;
-	host->can_queue = hostdata->queued + num_free;
+       host->can_queue = host->host_busy + num_free;
 	if (host->can_queue > QLOGICFC_REQ_QUEUE_LEN)
 		host->can_queue = QLOGICFC_REQ_QUEUE_LEN;
 	host->sg_tablesize = QLOGICFC_MAX_SG(num_free);
-
-	/* this is really gross */
-	if (host->can_queue <= host->host_busy){
-	        if (host->can_queue+2 < host->host_busy) 
-			DEBUG(printk("qlogicfc%d.c crosses its fingers.\n", hostdata->host_id));
-		host->can_queue = host->host_busy + 1;
-	}
 
 	LEAVE("isp2x00_queuecommand");
 
@@ -1376,7 +1363,7 @@ static void redo_port_db(unsigned long arg)
 	hostdata->explore_timer.data = 0;
 	del_timer(&hostdata->explore_timer);
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(host->host_lock, flags);
 
 	if (hostdata->adapter_state & AS_REDO_FABRIC_PORTDB || hostdata->adapter_state & AS_REDO_LOOP_PORTDB) {
 		isp2x00_make_portdb(host);
@@ -1391,8 +1378,8 @@ static void redo_port_db(unsigned long arg)
 		}
 		
 	        for (i = 0; i < QLOGICFC_REQ_QUEUE_LEN; i++){ 
-		        if (hostdata->handle_ptrs[i] && (hostdata->port_db[hostdata->handle_ptrs[i]->target].loop_id > QLOGICFC_MAX_LOOP_ID || hostdata->adapter_state & AS_REDO_LOOP_PORTDB)){
-                                if (hostdata->port_db[hostdata->handle_ptrs[i]->target].loop_id != hostdata->port_db[0].loop_id){
+		        if (hostdata->handle_ptrs[i] && (hostdata->port_db[hostdata->handle_ptrs[i]->device->id].loop_id > QLOGICFC_MAX_LOOP_ID || hostdata->adapter_state & AS_REDO_LOOP_PORTDB)){
+                                if (hostdata->port_db[hostdata->handle_ptrs[i]->device->id].loop_id != hostdata->port_db[0].loop_id){
 					Scsi_Cmnd *Cmnd = hostdata->handle_ptrs[i];
 
 					 if (Cmnd->use_sg)
@@ -1423,19 +1410,22 @@ static void redo_port_db(unsigned long arg)
 		hostdata->adapter_state = AS_LOOP_GOOD;
 	}
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(host->host_lock, flags);
 
 }
 
 #define ASYNC_EVENT_INTERRUPT	0x01
 
-void do_isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t do_isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 {
+	struct Scsi_Host *host = dev_id;
 	unsigned long flags;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(host->host_lock, flags);
 	isp2x00_intr_handler(irq, dev_id, regs);
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(host->host_lock, flags);
+
+	return IRQ_HANDLED;
 }
 
 void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
@@ -1570,7 +1560,7 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 				/* 
 				 * if any of the following are true we do not
 				 * call scsi_done.  if the status is CS_ABORTED
-				 * we dont have to call done because the upper
+				 * we don't have to call done because the upper
 				 * level should already know its aborted.
 				 */
 				if (hostdata->handle_serials[le_hand] != Cmnd->serial_number 
@@ -1588,7 +1578,7 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 				 * the device may well be back in a couple of
 				 * seconds.
 				 */
-				if ((hostdata->adapter_state == AS_LOOP_DOWN || sts->completion_status == cpu_to_le16(CS_PORT_UNAVAILABLE) || sts->completion_status == cpu_to_le16(CS_PORT_LOGGED_OUT) || sts->completion_status == cpu_to_le16(CS_PORT_CONFIG_CHANGED)) && hostdata->port_db[Cmnd->target].wwn){
+				if ((hostdata->adapter_state == AS_LOOP_DOWN || sts->completion_status == cpu_to_le16(CS_PORT_UNAVAILABLE) || sts->completion_status == cpu_to_le16(CS_PORT_LOGGED_OUT) || sts->completion_status == cpu_to_le16(CS_PORT_CONFIG_CHANGED)) && hostdata->port_db[Cmnd->device->id].wwn){
 					outw(out_ptr, host->io_port + MBOX5);
 					continue;
 				}
@@ -1623,16 +1613,10 @@ void isp2x00_intr_handler(int irq, void *dev_id, struct pt_regs *regs)
 
 	num_free = QLOGICFC_REQ_QUEUE_LEN - REQ_QUEUE_DEPTH(in_ptr, out_ptr);
 	num_free = (num_free > 2) ? num_free - 2 : 0;
-	host->can_queue = hostdata->queued + num_free;
+       host->can_queue = host->host_busy + num_free;
 	if (host->can_queue > QLOGICFC_REQ_QUEUE_LEN)
 		host->can_queue = QLOGICFC_REQ_QUEUE_LEN;
 	host->sg_tablesize = QLOGICFC_MAX_SG(num_free);
-
-	if (host->can_queue <= host->host_busy){
-	        if (host->can_queue+2 < host->host_busy) 
-		        DEBUG(printk("qlogicfc%d : crosses its fingers.\n", hostdata->host_id));
-		host->can_queue = host->host_busy + 1;
-	}
 
 	outw(HCCR_CLEAR_RISC_INTR, host->io_port + HOST_HCCR);
 	LEAVE_INTR("isp2x00_intr_handler");
@@ -1722,7 +1706,7 @@ int isp2x00_abort(Scsi_Cmnd * Cmnd)
 
 	ENTER("isp2x00_abort");
 
-	host = Cmnd->host;
+	host = Cmnd->device->host;
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
 
 	for (i = 0; i < QLOGICFC_REQ_QUEUE_LEN; i++)
@@ -1737,7 +1721,7 @@ int isp2x00_abort(Scsi_Cmnd * Cmnd)
 
 	param[0] = MBOX_ABORT_IOCB;
 #if ISP2x00_PORTDB
-	param[1] = (((u_short) hostdata->port_db[Cmnd->target].loop_id) << 8) | Cmnd->lun;
+	param[1] = (((u_short) hostdata->port_db[Cmnd->device->id].loop_id) << 8) | Cmnd->device->lun;
 #else
 	param[1] = (((u_short) Cmnd->target) << 8) | Cmnd->lun;
 #endif
@@ -1779,7 +1763,7 @@ int isp2x00_reset(Scsi_Cmnd * Cmnd, unsigned int reset_flags)
 
 	ENTER("isp2x00_reset");
 
-	host = Cmnd->host;
+	host = Cmnd->device->host;
 	hostdata = (struct isp2x00_hostdata *) host->hostdata;
 	param[0] = MBOX_BUS_RESET;
 	param[1] = 3;
@@ -1800,9 +1784,10 @@ int isp2x00_reset(Scsi_Cmnd * Cmnd, unsigned int reset_flags)
 }
 
 
-int isp2x00_biosparam(Disk * disk, kdev_t n, int ip[])
+int isp2x00_biosparam(struct scsi_device *sdev, struct block_device *n,
+		sector_t capacity, int ip[])
 {
-	int size = disk->capacity;
+	int size = capacity;
 
 	ENTER("isp2x00_biosparam");
 
@@ -2042,10 +2027,7 @@ static int isp2x00_init(struct Scsi_Host *sh)
 		return 1;
 	}
 
-	if (!(command & PCI_COMMAND_MASTER)) {
-		printk("qlogicfc%d : bus mastering is disabled\n", hostdata->host_id);
-		return 1;
-	}
+	pci_set_master(pdev);
 	if (revision != ISP2100_REV_ID1 && revision != ISP2100_REV_ID3 && revision != ISP2200_REV_ID5)
 		printk("qlogicfc%d : new isp2x00 revision ID (%d)\n", hostdata->host_id,  revision);
 
@@ -2241,6 +2223,18 @@ void isp2x00_print_scsi_cmd(Scsi_Cmnd * cmd)
 
 MODULE_LICENSE("GPL");
 
-static Scsi_Host_Template driver_template = QLOGICFC;
-
+static Scsi_Host_Template driver_template = {
+        .detect                 = isp2x00_detect,
+        .release                = isp2x00_release,
+        .info                   = isp2x00_info,
+        .queuecommand           = isp2x00_queuecommand,
+        .eh_abort_handler       = isp2x00_abort,
+        .bios_param             = isp2x00_biosparam,
+        .can_queue              = QLOGICFC_REQ_QUEUE_LEN,
+        .this_id                = -1,
+        .sg_tablesize           = QLOGICFC_MAX_SG(QLOGICFC_REQ_QUEUE_LEN),
+	.cmd_per_lun		= QLOGICFC_CMD_PER_LUN,
+        .use_clustering         = ENABLE_CLUSTERING,
+	.highmem_io		= 1,
+};
 #include "scsi_module.c"

@@ -1,7 +1,8 @@
 /*
  *	SNAP data link layer. Derived from 802.2
  *
- *		Alan Cox <Alan.Cox@linux.org>, from the 802.2 layer by Greg Page.
+ *		Alan Cox <Alan.Cox@linux.org>,
+ *		from the 802.2 layer by Greg Page.
  *		Merged in additions from Greg Page's psnap.c.
  *
  *		This program is free software; you can redistribute it and/or
@@ -14,151 +15,146 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/datalink.h>
-#include <net/p8022.h>
 #include <net/psnap.h>
+#include <net/llc_if.h>
+#include <net/llc_sap.h>
 #include <linux/mm.h>
 #include <linux/in.h>
 #include <linux/init.h>
 
-static struct datalink_proto *snap_list = NULL;
-static struct datalink_proto *snap_dl = NULL;		/* 802.2 DL for SNAP */
+static LIST_HEAD(snap_list);
+static spinlock_t snap_lock = SPIN_LOCK_UNLOCKED;
+static struct llc_sap *snap_sap;
 
 /*
  *	Find a snap client by matching the 5 bytes.
  */
-
 static struct datalink_proto *find_snap_client(unsigned char *desc)
 {
-	struct datalink_proto	*proto;
+	struct list_head *entry;
+	struct datalink_proto *proto = NULL, *p;
 
-	for (proto = snap_list; proto != NULL && memcmp(proto->type, desc, 5) ; proto = proto->next);
+	list_for_each_rcu(entry, &snap_list) {
+		p = list_entry(entry, struct datalink_proto, node);
+		if (!memcmp(p->type, desc, 5)) {
+			proto = p;
+			break;
+		}
+	}
 	return proto;
 }
 
 /*
  *	A SNAP packet has arrived
  */
-
-int snap_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
+static int snap_rcv(struct sk_buff *skb, struct net_device *dev,
+		    struct packet_type *pt)
 {
-	static struct packet_type psnap_packet_type =
-	{
-		0,
-		NULL,		/* All Devices */
-		snap_rcv,
-		NULL,
-		NULL,
+	int rc = 1;
+	struct datalink_proto *proto;
+	static struct packet_type snap_packet_type = {
+		.type = __constant_htons(ETH_P_SNAP),
 	};
 
-	struct datalink_proto	*proto;
-
+	rcu_read_lock();
 	proto = find_snap_client(skb->h.raw);
-	if (proto != NULL)
-	{
-		/*
-		 *	Pass the frame on.
-		 */
-
-		skb->h.raw += 5;
-		skb->nh.raw += 5;
-		skb_pull(skb,5);
-		if (psnap_packet_type.type == 0)
-			psnap_packet_type.type=htons(ETH_P_SNAP);
-
-		return proto->rcvfunc(skb, dev, &psnap_packet_type);
+	if (proto) {
+		/* Pass the frame on. */
+		skb->h.raw  += 5;
+		skb_pull(skb, 5);
+		rc = proto->rcvfunc(skb, dev, &snap_packet_type);
+	} else {
+		skb->sk = NULL;
+		kfree_skb(skb);
+		rc = 1;
 	}
-	skb->sk = NULL;
-	kfree_skb(skb);
-	return 0;
+
+	rcu_read_unlock();
+	return rc;
 }
 
 /*
  *	Put a SNAP header on a frame and pass to 802.2
  */
-
-static void snap_datalink_header(struct datalink_proto *dl, struct sk_buff *skb, unsigned char *dest_node)
+static int snap_request(struct datalink_proto *dl,
+			struct sk_buff *skb, u8 *dest)
 {
-	memcpy(skb_push(skb,5),dl->type,5);
-	snap_dl->datalink_header(snap_dl, skb, dest_node);
+	memcpy(skb_push(skb, 5), dl->type, 5);
+	llc_build_and_send_ui_pkt(snap_sap, skb, dest, snap_sap->laddr.lsap);
+	return 0;
 }
 
 /*
  *	Set up the SNAP layer
  */
-
 EXPORT_SYMBOL(register_snap_client);
 EXPORT_SYMBOL(unregister_snap_client);
 
+static char snap_err_msg[] __initdata =
+	KERN_CRIT "SNAP - unable to register with 802.2\n";
+
 static int __init snap_init(void)
 {
-	snap_dl=register_8022_client(0xAA, snap_rcv);
-	if(snap_dl==NULL)
-		printk("SNAP - unable to register with 802.2\n");
+	snap_sap = llc_sap_open(0xAA, snap_rcv);
+
+	if (!snap_sap)
+		printk(snap_err_msg);
+
 	return 0;
 }
 
+module_init(snap_init);
+
 static void __exit snap_exit(void)
 {
-	unregister_8022_client(0xAA);
+	llc_sap_close(snap_sap);
 }
 
-module_init(snap_init);
 module_exit(snap_exit);
 
 
 /*
  *	Register SNAP clients. We don't yet use this for IP.
  */
-
-struct datalink_proto *register_snap_client(unsigned char *desc, int (*rcvfunc)(struct sk_buff *, struct net_device *, struct packet_type *))
+struct datalink_proto *register_snap_client(unsigned char *desc,
+					    int (*rcvfunc)(struct sk_buff *,
+						    	   struct net_device *,
+							   struct packet_type *))
 {
-	struct datalink_proto	*proto;
+	struct datalink_proto *proto = NULL;
 
-	if (find_snap_client(desc) != NULL)
-		return NULL;
+	spin_lock_bh(&snap_lock);
 
-	proto = (struct datalink_proto *) kmalloc(sizeof(*proto), GFP_ATOMIC);
-	if (proto != NULL)
-	{
+	if (find_snap_client(desc))
+		goto out;
+
+	proto = kmalloc(sizeof(*proto), GFP_ATOMIC);
+	if (proto) {
 		memcpy(proto->type, desc,5);
-		proto->type_len = 5;
-		proto->rcvfunc = rcvfunc;
-		proto->header_length = 5+snap_dl->header_length;
-		proto->datalink_header = snap_datalink_header;
-		proto->string_name = "SNAP";
-		proto->next = snap_list;
-		snap_list = proto;
+		proto->rcvfunc		= rcvfunc;
+		proto->header_length	= 5 + 3; /* snap + 802.2 */
+		proto->request		= snap_request;
+		list_add_rcu(&proto->node, &snap_list);
 	}
+out:
+	spin_unlock_bh(&snap_lock);
 
+	synchronize_net();
 	return proto;
 }
 
 /*
  *	Unregister SNAP clients. Protocols no longer want to play with us ...
  */
-
-void unregister_snap_client(unsigned char *desc)
+void unregister_snap_client(struct datalink_proto *proto)
 {
-	struct datalink_proto **clients = &snap_list;
-	struct datalink_proto *tmp;
-	unsigned long flags;
+	spin_lock_bh(&snap_lock);
+	list_del_rcu(&proto->node);
+	spin_unlock_bh(&snap_lock);
 
-	save_flags(flags);
-	cli();
+	synchronize_net();
 
-	while ((tmp = *clients) != NULL)
-	{
-		if (memcmp(tmp->type,desc,5) == 0)
-		{
-			*clients = tmp->next;
-			kfree(tmp);
-			break;
-		}
-		else
-			clients = &tmp->next;
-	}
-
-	restore_flags(flags);
+	kfree(proto);
 }
 
 MODULE_LICENSE("GPL");

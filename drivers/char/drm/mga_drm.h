@@ -26,7 +26,7 @@
  *
  * Authors:
  *    Jeff Hartmann <jhartmann@valinux.com>
- *    Keith Whitwell <keithw@valinux.com>
+ *    Keith Whitwell <keith@tungstengraphics.com>
  *
  * Rewritten by:
  *    Gareth Hughes <gareth@valinux.com>
@@ -38,6 +38,7 @@
 /* WARNING: If you change any of these defines, make sure to change the
  * defines in the Xserver file (mga_sarea.h)
  */
+
 #ifndef __MGA_SAREA_DEFINES__
 #define __MGA_SAREA_DEFINES__
 
@@ -225,6 +226,21 @@ typedef struct _drm_mga_sarea {
 /* WARNING: If you change any of these defines, make sure to change the
  * defines in the Xserver file (xf86drmMga.h)
  */
+
+/* MGA specific ioctls
+ * The device specific ioctl range is 0x40 to 0x79.
+ */
+#define DRM_IOCTL_MGA_INIT		DRM_IOW( 0x40, drm_mga_init_t)
+#define DRM_IOCTL_MGA_FLUSH		DRM_IOW( 0x41, drm_lock_t)
+#define DRM_IOCTL_MGA_RESET		DRM_IO(  0x42)
+#define DRM_IOCTL_MGA_SWAP		DRM_IO(  0x43)
+#define DRM_IOCTL_MGA_CLEAR		DRM_IOW( 0x44, drm_mga_clear_t)
+#define DRM_IOCTL_MGA_VERTEX		DRM_IOW( 0x45, drm_mga_vertex_t)
+#define DRM_IOCTL_MGA_INDICES		DRM_IOW( 0x46, drm_mga_indices_t)
+#define DRM_IOCTL_MGA_ILOAD		DRM_IOW( 0x47, drm_mga_iload_t)
+#define DRM_IOCTL_MGA_BLIT		DRM_IOW( 0x48, drm_mga_blit_t)
+#define DRM_IOCTL_MGA_GETPARAM		DRM_IOWR(0x49, drm_mga_getparam_t)
+
 typedef struct _drm_mga_warp_index {
    	int installed;
    	unsigned long phys_addr;
@@ -306,5 +322,15 @@ typedef struct _drm_mga_blit {
 	int height, ydir;		/* flip image vertically */
 	int source_pitch, dest_pitch;
 } drm_mga_blit_t;
+
+/* 3.1: An ioctl to get parameters that aren't available to the 3d
+ * client any other way.  
+ */
+#define MGA_PARAM_IRQ_NR            1
+
+typedef struct drm_mga_getparam {
+	int param;
+	int *value;
+} drm_mga_getparam_t;
 
 #endif

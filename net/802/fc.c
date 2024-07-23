@@ -11,8 +11,6 @@
  */
 
 #include <linux/config.h>
-#include <linux/module.h>
-
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/types.h>
@@ -97,8 +95,6 @@ int fc_rebuild_header(struct sk_buff *skb)
 	return 0;
 #endif
 }
-
-EXPORT_SYMBOL(fc_type_trans);
 
 unsigned short
 fc_type_trans(struct sk_buff *skb, struct net_device *dev)

@@ -25,6 +25,7 @@
  +---------------------------------------------------------------------------*/
 
 #include <linux/signal.h>
+#include <linux/ptrace.h>
 
 #include <asm/uaccess.h>
 #include <asm/desc.h>
@@ -559,7 +560,7 @@ FPU_fwait_done:
   RE_ENTRANT_CHECK_ON;
 #endif /* DEBUG */
 
-  if (FPU_lookahead && !current->need_resched)
+  if (FPU_lookahead && !need_resched())
     {
       FPU_ORIG_EIP = FPU_EIP - code_base;
       if ( valid_prefix(&byte1, (u_char **)&FPU_EIP,

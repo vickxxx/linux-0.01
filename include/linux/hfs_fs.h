@@ -234,7 +234,7 @@ extern struct hfs_cat_entry *hfs_cat_get(struct hfs_mdb *,
 					 const struct hfs_cat_key *);
 
 /* dir.c */
-extern int hfs_create(struct inode *, struct dentry *, int);
+extern int hfs_create(struct inode *, struct dentry *, int, struct nameidata *);
 extern int hfs_mkdir(struct inode *, struct dentry *, int);
 extern int hfs_unlink(struct inode *, struct dentry *);
 extern int hfs_rmdir(struct inode *, struct dentry *);
@@ -267,7 +267,7 @@ extern void hfs_nat_drop_dentry(struct dentry *, const ino_t);
 
 /* file.c */
 extern hfs_s32 hfs_do_read(struct inode *, struct hfs_fork *, hfs_u32,
-			   char *, hfs_u32, int);
+			   char *, hfs_u32);
 extern hfs_s32 hfs_do_write(struct inode *, struct hfs_fork *, hfs_u32,
 			    const char *, hfs_u32);
 extern void hfs_file_fix_mode(struct hfs_cat_entry *entry);
@@ -301,7 +301,7 @@ extern void hfs_nat_ifill(struct inode *, ino_t, const int);
 extern void hfs_sngl_ifill(struct inode *, ino_t, const int);
 
 /* super.c */
-extern struct super_block *hfs_read_super(struct super_block *,void *,int);
+extern int hfs_fill_super(struct super_block *,void *,int);
 
 /* trans.c */
 extern void hfs_colon2mac(struct hfs_name *, const char *, int);
@@ -317,8 +317,18 @@ extern int hfs_mac2alpha(char *, const struct hfs_name *);
 extern int hfs_mac2triv(char *, const struct hfs_name *);
 extern void hfs_tolower(unsigned char *, int);
 
-#define	HFS_I(X)	(&((X)->u.hfs_i))
-#define	HFS_SB(X)	(&((X)->u.hfs_sb))
+#include <linux/hfs_fs_i.h>
+#include <linux/hfs_fs_sb.h>
+
+static inline struct hfs_inode_info *HFS_I(struct inode *inode)
+{
+	return container_of(inode, struct hfs_inode_info, vfs_inode);
+}
+
+static inline struct hfs_sb_info *HFS_SB(struct super_block *sb)
+{
+	return sb->s_fs_info;
+}
 
 static inline void hfs_nameout(struct inode *dir, struct hfs_name *out,
 				   const char *in, int len) {

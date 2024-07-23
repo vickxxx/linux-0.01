@@ -14,19 +14,20 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
+#include <linux/seq_file.h>
 
 #include <asm/system.h>
 #include <asm/ptrace.h>
 #include <asm/irq.h>
 
-static void mvme16x_defhand (int irq, void *dev_id, struct pt_regs *fp);
+static irqreturn_t mvme16x_defhand (int irq, void *dev_id, struct pt_regs *fp);
 
 /*
  * This should ideally be 4 elements only, for speed.
  */
 
 static struct {
-	void		(*handler)(int, void *, struct pt_regs *);
+	irqreturn_t	(*handler)(int, void *, struct pt_regs *);
 	unsigned long	flags;
 	void		*dev_id;
 	const char	*devname;
@@ -59,7 +60,7 @@ void mvme16x_init_IRQ (void)
 }
 
 int mvme16x_request_irq(unsigned int irq,
-		void (*handler)(int, void *, struct pt_regs *),
+		irqreturn_t (*handler)(int, void *, struct pt_regs *),
                 unsigned long flags, const char *devname, void *dev_id)
 {
 	if (irq < 64 || irq > 255) {
@@ -103,34 +104,36 @@ void mvme16x_free_irq(unsigned int irq, void *dev_id)
 	irq_tab[irq-64].devname = NULL;
 }
 
-void mvme16x_process_int (unsigned long vec, struct pt_regs *fp)
+irqreturn_t mvme16x_process_int (unsigned long vec, struct pt_regs *fp)
 {
-	if (vec < 64 || vec > 255)
+	if (vec < 64 || vec > 255) {
 		printk ("mvme16x_process_int: Illegal vector %ld", vec);
-	else
-	{
+		return IRQ_NONE;
+	} else {
 		irq_tab[vec-64].count++;
 		irq_tab[vec-64].handler(vec, irq_tab[vec-64].dev_id, fp);
+		return IRQ_HANDLED;
 	}
 }
 
-int mvme16x_get_irq_list (char *buf)
+int show_mvme16x_interrupts (struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i;
 
 	for (i = 0; i < 192; i++) {
 		if (irq_tab[i].count)
-			len += sprintf (buf+len, "Vec 0x%02x: %8d  %s\n",
+			seq_printf(p, "Vec 0x%02x: %8d  %s\n",
 			    i+64, irq_tab[i].count,
 			    irq_tab[i].devname ? irq_tab[i].devname : "free");
 	}
-	return len;
+	return 0;
 }
 
 
-static void mvme16x_defhand (int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t mvme16x_defhand (int irq, void *dev_id, struct pt_regs *fp)
 {
 	printk ("Unknown interrupt 0x%02x\n", irq);
+	return IRQ_NONE;
 }
 
 

@@ -45,7 +45,8 @@
 #include <asm/bitops.h>
 
 static struct proto_ops econet_ops;
-static struct sock *econet_sklist;
+static struct hlist_head econet_sklist;
+static rwlock_t econet_lock = RW_LOCK_UNLOCKED;
 
 /* Since there are only 256 possible network numbers (or fewer, depends
    how you count) it makes sense to use a simple lookup table. */
@@ -92,13 +93,27 @@ struct ec_cb
 #endif
 };
 
+static void econet_remove_socket(struct hlist_head *list, struct sock *sk)
+{
+	write_lock_bh(&econet_lock);
+	sk_del_node_init(sk);
+	write_unlock_bh(&econet_lock);
+}
+
+static void econet_insert_socket(struct hlist_head *list, struct sock *sk)
+{
+	write_lock_bh(&econet_lock);
+	sk_add_node(sk, list);
+	write_unlock_bh(&econet_lock);
+}
+
 /*
  *	Pull a packet from our receive queue and hand it to the user.
  *	If necessary we block.
  */
 
-static int econet_recvmsg(struct socket *sock, struct msghdr *msg, int len,
-			  int flags, struct scm_cookie *scm)
+static int econet_recvmsg(struct kiocb *iocb, struct socket *sock,
+			  struct msghdr *msg, int len, int flags)
 {
 	struct sock *sk = sock->sk;
 	struct sk_buff *skb;
@@ -142,7 +157,7 @@ static int econet_recvmsg(struct socket *sock, struct msghdr *msg, int len,
 	err = memcpy_toiovec(msg->msg_iov, skb->data, copied);
 	if (err)
 		goto out_free;
-	sk->stamp=skb->stamp;
+	sk->sk_stamp = skb->stamp;
 
 	if (msg->msg_name)
 		memcpy(msg->msg_name, skb->cb, msg->msg_namelen);
@@ -167,6 +182,7 @@ static int econet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len
 {
 	struct sockaddr_ec *sec = (struct sockaddr_ec *)uaddr;
 	struct sock *sk=sock->sk;
+	struct econet_opt *eo = ec_sk(sk);
 	
 	/*
 	 *	Check legality
@@ -176,10 +192,10 @@ static int econet_bind(struct socket *sock, struct sockaddr *uaddr, int addr_len
 	    sec->sec_family != AF_ECONET)
 		return -EINVAL;
 	
-	sk->protinfo.af_econet->cb = sec->cb;
-	sk->protinfo.af_econet->port = sec->port;
-	sk->protinfo.af_econet->station = sec->addr.station;
-	sk->protinfo.af_econet->net = sec->addr.net;
+	eo->cb	    = sec->cb;
+	eo->port    = sec->port;
+	eo->station = sec->addr.station;
+	eo->net	    = sec->addr.net;
 
 	return 0;
 }
@@ -229,8 +245,8 @@ static void ec_tx_done(struct sk_buff *skb, int result)
  *	and hence whether to use real Econet or the UDP emulation.
  */
 
-static int econet_sendmsg(struct socket *sock, struct msghdr *msg, int len,
-			  struct scm_cookie *scm)
+static int econet_sendmsg(struct kiocb *iocb, struct socket *sock,
+			  struct msghdr *msg, int len)
 {
 	struct sock *sk = sock->sk;
 	struct sockaddr_ec *saddr=(struct sockaddr_ec *)msg->msg_name;
@@ -265,10 +281,12 @@ static int econet_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	 */
 	 
 	if (saddr == NULL) {
-		addr.station = sk->protinfo.af_econet->station;
-		addr.net = sk->protinfo.af_econet->net;
-		port = sk->protinfo.af_econet->port;
-		cb = sk->protinfo.af_econet->cb;
+		struct econet_opt *eo = ec_sk(sk);
+
+		addr.station = eo->station;
+		addr.net     = eo->net;
+		port	     = eo->port;
+		cb	     = eo->cb;
 	} else {
 		if (msg->msg_namelen < sizeof(struct sockaddr_ec)) 
 			return -EINVAL;
@@ -294,7 +312,7 @@ static int econet_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 	{
 		/* Real hardware Econet.  We're not worthy etc. */
 #ifdef CONFIG_ECONET_NATIVE
-		atomic_inc(&dev->refcnt);
+		dev_hold(dev);
 		
 		skb = sock_alloc_send_skb(sk, len+dev->hard_header_len+15, 
 					  msg->msg_flags & MSG_DONTWAIT, &err);
@@ -333,7 +351,7 @@ static int econet_sendmsg(struct socket *sock, struct msghdr *msg, int len,
 		err = memcpy_fromiovec(skb_put(skb,len), msg->msg_iov, len);
 		skb->protocol = proto;
 		skb->dev = dev;
-		skb->priority = sk->priority;
+		skb->priority = sk->sk_priority;
 		if (err)
 			goto out_free;
 		
@@ -450,15 +468,16 @@ static int econet_getname(struct socket *sock, struct sockaddr *uaddr,
 			  int *uaddr_len, int peer)
 {
 	struct sock *sk = sock->sk;
+	struct econet_opt *eo = ec_sk(sk);
 	struct sockaddr_ec *sec = (struct sockaddr_ec *)uaddr;
 
 	if (peer)
 		return -EOPNOTSUPP;
 
-	sec->sec_family = AF_ECONET;
-	sec->port = sk->protinfo.af_econet->port;
-	sec->addr.station = sk->protinfo.af_econet->station;
-	sec->addr.net = sk->protinfo.af_econet->net;
+	sec->sec_family	  = AF_ECONET;
+	sec->port	  = eo->port;
+	sec->addr.station = eo->station;
+	sec->addr.net	  = eo->net;
 
 	*uaddr_len = sizeof(*sec);
 	return 0;
@@ -468,14 +487,14 @@ static void econet_destroy_timer(unsigned long data)
 {
 	struct sock *sk=(struct sock *)data;
 
-	if (!atomic_read(&sk->wmem_alloc) && !atomic_read(&sk->rmem_alloc)) {
+	if (!atomic_read(&sk->sk_wmem_alloc) &&
+	    !atomic_read(&sk->sk_rmem_alloc)) {
 		sk_free(sk);
-		MOD_DEC_USE_COUNT;
 		return;
 	}
 
-	sk->timer.expires=jiffies+10*HZ;
-	add_timer(&sk->timer);
+	sk->sk_timer.expires = jiffies + 10 * HZ;
+	add_timer(&sk->sk_timer);
 	printk(KERN_DEBUG "econet socket destroy delayed\n");
 }
 
@@ -490,32 +509,32 @@ static int econet_release(struct socket *sock)
 	if (!sk)
 		return 0;
 
-	sklist_remove_socket(&econet_sklist, sk);
+	econet_remove_socket(&econet_sklist, sk);
 
 	/*
 	 *	Now the socket is dead. No more input will appear.
 	 */
 
-	sk->state_change(sk);	/* It is useless. Just for sanity. */
+	sk->sk_state_change(sk);	/* It is useless. Just for sanity. */
 
 	sock->sk = NULL;
-	sk->socket = NULL;
-	sk->dead = 1;
+	sk->sk_socket = NULL;
+	sock_set_flag(sk, SOCK_DEAD);
 
 	/* Purge queues */
 
-	skb_queue_purge(&sk->receive_queue);
+	skb_queue_purge(&sk->sk_receive_queue);
 
-	if (atomic_read(&sk->rmem_alloc) || atomic_read(&sk->wmem_alloc)) {
-		sk->timer.data=(unsigned long)sk;
-		sk->timer.expires=jiffies+HZ;
-		sk->timer.function=econet_destroy_timer;
-		add_timer(&sk->timer);
+	if (atomic_read(&sk->sk_rmem_alloc) ||
+	    atomic_read(&sk->sk_wmem_alloc)) {
+		sk->sk_timer.data     = (unsigned long)sk;
+		sk->sk_timer.expires  = jiffies + HZ;
+		sk->sk_timer.function = econet_destroy_timer;
+		add_timer(&sk->sk_timer);
 		return 0;
 	}
 
 	sk_free(sk);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -526,6 +545,7 @@ static int econet_release(struct socket *sock)
 static int econet_create(struct socket *sock, int protocol)
 {
 	struct sock *sk;
+	struct econet_opt *eo;
 	int err;
 
 	/* Econet only provides datagram services. */
@@ -533,32 +553,30 @@ static int econet_create(struct socket *sock, int protocol)
 		return -ESOCKTNOSUPPORT;
 
 	sock->state = SS_UNCONNECTED;
-	MOD_INC_USE_COUNT;
 
 	err = -ENOBUFS;
-	sk = sk_alloc(PF_ECONET, GFP_KERNEL, 1);
+	sk = sk_alloc(PF_ECONET, GFP_KERNEL, 1, NULL);
 	if (sk == NULL)
 		goto out;
 
-	sk->reuse = 1;
+	sk->sk_reuse = 1;
 	sock->ops = &econet_ops;
 	sock_init_data(sock,sk);
 
-	sk->protinfo.af_econet = kmalloc(sizeof(struct econet_opt), GFP_KERNEL);
-	if (sk->protinfo.af_econet == NULL)
+	eo = ec_sk(sk) = kmalloc(sizeof(*eo), GFP_KERNEL);
+	if (!eo)
 		goto out_free;
-	memset(sk->protinfo.af_econet, 0, sizeof(struct econet_opt));
-	sk->zapped=0;
-	sk->family = PF_ECONET;
-	sk->num = protocol;
+	memset(eo, 0, sizeof(*eo));
+	sk->sk_zapped = 0;
+	sk->sk_family = PF_ECONET;
+	eo->num = protocol;
 
-	sklist_insert_socket(&econet_sklist, sk);
+	econet_insert_socket(&econet_sklist, sk);
 	return(0);
 
 out_free:
 	sk_free(sk);
 out:
-	MOD_DEC_USE_COUNT;
 	return err;
 }
 
@@ -639,83 +657,50 @@ static int ec_dev_ioctl(struct socket *sock, unsigned int cmd, void *arg)
 static int econet_ioctl(struct socket *sock, unsigned int cmd, unsigned long arg)
 {
 	struct sock *sk = sock->sk;
-	int pid;
 
-	switch(cmd) 
-	{
-		case FIOSETOWN:
-		case SIOCSPGRP:
-			if (get_user(pid, (int *) arg))
-				return -EFAULT; 
-			if (current->pid != pid && current->pgrp != -pid && !capable(CAP_NET_ADMIN))
-				return -EPERM;
-			sk->proc = pid;
-			return(0);
-		case FIOGETOWN:
-		case SIOCGPGRP:
-			return put_user(sk->proc, (int *)arg);
+	switch(cmd) {
 		case SIOCGSTAMP:
-			if(sk->stamp.tv_sec==0)
+			if (!sk->sk_stamp.tv_sec)
 				return -ENOENT;
-			return copy_to_user((void *)arg, &sk->stamp, sizeof(struct timeval)) ? -EFAULT : 0;
-		case SIOCGIFFLAGS:
-		case SIOCSIFFLAGS:
-		case SIOCGIFCONF:
-		case SIOCGIFMETRIC:
-		case SIOCSIFMETRIC:
-		case SIOCGIFMEM:
-		case SIOCSIFMEM:
-		case SIOCGIFMTU:
-		case SIOCSIFMTU:
-		case SIOCSIFLINK:
-		case SIOCGIFHWADDR:
-		case SIOCSIFHWADDR:
-		case SIOCSIFMAP:
-		case SIOCGIFMAP:
-		case SIOCSIFSLAVE:
-		case SIOCGIFSLAVE:
-		case SIOCGIFINDEX:
-		case SIOCGIFNAME:
-		case SIOCGIFCOUNT:
-		case SIOCSIFHWBROADCAST:
-			return(dev_ioctl(cmd,(void *) arg));
-
+			return copy_to_user((void *)arg, &sk->sk_stamp,
+					  sizeof(struct timeval)) ? -EFAULT : 0;
 		case SIOCSIFADDR:
 		case SIOCGIFADDR:
 			return ec_dev_ioctl(sock, cmd, (void *)arg);
 			break;
 
 		default:
-			return(dev_ioctl(cmd,(void *) arg));
+			return dev_ioctl(cmd,(void *) arg);
 	}
 	/*NOTREACHED*/
 	return 0;
 }
 
 static struct net_proto_family econet_family_ops = {
-	family:		PF_ECONET,
-	create:		econet_create,
+	.family =	PF_ECONET,
+	.create =	econet_create,
+	.owner	=	THIS_MODULE,
 };
 
 static struct proto_ops SOCKOPS_WRAPPED(econet_ops) = {
-	family:		PF_ECONET,
-
-	release:	econet_release,
-	bind:		econet_bind,
-	connect:	sock_no_connect,
-	socketpair:	sock_no_socketpair,
-	accept:		sock_no_accept,
-	getname:	econet_getname, 
-	poll:		datagram_poll,
-	ioctl:		econet_ioctl,
-	listen:		sock_no_listen,
-	shutdown:	sock_no_shutdown,
-	setsockopt:	sock_no_setsockopt,
-	getsockopt:	sock_no_getsockopt,
-	sendmsg:	econet_sendmsg,
-	recvmsg:	econet_recvmsg,
-	mmap:		sock_no_mmap,
-	sendpage:	sock_no_sendpage,
+	.family =	PF_ECONET,
+	.owner =	THIS_MODULE,
+	.release =	econet_release,
+	.bind =		econet_bind,
+	.connect =	sock_no_connect,
+	.socketpair =	sock_no_socketpair,
+	.accept =	sock_no_accept,
+	.getname =	econet_getname, 
+	.poll =		datagram_poll,
+	.ioctl =	econet_ioctl,
+	.listen =	sock_no_listen,
+	.shutdown =	sock_no_shutdown,
+	.setsockopt =	sock_no_setsockopt,
+	.getsockopt =	sock_no_getsockopt,
+	.sendmsg =	econet_sendmsg,
+	.recvmsg =	econet_recvmsg,
+	.mmap =		sock_no_mmap,
+	.sendpage =	sock_no_sendpage,
 };
 
 #include <linux/smp_lock.h>
@@ -728,20 +713,19 @@ SOCKOPS_WRAP(econet, PF_ECONET);
 static struct sock *ec_listening_socket(unsigned char port, unsigned char
 				 station, unsigned char net)
 {
-	struct sock *sk = econet_sklist;
+	struct sock *sk;
+	struct hlist_node *node;
 
-	while (sk)
-	{
-		struct econet_opt *opt = sk->protinfo.af_econet;
+	sk_for_each(sk, node, &econet_sklist) {
+		struct econet_opt *opt = ec_sk(sk);
 		if ((opt->port == port || opt->port == 0) && 
 		    (opt->station == station || opt->station == 0) &&
 		    (opt->net == net || opt->net == 0))
-			return sk;
-
-		sk = sk->next;
+			goto found;
 	}
-
-	return NULL;
+	sk = NULL;
+found:
+	return sk;
 }
 
 /*
@@ -995,9 +979,9 @@ static int __init aun_udp_initialise(void)
 		return error;
 	}
 	
-	udpsock->sk->reuse = 1;
-	udpsock->sk->allocation = GFP_ATOMIC;	/* we're going to call it
-						   from interrupts */
+	udpsock->sk->sk_reuse = 1;
+	udpsock->sk->sk_allocation = GFP_ATOMIC; /* we're going to call it
+						    from interrupts */
 	
 	error = udpsock->ops->bind(udpsock, (struct sockaddr *)&sin,
 				sizeof(sin));
@@ -1007,7 +991,7 @@ static int __init aun_udp_initialise(void)
 		goto release;
 	}
 
-	udpsock->sk->data_ready = aun_data_available;
+	udpsock->sk->sk_data_ready = aun_data_available;
 
 	return 0;
 
@@ -1033,14 +1017,14 @@ static int econet_rcv(struct sk_buff *skb, struct net_device *dev, struct packet
 	if (! edev)
 	{
 		kfree_skb(skb);
-		return NET_RX_DROP;
+		return 0;
 	}
 
 	if (skb->len < sizeof(struct ec_framehdr))
 	{
 		/* Frame is too small to be any use */
 		kfree_skb(skb);
-		return NET_RX_DROP;
+		return 0;
 	}
 
 	/* First check for encapsulated IP */
@@ -1056,20 +1040,16 @@ static int econet_rcv(struct sk_buff *skb, struct net_device *dev, struct packet
 	if (!sk) 
 	{
 		kfree_skb(skb);
-		return NET_RX_DROP;
+		return 0;
 	}
 
-	if (ec_queue_packet(sk, skb, edev->net, hdr->src_stn, hdr->cb, 
-			    hdr->port)) {
-		kfree_skb(skb);
-		return NET_RX_DROP;
-	}
-	return 0;
+	return ec_queue_packet(sk, skb, edev->net, hdr->src_stn, hdr->cb, 
+			       hdr->port);
 }
 
 static struct packet_type econet_packet_type = {
-	type:		__constant_htons(ETH_P_ECONET),
-	func:		econet_rcv,
+	.type =		__constant_htons(ETH_P_ECONET),
+	.func =		econet_rcv,
 };
 
 static void econet_hw_initialise(void)
@@ -1103,7 +1083,7 @@ static int econet_notifier(struct notifier_block *this, unsigned long msg, void 
 }
 
 static struct notifier_block econet_netdev_notifier = {
-	notifier_call:	econet_notifier,
+	.notifier_call =econet_notifier,
 };
 
 static void __exit econet_proto_exit(void)

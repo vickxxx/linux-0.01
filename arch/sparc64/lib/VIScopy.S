@@ -1,4 +1,4 @@
-/* $Id: VIScopy.S,v 1.26 2001/09/27 04:36:24 kanoj Exp $
+/* $Id: VIScopy.S,v 1.27 2002/02/09 19:49:30 davem Exp $
  * VIScopy.S: High speed copy operations utilizing the UltraSparc
  *            Visual Instruction Set.
  *
@@ -26,24 +26,24 @@
 #ifdef __KERNEL__
 
 #include <asm/visasm.h>
-#include <asm/asm_offsets.h>
+#include <asm/thread_info.h>
 
-#define FPU_CLEAN_RETL								\
-	ldub		[%g6 + AOFF_task_thread + AOFF_thread_current_ds], %o1;	\
-	VISExit									\
-	clr		%o0;							\
-	retl;									\
+#define FPU_CLEAN_RETL					\
+	ldub		[%g6 + TI_CURRENT_DS], %o1;	\
+	VISExit						\
+	clr		%o0;				\
+	retl;						\
 	 wr		%o1, %g0, %asi;
-#define FPU_RETL								\
-	ldub		[%g6 + AOFF_task_thread + AOFF_thread_current_ds], %o1;	\
-	VISExit									\
-	clr		%o0;							\
-	retl;									\
+#define FPU_RETL					\
+	ldub		[%g6 + TI_CURRENT_DS], %o1;	\
+	VISExit						\
+	clr		%o0;				\
+	retl;						\
 	 wr		%o1, %g0, %asi;
-#define NORMAL_RETL								\
-	ldub		[%g6 + AOFF_task_thread + AOFF_thread_current_ds], %o1;	\
-	clr		%o0;							\
-	retl;									\
+#define NORMAL_RETL					\
+	ldub		[%g6 + TI_CURRENT_DS], %o1;	\
+	clr		%o0;				\
+	retl;						\
 	 wr		%o1, %g0, %asi;
 #define EX(x,y,a,b) 				\
 98: 	x,y;					\
@@ -368,6 +368,28 @@ bcopy:		or		%o0, 0, %g3			! IEU0	Group
 	or	%g3, %lo(NOP), %g3; \
 	stw	%g3, [%g2 + 0x4]; \
 	flush	%g2;
+#define ULTRA3_PCACHE_DO_NOP(symbol)	\
+	sethi	%hi(symbol##_nop_1_6), %g1; \
+	or	%g1, %lo(symbol##_nop_1_6), %g1; \
+	sethi	%hi(NOP), %g2; \
+	stw	%g2, [%g1 + 0x00]; \
+	stw	%g2, [%g1 + 0x04]; \
+	flush	%g1 + 0x00; \
+	stw	%g2, [%g1 + 0x08]; \
+	stw	%g2, [%g1 + 0x0c]; \
+	flush	%g1 + 0x08; \
+	stw	%g2, [%g1 + 0x10]; \
+	stw	%g2, [%g1 + 0x04]; \
+	flush	%g1 + 0x10; \
+	sethi	%hi(symbol##_nop_2_3), %g1; \
+	or	%g1, %lo(symbol##_nop_2_3), %g1; \
+	stw	%g2, [%g1 + 0x00]; \
+	stw	%g2, [%g1 + 0x04]; \
+	flush	%g1 + 0x00; \
+	stw	%g2, [%g1 + 0x08]; \
+	flush	%g1 + 0x08;
+
+#include <asm/dcu.h>
 
 	.globl	cheetah_patch_copyops
 cheetah_patch_copyops:
@@ -375,6 +397,23 @@ cheetah_patch_copyops:
 	ULTRA3_DO_PATCH(__copy_from_user, U3copy_from_user)
 	ULTRA3_DO_PATCH(__copy_to_user, U3copy_to_user)
 	ULTRA3_DO_PATCH(__copy_in_user, U3copy_in_user)
+#if 0 /* Causes data corruption, nop out the optimization
+       * for now -DaveM
+       */
+	ldxa			[%g0] ASI_DCU_CONTROL_REG, %g3
+	sethi			%uhi(DCU_PE), %o3
+	sllx			%o3, 32, %o3
+	andcc			%g3, %o3, %g0
+	be,pn			%xcc, pcache_disabled
+	 nop
+#endif
+	ULTRA3_PCACHE_DO_NOP(U3memcpy)
+	ULTRA3_PCACHE_DO_NOP(U3copy_from_user)
+	ULTRA3_PCACHE_DO_NOP(U3copy_to_user)
+	ULTRA3_PCACHE_DO_NOP(cheetah_copy_user_page)
+#if 0
+pcache_disabled:
+#endif
 	retl
 	 nop
 #undef BRANCH_ALWAYS
@@ -1032,7 +1071,7 @@ VIScopyfixup_ret:
 		/* If this is copy_from_user(), zero out the rest of the
 		 * kernel buffer.
 		 */
-		ldub		[%g6 + AOFF_task_thread + AOFF_thread_current_ds], %o4
+		ldub		[%g6 + TI_CURRENT_DS], %o4
 		andcc		asi_src, 0x1, %g0
 		be,pt		%icc, 1f
 		 VISExit

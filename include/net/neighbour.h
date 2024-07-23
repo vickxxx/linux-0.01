@@ -46,6 +46,8 @@
 #include <asm/atomic.h>
 #include <linux/skbuff.h>
 
+#include <linux/err.h>
+
 #define NUD_IN_TIMER	(NUD_INCOMPLETE|NUD_DELAY|NUD_PROBE)
 #define NUD_VALID	(NUD_PERMANENT|NUD_NOARP|NUD_REACHABLE|NUD_PROBE|NUD_STALE|NUD_DELAY)
 #define NUD_CONNECTED	(NUD_PERMANENT|NUD_NOARP|NUD_REACHABLE)
@@ -163,7 +165,6 @@ struct neigh_table
 	unsigned long		last_rand;
 	struct neigh_parms	*parms_list;
 	kmem_cache_t		*kmem_cachep;
-	struct tasklet_struct	gc_task;
 	struct neigh_statistics	stats;
 	struct neighbour	*hash_buckets[NEIGH_HASHMASK+1];
 	struct pneigh_entry	*phash_buckets[PNEIGH_HASHMASK+1];

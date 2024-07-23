@@ -32,10 +32,10 @@
 #include <linux/mm.h>
 #include <linux/init.h>
 #include <linux/vt_kern.h>
-#include <linux/console_struct.h>
 #include <linux/selection.h>
 #include <linux/kbd_kern.h>
 #include <linux/console.h>
+#include <linux/smp_lock.h>
 #include <asm/uaccess.h>
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
@@ -49,7 +49,8 @@ static int
 vcs_size(struct inode *inode)
 {
 	int size;
-	int currcons = MINOR(inode->i_rdev) & 127;
+	int minor = minor(inode->i_rdev);
+	int currcons = minor & 127;
 	if (currcons == 0)
 		currcons = fg_console;
 	else
@@ -59,17 +60,20 @@ vcs_size(struct inode *inode)
 
 	size = video_num_lines * video_num_columns;
 
-	if (MINOR(inode->i_rdev) & 128)
+	if (minor & 128)
 		size = 2*size + HEADER_SIZE;
 	return size;
 }
 
 static loff_t vcs_lseek(struct file *file, loff_t offset, int orig)
 {
-	int size = vcs_size(file->f_dentry->d_inode);
+	int size;
 
+	lock_kernel();
+	size = vcs_size(file->f_dentry->d_inode);
 	switch (orig) {
 		default:
+			unlock_kernel();
 			return -EINVAL;
 		case 2:
 			offset += size;
@@ -79,9 +83,12 @@ static loff_t vcs_lseek(struct file *file, loff_t offset, int orig)
 		case 0:
 			break;
 	}
-	if (offset < 0 || offset > size)
+	if (offset < 0 || offset > size) {
+		unlock_kernel();
 		return -EINVAL;
+	}
 	file->f_pos = offset;
+	unlock_kernel();
 	return file->f_pos;
 }
 
@@ -97,7 +104,7 @@ static ssize_t
 vcs_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	unsigned int currcons = MINOR(inode->i_rdev);
+	unsigned int currcons = minor(inode->i_rdev);
 	long pos = *ppos;
 	long viewed, attr, read;
 	int col, maxcol;
@@ -266,7 +273,7 @@ static ssize_t
 vcs_write(struct file *file, const char *buf, size_t count, loff_t *ppos)
 {
 	struct inode *inode = file->f_dentry->d_inode;
-	unsigned int currcons = MINOR(inode->i_rdev);
+	unsigned int currcons = minor(inode->i_rdev);
 	long pos = *ppos;
 	long viewed, attr, size, written;
 	char *con_buf0;
@@ -449,62 +456,40 @@ unlock_out:
 static int
 vcs_open(struct inode *inode, struct file *filp)
 {
-	unsigned int currcons = (MINOR(inode->i_rdev) & 127);
+	unsigned int currcons = minor(inode->i_rdev) & 127;
 	if(currcons && !vc_cons_allocated(currcons-1))
 		return -ENXIO;
 	return 0;
 }
 
 static struct file_operations vcs_fops = {
-	llseek:		vcs_lseek,
-	read:		vcs_read,
-	write:		vcs_write,
-	open:		vcs_open,
+	.llseek		= vcs_lseek,
+	.read		= vcs_read,
+	.write		= vcs_write,
+	.open		= vcs_open,
 };
 
-static devfs_handle_t devfs_handle;
-
-void vcs_make_devfs (unsigned int index, int unregister)
+void vcs_make_devfs(struct tty_struct *tty)
 {
-#ifdef CONFIG_DEVFS_FS
-    char name[8];
-
-    sprintf (name, "a%u", index + 1);
-    if (unregister)
-    {
-	devfs_unregister ( devfs_find_handle (devfs_handle, name + 1, 0, 0,
-					      DEVFS_SPECIAL_CHR, 0) );
-	devfs_unregister ( devfs_find_handle (devfs_handle, name, 0, 0,
-					      DEVFS_SPECIAL_CHR, 0) );
-    }
-    else
-    {
-	devfs_register (devfs_handle, name + 1, DEVFS_FL_DEFAULT,
-			VCS_MAJOR, index + 1,
-			S_IFCHR | S_IRUSR | S_IWUSR, &vcs_fops, NULL);
-	devfs_register (devfs_handle, name, DEVFS_FL_DEFAULT,
-			VCS_MAJOR, index + 129,
-			S_IFCHR | S_IRUSR | S_IWUSR, &vcs_fops, NULL);
-    }
-#endif /* CONFIG_DEVFS_FS */
+	devfs_mk_cdev(MKDEV(VCS_MAJOR, tty->index + 1),
+			S_IFCHR|S_IRUSR|S_IWUSR,
+			"vcc/%u", tty->index + 1);
+	devfs_mk_cdev(MKDEV(VCS_MAJOR, tty->index + 129),
+			S_IFCHR|S_IRUSR|S_IWUSR,
+			"vcc/a%u", tty->index + 1);
+}
+void vcs_remove_devfs(struct tty_struct *tty)
+{
+	devfs_remove("vcc/%u", tty->index + 1);
+	devfs_remove("vcc/a%u", tty->index + 1);
 }
 
 int __init vcs_init(void)
 {
-	int error;
+	if (register_chrdev(VCS_MAJOR, "vcs", &vcs_fops))
+		panic("unable to get major %d for vcs device", VCS_MAJOR);
 
-	error = devfs_register_chrdev(VCS_MAJOR, "vcs", &vcs_fops);
-
-	if (error)
-		printk("unable to get major %d for vcs device", VCS_MAJOR);
-
-	devfs_handle = devfs_mk_dir (NULL, "vcc", NULL);
-	devfs_register (devfs_handle, "0", DEVFS_FL_DEFAULT,
-			VCS_MAJOR, 0,
-			S_IFCHR | S_IRUSR | S_IWUSR, &vcs_fops, NULL);
-	devfs_register (devfs_handle, "a", DEVFS_FL_DEFAULT,
-			VCS_MAJOR, 128,
-			S_IFCHR | S_IRUSR | S_IWUSR, &vcs_fops, NULL);
-
-	return error;
+	devfs_mk_cdev(MKDEV(VCS_MAJOR, 0), S_IFCHR|S_IRUSR|S_IWUSR, "vcc/0");
+	devfs_mk_cdev(MKDEV(VCS_MAJOR, 128), S_IFCHR|S_IRUSR|S_IWUSR, "vcc/a0");
+	return 0;
 }

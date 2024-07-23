@@ -4,43 +4,31 @@
 # Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
 # Copyright (C) 1997,1998 Jakub Jelinek (jj@ultra.linux.cz)
 
-ROOT_IMG	=/usr/src/root.img
-ELFTOAOUT	=elftoaout
+ROOT_IMG	:= /usr/src/root.img
+ELFTOAOUT	:= elftoaout
 
-all: btfix.o
+host-progs	:= piggyback btfixupprep
+targets		:= tftpboot.img btfix.o btfix.s image
 
-tftpboot.img: piggyback
-	$(ELFTOAOUT) $(TOPDIR)/vmlinux -o tftpboot.img
-	./piggyback tftpboot.img $(TOPDIR)/System.map $(ROOT_IMG)
+quiet_cmd_elftoaout	= ELFTOAOUT $@
+      cmd_elftoaout	= $(ELFTOAOUT) $(obj)/image -o $@
+quiet_cmd_piggy		= PIGGY $@
+      cmd_piggy		= $(obj)/piggyback $@ $(obj)/System.map $(ROOT_IMG)
+quiet_cmd_btfix		= BTFIX $@
+      cmd_btfix		= $(OBJDUMP) -x vmlinux | $(obj)/btfixupprep > $@
 
-piggyback: piggyback.c
-	$(HOSTCC) $(HOSTCFLAGS) -o piggyback piggyback.c
+BTOBJS := $(HEAD_Y) $(INIT_Y)
+BTLIBS := $(CORE_Y) $(LIBS_Y) $(DRIVERS_Y) $(NET_Y)
+LDFLAGS_image := -T arch/sparc/vmlinux.lds.s $(BTOBJS) --start-group $(BTLIBS) --end-group
 
-btfixupprep: btfixupprep.c
-	$(HOSTCC) $(HOSTCFLAGS) -o btfixupprep btfixupprep.c
+# Actual linking
+$(obj)/image: $(obj)/btfix.o FORCE
+	$(call if_changed,ld)
+	$(NM) $@ | grep -v  '\(compiled\)\|\(\.o$$\)\|\( [aUw] \)\|\(\.\.ng$$\)\|\(LASH[RL]DI\)' | sort > $(obj)/System.map
 
-clean:
-	rm -f btfixupprep piggyback tftpboot.img btfix.o btfix.s
+$(obj)/tftpboot.img: $(obj)/piggyback $(obj)/System.map $(obj)/image FORCE
+	$(call if_changed,elftoaout)
+	$(call if_changed,piggy)
 
-BTOBJS := $(HEAD) init/main.o init/version.o
-BTLIBS := $(CORE_FILES_NO_BTFIX) $(FILESYSTEMS) \
-	$(DRIVERS) $(NETWORKS)
-
-# I wanted to make this depend upon BTOBJS so that a parallel
-# build would work, but this fails because $(HEAD) cannot work
-# properly as it will cause head.o to be built with the implicit
-# rules not the ones in kernel/Makefile.  Someone please fix. --DaveM
-vmlinux.o: dummy
-	$(LD) -r $(patsubst %,$(TOPDIR)/%,$(BTOBJS)) \
-		--start-group \
-		$(patsubst %,$(TOPDIR)/%,$(BTLIBS)) \
-		$(LIBS) \
-		--end-group -o vmlinux.o
-
-btfix.s: btfixupprep vmlinux.o
-	$(OBJDUMP) -x vmlinux.o | ./btfixupprep > btfix.s
-
-btfix.o: btfix.s
-	$(CC) -c -o btfix.o btfix.s
-
-include $(TOPDIR)/Rules.make
+$(obj)/btfix.s: $(obj)/btfixupprep vmlinux FORCE
+	$(call if_changed,btfix)

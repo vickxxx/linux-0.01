@@ -2,7 +2,7 @@
 
 	drivers/net/pci-skeleton.c
 
-	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
+	Maintained by Jeff Garzik <jgarzik@pobox.com>
 
 	Original code came from 8139too.c, which in turns was based
 	originally on Donald Becker's rtl8139.c driver, versions 1.11
@@ -96,6 +96,7 @@ IVc. Errata
 #include <linux/delay.h>
 #include <linux/ethtool.h>
 #include <linux/mii.h>
+#include <linux/crc32.h>
 #include <asm/io.h>
 
 #define NETDRV_VERSION		"1.0.0"
@@ -482,7 +483,7 @@ struct netdrv_private {
 	chip_t chipset;
 };
 
-MODULE_AUTHOR ("Jeff Garzik <jgarzik@mandrakesoft.com>");
+MODULE_AUTHOR ("Jeff Garzik <jgarzik@pobox.com>");
 MODULE_DESCRIPTION ("Skeleton for a PCI Fast Ethernet driver");
 MODULE_LICENSE("GPL");
 MODULE_PARM (multicast_filter_limit, "i");
@@ -504,12 +505,11 @@ static void netdrv_tx_timeout (struct net_device *dev);
 static void netdrv_init_ring (struct net_device *dev);
 static int netdrv_start_xmit (struct sk_buff *skb,
 			       struct net_device *dev);
-static void netdrv_interrupt (int irq, void *dev_instance,
+static irqreturn_t netdrv_interrupt (int irq, void *dev_instance,
 			       struct pt_regs *regs);
 static int netdrv_close (struct net_device *dev);
 static int netdrv_ioctl (struct net_device *dev, struct ifreq *rq, int cmd);
 static struct net_device_stats *netdrv_get_stats (struct net_device *dev);
-static inline u32 ether_crc (int length, unsigned char *data);
 static void netdrv_set_rx_mode (struct net_device *dev);
 static void netdrv_hw_start (struct net_device *dev);
 
@@ -602,7 +602,7 @@ static int __devinit netdrv_init_board (struct pci_dev *pdev,
 	*ioaddr_out = NULL;
 	*dev_out = NULL;
 
-	/* dev zeroed in init_etherdev */
+	/* dev zeroed in alloc_etherdev */
 	dev = alloc_etherdev (sizeof (*tp));
 	if (dev == NULL) {
 		printk (KERN_ERR PFX "unable to alloc new ethernet\n");
@@ -610,6 +610,7 @@ static int __devinit netdrv_init_board (struct pci_dev *pdev,
 		return -ENOMEM;
 	}
 	SET_MODULE_OWNER(dev);
+	SET_NETDEV_DEV(dev, &pdev->dev);
 	tp = dev->priv;
 
 	/* enable device (incl. PCI PM wakeup), and bus-mastering */
@@ -789,7 +790,7 @@ static int __devinit netdrv_init_one (struct pci_dev *pdev,
 	dev->irq = pdev->irq;
 	dev->base_addr = (unsigned long) ioaddr;
 
-	/* dev->priv/tp zeroed and aligned in init_etherdev */
+	/* dev->priv/tp zeroed and aligned in alloc_etherdev */
 	tp = dev->priv;
 
 	/* note: tp->chipset set in netdrv_init_board */
@@ -834,7 +835,7 @@ static int __devinit netdrv_init_one (struct pci_dev *pdev,
 		printk (KERN_INFO
 			"%s: Media type forced to Full Duplex.\n",
 			dev->name);
-		mdio_write (dev, tp->phys[0], 4, 0x141);
+		mdio_write (dev, tp->phys[0], MII_ADVERTISE, ADVERTISE_FULL);
 		tp->duplex_lock = 1;
 	}
 
@@ -1235,20 +1236,20 @@ static void netdrv_timer (unsigned long data)
 	struct netdrv_private *tp = dev->priv;
 	void *ioaddr = tp->mmio_addr;
 	int next_tick = 60 * HZ;
-	int mii_reg5;
+	int mii_lpa;
 
-	mii_reg5 = mdio_read (dev, tp->phys[0], 5);
+	mii_lpa = mdio_read (dev, tp->phys[0], MII_LPA);
 
-	if (!tp->duplex_lock && mii_reg5 != 0xffff) {
-		int duplex = (mii_reg5 & 0x0100)
-		    || (mii_reg5 & 0x01C0) == 0x0040;
+	if (!tp->duplex_lock && mii_lpa != 0xffff) {
+		int duplex = (mii_lpa & LPA_100FULL)
+		    || (mii_lpa & 0x01C0) == 0x0040;
 		if (tp->full_duplex != duplex) {
 			tp->full_duplex = duplex;
 			printk (KERN_INFO
 				"%s: Setting %s-duplex based on MII #%d link"
 				" partner ability of %4.4x.\n", dev->name,
 				tp->full_duplex ? "full" : "half",
-				tp->phys[0], mii_reg5);
+				tp->phys[0], mii_lpa);
 			NETDRV_W8 (Cfg9346, Cfg9346_Unlock);
 			NETDRV_W8 (Config1, tp->full_duplex ? 0x60 : 0x20);
 			NETDRV_W8 (Cfg9346, Cfg9346_Lock);
@@ -1411,10 +1412,6 @@ static void netdrv_tx_interrupt (struct net_device *dev,
 				tp->stats.tx_carrier_errors++;
 			if (txstatus & TxOutOfWindow)
 				tp->stats.tx_window_errors++;
-#ifdef ETHER_STATS
-			if ((txstatus & 0x0f000000) == 0x0f000000)
-				tp->stats.collisions16++;
-#endif
 		} else {
 			if (txstatus & TxUnderrun) {
 				/* Add 64 to the Tx FIFO threshold. */
@@ -1669,7 +1666,7 @@ static void netdrv_weird_interrupt (struct net_device *dev,
 
 /* The interrupt handler does all of the Rx thread work and cleans up
    after the Tx thread. */
-static void netdrv_interrupt (int irq, void *dev_instance,
+static irqreturn_t netdrv_interrupt (int irq, void *dev_instance,
 			       struct pt_regs *regs)
 {
 	struct net_device *dev = (struct net_device *) dev_instance;
@@ -1677,6 +1674,7 @@ static void netdrv_interrupt (int irq, void *dev_instance,
 	int boguscnt = max_interrupt_work;
 	void *ioaddr = tp->mmio_addr;
 	int status = 0, link_changed = 0; /* avoid bogus "uninit" warning */
+	int handled = 0;
 
 	spin_lock (&tp->lock);
 
@@ -1687,6 +1685,7 @@ static void netdrv_interrupt (int irq, void *dev_instance,
 		if (status == 0xFFFF)
 			break;
 
+		handled = 1;
 		/* Acknowledge all of the current interrupt sources ASAP */
 		NETDRV_W16_F (IntrStatus, status);
 
@@ -1728,6 +1727,7 @@ static void netdrv_interrupt (int irq, void *dev_instance,
 
 	DPRINTK ("%s: exiting interrupt, intr_status=%#4.4x.\n",
 		 dev->name, NETDRV_R16 (IntrStatus));
+	return IRQ_RETVAL(handled);
 }
 
 
@@ -1793,19 +1793,16 @@ static int netdrv_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
 
 	switch (cmd) {
 	case SIOCGMIIPHY:		/* Get address of MII PHY in use. */
-	case SIOCDEVPRIVATE:		/* for binary compat, remove in 2.5 */
 		data->phy_id = tp->phys[0] & 0x3f;
 		/* Fall Through */
 
 	case SIOCGMIIREG:		/* Read MII PHY register. */
-	case SIOCDEVPRIVATE+1:		/* for binary compat, remove in 2.5 */
 		spin_lock_irqsave (&tp->lock, flags);
 		data->val_out = mdio_read (dev, data->phy_id & 0x1f, data->reg_num & 0x1f);
 		spin_unlock_irqrestore (&tp->lock, flags);
 		break;
 
 	case SIOCSMIIREG:		/* Write MII PHY register. */
-	case SIOCDEVPRIVATE+2:		/* for binary compat, remove in 2.5 */
 		if (!capable (CAP_NET_ADMIN)) {
 			rc = -EPERM;
 			break;
@@ -1852,27 +1849,6 @@ static struct net_device_stats *netdrv_get_stats (struct net_device *dev)
 
 /* Set or clear the multicast filter for this adaptor.
    This routine is not state sensitive and need not be SMP locked. */
-
-static unsigned const ethernet_polynomial = 0x04c11db7U;
-static inline u32 ether_crc (int length, unsigned char *data)
-{
-	int crc = -1;
-
-	DPRINTK ("ENTER\n");
-
-	while (--length >= 0) {
-		unsigned char current_octet = *data++;
-		int bit;
-		for (bit = 0; bit < 8; bit++, current_octet >>= 1)
-			crc = (crc << 1) ^
-			    ((crc < 0) ^ (current_octet & 1) ?
-			     ethernet_polynomial : 0);
-	}
-
-	DPRINTK ("EXIT\n");
-	return crc;
-}
-
 
 static void netdrv_set_rx_mode (struct net_device *dev)
 {
@@ -1977,13 +1953,13 @@ static int netdrv_resume (struct pci_dev *pdev)
 
 
 static struct pci_driver netdrv_pci_driver = {
-	name:		MODNAME,
-	id_table:	netdrv_pci_tbl,
-	probe:		netdrv_init_one,
-	remove:		netdrv_remove_one,
+	.name		= MODNAME,
+	.id_table	= netdrv_pci_tbl,
+	.probe		= netdrv_init_one,
+	.remove		= __devexit_p(netdrv_remove_one),
 #ifdef CONFIG_PM
-	suspend:	netdrv_suspend,
-	resume:		netdrv_resume,
+	.suspend	= netdrv_suspend,
+	.resume		= netdrv_resume,
 #endif /* CONFIG_PM */
 };
 

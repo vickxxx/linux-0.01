@@ -1,4 +1,4 @@
-/* $Id: irq.h,v 1.20 2001/03/09 01:31:40 davem Exp $
+/* $Id: irq.h,v 1.21 2002/01/23 11:27:36 davem Exp $
  * irq.h: IRQ registers on the 64-bit Sparc.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -11,10 +11,10 @@
 #include <linux/config.h>
 #include <linux/linkage.h>
 #include <linux/kernel.h>
-
-struct devid_cookie {
-	int dummy;
-};
+#include <linux/errno.h>
+#include <linux/interrupt.h>
+#include <asm/pil.h>
+#include <asm/ptrace.h>
 
 /* You should not mess with this directly. That's the job of irq.c.
  *
@@ -93,8 +93,9 @@ extern unsigned char dma_sync_reg_table_entry;
 #define IBF_PCI		0x02	/* Indicates PSYCHO/SABRE/SCHIZO PCI interrupt.	 */
 #define IBF_ACTIVE	0x04	/* This interrupt is active and has a handler.	 */
 #define IBF_MULTI	0x08	/* On PCI, indicates shared bucket.		 */
+#define IBF_INPROGRESS	0x10	/* IRQ is being serviced.			 */
 
-#define NUM_IVECS	8192
+#define NUM_IVECS	(IMAP_INR + 1)
 extern struct ino_bucket ivector_table[NUM_IVECS];
 
 #define __irq_ino(irq) \
@@ -111,13 +112,12 @@ static __inline__ char *__irq_itoa(unsigned int irq)
 	return buff;
 }
 
-#define NR_IRQS    15
+#define NR_IRQS    16
 
+#define irq_canonicalize(irq)	(irq)
 extern void disable_irq(unsigned int);
 #define disable_irq_nosync disable_irq
 extern void enable_irq(unsigned int);
-extern void init_timers(void (*lvl10_irq)(int, void *, struct pt_regs *),
-			unsigned long *);
 extern unsigned int build_irq(int pil, int inofixup, unsigned long iclr, unsigned long imap);
 extern unsigned int sbus_build_irq(void *sbus, unsigned int ino);
 extern unsigned int psycho_build_irq(void *psycho, int imap_off, int ino, int need_dma_sync);
@@ -129,25 +129,25 @@ extern void set_irq_udt(int);
 #endif
 
 extern int request_fast_irq(unsigned int irq,
-			    void (*handler)(int, void *, struct pt_regs *),
+			    irqreturn_t (*handler)(int, void *, struct pt_regs *),
 			    unsigned long flags, __const__ char *devname,
 			    void *dev_id);
 
-extern __inline__ void set_softint(unsigned long bits)
+static __inline__ void set_softint(unsigned long bits)
 {
 	__asm__ __volatile__("wr	%0, 0x0, %%set_softint"
 			     : /* No outputs */
 			     : "r" (bits));
 }
 
-extern __inline__ void clear_softint(unsigned long bits)
+static __inline__ void clear_softint(unsigned long bits)
 {
 	__asm__ __volatile__("wr	%0, 0x0, %%clear_softint"
 			     : /* No outputs */
 			     : "r" (bits));
 }
 
-extern __inline__ unsigned long get_softint(void)
+static __inline__ unsigned long get_softint(void)
 {
 	unsigned long retval;
 

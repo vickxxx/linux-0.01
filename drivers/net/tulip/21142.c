@@ -1,7 +1,7 @@
 /*
 	drivers/net/tulip/21142.c
 
-	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
+	Maintained by Jeff Garzik <jgarzik@pobox.com>
 	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
@@ -39,8 +39,13 @@ void t21142_timer(unsigned long data)
 		printk(KERN_INFO"%s: 21143 negotiation status %8.8x, %s.\n",
 			   dev->name, csr12, medianame[dev->if_port]);
 	if (tulip_media_cap[dev->if_port] & MediaIsMII) {
-		tulip_check_duplex(dev);
-		next_tick = 60*HZ;
+		if (tulip_check_duplex(dev) < 0) {
+			netif_carrier_off(dev);
+			next_tick = 3*HZ;
+		} else {
+			netif_carrier_on(dev);
+			next_tick = 60*HZ;
+		}
 	} else if (tp->nwayset) {
 		/* Don't screw up a negotiated session! */
 		if (tulip_debug > 1)
@@ -167,8 +172,9 @@ void t21142_lnk_change(struct net_device *dev, int csr5)
 			int i;
 			for (i = 0; i < tp->mtable->leafcount; i++)
 				if (tp->mtable->mleaf[i].media == dev->if_port) {
+					int startup = ! ((tp->chip_id == DC21143 && tp->revision == 65));
 					tp->cur_index = i;
-					tulip_select_media(dev, 1);
+					tulip_select_media(dev, startup);
 					setup_done = 1;
 					break;
 				}

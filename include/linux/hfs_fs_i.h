@@ -19,7 +19,7 @@
 struct hfs_inode_info {
 	int				magic;     /* A magic number */
 
-	unsigned long			mmu_private;
+	loff_t				mmu_private;
 	struct hfs_cat_entry		*entry;
 
 	/* For a regular or header file */
@@ -39,6 +39,7 @@ struct hfs_inode_info {
 
         /* for dentry cleanup */
         void (*d_drop_op)(struct dentry *, const ino_t);
+	struct inode vfs_inode;
 };
 
 #endif

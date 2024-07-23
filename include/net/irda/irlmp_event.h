@@ -11,7 +11,7 @@
  * 
  *     Copyright (c) 1997, 1999 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
- *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
+ *     Copyright (c) 2000-2002 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -27,9 +27,11 @@
 #ifndef IRLMP_EVENT_H
 #define IRLMP_EVENT_H
 
+/* A few forward declarations (to make compiler happy) */
 struct irlmp_cb;
 struct lsap_cb;
 struct lap_cb;
+struct discovery_t;
 
 /* LAP states */
 typedef enum {
@@ -76,26 +78,6 @@ typedef enum {
  	LM_LAP_DISCOVERY_CONFIRM,
 	LM_LAP_IDLE_TIMEOUT,
 } IRLMP_EVENT;
-
-/*
- *  Information which is used by the current thread, when executing in the
- *  state machine.
- */
-struct irlmp_event {
-	IRLMP_EVENT *event;
-	struct sk_buff *skb;
-
-	__u8 hint;
-	__u32 daddr;
-	__u32 saddr;
-
-	__u8 slsap;
-	__u8 dlsap;
-
-	int reason;
-
-	discovery_t *discovery;
-};
 
 extern const char *irlmp_state[];
 extern const char *irlsap_state[];

@@ -286,8 +286,8 @@
 #define __NR_pciconfig_write		346
 #define __NR_query_module		347
 #define __NR_prctl			348
-#define __NR_pread			349
-#define __NR_pwrite			350
+#define __NR_pread64			349
+#define __NR_pwrite64			350
 #define __NR_rt_sigreturn		351
 #define __NR_rt_sigaction		352
 #define __NR_rt_sigprocmask		353
@@ -317,7 +317,49 @@
 #define __NR_getdents64			377
 #define __NR_gettid			378
 #define __NR_readahead			379
-#define __NR_security			380 /* syscall for security modules */
+/* 380 is unused */
+#define __NR_tkill			381
+#define __NR_setxattr			382
+#define __NR_lsetxattr			383
+#define __NR_fsetxattr			384
+#define __NR_getxattr			385
+#define __NR_lgetxattr			386
+#define __NR_fgetxattr			387
+#define __NR_listxattr			388
+#define __NR_llistxattr			389
+#define __NR_flistxattr			390
+#define __NR_removexattr		391
+#define __NR_lremovexattr		392
+#define __NR_fremovexattr		393
+#define __NR_futex			394
+#define __NR_sched_setaffinity		395     
+#define __NR_sched_getaffinity		396
+#define __NR_tuxcall			397
+#define __NR_io_setup			398
+#define __NR_io_destroy			399
+#define __NR_io_getevents		400
+#define __NR_io_submit			401
+#define __NR_io_cancel			402
+#define __NR_exit_group			405
+#define __NR_lookup_dcookie		406
+#define __NR_sys_epoll_create		407
+#define __NR_sys_epoll_ctl		408
+#define __NR_sys_epoll_wait		409
+#define __NR_remap_file_pages		410
+#define __NR_set_tid_address		411
+#define __NR_restart_syscall		412
+#define __NR_fadvise64			413
+#define __NR_timer_create		414
+#define __NR_timer_settime		415
+#define __NR_timer_gettime		416
+#define __NR_timer_getoverrun		417
+#define __NR_timer_delete		418
+#define __NR_clock_settime		419
+#define __NR_clock_gettime		420
+#define __NR_clock_getres		421
+#define __NR_clock_nanosleep		422
+#define __NR_semtimedop			423
+#define NR_SYSCALLS			424
 
 #if defined(__GNUC__)
 
@@ -505,12 +547,7 @@ type name (type1 arg1,type2 arg2,type3 arg3,type4 arg4,type5 arg5, type6 arg6)\
 
 #include <linux/string.h>
 #include <linux/signal.h>
-
-extern void sys_idle(void);
-static inline void idle(void)
-{
-	sys_idle();
-}
+#include <asm/ptrace.h>
 
 extern long sys_open(const char *, int, int);
 static inline long open(const char * name, int mode, int flags)
@@ -526,13 +563,14 @@ static inline long dup(int fd)
 
 static inline long close(int fd)
 {
+	extern long sys_close(unsigned int);
 	return sys_close(fd);
 }
 
 extern off_t sys_lseek(int, off_t, int);
-static inline off_t lseek(int fd, off_t off, int whense)
+static inline off_t lseek(int fd, off_t off, int whence)
 {
-	return sys_lseek(fd, off, whense);
+	return sys_lseek(fd, off, whence);
 }
 
 extern long sys_exit(int);
@@ -543,25 +581,19 @@ static inline long _exit(int value)
 
 #define exit(x) _exit(x)
 
-extern long sys_write(int, const char *, int);
-static inline long write(int fd, const char * buf, int nr)
+extern long sys_write(int, const char *, size_t);
+static inline long write(int fd, const char * buf, size_t nr)
 {
 	return sys_write(fd, buf, nr);
 }
 
-extern long sys_read(int, char *, int);
-static inline long read(int fd, char * buf, int nr)
+extern long sys_read(int, char *, size_t);
+static inline long read(int fd, char * buf, size_t nr)
 {
 	return sys_read(fd, buf, nr);
 }
 
-extern int __kernel_execve(char *, char **, char **, struct pt_regs *);
-static inline long execve(char * file, char ** argvp, char ** envp)
-{
-	struct pt_regs regs;
-	memset(&regs, 0, sizeof(regs));
-	return __kernel_execve(file, argvp, envp, &regs);
-}
+extern long execve(char *, char **, char **);
 
 extern long sys_setsid(void);
 static inline long setsid(void)
@@ -569,28 +601,25 @@ static inline long setsid(void)
 	return sys_setsid();
 }
 
-extern long sys_sync(void);
-static inline long sync(void)
-{
-	return sys_sync();
-}
-
+struct rusage;
+extern asmlinkage long sys_wait4(pid_t, unsigned int *, int, struct rusage *);
 static inline pid_t waitpid(int pid, int * wait_stat, int flags)
 {
 	return sys_wait4(pid, wait_stat, flags, NULL);
 }
 
-static inline pid_t wait(int * wait_stat)
-{
-	return waitpid(-1,wait_stat,0);
-}
+#endif /* __KERNEL_SYSCALLS__ */
 
-extern long sys_delete_module(const char *name);
-static inline long delete_module(const char *name)
-{
-	return sys_delete_module(name);
-}
-
-#endif
+/*
+ * "Conditional" syscalls
+ *
+ * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
+ * but it doesn't work on all toolchains, so we just do it by hand.
+ *
+ * Note that we do *not* provide a parameter list to avoid 
+ * conflicting with one of the syscall declarations in some
+ * of the relevant header files (including this one).
+ */
+#define cond_syscall(x) asmlinkage long x() __attribute__((weak,alias("sys_ni_syscall")));
 
 #endif /* _ALPHA_UNISTD_H */

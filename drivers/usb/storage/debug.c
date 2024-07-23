@@ -1,10 +1,13 @@
 /* Driver for USB Mass Storage compliant devices
  * Debugging Functions Source Code File
  *
- * $Id: debug.c,v 1.5 2001/06/27 23:20:45 mdharm Exp $
+ * $Id: debug.c,v 1.9 2002/04/22 03:39:43 mdharm Exp $
  *
  * Current development and maintenance by:
- *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+ *   (c) 1999-2002 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
+ *
+ * Developed with the assistance of:
+ *   (c) 2002 Alan Stern <stern@rowland.org>
  *
  * Initial work by:
  *   (c) 1999 Michael Gee (michael@linuxspecific.com)
@@ -46,6 +49,7 @@
 void usb_stor_show_command(Scsi_Cmnd *srb)
 {
 	char *what = NULL;
+	int i;
 
 	switch (srb->cmnd[0]) {
 	case TEST_UNIT_READY: what = "TEST_UNIT_READY"; break;
@@ -140,29 +144,25 @@ void usb_stor_show_command(Scsi_Cmnd *srb)
 	default: what = "(unknown command)"; break;
 	}
 	US_DEBUGP("Command %s (%d bytes)\n", what, srb->cmd_len);
-	US_DEBUGP("%02x %02x %02x %02x "
-		  "%02x %02x %02x %02x "
-		  "%02x %02x %02x %02x\n",
-		  srb->cmnd[0], srb->cmnd[1], srb->cmnd[2], srb->cmnd[3],
-		  srb->cmnd[4], srb->cmnd[5], srb->cmnd[6], srb->cmnd[7],
-		  srb->cmnd[8], srb->cmnd[9], srb->cmnd[10],
-		  srb->cmnd[11]);
+	US_DEBUGP("");
+	for (i = 0; i < srb->cmd_len && i < 16; i++)
+		US_DEBUGPX(" %02x", srb->cmnd[i]);
+	US_DEBUGPX("\n");
 }
 
-void usb_stor_print_Scsi_Cmnd( Scsi_Cmnd* cmd )
+void usb_stor_print_Scsi_Cmnd(Scsi_Cmnd *cmd)
 {
 	int i=0, bufferSize = cmd->request_bufflen;
-	u8* buffer = cmd->request_buffer;
-	struct scatterlist* sg = (struct scatterlist*)cmd->request_buffer;
+	u8 *buffer = cmd->request_buffer;
+	struct scatterlist *sg = (struct scatterlist*)cmd->request_buffer;
 
-	US_DEBUGP("Dumping information about %p.\n", cmd );
-	US_DEBUGP("cmd->cmnd[0] value is %d.\n", cmd->cmnd[0] );
+	US_DEBUGP("Dumping information about %p.\n", cmd);
+	US_DEBUGP("cmd->cmnd[0] value is %d.\n", cmd->cmnd[0]);
 	US_DEBUGP("(MODE_SENSE is %d and MODE_SENSE_10 is %d)\n",
-		  MODE_SENSE, MODE_SENSE_10 );
+		  MODE_SENSE, MODE_SENSE_10);
 
-	US_DEBUGP("buffer is %p with length %d.\n", buffer, bufferSize );
-	for ( i=0; i<bufferSize; i+=16 )
-	{
+	US_DEBUGP("buffer is %p with length %d.\n", buffer, bufferSize);
+	for (i=0; i<bufferSize; i+=16) {
 		US_DEBUGP("%02x %02x %02x %02x %02x %02x %02x %02x\n"
 			  "%02x %02x %02x %02x %02x %02x %02x %02x\n",
 			  buffer[i],
@@ -184,27 +184,28 @@ void usb_stor_print_Scsi_Cmnd( Scsi_Cmnd* cmd )
 	}
 
 	US_DEBUGP("Buffer has %d scatterlists.\n", cmd->use_sg );
-	for ( i=0; i<cmd->use_sg; i++ )
-	{
+	for (i=0; i<cmd->use_sg; i++) {
+		char *adr = sg_address(sg[i]);
+		
 		US_DEBUGP("Length of scatterlist %d is %d.\n",i,sg[i].length);
 		US_DEBUGP("%02x %02x %02x %02x %02x %02x %02x %02x\n"
 			  "%02x %02x %02x %02x %02x %02x %02x %02x\n",
-			  sg[i].address[0],
-			  sg[i].address[1],
-			  sg[i].address[2],
-			  sg[i].address[3],
-			  sg[i].address[4],
-			  sg[i].address[5],
-			  sg[i].address[6],
-			  sg[i].address[7],
-			  sg[i].address[8],
-			  sg[i].address[9],
-			  sg[i].address[10],
-			  sg[i].address[11],
-			  sg[i].address[12],
-			  sg[i].address[13],
-			  sg[i].address[14],
-			  sg[i].address[15]);
+			  adr[0],
+			  adr[1],
+			  adr[2],
+			  adr[3],
+			  adr[4],
+			  adr[5],
+			  adr[6],
+			  adr[7],
+			  adr[8],
+			  adr[9],
+			  adr[10],
+			  adr[11],
+			  adr[12],
+			  adr[13],
+			  adr[14],
+			  adr[15]);
 	}
 }
 
@@ -213,155 +214,17 @@ void usb_stor_show_sense(
 		unsigned char asc,
 		unsigned char ascq) {
 
-	char *keys[] = {
-		"No Sense",
-		"Recovered Error",
-		"Not Ready",
-		"Medium Error",
-		"Hardware Error",
-		"Illegal Request",
-		"Unit Attention",
-		"Data Protect",
-		"Blank Check",
-		"Vendor Specific",
-		"Copy Aborted",
-		"Aborted Command",
-		"(Obsolete)",
-		"Volume Overflow",
-		"Miscompare"
-	};
+	const char *what, *keystr;
 
-	unsigned short qual = asc;
+	keystr = scsi_sense_key_string(key);
+	what = scsi_extd_sense_format(asc, ascq);
 
-	char *what = 0;
-	char *keystr = 0;
-
-	qual <<= 8;
-	qual |= ascq;
-
-	if (key>0x0E)
+	if (keystr == NULL)
 		keystr = "(Unknown Key)";
-	else
-		keystr = keys[key];
-
-	switch (qual) {
-
-	case 0x0000: what="no additional sense information"; break;
-	case 0x0001: what="filemark detected"; break;
-	case 0x0002: what="end of partition/medium detected"; break;
-	case 0x0003: what="setmark detected"; break;
-	case 0x0004: what="beginning of partition/medium detected"; break;
-	case 0x0005: what="end of data detected"; break;
-	case 0x0006: what="I/O process terminated"; break;
-	case 0x0011: what="audio play operation in progress"; break;
-	case 0x0012: what="audio play operation paused"; break;
-	case 0x0013: what="audio play operation stopped due to error"; break;
-	case 0x0014: what="audio play operation successfully completed"; break;
-	case 0x0015: what="no current audio status to return"; break;
-	case 0x0016: what="operation in progress"; break;
-	case 0x0017: what="cleaning requested"; break;
-	case 0x0100: what="no index/sector signal"; break;
-	case 0x0200: what="no seek complete"; break;
-	case 0x0300: what="peripheral device write fault"; break;
-	case 0x0301: what="no write current"; break;
-	case 0x0302: what="excessive write errors"; break;
-	case 0x0400: what="LUN not ready, cause not reportable"; break;
-	case 0x0401: what="LUN in process of becoming ready"; break;
-	case 0x0402: what="LUN not ready, initializing cmd. required"; break;
-	case 0x0403: what="LUN not ready, manual intervention required"; break;
-	case 0x0404: what="LUN not ready, format in progress"; break;
-	case 0x0405: what="LUN not ready, rebuild in progress"; break;
-	case 0x0406: what="LUN not ready, recalculation in progress"; break;
-	case 0x0407: what="LUN not ready, operation in progress"; break;
-	case 0x0408: what="LUN not ready, long write in progress"; break;
-	case 0x0500: what="LUN doesn't respond to selection"; break;
-	case 0x0A00: what="error log overflow"; break;
-	case 0x0C04: what="compression check miscompare error"; break;
-	case 0x0C05: what="data expansion occurred during compression"; break;
-	case 0x0C06: what="block not compressible"; break;
-	case 0x1102: what="error too long to correct"; break;
-	case 0x1106: what="CIRC unrecovered error"; break;
-	case 0x1107: what="data resynchronization error"; break;
-	case 0x110D: what="decompression CRC error"; break;
-	case 0x110E: what="can't decompress using declared algorithm"; break;
-	case 0x110F: what="error reading UPC/EAN number"; break;
-	case 0x1110: what="error reading ISRC number"; break;
-	case 0x1200: what="address mark not found for ID field"; break;
-	case 0x1300: what="address mark not found for data field"; break;
-	case 0x1403: what="end of data not found"; break;
-	case 0x1404: what="block sequence error"; break;
-	case 0x1600: what="data sync mark error"; break;
-	case 0x1601: what="data sync error: data rewritten"; break;
-	case 0x1602: what="data sync error: recommend rewrite"; break;
-	case 0x1603: what="data sync error: data auto-reallocated"; break;
-	case 0x1604: what="data sync error: recommend reassignment"; break;
-	case 0x1900: what="defect list error"; break;
-	case 0x1901: what="defect list not available"; break;
-	case 0x1902: what="defect list error in primary list"; break;
-	case 0x1903: what="defect list error in grown list"; break;
-	case 0x1C00: what="defect list not found"; break;
-	case 0x2400: what="invalid field in CDB"; break;
-	case 0x2703: what="associated write protect"; break;
-	case 0x2800: what="not ready to ready transition"; break;
-	case 0x2903: what="bus device reset function occurred"; break;
-	case 0x2904: what="device internal reset"; break;
-	case 0x2B00: what="copy can't execute / host can't disconnect"; break;
-	case 0x2C00: what="command sequence error"; break;
-	case 0x2C03: what="current program area is not empty"; break;
-	case 0x2C04: what="current program area is empty"; break;
-	case 0x2F00: what="commands cleared by another initiator"; break;
-	case 0x3001: what="can't read medium: unknown format"; break;
-	case 0x3002: what="can't read medium: incompatible format"; break;
-	case 0x3003: what="cleaning cartridge installed"; break;
-	case 0x3004: what="can't write medium: unknown format"; break;
-	case 0x3005: what="can't write medium: incompatible format"; break;
-	case 0x3006: what="can't format medium: incompatible medium"; break;
-	case 0x3007: what="cleaning failure"; break;
-	case 0x3008: what="can't write: application code mismatch"; break;
-	case 0x3009: what="current session not fixated for append"; break;
-	case 0x3201: what="defect list update failure"; break;
-	case 0x3400: what="enclosure failure"; break;
-	case 0x3500: what="enclosure services failure"; break;
-	case 0x3502: what="enclosure services unavailable"; break;
-	case 0x3503: what="enclosure services transfer failure"; break;
-	case 0x3504: what="enclosure services transfer refused"; break;
-	case 0x3B0F: what="end of medium reached"; break;
-	case 0x3F02: what="changed operating definition"; break;
-	case 0x4100: what="data path failure (should use 40 NN)"; break;
-	case 0x4A00: what="command phase error"; break;
-	case 0x4B00: what="data phase error"; break;
-	case 0x5100: what="erase failure"; break;
-	case 0x5200: what="cartridge fault"; break;
-	case 0x6300: what="end of user area encountered on this track"; break;
-	case 0x6600: what="automatic document feeder cover up"; break;
-	case 0x6601: what="automatic document feeder lift up"; break;
-	case 0x6602: what="document jam in auto doc feeder"; break;
-	case 0x6603: what="document miss feed auto in doc feeder"; break;
-	case 0x6700: what="configuration failure"; break;
-	case 0x6701: what="configuration of incapable LUN's failed"; break;
-	case 0x6702: what="add logical unit failed"; break;
-	case 0x6706: what="attachment of logical unit failed"; break;
-	case 0x6707: what="creation of logical unit failed"; break;
-	case 0x6900: what="data loss on logical unit"; break;
-	case 0x6E00: what="command to logical unit failed"; break;
-	case 0x7100: what="decompression exception long algorithm ID"; break;
-	case 0x7204: what="empty or partially written reserved track"; break;
-	case 0x7300: what="CD control error"; break;
-
-	default:
-		if (asc==0x40) {
-			US_DEBUGP("%s: diagnostic failure on component"
-			  " %02X\n", keystr, ascq);
-			return;
-		}
-		if (asc==0x70) {
-			US_DEBUGP("%s: decompression exception short"
-			  " algorithm ID of %02X\n", keystr, ascq);
-			return;
-		}
+	if (what == NULL)
 		what = "(unknown ASC/ASCQ)";
-	}
 
-	US_DEBUGP("%s: %s\n", keystr, what);
+	US_DEBUGP("%s: ", keystr);
+	US_DEBUGPX(what, ascq);
+	US_DEBUGPX("\n");
 }
-

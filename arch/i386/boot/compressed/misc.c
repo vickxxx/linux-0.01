@@ -12,6 +12,7 @@
 #include <linux/linkage.h>
 #include <linux/vmalloc.h>
 #include <linux/tty.h>
+#include <video/edid.h>
 #include <asm/io.h>
 
 /*
@@ -91,6 +92,7 @@ static unsigned char *real_mode; /* Pointer to real-mode data */
 #define ALT_MEM_K   (*(unsigned long *)(real_mode + 0x1e0))
 #endif
 #define SCREEN_INFO (*(struct screen_info *)(real_mode+0))
+#define EDID_INFO   (*(struct edid_info *)(real_mode+0x440))
 
 extern char input_data[];
 extern int input_len;
@@ -99,15 +101,11 @@ static long bytes_out = 0;
 static uch *output_data;
 static unsigned long output_ptr = 0;
 
- 
 static void *malloc(int size);
 static void free(void *where);
-static void error(char *m);
-static void gzip_mark(void **);
-static void gzip_release(void **);
- 
+
 static void puts(const char *);
-  
+
 extern int end;
 static long free_mem_ptr = (long)&end;
 static long free_mem_end_ptr;
@@ -124,8 +122,8 @@ static char *vidmem = (char *)0xb8000;
 static int vidport;
 static int lines, cols;
 
-#ifdef CONFIG_MULTIQUAD
-static void *xquad_portio = NULL;
+#ifdef CONFIG_X86_NUMAQ
+static void * xquad_portio = NULL;
 #endif
 
 #include "../../../../lib/inflate.c"
@@ -303,7 +301,7 @@ long user_stack [STACK_SIZE];
 struct {
 	long * a;
 	short b;
-	} stack_start = { & user_stack [STACK_SIZE] , __KERNEL_DS };
+	} stack_start = { & user_stack [STACK_SIZE] , __BOOT_DS };
 
 static void setup_normal_output_buffer(void)
 {

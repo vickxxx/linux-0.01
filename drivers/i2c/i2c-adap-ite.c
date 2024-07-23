@@ -61,11 +61,7 @@ static int own   = 0;
 
 static int i2c_debug=0;
 static struct iic_ite gpi;
-#if (LINUX_VERSION_CODE < 0x020301)
-static struct wait_queue *iic_wait = NULL;
-#else
 static wait_queue_head_t iic_wait;
-#endif
 static int iic_pending;
 
 /* ----- global defines -----------------------------------------------	*/
@@ -82,7 +78,7 @@ static void iic_ite_setiic(void *data, int ctl, short val)
         unsigned long j = jiffies + 10;
 
 	DEB3(printk(" Write 0x%02x to 0x%x\n",(unsigned short)val, ctl&0xff));
-	DEB3({while (jiffies < j) schedule();}) 
+	DEB3({while (time_before(jiffies, j)) schedule();})
 	outw(val,ctl);
 }
 
@@ -160,19 +156,17 @@ static void iic_ite_handler(int this_irq, void *dev_id, struct pt_regs *regs)
  */
 static int iic_hw_resrc_init(void)
 {
-  	if (check_region(gpi.iic_base, ITE_IIC_IO_SIZE) < 0 ) {
-   	   return -ENODEV;
-  	} else {
-  	   request_region(gpi.iic_base, ITE_IIC_IO_SIZE, 
-		"i2c (i2c bus adapter)");
-  	}
-	if (gpi.iic_irq > 0) {
-	   if (request_irq(gpi.iic_irq, iic_ite_handler, 0, "ITE IIC", 0) < 0) {
-	      gpi.iic_irq = 0;
-	   } else
-	      DEB3(printk("Enabled IIC IRQ %d\n", gpi.iic_irq));
-	      enable_irq(gpi.iic_irq);
-	}
+	if (!request_region(gpi.iic_base, ITE_IIC_IO_SIZE, "i2c"))
+		return -ENODEV;
+  
+	if (gpi.iic_irq <= 0)
+		return 0;
+
+	if (request_irq(gpi.iic_irq, iic_ite_handler, 0, "ITE IIC", 0) < 0)
+		gpi.iic_irq = 0;
+	else
+		enable_irq(gpi.iic_irq);
+
 	return 0;
 }
 
@@ -185,35 +179,6 @@ static void iic_ite_release(void)
 	}
 	release_region(gpi.iic_base , 2);
 }
-
-
-static int iic_ite_reg(struct i2c_client *client)
-{
-	return 0;
-}
-
-
-static int iic_ite_unreg(struct i2c_client *client)
-{
-	return 0;
-}
-
-
-static void iic_ite_inc_use(struct i2c_adapter *adap)
-{
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
-}
-
-
-static void iic_ite_dec_use(struct i2c_adapter *adap)
-{
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
-}
-
 
 /* ------------------------------------------------------------------------
  * Encapsulate the above functions in the correct operations structure.
@@ -230,18 +195,16 @@ static struct i2c_algo_iic_data iic_ite_data = {
 };
 
 static struct i2c_adapter iic_ite_ops = {
-	"ITE IIC adapter",
-	I2C_HW_I_IIC,
-	NULL,
-	&iic_ite_data,
-	iic_ite_inc_use,
-	iic_ite_dec_use,
-	iic_ite_reg,
-	iic_ite_unreg,
+	.owner		= THIS_MODULE,
+	.id		= I2C_HW_I_IIC,
+	.algo_data	= &iic_ite_data,
+	.dev		= {
+		.name	= "ITE IIC adapter",
+	},
 };
 
 /* Called when the module is loaded.  This function starts the
- * cascade of calls up through the heirarchy of i2c modules (i.e. up to the
+ * cascade of calls up through the hierarchy of i2c modules (i.e. up to the
  *  algorithm layer and into to the core layer)
  */
 static int __init iic_ite_init(void) 
@@ -271,9 +234,7 @@ static int __init iic_ite_init(void)
 		piic->iic_own = own;
 
 	iic_ite_data.data = (void *)piic;
-#if (LINUX_VERSION_CODE >= 0x020301)
 	init_waitqueue_head(&iic_wait);
-#endif
 	if (iic_hw_resrc_init() == 0) {
 		if (i2c_iic_add_bus(&iic_ite_ops) < 0)
 			return -ENODEV;
@@ -292,8 +253,6 @@ static void iic_ite_exit(void)
         iic_ite_release();
 }
 
-EXPORT_NO_SYMBOLS;
-
 /* If modules is NOT defined when this file is compiled, then the MODULE_*
  * macros will resolve to nothing
  */
@@ -308,7 +267,7 @@ MODULE_PARM(own, "i");
 MODULE_PARM(i2c_debug,"i");
 
 
-/* Called when module is loaded or when kernel is intialized.
+/* Called when module is loaded or when kernel is initialized.
  * If MODULES is defined when this file is compiled, then this function will
  * resolve to init_module (the function called when insmod is invoked for a
  * module).  Otherwise, this function is called early in the boot, when the

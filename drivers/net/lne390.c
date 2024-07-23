@@ -36,17 +36,16 @@ static const char *version =
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
 #include "8390.h"
 
 int lne390_probe(struct net_device *dev);
@@ -226,10 +225,10 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 	   the card mem within the region covered by `normal' RAM  !!!
 	*/
 	if (dev->mem_start > 1024*1024) {	/* phys addr > 1MB */
-		if (dev->mem_start < virt_to_bus(high_memory)) {
+		if (dev->mem_start < virt_to_phys(high_memory)) {
 			printk(KERN_CRIT "lne390.c: Card RAM overlaps with normal memory!!!\n");
 			printk(KERN_CRIT "lne390.c: Use EISA SCU to set card memory below 1MB,\n");
-			printk(KERN_CRIT "lne390.c: or to an address above 0x%lx.\n", virt_to_bus(high_memory));
+			printk(KERN_CRIT "lne390.c: or to an address above 0x%lx.\n", virt_to_phys(high_memory));
 			printk(KERN_CRIT "lne390.c: Driver NOT installed.\n");
 			ret = -EINVAL;
 			goto cleanup;
@@ -247,9 +246,9 @@ static int __init lne390_probe1(struct net_device *dev, int ioaddr)
 				LNE390_STOP_PG/4, dev->mem_start);
 	}
 
-	dev->mem_end = dev->rmem_end = dev->mem_start
+	dev->mem_end = ei_status.rmem_end = dev->mem_start
 		+ (LNE390_STOP_PG - LNE390_START_PG)*256;
-	dev->rmem_start = dev->mem_start + TX_PAGES*256;
+	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
 
 	/* The 8390 offset is zero for the LNE390 */
 	dev->base_addr = ioaddr;
@@ -334,12 +333,12 @@ static void lne390_block_input(struct net_device *dev, int count, struct sk_buff
 {
 	unsigned long xfer_start = dev->mem_start + ring_offset - (LNE390_START_PG<<8);
 
-	if (xfer_start + count > dev->rmem_end) {
+	if (xfer_start + count > ei_status.rmem_end) {
 		/* Packet wraps over end of ring buffer. */
-		int semi_count = dev->rmem_end - xfer_start;
+		int semi_count = ei_status.rmem_end - xfer_start;
 		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+		isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
 	} else {
 		/* Packet is in one chunk. */
 		isa_memcpy_fromio(skb->data, xfer_start, count);
@@ -381,9 +380,10 @@ static int mem[MAX_LNE_CARDS];
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_LNE_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_LNE_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_LNE_CARDS) "i");
-MODULE_PARM_DESC(io, "LNE390 I/O base address(es)");
-MODULE_PARM_DESC(irq, "LNE390 IRQ number(s)");
-MODULE_PARM_DESC(mem, "LNE390 memory base address(es)");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(mem, "memory base address(es)");
+MODULE_DESCRIPTION("Mylex LNE390A/B EISA Ethernet driver");
 MODULE_LICENSE("GPL");
 
 int init_module(void)

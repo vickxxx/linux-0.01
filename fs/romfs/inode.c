@@ -70,11 +70,30 @@
 #include <linux/slab.h>
 #include <linux/romfs_fs.h>
 #include <linux/fs.h>
-#include <linux/locks.h>
 #include <linux/init.h>
+#include <linux/pagemap.h>
 #include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
+#include <linux/vfs.h>
 
 #include <asm/uaccess.h>
+
+struct romfs_inode_info {
+	unsigned long i_metasize;	/* size of non-data area */
+	unsigned long i_dataoffset;	/* from the start of fs */
+	struct inode vfs_inode;
+};
+
+/* instead of private superblock data */
+static inline unsigned long romfs_maxsize(struct super_block *sb)
+{
+	return (unsigned long)sb->s_fs_info;
+}
+
+static inline struct romfs_inode_info *ROMFS_I(struct inode *inode)
+{
+	return list_entry(inode, struct romfs_inode_info, vfs_inode);
+}
 
 static __s32
 romfs_checksum(void *data, int size)
@@ -92,23 +111,18 @@ romfs_checksum(void *data, int size)
 
 static struct super_operations romfs_ops;
 
-static struct super_block *
-romfs_read_super(struct super_block *s, void *data, int silent)
+static int romfs_fill_super(struct super_block *s, void *data, int silent)
 {
 	struct buffer_head *bh;
-	kdev_t dev = s->s_dev;
 	struct romfs_super_block *rsb;
 	int sz;
 
 	/* I would parse the options here, but there are none.. :) */
 
-	set_blocksize(dev, ROMBSIZE);
-	s->s_blocksize = ROMBSIZE;
-	s->s_blocksize_bits = ROMBSBITS;
-	s->u.generic_sbp = (void *) 0;
+	sb_set_blocksize(s, ROMBSIZE);
 	s->s_maxbytes = 0xFFFFFFFF;
 
-	bh = bread(dev, 0, ROMBSIZE);
+	bh = sb_bread(s, 0);
 	if (!bh) {
 		/* XXX merge with other printk? */
                 printk ("romfs: unable to read superblock\n");
@@ -121,17 +135,17 @@ romfs_read_super(struct super_block *s, void *data, int silent)
 	   || sz < ROMFH_SIZE) {
 		if (!silent)
 			printk ("VFS: Can't find a romfs filesystem on dev "
-				"%s.\n", kdevname(dev));
+				"%s.\n", s->s_id);
 		goto out;
 	}
 	if (romfs_checksum(rsb, min_t(int, sz, 512))) {
 		printk ("romfs: bad initial checksum on dev "
-			"%s.\n", kdevname(dev));
+			"%s.\n", s->s_id);
 		goto out;
 	}
 
 	s->s_magic = ROMFS_MAGIC;
-	s->u.romfs_sb.s_maxsize = sz;
+	s->s_fs_info = (void *)(long)sz;
 
 	s->s_flags |= MS_RDONLY;
 
@@ -153,21 +167,21 @@ romfs_read_super(struct super_block *s, void *data, int silent)
 out:
 		brelse(bh);
 outnobh:
-		s = NULL;
+		return -EINVAL;
 	}
 
-	return s;
+	return 0;
 }
 
 /* That's simple too. */
 
 static int
-romfs_statfs(struct super_block *sb, struct statfs *buf)
+romfs_statfs(struct super_block *sb, struct kstatfs *buf)
 {
 	buf->f_type = ROMFS_MAGIC;
 	buf->f_bsize = ROMBSIZE;
 	buf->f_bfree = buf->f_bavail = buf->f_ffree;
-	buf->f_blocks = (sb->u.romfs_sb.s_maxsize+ROMBSIZE-1)>>ROMBSBITS;
+	buf->f_blocks = (romfs_maxsize(sb)+ROMBSIZE-1)>>ROMBSBITS;
 	buf->f_namelen = ROMFS_MAXFN;
 	return 0;
 }
@@ -180,7 +194,7 @@ romfs_strnlen(struct inode *i, unsigned long offset, unsigned long count)
 	struct buffer_head *bh;
 	unsigned long avail, maxsize, res;
 
-	maxsize = i->i_sb->u.romfs_sb.s_maxsize;
+	maxsize = romfs_maxsize(i->i_sb);
 	if (offset >= maxsize)
 		return -1;
 
@@ -188,7 +202,7 @@ romfs_strnlen(struct inode *i, unsigned long offset, unsigned long count)
 	if (count > maxsize || offset+count > maxsize)
 		count = maxsize-offset;
 
-	bh = bread(i->i_dev, offset>>ROMBSBITS, ROMBSIZE);
+	bh = sb_bread(i->i_sb, offset>>ROMBSBITS);
 	if (!bh)
 		return -1;		/* error */
 
@@ -203,7 +217,7 @@ romfs_strnlen(struct inode *i, unsigned long offset, unsigned long count)
 	while (res < count) {
 		offset += maxsize;
 
-		bh = bread(i->i_dev, offset>>ROMBSBITS, ROMBSIZE);
+		bh = sb_bread(i->i_sb, offset>>ROMBSBITS);
 		if (!bh)
 			return -1;
 		maxsize = min_t(unsigned long, count - res, ROMBSIZE);
@@ -222,11 +236,11 @@ romfs_copyfrom(struct inode *i, void *dest, unsigned long offset, unsigned long 
 	struct buffer_head *bh;
 	unsigned long avail, maxsize, res;
 
-	maxsize = i->i_sb->u.romfs_sb.s_maxsize;
+	maxsize = romfs_maxsize(i->i_sb);
 	if (offset >= maxsize || count > maxsize || offset+count>maxsize)
 		return -1;
 
-	bh = bread(i->i_dev, offset>>ROMBSBITS, ROMBSIZE);
+	bh = sb_bread(i->i_sb, offset>>ROMBSBITS);
 	if (!bh)
 		return -1;		/* error */
 
@@ -241,7 +255,7 @@ romfs_copyfrom(struct inode *i, void *dest, unsigned long offset, unsigned long 
 		offset += maxsize;
 		dest += maxsize;
 
-		bh = bread(i->i_dev, offset>>ROMBSBITS, ROMBSIZE);
+		bh = sb_bread(i->i_sb, offset>>ROMBSBITS);
 		if (!bh)
 			return -1;
 		maxsize = min_t(unsigned long, count - res, ROMBSIZE);
@@ -266,13 +280,15 @@ romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	int stored = 0;
 	char fsname[ROMFS_MAXFN];	/* XXX dynamic? */
 
-	maxoff = i->i_sb->u.romfs_sb.s_maxsize;
+	lock_kernel();
+
+	maxoff = romfs_maxsize(i->i_sb);
 
 	offset = filp->f_pos;
 	if (!offset) {
 		offset = i->i_ino & ROMFH_MASK;
 		if (romfs_copyfrom(i, &ri, offset, ROMFH_SIZE) <= 0)
-			return stored;
+			goto out;
 		offset = ntohl(ri.spec) & ROMFH_MASK;
 	}
 
@@ -281,17 +297,17 @@ romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		if (!offset || offset >= maxoff) {
 			offset = maxoff;
 			filp->f_pos = offset;
-			return stored;
+			goto out;
 		}
 		filp->f_pos = offset;
 
 		/* Fetch inode info */
 		if (romfs_copyfrom(i, &ri, offset, ROMFH_SIZE) <= 0)
-			return stored;
+			goto out;
 
 		j = romfs_strnlen(i, offset+ROMFH_SIZE, sizeof(fsname)-1);
 		if (j < 0)
-			return stored;
+			goto out;
 
 		fsname[j]=0;
 		romfs_copyfrom(i, fsname, offset+ROMFH_SIZE, j);
@@ -302,15 +318,18 @@ romfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 			ino = ntohl(ri.spec);
 		if (filldir(dirent, fsname, j, offset, ino,
 			    romfs_dtype_table[nextfh & ROMFH_TYPE]) < 0) {
-			return stored;
+			goto out;
 		}
 		stored++;
 		offset = nextfh & ROMFH_MASK;
 	}
+out:
+	unlock_kernel();
+	return stored;
 }
 
 static struct dentry *
-romfs_lookup(struct inode *dir, struct dentry *dentry)
+romfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
 	unsigned long offset, maxoff;
 	int fslen, res;
@@ -322,10 +341,11 @@ romfs_lookup(struct inode *dir, struct dentry *dentry)
 
 	res = -EACCES;			/* placeholder for "no data here" */
 	offset = dir->i_ino & ROMFH_MASK;
+	lock_kernel();
 	if (romfs_copyfrom(dir, &ri, offset, ROMFH_SIZE) <= 0)
 		goto out;
 
-	maxoff = dir->i_sb->u.romfs_sb.s_maxsize;
+	maxoff = romfs_maxsize(dir->i_sb);
 	offset = ntohl(ri.spec) & ROMFH_MASK;
 
 	/* OK, now find the file whose name is in "dentry" in the
@@ -382,7 +402,8 @@ out0:	inode = NULL;
 outi:	res = 0;
 	d_add (dentry, inode);
 
-out:	return ERR_PTR(res);
+out:	unlock_kernel();
+	return ERR_PTR(res);
 }
 
 /*
@@ -409,7 +430,7 @@ romfs_readpage(struct file *file, struct page * page)
 	if (offset < inode->i_size) {
 		avail = inode->i_size-offset;
 		readlen = min_t(unsigned long, avail, PAGE_SIZE);
-		if (romfs_copyfrom(inode, buf, inode->u.romfs_i.i_dataoffset+offset, readlen) == readlen) {
+		if (romfs_copyfrom(inode, buf, ROMFS_I(inode)->i_dataoffset+offset, readlen) == readlen) {
 			if (readlen < PAGE_SIZE) {
 				memset(buf + readlen,0,PAGE_SIZE-readlen);
 			}
@@ -423,7 +444,7 @@ romfs_readpage(struct file *file, struct page * page)
 	}
 	flush_dcache_page(page);
 
-	UnlockPage(page);
+	unlock_page(page);
 
 	kunmap(page);
 err_out:
@@ -436,16 +457,16 @@ err_out:
 /* Mapping from our types to the kernel */
 
 static struct address_space_operations romfs_aops = {
-	readpage: romfs_readpage
+	.readpage = romfs_readpage
 };
 
 static struct file_operations romfs_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	romfs_readdir,
+	.read		= generic_read_dir,
+	.readdir	= romfs_readdir,
 };
 
 static struct inode_operations romfs_dir_inode_operations = {
-	lookup:		romfs_lookup,
+	.lookup		= romfs_lookup,
 };
 
 static mode_t romfs_modemap[] =
@@ -480,7 +501,8 @@ romfs_read_inode(struct inode *i)
 
 	i->i_nlink = 1;		/* Hard to decide.. */
 	i->i_size = ntohl(ri.size);
-	i->i_mtime = i->i_atime = i->i_ctime = 0;
+	i->i_mtime.tv_sec = i->i_atime.tv_sec = i->i_ctime.tv_sec = 0;
+	i->i_mtime.tv_nsec = i->i_atime.tv_nsec = i->i_ctime.tv_nsec = 0;
 	i->i_uid = i->i_gid = 0;
 
         /* Precalculate the data offset */
@@ -490,15 +512,15 @@ romfs_read_inode(struct inode *i)
         else
                 ino = 0;
 
-        i->u.romfs_i.i_metasize = ino;
-        i->u.romfs_i.i_dataoffset = ino+(i->i_ino&ROMFH_MASK);
+        ROMFS_I(i)->i_metasize = ino;
+        ROMFS_I(i)->i_dataoffset = ino+(i->i_ino&ROMFH_MASK);
 
         /* Compute permissions */
         ino = romfs_modemap[nextfh & ROMFH_TYPE];
 	/* only "normal" files have ops */
 	switch (nextfh & ROMFH_TYPE) {
 		case 1:
-			i->i_size = i->u.romfs_i.i_metasize;
+			i->i_size = ROMFS_I(i)->i_metasize;
 			i->i_op = &romfs_dir_inode_operations;
 			i->i_fop = &romfs_dir_operations;
 			if (nextfh & ROMFH_EXEC)
@@ -520,31 +542,98 @@ romfs_read_inode(struct inode *i)
 		default:
 			/* depending on MBZ for sock/fifos */
 			nextfh = ntohl(ri.spec);
-			nextfh = kdev_t_to_nr(MKDEV(nextfh>>16,nextfh&0xffff));
+			/* convert back and forth for typechecking and
+			 * source tagging */
+			nextfh = kdev_t_to_nr(mk_kdev(nextfh>>16,nextfh&0xffff));
 			init_special_inode(i, ino, nextfh);
 	}
 }
 
+static kmem_cache_t * romfs_inode_cachep;
+
+static struct inode *romfs_alloc_inode(struct super_block *sb)
+{
+	struct romfs_inode_info *ei;
+	ei = (struct romfs_inode_info *)kmem_cache_alloc(romfs_inode_cachep, SLAB_KERNEL);
+	if (!ei)
+		return NULL;
+	return &ei->vfs_inode;
+}
+
+static void romfs_destroy_inode(struct inode *inode)
+{
+	kmem_cache_free(romfs_inode_cachep, ROMFS_I(inode));
+}
+
+static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+{
+	struct romfs_inode_info *ei = (struct romfs_inode_info *) foo;
+
+	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
+	    SLAB_CTOR_CONSTRUCTOR)
+		inode_init_once(&ei->vfs_inode);
+}
+ 
+static int init_inodecache(void)
+{
+	romfs_inode_cachep = kmem_cache_create("romfs_inode_cache",
+					     sizeof(struct romfs_inode_info),
+					     0, SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT,
+					     init_once, NULL);
+	if (romfs_inode_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
+static void destroy_inodecache(void)
+{
+	if (kmem_cache_destroy(romfs_inode_cachep))
+		printk(KERN_INFO "romfs_inode_cache: not all structures were freed\n");
+}
+
 static struct super_operations romfs_ops = {
-	read_inode:	romfs_read_inode,
-	statfs:		romfs_statfs,
+	.alloc_inode	= romfs_alloc_inode,
+	.destroy_inode	= romfs_destroy_inode,
+	.read_inode	= romfs_read_inode,
+	.statfs		= romfs_statfs,
 };
 
-static DECLARE_FSTYPE_DEV(romfs_fs_type, "romfs", romfs_read_super);
+static struct super_block *romfs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_bdev(fs_type, flags, dev_name, data, romfs_fill_super);
+}
+
+static struct file_system_type romfs_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "romfs",
+	.get_sb		= romfs_get_sb,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
 
 static int __init init_romfs_fs(void)
 {
-	return register_filesystem(&romfs_fs_type);
+	int err = init_inodecache();
+	if (err)
+		goto out1;
+        err = register_filesystem(&romfs_fs_type);
+	if (err)
+		goto out;
+	return 0;
+out:
+	destroy_inodecache();
+out1:
+	return err;
 }
 
 static void __exit exit_romfs_fs(void)
 {
 	unregister_filesystem(&romfs_fs_type);
+	destroy_inodecache();
 }
 
 /* Yes, works even as a module... :) */
-
-EXPORT_NO_SYMBOLS;
 
 module_init(init_romfs_fs)
 module_exit(exit_romfs_fs)

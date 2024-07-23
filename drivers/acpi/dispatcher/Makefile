@@ -1,12 +1,9 @@
 #
 # Makefile for all Linux ACPI interpreter subdirectories
-# EXCEPT for the ospm directory
 #
 
-O_TARGET := $(notdir $(CURDIR)).o
-
-obj-$(CONFIG_ACPI) := $(patsubst %.c,%.o,$(wildcard *.c))
+obj-y := dsfield.o   dsmthdat.o  dsopcode.o  dswexec.o  dswscope.o \
+	 dsmethod.o  dsobject.o  dsutils.o   dswload.o  dswstate.o \
+	 dsinit.o
 
 EXTRA_CFLAGS += $(ACPI_CFLAGS)
-
-include $(TOPDIR)/Rules.make

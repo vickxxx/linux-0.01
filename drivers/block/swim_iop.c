@@ -24,10 +24,6 @@
  * be sent.
  */
 
-/* This has to be defined before some of the #includes below */
-
-#define MAJOR_NR  FLOPPY_MAJOR
-
 #include <linux/stddef.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -80,9 +76,9 @@ static struct swim_iop_req *current_req;
 static int floppy_count;
 
 static struct floppy_state floppy_states[MAX_FLOPPIES];
+static spinlock_t swim_iop_lock = SPIN_LOCK_UNLOCKED;
 
-static int floppy_blocksizes[2] = {512,512};
-static int floppy_sizes[2] = {2880,2880};
+#define CURRENT elv_next_request(&swim_queue)
 
 static char *drive_names[7] = {
 	"not installed",	/* DRV_NONE    */
@@ -106,8 +102,8 @@ static int floppy_ioctl(struct inode *inode, struct file *filp,
 			unsigned int cmd, unsigned long param);
 static int floppy_open(struct inode *inode, struct file *filp);
 static int floppy_release(struct inode *inode, struct file *filp);
-static int floppy_check_change(kdev_t dev);
-static int floppy_revalidate(kdev_t dev);
+static int floppy_check_change(struct gendisk *disk);
+static int floppy_revalidate(struct gendisk *disk);
 static int grab_drive(struct floppy_state *fs, enum swim_state state,
 		      int interruptible);
 static void release_drive(struct floppy_state *fs);
@@ -118,13 +114,14 @@ static void do_fd_request(request_queue_t * q);
 static void start_request(struct floppy_state *fs);
 
 static struct block_device_operations floppy_fops = {
-	open:			floppy_open,
-	release:		floppy_release,
-	ioctl:			floppy_ioctl,
-	check_media_change:	floppy_check_change,
-	revalidate:		floppy_revalidate,
+	.open		= floppy_open,
+	.release	= floppy_release,
+	.ioctl		= floppy_ioctl,
+	.media_changed	= floppy_check_change,
+	.revalidate_disk= floppy_revalidate,
 };
 
+static struct request_queue swim_queue;
 /*
  * SWIM IOP initialization
  */
@@ -140,17 +137,13 @@ int swimiop_init(void)
 	current_req = NULL;
 	floppy_count = 0;
 
-	if (!iop_ism_present) return -ENODEV;
+	if (!iop_ism_present)
+		return -ENODEV;
 
-	if (register_blkdev(MAJOR_NR, "fd", &floppy_fops)) {
-		printk(KERN_ERR "SWIM-IOP: Unable to get major %d for floppy\n",
-		       MAJOR_NR);
+	if (register_blkdev(FLOPPY_MAJOR, "fd"))
 		return -EBUSY;
-	}
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	blksize_size[MAJOR_NR] = floppy_blocksizes;
-	blk_size[MAJOR_NR] = floppy_sizes;
 
+	blk_init_queue(&swim_queue, do_fd_request, &swim_iop_lock);
 	printk("SWIM-IOP: %s by Joshua M. Thompson (funaho@jurai.org)\n",
 		DRIVER_VERSION);
 
@@ -189,7 +182,19 @@ int swimiop_init(void)
 	}
 	printk("SWIM-IOP: detected %d installed drives.\n", floppy_count);
 
-	do_floppy = NULL;
+	for (i = 0; i < floppy_count; i++) {
+		struct gendisk *disk = alloc_disk(1);
+		if (!disk)
+			continue;
+		disk->major = FLOPPY_MAJOR;
+		disk->first_minor = i;
+		disk->fops = &floppy_fops;
+		sprintf(disk->disk_name, "fd%d", i);
+		disk->private_data = &floppy_states[i];
+		disk->queue = &swim_queue;
+		set_capacity(disk, 2880 * 2);
+		add_disk(disk);
+	}
 
 	return 0;
 }
@@ -203,17 +208,16 @@ static void swimiop_init_request(struct swim_iop_req *req)
 
 static int swimiop_send_request(struct swim_iop_req *req)
 {
-	unsigned long cpu_flags;
+	unsigned long flags;
 	int err;
 
 	/* It's doubtful an interrupt routine would try to send */
 	/* a SWIM request, but I'd rather play it safe here.    */
 
-	save_flags(cpu_flags);
-	cli();
+	local_irq_save(flags);
 
 	if (current_req != NULL) {
-		restore_flags(cpu_flags);
+		local_irq_restore(flags);
 		return -ENOMEM;
 	}
 
@@ -221,7 +225,7 @@ static int swimiop_send_request(struct swim_iop_req *req)
 
 	/* Interrupts should be back on for iop_send_message() */
 
-	restore_flags(cpu_flags);
+	local_irq_restore(flags);
 
 	err = iop_send_message(SWIM_IOP, SWIM_CHAN, (void *) req,
 				sizeof(req->command), (__u8 *) &req->command[0],
@@ -340,17 +344,11 @@ static struct floppy_struct floppy_type =
 static int floppy_ioctl(struct inode *inode, struct file *filp,
 			unsigned int cmd, unsigned long param)
 {
-	struct floppy_state *fs;
+	struct floppy_state *fs = inode->i_bdev->bd_disk->private_data;
 	int err;
-	int devnum = MINOR(inode->i_rdev);
 
-	if (devnum >= floppy_count)
-		return -ENODEV;
-		
-	if ((cmd & 0x80) && !suser())
+	if ((cmd & 0x80) && !capable(CAP_SYS_ADMIN))
 		return -EPERM;
-
-	fs = &floppy_states[devnum];
 
 	switch (cmd) {
 	case FDEJECT:
@@ -359,41 +357,29 @@ static int floppy_ioctl(struct inode *inode, struct file *filp,
 		err = swimiop_eject(fs);
 		return err;
 	case FDGETPRM:
-	        err = copy_to_user((void *) param, (void *) &floppy_type,
-				   sizeof(struct floppy_struct));
-		return err;
+	        if (copy_to_user((void *) param, (void *) &floppy_type,
+				 sizeof(struct floppy_struct)))
+			return -EFAULT;
+		return 0;
 	}
 	return -ENOTTY;
 }
 
 static int floppy_open(struct inode *inode, struct file *filp)
 {
-	struct floppy_state *fs;
-	int err;
-	int devnum = MINOR(inode->i_rdev);
+	struct floppy_state *fs = inode->i_bdev->bd_disk->private_data;
 
-	if (devnum >= floppy_count)
-		return -ENODEV;
-	if (filp == 0)
-		return -EIO;
-		
-	fs = &floppy_states[devnum];
-	err = 0;
-	if (fs->ref_count == -1 || filp->f_flags & O_EXCL) return -EBUSY;
+	if (fs->ref_count == -1 || filp->f_flags & O_EXCL)
+		return -EBUSY;
 
-	if (err == 0 && (filp->f_flags & O_NDELAY) == 0
-	    && (filp->f_mode & 3)) {
-		check_disk_change(inode->i_rdev);
+	if ((filp->f_flags & O_NDELAY) == 0 && (filp->f_mode & 3)) {
+		check_disk_change(inode->i_bdev);
 		if (fs->ejected)
-			err = -ENXIO;
+			return -ENXIO;
 	}
 
-	if (err == 0 && (filp->f_mode & 2)) {
-		if (fs->write_prot)
-			err = -EROFS;
-	}
-
-	if (err) return err;
+	if ((filp->f_mode & 2) && fs->write_prot)
+		return -EROFS;
 
 	if (filp->f_flags & O_EXCL)
 		fs->ref_count = -1;
@@ -405,43 +391,24 @@ static int floppy_open(struct inode *inode, struct file *filp)
 
 static int floppy_release(struct inode *inode, struct file *filp)
 {
-	struct floppy_state *fs;
-	int devnum = MINOR(inode->i_rdev);
-
-	if (devnum >= floppy_count)
-		return -ENODEV;
-
-	fs = &floppy_states[devnum];
-	if (fs->ref_count > 0) fs->ref_count--;
+	struct floppy_state *fs = inode->i_bdev->bd_disk->private_data;
+	if (fs->ref_count > 0)
+		fs->ref_count--;
 	return 0;
 }
 
-static int floppy_check_change(kdev_t dev)
+static int floppy_check_change(struct gendisk *disk)
 {
-	struct floppy_state *fs;
-	int devnum = MINOR(dev);
-
-	if (MAJOR(dev) != MAJOR_NR || (devnum >= floppy_count))
-		return 0;
-		
-	fs = &floppy_states[devnum];
+	struct floppy_state *fs = disk->private_data;
 	return fs->ejected;
 }
 
-static int floppy_revalidate(kdev_t dev)
+static int floppy_revalidate(struct gendisk *disk)
 {
-	struct floppy_state *fs;
-	int devnum = MINOR(dev);
-
-	if (MAJOR(dev) != MAJOR_NR || (devnum >= floppy_count))
-		return 0;
-
-	fs = &floppy_states[devnum];
-
+	struct floppy_state *fs = disk->private_data;
 	grab_drive(fs, revalidating, 0);
 	/* yadda, yadda */
 	release_drive(fs);
-
 	return 0;
 }
 
@@ -454,14 +421,13 @@ static int grab_drive(struct floppy_state *fs, enum swim_state state,
 {
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	if (fs->state != idle) {
 		++fs->wanted;
 		while (fs->state != available) {
 			if (interruptible && signal_pending(current)) {
 				--fs->wanted;
-				restore_flags(flags);
+				local_irq_restore(flags);
 				return -EINTR;
 			}
 			interruptible_sleep_on(&fs->wait);
@@ -469,7 +435,7 @@ static int grab_drive(struct floppy_state *fs, enum swim_state state,
 		--fs->wanted;
 	}
 	fs->state = state;
-	restore_flags(flags);
+	local_irq_restore(flags);
 	return 0;
 }
 
@@ -477,11 +443,10 @@ static void release_drive(struct floppy_state *fs)
 {
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	fs->state = idle;
 	start_request(fs);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static void set_timeout(struct floppy_state *fs, int nticks,
@@ -489,15 +454,16 @@ static void set_timeout(struct floppy_state *fs, int nticks,
 {
 	unsigned long flags;
 
-	save_flags(flags); cli();
+	local_irq_save(flags);
 	if (fs->timeout_pending)
 		del_timer(&fs->timeout);
+	init_timer(&fs->timeout);
 	fs->timeout.expires = jiffies + nticks;
 	fs->timeout.function = proc;
 	fs->timeout.data = (unsigned long) fs;
 	add_timer(&fs->timeout);
 	fs->timeout_pending = 1;
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static void do_fd_request(request_queue_t * q)
@@ -519,12 +485,12 @@ static void fd_request_complete(struct swim_iop_req *req)
 	fs->state = idle;
 	if (cmd->error) {
 		printk(KERN_ERR "SWIM-IOP: error %d on read/write request.\n", cmd->error);
-		end_request(0);
+		end_request(CURRENT, 0);
 	} else {
 		CURRENT->sector += cmd->num_blocks;
 		CURRENT->current_nr_sectors -= cmd->num_blocks;
 		if (CURRENT->current_nr_sectors <= 0) {
-			end_request(1);
+			end_request(CURRENT, 1);
 			return;
 		}
 	}
@@ -536,7 +502,7 @@ static void fd_request_timeout(unsigned long data)
 	struct floppy_state *fs = (struct floppy_state *) data;
 
 	fs->timeout_pending = 0;
-	end_request(0);
+	end_request(CURRENT, 0);
 	fs->state = idle;
 }
 
@@ -550,29 +516,27 @@ static void start_request(struct floppy_state *fs)
 		wake_up(&fs->wait);
 		return;
 	}
-	while (!QUEUE_EMPTY && fs->state == idle) {
-		if (MAJOR(CURRENT->rq_dev) != MAJOR_NR)
-			panic(DEVICE_NAME ": request list destroyed");
+	while (CURRENT && fs->state == idle) {
 		if (CURRENT->bh && !buffer_locked(CURRENT->bh))
-			panic(DEVICE_NAME ": block not locked");
+			panic("floppy: block not locked");
 #if 0
-		printk("do_fd_req: dev=%x cmd=%d sec=%ld nr_sec=%ld buf=%p\n",
-		       kdev_t_to_nr(CURRENT->rq_dev), CURRENT->cmd,
+		printk("do_fd_req: dev=%s cmd=%d sec=%ld nr_sec=%ld buf=%p\n",
+		       CURRENT->rq_disk->disk_name, CURRENT->cmd,
 		       CURRENT->sector, CURRENT->nr_sectors, CURRENT->buffer);
 		printk("           rq_status=%d errors=%d current_nr_sectors=%ld\n",
 		       CURRENT->rq_status, CURRENT->errors, CURRENT->current_nr_sectors);
 #endif
 
 		if (CURRENT->sector < 0 || CURRENT->sector >= fs->total_secs) {
-			end_request(0);
+			end_request(CURRENT, 0);
 			continue;
 		}
 		if (CURRENT->current_nr_sectors == 0) {
-			end_request(1);
+			end_request(CURRENT, 1);
 			continue;
 		}
 		if (fs->ejected) {
-			end_request(0);
+			end_request(CURRENT, 0);
 			continue;
 		}
 
@@ -582,7 +546,7 @@ static void start_request(struct floppy_state *fs)
 
 		if (CURRENT->cmd == WRITE) {
 			if (fs->write_prot) {
-				end_request(0);
+				end_request(CURRENT, 0);
 				continue;
 			}
 			cmd->code = CMD_WRITE;
@@ -596,7 +560,7 @@ static void start_request(struct floppy_state *fs)
 		cmd->num_blocks = CURRENT->current_nr_sectors;
 
 		if (swimiop_send_request(&req)) {
-			end_request(0);
+			end_request(CURRENT, 0);
 			continue;
 		}
 

@@ -27,6 +27,7 @@
 #include "i2ellis.h"
 #include "i2pack.h"
 #include "i2cmd.h"
+#include <linux/workqueue.h>
 
 //------------------------------------------------------------------------------
 // i2ChanStr -- Channel Structure:
@@ -91,8 +92,6 @@ typedef struct _i2ChanStr
 	int      throttled;		// Set if upper layer can take no data
 
 	int      flags;         // Defined in tty.h
-	int      session;       // Defined in tty.h
-	int      pgrp;          // Defined in tty.h
 
 	PWAITQ   open_wait;     // Pointer for OS sleep function.
 	PWAITQ   close_wait;    // Pointer for OS sleep function.
@@ -101,9 +100,6 @@ typedef struct _i2ChanStr
 
 	struct timer_list  BookmarkTimer;   // Used by i2DrainOutput
 	wait_queue_head_t pBookmarkWait;   // Used by i2DrainOutput
-
-	struct termios NormalTermios;
-	struct termios CalloutTermios;
 
 	int      BaudBase;
 	int      BaudDivisor;
@@ -224,9 +220,9 @@ typedef struct _i2ChanStr
 	/*
 	 *	Task queues for processing input packets from the board.
 	 */
-	struct tq_struct	tqueue_input;
-	struct tq_struct	tqueue_status;
-	struct tq_struct	tqueue_hangup;
+	struct work_struct	tqueue_input;
+	struct work_struct	tqueue_status;
+	struct work_struct	tqueue_hangup;
 
 	rwlock_t Ibuf_spinlock;
 	rwlock_t Obuf_spinlock;

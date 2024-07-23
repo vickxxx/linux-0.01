@@ -13,6 +13,7 @@
 #include <linux/list.h>
 #include <linux/mm.h>
 #include <linux/wait.h>
+#include <linux/nfs_fs_sb.h>
 #include <linux/sunrpc/auth.h>
 #include <linux/nfs_xdr.h>
 
@@ -22,17 +23,16 @@
 #define PG_BUSY			0
 
 struct nfs_page {
-	struct list_head	wb_hash,	/* Inode */
-				wb_lru,		/* superblock lru list */
-				wb_list,	/* Defines state of page: */
+	struct list_head	wb_list,	/* Defines state of page: */
 				*wb_list_head;	/*      read/write/commit */
 	struct file		*wb_file;
 	struct inode		*wb_inode;
 	struct rpc_cred		*wb_cred;
 	struct page		*wb_page;	/* page to read in/write out */
 	wait_queue_head_t	wb_wait;	/* wait queue */
-	unsigned long		wb_timeout;	/* when to read/write/commit */
-	unsigned int		wb_offset,	/* Offset of read/write */
+	unsigned long		wb_index;	/* Offset >> PAGE_CACHE_SHIFT */
+	unsigned int		wb_offset,	/* Offset & ~PAGE_CACHE_MASK */
+				wb_pgbase,	/* Start of page data */
 				wb_bytes,	/* Length of request */
 				wb_count;	/* reference count */
 	unsigned long		wb_flags;
@@ -41,21 +41,22 @@ struct nfs_page {
 
 #define NFS_WBACK_BUSY(req)	(test_bit(PG_BUSY,&(req)->wb_flags))
 
-extern	struct nfs_page *nfs_create_request(struct file *, struct inode *,
+extern	struct nfs_page *nfs_create_request(struct rpc_cred *, struct inode *,
 					    struct page *,
 					    unsigned int, unsigned int);
+extern	void nfs_clear_request(struct nfs_page *req);
 extern	void nfs_release_request(struct nfs_page *req);
+extern	void nfs_release_list(struct list_head *list);
 
 
 extern	void nfs_list_add_request(struct nfs_page *, struct list_head *);
 
-extern	int nfs_scan_lru(struct list_head *, struct list_head *, int);
-extern	int nfs_scan_lru_timeout(struct list_head *, struct list_head *, int);
 extern	int nfs_scan_list(struct list_head *, struct list_head *,
 			  struct file *, unsigned long, unsigned int);
 extern	int nfs_coalesce_requests(struct list_head *, struct list_head *,
 				  unsigned int);
 extern  int nfs_wait_on_request(struct nfs_page *);
+extern	int nfs_wait_for_reads(struct list_head *);
 
 extern	spinlock_t nfs_wreq_lock;
 
@@ -118,32 +119,6 @@ static inline struct nfs_page *
 nfs_list_entry(struct list_head *head)
 {
 	return list_entry(head, struct nfs_page, wb_list);
-}
-
-static inline struct nfs_page *
-nfs_inode_wb_entry(struct list_head *head)
-{
-	return list_entry(head, struct nfs_page, wb_hash);
-}
-
-static inline void
-__nfs_add_lru(struct list_head *head, struct nfs_page *req)
-{
-	list_add_tail(&req->wb_lru, head);
-}
-
-static inline void
-__nfs_del_lru(struct nfs_page *req)
-{
-	if (list_empty(&req->wb_lru))
-		return;
-	list_del_init(&req->wb_lru);
-}
-
-static inline struct nfs_page *
-nfs_lru_entry(struct list_head *head)
-{
-        return list_entry(head, struct nfs_page, wb_lru);
 }
 
 #endif /* _LINUX_NFS_PAGE_H */

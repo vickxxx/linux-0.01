@@ -1,7 +1,7 @@
 /*
  * netfilter module for userspace packet logging daemons
  *
- * (C) 2000-2004 by Harald Welte <laforge@netfilter.org>
+ * (C) 2000-2002 by Harald Welte <laforge@gnumonks.org>
  *
  * 2000/09/22 ulog-cprange feature added
  * 2001/01/04 in-kernel queue as proposed by Sebastian Zander 
@@ -13,8 +13,6 @@
  * 2002/07/07 remove broken nflog_rcv() function -HW
  * 2002/08/29 fix shifted/unshifted nlgroup bug -HW
  * 2002/10/30 fix uninitialized mac_len field - <Anders K. Pedersen>
- * 2004/10/25 fix erroneous calculation of 'len' parameter to NLMSG_PUT
- *	      resulting in bogus 'error during NLMSG_PUT' messages.
  *
  * Released under the terms of the GPL
  *
@@ -91,6 +89,7 @@ typedef struct {
 static ulog_buff_t ulog_buffers[ULOG_MAXNLGROUPS];	/* array of buffers */
 
 static struct sock *nflognl;	/* our socket */
+static size_t qlen;		/* current length of multipart-nlmsg */
 DECLARE_LOCK(ulog_lock);	/* spinlock */
 
 /* send one ulog_buff_t to userspace */
@@ -109,7 +108,7 @@ static void ulog_send(unsigned int nlgroupnum)
 
 	NETLINK_CB(ub->skb).dst_groups = (1 << nlgroupnum);
 	DEBUGP("ipt_ULOG: throwing %d packets to netlink mask %u\n",
-		ub->qlen, nlgroupnum);
+		ub->qlen, nlgroup);
 	netlink_broadcast(nflognl, ub->skb, 0, (1 << nlgroupnum), GFP_ATOMIC);
 
 	ub->qlen = 0;
@@ -119,7 +118,7 @@ static void ulog_send(unsigned int nlgroupnum)
 }
 
 
-/* timer function to flush queue in flushtimeout time */
+/* timer function to flush queue in ULOG_FLUSH_INTERVAL time */
 static void ulog_timer(unsigned long data)
 {
 	DEBUGP("ipt_ULOG: timer function called, calling ulog_send\n");
@@ -156,9 +155,9 @@ struct sk_buff *ulog_alloc_skb(unsigned int size)
 }
 
 static unsigned int ipt_ulog_target(struct sk_buff **pskb,
-				    unsigned int hooknum,
 				    const struct net_device *in,
 				    const struct net_device *out,
+				    unsigned int hooknum,
 				    const void *targinfo, void *userinfo)
 {
 	ulog_buff_t *ub;
@@ -205,7 +204,7 @@ static unsigned int ipt_ulog_target(struct sk_buff **pskb,
 
 	/* NLMSG_PUT contains a hidden goto nlmsg_failure !!! */
 	nlh = NLMSG_PUT(ub->skb, 0, ub->qlen, ULOG_NL_EVENT, 
-			sizeof(*pm)+copy_len);
+			size - sizeof(*nlh));
 	ub->qlen++;
 
 	pm = NLMSG_DATA(nlh);
@@ -239,12 +238,19 @@ static unsigned int ipt_ulog_target(struct sk_buff **pskb,
 	else
 		pm->outdev_name[0] = '\0';
 
-	if (copy_len)
-		memcpy(pm->payload, (*pskb)->data, copy_len);
+	/* copy_len <= (*pskb)->len, so can't fail. */
+	if (skb_copy_bits(*pskb, 0, pm->payload, copy_len) < 0)
+		BUG();
 	
 	/* check if we are building multi-part messages */
 	if (ub->qlen > 1) {
 		ub->lastnlh->nlmsg_flags |= NLM_F_MULTI;
+	}
+
+	/* if threshold is reached, send message to userspace */
+	if (qlen >= loginfo->qthreshold) {
+		if (loginfo->qthreshold > 1)
+			nlh->nlmsg_type = NLMSG_DONE;
 	}
 
 	ub->lastnlh = nlh;
@@ -253,13 +259,6 @@ static unsigned int ipt_ulog_target(struct sk_buff **pskb,
 	if (!timer_pending(&ub->timer)) {
 		ub->timer.expires = jiffies + flushtimeout;
 		add_timer(&ub->timer);
-	}
-
-	/* if threshold is reached, send message to userspace */
-	if (ub->qlen >= loginfo->qthreshold) {
-		if (loginfo->qthreshold > 1)
-			nlh->nlmsg_type = NLMSG_DONE;
-		ulog_send(groupnum);
 	}
 
 	UNLOCK_BH(&ulog_lock);
@@ -306,9 +305,11 @@ static int ipt_ulog_checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_target ipt_ulog_reg =
-    { {NULL, NULL}, "ULOG", ipt_ulog_target, ipt_ulog_checkentry, NULL,
-THIS_MODULE
+static struct ipt_target ipt_ulog_reg = {
+	.name		= "ULOG",
+	.target		= ipt_ulog_target,
+	.checkentry	= ipt_ulog_checkentry,
+	.me		= THIS_MODULE,
 };
 
 static int __init init(void)
@@ -334,7 +335,7 @@ static int __init init(void)
 		return -ENOMEM;
 
 	if (ipt_register_target(&ipt_ulog_reg) != 0) {
-		sock_release(nflognl->socket);
+		sock_release(nflognl->sk_socket);
 		return -EINVAL;
 	}
 
@@ -349,7 +350,7 @@ static void __exit fini(void)
 	DEBUGP("ipt_ULOG: cleanup_module\n");
 
 	ipt_unregister_target(&ipt_ulog_reg);
-	sock_release(nflognl->socket);
+	sock_release(nflognl->sk_socket);
 
 	/* remove pending timers and free allocated skb's */
 	for (i = 0; i < ULOG_MAXNLGROUPS; i++) {

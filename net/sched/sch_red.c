@@ -41,6 +41,9 @@
 #include <net/pkt_sched.h>
 #include <net/inet_ecn.h>
 
+#define RED_ECN_ECT  0x02
+#define RED_ECN_CE   0x01
+
 
 /*	Random Early Detection (RED) algorithm.
 	=======================================
@@ -58,7 +61,7 @@ Short description.
 
 	avg = (1-W)*avg + W*current_queue_len,
 
-	W is the filter time constant (choosen as 2^(-Wlog)), it controls
+	W is the filter time constant (chosen as 2^(-Wlog)), it controls
 	the inertia of the algorithm. To allow larger bursts, W should be
 	decreased.
 
@@ -162,16 +165,28 @@ static int red_ecn_mark(struct sk_buff *skb)
 
 	switch (skb->protocol) {
 	case __constant_htons(ETH_P_IP):
-		if (!INET_ECN_is_capable(skb->nh.iph->tos))
+	{
+		u8 tos = skb->nh.iph->tos;
+
+		if (!(tos & RED_ECN_ECT))
 			return 0;
-		if (INET_ECN_is_not_ce(skb->nh.iph->tos))
+
+		if (!(tos & RED_ECN_CE))
 			IP_ECN_set_ce(skb->nh.iph);
+
 		return 1;
+	}
+
 	case __constant_htons(ETH_P_IPV6):
-		if (!INET_ECN_is_capable(ip6_get_dsfield(skb->nh.ipv6h)))
+	{
+		u32 label = *(u32*)skb->nh.raw;
+
+		if (!(label & __constant_htonl(RED_ECN_ECT<<20)))
 			return 0;
-		IP6_ECN_set_ce(skb->nh.ipv6h);
+		label |= __constant_htonl(RED_ECN_CE<<20);
 		return 1;
+	}
+
 	default:
 		return 0;
 	}
@@ -242,7 +257,7 @@ red_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 	if (q->qave < q->qth_min) {
 		q->qcount = -1;
 enqueue:
-		if (sch->stats.backlog + skb->len <= q->limit) {
+		if (sch->stats.backlog <= q->limit) {
 			__skb_queue_tail(&sch->q, skb);
 			sch->stats.backlog += skb->len;
 			sch->stats.bytes += skb->len;
@@ -392,14 +407,7 @@ static int red_change(struct Qdisc *sch, struct rtattr *opt)
 
 static int red_init(struct Qdisc* sch, struct rtattr *opt)
 {
-	int err;
-
-	MOD_INC_USE_COUNT;
-
-	if ((err = red_change(sch, opt)) != 0) {
-		MOD_DEC_USE_COUNT;
-	}
-	return err;
+	return red_change(sch, opt);
 }
 
 
@@ -443,27 +451,23 @@ rtattr_failure:
 
 static void red_destroy(struct Qdisc *sch)
 {
-	MOD_DEC_USE_COUNT;
 }
 
-struct Qdisc_ops red_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"red",
-	sizeof(struct red_sched_data),
-
-	red_enqueue,
-	red_dequeue,
-	red_requeue,
-	red_drop,
-
-	red_init,
-	red_reset,
-	red_destroy,
-	red_change,
-
-	red_dump,
+struct Qdisc_ops red_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"red",
+	.priv_size	=	sizeof(struct red_sched_data),
+	.enqueue	=	red_enqueue,
+	.dequeue	=	red_dequeue,
+	.requeue	=	red_requeue,
+	.drop		=	red_drop,
+	.init		=	red_init,
+	.reset		=	red_reset,
+	.destroy	=	red_destroy,
+	.change		=	red_change,
+	.dump		=	red_dump,
+	.owner		=	THIS_MODULE,
 };
 
 

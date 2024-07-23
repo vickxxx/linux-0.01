@@ -3,8 +3,8 @@
 /*
  * Pagetable related stuff.
  *
- * Copyright (C) 1998, 1999 Hewlett-Packard Co
- * Copyright (C) 1998, 1999 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998, 1999, 2002 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <linux/config.h>
@@ -30,6 +30,41 @@
 #define PAGE_MASK		(~(PAGE_SIZE - 1))
 #define PAGE_ALIGN(addr)	(((addr) + PAGE_SIZE - 1) & PAGE_MASK)
 
+#define PERCPU_PAGE_SHIFT	16	/* log2() of max. size of per-CPU area */
+#define PERCPU_PAGE_SIZE	(__IA64_UL_CONST(1) << PERCPU_PAGE_SHIFT)
+
+#define RGN_MAP_LIMIT	((1UL << (4*PAGE_SHIFT - 12)) - PAGE_SIZE)	/* per region addr limit */
+
+#ifdef CONFIG_HUGETLB_PAGE
+
+# if defined(CONFIG_HUGETLB_PAGE_SIZE_4GB)
+#  define HPAGE_SHIFT	32
+# elif defined(CONFIG_HUGETLB_PAGE_SIZE_1GB)
+#  define HPAGE_SHIFT	30
+# elif defined(CONFIG_HUGETLB_PAGE_SIZE_256MB)
+#  define HPAGE_SHIFT	28
+# elif defined(CONFIG_HUGETLB_PAGE_SIZE_64MB)
+#  define HPAGE_SHIFT	26
+# elif defined(CONFIG_HUGETLB_PAGE_SIZE_16MB)
+#  define HPAGE_SHIFT	24
+# elif defined(CONFIG_HUGETLB_PAGE_SIZE_4MB)
+#  define HPAGE_SHIFT	22
+# elif defined(CONFIG_HUGETLB_PAGE_SIZE_1MB)
+#  define HPAGE_SHIFT	20
+# elif defined(CONFIG_HUGETLB_PAGE_SIZE_256KB)
+#  define HPAGE_SHIFT	18
+# else
+#  error Unsupported IA-64 HugeTLB Page Size!
+# endif
+
+# define REGION_HPAGE	(4UL)	/* note: this is hardcoded in mmu_context.h:reload_context()!*/
+# define REGION_SHIFT	61
+# define HPAGE_SIZE	(__IA64_UL_CONST(1) << HPAGE_SHIFT)
+# define HPAGE_MASK	(~(HPAGE_SIZE - 1))
+# define HAVE_ARCH_HUGETLB_UNMAPPED_AREA
+# define ARCH_HAS_VALID_HUGEPAGE_RANGE
+#endif /* CONFIG_HUGETLB_PAGE */
+
 #ifdef __ASSEMBLY__
 # define __pa(x)		((x) - PAGE_OFFSET)
 # define __va(x)		((x) + PAGE_OFFSET)
@@ -41,31 +76,35 @@ extern void clear_page (void *page);
 extern void copy_page (void *to, void *from);
 
 /*
- * Note: the MAP_NR_*() macro can't use __pa() because MAP_NR_*(X) MUST
- * map to something >= max_mapnr if X is outside the identity mapped
- * kernel space.
+ * clear_user_page() and copy_user_page() can't be inline functions because
+ * flush_dcache_page() can't be defined until later...
  */
+#define clear_user_page(addr, vaddr, page)	\
+do {						\
+	clear_page(addr);			\
+	flush_dcache_page(page);		\
+} while (0)
 
-/*
- * The dense variant can be used as long as the size of memory holes isn't
- * very big.
- */
-#define MAP_NR_DENSE(addr)	(((unsigned long) (addr) - PAGE_OFFSET) >> PAGE_SHIFT)
+#define copy_user_page(to, from, vaddr, page)	\
+do {						\
+	copy_page((to), (from));		\
+	flush_dcache_page(page);		\
+} while (0)
 
-#ifdef CONFIG_IA64_GENERIC
-# include <asm/machvec.h>
-# define virt_to_page(kaddr)	(mem_map + platform_map_nr(kaddr))
-# define page_to_phys(page)	XXX fix me
-#elif defined (CONFIG_IA64_SGI_SN1)
-# ifndef CONFIG_DISCONTIGMEM
-#  define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
-#  define page_to_phys(page)	XXX fix me
+#define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
+
+#ifndef CONFIG_DISCONTIGMEM
+# ifdef CONFIG_VIRTUAL_MEM_MAP
+   extern int ia64_pfn_valid (unsigned long pfn);
+#  define pfn_valid(pfn)	(((pfn) < max_mapnr) && ia64_pfn_valid(pfn))
+# else
+#  define pfn_valid(pfn)	((pfn) < max_mapnr)
 # endif
-#else
-# define virt_to_page(kaddr)	(mem_map + MAP_NR_DENSE(kaddr))
-# define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
+#define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
+#define page_to_pfn(page)	((unsigned long) (page - mem_map))
+#define pfn_to_page(pfn)	(mem_map + (pfn))
+#define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
 #endif
-#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
 
 typedef union ia64_va {
 	struct {
@@ -89,10 +128,14 @@ typedef union ia64_va {
 #define REGION_OFFSET(x)	({ia64_va _v; _v.l = (long) (x); _v.f.off;})
 
 #define REGION_SIZE		REGION_NUMBER(1)
-#define REGION_KERNEL	7
+#define REGION_KERNEL		7
 
-#define BUG() do { printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); *(int *)0=0; } while (0)
-#define PAGE_BUG(page) do { BUG(); } while (0)
+#ifdef CONFIG_HUGETLB_PAGE
+# define htlbpage_to_page(x)	((REGION_NUMBER(x) << 61)				\
+				 | (REGION_OFFSET(x) >> (HPAGE_SHIFT-PAGE_SHIFT)))
+# define HUGETLB_PAGE_ORDER	(HPAGE_SHIFT - PAGE_SHIFT)
+extern int  check_valid_hugepage_range(unsigned long addr, unsigned long len);
+#endif
 
 static __inline__ int
 get_order (unsigned long size)
@@ -148,6 +191,11 @@ get_order (unsigned long size)
 # define __pgprot(x)	(x)
 #endif /* !STRICT_MM_TYPECHECKS */
 
-#define PAGE_OFFSET		0xe000000000000000
+#define PAGE_OFFSET			0xe000000000000000
+
+#define VM_DATA_DEFAULT_FLAGS		(VM_READ | VM_WRITE |					\
+					 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC |		\
+					 (((current->thread.flags & IA64_THREAD_XSTACK) != 0)	\
+					  ? VM_EXEC : 0))
 
 #endif /* _ASM_IA64_PAGE_H */

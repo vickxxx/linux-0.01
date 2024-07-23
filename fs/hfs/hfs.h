@@ -271,10 +271,7 @@ struct hfs_mdb {
 						   512-byte blocks per
 						   "allocation block" */
 	hfs_u16			attrib;		/* Attribute word */
-	hfs_wait_queue		rename_wait;
-	int			rename_lock;
-	hfs_wait_queue		bitmap_wait;
-	int			bitmap_lock;
+	struct semaphore	bitmap_sem;
         struct list_head        entry_dirty;
 };
 
@@ -313,10 +310,7 @@ struct hfs_dir {
 	hfs_u16		flags;
 	hfs_u16		dirs;		/* Number of directories in this one */
 	hfs_u16		files;		/* Number of files in this directory */
-	int		readers;
-	hfs_wait_queue	read_wait;
-	int		writers;
-	hfs_wait_queue	write_wait;
+	struct rw_semaphore	sem;
 };
 
 /*
@@ -495,7 +489,7 @@ extern void hfs_extent_adj(struct hfs_fork *);
 extern void hfs_extent_free(struct hfs_fork *);
 
 /* file.c */
-extern int hfs_get_block(struct inode *, long, struct buffer_head *, int);
+extern int hfs_get_block(struct inode *, sector_t, struct buffer_head *, int);
 
 /* mdb.c */
 extern struct hfs_mdb *hfs_mdb_get(hfs_sysmdb, int, hfs_s32);

@@ -1,4 +1,4 @@
-/* $Id: checksum.h,v 1.32 2001/10/30 04:32:24 davem Exp $ */
+/* $Id: checksum.h,v 1.33 2002/02/01 22:01:05 davem Exp $ */
 #ifndef __SPARC_CHECKSUM_H
 #define __SPARC_CHECKSUM_H
 
@@ -16,6 +16,7 @@
  *      RFC1071 Computing the Internet Checksum
  */
  
+#include <linux/in6.h>
 #include <asm/uaccess.h>
 #include <asm/cprefix.h>
 
@@ -39,12 +40,6 @@ extern unsigned int csum_partial(const unsigned char * buff, int len, unsigned i
  * better 64-bit) boundary
  */
 
-/* FIXME: Remove these two macros ASAP */
-#define csum_partial_copy(src, dst, len, sum) \
- 		       csum_partial_copy_nocheck(src,dst,len,sum)
-#define csum_partial_copy_fromuser(s, d, l, w)  \
-                         csum_partial_copy((char *) (s), (d), (l), (w))
-  
 extern unsigned int __csum_partial_copy_sparc_generic (const char *, char *);
 
 extern __inline__ unsigned int 

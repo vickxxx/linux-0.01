@@ -18,27 +18,30 @@
 #ifndef _MD_H
 #define _MD_H
 
-#include <linux/mm.h>
-#include <linux/fs.h>
 #include <linux/blkdev.h>
 #include <asm/semaphore.h>
 #include <linux/major.h>
 #include <linux/ioctl.h>
 #include <linux/types.h>
-#include <asm/bitops.h>
+#include <linux/bitops.h>
 #include <linux/module.h>
 #include <linux/hdreg.h>
 #include <linux/proc_fs.h>
+#include <linux/seq_file.h>
 #include <linux/smp_lock.h>
 #include <linux/delay.h>
 #include <net/checksum.h>
 #include <linux/random.h>
-#include <linux/locks.h>
 #include <linux/kernel_stat.h>
 #include <asm/io.h>
 #include <linux/completion.h>
+#include <linux/mempool.h>
+#include <linux/list.h>
+#include <linux/reboot.h>
+#include <linux/vmalloc.h>
+#include <linux/blkpg.h>
+#include <linux/bio.h>
 
-#include <linux/raid/md_compatible.h>
 /*
  * 'md_p.h' holds the 'physical' layout of RAID devices
  * 'md_u.h' holds the user <=> kernel API
@@ -59,29 +62,20 @@
 #define MD_MINOR_VERSION                90
 #define MD_PATCHLEVEL_VERSION           0
 
-extern int md_size[MAX_MD_DEVS];
-extern struct hd_struct md_hd_struct[MAX_MD_DEVS];
-
-extern void add_mddev_mapping (mddev_t *mddev, kdev_t dev, void *data);
-extern void del_mddev_mapping (mddev_t *mddev, kdev_t dev);
-extern char * partition_name (kdev_t dev);
 extern int register_md_personality (int p_num, mdk_personality_t *p);
 extern int unregister_md_personality (int p_num);
-extern mdk_thread_t * md_register_thread (void (*run) (void *data),
-				void *data, const char *name);
+extern mdk_thread_t * md_register_thread (void (*run) (mddev_t *mddev),
+				mddev_t *mddev, const char *name);
 extern void md_unregister_thread (mdk_thread_t *thread);
 extern void md_wakeup_thread(mdk_thread_t *thread);
+extern void md_check_recovery(mddev_t *mddev);
 extern void md_interrupt_thread (mdk_thread_t *thread);
-extern int md_update_sb (mddev_t *mddev);
-extern int md_do_sync(mddev_t *mddev, mdp_disk_t *spare);
+extern void md_write_start(mddev_t *mddev);
+extern void md_write_end(mddev_t *mddev);
+extern void md_handle_safemode(mddev_t *mddev);
 extern void md_done_sync(mddev_t *mddev, int blocks, int ok);
-extern void md_sync_acct(kdev_t dev, unsigned long nr_sectors);
-extern void md_recover_arrays (void);
-extern int md_check_ordering (mddev_t *mddev);
-extern int md_notify_reboot(struct notifier_block *this,
-					unsigned long code, void *x);
-extern int md_error (mddev_t *mddev, kdev_t rdev);
-extern int md_run_setup(void);
+extern void md_sync_acct(mdk_rdev_t *rdev, unsigned long nr_sectors);
+extern void md_error (mddev_t *mddev, mdk_rdev_t *rdev);
 
 extern void md_print_devices (void);
 

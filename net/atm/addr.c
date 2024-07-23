@@ -114,28 +114,27 @@ int atm_del_addr(struct atm_dev *dev,struct sockaddr_atmsvc *addr)
 }
 
 
-int atm_get_addr(struct atm_dev *dev,struct sockaddr_atmsvc *u_buf,size_t size)
+int atm_get_addr(struct atm_dev *dev,struct sockaddr_atmsvc *u_buf,int size)
 {
 	unsigned long flags;
 	struct atm_dev_addr *walk;
-	int total = 0, error;
-	struct sockaddr_atmsvc *tmp_buf, *tmp_bufp;
-
+	int total;
 
 	spin_lock_irqsave(&dev->lock, flags);
-	for (walk = dev->local; walk; walk = walk->next)
+	total = 0;
+	for (walk = dev->local; walk; walk = walk->next) {
 		total += sizeof(struct sockaddr_atmsvc);
-	tmp_buf = tmp_bufp = kmalloc(total, GFP_ATOMIC);
-	if (!tmp_buf) {
-		spin_unlock_irqrestore(&dev->lock, flags);
-		return -ENOMEM;
+		if (total > size) {
+			spin_unlock_irqrestore(&dev->lock, flags);
+			return -E2BIG;
+		}
+		if (copy_to_user(u_buf,&walk->addr,
+		    sizeof(struct sockaddr_atmsvc))) {
+			spin_unlock_irqrestore(&dev->lock, flags);
+			return -EFAULT;
+		}
+		u_buf++;
 	}
-	for (walk = dev->local; walk; walk = walk->next)
-		memcpy(tmp_bufp++, &walk->addr, sizeof(struct sockaddr_atmsvc));
 	spin_unlock_irqrestore(&dev->lock, flags);
-	error = total > size ? -E2BIG : total;
-	if (copy_to_user(u_buf, tmp_buf, total < size ? total : size))
-		error = -EFAULT;
-	kfree(tmp_buf);
-	return error;
+	return total;
 }

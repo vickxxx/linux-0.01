@@ -4,6 +4,7 @@
 #include <linux/sched.h>
 #include <linux/version.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 
 #include <asm/setup.h>
 #include <asm/page.h>
@@ -27,11 +28,13 @@
 static struct Scsi_Host *first_instance = NULL;
 static Scsi_Host_Template *a2091_template;
 
-static void a2091_intr (int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t a2091_intr (int irq, void *dummy, struct pt_regs *fp)
 {
     unsigned long flags;
     unsigned int status;
     struct Scsi_Host *instance;
+    int handled = 0;
+
     for (instance = first_instance; instance &&
 	 instance->hostt == a2091_template; instance = instance->next)
     {
@@ -40,18 +43,20 @@ static void a2091_intr (int irq, void *dummy, struct pt_regs *fp)
 		continue;
 
 	if (status & ISTR_INTS) {
-		spin_lock_irqsave(&io_request_lock, flags);
+		spin_lock_irqsave(&instance->host_lock, flags);
 		wd33c93_intr (instance);
-		spin_unlock_irqrestore(&io_request_lock, flags);
+		spin_unlock_irqrestore(&instance->host_lock, flags);
+		handled = 1;
 	}
     }
+    return IRQ_RETVAL(handled);
 }
 
 static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 {
     unsigned short cntr = CNTR_PDMD | CNTR_INTEN;
     unsigned long addr = virt_to_bus(cmd->SCp.ptr);
-    struct Scsi_Host *instance = cmd->host;
+    struct Scsi_Host *instance = cmd->device->host;
 
     /* don't allow DMA if the physical address is bad */
     if (addr & A2091_XFER_MASK ||
@@ -60,7 +65,7 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 	HDATA(instance)->dma_bounce_len = (cmd->SCp.this_residual + 511)
 	    & ~0x1ff;
 	HDATA(instance)->dma_bounce_buffer =
-	    scsi_malloc (HDATA(instance)->dma_bounce_len);
+	    kmalloc (HDATA(instance)->dma_bounce_len, GFP_KERNEL);
 	
 	/* can't allocate memory; use PIO */
 	if (!HDATA(instance)->dma_bounce_buffer) {
@@ -74,8 +79,7 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 	/* the bounce buffer may not be in the first 16M of physmem */
 	if (addr & A2091_XFER_MASK) {
 	    /* we could use chipmem... maybe later */
-	    scsi_free (HDATA(instance)->dma_bounce_buffer,
-		       HDATA(instance)->dma_bounce_len);
+	    kfree (HDATA(instance)->dma_bounce_buffer);
 	    HDATA(instance)->dma_bounce_buffer = NULL;
 	    HDATA(instance)->dma_bounce_len = 0;
 	    return 1;
@@ -102,12 +106,12 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 	cntr |= CNTR_DDIR;
 
     /* remember direction */
-    HDATA(cmd->host)->dma_dir = dir_in;
+    HDATA(cmd->device->host)->dma_dir = dir_in;
 
-    DMA(cmd->host)->CNTR = cntr;
+    DMA(cmd->device->host)->CNTR = cntr;
 
     /* setup DMA *physical* address */
-    DMA(cmd->host)->ACR = addr;
+    DMA(cmd->device->host)->ACR = addr;
 
     if (dir_in){
 	/* invalidate any cache */
@@ -117,7 +121,7 @@ static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
 	cache_push (addr, cmd->SCp.this_residual);
       }
     /* start DMA */
-    DMA(cmd->host)->ST_DMA = 1;
+    DMA(cmd->device->host)->ST_DMA = 1;
 
     /* return success */
     return 0;
@@ -162,8 +166,7 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
 		memcpy (SCpnt->SCp.ptr, 
 			HDATA(instance)->dma_bounce_buffer,
 			SCpnt->SCp.this_residual);
-	    scsi_free (HDATA(instance)->dma_bounce_buffer,
-		       HDATA(instance)->dma_bounce_len);
+	    kfree (HDATA(instance)->dma_bounce_buffer);
 	    HDATA(instance)->dma_bounce_buffer = NULL;
 	    HDATA(instance)->dma_bounce_len = 0;
 	    
@@ -174,8 +177,7 @@ static void dma_stop (struct Scsi_Host *instance, Scsi_Cmnd *SCpnt,
 			HDATA(instance)->dma_bounce_buffer,
 			SCpnt->request_bufflen);
 
-	    scsi_free (HDATA(instance)->dma_bounce_buffer,
-		       HDATA(instance)->dma_bounce_len);
+	    kfree (HDATA(instance)->dma_bounce_buffer);
 	    HDATA(instance)->dma_bounce_buffer = NULL;
 	    HDATA(instance)->dma_bounce_len = 0;
 	}
@@ -231,9 +233,31 @@ int __init a2091_detect(Scsi_Host_Template *tpnt)
     return num_a2091;
 }
 
+static int a2091_bus_reset(Scsi_Cmnd *cmd)
+{
+	/* FIXME perform bus-specific reset */
+	wd33c93_host_reset(cmd);
+	return SUCCESS;
+}
+
 #define HOSTS_C
 
-static Scsi_Host_Template driver_template = A2091_SCSI;
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "A2901",
+	.name			= "Commodore A2091/A590 SCSI",
+	.detect			= a2091_detect,
+	.release		= a2091_release,
+	.queuecommand		= wd33c93_queuecommand,
+	.eh_abort_handler	= wd33c93_abort,
+	.eh_bus_reset_handler	= a2091_bus_reset,
+	.eh_host_reset_handler	= wd33c93_host_reset,
+	.can_queue		= CAN_QUEUE,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= CMD_PER_LUN,
+	.use_clustering		= DISABLE_CLUSTERING
+};
+
 
 #include "scsi_module.c"
 
@@ -248,3 +272,5 @@ int a2091_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
+
+MODULE_LICENSE("GPL");

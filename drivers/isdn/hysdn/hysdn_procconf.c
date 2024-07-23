@@ -11,7 +11,6 @@
  *
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/poll.h>
@@ -255,7 +254,7 @@ hysdn_conf_open(struct inode *ino, struct file *filep)
 	card = card_root;
 	while (card) {
 		pd = card->procconf;
-		if (pd->low_ino == (ino->i_ino & 0xFFFF))
+		if (pd == PDE(ino))
 			break;
 		card = card->next;	/* search next entry */
 	}
@@ -340,7 +339,7 @@ hysdn_conf_close(struct inode *ino, struct file *filep)
 	card = card_root;
 	while (card) {
 		pd = card->procconf;
-		if (pd->low_ino == (ino->i_ino & 0xFFFF))
+		if (pd == PDE(ino))
 			break;
 		card = card->next;	/* search next entry */
 	}
@@ -377,11 +376,11 @@ hysdn_conf_close(struct inode *ino, struct file *filep)
 /******************************************************/
 static struct file_operations conf_fops =
 {
-	llseek:         no_llseek,
-	read:           hysdn_conf_read,
-	write:          hysdn_conf_write,
-	open:           hysdn_conf_open,
-	release:        hysdn_conf_close,                                       
+	.llseek         = no_llseek,
+	.read           = hysdn_conf_read,
+	.write          = hysdn_conf_write,
+	.open           = hysdn_conf_open,
+	.release        = hysdn_conf_close,                                       
 };
 
 /*****************************/

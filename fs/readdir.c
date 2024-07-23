@@ -4,12 +4,15 @@
  *  Copyright (C) 1995  Linus Torvalds
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/stat.h>
 #include <linux/file.h>
 #include <linux/smp_lock.h>
+#include <linux/fs.h>
+#include <linux/dirent.h>
+#include <linux/security.h>
 
 #include <asm/uaccess.h>
 
@@ -19,82 +22,19 @@ int vfs_readdir(struct file *file, filldir_t filler, void *buf)
 	int res = -ENOTDIR;
 	if (!file->f_op || !file->f_op->readdir)
 		goto out;
+
+	res = security_file_permission(file, MAY_READ);
+	if (res)
+		goto out;
+
 	down(&inode->i_sem);
-	down(&inode->i_zombie);
 	res = -ENOENT;
 	if (!IS_DEADDIR(inode)) {
-		lock_kernel();
 		res = file->f_op->readdir(file, buf, filler);
-		unlock_kernel();
 	}
-	up(&inode->i_zombie);
 	up(&inode->i_sem);
 out:
 	return res;
-}
-
-/*
- * Directory is locked and all positive dentries in it are safe, since
- * for ramfs-type trees they can't go away without unlink() or rmdir(),
- * both impossible due to the lock on directory.
- */
-
-int dcache_readdir(struct file * filp, void * dirent, filldir_t filldir)
-{
-	int i;
-	struct dentry *dentry = filp->f_dentry;
-
-	i = filp->f_pos;
-	switch (i) {
-		case 0:
-			if (filldir(dirent, ".", 1, i, dentry->d_inode->i_ino, DT_DIR) < 0)
-				break;
-			i++;
-			filp->f_pos++;
-			/* fallthrough */
-		case 1:
-			if (filldir(dirent, "..", 2, i, dentry->d_parent->d_inode->i_ino, DT_DIR) < 0)
-				break;
-			i++;
-			filp->f_pos++;
-			/* fallthrough */
-		default: {
-			struct list_head *list;
-			int j = i-2;
-
-			spin_lock(&dcache_lock);
-			list = dentry->d_subdirs.next;
-
-			for (;;) {
-				if (list == &dentry->d_subdirs) {
-					spin_unlock(&dcache_lock);
-					return 0;
-				}
-				if (!j)
-					break;
-				j--;
-				list = list->next;
-			}
-
-			while(1) {
-				struct dentry *de = list_entry(list, struct dentry, d_child);
-
-				if (!list_empty(&de->d_hash) && de->d_inode) {
-					spin_unlock(&dcache_lock);
-					if (filldir(dirent, de->d_name.name, de->d_name.len, filp->f_pos, de->d_inode->i_ino, DT_UNKNOWN) < 0)
-						break;
-					spin_lock(&dcache_lock);
-				}
-				filp->f_pos++;
-				list = list->next;
-				if (list != &dentry->d_subdirs)
-					continue;
-				spin_unlock(&dcache_lock);
-				break;
-			}
-		}
-	}
-	return 0;
 }
 
 /*
@@ -118,29 +58,37 @@ struct old_linux_dirent {
 };
 
 struct readdir_callback {
-	struct old_linux_dirent * dirent;
-	int count;
+	struct old_linux_dirent __user * dirent;
+	int result;
 };
 
 static int fillonedir(void * __buf, const char * name, int namlen, loff_t offset,
 		      ino_t ino, unsigned int d_type)
 {
 	struct readdir_callback * buf = (struct readdir_callback *) __buf;
-	struct old_linux_dirent * dirent;
+	struct old_linux_dirent __user * dirent;
 
-	if (buf->count)
+	if (buf->result)
 		return -EINVAL;
-	buf->count++;
+	buf->result++;
 	dirent = buf->dirent;
-	put_user(ino, &dirent->d_ino);
-	put_user(offset, &dirent->d_offset);
-	put_user(namlen, &dirent->d_namlen);
-	copy_to_user(dirent->d_name, name, namlen);
-	put_user(0, dirent->d_name + namlen);
+	if (!access_ok(VERIFY_WRITE, (unsigned long)dirent,
+			(unsigned long)(dirent->d_name + namlen + 1) -
+				(unsigned long)dirent))
+		goto efault;
+	if (	__put_user(ino, &dirent->d_ino) ||
+		__put_user(offset, &dirent->d_offset) ||
+		__put_user(namlen, &dirent->d_namlen) ||
+		__copy_to_user(dirent->d_name, name, namlen) ||
+		__put_user(0, dirent->d_name + namlen))
+		goto efault;
 	return 0;
+efault:
+	buf->result = -EFAULT;
+	return -EFAULT;
 }
 
-asmlinkage int old_readdir(unsigned int fd, void * dirent, unsigned int count)
+asmlinkage long old_readdir(unsigned int fd, struct old_linux_dirent __user * dirent, unsigned int count)
 {
 	int error;
 	struct file * file;
@@ -151,12 +99,12 @@ asmlinkage int old_readdir(unsigned int fd, void * dirent, unsigned int count)
 	if (!file)
 		goto out;
 
-	buf.count = 0;
+	buf.result = 0;
 	buf.dirent = dirent;
 
 	error = vfs_readdir(file, fillonedir, &buf);
 	if (error >= 0)
-		error = buf.count;
+		error = buf.result;
 
 	fput(file);
 out:
@@ -177,8 +125,8 @@ struct linux_dirent {
 };
 
 struct getdents_callback {
-	struct linux_dirent * current_dir;
-	struct linux_dirent * previous;
+	struct linux_dirent __user * current_dir;
+	struct linux_dirent __user * previous;
 	int count;
 	int error;
 };
@@ -186,7 +134,7 @@ struct getdents_callback {
 static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
 		   ino_t ino, unsigned int d_type)
 {
-	struct linux_dirent * dirent;
+	struct linux_dirent __user * dirent;
 	struct getdents_callback * buf = (struct getdents_callback *) __buf;
 	int reclen = ROUND_UP(NAME_OFFSET(dirent) + namlen + 1);
 
@@ -194,33 +142,46 @@ static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
 	if (reclen > buf->count)
 		return -EINVAL;
 	dirent = buf->previous;
-	if (dirent)
-		put_user(offset, &dirent->d_off);
+	if (dirent) {
+		if (__put_user(offset, &dirent->d_off))
+			goto efault;
+	}
 	dirent = buf->current_dir;
+	if (__put_user(ino, &dirent->d_ino))
+		goto efault;
+	if (__put_user(reclen, &dirent->d_reclen))
+		goto efault;
+	if (copy_to_user(dirent->d_name, name, namlen))
+		goto efault;
+	if (__put_user(0, dirent->d_name + namlen))
+		goto efault;
 	buf->previous = dirent;
-	put_user(ino, &dirent->d_ino);
-	put_user(reclen, &dirent->d_reclen);
-	copy_to_user(dirent->d_name, name, namlen);
-	put_user(0, dirent->d_name + namlen);
 	((char *) dirent) += reclen;
 	buf->current_dir = dirent;
 	buf->count -= reclen;
 	return 0;
+efault:
+	buf->error = -EFAULT;
+	return -EFAULT;
 }
 
-asmlinkage long sys_getdents(unsigned int fd, void * dirent, unsigned int count)
+asmlinkage long sys_getdents(unsigned int fd, struct linux_dirent __user * dirent, unsigned int count)
 {
 	struct file * file;
-	struct linux_dirent * lastdirent;
+	struct linux_dirent __user * lastdirent;
 	struct getdents_callback buf;
 	int error;
+
+	error = -EFAULT;
+	if (!access_ok(VERIFY_WRITE, dirent, count))
+		goto out;
 
 	error = -EBADF;
 	file = fget(fd);
 	if (!file)
 		goto out;
 
-	buf.current_dir = (struct linux_dirent *) dirent;
+	buf.current_dir = dirent;
 	buf.previous = NULL;
 	buf.count = count;
 	buf.error = 0;
@@ -231,8 +192,10 @@ asmlinkage long sys_getdents(unsigned int fd, void * dirent, unsigned int count)
 	error = buf.error;
 	lastdirent = buf.previous;
 	if (lastdirent) {
-		put_user(file->f_pos, &lastdirent->d_off);
-		error = count - buf.count;
+		if (put_user(file->f_pos, &lastdirent->d_off))
+			error = -EFAULT;
+		else
+			error = count - buf.count;
 	}
 
 out_putf:
@@ -241,22 +204,11 @@ out:
 	return error;
 }
 
-/*
- * And even better one including d_type field and 64bit d_ino and d_off.
- */
-struct linux_dirent64 {
-	u64		d_ino;
-	s64		d_off;
-	unsigned short	d_reclen;
-	unsigned char	d_type;
-	char		d_name[0];
-};
-
 #define ROUND_UP64(x) (((x)+sizeof(u64)-1) & ~(sizeof(u64)-1))
 
 struct getdents_callback64 {
-	struct linux_dirent64 * current_dir;
-	struct linux_dirent64 * previous;
+	struct linux_dirent64 __user * current_dir;
+	struct linux_dirent64 __user * previous;
 	int count;
 	int error;
 };
@@ -264,7 +216,7 @@ struct getdents_callback64 {
 static int filldir64(void * __buf, const char * name, int namlen, loff_t offset,
 		     ino_t ino, unsigned int d_type)
 {
-	struct linux_dirent64 * dirent, d;
+	struct linux_dirent64 __user *dirent;
 	struct getdents_callback64 * buf = (struct getdents_callback64 *) __buf;
 	int reclen = ROUND_UP64(NAME_OFFSET(dirent) + namlen + 1);
 
@@ -273,37 +225,49 @@ static int filldir64(void * __buf, const char * name, int namlen, loff_t offset,
 		return -EINVAL;
 	dirent = buf->previous;
 	if (dirent) {
-		d.d_off = offset;
-		copy_to_user(&dirent->d_off, &d.d_off, sizeof(d.d_off));
+		if (__put_user(offset, &dirent->d_off))
+			goto efault;
 	}
 	dirent = buf->current_dir;
+	if (__put_user(ino, &dirent->d_ino))
+		goto efault;
+	if (__put_user(0, &dirent->d_off))
+		goto efault;
+	if (__put_user(reclen, &dirent->d_reclen))
+		goto efault;
+	if (__put_user(d_type, &dirent->d_type))
+		goto efault;
+	if (copy_to_user(dirent->d_name, name, namlen))
+		goto efault;
+	if (__put_user(0, dirent->d_name + namlen))
+		goto efault;
 	buf->previous = dirent;
-	memset(&d, 0, NAME_OFFSET(&d));
-	d.d_ino = ino;
-	d.d_reclen = reclen;
-	d.d_type = d_type;
-	copy_to_user(dirent, &d, NAME_OFFSET(&d));
-	copy_to_user(dirent->d_name, name, namlen);
-	put_user(0, dirent->d_name + namlen);
 	((char *) dirent) += reclen;
 	buf->current_dir = dirent;
 	buf->count -= reclen;
 	return 0;
+efault:
+	buf->error = -EFAULT;
+	return -EFAULT;
 }
 
-asmlinkage long sys_getdents64(unsigned int fd, void * dirent, unsigned int count)
+asmlinkage long sys_getdents64(unsigned int fd, struct linux_dirent64 __user * dirent, unsigned int count)
 {
 	struct file * file;
-	struct linux_dirent64 * lastdirent;
+	struct linux_dirent64 __user * lastdirent;
 	struct getdents_callback64 buf;
 	int error;
+
+	error = -EFAULT;
+	if (!access_ok(VERIFY_WRITE, dirent, count))
+		goto out;
 
 	error = -EBADF;
 	file = fget(fd);
 	if (!file)
 		goto out;
 
-	buf.current_dir = (struct linux_dirent64 *) dirent;
+	buf.current_dir = dirent;
 	buf.previous = NULL;
 	buf.count = count;
 	buf.error = 0;
@@ -314,9 +278,8 @@ asmlinkage long sys_getdents64(unsigned int fd, void * dirent, unsigned int coun
 	error = buf.error;
 	lastdirent = buf.previous;
 	if (lastdirent) {
-		struct linux_dirent64 d;
-		d.d_off = file->f_pos;
-		copy_to_user(&lastdirent->d_off, &d.d_off, sizeof(d.d_off));
+		typeof(lastdirent->d_off) d_off = file->f_pos;
+		__put_user(d_off, &lastdirent->d_off);
 		error = count - buf.count;
 	}
 

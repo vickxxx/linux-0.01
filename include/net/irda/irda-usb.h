@@ -29,8 +29,7 @@
 #include <linux/time.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irlap.h>
-#include <net/irda/irda_device.h>
+#include <net/irda/irda_device.h>      /* struct irlap_cb */
 
 #define RX_COPY_THRESHOLD 200
 #define IRDA_USB_MAX_MTU 2051
@@ -128,7 +127,7 @@ struct irda_class_desc {
 struct irda_usb_cb {
 	struct irda_class_desc *irda_desc;
 	struct usb_device *usbdev;	/* init: probe_irda */
-	unsigned int ifnum;		/* Interface number of the USB dev. */
+	struct usb_interface *usbintf;	/* init: probe_irda */
 	int netopen;			/* Device is active for network */
 	int present;			/* Device is present on the bus */
 	__u32 capability;		/* Capability of the hardware */
@@ -139,10 +138,10 @@ struct irda_usb_cb {
 
 	wait_queue_head_t wait_q;	/* for timeouts */
 
-	struct urb rx_urb[IU_MAX_RX_URBS];	/* URBs used to receive data frames */
+	struct urb *rx_urb[IU_MAX_RX_URBS];	/* URBs used to receive data frames */
 	struct urb *idle_rx_urb;	/* Pointer to idle URB in Rx path */
-	struct urb tx_urb;		/* URB used to send data frames */
-	struct urb speed_urb;		/* URB used to send speed commands */
+	struct urb *tx_urb;		/* URB used to send data frames */
+	struct urb *speed_urb;		/* URB used to send speed commands */
 	
 	struct net_device *netdev;	/* Yes! we are some kind of netdev. */
 	struct net_device_stats stats;

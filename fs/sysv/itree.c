@@ -5,28 +5,27 @@
  *  AV, Sep--Dec 2000
  */
 
-#include <linux/fs.h>
-#include <linux/sysv_fs.h>
-#include <linux/locks.h>
-#include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
+#include <linux/mount.h>
+#include <linux/string.h>
+#include "sysv.h"
 
 enum {DIRECT = 10, DEPTH = 4};	/* Have triple indirect */
 
 static inline void dirty_indirect(struct buffer_head *bh, struct inode *inode)
 {
 	mark_buffer_dirty_inode(bh, inode);
-	if (IS_SYNC(inode)) {
-		ll_rw_block (WRITE, 1, &bh);
-		wait_on_buffer (bh);
-	}
+	if (IS_SYNC(inode))
+		sync_dirty_buffer(bh);
 }
 
 static int block_to_path(struct inode *inode, long block, int offsets[DEPTH])
 {
 	struct super_block *sb = inode->i_sb;
-	int ptrs_bits = sb->sv_ind_per_block_bits;
-	unsigned long	indirect_blocks = sb->sv_ind_per_block,
-			double_blocks = sb->sv_ind_per_block_2;
+	struct sysv_sb_info *sbi = SYSV_SB(sb);
+	int ptrs_bits = sbi->s_ind_per_block_bits;
+	unsigned long	indirect_blocks = sbi->s_ind_per_block,
+			double_blocks = sbi->s_ind_per_block_2;
 	int n = 0;
 
 	if (block < 0) {
@@ -51,9 +50,9 @@ static int block_to_path(struct inode *inode, long block, int offsets[DEPTH])
 	return n;
 }
 
-static inline int block_to_cpu(struct super_block *sb, u32 nr)
+static inline int block_to_cpu(struct sysv_sb_info *sbi, u32 nr)
 {
-	return sb->sv_block_base + fs32_to_cpu(sb, nr);
+	return sbi->s_block_base + fs32_to_cpu(sbi, nr);
 }
 
 typedef struct {
@@ -61,6 +60,8 @@ typedef struct {
 	u32     key;
 	struct buffer_head *bh;
 } Indirect;
+
+static rwlock_t pointers_lock = RW_LOCK_UNLOCKED;
 
 static inline void add_chain(Indirect *p, struct buffer_head *bh, u32 *v)
 {
@@ -86,29 +87,32 @@ static Indirect *get_branch(struct inode *inode,
 			    Indirect chain[],
 			    int *err)
 {
-	kdev_t dev = inode->i_dev;
-	int size = inode->i_sb->s_blocksize;
+	struct super_block *sb = inode->i_sb;
 	Indirect *p = chain;
 	struct buffer_head *bh;
 
 	*err = 0;
-	add_chain (chain, NULL, inode->u.sysv_i.i_data + *offsets);
+	add_chain(chain, NULL, SYSV_I(inode)->i_data + *offsets);
 	if (!p->key)
 		goto no_block;
 	while (--depth) {
-		int block = block_to_cpu(inode->i_sb, p->key);
-		bh = bread(dev, block, size);
+		int block = block_to_cpu(SYSV_SB(sb), p->key);
+		bh = sb_bread(sb, block);
 		if (!bh)
 			goto failure;
+		read_lock(&pointers_lock);
 		if (!verify_chain(chain, p))
 			goto changed;
 		add_chain(++p, bh, (u32*)bh->b_data + *++offsets);
+		read_unlock(&pointers_lock);
 		if (!p->key)
-		goto no_block;
+			goto no_block;
 	}
 	return NULL;
 
 changed:
+	read_unlock(&pointers_lock);
+	brelse(bh);
 	*err = -EAGAIN;
 	goto no_block;
 failure:
@@ -138,14 +142,14 @@ static int alloc_branch(struct inode *inode,
 		 * Get buffer_head for parent block, zero it out and set 
 		 * the pointer to new one, then send parent to disk.
 		 */
-		parent = block_to_cpu(inode->i_sb, branch[n-1].key);
-		bh = getblk(inode->i_dev, parent, blocksize);
+		parent = block_to_cpu(SYSV_SB(inode->i_sb), branch[n-1].key);
+		bh = sb_getblk(inode->i_sb, parent);
 		lock_buffer(bh);
 		memset(bh->b_data, 0, blocksize);
 		branch[n].bh = bh;
 		branch[n].p = (u32*) bh->b_data + offsets[n];
 		*branch[n].p = branch[n].key;
-		mark_buffer_uptodate(bh, 1);
+		set_buffer_uptodate(bh);
 		unlock_buffer(bh);
 		dirty_indirect(bh, inode);
 	}
@@ -166,12 +170,14 @@ static inline int splice_branch(struct inode *inode,
 				int num)
 {
 	int i;
-	/* Verify that place we are splicing to is still there and vacant */
 
+	/* Verify that place we are splicing to is still there and vacant */
+	write_lock(&pointers_lock);
 	if (!verify_chain(chain, where-1) || *where->p)
 		goto changed;
-
 	*where->p = where->key;
+	write_unlock(&pointers_lock);
+
 	inode->i_ctime = CURRENT_TIME;
 
 	/* had we spliced it onto indirect block? */
@@ -185,6 +191,7 @@ static inline int splice_branch(struct inode *inode,
 	return 0;
 
 changed:
+	write_unlock(&pointers_lock);
 	for (i = 1; i < num; i++)
 		bforget(where[i].bh);
 	for (i = 0; i < num; i++)
@@ -192,7 +199,7 @@ changed:
 	return -EAGAIN;
 }
 
-static int get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create)
+static int get_block(struct inode *inode, sector_t iblock, struct buffer_head *bh_result, int create)
 {
 	int err = -EIO;
 	int offsets[DEPTH];
@@ -205,16 +212,14 @@ static int get_block(struct inode *inode, long iblock, struct buffer_head *bh_re
 	if (depth == 0)
 		goto out;
 
-	lock_kernel();
 reread:
 	partial = get_branch(inode, depth, offsets, chain, &err);
 
 	/* Simplest case - block found, no allocation needed */
 	if (!partial) {
 got_it:
-		bh_result->b_dev = sb->s_dev;
-		bh_result->b_blocknr = block_to_cpu(sb, chain[depth-1].key);
-		bh_result->b_state |= (1UL << BH_Mapped);
+		map_bh(bh_result, sb, block_to_cpu(SYSV_SB(sb),
+					chain[depth-1].key));
 		/* Clean up and exit */
 		partial = chain+depth-1; /* the whole chain */
 		goto cleanup;
@@ -227,7 +232,6 @@ cleanup:
 			brelse(partial->bh);
 			partial--;
 		}
-		unlock_kernel();
 out:
 		return err;
 	}
@@ -248,7 +252,7 @@ out:
 	if (splice_branch(inode, chain, partial, left) < 0)
 		goto changed;
 
-	bh_result->b_state |= (1UL << BH_New);
+	set_buffer_new(bh_result);
 	goto got_it;
 
 changed:
@@ -279,6 +283,8 @@ static Indirect *find_shared(struct inode *inode,
 	*top = 0;
 	for (k = depth; k > 1 && !offsets[k-1]; k--)
 		;
+
+	write_lock(&pointers_lock);
 	partial = get_branch(inode, k, offsets, chain, &err);
 	if (!partial)
 		partial = chain + k-1;
@@ -286,8 +292,10 @@ static Indirect *find_shared(struct inode *inode,
 	 * If the branch acquired continuation since we've looked at it -
 	 * fine, it should all survive and (new) top doesn't belong to us.
 	 */
-	if (!partial->key && *partial->p)
+	if (!partial->key && *partial->p) {
+		write_unlock(&pointers_lock);
 		goto no_top;
+	}
 	for (p=partial; p>chain && all_zeroes((u32*)p->bh->b_data,p->p); p--)
 		;
 	/*
@@ -302,8 +310,9 @@ static Indirect *find_shared(struct inode *inode,
 		*top = *p->p;
 		*p->p = 0;
 	}
+	write_unlock(&pointers_lock);
 
-	while(partial > p) {
+	while (partial > p) {
 		brelse(partial->bh);
 		partial--;
 	}
@@ -335,8 +344,8 @@ static void free_branches(struct inode *inode, u32 *p, u32 *q, int depth)
 			if (!nr)
 				continue;
 			*p = 0;
-			block = block_to_cpu(sb, nr);
-			bh = bread(inode->i_dev, block, sb->s_blocksize);
+			block = block_to_cpu(SYSV_SB(sb), nr);
+			bh = sb_bread(sb, block);
 			if (!bh)
 				continue;
 			free_branches(inode, (u32*)bh->b_data,
@@ -351,7 +360,7 @@ static void free_branches(struct inode *inode, u32 *p, u32 *q, int depth)
 
 void sysv_truncate (struct inode * inode)
 {
-	u32 *i_data = inode->u.sysv_i.i_data;
+	u32 *i_data = SYSV_I(inode)->i_data;
 	int offsets[DEPTH];
 	Indirect chain[DEPTH];
 	Indirect *partial;
@@ -414,9 +423,33 @@ do_indirects:
 		mark_inode_dirty(inode);
 }
 
-static int sysv_writepage(struct page *page)
+static unsigned sysv_nblocks(struct super_block *s, loff_t size)
 {
-	return block_write_full_page(page,get_block);
+	struct sysv_sb_info *sbi = SYSV_SB(s);
+	int ptrs_bits = sbi->s_ind_per_block_bits;
+	unsigned blocks, res, direct = DIRECT, i = DEPTH;
+	blocks = (size + s->s_blocksize - 1) >> s->s_blocksize_bits;
+	res = blocks;
+	while (--i && blocks > direct) {
+		blocks = ((blocks - direct - 1) >> ptrs_bits) + 1;
+		res += blocks;
+		direct = 1;
+	}
+	return blocks;
+}
+
+int sysv_getattr(struct vfsmount *mnt, struct dentry *dentry, struct kstat *stat)
+{
+	struct super_block *s = mnt->mnt_sb;
+	generic_fillattr(dentry->d_inode, stat);
+	stat->blocks = (s->s_blocksize / 512) * sysv_nblocks(s, stat->size);
+	stat->blksize = s->s_blocksize;
+	return 0;
+}
+
+static int sysv_writepage(struct page *page, struct writeback_control *wbc)
+{
+	return block_write_full_page(page,get_block,wbc);
 }
 static int sysv_readpage(struct file *file, struct page *page)
 {
@@ -426,15 +459,15 @@ static int sysv_prepare_write(struct file *file, struct page *page, unsigned fro
 {
 	return block_prepare_write(page,from,to,get_block);
 }
-static int sysv_bmap(struct address_space *mapping, long block)
+static sector_t sysv_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping,block,get_block);
 }
 struct address_space_operations sysv_aops = {
-	readpage: sysv_readpage,
-	writepage: sysv_writepage,
-	sync_page: block_sync_page,
-	prepare_write: sysv_prepare_write,
-	commit_write: generic_commit_write,
-	bmap: sysv_bmap
+	.readpage = sysv_readpage,
+	.writepage = sysv_writepage,
+	.sync_page = block_sync_page,
+	.prepare_write = sysv_prepare_write,
+	.commit_write = generic_commit_write,
+	.bmap = sysv_bmap
 };

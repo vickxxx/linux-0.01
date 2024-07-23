@@ -78,7 +78,7 @@ DecryptBuf(struct boot_data *boot, int cnt)
 }				/* DecryptBuf */
 
 /********************************************************************************/
-/* pof_handle_data executes the required actions dependant on the active record */
+/* pof_handle_data executes the required actions dependent on the active record */
 /* id. If successful 0 is returned, a negative value shows an error.           */
 /********************************************************************************/
 static int
@@ -357,7 +357,7 @@ EvalSysrTokData(hysdn_card * card, uchar * cp, int len)
 		hysdn_addlog(card, "SysReady Token Data invalid CRC");
 		return (1);
 	}
-	len--;			/* dont check CRC byte */
+	len--;			/* don't check CRC byte */
 	while (len > 0) {
 
 		if (*cp == SYSR_TOK_END)

@@ -1,5 +1,5 @@
 /*
- * linux/include/asm-arm/arch-rpc/vmalloc.h
+ * linux/include/asm-arm/arch-tbox/vmalloc.h
  */
 
 /*
@@ -15,3 +15,5 @@
 #define VMALLOC_VMADDR(x) ((unsigned long)(x))
 #define VMALLOC_END       (PAGE_OFFSET + 0x10000000)
 
+#define MODULE_START	(PAGE_OFFSET - 16*1048576)
+#define MODULE_END	(PAGE_OFFSET)

@@ -34,9 +34,7 @@
 
 #include <linux/config.h> /* for CONFIG_DLCI_MAX */
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
@@ -48,19 +46,17 @@
 #include <linux/timer.h>
 #include <linux/errno.h>
 #include <linux/init.h>
+#include <linux/netdevice.h>
+#include <linux/skbuff.h>
+#include <linux/if_arp.h>
+#include <linux/if_frad.h>
+#include <linux/sdla.h>
 
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <asm/uaccess.h>
-
-#include <linux/netdevice.h>
-#include <linux/skbuff.h>
-#include <linux/if_arp.h>
-#include <linux/if_frad.h>
-
-#include <linux/sdla.h>
 
 static const char* version = "SDLA driver v0.30, 12 Sep 1996, mike.mclagan@linux.org";
 
@@ -860,7 +856,7 @@ static void sdla_receive(struct net_device *dev)
 	restore_flags(flags);
 }
 
-static void sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device     *dev;
 	struct frad_local *flp;
@@ -871,7 +867,7 @@ static void sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 	if (dev == NULL)
 	{
 		printk(KERN_WARNING "sdla_isr(): irq %d for unknown device.\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	flp = dev->priv;
@@ -879,7 +875,7 @@ static void sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 	if (!flp->initialized)
 	{
 		printk(KERN_WARNING "%s: irq %d for uninitialized device.\n", dev->name, irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	byte = sdla_byte(dev, flp->type == SDLA_S508 ? SDLA_508_IRQ_INTERFACE : SDLA_502_IRQ_INTERFACE);
@@ -914,6 +910,7 @@ static void sdla_isr(int irq, void *dev_id, struct pt_regs * regs)
 	/* this clears the byte, informing the Z80 we're done */
 	byte = 0;
 	sdla_write(dev, flp->type == SDLA_S508 ? SDLA_508_IRQ_INTERFACE : SDLA_502_IRQ_INTERFACE, &byte, sizeof(byte));
+	return IRQ_HANDLED;
 }
 
 static void sdla_poll(unsigned long device)
@@ -1348,8 +1345,10 @@ int sdla_set_config(struct net_device *dev, struct ifmap *map)
 		return(-EINVAL);
 
 	dev->base_addr = map->base_addr;
-	request_region(dev->base_addr, SDLA_IO_EXTENTS, dev->name);
-
+	if (!request_region(dev->base_addr, SDLA_IO_EXTENTS, dev->name)){
+		printk(KERN_WARNING "SDLA: io-port 0x%04lx in use \n", dev->base_addr);
+		return(-EINVAL);
+	}
 	/* test for card types, S502A, S502E, S507, S508                 */
 	/* these tests shut down the card completely, so clear the state */
 	flp->type = SDLA_UNKNOWN;
@@ -1637,9 +1636,10 @@ int __init sdla_init(struct net_device *dev)
 	dev->change_mtu		= sdla_change_mtu;
 
 	dev->type		= 0xFFFF;
-	dev->hard_header_len = 0;
+	dev->hard_header_len	= 0;
 	dev->addr_len		= 0;
 	dev->mtu		= SDLA_MAX_MTU;
+	SET_MODULE_OWNER(dev);
 
 	flp->activate		= sdla_activate;
 	flp->deactivate		= sdla_deactivate;
@@ -1663,26 +1663,35 @@ int __init sdla_c_setup(void)
 }
 
 #ifdef MODULE
-static struct net_device sdla0 = {"sdla0", 0, 0, 0, 0, 0, 0, 0, 0, 0, NULL, sdla_init};
+static struct net_device sdla0 = {
+	.name = "sdla0",
+	.init = sdla_init
+};
+#endif /* MODULE */
 
-MODULE_LICENSE("GPL");
-
-int init_module(void)
+static int __init init_sdla(void)
 {
-	int result;
+	int result = 0;
 
 	sdla_c_setup();
-	if ((result = register_netdev(&sdla0)) != 0)
-		return result;
-	return 0;
+#ifdef MODULE
+	result = register_netdev(&sdla0);
+#endif
+	return result;
 }
 
-void cleanup_module(void)
+static void __exit exit_sdla(void)
 {
+#ifdef MODULE
 	unregister_netdev(&sdla0);
 	if (sdla0.priv)
 		kfree(sdla0.priv);
 	if (sdla0.irq)
 		free_irq(sdla0.irq, &sdla0);
+#endif
 }
-#endif /* MODULE */
+
+MODULE_LICENSE("GPL");
+
+module_init(init_sdla);
+module_exit(exit_sdla);

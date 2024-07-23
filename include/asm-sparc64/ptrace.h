@@ -1,4 +1,4 @@
-/* $Id: ptrace.h,v 1.13 1997/09/17 17:27:51 davem Exp $ */
+/* $Id: ptrace.h,v 1.14 2002/02/09 19:49:32 davem Exp $ */
 #ifndef _SPARC64_PTRACE_H
 #define _SPARC64_PTRACE_H
 
@@ -89,11 +89,9 @@ struct sparc_trapf {
 
 #define TRACEREG_SZ	sizeof(struct pt_regs)
 #define STACKFRAME_SZ	sizeof(struct sparc_stackf)
-#define REGWIN_SZ	sizeof(struct reg_window)
 
 #define TRACEREG32_SZ	sizeof(struct pt_regs32)
 #define STACKFRAME32_SZ	sizeof(struct sparc_stackf32)
-#define REGWIN32_SZ	sizeof(struct reg_window32)
 
 #ifdef __KERNEL__
 #define user_mode(regs) (!((regs)->tstate & TSTATE_PRIV))
@@ -105,13 +103,9 @@ extern void show_regs(struct pt_regs *);
 /* For assembly code. */
 #define TRACEREG_SZ		0xa0
 #define STACKFRAME_SZ		0xc0
-#define REGWIN_SZ		0x80
 
 #define TRACEREG32_SZ		0x50
 #define STACKFRAME32_SZ		0x60
-#define REGWIN32_SZ		0x40
-
-#include <asm/asm_offsets.h>
 #endif
 
 #ifdef __KERNEL__
@@ -270,7 +264,7 @@ extern void show_regs(struct pt_regs *);
 #define PTRACE_SETFPAREGS         21
 
 /* There are for debugging 64-bit processes, either from a 32 or 64 bit
- * parent.  Thus their compliments are for debugging 32-bit processes only.
+ * parent.  Thus their complements are for debugging 32-bit processes only.
  */
 
 #define PTRACE_GETREGS64	  22

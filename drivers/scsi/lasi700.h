@@ -25,40 +25,24 @@
 #ifndef _LASI700_H
 #define _LASI700_H
 
-static int lasi700_detect(Scsi_Host_Template *);
 static int lasi700_driver_callback(struct parisc_device *dev);
-static int lasi700_release(struct Scsi_Host *host);
-
-
-#define LASI700_SCSI {				\
-	name:		"LASI SCSI 53c700",	\
-	proc_name:	"lasi700",		\
-	detect:		lasi700_detect,		\
-	release:	lasi700_release,	\
-	this_id:	7,			\
-}
+static int lasi700_driver_remove(struct parisc_device *dev);
 
 #define LASI_710_SVERSION	0x082
 #define LASI_700_SVERSION	0x071
 
 #define LASI700_ID_TABLE {			\
-	hw_type:	HPHW_FIO,		\
-	sversion:	LASI_700_SVERSION,	\
-	hversion:	HVERSION_ANY_ID,	\
-	hversion_rev:	HVERSION_REV_ANY_ID,	\
+	.hw_type	= HPHW_FIO,		\
+	.sversion	= LASI_700_SVERSION,	\
+	.hversion	= HVERSION_ANY_ID,	\
+	.hversion_rev	= HVERSION_REV_ANY_ID,	\
 }
 
 #define LASI710_ID_TABLE {			\
-	hw_type:	HPHW_FIO,		\
-	sversion:	LASI_710_SVERSION,	\
-	hversion:	HVERSION_ANY_ID,	\
-	hversion_rev:	HVERSION_REV_ANY_ID,	\
-}
-
-#define LASI700_DRIVER {			\
-	name:		"Lasi SCSI",		\
-	id_table:	lasi700_scsi_tbl,	\
-	probe:		lasi700_driver_callback,\
+	.hw_type	= HPHW_FIO,		\
+	.sversion	= LASI_710_SVERSION,	\
+	.hversion	= HVERSION_ANY_ID,	\
+	.hversion_rev	= HVERSION_REV_ANY_ID,	\
 }
 
 #define LASI700_CLOCK	25

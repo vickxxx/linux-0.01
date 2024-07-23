@@ -9,7 +9,7 @@
 #define _LINUX_RWSEM_SPINLOCK_H
 
 #ifndef _LINUX_RWSEM_H
-#error please dont include linux/rwsem-spinlock.h directly, use linux/rwsem.h instead
+#error "please don't include linux/rwsem-spinlock.h directly, use linux/rwsem.h instead"
 #endif
 
 #include <linux/spinlock.h>
@@ -54,9 +54,12 @@ struct rw_semaphore {
 
 extern void FASTCALL(init_rwsem(struct rw_semaphore *sem));
 extern void FASTCALL(__down_read(struct rw_semaphore *sem));
+extern int FASTCALL(__down_read_trylock(struct rw_semaphore *sem));
 extern void FASTCALL(__down_write(struct rw_semaphore *sem));
+extern int FASTCALL(__down_write_trylock(struct rw_semaphore *sem));
 extern void FASTCALL(__up_read(struct rw_semaphore *sem));
 extern void FASTCALL(__up_write(struct rw_semaphore *sem));
+extern void FASTCALL(__downgrade_write(struct rw_semaphore *sem));
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_RWSEM_SPINLOCK_H */

@@ -18,6 +18,9 @@ struct ipv4_devconf
 	int	mc_forwarding;
 	int	tag;
 	int     arp_filter;
+	int	medium_id;
+	int	no_xfrm;
+	int	no_policy;
 	void	*sysctl;
 };
 
@@ -31,7 +34,17 @@ struct in_device
 	int			dead;
 	struct in_ifaddr	*ifa_list;	/* IP ifaddr chain		*/
 	struct ip_mc_list	*mc_list;	/* IP multicast filter chain    */
+	rwlock_t		mc_lock;	/* for mc_tomb */
+	struct ip_mc_list	*mc_tomb;
 	unsigned long		mr_v1_seen;
+	unsigned long		mr_v2_seen;
+	unsigned long		mr_maxdelay;
+	unsigned char		mr_qrv;
+	unsigned char		mr_gq_running;
+	unsigned char		mr_ifc_count;
+	struct timer_list	mr_gq_timer;	/* general query timer */
+	struct timer_list	mr_ifc_timer;	/* interface change timer */
+
 	struct neigh_parms	*arp_parms;
 	struct ipv4_devconf	cnf;
 };
@@ -48,6 +61,7 @@ struct in_device
 #define IN_DEV_TX_REDIRECTS(in_dev)	(ipv4_devconf.send_redirects || (in_dev)->cnf.send_redirects)
 #define IN_DEV_SEC_REDIRECTS(in_dev)	(ipv4_devconf.secure_redirects || (in_dev)->cnf.secure_redirects)
 #define IN_DEV_IDTAG(in_dev)		((in_dev)->cnf.tag)
+#define IN_DEV_MEDIUM_ID(in_dev)	((in_dev)->cnf.medium_id)
 
 #define IN_DEV_RX_REDIRECTS(in_dev) \
 	((IN_DEV_FORWARD(in_dev) && \

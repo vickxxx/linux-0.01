@@ -17,10 +17,14 @@
 #include <linux/smp_lock.h>
 #include <linux/kernel_stat.h>
 #include <linux/mc146818rtc.h>
+#include <linux/cache.h>
+#include <linux/interrupt.h>
 
 #include <asm/mtrr.h>
 #include <asm/pgalloc.h>
-#include <asm/smpboot.h>
+#include <asm/tlbflush.h>
+#include <mach_ipi.h>
+#include <mach_apic.h>
 
 /*
  *	Some notes on x86 processor bugs affecting SMP operation:
@@ -65,7 +69,7 @@
  *	an L1cache=Writethrough or L1cache=off option.
  *
  *		B stepping CPUs may hang. There are hardware work arounds
- *	for this. We warn about it in case your board doesnt have the work
+ *	for this. We warn about it in case your board doesn't have the work
  *	arounds. Basically thats so I can tell anyone with a B stepping
  *	CPU and SMP problems "tough".
  *
@@ -101,10 +105,7 @@
  *	about nothing of note with C stepping upwards.
  */
 
-/* The 'big kernel lock' */
-spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
-
-struct tlb_state cpu_tlbstate[NR_CPUS] = {[0 ... NR_CPUS-1] = { &init_mm, 0 }};
+struct tlb_state cpu_tlbstate[NR_CPUS] __cacheline_aligned = {[0 ... NR_CPUS-1] = { &init_mm, 0, }};
 
 /*
  * the following functions deal with sending IPIs between CPUs.
@@ -122,7 +123,7 @@ static inline int __prepare_ICR2 (unsigned int mask)
 	return SET_APIC_DEST_FIELD(mask);
 }
 
-static inline void __send_IPI_shortcut(unsigned int shortcut, int vector)
+inline void __send_IPI_shortcut(unsigned int shortcut, int vector)
 {
 	/*
 	 * Subtle. In the case of the 'never do double writes' workaround
@@ -154,14 +155,12 @@ void send_IPI_self(int vector)
 	__send_IPI_shortcut(APIC_DEST_SELF, vector);
 }
 
-static inline void send_IPI_mask_bitmask(int mask, int vector)
+inline void send_IPI_mask_bitmask(int mask, int vector)
 {
 	unsigned long cfg;
 	unsigned long flags;
 
-	__save_flags(flags);
-	__cli();
-
+	local_irq_save(flags);
 		
 	/*
 	 * Wait for idle.
@@ -184,10 +183,10 @@ static inline void send_IPI_mask_bitmask(int mask, int vector)
 	 */
 	apic_write_around(APIC_ICR, cfg);
 
-	__restore_flags(flags);
+	local_irq_restore(flags);
 }
 
-static inline void send_IPI_mask_sequence(int mask, int vector)
+inline void send_IPI_mask_sequence(int mask, int vector)
 {
 	unsigned long cfg, flags;
 	unsigned int query_cpu, query_mask;
@@ -198,8 +197,7 @@ static inline void send_IPI_mask_sequence(int mask, int vector)
 	 * should be modified to do 1 message per cluster ID - mbligh
 	 */ 
 
-	__save_flags(flags);
-	__cli();
+	local_irq_save(flags);
 
 	for (query_cpu = 0; query_cpu < NR_CPUS; ++query_cpu) {
 		query_mask = 1 << query_cpu;
@@ -227,55 +225,7 @@ static inline void send_IPI_mask_sequence(int mask, int vector)
 			apic_write_around(APIC_ICR, cfg);
 		}
 	}
-	__restore_flags(flags);
-}
-
-static inline void send_IPI_mask(int mask, int vector)
-{
-	if (clustered_apic_mode) 
-		send_IPI_mask_sequence(mask, vector);
-	else
-		send_IPI_mask_bitmask(mask, vector);
-}
-
-static inline void send_IPI_allbutself(int vector)
-{
-	/*
-	 * if there are no other CPUs in the system then
-	 * we get an APIC send error if we try to broadcast.
-	 * thus we have to avoid sending IPIs in this case.
-	 */
-	if (!(smp_num_cpus > 1))
-		return;
-
-	if (clustered_apic_mode) {
-		// Pointless. Use send_IPI_mask to do this instead
-		int cpu;
-
-		if (smp_num_cpus > 1) {
-			for (cpu = 0; cpu < smp_num_cpus; ++cpu) {
-				if (cpu != smp_processor_id())
-					send_IPI_mask(1 << cpu, vector);
-			}
-		}
-	} else {
-		__send_IPI_shortcut(APIC_DEST_ALLBUT, vector);
-		return;
-	}
-}
-
-static inline void send_IPI_all(int vector)
-{
-	if (clustered_apic_mode) {
-		// Pointless. Use send_IPI_mask to do this instead
-		int cpu;
-
-		for (cpu = 0; cpu < smp_num_cpus; ++cpu) {
-			send_IPI_mask(1 << cpu, vector);
-		}
-	} else {
-		__send_IPI_shortcut(APIC_DEST_ALLINC, vector);
-	}
+	local_irq_restore(flags);
 }
 
 /*
@@ -297,12 +247,16 @@ static spinlock_t tlbstate_lock = SPIN_LOCK_UNLOCKED;
 /*
  * We cannot call mmdrop() because we are in interrupt context, 
  * instead update mm->cpu_vm_mask.
+ *
+ * We need to reload %cr3 since the page tables may be going
+ * away from under us..
  */
-static void inline leave_mm (unsigned long cpu)
+static inline void leave_mm (unsigned long cpu)
 {
 	if (cpu_tlbstate[cpu].state == TLBSTATE_OK)
 		BUG();
 	clear_bit(cpu, &cpu_tlbstate[cpu].active_mm->cpu_vm_mask);
+	load_cr3(swapper_pg_dir);
 }
 
 /*
@@ -353,10 +307,12 @@ static void inline leave_mm (unsigned long cpu)
 
 asmlinkage void smp_invalidate_interrupt (void)
 {
-	unsigned long cpu = smp_processor_id();
+	unsigned long cpu;
+
+	cpu = get_cpu();
 
 	if (!test_bit(cpu, &flush_cpumask))
-		return;
+		goto out;
 		/* 
 		 * This was a BUG() but until someone can quote me the
 		 * line from the intel manual that guarantees an IPI to
@@ -377,6 +333,9 @@ asmlinkage void smp_invalidate_interrupt (void)
 	}
 	ack_APIC_irq();
 	clear_bit(cpu, &flush_cpumask);
+
+out:
+	put_cpu_no_resched();
 }
 
 static void flush_tlb_others (unsigned long cpumask, struct mm_struct *mm,
@@ -426,16 +385,23 @@ static void flush_tlb_others (unsigned long cpumask, struct mm_struct *mm,
 void flush_tlb_current_task(void)
 {
 	struct mm_struct *mm = current->mm;
-	unsigned long cpu_mask = mm->cpu_vm_mask & ~(1 << smp_processor_id());
+	unsigned long cpu_mask;
+
+	preempt_disable();
+	cpu_mask = mm->cpu_vm_mask & ~(1UL << smp_processor_id());
 
 	local_flush_tlb();
 	if (cpu_mask)
 		flush_tlb_others(cpu_mask, mm, FLUSH_ALL);
+	preempt_enable();
 }
 
 void flush_tlb_mm (struct mm_struct * mm)
 {
-	unsigned long cpu_mask = mm->cpu_vm_mask & ~(1 << smp_processor_id());
+	unsigned long cpu_mask;
+
+	preempt_disable();
+	cpu_mask = mm->cpu_vm_mask & ~(1UL << smp_processor_id());
 
 	if (current->active_mm == mm) {
 		if (current->mm)
@@ -445,12 +411,17 @@ void flush_tlb_mm (struct mm_struct * mm)
 	}
 	if (cpu_mask)
 		flush_tlb_others(cpu_mask, mm, FLUSH_ALL);
+
+	preempt_enable();
 }
 
 void flush_tlb_page(struct vm_area_struct * vma, unsigned long va)
 {
 	struct mm_struct *mm = vma->vm_mm;
-	unsigned long cpu_mask = mm->cpu_vm_mask & ~(1 << smp_processor_id());
+	unsigned long cpu_mask;
+
+	preempt_disable();
+	cpu_mask = mm->cpu_vm_mask & ~(1UL << smp_processor_id());
 
 	if (current->active_mm == mm) {
 		if(current->mm)
@@ -461,9 +432,11 @@ void flush_tlb_page(struct vm_area_struct * vma, unsigned long va)
 
 	if (cpu_mask)
 		flush_tlb_others(cpu_mask, mm, va);
+
+	preempt_enable();
 }
 
-static inline void do_flush_tlb_all_local(void)
+static void do_flush_tlb_all(void* info)
 {
 	unsigned long cpu = smp_processor_id();
 
@@ -472,16 +445,9 @@ static inline void do_flush_tlb_all_local(void)
 		leave_mm(cpu);
 }
 
-static void flush_tlb_all_ipi(void* info)
-{
-	do_flush_tlb_all_local();
-}
-
 void flush_tlb_all(void)
 {
-	smp_call_function (flush_tlb_all_ipi,0,1,1);
-
-	do_flush_tlb_all_local();
+	on_each_cpu(do_flush_tlb_all, 0, 1, 1);
 }
 
 /*
@@ -489,7 +455,6 @@ void flush_tlb_all(void)
  * it goes straight through and wastes no time serializing
  * anything. Worst case is that we lose a reschedule ...
  */
-
 void smp_send_reschedule(int cpu)
 {
 	send_IPI_mask(1 << cpu, RESCHEDULE_VECTOR);
@@ -528,11 +493,11 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
  * remote CPUs are nearly ready to execute <<func>> or are or have executed.
  *
  * You must not call this function with disabled interrupts or from a
- * hardware interrupt handler, you may call it from a bottom half handler.
+ * hardware interrupt handler or from a bottom half handler.
  */
 {
 	struct call_data_struct data;
-	int cpus = smp_num_cpus-1;
+	int cpus = num_online_cpus()-1;
 
 	if (!cpus)
 		return 0;
@@ -544,9 +509,10 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	if (wait)
 		atomic_set(&data.finished, 0);
 
-	spin_lock_bh(&call_lock);
+	spin_lock(&call_lock);
 	call_data = &data;
-	wmb();
+	mb();
+	
 	/* Send a message to all other CPUs and wait for them to respond */
 	send_IPI_allbutself(CALL_FUNCTION_VECTOR);
 
@@ -557,7 +523,7 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	if (wait)
 		while (atomic_read(&data.finished) != cpus)
 			barrier();
-	spin_unlock_bh(&call_lock);
+	spin_unlock(&call_lock);
 
 	return 0;
 }
@@ -568,7 +534,7 @@ static void stop_this_cpu (void * dummy)
 	 * Remove this CPU:
 	 */
 	clear_bit(smp_processor_id(), &cpu_online_map);
-	__cli();
+	local_irq_disable();
 	disable_local_APIC();
 	if (cpu_data[smp_processor_id()].hlt_works_ok)
 		for(;;) __asm__("hlt");
@@ -582,11 +548,10 @@ static void stop_this_cpu (void * dummy)
 void smp_send_stop(void)
 {
 	smp_call_function(stop_this_cpu, NULL, 1, 0);
-	smp_num_cpus = 1;
 
-	__cli();
+	local_irq_disable();
 	disable_local_APIC();
-	__sti();
+	local_irq_enable();
 }
 
 /*
@@ -615,7 +580,10 @@ asmlinkage void smp_call_function_interrupt(void)
 	/*
 	 * At this point the info structure may be out of scope unless wait==1
 	 */
+	irq_enter();
 	(*func)(info);
+	irq_exit();
+
 	if (wait) {
 		mb();
 		atomic_inc(&call_data->finished);

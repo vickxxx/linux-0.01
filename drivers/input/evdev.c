@@ -1,31 +1,11 @@
 /*
- * $Id: evdev.c,v 1.27 2001/05/28 09:06:44 vojtech Exp $
+ * Event char devices, giving access to raw input device events.
  *
- *  Copyright (c) 1999-2001 Vojtech Pavlik
+ * Copyright (c) 1999-2002 Vojtech Pavlik
  *
- *  Event char devices, giving access to raw input device events.
- *
- *  Sponsored by SuSE
- */
-
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@suse.cz>, or by paper mail:
- * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published by
+ * the Free Software Foundation.
  */
 
 #define EVDEV_MINOR_BASE	64
@@ -37,16 +17,20 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/input.h>
+#include <linux/major.h>
 #include <linux/smp_lock.h>
+#include <linux/device.h>
+#include <linux/devfs_fs_kernel.h>
 
 struct evdev {
 	int exist;
 	int open;
 	int minor;
+	char name[16];
 	struct input_handle handle;
 	wait_queue_head_t wait;
-	devfs_handle_t devfs;
-	struct evdev_list *list;
+	struct evdev_list *grab;
+	struct list_head list;
 };
 
 struct evdev_list {
@@ -55,28 +39,37 @@ struct evdev_list {
 	int tail;
 	struct fasync_struct *fasync;
 	struct evdev *evdev;
-	struct evdev_list *next;
+	struct list_head node;
 };
 
-static struct evdev *evdev_table[EVDEV_MINORS] = { NULL, /* ... */ };
+static struct evdev *evdev_table[EVDEV_MINORS];
 
 static void evdev_event(struct input_handle *handle, unsigned int type, unsigned int code, int value)
 {
 	struct evdev *evdev = handle->private;
-	struct evdev_list *list = evdev->list;
+	struct evdev_list *list;
 
-	while (list) {
+	if (evdev->grab) {
+		list = evdev->grab;
 
-		get_fast_time(&list->buffer[list->head].time);
+		do_gettimeofday(&list->buffer[list->head].time);
 		list->buffer[list->head].type = type;
 		list->buffer[list->head].code = code;
 		list->buffer[list->head].value = value;
 		list->head = (list->head + 1) & (EVDEV_BUFFER_SIZE - 1);
 
 		kill_fasync(&list->fasync, SIGIO, POLL_IN);
+	} else
+		list_for_each_entry(list, &evdev->list, node) {
 
-		list = list->next;
-	}
+			do_gettimeofday(&list->buffer[list->head].time);
+			list->buffer[list->head].type = type;
+			list->buffer[list->head].code = code;
+			list->buffer[list->head].value = value;
+			list->head = (list->head + 1) & (EVDEV_BUFFER_SIZE - 1);
+
+			kill_fasync(&list->fasync, SIGIO, POLL_IN);
+		}
 
 	wake_up_interruptible(&evdev->wait);
 }
@@ -89,51 +82,61 @@ static int evdev_fasync(int fd, struct file *file, int on)
 	return retval < 0 ? retval : 0;
 }
 
+static int evdev_flush(struct file * file)
+{
+	struct evdev_list *list = file->private_data;
+	if (!list->evdev->exist) return -ENODEV;
+	return input_flush_device(&list->evdev->handle, file);
+}
+
+static void evdev_free(struct evdev *evdev)
+{
+	devfs_remove("input/event%d", evdev->minor);
+	evdev_table[evdev->minor] = NULL;
+	kfree(evdev);
+}
+
 static int evdev_release(struct inode * inode, struct file * file)
 {
 	struct evdev_list *list = file->private_data;
-	struct evdev_list **listptr;
 
-	lock_kernel();
-	listptr = &list->evdev->list;
+	if (list->evdev->grab == list) {
+		input_release_device(&list->evdev->handle);
+		list->evdev->grab = NULL;
+	}
+
 	evdev_fasync(-1, file, 0);
-
-	while (*listptr && (*listptr != list))
-		listptr = &((*listptr)->next);
-	*listptr = (*listptr)->next;
+	list_del(&list->node);
 
 	if (!--list->evdev->open) {
-		if (list->evdev->exist) {
+		if (list->evdev->exist)
 			input_close_device(&list->evdev->handle);
-		} else {
-			input_unregister_minor(list->evdev->devfs);
-			evdev_table[list->evdev->minor] = NULL;
-			kfree(list->evdev);
-		}
+		else
+			evdev_free(list->evdev);
 	}
 
 	kfree(list);
-	unlock_kernel();
-
 	return 0;
 }
 
 static int evdev_open(struct inode * inode, struct file * file)
 {
 	struct evdev_list *list;
-	int i = MINOR(inode->i_rdev) - EVDEV_MINOR_BASE;
+	int i = minor(inode->i_rdev) - EVDEV_MINOR_BASE;
+	int accept_err;
 
 	if (i >= EVDEV_MINORS || !evdev_table[i])
 		return -ENODEV;
+
+	if ((accept_err = input_accept_process(&(evdev_table[i]->handle), file)))
+		return accept_err;
 
 	if (!(list = kmalloc(sizeof(struct evdev_list), GFP_KERNEL)))
 		return -ENOMEM;
 	memset(list, 0, sizeof(struct evdev_list));
 
 	list->evdev = evdev_table[i];
-	list->next = evdev_table[i]->list;
-	evdev_table[i]->list = list;
-
+	list_add_tail(&list->node, &evdev_table[i]->list);
 	file->private_data = list;
 
 	if (!list->evdev->open++)
@@ -149,6 +152,8 @@ static ssize_t evdev_write(struct file * file, const char * buffer, size_t count
 	struct input_event event;
 	int retval = 0;
 
+	if (!list->evdev->exist) return -ENODEV;
+
 	while (retval < count) {
 
 		if (copy_from_user(&event, buffer + retval, sizeof(struct input_event)))
@@ -162,39 +167,20 @@ static ssize_t evdev_write(struct file * file, const char * buffer, size_t count
 
 static ssize_t evdev_read(struct file * file, char * buffer, size_t count, loff_t *ppos)
 {
-	DECLARE_WAITQUEUE(wait, current);
 	struct evdev_list *list = file->private_data;
-	int retval = 0;
+	int retval;
 
-	if (list->head == list->tail) {
+	if (list->head == list->tail && list->evdev->exist && (file->f_flags & O_NONBLOCK))
+		return -EAGAIN;
 
-		add_wait_queue(&list->evdev->wait, &wait);
-		current->state = TASK_INTERRUPTIBLE;
-
-		while (list->head == list->tail) {
-
-			if (!list->evdev->exist) {
-				retval = -ENODEV;
-				break;
-			}
-			if (file->f_flags & O_NONBLOCK) {
-				retval = -EAGAIN;
-				break;
-			}
-			if (signal_pending(current)) {
-				retval = -ERESTARTSYS;
-				break;
-			}
-
-			schedule();
-		}
-
-		current->state = TASK_RUNNING;
-		remove_wait_queue(&list->evdev->wait, &wait);
-	}
+	retval = wait_event_interruptible(list->evdev->wait,
+		list->head != list->tail && list->evdev->exist);
 
 	if (retval)
 		return retval;
+
+	if (!list->evdev->exist)
+		return -ENODEV;
 
 	while (list->head != list->tail && retval + sizeof(struct input_event) <= count) {
 		if (copy_to_user(buffer + retval, list->buffer + list->tail,
@@ -221,7 +207,10 @@ static int evdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 	struct evdev_list *list = file->private_data;
 	struct evdev *evdev = list->evdev;
 	struct input_dev *dev = evdev->handle.dev;
-	int retval;
+	struct input_absinfo abs;
+	int i, t, u;
+
+	if (!evdev->exist) return -ENODEV;
 
 	switch (cmd) {
 
@@ -229,10 +218,35 @@ static int evdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			return put_user(EV_VERSION, (int *) arg);
 
 		case EVIOCGID:
-			if ((retval = put_user(dev->idbus,     ((short *) arg) + 0))) return retval;
-			if ((retval = put_user(dev->idvendor,  ((short *) arg) + 1))) return retval;
-			if ((retval = put_user(dev->idproduct, ((short *) arg) + 2))) return retval;
-			if ((retval = put_user(dev->idversion, ((short *) arg) + 3))) return retval;
+			return copy_to_user((void *) arg, &dev->id, sizeof(struct input_id));
+		
+		case EVIOCGREP:
+			if (put_user(dev->rep[0], ((int *) arg) + 0)) return -EFAULT;
+			if (put_user(dev->rep[1], ((int *) arg) + 1)) return -EFAULT;
+			return 0;
+
+		case EVIOCSREP:
+			if (get_user(dev->rep[0], ((int *) arg) + 0)) return -EFAULT;
+			if (get_user(dev->rep[1], ((int *) arg) + 1)) return -EFAULT;
+			return 0;
+
+		case EVIOCGKEYCODE:
+			if (get_user(t, ((int *) arg) + 0)) return -EFAULT;
+			if (t < 0 || t > dev->keycodemax || !dev->keycodesize) return -EINVAL;
+			if (put_user(INPUT_KEYCODE(dev, t), ((int *) arg) + 1)) return -EFAULT;
+			return 0;
+
+		case EVIOCSKEYCODE:
+			if (get_user(t, ((int *) arg) + 0)) return -EFAULT;
+			if (t < 0 || t > dev->keycodemax || !dev->keycodesize) return -EINVAL;
+			u = INPUT_KEYCODE(dev, t);
+			if (get_user(INPUT_KEYCODE(dev, t), ((int *) arg) + 1)) return -EFAULT;
+
+			for (i = 0; i < dev->keycodemax; i++)
+				if(INPUT_KEYCODE(dev, t) == u) break;
+			if (i == dev->keycodemax) clear_bit(u, dev->keybit);
+			set_bit(INPUT_KEYCODE(dev, t), dev->keybit);
+
 			return 0;
 
 		case EVIOCSFF:
@@ -240,13 +254,11 @@ static int evdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 				struct ff_effect effect;
 				int err;
 
-				if (copy_from_user((void*)(&effect), (void*)arg, sizeof(effect))) {
-					return -EINVAL;
-				}
+				if (copy_from_user((void*)(&effect), (void*)arg, sizeof(effect)))
+					return -EFAULT;
 				err = dev->upload_effect(dev, &effect);
-				if (put_user(effect.id, &(((struct ff_effect*)arg)->id))) {
-					return -EINVAL;
-				}
+				if (put_user(effect.id, &(((struct ff_effect*)arg)->id)))
+					return -EFAULT;
 				return err;
 			}
 			else return -ENOSYS;
@@ -258,8 +270,25 @@ static int evdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 			else return -ENOSYS;
 
 		case EVIOCGEFFECTS:
-			put_user(dev->ff_effects_max, (int*) arg);
+			if (put_user(dev->ff_effects_max, (int*) arg))
+				return -EFAULT;
 			return 0;
+
+		case EVIOCGRAB:
+			if (arg) {
+				if (evdev->grab)
+					return -EBUSY;
+				if (input_grab_device(&evdev->handle))
+					return -EBUSY;
+				evdev->grab = list;
+				return 0;
+			} else {
+				if (evdev->grab != list)
+					return -EINVAL;
+				input_release_device(&evdev->handle);
+				evdev->grab = NULL;
+				return 0;
+			}
 
 		default:
 
@@ -282,31 +311,83 @@ static int evdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 					default: return -EINVAL;
 				}
 				len = NBITS(len) * sizeof(long);
-				if (len > _IOC_SIZE(cmd)) {
-					printk(KERN_WARNING "evdev.c: Truncating bitfield length from %d to %d\n",
-						len, _IOC_SIZE(cmd));
-					len = _IOC_SIZE(cmd);
-				}
+				if (len > _IOC_SIZE(cmd)) len = _IOC_SIZE(cmd);
 				return copy_to_user((char *) arg, bits, len) ? -EFAULT : len;
+			}
+
+			if (_IOC_NR(cmd) == _IOC_NR(EVIOCGKEY(0))) {
+				int len;
+				len = NBITS(KEY_MAX) * sizeof(long);
+				if (len > _IOC_SIZE(cmd)) len = _IOC_SIZE(cmd);
+				return copy_to_user((char *) arg, dev->key, len) ? -EFAULT : len;
+			}
+
+			if (_IOC_NR(cmd) == _IOC_NR(EVIOCGLED(0))) {
+				int len;
+				len = NBITS(LED_MAX) * sizeof(long);
+				if (len > _IOC_SIZE(cmd)) len = _IOC_SIZE(cmd);
+				return copy_to_user((char *) arg, dev->led, len) ? -EFAULT : len;
+			}
+
+			if (_IOC_NR(cmd) == _IOC_NR(EVIOCGSND(0))) {
+				int len;
+				len = NBITS(SND_MAX) * sizeof(long);
+				if (len > _IOC_SIZE(cmd)) len = _IOC_SIZE(cmd);
+				return copy_to_user((char *) arg, dev->snd, len) ? -EFAULT : len;
 			}
 
 			if (_IOC_NR(cmd) == _IOC_NR(EVIOCGNAME(0))) {
 				int len;
-				if (!dev->name) return 0;
+				if (!dev->name) return -ENOENT;
 				len = strlen(dev->name) + 1;
 				if (len > _IOC_SIZE(cmd)) len = _IOC_SIZE(cmd);
 				return copy_to_user((char *) arg, dev->name, len) ? -EFAULT : len;
+			}
+
+			if (_IOC_NR(cmd) == _IOC_NR(EVIOCGPHYS(0))) {
+				int len;
+				if (!dev->phys) return -ENOENT;
+				len = strlen(dev->phys) + 1;
+				if (len > _IOC_SIZE(cmd)) len = _IOC_SIZE(cmd);
+				return copy_to_user((char *) arg, dev->phys, len) ? -EFAULT : len;
+			}
+
+			if (_IOC_NR(cmd) == _IOC_NR(EVIOCGUNIQ(0))) {
+				int len;
+				if (!dev->uniq) return -ENOENT;
+				len = strlen(dev->uniq) + 1;
+				if (len > _IOC_SIZE(cmd)) len = _IOC_SIZE(cmd);
+				return copy_to_user((char *) arg, dev->uniq, len) ? -EFAULT : len;
 			}
 
 			if ((_IOC_NR(cmd) & ~ABS_MAX) == _IOC_NR(EVIOCGABS(0))) {
 
 				int t = _IOC_NR(cmd) & ABS_MAX;
 
-				if ((retval = put_user(dev->abs[t],     ((int *) arg) + 0))) return retval;
-				if ((retval = put_user(dev->absmin[t],  ((int *) arg) + 1))) return retval;
-				if ((retval = put_user(dev->absmax[t],  ((int *) arg) + 2))) return retval;
-				if ((retval = put_user(dev->absfuzz[t], ((int *) arg) + 3))) return retval;
-				if ((retval = put_user(dev->absflat[t], ((int *) arg) + 4))) return retval;
+				abs.value = dev->abs[t];
+				abs.minimum = dev->absmin[t];
+				abs.maximum = dev->absmax[t];
+				abs.fuzz = dev->absfuzz[t];
+				abs.flat = dev->absflat[t];
+
+				if (copy_to_user((void *) arg, &abs, sizeof(struct input_absinfo)))
+					return -EFAULT;
+
+				return 0;
+			}
+
+			if ((_IOC_NR(cmd) & ~ABS_MAX) == _IOC_NR(EVIOCSABS(0))) {
+
+				int t = _IOC_NR(cmd) & ABS_MAX;
+
+				if (copy_from_user(&abs, (void *) arg, sizeof(struct input_absinfo)))
+					return -EFAULT;
+
+				dev->abs[t] = abs.value;
+				dev->absmin[t] = abs.minimum;
+				dev->absmax[t] = abs.maximum;
+				dev->absfuzz[t] = abs.fuzz;
+				dev->absflat[t] = abs.flat;
 
 				return 0;
 			}
@@ -315,17 +396,18 @@ static int evdev_ioctl(struct inode *inode, struct file *file, unsigned int cmd,
 }
 
 static struct file_operations evdev_fops = {
-	owner:		THIS_MODULE,
-	read:		evdev_read,
-	write:		evdev_write,
-	poll:		evdev_poll,
-	open:		evdev_open,
-	release:	evdev_release,
-	ioctl:		evdev_ioctl,
-	fasync:		evdev_fasync,
+	.owner =	THIS_MODULE,
+	.read =		evdev_read,
+	.write =	evdev_write,
+	.poll =		evdev_poll,
+	.open =		evdev_open,
+	.release =	evdev_release,
+	.ioctl =	evdev_ioctl,
+	.fasync =	evdev_fasync,
+	.flush =	evdev_flush
 };
 
-static struct input_handle *evdev_connect(struct input_handler *handler, struct input_dev *dev)
+static struct input_handle *evdev_connect(struct input_handler *handler, struct input_dev *dev, struct input_device_id *id)
 {
 	struct evdev *evdev;
 	int minor;
@@ -340,20 +422,21 @@ static struct input_handle *evdev_connect(struct input_handler *handler, struct 
 		return NULL;
 	memset(evdev, 0, sizeof(struct evdev));
 
+	INIT_LIST_HEAD(&evdev->list);
 	init_waitqueue_head(&evdev->wait);
 
+	evdev->exist = 1;
 	evdev->minor = minor;
-	evdev_table[minor] = evdev;
-
 	evdev->handle.dev = dev;
+	evdev->handle.name = evdev->name;
 	evdev->handle.handler = handler;
 	evdev->handle.private = evdev;
+	sprintf(evdev->name, "event%d", minor);
 
-	evdev->exist = 1;
+	evdev_table[minor] = evdev;
 
-	evdev->devfs = input_register_minor("event%d", minor, EVDEV_MINOR_BASE);
-
-//	printk(KERN_INFO "event%d: Event device for input%d\n", minor, dev->number);
+	devfs_mk_cdev(MKDEV(INPUT_MAJOR, EVDEV_MINOR_BASE + minor),
+			S_IFCHR|S_IRUGO|S_IWUSR, "input/event%d", minor);
 
 	return &evdev->handle;
 }
@@ -367,19 +450,25 @@ static void evdev_disconnect(struct input_handle *handle)
 	if (evdev->open) {
 		input_close_device(handle);
 		wake_up_interruptible(&evdev->wait);
-	} else {
-		input_unregister_minor(evdev->devfs);
-		evdev_table[evdev->minor] = NULL;
-		kfree(evdev);
-	}
+	} else
+		evdev_free(evdev);
 }
 
+static struct input_device_id evdev_ids[] = {
+	{ .driver_info = 1 },	/* Matches all devices */
+	{ },			/* Terminating zero entry */
+};
+
+MODULE_DEVICE_TABLE(input, evdev_ids);
+
 static struct input_handler evdev_handler = {
-	event:		evdev_event,
-	connect:	evdev_connect,
-	disconnect:	evdev_disconnect,
-	fops:		&evdev_fops,
-	minor:		EVDEV_MINOR_BASE,
+	.event =	evdev_event,
+	.connect =	evdev_connect,
+	.disconnect =	evdev_disconnect,
+	.fops =		&evdev_fops,
+	.minor =	EVDEV_MINOR_BASE,
+	.name =		"evdev",
+	.id_table =	evdev_ids,
 };
 
 static int __init evdev_init(void)
@@ -396,7 +485,6 @@ static void __exit evdev_exit(void)
 module_init(evdev_init);
 module_exit(evdev_exit);
 
-MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
-MODULE_DESCRIPTION("Event character device driver");
+MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
+MODULE_DESCRIPTION("Input driver event char devices");
 MODULE_LICENSE("GPL");
-

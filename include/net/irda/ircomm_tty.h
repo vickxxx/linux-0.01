@@ -34,6 +34,7 @@
 #include <linux/serial.h>
 #include <linux/termios.h>
 #include <linux/timer.h>
+#include <linux/tty.h>		/* struct tty_struct */
 
 #include <net/irda/irias_object.h>
 #include <net/irda/ircomm_core.h>
@@ -43,6 +44,13 @@
 #define IRCOMM_TTY_MAGIC 0x3432
 #define IRCOMM_TTY_MAJOR 161
 #define IRCOMM_TTY_MINOR 0
+
+/* This is used as an initial value to max_header_size before the proper
+ * value is filled in (5 for ttp, 4 for lmp). This allow us to detect
+ * the state of the underlying connection. - Jean II */
+#define IRCOMM_TTY_HDR_UNINITIALISED	16
+/* Same for payload size. See qos.c for the smallest max data size */
+#define IRCOMM_TTY_DATA_UNINITIALISED	(64 - IRCOMM_TTY_HDR_UNINITIALISED)
 
 /*
  * IrCOMM TTY driver state
@@ -77,27 +85,31 @@ struct ircomm_tty_cb {
 
 	__u32 max_data_size;   /* Max data we can transmit in one packet */
 	__u32 max_header_size; /* The amount of header space we must reserve */
+	__u32 tx_data_size;	/* Max data size of current tx_skb */
 
 	struct iriap_cb *iriap; /* Instance used for querying remote IAS */
 	struct ias_object* obj;
-	int skey;
-	int ckey;
-
-	struct termios	  normal_termios;
-	struct termios	  callout_termios;
+	void *skey;
+	void *ckey;
 
 	wait_queue_head_t open_wait;
 	wait_queue_head_t close_wait;
 	struct timer_list watchdog_timer;
-	struct tq_struct  tqueue;
+	struct work_struct  tqueue;
 
         unsigned short    close_delay;
         unsigned short    closing_wait; /* time to wait before closing */
 
-	long session;           /* Session of opening process */
-	long pgrp;		/* pgrp of opening process */
 	int  open_count;
 	int  blocked_open;	/* # of blocked opens */
+
+	/* Protect concurent access to :
+	 *	o self->open_count
+	 *	o self->ctrl_skb
+	 *	o self->tx_skb
+	 * Maybe other things may gain to be protected as well...
+	 * Jean II */
+	spinlock_t spinlock;
 };
 
 void ircomm_tty_start(struct tty_struct *tty);

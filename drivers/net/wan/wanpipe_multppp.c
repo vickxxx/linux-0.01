@@ -42,19 +42,11 @@
 #include <linux/if_wanpipe.h>		
 
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
-  #include <linux/inetdevice.h>
-  #include <asm/uaccess.h>
+#include <linux/inetdevice.h>
+#include <asm/uaccess.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,4,3)
- #include <net/syncppp.h>
-#else
- #include "syncppp.h"
-#endif
+#include <net/syncppp.h>
 
-#else
-  #include <net/route.h>          /* Adding new route entries */
-#endif
 
 /****** Defines & Macros ****************************************************/
 
@@ -138,25 +130,19 @@ extern void enable_irq(unsigned int);
 
 /****** Function Prototypes *************************************************/
 /* WAN link driver entry points. These are called by the WAN router module. */
-static int update (wan_device_t* wandev);
-static int new_if (wan_device_t* wandev, netdevice_t* dev,
-	wanif_conf_t* conf);
-static int del_if (wan_device_t* wandev, netdevice_t* dev);
+static int update(struct wan_device* wandev);
+static int new_if(struct wan_device* wandev, struct net_device* dev,
+		  wanif_conf_t* conf);
+static int del_if(struct wan_device* wandev, struct net_device* dev);
 
 /* Network device interface */
-static int if_init   (netdevice_t* dev);
-static int if_open   (netdevice_t* dev);
-static int if_close  (netdevice_t* dev);
-static int if_send (struct sk_buff* skb, netdevice_t* dev);
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
-static struct net_device_stats* if_stats (netdevice_t* dev);
-#else
-static struct enet_statistics* if_stats (netdevice_t* dev);
-#endif
+static int if_init(struct net_device* dev);
+static int if_open(struct net_device* dev);
+static int if_close(struct net_device* dev);
+static int if_send(struct sk_buff* skb, struct net_device* dev);
+static struct net_device_stats* if_stats(struct net_device* dev);
 
-#ifdef LINUX_2_4
-static void if_tx_timeout (netdevice_t *dev);
-#endif
+static void if_tx_timeout(struct net_device *dev);
 
 /* CHDLC Firmware interface functions */
 static int chdlc_configure 	(sdla_t* card, void* data);
@@ -172,7 +158,7 @@ static int config_chdlc (sdla_t *card);
 
 /* Miscellaneous CHDLC Functions */
 static int set_chdlc_config (sdla_t* card);
-static void init_chdlc_tx_rx_buff( sdla_t* card, netdevice_t *dev );
+static void init_chdlc_tx_rx_buff(sdla_t* card, struct net_device *dev);
 static int chdlc_error (sdla_t *card, int err, CHDLC_MAILBOX_STRUCT *mb);
 static int process_chdlc_exception(sdla_t *card);
 static int process_global_exception(sdla_t *card);
@@ -190,14 +176,14 @@ static int reply_udp( unsigned char *data, unsigned int mbox_len );
 static int intr_test( sdla_t* card);
 static int udp_pkt_type( struct sk_buff *skb , sdla_t* card);
 static int store_udp_mgmt_pkt(char udp_pkt_src, sdla_t* card,
-                                struct sk_buff *skb, netdevice_t* dev,
-                                chdlc_private_area_t* chdlc_priv_area);
-static int process_udp_mgmt_pkt(sdla_t* card, netdevice_t* dev,  
+			      struct sk_buff *skb, struct net_device* dev,
+			      chdlc_private_area_t* chdlc_priv_area);
+static int process_udp_mgmt_pkt(sdla_t* card, struct net_device* dev,  
 				chdlc_private_area_t* chdlc_priv_area);
 static unsigned short calc_checksum (char *, int);
 static void s508_lock (sdla_t *card, unsigned long *smp_flags);
 static void s508_unlock (sdla_t *card, unsigned long *smp_flags);
-static void send_ppp_term_request (netdevice_t*);
+static void send_ppp_term_request(struct net_device *dev);
 
 
 static int  Intr_test_counter;
@@ -470,10 +456,10 @@ int wsppp_init (sdla_t* card, wandev_conf_t* conf)
  * as to minimize the time that we are inside the interrupt handler.
  *
  */
-static int update (wan_device_t* wandev)
+static int update(struct wan_device* wandev)
 {
 	sdla_t* card = wandev->private;
- 	netdevice_t* dev;
+ 	struct net_device* dev;
         volatile chdlc_private_area_t* chdlc_priv_area;
         SHARED_MEMORY_INFO_STRUCT *flags;
 	unsigned long timeout;
@@ -536,11 +522,12 @@ static int update (wan_device_t* wandev)
  * Return:	0	o.k.
  *		< 0	failure (channel will not be created)
  */
-static int new_if (wan_device_t* wandev, netdevice_t* pdev, wanif_conf_t* conf)
+static int new_if(struct wan_device* wandev, struct net_device* pdev,
+		  wanif_conf_t* conf)
 {
 
 	struct ppp_device *pppdev = (struct ppp_device *)pdev;
-	netdevice_t *dev=NULL;
+	struct net_device *dev = NULL;
 	struct sppp *sp;
 	sdla_t* card = wandev->private;
 	chdlc_private_area_t* chdlc_priv_area;
@@ -601,18 +588,8 @@ static int new_if (wan_device_t* wandev, netdevice_t* pdev, wanif_conf_t* conf)
 
 	/* prepare network device data space for registration */
 
-#ifdef LINUX_2_4
 	strcpy(dev->name,card->u.c.if_name);
-#else
-	dev->name = (char *)kmalloc(strlen(card->u.c.if_name) + 2, GFP_KERNEL); 
-	if(dev->name == NULL)
-	{
-		kfree(chdlc_priv_area);	
-		return -ENOMEM;
-	}
-	sprintf(dev->name, "%s", card->u.c.if_name);
-#endif
-	
+
 	/* Attach PPP protocol layer to pppdev
 	 * The sppp_attach() will initilize the dev structure
          * and setup ppp layer protocols.
@@ -620,11 +597,7 @@ static int new_if (wan_device_t* wandev, netdevice_t* pdev, wanif_conf_t* conf)
          *        if_open(), if_close(), if_send() and get_stats() functions.
          */
 	sppp_attach(pppdev);
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,16)
 	dev = pppdev->dev;
-#else
-	dev = &pppdev->dev;
-#endif
 	sp = &pppdev->sppp;
 	
 	/* Enable PPP Debugging */
@@ -644,7 +617,7 @@ static int new_if (wan_device_t* wandev, netdevice_t* pdev, wanif_conf_t* conf)
 /*============================================================================
  * Delete logical channel.
  */
-static int del_if (wan_device_t* wandev, netdevice_t* dev)
+static int del_if(struct wan_device* wandev, struct net_device* dev)
 {
 	chdlc_private_area_t *chdlc_priv_area = dev->priv;
 	sdla_t *card = chdlc_priv_area->card;
@@ -679,14 +652,11 @@ static int del_if (wan_device_t* wandev, netdevice_t* dev)
  * interface registration.  Returning anything but zero will fail interface
  * registration.
  */
-static int if_init (netdevice_t* dev)
-	{
+static int if_init(struct net_device* dev)
+{
 	chdlc_private_area_t* chdlc_priv_area = dev->priv;
 	sdla_t* card = chdlc_priv_area->card;
-	wan_device_t* wandev = &card->wandev;
-#ifdef LINUX_2_0
-	int i;
-#endif
+	struct wan_device* wandev = &card->wandev;
 	
 	/* NOTE: Most of the dev initialization was
          *       done in sppp_attach(), called by new_if() 
@@ -699,16 +669,10 @@ static int if_init (netdevice_t* dev)
 	dev->stop		= &if_close;
 	dev->hard_start_xmit	= &if_send;
 	dev->get_stats		= &if_stats;
-#ifdef LINUX_2_4
 	dev->tx_timeout		= &if_tx_timeout;
 	dev->watchdog_timeo	= TX_TIMEOUT;
-#endif
 
 
-#ifdef LINUX_2_0
-	dev->family		= AF_INET;
-#endif	
- 
 	/* Initialize hardware parameters */
 	dev->irq	= wandev->irq;
 	dev->dma	= wandev->dma;
@@ -724,21 +688,14 @@ static int if_init (netdevice_t* dev)
 	 */
         dev->tx_queue_len = 100;
    
-	/* Initialize socket buffers */
-#if !defined(LINUX_2_1) && !defined(LINUX_2_4)
-        for (i = 0; i < DEV_NUMBUFFS; ++i)
-                skb_queue_head_init(&dev->buffs[i]);
-#endif
-
 	return 0;
 }
 
 
-#ifdef LINUX_2_4
 /*============================================================================
  * Handle transmit timeout event from netif watchdog
  */
-static void if_tx_timeout (netdevice_t *dev)
+static void if_tx_timeout(struct net_device *dev)
 {
     	chdlc_private_area_t* chan = dev->priv;
 	sdla_t *card = chan->card;
@@ -754,8 +711,6 @@ static void if_tx_timeout (netdevice_t *dev)
 	printk (KERN_INFO "%s: Transmit timed out on %s\n", card->devname,dev->name);
 	netif_wake_queue (dev);
 }
-#endif
-
 
 
 /*============================================================================
@@ -765,7 +720,7 @@ static void if_tx_timeout (netdevice_t *dev)
  *
  * Return 0 if O.k. or errno.
  */
-static int if_open (netdevice_t* dev)
+static int if_open(struct net_device* dev)
 {
 	chdlc_private_area_t* chdlc_priv_area = dev->priv;
 	sdla_t* card = chdlc_priv_area->card;
@@ -773,14 +728,8 @@ static int if_open (netdevice_t* dev)
 	SHARED_MEMORY_INFO_STRUCT *flags = card->u.c.flags;
 
 	/* Only one open per interface is allowed */
-
-#ifdef LINUX_2_4
 	if (netif_running(dev))
 		return -EBUSY;
-#else
-	if (dev->start)
-		return -EBUSY;		/* only one open is allowed */
-#endif
 
 	/* Start PPP Layer */
 	if (sppp_open(dev)){
@@ -790,13 +739,7 @@ static int if_open (netdevice_t* dev)
 	do_gettimeofday(&tv);
 	chdlc_priv_area->router_start_time = tv.tv_sec;
  
-#ifdef LINUX_2_4
 	netif_start_queue(dev);
-#else
-	dev->interrupt = 0;
-	dev->tbusy = 0;
-	dev->start = 1;
-#endif
 	
 	wanpipe_open(card);
 
@@ -810,18 +753,14 @@ static int if_open (netdevice_t* dev)
  * o if this is the last close, then disable communications and interrupts.
  * o reset flags.
  */
-static int if_close (netdevice_t* dev)
+static int if_close(struct net_device* dev)
 {
 	chdlc_private_area_t* chdlc_priv_area = dev->priv;
 	sdla_t* card = chdlc_priv_area->card;
 
 	/* Stop the PPP Layer */
 	sppp_close(dev);
-	stop_net_queue(dev);
-
-#ifndef LINUX_2_4
-	dev->start=0;
-#endif
+	netif_stop_queue(dev);
 
 	wanpipe_close(card);
 	
@@ -845,7 +784,7 @@ static int if_close (netdevice_t* dev)
  * 2. Setting tbusy flag will inhibit further transmit requests from the
  *    protocol stack and can be used for flow control with protocol layer.
  */
-static int if_send (struct sk_buff* skb, netdevice_t* dev)
+static int if_send(struct sk_buff* skb, struct net_device* dev)
 {
 	chdlc_private_area_t *chdlc_priv_area = dev->priv;
 	sdla_t *card = chdlc_priv_area->card;
@@ -855,9 +794,7 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 	unsigned long smp_flags;
 	int err=0;
 
-#ifdef LINUX_2_4
 	netif_stop_queue(dev);
-#endif
 
 	
 	if (skb == NULL){
@@ -867,31 +804,9 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 		printk(KERN_INFO "%s: Received NULL skb buffer! interface %s got kicked!\n",
 			card->devname, dev->name);
 
-		wake_net_dev(dev);
+		netif_wake_queue(dev);
 		return 0;
 	}
-
-#ifndef LINUX_2_4
-	if (dev->tbusy){
-
-		/* If our device stays busy for at least 5 seconds then we will
-		 * kick start the device by making dev->tbusy = 0.  We expect 
-		 * that our device never stays busy more than 5 seconds. So this
-		 * is only used as a last resort. 
-		 */
-                ++card->wandev.stats.collisions;
-
-		if((jiffies - chdlc_priv_area->tick_counter) < (5 * HZ)) {
-			return 1;
-		}
-
-		printk (KERN_INFO "%s: Transmit (tbusy) timeout !\n",
-			card->devname);
-
-		/* unbusy the interface */
-		dev->tbusy = 0;
-	}
-#endif
 
    	if (ntohs(skb->protocol) != htons(PVC_PROT)){
 		/* check the udp packet type */
@@ -903,7 +818,7 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 				chdlc_int->interrupt_permission |=
 					APP_INT_ON_TIMER;
 			}
-			start_net_queue(dev);
+			netif_start_queue(dev);
 			return 0;
 		}
         }
@@ -918,33 +833,29 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 		printk(KERN_INFO "%s: Critical in if_send: %lx\n",
 					card->wandev.name,card->wandev.critical);
                 ++card->wandev.stats.tx_dropped;
-		start_net_queue(dev);
+		netif_start_queue(dev);
 		goto if_send_crit_exit;
 	}
 
 	if (card->wandev.state != WAN_CONNECTED){
 		++card->wandev.stats.tx_dropped;
-		start_net_queue(dev);
+		netif_start_queue(dev);
 		goto if_send_crit_exit;
 	}
 	
 	if (chdlc_send(card, skb->data, skb->len)){
-		stop_net_queue(dev);
+		netif_stop_queue(dev);
 
 	}else{
 		++card->wandev.stats.tx_packets;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
        		card->wandev.stats.tx_bytes += skb->len;
-#endif
-#ifdef LINUX_2_4
 		dev->trans_start = jiffies;
-#endif
-		start_net_queue(dev);
+		netif_start_queue(dev);
 	}	
 
 if_send_crit_exit:
-	if (!(err=is_queue_stopped(dev))){
-                wan_dev_kfree_skb(skb, FREE_WRITE);
+	if (!(err=netif_queue_stopped(dev))){
+                dev_kfree_skb_any(skb);
 	}else{
 		chdlc_priv_area->tick_counter = jiffies;
 		chdlc_int->interrupt_permission |= APP_INT_ON_TX_FRAME;
@@ -1063,8 +974,7 @@ unsigned short calc_checksum (char *data, int len)
  * Get ethernet-style interface statistics.
  * Return a pointer to struct enet_statistics.
  */
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
-static struct net_device_stats* if_stats (netdevice_t* dev)
+static struct net_device_stats* if_stats(struct net_device* dev)
 {
 	sdla_t *my_card;
 	chdlc_private_area_t* chdlc_priv_area;
@@ -1079,23 +989,7 @@ static struct net_device_stats* if_stats (netdevice_t* dev)
 	my_card = chdlc_priv_area->card;
 	return &my_card->wandev.stats; 
 }
-#else
-static struct enet_statistics* if_stats (netdevice_t* dev)
-{
-        sdla_t *my_card;
-        chdlc_private_area_t* chdlc_priv_area = dev->priv;
 
-	/* Shutdown bug fix. In del_if() we kill
-         * dev->priv pointer. This function, gets
-         * called after del_if(), thus check
-         * if pointer has been deleted */
-	if ((chdlc_priv_area=dev->priv) == NULL)
-		return NULL;
-
-        my_card = chdlc_priv_area->card;
-        return &my_card->wandev.stats;
-}
-#endif
 
 /****** Cisco HDLC Firmware Interface Functions *******************************/
 
@@ -1349,7 +1243,7 @@ static int chdlc_error (sdla_t *card, int err, CHDLC_MAILBOX_STRUCT *mb)
  */
 STATIC void wsppp_isr (sdla_t* card)
 {
-	netdevice_t* dev;
+	struct net_device* dev;
 	SHARED_MEMORY_INFO_STRUCT* flags = NULL;
 	int i;
 	sdla_t *my_card;
@@ -1417,7 +1311,7 @@ STATIC void wsppp_isr (sdla_t* card)
 			flags->interrupt_info_struct.interrupt_permission &=
 				 ~APP_INT_ON_TX_FRAME;
 
-			wake_net_dev(dev);
+			netif_wake_queue(dev);
 			break;
 
 		case COMMAND_COMPLETE_APP_INT_PEND:/* 0x04: cmd cplt */
@@ -1462,7 +1356,7 @@ isr_done:
  */
 static void rx_intr (sdla_t* card)
 {
-	netdevice_t *dev;
+	struct net_device *dev;
 	chdlc_private_area_t *chdlc_priv_area;
 	SHARED_MEMORY_INFO_STRUCT *flags = card->u.c.flags;
 	CHDLC_DATA_RX_STATUS_EL_STRUCT *rxbuf = card->u.c.rxmb;
@@ -1505,15 +1399,9 @@ static void rx_intr (sdla_t* card)
 		goto rx_exit;
 	}
 	
-#ifdef LINUX_2_4
 	if (!netif_running(dev)){
 		goto rx_exit;
 	}
-#else
-	if (!dev->start){ 
-		goto rx_exit;
-	}
-#endif
 
 	chdlc_priv_area = dev->priv;
 
@@ -1555,9 +1443,7 @@ static void rx_intr (sdla_t* card)
 	skb->protocol = htons(ETH_P_WAN_PPP);
 
 	card->wandev.stats.rx_packets ++;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 	card->wandev.stats.rx_bytes += skb->len;
-#endif
 	udp_type = udp_pkt_type( skb, card );
 
 	if(udp_type == UDP_CPIPE_TYPE) {
@@ -1572,6 +1458,7 @@ static void rx_intr (sdla_t* card)
                 skb->dev = dev;
                 skb->mac.raw  = skb->data;
                 netif_rx(skb);
+                dev->last_rx = jiffies;
 	}
 
 rx_exit:
@@ -1591,7 +1478,7 @@ rx_exit:
  */
 void timer_intr(sdla_t *card)
 {
-        netdevice_t* dev;
+        struct net_device* dev;
         chdlc_private_area_t* chdlc_priv_area = NULL;
         SHARED_MEMORY_INFO_STRUCT* flags = NULL;
 
@@ -1779,8 +1666,8 @@ static int process_chdlc_exception(sdla_t *card)
  */
 
 static int store_udp_mgmt_pkt(char udp_pkt_src, sdla_t* card,
-                                struct sk_buff *skb, netdevice_t* dev,
-                                chdlc_private_area_t* chdlc_priv_area )
+			      struct sk_buff *skb, struct net_device* dev,
+			      chdlc_private_area_t* chdlc_priv_area )
 {
 	int udp_pkt_stored = 0;
 
@@ -1794,9 +1681,9 @@ static int store_udp_mgmt_pkt(char udp_pkt_src, sdla_t* card,
 	}
 
 	if(udp_pkt_src == UDP_PKT_FRM_STACK)
-		wan_dev_kfree_skb(skb, FREE_WRITE);
+		dev_kfree_skb_any(skb);
 	else
-                wan_dev_kfree_skb(skb, FREE_READ);
+                dev_kfree_skb_any(skb);
 	
 	return(udp_pkt_stored);
 }
@@ -1806,7 +1693,7 @@ static int store_udp_mgmt_pkt(char udp_pkt_src, sdla_t* card,
  * Process UDP management packet.
  */
 
-static int process_udp_mgmt_pkt(sdla_t* card, netdevice_t* dev,
+static int process_udp_mgmt_pkt(sdla_t* card, struct net_device* dev,
 				chdlc_private_area_t* chdlc_priv_area ) 
 {
 	unsigned char *buf;
@@ -2155,9 +2042,7 @@ static int process_udp_mgmt_pkt(sdla_t* card, netdevice_t* dev,
      	if(chdlc_priv_area->udp_pkt_src == UDP_PKT_FRM_NETWORK) {
 		if(!chdlc_send(card, chdlc_priv_area->udp_pkt_data, len)) {
 			++ card->wandev.stats.tx_packets;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 			card->wandev.stats.tx_bytes += len;
-#endif
 		}
 	} else {	
 	
@@ -2175,6 +2060,7 @@ static int process_udp_mgmt_pkt(sdla_t* card, netdevice_t* dev,
 	    		new_skb->mac.raw  = new_skb->data;
 	
 			netif_rx(new_skb);
+			dev->last_rx = jiffies;
 		} else {
 	    	
 			printk(KERN_INFO "%s: no socket buffers available!\n",
@@ -2191,7 +2077,7 @@ static int process_udp_mgmt_pkt(sdla_t* card, netdevice_t* dev,
  * Initialize Receive and Transmit Buffers.
  */
 
-static void init_chdlc_tx_rx_buff( sdla_t* card, netdevice_t *dev )
+static void init_chdlc_tx_rx_buff(sdla_t* card, struct net_device *dev)
 {
 	CHDLC_MAILBOX_STRUCT* mb = card->mbox;
 	CHDLC_TX_STATUS_EL_CFG_STRUCT *tx_config;
@@ -2281,7 +2167,7 @@ static int intr_test( sdla_t* card)
 
 	Intr_test_counter = 0;
 
-	/* The critical flag is unset because during intialization (if_open) 
+	/* The critical flag is unset because during initialization (if_open) 
 	 * we want the interrupts to be enabled so that when the wpc_isr is
 	 * called it does not exit due to critical flag set.
 	 */ 
@@ -2328,7 +2214,7 @@ static int udp_pkt_type(struct sk_buff *skb, sdla_t* card)
  */
 static void port_set_state (sdla_t *card, int state)
 {
-	netdevice_t *dev = card->wandev.dev;
+	struct net_device *dev = card->wandev.dev;
 	chdlc_private_area_t *chdlc_priv_area = dev->priv;
 
         if (card->u.c.state != state)
@@ -2358,28 +2244,20 @@ static void port_set_state (sdla_t *card, int state)
 
 void s508_lock (sdla_t *card, unsigned long *smp_flags)
 {
-#if defined(__SMP__) || defined(LINUX_2_4)
 	spin_lock_irqsave(&card->wandev.lock, *smp_flags);
         if (card->next){
 		/* It is ok to use spin_lock here, since we
 		 * already turned off interrupts */
         	spin_lock(&card->next->wandev.lock);
 	}
-#else
-	disable_irq(card->hw.irq);
-#endif
 }
 
 void s508_unlock (sdla_t *card, unsigned long *smp_flags)
 {
-#if defined(__SMP__) || defined(LINUX_2_4)
 	if (card->next){
 		spin_unlock(&card->next->wandev.lock);
 	}
 	spin_unlock_irqrestore(&card->wandev.lock, *smp_flags);
-#else
-	enable_irq(card->hw.irq);
-#endif           
 }
 
 
@@ -2407,7 +2285,7 @@ void s508_unlock (sdla_t *card, unsigned long *smp_flags)
 
 static int config_chdlc (sdla_t *card)
 {
-	netdevice_t *dev = card->wandev.dev;
+	struct net_device *dev = card->wandev.dev;
 	SHARED_MEMORY_INFO_STRUCT *flags = card->u.c.flags;
 
 	if (card->u.c.comm_enabled){
@@ -2453,7 +2331,7 @@ static int config_chdlc (sdla_t *card)
 }
 
 
-static void send_ppp_term_request (netdevice_t *dev)
+static void send_ppp_term_request(struct net_device *dev)
 {
 	struct sk_buff *new_skb;
 	unsigned char *buf;
@@ -2470,6 +2348,7 @@ static void send_ppp_term_request (netdevice_t *dev)
 		new_skb->mac.raw  = new_skb->data;
 
 		netif_rx(new_skb);
+		dev->last_rx = jiffies;
 	}
 }
 

@@ -107,7 +107,7 @@
 *                                  the if clause for it(0,dev->tbusy) 
 *				   forever.
 *				   The code got into this stage due to an 
-*				   interrupt occuring within the if clause for 
+*				   interrupt occurring within the if clause for 
 *				   set_bit(0,dev->tbusy).  Since an interrupt 
 *				   disables furhter transmit interrupt and 
 * 				   makes dev->tbusy = 0, this effect was undone 
@@ -152,7 +152,6 @@
 #include <asm/io.h>		/* for inb(), outb(), etc. */
 #include <linux/time.h>	 	/* for do_gettimeofday */	
 #include <linux/in.h>		/* sockaddr_in */
-#include <linux/inet.h>		/* in_ntoa(), etc... */
 #include <asm/errno.h>
 
 #include <linux/ip.h>
@@ -163,14 +162,9 @@
 
 #include <linux/sdla_fr.h>		/* frame relay firmware API definitions */
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
- #include <asm/uaccess.h>
- #include <linux/inetdevice.h>
- #include <linux/netdevice.h>
-
-#else
- #include <asm/segment.h>
-#endif
+#include <asm/uaccess.h>
+#include <linux/inetdevice.h>
+#include <linux/netdevice.h>
 
 #include <net/route.h>          	/* Dynamic Route Creation */
 #include <linux/etherdevice.h>		/* eth_type_trans() used for bridging */
@@ -231,15 +225,11 @@ typedef struct fr_channel
 	sdla_t *card;			/* -> owner */
 	unsigned route_flag;		/* Add/Rem dest addr in route tables */
 	unsigned inarp;			/* Inverse Arp Request status */ 
-	unsigned char inarp_ready;	/* Ready to send requests */
+	long inarp_ready;		/* Ready to send requests */
 	int inarp_interval;		/* Time between InArp Requests */
 	unsigned long inarp_tick;	/* InArp jiffies tick counter */
-	unsigned char interface_down;	/* Bring interface down on disconnect */
-      #if defined(LINUX_2_1) || defined(LINUX_2_4)
+	long interface_down;		/* Bring interface down on disconnect */
 	struct net_device_stats ifstats;	/* interface statistics */
-      #else
-	struct enet_statistics ifstats;
-      #endif	
 	if_send_stat_t drvstats_if_send;
         rx_intr_stat_t drvstats_rx_intr;
         pipe_mgmt_stat_t drvstats_gen;
@@ -248,14 +238,11 @@ typedef struct fr_channel
 	unsigned short transmit_length;
 	struct sk_buff *delay_skb;
 
-
-      #if defined(LINUX_2_1) || defined(LINUX_2_4)
 	bh_data_t *bh_head;	  	  /* Circular buffer for chdlc_bh */
 	unsigned long  tq_working;
 	volatile int  bh_write;
 	volatile int  bh_read;
 	atomic_t  bh_buff_used;
-      #endif
 
 	/* Polling task queue. Each interface
          * has its own task queue, which is used
@@ -265,8 +252,8 @@ typedef struct fr_channel
 
 	u32 ip_local;
 	u32 ip_remote;
-	u8  config_dlci;
-	u32 unconfig_dlci;
+	long config_dlci;
+	long unconfig_dlci;
 
 	/* Whether this interface should be setup as a gateway.
 	 * Used by dynamic route setup code */
@@ -336,39 +323,28 @@ static int Intr_test_counter;
 /****** Function Prototypes *************************************************/
 
 /* WAN link driver entry points. These are called by the WAN router module. */
-static int update(wan_device_t *wandev);
-static int new_if(wan_device_t *wandev, netdevice_t *dev, wanif_conf_t *conf);
-static int del_if(wan_device_t *wandev, netdevice_t *dev);
+static int update(struct wan_device *wandev);
+static int new_if(struct wan_device *wandev, struct net_device *dev,
+		  wanif_conf_t *conf);
+static int del_if(struct wan_device *wandev, struct net_device *dev);
 static void disable_comm (sdla_t *card);
 
 /* WANPIPE-specific entry points */
 static int wpf_exec(struct sdla *card, void *u_cmd, void *u_data);
 
 /* Network device interface */
-static int if_init(netdevice_t *dev);
-static int if_open(netdevice_t *dev);
-static int if_close(netdevice_t *dev);
+static int if_init(struct net_device *dev);
+static int if_open(struct net_device *dev);
+static int if_close(struct net_device *dev);
 
+static void if_tx_timeout(struct net_device *dev);
 
-#ifdef LINUX_2_4
-static void if_tx_timeout (netdevice_t *dev);
-#endif
-
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 static int if_rebuild_hdr (struct sk_buff *skb);
-#else
-static int if_rebuild_hdr (void* hdr, netdevice_t* dev, unsigned long raddr,
-        struct sk_buff* skb);
-#endif
 
-static int if_send(struct sk_buff *skb, netdevice_t *dev);
-static int chk_bcast_mcast_addr(sdla_t *card, netdevice_t* dev,
+static int if_send(struct sk_buff *skb, struct net_device *dev);
+static int chk_bcast_mcast_addr(sdla_t *card, struct net_device* dev,
                                 struct sk_buff *skb);
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
-static struct net_device_stats *if_stats(netdevice_t *dev);
-#else
-static struct enet_statistics* if_stats (netdevice_t* dev);
-#endif
+static struct net_device_stats *if_stats(struct net_device *dev);
 
 /* Interrupt handlers */
 static void fr_isr(sdla_t *card);
@@ -407,9 +383,9 @@ static int fr_modem_failure(sdla_t *card, fr_mbox_t *mbox);
 static int fr_dlci_change(sdla_t *card, fr_mbox_t *mbox);
 
 /* Miscellaneous functions */
-static int update_chan_state(netdevice_t *dev);
-static void set_chan_state(netdevice_t *dev, int state);
-static netdevice_t *find_channel(sdla_t *card, unsigned dlci);
+static int update_chan_state(struct net_device *dev);
+static void set_chan_state(struct net_device *dev, int state);
+static struct net_device *find_channel(sdla_t *card, unsigned dlci);
 static int is_tx_ready(sdla_t *card, fr_channel_t *chan);
 static unsigned int dec_to_uint(unsigned char *str, int len);
 static int reply_udp( unsigned char *data, unsigned int mbox_len );
@@ -418,24 +394,23 @@ static int intr_test( sdla_t* card );
 static void init_chan_statistics( fr_channel_t* chan );
 static void init_global_statistics( sdla_t* card );
 static void read_DLCI_IB_mapping( sdla_t* card, fr_channel_t* chan );
-static int setup_for_delayed_transmit(netdevice_t* dev, struct sk_buff *skb);
+static int setup_for_delayed_transmit(struct net_device* dev,
+				      struct sk_buff *skb);
 
-netdevice_t * move_dev_to_next (sdla_t *, netdevice_t *);
-static int check_tx_status(sdla_t *, netdevice_t *);
+struct net_device *move_dev_to_next(sdla_t *card, struct net_device *dev);
+static int check_tx_status(sdla_t *card, struct net_device *dev);
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 /* Frame Relay Socket API */
 static void trigger_fr_bh (fr_channel_t *);
-static void fr_bh (netdevice_t *);
-static int fr_bh_cleanup (netdevice_t *);
-static int bh_enqueue (netdevice_t *, struct sk_buff *);
-#endif
+static void fr_bh(struct net_device *dev);
+static int fr_bh_cleanup(struct net_device *dev);
+static int bh_enqueue(struct net_device *dev, struct sk_buff *skb);
 
-static void trigger_fr_poll (netdevice_t *);
-static void fr_poll (netdevice_t *);
-//static void add_gateway (netdevice_t *);
+static void trigger_fr_poll(struct net_device *dev);
+static void fr_poll(struct net_device *dev);
+//static void add_gateway(struct net_device *dev);
 
-static void trigger_unconfig_fr (netdevice_t *dev);
+static void trigger_unconfig_fr(struct net_device *dev);
 static void unconfig_fr (sdla_t *);
 
 static void trigger_config_fr (sdla_t *);
@@ -443,11 +418,11 @@ static void config_fr (sdla_t *);
 
 
 /* Inverse ARP and Dynamic routing functions */
-int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, netdevice_t *dev);
+int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, struct net_device *dev);
 int is_arp(void *buf);
-int send_inarp_request(sdla_t *card, netdevice_t *dev);
+int send_inarp_request(sdla_t *card, struct net_device *dev);
 
-static void trigger_fr_arp (netdevice_t *);
+static void trigger_fr_arp(struct net_device *dev);
 static void fr_arp (unsigned long data);
 
 
@@ -469,7 +444,8 @@ void 	s508_s514_unlock(sdla_t *card, unsigned long *smp_flags);
 void 	s508_s514_lock(sdla_t *card, unsigned long *smp_flags);
 
 unsigned short calc_checksum (char *, int);
-static int setup_fr_header(struct sk_buff** skb, netdevice_t* dev, char op_mode);
+static int setup_fr_header(struct sk_buff** skb,
+			   struct net_device* dev, char op_mode);
 
 
 /****** Public Functions ****************************************************/
@@ -773,7 +749,7 @@ int wpf_init(sdla_t *card, wandev_conf_t *conf)
 /*============================================================================
  * Update device status & statistics.
  */
-static int update (wan_device_t* wandev)
+static int update(struct wan_device* wandev)
 {
 	volatile sdla_t* card;
 	unsigned long timeout;
@@ -818,7 +794,8 @@ static int update (wan_device_t* wandev)
  * Return:	0	o.k.
  *		< 0	failure (channel will not be created)
  */
-static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
+static int new_if(struct wan_device* wandev, struct net_device* dev,
+		  wanif_conf_t* conf)
 {
 	sdla_t* card = wandev->private;
 	fr_channel_t* chan;
@@ -892,26 +869,14 @@ static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
 			
 			chan->common.usedby = BRIDGE;
 			
-#if defined(LINUX_2_1) || defined(LINUX_2_4) 
 			printk(KERN_INFO "%s: Running in WANPIPE (BRIDGE) mode.\n", 
 					card->devname);
-#else
-			printk(KERN_INFO "%s: WANPIPE Bridging mode not supported in 2.0.X kernels.\n",
-					card->devname);
-			err = -EPROTONOSUPPORT;
-#endif
 		}else if( strcmp(conf->usedby, "BRIDGE_N") == 0 ){
 			
 			chan->common.usedby = BRIDGE_NODE;
 		
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 			printk(KERN_INFO "%s: Running in WANPIPE (BRIDGE_NODE) mode.\n", 
 					card->devname);
-#else
-			printk(KERN_INFO "%s: WANPIPE Bridging mode not supported in 2.0.X kernels.\n",
-					card->devname);
-			err = -EPROTONOSUPPORT;
-#endif
 		}
 
 		if (!err){
@@ -928,18 +893,9 @@ static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
 
         } else if(strcmp(conf->usedby, "API") == 0){
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4) 
                 chan->common.usedby = API;
                 printk(KERN_INFO "%s: Running in API mode.\n",
 			wandev->name);
-#else
-                printk(KERN_INFO "%s: The API Mode is not supported for"
-				 "kernels lower than 2.2.X !\n",
-					wandev->name);
-		printk(KERN_INFO "%s: Please upgrade to a 2.2.X kernel for the API support\n",
-					wandev->name);
-                err = -EINVAL;
-#endif
         }
 
 	if (err) {
@@ -986,16 +942,9 @@ static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
 	chan->mc = conf->mc;
 
 	if (conf->inarp == WANOPT_YES){
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 		printk(KERN_INFO "%s: Inverse ARP Support Enabled\n",card->devname);
 		chan->inarp = conf->inarp ? INARP_REQUEST : INARP_NONE;
 		chan->inarp_interval = conf->inarp_interval ? conf->inarp_interval : 10;
-#else
-		printk(KERN_INFO "%s: Warning, Inverse ARP Support not available for 2.0.X kernels!\n",
-				card->devname);
-		chan->inarp = INARP_NONE;
-		chan->inarp_interval = 10;
-#endif
 	}else{
 		printk(KERN_INFO "%s: Inverse ARP Support Disabled\n",card->devname);
 		chan->inarp = INARP_NONE;
@@ -1029,17 +978,7 @@ static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
 	chan->transmit_length = 0;
 
 	/* prepare network device data space for registration */
-#ifdef LINUX_2_4
 	strcpy(dev->name,chan->name);
-#else
-	dev->name = (char *)kmalloc(strlen(chan->name) + 2, GFP_KERNEL); 
-	if(dev->name == NULL)
-	{
-		kfree(chan);
-		return -ENOMEM;
-	}
-	sprintf(dev->name, "%s", chan->name);
-#endif
 	
 	dev->init = &if_init;
 	dev->priv = chan;
@@ -1048,9 +987,6 @@ static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
          * We need a poll routine for each network
          * interface. 
          */
-#ifndef LINUX_2_4
-	chan->fr_poll_task.next = NULL;
-#endif
 	chan->fr_poll_task.sync = 0;
 	chan->fr_poll_task.routine = (void *)(void *)fr_poll;
 	chan->fr_poll_task.data = dev;
@@ -1088,7 +1024,7 @@ static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
 /*============================================================================
  * Delete logical channel.
  */
-static int del_if (wan_device_t* wandev, netdevice_t* dev)
+static int del_if(struct wan_device* wandev, struct net_device* dev)
 {
 	fr_channel_t* chan = dev->priv;
 	unsigned long smp_flags=0;
@@ -1144,8 +1080,6 @@ static int wpf_exec (struct sdla* card, void* u_cmd, void* u_data)
 	int err, len;
 	fr_cmd_t cmd;
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
-
 	if(copy_from_user((void*)&cmd, u_cmd, sizeof(cmd)))
 		return -EFAULT;
 	
@@ -1175,44 +1109,6 @@ static int wpf_exec (struct sdla* card, void* u_cmd, void* u_data)
 	if (len && u_data && !copy_to_user(u_data, (void*)&mbox->data, len))
 		return -EFAULT;
 	return 0;
-
-#else
-        if (!u_cmd || verify_area(VERIFY_WRITE, u_cmd, sizeof(fr_cmd_t)))
-                return -EFAULT;
-
-        memcpy_fromfs((void*)&cmd, u_cmd, sizeof(cmd));
-
-        if (cmd.length) {
-
-                if (!u_data || verify_area(VERIFY_READ, u_data, cmd.length))
-                        return -EFAULT;
-        }
-
-        /* execute command */
-        do
-        {
-                memcpy(&mbox->cmd, &cmd, sizeof(cmd));
-
-                if (cmd.length)
-                        memcpy_fromfs((void*)&mbox->data, u_data, cmd.length);
-
-                if (sdla_exec(mbox))
-                        err = mbox->cmd.result;
-
-                else return -EIO;
-        } while (err && retry-- && fr_event(card, err, mbox));
-
-        /* return result */
-        memcpy_tofs(u_cmd, (void*)&mbox->cmd, sizeof(fr_cmd_t));
-        len = mbox->cmd.length;
-
-        if (len && u_data && !verify_area(VERIFY_WRITE, u_data, len))
-                memcpy_tofs(u_data, (void*)&mbox->data, len);
-
-        return 0;
-
-#endif
-
 }
 
 /****** Network Device Interface ********************************************/
@@ -1224,14 +1120,11 @@ static int wpf_exec (struct sdla* card, void* u_cmd, void* u_data)
  * interface registration.  Returning anything but zero will fail interface
  * registration.
  */
-static int if_init (netdevice_t* dev)
+static int if_init(struct net_device* dev)
 {
 	fr_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
-	wan_device_t* wandev = &card->wandev;
-#ifdef LINUX_2_0
-	int i;
-#endif
+	struct wan_device* wandev = &card->wandev;
 
 	/* Initialize device driver entry points */
 	dev->open		= &if_open;
@@ -1240,15 +1133,11 @@ static int if_init (netdevice_t* dev)
 	dev->rebuild_header	= &if_rebuild_hdr;
 	dev->hard_start_xmit	= &if_send;
 	dev->get_stats		= &if_stats;
-#ifdef LINUX_2_4
 	dev->tx_timeout		= &if_tx_timeout;
 	dev->watchdog_timeo	= TX_TIMEOUT;
-#endif
 	
 	if (chan->common.usedby == WANPIPE || chan->common.usedby == API){
-#ifdef LINUX_2_0
-		dev->family = AF_INET;
-#endif
+
 		/* Initialize media-specific parameters */
 		if (chan->true_if_encoding){
 			dev->type 		= ARPHRD_DLCI;  /* This breaks tcpdump */
@@ -1280,11 +1169,6 @@ static int if_init (netdevice_t* dev)
 		/* Set transmit buffer queue length */
         	dev->tx_queue_len = 100;
 
-			/* Initialize socket buffers */
-#if !defined(LINUX_2_1) && !defined(LINUX_2_4)
-	        for (i = 0; i < DEV_NUMBUFFS; ++i)
-			skb_queue_head_init(&dev->buffs[i]);
-#endif
 	}else{
 
 		/* Setup the interface for Bridging */
@@ -1303,6 +1187,7 @@ static int if_init (netdevice_t* dev)
 	dev->base_addr	= wandev->ioport;
 	dev->mem_start	= wandev->maddr;
 	dev->mem_end	= wandev->maddr + wandev->msize - 1;
+	SET_MODULE_OWNER(dev);
 
 	return 0;
 }
@@ -1314,23 +1199,19 @@ static int if_init (netdevice_t* dev)
  *
  * Return 0 if O.k. or errno.
  */
-static int if_open (netdevice_t* dev)
+static int if_open(struct net_device* dev)
 {
 	fr_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
 	int err = 0;
 	struct timeval tv;
 
-	if (is_dev_running(dev))
+	if (netif_running(dev))
 		return -EBUSY;
 	
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 	/* Initialize the task queue */
 	chan->tq_working=0;
 
-#ifndef LINUX_2_4
-	chan->common.wanpipe_task.next = NULL;
-#endif
 	chan->common.wanpipe_task.sync = 0;
 	chan->common.wanpipe_task.routine = (void *)(void *)fr_bh;
 	chan->common.wanpipe_task.data = dev;
@@ -1339,15 +1220,8 @@ static int if_open (netdevice_t* dev)
 	chan->bh_head = kmalloc((sizeof(bh_data_t)*MAX_BH_BUFF),GFP_ATOMIC);
 	memset(chan->bh_head,0,(sizeof(bh_data_t)*MAX_BH_BUFF));
 	atomic_set(&chan->bh_buff_used, 0);
-#endif
 
-#ifdef LINUX_2_4
 	netif_start_queue(dev);
-#else	
-	dev->interrupt = 0;
-	dev->tbusy = 0;
-	dev->start = 1;
-#endif
 
 	wanpipe_open(card);
 	do_gettimeofday( &tv );
@@ -1367,7 +1241,7 @@ static int if_open (netdevice_t* dev)
  * o if this is the last open, then disable communications and interrupts.
  * o reset flags.
  */
-static int if_close (netdevice_t* dev)
+static int if_close(struct net_device* dev)
 {
 	fr_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
@@ -1376,10 +1250,7 @@ static int if_close (netdevice_t* dev)
 		chan->inarp = INARP_REQUEST;
 	}
 
-	stop_net_queue(dev);
-#ifndef LINUX_2_4
-	dev->start=0;
-#endif
+	netif_stop_queue(dev);
 	wanpipe_close(card);
 
 	return 0;
@@ -1391,18 +1262,9 @@ static int if_close (netdevice_t* dev)
  * Return:	1	physical address resolved.
  *		0	physical address not resolved
  */
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 static int if_rebuild_hdr (struct sk_buff* skb)
 {
-#else
-static int if_rebuild_hdr (void* hdr, netdevice_t* dev, unsigned long raddr,
-                           struct sk_buff* skb)
-{
-#endif
-
-#if defined(LINUX_2_1) || defined(LINUX_2_4) 
-	netdevice_t *dev = skb->dev;
-#endif
+	struct net_device *dev = skb->dev;
 	fr_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
 
@@ -1411,11 +1273,10 @@ static int if_rebuild_hdr (void* hdr, netdevice_t* dev, unsigned long raddr,
 	return 1;
 }
 
-#ifdef LINUX_2_4
 /*============================================================================
  * Handle transmit timeout event from netif watchdog
  */
-static void if_tx_timeout (netdevice_t *dev)
+static void if_tx_timeout(struct net_device *dev)
 {
     	fr_channel_t* chan = dev->priv;
 	sdla_t *card = chan->card;
@@ -1435,7 +1296,7 @@ static void if_tx_timeout (netdevice_t *dev)
 	netif_wake_queue (dev);
 
 }
-#endif
+
 
 /*============================================================================
  * Send a packet on a network interface.
@@ -1454,26 +1315,25 @@ static void if_tx_timeout (netdevice_t *dev)
  * 1. This routine is called either by the protocol stack or by the "net
  *    bottom half" (with interrupts enabled).
  * 
- * 2. Using the start_net_queue() and stop_net_queue() MACROS
+ * 2. Using netif_start_queue() and netif_stop_queue()
  *    will inhibit further transmit requests from the protocol stack 
  *    and can be used for flow control with protocol layer.
  */
-static int if_send (struct sk_buff* skb, netdevice_t* dev)
+static int if_send(struct sk_buff* skb, struct net_device* dev)
 {
     	fr_channel_t* chan = dev->priv;
     	sdla_t* card = chan->card;
         int err;
     	unsigned char *sendpacket;
     	fr508_flags_t* adptr_flags = card->flags;
-	int udp_type, delay_tx_queued=0;
+	int udp_type;
+	long delay_tx_queued = 0;
 	unsigned long smp_flags=0;
 	unsigned char attr = 0;
 
 	chan->drvstats_if_send.if_send_entry++;
 
-#ifdef LINUX_2_4
 	netif_stop_queue(dev);
-#endif
 	
         if (skb == NULL) {             
 		/* if we get here, some higher layer thinks we've missed an
@@ -1483,7 +1343,7 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 			card->devname, dev->name);
 		chan->drvstats_if_send.if_send_skb_null ++;
 
-		wake_net_dev(dev);
+		netif_wake_queue(dev);
 		return 0;
 	}
 
@@ -1493,8 +1353,8 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 		printk(KERN_INFO "%s: Critical in if_send(): Peripheral running!\n",
 				card->devname);
 		
-		wan_dev_kfree_skb(skb,FREE_WRITE);
-		start_net_queue(dev);
+		dev_kfree_skb_any(skb);
+		netif_start_queue(dev);
 		return 0;
 	}
 
@@ -1505,37 +1365,13 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 	*/
 	set_bit(SEND_TXIRQ_CRIT, (void*)&card->wandev.critical);
         if(chan->transmit_length) {
-		stop_net_queue(dev);
+		netif_stop_queue(dev);
 		chan->tick_counter = jiffies;
  		clear_bit(SEND_TXIRQ_CRIT, (void*)&card->wandev.critical);
 		return 1;
 	}
        	clear_bit(SEND_TXIRQ_CRIT, (void*)&card->wandev.critical);
  
-#ifndef LINUX_2_4
-    	if (dev->tbusy) {
-
-		/* If our device stays busy for at least 5 seconds then we will
-                 * kick start the device by making dev->tbusy = 0.  We expect
-                 * that our device never stays busy more than 5 seconds. So this                 
-		 * is only used as a last resort.
-                 */
-		
-		chan->drvstats_if_send.if_send_tbusy++;
-		++chan->ifstats.collisions;
-
-		if ((jiffies - chan->tick_counter) < (5 * HZ)) {
-			return 1;
-		}
-
-		printk(KERN_INFO "%s: Transmit timed out on %s\n", 
-				card->devname, chan->name);
-		chan->drvstats_if_send.if_send_tbusy_timeout ++;
-		dev->tbusy = 0;
-    	}
-#endif
-
-	
 	/* Move the if_header() code to here. By inserting frame
 	 * relay header in if_header() we would break the
 	 * tcpdump and other packet sniffers */
@@ -1544,8 +1380,8 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 		++chan->ifstats.tx_dropped;
 		++card->wandev.stats.tx_dropped;
 		
-		wan_dev_kfree_skb(skb,FREE_WRITE);
-		start_net_queue(dev);	
+		dev_kfree_skb_any(skb);
+		netif_start_queue(dev);	
 		return 0;
 	}
 
@@ -1562,7 +1398,7 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 					if_send_PIPE_request ++;
 			}
                 }
-		start_net_queue(dev);
+		netif_start_queue(dev);
 		return 0;
 	}
 
@@ -1574,8 +1410,8 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
                 if(chk_bcast_mcast_addr(card, dev, skb)){
             		++chan->ifstats.tx_dropped;
 			++card->wandev.stats.tx_dropped;
-                	wan_dev_kfree_skb(skb, FREE_WRITE);
-			start_net_queue(dev);
+                	dev_kfree_skb_any(skb);
+			netif_start_queue(dev);
 			return 0;
 		}
 	}
@@ -1696,26 +1532,22 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 				++chan->ifstats.tx_packets;
 				++card->wandev.stats.tx_packets;
 				
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
                                 chan->ifstats.tx_bytes += skb->len;
                                 card->wandev.stats.tx_bytes += skb->len;
-#endif
-#ifdef LINUX_2_4
 				dev->trans_start = jiffies;
-#endif
 			}
 		}
 	}
 
 if_send_start_and_exit:
 
-	start_net_queue(dev);
+	netif_start_queue(dev);
 	
 	/* If we queued the packet for transmission, we must not
 	 * deallocate it. The packet is unlinked from the IP stack
 	 * not copied. Therefore, we must keep the original packet */
 	if (!test_bit(1,&delay_tx_queued)) {
-                wan_dev_kfree_skb(skb, FREE_WRITE);
+                dev_kfree_skb_any(skb);
 	}else{
 		adptr_flags->imask |= FR_INTR_TXRDY;
 		card->u.f.tx_interrupts_pending ++;
@@ -1731,10 +1563,11 @@ if_send_start_and_exit:
 
 
 /*============================================================================
- * Setup so that a frame can be transmitted on the occurence of a transmit
+ * Setup so that a frame can be transmitted on the occurrence of a transmit
  * interrupt.
  */
-static int setup_for_delayed_transmit (netdevice_t* dev, struct sk_buff *skb)
+static int setup_for_delayed_transmit(struct net_device* dev,
+				      struct sk_buff *skb)
 {
         fr_channel_t* chan = dev->priv;
         sdla_t* card = chan->card;
@@ -1786,21 +1619,18 @@ static int setup_for_delayed_transmit (netdevice_t* dev, struct sk_buff *skb)
  * Return 0 if not broadcast/multicast address, otherwise return 1.
  */
 
-static int chk_bcast_mcast_addr(sdla_t *card, netdevice_t* dev,
+static int chk_bcast_mcast_addr(sdla_t *card, struct net_device* dev,
                                 struct sk_buff *skb)
 {
         u32 src_ip_addr;
         u32 broadcast_ip_addr = 0;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
         struct in_device *in_dev;
-#endif
         fr_channel_t* chan = dev->priv;
  
         /* read the IP source address from the outgoing packet */
         src_ip_addr = *(u32 *)(skb->data + 14);
 
         /* read the IP broadcast address for the device */
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
         in_dev = dev->ip_ptr;
         if(in_dev != NULL) {
                 struct in_ifaddr *ifa= in_dev->ifa_list;
@@ -1809,9 +1639,6 @@ static int chk_bcast_mcast_addr(sdla_t *card, netdevice_t* dev,
                 else
                         return 0;
         }
-#else
-        broadcast_ip_addr = dev->pa_brdaddr;
-#endif
 
         /* check if the IP Source Address is a Broadcast address */
         if((dev->flags & IFF_BROADCAST) && (src_ip_addr == broadcast_ip_addr)) {
@@ -2004,11 +1831,7 @@ static void switch_net_numbers(unsigned char *sendpacket, unsigned long network_
  * Get ethernet-style interface statistics.
  * Return a pointer to struct enet_statistics.
  */
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
-static struct net_device_stats *if_stats(netdevice_t *dev)
-#else
-static struct enet_statistics* if_stats (netdevice_t* dev)
-#endif
+static struct net_device_stats *if_stats(struct net_device *dev)
 {
 	fr_channel_t* chan = dev->priv;
 	
@@ -2076,7 +1899,7 @@ static void fr_isr (sdla_t* card)
 			++card->statistics.isr_intr_test;
 	    		break;	
 
-                case FR_INTR_DLC: /* Event interrupt occured */
+                case FR_INTR_DLC: /* Event interrupt occurred */
 			mbox->cmd.command = FR_READ_STATUS;
 			mbox->cmd.length = 0;
 			err = sdla_exec(mbox) ? mbox->cmd.result : CMD_TIMEOUT;
@@ -2134,7 +1957,7 @@ static void rx_intr (sdla_t* card)
 	fr_channel_t* chan;
 	char *ptr = &flags->iflag;
 	struct sk_buff* skb;
-	netdevice_t* dev;
+	struct net_device* dev;
 	void* buf;
 	unsigned dlci, len, offs, len_incl_hdr;
 	int i, udp_type;	
@@ -2198,7 +2021,7 @@ static void rx_intr (sdla_t* card)
 
 	skb = dev_alloc_skb(len); 
 
-	if (!is_dev_running(dev) || (skb == NULL)){
+	if (!netif_running(dev) || (skb == NULL)){
 
 		++chan->ifstats.rx_dropped;
 	
@@ -2211,11 +2034,11 @@ static void rx_intr (sdla_t* card)
 			chan->drvstats_rx_intr.rx_intr_no_socket ++;
 		} 
 
-		if (!is_dev_running(dev)){
+		if (!netif_running(dev)){
 			chan->drvstats_rx_intr.
 				rx_intr_dev_not_started ++;
 			if (skb){
-				wan_dev_kfree_skb(skb, FREE_READ);
+				dev_kfree_skb_any(skb);
 			}
 		}
 		goto rx_done;
@@ -2257,7 +2080,6 @@ static void rx_intr (sdla_t* card)
 			}
 		}
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 	}else if (chan->common.usedby == API) {
 
 		/* We are in API mode. 
@@ -2286,7 +2108,6 @@ static void rx_intr (sdla_t* card)
 		bh_enqueue(dev, skb);
 
 		trigger_fr_bh(chan);
-	#endif
 
 	}else if (handle_IPXWAN(skb->data,chan->name,chan->enable_IPX, chan->network_number)){
 
@@ -2294,7 +2115,7 @@ static void rx_intr (sdla_t* card)
 		//if (chan->enable_IPX) {
 		//	fr_send(card, dlci, 0, skb->len,skb->data);
 		//}
-		wan_dev_kfree_skb(skb, FREE_READ);
+		dev_kfree_skb_any(skb);
 
 	} else if (is_arp(skb->data)) {
 
@@ -2309,7 +2130,7 @@ static void rx_intr (sdla_t* card)
 					card->devname);
 			}
 		}
-		wan_dev_kfree_skb(skb, FREE_READ);
+		dev_kfree_skb_any(skb);
 
 	} else if (skb->data[0] != 0x03) {
 
@@ -2317,7 +2138,7 @@ static void rx_intr (sdla_t* card)
 			printk(KERN_INFO "%s: Non IETF packet discarded.\n", 
 				card->devname);
 		}
-		wan_dev_kfree_skb(skb, FREE_READ);
+		dev_kfree_skb_any(skb);
 
 	} else {
 
@@ -2346,7 +2167,7 @@ static void rx_intr (sdla_t* card)
 			if (!wanrouter_type_trans(skb, dev)) {
 				
 				/* can't decapsulate packet */
-				wan_dev_kfree_skb(skb, FREE_READ);
+				dev_kfree_skb_any(skb);
 
 				++chan->drvstats_rx_intr.rx_intr_bfr_not_passed_to_stack;
 				++chan->ifstats.rx_errors;
@@ -2358,15 +2179,14 @@ static void rx_intr (sdla_t* card)
 		
 
 		/* Send a packed up the IP stack */
+		skb->dev->last_rx = jiffies;
 		netif_rx(skb);
 		++chan->drvstats_rx_intr.rx_intr_bfr_passed_to_stack;
 		++chan->ifstats.rx_packets;
 		++card->wandev.stats.rx_packets;
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 		chan->ifstats.rx_bytes += len_incl_hdr;
 		card->wandev.stats.rx_bytes += len_incl_hdr;
-#endif
 	}
 
 rx_done:
@@ -2408,7 +2228,7 @@ static void tx_intr(sdla_t *card)
 {
         fr508_flags_t* flags = card->flags;
         fr_tx_buf_ctl_t* bctl;
-        netdevice_t* dev;
+        struct net_device* dev;
         fr_channel_t* chan;
 
         if(card->hw.type == SDLA_S514){
@@ -2458,36 +2278,28 @@ static void tx_intr(sdla_t *card)
 
 		++chan->ifstats.tx_packets;
 		++card->wandev.stats.tx_packets;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 		chan->ifstats.tx_bytes += chan->transmit_length;
 		card->wandev.stats.tx_bytes += chan->transmit_length;
-#endif
 
 		/* We must free an sk buffer, which we used
 		 * for delayed transmission; Otherwise, the sock
 		 * will run out of memory */
-                wan_dev_kfree_skb(chan->delay_skb, FREE_WRITE);
+                dev_kfree_skb_any(chan->delay_skb);
 
 		chan->delay_skb = NULL;				
         	chan->transmit_length = 0;
 
-#ifdef LINUX_2_4
 		dev->trans_start = jiffies;
-#endif
 
-#ifdef LINUX_2_0
-		wake_net_dev(dev);
-#else
-		if (is_queue_stopped(dev)){
+		if (netif_queue_stopped(dev)){
 			/* If using API, than wakeup socket BH handler */
 			if (chan->common.usedby == API){
-				start_net_queue(dev);
+				netif_start_queue(dev);
 				wakeup_sk_bh(dev);
 			}else{
-				wake_net_dev(dev);
+				netif_wake_queue(dev);
 			}
 		}
-#endif
 	}
 
 end_of_tx_intr:
@@ -2545,9 +2357,10 @@ static void timer_intr(sdla_t *card)
 	/* Update the channel state call.  This is call is
          * triggered by if_send() function */
 	if (card->u.f.timer_int_enabled & TMR_INT_ENABLED_UPDATE_STATE){
-		netdevice_t *dev;
+		struct net_device *dev;
 		if (card->wandev.state == WAN_CONNECTED){
-			for (dev=card->wandev.dev; dev; dev = *((netdevice_t **)dev->priv)){
+			for (dev = card->wandev.dev; dev;
+			     dev = *((struct net_device **)dev->priv)){
 				fr_channel_t *chan = dev->priv;	
 				if (chan->common.state != WAN_CONNECTED){
 					update_chan_state(dev);
@@ -2573,7 +2386,7 @@ static void timer_intr(sdla_t *card)
 	/* Transmit ARP packets */
 	if (card->u.f.timer_int_enabled & TMR_INT_ENABLED_ARP){
 		int i=0;
-		netdevice_t *dev;
+		struct net_device *dev;
 
 		if (card->u.f.arp_dev == NULL)
 			card->u.f.arp_dev = card->wandev.dev;
@@ -2751,7 +2564,7 @@ static int handle_IPXWAN(unsigned char *sendpacket,
 		return 1;
 	}
 
-	/* If we get here, its an IPX-data packet so it'll get passed up the 
+	/* If we get here, it's an IPX-data packet so it'll get passed up the 
 	 * stack.
 	 * switch the network numbers 
 	 */
@@ -2777,12 +2590,10 @@ static int handle_IPXWAN(unsigned char *sendpacket,
  *	This function is called by fr_poll() polling funtion.
  */
 
-static void process_route (netdevice_t *dev)
+static void process_route(struct net_device *dev)
 {
 	fr_channel_t *chan = dev->priv;
 	sdla_t *card = chan->card;
-
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 
 	struct ifreq if_info;
 	struct sockaddr_in *if_data;
@@ -2809,16 +2620,15 @@ static void process_route (netdevice_t *dev)
 		set_fs(fs);           /* restore old block */
 
 		if (err) {
-
 			printk(KERN_INFO 
 				"%s: Route Add failed.  Error: %d\n", 
 					card->devname,err);
-			printk(KERN_INFO "%s: Address: %s\n",
-				chan->name, in_ntoa(chan->ip_remote));
+			printk(KERN_INFO "%s: Address: %u.%u.%u.%u\n",
+				chan->name, NIPQUAD(chan->ip_remote));
 
 		}else {
-			printk(KERN_INFO "%s: Route Added Successfully: %s\n",
-				card->devname,in_ntoa(chan->ip_remote));
+			printk(KERN_INFO "%s: Route Added Successfully: %u.%u.%u.%u\n",
+				card->devname,NIPQUAD(chan->ip_remote));
 			chan->route_flag = ROUTE_ADDED;
 		}
 		break;
@@ -2841,83 +2651,20 @@ static void process_route (netdevice_t *dev)
 		set_fs(fs);    
 		
 		if (err) {
-
 			printk(KERN_INFO 
 				"%s: Deleting of route failed.  Error: %d\n", 
 					card->devname,err);
-			printk(KERN_INFO "%s: Address: %s\n",
-				dev->name,in_ntoa(chan->ip_remote) );
+			printk(KERN_INFO "%s: Address: %u.%u.%u.%u\n",
+				dev->name,NIPQUAD(chan->ip_remote) );
 
 		} else {
-
-			printk(KERN_INFO "%s: Route Removed Sucessfuly: %s\n", 
-				card->devname,in_ntoa(ip_tmp));
+			printk(KERN_INFO "%s: Route Removed Sucessfuly: %u.%u.%u.%u\n", 
+				card->devname,NIPQUAD(ip_tmp));
 			chan->route_flag = NO_ROUTE;
 		}
 		break;
 
 	} /* Case Statement */
-
-#else
-        /* Dynamic Route adding/removing */
-	struct rtentry route;
-        int err = 0;
-        unsigned long fs = get_fs();
-
-	memset(&route, 0, sizeof(route));
-	route.rt_dev   = dev->name;
-	route.rt_flags = 0;
-
-	((struct sockaddr_in *) &(route.rt_dst)) ->
-					sin_addr.s_addr=dev->pa_dstaddr;
-	((struct sockaddr_in *) &(route.rt_dst)) ->
-						sin_family = AF_INET;
-	((struct sockaddr_in *) &(route.rt_genmask)) ->
-				sin_addr.s_addr = 0xFFFFFFFF;
-	((struct sockaddr_in *) &(route.rt_genmask)) ->
-						sin_family = AF_INET;
-	switch(chan->route_flag) {
-
-	case ADD_ROUTE:
-
-		set_fs(get_ds());     /* get user space block */
-		err = ip_rt_new(&route);
-		set_fs(fs);           /* restore old block */
-
-		if (err) {
-			printk(KERN_INFO "%s: Adding of route failed.  Error: %d\n", 
-						card->devname,err);
-			printk(KERN_INFO "%s: Address: %s\n",
-				chan->name, in_ntoa(dev->pa_dstaddr) );
-			}
-		else {
-			chan->route_flag = ROUTE_ADDED;
-		}
-		break;
-
-	case REMOVE_ROUTE:
-
-		set_fs(get_ds());     /* get user space block */
-		err = ip_rt_kill(&route);
-		set_fs(fs);           /* restore old block */
-
-		if (err) {
-
-		     printk(KERN_INFO "%s: Deleting of route failed.  Error: %d\n", 
-				card->devname,err);
-		     printk(KERN_INFO "%s: Address: %s\n",
-				dev->name,in_ntoa(dev->pa_dstaddr) );
-		} else {
-
-		     printk(KERN_INFO "%s: Removed route.\n",
-			((fr_channel_t*)dev->priv)->name);
-		     chan->route_flag = NO_ROUTE;
-
-		}
-		break;
-	}
-
-#endif	
 
 }
 
@@ -3244,7 +2991,7 @@ static int fr_issue_isf (sdla_t* card, int isf)
 
 static unsigned int fr_send_hdr (sdla_t*card, int dlci, unsigned int offset)
 {
-	netdevice_t *dev = find_channel(card,dlci);	
+	struct net_device *dev = find_channel(card,dlci);	
 	fr_channel_t *chan;
 
 	if (!dev || !(chan=dev->priv))
@@ -3347,12 +3094,12 @@ static int fr_event (sdla_t *card, int event, fr_mbox_t* mbox)
 		case FRRES_MODEM_FAILURE:
 			return fr_modem_failure(card, mbox);
 
-		case FRRES_CHANNEL_DOWN:
-			{
-			netdevice_t *dev;
+		case FRRES_CHANNEL_DOWN: {
+			struct net_device *dev;
 
 			/* Remove all routes from associated DLCI's */
-			for (dev = card->wandev.dev; dev; dev = *((netdevice_t **)dev->priv)) {
+			for (dev = card->wandev.dev; dev;
+			     dev = *((struct net_device **)dev->priv)) {
 				fr_channel_t *chan = dev->priv;
 				if (chan->route_flag == ROUTE_ADDED) {
 					chan->route_flag = REMOVE_ROUTE;
@@ -3373,13 +3120,13 @@ static int fr_event (sdla_t *card, int event, fr_mbox_t* mbox)
 			return 1;
 			}
 
-		case FRRES_CHANNEL_UP:
-			{
-			netdevice_t *dev;
+		case FRRES_CHANNEL_UP: {
+			struct net_device *dev;
 
 			/* FIXME: Only startup devices that are on the list */
 			
-			for (dev = card->wandev.dev; dev; dev = *((netdevice_t **)dev->priv)) {
+			for (dev = card->wandev.dev; dev;
+			     dev = *((struct net_device **)dev->priv)) {
 				
 				set_chan_state(dev,WAN_CONNECTED);
 			}
@@ -3453,13 +3200,13 @@ static int fr_dlci_change (sdla_t *card, fr_mbox_t* mbox)
 	dlci_status_t* status = (void*)mbox->data;
 	int cnt = mbox->cmd.length / sizeof(dlci_status_t);
 	fr_channel_t *chan;
-	netdevice_t* dev2;
+	struct net_device* dev2;
 	
 
 	for (; cnt; --cnt, ++status) {
 
 		unsigned short dlci= status->dlci;
-		netdevice_t* dev = find_channel(card, dlci);
+		struct net_device* dev = find_channel(card, dlci);
 		
 		if (dev == NULL){
 			printk(KERN_INFO 
@@ -3476,7 +3223,7 @@ static int fr_dlci_change (sdla_t *card, fr_mbox_t* mbox)
 					"%s: DLCI %u is inactive!\n",
 					card->devname, dlci);
 
-				if (dev && is_dev_running(dev))
+				if (dev && netif_running(dev))
 					set_chan_state(dev, WAN_DISCONNECTED);
 			}
 	
@@ -3486,7 +3233,7 @@ static int fr_dlci_change (sdla_t *card, fr_mbox_t* mbox)
 					"%s: DLCI %u has been deleted!\n",
 					card->devname, dlci);
 
-				if (dev && is_dev_running(dev)){
+				if (dev && netif_running(dev)){
 
 					fr_channel_t *chan = dev->priv;
 
@@ -3518,7 +3265,8 @@ static int fr_dlci_change (sdla_t *card, fr_mbox_t* mbox)
 		}
 	}
 	
-	for (dev2 =card->wandev.dev; dev2; dev2 = *((netdevice_t **)dev2->priv)){
+	for (dev2 = card->wandev.dev; dev2;
+	     dev2 = *((struct net_device **)dev2->priv)){
 		
 		chan = dev2->priv;
 	
@@ -3574,7 +3322,7 @@ static int fr_init_dlci (sdla_t *card, fr_channel_t *chan)
 /*============================================================================
  * Update channel state. 
  */
-static int update_chan_state (netdevice_t* dev)
+static int update_chan_state(struct net_device* dev)
 {
 	fr_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
@@ -3620,7 +3368,7 @@ static int update_chan_state (netdevice_t* dev)
 /*============================================================================
  * Set channel state.
  */
-static void set_chan_state (netdevice_t* dev, int state)
+static void set_chan_state(struct net_device* dev, int state)
 {
 	fr_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
@@ -3673,7 +3421,7 @@ static void set_chan_state (netdevice_t* dev, int state)
  * NOTE: del_if() functions updates this array, it uses
  *       the spin locks to avoid corruption.
  */
-static netdevice_t* find_channel (sdla_t* card, unsigned dlci)
+static struct net_device* find_channel(sdla_t* card, unsigned dlci)
 {
 	if(dlci > HIGHEST_VALID_DLCI)
 		return NULL;
@@ -3730,7 +3478,7 @@ static int store_udp_mgmt_pkt(int udp_type, char udp_pkt_src, sdla_t* card,
 {
         int udp_pkt_stored = 0;
 	
-	netdevice_t *dev=find_channel(card,dlci);
+	struct net_device *dev = find_channel(card, dlci);
 	fr_channel_t *chan;
 	
 	if (!dev || !(chan=dev->priv))
@@ -3751,9 +3499,9 @@ static int store_udp_mgmt_pkt(int udp_type, char udp_pkt_src, sdla_t* card,
 	}
 
         if(udp_pkt_src == UDP_PKT_FRM_STACK){
-                wan_dev_kfree_skb(skb, FREE_WRITE);
+                dev_kfree_skb_any(skb);
 	}else{
-                wan_dev_kfree_skb(skb, FREE_READ);
+                dev_kfree_skb_any(skb);
 	}
 		
         return(udp_pkt_stored);
@@ -3776,7 +3524,7 @@ static int process_udp_mgmt_pkt(sdla_t* card)
 	int err;
 	struct timeval tv;
 	int udp_mgmt_req_valid = 1;
-        netdevice_t* dev;
+        struct net_device* dev;
         fr_channel_t* chan;
         fr_udp_pkt_t *fr_udp_pkt;
 	unsigned short num_trc_els;
@@ -4177,11 +3925,9 @@ udp_mgmt_dflt:
  * Send Inverse ARP Request
  */
 
-int send_inarp_request(sdla_t *card, netdevice_t *dev)
+int send_inarp_request(sdla_t *card, struct net_device *dev)
 {
 	int err=0;
-
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 
 	arphdr_1490_t *ArpPacket;
 	arphdr_fr_t *arphdr;
@@ -4233,47 +3979,6 @@ int send_inarp_request(sdla_t *card, netdevice_t *dev)
 		return 1;
 	}
 
-#else
-        arphdr_1490_t *ArpPacket;
-        arphdr_fr_t *arphdr;
-        fr_channel_t *chan = dev->priv;
-
-        ArpPacket = kmalloc(sizeof(arphdr_1490_t) + sizeof(arphdr_fr_t), GFP_ATOMIC);
-        /* SNAP Header indicating ARP */
-        ArpPacket->control      = 0x03;
-        ArpPacket->pad          = 0x00;
-        ArpPacket->NLPID        = 0x80;
-        ArpPacket->OUI[0]       = 0;
-        ArpPacket->OUI[1]       = 0;
-        ArpPacket->OUI[2]       = 0;
-        ArpPacket->PID          = 0x0608;
-
-        arphdr = (arphdr_fr_t *)(ArpPacket + 1); // Go to ARP Packet
-       /* InARP request */
-        arphdr->ar_hrd = 0x0F00;        /* Frame Relay HW type */
-        arphdr->ar_pro = 0x0008;        /* IP Protocol         */
-        arphdr->ar_hln = 2;             /* HW addr length      */
-        arphdr->ar_pln = 4;             /* IP addr length      */
-        arphdr->ar_op = htons(0x08);    /* InARP Request       */
-        arphdr->ar_sha = 0;             /* src HW DLCI - Doesn't matter */
-        arphdr->ar_sip = dev->pa_addr;  /* Local Address       */
-        arphdr->ar_tha = 0;             /* dst HW DLCI - Doesn't matter */
-        arphdr->ar_tip = 0;             /* Remote Address -- what we want */
-
-        printk(KERN_INFO "%s: Sending InARP request on DLCI %d.\n", card->devname, chan->dlci);
-        err = fr_send(card, chan->dlci, 0,
-                   sizeof(arphdr_1490_t) + sizeof(arphdr_fr_t),
-                   (void *)ArpPacket);
-	
-	if (!err){
-         	printk(KERN_INFO "\n%s: Sending InARP request on DLCI %d.\n",
-                        card->devname, chan->dlci);
-                clear_bit(ARP_CRIT,&card->wandev.critical);
-        }
-
-        kfree(ArpPacket);
-#endif
-
 	return 0;
 }
 	
@@ -4297,19 +4002,14 @@ int is_arp(void *buf)
  * Process ARP Packet Type
  */
 
-int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, netdevice_t* dev)
+int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, struct net_device* dev)
 {
 
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 	arphdr_fr_t *arphdr = (arphdr_fr_t *)(ArpPacket + 1); /* Skip header */
 	fr_rx_buf_ctl_t* frbuf = card->rxmb;
 	struct in_device *in_dev;
 	fr_channel_t *chan = dev->priv;		
-#else
-  	arphdr_fr_t *arphdr = (arphdr_fr_t *)(ArpPacket + 1); /* Skip header */
-        fr_rx_buf_ctl_t* frbuf = card->rxmb;
-#endif
 	
 	/* Before we transmit ARP packet, we must check 
 	 * to see that we are not currently transmitting a 
@@ -4324,8 +4024,6 @@ int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, netdevice_t* dev)
 		return 0;
 	}
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
-
 	in_dev = dev->ip_ptr;
 
 	/* Check that IP addresses exist for our network address */
@@ -4337,8 +4035,8 @@ int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, netdevice_t* dev)
 	case 0x08:  // Inverse ARP request  -- Send Reply, add route.
 			
 		/* Check for valid Address */
-		printk(KERN_INFO "%s: Recvd PtP addr -InArp Req: %s\n", 
-			card->devname, in_ntoa(arphdr->ar_sip));
+		printk(KERN_INFO "%s: Recvd PtP addr -InArp Req: %u.%u.%u.%u\n", 
+			card->devname, NIPQUAD(arphdr->ar_sip));
 
 
 		/* Check that the network address is the same as ours, only
@@ -4348,15 +4046,14 @@ int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, netdevice_t* dev)
 		if (in_dev->ifa_list->ifa_mask != 0xFFFFFFFF && 
 		    (in_dev->ifa_list->ifa_mask & arphdr->ar_sip) != 
 		    (in_dev->ifa_list->ifa_mask & in_dev->ifa_list->ifa_local)){
-
 			printk(KERN_INFO 
-				"%s: Invalid PtP address. %s  InARP ignored.\n", 
-					card->devname,in_ntoa(arphdr->ar_sip));
+				"%s: Invalid PtP address. %u.%u.%u.%u  InARP ignored.\n", 
+					card->devname,NIPQUAD(arphdr->ar_sip));
 
-			printk(KERN_INFO "%s: mask %s\n", 
-				card->devname, in_ntoa(in_dev->ifa_list->ifa_mask));
-				printk(KERN_INFO "%s: local %s\n", 
-				card->devname,in_ntoa(in_dev->ifa_list->ifa_local));
+			printk(KERN_INFO "%s: mask %u.%u.%u.%u\n", 
+				card->devname, NIPQUAD(in_dev->ifa_list->ifa_mask));
+				printk(KERN_INFO "%s: local %u.%u.%u.%u\n", 
+				card->devname,NIPQUAD(in_dev->ifa_list->ifa_local));
 			return -1;
 		}
 
@@ -4401,8 +4098,8 @@ int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, netdevice_t* dev)
 	case 0x09:  // Inverse ARP reply
 
 		/* Check for valid Address */
-		printk(KERN_INFO "%s: Recvd PtP addr %s -InArp Reply\n", 
-				card->devname, in_ntoa(arphdr->ar_sip));
+		printk(KERN_INFO "%s: Recvd PtP addr %u.%u.%u.%u -InArp Reply\n", 
+				card->devname, NIPQUAD(arphdr->ar_sip));
 
 
 		/* Compare network addresses, only if network mask
@@ -4443,87 +4140,6 @@ int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, netdevice_t* dev)
 	}
 
 	return 0;	
-#else
-
-        switch (ntohs(arphdr->ar_op)) {
-
-                case 0x08:  // Inverse ARP request  -- Send Reply, add route.
-
-                        /* Check for valid Address */
-                        printk(KERN_INFO "%s: Recvd PtP addr %s -InArp Req\n", 
-				((fr_channel_t *)dev->priv)->name, in_ntoa(arphdr->ar_sip));
-
-
-			if (dev->pa_mask != 0xFFFFFFFF){
-
-	                        if ((dev->pa_mask & arphdr->ar_sip) != (dev->pa_mask & dev->pa_addr)) {
-        	                        printk(KERN_INFO "%s: Invalid PtP address.  InARP ignored.\n", 
-							card->devname);
-                        	        return -1;
-                        	}
-			}
-
-                        if (dev->pa_addr == arphdr->ar_sip) {
-                                printk(KERN_INFO "%s: Local addr = PtP addr.  InARP ignored.\n", 
-						card->devname);
-                                return -1;
-                        }
-
-                        arphdr->ar_op = htons(0x09);    /* InARP Reply */
-
-                        /* Set addresses */
-                        arphdr->ar_tip = arphdr->ar_sip;
-                        arphdr->ar_sip = dev->pa_addr;
-
-                        fr_send(card, frbuf->dlci, 0, frbuf->length, (void *)ArpPacket);
-
-			clear_bit(ARP_CRIT,&card->wandev.critical);
-
-                        /* Modify Point-to-Point Address */
-                        dev->pa_dstaddr = arphdr->ar_tip;
-
-                        /* Add Route Flag */
-                        /* The route will be added in the polling routine so
-                           that it is not interrupt context. */
-                        ((fr_channel_t *) dev->priv)->route_flag = ADD_ROUTE;
-			trigger_fr_poll(dev);
-
-                        break;
-                case 0x09:  // Inverse ARP reply
-
-                        /* Check for valid Address */
-                        printk(KERN_INFO "%s: Recvd PtP addr %s -InArp Reply\n", 
-				((fr_channel_t *)dev->priv)->name, in_ntoa(arphdr->ar_sip));
-
-                        if ((dev->pa_mask & arphdr->ar_sip) != (dev->pa_mask & dev->pa_addr)) {
-                                printk(KERN_INFO "%s: Invalid PtP address.  InARP ignored.\n", 
-					card->devname);
-                                return -1;
-                        }
-
-                        if (dev->pa_addr == arphdr->ar_sip) {
-                                printk(KERN_INFO "%s: Local addr = PtP addr.  InARP ignored.\n", 
-					card->devname);
-                                return -1;
-                        }
-
-                        /* Modify Point-to-Point Address */
-                        dev->pa_dstaddr = arphdr->ar_sip;
-                        /* Add Route Flag */
-                        /* The route will be added in the polling routine so
-                           that it is not interrupt context. */
-
-                        ((fr_channel_t *) dev->priv)->route_flag = ADD_ROUTE;
-                        ((fr_channel_t *) dev->priv)->inarp = INARP_CONFIGURED;
-			trigger_fr_poll(dev);
-
-                        break;
-                default:  // ARP's and RARP's -- Shouldn't happen.
-        }
-
-        return 0;
-
-#endif
 }
 
 
@@ -4543,13 +4159,11 @@ int process_ARP(arphdr_1490_t *ArpPacket, sdla_t *card, netdevice_t* dev)
  *      at a later date.
  */	
 
-static void trigger_fr_arp (netdevice_t *dev)
+static void trigger_fr_arp(struct net_device *dev)
 {
 	fr_channel_t* chan = dev->priv;
 
-	del_timer(&chan->fr_arp_timer);
-	chan->fr_arp_timer.expires = jiffies + (chan->inarp_interval * HZ);
-	add_timer(&chan->fr_arp_timer);
+	mod_timer(&chan->fr_arp_timer, jiffies + chan->inarp_interval * HZ);
 	return;
 }
 
@@ -4564,7 +4178,7 @@ static void trigger_fr_arp (netdevice_t *dev)
 
 static void fr_arp (unsigned long data)
 {
-	netdevice_t *dev = (netdevice_t *)data;
+	struct net_device *dev = (struct net_device *)data;
 	fr_channel_t *chan = dev->priv;
 	volatile sdla_t *card = chan->card;
 	fr508_flags_t* flags = card->flags;
@@ -4715,15 +4329,9 @@ void s508_s514_lock(sdla_t *card, unsigned long *smp_flags)
 {
 	if (card->hw.type != SDLA_S514){
 
-#if defined(__SMP__) || defined(LINUX_2_4)
 		spin_lock_irqsave(&card->wandev.lock, *smp_flags);
-#else
-          	disable_irq(card->hw.irq);
-#endif
 	}else{
-#if defined(__SMP__) || defined(LINUX_2_4)
 		spin_lock(&card->u.f.if_send_lock);
-#endif
 	}
 	return;
 }
@@ -4733,22 +4341,14 @@ void s508_s514_unlock(sdla_t *card, unsigned long *smp_flags)
 {
 	if (card->hw.type != SDLA_S514){
 
-#if defined(__SMP__) || defined(LINUX_2_4)
 		spin_unlock_irqrestore (&card->wandev.lock, *smp_flags);
-#else
-          	enable_irq(card->hw.irq);
-#endif
 	}else{
-#if defined(__SMP__) || defined(LINUX_2_4)
 		spin_unlock(&card->u.f.if_send_lock);
-#endif
 	}
 	return;
 }
 
 
-
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 
 /*----------------------------------------------------------------------
                   RECEIVE INTERRUPT: BOTTOM HALF HANDLERS 
@@ -4770,7 +4370,7 @@ void s508_s514_unlock(sdla_t *card, unsigned long *smp_flags)
  *
  */
 
-static int bh_enqueue (netdevice_t *dev, struct sk_buff *skb)
+static int bh_enqueue(struct net_device *dev, struct sk_buff *skb)
 {
 	/* Check for full */
 	fr_channel_t* chan = dev->priv;
@@ -4779,7 +4379,7 @@ static int bh_enqueue (netdevice_t *dev, struct sk_buff *skb)
 
 	if (atomic_read(&chan->bh_buff_used) == MAX_BH_BUFF){
 		++card->wandev.stats.rx_dropped;
-		wan_dev_kfree_skb(skb, FREE_READ);
+		dev_kfree_skb_any(skb);
 		return 1; 
 	}
 
@@ -4843,7 +4443,7 @@ static void trigger_fr_bh (fr_channel_t *chan)
  *
  */	
 
-static void fr_bh (netdevice_t * dev)
+static void fr_bh(struct net_device * dev)
 {
 	fr_channel_t* chan = dev->priv;
 	sdla_t *card = chan->card;
@@ -4868,7 +4468,7 @@ static void fr_bh (netdevice_t * dev)
 			if (chan->common.sk == NULL || chan->common.func == NULL){
 				++card->wandev.stats.rx_dropped;
 				++chan->ifstats.rx_dropped;
-				wan_dev_kfree_skb(skb, FREE_READ);
+				dev_kfree_skb_any(skb);
 				fr_bh_cleanup(dev);
 				continue;
 			}
@@ -4890,7 +4490,7 @@ static void fr_bh (netdevice_t * dev)
 	return;
 }
 
-static int fr_bh_cleanup (netdevice_t *dev)
+static int fr_bh_cleanup(struct net_device *dev)
 {
 	fr_channel_t* chan = dev->priv;
 
@@ -4905,7 +4505,6 @@ static int fr_bh_cleanup (netdevice_t *dev)
 	atomic_dec(&chan->bh_buff_used);
 	return 0;
 }
-#endif
 
 
 /*----------------------------------------------------------------------
@@ -4925,14 +4524,10 @@ static int fr_bh_cleanup (netdevice_t *dev)
  *      a polling routine.
  *
  */	
-static void trigger_fr_poll (netdevice_t *dev)
+static void trigger_fr_poll(struct net_device *dev)
 {
 	fr_channel_t* chan = dev->priv;
-#ifdef LINUX_2_4
 	schedule_task(&chan->fr_poll_task);
-#else
-	queue_task(&chan->fr_poll_task, &tq_scheduler);
-#endif
 	return;
 }
 
@@ -4959,7 +4554,7 @@ static void trigger_fr_poll (netdevice_t *dev)
  *      the fr_poll routine.  
  */
 
-static void fr_poll (netdevice_t *dev)
+static void fr_poll(struct net_device *dev)
 {
 
 	fr_channel_t* chan;
@@ -5046,7 +4641,7 @@ static void fr_poll (netdevice_t *dev)
  *      an interrupt.
  */
 
-static int check_tx_status(sdla_t *card, netdevice_t *dev)
+static int check_tx_status(sdla_t *card, struct net_device *dev)
 {
 
 	if (card->hw.type == SDLA_S514){
@@ -5056,7 +4651,7 @@ static int check_tx_status(sdla_t *card, netdevice_t *dev)
 		}
 	}
 
-	if (is_queue_stopped(dev) || (card->u.f.tx_interrupts_pending))
+	if (netif_queue_stopped(dev) || (card->u.f.tx_interrupts_pending))
      		return 1; 
 
 	return 0;
@@ -5076,14 +4671,13 @@ static int check_tx_status(sdla_t *card, netdevice_t *dev)
  *
  */
 
-netdevice_t * move_dev_to_next (sdla_t *card, netdevice_t *dev)
+struct net_device *move_dev_to_next(sdla_t *card, struct net_device *dev)
 {
 	if (card->wandev.new_if_cnt != 1){
-		if (*((netdevice_t **)dev->priv) == NULL){
+		if (!*((struct net_device **)dev->priv))
 			return card->wandev.dev;
-		}else{
-			return *((netdevice_t **)dev->priv);
-		}
+		else
+			return *((struct net_device **)dev->priv);
 	}
 	return dev;
 }
@@ -5133,10 +4727,11 @@ static void trigger_config_fr (sdla_t *card)
 
 static void config_fr (sdla_t *card)
 {
-	netdevice_t *dev;
+	struct net_device *dev;
 	fr_channel_t *chan;
 
-	for (dev=card->wandev.dev; dev; dev=*((netdevice_t **)dev->priv)){
+	for (dev = card->wandev.dev; dev;
+	     dev = *((struct net_device **)dev->priv)) {
 	
 		if ((chan=dev->priv) == NULL)
 			continue;
@@ -5205,7 +4800,7 @@ static void config_fr (sdla_t *card)
  *
  */
 
-static void trigger_unconfig_fr (netdevice_t *dev)
+static void trigger_unconfig_fr(struct net_device *dev)
 {
 	fr_channel_t *chan = dev->priv;
 	volatile sdla_t *card = chan->card;
@@ -5257,10 +4852,11 @@ static void trigger_unconfig_fr (netdevice_t *dev)
 
 static void unconfig_fr (sdla_t *card)
 {
-	netdevice_t *dev;
+	struct net_device *dev;
 	fr_channel_t *chan;
 
-	for (dev=card->wandev.dev; dev; dev=*((netdevice_t **)dev->priv)){
+	for (dev = card->wandev.dev; dev;
+	     dev = *((struct net_device **)dev->priv)){
 	
 		if ((chan=dev->priv) == NULL)
 			continue;
@@ -5279,7 +4875,8 @@ static void unconfig_fr (sdla_t *card)
 	}
 }
 
-static int setup_fr_header(struct sk_buff ** skb_orig, netdevice_t* dev, char op_mode)
+static int setup_fr_header(struct sk_buff **skb_orig, struct net_device* dev,
+			   char op_mode)
 {
 	struct sk_buff *skb = *skb_orig;
 	fr_channel_t *chan=dev->priv;
@@ -5304,7 +4901,6 @@ static int setup_fr_header(struct sk_buff ** skb_orig, netdevice_t* dev, char op
 	 * an Ethernet header */
 	if (op_mode == BRIDGE || op_mode == BRIDGE_NODE){
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 
 		/* Encapsulate the packet as a bridged Ethernet frame. */
 #ifdef DEBUG
@@ -5325,12 +4921,6 @@ static int setup_fr_header(struct sk_buff ** skb_orig, netdevice_t* dev, char op
 		skb->protocol = ETH_P_802_3;
 		return 8;
 
-#else
-
-		/* BRIDGING is not supported in 2.0.X */
-		return -EINVAL;
-
-#endif
 	}
 		
 	return 0;
@@ -5344,7 +4934,7 @@ static int check_dlci_config (sdla_t *card, fr_channel_t *chan)
 	fr_conf_t *conf=NULL;
 	unsigned short dlci_num = chan->dlci;
 	int dlci_offset=0;
-	netdevice_t *dev=NULL;
+	struct net_device *dev = NULL;
 	
 	mbox->cmd.command = FR_READ_CONFIG;
 	mbox->cmd.length = 0;
@@ -5356,9 +4946,9 @@ static int check_dlci_config (sdla_t *card, fr_channel_t *chan)
 		return 0;
 	}
 
-	for (dev=card->wandev.dev; dev; dev=*((netdevice_t**)dev->priv)){
+	for (dev = card->wandev.dev; dev;
+	     dev=*((struct net_device **)dev->priv))
 		set_chan_state(dev,WAN_DISCONNECTED);
-	}
 	
 	printk(KERN_INFO "DLCI %i Not configured, configuring\n",dlci_num);
 	
@@ -5386,7 +4976,8 @@ static int check_dlci_config (sdla_t *card, fr_channel_t *chan)
 	conf = (fr_conf_t *)mbox->data;
 
 	dlci_offset=0;
-	for (dev=card->wandev.dev; dev; dev=*((netdevice_t**)dev->priv)){
+	for (dev = card->wandev.dev; dev;
+	     dev = *((struct net_device **)dev->priv)) {
 		fr_channel_t *chan_tmp = dev->priv;
 		conf->dlci[dlci_offset] = chan_tmp->dlci;		
 		dlci_offset++;
@@ -5420,7 +5011,8 @@ static int check_dlci_config (sdla_t *card, fr_channel_t *chan)
 
 	printk(KERN_INFO "Enabling Communications \n");
 
-	for (dev=card->wandev.dev; dev; dev=*((netdevice_t**)dev->priv)){
+	for (dev = card->wandev.dev; dev;
+	     dev = *((struct net_device **)dev->priv)) {
 		fr_channel_t *chan_tmp = dev->priv;
 		fr_init_dlci(card,chan_tmp);
 		fr_add_dlci(card, chan_tmp->dlci);

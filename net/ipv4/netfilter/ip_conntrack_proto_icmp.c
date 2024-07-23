@@ -6,7 +6,7 @@
 #include <linux/icmp.h>
 #include <linux/netfilter_ipv4/ip_conntrack_protocol.h>
 
-unsigned long ip_ct_icmp_timeout = 30*HZ;
+#define ICMP_TIMEOUT (30*HZ)
 
 #if 0
 #define DEBUGP printk
@@ -14,14 +14,18 @@ unsigned long ip_ct_icmp_timeout = 30*HZ;
 #define DEBUGP(format, args...)
 #endif
 
-static int icmp_pkt_to_tuple(const void *datah, size_t datalen,
+static int icmp_pkt_to_tuple(const struct sk_buff *skb,
+			     unsigned int dataoff,
 			     struct ip_conntrack_tuple *tuple)
 {
-	const struct icmphdr *hdr = datah;
+	struct icmphdr hdr;
 
-	tuple->dst.u.icmp.type = hdr->type;
-	tuple->src.u.icmp.id = hdr->un.echo.id;
-	tuple->dst.u.icmp.code = hdr->code;
+	if (skb_copy_bits(skb, dataoff, &hdr, sizeof(hdr)) != 0)
+		return 0;
+
+	tuple->dst.u.icmp.type = hdr.type;
+	tuple->src.u.icmp.id = hdr.un.echo.id;
+	tuple->dst.u.icmp.code = hdr.code;
 
 	return 1;
 }
@@ -69,7 +73,7 @@ static unsigned int icmp_print_conntrack(char *buffer,
 
 /* Returns verdict for packet, or -1 for invalid. */
 static int icmp_packet(struct ip_conntrack *ct,
-		       struct iphdr *iph, size_t len,
+		       const struct sk_buff *skb,
 		       enum ip_conntrack_info ctinfo)
 {
 	/* Try to delete connection immediately after all replies:
@@ -82,7 +86,7 @@ static int icmp_packet(struct ip_conntrack *ct,
 			ct->timeout.function((unsigned long)ct);
 	} else {
 		atomic_inc(&ct->proto.icmp.count);
-		ip_ct_refresh(ct, ip_ct_icmp_timeout);
+		ip_ct_refresh(ct, ICMP_TIMEOUT);
 	}
 
 	return NF_ACCEPT;
@@ -90,7 +94,7 @@ static int icmp_packet(struct ip_conntrack *ct,
 
 /* Called when a new connection for this protocol found. */
 static int icmp_new(struct ip_conntrack *conntrack,
-		    struct iphdr *iph, size_t len)
+		    const struct sk_buff *skb)
 {
 	static u_int8_t valid_new[]
 		= { [ICMP_ECHO] = 1,

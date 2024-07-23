@@ -13,13 +13,12 @@
 #include <linux/module.h>
 
 #include <linux/stat.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/iso_fs.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/mm.h>
 #include <linux/string.h>
-#include <linux/locks.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/cdrom.h>
@@ -28,22 +27,18 @@
 #include <linux/ctype.h>
 #include <linux/smp_lock.h>
 #include <linux/blkdev.h>
-
+#include <linux/buffer_head.h>
+#include <linux/vfs.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
 
 #include "zisofs.h"
 
-/*
- * We have no support for "multi volume" CDs, but more and more disks carry
- * wrong information within the volume descriptors.
- */
-#define IGNORE_WRONG_MULTI_VOLUME_SPECS
 #define BEQUIET
 
 #ifdef LEAK_CHECK
-static int check_malloc = 0;
-static int check_bread = 0;
+static int check_malloc;
+static int check_bread;
 #endif
 
 static int isofs_hashi(struct dentry *parent, struct qstr *qstr);
@@ -60,10 +55,11 @@ static int isofs_dentry_cmp_ms(struct dentry *dentry, struct qstr *a, struct qst
 
 static void isofs_put_super(struct super_block *sb)
 {
+	struct isofs_sb_info *sbi = ISOFS_SB(sb);
 #ifdef CONFIG_JOLIET
-	if (sb->u.isofs_sb.s_nls_iocharset) {
-		unload_nls(sb->u.isofs_sb.s_nls_iocharset);
-		sb->u.isofs_sb.s_nls_iocharset = NULL;
+	if (sbi->s_nls_iocharset) {
+		unload_nls(sbi->s_nls_iocharset);
+		sbi->s_nls_iocharset = NULL;
 	}
 #endif
 
@@ -72,35 +68,96 @@ static void isofs_put_super(struct super_block *sb)
 	       check_malloc, check_bread);
 #endif
 
+	kfree(sbi);
+	sb->s_fs_info = NULL;
 	return;
 }
 
 static void isofs_read_inode(struct inode *);
-static int isofs_statfs (struct super_block *, struct statfs *);
+static int isofs_statfs (struct super_block *, struct kstatfs *);
+
+static kmem_cache_t *isofs_inode_cachep;
+
+static struct inode *isofs_alloc_inode(struct super_block *sb)
+{
+	struct iso_inode_info *ei;
+	ei = (struct iso_inode_info *)kmem_cache_alloc(isofs_inode_cachep, SLAB_KERNEL);
+	if (!ei)
+		return NULL;
+	return &ei->vfs_inode;
+}
+
+static void isofs_destroy_inode(struct inode *inode)
+{
+	kmem_cache_free(isofs_inode_cachep, ISOFS_I(inode));
+}
+
+static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+{
+	struct iso_inode_info *ei = (struct iso_inode_info *) foo;
+
+	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
+	    SLAB_CTOR_CONSTRUCTOR)
+		inode_init_once(&ei->vfs_inode);
+}
+ 
+static int init_inodecache(void)
+{
+	isofs_inode_cachep = kmem_cache_create("isofs_inode_cache",
+					     sizeof(struct iso_inode_info),
+					     0, SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT,
+					     init_once, NULL);
+	if (isofs_inode_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
+static void destroy_inodecache(void)
+{
+	if (kmem_cache_destroy(isofs_inode_cachep))
+		printk(KERN_INFO "iso_inode_cache: not all structures were freed\n");
+}
 
 static struct super_operations isofs_sops = {
-	read_inode:	isofs_read_inode,
-	put_super:	isofs_put_super,
-	statfs:		isofs_statfs,
+	.alloc_inode	= isofs_alloc_inode,
+	.destroy_inode	= isofs_destroy_inode,
+	.read_inode	= isofs_read_inode,
+	.put_super	= isofs_put_super,
+	.statfs		= isofs_statfs,
 };
+
+/* the export_operations structure for describing
+ * how to export (e.g. via kNFSd) is deliberately
+ * empty.
+ * This means that the filesystem want to use iget
+ * to map an inode number into an inode.
+ * The lack of a get_parent operation means that 
+ * if something isn't in the cache, then you cannot
+ * access it.
+ * It should be possible to write a get_parent,
+ * but it would be a bit hairy...
+ */
+static struct export_operations isofs_export_ops = {
+};
+
 
 static struct dentry_operations isofs_dentry_ops[] = {
 	{
-		d_hash:		isofs_hash,
-		d_compare:	isofs_dentry_cmp,
+		.d_hash		= isofs_hash,
+		.d_compare	= isofs_dentry_cmp,
 	},
 	{
-		d_hash:		isofs_hashi,
-		d_compare:	isofs_dentry_cmpi,
+		.d_hash		= isofs_hashi,
+		.d_compare	= isofs_dentry_cmpi,
 	},
 #ifdef CONFIG_JOLIET
 	{
-		d_hash:		isofs_hash_ms,
-		d_compare:	isofs_dentry_cmp_ms,
+		.d_hash		= isofs_hash_ms,
+		.d_compare	= isofs_dentry_cmp_ms,
 	},
 	{
-		d_hash:		isofs_hashi_ms,
-		d_compare:	isofs_dentry_cmpi_ms,
+		.d_hash		= isofs_hashi_ms,
+		.d_compare	= isofs_dentry_cmpi_ms,
 	}
 #endif
 };
@@ -294,7 +351,9 @@ static int parse_options(char *options, struct iso9660_options * popt)
 	popt->session=-1;
 	popt->sbsector=-1;
 	if (!options) return 1;
-	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
+	while ((this_char = strsep(&options,",")) != NULL) {
+		if (!*this_char)
+			continue;
 	        if (strncmp(this_char,"norock",6) == 0) {
 		  popt->rock = 'n';
 		  continue;
@@ -466,41 +525,31 @@ static unsigned int isofs_get_last_session(struct super_block *sb,s32 session )
  * Note: a check_disk_change() has been done immediately prior
  * to this call, so we don't need to check again.
  */
-static struct super_block *isofs_read_super(struct super_block *s, void *data,
-					    int silent)
+static int isofs_fill_super(struct super_block *s, void *data, int silent)
 {
-	kdev_t				dev = s->s_dev;
 	struct buffer_head	      * bh = NULL, *pri_bh = NULL;
 	struct hs_primary_descriptor  * h_pri = NULL;
 	struct iso_primary_descriptor * pri = NULL;
 	struct iso_supplementary_descriptor *sec = NULL;
 	struct iso_directory_record   * rootp;
 	int				joliet_level = 0;
-	int				high_sierra;
 	int				iso_blknum, block;
 	int				orig_zonesize;
 	int				table;
-	unsigned int			blocksize, blocksize_bits;
 	unsigned int			vol_desc_start;
 	unsigned long			first_data_zone;
 	struct inode		      * inode;
 	struct iso9660_options		opt;
+	struct isofs_sb_info	      * sbi;
+
+	sbi = kmalloc(sizeof(struct isofs_sb_info), GFP_KERNEL);
+	if (!sbi)
+		return -ENOMEM;
+	s->s_fs_info = sbi;
+	memset(sbi, 0, sizeof(struct isofs_sb_info));
 
 	if (!parse_options((char *) data, &opt))
-		goto out_unlock;
-
-#if 0
-	printk("map = %c\n", opt.map);
-	printk("rock = %c\n", opt.rock);
-	printk("joliet = %c\n", opt.joliet);
-	printk("check = %c\n", opt.check);
-	printk("cruft = %c\n", opt.cruft);
-	printk("unhide = %c\n", opt.unhide);
-	printk("blocksize = %d\n", opt.blocksize);
-	printk("gid = %d\n", opt.gid);
-	printk("uid = %d\n", opt.uid);
-	printk("iocharset = %s\n", opt.iocharset);
-#endif
+		goto out_freesbi;
 
 	/*
 	 * First of all, get the hardware blocksize for this device.
@@ -508,27 +557,12 @@ static struct super_block *isofs_read_super(struct super_block *s, void *data,
 	 * larger than the blocksize the user specified, then use
 	 * that value.
 	 */
-	blocksize = get_hardsect_size(dev);
-	if(blocksize > opt.blocksize) {
-	    /*
-	     * Force the blocksize we are going to use to be the
-	     * hardware blocksize.
-	     */
-	    opt.blocksize = blocksize;
-	}
+	/*
+	 * What if bugger tells us to go beyond page size?
+	 */
+	opt.blocksize = sb_min_blocksize(s, opt.blocksize);
 
-	blocksize_bits = 0;
-	{
-	  int i = opt.blocksize;
-	  while (i != 1){
-	    blocksize_bits++;
-	    i >>=1;
-	  }
-	}
-
-	set_blocksize(dev, opt.blocksize);
-
-	s->u.isofs_sb.s_high_sierra = high_sierra = 0; /* default is iso9660 */
+	sbi->s_high_sierra = 0; /* default is iso9660 */
 
 	vol_desc_start = (opt.sbsector != -1) ?
 		opt.sbsector : isofs_get_last_session(s,opt.session);
@@ -539,9 +573,9 @@ static struct super_block *isofs_read_super(struct super_block *s, void *data,
 	    struct hs_volume_descriptor   * hdp;
 	    struct iso_volume_descriptor  * vdp;
 
-	    block = iso_blknum << (ISOFS_BLOCK_BITS-blocksize_bits);
-	    if (!(bh = bread(dev, block, opt.blocksize)))
-		goto out_no_read;		
+	    block = iso_blknum << (ISOFS_BLOCK_BITS - s->s_blocksize_bits);
+	    if (!(bh = sb_bread(s, block)))
+		goto out_no_read;
 
 	    vdp = (struct iso_volume_descriptor *)bh->b_data;
 	    hdp = (struct hs_volume_descriptor *)bh->b_data;
@@ -588,8 +622,7 @@ static struct super_block *isofs_read_super(struct super_block *s, void *data,
 		    if (isonum_711 (hdp->type) != ISO_VD_PRIMARY)
 		        goto out_freebh;
 		
-		    s->u.isofs_sb.s_high_sierra = 1;
-		    high_sierra = 1;
+		    sbi->s_high_sierra = 1;
 		    opt.rock = 'n';
 		    h_pri = (struct hs_primary_descriptor *)vdp;
 		    goto root_found;
@@ -620,29 +653,21 @@ root_found:
 	    pri = (struct iso_primary_descriptor *) sec;
 	}
 
-	if(high_sierra){
+	if(sbi->s_high_sierra){
 	  rootp = (struct iso_directory_record *) h_pri->root_directory_record;
-#ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
-	  if (isonum_723 (h_pri->volume_set_size) != 1)
-		goto out_no_support;
-#endif /* IGNORE_WRONG_MULTI_VOLUME_SPECS */
-	  s->u.isofs_sb.s_nzones = isonum_733 (h_pri->volume_space_size);
-	  s->u.isofs_sb.s_log_zone_size = isonum_723 (h_pri->logical_block_size);
-	  s->u.isofs_sb.s_max_size = isonum_733(h_pri->volume_space_size);
+	  sbi->s_nzones = isonum_733 (h_pri->volume_space_size);
+	  sbi->s_log_zone_size = isonum_723 (h_pri->logical_block_size);
+	  sbi->s_max_size = isonum_733(h_pri->volume_space_size);
 	} else {
 	  rootp = (struct iso_directory_record *) pri->root_directory_record;
-#ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
-	  if (isonum_723 (pri->volume_set_size) != 1)
-		goto out_no_support;
-#endif /* IGNORE_WRONG_MULTI_VOLUME_SPECS */
-	  s->u.isofs_sb.s_nzones = isonum_733 (pri->volume_space_size);
-	  s->u.isofs_sb.s_log_zone_size = isonum_723 (pri->logical_block_size);
-	  s->u.isofs_sb.s_max_size = isonum_733(pri->volume_space_size);
+	  sbi->s_nzones = isonum_733 (pri->volume_space_size);
+	  sbi->s_log_zone_size = isonum_723 (pri->logical_block_size);
+	  sbi->s_max_size = isonum_733(pri->volume_space_size);
 	}
 
-	s->u.isofs_sb.s_ninodes = 0; /* No way to figure this out easily */
+	sbi->s_ninodes = 0; /* No way to figure this out easily */
 
-	orig_zonesize = s -> u.isofs_sb.s_log_zone_size;
+	orig_zonesize = sbi->s_log_zone_size;
 	/*
 	 * If the zone size is smaller than the hardware sector size,
 	 * this is a fatal error.  This would occur if the disc drive
@@ -650,14 +675,14 @@ root_found:
 	 * blocks that were 512 bytes (which should only very rarely
 	 * happen.)
 	 */
-	if(blocksize != 0 && orig_zonesize < blocksize)
+	if(orig_zonesize < opt.blocksize)
 		goto out_bad_size;
 
 	/* RDE: convert log zone size to bit shift */
-	switch (s -> u.isofs_sb.s_log_zone_size)
-	  { case  512: s -> u.isofs_sb.s_log_zone_size =  9; break;
-	    case 1024: s -> u.isofs_sb.s_log_zone_size = 10; break;
-	    case 2048: s -> u.isofs_sb.s_log_zone_size = 11; break;
+	switch (sbi->s_log_zone_size)
+	  { case  512: sbi->s_log_zone_size =  9; break;
+	    case 1024: sbi->s_log_zone_size = 10; break;
+	    case 2048: sbi->s_log_zone_size = 11; break;
 
 	    default:
 		goto out_bad_zone_size;
@@ -679,16 +704,16 @@ root_found:
 
 	first_data_zone = ((isonum_733 (rootp->extent) +
 			  isonum_711 (rootp->ext_attr_length))
-			 << s -> u.isofs_sb.s_log_zone_size);
-	s->u.isofs_sb.s_firstdatazone = first_data_zone;
+			 << sbi->s_log_zone_size);
+	sbi->s_firstdatazone = first_data_zone;
 #ifndef BEQUIET
 	printk(KERN_DEBUG "Max size:%ld   Log zone size:%ld\n",
-	       s->u.isofs_sb.s_max_size,
-	       1UL << s->u.isofs_sb.s_log_zone_size);
+	       sbi->s_max_size,
+	       1UL << sbi->s_log_zone_size);
 	printk(KERN_DEBUG "First datazone:%ld   Root inode number:%ld\n",
-	       s->u.isofs_sb.s_firstdatazone >> s -> u.isofs_sb.s_log_zone_size,
-	       s->u.isofs_sb.s_firstdatazone);
-	if(high_sierra)
+	       sbi->s_firstdatazone >> sbi->s_log_zone_size,
+	       sbi->s_firstdatazone);
+	if(sbi->s_high_sierra)
 		printk(KERN_DEBUG "Disc in High Sierra format.\n");
 #endif
 
@@ -706,7 +731,7 @@ root_found:
 			pri->root_directory_record;
 		first_data_zone = ((isonum_733 (rootp->extent) +
 			  	isonum_711 (rootp->ext_attr_length))
-				 << s -> u.isofs_sb.s_log_zone_size);
+				 << sbi->s_log_zone_size);
 	}
 
 	/*
@@ -733,53 +758,46 @@ root_found:
 	 * entries.  By forcing the blocksize in this way, we ensure
 	 * that we will never be required to do this.
 	 */
-	if ( orig_zonesize != opt.blocksize ) {
-		set_blocksize(dev, orig_zonesize);
-#ifndef BEQUIET
-		printk(KERN_DEBUG 
-			"ISOFS: Forcing new log zone size:%d\n", orig_zonesize);
-#endif
-	}
-	s->s_blocksize = orig_zonesize;
-	s->s_blocksize_bits = s -> u.isofs_sb.s_log_zone_size;
+	sb_set_blocksize(s, orig_zonesize);
 
-	s->u.isofs_sb.s_nls_iocharset = NULL;
+	sbi->s_nls_iocharset = NULL;
 
 #ifdef CONFIG_JOLIET
 	if (joliet_level && opt.utf8 == 0) {
 		char * p = opt.iocharset ? opt.iocharset : "iso8859-1";
-		s->u.isofs_sb.s_nls_iocharset = load_nls(p);
-		if (! s->u.isofs_sb.s_nls_iocharset) {
+		sbi->s_nls_iocharset = load_nls(p);
+		if (! sbi->s_nls_iocharset) {
 			/* Fail only if explicit charset specified */
 			if (opt.iocharset)
-				goto out_unlock;
-			s->u.isofs_sb.s_nls_iocharset = load_nls_default();
+				goto out_freesbi;
+			sbi->s_nls_iocharset = load_nls_default();
 		}
 	}
 #endif
 	s->s_op = &isofs_sops;
-	s->u.isofs_sb.s_mapping = opt.map;
-	s->u.isofs_sb.s_rock = (opt.rock == 'y' ? 2 : 0);
-	s->u.isofs_sb.s_rock_offset = -1; /* initial offset, will guess until SP is found*/
-	s->u.isofs_sb.s_cruft = opt.cruft;
-	s->u.isofs_sb.s_unhide = opt.unhide;
-	s->u.isofs_sb.s_uid = opt.uid;
-	s->u.isofs_sb.s_gid = opt.gid;
-	s->u.isofs_sb.s_utf8 = opt.utf8;
-	s->u.isofs_sb.s_nocompress = opt.nocompress;
+	s->s_export_op = &isofs_export_ops;
+	sbi->s_mapping = opt.map;
+	sbi->s_rock = (opt.rock == 'y' ? 2 : 0);
+	sbi->s_rock_offset = -1; /* initial offset, will guess until SP is found*/
+	sbi->s_cruft = opt.cruft;
+	sbi->s_unhide = opt.unhide;
+	sbi->s_uid = opt.uid;
+	sbi->s_gid = opt.gid;
+	sbi->s_utf8 = opt.utf8;
+	sbi->s_nocompress = opt.nocompress;
 	/*
 	 * It would be incredibly stupid to allow people to mark every file
 	 * on the disk as suid, so we merely allow them to set the default
 	 * permissions.
 	 */
-	s->u.isofs_sb.s_mode = opt.mode & 0777;
+	sbi->s_mode = opt.mode & 0777;
 
 	/*
 	 * Read the root inode, which _may_ result in changing
 	 * the s_rock flag. Once we have the final s_rock value,
 	 * we then decide whether to use the Joliet descriptor.
 	 */
-	inode = iget(s, s->u.isofs_sb.s_firstdatazone);
+	inode = iget(s, sbi->s_firstdatazone);
 
 	/*
 	 * If this disk has both Rock Ridge and Joliet on it, then we
@@ -789,16 +807,16 @@ root_found:
 	 * CD with Unicode names.  Until someone sees such a beast, it
 	 * will not be supported.
 	 */
-	if (s->u.isofs_sb.s_rock == 1) {
+	if (sbi->s_rock == 1) {
 		joliet_level = 0;
 	} else if (joliet_level) {
-		s->u.isofs_sb.s_rock = 0;
-		if (s->u.isofs_sb.s_firstdatazone != first_data_zone) {
-			s->u.isofs_sb.s_firstdatazone = first_data_zone;
+		sbi->s_rock = 0;
+		if (sbi->s_firstdatazone != first_data_zone) {
+			sbi->s_firstdatazone = first_data_zone;
 			printk(KERN_DEBUG 
 				"ISOFS: changing to secondary root\n");
 			iput(inode);
-			inode = iget(s, s->u.isofs_sb.s_firstdatazone);
+			inode = iget(s, sbi->s_firstdatazone);
 		}
 	}
 
@@ -807,7 +825,7 @@ root_found:
 		if (joliet_level) opt.check = 'r';
 		else opt.check = 's';
 	}
-	s->u.isofs_sb.s_joliet_level = joliet_level;
+	sbi->s_joliet_level = joliet_level;
 
 	/* check the root inode */
 	if (!inode)
@@ -824,60 +842,57 @@ root_found:
 	if (opt.check == 'r') table++;
 	s->s_root->d_op = &isofs_dentry_ops[table];
 
-	return s;
+	return 0;
 
 	/*
 	 * Display error messages and free resources.
 	 */
 out_bad_root:
-	printk(KERN_WARNING "isofs_read_super: root inode not initialized\n");
+	printk(KERN_WARNING "isofs_fill_super: root inode not initialized\n");
 	goto out_iput;
 out_no_root:
-	printk(KERN_WARNING "isofs_read_super: get root inode failed\n");
+	printk(KERN_WARNING "isofs_fill_super: get root inode failed\n");
 out_iput:
 	iput(inode);
 #ifdef CONFIG_JOLIET
-	if (s->u.isofs_sb.s_nls_iocharset)
-		unload_nls(s->u.isofs_sb.s_nls_iocharset);
+	if (sbi->s_nls_iocharset)
+		unload_nls(sbi->s_nls_iocharset);
 #endif
-	goto out_unlock;
+	goto out_freesbi;
 out_no_read:
-	printk(KERN_WARNING "isofs_read_super: "
+	printk(KERN_WARNING "isofs_fill_super: "
 		"bread failed, dev=%s, iso_blknum=%d, block=%d\n",
-		kdevname(dev), iso_blknum, block);
-	goto out_unlock;
+		s->s_id, iso_blknum, block);
+	goto out_freesbi;
 out_bad_zone_size:
 	printk(KERN_WARNING "Bad logical zone size %ld\n",
-		s->u.isofs_sb.s_log_zone_size);
+		sbi->s_log_zone_size);
 	goto out_freebh;
 out_bad_size:
 	printk(KERN_WARNING "Logical zone size(%d) < hardware blocksize(%u)\n",
-		orig_zonesize, blocksize);
+		orig_zonesize, opt.blocksize);
 	goto out_freebh;
-#ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
-out_no_support:
-	printk(KERN_WARNING "Multi-volume disks not supported.\n");
-	goto out_freebh;
-#endif
 out_unknown_format:
 	if (!silent)
 		printk(KERN_WARNING "Unable to identify CD-ROM format.\n");
 
 out_freebh:
 	brelse(bh);
-out_unlock:
-	return NULL;
+out_freesbi:
+	kfree(sbi);
+	s->s_fs_info = NULL;
+	return -EINVAL;
 }
 
-static int isofs_statfs (struct super_block *sb, struct statfs *buf)
+static int isofs_statfs (struct super_block *sb, struct kstatfs *buf)
 {
 	buf->f_type = ISOFS_SUPER_MAGIC;
 	buf->f_bsize = sb->s_blocksize;
-	buf->f_blocks = (sb->u.isofs_sb.s_nzones
-                  << (sb->u.isofs_sb.s_log_zone_size - sb->s_blocksize_bits));
+	buf->f_blocks = (ISOFS_SB(sb)->s_nzones
+                  << (ISOFS_SB(sb)->s_log_zone_size - sb->s_blocksize_bits));
 	buf->f_bfree = 0;
 	buf->f_bavail = 0;
-	buf->f_files = sb->u.isofs_sb.s_ninodes;
+	buf->f_files = ISOFS_SB(sb)->s_ninodes;
 	buf->f_ffree = 0;
 	buf->f_namelen = NAME_MAX;
 	return 0;
@@ -888,30 +903,31 @@ static int isofs_statfs (struct super_block *sb, struct statfs *buf)
  * or getblk() if they are not.  Returns the number of blocks inserted
  * (0 == error.)
  */
-int isofs_get_blocks(struct inode *inode, long iblock,
-		     struct buffer_head **bh_result, unsigned long nblocks)
+int isofs_get_blocks(struct inode *inode, sector_t iblock_s,
+		     struct buffer_head **bh, unsigned long nblocks)
 {
 	unsigned long b_off;
 	unsigned offset, sect_size;
 	unsigned int firstext;
 	unsigned long nextino;
+	long iblock = (long)iblock_s;
 	int section, rv;
-	unsigned int blocksize = inode->i_sb->s_blocksize;
+	struct iso_inode_info *ei = ISOFS_I(inode);
 
 	lock_kernel();
 
 	rv = 0;
-	if (iblock < 0) {
-		printk("isofs_get_blocks: block < 0\n");
+	if (iblock < 0 || iblock != iblock_s) {
+		printk("isofs_get_blocks: block number too large\n");
 		goto abort;
 	}
 
 	b_off = iblock;
 	
 	offset    = 0;
-	firstext  = inode->u.isofs_i.i_first_extent;
-	sect_size = inode->u.isofs_i.i_section_size >> ISOFS_BUFFER_BITS(inode);
-	nextino   = inode->u.isofs_i.i_next_section_ino;
+	firstext  = ei->i_first_extent;
+	sect_size = ei->i_section_size >> ISOFS_BUFFER_BITS(inode);
+	nextino   = ei->i_next_section_ino;
 	section   = 0;
 
 	while ( nblocks ) {
@@ -938,9 +954,9 @@ int isofs_get_blocks(struct inode *inode, long iblock,
 				ninode = iget(inode->i_sb, nextino);
 				if (!ninode)
 					goto abort;
-				firstext  = ninode->u.isofs_i.i_first_extent;
-				sect_size = ninode->u.isofs_i.i_section_size;
-				nextino   = ninode->u.isofs_i.i_next_section_ino;
+				firstext  = ISOFS_I(ninode)->i_first_extent;
+				sect_size = ISOFS_I(ninode)->i_section_size;
+				nextino   = ISOFS_I(ninode)->i_next_section_ino;
 				iput(ninode);
 				
 				if (++section > 100) {
@@ -952,16 +968,14 @@ int isofs_get_blocks(struct inode *inode, long iblock,
 			}
 		}
 		
-		if ( *bh_result ) {
-			(*bh_result)->b_dev      = inode->i_dev;
-			(*bh_result)->b_blocknr  = firstext + b_off - offset;
-			(*bh_result)->b_state   |= (1UL << BH_Mapped);
+		if ( *bh ) {
+			map_bh(*bh, inode->i_sb, firstext + b_off - offset);
 		} else {
-			*bh_result = getblk(inode->i_dev, firstext+b_off-offset, blocksize);
-			if ( !*bh_result )
+			*bh = sb_getblk(inode->i_sb, firstext+b_off-offset);
+			if ( !*bh )
 				goto abort;
 		}
-		bh_result++;	/* Next buffer head */
+		bh++;	/* Next buffer head */
 		b_off++;	/* Next buffer offset */
 		nblocks--;
 		rv++;
@@ -976,7 +990,7 @@ abort:
 /*
  * Used by the standard interfaces.
  */
-static int isofs_get_block(struct inode *inode, long iblock,
+static int isofs_get_block(struct inode *inode, sector_t iblock,
 		    struct buffer_head *bh_result, int create)
 {
 	if ( create ) {
@@ -1000,12 +1014,12 @@ static int isofs_bmap(struct inode *inode, int block)
 	return 0;
 }
 
-struct buffer_head *isofs_bread(struct inode *inode, unsigned int bufsize, unsigned int block)
+struct buffer_head *isofs_bread(struct inode *inode, sector_t block)
 {
-	unsigned int blknr = isofs_bmap(inode, block);
+	sector_t blknr = isofs_bmap(inode, block);
 	if (!blknr)
 		return NULL;
-	return bread(inode->i_dev, blknr, bufsize);
+	return sb_bread(inode->i_sb, blknr);
 }
 
 static int isofs_readpage(struct file *file, struct page *page)
@@ -1013,15 +1027,15 @@ static int isofs_readpage(struct file *file, struct page *page)
 	return block_read_full_page(page,isofs_get_block);
 }
 
-static int _isofs_bmap(struct address_space *mapping, long block)
+static sector_t _isofs_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping,block,isofs_get_block);
 }
 
 static struct address_space_operations isofs_aops = {
-	readpage: isofs_readpage,
-	sync_page: block_sync_page,
-	bmap: _isofs_bmap
+	.readpage = isofs_readpage,
+	.sync_page = block_sync_page,
+	.bmap = _isofs_bmap
 };
 
 static inline void test_and_set_uid(uid_t *p, uid_t value)
@@ -1042,15 +1056,16 @@ static int isofs_read_level3_size(struct inode * inode)
 {
 	unsigned long f_pos = inode->i_ino;
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
-	int high_sierra = inode->i_sb->u.isofs_sb.s_high_sierra;
+	int high_sierra = ISOFS_SB(inode->i_sb)->s_high_sierra;
 	struct buffer_head * bh = NULL;
 	unsigned long block, offset;
 	int i = 0;
 	int more_entries = 0;
 	struct iso_directory_record * tmpde = NULL;
+	struct iso_inode_info *ei = ISOFS_I(inode);
 
 	inode->i_size = 0;
-	inode->u.isofs_i.i_next_section_ino = 0;
+	ei->i_next_section_ino = 0;
 
 	block = f_pos >> ISOFS_BUFFER_BITS(inode);
 	offset = f_pos & (bufsize-1);
@@ -1060,7 +1075,7 @@ static int isofs_read_level3_size(struct inode * inode)
 		unsigned int de_len;
 
 		if (!bh) {
-			bh = bread(inode->i_dev, block, bufsize);
+			bh = sb_bread(inode->i_sb, block);
 			if (!bh)
 				goto out_noread;
 		}
@@ -1092,7 +1107,7 @@ static int isofs_read_level3_size(struct inode * inode)
 			brelse(bh);
 			bh = NULL;
 			if (offset) {
-				bh = bread(inode->i_dev, block, bufsize);
+				bh = sb_bread(inode->i_sb, block);
 				if (!bh)
 					goto out_noread;
 				memcpy((void *) tmpde + slop, bh->b_data, offset);
@@ -1102,7 +1117,7 @@ static int isofs_read_level3_size(struct inode * inode)
 
 		inode->i_size += isonum_733(de->size);
 		if (i == 1)
-			inode->u.isofs_i.i_next_section_ino = f_pos;
+			ei->i_next_section_ino = f_pos;
 
 		more_entries = de->flags[-high_sierra] & 0x80;
 
@@ -1140,17 +1155,19 @@ out_toomany:
 static void isofs_read_inode(struct inode * inode)
 {
 	struct super_block *sb = inode->i_sb;
+	struct isofs_sb_info *sbi = ISOFS_SB(sb);
 	unsigned long bufsize = ISOFS_BUFFER_SIZE(inode);
 	int block = inode->i_ino >> ISOFS_BUFFER_BITS(inode);
-	int high_sierra = sb->u.isofs_sb.s_high_sierra;
+	int high_sierra = sbi->s_high_sierra;
 	struct buffer_head * bh = NULL;
 	struct iso_directory_record * de;
 	struct iso_directory_record * tmpde = NULL;
 	unsigned int de_len;
 	unsigned long offset;
 	int volume_seq_no, i;
+	struct iso_inode_info *ei = ISOFS_I(inode);
 
-	bh = bread(inode->i_dev, block, bufsize);
+	bh = sb_bread(inode->i_sb, block);
 	if (!bh)
 		goto out_badread;
 
@@ -1168,7 +1185,7 @@ static void isofs_read_inode(struct inode * inode)
 		}
 		memcpy(tmpde, bh->b_data + offset, frag1);
 		brelse(bh);
-		bh = bread(inode->i_dev, ++block, bufsize);
+		bh = sb_bread(inode->i_sb, ++block);
 		if (!bh)
 			goto out_badread;
 		memcpy((char *)tmpde+frag1, bh->b_data, de_len - frag1);
@@ -1176,7 +1193,7 @@ static void isofs_read_inode(struct inode * inode)
 	}
 
 	/* Assume it is a normal-format file unless told otherwise */
-	inode->u.isofs_i.i_file_format = isofs_file_normal;
+	ei->i_file_format = isofs_file_normal;
 
 	if (de->flags[-high_sierra] & 2) {
 		inode->i_mode = S_IRUGO | S_IXUGO | S_IFDIR;
@@ -1187,7 +1204,7 @@ static void isofs_read_inode(struct inode * inode)
 				       do it the hard way. */
 	} else {
  		/* Everybody gets to read the file. */
-		inode->i_mode = inode->i_sb->u.isofs_sb.s_mode;
+		inode->i_mode = sbi->s_mode;
 		inode->i_nlink = 1;
 	        inode->i_mode |= S_IFREG;
 		/* If there are no periods in the name,
@@ -1199,15 +1216,19 @@ static void isofs_read_inode(struct inode * inode)
 		if(i == de->name_len[0] || de->name[i] == ';')
 			inode->i_mode |= S_IXUGO; /* execute permission */
 	}
-	inode->i_uid = inode->i_sb->u.isofs_sb.s_uid;
-	inode->i_gid = inode->i_sb->u.isofs_sb.s_gid;
+	inode->i_uid = sbi->s_uid;
+	inode->i_gid = sbi->s_gid;
 	inode->i_blocks = inode->i_blksize = 0;
 
+	ei->i_format_parm[0] = 0;
+	ei->i_format_parm[1] = 0;
+	ei->i_format_parm[2] = 0;
 
-	inode->u.isofs_i.i_section_size = isonum_733 (de->size);
+	ei->i_section_size = isonum_733 (de->size);
 	if(de->flags[-high_sierra] & 0x80) {
 		if(isofs_read_level3_size(inode)) goto fail;
 	} else {
+		ei->i_next_section_ino = 0;
 		inode->i_size = isonum_733 (de->size);
 	}
 
@@ -1219,10 +1240,10 @@ static void isofs_read_inode(struct inode * inode)
 	 *	    legal. Do not prevent to use DVD's schilling@fokus.gmd.de
 	 */
 	if ((inode->i_size < 0 || inode->i_size > 0x7FFFFFFE) &&
-	    inode->i_sb->u.isofs_sb.s_cruft == 'n') {
+	    sbi->s_cruft == 'n') {
 		printk(KERN_WARNING "Warning: defective CD-ROM.  "
 		       "Enabling \"cruft\" mount option.\n");
-		inode->i_sb->u.isofs_sb.s_cruft = 'y';
+		sbi->s_cruft = 'y';
 	}
 
 	/*
@@ -1232,7 +1253,7 @@ static void isofs_read_inode(struct inode * inode)
 	 * on the CDROM.
 	 */
 
-	if (inode->i_sb->u.isofs_sb.s_cruft == 'y' &&
+	if (sbi->s_cruft == 'y' &&
 	    inode->i_size & 0xff000000) {
 		inode->i_size &= 0x00ffffff;
 	}
@@ -1258,11 +1279,15 @@ static void isofs_read_inode(struct inode * inode)
 	}
 #endif
 
-	inode->i_mtime = inode->i_atime = inode->i_ctime =
-		iso_date(de->date, high_sierra);
+	inode->i_mtime.tv_sec =
+	inode->i_atime.tv_sec =
+	inode->i_ctime.tv_sec = iso_date(de->date, high_sierra);
+	inode->i_mtime.tv_nsec =
+	inode->i_atime.tv_nsec =
+	inode->i_ctime.tv_nsec = 0;
 
-	inode->u.isofs_i.i_first_extent = (isonum_733 (de->extent) +
-					   isonum_711 (de->ext_attr_length));
+	ei->i_first_extent = (isonum_733 (de->extent) +
+			      isonum_711 (de->ext_attr_length));
 
 	/* Set the number of blocks for stat() - should be done before RR */
 	inode->i_blksize = PAGE_CACHE_SIZE; /* For stat() only */
@@ -1276,58 +1301,37 @@ static void isofs_read_inode(struct inode * inode)
 	if (!high_sierra) {
 		parse_rock_ridge_inode(de, inode);
 		/* if we want uid/gid set, override the rock ridge setting */
-		test_and_set_uid(&inode->i_uid, inode->i_sb->u.isofs_sb.s_uid);
-		test_and_set_gid(&inode->i_gid, inode->i_sb->u.isofs_sb.s_gid);
+		test_and_set_uid(&inode->i_uid, sbi->s_uid);
+		test_and_set_gid(&inode->i_gid, sbi->s_gid);
 	}
 
 	/* get the volume sequence number */
 	volume_seq_no = isonum_723 (de->volume_sequence_number) ;
 
-	/*
-	 * Disable checking if we see any volume number other than 0 or 1.
-	 * We could use the cruft option, but that has multiple purposes, one
-	 * of which is limiting the file size to 16Mb.  Thus we silently allow
-	 * volume numbers of 0 to go through without complaining.
-	 */
-	if (inode->i_sb->u.isofs_sb.s_cruft == 'n' &&
-	    (volume_seq_no != 0) && (volume_seq_no != 1)) {
-		printk(KERN_WARNING "Warning: defective CD-ROM "
-		       "(volume sequence number %d). "
-		       "Enabling \"cruft\" mount option.\n", volume_seq_no);
-		inode->i_sb->u.isofs_sb.s_cruft = 'y';
-	}
-
 	/* Install the inode operations vector */
-#ifndef IGNORE_WRONG_MULTI_VOLUME_SPECS
-	if (inode->i_sb->u.isofs_sb.s_cruft != 'y' &&
-	    (volume_seq_no != 0) && (volume_seq_no != 1)) {
-		printk(KERN_WARNING "Multi-volume CD somehow got mounted.\n");
-	} else
-#endif /*IGNORE_WRONG_MULTI_VOLUME_SPECS */
-	{
-		if (S_ISREG(inode->i_mode)) {
-			inode->i_fop = &generic_ro_fops;
-			switch ( inode->u.isofs_i.i_file_format ) {
+	if (S_ISREG(inode->i_mode)) {
+		inode->i_fop = &generic_ro_fops;
+		switch ( ei->i_file_format ) {
 #ifdef CONFIG_ZISOFS
-			case isofs_file_compressed:
-				inode->i_data.a_ops = &zisofs_aops;
-				break;
+		case isofs_file_compressed:
+			inode->i_data.a_ops = &zisofs_aops;
+			break;
 #endif
-			default:
-				inode->i_data.a_ops = &isofs_aops;
-				break;
-			}
-		} else if (S_ISDIR(inode->i_mode)) {
-			inode->i_op = &isofs_dir_inode_operations;
-			inode->i_fop = &isofs_dir_operations;
-		} else if (S_ISLNK(inode->i_mode)) {
-			inode->i_op = &page_symlink_inode_operations;
-			inode->i_data.a_ops = &isofs_symlink_aops;
-		} else
-			/* XXX - parse_rock_ridge_inode() had already set i_rdev. */
-			init_special_inode(inode, inode->i_mode,
-					   kdev_t_to_nr(inode->i_rdev));
-	}
+		default:
+			inode->i_data.a_ops = &isofs_aops;
+			break;
+		}
+	} else if (S_ISDIR(inode->i_mode)) {
+		inode->i_op = &isofs_dir_inode_operations;
+		inode->i_fop = &isofs_dir_operations;
+	} else if (S_ISLNK(inode->i_mode)) {
+		inode->i_op = &page_symlink_inode_operations;
+		inode->i_data.a_ops = &isofs_symlink_aops;
+	} else
+		/* XXX - parse_rock_ridge_inode() had already set i_rdev. */
+		init_special_inode(inode, inode->i_mode,
+				   kdev_t_to_nr(inode->i_rdev));
+
  out:
 	if (tmpde)
 		kfree(tmpde);
@@ -1345,7 +1349,7 @@ static void isofs_read_inode(struct inode * inode)
 #ifdef LEAK_CHECK
 #undef malloc
 #undef free_s
-#undef bread
+#undef sb_bread
 #undef brelse
 
 void * leak_check_malloc(unsigned int size){
@@ -1360,9 +1364,9 @@ void leak_check_free_s(void * obj, int size){
   return kfree(obj);
 }
 
-struct buffer_head * leak_check_bread(int dev, int block, int size){
+struct buffer_head * leak_check_bread(struct super_block *sb, int block){
   check_bread++;
-  return bread(dev, block, size);
+  return sb_bread(sb, block);
 }
 
 void leak_check_brelse(struct buffer_head * bh){
@@ -1372,18 +1376,42 @@ void leak_check_brelse(struct buffer_head * bh){
 
 #endif
 
-static DECLARE_FSTYPE_DEV(iso9660_fs_type, "iso9660", isofs_read_super);
+static struct super_block *isofs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_bdev(fs_type, flags, dev_name, data, isofs_fill_super);
+}
+
+static struct file_system_type iso9660_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "iso9660",
+	.get_sb		= isofs_get_sb,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
 
 static int __init init_iso9660_fs(void)
 {
+	int err = init_inodecache();
+	if (err)
+		goto out;
 #ifdef CONFIG_ZISOFS
-	int err;
-
 	err = zisofs_init();
-	if ( err )
-		return err;
+	if (err)
+		goto out1;
 #endif
-        return register_filesystem(&iso9660_fs_type);
+	err = register_filesystem(&iso9660_fs_type);
+	if (err)
+		goto out2;
+	return 0;
+out2:
+#ifdef CONFIG_ZISOFS
+	zisofs_cleanup();
+out1:
+#endif
+	destroy_inodecache();
+out:
+	return err;
 }
 
 static void __exit exit_iso9660_fs(void)
@@ -1392,9 +1420,8 @@ static void __exit exit_iso9660_fs(void)
 #ifdef CONFIG_ZISOFS
 	zisofs_cleanup();
 #endif
+	destroy_inodecache();
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(init_iso9660_fs)
 module_exit(exit_iso9660_fs)

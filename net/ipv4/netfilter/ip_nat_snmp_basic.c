@@ -50,12 +50,11 @@
 #include <linux/netfilter_ipv4.h>
 #include <linux/netfilter_ipv4/ip_nat.h>
 #include <linux/netfilter_ipv4/ip_nat_helper.h>
-#include <linux/brlock.h>
 #include <linux/types.h>
 #include <linux/ip.h>
-#include <net/checksum.h>
 #include <net/udp.h>
 #include <asm/uaccess.h>
+#include <asm/checksum.h>
 
 
 
@@ -232,11 +231,6 @@ static unsigned char asn1_length_decode(struct asn1_ctx *ctx,
 			}
 		}
 	}
-
-	/* don't trust len bigger than ctx buffer */
-	if (*len > ctx->end - ctx->pointer)
-		return 0;
-
 	return 1;
 }
 
@@ -253,11 +247,7 @@ static unsigned char asn1_header_decode(struct asn1_ctx *ctx,
 		
 	if (!asn1_length_decode(ctx, &def, &len))
 		return 0;
-
-	/* primitive shall be definite, indefinite shall be constructed */
-	if (*con == ASN1_PRI && !def)
-		return 0;
-
+		
 	if (def)
 		*eoc = ctx->pointer + len;
 	else
@@ -442,11 +432,6 @@ static unsigned char asn1_oid_decode(struct asn1_ctx *ctx,
 	unsigned long *optr;
 	
 	size = eoc - ctx->pointer + 1;
-
-	/* first subid actually encodes first two subids */
-	if (size < 2 || size > ULONG_MAX/sizeof(unsigned long))
-		return 0;
-
 	*oid = kmalloc(size * sizeof(unsigned long), GFP_ATOMIC);
 	if (*oid == NULL) {
 		if (net_ratelimit())
@@ -620,7 +605,7 @@ struct snmp_v1_trap
 #define SERR_NSI    1
 #define SERR_EOM    2
 
-static void inline mangle_address(unsigned char *begin,
+static inline void mangle_address(unsigned char *begin,
                                   unsigned char *addr,
                                   const struct oct1_map *map,
                                   u_int16_t *check);
@@ -740,7 +725,6 @@ static unsigned char snmp_object_decode(struct asn1_ctx *ctx,
 			*obj = kmalloc(sizeof(struct snmp_object) + len,
 			               GFP_ATOMIC);
 			if (*obj == NULL) {
-				kfree(p);
 				kfree(id);
 				if (net_ratelimit())
 					printk("OOM in bsalg (%d)\n", __LINE__);
@@ -877,77 +861,6 @@ static unsigned char snmp_request_decode(struct asn1_ctx *ctx,
 	return 1;
 }
 
-/* 
- * Fast checksum update for possibly oddly-aligned UDP byte, from the
- * code example in the draft.
- */
-static void fast_csum(unsigned char *csum,
-                      const unsigned char *optr,
-                      const unsigned char *nptr,
-                      int odd)
-{
-	long x, old, new;
-	
-	x = csum[0] * 256 + csum[1];
-	
-	x =~ x & 0xFFFF;
-	
-	if (odd) old = optr[0] * 256;
-	else old = optr[0];
-	
-	x -= old & 0xFFFF;
-	if (x <= 0) {
-		x--;
-		x &= 0xFFFF;
-	}
-	
-	if (odd) new = nptr[0] * 256;
-	else new = nptr[0];
-	
-	x += new & 0xFFFF;
-	if (x & 0x10000) {
-		x++;
-		x &= 0xFFFF;
-	}
-	
-	x =~ x & 0xFFFF;
-	csum[0] = x / 256;
-	csum[1] = x & 0xFF;
-}
-
-/* 
- * Mangle IP address.
- * 	- begin points to the start of the snmp messgae
- *      - addr points to the start of the address
- */
-static void inline mangle_address(unsigned char *begin,
-                                  unsigned char *addr,
-                                  const struct oct1_map *map,
-                                  u_int16_t *check)
-{
-	if (map->from == NOCT1(*addr)) {
-		u_int32_t old;
-		
-		if (debug)
-			memcpy(&old, (unsigned char *)addr, sizeof(old));
-			
-		*addr = map->to;
-		
-		/* Update UDP checksum if being used */
-		if (*check) {
-			unsigned char odd = !((addr - begin) % 2);
-			
-			fast_csum((unsigned char *)check,
-			          &map->from, &map->to, odd);
-			          
-		}
-		
-		if (debug)
-			printk(KERN_DEBUG "bsalg: mapped %u.%u.%u.%u to "
-			       "%u.%u.%u.%u\n", NIPQUAD(old), NIPQUAD(*addr));
-	}
-}
-
 static unsigned char snmp_trap_decode(struct asn1_ctx *ctx,
                                       struct snmp_v1_trap *trap,
                                       const struct oct1_map *map,
@@ -1011,12 +924,12 @@ static unsigned char snmp_trap_decode(struct asn1_ctx *ctx,
 		
 	return 1;
 
-err_addr_free:
-	kfree((unsigned long *)trap->ip_address);
-
 err_id_free:
 	kfree(trap->id);
 
+err_addr_free:
+	kfree((unsigned long *)trap->ip_address);
+	
 	return 0;
 }
 
@@ -1036,6 +949,77 @@ static void hex_dump(unsigned char *buf, size_t len)
 		printk("%02x ", *(buf + i));
 	}
 	printk("\n");
+}
+
+/* 
+ * Fast checksum update for possibly oddly-aligned UDP byte, from the
+ * code example in the draft.
+ */
+static void fast_csum(unsigned char *csum,
+                      const unsigned char *optr,
+                      const unsigned char *nptr,
+                      int odd)
+{
+	long x, old, new;
+	
+	x = csum[0] * 256 + csum[1];
+	
+	x =~ x & 0xFFFF;
+	
+	if (odd) old = optr[0] * 256;
+	else old = optr[0];
+	
+	x -= old & 0xFFFF;
+	if (x <= 0) {
+		x--;
+		x &= 0xFFFF;
+	}
+	
+	if (odd) new = nptr[0] * 256;
+	else new = nptr[0];
+	
+	x += new & 0xFFFF;
+	if (x & 0x10000) {
+		x++;
+		x &= 0xFFFF;
+	}
+	
+	x =~ x & 0xFFFF;
+	csum[0] = x / 256;
+	csum[1] = x & 0xFF;
+}
+
+/* 
+ * Mangle IP address.
+ * 	- begin points to the start of the snmp messgae
+ *      - addr points to the start of the address
+ */
+static inline void mangle_address(unsigned char *begin,
+                                  unsigned char *addr,
+                                  const struct oct1_map *map,
+                                  u_int16_t *check)
+{
+	if (map->from == NOCT1(*addr)) {
+		u_int32_t old;
+		
+		if (debug)
+			memcpy(&old, (unsigned char *)addr, sizeof(old));
+			
+		*addr = map->to;
+		
+		/* Update UDP checksum if being used */
+		if (*check) {
+			unsigned char odd = !((addr - begin) % 2);
+			
+			fast_csum((unsigned char *)check,
+			          &map->from, &map->to, odd);
+			          
+		}
+		
+		if (debug)
+			printk(KERN_DEBUG "bsalg: mapped %u.%u.%u.%u to "
+			       "%u.%u.%u.%u\n", NIPQUAD(old), NIPQUAD(*addr));
+	}
 }
 
 /*
@@ -1134,10 +1118,11 @@ static int snmp_parse_mangle(unsigned char *msg,
 		struct snmp_v1_trap trap;
 		unsigned char ret = snmp_trap_decode(&ctx, &trap, map, check);
 		
-		if (ret) {
-			kfree(trap.id);
-			kfree((unsigned long *)trap.ip_address);
-		} else 
+		/* Discard trap allocations regardless */
+		kfree(trap.id);
+		kfree((unsigned long *)trap.ip_address);
+		
+		if (!ret)
 			return ret;
 		
 	} else {
@@ -1321,7 +1306,7 @@ static unsigned int nat_help(struct ip_conntrack *ct,
 static struct ip_nat_helper snmp = { 
 	{ NULL, NULL },
 	"snmp",
-	IP_NAT_HELPER_F_STANDALONE,
+	0,
 	THIS_MODULE,
 	{ { 0, { .udp = { __constant_htons(SNMP_PORT) } } },
 	  { 0, { 0 }, IPPROTO_UDP } },
@@ -1332,7 +1317,7 @@ static struct ip_nat_helper snmp = {
 static struct ip_nat_helper snmp_trap = { 
 	{ NULL, NULL },
 	"snmp_trap",
-	IP_NAT_HELPER_F_STANDALONE,
+	0,
 	THIS_MODULE,
 	{ { 0, { .udp = { __constant_htons(SNMP_TRAP_PORT) } } },
 	  { 0, { 0 }, IPPROTO_UDP } },
@@ -1365,8 +1350,7 @@ static void __exit fini(void)
 {
 	ip_nat_helper_unregister(&snmp);
 	ip_nat_helper_unregister(&snmp_trap);
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	synchronize_net();
 }
 
 module_init(init);

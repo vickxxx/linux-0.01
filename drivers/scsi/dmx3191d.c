@@ -31,11 +31,11 @@
 #include <linux/signal.h>
 #include <linux/stat.h>
 #include <linux/version.h>
+#include <linux/interrupt.h>
+#include <linux/delay.h>
 
 #include "scsi.h"
 #include "hosts.h"
-#include "constants.h"
-#include "sd.h"
 
 #include "dmx3191d.h"
 
@@ -53,15 +53,10 @@
 #include "NCR5380.c"
 
 
-int __init dmx3191d_detect(Scsi_Host_Template *tmpl) {
+static int __init dmx3191d_detect(Scsi_Host_Template *tmpl) {
 	int boards = 0;
 	struct Scsi_Host *instance = NULL;
 	struct pci_dev *pdev = NULL;
-
-	if (!pci_present()) {
-		printk(KERN_WARNING "dmx3191: PCI support not enabled\n");
-		return 0;
-	}
 
 	tmpl->proc_name = DMX3191D_DRIVER_NAME;
 
@@ -86,17 +81,17 @@ int __init dmx3191d_detect(Scsi_Host_Template *tmpl) {
 			release_region(port, DMX3191D_REGION);
 			continue;
 		}
-		scsi_set_pci_device(instance, pdev);
+		scsi_set_device(instance, &pdev->dev);
 		instance->io_port = port;
 		instance->irq = pdev->irq;
 		NCR5380_init(instance, FLAG_NO_PSEUDO_DMA | FLAG_DTC3181E);
 
-		if (request_irq(pdev->irq, dmx3191d_do_intr, SA_SHIRQ,
+		if (request_irq(pdev->irq, dmx3191d_intr, SA_SHIRQ,
 				DMX3191D_DRIVER_NAME, instance)) {
 			printk(KERN_WARNING "dmx3191: IRQ %d not available - switching to polled mode.\n", pdev->irq);
 			/* Steam powered scsi controllers run without an IRQ
 			   anyway */
-			instance->irq = IRQ_NONE;
+			instance->irq = SCSI_IRQ_NONE;
 		}
 
 		boards++;
@@ -104,16 +99,16 @@ int __init dmx3191d_detect(Scsi_Host_Template *tmpl) {
 	return boards;
 }
 
-const char * dmx3191d_info(struct Scsi_Host *host) {
+static const char * dmx3191d_info(struct Scsi_Host *host) {
 	static const char *info ="Domex DMX3191D";
 
 	return info;
 }
 
-int dmx3191d_release_resources(struct Scsi_Host *instance)
+static int dmx3191d_release_resources(struct Scsi_Host *instance)
 {
 	release_region(instance->io_port, DMX3191D_REGION);
-	if(instance->irq!=IRQ_NONE)
+	if(instance->irq!=SCSI_IRQ_NONE)
 		free_irq(instance->irq, instance);
 
 	return 0;
@@ -121,6 +116,22 @@ int dmx3191d_release_resources(struct Scsi_Host *instance)
 
 MODULE_LICENSE("GPL");
 
-static Scsi_Host_Template driver_template = DMX3191D;
+static Scsi_Host_Template driver_template = {
+	.proc_info		= dmx3191d_proc_info,
+	.name			= "Domex DMX3191D",
+	.detect			= dmx3191d_detect,
+	.release		= dmx3191d_release_resources,
+	.info			= dmx3191d_info,
+	.queuecommand		= dmx3191d_queue_command,
+	.eh_abort_handler	= dmx3191d_abort,
+	.eh_bus_reset_handler	= dmx3191d_bus_reset,
+	.eh_device_reset_handler = dmx3191d_device_reset,
+	.eh_host_reset_handler	= dmx3191d_host_reset,
+	.can_queue		= 32,
+        .this_id		= 7,
+        .sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 2,
+        .use_clustering		= DISABLE_CLUSTERING,
+};
 #include "scsi_module.c"
 

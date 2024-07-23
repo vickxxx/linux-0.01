@@ -27,17 +27,16 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/netdevice.h>
+#include <linux/trdevice.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
-#include <linux/netdevice.h>
-#include <linux/trdevice.h>
 #include "tms380tr.h"
 #include "abyss.h"            /* Madge-specific constants */
 
@@ -113,9 +112,10 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 		
 	/* At this point we have found a valid card. */
 		
-	dev = init_trdev(NULL, 0);
+	dev = alloc_trdev(0);
 	if (!dev)
 		return -ENOMEM;
+
 	SET_MODULE_OWNER(dev);
 
 	if (!request_region(pci_ioaddr, ABYSS_IO_EXTENT, dev->name)) {
@@ -166,21 +166,21 @@ static int __init abyss_attach(struct pci_dev *pdev, const struct pci_device_id 
 	dev->open = abyss_open;
 	dev->stop = abyss_close;
 
-	ret = register_trdev(dev);
+	pci_set_drvdata(pdev, dev);
+
+	ret = register_netdev(dev);
 	if (ret)
 		goto err_out_tmsdev;
-
-	pci_set_drvdata(pdev, dev);
 	return 0;
 
 err_out_tmsdev:
+	pci_set_drvdata(pdev, NULL);
 	tmsdev_term(dev);
 err_out_irq:
 	free_irq(pdev->irq, dev);
 err_out_region:
 	release_region(pci_ioaddr, ABYSS_IO_EXTENT);
 err_out_trdev:
-	unregister_netdev(dev);
 	kfree(dev);
 	return ret;
 }
@@ -433,7 +433,7 @@ static int abyss_close(struct net_device *dev)
 	return 0;
 }
 
-static void __exit abyss_detach (struct pci_dev *pdev)
+static void __devexit abyss_detach (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 	
@@ -448,10 +448,10 @@ static void __exit abyss_detach (struct pci_dev *pdev)
 }
 
 static struct pci_driver abyss_driver = {
-	name:		"abyss",
-	id_table:	abyss_pci_tbl,
-	probe:		abyss_attach,
-	remove:		abyss_detach,
+	.name		= "abyss",
+	.id_table	= abyss_pci_tbl,
+	.probe		= abyss_attach,
+	.remove		= __devexit_p(abyss_detach),
 };
 
 static int __init abyss_init (void)

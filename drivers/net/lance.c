@@ -43,22 +43,20 @@ static const char version[] = "lance.c:v1.15ac 1999/11/13 dplatt@3do.com, becker
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/init.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/dma.h>
 
 static unsigned int lance_portlist[] __initdata = { 0x300, 0x320, 0x340, 0x360, 0};
 int lance_probe(struct net_device *dev);
@@ -280,7 +278,7 @@ static int lance_open_fail(struct net_device *dev);
 static void lance_init_ring(struct net_device *dev, int mode);
 static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static int lance_rx(struct net_device *dev);
-static void lance_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t lance_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static int lance_close(struct net_device *dev);
 static struct net_device_stats *lance_get_stats(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
@@ -354,7 +352,7 @@ MODULE_LICENSE("GPL");
    board probes now that kmalloc() can allocate ISA DMA-able regions.
    This also allows the LANCE driver to be used as a module.
    */
-int lance_probe(struct net_device *dev)
+int __init lance_probe(struct net_device *dev)
 {
 	int *port, result;
 
@@ -383,7 +381,7 @@ int lance_probe(struct net_device *dev)
 					return 0;
 				}
 			}
-			release_resource(r);
+			release_region(ioaddr, LANCE_TOTAL_SIZE);
 		}
 	}
 	return -ENODEV;
@@ -392,7 +390,7 @@ int lance_probe(struct net_device *dev)
 static int __init lance_probe1(struct net_device *dev, int ioaddr, int irq, int options)
 {
 	struct lance_private *lp;
-	short dma_channels;					/* Mark spuriously-busy DMA channels */
+	long dma_channels;			/* Mark spuriously-busy DMA channels */
 	int i, reset_val, lance_version;
 	const char *chipname;
 	/* Flags for specific chips or boards. */
@@ -495,15 +493,15 @@ static int __init lance_probe1(struct net_device *dev, int ioaddr, int irq, int 
 		lp->init_block.phys_addr[i] = dev->dev_addr[i];
 	lp->init_block.filter[0] = 0x00000000;
 	lp->init_block.filter[1] = 0x00000000;
-	lp->init_block.rx_ring = ((u32)virt_to_bus(lp->rx_ring) & 0xffffff) | RX_RING_LEN_BITS;
-	lp->init_block.tx_ring = ((u32)virt_to_bus(lp->tx_ring) & 0xffffff) | TX_RING_LEN_BITS;
+	lp->init_block.rx_ring = ((u32)isa_virt_to_bus(lp->rx_ring) & 0xffffff) | RX_RING_LEN_BITS;
+	lp->init_block.tx_ring = ((u32)isa_virt_to_bus(lp->tx_ring) & 0xffffff) | TX_RING_LEN_BITS;
 
 	outw(0x0001, ioaddr+LANCE_ADDR);
 	inw(ioaddr+LANCE_ADDR);
-	outw((short) (u32) virt_to_bus(&lp->init_block), ioaddr+LANCE_DATA);
+	outw((short) (u32) isa_virt_to_bus(&lp->init_block), ioaddr+LANCE_DATA);
 	outw(0x0002, ioaddr+LANCE_ADDR);
 	inw(ioaddr+LANCE_ADDR);
-	outw(((u32)virt_to_bus(&lp->init_block)) >> 16, ioaddr+LANCE_DATA);
+	outw(((u32)isa_virt_to_bus(&lp->init_block)) >> 16, ioaddr+LANCE_DATA);
 	outw(0x0000, ioaddr+LANCE_ADDR);
 	inw(ioaddr+LANCE_ADDR);
 
@@ -545,15 +543,19 @@ static int __init lance_probe1(struct net_device *dev, int ioaddr, int irq, int 
 	if (dev->irq >= 2)
 		printk(" assigned IRQ %d", dev->irq);
 	else if (lance_version != 0)  {	/* 7990 boards need DMA detection first. */
+		unsigned long irq_mask, delay;
+
 		/* To auto-IRQ we enable the initialization-done and DMA error
 		   interrupts. For ISA boards we get a DMA error, but VLB and PCI
 		   boards will work. */
-		autoirq_setup(0);
+		irq_mask = probe_irq_on();
 
 		/* Trigger an initialization just for the interrupt. */
 		outw(0x0041, ioaddr+LANCE_DATA);
 
-		dev->irq = autoirq_report(2);
+		delay = jiffies + HZ/50;
+		while (time_before(jiffies, delay)) ;
+		dev->irq = probe_irq_off(irq_mask);
 		if (dev->irq)
 			printk(", probed IRQ %d", dev->irq);
 		else {
@@ -619,10 +621,14 @@ static int __init lance_probe1(struct net_device *dev, int ioaddr, int irq, int 
 	if (lance_version == 0 && dev->irq == 0) {
 		/* We may auto-IRQ now that we have a DMA channel. */
 		/* Trigger an initialization just for the interrupt. */
-		autoirq_setup(0);
+		unsigned long irq_mask, delay;
+
+		irq_mask = probe_irq_on();
 		outw(0x0041, ioaddr+LANCE_DATA);
 
-		dev->irq = autoirq_report(4);
+		delay = jiffies + HZ/25;
+		while (time_before(jiffies, delay)) ;
+		dev->irq = probe_irq_off(irq_mask);
 		if (dev->irq == 0) {
 			printk("  Failed to detect the 7990 IRQ line.\n");
 			return -ENODEV;
@@ -704,16 +710,16 @@ lance_open(struct net_device *dev)
 	if (lance_debug > 1)
 		printk("%s: lance_open() irq %d dma %d tx/rx rings %#x/%#x init %#x.\n",
 			   dev->name, dev->irq, dev->dma,
-		           (u32) virt_to_bus(lp->tx_ring),
-		           (u32) virt_to_bus(lp->rx_ring),
-			   (u32) virt_to_bus(&lp->init_block));
+		           (u32) isa_virt_to_bus(lp->tx_ring),
+		           (u32) isa_virt_to_bus(lp->rx_ring),
+			   (u32) isa_virt_to_bus(&lp->init_block));
 
 	lance_init_ring(dev, GFP_KERNEL);
 	/* Re-initialize the LANCE, and start it when done. */
 	outw(0x0001, ioaddr+LANCE_ADDR);
-	outw((short) (u32) virt_to_bus(&lp->init_block), ioaddr+LANCE_DATA);
+	outw((short) (u32) isa_virt_to_bus(&lp->init_block), ioaddr+LANCE_DATA);
 	outw(0x0002, ioaddr+LANCE_ADDR);
-	outw(((u32)virt_to_bus(&lp->init_block)) >> 16, ioaddr+LANCE_DATA);
+	outw(((u32)isa_virt_to_bus(&lp->init_block)) >> 16, ioaddr+LANCE_DATA);
 
 	outw(0x0004, ioaddr+LANCE_ADDR);
 	outw(0x0915, ioaddr+LANCE_DATA);
@@ -735,7 +741,7 @@ lance_open(struct net_device *dev)
 
 	if (lance_debug > 2)
 		printk("%s: LANCE open after %d ticks, init block %#x csr0 %4.4x.\n",
-			   dev->name, i, (u32) virt_to_bus(&lp->init_block), inw(ioaddr+LANCE_DATA));
+			   dev->name, i, (u32) isa_virt_to_bus(&lp->init_block), inw(ioaddr+LANCE_DATA));
 
 	return 0;					/* Always succeed */
 }
@@ -799,7 +805,7 @@ lance_init_ring(struct net_device *dev, int gfp)
 		if (rx_buff == NULL)
 			lp->rx_ring[i].base = 0;
 		else
-			lp->rx_ring[i].base = (u32)virt_to_bus(rx_buff) | 0x80000000;
+			lp->rx_ring[i].base = (u32)isa_virt_to_bus(rx_buff) | 0x80000000;
 		lp->rx_ring[i].buf_length = -PKT_BUF_SZ;
 	}
 	/* The Tx buffer address is filled in as needed, but we do need to clear
@@ -814,8 +820,8 @@ lance_init_ring(struct net_device *dev, int gfp)
 		lp->init_block.phys_addr[i] = dev->dev_addr[i];
 	lp->init_block.filter[0] = 0x00000000;
 	lp->init_block.filter[1] = 0x00000000;
-	lp->init_block.rx_ring = ((u32)virt_to_bus(lp->rx_ring) & 0xffffff) | RX_RING_LEN_BITS;
-	lp->init_block.tx_ring = ((u32)virt_to_bus(lp->tx_ring) & 0xffffff) | TX_RING_LEN_BITS;
+	lp->init_block.rx_ring = ((u32)isa_virt_to_bus(lp->rx_ring) & 0xffffff) | RX_RING_LEN_BITS;
+	lp->init_block.tx_ring = ((u32)isa_virt_to_bus(lp->tx_ring) & 0xffffff) | TX_RING_LEN_BITS;
 }
 
 static void
@@ -893,8 +899,14 @@ static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	/* The old LANCE chips doesn't automatically pad buffers to min. size. */
 	if (chip_table[lp->chip_version].flags & LANCE_MUST_PAD) {
-		lp->tx_ring[entry].length =
-			-(ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN);
+		if (skb->len < ETH_ZLEN) {
+			skb = skb_padto(skb, ETH_ZLEN);
+			if (skb == NULL)
+				goto out;
+			lp->tx_ring[entry].length = -ETH_ZLEN;
+		}
+		else 
+			lp->tx_ring[entry].length = -skb->len;
 	} else
 		lp->tx_ring[entry].length = -skb->len;
 
@@ -904,17 +916,17 @@ static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	/* If any part of this buffer is >16M we must copy it to a low-memory
 	   buffer. */
-	if ((u32)virt_to_bus(skb->data) + skb->len > 0x01000000) {
+	if ((u32)isa_virt_to_bus(skb->data) + skb->len > 0x01000000) {
 		if (lance_debug > 5)
 			printk("%s: bouncing a high-memory packet (%#x).\n",
-				   dev->name, (u32)virt_to_bus(skb->data));
+				   dev->name, (u32)isa_virt_to_bus(skb->data));
 		memcpy(&lp->tx_bounce_buffs[entry], skb->data, skb->len);
 		lp->tx_ring[entry].base =
-			((u32)virt_to_bus((lp->tx_bounce_buffs + entry)) & 0xffffff) | 0x83000000;
+			((u32)isa_virt_to_bus((lp->tx_bounce_buffs + entry)) & 0xffffff) | 0x83000000;
 		dev_kfree_skb(skb);
 	} else {
 		lp->tx_skbuff[entry] = skb;
-		lp->tx_ring[entry].base = ((u32)virt_to_bus(skb->data) & 0xffffff) | 0x83000000;
+		lp->tx_ring[entry].base = ((u32)isa_virt_to_bus(skb->data) & 0xffffff) | 0x83000000;
 	}
 	lp->cur_tx++;
 
@@ -927,12 +939,13 @@ static int lance_start_xmit(struct sk_buff *skb, struct net_device *dev)
 	if ((lp->cur_tx - lp->dirty_tx) >= TX_RING_SIZE)
 		netif_stop_queue(dev);
 
+out:
 	spin_unlock_irqrestore(&lp->devlock, flags);
 	return 0;
 }
 
 /* The LANCE interrupt handler. */
-static void
+static irqreturn_t
 lance_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device *dev = dev_id;
@@ -942,7 +955,7 @@ lance_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 
 	if (dev == NULL) {
 		printk ("lance_interrupt(): irq %d for unknown device.\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	ioaddr = dev->base_addr;
@@ -1053,6 +1066,7 @@ lance_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			   inw(dev->base_addr + LANCE_DATA));
 
 	spin_unlock (&lp->devlock);
+	return IRQ_HANDLED;
 }
 
 static int
@@ -1112,7 +1126,7 @@ lance_rx(struct net_device *dev)
 				skb_reserve(skb,2);	/* 16 byte align */
 				skb_put(skb,pkt_len);	/* Make room */
 				eth_copy_and_sum(skb,
-					(unsigned char *)bus_to_virt((lp->rx_ring[entry].base & 0x00ffffff)),
+					(unsigned char *)isa_bus_to_virt((lp->rx_ring[entry].base & 0x00ffffff)),
 					pkt_len,0);
 				skb->protocol=eth_type_trans(skb,dev);
 				netif_rx(skb);

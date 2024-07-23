@@ -8,19 +8,13 @@
  * byte string operations. But on a 386 or a PPro the
  * byte string ops are faster than doing it by hand
  * (MUCH faster on a Pentium).
- *
- * Also, the byte strings actually work correctly. Forget
- * the i486 routines for now as they may be broken..
  */
-#if FIXED_486_STRING && defined(CONFIG_X86_USE_STRING_486)
-#include <asm/string-486.h>
-#else
 
 /*
  * This string-include defines all string functions as inline
  * functions. Use gcc. It also assumes ds=es=data space, this should be
  * normal. Most of the string-functions are rather heavily hand-optimized,
- * see especially strtok,strstr,str[c]spn. They should work, but are not
+ * see especially strsep,strstr,str[c]spn. They should work, but are not
  * very easy to understand. Everything is done entirely within the register
  * set, making the functions fast and clean. String instructions have been
  * used through-out, making for "slightly" unclear code :-)
@@ -75,7 +69,7 @@ __asm__ __volatile__(
 	"testb %%al,%%al\n\t"
 	"jne 1b"
 	: "=&S" (d0), "=&D" (d1), "=&a" (d2), "=&c" (d3)
-	: "0" (src), "1" (dest), "2" (0), "3" (0xffffffff):"memory");
+	: "0" (src), "1" (dest), "2" (0), "3" (0xffffffffu):"memory");
 return dest;
 }
 
@@ -97,7 +91,7 @@ __asm__ __volatile__(
 	"2:\txorl %2,%2\n\t"
 	"stosb"
 	: "=&S" (d0), "=&D" (d1), "=&a" (d2), "=&c" (d3)
-	: "0" (src),"1" (dest),"2" (0),"3" (0xffffffff), "g" (count)
+	: "0" (src),"1" (dest),"2" (0),"3" (0xffffffffu), "g" (count)
 	: "memory");
 return dest;
 }
@@ -192,7 +186,7 @@ __asm__ __volatile__(
 	"scasb\n\t"
 	"notl %0\n\t"
 	"decl %0"
-	:"=c" (__res), "=&D" (d0) :"1" (s),"a" (0), "0" (0xffffffff));
+	:"=c" (__res), "=&D" (d0) :"1" (s),"a" (0), "0" (0xffffffffu));
 return __res;
 }
 
@@ -220,49 +214,9 @@ return (to);
  */
 static inline void * __constant_memcpy(void * to, const void * from, size_t n)
 {
-	switch (n) {
-		case 0:
-			return to;
-		case 1:
-			*(unsigned char *)to = *(const unsigned char *)from;
-			return to;
-		case 2:
-			*(unsigned short *)to = *(const unsigned short *)from;
-			return to;
-		case 3:
-			*(unsigned short *)to = *(const unsigned short *)from;
-			*(2+(unsigned char *)to) = *(2+(const unsigned char *)from);
-			return to;
-		case 4:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			return to;
-		case 6:	/* for Ethernet addresses */
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(2+(unsigned short *)to) = *(2+(const unsigned short *)from);
-			return to;
-		case 8:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
-			return to;
-		case 12:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
-			*(2+(unsigned long *)to) = *(2+(const unsigned long *)from);
-			return to;
-		case 16:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
-			*(2+(unsigned long *)to) = *(2+(const unsigned long *)from);
-			*(3+(unsigned long *)to) = *(3+(const unsigned long *)from);
-			return to;
-		case 20:
-			*(unsigned long *)to = *(const unsigned long *)from;
-			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
-			*(2+(unsigned long *)to) = *(2+(const unsigned long *)from);
-			*(3+(unsigned long *)to) = *(3+(const unsigned long *)from);
-			*(4+(unsigned long *)to) = *(4+(const unsigned long *)from);
-			return to;
-	}
+	if (n <= 128)
+		return __builtin_memcpy(to, from, n);
+
 #define COMMON(x) \
 __asm__ __volatile__( \
 	"rep ; movsl" \
@@ -525,7 +479,6 @@ static inline void * memscan(void * addr, int c, size_t size)
 	return addr;
 }
 
-#endif /* CONFIG_X86_USE_STRING_486 */
 #endif /* __KERNEL__ */
 
 #endif

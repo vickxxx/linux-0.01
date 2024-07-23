@@ -30,7 +30,7 @@ struct pci_bus_info
 	struct pci_ops *m68k_pci_ops;
 
 	void (*fixup)(int pci_modify);
-	void (*conf_device)(unsigned char bus, unsigned char device_fn);
+	void (*conf_device)(struct pci_dev *dev);
 };
 
 #define pcibios_assign_all_busses()	0
@@ -45,7 +45,10 @@ extern inline void pcibios_penalize_isa_irq(int irq)
 	/* We don't do dynamic PCI IRQ allocation */
 }
 
-/* Return the index of the PCI controller for device PDEV. */
-#define pci_controller_num(PDEV)	(0)
+/* The PCI address space does equal the physical memory
+ * address space.  The networking and block device layers use
+ * this boolean for bounce buffer decisions.
+ */
+#define PCI_DMA_BUS_IS_PHYS	(1)
 
 #endif /* _ASM_M68K_PCI_H */

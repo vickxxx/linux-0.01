@@ -1,4 +1,4 @@
-/* $Id: sys_sunos.c,v 1.135 2001/08/13 14:40:10 davem Exp $
+/* $Id: sys_sunos.c,v 1.137 2002/02/08 03:57:14 davem Exp $
  * sys_sunos.c: SunOS specific syscall compatibility support.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -33,6 +33,8 @@
 #include <linux/errno.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
+
+#include <net/sock.h>
 
 #include <asm/uaccess.h>
 #ifndef KERNEL_DS
@@ -90,8 +92,8 @@ asmlinkage unsigned long sunos_mmap(unsigned long addr, unsigned long len,
 	 * SunOS is so stupid some times... hmph!
 	 */
 	if (file) {
-		if(MAJOR(file->f_dentry->d_inode->i_rdev) == MEM_MAJOR &&
-		   MINOR(file->f_dentry->d_inode->i_rdev) == 5) {
+		if(major(file->f_dentry->d_inode->i_rdev) == MEM_MAJOR &&
+		   minor(file->f_dentry->d_inode->i_rdev) == 5) {
 			flags |= MAP_ANONYMOUS;
 			fput(file);
 			file = 0;
@@ -192,8 +194,7 @@ asmlinkage int sunos_brk(unsigned long brk)
 	 * simple, it hopefully works in most obvious cases.. Easy to
 	 * fool it, but this should catch most mistakes.
 	 */
-	freepages = atomic_read(&buffermem_pages) >> PAGE_SHIFT;
-	freepages += atomic_read(&page_cache_size);
+	freepages = get_page_cache_size();
 	freepages >>= 1;
 	freepages += nr_free_pages();
 	freepages += nr_swap_pages;
@@ -280,11 +281,11 @@ asmlinkage unsigned long sunos_sigblock(unsigned long blk_mask)
 {
 	unsigned long old;
 
-	spin_lock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
 	old = current->blocked.sig[0];
 	current->blocked.sig[0] |= (blk_mask & _BLOCKABLE);
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 	return old;
 }
 
@@ -292,11 +293,11 @@ asmlinkage unsigned long sunos_sigsetmask(unsigned long newmask)
 {
 	unsigned long retval;
 
-	spin_lock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
 	retval = current->blocked.sig[0];
 	current->blocked.sig[0] = (newmask & _BLOCKABLE);
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 	return retval;
 }
 
@@ -488,7 +489,7 @@ asmlinkage int sunos_uname(struct sunos_utsname *name)
 		ret |= __copy_to_user(&name->mach[0], &system_utsname.machine[0], sizeof(name->mach) - 1);
 	}
 	up_read(&uts_sem);
-	return ret;
+	return ret ? -EFAULT : 0;
 }
 
 asmlinkage int sunos_nosys(void)
@@ -646,7 +647,7 @@ sunos_nfs_get_server_fd (int fd, struct sockaddr_in *addr)
 
 	inode = file->f_dentry->d_inode;
 
-	socket = &inode->u.socket_i;
+	socket = SOCKET_I(inode);
 	local.sin_family = AF_INET;
 	local.sin_addr.s_addr = INADDR_ANY;
 
@@ -737,8 +738,8 @@ static int sunos_nfs_mount(char *dir_name, int linux_flags, void *data)
 	if(IS_ERR(the_name))
 		return PTR_ERR(the_name);
 
-	strncpy (linux_nfs_mount.hostname, the_name, 254);
-	linux_nfs_mount.hostname [255] = 0;
+	strlcpy(linux_nfs_mount.hostname, the_name,
+		sizeof(linux_nfs_mount.hostname));
 	putname (the_name);
 	
 	return do_mount ("", dir_name, "nfs", linux_flags, &linux_nfs_mount);
@@ -1049,8 +1050,8 @@ static inline int check_nonblock(int ret, int fd)
 	return ret;
 }
 
-extern asmlinkage int sys_read(unsigned int fd,char *buf,int count);
-extern asmlinkage int sys_write(unsigned int fd,char *buf,int count);
+extern asmlinkage ssize_t sys_read(unsigned int fd,char *buf,int count);
+extern asmlinkage ssize_t sys_write(unsigned int fd,char *buf,int count);
 extern asmlinkage int sys_recv(int fd, void * ubuf, int size, unsigned flags);
 extern asmlinkage int sys_send(int fd, void * buff, int len, unsigned flags);
 extern asmlinkage int sys_accept(int fd, struct sockaddr *sa, int *addrlen);
@@ -1106,38 +1107,16 @@ asmlinkage int sunos_send(int fd, void * buff, int len, unsigned flags)
 	return ret;
 }
 
-extern asmlinkage int sys_setsockopt(int fd, int level, int optname,
-				     char *optval, int optlen);
-
-asmlinkage int sunos_socket(int family, int type, int protocol)
-{
-	int ret, one = 1;
-
-	ret = sys_socket(family, type, protocol);
-	if (ret < 0)
-		goto out;
-
-	sys_setsockopt(ret, SOL_SOCKET, SO_BSDCOMPAT,
-		       (char *)&one, sizeof(one));
-out:
-	return ret;
-}
-
 asmlinkage int sunos_accept(int fd, struct sockaddr *sa, int *addrlen)
 {
-	int ret, one = 1;
+	int ret;
 
 	while (1) {
 		ret = check_nonblock(sys_accept(fd,sa,addrlen),fd);	
 		if (ret != -ENETUNREACH && ret != -EHOSTUNREACH)
 			break;
 	}
-	if (ret < 0)
-		goto out;
 
-	sys_setsockopt(ret, SOL_SOCKET, SO_BSDCOMPAT,
-		       (char *)&one, sizeof(one));
-out:
 	return ret;
 }
 
@@ -1167,7 +1146,7 @@ sunos_sigaction(int sig, const struct old_sigaction *act,
 	ret = do_sigaction(sig, act ? &new_ka : NULL, oact ? &old_ka : NULL);
 
 	if (!ret && oact) {
-		/* In the clone() case we could copy half consistant
+		/* In the clone() case we could copy half consistent
 		 * state to the user, however this could sleep and
 		 * deadlock us if we held the signal lock on SMP.  So for
 		 * now I take the easy way out and do no locking.

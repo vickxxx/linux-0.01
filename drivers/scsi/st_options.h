@@ -1,13 +1,18 @@
 /*
    The compile-time configurable defaults for the Linux SCSI tape driver.
 
-   Copyright 1995-2000 Kai Makisara.
+   Copyright 1995-2003 Kai Makisara.
 
-   Last modified: Sat Apr 22 14:47:02 2000 by makisara@kai.makisara.local
+   Last modified: Mon Apr  7 22:49:18 2003 by makisara
 */
 
 #ifndef _ST_OPTIONS_H
 #define _ST_OPTIONS_H
+
+/* If TRY_DIRECT_IO is non-zero, the driver tries to transfer data directly
+   between the user buffer and tape drive. If this is not possible, driver
+   buffer is used. If TRY_DIRECT_IO is zero, driver buffer is always used. */
+#define TRY_DIRECT_IO 1
 
 /* The driver does not wait for some operations to finish before returning
    to the user program if ST_NOWAIT is non-zero. This helps if the SCSI
@@ -30,22 +35,12 @@
    SENSE. */
 #define ST_DEFAULT_BLOCK 0
 
-/* The tape driver buffer size in kilobytes. Must be non-zero. */
-#define ST_BUFFER_BLOCKS 32
-
-/* The number of kilobytes of data in the buffer that triggers an
-   asynchronous write in fixed block mode. See also ST_ASYNC_WRITES
-   below. */
-#define ST_WRITE_THRESHOLD_BLOCKS 30
-
-/* The maximum number of tape buffers the driver tries to allocate at 
-   driver initialisation. The number is also constrained by the number
-   of drives detected. If more buffers are needed, they are allocated
-   at run time and freed after use. */
-#define ST_MAX_BUFFERS 4
+/* The minimum tape driver buffer size in kilobytes in fixed block mode.
+   Must be non-zero. */
+#define ST_FIXED_BUFFER_BLOCKS 32
 
 /* Maximum number of scatter/gather segments */
-#define ST_MAX_SG      16
+#define ST_MAX_SG      256
 
 /* The number of scatter/gather segments to allocate at first try (must be
    smaller or equal to the maximum). */
@@ -99,5 +94,7 @@
    The default is BSD semantics. */
 #define ST_SYSV 0
 
+/* Time to wait for the drive to become ready if blocking open */
+#define ST_BLOCK_SECONDS     120
 
 #endif

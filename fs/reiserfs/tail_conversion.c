@@ -3,10 +3,10 @@
  */
 
 #include <linux/config.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/pagemap.h>
+#include <linux/buffer_head.h>
 #include <linux/reiserfs_fs.h>
-#include <linux/locks.h>
 
 /* access to tail : when one is going to read tail it must make sure, that is not running.
  direct2indirect and indirect2direct can not run concurrently */
@@ -30,12 +30,12 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
                                 key of unfm pointer to be pasted */
     int	n_blk_size,
       n_retval;	  /* returned value for reiserfs_insert_item and clones */
-    struct unfm_nodeinfo unfm_ptr;  /* Handle on an unformatted node
+    unp_t unfm_ptr;  /* Handle on an unformatted node
 				       that will be inserted in the
 				       tree. */
 
 
-    sb->u.reiserfs_sb.s_direct2indirect ++;
+    REISERFS_SB(sb)->s_direct2indirect ++;
 
     n_blk_size = sb->s_blocksize;
 
@@ -49,14 +49,17 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
     make_cpu_key (&end_key, inode, tail_offset, TYPE_INDIRECT, 4);
 
     // FIXME: we could avoid this 
-    if ( search_for_position_by_key (sb, &end_key, path) == POSITION_FOUND )
-	reiserfs_panic (sb, "PAP-14030: direct2indirect: "
-			"pasted or inserted byte exists in the tree");
+    if ( search_for_position_by_key (sb, &end_key, path) == POSITION_FOUND ) {
+	reiserfs_warning ("PAP-14030: direct2indirect: "
+			"pasted or inserted byte exists in the tree %K. "
+			"Use fsck to repair.\n", &end_key);
+	pathrelse(path);
+	return -EIO;
+    }
     
     p_le_ih = PATH_PITEM_HEAD (path);
 
-    unfm_ptr.unfm_nodenum = cpu_to_le32 (unbh->b_blocknr);
-    unfm_ptr.unfm_freespace = 0; // ???
+    unfm_ptr = cpu_to_le32 (unbh->b_blocknr);
     
     if ( is_statdata_le_ih (p_le_ih) )  {
 	/* Insert new indirect item. */
@@ -90,10 +93,10 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
            last item of the file */
 	if ( search_for_position_by_key (sb, &end_key, path) == POSITION_FOUND )
 	    reiserfs_panic (sb, "PAP-14050: direct2indirect: "
-			    "direct item (%k) not found", &end_key);
+			    "direct item (%K) not found", &end_key);
 	p_le_ih = PATH_PITEM_HEAD (path);
 	RFALSE( !is_direct_le_ih (p_le_ih),
-	        "vs-14055: direct item expected(%k), found %h",
+	        "vs-14055: direct item expected(%K), found %h",
                 &end_key, p_le_ih);
         tail_size = (le_ih_k_offset (p_le_ih) & (n_blk_size - 1))
             + ih_item_len(p_le_ih) - 1;
@@ -102,7 +105,7 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
 	** this avoids overwriting good data from writepage() with old data
 	** from the disk or buffer cache
 	*/
-	if (buffer_uptodate(unbh) || Page_Uptodate(unbh->b_page)) {
+	if (buffer_uptodate(unbh) || PageUptodate(unbh->b_page)) {
 	    up_to_date_bh = NULL ;
 	} else {
 	    up_to_date_bh = unbh ;
@@ -118,14 +121,15 @@ int direct2indirect (struct reiserfs_transaction_handle *th, struct inode * inod
     }
     /* if we've copied bytes from disk into the page, we need to zero
     ** out the unused part of the block (it was not up to date before)
-    ** the page is still kmapped (by whoever called reiserfs_get_block)
     */
     if (up_to_date_bh) {
         unsigned pgoff = (tail_offset + total_tail - 1) & (PAGE_CACHE_SIZE - 1);
-	memset(page_address(unbh->b_page) + pgoff, 0, n_blk_size - total_tail) ;
+	char *kaddr=kmap_atomic(up_to_date_bh->b_page, KM_USER0);
+	memset(kaddr + pgoff, 0, n_blk_size - total_tail) ;
+	kunmap_atomic(kaddr, KM_USER0);
     }
 
-    inode->u.reiserfs_i.i_first_direct_byte = U32_MAX;
+    REISERFS_I(inode)->i_first_direct_byte = U32_MAX;
 
     return 0;
 }
@@ -137,11 +141,22 @@ void reiserfs_unmap_buffer(struct buffer_head *bh) {
     if (buffer_journaled(bh) || buffer_journal_dirty(bh)) {
       BUG() ;
     }
-    mark_buffer_clean(bh) ;
+    clear_buffer_dirty(bh) ;
     lock_buffer(bh) ;
-    clear_bit(BH_Mapped, &bh->b_state) ;
-    clear_bit(BH_Req, &bh->b_state) ;
-    clear_bit(BH_New, &bh->b_state) ;
+    /* Remove the buffer from whatever list it belongs to. We are mostly
+       interested in removing it from per-sb j_dirty_buffers list, to avoid
+        BUG() on attempt to write not mapped buffer */
+    if ( !list_empty(&bh->b_assoc_buffers) && bh->b_page) {
+	struct inode *inode = bh->b_page->mapping->host;
+	struct reiserfs_journal *j = SB_JOURNAL(inode->i_sb);
+	spin_lock(&j->j_dirty_buffers_lock);
+	list_del_init(&bh->b_assoc_buffers);
+	spin_unlock(&j->j_dirty_buffers_lock);
+    }
+    clear_buffer_mapped(bh) ;
+    clear_buffer_req(bh) ;
+    clear_buffer_new(bh);
+    bh->b_bdev = NULL;
     unlock_buffer(bh) ;
   }
 }
@@ -155,10 +170,10 @@ unmap_buffers(struct page *page, loff_t pos) {
   unsigned long cur_index ;
 
   if (page) {
-    if (page->buffers) {
+    if (page_has_buffers(page)) {
       tail_index = pos & (PAGE_CACHE_SIZE - 1) ;
       cur_index = 0 ;
-      head = page->buffers ;
+      head = page_buffers(page) ;
       bh = head ;
       do {
 	next = bh->b_this_page ;
@@ -175,6 +190,9 @@ unmap_buffers(struct page *page, loff_t pos) {
         }
 	bh = next ;
       } while (bh != head) ;
+      if ( PAGE_SIZE == bh->b_size ) {
+	ClearPageDirty(page);
+      }
     }
   } 
 }
@@ -201,7 +219,7 @@ int indirect2direct (struct reiserfs_transaction_handle *th,
     loff_t pos, pos1; /* position of first byte of the tail */
     struct cpu_key key;
 
-    p_s_sb->u.reiserfs_sb.s_indirect2direct ++;
+    REISERFS_SB(p_s_sb)->s_indirect2direct ++;
 
     *p_c_mode = M_SKIP_BALANCING;
 
@@ -209,7 +227,7 @@ int indirect2direct (struct reiserfs_transaction_handle *th,
     copy_item_head (&s_ih, PATH_PITEM_HEAD(p_s_path));
 
     tail_len = (n_new_file_size & (n_block_size - 1));
-    if (!old_format_only (p_s_sb))
+    if (get_inode_sd_version (p_s_inode) == STAT_DATA_V2)
 	round_tail_len = ROUND_UP (tail_len);
     else
 	round_tail_len = tail_len;
@@ -227,7 +245,7 @@ int indirect2direct (struct reiserfs_transaction_handle *th,
 	/* re-search indirect item */
 	if ( search_for_position_by_key (p_s_sb, p_s_item_key, p_s_path) == POSITION_NOT_FOUND )
 	    reiserfs_panic(p_s_sb, "PAP-5520: indirect2direct: "
-			   "item to be converted %k does not exist", p_s_item_key);
+			   "item to be converted %K does not exist", p_s_item_key);
 	copy_item_head(&s_ih, PATH_PITEM_HEAD(p_s_path));
 #ifdef CONFIG_REISERFS_CHECK
 	pos = le_ih_k_offset (&s_ih) - 1 + 
@@ -240,7 +258,7 @@ int indirect2direct (struct reiserfs_transaction_handle *th,
 
 
     /* Set direct item header to insert. */
-    make_le_item_head (&s_ih, 0, inode_items_version (p_s_inode), pos1 + 1,
+    make_le_item_head (&s_ih, 0, get_inode_item_key_version (p_s_inode), pos1 + 1,
 		       TYPE_DIRECT, round_tail_len, 0xffff/*ih_free_space*/);
 
     /* we want a pointer to the first byte of the tail in the page.
@@ -284,7 +302,7 @@ int indirect2direct (struct reiserfs_transaction_handle *th,
 
     /* we store position of first direct item in the in-core inode */
     //mark_file_with_tail (p_s_inode, pos1 + 1);
-    p_s_inode->u.reiserfs_i.i_first_direct_byte = pos1 + 1;
+    REISERFS_I(p_s_inode)->i_first_direct_byte = pos1 + 1;
 
     return n_block_size - round_tail_len;
 }

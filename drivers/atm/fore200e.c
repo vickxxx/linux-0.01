@@ -39,7 +39,6 @@
 #include <linux/atm_suni.h>
 #include <asm/io.h>
 #include <asm/string.h>
-#include <asm/segment.h>
 #include <asm/page.h>
 #include <asm/irq.h>
 #include <asm/dma.h>
@@ -97,11 +96,9 @@ extern const struct fore200e_bus fore200e_bus[];
 static struct fore200e* fore200e_boards = NULL;
 
 
-#ifdef MODULE
 MODULE_AUTHOR("Christophe Lizzi - credits to Uwe Dannowski and Heikki Vatiainen");
 MODULE_DESCRIPTION("FORE Systems 200E-series ATM driver - version " FORE200E_VERSION);
 MODULE_SUPPORTED_DEVICE("PCA-200E, SBA-200E");
-#endif
 
 
 static const int fore200e_rx_buf_nbr[ BUFFER_SCHEME_NBR ][ BUFFER_MAGN_NBR ] = {
@@ -252,7 +249,7 @@ static void
 fore200e_spin(int msecs)
 {
     unsigned long timeout = jiffies + MSECS(msecs);
-    while (jiffies < timeout);
+    while (time_before(jiffies, timeout));
 }
 
 
@@ -267,7 +264,7 @@ fore200e_poll(struct fore200e* fore200e, volatile u32* addr, u32 val, int msecs)
 	if ((ok = (*addr == val)) || (*addr & STATUS_ERROR))
 	    break;
 
-    } while (jiffies < timeout);
+    } while (time_before(jiffies, timeout));
 
 #if 1
     if (!ok) {
@@ -290,7 +287,7 @@ fore200e_io_poll(struct fore200e* fore200e, volatile u32* addr, u32 val, int mse
 	if ((ok = (fore200e->bus->read(addr) == val)))
 	    break;
 
-    } while (jiffies < timeout);
+    } while (time_before(jiffies, timeout));
 
 #if 1
     if (!ok) {
@@ -636,11 +633,6 @@ fore200e_pca_detect(const struct fore200e_bus* bus, int index)
     struct pci_dev*  pci_dev = NULL;
     int              count = index;
     
-    if (pci_present() == 0) {
-	printk(FORE200E "no PCI subsystem\n");
-	return NULL;
-    }
-
     do {
 	pci_dev = pci_find_device(PCI_VENDOR_ID_FORE, PCI_DEVICE_ID_FORE_PCA200E, pci_dev);
 	if (pci_dev == NULL)
@@ -1077,15 +1069,23 @@ fore200e_supply(struct fore200e* fore200e)
 static struct atm_vcc* 
 fore200e_find_vcc(struct fore200e* fore200e, struct rpd* rpd)
 {
+    struct sock *s;
     struct atm_vcc* vcc;
+    struct hlist_node *node;
 
-    for (vcc = fore200e->atm_dev->vccs; vcc; vcc = vcc->next) {
-
-	if (vcc->vpi == rpd->atm_header.vpi && vcc->vci == rpd->atm_header.vci)
-	    break;
+    read_lock(&vcc_sklist_lock);
+    sk_for_each(s, node, &vcc_sklist) {
+	vcc = atm_sk(s);
+	if (vcc->dev != fore200e->atm_dev)
+		continue;
+	if (vcc->vpi == rpd->atm_header.vpi && vcc->vci == rpd->atm_header.vci) {
+            read_unlock(&vcc_sklist_lock);
+	    return vcc;
+	}
     }
-    
-    return vcc;
+    read_unlock(&vcc_sklist_lock);
+
+    return NULL;
 }
 
 
@@ -1135,7 +1135,7 @@ fore200e_push_rpd(struct fore200e* fore200e, struct rpd* rpd)
 	return;
     } 
 
-    skb->stamp = vcc->timestamp = xtime;
+    do_gettimeofday(&skb->stamp);
     
 #ifdef FORE200E_52BYTE_AAL0_SDU
     if (cell_header) {
@@ -1230,7 +1230,7 @@ fore200e_irq_rx(struct fore200e* fore200e)
 }
 
 
-static void
+static irqreturn_t
 fore200e_interrupt(int irq, void* dev, struct pt_regs* regs)
 {
     struct fore200e* fore200e = FORE200E_DEV((struct atm_dev*)dev);
@@ -1238,13 +1238,14 @@ fore200e_interrupt(int irq, void* dev, struct pt_regs* regs)
     if (fore200e->bus->irq_check(fore200e) == 0) {
 	
 	DPRINTK(3, "unexpected interrupt on device %c\n", fore200e->name[9]);
-	return;
+	return IRQ_NONE;
     }
     DPRINTK(3, "valid interrupt on device %c\n", fore200e->name[9]);
 
     tasklet_schedule(&fore200e->tasklet);
     
     fore200e->bus->irq_ack(fore200e);
+    return IRQ_HANDLED;
 }
 
 
@@ -1355,15 +1356,25 @@ static int
 fore200e_walk_vccs(struct atm_vcc *vcc, short *vpi, int *vci)
 {
     struct atm_vcc* walk;
+    struct sock *s;
+    struct hlist_node *node;
 
     /* find a free VPI */
+
+    read_lock(&vcc_sklist_lock);
+
     if (*vpi == ATM_VPI_ANY) {
 
-	for (*vpi = 0, walk = vcc->dev->vccs; walk; walk = walk->next) {
+	*vpi = 0;
+restart_vpi_search:
+	sk_for_each(s, node, &vcc_sklist) {
+	    walk = atm_sk(s);
+	    if (walk->dev != vcc->dev)
+		continue;
 
 	    if ((walk->vci == *vci) && (walk->vpi == *vpi)) {
 		(*vpi)++;
-		walk = vcc->dev->vccs;
+		goto restart_vpi_search;
 	    }
 	}
     }
@@ -1371,14 +1382,21 @@ fore200e_walk_vccs(struct atm_vcc *vcc, short *vpi, int *vci)
     /* find a free VCI */
     if (*vci == ATM_VCI_ANY) {
 	
-	for (*vci = ATM_NOT_RSV_VCI, walk = vcc->dev->vccs; walk; walk = walk->next) {
+	*vci = ATM_NOT_RSV_VCI;
+restart_vci_search:
+	sk_for_each(s, node, &vcc_sklist) {
+	    walk = atm_sk(s);
+	    if (walk->dev != vcc->dev)
+		continue;
 
 	    if ((walk->vpi = *vpi) && (walk->vci == *vci)) {
 		*vci = walk->vci + 1;
-		walk = vcc->dev->vccs;
+		goto restart_vci_search;
 	    }
 	}
     }
+
+    read_unlock(&vcc_sklist_lock);
 
     return 0;
 }
@@ -2417,7 +2435,7 @@ fore200e_monitor_getc(struct fore200e* fore200e)
     unsigned long      timeout = jiffies + MSECS(50);
     int                c;
 
-    while (jiffies < timeout) {
+    while (time_before(jiffies, timeout)) {
 
 	c = (int) fore200e->bus->read(&monitor->soft_uart.recv);
 
@@ -2583,9 +2601,8 @@ fore200e_init(struct fore200e* fore200e)
     return 0;
 }
 
-
-int __init
-fore200e_detect(void)
+static int __init
+fore200e_module_init(void)
 {
     const struct fore200e_bus* bus;
     struct       fore200e*     fore200e;
@@ -2618,28 +2635,31 @@ fore200e_detect(void)
 	}
     }
 
-    return link;
+    if (link)
+        return 0;
+    return -ENODEV;
 }
 
 
-#ifdef MODULE
-static void
-fore200e_cleanup(struct fore200e** head)
+static void __exit
+fore200e_module_cleanup(void)
 {
-    struct fore200e* fore200e = *head;
+    while (fore200e_boards) {
+        struct fore200e* fore200e = fore200e_boards;
 
-    fore200e_shutdown(fore200e);
-
-    *head = fore200e->next;
-
-    kfree(fore200e);
+	fore200e_shutdown(fore200e);
+	fore200e_boards = fore200e->next;
+	kfree(fore200e);
+    }
+    DPRINTK(1, "module being removed\n");
 }
-#endif
 
 
 static int
 fore200e_proc_read(struct atm_dev *dev,loff_t* pos,char* page)
 {
+    struct sock *s;
+    struct hlist_node *node;
     struct fore200e* fore200e  = FORE200E_DEV(dev);
     int              len, left = *pos;
 
@@ -2886,7 +2906,12 @@ fore200e_proc_read(struct atm_dev *dev,loff_t* pos,char* page)
 	len = sprintf(page,"\n"    
 		      " VCCs:\n  address\tVPI.VCI:AAL\t(min/max tx PDU size) (min/max rx PDU size)\n");
 	
-	for (vcc = fore200e->atm_dev->vccs; vcc; vcc = vcc->next) {
+	read_lock(&vcc_sklist_lock);
+	sk_for_each(s, node, &vcc_sklist) {
+	    vcc = atm_sk(s);
+
+	    if (vcc->dev != fore200e->atm_dev)
+		    continue;
 
 	    fore200e_vcc = FORE200E_VCC(vcc);
 	    
@@ -2900,6 +2925,7 @@ fore200e_proc_read(struct atm_dev *dev,loff_t* pos,char* page)
 			   fore200e_vcc->rx_max_pdu
 		);
 	}
+	read_unlock(&vcc_sklist_lock);
 
 	return len;
     }
@@ -2907,40 +2933,21 @@ fore200e_proc_read(struct atm_dev *dev,loff_t* pos,char* page)
     return 0;
 }
 
-
-#ifdef MODULE
-static int __init
-fore200e_module_init(void)
-{
-    DPRINTK(1, "module loaded\n");
-    return fore200e_detect() == 0;
-}
-
-static void __exit
-fore200e_module_cleanup(void)
-{
-    while (fore200e_boards) {
-	fore200e_cleanup(&fore200e_boards);
-    }
-    DPRINTK(1, "module being removed\n");
-}
-
 module_init(fore200e_module_init);
 module_exit(fore200e_module_cleanup);
-#endif
 
 
 static const struct atmdev_ops fore200e_ops =
 {
-	open:         fore200e_open,
-	close:        fore200e_close,
-	ioctl:        fore200e_ioctl,
-	getsockopt:   fore200e_getsockopt,
-	setsockopt:   fore200e_setsockopt,
-	send:         fore200e_send,
-	change_qos:   fore200e_change_qos,
-	proc_read:    fore200e_proc_read,
-	owner:        THIS_MODULE,
+	.open       = fore200e_open,
+	.close      = fore200e_close,
+	.ioctl      = fore200e_ioctl,
+	.getsockopt = fore200e_getsockopt,
+	.setsockopt = fore200e_setsockopt,
+	.send       = fore200e_send,
+	.change_qos = fore200e_change_qos,
+	.proc_read  = fore200e_proc_read,
+	.owner      = THIS_MODULE,
 };
 
 

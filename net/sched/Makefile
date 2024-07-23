@@ -2,10 +2,7 @@
 # Makefile for the Linux Traffic Control Unit.
 #
 
-O_TARGET := sched.o
-
 obj-y	:= sch_generic.o
-
 
 obj-$(CONFIG_NET_SCHED)		+= sch_api.o sch_fifo.o
 obj-$(CONFIG_NET_ESTIMATOR)	+= estimator.o
@@ -14,7 +11,6 @@ obj-$(CONFIG_NET_CLS_POLICE)	+= police.o
 obj-$(CONFIG_NET_SCH_INGRESS)	+= sch_ingress.o 
 obj-$(CONFIG_NET_SCH_CBQ)	+= sch_cbq.o
 obj-$(CONFIG_NET_SCH_CSZ)	+= sch_csz.o
-obj-$(CONFIG_NET_SCH_NETEM)	+= sch_netem.o
 obj-$(CONFIG_NET_SCH_HPFQ)	+= sch_hpfq.o
 obj-$(CONFIG_NET_SCH_HFSC)	+= sch_hfsc.o
 obj-$(CONFIG_NET_SCH_HTB)	+= sch_htb.o
@@ -32,5 +28,3 @@ obj-$(CONFIG_NET_CLS_RSVP)	+= cls_rsvp.o
 obj-$(CONFIG_NET_CLS_RSVP6)	+= cls_rsvp6.o
 obj-$(CONFIG_NET_CLS_ROUTE4)	+= cls_route.o
 obj-$(CONFIG_NET_CLS_FW)	+= cls_fw.o
-
-include $(TOPDIR)/Rules.make

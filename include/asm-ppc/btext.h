@@ -1,7 +1,4 @@
 /*
- * BK Id: %F% %I% %G% %U% %#%
- */
-/*
  * Definitions for using the procedures in btext.c.
  *
  * Benjamin Herrenschmidt <benh@kernel.crashing.org>
@@ -17,11 +14,11 @@ extern void btext_flushscreen(void);
 
 extern unsigned long disp_BAT[2];
 
-extern boot_infos_t *disp_bi;
+extern boot_infos_t disp_bi;
 extern int boot_text_mapped;
 
 void btext_init(boot_infos_t *bi);
-void btext_welcome(boot_infos_t* bi);
+void btext_welcome(void);
 void btext_prepare_BAT(void);
 void btext_setup_display(int width, int height, int depth, int pitch,
 			 unsigned long address);

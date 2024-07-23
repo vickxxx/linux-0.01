@@ -19,8 +19,10 @@
 #include <linux/interrupt.h>
 #include <linux/if.h>
 #include <linux/netdevice.h>
-#include <linux/brlock.h>
 #include <linux/inetdevice.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
+#include <linux/icmp.h>
 #include <net/sock.h>
 #include <net/route.h>
 #include <linux/ip.h>
@@ -40,12 +42,13 @@
 #endif
 
 /* Sockopts only registered and called from user context, so
-   BR_NETPROTO_LOCK would be overkill.  Also, [gs]etsockopt calls may
+   net locking would be overkill.  Also, [gs]etsockopt calls may
    sleep. */
 static DECLARE_MUTEX(nf_sockopt_mutex);
 
 struct list_head nf_hooks[NPROTO][NF_MAX_HOOKS];
 static LIST_HEAD(nf_sockopts);
+static spinlock_t nf_hook_lock = SPIN_LOCK_UNLOCKED;
 
 /* 
  * A queue handler may be registered for each protocol.  Each is protected by
@@ -56,28 +59,31 @@ static struct nf_queue_handler_t {
 	nf_queue_outfn_t outfn;
 	void *data;
 } queue_handler[NPROTO];
+static rwlock_t queue_handler_lock = RW_LOCK_UNLOCKED;
 
 int nf_register_hook(struct nf_hook_ops *reg)
 {
 	struct list_head *i;
 
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	for (i = nf_hooks[reg->pf][reg->hooknum].next; 
-	     i != &nf_hooks[reg->pf][reg->hooknum]; 
-	     i = i->next) {
+	spin_lock_bh(&nf_hook_lock);
+	list_for_each(i, &nf_hooks[reg->pf][reg->hooknum]) {
 		if (reg->priority < ((struct nf_hook_ops *)i)->priority)
 			break;
 	}
-	list_add(&reg->list, i->prev);
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	list_add_rcu(&reg->list, i->prev);
+	spin_unlock_bh(&nf_hook_lock);
+
+	synchronize_net();
 	return 0;
 }
 
 void nf_unregister_hook(struct nf_hook_ops *reg)
 {
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	list_del(&reg->list);
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	spin_lock_bh(&nf_hook_lock);
+	list_del_rcu(&reg->list);
+	spin_unlock_bh(&nf_hook_lock);
+
+	synchronize_net();
 }
 
 /* Do exclusive ranges overlap? */
@@ -138,7 +144,6 @@ void nf_unregister_sockopt(struct nf_sockopt_ops *reg)
 
 #ifdef CONFIG_NETFILTER_DEBUG
 #include <net/ip.h>
-#include <net/route.h>
 #include <net/tcp.h>
 #include <linux/netfilter_ipv4.h>
 
@@ -342,10 +347,21 @@ static unsigned int nf_iterate(struct list_head *head,
 			       const struct net_device *indev,
 			       const struct net_device *outdev,
 			       struct list_head **i,
-			       int (*okfn)(struct sk_buff *))
+			       int (*okfn)(struct sk_buff *),
+			       int hook_thresh)
 {
-	for (*i = (*i)->next; *i != head; *i = (*i)->next) {
+	/*
+	 * The caller must not block between calls to this
+	 * function because of risk of continuing from deleted element.
+	 */
+	list_for_each_continue_rcu(*i, head) {
 		struct nf_hook_ops *elem = (struct nf_hook_ops *)*i;
+
+		if (hook_thresh > elem->priority)
+			continue;
+
+		/* Optimization: we don't need to hold module
+                   reference here, since function can't sleep. --RR */
 		switch (elem->hook(hook, skb, indev, outdev, okfn)) {
 		case NF_QUEUE:
 			return NF_QUEUE;
@@ -377,7 +393,7 @@ int nf_register_queue_handler(int pf, nf_queue_outfn_t outfn, void *data)
 {      
 	int ret;
 
-	br_write_lock_bh(BR_NETPROTO_LOCK);
+	write_lock_bh(&queue_handler_lock);
 	if (queue_handler[pf].outfn)
 		ret = -EBUSY;
 	else {
@@ -385,7 +401,7 @@ int nf_register_queue_handler(int pf, nf_queue_outfn_t outfn, void *data)
 		queue_handler[pf].data = data;
 		ret = 0;
 	}
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	write_unlock_bh(&queue_handler_lock);
 
 	return ret;
 }
@@ -393,10 +409,11 @@ int nf_register_queue_handler(int pf, nf_queue_outfn_t outfn, void *data)
 /* The caller must flush their queue before this */
 int nf_unregister_queue_handler(int pf)
 {
-	br_write_lock_bh(BR_NETPROTO_LOCK);
+	write_lock_bh(&queue_handler_lock);
 	queue_handler[pf].outfn = NULL;
 	queue_handler[pf].data = NULL;
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	write_unlock_bh(&queue_handler_lock);
+	
 	return 0;
 }
 
@@ -404,19 +421,26 @@ int nf_unregister_queue_handler(int pf)
  * Any packet that leaves via this function must come back 
  * through nf_reinject().
  */
-static void nf_queue(struct sk_buff *skb, 
-		     struct list_head *elem, 
-		     int pf, unsigned int hook,
-		     struct net_device *indev,
-		     struct net_device *outdev,
-		     int (*okfn)(struct sk_buff *))
+static int nf_queue(struct sk_buff *skb, 
+		    struct list_head *elem, 
+		    int pf, unsigned int hook,
+		    struct net_device *indev,
+		    struct net_device *outdev,
+		    int (*okfn)(struct sk_buff *))
 {
 	int status;
 	struct nf_info *info;
+#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+	struct net_device *physindev = NULL;
+	struct net_device *physoutdev = NULL;
+#endif
 
+	/* QUEUE == DROP if noone is waiting, to be safe. */
+	read_lock(&queue_handler_lock);
 	if (!queue_handler[pf].outfn) {
+		read_unlock(&queue_handler_lock);
 		kfree_skb(skb);
-		return;
+		return 1;
 	}
 
 	info = kmalloc(sizeof(*info), GFP_ATOMIC);
@@ -424,42 +448,63 @@ static void nf_queue(struct sk_buff *skb,
 		if (net_ratelimit())
 			printk(KERN_ERR "OOM queueing packet %p\n",
 			       skb);
+		read_unlock(&queue_handler_lock);
 		kfree_skb(skb);
-		return;
+		return 1;
 	}
 
 	*info = (struct nf_info) { 
 		(struct nf_hook_ops *)elem, pf, hook, indev, outdev, okfn };
 
+	/* If it's going away, ignore hook. */
+	if (!try_module_get(info->elem->owner)) {
+		read_unlock(&queue_handler_lock);
+		kfree(info);
+		return 0;
+	}
+
 	/* Bump dev refs so they don't vanish while packet is out */
 	if (indev) dev_hold(indev);
 	if (outdev) dev_hold(outdev);
 
+#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+	if (skb->nf_bridge) {
+		physindev = skb->nf_bridge->physindev;
+		if (physindev) dev_hold(physindev);
+		physoutdev = skb->nf_bridge->physoutdev;
+		if (physoutdev) dev_hold(physoutdev);
+	}
+#endif
+
 	status = queue_handler[pf].outfn(skb, info, queue_handler[pf].data);
+	read_unlock(&queue_handler_lock);
+
 	if (status < 0) {
 		/* James M doesn't say fuck enough. */
 		if (indev) dev_put(indev);
 		if (outdev) dev_put(outdev);
+#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+		if (physindev) dev_put(physindev);
+		if (physoutdev) dev_put(physoutdev);
+#endif
+		module_put(info->elem->owner);
 		kfree(info);
 		kfree_skb(skb);
-		return;
+		return 1;
 	}
+	return 1;
 }
 
 int nf_hook_slow(int pf, unsigned int hook, struct sk_buff *skb,
 		 struct net_device *indev,
 		 struct net_device *outdev,
-		 int (*okfn)(struct sk_buff *))
+		 int (*okfn)(struct sk_buff *),
+		 int hook_thresh)
 {
 	struct list_head *elem;
 	unsigned int verdict;
 	int ret = 0;
 
-	/* This stopgap cannot be removed until all the hooks are audited. */
-	if (skb_is_nonlinear(skb) && skb_linearize(skb, GFP_ATOMIC) != 0) {
-		kfree_skb(skb);
-		return -ENOMEM;
-	}
 	if (skb->ip_summed == CHECKSUM_HW) {
 		if (outdev == NULL) {
 			skb->ip_summed = CHECKSUM_NONE;
@@ -469,7 +514,7 @@ int nf_hook_slow(int pf, unsigned int hook, struct sk_buff *skb,
 	}
 
 	/* We may already have this, but read-locks nest anyway */
-	br_read_lock_bh(BR_NETPROTO_LOCK);
+	rcu_read_lock();
 
 #ifdef CONFIG_NETFILTER_DEBUG
 	if (skb->nf_debug & (1 << hook)) {
@@ -480,11 +525,13 @@ int nf_hook_slow(int pf, unsigned int hook, struct sk_buff *skb,
 #endif
 
 	elem = &nf_hooks[pf][hook];
+ next_hook:
 	verdict = nf_iterate(&nf_hooks[pf][hook], &skb, hook, indev,
-			     outdev, &elem, okfn);
+			     outdev, &elem, okfn, hook_thresh);
 	if (verdict == NF_QUEUE) {
 		NFDEBUG("nf_hook: Verdict = QUEUE.\n");
-		nf_queue(skb, elem, pf, hook, indev, outdev, okfn);
+		if (!nf_queue(skb, elem, pf, hook, indev, outdev, okfn))
+			goto next_hook;
 	}
 
 	switch (verdict) {
@@ -498,7 +545,7 @@ int nf_hook_slow(int pf, unsigned int hook, struct sk_buff *skb,
 		break;
 	}
 
-	br_read_unlock_bh(BR_NETPROTO_LOCK);
+	rcu_read_unlock();
 	return ret;
 }
 
@@ -508,16 +555,21 @@ void nf_reinject(struct sk_buff *skb, struct nf_info *info,
 	struct list_head *elem = &info->elem->list;
 	struct list_head *i;
 
-	/* We don't have BR_NETPROTO_LOCK here */
-	br_read_lock_bh(BR_NETPROTO_LOCK);
-	for (i = nf_hooks[info->pf][info->hook].next; i != elem; i = i->next) {
-		if (i == &nf_hooks[info->pf][info->hook]) {
-			/* The module which sent it to userspace is gone. */
-			NFDEBUG("%s: module disappeared, dropping packet.\n",
-			         __FUNCTION__);
-			verdict = NF_DROP;
-			break;
-		}
+	rcu_read_lock();
+
+	/* Drop reference to owner of hook which queued us. */
+	module_put(info->elem->owner);
+
+	list_for_each_rcu(i, &nf_hooks[info->pf][info->hook]) {
+		if (i == elem) 
+  			break;
+  	}
+  
+	if (elem == &nf_hooks[info->pf][info->hook]) {
+		/* The module which sent it to userspace is gone. */
+		NFDEBUG("%s: module disappeared, dropping packet.\n",
+			__FUNCTION__);
+		verdict = NF_DROP;
 	}
 
 	/* Continue traversal iff userspace said ok... */
@@ -527,10 +579,11 @@ void nf_reinject(struct sk_buff *skb, struct nf_info *info,
 	}
 
 	if (verdict == NF_ACCEPT) {
+	next_hook:
 		verdict = nf_iterate(&nf_hooks[info->pf][info->hook],
 				     &skb, info->hook, 
 				     info->indev, info->outdev, &elem,
-				     info->okfn);
+				     info->okfn, INT_MIN);
 	}
 
 	switch (verdict) {
@@ -539,20 +592,29 @@ void nf_reinject(struct sk_buff *skb, struct nf_info *info,
 		break;
 
 	case NF_QUEUE:
-		nf_queue(skb, elem, info->pf, info->hook, 
-			 info->indev, info->outdev, info->okfn);
-		break;
-
-	case NF_DROP:
-		kfree_skb(skb);
+		if (!nf_queue(skb, elem, info->pf, info->hook, 
+			      info->indev, info->outdev, info->okfn))
+			goto next_hook;
 		break;
 	}
-	br_read_unlock_bh(BR_NETPROTO_LOCK);
+	rcu_read_unlock();
 
 	/* Release those devices we held, or Alexey will kill me. */
 	if (info->indev) dev_put(info->indev);
 	if (info->outdev) dev_put(info->outdev);
-	
+#if defined(CONFIG_BRIDGE) || defined(CONFIG_BRIDGE_MODULE)
+	if (skb->nf_bridge) {
+		if (skb->nf_bridge->physindev)
+			dev_put(skb->nf_bridge->physindev);
+		if (skb->nf_bridge->physoutdev)
+			dev_put(skb->nf_bridge->physoutdev);
+	}
+#endif
+
+
+	if (verdict == NF_DROP)
+		kfree_skb(skb);
+
 	kfree(info);
 	return;
 }
@@ -563,79 +625,135 @@ int ip_route_me_harder(struct sk_buff **pskb)
 {
 	struct iphdr *iph = (*pskb)->nh.iph;
 	struct rtable *rt;
-	struct rt_key key = {};
-	struct dst_entry *odst;
-	unsigned int hh_len;
-
-	/* some non-standard hacks like ipt_REJECT.c:send_reset() can cause
-	 * packets with foreign saddr to be appear on the NF_IP_LOCAL_OUT hook.
-	 */
-	if (inet_addr_type(iph->saddr) == RTN_LOCAL) {
-		key.dst = iph->daddr;
-		key.src = iph->saddr;
-		key.oif = (*pskb)->sk ? (*pskb)->sk->bound_dev_if : 0;
-		key.tos = RT_TOS(iph->tos);
+	struct flowi fl = { .nl_u = { .ip4_u =
+				      { .daddr = iph->daddr,
+					.saddr = iph->saddr,
+					.tos = RT_TOS(iph->tos)|RTO_CONN,
 #ifdef CONFIG_IP_ROUTE_FWMARK
-		key.fwmark = (*pskb)->nfmark;
+					.fwmark = (*pskb)->nfmark
 #endif
-		if (ip_route_output_key(&rt, &key) != 0)
-			return -1;
+				      } },
+			    .oif = (*pskb)->sk ? (*pskb)->sk->sk_bound_dev_if : 0,
+			    };
+	struct net_device *dev_src = NULL;
+	int err;
 
-		/* Drop old route. */
-		dst_release((*pskb)->dst);
-		(*pskb)->dst = &rt->u.dst;
-	} else {
-		/* non-local src, find valid iif to satisfy
-		 * rp-filter when calling ip_route_input. */
-		key.dst = iph->saddr;
-		if (ip_route_output_key(&rt, &key) != 0)
-			return -1;
+	/* accommodate ip_route_output_slow(), which expects the key src to be
+	   0 or a local address; however some non-standard hacks like
+	   ipt_REJECT.c:send_reset() can cause packets with foreign
+           saddr to be appear on the NF_IP_LOCAL_OUT hook -MB */
+	if(fl.fl4_src && !(dev_src = ip_dev_find(fl.fl4_src)))
+		fl.fl4_src = 0;
 
-		odst = (*pskb)->dst;
-		if (ip_route_input(*pskb, iph->daddr, iph->saddr,
-		                   RT_TOS(iph->tos), rt->u.dst.dev) != 0) {
-			dst_release(&rt->u.dst);
-			return -1;
-		}
-		dst_release(&rt->u.dst);
-		dst_release(odst);
+	if ((err=ip_route_output_key(&rt, &fl)) != 0) {
+		printk("route_me_harder: ip_route_output_key(dst=%u.%u.%u.%u, src=%u.%u.%u.%u, oif=%d, tos=0x%x, fwmark=0x%lx) error %d\n",
+			NIPQUAD(iph->daddr), NIPQUAD(iph->saddr),
+			(*pskb)->sk ? (*pskb)->sk->sk_bound_dev_if : 0,
+			RT_TOS(iph->tos)|RTO_CONN,
+#ifdef CONFIG_IP_ROUTE_FWMARK
+			(*pskb)->nfmark,
+#else
+			0UL,
+#endif
+			err);
+		goto out;
 	}
-	
-	if ((*pskb)->dst->error)
-		return -1;
+
+	/* Drop old route. */
+	dst_release((*pskb)->dst);
+
+	(*pskb)->dst = &rt->u.dst;
 
 	/* Change in oif may mean change in hh_len. */
-	hh_len = (*pskb)->dst->dev->hard_header_len;
-	if (skb_headroom(*pskb) < hh_len) {
+	if (skb_headroom(*pskb) < (*pskb)->dst->dev->hard_header_len) {
 		struct sk_buff *nskb;
 
-		nskb = skb_realloc_headroom(*pskb, hh_len);
-		if (!nskb)
-			return -1;
+		nskb = skb_realloc_headroom(*pskb,
+					    (*pskb)->dst->dev->hard_header_len);
+		if (!nskb) {
+			err = -ENOMEM;
+			goto out;
+		}
 		if ((*pskb)->sk)
 			skb_set_owner_w(nskb, (*pskb)->sk);
 		kfree_skb(*pskb);
 		*pskb = nskb;
 	}
 
-	return 0;
+out:
+	if (dev_src)
+		dev_put(dev_src);
+
+	return err;
 }
+
+int skb_ip_make_writable(struct sk_buff **pskb, unsigned int writable_len)
+{
+	struct sk_buff *nskb;
+	unsigned int iplen;
+
+	if (writable_len > (*pskb)->len)
+		return 0;
+
+	/* Not exclusive use of packet?  Must copy. */
+	if (skb_shared(*pskb) || skb_cloned(*pskb))
+		goto copy_skb;
+
+	/* Alexey says IP hdr is always modifiable and linear, so ok. */
+	if (writable_len <= (*pskb)->nh.iph->ihl*4)
+		return 1;
+
+	iplen = writable_len - (*pskb)->nh.iph->ihl*4;
+
+	/* DaveM says protocol headers are also modifiable. */
+	switch ((*pskb)->nh.iph->protocol) {
+	case IPPROTO_TCP: {
+		struct tcphdr hdr;
+		if (skb_copy_bits(*pskb, (*pskb)->nh.iph->ihl*4,
+				  &hdr, sizeof(hdr)) != 0)
+			goto copy_skb;
+		if (writable_len <= (*pskb)->nh.iph->ihl*4 + hdr.doff*4)
+			goto pull_skb;
+		goto copy_skb;
+	}
+	case IPPROTO_UDP:
+		if (writable_len<=(*pskb)->nh.iph->ihl*4+sizeof(struct udphdr))
+			goto pull_skb;
+		goto copy_skb;
+	case IPPROTO_ICMP:
+		if (writable_len
+		    <= (*pskb)->nh.iph->ihl*4 + sizeof(struct icmphdr))
+			goto pull_skb;
+		goto copy_skb;
+	/* Insert other cases here as desired */
+	}
+
+copy_skb:
+	nskb = skb_copy(*pskb, GFP_ATOMIC);
+	if (!nskb)
+		return 0;
+	BUG_ON(skb_is_nonlinear(nskb));
+
+	/* Rest of kernel will get very unhappy if we pass it a
+	   suddenly-orphaned skbuff */
+	if ((*pskb)->sk)
+		skb_set_owner_w(nskb, (*pskb)->sk);
+	kfree_skb(*pskb);
+	*pskb = nskb;
+	return 1;
+
+pull_skb:
+	return pskb_may_pull(*pskb, writable_len);
+}
+EXPORT_SYMBOL(skb_ip_make_writable);
 #endif /*CONFIG_INET*/
 
-/* This does not belong here, but locally generated errors need it if connection
-   tracking in use: without this, connection may not be in hash table, and hence
-   manufactured ICMP or RST packets will not be associated with it. */
+
+/* This does not belong here, but ipt_REJECT needs it if connection
+   tracking in use: without this, connection may not be in hash table,
+   and hence manufactured ICMP or RST packets will not be associated
+   with it. */
 void (*ip_ct_attach)(struct sk_buff *, struct nf_ct_info *);
-
-void nf_ct_attach(struct sk_buff *new, struct sk_buff *skb)
-{
-	void (*attach)(struct sk_buff *, struct nf_ct_info *);
-
-	if (skb->nfct && (attach = ip_ct_attach) != NULL) {
-		mb(); /* Just to be sure: must be read before executing this */
-		attach(new, skb->nfct);
-	}
-}
 
 void __init netfilter_init(void)
 {

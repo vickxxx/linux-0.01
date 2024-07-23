@@ -6,11 +6,13 @@
 #ifndef __SPARC64_SPINLOCK_H
 #define __SPARC64_SPINLOCK_H
 
+#include <linux/config.h>
+
 #ifndef __ASSEMBLY__
 
 /* To get debugging spinlocks which detect and catch
- * deadlock situations, set DEBUG_SPINLOCKS in the sparc64
- * specific makefile and rebuild your kernel.
+ * deadlock situations, set CONFIG_DEBUG_SPINLOCK
+ * and rebuild your kernel.
  */
 
 /* All of these locking primitives are expected to work properly
@@ -26,7 +28,7 @@
  * must be pre-V9 branches.
  */
 
-#ifndef SPIN_LOCK_DEBUG
+#ifndef CONFIG_DEBUG_SPINLOCK
 
 typedef unsigned char spinlock_t;
 #define SPIN_LOCK_UNLOCKED	0
@@ -38,7 +40,7 @@ typedef unsigned char spinlock_t;
 do {	membar("#LoadLoad");	\
 } while(*((volatile unsigned char *)lock))
 
-extern __inline__ void spin_lock(spinlock_t *lock)
+static __inline__ void _raw_spin_lock(spinlock_t *lock)
 {
 	__asm__ __volatile__(
 "1:	ldstub		[%0], %%g7\n"
@@ -55,7 +57,7 @@ extern __inline__ void spin_lock(spinlock_t *lock)
 	: "g7", "memory");
 }
 
-extern __inline__ int spin_trylock(spinlock_t *lock)
+static __inline__ int _raw_spin_trylock(spinlock_t *lock)
 {
 	unsigned int result;
 	__asm__ __volatile__("ldstub [%1], %0\n\t"
@@ -66,7 +68,7 @@ extern __inline__ int spin_trylock(spinlock_t *lock)
 	return (result == 0);
 }
 
-extern __inline__ void spin_unlock(spinlock_t *lock)
+static __inline__ void _raw_spin_unlock(spinlock_t *lock)
 {
 	__asm__ __volatile__("membar	#StoreStore | #LoadStore\n\t"
 			     "stb	%%g0, [%0]"
@@ -75,7 +77,7 @@ extern __inline__ void spin_unlock(spinlock_t *lock)
 			     : "memory");
 }
 
-#else /* !(SPIN_LOCK_DEBUG) */
+#else /* !(CONFIG_DEBUG_SPINLOCK) */
 
 typedef struct {
 	unsigned char lock;
@@ -97,31 +99,32 @@ extern void _do_spin_lock (spinlock_t *lock, char *str);
 extern void _do_spin_unlock (spinlock_t *lock);
 extern int _spin_trylock (spinlock_t *lock);
 
-#define spin_trylock(lp)	_spin_trylock(lp)
-#define spin_lock(lock)		_do_spin_lock(lock, "spin_lock")
-#define spin_unlock(lock)	_do_spin_unlock(lock)
+#define _raw_spin_trylock(lp)	_spin_trylock(lp)
+#define _raw_spin_lock(lock)	_do_spin_lock(lock, "spin_lock")
+#define _raw_spin_unlock(lock)	_do_spin_unlock(lock)
 
-#endif /* SPIN_LOCK_DEBUG */
+#endif /* CONFIG_DEBUG_SPINLOCK */
 
 /* Multi-reader locks, these are much saner than the 32-bit Sparc ones... */
 
-#ifndef SPIN_LOCK_DEBUG
+#ifndef CONFIG_DEBUG_SPINLOCK
 
 typedef unsigned int rwlock_t;
 #define RW_LOCK_UNLOCKED	0
 #define rwlock_init(lp) do { *(lp) = RW_LOCK_UNLOCKED; } while(0)
+#define rwlock_is_locked(x) (*(x) != RW_LOCK_UNLOCKED)
 
 extern void __read_lock(rwlock_t *);
 extern void __read_unlock(rwlock_t *);
 extern void __write_lock(rwlock_t *);
 extern void __write_unlock(rwlock_t *);
 
-#define read_lock(p)	__read_lock(p)
-#define read_unlock(p)	__read_unlock(p)
-#define write_lock(p)	__write_lock(p)
-#define write_unlock(p)	__write_unlock(p)
+#define _raw_read_lock(p)	__read_lock(p)
+#define _raw_read_unlock(p)	__read_unlock(p)
+#define _raw_write_lock(p)	__write_lock(p)
+#define _raw_write_unlock(p)	__write_unlock(p)
 
-#else /* !(SPIN_LOCK_DEBUG) */
+#else /* !(CONFIG_DEBUG_SPINLOCK) */
 
 typedef struct {
 	unsigned long lock;
@@ -130,41 +133,42 @@ typedef struct {
 } rwlock_t;
 #define RW_LOCK_UNLOCKED	(rwlock_t) { 0, 0, 0xff, { 0, 0, 0, 0 } }
 #define rwlock_init(lp) do { *(lp) = RW_LOCK_UNLOCKED; } while(0)
+#define rwlock_is_locked(x) ((x)->lock != 0)
 
 extern void _do_read_lock(rwlock_t *rw, char *str);
 extern void _do_read_unlock(rwlock_t *rw, char *str);
 extern void _do_write_lock(rwlock_t *rw, char *str);
 extern void _do_write_unlock(rwlock_t *rw);
 
-#define read_lock(lock)	\
+#define _raw_read_lock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_do_read_lock(lock, "read_lock"); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-#define read_unlock(lock) \
+#define _raw_read_unlock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_do_read_unlock(lock, "read_unlock"); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-#define write_lock(lock) \
+#define _raw_write_lock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_do_write_lock(lock, "write_lock"); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-#define write_unlock(lock) \
+#define _raw_write_unlock(lock) \
 do {	unsigned long flags; \
-	__save_and_cli(flags); \
+	local_irq_save(flags); \
 	_do_write_unlock(lock); \
-	__restore_flags(flags); \
+	local_irq_restore(flags); \
 } while(0)
 
-#endif /* SPIN_LOCK_DEBUG */
+#endif /* CONFIG_DEBUG_SPINLOCK */
 
 #endif /* !(__ASSEMBLY__) */
 

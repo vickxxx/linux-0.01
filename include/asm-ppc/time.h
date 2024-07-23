@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.time.h 1.17 10/23/01 08:09:35 trini
- */
-/*
  * Common time prototypes and such for all ppc machines.
  *
  * Written by Cort Dougan (cort@fsmlabs.com) to merge
@@ -39,7 +36,7 @@ int via_calibrate_decr(void);
  */
 static __inline__ unsigned int get_dec(void)
 {
-#if defined(CONFIG_4xx)
+#if defined(CONFIG_40x)
 	return (mfspr(SPRN_PIT));
 #else
 	return (mfspr(SPRN_DEC));
@@ -48,7 +45,7 @@ static __inline__ unsigned int get_dec(void)
 
 static __inline__ void set_dec(unsigned int val)
 {
-#if defined(CONFIG_4xx)
+#if defined(CONFIG_40x)
 	return;		/* Have to let it auto-reload */
 #elif defined(CONFIG_8xx_CPU6)
 	set_dec_cpu6(val);
@@ -69,13 +66,21 @@ extern __inline__ int const __USE_RTC(void) {
 
 extern __inline__ unsigned long get_tbl(void) {
 	unsigned long tbl;
+#if defined(CONFIG_403GCX)
+	asm volatile("mfspr %0, 0x3dd" : "=r" (tbl));
+#else
 	asm volatile("mftb %0" : "=r" (tbl));
+#endif
 	return tbl;
 }
 
 extern __inline__ unsigned long get_tbu(void) {
 	unsigned long tbl;
+#if defined(CONFIG_403GCX)
+	asm volatile("mfspr %0, 0x3dc" : "=r" (tbl));
+#else
 	asm volatile("mftbu %0" : "=r" (tbl));
+#endif
 	return tbl;
 }
 

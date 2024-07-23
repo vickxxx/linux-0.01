@@ -1,7 +1,7 @@
 /* SCTP kernel reference Implementation
- * (C) Copyright IBM Corp. 2001, 2004
  * Copyright (c) 1999-2000 Cisco, Inc.
  * Copyright (c) 1999-2001 Motorola, Inc.
+ * Copyright (c) 2001-2003 International Business Machines Corp.
  * Copyright (c) 2001 Intel Corp.
  * Copyright (c) 2001 La Monte H.P. Yarroll
  *
@@ -42,7 +42,6 @@
  *    Sridhar Samudrala	    <sri@us.ibm.com>
  *    Daisy Chang	    <daisyc@us.ibm.com>
  *    Ryan Layer	    <rmlayer@us.ibm.com>
- *    Kevin Gao             <kevin.gao@intel.com>
  *
  * Any bugs reported given to us we will try to fix... any fixes shared will
  * be incorporated into the next SCTP release.
@@ -58,7 +57,6 @@
 #include <linux/in.h>
 #include <net/ipv6.h>
 #include <net/sctp/sctp.h>
-#include <net/sctp/sm.h>
 
 /* Forward declarations for internal functions. */
 static void sctp_assoc_bh_rcv(struct sctp_association *asoc);
@@ -66,8 +64,33 @@ static void sctp_assoc_bh_rcv(struct sctp_association *asoc);
 
 /* 1st Level Abstractions. */
 
+/* Allocate and initialize a new association */
+struct sctp_association *sctp_association_new(const struct sctp_endpoint *ep,
+					 const struct sock *sk,
+					 sctp_scope_t scope, int gfp)
+{
+	struct sctp_association *asoc;
+
+	asoc = t_new(struct sctp_association, gfp);
+	if (!asoc)
+		goto fail;
+
+	if (!sctp_association_init(asoc, ep, sk, scope, gfp))
+		goto fail_init;
+
+	asoc->base.malloced = 1;
+	SCTP_DBG_OBJCNT_INC(assoc);
+
+	return asoc;
+
+fail_init:
+	kfree(asoc);
+fail:
+	return NULL;
+}
+
 /* Initialize a new association from provided memory. */
-static struct sctp_association *sctp_association_init(struct sctp_association *asoc,
+struct sctp_association *sctp_association_init(struct sctp_association *asoc,
 					  const struct sctp_endpoint *ep,
 					  const struct sock *sk,
 					  sctp_scope_t scope,
@@ -117,9 +140,9 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 	 * socket values.
 	 */
 	asoc->max_retrans = sp->assocparams.sasoc_asocmaxrxt;
-	asoc->rto_initial = SCTP_MSECS_TO_JIFFIES(sp->rtoinfo.srto_initial);
-	asoc->rto_max = SCTP_MSECS_TO_JIFFIES(sp->rtoinfo.srto_max);
-	asoc->rto_min = SCTP_MSECS_TO_JIFFIES(sp->rtoinfo.srto_min);
+	asoc->rto_initial = sp->rtoinfo.srto_initial * HZ / 1000;
+	asoc->rto_max = sp->rtoinfo.srto_max * HZ / 1000;
+	asoc->rto_min = sp->rtoinfo.srto_min * HZ / 1000;
 
 	asoc->overall_error_count = 0;
 
@@ -144,8 +167,7 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 	asoc->c.sinit_num_ostreams  = sp->initmsg.sinit_num_ostreams;
 	asoc->max_init_attempts	= sp->initmsg.sinit_max_attempts;
 
-	asoc->max_init_timeo =
-		 SCTP_MSECS_TO_JIFFIES(sp->initmsg.sinit_max_init_timeo);
+	asoc->max_init_timeo    = sp->initmsg.sinit_max_init_timeo * HZ / 1000;
 
 	/* Allocate storage for the ssnmap after the inbound and outbound
 	 * streams have been negotiated during Init.
@@ -157,10 +179,10 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 	 * RFC 6 - A SCTP receiver MUST be able to receive a minimum of
 	 * 1500 bytes in one SCTP packet.
 	 */
-	if (sk->rcvbuf < SCTP_DEFAULT_MINWINDOW)
+	if (sk->sk_rcvbuf < SCTP_DEFAULT_MINWINDOW)
 		asoc->rwnd = SCTP_DEFAULT_MINWINDOW;
 	else
-		asoc->rwnd = sk->rcvbuf;
+		asoc->rwnd = sk->sk_rcvbuf;
 
 	asoc->a_rwnd = asoc->rwnd;
 
@@ -179,14 +201,12 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 	asoc->c.peer_vtag = 0;
 	asoc->c.my_ttag   = 0;
 	asoc->c.peer_ttag = 0;
-	asoc->c.my_port = ep->base.bind_addr.port;
 
 	asoc->c.initial_tsn = sctp_generate_tsn(ep);
 
 	asoc->next_tsn = asoc->c.initial_tsn;
 
 	asoc->ctsn_ack_point = asoc->next_tsn - 1;
-	asoc->adv_peer_ack_point = asoc->ctsn_ack_point;
 	asoc->highest_sacked = asoc->ctsn_ack_point;
 	asoc->last_cwr_tsn = asoc->ctsn_ack_point;
 	asoc->unack_data = 0;
@@ -201,13 +221,11 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 	 * remote endpoint it should do the following:
 	 * ...
 	 * A2) a serial number should be assigned to the chunk. The serial
-	 * number SHOULD be a monotonically increasing number. The serial
-	 * numbers SHOULD be initialized at the start of the
+	 * number should be a monotonically increasing number. All serial
+	 * numbers are defined to be initialized at the start of the
 	 * association to the same value as the initial TSN.
 	 */
 	asoc->addip_serial = asoc->c.initial_tsn;
-
-	skb_queue_head_init(&asoc->addip_chunks);
 
 	/* Make an empty list of remote transport addresses.  */
 	INIT_LIST_HEAD(&asoc->peer.transport_addr_list);
@@ -225,11 +243,6 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 	 */
 	asoc->peer.sack_needed = 1;
 
-	/* Assume that the peer recongizes ASCONF until reported otherwise
-	 * via an ERROR chunk.
-	 */
-	asoc->peer.asconf_capable = 1;
-
 	/* Create an input queue.  */
 	sctp_inq_init(&asoc->base.inqueue);
 	sctp_inq_set_th_handler(&asoc->base.inqueue,
@@ -238,12 +251,20 @@ static struct sctp_association *sctp_association_init(struct sctp_association *a
 
 	/* Create an output queue.  */
 	sctp_outq_init(asoc, &asoc->outqueue);
+	sctp_outq_set_output_handlers(&asoc->outqueue,
+				      sctp_packet_init,
+				      sctp_packet_config,
+				      sctp_packet_append_chunk,
+				      sctp_packet_transmit_chunk,
+				      sctp_packet_transmit);
 
 	if (!sctp_ulpq_init(&asoc->ulpq, asoc))
 		goto fail_init;
 
 	/* Set up the tsn tracking. */
 	sctp_tsnmap_init(&asoc->peer.tsn_map, SCTP_TSN_MAP_SIZE, 0);
+
+	skb_queue_head_init(&asoc->addip_chunks);
 
 	asoc->need_ecne = 0;
 
@@ -272,31 +293,6 @@ fail_init:
 	return NULL;
 }
 
-/* Allocate and initialize a new association */
-struct sctp_association *sctp_association_new(const struct sctp_endpoint *ep,
-					 const struct sock *sk,
-					 sctp_scope_t scope, int gfp)
-{
-	struct sctp_association *asoc;
-
-	asoc = t_new(struct sctp_association, gfp);
-	if (!asoc)
-		goto fail;
-
-	if (!sctp_association_init(asoc, ep, sk, scope, gfp))
-		goto fail_init;
-
-	asoc->base.malloced = 1;
-	SCTP_DBG_OBJCNT_INC(assoc);
-
-	return asoc;
-
-fail_init:
-	kfree(asoc);
-fail:
-	return NULL;
-}
-
 /* Free this association if possible.  There may still be users, so
  * the actual deallocation may be delayed.
  */
@@ -311,7 +307,7 @@ void sctp_association_free(struct sctp_association *asoc)
 
 	/* Decrement the backlog value for a TCP-style listening socket. */
 	if (sctp_style(sk, TCP) && sctp_sstate(sk, LISTENING))
-		sk->ack_backlog--;
+		sk->sk_ack_backlog--;
 
 	/* Mark as dead, so other users can know this structure is
 	 * going away.
@@ -357,14 +353,6 @@ void sctp_association_free(struct sctp_association *asoc)
 	}
 
 	asoc->eyecatcher = 0;
-
-	/* Free any cached ASCONF_ACK chunk. */
-	if (asoc->addip_last_asconf_ack)
-		sctp_chunk_free(asoc->addip_last_asconf_ack);
-
-	/* Free any cached ASCONF chunk. */
-	if (asoc->addip_last_asconf)
-		sctp_chunk_free(asoc->addip_last_asconf);
 
 	sctp_association_put(asoc);
 }
@@ -474,20 +462,21 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	/* The asoc->peer.port might not be meaningful yet, but
 	 * initialize the packet structure anyway.
 	 */
-	sctp_packet_init(&peer->packet, peer, asoc->base.bind_addr.port,
-			 asoc->peer.port);
+	(asoc->outqueue.init_output)(&peer->packet,
+				     peer,
+				     asoc->base.bind_addr.port,
+				     asoc->peer.port);
 
 	/* 7.2.1 Slow-Start
 	 *
-	 * o The initial cwnd before DATA transmission or after a sufficiently
-	 *   long idle period MUST be set to
-	 *      min(4*MTU, max(2*MTU, 4380 bytes))
+	 * o The initial cwnd before data transmission or after a
+	 *   sufficiently long idle period MUST be <= 2*MTU.
 	 *
 	 * o The initial value of ssthresh MAY be arbitrarily high
 	 *   (for example, implementations MAY use the size of the
 	 *   receiver advertised window).
 	 */
-	peer->cwnd = min(4*asoc->pmtu, max_t(__u32, 2*asoc->pmtu, 4380));
+	peer->cwnd = asoc->pmtu * 2;
 
 	/* At this point, we may not have the receiver's advertised window,
 	 * so initialize ssthresh to the default value and it will be set
@@ -497,6 +486,7 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 
 	peer->partial_bytes_acked = 0;
 	peer->flight_size = 0;
+	peer->error_threshold = peer->max_retrans;
 
 	/* By default, enable heartbeat for peer address. */
 	peer->hb_allowed = 1;
@@ -504,10 +494,10 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 	/* Initialize the peer's heartbeat interval based on the
 	 * sock configured value.
 	 */
-	peer->hb_interval = SCTP_MSECS_TO_JIFFIES(sp->paddrparam.spp_hbinterval);
+	peer->hb_interval = sp->paddrparam.spp_hbinterval * HZ;
 
 	/* Set the path max_retrans.  */
-	peer->max_retrans = sp->paddrparam.spp_pathmaxrxt;
+	peer->max_retrans = asoc->max_retrans;
 
 	/* Set the transport's RTO.initial value */
 	peer->rto = asoc->rto_initial;
@@ -525,45 +515,6 @@ struct sctp_transport *sctp_assoc_add_peer(struct sctp_association *asoc,
 		asoc->peer.retran_path = peer;
 
 	return peer;
-}
-
-/* Delete a transport address from an association.  */
-void sctp_assoc_del_peer(struct sctp_association *asoc,
-			 const union sctp_addr *addr)
-{
-	struct list_head	*pos;
-	struct list_head	*temp;
-	struct sctp_transport	*peer = NULL;
-	struct sctp_transport	*transport;
-
-	list_for_each_safe(pos, temp, &asoc->peer.transport_addr_list) {
-		transport = list_entry(pos, struct sctp_transport, transports);
-		if (sctp_cmp_addr_exact(addr, &transport->ipaddr)) {
-			peer = transport;
-			list_del(pos);
-			break;
-		}
-	}
-
-	/* The address we want delete is not in the association. */
-	if (!peer)
-		return;
-
-	/* Get the first transport of asoc. */ 
-	pos = asoc->peer.transport_addr_list.next;
-	transport = list_entry(pos, struct sctp_transport, transports);
-
-	/* Update any entries that match the peer to be deleted. */  
-	if (asoc->peer.primary_path == peer)
-		sctp_assoc_set_primary(asoc, transport);
-	if (asoc->peer.active_path == peer)
-		asoc->peer.active_path = transport;
-	if (asoc->peer.retran_path == peer)
-		asoc->peer.retran_path = transport;
-	if (asoc->peer.last_data_from == peer)
-		asoc->peer.last_data_from = transport;
-
-	sctp_transport_free(peer);
 }
 
 /* Lookup a transport by address. */
@@ -605,12 +556,12 @@ void sctp_assoc_control_transport(struct sctp_association *asoc,
 	switch (command) {
 	case SCTP_TRANSPORT_UP:
 		transport->active = SCTP_ACTIVE;
-		spc_state = SCTP_ADDR_AVAILABLE;
+		spc_state = ADDRESS_AVAILABLE;
 		break;
 
 	case SCTP_TRANSPORT_DOWN:
 		transport->active = SCTP_INACTIVE;
-		spc_state = SCTP_ADDR_UNREACHABLE;
+		spc_state = ADDRESS_UNREACHABLE;
 		break;
 
 	default:
@@ -710,6 +661,18 @@ __u32 sctp_association_get_next_tsn(struct sctp_association *asoc)
 	return retval;
 }
 
+/* Allocate 'num' TSNs by incrementing the association's TSN by num. */
+__u32 sctp_association_get_tsn_block(struct sctp_association *asoc, int num)
+{
+	__u32 retval = asoc->next_tsn;
+
+	asoc->next_tsn += num;
+	asoc->unack_data += num;
+
+	return retval;
+}
+
+
 /* Compare two addresses to see if they match.  Wildcard addresses
  * only match themselves.
  */
@@ -742,6 +705,14 @@ struct sctp_chunk *sctp_get_ecne_prepend(struct sctp_association *asoc)
 		chunk = NULL;
 
 	return chunk;
+}
+
+/* Use this function for the packet prepend callback when no ECNE
+ * packet is desired (e.g. some packets don't like to be bundled).
+ */
+struct sctp_chunk *sctp_get_no_prepend(struct sctp_association *asoc)
+{
+	return NULL;
 }
 
 /*
@@ -857,8 +828,7 @@ static void sctp_assoc_bh_rcv(struct sctp_association *asoc)
 	struct sctp_chunk *chunk;
 	struct sock *sk;
 	struct sctp_inq *inqueue;
-	int state;
-	sctp_subtype_t subtype;
+	int state, subtype;
 	int error = 0;
 
 	/* The association should be held so we should be safe. */
@@ -868,7 +838,7 @@ static void sctp_assoc_bh_rcv(struct sctp_association *asoc)
 	inqueue = &asoc->base.inqueue;
 	while (NULL != (chunk = sctp_inq_pop(inqueue))) {
 		state = asoc->state;
-		subtype = SCTP_ST_CHUNK(chunk->chunk_hdr->type);
+		subtype = chunk->chunk_hdr->type;
 
 		/* Remember where the last DATA chunk came from so we
 		 * know where to send the SACK.
@@ -882,7 +852,7 @@ static void sctp_assoc_bh_rcv(struct sctp_association *asoc)
 			chunk->transport->last_time_heard = jiffies;
 
 		/* Run through the state machine. */
-		error = sctp_do_sm(SCTP_EVENT_T_CHUNK, subtype,
+		error = sctp_do_sm(SCTP_EVENT_T_CHUNK, SCTP_ST_CHUNK(subtype),
 				   state, ep, asoc, chunk, GFP_ATOMIC);
 
 		/* Check to see if the association is freed in response to
@@ -907,11 +877,11 @@ void sctp_assoc_migrate(struct sctp_association *assoc, struct sock *newsk)
 	/* Delete the association from the old endpoint's list of
 	 * associations.
 	 */
-	list_del_init(&assoc->asocs);
+	list_del(&assoc->asocs);
 
 	/* Decrement the backlog value for a TCP-style socket. */
 	if (sctp_style(oldsk, TCP))
-		oldsk->ack_backlog--;
+		oldsk->sk_ack_backlog--;
 
 	/* Release references to the old endpoint and the sock.  */
 	sctp_endpoint_put(assoc->ep);
@@ -933,9 +903,6 @@ void sctp_assoc_migrate(struct sctp_association *assoc, struct sock *newsk)
 void sctp_assoc_update(struct sctp_association *asoc,
 		       struct sctp_association *new)
 {
-	struct sctp_transport *trans;
-	struct list_head *pos, *temp;
-
 	/* Copy in new parameters of peer. */
 	asoc->c = new->c;
 	asoc->peer.rwnd = new->peer.rwnd;
@@ -944,22 +911,22 @@ void sctp_assoc_update(struct sctp_association *asoc,
 	sctp_tsnmap_init(&asoc->peer.tsn_map, SCTP_TSN_MAP_SIZE,
 			 asoc->peer.i.initial_tsn);
 
-	/* Remove any peer addresses not present in the new association. */
-	list_for_each_safe(pos, temp, &asoc->peer.transport_addr_list) {
-		trans = list_entry(pos, struct sctp_transport, transports);
-		if (!sctp_assoc_lookup_paddr(new, &trans->ipaddr))
-			sctp_assoc_del_peer(asoc, &trans->ipaddr);
-	}
+	/* FIXME:
+	 *    Do we need to copy primary_path etc?
+	 *
+	 *    More explicitly, addresses may have been removed and
+	 *    this needs accounting for.
+	 */
 
 	/* If the case is A (association restart), use
 	 * initial_tsn as next_tsn. If the case is B, use
 	 * current next_tsn in case data sent to peer
 	 * has been discarded and needs retransmission.
 	 */
-	if (asoc->state >= SCTP_STATE_ESTABLISHED) {
+	if (sctp_state(asoc, ESTABLISHED)) {
+
 		asoc->next_tsn = new->next_tsn;
 		asoc->ctsn_ack_point = new->ctsn_ack_point;
-		asoc->adv_peer_ack_point = new->adv_peer_ack_point;
 
 		/* Reinitialize SSN for both local streams
 		 * and peer's streams.
@@ -967,23 +934,14 @@ void sctp_assoc_update(struct sctp_association *asoc,
 		sctp_ssnmap_clear(asoc->ssnmap);
 
 	} else {
-		/* Add any peer addresses from the new association. */
-		list_for_each(pos, &new->peer.transport_addr_list) {
-			trans = list_entry(pos, struct sctp_transport,
-					   transports);
-			if (!sctp_assoc_lookup_paddr(asoc, &trans->ipaddr))
-				sctp_assoc_add_peer(asoc, &trans->ipaddr,
-						    GFP_ATOMIC);
-		}
-
 		asoc->ctsn_ack_point = asoc->next_tsn - 1;
-		asoc->adv_peer_ack_point = asoc->ctsn_ack_point;
 		if (!asoc->ssnmap) {
 			/* Move the ssnmap. */
 			asoc->ssnmap = new->ssnmap;
 			new->ssnmap = NULL;
 		}
 	}
+
 }
 
 /* Update the retran path for sending a retransmitted packet.
@@ -1090,10 +1048,9 @@ static inline int sctp_peer_needs_update(struct sctp_association *asoc)
 	case SCTP_STATE_ESTABLISHED:
 	case SCTP_STATE_SHUTDOWN_PENDING:
 	case SCTP_STATE_SHUTDOWN_RECEIVED:
-	case SCTP_STATE_SHUTDOWN_SENT:
 		if ((asoc->rwnd > asoc->a_rwnd) &&
 		    ((asoc->rwnd - asoc->a_rwnd) >=
-		     min_t(__u32, (asoc->base.sk->rcvbuf >> 1), asoc->pmtu)))
+		     min_t(__u32, (asoc->base.sk->sk_rcvbuf >> 1), asoc->pmtu)))
 			return 1;
 		break;
 	default:
@@ -1176,7 +1133,7 @@ int sctp_assoc_set_bind_addr_from_ep(struct sctp_association *asoc, int gfp)
 	 * the endpoint.
 	 */
 	scope = sctp_scope(&asoc->peer.active_path->ipaddr);
-	flags = (PF_INET6 == asoc->base.sk->family) ? SCTP_ADDR6_ALLOWED : 0;
+	flags = (PF_INET6 == asoc->base.sk->sk_family) ? SCTP_ADDR6_ALLOWED : 0;
 	if (asoc->peer.ipv4_address)
 		flags |= SCTP_ADDR4_PEERSUPP;
 	if (asoc->peer.ipv6_address)
@@ -1193,28 +1150,8 @@ int sctp_assoc_set_bind_addr_from_cookie(struct sctp_association *asoc,
 {
 	int var_size2 = ntohs(cookie->peer_init->chunk_hdr.length);
 	int var_size3 = cookie->raw_addr_list_len;
-	__u8 *raw = (__u8 *)cookie->peer_init + var_size2;
+	__u8 *raw = (__u8 *)cookie + sizeof(struct sctp_cookie) + var_size2;
 
 	return sctp_raw_to_bind_addrs(&asoc->base.bind_addr, raw, var_size3,
 				      asoc->ep->base.bind_addr.port, gfp);
-}
-
-/* Lookup laddr in the bind address list of an association. */ 
-int sctp_assoc_lookup_laddr(struct sctp_association *asoc, 
-			    const union sctp_addr *laddr)
-{
-	int found;
-
-	sctp_read_lock(&asoc->base.addr_lock);
-	if ((asoc->base.bind_addr.port == ntohs(laddr->v4.sin_port)) &&
-	    sctp_bind_addr_match(&asoc->base.bind_addr, laddr,
-			         sctp_sk(asoc->base.sk))) {
-		found = 1;
-		goto out;
-	}
-
-	found = 0;
-out:
-	sctp_read_unlock(&asoc->base.addr_lock);
-	return found;
 }

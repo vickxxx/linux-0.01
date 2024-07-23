@@ -1,35 +1,55 @@
 /*
  *
- *	Flow based forwarding rules (usage: firewalling, etc)
+ *	Generic internet FLOW.
  *
  */
 
 #ifndef _NET_FLOW_H
 #define _NET_FLOW_H
 
+#include <linux/in6.h>
+
 struct flowi {
-	int	proto;		/*	{TCP, UDP, ICMP}	*/
+	int	oif;
+	int	iif;
 
 	union {
 		struct {
 			__u32			daddr;
 			__u32			saddr;
+			__u32			fwmark;
+			__u8			tos;
+			__u8			scope;
 		} ip4_u;
 		
 		struct {
-			struct in6_addr *	daddr;
-			struct in6_addr *	saddr;
+			struct in6_addr		daddr;
+			struct in6_addr		saddr;
 			__u32			flowlabel;
 		} ip6_u;
+
+		struct {
+			__u16			daddr;
+			__u16			saddr;
+			__u32			fwmark;
+			__u8			scope;
+		} dn_u;
 	} nl_u;
+#define fld_dst		nl_u.dn_u.daddr
+#define fld_src		nl_u.dn_u.saddr
+#define fld_fwmark	nl_u.dn_u.fwmark
+#define fld_scope	nl_u.dn_u.scope
 #define fl6_dst		nl_u.ip6_u.daddr
 #define fl6_src		nl_u.ip6_u.saddr
 #define fl6_flowlabel	nl_u.ip6_u.flowlabel
 #define fl4_dst		nl_u.ip4_u.daddr
 #define fl4_src		nl_u.ip4_u.saddr
+#define fl4_fwmark	nl_u.ip4_u.fwmark
+#define fl4_tos		nl_u.ip4_u.tos
+#define fl4_scope	nl_u.ip4_u.scope
 
-	int	oif;
-
+	__u8	proto;
+	__u8	flags;
 	union {
 		struct {
 			__u16	sport;
@@ -41,61 +61,33 @@ struct flowi {
 			__u8	code;
 		} icmpt;
 
-		unsigned long	data;
-	} uli_u;
-};
-
-#define FLOWR_NODECISION	0	/* rule not appliable to flow	*/
-#define FLOWR_SELECT		1	/* flow must follow this rule	*/
-#define FLOWR_CLEAR		2	/* priority level clears flow	*/
-#define FLOWR_ERROR		3
-
-struct fl_acc_args {
-	int	type;
-
-
-#define FL_ARG_FORWARD	1
-#define FL_ARG_ORIGIN	2
-
-	union {
-		struct sk_buff		*skb;
 		struct {
-			struct sock	*sk;
-			struct flowi	*flow;
-		} fl_o;
-	} fl_u;
+			__u16	sport;
+			__u16	dport;
+			__u8	objnum;
+			__u8	objnamel; /* Not 16 bits since max val is 16 */
+			__u8	objname[16]; /* Not zero terminated */
+		} dnports;
+
+		__u32		spi;
+	} uli_u;
+#define fl_ip_sport	uli_u.ports.sport
+#define fl_ip_dport	uli_u.ports.dport
+#define fl_icmp_type	uli_u.icmpt.type
+#define fl_icmp_code	uli_u.icmpt.code
+#define fl_ipsec_spi	uli_u.spi
 };
 
+#define FLOW_DIR_IN	0
+#define FLOW_DIR_OUT	1
+#define FLOW_DIR_FWD	2
 
-struct pkt_filter {
-	atomic_t		refcnt;
-	unsigned int		offset;
-	__u32			value;
-	__u32			mask;
-	struct pkt_filter	*next;
-};
+typedef void (*flow_resolve_t)(struct flowi *key, u16 family, u8 dir,
+			       void **objp, atomic_t **obj_refp);
 
-#define FLR_INPUT		1
-#define FLR_OUTPUT		2
-
-struct flow_filter {
-	int				type;
-	union {
-		struct pkt_filter	*filter;
-		struct sock		*sk;
-	} u;
-};
-
-struct flow_rule {
-	struct flow_rule_ops		*ops;
-	unsigned char			private[0];
-};
-
-struct flow_rule_ops {
-	int			(*accept)(struct rt6_info *rt,
-					  struct rt6_info *rule,
-					  struct fl_acc_args *args,
-					  struct rt6_info **nrt);
-};
+extern void *flow_cache_lookup(struct flowi *key, u16 family, u8 dir,
+			       flow_resolve_t resolver);
+extern void flow_cache_flush(void);
+extern atomic_t flow_cache_genid;
 
 #endif

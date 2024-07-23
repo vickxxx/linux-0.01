@@ -84,24 +84,24 @@
 
 /* Internal data structures and random procedures: */
 
-#define GC_HEAD		((unix_socket *)(-1))
-#define GC_ORPHAN	((unix_socket *)(-3))
+#define GC_HEAD		((struct sock *)(-1))
+#define GC_ORPHAN	((struct sock *)(-3))
 
-static unix_socket *gc_current=GC_HEAD;	/* stack of objects to mark */
+static struct sock *gc_current = GC_HEAD; /* stack of objects to mark */
 
 atomic_t unix_tot_inflight = ATOMIC_INIT(0);
 
 
-extern inline unix_socket *unix_get_socket(struct file *filp)
+static struct sock *unix_get_socket(struct file *filp)
 {
-	unix_socket * u_sock = NULL;
+	struct sock *u_sock = NULL;
 	struct inode *inode = filp->f_dentry->d_inode;
 
 	/*
 	 *	Socket ?
 	 */
 	if (inode->i_sock) {
-		struct socket * sock = &inode->u.socket_i;
+		struct socket * sock = SOCKET_I(inode);
 		struct sock * s = sock->sk;
 
 		/*
@@ -120,18 +120,18 @@ extern inline unix_socket *unix_get_socket(struct file *filp)
  
 void unix_inflight(struct file *fp)
 {
-	unix_socket *s=unix_get_socket(fp);
+	struct sock *s = unix_get_socket(fp);
 	if(s) {
-		atomic_inc(&s->protinfo.af_unix.inflight);
+		atomic_inc(&unix_sk(s)->inflight);
 		atomic_inc(&unix_tot_inflight);
 	}
 }
 
 void unix_notinflight(struct file *fp)
 {
-	unix_socket *s=unix_get_socket(fp);
+	struct sock *s = unix_get_socket(fp);
 	if(s) {
-		atomic_dec(&s->protinfo.af_unix.inflight);
+		atomic_dec(&unix_sk(s)->inflight);
 		atomic_dec(&unix_tot_inflight);
 	}
 }
@@ -141,24 +141,26 @@ void unix_notinflight(struct file *fp)
  *	Garbage Collector Support Functions
  */
 
-extern inline unix_socket *pop_stack(void)
+static inline struct sock *pop_stack(void)
 {
-	unix_socket *p=gc_current;
-	gc_current = p->protinfo.af_unix.gc_tree;
+	struct sock *p = gc_current;
+	gc_current = unix_sk(p)->gc_tree;
 	return p;
 }
 
-extern inline int empty_stack(void)
+static inline int empty_stack(void)
 {
 	return gc_current == GC_HEAD;
 }
 
-extern inline void maybe_unmark_and_push(unix_socket *x)
+static void maybe_unmark_and_push(struct sock *x)
 {
-	if (x->protinfo.af_unix.gc_tree != GC_ORPHAN)
+	struct unix_sock *u = unix_sk(x);
+
+	if (u->gc_tree != GC_ORPHAN)
 		return;
 	sock_hold(x);
-	x->protinfo.af_unix.gc_tree = gc_current;
+	u->gc_tree = gc_current;
 	gc_current = x;
 }
 
@@ -169,7 +171,7 @@ void unix_gc(void)
 {
 	static DECLARE_MUTEX(unix_gc_sem);
 	int i;
-	unix_socket *s;
+	struct sock *s;
 	struct sk_buff_head hitlist;
 	struct sk_buff *skb;
 
@@ -184,7 +186,7 @@ void unix_gc(void)
 
 	forall_unix_sockets(i, s)
 	{
-		s->protinfo.af_unix.gc_tree=GC_ORPHAN;
+		unix_sk(s)->gc_tree = GC_ORPHAN;
 	}
 	/*
 	 *	Everything is now marked 
@@ -217,9 +219,9 @@ void unix_gc(void)
 		 *	negative inflight counter to close race window.
 		 *	It is trick of course and dirty one.
 		 */
-		if(s->socket && s->socket->file)
-			open_count = file_count(s->socket->file);
-		if (open_count > atomic_read(&s->protinfo.af_unix.inflight))
+		if (s->sk_socket && s->sk_socket->file)
+			open_count = file_count(s->sk_socket->file);
+		if (open_count > atomic_read(&unix_sk(s)->inflight))
 			maybe_unmark_and_push(s);
 	}
 
@@ -229,18 +231,17 @@ void unix_gc(void)
 
 	while (!empty_stack())
 	{
-		unix_socket *x = pop_stack();
-		unix_socket *sk;
+		struct sock *x = pop_stack();
+		struct sock *sk;
 
-		spin_lock(&x->receive_queue.lock);
-		skb=skb_peek(&x->receive_queue);
+		spin_lock(&x->sk_receive_queue.lock);
+		skb = skb_peek(&x->sk_receive_queue);
 		
 		/*
 		 *	Loop through all but first born 
 		 */
 		
-		while(skb && skb != (struct sk_buff *)&x->receive_queue)
-		{
+		while (skb && skb != (struct sk_buff *)&x->sk_receive_queue) {
 			/*
 			 *	Do we have file descriptors ?
 			 */
@@ -264,12 +265,11 @@ void unix_gc(void)
 				}
 			}
 			/* We have to scan not-yet-accepted ones too */
-			if (x->state == TCP_LISTEN) {
+			if (x->sk_state == TCP_LISTEN)
 				maybe_unmark_and_push(skb->sk);
-			}
 			skb=skb->next;
 		}
-		spin_unlock(&x->receive_queue.lock);
+		spin_unlock(&x->sk_receive_queue.lock);
 		sock_put(x);
 	}
 
@@ -277,13 +277,15 @@ void unix_gc(void)
 
 	forall_unix_sockets(i, s)
 	{
-		if (s->protinfo.af_unix.gc_tree == GC_ORPHAN)
-		{
+		struct unix_sock *u = unix_sk(s);
+
+		if (u->gc_tree == GC_ORPHAN) {
 			struct sk_buff *nextsk;
-			spin_lock(&s->receive_queue.lock);
-			skb=skb_peek(&s->receive_queue);
-			while(skb && skb != (struct sk_buff *)&s->receive_queue)
-			{
+
+			spin_lock(&s->sk_receive_queue.lock);
+			skb = skb_peek(&s->sk_receive_queue);
+			while (skb &&
+			       skb != (struct sk_buff *)&s->sk_receive_queue) {
 				nextsk=skb->next;
 				/*
 				 *	Do we have file descriptors ?
@@ -295,9 +297,9 @@ void unix_gc(void)
 				}
 				skb=nextsk;
 			}
-			spin_unlock(&s->receive_queue.lock);
+			spin_unlock(&s->sk_receive_queue.lock);
 		}
-		s->protinfo.af_unix.gc_tree = GC_ORPHAN;
+		u->gc_tree = GC_ORPHAN;
 	}
 	read_unlock(&unix_table_lock);
 

@@ -1,18 +1,6 @@
 #
 # Makefile for the netfilter modules on top of IPv4.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
-
-O_TARGET := netfilter.o
-
-export-objs = ip_conntrack_standalone.o ip_fw_compat.o ip_nat_standalone.o ip_tables.o arp_tables.o
-
-# Multipart objects.
-list-multi		:= ip_conntrack.o iptable_nat.o ipfwadm.o ipchains.o
 
 # objects for the conntrack and NAT core (used by standalone and backw. compat)
 ip_nf_conntrack-objs	:= ip_conntrack_core.o ip_conntrack_proto_generic.o ip_conntrack_proto_tcp.o ip_conntrack_proto_udp.o ip_conntrack_proto_icmp.o
@@ -33,20 +21,9 @@ obj-$(CONFIG_IP_NF_CONNTRACK) += ip_conntrack.o
 
 # connection tracking helpers
 obj-$(CONFIG_IP_NF_AMANDA) += ip_conntrack_amanda.o
-ifdef CONFIG_IP_NF_AMANDA
-	export-objs += ip_conntrack_amanda.o
-endif
-
 obj-$(CONFIG_IP_NF_TFTP) += ip_conntrack_tftp.o
 obj-$(CONFIG_IP_NF_FTP) += ip_conntrack_ftp.o
-ifdef CONFIG_IP_NF_FTP
-	export-objs += ip_conntrack_ftp.o
-endif
-
 obj-$(CONFIG_IP_NF_IRC) += ip_conntrack_irc.o
-ifdef CONFIG_IP_NF_IRC
-	export-objs += ip_conntrack_irc.o
-endif
 
 # NAT helpers 
 obj-$(CONFIG_IP_NF_NAT_AMANDA) += ip_nat_amanda.o
@@ -87,9 +64,10 @@ obj-$(CONFIG_IP_NF_MATCH_CONNTRACK) += ipt_conntrack.o
 obj-$(CONFIG_IP_NF_MATCH_UNCLEAN) += ipt_unclean.o
 obj-$(CONFIG_IP_NF_MATCH_TCPMSS) += ipt_tcpmss.o
 
+obj-$(CONFIG_IP_NF_MATCH_PHYSDEV) += ipt_physdev.o
+
 # targets
 obj-$(CONFIG_IP_NF_TARGET_REJECT) += ipt_REJECT.o
-obj-$(CONFIG_IP_NF_TARGET_CLASSIFY) += ipt_CLASSIFY.o
 obj-$(CONFIG_IP_NF_TARGET_MIRROR) += ipt_MIRROR.o
 obj-$(CONFIG_IP_NF_TARGET_TOS) += ipt_TOS.o
 obj-$(CONFIG_IP_NF_TARGET_ECN) += ipt_ECN.o
@@ -114,17 +92,3 @@ obj-$(CONFIG_IP_NF_COMPAT_IPCHAINS) += ipchains.o
 obj-$(CONFIG_IP_NF_COMPAT_IPFWADM) += ipfwadm.o
 
 obj-$(CONFIG_IP_NF_QUEUE) += ip_queue.o
-
-include $(TOPDIR)/Rules.make
-
-ip_conntrack.o: $(ip_conntrack-objs)
-	$(LD) -r -o $@ $(ip_conntrack-objs)
-
-iptable_nat.o: $(iptable_nat-objs)
-	$(LD) -r -o $@ $(iptable_nat-objs)
-
-ipfwadm.o: $(ipfwadm-objs)
-	$(LD) -r -o $@ $(ipfwadm-objs)
-
-ipchains.o: $(ipchains-objs)
-	$(LD) -r -o $@ $(ipchains-objs)

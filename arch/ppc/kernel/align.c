@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.align.c 1.5 05/17/01 18:14:21 cort
- */
-/*
  * align.c - handle alignment exceptions for the Power PC.
  *
  * Copyright (c) 1996 Paul Mackerras <paulus@cs.anu.edu.au>
@@ -24,11 +21,11 @@ struct aligninfo {
 	unsigned char flags;
 };
 
-#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
+#if defined(CONFIG_4xx)
 #define	OPCD(inst)	(((inst) & 0xFC000000) >> 26)
 #define	RS(inst)	(((inst) & 0x03E00000) >> 21)
 #define	RA(inst)	(((inst) & 0x001F0000) >> 16)
-#define	IS_DFORM(code)	((code) >= 32 && (code) <= 47)
+#define	IS_DFORM(code)	((code) >= 32 && (code) <= 55)
 #endif
 
 #define INVALID	{ 0, 0 }
@@ -187,12 +184,12 @@ int
 fix_alignment(struct pt_regs *regs)
 {
 	int instr, nb, flags;
-#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
+#if defined(CONFIG_4xx)
 	int opcode, f1, f2, f3;
 #endif
 	int i, t;
 	int reg, areg;
-	unsigned char *addr;
+	unsigned char __user *addr;
 	union {
 		long l;
 		float f;
@@ -200,11 +197,11 @@ fix_alignment(struct pt_regs *regs)
 		unsigned char v[8];
 	} data;
 
-#if defined(CONFIG_4xx) || defined(CONFIG_POWER4)
+	CHECK_FULL_REGS(regs);
+
+#if defined(CONFIG_4xx)
 	/* The 4xx-family processors have no DSISR register,
 	 * so we emulate it.
-	 * The POWER4 has a DSISR register but doesn't set it on
-	 * an alignment fault.  -- paulus
 	 */
 
 	instr = *((unsigned int *)regs->nip);
@@ -255,7 +252,7 @@ fix_alignment(struct pt_regs *regs)
 	 * pt_regs structure is overloaded and is really from the DEAR.
 	 */
 
-	addr = (unsigned char *)regs->dar;
+	addr = (unsigned char __user *)regs->dar;
 
 	/* Verify the address of the operand */
 	if (user_mode(regs)) {

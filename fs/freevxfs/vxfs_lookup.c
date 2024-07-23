@@ -27,17 +27,18 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_lookup.c,v 1.19 2001/05/30 19:50:20 hch Exp hch $"
+#ident "$Id: vxfs_lookup.c,v 1.21 2002/01/02 22:00:13 hch Exp hch $"
 
 /*
  * Veritas filesystem driver - lookup and other directory related code.
  */
 #include <linux/fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
 #include <linux/kernel.h>
 #include <linux/pagemap.h>
+#include <linux/smp_lock.h>
 
 #include "vxfs.h"
 #include "vxfs_dir.h"
@@ -50,7 +51,7 @@
 #define VXFS_BLOCK_PER_PAGE(sbp)  ((PAGE_CACHE_SIZE / (sbp)->s_blocksize))
 
 
-static struct dentry *	vxfs_lookup(struct inode *, struct dentry *);
+static struct dentry *	vxfs_lookup(struct inode *, struct dentry *, struct nameidata *);
 static int		vxfs_readdir(struct file *, void *, filldir_t);
 
 struct inode_operations vxfs_dir_inode_ops = {
@@ -126,7 +127,7 @@ vxfs_find_entry(struct inode *ip, struct dentry *dp, struct page **ppp)
 		caddr_t			kaddr;
 		struct page		*pp;
 
-		pp = vxfs_get_page(ip, page);
+		pp = vxfs_get_page(ip->i_mapping, page);
 		if (IS_ERR(pp))
 			continue;
 		kaddr = (caddr_t)page_address(pp);
@@ -192,6 +193,7 @@ vxfs_inode_by_name(struct inode *dip, struct dentry *dp)
  * vxfs_lookup - lookup pathname component
  * @dip:	dir in which we lookup
  * @dp:		dentry we lookup
+ * @nd:		lookup nameidata
  *
  * Description:
  *   vxfs_lookup tries to lookup the pathname component described
@@ -202,7 +204,7 @@ vxfs_inode_by_name(struct inode *dip, struct dentry *dp)
  *   in the return pointer.
  */
 static struct dentry *
-vxfs_lookup(struct inode *dip, struct dentry *dp)
+vxfs_lookup(struct inode *dip, struct dentry *dp, struct nameidata *nd)
 {
 	struct inode		*ip = NULL;
 	ino_t			ino;
@@ -210,13 +212,16 @@ vxfs_lookup(struct inode *dip, struct dentry *dp)
 	if (dp->d_name.len > VXFS_NAMELEN)
 		return ERR_PTR(-ENAMETOOLONG);
 				 
+	lock_kernel();
 	ino = vxfs_inode_by_name(dip, dp);
-	if (ino == 0)
-		return NULL;
-
-	ip = iget(dip->i_sb, ino);
-	if (!ip)
-		return ERR_PTR(-EACCES);
+	if (ino) {
+		ip = iget(dip->i_sb, ino);
+		if (!ip) {
+			unlock_kernel();
+			return ERR_PTR(-EACCES);
+		}
+	}
+	unlock_kernel();
 	d_add(dp, ip);
 	return NULL;
 }
@@ -258,8 +263,10 @@ vxfs_readdir(struct file *fp, void *retp, filldir_t filler)
 
 	pos = fp->f_pos - 2;
 	
-	if (pos > VXFS_DIRROUND(ip->i_size))
+	if (pos > VXFS_DIRROUND(ip->i_size)) {
+		unlock_kernel();
 		return 0;
+	}
 
 	npages = dir_pages(ip);
 	nblocks = dir_blocks(ip);
@@ -273,7 +280,7 @@ vxfs_readdir(struct file *fp, void *retp, filldir_t filler)
 		caddr_t			kaddr;
 		struct page		*pp;
 
-		pp = vxfs_get_page(ip, page);
+		pp = vxfs_get_page(ip->i_mapping, page);
 		if (IS_ERR(pp))
 			continue;
 		kaddr = (caddr_t)page_address(pp);
@@ -318,6 +325,6 @@ vxfs_readdir(struct file *fp, void *retp, filldir_t filler)
 done:
 	fp->f_pos = ((page << PAGE_CACHE_SHIFT) | offset) + 2;
 out:
-	fp->f_version = ip->i_version;
+	unlock_kernel();
 	return 0;
 }

@@ -20,7 +20,7 @@
 #include <linux/fs.h>
 #include <linux/major.h>
 #include <linux/termios.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_ldisc.h>
 
@@ -89,7 +89,8 @@ struct screen_info {
 	unsigned short vesapm_seg;		/* 0x2e */
 	unsigned short vesapm_off;		/* 0x30 */
 	unsigned short pages;			/* 0x32 */
-						/* 0x34 -- 0x3f reserved for future expansion */
+	unsigned short vesa_attributes;		/* 0x34 */
+						/* 0x36 -- 0x3f reserved for future expansion */
 };
 
 extern struct screen_info screen_info;
@@ -137,7 +138,7 @@ extern struct screen_info screen_info;
 #define TTY_FLIPBUF_SIZE 512
 
 struct tty_flip_buffer {
-	struct tq_struct tqueue;
+	struct work_struct		work;
 	struct semaphore pty_sem;
 	char		*char_buf_ptr;
 	unsigned char	*flag_buf_ptr;
@@ -242,6 +243,7 @@ struct tty_flip_buffer {
 #define L_PENDIN(tty)	_L_FLAG((tty),PENDIN)
 #define L_IEXTEN(tty)	_L_FLAG((tty),IEXTEN)
 
+struct device;
 /*
  * Where all of the state associated with a tty is kept while the tty
  * is open.  Since the termios state should be kept even if the tty
@@ -251,19 +253,18 @@ struct tty_flip_buffer {
  * treatment, but (1) the default 80x24 is usually right and (2) it's
  * most often used by a windowing system, which will set the correct
  * size each time the window is created or resized anyway.
- * IMPORTANT: since this structure is dynamically allocated, it must
- * be no larger than 4096 bytes.  Changing TTY_FLIPBUF_SIZE will change
- * the size of this structure, and it needs to be done with care.
  * 						- TYT, 9/14/92
  */
 struct tty_struct {
 	int	magic;
-	struct tty_driver driver;
+	struct tty_driver *driver;
+	int index;
 	struct tty_ldisc ldisc;
 	struct termios *termios, *termios_locked;
+	char name[64];
 	int pgrp;
 	int session;
-	kdev_t	device;
+	dev_t	device;
 	unsigned long flags;
 	int count;
 	struct winsize winsize;
@@ -278,7 +279,7 @@ struct tty_struct {
 	int alt_speed;		/* For magic substitution of 38400 bps */
 	wait_queue_head_t write_wait;
 	wait_queue_head_t read_wait;
-	struct tq_struct tq_hangup;
+	struct work_struct hangup_work;
 	void *disc_data;
 	void *driver_data;
 	struct list_head tty_files;
@@ -293,7 +294,7 @@ struct tty_struct {
 	unsigned char lnext:1, erasing:1, raw:1, real_raw:1, icanon:1;
 	unsigned char closing:1;
 	unsigned short minimum_to_wake;
-	unsigned overrun_time;
+	unsigned long overrun_time;
 	int num_overrun;
 	unsigned long process_char_map[256/(8*sizeof(unsigned long))];
 	char *read_buf;
@@ -308,7 +309,7 @@ struct tty_struct {
 	struct semaphore atomic_write;
 	spinlock_t read_lock;
 	/* If the tty has a pending do_SAK, queue it here - akpm */
-	struct tq_struct SAK_tq;
+	struct work_struct SAK_work;
 };
 
 /* tty magic number */
@@ -341,13 +342,11 @@ struct tty_struct {
 extern void tty_write_flush(struct tty_struct *);
 
 extern struct termios tty_std_termios;
-extern struct tty_struct * redirect;
 extern struct tty_ldisc ldiscs[];
 extern int fg_console, last_console, want_console;
 
 extern int kmsg_redirect;
 
-extern void con_init(void);
 extern void console_init(void);
 
 extern int lp_init(void);
@@ -378,9 +377,8 @@ extern void start_tty(struct tty_struct * tty);
 extern int tty_register_ldisc(int disc, struct tty_ldisc *new_ldisc);
 extern int tty_register_driver(struct tty_driver *driver);
 extern int tty_unregister_driver(struct tty_driver *driver);
-extern void tty_register_devfs (struct tty_driver *driver, unsigned int flags,
-				unsigned minor);
-extern void tty_unregister_devfs (struct tty_driver *driver, unsigned minor);
+extern void tty_register_device(struct tty_driver *driver, unsigned index, struct device *dev);
+extern void tty_unregister_device(struct tty_driver *driver, unsigned index);
 extern int tty_read_raw_data(struct tty_struct *tty, unsigned char *bufp,
 			     int buflen);
 extern void tty_write_message(struct tty_struct *tty, char *msg);
@@ -396,6 +394,7 @@ extern void do_SAK(struct tty_struct *tty);
 extern void disassociate_ctty(int priv);
 extern void tty_flip_buffer_push(struct tty_struct *tty);
 extern int tty_get_baud_rate(struct tty_struct *tty);
+extern int tty_termios_baud_rate(struct termios *termios);
 
 /* n_tty.c */
 extern struct tty_ldisc tty_ldisc_N_TTY;

@@ -24,7 +24,7 @@ struct nfs_unlinkdata {
 };
 
 static struct nfs_unlinkdata	*nfs_deletes;
-static struct rpc_wait_queue	nfs_delete_queue = RPC_INIT_WAITQ("nfs_delete_queue");
+static RPC_WAITQ(nfs_delete_queue, "nfs_delete_queue");
 
 /**
  * nfs_detach_unlinkdata - Remove asynchronous unlink from global list
@@ -93,14 +93,14 @@ nfs_async_unlink_init(struct rpc_task *task)
 {
 	struct nfs_unlinkdata	*data = (struct nfs_unlinkdata *)task->tk_calldata;
 	struct dentry		*dir = data->dir;
-	struct rpc_message	msg;
+	struct rpc_message	msg = {
+		.rpc_cred	= data->cred,
+	};
 	int			status = -ENOENT;
 
 	if (!data->name.len)
 		goto out_err;
 
-	memset(&msg, 0, sizeof(msg));
-	msg.rpc_cred = data->cred;
 	status = NFS_PROTO(dir->d_inode)->unlink_setup(&msg, dir, &data->name);
 	if (status < 0)
 		goto out_err;
@@ -127,7 +127,8 @@ nfs_async_unlink_done(struct rpc_task *task)
 		return;
 	dir_i = dir->d_inode;
 	nfs_zap_caches(dir_i);
-	NFS_PROTO(dir_i)->unlink_done(dir, &task->tk_msg);
+	if (NFS_PROTO(dir_i)->unlink_done(dir, task))
+		return;
 	put_rpccred(data->cred);
 	data->cred = NULL;
 	dput(dir);
@@ -149,8 +150,7 @@ nfs_async_unlink_release(struct rpc_task *task)
 
 /**
  * nfs_async_unlink - asynchronous unlinking of a file
- * @dir: directory in which the file resides.
- * @name: name of the file to unlink.
+ * @dentry: dentry to unlink
  */
 int
 nfs_async_unlink(struct dentry *dentry)
@@ -189,7 +189,7 @@ nfs_async_unlink(struct dentry *dentry)
 }
 
 /**
- * nfs_complete_remove - Initialize completion of the sillydelete
+ * nfs_complete_unlink - Initialize completion of the sillydelete
  * @dentry: dentry to delete
  *
  * Since we're most likely to be called by dentry_iput(), we

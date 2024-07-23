@@ -1,19 +1,14 @@
+# arch/ia64/sn/Makefile
 #
-# ia64/sn/Makefile
+# This file is subject to the terms and conditions of the GNU General Public
+# License.  See the file "COPYING" in the main directory of this archive
+# for more details.
 #
-# Copyright (C) 1999 Silicon Graphics, Inc.
-# Copyright (C) Srinivasa Thirumalachar (sprasad@engr.sgi.com)
+# Copyright (C) 2003 Silicon Graphics, Inc.  All Rights Reserved.
+#
+# Makefile for the sn ia64 subplatform
 #
 
-EXTRA_CFLAGS	:= -DSN -DLANGUAGE_C=1 -D_LANGUAGE_C=1 -I. -DBRINGUP \
-		   -DDIRECT_L1_CONSOLE -DNUMA_BASE -DSIMULATED_KLGRAPH \
-		   -DNUMA_MIGR_CONTROL -DLITTLE_ENDIAN -DREAL_HARDWARE \
-		   -DNEW_INTERRUPTS
-all: sn.a
+EXTRA_CFLAGS := -DLITTLE_ENDIAN
 
-O_TARGET        = sn.a
-obj-y           = sn1/sn1.a
-
-clean::
-
-include $(TOPDIR)/Rules.make
+obj-y += kernel/ io/

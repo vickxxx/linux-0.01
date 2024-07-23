@@ -105,7 +105,6 @@
 #include "hosts.h"
 #include "atari_scsi.h"
 #include "NCR5380.h"
-#include "constants.h"
 #include <asm/atari_stdma.h>
 #include <asm/atari_stram.h>
 #include <asm/io.h>
@@ -196,8 +195,8 @@ static int falcon_classify_cmd( Scsi_Cmnd *cmd );
 static unsigned long atari_dma_xfer_len( unsigned long wanted_len,
                                          Scsi_Cmnd *cmd, int write_flag );
 #endif
-static void scsi_tt_intr( int irq, void *dummy, struct pt_regs *fp);
-static void scsi_falcon_intr( int irq, void *dummy, struct pt_regs *fp);
+static irqreturn_t scsi_tt_intr( int irq, void *dummy, struct pt_regs *fp);
+static irqreturn_t scsi_falcon_intr( int irq, void *dummy, struct pt_regs *fp);
 static void falcon_release_lock_if_possible( struct NCR5380_hostdata *
                                              hostdata );
 static void falcon_get_lock( void );
@@ -316,7 +315,7 @@ static void scsi_dma_buserr (int irq, void *dummy, struct pt_regs *fp)
 #endif
 
 
-static void scsi_tt_intr (int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t scsi_tt_intr (int irq, void *dummy, struct pt_regs *fp)
 {
 #ifdef REAL_DMA
 	int dma_stat;
@@ -404,10 +403,11 @@ static void scsi_tt_intr (int irq, void *dummy, struct pt_regs *fp)
 	/* To be sure the int is not masked */
 	atari_enable_irq( IRQ_TT_MFP_SCSI );
 #endif
+	return IRQ_HANDLED;
 }
 
 
-static void scsi_falcon_intr (int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t scsi_falcon_intr (int irq, void *dummy, struct pt_regs *fp)
 {
 #ifdef REAL_DMA
 	int dma_stat;
@@ -464,6 +464,7 @@ static void scsi_falcon_intr (int irq, void *dummy, struct pt_regs *fp)
 #endif /* REAL_DMA */
 
 	NCR5380_intr (0, 0, 0);
+	return IRQ_HANDLED;
 }
 
 
@@ -509,12 +510,11 @@ static int falcon_dont_release = 0;
 static void
 falcon_release_lock_if_possible( struct NCR5380_hostdata * hostdata )
 {
-	unsigned long	oldflags;
+	unsigned long flags;
 		
 	if (IS_A_TT()) return;
 	
-	save_flags(oldflags);
-	cli();
+	local_irq_save(flags);
 
 	if (falcon_got_lock &&
 		!hostdata->disconnected_queue &&
@@ -525,7 +525,7 @@ falcon_release_lock_if_possible( struct NCR5380_hostdata * hostdata )
 #if 0
 			printk("WARNING: Lock release not allowed. Ignored\n");
 #endif
-			restore_flags(oldflags);
+			local_irq_restore(flags);
 			return;
 		}
 		falcon_got_lock = 0;
@@ -533,7 +533,7 @@ falcon_release_lock_if_possible( struct NCR5380_hostdata * hostdata )
 		wake_up( &falcon_fairness_wait );
 	}
 
-	restore_flags(oldflags);
+	local_irq_restore(flags);
 }
 
 /* This function manages the locking of the ST-DMA.
@@ -553,12 +553,11 @@ falcon_release_lock_if_possible( struct NCR5380_hostdata * hostdata )
 
 static void falcon_get_lock( void )
 {
-	unsigned long	oldflags;
+	unsigned long flags;
 
 	if (IS_A_TT()) return;
 
-	save_flags(oldflags);
-	cli();
+	local_irq_save(flags);
 
 	while( !in_interrupt() && falcon_got_lock && stdma_others_waiting() )
 		sleep_on( &falcon_fairness_wait );
@@ -578,7 +577,7 @@ static void falcon_get_lock( void )
 		}
 	}	
 
-	restore_flags(oldflags);
+	local_irq_restore(flags);
 	if (!falcon_got_lock)
 		panic("Falcon SCSI: someone stole the lock :-(\n");
 }
@@ -822,11 +821,11 @@ void __init atari_scsi_setup(char *str, int *ints)
 #endif
 }
 
-int atari_scsi_reset( Scsi_Cmnd *cmd, unsigned int reset_flags)
+int atari_scsi_bus_reset(Scsi_Cmnd *cmd)
 {
 	int		rv;
 	struct NCR5380_hostdata *hostdata =
-		(struct NCR5380_hostdata *)cmd->host->hostdata;
+		(struct NCR5380_hostdata *)cmd->device->host->hostdata;
 
 	/* For doing the reset, SCSI interrupts must be disabled first,
 	 * since the 5380 raises its IRQ line while _RST is active and we
@@ -848,7 +847,7 @@ int atari_scsi_reset( Scsi_Cmnd *cmd, unsigned int reset_flags)
 #endif /* REAL_DMA */
 	}
 
-	rv = NCR5380_reset(cmd, reset_flags);
+	rv = NCR5380_bus_reset(cmd);
 
 	/* Re-enable ints */
 	if (IS_A_TT()) {
@@ -1142,5 +1141,23 @@ static void atari_scsi_falcon_reg_write( unsigned char reg, unsigned char value 
 
 #include "atari_NCR5380.c"
 
-static Scsi_Host_Template driver_template = ATARI_SCSI;
+static Scsi_Host_Template driver_template = {
+	.proc_info		= atari_scsi_proc_info,
+	.name			= "Atari native SCSI",
+	.detect			= atari_scsi_detect,
+	.release		= atari_scsi_release,
+	.info			= atari_scsi_info,
+	.queuecommand		= atari_scsi_queue_command,
+	.eh_abort_handler	= atari_scsi_abort,
+	.eh_bus_reset_handler	= atari_scsi_bus_reset,
+	.can_queue		= 0, /* initialized at run-time */
+	.this_id		= 0, /* initialized at run-time */
+	.sg_tablesize		= 0, /* initialized at run-time */
+	.cmd_per_lun		= 0, /* initialized at run-time */
+	.use_clustering		= DISABLE_CLUSTERING
+};
+
+
 #include "scsi_module.c"
+
+MODULE_LICENSE("GPL");

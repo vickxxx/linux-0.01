@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.mmu.h 1.10 06/28/01 15:50:17 paulus
- */
-/*
  * PowerPC memory management structures
  */
 
@@ -114,9 +111,6 @@ typedef struct _P601_BAT {
 	P601_BATU batu;		/* Upper register */
 	P601_BATL batl;		/* Lower register */
 } P601_BAT;
-
-extern void _tlbie(unsigned long va);	/* invalidate a TLB entry */
-extern void _tlbia(void);		/* invalidate all TLB entries */
 
 #endif /* __ASSEMBLY__ */
 

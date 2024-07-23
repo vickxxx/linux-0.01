@@ -22,7 +22,7 @@
 **  This driver has been ported to Linux from the FreeBSD NCR53C8XX driver
 **  and is currently maintained by
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -42,60 +42,79 @@
 #ifndef NCR53C8XX_H
 #define NCR53C8XX_H
 
+/*
+**	Define the BSD style u_int32 and u_int64 type.
+**	Are in fact u_int32_t and u_int64_t :-)
+*/
+typedef u32 u_int32;
+typedef u64 u_int64;
+typedef	u_long		vm_offset_t;
+
 #include "sym53c8xx_defs.h"
 
-/*
-**	Define Scsi_Host_Template parameters
+/*==========================================================
 **
-**	Used by hosts.c and ncr53c8xx.c with module configuration.
+**	Structures used by the detection routine to transmit 
+**	device configuration to the attach function.
+**
+**==========================================================
 */
+typedef struct {
+	int	bus;
+	u_char	device_fn;
+	u_long	base;
+	u_long	base_2;
+	u_long	io_port;
+	u_long	base_c;
+	u_long	base_2_c;
+	u_long	base_v;
+	u_long	base_2_v;
+	int	irq;
+/* port and reg fields to use INB, OUTB macros */
+	u_long	base_io;
+	volatile struct ncr_reg	*reg;
+} ncr_slot;
 
-#if (LINUX_VERSION_CODE >= 0x020400) || defined(HOSTS_C) || defined(MODULE)
-
-#include <scsi/scsicam.h>
-
-int ncr53c8xx_abort(Scsi_Cmnd *);
-int ncr53c8xx_detect(Scsi_Host_Template *tpnt);
-const char *ncr53c8xx_info(struct Scsi_Host *host);
-int ncr53c8xx_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int ncr53c8xx_reset(Scsi_Cmnd *, unsigned int);
-
-#ifdef MODULE
-int ncr53c8xx_release(struct Scsi_Host *);
-#else
-#define ncr53c8xx_release NULL
+/*==========================================================
+**
+**	Structure used to store the NVRAM content.
+**
+**==========================================================
+*/
+typedef struct {
+	int type;
+#define	SCSI_NCR_SYMBIOS_NVRAM	(1)
+#define	SCSI_NCR_TEKRAM_NVRAM	(2)
+#ifdef	SCSI_NCR_NVRAM_SUPPORT
+	union {
+		Symbios_nvram Symbios;
+		Tekram_nvram Tekram;
+	} data;
 #endif
+} ncr_nvram;
 
+/*==========================================================
+**
+**	Structure used by detection routine to save data on 
+**	each detected board for attach.
+**
+**==========================================================
+*/
+typedef struct {
+	struct device  *dev;
+	ncr_slot  slot;
+	ncr_chip  chip;
+	ncr_nvram *nvram;
+	u_char host_id;
+#ifdef	SCSI_NCR_PQS_PDS_SUPPORT
+	u_char pqs_pds;
+#endif
+	__u8 differential;
+	int attach_done;
+} ncr_device;
 
-#if	LINUX_VERSION_CODE >= LinuxVersionCode(2,1,75)
-
-#define NCR53C8XX {     name:           "",			\
-			detect:         ncr53c8xx_detect,	\
-			release:        ncr53c8xx_release,	\
-			info:           ncr53c8xx_info, 	\
-			queuecommand:   ncr53c8xx_queue_command,\
-			abort:          ncr53c8xx_abort,	\
-			reset:          ncr53c8xx_reset,	\
-			bios_param:     scsicam_bios_param,	\
-			can_queue:      SCSI_NCR_CAN_QUEUE,	\
-			this_id:        7,			\
-			sg_tablesize:   SCSI_NCR_SG_TABLESIZE,	\
-			cmd_per_lun:    SCSI_NCR_CMD_PER_LUN,	\
-			use_clustering: DISABLE_CLUSTERING} 
-
-#else
-
-#define NCR53C8XX {	NULL, NULL, NULL, NULL,				\
-			NULL,			ncr53c8xx_detect,	\
-			ncr53c8xx_release,	ncr53c8xx_info,	NULL,	\
-			ncr53c8xx_queue_command,ncr53c8xx_abort,	\
-			ncr53c8xx_reset, NULL,	scsicam_bios_param,	\
-			SCSI_NCR_CAN_QUEUE,	7,			\
-			SCSI_NCR_SG_TABLESIZE,	SCSI_NCR_CMD_PER_LUN,	\
-			0,	0,	DISABLE_CLUSTERING} 
- 
-#endif /* LINUX_VERSION_CODE */
-
-#endif /* defined(HOSTS_C) || defined(MODULE) */ 
+extern struct Scsi_Host *ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device);
+extern int ncr53c8xx_release(struct Scsi_Host *host);
+irqreturn_t ncr53c8xx_intr(int irq, void *dev_id, struct pt_regs * regs);
 
 #endif /* NCR53C8XX_H */

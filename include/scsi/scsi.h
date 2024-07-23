@@ -15,6 +15,13 @@
 */
 
 /*
+ * SCSI command lengths
+ */
+
+extern const unsigned char scsi_command_size[8];
+#define COMMAND_SIZE(opcode) scsi_command_size[((opcode) >> 5) & 7]
+
+/*
  *      SCSI opcodes
  */
 
@@ -78,6 +85,7 @@
 #define MODE_SENSE_10         0x5a
 #define PERSISTENT_RESERVE_IN 0x5e
 #define PERSISTENT_RESERVE_OUT 0x5f
+#define REPORT_LUNS           0xa0
 #define MOVE_MEDIUM           0xa5
 #define READ_12               0xa8
 #define WRITE_12              0xaa
@@ -88,9 +96,59 @@
 #define READ_ELEMENT_STATUS   0xb8
 #define SEND_VOLUME_TAG       0xb6
 #define WRITE_LONG_2          0xea
+#define READ_16               0x88
+#define WRITE_16              0x8a
+#define SERVICE_ACTION_IN     0x9e
+/* values for service action in */
+#define	SAI_READ_CAPACITY_16  0x10
+
 
 /*
- *  Status codes
+ *  SCSI Architecture Model (SAM) Status codes. Taken from SAM-3 draft
+ *  T10/1561-D Revision 4 Draft dated 7th November 2002.
+ */
+#define SAM_STAT_GOOD            0x00
+#define SAM_STAT_CHECK_CONDITION 0x02
+#define SAM_STAT_CONDITION_MET   0x04
+#define SAM_STAT_BUSY            0x08
+#define SAM_STAT_INTERMEDIATE    0x10
+#define SAM_STAT_INTERMEDIATE_CONDITION_MET 0x14
+#define SAM_STAT_RESERVATION_CONFLICT 0x18
+#define SAM_STAT_COMMAND_TERMINATED 0x22	/* obsolete in SAM-3 */
+#define SAM_STAT_TASK_SET_FULL   0x28
+#define SAM_STAT_ACA_ACTIVE      0x30
+#define SAM_STAT_TASK_ABORTED    0x40
+
+/** scsi_status_is_good - check the status return.
+ *
+ * @status: the status passed up from the driver (including host and
+ *          driver components)
+ *
+ * This returns true for known good conditions that may be treated as
+ * command completed normally
+ */
+static inline int scsi_status_is_good(int status)
+{
+	/* mask out the relevant bits
+	 *
+	 * FIXME: bit0 is listed as reserved in SCSI-2, but is
+	 * significant in SCSI-3.  For now, we follow the SCSI-2
+	 * behaviour and ignore reserved bits. */
+	
+	status &= 0xfe;
+
+	return ((status == SAM_STAT_GOOD)
+		|| (status == SAM_STAT_INTERMEDIATE)
+		|| (status == SAM_STAT_INTERMEDIATE_CONDITION_MET)
+		/* FIXME: this is obsolete in SAM-3 */
+		|| (status == SAM_STAT_COMMAND_TERMINATED));
+}
+
+/*
+ *  Status codes. These are deprecated as they are shifted 1 bit right
+ *  from those found in the SCSI standards. This causes confusion for
+ *  applications that are ported to several OSes. Prefer SAM Status codes
+ *  above.
  */
 
 #define GOOD                 0x00
@@ -130,6 +188,7 @@
 
 #define TYPE_DISK           0x00
 #define TYPE_TAPE           0x01
+#define TYPE_PRINTER        0x02
 #define TYPE_PROCESSOR      0x03    /* HP scanners use this */
 #define TYPE_WORM           0x04    /* Treated as ROM by our system */
 #define TYPE_ROM            0x05
@@ -162,6 +221,13 @@ struct ccs_modesel_head
     u_char  block_length_med;
     u_char  block_length_lo;
 };
+
+/*
+ * ScsiLun: 8 byte LUN.
+ */
+typedef struct scsi_lun {
+	u8 scsi_lun[8];
+} ScsiLun;
 
 /*
  *  MESSAGE CODES
@@ -213,24 +279,5 @@ struct ccs_modesel_head
 
 /* Used to get the PCI location of a device */
 #define SCSI_IOCTL_GET_PCI 0x5387
-
-/*
- * Overrides for Emacs so that we follow Linus's tabbing style.
- * Emacs will notice this stuff at the end of the file and automatically
- * adjust the settings for this buffer only.  This must remain at the end
- * of the file.
- * ---------------------------------------------------------------------------
- * Local variables:
- * c-indent-level: 4 
- * c-brace-imaginary-offset: 0
- * c-brace-offset: -4
- * c-argdecl-indent: 4
- * c-label-offset: -4
- * c-continued-statement-offset: 4
- * c-continued-brace-offset: 0
- * indent-tabs-mode: nil
- * tab-width: 8
- * End:
- */
 
 #endif

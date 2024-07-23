@@ -25,15 +25,15 @@
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/errno.h>
-#include <linux/videodev.h>
 #include <linux/init.h>
-
+#include <linux/kmod.h>
+#include <linux/slab.h>
+#include <linux/devfs_fs_kernel.h>
 #include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/semaphore.h>
 
-#include <linux/kmod.h>
-
+#include <linux/videodev.h>
 
 #define VIDEO_NUM_DEVICES	256 
 
@@ -42,9 +42,10 @@
  */
  
 static struct video_device *video_device[VIDEO_NUM_DEVICES];
+static DECLARE_MUTEX(videodev_lock);
 
 
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
+#ifdef CONFIG_VIDEO_PROC_FS
 
 #include <linux/proc_fs.h>
 
@@ -60,164 +61,142 @@ struct proc_dir_entry *video_proc_entry = NULL;
 EXPORT_SYMBOL(video_proc_entry);
 LIST_HEAD(videodev_proc_list);
 
-#endif /* CONFIG_PROC_FS && CONFIG_VIDEO_PROC_FS */
+#endif /* CONFIG_VIDEO_PROC_FS */
 
-
-/*
- *	Read will do some smarts later on. Buffer pin etc.
- */
- 
-static ssize_t video_read(struct file *file,
-	char *buf, size_t count, loff_t *ppos)
+struct video_device* video_devdata(struct file *file)
 {
-	struct video_device *vfl=video_device[MINOR(file->f_dentry->d_inode->i_rdev)];
-	if(vfl->read)
-		return vfl->read(vfl, buf, count, file->f_flags&O_NONBLOCK);
-	else
-		return -EINVAL;
+	return video_device[minor(file->f_dentry->d_inode->i_rdev)];
 }
-
-
-/*
- *	Write for now does nothing. No reason it shouldnt do overlay setting
- *	for some boards I guess..
- */
-
-static ssize_t video_write(struct file *file, const char *buf, 
-	size_t count, loff_t *ppos)
-{
-	struct video_device *vfl=video_device[MINOR(file->f_dentry->d_inode->i_rdev)];
-	if(vfl->write)
-		return vfl->write(vfl, buf, count, file->f_flags&O_NONBLOCK);
-	else
-		return 0;
-}
-
-/*
- *	Poll to see if we're readable, can probably be used for timing on incoming
- *	frames, etc..
- */
-
-static unsigned int video_poll(struct file *file, poll_table * wait)
-{
-	struct video_device *vfl=video_device[MINOR(file->f_dentry->d_inode->i_rdev)];
-	if(vfl->poll)
-		return vfl->poll(vfl, file, wait);
-	else
-		return 0;
-}
-
 
 /*
  *	Open a video device.
  */
-
 static int video_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = MINOR(inode->i_rdev);
-	int err, retval = 0;
+	unsigned int minor = minor(inode->i_rdev);
+	int err = 0;
 	struct video_device *vfl;
+	struct file_operations *old_fops;
 	
 	if(minor>=VIDEO_NUM_DEVICES)
 		return -ENODEV;
-	lock_kernel();		
+	down(&videodev_lock);
 	vfl=video_device[minor];
 	if(vfl==NULL) {
-		char modname[20];
-
-		sprintf (modname, "char-major-%d-%d", VIDEO_MAJOR, minor);
-		request_module(modname);
+		up(&videodev_lock);
+		request_module("char-major-%d-%d", VIDEO_MAJOR, minor);
+		down(&videodev_lock);
 		vfl=video_device[minor];
 		if (vfl==NULL) {
-			retval = -ENODEV;
-			goto error_out;
+			up(&videodev_lock);
+			return -ENODEV;
 		}
 	}
-	if(vfl->busy) {
-		retval = -EBUSY;
-		goto error_out;
+	old_fops = file->f_op;
+	file->f_op = fops_get(vfl->fops);
+	if(file->f_op->open)
+		err = file->f_op->open(inode,file);
+	if (err) {
+		fops_put(file->f_op);
+		file->f_op = fops_get(old_fops);
 	}
-	vfl->busy=1;		/* In case vfl->open sleeps */
-	
-	if(vfl->owner)
-		__MOD_INC_USE_COUNT(vfl->owner);
-	
-	if(vfl->open)
+	fops_put(old_fops);
+	up(&videodev_lock);
+	return err;
+}
+
+/*
+ * helper function -- handles userspace copying for ioctl arguments
+ */
+int
+video_usercopy(struct inode *inode, struct file *file,
+	       unsigned int cmd, unsigned long arg,
+	       int (*func)(struct inode *inode, struct file *file,
+			   unsigned int cmd, void *arg))
+{
+	char	sbuf[128];
+	void    *mbuf = NULL;
+	void	*parg = NULL;
+	int	err  = -EINVAL;
+
+	/*  Copy arguments into temp kernel buffer  */
+	switch (_IOC_DIR(cmd)) {
+	case _IOC_NONE:
+		parg = (void *)arg;
+		break;
+	case _IOC_READ: /* some v4l ioctls are marked wrong ... */
+	case _IOC_WRITE:
+	case (_IOC_WRITE | _IOC_READ):
+		if (_IOC_SIZE(cmd) <= sizeof(sbuf)) {
+			parg = sbuf;
+		} else {
+			/* too big to allocate from stack */
+			mbuf = kmalloc(_IOC_SIZE(cmd),GFP_KERNEL);
+			if (NULL == mbuf)
+				return -ENOMEM;
+			parg = mbuf;
+		}
+		
+		err = -EFAULT;
+		if (copy_from_user(parg, (void *)arg, _IOC_SIZE(cmd)))
+			goto out;
+		break;
+	}
+
+	/* call driver */
+	err = func(inode, file, cmd, parg);
+	if (err == -ENOIOCTLCMD)
+		err = -EINVAL;
+	if (err < 0)
+		goto out;
+
+	/*  Copy results into user buffer  */
+	switch (_IOC_DIR(cmd))
 	{
-		err=vfl->open(vfl,0);	/* Tell the device it is open */
-		if(err)
-		{
-			vfl->busy=0;
-			if(vfl->owner)
-				__MOD_DEC_USE_COUNT(vfl->owner);
-			
-			unlock_kernel();
-			return err;
-		}
+	case _IOC_READ:
+	case (_IOC_WRITE | _IOC_READ):
+		if (copy_to_user((void *)arg, parg, _IOC_SIZE(cmd)))
+			err = -EFAULT;
+		break;
 	}
-	unlock_kernel();
-	return 0;
-error_out:
-	unlock_kernel();
+
+out:
+	if (mbuf)
+		kfree(mbuf);
+	return err;
+}
+
+/*
+ * open/release helper functions -- handle exclusive opens
+ */
+extern int video_exclusive_open(struct inode *inode, struct file *file)
+{
+	struct  video_device *vfl = video_devdata(file);
+	int retval = 0;
+
+	down(&vfl->lock);
+	if (vfl->users) {
+		retval = -EBUSY;
+	} else {
+		vfl->users++;
+	}
+	up(&vfl->lock);
 	return retval;
 }
 
-/*
- *	Last close of a video for Linux device
- */
-	
-static int video_release(struct inode *inode, struct file *file)
+extern int video_exclusive_release(struct inode *inode, struct file *file)
 {
-	struct video_device *vfl;
-	lock_kernel();
-	vfl=video_device[MINOR(inode->i_rdev)];
-	if(vfl->close)
-		vfl->close(vfl);
-	vfl->busy=0;
-	if(vfl->owner)
-		__MOD_DEC_USE_COUNT(vfl->owner);
-	unlock_kernel();
+	struct  video_device *vfl = video_devdata(file);
+	
+	vfl->users--;
 	return 0;
-}
-
-static int video_ioctl(struct inode *inode, struct file *file,
-	unsigned int cmd, unsigned long arg)
-{
-	struct video_device *vfl=video_device[MINOR(inode->i_rdev)];
-	int err=vfl->ioctl(vfl, cmd, (void *)arg);
-
-	if(err!=-ENOIOCTLCMD)
-		return err;
-	
-	switch(cmd)
-	{
-		default:
-			return -EINVAL;
-	}
-}
-
-/*
- *	We need to do MMAP support
- */
-  
-int video_mmap(struct file *file, struct vm_area_struct *vma)
-{
-	int ret = -EINVAL;
-	struct video_device *vfl=video_device[MINOR(file->f_dentry->d_inode->i_rdev)];
-	if(vfl->mmap) {
-		lock_kernel();
-		ret = vfl->mmap(vfl, (char *)vma->vm_start, 
-				(unsigned long)(vma->vm_end-vma->vm_start));
-		unlock_kernel();
-	}
-	return ret;
 }
 
 /*
  *	/proc support
  */
 
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
+#ifdef CONFIG_VIDEO_PROC_FS
 
 /* Hmm... i'd like to see video_capability information here, but
  * how can I access it (without changing the other drivers? -claudio
@@ -307,9 +286,7 @@ static void videodev_proc_create(void)
 	video_dev_proc_entry->owner = THIS_MODULE;
 }
 
-#ifdef MODULE
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
-static void videodev_proc_destroy(void)
+static void __exit videodev_proc_destroy(void)
 {
 	if (video_dev_proc_entry != NULL)
 		remove_proc_entry("dev", video_proc_entry);
@@ -317,8 +294,6 @@ static void videodev_proc_destroy(void)
 	if (video_proc_entry != NULL)
 		remove_proc_entry("video", &proc_root);
 }
-#endif
-#endif
 
 static void videodev_proc_create_dev (struct video_device *vfd, char *name)
 {
@@ -333,8 +308,10 @@ static void videodev_proc_create_dev (struct video_device *vfd, char *name)
 		return;
 
 	p = create_proc_entry(name, S_IFREG|S_IRUGO|S_IWUSR, video_dev_proc_entry);
-	if (!p)
+	if (!p) {
+		kfree(d);
 		return;
+	}
 	p->data = vfd;
 	p->read_proc = videodev_proc_read;
 
@@ -392,16 +369,12 @@ extern struct file_operations video_fops;
  *	%VFL_TYPE_RADIO - A radio card	
  */
 
-static DECLARE_MUTEX(videodev_register_lock);
-
 int video_register_device(struct video_device *vfd, int type, int nr)
 {
 	int i=0;
 	int base;
-	int err;
 	int end;
 	char *name_base;
-	char name[16];
 	
 	switch(type)
 	{
@@ -430,55 +403,41 @@ int video_register_device(struct video_device *vfd, int type, int nr)
 	}
 
 	/* pick a minor number */
-	down(&videodev_register_lock);
+	down(&videodev_lock);
 	if (-1 == nr) {
 		/* use first free */
 		for(i=base;i<end;i++)
 			if (NULL == video_device[i])
 				break;
 		if (i == end) {
-			up(&videodev_register_lock);
+			up(&videodev_lock);
 			return -ENFILE;
 		}
 	} else {
 		/* use the one the driver asked for */
 		i = base+nr;
 		if (NULL != video_device[i]) {
-			up(&videodev_register_lock);
+			up(&videodev_lock);
 			return -ENFILE;
 		}
 	}
 	video_device[i]=vfd;
 	vfd->minor=i;
-	up(&videodev_register_lock);
+	up(&videodev_lock);
 
-	/* The init call may sleep so we book the slot out
-	   then call */
-	MOD_INC_USE_COUNT;
-	if(vfd->initialize) {
-		err=vfd->initialize(vfd);
-		if(err<0) {
-			video_device[i]=NULL;
-			MOD_DEC_USE_COUNT;
-			return err;
-		}
-	}
-	sprintf (name, "v4l/%s%d", name_base, i - base);
-	/*
-	 *	Start the device root only. Anything else
-	 *	has serious privacy issues.
-	 */
-	vfd->devfs_handle =
-		devfs_register (NULL, name, DEVFS_FL_DEFAULT,
-				VIDEO_MAJOR, vfd->minor,
-				S_IFCHR | S_IRUSR | S_IWUSR,
-				&video_fops,
-				NULL);
+	sprintf(vfd->devfs_name, "v4l/%s%d", name_base, i - base);
+	devfs_mk_cdev(MKDEV(VIDEO_MAJOR, vfd->minor),
+			S_IFCHR | S_IRUSR | S_IWUSR, vfd->devfs_name);
+	init_MUTEX(&vfd->lock);
 	
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
-	sprintf (name, "%s%d", name_base, i - base);
-	videodev_proc_create_dev (vfd, name);
+#ifdef CONFIG_VIDEO_PROC_FS
+{
+	char name[16];
+	sprintf(name, "%s%d", name_base, i - base);
+	videodev_proc_create_dev(vfd, name);
+}
 #endif
+
 	return 0;
 }
 
@@ -492,30 +451,25 @@ int video_register_device(struct video_device *vfd, int type, int nr)
  
 void video_unregister_device(struct video_device *vfd)
 {
+	down(&videodev_lock);
 	if(video_device[vfd->minor]!=vfd)
-		panic("vfd: bad unregister");
+		panic("videodev: bad unregister");
 
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
+#ifdef CONFIG_VIDEO_PROC_FS
 	videodev_proc_destroy_dev (vfd);
 #endif
 
-	devfs_unregister (vfd->devfs_handle);
+	devfs_remove(vfd->devfs_name);
 	video_device[vfd->minor]=NULL;
-	MOD_DEC_USE_COUNT;
+	up(&videodev_lock);
 }
 
 
 static struct file_operations video_fops=
 {
-	owner:		THIS_MODULE,
-	llseek:		no_llseek,
-	read:		video_read,
-	write:		video_write,
-	ioctl:		video_ioctl,
-	mmap:		video_mmap,
-	open:		video_open,
-	release:	video_release,
-	poll:		video_poll,
+	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
+	.open		= video_open,
 };
 
 /*
@@ -525,13 +479,12 @@ static struct file_operations video_fops=
 static int __init videodev_init(void)
 {
 	printk(KERN_INFO "Linux video capture interface: v1.00\n");
-	if(devfs_register_chrdev(VIDEO_MAJOR,"video_capture", &video_fops))
-	{
+	if (register_chrdev(VIDEO_MAJOR,"video_capture", &video_fops)) {
 		printk("video_dev: unable to get major %d\n", VIDEO_MAJOR);
 		return -EIO;
 	}
 
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
+#ifdef CONFIG_VIDEO_PROC_FS
 	videodev_proc_create ();
 #endif
 	
@@ -540,13 +493,10 @@ static int __init videodev_init(void)
 
 static void __exit videodev_exit(void)
 {
-#ifdef MODULE		
-#if defined(CONFIG_PROC_FS) && defined(CONFIG_VIDEO_PROC_FS)
+#ifdef CONFIG_VIDEO_PROC_FS
 	videodev_proc_destroy ();
 #endif
-#endif
-	
-	devfs_unregister_chrdev(VIDEO_MAJOR, "video_capture");
+	unregister_chrdev(VIDEO_MAJOR, "video_capture");
 }
 
 module_init(videodev_init)
@@ -554,6 +504,10 @@ module_exit(videodev_exit)
 
 EXPORT_SYMBOL(video_register_device);
 EXPORT_SYMBOL(video_unregister_device);
+EXPORT_SYMBOL(video_devdata);
+EXPORT_SYMBOL(video_usercopy);
+EXPORT_SYMBOL(video_exclusive_open);
+EXPORT_SYMBOL(video_exclusive_release);
 
 MODULE_AUTHOR("Alan Cox");
 MODULE_DESCRIPTION("Device registrar for Video4Linux drivers");

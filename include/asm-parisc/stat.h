@@ -13,11 +13,11 @@ struct stat {
 	dev_t		st_rdev;
 	off_t		st_size;
 	time_t		st_atime;
-	unsigned int	st_spare1;
+	unsigned int	st_atime_nsec;
 	time_t		st_mtime;
-	unsigned int	st_spare2;
+	unsigned int	st_mtime_nsec;
 	time_t		st_ctime;
-	unsigned int	st_spare3;
+	unsigned int	st_ctime_nsec;
 	int		st_blksize;
 	int		st_blocks;
 	unsigned int	__unused1;	/* ACL stuff */
@@ -33,6 +33,8 @@ struct stat {
 	gid_t		st_gid;
 	unsigned int	st_spare4[3];
 };
+
+#define STAT_HAVE_NSEC
 
 typedef __kernel_off64_t	off64_t;
 
@@ -66,6 +68,33 @@ struct hpux_stat64 {
 	gid_t		st_gid;
 	unsigned int	st_spare4[3];
 };
-#define stat64	hpux_stat64
+
+/* This is the struct that 32-bit userspace applications are expecting.
+ * How 64-bit apps are going to be compiled, I have no idea.  But at least
+ * this way, we don't have a wrapper in the kernel.
+ */
+struct stat64 {
+	unsigned long long	st_dev;
+	unsigned int		__pad1;
+
+	unsigned int		__st_ino;	/* Not actually filled in */
+	unsigned int		st_mode;
+	unsigned int		st_nlink;
+	unsigned int		st_uid;
+	unsigned int		st_gid;
+	unsigned long long	st_rdev;
+	unsigned int		__pad2;
+	signed long long	st_size;
+	signed int		st_blksize;
+
+	signed long long	st_blocks;
+	signed int		st_atime;
+	unsigned int		st_atime_nsec;
+	signed int		st_mtime;
+	unsigned int		st_mtime_nsec;
+	signed int		st_ctime;
+	unsigned int		st_ctime_nsec;
+	unsigned long long	st_ino;
+};
 
 #endif

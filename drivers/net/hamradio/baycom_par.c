@@ -71,16 +71,12 @@
 #include <linux/version.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/string.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/uaccess.h>
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
@@ -88,6 +84,10 @@
 #include <linux/hdlcdrv.h>
 #include <linux/baycom.h>
 #include <linux/parport.h>
+
+#include <asm/system.h>
+#include <asm/bitops.h>
+#include <asm/uaccess.h>
 
 /* --------------------------------------------------------------------- */
 
@@ -288,14 +288,14 @@ static void par96_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		par96_rx(dev, bc);
 		if (--bc->modem.arb_divider <= 0) {
 			bc->modem.arb_divider = 6;
-			__sti();
+			local_irq_enable();
 			hdlcdrv_arbitrate(dev, &bc->hdrv);
 		}
 	}
-	__sti();
+	local_irq_enable();
 	hdlcdrv_transmitter(dev, &bc->hdrv);
 	hdlcdrv_receiver(dev, &bc->hdrv);
-        __cli();
+        local_irq_disable();
 }
 
 /* --------------------------------------------------------------------- */
@@ -493,6 +493,7 @@ MODULE_PARM_DESC(iobase, "baycom io base address");
 
 MODULE_AUTHOR("Thomas M. Sailer, sailer@ife.ee.ethz.ch, hb9jnx@hb9w.che.eu");
 MODULE_DESCRIPTION("Baycom par96 and picpar amateur radio modem driver");
+MODULE_LICENSE("GPL");
 
 /* --------------------------------------------------------------------- */
 

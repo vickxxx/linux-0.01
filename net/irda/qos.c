@@ -72,7 +72,7 @@ unsigned sysctl_min_tx_turn_time = 10;
  * payload), that's only 2042 bytes. Oups !
  * My nsc-ircc hardware has troubles receiving 2048 bytes frames at 4 Mb/s,
  * so adjust to 2042... I don't know if this bug applies only for 2048
- * bytes frames or all negociated frame sizes, but you can use the sysctl
+ * bytes frames or all negotiated frame sizes, but you can use the sysctl
  * to play with this value anyway.
  * Jean II */
 unsigned sysctl_max_tx_data_size = 2042;
@@ -96,15 +96,15 @@ static int irlap_param_additional_bofs(void *instance, irda_param_t *parm,
 static int irlap_param_min_turn_time(void *instance, irda_param_t *param, 
 				     int get);
 
-__u32 min_turn_times[]  = { 10000, 5000, 1000, 500, 100, 50, 10, 0 }; /* us */
-static __u32 baud_rates[] = { 2400, 9600, 19200, 38400, 57600, 115200, 576000,
-			    1152000, 4000000, 16000000 };           /* bps */
-__u32 data_sizes[]      = { 64, 128, 256, 512, 1024, 2048 };        /* bytes */
-__u32 add_bofs[]        = { 48, 24, 12, 5, 3, 2, 1, 0 };            /* bytes */
-__u32 max_turn_times[]  = { 500, 250, 100, 50 };                    /* ms */
-__u32 link_disc_times[] = { 3, 8, 12, 16, 20, 25, 30, 40 };         /* secs */
+static __u32 min_turn_times[]  = { 10000, 5000, 1000, 500, 100, 50, 10, 0 }; /* us */
+static __u32 baud_rates[]      = { 2400, 9600, 19200, 38400, 57600, 115200, 576000, 
+				   1152000, 4000000, 16000000 };           /* bps */
+static __u32 data_sizes[]      = { 64, 128, 256, 512, 1024, 2048 };        /* bytes */
+static __u32 add_bofs[]        = { 48, 24, 12, 5, 3, 2, 1, 0 };            /* bytes */
+static __u32 max_turn_times[]  = { 500, 250, 100, 50 };                    /* ms */
+static __u32 link_disc_times[] = { 3, 8, 12, 16, 20, 25, 30, 40 };         /* secs */
 
-__u32 max_line_capacities[10][4] = {
+static __u32 max_line_capacities[10][4] = {
        /* 500 ms     250 ms  100 ms  50 ms (max turn time) */
 	{    100,      0,      0,     0 }, /*     2400 bps */
 	{    400,      0,      0,     0 }, /*     9600 bps */
@@ -185,7 +185,7 @@ static inline __u32 index_value(int index, __u32 *array)
  *    Returns index to most significant bit (MSB) in word
  *
  */
-int msb_index (__u16 word) 
+static int msb_index (__u16 word) 
 {
 	__u16 msb = 0x8000;
 	int index = 15;   /* Current MSB */
@@ -280,7 +280,7 @@ static inline int value_highest_bit(__u32 value, __u32 *array, int size, __u16 *
 /*
  * Function irda_qos_compute_intersection (qos, new)
  *
- *    Compute the intersection of the old QoS capabilites with new ones
+ *    Compute the intersection of the old QoS capabilities with new ones
  *
  */
 void irda_qos_compute_intersection(struct qos_info *qos, struct qos_info *new)
@@ -374,8 +374,9 @@ void irlap_adjust_qos_settings(struct qos_info *qos)
 	if ((qos->baud_rate.value < 115200) && 
 	    (qos->max_turn_time.value < 500))
 	{
-		IRDA_DEBUG(0, "%s(), adjusting max turn time from %d to 500 ms\n", __FUNCTION__,
-			   qos->max_turn_time.value);
+		IRDA_DEBUG(0, 
+			   "%s(), adjusting max turn time from %d to 500 ms\n",
+			   __FUNCTION__, qos->max_turn_time.value);
 		qos->max_turn_time.value = 500;
 	}
 	
@@ -390,8 +391,8 @@ void irlap_adjust_qos_settings(struct qos_info *qos)
 #ifdef CONFIG_IRDA_DYNAMIC_WINDOW
 	while ((qos->data_size.value > line_capacity) && (index > 0)) {
 		qos->data_size.value = data_sizes[index--];
-		IRDA_DEBUG(2, "%s(), reducing data size to %d\n", __FUNCTION__,
-			   qos->data_size.value);
+		IRDA_DEBUG(2, "%s(), reducing data size to %d\n",
+			   __FUNCTION__, qos->data_size.value);
 	}
 #else /* Use method described in section 6.6.11 of IrLAP */
 	while (irlap_requested_line_capacity(qos) > line_capacity) {
@@ -400,14 +401,15 @@ void irlap_adjust_qos_settings(struct qos_info *qos)
 		/* Must be able to send at least one frame */
 		if (qos->window_size.value > 1) {
 			qos->window_size.value--;
-			IRDA_DEBUG(2, "%s(), reducing window size to %d\n", __FUNCTION__,
-				   qos->window_size.value);
+			IRDA_DEBUG(2, "%s(), reducing window size to %d\n",
+				   __FUNCTION__, qos->window_size.value);
 		} else if (index > 1) {
 			qos->data_size.value = data_sizes[index--];
-			IRDA_DEBUG(2, "%s(), reducing data size to %d\n", __FUNCTION__,
-				   qos->data_size.value);
+			IRDA_DEBUG(2, "%s(), reducing data size to %d\n",
+				   __FUNCTION__, qos->data_size.value);
 		} else {
-			WARNING("%s(), nothing more we can do!\n", __FUNCTION__);
+			WARNING("%s(), nothing more we can do!\n",
+				__FUNCTION__);
 		}
 	}
 #endif /* CONFIG_IRDA_DYNAMIC_WINDOW */
@@ -541,8 +543,8 @@ static int irlap_param_baud_rate(void *instance, irda_param_t *param, int get)
 
 	if (get) {
 		param->pv.i = self->qos_rx.baud_rate.bits;
-		IRDA_DEBUG(2, "%s(), baud rate = 0x%02x\n", __FUNCTION__,
-			   param->pv.i);		
+		IRDA_DEBUG(2, "%s(), baud rate = 0x%02x\n", 
+			   __FUNCTION__, param->pv.i);		
 	} else {
 		/* 
 		 *  Stations must agree on baud rate, so calculate
@@ -714,19 +716,19 @@ __u32 irlap_max_line_capacity(__u32 speed, __u32 max_turn_time)
 	__u32 line_capacity;
 	int i,j;
 
-	IRDA_DEBUG(2, "%s(), speed=%d, max_turn_time=%d\n", __FUNCTION__,
-		   speed, max_turn_time);
+	IRDA_DEBUG(2, "%s(), speed=%d, max_turn_time=%d\n",
+		   __FUNCTION__, speed, max_turn_time);
 
 	i = value_index(speed, baud_rates, 10);
 	j = value_index(max_turn_time, max_turn_times, 4);
 
-	ASSERT(((i >=0) && (i <=10)), return 0;);
-	ASSERT(((j >=0) && (j <=4)), return 0;);
+	ASSERT(((i >=0) && (i <10)), return 0;);
+	ASSERT(((j >=0) && (j <4)), return 0;);
 
 	line_capacity = max_line_capacities[i][j];
 
-	IRDA_DEBUG(2, "%s(), line capacity=%d bytes\n", __FUNCTION__,
-		   line_capacity);
+	IRDA_DEBUG(2, "%s(), line capacity=%d bytes\n", 
+		   __FUNCTION__, line_capacity);
 	
 	return line_capacity;
 }
@@ -739,8 +741,8 @@ __u32 irlap_requested_line_capacity(struct qos_info *qos)
 		irlap_min_turn_time_in_bytes(qos->baud_rate.value, 
 					     qos->min_turn_time.value);
 	
-	IRDA_DEBUG(2, "%s(), requested line capacity=%d\n", __FUNCTION__,
-		   line_capacity);
+	IRDA_DEBUG(2, "%s(), requested line capacity=%d\n",
+		   __FUNCTION__, line_capacity);
 	
 	return line_capacity;			       		  
 }

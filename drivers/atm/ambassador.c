@@ -290,12 +290,11 @@ static inline void __init show_version (void) {
 /********** microcode **********/
 
 #ifdef AMB_NEW_MICROCODE
-#define UCODE(x) UCODE1(atmsar12.,x)
+#define UCODE(x) UCODE2(atmsar12.x)
 #else
-#define UCODE(x) UCODE1(atmsar11.,x)
+#define UCODE(x) UCODE2(atmsar11.x)
 #endif
 #define UCODE2(x) #x
-#define UCODE1(x,y) UCODE2(x ## y)
 
 static u32 __initdata ucode_start = 
 #include UCODE(start)
@@ -516,7 +515,7 @@ static void rx_complete (amb_dev * dev, rx_out * rx) {
 	  
 	  // VC layer stats
 	  atomic_inc(&atm_vcc->stats->rx);
-	  skb->stamp = xtime;
+	  do_gettimeofday(&skb->stamp);
 	  // end of our responsability
 	  atm_vcc->push (atm_vcc, skb);
 	  return;
@@ -795,7 +794,6 @@ static inline void drain_rx_pool (amb_dev * dev, unsigned char pool) {
   return;
 }
 
-#ifdef MODULE
 static void drain_rx_pools (amb_dev * dev) {
   unsigned char pool;
   
@@ -803,10 +801,7 @@ static void drain_rx_pools (amb_dev * dev) {
   
   for (pool = 0; pool < NUM_RX_POOLS; ++pool)
     drain_rx_pool (dev, pool);
-  
-  return;
 }
-#endif
 
 static inline void fill_rx_pool (amb_dev * dev, unsigned char pool, int priority) {
   rx_in rx;
@@ -872,7 +867,8 @@ static inline void interrupts_off (amb_dev * dev) {
 
 /********** interrupt handling **********/
 
-static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs) {
+static irqreturn_t interrupt_handler(int irq, void *dev_id,
+					struct pt_regs *pt_regs) {
   amb_dev * dev = amb_devs;
   (void) pt_regs;
   
@@ -880,7 +876,7 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
   
   if (!dev_id) {
     PRINTD (DBG_IRQ|DBG_ERR, "irq with NULL dev_id: %d", irq);
-    return;
+    return IRQ_NONE;
   }
   // Did one of our cards generate the interrupt?
   while (dev) {
@@ -893,12 +889,12 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
   // the card generates an IRQ at startup - should not happen again
   if (!dev) {
     PRINTD (DBG_IRQ, "irq for unknown device: %d", irq);
-    return;
+    return IRQ_NONE;
   }
   // impossible - unless we have memory corruption of dev or kernel
   if (irq != dev->irq) {
     PRINTD (DBG_IRQ|DBG_ERR, "irq mismatch: %d", irq);
-    return;
+    return IRQ_NONE;
   }
   
   {
@@ -907,7 +903,7 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
     // for us or someone else sharing the same interrupt
     if (!interrupt) {
       PRINTD (DBG_IRQ, "irq not for me: %d", irq);
-      return;
+      return IRQ_NONE;
     }
     
     // definitely for us
@@ -926,8 +922,7 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
   
     if (irq_work) {
 #ifdef FILL_RX_POOLS_IN_BH
-      queue_task (&dev->bh, &tq_immediate);
-      mark_bh (IMMEDIATE_BH);
+      schedule_work (&dev->bh);
 #else
       fill_rx_pools (dev);
 #endif
@@ -939,7 +934,7 @@ static void interrupt_handler (int irq, void * dev_id, struct pt_regs * pt_regs)
   }
   
   PRINTD (DBG_IRQ|DBG_FLOW, "interrupt_handler done: %p", dev_id);
-  return;
+  return IRQ_HANDLED;
 }
 
 /********** don't panic... yeah, right **********/
@@ -1695,12 +1690,12 @@ static int amb_proc_read (struct atm_dev * atm_dev, loff_t * pos, char * page) {
 /********** Operation Structure **********/
 
 static const struct atmdev_ops amb_ops = {
-  open:		amb_open,
-  close:	amb_close,
-  send:		amb_send,
-  sg_send:	amb_sg_send,
-  proc_read:	amb_proc_read,
-  owner:	THIS_MODULE,
+  .open	= amb_open,
+  .close	= amb_close,
+  .send	= amb_send,
+  .sg_send	= amb_sg_send,
+  .proc_read	= amb_proc_read,
+  .owner	= THIS_MODULE,
 };
 
 /********** housekeeping **********/
@@ -2402,10 +2397,7 @@ static int __init amb_probe (void) {
       
 #ifdef FILL_RX_POOLS_IN_BH
       // initialise bottom half
-      INIT_LIST_HEAD(&dev->bh.list);
-      dev->bh.sync = 0;
-      dev->bh.routine = (void (*)(void *)) fill_rx_pools;
-      dev->bh.data = dev;
+      INIT_WORK(&dev->bh, (void (*)(void *)) fill_rx_pools, dev);
 #endif
       
       // semaphore for txer/rxer modifications - we cannot use a
@@ -2447,7 +2439,7 @@ static int __init amb_probe (void) {
 	    " IO %x, IRQ %u, MEM %p", iobase, irq, membase);
     
     // check IO region
-    if (check_region (iobase, AMB_EXTENT)) {
+    if (!request_region (iobase, AMB_EXTENT, DEV_LABEL)) {
       PRINTK (KERN_ERR, "IO range already in use!");
       return;
     }
@@ -2456,6 +2448,7 @@ static int __init amb_probe (void) {
     if (!dev) {
       // perhaps we should be nice: deregister all adapters and abort?
       PRINTK (KERN_ERR, "out of memory!");
+      release_region (iobase, AMB_EXTENT);
       return;
     }
     
@@ -2472,9 +2465,6 @@ static int __init amb_probe (void) {
 	PRINTK (KERN_ERR, "request IRQ failed!");
 	// free_irq is at "endif"
       } else {
-	
-	// reserve IO region
-	request_region (iobase, AMB_EXTENT, DEV_LABEL);
 	
 	dev->atm_dev = atm_dev_register (DEV_LABEL, &amb_ops, -1, NULL);
 	if (!dev->atm_dev) {
@@ -2507,20 +2497,17 @@ static int __init amb_probe (void) {
 	  atm_dev_deregister (dev->atm_dev);
 	} /* atm_dev_register */
 	
-	release_region (iobase, AMB_EXTENT);
 	free_irq (irq, dev);
-      } /* request_region, request_irq */
+      } /* request_irq */
       
       amb_reset (dev, 0);
     } /* amb_init */
     
     kfree (dev);
+    release_region (iobase, AMB_EXTENT);
   } /* kmalloc, end-of-fn */
   
   PRINTD (DBG_FLOW, "amb_probe");
-  
-  if (!pci_present())
-    return 0;
   
   devs = 0;
   pci_dev = NULL;
@@ -2580,9 +2567,6 @@ static void __init amb_check_args (void) {
 
 /********** module stuff **********/
 
-#ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
 MODULE_AUTHOR(maintainer_string);
 MODULE_DESCRIPTION(description_string);
 MODULE_LICENSE("GPL");
@@ -2603,7 +2587,7 @@ MODULE_PARM_DESC(pci_lat, "PCI latency in bus cycles");
 
 /********** module entry **********/
 
-int init_module (void) {
+static int __init amb_module_init (void) {
   int devs;
   
   PRINTD (DBG_FLOW|DBG_INIT, "init_module");
@@ -2637,7 +2621,7 @@ int init_module (void) {
 
 /********** module exit **********/
 
-void cleanup_module (void) {
+static void __exit amb_module_exit (void) {
   amb_dev * dev;
   
   PRINTD (DBG_FLOW|DBG_INIT, "cleanup_module");
@@ -2665,38 +2649,5 @@ void cleanup_module (void) {
   return;
 }
 
-#else
-
-/********** monolithic entry **********/
-
-int __init amb_detect (void) {
-  int devs;
-  
-  // sanity check - cast needed as printk does not support %Zu
-  if (sizeof(amb_mem) != 4*16 + 4*12) {
-    PRINTK (KERN_ERR, "Fix amb_mem (is %lu words).",
-	    (unsigned long) sizeof(amb_mem));
-    return 0;
-  }
-  
-  show_version();
-  
-  amb_check_args();
-  
-  // get the juice
-  devs = amb_probe();
-  
-  if (devs) {
-    init_timer (&housekeeping);
-    housekeeping.function = do_housekeeping;
-    // paranoia
-    housekeeping.data = 1;
-    set_timer (&housekeeping, 0);
-  } else {
-    PRINTK (KERN_INFO, "no (usable) adapters found");
-  }
-  
-  return devs;
-}
-
-#endif
+module_init(amb_module_init);
+module_exit(amb_module_exit);

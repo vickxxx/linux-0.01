@@ -95,8 +95,6 @@ not be guaranteed. There are several ways to assure this:
  */
 #define	SLM_CONT_CNT_REPROG
 
-#define MAJOR_NR ACSI_MAJOR
-
 #define CMDSET_TARG_LUN(cmd,targ,lun)			\
     do {										\
 		cmd[0] = (cmd[0] & ~0xe0) | (targ)<<5;	\
@@ -121,8 +119,8 @@ static char slmmselect_cmd[6]  = { 0x15, 0, 0, 0, 0, 0 };
 static struct slm {
 	unsigned	target;			/* target number */
 	unsigned	lun;			/* LUN in target controller */
-	unsigned	wbusy : 1;		/* output part busy */
-	unsigned	rbusy : 1;		/* status part busy */
+	atomic_t	wr_ok; 			/* set to 0 if output part busy */
+	atomic_t	rd_ok;			/* set to 0 if status part busy */
 } slm_info[MAX_SLM];
 
 int N_SLM_Printers = 0;
@@ -249,7 +247,7 @@ static int slm_getstats( char *buffer, int device );
 static ssize_t slm_read( struct file* file, char *buf, size_t count, loff_t
                          *ppos );
 static void start_print( int device );
-static void slm_interrupt(int irc, void *data, struct pt_regs *fp);
+static irqreturn_t slm_interrupt(int irc, void *data, struct pt_regs *fp);
 static void slm_test_ready( unsigned long dummy );
 static void set_dma_addr( unsigned long paddr );
 static unsigned long get_dma_addr( void );
@@ -270,15 +268,15 @@ static int slm_get_pagesize( int device, int *w, int *h );
 /************************* End of Prototypes **************************/
 
 
-static struct timer_list slm_timer = { function: slm_test_ready };
+static struct timer_list slm_timer = TIMER_INITIALIZER(slm_test_ready, 0, 0);
 
 static struct file_operations slm_fops = {
-	owner:		THIS_MODULE,
-	read:		slm_read,
-	write:		slm_write,
-	ioctl:		slm_ioctl,
-	open:		slm_open,
-	release:	slm_release,
+	.owner =	THIS_MODULE,
+	.read =		slm_read,
+	.write =	slm_write,
+	.ioctl =	slm_ioctl,
+	.open =		slm_open,
+	.release =	slm_release,
 };
 
 
@@ -457,7 +455,7 @@ static void start_print( int device )
 
 /* Only called when an error happened or at the end of a page */
 
-static void slm_interrupt(int irc, void *data, struct pt_regs *fp)
+static irqreturn_t slm_interrupt(int irc, void *data, struct pt_regs *fp)
 
 {	unsigned long	addr;
 	int				stat;
@@ -478,6 +476,7 @@ static void slm_interrupt(int irc, void *data, struct pt_regs *fp)
 	wake_up( &print_wait );
 	stdma_release();
 	ENABLE_IRQ();
+	return IRQ_HANDLED;
 }
 
 
@@ -502,12 +501,11 @@ static void slm_test_ready( unsigned long dummy )
 	int			   did_wait = 0;
 #endif
 
-	save_flags(flags);
-	cli();
-	
+	local_irq_save(flags);
+
 	addr = get_dma_addr();
 	if ((d = SLMEndAddr - addr) > 0) {
-		restore_flags(flags);
+		local_irq_restore(flags);
 		
 		/* slice not yet finished, decide whether to start another timer or to
 		 * busy-wait */
@@ -525,7 +523,7 @@ static void slm_test_ready( unsigned long dummy )
 		do_gettimeofday( &start_tm );
 		did_wait = 1;
 #endif
-		cli();
+		local_irq_disable();
 		while( get_dma_addr() < SLMEndAddr )
 			barrier();
 	}
@@ -549,7 +547,7 @@ static void slm_test_ready( unsigned long dummy )
 	DMA_LONG_WRITE( SLM_DMA_AMOUNT, 0x112 );
 #endif
 	
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 #ifdef DEBUG
 	if (did_wait) {
@@ -586,10 +584,9 @@ static void slm_test_ready( unsigned long dummy )
 
 static void set_dma_addr( unsigned long paddr )
 
-{	unsigned long	flags;
-	
-	save_flags(flags);  
-	cli();
+{	unsigned long flags;
+
+	local_irq_save(flags);
 	dma_wd.dma_lo = (unsigned char)paddr;
 	paddr >>= 8;
 	MFPDELAY();
@@ -601,7 +598,7 @@ static void set_dma_addr( unsigned long paddr )
 	else
 		dma_wd.dma_hi = (unsigned char)paddr;
 	MFPDELAY();
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 
@@ -778,15 +775,17 @@ static int slm_open( struct inode *inode, struct file *file )
 
 	if (file->f_mode & 2) {
 		/* open for writing is exclusive */
-		if (sip->wbusy)
+		if ( !atomic_dec_and_test(&sip->wr_ok) ) {
+			atomic_inc(&sip->wr_ok);	
 			return( -EBUSY );
-		sip->wbusy = 1;
+		}
 	}
 	if (file->f_mode & 1) {
-		/* open for writing is exclusive */
-		if (sip->rbusy)
-			return( -EBUSY );
-		sip->rbusy = 1;
+		/* open for reading is exclusive */
+                if ( !atomic_dec_and_test(&sip->rd_ok) ) {
+                        atomic_inc(&sip->rd_ok);
+                        return( -EBUSY );
+                }
 	}
 
 	return( 0 );
@@ -801,12 +800,10 @@ static int slm_release( struct inode *inode, struct file *file )
 	device = MINOR(inode->i_rdev);
 	sip = &slm_info[device];
 
-	lock_kernel();
 	if (file->f_mode & 2)
-		sip->wbusy = 0;
+		atomic_inc( &sip->wr_ok );
 	if (file->f_mode & 1)
-		sip->rbusy = 0;
-	unlock_kernel();
+		atomic_inc( &sip->rd_ok );
 	
 	return( 0 );
 }
@@ -983,8 +980,8 @@ int attach_slm( int target, int lun )
 
 	slm_info[N_SLM_Printers].target = target;
 	slm_info[N_SLM_Printers].lun    = lun;
-	slm_info[N_SLM_Printers].wbusy  = 0;
-	slm_info[N_SLM_Printers].rbusy  = 0;
+	atomic_set(&slm_info[N_SLM_Printers].wr_ok, 1 ); 
+	atomic_set(&slm_info[N_SLM_Printers].rd_ok, 1 );
 	
 	printk( KERN_INFO "  Printer: %s\n", SLMBuffer );
 	printk( KERN_INFO "Detected slm%d at id %d lun %d\n",
@@ -993,28 +990,28 @@ int attach_slm( int target, int lun )
 	return( 1 );
 }
 
-static devfs_handle_t devfs_handle;
-
 int slm_init( void )
 
 {
-	if (devfs_register_chrdev( MAJOR_NR, "slm", &slm_fops )) {
-		printk( KERN_ERR "Unable to get major %d for ACSI SLM\n", MAJOR_NR );
+	int i;
+	if (register_chrdev( ACSI_MAJOR, "slm", &slm_fops )) {
+		printk( KERN_ERR "Unable to get major %d for ACSI SLM\n", ACSI_MAJOR );
 		return -EBUSY;
 	}
 	
 	if (!(SLMBuffer = atari_stram_alloc( SLM_BUFFER_SIZE, NULL, "SLM" ))) {
 		printk( KERN_ERR "Unable to get SLM ST-Ram buffer.\n" );
-		devfs_unregister_chrdev( MAJOR_NR, "slm" );
+		unregister_chrdev( ACSI_MAJOR, "slm" );
 		return -ENOMEM;
 	}
 	BufferP = SLMBuffer;
 	SLMState = IDLE;
 	
-	devfs_handle = devfs_mk_dir (NULL, "slm", NULL);
-	devfs_register_series (devfs_handle, "%u", MAX_SLM, DEVFS_FL_DEFAULT,
-			       MAJOR_NR, 0, S_IFCHR | S_IRUSR | S_IWUSR,
-			       &slm_fops, NULL);
+	devfs_mk_dir("slm");
+	for (i = 0; i < MAX_SLM; i++) {
+		devfs_mk_cdev(MKDEV(ACSI_MAJOR, i),
+				S_IFCHR|S_IRUSR|S_IWUSR, "slm/%d", i);
+	}
 	return 0;
 }
 
@@ -1037,8 +1034,11 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	devfs_unregister (devfs_handle);
-	if (devfs_unregister_chrdev( MAJOR_NR, "slm" ) != 0)
+	int i;
+	for (i = 0; i < MAX_SLM; i++)
+		devfs_remove("slm/%d", i);
+	devfs_remove("slm");
+	if (unregister_chrdev( ACSI_MAJOR, "slm" ) != 0)
 		printk( KERN_ERR "acsi_slm: cleanup_module failed\n");
 	atari_stram_free( SLMBuffer );
 }

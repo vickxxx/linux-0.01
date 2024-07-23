@@ -8,7 +8,7 @@
  * addresses.  Thus, we need to be careful not to let the user to
  * trick us into accessing kernel memory that would normally be
  * inaccessible.  This code is also fairly performance sensitive,
- * so we want to spend as little time doing saftey checks as
+ * so we want to spend as little time doing safety checks as
  * possible.
  *
  * To make matters a bit more interesting, these macros sometimes also
@@ -26,8 +26,8 @@
  * associated and, if so, sets r8 to -EFAULT and clears r9 to 0 and
  * then resumes execution at the continuation point.
  *
- * Copyright (C) 1998, 1999, 2001 Hewlett-Packard Co
- * Copyright (C) 1998, 1999, 2001 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998, 1999, 2001-2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #include <linux/errno.h>
@@ -45,8 +45,8 @@
 #define VERIFY_WRITE	1
 
 #define get_ds()  (KERNEL_DS)
-#define get_fs()  (current->addr_limit)
-#define set_fs(x) (current->addr_limit = (x))
+#define get_fs()  (current_thread_info()->addr_limit)
+#define set_fs(x) (current_thread_info()->addr_limit = (x))
 
 #define segment_eq(a,b)	((a).seg == (b).seg)
 
@@ -56,8 +56,9 @@
  * address TASK_SIZE is never valid.  We also need to make sure that the address doesn't
  * point inside the virtually mapped linear page table.
  */
-#define __access_ok(addr,size,segment)	(((unsigned long) (addr)) <= (segment).seg		\
-	 && ((segment).seg == KERNEL_DS.seg || rgn_offset((unsigned long) (addr)) < RGN_MAP_LIMIT))
+#define __access_ok(addr,size,segment)	(((unsigned long) (addr)) <= (segment).seg	\
+	 && ((segment).seg == KERNEL_DS.seg						\
+	     || REGION_OFFSET((unsigned long) (addr)) < RGN_MAP_LIMIT))
 #define access_ok(type,addr,size)	__access_ok((addr),(size),get_fs())
 
 static inline int
@@ -127,38 +128,28 @@ struct __large_struct { unsigned long buf[100]; };
 /* We need to declare the __ex_table section before we can use it in .xdata.  */
 asm (".section \"__ex_table\", \"a\"\n\t.previous");
 
-#if __GNUC__ >= 3
-#  define GAS_HAS_LOCAL_TAGS	/* define if gas supports local tags a la [1:] */
-#endif
-
-#ifdef GAS_HAS_LOCAL_TAGS
-# define _LL	"[1:]"
-#else
-# define _LL	"1:"
-#endif
-
 #define __get_user_64(addr)									\
-	asm ("\n"_LL"\tld8 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
-	     "\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)+4\n"				\
-	     _LL										\
+	asm ("\n[1:]\tld8 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
+	     "\t.xdata4 \"__ex_table\", 1b-., 1f-.+4\n"						\
+	     "[1:]"										\
 	     : "=r"(__gu_val), "=r"(__gu_err) : "m"(__m(addr)), "1"(__gu_err));
 
 #define __get_user_32(addr)									\
-	asm ("\n"_LL"\tld4 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
-	     "\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)+4\n"				\
-	     _LL										\
+	asm ("\n[1:]\tld4 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
+	     "\t.xdata4 \"__ex_table\", 1b-., 1f-.+4\n"						\
+	     "[1:]"										\
 	     : "=r"(__gu_val), "=r"(__gu_err) : "m"(__m(addr)), "1"(__gu_err));
 
 #define __get_user_16(addr)									\
-	asm ("\n"_LL"\tld2 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
-	     "\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)+4\n"				\
-	     _LL										\
+	asm ("\n[1:]\tld2 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
+	     "\t.xdata4 \"__ex_table\", 1b-., 1f-.+4\n"						\
+	     "[1:]"										\
 	     : "=r"(__gu_val), "=r"(__gu_err) : "m"(__m(addr)), "1"(__gu_err));
 
 #define __get_user_8(addr)									\
-	asm ("\n"_LL"\tld1 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
-	     "\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)+4\n"				\
-	     _LL										\
+	asm ("\n[1:]\tld1 %0=%2%P2\t// %0 and %1 get overwritten by exception handler\n"	\
+	     "\t.xdata4 \"__ex_table\", 1b-., 1f-.+4\n"						\
+	     "[1:]"										\
 	     : "=r"(__gu_val), "=r"(__gu_err) : "m"(__m(addr)), "1"(__gu_err));
 
 extern void __put_user_unknown (void);
@@ -200,30 +191,30 @@ extern void __put_user_unknown (void);
  */
 #define __put_user_64(x,addr)								\
 	asm volatile (									\
-		"\n"_LL"\tst8 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
-		"\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)\n"			\
-		_LL									\
+		"\n[1:]\tst8 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
+		"\t.xdata4 \"__ex_table\", 1b-., 1f-.\n"				\
+		"[1:]"									\
 		: "=r"(__pu_err) : "m"(__m(addr)), "rO"(x), "0"(__pu_err))
 
 #define __put_user_32(x,addr)								\
 	asm volatile (									\
-		"\n"_LL"\tst4 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
-		"\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)\n"			\
-		_LL									\
+		"\n[1:]\tst4 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
+		"\t.xdata4 \"__ex_table\", 1b-., 1f-.\n"				\
+		"[1:]"									\
 		: "=r"(__pu_err) : "m"(__m(addr)), "rO"(x), "0"(__pu_err))
 
 #define __put_user_16(x,addr)								\
 	asm volatile (									\
-		"\n"_LL"\tst2 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
-		"\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)\n"			\
-		_LL									\
+		"\n[1:]\tst2 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
+		"\t.xdata4 \"__ex_table\", 1b-., 1f-.\n"				\
+		"[1:]"									\
 		: "=r"(__pu_err) : "m"(__m(addr)), "rO"(x), "0"(__pu_err))
 
 #define __put_user_8(x,addr)								\
 	asm volatile (									\
-		"\n"_LL"\tst1 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
-		"\t.xdata4 \"__ex_table\", @gprel(1b), @gprel(1f)\n"			\
-		_LL									\
+		"\n[1:]\tst1 %1=%r2%P1\t// %0 gets overwritten by exception handler\n"	\
+		"\t.xdata4 \"__ex_table\", 1b-., 1f-.\n"				\
+		"[1:]"									\
 		: "=r"(__pu_err) : "m"(__m(addr)), "rO"(x), "0"(__pu_err))
 
 /*
@@ -313,11 +304,25 @@ struct exception_table_entry {
 	int cont;	/* gp-relative continuation address; if bit 2 is set, r9 is set to 0 */
 };
 
-struct exception_fixup {
-	unsigned long cont;	/* continuation point (bit 2: clear r9 if set) */
-};
+extern void handle_exception (struct pt_regs *regs, const struct exception_table_entry *e);
+extern const struct exception_table_entry *search_exception_tables (unsigned long addr);
 
-extern struct exception_fixup search_exception_table (unsigned long addr);
-extern void handle_exception (struct pt_regs *regs, struct exception_fixup fixup);
+#ifdef GAS_HAS_LOCAL_TAGS
+# define SEARCH_EXCEPTION_TABLE(regs) search_exception_tables(regs->cr_iip + ia64_psr(regs)->ri)
+#else
+# define SEARCH_EXCEPTION_TABLE(regs) search_exception_tables(regs->cr_iip)
+#endif
+
+static inline int
+done_with_exception (struct pt_regs *regs)
+{
+	const struct exception_table_entry *e;
+	e = SEARCH_EXCEPTION_TABLE(regs);
+	if (e) {
+		handle_exception(regs, e);
+		return 1;
+	}
+	return 0;
+}
 
 #endif /* _ASM_IA64_UACCESS_H */

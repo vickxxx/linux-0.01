@@ -27,12 +27,13 @@
  * Note also that it is intended that __get_user_bad is not global.
  */
 #include <asm/constants.h>
+#include <asm/thread_info.h>
 
 	.global	__get_user_1
 __get_user_1:
 	bic	r1, sp, #0x1f00
 	bic	r1, r1, #0x00ff
-	ldr	r1, [r1, #TSK_ADDR_LIMIT]
+	ldr	r1, [r1, #TI_ADDR_LIMIT]
 	sub	r1, r1, #1
 	cmp	r0, r1
 1:	ldrlsbt	r1, [r0]
@@ -44,12 +45,16 @@ __get_user_1:
 __get_user_2:
 	bic	r2, sp, #0x1f00
 	bic	r2, r2, #0x00ff
-	ldr	r2, [r2, #TSK_ADDR_LIMIT]
+	ldr	r2, [r2, #TI_ADDR_LIMIT]
 	sub	r2, r2, #2
 	cmp	r0, r2
 2:	ldrlsbt	r1, [r0], #1
 3:	ldrlsbt	r2, [r0]
+#ifndef __ARMEB__
 	orrls	r1, r1, r2, lsl #8
+#else
+	orrls	r1, r2, r1, lsl #8
+#endif
 	movls	r0, #0
 	movls	pc, lr
 	b	__get_user_bad
@@ -58,7 +63,7 @@ __get_user_2:
 __get_user_4:
 	bic	r1, sp, #0x1f00
 	bic	r1, r1, #0x00ff
-	ldr	r1, [r1, #TSK_ADDR_LIMIT]
+	ldr	r1, [r1, #TI_ADDR_LIMIT]
 	sub	r1, r1, #4
 	cmp	r0, r1
 4:	ldrlst	r1, [r0]
@@ -70,7 +75,7 @@ __get_user_4:
 __get_user_8:
 	bic	r2, sp, #0x1f00
 	bic	r2, r2, #0x00ff
-	ldr	r2, [r2, #TSK_ADDR_LIMIT]
+	ldr	r2, [r2, #TI_ADDR_LIMIT]
 	sub	r2, r2, #8
 	cmp	r0, r2
 5:	ldrlst	r1, [r0], #4
@@ -80,8 +85,9 @@ __get_user_8:
 
 	/* fall through */
 
-__get_user_bad:
+__get_user_bad_8:
 	mov	r2, #0
+__get_user_bad:
 	mov	r1, #0
 	mov	r0, #-14
 	mov	pc, lr
@@ -91,6 +97,6 @@ __get_user_bad:
 	.long	2b, __get_user_bad
 	.long	3b, __get_user_bad
 	.long	4b, __get_user_bad
-	.long	5b, __get_user_bad
-	.long	6b, __get_user_bad
+	.long	5b, __get_user_bad_8
+	.long	6b, __get_user_bad_8
 .previous

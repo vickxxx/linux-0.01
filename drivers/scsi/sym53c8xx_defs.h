@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
+**  Copyright (C) 1998-2001  Gerard Roudier <groudier@free.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -32,7 +32,7 @@
 **  The Linux port of the FreeBSD ncr driver has been achieved in 
 **  november 1995 by:
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -50,6 +50,13 @@
 **
 **  NVRAM detection and reading.
 **    Copyright (C) 1997 Richard Waltham <dormouse@farsrobt.demon.co.uk>
+**
+**  Added support for MIPS big endian systems.
+**    Carsten Langgaard, carstenl@mips.com
+**    Copyright (C) 2000 MIPS Technologies, Inc.  All rights reserved.
+**
+**  Added support for HP PARISC big endian systems.
+**    Copyright (C) 2000 MIPS Technologies, Inc.  All rights reserved.
 **
 *******************************************************************************
 */
@@ -78,8 +85,10 @@
 /*
  *	No more an option, enabled by default.
  */
-#ifndef CONFIG_SCSI_NCR53C8XX_NVRAM_DETECT
-#define CONFIG_SCSI_NCR53C8XX_NVRAM_DETECT
+#ifndef CONFIG_SCSI_NCR53C8XX_NO_NVRAM
+# ifndef CONFIG_SCSI_NCR53C8XX_NVRAM_DETECT
+#  define CONFIG_SCSI_NCR53C8XX_NVRAM_DETECT
+# endif
 #endif
 
 /*
@@ -179,8 +188,6 @@
 #define	SCSI_NCR_IOMAPPED
 #define SCSI_NCR_PCI_MEM_NOT_SUPPORTED
 #endif
-#elif defined(__sparc__)
-#undef SCSI_NCR_IOMAPPED
 #endif
 
 /*
@@ -379,16 +386,24 @@
 #define	readb_raw	readb
 #define	writeb_raw	writeb
 
-#if defined(__hppa__)
-#define	readw_l2b(a)	le16_to_cpu(readw(a))
-#define	readl_l2b(a)	le32_to_cpu(readl(a))
-#define	writew_b2l(v,a)	writew(cpu_to_le16(v),a)
-#define	writel_b2l(v,a)	writel(cpu_to_le32(v),a)
-#else	/* Other bid-endian */
+#if defined(SCSI_NCR_BIG_ENDIAN)
+#define	readw_l2b	__raw_readw
+#define	readl_l2b	__raw_readl
+#define	writew_b2l	__raw_writew
+#define	writel_b2l	__raw_writel
+#define	readw_raw	__raw_readw
+#define	readl_raw(a)	__raw_readl((unsigned long)(a))
+#define	writew_raw	__raw_writew
+#define	writel_raw(v,a)	__raw_writel(v,(unsigned long)(a))
+#else	/* Other big-endian */
 #define	readw_l2b	readw
 #define	readl_l2b	readl
 #define	writew_b2l	writew
 #define	writel_b2l	writel
+#define	readw_raw	readw
+#define	readl_raw	readl
+#define	writew_raw	writew
+#define	writel_raw	writel
 #endif
 
 #else	/* little endian */
@@ -417,8 +432,10 @@
 #endif
 #endif
 
+#if !defined(__hppa__) && !defined(__mips__)
 #ifdef	SCSI_NCR_BIG_ENDIAN
 #error	"The NCR in BIG ENDIAN addressing mode is not (yet) supported"
+#endif
 #endif
 
 
@@ -466,7 +483,7 @@
 #endif
 
 /*
- *  If the CPU and the NCR use same endian-ness adressing,
+ *  If the CPU and the NCR use same endian-ness addressing,
  *  no byte reordering is needed for script patching.
  *  Macro cpu_to_scr() is to be used for script patching.
  *  Macro scr_to_cpu() is to be used for getting a DWORD 
@@ -500,7 +517,7 @@
  *  would have been correctly designed for PCI, this 
  *  option would be useless.
  *
- *  If the CPU and the NCR use same endian-ness adressing,
+ *  If the CPU and the NCR use same endian-ness addressing,
  *  no byte reordering is needed for accessing chip io 
  *  registers. Functions suffixed by '_raw' are assumed 
  *  to access the chip over the PCI without doing byte 
@@ -511,7 +528,6 @@
  */
 
 #if defined(SCSI_NCR_IOMAPPED)
-
 /*
  *  IO mapped only input / ouput
  */
@@ -572,10 +588,20 @@
 
 #else
 
+#ifdef CONFIG_SCSI_NCR53C8XX_NO_WORD_TRANSFERS
+/* Only 8 or 32 bit transfers allowed */
+#define INW_OFF(o)		(readb((char *)np->reg + ncr_offw(o)) << 8 | readb((char *)np->reg + ncr_offw(o) + 1))
+#else
 #define INW_OFF(o)		readw_raw((char *)np->reg + ncr_offw(o))
+#endif
 #define INL_OFF(o)		readl_raw((char *)np->reg + (o))
 
+#ifdef CONFIG_SCSI_NCR53C8XX_NO_WORD_TRANSFERS
+/* Only 8 or 32 bit transfers allowed */
+#define OUTW_OFF(o, val)	do { writeb((char)((val) >> 8), (char *)np->reg + ncr_offw(o)); writeb((char)(val), (char *)np->reg + ncr_offw(o) + 1); } while (0)
+#else
 #define OUTW_OFF(o, val)	writew_raw((val), (char *)np->reg + ncr_offw(o))
+#endif
 #define OUTL_OFF(o, val)	writel_raw((val), (char *)np->reg + (o))
 
 #endif
@@ -622,6 +648,10 @@
 /*
 **	NCR53C8XX Device Ids
 */
+
+#ifndef PSEUDO_720_ID
+#define PSEUDO_720_ID 0x5a00
+#endif
 
 #ifndef PCI_DEVICE_ID_NCR_53C810
 #define PCI_DEVICE_ID_NCR_53C810 1
@@ -726,6 +756,9 @@ typedef struct {
 #define FE_DAC	 	(1<<24)   /* Support DAC cycles (64 bit addressing) */
 #define FE_ISTAT1 	(1<<25)   /* Have ISTAT1, MBOX0, MBOX1 registers */
 #define FE_DAC_IN_USE	(1<<26)	  /* Platform does DAC cycles */
+#define FE_EHP		(1<<27)   /* 720: Even host parity */
+#define FE_MUX		(1<<28)   /* 720: Multiplexed bus */
+#define FE_EA		(1<<29)   /* 720: Enable Ack */
 
 #define FE_CACHE_SET	(FE_ERL|FE_CLSE|FE_WRIE|FE_ERMP)
 #define FE_SCSI_SET	(FE_WIDE|FE_ULTRA|FE_ULTRA2|FE_DBLR|FE_QUAD|F_CLK80)
@@ -747,6 +780,9 @@ typedef struct {
 
 #define SCSI_NCR_CHIP_TABLE						\
 {									\
+ {PSEUDO_720_ID, 0x0f, "720",  3,  8, 4,				\
+ FE_WIDE|FE_DIFF|FE_EHP|FE_MUX|FE_EA}					\
+ ,									\
  {PCI_DEVICE_ID_NCR_53C810, 0x0f, "810",  4,  8, 4,			\
  FE_ERL}								\
  ,									\
@@ -819,6 +855,7 @@ typedef struct {
  */
 #define SCSI_NCR_CHIP_IDS		\
 {					\
+	PSEUDO_720_ID,		\
 	PCI_DEVICE_ID_NCR_53C810,	\
 	PCI_DEVICE_ID_NCR_53C815,	\
 	PCI_DEVICE_ID_NCR_53C820,	\
@@ -1170,6 +1207,7 @@ struct ncr_reg {
 /*17*/  u_char    nc_mbox1;	/* 896 and later cores only */
 
 /*18*/	u_char	  nc_ctest0;
+	#define   EHP     0x04	/* 720 even host parity             */
 /*19*/  u_char    nc_ctest1;
 
 /*1a*/  u_char    nc_ctest2;
@@ -1187,6 +1225,7 @@ struct ncr_reg {
 
 /*20*/	u_char	  nc_dfifo;
 /*21*/  u_char    nc_ctest4;
+	#define   MUX     0x80  /* 720 host bus multiplex mode      */
 	#define   BDIS    0x80  /* mod: burst disable               */
 	#define   MPEE    0x08  /* mod: master parity error enable  */
 
@@ -1219,6 +1258,7 @@ struct ncr_reg {
 	#define   CLSE    0x80  /* mod: cache line size enable      */
 	#define   PFF     0x40  /* cmd: pre-fetch flush             */
 	#define   PFEN    0x20  /* mod: pre-fetch enable            */
+	#define   EA      0x20  /* mod: 720 enable-ack              */
 	#define   SSM     0x10  /* mod: single step mode            */
 	#define   IRQM    0x08  /* mod: irq mode (1 = totem pole !) */
 	#define   STD     0x04  /* cmd: start dma mode              */
@@ -1261,6 +1301,7 @@ struct ncr_reg {
 
 /*4e*/  u_char    nc_stest2;
 	#define   ROF     0x40	/* reset scsi offset (after gross error!) */
+	#define   DIF     0x20  /* 720 SCSI differential mode             */
 	#define   EXT     0x02  /* extended filtering                     */
 
 /*4f*/  u_char    nc_stest3;
@@ -1439,12 +1480,22 @@ struct scr_tblmove {
 #define	SCR_SEL_TBL	0x42000000
 #define	SCR_SEL_TBL_ATN	0x43000000
 
+
+#ifdef SCSI_NCR_BIG_ENDIAN
+struct scr_tblsel {
+        u_char  sel_scntl3;
+        u_char  sel_id;
+        u_char  sel_sxfer;
+        u_char  sel_scntl4;	
+};
+#else
 struct scr_tblsel {
         u_char  sel_scntl4;	
         u_char  sel_sxfer;
         u_char  sel_id;
         u_char  sel_scntl3;
 };
+#endif
 
 #define SCR_JMP_REL     0x04000000
 #define SCR_ID(id)	(((u_int32)(id)) << 16)

@@ -13,6 +13,8 @@
  * Also thanks to: Salvador Abreu, Dave Thaler, Risto Kankkunen and Wim Van Dorst.
  */
 
+#include <linux/interrupt.h>
+
 /* XT hard disk controller registers */
 #define XD_DATA		(xd_iobase + 0x00)	/* data RW register */
 #define XD_RESET	(xd_iobase + 0x01)	/* reset WO register */
@@ -84,15 +86,8 @@ typedef struct {
 	u_short cylinders;
 	u_char sectors;
 	u_char control;
+	int unit;
 } XD_INFO;
-
-/* this structure is returned to the HDIO_GETGEO ioctl */
-typedef struct {
-	__u8 heads;
-	__u8 sectors;
-	__u8 cylinders;
-	__u32 start;
-} XD_GEOMETRY;
 
 /* this structure defines a ROM BIOS signature */
 typedef struct {
@@ -108,20 +103,16 @@ static int xd_manual_geo_init (char *command);
 #endif /* MODULE */
 static u_char xd_detect (u_char *controller, unsigned int *address);
 static u_char xd_initdrives (void (*init_drive)(u_char drive));
-static void xd_geninit (void);
 
-static int xd_open (struct inode *inode,struct file *file);
 static void do_xd_request (request_queue_t * q);
 static int xd_ioctl (struct inode *inode,struct file *file,unsigned int cmd,unsigned long arg);
-static int xd_release (struct inode *inode,struct file *file);
-static int xd_reread_partitions (kdev_t dev);
-static int xd_readwrite (u_char operation,u_char drive,char *buffer,u_int block,u_int count);
+static int xd_readwrite (u_char operation,XD_INFO *disk,char *buffer,u_int block,u_int count);
 static void xd_recalibrate (u_char drive);
 
-static void xd_interrupt_handler (int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t xd_interrupt_handler(int irq, void *dev_id,
+					struct pt_regs *regs);
 static u_char xd_setup_dma (u_char opcode,u_char *buffer,u_int count);
 static u_char *xd_build (u_char *cmdblk,u_char command,u_char drive,u_char head,u_short cylinder,u_char sector,u_char count,u_char control);
-static void xd_wakeup (unsigned long unused);
 static void xd_watchdog (unsigned long unused);
 static inline u_char xd_waitport (u_short port,u_char flags,u_char mask,u_long timeout);
 static u_int xd_command (u_char *command,u_char mode,u_char *indata,u_char *outdata,u_char *sense,u_long timeout);

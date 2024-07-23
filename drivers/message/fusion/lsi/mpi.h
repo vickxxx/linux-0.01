@@ -1,12 +1,12 @@
 /*
- *  Copyright (c) 2000-2001 LSI Logic Corporation.
+ *  Copyright (c) 2000-2002 LSI Logic Corporation.
  *
  *
  *           Name:  MPI.H
  *          Title:  MPI Message independent structures and definitions
  *  Creation Date:  July 27, 2000
  *
- *    MPI Version:  01.01.07
+ *    MPI.H Version:  01.02.07
  *
  *  Version History
  *  ---------------
@@ -39,6 +39,15 @@
  *                      Added function codes for RAID.
  *  04-09-01  01.01.07  Added alternate define for MPI_DOORBELL_ACTIVE,
  *                      MPI_DOORBELL_USED, to better match the spec.
+ *  08-08-01  01.02.01  Original release for v1.2 work.
+ *                      Changed MPI_VERSION_MINOR from 0x01 to 0x02.
+ *                      Added define MPI_FUNCTION_TOOLBOX.
+ *  09-28-01  01.02.02  New function code MPI_SCSI_ENCLOSURE_PROCESSOR.
+ *  11-01-01  01.02.03  Changed name to MPI_FUNCTION_SCSI_ENCLOSURE_PROCESSOR.
+ *  03-14-02  01.02.04  Added MPI_HEADER_VERSION_ defines.
+ *  05-31-02  01.02.05  Bumped MPI_HEADER_VERSION_UNIT.
+ *  07-12-02  01.02.06  Added define for MPI_FUNCTION_MAILBOX.
+ *  09-16-02  01.02.07  Bumped value for MPI_HEADER_VERSION_UNIT.
  *  --------------------------------------------------------------------------
  */
 
@@ -53,10 +62,27 @@
 *****************************************************************************/
 
 #define MPI_VERSION_MAJOR                   (0x01)
-#define MPI_VERSION_MINOR                   (0x01)
-#define MPI_VERSION            ((MPI_VERSION_MAJOR << 8) | MPI_VERSION_MINOR)
+#define MPI_VERSION_MINOR                   (0x02)
+#define MPI_VERSION_MAJOR_MASK              (0xFF00)
+#define MPI_VERSION_MAJOR_SHIFT             (8)
+#define MPI_VERSION_MINOR_MASK              (0x00FF)
+#define MPI_VERSION_MINOR_SHIFT             (0)
+#define MPI_VERSION ((MPI_VERSION_MAJOR << MPI_VERSION_MAJOR_SHIFT) |   \
+                                      MPI_VERSION_MINOR)
 
+#define MPI_VERSION_01_00                   (0x0100)
+#define MPI_VERSION_01_01                   (0x0101)
+#define MPI_VERSION_01_02                   (0x0102)
 /* Note: The major versions of 0xe0 through 0xff are reserved */
+
+/* versioning for this MPI header set */
+#define MPI_HEADER_VERSION_UNIT             (0x09)
+#define MPI_HEADER_VERSION_DEV              (0x00)
+#define MPI_HEADER_VERSION_UNIT_MASK        (0xFF00)
+#define MPI_HEADER_VERSION_UNIT_SHIFT       (8)
+#define MPI_HEADER_VERSION_DEV_MASK         (0x00FF)
+#define MPI_HEADER_VERSION_DEV_SHIFT        (0)
+#define MPI_HEADER_VERSION ((MPI_HEADER_VERSION_UNIT << 8) | MPI_HEADER_VERSION_DEV)
 
 /*****************************************************************************
 *
@@ -216,8 +242,14 @@
 #define MPI_FUNCTION_FC_COMMON_TRANSPORT_SEND       (0x13)
 #define MPI_FUNCTION_FC_PRIMITIVE_SEND              (0x14)
 
-#define MPI_FUNCTION_RAID_VOLUME                    (0x15)
+#define MPI_FUNCTION_RAID_ACTION                    (0x15)
 #define MPI_FUNCTION_RAID_SCSI_IO_PASSTHROUGH       (0x16)
+
+#define MPI_FUNCTION_TOOLBOX                        (0x17)
+
+#define MPI_FUNCTION_SCSI_ENCLOSURE_PROCESSOR       (0x18)
+
+#define MPI_FUNCTION_MAILBOX                        (0x19)
 
 #define MPI_FUNCTION_LAN_SEND                       (0x20)
 #define MPI_FUNCTION_LAN_RECEIVE                    (0x21)

@@ -8,16 +8,14 @@
  * Copyright (C) 1995, 1996, 1997 Olaf Kirch <okir@monad.swb.de>
  */
 
-#define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/module.h>
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/errno.h>
 #include <linux/nfs.h>
 #include <linux/in.h>
 #include <linux/uio.h>
-#include <linux/version.h>
 #include <linux/unistd.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
@@ -27,14 +25,13 @@
 #include <linux/sunrpc/stats.h>
 #include <linux/sunrpc/svc.h>
 #include <linux/sunrpc/svcsock.h>
+#include <linux/sunrpc/cache.h>
 #include <linux/nfsd/nfsd.h>
 #include <linux/nfsd/stats.h>
 #include <linux/nfsd/cache.h>
-#include <linux/nfsd/xdr.h>
 #include <linux/lockd/bind.h>
 
 #define NFSDDBG_FACILITY	NFSDDBG_SVC
-#define NFSD_BUFSIZE		(1024 + NFSSVC_MAXBLKSIZE)
 
 /* these signals will be delivered to an nfsd thread 
  * when handling a request
@@ -54,8 +51,9 @@ extern struct svc_program	nfsd_program;
 static void			nfsd(struct svc_rqst *rqstp);
 struct timeval			nfssvc_boot;
 static struct svc_serv 		*nfsd_serv;
-static int			nfsd_busy;
+static atomic_t			nfsd_busy;
 static unsigned long		nfsd_last_call;
+static spinlock_t		nfsd_call_lock = SPIN_LOCK_UNLOCKED;
 
 struct nfsd_list {
 	struct list_head 	list;
@@ -66,7 +64,15 @@ struct list_head nfsd_list = LIST_HEAD_INIT(nfsd_list);
 /*
  * Maximum number of nfsd processes
  */
-#define	NFSD_MAXSERVS		128
+#define	NFSD_MAXSERVS		8192
+
+int nfsd_nrthreads(void)
+{
+	if (nfsd_serv == NULL)
+		return 0;
+	else
+		return nfsd_serv->sv_nrthreads;
+}
 
 int
 nfsd_svc(unsigned short port, int nrservs)
@@ -74,7 +80,8 @@ nfsd_svc(unsigned short port, int nrservs)
 	int	error;
 	int	none_left;	
 	struct list_head *victim;
-
+	
+	lock_kernel();
 	dprintk("nfsd: creating service\n");
 	error = -EINVAL;
 	if (nrservs <= 0)
@@ -84,22 +91,25 @@ nfsd_svc(unsigned short port, int nrservs)
 	
 	/* Readahead param cache - will no-op if it already exists */
 	error =	nfsd_racache_init(2*nrservs);
+	nfs4_state_init();
 	if (error<0)
 		goto out;
 	if (!nfsd_serv) {
-		nfsd_serv = svc_create(&nfsd_program, NFSD_BUFSIZE, NFSSVC_XDRSIZE);
+		atomic_set(&nfsd_busy, 0);
+		error = -ENOMEM;
+		nfsd_serv = svc_create(&nfsd_program, NFSD_BUFSIZE);
 		if (nfsd_serv == NULL)
 			goto out;
 		error = svc_makesock(nfsd_serv, IPPROTO_UDP, port);
 		if (error < 0)
 			goto failure;
 
-#if 0	/* Don't even pretend that TCP works. It doesn't. */
+#ifdef CONFIG_NFSD_TCP
 		error = svc_makesock(nfsd_serv, IPPROTO_TCP, port);
 		if (error < 0)
 			goto failure;
 #endif
-		get_fast_time(&nfssvc_boot);		/* record boot time */
+		do_gettimeofday(&nfssvc_boot);		/* record boot time */
 	} else
 		nfsd_serv->sv_nrthreads++;
 	nrservs -= (nfsd_serv->sv_nrthreads-1);
@@ -123,8 +133,10 @@ nfsd_svc(unsigned short port, int nrservs)
 	if (none_left) {
 		nfsd_serv = NULL;
 		nfsd_racache_shutdown();
+		nfs4_state_shutdown();
 	}
  out:
+	unlock_kernel();
 	return error;
 }
 
@@ -135,6 +147,7 @@ update_thread_usage(int busy_threads)
 	unsigned long diff;
 	int decile;
 
+	spin_lock(&nfsd_call_lock);
 	prev_call = nfsd_last_call;
 	nfsd_last_call = jiffies;
 	decile = busy_threads*10/nfsdstats.th_cnt;
@@ -145,6 +158,7 @@ update_thread_usage(int busy_threads)
 		if (decile == 10)
 			nfsdstats.th_fullcnt++;
 	}
+	spin_unlock(&nfsd_call_lock);
 }
 
 /*
@@ -156,64 +170,64 @@ nfsd(struct svc_rqst *rqstp)
 	struct svc_serv	*serv = rqstp->rq_server;
 	int		err;
 	struct nfsd_list me;
+	sigset_t shutdown_mask, allowed_mask;
 
 	/* Lock module and set up kernel thread */
 	MOD_INC_USE_COUNT;
 	lock_kernel();
-	daemonize();
-	sprintf(current->comm, "nfsd");
+	daemonize("nfsd");
 	current->rlim[RLIMIT_FSIZE].rlim_cur = RLIM_INFINITY;
 
+	siginitsetinv(&shutdown_mask, SHUTDOWN_SIGS);
+	siginitsetinv(&allowed_mask, ALLOWED_SIGS);
+
 	nfsdstats.th_cnt++;
-	/* Let svc_process check client's authentication. */
-	rqstp->rq_auth = 1;
 
 	lockd_up();				/* start lockd */
 
 	me.task = current;
 	list_add(&me.list, &nfsd_list);
 
+	unlock_kernel();
+
+	/*
+	 * We want less throttling in balance_dirty_pages() so that nfs to
+	 * localhost doesn't cause nfsd to lock up due to all the client's
+	 * dirty pages.
+	 */
+	current->flags |= PF_LESS_THROTTLE;
+
 	/*
 	 * The main request loop
 	 */
 	for (;;) {
 		/* Block all but the shutdown signals */
-		spin_lock_irq(&current->sigmask_lock);
-		siginitsetinv(&current->blocked, SHUTDOWN_SIGS);
-		recalc_sigpending(current);
-		spin_unlock_irq(&current->sigmask_lock);
+		sigprocmask(SIG_SETMASK, &shutdown_mask, NULL);
 
 		/*
 		 * Find a socket with data available and call its
 		 * recvfrom routine.
 		 */
 		while ((err = svc_recv(serv, rqstp,
-				       MAX_SCHEDULE_TIMEOUT)) == -EAGAIN)
-		    ;
+				       60*60*HZ)) == -EAGAIN)
+			;
 		if (err < 0)
 			break;
-		update_thread_usage(nfsd_busy);
-		nfsd_busy++;
+		update_thread_usage(atomic_read(&nfsd_busy));
+		atomic_inc(&nfsd_busy);
 
 		/* Lock the export hash tables for reading. */
 		exp_readlock();
 
-		/* Validate the client's address. This will also defeat
-		 * port probes on port 2049 by unauthorized clients.
-		 */
-		rqstp->rq_client = exp_getclient(&rqstp->rq_addr);
 		/* Process request with signals blocked.  */
-		spin_lock_irq(&current->sigmask_lock);
-		siginitsetinv(&current->blocked, ALLOWED_SIGS);
-		recalc_sigpending(current);
-		spin_unlock_irq(&current->sigmask_lock);
+		sigprocmask(SIG_SETMASK, &allowed_mask, NULL);
 
 		svc_process(serv, rqstp);
 
 		/* Unlock export hash tables */
-		exp_unlock();
-		update_thread_usage(nfsd_busy);
-		nfsd_busy--;
+		exp_readunlock();
+		update_thread_usage(atomic_read(&nfsd_busy));
+		atomic_dec(&nfsd_busy);
 	}
 
 	if (err != -EINTR) {
@@ -228,6 +242,8 @@ nfsd(struct svc_rqst *rqstp)
 		err = signo;
 	}
 
+	lock_kernel();
+
 	/* Release lockd */
 	lockd_down();
 
@@ -237,10 +253,11 @@ nfsd(struct svc_rqst *rqstp)
 		printk(KERN_WARNING "nfsd: last server has exited\n");
 		if (err != SIG_NOCLEAN) {
 			printk(KERN_WARNING "nfsd: unexporting all filesystems\n");
-			nfsd_export_shutdown();
+			nfsd_export_flush();
 		}
 		nfsd_serv = NULL;
 	        nfsd_racache_shutdown();	/* release read-ahead cache */
+		nfs4_state_shutdown();
 	}
 	list_del(&me.list);
 	nfsdstats.th_cnt --;
@@ -252,12 +269,13 @@ nfsd(struct svc_rqst *rqstp)
 	MOD_DEC_USE_COUNT;
 }
 
-static int
+int
 nfsd_dispatch(struct svc_rqst *rqstp, u32 *statp)
 {
 	struct svc_procedure	*proc;
 	kxdrproc_t		xdr;
 	u32			nfserr;
+	u32			*nfserrp;
 
 	dprintk("nfsd_dispatch: vers %d proc %d\n",
 				rqstp->rq_vers, rqstp->rq_proc);
@@ -276,12 +294,20 @@ nfsd_dispatch(struct svc_rqst *rqstp, u32 *statp)
 
 	/* Decode arguments */
 	xdr = proc->pc_decode;
-	if (xdr && !xdr(rqstp, rqstp->rq_argbuf.buf, rqstp->rq_argp)) {
+	if (xdr && !xdr(rqstp, (u32*)rqstp->rq_arg.head[0].iov_base,
+			rqstp->rq_argp)) {
 		dprintk("nfsd: failed to decode arguments!\n");
 		nfsd_cache_update(rqstp, RC_NOCACHE, NULL);
 		*statp = rpc_garbage_args;
 		return 1;
 	}
+
+	/* need to grab the location to store the status, as
+	 * nfsv4 does some encoding while processing 
+	 */
+	nfserrp = rqstp->rq_res.head[0].iov_base
+		+ rqstp->rq_res.head[0].iov_len;
+	rqstp->rq_res.head[0].iov_len += sizeof(u32);
 
 	/* Now call the procedure handler, and encode NFS status. */
 	nfserr = proc->pc_func(rqstp, rqstp->rq_argp, rqstp->rq_resp);
@@ -290,16 +316,17 @@ nfsd_dispatch(struct svc_rqst *rqstp, u32 *statp)
 		nfsd_cache_update(rqstp, RC_NOCACHE, NULL);
 		return 0;
 	}
-		
+
 	if (rqstp->rq_proc != 0)
-		svc_putlong(&rqstp->rq_resbuf, nfserr);
+		*nfserrp++ = nfserr;
 
 	/* Encode result.
 	 * For NFSv2, additional info is never returned in case of an error.
 	 */
 	if (!(nfserr && rqstp->rq_vers == 2)) {
 		xdr = proc->pc_encode;
-		if (xdr && !xdr(rqstp, rqstp->rq_resbuf.buf, rqstp->rq_resp)) {
+		if (xdr && !xdr(rqstp, nfserrp,
+				rqstp->rq_resp)) {
 			/* Failed to encode result. Release cache entry */
 			dprintk("nfsd: failed to encode result!\n");
 			nfsd_cache_update(rqstp, RC_NOCACHE, NULL);
@@ -313,29 +340,24 @@ nfsd_dispatch(struct svc_rqst *rqstp, u32 *statp)
 	return 1;
 }
 
-static struct svc_version	nfsd_version2 = {
-	2, 18, nfsd_procedures2, nfsd_dispatch
-};
-#ifdef CONFIG_NFSD_V3
-static struct svc_version	nfsd_version3 = {
-	3, 22, nfsd_procedures3, nfsd_dispatch
-};
-#endif
+extern struct svc_version nfsd_version2, nfsd_version3, nfsd_version4;
+
 static struct svc_version *	nfsd_version[] = {
-	NULL,
-	NULL,
-	&nfsd_version2,
-#ifdef CONFIG_NFSD_V3
-	&nfsd_version3,
+	[2] = &nfsd_version2,
+#if defined(CONFIG_NFSD_V3)
+	[3] = &nfsd_version3,
+#endif
+#if defined(CONFIG_NFSD_V4)
+	[4] = &nfsd_version4,
 #endif
 };
 
 #define NFSD_NRVERS		(sizeof(nfsd_version)/sizeof(nfsd_version[0]))
 struct svc_program		nfsd_program = {
-	NFS_PROGRAM,		/* program number */
-	2, NFSD_NRVERS-1,	/* version range */
-	NFSD_NRVERS,		/* nr of entries in nfsd_version */
-	nfsd_version,		/* version table */
-	"nfsd",			/* program name */
-	&nfsd_svcstats,		/* version table */
+	.pg_prog		= NFS_PROGRAM,		/* program number */
+	.pg_nvers		= NFSD_NRVERS,		/* nr of entries in nfsd_version */
+	.pg_vers		= nfsd_version,		/* version table */
+	.pg_name		= "nfsd",		/* program name */
+	.pg_class		= "nfsd",		/* authentication class */
+	.pg_stats		= &nfsd_svcstats,	/* version table */
 };

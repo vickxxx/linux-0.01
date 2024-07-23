@@ -141,7 +141,7 @@ struct CYZ_BOOT_CTRL {
 /****************** ****************** *******************/
 /*
  *	The data types defined below are used in all ZFIRM interface
- *	data structures. They accomodate differences between HW
+ *	data structures. They accommodate differences between HW
  *	architectures and compilers.
  */
 
@@ -503,6 +503,7 @@ struct ZFW_CTRL {
 #endif
 
 /* Per card data structure */
+struct resource;
 struct cyclades_card {
     unsigned long base_phys;
     unsigned long ctl_phys;
@@ -514,10 +515,11 @@ struct cyclades_card {
     int nports;		/* Number of ports in the card */
     int bus_index;	/* address shift - 0 for ISA, 1 for PCI */
     int	intr_enabled;	/* FW Interrupt flag - 0 disabled, 1 enabled */
+    struct pci_dev *pdev;
 #ifdef __KERNEL__
     spinlock_t card_lock;
 #else
-    uclong filler;
+    unsigned long filler;
 #endif
 };
 
@@ -586,8 +588,6 @@ struct cyclades_port {
 	int                     breakon;
 	int                     breakoff;
 	int			blocked_open; /* # of blocked opens */
-	long			session; /* Session of opening process */
-	long			pgrp; /* pgrp of opening process */
 	unsigned char 		*xmit_buf;
 	int			xmit_head;
 	int			xmit_tail;
@@ -596,12 +596,10 @@ struct cyclades_port {
         int                     default_timeout;
 	unsigned long		jiffies[3];
 	unsigned long		rflush_count;
-	struct termios		normal_termios;
-	struct termios		callout_termios;
 	struct cyclades_monitor	mon;
 	struct cyclades_idle_stats	idle_stats;
 	struct cyclades_icount	icount;
-	struct tq_struct	tqueue;
+	struct work_struct	tqueue;
 	wait_queue_head_t       open_wait;
 	wait_queue_head_t       close_wait;
 	wait_queue_head_t       shutdown_wait;

@@ -9,17 +9,10 @@
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/time.h>
+#include <linux/bcd.h>
 
 #include <asm/io.h>
 #include <asm/rtc.h>
-
-#ifndef BCD_TO_BIN
-#define BCD_TO_BIN(val) ((val)=((val)&15) + ((val)>>4)*10)
-#endif
-
-#ifndef BIN_TO_BCD
-#define BIN_TO_BCD(val) ((val)=(((val)/10)<<4) + (val)%10)
-#endif
 
 void sh_rtc_gettimeofday(struct timeval *tv)
 {
@@ -46,7 +39,7 @@ void sh_rtc_gettimeofday(struct timeval *tv)
 	} while ((ctrl_inb(RCR1) & RCR1_CF) != 0);
 
 #if RTC_BIT_INVERTED != 0
-	/* Work around to avoid reading correct value. */
+	/* Work around to avoid reading incorrect value. */
 	if (sec128 == RTC_BIT_INVERTED) {
 		schedule_timeout(1);
 		goto again;
@@ -81,12 +74,18 @@ void sh_rtc_gettimeofday(struct timeval *tv)
 		goto again;
 	}
 
+#if RTC_BIT_INVERTED != 0
+	if ((sec128 & RTC_BIT_INVERTED))
+		sec--;
+#endif
+
 	tv->tv_sec = mktime(yr100 * 100 + yr, mon, day, hr, min, sec);
-	tv->tv_usec = ((sec128 ^ RTC_BIT_INVERTED) * 1000000) / 128;
+	tv->tv_usec = (sec128 * 1000000) / 128;
 }
 
-static int set_rtc_time(unsigned long nowtime)
+int sh_rtc_settimeofday(const struct timeval *tv)
 {
+	unsigned long nowtime = tv->tv_sec;
 	int retval = 0;
 	int real_seconds, real_minutes, cmos_minutes;
 
@@ -122,13 +121,4 @@ static int set_rtc_time(unsigned long nowtime)
 	ctrl_outb(RCR2_RTCEN|RCR2_START, RCR2);  /* Start RTC */
 
 	return retval;
-}
-
-int sh_rtc_settimeofday(const struct timeval *tv)
-{
-#if RTC_BIT_INVERTED != 0
-	/* This is not accurate, but better than nothing. */
-	schedule_timeout(HZ/2);
-#endif
-	return set_rtc_time(tv->tv_sec);
 }

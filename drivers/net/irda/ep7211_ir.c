@@ -7,11 +7,9 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/tty.h>
-#include <linux/sched.h>
 #include <linux/init.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
 #include <net/irda/irda_device.h>
 
 #include <asm/io.h>
@@ -123,7 +121,5 @@ MODULE_AUTHOR("Jon McClintock <jonm@bluemug.com>");
 MODULE_DESCRIPTION("EP7211 I/R driver");
 MODULE_LICENSE("GPL");
 		
-#ifdef MODULE
 module_init(ep7211_ir_init);
-#endif /* MODULE */
 module_exit(ep7211_ir_cleanup);

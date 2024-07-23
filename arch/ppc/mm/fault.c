@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.fault.c 1.15 09/24/01 16:35:10 paulus
- */
-/*
  *  arch/ppc/mm/fault.c
  *
  *  PowerPC version 
@@ -29,6 +26,8 @@
 #include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
+#include <linux/highmem.h>
+#include <linux/module.h>
 
 #include <asm/page.h>
 #include <asm/pgtable.h>
@@ -36,6 +35,7 @@
 #include <asm/mmu_context.h>
 #include <asm/system.h>
 #include <asm/uaccess.h>
+#include <asm/tlbflush.h>
 
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
 extern void (*debugger)(struct pt_regs *);
@@ -54,6 +54,42 @@ unsigned int probingmem;
 extern void die_if_kernel(char *, struct pt_regs *, long);
 void bad_page_fault(struct pt_regs *, unsigned long, int sig);
 void do_page_fault(struct pt_regs *, unsigned long, unsigned long);
+extern int get_pteptr(struct mm_struct *mm, unsigned long addr, pte_t **ptep);
+
+/*
+ * Check whether the instruction at regs->nip is a store using
+ * an update addressing form which will update r1.
+ */
+static int store_updates_sp(struct pt_regs *regs)
+{
+	unsigned int inst;
+
+	if (get_user(inst, (unsigned int *)regs->nip))
+		return 0;
+	/* check for 1 in the rA field */
+	if (((inst >> 16) & 0x1f) != 1)
+		return 0;
+	/* check major opcode */
+	switch (inst >> 26) {
+	case 37:	/* stwu */
+	case 39:	/* stbu */
+	case 45:	/* sthu */
+	case 53:	/* stfsu */
+	case 55:	/* stfdu */
+		return 1;
+	case 31:
+		/* check minor opcode */
+		switch ((inst >> 1) & 0x3ff) {
+		case 183:	/* stwux */
+		case 247:	/* stbux */
+		case 439:	/* sthux */
+		case 695:	/* stfsux */
+		case 759:	/* stfdux */
+			return 1;
+		}
+	}
+	return 0;
+}
 
 /*
  * For 600- and 800-family processors, the error_code parameter is DSISR
@@ -79,14 +115,14 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 	 * bits we are interested in.  But there are some bits which
 	 * indicate errors in DSISR but can validly be set in SRR1.
 	 */
-	if (regs->trap == 0x400)
+	if (TRAP(regs) == 0x400)
 		error_code &= 0x48200000;
 	else
 		is_write = error_code & 0x02000000;
 #endif /* CONFIG_4xx */
 
 #if defined(CONFIG_XMON) || defined(CONFIG_KGDB)
-	if (debugger_fault_handler && regs->trap == 0x300) {
+	if (debugger_fault_handler && TRAP(regs) == 0x300) {
 		debugger_fault_handler(regs);
 		return;
 	}
@@ -99,7 +135,7 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 #endif /* !CONFIG_4xx */
 #endif /* CONFIG_XMON || CONFIG_KGDB */
 
-	if (in_interrupt() || mm == NULL) {
+	if (in_atomic() || mm == NULL) {
 		bad_page_fault(regs, address, SIGSEGV);
 		return;
 	}
@@ -111,6 +147,40 @@ void do_page_fault(struct pt_regs *regs, unsigned long address,
 		goto good_area;
 	if (!(vma->vm_flags & VM_GROWSDOWN))
 		goto bad_area;
+	if (!is_write)
+                goto bad_area;
+
+	/*
+	 * N.B. The rs6000/xcoff ABI allows programs to access up to
+	 * a few hundred bytes below the stack pointer.
+	 * The kernel signal delivery code writes up to about 1.5kB
+	 * below the stack pointer (r1) before decrementing it.
+	 * The exec code can write slightly over 640kB to the stack
+	 * before setting the user r1.  Thus we allow the stack to
+	 * expand to 1MB without further checks.
+	 */
+	if (address + 0x100000 < vma->vm_end) {
+		/* get user regs even if this fault is in kernel mode */
+		struct pt_regs *uregs = current->thread.regs;
+		if (uregs == NULL)
+			goto bad_area;
+
+		/*
+		 * A user-mode access to an address a long way below
+		 * the stack pointer is only valid if the instruction
+		 * is one which would update the stack pointer to the
+		 * address accessed if the instruction completed,
+		 * i.e. either stwu rs,n(r1) or stwux rs,r1,rb
+		 * (or the byte, halfword, float or double forms).
+		 *
+		 * If we don't check this then any write to the area
+		 * between the last mapped region and the stack will
+		 * expand the stack rather than segfaulting.
+		 */
+		if (address + 2048 < uregs->gpr[1]
+		    && (!user_mode(regs) || !store_updates_sp(regs)))
+			goto bad_area;
+	}
 	if (expand_stack(vma, address))
 		goto bad_area;
 
@@ -136,6 +206,40 @@ good_area:
 	if (is_write) {
 		if (!(vma->vm_flags & VM_WRITE))
 			goto bad_area;
+#if defined(CONFIG_4xx)
+	/* an exec  - 4xx allows for per-page execute permission */
+	} else if (TRAP(regs) == 0x400) {
+		pte_t *ptep;
+
+#if 0
+		/* It would be nice to actually enforce the VM execute
+		   permission on CPUs which can do so, but far too
+		   much stuff in userspace doesn't get the permissions
+		   right, so we let any page be executed for now. */
+		if (! (vma->vm_flags & VM_EXEC))
+			goto bad_area;
+#endif
+
+		/* Since 4xx supports per-page execute permission,
+		 * we lazily flush dcache to icache. */
+		ptep = NULL;
+		if (get_pteptr(mm, address, &ptep) && pte_present(*ptep)) {
+			struct page *page = pte_page(*ptep);
+
+			if (! test_bit(PG_arch_1, &page->flags)) {
+				unsigned long phys = page_to_pfn(page) << PAGE_SHIFT;
+				__flush_dcache_icache_phys(phys);
+				set_bit(PG_arch_1, &page->flags);
+			}
+			pte_update(ptep, 0, _PAGE_HWEXEC);
+			_tlbie(address);
+			pte_unmap(ptep);
+			up_read(&mm->mmap_sem);
+			return;
+		}
+		if (ptep != NULL)
+			pte_unmap(ptep);
+#endif
 	/* a read */
 	} else {
 		/* protection fault */
@@ -152,16 +256,18 @@ good_area:
 	 */
  survive:
         switch (handle_mm_fault(mm, vma, address, is_write)) {
-        case 1:
+        case VM_FAULT_MINOR:
                 current->min_flt++;
                 break;
-        case 2:
+        case VM_FAULT_MAJOR:
                 current->maj_flt++;
                 break;
-        case 0:
+        case VM_FAULT_SIGBUS:
                 goto do_sigbus;
-        default:
+        case VM_FAULT_OOM:
                 goto out_of_memory;
+	default:
+		BUG();
 	}
 
 	up_read(&mm->mmap_sem);
@@ -197,8 +303,7 @@ bad_area:
 out_of_memory:
 	up_read(&mm->mmap_sem);
 	if (current->pid == 1) {
-		current->policy |= SCHED_YIELD;
-		schedule();
+		yield();
 		down_read(&mm->mmap_sem);
 		goto survive;
 	}
@@ -228,12 +333,11 @@ void
 bad_page_fault(struct pt_regs *regs, unsigned long address, int sig)
 {
 	extern void die(const char *,struct pt_regs *,long);
-
-	unsigned long fixup;
+	const struct exception_table_entry *entry;
 
 	/* Are we prepared to handle this fault?  */
-	if ((fixup = search_exception_table(regs->nip)) != 0) {
-		regs->nip = fixup;
+	if ((entry = search_exception_tables(regs->nip)) != NULL) {
+		regs->nip = entry->fixup;
 		return;
 	}
 
@@ -258,27 +362,18 @@ pte_t *va_to_pte(unsigned long address)
 	struct mm_struct *mm;
 
 	if (address < TASK_SIZE)
-		mm = current->mm;
-	else
-		mm = &init_mm;
+		return NULL;
 
-	dir = pgd_offset(mm, address & PAGE_MASK);
+	dir = pgd_offset(&init_mm, address);
 	if (dir) {
 		pmd = pmd_offset(dir, address & PAGE_MASK);
 		if (pmd && pmd_present(*pmd)) {
-			pte = pte_offset(pmd, address & PAGE_MASK);
-			if (pte && pte_present(*pte)) {
+			pte = pte_offset_kernel(pmd, address & PAGE_MASK);
+			if (pte && pte_present(*pte))
 				return(pte);
-			}
-		}
-		else {
-			return (0);
 		}
 	}
-	else {
-		return (0);
-	}
-	return (0);
+	return NULL;
 }
 
 unsigned long va_to_phys(unsigned long address)
@@ -303,7 +398,7 @@ print_8xx_pte(struct mm_struct *mm, unsigned long addr)
         if (pgd) {
                 pmd = pmd_offset(pgd, addr & PAGE_MASK);
                 if (pmd && pmd_present(*pmd)) {
-                        pte = pte_offset(pmd, addr & PAGE_MASK);
+                        pte = pte_offset_kernel(pmd, addr & PAGE_MASK);
                         if (pte) {
                                 printk(" (0x%08lx)->(0x%08lx)->0x%08lx\n",
                                         (long)pgd, (long)pte, (long)pte_val(*pte));
@@ -344,9 +439,9 @@ get_8xx_pte(struct mm_struct *mm, unsigned long addr)
         if (pgd) {
                 pmd = pmd_offset(pgd, addr & PAGE_MASK);
                 if (pmd && pmd_present(*pmd)) {
-                        pte = pte_offset(pmd, addr & PAGE_MASK);
+                        pte = pte_offset_kernel(pmd, addr & PAGE_MASK);
                         if (pte) {
-                                        retval = (int)pte_val(*pte);
+				retval = (int)pte_val(*pte);
                         }
                 }
         }

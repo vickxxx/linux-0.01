@@ -26,7 +26,6 @@
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
 #include <asm/hardirq.h>
-#include <asm/softirq.h>
 
 #define __KERNEL_SYSCALLS__
 #include <linux/unistd.h>
@@ -40,7 +39,6 @@ extern int linux_num_cpus;
 
 extern void calibrate_delay(void);
 
-extern struct task_struct *current_set[NR_CPUS];
 extern volatile int smp_processors_ready;
 extern unsigned long cpu_present_map;
 extern int smp_num_cpus;
@@ -58,8 +56,6 @@ extern volatile unsigned long ipi_count;
 extern volatile int smp_process_available;
 extern volatile int smp_commenced;
 extern int __smp4m_processor_id(void);
-
-extern unsigned long totalram_pages;
 
 /*#define SMP_DEBUG*/
 
@@ -129,7 +125,7 @@ void __init smp4m_callin(void)
 	local_flush_cache_all();
 	local_flush_tlb_all();
 
-	__sti();
+	local_irq_enable();
 }
 
 extern int cpu_idle(void *unused);
@@ -155,7 +151,7 @@ void __init smp4m_boot_cpus(void)
 
 	printk("Entering SMP Mode...\n");
 
-	__sti();
+	local_irq_enable();
 	cpu_present_map = 0;
 
 	for(i=0; i < linux_num_cpus; i++)
@@ -170,12 +166,11 @@ void __init smp4m_boot_cpus(void)
 	mid_xlate[boot_cpu_id] = (linux_cpus[boot_cpu_id].mid & ~8);
 	__cpu_number_map[boot_cpu_id] = 0;
 	__cpu_logical_map[0] = boot_cpu_id;
-	current->processor = boot_cpu_id;
+	current->cpu = boot_cpu_id;
 
 	smp_store_cpu_info(boot_cpu_id);
 	set_irq_udt(mid_xlate[boot_cpu_id]);
 	smp_setup_percpu_timer();
-	init_idle();
 	local_flush_cache_all();
 	if(linux_num_cpus == 1)
 		return;  /* Not an MP box. */
@@ -190,19 +185,16 @@ void __init smp4m_boot_cpus(void)
 			int timeout;
 
 			/* Cook up an idler for this guy. */
-			kernel_thread(start_secondary, NULL, CLONE_PID);
+			kernel_thread(start_secondary, NULL, CLONE_IDLETASK);
 
 			cpucount++;
 
-			p = init_task.prev_task;
-			init_tasks[i] = p;
+			p = prev_task(&init_task);
 
-			p->processor = i;
-			p->cpus_runnable = 1 << i; /* we schedule the first task manually */
+			p->cpu = i;
 
 			current_set[i] = p;
 
-			del_from_runqueue(p);
 			unhash_process(p);
 
 			/* See trampoline.S for details... */
@@ -452,9 +444,9 @@ void smp4m_percpu_timer_interrupt(struct pt_regs *regs)
 	if(!--prof_counter[cpu]) {
 		int user = user_mode(regs);
 
-		irq_enter(cpu, 0);
+		irq_enter();
 		update_process_times(user);
-		irq_exit(cpu, 0);
+		irq_exit();
 
 		prof_counter[cpu] = prof_multiplier[cpu];
 	}

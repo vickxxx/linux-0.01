@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.enet.c 1.9 09/14/01 18:01:16 trini
- */
-/*
  * Ethernet driver for Motorola MPC8260.
  * Copyright (c) 1999 Dan Malek (dmalek@jlc.net)
  * Copyright (c) 2000 MontaVista Software Inc. (source@mvista.com)
@@ -125,7 +122,7 @@ struct scc_enet_private {
 static int scc_enet_open(struct net_device *dev);
 static int scc_enet_start_xmit(struct sk_buff *skb, struct net_device *dev);
 static int scc_enet_rx(struct net_device *dev);
-static void scc_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs);
+static irqreturn_t scc_enet_interrupt(int irq, void *dev_id, struct pt_regs *);
 static int scc_enet_close(struct net_device *dev);
 static struct net_device_stats *scc_enet_get_stats(struct net_device *dev);
 static void set_multicast_list(struct net_device *dev);
@@ -275,7 +272,7 @@ scc_enet_timeout(struct net_device *dev)
 /* The interrupt handler.
  * This is called from the CPM handler, not the MPC core interrupt.
  */
-static void
+static irqreturn_t
 scc_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 {
 	struct	net_device *dev = dev_id;
@@ -406,7 +403,7 @@ scc_enet_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 		printk("SCC ENET: BSY can't happen.\n");
 	}
 
-	return;
+	return IRQ_HANDLED;
 }
 
 /* During a receive, the cur_rx points to the current incoming buffer.
@@ -611,7 +608,7 @@ static void set_multicast_list(struct net_device *dev)
 
 /* Initialize the CPM Ethernet on SCC.
  */
-int __init scc_enet_init(void)
+static int __init scc_enet_init(void)
 {
 	struct net_device *dev;
 	struct scc_enet_private *cep;
@@ -633,18 +630,14 @@ int __init scc_enet_init(void)
 
 	bd = (bd_t *)__res;
 
-	/* Allocate some private information.
-	*/
-	cep = (struct scc_enet_private *)kmalloc(sizeof(*cep), GFP_KERNEL);
-	if (cep == NULL)
-		return -ENOMEM;
-
-	__clear_user(cep,sizeof(*cep));
-	spin_lock_init(&cep->lock);
-
 	/* Create an Ethernet device instance.
 	*/
-	dev = init_etherdev(0, 0);
+	dev = alloc_etherdev(sizeof(*cep));
+	if (!dev)
+		return -ENOMEM;
+
+	cep = dev->priv;
+	spin_lock_init(&cep->lock);
 
 	/* Get pointer to SCC area in parameter RAM.
 	*/
@@ -774,6 +767,7 @@ int __init scc_enet_init(void)
 		/* Allocate a page.
 		*/
 		mem_addr = __get_free_page(GFP_KERNEL);
+		/* BUG: no check for failure */
 
 		/* Initialize the BD for every fragment in the page.
 		*/
@@ -810,7 +804,8 @@ int __init scc_enet_init(void)
 
 	/* Install our interrupt handler.
 	*/
-	request_8xxirq(SIU_INT_ENET, scc_enet_interrupt, 0, "enet", dev);
+	request_irq(SIU_INT_ENET, scc_enet_interrupt, 0, "enet", dev);
+	/* BUG: no check for failure */
 
 	/* Set GSMR_H to enable all normal operating modes.
 	 * Set GSMR_L to enable Ethernet to MC68160.
@@ -840,7 +835,6 @@ int __init scc_enet_init(void)
 	io->iop_pdatc |= PC_EST8260_ENET_NOTFD;
 
 	dev->base_addr = (unsigned long)ep;
-	dev->priv = cep;
 
 	/* The CPM Ethernet specific entries in the device structure. */
 	dev->open = scc_enet_open;
@@ -855,6 +849,12 @@ int __init scc_enet_init(void)
 	*/
 	sccp->scc_gsmrl |= (SCC_GSMRL_ENR | SCC_GSMRL_ENT);
 
+	err = register_netdev(dev);
+	if (err) {
+		kfree(dev);
+		return err;
+	}
+
 	printk("%s: SCC ENET Version 0.1, ", dev->name);
 	for (i=0; i<5; i++)
 		printk("%02x:", dev->dev_addr[i]);
@@ -863,3 +863,4 @@ int __init scc_enet_init(void)
 	return 0;
 }
 
+module_init(scc_enet_init);

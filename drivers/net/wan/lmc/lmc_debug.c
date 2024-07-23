@@ -1,10 +1,8 @@
 
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/netdevice.h>
 #include <linux/interrupt.h>
-#include <linux/version.h>
-#include "lmc_ver.h"
+
 #include "lmc_debug.h"
 
 /*
@@ -72,12 +70,12 @@ inline void lmc_trace(struct net_device *dev, char *msg){
 
     if(in_interrupt()){
         printk("%s: * %s\n", dev->name, msg);
-//        while(jiffies < j+10)
+//        while(time_before(jiffies, j+10))
 //            ;
     }
     else {
         printk("%s: %s\n", dev->name, msg);
-        while(jiffies < j)
+        while(time_before(jiffies, j))
             schedule();
     }
 #endif

@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.nvram.h 1.5 05/17/01 18:14:25 cort
- */
-/*
  * PreP compliant NVRAM access
  */
 
@@ -26,14 +23,6 @@
 #define MOTO_RTC_CONTROLA            0x1FF8
 #define MOTO_RTC_CONTROLB            0x1FF9
 
-#ifndef BCD_TO_BIN
-#define BCD_TO_BIN(val) ((val)=((val)&15) + ((val)>>4)*10)
-#endif
-
-#ifndef BIN_TO_BCD
-#define BIN_TO_BCD(val) ((val)=(((val)/10)<<4) + (val)%10)
-#endif
-
 /* PowerMac specific nvram stuffs */
 
 enum {
@@ -42,16 +31,12 @@ enum {
 	pmac_nvram_NR		/* MacOS Name Registry partition */
 };
 
-#ifdef __KERNEL__
-
 /* Return partition offset in nvram */
 extern int	pmac_get_partition(int partition);
 
 /* Direct access to XPRAM */
 extern u8	pmac_xpram_read(int xpaddr);
 extern void	pmac_xpram_write(int xpaddr, u8 data);
-
-#endif /* __KERNEL__ */
 
 /* Some offsets in XPRAM */
 #define PMAC_XPRAM_MACHINE_LOC	0xe4

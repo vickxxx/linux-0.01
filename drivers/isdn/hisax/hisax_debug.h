@@ -28,7 +28,7 @@
 
 #define DBG(level, format, arg...) do { \
 if (level & __debug_variable) \
-printk(KERN_DEBUG __FUNCTION__ ": " format "\n" , ## arg); \
+printk(KERN_DEBUG "%s: " format "\n" , __FUNCTION__ , ## arg); \
 } while (0)
 
 #define DBG_PACKET(level,data,count) \
@@ -39,7 +39,7 @@ printk(KERN_DEBUG __FUNCTION__ ": " format "\n" , ## arg); \
 
 
 static void __attribute__((unused))
-dump_packet(const char *name,const u_char *data,int pkt_len)
+dump_packet(const char *name,const u8 *data,int pkt_len)
 {
 #define DUMP_HDR_SIZE 20
 #define DUMP_TLR_SIZE 8

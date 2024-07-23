@@ -1,4 +1,4 @@
-/* $Id: sunbmac.c,v 1.28 2001/10/21 06:35:29 davem Exp $
+/* $Id: sunbmac.c,v 1.30 2002/01/15 06:48:55 davem Exp $
  * sunbmac.c: Driver for Sparc BigMAC 100baseT ethernet adapters.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@redhat.com)
@@ -7,34 +7,32 @@
 #include <linux/module.h>
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
+#include <linux/crc32.h>
 #include <linux/errno.h>
-#include <asm/byteorder.h>
-
-#include <asm/idprom.h>
-#include <asm/sbus.h>
-#include <asm/openprom.h>
-#include <asm/oplib.h>
-#include <asm/auxio.h>
-#include <asm/pgtable.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+
+#include <asm/auxio.h>
+#include <asm/bitops.h>
+#include <asm/byteorder.h>
+#include <asm/dma.h>
+#include <asm/idprom.h>
+#include <asm/io.h>
+#include <asm/openprom.h>
+#include <asm/oplib.h>
+#include <asm/pgtable.h>
+#include <asm/sbus.h>
+#include <asm/system.h>
 
 #include "sunbmac.h"
 
@@ -876,7 +874,7 @@ static void bigmac_rx(struct bigmac *bp)
 		printk(KERN_NOTICE "%s: Memory squeeze, deferring packet.\n", bp->dev->name);
 }
 
-static void bigmac_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t bigmac_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct bigmac *bp = (struct bigmac *) dev_id;
 	u32 qec_status, bmac_status;
@@ -897,6 +895,8 @@ static void bigmac_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (bmac_status & CREG_STAT_RXIRQ)
 		bigmac_rx(bp);
+
+	return IRQ_HANDLED;
 }
 
 static int bigmac_open(struct net_device *dev)
@@ -979,17 +979,14 @@ static struct net_device_stats *bigmac_get_stats(struct net_device *dev)
 	return &bp->enet_stats;
 }
 
-#define CRC_POLYNOMIAL_BE 0x04c11db7UL  /* Ethernet CRC, big endian */
-#define CRC_POLYNOMIAL_LE 0xedb88320UL  /* Ethernet CRC, little endian */
-
 static void bigmac_set_multicast(struct net_device *dev)
 {
 	struct bigmac *bp = (struct bigmac *) dev->priv;
 	unsigned long bregs = bp->bregs;
 	struct dev_mc_list *dmi = dev->mc_list;
 	char *addrs;
-	int i, j, bit, byte;
-	u32 tmp, crc, poly = CRC_POLYNOMIAL_LE;
+	int i;
+	u32 tmp, crc;
 
 	/* Disable the receiver.  The bit self-clears when
 	 * the operation is complete.
@@ -1022,17 +1019,7 @@ static void bigmac_set_multicast(struct net_device *dev)
 			if (!(*addrs & 1))
 				continue;
 
-			crc = 0xffffffffU;
-			for (byte = 0; byte < 6; byte++) {
-				for (bit = *addrs++, j = 0; j < 8; j++, bit >>= 1) {
-					int test;
-
-					test = ((bit ^ crc) & 0x01);
-					crc >>= 1;
-					if (test)
-						crc = crc ^ poly;
-				}
-			}
+			crc = ether_crc_le(6, addrs);
 			crc >>= 26;
 			hash_table[crc >> 4] |= 1 << (crc & 0xf);
 		}
@@ -1048,8 +1035,9 @@ static void bigmac_set_multicast(struct net_device *dev)
 	sbus_writel(tmp, bregs + BMAC_RXCFG);
 }
 
-static int __init bigmac_ether_init(struct net_device *dev, struct sbus_dev *qec_sdev)
+static int __init bigmac_ether_init(struct sbus_dev *qec_sdev)
 {
+	struct net_device *dev;
 	static int version_printed;
 	struct bigmac *bp;
 	u8 bsizes, bsizes_more;
@@ -1063,9 +1051,6 @@ static int __init bigmac_ether_init(struct net_device *dev, struct sbus_dev *qec
 
 	if (version_printed++ == 0)
 		printk(KERN_INFO "%s", version);
-
-	if (!dev)
-		return -ENOMEM;
 
 	/* Report what we have found to the user. */
 	printk(KERN_INFO "%s: BigMAC 100baseT Ethernet ", dev->name);
@@ -1195,7 +1180,6 @@ static int __init bigmac_ether_init(struct net_device *dev, struct sbus_dev *qec
 	/* Finish net device registration. */
 	dev->irq = bp->bigmac_sdev->irqs[0];
 	dev->dma = 0;
-	ether_setup(dev);
 
 	/* Put us into the list of instances attached for later driver
 	 * exit.
@@ -1224,6 +1208,7 @@ fail_and_cleanup:
 				     bp->bblock_dvma);
 
 	unregister_netdev(dev);
+	/* This also frees the co-located 'dev->priv' */
 	kfree(dev);
 	return -ENODEV;
 }
@@ -1249,7 +1234,6 @@ static int __init bigmac_match(struct sbus_dev *sdev)
 
 static int __init bigmac_probe(void)
 {
-	struct net_device *dev = NULL;
 	struct sbus_bus *sbus;
 	struct sbus_dev *sdev = 0;
 	static int called;
@@ -1263,12 +1247,9 @@ static int __init bigmac_probe(void)
 
 	for_each_sbus(sbus) {
 		for_each_sbusdev(sdev, sbus) {
-			if (cards)
-				dev = NULL;
-
 			if (bigmac_match(sdev)) {
 				cards++;
-				if ((v = bigmac_ether_init(dev, sdev)))
+				if ((v = bigmac_ether_init(sdev)))
 					return v;
 			}
 		}

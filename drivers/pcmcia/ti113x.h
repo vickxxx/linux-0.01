@@ -12,7 +12,7 @@
  * limitations under the License. 
  *
  * The initial developer of the original code is David A. Hinds
- * <dhinds@pcmcia.sourceforge.org>.  Portions created by David A. Hinds
+ * <dahinds@users.sourceforge.net>.  Portions created by David A. Hinds
  * are Copyright (C) 1999 David A. Hinds.  All Rights Reserved.
  *
  * Alternatively, the contents of this file may be used under the
@@ -136,6 +136,26 @@
 
 #ifdef CONFIG_CARDBUS
 
+static int ti_intctl(struct yenta_socket *socket)
+{
+	u8 new, reg = exca_readb(socket, I365_INTCTL);
+
+	new = reg & ~I365_INTR_ENA;
+	if (socket->cb_irq)
+		new |= I365_INTR_ENA;
+	if (new != reg)
+		exca_writeb(socket, I365_INTCTL, new);
+	return 0;
+}
+
+static int ti_init(struct pcmcia_socket *sock)
+{
+	struct yenta_socket *socket = container_of(sock, struct yenta_socket, socket);
+	yenta_init(sock);
+	ti_intctl(socket);
+	return 0;
+}
+
 /*
  * Generic TI init - TI has an extension for the
  * INTCTL register that sets the PCI CSC interrupt.
@@ -148,70 +168,49 @@
  *   This makes us correctly get PCI CSC interrupt
  *   events.
  */
-static int ti_open(pci_socket_t *socket)
+static int ti_override(struct yenta_socket *socket)
 {
 	u8 new, reg = exca_readb(socket, I365_INTCTL);
 
 	new = reg & ~I365_INTR_ENA;
 	if (new != reg)
 		exca_writeb(socket, I365_INTCTL, new);
+
+	/*
+	 * If ISA interrupts don't work, then fall back to routing card
+	 * interrupts to the PCI interrupt of the socket.
+	 */
+	if (!socket->socket.irq_mask) {
+		int irqmux, devctl;
+
+		printk (KERN_INFO "ti113x: Routing card interrupts to PCI\n");
+
+		devctl = config_readb(socket, TI113X_DEVICE_CONTROL);
+		devctl &= ~TI113X_DCR_IMODE_MASK;
+
+		irqmux = config_readl(socket, TI122X_IRQMUX);
+		irqmux = (irqmux & ~0x0f) | 0x02; /* route INTA */
+		irqmux = (irqmux & ~0xf0) | 0x20; /* route INTB */
+
+		config_writel(socket, TI122X_IRQMUX, irqmux);
+		config_writeb(socket, TI113X_DEVICE_CONTROL, devctl);
+	}
+
+	socket->socket.ss_entry->init = ti_init;
 	return 0;
 }
-
-static int ti_intctl(pci_socket_t *socket)
-{
-	u8 new, reg = exca_readb(socket, I365_INTCTL);
-
-	new = reg & ~I365_INTR_ENA;
-	if (socket->cb_irq)
-		new |= I365_INTR_ENA;
-	if (new != reg)
-		exca_writeb(socket, I365_INTCTL, new);
-	return 0;
-}
-
-static int ti_init(pci_socket_t *socket)
-{
-	yenta_init(socket);
-	ti_intctl(socket);
-	return 0;
-}
-
-static struct pci_socket_ops ti_ops = {
-	ti_open,
-	yenta_close,
-	ti_init,
-	yenta_suspend,
-	yenta_get_status,
-	yenta_get_socket,
-	yenta_set_socket,
-	yenta_get_io_map,
-	yenta_set_io_map,
-	yenta_get_mem_map,
-	yenta_set_mem_map,
-	yenta_proc_setup
-};
 
 #define ti_sysctl(socket)	((socket)->private[0])
 #define ti_cardctl(socket)	((socket)->private[1])
 #define ti_devctl(socket)	((socket)->private[2])
+#define ti_diag(socket)		((socket)->private[3])
+#define ti_irqmux(socket)	((socket)->private[4])
 
-static int ti113x_open(pci_socket_t *socket)
+
+static int ti113x_init(struct pcmcia_socket *sock)
 {
-	ti_sysctl(socket) = config_readl(socket, TI113X_SYSTEM_CONTROL);
-	ti_cardctl(socket) = config_readb(socket, TI113X_CARD_CONTROL);
-	ti_devctl(socket) = config_readb(socket, TI113X_DEVICE_CONTROL);
-
-	ti_cardctl(socket) &= ~(TI113X_CCR_PCI_IRQ_ENA | TI113X_CCR_PCI_IREQ | TI113X_CCR_PCI_CSC);
-	if (socket->cb_irq)
-		ti_cardctl(socket) |= TI113X_CCR_PCI_IRQ_ENA | TI113X_CCR_PCI_CSC | TI113X_CCR_PCI_IREQ;
-	ti_open(socket);
-	return 0;
-}
-
-static int ti113x_init(pci_socket_t *socket)
-{
-	yenta_init(socket);
+	struct yenta_socket *socket = container_of(sock, struct yenta_socket, socket);
+	yenta_init(sock);
 
 	config_writel(socket, TI113X_SYSTEM_CONTROL, ti_sysctl(socket));
 	config_writeb(socket, TI113X_CARD_CONTROL, ti_cardctl(socket));
@@ -220,57 +219,59 @@ static int ti113x_init(pci_socket_t *socket)
 	return 0;
 }
 
-static struct pci_socket_ops ti113x_ops = {
-	ti113x_open,
-	yenta_close,
-	ti113x_init,
-	yenta_suspend,
-	yenta_get_status,
-	yenta_get_socket,
-	yenta_set_socket,
-	yenta_get_io_map,
-	yenta_set_io_map,
-	yenta_get_mem_map,
-	yenta_set_mem_map,
-	yenta_proc_setup
-};
+static int ti113x_override(struct yenta_socket *socket)
+{
+	ti_sysctl(socket) = config_readl(socket, TI113X_SYSTEM_CONTROL);
+	ti_cardctl(socket) = config_readb(socket, TI113X_CARD_CONTROL);
+	ti_devctl(socket) = config_readb(socket, TI113X_DEVICE_CONTROL);
 
-#define ti_diag(socket)		((socket)->private[0])
+	ti_cardctl(socket) &= ~(TI113X_CCR_PCI_IRQ_ENA | TI113X_CCR_PCI_IREQ | TI113X_CCR_PCI_CSC);
+	if (socket->cb_irq)
+		ti_cardctl(socket) |= TI113X_CCR_PCI_IRQ_ENA | TI113X_CCR_PCI_CSC | TI113X_CCR_PCI_IREQ;
+	ti_override(socket);
+	socket->socket.ss_entry->init = ti113x_init;
+	return 0;
+}
 
-static int ti1250_open(pci_socket_t *socket)
+
+static int ti1250_init(struct pcmcia_socket *sock)
+{
+	struct yenta_socket *socket = container_of(sock, struct yenta_socket, socket);
+	yenta_init(sock);
+	ti113x_init(sock);
+	ti_irqmux(socket) = config_readl(socket, TI122X_IRQMUX);
+	ti_irqmux(socket) = (ti_irqmux(socket) & ~0x0f) | 0x02; /* route INTA */
+	if (!(ti_sysctl(socket) & TI122X_SCR_INTRTIE))
+		ti_irqmux(socket) |= 0x20; /* route INTB */
+	
+	config_writel(socket, TI122X_IRQMUX, ti_irqmux(socket));
+		
+	config_writeb(socket, TI1250_DIAGNOSTIC, ti_diag(socket));
+	return 0;
+}
+
+static int ti1250_override(struct yenta_socket *socket)
 {
 	ti_diag(socket) = config_readb(socket, TI1250_DIAGNOSTIC);
 
 	ti_diag(socket) &= ~(TI1250_DIAG_PCI_CSC | TI1250_DIAG_PCI_IREQ);
 	if (socket->cb_irq)
 		ti_diag(socket) |= TI1250_DIAG_PCI_CSC | TI1250_DIAG_PCI_IREQ;
-	ti_open(socket);
+	ti113x_override(socket);
+	socket->socket.ss_entry->init = ti1250_init;
 	return 0;
 }
 
-static int ti1250_init(pci_socket_t *socket)
+
+static int ti12xx_override(struct yenta_socket *socket)
 {
-	yenta_init(socket);
+	/* make sure that memory burst is active */
+	ti_sysctl(socket) = config_readl(socket, TI113X_SYSTEM_CONTROL);
+	ti_sysctl(socket) |= TI122X_SCR_MRBURSTUP;
+	config_writel(socket, TI113X_SYSTEM_CONTROL, ti_sysctl(socket));
 
-	config_writeb(socket, TI1250_DIAGNOSTIC, ti_diag(socket));
-	ti_intctl(socket);
-	return 0;
+	return ti113x_override(socket);
 }
-
-static struct pci_socket_ops ti1250_ops = {
-	ti1250_open,
-	yenta_close,
-	ti1250_init,
-	yenta_suspend,
-	yenta_get_status,
-	yenta_get_socket,
-	yenta_set_socket,
-	yenta_get_io_map,
-	yenta_set_io_map,
-	yenta_get_mem_map,
-	yenta_set_mem_map,
-	yenta_proc_setup
-};
 
 #endif /* CONFIG_CARDBUS */
 

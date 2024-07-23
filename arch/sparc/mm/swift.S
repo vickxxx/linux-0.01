@@ -1,4 +1,4 @@
-/* $Id: swift.S,v 1.7 2000/07/16 21:48:52 anton Exp $
+/* $Id: swift.S,v 1.9 2002/01/08 11:11:59 davem Exp $
  * swift.S: MicroSparc-II mmu/cache operations.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
@@ -53,11 +53,9 @@ swift_flush_cache_all:
 
 	.globl	swift_flush_cache_mm
 swift_flush_cache_mm:
-#ifndef CONFIG_SMP
 	ld	[%o0 + AOFF_mm_context], %g2
 	cmp	%g2, -1
 	be	swift_flush_cache_mm_out
-#endif
 	WINDOW_FLUSH(%g4, %g5)
 	rd	%psr, %g1
 	andn	%g1, PSR_ET, %g3
@@ -108,6 +106,7 @@ swift_flush_cache_mm_out:
 
 	.globl	swift_flush_cache_range
 swift_flush_cache_range:
+	ld	[%o0 + 0x0], %o0		/* XXX vma->vm_mm, GROSS XXX */
 	sub	%o2, %o1, %o2
 	sethi	%hi(4096), %o3
 	cmp	%o2, %o3
@@ -120,11 +119,9 @@ swift_flush_cache_range:
 swift_flush_cache_page:
 	ld	[%o0 + 0x0], %o0		/* XXX vma->vm_mm, GROSS XXX */
 70:
-#ifndef CONFIG_SMP
 	ld	[%o0 + AOFF_mm_context], %g2
 	cmp	%g2, -1
 	be	swift_flush_cache_page_out
-#endif
 	WINDOW_FLUSH(%g4, %g5)
 	rd	%psr, %g1
 	andn	%g1, PSR_ET, %g3
@@ -222,13 +219,12 @@ swift_flush_sig_insns:
 	.globl	swift_flush_tlb_mm
 	.globl	swift_flush_tlb_range
 	.globl	swift_flush_tlb_all
-swift_flush_tlb_mm:
 swift_flush_tlb_range:
-#ifndef CONFIG_SMP
+	ld	[%o0 + 0x00], %o0	/* XXX vma->vm_mm GROSS XXX */
+swift_flush_tlb_mm:
 	ld	[%o0 + AOFF_mm_context], %g2
 	cmp	%g2, -1
 	be	swift_flush_tlb_all_out
-#endif
 swift_flush_tlb_all:
 	mov	0x400, %o1
 	sta	%g0, [%o1] ASI_M_FLUSH_PROBE
@@ -242,11 +238,9 @@ swift_flush_tlb_page:
 	mov	SRMMU_CTX_REG, %g1
 	ld	[%o0 + AOFF_mm_context], %o3
 	andn	%o1, (PAGE_SIZE - 1), %o1
-#ifndef CONFIG_SMP
 	cmp	%o3, -1
 	be	swift_flush_tlb_page_out
 	 nop
-#endif
 #if 1
 	mov	0x400, %o1
 	sta	%g0, [%o1] ASI_M_FLUSH_PROBE	

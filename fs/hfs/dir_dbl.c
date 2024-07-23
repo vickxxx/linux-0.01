@@ -20,12 +20,13 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/smp_lock.h>
 
 /*================ Forward declarations ================*/
 
-static struct dentry *dbl_lookup(struct inode *, struct dentry *);
+static struct dentry *dbl_lookup(struct inode *, struct dentry *, struct nameidata *);
 static int dbl_readdir(struct file *, void *, filldir_t);
-static int dbl_create(struct inode *, struct dentry *, int);
+static int dbl_create(struct inode *, struct dentry *, int, struct nameidata *);
 static int dbl_mkdir(struct inode *, struct dentry *, int);
 static int dbl_unlink(struct inode *, struct dentry *);
 static int dbl_rmdir(struct inode *, struct dentry *);
@@ -57,19 +58,19 @@ const struct hfs_name hfs_dbl_reserved2[] = {
 #define PCNT_ROOTINFO	(&hfs_dbl_reserved2[1])
 
 struct file_operations hfs_dbl_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	dbl_readdir,
-	fsync:		file_fsync,
+	.read		= generic_read_dir,
+	.readdir	= dbl_readdir,
+	.fsync		= file_fsync,
 };
 
 struct inode_operations hfs_dbl_dir_inode_operations = {
-	create:		dbl_create,
-	lookup:		dbl_lookup,
-	unlink:		dbl_unlink,
-	mkdir:		dbl_mkdir,
-	rmdir:		dbl_rmdir,
-	rename:		dbl_rename,
-	setattr:	hfs_notify_change,
+	.create		= dbl_create,
+	.lookup		= dbl_lookup,
+	.unlink		= dbl_unlink,
+	.mkdir		= dbl_mkdir,
+	.rmdir		= dbl_rmdir,
+	.rename		= dbl_rename,
+	.setattr	= hfs_notify_change,
 };
 
 
@@ -107,13 +108,14 @@ static int is_hdr(struct inode *dir, const char *name, int len)
  * the inode for the directory and the name (and its length) of the
  * entry.
  */
-static struct dentry *dbl_lookup(struct inode * dir, struct dentry *dentry)
+static struct dentry *dbl_lookup(struct inode * dir, struct dentry *dentry, struct nameidata *nd)
 {
 	struct hfs_name cname;
 	struct hfs_cat_entry *entry;
 	struct hfs_cat_key key;
 	struct inode *inode = NULL;
 
+	lock_kernel();
 	dentry->d_op = &hfs_dentry_operations;
 	entry = HFS_I(dir)->entry;
 	
@@ -145,6 +147,7 @@ static struct dentry *dbl_lookup(struct inode * dir, struct dentry *dentry)
 	}
 	
 done:
+	unlock_kernel();
 	d_add(dentry, inode);
 	return NULL;
 }
@@ -179,13 +182,15 @@ static int dbl_readdir(struct file * filp,
         struct hfs_cat_entry *entry;
 	struct inode *dir = filp->f_dentry->d_inode;
 
+	lock_kernel();
+
 	entry = HFS_I(dir)->entry;
 
 	if (filp->f_pos == 0) {
 		/* Entry 0 is for "." */
 		if (filldir(dirent, DOT->Name, DOT_LEN, 0, dir->i_ino,
 			    DT_DIR)) {
-			return 0;
+			goto out;
 		}
 		filp->f_pos = 1;
 	}
@@ -194,7 +199,7 @@ static int dbl_readdir(struct file * filp,
 		/* Entry 1 is for ".." */
 		if (filldir(dirent, DOT_DOT->Name, DOT_DOT_LEN, 1,
 			    hfs_get_hl(entry->key.ParID), DT_DIR)) {
-			return 0;
+			goto out;	
 		}
 		filp->f_pos = 2;
 	}
@@ -206,7 +211,7 @@ static int dbl_readdir(struct file * filp,
 		if (hfs_cat_open(entry, &brec) ||
 		    hfs_cat_next(entry, &brec, (filp->f_pos - 1) >> 1,
 				 &cnid, &type)) {
-			return 0;
+			goto out;
 		}
 
 		while (filp->f_pos < (dir->i_size - 1)) {
@@ -223,7 +228,7 @@ static int dbl_readdir(struct file * filp,
 			} else {
 				if (hfs_cat_next(entry, &brec, 1,
 							&cnid, &type)) {
-					return 0;
+					goto out;
 				}
 				ino = ntohl(cnid);
 				len = hfs_namein(dir, tmp_name,
@@ -233,7 +238,7 @@ static int dbl_readdir(struct file * filp,
 			if (filldir(dirent, tmp_name, len, filp->f_pos, ino,
 				    DT_UNKNOWN)) {
 				hfs_cat_close(entry, &brec);
-				return 0;
+				goto out;
 			}
 			++filp->f_pos;
 		}
@@ -247,12 +252,14 @@ static int dbl_readdir(struct file * filp,
 				    PCNT_ROOTINFO_LEN, filp->f_pos,
 				    ntohl(entry->cnid) | HFS_DBL_HDR,
 				    DT_UNKNOWN)) {
-				return 0;
+				goto out;
 			}
 		}
 		++filp->f_pos;
 	}
 
+out:
+	unlock_kernel();
 	return 0;
 }
 
@@ -265,15 +272,17 @@ static int dbl_readdir(struct file * filp,
  * the directory and the name (and its length) of the new file.
  */
 static int dbl_create(struct inode * dir, struct dentry *dentry,
-		      int mode)
+		      int mode, struct nameidata *nd)
 {
 	int error;
 
+	lock_kernel();
 	if (is_hdr(dir, dentry->d_name.name, dentry->d_name.len)) {
 		error = -EEXIST;
 	} else {
-		error = hfs_create(dir, dentry, mode);
+		error = hfs_create(dir, dentry, mode, nd);
 	}
+	unlock_kernel();
 	return error;
 }
 
@@ -290,11 +299,13 @@ static int dbl_mkdir(struct inode * parent, struct dentry *dentry,
 {
 	int error;
 
+	lock_kernel();
 	if (is_hdr(parent, dentry->d_name.name, dentry->d_name.len)) {
 		error = -EEXIST;
 	} else {
 		error = hfs_mkdir(parent, dentry, mode);
 	}
+	unlock_kernel();
 	return error;
 }
 
@@ -310,11 +321,13 @@ static int dbl_unlink(struct inode * dir, struct dentry *dentry)
 {
 	int error;
 
+	lock_kernel();
 	error = hfs_unlink(dir, dentry);
 	if ((error == -ENOENT) && is_hdr(dir, dentry->d_name.name,
 					 dentry->d_name.len)) {
 		error = -EPERM;
 	}
+	unlock_kernel();
 	return error;
 }
 
@@ -330,11 +343,13 @@ static int dbl_rmdir(struct inode * parent, struct dentry *dentry)
 {
 	int error;
 
+	lock_kernel();
 	error = hfs_rmdir(parent, dentry);
 	if ((error == -ENOENT) && is_hdr(parent, dentry->d_name.name,
 					 dentry->d_name.len)) {
 		error = -ENOTDIR;
 	}
+	unlock_kernel();
 	return error;
 }
 
@@ -355,6 +370,7 @@ static int dbl_rename(struct inode *old_dir, struct dentry *old_dentry,
 {
 	int error;
 
+	lock_kernel();
 	if (is_hdr(new_dir, new_dentry->d_name.name,
 		   new_dentry->d_name.len)) {
 		error = -EPERM;
@@ -367,6 +383,7 @@ static int dbl_rename(struct inode *old_dir, struct dentry *old_dentry,
 			error = -EPERM;
 		}
 	}
+	unlock_kernel();
 	return error;
 }
 

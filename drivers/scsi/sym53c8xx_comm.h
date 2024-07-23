@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
+**  Copyright (C) 1998-2001  Gerard Roudier <groudier@free.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -32,7 +32,7 @@
 **  The Linux port of the FreeBSD ncr driver has been achieved in 
 **  november 1995 by:
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -265,6 +265,7 @@ static inline struct xpt_quehead *xpt_remque_tail(struct xpt_quehead *head)
 #if LINUX_VERSION_CODE >= LinuxVersionCode(2,2,0)
 
 typedef struct pci_dev *pcidev_t;
+typedef struct device *device_t;
 #define PCIDEV_NULL		(0)
 #define PciBusNumber(d)		(d)->bus->number
 #define PciDeviceFn(d)		(d)->devfn
@@ -312,12 +313,11 @@ pci_get_base_address(struct pci_dev *pdev, int index, u_long *base)
 #else	/* Incomplete emulation of current PCI code for pre-2.2 kernels */
 
 typedef unsigned int pcidev_t;
+typedef unsinged int device_t;
 #define PCIDEV_NULL		(~0u)
 #define PciBusNumber(d)		((d)>>8)
 #define PciDeviceFn(d)		((d)&0xff)
 #define __PciDev(busn, devfn)	(((busn)<<8)+(devfn))
-
-#define pci_present pcibios_present
 
 #define pci_read_config_byte(d, w, v) \
 	pcibios_read_config_byte(PciBusNumber(d), PciDeviceFn(d), w, v)
@@ -438,10 +438,10 @@ spinlock_t DRIVER_SMP_LOCK = SPIN_LOCK_UNLOCKED;
 #define	NCR_LOCK_NCB(np, flags)    spin_lock_irqsave(&np->smp_lock, flags)
 #define	NCR_UNLOCK_NCB(np, flags)  spin_unlock_irqrestore(&np->smp_lock, flags)
 
-#define	NCR_LOCK_SCSI_DONE(np, flags) \
-		spin_lock_irqsave(&io_request_lock, flags)
-#define	NCR_UNLOCK_SCSI_DONE(np, flags) \
-		spin_unlock_irqrestore(&io_request_lock, flags)
+#define	NCR_LOCK_SCSI_DONE(host, flags) \
+		spin_lock_irqsave((host)->host_lock, flags)
+#define	NCR_UNLOCK_SCSI_DONE(host, flags) \
+		spin_unlock_irqrestore(((host)->host_lock), flags)
 
 #else
 
@@ -452,8 +452,8 @@ spinlock_t DRIVER_SMP_LOCK = SPIN_LOCK_UNLOCKED;
 #define	NCR_LOCK_NCB(np, flags)    do { save_flags(flags); cli(); } while (0)
 #define	NCR_UNLOCK_NCB(np, flags)  do { restore_flags(flags); } while (0)
 
-#define	NCR_LOCK_SCSI_DONE(np, flags)    do {;} while (0)
-#define	NCR_UNLOCK_SCSI_DONE(np, flags)  do {;} while (0)
+#define	NCR_LOCK_SCSI_DONE(host, flags)    do {;} while (0)
+#define	NCR_UNLOCK_SCSI_DONE(host, flags)  do {;} while (0)
 
 #endif
 
@@ -564,7 +564,7 @@ static void MDELAY(long ms) { while (ms--) UDELAY(1000); }
 #define MEMO_CLUSTER_MASK	(MEMO_CLUSTER_SIZE-1)
 
 typedef u_long m_addr_t;	/* Enough bits to bit-hack addresses */
-typedef pcidev_t m_bush_t;	/* Something that addresses DMAable */
+typedef struct device *m_bush_t;	/* Something that addresses DMAable */
 
 typedef struct m_link {		/* Link between free memory chunks */
 	struct m_link *next;
@@ -793,9 +793,9 @@ static m_addr_t ___dma_getp(m_pool_s *mp)
 	vbp = __m_calloc(&mp0, sizeof(*vbp), "VTOB");
 	if (vbp) {
 		dma_addr_t daddr;
-		vp = (m_addr_t) pci_alloc_consistent(mp->bush,
+		vp = (m_addr_t) dma_alloc_coherent(mp->bush,
 						PAGE_SIZE<<MEMO_PAGE_ORDER,
-						&daddr);
+						&daddr, GFP_ATOMIC);
 		if (vp) {
 			int hc = VTOB_HASH_CODE(vp);
 			vbp->vaddr = vp;
@@ -822,8 +822,8 @@ static void ___dma_freep(m_pool_s *mp, m_addr_t m)
 	if (*vbpp) {
 		vbp = *vbpp;
 		*vbpp = (*vbpp)->next;
-		pci_free_consistent(mp->bush, PAGE_SIZE<<MEMO_PAGE_ORDER,
-				    (void *)vbp->vaddr, (dma_addr_t)vbp->baddr);
+		dma_free_coherent(mp->bush, PAGE_SIZE<<MEMO_PAGE_ORDER,
+				  (void *)vbp->vaddr, (dma_addr_t)vbp->baddr);
 		__m_free(&mp0, vbp, sizeof(*vbp), "VTOB");
 		--mp->nump;
 	}
@@ -917,11 +917,11 @@ static m_addr_t __vtobus(m_bush_t bush, void *m)
 
 #endif	/* SCSI_NCR_DYNAMIC_DMA_MAPPING */
 
-#define _m_calloc_dma(np, s, n)		__m_calloc_dma(np->pdev, s, n)
-#define _m_free_dma(np, p, s, n)	__m_free_dma(np->pdev, p, s, n)
+#define _m_calloc_dma(np, s, n)		__m_calloc_dma(np->dev, s, n)
+#define _m_free_dma(np, p, s, n)	__m_free_dma(np->dev, p, s, n)
 #define m_calloc_dma(s, n)		_m_calloc_dma(np, s, n)
 #define m_free_dma(p, s, n)		_m_free_dma(np, p, s, n)
-#define _vtobus(np, p)			__vtobus(np->pdev, p)
+#define _vtobus(np, p)			__vtobus(np->dev, p)
 #define vtobus(p)			_vtobus(np, p)
 
 /*
@@ -932,10 +932,10 @@ static m_addr_t __vtobus(m_bush_t bush, void *m)
 
 /* Linux versions prior to pci bus iommu kernel interface */
 
-#define __unmap_scsi_data(pdev, cmd)	do {; } while (0)
-#define __map_scsi_single_data(pdev, cmd) (__vtobus(pdev,(cmd)->request_buffer))
-#define __map_scsi_sg_data(pdev, cmd)	((cmd)->use_sg)
-#define __sync_scsi_data(pdev, cmd)	do {; } while (0)
+#define __unmap_scsi_data(dev, cmd)	do {; } while (0)
+#define __map_scsi_single_data(dev, cmd) (__vtobus(dev,(cmd)->request_buffer))
+#define __map_scsi_sg_data(dev, cmd)	((cmd)->use_sg)
+#define __sync_scsi_data(dev, cmd)	do {; } while (0)
 
 #define scsi_sg_dma_address(sc)		vtobus((sc)->address)
 #define scsi_sg_dma_len(sc)		((sc)->length)
@@ -948,31 +948,34 @@ static m_addr_t __vtobus(m_bush_t bush, void *m)
 #define __data_mapped	SCp.phase
 #define __data_mapping	SCp.have_data_in
 
-static void __unmap_scsi_data(pcidev_t pdev, Scsi_Cmnd *cmd)
+static void __unmap_scsi_data(device_t dev, Scsi_Cmnd *cmd)
 {
-	int dma_dir = scsi_to_pci_dma_dir(cmd->sc_data_direction);
+	enum dma_data_direction dma_dir = 
+		(enum dma_data_direction)scsi_to_pci_dma_dir(cmd->sc_data_direction);
 
 	switch(cmd->__data_mapped) {
 	case 2:
-		pci_unmap_sg(pdev, cmd->buffer, cmd->use_sg, dma_dir);
+		dma_unmap_sg(dev, cmd->buffer, cmd->use_sg, dma_dir);
 		break;
 	case 1:
-		pci_unmap_single(pdev, cmd->__data_mapping,
+		dma_unmap_single(dev, cmd->__data_mapping,
 				 cmd->request_bufflen, dma_dir);
 		break;
 	}
 	cmd->__data_mapped = 0;
 }
 
-static u_long __map_scsi_single_data(pcidev_t pdev, Scsi_Cmnd *cmd)
+static u_long __map_scsi_single_data(device_t dev, Scsi_Cmnd *cmd)
 {
 	dma_addr_t mapping;
-	int dma_dir = scsi_to_pci_dma_dir(cmd->sc_data_direction);
+	enum dma_data_direction dma_dir = 
+		(enum dma_data_direction)scsi_to_pci_dma_dir(cmd->sc_data_direction);
+
 
 	if (cmd->request_bufflen == 0)
 		return 0;
 
-	mapping = pci_map_single(pdev, cmd->request_buffer,
+	mapping = dma_map_single(dev, cmd->request_buffer,
 				 cmd->request_bufflen, dma_dir);
 	cmd->__data_mapped = 1;
 	cmd->__data_mapping = mapping;
@@ -980,32 +983,34 @@ static u_long __map_scsi_single_data(pcidev_t pdev, Scsi_Cmnd *cmd)
 	return mapping;
 }
 
-static int __map_scsi_sg_data(pcidev_t pdev, Scsi_Cmnd *cmd)
+static int __map_scsi_sg_data(device_t dev, Scsi_Cmnd *cmd)
 {
 	int use_sg;
-	int dma_dir = scsi_to_pci_dma_dir(cmd->sc_data_direction);
+	enum dma_data_direction dma_dir = 
+		(enum dma_data_direction)scsi_to_pci_dma_dir(cmd->sc_data_direction);
 
 	if (cmd->use_sg == 0)
 		return 0;
 
-	use_sg = pci_map_sg(pdev, cmd->buffer, cmd->use_sg, dma_dir);
+	use_sg = dma_map_sg(dev, cmd->buffer, cmd->use_sg, dma_dir);
 	cmd->__data_mapped = 2;
 	cmd->__data_mapping = use_sg;
 
 	return use_sg;
 }
 
-static void __sync_scsi_data(pcidev_t pdev, Scsi_Cmnd *cmd)
+static void __sync_scsi_data(device_t dev, Scsi_Cmnd *cmd)
 {
-	int dma_dir = scsi_to_pci_dma_dir(cmd->sc_data_direction);
+	enum dma_data_direction dma_dir = 
+		(enum dma_data_direction)scsi_to_pci_dma_dir(cmd->sc_data_direction);
 
 	switch(cmd->__data_mapped) {
 	case 2:
-		pci_dma_sync_sg(pdev, cmd->buffer, cmd->use_sg, dma_dir);
+		dma_sync_sg(dev, cmd->buffer, cmd->use_sg, dma_dir);
 		break;
 	case 1:
-		pci_dma_sync_single(pdev, cmd->__data_mapping,
-				    cmd->request_bufflen, dma_dir);
+		dma_sync_single(dev, cmd->__data_mapping,
+				cmd->request_bufflen, dma_dir);
 		break;
 	}
 }
@@ -1015,10 +1020,10 @@ static void __sync_scsi_data(pcidev_t pdev, Scsi_Cmnd *cmd)
 
 #endif	/* SCSI_NCR_DYNAMIC_DMA_MAPPING */
 
-#define unmap_scsi_data(np, cmd)	__unmap_scsi_data(np->pdev, cmd)
-#define map_scsi_single_data(np, cmd)	__map_scsi_single_data(np->pdev, cmd)
-#define map_scsi_sg_data(np, cmd)	__map_scsi_sg_data(np->pdev, cmd)
-#define sync_scsi_data(np, cmd)		__sync_scsi_data(np->pdev, cmd)
+#define unmap_scsi_data(np, cmd)	__unmap_scsi_data(np->dev, cmd)
+#define map_scsi_single_data(np, cmd)	__map_scsi_single_data(np->dev, cmd)
+#define map_scsi_sg_data(np, cmd)	__map_scsi_sg_data(np->dev, cmd)
+#define sync_scsi_data(np, cmd)		__sync_scsi_data(np->dev, cmd)
 
 /*==========================================================
 **
@@ -1092,66 +1097,6 @@ static struct ncr_driver_setup
 #define initverbose (driver_setup.verbose)
 #define bootverbose (np->verbose)
 
-
-/*==========================================================
-**
-**	Structures used by the detection routine to transmit 
-**	device configuration to the attach function.
-**
-**==========================================================
-*/
-typedef struct {
-	int	bus;
-	u_char	device_fn;
-	u_long	base;
-	u_long	base_2;
-	u_long	io_port;
-	u_long	base_c;
-	u_long	base_2_c;
-	int	irq;
-/* port and reg fields to use INB, OUTB macros */
-	u_long	base_io;
-	volatile struct ncr_reg	*reg;
-} ncr_slot;
-
-/*==========================================================
-**
-**	Structure used to store the NVRAM content.
-**
-**==========================================================
-*/
-typedef struct {
-	int type;
-#define	SCSI_NCR_SYMBIOS_NVRAM	(1)
-#define	SCSI_NCR_TEKRAM_NVRAM	(2)
-#ifdef	SCSI_NCR_NVRAM_SUPPORT
-	union {
-		Symbios_nvram Symbios;
-		Tekram_nvram Tekram;
-	} data;
-#endif
-} ncr_nvram;
-
-/*==========================================================
-**
-**	Structure used by detection routine to save data on 
-**	each detected board for attach.
-**
-**==========================================================
-*/
-typedef struct {
-	pcidev_t  pdev;
-	ncr_slot  slot;
-	ncr_chip  chip;
-	ncr_nvram *nvram;
-	u_char host_id;
-#ifdef	SCSI_NCR_PQS_PDS_SUPPORT
-	u_char pqs_pds;
-#endif
-	int attach_done;
-} ncr_device;
-
-static int ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device);
 
 /*==========================================================
 **
@@ -2486,7 +2431,7 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, ncr_device *device)
  	/*
 	**    Initialise ncr_device structure with items required by ncr_attach.
 	*/
-	device->pdev		= pdev;
+	device->dev		= &pdev->dev;
 	device->slot.bus	= PciBusNumber(pdev);
 	device->slot.device_fn	= PciDeviceFn(pdev);
 	device->slot.base	= base;
@@ -2509,7 +2454,7 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, ncr_device *device)
 **    differ and attach them using the order in the NVRAM.
 **
 **    If no NVRAM is found or data appears invalid attach boards in 
-**    the the order they are detected.
+**    the order they are detected.
 **
 **===================================================================
 */
@@ -2523,12 +2468,6 @@ sym53c8xx__detect(Scsi_Host_Template *tpnt, u_short ncr_chip_ids[], int chips)
 #ifdef SCSI_NCR_NVRAM_SUPPORT
 	ncr_nvram  nvram0, nvram, *nvp;
 #endif
-
-	/*
-	**    PCI is required.
-	*/
-	if (!pci_present())
-		return 0;
 
 #ifdef SCSI_NCR_DEBUG_INFO_SUPPORT
 	ncr_debug = driver_setup.debug;

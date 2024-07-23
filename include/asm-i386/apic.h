@@ -3,10 +3,9 @@
 
 #include <linux/config.h>
 #include <linux/pm.h>
+#include <asm/fixmap.h>
 #include <asm/apicdef.h>
 #include <asm/system.h>
-
-#ifdef CONFIG_X86_LOCAL_APIC
 
 #define APIC_DEBUG 0
 
@@ -15,6 +14,8 @@
 #else
 #define Dprintk(x...)
 #endif
+
+#ifdef CONFIG_X86_LOCAL_APIC
 
 /*
  * Basic functions accessing APICs.
@@ -75,16 +76,20 @@ extern void init_bsp_APIC (void);
 extern void setup_local_APIC (void);
 extern void init_apic_mappings (void);
 extern void smp_local_timer_interrupt (struct pt_regs * regs);
-extern void setup_APIC_clocks (void);
+extern void setup_boot_APIC_clock (void);
+extern void setup_secondary_APIC_clock (void);
 extern void setup_apic_nmi_watchdog (void);
+extern void disable_lapic_nmi_watchdog(void);
+extern void enable_lapic_nmi_watchdog(void);
+extern void disable_timer_nmi_watchdog(void);
+extern void enable_timer_nmi_watchdog(void);
 extern inline void nmi_watchdog_tick (struct pt_regs * regs);
 extern int APIC_init_uniprocessor (void);
+extern void disable_APIC_timer(void);
+extern void enable_APIC_timer(void);
 
-extern struct pm_dev *apic_pm_register(pm_dev_t, unsigned long, pm_callback);
-extern void apic_pm_unregister(struct pm_dev*);
-
-extern unsigned int apic_timer_irqs [NR_CPUS];
 extern int check_nmi_watchdog (void);
+extern void enable_NMI_through_LVT0 (void * dummy);
 
 extern unsigned int nmi_watchdog;
 #define NMI_NONE	0

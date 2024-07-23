@@ -32,11 +32,12 @@ static u_long ident_map[32] = {
 };
 
 struct exec_domain default_exec_domain = {
-	"Linux",		/* name */
-	default_handler,	/* lcall7 causes a seg fault. */
-	0, 0,			/* PER_LINUX personality. */
-	ident_map,		/* Identity map signals. */
-	ident_map,		/*  - both ways. */
+	.name		= "Linux",		/* name */
+	.handler	= default_handler,	/* lcall7 causes a seg fault. */
+	.pers_low	= 0, 			/* PER_LINUX personality. */
+	.pers_high	= 0,			/* PER_LINUX personality. */
+	.signal_map	= ident_map,		/* Identity map signals. */
+	.signal_invmap	= ident_map,		/*  - both ways. */
 };
 
 
@@ -67,8 +68,8 @@ default_handler(int segment, struct pt_regs *regp)
 	}
 	set_personality(pers);
 
-	if (current->exec_domain->handler != default_handler)
-		current->exec_domain->handler(segment, regp);
+	if (current_thread_info()->exec_domain->handler != default_handler)
+		current_thread_info()->exec_domain->handler(segment, regp);
 	else
 		send_sig(SIGSEGV, current, 1);
 }
@@ -82,22 +83,18 @@ lookup_exec_domain(u_long personality)
 	read_lock(&exec_domains_lock);
 	for (ep = exec_domains; ep; ep = ep->next) {
 		if (pers >= ep->pers_low && pers <= ep->pers_high)
-			if (try_inc_mod_count(ep->module))
+			if (try_module_get(ep->module))
 				goto out;
 	}
 
 #ifdef CONFIG_KMOD
 	read_unlock(&exec_domains_lock);
-	{
-		char buffer[30];
-		sprintf(buffer, "personality-%ld", pers);
-		request_module(buffer);
-	}
+	request_module("personality-%ld", pers);
 	read_lock(&exec_domains_lock);
 
 	for (ep = exec_domains; ep; ep = ep->next) {
 		if (pers >= ep->pers_low && pers <= ep->pers_high)
-			if (try_inc_mod_count(ep->module))
+			if (try_module_get(ep->module))
 				goto out;
 	}
 #endif
@@ -162,7 +159,7 @@ __set_personality(u_long personality)
 	struct exec_domain	*ep, *oep;
 
 	ep = lookup_exec_domain(personality);
-	if (ep == current->exec_domain) {
+	if (ep == current_thread_info()->exec_domain) {
 		current->personality = personality;
 		return 0;
 	}
@@ -172,7 +169,7 @@ __set_personality(u_long personality)
 
 		fsp = copy_fs_struct(current->fs);
 		if (fsp == NULL) {
-			put_exec_domain(ep);
+			module_put(ep->module);
 			return -ENOMEM;;
 		}
 
@@ -190,12 +187,11 @@ __set_personality(u_long personality)
 	 */
 
 	current->personality = personality;
-	oep = current->exec_domain;
-	current->exec_domain = ep;
+	oep = current_thread_info()->exec_domain;
+	current_thread_info()->exec_domain = ep;
 	set_fs_altroot();
 
-	put_exec_domain(oep);
-
+	module_put(oep->module);
 	return 0;
 }
 
@@ -208,8 +204,8 @@ get_exec_domain_list(char *page)
 	read_lock(&exec_domains_lock);
 	for (ep = exec_domains; ep && len < PAGE_SIZE - 80; ep = ep->next)
 		len += sprintf(page + len, "%d-%d\t%-16s\t[%s]\n",
-			ep->pers_low, ep->pers_high, ep->name,
-			ep->module ? ep->module->name : "kernel");
+			       ep->pers_low, ep->pers_high, ep->name,
+			       module_name(ep->module));
 	read_unlock(&exec_domains_lock);
 	return (len);
 }
@@ -252,24 +248,65 @@ u_int abi_traceflg;
 int abi_fake_utsname;
 
 static struct ctl_table abi_table[] = {
-	{ABI_DEFHANDLER_COFF, "defhandler_coff", &abi_defhandler_coff,
-		sizeof(int), 0644, NULL, &proc_doulongvec_minmax},
-	{ABI_DEFHANDLER_ELF, "defhandler_elf", &abi_defhandler_elf,
-		sizeof(int), 0644, NULL, &proc_doulongvec_minmax},
-	{ABI_DEFHANDLER_LCALL7, "defhandler_lcall7", &abi_defhandler_lcall7,
-		sizeof(int), 0644, NULL, &proc_doulongvec_minmax},
-	{ABI_DEFHANDLER_LIBCSO, "defhandler_libcso", &abi_defhandler_libcso,
-		sizeof(int), 0644, NULL, &proc_doulongvec_minmax},
-	{ABI_TRACE, "trace", &abi_traceflg,
-		sizeof(u_int), 0644, NULL, &proc_dointvec},
-	{ABI_FAKE_UTSNAME, "fake_utsname", &abi_fake_utsname,
-		sizeof(int), 0644, NULL, &proc_dointvec},
-	{0}
+	{
+		.ctl_name	= ABI_DEFHANDLER_COFF,
+		.procname	= "defhandler_coff",
+		.data		= &abi_defhandler_coff,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_doulongvec_minmax,
+	},
+	{
+		.ctl_name	= ABI_DEFHANDLER_ELF,
+		.procname	= "defhandler_elf",
+		.data		= &abi_defhandler_elf,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_doulongvec_minmax,
+	},
+	{
+		.ctl_name	= ABI_DEFHANDLER_LCALL7,
+		.procname	= "defhandler_lcall7",
+		.data		= &abi_defhandler_lcall7,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_doulongvec_minmax,
+	},
+	{
+		.ctl_name	= ABI_DEFHANDLER_LIBCSO,
+		.procname	= "defhandler_libcso",
+		.data		= &abi_defhandler_libcso,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_doulongvec_minmax,
+	},
+	{
+		.ctl_name	= ABI_TRACE,
+		.procname	= "trace",
+		.data		= &abi_traceflg,
+		.maxlen		= sizeof(u_int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= ABI_FAKE_UTSNAME,
+		.procname	= "fake_utsname",
+		.data		= &abi_fake_utsname,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{ .ctl_name = 0 }
 };
 
 static struct ctl_table abi_root_table[] = {
-	{CTL_ABI, "abi", NULL, 0, 0555, abi_table},
-	{0}
+	{
+		.ctl_name	= CTL_ABI,
+		.procname	= "abi",
+		.mode		= 0555,
+		.child		= abi_table,
+	},
+	{ .ctl_name = 0 }
 };
 
 static int __init

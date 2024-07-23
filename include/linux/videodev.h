@@ -4,33 +4,41 @@
 #include <linux/types.h>
 #include <linux/version.h>
 
+#if 1
+/*
+ * v4l2 is still work-in-progress, integration planed for 2.5.x
+ *   documentation:           http://bytesex.org/v4l/
+ *   patches available from:  http://bytesex.org/patches/
+ */ 
+# define HAVE_V4L2 1
+# include <linux/videodev2.h>
+#else
+# undef HAVE_V4L2
+#endif
+
 #ifdef __KERNEL__
 
 #include <linux/poll.h>
-#include <linux/devfs_fs_kernel.h>
+#include <linux/mm.h>
 
 struct video_device
 {
 	struct module *owner;
-	char name[32];
-	int type;
+     	char name[32];
+ 	int type;       /* v4l1 */
+ 	int type2;      /* v4l2 */
 	int hardware;
-
-	int (*open)(struct video_device *, int mode);
-	void (*close)(struct video_device *);
-	long (*read)(struct video_device *, char *, unsigned long, int noblock);
-	/* Do we need a write method ? */
-	long (*write)(struct video_device *, const char *, unsigned long, int noblock);
-#if LINUX_VERSION_CODE >= 0x020100
-	unsigned int (*poll)(struct video_device *, struct file *, poll_table *);
-#endif
-	int (*ioctl)(struct video_device *, unsigned int , void *);
-	int (*mmap)(struct video_device *, const char *, unsigned long);
-	int (*initialize)(struct video_device *);	
-	void *priv;		/* Used to be 'private' but that upsets C++ */
-	int busy;
 	int minor;
-	devfs_handle_t devfs_handle;
+
+ 	/* new interface -- we will use file_operations directly
+ 	 * like soundcore does. */
+ 	struct file_operations *fops;
+	void *priv;		/* Used to be 'private' but that upsets C++ */
+
+	/* for videodev.c intenal usage -- don't touch */
+	int users;
+	struct semaphore lock;
+	char devfs_name[64];	/* devfs */
 };
 
 #define VIDEO_MAJOR	81
@@ -42,8 +50,15 @@ extern int video_register_device(struct video_device *, int type, int nr);
 #define VFL_TYPE_VTX		3
 
 extern void video_unregister_device(struct video_device *);
-#endif
+extern struct video_device* video_devdata(struct file*);
 
+extern int video_exclusive_open(struct inode *inode, struct file *file);
+extern int video_exclusive_release(struct inode *inode, struct file *file);
+extern int video_usercopy(struct inode *inode, struct file *file,
+			  unsigned int cmd, unsigned long arg,
+			  int (*func)(struct inode *inode, struct file *file,
+				      unsigned int cmd, void *arg));
+#endif /* __KERNEL__ */
 
 #define VID_TYPE_CAPTURE	1	/* Can capture */
 #define VID_TYPE_TUNER		2	/* Can tune */
@@ -149,6 +164,7 @@ struct video_audio
 #define VIDEO_AUDIO_VOLUME	4
 #define VIDEO_AUDIO_BASS	8
 #define VIDEO_AUDIO_TREBLE	16	
+#define VIDEO_AUDIO_BALANCE	32
 	char    name[16];
 #define VIDEO_SOUND_MONO	1
 #define VIDEO_SOUND_STEREO	2
@@ -377,5 +393,12 @@ struct video_code
 #define VID_HARDWARE_PWC	31	/* Philips webcams */
 #define VID_HARDWARE_MEYE	32	/* Sony Vaio MotionEye cameras */
 #define VID_HARDWARE_CPIA2	33
+#define VID_HARDWARE_VICAM      34
+#define VID_HARDWARE_SF16FMR2	35
+#endif /* __LINUX_VIDEODEV_H */
 
-#endif
+/*
+ * Local variables:
+ * c-basic-offset: 8
+ * End:
+ */

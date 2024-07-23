@@ -6,6 +6,8 @@
  * Copyright (C) Srinivasa Thirumalachar <sprasad@engr.sgi.com>
  * Copyright (C) 2000 Hewlett-Packard Co.
  * Copyright (C) 2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 2002 Intel Corp.
+ * Copyright (C) 2002 Jenna Hall <jenna.s.hall@intel.com>
  */
 #ifndef _ASM_IA64_MCA_ASM_H
 #define _ASM_IA64_MCA_ASM_H
@@ -14,6 +16,7 @@
 #define PSR_I		14
 #define	PSR_DT		17
 #define PSR_RT		27
+#define PSR_MC		35
 #define PSR_IT		36
 #define PSR_BN		44
 
@@ -24,7 +27,7 @@
  *	1. Lop off bits 61 thru 63 in the virtual address
  */
 #define INST_VA_TO_PA(addr)							\
-	dep	addr	= 0, addr, 61, 3;
+	dep	addr	= 0, addr, 61, 3
 /*
  * This macro converts a data virtual address to a physical address
  * Right now for simulation purposes the virtual addresses are
@@ -32,7 +35,7 @@
  *	1. Lop off bits 61 thru 63 in the virtual address
  */
 #define DATA_VA_TO_PA(addr)							\
-	dep	addr	= 0, addr, 61, 3;
+	tpa	addr	= addr
 /*
  * This macro converts a data physical address to a virtual address
  * Right now for simulation purposes the virtual addresses are
@@ -41,7 +44,7 @@
  */
 #define DATA_PA_TO_VA(addr,temp)							\
 	mov	temp	= 0x7	;;							\
-	dep	addr	= temp, addr, 61, 3;;
+	dep	addr	= temp, addr, 61, 3
 
 /*
  * This macro jumps to the instruction at the given virtual address
@@ -105,6 +108,8 @@
 	;;										\
 	dep	temp1 = 0, temp1, PSR_IC, 1;						\
 	;;										\
+	dep	temp1 = -1, temp1, PSR_MC, 1;						\
+	;;										\
 	movl	temp2 = start_addr;							\
 	mov	cr.ipsr = temp1;							\
 	;;										\
@@ -112,8 +117,8 @@
 	;;										\
 	mov	cr.iip = temp2;								\
 	mov	cr.ifs = r0;								\
-	DATA_VA_TO_PA(sp)								\
-	DATA_VA_TO_PA(gp)								\
+	DATA_VA_TO_PA(sp);								\
+	DATA_VA_TO_PA(gp);								\
 	;;										\
 	srlz.i;										\
 	;;										\
@@ -130,8 +135,7 @@
  * translations turned on.
  *	1.	Get the old saved psr
  *
- *	2.	Clear the interrupt enable and interrupt state collection bits
- *		in the current psr.
+ *	2.	Clear the interrupt state collection bit in the current psr.
  *
  *	3.	Set the instruction translation bit back in the old psr
  *		Note we have to do this since we are right now saving only the
@@ -140,9 +144,11 @@
  *
  *	4.	Set ipsr to this old_psr with "it" bit set and "bn" = 1.
  *
- *	5.	Set iip to the virtual address of the next instruction bundle.
+ *	5.	Reset the current thread pointer (r13).
  *
- *	6.	Do an rfi to move ipsr to psr and iip to ip.
+ *	6.	Set iip to the virtual address of the next instruction bundle.
+ *
+ *	7.	Do an rfi to move ipsr to psr and iip to ip.
  */
 
 #define VIRTUAL_MODE_ENTER(temp1, temp2, start_addr, old_psr)	\
@@ -156,6 +162,10 @@
 	mov	ar.rsc = 0;					\
 	;;							\
 	srlz.d;							\
+	mov	r13 = ar.k6;					\
+	;;							\
+	DATA_PA_TO_VA(r13,temp1);				\
+	;;							\
 	mov	temp2 = ar.bspstore;				\
 	;;							\
 	DATA_PA_TO_VA(temp2,temp1);				\
@@ -169,8 +179,6 @@
 	mov	temp1 = old_psr;				\
 	;;							\
 	mov	temp2 = 1;					\
-	;;							\
-	dep	temp1 = temp2, temp1, PSR_I,  1;		\
 	;;							\
 	dep	temp1 = temp2, temp1, PSR_IC, 1;		\
 	;;							\
@@ -195,7 +203,7 @@
 	nop	1;						\
 	nop	2;						\
 	nop	1;						\
-	rfi;							\
+	rfi							\
 	;;
 
 /*

@@ -28,12 +28,7 @@
  *
  */
 
-#define __NO_VERSION__
 #include "drmP.h"
-
-#if LINUX_VERSION_CODE < 0x020400
-#include "stubsupport-pre24.h"
-#endif
 
 #define DRM_STUB_MAXCARDS 16	/* Enough for one machine */
 
@@ -53,7 +48,7 @@ static struct drm_stub_info {
 
 static int DRM(stub_open)(struct inode *inode, struct file *filp)
 {
-	int                    minor = MINOR(inode->i_rdev);
+	int                    minor = minor(inode->i_rdev);
 	int                    err   = -ENODEV;
 	struct file_operations *old_fops;
 
@@ -70,10 +65,8 @@ static int DRM(stub_open)(struct inode *inode, struct file *filp)
 }
 
 static struct file_operations DRM(stub_fops) = {
-#if LINUX_VERSION_CODE >= 0x020400
-	owner:   THIS_MODULE,
-#endif
-	open:	 DRM(stub_open)
+	.owner = THIS_MODULE,
+	.open  = DRM(stub_open)
 };
 
 static int DRM(stub_getminor)(const char *name, struct file_operations *fops,

@@ -65,23 +65,27 @@ static void __init pluto_detect_done(Scsi_Cmnd *SCpnt)
 
 static void __init pluto_detect_scsi_done(Scsi_Cmnd *SCpnt)
 {
-	SCpnt->request.rq_status = RQ_SCSI_DONE;
+	SCpnt->request->rq_status = RQ_SCSI_DONE;
 	PLND(("Detect done %08lx\n", (long)SCpnt))
 	if (atomic_dec_and_test (&fcss))
 		up(&fc_sem);
 }
 
-static void pluto_select_queue_depths(struct Scsi_Host *host, Scsi_Device *devlist)
+int pluto_slave_configure(Scsi_Device *device)
 {
-	Scsi_Device *device;
-	
-	for (device = devlist; device; device = device->next) {
-		if (device->host != host) continue;
-		if (device->tagged_supported)
-			device->queue_depth = /* 254 */ 8;
-		else
-			device->queue_depth = 2;
-	}
+	int depth_to_use;
+
+	if (device->tagged_supported)
+		depth_to_use = /* 254 */ 8;
+	else
+		depth_to_use = 2;
+
+	scsi_adjust_queue_depth(device,
+				(device->tagged_supported ?
+				 MSG_SIMPLE_TAG : 0),
+				depth_to_use);
+
+	return 0;
 }
 
 /* Detect all SSAs attached to the machine.
@@ -91,7 +95,8 @@ int __init pluto_detect(Scsi_Host_Template *tpnt)
 	int i, retry, nplutos;
 	fc_channel *fc;
 	Scsi_Device dev;
-	struct timer_list fc_timer = { function: pluto_detect_timeout };
+	struct timer_list fc_timer =
+		TIMER_INITIALIZER(pluto_detect_timeout, 0, 0);
 
 	tpnt->proc_name = "pluto";
 	fcscount = 0;
@@ -151,16 +156,16 @@ int __init pluto_detect(Scsi_Host_Template *tpnt)
 		
 		pluto->fc = fc;
 	
-		SCpnt->host = host;
 		SCpnt->cmnd[0] = INQUIRY;
 		SCpnt->cmnd[4] = 255;
 		
 		/* FC layer requires this, so that SCpnt->device->tagged_supported is initially 0 */
 		SCpnt->device = &dev;
+		dev.host = host;
 		
 		SCpnt->cmd_len = COMMAND_SIZE(INQUIRY);
 	
-		SCpnt->request.rq_status = RQ_SCSI_BUSY;
+		SCpnt->request->rq_status = RQ_SCSI_BUSY;
 		
 		SCpnt->done = pluto_detect_done;
 		SCpnt->bufflen = 256;
@@ -174,7 +179,7 @@ int __init pluto_detect(Scsi_Host_Template *tpnt)
 	for (retry = 0; retry < 5; retry++) {
 		for (i = 0; i < fcscount; i++) {
 			if (!fcs[i].fc) break;
-			if (fcs[i].cmd.request.rq_status != RQ_SCSI_DONE) {
+			if (fcs[i].cmd.request->rq_status != RQ_SCSI_DONE) {
 				disable_irq(fcs[i].fc->irq);
 				PLND(("queuecommand %d %d\n", retry, i))
 				fcp_scsi_queuecommand (&(fcs[i].cmd), 
@@ -227,21 +232,19 @@ int __init pluto_detect(Scsi_Host_Template *tpnt)
 					continue;
 				}
 				
+				if (!try_module_get(fc->module)) {
+					kfree(ages);
+					scsi_unregister(host);
+					continue;
+				}
+
 				nplutos++;
-				
-				if (fc->module) __MOD_INC_USE_COUNT(fc->module);
 				
 				pluto = (struct pluto *)host->hostdata;
 				
 				host->max_id = inq->targets;
 				host->max_channel = inq->channels;
 				host->irq = fc->irq;
-
-#ifdef __sparc_v9__
-				host->unchecked_isa_dma = 1;
-#endif
-
-				host->select_queue_depths = pluto_select_queue_depths;
 
 				fc->channels = inq->channels + 1;
 				fc->targets = inq->targets;
@@ -279,7 +282,7 @@ int pluto_release(struct Scsi_Host *host)
 	struct pluto *pluto = (struct pluto *)host->hostdata;
 	fc_channel *fc = pluto->fc;
 
-	if (fc->module) __MOD_DEC_USE_COUNT(fc->module);
+	module_put(fc->module);
 	
 	fc->fcp_register(fc, TYPE_SCSI_FCP, 1);
 	PLND((" releasing pluto.\n"));
@@ -317,16 +320,18 @@ const char *pluto_info(struct Scsi_Host *host)
  */
 static int pluto_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cmnd *fcmd)
 {
-	PLND(("encode addr %d %d %d\n", SCpnt->channel, SCpnt->target, SCpnt->cmnd[1] & 0xe0))
+	PLND(("encode addr %d %d %d\n", SCpnt->device->channel, SCpnt->device->id, SCpnt->cmnd[1] & 0xe0))
 	/* We don't support LUNs - neither does SSA :) */
-	if (SCpnt->cmnd[1] & 0xe0) return -EINVAL;
-	if (!SCpnt->channel) {
-		if (SCpnt->target) return -EINVAL;
+	if (SCpnt->cmnd[1] & 0xe0)
+		return -EINVAL;
+	if (!SCpnt->device->channel) {
+		if (SCpnt->device->id)
+			return -EINVAL;
 		memset (addr, 0, 4 * sizeof(u16));
 	} else {
 		addr[0] = 1;
-		addr[1] = SCpnt->channel - 1;
-		addr[2] = SCpnt->target;
+		addr[1] = SCpnt->device->channel - 1;
+		addr[2] = SCpnt->device->id;
 		addr[3] = 0;
 	}
 	/* We're Point-to-Point, so target it to the default DID */
@@ -335,8 +340,23 @@ static int pluto_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cm
 	return 0;
 }
 
-static Scsi_Host_Template driver_template = PLUTO;
+static Scsi_Host_Template driver_template = {
+	.name			= "Sparc Storage Array 100/200",
+	.detect			= pluto_detect,
+	.release		= pluto_release,
+	.info			= pluto_info,
+	.queuecommand		= fcp_scsi_queuecommand,
+	.slave_configure	= pluto_slave_configure,
+	.can_queue		= PLUTO_CAN_QUEUE,
+	.this_id		= -1,
+	.sg_tablesize		= 1,
+	.cmd_per_lun		= 1,
+	.use_clustering		= ENABLE_CLUSTERING,
+	.eh_abort_handler	= fcp_scsi_abort,
+	.eh_device_reset_handler = fcp_scsi_dev_reset,
+	.eh_bus_reset_handler	= fcp_scsi_bus_reset,
+	.eh_host_reset_handler	= fcp_scsi_host_reset,
+};
 
 #include "scsi_module.c"
 
-EXPORT_NO_SYMBOLS;

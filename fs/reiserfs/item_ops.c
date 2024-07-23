@@ -2,7 +2,7 @@
  * Copyright 2000 by Hans Reiser, licensing governed by reiserfs/README
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/reiserfs_fs.h>
 
 // this contains item handlers for old item types: sd, direct,
@@ -111,18 +111,18 @@ static void sd_print_vi (struct virtual_item * vi)
 }
 
 struct item_operations stat_data_ops = {
-    sd_bytes_number,
-    sd_decrement_key,
-    sd_is_left_mergeable,
-    sd_print_item,
-    sd_check_item,
+	.bytes_number		= sd_bytes_number,
+	.decrement_key		= sd_decrement_key,
+	.is_left_mergeable	= sd_is_left_mergeable,
+	.print_item		= sd_print_item,
+	.check_item		= sd_check_item,
 
-    sd_create_vi,
-    sd_check_left,
-    sd_check_right,
-    sd_part_size,
-    sd_unit_num,
-    sd_print_vi
+	.create_vi		= sd_create_vi,
+	.check_left		= sd_check_left,
+	.check_right		= sd_check_right,
+	.part_size		= sd_part_size,
+	.unit_num		= sd_unit_num,
+	.print_vi		= sd_print_vi
 };
 
 
@@ -214,18 +214,18 @@ static void direct_print_vi (struct virtual_item * vi)
 }
 
 struct item_operations direct_ops = {
-    direct_bytes_number,
-    direct_decrement_key,
-    direct_is_left_mergeable,
-    direct_print_item,
-    direct_check_item,
+	.bytes_number		= direct_bytes_number,
+	.decrement_key		= direct_decrement_key,
+	.is_left_mergeable	= direct_is_left_mergeable,
+	.print_item		= direct_print_item,
+	.check_item		= direct_check_item,
 
-    direct_create_vi,
-    direct_check_left,
-    direct_check_right,
-    direct_part_size,
-    direct_unit_num,
-    direct_print_vi
+	.create_vi		= direct_create_vi,
+	.check_left		= direct_check_left,
+	.check_right		= direct_check_right,
+	.part_size		= direct_part_size,
+	.unit_num		= direct_unit_num,
+	.print_vi		= direct_print_vi
 };
 
 
@@ -368,18 +368,18 @@ static void indirect_print_vi (struct virtual_item * vi)
 }
 
 struct item_operations indirect_ops = {
-    indirect_bytes_number,
-    indirect_decrement_key,
-    indirect_is_left_mergeable,
-    indirect_print_item,
-    indirect_check_item,
+	.bytes_number		= indirect_bytes_number,
+	.decrement_key		= indirect_decrement_key,
+	.is_left_mergeable	= indirect_is_left_mergeable,
+	.print_item		= indirect_print_item,
+	.check_item		= indirect_check_item,
 
-    indirect_create_vi,
-    indirect_check_left,
-    indirect_check_right,
-    indirect_part_size,
-    indirect_unit_num,
-    indirect_print_vi
+	.create_vi		= indirect_create_vi,
+	.check_left		= indirect_check_left,
+	.check_right		= indirect_check_right,
+	.part_size		= indirect_part_size,
+	.unit_num		= indirect_unit_num,
+	.print_vi		= indirect_print_vi
 };
 
 
@@ -465,13 +465,6 @@ static void direntry_check_item (struct item_head * ih, char * item)
 
 
 #define DIRENTRY_VI_FIRST_DIRENTRY_ITEM 1
-
-struct direntry_uarea {
-    int flags;
-    __u16 entry_count;
-    __u16 entry_sizes[1];
-} __attribute__ ((__packed__)) ;
-
 
 /*
  * function returns old entry number in directory item in real node
@@ -669,19 +662,110 @@ static void direntry_print_vi (struct virtual_item * vi)
 }
 
 struct item_operations direntry_ops = {
-    direntry_bytes_number,
-    direntry_decrement_key,
-    direntry_is_left_mergeable,
-    direntry_print_item,
-    direntry_check_item,
+	.bytes_number		= direntry_bytes_number,
+	.decrement_key		= direntry_decrement_key,
+	.is_left_mergeable	= direntry_is_left_mergeable,
+	.print_item		= direntry_print_item,
+	.check_item		= direntry_check_item,
 
-    direntry_create_vi,
-    direntry_check_left,
-    direntry_check_right,
-    direntry_part_size,
-    direntry_unit_num,
-    direntry_print_vi
+	.create_vi		= direntry_create_vi,
+	.check_left		= direntry_check_left,
+	.check_right		= direntry_check_right,
+	.part_size		= direntry_part_size,
+	.unit_num		= direntry_unit_num,
+	.print_vi		= direntry_print_vi
 };
+
+
+//////////////////////////////////////////////////////////////////////////////
+// Error catching functions to catch errors caused by incorrect item types.
+//
+static int errcatch_bytes_number (struct item_head * ih, int block_size)
+{
+    reiserfs_warning ("green-16001: Invalid item type observed, run fsck ASAP\n");
+    return 0;
+}
+
+static void errcatch_decrement_key (struct cpu_key * key)
+{
+    reiserfs_warning ("green-16002: Invalid item type observed, run fsck ASAP\n");
+}
+
+
+static int errcatch_is_left_mergeable (struct key * key, unsigned long bsize)
+{
+    reiserfs_warning ("green-16003: Invalid item type observed, run fsck ASAP\n");
+    return 0;
+}
+
+
+static void errcatch_print_item (struct item_head * ih, char * item)
+{
+    reiserfs_warning ("green-16004: Invalid item type observed, run fsck ASAP\n");
+}
+
+
+static void errcatch_check_item (struct item_head * ih, char * item)
+{
+    reiserfs_warning ("green-16005: Invalid item type observed, run fsck ASAP\n");
+}
+
+static int errcatch_create_vi (struct virtual_node * vn,
+			       struct virtual_item * vi, 
+			       int is_affected, 
+			       int insert_size)
+{
+    reiserfs_warning ("green-16006: Invalid item type observed, run fsck ASAP\n");
+    return 0;	// We might return -1 here as well, but it won't help as create_virtual_node() from where
+		// this operation is called from is of return type void.
+}
+
+static int errcatch_check_left (struct virtual_item * vi, int free,
+				int start_skip, int end_skip)
+{
+    reiserfs_warning ("green-16007: Invalid item type observed, run fsck ASAP\n");
+    return -1;
+}
+
+
+static int errcatch_check_right (struct virtual_item * vi, int free)
+{
+    reiserfs_warning ("green-16008: Invalid item type observed, run fsck ASAP\n");
+    return -1;
+}
+
+static int errcatch_part_size (struct virtual_item * vi, int first, int count)
+{
+    reiserfs_warning ("green-16009: Invalid item type observed, run fsck ASAP\n");
+    return 0;
+}
+
+static int errcatch_unit_num (struct virtual_item * vi)
+{
+    reiserfs_warning ("green-16010: Invalid item type observed, run fsck ASAP\n");
+    return 0;
+}
+
+static void errcatch_print_vi (struct virtual_item * vi)
+{
+    reiserfs_warning ("green-16011: Invalid item type observed, run fsck ASAP\n");
+}
+
+struct item_operations errcatch_ops = {
+    errcatch_bytes_number,
+    errcatch_decrement_key,
+    errcatch_is_left_mergeable,
+    errcatch_print_item,
+    errcatch_check_item,
+
+    errcatch_create_vi,
+    errcatch_check_left,
+    errcatch_check_right,
+    errcatch_part_size,
+    errcatch_unit_num,
+    errcatch_print_vi
+};
+
 
 
 //////////////////////////////////////////////////////////////////////////////
@@ -691,11 +775,13 @@ struct item_operations direntry_ops = {
   do not compile
 #endif
 
-struct item_operations * item_ops [4] = {
+struct item_operations * item_ops [TYPE_ANY + 1] = {
   &stat_data_ops,
   &indirect_ops,
   &direct_ops,
-  &direntry_ops
+  &direntry_ops,
+  NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+  &errcatch_ops		/* This is to catch errors with invalid type (15th entry for TYPE_ANY) */
 };
 
 

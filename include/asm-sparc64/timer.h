@@ -7,6 +7,8 @@
 #ifndef _SPARC64_TIMER_H
 #define _SPARC64_TIMER_H
 
+#include <linux/types.h>
+
 /* How timers work:
  *
  * On uniprocessors we just use counter zero for the system wide
@@ -50,9 +52,27 @@ struct sun5_timer {
  */
 #define SUN5_HZ_TO_LIMIT(__hz)  (1000000/(__hz))
 
+struct sparc64_tick_ops {
+	void (*init_tick)(unsigned long);
+	unsigned long (*get_tick)(void);
+	unsigned long (*get_compare)(void);
+	unsigned long (*add_tick)(unsigned long, unsigned long);
+	unsigned long (*add_compare)(unsigned long);
+	unsigned long softint_mask;
+};
+
+extern struct sparc64_tick_ops *tick_ops;
+
 #ifdef CONFIG_SMP
 extern unsigned long timer_tick_offset;
+struct pt_regs;
 extern void timer_tick_interrupt(struct pt_regs *);
 #endif
+
+#ifndef CONFIG_SMP
+extern unsigned long up_clock_tick;
+#endif
+
+extern unsigned long sparc64_get_clock_tick(unsigned int cpu);
 
 #endif /* _SPARC64_TIMER_H */

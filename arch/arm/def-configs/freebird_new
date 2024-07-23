@@ -131,7 +131,7 @@ CONFIG_BINFMT_ELF=y
 CONFIG_PM=y
 CONFIG_APM=y
 # CONFIG_ARTHUR is not set
-CONFIG_CMDLINE="noinitrd console=ttySA0 init=/linuxrc root=1f04 mem=32m"
+CONFIG_CMDLINE="noinitrd console=ttySA0 init=/linuxrc root=/dev/mtdblock4 mem=32m"
 # CONFIG_PFS168_CMDLINE is not set
 # CONFIG_LEDS is not set
 CONFIG_ALIGNMENT_TRAP=y
@@ -378,15 +378,6 @@ CONFIG_BLK_DEV_IDE=m
 # CONFIG_BLK_DEV_HD is not set
 CONFIG_BLK_DEV_IDEDISK=m
 # CONFIG_IDEDISK_MULTI_MODE is not set
-# CONFIG_BLK_DEV_IDEDISK_VENDOR is not set
-# CONFIG_BLK_DEV_IDEDISK_FUJITSU is not set
-# CONFIG_BLK_DEV_IDEDISK_IBM is not set
-# CONFIG_BLK_DEV_IDEDISK_MAXTOR is not set
-# CONFIG_BLK_DEV_IDEDISK_QUANTUM is not set
-# CONFIG_BLK_DEV_IDEDISK_SEAGATE is not set
-# CONFIG_BLK_DEV_IDEDISK_WD is not set
-# CONFIG_BLK_DEV_COMMERIAL is not set
-# CONFIG_BLK_DEV_TIVO is not set
 CONFIG_BLK_DEV_IDECS=m
 # CONFIG_BLK_DEV_IDECD is not set
 # CONFIG_BLK_DEV_IDETAPE is not set
@@ -397,7 +388,6 @@ CONFIG_BLK_DEV_IDECS=m
 # CONFIG_BLK_DEV_ISAPNP is not set
 # CONFIG_IDE_CHIPSETS is not set
 # CONFIG_IDEDMA_AUTO is not set
-# CONFIG_DMA_NONPCI is not set
 # CONFIG_BLK_DEV_IDE_MODES is not set
 
 #
@@ -521,6 +511,7 @@ CONFIG_RAMFS=y
 # CONFIG_JOLIET is not set
 # CONFIG_MINIX_FS is not set
 # CONFIG_NTFS_FS is not set
+# CONFIG_NTFS_DEBUG is not set
 # CONFIG_NTFS_RW is not set
 # CONFIG_HPFS_FS is not set
 CONFIG_PROC_FS=y
@@ -634,7 +625,7 @@ CONFIG_SOUND_UDA1341=y
 #
 # Kernel hacking
 #
-# CONFIG_NO_FRAME_POINTER is not set
+CONFIG_FRAME_POINTER=y
 CONFIG_DEBUG_ERRORS=y
 # CONFIG_DEBUG_USER is not set
 # CONFIG_DEBUG_INFO is not set

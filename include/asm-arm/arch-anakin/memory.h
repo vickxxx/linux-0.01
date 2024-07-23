@@ -14,9 +14,9 @@
 #ifndef __ASM_ARCH_MEMORY_H
 #define __ASM_ARCH_MEMORY_H
 
-#define TASK_SIZE		(3u * 1024 * 1024 * 1024)
+#define TASK_SIZE		(0xbf000000)
 #define TASK_SIZE_26		(64u * 1024 * 1024)
-#define TASK_UNMAPPED_BASE	(1u * 1024 * 1024 * 1024)
+#define TASK_UNMAPPED_BASE	(0x40000000)
 
 #define PAGE_OFFSET		0xc0000000
 #define PHYS_OFFSET		0x20000000
@@ -30,7 +30,5 @@
 #define __phys_to_virt__is_a_macro
 #define __virt_to_bus__is_a_macro
 #define __bus_to_virt__is_a_macro
-
-#define PHYS_TO_NID(addr)	(0)
 
 #endif

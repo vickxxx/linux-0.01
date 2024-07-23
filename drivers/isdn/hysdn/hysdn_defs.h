@@ -17,7 +17,7 @@
 #include <linux/config.h>
 #include <linux/hysdn_if.h>
 #include <linux/interrupt.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/skbuff.h>
 
 /****************************/
@@ -32,9 +32,9 @@
 
 #ifdef CONFIG_HYSDN_CAPI
 #include <linux/capi.h>
-#include "../avmb1/capicmd.h"
-#include "../avmb1/capiutil.h"
-#include "../avmb1/capilli.h"
+#include <linux/isdn/capicmd.h>
+#include <linux/isdn/capiutil.h>
+#include <linux/isdn/capilli.h>
 
 /***************************/
 /*   CAPI-Profile values.  */
@@ -173,7 +173,7 @@ typedef struct HYSDN_CARD {
 	void (*set_errlog_state) (struct HYSDN_CARD *, int);
 
 	/* interrupt handler + interrupt synchronisation */
-	struct tq_struct irq_queue;	/* interrupt task queue */
+	struct work_struct irq_queue;	/* interrupt task queue */
 	uchar volatile irq_enabled;	/* interrupt enabled if != 0 */
 	uchar volatile hw_lock;	/* hardware is currently locked -> no access */
 
@@ -208,11 +208,13 @@ typedef struct HYSDN_CARD {
 		char infobuf[128];	/* for function procinfo */
 		
 		struct HYSDN_CARD  *card;
-		struct capi_ctr *capi_ctrl;
+		struct capi_ctr capi_ctrl;
 		struct sk_buff *skbs[HYSDN_MAX_CAPI_SKB];
 		int in_idx, out_idx;	/* indexes to buffer ring */
 		int sk_count;		/* number of buffers currently in ring */
 		struct sk_buff *tx_skb;	/* buffer for tx operation */
+	  
+		struct list_head ncci_head;
 	} *hyctrlinfo;
 #endif /* CONFIG_HYSDN_CAPI */
 } hysdn_card;
@@ -274,7 +276,6 @@ extern void hysdn_rx_netpkt(hysdn_card *, uchar *, word);	/* rxed packet from ne
 
 #ifdef CONFIG_HYSDN_CAPI
 extern unsigned int hycapi_enable; 
-extern struct capi_driver_interface *hy_di;
 extern int hycapi_capi_create(hysdn_card *);	/* create a new capi device */
 extern int hycapi_capi_release(hysdn_card *);	/* delete the device */
 extern int hycapi_capi_stop(hysdn_card *card);   /* suspend */
@@ -284,7 +285,7 @@ extern void hycapi_remove_ctr(struct capi_ctr *);
 extern void hycapi_register_appl(struct capi_ctr *, __u16 appl,
 				 capi_register_params *);
 extern void hycapi_release_appl(struct capi_ctr *, __u16 appl);
-extern void hycapi_send_message(struct capi_ctr *, struct sk_buff *skb);
+extern u16  hycapi_send_message(struct capi_ctr *, struct sk_buff *skb);
 extern char *hycapi_procinfo(struct capi_ctr *);
 extern int hycapi_read_proc(char *page, char **start, off_t off,
 			    int count, int *eof, struct capi_ctr *card);

@@ -14,7 +14,7 @@
 #define _LINUX_CAPABILITY_H
 
 #include <linux/types.h>
-#include <linux/fs.h>
+#include <linux/compiler.h>
 
 /* User-level do most of the mapping between kernel and user
    capabilities based on the version tag given by the kernel. The
@@ -32,15 +32,19 @@
 typedef struct __user_cap_header_struct {
 	__u32 version;
 	int pid;
-} *cap_user_header_t;
+} __user *cap_user_header_t;
  
 typedef struct __user_cap_data_struct {
         __u32 effective;
         __u32 permitted;
         __u32 inheritable;
-} *cap_user_data_t;
+} __user *cap_user_data_t;
   
 #ifdef __KERNEL__
+
+#include <linux/spinlock.h>
+
+extern spinlock_t task_capability_lock;
 
 /* #define STRICT_CAP_T_TYPECHECKS */
 
@@ -243,6 +247,7 @@ typedef __u32 kernel_cap_t;
 /* Allow use of FIFO and round-robin (realtime) scheduling on own
    processes and setting the scheduling algorithm used by another
    process. */
+/* Allow setting cpu affinity on other processes */
 
 #define CAP_SYS_NICE         23
 

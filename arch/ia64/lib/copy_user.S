@@ -237,15 +237,17 @@ GLOBAL_ENTRY(__copy_user)
 .copy_user_bit##rshift:						\
 1:								\
 	EX(.failure_out,(EPI) st8 [dst1]=tmp,8);		\
-(EPI_1) shrp tmp=val1[PIPE_DEPTH-3],val1[PIPE_DEPTH-2],rshift;	\
-	EX(3f,(p16) ld8 val1[0]=[src1],8);			\
+(EPI_1) shrp tmp=val1[PIPE_DEPTH-2],val1[PIPE_DEPTH-1],rshift;	\
+	EX(3f,(p16) ld8 val1[1]=[src1],8);			\
+(p16)	mov val1[0]=r0;						\
 	br.ctop.dptk 1b;					\
 	;;							\
 	br.cond.sptk.many .diff_align_do_tail;			\
 2:								\
 (EPI)	st8 [dst1]=tmp,8;					\
-(EPI_1)	shrp tmp=val1[PIPE_DEPTH-3],val1[PIPE_DEPTH-2],rshift;	\
+(EPI_1)	shrp tmp=val1[PIPE_DEPTH-2],val1[PIPE_DEPTH-1],rshift;	\
 3:								\
+(p16)	mov val1[1]=r0;						\
 (p16)	mov val1[0]=r0;						\
 	br.ctop.dptk 2b;					\
 	;;							\
@@ -314,7 +316,7 @@ GLOBAL_ENTRY(__copy_user)
 	// Beginning of long mempcy (i.e. > 16 bytes)
 	//
 .long_copy_user:
-	tbit.nz p6,p7=src1,0	// odd alignement
+	tbit.nz p6,p7=src1,0	// odd alignment
 	and tmp=7,tmp
 	;;
 	cmp.eq p10,p8=r0,tmp

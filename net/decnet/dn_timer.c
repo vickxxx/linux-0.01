@@ -23,6 +23,7 @@
 #include <linux/spinlock.h>
 #include <net/sock.h>
 #include <asm/atomic.h>
+#include <net/flow.h>
 #include <net/dn.h>
 
 /*
@@ -37,16 +38,16 @@ static void dn_slow_timer(unsigned long arg);
 
 void dn_start_slow_timer(struct sock *sk)
 {
-	sk->timer.expires = jiffies + SLOW_INTERVAL;
-	sk->timer.function = dn_slow_timer;
-	sk->timer.data = (unsigned long)sk;
+	sk->sk_timer.expires	= jiffies + SLOW_INTERVAL;
+	sk->sk_timer.function	= dn_slow_timer;
+	sk->sk_timer.data	= (unsigned long)sk;
 
-	add_timer(&sk->timer);
+	add_timer(&sk->sk_timer);
 }
 
 void dn_stop_slow_timer(struct sock *sk)
 {
-	del_timer(&sk->timer);
+	del_timer(&sk->sk_timer);
 }
 
 static void dn_slow_timer(unsigned long arg)
@@ -57,9 +58,9 @@ static void dn_slow_timer(unsigned long arg)
 	sock_hold(sk);
 	bh_lock_sock(sk);
 
-	if (sk->lock.users != 0) {
-		sk->timer.expires = jiffies + HZ / 10;
-		add_timer(&sk->timer);
+	if (sock_owned_by_user(sk)) {
+		sk->sk_timer.expires = jiffies + HZ / 10;
+		add_timer(&sk->sk_timer);
 		goto out;
 	}
 
@@ -101,9 +102,9 @@ static void dn_slow_timer(unsigned long arg)
 			scp->keepalive_fxn(sk);
 	}
 
-	sk->timer.expires = jiffies + SLOW_INTERVAL;
+	sk->sk_timer.expires = jiffies + SLOW_INTERVAL;
 
-	add_timer(&sk->timer);
+	add_timer(&sk->sk_timer);
 out:
 	bh_unlock_sock(sk);
 	sock_put(sk);
@@ -115,7 +116,7 @@ static void dn_fast_timer(unsigned long arg)
 	struct dn_scp *scp = DN_SK(sk);
 
 	bh_lock_sock(sk);
-	if (sk->lock.users != 0) {
+	if (sock_owned_by_user(sk)) {
 		scp->delack_timer.expires = jiffies + HZ / 20;
 		add_timer(&scp->delack_timer);
 		goto out;

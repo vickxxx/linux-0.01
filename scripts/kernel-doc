@@ -154,6 +154,7 @@ use strict;
 # '%CONST' - name of a constant.
 
 my $errors = 0;
+my $warnings = 0;
 
 # match expressions used to find embedded type information
 my $type_constant = '\%([-_\w]+)';
@@ -646,6 +647,7 @@ sub output_struct_sgml(%) {
     print "  <programlisting>\n";
     print $args{'type'}." ".$args{'struct'}." {\n";
     foreach $parameter (@{$args{'parameterlist'}}) {
+	defined($args{'parameterdescs'}{$parameter}) || next;
         ($args{'parameterdescs'}{$parameter} ne $undescribed) || next;
 	$type = $args{'parametertypes'}{$parameter};
 	if ($type =~ m/([^\(]*\(\*)\s*\)\s*\(([^\)]*)\)/) {
@@ -666,6 +668,7 @@ sub output_struct_sgml(%) {
 
     print "  <variablelist>\n";
     foreach $parameter (@{$args{'parameterlist'}}) {
+      defined($args{'parameterdescs'}{$parameter}) || next;
       ($args{'parameterdescs'}{$parameter} ne $undescribed) || next;
       print "    <varlistentry>";
       print "      <term>$parameter</term>\n";
@@ -878,7 +881,7 @@ sub output_function_man(%) {
     my ($parameter, $section);
     my $count;
 
-    print ".TH \"$args{'function'}\" 9 \"$args{'function'}\" \"25 May 1998\" \"Kernel Hacker's Manual\" LINUX\n";
+    print ".TH \"$args{'function'}\" 9 \"$args{'function'}\" \"$man_date\" \"Kernel Hacker's Manual\" LINUX\n";
 
     print ".SH NAME\n";
     print $args{'function'}." \\- ".$args{'purpose'}."\n";
@@ -1350,7 +1353,9 @@ sub create_parameterlist($$$) {
 		    "or member '$param' not " .
 		    "described in '$declaration_name'\n";
 	    }
-	    ++$errors;
+	    print STDERR "Warning(${file}:$.):".
+	                 " No description found for parameter '$param'\n";
+	    ++$warnings;
         }
 
 	push @parameterlist, $param;
@@ -1453,6 +1458,12 @@ if ($filelist) {
 foreach (@ARGV) {
     chomp;
     process_file($_);
+}
+if ($verbose && $errors) {
+  print STDERR "$errors errors\n";
+}
+if ($verbose && $warnings) {
+  print STDERR "$warnings warnings\n";
 }
 
 exit($errors);
@@ -1578,7 +1589,7 @@ sub process_file($) {
 	    } else {
 		print STDERR "Warning(${file}:$.): Cannot understand $_ on line $.",
 		" - I thought it was a doc line\n";
-		++$errors;
+		++$warnings;
 		$state = 0;
 	    }
 	} elsif ($state == 2) {	# look for head: lines, and include content
@@ -1631,7 +1642,7 @@ sub process_file($) {
 	    } else {
 		# i dont know - bad line?  ignore.
 		print STDERR "Warning(${file}:$.): bad line: $_"; 
-		++$errors;
+		++$warnings;
 	    }
 	} elsif ($state == 3) {	# scanning for function { (end of prototype)
 	    if ($decl_type eq 'function') {

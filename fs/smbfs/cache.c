@@ -9,13 +9,14 @@
  * Please add a note about your changes to smbfs in the ChangeLog file.
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/errno.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/dirent.h>
 #include <linux/smb_fs.h>
 #include <linux/pagemap.h>
+#include <linux/net.h>
 
 #include <asm/page.h>
 
@@ -37,7 +38,7 @@ smb_invalid_dir_cache(struct inode * dir)
 	if (!page)
 		goto out;
 
-	if (!Page_Uptodate(page))
+	if (!PageUptodate(page))
 		goto out_unlock;
 
 	cache = kmap(page);
@@ -46,7 +47,7 @@ smb_invalid_dir_cache(struct inode * dir)
 	kunmap(page);
 	SetPageUptodate(page);
 out_unlock:
-	UnlockPage(page);
+	unlock_page(page);
 	page_cache_release(page);
 out:
 	return;
@@ -84,7 +85,7 @@ smb_dget_fpos(struct dentry *dentry, struct dentry *parent, unsigned long fpos)
 	struct list_head *next;
 
 	if (d_validate(dent, parent)) {
-		if (dent->d_name.len <= SMB_MAXPATHLEN &&
+		if (dent->d_name.len <= SMB_MAXNAMELEN &&
 		    (unsigned long)dent->d_fsdata == fpos) {
 			if (!dent->d_inode) {
 				dput(dent);
@@ -172,7 +173,7 @@ smb_fill_cache(struct file *filp, void *dirent, filldir_t filldir,
 		if (ctl.page) {
 			kunmap(ctl.page);
 			SetPageUptodate(ctl.page);
-			UnlockPage(ctl.page);
+			unlock_page(ctl.page);
 			page_cache_release(ctl.page);
 		}
 		ctl.cache = NULL;

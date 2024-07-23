@@ -17,17 +17,20 @@
 #include <linux/spinlock.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
+#include <linux/cache.h>
+#include <linux/jiffies.h>
 
 #include <asm/head.h>
 #include <asm/ptrace.h>
 #include <asm/atomic.h>
+#include <asm/tlbflush.h>
+#include <asm/mmu_context.h>
 
 #include <asm/irq.h>
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
 #include <asm/hardirq.h>
-#include <asm/softirq.h>
 #include <asm/uaccess.h>
 #include <asm/timer.h>
 #include <asm/starfire.h>
@@ -37,38 +40,18 @@
 
 extern int linux_num_cpus;
 extern void calibrate_delay(void);
-extern unsigned prom_cpu_nodes[];
 
-struct cpuinfo_sparc cpu_data[NR_CPUS]  __attribute__ ((aligned (64)));
-
-volatile int __cpu_number_map[NR_CPUS]  __attribute__ ((aligned (64)));
-volatile int __cpu_logical_map[NR_CPUS] __attribute__ ((aligned (64)));
+cpuinfo_sparc cpu_data[NR_CPUS];
 
 /* Please don't make this stuff initdata!!!  --DaveM */
-static unsigned char boot_cpu_id = 0;
-static int smp_activated = 0;
+static unsigned char boot_cpu_id;
 
-/* Kernel spinlock */
-spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
-
-volatile int smp_processors_ready = 0;
-unsigned long cpu_present_map = 0;
-int smp_num_cpus = 1;
-int smp_threads_ready = 0;
-
-void __init smp_setup(char *str, int *ints)
-{
-	/* XXX implement me XXX */
-}
-
-static int max_cpus = NR_CPUS;
-static int __init maxcpus(char *str)
-{
-	get_option(&str, &max_cpus);
-	return 1;
-}
-
-__setup("maxcpus=", maxcpus);
+atomic_t sparc64_num_cpus_online = ATOMIC_INIT(0);
+unsigned long cpu_online_map = 0;
+atomic_t sparc64_num_cpus_possible = ATOMIC_INIT(0);
+unsigned long phys_cpu_present_map = 0;
+static unsigned long smp_commenced_mask;
+static unsigned long cpu_callout_map;
 
 void smp_info(struct seq_file *m)
 {
@@ -76,7 +59,7 @@ void smp_info(struct seq_file *m)
 	
 	seq_printf(m, "State:\n");
 	for (i = 0; i < NR_CPUS; i++) {
-		if (cpu_present_map & (1UL << i))
+		if (cpu_online(i))
 			seq_printf(m,
 				   "CPU%d:\t\tonline\n", i);
 	}
@@ -87,7 +70,7 @@ void smp_bogo(struct seq_file *m)
 	int i;
 	
 	for (i = 0; i < NR_CPUS; i++)
-		if (cpu_present_map & (1UL << i))
+		if (cpu_online(i))
 			seq_printf(m,
 				   "Cpu%dBogo\t: %lu.%02lu\n"
 				   "Cpu%dClkTck\t: %016lx\n",
@@ -122,10 +105,6 @@ void __init smp_store_cpu_info(int id)
 		cpu_data[id].irq_worklists[i] = 0;
 }
 
-void __init smp_commence(void)
-{
-}
-
 static void smp_setup_percpu_timer(void);
 
 static volatile unsigned long callin_flag = 0;
@@ -136,7 +115,15 @@ extern void cpu_probe(void);
 void __init smp_callin(void)
 {
 	int cpuid = hard_smp_processor_id();
-	unsigned long pstate;
+	extern int bigkernel;
+	extern unsigned long kern_locked_tte_data;
+
+	if (bigkernel) {
+		prom_dtlb_load(sparc64_highest_locked_tlbent()-1, 
+			kern_locked_tte_data + 0x400000, KERNBASE + 0x400000);
+		prom_itlb_load(sparc64_highest_locked_tlbent()-1, 
+			kern_locked_tte_data + 0x400000, KERNBASE + 0x400000);
+	}
 
 	inherit_locked_prom_mappings(0);
 
@@ -145,53 +132,9 @@ void __init smp_callin(void)
 
 	cpu_probe();
 
-	/* Guarentee that the following sequences execute
-	 * uninterrupted.
-	 */
-	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
-			     "wrpr	%0, %1, %%pstate"
-			     : "=r" (pstate)
-			     : "i" (PSTATE_IE));
-
-	/* Set things up so user can access tick register for profiling
-	 * purposes.  Also workaround BB_ERRATA_1 by doing a dummy
-	 * read back of %tick after writing it.
-	 */
-	__asm__ __volatile__("
-	sethi	%%hi(0x80000000), %%g1
-	ba,pt	%%xcc, 1f
-	 sllx	%%g1, 32, %%g1
-	.align	64
-1:	rd	%%tick, %%g2
-	add	%%g2, 6, %%g2
-	andn	%%g2, %%g1, %%g2
-	wrpr	%%g2, 0, %%tick
-	rdpr	%%tick, %%g0"
-	: /* no outputs */
-	: /* no inputs */
-	: "g1", "g2");
-
-	if (SPARC64_USE_STICK) {
-		/* Let the user get at STICK too. */
-		__asm__ __volatile__("
-			sethi	%%hi(0x80000000), %%g1
-			sllx	%%g1, 32, %%g1
-			rd	%%asr24, %%g2
-			andn	%%g2, %%g1, %%g2
-			wr	%%g2, 0, %%asr24"
-		: /* no outputs */
-		: /* no inputs */
-		: "g1", "g2");
-	}
-
-	/* Restore PSTATE_IE. */
-	__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
-			     : /* no outputs */
-			     : "r" (pstate));
-
 	smp_setup_percpu_timer();
 
-	__sti();
+	local_irq_enable();
 
 	calibrate_delay();
 	smp_store_cpu_info(cpuid);
@@ -202,29 +145,17 @@ void __init smp_callin(void)
 	/* Clear this or we will die instantly when we
 	 * schedule back to this idler...
 	 */
-	current->thread.flags &= ~(SPARC_FLAG_NEWCHILD);
+	clear_thread_flag(TIF_NEWCHILD);
 
 	/* Attach to the address space of init_task. */
 	atomic_inc(&init_mm.mm_count);
 	current->active_mm = &init_mm;
 
-	while (!smp_processors_ready)
+	while (!test_bit(cpuid, &smp_commenced_mask))
 		membar("#LoadLoad");
-}
 
-extern int cpu_idle(void);
-extern void init_IRQ(void);
-
-void initialize_secondary(void)
-{
-}
-
-int start_secondary(void *unused)
-{
-	trap_init();
-	init_IRQ();
-	smp_callin();
-	return cpu_idle();
+	set_bit(cpuid, &cpu_online_map);
+	atomic_inc(&sparc64_num_cpus_online);
 }
 
 void cpu_panic(void)
@@ -233,7 +164,145 @@ void cpu_panic(void)
 	panic("SMP bolixed\n");
 }
 
-extern struct prom_cpuinfo linux_cpus[64];
+static unsigned long current_tick_offset;
+
+/* This tick register synchronization scheme is taken entirely from
+ * the ia64 port, see arch/ia64/kernel/smpboot.c for details and credit.
+ *
+ * The only change I've made is to rework it so that the master
+ * initiates the synchonization instead of the slave. -DaveM
+ */
+
+#define MASTER	0
+#define SLAVE	(SMP_CACHE_BYTES/sizeof(unsigned long))
+
+#define NUM_ROUNDS	64	/* magic value */
+#define NUM_ITERS	5	/* likewise */
+
+static spinlock_t itc_sync_lock = SPIN_LOCK_UNLOCKED;
+static unsigned long go[SLAVE + 1];
+
+#define DEBUG_TICK_SYNC	0
+
+static inline long get_delta (long *rt, long *master)
+{
+	unsigned long best_t0 = 0, best_t1 = ~0UL, best_tm = 0;
+	unsigned long tcenter, t0, t1, tm;
+	unsigned long i;
+
+	for (i = 0; i < NUM_ITERS; i++) {
+		t0 = tick_ops->get_tick();
+		go[MASTER] = 1;
+		membar("#StoreLoad");
+		while (!(tm = go[SLAVE]))
+			membar("#LoadLoad");
+		go[SLAVE] = 0;
+		membar("#StoreStore");
+		t1 = tick_ops->get_tick();
+
+		if (t1 - t0 < best_t1 - best_t0)
+			best_t0 = t0, best_t1 = t1, best_tm = tm;
+	}
+
+	*rt = best_t1 - best_t0;
+	*master = best_tm - best_t0;
+
+	/* average best_t0 and best_t1 without overflow: */
+	tcenter = (best_t0/2 + best_t1/2);
+	if (best_t0 % 2 + best_t1 % 2 == 2)
+		tcenter++;
+	return tcenter - best_tm;
+}
+
+void smp_synchronize_tick_client(void)
+{
+	long i, delta, adj, adjust_latency = 0, done = 0;
+	unsigned long flags, rt, master_time_stamp, bound;
+#if DEBUG_TICK_SYNC
+	struct {
+		long rt;	/* roundtrip time */
+		long master;	/* master's timestamp */
+		long diff;	/* difference between midpoint and master's timestamp */
+		long lat;	/* estimate of itc adjustment latency */
+	} t[NUM_ROUNDS];
+#endif
+
+	go[MASTER] = 1;
+
+	while (go[MASTER])
+		membar("#LoadLoad");
+
+	local_irq_save(flags);
+	{
+		for (i = 0; i < NUM_ROUNDS; i++) {
+			delta = get_delta(&rt, &master_time_stamp);
+			if (delta == 0) {
+				done = 1;	/* let's lock on to this... */
+				bound = rt;
+			}
+
+			if (!done) {
+				if (i > 0) {
+					adjust_latency += -delta;
+					adj = -delta + adjust_latency/4;
+				} else
+					adj = -delta;
+
+				tick_ops->add_tick(adj, current_tick_offset);
+			}
+#if DEBUG_TICK_SYNC
+			t[i].rt = rt;
+			t[i].master = master_time_stamp;
+			t[i].diff = delta;
+			t[i].lat = adjust_latency/4;
+#endif
+		}
+	}
+	local_irq_restore(flags);
+
+#if DEBUG_TICK_SYNC
+	for (i = 0; i < NUM_ROUNDS; i++)
+		printk("rt=%5ld master=%5ld diff=%5ld adjlat=%5ld\n",
+		       t[i].rt, t[i].master, t[i].diff, t[i].lat);
+#endif
+
+	printk(KERN_INFO "CPU %d: synchronized TICK with master CPU (last diff %ld cycles,"
+	       "maxerr %lu cycles)\n", smp_processor_id(), delta, rt);
+}
+
+static void smp_start_sync_tick_client(int cpu);
+
+static void smp_synchronize_one_tick(int cpu)
+{
+	unsigned long flags, i;
+
+	go[MASTER] = 0;
+
+	smp_start_sync_tick_client(cpu);
+
+	/* wait for client to be ready */
+	while (!go[MASTER])
+		membar("#LoadLoad");
+
+	/* now let the client proceed into his loop */
+	go[MASTER] = 0;
+	membar("#StoreLoad");
+
+	spin_lock_irqsave(&itc_sync_lock, flags);
+	{
+		for (i = 0; i < NUM_ROUNDS*NUM_ITERS; i++) {
+			while (!go[MASTER])
+				membar("#LoadLoad");
+			go[MASTER] = 0;
+			membar("#StoreStore");
+			go[SLAVE] = tick_ops->get_tick();
+			membar("#StoreLoad");
+		}
+	}
+	spin_unlock_irqrestore(&itc_sync_lock, flags);
+}
+
+extern struct prom_cpuinfo linux_cpus[NR_CPUS];
 
 extern unsigned long sparc64_cpu_startup;
 
@@ -241,94 +310,48 @@ extern unsigned long sparc64_cpu_startup;
  * 32-bits (I think) so to be safe we have it read the pointer
  * contained here so we work on >4GB machines. -DaveM
  */
-static struct task_struct *cpu_new_task = NULL;
+static struct thread_info *cpu_new_thread = NULL;
 
-void __init smp_boot_cpus(void)
+static int __devinit smp_boot_one_cpu(unsigned int cpu)
 {
-	int cpucount = 0, i;
+	unsigned long entry =
+		(unsigned long)(&sparc64_cpu_startup);
+	unsigned long cookie =
+		(unsigned long)(&cpu_new_thread);
+	struct task_struct *p;
+	int timeout, no, ret;
 
-	printk("Entering UltraSMPenguin Mode...\n");
-	__sti();
-	smp_store_cpu_info(boot_cpu_id);
-	init_idle();
+	kernel_thread(NULL, NULL, CLONE_IDLETASK);
 
-	if (linux_num_cpus == 1)
-		return;
+	p = prev_task(&init_task);
 
-	for (i = 0; i < NR_CPUS; i++) {
-		if (i == boot_cpu_id)
-			continue;
+	init_idle(p, cpu);
 
-		if ((cpucount + 1) == max_cpus)
+	unhash_process(p);
+
+	callin_flag = 0;
+	for (no = 0; no < linux_num_cpus; no++)
+		if (linux_cpus[no].mid == cpu)
 			break;
-		if (cpu_present_map & (1UL << i)) {
-			unsigned long entry = (unsigned long)(&sparc64_cpu_startup);
-			unsigned long cookie = (unsigned long)(&cpu_new_task);
-			struct task_struct *p;
-			int timeout;
-			int no;
-
-			prom_printf("Starting CPU %d... ", i);
-			kernel_thread(start_secondary, NULL, CLONE_PID);
-			cpucount++;
-
-			p = init_task.prev_task;
-			init_tasks[cpucount] = p;
-
-			p->processor = i;
-			p->cpus_runnable = 1 << i; /* we schedule the first task manually */
-
-			del_from_runqueue(p);
-			unhash_process(p);
-
-			callin_flag = 0;
-			for (no = 0; no < linux_num_cpus; no++)
-				if (linux_cpus[no].mid == i)
-					break;
-			cpu_new_task = p;
-			prom_startcpu(linux_cpus[no].prom_node,
-				      entry, cookie);
-			for (timeout = 0; timeout < 5000000; timeout++) {
-				if (callin_flag)
-					break;
-				udelay(100);
-			}
-			if (callin_flag) {
-				__cpu_number_map[i] = cpucount;
-				__cpu_logical_map[cpucount] = i;
-				prom_cpu_nodes[i] = linux_cpus[no].prom_node;
-				prom_printf("OK\n");
-			} else {
-				cpucount--;
-				printk("Processor %d is stuck.\n", i);
-				prom_printf("FAILED\n");
-			}
-		}
-		if (!callin_flag) {
-			cpu_present_map &= ~(1UL << i);
-			__cpu_number_map[i] = -1;
-		}
+	cpu_new_thread = p->thread_info;
+	set_bit(cpu, &cpu_callout_map);
+	prom_startcpu(linux_cpus[no].prom_node, entry, cookie);
+	for (timeout = 0; timeout < 5000000; timeout++) {
+		if (callin_flag)
+			break;
+		udelay(100);
 	}
-	cpu_new_task = NULL;
-	if (cpucount == 0) {
-		printk("Error: only one processor found.\n");
-		cpu_present_map = (1UL << smp_processor_id());
+	if (callin_flag) {
+		prom_cpu_nodes[cpu] = linux_cpus[no].prom_node;
+		ret = 0;
 	} else {
-		unsigned long bogosum = 0;
-
-		for (i = 0; i < NR_CPUS; i++) {
-			if (cpu_present_map & (1UL << i))
-				bogosum += cpu_data[i].udelay_val;
-		}
-		printk("Total of %d processors activated (%lu.%02lu BogoMIPS).\n",
-		       cpucount + 1,
-		       bogosum/(500000/HZ),
-		       (bogosum/(5000/HZ))%100);
-		smp_activated = 1;
-		smp_num_cpus = cpucount + 1;
+		printk("Processor %d is stuck.\n", cpu);
+		clear_bit(cpu, &cpu_callout_map);
+		ret = -ENODEV;
 	}
-	smp_processors_ready = 1;
-	membar("#StoreStore | #StoreLoad");
+	cpu_new_thread = NULL;
+
+	return ret;
 }
 
 static void spitfire_xcall_helper(u64 data0, u64 data1, u64 data2, u64 pstate, unsigned long cpu)
@@ -353,22 +376,23 @@ again:
 	 * ADDR 0x20) for the dummy read. -DaveM
 	 */
 	tmp = 0x40;
-	__asm__ __volatile__("
-	wrpr	%1, %2, %%pstate
-	stxa	%4, [%0] %3
-	stxa	%5, [%0+%8] %3
-	add	%0, %8, %0
-	stxa	%6, [%0+%8] %3
-	membar	#Sync
-	stxa	%%g0, [%7] %3
-	membar	#Sync
-	mov	0x20, %%g1
-	ldxa	[%%g1] 0x7f, %%g0
-	membar	#Sync"
+	__asm__ __volatile__(
+	"wrpr	%1, %2, %%pstate\n\t"
+	"stxa	%4, [%0] %3\n\t"
+	"stxa	%5, [%0+%8] %3\n\t"
+	"add	%0, %8, %0\n\t"
+	"stxa	%6, [%0+%8] %3\n\t"
+	"membar	#Sync\n\t"
+	"stxa	%%g0, [%7] %3\n\t"
+	"membar	#Sync\n\t"
+	"mov	0x20, %%g1\n\t"
+	"ldxa	[%%g1] 0x7f, %%g0\n\t"
+	"membar	#Sync"
 	: "=r" (tmp)
 	: "r" (pstate), "i" (PSTATE_IE), "i" (ASI_INTR_W),
-	  "r" (data0), "r" (data1), "r" (data2), "r" (target), "r" (0x10), "0" (tmp)
-       : "g1");
+	  "r" (data0), "r" (data1), "r" (data2), "r" (target),
+	  "r" (0x10), "0" (tmp)
+        : "g1");
 
 	/* NOTE: PSTATE_IE is still clear. */
 	stuck = 100000;
@@ -398,15 +422,16 @@ again:
 
 static __inline__ void spitfire_xcall_deliver(u64 data0, u64 data1, u64 data2, unsigned long mask)
 {
-	int ncpus = smp_num_cpus - 1;
-	int i;
 	u64 pstate;
+	int i;
 
 	__asm__ __volatile__("rdpr %%pstate, %0" : "=r" (pstate));
-	for (i = 0; (i < NR_CPUS) && ncpus; i++) {
+	for (i = 0; i < NR_CPUS; i++) {
 		if (mask & (1UL << i)) {
 			spitfire_xcall_helper(data0, data1, data2, pstate, i);
-			ncpus--;
+			mask &= ~(1UL << i);
+			if (!mask)
+				break;
 		}
 	}
 }
@@ -444,18 +469,22 @@ retry:
 
 	nack_busy_id = 0;
 	{
-		int i, ncpus = smp_num_cpus - 1;
+		unsigned long work_mask = mask;
+		int i;
 
-		for (i = 0; (i < NR_CPUS) && ncpus; i++) {
-			if (mask & (1UL << i)) {
+		for (i = 0; i < NR_CPUS; i++) {
+			if (work_mask & (1UL << i)) {
 				u64 target = (i << 14) | 0x70;
 
 				target |= (nack_busy_id++ << 24);
-				__asm__ __volatile__("stxa	%%g0, [%0] %1\n\t"
-						     "membar	#Sync\n\t"
-						     : /* no outputs */
-						     : "r" (target), "i" (ASI_INTR_W));
-				ncpus--;
+				__asm__ __volatile__(
+					"stxa	%%g0, [%0] %1\n\t"
+					"membar	#Sync\n\t"
+					: /* no outputs */
+					: "r" (target), "i" (ASI_INTR_W));
+				work_mask &= ~(1UL << i);
+				if (!work_mask)
+					break;
 			}
 		}
 	}
@@ -482,13 +511,14 @@ retry:
 		__asm__ __volatile__("wrpr %0, 0x0, %%pstate"
 				     : : "r" (pstate));
 
-		if ((stuck & ~(0x5555555555555555UL)) == 0) {
+		if ((dispatch_stat & ~(0x5555555555555555UL)) == 0) {
 			/* Busy bits will not clear, continue instead
 			 * of freezing up on this cpu.
 			 */
 			printk("CPU[%d]: mondo stuckage result[%016lx]\n",
 			       smp_processor_id(), dispatch_stat);
 		} else {
+			unsigned long work_mask = mask;
 			int i, this_busy_nack = 0;
 
 			/* Delay some random time with interrupts enabled
@@ -500,10 +530,14 @@ retry:
 			 * NACK us.
 			 */
 			for (i = 0; i < NR_CPUS; i++) {
-				if (mask & (1UL << i)) {
-					if ((dispatch_stat & (0x2 << this_busy_nack)) == 0)
+				if (work_mask & (1UL << i)) {
+					if ((dispatch_stat &
+					     (0x2 << this_busy_nack)) == 0)
 						mask &= ~(1UL << i);
 					this_busy_nack += 2;
+					work_mask &= ~(1UL << i);
+					if (!work_mask)
+						break;
 				}
 			}
 
@@ -517,23 +551,30 @@ retry:
  */
 static void smp_cross_call_masked(unsigned long *func, u32 ctx, u64 data1, u64 data2, unsigned long mask)
 {
-	if (smp_processors_ready) {
-		u64 data0 = (((u64)ctx)<<32 | (((u64)func) & 0xffffffff));
+	u64 data0 = (((u64)ctx)<<32 | (((u64)func) & 0xffffffff));
 
-		mask &= ~(1UL<<smp_processor_id());
+	mask &= cpu_online_map;
+	mask &= ~(1UL<<smp_processor_id());
 
-		if (tlb_type == spitfire)
-			spitfire_xcall_deliver(data0, data1, data2, mask);
-		else
-			cheetah_xcall_deliver(data0, data1, data2, mask);
+	if (tlb_type == spitfire)
+		spitfire_xcall_deliver(data0, data1, data2, mask);
+	else
+		cheetah_xcall_deliver(data0, data1, data2, mask);
+	/* NOTE: Caller runs local copy on master. */
+}
 
-		/* NOTE: Caller runs local copy on master. */
-	}
+extern unsigned long xcall_sync_tick;
+
+static void smp_start_sync_tick_client(int cpu)
+{
+	smp_cross_call_masked(&xcall_sync_tick,
+			      0, 0, 0,
+			      (1UL << cpu));
 }
 
 /* Send cross call to all processors except self. */
 #define smp_cross_call(func, ctx, data1, data2) \
-	smp_cross_call_masked(func, ctx, data1, data2, cpu_present_map)
+	smp_cross_call_masked(func, ctx, data1, data2, cpu_online_map)
 
 struct call_data_struct {
 	void (*func) (void *info);
@@ -542,13 +583,21 @@ struct call_data_struct {
 	int wait;
 };
 
+static spinlock_t call_lock = SPIN_LOCK_UNLOCKED;
+static struct call_data_struct *call_data;
+
 extern unsigned long xcall_call_function;
 
+/*
+ * You must not call this function with disabled interrupts or from a
+ * hardware interrupt handler or from a bottom half handler.
+ */
 int smp_call_function(void (*func)(void *info), void *info,
 		      int nonatomic, int wait)
 {
 	struct call_data_struct data;
-	int cpus = smp_num_cpus - 1;
+	int cpus = num_online_cpus() - 1;
+	long timeout;
 
 	if (!cpus)
 		return 0;
@@ -558,23 +607,41 @@ int smp_call_function(void (*func)(void *info), void *info,
 	atomic_set(&data.finished, 0);
 	data.wait = wait;
 
-	smp_cross_call(&xcall_call_function,
-		       0, (u64) &data, 0);
+	spin_lock(&call_lock);
+
+	call_data = &data;
+
+	smp_cross_call(&xcall_call_function, 0, 0, 0);
+
 	/* 
 	 * Wait for other cpus to complete function or at
 	 * least snap the call data.
 	 */
-	while (atomic_read(&data.finished) != cpus)
+	timeout = 1000000;
+	while (atomic_read(&data.finished) != cpus) {
+		if (--timeout <= 0)
+			goto out_timeout;
 		barrier();
+		udelay(1);
+	}
 
+	spin_unlock(&call_lock);
+
+	return 0;
+
+out_timeout:
+	spin_unlock(&call_lock);
+	printk("XCALL: Remote cpus not responding, ncpus=%d finished=%d\n",
+	       num_online_cpus() - 1, atomic_read(&data.finished));
 	return 0;
 }
 
-void smp_call_function_client(struct call_data_struct *call_data)
+void smp_call_function_client(int irq, struct pt_regs *regs)
 {
 	void (*func) (void *info) = call_data->func;
 	void *info = call_data->info;
 
+	clear_softint(1 << irq);
 	if (call_data->wait) {
 		/* let initiator proceed only after completion */
 		func(info);
@@ -589,15 +656,16 @@ void smp_call_function_client(struct call_data_struct *call_data)
 extern unsigned long xcall_flush_tlb_page;
 extern unsigned long xcall_flush_tlb_mm;
 extern unsigned long xcall_flush_tlb_range;
-extern unsigned long xcall_flush_tlb_all;
-extern unsigned long xcall_tlbcachesync;
-extern unsigned long xcall_flush_cache_all;
+extern unsigned long xcall_flush_tlb_kernel_range;
+extern unsigned long xcall_flush_tlb_all_spitfire;
+extern unsigned long xcall_flush_tlb_all_cheetah;
+extern unsigned long xcall_flush_cache_all_spitfire;
 extern unsigned long xcall_report_regs;
 extern unsigned long xcall_receive_signal;
 extern unsigned long xcall_flush_dcache_page_cheetah;
 extern unsigned long xcall_flush_dcache_page_spitfire;
 
-#ifdef DCFLUSH_DEBUG
+#ifdef CONFIG_DEBUG_DCFLUSH
 extern atomic_t dcpage_flushes;
 extern atomic_t dcpage_flushes_xcall;
 #endif
@@ -617,52 +685,87 @@ static __inline__ void __local_flush_dcache_page(struct page *page)
 
 void smp_flush_dcache_page_impl(struct page *page, int cpu)
 {
-	if (smp_processors_ready) {
-		unsigned long mask = 1UL << cpu;
+	unsigned long mask = 1UL << cpu;
 
-#ifdef DCFLUSH_DEBUG
-		atomic_inc(&dcpage_flushes);
+#ifdef CONFIG_DEBUG_DCFLUSH
+	atomic_inc(&dcpage_flushes);
 #endif
-		if (cpu == smp_processor_id()) {
-			__local_flush_dcache_page(page);
-		} else if ((cpu_present_map & mask) != 0) {
-			u64 data0;
+	if (cpu == smp_processor_id()) {
+		__local_flush_dcache_page(page);
+	} else if ((cpu_online_map & mask) != 0) {
+		u64 data0;
 
-			if (tlb_type == spitfire) {
-				data0 = ((u64)&xcall_flush_dcache_page_spitfire);
-				if (page->mapping != NULL)
-					data0 |= ((u64)1 << 32);
-				spitfire_xcall_deliver(data0,
-						       __pa(page->virtual),
-						       (u64) page->virtual,
-						       mask);
-			} else {
-				data0 = ((u64)&xcall_flush_dcache_page_cheetah);
-				cheetah_xcall_deliver(data0,
-						      __pa(page->virtual),
-						      0, mask);
-			}
-#ifdef DCFLUSH_DEBUG
-			atomic_inc(&dcpage_flushes_xcall);
-#endif
+		if (tlb_type == spitfire) {
+			data0 =
+				((u64)&xcall_flush_dcache_page_spitfire);
+			if (page->mapping != NULL)
+				data0 |= ((u64)1 << 32);
+			spitfire_xcall_deliver(data0,
+					       __pa(page->virtual),
+					       (u64) page->virtual,
+					       mask);
+		} else {
+			data0 =
+				((u64)&xcall_flush_dcache_page_cheetah);
+			cheetah_xcall_deliver(data0,
+					      __pa(page->virtual),
+					      0, mask);
 		}
+#ifdef CONFIG_DEBUG_DCFLUSH
+		atomic_inc(&dcpage_flushes_xcall);
+#endif
 	}
+}
+
+void flush_dcache_page_all(struct mm_struct *mm, struct page *page)
+{
+	unsigned long mask = cpu_online_map & ~(1UL << smp_processor_id());
+	u64 data0;
+
+#ifdef CONFIG_DEBUG_DCFLUSH
+	atomic_inc(&dcpage_flushes);
+#endif
+	if (mask == 0UL)
+		goto flush_self;
+	if (tlb_type == spitfire) {
+		data0 = ((u64)&xcall_flush_dcache_page_spitfire);
+		if (page->mapping != NULL)
+			data0 |= ((u64)1 << 32);
+		spitfire_xcall_deliver(data0,
+				       __pa(page->virtual),
+				       (u64) page->virtual,
+				       mask);
+	} else {
+		data0 = ((u64)&xcall_flush_dcache_page_cheetah);
+		cheetah_xcall_deliver(data0,
+				      __pa(page->virtual),
+				      0, mask);
+	}
+#ifdef CONFIG_DEBUG_DCFLUSH
+	atomic_inc(&dcpage_flushes_xcall);
+#endif
+ flush_self:
+	__local_flush_dcache_page(page);
 }
 
 void smp_receive_signal(int cpu)
 {
-	if (smp_processors_ready) {
-		unsigned long mask = 1UL << cpu;
+	unsigned long mask = 1UL << cpu;
 
-		if ((cpu_present_map & mask) != 0) {
-			u64 data0 = (((u64)&xcall_receive_signal) & 0xffffffff);
+	if ((cpu_online_map & mask) != 0) {
+		u64 data0 = (((u64)&xcall_receive_signal) & 0xffffffff);
 
-			if (tlb_type == spitfire)
-				spitfire_xcall_deliver(data0, 0, 0, mask);
-			else
-				cheetah_xcall_deliver(data0, 0, 0, mask);
-		}
+		if (tlb_type == spitfire)
+			spitfire_xcall_deliver(data0, 0, 0, mask);
+		else
+			cheetah_xcall_deliver(data0, 0, 0, mask);
 	}
+}
+
+void smp_receive_signal_client(int irq, struct pt_regs *regs)
+{
+	/* Just return, rtrap takes care of the rest. */
+	clear_softint(1 << irq);
 }
 
 void smp_report_regs(void)
@@ -672,13 +775,19 @@ void smp_report_regs(void)
 
 void smp_flush_cache_all(void)
 {
-	smp_cross_call(&xcall_flush_cache_all, 0, 0, 0);
-	__flush_cache_all();
+	/* Cheetah need do nothing. */
+	if (tlb_type == spitfire) {
+		smp_cross_call(&xcall_flush_cache_all_spitfire, 0, 0, 0);
+		__flush_cache_all();
+	}
 }
 
 void smp_flush_tlb_all(void)
 {
-	smp_cross_call(&xcall_flush_tlb_all, 0, 0, 0);
+	if (tlb_type == spitfire)
+		smp_cross_call(&xcall_flush_tlb_all_spitfire, 0, 0, 0);
+	else
+		smp_cross_call(&xcall_flush_tlb_all_cheetah, 0, 0, 0);
 	__flush_tlb_all();
 }
 
@@ -761,24 +870,35 @@ void smp_flush_tlb_mm(struct mm_struct *mm)
 void smp_flush_tlb_range(struct mm_struct *mm, unsigned long start,
 			 unsigned long end)
 {
-	{
-		u32 ctx = CTX_HWBITS(mm->context);
-		int cpu = smp_processor_id();
+	u32 ctx = CTX_HWBITS(mm->context);
+	int cpu = smp_processor_id();
 
-		start &= PAGE_MASK;
-		end    = PAGE_ALIGN(end);
+	start &= PAGE_MASK;
+	end    = PAGE_ALIGN(end);
 
-		if (mm == current->active_mm && atomic_read(&mm->mm_users) == 1) {
-			mm->cpu_vm_mask = (1UL << cpu);
-			goto local_flush_and_out;
-		}
+	if (mm == current->active_mm && atomic_read(&mm->mm_users) == 1) {
+		mm->cpu_vm_mask = (1UL << cpu);
+		goto local_flush_and_out;
+	}
 
-		smp_cross_call_masked(&xcall_flush_tlb_range,
-				      ctx, start, end,
-				      mm->cpu_vm_mask);
+	smp_cross_call_masked(&xcall_flush_tlb_range,
+			      ctx, start, end,
+			      mm->cpu_vm_mask);
 
-	local_flush_and_out:
-		__flush_tlb_range(ctx, start, SECONDARY_CONTEXT, end, PAGE_SIZE, (end-start));
+ local_flush_and_out:
+	__flush_tlb_range(ctx, start, SECONDARY_CONTEXT,
+			  end, PAGE_SIZE, (end-start));
+}
+
+void smp_flush_tlb_kernel_range(unsigned long start, unsigned long end)
+{
+	start &= PAGE_MASK;
+	end    = PAGE_ALIGN(end);
+	if (start != end) {
+		smp_cross_call(&xcall_flush_tlb_kernel_range,
+			       0, start, end);
+
+		__flush_tlb_kernel_range(start, end);
 	}
 }
 
@@ -789,31 +909,32 @@ void smp_flush_tlb_page(struct mm_struct *mm, unsigned long page)
 		int cpu = smp_processor_id();
 
 		page &= PAGE_MASK;
-		if (mm == current->active_mm && atomic_read(&mm->mm_users) == 1) {
+		if (mm == current->active_mm &&
+		    atomic_read(&mm->mm_users) == 1) {
 			/* By virtue of being the current address space, and
-			 * having the only reference to it, the following operation
-			 * is safe.
+			 * having the only reference to it, the following
+			 * operation is safe.
 			 *
-			 * It would not be a win to perform the xcall tlb flush in
-			 * this case, because even if we switch back to one of the
-			 * other processors in cpu_vm_mask it is almost certain that
-			 * all TLB entries for this context will be replaced by the
-			 * time that happens.
+			 * It would not be a win to perform the xcall tlb
+			 * flush in this case, because even if we switch back
+			 * to one of the other processors in cpu_vm_mask it
+			 * is almost certain that all TLB entries for this
+			 * context will be replaced by the time that happens.
 			 */
 			mm->cpu_vm_mask = (1UL << cpu);
 			goto local_flush_and_out;
 		} else {
 			/* By virtue of running under the mm->page_table_lock,
-			 * and mmu_context.h:switch_mm doing the same, the following
-			 * operation is safe.
+			 * and mmu_context.h:switch_mm doing the same, the
+			 * following operation is safe.
 			 */
 			if (mm->cpu_vm_mask == (1UL << cpu))
 				goto local_flush_and_out;
 		}
 
-		/* OK, we have to actually perform the cross call.  Most likely
-		 * this is a cloned mm or kswapd is kicking out pages for a task
-		 * which has run recently on another cpu.
+		/* OK, we have to actually perform the cross call.  Most
+		 * likely this is a cloned mm or kswapd is kicking out pages
+		 * for a task which has run recently on another cpu.
 		 */
 		smp_cross_call_masked(&xcall_flush_tlb_page,
 				      ctx, page, 0,
@@ -832,46 +953,43 @@ extern unsigned long xcall_capture;
 
 static atomic_t smp_capture_depth = ATOMIC_INIT(0);
 static atomic_t smp_capture_registry = ATOMIC_INIT(0);
-static unsigned long penguins_are_doing_time = 0;
+static unsigned long penguins_are_doing_time;
 
 void smp_capture(void)
 {
-	if (smp_processors_ready) {
-		int result = __atomic_add(1, &smp_capture_depth);
+	int result = __atomic_add(1, &smp_capture_depth);
 
+	membar("#StoreStore | #LoadStore");
+	if (result == 1) {
+		int ncpus = num_online_cpus();
+
+#ifdef CAPTURE_DEBUG
+		printk("CPU[%d]: Sending penguins to jail...",
+		       smp_processor_id());
+#endif
+		penguins_are_doing_time = 1;
 		membar("#StoreStore | #LoadStore");
-		if (result == 1) {
-			int ncpus = smp_num_cpus;
-
+		atomic_inc(&smp_capture_registry);
+		smp_cross_call(&xcall_capture, 0, 0, 0);
+		while (atomic_read(&smp_capture_registry) != ncpus)
+			membar("#LoadLoad");
 #ifdef CAPTURE_DEBUG
-			printk("CPU[%d]: Sending penguins to jail...",
-			       smp_processor_id());
+		printk("done\n");
 #endif
-			penguins_are_doing_time = 1;
-			membar("#StoreStore | #LoadStore");
-			atomic_inc(&smp_capture_registry);
-			smp_cross_call(&xcall_capture, 0, 0, 0);
-			while (atomic_read(&smp_capture_registry) != ncpus)
-				membar("#LoadLoad");
-#ifdef CAPTURE_DEBUG
-			printk("done\n");
-#endif
-		}
 	}
 }
 
 void smp_release(void)
 {
-	if (smp_processors_ready) {
-		if (atomic_dec_and_test(&smp_capture_depth)) {
+	if (atomic_dec_and_test(&smp_capture_depth)) {
 #ifdef CAPTURE_DEBUG
-			printk("CPU[%d]: Giving pardon to imprisoned penguins\n",
-			       smp_processor_id());
+		printk("CPU[%d]: Giving pardon to "
+		       "imprisoned penguins\n",
+		       smp_processor_id());
 #endif
-			penguins_are_doing_time = 0;
-			membar("#StoreStore | #StoreLoad");
-			atomic_dec(&smp_capture_registry);
-		}
+		penguins_are_doing_time = 0;
+		membar("#StoreStore | #StoreLoad");
+		atomic_dec(&smp_capture_registry);
 	}
 }
 
@@ -881,9 +999,13 @@ void smp_release(void)
 extern void prom_world(int);
 extern void save_alternate_globals(unsigned long *);
 extern void restore_alternate_globals(unsigned long *);
-void smp_penguin_jailcell(void)
+void smp_penguin_jailcell(int irq, struct pt_regs *regs)
 {
 	unsigned long global_save[24];
+
+	clear_softint(1 << irq);
+
+	preempt_disable();
 
 	__asm__ __volatile__("flushw");
 	save_alternate_globals(global_save);
@@ -895,19 +1017,18 @@ void smp_penguin_jailcell(void)
 	restore_alternate_globals(global_save);
 	atomic_dec(&smp_capture_registry);
 	prom_world(0);
+
+	preempt_enable();
 }
 
 extern unsigned long xcall_promstop;
 
 void smp_promstop_others(void)
 {
-	if (smp_processors_ready)
-		smp_cross_call(&xcall_promstop, 0, 0, 0);
+	smp_cross_call(&xcall_promstop, 0, 0, 0);
 }
 
-extern void sparc64_do_profile(unsigned long pc, unsigned long o7);
-
-static unsigned long current_tick_offset;
+extern void sparc64_do_profile(struct pt_regs *regs);
 
 #define prof_multiplier(__cpu)		cpu_data[(__cpu)].multiplier
 #define prof_counter(__cpu)		cpu_data[(__cpu)].counter
@@ -922,12 +1043,7 @@ void smp_percpu_timer_interrupt(struct pt_regs *regs)
 	 * Check for level 14 softint.
 	 */
 	{
-		unsigned long tick_mask;
-
-		if (SPARC64_USE_STICK)
-			tick_mask = (1UL << 16);
-		else
-			tick_mask = (1UL << 0);
+		unsigned long tick_mask = tick_ops->softint_mask;
 
 		if (!(get_softint() & tick_mask)) {
 			extern void handler_irq(int, struct pt_regs *);
@@ -939,24 +1055,23 @@ void smp_percpu_timer_interrupt(struct pt_regs *regs)
 	}
 
 	do {
-		if (!user)
-			sparc64_do_profile(regs->tpc, regs->u_regs[UREG_RETPC]);
+		sparc64_do_profile(regs);
 		if (!--prof_counter(cpu)) {
+			irq_enter();
+
 			if (cpu == boot_cpu_id) {
-				irq_enter(cpu, 0);
-
-				kstat.irqs[cpu][0]++;
+				kstat_this_cpu.irqs[0]++;
 				timer_tick_interrupt(regs);
-
-				irq_exit(cpu, 0);
 			}
 
 			update_process_times(user);
 
+			irq_exit();
+
 			prof_counter(cpu) = prof_multiplier(cpu);
 		}
 
-		/* Guarentee that the following sequences execute
+		/* Guarantee that the following sequences execute
 		 * uninterrupted.
 		 */
 		__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
@@ -964,47 +1079,14 @@ void smp_percpu_timer_interrupt(struct pt_regs *regs)
 				     : "=r" (pstate)
 				     : "i" (PSTATE_IE));
 
-		/* Workaround for Spitfire Errata (#54 I think??), I discovered
-		 * this via Sun BugID 4008234, mentioned in Solaris-2.5.1 patch
-		 * number 103640.
-		 *
-		 * On Blackbird writes to %tick_cmpr can fail, the
-		 * workaround seems to be to execute the wr instruction
-		 * at the start of an I-cache line, and perform a dummy
-		 * read back from %tick_cmpr right after writing to it. -DaveM
-		 *
-		 * Just to be anal we add a workaround for Spitfire
-		 * Errata 50 by preventing pipeline bypasses on the
-		 * final read of the %tick register into a compare
-		 * instruction.  The Errata 50 description states
-		 * that %tick is not prone to this bug, but I am not
-		 * taking any chances.
-		 */
-		if (!SPARC64_USE_STICK) {
-		__asm__ __volatile__("rd	%%tick_cmpr, %0\n\t"
-				     "ba,pt	%%xcc, 1f\n\t"
-				     " add	%0, %2, %0\n\t"
-				     ".align	64\n"
-				  "1: wr	%0, 0x0, %%tick_cmpr\n\t"
-				     "rd	%%tick_cmpr, %%g0\n\t"
-				     "rd	%%tick, %1\n\t"
-				     "mov	%1, %1"
-				     : "=&r" (compare), "=r" (tick)
-				     : "r" (current_tick_offset));
-		} else {
-		__asm__ __volatile__("rd	%%asr25, %0\n\t"
-				     "add	%0, %2, %0\n\t"
-				     "wr	%0, 0x0, %%asr25\n\t"
-				     "rd	%%asr24, %1\n\t"
-				     : "=&r" (compare), "=r" (tick)
-				     : "r" (current_tick_offset));
-		}
+		compare = tick_ops->add_compare(current_tick_offset);
+		tick = tick_ops->get_tick();
 
 		/* Restore PSTATE_IE. */
 		__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
 				     : /* no outputs */
 				     : "r" (pstate));
-	} while (tick >= compare);
+	} while (time_after_eq(tick, compare));
 }
 
 static void __init smp_setup_percpu_timer(void)
@@ -1014,7 +1096,7 @@ static void __init smp_setup_percpu_timer(void)
 
 	prof_counter(cpu) = prof_multiplier(cpu) = 1;
 
-	/* Guarentee that the following sequences execute
+	/* Guarantee that the following sequences execute
 	 * uninterrupted.
 	 */
 	__asm__ __volatile__("rdpr	%%pstate, %0\n\t"
@@ -1022,35 +1104,7 @@ static void __init smp_setup_percpu_timer(void)
 			     : "=r" (pstate)
 			     : "i" (PSTATE_IE));
 
-	/* Workaround for Spitfire Errata (#54 I think??), I discovered
-	 * this via Sun BugID 4008234, mentioned in Solaris-2.5.1 patch
-	 * number 103640.
-	 *
-	 * On Blackbird writes to %tick_cmpr can fail, the
-	 * workaround seems to be to execute the wr instruction
-	 * at the start of an I-cache line, and perform a dummy
-	 * read back from %tick_cmpr right after writing to it. -DaveM
-	 */
-	if (!SPARC64_USE_STICK) {
-	__asm__ __volatile__("
-		rd	%%tick, %%g1
-		ba,pt	%%xcc, 1f
-		 add	%%g1, %0, %%g1
-		.align	64
-	1:	wr	%%g1, 0x0, %%tick_cmpr
-		rd	%%tick_cmpr, %%g0"
-	: /* no outputs */
-	: "r" (current_tick_offset)
-	: "g1");
-	} else {
-	__asm__ __volatile__("
-		rd	%%asr24, %%g1
-		add	%%g1, %0, %%g1
-		wr	%%g1, 0x0, %%asr25"
-	: /* no outputs */
-	: "r" (current_tick_offset)
-	: "g1");
-	}
+	tick_ops->init_tick(current_tick_offset);
 
 	/* Restore PSTATE_IE. */
 	__asm__ __volatile__("wrpr	%0, 0x0, %%pstate"
@@ -1060,48 +1114,110 @@ static void __init smp_setup_percpu_timer(void)
 
 void __init smp_tick_init(void)
 {
-	int i;
-	
 	boot_cpu_id = hard_smp_processor_id();
 	current_tick_offset = timer_tick_offset;
-	cpu_present_map = 0;
-	for (i = 0; i < linux_num_cpus; i++)
-		cpu_present_map |= (1UL << linux_cpus[i].mid);
-	for (i = 0; i < NR_CPUS; i++) {
-		__cpu_number_map[i] = -1;
-		__cpu_logical_map[i] = -1;
+
+	if (boot_cpu_id >= NR_CPUS) {
+		prom_printf("Serious problem, boot cpu id >= NR_CPUS\n");
+		prom_halt();
 	}
-	__cpu_number_map[boot_cpu_id] = 0;
+
+	atomic_inc(&sparc64_num_cpus_online);
+	set_bit(boot_cpu_id, &cpu_online_map);
 	prom_cpu_nodes[boot_cpu_id] = linux_cpus[0].prom_node;
-	__cpu_logical_map[0] = boot_cpu_id;
-	current->processor = boot_cpu_id;
 	prof_counter(boot_cpu_id) = prof_multiplier(boot_cpu_id) = 1;
 }
 
-static inline unsigned long find_flush_base(unsigned long size)
-{
-	struct page *p = mem_map;
-	unsigned long found, base;
+cycles_t cacheflush_time;
+unsigned long cache_decay_ticks;
 
-	size = PAGE_ALIGN(size);
-	found = size;
-	base = (unsigned long) page_address(p);
-	while (found != 0) {
-		/* Failure. */
-		if (p >= (mem_map + max_mapnr))
-			return 0UL;
-		if (PageReserved(p)) {
-			found = size;
-			base = (unsigned long) page_address(p);
-		} else {
-			found -= PAGE_SIZE;
-		}
-		p++;
+extern unsigned long cheetah_tune_scheduling(void);
+
+static void __init smp_tune_scheduling(void)
+{
+	unsigned long orig_flush_base, flush_base, flags, *p;
+	unsigned int ecache_size, order;
+	cycles_t tick1, tick2, raw;
+
+	/* Approximate heuristic for SMP scheduling.  It is an
+	 * estimation of the time it takes to flush the L2 cache
+	 * on the local processor.
+	 *
+	 * The ia32 chooses to use the L1 cache flush time instead,
+	 * and I consider this complete nonsense.  The Ultra can service
+	 * a miss to the L1 with a hit to the L2 in 7 or 8 cycles, and
+	 * L2 misses are what create extra bus traffic (ie. the "cost"
+	 * of moving a process from one cpu to another).
+	 */
+	printk("SMP: Calibrating ecache flush... ");
+	if (tlb_type == cheetah || tlb_type == cheetah_plus) {
+		cacheflush_time = cheetah_tune_scheduling();
+		goto report;
 	}
-	return base;
+
+	ecache_size = prom_getintdefault(linux_cpus[0].prom_node,
+					 "ecache-size", (512 * 1024));
+	if (ecache_size > (4 * 1024 * 1024))
+		ecache_size = (4 * 1024 * 1024);
+	orig_flush_base = flush_base =
+		__get_free_pages(GFP_KERNEL, order = get_order(ecache_size));
+
+	if (flush_base != 0UL) {
+		local_irq_save(flags);
+
+		/* Scan twice the size once just to get the TLB entries
+		 * loaded and make sure the second scan measures pure misses.
+		 */
+		for (p = (unsigned long *)flush_base;
+		     ((unsigned long)p) < (flush_base + (ecache_size<<1));
+		     p += (64 / sizeof(unsigned long)))
+			*((volatile unsigned long *)p);
+
+		tick1 = tick_ops->get_tick();
+
+		__asm__ __volatile__("1:\n\t"
+				     "ldx	[%0 + 0x000], %%g1\n\t"
+				     "ldx	[%0 + 0x040], %%g2\n\t"
+				     "ldx	[%0 + 0x080], %%g3\n\t"
+				     "ldx	[%0 + 0x0c0], %%g5\n\t"
+				     "add	%0, 0x100, %0\n\t"
+				     "cmp	%0, %2\n\t"
+				     "bne,pt	%%xcc, 1b\n\t"
+				     " nop"
+				     : "=&r" (flush_base)
+				     : "0" (flush_base),
+				       "r" (flush_base + ecache_size)
+				     : "g1", "g2", "g3", "g5");
+
+		tick2 = tick_ops->get_tick();
+
+		local_irq_restore(flags);
+
+		raw = (tick2 - tick1);
+
+		/* Dampen it a little, considering two processes
+		 * sharing the cache and fitting.
+		 */
+		cacheflush_time = (raw - (raw >> 2));
+
+		free_pages(orig_flush_base, order);
+	} else {
+		cacheflush_time = ((ecache_size << 2) +
+				   (ecache_size << 1));
+	}
+report:
+	/* Convert ticks/sticks to jiffies. */
+	cache_decay_ticks = cacheflush_time / timer_tick_offset;
+	if (cache_decay_ticks < 1)
+		cache_decay_ticks = 1;
+
+	printk("Using heuristic of %ld cycles, %ld ticks.\n",
+	       cacheflush_time, cache_decay_ticks);
 }
 
 /* /proc/profile writes can call this, don't __init it please. */
+static spinlock_t prof_setup_lock = SPIN_LOCK_UNLOCKED;
+
 int setup_profiling_timer(unsigned int multiplier)
 {
 	unsigned long flags;
@@ -1110,13 +1226,81 @@ int setup_profiling_timer(unsigned int multiplier)
 	if ((!multiplier) || (timer_tick_offset / multiplier) < 1000)
 		return -EINVAL;
 
-	save_and_cli(flags);
-	for (i = 0; i < NR_CPUS; i++) {
-		if (cpu_present_map & (1UL << i))
-			prof_multiplier(i) = multiplier;
-	}
+	spin_lock_irqsave(&prof_setup_lock, flags);
+	for (i = 0; i < NR_CPUS; i++)
+		prof_multiplier(i) = multiplier;
 	current_tick_offset = (timer_tick_offset / multiplier);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&prof_setup_lock, flags);
 
 	return 0;
+}
+
+void __init smp_prepare_cpus(unsigned int max_cpus)
+{
+	int i;
+
+	for (i = 0; i < linux_num_cpus; i++) {
+		if (linux_cpus[i].mid < max_cpus) {
+			set_bit(linux_cpus[i].mid,
+				&phys_cpu_present_map);
+			atomic_inc(&sparc64_num_cpus_possible);
+		}
+	}
+	if (atomic_read(&sparc64_num_cpus_possible) > max_cpus) {
+		for (i = linux_num_cpus - 1; i >= 0; i--) {
+			if (linux_cpus[i].mid != boot_cpu_id) {
+				clear_bit(linux_cpus[i].mid,
+					  &phys_cpu_present_map);
+				atomic_dec(&sparc64_num_cpus_possible);
+				if (atomic_read(&sparc64_num_cpus_possible) <= max_cpus)
+					break;
+			}
+		}
+	}
+
+	smp_store_cpu_info(boot_cpu_id);
+}
+
+void __devinit smp_prepare_boot_cpu(void)
+{
+	set_bit(smp_processor_id(), &cpu_online_map);
+	set_bit(smp_processor_id(), &phys_cpu_present_map);
+}
+
+int __devinit __cpu_up(unsigned int cpu)
+{
+	int ret = smp_boot_one_cpu(cpu);
+
+	if (!ret) {
+		set_bit(cpu, &smp_commenced_mask);
+		while (!test_bit(cpu, &cpu_online_map))
+			mb();
+		if (!test_bit(cpu, &cpu_online_map)) {
+			ret = -ENODEV;
+		} else {
+			smp_synchronize_one_tick(cpu);
+		}
+	}
+	return ret;
+}
+
+void __init smp_cpus_done(unsigned int max_cpus)
+{
+	unsigned long bogosum = 0;
+	int i;
+
+	for (i = 0; i < NR_CPUS; i++) {
+		if (cpu_online(i))
+			bogosum += cpu_data[i].udelay_val;
+	}
+	printk("Total of %d processors activated "
+	       "(%lu.%02lu BogoMIPS).\n",
+	       num_online_cpus(),
+	       bogosum/(500000/HZ),
+	       (bogosum/(5000/HZ))%100);
+
+	/* We want to run this with all the other cpus spinning
+	 * in the kernel.
+	 */
+	smp_tune_scheduling();
 }

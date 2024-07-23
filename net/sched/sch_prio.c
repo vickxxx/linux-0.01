@@ -162,14 +162,13 @@ prio_destroy(struct Qdisc* sch)
 
 	while ((tp = q->filter_list) != NULL) {
 		q->filter_list = tp->next;
-		tcf_destroy(tp);
+		tp->ops->destroy(tp);
 	}
 
 	for (prio=0; prio<q->bands; prio++) {
 		qdisc_destroy(q->queues[prio]);
 		q->queues[prio] = &noop_qdisc;
 	}
-	MOD_DEC_USE_COUNT;
 }
 
 static int prio_tune(struct Qdisc *sch, struct rtattr *opt)
@@ -233,7 +232,6 @@ static int prio_init(struct Qdisc *sch, struct rtattr *opt)
 		if ((err= prio_tune(sch, opt)) != 0)
 			return err;
 	}
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -268,7 +266,6 @@ static int prio_graft(struct Qdisc *sch, unsigned long arg, struct Qdisc *new,
 	sch_tree_lock(sch);
 	*old = q->queues[band];
 	q->queues[band] = new;
-	sch->q.qlen -= (*old)->q.qlen;
 	qdisc_reset(*old);
 	sch_tree_unlock(sch);
 
@@ -370,42 +367,35 @@ static struct tcf_proto ** prio_find_tcf(struct Qdisc *sch, unsigned long cl)
 	return &q->filter_list;
 }
 
-static struct Qdisc_class_ops prio_class_ops =
-{
-	prio_graft,
-	prio_leaf,
-
-	prio_get,
-	prio_put,
-	prio_change,
-	prio_delete,
-	prio_walk,
-
-	prio_find_tcf,
-	prio_bind,
-	prio_put,
-
-	prio_dump_class,
+static struct Qdisc_class_ops prio_class_ops = {
+	.graft		=	prio_graft,
+	.leaf		=	prio_leaf,
+	.get		=	prio_get,
+	.put		=	prio_put,
+	.change		=	prio_change,
+	.delete		=	prio_delete,
+	.walk		=	prio_walk,
+	.tcf_chain	=	prio_find_tcf,
+	.bind_tcf	=	prio_bind,
+	.unbind_tcf	=	prio_put,
+	.dump		=	prio_dump_class,
 };
 
-struct Qdisc_ops prio_qdisc_ops =
-{
-	NULL,
-	&prio_class_ops,
-	"prio",
-	sizeof(struct prio_sched_data),
-
-	prio_enqueue,
-	prio_dequeue,
-	prio_requeue,
-	prio_drop,
-
-	prio_init,
-	prio_reset,
-	prio_destroy,
-	prio_tune,
-
-	prio_dump,
+struct Qdisc_ops prio_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	&prio_class_ops,
+	.id		=	"prio",
+	.priv_size	=	sizeof(struct prio_sched_data),
+	.enqueue	=	prio_enqueue,
+	.dequeue	=	prio_dequeue,
+	.requeue	=	prio_requeue,
+	.drop		=	prio_drop,
+	.init		=	prio_init,
+	.reset		=	prio_reset,
+	.destroy	=	prio_destroy,
+	.change		=	prio_tune,
+	.dump		=	prio_dump,
+	.owner		=	THIS_MODULE,
 };
 
 #ifdef MODULE

@@ -1,12 +1,10 @@
-/*
- * BK Id: SCCS/s.io.h 1.14 10/16/01 15:58:42 trini
- */
 #ifdef __KERNEL__
 #ifndef _PPC_IO_H
 #define _PPC_IO_H
 
 #include <linux/config.h>
 #include <linux/types.h>
+
 #include <asm/page.h>
 #include <asm/byteorder.h>
 
@@ -24,24 +22,25 @@
 #define PREP_ISA_MEM_BASE 	0xc0000000
 #define PREP_PCI_DRAM_OFFSET 	0x80000000
 
-#if defined(CONFIG_4xx)
-#include <asm/ppc4xx.h>
+#if defined(CONFIG_40x)
+#include <asm/ibm4xx.h>
 #elif defined(CONFIG_8xx)
 #include <asm/mpc8xx.h>
 #elif defined(CONFIG_8260)
 #include <asm/mpc8260.h>
 #elif defined(CONFIG_APUS)
-#define _IO_BASE 0
-#define _ISA_MEM_BASE 0
+#define _IO_BASE	0
+#define _ISA_MEM_BASE	0
 #define PCI_DRAM_OFFSET 0
 #else /* Everyone else */
-extern unsigned long isa_io_base;
-extern unsigned long isa_mem_base;
-extern unsigned long pci_dram_offset;
 #define _IO_BASE	isa_io_base
 #define _ISA_MEM_BASE	isa_mem_base
 #define PCI_DRAM_OFFSET	pci_dram_offset
-#endif /* Platform-dependant I/O */
+#endif /* Platform-dependent I/O */
+
+extern unsigned long isa_io_base;
+extern unsigned long isa_mem_base;
+extern unsigned long pci_dram_offset;
 
 #define readb(addr) in_8((volatile u8 *)(addr))
 #define writeb(b,addr) out_8((volatile u8 *)(addr), (b))
@@ -55,7 +54,7 @@ extern unsigned long pci_dram_offset;
 #define readl(addr) in_le32((volatile u32 *)(addr))
 #define writew(b,addr) out_le16((volatile u16 *)(addr),(b))
 #define writel(b,addr) out_le32((volatile u32 *)(addr),(b))
-#endif
+#endif /* CONFIG_APUS */
 
 
 #define __raw_readb(addr)	(*(volatile unsigned char *)(addr))
@@ -78,11 +77,24 @@ extern unsigned long pci_dram_offset;
 #define insl(port, buf, nl)	_insl_ns((u32 *)((port)+_IO_BASE), (buf), (nl))
 #define outsl(port, buf, nl)	_outsl_ns((u32 *)((port)+_IO_BASE), (buf), (nl))
 
-#ifdef CONFIG_ALL_PPC
+#ifdef CONFIG_PPC_PMAC
 /*
- * We have to handle possible machine checks here on powermacs
- * and potentially some CHRPs -- paulus.
+ * On powermacs, we will get a machine check exception if we
+ * try to read data from a non-existent I/O port.  Because the
+ * machine check is an asynchronous exception, it isn't
+ * well-defined which instruction SRR0 will point to when the
+ * exception occurs.
+ * With the sequence below (twi; isync; nop), we have found that
+ * the machine check occurs on one of the three instructions on
+ * all PPC implementations tested so far.  The twi and isync are
+ * needed on the 601 (in fact twi; sync works too), the isync and
+ * nop are needed on 604[e|r], and any of twi, sync or isync will
+ * work on 603[e], 750, 74x0.
+ * The twi creates an explicit data dependency on the returned
+ * value which seems to be needed to make the 601 wait for the
+ * load to finish.
  */
+
 #define __do_in_asm(name, op)				\
 extern __inline__ unsigned int name(unsigned int port)	\
 {							\
@@ -137,7 +149,7 @@ __do_out_asm(outl, "stwbrx")
 #define inl(port)		in_be32((u32 *)((port)+_IO_BASE))
 #define outl(val, port)		out_be32((u32 *)((port)+_IO_BASE), (val))
 
-#else /* not APUS or ALL_PPC */
+#else /* not APUS or PMAC */
 #define inb(port)		in_8((u8 *)((port)+_IO_BASE))
 #define outb(val, port)		out_8((u8 *)((port)+_IO_BASE), (val))
 #define inw(port)		in_le16((u16 *)((port)+_IO_BASE))
@@ -181,7 +193,6 @@ extern void _outsl_ns(volatile u32 *port, const void *buf, int nl);
 #define memcpy_fromio(a,b,c)   memcpy((a),(void *)(b),(c))
 #define memcpy_toio(a,b,c)	memcpy((void *)(a),(b),(c))
 
-#ifdef __KERNEL__
 /*
  * Map in an area of physical address space, for accessing
  * I/O devices etc.
@@ -250,10 +261,8 @@ extern inline void * phys_to_virt(unsigned long address)
 /*
  * Change "struct page" to physical address.
  */
-#define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
+#define page_to_phys(page)	(page_to_pfn(page) << PAGE_SHIFT)
 #define page_to_bus(page)	(page_to_phys(page) + PCI_DRAM_OFFSET)
-
-#endif /* __KERNEL__ */
 
 /*
  * Enforce In-order Execution of I/O:
@@ -265,7 +274,7 @@ extern inline void eieio(void)
 	__asm__ __volatile__ ("eieio" : : : "memory");
 }
 
-/* Enforce in-order execution of data I/O. 
+/* Enforce in-order execution of data I/O.
  * No distinction between read/write on PPC; use eieio for all three.
  */
 #define iobarrier_rw() eieio()
@@ -367,11 +376,43 @@ static inline int isa_check_signature(unsigned long io_addr,
 	return 0;
 }
 
-/* Nothing to do */
+#ifdef CONFIG_NOT_COHERENT_CACHE
+
+/*
+ * DMA-consistent mapping functions for PowerPCs that don't support
+ * cache snooping.  These allocate/free a region of uncached mapped
+ * memory space for use with DMA devices.  Alternatively, you could
+ * allocate the space "normally" and use the cache management functions
+ * to ensure it is consistent.
+ */
+extern void *consistent_alloc(int gfp, size_t size, dma_addr_t *handle);
+extern void consistent_free(void *vaddr);
+extern void consistent_sync(void *vaddr, size_t size, int rw);
+extern void consistent_sync_page(struct page *page, unsigned long offset,
+				 size_t size, int rw);
+
+#define dma_cache_inv(_start,_size) \
+	invalidate_dcache_range(_start, (_start + _size))
+#define dma_cache_wback(_start,_size) \
+	clean_dcache_range(_start, (_start + _size))
+#define dma_cache_wback_inv(_start,_size) \
+	flush_dcache_range(_start, (_start + _size))
+
+#else /* ! CONFIG_NOT_COHERENT_CACHE */
+
+/*
+ * Cache coherent cores.
+ */
 
 #define dma_cache_inv(_start,_size)		do { } while (0)
 #define dma_cache_wback(_start,_size)		do { } while (0)
 #define dma_cache_wback_inv(_start,_size)	do { } while (0)
 
-#endif
+#define consistent_alloc(gfp, size, handle)	NULL
+#define consistent_free(addr, size)		do { } while (0)
+#define consistent_sync(addr, size, rw)		do { } while (0)
+#define consistent_sync_page(pg, off, sz, rw)	do { } while (0)
+
+#endif /* ! CONFIG_NOT_COHERENT_CACHE */
+#endif /* _PPC_IO_H */
 #endif /* __KERNEL__ */

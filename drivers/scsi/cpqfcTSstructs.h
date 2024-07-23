@@ -21,19 +21,19 @@
 #define CPQFCTSSTRUCTS_H
 
 #include <linux/timer.h>  // timer declaration in our host data
-#include <linux/tqueue.h> // task queue sched
+#include <linux/interrupt.h>
 #include <asm/atomic.h>
 #include "cpqfcTSioctl.h"
 
 #define DbgDelay(secs) { int wait_time; printk( " DbgDelay %ds ", secs); \
                          for( wait_time=jiffies + (secs*HZ); \
-		         wait_time > jiffies ;) ; }
+		         time_before(jiffies, wait_time) ;) ; }
 
 #define CPQFCTS_DRIVER_VER(maj,min,submin) ((maj<<16)|(min<<8)|(submin))
 // don't forget to also change MODULE_DESCRIPTION in cpqfcTSinit.c
 #define VER_MAJOR 2
-#define VER_MINOR 1
-#define VER_SUBMINOR 1
+#define VER_MINOR 5
+#define VER_SUBMINOR 4
 
 // Macros for kernel (esp. SMP) tracing using a PCI analyzer
 // (e.g. x86).
@@ -95,14 +95,11 @@
 
 #define DEV_NAME "cpqfcTS"
 
-#define CPQ_DEVICE_ID     0xA0FC
-#define AGILENT_XL2_ID    0x1029
-
-typedef struct
+struct SupportedPCIcards
 {
   __u16 vendor_id;
   __u16 device_id;
-} SupportedPCIcards;
+};
 			 
 // nn:nn denotes bit field
                             // TachyonHeader struct def.
@@ -229,7 +226,6 @@ typedef __u8 BOOLEAN;
 #define ELS_PRLI_ACC 0x22  // {FCP-SCSI} Process Login Accept
 #define ELS_RJT 0x1000000
 #define SCSI_REPORT_LUNS 0x0A0
-#define REPORT_LUNS 0xA0 // SCSI-3 command op-code
 #define FCP_TARGET_RESET 0x200
 
 #define ELS_LILP_FRAME 0x00000711 // 1st payload word of LILP frame
@@ -866,7 +862,7 @@ void BigEndianSwap(  UCHAR *source, UCHAR *dest,  USHORT cnt);
                   
 
 // Linux interrupt handler
-void cpqfcTS_intr_handler( int irq,void *dev_id,struct pt_regs *regs);
+irqreturn_t cpqfcTS_intr_handler( int irq,void *dev_id,struct pt_regs *regs);
 void cpqfcTSheartbeat( unsigned long ptr );
 
 
@@ -911,9 +907,17 @@ typedef struct
 
 } FC_SCSI_QUE, *PFC_SCSI_QUE;
 
+typedef struct {
+	/* This is tacked on to a Scsi_Request in upper_private_data 
+	   for pasthrough ioctls, as a place to hold data that can't 
+	   be stashed anywhere else in the Scsi_Request.  We differentiate
+	   this from _real_ upper_private_data by checking if the virt addr
+	   is within our special pool.  */
+	ushort bus;
+	ushort pdrive;
+} cpqfc_passthru_private_t;
 
-
-
+#define CPQFC_MAX_PASSTHRU_CMDS 100
 
 #define DYNAMIC_ALLOCATIONS 4  // Tachyon aligned allocations: ERQ,IMQ,SFQ,SEST
 
@@ -953,6 +957,8 @@ typedef struct
   PFC_LINK_QUE fcLQ;             // the WorkerThread operates on this
 
   spinlock_t hba_spinlock;           // held/released by WorkerThread
+  cpqfc_passthru_private_t *private_data_pool;
+  unsigned long *private_data_bits;
 
 } CPQFCHBA;
 
@@ -1408,6 +1414,7 @@ struct ext_sg_entry_t {
 	__u32 uba:13;		/* upper bus address bits 18-31 */
 	__u32 lba;		/* lower bus address bits 0-31 */
 }; 
+
 
 // J. McCarty's LINK.H
 //

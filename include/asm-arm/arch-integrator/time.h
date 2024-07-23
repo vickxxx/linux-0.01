@@ -98,7 +98,8 @@ static unsigned long integrator_gettimeoffset(void)
 /*
  * IRQ handler for the timer
  */
-static void integrator_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+integrator_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	volatile TimerStruct_t *timer1 = (volatile TimerStruct_t *)TIMER1_VA_BASE;
 
@@ -108,12 +109,14 @@ static void integrator_timer_interrupt(int irq, void *dev_id, struct pt_regs *re
 	do_leds();
 	do_timer(regs);
 	do_profile(regs);
+
+	return IRQ_HANDLED;
 }
 
 /*
  * Set up timer interrupt, and return the current time in seconds.
  */
-static inline void setup_timer(void)
+void __init time_init(void)
 {
 	volatile TimerStruct_t *timer0 = (volatile TimerStruct_t *)TIMER0_VA_BASE;
 	volatile TimerStruct_t *timer1 = (volatile TimerStruct_t *)TIMER1_VA_BASE;
@@ -129,12 +132,11 @@ static inline void setup_timer(void)
 	timer2->TimerControl = 0;
 
 	timer1->TimerLoad    = TIMER_RELOAD;
-	timer1->TimerValue   = TIMER_RELOAD;
 	timer1->TimerControl = TIMER_CTRL | 0x40;	/* periodic */
 
 	/* 
 	 * Make irqs happen for the system timer
 	 */
-	setup_arm_irq(IRQ_TIMERINT1, &timer_irq);
+	setup_irq(IRQ_TIMERINT1, &timer_irq);
 	gettimeoffset = integrator_gettimeoffset;
 }

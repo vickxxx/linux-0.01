@@ -1,24 +1,16 @@
 #include <linux/config.h>
 
+#include <asm/system.h>
+
 #ifdef CONFIG_IA64_GENERIC
 
 #include <linux/kernel.h>
 #include <linux/string.h>
 
-#include <asm/page.h>
 #include <asm/machvec.h>
+#include <asm/page.h>
 
 struct ia64_machine_vector ia64_mv;
-
-/*
- * Most platforms use this routine for mapping page frame addresses
- * into a memory map index.
- */
-unsigned long
-map_nr_dense (unsigned long addr)
-{
-	return MAP_NR_DENSE(addr);
-}
 
 static struct ia64_machine_vector *
 lookup_machvec (const char *name)
@@ -44,7 +36,7 @@ machvec_init (const char *name)
 		panic("generic kernel failed to find machine vector for platform %s!", name);
 	}
 	ia64_mv = *mv;
-	printk("booting generic kernel on platform %s\n", name);
+	printk(KERN_INFO "booting generic kernel on platform %s\n", name);
 }
 
 #endif /* CONFIG_IA64_GENERIC */
@@ -52,4 +44,10 @@ machvec_init (const char *name)
 void
 machvec_noop (void)
 {
+}
+
+void
+machvec_memory_fence (void)
+{
+	mb();
 }

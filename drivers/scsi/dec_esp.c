@@ -31,7 +31,6 @@
 #include "scsi.h"
 #include "hosts.h"
 #include "NCR53C9x.h"
-#include "dec_esp.h"
 
 #include <asm/irq.h>
 #include <asm/jazz.h>
@@ -45,6 +44,11 @@
 #include <asm/dec/ioasic_addrs.h>
 #include <asm/dec/ioasic_ints.h>
 #include <asm/dec/machtype.h>
+
+#define DEC_SCSI_SREG 0
+#define DEC_SCSI_DMAREG 0x40000
+#define DEC_SCSI_SRAM 0x80000
+#define DEC_SCSI_DIAG 0xC0000
 
 /*
  * Once upon a time the pmaz code used to be working but
@@ -103,7 +107,35 @@ volatile unsigned long *scsi_sdr1;
 
 static void scsi_dma_int(int, void *, struct pt_regs *);
 
-static Scsi_Host_Template driver_template = SCSI_DEC_ESP;
+int dec_esp_detect(Scsi_Host_Template * tpnt);
+
+static int dec_esp_release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
+}
+
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp",
+	.proc_info		= &esp_proc_info,
+	.name			= "NCR53C94",
+	.detect			= dec_esp_detect,
+	.release		= dec_esp_release,
+	.info			= esp_info,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= DISABLE_CLUSTERING,
+};
+
 
 #include "scsi_module.c"
 
@@ -189,10 +221,10 @@ int dec_esp_detect(Scsi_Host_Template * tpnt)
 		esp_initialize(esp);
 
 		if (request_irq(esp->irq, esp_intr, SA_INTERRUPT, 
-				"NCR 53C94 SCSI", NULL))
+				"NCR 53C94 SCSI", esp->ehost))
 			goto err_dealloc;
 		if (request_irq(SCSI_DMA_INT, scsi_dma_int, SA_INTERRUPT, 
-				"JUNKIO SCSI DMA", NULL))
+				"JUNKIO SCSI DMA", esp->ehost))
 			goto err_free_irq;
  			
 	}
@@ -253,7 +285,7 @@ int dec_esp_detect(Scsi_Host_Template * tpnt)
 			esp->dma_advance_sg = 0;
 
  			if (request_irq(esp->irq, esp_intr, SA_INTERRUPT, 
- 					 "PMAZ_AA", NULL)) {
+ 					 "PMAZ_AA", esp->ehost)) {
  				esp_deallocate(esp);
  				release_tc_card(slot);
  				continue;

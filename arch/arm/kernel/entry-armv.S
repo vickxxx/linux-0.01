@@ -14,7 +14,10 @@
  *  it to save wrong values...  Be aware!
  */
 #include <linux/config.h>
+#include <linux/init.h>
 #include "entry-header.S"
+#include <asm/thread_info.h>
+#include <asm/glue.h>
 
 
 #ifdef IOC_BASE
@@ -187,11 +190,10 @@ irq_prio_ld:	.byte	40,40,41,40,42,42,42,42,43,43,43,43,43,43,43,43
 
 		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
 		mov	r4, #0xe0000000
-		orr	r4, r4, #0x20
 
 		mov	\irqstat, #0x0C
-		strb	\irqstat, [r4]			@outb(0x0C, 0x20) /* Poll command */
-		ldrb	\irqnr, [r4]			@irq = inb(0x20) & 7
+		strb	\irqstat, [r4, #0x20]		@outb(0x0C, 0x20) /* Poll command */
+		ldrb	\irqnr, [r4, #0x20]		@irq = inb(0x20) & 7
 		and	\irqstat, \irqnr, #0x80
 		teq	\irqstat, #0
 		beq	43f
@@ -199,8 +201,8 @@ irq_prio_ld:	.byte	40,40,41,40,42,42,42,42,43,43,43,43,43,43,43,43
 		teq	\irqnr, #2
 		bne	44f
 43:		mov	\irqstat, #0x0C
-		strb	\irqstat, [r4, #0x80]		@outb(0x0C, 0xA0) /* Poll command */
-		ldrb	\irqnr, [r4, #0x80]		@irq = (inb(0xA0) & 7) + 8
+		strb	\irqstat, [r4, #0xa0]		@outb(0x0C, 0xA0) /* Poll command */
+		ldrb	\irqnr, [r4, #0xa0]		@irq = (inb(0xA0) & 7) + 8
 		and	\irqstat, \irqnr, #0x80
 		teq	\irqstat, #0
 		beq	44f
@@ -548,6 +550,84 @@ ENTRY(anakin_active_irqs)
 		.text
 		.endm
 
+#elif defined(CONFIG_ARCH_IOP310) || defined(CONFIG_ARCH_ADIFCC)
+
+		.macro	disable_fiq
+		.endm
+
+        	.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
+        	mrc p13, 0, \irqstat, c4, c0, 0 @ get INTSRC
+        	mrc p13, 0, \base, c0, c0, 0    @ get INTCTL
+
+        	tst \irqstat, #(1<<29)      @ if INTSRC_BI
+        	tstne   \base, #(1<<3)          @ and INTCTL_BM
+        	movne   \irqnr, #IRQ_XS80200_BCU
+        	bne 1001f
+
+        	tst \irqstat, #(1<<28)      @ if INTSRC_PI
+        	tstne   \base, #(1<<2)          @ and INTCTL_PM
+        	movne   \irqnr, #IRQ_XS80200_PMU
+        	bne 1001f
+
+        	tst \irqstat, #(1<<31)      @ if INTSRC_FI
+        	tstne   \base, #(1<<0)          @ and INTCTL_FM
+        	movne   \irqnr, #IRQ_XS80200_EXTFIQ
+        	bne 1001f
+
+        	tst \irqstat, #(1<<30)      @ if INTSRC_II
+        	tstne   \base, #(1<<1)          @ and INTCTL_IM
+        	movne   \irqnr, #IRQ_XS80200_EXTIRQ
+
+1001:
+  		.endm
+
+  		.macro	irq_prio_table
+ 		.endm
+
+#elif defined(CONFIG_ARCH_IOP321)
+		.macro  disable_fiq
+		.endm
+
+		/*
+		 * Note: only deal with normal interrupts, not FIQ
+		 */
+		.macro  get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov     \irqnr, #0
+		mrc     p6, 0, \irqstat, c8, c0, 0      @ Read IINTSRC
+		cmp     \irqstat, #0
+		beq     1001f
+		clz     \irqnr, \irqstat
+		mov     \base, #31
+		subs    \irqnr,\base,\irqnr
+		add     \irqnr,\irqnr,#IRQ_IOP321_DMA0_EOT
+1001:
+		.endm
+
+		.macro  irq_prio_table
+		.endm
+
+#elif defined(CONFIG_ARCH_PXA)
+
+		.macro	disable_fiq
+		.endm
+
+		.macro	get_irqnr_and_base, irqnr, irqstat, base, tmp
+		mov	\base, #io_p2v(0x40000000)	@ IIR Ctl = 0x40d00000
+		add	\base, \base, #0x00d00000
+		ldr	\irqstat, [\base, #0]		@ ICIP
+		ldr	\irqnr, [\base, #4]		@ ICMR
+		ands	\irqnr, \irqstat, \irqnr
+		beq	1001f
+		rsb	\irqstat, \irqnr, #0
+		and	\irqstat, \irqstat, \irqnr
+		clz	\irqnr, \irqstat
+		rsb	\irqnr, \irqnr, #(31 - PXA_IRQ_SKIP)
+1001:
+		.endm
+
+		.macro	irq_prio_table
+		.endm
+
 #else
 #error Unknown architecture
 #endif
@@ -584,11 +664,11 @@ __und_invalid:	sub	sp, sp, #S_FRAME_SIZE
 		stmia	r4, {r5 - r7}			@ Save XXX pc, cpsr, old_r0
 		mov	r0, sp
 		and	r2, r6, #31			@ int mode
-		b	SYMBOL_NAME(bad_mode)
+		b	bad_mode
 
-#if defined CONFIG_FPE_NWFPE || defined CONFIG_FPE_FASTFPE
+#if 1 /* defined CONFIG_FPE_NWFPE || defined CONFIG_FPE_FASTFPE */
 		/* The FPE is always present */
-		.equ	fpe_not_present, 0
+		.equ	fpe_not_present, fpundefinstr
 #else
 wfs_mask_data:	.word	0x0e200110			@ WFS/RFS
 		.word	0x0fef0fff
@@ -641,24 +721,22 @@ __dabt_svc:	sub	sp, sp, #S_FRAME_SIZE
 		mov	r1, lr
 		stmia	r5, {r0 - r4}			@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
 		mrs	r9, cpsr			@ Enable interrupts if they were
-		tst	r3, #I_BIT
-		biceq	r9, r9, #I_BIT			@ previously
-		mov	r0, r2
+		tst	r3, #PSR_I_BIT
+		biceq	r9, r9, #PSR_I_BIT		@ previously
 /*
  * This routine must not corrupt r9
  */
-#ifdef MULTI_CPU
-		ldr	r2, .LCprocfns			@ pass r0, r3 to
+#ifdef MULTI_ABORT
+		ldr	r4, .LCprocfns			@ pass r0, r3 to
 		mov	lr, pc				@ processor code
-		ldr	pc, [r2]			@ call processor specific code
+		ldr	pc, [r4]			@ call processor specific code
 #else
-		bl	cpu_data_abort
+		bl	CPU_ABORT_HANDLER
 #endif
 		msr	cpsr_c, r9
 		mov	r2, sp
-		bl	SYMBOL_NAME(do_DataAbort)
-		mov	r0, #I_BIT | MODE_SVC
-		msr	cpsr_c, r0
+		bl	do_DataAbort
+		disable_irq r0
 		ldr	r0, [sp, #S_PSR]
 		msr	spsr, r0
 		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
@@ -672,36 +750,72 @@ __irq_svc:	sub	sp, sp, #S_FRAME_SIZE
 		add	r4, sp, #S_SP
 		mov	r6, lr
 		stmia	r4, {r5, r6, r7, r8, r9}	@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
+#ifdef CONFIG_PREEMPT
+		get_thread_info r8
+		ldr	r9, [r8, #TI_PREEMPT]		@ get preempt count
+		add	r7, r9, #1			@ increment it
+		str	r7, [r8, #TI_PREEMPT]
+#endif
 1:		get_irqnr_and_base r0, r6, r5, lr
 		movne	r1, sp
 		@
 		@ routine called with r0 = irq number, r1 = struct pt_regs *
 		@
 		adrsvc	ne, lr, 1b
-		bne	do_IRQ
+		bne	asm_do_IRQ
+#ifdef CONFIG_PREEMPT
+		ldr	r0, [r8, #TI_FLAGS]		@ get flags
+		tst	r0, #_TIF_NEED_RESCHED
+		blne	svc_preempt
+preempt_return:
+		ldr	r0, [r8, #TI_PREEMPT]		@ read preempt value
+		teq	r0, r7
+		strne	r0, [r0, -r0]			@ bug()
+		str	r9, [r8, #TI_PREEMPT]		@ restore preempt count
+#endif
 		ldr	r0, [sp, #S_PSR]		@ irqs are already disabled
 		msr	spsr, r0
 		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
 
+		.ltorg
+
+#ifdef CONFIG_PREEMPT
+svc_preempt:	teq	r9, #0				@ was preempt count = 0
+		ldreq	r6, .LCirq_stat
+		movne	pc, lr				@ no
+		ldr	r0, [r6, #4]			@ local_irq_count
+		ldr	r1, [r6, #8]			@ local_bh_count
+		adds	r0, r0, r1
+		movne	pc, lr
+		mov	r7, #PREEMPT_ACTIVE
+		str	r7, [r8, #TI_PREEMPT]		@ set PREEMPT_ACTIVE
+1:		enable_irq r2				@ enable IRQs
+		bl	schedule
+		disable_irq r0				@ disable IRQs
+		ldr	r0, [r8, #TI_FLAGS]		@ get new tasks TI_FLAGS
+		tst	r0, #_TIF_NEED_RESCHED
+		beq	preempt_return			@ go again
+		b	1b
+#endif
+
 		.align	5
 __und_svc:	sub	sp, sp, #S_FRAME_SIZE
 		stmia	sp, {r0 - r12}			@ save r0 - r12
-		ldr	r7, .LCund
-		mov	r6, lr
-		ldmia	r7, {r7 - r9}
-		add	r5, sp, #S_FRAME_SIZE
-		add	r4, sp, #S_SP
-		stmia	r4, {r5 - r9}			@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
+		ldr	r3, .LCund
+		mov	r4, lr
+		ldmia	r3, {r5 - r7}
+		add	r3, sp, #S_FRAME_SIZE
+		add	r2, sp, #S_SP
+		stmia	r2, {r3 - r7}			@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
 
-		adrsvc	al, r9, 1f			@ r9  = normal FP return
-		bl	call_fpe			@ lr  = undefined instr return
+		ldr	r0, [r5, #-4]			@ r0 = instruction
+		adrsvc	al, r9, 1f			@ r9 = normal FP return
+		bl	call_fpe			@ lr = undefined instr return
 
-		mov	r0, r5				@ unsigned long pc
-		mov	r1, sp				@ struct pt_regs *regs
-		bl	SYMBOL_NAME(do_undefinstr)
+		mov	r0, sp				@ struct pt_regs *regs
+		bl	do_undefinstr
 
-1:		mov	r0, #I_BIT | MODE_SVC
-		msr	cpsr_c, r0
+1:		disable_irq r0
 		ldr	lr, [sp, #S_PSR]		@ Get SVC cpsr
 		msr	spsr, lr
 		ldmia	sp, {r0 - pc}^			@ Restore SVC registers
@@ -716,14 +830,13 @@ __pabt_svc:	sub	sp, sp, #S_FRAME_SIZE
 		mov	r1, lr
 		stmia	r5, {r0 - r4}			@ save sp_SVC, lr_SVC, pc, cpsr, old_ro
 		mrs	r9, cpsr			@ Enable interrupts if they were
-		tst	r3, #I_BIT
-		biceq	r9, r9, #I_BIT			@ previously
+		tst	r3, #PSR_I_BIT
+		biceq	r9, r9, #PSR_I_BIT		@ previously
 		msr	cpsr_c, r9
 		mov	r0, r2				@ address (pc)
 		mov	r1, sp				@ regs
-		bl	SYMBOL_NAME(do_PrefetchAbort)	@ call abort handler
-		mov	r0, #I_BIT | MODE_SVC
-		msr	cpsr_c, r0
+		bl	do_PrefetchAbort		@ call abort handler
+		disable_irq r0
 		ldr	r0, [sp, #S_PSR]
 		msr	spsr, r0
 		ldmia	sp, {r0 - pc}^			@ load r0 - pc, cpsr
@@ -732,10 +845,13 @@ __pabt_svc:	sub	sp, sp, #S_FRAME_SIZE
 .LCirq:		.word	__temp_irq
 .LCund:		.word	__temp_und
 .LCabt:		.word	__temp_abt
-#ifdef MULTI_CPU
-.LCprocfns:	.word	SYMBOL_NAME(processor)
+#ifdef MULTI_ABORT
+.LCprocfns:	.word	processor
 #endif
-.LCfp:		.word	SYMBOL_NAME(fp_enter)
+.LCfp:		.word	fp_enter
+#ifdef CONFIG_PREEMPT
+.LCirq_stat:	.word	irq_stat
+#endif
 
 		irq_prio_table
 
@@ -747,23 +863,22 @@ __dabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
 		stmia	sp, {r0 - r12}			@ save r0 - r12
 		ldr	r7, .LCabt
 		add	r5, sp, #S_PC
-		ldmia	r7, {r0, r3, r4}		@ Get USR pc, cpsr
-		stmia	r5, {r0, r3, r4}		@ Save USR pc, cpsr, old_r0
+		ldmia	r7, {r2 - r4}			@ Get USR pc, cpsr
+		stmia	r5, {r2 - r4}			@ Save USR pc, cpsr, old_r0
 		stmdb	r5, {sp, lr}^
 		alignment_trap r7, r7, __temp_abt
 		zero_fp
-#ifdef MULTI_CPU
-		ldr	r2, .LCprocfns			@ pass r0, r3 to
+#ifdef MULTI_ABORT
+		ldr	r4, .LCprocfns			@ pass r0, r3 to
 		mov	lr, pc				@ processor code
-		ldr	pc, [r2]			@ call processor specific code
+		ldr	pc, [r4]			@ call processor specific code
 #else
-		bl	cpu_data_abort
+		bl	CPU_ABORT_HANDLER
 #endif
-		mov	r2, #MODE_SVC
-		msr	cpsr_c, r2			@ Enable interrupts
+		enable_irq r2				@ Enable interrupts
 		mov	r2, sp
 		adrsvc	al, lr, ret_from_exception
-		b	SYMBOL_NAME(do_DataAbort)
+		b	do_DataAbort
 
 		.align	5
 __irq_usr:	sub	sp, sp, #S_FRAME_SIZE
@@ -775,16 +890,32 @@ __irq_usr:	sub	sp, sp, #S_FRAME_SIZE
 		stmdb	r8, {sp, lr}^
 		alignment_trap r4, r7, __temp_irq
 		zero_fp
+#ifdef CONFIG_PREEMPT
+		get_thread_info r8
+		ldr	r9, [r8, #TI_PREEMPT]		@ get preempt count
+		add	r7, r9, #1			@ increment it
+		str	r7, [r8, #TI_PREEMPT]
+#endif
 1:		get_irqnr_and_base r0, r6, r5, lr
 		movne	r1, sp
 		adrsvc	ne, lr, 1b
 		@
 		@ routine called with r0 = irq number, r1 = struct pt_regs *
 		@
-		bne	do_IRQ
+		bne	asm_do_IRQ
+#ifdef CONFIG_PREEMPT
+		ldr	r0, [r8, #TI_PREEMPT]
+		teq	r0, r7
+		strne	r0, [r0, -r0]
+		str	r9, [r8, #TI_PREEMPT]
+		mov	tsk, r8
+#else
+		get_thread_info tsk
+#endif
 		mov	why, #0
-		get_current_task tsk
 		b	ret_to_user
+
+		.ltorg
 
 		.align	5
 __und_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
@@ -796,22 +927,64 @@ __und_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
 		stmdb	r8, {sp, lr}^			@ Save user sp, lr
 		alignment_trap r4, r7, __temp_und
 		zero_fp
+		tst	r6, #PSR_T_BIT			@ Thumb mode?
+		bne	fpundefinstr			@ ignore FP
+		sub	r4, r5, #4
+1:		ldrt	r0, [r4]			@ r0  = instruction
 		adrsvc	al, r9, ret_from_exception	@ r9  = normal FP return
 		adrsvc	al, lr, fpundefinstr		@ lr  = undefined instr return
 
-call_fpe:	get_current_task r10
-		mov	r8, #1
-		strb	r8, [r10, #TSK_USED_MATH]	@ set current->used_math
-		ldr	r4, .LCfp
-		add	r10, r10, #TSS_FPESAVE		@ r10 = workspace
-		ldr	pc, [r4]			@ Call FP module USR entry point
+/*
+ * The out of line fixup for the ldrt above.
+ */
+		.section .fixup, "ax"
+2:		mov	pc, r9
+		.previous
+		.section __ex_table,"a"
+		.long	1b, 2b
+		.previous
 
-fpundefinstr:	mov	r0, #MODE_SVC
-		msr	cpsr_c, r0			@ Enable interrupts
-		mov	r0, lr
-		mov	r1, sp
+/*
+ * r0 = instruction.
+ *
+ * Check whether the instruction is a co-processor instruction.
+ * If yes, we need to call the relevant co-processor handler.
+ *
+ * Note that we don't do a full check here for the co-processor
+ * instructions; all instructions with bit 27 set are well
+ * defined.  The only instructions that should fault are the
+ * co-processor instructions.  However, we have to watch out
+ * for the ARM6/ARM7 SWI bug.
+ *
+ * Emulators may wish to make use of the instruction value we
+ * prepared for them in r0.
+ */
+call_fpe:	enable_irq r10				@ Enable interrupts
+		tst	r0, #0x08000000			@ only CDP/CPRT/LDC/STC have bit 27
+#if defined(CONFIG_CPU_ARM610) || defined(CONFIG_CPU_ARM710)
+		and	r10, r0, #0x0f000000		@ mask out op-code bits
+		teqne	r10, #0x0f000000		@ SWI (ARM6/7 bug)?
+#endif
+		moveq	pc, lr
+do_fpe:		get_thread_info r10			@ get current thread
+		ldr	r4, [r10, #TI_TASK]		@ get current task
+		mov	r8, #1
+		strb	r8, [r4, #TSK_USED_MATH]	@ set current->used_math
+		ldr	r4, .LCfp
+		add	r10, r10, #TI_FPSTATE		@ r10 = workspace
+		ldr	pc, [r4]			@ Call FP module USR entry point
+/*
+ * The FP module is called with these registers set:
+ *  r0  = instruction
+ *  r5  = PC
+ *  r9  = normal "successful" return address
+ *  r10 = FP workspace
+ *  lr  = unrecognised FP instruction return address
+ */
+
+fpundefinstr:	mov	r0, sp
 		adrsvc	al, lr, ret_from_exception
-		b	SYMBOL_NAME(do_undefinstr)
+		b	do_undefinstr
 
 		.align	5
 __pabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
@@ -823,17 +996,16 @@ __pabt_usr:	sub	sp, sp, #S_FRAME_SIZE		@ Allocate frame size in one go
 		stmdb	r8, {sp, lr}^			@ Save sp_usr lr_usr
 		alignment_trap r4, r7, __temp_abt
 		zero_fp
-		mov	r0, #MODE_SVC
-		msr	cpsr_c, r0			@ Enable interrupts
+		enable_irq r0				@ Enable interrupts
 		mov	r0, r5				@ address (pc)
 		mov	r1, sp				@ regs
-		bl	SYMBOL_NAME(do_PrefetchAbort)	@ call abort handler
+		bl	do_PrefetchAbort		@ call abort handler
 		/* fall through */
 /*
  * This is the return code to user mode for abort handlers
  */
 ENTRY(ret_from_exception)
-		get_current_task tsk
+		get_thread_info tsk
 		mov	why, #0
 		b	ret_to_user
 
@@ -843,22 +1015,17 @@ ENTRY(fp_enter)
 		.text
 /*
  * Register switch for ARMv3 and ARMv4 processors
- * r0 = previous, r1 = next, return previous.
+ * r0 = previous thread_info, r1 = next thread_info
  * previous and next are guaranteed not to be the same.
  */
 ENTRY(__switch_to)
-		stmfd	sp!, {r4 - sl, fp, lr}		@ Store most regs on stack
-		mrs	ip, cpsr
-		str	ip, [sp, #-4]!			@ Save cpsr_SVC
-		str	sp, [r0, #TSS_SAVE]		@ Save sp_SVC
-		ldr	sp, [r1, #TSS_SAVE]		@ Get saved sp_SVC
-		ldr	r2, [r1, #TSS_DOMAIN]
-		ldr	ip, [sp], #4
-		mcr	p15, 0, r2, c3, c0		@ Set domain register
-		msr	spsr, ip			@ Save tasks CPSR into SPSR for this return
-		ldmfd	sp!, {r4 - sl, fp, pc}^		@ Load all regs saved previously
+		add	ip, r1, #TI_CPU_SAVE
+		ldr	r3, [r2, #TI_CPU_DOMAIN]!
+		stmia	ip, {r4 - sl, fp, sp, lr}	@ Store most regs on stack
+		mcr	p15, 0, r3, c3, c0, 0		@ Set domain register
+		ldmib	r2, {r4 - sl, fp, sp, pc}	@ Load all regs saved previously
 
-		.section ".text.init",#alloc,#execinstr
+		__INIT
 /*
  * Vector stubs.  NOTE that we only align 'vector_IRQ' to a cache line boundary,
  * and we rely on each stub being exactly 48 (1.5 cache lines) in size.  This
@@ -881,10 +1048,12 @@ vector_IRQ:	@
 		mrs	lr, spsr
 		str	lr, [r13, #4]			@ save spsr_IRQ
 		@
-		@ now branch to the relevent MODE handling routine
+		@ now branch to the relevant MODE handling routine
 		@
-		mov	r13, #I_BIT | MODE_SVC
-		msr	spsr_c, r13			@ switch to SVC_32 mode
+		mrs	r13, cpsr
+		bic	r13, r13, #MODE_MASK
+		orr	r13, r13, #MODE_SVC
+		msr	spsr, r13			@ switch to SVC_32 mode
 
 		and	lr, lr, #15
 		ldr	lr, [pc, lr, lsl #2]
@@ -922,10 +1091,12 @@ vector_data:	@
 		mrs	lr, spsr
 		str	lr, [r13, #4]
 		@
-		@ now branch to the relevent MODE handling routine
+		@ now branch to the relevant MODE handling routine
 		@
-		mov	r13, #I_BIT | MODE_SVC
-		msr	spsr_c, r13			@ switch to SVC_32 mode
+		mrs	r13, cpsr
+		bic	r13, r13, #MODE_MASK
+		orr	r13, r13, #MODE_SVC
+		msr	spsr, r13			@ switch to SVC_32 mode
 
 		and	lr, lr, #15
 		ldr	lr, [pc, lr, lsl #2]
@@ -964,10 +1135,12 @@ vector_prefetch:
 		mrs	lr, spsr
 		str	lr, [r13, #4]			@ save spsr_ABT
 		@
-		@ now branch to the relevent MODE handling routine
+		@ now branch to the relevant MODE handling routine
 		@
-		mov	r13, #I_BIT | MODE_SVC
-		msr	spsr_c, r13			@ switch to SVC_32 mode
+		mrs	r13, cpsr
+		bic	r13, r13, #MODE_MASK
+		orr	r13, r13, #MODE_SVC
+		msr	spsr, r13			@ switch to SVC_32 mode
 
 		ands	lr, lr, #15
 		ldr	lr, [pc, lr, lsl #2]
@@ -1005,10 +1178,12 @@ vector_undefinstr:
 		mrs	lr, spsr
 		str	lr, [r13, #4]			@ save spsr_UND
 		@
-		@ now branch to the relevent MODE handling routine
+		@ now branch to the relevant MODE handling routine
 		@
-		mov	r13, #I_BIT | MODE_SVC
-		msr	spsr_c, r13			@ switch to SVC_32 mode
+		mrs	r13, cpsr
+		bic	r13, r13, #MODE_MASK
+		orr	r13, r13, #MODE_SVC
+		msr	spsr, r13			@ switch to SVC_32 mode
 
 		and	lr, lr, #15
 		ldr	lr, [pc, lr, lsl #2]
@@ -1113,9 +1288,9 @@ __temp_abt:	.word	0				@ Saved lr_abt
 		.word	0				@ Saved spsr_abt
 		.word	-1				@ old_r0
 
-		.globl	SYMBOL_NAME(cr_alignment)
-		.globl	SYMBOL_NAME(cr_no_alignment)
-SYMBOL_NAME(cr_alignment):
+		.globl	cr_alignment
+		.globl	cr_no_alignment
+cr_alignment:
 		.space	4
-SYMBOL_NAME(cr_no_alignment):
+cr_no_alignment:
 		.space	4

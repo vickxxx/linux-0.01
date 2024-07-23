@@ -25,9 +25,7 @@ static const char version[] =
 	"ac3200.c:v1.01 7/1/94 Donald Becker (becker@cesdis.gsfc.nasa.gov)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/netdevice.h>
@@ -169,7 +167,7 @@ static int __init ac_probe1(int ioaddr, struct net_device *dev)
 		dev->irq = config2irq(inb(ioaddr + AC_CONFIG));
 		printk(", using");
 	} else {
-		dev->irq = irq_cannonicalize(dev->irq);
+		dev->irq = irq_canonicalize(dev->irq);
 		printk(", assigning");
 	}
 
@@ -205,10 +203,10 @@ static int __init ac_probe1(int ioaddr, struct net_device *dev)
 	 *  the card mem within the region covered by `normal' RAM  !!!
 	 */
 	if (dev->mem_start > 1024*1024) {	/* phys addr > 1MB */
-		if (dev->mem_start < virt_to_bus(high_memory)) {
+		if (dev->mem_start < virt_to_phys(high_memory)) {
 			printk(KERN_CRIT "ac3200.c: Card RAM overlaps with normal memory!!!\n");
 			printk(KERN_CRIT "ac3200.c: Use EISA SCU to set card memory below 1MB,\n");
-			printk(KERN_CRIT "ac3200.c: or to an address above 0x%lx.\n", virt_to_bus(high_memory));
+			printk(KERN_CRIT "ac3200.c: or to an address above 0x%lx.\n", virt_to_phys(high_memory));
 			printk(KERN_CRIT "ac3200.c: Driver NOT installed.\n");
 			retval = -EINVAL;
 			goto out2;
@@ -226,8 +224,8 @@ static int __init ac_probe1(int ioaddr, struct net_device *dev)
 				AC_STOP_PG/4, dev->mem_start);
 	}
 
-	dev->rmem_start = dev->mem_start + TX_PAGES*256;
-	dev->mem_end = dev->rmem_end = dev->mem_start
+	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
+	dev->mem_end = ei_status.rmem_end = dev->mem_start
 		+ (AC_STOP_PG - AC_START_PG)*256;
 
 	ei_status.name = "AC3200";
@@ -302,12 +300,12 @@ static void ac_block_input(struct net_device *dev, int count, struct sk_buff *sk
 {
 	unsigned long xfer_start = dev->mem_start + ring_offset - (AC_START_PG<<8);
 
-	if (xfer_start + count > dev->rmem_end) {
+	if (xfer_start + count > ei_status.rmem_end) {
 		/* We must wrap the input move. */
-		int semi_count = dev->rmem_end - xfer_start;
+		int semi_count = ei_status.rmem_end - xfer_start;
 		isa_memcpy_fromio(skb->data, xfer_start, semi_count);
 		count -= semi_count;
-		isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+		isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
 		isa_eth_io_copy_and_sum(skb, xfer_start, count, 0);
@@ -346,9 +344,11 @@ static int mem[MAX_AC32_CARDS];
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_AC32_CARDS) "i");
 MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_AC32_CARDS) "i");
 MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_AC32_CARDS) "i");
-MODULE_PARM_DESC(io, "ac3200 I/O base adress(es)");
-MODULE_PARM_DESC(irq, "ac3200 IRQ number(s)");
-MODULE_PARM_DESC(mem, "ac3200 Memory base address(es)");
+MODULE_PARM_DESC(io, "I/O base address(es)");
+MODULE_PARM_DESC(irq, "IRQ number(s)");
+MODULE_PARM_DESC(mem, "Memory base address(es)");
+MODULE_DESCRIPTION("Ansel AC3200 EISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 int
 init_module(void)
@@ -395,7 +395,6 @@ cleanup_module(void)
 	}
 }
 #endif /* MODULE */
-MODULE_LICENSE("GPL");
 
 
 /*

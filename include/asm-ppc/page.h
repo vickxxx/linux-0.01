@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.page.h 1.8 08/19/01 20:06:47 paulus
- */
 #ifndef _PPC_PAGE_H
 #define _PPC_PAGE_H
 
@@ -12,25 +9,11 @@
 #ifdef __KERNEL__
 #include <linux/config.h>
 
-/* Be sure to change arch/ppc/Makefile to match */
-#define PAGE_OFFSET	0xc0000000
+/* This must match what is in arch/ppc/Makefile */
+#define PAGE_OFFSET	CONFIG_KERNEL_START
 #define KERNELBASE	PAGE_OFFSET
 
 #ifndef __ASSEMBLY__
-#include <asm/system.h> /* for xmon definition */
-
-#ifdef CONFIG_XMON
-#define BUG() do { \
-	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-	xmon(0); \
-} while (0)
-#else
-#define BUG() do { \
-	printk("kernel BUG at %s:%d!\n", __FILE__, __LINE__); \
-	__asm__ __volatile__(".long 0x0"); \
-} while (0)
-#endif
-#define PAGE_BUG(page) do { BUG(); } while (0)
 
 #define STRICT_MM_TYPECHECKS
 
@@ -75,17 +58,33 @@ typedef unsigned long pgprot_t;
 #endif
 
 
-/* align addr on a size boundry - adjust address up if needed -- Cort */
-#define _ALIGN(addr,size)	(((addr)+size-1)&(~(size-1)))
+/* align addr on a size boundary - adjust address up if needed -- Cort */
+#define _ALIGN(addr,size)	(((addr)+(size)-1)&(~((size)-1)))
 
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
+struct page;
 extern void clear_page(void *page);
 extern void copy_page(void *to, void *from);
-#define clear_user_page(page, vaddr)	clear_page(page)
-#define copy_user_page(to, from, vaddr)	copy_page(to, from)
+extern void clear_user_page(void *page, unsigned long vaddr, struct page *pg);
+extern void copy_user_page(void *to, void *from, unsigned long vaddr,
+			   struct page *pg);
 
+#ifndef CONFIG_APUS
+#define PPC_MEMSTART	0
+#define PPC_PGSTART	0
+#define PPC_MEMOFFSET	PAGE_OFFSET
+#else
+extern unsigned long ppc_memstart;
+extern unsigned long ppc_pgstart;
+extern unsigned long ppc_memoffset;
+#define PPC_MEMSTART	ppc_memstart
+#define PPC_PGSTART	ppc_pgstart
+#define PPC_MEMOFFSET	ppc_memoffset
+#endif
+
+#if defined(CONFIG_APUS) && !defined(MODULE)
 /* map phys->virtual and virtual->phys for RAM pages */
 static inline unsigned long ___pa(unsigned long v)
 { 
@@ -113,29 +112,35 @@ static inline void* ___va(unsigned long p)
 
 	return (void*) v;
 }
-#define __pa(x) ___pa ((unsigned long)(x))
-#define __va(x) ___va ((unsigned long)(x))
+#else
+#define ___pa(vaddr) ((vaddr)-PPC_MEMOFFSET)
+#define ___va(paddr) ((paddr)+PPC_MEMOFFSET)
+#endif
 
-#define MAP_PAGE_RESERVED	(1<<15)
-#define virt_to_page(kaddr)	(mem_map + (((unsigned long)kaddr-PAGE_OFFSET) >> PAGE_SHIFT))
-#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+#define __pa(x) ___pa((unsigned long)(x))
+#define __va(x) ((void *)(___va((unsigned long)(x))))
 
-extern unsigned long get_zero_page_fast(void);
+#define pfn_to_page(pfn)	(mem_map + ((pfn) - PPC_PGSTART))
+#define page_to_pfn(page)	((unsigned long)((page) - mem_map) + PPC_PGSTART)
+#define virt_to_page(kaddr)	pfn_to_page(__pa(kaddr) >> PAGE_SHIFT)
+
+#define pfn_valid(pfn)		(((pfn) - PPC_PGSTART) < max_mapnr)
+#define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
 
 /* Pure 2^n version of get_order */
 extern __inline__ int get_order(unsigned long size)
 {
-	int order;
+	int lz;
 
-	size = (size-1) >> (PAGE_SHIFT-1);
-	order = -1;
-	do {
-		size >>= 1;
-		order++;
-	} while (size);
-	return order;
+	size = (size-1) >> PAGE_SHIFT;
+	asm ("cntlzw %0,%1" : "=r" (lz) : "r" (size));
+	return 32 - lz;
 }
 
 #endif /* __ASSEMBLY__ */
+
+#define VM_DATA_DEFAULT_FLAGS	(VM_READ | VM_WRITE | VM_EXEC | \
+				 VM_MAYREAD | VM_MAYWRITE | VM_MAYEXEC)
+
 #endif /* __KERNEL__ */
 #endif /* _PPC_PAGE_H */

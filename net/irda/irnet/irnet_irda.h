@@ -53,7 +53,7 @@ typedef struct irnet_root
    * reentrant, beware... So, we blindly protect all with spinlock */
 
   /* Handle for the hint bit advertised in IrLMP */
-  __u32			skey;
+  void *		skey;
 
   /* Server socket part */
   struct ias_object *	ias_obj;	/* Our service name + lsap in IAS */
@@ -69,7 +69,8 @@ static void
 			 irnet_event,
 			 __u32,
 			 __u32,
-			 char *);
+			 char *,
+			 __u16);
 /* ----------------------- IRDA SUBROUTINES ----------------------- */
 static inline int
 	irnet_open_tsap(irnet_socket *);
@@ -150,11 +151,11 @@ static void
 				    void *);
 #ifdef DISCOVERY_EVENTS
 static void
-	irnet_discovery_indication(discovery_t *,
+	irnet_discovery_indication(discinfo_t *,
 				   DISCOVERY_MODE,
 				   void *);
 static void
-	irnet_expiry_indication(discovery_t *,
+	irnet_expiry_indication(discinfo_t *,
 				DISCOVERY_MODE,
 				void *);
 #endif

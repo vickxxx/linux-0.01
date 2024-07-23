@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.fec.c 1.20 10/11/01 11:55:47 trini
- */
-/*
  * Fast Ethernet Controller (FEC) driver for Motorola MPC8xx.
  * Copyright (c) 1997 Dan Malek (dmalek@jlc.net)
  *
@@ -25,14 +22,11 @@
  *
  * Make use of MII for PHY control configurable.
  * Some fixes.
- * Copyright (c) 2000 Wolfgang Denk, DENX Software Engineering.
+ * Copyright (c) 2000-2002 Wolfgang Denk, DENX Software Engineering.
+ *
+ * Support for AMD AM79C874 added.
+ * Thomas Lange, thomas@corelatus.com
  */
-
-/* List of PHYs we wish to support.
-*/
-#undef	CONFIG_FEC_LXT970
-#define	CONFIG_FEC_LXT971
-#undef	CONFIG_FEC_QS6612
 
 #include <linux/config.h>
 #include <linux/kernel.h>
@@ -163,7 +157,12 @@ struct fec_enet_private {
 	cbd_t	*tx_bd_base;
 	cbd_t	*cur_rx, *cur_tx;		/* The next free ring entry */
 	cbd_t	*dirty_tx;	/* The ring entries to be free()ed. */
-	scc_t	*sccp;
+
+	/* Virtual addresses for the receive buffers because we can't
+	 * do a __va() on them anymore.
+	 */
+	unsigned char *rx_vaddr[RX_RING_SIZE];
+
 	struct	net_device_stats stats;
 	uint	tx_full;
 	spinlock_t lock;
@@ -688,7 +687,7 @@ while (!(bdp->cbd_sc & BD_ENET_RX_EMPTY)) {
 	fep->stats.rx_packets++;
 	pkt_len = bdp->cbd_datlen;
 	fep->stats.rx_bytes += pkt_len;
-	data = (__u8*)__va(bdp->cbd_bufaddr);
+	data = fep->rx_vaddr[bdp - fep->rx_bd_base];
 
 #ifdef CONFIG_FEC_PACKETHOOK
 	/* Packet hook ... */
@@ -724,9 +723,7 @@ while (!(bdp->cbd_sc & BD_ENET_RX_EMPTY)) {
 	} else {
 		skb->dev = dev;
 		skb_put(skb,pkt_len-4);	/* Make room */
-		eth_copy_and_sum(skb,
-				 (unsigned char *)__va(bdp->cbd_bufaddr),
-				 pkt_len-4, 0);
+		eth_copy_and_sum(skb, data, pkt_len-4, 0);
 		skb->protocol=eth_type_trans(skb,dev);
 		netif_rx(skb);
 	}
@@ -1137,9 +1134,74 @@ static phy_info_t phy_info_qs6612 = {
 	},
 };
 
-
 #endif /* CONFIG_FEC_QS6612 */
 
+/* ------------------------------------------------------------------------- */
+/* The Advanced Micro Devices AM79C874 is used on the ICU862		     */
+
+#ifdef CONFIG_FEC_AM79C874
+
+/* register definitions for the 79C874 */
+
+#define MII_AM79C874_MFR	16  /* Miscellaneous Features Register      */
+#define MII_AM79C874_ICSR	17  /* Interrupt Control/Status Register    */
+#define MII_AM79C874_DR		18  /* Diagnostic Register		    */
+#define MII_AM79C874_PMLR	19  /* Power Management & Loopback Register */
+#define MII_AM79C874_MCR	21  /* Mode Control Register		    */
+#define MII_AM79C874_DC		23  /* Disconnect Counter		    */
+#define MII_AM79C874_REC	24  /* Receiver Error Counter		    */
+
+static void mii_parse_amd79c874_dr(uint mii_reg, struct net_device *dev, uint data)
+{
+	volatile struct fec_enet_private *fep = dev->priv;
+	uint s = fep->phy_status;
+
+	s &= ~(PHY_STAT_SPMASK);
+
+	/* Register 18: Bit 10 is data rate, 11 is Duplex */
+	switch ((mii_reg >> 10) & 3) {
+	case 0:	s |= PHY_STAT_10HDX;	break;
+	case 1:	s |= PHY_STAT_100HDX;	break;
+	case 2:	s |= PHY_STAT_10FDX;	break;
+	case 3:	s |= PHY_STAT_100FDX;	break;
+	}
+
+	fep->phy_status = s;
+}
+
+static phy_info_t phy_info_amd79c874 = {
+	0x00022561,
+	"AM79C874",
+
+	(const phy_cmd_t []) {  /* config */
+//		{ mk_mii_write(MII_REG_ANAR, 0x021), NULL }, /* 10  Mbps, HD */
+		{ mk_mii_read(MII_REG_CR), mii_parse_cr },
+		{ mk_mii_read(MII_REG_ANAR), mii_parse_anar },
+		{ mk_mii_end, }
+	},
+	(const phy_cmd_t []) {  /* startup - enable interrupts */
+		{ mk_mii_write(MII_AM79C874_ICSR, 0xff00), NULL },
+		{ mk_mii_write(MII_REG_CR, 0x1200), NULL }, /* autonegotiate */
+		{ mk_mii_end, }
+	},
+	(const phy_cmd_t []) { /* ack_int */
+		/* find out the current status */
+
+		{ mk_mii_read(MII_REG_SR), mii_parse_sr },
+		{ mk_mii_read(MII_AM79C874_DR), mii_parse_amd79c874_dr },
+
+		/* we only need to read ICSR to acknowledge */
+
+		{ mk_mii_read(MII_AM79C874_ICSR), NULL },
+		{ mk_mii_end, }
+	},
+	(const phy_cmd_t []) {  /* shutdown - disable interrupts */
+		{ mk_mii_write(MII_AM79C874_ICSR, 0x0000), NULL },
+		{ mk_mii_end, }
+	},
+};
+
+#endif /* CONFIG_FEC_AM79C874 */
 
 static phy_info_t *phy_info[] = {
 
@@ -1153,7 +1215,11 @@ static phy_info_t *phy_info[] = {
 
 #ifdef CONFIG_FEC_QS6612
 	&phy_info_qs6612,
-#endif /* CONFIG_FEC_LXT971 */
+#endif /* CONFIG_FEC_QS6612 */
+
+#ifdef CONFIG_FEC_AM79C874
+	&phy_info_amd79c874,
+#endif /* CONFIG_FEC_AM79C874 */
 
 	NULL
 };
@@ -1500,14 +1566,13 @@ static void set_multicast_list(struct net_device *dev)
 
 /* Initialize the FEC Ethernet on 860T.
  */
-int __init fec_enet_init(void)
+static int __init fec_enet_init(void)
 {
 	struct net_device *dev;
 	struct fec_enet_private *fep;
-	int i, j;
-	unsigned char	*eap, *iap;
+	int i, j, k, err;
+	unsigned char	*eap, *iap, *ba;
 	unsigned long	mem_addr;
-	pte_t		*pte;
 	volatile	cbd_t	*bdp;
 	cbd_t		*cbd_base;
 	volatile	immap_t	*immap;
@@ -1521,17 +1586,11 @@ int __init fec_enet_init(void)
 
 	bd = (bd_t *)__res;
 
-	/* Allocate some private information.
-	*/
-	fep = (struct fec_enet_private *)kmalloc(sizeof(*fep), GFP_KERNEL);
-	if (fep == NULL)
+	dev = alloc_etherdev(sizeof(*fep));
+	if (!dev)
 		return -ENOMEM;
 
-	__clear_user(fep,sizeof(*fep));
-
-	/* Create an Ethernet device instance.
-	*/
-	dev = init_etherdev(0, 0);
+	fep = dev->priv;
 
 	fecp = &(immap->im_cpm.cp_fec);
 
@@ -1578,14 +1637,7 @@ int __init fec_enet_init(void)
 		printk("FEC initialization failed.\n");
 		return 1;
 	}
-	mem_addr = __get_free_page(GFP_KERNEL);
-	cbd_base = (cbd_t *)mem_addr;
-
-	/* Make it uncached.
-	*/
-	pte = va_to_pte(mem_addr);
-	pte_val(*pte) |= _PAGE_NO_CACHE;
-	flush_tlb_page(init_mm.mmap, mem_addr);
+	cbd_base = (cbd_t *)consistent_alloc(GFP_KERNEL, PAGE_SIZE, &mem_addr);
 
 	/* Set receive and transmit descriptor base.
 	*/
@@ -1597,24 +1649,22 @@ int __init fec_enet_init(void)
 	/* Initialize the receive buffer descriptors.
 	*/
 	bdp = fep->rx_bd_base;
+	k = 0;
 	for (i=0; i<FEC_ENET_RX_PAGES; i++) {
 
 		/* Allocate a page.
 		*/
-		mem_addr = __get_free_page(GFP_KERNEL);
-
-		/* Make it uncached.
-		*/
-		pte = va_to_pte(mem_addr);
-		pte_val(*pte) |= _PAGE_NO_CACHE;
-		flush_tlb_page(init_mm.mmap, mem_addr);
+		ba = (unsigned char *)consistent_alloc(GFP_KERNEL, PAGE_SIZE, &mem_addr);
+		/* BUG: no check for failure */
 
 		/* Initialize the BD for every fragment in the page.
 		*/
 		for (j=0; j<FEC_ENET_RX_FRPPG; j++) {
 			bdp->cbd_sc = BD_ENET_RX_EMPTY;
-			bdp->cbd_bufaddr = __pa(mem_addr);
+			bdp->cbd_bufaddr = mem_addr;
+			fep->rx_vaddr[k++] = ba;
 			mem_addr += FEC_ENET_RX_FRSIZE;
+			ba += FEC_ENET_RX_FRSIZE;
 			bdp++;
 		}
 	}
@@ -1660,7 +1710,6 @@ int __init fec_enet_init(void)
 #endif
 
 	dev->base_addr = (unsigned long)fecp;
-	dev->priv = fep;
 
 	/* The FEC Ethernet specific entries in the device structure. */
 	dev->open = fec_enet_open;
@@ -1697,6 +1746,12 @@ int __init fec_enet_init(void)
 	fecp->fec_mii_speed = 0;	/* turn off MDIO */
 #endif	/* CONFIG_USE_MDIO */
 
+	err = register_netdev(dev);
+	if (err) {
+		kfree(dev);
+		return err;
+	}
+
 	printk ("%s: FEC ENET Version 0.2, FEC irq %d"
 #ifdef PHY_INTERRUPT
 		", MII irq %d"
@@ -1727,6 +1782,7 @@ int __init fec_enet_init(void)
 
 	return 0;
 }
+module_init(fec_enet_init);
 
 /* This function is called to start or restart the FEC during a link
  * change.  This only happens when switching between half and full
@@ -1776,8 +1832,8 @@ fec_restart(struct net_device *dev, int duplex)
 
 	/* Set receive and transmit descriptor base.
 	*/
-	fecp->fec_r_des_start = __pa((uint)(fep->rx_bd_base));
-	fecp->fec_x_des_start = __pa((uint)(fep->tx_bd_base));
+	fecp->fec_r_des_start = iopa((uint)(fep->rx_bd_base));
+	fecp->fec_x_des_start = iopa((uint)(fep->tx_bd_base));
 
 	fep->dirty_tx = fep->cur_tx = fep->tx_bd_base;
 	fep->cur_rx = fep->rx_bd_base;

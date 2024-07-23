@@ -1,7 +1,7 @@
 /*
  *  linux/arch/arm/mm/init.c
  *
- *  Copyright (C) 1995-2000 Russell King
+ *  Copyright (C) 1995-2002 Russell King
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -9,7 +9,6 @@
  */
 #include <linux/config.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -18,11 +17,10 @@
 #include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
 #include <linux/smp.h>
 #include <linux/init.h>
 #include <linux/bootmem.h>
-#include <linux/blk.h>
+#include <linux/initrd.h>
 
 #include <asm/segment.h>
 #include <asm/mach-types.h>
@@ -30,6 +28,7 @@
 #include <asm/dma.h>
 #include <asm/hardware.h>
 #include <asm/setup.h>
+#include <asm/tlb.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/map.h>
@@ -46,11 +45,14 @@
 #define TABLE_OFFSET	0
 #endif
 
-#define TABLE_SIZE	((TABLE_OFFSET + PTRS_PER_PTE) * sizeof(void *))
+#define TABLE_SIZE	((TABLE_OFFSET + PTRS_PER_PTE) * sizeof(pte_t))
 
-static unsigned long totalram_pages;
+DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
+
 extern pgd_t swapper_pg_dir[PTRS_PER_PGD];
 extern char _stext, _text, _etext, _end, __init_begin, __init_end;
+extern unsigned long phys_initrd_start;
+extern unsigned long phys_initrd_size;
 
 /*
  * The sole use of this is to pass memory configuration
@@ -64,50 +66,6 @@ static struct meminfo meminfo __initdata = { 0, };
  */
 struct page *empty_zero_page;
 
-#ifndef CONFIG_NO_PGT_CACHE
-struct pgtable_cache_struct quicklists;
-
-int do_check_pgt_cache(int low, int high)
-{
-	int freed = 0;
-
-	if(pgtable_cache_size > high) {
-		do {
-			if(pgd_quicklist) {
-				free_pgd_slow(get_pgd_fast());
-				freed++;
-			}
-			if(pmd_quicklist) {
-				pmd_free_slow(pmd_alloc_one_fast(NULL, 0));
-				freed++;
-			}
-			if(pte_quicklist) {
-				pte_free_slow(pte_alloc_one_fast(NULL, 0));
-				freed++;
-			}
-		} while(pgtable_cache_size > low);
-	}
-	return freed;
-}
-#else
-int do_check_pgt_cache(int low, int high)
-{
-	return 0;
-}
-#endif
-
-/* This is currently broken
- * PG_skip is used on sparc/sparc64 architectures to "skip" certain
- * parts of the address space.
- *
- * #define PG_skip	10
- * #define PageSkip(page) (machine_is_riscpc() && test_bit(PG_skip, &(page)->flags))
- *			if (PageSkip(page)) {
- *				page = page->next_hash;
- *				if (page == NULL)
- *					break;
- *			}
- */
 void show_mem(void)
 {
 	int free = 0, total = 0, reserved = 0;
@@ -121,7 +79,7 @@ void show_mem(void)
 		struct page *page, *end;
 
 		page = NODE_MEM_MAP(node);
-		end  = page + NODE_DATA(node)->node_size;
+		end  = page + NODE_DATA(node)->node_spanned_pages;
 
 		do {
 			total++;
@@ -145,10 +103,6 @@ void show_mem(void)
 	printk("%d slab pages\n", slab);
 	printk("%d pages shared\n", shared);
 	printk("%d pages swap cached\n", cached);
-#ifndef CONFIG_NO_PGT_CACHE
-	printk("%ld page tables cached\n", pgtable_cache_size);
-#endif
-	show_buffers();
 }
 
 struct node_info {
@@ -292,6 +246,7 @@ find_memend_and_nodes(struct meminfo *mi, struct node_info *np)
 	 * also get rid of some of the stuff above as well.
 	 */
 	max_low_pfn = memend_pfn - O_PFN_DOWN(PHYS_OFFSET);
+	max_pfn = memend_pfn - O_PFN_DOWN(PHYS_OFFSET);
 	mi->end = memend_pfn << PAGE_SHIFT;
 
 	return bootmem_pages;
@@ -300,18 +255,17 @@ find_memend_and_nodes(struct meminfo *mi, struct node_info *np)
 static int __init check_initrd(struct meminfo *mi)
 {
 	int initrd_node = -2;
-
 #ifdef CONFIG_BLK_DEV_INITRD
+	unsigned long end = phys_initrd_start + phys_initrd_size;
+
 	/*
 	 * Make sure that the initrd is within a valid area of
 	 * memory.
 	 */
-	if (initrd_start) {
-		unsigned long phys_initrd_start, phys_initrd_end;
+	if (phys_initrd_size) {
 		unsigned int i;
 
-		phys_initrd_start = __pa(initrd_start);
-		phys_initrd_end   = __pa(initrd_end);
+		initrd_node = -1;
 
 		for (i = 0; i < mi->nr_banks; i++) {
 			unsigned long bank_end;
@@ -319,7 +273,7 @@ static int __init check_initrd(struct meminfo *mi)
 			bank_end = mi->bank[i].start + mi->bank[i].size;
 
 			if (mi->bank[i].start <= phys_initrd_start &&
-			    phys_initrd_end <= bank_end)
+			    end <= bank_end)
 				initrd_node = mi->bank[i].node;
 		}
 	}
@@ -327,8 +281,8 @@ static int __init check_initrd(struct meminfo *mi)
 	if (initrd_node == -1) {
 		printk(KERN_ERR "initrd (0x%08lx - 0x%08lx) extends beyond "
 		       "physical memory - disabling initrd\n",
-		       initrd_start, initrd_end);
-		initrd_start = initrd_end = 0;
+		       phys_initrd_start, end);
+		phys_initrd_start = phys_initrd_size = 0;
 	}
 #endif
 
@@ -354,7 +308,7 @@ static __init void reserve_node_zero(unsigned int bootmap_pfn, unsigned int boot
 	 * and can only be in node 0.
 	 */
 	reserve_bootmem_node(pgdat, __pa(swapper_pg_dir),
-			     PTRS_PER_PGD * sizeof(void *));
+			     PTRS_PER_PGD * sizeof(pgd_t));
 #endif
 	/*
 	 * And don't forget to reserve the allocator bitmap,
@@ -469,9 +423,12 @@ void __init bootmem_init(struct meminfo *mi)
 
 
 #ifdef CONFIG_BLK_DEV_INITRD
-	if (initrd_node >= 0)
-		reserve_bootmem_node(NODE_DATA(initrd_node), __pa(initrd_start),
-				     initrd_end - initrd_start);
+	if (phys_initrd_size && initrd_node >= 0) {
+		reserve_bootmem_node(NODE_DATA(initrd_node), phys_initrd_start,
+				     phys_initrd_size);
+		initrd_start = __phys_to_virt(phys_initrd_start);
+		initrd_end = initrd_start + phys_initrd_size;
+	}
 #endif
 
 	if (map_pg != bootmap_pfn + bootmap_pages)
@@ -558,8 +515,12 @@ void __init paging_init(struct meminfo *mi, struct machine_desc *mdesc)
 		arch_adjust_zones(node, zone_size, zhole_size);
 
 		free_area_init_node(node, pgdat, 0, zone_size,
-				bdata->node_boot_start, zhole_size);
+				bdata->node_boot_start >> PAGE_SHIFT, zhole_size);
 	}
+
+#ifndef CONFIG_DISCONTIGMEM
+	mem_map = contig_page_data.node_mem_map;
+#endif
 
 	/*
 	 * finish off the bad pages once
@@ -583,7 +544,7 @@ static inline void free_area(unsigned long addr, unsigned long end, char *s)
 	}
 
 	if (size && s)
-		printk("Freeing %s memory: %dK\n", s, size);
+		printk(KERN_INFO "Freeing %s memory: %dK\n", s, size);
 }
 
 /*
@@ -601,7 +562,9 @@ void __init mem_init(void)
 	initpages = &__init_end - &__init_begin;
 
 	high_memory = (void *)__va(meminfo.end);
+#ifndef CONFIG_DISCONTIGMEM
 	max_mapnr   = virt_to_page(high_memory) - mem_map;
+#endif
 
 	/*
 	 * We may have non-contiguous memory.
@@ -613,7 +576,7 @@ void __init mem_init(void)
 	for (node = 0; node < numnodes; node++) {
 		pg_data_t *pgdat = NODE_DATA(node);
 
-		if (pgdat->node_size != 0)
+		if (pgdat->node_spanned_pages != 0)
 			totalram_pages += free_all_bootmem_node(pgdat);
 	}
 
@@ -678,14 +641,3 @@ static int __init keepinitrd_setup(char *__unused)
 
 __setup("keepinitrd", keepinitrd_setup);
 #endif
-
-void si_meminfo(struct sysinfo *val)
-{
-	val->totalram  = totalram_pages;
-	val->sharedram = 0;
-	val->freeram   = nr_free_pages();
-	val->bufferram = atomic_read(&buffermem_pages);
-	val->totalhigh = 0;
-	val->freehigh  = 0;
-	val->mem_unit  = PAGE_SIZE;
-}

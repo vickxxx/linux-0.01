@@ -10,7 +10,7 @@
  *  Extra MM routines for the EBSA285 architecture
  */
 #include <linux/config.h>
-#include <linux/sched.h>
+#include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/init.h>
  
@@ -28,9 +28,8 @@
  * it means that we have extra bullet protection on our feet.
  */
 static struct map_desc fb_common_io_desc[] __initdata = {
- { ARMCSR_BASE,	 DC21285_ARMCSR_BASE,	    ARMCSR_SIZE,  DOMAIN_IO, 0, 1, 0, 0 },
- { XBUS_BASE,    0x40000000,		    XBUS_SIZE,    DOMAIN_IO, 0, 1, 0, 0 },
- LAST_DESC
+ { ARMCSR_BASE,	 DC21285_ARMCSR_BASE,	    ARMCSR_SIZE,  MT_DEVICE },
+ { XBUS_BASE,    0x40000000,		    XBUS_SIZE,    MT_DEVICE }
 };
 
 /*
@@ -39,13 +38,12 @@ static struct map_desc fb_common_io_desc[] __initdata = {
  */
 static struct map_desc ebsa285_host_io_desc[] __initdata = {
 #if defined(CONFIG_ARCH_FOOTBRIDGE) && defined(CONFIG_FOOTBRIDGE_HOST)
- { PCIMEM_BASE,  DC21285_PCI_MEM,	    PCIMEM_SIZE,  DOMAIN_IO, 0, 1, 0, 0 },
- { PCICFG0_BASE, DC21285_PCI_TYPE_0_CONFIG, PCICFG0_SIZE, DOMAIN_IO, 0, 1, 0, 0 },
- { PCICFG1_BASE, DC21285_PCI_TYPE_1_CONFIG, PCICFG1_SIZE, DOMAIN_IO, 0, 1, 0, 0 },
- { PCIIACK_BASE, DC21285_PCI_IACK,	    PCIIACK_SIZE, DOMAIN_IO, 0, 1, 0, 0 },
- { PCIO_BASE,    DC21285_PCI_IO,	    PCIO_SIZE,	  DOMAIN_IO, 0, 1, 0, 0 },
+ { PCIMEM_BASE,  DC21285_PCI_MEM,	    PCIMEM_SIZE,  MT_DEVICE },
+ { PCICFG0_BASE, DC21285_PCI_TYPE_0_CONFIG, PCICFG0_SIZE, MT_DEVICE },
+ { PCICFG1_BASE, DC21285_PCI_TYPE_1_CONFIG, PCICFG1_SIZE, MT_DEVICE },
+ { PCIIACK_BASE, DC21285_PCI_IACK,	    PCIIACK_SIZE, MT_DEVICE },
+ { PCIO_BASE,    DC21285_PCI_IO,	    PCIO_SIZE,	  MT_DEVICE }
 #endif
- LAST_DESC
 };
 
 /*
@@ -53,33 +51,27 @@ static struct map_desc ebsa285_host_io_desc[] __initdata = {
  */
 static struct map_desc co285_io_desc[] __initdata = {
 #ifdef CONFIG_ARCH_CO285
- { PCIO_BASE,	 DC21285_PCI_IO,	    PCIO_SIZE,    DOMAIN_IO, 0, 1, 0, 0 },
- { PCIMEM_BASE,	 DC21285_PCI_MEM,	    PCIMEM_SIZE,  DOMAIN_IO, 0, 1, 0, 0 },
+ { PCIO_BASE,	 DC21285_PCI_IO,	    PCIO_SIZE,    MT_DEVICE },
+ { PCIMEM_BASE,	 DC21285_PCI_MEM,	    PCIMEM_SIZE,  MT_DEVICE }
 #endif
- LAST_DESC
 };
 
 void __init footbridge_map_io(void)
 {
-	struct map_desc *desc = NULL;
-
 	/*
 	 * Set up the common mapping first; we need this to
 	 * determine whether we're in host mode or not.
 	 */
-	iotable_init(fb_common_io_desc);
+	iotable_init(fb_common_io_desc, ARRAY_SIZE(fb_common_io_desc));
 
 	/*
 	 * Now, work out what we've got to map in addition on this
 	 * platform.
 	 */
 	if (machine_is_co285())
-		desc = co285_io_desc;
-	else if (footbridge_cfn_mode())
-		desc = ebsa285_host_io_desc;
-
-	if (desc)
-		iotable_init(desc);
+		iotable_init(co285_io_desc, ARRAY_SIZE(co285_io_desc));
+	if (footbridge_cfn_mode())
+		iotable_init(ebsa285_host_io_desc, ARRAY_SIZE(ebsa285_host_io_desc));
 }
 
 #ifdef CONFIG_FOOTBRIDGE_ADDIN
@@ -87,16 +79,12 @@ void __init footbridge_map_io(void)
 /*
  * These two functions convert virtual addresses to PCI addresses and PCI
  * addresses to virtual addresses.  Note that it is only legal to use these
- * on memory obtained via get_free_page or kmalloc.
+ * on memory obtained via get_zeroed_page or kmalloc.
  */
 unsigned long __virt_to_bus(unsigned long res)
 {
-#ifdef CONFIG_DEBUG_ERRORS
-	if (res < PAGE_OFFSET || res >= (unsigned long)high_memory) {
-		printk("__virt_to_bus: invalid virtual address 0x%08lx\n", res);
-		__backtrace();
-	}
-#endif
+	WARN_ON(res < PAGE_OFFSET || res >= (unsigned long)high_memory);
+
 	return (res - PAGE_OFFSET) + (*CSR_PCISDRAMBASE & 0xfffffff0);
 }
 
@@ -105,12 +93,8 @@ unsigned long __bus_to_virt(unsigned long res)
 	res -= (*CSR_PCISDRAMBASE & 0xfffffff0);
 	res += PAGE_OFFSET;
 
-#ifdef CONFIG_DEBUG_ERRORS
-	if (res < PAGE_OFFSET || res >= (unsigned long)high_memory) {
-		printk("__bus_to_virt: invalid virtual address 0x%08lx\n", res);
-		__backtrace();
-	}
-#endif
+	WARN_ON(res < PAGE_OFFSET || res >= (unsigned long)high_memory);
+
 	return res;
 }
 

@@ -2,44 +2,27 @@
 #define _GAMEPORT_H
 
 /*
- * $Id: gameport.h,v 1.11 2001/04/26 10:24:46 vojtech Exp $
+ *  Copyright (c) 1999-2002 Vojtech Pavlik
  *
- *  Copyright (c) 1999-2000 Vojtech Pavlik
- *
- *  Sponsored by SuSE
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License version 2 as published by
+ * the Free Software Foundation.
  */
 
-/*
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation; either version 2 of the License, or
- * (at your option) any later version.
- *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- *
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- *
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@ucw.cz>, or by paper mail:
- * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
- */
-
-#include <linux/sched.h>
-#include <linux/delay.h>
 #include <asm/io.h>
+#include <linux/input.h>
+#include <linux/list.h>
 
 struct gameport;
 
 struct gameport {
 
-	void *private;
+	void *private;	/* Private pointer for joystick drivers */
+	void *driver;	/* Private pointer for gameport drivers */
+	char *name;
+	char *phys;
 
-	int number;
+	struct input_id id;
 
 	int io;
 	int speed;
@@ -53,29 +36,31 @@ struct gameport {
 	void (*close)(struct gameport *);
 
 	struct gameport_dev *dev;
-	struct gameport *next;
+
+	struct list_head node;
 };
 
 struct gameport_dev {
 
 	void *private;
+	char *name;
 
 	void (*connect)(struct gameport *, struct gameport_dev *dev);
 	void (*disconnect)(struct gameport *);
 
-	struct gameport_dev *next;
+	struct list_head node;
 };
 
 int gameport_open(struct gameport *gameport, struct gameport_dev *dev, int mode);
 void gameport_close(struct gameport *gameport);
 void gameport_rescan(struct gameport *gameport);
 
-#if defined(CONFIG_INPUT_GAMEPORT) || defined(CONFIG_INPUT_GAMEPORT_MODULE)
+#if defined(CONFIG_GAMEPORT) || defined(CONFIG_GAMEPORT_MODULE)
 void gameport_register_port(struct gameport *gameport);
 void gameport_unregister_port(struct gameport *gameport);
 #else
-static void __inline__ gameport_register_port(struct gameport *gameport) { return; }
-static void __inline__ gameport_unregister_port(struct gameport *gameport) { return; }
+static inline void gameport_register_port(struct gameport *gameport) { return; }
+static inline void gameport_unregister_port(struct gameport *gameport) { return; }
 #endif
 
 void gameport_register_device(struct gameport_dev *dev);
@@ -94,6 +79,7 @@ void gameport_unregister_device(struct gameport_dev *dev);
 #define GAMEPORT_ID_VENDOR_MICROSOFT	0x0007
 #define GAMEPORT_ID_VENDOR_THRUSTMASTER	0x0008
 #define GAMEPORT_ID_VENDOR_GRAVIS	0x0009
+#define GAMEPORT_ID_VENDOR_GUILLEMOT	0x000a
 
 static __inline__ void gameport_trigger(struct gameport *gameport)
 {
@@ -134,7 +120,7 @@ static __inline__ int gameport_time(struct gameport *gameport, int time)
 
 static __inline__ void wait_ms(unsigned int ms)
 {
-	current->state = TASK_UNINTERRUPTIBLE;
+	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule_timeout(1 + ms * HZ / 1000);
 }
 

@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.string.S 1.9 10/25/01 10:08:51 trini
- */
-/*
  * String handling functions for PowerPC.
  *
  * Copyright (C) 1996 Paul Mackerras.
@@ -11,11 +8,11 @@
  * as published by the Free Software Foundation; either version
  * 2 of the License, or (at your option) any later version.
  */
-#include "../kernel/ppc_asm.tmpl"
 #include <linux/config.h>
 #include <asm/processor.h>
 #include <asm/cache.h>
 #include <asm/errno.h>
+#include <asm/ppc_asm.h>
 
 #define COPY_16_BYTES		\
 	lwz	r7,4(r4);	\
@@ -65,13 +62,14 @@
 	.text
 
 	.text
+	.stabs	"arch/ppc/lib/",N_SO,0,0,0f
+	.stabs	"string.S",N_SO,0,0,0f
 
 CACHELINE_BYTES = L1_CACHE_LINE_SIZE
 LG_CACHELINE_BYTES = LG_L1_CACHE_LINE_SIZE
 CACHELINE_MASK = (L1_CACHE_LINE_SIZE-1)
 
-	.globl	strcpy
-strcpy:
+_GLOBAL(strcpy)
 	addi	r5,r3,-1
 	addi	r4,r4,-1
 1:	lbzu	r0,1(r4)
@@ -80,8 +78,7 @@ strcpy:
 	bne	1b
 	blr
 
-	.globl	strncpy
-strncpy:
+_GLOBAL(strncpy)
 	cmpwi	0,r5,0
 	beqlr
 	mtctr	r5
@@ -93,8 +90,7 @@ strncpy:
 	bdnzf	2,1b		/* dec ctr, branch if ctr != 0 && !cr0.eq */
 	blr
 
-	.globl	strcat
-strcat:
+_GLOBAL(strcat)
 	addi	r5,r3,-1
 	addi	r4,r4,-1
 1:	lbzu	r0,1(r5)
@@ -107,8 +103,7 @@ strcat:
 	bne	1b
 	blr
 
-	.globl	strcmp
-strcmp:
+_GLOBAL(strcmp)
 	addi	r5,r3,-1
 	addi	r4,r4,-1
 1:	lbzu	r3,1(r5)
@@ -119,8 +114,7 @@ strcmp:
 	beq	1b
 	blr
 
-	.globl	strlen
-strlen:
+_GLOBAL(strlen)
 	addi	r4,r3,-1
 1:	lbzu	r0,1(r4)
 	cmpwi	0,r0,0
@@ -133,8 +127,7 @@ strlen:
  * to set them to zero.  This requires that the destination
  * area is cacheable.  -- paulus
  */
-	.globl	cacheable_memzero
-cacheable_memzero:
+_GLOBAL(cacheable_memzero)
 	mr	r5,r4
 	li	r4,0
 	addi	r6,r3,-4
@@ -165,6 +158,12 @@ cacheable_memzero:
 	stw	r4, 8(r6)
 	stw	r4, 12(r6)
 	stw	r4, 16(r6)
+#if CACHE_LINE_SIZE >= 32
+	stw	r4, 20(r6)
+	stw	r4, 24(r6)
+	stw	r4, 28(r6)
+	stw	r4, 32(r6)
+#endif /* CACHE_LINE_SIZE */
 #endif
 	addi	r6,r6,CACHELINE_BYTES
 	bdnz	10b
@@ -184,8 +183,7 @@ cacheable_memzero:
 	bdnz	8b
 	blr
 
-	.globl	memset
-memset:
+_GLOBAL(memset)
 	rlwimi	r4,r4,8,16,23
 	rlwimi	r4,r4,16,0,15
 	addi	r6,r3,-4
@@ -210,8 +208,7 @@ memset:
 	bdnz	8b
 	blr
 
-	.globl	bcopy
-bcopy:
+_GLOBAL(bcopy)
 	mr	r6,r3
 	mr	r3,r4
 	mr	r4,r6
@@ -224,8 +221,7 @@ bcopy:
  * We only use this version if the source and dest don't overlap.
  * -- paulus.
  */
-	.global	cacheable_memcpy
-cacheable_memcpy:
+_GLOBAL(cacheable_memcpy)
 	add	r7,r3,r5		/* test if the src & dst overlap */
 	add	r8,r4,r5
 	cmplw	0,r4,r7
@@ -299,14 +295,12 @@ cacheable_memcpy:
 	bdnz	40b
 65:	blr
 
-	.globl	memmove
-memmove:
+_GLOBAL(memmove)
 	cmplw	0,r3,r4
 	bgt	backwards_memcpy
 	/* fall through */
 
-	.globl	memcpy
-memcpy:
+_GLOBAL(memcpy)
 	srwi.	r7,r5,3
 	addi	r6,r3,-4
 	addi	r4,r4,-4
@@ -347,8 +341,7 @@ memcpy:
 	mtctr	r7
 	b	1b
 
-	.globl	backwards_memcpy
-backwards_memcpy:
+_GLOBAL(backwards_memcpy)
 	rlwinm.	r7,r5,32-3,3,31		/* r0 = r5 >> 3 */
 	add	r6,r3,r5
 	add	r4,r4,r5
@@ -383,9 +376,8 @@ backwards_memcpy:
 	beq	2b
 	mtctr	r7
 	b	1b
-	
-	.globl	memcmp
-memcmp:
+
+_GLOBAL(memcmp)
 	cmpwi	0,r5,0
 	ble-	2f
 	mtctr	r5
@@ -399,8 +391,7 @@ memcmp:
 2:	li	r3,0
 	blr
 
-	.global	memchr
-memchr:
+_GLOBAL(memchr)
 	cmpwi	0,r5,0
 	ble-	2f
 	mtctr	r5
@@ -412,8 +403,7 @@ memchr:
 2:	li	r3,0
 	blr
 
-	.globl	__copy_tofrom_user
-__copy_tofrom_user:
+_GLOBAL(__copy_tofrom_user)
 	addi	r4,r4,-4
 	addi	r6,r3,-4
 	neg	r0,r3
@@ -445,30 +435,30 @@ __copy_tofrom_user:
 
 #if !defined(CONFIG_8xx)
 	/* Here we decide how far ahead to prefetch the source */
-#if MAX_L1_COPY_PREFETCH > 1
+#if MAX_COPY_PREFETCH > 1
 	/* Heuristically, for large transfers we prefetch
-	   MAX_L1_COPY_PREFETCH cachelines ahead.  For small transfers
+	   MAX_COPY_PREFETCH cachelines ahead.  For small transfers
 	   we prefetch 1 cacheline ahead. */
-	cmpwi	r0,MAX_L1_COPY_PREFETCH
+	cmpwi	r0,MAX_COPY_PREFETCH
 	li	r7,1
 	li	r3,4
 	ble	111f
-	li	r7,MAX_L1_COPY_PREFETCH
+	li	r7,MAX_COPY_PREFETCH
 111:	mtctr	r7
 112:	dcbt	r3,r4
 	addi	r3,r3,CACHELINE_BYTES
 	bdnz	112b
-#else /* MAX_L1_COPY_PREFETCH == 1 */
+#else /* MAX_COPY_PREFETCH == 1 */
 	li	r3,CACHELINE_BYTES + 4
 	dcbt	r11,r4
-#endif /* MAX_L1_COPY_PREFETCH */
+#endif /* MAX_COPY_PREFETCH */
 #endif /* CONFIG_8xx */
 
 	mtctr	r0
 53:
 #if !defined(CONFIG_8xx)
 	dcbt	r3,r4
-	dcbz	r11,r6
+54:	dcbz	r11,r6
 #endif
 /* had to move these to keep extable in order */
 	.section __ex_table,"a"
@@ -477,7 +467,9 @@ __copy_tofrom_user:
 	.long	71b,101f
 	.long	72b,102f
 	.long	73b,103f
-	.long	53b,105f
+#if !defined(CONFIG_8xx)
+	.long	54b,105f
+#endif
 	.text
 /* the main body of the cacheline loop */
 	COPY_16_BYTES_WITHEX(0)
@@ -515,18 +507,18 @@ __copy_tofrom_user:
 	blr
 
 /* read fault, initial single-byte copy */
-100:	li	r4,0
+100:	li	r9,0
 	b	90f
 /* write fault, initial single-byte copy */
-101:	li	r4,1
+101:	li	r9,1
 90:	subf	r5,r8,r5
 	li	r3,0
 	b	99f
 /* read fault, initial word copy */
-102:	li	r4,0
+102:	li	r9,0
 	b	91f
 /* write fault, initial word copy */
-103:	li	r4,1
+103:	li	r9,1
 91:	li	r3,2
 	b	99f
 
@@ -550,38 +542,47 @@ __copy_tofrom_user:
 #endif
 
 /* read fault in cacheline loop */
-104:	li	r4,0
+104:	li	r9,0
 	b	92f
 /* fault on dcbz (effectively a write fault) */
 /* or write fault in cacheline loop */
-105:	li	r4,1
+105:	li	r9,1
 92:	li	r3,LG_CACHELINE_BYTES
 	b	99f
 /* read fault in final word loop */
-108:	li	r4,0
+108:	li	r9,0
 	b	93f
 /* write fault in final word loop */
-109:	li	r4,1
+109:	li	r9,1
 93:	andi.	r5,r5,3
 	li	r3,2
 	b	99f
 /* read fault in final byte loop */
-110:	li	r4,0
+110:	li	r9,0
 	b	94f
 /* write fault in final byte loop */
-111:	li	r4,1
+111:	li	r9,1
 94:	li	r5,0
 	li	r3,0
 /*
  * At this stage the number of bytes not copied is
- * r5 + (ctr << r3), and r4 is 0 for read or 1 for write.
+ * r5 + (ctr << r3), and r9 is 0 for read or 1 for write.
  */
 99:	mfctr	r0
 	slw	r3,r0,r3
-	add	r3,r3,r5
-	cmpwi	0,r4,0
+	add.	r3,r3,r5
+	beq	120f			/* shouldn't happen */
+	cmpwi	0,r9,0
 	bne	120f
-/* for read fault, clear out the destination: r3 bytes starting at 4(r6) */
+/* for a read fault, first try to continue the copy one byte at a time */
+	mtctr	r3
+130:	lbz	r0,4(r4)
+131:	stb	r0,4(r6)
+	addi	r4,r4,1
+	addi	r6,r6,1
+	bdnz	130b
+/* then clear out the destination: r3 bytes starting at 4(r6) */
+132:	mfctr	r3
 	srwi.	r0,r3,2
 	li	r9,0
 	mtctr	r0
@@ -602,12 +603,13 @@ __copy_tofrom_user:
 	.long	31b,109b
 	.long	40b,110b
 	.long	41b,111b
+	.long	130b,132b
+	.long	131b,120b
 	.long	112b,120b
 	.long	114b,120b
 	.text
 
-	.globl	__clear_user
-__clear_user:
+_GLOBAL(__clear_user)
 	addi	r6,r3,-4
 	li	r3,0
 	li	r5,0
@@ -621,11 +623,11 @@ __clear_user:
 	add	r4,r0,r4
 	subf	r6,r0,r6
 	srwi	r0,r4,2
+	andi.	r4,r4,3
 	mtctr	r0
-	bdz	6f
+	bdz	7f
 1:	stwu	r5,4(r6)
 	bdnz	1b
-6:	andi.	r4,r4,3
 	/* clear byte sized chunks */
 7:	cmpwi	0,r4,0
 	beqlr
@@ -634,18 +636,23 @@ __clear_user:
 8:	stbu	r5,1(r6)
 	bdnz	8b
 	blr
-99:	li	r3,-EFAULT
+90:	mr	r3,r4
+	blr
+91:	mfctr	r3
+	slwi	r3,r3,2
+	add	r3,r3,r4
+	blr
+92:	mfctr	r3
 	blr
 
 	.section __ex_table,"a"
 	.align	2
-	.long	11b,99b
-	.long	1b,99b
-	.long	8b,99b
+	.long	11b,90b
+	.long	1b,91b
+	.long	8b,92b
 	.text
 
-	.globl	__strncpy_from_user
-__strncpy_from_user:
+_GLOBAL(__strncpy_from_user)
 	addi	r6,r3,-1
 	addi	r4,r4,-1
 	cmpwi	0,r5,0
@@ -668,8 +675,7 @@ __strncpy_from_user:
 	.text
 
 /* r3 = str, r4 = len (> 0), r5 = top (highest addr) */
-	.globl	__strnlen_user
-__strnlen_user:
+_GLOBAL(__strnlen_user)
 	addi	r7,r3,-1
 	subf	r6,r7,r5	/* top+1 - str */
 	cmplw	0,r4,r6

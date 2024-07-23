@@ -60,7 +60,7 @@ static const char *mcdx_c_version
 #include <linux/module.h>
 
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/interrupt.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/cdrom.h>
@@ -69,6 +69,7 @@ static const char *mcdx_c_version
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <asm/io.h>
+#include <asm/current.h>
 #include <asm/uaccess.h>
 
 #include <linux/major.h>
@@ -196,7 +197,6 @@ struct s_drive_stuff {
 	void *rreg_status;	/* r status */
 
 	int irq;		/* irq used by this drive */
-	int minor;		/* minor number of this drive */
 	int present;		/* drive present and its capabilities */
 	unsigned char readcmd;	/* read cmd depends on single/double speed */
 	unsigned char playcmd;	/* play should always be single speed */
@@ -206,6 +206,8 @@ struct s_drive_stuff {
 	int lastsector;		/* last block accessible */
 	int status;		/* last operation's error / status */
 	int readerrs;		/* # of blocks read w/o error */
+	struct cdrom_device_info info;
+	struct gendisk *disk;
 };
 
 
@@ -219,22 +221,44 @@ struct s_drive_stuff {
 int mcdx_init(void);
 void do_mcdx_request(request_queue_t * q);
 
-struct block_device_operations mcdx_bdops =
+static int mcdx_block_open(struct inode *inode, struct file *file)
 {
-	owner:			THIS_MODULE,
-	open:			cdrom_open,
-	release:		cdrom_release,
-	ioctl:			cdrom_ioctl,
-	check_media_change:	cdrom_media_changed,
+	struct s_drive_stuff *p = inode->i_bdev->bd_disk->private_data;
+	return cdrom_open(&p->info, inode, file);
+}
+
+static int mcdx_block_release(struct inode *inode, struct file *file)
+{
+	struct s_drive_stuff *p = inode->i_bdev->bd_disk->private_data;
+	return cdrom_release(&p->info, file);
+}
+
+static int mcdx_block_ioctl(struct inode *inode, struct file *file,
+				unsigned cmd, unsigned long arg)
+{
+	struct s_drive_stuff *p = inode->i_bdev->bd_disk->private_data;
+	return cdrom_ioctl(&p->info, inode, cmd, arg);
+}
+
+static int mcdx_block_media_changed(struct gendisk *disk)
+{
+	struct s_drive_stuff *p = disk->private_data;
+	return cdrom_media_changed(&p->info);
+}
+
+static struct block_device_operations mcdx_bdops =
+{
+	.owner		= THIS_MODULE,
+	.open		= mcdx_block_open,
+	.release	= mcdx_block_release,
+	.ioctl		= mcdx_block_ioctl,
+	.media_changed	= mcdx_block_media_changed,
 };
 
 
 /*	Indirect exported functions. These functions are exported by their
 	addresses, such as mcdx_open and mcdx_close in the
 	structure mcdx_dops. */
-
-/* ???  exported by the mcdx_sigaction struct */
-static void mcdx_intr(int, void *, struct pt_regs *);
 
 /* exported by file_ops */
 static int mcdx_open(struct cdrom_device_info *cdi, int purpose);
@@ -285,32 +309,25 @@ static int mcdx_setattentuator(struct s_drive_stuff *,
 
 /* static variables ************************************************/
 
-static int mcdx_blocksizes[MCDX_NDRIVES];
 static int mcdx_drive_map[][2] = MCDX_DRIVEMAP;
 static struct s_drive_stuff *mcdx_stuffp[MCDX_NDRIVES];
 static struct s_drive_stuff *mcdx_irq_map[16] = { 0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0
 };
+static spinlock_t mcdx_lock = SPIN_LOCK_UNLOCKED;
+static struct request_queue mcdx_queue;
 MODULE_PARM(mcdx, "1-4i");
 
 static struct cdrom_device_ops mcdx_dops = {
-	open:mcdx_open,
-	release:mcdx_close,
-	media_changed:mcdx_media_changed,
-	tray_move:mcdx_tray_move,
-	lock_door:mcdx_lockdoor,
-	audio_ioctl:mcdx_audio_ioctl,
-	capability:CDC_OPEN_TRAY | CDC_LOCK | CDC_MEDIA_CHANGED |
-	    CDC_PLAY_AUDIO | CDC_DRIVE_STATUS,
+	.open		= mcdx_open,
+	.release	= mcdx_close,
+	.media_changed	= mcdx_media_changed,
+	.tray_move	= mcdx_tray_move,
+	.lock_door	= mcdx_lockdoor,
+	.audio_ioctl	= mcdx_audio_ioctl,
+	.capability	= CDC_OPEN_TRAY | CDC_LOCK | CDC_MEDIA_CHANGED |
+			  CDC_PLAY_AUDIO | CDC_DRIVE_STATUS,
 };
-
-static struct cdrom_device_info mcdx_info = {
-	ops:&mcdx_dops,
-	speed:2,
-	capacity:1,
-	name:"mcdx",
-};
-
 
 /* KERNEL INTERFACE FUNCTIONS **************************************/
 
@@ -318,7 +335,7 @@ static struct cdrom_device_info mcdx_info = {
 static int mcdx_audio_ioctl(struct cdrom_device_info *cdi,
 			    unsigned int cmd, void *arg)
 {
-	struct s_drive_stuff *stuffp = mcdx_stuffp[MINOR(cdi->dev)];
+	struct s_drive_stuff *stuffp = cdi->handle;
 
 	if (!stuffp->present)
 		return -ENXIO;
@@ -557,82 +574,63 @@ static int mcdx_audio_ioctl(struct cdrom_device_info *cdi,
 
 void do_mcdx_request(request_queue_t * q)
 {
-	int dev;
 	struct s_drive_stuff *stuffp;
+	struct request *req;
 
       again:
 
-	if (QUEUE_EMPTY) {
-		xtrace(REQUEST, "end_request(0): CURRENT == NULL\n");
+	req = elv_next_request(q);
+	if (!req)
 		return;
-	}
 
-	if (CURRENT->rq_status == RQ_INACTIVE) {
-		xtrace(REQUEST,
-		       "end_request(0): rq_status == RQ_INACTIVE\n");
-		return;
-	}
+	stuffp = req->rq_disk->private_data;
 
-	INIT_REQUEST;
-
-	dev = MINOR(CURRENT->rq_dev);
-	stuffp = mcdx_stuffp[dev];
-
-	if ((dev < 0)
-	    || (dev >= MCDX_NDRIVES)
-	    || !stuffp || (!stuffp->present)) {
-		xwarn("do_request(): bad device: %s\n",
-		      kdevname(CURRENT->rq_dev));
+	if (!stuffp->present) {
+		xwarn("do_request(): bad device: %s\n",req->rq_disk->disk_name);
 		xtrace(REQUEST, "end_request(0): bad device\n");
-		end_request(0);
+		end_request(req, 0);
 		return;
 	}
 
 	if (stuffp->audio) {
 		xwarn("do_request() attempt to read from audio cd\n");
 		xtrace(REQUEST, "end_request(0): read from audio\n");
-		end_request(0);
+		end_request(req, 0);
 		return;
 	}
 
 	xtrace(REQUEST, "do_request() (%lu + %lu)\n",
-	       CURRENT->sector, CURRENT->nr_sectors);
+	       req->sector, req->nr_sectors);
 
-	switch (CURRENT->cmd) {
-	case WRITE:
-		xwarn("do_request(): attempt to write to cd!!\n");
+	if (req->cmd != READ) {
+		xwarn("do_request(): non-read command to cd!!\n");
 		xtrace(REQUEST, "end_request(0): write\n");
-		end_request(0);
+		end_request(req, 0);
 		return;
-
-	case READ:
+	}
+	else {
 		stuffp->status = 0;
-		while (CURRENT->nr_sectors) {
+		while (req->nr_sectors) {
 			int i;
 
 			i = mcdx_transfer(stuffp,
-					  CURRENT->buffer,
-					  CURRENT->sector,
-					  CURRENT->nr_sectors);
+					  req->buffer,
+					  req->sector,
+					  req->nr_sectors);
 
 			if (i == -1) {
-				end_request(0);
+				end_request(req, 0);
 				goto again;
 			}
-			CURRENT->sector += i;
-			CURRENT->nr_sectors -= i;
-			CURRENT->buffer += (i * 512);
+			req->sector += i;
+			req->nr_sectors -= i;
+			req->buffer += (i * 512);
 		}
-		end_request(1);
+		end_request(req, 1);
 		goto again;
 
 		xtrace(REQUEST, "end_request(1)\n");
-		end_request(1);
-		break;
-
-	default:
-		panic(MCDX "do_request: unknown command.\n");
-		break;
+		end_request(req, 1);
 	}
 
 	goto again;
@@ -642,7 +640,7 @@ static int mcdx_open(struct cdrom_device_info *cdi, int purpose)
 {
 	struct s_drive_stuff *stuffp;
 	xtrace(OPENCLOSE, "open()\n");
-	stuffp = mcdx_stuffp[MINOR(cdi->dev)];
+	stuffp = cdi->handle;
 	if (!stuffp->present)
 		return -ENXIO;
 
@@ -791,7 +789,7 @@ static void mcdx_close(struct cdrom_device_info *cdi)
 
 	xtrace(OPENCLOSE, "close()\n");
 
-	stuffp = mcdx_stuffp[MINOR(cdi->dev)];
+	stuffp = cdi->handle;
 
 	--stuffp->users;
 }
@@ -802,10 +800,9 @@ static int mcdx_media_changed(struct cdrom_device_info *cdi, int disc_nr)
 {
 	struct s_drive_stuff *stuffp;
 
-	xinfo("mcdx_media_changed called for device %s\n",
-	      kdevname(cdi->dev));
+	xinfo("mcdx_media_changed called for device %s\n", cdi->name);
 
-	stuffp = mcdx_stuffp[MINOR(cdi->dev)];
+	stuffp = cdi->handle;
 	mcdx_getstatus(stuffp, 1);
 
 	if (stuffp->yyy == 0)
@@ -854,7 +851,7 @@ static void mcdx_delay(struct s_drive_stuff *stuff, long jifs)
 	}
 }
 
-static void mcdx_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t mcdx_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct s_drive_stuff *stuffp;
 	unsigned char b;
@@ -863,7 +860,7 @@ static void mcdx_intr(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (stuffp == NULL) {
 		xwarn("mcdx: no device for intr %d\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 #ifdef AK2
 	if (!stuffp->busy && stuffp->pending)
@@ -895,6 +892,7 @@ static void mcdx_intr(int irq, void *dev_id, struct pt_regs *regs)
 
 	stuffp->busy = 0;
 	wake_up_interruptible(&stuffp->busyq);
+	return IRQ_HANDLED;
 }
 
 
@@ -1015,8 +1013,6 @@ static int mcdx_talk(struct s_drive_stuff *stuffp,
 
 /* MODULE STUFF ***********************************************************/
 
-EXPORT_NO_SYMBOLS;
-
 int __mcdx_init(void)
 {
 	int i;
@@ -1044,14 +1040,15 @@ void __exit mcdx_exit(void)
 	xinfo("cleanup_module called\n");
 
 	for (i = 0; i < MCDX_NDRIVES; i++) {
-		struct s_drive_stuff *stuffp;
-		if (unregister_cdrom(&mcdx_info)) {
-			printk(KERN_WARNING "Can't unregister cdrom mcdx\n");
-			return;
-		}
-		stuffp = mcdx_stuffp[i];
+		struct s_drive_stuff *stuffp = mcdx_stuffp[i];
 		if (!stuffp)
 			continue;
+		del_gendisk(stuffp->disk);
+		if (unregister_cdrom(&stuffp->info)) {
+			printk(KERN_WARNING "Can't unregister cdrom mcdx\n");
+			continue;
+		}
+		put_disk(stuffp->disk);
 		release_region((unsigned long) stuffp->wreg_data,
 			       MCDX_IO_SIZE);
 		free_irq(stuffp->irq, NULL);
@@ -1066,10 +1063,10 @@ void __exit mcdx_exit(void)
 		kfree(stuffp);
 	}
 
-	if (devfs_unregister_blkdev(MAJOR_NR, "mcdx") != 0) {
+	if (unregister_blkdev(MAJOR_NR, "mcdx") != 0) {
 		xwarn("cleanup() unregister_blkdev() failed\n");
 	}
-	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+	blk_cleanup_queue(&mcdx_queue);
 #if !MCDX_QUIET
 	else
 	xinfo("cleanup() succeeded\n");
@@ -1087,11 +1084,10 @@ module_exit(mcdx_exit);
 int __init mcdx_init_drive(int drive)
 {
 	struct s_version version;
+	struct gendisk *disk;
 	struct s_drive_stuff *stuffp;
 	int size = sizeof(*stuffp);
 	char msg[80];
-
-	mcdx_blocksizes[drive] = 0;
 
 	xtrace(INIT, "init() try drive %d\n", drive);
 
@@ -1099,6 +1095,13 @@ int __init mcdx_init_drive(int drive)
 	xtrace(MALLOC, "init() malloc %d bytes\n", size);
 	if (!(stuffp = kmalloc(size, GFP_KERNEL))) {
 		xwarn("init() malloc failed\n");
+		return 1;
+	}
+
+	disk = alloc_disk(1);
+	if (!disk) {
+		xwarn("init() malloc failed\n");
+		kfree(stuffp);
 		return 1;
 	}
 
@@ -1124,7 +1127,8 @@ int __init mcdx_init_drive(int drive)
 	init_waitqueue_head(&stuffp->sleepq);
 
 	/* check if i/o addresses are available */
-	if (check_region((unsigned int) stuffp->wreg_data, MCDX_IO_SIZE)) {
+	if (!request_region((unsigned int) stuffp->wreg_data, MCDX_IO_SIZE,
+			    "mcdx")) {
 		xwarn("0x%3p,%d: Init failed. "
 		      "I/O ports (0x%3p..0x%3p) already in use.\n",
 		      stuffp->wreg_data, stuffp->irq,
@@ -1132,6 +1136,7 @@ int __init mcdx_init_drive(int drive)
 		      stuffp->wreg_data + MCDX_IO_SIZE - 1);
 		xtrace(MALLOC, "init() free stuffp @ %p\n", stuffp);
 		kfree(stuffp);
+		put_disk(disk);
 		xtrace(INIT, "init() continue at next drive\n");
 		return 0;	/* next drive */
 	}
@@ -1144,10 +1149,13 @@ int __init mcdx_init_drive(int drive)
 	xtrace(INIT, "init() get version\n");
 	if (-1 == mcdx_requestversion(stuffp, &version, 4)) {
 		/* failed, next drive */
+		release_region((unsigned long) stuffp->wreg_data,
+			       MCDX_IO_SIZE);
 		xwarn("%s=0x%3p,%d: Init failed. Can't get version.\n",
 		      MCDX, stuffp->wreg_data, stuffp->irq);
 		xtrace(MALLOC, "init() free stuffp @ %p\n", stuffp);
 		kfree(stuffp);
+		put_disk(disk);
 		xtrace(INIT, "init() continue at next drive\n");
 		return 0;
 	}
@@ -1173,36 +1181,39 @@ int __init mcdx_init_drive(int drive)
 	stuffp->playcmd = READ1X;
 
 	if (!stuffp->present) {
+		release_region((unsigned long) stuffp->wreg_data,
+			       MCDX_IO_SIZE);
 		xwarn("%s=0x%3p,%d: Init failed. No Mitsumi CD-ROM?.\n",
 		      MCDX, stuffp->wreg_data, stuffp->irq);
 		kfree(stuffp);
+		put_disk(disk);
 		return 0;	/* next drive */
 	}
 
 	xtrace(INIT, "init() register blkdev\n");
-	if (devfs_register_blkdev(MAJOR_NR, "mcdx", &mcdx_bdops) != 0) {
-		xwarn("%s=0x%3p,%d: Init failed. Can't get major %d.\n",
-		      MCDX, stuffp->wreg_data, stuffp->irq, MAJOR_NR);
+	if (register_blkdev(MAJOR_NR, "mcdx")) {
+		release_region((unsigned long) stuffp->wreg_data,
+			       MCDX_IO_SIZE);
 		kfree(stuffp);
+		put_disk(disk);
 		return 1;
 	}
 
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	read_ahead[MAJOR_NR] = READ_AHEAD;
-	blksize_size[MAJOR_NR] = mcdx_blocksizes;
+	blk_init_queue(&mcdx_queue, do_mcdx_request, &mcdx_lock);
 
 	xtrace(INIT, "init() subscribe irq and i/o\n");
 	mcdx_irq_map[stuffp->irq] = stuffp;
 	if (request_irq(stuffp->irq, mcdx_intr, SA_INTERRUPT, "mcdx", NULL)) {
+		release_region((unsigned long) stuffp->wreg_data,
+			       MCDX_IO_SIZE);
 		xwarn("%s=0x%3p,%d: Init failed. Can't get irq (%d).\n",
 		      MCDX, stuffp->wreg_data, stuffp->irq, stuffp->irq);
 		stuffp->irq = 0;
-		blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+		blk_cleanup_queue(&mcdx_queue);
 		kfree(stuffp);
+		put_disk(disk);
 		return 0;
 	}
-	request_region((unsigned int) stuffp->wreg_data,
-		       MCDX_IO_SIZE, "mcdx");
 
 	xtrace(INIT, "init() get garbage\n");
 	{
@@ -1221,26 +1232,38 @@ int __init mcdx_init_drive(int drive)
 	xtrace(INIT, "init() set non dma but irq mode\n");
 	mcdx_config(stuffp, 1);
 
-	stuffp->minor = drive;
+	stuffp->info.ops = &mcdx_dops;
+	stuffp->info.speed = 2;
+	stuffp->info.capacity = 1;
+	stuffp->info.handle = stuffp;
+	sprintf(stuffp->info.name, "mcdx%d", drive);
+	disk->major = MAJOR_NR;
+	disk->first_minor = drive;
+	strcpy(disk->disk_name, stuffp->info.name);
+	disk->fops = &mcdx_bdops;
+	disk->flags = GENHD_FL_CD;
+	stuffp->disk = disk;
 
 	sprintf(msg, " mcdx: Mitsumi CD-ROM installed at 0x%3p, irq %d."
 		" (Firmware version %c %x)\n",
 		stuffp->wreg_data, stuffp->irq, version.code, version.ver);
 	mcdx_stuffp[drive] = stuffp;
 	xtrace(INIT, "init() mcdx_stuffp[%d] = %p\n", drive, stuffp);
-	mcdx_info.dev = MKDEV(MAJOR_NR, 0);
-	if (register_cdrom(&mcdx_info) != 0) {
+	if (register_cdrom(&stuffp->info) != 0) {
 		printk("Cannot register Mitsumi CD-ROM!\n");
 		release_region((unsigned long) stuffp->wreg_data,
 			       MCDX_IO_SIZE);
 		free_irq(stuffp->irq, NULL);
 		kfree(stuffp);
-		if (devfs_unregister_blkdev(MAJOR_NR, "mcdx") != 0)
+		put_disk(disk);
+		if (unregister_blkdev(MAJOR_NR, "mcdx") != 0)
 			xwarn("cleanup() unregister_blkdev() failed\n");
-		blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+		blk_cleanup_queue(&mcdx_queue);
 		return 2;
 	}
-	devfs_plain_cdrom(&mcdx_info, &mcdx_bdops);
+	disk->private_data = stuffp;
+	disk->queue = &mcdx_queue;
+	add_disk(disk);
 	printk(msg);
 	return 0;
 }
@@ -1698,7 +1721,7 @@ mcdx_playtrk(struct s_drive_stuff *stuffp, const struct cdrom_ti *ti)
 
 static int mcdx_tray_move(struct cdrom_device_info *cdi, int position)
 {
-	struct s_drive_stuff *stuffp = mcdx_stuffp[MINOR(cdi->dev)];
+	struct s_drive_stuff *stuffp = cdi->handle;
 
 	if (!stuffp->present)
 		return -ENXIO;
@@ -1888,7 +1911,7 @@ static int mcdx_reset(struct s_drive_stuff *stuffp, enum resetmodes mode, int tr
 
 static int mcdx_lockdoor(struct cdrom_device_info *cdi, int lock)
 {
-	struct s_drive_stuff *stuffp = mcdx_stuffp[MINOR(cdi->dev)];
+	struct s_drive_stuff *stuffp = cdi->handle;
 	char cmd[2] = { 0xfe };
 
 	if (!(stuffp->present & DOOR))

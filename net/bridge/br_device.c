@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br_device.c,v 1.5.2.1 2001/12/24 00:59:27 davem Exp $
+ *	$Id: br_device.c,v 1.6 2001/12/24 00:59:55 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -16,6 +16,7 @@
 #include <linux/kernel.h>
 #include <linux/netdevice.h>
 #include <linux/if_bridge.h>
+#include <linux/module.h>
 #include <asm/uaccess.h>
 #include "br_private.h"
 
@@ -73,27 +74,20 @@ static int __br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 
 int br_dev_xmit(struct sk_buff *skb, struct net_device *dev)
 {
-	struct net_bridge *br;
 	int ret;
 
-	br = dev->priv;
-	read_lock(&br->lock);
+	rcu_read_lock();
 	ret = __br_dev_xmit(skb, dev);
-	read_unlock(&br->lock);
+	rcu_read_unlock();
 
 	return ret;
 }
 
 static int br_dev_open(struct net_device *dev)
 {
-	struct net_bridge *br;
-
 	netif_start_queue(dev);
 
-	br = dev->priv;
-	read_lock(&br->lock);
-	br_stp_enable_bridge(br);
-	read_unlock(&br->lock);
+	br_stp_enable_bridge(dev->priv);
 
 	return 0;
 }
@@ -104,12 +98,7 @@ static void br_dev_set_multicast_list(struct net_device *dev)
 
 static int br_dev_stop(struct net_device *dev)
 {
-	struct net_bridge *br;
-
-	br = dev->priv;
-	read_lock(&br->lock);
-	br_stp_disable_bridge(br);
-	read_unlock(&br->lock);
+	br_stp_disable_bridge(dev->priv);
 
 	netif_stop_queue(dev);
 
@@ -121,6 +110,7 @@ static int br_dev_accept_fastpath(struct net_device *dev, struct dst_entry *dst)
 	return -1;
 }
 
+
 void br_dev_setup(struct net_device *dev)
 {
 	memset(dev->dev_addr, 0, ETH_ALEN);
@@ -130,8 +120,13 @@ void br_dev_setup(struct net_device *dev)
 	dev->hard_start_xmit = br_dev_xmit;
 	dev->open = br_dev_open;
 	dev->set_multicast_list = br_dev_set_multicast_list;
+	dev->destructor = (void (*)(struct net_device *))kfree;
+	SET_MODULE_OWNER(dev);
 	dev->stop = br_dev_stop;
 	dev->accept_fastpath = br_dev_accept_fastpath;
 	dev->tx_queue_len = 0;
 	dev->set_mac_address = NULL;
+	dev->priv_flags = IFF_EBRIDGE;
+
+	ether_setup(dev);
 }

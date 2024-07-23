@@ -1,4 +1,4 @@
-/* $Id: pci_psycho.c,v 1.29 2001/10/11 00:44:38 davem Exp $
+/* $Id: pci_psycho.c,v 1.33 2002/02/01 00:58:33 davem Exp $
  * pci_psycho.c: PSYCHO/U2P specific PCI controller support.
  *
  * Copyright (C) 1997, 1998, 1999 David S. Miller (davem@caipfs.rutgers.edu)
@@ -11,6 +11,7 @@
 #include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/interrupt.h>
 
 #include <asm/pbm.h>
 #include <asm/iommu.h>
@@ -107,119 +108,66 @@ static int psycho_out_of_range(struct pci_pbm_info *pbm,
 
 /* PSYCHO PCI configuration space accessors. */
 
-static int psycho_read_byte(struct pci_dev *dev, int where, u8 *value)
+static int psycho_read_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
+			       int where, int size, u32 *value)
 {
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
-	u8 *addr;
-
-	*value = 0xff;
-	addr = psycho_pci_config_mkaddr(pbm, bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_SUCCESSFUL;
-
-	if (psycho_out_of_range(pbm, bus, devfn))
-		return PCIBIOS_SUCCESSFUL;
-	pci_config_read8(addr, value);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int psycho_read_word(struct pci_dev *dev, int where, u16 *value)
-{
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
-	u16 *addr;
-
-	*value = 0xffff;
-	addr = psycho_pci_config_mkaddr(pbm, bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_SUCCESSFUL;
-
-	if (psycho_out_of_range(pbm, bus, devfn))
-		return PCIBIOS_SUCCESSFUL;
-
-	if (where & 0x01) {
-		printk("pcibios_read_config_word: misaligned reg [%x]\n",
-		       where);
-		return PCIBIOS_SUCCESSFUL;
-	}
-	pci_config_read16(addr, value);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int psycho_read_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
+	struct pci_pbm_info *pbm = pci_bus2pbm[bus_dev->number];
+	unsigned char bus = bus_dev->number;
 	u32 *addr;
+	u16 tmp16;
+	u8 tmp8;
 
-	*value = 0xffffffff;
-	addr = psycho_pci_config_mkaddr(pbm, bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_SUCCESSFUL;
-
-	if (psycho_out_of_range(pbm, bus, devfn))
-		return PCIBIOS_SUCCESSFUL;
-
-	if (where & 0x03) {
-		printk("pcibios_read_config_dword: misaligned reg [%x]\n",
-		       where);
-		return PCIBIOS_SUCCESSFUL;
+	switch (size) {
+	case 1:
+		*value = 0xff;
+		break;
+	case 2:
+		*value = 0xffff;
+		break;
+	case 4:
+		*value = 0xffffffff;
+		break;
 	}
 
-	pci_config_read32(addr, value);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int psycho_write_byte(struct pci_dev *dev, int where, u8 value)
-{
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
-	u8 *addr;
-
 	addr = psycho_pci_config_mkaddr(pbm, bus, devfn, where);
 	if (!addr)
 		return PCIBIOS_SUCCESSFUL;
 
 	if (psycho_out_of_range(pbm, bus, devfn))
 		return PCIBIOS_SUCCESSFUL;
+	switch (size) {
+	case 1:
+		pci_config_read8((u8 *)addr, &tmp8);
+		*value = (u32) tmp8;
+		break;
 
-	pci_config_write8(addr, value);
-	return PCIBIOS_SUCCESSFUL;
-}
+	case 2:
+		if (where & 0x01) {
+			printk("pci_read_config_word: misaligned reg [%x]\n",
+			       where);
+			return PCIBIOS_SUCCESSFUL;
+		}
+		pci_config_read16((u16 *)addr, &tmp16);
+		*value = (u32) tmp16;
+		break;
 
-static int psycho_write_word(struct pci_dev *dev, int where, u16 value)
-{
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
-	u16 *addr;
-
-	addr = psycho_pci_config_mkaddr(pbm, bus, devfn, where);
-	if (!addr)
-		return PCIBIOS_SUCCESSFUL;
-
-	if (psycho_out_of_range(pbm, bus, devfn))
-		return PCIBIOS_SUCCESSFUL;
-
-	if (where & 0x01) {
-		printk("pcibios_write_config_word: misaligned reg [%x]\n",
-		       where);
-		return PCIBIOS_SUCCESSFUL;
+	case 4:
+		if (where & 0x03) {
+			printk("pci_read_config_dword: misaligned reg [%x]\n",
+			       where);
+			return PCIBIOS_SUCCESSFUL;
+		}
+		pci_config_read32(addr, value);
+		break;
 	}
-	pci_config_write16(addr, value);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int psycho_write_dword(struct pci_dev *dev, int where, u32 value)
+static int psycho_write_pci_cfg(struct pci_bus *bus_dev, unsigned int devfn,
+				int where, int size, u32 value)
 {
-	struct pci_pbm_info *pbm = pci_bus2pbm[dev->bus->number];
-	unsigned char bus = dev->bus->number;
-	unsigned int devfn = dev->devfn;
+	struct pci_pbm_info *pbm = pci_bus2pbm[bus_dev->number];
+	unsigned char bus = bus_dev->number;
 	u32 *addr;
 
 	addr = psycho_pci_config_mkaddr(pbm, bus, devfn, where);
@@ -229,22 +177,34 @@ static int psycho_write_dword(struct pci_dev *dev, int where, u32 value)
 	if (psycho_out_of_range(pbm, bus, devfn))
 		return PCIBIOS_SUCCESSFUL;
 
-	if (where & 0x03) {
-		printk("pcibios_write_config_dword: misaligned reg [%x]\n",
-		       where);
-		return PCIBIOS_SUCCESSFUL;
+	switch (size) {
+	case 1:
+		pci_config_write8((u8 *)addr, value);
+		break;
+
+	case 2:
+		if (where & 0x01) {
+			printk("pci_write_config_word: misaligned reg [%x]\n",
+			       where);
+			return PCIBIOS_SUCCESSFUL;
+		}
+		pci_config_write16((u16 *)addr, value);
+		break;
+
+	case 4:
+		if (where & 0x03) {
+			printk("pci_write_config_dword: misaligned reg [%x]\n",
+			       where);
+			return PCIBIOS_SUCCESSFUL;
+		}
+		pci_config_write32(addr, value);
 	}
-	pci_config_write32(addr, value);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static struct pci_ops psycho_ops = {
-	psycho_read_byte,
-	psycho_read_word,
-	psycho_read_dword,
-	psycho_write_byte,
-	psycho_write_word,
-	psycho_write_dword
+	.read =		psycho_read_pci_cfg,
+	.write =	psycho_write_pci_cfg,
 };
 
 /* PSYCHO interrupt mapping support. */
@@ -326,15 +286,15 @@ static unsigned char psycho_pil_table[] = {
 /*0x14*/0, 0, 0, 0,	/* PCI B slot 1  Int A, B, C, D */
 /*0x18*/0, 0, 0, 0,	/* PCI B slot 2  Int A, B, C, D */
 /*0x1c*/0, 0, 0, 0,	/* PCI B slot 3  Int A, B, C, D */
-/*0x20*/3,		/* SCSI				*/
+/*0x20*/4,		/* SCSI				*/
 /*0x21*/5,		/* Ethernet			*/
 /*0x22*/8,		/* Parallel Port		*/
 /*0x23*/13,		/* Audio Record			*/
 /*0x24*/14,		/* Audio Playback		*/
 /*0x25*/15,		/* PowerFail			*/
-/*0x26*/3,		/* second SCSI			*/
+/*0x26*/4,		/* second SCSI			*/
 /*0x27*/11,		/* Floppy			*/
-/*0x28*/2,		/* Spare Hardware		*/
+/*0x28*/4,		/* Spare Hardware		*/
 /*0x29*/9,		/* Keyboard			*/
 /*0x2a*/4,		/* Mouse			*/
 /*0x2b*/12,		/* Serial			*/
@@ -344,7 +304,7 @@ static unsigned char psycho_pil_table[] = {
 /*0x2f*/15,		/* Correctable ECC		*/
 /*0x30*/15,		/* PCI Bus A Error		*/
 /*0x31*/15,		/* PCI Bus B Error		*/
-/*0x32*/1,		/* Power Management		*/
+/*0x32*/15,		/* Power Management		*/
 };
 
 static int __init psycho_ino_to_pil(struct pci_dev *pdev, unsigned int ino)
@@ -353,7 +313,7 @@ static int __init psycho_ino_to_pil(struct pci_dev *pdev, unsigned int ino)
 
 	ret = psycho_pil_table[ino];
 	if (ret == 0 && pdev == NULL) {
-		ret = 1;
+		ret = 4;
 	} else if (ret == 0) {
 		switch ((pdev->class >> 16) & 0xff) {
 		case PCI_BASE_CLASS_STORAGE:
@@ -371,11 +331,12 @@ static int __init psycho_ino_to_pil(struct pci_dev *pdev, unsigned int ino)
 		case PCI_BASE_CLASS_MULTIMEDIA:
 		case PCI_BASE_CLASS_MEMORY:
 		case PCI_BASE_CLASS_BRIDGE:
+		case PCI_BASE_CLASS_SERIAL:
 			ret = 10;
 			break;
 
 		default:
-			ret = 1;
+			ret = 4;
 			break;
 		};
 	}
@@ -408,6 +369,10 @@ static unsigned int __init psycho_irq_build(struct pci_pbm_info *pbm,
 
 	/* Now build the IRQ bucket. */
 	pil = psycho_ino_to_pil(pdev, ino);
+
+	if (PIL_RESERVED(pil))
+		BUG();
+
 	imap = p->controller_regs + imap_off;
 	imap += 4;
 
@@ -748,7 +713,7 @@ static void psycho_check_iommu_error(struct pci_controller_info *p,
 #define  PSYCHO_UEAFSR_RESV2	0x00000000007fffff /* Reserved                     */
 #define PSYCHO_UE_AFAR	0x0038UL
 
-static void psycho_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t psycho_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct pci_controller_info *p = dev_id;
 	unsigned long afsr_reg = p->controller_regs + PSYCHO_UE_AFSR;
@@ -765,7 +730,7 @@ static void psycho_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
 		(PSYCHO_UEAFSR_PPIO | PSYCHO_UEAFSR_PDRD | PSYCHO_UEAFSR_PDWR |
 		 PSYCHO_UEAFSR_SPIO | PSYCHO_UEAFSR_SDRD | PSYCHO_UEAFSR_SDWR);
 	if (!error_bits)
-		return;
+		return IRQ_NONE;
 	psycho_write(afsr_reg, error_bits);
 
 	/* Log the error. */
@@ -804,6 +769,8 @@ static void psycho_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
 
 	/* Interrogate IOMMU for error status. */
 	psycho_check_iommu_error(p, afsr, afar, UE_ERR);
+
+	return IRQ_HANDLED;
 }
 
 /* Correctable Errors. */
@@ -823,7 +790,7 @@ static void psycho_ue_intr(int irq, void *dev_id, struct pt_regs *regs)
 #define  PSYCHO_CEAFSR_RESV2	0x00000000007fffff /* Reserved                     */
 #define PSYCHO_CE_AFAR	0x0040UL
 
-static void psycho_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t psycho_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct pci_controller_info *p = dev_id;
 	unsigned long afsr_reg = p->controller_regs + PSYCHO_CE_AFSR;
@@ -840,7 +807,7 @@ static void psycho_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
 		(PSYCHO_CEAFSR_PPIO | PSYCHO_CEAFSR_PDRD | PSYCHO_CEAFSR_PDWR |
 		 PSYCHO_CEAFSR_SPIO | PSYCHO_CEAFSR_SDRD | PSYCHO_CEAFSR_SDWR);
 	if (!error_bits)
-		return;
+		return IRQ_NONE;
 	psycho_write(afsr_reg, error_bits);
 
 	/* Log the error. */
@@ -882,10 +849,12 @@ static void psycho_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
 	if (!reported)
 		printk("(none)");
 	printk("]\n");
+
+	return IRQ_HANDLED;
 }
 
 /* PCI Errors.  They are signalled by the PCI bus module since they
- * are assosciated with a specific bus segment.
+ * are associated with a specific bus segment.
  */
 #define PSYCHO_PCI_AFSR_A	0x2010UL
 #define PSYCHO_PCI_AFSR_B	0x4010UL
@@ -906,7 +875,7 @@ static void psycho_ce_intr(int irq, void *dev_id, struct pt_regs *regs)
 #define PSYCHO_PCI_AFAR_A	0x2018UL
 #define PSYCHO_PCI_AFAR_B	0x4018UL
 
-static void psycho_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t psycho_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct pci_pbm_info *pbm = dev_id;
 	struct pci_controller_info *p = pbm->parent;
@@ -934,7 +903,7 @@ static void psycho_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
 		 PSYCHO_PCIAFSR_SMA | PSYCHO_PCIAFSR_STA |
 		 PSYCHO_PCIAFSR_SRTRY | PSYCHO_PCIAFSR_SPERR);
 	if (!error_bits)
-		return;
+		return IRQ_NONE;
 	psycho_write(afsr_reg, error_bits);
 
 	/* Log the error. */
@@ -1003,6 +972,8 @@ static void psycho_pcierr_intr(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (error_bits & (PSYCHO_PCIAFSR_PPERR | PSYCHO_PCIAFSR_SPERR))
 		pci_scan_for_parity_error(p, pbm, pbm->pci_bus);
+
+	return IRQ_HANDLED;
 }
 
 /* XXX What about PowerFail/PowerManagement??? -DaveM */
@@ -1096,7 +1067,14 @@ static void __init psycho_base_address_update(struct pci_dev *pdev, int resource
 	int where, size, is_64bit;
 
 	res = &pdev->resource[resource];
-	where = PCI_BASE_ADDRESS_0 + (resource * 4);
+	if (resource < 6) {
+		where = PCI_BASE_ADDRESS_0 + (resource * 4);
+	} else if (resource == PCI_ROM_RESOURCE) {
+		where = pdev->rom_base_reg;
+	} else {
+		/* Somebody might have asked allocation of a non-standard resource */
+		return;
+	}
 
 	is_64bit = 0;
 	if (res->flags & IORESOURCE_IO)
@@ -1112,6 +1090,10 @@ static void __init psycho_base_address_update(struct pci_dev *pdev, int resource
 	pci_read_config_dword(pdev, where, &reg);
 	reg = ((reg & size) |
 	       (((u32)(res->start - root->start)) & ~size));
+	if (resource == PCI_ROM_RESOURCE) {
+		reg |= PCI_ROM_ADDRESS_ENABLE;
+		res->flags |= PCI_ROM_ADDRESS_ENABLE;
+	}
 	pci_write_config_dword(pdev, where, reg);
 
 	/* This knows that the upper 32-bits of the address
@@ -1479,8 +1461,7 @@ static void psycho_pbm_init(struct pci_controller_info *p,
 {
 	unsigned int busrange[2];
 	struct pci_pbm_info *pbm;
-	char namebuf[64];
-	int err, len;
+	int err;
 
 	if (is_pbm_a) {
 		pbm = &p->pbm_A;
@@ -1489,13 +1470,7 @@ static void psycho_pbm_init(struct pci_controller_info *p,
 		pbm->mem_space.start = p->controller_regs + PSYCHO_MEMSPACE_A;
 	} else {
 		pbm = &p->pbm_B;
-		pbm->pci_first_slot = 1;
-		len = prom_getproperty(prom_root_node, "name",
-				       namebuf, sizeof(namebuf));
-		if (len > 0) {
-			if (!strcmp(namebuf, "SUNW,Ultra-1-Engine"))
-				pbm->pci_first_slot = 2;
-		}
+		pbm->pci_first_slot = 2;
 		pbm->io_space.start = p->controller_regs + PSYCHO_IOSPACE_B;
 		pbm->mem_space.start = p->controller_regs + PSYCHO_MEMSPACE_B;
 	}

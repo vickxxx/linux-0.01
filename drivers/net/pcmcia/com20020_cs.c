@@ -33,16 +33,12 @@
  */
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/delay.h>
 #include <linux/module.h>
-#include <asm/io.h>
-#include <asm/system.h>
-
 #include <linux/netdevice.h>
 #include <linux/arcdevice.h>
 #include <linux/com20020.h>
@@ -52,6 +48,9 @@
 #include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
+
+#include <asm/io.h>
+#include <asm/system.h>
 
 #define VERSION "arcnet: COM20020 PCMCIA support loaded.\n"
 
@@ -122,6 +121,7 @@ static int irq_list[4] = { -1 };
 
 MODULE_PARM(irq_mask, "i");
 MODULE_PARM(irq_list, "1-4i");
+MODULE_LICENSE("GPL");
 
 /*====================================================================*/
 
@@ -161,14 +161,6 @@ static void flush_stale_links(void)
 	if (link->state & DEV_STALE_LINK)
 	    com20020_detach(link);
     }
-}
-
-/*====================================================================*/
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-    error_info_t err = { func, ret };
-    CardServices(ReportError, handle, &err);
 }
 
 /*======================================================================
@@ -221,6 +213,7 @@ static dev_link_t *com20020_attach(void)
     memset(link, 0, sizeof(struct dev_link_t));
     dev->priv = lp;
 
+    init_timer(&link->release);
     link->release.function = &com20020_release;
     link->release.data = (u_long)link;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
@@ -566,29 +559,26 @@ static int com20020_event(event_t event, int priority,
 } /* com20020_event */
 
 
-/*====================================================================*/
+
+static struct pcmcia_driver com20020_cs_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "com20020_cs",
+	},
+	.attach		= com20020_attach,
+	.detach		= com20020_detach,
+};
 
 static int __init init_com20020_cs(void)
 {
-    servinfo_t serv;
-
-    DEBUG(0, "%s\n", VERSION);
-    CardServices(GetCardServicesInfo, &serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-	printk(KERN_NOTICE "com20020_cs: Card Services release "
-	       "does not match!\n");
-        return -1;
-    }
-    register_pccard_driver(&dev_info, &com20020_attach, &com20020_detach);
-    return 0;
+	return pcmcia_register_driver(&com20020_cs_driver);
 }
 
 static void __exit exit_com20020_cs(void)
 {
-    DEBUG(0, "com20020_cs: unloading\n");
-    unregister_pccard_driver(&dev_info);
-    while (dev_list != NULL)
-        com20020_detach(dev_list);
+	pcmcia_unregister_driver(&com20020_cs_driver);
+	while (dev_list != NULL)
+		com20020_detach(dev_list);
 }
 
 module_init(init_com20020_cs);

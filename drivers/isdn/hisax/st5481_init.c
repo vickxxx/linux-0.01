@@ -59,10 +59,10 @@ static LIST_HEAD(adapter_list);
  * This function will be called when the adapter is plugged
  * into the USB bus.
  */
-static void * __devinit probe_st5481(struct usb_device *dev,
-				     unsigned int ifnum,
-				     const struct usb_device_id *id)
+static int probe_st5481(struct usb_interface *intf,
+			const struct usb_device_id *id)
 {
+	struct usb_device *dev = interface_to_usbdev(intf);
 	struct st5481_adapter *adapter;
 	struct hisax_b_if *b_if[2];
 	int retval, i;
@@ -73,14 +73,14 @@ static void * __devinit probe_st5481(struct usb_device *dev,
 
 	adapter = kmalloc(sizeof(struct st5481_adapter), GFP_KERNEL);
 	if (!adapter)
-		return NULL;
+		return -ENOMEM;
 
 	memset(adapter, 0, sizeof(struct st5481_adapter));
 
 	adapter->number_of_leds = number_of_leds;
 	adapter->usb_dev = dev;
 
-	SET_MODULE_OWNER(&adapter->hisax_d_if);
+	adapter->hisax_d_if.owner = THIS_MODULE;
 	adapter->hisax_d_if.ifc.priv = adapter;
 	adapter->hisax_d_if.ifc.l2l1 = st5481_d_l2l1;
 
@@ -114,7 +114,8 @@ static void * __devinit probe_st5481(struct usb_device *dev,
 	hisax_register(&adapter->hisax_d_if, b_if, "st5481_usb", protocol);
 	st5481_start(adapter);
 
-	return adapter;
+	usb_set_intfdata(intf, adapter);
+	return 0;
 
  err_b:
 	st5481_release_b(&adapter->bcs[0]);
@@ -123,18 +124,22 @@ static void * __devinit probe_st5481(struct usb_device *dev,
  err_usb:
 	st5481_release_usb(adapter);
  err:
-	return NULL;
+	return -EIO;
 }
 
 /*
  * This function will be called when the adapter is removed
  * from the USB bus.
  */
-static void __devexit disconnect_st5481(struct usb_device *dev, void *arg)
+static void disconnect_st5481(struct usb_interface *intf)
 {
-	struct st5481_adapter *adapter = arg;
+	struct st5481_adapter *adapter = usb_get_intfdata(intf);
 
 	DBG(1,"");
+
+	usb_set_intfdata(intf, NULL);
+	if (!adapter)
+		return;
 
 	list_del(&adapter->list);
 
@@ -176,10 +181,11 @@ static struct usb_device_id st5481_ids[] = {
 MODULE_DEVICE_TABLE (usb, st5481_ids);
 
 static struct usb_driver st5481_usb_driver = {
-	name: "st5481_usb",
-	probe: probe_st5481,
-	disconnect: disconnect_st5481,
-	id_table: st5481_ids,
+	.owner =	THIS_MODULE,
+	.name =		"st5481_usb",
+	.probe =	probe_st5481,
+	.disconnect =	disconnect_st5481,
+	.id_table =	st5481_ids,
 };
 
 static int __init st5481_usb_init(void)

@@ -8,7 +8,8 @@
 #include <linux/module.h>
 #include <linux/netfilter_arp/arp_tables.h>
 
-#define FILTER_VALID_HOOKS ((1 << NF_ARP_IN) | (1 << NF_ARP_OUT))
+#define FILTER_VALID_HOOKS ((1 << NF_ARP_IN) | (1 << NF_ARP_OUT) | \
+			   (1 << NF_ARP_FORWARD))
 
 /* Standard entry. */
 struct arpt_standard
@@ -32,15 +33,17 @@ struct arpt_error
 static struct
 {
 	struct arpt_replace repl;
-	struct arpt_standard entries[2];
+	struct arpt_standard entries[3];
 	struct arpt_error term;
 } initial_table __initdata
-= { { "filter", FILTER_VALID_HOOKS, 3,
-      sizeof(struct arpt_standard) * 2 + sizeof(struct arpt_error),
-      { [NF_ARP_IN] 0,
-	[NF_ARP_OUT] sizeof(struct arpt_standard) },
-      { [NF_ARP_IN] 0,
-	[NF_ARP_OUT] sizeof(struct arpt_standard), },
+= { { "filter", FILTER_VALID_HOOKS, 4,
+      sizeof(struct arpt_standard) * 3 + sizeof(struct arpt_error),
+      { [NF_ARP_IN] = 0,
+	[NF_ARP_OUT] = sizeof(struct arpt_standard),
+	[NF_ARP_FORWARD] = 2 * sizeof(struct arpt_standard), },
+      { [NF_ARP_IN] = 0,
+	[NF_ARP_OUT] = sizeof(struct arpt_standard),
+	[NF_ARP_FORWARD] = 2 * sizeof(struct arpt_standard), },
       0, NULL, { } },
     {
 	    /* ARP_IN */
@@ -65,6 +68,27 @@ static struct
 		      -NF_ACCEPT - 1 }
 	    },
 	    /* ARP_OUT */
+	    {
+		    {
+			    {
+				    { 0 }, { 0 }, { 0 }, { 0 },
+				    0, 0,
+				    { { 0, }, { 0, } },
+				    { { 0, }, { 0, } },
+				    0, 0,
+				    0, 0,
+				    0, 0,
+				    "", "", { 0 }, { 0 },
+				    0, 0
+			    },
+			    sizeof(struct arpt_entry),
+			    sizeof(struct arpt_standard),
+			    0,
+			    { 0, 0 }, { } },
+		    { { { { ARPT_ALIGN(sizeof(struct arpt_standard_target)), "" } }, { } },
+		      -NF_ACCEPT - 1 }
+	    },
+	    /* ARP_FORWARD */
 	    {
 		    {
 			    {
@@ -111,9 +135,14 @@ static struct
     }
 };
 
-static struct arpt_table packet_filter
-= { { NULL, NULL }, "filter", &initial_table.repl,
-    FILTER_VALID_HOOKS, RW_LOCK_UNLOCKED, NULL, THIS_MODULE };
+static struct arpt_table packet_filter = {
+	.name		= "filter",
+	.table		= &initial_table.repl,
+	.valid_hooks	= FILTER_VALID_HOOKS,
+	.lock		= RW_LOCK_UNLOCKED,
+	.private	= NULL,
+	.me		= THIS_MODULE,
+};
 
 /* The work comes in here from netfilter.c */
 static unsigned int arpt_hook(unsigned int hook,
@@ -125,37 +154,46 @@ static unsigned int arpt_hook(unsigned int hook,
 	return arpt_do_table(pskb, hook, in, out, &packet_filter, NULL);
 }
 
-static struct nf_hook_ops arpt_ops[]
-= { { { NULL, NULL }, arpt_hook, NF_ARP, NF_ARP_IN, 0 },
-    { { NULL, NULL }, arpt_hook, NF_ARP, NF_ARP_OUT, 0 }
+static struct nf_hook_ops arpt_ops[] = {
+	{
+		.hook		= arpt_hook,
+		.owner		= THIS_MODULE,
+		.pf		= NF_ARP,
+		.hooknum	= NF_ARP_IN,
+	},
+	{
+		.hook		= arpt_hook,
+		.owner		= THIS_MODULE,
+		.pf		= NF_ARP,
+		.hooknum	= NF_ARP_OUT,
+	},
+	{
+		.hook		= arpt_hook,
+		.owner		= THIS_MODULE,
+		.pf		= NF_ARP,
+		.hooknum	= NF_ARP_FORWARD,
+	},
 };
 
 static int __init init(void)
 {
-	int ret;
+	int ret, i;
 
 	/* Register table */
 	ret = arpt_register_table(&packet_filter);
 	if (ret < 0)
 		return ret;
 
-	/* Register hooks */
-	ret = nf_register_hook(&arpt_ops[0]);
-	if (ret < 0)
-		goto cleanup_table;
-
-	ret = nf_register_hook(&arpt_ops[1]);
-	if (ret < 0)
-		goto cleanup_hook0;
-
+	for (i = 0; i < ARRAY_SIZE(arpt_ops); i++)
+		if ((ret = nf_register_hook(&arpt_ops[i])) < 0)
+			goto cleanup_hooks;
 	return ret;
 
-cleanup_hook0:
-	nf_unregister_hook(&arpt_ops[0]);
+cleanup_hooks:
+	while (--i >= 0)
+		nf_unregister_hook(&arpt_ops[i]);
 
-cleanup_table:
 	arpt_unregister_table(&packet_filter);
-
 	return ret;
 }
 
@@ -163,7 +201,7 @@ static void __exit fini(void)
 {
 	unsigned int i;
 
-	for (i = 0; i < sizeof(arpt_ops)/sizeof(struct nf_hook_ops); i++)
+	for (i = 0; i < ARRAY_SIZE(arpt_ops); i++)
 		nf_unregister_hook(&arpt_ops[i]);
 
 	arpt_unregister_table(&packet_filter);

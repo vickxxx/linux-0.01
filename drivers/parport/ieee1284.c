@@ -22,6 +22,8 @@
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/interrupt.h>
+#include <linux/timer.h>
+#include <linux/sched.h>
 
 #undef DEBUG /* undef me for production */
 
@@ -128,7 +130,7 @@ int parport_poll_peripheral(struct parport *port,
 			return 0;
 		if (signal_pending (current))
 			return -EINTR;
-		if (current->need_resched)
+		if (need_resched())
 			break;
 		if (i >= 2)
 			udelay (5);
@@ -168,7 +170,7 @@ int parport_wait_peripheral(struct parport *port,
 {
 	int ret;
 	int usec;
-	long deadline;
+	unsigned long deadline;
 	unsigned char status;
 
 	usec = port->physport->spintime; /* usecs of fast polling */

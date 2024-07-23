@@ -6,19 +6,18 @@
 #include <asm/errno.h>
 #include <asm/hardware.h>
 #include <asm/arch/irqs.h>
-#include <asm/proc-fns.h>
 
 #ifndef MODE_SVC
 #define MODE_SVC 0x13
 #endif
 
-		.macro	zero_fp
-#ifndef CONFIG_NO_FRAME_POINTER
-		mov	fp, #0
+	.macro	zero_fp
+#ifdef CONFIG_FRAME_POINTER
+	mov	fp, #0
 #endif
-		.endm
+	.endm
 
-		.text
+	.text
 
 @ Bad Abort numbers
 @ -----------------
@@ -42,14 +41,8 @@
 @ Stack format (ensured by USER_* and SVC_*)
 @
 #define S_FRAME_SIZE	72
-#ifdef CONFIG_CPU_32
 #define S_OLD_R0	68
 #define S_PSR		64
-#else
-#define S_OLD_R0	64
-#define S_PSR		60
-#define S_PC		60
-#endif
 
 #define S_PC		60
 #define S_LR		56
@@ -69,122 +62,95 @@
 #define S_R0		0
 #define S_OFF		8
 
-#ifdef CONFIG_CPU_32
-		.macro	save_user_regs
-		sub	sp, sp, #S_FRAME_SIZE
-		stmia	sp, {r0 - r12}			@ Calling r0 - r12
-		add	r8, sp, #S_PC
-		stmdb	r8, {sp, lr}^			@ Calling sp, lr
-		mrs	r8, spsr			@ called from non-FIQ mode, so ok.
-		str	lr, [sp, #S_PC]			@ Save calling PC
-		str	r8, [sp, #S_PSR]		@ Save CPSR
-		str	r0, [sp, #S_OLD_R0]		@ Save OLD_R0
-		.endm
+	.macro	set_cpsr_c, reg, mode
+#if 1
+	/* broken binutils */
+	mov	\reg, \mode
+	msr	cpsr_c, \reg
+#else
+	msr	cpsr_c, \mode
+#endif
+	.endm
 
-		.macro	restore_user_regs
-		ldr	r0, [sp, #S_PSR]		@ Get calling cpsr
-		mov	ip, #I_BIT | MODE_SVC
-		msr	cpsr_c, ip			@ disable IRQs
-		msr	spsr, r0			@ save in spsr_svc
-		ldr	lr, [sp, #S_PC]			@ Get PC
-		ldmia	sp, {r0 - lr}^			@ Get calling r0 - lr
-		mov	r0, r0
-		add	sp, sp, #S_FRAME_SIZE
-		movs	pc, lr				@ return & move spsr_svc into cpsr
-		.endm
+	.macro	disable_irq, temp
+	set_cpsr_c \temp, #PSR_I_BIT | MODE_SVC
+	.endm
 
-		.macro	fast_restore_user_regs
-		mov	ip, #I_BIT | MODE_SVC
-		msr	cpsr_c, ip			@ disable IRQs
-		ldr	r1, [sp, #S_OFF + S_PSR]	@ get calling cpsr
-		ldr	lr, [sp, #S_OFF + S_PC]!	@ get pc
- 		msr	spsr, r1			@ save in spsr_svc
-		ldmdb	sp, {r1 - lr}^			@ get calling r1 - lr
-		mov	r0, r0
-		add	sp, sp, #S_FRAME_SIZE - S_PC
-		movs	pc, lr				@ return & move spsr_svc into cpsr
-		.endm
+	.macro	enable_irq, temp
+	set_cpsr_c \temp, #MODE_SVC
+	.endm
 
-		.macro	mask_pc, rd, rm
-		.endm
+	.macro	save_user_regs
+	sub	sp, sp, #S_FRAME_SIZE
+	stmia	sp, {r0 - r12}			@ Calling r0 - r12
+	add	r8, sp, #S_PC
+	stmdb	r8, {sp, lr}^			@ Calling sp, lr
+	mrs	r8, spsr			@ called from non-FIQ mode, so ok.
+	str	lr, [sp, #S_PC]			@ Save calling PC
+	str	r8, [sp, #S_PSR]		@ Save CPSR
+	str	r0, [sp, #S_OLD_R0]		@ Save OLD_R0
+	.endm
 
-		.macro	enable_irqs, temp
-		mov	\temp, #MODE_SVC
-		msr	cpsr_c, \temp
-		.endm
+	.macro	restore_user_regs
+	ldr	r1, [sp, #S_PSR]		@ Get calling cpsr
+	disable_irq ip				@ disable IRQs
+	ldr	lr, [sp, #S_PC]!		@ Get PC
+	msr	spsr, r1			@ save in spsr_svc
+	ldmdb	sp, {r0 - lr}^			@ Get calling r0 - lr
+	mov	r0, r0
+	add	sp, sp, #S_FRAME_SIZE - S_PC
+	movs	pc, lr				@ return & move spsr_svc into cpsr
+	.endm
 
-		.macro	get_current_task, rd
-		mov	\rd, sp, lsr #13
-		mov	\rd, \rd, lsl #13
-		.endm
+/*
+ * Must be called with IRQs already disabled.
+ */
+	.macro	fast_restore_user_regs
+	ldr	r1, [sp, #S_OFF + S_PSR]	@ get calling cpsr
+	ldr	lr, [sp, #S_OFF + S_PC]!	@ get pc
+	msr	spsr, r1			@ save in spsr_svc
+	ldmdb	sp, {r1 - lr}^			@ get calling r1 - lr
+	mov	r0, r0
+	add	sp, sp, #S_FRAME_SIZE - S_PC
+	movs	pc, lr				@ return & move spsr_svc into cpsr
+	.endm
 
-		/*
-		 * Like adr, but force SVC mode (if required)
-		 */
-		.macro	adrsvc, cond, reg, label
-		adr\cond	\reg, \label
-		.endm
+/*
+ * Must be called with IRQs already disabled.
+ */
+	.macro	slow_restore_user_regs
+	ldr	r1, [sp, #S_PSR]		@ get calling cpsr
+	ldr	lr, [sp, #S_PC]!		@ get pc
+	msr	spsr, r1			@ save in spsr_svc
+	ldmdb	sp, {r0 - lr}^			@ get calling r1 - lr
+	mov	r0, r0
+	add	sp, sp, #S_FRAME_SIZE - S_PC
+	movs	pc, lr				@ return & move spsr_svc into cpsr
+	.endm
 
-		.macro	alignment_trap, rbase, rtemp, sym
+	.macro	mask_pc, rd, rm
+	.endm
+
+	.macro	get_thread_info, rd
+	mov	\rd, sp, lsr #13
+	mov	\rd, \rd, lsl #13
+	.endm
+
+/*
+ * Like adr, but force SVC mode (if required)
+ */
+	.macro	adrsvc, cond, reg, label
+	adr\cond	\reg, \label
+	.endm
+
+	.macro	alignment_trap, rbase, rtemp, sym
 #ifdef CONFIG_ALIGNMENT_TRAP
 #define OFF_CR_ALIGNMENT(x)	cr_alignment - x
 
-		ldr	\rtemp, [\rbase, #OFF_CR_ALIGNMENT(\sym)]
-		mcr	p15, 0, \rtemp, c1, c0
+	ldr	\rtemp, [\rbase, #OFF_CR_ALIGNMENT(\sym)]
+	mcr	p15, 0, \rtemp, c1, c0
 #endif
-		.endm
-
-#else
-		.macro	save_user_regs
-		str	r0, [sp, #-4]!
-		str	lr, [sp, #-4]!
-		sub	sp, sp, #15*4
-		stmia	sp, {r0 - lr}^
-		mov	r0, r0
-		.endm
-
-		.macro	restore_user_regs
-		ldmia	sp, {r0 - lr}^
-		mov	r0, r0
-		ldr	lr, [sp, #15*4]
-		add	sp, sp, #15*4+8
-		movs	pc, lr
-		.endm
-
-		.macro	fast_restore_user_regs
-		add	sp, sp, #S_OFF
-		ldmib	sp, {r1 - lr}^
-		mov	r0, r0
-		ldr	lr, [sp, #15*4]
-		add	sp, sp, #15*4+8
-		movs	pc, lr
-		.endm
-
-		.macro	mask_pc, rd, rm
-		bic	\rd, \rm, #PCMASK
-		.endm
-
-		.macro	enable_irqs, temp
-		teqp	pc, #0x00000003
-		.endm
-
-		.macro	initialise_traps_extra
-		.endm
-
-		.macro	get_current_task, rd
-		mov	\rd, sp, lsr #13
-		mov	\rd, \rd, lsl #13
-		.endm
-
-		/*
-		 * Like adr, but force SVC mode (if required)
-		 */
-		.macro	adrsvc, cond, reg, label
-		adr\cond	\reg, \label
-		orr\cond	\reg, \reg, #0x08000003
-		.endm
-
-#endif
+	.endm
 
 
 /*
@@ -197,17 +163,17 @@
  *
  * We must set at least "tsk" and "why" when calling ret_with_reschedule.
  */
-scno	.req	r7				@ syscall number
-tbl	.req	r8				@ syscall table pointer
-why	.req	r8				@ Linux syscall (!= 0)
-tsk	.req	r9				@ current task
+scno	.req	r7		@ syscall number
+tbl	.req	r8		@ syscall table pointer
+why	.req	r8		@ Linux syscall (!= 0)
+tsk	.req	r9		@ current thread_info
 
 /*
  * Get the system call number.
  */
 	.macro	get_scno
 #ifdef CONFIG_ARM_THUMB
-	tst	r8, #T_BIT		@ this is SPSR from save_user_regs
+	tst	r8, #PSR_T_BIT		@ this is SPSR from save_user_regs
 	addne	scno, r7, #OS_NUMBER << 20 @ put OS number in
 	ldreq	scno, [lr, #-4]
 
@@ -216,4 +182,3 @@ tsk	.req	r9				@ current task
 	ldr	scno, [lr, #-4]		@ get SWI instruction
 #endif
 	.endm
-

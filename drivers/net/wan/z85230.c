@@ -718,7 +718,7 @@ EXPORT_SYMBOL(z8530_nop);
  *	channel). c->lock for both channels points to dev->lock
  */
 
-void z8530_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t z8530_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct z8530_dev *dev=dev_id;
 	u8 intr;
@@ -729,7 +729,7 @@ void z8530_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	if(locker)
 	{
 		printk(KERN_ERR "IRQ re-enter\n");
-		return;
+		return IRQ_NONE;
 	}
 	locker=1;
 
@@ -775,6 +775,7 @@ void z8530_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		printk(KERN_ERR "%s: interrupt jammed - abort(0x%X)!\n", dev->name, intr);
 	/* Ok all done */
 	locker=0;
+	return IRQ_HANDLED;
 }
 
 EXPORT_SYMBOL(z8530_interrupt);
@@ -889,12 +890,12 @@ int z8530_sync_dma_open(struct net_device *dev, struct z8530_channel *c)
 	if(c->mtu  > PAGE_SIZE/2)
 		return -EMSGSIZE;
 	 
-	c->rx_buf[0]=(void *)get_free_page(GFP_KERNEL|GFP_DMA);
+	c->rx_buf[0]=(void *)get_zeroed_page(GFP_KERNEL|GFP_DMA);
 	if(c->rx_buf[0]==NULL)
 		return -ENOBUFS;
 	c->rx_buf[1]=c->rx_buf[0]+PAGE_SIZE/2;
 	
-	c->tx_dma_buf[0]=(void *)get_free_page(GFP_KERNEL|GFP_DMA);
+	c->tx_dma_buf[0]=(void *)get_zeroed_page(GFP_KERNEL|GFP_DMA);
 	if(c->tx_dma_buf[0]==NULL)
 	{
 		free_page((unsigned long)c->rx_buf[0]);
@@ -1079,7 +1080,7 @@ int z8530_sync_txdma_open(struct net_device *dev, struct z8530_channel *c)
 	if(c->mtu  > PAGE_SIZE/2)
 		return -EMSGSIZE;
 	 
-	c->tx_dma_buf[0]=(void *)get_free_page(GFP_KERNEL|GFP_DMA);
+	c->tx_dma_buf[0]=(void *)get_zeroed_page(GFP_KERNEL|GFP_DMA);
 	if(c->tx_dma_buf[0]==NULL)
 		return -ENOBUFS;
 
@@ -1634,7 +1635,7 @@ static void z8530_rx_done(struct z8530_channel *c)
 			write_zsreg(c, R0, RES_Rx_CRC);
 		}
 		else
-			/* Can't occur as we dont reenable the DMA irq until
+			/* Can't occur as we don't reenable the DMA irq until
 			   after the flip is done */
 			printk(KERN_WARNING "%s: DMA flip overrun!\n", c->netdevice->name);
 			

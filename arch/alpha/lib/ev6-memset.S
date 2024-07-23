@@ -38,7 +38,6 @@
 	.ent __memset
 .align 5
 __memset:
-memset:
 	.frame $30,0,$26,0
 	.prologue 0
 
@@ -236,7 +235,7 @@ end_b:
 	 * entry point.
 	 */
 .align 4
-	.ent __memset
+	.ent __constant_c_memset
 __constant_c_memset:
 	.frame $30,0,$26,0
 	.prologue 0
@@ -594,3 +593,5 @@ end_w:
 	ret $31,($26),1		# L0 :
 
 	.end __memsetw
+
+memset = __memset

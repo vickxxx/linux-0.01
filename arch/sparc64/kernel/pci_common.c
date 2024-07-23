@@ -1,4 +1,4 @@
-/* $Id: pci_common.c,v 1.27 2001/08/12 13:18:22 davem Exp $
+/* $Id: pci_common.c,v 1.29 2002/02/01 00:56:03 davem Exp $
  * pci_common.c: PCI controller common support.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
@@ -78,20 +78,6 @@ static int __init find_device_prom_node(struct pci_pbm_info *pbm,
 	return 0;
 }
 
-/* Remove a PCI device from the device trees, then
- * free it up.  Note that this must run before
- * the device's resources are registered because we
- * do not handle unregistering them here.
- */
-static void pci_device_delete(struct pci_dev *pdev)
-{
-	list_del(&pdev->global_list);
-	list_del(&pdev->bus_list);
-
-	/* Ok, all references are gone, free it up. */
-	kfree(pdev);
-}
-
 /* Older versions of OBP on PCI systems encode 64-bit MEM
  * space assignments incorrectly, this fixes them up.  We also
  * take the opportunity here to hide other kinds of bogus
@@ -159,12 +145,12 @@ static void __init pdev_cookie_fillin(struct pci_pbm_info *pbm,
 		 * there must be a damn good reason for it.
 		 *
 		 * So what we do is delete the device from the
-		 * PCI device tree completely.  This scenerio
+		 * PCI device tree completely.  This scenario
 		 * is seen, for example, on CP1500 for the
 		 * second EBUS/HappyMeal pair if the external
 		 * connector for it is not present.
 		 */
-		pci_device_delete(pdev);
+		pci_remove_bus_device(pdev);
 		return;
 	}
 
@@ -183,6 +169,17 @@ static void __init pdev_cookie_fillin(struct pci_pbm_info *pbm,
 		pcp->prom_name[err] = 0;
 	else
 		pcp->prom_name[0] = 0;
+
+	err = prom_getproperty(device_prom_node,
+			       "assigned-addresses",
+			       (char *)pcp->prom_assignments,
+			       sizeof(pcp->prom_assignments));
+	if (err == 0 || err == -1)
+		pcp->num_prom_assignments = 0;
+	else
+		pcp->num_prom_assignments =
+			(err / sizeof(pcp->prom_assignments[0]));
+
 	if (strcmp(pcp->prom_name, "ebus") == 0) {
 		struct linux_prom_ebus_ranges erng[PROM_PCIRNG_MAX];
 		int iter;
@@ -208,16 +205,6 @@ static void __init pdev_cookie_fillin(struct pci_pbm_info *pbm,
 			ap->size_lo = ep->size;
 		}
 		pcp->num_prom_assignments = err;
-	} else {
-		err = prom_getproperty(device_prom_node,
-				       "assigned-addresses",
-				       (char *)pcp->prom_assignments,
-				       sizeof(pcp->prom_assignments));
-		if (err == 0 || err == -1)
-			pcp->num_prom_assignments = 0;
-		else
-			pcp->num_prom_assignments =
-				(err / sizeof(pcp->prom_assignments[0]));
 	}
 
 	fixup_obp_assignments(pdev, pcp);
@@ -403,7 +390,7 @@ static void __init pdev_record_assignments(struct pci_pbm_info *pbm,
 			if ((res->start >> 32) != 0UL) {
 				printk(KERN_ERR "PCI: OBP assigns out of range MEM address "
 				       "%016lx for region %ld on device %s\n",
-				       res->start, (res - &pdev->resource[0]), pdev->name);
+				       res->start, (res - &pdev->resource[0]), pdev->dev.name);
 				continue;
 			}
 		}
@@ -425,7 +412,7 @@ static void __init pdev_record_assignments(struct pci_pbm_info *pbm,
 				       "[%016lx:%016lx] of device %s\n",
 				       (res - &pdev->resource[0]),
 				       res->start, res->end,
-				       pdev->name);
+				       pdev->dev.name);
 			}
 		}
 	}
@@ -502,7 +489,7 @@ static void __init pdev_assign_unassigned(struct pci_pbm_info *pbm,
 		if (allocate_resource(root, res, size + 1, min, max, align, NULL, NULL) < 0) {
 			/* uh oh */
 			prom_printf("PCI: Failed to allocate resource %d for %s\n",
-				    i, pdev->name);
+				    i, pdev->dev.name);
 			prom_halt();
 		}
 
@@ -570,33 +557,55 @@ static int __init pci_intmap_match(struct pci_dev *pdev, unsigned int *interrupt
 	struct pci_pbm_info *pbm = dev_pcp->pbm;
 	struct linux_prom_pci_registers *pregs = dev_pcp->prom_regs;
 	unsigned int hi, mid, lo, irq;
-	int i, num_intmap;
-
-	if (pbm->num_pbm_intmap == 0)
-		return 0;
+	int i, num_intmap, map_slot;
 
 	intmap = &pbm->pbm_intmap[0];
 	intmask = &pbm->pbm_intmask;
 	num_intmap = pbm->num_pbm_intmap;
+	map_slot = 0;
 
 	/* If we are underneath a PCI bridge, use PROM register
 	 * property of the parent bridge which is closest to
 	 * the PBM.
+	 *
+	 * However if that parent bridge has interrupt map/mask
+	 * properties of its own we use the PROM register property
+	 * of the next child device on the path to PDEV.
+	 *
+	 * In detail the two cases are (note that the 'X' below is the
+	 * 'next child on the path to PDEV' mentioned above):
+	 *
+	 * 1) PBM --> PCI bus lacking int{map,mask} --> X ... PDEV
+	 *
+	 *    Here we use regs of 'PCI bus' device.
+	 *
+	 * 2) PBM --> PCI bus with int{map,mask} --> X ... PDEV
+	 *
+	 *    Here we use regs of 'X'.  Note that X can be PDEV.
 	 */
 	if (pdev->bus->number != pbm->pci_first_busno) {
-		struct pcidev_cookie *bus_pcp;
-		struct pci_dev *pwalk;
-		int offset, plen;
+		struct pcidev_cookie *bus_pcp, *regs_pcp;
+		struct pci_dev *bus_dev, *regs_dev;
+		int plen;
 
-		pwalk = pdev->bus->self;
-		while (pwalk->bus &&
-		       pwalk->bus->number != pbm->pci_first_busno)
-			pwalk = pwalk->bus->self;
+		bus_dev = pdev->bus->self;
+		regs_dev = pdev;
 
-		bus_pcp = pwalk->sysdata;
+		while (bus_dev->bus &&
+		       bus_dev->bus->number != pbm->pci_first_busno) {
+			regs_dev = bus_dev;
+			bus_dev = bus_dev->bus->self;
+		}
+
+		regs_pcp = regs_dev->sysdata;
+		pregs = regs_pcp->prom_regs;
+
+		bus_pcp = bus_dev->sysdata;
 
 		/* But if the PCI bridge has it's own interrupt map
-		 * and mask properties, use that and the device regs.
+		 * and mask properties, use that and the regs of the
+		 * PCI entity at the next level down on the path to the
+		 * device.
 		 */
 		plen = prom_getproperty(bus_pcp->prom_node, "interrupt-map",
 					(char *) &bridge_local_intmap[0],
@@ -604,38 +613,31 @@ static int __init pci_intmap_match(struct pci_dev *pdev, unsigned int *interrupt
 		if (plen != -1) {
 			intmap = &bridge_local_intmap[0];
 			num_intmap = plen / sizeof(struct linux_prom_pci_intmap);
-			plen = prom_getproperty(bus_pcp->prom_node, "interrupt-map-mask",
+			plen = prom_getproperty(bus_pcp->prom_node,
+						"interrupt-map-mask",
 						(char *) &bridge_local_intmask,
 						sizeof(bridge_local_intmask));
 			if (plen == -1) {
-				prom_printf("pbm_intmap_match: Bridge has intmap but "
-					    "no intmask.\n");
-				prom_halt();
+				printk("pci_intmap_match: Warning! Bridge has intmap "
+				       "but no intmask.\n");
+				printk("pci_intmap_match: Trying to recover.\n");
+				return 0;
 			}
-			goto check_intmap;
-		}
 
-		pregs = bus_pcp->prom_regs;
-
-		offset = prom_getint(dev_pcp->prom_node,
-				     "fcode-rom-offset");
-
-		/* Did PROM know better and assign an interrupt other
-		 * than #INTA to the device? - We test here for presence of
-		 * FCODE on the card, in this case we assume PROM has set
-		 * correct 'interrupts' property, unless it is quadhme.
-		 */
-		if (offset == -1 ||
-		    !strcmp(dev_pcp->prom_name, "SUNW,qfe") ||
-		    !strcmp(dev_pcp->prom_name, "qfe")) {
-			/*
-			 * No, use low slot number bits of child as IRQ line.
-			 */
-			*interrupt = ((*interrupt - 1 + PCI_SLOT(pdev->devfn)) & 3) + 1;
+			if (pdev->bus->self != bus_dev)
+				map_slot = 1;
+		} else {
+			pregs = bus_pcp->prom_regs;
+			map_slot = 1;
 		}
 	}
 
-check_intmap:
+	if (map_slot) {
+		*interrupt = ((*interrupt
+			       - 1
+			       + PCI_SLOT(pdev->devfn)) & 0x3) + 1;
+	}
+
 	hi   = pregs->phys_hi & intmask->phys_hi;
 	mid  = pregs->phys_mid & intmask->phys_mid;
 	lo   = pregs->phys_lo & intmask->phys_lo;
@@ -647,16 +649,35 @@ check_intmap:
 		    intmap[i].phys_lo  == lo	&&
 		    intmap[i].interrupt == irq) {
 			*interrupt = intmap[i].cinterrupt;
+			printk("PCI-IRQ: Routing bus[%2x] slot[%2x] map[%d] to INO[%02x]\n",
+			       pdev->bus->number, PCI_SLOT(pdev->devfn),
+			       map_slot, *interrupt);
 			return 1;
 		}
 	}
 
-	prom_printf("pbm_intmap_match: bus %02x, devfn %02x: ",
-		    pdev->bus->number, pdev->devfn);
-	prom_printf("IRQ [%08x.%08x.%08x.%08x] not found in interrupt-map\n",
-		    pregs->phys_hi, pregs->phys_mid, pregs->phys_lo, *interrupt);
-	prom_printf("Please email this information to davem@redhat.com\n");
-	prom_halt();
+	/* We will run this code even if pbm->num_pbm_intmap is zero, just so
+	 * we can apply the slot mapping to the PROM interrupt property value.
+	 * So do not spit out these warnings in that case.
+	 */
+	if (num_intmap != 0) {
+		/* Print it both to OBP console and kernel one so that if bootup
+		 * hangs here the user has the information to report.
+		 */
+		prom_printf("pci_intmap_match: bus %02x, devfn %02x: ",
+			    pdev->bus->number, pdev->devfn);
+		prom_printf("IRQ [%08x.%08x.%08x.%08x] not found in interrupt-map\n",
+			    pregs->phys_hi, pregs->phys_mid, pregs->phys_lo, *interrupt);
+		prom_printf("Please email this information to davem@redhat.com\n");
+
+		printk("pci_intmap_match: bus %02x, devfn %02x: ",
+		       pdev->bus->number, pdev->devfn);
+		printk("IRQ [%08x.%08x.%08x.%08x] not found in interrupt-map\n",
+		       pregs->phys_hi, pregs->phys_mid, pregs->phys_lo, *interrupt);
+		printk("Please email this information to davem@redhat.com\n");
+	}
+
+	return 0;
 }
 
 static void __init pdev_fixup_irq(struct pci_dev *pdev)
@@ -668,6 +689,20 @@ static void __init pdev_fixup_irq(struct pci_dev *pdev)
 	unsigned int prom_irq;
 	int prom_node = pcp->prom_node;
 	int err;
+
+	/* If this is an empty EBUS device, sometimes OBP fails to
+	 * give it a valid fully specified interrupts property.
+	 * The EBUS hooked up to SunHME on PCI I/O boards of
+	 * Ex000 systems is one such case.
+	 *
+	 * The interrupt is not important so just ignore it.
+	 */
+	if (pdev->vendor == PCI_VENDOR_ID_SUN &&
+	    pdev->device == PCI_DEVICE_ID_SUN_EBUS &&
+	    !prom_getchild(prom_node)) {
+		pdev->irq = 0;
+		return;
+	}
 
 	err = prom_getproperty(prom_node, "interrupts",
 			       (char *)&prom_irq, sizeof(prom_irq));
@@ -723,12 +758,19 @@ static void __init pdev_fixup_irq(struct pci_dev *pdev)
 		 * ranges. -DaveM
  		 */
 		if (pdev->bus->number == pbm->pci_first_busno) {
-			slot = (pdev->devfn >> 3) - pbm->pci_first_slot;
+			slot = PCI_SLOT(pdev->devfn) - pbm->pci_first_slot;
 		} else {
+			struct pci_dev *bus_dev;
+
 			/* Underneath a bridge, use slot number of parent
-			 * bridge.
+			 * bridge which is closest to the PBM.
 			 */
-			slot = (pdev->bus->self->devfn >> 3) - pbm->pci_first_slot;
+			bus_dev = pdev->bus->self;
+			while (bus_dev->bus &&
+			       bus_dev->bus->number != pbm->pci_first_busno)
+				bus_dev = bus_dev->bus->self;
+
+			slot = PCI_SLOT(bus_dev->devfn) - pbm->pci_first_slot;
 		}
 		slot = slot << 2;
 
@@ -949,7 +991,7 @@ void pci_scan_for_target_abort(struct pci_controller_info *p,
 			pci_write_config_word(pdev, PCI_STATUS, error_bits);
 			printk("PCI%d(PBM%c): Device [%s] saw Target Abort [%016x]\n",
 			       p->index, ((pbm == &p->pbm_A) ? 'A' : 'B'),
-			       pdev->name, status);
+			       pdev->dev.name, status);
 		}
 	}
 
@@ -975,7 +1017,7 @@ void pci_scan_for_master_abort(struct pci_controller_info *p,
 			pci_write_config_word(pdev, PCI_STATUS, error_bits);
 			printk("PCI%d(PBM%c): Device [%s] received Master Abort [%016x]\n",
 			       p->index, ((pbm == &p->pbm_A) ? 'A' : 'B'),
-			       pdev->name, status);
+			       pdev->dev.name, status);
 		}
 	}
 
@@ -1002,7 +1044,7 @@ void pci_scan_for_parity_error(struct pci_controller_info *p,
 			pci_write_config_word(pdev, PCI_STATUS, error_bits);
 			printk("PCI%d(PBM%c): Device [%s] saw Parity Error [%016x]\n",
 			       p->index, ((pbm == &p->pbm_A) ? 'A' : 'B'),
-			       pdev->name, status);
+			       pdev->dev.name, status);
 		}
 	}
 

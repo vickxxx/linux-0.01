@@ -5,12 +5,13 @@
  *
  * This code is GPL
  * 
- * $Id: dc21285.c,v 1.6 2001/10/02 15:05:14 dwmw2 Exp $
+ * $Id: dc21285.c,v 1.15 2003/05/21 12:45:18 dwmw2 Exp $
  */
-
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
+#include <linux/init.h>
 
 #include <linux/mtd/mtd.h>
 #include <linux/mtd/map.h>
@@ -44,15 +45,15 @@ void dc21285_copy_from(struct map_info *map, void *to, unsigned long from, ssize
 
 void dc21285_write8(struct map_info *map, __u8 d, unsigned long adr)
 {
-	*CSR_ROMWRITEREG = adr;
+	*CSR_ROMWRITEREG = adr & 3;
 	adr &= ~3;
 	*(__u8*)(map->map_priv_1 + adr) = d;
 }
 
 void dc21285_write16(struct map_info *map, __u16 d, unsigned long adr)
 {
-	*CSR_ROMWRITEREG = adr;
-	adr &= ~1;
+	*CSR_ROMWRITEREG = adr & 3;
+	adr &= ~3;
 	*(__u16*)(map->map_priv_1 + adr) = d;
 }
 
@@ -92,26 +93,42 @@ void dc21285_copy_to(struct map_info *map, unsigned long to, const void *from, s
 }
 
 struct map_info dc21285_map = {
-	name: "DC21285 flash",
-	size: 16*1024*1024,
-	read8: dc21285_read8,
-	read16: dc21285_read16,
-	read32: dc21285_read32,
-	copy_from: dc21285_copy_from,
-	write8: dc21285_write8,
-	write16: dc21285_write16,
-	write32: dc21285_write32,
-	copy_to: dc21285_copy_to
+	.name = "DC21285 flash",
+	.phys = NO_XIP,
+	.size = 16*1024*1024,
+	.read8 = dc21285_read8,
+	.read16 = dc21285_read16,
+	.read32 = dc21285_read32,
+	.copy_from = dc21285_copy_from,
+	.write8 = dc21285_write8,
+	.write16 = dc21285_write16,
+	.write32 = dc21285_write32,
+	.copy_to = dc21285_copy_to
 };
 
 
 /* Partition stuff */
 static struct mtd_partition *dc21285_parts;
-		      
-extern int parse_redboot_partitions(struct mtd_info *, struct mtd_partition **);
-
+#ifdef CONFIG_MTD_PARTITIONS
+static const char *probes[] = { "RedBoot", "cmdlinepart", NULL };
+#endif
+  
 int __init init_dc21285(void)
 {
+
+	/* 
+	 * Flash timing is determined with bits 19-16 of the
+	 * CSR_SA110_CNTL.  The value is the number of wait cycles, or
+	 * 0 for 16 cycles (the default).  Cycles are 20 ns.
+	 * Here we use 7 for 140 ns flash chips.
+	 */
+	/* access time */
+	*CSR_SA110_CNTL = ((*CSR_SA110_CNTL & ~0x000f0000) | (7 << 16));
+	/* burst time */
+	*CSR_SA110_CNTL = ((*CSR_SA110_CNTL & ~0x00f00000) | (7 << 20));
+	/* tristate time */
+	*CSR_SA110_CNTL = ((*CSR_SA110_CNTL & ~0x0f000000) | (7 << 24));
+
 	/* Determine buswidth */
 	switch (*CSR_SA110_CNTL & (3<<14)) {
 		case SA110_CNTL_ROMWIDTH_8: 
@@ -131,7 +148,7 @@ int __init init_dc21285(void)
 		dc21285_map.buswidth*8);
 
 	/* Let's map the flash area */
-	dc21285_map.map_priv_1 = (unsigned long)__ioremap(DC21285_FLASH, 16*1024*1024, 0);
+	dc21285_map.map_priv_1 = (unsigned long)ioremap(DC21285_FLASH, 16*1024*1024);
 	if (!dc21285_map.map_priv_1) {
 		printk("Failed to ioremap\n");
 		return -EIO;
@@ -139,34 +156,20 @@ int __init init_dc21285(void)
 
 	mymtd = do_map_probe("cfi_probe", &dc21285_map);
 	if (mymtd) {
-		int nrparts;
+		int nrparts = 0;
 
-		mymtd->module = THIS_MODULE;
+		mymtd->owner = THIS_MODULE;
 			
 		/* partition fixup */
 
-		nrparts = parse_redboot_partitions(mymtd, &dc21285_parts);
-		if (nrparts <=0) {
-			printk(KERN_NOTICE "RedBoot partition table failed\n");
-			iounmap((void *)dc21285_map.map_priv_1);
-			return -ENXIO;
+#ifdef CONFIG_MTD_PARTITIONS
+		nrparts = parse_mtd_partitions(mymtd, probes, &dc21285_parts, (void *)0);
+		if (nrparts > 0) {
+			add_mtd_partitions(mymtd, dc21285_parts, nrparts);
+			return 0;
 		}
-
-		add_mtd_partitions(mymtd, dc21285_parts, nrparts);
-
-		/* 
-		 * Flash timing is determined with bits 19-16 of the
-		 * CSR_SA110_CNTL.  The value is the number of wait cycles, or
-		 * 0 for 16 cycles (the default).  Cycles are 20 ns.
-		 * Here we use 7 for 140 ns flash chips.
-		 */
-		/* access time */
-		*CSR_SA110_CNTL = ((*CSR_SA110_CNTL & ~0x000f0000) | (7 << 16));
-		/* burst time */
-		*CSR_SA110_CNTL = ((*CSR_SA110_CNTL & ~0x00f00000) | (7 << 20));
-		/* tristate time */
-		*CSR_SA110_CNTL = ((*CSR_SA110_CNTL & ~0x0f000000) | (7 << 24));
-
+#endif
+		add_mtd_device(mymtd);
 		return 0;
 	}
 
@@ -176,17 +179,16 @@ int __init init_dc21285(void)
 
 static void __exit cleanup_dc21285(void)
 {
-	if (mymtd) {
-		del_mtd_device(mymtd);
-		map_destroy(mymtd);
-		mymtd = NULL;
-	}
-	if (dc21285_map.map_priv_1) {
-		iounmap((void *)dc21285_map.map_priv_1);
-		dc21285_map.map_priv_1 = 0;
-	}
-	if(dc21285_parts)
+#ifdef CONFIG_MTD_PARTITIONS
+	if (dc21285_parts) {
+		del_mtd_partitions(mymtd);
 		kfree(dc21285_parts);
+	} else
+#endif
+		del_mtd_device(mymtd);
+
+	map_destroy(mymtd);
+	iounmap((void *)dc21285_map.map_priv_1);
 }
 
 module_init(init_dc21285);

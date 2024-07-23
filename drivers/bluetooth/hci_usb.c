@@ -1,8 +1,9 @@
 /* 
-   BlueZ - Bluetooth protocol stack for Linux
+   HCI USB driver for Linux Bluetooth protocol stack (BlueZ)
    Copyright (C) 2000-2001 Qualcomm Incorporated
-
    Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>
+
+   Copyright (C) 2003 Maxim Krasnyansky <maxk@qualcomm.com>
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License version 2 as
@@ -23,641 +24,940 @@
 */
 
 /*
- * BlueZ HCI USB driver.
+ * Bluetooth HCI USB driver.
  * Based on original USB Bluetooth driver for Linux kernel
  *    Copyright (c) 2000 Greg Kroah-Hartman        <greg@kroah.com>
  *    Copyright (c) 2000 Mark Douglas Corner       <mcorner@umich.edu>
  *
- * $Id: hci_usb.c,v 1.5 2001/07/05 18:42:44 maxk Exp $    
+ * $Id: hci_usb.c,v 1.8 2002/07/18 17:23:09 maxk Exp $    
  */
-#define VERSION "1.0"
+#define VERSION "2.4"
 
 #include <linux/config.h>
 #include <linux/module.h>
 
 #include <linux/version.h>
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/init.h>
 #include <linux/sched.h>
+#include <linux/unistd.h>
 #include <linux/types.h>
-#include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
-#include <linux/poll.h>
 
 #include <linux/slab.h>
-#include <linux/tty.h>
 #include <linux/errno.h>
 #include <linux/string.h>
-#include <linux/signal.h>
-#include <linux/ioctl.h>
 #include <linux/skbuff.h>
 
 #include <linux/usb.h>
 
 #include <net/bluetooth/bluetooth.h>
-#include <net/bluetooth/bluez.h>
 #include <net/bluetooth/hci_core.h>
-#include <net/bluetooth/hci_usb.h>
+
+#include "hci_usb.h"
 
 #ifndef HCI_USB_DEBUG
-#undef  DBG
-#define DBG( A... )
-#undef  DMP
-#define DMP( A... )
+#undef  BT_DBG
+#define BT_DBG( A... )
+#undef  BT_DMP
+#define BT_DMP( A... )
 #endif
 
-static struct usb_device_id usb_bluetooth_ids [] = {
+#ifndef CONFIG_BT_USB_ZERO_PACKET
+#undef  URB_ZERO_PACKET
+#define URB_ZERO_PACKET 0
+#endif
+
+static struct usb_driver hci_usb_driver; 
+
+static struct usb_device_id bluetooth_ids[] = {
+	/* Generic Bluetooth USB device */
 	{ USB_DEVICE_INFO(HCI_DEV_CLASS, HCI_DEV_SUBCLASS, HCI_DEV_PROTOCOL) },
+
+	/* Ericsson with non-standard id */
+	{ USB_DEVICE(0x0bdb, 0x1002) },
+
+	/* Bluetooth Ultraport Module from IBM */
+	{ USB_DEVICE(0x04bf, 0x030a) },
+
 	{ }	/* Terminating entry */
 };
 
-MODULE_DEVICE_TABLE (usb, usb_bluetooth_ids);
+MODULE_DEVICE_TABLE (usb, bluetooth_ids);
 
-static int hci_usb_ctrl_msg(struct hci_usb *husb,  struct sk_buff *skb);
-static int hci_usb_write_msg(struct hci_usb *husb, struct sk_buff *skb);
+static struct usb_device_id ignore_ids[] = {
+	/* Broadcom BCM2033 without firmware */
+	{ USB_DEVICE(0x0a5c, 0x2033) },
 
-static void hci_usb_unlink_urbs(struct hci_usb *husb)
+	{ }	/* Terminating entry */
+};
+
+struct _urb *_urb_alloc(int isoc, int gfp)
 {
-	usb_unlink_urb(husb->read_urb);
-	usb_unlink_urb(husb->intr_urb);
-	usb_unlink_urb(husb->ctrl_urb);
-	usb_unlink_urb(husb->write_urb);
+	struct _urb *_urb = kmalloc(sizeof(struct _urb) +
+				sizeof(struct usb_iso_packet_descriptor) * isoc, gfp);
+	if (_urb) {
+		memset(_urb, 0, sizeof(*_urb));
+		_urb->urb.count = (atomic_t)ATOMIC_INIT(1);
+		spin_lock_init(&_urb->urb.lock);
+	}
+	return _urb;
 }
 
-static void hci_usb_free_bufs(struct hci_usb *husb)
+struct _urb *_urb_dequeue(struct _urb_queue *q)
 {
-	if (husb->read_urb) {
-		if (husb->read_urb->transfer_buffer)
-			kfree(husb->read_urb->transfer_buffer);
-		usb_free_urb(husb->read_urb);
+	struct _urb *_urb = NULL;
+        unsigned long flags;
+        spin_lock_irqsave(&q->lock, flags);
+	{
+		struct list_head *head = &q->head;
+		struct list_head *next = head->next;
+		if (next != head) {
+			_urb = list_entry(next, struct _urb, list);
+			list_del(next); _urb->queue = NULL;
+		}
 	}
-
-	if (husb->intr_urb) {
-		if (husb->intr_urb->transfer_buffer)
-			kfree(husb->intr_urb->transfer_buffer);
-		usb_free_urb(husb->intr_urb);
-	}
-
-	if (husb->ctrl_urb)
-		usb_free_urb(husb->ctrl_urb);
-
-	if (husb->write_urb)
-		usb_free_urb(husb->write_urb);
-
-	if (husb->intr_skb)
-		kfree_skb(husb->intr_skb);
+	spin_unlock_irqrestore(&q->lock, flags);
+	return _urb;
 }
 
-/* ------- Interface to HCI layer ------ */
+static void hci_usb_rx_complete(struct urb *urb, struct pt_regs *regs);
+static void hci_usb_tx_complete(struct urb *urb, struct pt_regs *regs);
+
+#define __pending_tx(husb, type)  (&husb->pending_tx[type-1])
+#define __pending_q(husb, type)   (&husb->pending_q[type-1])
+#define __completed_q(husb, type) (&husb->completed_q[type-1])
+#define __transmit_q(husb, type)  (&husb->transmit_q[type-1])
+#define __reassembly(husb, type)  (husb->reassembly[type-1])
+
+static inline struct _urb *__get_completed(struct hci_usb *husb, int type)
+{
+	return _urb_dequeue(__completed_q(husb, type)); 
+}
+
+#ifdef CONFIG_BT_USB_SCO
+static void __fill_isoc_desc(struct urb *urb, int len, int mtu)
+{
+	int offset = 0, i;
+
+	BT_DBG("len %d mtu %d", len, mtu);
+
+	for (i=0; i < HCI_MAX_ISOC_FRAMES && len >= mtu; i++, offset += mtu, len -= mtu) {
+		urb->iso_frame_desc[i].offset = offset;
+		urb->iso_frame_desc[i].length = mtu;
+		BT_DBG("desc %d offset %d len %d", i, offset, mtu);
+	}
+	if (len && i < HCI_MAX_ISOC_FRAMES) {
+		urb->iso_frame_desc[i].offset = offset;
+		urb->iso_frame_desc[i].length = len;
+		BT_DBG("desc %d offset %d len %d", i, offset, len);
+		i++;
+	}
+	urb->number_of_packets = i;
+}
+#endif
+
+static int hci_usb_intr_rx_submit(struct hci_usb *husb)
+{
+	struct _urb *_urb;
+	struct urb *urb;
+	int err, pipe, interval, size;
+	void *buf;
+
+	BT_DBG("%s", husb->hdev.name);
+
+        size = husb->intr_in_ep->desc.wMaxPacketSize;
+
+	buf = kmalloc(size, GFP_ATOMIC);
+	if (!buf)
+		return -ENOMEM;
+
+	_urb = _urb_alloc(0, GFP_ATOMIC);
+	if (!_urb) {
+		kfree(buf);
+		return -ENOMEM;
+	}
+	_urb->type = HCI_EVENT_PKT;
+	_urb_queue_tail(__pending_q(husb, _urb->type), _urb);
+
+	urb = &_urb->urb;
+	pipe     = usb_rcvintpipe(husb->udev, husb->intr_in_ep->desc.bEndpointAddress);
+	interval = husb->intr_in_ep->desc.bInterval;
+	usb_fill_int_urb(urb, husb->udev, pipe, buf, size, hci_usb_rx_complete, husb, interval);
+	
+	err = usb_submit_urb(urb, GFP_ATOMIC);
+	if (err) {
+		BT_ERR("%s intr rx submit failed urb %p err %d",
+				husb->hdev.name, urb, err);
+		_urb_unlink(_urb);
+		_urb_free(_urb);
+		kfree(buf);
+	}
+	return err;
+}
+
+static int hci_usb_bulk_rx_submit(struct hci_usb *husb)
+{
+	struct _urb *_urb;
+	struct urb *urb;
+	int err, pipe, size = HCI_MAX_FRAME_SIZE;
+	void *buf;
+
+	buf = kmalloc(size, GFP_ATOMIC);
+	if (!buf)
+		return -ENOMEM;
+
+	_urb = _urb_alloc(0, GFP_ATOMIC);
+	if (!_urb) {
+		kfree(buf);
+		return -ENOMEM;
+	}
+	_urb->type = HCI_ACLDATA_PKT;
+	_urb_queue_tail(__pending_q(husb, _urb->type), _urb);
+
+	urb  = &_urb->urb;
+	pipe = usb_rcvbulkpipe(husb->udev, husb->bulk_in_ep->desc.bEndpointAddress);
+        usb_fill_bulk_urb(urb, husb->udev, pipe, buf, size, hci_usb_rx_complete, husb);
+        urb->transfer_flags = 0;
+
+	BT_DBG("%s urb %p", husb->hdev.name, urb);
+
+	err = usb_submit_urb(urb, GFP_ATOMIC);
+	if (err) {
+		BT_ERR("%s bulk rx submit failed urb %p err %d",
+				husb->hdev.name, urb, err);
+		_urb_unlink(_urb);
+		_urb_free(_urb);
+		kfree(buf);
+	}
+	return err;
+}
+
+#ifdef CONFIG_BT_USB_SCO
+static int hci_usb_isoc_rx_submit(struct hci_usb *husb)
+{
+	struct _urb *_urb;
+	struct urb *urb;
+	int err, mtu, size;
+	void *buf;
+
+	mtu  = husb->isoc_in_ep->desc.wMaxPacketSize;
+        size = mtu * HCI_MAX_ISOC_FRAMES;
+
+	buf = kmalloc(size, GFP_ATOMIC);
+	if (!buf)
+		return -ENOMEM;
+
+	_urb = _urb_alloc(HCI_MAX_ISOC_FRAMES, GFP_ATOMIC);
+	if (!_urb) {
+		kfree(buf);
+		return -ENOMEM;
+	}
+	_urb->type = HCI_SCODATA_PKT;
+	_urb_queue_tail(__pending_q(husb, _urb->type), _urb);
+
+	urb = &_urb->urb;
+
+	urb->context  = husb;
+	urb->dev      = husb->udev;
+	urb->pipe     = usb_rcvisocpipe(husb->udev, husb->isoc_in_ep->desc.bEndpointAddress);
+	urb->complete = hci_usb_rx_complete;
+
+	urb->transfer_buffer_length = size;
+	urb->transfer_buffer = buf;
+	urb->transfer_flags  = URB_ISO_ASAP;
+
+	__fill_isoc_desc(urb, size, mtu);
+
+	BT_DBG("%s urb %p", husb->hdev.name, urb);
+
+	err = usb_submit_urb(urb, GFP_ATOMIC);
+	if (err) {
+		BT_ERR("%s isoc rx submit failed urb %p err %d",
+				husb->hdev.name, urb, err);
+		_urb_unlink(_urb);
+		_urb_free(_urb);
+		kfree(buf);
+	}
+	return err;
+}
+#endif
+
 /* Initialize device */
-int hci_usb_open(struct hci_dev *hdev)
+static int hci_usb_open(struct hci_dev *hdev)
 {
 	struct hci_usb *husb = (struct hci_usb *) hdev->driver_data;
-	int status;
+	int i, err;
+	unsigned long flags;
 
-	DBG("%s", hdev->name);
+	BT_DBG("%s", hdev->name);
 
-	husb->read_urb->dev = husb->udev;
-	if ((status = usb_submit_urb(husb->read_urb)))
-		DBG("read submit failed. %d", status);
+	if (test_and_set_bit(HCI_RUNNING, &hdev->flags))
+		return 0;
 
-	husb->intr_urb->dev = husb->udev;
-	if ((status = usb_submit_urb(husb->intr_urb)))
-		DBG("interrupt submit failed. %d", status);
+	write_lock_irqsave(&husb->completion_lock, flags);
 
-	hdev->flags |= HCI_RUNNING;
+	err = hci_usb_intr_rx_submit(husb);
+	if (!err) {
+		for (i = 0; i < HCI_MAX_BULK_RX; i++)
+			hci_usb_bulk_rx_submit(husb);
 
-	return 0;
+#ifdef CONFIG_BT_USB_SCO
+		hci_usb_isoc_rx_submit(husb);
+#endif
+	} else {
+		clear_bit(HCI_RUNNING, &hdev->flags);
+	}
+
+	write_unlock_irqrestore(&husb->completion_lock, flags);
+	return err;
 }
 
 /* Reset device */
-int hci_usb_flush(struct hci_dev *hdev)
+static int hci_usb_flush(struct hci_dev *hdev)
 {
 	struct hci_usb *husb = (struct hci_usb *) hdev->driver_data;
+	int i;
 
-	DBG("%s", hdev->name);
+	BT_DBG("%s", hdev->name);
 
-	/* Drop TX queues */
-	skb_queue_purge(&husb->tx_ctrl_q);
-	skb_queue_purge(&husb->tx_write_q);
-
+	for (i=0; i < 4; i++)
+		skb_queue_purge(&husb->transmit_q[i]);
 	return 0;
+}
+
+static void hci_usb_unlink_urbs(struct hci_usb *husb)
+{
+	int i;
+
+	BT_DBG("%s", husb->hdev.name);
+
+	for (i=0; i < 4; i++) {
+		struct _urb *_urb;
+		struct urb *urb;
+
+		/* Kill pending requests */
+		while ((_urb = _urb_dequeue(&husb->pending_q[i]))) {
+			urb = &_urb->urb;
+			BT_DBG("%s unlinking _urb %p type %d urb %p", 
+					husb->hdev.name, _urb, _urb->type, urb);
+			usb_unlink_urb(urb);
+			_urb_queue_tail(__completed_q(husb, _urb->type), _urb);
+		}
+
+		/* Release completed requests */
+		while ((_urb = _urb_dequeue(&husb->completed_q[i]))) {
+			urb = &_urb->urb;
+			BT_DBG("%s freeing _urb %p type %d urb %p",
+					husb->hdev.name, _urb, _urb->type, urb);
+			if (urb->setup_packet)
+				kfree(urb->setup_packet);
+			if (urb->transfer_buffer)
+				kfree(urb->transfer_buffer);
+			_urb_free(_urb);
+		}
+
+		/* Release reassembly buffers */
+		if (husb->reassembly[i]) {
+			kfree_skb(husb->reassembly[i]);
+			husb->reassembly[i] = NULL;
+		}
+	}
 }
 
 /* Close device */
-int hci_usb_close(struct hci_dev *hdev)
+static int hci_usb_close(struct hci_dev *hdev)
 {
 	struct hci_usb *husb = (struct hci_usb *) hdev->driver_data;
+	unsigned long flags;
+	
+	if (!test_and_clear_bit(HCI_RUNNING, &hdev->flags))
+		return 0;
 
-	DBG("%s", hdev->name);
+	BT_DBG("%s", hdev->name);
 
-	hdev->flags &= ~HCI_RUNNING;
+	/* Synchronize with completion handlers */
+	write_lock_irqsave(&husb->completion_lock, flags);
+	write_unlock_irqrestore(&husb->completion_lock, flags);
+	
 	hci_usb_unlink_urbs(husb);
-
 	hci_usb_flush(hdev);
-
 	return 0;
 }
 
-void hci_usb_ctrl_wakeup(struct hci_usb *husb)
+static int __tx_submit(struct hci_usb *husb, struct _urb *_urb)
 {
-	struct sk_buff *skb;
+	struct urb *urb = &_urb->urb;
+	int err;
 
-	if (test_and_set_bit(HCI_TX_CTRL, &husb->tx_state))
-		return;
+	BT_DBG("%s urb %p type %d", husb->hdev.name, urb, _urb->type);
+	
+	_urb_queue_tail(__pending_q(husb, _urb->type), _urb);
+	err = usb_submit_urb(urb, GFP_ATOMIC);
+	if (err) {
+		BT_ERR("%s tx submit failed urb %p type %d err %d",
+				husb->hdev.name, urb, _urb->type, err);
+		_urb_unlink(_urb);
+		_urb_queue_tail(__completed_q(husb, _urb->type), _urb);
+	} else
+		atomic_inc(__pending_tx(husb, _urb->type));
 
-	DBG("%s", husb->hdev.name);
-
-	if (!(skb = skb_dequeue(&husb->tx_ctrl_q)))
-		goto done;
-
-	if (hci_usb_ctrl_msg(husb, skb)){
-		kfree_skb(skb);
-		goto done;
-	}
-
-	DMP(skb->data, skb->len);
-
-	husb->hdev.stat.byte_tx += skb->len;
-	return;
-
-done:
-	clear_bit(HCI_TX_CTRL, &husb->tx_state);
-	return;
+	return err;
 }
 
-void hci_usb_write_wakeup(struct hci_usb *husb)
+static inline int hci_usb_send_ctrl(struct hci_usb *husb, struct sk_buff *skb)
 {
-	struct sk_buff *skb;
+	struct _urb *_urb = __get_completed(husb, skb->pkt_type);
+	struct usb_ctrlrequest *dr;
+	struct urb *urb;
 
-	if (test_and_set_bit(HCI_TX_WRITE, &husb->tx_state))
-		return;
+	if (!_urb) {
+	       	_urb = _urb_alloc(0, GFP_ATOMIC);
+	       	if (!_urb)
+			return -ENOMEM;
+		_urb->type = skb->pkt_type;
 
-	DBG("%s", husb->hdev.name);
+		dr = kmalloc(sizeof(*dr), GFP_ATOMIC);
+		if (!dr) {
+			_urb_free(_urb);
+			return -ENOMEM;
+		}
+	} else
+		dr = (void *) _urb->urb.setup_packet;
 
-	if (!(skb = skb_dequeue(&husb->tx_write_q)))
-		goto done;
+	dr->bRequestType = HCI_CTRL_REQ;
+	dr->bRequest = 0;
+	dr->wIndex   = 0;
+	dr->wValue   = 0;
+	dr->wLength  = __cpu_to_le16(skb->len);
 
-	if (hci_usb_write_msg(husb, skb)) {
-		skb_queue_head(&husb->tx_write_q, skb);
-		goto done;
+	urb = &_urb->urb;
+	usb_fill_control_urb(urb, husb->udev, usb_sndctrlpipe(husb->udev, 0),
+		(void *) dr, skb->data, skb->len, hci_usb_tx_complete, husb);
+
+	BT_DBG("%s skb %p len %d", husb->hdev.name, skb, skb->len);
+	
+	_urb->priv = skb;
+	return __tx_submit(husb, _urb);
+}
+
+static inline int hci_usb_send_bulk(struct hci_usb *husb, struct sk_buff *skb)
+{
+	struct _urb *_urb = __get_completed(husb, skb->pkt_type);
+	struct urb *urb;
+	int pipe;
+
+	if (!_urb) {
+	       	_urb = _urb_alloc(0, GFP_ATOMIC);
+	       	if (!_urb)
+			return -ENOMEM;
+		_urb->type = skb->pkt_type;
 	}
 
-	DMP(skb->data, skb->len);
+	urb  = &_urb->urb;
+	pipe = usb_sndbulkpipe(husb->udev, husb->bulk_out_ep->desc.bEndpointAddress);
+	usb_fill_bulk_urb(urb, husb->udev, pipe, skb->data, skb->len, 
+			hci_usb_tx_complete, husb);
+	urb->transfer_flags = URB_ZERO_PACKET;
 
-	husb->hdev.stat.byte_tx += skb->len;
-	return;
+	BT_DBG("%s skb %p len %d", husb->hdev.name, skb, skb->len);
 
-done:
-	clear_bit(HCI_TX_WRITE, &husb->tx_state);
-	return;
+	_urb->priv = skb;
+	return __tx_submit(husb, _urb);
+}
+
+#ifdef CONFIG_BT_USB_SCO
+static inline int hci_usb_send_isoc(struct hci_usb *husb, struct sk_buff *skb)
+{
+	struct _urb *_urb = __get_completed(husb, skb->pkt_type);
+	struct urb *urb;
+	
+	if (!_urb) {
+	       	_urb = _urb_alloc(HCI_MAX_ISOC_FRAMES, GFP_ATOMIC);
+	       	if (!_urb)
+			return -ENOMEM;
+		_urb->type = skb->pkt_type;
+	}
+
+	BT_DBG("%s skb %p len %d", husb->hdev.name, skb, skb->len);
+
+	urb = &_urb->urb;
+	
+	urb->context  = husb;
+	urb->dev      = husb->udev;
+	urb->pipe     = usb_sndisocpipe(husb->udev, husb->isoc_out_ep->desc.bEndpointAddress);
+	urb->complete = hci_usb_tx_complete;
+	urb->transfer_flags = URB_ISO_ASAP;
+
+	urb->transfer_buffer = skb->data;
+	urb->transfer_buffer_length = skb->len;
+	
+	__fill_isoc_desc(urb, skb->len, husb->isoc_out_ep->desc.wMaxPacketSize);
+
+	_urb->priv = skb;
+	return __tx_submit(husb, _urb);
+}
+#endif
+
+static void hci_usb_tx_process(struct hci_usb *husb)
+{
+	struct sk_buff_head *q;
+	struct sk_buff *skb;
+
+	BT_DBG("%s", husb->hdev.name);
+
+	do {
+		clear_bit(HCI_USB_TX_WAKEUP, &husb->state);
+
+		/* Process command queue */
+		q = __transmit_q(husb, HCI_COMMAND_PKT);
+		if (!atomic_read(__pending_tx(husb, HCI_COMMAND_PKT)) &&
+				(skb = skb_dequeue(q))) {
+			if (hci_usb_send_ctrl(husb, skb) < 0)
+				skb_queue_head(q, skb);
+		}
+
+#ifdef CONFIG_BT_USB_SCO
+		/* Process SCO queue */
+		q = __transmit_q(husb, HCI_SCODATA_PKT);
+		if (!atomic_read(__pending_tx(husb, HCI_SCODATA_PKT)) &&
+				(skb = skb_dequeue(q))) {
+			if (hci_usb_send_isoc(husb, skb) < 0)
+				skb_queue_head(q, skb);
+		}
+#endif
+		
+		/* Process ACL queue */
+		q = __transmit_q(husb, HCI_ACLDATA_PKT);
+		while (atomic_read(__pending_tx(husb, HCI_ACLDATA_PKT)) < HCI_MAX_BULK_TX &&
+				(skb = skb_dequeue(q))) {
+			if (hci_usb_send_bulk(husb, skb) < 0) {
+				skb_queue_head(q, skb);
+				break;
+			}
+		}
+	} while(test_bit(HCI_USB_TX_WAKEUP, &husb->state));
+}
+
+static inline void hci_usb_tx_wakeup(struct hci_usb *husb)
+{
+	/* Serialize TX queue processing to avoid data reordering */
+	if (!test_and_set_bit(HCI_USB_TX_PROCESS, &husb->state)) {
+		hci_usb_tx_process(husb);
+		clear_bit(HCI_USB_TX_PROCESS, &husb->state);
+	} else
+		set_bit(HCI_USB_TX_WAKEUP, &husb->state);
 }
 
 /* Send frames from HCI layer */
-int hci_usb_send_frame(struct sk_buff *skb)
+static int hci_usb_send_frame(struct sk_buff *skb)
 {
 	struct hci_dev *hdev = (struct hci_dev *) skb->dev;
 	struct hci_usb *husb;
 
 	if (!hdev) {
-		ERR("frame for uknown device (hdev=NULL)");
+		BT_ERR("frame for uknown device (hdev=NULL)");
 		return -ENODEV;
 	}
 
-	if (!(hdev->flags & HCI_RUNNING))
-		return 0;
+	if (!test_bit(HCI_RUNNING, &hdev->flags))
+		return -EBUSY;
+
+	BT_DBG("%s type %d len %d", hdev->name, skb->pkt_type, skb->len);
 
 	husb = (struct hci_usb *) hdev->driver_data;
-
-	DBG("%s type %d len %d", hdev->name, skb->pkt_type, skb->len);
 
 	switch (skb->pkt_type) {
-		case HCI_COMMAND_PKT:
-			skb_queue_tail(&husb->tx_ctrl_q, skb);
-			hci_usb_ctrl_wakeup(husb);
-			hdev->stat.cmd_tx++;
-			return 0;
+	case HCI_COMMAND_PKT:
+		hdev->stat.cmd_tx++;
+		break;
 
-		case HCI_ACLDATA_PKT:
-			skb_queue_tail(&husb->tx_write_q, skb);
-			hci_usb_write_wakeup(husb);
-			hdev->stat.acl_tx++;
-			return 0;
+	case HCI_ACLDATA_PKT:
+		hdev->stat.acl_tx++;
+		break;
 
-		case HCI_SCODATA_PKT:
-			return -EOPNOTSUPP;
-	};
+#ifdef CONFIG_BT_USB_SCO
+	case HCI_SCODATA_PKT:
+		hdev->stat.sco_tx++;
+		break;
+#endif
 
+	default:
+		kfree_skb(skb);
+		return 0;
+	}
+
+	read_lock(&husb->completion_lock);
+
+	skb_queue_tail(__transmit_q(husb, skb->pkt_type), skb);
+	hci_usb_tx_wakeup(husb);
+
+	read_unlock(&husb->completion_lock);
 	return 0;
 }
 
-/* ---------- USB ------------- */
-
-static void hci_usb_ctrl(struct urb *urb)
+static inline int __recv_frame(struct hci_usb *husb, int type, void *data, int count)
 {
-	struct sk_buff *skb = (struct sk_buff *) urb->context;
-	struct hci_dev *hdev;
-	struct hci_usb *husb;
+	BT_DBG("%s type %d data %p count %d", husb->hdev.name, type, data, count);
 
-	if (!skb)
-		return;
-	hdev = (struct hci_dev *) skb->dev;
-	husb = (struct hci_usb *) hdev->driver_data;
+	husb->hdev.stat.byte_rx += count;
 
-	DBG("%s", hdev->name);
+	while (count) {
+		struct sk_buff *skb = __reassembly(husb, type);
+		struct { int expect; } *scb;
+		int len = 0;
+	
+		if (!skb) {
+			/* Start of the frame */
 
-	if (urb->status)
-		DBG("%s ctrl status: %d", hdev->name, urb->status);
+			switch (type) {
+			case HCI_EVENT_PKT:
+				if (count >= HCI_EVENT_HDR_SIZE) {
+					struct hci_event_hdr *h = data;
+					len = HCI_EVENT_HDR_SIZE + h->plen;
+				} else
+					return -EILSEQ;
+				break;
 
-	clear_bit(HCI_TX_CTRL, &husb->tx_state);
-	kfree_skb(skb);
+			case HCI_ACLDATA_PKT:
+				if (count >= HCI_ACL_HDR_SIZE) {
+					struct hci_acl_hdr *h = data;
+					len = HCI_ACL_HDR_SIZE + __le16_to_cpu(h->dlen);
+				} else
+					return -EILSEQ;
+				break;
+#ifdef CONFIG_BT_USB_SCO
+			case HCI_SCODATA_PKT:
+				if (count >= HCI_SCO_HDR_SIZE) {
+					struct hci_sco_hdr *h = data;
+					len = HCI_SCO_HDR_SIZE + h->dlen;
+				} else 
+					return -EILSEQ;
+				break;
+#endif
+			}
+			BT_DBG("new packet len %d", len);
+				
+			skb = bt_skb_alloc(len, GFP_ATOMIC);
+			if (!skb) {
+				BT_ERR("%s no memory for the packet", husb->hdev.name);
+				return -ENOMEM;
+			}
+			skb->dev = (void *) &husb->hdev;
+			skb->pkt_type = type;
+	
+			__reassembly(husb, type) = skb;
 
-	/* Wake up device */
-	hci_usb_ctrl_wakeup(husb);
-}
+			scb = (void *) skb->cb;
+			scb->expect = len;
+		} else {
+			/* Continuation */
+			scb = (void *) skb->cb;
+			len = scb->expect;
+		}
 
-static void hci_usb_bulk_write(struct urb *urb)
-{
-	struct sk_buff *skb = (struct sk_buff *) urb->context;
-	struct hci_dev *hdev;
-	struct hci_usb *husb;
+		len = min(len, count);
+		
+		memcpy(skb_put(skb, len), data, len);
 
-	if (!skb)
-		return;
-	hdev = (struct hci_dev *) skb->dev;
-	husb = (struct hci_usb *) hdev->driver_data;
+		scb->expect -= len;
+		if (!scb->expect) {
+			/* Complete frame */
+			__reassembly(husb, type) = NULL;
+			hci_recv_frame(skb);
+		}
 
-	DBG("%s", hdev->name);
-
-	if (urb->status)
-		DBG("%s bulk write status: %d", hdev->name, urb->status);
-
-	clear_bit(HCI_TX_WRITE, &husb->tx_state);
-	kfree_skb(skb);
-
-	/* Wake up device */
-	hci_usb_write_wakeup(husb);
-
-	return;
-}
-
-static void hci_usb_intr(struct urb *urb)
-{
-	struct hci_usb *husb = (struct hci_usb *) urb->context;
-	unsigned char *data = urb->transfer_buffer;
-	register int count  = urb->actual_length;
-	register struct sk_buff *skb = husb->intr_skb;
-	hci_event_hdr *eh;
-	register int len;
-
-	if (!husb)
-		return;
-
-	DBG("%s count %d", husb->hdev.name, count);
-
-	if (urb->status || !count) {
-		DBG("%s intr status %d, count %d", husb->hdev.name, urb->status, count);
-		return;
+		count -= len; data += len;
 	}
+	return 0;
+}
 
-	/* Do we really have to handle continuations here ? */
-	if (!skb) {
-		/* New frame */
-		if (count < HCI_EVENT_HDR_SIZE) {
-			DBG("%s bad frame len %d", husb->hdev.name, count);
-			return;
+static void hci_usb_rx_complete(struct urb *urb, struct pt_regs *regs)
+{
+	struct _urb *_urb = container_of(urb, struct _urb, urb);
+	struct hci_usb *husb = (void *) urb->context;
+	struct hci_dev *hdev = &husb->hdev;
+	int    err, count = urb->actual_length;
+
+	BT_DBG("%s urb %p type %d status %d count %d flags %x", hdev->name, urb,
+			_urb->type, urb->status, count, urb->transfer_flags);
+
+	if (!test_bit(HCI_RUNNING, &hdev->flags))
+		return;
+
+	read_lock(&husb->completion_lock);
+
+	if (urb->status || !count)
+		goto resubmit;
+
+	if (_urb->type == HCI_SCODATA_PKT) {
+#ifdef CONFIG_BT_USB_SCO
+		int i;
+		for (i=0; i < urb->number_of_packets; i++) {
+			BT_DBG("desc %d status %d offset %d len %d", i,
+					urb->iso_frame_desc[i].status,
+					urb->iso_frame_desc[i].offset,
+					urb->iso_frame_desc[i].actual_length);
+	
+			if (!urb->iso_frame_desc[i].status)
+				__recv_frame(husb, _urb->type, 
+					urb->transfer_buffer + urb->iso_frame_desc[i].offset,
+					urb->iso_frame_desc[i].actual_length);
 		}
-
-		eh = (hci_event_hdr *) data;
-		len = eh->plen + HCI_EVENT_HDR_SIZE;
-
-		if (count > len) {
-			DBG("%s corrupted frame, len %d", husb->hdev.name, count);
-			return;
-		}
-
-		/* Allocate skb */
-		if (!(skb = bluez_skb_alloc(len, GFP_ATOMIC))) {
-			ERR("Can't allocate mem for new packet");
-			return;
-		}
-		skb->dev = (void *) &husb->hdev;
-		skb->pkt_type = HCI_EVENT_PKT;
-
-		husb->intr_skb = skb;
-		husb->intr_count = len;
+#else
+		;
+#endif
 	} else {
-		/* Continuation */
-		if (count > husb->intr_count) {
-			ERR("%s bad frame len %d (expected %d)", husb->hdev.name, count, husb->intr_count);
-
-			kfree_skb(skb);
-			husb->intr_skb = NULL;
-			husb->intr_count = 0;
-			return;
+		err = __recv_frame(husb, _urb->type, urb->transfer_buffer, count);
+		if (err < 0) { 
+			BT_ERR("%s corrupted packet: type %d count %d",
+					husb->hdev.name, _urb->type, count);
+			hdev->stat.err_rx++;
 		}
 	}
-
-	memcpy(skb_put(skb, count), data, count);
-	husb->intr_count -= count;
-
-	DMP(data, count);
-
-	if (!husb->intr_count) {
-		/* Got complete frame */
-
-		husb->hdev.stat.byte_rx += skb->len;
-		hci_recv_frame(skb);
-
-		husb->intr_skb = NULL;
-	}
-}
-
-static void hci_usb_bulk_read(struct urb *urb)
-{
-	struct hci_usb *husb = (struct hci_usb *) urb->context;
-	unsigned char *data = urb->transfer_buffer;
-	int count = urb->actual_length, status;
-	struct sk_buff *skb;
-	hci_acl_hdr *ah;
-	register __u16 dlen;
-
-	if (!husb)
-		return;
-
-	DBG("%s status %d, count %d, flags %x", husb->hdev.name, urb->status, count, urb->transfer_flags);
-
-	if (urb->status) {
-		/* Do not re-submit URB on critical errors */
-		switch (urb->status) {
-			case -ENOENT:
-				return;
-			default:
-				goto resubmit;
-		};
-	}
-	if (!count)
-		goto resubmit;
-
-	DMP(data, count);
-
-	ah = (hci_acl_hdr *) data;
-	dlen = le16_to_cpu(ah->dlen);
-
-	/* Verify frame len and completeness */
-	if ((count - HCI_ACL_HDR_SIZE) != dlen) {
-		ERR("%s corrupted ACL packet: count %d, plen %d", husb->hdev.name, count, dlen);
-		goto resubmit;
-	}
-
-	/* Allocate packet */
-	if (!(skb = bluez_skb_alloc(count, GFP_ATOMIC))) {
-		ERR("Can't allocate mem for new packet");
-		goto resubmit;
-	}
-
-	memcpy(skb_put(skb, count), data, count);
-	skb->dev = (void *) &husb->hdev;
-	skb->pkt_type = HCI_ACLDATA_PKT;
-
-	husb->hdev.stat.byte_rx += skb->len;
-
-	hci_recv_frame(skb);
 
 resubmit:
-	husb->read_urb->dev = husb->udev;
-	if ((status = usb_submit_urb(husb->read_urb)))
-		DBG("%s read URB submit failed %d", husb->hdev.name, status);
+	urb->dev = husb->udev;
+	err      = usb_submit_urb(urb, GFP_ATOMIC);
+	BT_DBG("%s urb %p type %d resubmit status %d", hdev->name, urb,
+			_urb->type, err);
 
-	DBG("%s read URB re-submited", husb->hdev.name);
+	read_unlock(&husb->completion_lock);
 }
 
-static int hci_usb_ctrl_msg(struct hci_usb *husb, struct sk_buff *skb)
+static void hci_usb_tx_complete(struct urb *urb, struct pt_regs *regs)
 {
-	struct urb *urb = husb->ctrl_urb;
-	devrequest *dr  = &husb->dev_req;
-	int pipe, status;
+	struct _urb *_urb = container_of(urb, struct _urb, urb);
+	struct hci_usb *husb = (void *) urb->context;
+	struct hci_dev *hdev = &husb->hdev;
 
-	DBG("%s len %d", husb->hdev.name, skb->len);
+	BT_DBG("%s urb %p status %d flags %x", hdev->name, urb,
+			urb->status, urb->transfer_flags);
 
-	pipe = usb_sndctrlpipe(husb->udev, 0);
+	atomic_dec(__pending_tx(husb, _urb->type));
 
-	dr->requesttype = HCI_CTRL_REQ;
-	dr->request = 0;
-	dr->index   = 0;
-	dr->value   = 0;
-	dr->length  = cpu_to_le16(skb->len);
+	urb->transfer_buffer = NULL;
+	kfree_skb((struct sk_buff *) _urb->priv);
 
-	FILL_CONTROL_URB(urb, husb->udev, pipe, (void*)dr, skb->data, skb->len,
-	                 hci_usb_ctrl, skb);
+	if (!test_bit(HCI_RUNNING, &hdev->flags))
+		return;
 
-	if ((status = usb_submit_urb(urb))) {
-		DBG("%s control URB submit failed %d", husb->hdev.name, status);
-		return status;
-	}
+	if (!urb->status)
+		hdev->stat.byte_tx += urb->transfer_buffer_length;
+	else
+		hdev->stat.err_tx++;
 
-	return 0;
+	read_lock(&husb->completion_lock);
+
+	_urb_unlink(_urb);
+	_urb_queue_tail(__completed_q(husb, _urb->type), _urb);
+
+	hci_usb_tx_wakeup(husb);
+	
+	read_unlock(&husb->completion_lock);
 }
 
-static int hci_usb_write_msg(struct hci_usb *husb, struct sk_buff *skb)
+static void hci_usb_destruct(struct hci_dev *hdev)
 {
-	struct urb *urb = husb->write_urb;
-	int pipe, status;
+	struct hci_usb *husb = (struct hci_usb *) hdev->driver_data;
 
-	DBG("%s len %d", husb->hdev.name, skb->len);
+	BT_DBG("%s", hdev->name);
 
-	pipe = usb_sndbulkpipe(husb->udev, husb->bulk_out_ep_addr);
-
-	FILL_BULK_URB(urb, husb->udev, pipe, skb->data, skb->len,
-	              hci_usb_bulk_write, skb);
-	urb->transfer_flags |= USB_QUEUE_BULK;
-
-	if ((status = usb_submit_urb(urb))) {
-		DBG("%s write URB submit failed %d", husb->hdev.name, status);
-		return status;
-	}
-
-	return 0;
+	kfree(husb);
 }
 
-static void * hci_usb_probe(struct usb_device *udev, unsigned int ifnum, const struct usb_device_id *id)
+int hci_usb_probe(struct usb_interface *intf, const struct usb_device_id *id)
 {
-	struct usb_endpoint_descriptor *bulk_out_ep, *intr_in_ep, *bulk_in_ep;
-	struct usb_interface_descriptor *uif;
-	struct usb_endpoint_descriptor *ep;
+	struct usb_device *udev = interface_to_usbdev(intf);
+	struct usb_host_endpoint *bulk_out_ep[HCI_MAX_IFACE_NUM];
+	struct usb_host_endpoint *isoc_out_ep[HCI_MAX_IFACE_NUM];
+	struct usb_host_endpoint *bulk_in_ep[HCI_MAX_IFACE_NUM];
+	struct usb_host_endpoint *isoc_in_ep[HCI_MAX_IFACE_NUM];
+	struct usb_host_endpoint *intr_in_ep[HCI_MAX_IFACE_NUM];
+	struct usb_host_endpoint  *ep;
+	struct usb_host_interface *uif;
+	struct usb_interface *iface, *isoc_iface;
 	struct hci_usb *husb;
 	struct hci_dev *hdev;
-	int i, size, pipe;
-	__u8 * buf;
+	int i, a, e, size, ifn, isoc_ifnum, isoc_alts;
 
-	DBG("udev %p ifnum %d", udev, ifnum);
+	BT_DBG("udev %p ifnum %d", udev, ifnum);
 
-	/* Check device signature */
-	if ((udev->descriptor.bDeviceClass    != HCI_DEV_CLASS)   ||
-	    (udev->descriptor.bDeviceSubClass != HCI_DEV_SUBCLASS)||
-	    (udev->descriptor.bDeviceProtocol != HCI_DEV_PROTOCOL) )
-		return NULL;
+	iface = &udev->actconfig->interface[0];
 
-	MOD_INC_USE_COUNT;
+	/* Check our black list */
+	if (usb_match_id(intf, ignore_ids))
+		return -EIO;
 
-	uif = &udev->actconfig->interface[ifnum].altsetting[0];
+	/* Check number of endpoints */
+	if (intf->altsetting[0].desc.bNumEndpoints < 3)
+		return -EIO;
 
-	if (uif->bNumEndpoints != 3) {
-		DBG("Wrong number of endpoints %d", uif->bNumEndpoints);
-		MOD_DEC_USE_COUNT;
-		return NULL;
-	}
+	memset(bulk_out_ep, 0, sizeof(bulk_out_ep));
+	memset(isoc_out_ep, 0, sizeof(isoc_out_ep));
+	memset(bulk_in_ep,  0, sizeof(bulk_in_ep));
+	memset(isoc_in_ep,  0, sizeof(isoc_in_ep));
+	memset(intr_in_ep,  0, sizeof(intr_in_ep));
 
-	bulk_out_ep = intr_in_ep = bulk_in_ep = NULL;
-
+	size = 0; 
+	isoc_iface = NULL;
+	isoc_alts  = isoc_ifnum = 0;
+	
 	/* Find endpoints that we need */
-	for ( i = 0; i < uif->bNumEndpoints; ++i) {
-		ep = &uif->endpoint[i];
 
-		switch (ep->bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) {
-			case USB_ENDPOINT_XFER_BULK:
-				if (ep->bEndpointAddress & USB_DIR_IN)
-					bulk_in_ep  = ep;
-				else
-					bulk_out_ep = ep;
-				break;
+	ifn = min_t(unsigned int, udev->actconfig->desc.bNumInterfaces, HCI_MAX_IFACE_NUM);
+	for (i = 0; i < ifn; i++) {
+		iface = &udev->actconfig->interface[i];
+		for (a = 0; a < iface->num_altsetting; a++) {
+			uif = &iface->altsetting[a];
+			for (e = 0; e < uif->desc.bNumEndpoints; e++) {
+				ep = &uif->endpoint[e];
 
-			case USB_ENDPOINT_XFER_INT:
-				intr_in_ep = ep;
-				break;
-		};
+				switch (ep->desc.bmAttributes & USB_ENDPOINT_XFERTYPE_MASK) {
+				case USB_ENDPOINT_XFER_INT:
+					if (ep->desc.bEndpointAddress & USB_DIR_IN)
+						intr_in_ep[i] = ep;
+					break;
+
+				case USB_ENDPOINT_XFER_BULK:
+					if (ep->desc.bEndpointAddress & USB_DIR_IN)
+						bulk_in_ep[i]  = ep;
+					else
+						bulk_out_ep[i] = ep;
+					break;
+
+#ifdef CONFIG_BT_USB_SCO
+				case USB_ENDPOINT_XFER_ISOC:
+					if (ep->desc.wMaxPacketSize < size)
+						break;
+					size = ep->desc.wMaxPacketSize;
+
+					isoc_iface = iface;
+					isoc_alts  = a;
+					isoc_ifnum = i;
+
+					if (ep->desc.bEndpointAddress & USB_DIR_IN)
+						isoc_in_ep[i]  = ep;
+					else
+						isoc_out_ep[i] = ep;
+					break;
+#endif
+				}
+			}
+		}
 	}
 
-	if (!bulk_in_ep || !bulk_out_ep || !intr_in_ep) {
-		DBG("Endpoints not found: %p %p %p", bulk_in_ep, bulk_out_ep, intr_in_ep);
-		MOD_DEC_USE_COUNT;
-		return NULL;
+	if (!bulk_in_ep[0] || !bulk_out_ep[0] || !intr_in_ep[0]) {
+		BT_DBG("Bulk endpoints not found");
+		goto done;
 	}
+
+#ifdef CONFIG_BT_USB_SCO
+	if (!isoc_in_ep[1] || !isoc_out_ep[1]) {
+		BT_DBG("Isoc endpoints not found");
+		isoc_iface = NULL;
+	}
+#endif
 
 	if (!(husb = kmalloc(sizeof(struct hci_usb), GFP_KERNEL))) {
-		ERR("Can't allocate: control structure");
-		MOD_DEC_USE_COUNT;
-		return NULL;
+		BT_ERR("Can't allocate: control structure");
+		goto done;
 	}
 
 	memset(husb, 0, sizeof(struct hci_usb));
 
 	husb->udev = udev;
-	husb->bulk_out_ep_addr = bulk_out_ep->bEndpointAddress;
+	husb->bulk_out_ep = bulk_out_ep[0];
+	husb->bulk_in_ep  = bulk_in_ep[0];
+	husb->intr_in_ep  = intr_in_ep[0];
 
-	if (!(husb->ctrl_urb = usb_alloc_urb(0))) {
-		ERR("Can't allocate: control URB");
-		goto probe_error;
+#ifdef CONFIG_BT_USB_SCO
+	if (isoc_iface) {
+		BT_DBG("isoc ifnum %d alts %d", isoc_ifnum, isoc_alts);
+		if (usb_set_interface(udev, isoc_ifnum, isoc_alts)) {
+			BT_ERR("Can't set isoc interface settings");
+			isoc_iface = NULL;
+		}
+		usb_driver_claim_interface(&hci_usb_driver, isoc_iface, husb);
+		husb->isoc_iface  = isoc_iface;
+		husb->isoc_in_ep  = isoc_in_ep[isoc_ifnum];
+		husb->isoc_out_ep = isoc_out_ep[isoc_ifnum];
 	}
+#endif
+	
+	husb->completion_lock = RW_LOCK_UNLOCKED;
 
-	if (!(husb->write_urb = usb_alloc_urb(0))) {
-		ERR("Can't allocate: write URB");
-		goto probe_error;
+	for (i = 0; i < 4; i++) {	
+		skb_queue_head_init(&husb->transmit_q[i]);
+		_urb_queue_init(&husb->pending_q[i]);
+		_urb_queue_init(&husb->completed_q[i]);
 	}
-
-	if (!(husb->read_urb = usb_alloc_urb(0))) {
-		ERR("Can't allocate: read URB");
-		goto probe_error;
-	}
-
-	ep = bulk_in_ep;
-	pipe = usb_rcvbulkpipe(udev, ep->bEndpointAddress);
-	size = HCI_MAX_FRAME_SIZE;
-
-	if (!(buf = kmalloc(size, GFP_KERNEL))) {
-		ERR("Can't allocate: read buffer");
-		goto probe_error;
-	}
-
-	FILL_BULK_URB(husb->read_urb, udev, pipe, buf, size, hci_usb_bulk_read, husb);
-	husb->read_urb->transfer_flags |= USB_QUEUE_BULK;
-
-	ep = intr_in_ep;
-	pipe = usb_rcvintpipe(udev, ep->bEndpointAddress);
-	size = usb_maxpacket(udev, pipe, usb_pipeout(pipe));
-
-	if (!(husb->intr_urb = usb_alloc_urb(0))) {
-		ERR("Can't allocate: interrupt URB");
-		goto probe_error;
-	}
-
-	if (!(buf = kmalloc(size, GFP_KERNEL))) {
-		ERR("Can't allocate: interrupt buffer");
-		goto probe_error;
-	}
-
-	FILL_INT_URB(husb->intr_urb, udev, pipe, buf, size, hci_usb_intr, husb, ep->bInterval);
-
-	skb_queue_head_init(&husb->tx_ctrl_q);
-	skb_queue_head_init(&husb->tx_write_q);
 
 	/* Initialize and register HCI device */
 	hdev = &husb->hdev;
 
-	hdev->type = HCI_USB;
+	hdev->type  = HCI_USB;
 	hdev->driver_data = husb;
 
 	hdev->open  = hci_usb_open;
 	hdev->close = hci_usb_close;
 	hdev->flush = hci_usb_flush;
-	hdev->send	= hci_usb_send_frame;
+	hdev->send  = hci_usb_send_frame;
+	hdev->destruct = hci_usb_destruct;
+
+	hdev->owner = THIS_MODULE;
 
 	if (hci_register_dev(hdev) < 0) {
-		ERR("Can't register HCI device %s", hdev->name);
+		BT_ERR("Can't register HCI device");
 		goto probe_error;
 	}
 
-	return husb;
+	usb_set_intfdata(intf, husb);
+	return 0;
 
 probe_error:
-	hci_usb_free_bufs(husb);
 	kfree(husb);
-	MOD_DEC_USE_COUNT;
-	return NULL;
+
+done:
+	return -EIO;
 }
 
-static void hci_usb_disconnect(struct usb_device *udev, void *ptr)
+static void hci_usb_disconnect(struct usb_interface *intf)
 {
-	struct hci_usb *husb = (struct hci_usb *) ptr;
+	struct hci_usb *husb = usb_get_intfdata(intf);
 	struct hci_dev *hdev = &husb->hdev;
 
 	if (!husb)
 		return;
+	usb_set_intfdata(intf, NULL);
 
-	DBG("%s", hdev->name);
+	BT_DBG("%s", hdev->name);
 
 	hci_usb_close(hdev);
 
-	if (hci_unregister_dev(hdev) < 0) {
-		ERR("Can't unregister HCI device %s", hdev->name);
-	}
+	if (husb->isoc_iface)
+		usb_driver_release_interface(&hci_usb_driver, husb->isoc_iface);
 
-	hci_usb_free_bufs(husb);
-	kfree(husb);
-
-	MOD_DEC_USE_COUNT;
+	if (hci_unregister_dev(hdev) < 0)
+		BT_ERR("Can't unregister HCI device %s", hdev->name);
 }
 
-static struct usb_driver hci_usb_driver =
-{
-	name:           "hci_usb",
-	probe:          hci_usb_probe,
-	disconnect:     hci_usb_disconnect,
-	id_table:       usb_bluetooth_ids,
+static struct usb_driver hci_usb_driver = {
+	.owner      =  THIS_MODULE,
+	.name       =  "hci_usb",
+	.probe      =  hci_usb_probe,
+	.disconnect =  hci_usb_disconnect,
+	.id_table   =  bluetooth_ids,
 };
 
 int hci_usb_init(void)
 {
 	int err;
 
-	INF("BlueZ HCI USB driver ver %s Copyright (C) 2000,2001 Qualcomm Inc",  
-		VERSION);
-	INF("Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>");
+	BT_INFO("HCI USB driver ver %s", VERSION);
 
 	if ((err = usb_register(&hci_usb_driver)) < 0)
-		ERR("Failed to register HCI USB driver");
+		BT_ERR("Failed to register HCI USB driver");
 
 	return err;
 }
@@ -671,5 +971,5 @@ module_init(hci_usb_init);
 module_exit(hci_usb_cleanup);
 
 MODULE_AUTHOR("Maxim Krasnyansky <maxk@qualcomm.com>");
-MODULE_DESCRIPTION("BlueZ HCI USB driver ver " VERSION);
+MODULE_DESCRIPTION("Bluetooth HCI USB driver ver " VERSION);
 MODULE_LICENSE("GPL");

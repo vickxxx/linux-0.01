@@ -1,4 +1,4 @@
-/* $Id: sunqe.c,v 1.52 2001/10/18 08:18:08 davem Exp $
+/* $Id: sunqe.c,v 1.55 2002/01/15 06:48:55 davem Exp $
  * sunqe.c: Sparc QuadEthernet 10baseT SBUS card driver.
  *          Once again I am out to prove that every ethernet
  *          controller out there can be most efficiently programmed
@@ -11,27 +11,27 @@ static char version[] =
         "sunqe.c:v2.9 9/11/99 David S. Miller (davem@redhat.com)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
+#include <linux/errno.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/crc32.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/skbuff.h>
 
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <linux/errno.h>
 #include <asm/byteorder.h>
-
 #include <asm/idprom.h>
 #include <asm/sbus.h>
 #include <asm/openprom.h>
@@ -39,10 +39,6 @@ static char version[] =
 #include <asm/auxio.h>
 #include <asm/pgtable.h>
 #include <asm/irq.h>
-
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
 
 #include "sunqe.h"
 
@@ -460,7 +456,7 @@ static void qe_tx_reclaim(struct sunqe *qep);
  * so we just run through each qe and check to see who is signaling
  * and thus needs to be serviced.
  */
-static void qec_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t qec_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct sunqec *qecp = (struct sunqec *) dev_id;
 	u32 qec_status;
@@ -494,10 +490,13 @@ static void qec_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 				spin_unlock(&qep->lock);
 			}
 	next:
+			;
 		}
 		qec_status >>= 4;
 		channel++;
 	}
+
+	return IRQ_HANDLED;
 }
 
 static int qe_open(struct net_device *dev)
@@ -621,17 +620,14 @@ static struct net_device_stats *qe_get_stats(struct net_device *dev)
 	return &qep->net_stats;
 }
 
-#define CRC_POLYNOMIAL_BE 0x04c11db7UL  /* Ethernet CRC, big endian */
-#define CRC_POLYNOMIAL_LE 0xedb88320UL  /* Ethernet CRC, little endian */
-
 static void qe_set_multicast(struct net_device *dev)
 {
 	struct sunqe *qep = (struct sunqe *) dev->priv;
 	struct dev_mc_list *dmi = dev->mc_list;
 	u8 new_mconfig = qep->mconfig;
 	char *addrs;
-	int i, j, bit, byte;
-	u32 crc, poly = CRC_POLYNOMIAL_LE;
+	int i;
+	u32 crc;
 
 	/* Lock out others. */
 	netif_stop_queue(dev);
@@ -659,18 +655,7 @@ static void qe_set_multicast(struct net_device *dev)
 
 			if (!(*addrs & 1))
 				continue;
-
-			crc = 0xffffffffU;
-			for (byte = 0; byte < 6; byte++) {
-				for (bit = *addrs++, j = 0; j < 8; j++, bit >>= 1) {
-					int test;
-
-					test = ((bit ^ crc) & 0x01);
-					crc >>= 1;
-					if (test)
-						crc = crc ^ poly;
-				}
-			}
+			crc = ether_crc_le(6, addrs);
 			crc >>= 26;
 			hash_table[crc >> 4] |= 1 << (crc & 0xf);
 		}
@@ -737,34 +722,31 @@ static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 	struct net_device *qe_devs[4];
 	struct sunqe *qeps[4];
 	struct sbus_dev *qesdevs[4];
+	struct sbus_dev *child;
 	struct sunqec *qecp = NULL;
 	u8 bsizes, bsizes_more;
-	int i, j, res = ENOMEM;
+	int i, j, res = -ENOMEM;
 
-	dev = init_etherdev(0, sizeof(struct sunqe));
-	qe_devs[0] = dev;
-	qeps[0] = (struct sunqe *) dev->priv;
-	qeps[0]->channel = 0;
-	spin_lock_init(&qeps[0]->lock);
-	for (j = 0; j < 6; j++)
-		qe_devs[0]->dev_addr[j] = idprom->id_ethaddr[j];
+	for (i = 0; i < 4; i++) {
+		qe_devs[i] = alloc_etherdev(sizeof(struct sunqe));
+		if (!qe_devs[i])
+			goto out;
+	}
 
 	if (version_printed++ == 0)
 		printk(KERN_INFO "%s", version);
 
-	qe_devs[1] = qe_devs[2] = qe_devs[3] = NULL;
-	for (i = 1; i < 4; i++) {
-		qe_devs[i] = init_etherdev(0, sizeof(struct sunqe));
-		if (qe_devs[i] == NULL || qe_devs[i]->priv == NULL)
-			goto qec_free_devs;
+	for (i = 0; i < 4; i++) {
 		qeps[i] = (struct sunqe *) qe_devs[i]->priv;
 		for (j = 0; j < 6; j++)
 			qe_devs[i]->dev_addr[j] = idprom->id_ethaddr[j];
 		qeps[i]->channel = i;
+		spin_lock_init(&qeps[i]->lock);
 	}
+
 	qecp = kmalloc(sizeof(struct sunqec), GFP_KERNEL);
 	if (qecp == NULL)
-		goto qec_free_devs;
+		goto out1;
 	qecp->qec_sdev = sdev;
 
 	for (i = 0; i < 4; i++) {
@@ -773,25 +755,15 @@ static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 		qeps[i]->parent = qecp;
 	}
 
-	/* Link in channel 0. */
-	i = prom_getintdefault(sdev->child->prom_node, "channel#", -1);
-	if (i == -1) { res=ENODEV; goto qec_free_devs; }
-	qesdevs[i] = sdev->child;
+	res = -ENODEV;
 
-	/* Link in channel 1. */
-	i = prom_getintdefault(sdev->child->next->prom_node, "channel#", -1);
-	if (i == -1) { res=ENODEV; goto qec_free_devs; }
-	qesdevs[i] = sdev->child->next;
-
-	/* Link in channel 2. */
-	i = prom_getintdefault(sdev->child->next->next->prom_node, "channel#", -1);
-	if (i == -1) { res=ENODEV; goto qec_free_devs; }
-	qesdevs[i] = sdev->child->next->next;
-
-	/* Link in channel 3. */
-	i = prom_getintdefault(sdev->child->next->next->next->prom_node, "channel#", -1);
-	if (i == -1) { res=ENODEV; goto qec_free_devs; }
-	qesdevs[i] = sdev->child->next->next->next;
+	for (i = 0, child = sdev->child; i < 4; i++, child = child->next) {
+		/* Link in channel */
+		j = prom_getintdefault(child->prom_node, "channel#", -1);
+		if (j == -1)
+			goto out2;
+		qesdevs[j] = child;
+	}
 
 	for (i = 0; i < 4; i++)
 		qeps[i]->qe_sdev = qesdevs[i];
@@ -801,22 +773,18 @@ static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 				   GLOB_REG_SIZE, "QEC Global Registers");
 	if (!qecp->gregs) {
 		printk(KERN_ERR "QuadEther: Cannot map QEC global registers.\n");
-		res = ENODEV;
-		goto qec_free_devs;
+		goto out2;
 	}
 
 	/* Make sure the QEC is in MACE mode. */
 	if ((sbus_readl(qecp->gregs + GLOB_CTRL) & 0xf0000000) != GLOB_CTRL_MMODE) {
 		printk(KERN_ERR "QuadEther: AIEEE, QEC is not in MACE mode!\n");
-		res = ENODEV;
-		goto qec_free_devs;
+		goto out3;
 	}
 
 	/* Reset the QEC. */
-	if (qec_global_reset(qecp->gregs)) {
-		res = ENODEV;
-		goto qec_free_devs;
-	}
+	if (qec_global_reset(qecp->gregs))
+		goto out3;
 
 	/* Find and set the burst sizes for the QEC, since it does
 	 * the actual dma for all 4 channels.
@@ -839,40 +807,36 @@ static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 	qec_init_once(qecp, sdev);
 
 	for (i = 0; i < 4; i++) {
+		struct sunqe *qe = qeps[i];
 		/* Map in QEC per-channel control registers. */
-		qeps[i]->qcregs = sbus_ioremap(&qesdevs[i]->resource[0], 0,
-					       CREG_REG_SIZE, "QEC Channel Registers");
-		if (!qeps[i]->qcregs) {
+		qe->qcregs = sbus_ioremap(&qe->qe_sdev->resource[0], 0,
+				       CREG_REG_SIZE, "QEC Channel Registers");
+		if (!qe->qcregs) {
 			printk(KERN_ERR "QuadEther: Cannot map QE %d's channel registers.\n", i);
-			res = ENODEV;
-			goto qec_free_devs;
+			goto out4;
 		}
 
 		/* Map in per-channel AMD MACE registers. */
-		qeps[i]->mregs = sbus_ioremap(&qesdevs[i]->resource[1], 0,
-					      MREGS_REG_SIZE, "QE MACE Registers");
-		if (!qeps[i]->mregs) {
+		qe->mregs = sbus_ioremap(&qe->qe_sdev->resource[1], 0,
+				      MREGS_REG_SIZE, "QE MACE Registers");
+		if (!qe->mregs) {
 			printk(KERN_ERR "QuadEther: Cannot map QE %d's MACE registers.\n", i);
-			res = ENODEV;
-			goto qec_free_devs;
+			goto out4;
 		}
 
-		qeps[i]->qe_block = sbus_alloc_consistent(qesdevs[i],
-							  PAGE_SIZE,
-							  &qeps[i]->qblock_dvma);
-		qeps[i]->buffers = sbus_alloc_consistent(qesdevs[i],
-							 sizeof(struct sunqe_buffers),
-							 &qeps[i]->buffers_dvma);
-		if (qeps[i]->qe_block == NULL ||
-		    qeps[i]->qblock_dvma == 0 ||
-		    qeps[i]->buffers == NULL ||
-		    qeps[i]->buffers_dvma == 0) {
-			res = ENODEV;
-			goto qec_free_devs;
+		qe->qe_block = sbus_alloc_consistent(qe->qe_sdev,
+						  PAGE_SIZE,
+						  &qe->qblock_dvma);
+		qe->buffers = sbus_alloc_consistent(qe->qe_sdev,
+						 sizeof(struct sunqe_buffers),
+						 &qe->buffers_dvma);
+		if (qe->qe_block == NULL || qe->qblock_dvma == 0 ||
+		    qe->buffers == NULL || qe->buffers_dvma == 0) {
+			goto out4;
 		}
 
 		/* Stop this QE. */
-		qe_stop(qeps[i]);
+		qe_stop(qe);
 	}
 
 	for (i = 0; i < 4; i++) {
@@ -886,7 +850,6 @@ static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 		qe_devs[i]->watchdog_timeo = 5*HZ;
 		qe_devs[i]->irq = sdev->irqs[0];
 		qe_devs[i]->dma = 0;
-		ether_setup(qe_devs[i]);
 	}
 
 	/* QEC receives interrupts from each QE, then it sends the actual
@@ -897,8 +860,13 @@ static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 	if (request_irq(sdev->irqs[0], &qec_interrupt,
 			SA_SHIRQ, "QuadEther", (void *) qecp)) {
 		printk(KERN_ERR "QuadEther: Can't register QEC master irq handler.\n");
-		res = EAGAIN;
-		goto qec_free_devs;
+		res = -EAGAIN;
+		goto out4;
+	}
+
+	for (i = 0; i < 4; i++) {
+		if (register_netdev(qe_devs[i]) != 0)
+			goto out5;
 	}
 
 	/* Report the QE channels. */
@@ -914,43 +882,43 @@ static int __init qec_ether_init(struct net_device *dev, struct sbus_dev *sdev)
 	/* We are home free at this point, link the qe's into
 	 * the master list for later driver exit.
 	 */
-	for (i = 0; i < 4; i++)
-		qe_devs[i]->ifindex = dev_new_index();
 	qecp->next_module = root_qec_dev;
 	root_qec_dev = qecp;
 
 	return 0;
 
-qec_free_devs:
+out5:
+	while (i--)
+		unregister_netdev(qe_devs[i]);
+	free_irq(sdev->irqs[0], (void *)qecp);
+out4:
 	for (i = 0; i < 4; i++) {
-		if (qe_devs[i] != NULL) {
-			if (qe_devs[i]->priv) {
-				struct sunqe *qe = (struct sunqe *)qe_devs[i]->priv;
+		struct sunqe *qe = (struct sunqe *)qe_devs[i]->priv;
 
-				if (qe->qcregs)
-					sbus_iounmap(qe->qcregs, CREG_REG_SIZE);
-				if (qe->mregs)
-					sbus_iounmap(qe->mregs, MREGS_REG_SIZE);
-				if (qe->qe_block != NULL)
-					sbus_free_consistent(qe->qe_sdev,
-							     PAGE_SIZE,
-							     qe->qe_block,
-							     qe->qblock_dvma);
-				if (qe->buffers != NULL)
-					sbus_free_consistent(qe->qe_sdev,
-							     sizeof(struct sunqe_buffers),
-							     qe->buffers,
-							     qe->buffers_dvma);
-				kfree(qe_devs[i]->priv);
-			}
-			kfree(qe_devs[i]);
-		}
+		if (qe->qcregs)
+			sbus_iounmap(qe->qcregs, CREG_REG_SIZE);
+		if (qe->mregs)
+			sbus_iounmap(qe->mregs, MREGS_REG_SIZE);
+		if (qe->qe_block)
+			sbus_free_consistent(qe->qe_sdev,
+					     PAGE_SIZE,
+					     qe->qe_block,
+					     qe->qblock_dvma);
+		if (qe->buffers)
+			sbus_free_consistent(qe->qe_sdev,
+					     sizeof(struct sunqe_buffers),
+					     qe->buffers,
+					     qe->buffers_dvma);
 	}
-	if (qecp != NULL) {
-		if (qecp->gregs)
-			sbus_iounmap(qecp->gregs, GLOB_REG_SIZE);
-		kfree(qecp);
-	}
+out3:
+	sbus_iounmap(qecp->gregs, GLOB_REG_SIZE);
+out2:
+	kfree(qecp);
+out1:
+	i = 4;
+out:
+	while (i--)
+		kfree(qe_devs[i]);
 	return res;
 }
 

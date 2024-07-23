@@ -16,6 +16,7 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/timex.h>
+#include <linux/interrupt.h>
 
 #include <asm/oplib.h>
 #include <asm/segment.h>
@@ -29,35 +30,33 @@ extern unsigned long lvl14_save[5];
 static unsigned long *linux_lvl14 = NULL;
 static unsigned long obp_lvl14[4];
  
+/*
+ * Call with timer IRQ closed.
+ * First time we do it with disable_irq, later prom code uses spin_lock_irq().
+ */
 void install_linux_ticker(void)
 {
-	unsigned long flags;
 
 	if (!linux_lvl14)
 		return;
-	save_and_cli(flags);
 	linux_lvl14[0] =  lvl14_save[0];
 	linux_lvl14[1] =  lvl14_save[1];
 	linux_lvl14[2] =  lvl14_save[2];
 	linux_lvl14[3] =  lvl14_save[3];
-	restore_flags(flags);
 }
 
 void install_obp_ticker(void)
 {
-	unsigned long flags;
-    
+
 	if (!linux_lvl14)
 		return;
-	save_and_cli(flags);
 	linux_lvl14[0] =  obp_lvl14[0];
 	linux_lvl14[1] =  obp_lvl14[1];
 	linux_lvl14[2] =  obp_lvl14[2];
 	linux_lvl14[3] =  obp_lvl14[3]; 
-	restore_flags(flags);
 }
 
-void claim_ticker14(void (*handler)(int, void *, struct pt_regs *),
+void claim_ticker14(irqreturn_t (*handler)(int, void *, struct pt_regs *),
 		    int irq_nr, unsigned int timeout )
 {
 	int cpu = smp_processor_id();

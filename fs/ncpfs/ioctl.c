@@ -13,7 +13,7 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/ioctl.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/highuid.h>
 #include <linux/vmalloc.h>
@@ -40,7 +40,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 	switch (cmd) {
 	case NCP_IOC_NCPREQUEST:
 
-		if ((permission(inode, MAY_WRITE) != 0)
+		if ((permission(inode, MAY_WRITE, NULL) != 0)
 		    && (current->uid != server->m.mounted_uid)) {
 			return -EACCES;
 		}
@@ -99,7 +99,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		{
 			struct ncp_fs_info info;
 
-			if ((permission(inode, MAY_WRITE) != 0)
+			if ((permission(inode, MAY_WRITE, NULL) != 0)
 			    && (current->uid != server->m.mounted_uid)) {
 				return -EACCES;
 			}
@@ -127,7 +127,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		{
 			struct ncp_fs_info_v2 info2;
 
-			if ((permission(inode, MAY_WRITE) != 0)
+			if ((permission(inode, MAY_WRITE, NULL) != 0)
 			    && (current->uid != server->m.mounted_uid)) {
 				return -EACCES;
 			}
@@ -155,7 +155,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		{
 			unsigned long tmp = server->m.mounted_uid;
 
-			if (   (permission(inode, MAY_READ) != 0)
+			if (   (permission(inode, MAY_READ, NULL) != 0)
 			    && (current->uid != server->m.mounted_uid))
 			{
 				return -EACCES;
@@ -169,7 +169,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		{
 			struct ncp_setroot_ioctl sr;
 
-			if (   (permission(inode, MAY_READ) != 0)
+			if (   (permission(inode, MAY_READ, NULL) != 0)
 			    && (current->uid != server->m.mounted_uid))
 			{
 				return -EACCES;
@@ -201,7 +201,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 	case NCP_IOC_SETROOT:
 		{
 			struct ncp_setroot_ioctl sr;
-			struct nw_info_struct i;
+			unsigned int vnum, de, dosde;
 			struct dentry* dentry;
 
 			if (!capable(CAP_SYS_ADMIN))
@@ -214,25 +214,31 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 					   sizeof(sr))) return -EFAULT;
 			if (sr.volNumber < 0) {
 				server->m.mounted_vol[0] = 0;
-				i.volNumber = NCP_NUMBER_OF_VOLUMES + 1;
-				i.dirEntNum = 0;
-				i.DosDirNum = 0;
+				vnum = NCP_NUMBER_OF_VOLUMES;
+				de = 0;
+				dosde = 0;
 			} else if (sr.volNumber >= NCP_NUMBER_OF_VOLUMES) {
 				return -EINVAL;
-			} else
-				if (ncp_mount_subdir(server, &i, sr.volNumber,
+			} else {
+				struct nw_info_struct ni;
+				
+				if (ncp_mount_subdir(server, &ni, sr.volNumber,
 						sr.namespace, sr.dirEntNum))
 					return -ENOENT;
-
+				vnum = ni.volNumber;
+				de = ni.dirEntNum;
+				dosde = ni.DosDirNum;
+			}
+			
 			dentry = inode->i_sb->s_root;
 			server->root_setuped = 1;
 			if (dentry) {
 				struct inode* inode = dentry->d_inode;
 				
 				if (inode) {
-					NCP_FINFO(inode)->volNumber = i.volNumber;
-					NCP_FINFO(inode)->dirEntNum = i.dirEntNum;
-					NCP_FINFO(inode)->DosDirNum = i.DosDirNum;
+					NCP_FINFO(inode)->volNumber = vnum;
+					NCP_FINFO(inode)->dirEntNum = de;
+					NCP_FINFO(inode)->DosDirNum = dosde;
 				} else
 					DPRINTK("ncpfs: s_root->d_inode==NULL\n");
 			} else
@@ -243,7 +249,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 
 #ifdef CONFIG_NCPFS_PACKET_SIGNING	
 	case NCP_IOC_SIGN_INIT:
-		if ((permission(inode, MAY_WRITE) != 0)
+		if ((permission(inode, MAY_WRITE, NULL) != 0)
 		    && (current->uid != server->m.mounted_uid))
 		{
 			return -EACCES;
@@ -266,7 +272,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		return 0;		
 		
         case NCP_IOC_SIGN_WANTED:
-		if (   (permission(inode, MAY_READ) != 0)
+		if (   (permission(inode, MAY_READ, NULL) != 0)
 		    && (current->uid != server->m.mounted_uid))
 		{
 			return -EACCES;
@@ -279,7 +285,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 		{
 			int newstate;
 
-			if (   (permission(inode, MAY_WRITE) != 0)
+			if (   (permission(inode, MAY_WRITE, NULL) != 0)
 			    && (current->uid != server->m.mounted_uid))
 			{
 				return -EACCES;
@@ -300,7 +306,7 @@ int ncp_ioctl(struct inode *inode, struct file *filp,
 
 #ifdef CONFIG_NCPFS_IOCTL_LOCKING
 	case NCP_IOC_LOCKUNLOCK:
-		if (   (permission(inode, MAY_WRITE) != 0)
+		if (   (permission(inode, MAY_WRITE, NULL) != 0)
 		    && (current->uid != server->m.mounted_uid))
 		{
 			return -EACCES;
@@ -418,7 +424,7 @@ outrel:
 			if (user.object_name_len) {
 				newname = ncp_kmalloc(user.object_name_len, GFP_USER);
 				if (!newname) return -ENOMEM;
-				if (copy_from_user(newname, user.object_name, sizeof(user))) {
+				if (copy_from_user(newname, user.object_name, user.object_name_len)) {
 					ncp_kfree_s(newname, user.object_name_len);
 					return -EFAULT;
 				}
@@ -434,7 +440,7 @@ outrel:
 			oldprivatelen = server->priv.len;
 			server->auth.auth_type = user.auth_type;
 			server->auth.object_name_len = user.object_name_len;
-			server->auth.object_name = user.object_name;
+			server->auth.object_name = newname;
 			server->priv.len = 0;
 			server->priv.data = NULL;
 			/* leave critical section */
@@ -602,7 +608,7 @@ outrel:
 		}
 #endif /* CONFIG_NCPFS_NLS */
 	case NCP_IOC_SETDENTRYTTL:
-		if ((permission(inode, MAY_WRITE) != 0) &&
+		if ((permission(inode, MAY_WRITE, NULL) != 0) &&
 				 (current->uid != server->m.mounted_uid))
 			return -EACCES;
 		{
@@ -631,7 +637,7 @@ outrel:
 	/* NCP_IOC_GETMOUNTUID may be same as NCP_IOC_GETMOUNTUID2,
            so we have this out of switch */
 	if (cmd == NCP_IOC_GETMOUNTUID) {
-		if ((permission(inode, MAY_READ) != 0)
+		if ((permission(inode, MAY_READ, NULL) != 0)
 		    && (current->uid != server->m.mounted_uid)) {
 			return -EACCES;
 		}

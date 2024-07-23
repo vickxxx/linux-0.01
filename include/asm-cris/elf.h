@@ -5,12 +5,14 @@
  * ELF register definitions..
  */
 
-#include <asm/ptrace.h>
+#include <asm/arch/elf.h>
+#include <asm/user.h>
 
 typedef unsigned long elf_greg_t;
 
-/* These probably need fixing.  */
-#define ELF_NGREG (sizeof (struct pt_regs) / sizeof(elf_greg_t))
+/* Note that NGREG is defined to ELF_NGREG in include/linux/elfcore.h, and is
+   thus exposed to user-space. */
+#define ELF_NGREG (sizeof (struct user_regs_struct) / sizeof(elf_greg_t))
 typedef elf_greg_t elf_gregset_t[ELF_NGREG];
 
 /* A placeholder; CRIS does not have any fp regs.  */
@@ -28,24 +30,8 @@ typedef unsigned long elf_fpregset_t;
 #define ELF_DATA	ELFDATA2LSB;
 #define ELF_ARCH	EM_CRIS
 
-	/* SVR4/i386 ABI (pages 3-31, 3-32) says that when the program
-	   starts (a register; assume first param register for CRIS)
-	   contains a pointer to a function which might be
-	   registered using `atexit'.  This provides a mean for the
-	   dynamic linker to call DT_FINI functions for shared libraries
-	   that have been loaded before the code runs.
+#define USE_ELF_CORE_DUMP
 
-	   A value of 0 tells we have no such handler.  */
-	
-	/* Explicitly set registers to 0 to increase determinism.  */
-#define ELF_PLAT_INIT(_r)	do { \
-	(_r)->r13 = 0; (_r)->r12 = 0; (_r)->r11 = 0; (_r)->r10 = 0; \
-	(_r)->r9 = 0;  (_r)->r8 = 0;  (_r)->r7 = 0;  (_r)->r6 = 0;  \
-	(_r)->r5 = 0;  (_r)->r4 = 0;  (_r)->r3 = 0;  (_r)->r2 = 0;  \
-	(_r)->r1 = 0;  (_r)->r0 = 0;  (_r)->mof = 0; (_r)->srp = 0; \
-} while (0)
-
-#undef USE_ELF_CORE_DUMP
 #define ELF_EXEC_PAGESIZE	8192
 
 /* This is the location that an ET_DYN program is loaded if exec'ed.  Typical

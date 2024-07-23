@@ -15,7 +15,6 @@
  *     +1 (416) 297-6433 Facsimile
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include "includes.h"		/* This must be first */
 #include "hardware.h"
@@ -28,15 +27,8 @@ int hangup(int card, unsigned long channel);
 int answer(int card, unsigned long channel);
 int clreaz(int card, unsigned long channel);
 int seteaz(int card, unsigned long channel, char *);
-int geteaz(int card, unsigned long channel, char *);
-int setsil(int card, unsigned long channel, char *);
-int getsil(int card, unsigned long channel, char *);
 int setl2(int card, unsigned long arg);
-int getl2(int card, unsigned long arg);
 int setl3(int card, unsigned long arg);
-int getl3(int card, unsigned long arg);
-int lock(void);
-int unlock(void);
 int acceptb(int card, unsigned long channel);
 
 extern int cinst;
@@ -64,17 +56,17 @@ static char *commands[] = { "ISDN_CMD_IOCTL",
 			    "ISDN_CMD_HANGUP",
 			    "ISDN_CMD_CLREAZ",
 			    "ISDN_CMD_SETEAZ",
-			    "ISDN_CMD_GETEAZ",
-			    "ISDN_CMD_SETSIL",
-			    "ISDN_CMD_GETSIL",
+			    NULL,
+			    NULL,
+			    NULL,
 			    "ISDN_CMD_SETL2",
-			    "ISDN_CMD_GETL2",
+			    NULL,
 			    "ISDN_CMD_SETL3",
-			    "ISDN_CMD_GETL3",
-			    "ISDN_CMD_LOCK",
-			    "ISDN_CMD_UNLOCK",
-			    "ISDN_CMD_SUSPEND",
-			    "ISDN_CMD_RESUME" };
+			    NULL,
+			    NULL,
+			    NULL,
+			    NULL,
+			    NULL, };
 
 /*
  * Translates ISDN4Linux protocol codes to strings for debug messages
@@ -95,7 +87,7 @@ int get_card_from_id(int driver)
 		if(adapter[i]->driverId == driver)
 			return i;
 	}
-	return -NODEV;
+	return -ENODEV;
 }
 
 /* 
@@ -123,14 +115,13 @@ int command(isdn_ctrl *cmd)
 	{
 		unsigned long 	cmdptr;
 		scs_ioctl	ioc;
-		int		err;
 
 		memcpy(&cmdptr, cmd->parm.num, sizeof(unsigned long));
-		if((err = copy_from_user(&ioc, (scs_ioctl *) cmdptr, 
-			sizeof(scs_ioctl)))) {
+		if (copy_from_user(&ioc, (scs_ioctl *)cmdptr,
+				   sizeof(scs_ioctl))) {
 			pr_debug("%s: Failed to verify user space 0x%x\n",
 				adapter[card]->devicename, cmdptr);
-			return err;
+			return -EFAULT;
 		}
 		return sc_ioctl(card, &ioc);
 	}
@@ -146,24 +137,10 @@ int command(isdn_ctrl *cmd)
 		return clreaz(card, cmd->arg);
 	case ISDN_CMD_SETEAZ:
 		return seteaz(card, cmd->arg, cmd->parm.num);
-	case ISDN_CMD_GETEAZ:
-		return geteaz(card, cmd->arg, cmd->parm.num);
-	case ISDN_CMD_SETSIL:
-		return setsil(card, cmd->arg, cmd->parm.num);
-	case ISDN_CMD_GETSIL:
-		return getsil(card, cmd->arg, cmd->parm.num);
 	case ISDN_CMD_SETL2:
 		return setl2(card, cmd->arg);
-	case ISDN_CMD_GETL2:
-		return getl2(card, cmd->arg);
 	case ISDN_CMD_SETL3:
 		return setl3(card, cmd->arg);
-	case ISDN_CMD_GETL3:
-		return getl3(card, cmd->arg);
-	case ISDN_CMD_LOCK:
-		return lock();
-	case ISDN_CMD_UNLOCK:
-		return unlock();
 	default:
 		return -EINVAL;
 	}
@@ -360,23 +337,6 @@ int setl2(int card, unsigned long arg)
 }
 
 /*
- * Get the layer 2 protocol
- */
-int getl2(int card, unsigned long channel) {
-
-	if(!IS_VALID_CARD(card)) {
-		pr_debug("Invalid param: %d is not a valid card id\n", card);
-		return -ENODEV;
-	}
-
-	pr_debug("%s: Level 2 protocol for channel %d reported as %s\n",
-		adapter[card]->devicename, channel+1,
-		l2protos[adapter[card]->channel[channel].l2_proto]);
-
-	return adapter[card]->channel[channel].l2_proto;
-}
-
-/*
  * Set the layer 3 protocol
  */
 int setl3(int card, unsigned long channel) 
@@ -393,23 +353,6 @@ int setl3(int card, unsigned long channel)
 		adapter[card]->devicename, channel+1, l3protos[protocol]);
 	return 0;
 }
-
-/*
- * Get the layer 3 protocol
- */
-int getl3(int card, unsigned long arg) 
-{
-	if(!IS_VALID_CARD(card)) {
-		pr_debug("Invalid param: %d is not a valid card id\n", card);
-		return -ENODEV;
-	}
-
-	pr_debug("%s: Level 3 protocol for channel %d reported as %s\n",
-			adapter[card]->devicename, arg+1,
-			l3protos[adapter[card]->channel[arg].l3_proto]);
-	return adapter[card]->channel[arg].l3_proto;
-}
-
 
 int acceptb(int card, unsigned long channel)
 {
@@ -456,61 +399,6 @@ int seteaz(int card, unsigned long arg, char *num)
 	pr_debug("%s: EAZ list for channel %d set to: %s\n",
 		adapter[card]->devicename, arg+1,
 		adapter[card]->channel[arg].eazlist);
-	return 0;
-}
-
-int geteaz(int card, unsigned long arg, char *num)
-{
-	if(!IS_VALID_CARD(card)) {
-		pr_debug("Invalid param: %d is not a valid card id\n", card);
-		return -ENODEV;
-	}
-
-	strcpy(num, adapter[card]->channel[arg].eazlist);
-	pr_debug("%s: EAZ List for channel %d reported: %s\n",
-		adapter[card]->devicename, arg+1,
-		adapter[card]->channel[arg].eazlist);
-	return 0;
-}
-
-int setsil(int card, unsigned long arg, char *num)
-{
-	if(!IS_VALID_CARD(card)) {
-		pr_debug("Invalid param: %d is not a valid card id\n", card);
-		return -ENODEV;
-	}
-
-	strcpy(adapter[card]->channel[arg].sillist, num);
-	pr_debug("%s: Service Indicators for channel %d set: %s\n",
-		adapter[card]->devicename, arg+1,
-		adapter[card]->channel[arg].sillist);
-	return 0;
-}
-
-int getsil(int card, unsigned long arg, char *num)
-{
-	if(!IS_VALID_CARD(card)) {
-		pr_debug("Invalid param: %d is not a valid card id\n", card);
-		return -ENODEV;
-	}
-
-	strcpy(num, adapter[card]->channel[arg].sillist);
-	pr_debug("%s: SIL for channel %d reported: %s\n",
-		adapter[card]->devicename, arg+1,
-		adapter[card]->channel[arg].sillist);
-	return 0;
-}
-
-
-int lock()
-{
-	MOD_INC_USE_COUNT;
-	return 0;
-}
-
-int unlock()
-{
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 

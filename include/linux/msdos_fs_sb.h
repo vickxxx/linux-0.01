@@ -1,6 +1,5 @@
 #ifndef _MSDOS_FS_SB
 #define _MSDOS_FS_SB
-#include<linux/fat_cvf.h>
 
 /*
  * MS-DOS file system in-core superblock data
@@ -9,12 +8,12 @@
 struct fat_mount_options {
 	uid_t fs_uid;
 	gid_t fs_gid;
-	unsigned short fs_umask;
+	unsigned short fs_fmask;
+	unsigned short fs_dmask;
 	unsigned short codepage;  /* Codepage for shortname conversions */
 	char *iocharset;          /* Charset used for filename input/display */
 	unsigned short shortname; /* flags for shortname display/create rule */
 	unsigned char name_check; /* r = relaxed, n = normal, s = strict */
-	unsigned char conversion; /* b = binary, t = text, a = auto */
 	unsigned quiet:1,         /* set = fake successful chmods and chowns */
 		 showexec:1,      /* set = only set x bit for com/exe/bat */
 		 sys_immutable:1, /* set = system files are immutable */
@@ -22,11 +21,18 @@ struct fat_mount_options {
 		 isvfat:1,        /* 0=no vfat long filename support, 1=vfat support */
 		 utf8:1,	  /* Use of UTF8 character set (Default) */
 		 unicode_xlate:1, /* create escape sequences for unhandled Unicode */
-		 posixfs:1,       /* Allow names like makefile and Makefile to coexist */
 		 numtail:1,       /* Does first alias have a numeric '~1' type tail? */
 		 atari:1,         /* Use Atari GEMDOS variation of MS-DOS fs */
-		 fat32:1,	  /* Is this a FAT32 partition? */
 		 nocase:1;	  /* Does this need case conversion? 0=need case conversion*/
+};
+
+#define FAT_CACHE_NR	8 /* number of FAT cache */
+
+struct fat_cache {
+	int start_cluster; /* first cluster of the chain. */
+	int file_cluster; /* cluster number in the file. */
+	int disk_cluster; /* cluster number on disk. */
+	struct fat_cache *next; /* next cache entry */
 };
 
 struct msdos_sb_info {
@@ -47,11 +53,12 @@ struct msdos_sb_info {
 	struct fat_mount_options options;
 	struct nls_table *nls_disk;  /* Codepage used on disk */
 	struct nls_table *nls_io;    /* Charset used for input and display */
-	struct cvf_format* cvf_format;
 	void *dir_ops;		     /* Opaque; default directory operations */
-	void *private_data;
 	int dir_per_block;	     /* dir entries per block */
 	int dir_per_block_bits;	     /* log2(dir_per_block) */
+
+	spinlock_t cache_lock;
+	struct fat_cache cache_array[FAT_CACHE_NR], *cache;
 };
 
 #endif

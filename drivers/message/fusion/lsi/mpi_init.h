@@ -1,12 +1,12 @@
 /*
- *  Copyright (c) 2000-2001 LSI Logic Corporation.
+ *  Copyright (c) 2000-2002 LSI Logic Corporation.
  *
  *
  *           Name:  MPI_INIT.H
  *          Title:  MPI initiator mode messages and structures
  *  Creation Date:  June 8, 2000
  *
- *    MPI Version:  01.01.05
+ *    MPI_INIT.H Version:  01.02.05
  *
  *  Version History
  *  ---------------
@@ -22,6 +22,15 @@
  *  02-20-01  01.01.03  Started using MPI_POINTER.
  *  03-27-01  01.01.04  Added structure offset comments.
  *  04-10-01  01.01.05  Added new MsgFlag for MSG_SCSI_TASK_MGMT.
+ *  08-08-01  01.02.01  Original release for v1.2 work.
+ *  08-29-01  01.02.02  Added MPI_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET.
+ *                      Added MPI_SCSI_STATE_QUEUE_TAG_REJECTED for
+ *                      MSG_SCSI_IO_REPLY.
+ *  09-28-01  01.02.03  Added structures and defines for SCSI Enclosure
+ *                      Processor messages.
+ *  10-04-01  01.02.04  Added defines for SEP request Action field.
+ *  05-31-02  01.02.05  Added MPI_SCSIIO_MSGFLGS_CMD_DETERMINES_DATA_DIR define
+ *                      for SCSI IO requests.
  *  --------------------------------------------------------------------------
  */
 
@@ -60,16 +69,17 @@ typedef struct _MSG_SCSI_IO_REQUEST
   SCSIIORequest_t, MPI_POINTER pSCSIIORequest_t;
 
 
-/* SCSIO MsgFlags bits */
+/* SCSI IO MsgFlags bits */
 
-#define MPI_SCSIIO_MSGFLGS_SENSE_WIDTH          (0x01)
-#define MPI_SCSIIO_MSGFLGS_SENSE_WIDTH_32       (0x00)
-#define MPI_SCSIIO_MSGFLGS_SENSE_WIDTH_64       (0x01)
-#define MPI_SCSIIO_MSGFLGS_SENSE_LOCATION       (0x02)
-#define MPI_SCSIIO_MSGFLGS_SENSE_LOC_HOST       (0x00)
-#define MPI_SCSIIO_MSGFLGS_SENSE_LOC_IOC        (0x02)
+#define MPI_SCSIIO_MSGFLGS_SENSE_WIDTH              (0x01)
+#define MPI_SCSIIO_MSGFLGS_SENSE_WIDTH_32           (0x00)
+#define MPI_SCSIIO_MSGFLGS_SENSE_WIDTH_64           (0x01)
+#define MPI_SCSIIO_MSGFLGS_SENSE_LOCATION           (0x02)
+#define MPI_SCSIIO_MSGFLGS_SENSE_LOC_HOST           (0x00)
+#define MPI_SCSIIO_MSGFLGS_SENSE_LOC_IOC            (0x02)
+#define MPI_SCSIIO_MSGFLGS_CMD_DETERMINES_DATA_DIR  (0x04)
 
-/* SCSIIO LUN fields */
+/* SCSI IO LUN fields */
 
 #define MPI_SCSIIO_LUN_FIRST_LEVEL_ADDRESSING   (0x0000FFFF)
 #define MPI_SCSIIO_LUN_SECOND_LEVEL_ADDRESSING  (0xFFFF0000)
@@ -78,7 +88,7 @@ typedef struct _MSG_SCSI_IO_REQUEST
 #define MPI_SCSIIO_LUN_LEVEL_1_WORD             (0xFF00)
 #define MPI_SCSIIO_LUN_LEVEL_1_DWORD            (0x0000FF00)
 
-/* SCSIO Control bits */
+/* SCSI IO Control bits */
 
 #define MPI_SCSIIO_CONTROL_DATADIRECTION_MASK   (0x03000000)
 #define MPI_SCSIIO_CONTROL_NODATATRANSFER       (0x00000000)
@@ -107,7 +117,7 @@ typedef struct _MSG_SCSI_IO_REQUEST
 #define MPI_SCSIIO_CONTROL_RESERVED2            (0x00010000)
 
 
-/* SCSIIO reply structure */
+/* SCSI IO reply structure */
 typedef struct _MSG_SCSI_IO_REPLY
 {
     U8                      TargetID;           /* 00h */
@@ -130,7 +140,7 @@ typedef struct _MSG_SCSI_IO_REPLY
   SCSIIOReply_t, MPI_POINTER pSCSIIOReply_t;
 
 
-/* SCSIIO Reply SCSIStatus values (SAM-2 status codes) */
+/* SCSI IO Reply SCSIStatus values (SAM-2 status codes) */
 
 #define MPI_SCSI_STATUS_SUCCESS                 (0x00)
 #define MPI_SCSI_STATUS_CHECK_CONDITION         (0x02)
@@ -144,15 +154,16 @@ typedef struct _MSG_SCSI_IO_REPLY
 #define MPI_SCSI_STATUS_ACA_ACTIVE              (0x30)
 
 
-/* SCSIIO Reply SCSIState values */
+/* SCSI IO Reply SCSIState values */
 
 #define MPI_SCSI_STATE_AUTOSENSE_VALID          (0x01)
 #define MPI_SCSI_STATE_AUTOSENSE_FAILED         (0x02)
 #define MPI_SCSI_STATE_NO_SCSI_STATUS           (0x04)
 #define MPI_SCSI_STATE_TERMINATED               (0x08)
 #define MPI_SCSI_STATE_RESPONSE_INFO_VALID      (0x10)
+#define MPI_SCSI_STATE_QUEUE_TAG_REJECTED       (0x20)
 
-/* SCSIIO Reply ResponseInfo values */
+/* SCSI IO Reply ResponseInfo values */
 /* (FCP-1 RSP_CODE values and SPI-3 Packetized Failure codes) */
 
 #define MPI_SCSI_RSP_INFO_FUNCTION_COMPLETE     (0x00000000)
@@ -191,6 +202,7 @@ typedef struct _MSG_SCSI_TASK_MGMT
 #define MPI_SCSITASKMGMT_TASKTYPE_ABRT_TASK_SET         (0x02)
 #define MPI_SCSITASKMGMT_TASKTYPE_TARGET_RESET          (0x03)
 #define MPI_SCSITASKMGMT_TASKTYPE_RESET_BUS             (0x04)
+#define MPI_SCSITASKMGMT_TASKTYPE_LOGICAL_UNIT_RESET    (0x05)
 
 /* MsgFlags bits */
 #define MPI_SCSITASKMGMT_MSGFLAGS_TARGET_RESET_OPTION   (0x00)
@@ -215,5 +227,92 @@ typedef struct _MSG_SCSI_TASK_MGMT_REPLY
     U32                     TerminationCount;   /* 14h */
 } MSG_SCSI_TASK_MGMT_REPLY, MPI_POINTER PTR_MSG_SCSI_TASK_MGMT_REPLY,
   SCSITaskMgmtReply_t, MPI_POINTER pSCSITaskMgmtReply_t;
+
+
+/****************************************************************************/
+/*  SCSI Enclosure Processor messages                                       */
+/****************************************************************************/
+
+typedef struct _MSG_SEP_REQUEST
+{
+    U8                      TargetID;           /* 00h */
+    U8                      Bus;                /* 01h */
+    U8                      ChainOffset;        /* 02h */
+    U8                      Function;           /* 03h */
+    U8                      Action;             /* 04h */
+    U8                      Reserved1;          /* 05h */
+    U8                      Reserved2;          /* 06h */
+    U8                      MsgFlags;           /* 07h */
+    U32                     MsgContext;         /* 08h */
+    U32                     SlotStatus;         /* 0Ch */
+} MSG_SEP_REQUEST, MPI_POINTER PTR_MSG_SEP_REQUEST,
+  SEPRequest_t, MPI_POINTER pSEPRequest_t;
+
+/* Action defines */
+#define MPI_SEP_REQ_ACTION_WRITE_STATUS                 (0x00)
+#define MPI_SEP_REQ_ACTION_READ_STATUS                  (0x01)
+
+/* SlotStatus bits for MSG_SEP_REQUEST */
+#define MPI_SEP_REQ_SLOTSTATUS_NO_ERROR                 (0x00000001)
+#define MPI_SEP_REQ_SLOTSTATUS_DEV_FAULTY               (0x00000002)
+#define MPI_SEP_REQ_SLOTSTATUS_DEV_REBUILDING           (0x00000004)
+#define MPI_SEP_REQ_SLOTSTATUS_IN_FAILED_ARRAY          (0x00000008)
+#define MPI_SEP_REQ_SLOTSTATUS_IN_CRITICAL_ARRAY        (0x00000010)
+#define MPI_SEP_REQ_SLOTSTATUS_PARITY_CHECK             (0x00000020)
+#define MPI_SEP_REQ_SLOTSTATUS_PREDICTED_FAULT          (0x00000040)
+#define MPI_SEP_REQ_SLOTSTATUS_UNCONFIGURED             (0x00000080)
+#define MPI_SEP_REQ_SLOTSTATUS_HOT_SPARE                (0x00000100)
+#define MPI_SEP_REQ_SLOTSTATUS_REBUILD_STOPPED          (0x00000200)
+#define MPI_SEP_REQ_SLOTSTATUS_IDENTIFY_REQUEST         (0x00020000)
+#define MPI_SEP_REQ_SLOTSTATUS_REQUEST_REMOVE           (0x00040000)
+#define MPI_SEP_REQ_SLOTSTATUS_REQUEST_INSERT           (0x00080000)
+#define MPI_SEP_REQ_SLOTSTATUS_DO_NOT_MOVE              (0x00400000)
+#define MPI_SEP_REQ_SLOTSTATUS_B_ENABLE_BYPASS          (0x04000000)
+#define MPI_SEP_REQ_SLOTSTATUS_A_ENABLE_BYPASS          (0x08000000)
+#define MPI_SEP_REQ_SLOTSTATUS_DEV_OFF                  (0x10000000)
+#define MPI_SEP_REQ_SLOTSTATUS_SWAP_RESET               (0x80000000)
+
+
+typedef struct _MSG_SEP_REPLY
+{
+    U8                      TargetID;           /* 00h */
+    U8                      Bus;                /* 01h */
+    U8                      MsgLength;          /* 02h */
+    U8                      Function;           /* 03h */
+    U8                      Action;             /* 04h */
+    U8                      Reserved1;          /* 05h */
+    U8                      Reserved2;          /* 06h */
+    U8                      MsgFlags;           /* 07h */
+    U32                     MsgContext;         /* 08h */
+    U16                     Reserved3;          /* 0Ch */
+    U16                     IOCStatus;          /* 0Eh */
+    U32                     IOCLogInfo;         /* 10h */
+    U32                     SlotStatus;         /* 14h */
+} MSG_SEP_REPLY, MPI_POINTER PTR_MSG_SEP_REPLY,
+  SEPReply_t, MPI_POINTER pSEPReply_t;
+
+/* SlotStatus bits for MSG_SEP_REPLY */
+#define MPI_SEP_REPLY_SLOTSTATUS_NO_ERROR               (0x00000001)
+#define MPI_SEP_REPLY_SLOTSTATUS_DEV_FAULTY             (0x00000002)
+#define MPI_SEP_REPLY_SLOTSTATUS_DEV_REBUILDING         (0x00000004)
+#define MPI_SEP_REPLY_SLOTSTATUS_IN_FAILED_ARRAY        (0x00000008)
+#define MPI_SEP_REPLY_SLOTSTATUS_IN_CRITICAL_ARRAY      (0x00000010)
+#define MPI_SEP_REPLY_SLOTSTATUS_PARITY_CHECK           (0x00000020)
+#define MPI_SEP_REPLY_SLOTSTATUS_PREDICTED_FAULT        (0x00000040)
+#define MPI_SEP_REPLY_SLOTSTATUS_UNCONFIGURED           (0x00000080)
+#define MPI_SEP_REPLY_SLOTSTATUS_HOT_SPARE              (0x00000100)
+#define MPI_SEP_REPLY_SLOTSTATUS_REBUILD_STOPPED        (0x00000200)
+#define MPI_SEP_REPLY_SLOTSTATUS_REPORT                 (0x00010000)
+#define MPI_SEP_REPLY_SLOTSTATUS_IDENTIFY_REQUEST       (0x00020000)
+#define MPI_SEP_REPLY_SLOTSTATUS_REMOVE_READY           (0x00040000)
+#define MPI_SEP_REPLY_SLOTSTATUS_INSERT_READY           (0x00080000)
+#define MPI_SEP_REPLY_SLOTSTATUS_DO_NOT_REMOVE          (0x00400000)
+#define MPI_SEP_REPLY_SLOTSTATUS_B_BYPASS_ENABLED       (0x01000000)
+#define MPI_SEP_REPLY_SLOTSTATUS_A_BYPASS_ENABLED       (0x02000000)
+#define MPI_SEP_REPLY_SLOTSTATUS_B_ENABLE_BYPASS        (0x04000000)
+#define MPI_SEP_REPLY_SLOTSTATUS_A_ENABLE_BYPASS        (0x08000000)
+#define MPI_SEP_REPLY_SLOTSTATUS_DEV_OFF                (0x10000000)
+#define MPI_SEP_REPLY_SLOTSTATUS_FAULT_SENSED           (0x40000000)
+#define MPI_SEP_REPLY_SLOTSTATUS_SWAPPED                (0x80000000)
 
 #endif

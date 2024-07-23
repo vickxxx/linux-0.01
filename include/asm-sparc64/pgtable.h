@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.152 2001/11/12 09:43:39 davem Exp $
+/* $Id: pgtable.h,v 1.156 2002/02/09 19:49:31 davem Exp $
  * pgtable.h: SpitFire page table operations.
  *
  * Copyright 1996,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -14,10 +14,26 @@
 
 #include <asm/spitfire.h>
 #include <asm/asi.h>
-#include <asm/mmu_context.h>
 #include <asm/system.h>
 #include <asm/page.h>
 #include <asm/processor.h>
+
+/* The kernel image occupies 0x4000000 to 0x1000000 (4MB --> 16MB).
+ * The page copy blockops use 0x1000000 to 0x18000000 (16MB --> 24MB).
+ * The PROM resides in an area spanning 0xf0000000 to 0x100000000.
+ * The vmalloc area spans 0x140000000 to 0x200000000.
+ * There is a single static kernel PMD which maps from 0x0 to address
+ * 0x400000000.
+ */
+#define	TLBTEMP_BASE		0x0000000001000000
+#define MODULES_VADDR		0x0000000002000000
+#define MODULES_LEN		0x000000007e000000
+#define MODULES_END		0x0000000080000000
+#define VMALLOC_START		0x0000000140000000
+#define VMALLOC_VMADDR(x)	((unsigned long)(x))
+#define VMALLOC_END		0x0000000200000000
+#define LOW_OBP_ADDRESS		0x00000000f0000000
+#define HI_OBP_ADDRESS		0x0000000100000000
 
 /* XXX All of this needs to be rethought so we can take advantage
  * XXX cheetah's full 64-bit virtual address space, ie. no more hole
@@ -46,6 +62,8 @@
 
 #ifndef __ASSEMBLY__
 
+#include <linux/sched.h>
+
 /* Certain architectures need to do special things when pte's
  * within a page table are directly modified.  Thus, the following
  * hook is made available.
@@ -59,7 +77,7 @@
  * is different so we can optimize correctly for 32-bit tasks.
  */
 #define REAL_PTRS_PER_PMD	(1UL << PMD_BITS)
-#define PTRS_PER_PMD		((const int)((current->thread.flags & SPARC_FLAG_32BIT) ? \
+#define PTRS_PER_PMD		((const int)(test_thread_flag(TIF_32BIT) ? \
 				 (1UL << (32 - (PAGE_SHIFT-3) - PAGE_SHIFT)) : (REAL_PTRS_PER_PMD)))
 
 /*
@@ -73,16 +91,9 @@
 			(PAGE_SHIFT-3) + PMD_BITS)))
 
 /* Kernel has a separate 44bit address space. */
-#define USER_PTRS_PER_PGD	((const int)((current->thread.flags & SPARC_FLAG_32BIT) ? \
-				 (1) : (PTRS_PER_PGD)))
+#define USER_PTRS_PER_PGD	((const int)(test_thread_flag(TIF_32BIT)) ? \
+				 (1) : (PTRS_PER_PGD))
 #define FIRST_USER_PGD_NR	0
-
-/* NOTE: TLB miss handlers depend heavily upon where this is. */
-#define VMALLOC_START		0x0000000140000000UL
-#define VMALLOC_VMADDR(x)	((unsigned long)(x))
-#define VMALLOC_END		0x0000000200000000UL
-#define LOW_OBP_ADDRESS		0xf0000000UL
-#define HI_OBP_ADDRESS		0x100000000UL
 
 #define pte_ERROR(e)	__builtin_trap()
 #define pmd_ERROR(e)	__builtin_trap()
@@ -112,6 +123,7 @@
 #define _PAGE_G		0x0000000000000001	/* Global                             */
 
 /* Here are the SpitFire software bits we use in the TTE's. */
+#define _PAGE_FILE	0x0000000000001000	/* Pagecache page                     */
 #define _PAGE_MODIFIED	0x0000000000000800	/* Modified Page (ie. dirty)          */
 #define _PAGE_ACCESSED	0x0000000000000400	/* Accessed Page (ie. referenced)     */
 #define _PAGE_READ	0x0000000000000200	/* Readable SW Bit                    */
@@ -180,19 +192,28 @@
 #ifndef __ASSEMBLY__
 
 extern unsigned long phys_base;
+extern unsigned long pfn_base;
 
 extern struct page *mem_map_zero;
 #define ZERO_PAGE(vaddr)	(mem_map_zero)
 
-/* Warning: These take pointers to page structs now... */
-#define mk_pte(page, pgprot)		\
-	__pte((((page - mem_map) << PAGE_SHIFT)+phys_base) | pgprot_val(pgprot) | _PAGE_SZBITS)
+/* PFNs are real physical page numbers.  However, mem_map only begins to record
+ * per-page information starting at pfn_base.  This is to handle systems where
+ * the first physical page in the machine is at some huge physical address, such
+ * as 4GB.   This is common on a partitioned E10000, for example.
+ */
+
+#define pfn_pte(pfn, prot)	\
+	__pte(((pfn) << PAGE_SHIFT) | pgprot_val(prot) | _PAGE_SZBITS)
+#define mk_pte(page, pgprot)	pfn_pte(page_to_pfn(page), (pgprot))
+
+#define pte_pfn(x)		((pte_val(x) & _PAGE_PADDR)>>PAGE_SHIFT)
+#define pte_page(x)		pfn_to_page(pte_pfn(x))
+
 #define page_pte_prot(page, prot)	mk_pte(page, prot)
 #define page_pte(page)			page_pte_prot(page, __pgprot(0))
 
-#define mk_pte_phys(physpage, pgprot)	(__pte((physpage) | pgprot_val(pgprot) | _PAGE_SZBITS))
-
-extern inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
+static inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
 {
 	pte_t __pte;
 
@@ -205,7 +226,8 @@ extern inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
 	(pmd_val(*(pmdp)) = (__pa((unsigned long) (ptep)) >> 11UL))
 #define pgd_set(pgdp, pmdp)	\
 	(pgd_val(*(pgdp)) = (__pa((unsigned long) (pmdp)) >> 11UL))
-#define pmd_page(pmd)			((unsigned long) __va((pmd_val(pmd)<<11UL)))
+#define __pmd_page(pmd)			((unsigned long) __va((pmd_val(pmd)<<11UL)))
+#define pmd_page(pmd) 			virt_to_page((void *)__pmd_page(pmd))
 #define pgd_page(pgd)			((unsigned long) __va((pgd_val(pgd)<<11UL)))
 #define pte_none(pte) 			(!pte_val(pte))
 #define pte_present(pte)		(pte_val(pte) & _PAGE_PRESENT)
@@ -233,10 +255,7 @@ extern inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
 #define pte_mkold(pte)		(__pte(((pte_val(pte)<<1UL)>>1UL) & ~_PAGE_ACCESSED))
 
 /* Permanent address of a page. */
-#define __page_address(page)	((page)->virtual)
-#define page_address(page)	({ __page_address(page); })
-
-#define pte_page(x) (mem_map+(((pte_val(x)&_PAGE_PADDR)-phys_base)>>PAGE_SHIFT))
+#define __page_address(page)	page_address(page)
 
 /* Be very careful when you change these three, they are delicate. */
 #define pte_mkyoung(pte)	(__pte(pte_val(pte) | _PAGE_ACCESSED | _PAGE_R))
@@ -255,8 +274,13 @@ extern inline pte_t pte_modify(pte_t orig_pte, pgprot_t new_prot)
 					((address >> PMD_SHIFT) & (REAL_PTRS_PER_PMD-1)))
 
 /* Find an entry in the third-level page table.. */
-#define pte_offset(dir, address)	((pte_t *) pmd_page(*(dir)) + \
+#define pte_index(dir, address)	((pte_t *) __pmd_page(*(dir)) + \
 					((address >> PAGE_SHIFT) & (PTRS_PER_PTE - 1)))
+#define pte_offset_kernel		pte_index
+#define pte_offset_map			pte_index
+#define pte_offset_map_nested		pte_index
+#define pte_unmap(pte)			do { } while (0)
+#define pte_unmap_nested(pte)		do { } while (0)
 
 extern pgd_t swapper_pg_dir[1];
 
@@ -264,12 +288,11 @@ extern pgd_t swapper_pg_dir[1];
 #define mmu_lockarea(vaddr, len)		(vaddr)
 #define mmu_unlockarea(vaddr, len)		do { } while(0)
 
+struct vm_area_struct;
 extern void update_mmu_cache(struct vm_area_struct *, unsigned long, pte_t);
 
-#define flush_icache_page(vma, pg)	do { } while(0)
-
 /* Make a non-present pseudo-TTE. */
-extern inline pte_t mk_pte_io(unsigned long page, pgprot_t prot, int space)
+static inline pte_t mk_pte_io(unsigned long page, pgprot_t prot, int space)
 {
 	pte_t pte;
 	pte_val(pte) = ((page) | pgprot_val(prot) | _PAGE_E) & ~(unsigned long)_PAGE_CACHE;
@@ -278,22 +301,26 @@ extern inline pte_t mk_pte_io(unsigned long page, pgprot_t prot, int space)
 }
 
 /* Encode and de-code a swap entry */
-#define SWP_TYPE(entry)		(((entry).val >> PAGE_SHIFT) & 0xffUL)
-#define SWP_OFFSET(entry)	((entry).val >> (PAGE_SHIFT + 8UL))
-#define SWP_ENTRY(type, offset)	\
+#define __swp_type(entry)	(((entry).val >> PAGE_SHIFT) & 0xffUL)
+#define __swp_offset(entry)	((entry).val >> (PAGE_SHIFT + 8UL))
+#define __swp_entry(type, offset)	\
 	( (swp_entry_t) \
 	  { \
 		(((long)(type) << PAGE_SHIFT) | \
                  ((long)(offset) << (PAGE_SHIFT + 8UL))) \
 	  } )
-#define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
-#define swp_entry_to_pte(x)		((pte_t) { (x).val })
+#define __pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
+#define __swp_entry_to_pte(x)		((pte_t) { (x).val })
+
+/* File offset in PTE support. */
+#define pte_file(pte)		(pte_val(pte) & _PAGE_FILE)
+#define pte_to_pgoff(pte)	(pte_val(pte) >> PAGE_SHIFT)
+#define pgoff_to_pte(off)	(__pte(((off) << PAGE_SHIFT) | _PAGE_FILE))
+#define PTE_FILE_MAX_BITS	(64UL - PAGE_SHIFT - 1UL)
 
 extern unsigned long prom_virt_to_phys(unsigned long, int *);
-#define LOW_OBP_ADDRESS		0xf0000000UL
-#define HI_OBP_ADDRESS		0x100000000UL
 
-extern __inline__ unsigned long
+static __inline__ unsigned long
 sun4u_get_pte (unsigned long addr)
 {
 	pgd_t *pgdp;
@@ -304,19 +331,19 @@ sun4u_get_pte (unsigned long addr)
 		return addr & _PAGE_PADDR;
 	if ((addr >= LOW_OBP_ADDRESS) && (addr < HI_OBP_ADDRESS))
 		return prom_virt_to_phys(addr, 0);
-	pgdp = pgd_offset_k (addr);
-	pmdp = pmd_offset (pgdp, addr);
-	ptep = pte_offset (pmdp, addr);
-	return pte_val (*ptep) & _PAGE_PADDR;
+	pgdp = pgd_offset_k(addr);
+	pmdp = pmd_offset(pgdp, addr);
+	ptep = pte_offset_kernel(pmdp, addr);
+	return pte_val(*ptep) & _PAGE_PADDR;
 }
 
-extern __inline__ unsigned long
+static __inline__ unsigned long
 __get_phys (unsigned long addr)
 {
 	return sun4u_get_pte (addr);
 }
 
-extern __inline__ int
+static __inline__ int
 __get_iospace (unsigned long addr)
 {
 	return ((sun4u_get_pte (addr) & 0xf0000000) >> 28);
@@ -328,7 +355,7 @@ extern unsigned long *sparc64_valid_addr_bitmap;
 #define kern_addr_valid(addr)	\
 	(test_bit(__pa((unsigned long)(addr))>>22, sparc64_valid_addr_bitmap))
 
-extern int io_remap_page_range(unsigned long from, unsigned long offset,
+extern int io_remap_page_range(struct vm_area_struct *vma, unsigned long from, unsigned long offset,
 			       unsigned long size, pgprot_t prot, int space);
 
 #include <asm-generic/pgtable.h>
@@ -342,11 +369,15 @@ extern int io_remap_page_range(unsigned long from, unsigned long offset,
 extern unsigned long get_fb_unmapped_area(struct file *filp, unsigned long, unsigned long, unsigned long, unsigned long);
 #define HAVE_ARCH_FB_UNMAPPED_AREA
 
-#endif /* !(__ASSEMBLY__) */
-
 /*
  * No page table caches to initialise
  */
 #define pgtable_cache_init()	do { } while (0)
+
+extern void check_pgt_cache(void);
+
+typedef pte_t *pte_addr_t;
+
+#endif /* !(__ASSEMBLY__) */
 
 #endif /* !(_SPARC64_PGTABLE_H) */

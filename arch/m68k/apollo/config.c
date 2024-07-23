@@ -4,6 +4,9 @@
 #include <linux/mm.h>
 #include <linux/tty.h>
 #include <linux/console.h>
+#include <linux/rtc.h>
+#include <linux/vt_kern.h>
+#include <linux/interrupt.h>
 
 #include <asm/setup.h>
 #include <asm/bootinfo.h>
@@ -23,34 +26,28 @@ u_long cpuctrl_physaddr;
 u_long timer_physaddr;
 u_long apollo_model;
 
-extern void dn_sched_init(void (*handler)(int,void *,struct pt_regs *));
-extern int dn_keyb_init(void);
-extern int dn_dummy_kbdrate(struct kbd_repeat *);
+extern void dn_sched_init(irqreturn_t (*handler)(int,void *,struct pt_regs *));
 extern void dn_init_IRQ(void);
-extern int dn_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *), unsigned long flags, const char *devname, void *dev_id);
+extern int dn_request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *), unsigned long flags, const char *devname, void *dev_id);
 extern void dn_free_irq(unsigned int irq, void *dev_id);
 extern void dn_enable_irq(unsigned int);
 extern void dn_disable_irq(unsigned int);
-extern int dn_get_irq_list(char *);
+extern int show_dn_interrupts(struct seq_file *, void *);
 extern unsigned long dn_gettimeoffset(void);
-extern void dn_gettod(int *, int *, int *, int *, int *, int *);
-extern int dn_dummy_hwclk(int, struct hwclk_time *);
+extern int dn_dummy_hwclk(int, struct rtc_time *);
 extern int dn_dummy_set_clock_mmss(unsigned long);
-extern void dn_mksound(unsigned int count, unsigned int ticks);
 extern void dn_dummy_reset(void);
 extern void dn_dummy_waitbut(void);
 extern struct fb_info *dn_fb_init(long *);
 extern void dn_dummy_debug_init(void);
-extern void (*kd_mksound)(unsigned int, unsigned int);
 extern void dn_dummy_video_setup(char *,int *);
-extern void dn_process_int(int irq, struct pt_regs *fp);
+extern irqreturn_t dn_process_int(int irq, struct pt_regs *fp);
 #ifdef CONFIG_HEARTBEAT
 static void dn_heartbeat(int on);
 #endif
-static void dn_timer_int(int irq,void *, struct pt_regs *);
-static void (*sched_timer_handler)(int, void *, struct pt_regs *)=NULL;
+static irqreturn_t dn_timer_int(int irq,void *, struct pt_regs *);
+static irqreturn_t (*sched_timer_handler)(int, void *, struct pt_regs *)=NULL;
 static void dn_get_model(char *model);
-static int dn_cpuctrl=0xff00;
 static const char *apollo_models[] = {
 	"DN3000 (Otter)",
 	"DN3010 (Otter)",
@@ -165,17 +162,14 @@ void config_apollo(void) {
 	dn_setup_model();	
 
 	mach_sched_init=dn_sched_init; /* */
-	mach_keyb_init=dn_keyb_init;
-	mach_kbdrate=dn_dummy_kbdrate;
 	mach_init_IRQ=dn_init_IRQ;
 	mach_default_handler=NULL;
 	mach_request_irq     = dn_request_irq;
 	mach_free_irq        = dn_free_irq;
 	enable_irq      = dn_enable_irq;
 	disable_irq     = dn_disable_irq;
-	mach_get_irq_list    = dn_get_irq_list;
+	mach_get_irq_list    = show_dn_interrupts;
 	mach_gettimeoffset   = dn_gettimeoffset;
-	mach_gettod	     = dn_gettod; /* */
 	mach_max_dma_address = 0xffffffff;
 	mach_hwclk           = dn_dummy_hwclk; /* */
 	mach_set_clock_mmss  = dn_dummy_set_clock_mmss; /* */
@@ -188,7 +182,6 @@ void config_apollo(void) {
 #ifdef CONFIG_DUMMY_CONSOLE
         conswitchp           = &dummy_con;
 #endif
-	kd_mksound	     = dn_mksound;
 #ifdef CONFIG_HEARTBEAT
   	mach_heartbeat = dn_heartbeat;
 #endif
@@ -202,7 +195,7 @@ void config_apollo(void) {
 
 }		
 
-void dn_timer_int(int irq, void *dev_id, struct pt_regs *fp) {
+irqreturn_t dn_timer_int(int irq, void *dev_id, struct pt_regs *fp) {
 
 	volatile unsigned char x;
 
@@ -211,9 +204,10 @@ void dn_timer_int(int irq, void *dev_id, struct pt_regs *fp) {
 	x=*(volatile unsigned char *)(timer+3);
 	x=*(volatile unsigned char *)(timer+5);
 
+	return IRQ_HANDLED;
 }
 
-void dn_sched_init(void (*timer_routine)(int, void *, struct pt_regs *)) {
+void dn_sched_init(irqreturn_t (*timer_routine)(int, void *, struct pt_regs *)) {
 
 	/* program timer 1 */       	
 	*(volatile unsigned char *)(timer+3)=0x01;
@@ -240,40 +234,26 @@ unsigned long dn_gettimeoffset(void) {
 
 }
 
-void dn_gettod(int *yearp, int *monp, int *dayp,
-	       int *hourp, int *minp, int *secp) {
-
-  *yearp=rtc->year;
-  *monp=rtc->month;
-  *dayp=rtc->day_of_month;
-  *hourp=rtc->hours;
-  *minp=rtc->minute;
-  *secp=rtc->second;
-
-printk("gettod: %d %d %d %d %d %d\n",*yearp,*monp,*dayp,*hourp,*minp,*secp);
-
-}
-
-int dn_dummy_hwclk(int op, struct hwclk_time *t) {
+int dn_dummy_hwclk(int op, struct rtc_time *t) {
 
 
   if(!op) { /* read */
-    t->sec=rtc->second;
-    t->min=rtc->minute;
-    t->hour=rtc->hours;
-    t->day=rtc->day_of_month;
-    t->wday=rtc->day_of_week;
-    t->mon=rtc->month;
-    t->year=rtc->year;
+    t->tm_sec=rtc->second;
+    t->tm_min=rtc->minute;
+    t->tm_hour=rtc->hours;
+    t->tm_mday=rtc->day_of_month;
+    t->tm_wday=rtc->day_of_week;
+    t->tm_mon=rtc->month;
+    t->tm_year=rtc->year;
   } else {
-    rtc->second=t->sec;
-    rtc->minute=t->min;
-    rtc->hours=t->hour;
-    rtc->day_of_month=t->day;
-    if(t->wday!=-1)
-      rtc->day_of_week=t->wday;
-    rtc->month=t->mon;
-    rtc->year=t->year;
+    rtc->second=t->tm_sec;
+    rtc->minute=t->tm_min;
+    rtc->hours=t->tm_hour;
+    rtc->day_of_month=t->tm_mday;
+    if(t->tm_wday!=-1)
+      rtc->day_of_week=t->tm_wday;
+    rtc->month=t->tm_mon;
+    rtc->year=t->tm_year;
   }
 
   return 0;
@@ -310,6 +290,8 @@ static void dn_get_model(char *model)
 }
 
 #ifdef CONFIG_HEARTBEAT
+static int dn_cpuctrl=0xff00;
+
 static void dn_heartbeat(int on) {
 
 	if(on) { 

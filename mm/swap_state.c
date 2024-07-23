@@ -10,42 +10,36 @@
 #include <linux/mm.h>
 #include <linux/kernel_stat.h>
 #include <linux/swap.h>
-#include <linux/swapctl.h>
 #include <linux/init.h>
 #include <linux/pagemap.h>
-#include <linux/smp_lock.h>
+#include <linux/backing-dev.h>
 
 #include <asm/pgtable.h>
 
-/*
- * We may have stale swap cache pages in memory: notice
- * them here and get rid of the unnecessary final write.
- */
-static int swap_writepage(struct page *page)
-{
-	if (remove_exclusive_swap_page(page)) {
-		UnlockPage(page);
-		return 0;
-	}
-	rw_swap_page(WRITE, page);
-	return 0;
-}
-
-static struct address_space_operations swap_aops = {
-	writepage: swap_writepage,
-	sync_page: block_sync_page,
+static struct backing_dev_info swap_backing_dev_info = {
+	.ra_pages	= 0,	/* No readahead */
+	.memory_backed	= 1,	/* Does not contribute to dirty memory */
 };
+
+extern struct address_space_operations swap_aops;
 
 struct address_space swapper_space = {
-	LIST_HEAD_INIT(swapper_space.clean_pages),
-	LIST_HEAD_INIT(swapper_space.dirty_pages),
-	LIST_HEAD_INIT(swapper_space.locked_pages),
-	0,				/* nrpages	*/
-	&swap_aops,
+	.page_tree	= RADIX_TREE_INIT(GFP_ATOMIC),
+	.page_lock	= SPIN_LOCK_UNLOCKED,
+	.clean_pages	= LIST_HEAD_INIT(swapper_space.clean_pages),
+	.dirty_pages	= LIST_HEAD_INIT(swapper_space.dirty_pages),
+	.io_pages	= LIST_HEAD_INIT(swapper_space.io_pages),
+	.locked_pages	= LIST_HEAD_INIT(swapper_space.locked_pages),
+	.a_ops		= &swap_aops,
+	.backing_dev_info = &swap_backing_dev_info,
+	.i_mmap		= LIST_HEAD_INIT(swapper_space.i_mmap),
+	.i_mmap_shared	= LIST_HEAD_INIT(swapper_space.i_mmap_shared),
+	.i_shared_sem	= __MUTEX_INITIALIZER(swapper_space.i_shared_sem),
+	.private_lock	= SPIN_LOCK_UNLOCKED,
+	.private_list	= LIST_HEAD_INIT(swapper_space.private_list),
 };
 
-#ifdef SWAP_CACHE_INFO
-#define INC_CACHE_INFO(x)	(swap_cache_info.x++)
+#define INC_CACHE_INFO(x)	do { swap_cache_info.x++; } while (0)
 
 static struct {
 	unsigned long add_total;
@@ -63,23 +57,26 @@ void show_swap_cache_info(void)
 		swap_cache_info.find_success, swap_cache_info.find_total,
 		swap_cache_info.noent_race, swap_cache_info.exist_race);
 }
-#else
-#define INC_CACHE_INFO(x)	do { } while (0)
-#endif
 
-int add_to_swap_cache(struct page *page, swp_entry_t entry)
+static int add_to_swap_cache(struct page *page, swp_entry_t entry)
 {
+	int error;
+
 	if (page->mapping)
 		BUG();
 	if (!swap_duplicate(entry)) {
 		INC_CACHE_INFO(noent_race);
 		return -ENOENT;
 	}
-	if (add_to_page_cache_unique(page, &swapper_space, entry.val,
-			page_hash(&swapper_space, entry.val)) != 0) {
+	error = add_to_page_cache(page, &swapper_space, entry.val, GFP_KERNEL);
+	/*
+	 * Anon pages are already on the LRU, we don't run lru_cache_add here.
+	 */
+	if (error != 0) {
 		swap_free(entry);
-		INC_CACHE_INFO(exist_race);
-		return -EEXIST;
+		if (error == -EEXIST)
+			INC_CACHE_INFO(exist_race);
+		return error;
 	}
 	if (!PageLocked(page))
 		BUG();
@@ -95,13 +92,77 @@ int add_to_swap_cache(struct page *page, swp_entry_t entry)
  */
 void __delete_from_swap_cache(struct page *page)
 {
+	BUG_ON(!PageLocked(page));
+	BUG_ON(!PageSwapCache(page));
+	BUG_ON(PageWriteback(page));
+	__remove_from_page_cache(page);
+	INC_CACHE_INFO(del_total);
+}
+
+/**
+ * add_to_swap - allocate swap space for a page
+ * @page: page we want to move to swap
+ *
+ * Allocate swap space for the page and add the page to the
+ * swap cache.  Caller needs to hold the page lock. 
+ */
+int add_to_swap(struct page * page)
+{
+	swp_entry_t entry;
+	int pf_flags;
+	int err;
+
 	if (!PageLocked(page))
 		BUG();
-	if (!PageSwapCache(page))
-		BUG();
-	ClearPageDirty(page);
-	__remove_inode_page(page);
-	INC_CACHE_INFO(del_total);
+
+	for (;;) {
+		entry = get_swap_page();
+		if (!entry.val)
+			return 0;
+
+		/* Radix-tree node allocations are performing
+		 * GFP_ATOMIC allocations under PF_MEMALLOC.  
+		 * They can completely exhaust the page allocator.  
+		 *
+		 * So PF_MEMALLOC is dropped here.  This causes the slab 
+		 * allocations to fail earlier, so radix-tree nodes will 
+		 * then be allocated from the mempool reserves.
+		 *
+		 * We're still using __GFP_HIGH for radix-tree node
+		 * allocations, so some of the emergency pools are available,
+		 * just not all of them.
+		 */
+
+		pf_flags = current->flags;
+		current->flags &= ~PF_MEMALLOC;
+
+		/*
+		 * Add it to the swap cache and mark it dirty
+		 */
+		err = add_to_page_cache(page, &swapper_space,
+					entry.val, GFP_ATOMIC);
+
+		if (pf_flags & PF_MEMALLOC)
+			current->flags |= PF_MEMALLOC;
+
+		switch (err) {
+		case 0:				/* Success */
+			SetPageUptodate(page);
+			ClearPageDirty(page);
+			set_page_dirty(page);
+			INC_CACHE_INFO(add_total);
+			return 1;
+		case -EEXIST:
+			/* Raced with "speculative" read_swap_cache_async */
+			INC_CACHE_INFO(exist_race);
+			swap_free(entry);
+			continue;
+		default:
+			/* -ENOMEM radix-tree allocation failure */
+			swap_free(entry);
+			return 0;
+		}
+	}
 }
 
 /*
@@ -114,20 +175,97 @@ void delete_from_swap_cache(struct page *page)
 {
 	swp_entry_t entry;
 
-	if (!PageLocked(page))
-		BUG();
-
-	if (unlikely(!block_flushpage(page, 0)))
-		BUG();	/* an anonymous page cannot have page->buffers set */
-
+	BUG_ON(!PageLocked(page));
+	BUG_ON(PageWriteback(page));
+	BUG_ON(PagePrivate(page));
+  
 	entry.val = page->index;
 
-	spin_lock(&pagecache_lock);
+	spin_lock(&swapper_space.page_lock);
 	__delete_from_swap_cache(page);
-	spin_unlock(&pagecache_lock);
+	spin_unlock(&swapper_space.page_lock);
 
 	swap_free(entry);
 	page_cache_release(page);
+}
+
+int move_to_swap_cache(struct page *page, swp_entry_t entry)
+{
+	struct address_space *mapping = page->mapping;
+	int err;
+
+	spin_lock(&swapper_space.page_lock);
+	spin_lock(&mapping->page_lock);
+
+	err = radix_tree_insert(&swapper_space.page_tree, entry.val, page);
+	if (!err) {
+		__remove_from_page_cache(page);
+		___add_to_page_cache(page, &swapper_space, entry.val);
+	}
+
+	spin_unlock(&mapping->page_lock);
+	spin_unlock(&swapper_space.page_lock);
+
+	if (!err) {
+		if (!swap_duplicate(entry))
+			BUG();
+		/* shift page from clean_pages to dirty_pages list */
+		BUG_ON(PageDirty(page));
+		set_page_dirty(page);
+		INC_CACHE_INFO(add_total);
+	} else if (err == -EEXIST)
+		INC_CACHE_INFO(exist_race);
+	return err;
+}
+
+int move_from_swap_cache(struct page *page, unsigned long index,
+		struct address_space *mapping)
+{
+	swp_entry_t entry;
+	int err;
+
+	BUG_ON(!PageLocked(page));
+	BUG_ON(PageWriteback(page));
+	BUG_ON(PagePrivate(page));
+
+	entry.val = page->index;
+
+	spin_lock(&swapper_space.page_lock);
+	spin_lock(&mapping->page_lock);
+
+	err = radix_tree_insert(&mapping->page_tree, index, page);
+	if (!err) {
+		__delete_from_swap_cache(page);
+		___add_to_page_cache(page, mapping, index);
+	}
+
+	spin_unlock(&mapping->page_lock);
+	spin_unlock(&swapper_space.page_lock);
+
+	if (!err) {
+		swap_free(entry);
+		/* shift page from clean_pages to dirty_pages list */
+		ClearPageDirty(page);
+		set_page_dirty(page);
+	}
+	return err;
+}
+
+
+/* 
+ * If we are the only user, then try to free up the swap cache. 
+ * 
+ * Its ok to check for PageSwapCache without the page lock
+ * here because we are going to recheck again inside 
+ * exclusive_swap_page() _with_ the lock. 
+ * 					- Marcelo
+ */
+static inline void free_swap_cache(struct page *page)
+{
+	if (PageSwapCache(page) && !TestSetPageLocked(page)) {
+		remove_exclusive_swap_page(page);
+		unlock_page(page);
+	}
 }
 
 /* 
@@ -137,19 +275,30 @@ void delete_from_swap_cache(struct page *page)
  */
 void free_page_and_swap_cache(struct page *page)
 {
-	/* 
-	 * If we are the only user, then try to free up the swap cache. 
-	 * 
-	 * Its ok to check for PageSwapCache without the page lock
-	 * here because we are going to recheck again inside 
-	 * exclusive_swap_page() _with_ the lock. 
-	 * 					- Marcelo
-	 */
-	if (PageSwapCache(page) && !TryLockPage(page)) {
-		remove_exclusive_swap_page(page);
-		UnlockPage(page);
-	}
+	free_swap_cache(page);
 	page_cache_release(page);
+}
+
+/*
+ * Passed an array of pages, drop them all from swapcache and then release
+ * them.  They are removed from the LRU and freed if this is their last use.
+ */
+void free_pages_and_swap_cache(struct page **pages, int nr)
+{
+	int chunk = 16;
+	struct page **pagep = pages;
+
+	lru_add_drain();
+	while (nr) {
+		int todo = min(chunk, nr);
+		int i;
+
+		for (i = 0; i < todo; i++)
+			free_swap_cache(pagep[i]);
+		release_pages(pagep, todo, 0);
+		pagep += todo;
+		nr -= todo;
+	}
 }
 
 /*
@@ -214,16 +363,18 @@ struct page * read_swap_cache_async(swp_entry_t entry)
 		 * swap cache: added by a racing read_swap_cache_async,
 		 * or by try_to_swap_out (or shmem_writepage) re-using
 		 * the just freed swap entry for an existing page.
+		 * May fail (-ENOMEM) if radix-tree node allocation failed.
 		 */
 		err = add_to_swap_cache(new_page, entry);
 		if (!err) {
 			/*
 			 * Initiate read into locked page and return.
 			 */
-			rw_swap_page(READ, new_page);
+			lru_cache_add_active(new_page);
+			swap_readpage(NULL, new_page);
 			return new_page;
 		}
-	} while (err != -ENOENT);
+	} while (err != -ENOENT && err != -ENOMEM);
 
 	if (new_page)
 		page_cache_release(new_page);

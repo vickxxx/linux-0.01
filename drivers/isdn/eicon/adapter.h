@@ -176,8 +176,7 @@ extern	void    DivasLogAdd(void *buffer, int length);
 /*------------------------------------------------------------------*/
 
 int		DivasDpcSchedule(void);
-void		DivasDoDpc(void *);
-void		DivasDoRequestDpc(void *pData);
+void		DivasDoDpc(unsigned long);
 int		DivasScheduleRequestDpc(void);
 
 /* table of IDI request functions */
@@ -186,7 +185,7 @@ extern
 IDI_CALL	DivasIdiRequest[];
 
 /*
- * intialisation entry point
+ * initialisation entry point
  */
 
 int		DivasInit(void);

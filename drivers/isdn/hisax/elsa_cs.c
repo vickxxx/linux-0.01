@@ -53,7 +53,6 @@
 #include <pcmcia/cistpl.h>
 #include <pcmcia/cisreg.h>
 #include <pcmcia/ds.h>
-#include <pcmcia/bus_ops.h>
 
 MODULE_DESCRIPTION("ISDN4Linux: PCMCIA client driver for Elsa PCM cards");
 MODULE_AUTHOR("Klaus Lichtenwalder");
@@ -163,26 +162,13 @@ static dev_link_t *dev_list = NULL;
    "stopped" due to a power management event, or card ejection.  The
    device IO routines can use a flag like this to throttle IO to a
    card that is not ready to accept it.
-
-   The bus_operations pointer is used on platforms for which we need
-   to use special socket-specific versions of normal IO primitives
-   (inb, outb, readb, writeb, etc) for card IO.
 */
 
 typedef struct local_info_t {
     dev_link_t          link;
     dev_node_t          node;
     int                 busy;
-  struct bus_operations *bus;
 } local_info_t;
-
-/*====================================================================*/
-
-static void cs_error(client_handle_t handle, int func, int ret)
-{
-    error_info_t err = { func, ret};
-    CardServices(ReportError, handle, &err);
-}
 
 /*======================================================================
 
@@ -522,7 +508,6 @@ static int elsa_cs_event(event_t event, int priority,
         break;
     case CS_EVENT_CARD_INSERTION:
         link->state |= DEV_PRESENT | DEV_CONFIG_PENDING;
-        dev->bus = args->bus;
         elsa_cs_config(link);
         break;
     case CS_EVENT_PM_SUSPEND:
@@ -546,28 +531,27 @@ static int elsa_cs_event(event_t event, int priority,
     return 0;
 } /* elsa_cs_event */
 
-/*====================================================================*/
+static struct pcmcia_driver elsa_cs_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "elsa_cs",
+	},
+	.attach		= elsa_cs_attach,
+	.detach		= elsa_cs_detach,
+};
 
 static int __init init_elsa_cs(void)
 {
-    servinfo_t serv;
-    DEBUG(0, "%s\n", version);
-    CardServices(GetCardServicesInfo, &serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-        printk(KERN_NOTICE "elsa_cs: Card Services release "
-               "does not match!\n");
-        return -1;
-    }
-    register_pccard_driver(&dev_info, &elsa_cs_attach, &elsa_cs_detach);
-    return 0;
+	return pcmcia_register_driver(&elsa_cs_driver);
 }
 
 static void __exit exit_elsa_cs(void)
 {
-    DEBUG(0, "elsa_cs: unloading\n");
-    unregister_pccard_driver(&dev_info);
-    while (dev_list != NULL)
-        elsa_cs_detach(dev_list);
+	pcmcia_unregister_driver(&elsa_cs_driver);
+
+	/* XXX: this really needs to move into generic code.. */
+	while (dev_list != NULL)
+		elsa_cs_detach(dev_list);
 }
 
 module_init(init_elsa_cs);

@@ -132,27 +132,33 @@ void br_send_tcn_bpdu(struct net_bridge_port *p)
 	br_send_bpdu(p, buf, 7);
 }
 
-static unsigned char header[6] = {0x42, 0x42, 0x03, 0x00, 0x00, 0x00};
+static const unsigned char header[6] = {0x42, 0x42, 0x03, 0x00, 0x00, 0x00};
 
-/* called under bridge lock */
+/* NO locks */
 int br_stp_handle_bpdu(struct sk_buff *skb)
 {
+	struct net_bridge_port *p = skb->dev->br_port;
+	struct net_bridge *br = p->br;
 	unsigned char *buf;
-	struct net_bridge_port *p;
 
-	p = skb->dev->br_port;
-
-	if (!p->br->stp_enabled ||
-	    !pskb_may_pull(skb, sizeof(header)+1) ||
+	/* need at least the 802 and STP headers */
+	if (!pskb_may_pull(skb, sizeof(header)+1) ||
 	    memcmp(skb->data, header, sizeof(header)))
 		goto err;
 
 	buf = skb_pull(skb, sizeof(header));
+
+	spin_lock_bh(&br->lock);
+	if (p->state == BR_STATE_DISABLED 
+	    || !(br->dev->flags & IFF_UP)
+	    || !br->stp_enabled)
+		goto out;
+
 	if (buf[0] == BPDU_TYPE_CONFIG) {
 		struct br_config_bpdu bpdu;
 
 		if (!pskb_may_pull(skb, 32))
-			goto err;
+		    goto out;
 
 		buf = skb->data;
 		bpdu.topology_change = (buf[1] & 0x01) ? 1 : 0;
@@ -192,8 +198,9 @@ int br_stp_handle_bpdu(struct sk_buff *skb)
 	else if (buf[0] == BPDU_TYPE_TCN) {
 		br_received_tcn_bpdu(p);
 	}
-
+ out:
+	spin_unlock_bh(&br->lock);
  err:
-	kfree_skb(skb);
+	kfree(skb);
 	return 0;
 }

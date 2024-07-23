@@ -13,7 +13,6 @@
 #include <linux/uio.h>
 #include <linux/net.h>
 #include <linux/in.h>
-#include <linux/inet.h>
 #include <linux/sunrpc/clnt.h>
 #include <linux/sunrpc/xprt.h>
 #include <linux/sunrpc/sched.h>
@@ -30,10 +29,9 @@
 #define MOUNT_UMNT		3
  */
 
-static int			nfs_gen_mount(struct sockaddr_in *,
-					      char *, struct nfs_fh *, int);
-static struct rpc_clnt *	mnt_create(char *, struct sockaddr_in *, int);
-extern struct rpc_program	mnt_program;
+static struct rpc_clnt *	mnt_create(char *, struct sockaddr_in *,
+								int, int);
+struct rpc_program		mnt_program;
 
 struct mnt_fhstatus {
 	unsigned int		status;
@@ -44,22 +42,13 @@ struct mnt_fhstatus {
  * Obtain an NFS file handle for the given host and path
  */
 int
-nfs_mount(struct sockaddr_in *addr, char *path, struct nfs_fh *fh)
-{
-	return nfs_gen_mount(addr, path, fh, NFS_MNT_VERSION);
-}
-
-int
-nfs3_mount(struct sockaddr_in *addr, char *path, struct nfs_fh *fh)
-{
-	return nfs_gen_mount(addr, path, fh, NFS_MNT3_VERSION);
-}
-
-static int
-nfs_gen_mount(struct sockaddr_in *addr, char *path, struct nfs_fh *fh, int version)
+nfsroot_mount(struct sockaddr_in *addr, char *path, struct nfs_fh *fh,
+		int version, int protocol)
 {
 	struct rpc_clnt		*mnt_clnt;
-	struct mnt_fhstatus	result = { 0, fh };
+	struct mnt_fhstatus	result = {
+		.fh		= fh
+	};
 	char			hostname[32];
 	int			status;
 	int			call;
@@ -67,22 +56,23 @@ nfs_gen_mount(struct sockaddr_in *addr, char *path, struct nfs_fh *fh, int versi
 	dprintk("NFS:      nfs_mount(%08x:%s)\n",
 			(unsigned)ntohl(addr->sin_addr.s_addr), path);
 
-	strcpy(hostname, in_ntoa(addr->sin_addr.s_addr));
-	if (!(mnt_clnt = mnt_create(hostname, addr, version)))
+	sprintf(hostname, "%u.%u.%u.%u", NIPQUAD(addr->sin_addr.s_addr));
+	if (!(mnt_clnt = mnt_create(hostname, addr, version, protocol)))
 		return -EACCES;
 
-	call = (version == 3) ? MOUNTPROC3_MNT : MNTPROC_MNT;
+	call = (version == NFS_MNT3_VERSION) ? MOUNTPROC3_MNT : MNTPROC_MNT;
 	status = rpc_call(mnt_clnt, call, path, &result, 0);
 	return status < 0? status : (result.status? -EACCES : 0);
 }
 
 static struct rpc_clnt *
-mnt_create(char *hostname, struct sockaddr_in *srvaddr, int version)
+mnt_create(char *hostname, struct sockaddr_in *srvaddr, int version,
+		int protocol)
 {
 	struct rpc_xprt	*xprt;
 	struct rpc_clnt	*clnt;
 
-	if (!(xprt = xprt_create_proto(IPPROTO_UDP, srvaddr, NULL)))
+	if (!(xprt = xprt_create_proto(protocol, srvaddr, NULL)))
 		return NULL;
 
 	clnt = rpc_create_client(xprt, hostname,
@@ -102,12 +92,6 @@ mnt_create(char *hostname, struct sockaddr_in *srvaddr, int version)
 /*
  * XDR encode/decode functions for MOUNT
  */
-static int
-xdr_error(struct rpc_rqst *req, u32 *p, void *dummy)
-{
-	return -EIO;
-}
-
 static int
 xdr_encode_dirpath(struct rpc_rqst *req, u32 *p, const char *path)
 {
@@ -150,33 +134,35 @@ xdr_decode_fhstatus3(struct rpc_rqst *req, u32 *p, struct mnt_fhstatus *res)
 #define MNT_dirpath_sz		(1 + 256)
 #define MNT_fhstatus_sz		(1 + 8)
 
-static struct rpc_procinfo	mnt_procedures[2] = {
-	{ "mnt_null",
-		(kxdrproc_t) xdr_error,	
-		(kxdrproc_t) xdr_error,	0, 0 },
-	{ "mnt_mount",
-		(kxdrproc_t) xdr_encode_dirpath,	
-		(kxdrproc_t) xdr_decode_fhstatus,
-		MNT_dirpath_sz << 2, 0 },
+static struct rpc_procinfo	mnt_procedures[] = {
+[MNTPROC_MNT] = {
+	  .p_proc		= MNTPROC_MNT,
+	  .p_encode		= (kxdrproc_t) xdr_encode_dirpath,	
+	  .p_decode		= (kxdrproc_t) xdr_decode_fhstatus,
+	  .p_bufsiz		= MNT_dirpath_sz << 2,
+	},
 };
 
-static struct rpc_procinfo mnt3_procedures[2] = {
-	{ "mnt3_null",
-		(kxdrproc_t) xdr_error,
-		(kxdrproc_t) xdr_error, 0, 0 },
-	{ "mnt3_mount",
-		(kxdrproc_t) xdr_encode_dirpath,
-		(kxdrproc_t) xdr_decode_fhstatus3,
-		MNT_dirpath_sz << 2, 0 },
+static struct rpc_procinfo mnt3_procedures[] = {
+[MOUNTPROC3_MNT] = {
+	  .p_proc		= MOUNTPROC3_MNT,
+	  .p_encode		= (kxdrproc_t) xdr_encode_dirpath,
+	  .p_decode		= (kxdrproc_t) xdr_decode_fhstatus3,
+	  .p_bufsiz		= MNT_dirpath_sz << 2,
+	},
 };
 
 
 static struct rpc_version	mnt_version1 = {
-	1, 2, mnt_procedures
+		.number		= 1,
+		.nrprocs 	= 2,
+		.procs 		= mnt_procedures
 };
 
 static struct rpc_version       mnt_version3 = {
-	3, 2, mnt3_procedures
+		.number		= 3,
+		.nrprocs	= 2,
+		.procs		= mnt3_procedures
 };
 
 static struct rpc_version *	mnt_version[] = {
@@ -189,9 +175,9 @@ static struct rpc_version *	mnt_version[] = {
 static struct rpc_stat		mnt_stats;
 
 struct rpc_program	mnt_program = {
-	"mount",
-	NFS_MNT_PROGRAM,
-	sizeof(mnt_version)/sizeof(mnt_version[0]),
-	mnt_version,
-	&mnt_stats,
+	.name		= "mount",
+	.number		= NFS_MNT_PROGRAM,
+	.nrvers		= sizeof(mnt_version)/sizeof(mnt_version[0]),
+	.version	= mnt_version,
+	.stats		= &mnt_stats,
 };

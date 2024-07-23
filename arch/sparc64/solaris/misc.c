@@ -1,5 +1,5 @@
-/* $Id: misc.c,v 1.33 2001/09/18 22:29:06 davem Exp $
- * misc.c: Miscelaneous syscall emulation for Solaris
+/* $Id: misc.c,v 1.36 2002/02/09 19:49:31 davem Exp $
+ * misc.c: Miscellaneous syscall emulation for Solaris
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
@@ -15,11 +15,14 @@
 #include <linux/mman.h>
 #include <linux/file.h>
 #include <linux/timex.h>
+#include <linux/major.h>
+#include <linux/compat.h>
 
 #include <asm/uaccess.h>
 #include <asm/string.h>
 #include <asm/oplib.h>
 #include <asm/idprom.h>
+#include <asm/smp.h>
 
 #include "conv.h"
 
@@ -56,7 +59,7 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 	/* Do we need it here? */
 	set_personality(PER_SVR4);
 	if (flags & MAP_NORESERVE) {
-		static int cnt = 0;
+		static int cnt;
 		
 		if (cnt < 5) {
 			printk("%s:  unimplemented Solaris MAP_NORESERVE mmap() flag\n",
@@ -74,8 +77,8 @@ static u32 do_solaris_mmap(u32 addr, u32 len, u32 prot, u32 flags, u32 fd, u64 o
 			goto out;
 		else {
 			struct inode * inode = file->f_dentry->d_inode;
-			if(MAJOR(inode->i_rdev) == MEM_MAJOR &&
-			   MINOR(inode->i_rdev) == 5) {
+			if(major(inode->i_rdev) == MEM_MAJOR &&
+			   minor(inode->i_rdev) == 5) {
 				flags |= MAP_ANONYMOUS;
 				fput(file);
 				file = NULL;
@@ -335,8 +338,6 @@ asmlinkage int solaris_sysinfo(int cmd, u32 buf, s32 count)
 #define	SOLARIS_CONFIG_PHYS_PAGES		26
 #define	SOLARIS_CONFIG_AVPHYS_PAGES		27
 
-extern unsigned prom_cpu_nodes[NR_CPUS];
-
 asmlinkage int solaris_sysconf(int id)
 {
 	switch (id) {
@@ -352,7 +353,7 @@ asmlinkage int solaris_sysconf(int id)
 					  "clock-frequency", 167000000);
 #ifdef CONFIG_SMP	
 	case SOLARIS_CONFIG_NPROC_CONF:	return NR_CPUS;
-	case SOLARIS_CONFIG_NPROC_ONLN:	return smp_num_cpus;
+	case SOLARIS_CONFIG_NPROC_ONLN:	return num_online_cpus();
 #else
 	case SOLARIS_CONFIG_NPROC_CONF:	return 1;
 	case SOLARIS_CONFIG_NPROC_ONLN:	return 1;
@@ -597,12 +598,8 @@ asmlinkage int solaris_setrlimit64(unsigned int resource, struct rlimit *rlim)
 	return ret;
 }
 
-struct timeval32 {
-	int tv_sec, tv_usec;
-};
-
 struct sol_ntptimeval {
-	struct timeval32 time;
+	struct compat_timeval time;
 	s32 maxerror;
 	s32 esterror;
 };
@@ -708,14 +705,14 @@ asmlinkage void solaris_register(void)
 extern long solaris_to_linux_signals[], linux_to_solaris_signals[];
 
 struct exec_domain solaris_exec_domain = {
-	name:		"Solaris",
-	handler:	NULL,
-	pers_low:	1,		/* PER_SVR4 personality */
-	pers_high:	1,
-	signal_map:	solaris_to_linux_signals,
-	signal_invmap:	linux_to_solaris_signals,
-	module:		THIS_MODULE,
-	next:		NULL
+	.name =		"Solaris",
+	.handler =	NULL,
+	.pers_low =	1,		/* PER_SVR4 personality */
+	.pers_high =	1,
+	.signal_map =	solaris_to_linux_signals,
+	.signal_invmap =linux_to_solaris_signals,
+	.module =	THIS_MODULE,
+	.next =		NULL
 };
 
 extern int init_socksys(void);
@@ -724,7 +721,7 @@ extern int init_socksys(void);
 
 MODULE_AUTHOR("Jakub Jelinek (jj@ultra.linux.cz), Patrik Rak (prak3264@ss1000.ms.mff.cuni.cz)");
 MODULE_DESCRIPTION("Solaris binary emulation module");
-EXPORT_NO_SYMBOLS;
+MODULE_LICENSE("GPL");
 
 #ifdef __sparc_v9__
 extern u32 tl0_solaris[8];
@@ -738,6 +735,8 @@ extern u32 solaris_sparc_syscall[];
 extern u32 solaris_syscall[];
 extern void cleanup_socksys(void);
 
+extern u32 entry64_personality_patch;
+
 int init_module(void)
 {
 	int ret;
@@ -749,6 +748,11 @@ int init_module(void)
 		return ret;
 	}
 	update_ttable(solaris_sparc_syscall);
+	entry64_personality_patch |=
+		(offsetof(struct task_struct, personality) +
+		 (sizeof(unsigned long) - 1));
+	__asm__ __volatile__("membar #StoreStore; flush %0"
+			     : : "r" (&entry64_personality_patch));
 	return 0;
 }
 

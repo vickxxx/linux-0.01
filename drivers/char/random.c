@@ -128,7 +128,6 @@
  * 	void add_keyboard_randomness(unsigned char scancode);
  * 	void add_mouse_randomness(__u32 mouse_data);
  * 	void add_interrupt_randomness(int irq);
- * 	void add_blkdev_randomness(int irq);
  * 
  * add_keyboard_randomness() uses the inter-keypress timing, as well as the
  * scancode as random inputs into the "entropy pool".
@@ -143,8 +142,6 @@
  * regular, and hence predictable to an attacker.  Disk interrupts are
  * a better measure, since the timing of the disk interrupts are more
  * unpredictable.
- * 
- * add_blkdev_randomness() times the finishing time of block requests.
  * 
  * All of these routines try to estimate how many bits of randomness a
  * particular randomness source.  They do this by keeping track of the
@@ -175,7 +172,7 @@
  *	chmod 600 $random_seed
  *	poolfile=/proc/sys/kernel/random/poolsize
  *	[ -r $poolfile ] && bytes=`cat $poolfile` || bytes=512
- *	dd if=/dev/urandom of=$random_seed count=1 bs=bytes
+ *	dd if=/dev/urandom of=$random_seed count=1 bs=$bytes
  *
  * and the following lines in an appropriate script which is run as
  * the system is shutdown:
@@ -188,7 +185,7 @@
  *	chmod 600 $random_seed
  *	poolfile=/proc/sys/kernel/random/poolsize
  *	[ -r $poolfile ] && bytes=`cat $poolfile` || bytes=512
- *	dd if=/dev/urandom of=$random_seed count=1 bs=bytes
+ *	dd if=/dev/urandom of=$random_seed count=1 bs=$bytes
  *
  * For example, on most modern systems using the System V init
  * scripts, such code fragments would be found in
@@ -251,6 +248,9 @@
 #include <linux/random.h>
 #include <linux/poll.h>
 #include <linux/init.h>
+#include <linux/fs.h>
+#include <linux/workqueue.h>
+#include <linux/genhd.h>
 
 #include <asm/processor.h>
 #include <asm/uaccess.h>
@@ -412,13 +412,13 @@ static void sysctl_init_random(struct entropy_store *random_state);
  * deal with a variable rotate of x bits.  So we use a bit of asm magic.
  */
 #if (!defined (__i386__))
-extern inline __u32 rotate_left(int i, __u32 word)
+static inline __u32 rotate_left(int i, __u32 word)
 {
 	return (word << i) | (word >> (32 - i));
 	
 }
 #else
-extern inline __u32 rotate_left(int i, __u32 word)
+static inline __u32 rotate_left(int i, __u32 word)
 {
 	__asm__("roll %%cl,%0"
 		:"=r" (word)
@@ -535,14 +535,14 @@ static void clear_entropy_store(struct entropy_store *r)
 	r->extract_count = 0;
 	memset(r->pool, 0, r->poolinfo.POOLBYTES);
 }
-
+#ifdef CONFIG_SYSCTL
 static void free_entropy_store(struct entropy_store *r)
 {
 	if (r->pool)
 		kfree(r->pool);
 	kfree(r);
 }
-
+#endif
 /*
  * This function adds a byte into the entropy "pool".  It does not
  * update the entropy estimate.  The caller should call
@@ -622,8 +622,8 @@ static __u32	*batch_entropy_pool;
 static int	*batch_entropy_credit;
 static int	batch_max;
 static int	batch_head, batch_tail;
-static struct tq_struct	batch_tqueue;
 static void batch_entropy_process(void *private_);
+static DECLARE_WORK(batch_work, batch_entropy_process, NULL);
 
 /* note: the size must be a power of 2 */
 static int __init batch_entropy_init(int size, struct entropy_store *r)
@@ -638,8 +638,7 @@ static int __init batch_entropy_init(int size, struct entropy_store *r)
 	}
 	batch_head = batch_tail = 0;
 	batch_max = size;
-	batch_tqueue.routine = batch_entropy_process;
-	batch_tqueue.data = r;
+	batch_work.data = r;
 	return 0;
 }
 
@@ -647,7 +646,7 @@ static int __init batch_entropy_init(int size, struct entropy_store *r)
  * Changes to the entropy data is put into a queue rather than being added to
  * the entropy counts directly.  This is presumably to avoid doing heavy
  * hashing calculations during an interrupt in add_timer_randomness().
- * Instead, the entropy is only added to the pool once per timer tick.
+ * Instead, the entropy is only added to the pool by keventd.
  */
 void batch_entropy_store(u32 a, u32 b, int num)
 {
@@ -661,11 +660,16 @@ void batch_entropy_store(u32 a, u32 b, int num)
 	batch_entropy_credit[batch_head] = num;
 
 	new = (batch_head+1) & (batch_max-1);
-	if (new != batch_tail) {
-		queue_task(&batch_tqueue, &tq_timer);
+	if ((unsigned)(new - batch_tail) >= (unsigned)(batch_max / 2)) {
+		/*
+		 * Schedule it for the next timer tick:
+		 */
+		schedule_delayed_work(&batch_work, 1);
 		batch_head = new;
-	} else {
+	} else if (new == batch_tail) {
 		DEBUG_ENT("batch entropy buffer full\n");
+	} else {
+		batch_head = new;
 	}
 }
 
@@ -714,7 +718,6 @@ static struct timer_rand_state keyboard_timer_state;
 static struct timer_rand_state mouse_timer_state;
 static struct timer_rand_state extract_timer_state;
 static struct timer_rand_state *irq_timer_state[NR_IRQS];
-static struct timer_rand_state *blkdev_timer_state[MAX_BLKDEV];
 
 /*
  * This function adds entropy to the entropy "pool" by using timing
@@ -734,18 +737,14 @@ static void add_timer_randomness(struct timer_rand_state *state, unsigned num)
 	__s32		delta, delta2, delta3;
 	int		entropy = 0;
 
-#if defined (__i386__)
-	if ( test_bit(X86_FEATURE_TSC, &boot_cpu_data.x86_capability) ) {
+#if defined (__i386__) || defined (__x86_64__)
+	if (cpu_has_tsc) {
 		__u32 high;
 		rdtsc(time, high);
 		num ^= high;
 	} else {
 		time = jiffies;
 	}
-#elif defined (__x86_64__)
-	__u32 high;
-	rdtsc(time, high);
-	num ^= high;
 #else
 	time = jiffies;
 #endif
@@ -812,18 +811,12 @@ void add_interrupt_randomness(int irq)
 	add_timer_randomness(irq_timer_state[irq], 0x100+irq);
 }
 
-void add_blkdev_randomness(int major)
+void add_disk_randomness(struct gendisk *disk)
 {
-	if (major >= MAX_BLKDEV)
+	if (!disk || !disk->random)
 		return;
-
-	if (blkdev_timer_state[major] == 0) {
-		rand_initialize_blkdev(major, GFP_ATOMIC);
-		if (blkdev_timer_state[major] == 0)
-			return;
-	}
-		
-	add_timer_randomness(blkdev_timer_state[major], 0x200+major);
+	/* first major is 1, so we get >= 0x200 here */
+	add_timer_randomness(disk->random, 0x100+MKDEV(disk->major, disk->first_minor));
 }
 
 /******************************************************************
@@ -1235,10 +1228,8 @@ static ssize_t extract_entropy(struct entropy_store *r, void * buf,
  * at which point we do a "catastrophic reseeding".
  */
 static inline void xfer_secondary_pool(struct entropy_store *r,
-				       size_t nbytes)
+				       size_t nbytes, __u32 *tmp)
 {
-	__u32	tmp[TMP_BUF_SIZE];
-
 	if (r->entropy_count < nbytes * 8 &&
 	    r->entropy_count < r->poolinfo.POOLBITS) {
 		int nwords = min_t(int,
@@ -1291,7 +1282,7 @@ static ssize_t extract_entropy(struct entropy_store *r, void * buf,
 		r->entropy_count = r->poolinfo.POOLBITS;
 
 	if (flags & EXTRACT_ENTROPY_SECONDARY)
-		xfer_secondary_pool(r, nbytes);
+		xfer_secondary_pool(r, nbytes, tmp);
 
 	DEBUG_ENT("%s has %d bits, want %d bits\n",
 		  r == sec_random_state ? "secondary" :
@@ -1313,7 +1304,7 @@ static ssize_t extract_entropy(struct entropy_store *r, void * buf,
 		/*
 		 * Check if we need to break out or reschedule....
 		 */
-		if ((flags & EXTRACT_ENTROPY_USER) && current->need_resched) {
+		if ((flags & EXTRACT_ENTROPY_USER) && need_resched()) {
 			if (signal_pending(current)) {
 				if (ret == 0)
 					ret = -ERESTARTSYS;
@@ -1447,8 +1438,6 @@ void __init rand_initialize(void)
 #endif
 	for (i = 0; i < NR_IRQS; i++)
 		irq_timer_state[i] = NULL;
-	for (i = 0; i < MAX_BLKDEV; i++)
-		blkdev_timer_state[i] = NULL;
 	memset(&keyboard_timer_state, 0, sizeof(struct timer_rand_state));
 	memset(&mouse_timer_state, 0, sizeof(struct timer_rand_state));
 	memset(&extract_timer_state, 0, sizeof(struct timer_rand_state));
@@ -1472,25 +1461,21 @@ void rand_initialize_irq(int irq)
 		irq_timer_state[irq] = state;
 	}
 }
-
-void rand_initialize_blkdev(int major, int mode)
+ 
+void rand_initialize_disk(struct gendisk *disk)
 {
 	struct timer_rand_state *state;
 	
-	if (major >= MAX_BLKDEV || blkdev_timer_state[major])
-		return;
-
 	/*
 	 * If kmalloc returns null, we just won't use that entropy
 	 * source.
 	 */
-	state = kmalloc(sizeof(struct timer_rand_state), mode);
+	state = kmalloc(sizeof(struct timer_rand_state), GFP_KERNEL);
 	if (state) {
 		memset(state, 0, sizeof(struct timer_rand_state));
-		blkdev_timer_state[major] = state;
+		disk->random = state;
 	}
 }
-
 
 static ssize_t
 random_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
@@ -1542,7 +1527,7 @@ random_read(struct file * file, char * buf, size_t nbytes, loff_t *ppos)
 	 * If we gave the user some bytes, update the access time.
 	 */
 	if (count != 0) {
-		UPDATE_ATIME(file->f_dentry->d_inode);
+		update_atime(file->f_dentry->d_inode);
 	}
 	
 	return (count ? count : retval);
@@ -1643,7 +1628,7 @@ random_ioctl(struct inode * inode, struct file * file,
 			return -EINVAL;
 		if (size > random_state->poolinfo.poolwords)
 			size = random_state->poolinfo.poolwords;
-		if (copy_to_user(p, random_state->pool, size * 4))
+		if (copy_to_user(p, random_state->pool, size * sizeof(__u32)))
 			return -EFAULT;
 		return 0;
 	case RNDADDENTROPY:
@@ -1686,16 +1671,16 @@ random_ioctl(struct inode * inode, struct file * file,
 }
 
 struct file_operations random_fops = {
-	read:		random_read,
-	write:		random_write,
-	poll:		random_poll,
-	ioctl:		random_ioctl,
+	.read		= random_read,
+	.write		= random_write,
+	.poll		= random_poll,
+	.ioctl		= random_ioctl,
 };
 
 struct file_operations urandom_fops = {
-	read:		urandom_read,
-	write:		random_write,
-	ioctl:		random_ioctl,
+	.read		= urandom_read,
+	.write		= random_write,
+	.ioctl		= random_ioctl,
 };
 
 /***************************************************************
@@ -1750,7 +1735,7 @@ static int change_poolsize(int poolsize)
 
 	sysctl_init_random(new_store);
 	old_store = random_state;
-	random_state = batch_tqueue.data = new_store;
+	random_state = batch_work.data = new_store;
 	free_entropy_store(old_store);
 	return 0;
 }
@@ -2035,98 +2020,136 @@ static __u32 twothirdsMD4Transform (__u32 const buf[4], __u32 const in[12])
 
 /* This should not be decreased so low that ISNs wrap too fast. */
 #define REKEY_INTERVAL	300
-#define HASH_BITS 24
+/*
+ * Bit layout of the tcp sequence numbers (before adding current time):
+ * bit 24-31: increased after every key exchange
+ * bit 0-23: hash(source,dest)
+ *
+ * The implementation is similar to the algorithm described
+ * in the Appendix of RFC 1185, except that
+ * - it uses a 1 MHz clock instead of a 250 kHz clock
+ * - it performs a rekey every 5 minutes, which is equivalent
+ * 	to a (source,dest) tulple dependent forward jump of the
+ * 	clock by 0..2^(HASH_BITS+1)
+ *
+ * Thus the average ISN wraparound time is 68 minutes instead of
+ * 4.55 hours.
+ *
+ * SMP cleanup and lock avoidance with poor man's RCU.
+ * 			Manfred Spraul <manfred@colorfullife.com>
+ * 		
+ */
+#define COUNT_BITS	8
+#define COUNT_MASK	( (1<<COUNT_BITS)-1)
+#define HASH_BITS	24
+#define HASH_MASK	( (1<<HASH_BITS)-1 )
+
+static struct keydata {
+	time_t rekey_time;
+	__u32	count;		// already shifted to the final position
+	__u32	secret[12];
+} ____cacheline_aligned ip_keydata[2];
+
+static spinlock_t ip_lock = SPIN_LOCK_UNLOCKED;
+static unsigned int ip_cnt;
+
+static struct keydata *__check_and_rekey(time_t time)
+{
+	struct keydata *keyptr;
+	spin_lock(&ip_lock);
+	keyptr = &ip_keydata[ip_cnt&1];
+	if (!keyptr->rekey_time || (time - keyptr->rekey_time) > REKEY_INTERVAL) {
+		keyptr = &ip_keydata[1^(ip_cnt&1)];
+		keyptr->rekey_time = time;
+		get_random_bytes(keyptr->secret, sizeof(keyptr->secret));
+		keyptr->count = (ip_cnt&COUNT_MASK)<<HASH_BITS;
+		mb();
+		ip_cnt++;
+	}
+	spin_unlock(&ip_lock);
+	return keyptr;
+}
+
+static inline struct keydata *check_and_rekey(time_t time)
+{
+	struct keydata *keyptr = &ip_keydata[ip_cnt&1];
+
+	rmb();
+	if (!keyptr->rekey_time || (time - keyptr->rekey_time) > REKEY_INTERVAL) {
+		keyptr = __check_and_rekey(time);
+	}
+
+	return keyptr;
+}
 
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
 __u32 secure_tcpv6_sequence_number(__u32 *saddr, __u32 *daddr,
 				   __u16 sport, __u16 dport)
 {
-	static __u32	rekey_time;
-	static __u32	count;
-	static __u32	secret[12];
 	struct timeval 	tv;
 	__u32		seq;
+	__u32		hash[12];
+	struct keydata *keyptr;
 
-	/* The procedure is the same as for IPv4, but addresses are longer. */
+	/* The procedure is the same as for IPv4, but addresses are longer.
+	 * Thus we must use twothirdsMD4Transform.
+	 */
 
 	do_gettimeofday(&tv);	/* We need the usecs below... */
+	keyptr = check_and_rekey(tv.tv_sec);
 
-	if (!rekey_time || (tv.tv_sec - rekey_time) > REKEY_INTERVAL) {
-		rekey_time = tv.tv_sec;
-		/* First five words are overwritten below. */
-		get_random_bytes(&secret[5], sizeof(secret)-5*4);
-		count = (tv.tv_sec/REKEY_INTERVAL) << HASH_BITS;
-	}
+	memcpy(hash, saddr, 16);
+	hash[4]=(sport << 16) + dport;
+	memcpy(&hash[5],keyptr->secret,sizeof(__u32)*7);
 
-	memcpy(secret, saddr, 16);
-	secret[4]=(sport << 16) + dport;
-
-	seq = (twothirdsMD4Transform(daddr, secret) &
-	       ((1<<HASH_BITS)-1)) + count;
-
+	seq = twothirdsMD4Transform(daddr, hash) & HASH_MASK;
+	seq += keyptr->count;
 	seq += tv.tv_usec + tv.tv_sec*1000000;
+
 	return seq;
 }
+EXPORT_SYMBOL(secure_tcpv6_sequence_number);
 
 __u32 secure_ipv6_id(__u32 *daddr)
 {
-	static time_t	rekey_time;
-	static __u32	secret[12];
-	time_t		t;
+	struct keydata *keyptr;
 
-	/*
-	 * Pick a random secret every REKEY_INTERVAL seconds.
-	 */
-	t = CURRENT_TIME;
-	if (!rekey_time || (t - rekey_time) > REKEY_INTERVAL) {
-		rekey_time = t;
-		/* First word is overwritten below. */
-		get_random_bytes(secret, sizeof(secret));
-	}
+	keyptr = check_and_rekey(get_seconds());
 
-	return twothirdsMD4Transform(daddr, secret);
+	return halfMD4Transform(daddr, keyptr->secret);
 }
 
+EXPORT_SYMBOL(secure_ipv6_id);
 #endif
 
 
 __u32 secure_tcp_sequence_number(__u32 saddr, __u32 daddr,
 				 __u16 sport, __u16 dport)
 {
-	static __u32	rekey_time;
-	static __u32	count;
-	static __u32	secret[12];
 	struct timeval 	tv;
 	__u32		seq;
+	__u32	hash[4];
+	struct keydata *keyptr;
 
 	/*
 	 * Pick a random secret every REKEY_INTERVAL seconds.
 	 */
 	do_gettimeofday(&tv);	/* We need the usecs below... */
-
-	if (!rekey_time || (tv.tv_sec - rekey_time) > REKEY_INTERVAL) {
-		rekey_time = tv.tv_sec;
-		/* First three words are overwritten below. */
-		get_random_bytes(&secret[3], sizeof(secret)-12);
-		count = (tv.tv_sec/REKEY_INTERVAL) << HASH_BITS;
-	}
+	keyptr = check_and_rekey(tv.tv_sec);
 
 	/*
 	 *  Pick a unique starting offset for each TCP connection endpoints
 	 *  (saddr, daddr, sport, dport).
-	 *  Note that the words are placed into the first words to be
-	 *  mixed in with the halfMD4.  This is because the starting
-	 *  vector is also a random secret (at secret+8), and further
-	 *  hashing fixed data into it isn't going to improve anything,
-	 *  so we should get started with the variable data.
+	 *  Note that the words are placed into the starting vector, which is 
+	 *  then mixed with a partial MD4 over random data.
 	 */
-	secret[0]=saddr;
-	secret[1]=daddr;
-	secret[2]=(sport << 16) + dport;
+	hash[0]=saddr;
+	hash[1]=daddr;
+	hash[2]=(sport << 16) + dport;
+	hash[3]=keyptr->secret[11];
 
-	seq = (halfMD4Transform(secret+8, secret) &
-	       ((1<<HASH_BITS)-1)) + count;
-
+	seq = halfMD4Transform(hash, keyptr->secret) & HASH_MASK;
+	seq += keyptr->count;
 	/*
 	 *	As close as possible to RFC 793, which
 	 *	suggests using a 250 kHz clock.
@@ -2148,31 +2171,22 @@ __u32 secure_tcp_sequence_number(__u32 saddr, __u32 daddr,
  */
 __u32 secure_ip_id(__u32 daddr)
 {
-	static time_t	rekey_time;
-	static __u32	secret[12];
-	time_t		t;
+	struct keydata *keyptr;
+	__u32 hash[4];
 
-	/*
-	 * Pick a random secret every REKEY_INTERVAL seconds.
-	 */
-	t = CURRENT_TIME;
-	if (!rekey_time || (t - rekey_time) > REKEY_INTERVAL) {
-		rekey_time = t;
-		/* First word is overwritten below. */
-		get_random_bytes(secret+1, sizeof(secret)-4);
-	}
+	keyptr = check_and_rekey(get_seconds());
 
 	/*
 	 *  Pick a unique starting offset for each IP destination.
-	 *  Note that the words are placed into the first words to be
-	 *  mixed in with the halfMD4.  This is because the starting
-	 *  vector is also a random secret (at secret+8), and further
-	 *  hashing fixed data into it isn't going to improve anything,
-	 *  so we should get started with the variable data.
+	 *  The dest ip address is placed in the starting vector,
+	 *  which is then hashed with random data.
 	 */
-	secret[0]=daddr;
+	hash[0] = daddr;
+	hash[1] = keyptr->secret[9];
+	hash[2] = keyptr->secret[10];
+	hash[3] = keyptr->secret[11];
 
-	return halfMD4Transform(secret+8, secret);
+	return halfMD4Transform(hash, keyptr->secret);
 }
 
 #ifdef CONFIG_SYN_COOKIES
@@ -2280,7 +2294,7 @@ __u32 check_tcp_syn_cookie(__u32 cookie, __u32 saddr, __u32 daddr, __u16 sport,
 EXPORT_SYMBOL(add_keyboard_randomness);
 EXPORT_SYMBOL(add_mouse_randomness);
 EXPORT_SYMBOL(add_interrupt_randomness);
-EXPORT_SYMBOL(add_blkdev_randomness);
+EXPORT_SYMBOL(add_disk_randomness);
 EXPORT_SYMBOL(batch_entropy_store);
 EXPORT_SYMBOL(generate_random_uuid);
 

@@ -29,16 +29,16 @@ match_pid(const struct sk_buff *skb, pid_t pid)
 	task_lock(p);
 	files = p->files;
 	if(files) {
-		read_lock(&files->file_lock);
+		spin_lock(&files->file_lock);
 		for (i=0; i < files->max_fds; i++) {
-			if (fcheck_files(files, i) == skb->sk->socket->file) {
-				read_unlock(&files->file_lock);
+			if (fcheck_files(files, i) == skb->sk->sk_socket->file) {
+				spin_unlock(&files->file_lock);
 				task_unlock(p);
 				read_unlock(&tasklist_lock);
 				return 1;
 			}
 		}
-		read_unlock(&files->file_lock);
+		spin_unlock(&files->file_lock);
 	}
 	task_unlock(p);
 out:
@@ -49,12 +49,12 @@ out:
 static int
 match_sid(const struct sk_buff *skb, pid_t sid)
 {
-	struct task_struct *p;
-	struct file *file = skb->sk->socket->file;
+	struct task_struct *g, *p;
+	struct file *file = skb->sk->sk_socket->file;
 	int i, found=0;
 
 	read_lock(&tasklist_lock);
-	for_each_task(p) {
+	do_each_thread(g, p) {
 		struct files_struct *files;
 		if (p->session != sid)
 			continue;
@@ -62,19 +62,20 @@ match_sid(const struct sk_buff *skb, pid_t sid)
 		task_lock(p);
 		files = p->files;
 		if (files) {
-			read_lock(&files->file_lock);
+			spin_lock(&files->file_lock);
 			for (i=0; i < files->max_fds; i++) {
 				if (fcheck_files(files, i) == file) {
 					found = 1;
 					break;
 				}
 			}
-			read_unlock(&files->file_lock);
+			spin_unlock(&files->file_lock);
 		}
 		task_unlock(p);
-		if(found)
-			break;
-	}
+		if (found)
+			goto out;
+	} while_each_thread(g, p);
+out:
 	read_unlock(&tasklist_lock);
 
 	return found;
@@ -92,17 +93,17 @@ match(const struct sk_buff *skb,
 {
 	const struct ip6t_owner_info *info = matchinfo;
 
-	if (!skb->sk || !skb->sk->socket || !skb->sk->socket->file)
+	if (!skb->sk || !skb->sk->sk_socket || !skb->sk->sk_socket->file)
 		return 0;
 
 	if(info->match & IP6T_OWNER_UID) {
-		if((skb->sk->socket->file->f_uid != info->uid) ^
+		if((skb->sk->sk_socket->file->f_uid != info->uid) ^
 		    !!(info->invert & IP6T_OWNER_UID))
 			return 0;
 	}
 
 	if(info->match & IP6T_OWNER_GID) {
-		if((skb->sk->socket->file->f_gid != info->gid) ^
+		if((skb->sk->sk_socket->file->f_gid != info->gid) ^
 		    !!(info->invert & IP6T_OWNER_GID))
 			return 0;
 	}
@@ -137,19 +138,16 @@ checkentry(const char *tablename,
 
 	if (matchsize != IP6T_ALIGN(sizeof(struct ip6t_owner_info)))
 		return 0;
-#ifdef CONFIG_SMP
-	/* files->file_lock can not be used in a BH */
-	if (((struct ip6t_owner_info *)matchinfo)->match
-	    & (IP6T_OWNER_PID|IP6T_OWNER_SID)) {
-		printk("ip6t_owner: pid and sid matching is broken on SMP.\n");
-		return 0;
-	}
-#endif
+
 	return 1;
 }
 
-static struct ip6t_match owner_match
-= { { NULL, NULL }, "owner", &match, &checkentry, NULL, THIS_MODULE };
+static struct ip6t_match owner_match = {
+	.name		= "owner",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

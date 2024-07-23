@@ -1,5 +1,4 @@
-/* $Id$
- *
+/*
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
@@ -7,7 +6,7 @@
  * This is the user-visible SGI GFX interface.
  *
  * This must be used verbatim into the GNU libc.  It does not include
- * any kernel-only bits on it.  
+ * any kernel-only bits on it.
  *
  * miguel@nuclecu.unam.mx
  */
@@ -48,9 +47,9 @@ struct gfx_attach_board_args {
 
 #ifdef __KERNEL__
 /* umap.c */
-extern void remove_mapping (struct task_struct *, unsigned long, unsigned long);
+extern void remove_mapping (struct vm_area_struct *vma, struct task_struct *, unsigned long, unsigned long);
 extern void *vmalloc_uncached (unsigned long size);
-extern int vmap_page_range (unsigned long from, unsigned long size, unsigned long vaddr);
+extern int vmap_page_range (struct vm_area_struct *vma, unsigned long from, unsigned long size, unsigned long vaddr);
 #endif
 
 #endif /* _ASM_GFX_H */

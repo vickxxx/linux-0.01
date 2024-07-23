@@ -22,19 +22,17 @@
  * we can depend on generic_block_fdatasync() to sync the data blocks.
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/jbd.h>
 #include <linux/ext3_fs.h>
 #include <linux/ext3_jbd.h>
-#include <linux/jbd.h>
-#include <linux/smp_lock.h>
 
 /*
  * akpm: A new design for ext3_sync_file().
  *
  * This is only called from sys_fsync(), sys_fdatasync() and sys_msync().
- * There cannot be a transaction open by this task. (AKPM: quotas?)
+ * There cannot be a transaction open by this task.
  * Another task could have dirtied this inode.  Its data can be in any
  * state in the journalling system.
  *
@@ -50,21 +48,27 @@
 int ext3_sync_file(struct file * file, struct dentry *dentry, int datasync)
 {
 	struct inode *inode = dentry->d_inode;
-	int ret;
 
 	J_ASSERT(ext3_journal_current_handle() == 0);
 
 	/*
-	 * fsync_inode_buffers() just walks i_dirty_buffers and waits
-	 * on them.  It's a no-op for full data journalling because
-	 * i_dirty_buffers will be ampty.
-	 * Really, we only need to start I/O on the dirty buffers -
-	 * we'll end up waiting on them in commit.
+	 * data=writeback:
+	 *  The caller's filemap_fdatawrite()/wait will sync the data.
+	 *  ext3_force_commit() will sync the metadata
+	 *
+	 * data=ordered:
+	 *  The caller's filemap_fdatawrite() will write the data and
+	 *  ext3_force_commit() will wait on the buffers.  Then the caller's
+	 *  filemap_fdatawait() will wait on the pages (but all IO is complete)
+	 *  Not pretty, but it works.
+	 *
+	 * data=journal:
+	 *  filemap_fdatawrite won't do anything (the buffers are clean).
+	 *  ext3_force_commit will write the file data into the journal and
+	 *  will wait on that.
+	 *  filemap_fdatawait() will encounter a ton of newly-dirtied pages
+	 *  (they were dirtied by commit).  But that's OK - the blocks are
+	 *  safe in-journal, which is all fsync() needs to ensure.
 	 */
-	ret = fsync_inode_buffers(inode);
-	ret |= fsync_inode_data_buffers(inode);
-
-	ext3_force_commit(inode->i_sb);
-
-	return ret;
+	return ext3_force_commit(inode->i_sb);
 }

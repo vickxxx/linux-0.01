@@ -31,6 +31,11 @@ ipfrag_low_thresh - INTEGER
 ipfrag_time - INTEGER
 	Time in seconds to keep an IP fragment in memory.	
 
+ipfrag_secret_interval - INTEGER
+	Regeneration interval (in seconds) of the hash secret (or lifetime 
+	for the hash secret) for IP fragments.
+	Default: 600
+
 INET peer storage:
 
 inet_peer_threshold - INTEGER
@@ -43,23 +48,23 @@ inet_peer_minttl - INTEGER
 	Minimum time-to-live of entries.  Should be enough to cover fragment
 	time-to-live on the reassembling side.  This minimum time-to-live  is
 	guaranteed if the pool size is less than inet_peer_threshold.
-	Measured in jiffies.
+	Measured in jiffies(1).
 
 inet_peer_maxttl - INTEGER
 	Maximum time-to-live of entries.  Unused entries will expire after
 	this period of time if there is no memory pressure on the pool (i.e.
 	when the number of entries in the pool is very small).
-	Measured in jiffies.
+	Measured in jiffies(1).
 
 inet_peer_gc_mintime - INTEGER
 	Minimum interval between garbage collection passes.  This interval is
 	in effect under high memory pressure on the pool.
-	Measured in jiffies.
+	Measured in jiffies(1).
 
 inet_peer_gc_maxtime - INTEGER
 	Minimum interval between garbage collection passes.  This interval is
 	in effect under low (or absent) memory pressure on the pool.
-	Measured in jiffies.
+	Measured in jiffies(1).
 
 TCP variables: 
 
@@ -81,7 +86,7 @@ tcp_keepalive_probes - INTEGER
 	How many keepalive probes TCP sends out, until it decides that the
 	connection is broken. Default value: 9.
 
-tcp_keepalive_interval - INTEGER
+tcp_keepalive_intvl - INTEGER
 	How frequently the probes are send out. Multiplied by
 	tcp_keepalive_probes it is time to kill not responding connection,
 	after probes started. Default value: 75sec i.e. connection
@@ -89,7 +94,7 @@ tcp_keepalive_interval - INTEGER
 
 tcp_retries1 - INTEGER
 	How many times to retry before deciding that something is wrong
-	and it is necessary to report this suspection to network layer.
+	and it is necessary to report this suspicion to network layer.
 	Minimal RFC value is 3, it is default, which corresponds
 	to ~3sec-8min depending on RTO.
 
@@ -126,7 +131,13 @@ tcp_max_tw_buckets - INTEGER
 	if network conditions require more than default value.
 
 tcp_tw_recycle - BOOLEAN
-	Enable fast recycling TIME-WAIT sockets. Default value is 1.
+	Enable fast recycling TIME-WAIT sockets. Default value is 0.
+	It should not be changed without advice/request of technical
+	experts.
+
+tcp_tw_reuse - BOOLEAN
+	Allow to reuse TIME-WAIT sockets for new connections when it is
+	safe from protocol viewpoint. Default value is 0.
 	It should not be changed without advice/request of technical
 	experts.
 
@@ -179,13 +190,10 @@ tcp_stdurg - BOOLEAN
 	
 tcp_max_syn_backlog - INTEGER
 	Maximal number of remembered connection requests, which are
-	still did not receive an acknowledgement from connecting client.
+	still did not receive an acknowledgment from connecting client.
 	Default value is 1024 for systems with more than 128Mb of memory,
 	and 128 for low memory machines. If server suffers of overload,
-	try to increase this number. Warning! If you make it greater
-	than 1024, it would be better to change TCP_SYNQ_HSIZE in
-	include/net/tcp.h to keep TCP_SYNQ_HSIZE*16<=tcp_max_syn_backlog
-	and to recompile kernel.
+	try to increase this number.
 
 tcp_window_scaling - BOOLEAN
 	Enable window scaling as defined in RFC1323.
@@ -197,7 +205,7 @@ tcp_sack - BOOLEAN
 	Enable select acknowledgments (SACKS).
 
 tcp_fack - BOOLEAN
-	Enable FACK congestion avoidance and fast restransmission.
+	Enable FACK congestion avoidance and fast retransmission.
 	The value is not used, if tcp_sack is not enabled.
 
 tcp_dsack - BOOLEAN
@@ -253,7 +261,7 @@ tcp_mem - vector of 3 INTEGERs: min, pressure, max
 
 	pressure: when amount of memory allocated by TCP exceeds this number
 	of pages, TCP moderates its memory consumption and enters memory
-	pressure mode, which is exited when memory consumtion falls
+	pressure mode, which is exited when memory consumption falls
 	under "low".
 
 	high: number of pages allowed for queueing by all TCP sockets.
@@ -275,7 +283,15 @@ tcp_adv_win_scale - INTEGER
 tcp_rfc1337 - BOOLEAN
 	If set, the TCP stack behaves conforming to RFC1337. If unset,
 	we are not conforming to RFC, but prevent TCP TIME_WAIT
-	asassination.	
+	assassination.   
+	Default: 0
+
+tcp_low_latency - BOOLEAN
+	If set, the TCP stack makes decisions that prefer lower
+	latency as opposed to higher throughput.  By default, this
+	option is not set meaning that higher throughput is preferred.
+	An example of an application where this default should be
+	changed would be a Beowulf compute cluster.
 	Default: 0
 
 ip_local_port_range - 2 INTEGERS
@@ -292,7 +308,7 @@ ip_local_port_range - 2 INTEGERS
 	2000 connections per second to systems supporting timestamps.
 
 ip_nonlocal_bind - BOOLEAN
-	If set, allows processes to bind() to non-local IP adresses,
+	If set, allows processes to bind() to non-local IP addresses,
 	which can be quite useful - but may break some applications.
 	Default: 0
 
@@ -309,38 +325,65 @@ icmp_echo_ignore_broadcasts - BOOLEAN
 	ICMP ECHO requests sent to it or just those to broadcast/multicast
 	addresses, respectively.
 
-icmp_destunreach_rate - INTEGER
-icmp_paramprob_rate - INTEGER
-icmp_timeexceed_rate - INTEGER
-icmp_echoreply_rate - INTEGER (not enabled per default)
-	Limit the maximal rates for sending ICMP packets to specific targets.
+icmp_ratelimit - INTEGER
+	Limit the maximal rates for sending ICMP packets whose type matches
+	icmp_ratemask (see below) to specific targets.
 	0 to disable any limiting, otherwise the maximal rate in jiffies(1)
-	See the source for more information.
+	Default: 100
+
+icmp_ratemask - INTEGER
+	Mask made of ICMP types for which rates are being limited.
+	Significant bits: IHGFEDCBA9876543210
+	Default mask:     0000001100000011000 (6168)
+
+	Bit definitions (see include/linux/icmp.h):
+		0 Echo Reply
+		3 Destination Unreachable *
+		4 Source Quench *
+		5 Redirect
+		8 Echo Request
+		B Time Exceeded *
+		C Parameter Problem *
+		D Timestamp Request
+		E Timestamp Reply
+		F Info Request
+		G Info Reply
+		H Address Mask Request
+		I Address Mask Reply
+
+	* These are rate limited by default (see default mask above)
 
 icmp_ignore_bogus_error_responses - BOOLEAN
-	Some routers violate RFC 1122 by sending bogus responses to broadcast
+	Some routers violate RFC1122 by sending bogus responses to broadcast
 	frames.  Such violations are normally logged via a kernel warning.
 	If this is set to TRUE, the kernel will not give such warnings, which
 	will avoid log file clutter.
 	Default: FALSE
 
-(1) Jiffie: internal timeunit for the kernel. On the i386 1/100s, on the
-Alpha 1/1024s. See the HZ define in /usr/include/asm/param.h for the exact
-value on your system. 
-
 igmp_max_memberships - INTEGER
 	Change the maximum number of multicast groups we can subscribe to.
 	Default: 20
 
-conf/interface/*: 
-conf/all/* is special and changes the settings for all interfaces.
-	Change special settings per interface.
+conf/interface/*  changes special settings per interface (where "interface" is 
+		  the name of your network interface)
+conf/all/*	  is special, changes the settings for all interfaces
+
 
 log_martians - BOOLEAN
 	Log packets with impossible addresses to kernel log.
+	log_martians for the interface will be enabled if at least one of
+	conf/{all,interface}/log_martians is set to TRUE,
+	it will be disabled otherwise
 
 accept_redirects - BOOLEAN
 	Accept ICMP redirect messages.
+	accept_redirects for the interface will be enabled if:
+	- both conf/{all,interface}/accept_redirects are TRUE in the case forwarding
+	  for the interface is enabled
+	or
+	- at least one of conf/{all,interface}/accept_redirects is TRUE in the case
+	  forwarding for the interface is disabled
+	accept_redirects for the interface will be disabled otherwise
 	default TRUE (host)
 		FALSE (router)
 
@@ -350,33 +393,62 @@ forwarding - BOOLEAN
 mc_forwarding - BOOLEAN
 	Do multicast routing. The kernel needs to be compiled with CONFIG_MROUTE
 	and a multicast routing daemon is required.
+	conf/all/mc_forwarding must also be set to TRUE to enable multicast routing
+	for the interface
+
+medium_id - INTEGER
+	Integer value used to differentiate the devices by the medium they
+	are attached to. Two devices can have different id values when
+	the broadcast packets are received only on one of them.
+	The default value 0 means that the device is the only interface
+	to its medium, value of -1 means that medium is not known.
+	
+	Currently, it is used to change the proxy_arp behavior:
+	the proxy_arp feature is enabled for packets forwarded between
+	two devices attached to different media.
 
 proxy_arp - BOOLEAN
 	Do proxy arp.
+	proxy_arp for the interface will be enabled if at least one of
+	conf/{all,interface}/proxy_arp is set to TRUE,
+	it will be disabled otherwise
 
 shared_media - BOOLEAN
 	Send(router) or accept(host) RFC1620 shared media redirects.
 	Overrides ip_secure_redirects.
+	shared_media for the interface will be enabled if at least one of
+	conf/{all,interface}/shared_media is set to TRUE,
+	it will be disabled otherwise
 	default TRUE
 
 secure_redirects - BOOLEAN
 	Accept ICMP redirect messages only for gateways,
 	listed in default gateway list.
+	secure_redirects for the interface will be enabled if at least one of
+	conf/{all,interface}/secure_redirects is set to TRUE,
+	it will be disabled otherwise
 	default TRUE
 
 send_redirects - BOOLEAN
-	Send redirects, if router. Default: TRUE
+	Send redirects, if router.
+	send_redirects for the interface will be enabled if at least one of
+	conf/{all,interface}/send_redirects is set to TRUE,
+	it will be disabled otherwise
+	Default: TRUE
 
 bootp_relay - BOOLEAN
 	Accept packets with source address 0.b.c.d destined
 	not to this host as local ones. It is supposed, that
 	BOOTP relay daemon will catch and forward such packets.
-
+	conf/all/bootp_relay must also be set to TRUE to enable BOOTP relay
+	for the interface
 	default FALSE
 	Not Implemented Yet.
 
 accept_source_route - BOOLEAN
 	Accept packets with SRR option.
+	conf/all/accept_source_route must also be set to TRUE to accept packets
+	with SRR option on the interface
 	default TRUE (router)
 		FALSE (host)
 
@@ -387,10 +459,40 @@ rp_filter - BOOLEAN
 	    networks running a slow unreliable protocol (sort of RIP),
 	    or using static routes.
 
-	0 - No source validation. 
+	0 - No source validation.
+
+	conf/all/rp_filter must also be set to TRUE to do source validation
+	on the interface
 
 	Default value is 0. Note that some distributions enable it
-	in startip scripts.
+	in startup scripts.
+
+arp_filter - BOOLEAN
+	1 - Allows you to have multiple network interfaces on the same
+	subnet, and have the ARPs for each interface be answered
+	based on whether or not the kernel would route a packet from
+	the ARP'd IP out that interface (therefore you must use source
+	based routing for this to work). In other words it allows control
+	of which cards (usually 1) will respond to an arp request.
+
+	0 - (default) The kernel can respond to arp requests with addresses
+	from other interfaces. This may seem wrong but it usually makes
+	sense, because it increases the chance of successful communication.
+	IP addresses are owned by the complete host on Linux, not by
+	particular interfaces. Only for more complex setups like load-
+	balancing, does this behaviour cause problems.
+
+	arp_filter for the interface will be enabled if at least one of
+	conf/{all,interface}/arp_filter is set to TRUE,
+	it will be disabled otherwise
+
+tag - INTEGER
+	Allows you to write a number, which can be used as required.
+	Default value is 0.
+
+(1) Jiffie: internal timeunit for the kernel. On the i386 1/100s, on the
+Alpha 1/1024s. See the HZ define in /usr/include/asm/param.h for the exact
+value on your system. 
 
 Alexey Kuznetsov.
 kuznet@ms2.inr.ac.ru
@@ -398,8 +500,8 @@ kuznet@ms2.inr.ac.ru
 Updated by:
 Andi Kleen
 ak@muc.de
-
-
+Nicolas Delon
+delon.nicolas@wanadoo.fr
 
 
 
@@ -408,6 +510,34 @@ ak@muc.de
 
 IPv6 has no global variables such as tcp_*.  tcp_* settings under ipv4/ also
 apply to IPv6 [XXX?].
+
+bindv6only - BOOLEAN
+	Default value for IPV6_V6ONLY socket option,
+	which restricts use of the IPv6 socket to IPv6 communication 
+	only.
+		TRUE: disable IPv4-mapped address feature
+		FALSE: enable IPv4-mapped address feature
+
+	Default: FALSE (as specified in RFC2553bis)
+
+IPv6 Fragmentation:
+
+ip6frag_high_thresh - INTEGER
+	Maximum memory used to reassemble IPv6 fragments. When 
+	ip6frag_high_thresh bytes of memory is allocated for this purpose,
+	the fragment handler will toss packets until ip6frag_low_thresh
+	is reached.
+	
+ip6frag_low_thresh - INTEGER
+	See ip6frag_high_thresh	
+
+ip6frag_time - INTEGER
+	Time in seconds to keep an IPv6 fragment in memory.
+
+ip6frag_secret_interval - INTEGER
+	Regeneration interval (in seconds) of the hash secret (or lifetime 
+	for the hash secret) for IPv6 fragments.
+	Default: 600
 
 conf/default/*:
 	Change the interface-specific default settings.
@@ -507,8 +637,45 @@ router_solicitations - INTEGER
 	routers are present.
 	Default: 3
 
-IPv6 Update by:
-Pekka Savola
-pekkas@netcore.fi
+use_tempaddr - INTEGER
+	Preference for Privacy Extensions (RFC3041).
+	  <= 0 : disable Privacy Extensions
+	  == 1 : enable Privacy Extensions, but prefer public
+	         addresses over temporary addresses.
+	  >  1 : enable Privacy Extensions and prefer temporary
+	         addresses over public addresses.
+	Default:  0 (for most devices)
+		 -1 (for point-to-point devices and loopback devices)
 
-$Id: ip-sysctl.txt,v 1.19 2001/05/16 17:11:04 davem Exp $
+temp_valid_lft - INTEGER
+	valid lifetime (in seconds) for temporary addresses.
+	Default: 604800 (7 days)
+
+temp_prefered_lft - INTEGER
+	Preferred lifetime (in seconds) for temorary addresses.
+	Default: 86400 (1 day)
+
+max_desync_factor - INTEGER
+	Maximum value for DESYNC_FACTOR, which is a random value
+	that ensures that clients don't synchronize with each 
+	other and generage new addresses at exactly the same time.
+	value is in seconds.
+	Default: 600
+	
+regen_max_retry - INTEGER
+	Number of attempts before give up attempting to generate
+	valid temporary addresses.
+	Default: 5
+
+icmp/*:
+ratelimit - INTEGER
+	Limit the maximal rates for sending ICMPv6 packets.
+	0 to disable any limiting, otherwise the maximal rate in jiffies(1)
+	Default: 100
+
+
+IPv6 Update by:
+Pekka Savola <pekkas@netcore.fi>
+YOSHIFUJI Hideaki / USAGI Project <yoshfuji@linux-ipv6.org>
+
+$Id: ip-sysctl.txt,v 1.20 2001/12/13 09:00:18 davem Exp $

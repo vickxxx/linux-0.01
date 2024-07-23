@@ -18,7 +18,6 @@
 #include "scsi.h"
 #include "hosts.h"
 #include "NCR53C9x.h"
-#include "jazz_esp.h"
 
 #include <asm/irq.h>
 #include <asm/jazz.h>
@@ -120,10 +119,10 @@ int jazz_esp_detect(Scsi_Host_Template *tpnt)
 	
 	esp->irq = JAZZ_SCSI_IRQ;
 	request_irq(JAZZ_SCSI_IRQ, esp_intr, SA_INTERRUPT, "JAZZ SCSI",
-	            NULL);
+	            esp->ehost);
 
 	/*
-	 * FIXME, look if the scsi id is availabe from NVRAM
+	 * FIXME, look if the scsi id is available from NVRAM
 	 */
 	esp->scsi_id = 7;
 		
@@ -138,6 +137,18 @@ int jazz_esp_detect(Scsi_Host_Template *tpnt)
 	return esps_in_use;
     }
     return 0;
+}
+
+static int jazz_esp_release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	if (shost->dma_channel != 0xff)
+		free_dma(shost->dma_channel);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
 }
 
 /************************************************************* DMA Functions */
@@ -273,3 +284,21 @@ static void dma_led_on(struct NCR_ESP *esp)
     *(unsigned char *)JAZZ_HDC_LED = 1;
 #endif    
 }
+
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp",
+	.proc_info		= &esp_proc_info,
+	.name			= "ESP 100/100a/200",
+	.detect			= jazz_esp_detect,
+	.release		= jazz_esp_release,
+	.info			= esp_info,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= DISABLE_CLUSTERING,
+};
+

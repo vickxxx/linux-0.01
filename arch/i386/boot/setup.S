@@ -42,6 +42,13 @@
  * if CX/DX have been changed in the e801 call and if so use AX/BX .
  * Michael Miller, April 2001 <michaelm@mjmm.org>
  *
+ * New A20 code ported from SYSLINUX by H. Peter Anvin. AMD Elan bugfixes
+ * by Robert Schwebel, December 2001 <robert@schwebel.de>
+ *    
+ * BIOS Enhanced Disk Drive support
+ * by Matt Domsch <Matt_Domsch@dell.com> October 2002
+ * conformant to T13 Committee www.t13.org
+ *   projects 1572D, 1484D, 1386D, 1226DT
  */
 
 #include <linux/config.h>
@@ -50,7 +57,9 @@
 #include <linux/compile.h>
 #include <asm/boot.h>
 #include <asm/e820.h>
-
+#include <asm/edd.h>    
+#include <asm/page.h>
+	
 /* Signature words to ensure LILO loaded us right */
 #define SIG1	0xAA55
 #define SIG2	0x5A5A
@@ -79,7 +88,7 @@ start:
 # This is the setup header, and it must start at %cs:2 (old 0x9020:2)
 
 		.ascii	"HdrS"		# header signature
-		.word	0x0202		# header version number (>= 0x0105)
+		.word	0x0203		# header version number (>= 0x0105)
 					# or else old loadlin-1.5 will fail)
 realmode_swtch:	.word	0, 0		# default_switch, SETUPSEG
 start_sys_seg:	.word	SYSSEG
@@ -153,6 +162,10 @@ cmd_line_ptr:	.long 0			# (Header version 0x0202 or later)
 					# can be located anywhere in
 					# low memory 0x10000 or higher.
 
+ramdisk_max:	.long MAXMEM-1		# (Header version 0x0203 or later)
+					# The highest safe address for
+					# the contents of an initrd
+
 trampoline:	call	start_of_setup
 		.space	1024
 # End of setup header #####################################################
@@ -200,7 +213,7 @@ prtspc:	movb	$0x20, %al	# Print single space (note: fall-thru)
 # Part of above routine, this one just prints ascii al
 prtchr:	pushw	%ax
 	pushw	%cx
-	xorb	%bh, %bh
+	movw	$7,%bx
 	movw	$0x01, %cx
 	movb	$0x0e, %ah
 	int	$0x10
@@ -463,6 +476,24 @@ sysdesc_ok:
 	movsb
 	popw	%ds
 no_mca:
+#ifdef CONFIG_X86_VOYAGER
+	movb	$0xff, 0x40	# flag on config found
+	movb	$0xc0, %al
+	mov	$0xff, %ah
+	int	$0x15		# put voyager config info at es:di
+	jc	no_voyager
+	movw	$0x40, %si	# place voyager info in apm table
+	cld
+	movw	$7, %cx
+voyager_rep:
+	movb	%es:(%di), %al
+	movb	%al,(%si)
+	incw	%di
+	incw	%si
+	decw	%cx
+	jnz	voyager_rep
+no_voyager:	
+#endif
 # Check for PS/2 pointing device
 	movw	%cs, %ax			# aka SETUPSEG
 	subw	$DELTA_INITSEG, %ax		# aka INITSEG
@@ -535,11 +566,75 @@ no_32_apm_bios:
 done_apm_bios:
 #endif
 
+#if defined(CONFIG_EDD) || defined(CONFIG_EDD_MODULE)
+# Do the BIOS Enhanced Disk Drive calls
+# This consists of two calls:
+#    int 13h ah=41h "Check Extensions Present"
+#    int 13h ah=48h "Get Device Parameters"
+#
+# A buffer of size EDDMAXNR*(EDDEXTSIZE+EDDPARMSIZE) is reserved for our use
+# in the empty_zero_page at EDDBUF.  The first four bytes of which are
+# used to store the device number, interface support map and version
+# results from fn41.  The following 74 bytes are used to store
+# the results from fn48.  Starting from device 80h, fn41, then fn48
+# are called and their results stored in EDDBUF+n*(EDDEXTSIZE+EDDPARMIZE).
+# Then the pointer is incremented to store the data for the next call.
+# This repeats until either a device doesn't exist, or until EDDMAXNR
+# devices have been stored.
+# The one tricky part is that ds:si always points four bytes into
+# the structure, and the fn41 results are stored at offsets
+# from there.  This removes the need to increment the pointer for
+# every store, and leaves it ready for the fn48 call.
+# A second one-byte buffer, EDDNR, in the empty_zero_page stores
+# the number of BIOS devices which exist, up to EDDMAXNR.
+# In setup.c, copy_edd() stores both empty_zero_page buffers away
+# for later use, as they would get overwritten otherwise. 
+# This code is sensitive to the size of the structs in edd.h
+edd_start:  
+						# %ds points to the bootsector
+       						# result buffer for fn48
+    	movw	$EDDBUF+EDDEXTSIZE, %si		# in ds:si, fn41 results
+						# kept just before that    
+	movb	$0, (EDDNR)			# zero value at EDDNR
+    	movb	$0x80, %dl			# BIOS device 0x80
+
+edd_check_ext:
+	movb	$CHECKEXTENSIONSPRESENT, %ah    # Function 41
+	movw	$EDDMAGIC1, %bx			# magic
+	int	$0x13				# make the call
+	jc	edd_done			# no more BIOS devices
+
+    	cmpw	$EDDMAGIC2, %bx			# is magic right?
+	jne	edd_next			# nope, next...
+
+    	movb	%dl, %ds:-4(%si)		# store device number
+    	movb	%ah, %ds:-3(%si)		# store version
+	movw	%cx, %ds:-2(%si)		# store extensions
+	incb	(EDDNR)				# note that we stored something
+        
+edd_get_device_params:  
+	movw	$EDDPARMSIZE, %ds:(%si)		# put size
+    	movb	$GETDEVICEPARAMETERS, %ah	# Function 48
+	int	$0x13				# make the call
+						# Don't check for fail return
+						# it doesn't matter.
+	movw	%si, %ax			# increment si
+	addw	$EDDPARMSIZE+EDDEXTSIZE, %ax
+	movw	%ax, %si
+
+edd_next:
+        incb	%dl				# increment to next device
+       	cmpb	$EDDMAXNR, (EDDNR) 		# Out of space?
+	jb	edd_check_ext			# keep looping
+    
+edd_done:   
+#endif
+
 # Now we want to move to protected mode ...
 	cmpw	$0, %cs:realmode_swtch
 	jz	rmodeswtch_normal
 
-	lcall	%cs:realmode_swtch
+	lcall	*%cs:realmode_swtch
 
 	jmp	rmodeswtch_end
 
@@ -646,12 +741,24 @@ end_move_self:					# now we are at the right place
 #
 # Enable A20.  This is at the very best an annoying procedure.
 # A20 code ported from SYSLINUX 1.52-1.63 by H. Peter Anvin.
+# AMD Elan bug fix by Robert Schwebel.
 #
+
+#if defined(CONFIG_MELAN)
+	movb $0x02, %al			# alternate A20 gate
+	outb %al, $0x92			# this works on SC410/SC520
+a20_elan_wait:
+	call a20_test
+	jz a20_elan_wait
+	jmp a20_done
+#endif
+
 
 A20_TEST_LOOPS		=  32		# Iterations per wait
 A20_ENABLE_LOOPS	= 255		# Total loops to try		
 
 
+#ifndef CONFIG_X86_VOYAGER
 a20_try_loop:
 
 	# First, see if we are on a system with no A20 gate.
@@ -670,11 +777,14 @@ a20_bios:
 	jnz	a20_done
 
 	# Try enabling A20 through the keyboard controller
+#endif /* CONFIG_X86_VOYAGER */
 a20_kbc:
 	call	empty_8042
 
+#ifndef CONFIG_X86_VOYAGER
 	call	a20_test			# Just in case the BIOS worked
 	jnz	a20_done			# but had a delayed reaction.
+#endif
 
 	movb	$0xD1, %al			# command write
 	outb	%al, $0x64
@@ -684,6 +794,7 @@ a20_kbc:
 	outb	%al, $0x60
 	call	empty_8042
 
+#ifndef CONFIG_X86_VOYAGER
 	# Wait until a20 really *is* enabled; it can take a fair amount of
 	# time on certain systems; Toshiba Tecras are known to have this
 	# problem.
@@ -731,6 +842,7 @@ a20_err_msg:
 	# If we get here, all is good
 a20_done:
 
+#endif /* CONFIG_X86_VOYAGER */
 # set up gdt and idt
 	lidt	idt_48				# load idt with 0,0
 	xorl	%eax, %eax			# Compute gdt_base
@@ -781,19 +893,22 @@ flush_instr:
 	movw	%cs, %si
 	subw	$DELTA_INITSEG, %si
 	shll	$4, %esi			# Convert to 32-bit pointer
+
+# jump to startup_32 in arch/i386/kernel/head.S
+#	
 # NOTE: For high loaded big kernels we need a
-#	jmpi    0x100000,__KERNEL_CS
+#	jmpi    0x100000,__BOOT_CS
 #
 #	but we yet haven't reloaded the CS register, so the default size 
 #	of the target offset still is 16 bit.
-#       However, using an operant prefix (0x66), the CPU will properly
+#       However, using an operand prefix (0x66), the CPU will properly
 #	take our 48 bit far pointer. (INTeL 80386 Programmer's Reference
 #	Manual, Mixing 16-bit and 32-bit code, page 16-6)
 
 	.byte 0x66, 0xea			# prefix + jmpi-opcode
 code32:	.long	0x1000				# will be set to 0x100000
 						# for big kernels
-	.word	__KERNEL_CS
+	.word	__BOOT_CS
 
 # Here's a bunch of information about your current kernel..
 kernel_version:	.ascii	UTS_RELEASE
@@ -897,6 +1012,7 @@ bootsect_panic_mess:
 	.string	"INT15 refuses to access high mem, giving up."
 
 
+#ifndef CONFIG_X86_VOYAGER
 # This routine tests whether or not A20 is enabled.  If so, it
 # exits with zf = 0.
 #
@@ -926,6 +1042,8 @@ a20_test_wait:
 	popw	%ax
 	popw	%cx
 	ret	
+
+#endif /* CONFIG_X86_VOYAGER */
 
 # This routine checks that the keyboard command queue is empty
 # (after emptying the output buffers)
@@ -986,9 +1104,20 @@ delay:
 	ret
 
 # Descriptor tables
+#
+# NOTE: The intel manual says gdt should be sixteen bytes aligned for
+# efficiency reasons.  However, there are machines which are known not
+# to boot with misaligned GDTs, so alter this at your peril!  If you alter
+# GDT_ENTRY_BOOT_CS (in asm/segment.h) remember to leave at least two
+# empty GDT entries (one for NULL and one reserved).
+#
+# NOTE:	On some CPUs, the GDT must be 8 byte aligned.  This is
+# true for the Voyager Quad CPU card which will not boot without
+# This directive.  16 byte aligment is recommended by intel.
+#
+	.align 16
 gdt:
-	.word	0, 0, 0, 0			# dummy
-	.word	0, 0, 0, 0			# unused
+	.fill GDT_ENTRY_BOOT_CS,8,0
 
 	.word	0xFFFF				# 4Gb - (0x100000*0x1000 = 4Gb)
 	.word	0				# base address = 0
@@ -1001,13 +1130,17 @@ gdt:
 	.word	0x9200				# data read/write
 	.word	0x00CF				# granularity = 4096, 386
 						#  (+5th nibble of limit)
+gdt_end:
+	.align	4
+	
+	.word	0				# alignment byte
 idt_48:
 	.word	0				# idt limit = 0
 	.word	0, 0				# idt base = 0L
-gdt_48:
-	.word	0x8000				# gdt limit=2048,
-						#  256 GDT entries
 
+	.word	0				# alignment byte
+gdt_48:
+	.word	gdt_end - gdt - 1		# gdt limit
 	.word	0, 0				# gdt base (filled in later)
 
 # Include video setup & detection code

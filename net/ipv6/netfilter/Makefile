@@ -1,15 +1,6 @@
 #
 # Makefile for the netfilter modules on top of IPv6.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now in the main makefile...
-
-O_TARGET := netfilter.o
-
-export-objs := ip6_tables.o
 
 # Link order matters here.
 obj-$(CONFIG_IP6_NF_IPTABLES) += ip6_tables.o
@@ -31,5 +22,3 @@ obj-$(CONFIG_IP6_NF_TARGET_MARK) += ip6t_MARK.o
 obj-$(CONFIG_IP6_NF_QUEUE) += ip6_queue.o
 obj-$(CONFIG_IP6_NF_TARGET_LOG) += ip6t_LOG.o
 obj-$(CONFIG_IP6_NF_MATCH_HL) += ip6t_hl.o
-
-include $(TOPDIR)/Rules.make

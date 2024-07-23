@@ -31,19 +31,21 @@
 
 #define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
 
+#include <linux/config.h>  
+#include <linux/interrupt.h>  
+#include <linux/module.h>
+#include <linux/version.h> 
 #include <linux/blk.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
 #include <linux/timer.h>
+#include <linux/init.h>
 #include <linux/ioport.h>  // request_region() prototype
-#include <linux/vmalloc.h> // ioremap()
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,4,7)
 #include <linux/completion.h>
-#endif
+
 #ifdef __alpha__
 #define __KERNEL_SYSCALLS__
 #endif
@@ -52,22 +54,18 @@
 #include <asm/uaccess.h>   // ioctl related
 #include <asm/irq.h>
 #include <linux/spinlock.h>
-#include "sd.h"
-#include <scsi/scsi_ioctl.h>
+#include "scsi.h"
 #include "hosts.h"
+#include <scsi/scsi_ioctl.h>
 #include "cpqfcTSchip.h"
 #include "cpqfcTSstructs.h"
 #include "cpqfcTStrigger.h"
 
 #include "cpqfcTS.h"
 
-#include <linux/config.h>  
-#include <linux/module.h>
-#include <linux/version.h> 
-
 /* Embedded module documentation macros - see module.h */
 MODULE_AUTHOR("Compaq Computer Corporation");
-MODULE_DESCRIPTION("Driver for Compaq 64-bit/66Mhz PCI Fibre Channel HBA v. 2.1.1");
+MODULE_DESCRIPTION("Driver for Compaq 64-bit/66Mhz PCI Fibre Channel HBA v. 2.5.4");
 MODULE_LICENSE("GPL");
   
 int cpqfcTS_TargetDeviceReset( Scsi_Device *ScsiDev, unsigned int reset_flags);
@@ -104,15 +102,16 @@ static struct proc_dir_entry proc_scsi_cpqfcTS =
 #  define CPQFC_WAIT_FOR_COMPLETION(x) down(x)
 #endif
 
+static int cpqfc_alloc_private_data_pool(CPQFCHBA *hba);
+
 /* local function to load our per-HBA (local) data for chip
    registers, FC link state, all FC exchanges, etc.
 
    We allocate space and compute address offsets for the
    most frequently accessed addresses; others (like World Wide
    Name) are not necessary.
-   
 */
-static void Cpqfc_initHBAdata( CPQFCHBA *cpqfcHBAdata, struct pci_dev *PciDev )
+static void Cpqfc_initHBAdata(CPQFCHBA *cpqfcHBAdata, struct pci_dev *PciDev )
 {
              
   cpqfcHBAdata->PciDev = PciDev; // copy PCI info ptr
@@ -188,7 +187,7 @@ static void Cpqfc_initHBAdata( CPQFCHBA *cpqfcHBAdata, struct pci_dev *PciDev )
   DEBUG_PCI(printk("    IOBaseU = %x\n", 
     cpqfcHBAdata->fcChip.Registers.IOBaseU));
   
-  printk(" ioremap'd Membase: %p\n", cpqfcHBAdata->fcChip.Registers.ReMapMemBase);
+  /* printk(" ioremap'd Membase: %p\n", cpqfcHBAdata->fcChip.Registers.ReMapMemBase); */
   
   DEBUG_PCI(printk("    SFQconsumerIndex.address = %p\n", 
     cpqfcHBAdata->fcChip.Registers.SFQconsumerIndex.address));
@@ -225,8 +224,11 @@ static void Cpqfc_initHBAdata( CPQFCHBA *cpqfcHBAdata, struct pci_dev *PciDev )
   cpqfcHBAdata->fcChip.ReadWriteWWN = CpqTsReadWriteWWN;
   cpqfcHBAdata->fcChip.ReadWriteNVRAM = CpqTsReadWriteNVRAM;
 
- 
-
+      if (cpqfc_alloc_private_data_pool(cpqfcHBAdata) != 0) {
+		printk(KERN_WARNING 
+			"cpqfc: unable to allocate pool for passthru ioctls.  "
+			"Passthru ioctls disabled.\n");
+      }
 }
 
 
@@ -242,7 +244,7 @@ static void launch_FCworker_thread(struct Scsi_Host *HostAdapter)
   cpqfcHBAdata->notify_wt = &sem;
 
   /* must unlock before kernel_thread(), for it may cause a reschedule. */
-  spin_unlock_irq(&io_request_lock);
+  spin_unlock_irq(HostAdapter->host_lock);
   kernel_thread((int (*)(void *))cpqfcTSWorkerThread, 
                           (void *) HostAdapter, 0);
   /*
@@ -250,7 +252,7 @@ static void launch_FCworker_thread(struct Scsi_Host *HostAdapter)
 
    */
   down (&sem);
-  spin_lock_irq(&io_request_lock);
+  spin_lock_irq(HostAdapter->host_lock);
   cpqfcHBAdata->notify_wt = NULL;
 
   LEAVE("launch_FC_worker_thread");
@@ -261,10 +263,22 @@ static void launch_FCworker_thread(struct Scsi_Host *HostAdapter)
 /* "Entry" point to discover if any supported PCI 
    bus adapter can be found
 */
-// We're supporting:
-// Compaq 64-bit, 66MHz HBA with Tachyon TS
-// Agilent XL2 
-#define HBA_TYPES 2
+/* We're supporting:
+ * Compaq 64-bit, 66MHz HBA with Tachyon TS
+ * Agilent XL2 
+ * HP Tachyon
+ */
+#define HBA_TYPES 3
+
+#ifndef PCI_DEVICE_ID_COMPAQ_
+#define PCI_DEVICE_ID_COMPAQ_TACHYON	0xa0fc
+#endif
+
+static struct SupportedPCIcards cpqfc_boards[] __initdata = {
+	{PCI_VENDOR_ID_COMPAQ, PCI_DEVICE_ID_COMPAQ_TACHYON},
+	{PCI_VENDOR_ID_HP, PCI_DEVICE_ID_HP_TACHLITE},
+	{PCI_VENDOR_ID_HP, PCI_DEVICE_ID_HP_TACHYON},
+};
 
 
 int cpqfcTS_detect(Scsi_Host_Template *ScsiHostTemplate)
@@ -274,35 +288,22 @@ int cpqfcTS_detect(Scsi_Host_Template *ScsiHostTemplate)
   struct Scsi_Host *HostAdapter = NULL;
   CPQFCHBA *cpqfcHBAdata = NULL; 
   struct timer_list *cpqfcTStimer = NULL;
-  SupportedPCIcards PCIids[HBA_TYPES];
   int i;
-  
+
   ENTER("cpqfcTS_detect");
-  
+
 #if LINUX_VERSION_CODE < LinuxVersionCode(2,3,27)
   ScsiHostTemplate->proc_dir = &proc_scsi_cpqfcTS;
 #else
   ScsiHostTemplate->proc_name = "cpqfcTS";
 #endif
-  
-  if( pci_present() == 0) // no PCI busses?
-  {
-    printk( "  no PCI bus?@#!\n");
-    return NumberOfAdapters;
-  }
-
-  // what HBA adapters are we supporting?
-  PCIids[0].vendor_id = PCI_VENDOR_ID_COMPAQ;
-  PCIids[0].device_id = CPQ_DEVICE_ID;
-  PCIids[1].vendor_id = PCI_VENDOR_ID_HP; // i.e. 103Ch (Agilent == HP for now)
-  PCIids[1].device_id = AGILENT_XL2_ID;   // i.e. 1029h
 
   for( i=0; i < HBA_TYPES; i++)
   {
     // look for all HBAs of each type
 
-    while( (PciDev =
-      pci_find_device( PCIids[i].vendor_id, PCIids[i].device_id, PciDev) ))
+    while((PciDev = pci_find_device(cpqfc_boards[i].vendor_id,
+				    cpqfc_boards[i].device_id, PciDev)))
     {
 
       if (pci_set_dma_mask(PciDev, CPQFCTS_DMA_MASK) != 0) {
@@ -312,8 +313,8 @@ int cpqfcTS_detect(Scsi_Host_Template *ScsiHostTemplate)
       }
 
       // NOTE: (kernel 2.2.12-32) limits allocation to 128k bytes...
-      printk(" scsi_register allocating %d bytes for FC HBA\n",
-		      (ULONG)sizeof(CPQFCHBA));
+      /* printk(" scsi_register allocating %d bytes for FC HBA\n",
+		      (ULONG)sizeof(CPQFCHBA)); */
 
       HostAdapter = scsi_register( ScsiHostTemplate, sizeof( CPQFCHBA ) );
       
@@ -330,7 +331,7 @@ int cpqfcTS_detect(Scsi_Host_Template *ScsiHostTemplate)
       DEBUG_PCI(printk("  PciDev->baseaddress[3]= %lx\n", 
 				PciDev->resource[3].start));
 
-      scsi_set_pci_device(HostAdapter, PciDev);      
+      scsi_set_device(HostAdapter, &PciDev->dev);
       HostAdapter->irq = PciDev->irq;  // copy for Scsi layers
       
       // HP Tachlite uses two (255-byte) ranges of Port I/O (lower & upper),
@@ -377,7 +378,8 @@ int cpqfcTS_detect(Scsi_Host_Template *ScsiHostTemplate)
 
       // Since we have two 256-byte I/O port ranges (upper
       // and lower), check them both
-      if( check_region( cpqfcHBAdata->fcChip.Registers.IOBaseU, 0xff) )
+      if( !request_region( cpqfcHBAdata->fcChip.Registers.IOBaseU,
+      	                   0xff, DEV_NAME ) )
       {
 	printk("  cpqfcTS address in use: %x\n", 
 			cpqfcHBAdata->fcChip.Registers.IOBaseU);
@@ -386,26 +388,28 @@ int cpqfcTS_detect(Scsi_Host_Template *ScsiHostTemplate)
 	continue;
       }	
       
-      if( check_region( cpqfcHBAdata->fcChip.Registers.IOBaseL, 0xff) )
+      if( !request_region( cpqfcHBAdata->fcChip.Registers.IOBaseL,
+      			   0xff, DEV_NAME ) )
       {
   	printk("  cpqfcTS address in use: %x\n", 
 	      			cpqfcHBAdata->fcChip.Registers.IOBaseL);
+	release_region( cpqfcHBAdata->fcChip.Registers.IOBaseU, 0xff );
 	free_irq( HostAdapter->irq, HostAdapter);
         scsi_unregister( HostAdapter);
 	continue;
       }	
       
-      // OK, we should be able to grab everything we need now.
-      request_region( cpqfcHBAdata->fcChip.Registers.IOBaseL, 0xff, DEV_NAME);
-      request_region( cpqfcHBAdata->fcChip.Registers.IOBaseU, 0xff, DEV_NAME);
-      DEBUG_PCI(printk("  Requesting 255 I/O addresses @ %x\n",
+      // OK, we have grabbed everything we need now.
+      DEBUG_PCI(printk("  Reserved 255 I/O addresses @ %x\n",
         cpqfcHBAdata->fcChip.Registers.IOBaseL ));
-      DEBUG_PCI(printk("  Requesting 255 I/O addresses @ %x\n",
+      DEBUG_PCI(printk("  Reserved 255 I/O addresses @ %x\n",
         cpqfcHBAdata->fcChip.Registers.IOBaseU ));
 
-      
+     
+ 
       // start our kernel worker thread
 
+      spin_lock_irq(HostAdapter->host_lock);
       launch_FCworker_thread(HostAdapter);
 
 
@@ -445,15 +449,16 @@ int cpqfcTS_detect(Scsi_Host_Template *ScsiHostTemplate)
 	
 	unsigned long stop_time;
 
-        spin_unlock_irq(&io_request_lock);
+	spin_unlock_irq(HostAdapter->host_lock);
 	stop_time = jiffies + 4*HZ;
         while ( time_before(jiffies, stop_time) ) 
 	  	schedule();  // (our worker task needs to run)
 
-	spin_lock_irq(&io_request_lock);
       }
       
+      spin_lock_irq(HostAdapter->host_lock);
       NumberOfAdapters++; 
+      spin_unlock_irq(HostAdapter->host_lock);
     } // end of while()
   }
 
@@ -466,7 +471,7 @@ static void my_ioctl_done (Scsi_Cmnd * SCpnt)
 {
     struct request * req;
     
-    req = &SCpnt->request;
+    req = SCpnt->request;
     req->rq_status = RQ_SCSI_DONE; /* Busy, but indicate request done */
   
     if (req->CPQFC_WAITING != NULL)
@@ -474,6 +479,75 @@ static void my_ioctl_done (Scsi_Cmnd * SCpnt)
 }   
 
 
+static int cpqfc_alloc_private_data_pool(CPQFCHBA *hba)
+{
+	hba->private_data_bits = NULL;
+	hba->private_data_pool = NULL;
+	hba->private_data_bits = 
+		kmalloc(((CPQFC_MAX_PASSTHRU_CMDS+BITS_PER_LONG-1) /
+				BITS_PER_LONG)*sizeof(unsigned long), 
+				GFP_KERNEL);
+	if (hba->private_data_bits == NULL)
+		return -1;
+	memset(hba->private_data_bits, 0,
+		((CPQFC_MAX_PASSTHRU_CMDS+BITS_PER_LONG-1) /
+				BITS_PER_LONG)*sizeof(unsigned long));
+	hba->private_data_pool = kmalloc(sizeof(cpqfc_passthru_private_t) *
+			CPQFC_MAX_PASSTHRU_CMDS, GFP_KERNEL);
+	if (hba->private_data_pool == NULL) {
+		kfree(hba->private_data_bits);
+		hba->private_data_bits = NULL;
+		return -1;
+	}
+	return 0;
+}
+
+static void cpqfc_free_private_data_pool(CPQFCHBA *hba)
+{
+	kfree(hba->private_data_bits);
+	kfree(hba->private_data_pool);
+}
+
+int is_private_data_of_cpqfc(CPQFCHBA *hba, void *pointer)
+{
+	/* Is pointer within our private data pool?
+	   We use Scsi_Request->upper_private_data (normally
+	   reserved for upper layer drivers, e.g. the sg driver)
+	   We check to see if the pointer is ours by looking at
+	   its address.  Is this ok?   Hmm, it occurs to me that
+	   a user app might do something bad by using sg to send
+	   a cpqfc passthrough ioctl with upper_data_private
+	   forged to be somewhere in our pool..., though they'd
+	   normally have to be root already to do this.  */
+
+	return (pointer != NULL && 
+		pointer >= (void *) hba->private_data_pool && 
+		pointer < (void *) hba->private_data_pool + 
+			sizeof(*hba->private_data_pool) * 
+				CPQFC_MAX_PASSTHRU_CMDS);
+}
+
+cpqfc_passthru_private_t *cpqfc_alloc_private_data(CPQFCHBA *hba)
+{
+	int i;
+
+	do {
+		i = find_first_zero_bit(hba->private_data_bits, 
+			CPQFC_MAX_PASSTHRU_CMDS);
+		if (i == CPQFC_MAX_PASSTHRU_CMDS)
+			return NULL;
+	} while ( test_and_set_bit(i & (BITS_PER_LONG - 1), 
+			hba->private_data_bits+(i/BITS_PER_LONG)) != 0);
+	return &hba->private_data_pool[i];
+}
+
+void cpqfc_free_private_data(CPQFCHBA *hba, cpqfc_passthru_private_t *data)
+{
+	int i;
+	i = data - hba->private_data_pool;
+	clear_bit(i&(BITS_PER_LONG-1), 
+			hba->private_data_bits+(i/BITS_PER_LONG));
+}
 
 int cpqfcTS_ioctl( Scsi_Device *ScsiDev, int Cmnd, void *arg)
 {
@@ -481,35 +555,19 @@ int cpqfcTS_ioctl( Scsi_Device *ScsiDev, int Cmnd, void *arg)
   struct Scsi_Host *HostAdapter = ScsiDev->host;
   CPQFCHBA *cpqfcHBAdata = (CPQFCHBA *)HostAdapter->hostdata;
   PTACHYON fcChip = &cpqfcHBAdata->fcChip;
-  PFC_LOGGEDIN_PORT pLoggedInPort;
+  PFC_LOGGEDIN_PORT pLoggedInPort = NULL;
   Scsi_Cmnd DumCmnd;
   int i, j;
   VENDOR_IOCTL_REQ ioc;
   cpqfc_passthru_t *vendor_cmd;
   Scsi_Device *SDpnt;
-  Scsi_Cmnd *ScsiPassThruCmnd;
+  Scsi_Request *ScsiPassThruReq;
+  cpqfc_passthru_private_t *privatedata;
 
   ENTER("cpqfcTS_ioctl ");
-  
-  // can we find an FC device mapping to this SCSI target?
-  DumCmnd.channel = ScsiDev->channel;		// For searching
-  DumCmnd.target  = ScsiDev->id;
-  pLoggedInPort = fcFindLoggedInPort( fcChip,
-    &DumCmnd, // search Scsi Nexus
-    0,        // DON'T search linked list for FC port id
-    NULL,     // DON'T search linked list for FC WWN
-    NULL);    // DON'T care about end of list
- 
-  if( pLoggedInPort == NULL )      // not found!
-  {
-    result = -ENXIO;
-  }
- 
-  else  // we know what FC device to operate on...
-  {
-	// printk("ioctl CMND %d", Cmnd);
-    switch (Cmnd) 
-    {
+
+    // printk("ioctl CMND %d", Cmnd);
+    switch (Cmnd) {
       // Passthrough provides a mechanism to bypass the RAID
       // or other controller and talk directly to the devices
       // (e.g. physical disk drive)
@@ -518,13 +576,17 @@ int cpqfcTS_ioctl( Scsi_Device *ScsiDev, int Cmnd, void *arg)
       case CPQFCTS_SCSI_PASSTHRU:
       {
 	void *buf = NULL; // for kernel space buffer for user data
+
+	/* Check that our pool got allocated ok. */
+	if (cpqfcHBAdata->private_data_pool == NULL)
+		return -ENOMEM;
 	
 	if( !arg)
 	  return -EINVAL;
 
 	// must be super user to send stuff directly to the
 	// controller and/or physical drives...
-	if( !suser() )
+	if( !capable(CAP_SYS_RAWIO) )
 	  return -EPERM;
 
 	// copy the caller's struct to our space.
@@ -540,94 +602,80 @@ int cpqfcTS_ioctl( Scsi_Device *ScsiDev, int Cmnd, void *arg)
 	  if( !buf)
 	    return -ENOMEM;
 	}
+        // Now build a Scsi_Request to pass down...
+        ScsiPassThruReq = scsi_allocate_request(ScsiDev);
+	if (ScsiPassThruReq == NULL) {
+		kfree(buf);
+		return -ENOMEM;
+	}
+	ScsiPassThruReq->upper_private_data = 
+			cpqfc_alloc_private_data(cpqfcHBAdata);
+	if (ScsiPassThruReq->upper_private_data == NULL) {
+		kfree(buf);
+		scsi_release_request(ScsiPassThruReq); // "de-allocate"
+		return -ENOMEM;
+	}
 
-        // Now build a SCSI_CMND to pass down...
-	// This function allocates and sets Scsi_Cmnd ptrs such as
-	//  ->channel, ->target, ->host
-        ScsiPassThruCmnd = scsi_allocate_device(ScsiDev, 1, 1);
-
-        // Need data from user?
-	// make sure caller's buffer is in kernel space.
-	if( (vendor_cmd->rw_flag == VENDOR_WRITE_OPCODE) &&
-	    vendor_cmd->len)
-        if(  copy_from_user( buf, vendor_cmd->bufp, vendor_cmd->len))
-		return( -EFAULT);
+	if (vendor_cmd->rw_flag == VENDOR_WRITE_OPCODE) {
+		if (vendor_cmd->len) { // Need data from user?
+        		if (copy_from_user(buf, vendor_cmd->bufp, 
+						vendor_cmd->len)) {
+				kfree(buf);
+				cpqfc_free_private_data(cpqfcHBAdata, 
+					ScsiPassThruReq->upper_private_data);
+				scsi_release_request(ScsiPassThruReq);
+				return( -EFAULT);
+			}
+		}
+		ScsiPassThruReq->sr_data_direction = SCSI_DATA_WRITE; 
+	} else if (vendor_cmd->rw_flag == VENDOR_READ_OPCODE) {
+		ScsiPassThruReq->sr_data_direction = SCSI_DATA_READ; 
+	} else
+		// maybe this means a bug in the user app
+		ScsiPassThruReq->sr_data_direction = SCSI_DATA_NONE;
 	    
-	// copy the CDB (if/when MAX_COMMAND_SIZE is 16, remove copy below)
-        memcpy( &ScsiPassThruCmnd->cmnd[0], 
-		&vendor_cmd->cdb[0], 
-		MAX_COMMAND_SIZE);  
-        // we want to copy all 16 bytes into the FCP-SCSI CDB,
-	// although the actual passthru only uses up to the
-	// first 12.
-	
-	ScsiPassThruCmnd->cmd_len = 16; // sizeof FCP-SCSI CDB
+	ScsiPassThruReq->sr_cmd_len = 0; // set correctly by scsi_do_req()
+	ScsiPassThruReq->sr_sense_buffer[0] = 0;
+	ScsiPassThruReq->sr_sense_buffer[2] = 0;
 
-	// Unfortunately, the SCSI command cmnd[] field has only
-	// 12 bytes.  Ideally the MAX_COMMAND_SIZE should be increased
-	// to 16 for newer Fibre Channel and SCSI-3 larger CDBs.
-	// However, to avoid a mandatory kernel rebuild, we use the SCp
-	// spare field to store the extra 4 bytes ( ugly :-(
-
-	if( MAX_COMMAND_SIZE < 16)
-	{
-          memcpy( &ScsiPassThruCmnd->SCp.buffers_residual,
-		  &vendor_cmd->cdb[12], 4);
-	}	  
-                  
-	
-        ScsiPassThruCmnd->SCp.sent_command = 1; // PASSTHRU!
-	                                        // suppress LUN masking
-	                                        // and VSA logic
-
-	// Use spare fields to copy FCP-SCSI LUN address info...
-        ScsiPassThruCmnd->SCp.phase = vendor_cmd->bus;
-	ScsiPassThruCmnd->SCp.have_data_in = vendor_cmd->pdrive;
-
-        // We copy the scheme used by scsi.c to submit commands
+        // We copy the scheme used by sd.c:spinup_disk() to submit commands
 	// to our own HBA.  We do this in order to stall the
 	// thread calling the IOCTL until it completes, and use
 	// the same "_quecommand" function for synchronizing
 	// FC Link events with our "worker thread".
 
-        {
-          CPQFC_DECLARE_COMPLETION(wait);
-          ScsiPassThruCmnd->request.CPQFC_WAITING = &wait;
-          // eventually gets us to our own _quecommand routine
-          scsi_do_cmd( ScsiPassThruCmnd, &vendor_cmd->cdb[0], 
-	       buf, 
-	       vendor_cmd->len, 
-	       my_ioctl_done, 
-	       10*HZ, 1);// timeout,retries
-          // Other I/Os can now resume; we wait for our ioctl
-	  // command to complete
-	  CPQFC_WAIT_FOR_COMPLETION(&wait);
-          ScsiPassThruCmnd->request.CPQFC_WAITING = NULL;
-        }
+	privatedata = ScsiPassThruReq->upper_private_data;
+	privatedata->bus = vendor_cmd->bus;
+	privatedata->pdrive = vendor_cmd->pdrive;
 	
-        result = ScsiPassThruCmnd->result;
+        // eventually gets us to our own _quecommand routine
+	scsi_wait_req(ScsiPassThruReq, 
+		&vendor_cmd->cdb[0], buf, vendor_cmd->len, 
+		10*HZ,  // timeout
+		1);	// retries
+        result = ScsiPassThruReq->sr_result;
 
         // copy any sense data back to caller
         if( result != 0 )
 	{
 	  memcpy( vendor_cmd->sense_data, // see struct def - size=40
-		  ScsiPassThruCmnd->sense_buffer, 
-		  sizeof(ScsiPassThruCmnd->sense_buffer)); 
+		  ScsiPassThruReq->sr_sense_buffer, 
+		  sizeof(ScsiPassThruReq->sr_sense_buffer) <
+                  sizeof(vendor_cmd->sense_data)           ?
+                  sizeof(ScsiPassThruReq->sr_sense_buffer) :
+                  sizeof(vendor_cmd->sense_data)
+                ); 
 	}
-        SDpnt = ScsiPassThruCmnd->device;
-        scsi_release_command(ScsiPassThruCmnd); // "de-allocate"
-        ScsiPassThruCmnd = NULL;
-
-        // if (!SDpnt->was_reset && SDpnt->scsi_request_fn)
-        //  (*SDpnt->scsi_request_fn)();
-
-        wake_up(&SDpnt->scpnt_wait);
+        SDpnt = ScsiPassThruReq->sr_device;
+	/* upper_private_data is already freed in call_scsi_done() */
+        scsi_release_request(ScsiPassThruReq); // "de-allocate"
+        ScsiPassThruReq = NULL;
 
 	// need to pass data back to user (space)?
 	if( (vendor_cmd->rw_flag == VENDOR_READ_OPCODE) &&
 	     vendor_cmd->len )
         if(  copy_to_user( vendor_cmd->bufp, buf, vendor_cmd->len))
-		return( -EFAULT);
+		result = -EFAULT;
 
         if( buf) 
 	  kfree( buf);
@@ -670,10 +718,24 @@ int cpqfcTS_ioctl( Scsi_Device *ScsiDev, int Cmnd, void *arg)
 
 
       case CPQFC_IOCTL_FC_TARGET_ADDRESS:
-      result = 
-        verify_area(VERIFY_WRITE, arg, sizeof(Scsi_FCTargAddress));
-      if (result) 
-	break;
+	// can we find an FC device mapping to this SCSI target?
+/* 	DumCmnd.channel = ScsiDev->channel; */		// For searching
+/* 	DumCmnd.target  = ScsiDev->id; */
+/* 	DumCmnd.lun     = ScsiDev->lun; */
+
+        DumCmnd.device = ScsiDev;
+	
+	pLoggedInPort = fcFindLoggedInPort( fcChip,
+		&DumCmnd, // search Scsi Nexus
+		0,        // DON'T search linked list for FC port id
+		NULL,     // DON'T search linked list for FC WWN
+		NULL);    // DON'T care about end of list
+	if (pLoggedInPort == NULL) {
+		result = -ENXIO;
+		break;
+	}
+	result = verify_area(VERIFY_WRITE, arg, sizeof(Scsi_FCTargAddress));
+	if (result) break;
  
       put_user(pLoggedInPort->port_id,
 		&((Scsi_FCTargAddress *) arg)->host_port_id);
@@ -700,7 +762,6 @@ int cpqfcTS_ioctl( Scsi_Device *ScsiDev, int Cmnd, void *arg)
       result = -EINVAL;
       break;
     }
-  }
 
   LEAVE("cpqfcTS_ioctl");
   return result;
@@ -738,6 +799,7 @@ int cpqfcTS_release(struct Scsi_Host *HostAdapter)
     
   }
 
+  cpqfc_free_private_data_pool(cpqfcHBAdata);
   // free Linux resources
   DEBUG_PCI( printk(" cpqfcTS: freeing resources...\n"));
   free_irq( HostAdapter->irq, HostAdapter);
@@ -853,10 +915,9 @@ static int copy_info(struct info_str *info, char *fmt, ...)
 
 // Routine to get data for /proc RAM filesystem
 //
-int cpqfcTS_proc_info (char *buffer, char **start, off_t offset, int length, 
-		       int hostno, int inout)
+int cpqfcTS_proc_info (struct Scsi_Host *host, char *buffer, char **start, off_t offset, int length, 
+		       int inout)
 {
-  struct Scsi_Host *host;
   Scsi_Cmnd DumCmnd;
   int Chan, Targ, i;
   struct info_str info;
@@ -864,13 +925,6 @@ int cpqfcTS_proc_info (char *buffer, char **start, off_t offset, int length,
   PTACHYON fcChip;
   PFC_LOGGEDIN_PORT pLoggedInPort;
   char buf[81];
-
-  // Search the Scsi host list for our controller
-  for (host=scsi_hostlist; host; host=host->next)
-    if (host->host_no == hostno)
-      break;
-
-  if (!host) return -ESRCH;
 
   if (inout) return -EINVAL;
 
@@ -903,7 +957,7 @@ int cpqfcTS_proc_info (char *buffer, char **start, off_t offset, int length,
     				NULL,     // DON'T search list for FC WWN
     				NULL))){   // DON'T care about end of list
 	copy_info(&info, "Host: scsi%d Channel: %02d TargetId: %02d -> WWN: ",
-			   hostno, Chan, Targ);
+			   host->host_no, Chan, Targ);
         for( i=3; i>=0; i--)        // copy the LOGIN port's WWN
           copy_info(&info, "%02X", pLoggedInPort->u.ucWWN[i]);
         for( i=7; i>3; i--)             // copy the LOGIN port's WWN
@@ -1229,7 +1283,7 @@ static void QueBadTargetCmnd( CPQFCHBA *cpqfcHBAdata, Scsi_Cmnd *Cmnd)
 
 int cpqfcTS_queuecommand(Scsi_Cmnd *Cmnd, void (* done)(Scsi_Cmnd *))
 {
-  struct Scsi_Host *HostAdapter = Cmnd->host;
+  struct Scsi_Host *HostAdapter = Cmnd->device->host;
   CPQFCHBA *cpqfcHBAdata = (CPQFCHBA *)HostAdapter->hostdata;
   PTACHYON fcChip = &cpqfcHBAdata->fcChip;
   TachFCHDR_GCMND fchs;  // only use for FC destination id field  
@@ -1285,9 +1339,9 @@ int cpqfcTS_queuecommand(Scsi_Cmnd *Cmnd, void (* done)(Scsi_Cmnd *))
 //    printk(" @Q bad targ cmnd %p@ ", Cmnd);
       QueBadTargetCmnd( cpqfcHBAdata, Cmnd);
     }
-    else if (Cmnd->lun >= CPQFCTS_MAX_LUN)
+    else if (Cmnd->device->lun >= CPQFCTS_MAX_LUN)
     {
-      printk(KERN_WARNING "cpqfc: Invalid LUN: %d\n", Cmnd->lun);
+      printk(KERN_WARNING "cpqfc: Invalid LUN: %d\n", Cmnd->device->lun);
       QueBadTargetCmnd( cpqfcHBAdata, Cmnd);
     } 
 
@@ -1407,7 +1461,7 @@ int cpqfcTS_abort(Scsi_Cmnd *Cmnd)
 int cpqfcTS_eh_abort(Scsi_Cmnd *Cmnd)
 {
 
-  struct Scsi_Host *HostAdapter = Cmnd->host;
+  struct Scsi_Host *HostAdapter = Cmnd->device->host;
   // get the pointer to our Scsi layer HBA buffer  
   CPQFCHBA *cpqfcHBAdata = (CPQFCHBA *)HostAdapter->hostdata;
   PTACHYON fcChip = &cpqfcHBAdata->fcChip;
@@ -1443,7 +1497,7 @@ int cpqfcTS_eh_abort(Scsi_Cmnd *Cmnd)
       Exchanges->fcExchange[i].timeOut = 10; // seconds default (changed later)
 
       // Since we need to immediately return the aborted Cmnd to Scsi 
-      // upper layers, we can't make future reference to any of it's 
+      // upper layers, we can't make future reference to any of its 
       // fields (e.g the Nexus).
 
       cpqfcTSPutLinkQue( cpqfcHBAdata, BLS_ABTS, &i);
@@ -1518,6 +1572,12 @@ int cpqfcTS_TargetDeviceReset( Scsi_Device *ScsiDev,
   Scsi_Cmnd * SCpnt;
   Scsi_Device * SDpnt;
 
+// FIXME, cpqfcTS_TargetDeviceReset needs to be fixed 
+// similarly to how the passthrough ioctl was fixed 
+// around the 2.5.30 kernel.  Scsi_Cmnd replaced with 
+// Scsi_Request, etc.
+// For now, so people don't fall into a hole...
+return -ENOTSUPP;
 
   // printk("   ENTERING cpqfcTS_TargetDeviceReset() - flag=%d \n",reset_flags);
 
@@ -1527,17 +1587,17 @@ int cpqfcTS_TargetDeviceReset( Scsi_Device *ScsiDev,
 
   scsi_cdb[0] = RELEASE;
 
-  // allocate with wait = true, interruptible = false 
-  SCpnt = scsi_allocate_device(ScsiDev, 1, 0);
+  SCpnt = scsi_get_command(ScsiDev, GFP_KERNEL);
   {
     CPQFC_DECLARE_COMPLETION(wait);
-        
+    
     SCpnt->SCp.buffers_residual = FCP_TARGET_RESET;
 
-	SCpnt->request.CPQFC_WAITING = &wait;
+	// FIXME: this would panic, SCpnt->request would be NULL.
+	SCpnt->request->CPQFC_WAITING = &wait;
 	scsi_do_cmd(SCpnt,  scsi_cdb, NULL,  0, my_ioctl_done,  timeout, retries);
 	CPQFC_WAIT_FOR_COMPLETION(&wait);
-	SCpnt->request.CPQFC_WAITING = NULL;
+	SCpnt->request->CPQFC_WAITING = NULL;
   }
     
 /*
@@ -1576,13 +1636,9 @@ int cpqfcTS_TargetDeviceReset( Scsi_Device *ScsiDev,
   result = SCpnt->result;
 
   SDpnt = SCpnt->device;
-  scsi_release_command(SCpnt);
+  scsi_put_command(SCpnt);
   SCpnt = NULL;
 
-  // if (!SDpnt->was_reset && SDpnt->scsi_request_fn)
-  // 	(*SDpnt->scsi_request_fn)();
-
-  wake_up(&SDpnt->scpnt_wait);
   // printk("   LEAVING cpqfcTS_TargetDeviceReset() - return SUCCESS \n");
   return SUCCESS;
 }
@@ -1593,9 +1649,9 @@ int cpqfcTS_eh_device_reset(Scsi_Cmnd *Cmnd)
   int retval;
   Scsi_Device *SDpnt = Cmnd->device;
   // printk("   ENTERING cpqfcTS_eh_device_reset() \n");
-  spin_unlock_irq(&io_request_lock);
+  spin_unlock_irq(Cmnd->device->host->host_lock);
   retval = cpqfcTS_TargetDeviceReset( SDpnt, 0);
-  spin_lock_irq(&io_request_lock);
+  spin_lock_irq(Cmnd->device->host->host_lock);
   return retval;
 }
 
@@ -1616,9 +1672,10 @@ int cpqfcTS_reset(Scsi_Cmnd *Cmnd, unsigned int reset_flags)
    (from hosts.h)
 */
 
-int cpqfcTS_biosparam(Disk *disk, kdev_t n, int ip[])
+int cpqfcTS_biosparam(struct scsi_device *sdev, struct block_device *n,
+		sector_t capacity, int ip[])
 {
-  int size = disk->capacity;
+  int size = capacity;
   
   ENTER("cpqfcTS_biosparam");
   ip[0] = 64;
@@ -1638,7 +1695,7 @@ int cpqfcTS_biosparam(Disk *disk, kdev_t n, int ip[])
 
 
 
-void cpqfcTS_intr_handler( int irq, 
+irqreturn_t cpqfcTS_intr_handler( int irq, 
 		void *dev_id, 
 		struct pt_regs *regs)
 {
@@ -1648,10 +1705,10 @@ void cpqfcTS_intr_handler( int irq,
   CPQFCHBA *cpqfcHBA = (CPQFCHBA *)HostAdapter->hostdata;
   int MoreMessages = 1; // assume we have something to do
   UCHAR IntPending;
-  
-  ENTER("intr_handler");
+  int handled = 0;
 
-  spin_lock_irqsave( &io_request_lock, flags);
+  ENTER("intr_handler");
+  spin_lock_irqsave( HostAdapter->host_lock, flags);
   // is this our INT?
   IntPending = readb( cpqfcHBA->fcChip.Registers.INTPEND.address);
 
@@ -1660,7 +1717,7 @@ void cpqfcTS_intr_handler( int irq,
 #define INFINITE_IMQ_BREAK 10000
   if( IntPending )
   {
-    
+    handled = 1;
     // mask our HBA interrupts until we handle it...
     writeb( 0, cpqfcHBA->fcChip.Registers.INTEN.address);
 
@@ -1693,6 +1750,18 @@ void cpqfcTS_intr_handler( int irq,
   	UCHAR IntStat;
   	printk(" cpqfcTS adapter PCI error detected\n");
   	IntStat = readb( cpqfcHBA->fcChip.Registers.INTSTAT.address);
+	printk("cpqfc: ISR = 0x%02x\n", IntStat);
+	if (IntStat & 0x1) {
+		__u16 pcistat;
+		/* read the pci status register */
+		pci_read_config_word(cpqfcHBA->PciDev, 0x06, &pcistat);
+		printk("PCI status register is 0x%04x\n", pcistat);
+		if (pcistat & 0x8000) printk("Parity Error Detected.\n");
+		if (pcistat & 0x4000) printk("Signalled System Error\n");
+		if (pcistat & 0x2000) printk("Received Master Abort\n");
+		if (pcistat & 0x1000) printk("Received Target Abort\n");
+		if (pcistat & 0x0800) printk("Signalled Target Abort\n");
+	}
 	if (IntStat & 0x4) printk("(INT)\n");
 	if (IntStat & 0x8) 
 		printk("CRS: PCI master address crossed 46 bit bouandary\n");
@@ -1700,8 +1769,9 @@ void cpqfcTS_intr_handler( int irq,
       }
     }      
   }
-  spin_unlock_irqrestore( &io_request_lock, flags);
+  spin_unlock_irqrestore( HostAdapter->host_lock, flags);
   LEAVE("intr_handler");
+  return IRQ_RETVAL(handled);
 }
 
 
@@ -1969,7 +2039,21 @@ void* fcMemManager( struct pci_dev *pdev, ALIGNED_MEM *dynamic_mem,
 }
 
 
-static Scsi_Host_Template driver_template = CPQFCTS;
-
+static Scsi_Host_Template driver_template = {
+	.detect                 = cpqfcTS_detect,
+	.release                = cpqfcTS_release,
+	.info                   = cpqfcTS_info,
+	.proc_info              = cpqfcTS_proc_info,
+	.ioctl                  = cpqfcTS_ioctl,
+	.queuecommand           = cpqfcTS_queuecommand,
+	.eh_device_reset_handler   = cpqfcTS_eh_device_reset,
+	.eh_abort_handler       = cpqfcTS_eh_abort, 
+	.bios_param             = cpqfcTS_biosparam, 
+	.can_queue              = CPQFCTS_REQ_QUEUE_LEN,
+	.this_id                = -1, 
+	.sg_tablesize           = SG_ALL, 
+	.cmd_per_lun            = CPQFCTS_CMD_PER_LUN,
+	.use_clustering         = ENABLE_CLUSTERING,
+};
 #include "scsi_module.c"
 

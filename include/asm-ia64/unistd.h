@@ -4,7 +4,7 @@
 /*
  * IA-64 Linux syscall numbers and inline-functions.
  *
- * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2003 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
@@ -109,23 +109,23 @@
 #define __NR_syslog			1117
 #define __NR_setitimer			1118
 #define __NR_getitimer			1119
-#define __NR_old_stat			1120
-#define __NR_old_lstat			1121
-#define __NR_old_fstat			1122
+/* 1120 was __NR_old_stat */
+/* 1121 was __NR_old_lstat */
+/* 1122 was __NR_old_fstat */
 #define __NR_vhangup			1123
 #define __NR_lchown			1124
-#define __NR_vm86			1125
+#define __NR_remap_file_pages		1125
 #define __NR_wait4			1126
 #define __NR_sysinfo			1127
 #define __NR_clone			1128
 #define __NR_setdomainname		1129
 #define __NR_uname			1130
 #define __NR_adjtimex			1131
-#define __NR_create_module		1132
+/* 1132 was __NR_create_module */
 #define __NR_init_module		1133
 #define __NR_delete_module		1134
-#define __NR_get_kernel_syms		1135
-#define __NR_query_module		1136
+/* 1135 was __NR_get_kernel_syms */
+/* 1136 was __NR_query_module */
 #define __NR_quotactl			1137
 #define __NR_bdflush			1138
 #define __NR_sysfs			1139
@@ -137,8 +137,8 @@
 #define __NR_flock			1145
 #define __NR_readv			1146
 #define __NR_writev			1147
-#define __NR_pread			1148
-#define __NR_pwrite			1149
+#define __NR_pread64			1148
+#define __NR_pwrite64			1149
 #define __NR__sysctl			1150
 #define __NR_mmap			1151
 #define __NR_munmap			1152
@@ -206,6 +206,52 @@
 #define __NR_getdents64			1214
 #define __NR_getunwind			1215
 #define __NR_readahead			1216
+#define __NR_setxattr			1217
+#define __NR_lsetxattr			1218
+#define __NR_fsetxattr			1219
+#define __NR_getxattr			1220
+#define __NR_lgetxattr			1221
+#define __NR_fgetxattr			1222
+#define __NR_listxattr			1223
+#define __NR_llistxattr			1224
+#define __NR_flistxattr			1225
+#define __NR_removexattr		1226
+#define __NR_lremovexattr		1227
+#define __NR_fremovexattr		1228
+#define __NR_tkill			1229
+#define __NR_futex			1230
+#define __NR_sched_setaffinity		1231
+#define __NR_sched_getaffinity		1232
+#define __NR_set_tid_address		1233
+#define __NR_fadvise64			1234
+#define __NR_tgkill			1235
+#define __NR_exit_group			1236
+#define __NR_lookup_dcookie		1237
+#define __NR_io_setup			1238
+#define __NR_io_destroy			1239
+#define __NR_io_getevents		1240
+#define __NR_io_submit			1241
+#define __NR_io_cancel			1242
+#define __NR_epoll_create		1243
+#define __NR_epoll_ctl			1244
+#define __NR_epoll_wait			1245
+#define __NR_restart_syscall		1246
+#define __NR_semtimedop			1247
+#define __NR_sys_timer_create		1248
+#define __NR_sys_timer_settime		1249
+#define __NR_sys_timer_gettime		1250
+#define __NR_sys_timer_getoverrun	1251
+#define __NR_sys_timer_delete		1252
+#define __NR_sys_clock_settime		1253
+#define __NR_sys_clock_gettime		1254
+#define __NR_sys_clock_getres		1255
+#define __NR_sys_clock_nanosleep	1256
+#define __NR_sys_fstatfs64		1257
+#define __NR_sys_statfs64		1258
+
+#ifdef __KERNEL__
+
+#define NR_syscalls			256 /* length of syscall table */
 
 #if !defined(__ASSEMBLY__) && !defined(ASSEMBLER)
 
@@ -281,7 +327,8 @@ name (type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)			\
 
 #ifdef __KERNEL_SYSCALLS__
 
-static inline _syscall0(int,sync)
+struct rusage;
+
 static inline _syscall0(pid_t,setsid)
 static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
 static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
@@ -291,7 +338,6 @@ static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
 static inline _syscall3(int,open,const char *,file,int,flag,int,mode)
 static inline _syscall1(int,close,int,fd)
 static inline _syscall4(pid_t,wait4,pid_t,pid,int *,wait_stat,int,options,struct rusage*, rusage)
-static inline _syscall1(int,delete_module,const char *,name)
 static inline _syscall2(pid_t,clone,unsigned long,flags,void*,sp);
 
 #define __NR__exit __NR_exit
@@ -303,12 +349,17 @@ waitpid (int pid, int *wait_stat, int flags)
 	return wait4(pid, wait_stat, flags, NULL);
 }
 
-static inline pid_t
-wait (int * wait_stat)
-{
-	return wait4(-1, wait_stat, 0, 0);
-}
-
 #endif /* __KERNEL_SYSCALLS__ */
+
+/*
+ * "Conditional" syscalls
+ *
+ * What we want is __attribute__((weak,alias("sys_ni_syscall"))), but it doesn't work on
+ * all toolchains, so we just do it by hand.  Note, this macro can only be used in the
+ * file which defines sys_ni_syscall, i.e., in kernel/sys.c.
+ */
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
+
 #endif /* !__ASSEMBLY__ */
+#endif /* __KERNEL__ */
 #endif /* _ASM_IA64_UNISTD_H */

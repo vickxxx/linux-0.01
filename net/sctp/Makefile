@@ -2,21 +2,22 @@
 # Makefile for SCTP support code.
 #
 
-O_TARGET := sctp.o
-
 obj-$(CONFIG_IP_SCTP) += sctp.o
 
-obj-y := endpointola.o output.o sm_make_chunk.o associola.o \
-	outqueue.o sm_sideeffect.o transport.o bind_addr.o input.o primitive.o \
-	sm_statefuns.o tsnmap.o command.o inqueue.o proc.o sm_statetable.o \
-	ulpevent.o protocol.o socket.o ulpqueue.o debug.o ssnmap.o \
-	crc32c.o chunk.o
+sctp-y := sm_statetable.o sm_statefuns.o sm_sideeffect.o \
+	  protocol.o endpointola.o associola.o \
+	  transport.o chunk.o sm_make_chunk.o ulpevent.o \
+	  inqueue.o outqueue.o ulpqueue.o command.o \
+	  tsnmap.o bind_addr.o socket.o primitive.o \
+	  output.o input.o debug.o ssnmap.o proc.o
 
-obj-$(CONFIG_SCTP_DBG_OBJCNT) += objcnt.o
-obj-$(CONFIG_SYSCTL) += sysctl.o
+ifeq ($(CONFIG_SCTP_ADLER32), y)
+sctp-y += adler32.o
+else
+sctp-y += crc32c.o
+endif
 
-obj-$(subst m,y,$(CONFIG_IPV6))	+= ipv6.o
+sctp-$(CONFIG_SCTP_DBG_OBJCNT) += objcnt.o
+sctp-$(CONFIG_SYSCTL) += sysctl.o
 
-sctp-objs := $(obj-y)
-
-include $(TOPDIR)/Rules.make
+sctp-$(subst m,y,$(CONFIG_IPV6))	+= ipv6.o

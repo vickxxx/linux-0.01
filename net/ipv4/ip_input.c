@@ -5,7 +5,7 @@
  *
  *		The Internet Protocol (IP) module.
  *
- * Version:	$Id: ip_input.c,v 1.54.2.1 2002/01/12 07:39:23 davem Exp $
+ * Version:	$Id: ip_input.c,v 1.55 2002/01/12 07:39:45 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -141,6 +141,7 @@
 #include <net/raw.h>
 #include <net/checksum.h>
 #include <linux/netfilter_ipv4.h>
+#include <net/xfrm.h>
 #include <linux/mroute.h>
 #include <linux/netlink.h>
 
@@ -148,7 +149,7 @@
  *	SNMP management statistics
  */
 
-struct ip_mib ip_statistics[NR_CPUS*2];
+DEFINE_SNMP_STAT(struct ip_mib, ip_statistics);
 
 /*
  *	Process Router Attention IP option
@@ -166,11 +167,11 @@ int ip_call_ra_chain(struct sk_buff *skb)
 		/* If socket is bound to an interface, only report
 		 * the packet if it came  from that interface.
 		 */
-		if (sk && sk->num == protocol 
-		    && ((sk->bound_dev_if == 0) 
-			|| (sk->bound_dev_if == skb->dev->ifindex))) {
+		if (sk && inet_sk(sk)->num == protocol &&
+		    (!sk->sk_bound_dev_if ||
+		     sk->sk_bound_dev_if == skb->dev->ifindex)) {
 			if (skb->nh.iph->frag_off & htons(IP_MF|IP_OFFSET)) {
-				skb = ip_defrag(skb, IP_DEFRAG_CALL_RA_CHAIN);
+				skb = ip_defrag(skb);
 				if (skb == NULL) {
 					read_unlock(&ip_ra_lock);
 					return 1;
@@ -194,28 +195,6 @@ int ip_call_ra_chain(struct sk_buff *skb)
 	return 0;
 }
 
-/* Handle this out of line, it is rare. */
-static int ip_run_ipprot(struct sk_buff *skb, struct iphdr *iph,
-			 struct inet_protocol *ipprot, int force_copy)
-{
-	int ret = 0;
-
-	do {
-		if (ipprot->protocol == iph->protocol) {
-			struct sk_buff *skb2 = skb;
-			if (ipprot->copy || force_copy)
-				skb2 = skb_clone(skb, GFP_ATOMIC);
-			if(skb2 != NULL) {
-				ret = 1;
-				ipprot->handler(skb2);
-			}
-		}
-		ipprot = (struct inet_protocol *) ipprot->next;
-	} while(ipprot != NULL);
-
-	return ret;
-}
-
 static inline int ip_local_deliver_finish(struct sk_buff *skb)
 {
 	int ihl = skb->nh.iph->ihl*4;
@@ -226,57 +205,63 @@ static inline int ip_local_deliver_finish(struct sk_buff *skb)
 
 	__skb_pull(skb, ihl);
 
+#ifdef CONFIG_NETFILTER
 	/* Free reference early: we don't need it any more, and it may
            hold ip_conntrack module loaded indefinitely. */
-	nf_reset(skb);
+	nf_conntrack_put(skb->nfct);
+	skb->nfct = NULL;
+#endif /*CONFIG_NETFILTER*/
 
         /* Point into the IP datagram, just past the header. */
         skb->h.raw = skb->data;
 
+	rcu_read_lock();
 	{
 		/* Note: See raw.c and net/raw.h, RAWV4_HTABLE_SIZE==MAX_INET_PROTOS */
 		int protocol = skb->nh.iph->protocol;
-		int hash = protocol & (MAX_INET_PROTOS - 1);
-		struct sock *raw_sk = raw_v4_htable[hash];
+		int hash;
+		struct sock *raw_sk;
 		struct inet_protocol *ipprot;
-		int flag;
+
+	resubmit:
+		hash = protocol & (MAX_INET_PROTOS - 1);
+		raw_sk = sk_head(&raw_v4_htable[hash]);
 
 		/* If there maybe a raw socket we must check - if not we
 		 * don't care less
 		 */
-		if(raw_sk != NULL)
-			raw_sk = raw_v4_input(skb, skb->nh.iph, hash);
+		if (raw_sk)
+			raw_v4_input(skb, skb->nh.iph, hash);
 
-		ipprot = (struct inet_protocol *) inet_protos[hash];
-		flag = 0;
-		if(ipprot != NULL) {
-			if(raw_sk == NULL &&
-			   ipprot->next == NULL &&
-			   ipprot->protocol == protocol) {
-				int ret;
+		if ((ipprot = inet_protos[hash]) != NULL) {
+			int ret;
 
-				/* Fast path... */
-				ret = ipprot->handler(skb);
-
-				return ret;
-			} else {
-				flag = ip_run_ipprot(skb, skb->nh.iph, ipprot, (raw_sk != NULL));
+			smp_read_barrier_depends();
+			if (!ipprot->no_policy &&
+			    !xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+				kfree_skb(skb);
+				goto out;
 			}
-		}
-
-		/* All protocols checked.
-		 * If this packet was a broadcast, we may *not* reply to it, since that
-		 * causes (proven, grin) ARP storms and a leakage of memory (i.e. all
-		 * ICMP reply messages get queued up for transmission...)
-		 */
-		if(raw_sk != NULL) {	/* Shift to last raw user */
-			raw_rcv(raw_sk, skb);
-			sock_put(raw_sk);
-		} else if (!flag) {		/* Free and report errors */
-			icmp_send(skb, ICMP_DEST_UNREACH, ICMP_PROT_UNREACH, 0);	
+			ret = ipprot->handler(skb);
+			if (ret < 0) {
+				protocol = -ret;
+				goto resubmit;
+			}
+			IP_INC_STATS_BH(IpInDelivers);
+		} else {
+			if (!raw_sk) {
+				if (xfrm4_policy_check(NULL, XFRM_POLICY_IN, skb)) {
+					IP_INC_STATS_BH(IpInUnknownProtos);
+					icmp_send(skb, ICMP_DEST_UNREACH,
+						  ICMP_PROT_UNREACH, 0);
+				}
+			} else
+				IP_INC_STATS_BH(IpInDelivers);
 			kfree_skb(skb);
 		}
 	}
+ out:
+	rcu_read_unlock();
 
 	return 0;
 }
@@ -291,7 +276,7 @@ int ip_local_deliver(struct sk_buff *skb)
 	 */
 
 	if (skb->nh.iph->frag_off & htons(IP_MF|IP_OFFSET)) {
-		skb = ip_defrag(skb, IP_DEFRAG_LOCAL_DELIVER);
+		skb = ip_defrag(skb);
 		if (!skb)
 			return 0;
 	}
@@ -336,8 +321,10 @@ static inline int ip_rcv_finish(struct sk_buff *skb)
 		                                      --ANK (980813)
 		*/
 
-		if (skb_cow(skb, skb_headroom(skb)))
+		if (skb_cow(skb, skb_headroom(skb))) {
+			IP_INC_STATS_BH(IpInDiscards);
 			goto drop;
+		}
 		iph = skb->nh.iph;
 
 		if (ip_options_compile(NULL, skb))
@@ -361,7 +348,7 @@ static inline int ip_rcv_finish(struct sk_buff *skb)
 		}
 	}
 
-	return skb->dst->input(skb);
+	return dst_input(skb);
 
 inhdr_error:
 	IP_INC_STATS_BH(IpInHdrErrors);
@@ -385,8 +372,10 @@ int ip_rcv(struct sk_buff *skb, struct net_device *dev, struct packet_type *pt)
 
 	IP_INC_STATS_BH(IpInReceives);
 
-	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL)
+	if ((skb = skb_share_check(skb, GFP_ATOMIC)) == NULL) {
+		IP_INC_STATS_BH(IpInDiscards);
 		goto out;
+	}
 
 	if (!pskb_may_pull(skb, sizeof(struct iphdr)))
 		goto inhdr_error;

@@ -27,8 +27,10 @@ static int device_check(int host_no);
 #include <linux/blk.h>
 #include <asm/io.h>
 #include <linux/parport.h>
-#include "sd.h"
+#include <linux/workqueue.h>
+#include "scsi.h"
 #include "hosts.h"
+
 typedef struct {
     struct pardevice *dev;	/* Parport device entry         */
     int base;			/* Actual port address          */
@@ -36,7 +38,7 @@ typedef struct {
     int mode;			/* Transfer mode                */
     int host;			/* Host number (for proc)       */
     Scsi_Cmnd *cur_cmd;		/* Current queued command       */
-    struct tq_struct imm_tq;	/* Polling interrupt stuff       */
+    struct work_struct imm_tq;		/* Polling interrupt stuff       */
     unsigned long jstart;	/* Jiffies at start             */
     unsigned failed:1;		/* Failure flag                 */
     unsigned dp:1;		/* Data phase present           */
@@ -45,18 +47,9 @@ typedef struct {
 } imm_struct;
 
 #define IMM_EMPTY \
-{	dev:		NULL,		\
-	base:		-1,		\
-	base_hi:	0,		\
-	mode:		IMM_AUTODETECT,	\
-	host:		-1,		\
-	cur_cmd:	NULL,		\
-	imm_tq:		{ routine: imm_interrupt },    \
-	jstart:		0,		\
-	failed:		0,		\
-	dp:		0,		\
-	rd:		0,		\
-	p_busy:		0		\
+{	.base		= -1,		\
+	.mode		= IMM_AUTODETECT,	\
+	.host		= -1,		\
 }
 
 #include "imm.h"
@@ -114,7 +107,22 @@ static int imm_pb_claim(int host_no)
  *                   Parallel port probing routines                        *
  ***************************************************************************/
 
-static Scsi_Host_Template driver_template = IMM;
+static Scsi_Host_Template driver_template = {
+	.proc_name			= "imm",
+	.proc_info			= imm_proc_info,
+	.name				= "Iomega VPI2 (imm) interface",
+	.detect				= imm_detect,
+	.release			= imm_release,
+	.queuecommand			= imm_queuecommand,
+	.eh_abort_handler               = imm_abort,
+	.eh_bus_reset_handler           = imm_reset,
+	.eh_host_reset_handler          = imm_reset, 
+	.bios_param		        = imm_biosparam,
+	.this_id			= 7,
+	.sg_tablesize			= SG_ALL,
+	.cmd_per_lun			= 1,
+	.use_clustering			= ENABLE_CLUSTERING,
+};
 #include  "scsi_module.c"
 
 int imm_detect(Scsi_Host_Template * host)
@@ -124,11 +132,6 @@ int imm_detect(Scsi_Host_Template * host)
     int i, nhosts, try_again;
     struct parport *pb;
 
-    /*
-     * unlock to allow the lowlevel parport driver to probe
-     * the irqs
-     */
-    spin_unlock_irq(&io_request_lock);
     pb = parport_enumerate();
 
     printk("imm: Version %s\n", IMM_VERSION);
@@ -137,7 +140,6 @@ int imm_detect(Scsi_Host_Template * host)
 
     if (!pb) {
 	printk("imm: parport reports no devices.\n");
-	spin_lock_irq(&io_request_lock);
 	return 0;
     }
   retry_entry:
@@ -163,7 +165,6 @@ int imm_detect(Scsi_Host_Template * host)
 		      "pardevice is owning the port for too longtime!\n",
 			   i);
 		    parport_unregister_device (imm_hosts[i].dev);
-		    spin_lock_irq(&io_request_lock);
 		    return 0;
 		}
 	    }
@@ -188,6 +189,7 @@ int imm_detect(Scsi_Host_Template * host)
 	    parport_unregister_device(imm_hosts[i].dev);
 	    continue;
 	}
+
 	/* now the glue ... */
 	switch (imm_hosts[i].mode) {
 	case IMM_NIBBLE:
@@ -205,6 +207,8 @@ int imm_detect(Scsi_Host_Template * host)
 	    continue;
 	}
 
+	INIT_WORK(&imm_hosts[i].imm_tq, imm_interrupt, &imm_hosts[i]);
+	
 	host->can_queue = IMM_CAN_QUEUE;
 	host->sg_tablesize = imm_sg;
 	hreg = scsi_register(host, 0);
@@ -219,20 +223,18 @@ int imm_detect(Scsi_Host_Template * host)
     }
     if (nhosts == 0) {
 	if (try_again == 1) {
-	    spin_lock_irq(&io_request_lock);
 	    return 0;
 	}
 	try_again = 1;
 	goto retry_entry;
     } else {
-	spin_lock_irq (&io_request_lock);
 	return 1;		/* return number of hosts detected */
     }
 }
 
 /* This is to give the imm driver a way to modify the timings (and other
  * parameters) by writing to the /proc/scsi/imm/0 file.
- * Very simple method really... (To simple, no error checking :( )
+ * Very simple method really... (Too simple, no error checking :( )
  * Reason: Kernel hackers HATE having to unload and reload modules for
  * testing...
  * Also gives a method to use a script to obtain optimum timings (TODO)
@@ -250,14 +252,14 @@ static inline int imm_proc_write(int hostno, char *buffer, int length)
     return (-EINVAL);
 }
 
-int imm_proc_info(char *buffer, char **start, off_t offset,
-		  int length, int hostno, int inout)
+int imm_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t offset,
+		  int length, int inout)
 {
     int i;
     int len = 0;
 
     for (i = 0; i < 4; i++)
-	if (imm_hosts[i].host == hostno)
+	if (imm_hosts[i].host == host->host_no)
 	    break;
 
     if (inout)
@@ -747,7 +749,7 @@ static int imm_init(int host_no)
 
 static inline int imm_send_command(Scsi_Cmnd * cmd)
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
     int k;
 
     /* NOTE: IMM uses byte pairs */
@@ -772,7 +774,7 @@ static int imm_completion(Scsi_Cmnd * cmd)
      *  0     Told to schedule
      *  1     Finished data transfer
      */
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
     unsigned short ppb = IMM_BASE(host_no);
     unsigned long start_jiffies = jiffies;
 
@@ -834,7 +836,7 @@ static int imm_completion(Scsi_Cmnd * cmd)
 	    if (cmd->SCp.buffers_residual--) {
 		cmd->SCp.buffer++;
 		cmd->SCp.this_residual = cmd->SCp.buffer->length;
-		cmd->SCp.ptr = cmd->SCp.buffer->address;
+		cmd->SCp.ptr = page_address(cmd->SCp.buffer->page) + cmd->SCp.buffer->offset;
 
 		/*
 		 * Make sure that we transfer even number of bytes
@@ -855,39 +857,6 @@ static int imm_completion(Scsi_Cmnd * cmd)
     return 1;			/* FINISH_RETURN */
 }
 
-/* deprecated synchronous interface */
-int imm_command(Scsi_Cmnd * cmd)
-{
-    static int first_pass = 1;
-    int host_no = cmd->host->unique_id;
-
-    if (first_pass) {
-	printk("imm: using non-queuing interface\n");
-	first_pass = 0;
-    }
-    if (imm_hosts[host_no].cur_cmd) {
-	printk("IMM: bug in imm_command\n");
-	return 0;
-    }
-    imm_hosts[host_no].failed = 0;
-    imm_hosts[host_no].jstart = jiffies;
-    imm_hosts[host_no].cur_cmd = cmd;
-    cmd->result = DID_ERROR << 16;	/* default return code */
-    cmd->SCp.phase = 0;
-
-    imm_pb_claim(host_no);
-
-    while (imm_engine(&imm_hosts[host_no], cmd))
-	schedule();
-
-    if (cmd->SCp.phase)		/* Only disconnect if we have connected */
-	imm_disconnect(cmd->host->unique_id);
-
-    imm_pb_release(host_no);
-    imm_hosts[host_no].cur_cmd = 0;
-    return cmd->result;
-}
-
 /*
  * Since the IMM itself doesn't generate interrupts, we use
  * the scheduler's task queue to generate a stream of call-backs and
@@ -897,6 +866,7 @@ static void imm_interrupt(void *data)
 {
     imm_struct *tmp = (imm_struct *) data;
     Scsi_Cmnd *cmd = tmp->cur_cmd;
+    struct Scsi_Host *host = cmd->device->host;
     unsigned long flags;
 
     if (!cmd) {
@@ -904,9 +874,8 @@ static void imm_interrupt(void *data)
 	return;
     }
     if (imm_engine(tmp, cmd)) {
-	tmp->imm_tq.data = (void *) tmp;
-	tmp->imm_tq.sync = 0;
-	queue_task(&tmp->imm_tq, &tq_timer);
+	INIT_WORK(&tmp->imm_tq, imm_interrupt, (void *)tmp);
+	schedule_delayed_work(&tmp->imm_tq, 1);
 	return;
     }
     /* Command must of completed hence it is safe to let go... */
@@ -944,25 +913,25 @@ static void imm_interrupt(void *data)
 #endif
 
     if (cmd->SCp.phase > 1)
-	imm_disconnect(cmd->host->unique_id);
+	imm_disconnect(cmd->device->host->unique_id);
     if (cmd->SCp.phase > 0)
-	imm_pb_release(cmd->host->unique_id);
+	imm_pb_release(cmd->device->host->unique_id);
 
-    spin_lock_irqsave(&io_request_lock, flags);
+    spin_lock_irqsave(host->host_lock, flags);
     tmp->cur_cmd = 0;
     cmd->scsi_done(cmd);
-    spin_unlock_irqrestore(&io_request_lock, flags);
+    spin_unlock_irqrestore(host->host_lock, flags);
     return;
 }
 
 static int imm_engine(imm_struct * tmp, Scsi_Cmnd * cmd)
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
     unsigned short ppb = IMM_BASE(host_no);
     unsigned char l = 0, h = 0;
     int retv, x;
 
-    /* First check for any errors that may of occurred
+    /* First check for any errors that may have occurred
      * Here we check for internal errors
      */
     if (tmp->failed)
@@ -986,7 +955,7 @@ static int imm_engine(imm_struct * tmp, Scsi_Cmnd * cmd)
 
 	/* Phase 2 - We are now talking to the scsi bus */
     case 2:
-	if (!imm_select(host_no, cmd->target)) {
+	if (!imm_select(host_no, cmd->device->id)) {
 	    imm_fail(host_no, DID_NO_CONNECT);
 	    return 0;
 	}
@@ -1008,14 +977,14 @@ static int imm_engine(imm_struct * tmp, Scsi_Cmnd * cmd)
 	    /* if many buffers are available, start filling the first */
 	    cmd->SCp.buffer = (struct scatterlist *) cmd->request_buffer;
 	    cmd->SCp.this_residual = cmd->SCp.buffer->length;
-	    cmd->SCp.ptr = cmd->SCp.buffer->address;
+	    cmd->SCp.ptr = page_address(cmd->SCp.buffer->page) + cmd->SCp.buffer->offset;
 	} else {
 	    /* else fill the only available buffer */
 	    cmd->SCp.buffer = NULL;
 	    cmd->SCp.this_residual = cmd->request_bufflen;
 	    cmd->SCp.ptr = cmd->request_buffer;
 	}
-	cmd->SCp.buffers_residual = cmd->use_sg;
+	cmd->SCp.buffers_residual = cmd->use_sg - 1;
 	cmd->SCp.phase++;
 	if (cmd->SCp.this_residual & 0x01)
 	    cmd->SCp.this_residual++;
@@ -1096,7 +1065,7 @@ static int imm_engine(imm_struct * tmp, Scsi_Cmnd * cmd)
 
 int imm_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
 
     if (imm_hosts[host_no].cur_cmd) {
 	printk("IMM: bug in imm_queuecommand\n");
@@ -1111,36 +1080,35 @@ int imm_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 
     imm_pb_claim(host_no);
 
-    imm_hosts[host_no].imm_tq.data = imm_hosts + host_no;
-    imm_hosts[host_no].imm_tq.sync = 0;
-    queue_task(&imm_hosts[host_no].imm_tq, &tq_immediate);
-    mark_bh(IMMEDIATE_BH);
+    INIT_WORK(&imm_hosts[host_no].imm_tq, imm_interrupt, imm_hosts + host_no);
+    schedule_work(&imm_hosts[host_no].imm_tq);
 
     return 0;
 }
 
 /*
- * Apparently the the disk->capacity attribute is off by 1 sector 
+ * Apparently the disk->capacity attribute is off by 1 sector 
  * for all disk drives.  We add the one here, but it should really
  * be done in sd.c.  Even if it gets fixed there, this will still
  * work.
  */
-int imm_biosparam(Disk * disk, kdev_t dev, int ip[])
+int imm_biosparam(struct scsi_device *sdev, struct block_device *dev,
+		sector_t capacity, int ip[])
 {
     ip[0] = 0x40;
     ip[1] = 0x20;
-    ip[2] = (disk->capacity + 1) / (ip[0] * ip[1]);
+    ip[2] = ((unsigned long)capacity + 1) / (ip[0] * ip[1]);
     if (ip[2] > 1024) {
 	ip[0] = 0xff;
 	ip[1] = 0x3f;
-	ip[2] = (disk->capacity + 1) / (ip[0] * ip[1]);
+	ip[2] = ((unsigned long)capacity + 1) / (ip[0] * ip[1]);
     }
     return 0;
 }
 
 int imm_abort(Scsi_Cmnd * cmd)
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
     /*
      * There is no method for aborting commands since Iomega
      * have tied the SCSI_MESSAGE line high in the interface
@@ -1172,7 +1140,7 @@ void imm_reset_pulse(unsigned int base)
 
 int imm_reset(Scsi_Cmnd * cmd)
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
 
     if (cmd->SCp.phase)
 	imm_disconnect(host_no);

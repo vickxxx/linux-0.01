@@ -18,7 +18,8 @@
 #include <linux/blk.h>
 #include <asm/io.h>
 #include <linux/parport.h>
-#include "sd.h"
+#include <linux/workqueue.h>
+#include "scsi.h"
 #include "hosts.h"
 int ppa_release(struct Scsi_Host *);
 static void ppa_reset_pulse(unsigned int base);
@@ -29,7 +30,7 @@ typedef struct {
     int mode;			/* Transfer mode                */
     int host;			/* Host number (for proc)       */
     Scsi_Cmnd *cur_cmd;		/* Current queued command       */
-    struct tq_struct ppa_tq;	/* Polling interrupt stuff       */
+    struct work_struct ppa_tq;	/* Polling interrupt stuff       */
     unsigned long jstart;	/* Jiffies at start             */
     unsigned long recon_tmo;    /* How many usecs to wait for reconnection (6th bit) */
     unsigned int failed:1;	/* Failure flag                 */
@@ -37,16 +38,11 @@ typedef struct {
 } ppa_struct;
 
 #define PPA_EMPTY	\
-{	dev:		NULL,		\
-	base:		-1,		\
-	mode:		PPA_AUTODETECT,	\
-	host:		-1,		\
-	cur_cmd:	NULL,		\
-	ppa_tq:		{ routine: ppa_interrupt },	\
-	jstart:		0,		\
-	recon_tmo:      PPA_RECON_TMO,	\
-	failed:		0,		\
-	p_busy:		0		\
+{	.base		= -1,		\
+	.mode		= PPA_AUTODETECT,	\
+	.host		= -1,		\
+	.ppa_tq		= { .func = ppa_interrupt },	\
+	.recon_tmo      = PPA_RECON_TMO,	\
 }
 
 #include  "ppa.h"
@@ -101,7 +97,22 @@ static int ppa_pb_claim(int host_no)
  *                   Parallel port probing routines                        *
  ***************************************************************************/
 
-static Scsi_Host_Template driver_template = PPA;
+static Scsi_Host_Template driver_template = {
+	.proc_name			= "ppa",
+	.proc_info			= ppa_proc_info,
+	.name				= "Iomega VPI0 (ppa) interface",
+	.detect				= ppa_detect,
+	.release			= ppa_release,
+	.queuecommand			= ppa_queuecommand,
+	.eh_abort_handler		= ppa_abort,
+	.eh_bus_reset_handler		= ppa_reset,
+	.eh_host_reset_handler		= ppa_reset,
+	.bios_param			= ppa_biosparam,
+	.this_id			= -1,
+	.sg_tablesize			= SG_ALL,
+	.cmd_per_lun			= 1,
+	.use_clustering			= ENABLE_CLUSTERING,
+};
 #include  "scsi_module.c"
 
 /*
@@ -110,7 +121,7 @@ static Scsi_Host_Template driver_template = PPA;
 
 int ppa_detect(Scsi_Host_Template * host)
 {
-    struct Scsi_Host *hreg;
+    struct Scsi_Host *hreg = NULL;
     int ports;
     int i, nhosts, try_again;
     struct parport *pb;
@@ -119,7 +130,6 @@ int ppa_detect(Scsi_Host_Template * host)
      * unlock to allow the lowlevel parport driver to probe
      * the irqs
      */
-    spin_unlock_irq(&io_request_lock);
     pb = parport_enumerate();
 
     printk("ppa: Version %s\n", PPA_VERSION);
@@ -128,7 +138,6 @@ int ppa_detect(Scsi_Host_Template * host)
 
     if (!pb) {
 	printk("ppa: parport reports no devices.\n");
-	spin_lock_irq(&io_request_lock);
 	return 0;
     }
   retry_entry:
@@ -154,7 +163,7 @@ int ppa_detect(Scsi_Host_Template * host)
 		      "pardevice is owning the port for too longtime!\n",
 			   i);
 		    parport_unregister_device(ppa_hosts[i].dev);
-		    spin_lock_irq(&io_request_lock);
+		    spin_lock_irq(ppa_hosts[i].cur_cmd->device->host->host_lock);
 		    return 0;
 		}
 	    }
@@ -202,6 +211,8 @@ int ppa_detect(Scsi_Host_Template * host)
 	default:		/* Never gets here */
 	    continue;
 	}
+	
+	INIT_WORK(&ppa_hosts[i].ppa_tq, ppa_interrupt, &ppa_hosts[i]);
 
 	host->can_queue = PPA_CAN_QUEUE;
 	host->sg_tablesize = ppa_sg;
@@ -223,15 +234,12 @@ int ppa_detect(Scsi_Host_Template * host)
 	    printk("  supported by the imm (ZIP Plus) driver. If the\n");
 	    printk("  cable is marked with \"AutoDetect\", this is what has\n");
 	    printk("  happened.\n");
-	    spin_lock_irq(&io_request_lock);
 	    return 0;
 	}
 	try_again = 1;
 	goto retry_entry;
-    } else {
-	spin_lock_irq(&io_request_lock);
+    } else
 	return 1;		/* return number of hosts detected */
-    }
 }
 
 /* This is to give the ppa driver a way to modify the timings (and other
@@ -261,14 +269,14 @@ static inline int ppa_proc_write(int hostno, char *buffer, int length)
     return (-EINVAL);
 }
 
-int ppa_proc_info(char *buffer, char **start, off_t offset,
-		  int length, int hostno, int inout)
+int ppa_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t offset,
+		  int length, int inout)
 {
     int i;
     int len = 0;
 
     for (i = 0; i < 4; i++)
-	if (ppa_hosts[i].host == hostno)
+	if (ppa_hosts[i].host == host->host_no)
 	    break;
 
     if (inout)
@@ -639,7 +647,7 @@ static int ppa_init(int host_no)
 
 static inline int ppa_send_command(Scsi_Cmnd * cmd)
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
     int k;
 
     w_ctr(PPA_BASE(host_no), 0x0c);
@@ -665,7 +673,7 @@ static int ppa_completion(Scsi_Cmnd * cmd)
      *  0     Told to schedule
      *  1     Finished data transfer
      */
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
     unsigned short ppb = PPA_BASE(host_no);
     unsigned long start_jiffies = jiffies;
 
@@ -704,7 +712,7 @@ static int ppa_completion(Scsi_Cmnd * cmd)
 	 * change things for "normal" hardware since generally 
 	 * the 6th bit is always high.
 	 * This makes the CPU load higher on some hardware 
-	 * but otherwise we can not get more then 50K/secs 
+	 * but otherwise we can not get more than 50K/secs 
 	 * on this problem hardware.
 	 */
 	if ((r & 0xc0) != 0xc0) {
@@ -740,7 +748,7 @@ static int ppa_completion(Scsi_Cmnd * cmd)
 	    if (cmd->SCp.buffers_residual--) {
 		cmd->SCp.buffer++;
 		cmd->SCp.this_residual = cmd->SCp.buffer->length;
-		cmd->SCp.ptr = cmd->SCp.buffer->address;
+		cmd->SCp.ptr = page_address(cmd->SCp.buffer->page) + cmd->SCp.buffer->offset;
 	    }
 	}
 	/* Now check to see if the drive is ready to comunicate */
@@ -750,39 +758,6 @@ static int ppa_completion(Scsi_Cmnd * cmd)
 	    return 0;
     }
     return 1;			/* FINISH_RETURN */
-}
-
-/* deprecated synchronous interface */
-int ppa_command(Scsi_Cmnd * cmd)
-{
-    static int first_pass = 1;
-    int host_no = cmd->host->unique_id;
-
-    if (first_pass) {
-	printk("ppa: using non-queuing interface\n");
-	first_pass = 0;
-    }
-    if (ppa_hosts[host_no].cur_cmd) {
-	printk("PPA: bug in ppa_command\n");
-	return 0;
-    }
-    ppa_hosts[host_no].failed = 0;
-    ppa_hosts[host_no].jstart = jiffies;
-    ppa_hosts[host_no].cur_cmd = cmd;
-    cmd->result = DID_ERROR << 16;	/* default return code */
-    cmd->SCp.phase = 0;
-
-    ppa_pb_claim(host_no);
-
-    while (ppa_engine(&ppa_hosts[host_no], cmd))
-	schedule();
-
-    if (cmd->SCp.phase)		/* Only disconnect if we have connected */
-	ppa_disconnect(cmd->host->unique_id);
-
-    ppa_pb_release(host_no);
-    ppa_hosts[host_no].cur_cmd = 0;
-    return cmd->result;
 }
 
 /*
@@ -802,8 +777,7 @@ static void ppa_interrupt(void *data)
     }
     if (ppa_engine(tmp, cmd)) {
 	tmp->ppa_tq.data = (void *) tmp;
-	tmp->ppa_tq.sync = 0;
-	queue_task(&tmp->ppa_tq, &tq_timer);
+	schedule_delayed_work(&tmp->ppa_tq, 1);
 	return;
     }
     /* Command must of completed hence it is safe to let go... */
@@ -812,7 +786,7 @@ static void ppa_interrupt(void *data)
     case DID_OK:
 	break;
     case DID_NO_CONNECT:
-	printk("ppa: no device at SCSI ID %i\n", cmd->target);
+	printk("ppa: no device at SCSI ID %i\n", cmd->device->target);
 	break;
     case DID_BUS_BUSY:
 	printk("ppa: BUS BUSY - EPP timeout detected\n");
@@ -841,21 +815,21 @@ static void ppa_interrupt(void *data)
 #endif
 
     if (cmd->SCp.phase > 1)
-	ppa_disconnect(cmd->host->unique_id);
+	ppa_disconnect(cmd->device->host->unique_id);
     if (cmd->SCp.phase > 0)
-	ppa_pb_release(cmd->host->unique_id);
+	ppa_pb_release(cmd->device->host->unique_id);
 
     tmp->cur_cmd = 0;
     
-    spin_lock_irqsave(&io_request_lock, flags);
+    spin_lock_irqsave(cmd->device->host->host_lock, flags);
     cmd->scsi_done(cmd);
-    spin_unlock_irqrestore(&io_request_lock, flags);
+    spin_unlock_irqrestore(cmd->device->host->host_lock, flags);
     return;
 }
 
 static int ppa_engine(ppa_struct * tmp, Scsi_Cmnd * cmd)
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
     unsigned short ppb = PPA_BASE(host_no);
     unsigned char l = 0, h = 0;
     int retv;
@@ -905,7 +879,7 @@ static int ppa_engine(ppa_struct * tmp, Scsi_Cmnd * cmd)
 	}
 
     case 2:			/* Phase 2 - We are now talking to the scsi bus */
-	if (!ppa_select(host_no, cmd->target)) {
+	if (!ppa_select(host_no, cmd->device->id)) {
 	    ppa_fail(host_no, DID_NO_CONNECT);
 	    return 0;
 	}
@@ -925,14 +899,14 @@ static int ppa_engine(ppa_struct * tmp, Scsi_Cmnd * cmd)
 	    /* if many buffers are available, start filling the first */
 	    cmd->SCp.buffer = (struct scatterlist *) cmd->request_buffer;
 	    cmd->SCp.this_residual = cmd->SCp.buffer->length;
-	    cmd->SCp.ptr = cmd->SCp.buffer->address;
+	    cmd->SCp.ptr = page_address(cmd->SCp.buffer->page) + cmd->SCp.buffer->offset;
 	} else {
 	    /* else fill the only available buffer */
 	    cmd->SCp.buffer = NULL;
 	    cmd->SCp.this_residual = cmd->request_bufflen;
 	    cmd->SCp.ptr = cmd->request_buffer;
 	}
-	cmd->SCp.buffers_residual = cmd->use_sg;
+	cmd->SCp.buffers_residual = cmd->use_sg - 1;
 	cmd->SCp.phase++;
 
     case 5:			/* Phase 5 - Data transfer stage */
@@ -971,7 +945,7 @@ static int ppa_engine(ppa_struct * tmp, Scsi_Cmnd * cmd)
 
 int ppa_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
 
     if (ppa_hosts[host_no].cur_cmd) {
 	printk("PPA: bug in ppa_queuecommand\n");
@@ -987,28 +961,27 @@ int ppa_queuecommand(Scsi_Cmnd * cmd, void (*done) (Scsi_Cmnd *))
     ppa_pb_claim(host_no);
 
     ppa_hosts[host_no].ppa_tq.data = ppa_hosts + host_no;
-    ppa_hosts[host_no].ppa_tq.sync = 0;
-    queue_task(&ppa_hosts[host_no].ppa_tq, &tq_immediate);
-    mark_bh(IMMEDIATE_BH);
+    schedule_work(&ppa_hosts[host_no].ppa_tq);
 
     return 0;
 }
 
 /*
- * Apparently the the disk->capacity attribute is off by 1 sector 
+ * Apparently the disk->capacity attribute is off by 1 sector 
  * for all disk drives.  We add the one here, but it should really
  * be done in sd.c.  Even if it gets fixed there, this will still
  * work.
  */
-int ppa_biosparam(Disk * disk, kdev_t dev, int ip[])
+int ppa_biosparam(struct scsi_device *sdev, struct block_device *dev,
+		sector_t capacity, int ip[])
 {
     ip[0] = 0x40;
     ip[1] = 0x20;
-    ip[2] = (disk->capacity + 1) / (ip[0] * ip[1]);
+    ip[2] = ((unsigned long)capacity + 1) / (ip[0] * ip[1]);
     if (ip[2] > 1024) {
 	ip[0] = 0xff;
 	ip[1] = 0x3f;
-	ip[2] = (disk->capacity + 1) / (ip[0] * ip[1]);
+	ip[2] = ((unsigned long)capacity + 1) / (ip[0] * ip[1]);
 	if (ip[2] > 1023)
 	    ip[2] = 1023;
     }
@@ -1017,7 +990,7 @@ int ppa_biosparam(Disk * disk, kdev_t dev, int ip[])
 
 int ppa_abort(Scsi_Cmnd * cmd)
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
     /*
      * There is no method for aborting commands since Iomega
      * have tied the SCSI_MESSAGE line high in the interface
@@ -1045,7 +1018,7 @@ static void ppa_reset_pulse(unsigned int base)
 
 int ppa_reset(Scsi_Cmnd * cmd)
 {
-    int host_no = cmd->host->unique_id;
+    int host_no = cmd->device->host->unique_id;
 
     if (cmd->SCp.phase)
 	ppa_disconnect(host_no);

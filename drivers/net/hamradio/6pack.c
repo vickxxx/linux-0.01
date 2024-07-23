@@ -113,7 +113,7 @@ struct sixpack {
 
 	/* 6pack stuff */
 	unsigned char		tx_delay;
-	unsigned char		persistance;
+	unsigned char		persistence;
 	unsigned char		slottime;
 	unsigned char		duplex;
 	unsigned char		led_state;
@@ -256,6 +256,7 @@ static void sp_bump(struct sixpack *sp, char cmd)
 	skb->mac.raw = skb->data;
 	skb->protocol = htons(ETH_P_AX25);
 	netif_rx(skb);
+	sp->dev->last_rx = jiffies;
 	sp->stats.rx_packets++;
 }
 
@@ -301,7 +302,7 @@ static void sp_encaps(struct sixpack *sp, unsigned char *icp, int len)
 
 	switch (p[0]) {
 		case 1:	sp->tx_delay = p[1];		return;
-		case 2:	sp->persistance = p[1];		return;
+		case 2:	sp->persistence = p[1];		return;
 		case 3: sp->slottime = p[1];		return;
 		case 4: /* ignored */			return;
 		case 5: sp->duplex = p[1];		return;
@@ -314,13 +315,13 @@ static void sp_encaps(struct sixpack *sp, unsigned char *icp, int len)
 		   immediately after data has arrived. */
 		if (sp->duplex == 1) {
 			sp->led_state = 0x70;
-			sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
+			sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
 			sp->tx_enable = 1;
-			actual = sp->tty->driver.write(sp->tty, 0, sp->xbuff, count);
+			actual = sp->tty->driver->write(sp->tty, 0, sp->xbuff, count);
 			sp->xleft = count - actual;
 			sp->xhead = sp->xbuff + actual;
 			sp->led_state = 0x60;
-			sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
+			sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
 		} else {
 			sp->xleft = count;
 			sp->xhead = sp->xbuff;
@@ -356,7 +357,7 @@ static void sixpack_write_wakeup(struct tty_struct *tty)
 	}
 
 	if (sp->tx_enable == 1) {
-		actual = tty->driver.write(tty, 0, sp->xhead, sp->xleft);
+		actual = tty->driver->write(tty, 0, sp->xhead, sp->xleft);
 		sp->xleft -= actual;
 		sp->xhead += actual;
 	}
@@ -391,15 +392,15 @@ static void sp_xmit_on_air(unsigned long channel)
 
 	random = random * 17 + 41;
 
-	if (((sp->status1 & SIXP_DCD_MASK) == 0) && (random < sp->persistance)) {
+	if (((sp->status1 & SIXP_DCD_MASK) == 0) && (random < sp->persistence)) {
 		sp->led_state = 0x70;
-		sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
+		sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
 		sp->tx_enable = 1;
-		actual = sp->tty->driver.write(sp->tty, 0, sp->xbuff, sp->status2);
+		actual = sp->tty->driver->write(sp->tty, 0, sp->xbuff, sp->status2);
 		sp->xleft -= actual;
 		sp->xhead += actual;
 		sp->led_state = 0x60;
-		sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
+		sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
 		sp->status2 = 0;
 	} else
 		sp_start_tx_timer(sp);
@@ -468,7 +469,7 @@ static int sp_open(struct net_device *dev)
 
 	sp->duplex = 0;
 	sp->tx_delay    = SIXP_TXDELAY;
-	sp->persistance = SIXP_PERSIST;
+	sp->persistence = SIXP_PERSIST;
 	sp->slottime    = SIXP_SLOTTIME;
 	sp->led_state   = 0x60;
 	sp->status      = 1;
@@ -565,8 +566,8 @@ static int sixpack_open(struct tty_struct *tty)
 		return -ENFILE;
 	sp->tty = tty;
 	tty->disc_data = sp;
-	if (tty->driver.flush_buffer)
-		tty->driver.flush_buffer(tty);
+	if (tty->driver->flush_buffer)
+		tty->driver->flush_buffer(tty);
 
 	if (tty->ldisc.flush_buffer)
 		tty->ldisc.flush_buffer(tty);
@@ -686,21 +687,20 @@ static int sp_open_dev(struct net_device *dev)
 
 /* Fill in our line protocol discipline */
 static struct tty_ldisc sp_ldisc = {
-	magic:		TTY_LDISC_MAGIC,
-	name:		"6pack",
-	open:		sixpack_open,
-	close:		sixpack_close,
-	ioctl:		(int (*)(struct tty_struct *, struct file *,
+	.magic	= TTY_LDISC_MAGIC,
+	.name		= "6pack",
+	.open		= sixpack_open,
+	.close	= sixpack_close,
+	.ioctl	= (int (*)(struct tty_struct *, struct file *,
 			unsigned int, unsigned long)) sixpack_ioctl,
-	receive_buf:	sixpack_receive_buf,
-	receive_room:	sixpack_receive_room,
-	write_wakeup:	sixpack_write_wakeup,
+	.receive_buf	= sixpack_receive_buf,
+	.receive_room	= sixpack_receive_room,
+	.write_wakeup	= sixpack_write_wakeup,
 };
 
 /* Initialize 6pack control device -- register 6pack line discipline */
 
 static char msg_banner[]  __initdata = KERN_INFO "AX.25: 6pack driver, " SIXPACK_VERSION " (dynamic channels, max=%d)\n";
-static char msg_invparm[] __initdata = KERN_ERR  "6pack: sixpack_maxdev parameter too large.\n";
 static char msg_nomem[]   __initdata = KERN_ERR  "6pack: can't allocate sixpack_ctrls[] array! No 6pack available.\n";
 static char msg_regfail[] __initdata = KERN_ERR  "6pack: can't register line discipline (err = %d)\n";
 
@@ -882,7 +882,7 @@ static int tnc_init(struct sixpack *sp)
 {
 	unsigned char inbyte = 0xe8;
 
-	sp->tty->driver.write(sp->tty, 0, &inbyte, 1);
+	sp->tty->driver->write(sp->tty, 0, &inbyte, 1);
 
 	del_timer(&sp->resync_t);
 	sp->resync_t.data = (unsigned long) sp;
@@ -924,9 +924,9 @@ static void decode_prio_command(unsigned char cmd, struct sixpack *sp)
 	else { /* output watchdog char if idle */
 		if ((sp->status2 != 0) && (sp->duplex == 1)) {
 			sp->led_state = 0x70;
-			sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
+			sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
 			sp->tx_enable = 1;
-			actual = sp->tty->driver.write(sp->tty, 0, sp->xbuff, sp->status2);
+			actual = sp->tty->driver->write(sp->tty, 0, sp->xbuff, sp->status2);
 			sp->xleft -= actual;
 			sp->xhead += actual;
 			sp->led_state = 0x60;
@@ -936,7 +936,7 @@ static void decode_prio_command(unsigned char cmd, struct sixpack *sp)
 	}
 
 	/* needed to trigger the TNC watchdog */
-	sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
+	sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
 
         /* if the state byte has been received, the TNC is present,
            so the resync timer can be reset. */
@@ -977,8 +977,8 @@ static void resync_tnc(unsigned long channel)
 	/* resync the TNC */
 
 	sp->led_state = 0x60;
-	sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
-	sp->tty->driver.write(sp->tty, 0, &resync_cmd, 1);
+	sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
+	sp->tty->driver->write(sp->tty, 0, &resync_cmd, 1);
 
 
 	/* Start resync timer again -- the TNC might be still absent */
@@ -1006,12 +1006,12 @@ static void decode_std_command(unsigned char cmd, struct sixpack *sp)
 				if ((sp->status & SIXP_RX_DCD_MASK) ==
 					SIXP_RX_DCD_MASK) {
 					sp->led_state = 0x68;
-					sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
+					sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
 				}
 			} else {
 				sp->led_state = 0x60;
 				/* fill trailing bytes with zeroes */
-				sp->tty->driver.write(sp->tty, 0, &sp->led_state, 1);
+				sp->tty->driver->write(sp->tty, 0, &sp->led_state, 1);
 				rest = sp->rx_count;
 				if (rest != 0)
 					 for (i = rest; i <= 3; i++)
@@ -1063,6 +1063,7 @@ static void decode_data(unsigned char inbyte, struct sixpack *sp)
 
 MODULE_AUTHOR("Andreas Könsgen <ajk@ccac.rwth-aachen.de>");
 MODULE_DESCRIPTION("6pack driver for AX.25");
+MODULE_LICENSE("GPL");
 
 module_init(sixpack_init_driver);
 module_exit(sixpack_exit_driver);

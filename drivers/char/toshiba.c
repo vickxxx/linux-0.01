@@ -84,8 +84,6 @@ static int tosh_fn = 0;
 
 MODULE_PARM(tosh_fn, "i");
 
-MODULE_LICENSE("GPL");
-
 
 static int tosh_get_info(char *, char **, off_t, int);
 static int tosh_ioctl(struct inode *, struct file *, unsigned int,
@@ -93,8 +91,8 @@ static int tosh_ioctl(struct inode *, struct file *, unsigned int,
 
 
 static struct file_operations tosh_fops = {
-	owner:		THIS_MODULE,
-	ioctl:		tosh_ioctl,
+	.owner		= THIS_MODULE,
+	.ioctl		= tosh_ioctl,
 };
 
 static struct miscdevice tosh_device = {
@@ -114,11 +112,10 @@ static int tosh_fn_status(void)
 	if (tosh_fn!=0) {
 		scan = inb(tosh_fn);
 	} else {
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		outb(0x8e, 0xe4);
 		scan = inb(0xe5);
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
 
         return (int) scan;
@@ -141,35 +138,32 @@ static int tosh_emulate_fan(SMMRegisters *regs)
 	if (tosh_id==0xfccb) {
 		if (eax==0xfe00) {
 			/* fan status */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xbe, 0xe4);
 			al = inb(0xe5);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = (unsigned int) (al & 0x01);
 		}
 		if ((eax==0xff00) && (ecx==0x0000)) {
 			/* fan off */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xbe, 0xe4);
 			al = inb(0xe5);
 			outb(0xbe, 0xe4);
 			outb (al | 0x01, 0xe5);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = 0x00;
 		}
 		if ((eax==0xff00) && (ecx==0x0001)) {
 			/* fan on */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xbe, 0xe4);
 			al = inb(0xe5);
 			outb(0xbe, 0xe4);
 			outb(al & 0xfe, 0xe5);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = 0x01;
 		}
@@ -180,33 +174,30 @@ static int tosh_emulate_fan(SMMRegisters *regs)
 	if (tosh_id==0xfccc) {
 		if (eax==0xfe00) {
 			/* fan status */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xe0, 0xe4);
 			al = inb(0xe5);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = al & 0x01;
 		}
 		if ((eax==0xff00) && (ecx==0x0000)) {
 			/* fan off */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xe0, 0xe4);
 			al = inb(0xe5);
 			outw(0xe0 | ((al & 0xfe) << 8), 0xe4);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = 0x00;
 		}
 		if ((eax==0xff00) && (ecx==0x0001)) {
 			/* fan on */
-			save_flags(flags);
-			cli();
+			local_irq_save(flags);
 			outb(0xe0, 0xe4);
 			al = inb(0xe5);
 			outw(0xe0 | ((al | 0x01) << 8), 0xe4);
-			restore_flags(flags);
+			local_irq_restore(flags);
 			regs->eax = 0x00;
 			regs->ecx = 0x01;
 		}
@@ -219,7 +210,7 @@ static int tosh_emulate_fan(SMMRegisters *regs)
 /*
  * Put the laptop into System Management Mode
  */
-static int tosh_smm(SMMRegisters *regs)
+int tosh_smm(SMMRegisters *regs)
 {
 	int eax;
 
@@ -483,6 +474,7 @@ int tosh_probe(void)
 
 int __init tosh_init(void)
 {
+	int retval;
 	/* are we running on a Toshiba laptop */
 
 	if (tosh_probe()!=0)
@@ -492,17 +484,21 @@ int __init tosh_init(void)
 		TOSH_VERSION"\n");
 
 	/* set the port to use for Fn status if not specified as a parameter */
-
 	if (tosh_fn==0x00)
 		tosh_set_fn_port();
 
 	/* register the device file */
+	retval = misc_register(&tosh_device);
+	if(retval < 0)
+		return retval;
 
-	misc_register(&tosh_device);
-
+#ifdef CONFIG_PROC_FS
 	/* register the proc entry */
-
-	create_proc_info_entry("toshiba", 0, NULL, tosh_get_info);
+	if(create_proc_info_entry("toshiba", 0, NULL, tosh_get_info) == NULL){
+		misc_deregister(&tosh_device);
+		return -ENOMEM;
+	}
+#endif
 
 	return 0;
 }
@@ -524,3 +520,10 @@ void cleanup_module(void)
 	misc_deregister(&tosh_device);
 }
 #endif
+
+MODULE_LICENSE("GPL");
+MODULE_PARM_DESC(tosh_fn, "User specified Fn key detection port");
+MODULE_AUTHOR("Jonathan Buzzard <jonathan@buzzard.org.uk>");
+MODULE_DESCRIPTION("Toshiba laptop SMM driver");
+MODULE_SUPPORTED_DEVICE("toshiba");
+

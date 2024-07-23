@@ -14,20 +14,11 @@
  *
  */
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/init.h>
 #include "hisax.h"
 
 #define FSM_TIMER_DEBUG 0
-
-EXPORT_SYMBOL(FsmNew);
-EXPORT_SYMBOL(FsmFree);
-EXPORT_SYMBOL(FsmEvent);
-EXPORT_SYMBOL(FsmChangeState);
-EXPORT_SYMBOL(FsmInitTimer);
-EXPORT_SYMBOL(FsmDelTimer);
-EXPORT_SYMBOL(FsmRestartTimer);
 
 int __init
 FsmNew(struct Fsm *fsm, struct FsmNode *fnlist, int fncount)

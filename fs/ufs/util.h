@@ -6,6 +6,7 @@
  * Charles University, Faculty of Mathematics and Physics
  */
 
+#include <linux/buffer_head.h>
 #include <linux/fs.h>
 #include "swab.h"
 
@@ -24,13 +25,13 @@
 
 
 /*
- * macros used for accesing structures
+ * macros used for accessing structures
  */
 static inline s32
 ufs_get_fs_state(struct super_block *sb, struct ufs_super_block_first *usb1,
 		 struct ufs_super_block_third *usb3)
 {
-	switch (sb->u.ufs_sb.s_flags & UFS_ST_MASK) {
+	switch (UFS_SB(sb)->s_flags & UFS_ST_MASK) {
 	case UFS_ST_SUN:
 		return fs32_to_cpu(sb, usb3->fs_u2.fs_sun.fs_state);
 	case UFS_ST_SUNx86:
@@ -45,7 +46,7 @@ static inline void
 ufs_set_fs_state(struct super_block *sb, struct ufs_super_block_first *usb1,
 		 struct ufs_super_block_third *usb3, s32 value)
 {
-	switch (sb->u.ufs_sb.s_flags & UFS_ST_MASK) {
+	switch (UFS_SB(sb)->s_flags & UFS_ST_MASK) {
 	case UFS_ST_SUN:
 		usb3->fs_u2.fs_sun.fs_state = cpu_to_fs32(sb, value);
 		break;
@@ -62,7 +63,7 @@ static inline u32
 ufs_get_fs_npsect(struct super_block *sb, struct ufs_super_block_first *usb1,
 		  struct ufs_super_block_third *usb3)
 {
-	if ((sb->u.ufs_sb.s_flags & UFS_ST_MASK) == UFS_ST_SUNx86)
+	if ((UFS_SB(sb)->s_flags & UFS_ST_MASK) == UFS_ST_SUNx86)
 		return fs32_to_cpu(sb, usb3->fs_u2.fs_sunx86.fs_npsect);
 	else
 		return fs32_to_cpu(sb, usb1->fs_u1.fs_sun.fs_npsect);
@@ -73,7 +74,7 @@ ufs_get_fs_qbmask(struct super_block *sb, struct ufs_super_block_third *usb3)
 {
 	u64 tmp;
 
-	switch (sb->u.ufs_sb.s_flags & UFS_ST_MASK) {
+	switch (UFS_SB(sb)->s_flags & UFS_ST_MASK) {
 	case UFS_ST_SUN:
 		((u32 *)&tmp)[0] = usb3->fs_u2.fs_sun.fs_qbmask[0];
 		((u32 *)&tmp)[1] = usb3->fs_u2.fs_sun.fs_qbmask[1];
@@ -96,7 +97,7 @@ ufs_get_fs_qfmask(struct super_block *sb, struct ufs_super_block_third *usb3)
 {
 	u64 tmp;
 
-	switch (sb->u.ufs_sb.s_flags & UFS_ST_MASK) {
+	switch (UFS_SB(sb)->s_flags & UFS_ST_MASK) {
 	case UFS_ST_SUN:
 		((u32 *)&tmp)[0] = usb3->fs_u2.fs_sun.fs_qfmask[0];
 		((u32 *)&tmp)[1] = usb3->fs_u2.fs_sun.fs_qfmask[1];
@@ -117,7 +118,7 @@ ufs_get_fs_qfmask(struct super_block *sb, struct ufs_super_block_third *usb3)
 static inline u16
 ufs_get_de_namlen(struct super_block *sb, struct ufs_dir_entry *de)
 {
-	if ((sb->u.ufs_sb.s_flags & UFS_DE_MASK) == UFS_DE_OLD)
+	if ((UFS_SB(sb)->s_flags & UFS_DE_MASK) == UFS_DE_OLD)
 		return fs16_to_cpu(sb, de->d_u.d_namlen);
 	else
 		return de->d_u.d_44.d_namlen; /* XXX this seems wrong */
@@ -126,7 +127,7 @@ ufs_get_de_namlen(struct super_block *sb, struct ufs_dir_entry *de)
 static inline void
 ufs_set_de_namlen(struct super_block *sb, struct ufs_dir_entry *de, u16 value)
 {
-	if ((sb->u.ufs_sb.s_flags & UFS_DE_MASK) == UFS_DE_OLD)
+	if ((UFS_SB(sb)->s_flags & UFS_DE_MASK) == UFS_DE_OLD)
 		de->d_u.d_namlen = cpu_to_fs16(sb, value);
 	else
 		de->d_u.d_44.d_namlen = value; /* XXX this seems wrong */
@@ -135,7 +136,7 @@ ufs_set_de_namlen(struct super_block *sb, struct ufs_dir_entry *de, u16 value)
 static inline void
 ufs_set_de_type(struct super_block *sb, struct ufs_dir_entry *de, int mode)
 {
-	if ((sb->u.ufs_sb.s_flags & UFS_DE_MASK) != UFS_DE_44BSD)
+	if ((UFS_SB(sb)->s_flags & UFS_DE_MASK) != UFS_DE_44BSD)
 		return;
 
 	/*
@@ -171,7 +172,7 @@ ufs_set_de_type(struct super_block *sb, struct ufs_dir_entry *de, int mode)
 static inline u32
 ufs_get_inode_uid(struct super_block *sb, struct ufs_inode *inode)
 {
-	switch (sb->u.ufs_sb.s_flags & UFS_UID_MASK) {
+	switch (UFS_SB(sb)->s_flags & UFS_UID_MASK) {
 	case UFS_UID_EFT:
 		return fs32_to_cpu(sb, inode->ui_u3.ui_sun.ui_uid);
 	case UFS_UID_44BSD:
@@ -184,7 +185,7 @@ ufs_get_inode_uid(struct super_block *sb, struct ufs_inode *inode)
 static inline void
 ufs_set_inode_uid(struct super_block *sb, struct ufs_inode *inode, u32 value)
 {
-	switch (sb->u.ufs_sb.s_flags & UFS_UID_MASK) {
+	switch (UFS_SB(sb)->s_flags & UFS_UID_MASK) {
 	case UFS_UID_EFT:
 		inode->ui_u3.ui_sun.ui_uid = cpu_to_fs32(sb, value);
 		break;
@@ -198,7 +199,7 @@ ufs_set_inode_uid(struct super_block *sb, struct ufs_inode *inode, u32 value)
 static inline u32
 ufs_get_inode_gid(struct super_block *sb, struct ufs_inode *inode)
 {
-	switch (sb->u.ufs_sb.s_flags & UFS_UID_MASK) {
+	switch (UFS_SB(sb)->s_flags & UFS_UID_MASK) {
 	case UFS_UID_EFT:
 		return fs32_to_cpu(sb, inode->ui_u3.ui_sun.ui_gid);
 	case UFS_UID_44BSD:
@@ -211,7 +212,7 @@ ufs_get_inode_gid(struct super_block *sb, struct ufs_inode *inode)
 static inline void
 ufs_set_inode_gid(struct super_block *sb, struct ufs_inode *inode, u32 value)
 {
-	switch (sb->u.ufs_sb.s_flags & UFS_UID_MASK) {
+	switch (UFS_SB(sb)->s_flags & UFS_UID_MASK) {
 	case UFS_UID_EFT:
 		inode->ui_u3.ui_sun.ui_gid = cpu_to_fs32(sb, value);
 		break;
@@ -226,9 +227,9 @@ ufs_set_inode_gid(struct super_block *sb, struct ufs_inode *inode, u32 value)
 /*
  * These functions manipulate ufs buffers
  */
-#define ubh_bread(dev,fragment,size) _ubh_bread_(uspi,dev,fragment,size)  
-extern struct ufs_buffer_head * _ubh_bread_(struct ufs_sb_private_info *, kdev_t, unsigned, unsigned);
-extern struct ufs_buffer_head * ubh_bread_uspi(struct ufs_sb_private_info *, kdev_t, unsigned, unsigned);
+#define ubh_bread(sb,fragment,size) _ubh_bread_(uspi,sb,fragment,size)  
+extern struct ufs_buffer_head * _ubh_bread_(struct ufs_sb_private_info *, struct super_block *, unsigned, unsigned);
+extern struct ufs_buffer_head * ubh_bread_uspi(struct ufs_sb_private_info *, struct super_block *, unsigned, unsigned);
 extern void ubh_brelse (struct ufs_buffer_head *);
 extern void ubh_brelse_uspi (struct ufs_sb_private_info *);
 extern void ubh_mark_buffer_dirty (struct ufs_buffer_head *);
@@ -480,7 +481,7 @@ static inline void ufs_fragacct (struct super_block * sb, unsigned blockmap,
 	struct ufs_sb_private_info * uspi;
 	unsigned fragsize, pos;
 	
-	uspi = sb->u.ufs_sb.s_uspi;
+	uspi = UFS_SB(sb)->s_uspi;
 	
 	fragsize = 0;
 	for (pos = 0; pos < uspi->s_fpb; pos++) {

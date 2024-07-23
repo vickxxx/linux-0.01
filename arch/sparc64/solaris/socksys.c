@@ -1,9 +1,16 @@
-/* $Id: socksys.c,v 1.18 2001/02/13 01:16:44 davem Exp $
+/* $Id: socksys.c,v 1.21 2002/02/08 03:57:14 davem Exp $
  * socksys.c: /dev/inet/ stuff for Solaris emulation.
  *
  * Copyright (C) 1997 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  * Copyright (C) 1997, 1998 Patrik Rak (prak3264@ss1000.ms.mff.cuni.cz)
  * Copyright (C) 1995, 1996 Mike Jagdis (jaggy@purplet.demon.co.uk)
+ */
+
+/*
+ *  Dave, _please_ give me specifications on this fscking mess so that I
+ * could at least get it into the state when it wouldn't screw the rest of
+ * the kernel over.  socksys.c and timod.c _stink_ and we are not talking
+ * H2S here, it's isopropilmercaptan in concentrations way over LD50. -- AV
  */
 
 #include <linux/types.h>
@@ -19,6 +26,8 @@
 #include <linux/slab.h>
 #include <linux/in.h>
 #include <linux/devfs_fs_kernel.h>
+
+#include <net/sock.h>
 
 #include <asm/uaccess.h>
 #include <asm/termios.h>
@@ -61,14 +70,14 @@ static int socksys_open(struct inode * inode, struct file * filp)
 		(int (*)(int,int,int))SUNOS(97);
         struct sol_socket_struct * sock;
 	
-	family = ((MINOR(inode->i_rdev) >> 4) & 0xf);
+	family = ((minor(inode->i_rdev) >> 4) & 0xf);
 	switch (family) {
 	case AF_UNIX:
 		type = SOCK_STREAM;
 		protocol = 0;
 		break;
 	case AF_INET:
-		protocol = af_inet_protocols[MINOR(inode->i_rdev) & 0xf];
+		protocol = af_inet_protocols[minor(inode->i_rdev) & 0xf];
 		switch (protocol) {
 		case IPPROTO_TCP: type = SOCK_STREAM; break;
 		case IPPROTO_UDP: type = SOCK_DGRAM; break;
@@ -86,6 +95,9 @@ static int socksys_open(struct inode * inode, struct file * filp)
 		return fd;
 	/*
 	 * N.B. The following operations are not legal!
+	 *
+	 * No shit.  WTF is it supposed to do, anyway?
+	 *
 	 * Try instead:
 	 * d_delete(filp->f_dentry), then d_instantiate with sock inode
 	 */
@@ -93,7 +105,7 @@ static int socksys_open(struct inode * inode, struct file * filp)
 	filp->f_dentry = dget(fcheck(fd)->f_dentry);
 	filp->f_dentry->d_inode->i_rdev = inode->i_rdev;
 	filp->f_dentry->d_inode->i_flock = inode->i_flock;
-	filp->f_dentry->d_inode->u.socket_i.file = filp;
+	SOCKET_I(filp->f_dentry->d_inode)->file = filp;
 	filp->f_op = &socksys_file_ops;
         sock = (struct sol_socket_struct*) 
         	mykmalloc(sizeof(struct sol_socket_struct), GFP_KERNEL);
@@ -118,7 +130,6 @@ static int socksys_release(struct inode * inode, struct file * filp)
         struct T_primsg *it;
 
 	/* XXX: check this */
-	lock_kernel();
 	sock = (struct sol_socket_struct *)filp->private_data;
 	SOLDD(("sock release %016lx(%016lx)\n", sock, filp));
 	it = sock->pfirst;
@@ -132,7 +143,6 @@ static int socksys_release(struct inode * inode, struct file * filp)
 	filp->private_data = NULL;
 	SOLDD(("socksys_release %016lx\n", sock));
 	mykfree((char*)sock);
-	unlock_kernel();
 	return 0;
 }
 
@@ -157,11 +167,9 @@ static unsigned int socksys_poll(struct file * filp, poll_table * wait)
 }
 	
 static struct file_operations socksys_fops = {
-	open:		socksys_open,
-	release:	socksys_release,
+	.open =		socksys_open,
+	.release =	socksys_release,
 };
-
-static devfs_handle_t devfs_handle;
 
 int __init
 init_socksys(void)
@@ -173,7 +181,7 @@ init_socksys(void)
 	int (*sys_close)(unsigned int) = 
 		(int (*)(unsigned int))SYS(close);
 	
-	ret = devfs_register_chrdev (30, "socksys", &socksys_fops);
+	ret = register_chrdev (30, "socksys", &socksys_fops);
 	if (ret < 0) {
 		printk ("Couldn't register socksys character device\n");
 		return ret;
@@ -183,10 +191,9 @@ init_socksys(void)
 		printk ("Couldn't create socket\n");
 		return ret;
 	}
-	devfs_handle = devfs_register (NULL, "socksys", DEVFS_FL_DEFAULT,
-				       30, 0,
-				       S_IFCHR | S_IRUSR | S_IWUSR,
-				       &socksys_fops, NULL);
+
+	devfs_mk_cdev(MKDEV(30, 0), S_IFCHR|S_IRUSR|S_IWUSR, "socksys");
+
 	file = fcheck(ret);
 	/* N.B. Is this valid? Suppose the f_ops are in a module ... */
 	socksys_file_ops = *file->f_op;
@@ -200,7 +207,7 @@ init_socksys(void)
 void
 cleanup_socksys(void)
 {
-	if (devfs_unregister_chrdev(30, "socksys"))
+	if (unregister_chrdev(30, "socksys"))
 		printk ("Couldn't unregister socksys character device\n");
-	devfs_unregister (devfs_handle);
+	devfs_remove ("socksys");
 }

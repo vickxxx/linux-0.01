@@ -3,10 +3,13 @@
 
 #if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2)
 
+#include <linux/config.h>		/* for CONFIG_COMPAT */
+#include <linux/linkage.h>
 #include <asm/socket.h>			/* arch-dependent defines	*/
 #include <linux/sockios.h>		/* the SIOCxxx I/O controls	*/
 #include <linux/uio.h>			/* iovec support		*/
 #include <linux/types.h>		/* pid_t			*/
+#include <linux/compiler.h>		/* __user			*/
 
 typedef unsigned short	sa_family_t;
 
@@ -23,6 +26,21 @@ struct linger {
 	int		l_onoff;	/* Linger active		*/
 	int		l_linger;	/* How long to linger for	*/
 };
+
+/*
+ * Desired design of maximum size and alignment (see RFC2553)
+ */
+#define _SS_MAXSIZE	128	/* Implementation specific max size */
+#define _SS_ALIGNSIZE	(__alignof__ (struct sockaddr *))
+				/* Implementation specific desired alignment */
+
+struct sockaddr_storage {
+	sa_family_t	ss_family;		/* address family */
+	/* Following field(s) are implementation specific */
+	char		__data[_SS_MAXSIZE - sizeof(sa_family_t)];
+				/* space to achieve desired size, */
+				/* _SS_MAXSIZE value minus size of ss_family */
+} __attribute__ ((aligned(_SS_ALIGNSIZE)));	/* force desired alignment */
 
 /*
  *	As we do 4.4BSD message passing we use a 4.4BSD message passing
@@ -156,6 +174,7 @@ struct ucred {
 #define AF_IRDA		23	/* IRDA sockets			*/
 #define AF_PPPOX	24	/* PPPoX sockets		*/
 #define AF_WANPIPE	25	/* Wanpipe API Sockets */
+#define AF_LLC		26	/* Linux LLC			*/
 #define AF_BLUETOOTH	31	/* Bluetooth sockets 		*/
 #define AF_MAX		32	/* For now.. */
 
@@ -187,6 +206,7 @@ struct ucred {
 #define PF_IRDA		AF_IRDA
 #define PF_PPPOX	AF_PPPOX
 #define PF_WANPIPE	AF_WANPIPE
+#define PF_LLC		AF_LLC
 #define PF_BLUETOOTH	AF_BLUETOOTH
 #define PF_MAX		AF_MAX
 
@@ -217,6 +237,16 @@ struct ucred {
 
 #define MSG_EOF         MSG_FIN
 
+#if defined(CONFIG_COMPAT)
+#define MSG_CMSG_COMPAT	0x80000000	/* This message needs 32 bit fixups */
+#else
+#define MSG_CMSG_COMPAT	0		/* We never have 32 bit fixups */
+#endif
+
+extern asmlinkage long sys_sendmsg(int fd, struct msghdr __user *msg, unsigned flags);
+extern asmlinkage long sys_recvmsg(int fd, struct msghdr __user *msg, unsigned flags);
+
+
 
 /* Setsockoptions(2) level. Thanks to BSD these must match IPPROTO_xxx */
 #define SOL_IP		0
@@ -225,6 +255,7 @@ struct ucred {
 #define SOL_UDP		17
 #define SOL_IPV6	41
 #define SOL_ICMPV6	58
+#define SOL_SCTP	132
 #define SOL_RAW		255
 #define SOL_IPX		256
 #define SOL_AX25	257
@@ -237,6 +268,8 @@ struct ucred {
 #define SOL_ATM		264	/* ATM layer (cell level) */
 #define SOL_AAL		265	/* ATM Adaption Layer (packet level) */
 #define SOL_IRDA        266
+#define SOL_NETBEUI	267
+#define SOL_LLC		268
 
 /* IPX options */
 #define IPX_TYPE	1
@@ -253,9 +286,10 @@ extern int csum_partial_copy_fromiovecend(unsigned char *kdata,
 extern int verify_iovec(struct msghdr *m, struct iovec *iov, char *address, int mode);
 extern int memcpy_toiovec(struct iovec *v, unsigned char *kdata, int len);
 extern void memcpy_tokerneliovec(struct iovec *iov, unsigned char *kdata, int len);
-extern int move_addr_to_user(void *kaddr, int klen, void *uaddr, int *ulen);
-extern int move_addr_to_kernel(void *uaddr, int ulen, void *kaddr);
+extern int move_addr_to_user(void *kaddr, int klen, void __user *uaddr, int __user *ulen);
+extern int move_addr_to_kernel(void __user *uaddr, int ulen, void *kaddr);
 extern int put_cmsg(struct msghdr*, int level, int type, int len, void *data);
+
 #endif
 #endif /* not kernel and not glibc */
 #endif /* _LINUX_SOCKET_H */

@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.mk48t59.h 1.5 05/17/01 18:14:25 cort
- */
-/*
  * Registers for the mk48t59 real-time-clock
  */
 
@@ -26,13 +23,5 @@
 
 #define MK48T59_RTC_CONTROLB		0x1FF9
 #define MK48T59_RTC_CB_STOP		0x80
-
-#ifndef BCD_TO_BIN
-#define BCD_TO_BIN(val) ((val)=((val)&15) + ((val)>>4)*10)
-#endif
-
-#ifndef BIN_TO_BCD
-#define BIN_TO_BCD(val) ((val)=(((val)/10)<<4) + (val)%10)
-#endif
 
 #endif /* _PPC_MK48T59_H */

@@ -39,18 +39,19 @@
 
 #define VERSION "0.65"
 
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
-#include <asm/types.h>
-#include <asm/uaccess.h>
-#include <asm/io.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+
+#include <asm/types.h>
+#include <asm/uaccess.h>
+#include <asm/io.h>
 
 #include "comx.h"
 #include "mixcom.h"
@@ -103,7 +104,7 @@ static inline void hscx_cmd(struct net_device *dev, int cmd)
 	unsigned delay = 0;
 
 	while ((cec = (rd_hscx(dev, HSCX_STAR) & HSCX_CEC) != 0) && 
-	    (jiffs + HZ > jiffies)) {
+	    time_before(jiffies, jiffs + HZ)) {
 		udelay(1);
 		if (++delay > (100000 / HZ)) break;
 	}
@@ -411,7 +412,7 @@ static inline void mixcom_extended_interrupt(struct net_device *dev)
 }
 
 
-static void MIXCOM_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t MIXCOM_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
 	struct net_device *dev = (struct net_device *)dev_id;
@@ -421,7 +422,7 @@ static void MIXCOM_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (dev==NULL) {
 		printk(KERN_ERR "comx_interrupt: irq %d for unknown device\n",irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	ch = dev->priv; 
@@ -479,7 +480,7 @@ static void MIXCOM_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 
 	restore_flags(flags);
-	return;
+	return IRQ_HANDLED;
 }
 
 static int MIXCOM_open(struct net_device *dev)
@@ -566,8 +567,6 @@ static int MIXCOM_open(struct net_device *dev)
 
 	return 0;
 	
-err_restore_flags:
-	restore_flags(flags);
 err_release_region:
 	release_region(dev->base_addr, MIXCOM_IO_EXTENT);
 err_ret:
@@ -945,21 +944,15 @@ static struct comx_hardware mixcomhw = {
 	NULL
 };
 	
-/* Module management */
-
-#ifdef MODULE
-#define comx_hw_mixcom_init init_module
-#endif
-
-int __init comx_hw_mixcom_init(void)
+static int __init comx_hw_mixcom_init(void)
 {
-	return(comx_register_hardware(&mixcomhw));
+	return comx_register_hardware(&mixcomhw);
 }
 
-#ifdef MODULE
-void
-cleanup_module(void)
+static void __exit comx_hw_mixcom_exit(void)
 {
 	comx_unregister_hardware("mixcom");
 }
-#endif
+
+module_init(comx_hw_mixcom_init);
+module_exit(comx_hw_mixcom_exit);

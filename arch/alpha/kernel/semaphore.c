@@ -5,8 +5,8 @@
  * (C) Copyright 1999, 2000 Richard Henderson
  */
 
+#include <linux/errno.h>
 #include <linux/sched.h>
-
 
 /*
  * Semaphores are implemented using a two-way counter:
@@ -122,7 +122,7 @@ __down_failed_interruptible(struct semaphore *sem)
 		long tmp, tmp2, tmp3;
 
 		/* We must undo the sem->count down_interruptible decrement
-		   simultaneously and atomicly with the sem->waking
+		   simultaneously and atomically with the sem->waking
 		   adjustment, otherwise we can race with __up.  This is
 		   accomplished by doing a 64-bit ll/sc on two 32-bit words.
 		

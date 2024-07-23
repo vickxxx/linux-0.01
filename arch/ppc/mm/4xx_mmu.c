@@ -1,7 +1,4 @@
 /*
- * BK Id: %F% %I% %G% %U% %#%
- */
-/*
  * This file contains the routines for initializing the MMU
  * on the 4xx series of chips.
  *  -- paulus
@@ -53,11 +50,7 @@
 #include <asm/bootx.h>
 #include <asm/machdep.h>
 #include <asm/setup.h>
-
-/* Used by the 4xx TLB replacement exception handler.
- * Just needed it declared someplace (and initialized to zero).
- */
-unsigned int tlb_4xx_index;
+#include "mmu_decl.h"
 
 /*
  * MMU_init_hw does the chip-specific initialization of the MMU hardware.
@@ -93,6 +86,52 @@ void __init MMU_init_hw(void)
 	 * vectors and the kernel live in real-mode.
 	 */
 
-        mtspr(SPRN_DCCR, 0x80000000);	/* 128 MB of data space at 0x0. */
-        mtspr(SPRN_ICCR, 0x80000000);	/* 128 MB of instr. space at 0x0. */
+        mtspr(SPRN_DCCR, 0xF0000000);	/* 512 MB of data space at 0x0. */
+        mtspr(SPRN_ICCR, 0xF0000000);	/* 512 MB of instr. space at 0x0. */
+}
+
+#define LARGE_PAGE_SIZE_16M	(1<<24)
+#define LARGE_PAGE_SIZE_4M	(1<<22)
+
+unsigned long __init mmu_mapin_ram(void)
+{
+	unsigned long v, s;
+	phys_addr_t p;
+
+	v = KERNELBASE;
+	p = PPC_MEMSTART;
+	s = 0;
+
+	while (s <= (total_lowmem - LARGE_PAGE_SIZE_16M)) {
+		pmd_t *pmdp;
+		unsigned long val = p | _PMD_SIZE_16M | _PAGE_HWEXEC | _PAGE_HWWRITE;
+
+		spin_lock(&init_mm.page_table_lock);
+		pmdp = pmd_offset(pgd_offset_k(v), v);
+		pmd_val(*pmdp++) = val;
+		pmd_val(*pmdp++) = val;
+		pmd_val(*pmdp++) = val;
+		pmd_val(*pmdp++) = val;
+		spin_unlock(&init_mm.page_table_lock);
+
+		v += LARGE_PAGE_SIZE_16M;
+		p += LARGE_PAGE_SIZE_16M;
+		s += LARGE_PAGE_SIZE_16M;
+	}
+	
+	while (s <= (total_lowmem - LARGE_PAGE_SIZE_4M)) {
+		pmd_t *pmdp;
+		unsigned long val = p | _PMD_SIZE_4M | _PAGE_HWEXEC | _PAGE_HWWRITE;
+
+		spin_lock(&init_mm.page_table_lock);
+		pmdp = pmd_offset(pgd_offset_k(v), v);
+		pmd_val(*pmdp) = val;
+		spin_unlock(&init_mm.page_table_lock);
+
+		v += LARGE_PAGE_SIZE_4M;
+		p += LARGE_PAGE_SIZE_4M;
+		s += LARGE_PAGE_SIZE_4M;
+	}
+
+	return s;
 }

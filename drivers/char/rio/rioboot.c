@@ -34,7 +34,6 @@
 static char *_rioboot_c_sccs_ = "@(#)rioboot.c	1.3";
 #endif
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -48,7 +47,6 @@ static char *_rioboot_c_sccs_ = "@(#)rioboot.c	1.3";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 
@@ -129,7 +127,7 @@ struct DownLoad *	rbp;
 		p->RIOError.Error = HOST_FILE_TOO_LARGE;
 		/* restore(oldspl); */
 		func_exit ();
-		return ENOMEM;
+		return -ENOMEM;
 	}
 
 	if ( p->RIOBooting ) {
@@ -137,7 +135,7 @@ struct DownLoad *	rbp;
 		p->RIOError.Error = BOOT_IN_PROGRESS;
 		/* restore(oldspl); */
 		func_exit ();
-		return EBUSY;
+		return -EBUSY;
 	}
 
 	/*
@@ -165,7 +163,7 @@ struct DownLoad *	rbp;
 		p->RIOError.Error = COPYIN_FAILED;
 		/* restore(oldspl); */
 		func_exit ();
-		return EFAULT;
+		return -EFAULT;
 	}
 
 	/*
@@ -295,7 +293,7 @@ register struct DownLoad *rbp;
 			rio_dprintk (RIO_DEBUG_BOOT, "Bin too large\n");
 			p->RIOError.Error = HOST_FILE_TOO_LARGE;
 			func_exit ();
-			return EFBIG;
+			return -EFBIG;
 		}
 		/*
 		** Ensure that the host really is stopped.
@@ -322,15 +320,16 @@ register struct DownLoad *rbp;
 				rio_dprintk (RIO_DEBUG_BOOT, "No system memory available\n");
 				p->RIOError.Error = NOT_ENOUGH_CORE_FOR_PCI_COPY;
 				func_exit ();
-				return ENOMEM;
+				return -ENOMEM;
 			}
 			bzero(DownCode, rbp->Count);
 
 			if ( copyin((int)rbp->DataP,DownCode,rbp->Count)==COPYFAIL ) {
 				rio_dprintk (RIO_DEBUG_BOOT, "Bad copyin of host data\n");
+				sysfree( DownCode, rbp->Count );
 				p->RIOError.Error = COPYIN_FAILED;
 				func_exit ();
-				return EFAULT;
+				return -EFAULT;
 			}
 
 			HostP->Copy( DownCode, StartP, rbp->Count );
@@ -341,7 +340,7 @@ register struct DownLoad *rbp;
 			rio_dprintk (RIO_DEBUG_BOOT, "Bad copyin of host data\n");
 			p->RIOError.Error = COPYIN_FAILED;
 			func_exit ();
-			return EFAULT;
+			return -EFAULT;
 		}
 
 		rio_dprintk (RIO_DEBUG_BOOT, "Copy completed\n");
@@ -410,7 +409,7 @@ register struct DownLoad *rbp;
 		** compatible with the whole Tp family. (lies, damn lies, it'll never
 		** work in a month of Sundays).
 		**
-		** The nfix nyble is the 1s compliment of the nyble value you
+		** The nfix nyble is the 1s complement of the nyble value you
 		** want to load - in this case we wanted 'F' so we nfix loaded '0'.
 		*/
 

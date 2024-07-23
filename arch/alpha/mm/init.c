@@ -34,20 +34,14 @@
 #include <asm/console.h>
 #include <asm/tlb.h>
 
-mmu_gather_t mmu_gathers[NR_CPUS];
-
-unsigned long totalram_pages;
+DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
 extern void die_if_kernel(char *,struct pt_regs *,long);
 
-struct thread_struct original_pcb;
-
-#ifndef CONFIG_SMP
-struct pgtable_cache_struct quicklists;
-#endif
+static struct pcb_struct original_pcb;
 
 pgd_t *
-get_pgd_slow(void)
+pgd_alloc(struct mm_struct *mm)
 {
 	pgd_t *ret, *init;
 
@@ -69,27 +63,15 @@ get_pgd_slow(void)
 	return ret;
 }
 
-int do_check_pgt_cache(int low, int high)
+pte_t *
+pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
 {
-	int freed = 0;
-	if(pgtable_cache_size > high) {
-		do {
-			if(pgd_quicklist) {
-				free_pgd_slow(get_pgd_fast());
-				freed++;
-			}
-			if(pmd_quicklist) {
-				pmd_free_slow(pmd_alloc_one_fast(NULL, 0));
-				freed++;
-			}
-			if(pte_quicklist) {
-				pte_free_slow(pte_alloc_one_fast(NULL, 0));
-				freed++;
-			}
-		} while(pgtable_cache_size > low);
-	}
-	return freed;
+	pte_t *pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
+	if (pte)
+		clear_page(pte);
+	return pte;
 }
+
 
 /*
  * BAD_PAGE is the page that is used for page faults when linux
@@ -145,13 +127,11 @@ show_mem(void)
 	printk("%ld reserved pages\n",reserved);
 	printk("%ld pages shared\n",shared);
 	printk("%ld pages swap cached\n",cached);
-	printk("%ld pages in page table cache\n",pgtable_cache_size);
-	show_buffers();
 }
 #endif
 
 static inline unsigned long
-load_PCB(struct thread_struct * pcb)
+load_PCB(struct pcb_struct *pcb)
 {
 	register unsigned long sp __asm__("$30");
 	pcb->ksp = sp;
@@ -182,10 +162,9 @@ switch_to_system_map(void)
 	}
 
 	/* Also set up the real kernel PCB while we're at it.  */
-	init_task.thread.ptbr = newptbr;
-	init_task.thread.pal_flags = 1;	/* set FEN, clear everything else */
-	init_task.thread.flags = 0;
-	original_pcb_ptr = load_PCB(&init_task.thread);
+	init_thread_info.pcb.ptbr = newptbr;
+	init_thread_info.pcb.flags = 1;	/* set FEN, clear everything else */
+	original_pcb_ptr = load_PCB(&init_thread_info.pcb);
 	tbia();
 
 	/* Save off the contents of the original PCB so that we can
@@ -199,7 +178,7 @@ switch_to_system_map(void)
 		original_pcb_ptr = (unsigned long)
 			phys_to_virt(original_pcb_ptr);
 	}
-	original_pcb = *(struct thread_struct *) original_pcb_ptr;
+	original_pcb = *(struct pcb_struct *) original_pcb_ptr;
 }
 
 int callback_init_done;
@@ -253,24 +232,24 @@ callback_init(void * kernel_end)
 	if (alpha_using_srm) {
 		static struct vm_struct console_remap_vm;
 		unsigned long vaddr = VMALLOC_START;
-		long i, j;
+		unsigned long i, j;
 
 		/* Set up the third level PTEs and update the virtual
 		   addresses of the CRB entries.  */
 		for (i = 0; i < crb->map_entries; ++i) {
-			unsigned long paddr = crb->map[i].pa;
+			unsigned long pfn = crb->map[i].pa >> PAGE_SHIFT;
 			crb->map[i].va = vaddr;
 			for (j = 0; j < crb->map[i].count; ++j) {
-				set_pte(pte_offset(pmd, vaddr),
-					mk_pte_phys(paddr, PAGE_KERNEL));
-				paddr += PAGE_SIZE;
+				set_pte(pte_offset_kernel(pmd, vaddr),
+					pfn_pte(pfn, PAGE_KERNEL));
+				pfn++;
 				vaddr += PAGE_SIZE;
 			}
 		}
 
 		/* Let vmalloc know that we've allocated some space.  */
 		console_remap_vm.flags = VM_ALLOC;
-		console_remap_vm.addr = VMALLOC_START;
+		console_remap_vm.addr = (void *) VMALLOC_START;
 		console_remap_vm.size = vaddr - VMALLOC_START;
 		vmlist = &console_remap_vm;
 	}
@@ -291,7 +270,7 @@ paging_init(void)
 	unsigned long dma_pfn, high_pfn;
 
 	dma_pfn = virt_to_phys((char *)MAX_DMA_ADDRESS) >> PAGE_SHIFT;
-	high_pfn = max_low_pfn;
+	high_pfn = max_pfn = max_low_pfn;
 
 	if (dma_pfn >= high_pfn)
 		zones_size[ZONE_DMA] = high_pfn;
@@ -368,18 +347,23 @@ mem_init(void)
 #endif /* CONFIG_DISCONTIGMEM */
 
 void
-free_initmem (void)
+free_reserved_mem(void *start, void *end)
 {
-	extern char __init_begin, __init_end;
-	unsigned long addr;
-
-	addr = (unsigned long)(&__init_begin);
-	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
-		ClearPageReserved(virt_to_page(addr));
-		set_page_count(virt_to_page(addr), 1);
-		free_page(addr);
+	void *__start = start;
+	for (; __start < end; __start += PAGE_SIZE) {
+		ClearPageReserved(virt_to_page(__start));
+		set_page_count(virt_to_page(__start), 1);
+		free_page((long)__start);
 		totalram_pages++;
 	}
+}
+
+void
+free_initmem(void)
+{
+	extern char __init_begin, __init_end;
+
+	free_reserved_mem(&__init_begin, &__init_end);
 	printk ("Freeing unused kernel memory: %ldk freed\n",
 		(&__init_end - &__init_begin) >> 10);
 }
@@ -388,25 +372,7 @@ free_initmem (void)
 void
 free_initrd_mem(unsigned long start, unsigned long end)
 {
-	unsigned long __start = start;
-	for (; start < end; start += PAGE_SIZE) {
-		ClearPageReserved(virt_to_page(start));
-		set_page_count(virt_to_page(start), 1);
-		free_page(start);
-		totalram_pages++;
-	}
-	printk ("Freeing initrd memory: %ldk freed\n", (end - __start) >> 10);
+	free_reserved_mem((void *)start, (void *)end);
+	printk ("Freeing initrd memory: %ldk freed\n", (end - start) >> 10);
 }
 #endif
-
-void
-si_meminfo(struct sysinfo *val)
-{
-	val->totalram = totalram_pages;
-	val->sharedram = 0;
-	val->freeram = nr_free_pages();
-	val->bufferram = atomic_read(&buffermem_pages);
-	val->totalhigh = 0;
-	val->freehigh = 0;
-	val->mem_unit = PAGE_SIZE;
-}

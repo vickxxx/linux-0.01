@@ -27,21 +27,23 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_subr.c,v 1.5 2001/04/26 22:49:51 hch Exp hch $"
+#ident "$Id: vxfs_subr.c,v 1.8 2001/12/28 20:50:47 hch Exp hch $"
 
 /*
  * Veritas filesystem driver - shared subroutines.
  */
 #include <linux/fs.h>
+#include <linux/buffer_head.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/pagemap.h>
 
+#include "vxfs_kcompat.h"
 #include "vxfs_extern.h"
 
 
 static int		vxfs_readpage(struct file *, struct page *);
-static int		vxfs_bmap(struct address_space *, long);
+static sector_t		vxfs_bmap(struct address_space *, sector_t);
 
 struct address_space_operations vxfs_aops = {
 	.readpage =		vxfs_readpage,
@@ -62,18 +64,17 @@ struct address_space_operations vxfs_aops = {
  *   The wanted page on success, else a NULL pointer.
  */
 struct page *
-vxfs_get_page(struct inode *ip, u_long n)
+vxfs_get_page(struct address_space *mapping, u_long n)
 {
-	struct address_space *		mapping = ip->i_mapping;
 	struct page *			pp;
 
 	pp = read_cache_page(mapping, n,
 			(filler_t*)mapping->a_ops->readpage, NULL);
 
 	if (!IS_ERR(pp)) {
-		wait_on_page(pp);
+		wait_on_page_locked(pp);
 		kmap(pp);
-		if (!Page_Uptodate(pp))
+		if (!PageUptodate(pp))
 			goto fail;
 		/** if (!PageChecked(pp)) **/
 			/** vxfs_check_page(pp); **/
@@ -114,7 +115,7 @@ vxfs_bread(struct inode *ip, int block)
 	daddr_t			pblock;
 
 	pblock = vxfs_bmap1(ip, block);
-	bp = bread(ip->i_dev, pblock, ip->i_sb->s_blocksize);
+	bp = sb_bread(ip->i_sb, pblock);
 
 	return (bp);
 }
@@ -135,17 +136,14 @@ vxfs_bread(struct inode *ip, int block)
  *   Zero on success, else a negativ error code (-EIO).
  */
 static int
-vxfs_getblk(struct inode *ip, long iblock,
+vxfs_getblk(struct inode *ip, sector_t iblock,
 	    struct buffer_head *bp, int create)
 {
 	daddr_t			pblock;
 
 	pblock = vxfs_bmap1(ip, iblock);
 	if (pblock != 0) {
-		bp->b_dev = ip->i_dev;
-		bp->b_blocknr = pblock;
-		bp->b_state |= (1UL << BH_Mapped);
-
+		map_bh(bp, ip->i_sb, pblock);
 		return 0;
 	}
 
@@ -188,8 +186,8 @@ vxfs_readpage(struct file *file, struct page *page)
  * Locking status:
  *   We are under the bkl.
  */
-static int
-vxfs_bmap(struct address_space *mapping, long block)
+static sector_t
+vxfs_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping, block, vxfs_getblk);
 }

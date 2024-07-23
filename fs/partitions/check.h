@@ -1,16 +1,36 @@
+#include <linux/pagemap.h>
+#include <linux/blkdev.h>
+
 /*
- * add_partition adds a partitions details to the devices partition
+ * add_gd_partition adds a partitions details to the devices partition
  * description.
  */
-void add_gd_partition(struct gendisk *hd, int minor, int start, int size);
+enum { MAX_PART = 256 };
 
-typedef struct {struct page *v;} Sector;
+struct parsed_partitions {
+	char name[BDEVNAME_SIZE];
+	struct {
+		sector_t from;
+		sector_t size;
+		int flags;
+	} parts[MAX_PART];
+	int next;
+	int limit;
+};
 
-unsigned char *read_dev_sector(struct block_device *, unsigned long, Sector *);
-
-static inline void put_dev_sector(Sector p)
+static inline void
+put_partition(struct parsed_partitions *p, int n, sector_t from, sector_t size)
 {
-	page_cache_release(p.v);
+	if (n < p->limit) {
+		p->parts[n].from = from;
+		p->parts[n].size = size;
+		printk(" %s%d", p->name, n);
+	}
 }
 
 extern int warn_no_part;
+
+extern void parse_bsd(struct parsed_partitions *state,
+			struct block_device *bdev, u32 offset, u32 size,
+			int origin, char *flavour, int max_partitions);
+

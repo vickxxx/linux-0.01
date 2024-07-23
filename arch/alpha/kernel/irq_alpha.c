@@ -14,10 +14,6 @@
 #include "proto.h"
 #include "irq_impl.h"
 
-#ifndef CONFIG_SMP
-unsigned long __irq_attempt[NR_IRQS];
-#endif
-
 /* Hack minimum IPL during interrupt processing for broken hardware.  */
 #ifdef CONFIG_ALPHA_BROKEN_IRQ_MASK
 int __min_ipl;
@@ -41,14 +37,13 @@ void (*perf_irq)(unsigned long, struct pt_regs *) = dummy_perf;
  */
 
 asmlinkage void 
-do_entInt(unsigned long type, unsigned long vector, unsigned long la_ptr,
-	  unsigned long a3, unsigned long a4, unsigned long a5,
-	  struct pt_regs regs)
+do_entInt(unsigned long type, unsigned long vector,
+	  unsigned long la_ptr, struct pt_regs *regs)
 {
 	switch (type) {
 	case 0:
 #ifdef CONFIG_SMP
-		handle_ipi(&regs);
+		handle_ipi(regs);
 		return;
 #else
 		irq_err_count++;
@@ -60,33 +55,32 @@ do_entInt(unsigned long type, unsigned long vector, unsigned long la_ptr,
 #ifdef CONFIG_SMP
 	  {
 		long cpu;
-		smp_percpu_timer_interrupt(&regs);
+		smp_percpu_timer_interrupt(regs);
 		cpu = smp_processor_id();
 		if (cpu != boot_cpuid) {
-		        irq_attempt(cpu, RTC_IRQ)++;
-		        kstat.irqs[cpu][RTC_IRQ]++;
+		        kstat_cpu(cpu).irqs[RTC_IRQ]++;
 		} else {
-			handle_irq(RTC_IRQ, &regs);
+			handle_irq(RTC_IRQ, regs);
 		}
 	  }
 #else
-		handle_irq(RTC_IRQ, &regs);
+		handle_irq(RTC_IRQ, regs);
 #endif
 		return;
 	case 2:
-		alpha_mv.machine_check(vector, la_ptr, &regs);
+		alpha_mv.machine_check(vector, la_ptr, regs);
 		return;
 	case 3:
-		alpha_mv.device_interrupt(vector, &regs);
+		alpha_mv.device_interrupt(vector, regs);
 		return;
 	case 4:
-		perf_irq(vector, &regs);
+		perf_irq(la_ptr, regs);
 		return;
 	default:
 		printk(KERN_CRIT "Hardware intr %ld %lx? Huh?\n",
 		       type, vector);
 	}
-	printk("PC = %016lx PS=%04lx\n", regs.pc, regs.ps);
+	printk(KERN_CRIT "PC = %016lx PS=%04lx\n", regs->pc, regs->ps);
 }
 
 void __init
@@ -101,10 +95,8 @@ common_init_isa_dma(void)
 void __init
 init_IRQ(void)
 {
-	/* Uh, this really MUST come first, just in case
-	 * the platform init_irq() causes interrupts/mchecks
-	 * (as is the case with RAWHIDE, at least).
-	 */
+	/* Just in case the platform init_irq() causes interrupts/mchecks
+	   (as is the case with RAWHIDE, at least).  */
 	wrent(entInt, 0);
 
 	alpha_mv.init_irq();
@@ -152,10 +144,10 @@ process_mcheck_info(unsigned long vector, unsigned long la_ptr,
 
 	mchk_header = (struct el_common *)la_ptr;
 
-	printk(KERN_CRIT "%s machine check: vector=0x%lx pc=0x%lx code=0x%lx\n",
+	printk(KERN_CRIT "%s machine check: vector=0x%lx pc=0x%lx code=0x%x\n",
 	       machine, vector, regs->pc, mchk_header->code);
 
-	switch ((unsigned int) mchk_header->code) {
+	switch (mchk_header->code) {
 	/* Machine check reasons.  Defined according to PALcode sources.  */
 	case 0x80: reason = "tag parity error"; break;
 	case 0x82: reason = "tag control parity error"; break;
@@ -218,19 +210,19 @@ static void rtc_enable_disable(unsigned int irq) { }
 static unsigned int rtc_startup(unsigned int irq) { return 0; }
 
 struct irqaction timer_irqaction = {
-	handler:	timer_interrupt,
-	flags:		SA_INTERRUPT,
-	name:		"timer",
+	.handler	= timer_interrupt,
+	.flags		= SA_INTERRUPT,
+	.name		= "timer",
 };
 
 static struct hw_interrupt_type rtc_irq_type = {
-	typename:	"RTC",
-	startup:	rtc_startup,
-	shutdown:	rtc_enable_disable,
-	enable:		rtc_enable_disable,
-	disable:	rtc_enable_disable,
-	ack:		rtc_enable_disable,
-	end:		rtc_enable_disable,
+	.typename	= "RTC",
+	.startup	= rtc_startup,
+	.shutdown	= rtc_enable_disable,
+	.enable		= rtc_enable_disable,
+	.disable	= rtc_enable_disable,
+	.ack		= rtc_enable_disable,
+	.end		= rtc_enable_disable,
 };
 
 void __init
@@ -243,16 +235,16 @@ init_rtc_irq(void)
 
 /* Dummy irqactions.  */
 struct irqaction isa_cascade_irqaction = {
-	handler:	no_action,
-	name:		"isa-cascade"
+	.handler	= no_action,
+	.name		= "isa-cascade"
 };
 
 struct irqaction timer_cascade_irqaction = {
-	handler:	no_action,
-	name:		"timer-cascade"
+	.handler	= no_action,
+	.name		= "timer-cascade"
 };
 
 struct irqaction halt_switch_irqaction = {
-	handler:	no_action,
-	name:		"halt-switch"
+	.handler	= no_action,
+	.name		= "halt-switch"
 };

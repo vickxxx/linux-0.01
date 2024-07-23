@@ -26,7 +26,7 @@
 */
 
 /*
- * $Id: netdev.c,v 1.7 2002/07/14 05:39:26 maxk Exp $
+ * $Id: netdev.c,v 1.8 2002/08/04 21:23:58 maxk Exp $
  */ 
 
 #include <linux/config.h>
@@ -46,7 +46,7 @@
 
 #include "bnep.h"
 
-#ifndef CONFIG_BLUEZ_BNEP_DEBUG
+#ifndef CONFIG_BT_BNEP_DEBUG
 #undef  BT_DBG
 #define BT_DBG( A... )
 #endif
@@ -73,7 +73,7 @@ static struct net_device_stats *bnep_net_get_stats(struct net_device *dev)
 
 static void bnep_net_set_mc_list(struct net_device *dev)
 {
-#ifdef CONFIG_BLUEZ_BNEP_MC_FILTER
+#ifdef CONFIG_BT_BNEP_MC_FILTER
 	struct bnep_session *s = dev->priv;
 	struct sock *sk = s->sock->sk;
 	struct bnep_set_filter_req *r;
@@ -121,8 +121,8 @@ static void bnep_net_set_mc_list(struct net_device *dev)
 		r->len = htons(skb->len - len);
 	}
 
-	skb_queue_tail(&sk->write_queue, skb);
-	wake_up_interruptible(sk->sleep);
+	skb_queue_tail(&sk->sk_write_queue, skb);
+	wake_up_interruptible(sk->sk_sleep);
 #endif
 }
 
@@ -143,22 +143,18 @@ static int bnep_net_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 	return -EINVAL;
 }
 
-#ifdef CONFIG_BLUEZ_BNEP_MC_FILTER
+#ifdef CONFIG_BT_BNEP_MC_FILTER
 static inline int bnep_net_mc_filter(struct sk_buff *skb, struct bnep_session *s)
 {
 	struct ethhdr *eh = (void *) skb->data;
 
-	if ((eh->h_dest[0] & 1) && !test_bit(bnep_mc_hash(eh->h_dest), &s->mc_filter)) {
-		BT_DBG("BNEP: filtered skb %p, dst %.2x:%.2x:%.2x:%.2x:%.2x:%.2x", skb, 
-				eh->h_dest[0], eh->h_dest[1], eh->h_dest[2],
-				eh->h_dest[3], eh->h_dest[4], eh->h_dest[5]);
+	if ((eh->h_dest[0] & 1) && !test_bit(bnep_mc_hash(eh->h_dest), (ulong *) &s->mc_filter))
 		return 1;
-	}
 	return 0;
 }
 #endif
 
-#ifdef CONFIG_BLUEZ_BNEP_PROTO_FILTER
+#ifdef CONFIG_BT_BNEP_PROTO_FILTER
 /* Determine ether protocol. Based on eth_type_trans. */
 static inline u16 bnep_net_eth_proto(struct sk_buff *skb)
 {
@@ -196,14 +192,14 @@ static int bnep_net_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	BT_DBG("skb %p, dev %p", skb, dev);
 
-#ifdef CONFIG_BLUEZ_BNEP_MC_FILTER
+#ifdef CONFIG_BT_BNEP_MC_FILTER
 	if (bnep_net_mc_filter(skb, s)) {
 		kfree_skb(skb);
 		return 0;
 	}
 #endif
 	
-#ifdef CONFIG_BLUEZ_BNEP_PROTO_FILTER
+#ifdef CONFIG_BT_BNEP_PROTO_FILTER
 	if (bnep_net_proto_filter(skb, s)) {
 		kfree_skb(skb);
 		return 0;
@@ -213,13 +209,13 @@ static int bnep_net_xmit(struct sk_buff *skb, struct net_device *dev)
 	/*
 	 * We cannot send L2CAP packets from here as we are potentially in a bh.
 	 * So we have to queue them and wake up session thread which is sleeping
-	 * on the sk->sleep.
+	 * on the sk->sk_sleep.
 	 */
 	dev->trans_start = jiffies;
-	skb_queue_tail(&sk->write_queue, skb);
-	wake_up_interruptible(sk->sleep);
+	skb_queue_tail(&sk->sk_write_queue, skb);
+	wake_up_interruptible(sk->sk_sleep);
 
-	if (skb_queue_len(&sk->write_queue) >= BNEP_TX_QUEUE_LEN) {
+	if (skb_queue_len(&sk->sk_write_queue) >= BNEP_TX_QUEUE_LEN) {
 		BT_DBG("tx queue is full");
 
 		/* Stop queuing.

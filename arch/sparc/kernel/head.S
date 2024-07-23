@@ -23,7 +23,9 @@
 #include <asm/page.h>
 #include <asm/kdebug.h>
 #include <asm/winmacro.h>
+#include <asm/thread_info.h>	/* TI_UWINMASK */
 #include <asm/errno.h>
+#include <asm/pgtsrmmu.h>	/* SRMMU_PGDIR_SHIFT */
 
 	.data
 /* 
@@ -622,12 +624,8 @@ srmmu_remap:
 		/* Ok, pull in the PTD. */
 		lda	[%o1] ASI_M_BYPASS, %o2		! This is the 0x0 16MB pgd
 
-		/* Calculate to KERNBASE entry.
-		 *
-		 * XXX Should not use empirical constant, but Gas gets an  XXX
-		 * XXX upset stomach with the bitshift I would have to use XXX
-		 */
-		add	%o1, 0x3c0, %o3		
+		/* Calculate to KERNBASE entry. */
+		add	%o1, KERNBASE >> (SRMMU_PGDIR_SHIFT - 2), %o3		
 
 		/* Poke the entry into the calculated address. */
 		sta	%o2, [%o3] ASI_M_BYPASS
@@ -671,7 +669,7 @@ srmmu_nviking:
 		sll	%g1, 0x8, %g1			! make phys addr for l1 tbl
 
 		lda	[%g1] ASI_M_BYPASS, %g2		! get level1 entry for 0x0
-		add	%g1, 0x3c0, %g3			! XXX AWAY WITH EMPIRICALS
+		add	%g1, KERNBASE >> (SRMMU_PGDIR_SHIFT - 2), %g3
 		sta	%g2, [%g3] ASI_M_BYPASS		! place at KERNBASE entry
 		b	go_to_highmem
 		 nop					! wheee....
@@ -749,7 +747,7 @@ go_to_highmem:
 		jmpl	%g1, %g0
 		 nop
 
-	/* This is to align init_task_union properly, be careful. -DaveM */
+	/* This is to align init_thread_union properly, be careful. -DaveM */
 	.align	8192
 
 /* The code above should be at beginning and we have to take care about
@@ -1010,8 +1008,8 @@ sun4c_continue_boot:
 		WRITE_PAUSE
 
 		/* I want a kernel stack NOW! */
-		set	C_LABEL(init_task_union), %g1
-		set	(TASK_UNION_SIZE - REGWIN_SZ), %g2
+		set	C_LABEL(init_thread_union), %g1
+		set	(THREAD_SIZE - STACKFRAME_SZ), %g2
 		add	%g1, %g2, %sp
 		mov	0, %fp			/* And for good luck */
 
@@ -1025,10 +1023,10 @@ sun4c_continue_boot:
 		bl	1b
 		 add	%o0, 0x1, %o0
 
-		/* Initialize the umask value for init_task just in case.
+		/* Initialize the uwinmask value for init task just in case.
 		 * But first make current_set[boot_cpu_id] point to something useful.
 		 */
-		set	C_LABEL(init_task_union), %g6
+		set	C_LABEL(init_thread_union), %g6
 		set	C_LABEL(current_set), %g2
 #ifdef CONFIG_SMP
 		sethi	%hi(C_LABEL(boot_cpu_id4)), %g3
@@ -1038,7 +1036,7 @@ sun4c_continue_boot:
 #endif
 		st	%g6, [%g2]
 
-		st	%g0, [%g6 + AOFF_task_thread + AOFF_thread_uwinmask]
+		st	%g0, [%g6 + TI_UWINMASK]
 
 /* Compute NWINDOWS and stash it away. Now uses %wim trick explained
  * in the V8 manual. Ok, this method seems to work, Sparc is cool...

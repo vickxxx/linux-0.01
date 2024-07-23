@@ -12,12 +12,13 @@
 #include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/slab.h>
-#include <linux/locks.h>
 #include <linux/smp_lock.h>
 #include <linux/binfmts.h>
 #include <linux/elf.h>
 #include <linux/init.h>
+#include <linux/fs.h>
 #include <linux/file.h>
+#include <linux/errno.h>
 
 
 #define EM86_INTERP	"/usr/bin/em86"
@@ -95,7 +96,8 @@ static int load_em86(struct linux_binprm *bprm,struct pt_regs *regs)
 }
 
 struct linux_binfmt em86_format = {
-	NULL, THIS_MODULE, load_em86, NULL, NULL, 0
+	.module		= THIS_MODULE,
+	.load_binary	= load_em86,
 };
 
 static int __init init_em86_binfmt(void)
@@ -110,3 +112,4 @@ static void __exit exit_em86_binfmt(void)
 
 module_init(init_em86_binfmt)
 module_exit(exit_em86_binfmt)
+MODULE_LICENSE("GPL");

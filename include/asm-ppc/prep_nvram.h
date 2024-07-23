@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.prep_nvram.h 1.7 05/17/01 18:14:25 cort
- */
-/*
  * PreP compliant NVRAM access
  */
 
@@ -92,7 +89,7 @@ typedef enum _OSAREA_USAGE {
 typedef enum _PM_MODE {
   Suspend = 0x80, /* Part of state is in memory */
   Normal = 0x00   /* No power management in effect */
-} PMMode;
+} PMMODE;
 
 typedef struct _HEADER {
   unsigned short Size;       /* NVRAM size in K(1024) */

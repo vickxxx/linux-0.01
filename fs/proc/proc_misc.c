@@ -17,7 +17,7 @@
 
 #include <linux/types.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/kernel.h>
 #include <linux/kernel_stat.h>
 #include <linux/tty.h>
@@ -27,6 +27,7 @@
 #include <linux/ioport.h>
 #include <linux/config.h>
 #include <linux/mm.h>
+#include <linux/mmzone.h>
 #include <linux/pagemap.h>
 #include <linux/swap.h>
 #include <linux/slab.h>
@@ -36,11 +37,19 @@
 #include <linux/init.h>
 #include <linux/smp_lock.h>
 #include <linux/seq_file.h>
-
+#include <linux/times.h>
+#include <linux/profile.h>
+#include <linux/blkdev.h>
+#include <linux/hugetlb.h>
+#include <linux/jiffies.h>
+#include <linux/sysrq.h>
+#include <linux/vmalloc.h>
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
 #include <asm/io.h>
-
+#include <asm/pgalloc.h>
+#include <asm/tlb.h>
+#include <asm/div64.h>
 
 #define LOAD_INT(x) ((x) >> FSHIFT)
 #define LOAD_FRAC(x) LOAD_INT(((x) & (FIXED_1-1)) * 100)
@@ -50,17 +59,14 @@
  * have a way to deal with that gracefully. Right now I used straightforward
  * wrappers, but this needs further analysis wrt potential overflows.
  */
-#ifdef CONFIG_MODULES
-extern int get_module_list(char *);
-#endif
-extern int get_device_list(char *);
-extern int get_partition_list(char *, char **, off_t, int);
+extern int get_hardware_list(char *);
+extern int get_stram_list(char *);
+extern int get_chrdev_list(char *);
+extern int get_blkdev_list(char *);
 extern int get_filesystem_list(char *);
 extern int get_exec_domain_list(char *);
-extern int get_irq_list(char *);
 extern int get_dma_list(char *);
 extern int get_locks_status (char *, char **, off_t, int);
-extern int get_swaparea_info (char *);
 #ifdef CONFIG_SGI_DS1286
 extern int get_ds1286_status(char *);
 #endif
@@ -85,46 +91,65 @@ static int loadavg_read_proc(char *page, char **start, off_t off,
 	a = avenrun[0] + (FIXED_1/200);
 	b = avenrun[1] + (FIXED_1/200);
 	c = avenrun[2] + (FIXED_1/200);
-	len = sprintf(page,"%d.%02d %d.%02d %d.%02d %d/%d %d\n",
+	len = sprintf(page,"%d.%02d %d.%02d %d.%02d %ld/%d %d\n",
 		LOAD_INT(a), LOAD_FRAC(a),
 		LOAD_INT(b), LOAD_FRAC(b),
 		LOAD_INT(c), LOAD_FRAC(c),
-		nr_running, nr_threads, last_pid);
+		nr_running(), nr_threads, last_pid);
 	return proc_calc_metrics(page, start, off, count, eof, len);
+}
+
+struct vmalloc_info {
+	unsigned long used;
+	unsigned long largest_chunk;
+};
+
+static struct vmalloc_info get_vmalloc_info(void)
+{
+	unsigned long prev_end = VMALLOC_START;
+	struct vm_struct* vma;
+	struct vmalloc_info vmi;
+	vmi.used = 0;
+
+	read_lock(&vmlist_lock);
+
+	if(!vmlist)
+		vmi.largest_chunk = (VMALLOC_END-VMALLOC_START);
+	else
+		vmi.largest_chunk = 0;
+
+	for (vma = vmlist; vma; vma = vma->next) {
+		unsigned long free_area_size =
+			(unsigned long)vma->addr - prev_end;
+		vmi.used += vma->size;
+		if (vmi.largest_chunk < free_area_size )
+
+			vmi.largest_chunk = free_area_size;
+		prev_end = vma->size + (unsigned long)vma->addr;
+	}
+	if(VMALLOC_END-prev_end > vmi.largest_chunk)
+		vmi.largest_chunk = VMALLOC_END-prev_end;
+
+	read_unlock(&vmlist_lock);
+	return vmi;
 }
 
 static int uptime_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
-	unsigned long uptime;
-	unsigned long idle;
+	struct timespec uptime;
+	struct timespec idle;
 	int len;
+	u64 idle_jiffies = init_task.utime + init_task.stime;
 
-	uptime = jiffies;
-	idle = init_tasks[0]->times.tms_utime + init_tasks[0]->times.tms_stime;
+	do_posix_clock_monotonic_gettime(&uptime);
+	jiffies_to_timespec(idle_jiffies, &idle);
+	len = sprintf(page,"%lu.%02lu %lu.%02lu\n",
+			(unsigned long) uptime.tv_sec,
+			(uptime.tv_nsec / (NSEC_PER_SEC / 100)),
+			(unsigned long) idle.tv_sec,
+			(idle.tv_nsec / (NSEC_PER_SEC / 100)));
 
-	/* The formula for the fraction parts really is ((t * 100) / HZ) % 100, but
-	   that would overflow about every five days at HZ == 100.
-	   Therefore the identity a = (a / b) * b + a % b is used so that it is
-	   calculated as (((t / HZ) * 100) + ((t % HZ) * 100) / HZ) % 100.
-	   The part in front of the '+' always evaluates as 0 (mod 100). All divisions
-	   in the above formulas are truncating. For HZ being a power of 10, the
-	   calculations simplify to the version in the #else part (if the printf
-	   format is adapted to the same number of digits as zeroes in HZ.
-	 */
-#if HZ!=100
-	len = sprintf(page,"%lu.%02lu %lu.%02lu\n",
-		uptime / HZ,
-		(((uptime % HZ) * 100) / HZ) % 100,
-		idle / HZ,
-		(((idle % HZ) * 100) / HZ) % 100);
-#else
-	len = sprintf(page,"%lu.%02lu %lu.%02lu\n",
-		uptime / HZ,
-		uptime % HZ,
-		idle / HZ,
-		idle % HZ);
-#endif
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
@@ -132,64 +157,99 @@ static int meminfo_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	struct sysinfo i;
-	int len;
-	int pg_size ;
+	int len, committed;
+	struct page_state ps;
+	unsigned long inactive;
+	unsigned long active;
+	unsigned long free;
+	unsigned long vmtot;
+	struct vmalloc_info vmi;
+
+	get_page_state(&ps);
+	get_zone_counts(&active, &inactive, &free);
 
 /*
  * display in kilobytes.
  */
 #define K(x) ((x) << (PAGE_SHIFT - 10))
-#define B(x) ((unsigned long long)(x) << PAGE_SHIFT)
 	si_meminfo(&i);
 	si_swapinfo(&i);
-	pg_size = atomic_read(&page_cache_size) - i.bufferram ;
+	committed = atomic_read(&vm_committed_space);
 
-	len = sprintf(page, "        total:    used:    free:  shared: buffers:  cached:\n"
-		"Mem:  %8Lu %8Lu %8Lu %8Lu %8Lu %8Lu\n"
-		"Swap: %8Lu %8Lu %8Lu\n",
-		B(i.totalram), B(i.totalram-i.freeram), B(i.freeram),
-		B(i.sharedram), B(i.bufferram),
-		B(pg_size), B(i.totalswap),
-		B(i.totalswap-i.freeswap), B(i.freeswap));
+	vmtot = (VMALLOC_END-VMALLOC_START)>>10;
+	vmi = get_vmalloc_info();
+	vmi.used >>= 10;
+	vmi.largest_chunk >>= 10;
+
 	/*
 	 * Tagged format, for easy grepping and expansion.
-	 * The above will go away eventually, once the tools
-	 * have been updated.
 	 */
-	len += sprintf(page+len,
+	len = sprintf(page,
 		"MemTotal:     %8lu kB\n"
 		"MemFree:      %8lu kB\n"
-		"MemShared:    %8lu kB\n"
 		"Buffers:      %8lu kB\n"
 		"Cached:       %8lu kB\n"
 		"SwapCached:   %8lu kB\n"
-		"Active:       %8u kB\n"
-		"Inactive:     %8u kB\n"
+		"Active:       %8lu kB\n"
+		"Inactive:     %8lu kB\n"
 		"HighTotal:    %8lu kB\n"
 		"HighFree:     %8lu kB\n"
 		"LowTotal:     %8lu kB\n"
 		"LowFree:      %8lu kB\n"
 		"SwapTotal:    %8lu kB\n"
-		"SwapFree:     %8lu kB\n",
+		"SwapFree:     %8lu kB\n"
+		"Dirty:        %8lu kB\n"
+		"Writeback:    %8lu kB\n"
+		"Mapped:       %8lu kB\n"
+		"Slab:         %8lu kB\n"
+		"Committed_AS: %8u kB\n"
+		"PageTables:   %8lu kB\n"
+		"VmallocTotal: %8lu kB\n"
+		"VmallocUsed:  %8lu kB\n"
+		"VmallocChunk: %8lu kB\n",
 		K(i.totalram),
 		K(i.freeram),
-		K(i.sharedram),
 		K(i.bufferram),
-		K(pg_size - swapper_space.nrpages),
-		K(swapper_space.nrpages),
-		K(nr_active_pages),
-		K(nr_inactive_pages),
+		K(get_page_cache_size()-total_swapcache_pages-i.bufferram),
+		K(total_swapcache_pages),
+		K(active),
+		K(inactive),
 		K(i.totalhigh),
 		K(i.freehigh),
 		K(i.totalram-i.totalhigh),
 		K(i.freeram-i.freehigh),
 		K(i.totalswap),
-		K(i.freeswap));
+		K(i.freeswap),
+		K(ps.nr_dirty),
+		K(ps.nr_writeback),
+		K(ps.nr_mapped),
+		K(ps.nr_slab),
+		K(committed),
+		K(ps.nr_page_table_pages),
+		vmtot,
+		vmi.used,
+		vmi.largest_chunk
+		);
+
+		len += hugetlb_report_meminfo(page + len);
 
 	return proc_calc_metrics(page, start, off, count, eof, len);
-#undef B
 #undef K
 }
+
+extern struct seq_operations fragmentation_op;
+static int fragmentation_open(struct inode *inode, struct file *file)
+{
+	(void)inode;
+	return seq_open(file, &fragmentation_op);
+}
+
+static struct file_operations fragmentation_file_operations = {
+	.open		= fragmentation_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
 
 static int version_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
@@ -208,107 +268,166 @@ static int cpuinfo_open(struct inode *inode, struct file *file)
 	return seq_open(file, &cpuinfo_op);
 }
 static struct file_operations proc_cpuinfo_operations = {
-	open:		cpuinfo_open,
-	read:		seq_read,
-	llseek:		seq_lseek,
-	release:	seq_release,
+	.open		= cpuinfo_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
+extern struct seq_operations vmstat_op;
+static int vmstat_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &vmstat_op);
+}
+static struct file_operations proc_vmstat_file_operations = {
+	.open		= vmstat_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
+#ifdef CONFIG_PROC_HARDWARE
+static int hardware_read_proc(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
+{
+	int len = get_hardware_list(page);
+	return proc_calc_metrics(page, start, off, count, eof, len);
+}
+#endif
+
+#ifdef CONFIG_STRAM_PROC
+static int stram_read_proc(char *page, char **start, off_t off,
+				 int count, int *eof, void *data)
+{
+	int len = get_stram_list(page);
+	return proc_calc_metrics(page, start, off, count, eof, len);
+}
+#endif
+
+extern struct seq_operations partitions_op;
+static int partitions_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &partitions_op);
+}
+static struct file_operations proc_partitions_operations = {
+	.open		= partitions_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
+
+extern struct seq_operations diskstats_op;
+static int diskstats_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &diskstats_op);
+}
+static struct file_operations proc_diskstats_operations = {
+	.open		= diskstats_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
 };
 
 #ifdef CONFIG_MODULES
-static int modules_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
+extern struct seq_operations modules_op;
+static int modules_open(struct inode *inode, struct file *file)
 {
-	int len = get_module_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
+	return seq_open(file, &modules_op);
 }
-
-extern struct seq_operations ksyms_op;
-static int ksyms_open(struct inode *inode, struct file *file)
-{
-	return seq_open(file, &ksyms_op);
-}
-static struct file_operations proc_ksyms_operations = {
-	open:		ksyms_open,
-	read:		seq_read,
-	llseek:		seq_lseek,
-	release:	seq_release,
+static struct file_operations proc_modules_operations = {
+	.open		= modules_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
 };
 #endif
+
+extern struct seq_operations slabinfo_op;
+extern ssize_t slabinfo_write(struct file *, const char *, size_t, loff_t *);
+static int slabinfo_open(struct inode *inode, struct file *file)
+{
+	return seq_open(file, &slabinfo_op);
+}
+static struct file_operations proc_slabinfo_operations = {
+	.open		= slabinfo_open,
+	.read		= seq_read,
+	.write		= slabinfo_write,
+	.llseek		= seq_lseek,
+	.release	= seq_release,
+};
 
 static int kstat_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int i, len;
 	extern unsigned long total_forks;
-	unsigned long jif = jiffies;
-	unsigned int sum = 0, user = 0, nice = 0, system = 0;
-	int major, disk;
+	u64 jif;
+	unsigned int sum = 0, user = 0, nice = 0, system = 0, idle = 0, iowait = 0;
+	struct timeval now; 
+	unsigned long seq;
 
-	for (i = 0 ; i < smp_num_cpus; i++) {
-		int cpu = cpu_logical_map(i), j;
+	/* Atomically read jiffies and time of day */ 
+	do {
+		seq = read_seqbegin(&xtime_lock);
 
-		user += kstat.per_cpu_user[cpu];
-		nice += kstat.per_cpu_nice[cpu];
-		system += kstat.per_cpu_system[cpu];
+		jif = get_jiffies_64();
+		do_gettimeofday(&now);
+	} while (read_seqretry(&xtime_lock, seq));
+
+	/* calc # of seconds since boot time */
+	jif -= INITIAL_JIFFIES;
+	jif = ((u64)now.tv_sec * HZ) + (now.tv_usec/(1000000/HZ)) - jif;
+	do_div(jif, HZ);
+
+	for (i = 0 ; i < NR_CPUS; i++) {
+		int j;
+
+		if(!cpu_online(i)) continue;
+		user += kstat_cpu(i).cpustat.user;
+		nice += kstat_cpu(i).cpustat.nice;
+		system += kstat_cpu(i).cpustat.system;
+		idle += kstat_cpu(i).cpustat.idle;
+		iowait += kstat_cpu(i).cpustat.iowait;
 #if !defined(CONFIG_ARCH_S390)
 		for (j = 0 ; j < NR_IRQS ; j++)
-			sum += kstat.irqs[cpu][j];
+			sum += kstat_cpu(i).irqs[j];
 #endif
 	}
 
-	len = sprintf(page, "cpu  %u %u %u %lu\n", user, nice, system,
-		      jif * smp_num_cpus - (user + nice + system));
-	for (i = 0 ; i < smp_num_cpus; i++)
-		len += sprintf(page + len, "cpu%d %u %u %u %lu\n",
+	len = sprintf(page, "cpu  %u %u %u %u %u\n",
+		jiffies_to_clock_t(user),
+		jiffies_to_clock_t(nice),
+		jiffies_to_clock_t(system),
+		jiffies_to_clock_t(idle),
+		jiffies_to_clock_t(iowait));
+	for (i = 0 ; i < NR_CPUS; i++){
+		if (!cpu_online(i)) continue;
+		len += sprintf(page + len, "cpu%d %u %u %u %u %u\n",
 			i,
-			kstat.per_cpu_user[cpu_logical_map(i)],
-			kstat.per_cpu_nice[cpu_logical_map(i)],
-			kstat.per_cpu_system[cpu_logical_map(i)],
-			jif - (  kstat.per_cpu_user[cpu_logical_map(i)] \
-				   + kstat.per_cpu_nice[cpu_logical_map(i)] \
-				   + kstat.per_cpu_system[cpu_logical_map(i)]));
-	len += sprintf(page + len,
-		"page %u %u\n"
-		"swap %u %u\n"
-		"intr %u",
-			kstat.pgpgin >> 1,
-			kstat.pgpgout >> 1,
-			kstat.pswpin,
-			kstat.pswpout,
-			sum
-	);
-#if !defined(CONFIG_ARCH_S390)
+			jiffies_to_clock_t(kstat_cpu(i).cpustat.user),
+			jiffies_to_clock_t(kstat_cpu(i).cpustat.nice),
+			jiffies_to_clock_t(kstat_cpu(i).cpustat.system),
+			jiffies_to_clock_t(kstat_cpu(i).cpustat.idle),
+			jiffies_to_clock_t(kstat_cpu(i).cpustat.iowait));
+	}
+	len += sprintf(page + len, "intr %u", sum);
+
+#if !defined(CONFIG_ARCH_S390) && !defined(CONFIG_PPC64) && !defined(CONFIG_ALPHA)
 	for (i = 0 ; i < NR_IRQS ; i++)
 		len += sprintf(page + len, " %u", kstat_irqs(i));
 #endif
 
-	len += sprintf(page + len, "\ndisk_io: ");
-
-	for (major = 0; major < DK_MAX_MAJOR; major++) {
-		for (disk = 0; disk < DK_MAX_DISK; disk++) {
-			int active = kstat.dk_drive[major][disk] +
-				kstat.dk_drive_rblk[major][disk] +
-				kstat.dk_drive_wblk[major][disk];
-			if (active)
-				len += sprintf(page + len,
-					"(%u,%u):(%u,%u,%u,%u,%u) ",
-					major, disk,
-					kstat.dk_drive[major][disk],
-					kstat.dk_drive_rio[major][disk],
-					kstat.dk_drive_rblk[major][disk],
-					kstat.dk_drive_wio[major][disk],
-					kstat.dk_drive_wblk[major][disk]
-			);
-		}
-	}
-
 	len += sprintf(page + len,
-		"\nctxt %u\n"
+		"\nctxt %lu\n"
 		"btime %lu\n"
-		"processes %lu\n",
-		kstat.context_swtch,
-		xtime.tv_sec - jif / HZ,
-		total_forks);
+		"processes %lu\n"
+		"procs_running %lu\n"
+		"procs_blocked %lu\n",
+		nr_context_switches(),
+		(unsigned long)jif,
+		total_forks,
+		nr_running(),
+		nr_iowait());
 
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
@@ -316,45 +435,43 @@ static int kstat_read_proc(char *page, char **start, off_t off,
 static int devices_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
-	int len = get_device_list(page);
+	int len = get_chrdev_list(page);
+	len += get_blkdev_list(page+len);
 	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-
-static int partitions_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_partition_list(page, start, off, count);
-	if (len < count) *eof = 1;
-	return len;
 }
 
 #if !defined(CONFIG_ARCH_S390)
-static int interrupts_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
+extern int show_interrupts(struct seq_file *p, void *v);
+static int interrupts_open(struct inode *inode, struct file *file)
 {
-	int len = get_irq_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
+	unsigned size = 4096 * (1 + num_online_cpus() / 8);
+	char *buf = kmalloc(size, GFP_KERNEL);
+	struct seq_file *m;
+	int res;
+
+	if (!buf)
+		return -ENOMEM;
+	res = single_open(file, show_interrupts, NULL);
+	if (!res) {
+		m = file->private_data;
+		m->buf = buf;
+		m->size = size;
+	} else
+		kfree(buf);
+	return res;
 }
+static struct file_operations proc_interrupts_operations = {
+	.open		= interrupts_open,
+	.read		= seq_read,
+	.llseek		= seq_lseek,
+	.release	= single_release,
+};
 #endif
 
 static int filesystems_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_filesystem_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-
-static int dma_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_dma_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-
-static int ioports_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_ioport_list(page);
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
@@ -365,7 +482,6 @@ static int cmdline_read_proc(char *page, char **start, off_t off,
 	int len;
 
 	len = sprintf(page, "%s\n", saved_command_line);
-	len = strlen(page);
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
@@ -381,11 +497,10 @@ static int ds1286_read_proc(char *page, char **start, off_t off,
 static int locks_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
-	int len;
-	lock_kernel();
-	len = get_locks_status(page, start, off, count);
-	unlock_kernel();
-	if (len < count) *eof = 1;
+	int len = get_locks_status(page, start, off, count);
+
+	if (len < count)
+		*eof = 1;
 	return len;
 }
 
@@ -393,20 +508,6 @@ static int execdomains_read_proc(char *page, char **start, off_t off,
 				 int count, int *eof, void *data)
 {
 	int len = get_exec_domain_list(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-
-static int swaps_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_swaparea_info(page);
-	return proc_calc_metrics(page, start, off, count, eof, len);
-}
-
-static int memory_read_proc(char *page, char **start, off_t off,
-				 int count, int *eof, void *data)
-{
-	int len = get_mem_list(page);
 	return proc_calc_metrics(page, start, off, count, eof, len);
 }
 
@@ -469,21 +570,31 @@ static ssize_t write_profile(struct file * file, const char * buf,
 }
 
 static struct file_operations proc_profile_operations = {
-	read:		read_profile,
-	write:		write_profile,
+	.read		= read_profile,
+	.write		= write_profile,
 };
 
-extern struct seq_operations mounts_op;
-static int mounts_open(struct inode *inode, struct file *file)
+#ifdef CONFIG_MAGIC_SYSRQ
+/*
+ * writing 'C' to /proc/sysrq-trigger is like sysrq-C
+ */
+static ssize_t write_sysrq_trigger(struct file *file, const char *buf,
+				     size_t count, loff_t *ppos)
 {
-	return seq_open(file, &mounts_op);
+	if (count) {
+		char c;
+
+		if (get_user(c, buf))
+			return -EFAULT;
+		handle_sysrq(c, NULL, NULL);
+	}
+	return count;
 }
-static struct file_operations proc_mounts_operations = {
-	open:		mounts_open,
-	read:		seq_read,
-	llseek:		seq_lseek,
-	release:	seq_release,
+
+static struct file_operations proc_sysrq_trigger_operations = {
+	.write		= write_sysrq_trigger,
 };
+#endif
 
 struct proc_dir_entry *proc_root_kcore;
 
@@ -506,39 +617,43 @@ void __init proc_misc_init(void)
 		{"uptime",	uptime_read_proc},
 		{"meminfo",	meminfo_read_proc},
 		{"version",	version_read_proc},
-#ifdef CONFIG_MODULES
-		{"modules",	modules_read_proc},
+#ifdef CONFIG_PROC_HARDWARE
+		{"hardware",	hardware_read_proc},
+#endif
+#ifdef CONFIG_STRAM_PROC
+		{"stram",	stram_read_proc},
 #endif
 		{"stat",	kstat_read_proc},
 		{"devices",	devices_read_proc},
-		{"partitions",	partitions_read_proc},
-#if !defined(CONFIG_ARCH_S390)
-		{"interrupts",	interrupts_read_proc},
-#endif
 		{"filesystems",	filesystems_read_proc},
-		{"dma",		dma_read_proc},
-		{"ioports",	ioports_read_proc},
 		{"cmdline",	cmdline_read_proc},
 #ifdef CONFIG_SGI_DS1286
 		{"rtc",		ds1286_read_proc},
 #endif
 		{"locks",	locks_read_proc},
-		{"swaps",	swaps_read_proc},
-		{"iomem",	memory_read_proc},
 		{"execdomains",	execdomains_read_proc},
 		{NULL,}
 	};
 	for (p = simple_ones; p->name; p++)
 		create_proc_read_entry(p->name, 0, NULL, p->read_proc, NULL);
 
+	proc_symlink("mounts", NULL, "self/mounts");
+
 	/* And now for trickier ones */
 	entry = create_proc_entry("kmsg", S_IRUSR, &proc_root);
 	if (entry)
 		entry->proc_fops = &proc_kmsg_operations;
-	create_seq_entry("mounts", 0, &proc_mounts_operations);
 	create_seq_entry("cpuinfo", 0, &proc_cpuinfo_operations);
+	create_seq_entry("partitions", 0, &proc_partitions_operations);
+#if !defined(CONFIG_ARCH_S390)
+	create_seq_entry("interrupts", 0, &proc_interrupts_operations);
+#endif
+	create_seq_entry("slabinfo",S_IWUSR|S_IRUGO,&proc_slabinfo_operations);
+	create_seq_entry("buddyinfo",S_IRUGO, &fragmentation_file_operations);
+	create_seq_entry("vmstat",S_IRUGO, &proc_vmstat_file_operations);
+	create_seq_entry("diskstats", 0, &proc_diskstats_operations);
 #ifdef CONFIG_MODULES
-	create_seq_entry("ksyms", 0, &proc_ksyms_operations);
+	create_seq_entry("modules", 0, &proc_modules_operations);
 #endif
 	proc_root_kcore = create_proc_entry("kcore", S_IRUSR, NULL);
 	if (proc_root_kcore) {
@@ -546,13 +661,18 @@ void __init proc_misc_init(void)
 		proc_root_kcore->size =
 				(size_t)high_memory - PAGE_OFFSET + PAGE_SIZE;
 	}
-	if (prof_shift) {
+	if (prof_on) {
 		entry = create_proc_entry("profile", S_IWUSR | S_IRUGO, NULL);
 		if (entry) {
 			entry->proc_fops = &proc_profile_operations;
 			entry->size = (1+prof_len) * sizeof(unsigned int);
 		}
 	}
+#ifdef CONFIG_MAGIC_SYSRQ
+	entry = create_proc_entry("sysrq-trigger", S_IWUSR, NULL);
+	if (entry)
+		entry->proc_fops = &proc_sysrq_trigger_operations;
+#endif
 #ifdef CONFIG_PPC32
 	{
 		extern struct file_operations ppc_htab_operations;
@@ -561,8 +681,4 @@ void __init proc_misc_init(void)
 			entry->proc_fops = &ppc_htab_operations;
 	}
 #endif
-	entry = create_proc_read_entry("slabinfo", S_IWUSR | S_IRUGO, NULL,
-				       slabinfo_read_proc, NULL);
-	if (entry)
-		entry->write_proc = slabinfo_write_proc;
 }

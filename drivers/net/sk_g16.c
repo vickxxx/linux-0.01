@@ -60,24 +60,22 @@ static const char rcsid[] = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $"
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
-#include <linux/ptrace.h>
 #include <linux/fcntl.h>
 #include <linux/ioport.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <linux/string.h> 
 #include <linux/delay.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <asm/bitops.h> 
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+
+#include <asm/system.h>
+#include <asm/io.h>
+#include <asm/bitops.h> 
 
 #include "sk_g16.h"
 
@@ -480,7 +478,7 @@ static int   SK_probe(struct net_device *dev, short ioaddr);
 static void  SK_timeout(struct net_device *dev);
 static int   SK_open(struct net_device *dev);
 static int   SK_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void  SK_interrupt(int irq, void *dev_id, struct pt_regs * regs);
+static irqreturn_t SK_interrupt(int irq, void *dev_id, struct pt_regs * regs);
 static void  SK_rxintr(struct net_device *dev);
 static void  SK_txintr(struct net_device *dev);
 static int   SK_close(struct net_device *dev);
@@ -810,7 +808,7 @@ int __init SK_probe(struct net_device *dev, short ioaddr)
     SK_print_pos(dev, "POS registers after ROM, RAM config");
 #endif
 
-    board = (SK_RAM *) bus_to_virt(rom_addr);
+    board = (SK_RAM *) isa_bus_to_virt(rom_addr);
 
     /* Read in station address */
     for (i = 0, j = 0; i < ETH_ALEN; i++, j+=2)
@@ -1256,6 +1254,7 @@ static int SK_send_packet(struct sk_buff *skb, struct net_device *dev)
 {
     struct priv *p = (struct priv *) dev->priv;
     struct tmd *tmdp;
+    static char pad[64];
 
     PRINTK2(("## %s: SK_send_packet() called, CSR0 %#04x.\n", 
 	    SK_NAME, SK_read_reg(CSR0)));
@@ -1280,6 +1279,8 @@ static int SK_send_packet(struct sk_buff *skb, struct net_device *dev)
 	/* Copy data into dual ported ram */
 
 	memcpy_toio((tmdp->u.buffer & 0x00ffffff), skb->data, skb->len);
+	if (len != skb->len)
+		memcpy_toio((tmdp->u.buffer & 0x00ffffff) + sb->len, pad, len-skb->len);
 
 	writew(-len, &tmdp->blen);            /* set length to transmit */
 
@@ -1336,7 +1337,7 @@ static int SK_send_packet(struct sk_buff *skb, struct net_device *dev)
  *     YY/MM/DD  uid  Description
 -*/
 
-static void SK_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t SK_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
     int csr0;
     struct net_device *dev = dev_id;
@@ -1385,6 +1386,7 @@ static void SK_interrupt(int irq, void *dev_id, struct pt_regs * regs)
     SK_write_reg(CSR0, CSR0_INEA); /* Enable Interrupts */
 
     spin_unlock (&SK_lock);
+    return IRQ_HANDLED;
 } /* End of SK_interrupt() */ 
 
 

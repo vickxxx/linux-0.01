@@ -3,27 +3,6 @@
 #define _SPARC64_STAT_H
 
 #include <linux/types.h>
-#include <linux/time.h>
-
-struct stat32 {
-	__kernel_dev_t32   st_dev;
-	__kernel_ino_t32   st_ino;
-	__kernel_mode_t32  st_mode;
-	short   	   st_nlink;
-	__kernel_uid_t32   st_uid;
-	__kernel_gid_t32   st_gid;
-	__kernel_dev_t32   st_rdev;
-	__kernel_off_t32   st_size;
-	__kernel_time_t32  st_atime;
-	unsigned int       __unused1;
-	__kernel_time_t32  st_mtime;
-	unsigned int       __unused2;
-	__kernel_time_t32  st_ctime;
-	unsigned int       __unused3;
-	__kernel_off_t32   st_blksize;
-	__kernel_off_t32   st_blocks;
-	unsigned int  __unused4[2];
-};
 
 struct stat {
 	dev_t   st_dev;
@@ -46,8 +25,7 @@ struct stat {
 /* This is sparc32 stat64 structure. */
 
 struct stat64 {
-	unsigned char	__pad0[6];
-	unsigned short	st_dev;
+	unsigned long long	st_dev;
 
 	unsigned long long	st_ino;
 
@@ -57,8 +35,7 @@ struct stat64 {
 	unsigned int	st_uid;
 	unsigned int	st_gid;
 
-	unsigned char	__pad2[6];
-	unsigned short	st_rdev;
+	unsigned long long	st_rdev;
 
 	unsigned char	__pad3[8];
 
@@ -69,13 +46,13 @@ struct stat64 {
 	unsigned int	st_blocks;
 
 	unsigned int	st_atime;
-	unsigned int	__unused1;
+	unsigned int	st_atime_nsec;
 
 	unsigned int	st_mtime;
-	unsigned int	__unused2;
+	unsigned int	st_mtime_nsec;
 
 	unsigned int	st_ctime;
-	unsigned int	__unused3;
+	unsigned int	st_ctime_nsec;
 
 	unsigned int	__unused4;
 	unsigned int	__unused5;

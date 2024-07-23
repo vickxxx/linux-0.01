@@ -69,15 +69,16 @@ fold_field(void *mib[], int nr)
 {
 	unsigned long res = 0;
 	int i;
-	int sz = sizeof(struct sctp_mib);
-	unsigned long* begin;
 
-	sz /= sizeof(unsigned long);
-	begin = (unsigned long*) mib;
-
-	for (i=0; i<smp_num_cpus; i++) {
-		res += begin[2*cpu_logical_map(i)*sz + nr];
-		res += begin[(2*cpu_logical_map(i)+1)*sz + nr];
+	for (i = 0; i < NR_CPUS; i++) {
+		if (!cpu_possible(i))
+			continue;
+		res +=
+		    *((unsigned long *) (((void *) per_cpu_ptr(mib[0], i)) +
+					 sizeof (unsigned long) * nr));
+		res +=
+		    *((unsigned long *) (((void *) per_cpu_ptr(mib[1], i)) +
+					 sizeof (unsigned long) * nr));
 	}
 	return res;
 }
@@ -171,13 +172,13 @@ static int sctp_eps_seq_show(struct seq_file *seq, void *v)
 
 	seq_printf(seq, " ENDPT     SOCK   STY SST HBKT LPORT LADDRS\n");
 	for (hash = 0; hash < sctp_ep_hashsize; hash++) {
-		head = &sctp_ep_hashtable[hash];
+		head = &sctp_ep_hashbucket[hash];
 		read_lock(&head->lock);
 		for (epb = head->chain; epb; epb = epb->next) {
 			ep = sctp_ep(epb);
 			sk = epb->sk;
 			seq_printf(seq, "%8p %8p %-3d %-3d %-4d %-5d ", ep, sk,
-				   sctp_sk(sk)->type, sk->state, hash,
+				   sctp_sk(sk)->type, sk->sk_state, hash,
 				   epb->bind_addr.port);
 			sctp_seq_dump_local_addrs(seq, epb);
 			seq_printf(seq, "\n");
@@ -233,14 +234,14 @@ static int sctp_assocs_seq_show(struct seq_file *seq, void *v)
 	seq_printf(seq, " ASSOC     SOCK   STY SST ST HBKT LPORT RPORT "
 			"LADDRS <-> RADDRS\n");
 	for (hash = 0; hash < sctp_assoc_hashsize; hash++) {
-		head = &sctp_assoc_hashtable[hash];
+		head = &sctp_assoc_hashbucket[hash];
 		read_lock(&head->lock);
 		for (epb = head->chain; epb; epb = epb->next) {
 			assoc = sctp_assoc(epb);
 			sk = epb->sk;
 			seq_printf(seq,
 				   "%8p %8p %-3d %-3d %-2d %-4d %-5d %-5d ",
-				   assoc, sk, sctp_sk(sk)->type, sk->state,
+				   assoc, sk, sctp_sk(sk)->type, sk->sk_state,
 				   assoc->state, hash, epb->bind_addr.port,
 				   assoc->peer.port);
 			sctp_seq_dump_local_addrs(seq, epb);

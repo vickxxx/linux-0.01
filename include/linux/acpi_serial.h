@@ -9,7 +9,11 @@
  *
  */
 
+#include <linux/serial.h>
+
 extern void setup_serial_acpi(void *);
+
+#define ACPI_SIG_LEN		4
 
 /* ACPI table signatures */
 #define ACPI_SPCRT_SIGNATURE	"SPCR"

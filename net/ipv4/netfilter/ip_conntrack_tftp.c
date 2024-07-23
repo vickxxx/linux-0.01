@@ -35,15 +35,18 @@ MODULE_PARM_DESC(ports, "port numbers of tftp servers");
 #define DEBUGP(format, args...)
 #endif
 
-static int tftp_help(const struct iphdr *iph, size_t len,
-	struct ip_conntrack *ct,
-	enum ip_conntrack_info ctinfo)
+static int tftp_help(struct sk_buff *skb,
+		     struct ip_conntrack *ct,
+		     enum ip_conntrack_info ctinfo)
 {
-	struct udphdr *udph = (void *)iph + iph->ihl * 4;
-	struct tftphdr *tftph = (void *)udph + 8;
+	struct tftphdr tftph;
 	struct ip_conntrack_expect exp;
-	
-	switch (ntohs(tftph->opcode)) {
+
+	if (skb_copy_bits(skb, skb->nh.iph->ihl * 4 + sizeof(struct udphdr),
+			  &tftph, sizeof(tftph)) != 0)
+		return -1;
+
+	switch (ntohs(tftph.opcode)) {
 	/* RRQ and WRQ works the same way */
 	case TFTP_OPCODE_READ:
 	case TFTP_OPCODE_WRITE:
@@ -63,13 +66,6 @@ static int tftp_help(const struct iphdr *iph, size_t len,
 		DUMP_TUPLE(&exp.tuple);
 		DUMP_TUPLE(&exp.mask);
 		ip_conntrack_expect_related(ct, &exp);
-		break;
-	case TFTP_OPCODE_DATA:
-	case TFTP_OPCODE_ACK:
-		DEBUGP("Data/ACK opcode\n");
-		break;
-	case TFTP_OPCODE_ERROR:
-		DEBUGP("Error opcode\n");
 		break;
 	default:
 		DEBUGP("Unknown opcode\n");
@@ -101,6 +97,8 @@ static int __init init(void)
 
 	for (i = 0 ; (i < MAX_PORTS) && ports[i] ; i++) {
 		/* Create helper structure */
+		memset(&tftp[i], 0, sizeof(struct ip_conntrack_helper));
+
 		tftp[i].tuple.dst.protonum = IPPROTO_UDP;
 		tftp[i].tuple.src.u.udp.port = htons(ports[i]);
 		tftp[i].mask.dst.protonum = 0xFFFF;
@@ -131,6 +129,8 @@ static int __init init(void)
 	}
 	return(0);
 }
+
+PROVIDES_CONNTRACK(tftp);
 
 module_init(init);
 module_exit(fini);

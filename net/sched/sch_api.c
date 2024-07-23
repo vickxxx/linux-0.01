@@ -16,6 +16,7 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -32,7 +33,6 @@
 #include <linux/init.h>
 #include <linux/proc_fs.h>
 #include <linux/kmod.h>
-#include <linux/list.h>
 
 #include <net/sock.h>
 #include <net/pkt_sched.h>
@@ -139,21 +139,19 @@ static rwlock_t qdisc_mod_lock = RW_LOCK_UNLOCKED;
 
 /* The list of all installed queueing disciplines. */
 
-static struct Qdisc_ops *qdisc_base = NULL;
+static struct Qdisc_ops *qdisc_base;
 
 /* Register/uregister queueing discipline */
 
 int register_qdisc(struct Qdisc_ops *qops)
 {
 	struct Qdisc_ops *q, **qp;
+	int rc = -EEXIST;
 
 	write_lock(&qdisc_mod_lock);
-	for (qp = &qdisc_base; (q=*qp)!=NULL; qp = &q->next) {
-		if (strcmp(qops->id, q->id) == 0) {
-			write_unlock(&qdisc_mod_lock);
-			return -EEXIST;
-		}
-	}
+	for (qp = &qdisc_base; (q = *qp) != NULL; qp = &q->next)
+		if (!strcmp(qops->id, q->id))
+			goto out;
 
 	if (qops->enqueue == NULL)
 		qops->enqueue = noop_qdisc_ops.enqueue;
@@ -164,8 +162,10 @@ int register_qdisc(struct Qdisc_ops *qops)
 
 	qops->next = NULL;
 	*qp = qops;
+	rc = 0;
+out:
 	write_unlock(&qdisc_mod_lock);
-	return 0;
+	return rc;
 }
 
 int unregister_qdisc(struct Qdisc_ops *qops)
@@ -194,7 +194,7 @@ struct Qdisc *qdisc_lookup(struct net_device *dev, u32 handle)
 {
 	struct Qdisc *q;
 
-	list_for_each_entry(q, &dev->qdisc_list, list) {
+	for (q = dev->qdisc_list; q; q = q->next) {
 		if (q->handle == handle)
 			return q;
 	}
@@ -307,7 +307,7 @@ dev_graft_qdisc(struct net_device *dev, struct Qdisc *qdisc)
 
 	write_lock(&qdisc_tree_lock);
 	spin_lock_bh(&dev->queue_lock);
-	if (qdisc && qdisc->flags&TCQ_F_INGRESS) {
+	if (qdisc && qdisc->flags&TCQ_F_INGRES) {
 		oqdisc = dev->qdisc_ingress;
 		/* Prune old scheduler */
 		if (oqdisc && atomic_read(&oqdisc->refcnt) <= 1) {
@@ -357,7 +357,7 @@ int qdisc_graft(struct net_device *dev, struct Qdisc *parent, u32 classid,
 
 
 	if (parent == NULL) { 
-		if (q && q->flags&TCQ_F_INGRESS) {
+		if (q && q->flags&TCQ_F_INGRES) {
 			*old = dev_graft_qdisc(dev, q);
 		} else {
 			*old = dev_graft_qdisc(dev, new);
@@ -371,8 +371,6 @@ int qdisc_graft(struct net_device *dev, struct Qdisc *parent, u32 classid,
 			unsigned long cl = cops->get(parent, classid);
 			if (cl) {
 				err = cops->graft(parent, cl, new, old);
-				if (new)
-					new->parent = classid;
 				cops->put(parent, cl);
 			}
 		}
@@ -398,11 +396,8 @@ qdisc_create(struct net_device *dev, u32 handle, struct rtattr **tca, int *errp)
 	ops = qdisc_lookup_ops(kind);
 #ifdef CONFIG_KMOD
 	if (ops==NULL && tca[TCA_KIND-1] != NULL) {
-		char module_name[4 + IFNAMSIZ + 1];
-
 		if (RTA_PAYLOAD(kind) <= IFNAMSIZ) {
-			sprintf(module_name, "sch_%s", (char*)RTA_DATA(kind));
-			request_module (module_name);
+			request_module("sch_%s", (char*)RTA_DATA(kind));
 			ops = qdisc_lookup_ops(kind);
 		}
 	}
@@ -427,11 +422,10 @@ qdisc_create(struct net_device *dev, u32 handle, struct rtattr **tca, int *errp)
 
 	memset(sch, 0, size);
 
-	INIT_LIST_HEAD(&sch->list);
 	skb_queue_head_init(&sch->q);
 
 	if (handle == TC_H_INGRESS)
-		sch->flags |= TCQ_F_INGRESS;
+		sch->flags |= TCQ_F_INGRES;
 
 	sch->ops = ops;
 	sch->enqueue = ops->enqueue;
@@ -451,9 +445,14 @@ qdisc_create(struct net_device *dev, u32 handle, struct rtattr **tca, int *errp)
         else
                 sch->handle = handle;
 
+	err = -EBUSY;
+	if (!try_module_get(ops->owner))
+		goto err_out;
+
 	if (!ops->init || (err = ops->init(sch, tca[TCA_OPTIONS-1])) == 0) {
 		write_lock(&qdisc_tree_lock);
-		list_add_tail(&sch->list, &dev->qdisc_list);
+		sch->next = dev->qdisc_list;
+		dev->qdisc_list = sch;
 		write_unlock(&qdisc_tree_lock);
 #ifdef CONFIG_NET_ESTIMATOR
 		if (tca[TCA_RATE-1])
@@ -461,6 +460,7 @@ qdisc_create(struct net_device *dev, u32 handle, struct rtattr **tca, int *errp)
 #endif
 		return sch;
 	}
+	module_put(ops->owner);
 
 err_out:
 	*errp = err;
@@ -808,18 +808,15 @@ static int tc_dump_qdisc(struct sk_buff *skb, struct netlink_callback *cb)
 		if (idx > s_idx)
 			s_q_idx = 0;
 		read_lock(&qdisc_tree_lock);
-		q_idx = 0;
-		list_for_each_entry(q, &dev->qdisc_list, list) {
-			if (q_idx < s_q_idx) {
-				q_idx++;
+		for (q = dev->qdisc_list, q_idx = 0; q;
+		     q = q->next, q_idx++) {
+			if (q_idx < s_q_idx)
 				continue;
-			}
-			if (tc_fill_qdisc(skb, q, q->parent, NETLINK_CB(cb->skb).pid,
+			if (tc_fill_qdisc(skb, q, 0, NETLINK_CB(cb->skb).pid,
 					  cb->nlh->nlmsg_seq, NLM_F_MULTI, RTM_NEWQDISC) <= 0) {
 				read_unlock(&qdisc_tree_lock);
 				goto done;
 			}
-			q_idx++;
 		}
 		read_unlock(&qdisc_tree_lock);
 	}
@@ -1030,16 +1027,13 @@ static int tc_dump_tclass(struct sk_buff *skb, struct netlink_callback *cb)
 		return 0;
 
 	s_t = cb->args[0];
-	t = 0;
 
 	read_lock(&qdisc_tree_lock);
-	list_for_each_entry(q, &dev->qdisc_list, list) {
-		if (t < s_t || !q->ops->cl_ops ||
-		    (tcm->tcm_parent &&
-		     TC_H_MAJ(tcm->tcm_parent) != q->handle)) {
-			t++;
+	for (q=dev->qdisc_list, t=0; q; q = q->next, t++) {
+		if (t < s_t) continue;
+		if (!q->ops->cl_ops) continue;
+		if (tcm->tcm_parent && TC_H_MAJ(tcm->tcm_parent) != q->handle)
 			continue;
-		}
 		if (t > s_t)
 			memset(&cb->args[1], 0, sizeof(cb->args)-sizeof(cb->args[0]));
 		arg.w.fn = qdisc_class_dump;
@@ -1052,7 +1046,6 @@ static int tc_dump_tclass(struct sk_buff *skb, struct netlink_callback *cb)
 		cb->args[1] = arg.w.count;
 		if (arg.w.stop)
 			break;
-		t++;
 	}
 	read_unlock(&qdisc_tree_lock);
 
@@ -1115,8 +1108,7 @@ PSCHED_WATCHER psched_time_mark;
 
 static void psched_tick(unsigned long);
 
-static struct timer_list psched_timer =
-	{ function: psched_tick };
+static struct timer_list psched_timer = TIMER_INITIALIZER(psched_tick, 0, 0);
 
 static void psched_tick(unsigned long dummy)
 {

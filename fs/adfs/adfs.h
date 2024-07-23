@@ -14,6 +14,8 @@
 
 #include "dir_f.h"
 
+struct buffer_head;
+
 /*
  * Directory handling
  */
@@ -66,7 +68,7 @@ struct adfs_discmap {
 
 /* Inode stuff */
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
-int adfs_get_block(struct inode *inode, long block,
+int adfs_get_block(struct inode *inode, sector_t block,
 		   struct buffer_head *bh, int create);
 #else
 int adfs_bmap(struct inode *inode, int block);
@@ -77,7 +79,7 @@ void adfs_write_inode(struct inode *inode,int unused);
 int adfs_notify_change(struct dentry *dentry, struct iattr *attr);
 
 /* map.c */
-extern int adfs_map_lookup(struct super_block *sb, int frag_id, int offset);
+extern int adfs_map_lookup(struct super_block *sb, unsigned int frag_id, unsigned int offset);
 extern unsigned int adfs_map_free(struct super_block *sb);
 
 /* Misc */
@@ -86,7 +88,7 @@ void __adfs_error(struct super_block *sb, const char *function,
 #define adfs_error(sb, fmt...) __adfs_error(sb, __FUNCTION__, fmt)
 
 /* namei.c */
-extern struct dentry *adfs_lookup(struct inode *dir, struct dentry *dentry);
+extern struct dentry *adfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *);
 
 /* super.c */
 
@@ -130,7 +132,7 @@ __adfs_block_map(struct super_block *sb, unsigned int object_id,
 		unsigned int off;
 
 		off = (object_id & 255) - 1;
-		block += off << sb->u.adfs_sb.s_log2sharesize;
+		block += off << ADFS_SB(sb)->s_log2sharesize;
 	}
 
 	return adfs_map_lookup(sb, object_id >> 8, block);

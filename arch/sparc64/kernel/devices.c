@@ -10,15 +10,22 @@
 #include <linux/init.h>
 #include <linux/ioport.h>
 #include <linux/string.h>
+#include <linux/spinlock.h>
 
 #include <asm/page.h>
 #include <asm/oplib.h>
 #include <asm/system.h>
 #include <asm/smp.h>
 #include <asm/spitfire.h>
+#include <asm/timer.h>
 
-struct prom_cpuinfo linux_cpus[64] __initdata = { { 0 } };
-unsigned prom_cpu_nodes[64];
+/* Used to synchronize acceses to NatSemi SUPER I/O chip configure
+ * operations in asm/ns87303.h
+ */
+spinlock_t ns87303_lock = SPIN_LOCK_UNLOCKED;
+
+struct prom_cpuinfo linux_cpus[NR_CPUS] __initdata = { { 0 } };
+unsigned prom_cpu_nodes[NR_CPUS];
 int linux_num_cpus = 0;
 
 extern void cpu_probe(void);
@@ -33,7 +40,6 @@ void __init device_scan(void)
 
 	/* FIX ME FAST... -DaveM */
 	ioport_resource.end = 0xffffffffffffffffUL;
-	iomem_resource.end = 0xffffffffffffffffUL;
 
 	prom_getstring(prom_root_node, "device_type", node_str, sizeof(node_str));
 
@@ -57,7 +63,8 @@ void __init device_scan(void)
 				if (tlb_type == spitfire) {
 					prom_getproperty(scan, "upa-portid",
 							 (char *) &thismid, sizeof(thismid));
-				} else if (tlb_type == cheetah) {
+				} else if (tlb_type == cheetah ||
+					   tlb_type == cheetah_plus) {
 					prom_getproperty(scan, "portid",
 							 (char *) &thismid, sizeof(thismid));
 				}
@@ -81,7 +88,6 @@ void __init device_scan(void)
 
 #ifndef CONFIG_SMP
 	{
-		extern unsigned long up_clock_tick;
 		up_clock_tick = prom_getintdefault(prom_node_cpu,
 						   "clock-frequency",
 						   0);

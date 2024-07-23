@@ -23,7 +23,11 @@
 #define _UDP_H
 
 #include <linux/udp.h>
+#include <linux/ip.h>
+#include <linux/list.h>
 #include <net/sock.h>
+#include <net/snmp.h>
+#include <linux/seq_file.h>
 
 #define UDP_HTABLE_SIZE		128
 
@@ -31,19 +35,19 @@
  *        and hashing code needs to work with different AF's yet
  *        the port space is shared.
  */
-extern struct sock *udp_hash[UDP_HTABLE_SIZE];
+extern struct hlist_head udp_hash[UDP_HTABLE_SIZE];
 extern rwlock_t udp_hash_lock;
 
 extern int udp_port_rover;
 
 static inline int udp_lport_inuse(u16 num)
 {
-	struct sock *sk = udp_hash[num & (UDP_HTABLE_SIZE - 1)];
+	struct sock *sk;
+	struct hlist_node *node;
 
-	for(; sk != NULL; sk = sk->next) {
-		if(sk->num == num)
+	sk_for_each(sk, node, &udp_hash[num & (UDP_HTABLE_SIZE - 1)])
+		if (inet_sk(sk)->num == num)
 			return 1;
-	}
 	return 0;
 }
 
@@ -63,15 +67,33 @@ extern void	udp_err(struct sk_buff *, u32);
 extern int	udp_connect(struct sock *sk,
 			    struct sockaddr *usin, int addr_len);
 
-extern int	udp_sendmsg(struct sock *sk, struct msghdr *msg, int len);
+extern int	udp_sendmsg(struct kiocb *iocb, struct sock *sk,
+			    struct msghdr *msg, int len);
 
 extern int	udp_rcv(struct sk_buff *skb);
 extern int	udp_ioctl(struct sock *sk, int cmd, unsigned long arg);
 extern int	udp_disconnect(struct sock *sk, int flags);
 
-extern struct udp_mib udp_statistics[NR_CPUS*2];
+DECLARE_SNMP_STAT(struct udp_mib, udp_statistics);
 #define UDP_INC_STATS(field)		SNMP_INC_STATS(udp_statistics, field)
 #define UDP_INC_STATS_BH(field)		SNMP_INC_STATS_BH(udp_statistics, field)
 #define UDP_INC_STATS_USER(field) 	SNMP_INC_STATS_USER(udp_statistics, field)
 
+/* /proc */
+struct udp_seq_afinfo {
+	struct module		*owner;
+	char			*name;
+	sa_family_t		family;
+	int 			(*seq_show) (struct seq_file *m, void *v);
+	struct file_operations	*seq_fops;
+};
+
+struct udp_iter_state {
+	sa_family_t		family;
+	int			bucket;
+	struct seq_operations	seq_ops;
+};
+
+extern int udp_proc_register(struct udp_seq_afinfo *afinfo);
+extern void udp_proc_unregister(struct udp_seq_afinfo *afinfo);
 #endif	/* _UDP_H */

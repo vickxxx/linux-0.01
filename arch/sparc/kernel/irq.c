@@ -1,4 +1,4 @@
-/*  $Id: irq.c,v 1.113 2001/07/17 16:17:33 anton Exp $
+/*  $Id: irq.c,v 1.114 2001/12/11 04:55:51 davem Exp $
  *  arch/sparc/kernel/irq.c:  Interrupt request handling routines. On the
  *                            Sparc the IRQ's are basically 'cast in stone'
  *                            and you are supposed to probe the prom's device
@@ -6,12 +6,13 @@
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
  *  Copyright (C) 1995 Miguel de Icaza (miguel@nuclecu.unam.mx)
- *  Copyright (C) 1995 Pete A. Zaitcev (zaitcev@yahoo.com)
+ *  Copyright (C) 1995,2002 Pete A. Zaitcev (zaitcev@yahoo.com)
  *  Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
  *  Copyright (C) 1998-2000 Anton Blanchard (anton@samba.org)
  */
 
 #include <linux/config.h>
+#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
@@ -27,6 +28,7 @@
 #include <linux/delay.h>
 #include <linux/threads.h>
 #include <linux/spinlock.h>
+#include <linux/seq_file.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
@@ -43,8 +45,8 @@
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
 #include <asm/hardirq.h>
-#include <asm/softirq.h>
 #include <asm/pcic.h>
+#include <asm/cacheflush.h>
 
 /*
  * Dave Redman (djhr@tadpole.co.uk)
@@ -72,8 +74,8 @@ static void irq_panic(void)
     prom_halt();
 }
 
-void (*init_timers)(void (*)(int, void *,struct pt_regs *)) =
-    (void (*)(void (*)(int, void *,struct pt_regs *))) irq_panic;
+void (*sparc_init_timers)(irqreturn_t (*)(int, void *,struct pt_regs *)) =
+    (void (*)(irqreturn_t (*)(int, void *,struct pt_regs *))) irq_panic;
 
 /*
  * Dave Redman (djhr@tadpole.co.uk)
@@ -90,49 +92,55 @@ void (*init_timers)(void (*)(int, void *,struct pt_regs *)) =
  */
 #define MAX_STATIC_ALLOC	4
 struct irqaction static_irqaction[MAX_STATIC_ALLOC];
-int static_irq_count = 0;
+int static_irq_count;
 
-struct irqaction *irq_action[NR_IRQS+1] = {
+struct irqaction *irq_action[NR_IRQS] = {
 	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL,
 	  NULL, NULL, NULL, NULL, NULL, NULL , NULL, NULL
 };
 
-int get_irq_list(char *buf)
+int show_interrupts(struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i;
 	struct irqaction * action;
+	unsigned long flags;
 #ifdef CONFIG_SMP
 	int j;
 #endif
 
 	if (sparc_cpu_model == sun4d) {
-		extern int sun4d_get_irq_list(char *);
+		extern int show_sun4d_interrupts(struct seq_file *, void *);
 		
-		return sun4d_get_irq_list(buf);
+		return show_sun4d_interrupts(p, v);
 	}
-	for (i = 0 ; i < (NR_IRQS+1) ; i++) {
+	for (i = 0 ; i < NR_IRQS ; i++) {
+		local_irq_save(flags);
 	        action = *(i + irq_action);
 		if (!action) 
-		        continue;
-		len += sprintf(buf+len, "%3d: ", i);
+		        goto skip;
+		seq_printf(p, "%3d: ", i);
 #ifndef CONFIG_SMP
-		len += sprintf(buf+len, "%10u ", kstat_irqs(i));
+		seq_printf(p, "%10u ", kstat_irqs(i));
 #else
-		for (j = 0; j < smp_num_cpus; j++)
-			len += sprintf(buf+len, "%10u ",
-				kstat.irqs[cpu_logical_map(j)][i]);
+		for (j = 0; j < NR_CPUS; j++) {
+			if (cpu_online(j))
+				seq_printf(p, "%10u ",
+				    kstat_cpu(cpu_logical_map(j)).irqs[i]);
+		}
 #endif
-		len += sprintf(buf+len, " %c %s",
+		seq_printf(p, " %c %s",
 			(action->flags & SA_INTERRUPT) ? '+' : ' ',
 			action->name);
 		for (action=action->next; action; action = action->next) {
-			len += sprintf(buf+len, ",%s %s",
+			seq_printf(p, ",%s %s",
 				(action->flags & SA_INTERRUPT) ? " +" : "",
 				action->name);
 		}
-		len += sprintf(buf+len, "\n");
+		seq_putc(p, '\n');
+skip:
+		local_irq_restore(flags);
 	}
-	return len;
+	return 0;
 }
 
 void free_irq(unsigned int irq, void *dev_id)
@@ -147,7 +155,7 @@ void free_irq(unsigned int irq, void *dev_id)
 		
 		return sun4d_free_irq(irq, dev_id);
 	}
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	action = *(cpu_irq + irq_action);
         if (cpu_irq > 14) {  /* 14 irq levels on the sparc */
                 printk("Trying to free bogus IRQ %d\n", irq);
@@ -213,12 +221,16 @@ static void show(char * str)
 
 	printk("\n%s, CPU %d:\n", str, cpu);
 	printk("irq:  %d [ ", irqs_running());
-	for (i = 0; i < smp_num_cpus; i++)
-		printk("%u ", __brlock_array[i][BR_GLOBALIRQ_LOCK]);
+	for (i = 0; i < NR_CPUS; i++) {
+		if (cpu_online(i))
+			printk("%u ", __brlock_array[i][BR_GLOBALIRQ_LOCK]);
+	}
 	printk("]\nbh:   %d [ ",
 	       (spin_is_locked(&global_bh_lock) ? 1 : 0));
-	for (i = 0; i < smp_num_cpus; i++)
-		printk("%u ", local_bh_count(i));
+	for (i = 0; i < NR_CPUS; i++) {
+		if (cpu_online(i))
+			printk("%u ", local_bh_count(i));
+	}
 	printk("]\n");
 
 #ifdef VERBOSE_DEBUG_IRQLOCK
@@ -230,7 +242,7 @@ static void show(char * str)
 
 
 /*
- * We have to allow irqs to arrive between __sti and __cli
+ * We have to allow irqs to arrive between local_irq_enable and local_irq_disable
  */
 #define SYNC_OTHER_CORES(x) barrier()
 
@@ -275,9 +287,9 @@ again:
 				show("get_irqlock");
 				count = (~0 >> 1);
 			}
-			__sti();
+			local_irq_enable();
 			SYNC_OTHER_CORES(cpu);
-			__cli();
+			local_irq_disable();
 		}
 		goto again;
 	}
@@ -301,11 +313,11 @@ void __global_cli(void)
 {
 	unsigned long flags;
 
-	__save_flags(flags);
+	local_save_flags(flags);
 
 	if ((flags & PSR_PIL) != PSR_PIL) {
 		int cpu = smp_processor_id();
-		__cli();
+		local_irq_disable();
 		if (!local_irq_count(cpu))
 			get_irqlock(cpu);
 	}
@@ -317,7 +329,7 @@ void __global_sti(void)
 
 	if (!local_irq_count(cpu))
 		release_irqlock(cpu);
-	__sti();
+	local_irq_enable();
 }
 
 /*
@@ -332,7 +344,7 @@ unsigned long __global_save_flags(void)
 	unsigned long flags, retval;
 	unsigned long local_enabled = 0;
 
-	__save_flags(flags);
+	local_save_flags(flags);
 
 	if ((flags & PSR_PIL) != PSR_PIL)
 		local_enabled = 1;
@@ -360,10 +372,10 @@ void __global_restore_flags(unsigned long flags)
 		__global_sti();
 		break;
 	case 2:
-		__cli();
+		local_irq_disable();
 		break;
 	case 3:
-		__sti();
+		local_irq_enable();
 		break;
 	default:
 	{
@@ -382,7 +394,7 @@ void unexpected_irq(int irq, void *dev_id, struct pt_regs * regs)
 	struct irqaction * action;
 	unsigned int cpu_irq;
 	
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	action = *(cpu_irq + irq_action);
 
         printk("IO device interrupt, irq = %d\n", irq);
@@ -392,8 +404,8 @@ void unexpected_irq(int irq, void *dev_id, struct pt_regs * regs)
 		printk("Expecting: ");
         	for (i = 0; i < 16; i++)
                 	if (action->handler)
-                        	prom_printf("[%s:%d:0x%x] ", action->name,
-				    (int) i, (unsigned int) action->handler);
+                        	printk("[%s:%d:0x%x] ", action->name,
+				       (int) i, (unsigned int) action->handler);
 	}
         printk("AIEEE\n");
 	panic("bogus interrupt received");
@@ -407,7 +419,7 @@ void handler_irq(int irq, struct pt_regs * regs)
 	extern void smp4m_irq_rotate(int cpu);
 #endif
 
-	irq_enter(cpu, irq);
+	irq_enter();
 	disable_pil_irq(irq);
 #ifdef CONFIG_SMP
 	/* Only rotate on lower priority IRQ's (scsi, ethernet, etc.). */
@@ -415,7 +427,7 @@ void handler_irq(int irq, struct pt_regs * regs)
 		smp4m_irq_rotate(cpu);
 #endif
 	action = *(irq + irq_action);
-	kstat.irqs[cpu][irq]++;
+	kstat_cpu(cpu).irqs[irq]++;
 	do {
 		if (!action || !action->handler)
 			unexpected_irq(irq, 0, regs);
@@ -423,9 +435,7 @@ void handler_irq(int irq, struct pt_regs * regs)
 		action = action->next;
 	} while (action);
 	enable_pil_irq(irq);
-	irq_exit(cpu, irq);
-	if (softirq_pending(cpu))
-		do_softirq();
+	irq_exit();
 }
 
 #ifdef CONFIG_BLK_DEV_FD
@@ -436,13 +446,14 @@ void sparc_floppy_irq(int irq, void *dev_id, struct pt_regs *regs)
 	int cpu = smp_processor_id();
 
 	disable_pil_irq(irq);
-	irq_enter(cpu, irq);
-	kstat.irqs[cpu][irq]++;
+	irq_enter();
+	kstat_cpu(cpu).irqs[irq]++;
 	floppy_interrupt(irq, dev_id, regs);
-	irq_exit(cpu, irq);
+	irq_exit();
 	enable_pil_irq(irq);
-	if (softirq_pending(cpu))
-		do_softirq();
+	// XXX Eek, it's totally changed with preempt_count() and such
+	// if (softirq_pending(cpu))
+	//	do_softirq();
 }
 #endif
 
@@ -450,7 +461,7 @@ void sparc_floppy_irq(int irq, void *dev_id, struct pt_regs *regs)
  * thus no sharing possible.
  */
 int request_fast_irq(unsigned int irq,
-		     void (*handler)(int, void *, struct pt_regs *),
+		     irqreturn_t (*handler)(int, void *, struct pt_regs *),
 		     unsigned long irqflags, const char *devname)
 {
 	struct irqaction *action;
@@ -461,7 +472,7 @@ int request_fast_irq(unsigned int irq,
 	extern struct tt_entry trapbase_cpu1, trapbase_cpu2, trapbase_cpu3;
 #endif
 	
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	if(cpu_irq > 14)
 		return -EINVAL;
 	if(!handler)
@@ -538,7 +549,7 @@ int request_fast_irq(unsigned int irq,
 }
 
 int request_irq(unsigned int irq,
-		void (*handler)(int, void *, struct pt_regs *),
+		irqreturn_t (*handler)(int, void *, struct pt_regs *),
 		unsigned long irqflags, const char * devname, void *dev_id)
 {
 	struct irqaction * action, *tmp = NULL;
@@ -547,11 +558,11 @@ int request_irq(unsigned int irq,
 	
 	if (sparc_cpu_model == sun4d) {
 		extern int sun4d_request_irq(unsigned int, 
-					     void (*)(int, void *, struct pt_regs *),
+					     irqreturn_t (*)(int, void *, struct pt_regs *),
 					     unsigned long, const char *, void *);
 		return sun4d_request_irq(irq, handler, irqflags, devname, dev_id);
 	}
-	cpu_irq = irq & NR_IRQS;
+	cpu_irq = irq & (NR_IRQS - 1);
 	if(cpu_irq > 14)
 		return -EINVAL;
 
@@ -636,7 +647,7 @@ void __init init_IRQ(void)
 	extern void sun4c_init_IRQ( void );
 	extern void sun4m_init_IRQ( void );
 	extern void sun4d_init_IRQ( void );
-    
+
 	switch(sparc_cpu_model) {
 	case sun4c:
 	case sun4:

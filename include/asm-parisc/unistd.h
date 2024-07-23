@@ -579,7 +579,7 @@
 #define __NR_uselib              (__NR_Linux + 86)
 #define __NR_swapon              (__NR_Linux + 87)
 #define __NR_reboot              (__NR_Linux + 88)
-#define __NR_readdir             (__NR_Linux + 89)
+#define __NR_mmap2             (__NR_Linux + 89)
 #define __NR_mmap                (__NR_Linux + 90)
 #define __NR_munmap              (__NR_Linux + 91)
 #define __NR_truncate            (__NR_Linux + 92)
@@ -591,18 +591,18 @@
 #define __NR_recv                (__NR_Linux + 98)
 #define __NR_statfs              (__NR_Linux + 99)
 #define __NR_fstatfs            (__NR_Linux + 100)
-#define __NR_ioperm             (__NR_Linux + 101)
-#define __NR_socketcall         (__NR_Linux + 102)
+#define __NR_stat64           (__NR_Linux + 101)
+/* #define __NR_socketcall         (__NR_Linux + 102) */
 #define __NR_syslog             (__NR_Linux + 103)
 #define __NR_setitimer          (__NR_Linux + 104)
 #define __NR_getitimer          (__NR_Linux + 105)
 #define __NR_capget             (__NR_Linux + 106)
 #define __NR_capset             (__NR_Linux + 107)
-#define __NR_pread              (__NR_Linux + 108)
-#define __NR_pwrite             (__NR_Linux + 109)
+#define __NR_pread64            (__NR_Linux + 108)
+#define __NR_pwrite64           (__NR_Linux + 109)
 #define __NR_getcwd             (__NR_Linux + 110)
 #define __NR_vhangup            (__NR_Linux + 111)
-#define __NR_idle               (__NR_Linux + 112)
+#define __NR_fstat64            (__NR_Linux + 112)
 #define __NR_vfork              (__NR_Linux + 113)
 #define __NR_wait4              (__NR_Linux + 114)
 #define __NR_swapoff            (__NR_Linux + 115)
@@ -690,11 +690,45 @@
 #define __NR_getpmsg            (__NR_Linux + 196)      /* some people actually want streams */
 #define __NR_putpmsg            (__NR_Linux + 197)      /* some people actually want streams */
 
-#define __NR_Linux_syscalls     197
+#define __NR_lstat64            (__NR_Linux + 198)
+#define __NR_truncate64         (__NR_Linux + 199)
+#define __NR_ftruncate64        (__NR_Linux + 200)
+#define __NR_getdents64         (__NR_Linux + 201)
+#define __NR_fcntl64            (__NR_Linux + 202)
+#define __NR_attrctl            (__NR_Linux + 203)
+#define __NR_acl_get            (__NR_Linux + 204)
+#define __NR_acl_set            (__NR_Linux + 205)
+#define __NR_gettid             (__NR_Linux + 206)
+#define __NR_readahead          (__NR_Linux + 207)
+#define __NR_tkill		(__NR_Linux + 208)
+#define __NR_sendfile64		(__NR_Linux + 209)
+#define __NR_futex		(__NR_Linux + 210)
+#define __NR_sched_setaffinity	(__NR_Linux + 211)
+#define __NR_sched_getaffinity	(__NR_Linux + 212)
+#define __NR_set_thread_area	(__NR_Linux + 213)
+#define __NR_get_thread_area	(__NR_Linux + 214)
+#define __NR_io_setup		(__NR_Linux + 215)
+#define __NR_io_destroy		(__NR_Linux + 216)
+#define __NR_io_getevents	(__NR_Linux + 217)
+#define __NR_io_submit		(__NR_Linux + 218)
+#define __NR_io_cancel		(__NR_Linux + 219)
+#define __NR_alloc_hugepages	(__NR_Linux + 220)
+#define __NR_free_hugepages	(__NR_Linux + 221)
+#define __NR_exit_group		(__NR_Linux + 222)
+#define __NR_lookup_dcookie	(__NR_Linux + 223)
+#define __NR_epoll_create	(__NR_Linux + 224)
+#define __NR_epoll_ctl		(__NR_Linux + 225)
+#define __NR_epoll_wait		(__NR_Linux + 226)
+#define __NR_remap_file_pages	(__NR_Linux + 227)
+#define __NR_semtimedop		(__NR_Linux + 228)
+
+
+#define __NR_Linux_syscalls     228
 
 #define HPUX_GATEWAY_ADDR       0xC0000004
 #define LINUX_GATEWAY_ADDR      0x100
-#define LINUX_GATEWAY_STR       "0x100"
+
+#ifndef __ASSEMBLY__
 
 /* The old syscall code here didn't work, and it looks like it's only used
  * by applications such as fdisk which for some reason need to produce
@@ -723,7 +757,7 @@
         }                                                       \
         if (__sys_res >= (unsigned long)-4095) {                \
 		errno = -__sys_res;				\
-                __sys_res == (unsigned long)-1;                 \
+                __sys_res = (unsigned long)-1;                 \
         }                                                       \
         __sys_res;                                              \
 })
@@ -794,7 +828,7 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
 }
 
 
-/* mmap takes 6 arguments */
+/* mmap & mmap2 take 6 arguments */
 
 #define _syscall6(type,name,type1,arg1,type2,arg2,type3,arg3,type4,arg4,type5,arg5,type6,arg6) \
 type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5, type6 arg6) \
@@ -802,41 +836,26 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5, type6 arg6
     return K_INLINE_SYSCALL(name, 6, arg1, arg2, arg3, arg4, arg5, arg6);	\
 }
 
+
 #ifdef __KERNEL_SYSCALLS__
 
-static inline int idle(void)
-{
-	extern int sys_idle(void);
-	return sys_idle();
-}
-
-static inline int pause(void)
-{
-	extern int sys_pause(void);
-	return sys_pause();
-}
-
-static inline int sync(void)
-{
-	extern int sys_sync(void);
-	return sys_sync();
-}
+#include <asm/current.h>
 
 static inline pid_t setsid(void)
 {
-	extern int sys_setsid(void);
+	extern long sys_setsid(void);
 	return sys_setsid();
 }
 
 static inline int write(int fd, const char *buf, off_t count)
 {
-	extern int sys_write(int, const char *, int);
+	extern long sys_write(int, const char *, int);
 	return sys_write(fd, buf, count);
 }
 
 static inline int read(int fd, char *buf, off_t count)
 {
-	extern int sys_read(int, char *, int);
+	extern long sys_read(int, char *, int);
 	return sys_read(fd, buf, count);
 }
 
@@ -848,8 +867,15 @@ static inline off_t lseek(int fd, off_t offset, int count)
 
 static inline int dup(int fd)
 {
-	extern int sys_dup(int);
+	extern long sys_dup(int);
 	return sys_dup(fd);
+}
+
+static inline int execve(char *filename, char * argv [],
+	char * envp[])
+{
+	extern int __execve(char *, char **, char **, struct task_struct *);
+	return __execve(filename, argv, envp, current);
 }
 
 static inline int open(const char *file, int flag, int mode)
@@ -860,42 +886,36 @@ static inline int open(const char *file, int flag, int mode)
 
 static inline int close(int fd)
 {
+	extern asmlinkage long sys_close(unsigned int);
 	return sys_close(fd);
 }
 
 static inline int _exit(int exitcode)
 {
-	extern int sys_exit(int) __attribute__((noreturn));
+	extern long sys_exit(int) __attribute__((noreturn));
 	return sys_exit(exitcode);
 }
 
+struct rusage;
+extern asmlinkage long sys_wait4(pid_t, unsigned int *, int, struct rusage *);
+
 static inline pid_t waitpid(pid_t pid, int *wait_stat, int options)
 {
-	extern int sys_wait4(int, int *, int, struct rusage *);
-	return sys_wait4((int)pid, wait_stat, options, NULL);
+	return sys_wait4(pid, wait_stat, options, NULL);
 }
 
-static inline int delete_module(const char *name)
-{
-	extern int sys_delete_module(const char *name);
-	return sys_delete_module(name);
-}
+#endif	/* __KERNEL_SYSCALLS__ */
 
-static inline pid_t wait(int * wait_stat)
-{
-	extern int sys_wait4(int, int *, int, struct rusage *);
-	return sys_wait4(-1, wait_stat, 0, NULL);
-}
-
-static inline int execve(char *filename, char * argv [],
-	char * envp[])
-{
-	extern int __execve(char *, char **, char **, struct task_struct *);
-	return __execve(filename, argv, envp, current);
-}
-
-#endif
+#endif /* __ASSEMBLY__ */
 
 #undef STR
+
+/*
+ * "Conditional" syscalls
+ *
+ * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
+ * but it doesn't work on all toolchains, so we just do it by hand
+ */
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
 
 #endif /* _ASM_PARISC_UNISTD_H_ */

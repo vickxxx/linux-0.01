@@ -6,11 +6,12 @@
  *  handling extended attributes
  */
 
+#include <linux/buffer_head.h>
 #include <linux/string.h>
 #include "hpfs_fn.h"
 
-/* Remove external extended attributes. ano specifies wheter a is a 
-   direct sector where eas start or an anode */
+/* Remove external extended attributes. ano specifies whether a is a 
+   direct sector where eas starts or an anode */
 
 void hpfs_ea_ext_remove(struct super_block *s, secno a, int ano, unsigned len)
 {
@@ -355,7 +356,7 @@ void hpfs_set_ea(struct inode *inode, struct fnode *fnode, char *key, char *data
 	if (hpfs_ea_write(s, fnode->ea_secno, fnode->ea_anode, fnode->ea_size_l + 5 + h[1], size, data)) goto bail;
 	fnode->ea_size_l = pos;
 	ret:
-	inode->i_hpfs_ea_size += 5 + strlen(key) + size;
+	hpfs_i(inode)->i_ea_size += 5 + strlen(key) + size;
 	return;
 	bail:
 	if (fnode->ea_secno)

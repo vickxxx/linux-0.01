@@ -1,13 +1,11 @@
 /*
- *	$Header: /home/cvsroot/Driver/osst.h,v 1.11 2001/01/26 01:54:49 riede Exp $
+ *	$Header: /home/cvsroot/Driver/osst.h,v 1.12 2001/10/11 00:30:15 riede Exp $
  */
 
 #include <asm/byteorder.h>
 #include <linux/config.h>
 #include <linux/completion.h>
-#ifdef CONFIG_DEVFS_FS
-#include <linux/devfs_fs_kernel.h>
-#endif
+
 
 /*	FIXME - rename and use the following two types or delete them!
  *              and the types really should go to st.h anyway...
@@ -510,7 +508,7 @@ typedef struct os_header_s {
 #define OS_AUX_SIZE     (512)
 //#define OSST_MAX_SG      2
 
-/* The tape buffer descriptor. */
+/* The OnStream tape buffer descriptor. */
 typedef struct {
   unsigned char in_use;
   unsigned char dma;	/* DMA-able buffer */
@@ -523,16 +521,16 @@ typedef struct {
   int syscall_result;
   Scsi_Request *last_SRpnt;
   unsigned char *b_data;
-  os_aux_t *aux;               /* onstream AUX structure at end of each block */
-  unsigned short use_sg;       /* zero or number of segments for this adapter */
-  unsigned short sg_segs;      /* total number of allocated segments */
-  unsigned short orig_sg_segs; /* number of segments allocated at first try */
-  struct scatterlist sg[1];    /* MUST BE last item */
+  os_aux_t *aux;               /* onstream AUX structure at end of each block     */
+  unsigned short use_sg;       /* zero or number of s/g segments for this adapter */
+  unsigned short sg_segs;      /* number of segments in s/g list                  */
+  unsigned short orig_sg_segs; /* number of segments allocated at first try       */
+  struct scatterlist sg[1];    /* MUST BE last item                               */
 } OSST_buffer;
 
-/* The tape drive descriptor */
+/* The OnStream tape drive descriptor */
 typedef struct {
-  kdev_t devt;
+  struct scsi_driver *driver;
   unsigned capacity;
   Scsi_Device* device;
   struct semaphore lock;       /* for serialization */
@@ -549,6 +547,7 @@ typedef struct {
   unsigned char restr_dma;
   unsigned char scsi2_logical;
   unsigned char default_drvbuffer;  /* 0xff = don't touch, value 3 bits */
+  unsigned char pos_unknown;        /* after reset position unknown */
   int write_threshold;
   int timeout;			/* timeout for normal commands */
   int long_timeout;		/* timeout for commands known to take long time*/
@@ -556,10 +555,6 @@ typedef struct {
   /* Mode characteristics */
   ST_mode modes[ST_NBR_MODES];
   int current_mode;
-#ifdef CONFIG_DEVFS_FS
-  devfs_handle_t de_r[ST_NBR_MODES];  /*  Rewind entries     */
-  devfs_handle_t de_n[ST_NBR_MODES];  /*  No-rewind entries  */
-#endif
 
   /* Status variables */
   int partition;
@@ -628,6 +623,7 @@ typedef struct {
   unsigned char last_cmnd[6];
   unsigned char last_sense[16];
 #endif
+  struct gendisk *drive;
 } OS_Scsi_Tape;
 
 /* Values of write_type */
@@ -638,3 +634,5 @@ typedef struct {
 #define OS_WRITE_HEADER    4
 #define OS_WRITE_FILLER    5
 
+/* Additional rw state */
+#define OS_WRITING_COMPLETE 3

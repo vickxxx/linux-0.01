@@ -30,7 +30,7 @@
 #include <linux/ipv6.h>
 #endif
 
-#define MAX_INET_PROTOS	32		/* Must be a power of 2		*/
+#define MAX_INET_PROTOS	256		/* Must be a power of 2		*/
 
 
 /* This is used to register protocols. */
@@ -38,29 +38,23 @@ struct inet_protocol
 {
 	int			(*handler)(struct sk_buff *skb);
 	void			(*err_handler)(struct sk_buff *skb, u32 info);
-	struct inet_protocol	*next;
-	unsigned char		protocol;
-	unsigned char		copy:1;
-	void			*data;
-	const char		*name;
+	int			no_policy;
 };
 
 #if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
 struct inet6_protocol 
 {
-	int	(*handler)(struct sk_buff *skb);
+	int	(*handler)(struct sk_buff **skb, unsigned int *nhoffp);
 
 	void	(*err_handler)(struct sk_buff *skb,
 			       struct inet6_skb_parm *opt,
 			       int type, int code, int offset,
 			       __u32 info);
-	struct inet6_protocol *next;
-	unsigned char	protocol;
-	unsigned char	copy:1;
-	void		*data;
-	const char	*name;
+	unsigned int	flags;	/* INET6_PROTO_xxx */
 };
 
+#define INET6_PROTO_NOPOLICY	0x1
+#define INET6_PROTO_FINAL	0x2
 #endif
 
 /* This is used to register socket interfaces for IP protocols.  */
@@ -86,21 +80,19 @@ struct inet_protosw {
 
 extern struct inet_protocol *inet_protocol_base;
 extern struct inet_protocol *inet_protos[MAX_INET_PROTOS];
-extern struct list_head inetsw[SOCK_MAX];
 
 #if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
 extern struct inet6_protocol *inet6_protos[MAX_INET_PROTOS];
-extern struct list_head inetsw6[SOCK_MAX];
 #endif
 
-extern void	inet_add_protocol(struct inet_protocol *prot);
-extern int	inet_del_protocol(struct inet_protocol *prot);
+extern int	inet_add_protocol(struct inet_protocol *prot, unsigned char num);
+extern int	inet_del_protocol(struct inet_protocol *prot, unsigned char num);
 extern void	inet_register_protosw(struct inet_protosw *p);
 extern void	inet_unregister_protosw(struct inet_protosw *p);
 
 #if defined(CONFIG_IPV6) || defined (CONFIG_IPV6_MODULE)
-extern void	inet6_add_protocol(struct inet6_protocol *prot);
-extern int	inet6_del_protocol(struct inet6_protocol *prot);
+extern int	inet6_add_protocol(struct inet6_protocol *prot, unsigned char num);
+extern int	inet6_del_protocol(struct inet6_protocol *prot, unsigned char num);
 extern void	inet6_register_protosw(struct inet_protosw *p);
 extern void	inet6_unregister_protosw(struct inet_protosw *p);
 #endif

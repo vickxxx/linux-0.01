@@ -28,7 +28,6 @@
 
 #if defined(__i386__)
 # include <asm/system.h>
-# include <asm/segment.h>
 #endif
 
 #if defined(__sparc__)
@@ -96,7 +95,7 @@ const unsigned short base_addrs[BPP_NO] = { 0x278, 0x378, 0x3bc };
 /*
  * These are for data access.
  * Control lines accesses are hidden in set_bits() and get_bits().
- * The exeption is the probe procedure, which is system-dependent.
+ * The exception is the probe procedure, which is system-dependent.
  */
 #define bpp_outb_p(data, base)  outb_p((data), (base))
 #define bpp_inb(base)  inb(base)
@@ -304,6 +303,7 @@ static void bpp_wake_up(unsigned long val)
 
 static void snooze(unsigned long snooze_time, unsigned minor)
 {
+      init_timer(&instances[minor].timer_list);
       instances[minor].timer_list.expires = jiffies + snooze_time + 1;
       instances[minor].timer_list.data    = minor;
       add_timer(&instances[minor].timer_list);
@@ -440,7 +440,7 @@ static spinlock_t bpp_open_lock = SPIN_LOCK_UNLOCKED;
  */
 static int bpp_open(struct inode *inode, struct file *f)
 {
-      unsigned minor = MINOR(inode->i_rdev);
+      unsigned minor = minor(inode->i_rdev);
       int ret;
 
       spin_lock(&bpp_open_lock);
@@ -470,7 +470,7 @@ static int bpp_open(struct inode *inode, struct file *f)
  */
 static int bpp_release(struct inode *inode, struct file *f)
 {
-      unsigned minor = MINOR(inode->i_rdev);
+      unsigned minor = minor(inode->i_rdev);
 
       spin_lock(&bpp_open_lock);
       instances[minor].opened = 0;
@@ -634,7 +634,7 @@ static long read_ecp(unsigned minor, char *c, unsigned long cnt)
 static ssize_t bpp_read(struct file *f, char *c, size_t cnt, loff_t * ppos)
 {
       long rc;
-      const unsigned minor = MINOR(f->f_dentry->d_inode->i_rdev);
+      const unsigned minor = minor(f->f_dentry->d_inode->i_rdev);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -787,7 +787,7 @@ static long write_ecp(unsigned minor, const char *c, unsigned long cnt)
 static ssize_t bpp_write(struct file *f, const char *c, size_t cnt, loff_t * ppos)
 {
       long errno = 0;
-      const unsigned minor = MINOR(f->f_dentry->d_inode->i_rdev);
+      const unsigned minor = minor(f->f_dentry->d_inode->i_rdev);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -813,7 +813,7 @@ static int bpp_ioctl(struct inode *inode, struct file *f, unsigned int cmd,
 {
       int errno = 0;
 
-      unsigned minor = MINOR(inode->i_rdev);
+      unsigned minor = minor(inode->i_rdev);
       if (minor >= BPP_NO) return -ENODEV;
       if (!instances[minor].present) return -ENODEV;
 
@@ -860,12 +860,12 @@ static int bpp_ioctl(struct inode *inode, struct file *f, unsigned int cmd,
 }
 
 static struct file_operations bpp_fops = {
-	owner:		THIS_MODULE,
-	read:		bpp_read,
-	write:		bpp_write,
-	ioctl:		bpp_ioctl,
-	open:		bpp_open,
-	release:	bpp_release,
+	.owner =	THIS_MODULE,
+	.read =		bpp_read,
+	.write =	bpp_write,
+	.ioctl =	bpp_ioctl,
+	.open =		bpp_open,
+	.release =	bpp_release,
 };
 
 #if defined(__i386__)
@@ -886,7 +886,7 @@ static void probeLptPort(unsigned idx)
       instances[idx].run_flag = 0;
       init_timer(&instances[idx].timer_list);
       instances[idx].timer_list.function = bpp_wake_up;
-      if (check_region(lpAddr,3)) return;
+      if (!request_region(lpAddr,3, dev_name)) return;
 
       /*
        * First, make sure the instance exists. Do this by writing to
@@ -904,7 +904,6 @@ static void probeLptPort(unsigned idx)
             unsigned save;
             instances[idx].present = 1;
 
-            request_region(lpAddr,3, dev_name);
             save = inb_p(lpAddr+2);
             for (testvalue=0; testvalue<BPP_DELAY; testvalue++)
                   ;
@@ -921,7 +920,9 @@ static void probeLptPort(unsigned idx)
                   instances[idx].enhanced = 1;
             outb_p(save, lpAddr+2);
       }
-
+      else {
+            release_region(lpAddr,3);
+      }
       /*
        * Leave the port in compat idle mode.
        */
@@ -1031,8 +1032,6 @@ static inline void freeLptPort(int idx)
 
 #endif
 
-static devfs_handle_t devfs_handle;
-
 static int __init bpp_init(void)
 {
 	int rc;
@@ -1042,18 +1041,19 @@ static int __init bpp_init(void)
 	if (rc == 0)
 		return -ENODEV;
 
-	rc = devfs_register_chrdev(BPP_MAJOR, dev_name, &bpp_fops);
+	rc = register_chrdev(BPP_MAJOR, dev_name, &bpp_fops);
 	if (rc < 0)
 		return rc;
 
-	for (idx = 0; idx < BPP_NO; idx += 1) {
+	for (idx = 0; idx < BPP_NO; idx++) {
 		instances[idx].opened = 0;
 		probeLptPort(idx);
 	}
-	devfs_handle = devfs_mk_dir (NULL, "bpp", NULL);
-	devfs_register_series (devfs_handle, "%u", BPP_NO, DEVFS_FL_DEFAULT,
-			       BPP_MAJOR, 0, S_IFCHR | S_IRUSR | S_IWUSR,
-			       &bpp_fops, NULL);
+	devfs_mk_dir("bpp");
+	for (idx = 0; idx < BPP_NO; idx++) {
+		devfs_mk_cdev(MKDEV(BPP_MAJOR, idx),
+				S_IFCHR | S_IRUSR | S_IWUSR, "bpp/%d", idx);
+	}
 
 	return 0;
 }
@@ -1062,10 +1062,12 @@ static void __exit bpp_cleanup(void)
 {
 	unsigned idx;
 
-	devfs_unregister (devfs_handle);
-	devfs_unregister_chrdev(BPP_MAJOR, dev_name);
+	for (idx = 0; idx < BPP_NO; idx++)
+		devfs_remove("bpp/%d", idx);
+	devfs_remove("bpp");
+	unregister_chrdev(BPP_MAJOR, dev_name);
 
-	for (idx = 0 ;  idx < BPP_NO ;  idx += 1) {
+	for (idx = 0;  idx < BPP_NO; idx++) {
 		if (instances[idx].present)
 			freeLptPort(idx);
 	}

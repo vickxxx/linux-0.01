@@ -70,17 +70,21 @@ static unsigned char target2alpa[] = {
 
 static int fcal_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cmnd *fcmd);
 
-static void fcal_select_queue_depths(struct Scsi_Host *host, Scsi_Device *devlist)
+int fcal_slave_configure(Scsi_Device *device)
 {
-	Scsi_Device *device;
+	int depth_to_use;
 	
-	for (device = devlist; device; device = device->next) {
-		if (device->host != host) continue;
-		if (device->tagged_supported)
-			device->queue_depth = /* 254 */ 8;
-		else
-			device->queue_depth = 2;
-	}
+	if (device->tagged_supported)
+		depth_to_use = /* 254 */ 8;
+	else
+		depth_to_use = 2;
+
+	scsi_adjust_queue_depth(device,
+				(device->tagged_supported ?
+				 MSG_SIMPLE_TAG : 0),
+				depth_to_use);
+
+	return 0;
 }
 
 /* Detect all FC Arbitrated Loops attached to the machine.
@@ -134,9 +138,13 @@ int __init fcal_detect(Scsi_Host_Template *tpnt)
 			continue;
 		}
 				
+		if (!try_module_get(fc->module)) {
+			kfree(ages);
+			scsi_unregister(host);
+			continue;
+		}
+	
 		nfcals++;
-				
-		if (fc->module) __MOD_INC_USE_COUNT(fc->module);
 				
 		fcal = (struct fcal *)host->hostdata;
 		
@@ -165,7 +173,6 @@ int __init fcal_detect(Scsi_Host_Template *tpnt)
 #ifdef __sparc_v9__
 		host->unchecked_isa_dma = 1;
 #endif
-		host->select_queue_depths = fcal_select_queue_depths;
 
 		fc->channels = 1;
 		fc->targets = 127;
@@ -190,7 +197,7 @@ int fcal_release(struct Scsi_Host *host)
 	struct fcal *fcal = (struct fcal *)host->hostdata;
 	fc_channel *fc = fcal->fc;
 
-	if (fc->module) __MOD_DEC_USE_COUNT(fc->module);
+	module_put(fc->module);
 	
 	fc->fcp_register(fc, TYPE_SCSI_FCP, 1);
 	FCALND((" releasing fcal.\n"));
@@ -202,19 +209,12 @@ int fcal_release(struct Scsi_Host *host)
 #undef SPRINTF
 #define SPRINTF(args...) { if (pos < (buffer + length)) pos += sprintf (pos, ## args); }
 
-int fcal_proc_info (char *buffer, char **start, off_t offset, int length, int hostno, int inout)
+int fcal_proc_info (struct Scsi_Host *host, char *buffer, char **start, off_t offset, int length, int inout)
 {
-	struct Scsi_Host *host = NULL;
 	struct fcal *fcal;
 	fc_channel *fc;
 	char *pos = buffer;
 	int i, j;
-
-	for (host=scsi_hostlist; host; host=host->next)
-		if (host->host_no == hostno)
-                      break;
-
-	if (!host) return -ESRCH;
 
 	if (inout) return length;
     
@@ -228,7 +228,7 @@ int fcal_proc_info (char *buffer, char **start, off_t offset, int length, int ho
 #endif
 	SPRINTF ("Initiator AL-PA: %02x\n", fc->sid);
 
-	SPRINTF ("\nAttached devices: %s\n", host->host_queue ? "" : "none");
+	SPRINTF ("\nAttached devices: %s\n", !list_empty(&host->my_devices) ? "" : "none");
 	
 	for (i = 0; i < fc->posmap->len; i++) {
 		unsigned char alpa = fc->posmap->list[i];
@@ -245,8 +245,8 @@ int fcal_proc_info (char *buffer, char **start, off_t offset, int length, int ho
 				 alpa, u1[0], u1[1], u2[0], u2[1]);
 		} else {
 			Scsi_Device *scd;
-			for (scd = host->host_queue ; scd; scd = scd->next)
-				if (scd->host->host_no == hostno && scd->id == target) {
+			list_for_each_entry (scd, &host->my_devices, siblings)
+				if (scd->id == target) {
 					SPRINTF ("  [AL-PA: %02x, Id: %02d, Port WWN: %08x%08x, Node WWN: %08x%08x]  ",
 						alpa, target, u1[0], u1[1], u2[0], u2[1]);
 					SPRINTF ("%s ", (scd->type < MAX_SCSI_DEVICE_CODE) ?
@@ -287,17 +287,32 @@ static int fcal_encode_addr(Scsi_Cmnd *SCpnt, u16 *addr, fc_channel *fc, fcp_cmn
 	if (SCpnt->cmnd[1] & 0xe0) return -EINVAL;
 	/* FC-PLDA tells us... */
 	memset(addr, 0, 8);
-	f = (struct fcal *)SCpnt->host->hostdata;
-	if (!f->map[SCpnt->target]) return -EINVAL;
+	f = (struct fcal *)SCpnt->device->host->hostdata;
+	if (!f->map[SCpnt->device->id])
+		return -EINVAL;
 	/* Now, determine DID: It will be Native Identifier, so we zero upper
 	   2 bytes of the 3 byte DID, lowest byte will be AL-PA */
-	fcmd->did = target2alpa[SCpnt->target];
+	fcmd->did = target2alpa[SCpnt->device->id];
 	FCALD(("trying DID %06x\n", fcmd->did))
 	return 0;
 }
 
-static Scsi_Host_Template driver_template = FCAL;
-
+static Scsi_Host_Template driver_template = {
+	.name			= "Fibre Channel Arbitrated Loop",
+	.detect			= fcal_detect,
+	.release		= fcal_release,	
+	.proc_info		= fcal_proc_info,
+	.queuecommand		= fcp_scsi_queuecommand,
+	.slave_configure	= fcal_slave_configure,
+	.can_queue		= FCAL_CAN_QUEUE,
+	.this_id		= -1,
+	.sg_tablesize		= 1,
+	.cmd_per_lun		= 1,
+	.use_clustering		= ENABLE_CLUSTERING,
+	.eh_abort_handler	= fcp_scsi_abort,
+	.eh_device_reset_handler = fcp_scsi_dev_reset,
+	.eh_bus_reset_handler	= fcp_scsi_bus_reset,
+	.eh_host_reset_handler	= fcp_scsi_host_reset,
+};
 #include "scsi_module.c"
 
-EXPORT_NO_SYMBOLS;

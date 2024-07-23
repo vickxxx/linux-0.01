@@ -13,12 +13,12 @@
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 
 #include "scsi.h"
 #include "hosts.h"
 #include "NCR53C9x.h"
 
-#include "sun3x_esp.h"
 #include <asm/sun3x.h>
 #include <asm/dvma.h>
 #include <asm/irq.h>
@@ -112,7 +112,7 @@ int sun3x_esp_detect(Scsi_Host_Template *tpnt)
 
 	esp->irq = 2;
 	if (request_irq(esp->irq, esp_intr, SA_INTERRUPT, 
-			"SUN3X SCSI", NULL)) {
+			"SUN3X SCSI", esp->ehost)) {
 		esp_deallocate(esp);
 		return 0;
 	}
@@ -343,27 +343,28 @@ static void dma_mmu_get_scsi_one (struct NCR_ESP *esp, Scsi_Cmnd *sp)
 static void dma_mmu_get_scsi_sgl (struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
     int sz = sp->SCp.buffers_residual;
-    struct mmu_sglist *sg = (struct mmu_sglist *) sp->SCp.buffer;
+    struct scatterlist *sg = sp->SCp.buffer;
 
     while (sz >= 0) {
-        sg[sz].dvma_addr = dvma_map((unsigned long)sg[sz].addr, sg[sz].len);
-        sz--;
+	    sg[sz].dvma_address = dvma_map((unsigned long)page_address(sg[sz].page) +
+					   sg[sz].offset, sg[sz].length);
+	    sz--;
     }
     sp->SCp.ptr=(char *)((unsigned long)sp->SCp.buffer->dvma_address);
 }
 
 static void dma_mmu_release_scsi_one (struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
-    dvma_unmap(sp->SCp.have_data_in);
+    dvma_unmap((char *)sp->SCp.have_data_in);
 }
 
 static void dma_mmu_release_scsi_sgl (struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
     int sz = sp->use_sg - 1;
-    struct mmu_sglist *sg = (struct mmu_sglist *)sp->buffer;
+    struct scatterlist *sg = (struct scatterlist *)sp->buffer;
                         
     while(sz >= 0) {
-        dvma_unmap(sg[sz].dvma_addr);
+        dvma_unmap((char *)sg[sz].dvma_address);
         sz--;
     }
 }
@@ -373,6 +374,56 @@ static void dma_advance_sg (Scsi_Cmnd *sp)
     sp->SCp.ptr = (char *)((unsigned long)sp->SCp.buffer->dvma_address);
 }
 
-static Scsi_Host_Template driver_template = SCSI_SUN3X_ESP;
+
+static int esp_slave_alloc(Scsi_Device *SDptr)
+{
+	struct esp_device *esp_dev =
+		kmalloc(sizeof(struct esp_device), GFP_ATOMIC);
+
+	if (!esp_dev)
+		return -ENOMEM;
+	memset(esp_dev, 0, sizeof(struct esp_device));
+	SDptr->hostdata = esp_dev;
+	return 0;
+}
+
+static void esp_slave_destroy(Scsi_Device *SDptr)
+{
+	struct NCR_ESP *esp = (struct NCR_ESP *) SDptr->host->hostdata;
+
+	esp->targets_present &= ~(1 << SDptr->id);
+	kfree(SDptr->hostdata);
+	SDptr->hostdata = NULL;
+}
+
+
+static int sun3x_esp_release(struct Scsi_Host *instance)
+{
+	/* this code does not support being compiled as a module */	 
+	return 1;
+
+}
+
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp",
+	.proc_info		= &esp_proc_info,
+	.name			= "Sun ESP 100/100a/200",
+	.detect			= sun3x_esp_detect,
+	.release                = sun3x_esp_release,
+	.slave_alloc		= esp_slave_alloc,
+	.slave_destroy		= esp_slave_destroy,
+	.info			= esp_info,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= DISABLE_CLUSTERING,
+};
+
 
 #include "scsi_module.c"
+
+MODULE_LICENSE("GPL");

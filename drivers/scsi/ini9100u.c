@@ -108,14 +108,13 @@
 
 #define CVT_LINUX_VERSION(V,P,S)        (V * 65536 + P * 256 + S)
 
+#error Please convert me to Documentation/DMA-mapping.txt
+
 #ifndef LINUX_VERSION_CODE
 #include <linux/version.h>
 #endif
 
 #include <linux/module.h>
-
-#include <stdarg.h>
-#include <asm/irq.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
 #include <linux/pci.h>
@@ -124,24 +123,40 @@
 #include <linux/spinlock.h>
 #include <linux/stat.h>
 #include <linux/config.h>
-
 #include <linux/kernel.h>
+#include <linux/proc_fs.h>
 #include <linux/string.h>
+#include <linux/interrupt.h>
 #include <linux/ioport.h>
 #include <linux/sched.h>
-#include <linux/proc_fs.h>
-#include <asm/io.h>
-#include "scsi.h"
-#include "sd.h"
-#include "hosts.h"
 #include <linux/slab.h>
+
+#include <asm/io.h>
+
+#include "scsi.h"
+#include "hosts.h"
 #include "ini9100u.h"
 
 #ifdef DEBUG_i91u
 unsigned int i91u_debug = DEBUG_DEFAULT;
 #endif
 
-static Scsi_Host_Template driver_template = INI9100U;
+static Scsi_Host_Template driver_template = {
+	.proc_name	= "INI9100U",
+	.proc_info	= "INI9100U",
+	.name		= i91u_REVID,
+	.detect		= i91u_detect,
+	.release	= i91u_release,
+	.queuecommand	= i91u_queue,
+	.abort		= i91u_abort,
+	.reset		= i91u_reset,
+	.bios_param	= i91u_biosparam,
+	.can_queue	= 1,
+	.this_id	= 1,
+	.sg_tablesize	= SG_ALL,
+	.cmd_per_lun 	= 1,
+	.use_clustering	= ENABLE_CLUSTERING,
+};
 #include "scsi_module.c"
 
 char *i91uCopyright = "Copyright (C) 1996-98";
@@ -166,14 +181,14 @@ static int setup_debug = 0;
 
 static char *setup_str = (char *) NULL;
 
-static void i91u_intr0(int irq, void *dev_id, struct pt_regs *);
-static void i91u_intr1(int irq, void *dev_id, struct pt_regs *);
-static void i91u_intr2(int irq, void *dev_id, struct pt_regs *);
-static void i91u_intr3(int irq, void *dev_id, struct pt_regs *);
-static void i91u_intr4(int irq, void *dev_id, struct pt_regs *);
-static void i91u_intr5(int irq, void *dev_id, struct pt_regs *);
-static void i91u_intr6(int irq, void *dev_id, struct pt_regs *);
-static void i91u_intr7(int irq, void *dev_id, struct pt_regs *);
+static irqreturn_t i91u_intr0(int irq, void *dev_id, struct pt_regs *);
+static irqreturn_t i91u_intr1(int irq, void *dev_id, struct pt_regs *);
+static irqreturn_t i91u_intr2(int irq, void *dev_id, struct pt_regs *);
+static irqreturn_t i91u_intr3(int irq, void *dev_id, struct pt_regs *);
+static irqreturn_t i91u_intr4(int irq, void *dev_id, struct pt_regs *);
+static irqreturn_t i91u_intr5(int irq, void *dev_id, struct pt_regs *);
+static irqreturn_t i91u_intr6(int irq, void *dev_id, struct pt_regs *);
+static irqreturn_t i91u_intr7(int irq, void *dev_id, struct pt_regs *);
 
 static void i91u_panic(char *msg);
 
@@ -466,9 +481,9 @@ static void i91uBuildSCB(HCS * pHCB, SCB * pSCB, Scsi_Cmnd * SCpnt)
 	pSCB->SCB_Srb = SCpnt;
 	pSCB->SCB_Opcode = ExecSCSI;
 	pSCB->SCB_Flags = SCF_POST;	/* After SCSI done, call post routine */
-	pSCB->SCB_Target = SCpnt->target;
-	pSCB->SCB_Lun = SCpnt->lun;
-	pSCB->SCB_Ident = SCpnt->lun | DISC_ALLOW;
+	pSCB->SCB_Target = SCpnt->device->id;
+	pSCB->SCB_Lun = SCpnt->device->lun;
+	pSCB->SCB_Ident = SCpnt->device->lun | DISC_ALLOW;
 	pSCB->SCB_Flags |= SCF_SENSE;	/* Turn on auto request sense   */
 
 	pSCB->SCB_SensePtr = (U32) VIRT_TO_BUS(SCpnt->sense_buffer);
@@ -522,13 +537,13 @@ int i91u_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 	register SCB *pSCB;
 	HCS *pHCB;		/* Point to Host adapter control block */
 
-	if (SCpnt->lun > 16) {	/* 07/22/98 */
+	if (SCpnt->device->lun > 16) {	/* 07/22/98 */
 
 		SCpnt->result = (DID_TIME_OUT << 16);
 		done(SCpnt);	/* Notify system DONE           */
 		return (0);
 	}
-	pHCB = (HCS *) SCpnt->host->base;
+	pHCB = (HCS *) SCpnt->device->host->base;
 
 	SCpnt->scsi_done = done;
 	/* Get free SCSI control block  */
@@ -542,15 +557,6 @@ int i91u_queue(Scsi_Cmnd * SCpnt, void (*done) (Scsi_Cmnd *))
 }
 
 /*
- *  We only support command in interrupt-driven fashion
- */
-int i91u_command(Scsi_Cmnd * SCpnt)
-{
-	printk("i91u: interrupt driven driver; use i91u_queue()\n");
-	return -1;
-}
-
-/*
  *  Abort a queued command
  *  (commands that are on the bus can't be aborted easily)
  */
@@ -558,7 +564,7 @@ int i91u_abort(Scsi_Cmnd * SCpnt)
 {
 	HCS *pHCB;
 
-	pHCB = (HCS *) SCpnt->host->base;
+	pHCB = (HCS *) SCpnt->device->host->base;
 	return tul_abort_srb(pHCB, SCpnt);
 }
 
@@ -570,38 +576,39 @@ int i91u_reset(Scsi_Cmnd * SCpnt, unsigned int reset_flags)
 {				/* I need Host Control Block Information */
 	HCS *pHCB;
 
-	pHCB = (HCS *) SCpnt->host->base;
+	pHCB = (HCS *) SCpnt->device->host->base;
 
 	if (reset_flags & (SCSI_RESET_SUGGEST_BUS_RESET | SCSI_RESET_SUGGEST_HOST_RESET))
 		return tul_reset_scsi_bus(pHCB);
 	else
-		return tul_device_reset(pHCB, (ULONG) SCpnt, SCpnt->target, reset_flags);
+		return tul_device_reset(pHCB, (ULONG) SCpnt, SCpnt->device->id, reset_flags);
 }
 
 /*
  * Return the "logical geometry"
  */
-int i91u_biosparam(Scsi_Disk * disk, kdev_t dev, int *info_array)
+int i91u_biosparam(struct scsi_device *sdev, struct block_device *dev,
+		sector_t capacity, int *info_array)
 {
 	HCS *pHcb;		/* Point to Host adapter control block */
 	TCS *pTcb;
 
-	pHcb = (HCS *) disk->device->host->base;
-	pTcb = &pHcb->HCS_Tcs[disk->device->id];
+	pHcb = (HCS *) sdev->host->base;
+	pTcb = &pHcb->HCS_Tcs[sdev->id];
 
 	if (pTcb->TCS_DrvHead) {
 		info_array[0] = pTcb->TCS_DrvHead;
 		info_array[1] = pTcb->TCS_DrvSector;
-		info_array[2] = disk->capacity / pTcb->TCS_DrvHead / pTcb->TCS_DrvSector;
+		info_array[2] = (unsigned long)capacity / pTcb->TCS_DrvHead / pTcb->TCS_DrvSector;
 	} else {
 		if (pTcb->TCS_DrvFlags & TCF_DRV_255_63) {
 			info_array[0] = 255;
 			info_array[1] = 63;
-			info_array[2] = disk->capacity / 255 / 63;
+			info_array[2] = (unsigned long)capacity / 255 / 63;
 		} else {
 			info_array[0] = 64;
 			info_array[1] = 32;
-			info_array[2] = disk->capacity >> 11;
+			info_array[2] = (unsigned long)capacity >> 11;
 		}
 	}
 
@@ -696,116 +703,132 @@ static void i91uSCBPost(BYTE * pHcb, BYTE * pScb)
 /*
  * Interrupts handler (main routine of the driver)
  */
-static void i91u_intr0(int irqno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t i91u_intr0(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
-
+	struct Scsi_Host *dev = dev_id;
+	
 	if (tul_hcs[0].HCS_Intr != irqno)
-		return;
+		return IRQ_NONE;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(dev->host_lock, flags);
 
 	tul_isr(&tul_hcs[0]);
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
 }
 
-static void i91u_intr1(int irqno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t i91u_intr1(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
-
+	struct Scsi_Host *dev = dev_id;
+	
 	if (tul_hcs[1].HCS_Intr != irqno)
-		return;
+		return IRQ_NONE;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(dev->host_lock, flags);
 
 	tul_isr(&tul_hcs[1]);
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
 }
 
-static void i91u_intr2(int irqno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t i91u_intr2(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
-
+	struct Scsi_Host *dev = dev_id;
+	
 	if (tul_hcs[2].HCS_Intr != irqno)
-		return;
+		return IRQ_NONE;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(dev->host_lock, flags);
 
 	tul_isr(&tul_hcs[2]);
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
 }
 
-static void i91u_intr3(int irqno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t i91u_intr3(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
-
+	struct Scsi_Host *dev = dev_id;
+	
 	if (tul_hcs[3].HCS_Intr != irqno)
-		return;
+		return IRQ_NONE;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(dev->host_lock, flags);
 
 	tul_isr(&tul_hcs[3]);
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
 }
 
-static void i91u_intr4(int irqno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t i91u_intr4(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
-
+	struct Scsi_Host *dev = dev_id;
+	
 	if (tul_hcs[4].HCS_Intr != irqno)
-		return;
+		return IRQ_NONE;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(dev->host_lock, flags);
 
 	tul_isr(&tul_hcs[4]);
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
 }
 
-static void i91u_intr5(int irqno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t i91u_intr5(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
-
+	struct Scsi_Host *dev = dev_id;
+	
 	if (tul_hcs[5].HCS_Intr != irqno)
-		return;
+		return IRQ_NONE;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(dev->host_lock, flags);
 
 	tul_isr(&tul_hcs[5]);
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
 }
-
-static void i91u_intr6(int irqno, void *dev_id, struct pt_regs *regs)
+	
+static irqreturn_t i91u_intr6(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
-
+	struct Scsi_Host *dev = dev_id;
+	
 	if (tul_hcs[6].HCS_Intr != irqno)
-		return;
+		return IRQ_NONE;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(dev->host_lock, flags);
 
 	tul_isr(&tul_hcs[6]);
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
 }
 
-static void i91u_intr7(int irqno, void *dev_id, struct pt_regs *regs)
+static irqreturn_t i91u_intr7(int irqno, void *dev_id, struct pt_regs *regs)
 {
 	unsigned long flags;
-
+	struct Scsi_Host *dev = dev_id;
+	
 	if (tul_hcs[7].HCS_Intr != irqno)
-		return;
+		return IRQ_NONE;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(dev->host_lock, flags);
 
 	tul_isr(&tul_hcs[7]);
 
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
 }
 
 /* 

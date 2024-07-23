@@ -48,13 +48,13 @@ extern unsigned long __bus_to_virt(unsigned long);
 #if defined(CONFIG_ARCH_FOOTBRIDGE)
 
 /* Task size and page offset at 3GB */
-#define TASK_SIZE		(0xc0000000UL)
+#define TASK_SIZE		(0xbf000000UL)
 #define PAGE_OFFSET		(0xc0000000UL)
 
 #elif defined(CONFIG_ARCH_CO285)
 
 /* Task size and page offset at 1.5GB */
-#define TASK_SIZE		(0x60000000UL)
+#define TASK_SIZE		(0x5f000000UL)
 #define PAGE_OFFSET		(0x60000000UL)
 
 #else
@@ -70,7 +70,7 @@ extern unsigned long __bus_to_virt(unsigned long);
  * This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
-#define TASK_UNMAPPED_BASE (TASK_SIZE / 3)
+#define TASK_UNMAPPED_BASE ((TASK_SIZE + 0x01000000) / 3)
 
 /*
  * The DRAM is always contiguous.
@@ -79,7 +79,5 @@ extern unsigned long __bus_to_virt(unsigned long);
 #define __virt_to_phys(vpage) ((unsigned long)(vpage) - PAGE_OFFSET)
 #define __phys_to_virt__is_a_macro
 #define __phys_to_virt(ppage) ((unsigned long)(ppage) + PAGE_OFFSET)
-
-#define PHYS_TO_NID(addr)	(0)
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * linux/net/sunrpc/rpcauth_null.c
+ * linux/net/sunrpc/auth_null.c
  *
  * AUTH_NULL authentication. Really :-)
  *
@@ -7,11 +7,12 @@
  */
 
 #include <linux/types.h>
-#include <linux/slab.h>
 #include <linux/socket.h>
+#include <linux/module.h>
 #include <linux/in.h>
 #include <linux/utsname.h>
 #include <linux/sunrpc/clnt.h>
+#include <linux/sched.h>
 
 #ifdef RPC_DEBUG
 # define RPCDBG_FACILITY	RPCDBG_AUTH
@@ -20,12 +21,12 @@
 static struct rpc_credops	null_credops;
 
 static struct rpc_auth *
-nul_create(struct rpc_clnt *clnt)
+nul_create(struct rpc_clnt *clnt, rpc_authflavor_t flavor)
 {
 	struct rpc_auth	*auth;
 
 	dprintk("RPC: creating NULL authenticator for client %p\n", clnt);
-	if (!(auth = (struct rpc_auth *) rpc_allocate(0, sizeof(*auth))))
+	if (!(auth = (struct rpc_auth *) kmalloc(sizeof(*auth),GFP_KERNEL)))
 		return NULL;
 	auth->au_cslack = 4;
 	auth->au_rslack = 2;
@@ -41,22 +42,21 @@ nul_destroy(struct rpc_auth *auth)
 {
 	dprintk("RPC: destroying NULL authenticator %p\n", auth);
 	rpcauth_free_credcache(auth);
-	rpc_free(auth);
 }
 
 /*
  * Create NULL creds for current process
  */
 static struct rpc_cred *
-nul_create_cred(int flags)
+nul_create_cred(struct rpc_auth *auth, struct auth_cred *acred, int flags)
 {
 	struct rpc_cred	*cred;
 
-	if (!(cred = (struct rpc_cred *) rpc_allocate(flags, sizeof(*cred))))
+	if (!(cred = (struct rpc_cred *) kmalloc(sizeof(*cred),GFP_KERNEL)))
 		return NULL;
 	atomic_set(&cred->cr_count, 0);
 	cred->cr_flags = RPCAUTH_CRED_UPTODATE;
-	cred->cr_uid = current->uid;
+	cred->cr_uid = acred->uid;
 	cred->cr_ops = &null_credops;
 
 	return cred;
@@ -68,14 +68,14 @@ nul_create_cred(int flags)
 static void
 nul_destroy_cred(struct rpc_cred *cred)
 {
-	rpc_free(cred);
+	kfree(cred);
 }
 
 /*
  * Match cred handle against current process
  */
 static int
-nul_match(struct rpc_cred *cred, int taskflags)
+nul_match(struct auth_cred *acred, struct rpc_cred *cred, int taskflags)
 {
 	return 1;
 }
@@ -106,14 +106,18 @@ nul_refresh(struct rpc_task *task)
 static u32 *
 nul_validate(struct rpc_task *task, u32 *p)
 {
-	u32		n = ntohl(*p++);
+	rpc_authflavor_t	flavor;
+	u32			size;
 
-	if (n != RPC_AUTH_NULL) {
-		printk("RPC: bad verf flavor: %ld\n", (unsigned long) n);
+	flavor = ntohl(*p++);
+	if (flavor != RPC_AUTH_NULL) {
+		printk("RPC: bad verf flavor: %u\n", flavor);
 		return NULL;
 	}
-	if ((n = ntohl(*p++)) != 0) {
-		printk("RPC: bad verf size: %ld\n", (unsigned long) n);
+
+	size = ntohl(*p++);
+	if (size != 0) {
+		printk("RPC: bad verf size: %u\n", size);
 		return NULL;
 	}
 
@@ -121,20 +125,21 @@ nul_validate(struct rpc_task *task, u32 *p)
 }
 
 struct rpc_authops	authnull_ops = {
-	RPC_AUTH_NULL,
+	.owner		= THIS_MODULE,
+	.au_flavor	= RPC_AUTH_NULL,
 #ifdef RPC_DEBUG
-	"NULL",
+	.au_name	= "NULL",
 #endif
-	nul_create,
-	nul_destroy,
-	nul_create_cred
+	.create		= nul_create,
+	.destroy	= nul_destroy,
+	.crcreate	= nul_create_cred,
 };
 
 static
 struct rpc_credops	null_credops = {
-	nul_destroy_cred,
-	nul_match,
-	nul_marshal,
-	nul_refresh,
-	nul_validate
+	.crdestroy	= nul_destroy_cred,
+	.crmatch	= nul_match,
+	.crmarshal	= nul_marshal,
+	.crrefresh	= nul_refresh,
+	.crvalidate	= nul_validate,
 };

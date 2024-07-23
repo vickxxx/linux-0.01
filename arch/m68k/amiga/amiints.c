@@ -40,6 +40,8 @@
 #include <linux/sched.h>
 #include <linux/kernel_stat.h>
 #include <linux/init.h>
+#include <linux/errno.h>
+#include <linux/seq_file.h>
 
 #include <asm/system.h>
 #include <asm/irq.h>
@@ -49,11 +51,11 @@
 #include <asm/amipcmcia.h>
 
 extern int cia_request_irq(struct ciabase *base,int irq,
-                           void (*handler)(int, void *, struct pt_regs *),
+                           irqreturn_t (*handler)(int, void *, struct pt_regs *),
                            unsigned long flags, const char *devname, void *dev_id);
 extern void cia_free_irq(struct ciabase *base, unsigned int irq, void *dev_id);
 extern void cia_init_IRQ(struct ciabase *base);
-extern int cia_get_irq_list(struct ciabase *base, char *buf);
+extern int cia_get_irq_list(struct ciabase *base, struct seq_file *p);
 
 /* irq node variables for amiga interrupt sources */
 static irq_node_t *ami_irq_list[AMI_STD_IRQS];
@@ -68,9 +70,10 @@ static const unsigned char ami_servers[AMI_STD_IRQS] = {
 
 static short ami_ablecount[AMI_IRQS];
 
-static void ami_badint(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t ami_badint(int irq, void *dev_id, struct pt_regs *fp)
 {
 	num_spurious += 1;
+	return IRQ_NONE;
 }
 
 /*
@@ -126,8 +129,7 @@ static inline int amiga_insert_irq(irq_node_t **list, irq_node_t *node)
 		printk("%s: Warning: dev_id of %s is zero\n",
 		       __FUNCTION__, node->devname);
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	cur = *list;
 
@@ -151,7 +153,7 @@ static inline int amiga_insert_irq(irq_node_t **list, irq_node_t *node)
 	node->next = cur;
 	*list = node;
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 	return 0;
 }
 
@@ -160,19 +162,18 @@ static inline void amiga_delete_irq(irq_node_t **list, void *dev_id)
 	unsigned long flags;
 	irq_node_t *node;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	for (node = *list; node; list = &node->next, node = *list) {
 		if (node->dev_id == dev_id) {
 			*list = node->next;
 			/* Mark it as free. */
 			node->handler = NULL;
-			restore_flags(flags);
+			local_irq_restore(flags);
 			return;
 		}
 	}
-	restore_flags(flags);
+	local_irq_restore(flags);
 	printk ("%s: tried to remove invalid irq\n", __FUNCTION__);
 }
 
@@ -183,7 +184,7 @@ static inline void amiga_delete_irq(irq_node_t **list, void *dev_id)
  */
 
 int amiga_request_irq(unsigned int irq,
-		      void (*handler)(int, void *, struct pt_regs *),
+		      irqreturn_t (*handler)(int, void *, struct pt_regs *),
                       unsigned long flags, const char *devname, void *dev_id)
 {
 	irq_node_t *node;
@@ -348,7 +349,7 @@ void amiga_disable_irq(unsigned int irq)
 
 inline void amiga_do_irq(int irq, struct pt_regs *fp)
 {
-	kstat.irqs[0][SYS_IRQS + irq]++;
+	kstat_cpu(0).irqs[SYS_IRQS + irq]++;
 	ami_irq_list[irq]->handler(irq, ami_irq_list[irq]->dev_id, fp);
 }
 
@@ -356,7 +357,7 @@ void amiga_do_irq_list(int irq, struct pt_regs *fp)
 {
 	irq_node_t *node;
 
-	kstat.irqs[0][SYS_IRQS + irq]++;
+	kstat_cpu(0).irqs[SYS_IRQS + irq]++;
 
 	custom.intreq = amiga_intena_vals[irq];
 
@@ -368,7 +369,7 @@ void amiga_do_irq_list(int irq, struct pt_regs *fp)
  * The builtin Amiga hardware interrupt handlers.
  */
 
-static void ami_int1(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t ami_int1(int irq, void *dev_id, struct pt_regs *fp)
 {
 	unsigned short ints = custom.intreqr & custom.intenar;
 
@@ -389,9 +390,10 @@ static void ami_int1(int irq, void *dev_id, struct pt_regs *fp)
 		custom.intreq = IF_SOFT;
 		amiga_do_irq(IRQ_AMIGA_SOFT, fp);
 	}
+	return IRQ_HANDLED;
 }
 
-static void ami_int3(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t ami_int3(int irq, void *dev_id, struct pt_regs *fp)
 {
 	unsigned short ints = custom.intreqr & custom.intenar;
 
@@ -410,9 +412,10 @@ static void ami_int3(int irq, void *dev_id, struct pt_regs *fp)
 	/* if a vertical blank interrupt */
 	if (ints & IF_VERTB)
 		amiga_do_irq_list(IRQ_AMIGA_VERTB, fp);
+	return IRQ_HANDLED;
 }
 
-static void ami_int4(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t ami_int4(int irq, void *dev_id, struct pt_regs *fp)
 {
 	unsigned short ints = custom.intreqr & custom.intenar;
 
@@ -439,9 +442,10 @@ static void ami_int4(int irq, void *dev_id, struct pt_regs *fp)
 		custom.intreq = IF_AUD3;
 		amiga_do_irq(IRQ_AMIGA_AUD3, fp);
 	}
+	return IRQ_HANDLED;
 }
 
-static void ami_int5(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t ami_int5(int irq, void *dev_id, struct pt_regs *fp)
 {
 	unsigned short ints = custom.intreqr & custom.intenar;
 
@@ -456,40 +460,41 @@ static void ami_int5(int irq, void *dev_id, struct pt_regs *fp)
 		custom.intreq = IF_DSKSYN;
 		amiga_do_irq(IRQ_AMIGA_DSKSYN, fp);
 	}
+	return IRQ_HANDLED;
 }
 
-static void ami_int7(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t ami_int7(int irq, void *dev_id, struct pt_regs *fp)
 {
 	panic ("level 7 interrupt received\n");
 }
 
-void (*amiga_default_handler[SYS_IRQS])(int, void *, struct pt_regs *) = {
+irqreturn_t (*amiga_default_handler[SYS_IRQS])(int, void *, struct pt_regs *) = {
 	ami_badint, ami_int1, ami_badint, ami_int3,
 	ami_int4, ami_int5, ami_badint, ami_int7
 };
 
-int amiga_get_irq_list(char *buf)
+int show_amiga_interrupts(struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i;
 	irq_node_t *node;
 
 	for (i = 0; i < AMI_STD_IRQS; i++) {
 		if (!(node = ami_irq_list[i]))
 			continue;
-		len += sprintf(buf+len, "ami  %2d: %10u ", i,
-		               kstat.irqs[0][SYS_IRQS + i]);
+		seq_printf(p, "ami  %2d: %10u ", i,
+		               kstat_cpu(0).irqs[SYS_IRQS + i]);
 		do {
 			if (node->flags & SA_INTERRUPT)
-				len += sprintf(buf+len, "F ");
+				seq_puts(p, "F ");
 			else
-				len += sprintf(buf+len, "  ");
-			len += sprintf(buf+len, "%s\n", node->devname);
+				seq_puts(p, "  ");
+			seq_printf(p, "%s\n", node->devname);
 			if ((node = node->next))
-				len += sprintf(buf+len, "                    ");
+				seq_puts(p, "                    ");
 		} while (node);
 	}
 
-	len += cia_get_irq_list(&ciaa_base, buf+len);
-	len += cia_get_irq_list(&ciab_base, buf+len);
-	return len;
+	cia_get_irq_list(&ciaa_base, p);
+	cia_get_irq_list(&ciab_base, p);
+	return 0;
 }

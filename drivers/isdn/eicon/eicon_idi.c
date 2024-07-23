@@ -1,4 +1,4 @@
-/* $Id: eicon_idi.c,v 1.41.6.4 2001/11/06 20:58:29 kai Exp $
+/* $Id: eicon_idi.c,v 1.1.4.1.2.4 2002/10/01 11:29:13 armin Exp $
  *
  * ISDN lowlevel-module for Eicon active cards.
  * IDI interface 
@@ -17,7 +17,6 @@
  */
 
 #include <linux/config.h>
-#define __NO_VERSION__
 #include "eicon.h"
 #include "eicon_idi.h"
 #include "eicon_dsp.h"
@@ -25,7 +24,7 @@
 
 #undef EICON_FULL_SERVICE_OKTETT
 
-char *eicon_idi_revision = "$Revision: 1.41.6.4 $";
+char *eicon_idi_revision = "$Revision: 1.1.4.1.2.4 $";
 
 eicon_manifbuf *manbuf;
 
@@ -1119,8 +1118,7 @@ idi_fill_in_T30(eicon_chan *chan, unsigned char *buffer)
 		//eicon_log(NULL, 128, "sT30:universal_7 = %x\n", t30->universal_7);
 		eicon_log(NULL, 128, "sT30:station_id_len = %x\n", t30->station_id_len);
 		eicon_log(NULL, 128, "sT30:head_line_len = %x\n", t30->head_line_len);
-		strncpy(st, t30->station_id, t30->station_id_len);
-		st[t30->station_id_len] = 0;
+		strlcpy(st, t30->station_id, t30->station_id_len + 1);
 		eicon_log(NULL, 128, "sT30:station_id = <%s>\n", st);
 	}
 	return(sizeof(eicon_t30_s));
@@ -1196,8 +1194,7 @@ idi_parse_edata(eicon_card *ccard, eicon_chan *chan, unsigned char *buffer, int 
 		//eicon_log(ccard, 128, "rT30:universal_7 = %x\n", p->universal_7);
 		eicon_log(ccard, 128, "rT30:station_id_len = %x\n", p->station_id_len);
 		eicon_log(ccard, 128, "rT30:head_line_len = %x\n", p->head_line_len);
-		strncpy(st, p->station_id, p->station_id_len);
-		st[p->station_id_len] = 0;
+		strlcpy(st, p->station_id, p->station_id_len + 1);
 		eicon_log(ccard, 128, "rT30:station_id = <%s>\n", st);
 	}
 	if (!chan->fax) {
@@ -2718,7 +2715,7 @@ idi_handle_ack_ok(eicon_card *ccard, eicon_chan *chan, eicon_RC *ack)
 	int twaitpq = 0;
 
 	if (ack->RcId != ((chan->e.ReqCh) ? chan->e.B2Id : chan->e.D3Id)) {
-		/* I dont know why this happens, should not ! */
+		/* I don't know why this happens, should not ! */
 		/* just ignoring this RC */
 		eicon_log(ccard, 16, "idi_ack: Ch%d: RcId %d not equal to last %d\n", chan->No, 
 			ack->RcId, (chan->e.ReqCh) ? chan->e.B2Id : chan->e.D3Id);
@@ -2972,7 +2969,7 @@ idi_send_data(eicon_card *card, eicon_chan *chan, int ack, struct sk_buff *skb, 
 			spin_unlock_irqrestore(&eicon_lock, flags);
         	        eicon_log(card, 1, "idi_err: Ch%d: alloc_skb failed in send_data()\n", chan->No);
 			if (xmit_skb) 
-				dev_kfree_skb(skb);
+				dev_kfree_skb(xmit_skb);
 			if (skb2) 
 				dev_kfree_skb(skb2);
                 	return -ENOMEM;
@@ -3098,7 +3095,7 @@ eicon_idi_manage(eicon_card *card, eicon_manifbuf *mb)
 {
 	int l = 0;
 	int ret = 0;
-	int timeout;
+	unsigned long timeout;
 	int i;
         struct sk_buff *skb;
         struct sk_buff *skb2;

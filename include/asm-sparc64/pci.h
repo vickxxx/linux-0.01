@@ -17,12 +17,12 @@
 
 #define PCI_IRQ_NONE		0xffffffff
 
-extern inline void pcibios_set_master(struct pci_dev *dev)
+static inline void pcibios_set_master(struct pci_dev *dev)
 {
 	/* No special bus mastering setup handling */
 }
 
-extern inline void pcibios_penalize_isa_irq(int irq)
+static inline void pcibios_penalize_isa_irq(int irq)
 {
 	/* We don't do dynamic PCI IRQ allocation */
 }
@@ -50,7 +50,7 @@ extern void *pci_alloc_consistent(struct pci_dev *hwdev, size_t size, dma_addr_t
  * size must be the same as what as passed into pci_alloc_consistent,
  * and likewise dma_addr must be the same as what *dma_addrp was set to.
  *
- * References to the memory and mappings assosciated with cpu_addr/dma_addr
+ * References to the memory and mappings associated with cpu_addr/dma_addr
  * past this call are illegal.
  */
 extern void pci_free_consistent(struct pci_dev *hwdev, size_t size, void *vaddr, dma_addr_t dma_handle);
@@ -67,7 +67,7 @@ extern dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr, size_t size, 
  * must match what was provided for in a previous pci_map_single call.  All
  * other usages are undefined.
  *
- * After this call, reads by the cpu to the buffer are guarenteed to see
+ * After this call, reads by the cpu to the buffer are guaranteed to see
  * whatever the device wrote there.
  */
 extern void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr, size_t size, int direction);
@@ -77,8 +77,22 @@ extern void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr, size_t 
 	pci_map_single(dev, (page_address(page) + (off)), size, dir)
 #define pci_unmap_page(dev,addr,sz,dir) pci_unmap_single(dev,addr,sz,dir)
 
+/* pci_unmap_{single,page} is not a nop, thus... */
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)	\
+	dma_addr_t ADDR_NAME;
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)		\
+	__u32 LEN_NAME;
+#define pci_unmap_addr(PTR, ADDR_NAME)			\
+	((PTR)->ADDR_NAME)
+#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)		\
+	(((PTR)->ADDR_NAME) = (VAL))
+#define pci_unmap_len(PTR, LEN_NAME)			\
+	((PTR)->LEN_NAME)
+#define pci_unmap_len_set(PTR, LEN_NAME, VAL)		\
+	(((PTR)->LEN_NAME) = (VAL))
+
 /* Map a set of buffers described by scatterlist in streaming
- * mode for DMA.  This is the scather-gather version of the
+ * mode for DMA.  This is the scatter-gather version of the
  * above pci_map_single interface.  Here the scatter gather list
  * elements are each tagged with the appropriate dma address
  * and length.  They are obtained via sg_dma_{address,length}(SG).
@@ -175,7 +189,14 @@ pci_dac_dma_sync_single(struct pci_dev *pdev, dma64_addr_t dma_addr, size_t len,
 
 /* Return the index of the PCI controller for device PDEV. */
 
-extern int pci_controller_num(struct pci_dev *pdev);
+extern int pci_domain_nr(struct pci_bus *bus);
+
+/* Set the name of the bus as it appears in /proc/bus/pci */
+static inline int pci_name_bus(char *name, struct pci_bus *bus)
+{
+	sprintf(name, "%02x", bus->number);
+	return 0;
+}
 
 /* Platform support for /proc/bus/pci/X/Y mmap()s. */
 
@@ -186,6 +207,18 @@ extern int pci_controller_num(struct pci_dev *pdev);
 extern int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
 			       enum pci_mmap_state mmap_state,
 			       int write_combine);
+
+/* Platform specific MWI support. */
+#define HAVE_ARCH_PCI_MWI
+extern int pcibios_prep_mwi(struct pci_dev *dev);
+
+extern void
+pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
+			struct resource *res);
+
+extern void
+pcibios_bus_to_resource(struct pci_dev *dev, struct resource *res,
+			struct pci_bus_region *region);
 
 #endif /* __KERNEL__ */
 

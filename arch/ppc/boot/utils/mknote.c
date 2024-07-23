@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.mknote.c 1.7 05/18/01 15:17:23 cort
- */
-/*
  * Copyright (C) Cort Dougan 1999.
  *
  * This program is free software; you can redistribute it and/or
@@ -14,6 +11,7 @@
  */
 
 #include <stdio.h>
+#include <string.h>
 
 #define PL(x) printf("%c%c%c%c", ((x)>>24)&0xff, ((x)>>16)&0xff, ((x)>>8)&0xff, (x)&0xff );
 

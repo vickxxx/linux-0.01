@@ -13,10 +13,10 @@
  */
 #include <linux/module.h>
 #include <linux/slab.h>
-#include <linux/sched.h>
 #include <linux/mman.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
+#include <linux/errno.h>
 
 #include <asm/dma.h>
 
@@ -119,6 +119,10 @@ void set_dma_sg (dmach_t channel, struct scatterlist *sg, int nr_sg)
 {
 	dma_t *dma = dma_chan + channel;
 
+	if (dma->active)
+		printk(KERN_ERR "dma%d: altering DMA SG while "
+		       "DMA active\n", channel);
+
 	dma->sg = sg;
 	dma->sgcount = nr_sg;
 	dma->using_sg = 1;
@@ -139,7 +143,7 @@ void set_dma_addr (dmach_t channel, unsigned long physaddr)
 
 	dma->sg = &dma->buf;
 	dma->sgcount = 1;
-	dma->buf.address = bus_to_virt(physaddr);
+	dma->buf.__address = bus_to_virt(physaddr);
 	dma->using_sg = 0;
 	dma->invalid = 1;
 }
@@ -217,6 +221,14 @@ free_dma:
 	BUG();
 }
 
+/*
+ * Is the specified DMA channel active?
+ */
+int dma_channel_active(dmach_t channel)
+{
+	return dma_chan[channel].active;
+}
+
 void set_dma_page(dmach_t channel, char pagenr)
 {
 	printk(KERN_ERR "dma%d: trying to set_dma_page\n", channel);
@@ -275,6 +287,8 @@ GLOBAL_ALIAS(init_dma, get_dma_residue);
 
 #endif
 
+EXPORT_SYMBOL(request_dma);
+EXPORT_SYMBOL(free_dma);
 EXPORT_SYMBOL(enable_dma);
 EXPORT_SYMBOL(disable_dma);
 EXPORT_SYMBOL(set_dma_addr);
@@ -284,3 +298,5 @@ EXPORT_SYMBOL(set_dma_page);
 EXPORT_SYMBOL(get_dma_residue);
 EXPORT_SYMBOL(set_dma_sg);
 EXPORT_SYMBOL(set_dma_speed);
+
+EXPORT_SYMBOL(dma_spin_lock);

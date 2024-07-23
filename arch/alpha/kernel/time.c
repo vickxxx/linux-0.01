@@ -37,23 +37,28 @@
 #include <linux/irq.h>
 #include <linux/interrupt.h>
 #include <linux/init.h>
+#include <linux/bcd.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/hwrpb.h>
 
 #include <linux/mc146818rtc.h>
+#include <linux/time.h>
 #include <linux/timex.h>
 
 #include "proto.h"
 #include "irq_impl.h"
 
-extern rwlock_t xtime_lock;
+u64 jiffies_64 = INITIAL_JIFFIES;
+
 extern unsigned long wall_jiffies;	/* kernel/timer.c */
 
 static int set_rtc_mmss(unsigned long);
 
 spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
+
+#define TICK_SIZE (tick_nsec / 1000)
 
 /*
  * Shift amount by which scaled_ticks_per_cycle is scaled.  Shifting
@@ -89,7 +94,7 @@ static inline __u32 rpcc(void)
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
+irqreturn_t timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 {
 	unsigned long delta;
 	__u32 now;
@@ -101,7 +106,7 @@ void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 		alpha_do_profile(regs->pc);
 #endif
 
-	write_lock(&xtime_lock);
+	write_seqlock(&xtime_lock);
 
 	/*
 	 * Calculate how many ticks have passed since the last update,
@@ -127,13 +132,14 @@ void timer_interrupt(int irq, void *dev, struct pt_regs * regs)
 	 */
 	if ((time_status & STA_UNSYNC) == 0
 	    && xtime.tv_sec > state.last_rtc_update + 660
-	    && xtime.tv_usec >= 500000 - ((unsigned) tick) / 2
-	    && xtime.tv_usec <= 500000 + ((unsigned) tick) / 2) {
+	    && xtime.tv_nsec >= 500000 - ((unsigned) TICK_SIZE) / 2
+	    && xtime.tv_nsec <= 500000 + ((unsigned) TICK_SIZE) / 2) {
 		int tmp = set_rtc_mmss(xtime.tv_sec);
 		state.last_rtc_update = xtime.tv_sec - (tmp ? 600 : 0);
 	}
 
-	write_unlock(&xtime_lock);
+	write_sequnlock(&xtime_lock);
+	return IRQ_HANDLED;
 }
 
 void
@@ -183,8 +189,8 @@ validate_cc_value(unsigned long cc)
 		unsigned int min, max;
 	} cpu_hz[] __initdata = {
 		[EV3_CPU]    = {   50000000,  200000000 },	/* guess */
-		[EV4_CPU]    = {  150000000,  300000000 },
-		[LCA4_CPU]   = {  150000000,  300000000 },	/* guess */
+		[EV4_CPU]    = {  100000000,  300000000 },
+		[LCA4_CPU]   = {  100000000,  300000000 },	/* guess */
 		[EV45_CPU]   = {  200000000,  300000000 },
 		[EV5_CPU]    = {  250000000,  433000000 },
 		[EV56_CPU]   = {  333000000,  667000000 },
@@ -255,12 +261,12 @@ calibrate_cc_with_pic(void)
 
 	cc = rpcc();
 	do {
-		count++;
+	  count+=100; /* by 1 takes too long to timeout from 0 */
 	} while ((inb(0x61) & 0x20) == 0 && count > 0);
 	cc = rpcc() - cc;
 
 	/* Error: ECTCNEVERSET or ECPUTOOFAST.  */
-	if (count <= 1)
+	if (count <= 100)
 		return 0;
 
 	/* Error: ECPUTOOSLOW.  */
@@ -312,7 +318,7 @@ time_init(void)
 		diff = cycle_freq - est_cycle_freq;
 		if (diff < 0)
 			diff = -diff;
-		if (diff > one_percent) {
+		if ((unsigned long)diff > one_percent) {
 			cycle_freq = est_cycle_freq;
 			printk("HWRPB cycle frequency bogus.  "
 			       "Estimated %lu Hz\n", cycle_freq);
@@ -326,7 +332,7 @@ time_init(void)
 
 	/* From John Bowman <bowman@math.ualberta.ca>: allow the values
 	   to settle, as the Update-In-Progress bit going low isn't good
-	   enough on some hardware.  2ms is our guess; we havn't found 
+	   enough on some hardware.  2ms is our guess; we haven't found 
 	   bogomips yet, but this is close on a 500Mhz box.  */
 	__delay(1000000);
 
@@ -363,7 +369,10 @@ time_init(void)
 		year += 100;
 
 	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	xtime.tv_usec = 0;
+	xtime.tv_nsec = 0;
+
+        wall_to_monotonic.tv_sec -= xtime.tv_sec;
+        wall_to_monotonic.tv_nsec = 0;
 
 	if (HZ > (1<<16)) {
 		extern void __you_loose (void);
@@ -378,23 +387,6 @@ time_init(void)
 
 	/* Startup the timer source. */
 	alpha_mv.init_rtc();
-
-	do_get_fast_time = do_gettimeofday;
-
-	/*
-	 * If we had wanted SRM console printk echoing early, undo it now.
-	 *
-	 * "srmcons" specified in the boot command arguments allows us to
-	 * see kernel messages during the period of time before the true
-	 * console device is "registered" during console_init(). As of this
-	 * version (2.4.10), time_init() is the last Alpha-specific code
-	 * called before console_init(), so we put this "unregister" code
-	 * here to prevent schizophrenic console behavior later... ;-}
-	 */
-	if (alpha_using_srm && srmcons_output) {
-		unregister_srm_console();
-		srmcons_output = 0;
-	}
 }
 
 /*
@@ -407,18 +399,20 @@ time_init(void)
 void
 do_gettimeofday(struct timeval *tv)
 {
-	unsigned long sec, usec, lost, flags;
+	unsigned long flags;
+	unsigned long sec, usec, lost, seq;
 	unsigned long delta_cycles, delta_usec, partial_tick;
 
-	read_lock_irqsave(&xtime_lock, flags);
+	do {
+		seq = read_seqbegin_irqsave(&xtime_lock, flags);
 
-	delta_cycles = rpcc() - state.last_time;
-	sec = xtime.tv_sec;
-	usec = xtime.tv_usec;
-	partial_tick = state.partial_tick;
-	lost = jiffies - wall_jiffies;
+		delta_cycles = rpcc() - state.last_time;
+		sec = xtime.tv_sec;
+		usec = (xtime.tv_nsec / 1000);
+		partial_tick = state.partial_tick;
+		lost = jiffies - wall_jiffies;
 
-	read_unlock_irqrestore(&xtime_lock, flags);
+	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
 
 #ifdef CONFIG_SMP
 	/* Until and unless we figure out how to get cpu cycle counters
@@ -454,44 +448,59 @@ do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
-void
-do_settimeofday(struct timeval *tv)
+int
+do_settimeofday(struct timespec *tv)
 {
-	unsigned long delta_usec;
-	long sec, usec;
-	
-	write_lock_irq(&xtime_lock);
+	unsigned long delta_nsec;
+	long sec, nsec;
+
+	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
+		return -EINVAL;
+
+	write_seqlock_irq(&xtime_lock);
 
 	/* The offset that is added into time in do_gettimeofday above
 	   must be subtracted out here to keep a coherent view of the
 	   time.  Without this, a full-tick error is possible.  */
 
 #ifdef CONFIG_SMP
-	delta_usec = (jiffies - wall_jiffies) * (1000000 / HZ);
+	delta_nsec = (jiffies - wall_jiffies) * (NSEC_PER_SEC / HZ);
 #else
-	delta_usec = rpcc() - state.last_time;
-	delta_usec = (delta_usec * state.scaled_ticks_per_cycle 
+	delta_nsec = rpcc() - state.last_time;
+	delta_nsec = (delta_nsec * state.scaled_ticks_per_cycle 
 		      + state.partial_tick
 		      + ((jiffies - wall_jiffies) << FIX_SHIFT)) * 15625;
-	delta_usec = ((delta_usec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
+	delta_nsec = ((delta_nsec / ((1UL << (FIX_SHIFT-6-1)) * HZ)) + 1) / 2;
+	delta_nsec *= 1000;
 #endif
 
 	sec = tv->tv_sec;
-	usec = tv->tv_usec;
-	usec -= delta_usec;
-	if (usec < 0) {
-		usec += 1000000;
+	nsec = tv->tv_nsec;
+	nsec -= delta_nsec;
+	if (nsec < 0) {
+		nsec += NSEC_PER_SEC;
 		sec -= 1;
 	}
 
 	xtime.tv_sec = sec;
-	xtime.tv_usec = usec;
+	xtime.tv_nsec = nsec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
 
-	write_unlock_irq(&xtime_lock);
+        wall_to_monotonic.tv_sec += xtime.tv_sec - tv->tv_sec;
+        wall_to_monotonic.tv_nsec += xtime.tv_nsec - tv->tv_nsec;
+        if (wall_to_monotonic.tv_nsec > NSEC_PER_SEC) {
+                wall_to_monotonic.tv_nsec -= NSEC_PER_SEC;
+                wall_to_monotonic.tv_sec++;
+        } else if (wall_to_monotonic.tv_nsec < 0) {
+                wall_to_monotonic.tv_nsec += NSEC_PER_SEC;
+                wall_to_monotonic.tv_sec--;
+        }
+
+	write_sequnlock_irq(&xtime_lock);
+	return 0;
 }
 
 

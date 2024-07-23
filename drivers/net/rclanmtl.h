@@ -54,10 +54,10 @@
 #include <asm/io.h>
 
 /* Debug stuff. Define for debug output */
-#define RCDEBUG
+#undef RCDEBUG
 
 #ifdef RCDEBUG
-#define dprintk(args...) printk(KERN_DEBUG "(rcpci45 driver:) " args)
+#define dprintk(args...) printk(KERN_DEBUG "rc: " args)
 #else
 #define dprintk(args...) { }
 #endif
@@ -182,6 +182,7 @@ typedef struct {
 	U32 pci_addr;		/* the pci address of the adapter */
 	U32 pci_addr_len;
 
+	struct pci_dev *pci_dev;
 	struct timer_list timer;	/*  timer */
 	struct net_device_stats stats;	/* the statistics structure */
 	unsigned long numOutRcvBuffers;	/* number of outstanding receive buffers */
@@ -189,7 +190,7 @@ typedef struct {
 	unsigned char reboot;
 	unsigned char nexus;
 	PU8 msgbuf;		/* Pointer to Lan Api Private Area */
-	PU8 PLanApiPA;		/* Pointer to Lan Api Private Area (aligned) */
+	dma_addr_t msgbuf_dma;
 	PPAB pPab;		/* Pointer to the PCI Adapter Block */
 } *PDPA;
 
@@ -421,7 +422,7 @@ RCGetRavlinIPandMask (struct net_device *dev, PU32 pIpAddr, PU32 pNetMask,
     ** callback functions, TransmitCallbackFunction or ReceiveCallbackFunction,
     ** if a TX or RX transaction has completed.
   */
-void RCProcI2OMsgQ (struct net_device *dev);
+irqreturn_t RCProcI2OMsgQ (struct net_device *dev);
 
  /*
     ** Disable and Enable I2O interrupts.  I2O interrupts are enabled at Init time

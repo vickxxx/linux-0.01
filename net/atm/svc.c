@@ -4,8 +4,7 @@
 
 
 #include <linux/string.h>
-#include <linux/net.h>		/* struct socket, struct net_proto,
-				   struct proto_ops */
+#include <linux/net.h>		/* struct socket, struct proto_ops */
 #include <linux/errno.h>	/* error codes */
 #include <linux/kernel.h>	/* printk */
 #include <linux/skbuff.h>
@@ -60,22 +59,22 @@ static int svc_shutdown(struct socket *sock,int how)
 
 static void svc_disconnect(struct atm_vcc *vcc)
 {
-	DECLARE_WAITQUEUE(wait,current);
+	DEFINE_WAIT(wait);
 	struct sk_buff *skb;
 
 	DPRINTK("svc_disconnect %p\n",vcc);
 	if (test_bit(ATM_VF_REGIS,&vcc->flags)) {
-		add_wait_queue(&vcc->sleep,&wait);
+		prepare_to_wait(&vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 		sigd_enq(vcc,as_close,NULL,NULL,NULL);
 		while (!test_bit(ATM_VF_RELEASED,&vcc->flags) && sigd) {
-			set_current_state(TASK_UNINTERRUPTIBLE);
 			schedule();
+			prepare_to_wait(&vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 		}
-		remove_wait_queue(&vcc->sleep,&wait);
+		finish_wait(&vcc->sleep, &wait);
 	}
 	/* beware - socket is still in use by atmsigd until the last
 	   as_indicate has been answered */
-	while ((skb = skb_dequeue(&vcc->sk->receive_queue))) {
+	while ((skb = skb_dequeue(&vcc->sk->sk_receive_queue))) {
 		DPRINTK("LISTEN REL\n");
 		sigd_enq2(NULL,as_reject,vcc,NULL,NULL,&vcc->qos,0);
 		dev_kfree_skb(skb);
@@ -111,7 +110,7 @@ static int svc_release(struct socket *sock)
 static int svc_bind(struct socket *sock,struct sockaddr *sockaddr,
     int sockaddr_len)
 {
-	DECLARE_WAITQUEUE(wait,current);
+	DEFINE_WAIT(wait);
 	struct sock *sk = sock->sk;
 	struct sockaddr_atmsvc *addr;
 	struct atm_vcc *vcc;
@@ -147,13 +146,13 @@ static int svc_bind(struct socket *sock,struct sockaddr *sockaddr,
 	}
 	vcc->local = *addr;
 	vcc->reply = WAITING;
-	add_wait_queue(&vcc->sleep,&wait);
+	prepare_to_wait(&vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 	sigd_enq(vcc,as_bind,NULL,NULL,&vcc->local);
 	while (vcc->reply == WAITING && sigd) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule();
+		prepare_to_wait(&vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 	}
-	remove_wait_queue(&vcc->sleep,&wait);
+	finish_wait(&vcc->sleep, &wait);
 	clear_bit(ATM_VF_REGIS,&vcc->flags); /* doesn't count */
 	if (!sigd) {
 		error = -EUNATCH;
@@ -171,7 +170,7 @@ out:
 static int svc_connect(struct socket *sock,struct sockaddr *sockaddr,
     int sockaddr_len,int flags)
 {
-	DECLARE_WAITQUEUE(wait,current);
+	DEFINE_WAIT(wait);
 	struct sock *sk = sock->sk;
 	struct sockaddr_atmsvc *addr;
 	struct atm_vcc *vcc = ATM_SD(sock);
@@ -228,19 +227,21 @@ static int svc_connect(struct socket *sock,struct sockaddr *sockaddr,
 		}
 		vcc->remote = *addr;
 		vcc->reply = WAITING;
-		add_wait_queue(&vcc->sleep,&wait);
+		prepare_to_wait(&vcc->sleep, &wait, TASK_INTERRUPTIBLE);
 		sigd_enq(vcc,as_connect,NULL,NULL,&vcc->remote);
 		if (flags & O_NONBLOCK) {
-			remove_wait_queue(&vcc->sleep,&wait);
+			finish_wait(&vcc->sleep, &wait);
 			sock->state = SS_CONNECTING;
 			error = -EINPROGRESS;
 			goto out;
 		}
 		error = 0;
 		while (vcc->reply == WAITING && sigd) {
-			set_current_state(TASK_INTERRUPTIBLE);
 			schedule();
-			if (!signal_pending(current)) continue;
+			if (!signal_pending(current)) {
+				prepare_to_wait(&vcc->sleep, &wait, TASK_INTERRUPTIBLE);
+				continue;
+			}
 			DPRINTK("*ABORT*\n");
 			/*
 			 * This is tricky:
@@ -256,13 +257,13 @@ static int svc_connect(struct socket *sock,struct sockaddr *sockaddr,
 			 */
 			sigd_enq(vcc,as_close,NULL,NULL,NULL);
 			while (vcc->reply == WAITING && sigd) {
-				set_current_state(TASK_UNINTERRUPTIBLE);
+				prepare_to_wait(&vcc->sleep, &wait, TASK_INTERRUPTIBLE);
 				schedule();
 			}
 			if (!vcc->reply)
 				while (!test_bit(ATM_VF_RELEASED,&vcc->flags)
 				    && sigd) {
-					set_current_state(TASK_UNINTERRUPTIBLE);
+					prepare_to_wait(&vcc->sleep, &wait, TASK_INTERRUPTIBLE);
 					schedule();
 				}
 			clear_bit(ATM_VF_REGIS,&vcc->flags);
@@ -272,7 +273,7 @@ static int svc_connect(struct socket *sock,struct sockaddr *sockaddr,
 			error = -EINTR;
 			break;
 		}
-		remove_wait_queue(&vcc->sleep,&wait);
+		finish_wait(&vcc->sleep, &wait);
 		if (error)
 			goto out;
 		if (!sigd) {
@@ -306,7 +307,7 @@ out:
 
 static int svc_listen(struct socket *sock,int backlog)
 {
-	DECLARE_WAITQUEUE(wait,current);
+	DEFINE_WAIT(wait);
 	struct sock *sk = sock->sk;
 	struct atm_vcc *vcc = ATM_SD(sock);
 	int error;
@@ -319,19 +320,20 @@ static int svc_listen(struct socket *sock,int backlog)
 		goto out;
 	}
 	vcc->reply = WAITING;
-	add_wait_queue(&vcc->sleep,&wait);
+	prepare_to_wait(&vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 	sigd_enq(vcc,as_listen,NULL,NULL,&vcc->local);
 	while (vcc->reply == WAITING && sigd) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule();
+		prepare_to_wait(&vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 	}
-	remove_wait_queue(&vcc->sleep,&wait);
+	finish_wait(&vcc->sleep, &wait);
 	if (!sigd) {
 		error = -EUNATCH;
 		goto out;
 	}
 	set_bit(ATM_VF_LISTEN,&vcc->flags);
-	vcc->sk->max_ack_backlog = backlog > 0 ? backlog : ATM_BACKLOG_DEFAULT;
+	vcc->sk->sk_max_ack_backlog = backlog > 0 ? backlog :
+						    ATM_BACKLOG_DEFAULT;
 	error = vcc->reply;
 out:
 	release_sock(sk);
@@ -358,10 +360,11 @@ static int svc_accept(struct socket *sock,struct socket *newsock,int flags)
 
 	DPRINTK("svc_accept %p -> %p\n",old_vcc,new_vcc);
 	while (1) {
-		DECLARE_WAITQUEUE(wait,current);
+		DEFINE_WAIT(wait);
 
-		add_wait_queue(&old_vcc->sleep,&wait);
-		while (!(skb = skb_dequeue(&old_vcc->sk->receive_queue)) && sigd) {
+		prepare_to_wait(&old_vcc->sleep, &wait, TASK_INTERRUPTIBLE);
+		while (!(skb = skb_dequeue(&old_vcc->sk->sk_receive_queue)) &&
+		       sigd) {
 			if (test_bit(ATM_VF_RELEASED,&old_vcc->flags)) break;
 			if (test_bit(ATM_VF_CLOSE,&old_vcc->flags)) {
 				error = old_vcc->reply;
@@ -378,8 +381,9 @@ static int svc_accept(struct socket *sock,struct socket *newsock,int flags)
 				error = -ERESTARTSYS;
 				break;
 			}
+			prepare_to_wait(&old_vcc->sleep, &wait, TASK_INTERRUPTIBLE);
 		}
-		remove_wait_queue(&old_vcc->sleep,&wait);
+		finish_wait(&old_vcc->sleep, &wait);
 		if (error)
 			goto out;
 		if (!skb) {
@@ -395,7 +399,7 @@ static int svc_accept(struct socket *sock,struct socket *newsock,int flags)
 		error = vcc_connect(newsock, msg->pvc.sap_addr.itf,
 				    msg->pvc.sap_addr.vpi, msg->pvc.sap_addr.vci);
 		dev_kfree_skb(skb);
-		old_vcc->sk->ack_backlog--;
+		old_vcc->sk->sk_ack_backlog--;
 		if (error) {
 			sigd_enq2(NULL,as_reject,old_vcc,NULL,NULL,
 			    &old_vcc->qos,error);
@@ -404,15 +408,15 @@ static int svc_accept(struct socket *sock,struct socket *newsock,int flags)
 		}
 		/* wait should be short, so we ignore the non-blocking flag */
 		new_vcc->reply = WAITING;
-		add_wait_queue(&new_vcc->sleep,&wait);
+		prepare_to_wait(&new_vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 		sigd_enq(new_vcc,as_accept,old_vcc,NULL,NULL);
 		while (new_vcc->reply == WAITING && sigd) {
-			set_current_state(TASK_UNINTERRUPTIBLE);
 			release_sock(sk);
 			schedule();
 			lock_sock(sk);
+			prepare_to_wait(&new_vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 		}
-		remove_wait_queue(&new_vcc->sleep,&wait);
+		finish_wait(&new_vcc->sleep, &wait);
 		if (!sigd) {
 			error = -EUNATCH;
 			goto out;
@@ -445,17 +449,17 @@ static int svc_getname(struct socket *sock,struct sockaddr *sockaddr,
 
 int svc_change_qos(struct atm_vcc *vcc,struct atm_qos *qos)
 {
-	DECLARE_WAITQUEUE(wait,current);
+	DEFINE_WAIT(wait);
 
 	vcc->reply = WAITING;
-	add_wait_queue(&vcc->sleep,&wait);
+	prepare_to_wait(&vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 	sigd_enq2(vcc,as_modify,NULL,NULL,&vcc->local,qos,0);
 	while (vcc->reply == WAITING && !test_bit(ATM_VF_RELEASED,&vcc->flags)
 	    && sigd) {
-		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule();
+		prepare_to_wait(&vcc->sleep, &wait, TASK_UNINTERRUPTIBLE);
 	}
-	remove_wait_queue(&vcc->sleep,&wait);
+	finish_wait(&vcc->sleep, &wait);
 	if (!sigd) return -EUNATCH;
 	return vcc->reply;
 }
@@ -551,11 +555,8 @@ static int svc_create(struct socket *sock,int protocol)
 
 
 static struct net_proto_family svc_family_ops = {
-	PF_ATMSVC,
-	svc_create,
-	0,			/* no authentication */
-	0,			/* no encryption */
-	0			/* no encrypt_net */
+	.family = PF_ATMSVC,
+	.create = svc_create,
 };
 
 
@@ -563,7 +564,7 @@ static struct net_proto_family svc_family_ops = {
  *	Initialize the ATM SVC protocol family
  */
 
-int atmsvc_init(void)
+int __init atmsvc_init(void)
 {
 	return sock_register(&svc_family_ops);
 }

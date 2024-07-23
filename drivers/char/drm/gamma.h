@@ -38,11 +38,47 @@
  */
 #define __HAVE_MTRR			1
 
+#define DRIVER_AUTHOR		"VA Linux Systems Inc."
+
+#define DRIVER_NAME		"gamma"
+#define DRIVER_DESC		"3DLabs gamma"
+#define DRIVER_DATE		"20010624"
+
+#define DRIVER_MAJOR		2
+#define DRIVER_MINOR		0
+#define DRIVER_PATCHLEVEL	0
+
+#define DRIVER_IOCTLS							  \
+	[DRM_IOCTL_NR(DRM_IOCTL_DMA)]	     = { gamma_dma,	  1, 0 }, \
+	[DRM_IOCTL_NR(DRM_IOCTL_GAMMA_INIT)] = { gamma_dma_init,  1, 1 }, \
+	[DRM_IOCTL_NR(DRM_IOCTL_GAMMA_COPY)] = { gamma_dma_copy,  1, 1 }
+
+#define IOCTL_TABLE_NAME	DRM(ioctls)
+#define IOCTL_FUNC_NAME 	DRM(ioctl)
+
+#define __HAVE_COUNTERS		5
+#define __HAVE_COUNTER6		_DRM_STAT_IRQ
+#define __HAVE_COUNTER7		_DRM_STAT_DMA
+#define __HAVE_COUNTER8		_DRM_STAT_PRIMARY
+#define __HAVE_COUNTER9		_DRM_STAT_SPECIAL
+#define __HAVE_COUNTER10	_DRM_STAT_MISSED
+
+/* Driver customization:
+ */
+#define DRIVER_PRETAKEDOWN() do {					\
+	gamma_do_cleanup_dma( dev );					\
+} while (0)
+
 /* DMA customization:
  */
 #define __HAVE_DMA			1
+#define __HAVE_AGP			1
+#define __MUST_HAVE_AGP			0
 #define __HAVE_OLD_DMA			1
 #define __HAVE_PCI_DMA			1
+
+#define __HAVE_DRIVER_FOPS_READ		1
+#define __HAVE_DRIVER_FOPS_POLL		1
 
 #define __HAVE_MULTIPLE_DMA_QUEUES	1
 #define __HAVE_DMA_WAITQUEUE		1
@@ -60,34 +96,19 @@
 
 #define __HAVE_DMA_QUIESCENT		1
 #define DRIVER_DMA_QUIESCENT() do {					\
-	/* FIXME ! */ 							\
-	gamma_dma_quiescent_dual(dev);					\
+	drm_gamma_private_t *dev_priv =					\
+		(drm_gamma_private_t *)dev->dev_private;		\
+	if (dev_priv->num_rast == 2)					\
+		gamma_dma_quiescent_dual(dev);				\
+	else gamma_dma_quiescent_single(dev);				\
 	return 0;							\
 } while (0)
 
 #define __HAVE_DMA_IRQ			1
 #define __HAVE_DMA_IRQ_BH		1
-#define DRIVER_PREINSTALL() do {					\
-	drm_gamma_private_t *dev_priv =					\
-				(drm_gamma_private_t *)dev->dev_private;\
-	GAMMA_WRITE( GAMMA_GCOMMANDMODE,	0x00000000 );		\
-	GAMMA_WRITE( GAMMA_GDMACONTROL,		0x00000000 );		\
-} while (0)
 
-#define DRIVER_POSTINSTALL() do {					\
-	drm_gamma_private_t *dev_priv =					\
-				(drm_gamma_private_t *)dev->dev_private;\
-	GAMMA_WRITE( GAMMA_GINTENABLE,		0x00002001 );		\
-	GAMMA_WRITE( GAMMA_COMMANDINTENABLE,	0x00000008 );		\
-	GAMMA_WRITE( GAMMA_GDELAYTIMER,		0x00039090 );		\
-} while (0)
+#define DRIVER_AGP_BUFFERS_MAP( dev )					\
+	((drm_gamma_private_t *)((dev)->dev_private))->buffers
 
-#define DRIVER_UNINSTALL() do {						\
-	drm_gamma_private_t *dev_priv =					\
-				(drm_gamma_private_t *)dev->dev_private;\
-	GAMMA_WRITE( GAMMA_GDELAYTIMER,		0x00000000 );		\
-	GAMMA_WRITE( GAMMA_COMMANDINTENABLE,	0x00000000 );		\
-	GAMMA_WRITE( GAMMA_GINTENABLE,		0x00000000 );		\
-} while (0)
 
 #endif /* __GAMMA_H__ */

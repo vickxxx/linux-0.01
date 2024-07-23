@@ -38,11 +38,9 @@
 #include <linux/module.h>
 #include <linux/delay.h>
 #include <linux/tty.h>
-#include <linux/sched.h>
 #include <linux/init.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
 #include <net/irda/irda_device.h>
 
 /* 
@@ -110,7 +108,7 @@ int __init actisys_init(void)
 	return 0;
 }
 
-void actisys_cleanup(void)
+void __exit actisys_cleanup(void)
 {
 	/* We have to remove both dongles */
 	irda_device_unregister_dongle(&dongle);
@@ -166,7 +164,7 @@ static int actisys_change_speed(struct irda_task *task)
 	int ret = 0;
 	int i = 0;
 
-        IRDA_DEBUG(4, __FUNCTION__ "(), speed=%d (was %d)\n", speed, 
+        IRDA_DEBUG(4, "%s(), speed=%d (was %d)\n", __FUNCTION__, speed, 
 		   self->speed);
 
 	/* Go to a known state by reseting the dongle */
@@ -219,7 +217,7 @@ static int actisys_change_speed(struct irda_task *task)
  *	o second put the dongle in a know state
  *
  *	The dongle is powered of the RTS and DTR lines. In the dongle, there
- * is a big capacitor to accomodate the current spikes. This capacitor
+ * is a big capacitor to accommodate the current spikes. This capacitor
  * takes a least 50 ms to be charged. In theory, the Bios set those lines
  * up, so by the time we arrive here we should be set. It doesn't hurt
  * to be on the conservative side, so we will wait...
@@ -260,7 +258,7 @@ static int actisys_reset(struct irda_task *task)
 		self->speed = 9600;	/* That's the default */
 		break;
 	default:
-		ERROR(__FUNCTION__ "(), unknown state %d\n", task->state);
+		ERROR("%s(), unknown state %d\n", __FUNCTION__, task->state);
 		irda_task_next_state(task, IRDA_TASK_DONE);
 		self->reset_task = NULL;
 		ret = -1;
@@ -269,7 +267,6 @@ static int actisys_reset(struct irda_task *task)
 	return ret;
 }
 
-#ifdef MODULE
 MODULE_AUTHOR("Dag Brattli <dagb@cs.uit.no> - Jean Tourrilhes <jt@hpl.hp.com>");
 MODULE_DESCRIPTION("ACTiSYS IR-220L and IR-220L+ dongle driver");	
 MODULE_LICENSE("GPL");
@@ -281,10 +278,7 @@ MODULE_LICENSE("GPL");
  *    Initialize Actisys module
  *
  */
-int init_module(void)
-{
-	return actisys_init();
-}
+module_init(actisys_init);
 
 /*
  * Function cleanup_module (void)
@@ -292,8 +286,4 @@ int init_module(void)
  *    Cleanup Actisys module
  *
  */
-void cleanup_module(void)
-{
-	actisys_cleanup();
-}
-#endif /* MODULE */
+module_exit(actisys_cleanup);

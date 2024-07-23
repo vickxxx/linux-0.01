@@ -34,7 +34,6 @@
   of the Linux Kernel and SCSI Subsystem.
 */
 
-typedef kdev_t KernelDevice_T;
 typedef unsigned long ProcessorFlags_T;
 typedef struct pt_regs Registers_T;
 typedef struct partition PartitionTable_T;
@@ -42,7 +41,6 @@ typedef struct pci_dev PCI_Device_T;
 typedef Scsi_Host_Template SCSI_Host_Template_T;
 typedef struct Scsi_Host SCSI_Host_T;
 typedef struct scsi_device SCSI_Device_T;
-typedef struct scsi_disk SCSI_Disk_T;
 typedef struct scsi_cmnd SCSI_Command_T;
 typedef struct scatterlist SCSI_ScatterList_T;
 
@@ -56,35 +54,10 @@ extern int BusLogic_DetectHostAdapter(SCSI_Host_Template_T *);
 extern int BusLogic_ReleaseHostAdapter(SCSI_Host_T *);
 extern int BusLogic_QueueCommand(SCSI_Command_T *,
 				 void (*CompletionRoutine)(SCSI_Command_T *));
-extern int BusLogic_AbortCommand(SCSI_Command_T *);
-extern int BusLogic_ResetCommand(SCSI_Command_T *, unsigned int);
-extern int BusLogic_BIOSDiskParameters(SCSI_Disk_T *, KernelDevice_T, int *);
-extern int BusLogic_ProcDirectoryInfo(char *, char **, off_t, int, int, int);
-
-
-/*
-  Define the BusLogic SCSI Host Template structure.
-*/
-
-#define BUSLOGIC							       \
-  { proc_name:      "BusLogic",			  /* ProcFS Directory Entry */ \
-    proc_info:      BusLogic_ProcDirectoryInfo,	  /* ProcFS Info Function   */ \
-    name:           "BusLogic",			  /* Driver Name            */ \
-    detect:         BusLogic_DetectHostAdapter,	  /* Detect Host Adapter    */ \
-    release:        BusLogic_ReleaseHostAdapter,  /* Release Host Adapter   */ \
-    info:           BusLogic_DriverInfo,	  /* Driver Info Function   */ \
-    queuecommand:   BusLogic_QueueCommand,	  /* Queue Command Function */ \
-    abort:          BusLogic_AbortCommand,	  /* Abort Command Function */ \
-    reset:          BusLogic_ResetCommand,	  /* Reset Command Function */ \
-    bios_param:     BusLogic_BIOSDiskParameters,  /* BIOS Disk Parameters   */ \
-    unchecked_isa_dma: 1,			  /* Default Initial Value  */ \
-    max_sectors:    128,			  /* I/O queue len limit    */ \
-    use_clustering: ENABLE_CLUSTERING }		  /* Enable Clustering	    */
-
-
-/*
-  BusLogic_DriverVersion protects the private portion of this file.
-*/
+extern int BusLogic_BIOSDiskParameters(struct scsi_device *,
+		struct block_device *, sector_t, int *);
+extern int BusLogic_ProcDirectoryInfo(struct Scsi_Host *, char *, char **, off_t, int, int);
+extern int BusLogic_SlaveConfigure(SCSI_Device_T *);
 
 #ifdef BusLogic_DriverVersion
 
@@ -372,6 +345,7 @@ typedef struct BusLogic_ProbeInfo
   BusLogic_HostAdapterBusType_T HostAdapterBusType;
   BusLogic_IO_Address_T IO_Address;
   BusLogic_PCI_Address_T PCI_Address;
+  PCI_Device_T *PCI_Device;
   unsigned char Bus;
   unsigned char Device;
   unsigned char IRQ_Channel;
@@ -1192,7 +1166,9 @@ typedef struct BusLogic_CCB
   /*
     BusLogic Linux Driver Defined Portion.
   */
-  boolean AllocationGroupHead;
+  dma_addr_t AllocationGroupHead;
+  unsigned int AllocationGroupSize;
+  BusLogic_BusAddress_T DMA_Handle;
   BusLogic_CCB_Status_T Status;
   unsigned long SerialNumber;
   SCSI_Command_T *Command;
@@ -1356,6 +1332,7 @@ FlashPoint_Info_T;
 typedef struct BusLogic_HostAdapter
 {
   SCSI_Host_T *SCSI_Host;
+  PCI_Device_T *PCI_Device;
   BusLogic_HostAdapterType_T HostAdapterType;
   BusLogic_HostAdapterBusType_T HostAdapterBusType;
   BusLogic_IO_Address_T IO_Address;
@@ -1444,9 +1421,13 @@ typedef struct BusLogic_HostAdapter
   BusLogic_IncomingMailbox_T *LastIncomingMailbox;
   BusLogic_IncomingMailbox_T *NextIncomingMailbox;
   BusLogic_TargetStatistics_T TargetStatistics[BusLogic_MaxTargetDevices];
-  unsigned char MailboxSpace[BusLogic_MaxMailboxes
+  unsigned char *MailboxSpace;
+  dma_addr_t	MailboxSpaceHandle;
+  unsigned int MailboxSize;
+  unsigned long CCB_Offset;
+/* [BusLogic_MaxMailboxes
 			     * (sizeof(BusLogic_OutgoingMailbox_T)
-				+ sizeof(BusLogic_IncomingMailbox_T))];
+				+ sizeof(BusLogic_IncomingMailbox_T))]; */
   char MessageBuffer[BusLogic_MessageBufferSize];
 }
 BusLogic_HostAdapter_T;
@@ -1505,9 +1486,9 @@ SCSI_Inquiry_T;
 */
 
 static inline
-void BusLogic_AcquireHostAdapterLock(BusLogic_HostAdapter_T *HostAdapter,
-				     ProcessorFlags_T *ProcessorFlags)
+void BusLogic_AcquireHostAdapterLock(BusLogic_HostAdapter_T *HostAdapter)
 {
+  spin_lock_irq(HostAdapter->SCSI_Host->host_lock);
 }
 
 
@@ -1516,9 +1497,9 @@ void BusLogic_AcquireHostAdapterLock(BusLogic_HostAdapter_T *HostAdapter,
 */
 
 static inline
-void BusLogic_ReleaseHostAdapterLock(BusLogic_HostAdapter_T *HostAdapter,
-				     ProcessorFlags_T *ProcessorFlags)
+void BusLogic_ReleaseHostAdapterLock(BusLogic_HostAdapter_T *HostAdapter)
 {
+  spin_unlock_irq(HostAdapter->SCSI_Host->host_lock);
 }
 
 
@@ -1531,7 +1512,7 @@ static inline
 void BusLogic_AcquireHostAdapterLockIH(BusLogic_HostAdapter_T *HostAdapter,
 				       ProcessorFlags_T *ProcessorFlags)
 {
-  spin_lock_irqsave(&io_request_lock, *ProcessorFlags);
+  spin_lock_irqsave(HostAdapter->SCSI_Host->host_lock, *ProcessorFlags);
 }
 
 
@@ -1544,7 +1525,7 @@ static inline
 void BusLogic_ReleaseHostAdapterLockIH(BusLogic_HostAdapter_T *HostAdapter,
 				       ProcessorFlags_T *ProcessorFlags)
 {
-  spin_unlock_irqrestore(&io_request_lock, *ProcessorFlags);
+  spin_unlock_irqrestore(HostAdapter->SCSI_Host->host_lock, *ProcessorFlags);
 }
 
 
@@ -1649,12 +1630,7 @@ void BusLogic_StartMailboxCommand(BusLogic_HostAdapter_T *HostAdapter)
 
 static inline void BusLogic_Delay(int Seconds)
 {
-  int Milliseconds = 1000 * Seconds;
-  unsigned long ProcessorFlags;
-  save_flags(ProcessorFlags);
-  sti();
-  while (--Milliseconds >= 0) udelay(1000);
-  restore_flags(ProcessorFlags);
+  mdelay(1000 * Seconds);
 }
 
 
@@ -1763,7 +1739,7 @@ static inline void BusLogic_IncrementSizeBucket(BusLogic_CommandSizeBuckets_T
 */
 
 static void BusLogic_QueueCompletedCCB(BusLogic_CCB_T *);
-static void BusLogic_InterruptHandler(int, void *, Registers_T *);
+static irqreturn_t BusLogic_InterruptHandler(int, void *, Registers_T *);
 static int BusLogic_ResetHostAdapter(BusLogic_HostAdapter_T *,
 				     SCSI_Command_T *, unsigned int);
 static void BusLogic_Message(BusLogic_MessageLevel_T, char *,

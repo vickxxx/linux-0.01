@@ -1,4 +1,4 @@
-/* $Id: flash.c,v 1.24 2001/10/08 22:19:51 davem Exp $
+/* $Id: flash.c,v 1.25 2001/12/21 04:56:16 davem Exp $
  * flash.c: Allow mmap access to the OBP Flash, for OBP updates.
  *
  * Copyright (C) 1997  Eddie C. Dost  (ecd@skynet.be)
@@ -74,7 +74,7 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 	pgprot_val(vma->vm_page_prot) |= _PAGE_E;
 	vma->vm_flags |= (VM_SHM | VM_LOCKED);
 
-	if (remap_page_range(vma->vm_start, addr, size, vma->vm_page_prot))
+	if (remap_page_range(vma, vma->vm_start, addr, size, vma->vm_page_prot))
 		return -EAGAIN;
 		
 	return 0;
@@ -83,6 +83,7 @@ flash_mmap(struct file *file, struct vm_area_struct *vma)
 static long long
 flash_llseek(struct file *file, long long offset, int origin)
 {
+	lock_kernel();
 	switch (origin) {
 		case 0:
 			file->f_pos = offset;
@@ -96,8 +97,10 @@ flash_llseek(struct file *file, long long offset, int origin)
 			file->f_pos = flash.read_size;
 			break;
 		default:
+			unlock_kernel();
 			return -EINVAL;
 	}
+	unlock_kernel();
 	return file->f_pos;
 }
 
@@ -145,17 +148,15 @@ static struct file_operations flash_fops = {
 	/* no write to the Flash, use mmap
 	 * and play flash dependent tricks.
 	 */
-	owner:		THIS_MODULE,
-	llseek:		flash_llseek,
-	read:		flash_read,
-	mmap:		flash_mmap,
-	open:		flash_open,
-	release:	flash_release,
+	.owner =	THIS_MODULE,
+	.llseek =	flash_llseek,
+	.read =		flash_read,
+	.mmap =		flash_mmap,
+	.open =		flash_open,
+	.release =	flash_release,
 };
 
 static struct miscdevice flash_dev = { FLASH_MINOR, "flash", &flash_fops };
-
-EXPORT_NO_SYMBOLS;
 
 static int __init flash_init(void)
 {

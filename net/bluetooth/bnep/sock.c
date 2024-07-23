@@ -25,7 +25,7 @@
 */
 
 /*
- * $Id: sock.c,v 1.3 2002/07/10 22:59:52 maxk Exp $
+ * $Id: sock.c,v 1.4 2002/08/04 21:23:58 maxk Exp $
  */ 
 
 #include <linux/config.h>
@@ -43,6 +43,7 @@
 #include <linux/socket.h>
 #include <linux/ioctl.h>
 #include <linux/file.h>
+#include <linux/init.h>
 #include <net/sock.h>
 
 #include <asm/system.h>
@@ -50,7 +51,7 @@
 
 #include "bnep.h"
 
-#ifndef CONFIG_BLUEZ_BNEP_DEBUG
+#ifndef CONFIG_BT_BNEP_DEBUG
 #undef  BT_DBG
 #define BT_DBG( A... )
 #endif
@@ -66,8 +67,6 @@ static int bnep_sock_release(struct socket *sock)
 
 	sock_orphan(sk);
 	sock_put(sk);
-
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -94,10 +93,8 @@ static int bnep_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long 
 		if (!nsock)
 			return err;
 
-		if (nsock->sk->state != BT_CONNECTED) {
-			fput(nsock->file);
+		if (nsock->sk->sk_state != BT_CONNECTED)
 			return -EBADFD;
-		}
 
 		err = bnep_add_connection(&ca, nsock);
 		if (!err) {
@@ -148,22 +145,23 @@ static int bnep_sock_ioctl(struct socket *sock, unsigned int cmd, unsigned long 
 }
 
 static struct proto_ops bnep_sock_ops = {
-	family:     PF_BLUETOOTH,
-	release:    bnep_sock_release,
-	ioctl:      bnep_sock_ioctl,
-	bind:       sock_no_bind,
-	getname:    sock_no_getname,
-	sendmsg:    sock_no_sendmsg,
-	recvmsg:    sock_no_recvmsg,
-	poll:       sock_no_poll,
-	listen:     sock_no_listen,
-	shutdown:   sock_no_shutdown,
-	setsockopt: sock_no_setsockopt,
-	getsockopt: sock_no_getsockopt,
-	connect:    sock_no_connect,
-	socketpair: sock_no_socketpair,
-	accept:     sock_no_accept,
-	mmap:       sock_no_mmap
+	.family     = PF_BLUETOOTH,
+	.owner      = THIS_MODULE,
+	.release    = bnep_sock_release,
+	.ioctl      = bnep_sock_ioctl,
+	.bind       = sock_no_bind,
+	.getname    = sock_no_getname,
+	.sendmsg    = sock_no_sendmsg,
+	.recvmsg    = sock_no_recvmsg,
+	.poll       = sock_no_poll,
+	.listen     = sock_no_listen,
+	.shutdown   = sock_no_shutdown,
+	.setsockopt = sock_no_setsockopt,
+	.getsockopt = sock_no_getsockopt,
+	.connect    = sock_no_connect,
+	.socketpair = sock_no_socketpair,
+	.accept     = sock_no_accept,
+	.mmap       = sock_no_mmap
 };
 
 static int bnep_sock_create(struct socket *sock, int protocol)
@@ -175,36 +173,31 @@ static int bnep_sock_create(struct socket *sock, int protocol)
 	if (sock->type != SOCK_RAW)
 		return -ESOCKTNOSUPPORT;
 
+	if (!(sk = bt_sock_alloc(sock, PF_BLUETOOTH, 0, GFP_KERNEL)))
+		return -ENOMEM;
 	sock->ops = &bnep_sock_ops;
 
-	if (!(sk = sk_alloc(PF_BLUETOOTH, GFP_KERNEL, 1)))
-		return -ENOMEM;
+	sock->state  = SS_UNCONNECTED;
 
-	MOD_INC_USE_COUNT;
-
-	sock->state = SS_UNCONNECTED;
-	sock_init_data(sock, sk);
-
-	sk->destruct = NULL;
-	sk->protocol = protocol;
-
+	sk->sk_destruct = NULL;
+	sk->sk_protocol = protocol;
 	return 0;
 }
 
 static struct net_proto_family bnep_sock_family_ops = {
-	family: PF_BLUETOOTH,
-	create: bnep_sock_create
+	.family = PF_BLUETOOTH,
+	.create = bnep_sock_create
 };
 
-int bnep_sock_init(void)
+int __init bnep_sock_init(void)
 {
-	bluez_sock_register(BTPROTO_BNEP, &bnep_sock_family_ops);
+	bt_sock_register(BTPROTO_BNEP, &bnep_sock_family_ops);
 	return 0;
 }
 
-int bnep_sock_cleanup(void)
+int __exit bnep_sock_cleanup(void)
 {
-	if (bluez_sock_unregister(BTPROTO_BNEP))
+	if (bt_sock_unregister(BTPROTO_BNEP))
 		BT_ERR("Can't unregister BNEP socket");
 	return 0;
 }

@@ -103,11 +103,11 @@
  *   interrupts.  Ie, for a board at the default 0x388 base port,
  *   boot: linux pas16=0x388,255
  *
- *   IRQ_NONE (255) should be specified for no interrupt,
+ *   SCSI_IRQ_NONE (255) should be specified for no interrupt,
  *   IRQ_AUTO (254) to autoprobe for an IRQ line if overridden
  *   on the command line.
  *
- *   (IRQ_AUTO == 254, IRQ_NONE == 255 in NCR5380.h)
+ *   (IRQ_AUTO == 254, SCSI_IRQ_NONE == 255 in NCR5380.h)
  */
  
 #include <linux/module.h>
@@ -118,16 +118,17 @@
 #include <linux/sched.h>
 #include <asm/io.h>
 #include <linux/blk.h>
+#include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/stat.h>
+#include <linux/init.h>
+
 #include "scsi.h"
 #include "hosts.h"
 #include "pas16.h"
 #define AUTOPROBE_IRQ
 #include "NCR5380.h"
-#include "constants.h"
-#include "sd.h"
 
-#include <linux/stat.h>
-#include <linux/init.h>
 
 static int pas_maxi = 0;
 static int pas_wmaxi = 0;
@@ -450,14 +451,14 @@ int __init pas16_detect(Scsi_Host_Template * tpnt)
 	else 
 	    instance->irq = NCR5380_probe_irq(instance, PAS16_IRQS);
 
-	if (instance->irq != IRQ_NONE) 
-	    if (request_irq(instance->irq, do_pas16_intr, SA_INTERRUPT, "pas16", NULL)) {
+	if (instance->irq != SCSI_IRQ_NONE) 
+	    if (request_irq(instance->irq, pas16_intr, SA_INTERRUPT, "pas16", instance)) {
 		printk("scsi%d : IRQ%d not free, interrupts disabled\n", 
 		    instance->host_no, instance->irq);
-		instance->irq = IRQ_NONE;
+		instance->irq = SCSI_IRQ_NONE;
 	    } 
 
-	if (instance->irq == IRQ_NONE) {
+	if (instance->irq == SCSI_IRQ_NONE) {
 	    printk("scsi%d : interrupts not enabled. for better interactive performance,\n", instance->host_no);
 	    printk("scsi%d : please jumper the board for a free IRQ.\n", instance->host_no);
 	    /* Disable 5380 interrupts, leave drive params the same */
@@ -471,7 +472,7 @@ int __init pas16_detect(Scsi_Host_Template * tpnt)
 
 	printk("scsi%d : at 0x%04x", instance->host_no, (int) 
 	    instance->io_port);
-	if (instance->irq == IRQ_NONE)
+	if (instance->irq == SCSI_IRQ_NONE)
 	    printk (" interrupts disabled");
 	else 
 	    printk (" irq %d", instance->irq);
@@ -487,7 +488,7 @@ int __init pas16_detect(Scsi_Host_Template * tpnt)
 }
 
 /*
- * Function : int pas16_biosparam(Disk *disk, kdev_t dev, int *ip)
+ * Function : int pas16_biosparam(Disk *disk, struct block_device *dev, int *ip)
  *
  * Purpose : Generates a BIOS / DOS compatible H-C-S mapping for 
  *	the specified device / size.
@@ -506,9 +507,10 @@ int __init pas16_detect(Scsi_Host_Template * tpnt)
  * and matching the H_C_S coordinates to what DOS uses.
  */
 
-int pas16_biosparam(Disk * disk, kdev_t dev, int * ip)
+int pas16_biosparam(struct scsi_device *sdev, struct block_device *dev,
+		sector_t capacity, int * ip)
 {
-  int size = disk->capacity;
+  int size = capacity;
   ip[0] = 64;
   ip[1] = 32;
   ip[2] = size >> 11;		/* I think I have it as /(32*64) */
@@ -598,9 +600,34 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance, unsigned char *src
 
 #include "NCR5380.c"
 
-/* Eventually this will go into an include file, but this will be later */
-static Scsi_Host_Template driver_template = MV_PAS16;
+static int pas16_release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	if (shost->dma_channel != 0xff)
+		free_dma(shost->dma_channel);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
+}
 
+static Scsi_Host_Template driver_template = {
+	.name           = "Pro Audio Spectrum-16 SCSI",
+	.detect         = pas16_detect,
+	.release        = pas16_release,
+	.queuecommand   = pas16_queue_command,
+	.eh_abort_handler = pas16_abort,
+	.eh_bus_reset_handler = pas16_bus_reset,
+	.eh_device_reset_handler = pas16_device_reset,
+	.eh_host_reset_handler = pas16_host_reset,
+	.bios_param     = pas16_biosparam, 
+	.can_queue      = CAN_QUEUE,
+	.this_id        = 7,
+	.sg_tablesize   = SG_ALL,
+	.cmd_per_lun    = CMD_PER_LUN,
+	.use_clustering = DISABLE_CLUSTERING,
+};
 #include "scsi_module.c"
 
 #ifdef MODULE

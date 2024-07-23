@@ -51,6 +51,7 @@
  .				 allocation
  .      08/20/00  Arnaldo Melo   fix kfree(skb) in smc_hardware_send_packet
  .      12/15/00  Christian Jullien fix "Warning: kfree_skb on hard IRQ"
+ .      11/08/01 Matt Domsch     Use common crc32 function
  ----------------------------------------------------------------------------*/
 
 static const char version[] =
@@ -59,25 +60,25 @@ static const char version[] =
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
+#include <linux/crc32.h>
 #include <linux/errno.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 
+#include <asm/bitops.h>
+#include <asm/io.h>
+
 #include "smc9194.h"
+
 /*------------------------------------------------------------------------
  .
  . Configuration options, for the experienced user to change.
@@ -223,10 +224,6 @@ static struct net_device_stats * smc_query_statistics( struct net_device *dev);
 */
 static void smc_set_multicast_list(struct net_device *dev);
 
-/*
- . CRC compute
- */
-static int crc32( char * s, int length );
 
 /*---------------------------------------------------------------
  .
@@ -237,7 +234,7 @@ static int crc32( char * s, int length );
 /*
  . Handles the actual interrupt
 */
-static void smc_interrupt(int irq, void *, struct pt_regs *regs);
+static irqreturn_t smc_interrupt(int irq, void *, struct pt_regs *regs);
 /*
  . This is a separate procedure to handle the receipt of a packet, to
  . leave the interrupt code looking slightly cleaner
@@ -436,7 +433,7 @@ static void smc_setmulticast( int ioaddr, int count, struct dev_mc_list * addrs 
 			continue;
 
 		/* only use the low order bits */
-		position = crc32( cur_addr->dmi_addr, 6 ) & 0x3f;
+		position = ether_crc_le(6, cur_addr->dmi_addr) & 0x3f;
 
 		/* do some messy swapping to put the bit in the right spot */
 		multicast_table[invert3[position&7]] |=
@@ -450,33 +447,6 @@ static void smc_setmulticast( int ioaddr, int count, struct dev_mc_list * addrs 
 		outb( multicast_table[i], ioaddr + MULTICAST1 + i );
 	}
 }
-
-/*
-  Finds the CRC32 of a set of bytes.
-  Again, from Peter Cammaert's code.
-*/
-static int crc32( char * s, int length ) {
-	/* indices */
-	int perByte;
-	int perBit;
-	/* crc polynomial for Ethernet */
-	const unsigned long poly = 0xedb88320;
-	/* crc value - preinitialized to all 1's */
-	unsigned long crc_value = 0xffffffff;
-
-	for ( perByte = 0; perByte < length; perByte ++ ) {
-		unsigned char	c;
-
-		c = *(s++);
-		for ( perBit = 0; perBit < 8; perBit++ ) {
-			crc_value = (crc_value>>1)^
-				(((crc_value^c)&0x01)?poly:0);
-			c >>= 1;
-		}
-	}
-	return	crc_value;
-}
-
 
 /*
  . Function: smc_wait_to_send_packet( struct sk_buff * skb, struct net_device * )
@@ -514,8 +484,16 @@ static int smc_wait_to_send_packet( struct sk_buff * skb, struct net_device * de
 	}
 	lp->saved_skb = skb;
 
-	length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	length = skb->len;
 
+	if (length < ETH_ZLEN) {
+		skb = skb_padto(skb, ETH_ZLEN);
+		if (skb == NULL) {
+			netif_wake_queue(dev);
+			return 0;
+		}
+		length = ETH_ZLEN;
+	}
 		
 	/*
 	** The MMU wants the number of pages to be the number of 256 bytes
@@ -743,11 +721,6 @@ int __init smc_findirq( int ioaddr )
 	unsigned long cookie;
 
 
-	/* I have to do a STI() here, because this is called from
-	   a routine that does an CLI during this process, making it
-	   rather difficult to get interrupts for auto detection */
-	sti();
-
 	cookie = probe_irq_on();
 
 	/*
@@ -780,25 +753,21 @@ int __init smc_findirq( int ioaddr )
 		timeout--;
 	}
 	/* there is really nothing that I can do here if timeout fails,
-	   as autoirq_report will return a 0 anyway, which is what I
+	   as probe_irq_off will return a 0 anyway, which is what I
 	   want in this case.   Plus, the clean up is needed in both
 	   cases.  */
 
 	/* DELAY HERE!
 	   On a fast machine, the status might change before the interrupt
 	   is given to the processor.  This means that the interrupt was
-	   never detected, and autoirq_report fails to report anything.
-	   This should fix autoirq_* problems.
+	   never detected, and probe_irq_off fails to report anything.
+	   This should fix probe_irq_* problems.
 	*/
 	SMC_DELAY();
 	SMC_DELAY();
 
 	/* and disable all interrupts again */
 	outb( 0, ioaddr + INT_MASK );
-
-	/* clear hardware interrupts again, because that's how it
-	   was when I was called... */
-	cli();
 
 	/* and return what I found */
 	return probe_irq_off(cookie);
@@ -1164,7 +1133,7 @@ static void smc_timeout(struct net_device *dev)
  .
  ---------------------------------------------------------------------*/
 
-static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
+static irqreturn_t smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 {
 	struct net_device *dev 	= dev_id;
 	int ioaddr 		= dev->base_addr;
@@ -1177,7 +1146,7 @@ static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 	/* state registers */
 	word	saved_bank;
 	word	saved_pointer;
-
+	int handled = 0;
 
 
 	PRINTK3((CARDNAME": SMC interrupt started \n"));
@@ -1201,6 +1170,8 @@ static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 		status = inb( ioaddr + INTERRUPT ) & mask;
 		if (!status )
 			break;
+
+		handled = 1;
 
 		PRINTK3((KERN_WARNING CARDNAME
 			": Handling interrupt status %x \n", status ));
@@ -1273,7 +1244,7 @@ static void smc_interrupt(int irq, void * dev_id,  struct pt_regs * regs)
 	SMC_SELECT_BANK( saved_bank );
 
 	PRINTK3((CARDNAME ": Interrupt done\n"));
-	return;
+	return IRQ_RETVAL(handled);
 }
 
 /*-------------------------------------------------------------
@@ -1588,7 +1559,6 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-	/* No need to check MOD_IN_USE, as sys_delete_module() checks. */
 	unregister_netdev(&devSMC9194);
 
 	free_irq(devSMC9194.irq, &devSMC9194);

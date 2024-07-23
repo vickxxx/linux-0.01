@@ -12,7 +12,7 @@
 #include <asm/ioctl.h>
 
 #define TCGETA		0x5401
-#define TCSETA		0x5402
+#define TCSETA		0x5402	/* Clashes with SNDCTL_TMR_START sound ioctl */
 #define TCSETAW		0x5403
 #define TCSETAF		0x5404
 
@@ -49,7 +49,7 @@
 #define TIOCGETD	0x7400
 
 #define FIOCLEX		0x6601
-#define FIONCLEX	0x6602		/* these numbers need to be adjusted. */
+#define FIONCLEX	0x6602
 #define FIOASYNC	0x667d
 #define FIONBIO		0x667e
 #define FIOQSIZE	0x667f
@@ -66,13 +66,19 @@
 #define TIOCGETP        0x7408
 #define TIOCSETP        0x7409
 #define TIOCSETN        0x740a			/* TIOCSETP wo flush */
- 
+
 /* #define TIOCSETA	_IOW('t', 20, struct termios) set termios struct */
 /* #define TIOCSETAW	_IOW('t', 21, struct termios) drain output, set */
 /* #define TIOCSETAF	_IOW('t', 22, struct termios) drn out, fls in, set */
 /* #define TIOCGETD	_IOR('t', 26, int)	get line discipline */
 /* #define TIOCSETD	_IOW('t', 27, int)	set line discipline */
 						/* 127-124 compat */
+
+#define TIOCSBRK	0x5427  /* BSD compatibility */
+#define TIOCCBRK	0x5428  /* BSD compatibility */
+#define TIOCGSID	0x7416  /* Return the session ID of FD */
+#define TIOCGPTN	_IOR('T',0x30, unsigned int) /* Get Pty Number (of pty-mux device) */
+#define TIOCSPTLCK	_IOW('T',0x31, int)  /* Lock/unlock Pty */
 
 /* I hope the range from 0x5480 on is free ... */
 #define TIOCSCTTY	0x5480		/* become controlling tty */
@@ -81,15 +87,7 @@
 #define TIOCLINUX	0x5483
 #define TIOCGSERIAL	0x5484
 #define TIOCSSERIAL	0x5485
-
 #define TCSBRKP		0x5486	/* Needed for POSIX tcsendbreak() */
-#define TIOCTTYGSTRUCT	0x5487  /* For debugging only */
-#define TIOCSBRK	0x5427  /* BSD compatibility */
-#define TIOCCBRK	0x5428  /* BSD compatibility */
-#define TIOCGSID	0x7416  /* Return the session ID of FD */
-#define TIOCGPTN	_IOR('T',0x30, unsigned int) /* Get Pty Number (of pty-mux device) */
-#define TIOCSPTLCK	_IOW('T',0x31, int)  /* Lock/unlock Pty */
-
 #define TIOCSERCONFIG	0x5488
 #define TIOCSERGWILD	0x5489
 #define TIOCSERSWILD	0x548a

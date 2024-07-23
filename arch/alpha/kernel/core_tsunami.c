@@ -26,13 +26,14 @@
 #include "proto.h"
 #include "pci_impl.h"
 
+/* Save Tsunami configuration data as the console had it set up.  */
 
-static struct 
+struct 
 {
 	unsigned long wsba[4];
 	unsigned long wsm[4];
 	unsigned long tba[4];
-} saved_pchip[2];
+} saved_config[2] __attribute__((common));
 
 /*
  * NOTE: Herein lie back-to-back mb instructions.  They are magic. 
@@ -89,19 +90,18 @@ static struct
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
-	     unsigned char *type1)
+mk_conf_addr(struct pci_bus *pbus, unsigned int device_fn, int where,
+	     unsigned long *pci_addr, unsigned char *type1)
 {
-	struct pci_controller *hose = dev->sysdata;
+	struct pci_controller *hose = pbus->sysdata;
 	unsigned long addr;
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = pbus->number;
 
 	DBG_CFG(("mk_conf_addr(bus=%d ,device_fn=0x%x, where=0x%x, "
 		 "pci_addr=0x%p, type1=0x%p)\n",
 		 bus, device_fn, where, pci_addr, type1));
 
-	if (hose->first_busno == dev->bus->number)
+	if (hose->first_busno == bus)
 		bus = 0;
 	*type1 = (bus != 0);
 
@@ -114,97 +114,65 @@ mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
 }
 
 static int 
-tsunami_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+tsunami_read_config(struct pci_bus *bus, unsigned int devfn, int where,
+		    int size, u32 *value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, &addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	*value = __kernel_ldbu(*(vucp)addr);
-	return PCIBIOS_SUCCESSFUL;
-}
+	switch (size) {
+	case 1:
+		*value = __kernel_ldbu(*(vucp)addr);
+		break;
+	case 2:
+		*value = __kernel_ldwu(*(vusp)addr);
+		break;
+	case 4:
+		*value = *(vuip)addr;
+		break;
+	}
 
-static int
-tsunami_read_config_word(struct pci_dev *dev, int where, u16 *value)
-{
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	*value = __kernel_ldwu(*(vusp)addr);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-tsunami_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	*value = *(vuip)addr;
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int 
-tsunami_write_config_byte(struct pci_dev *dev, int where, u8 value)
+tsunami_write_config(struct pci_bus *bus, unsigned int devfn, int where,
+		     int size, u32 value)
 {
 	unsigned long addr;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, &addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	__kernel_stb(value, *(vucp)addr);
-	mb();
-	__kernel_ldbu(*(vucp)addr);
-	return PCIBIOS_SUCCESSFUL;
-}
+	switch (size) {
+	case 1:
+		__kernel_stb(value, *(vucp)addr);
+		mb();
+		__kernel_ldbu(*(vucp)addr);
+		break;
+	case 2:
+		__kernel_stw(value, *(vusp)addr);
+		mb();
+		__kernel_ldwu(*(vusp)addr);
+		break;
+	case 4:
+		*(vuip)addr = value;
+		mb();
+		*(vuip)addr;
+		break;
+	}
 
-static int 
-tsunami_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	__kernel_stw(value, *(vusp)addr);
-	mb();
-	__kernel_ldwu(*(vusp)addr);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int
-tsunami_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	unsigned long addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	*(vuip)addr = value;
-	mb();
-	*(vuip)addr;
 	return PCIBIOS_SUCCESSFUL;
 }
 
 struct pci_ops tsunami_pci_ops = 
 {
-	read_byte:	tsunami_read_config_byte,
-	read_word:	tsunami_read_config_word,
-	read_dword:	tsunami_read_config_dword,
-	write_byte:	tsunami_write_config_byte,
-	write_word:	tsunami_write_config_word,
-	write_dword:	tsunami_write_config_dword
+	.read =		tsunami_read_config,
+	.write = 	tsunami_write_config,
 };
 
 void
@@ -326,21 +294,21 @@ tsunami_init_one_pchip(tsunami_pchip *pchip, int index)
 	 * need them when we go to reboot.
 	 */
 
-	saved_pchip[index].wsba[0] = pchip->wsba[0].csr;
-	saved_pchip[index].wsm[0] = pchip->wsm[0].csr;
-	saved_pchip[index].tba[0] = pchip->tba[0].csr;
+	saved_config[index].wsba[0] = pchip->wsba[0].csr;
+	saved_config[index].wsm[0] = pchip->wsm[0].csr;
+	saved_config[index].tba[0] = pchip->tba[0].csr;
 
-	saved_pchip[index].wsba[1] = pchip->wsba[1].csr;
-	saved_pchip[index].wsm[1] = pchip->wsm[1].csr;
-	saved_pchip[index].tba[1] = pchip->tba[1].csr;
+	saved_config[index].wsba[1] = pchip->wsba[1].csr;
+	saved_config[index].wsm[1] = pchip->wsm[1].csr;
+	saved_config[index].tba[1] = pchip->tba[1].csr;
 
-	saved_pchip[index].wsba[2] = pchip->wsba[2].csr;
-	saved_pchip[index].wsm[2] = pchip->wsm[2].csr;
-	saved_pchip[index].tba[2] = pchip->tba[2].csr;
+	saved_config[index].wsba[2] = pchip->wsba[2].csr;
+	saved_config[index].wsm[2] = pchip->wsm[2].csr;
+	saved_config[index].tba[2] = pchip->tba[2].csr;
 
-	saved_pchip[index].wsba[3] = pchip->wsba[3].csr;
-	saved_pchip[index].wsm[3] = pchip->wsm[3].csr;
-	saved_pchip[index].tba[3] = pchip->tba[3].csr;
+	saved_config[index].wsba[3] = pchip->wsba[3].csr;
+	saved_config[index].wsm[3] = pchip->wsm[3].csr;
+	saved_config[index].tba[3] = pchip->tba[3].csr;
 
 	/*
 	 * Set up the PCI to main memory translation windows.
@@ -350,10 +318,17 @@ tsunami_init_one_pchip(tsunami_pchip *pchip, int index)
 	 * Window 0 is scatter-gather 8MB at 8MB (for isa)
 	 * Window 1 is scatter-gather (up to) 1GB at 1GB
 	 * Window 2 is direct access 2GB at 2GB
+	 *
+	 * NOTE: we need the align_entry settings for Acer devices on ES40,
+	 * specifically floppy and IDE when memory is larger than 2GB.
 	 */
 	hose->sg_isa = iommu_arena_new(hose, 0x00800000, 0x00800000, 0);
+	/* Initially set for 4 PTEs, but will be overridden to 64K for ISA. */
+        hose->sg_isa->align_entry = 4;
+
 	hose->sg_pci = iommu_arena_new(hose, 0x40000000,
 				       size_for_memory(0x40000000), 0);
+        hose->sg_pci->align_entry = 4; /* Tsunami caches 4 PTEs at a time */
 
 	__direct_map_base = 0x80000000;
 	__direct_map_size = 0x80000000;
@@ -382,7 +357,6 @@ void __init
 tsunami_init_arch(void)
 {
 #ifdef NXM_MACHINE_CHECKS_ON_TSUNAMI
-	extern asmlinkage void entInt(void);
 	unsigned long tmp;
 	
 	/* Ho hum.. init_arch is called before init_IRQ, but we need to be
@@ -416,7 +390,6 @@ tsunami_init_arch(void)
 #endif
 	/* With multiple PCI busses, we play with I/O as physical addrs.  */
 	ioport_resource.end = ~0UL;
-	iomem_resource.end = ~0UL;
 
 	/* Find how many hoses we have, and initialize them.  TSUNAMI
 	   and TYPHOON can have 2, but might only have 1 (DS10).  */
@@ -429,21 +402,21 @@ tsunami_init_arch(void)
 static void
 tsunami_kill_one_pchip(tsunami_pchip *pchip, int index)
 {
-	pchip->wsba[0].csr = saved_pchip[index].wsba[0];
-	pchip->wsm[0].csr = saved_pchip[index].wsm[0];
-	pchip->tba[0].csr = saved_pchip[index].tba[0];
+	pchip->wsba[0].csr = saved_config[index].wsba[0];
+	pchip->wsm[0].csr = saved_config[index].wsm[0];
+	pchip->tba[0].csr = saved_config[index].tba[0];
 
-	pchip->wsba[1].csr = saved_pchip[index].wsba[1];
-	pchip->wsm[1].csr = saved_pchip[index].wsm[1];
-	pchip->tba[1].csr = saved_pchip[index].tba[1];
+	pchip->wsba[1].csr = saved_config[index].wsba[1];
+	pchip->wsm[1].csr = saved_config[index].wsm[1];
+	pchip->tba[1].csr = saved_config[index].tba[1];
 
-	pchip->wsba[2].csr = saved_pchip[index].wsba[2];
-	pchip->wsm[2].csr = saved_pchip[index].wsm[2];
-	pchip->tba[2].csr = saved_pchip[index].tba[2];
+	pchip->wsba[2].csr = saved_config[index].wsba[2];
+	pchip->wsm[2].csr = saved_config[index].wsm[2];
+	pchip->tba[2].csr = saved_config[index].tba[2];
 
-	pchip->wsba[3].csr = saved_pchip[index].wsba[3];
-	pchip->wsm[3].csr = saved_pchip[index].wsm[3];
-	pchip->tba[3].csr = saved_pchip[index].tba[3];
+	pchip->wsba[3].csr = saved_config[index].wsba[3];
+	pchip->wsm[3].csr = saved_config[index].wsm[3];
+	pchip->tba[3].csr = saved_config[index].tba[3];
 }
 
 void

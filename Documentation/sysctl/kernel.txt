@@ -17,29 +17,42 @@ before actually making adjustments.
 Currently, these files might (depending on your configuration)
 show up in /proc/sys/kernel:
 - acct
+- core_pattern
+- core_uses_pid
 - ctrl-alt-del
 - dentry-state
 - domainname
 - hostname
 - htab-reclaim                [ PPC only ]
+- hotplug
 - java-appletviewer           [ binfmt_java, obsolete ]
 - java-interpreter            [ binfmt_java, obsolete ]
 - l2cr                        [ PPC only ]
 - modprobe                    ==> Documentation/kmod.txt
+- msgmax
+- msgmnb
+- msgmni
 - osrelease
 - ostype
 - overflowgid
 - overflowuid
 - panic
+- pid_max
 - powersave-nap               [ PPC only ]
 - printk
 - real-root-dev               ==> Documentation/initrd.txt
 - reboot-cmd                  [ SPARC only ]
-- rtsig-nr
 - rtsig-max
+- rtsig-nr
+- sem
 - sg-big-buff                 [ generic SCSI device (sg) ]
+- shmall
 - shmmax                      [ sysv ipc ]
+- shmmni
+- stop-a                      [ SPARC only ]
+- sysrq                       ==> Documentation/sysrq.txt
 - tainted
+- threads-max
 - version
 - zero-paged                  [ PPC only ]
 
@@ -59,6 +72,41 @@ seconds). Default:
 That is, suspend accounting if there left <= 2% free; resume it
 if we got >=4%; consider information about amount of free space
 valid for 30 seconds.
+
+==============================================================
+
+core_pattern:
+
+core_pattern is used to specify a core dumpfile pattern name.
+. max length 64 characters; default value is "core"
+. core_pattern is used as a pattern template for the output filename;
+  certain string patterns (beginning with '%') are substituted with
+  their actual values.
+. backward compatibility with core_uses_pid:
+	If core_pattern does not include "%p" (default does not)
+	and core_uses_pid is set, then .PID will be appended to
+	the filename.
+. corename format specifiers:
+	%<NUL>	'%' is dropped
+	%%	output one '%'
+	%p	pid
+	%u	uid
+	%g	gid
+	%s	signal number
+	%t	UNIX time of dump
+	%h	hostname
+	%e	executable filename
+	%<OTHER> both are dropped
+
+==============================================================
+
+core_uses_pid:
+
+The default coredump filename is "core".  By setting
+core_uses_pid to 1, the coredump filename becomes core.PID.
+If core_pattern does not include "%p" (default does not)
+and core_uses_pid is set, then .PID will be appended to
+the filename.
 
 ==============================================================
 
@@ -105,6 +153,13 @@ each time the system hits the idle loop.
  
 ==============================================================
 
+hotplug:
+
+Path for the hotplug policy agent.
+Default value is "/sbin/hotplug".
+
+==============================================================
+
 l2cr: (PPC only)
 
 This flag controls the L2 cache of G3 processor boards. If
@@ -149,6 +204,26 @@ software watchdog, the recommended setting is 60.
 
 ==============================================================
 
+panic_on_oops:
+
+Controls the kernel's behaviour when an oops or BUG is encountered.
+
+0: try to continue operation
+
+1: delay a few seconds (to give klogd time to record the oops output) and
+   then panic.  If the `panic' sysctl is also non-zero then the machine will
+   be rebooted.
+
+==============================================================
+
+pid_max:
+
+PID allocation wrap value.  When the kenrel's next PID value
+reaches this value, it wraps back to a minimum PID value.
+PIDs of value pid_max or larger are not allocated.
+
+==============================================================
+
 powersave-nap: (PPC only)
 
 If set, Linux-PPC will use the 'nap' mode of powersaving,
@@ -159,7 +234,7 @@ otherwise the 'doze' mode will be used.
 printk:
 
 The four values in printk denote: console_loglevel,
-default_message_loglevel, minimum_console_level and
+default_message_loglevel, minimum_console_loglevel and
 default_console_loglevel respectively.
 
 These values influence printk() behavior when printing or
@@ -173,11 +248,6 @@ the different loglevels.
 - minimum_console_loglevel: minimum (highest) value to which
   console_loglevel can be set
 - default_console_loglevel: default value for console_loglevel
-
-Note: a quick look in linux/kernel/printk.c will reveal that
-these variables aren't put inside a structure, so their order
-in-core isn't formally guaranteed and garbage values _might_
-occur when the compiler changes. (???)
 
 ==============================================================
 
@@ -195,7 +265,7 @@ The file rtsig-max can be used to tune the maximum number
 of POSIX realtime (queued) signals that can be outstanding
 in the system.
 
-Rtsig-nr shows the number of RT signals currently queued.
+rtsig-nr shows the number of RT signals currently queued.
 
 ==============================================================
 
@@ -228,9 +298,10 @@ can be ORed together:
 
   1 - A module with a non-GPL license has been loaded, this
       includes modules with no license.
-      Set by modutils >= 2.4.9.
+      Set by modutils >= 2.4.9 and module-init-tools.
   2 - A module was force loaded by insmod -f.
-      Set by modutils >= 2.4.9.
+      Set by modutils >= 2.4.9 and module-init-tools.
+  4 - Unsafe SMP processors: SMP with CPUs not designed for SMP.
 
 ==============================================================
 

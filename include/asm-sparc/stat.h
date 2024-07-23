@@ -28,21 +28,22 @@ struct stat {
 	unsigned short	st_rdev;
 	long		st_size;
 	long		st_atime;
-	unsigned long	__unused1;
+	unsigned long	st_atime_nsec;
 	long		st_mtime;
-	unsigned long	__unused2;
+	unsigned long	st_mtime_nsec;
 	long		st_ctime;
-	unsigned long	__unused3;
+	unsigned long	st_ctime_nsec;
 	long		st_blksize;
 	long		st_blocks;
 	unsigned long	__unused4[2];
 };
 
-struct stat64 {
-	unsigned char	__pad0[6];
-	unsigned short	st_dev;
+#define STAT_HAVE_NSEC 1
 
-	unsigned long long	st_ino;
+struct stat64 {
+	unsigned long long st_dev;
+
+	unsigned long long st_ino;
 
 	unsigned int	st_mode;
 	unsigned int	st_nlink;
@@ -50,8 +51,7 @@ struct stat64 {
 	unsigned int	st_uid;
 	unsigned int	st_gid;
 
-	unsigned char	__pad2[6];
-	unsigned short	st_rdev;
+	unsigned long long st_rdev;
 
 	unsigned char	__pad3[8];
 
@@ -62,13 +62,13 @@ struct stat64 {
 	unsigned int	st_blocks;
 
 	unsigned int	st_atime;
-	unsigned int	__unused1;
+	unsigned int	st_atime_nsec;
 
 	unsigned int	st_mtime;
-	unsigned int	__unused2;
+	unsigned int	st_mtime_nsec;
 
 	unsigned int	st_ctime;
-	unsigned int	__unused3;
+	unsigned int	st_ctime_nsec;
 
 	unsigned int	__unused4;
 	unsigned int	__unused5;

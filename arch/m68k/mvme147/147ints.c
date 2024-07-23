@@ -14,20 +14,21 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
+#include <linux/seq_file.h>
 
 #include <asm/ptrace.h>
 #include <asm/system.h>
 #include <asm/irq.h>
 #include <asm/traps.h>
 
-static void mvme147_defhand (int irq, void *dev_id, struct pt_regs *fp);
+static irqreturn_t mvme147_defhand (int irq, void *dev_id, struct pt_regs *fp);
 
 /*
  * This should ideally be 4 elements only, for speed.
  */
 
 static struct {
-	void		(*handler)(int, void *, struct pt_regs *);
+	irqreturn_t	(*handler)(int, void *, struct pt_regs *);
 	unsigned long	flags;
 	void		*dev_id;
 	const char	*devname;
@@ -59,7 +60,7 @@ void mvme147_init_IRQ (void)
 }
 
 int mvme147_request_irq(unsigned int irq,
-		void (*handler)(int, void *, struct pt_regs *),
+		irqreturn_t (*handler)(int, void *, struct pt_regs *),
                 unsigned long flags, const char *devname, void *dev_id)
 {
 	if (irq > 255) {
@@ -101,34 +102,36 @@ void mvme147_free_irq(unsigned int irq, void *dev_id)
 	irq_tab[irq].devname = NULL;
 }
 
-void mvme147_process_int (unsigned long vec, struct pt_regs *fp)
+irqreturn_t mvme147_process_int (unsigned long vec, struct pt_regs *fp)
 {
-	if (vec > 255)
+	if (vec > 255) {
 		printk ("mvme147_process_int: Illegal vector %ld\n", vec);
-	else
-	{
+		return IRQ_NONE;
+	} else {
 		irq_tab[vec].count++;
 		irq_tab[vec].handler(vec, irq_tab[vec].dev_id, fp);
+		return IRQ_HANDLED;
 	}
 }
 
-int mvme147_get_irq_list (char *buf)
+int show_mvme147_interrupts (struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i;
 
 	for (i = 0; i < 256; i++) {
 		if (irq_tab[i].count)
-			len += sprintf (buf+len, "Vec 0x%02x: %8d  %s\n",
+			seq_printf(p, "Vec 0x%02x: %8d  %s\n",
 			    i, irq_tab[i].count,
 			    irq_tab[i].devname ? irq_tab[i].devname : "free");
 	}
-	return len;
+	return 0;
 }
 
 
-static void mvme147_defhand (int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t mvme147_defhand (int irq, void *dev_id, struct pt_regs *fp)
 {
 	printk ("Unknown interrupt 0x%02x\n", irq);
+	return IRQ_NONE;
 }
 
 void mvme147_enable_irq (unsigned int irq)

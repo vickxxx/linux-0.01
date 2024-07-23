@@ -62,6 +62,8 @@ enum {
 	PER_RISCOS =		0x000c,
 	PER_SOLARIS =		0x000d | STICKY_TIMEOUTS,
 	PER_UW7 =		0x000e | STICKY_TIMEOUTS | MMAP_PAGE_ZERO,
+	PER_OSF4 =		0x000f,			 /* OSF/1 v4 */
+	PER_HPUX =		0x0010,
 	PER_MASK =		0x00ff,
 };
 
@@ -104,23 +106,5 @@ struct exec_domain {
  */
 #define set_personality(pers) \
 	((current->personality == pers) ? 0 : __set_personality(pers))
-
-/*
- * Load an execution domain.
- */
-#define get_exec_domain(ep)				\
-do {							\
-	if (ep != NULL && ep->module != NULL)		\
-		__MOD_INC_USE_COUNT(ep->module);	\
-} while (0)
-
-/*
- * Unload an execution domain.
- */
-#define put_exec_domain(ep)				\
-do {							\
-	if (ep != NULL && ep->module != NULL)		\
-		__MOD_DEC_USE_COUNT(ep->module);	\
-} while (0)
 
 #endif /* _LINUX_PERSONALITY_H */

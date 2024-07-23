@@ -10,7 +10,7 @@
 #include <linux/ioport.h>
 
 #include <asm/oplib.h>
-#include <asm/iommu.h>
+/* #include <asm/iommu.h> */ /* Unused since we use opaque iommu (|io-unit) */
 #include <asm/scatterlist.h>
 
 /* We scan which devices are on the SBus using the PROM node device
@@ -94,7 +94,8 @@ sbus_is_slave(struct sbus_dev *dev)
         for((device) = (bus)->devices; (device); (device)=(device)->next)
         
 #define for_all_sbusdev(device, bus) \
-	for((bus) = sbus_root, ((device) = (bus) ? (bus)->devices : 0); (bus); (device)=((device)->next ? (device)->next : ((bus) = (bus)->next, (bus) ? (bus)->devices : 0)))
+	for ((bus) = sbus_root; (bus); (bus) = (bus)->next) \
+		for ((device) = (bus)->devices; (device); (device) = (device)->next)
 
 /* Driver DVMA interfaces. */
 #define sbus_can_dma_64bit(sdev)	(0) /* actually, sparc_cpu_model==sun4d */
@@ -111,13 +112,24 @@ extern void sbus_free_consistent(struct sbus_dev *, long, void *, u32);
 #define	SBUS_DMA_NONE		3
 
 /* All the rest use streaming mode mappings. */
-extern u32 sbus_map_single(struct sbus_dev *, void *, long, int);
-extern void sbus_unmap_single(struct sbus_dev *, u32, long, int);
+extern dma_addr_t sbus_map_single(struct sbus_dev *, void *, size_t, int);
+extern void sbus_unmap_single(struct sbus_dev *, dma_addr_t, size_t, int);
 extern int sbus_map_sg(struct sbus_dev *, struct scatterlist *, int, int);
 extern void sbus_unmap_sg(struct sbus_dev *, struct scatterlist *, int, int);
 
 /* Finally, allow explicit synchronization of streamable mappings. */
-extern void sbus_dma_sync_single(struct sbus_dev *, u32, long, int);
+extern void sbus_dma_sync_single(struct sbus_dev *, dma_addr_t, size_t, int);
 extern void sbus_dma_sync_sg(struct sbus_dev *, struct scatterlist *, int, int);
+
+/* Eric Brower (ebrower@usa.net)
+ * Translate SBus interrupt levels to ino values--
+ * this is used when converting sbus "interrupts" OBP 
+ * node values to "intr" node values, and is platform 
+ * dependent.  If only we could call OBP with 
+ * "sbus-intr>cpu (sbint -- ino)" from kernel...
+ * See .../drivers/sbus/sbus.c for details.
+ */
+BTFIXUPDEF_CALL(unsigned int, sbint_to_irq, struct sbus_dev *sdev, unsigned int)
+#define sbint_to_irq(sdev, sbint) BTFIXUP_CALL(sbint_to_irq)(sdev, sbint)
 
 #endif /* !(_SPARC_SBUS_H) */

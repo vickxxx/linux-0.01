@@ -1,4 +1,4 @@
-/* $Id: fs.c,v 1.25 2001/09/19 00:04:30 davem Exp $
+/* $Id: fs.c,v 1.27 2002/02/08 03:57:14 davem Exp $
  * fs.c: fs related syscall emulation for Solaris
  *
  * Copyright (C) 1997,1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
@@ -11,6 +11,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/fs.h>
+#include <linux/namei.h>
 #include <linux/mm.h>
 #include <linux/file.h>
 #include <linux/stat.h>
@@ -18,6 +19,8 @@
 #include <linux/limits.h>
 #include <linux/resource.h>
 #include <linux/quotaops.h>
+#include <linux/mount.h>
+#include <linux/vfs.h>
 
 #include <asm/uaccess.h>
 #include <asm/string.h>
@@ -79,47 +82,49 @@ struct sol_stat64 {
 
 #define UFSMAGIC (((unsigned)'u'<<24)||((unsigned)'f'<<16)||((unsigned)'s'<<8))
 
-static inline int putstat(struct sol_stat *ubuf, struct stat *kbuf)
+static inline int putstat(struct sol_stat *ubuf, struct kstat *kbuf)
 {
-	if (put_user (R4_DEV(kbuf->st_dev), &ubuf->st_dev)	||
-	    __put_user (kbuf->st_ino, &ubuf->st_ino)		||
-	    __put_user (kbuf->st_mode, &ubuf->st_mode)		||
-	    __put_user (kbuf->st_nlink, &ubuf->st_nlink)	||
-	    __put_user (kbuf->st_uid, &ubuf->st_uid)		||
-	    __put_user (kbuf->st_gid, &ubuf->st_gid)		||
-	    __put_user (R4_DEV(kbuf->st_rdev), &ubuf->st_rdev)	||
-	    __put_user (kbuf->st_size, &ubuf->st_size)		||
-	    __put_user (kbuf->st_atime, &ubuf->st_atime.tv_sec)	||
-	    __put_user (0, &ubuf->st_atime.tv_nsec)		||
-	    __put_user (kbuf->st_mtime, &ubuf->st_mtime.tv_sec)	||
-	    __put_user (0, &ubuf->st_mtime.tv_nsec)		||
-	    __put_user (kbuf->st_ctime, &ubuf->st_ctime.tv_sec)	||
-	    __put_user (0, &ubuf->st_ctime.tv_nsec)		||
-	    __put_user (kbuf->st_blksize, &ubuf->st_blksize)	||
-	    __put_user (kbuf->st_blocks, &ubuf->st_blocks)	||
+	if (kbuf->size > MAX_NON_LFS)
+		return -EOVERFLOW;
+	if (put_user (R4_DEV(kbuf->dev), &ubuf->st_dev)	||
+	    __put_user (kbuf->ino, &ubuf->st_ino)		||
+	    __put_user (kbuf->mode, &ubuf->st_mode)		||
+	    __put_user (kbuf->nlink, &ubuf->st_nlink)	||
+	    __put_user (kbuf->uid, &ubuf->st_uid)		||
+	    __put_user (kbuf->gid, &ubuf->st_gid)		||
+	    __put_user (R4_DEV(kbuf->rdev), &ubuf->st_rdev)	||
+	    __put_user (kbuf->size, &ubuf->st_size)		||
+	    __put_user (kbuf->atime.tv_sec, &ubuf->st_atime.tv_sec)	||
+	    __put_user (kbuf->atime.tv_nsec, &ubuf->st_atime.tv_nsec)	||
+	    __put_user (kbuf->mtime.tv_sec, &ubuf->st_mtime.tv_sec)	||
+	    __put_user (kbuf->mtime.tv_nsec, &ubuf->st_mtime.tv_nsec)	||
+	    __put_user (kbuf->ctime.tv_sec, &ubuf->st_ctime.tv_sec)	||
+	    __put_user (kbuf->ctime.tv_nsec, &ubuf->st_ctime.tv_nsec)	||
+	    __put_user (kbuf->blksize, &ubuf->st_blksize)	||
+	    __put_user (kbuf->blocks, &ubuf->st_blocks)	||
 	    __put_user (UFSMAGIC, (unsigned *)ubuf->st_fstype))
 		return -EFAULT;
 	return 0;
 }
 
-static inline int putstat64(struct sol_stat64 *ubuf, struct stat *kbuf)
+static inline int putstat64(struct sol_stat64 *ubuf, struct kstat *kbuf)
 {
-	if (put_user (R4_DEV(kbuf->st_dev), &ubuf->st_dev)	||
-	    __put_user (kbuf->st_ino, &ubuf->st_ino)		||
-	    __put_user (kbuf->st_mode, &ubuf->st_mode)		||
-	    __put_user (kbuf->st_nlink, &ubuf->st_nlink)	||
-	    __put_user (kbuf->st_uid, &ubuf->st_uid)		||
-	    __put_user (kbuf->st_gid, &ubuf->st_gid)		||
-	    __put_user (R4_DEV(kbuf->st_rdev), &ubuf->st_rdev)	||
-	    __put_user (kbuf->st_size, &ubuf->st_size)		||
-	    __put_user (kbuf->st_atime, &ubuf->st_atime.tv_sec)	||
-	    __put_user (0, &ubuf->st_atime.tv_nsec)		||
-	    __put_user (kbuf->st_mtime, &ubuf->st_mtime.tv_sec)	||
-	    __put_user (0, &ubuf->st_mtime.tv_nsec)		||
-	    __put_user (kbuf->st_ctime, &ubuf->st_ctime.tv_sec)	||
-	    __put_user (0, &ubuf->st_ctime.tv_nsec)		||
-	    __put_user (kbuf->st_blksize, &ubuf->st_blksize)	||
-	    __put_user (kbuf->st_blocks, &ubuf->st_blocks)	||
+	if (put_user (R4_DEV(kbuf->dev), &ubuf->st_dev)	||
+	    __put_user (kbuf->ino, &ubuf->st_ino)		||
+	    __put_user (kbuf->mode, &ubuf->st_mode)		||
+	    __put_user (kbuf->nlink, &ubuf->st_nlink)	||
+	    __put_user (kbuf->uid, &ubuf->st_uid)		||
+	    __put_user (kbuf->gid, &ubuf->st_gid)		||
+	    __put_user (R4_DEV(kbuf->rdev), &ubuf->st_rdev)	||
+	    __put_user (kbuf->size, &ubuf->st_size)		||
+	    __put_user (kbuf->atime.tv_sec, &ubuf->st_atime.tv_sec)	||
+	    __put_user (kbuf->atime.tv_nsec, &ubuf->st_atime.tv_nsec)	||
+	    __put_user (kbuf->mtime.tv_sec, &ubuf->st_mtime.tv_sec)	||
+	    __put_user (kbuf->mtime.tv_nsec, &ubuf->st_mtime.tv_nsec)	||
+	    __put_user (kbuf->ctime.tv_sec, &ubuf->st_ctime.tv_sec)	||
+	    __put_user (kbuf->ctime.tv_nsec, &ubuf->st_ctime.tv_nsec)	||
+	    __put_user (kbuf->blksize, &ubuf->st_blksize)	||
+	    __put_user (kbuf->blocks, &ubuf->st_blocks)	||
 	    __put_user (UFSMAGIC, (unsigned *)ubuf->st_fstype))
 		return -EFAULT;
 	return 0;
@@ -128,21 +133,18 @@ static inline int putstat64(struct sol_stat64 *ubuf, struct stat *kbuf)
 asmlinkage int solaris_stat(u32 filename, u32 statbuf)
 {
 	int ret;
-	struct stat s;
+	struct kstat s;
 	char *filenam;
 	mm_segment_t old_fs = get_fs();
-	int (*sys_newstat)(char *,struct stat *) = 
-		(int (*)(char *,struct stat *))SYS(stat);
 	
 	filenam = getname ((char *)A(filename));
 	ret = PTR_ERR(filenam);
 	if (!IS_ERR(filenam)) {
 		set_fs (KERNEL_DS);
-		ret = sys_newstat(filenam, &s);
+		ret = vfs_stat(filenam, &s);
 		set_fs (old_fs);
 		putname (filenam);
-		if (putstat ((struct sol_stat *)A(statbuf), &s))
-			return -EFAULT;
+		return putstat((struct sol_stat *)A(statbuf), &s);
 	}
 	return ret;
 }
@@ -156,21 +158,18 @@ asmlinkage int solaris_xstat(int vers, u32 filename, u32 statbuf)
 asmlinkage int solaris_stat64(u32 filename, u32 statbuf)
 {
 	int ret;
-	struct stat s;
+	struct kstat s;
 	char *filenam;
 	mm_segment_t old_fs = get_fs();
-	int (*sys_newstat)(char *,struct stat *) = 
-		(int (*)(char *,struct stat *))SYS(stat);
 	
 	filenam = getname ((char *)A(filename));
 	ret = PTR_ERR(filenam);
 	if (!IS_ERR(filenam)) {
 		set_fs (KERNEL_DS);
-		ret = sys_newstat(filenam, &s);
+		ret = vfs_stat(filenam, &s);
 		set_fs (old_fs);
 		putname (filenam);
-		if (putstat64 ((struct sol_stat64 *)A(statbuf), &s))
-			return -EFAULT;
+		return putstat64((struct sol_stat64 *)A(statbuf), &s);
 	}
 	return ret;
 }
@@ -178,21 +177,18 @@ asmlinkage int solaris_stat64(u32 filename, u32 statbuf)
 asmlinkage int solaris_lstat(u32 filename, u32 statbuf)
 {
 	int ret;
-	struct stat s;
+	struct kstat s;
 	char *filenam;
 	mm_segment_t old_fs = get_fs();
-	int (*sys_newlstat)(char *,struct stat *) = 
-		(int (*)(char *,struct stat *))SYS(lstat);
 	
 	filenam = getname ((char *)A(filename));
 	ret = PTR_ERR(filenam);
 	if (!IS_ERR(filenam)) {
 		set_fs (KERNEL_DS);
-		ret = sys_newlstat(filenam, &s);
+		ret = vfs_lstat(filenam, &s);
 		set_fs (old_fs);
 		putname (filenam);
-		if (putstat ((struct sol_stat *)A(statbuf), &s))
-			return -EFAULT;
+		return putstat((struct sol_stat *)A(statbuf), &s);
 	}
 	return ret;
 }
@@ -205,21 +201,18 @@ asmlinkage int solaris_lxstat(int vers, u32 filename, u32 statbuf)
 asmlinkage int solaris_lstat64(u32 filename, u32 statbuf)
 {
 	int ret;
-	struct stat s;
+	struct kstat s;
 	char *filenam;
 	mm_segment_t old_fs = get_fs();
-	int (*sys_newlstat)(char *,struct stat *) = 
-		(int (*)(char *,struct stat *))SYS(lstat);
 	
 	filenam = getname ((char *)A(filename));
 	ret = PTR_ERR(filenam);
 	if (!IS_ERR(filenam)) {
 		set_fs (KERNEL_DS);
-		ret = sys_newlstat(filenam, &s);
+		ret = vfs_lstat(filenam, &s);
 		set_fs (old_fs);
 		putname (filenam);
-		if (putstat64 ((struct sol_stat64 *)A(statbuf), &s))
-			return -EFAULT;
+		return putstat64((struct sol_stat64 *)A(statbuf), &s);
 	}
 	return ret;
 }
@@ -227,16 +220,10 @@ asmlinkage int solaris_lstat64(u32 filename, u32 statbuf)
 asmlinkage int solaris_fstat(unsigned int fd, u32 statbuf)
 {
 	int ret;
-	struct stat s;
-	mm_segment_t old_fs = get_fs();
-	int (*sys_newfstat)(unsigned,struct stat *) = 
-		(int (*)(unsigned,struct stat *))SYS(fstat);
-	
-	set_fs (KERNEL_DS);
-	ret = sys_newfstat(fd, &s);
-	set_fs (old_fs);
-	if (putstat ((struct sol_stat *)A(statbuf), &s))
-		return -EFAULT;
+	struct kstat s;
+	ret = vfs_fstat(fd, &s);
+	if (!ret)
+		return putstat((struct sol_stat *)A(statbuf), &s);
 	return ret;
 }
 
@@ -248,16 +235,11 @@ asmlinkage int solaris_fxstat(int vers, u32 fd, u32 statbuf)
 asmlinkage int solaris_fstat64(unsigned int fd, u32 statbuf)
 {
 	int ret;
-	struct stat s;
-	mm_segment_t old_fs = get_fs();
-	int (*sys_newfstat)(unsigned,struct stat *) = 
-		(int (*)(unsigned,struct stat *))SYS(fstat);
+	struct kstat s;
 	
-	set_fs (KERNEL_DS);
-	ret = sys_newfstat(fd, &s);
-	set_fs (old_fs);
-	if (putstat64 ((struct sol_stat64 *)A(statbuf), &s))
-		return -EFAULT;
+	ret = vfs_fstat(fd, &s);
+	if (!ret)
+		return putstat64((struct sol_stat64 *)A(statbuf), &s);
 	return ret;
 }
 
@@ -408,7 +390,7 @@ struct sol_statvfs64 {
 
 static int report_statvfs(struct vfsmount *mnt, struct inode *inode, u32 buf)
 {
-	struct statfs s;
+	struct kstatfs s;
 	int error;
 	struct sol_statvfs *ss = (struct sol_statvfs *)A(buf);
 
@@ -442,7 +424,7 @@ static int report_statvfs(struct vfsmount *mnt, struct inode *inode, u32 buf)
 
 static int report_statvfs64(struct vfsmount *mnt, struct inode *inode, u32 buf)
 {
-	struct statfs s;
+	struct kstatfs s;
 	int error;
 	struct sol_statvfs64 *ss = (struct sol_statvfs64 *)A(buf);
 			
@@ -689,18 +671,18 @@ asmlinkage int solaris_facl(unsigned int fd, int cmd, int nentries, u32 aclbufp)
 
 asmlinkage int solaris_pread(unsigned int fd, char *buf, u32 count, u32 pos)
 {
-	ssize_t (*sys_pread)(unsigned int, char *, size_t, loff_t) =
-		(ssize_t (*)(unsigned int, char *, size_t, loff_t))SYS(pread);
-		
-	return sys_pread(fd, buf, count, (loff_t)pos);
+	ssize_t (*sys_pread64)(unsigned int, char *, size_t, loff_t) =
+		(ssize_t (*)(unsigned int, char *, size_t, loff_t))SYS(pread64);
+
+	return sys_pread64(fd, buf, count, (loff_t)pos);
 }
 
 asmlinkage int solaris_pwrite(unsigned int fd, char *buf, u32 count, u32 pos)
 {
-	ssize_t (*sys_pwrite)(unsigned int, char *, size_t, loff_t) =
-		(ssize_t (*)(unsigned int, char *, size_t, loff_t))SYS(pwrite);
-		
-	return sys_pwrite(fd, buf, count, (loff_t)pos);
+	ssize_t (*sys_pwrite64)(unsigned int, char *, size_t, loff_t) =
+		(ssize_t (*)(unsigned int, char *, size_t, loff_t))SYS(pwrite64);
+
+	return sys_pwrite64(fd, buf, count, (loff_t)pos);
 }
 
 /* POSIX.1 names */

@@ -14,7 +14,6 @@ on whether they contain certain headers */
 #include <linux/netfilter_ipv6/ip6_tables.h>
 #include <linux/netfilter_ipv6/ip6t_ipv6header.h>
 
-EXPORT_NO_SYMBOLS;
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("IPv6 headers match");
 MODULE_AUTHOR("Andras Kis-Szabo <kisza@sch.bme.hu>");
@@ -63,7 +62,7 @@ ipv6header_match(const struct sk_buff *skb,
 			break;
 		}
 
-		hdr=(struct ipv6_opt_hdr *)(skb->data+ptr);
+		hdr=(struct ipv6_opt_hdr *)skb->data+ptr;
 
 		/* Calculate the header length */
                 if (nexthdr == NEXTHDR_FRAGMENT) {
@@ -98,23 +97,18 @@ ipv6header_match(const struct sk_buff *skb,
                 nexthdr = hdr->nexthdr;
                 len -= hdrlen;
                 ptr += hdrlen;
-		if ( ptr > skb->len ) {
+		if (ptr > skb->len)
 			break;
-		}
         }
 
 	if ( (nexthdr != NEXTHDR_NONE ) && (nexthdr != NEXTHDR_ESP) )
 		temp |= MASK_PROTO;
 
 	if (info->modeflag)
-		return !((temp ^ info->matchflags ^ info->invflags)
-			 & info->matchflags);
-	else {
-		if (info->invflags)
-			return temp != info->matchflags;
-		else
-			return temp == info->matchflags;
-	}
+		return (!( (temp & info->matchflags)
+			^ info->matchflags) ^ info->invflags);
+	else
+		return (!( temp ^ info->matchflags) ^ info->invflags);
 }
 
 static int
@@ -124,29 +118,27 @@ ipv6header_checkentry(const char *tablename,
 		      unsigned int matchsize,
 		      unsigned int hook_mask)
 {
-	const struct ip6t_ipv6header_info *info = matchinfo;
-
 	/* Check for obvious errors */
 	/* This match is valid in all hooks! */
 	if (matchsize != IP6T_ALIGN(sizeof(struct ip6t_ipv6header_info)))
 		return 0;
 
-	/* invflags is 0 or 0xff in hard mode */
-	if ((!info->modeflag) && info->invflags != 0x00
-			      && info->invflags != 0xFF)
-		return 0;
-
 	return 1;
 }
 
-static struct ip6t_match
-ip6t_ipv6header_match = {
-	{ NULL, NULL },
-	"ipv6header",
-	&ipv6header_match,
-	&ipv6header_checkentry,
-	NULL,
-	THIS_MODULE
+static void
+ipv6header_destroy(void *matchinfo,
+		   unsigned int matchinfosize)
+{
+	return;
+}
+
+static struct ip6t_match ip6t_ipv6header_match = {
+	.name		= "ipv6header",
+	.match		= &ipv6header_match,
+	.checkentry	= &ipv6header_checkentry,
+	.destroy	= &ipv6header_destroy,
+	.me		= THIS_MODULE,
 };
 
 static int  __init ipv6header_init(void)

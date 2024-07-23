@@ -12,12 +12,11 @@
  * Note that this is actually 0x1,0000,0000
  */
 #define KERNEL_DS	0x00000000
-#define USER_DS		PAGE_OFFSET
+#define USER_DS		TASK_SIZE
 
 static inline void set_fs (mm_segment_t fs)
 {
-	current->addr_limit = fs;
-
+	current_thread_info()->addr_limit = fs;
 	modify_domain(DOMAIN_KERNEL, fs ? DOMAIN_CLIENT : DOMAIN_MANAGER);
 }
 
@@ -26,7 +25,7 @@ static inline void set_fs (mm_segment_t fs)
 	unsigned long flag, sum; \
 	__asm__("adds %1, %2, %3; sbcccs %1, %1, %0; movcc %0, #0" \
 		: "=&r" (flag), "=&r" (sum) \
-		: "r" (addr), "Ir" (size), "0" (current->addr_limit) \
+		: "r" (addr), "Ir" (size), "0" (current_thread_info()->addr_limit) \
 		: "cc"); \
 	flag; })
 
@@ -34,11 +33,11 @@ static inline void set_fs (mm_segment_t fs)
 	unsigned long flag; \
 	__asm__("cmp %2, %0; movlo %0, #0" \
 		: "=&r" (flag) \
-		: "0" (current->addr_limit), "r" (addr) \
+		: "0" (current_thread_info()->addr_limit), "r" (addr) \
 		: "cc"); \
 	(flag == 0); })
 
-#define __put_user_asm_byte(x,addr,err)				\
+#define __put_user_asm_byte(x,__pu_addr,err)			\
 	__asm__ __volatile__(					\
 	"1:	strbt	%1,[%2],#0\n"				\
 	"2:\n"							\
@@ -51,18 +50,27 @@ static inline void set_fs (mm_segment_t fs)
 	"	.align	3\n"					\
 	"	.long	1b, 3b\n"				\
 	"	.previous"					\
-	: "=r" (err)						\
-	: "r" (x), "r" (addr), "i" (-EFAULT), "0" (err))
+	: "+r" (err)						\
+	: "r" (x), "r" (__pu_addr), "i" (-EFAULT)		\
+	: "cc")
 
-#define __put_user_asm_half(x,addr,err)				\
+#ifndef __ARMEB__
+#define __put_user_asm_half(x,__pu_addr,err)			\
 ({								\
 	unsigned long __temp = (unsigned long)(x);		\
-	unsigned long __ptr  = (unsigned long)(addr);		\
-	__put_user_asm_byte(__temp, __ptr, err);		\
-	__put_user_asm_byte(__temp >> 8, __ptr + 1, err);	\
+	__put_user_asm_byte(__temp, __pu_addr, err);		\
+	__put_user_asm_byte(__temp >> 8, __pu_addr + 1, err);	\
 })
+#else
+#define __put_user_asm_half(x,__pu_addr,err)			\
+({								\
+	unsigned long __temp = (unsigned long)(x);		\
+	__put_user_asm_byte(__temp >> 8, __pu_addr, err);	\
+	__put_user_asm_byte(__temp, __pu_addr + 1, err);	\
+})
+#endif
 
-#define __put_user_asm_word(x,addr,err)				\
+#define __put_user_asm_word(x,__pu_addr,err)			\
 	__asm__ __volatile__(					\
 	"1:	strt	%1,[%2],#0\n"				\
 	"2:\n"							\
@@ -75,8 +83,36 @@ static inline void set_fs (mm_segment_t fs)
 	"	.align	3\n"					\
 	"	.long	1b, 3b\n"				\
 	"	.previous"					\
-	: "=r" (err)						\
-	: "r" (x), "r" (addr), "i" (-EFAULT), "0" (err))
+	: "+r" (err)						\
+	: "r" (x), "r" (__pu_addr), "i" (-EFAULT)		\
+	: "cc")
+
+#ifndef __ARMEB__
+#define	__reg_oper0	"%R2"
+#define	__reg_oper1	"%Q2"
+#else
+#define	__reg_oper0	"%Q2"
+#define	__reg_oper1	"%R2"
+#endif
+
+#define __put_user_asm_dword(x,__pu_addr,err)			\
+	__asm__ __volatile__(					\
+	"1:	strt	" __reg_oper1 ", [%1], #4\n"		\
+	"2:	strt	" __reg_oper0 ", [%1], #0\n"		\
+	"3:\n"							\
+	"	.section .fixup,\"ax\"\n"			\
+	"	.align	2\n"					\
+	"4:	mov	%0, %3\n"				\
+	"	b	3b\n"					\
+	"	.previous\n"					\
+	"	.section __ex_table,\"a\"\n"			\
+	"	.align	3\n"					\
+	"	.long	1b, 4b\n"				\
+	"	.long	2b, 4b\n"				\
+	"	.previous"					\
+	: "+r" (err), "+r" (__pu_addr)				\
+	: "r" (x), "i" (-EFAULT)				\
+	: "cc")
 
 #define __get_user_asm_byte(x,addr,err)				\
 	__asm__ __volatile__(					\
@@ -92,17 +128,27 @@ static inline void set_fs (mm_segment_t fs)
 	"	.align	3\n"					\
 	"	.long	1b, 3b\n"				\
 	"	.previous"					\
-	: "=r" (err), "=&r" (x)					\
-	: "r" (addr), "i" (-EFAULT), "0" (err))
+	: "+r" (err), "=&r" (x)					\
+	: "r" (addr), "i" (-EFAULT)				\
+	: "cc")
 
-#define __get_user_asm_half(x,addr,err)				\
+#ifndef __ARMEB__
+#define __get_user_asm_half(x,__gu_addr,err)			\
 ({								\
-	unsigned long __b1, __b2, __ptr = (unsigned long)addr;	\
-	__get_user_asm_byte(__b1, __ptr, err);			\
-	__get_user_asm_byte(__b2, __ptr + 1, err);		\
+	unsigned long __b1, __b2;				\
+	__get_user_asm_byte(__b1, __gu_addr, err);		\
+	__get_user_asm_byte(__b2, __gu_addr + 1, err);		\
 	(x) = __b1 | (__b2 << 8);				\
 })
-
+#else
+#define __get_user_asm_half(x,__gu_addr,err)			\
+({								\
+	unsigned long __b1, __b2;				\
+	__get_user_asm_byte(__b1, __gu_addr, err);		\
+	__get_user_asm_byte(__b2, __gu_addr + 1, err);		\
+	(x) = (__b1 << 8) | __b2;				\
+})
+#endif
 
 #define __get_user_asm_word(x,addr,err)				\
 	__asm__ __volatile__(					\
@@ -118,8 +164,9 @@ static inline void set_fs (mm_segment_t fs)
 	"	.align	3\n"					\
 	"	.long	1b, 3b\n"				\
 	"	.previous"					\
-	: "=r" (err), "=&r" (x)					\
-	: "r" (addr), "i" (-EFAULT), "0" (err))
+	: "+r" (err), "=&r" (x)					\
+	: "r" (addr), "i" (-EFAULT)				\
+	: "cc")
 
 extern unsigned long __arch_copy_from_user(void *to, const void *from, unsigned long n);
 #define __do_copy_from_user(to,from,n)				\

@@ -72,7 +72,7 @@
 #define VTBL_FMT        125
 #define VTBL_RESERVED_2 126
 #define VTBL_RESERVED_3 127
-/* compatability with pre revision K */
+/* compatibility with pre revision K */
 #define VTBL_K_CMPR     120 
 
 /*  the next is used by QIC-3020 tapes with format code 6 (>2^16
@@ -129,8 +129,7 @@ extern struct list_head zft_vtbl;
 #define DUMP_VOLINFO(level, desc, info)					\
 {									\
 	char tmp[21];							\
-	strncpy(tmp, desc, 20);						\
-	tmp[20] = '\0';							\
+	strlcpy(tmp, desc, sizeof(tmp));				\
 	TRACE(level, "Volume %d:\n"					\
 	      KERN_INFO "description  : %s\n"				\
 	      KERN_INFO "first segment: %d\n"				\
@@ -168,19 +167,19 @@ extern int   zft_fake_volume_headers   (eof_mark_union *eof_map,
 extern int   zft_weof                  (unsigned int count, zft_position *pos);
 extern void  zft_move_past_eof         (zft_position *pos);
 
-extern inline int   zft_tape_at_eod         (const zft_position *pos);
-extern inline int   zft_tape_at_lbot        (const zft_position *pos);
-extern inline void  zft_position_before_eof (zft_position *pos, 
+static inline int   zft_tape_at_eod         (const zft_position *pos);
+static inline int   zft_tape_at_lbot        (const zft_position *pos);
+static inline void  zft_position_before_eof (zft_position *pos, 
 					     const zft_volinfo *volume);
-extern inline __s64 zft_check_for_eof(const zft_volinfo *vtbl,
+static inline __s64 zft_check_for_eof(const zft_volinfo *vtbl,
 				      const zft_position *pos);
 
 /* this function decrements the zft_seg_pos counter if we are right
- * at the beginning of a segment. This is to handel fsfm/bsfm -- we
+ * at the beginning of a segment. This is to handle fsfm/bsfm -- we
  * need to position before the eof mark.  NOTE: zft_tape_pos is not
  * changed 
  */
-extern inline void zft_position_before_eof(zft_position *pos, 
+static inline void zft_position_before_eof(zft_position *pos, 
 					   const zft_volinfo *volume)
 { 
 	TRACE_FUN(ft_t_flow);
@@ -195,7 +194,7 @@ extern inline void zft_position_before_eof(zft_position *pos,
 /*  Mmmh. Is the position at the end of the last volume, that is right
  *  before the last EOF mark also logical an EOD condition?
  */
-extern inline int zft_tape_at_eod(const zft_position *pos)
+static inline int zft_tape_at_eod(const zft_position *pos)
 { 
 	TRACE_FUN(ft_t_any);
 
@@ -207,7 +206,7 @@ extern inline int zft_tape_at_eod(const zft_position *pos)
 	}
 }
 
-extern inline int zft_tape_at_lbot(const zft_position *pos)
+static inline int zft_tape_at_lbot(const zft_position *pos)
 {
 	if (zft_qic_mode) {
 		return (pos->seg_pos <= zft_first_vtbl->start_seg &&
@@ -220,7 +219,7 @@ extern inline int zft_tape_at_lbot(const zft_position *pos)
 
 /* This one checks for EOF.  return remaing space (may be negative) 
  */
-extern inline __s64 zft_check_for_eof(const zft_volinfo *vtbl,
+static inline __s64 zft_check_for_eof(const zft_volinfo *vtbl,
 				      const zft_position *pos)
 {     
 	return (__s64)(vtbl->size - pos->volume_pos);

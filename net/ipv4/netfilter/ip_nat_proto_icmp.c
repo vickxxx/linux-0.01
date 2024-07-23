@@ -6,6 +6,7 @@
 #include <linux/if.h>
 
 #include <linux/netfilter_ipv4/ip_nat.h>
+#include <linux/netfilter_ipv4/ip_nat_core.h>
 #include <linux/netfilter_ipv4/ip_nat_rule.h>
 #include <linux/netfilter_ipv4/ip_nat_protocol.h>
 
@@ -26,34 +27,40 @@ icmp_unique_tuple(struct ip_conntrack_tuple *tuple,
 		  const struct ip_conntrack *conntrack)
 {
 	static u_int16_t id = 0;
-	unsigned int range_size;
+	unsigned int range_size
+		= (unsigned int)range->max.icmp.id - range->min.icmp.id + 1;
 	unsigned int i;
 
-	range_size = ntohs(range->max.icmp.id) - ntohs(range->min.icmp.id) + 1;
 	/* If no range specified... */
 	if (!(range->flags & IP_NAT_RANGE_PROTO_SPECIFIED))
 		range_size = 0xFFFF;
 
 	for (i = 0; i < range_size; i++, id++) {
-		tuple->src.u.icmp.id = htons(ntohs(range->min.icmp.id) +
-		                             (id % range_size));
+		tuple->src.u.icmp.id = range->min.icmp.id + (id % range_size);
 		if (!ip_nat_used_tuple(tuple, conntrack))
 			return 1;
 	}
 	return 0;
 }
 
-static void
-icmp_manip_pkt(struct iphdr *iph, size_t len,
+static int
+icmp_manip_pkt(struct sk_buff **pskb,
+	       unsigned int hdroff,
 	       const struct ip_conntrack_manip *manip,
 	       enum ip_nat_manip_type maniptype)
 {
-	struct icmphdr *hdr = (struct icmphdr *)((u_int32_t *)iph + iph->ihl);
+	struct icmphdr *hdr;
+
+	if (!skb_ip_make_writable(pskb, hdroff + sizeof(*hdr)))
+		return 0;
+
+	hdr = (void *)(*pskb)->data + hdroff;
 
 	hdr->checksum = ip_nat_cheat_check(hdr->un.echo.id ^ 0xFFFF,
-					   manip->u.icmp.id,
-					   hdr->checksum);
+					    manip->u.icmp.id,
+					    hdr->checksum);
 	hdr->un.echo.id = manip->u.icmp.id;
+	return 1;
 }
 
 static unsigned int

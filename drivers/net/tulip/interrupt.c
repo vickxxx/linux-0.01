@@ -1,7 +1,7 @@
 /*
 	drivers/net/tulip/interrupt.c
 
-	Maintained by Jeff Garzik <jgarzik@mandrakesoft.com>
+	Maintained by Jeff Garzik <jgarzik@pobox.com>
 	Copyright 2000,2001  The Linux Kernel Team
 	Written/copyright 1994-2001 by Donald Becker.
 
@@ -194,10 +194,10 @@ static int tulip_rx(struct net_device *dev)
 				if (tp->rx_buffers[entry].mapping !=
 				    le32_to_cpu(tp->rx_ring[entry].buffer1)) {
 					printk(KERN_ERR "%s: Internal fault: The skbuff addresses "
-					       "do not match in tulip_rx: %08x vs. %08x %p / %p.\n",
+					       "do not match in tulip_rx: %08x vs. %Lx %p / %p.\n",
 					       dev->name,
 					       le32_to_cpu(tp->rx_ring[entry].buffer1),
-					       tp->rx_buffers[entry].mapping,
+					       (long long)tp->rx_buffers[entry].mapping,
 					       skb->head, temp);
 				}
 #endif
@@ -263,7 +263,7 @@ throttle:
            This would turn on IM for devices that is not contributing
            to backlog congestion with unnecessary latency.
 
-           We monitor the the device RX-ring and have:
+           We monitor the device RX-ring and have:
 
            HW Interrupt Mitigation either ON or OFF.
 
@@ -291,10 +291,33 @@ throttle:
 #endif
 }
 
+static inline unsigned int phy_interrupt (struct net_device *dev)
+{
+#ifdef __hppa__
+	int csr12 = inl(dev->base_addr + CSR12) & 0xff;
+	struct tulip_private *tp = (struct tulip_private *)dev->priv;
+
+	if (csr12 != tp->csr12_shadow) {
+		/* ack interrupt */
+		outl(csr12 | 0x02, dev->base_addr + CSR12);
+		tp->csr12_shadow = csr12;
+		/* do link change stuff */
+		spin_lock(&tp->lock);
+		tulip_check_duplex(dev);
+		spin_unlock(&tp->lock);
+		/* clear irq ack bit */
+		outl(csr12 & ~0x02, dev->base_addr + CSR12);
+
+		return 1;
+	}
+#endif
+
+	return 0;
+}
 
 /* The interrupt handler does all of the Rx thread work and cleans up
    after the Tx thread. */
-void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs)
+irqreturn_t tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs)
 {
 	struct net_device *dev = (struct net_device *)dev_instance;
 	struct tulip_private *tp = (struct tulip_private *)dev->priv;
@@ -309,12 +332,16 @@ void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs)
 	int maxtx = TX_RING_SIZE;
 	int maxoi = TX_RING_SIZE;
 	unsigned int work_count = tulip_max_interrupt_work;
+	unsigned int handled = 0;
 
 	/* Let's see whether the interrupt really is for us */
 	csr5 = inl(ioaddr + CSR5);
 
+        if (tp->flags & HAS_PHY_IRQ) 
+	        handled = phy_interrupt (dev);
+    
 	if ((csr5 & (NormalIntr|AbnormalIntr)) == 0)
-		return;
+		return IRQ_RETVAL(handled);
 
 	tp->nir++;
 
@@ -465,7 +492,7 @@ void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs)
 				 * to the 21142/3 docs that is).
 				 *   -- rmk
 				 */
-				printk(KERN_ERR "%s: (%lu) System Error occured (%d)\n",
+				printk(KERN_ERR "%s: (%lu) System Error occurred (%d)\n",
 					dev->name, tp->nir, error);
 			}
 			/* Clear all error sources, included undocumented ones! */
@@ -479,7 +506,7 @@ void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs)
 					   dev->name, csr5);
 #ifdef CONFIG_NET_HW_FLOWCONTROL
                         if (tp->fc_bit && (test_bit(tp->fc_bit, &netdev_fc_xoff)))
-                          if (net_ratelimit()) printk("BUG!! enabling interupt when FC off (timerintr.) \n");
+                          if (net_ratelimit()) printk("BUG!! enabling interrupt when FC off (timerintr.) \n");
 #endif
 			outl(tulip_tbl[tp->chip_id].valid_intrs, ioaddr + CSR7);
 			tp->ttimer = 0;
@@ -556,4 +583,5 @@ void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs)
 		printk(KERN_DEBUG "%s: exiting interrupt, csr5=%#4.4x.\n",
 			   dev->name, inl(ioaddr + CSR5));
 
+	return IRQ_HANDLED;
 }

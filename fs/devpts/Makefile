@@ -2,10 +2,14 @@
 # Makefile for the Linux /dev/pts virtual filesystem.
 #
 
-O_TARGET := devpts.o
+obj-$(CONFIG_DEVPTS_FS) += devpts.o
 
-obj-y    := root.o inode.o
+devpts-objs := inode.o
 
-obj-m    := $(O_TARGET)
+ifeq ($(CONFIG_DEVPTS_FS_XATTR),y)
+devpts-objs += xattr.o 
+endif
 
-include $(TOPDIR)/Rules.make
+ifeq ($(CONFIG_DEVPTS_FS_SECURITY),y)
+devpts-objs += xattr_security.o
+endif

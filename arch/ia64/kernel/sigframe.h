@@ -1,6 +1,6 @@
 struct sigscratch {
 	unsigned long scratch_unat;	/* ar.unat for the general registers saved in pt */
-	unsigned long pad;
+	unsigned long ar_pfs;		/* for syscalls, the user-level function-state  */
 	struct pt_regs pt;
 };
 
@@ -21,3 +21,5 @@ struct sigframe {
 	struct siginfo info;
 	struct sigcontext sc;
 };
+
+extern long ia64_do_signal (sigset_t *, struct sigscratch *, long);

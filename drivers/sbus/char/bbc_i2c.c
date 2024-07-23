@@ -13,6 +13,7 @@
 #include <linux/wait.h>
 #include <linux/delay.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <asm/oplib.h>
 #include <asm/ebus.h>
 #include <asm/spitfire.h>
@@ -330,7 +331,7 @@ EXPORT_SYMBOL(bbc_i2c_readb);
 EXPORT_SYMBOL(bbc_i2c_write_buf);
 EXPORT_SYMBOL(bbc_i2c_read_buf);
 
-static void bbc_i2c_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t bbc_i2c_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct bbc_i2c_bus *bp = dev_id;
 
@@ -340,6 +341,8 @@ static void bbc_i2c_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	if (bp->waiting &&
 	    !(readb(bp->i2c_control_regs + 0x0) & I2C_PCF_PIN))
 		wake_up(&bp->wq);
+
+	return IRQ_HANDLED;
 }
 
 static void __init reset_one_i2c(struct bbc_i2c_bus *bp)
@@ -427,14 +430,15 @@ static int __init bbc_present(void)
 	return 0;
 }
 
-extern void bbc_envctrl_init(void);
+extern int bbc_envctrl_init(void);
 extern void bbc_envctrl_cleanup(void);
+static void bbc_i2c_cleanup(void);
 
 static int __init bbc_i2c_init(void)
 {
 	struct linux_ebus *ebus = NULL;
 	struct linux_ebus_device *edev = NULL;
-	int index = 0;
+	int err, index = 0;
 
 	if (tlb_type != cheetah || !bbc_present())
 		return -ENODEV;
@@ -451,11 +455,13 @@ static int __init bbc_i2c_init(void)
 	if (!index)
 		return -ENODEV;
 
-	bbc_envctrl_init();
-	return 0;
+	err = bbc_envctrl_init();
+	if (err)
+		bbc_i2c_cleanup();
+	return err;
 }
 
-static void __exit bbc_i2c_cleanup(void)
+static void bbc_i2c_cleanup(void)
 {
 	struct bbc_i2c_bus *bp = all_bbc_i2c;
 

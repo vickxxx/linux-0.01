@@ -8,15 +8,18 @@
  * 7/5/01 Woojung Huh <whuh@applieddata.net>
  *
  */
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/device.h>
+#include <linux/init.h>
 
-#include <asm/delay.h>
 #include <asm/hardware.h>
-#include <asm/irq.h>
-#include <asm/arch/pcmcia.h>
+#include <asm/mach-types.h>
 
-static int graphicsmaster_pcmcia_init(struct pcmcia_init *init)
+#include "sa1111_generic.h"
+
+static int graphicsmaster_pcmcia_hw_init(struct sa1100_pcmcia_socket *skt)
 {
   int return_val=0;
 
@@ -26,190 +29,78 @@ static int graphicsmaster_pcmcia_init(struct pcmcia_init *init)
   /* Disable Power 3.3V/5V for PCMCIA/CF */
   PA_DWR |= GPIO_GPIO0 | GPIO_GPIO1 | GPIO_GPIO2 | GPIO_GPIO3;
 
-  INTPOL1 |= (1 << (S0_READY_NINT - SA1111_IRQ(32))) |
-			 (1 << (S1_READY_NINT - SA1111_IRQ(32))) |
-    		 (1 << (S0_CD_VALID - SA1111_IRQ(32))) |
-    		 (1 << (S1_CD_VALID - SA1111_IRQ(32))) |
-    		 (1 << (S0_BVD1_STSCHG - SA1111_IRQ(32))) |
-    		 (1 << (S1_BVD1_STSCHG - SA1111_IRQ(32)));
-
-  return_val+=request_irq(S0_CD_VALID, init->handler, SA_INTERRUPT,
-			  "GC Master PCMCIA (0) CD", NULL);
-  return_val+=request_irq(S1_CD_VALID, init->handler, SA_INTERRUPT,
-			  "GC Master CF (1) CD", NULL);
-  return_val+=request_irq(S0_BVD1_STSCHG, init->handler, SA_INTERRUPT,
-			  "GC Master PCMCIA (0) BVD1", NULL);
-  return_val+=request_irq(S1_BVD1_STSCHG, init->handler, SA_INTERRUPT,
-			  "GC Master CF (1) BVD1", NULL);
-
+  /* why? */
   MECR = 0x09430943;
 
-  return (return_val<0) ? -1 : 2;
+  return sa1111_pcmcia_hwinit(skt);
 }
 
-static int graphicsmaster_pcmcia_shutdown(void)
+static int
+graphicsmaster_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt,
+				       const socket_state_t *state)
 {
+	unsigned int pa_dwr_mask, pa_dwr_set;
+	int ret;
 
-  free_irq(S0_CD_VALID, NULL);
-  free_irq(S1_CD_VALID, NULL);
-  free_irq(S0_BVD1_STSCHG, NULL);
-  free_irq(S1_BVD1_STSCHG, NULL);
+	switch (skt->nr) {
+	case 0:
+		pa_dwr_mask = GPIO_GPIO0 | GPIO_GPIO1;
 
-  INTPOL1 &= ~((1 << (S0_CD_VALID - SA1111_IRQ(32))) |
-			   (1 << (S1_CD_VALID - SA1111_IRQ(32))) |
-      		   (1 << (S0_BVD1_STSCHG - SA1111_IRQ(32))) |
-      		   (1 << (S1_BVD1_STSCHG - SA1111_IRQ(32))));
+		switch (state->Vcc) {
+		default:
+		case 0:  pa_dwr_set = GPIO_GPIO0 | GPIO_GPIO1;	break;
+		case 33: pa_dwr_set = GPIO_GPIO1;		break;
+		case 50: pa_dwr_set = GPIO_GPIO0;		break;
+		}
+		break;
 
-  return 0;
+	case 1:
+		pa_dwr_mask = GPIO_GPIO2 | GPIO_GPIO3;
+
+		switch (state->Vcc) {
+		default:
+		case 0:  pa_dwr_set = GPIO_GPIO2 | GPIO_GPIO3;	break;
+		case 33: pa_dwr_set = GPIO_GPIO3;		break;
+		case 50: pa_dwr_set = GPIO_GPIO2;		break;
+		}
+		break;
+	}
+
+	if (state->Vpp != state->Vcc && state->Vpp != 0) {
+		printk(KERN_ERR "%s(): CF slot cannot support Vpp %u\n",
+			__FUNCTION__, state->Vpp);
+		return -1;
+	}
+
+	ret = sa1111_pcmcia_configure_socket(skt, state);
+	if (ret == 0) {
+		unsigned long flags;
+
+		local_irq_save(flags);
+		PA_DWR = (PA_DWR & ~pa_dwr_mask) | pa_dwr_set;
+		local_irq_restore(flags);
+	}
+
+	return ret;
 }
 
-static int graphicsmaster_pcmcia_socket_state(struct pcmcia_state_array *state_array)
-{
-  unsigned long status;
-  int return_val=1;
+static struct pcmcia_low_level graphicsmaster_pcmcia_ops = {
+	.owner			= THIS_MODULE,
+	.hw_init		= graphicsmaster_pcmcia_init,
+	.hw_shutdown		= sa1111_pcmcia_hw_shutdown,
+	.socket_state		= sa1111_pcmcia_socket_state,
+	.configure_socket	= graphicsmaster_pcmcia_configure_socket,
 
-  if(state_array->size<2) return -1;
-
-  memset(state_array->state, 0,
-	 (state_array->size)*sizeof(struct pcmcia_state));
-
-  status=PCSR;
-
-  state_array->state[0].detect=((status & PCSR_S0_DETECT)==0)?1:0;
-
-  state_array->state[0].ready=((status & PCSR_S0_READY)==0)?0:1;
-
-  state_array->state[0].bvd1=((status & PCSR_S0_BVD1)==0)?0:1;
-
-  state_array->state[0].bvd2=((status & PCSR_S0_BVD2)==0)?0:1;
-
-  state_array->state[0].wrprot=((status & PCSR_S0_WP)==0)?0:1;
-
-  state_array->state[0].vs_3v=((status & PCSR_S0_VS1)==0)?1:0;
-
-  state_array->state[0].vs_Xv=((status & PCSR_S0_VS2)==0)?1:0;
-
-  state_array->state[1].detect=((status & PCSR_S1_DETECT)==0)?1:0;
-
-  state_array->state[1].ready=((status & PCSR_S1_READY)==0)?0:1;
-
-  state_array->state[1].bvd1=((status & PCSR_S1_BVD1)==0)?0:1;
-
-  state_array->state[1].bvd2=((status & PCSR_S1_BVD2)==0)?0:1;
-
-  state_array->state[1].wrprot=((status & PCSR_S1_WP)==0)?0:1;
-
-  state_array->state[1].vs_3v=((status & PCSR_S1_VS1)==0)?1:0;
-
-  state_array->state[1].vs_Xv=((status & PCSR_S1_VS2)==0)?1:0;
-
-  return return_val;
-}
-
-static int graphicsmaster_pcmcia_get_irq_info(struct pcmcia_irq_info *info)
-{
-
-  switch(info->sock){
-  case 0:
-    info->irq=S0_READY_NINT;
-    break;
-
-  case 1:
-    info->irq=S1_READY_NINT;
-    break;
-
-  default:
-    return -1;
-  }
-
-  return 0;
-}
-
-static int graphicsmaster_pcmcia_configure_socket(const struct pcmcia_configure *configure)
-{
-  unsigned long pccr=PCCR, gpio=PA_DWR;
-
-  switch(configure->sock){
-  case 0:
-
-    switch(configure->vcc){
-    case 0:
-      pccr = (pccr & ~PCCR_S0_FLT);
-      gpio |= GPIO_GPIO0 | GPIO_GPIO1;
-      break;
-
-    case 33:
-      pccr = (pccr & ~PCCR_S0_PSE) | PCCR_S0_FLT | PCCR_S0_PWAITEN;
-      gpio &= ~(GPIO_GPIO0 | GPIO_GPIO1);
-	  gpio &= ~GPIO_GPIO0;
-      break;
-
-    case 50:
-      pccr = (pccr | PCCR_S0_PSE | PCCR_S0_FLT | PCCR_S0_PWAITEN);
-      gpio &= ~(GPIO_GPIO0 | GPIO_GPIO1);
-	  gpio |= GPIO_GPIO0;
-      break;
-
-    default:
-      printk(KERN_ERR "%s(): unrecognized Vcc %u\n", __FUNCTION__,
-	     configure->vcc);
-      return -1;
-    }
-
-    pccr=(configure->reset)?(pccr | PCCR_S0_RST):(pccr & ~PCCR_S0_RST);
-
-    break;
-
-  case 1:
-    switch(configure->vcc){
-    case 0:
-      pccr = (pccr & ~PCCR_S1_FLT);
-      gpio |= GPIO_GPIO2 | GPIO_GPIO3;
-      break;
-
-    case 33:
-      pccr = (pccr & ~PCCR_S1_PSE) | PCCR_S1_FLT | PCCR_S1_PWAITEN;
-      gpio &= ~(GPIO_GPIO2 | GPIO_GPIO3);
-	  gpio &= ~GPIO_GPIO2;
-      break;
-
-    case 50:
-      pccr = (pccr | PCCR_S1_PSE | PCCR_S1_FLT | PCCR_S1_PWAITEN);
-      gpio &= ~(GPIO_GPIO2 | GPIO_GPIO3);
-	  gpio |= GPIO_GPIO2;
-      break;
-
-    default:
-      printk(KERN_ERR "%s(): unrecognized Vcc %u\n", __FUNCTION__,
-	     configure->vcc);
-      return -1;
-    }
-
-    if(configure->vpp!=configure->vcc && configure->vpp!=0){
-      printk(KERN_ERR "%s(): CF slot cannot support Vpp %u\n", __FUNCTION__,
-	     configure->vpp);
-      return -1;
-    }
-
-    pccr=(configure->reset)?(pccr | PCCR_S1_RST):(pccr & ~PCCR_S1_RST);
-
-    break;
-
-  default:
-    return -1;
-  }
-
-  PCCR = pccr;
-  PA_DWR = gpio;
-
-  return 0;
-}
-
-struct pcmcia_low_level graphicsmaster_pcmcia_ops = {
-  graphicsmaster_pcmcia_init,
-  graphicsmaster_pcmcia_shutdown,
-  graphicsmaster_pcmcia_socket_state,
-  graphicsmaster_pcmcia_get_irq_info,
-  graphicsmaster_pcmcia_configure_socket
+	.socket_init		= sa1111_pcmcia_socket_init,
+	.socket_suspend		= sa1111_pcmcia_socket_suspend,
 };
 
+int __init pcmcia_graphicsmaster_init(struct device *dev)
+{
+	int ret = -ENODEV;
+
+	if (machine_is_graphicsmaster())
+		ret = sa11xx_drv_pcmcia_probe(dev, &graphicsmaster_pcmcia_ops, 0, 2);
+
+	return ret;
+}

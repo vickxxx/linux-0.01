@@ -34,7 +34,7 @@ struct wan_sockaddr_ll
 typedef struct 
 {
 	unsigned char free;
-	unsigned char sk_state;
+	unsigned char state_sk;
 	int rcvbuf;
 	int sndbuf;
 	int rmem;
@@ -100,21 +100,13 @@ typedef struct
 #define WAN_PACKET_MR_ALLMULTI	2
 
 #ifdef __KERNEL__
-#ifndef netdevice_t
-#include <linux/version.h>
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
- #define netdevice_t struct net_device
-#else
- #define netdevice_t struct device
-#endif
-#endif
 
 /* Private wanpipe socket structures. */
 struct wanpipe_opt
 {
 	void   *mbox;		/* Mail box  */
 	void   *card; 		/* Card bouded to */
-	netdevice_t *dev;	/* Bounded device */
+	struct net_device *dev;	/* Bounded device */
 	unsigned short lcn;	/* Binded LCN */
 	unsigned char  svc;	/* 0=pvc, 1=svc */
 	unsigned char  timer;   /* flag for delayed transmit*/	
@@ -122,7 +114,11 @@ struct wanpipe_opt
 	unsigned poll_cnt;
 	unsigned char force;	/* Used to force sock release */
 	atomic_t packet_sent;   
+	unsigned short num; 
 };
+
+#define wp_sk(__sk) ((struct wanpipe_opt *)(__sk)->sk_protinfo)
+
 #endif
 
 #endif

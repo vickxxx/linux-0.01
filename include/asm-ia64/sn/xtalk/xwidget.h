@@ -4,8 +4,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1992 - 1997, 2000 Silicon Graphics, Inc.
- * Copyright (C) 2000 by Colin Ngam
+ * Copyright (C) 1992-1997,2000-2003 Silicon Graphics, Inc. All Rights Reserved.
  */
 #ifndef __ASM_SN_XTALK_XWIDGET_H__
 #define __ASM_SN_XTALK_XWIDGET_H__
@@ -15,9 +14,9 @@
  */
 
 #include <asm/sn/xtalk/xtalk.h>
-#if LANGUAGE_C
+#ifndef __ASSEMBLY__
 #include <asm/sn/cdl.h>
-#endif /* LANGUAGE_C */
+#endif /* __ASSEMBLY__ */
 
 #ifdef LITTLE_ENDIAN
 #define WIDGET_ID			0x00
@@ -58,6 +57,7 @@
 #define XWIDGET_MFG_NUM(widgetid) (((widgetid) & WIDGET_MFG_NUM) >> WIDGET_MFG_NUM_SHFT)
 #define XWIDGET_PART_REV_NUM(widgetid) ((XWIDGET_PART_NUM(widgetid) << 4) | \
 					XWIDGET_REV_NUM(widgetid))
+#define XWIDGET_PART_REV_NUM_REV(partrev) (partrev & 0xf)
 
 /* WIDGET_STATUS */
 #define WIDGET_LLP_REC_CNT		0xff000000
@@ -115,7 +115,7 @@
  * widget target flush register are widget dependent thus will not be
  * defined here
  */
-#if _LANGUAGE_C
+#ifndef __ASSEMBLY__
 typedef uint32_t      widgetreg_t;
 
 /* widget configuration registers */
@@ -260,34 +260,33 @@ extern int              xwidget_driver_register(xwidget_part_num_t part_num,
 extern void             xwidget_driver_unregister(char *driver_prefix);
 
 extern int              xwidget_register(struct xwidget_hwid_s *hwid,
-					 devfs_handle_t dev,
+					 vertex_hdl_t dev,
 					 xwidgetnum_t id,
-					 devfs_handle_t master,
-					 xwidgetnum_t targetid,
-					 async_attach_t aa);
+					 vertex_hdl_t master,
+					 xwidgetnum_t targetid);
 
-extern int		xwidget_unregister(devfs_handle_t);
-extern void	        xwidget_error_register(devfs_handle_t xwidget,
-						error_handler_f * efunc,
-						error_handler_arg_t einfo);
+extern int		xwidget_unregister(vertex_hdl_t);
 
-extern void             xwidget_reset(devfs_handle_t xwidget);
-extern void             xwidget_gfx_reset(devfs_handle_t xwidget);
-extern char		*xwidget_name_get(devfs_handle_t xwidget);	
+extern void             xwidget_reset(vertex_hdl_t xwidget);
+extern void             xwidget_gfx_reset(vertex_hdl_t xwidget);
+extern char		*xwidget_name_get(vertex_hdl_t xwidget);	
 
 /* Generic crosstalk widget information access interface */
-extern xwidget_info_t   xwidget_info_chk(devfs_handle_t widget);
-extern xwidget_info_t   xwidget_info_get(devfs_handle_t widget);
-extern void             xwidget_info_set(devfs_handle_t widget, xwidget_info_t widget_info);
-extern devfs_handle_t     xwidget_info_dev_get(xwidget_info_t xwidget_info);
+extern xwidget_info_t   xwidget_info_chk(vertex_hdl_t widget);
+extern xwidget_info_t   xwidget_info_get(vertex_hdl_t widget);
+extern void             xwidget_info_set(vertex_hdl_t widget, xwidget_info_t widget_info);
+extern vertex_hdl_t     xwidget_info_dev_get(xwidget_info_t xwidget_info);
 extern xwidgetnum_t     xwidget_info_id_get(xwidget_info_t xwidget_info);
 extern int              xwidget_info_type_get(xwidget_info_t xwidget_info);
 extern int              xwidget_info_state_get(xwidget_info_t xwidget_info);
-extern devfs_handle_t     xwidget_info_master_get(xwidget_info_t xwidget_info);
+extern vertex_hdl_t     xwidget_info_master_get(xwidget_info_t xwidget_info);
 extern xwidgetnum_t     xwidget_info_masterid_get(xwidget_info_t xwidget_info);
 extern xwidget_part_num_t xwidget_info_part_num_get(xwidget_info_t xwidget_info);
 extern xwidget_rev_num_t xwidget_info_rev_num_get(xwidget_info_t xwidget_info);
 extern xwidget_mfg_num_t xwidget_info_mfg_num_get(xwidget_info_t xwidget_info);
+
+extern xwidgetnum_t hub_widget_id(nasid_t);
+
 
 
 /*
@@ -303,6 +302,6 @@ typedef struct v_widget_s {
 } v_widget_t;
 #endif				/* _KERNEL */
 
-#endif				/* _LANGUAGE_C */
+#endif				/* __ASSEMBLY__ */
 
 #endif				/* __ASM_SN_XTALK_XWIDGET_H__ */

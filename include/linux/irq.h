@@ -61,6 +61,8 @@ typedef struct {
 	hw_irq_controller *handler;
 	struct irqaction *action;	/* IRQ action list */
 	unsigned int depth;		/* nested irq disables */
+	unsigned int irq_count;		/* For detecting broken interrupts */
+	unsigned int irqs_unhandled;
 	spinlock_t lock;
 } ____cacheline_aligned irq_desc_t;
 
@@ -72,8 +74,7 @@ extern int handle_IRQ_event(unsigned int, struct pt_regs *, struct irqaction *);
 extern int setup_irq(unsigned int , struct irqaction * );
 
 extern hw_irq_controller no_irq_type;  /* needed in every arch ? */
-extern void no_action(int cpl, void *dev_id, struct pt_regs *regs);
 
 #endif
 
-#endif /* __asm_h */
+#endif /* __irq_h */

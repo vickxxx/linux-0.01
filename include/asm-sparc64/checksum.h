@@ -1,4 +1,4 @@
-/* $Id: checksum.h,v 1.17 2001/04/24 01:09:12 davem Exp $ */
+/* $Id: checksum.h,v 1.19 2002/02/09 19:49:31 davem Exp $ */
 #ifndef __SPARC64_CHECKSUM_H
 #define __SPARC64_CHECKSUM_H
 
@@ -16,7 +16,8 @@
  *      RFC1071 Computing the Internet Checksum
  */
 
-#include <asm/uaccess.h> 
+#include <linux/in6.h>
+#include <asm/uaccess.h>
 
 /* computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit)
@@ -39,19 +40,19 @@ extern unsigned int csum_partial(const unsigned char * buff, int len, unsigned i
  */
 extern unsigned int csum_partial_copy_sparc64(const char *src, char *dst, int len, unsigned int sum);
 			
-extern __inline__ unsigned int 
+static __inline__ unsigned int 
 csum_partial_copy_nocheck (const char *src, char *dst, int len, 
 			   unsigned int sum)
 {
 	int ret;
-	unsigned char cur_ds = current->thread.current_ds.seg;
+	unsigned char cur_ds = get_thread_current_ds();
 	__asm__ __volatile__ ("wr %%g0, %0, %%asi" : : "i" (ASI_P));
 	ret = csum_partial_copy_sparc64(src, dst, len, sum);
 	__asm__ __volatile__ ("wr %%g0, %0, %%asi" : : "r" (cur_ds));
 	return ret;
 }
 
-extern __inline__ unsigned int 
+static __inline__ unsigned int 
 csum_partial_copy_from_user(const char *src, char *dst, int len, 
 			    unsigned int sum, int *err)
 {
@@ -65,7 +66,7 @@ csum_partial_copy_from_user(const char *src, char *dst, int len,
  */
 #define HAVE_CSUM_COPY_USER
 extern unsigned int csum_partial_copy_user_sparc64(const char *src, char *dst, int len, unsigned int sum);
-extern __inline__ unsigned int 
+static __inline__ unsigned int 
 csum_and_copy_to_user(const char *src, char *dst, int len, 
 		      unsigned int sum, int *err)
 {
@@ -77,48 +78,11 @@ csum_and_copy_to_user(const char *src, char *dst, int len,
 /* ihl is always 5 or greater, almost always is 5, and iph is word aligned
  * the majority of the time.
  */
-extern __inline__ unsigned short ip_fast_csum(__const__ unsigned char *iph,
-					      unsigned int ihl)
-{
-	unsigned short sum;
-
-	/* Note: We must read %2 before we touch %0 for the first time,
-	 *       because GCC can legitimately use the same register for
-	 *       both operands.
-	 */
-	__asm__ __volatile__(
-"	sub		%2, 4, %%g7		! IEU0\n"
-"	lduw		[%1 + 0x00], %0		! Load	Group\n"
-"	lduw		[%1 + 0x04], %%g2	! Load	Group\n"
-"	lduw		[%1 + 0x08], %%g3	! Load	Group\n"
-"	addcc		%%g2, %0, %0		! IEU1	1 Load Bubble + Group\n"
-"	lduw		[%1 + 0x0c], %%g2	! Load\n"
-"	addccc		%%g3, %0, %0		! Sngle	Group no Bubble\n"
-"	lduw		[%1 + 0x10], %%g3	! Load	Group\n"
-"	addccc		%%g2, %0, %0		! Sngle	Group no Bubble\n"
-"	addc		%0, %%g0, %0		! Sngle Group\n"
-"1:	addcc		%%g3, %0, %0		! IEU1	Group no Bubble\n"
-"	add		%1, 4, %1		! IEU0\n"
-"	addccc		%0, %%g0, %0		! Sngle Group no Bubble\n"
-"	subcc		%%g7, 1, %%g7		! IEU1	Group\n"
-"	be,a,pt		%%icc, 2f		! CTI\n"
-"	 sll		%0, 16, %%g2		! IEU0\n"
-"	lduw		[%1 + 0x10], %%g3	! Load	Group\n"
-"	ba,pt		%%xcc, 1b		! CTI\n"
-"	 nop					! IEU0\n"
-"2:	addcc		%0, %%g2, %%g2		! IEU1	Group\n"
-"	srl		%%g2, 16, %0		! IEU0	Group regdep	XXX Scheisse!\n"
-"	addc		%0, %%g0, %0		! Sngle	Group\n"
-"	xnor		%%g0, %0, %0		! IEU0	Group\n"
-"	srl		%0, 0, %0		! IEU0	Group		XXX Scheisse!\n"
-	: "=r" (sum), "=&r" (iph)
-	: "r" (ihl), "1" (iph)
-	: "g2", "g3", "g7", "cc");
-	return sum;
-}
+extern unsigned short ip_fast_csum(__const__ unsigned char *iph,
+				   unsigned int ihl);
 
 /* Fold a partial checksum without adding pseudo headers. */
-extern __inline__ unsigned short csum_fold(unsigned int sum)
+static __inline__ unsigned short csum_fold(unsigned int sum)
 {
 	unsigned int tmp;
 
@@ -133,7 +97,7 @@ extern __inline__ unsigned short csum_fold(unsigned int sum)
 	return (sum & 0xffff);
 }
 
-extern __inline__ unsigned long csum_tcpudp_nofold(unsigned long saddr,
+static __inline__ unsigned long csum_tcpudp_nofold(unsigned long saddr,
 						   unsigned long daddr,
 						   unsigned int len,
 						   unsigned short proto,
@@ -200,7 +164,7 @@ static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
 }
 
 /* this routine is used for miscellaneous IP-like checksums, mainly in icmp.c */
-extern __inline__ unsigned short ip_compute_csum(unsigned char * buff, int len)
+static __inline__ unsigned short ip_compute_csum(unsigned char * buff, int len)
 {
 	return csum_fold(csum_partial(buff, len, 0));
 }

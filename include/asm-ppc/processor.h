@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.processor.h 1.31 10/05/01 16:26:22 paulus
- */
 #ifdef __KERNEL__
 #ifndef __ASM_PPC_PROCESSOR_H
 #define __ASM_PPC_PROCESSOR_H
@@ -12,6 +9,7 @@
 #define current_text_addr() ({ __label__ _l; _l: &&_l;})
 
 #include <linux/config.h>
+#include <linux/stringify.h>
 
 #include <asm/ptrace.h>
 #include <asm/types.h>
@@ -48,12 +46,16 @@
 #define MSR_LE		(1<<0) 		/* Little Endian */
 
 #ifdef CONFIG_APUS_FAST_EXCEPT
-#define MSR_		MSR_ME|MSR_IP|MSR_RI
+#define MSR_		(MSR_ME|MSR_IP|MSR_RI)
 #else
-#define MSR_		MSR_ME|MSR_RI
+#define MSR_		(MSR_ME|MSR_RI)
 #endif
-#define MSR_KERNEL      MSR_|MSR_IR|MSR_DR
-#define MSR_USER	MSR_KERNEL|MSR_PR|MSR_EE
+#ifdef CONFIG_4xx
+#define MSR_KERNEL	(MSR_|MSR_IR|MSR_DR|MSR_CE|MSR_DE)
+#else
+#define MSR_KERNEL      (MSR_|MSR_IR|MSR_DR)
+#endif
+#define MSR_USER	(MSR_KERNEL|MSR_PR|MSR_EE)
 
 /* Floating Point Status and Control Register (FPSCR) Fields */
 
@@ -102,6 +104,15 @@
 #define	SPRN_DBAT2U	0x21C	/* Data BAT 2 Upper Register */
 #define	SPRN_DBAT3L	0x21F	/* Data BAT 3 Lower Register */
 #define	SPRN_DBAT3U	0x21E	/* Data BAT 3 Upper Register */
+#define	SPRN_DBAT4L	0x239	/* Data BAT 4 Lower Register */
+#define	SPRN_DBAT4U	0x238	/* Data BAT 4 Upper Register */
+#define	SPRN_DBAT5L	0x23B	/* Data BAT 5 Lower Register */
+#define	SPRN_DBAT5U	0x23A	/* Data BAT 5 Upper Register */
+#define	SPRN_DBAT6L	0x23D	/* Data BAT 6 Lower Register */
+#define	SPRN_DBAT6U	0x23C	/* Data BAT 6 Upper Register */
+#define	SPRN_DBAT7L	0x23F	/* Data BAT 7 Lower Register */
+#define	SPRN_DBAT7U	0x23E	/* Data BAT 7 Upper Register */
+
 #define	SPRN_DBCR	0x3F2	/* Debug Control Regsiter */
 #define	  DBCR_EDM	0x80000000
 #define	  DBCR_IDM	0x40000000
@@ -136,10 +147,33 @@
 #define	  DBCR_JOI	0x00000002	/* JTAG Serial Outbound Int. Enable */
 #define	  DBCR_JII	0x00000001	/* JTAG Serial Inbound Int. Enable */
 #define	SPRN_DBCR0	0x3F2	/* Debug Control Register 0 */
-#define	SPRN_DBCR1	0x3BD	/* Debug Control Register 1 */
-#define	SPRN_DBSR	0x3F0	/* Debug Status Register */
-#define   DBSR_IC	    0x80000000	/* Instruction Completion             */
-#define   DBSR_TIE	    0x10000000	/* Trap Instruction debug Event       */
+#define   DBCR0_EDM         0x80000000  /* External Debug Mode             */
+#define   DBCR0_IDM         0x40000000  /* Internal Debug Mode             */
+#define   DBCR0_RST         0x30000000  /* all the bits in the RST field   */
+#define   DBCR0_RST_SYSTEM  0x30000000  /* System Reset                    */
+#define   DBCR0_RST_CHIP    0x20000000  /* Chip   Reset                    */
+#define   DBCR0_RST_CORE    0x10000000  /* Core   Reset                    */
+#define   DBCR0_RST_NONE    0x00000000  /* No     Reset                    */
+#define   DBCR0_IC          0x08000000  /* Instruction Completion          */
+#define   DBCR0_BT          0x04000000  /* Branch Taken                    */
+#define   DBCR0_EDE         0x02000000  /* Exception Debug Event           */
+#define   DBCR0_TDE         0x01000000  /* TRAP Debug Event                */
+#define   DBCR0_IA1         0x00800000  /* Instr Addr compare 1 enable     */
+#define   DBCR0_IA2         0x00400000  /* Instr Addr compare 2 enable     */
+#define   DBCR0_IA12        0x00200000  /* Instr Addr 1-2 range enable     */
+#define   DBCR0_IA12X       0x00100000  /* Instr Addr 1-2 range eXclusive  */
+#define   DBCR0_IA3         0x00080000  /* Instr Addr compare 3 enable     */
+#define   DBCR0_IA4         0x00040000  /* Instr Addr compare 4 enable     */
+#define   DBCR0_IA34        0x00020000  /* Instr Addr 3-4 range Enable     */
+#define   DBCR0_IA34X       0x00010000  /* Instr Addr 3-4 range eXclusive  */
+#define   DBCR0_IA12T       0x00008000  /* Instr Addr 1-2 range Toggle     */
+#define   DBCR0_IA34T       0x00004000  /* Instr Addr 3-4 range Toggle     */
+#define   DBCR0_FT          0x00000001  /* Freeze Timers on debug event    */
+#define	SPRN_DBCR1	0x3BD	/* Debug Control Register 1 */		  
+#define	SPRN_DBSR	0x3F0	/* Debug Status Register */		  
+#define   DBSR_IC	    0x80000000	/* Instruction Completion          */
+#define   DBSR_BT	    0x40000000	/* Branch taken */
+#define   DBSR_TIE	    0x10000000	/* Trap Instruction debug Event    */
 #define	SPRN_DCCR	0x3FA	/* Data Cache Cacheability Register */
 #define	  DCCR_NOCACHE		0	/* Noncacheable */
 #define	  DCCR_CACHE		1	/* Cacheable */
@@ -173,10 +207,11 @@
 #define	SPRN_DSISR	0x012	/* Data Storage Interrupt Status Register */
 #define	SPRN_EAR	0x11A	/* External Address Register */
 #define	SPRN_ESR	0x3D4	/* Exception Syndrome Register */
-#define	  ESR_IMCP	0x80000000	/* Instr. Machine Check - Protection */
-#define	  ESR_IMCN	0x40000000	/* Instr. Machine Check - Non-config */
-#define	  ESR_IMCB	0x20000000	/* Instr. Machine Check - Bus error */
-#define	  ESR_IMCT	0x10000000	/* Instr. Machine Check - Timeout */
+#define	  ESR_MCI	0x80000000	/* 405 Machine Check - Instruction */
+#define	  ESR_IMCP	0x80000000	/* 403 Inst. Mach. Check - Protection */
+#define	  ESR_IMCN	0x40000000	/* 403 Inst. Mach. Check - Non-config */
+#define	  ESR_IMCB	0x20000000	/* 403 Inst. Mach. Check - Bus error */
+#define	  ESR_IMCT	0x10000000	/* 403 Inst. Mach. Check - Timeout */
 #define	  ESR_PIL	0x08000000	/* Program Exception - Illegal */
 #define	  ESR_PPR	0x04000000	/* Program Exception - Priveleged */
 #define	  ESR_PTR	0x02000000	/* Program Exception - Trap */
@@ -191,12 +226,18 @@
 #define	  HID0_EBD	(1<<28)		/* Enable Bus Data Parity */
 #define	  HID0_SBCLK	(1<<27)
 #define	  HID0_EICE	(1<<26)
+#define	  HID0_TBEN	(1<<26)		/* Timebase enable - 745x */
 #define	  HID0_ECLK	(1<<25)
 #define	  HID0_PAR	(1<<24)
+#define	  HID0_STEN	(1<<24)		/* Software table search enable - 745x */
+#define	  HID0_HIGH_BAT	(1<<23)		/* Enable high BATs - 7455 */
 #define	  HID0_DOZE	(1<<23)
 #define	  HID0_NAP	(1<<22)
 #define	  HID0_SLEEP	(1<<21)
 #define	  HID0_DPM	(1<<20)
+#define	  HID0_BHTCLR	(1<<18)		/* Clear branch history table - 7450 */
+#define	  HID0_XAEN	(1<<17)		/* Extended addressing enable - 7450 */
+#define   HID0_NHR	(1<<16)		/* Not hard reset (software bit-7450)*/
 #define	  HID0_ICE	(1<<15)		/* Instruction Cache Enable */
 #define	  HID0_DCE	(1<<14)		/* Data Cache Enable */
 #define	  HID0_ILOCK	(1<<13)		/* Instruction Cache Lock */
@@ -207,11 +248,23 @@
 #define   HID0_SGE	(1<<7)		/* Store Gathering Enable */
 #define	  HID0_SIED	(1<<7)		/* Serial Instr. Execution [Disable] */
 #define	  HID0_DFCA	(1<<6)		/* Data Cache Flush Assist */
-#define   HID0_BTIC	(1<<5)		/* Branch Target Instruction Cache Enable */
+#define   HID0_LRSTK	(1<<4)		/* Link register stack - 745x */
+#define   HID0_BTIC	(1<<5)		/* Branch Target Instr Cache Enable */
 #define   HID0_ABE	(1<<3)		/* Address Broadcast Enable */
+#define   HID0_FOLD	(1<<3)		/* Branch Folding enable - 745x */
 #define	  HID0_BHTE	(1<<2)		/* Branch History Table Enable */
 #define	  HID0_BTCD	(1<<1)		/* Branch target cache disable */
+#define	  HID0_NOPDST	(1<<1)		/* No-op dst, dstt, etc. instr. */
+#define	  HID0_NOPTI	(1<<0)		/* No-op dcbt and dcbst instr. */
+
 #define	SPRN_HID1	0x3F1	/* Hardware Implementation Register 1 */
+#define	  HID1_EMCP	(1<<31)		/* 7450 Machine Check Pin Enable */
+#define   HID1_PC0	(1<<16)		/* 7450 PLL_CFG[0] */
+#define   HID1_PC1	(1<<15)		/* 7450 PLL_CFG[1] */
+#define   HID1_PC2	(1<<14)		/* 7450 PLL_CFG[2] */
+#define   HID1_PC3	(1<<13)		/* 7450 PLL_CFG[3] */
+#define	  HID1_SYNCBE	(1<<11)		/* 7450 ABE for sync, eieio */
+#define	  HID1_ABE	(1<<10)		/* 7450 Address Broadcast Enable */
 #define	SPRN_IABR	0x3F2	/* Instruction Address Breakpoint Register */
 #define	SPRN_IAC1	0x3F4	/* Instruction Address Compare 1 */
 #define	SPRN_IAC2	0x3F5	/* Instruction Address Compare 2 */
@@ -223,12 +276,24 @@
 #define	SPRN_IBAT2U	0x214	/* Instruction BAT 2 Upper Register */
 #define	SPRN_IBAT3L	0x217	/* Instruction BAT 3 Lower Register */
 #define	SPRN_IBAT3U	0x216	/* Instruction BAT 3 Upper Register */
+#define	SPRN_IBAT4L	0x231	/* Instruction BAT 4 Lower Register */
+#define	SPRN_IBAT4U	0x230	/* Instruction BAT 4 Upper Register */
+#define	SPRN_IBAT5L	0x233	/* Instruction BAT 5 Lower Register */
+#define	SPRN_IBAT5U	0x232	/* Instruction BAT 5 Upper Register */
+#define	SPRN_IBAT6L	0x235	/* Instruction BAT 6 Lower Register */
+#define	SPRN_IBAT6U	0x234	/* Instruction BAT 6 Upper Register */
+#define	SPRN_IBAT7L	0x237	/* Instruction BAT 7 Lower Register */
+#define	SPRN_IBAT7U	0x236	/* Instruction BAT 7 Upper Register */
 #define	SPRN_ICCR	0x3FB	/* Instruction Cache Cacheability Register */
 #define	  ICCR_NOCACHE		0	/* Noncacheable */
 #define	  ICCR_CACHE		1	/* Cacheable */
 #define	SPRN_ICDBDR	0x3D3	/* Instruction Cache Debug Data Register */
 #define	SPRN_ICMP	0x3D5	/* Instruction TLB Compare Register */
 #define	SPRN_ICTC	0x3FB	/* Instruction Cache Throttling Control Reg */
+#define	SPRN_ICTRL 	0x3F3	/* 1011 7450 icache and interrupt ctrl */
+#define   ICTRL_EICE		0x08000000	/* enable icache parity errs */
+#define   ICTRL_EDCE		0x04000000	/* enable dcache parity errs */
+#define   ICTRL_EICP		0x00000100	/* enable icache par. check */
 #define	SPRN_IMISS	0x3D4	/* Instruction TLB Miss Register */
 #define	SPRN_IMMR	0x27E  	/* Internal Memory Map Register */
 #define	SPRN_L2CR	0x3F9	/* Level 2 Cache Control Regsiter */
@@ -261,6 +326,31 @@
 #define L2CR_L2DF		0x00004000	/* L2 differential clock */
 #define L2CR_L2BYP		0x00002000	/* L2 DLL bypass */
 #define L2CR_L2IP		0x00000001	/* L2 GI in progress */
+#define SPRN_L2CR2      0x3f8
+#define	SPRN_L3CR	0x3FA	/* Level 3 Cache Control Regsiter (7450) */
+#define L3CR_L3E		0x80000000	/* L3 enable */
+#define L3CR_L3PE		0x40000000	/* L3 data parity enable */
+#define L3CR_L3APE		0x20000000	/* L3 addr parity enable */
+#define L3CR_L3SIZ		0x10000000	/* L3 size */
+#define L3CR_L3CLKEN		0x08000000	/* L3 clock enable */
+#define L3CR_L3RES		0x04000000	/* L3 special reserved bit */
+#define L3CR_L3CLKDIV		0x03800000	/* L3 clock divisor */
+#define L3CR_L3IO		0x00400000	/* L3 instruction only */
+#define L3CR_L3SPO		0x00040000	/* L3 sample point override */
+#define L3CR_L3CKSP		0x00030000	/* L3 clock sample point */
+#define L3CR_L3PSP		0x0000e000	/* L3 P-clock sample point */
+#define L3CR_L3REP		0x00001000	/* L3 replacement algorithm */
+#define L3CR_L3HWF		0x00000800	/* L3 hardware flush */
+#define L3CR_L3I		0x00000400	/* L3 global invalidate */
+#define L3CR_L3RT		0x00000300	/* L3 SRAM type */
+#define L3CR_L3NIRCA		0x00000080	/* L3 non-integer ratio clock adj. */
+#define L3CR_L3DO		0x00000040	/* L3 data only mode */
+#define L3CR_PMEN		0x00000004	/* L3 private memory enable */
+#define L3CR_PMSIZ		0x00000001	/* L3 private memory size */
+#define SPRN_MSSCR0	0x3f6	/* Memory Subsystem Control Register 0 */
+#define SPRN_MSSSR0	0x3f7	/* Memory Subsystem Status Register 1 */
+#define SPRN_LDSTCR	0x3f8	/* Load/Store control register */
+#define SPRN_LDSTDB	0x3f4	/* */
 #define	SPRN_LR		0x008	/* Link Register */
 #define	SPRN_MMCR0	0x3B8	/* Monitor Mode Control Register 0 */
 #define	SPRN_MMCR1	0x3BC	/* Monitor Mode Control Register 1 */
@@ -275,6 +365,8 @@
 #define	SPRN_PMC2	0x3BA	/* Performance Counter Register 2 */
 #define	SPRN_PMC3	0x3BD	/* Performance Counter Register 3 */
 #define	SPRN_PMC4	0x3BE	/* Performance Counter Register 4 */
+#define	SPRN_PTEHI	0x3D5	/* 981 7450 PTE HI word (S/W TLB load) */
+#define	SPRN_PTELO	0x3D6	/* 982 7450 PTE LO word (S/W TLB load)  */
 #define	SPRN_PVR	0x11F	/* Processor Version Register */
 #define	SPRN_RPA	0x3D6	/* Required Physical Address Register */
 #define	SPRN_SDA	0x3BF	/* Sampled Data Address Register */
@@ -295,17 +387,23 @@
 #define	SPRN_SRR1	0x01B	/* Save/Restore Register 1 */
 #define	SPRN_SRR2	0x3DE	/* Save/Restore Register 2 */
 #define	SPRN_SRR3 	0x3DF	/* Save/Restore Register 3 */
+#define	SPRN_TBHI	0x3DC	/* Time Base High (4xx) */
+#define	SPRN_TBHU	0x3CC	/* Time Base High User-mode (4xx) */
+#define	SPRN_TBLO	0x3DD	/* Time Base Low (4xx) */
+#define	SPRN_TBLU	0x3CD	/* Time Base Low User-mode (4xx) */
 #define	SPRN_TBRL	0x10C	/* Time Base Read Lower Register (user, R/O) */
 #define	SPRN_TBRU	0x10D	/* Time Base Read Upper Register (user, R/O) */
-#define	SPRN_TBWL	0x11C	/* Time Base Lower Register (supervisor, R/W) */
-#define	SPRN_TBWU	0x11D	/* Time Base Upper Register (supervisor, R/W) */
+#define	SPRN_TBWL	0x11C	/* Time Base Lower Register (super, R/W) */
+#define	SPRN_TBWU	0x11D	/* Time Base Upper Register (super, R/W) */
 #define	SPRN_TCR	0x3DA	/* Timer Control Register */
 #define	  TCR_WP(x)		(((x)&0x3)<<30)	/* WDT Period */
+#define     TCR_WP_MASK         TCR_WP(3)
 #define	    WP_2_17		0		/* 2^17 clocks */
 #define	    WP_2_21		1		/* 2^21 clocks */
 #define	    WP_2_25		2		/* 2^25 clocks */
 #define	    WP_2_29		3		/* 2^29 clocks */
 #define	  TCR_WRC(x)		(((x)&0x3)<<28)	/* WDT Reset Control */
+#define     TCR_WRC_MASK        TCR_WRC(3)
 #define	    WRC_NONE		0		/* No reset will occur */
 #define	    WRC_CORE		1		/* Core reset will occur */
 #define	    WRC_CHIP		2		/* Chip reset will occur */
@@ -313,6 +411,7 @@
 #define	  TCR_WIE		0x08000000	/* WDT Interrupt Enable */
 #define	  TCR_PIE		0x04000000	/* PIT Interrupt Enable */
 #define	  TCR_FP(x)		(((x)&0x3)<<24)	/* FIT Period */
+#define     TCR_FP_MASK         TCR_FP(3)
 #define	    FP_2_9		0		/* 2^9 clocks */
 #define	    FP_2_13		1		/* 2^13 clocks */
 #define	    FP_2_17		2		/* 2^17 clocks */
@@ -331,6 +430,7 @@
 #define	SPRN_THRM2	0x3FD	/* Thermal Management Register 2 */
 #define	SPRN_THRM3	0x3FE	/* Thermal Management Register 3 */
 #define	  THRM3_E		(1<<0)
+#define	SPRN_TLBMISS	0x3D4	/* 980 7450 TLB Miss Register */
 #define	SPRN_TSR	0x3D8	/* Timer Status Register */
 #define	  TSR_ENW		0x80000000	/* Enable Next Watchdog */
 #define	  TSR_WIS		0x40000000	/* WDT Interrupt Status */
@@ -365,6 +465,14 @@
 #define	DBAT2U	SPRN_DBAT2U	/* Data BAT 2 Upper Register */
 #define	DBAT3L	SPRN_DBAT3L	/* Data BAT 3 Lower Register */
 #define	DBAT3U	SPRN_DBAT3U	/* Data BAT 3 Upper Register */
+#define	DBAT4L	SPRN_DBAT4L	/* Data BAT 4 Lower Register */
+#define	DBAT4U	SPRN_DBAT4U	/* Data BAT 4 Upper Register */
+#define	DBAT5L	SPRN_DBAT5L	/* Data BAT 5 Lower Register */
+#define	DBAT5U	SPRN_DBAT5U	/* Data BAT 5 Upper Register */
+#define	DBAT6L	SPRN_DBAT6L	/* Data BAT 6 Lower Register */
+#define	DBAT6U	SPRN_DBAT6U	/* Data BAT 6 Upper Register */
+#define	DBAT7L	SPRN_DBAT7L	/* Data BAT 7 Lower Register */
+#define	DBAT7U	SPRN_DBAT7U	/* Data BAT 7 Upper Register */
 #define	DCMP	SPRN_DCMP      	/* Data TLB Compare Register */
 #define	DEC	SPRN_DEC       	/* Decrement Register */
 #define	DMISS	SPRN_DMISS     	/* Data TLB Miss Register */
@@ -383,10 +491,19 @@
 #define	IBAT2U	SPRN_IBAT2U	/* Instruction BAT 2 Upper Register */
 #define	IBAT3L	SPRN_IBAT3L	/* Instruction BAT 3 Lower Register */
 #define	IBAT3U	SPRN_IBAT3U	/* Instruction BAT 3 Upper Register */
+#define	IBAT4L	SPRN_IBAT4L	/* Instruction BAT 4 Lower Register */
+#define	IBAT4U	SPRN_IBAT4U	/* Instruction BAT 4 Upper Register */
+#define	IBAT5L	SPRN_IBAT5L	/* Instruction BAT 5 Lower Register */
+#define	IBAT5U	SPRN_IBAT5U	/* Instruction BAT 5 Upper Register */
+#define	IBAT6L	SPRN_IBAT6L	/* Instruction BAT 6 Lower Register */
+#define	IBAT6U	SPRN_IBAT6U	/* Instruction BAT 6 Upper Register */
+#define	IBAT7L	SPRN_IBAT7L	/* Instruction BAT 7 Lower Register */
+#define	IBAT7U	SPRN_IBAT7U	/* Instruction BAT 7 Upper Register */
 #define	ICMP	SPRN_ICMP	/* Instruction TLB Compare Register */
 #define	IMISS	SPRN_IMISS	/* Instruction TLB Miss Register */
 #define	IMMR	SPRN_IMMR      	/* PPC 860/821 Internal Memory Map Register */
-#define	L2CR	SPRN_L2CR    	/* PPC 750 L2 control register */
+#define	L2CR	SPRN_L2CR    	/* Classic PPC L2 cache control register */
+#define	L3CR	SPRN_L3CR	/* PPC 745x L3 cache control register */
 #define	LR	SPRN_LR
 #define	PVR	SPRN_PVR	/* Processor Version */
 #define	RPA	SPRN_RPA	/* Required Physical Address Register */
@@ -409,6 +526,8 @@
 #define	SPRG7   SPRN_SPRG7
 #define	SRR0	SPRN_SRR0	/* Save and Restore Register 0 */
 #define	SRR1	SPRN_SRR1	/* Save and Restore Register 1 */
+#define	SRR2	SPRN_SRR2	/* Save and Restore Register 2 */
+#define	SRR3	SPRN_SRR3	/* Save and Restore Register 3 */
 #define	TBRL	SPRN_TBRL	/* Time Base Read Lower Register */
 #define	TBRU	SPRN_TBRU	/* Time Base Read Upper Register */
 #define	TBWL	SPRN_TBWL	/* Time Base Write Lower Register */
@@ -438,46 +557,9 @@
 #define	PVR_MAJ(pvr)	(((pvr) >>  4) & 0xF)	/* Major revision field */
 #define	PVR_MIN(pvr)	(((pvr) >>  0) & 0xF)	/* Minor revision field */
 
-/* Processor Version Numbers */
-
-#define	PVR_403GA	0x00200000
-#define	PVR_403GB	0x00200100
-#define	PVR_403GC	0x00200200
-#define	PVR_403GCX	0x00201400
-#define	PVR_405GP	0x40110000
-#define	PVR_STB03XXX	0x40310000 
-#define	PVR_601		0x00010000
-#define	PVR_602		0x00050000
-#define	PVR_603		0x00030000
-#define	PVR_603e	0x00060000
-#define	PVR_603ev	0x00070000
-#define	PVR_603r	0x00071000
-#define	PVR_604		0x00040000
-#define	PVR_604e	0x00090000
-#define	PVR_604r	0x000A0000
-#define	PVR_620		0x00140000
-#define	PVR_740		0x00080000
-#define	PVR_750		PVR_740
-#define	PVR_740P	0x10080000
-#define	PVR_750P	PVR_740P
-#define	PVR_7400	0x000C0000
-#define	PVR_7410	0x800C0000
-/*
- * For the 8xx processors, all of them report the same PVR family for
- * the PowerPC core. The various versions of these processors must be
- * differentiated by the version number in the Communication Processor
- * Module (CPM).
- */
-#define	PVR_821		0x00500000
-#define	PVR_823		PVR_821
-#define	PVR_850		PVR_821
-#define	PVR_860		PVR_821
-#define	PVR_8240	0x00810100
-#define	PVR_8260	PVR_8240
-
 /* We only need to define a new _MACH_xxx for machines which are part of
  * a configuration which supports more than one type of different machine.
- * This is currently limited to CONFIG_ALL_PPC and CHRP/PReP/PMac. -- Tom
+ * This is currently limited to CONFIG_PPC_MULTIPLATFORM and CHRP/PReP/PMac. -- Tom
  */
 #define _MACH_prep	0x00000001
 #define _MACH_Pmac	0x00000002	/* pmac or pmac clone (non-chrp) */
@@ -494,6 +576,7 @@
 #define _CHRP_IBM      0x05  /* IBM chrp, the longtrail and longtrail 2 */
 
 #define _GLOBAL(n)\
+        .stabs __stringify(n:F-1),N_FUN,0,0,n;\
 	.globl n;\
 n:
 
@@ -501,11 +584,6 @@ n:
 
 #define stringify(s)	tostring(s)
 #define tostring(s)	#s
-
-#define mfdcr(rn)	({unsigned int rval; \
-			asm volatile("mfdcr %0," stringify(rn) \
-				     : "=r" (rval)); rval;})
-#define mtdcr(rn, v)	asm volatile("mtdcr " stringify(rn) ",%0" : : "r" (v))
 
 #define mfmsr()		({unsigned int rval; \
 			asm volatile("mfmsr %0" : "=r" (rval)); rval;})
@@ -515,6 +593,12 @@ n:
 			asm volatile("mfspr %0," stringify(rn) \
 				     : "=r" (rval)); rval;})
 #define mtspr(rn, v)	asm volatile("mtspr " stringify(rn) ",%0" : : "r" (v))
+
+#define mfsrin(v)	({unsigned int rval; \
+			asm volatile("mfsrin %0,%1" : "=r" (rval) : "r" (v)); \
+					rval;})
+
+#define proc_trap()  	asm volatile("trap")
 
 /* Segment Registers */
 
@@ -536,7 +620,7 @@ n:
 #define SR15	15
 
 #ifndef __ASSEMBLY__
-#if defined(CONFIG_ALL_PPC)
+#ifdef CONFIG_PPC_MULTIPLATFORM
 extern int _machine;
 
 /* what kind of prep workstation we are */
@@ -551,11 +635,14 @@ extern unsigned char ucBoardRev;
 extern unsigned char ucBoardRevMaj, ucBoardRevMin;
 #else
 #define _machine 0
-#endif /* CONFIG_ALL_PPC */
+#endif /* CONFIG_PPC_MULTIPLATFORM */
 
 struct task_struct;
 void start_thread(struct pt_regs *regs, unsigned long nip, unsigned long sp);
 void release_thread(struct task_struct *);
+
+/* Prepare to copy thread state - unlazy all lazy status */
+extern void prepare_to_copy(struct task_struct *tsk);
 
 /*
  * Create a new kernel thread.
@@ -566,9 +653,7 @@ extern long kernel_thread(int (*fn)(void *), void *arg, unsigned long flags);
  * Bus types
  */
 #define EISA_bus 0
-#define EISA_bus__is_a_macro /* for versions in ksyms.c */
 #define MCA_bus 0
-#define MCA_bus__is_a_macro /* for versions in ksyms.c */
 
 /* Lazy FPU handling on uni-processor */
 extern struct task_struct *last_task_used_math;
@@ -580,7 +665,7 @@ extern struct task_struct *last_task_used_altivec;
  * as soon as I get around to remapping the io areas with the BATs
  * to match the mac we can raise this. -- Cort
  */
-#define TASK_SIZE	(0x80000000UL)
+#define TASK_SIZE	(CONFIG_TASK_SIZE)
 
 /* This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
@@ -593,17 +678,23 @@ typedef struct {
 
 struct thread_struct {
 	unsigned long	ksp;		/* Kernel stack pointer */
-	unsigned long	wchan;		/* Event task is sleeping on */
 	struct pt_regs	*regs;		/* Pointer to saved register state */
 	mm_segment_t	fs;		/* for get_fs() validation */
 	void		*pgdir;		/* root of page-table tree */
+	int		fpexc_mode;	/* floating-point exception mode */
 	signed long     last_syscall;
+#ifdef CONFIG_4xx
+	unsigned long	dbcr0;		/* debug control register values */
+	unsigned long	dbcr1;
+#endif
 	double		fpr[32];	/* Complete floating point set */
 	unsigned long	fpscr_pad;	/* fpr ... fpscr must be contiguous */
 	unsigned long	fpscr;		/* Floating point status */
 #ifdef CONFIG_ALTIVEC
-	vector128	vr[32];		/* Complete AltiVec set */
-	vector128	vscr;		/* AltiVec status */
+	/* Complete AltiVec register set */
+	vector128	vr[32] __attribute((aligned(16)));
+	/* AltiVec status */
+	vector128	vscr __attribute((aligned(16)));
 	unsigned long	vrsave;
 #endif /* CONFIG_ALTIVEC */
 };
@@ -611,51 +702,49 @@ struct thread_struct {
 #define INIT_SP		(sizeof(init_stack) + (unsigned long) &init_stack)
 
 #define INIT_THREAD  { \
-	INIT_SP, /* ksp */ \
-	0, /* wchan */ \
-	0, /* regs */ \
-	KERNEL_DS, /*fs*/ \
-	swapper_pg_dir, /* pgdir */ \
-	0, /* last_syscall */ \
-	{0}, 0, 0 \
+	.ksp = INIT_SP, \
+	.fs = KERNEL_DS, \
+	.pgdir = swapper_pg_dir, \
 }
 
 /*
  * Return saved PC of a blocked thread. For now, this is the "user" PC
  */
-static inline unsigned long thread_saved_pc(struct thread_struct *t)
-{
-	return (t->regs) ? t->regs->nip : 0;
-}
-
-#define copy_segments(tsk, mm)		do { } while (0)
-#define release_segments(mm)		do { } while (0)
+#define thread_saved_pc(tsk)	\
+	((tsk)->thread.regs? (tsk)->thread.regs->nip: 0)
 
 unsigned long get_wchan(struct task_struct *p);
 
 #define KSTK_EIP(tsk)  ((tsk)->thread.regs? (tsk)->thread.regs->nip: 0)
 #define KSTK_ESP(tsk)  ((tsk)->thread.regs? (tsk)->thread.regs->gpr[1]: 0)
 
-/*
- * NOTE! The task struct and the stack go together
- */
-#define THREAD_SIZE (2*PAGE_SIZE)
-#define alloc_task_struct() \
-	((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
-#define free_task_struct(p)	free_pages((unsigned long)(p),1)
-#define get_task_struct(tsk)      atomic_inc(&virt_to_page(tsk)->count)
+/* Get/set floating-point exception mode */
+#define GET_FPEXC_CTL(tsk, adr)	get_fpexc_mode((tsk), (adr))
+#define SET_FPEXC_CTL(tsk, val)	set_fpexc_mode((tsk), (val))
+
+extern int get_fpexc_mode(struct task_struct *tsk, unsigned long adr);
+extern int set_fpexc_mode(struct task_struct *tsk, unsigned int val);
+
+static inline unsigned int __unpack_fe01(unsigned int msr_bits)
+{
+	return ((msr_bits & MSR_FE0) >> 10) | ((msr_bits & MSR_FE1) >> 8);
+}
+
+static inline unsigned int __pack_fe01(unsigned int fpmode)
+{
+	return ((fpmode << 10) & MSR_FE0) | ((fpmode << 8) & MSR_FE1);
+}
 
 /* in process.c - for early bootup debug -- Cort */
 int ll_printk(const char *, ...);
 void ll_puts(const char *);
 
-#define init_task	(init_task_union.task)
-#define init_stack	(init_task_union.stack)
-
 /* In misc.c */
 void _nmask_and_or_msr(unsigned long nmask, unsigned long or_val);
 
-#define cpu_relax()	do { } while (0)
+#define have_of (_machine == _MACH_chrp || _machine == _MACH_Pmac)
+
+#define cpu_relax()	barrier()
 
 /*
  * Prefetch macros.
@@ -677,8 +766,6 @@ extern inline void prefetchw(const void *x)
 #define spin_lock_prefetch(x)	prefetchw(x)
 
 #endif /* !__ASSEMBLY__ */
-
-#define have_of (_machine == _MACH_chrp || _machine == _MACH_Pmac)
 
 #endif /* __ASM_PPC_PROCESSOR_H */
 #endif /* __KERNEL__ */

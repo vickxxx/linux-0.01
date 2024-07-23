@@ -17,12 +17,14 @@
  *  along with this program; if not, write to the Free Software
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-
+#include <linux/init.h>
 #include <linux/module.h>
 #include <linux/spinlock.h>
+#include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/pm.h>
 #include <linux/interrupt.h>
+#include <linux/sysrq.h>
 
 int pm_active;
 
@@ -139,11 +141,11 @@ void pm_unregister_all(pm_callback callback)
  *	data field must hold the intended next state. No call is made
  *	if the state matches.
  *
- *	BUGS: what stops two power management requests occuring in parallel
+ *	BUGS: what stops two power management requests occurring in parallel
  *	and conflicting.
  *
  *	WARNING: Calling pm_send directly is not generally recommended, in
- *	paticular there is no locking against the pm_dev going away. The
+ *	particular there is no locking against the pm_dev going away. The
  *	caller must maintain all needed locking or have 'inside knowledge'
  *	on the safety. Also remember that this function is not locked against
  *	pm_unregister. This means that you must handle SMP races on callback
@@ -153,7 +155,7 @@ void pm_unregister_all(pm_callback callback)
 int pm_send(struct pm_dev *dev, pm_request_t rqst, void *data)
 {
 	int status = 0;
-	int prev_state, next_state;
+	unsigned long prev_state, next_state;
 
 	if (in_interrupt())
 		BUG();
@@ -225,7 +227,7 @@ static void pm_undo_all(struct pm_dev *last)
  *	Zero is returned on success. If a suspend fails then the status
  *	from the device that vetoes the suspend is returned.
  *
- *	BUGS: what stops two power management requests occuring in parallel
+ *	BUGS: what stops two power management requests occurring in parallel
  *	and conflicting.
  */
  
@@ -291,3 +293,41 @@ EXPORT_SYMBOL(pm_send);
 EXPORT_SYMBOL(pm_send_all);
 EXPORT_SYMBOL(pm_find);
 EXPORT_SYMBOL(pm_active);
+
+
+#ifdef CONFIG_MAGIC_SYSRQ
+
+/**
+ * handle_poweroff	-	sysrq callback for power down
+ * @key: key pressed (unused)
+ * @pt_regs: register state (unused)
+ * @kbd: keyboard state (unused)
+ * @tty: tty involved (unused)
+ *
+ * When the user hits Sys-Rq o to power down the machine this is the
+ * callback we use.
+ */
+
+static void handle_poweroff (int key, struct pt_regs *pt_regs,
+			     struct tty_struct *tty)
+{
+	if (pm_power_off)
+		pm_power_off();
+}
+
+static struct sysrq_key_op	sysrq_poweroff_op = {
+	.handler        = handle_poweroff,
+	.help_msg       = "powerOff",
+	.action_msg     = "Power Off\n"
+};
+
+#endif  /* CONFIG_MAGIC_SYSRQ */
+
+
+static int pm_init(void)
+{
+	register_sysrq_key('o', &sysrq_poweroff_op);
+	return 0;
+}
+
+subsys_initcall(pm_init);

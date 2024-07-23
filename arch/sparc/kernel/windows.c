@@ -32,7 +32,7 @@ void flush_user_windows(void)
 		" restore %%g0, %%g0, %%g0\n"
 	: "=&r" (ctr)
 	: "0" (ctr),
-	  "i" ((const unsigned long)(&(((struct task_struct *)0)->thread.uwinmask)))
+	  "i" ((const unsigned long)TI_UWINMASK)
 	: "g4", "cc");
 }
 
@@ -120,7 +120,7 @@ void try_to_clear_window_buffer(struct pt_regs *regs, int who)
 		unsigned long sp = tp->rwbuf_stkptrs[window];
 
 		if((sp & 7) ||
-		   copy_to_user((char *) sp, &tp->reg_window[window], REGWIN_SZ))
+		   copy_to_user((char *) sp, &tp->reg_window[window], sizeof(struct reg_window)))
 			do_exit(SIGILL);
 	}
 	tp->w_saved = 0;

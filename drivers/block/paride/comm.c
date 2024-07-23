@@ -17,6 +17,7 @@
 #define COMM_VERSION      "1.01"
 
 #include <linux/module.h>
+#include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -186,45 +187,32 @@ static void comm_log_adapter( PIA *pi, char * scratch, int verbose )
 
 }
 
-static void comm_init_proto(PIA *pi)
+static struct pi_protocol comm = {
+	.owner		= THIS_MODULE,
+	.name		= "comm",
+	.max_mode	= 5,
+	.epp_first	= 2,
+	.default_delay	= 1,
+	.max_units	= 1,
+	.write_regr	= comm_write_regr,
+	.read_regr	= comm_read_regr,
+	.write_block	= comm_write_block,
+	.read_block	= comm_read_block,
+	.connect	= comm_connect,
+	.disconnect	= comm_disconnect,
+	.log_adapter	= comm_log_adapter,
+};
 
-{       MOD_INC_USE_COUNT;
+static int __init comm_init(void)
+{
+	return pi_register(&comm)-1;
 }
 
-static void comm_release_proto(PIA *pi)
-
-{       MOD_DEC_USE_COUNT;
+static void __exit comm_exit(void)
+{
+	pi_unregister(&comm);
 }
 
-struct pi_protocol comm = {"comm",0,5,2,1,1,
-                           comm_write_regr,
-                           comm_read_regr,
-                           comm_write_block,
-                           comm_read_block,
-                           comm_connect,
-                           comm_disconnect,
-                           0,
-                           0,
-                           0,
-                           comm_log_adapter,
-                           comm_init_proto,
-                           comm_release_proto
-                          };
-
-
-#ifdef MODULE
-
-int     init_module(void)
-
-{       return pi_register( &comm ) - 1;
-}
-
-void    cleanup_module(void)
-
-{       pi_unregister( &comm );
-}
-
-#endif
-
-/* end of comm.c */
 MODULE_LICENSE("GPL");
+module_init(comm_init)
+module_exit(comm_exit)

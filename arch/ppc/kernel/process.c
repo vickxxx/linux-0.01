@@ -1,8 +1,5 @@
 /*
- * BK Id: SCCS/s.process.c 1.31 10/02/01 09:51:41 paulus
- */
-/*
- *  linux/arch/ppc/kernel/process.c
+ *  arch/ppc/kernel/process.c
  *
  *  Derived from "arch/i386/kernel/process.c"
  *    Copyright (C) 1995  Linus Torvalds
@@ -34,6 +31,10 @@
 #include <linux/user.h>
 #include <linux/elf.h>
 #include <linux/init.h>
+#include <linux/prctl.h>
+#include <linux/init_task.h>
+#include <linux/module.h>
+#include <linux/kallsyms.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
@@ -42,20 +43,29 @@
 #include <asm/processor.h>
 #include <asm/mmu.h>
 #include <asm/prom.h>
+#include <asm/hardirq.h>
 
 int dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpregs);
 extern unsigned long _get_SP(void);
 
 struct task_struct *last_task_used_math = NULL;
 struct task_struct *last_task_used_altivec = NULL;
+
 static struct fs_struct init_fs = INIT_FS;
 static struct files_struct init_files = INIT_FILES;
-static struct signal_struct init_signals = INIT_SIGNALS;
+static struct signal_struct init_signals = INIT_SIGNALS(init_signals);
+static struct sighand_struct init_sighand = INIT_SIGHAND(init_sighand);
 struct mm_struct init_mm = INIT_MM(init_mm);
-/* this is 16-byte aligned because it has a stack in it */
-union task_union __attribute((aligned(16))) init_task_union = {
-	INIT_TASK(init_task_union.task)
-};
+
+/* this is 8kB-aligned so we can get to the thread_info struct
+   at the base of it from the stack pointer with 1 integer instruction. */
+union thread_union init_thread_union
+	__attribute__((__section__(".data.init_task"))) =
+{ INIT_THREAD_INFO(init_task) };
+
+/* initial task structure */
+struct task_struct init_task = INIT_TASK(init_task);
+
 /* only used to get secondary processor up */
 struct task_struct *current_set[NR_CPUS] = {&init_task, };
 
@@ -185,16 +195,15 @@ dump_fpu(struct pt_regs *regs, elf_fpregset_t *fpregs)
 	return 1;
 }
 
-void
-_switch_to(struct task_struct *prev, struct task_struct *new,
-	  struct task_struct **last)
+struct task_struct *__switch_to(struct task_struct *prev,
+	struct task_struct *new)
 {
 	struct thread_struct *new_thread, *old_thread;
 	unsigned long s;
+	struct task_struct *last;
 	
-	__save_flags(s);
-	__cli();
-#if CHECK_STACK
+	local_irq_save(s);
+#ifdef CHECK_STACK
 	check_stack(prev);
 	check_stack(new);
 #endif
@@ -209,7 +218,7 @@ _switch_to(struct task_struct *prev, struct task_struct *new,
 	 * every switch, just a save.
 	 *  -- Cort
 	 */
-	if ( prev->thread.regs && (prev->thread.regs->msr & MSR_FP) )
+	if (prev->thread.regs && (prev->thread.regs->msr & MSR_FP))
 		giveup_fpu(prev);
 #ifdef CONFIG_ALTIVEC	
 	/*
@@ -228,8 +237,6 @@ _switch_to(struct task_struct *prev, struct task_struct *new,
 #endif /* CONFIG_ALTIVEC */	
 #endif /* CONFIG_SMP */
 
-	current_set[smp_processor_id()] = new;
-
 	/* Avoid the trap.  On smp this this never happens since
 	 * we don't set last_task_used_altivec -- Cort
 	 */
@@ -237,61 +244,57 @@ _switch_to(struct task_struct *prev, struct task_struct *new,
 		new->thread.regs->msr |= MSR_VEC;
 	new_thread = &new->thread;
 	old_thread = &current->thread;
-	*last = _switch(old_thread, new_thread);
-	__restore_flags(s);
+	last = _switch(old_thread, new_thread);
+	local_irq_restore(s);
+	return last;
 }
 
 void show_regs(struct pt_regs * regs)
 {
-	int i;
+	int i, trap;
 
-	printk("NIP: %08lX XER: %08lX LR: %08lX SP: %08lX REGS: %p TRAP: %04lx    %s\n",
-	       regs->nip, regs->xer, regs->link, regs->gpr[1], regs,regs->trap, print_tainted());
+	printk("NIP: %08lX LR: %08lX SP: %08lX REGS: %p TRAP: %04lx    %s\n",
+	       regs->nip, regs->link, regs->gpr[1], regs, regs->trap,
+	       print_tainted());
 	printk("MSR: %08lx EE: %01x PR: %01x FP: %01x ME: %01x IR/DR: %01x%01x\n",
 	       regs->msr, regs->msr&MSR_EE ? 1 : 0, regs->msr&MSR_PR ? 1 : 0,
 	       regs->msr & MSR_FP ? 1 : 0,regs->msr&MSR_ME ? 1 : 0,
 	       regs->msr&MSR_IR ? 1 : 0,
 	       regs->msr&MSR_DR ? 1 : 0);
-	if (regs->trap == 0x300 || regs->trap == 0x600)
+	trap = TRAP(regs);
+	if (trap == 0x300 || trap == 0x600)
 		printk("DAR: %08lX, DSISR: %08lX\n", regs->dar, regs->dsisr);
 	printk("TASK = %p[%d] '%s' ",
 	       current, current->pid, current->comm);
 	printk("Last syscall: %ld ", current->thread.last_syscall);
-	printk("\nlast math %p last altivec %p", last_task_used_math,
-	       last_task_used_altivec);
 
-#ifdef CONFIG_4xx
+#if defined(CONFIG_4xx) && defined(DCRN_PLB0_BEAR)
 	printk("\nPLB0: bear= 0x%8.8x acr=   0x%8.8x besr=  0x%8.8x\n",
-	    mfdcr(DCRN_POB0_BEAR), mfdcr(DCRN_PLB0_ACR),
+	    mfdcr(DCRN_PLB0_BEAR), mfdcr(DCRN_PLB0_ACR),
 	    mfdcr(DCRN_PLB0_BESR));
+#endif
+#if defined(CONFIG_4xx) && defined(DCRN_POB0_BEAR)
 	printk("PLB0 to OPB: bear= 0x%8.8x besr0= 0x%8.8x besr1= 0x%8.8x\n",
-	    mfdcr(DCRN_PLB0_BEAR), mfdcr(DCRN_POB0_BESR0),
+	    mfdcr(DCRN_POB0_BEAR), mfdcr(DCRN_POB0_BESR0),
 	    mfdcr(DCRN_POB0_BESR1));
 #endif
 	
 #ifdef CONFIG_SMP
-	printk(" CPU: %d", current->processor);
+	printk(" CPU: %d", smp_processor_id());
 #endif /* CONFIG_SMP */
-	
-	printk("\n");
-	for (i = 0;  i < 32;  i++)
-	{
+
+	for (i = 0;  i < 32;  i++) {
 		long r;
 		if ((i % 8) == 0)
-		{
-			printk("GPR%02d: ", i);
-		}
-
-		if ( __get_user(r, &(regs->gpr[i])) )
-		    goto out;
+			printk("\n" KERN_INFO "GPR%02d: ", i);
+		if (__get_user(r, &regs->gpr[i]))
+			break;
 		printk("%08lX ", r);
-		if ((i % 8) == 7)
-		{
-			printk("\n");
-		}
+		if (i == 12 && !FULL_REGS(regs))
+			break;
 	}
-out:
-	print_backtrace((unsigned long *)regs->gpr[1]);
+	printk("\n");
+	show_stack(current, (unsigned long *) regs->gpr[1]);
 }
 
 void exit_thread(void)
@@ -316,6 +319,24 @@ release_thread(struct task_struct *t)
 }
 
 /*
+ * This gets called before we allocate a new thread and copy
+ * the current task into it.
+ */
+void prepare_to_copy(struct task_struct *tsk)
+{
+	struct pt_regs *regs = tsk->thread.regs;
+
+	if (regs == NULL)
+		return;
+	if (regs->msr & MSR_FP)
+		giveup_fpu(current);
+#ifdef CONFIG_ALTIVEC
+	if (regs->msr & MSR_VEC)
+		giveup_altivec(current);
+#endif /* CONFIG_ALTIVEC */
+}
+
+/*
  * Copy a thread..
  */
 int
@@ -325,9 +346,12 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 {
 	struct pt_regs *childregs, *kregs;
 	extern void ret_from_fork(void);
-	unsigned long sp = (unsigned long)p + sizeof(union task_union);
+	unsigned long sp = (unsigned long)p->thread_info + THREAD_SIZE;
 	unsigned long childframe;
 
+	p->set_child_tid = p->clear_child_tid = NULL;
+
+	CHECK_FULL_REGS(regs);
 	/* Copy registers */
 	sp -= sizeof(struct pt_regs);
 	childregs = (struct pt_regs *) sp;
@@ -336,9 +360,14 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 		/* for kernel thread, set `current' and stackptr in new task */
 		childregs->gpr[1] = sp + sizeof(struct pt_regs);
 		childregs->gpr[2] = (unsigned long) p;
+		p->thread.regs = NULL;	/* no user register state */
+	} else {
+		childregs->gpr[1] = usp;
+		p->thread.regs = childregs;
+		if (clone_flags & CLONE_SETTLS)
+			childregs->gpr[2] = childregs->gpr[6];
 	}
 	childregs->gpr[3] = 0;  /* Result from fork() */
-	p->thread.regs = childregs;
 	sp -= STACK_FRAME_OVERHEAD;
 	childframe = sp;
 
@@ -356,29 +385,6 @@ copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	p->thread.ksp = sp;
 	kregs->nip = (unsigned long)ret_from_fork;
 
-	/*
-	 * copy fpu info - assume lazy fpu switch now always
-	 *  -- Cort
-	 */
-	if (regs->msr & MSR_FP) {
-		giveup_fpu(current);
-		childregs->msr &= ~(MSR_FP | MSR_FE0 | MSR_FE1);
-	}
-	memcpy(&p->thread.fpr, &current->thread.fpr, sizeof(p->thread.fpr));
-	p->thread.fpscr = current->thread.fpscr;
-
-#ifdef CONFIG_ALTIVEC
-	/*
-	 * copy altiVec info - assume lazy altiVec switch
-	 * - kumar
-	 */
-	if (regs->msr & MSR_VEC)
-		giveup_altivec(current);
-	memcpy(&p->thread.vr, &current->thread.vr, sizeof(p->thread.vr));
-	p->thread.vscr = current->thread.vscr;
-	childregs->msr &= ~MSR_VEC;
-#endif /* CONFIG_ALTIVEC */
-
 	p->thread.last_syscall = -1;
 
 	return 0;
@@ -391,7 +397,11 @@ void start_thread(struct pt_regs *regs, unsigned long nip, unsigned long sp)
 {
 	set_fs(USER_DS);
 	memset(regs->gpr, 0, sizeof(regs->gpr));
-	memset(&regs->ctr, 0, 5 * sizeof(regs->ctr));
+	regs->ctr = 0;
+	regs->link = 0;
+	regs->xer = 0;
+	regs->ccr = 0;
+	regs->mq = 0;
 	regs->nip = nip;
 	regs->gpr[1] = sp;
 	regs->msr = MSR_USER;
@@ -399,25 +409,61 @@ void start_thread(struct pt_regs *regs, unsigned long nip, unsigned long sp)
 		last_task_used_math = 0;
 	if (last_task_used_altivec == current)
 		last_task_used_altivec = 0;
+	memset(current->thread.fpr, 0, sizeof(current->thread.fpr));
 	current->thread.fpscr = 0;
+#ifdef CONFIG_ALTIVEC
+	memset(current->thread.vr, 0, sizeof(current->thread.vr));
+	memset(&current->thread.vscr, 0, sizeof(current->thread.vscr));
+	current->thread.vrsave = 0;
+#endif /* CONFIG_ALTIVEC */
 }
 
-int sys_clone(int p1, int p2, int p3, int p4, int p5, int p6,
+int set_fpexc_mode(struct task_struct *tsk, unsigned int val)
+{
+	struct pt_regs *regs = tsk->thread.regs;
+
+	if (val > PR_FP_EXC_PRECISE)
+		return -EINVAL;
+	tsk->thread.fpexc_mode = __pack_fe01(val);
+	if (regs != NULL && (regs->msr & MSR_FP) != 0)
+		regs->msr = (regs->msr & ~(MSR_FE0|MSR_FE1))
+			| tsk->thread.fpexc_mode;
+	return 0;
+}
+
+int get_fpexc_mode(struct task_struct *tsk, unsigned long adr)
+{
+	unsigned int val;
+
+	val = __unpack_fe01(tsk->thread.fpexc_mode);
+	return put_user(val, (unsigned int *) adr);
+}
+
+int sys_clone(unsigned long clone_flags, unsigned long usp,
+	      int __user *parent_tidp, void __user *child_threadptr,
+	      int __user *child_tidp, int p6,
 	      struct pt_regs *regs)
 {
-	return do_fork(p1, regs->gpr[1], regs, 0);
+	CHECK_FULL_REGS(regs);
+	if (usp == 0)
+		usp = regs->gpr[1];	/* stack pointer for child */
+ 	return do_fork(clone_flags & ~CLONE_IDLETASK, usp, regs, 0,
+			parent_tidp, child_tidp);
 }
 
 int sys_fork(int p1, int p2, int p3, int p4, int p5, int p6,
 	     struct pt_regs *regs)
 {
-	return do_fork(SIGCHLD, regs->gpr[1], regs, 0);
+	CHECK_FULL_REGS(regs);
+	return do_fork(SIGCHLD, regs->gpr[1], regs, 0, NULL, NULL);
 }
 
 int sys_vfork(int p1, int p2, int p3, int p4, int p5, int p6,
 	      struct pt_regs *regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->gpr[1], regs, 0);
+	CHECK_FULL_REGS(regs);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->gpr[1],
+			regs, 0, NULL, NULL);
 }
 
 int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
@@ -427,7 +473,7 @@ int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
 	int error;
 	char * filename;
 
-	filename = getname((char *) a0);
+	filename = getname((char __user *) a0);
 	error = PTR_ERR(filename);
 	if (IS_ERR(filename))
 		goto out;
@@ -437,7 +483,8 @@ int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
 	if (regs->msr & MSR_VEC)
 		giveup_altivec(current);
 #endif /* CONFIG_ALTIVEC */ 
-	error = do_execve(filename, (char **) a1, (char **) a2, regs);
+	error = do_execve(filename, (char __user *__user *) a1,
+			  (char __user *__user *) a2, regs);
 	if (error == 0)
 		current->ptrace &= ~PT_DTRACE;
 	putname(filename);
@@ -445,24 +492,64 @@ out:
 	return error;
 }
 
-void
-print_backtrace(unsigned long *sp)
+void dump_stack(void)
 {
-	int cnt = 0;
-	unsigned long i;
+	show_stack(current, NULL);
+}
 
-	printk("Call backtrace: ");
-	while (sp) {
-		if (__get_user( i, &sp[1] ))
-			break;
-		if (cnt++ % 7 == 0)
-			printk("\n");
-		printk("%08lX ", i);
-		if (cnt > 32) break;
-		if (__get_user(sp, (unsigned long **)sp))
-			break;
+void show_stack(struct task_struct *tsk, unsigned long *stack)
+{
+	unsigned long sp, stack_top, prev_sp, ret;
+	int count = 0;
+	unsigned long next_exc = 0;
+	struct pt_regs *regs;
+	extern char ret_from_except, ret_from_except_full, ret_from_syscall;
+
+	sp = (unsigned long) stack;
+	if (tsk == NULL)
+		tsk = current;
+	if (sp == 0) {
+		if (tsk == current)
+			asm("mr %0,1" : "=r" (sp));
+		else
+			sp = tsk->thread.ksp;
 	}
-	printk("\n");
+
+	prev_sp = (unsigned long) (tsk->thread_info + 1);
+	stack_top = (unsigned long) tsk->thread_info + THREAD_SIZE;
+	while (count < 16 && sp > prev_sp && sp < stack_top && (sp & 3) == 0) {
+		if (count == 0) {
+			printk("Call trace:");
+#ifdef CONFIG_KALLSYMS
+			printk("\n");
+#endif
+		} else {
+			if (next_exc) {
+				ret = next_exc;
+				next_exc = 0;
+			} else
+				ret = *(unsigned long *)(sp + 4);
+			printk(" [%08lx] ", ret);
+#ifdef CONFIG_KALLSYMS
+			print_symbol("%s", ret);
+			printk("\n");
+#endif
+			if (ret == (unsigned long) &ret_from_except
+			    || ret == (unsigned long) &ret_from_except_full
+			    || ret == (unsigned long) &ret_from_syscall) {
+				/* sp + 16 points to an exception frame */
+				regs = (struct pt_regs *) (sp + 16);
+				if (sp + 16 + sizeof(*regs) <= stack_top)
+					next_exc = regs->nip;
+			}
+		}
+		++count;
+		sp = *(unsigned long *)sp;
+	}
+#if !CONFIG_KALLSYMS
+	if (count > 0)
+		printk("\n");
+#endif
 }
 
 #if 0
@@ -566,7 +653,7 @@ extern void scheduling_functions_end_here(void);
 unsigned long get_wchan(struct task_struct *p)
 {
 	unsigned long ip, sp;
-	unsigned long stack_page = (unsigned long) p;
+	unsigned long stack_page = (unsigned long) p->thread_info;
 	int count = 0;
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;

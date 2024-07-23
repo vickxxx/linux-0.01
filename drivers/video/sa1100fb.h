@@ -63,8 +63,6 @@ struct sa1100fb_lcd_reg {
 
 struct sa1100fb_info {
 	struct fb_info		fb;
-	signed int		currcon;
-
 	struct sa1100fb_rgb	*rgb[NR_RGB];
 
 	u_int			max_bpp;
@@ -103,13 +101,11 @@ struct sa1100fb_info {
 	volatile u_char		task_state;
 	struct semaphore	ctrlr_sem;
 	wait_queue_head_t	ctrlr_wait;
-	struct tq_struct	task;
+	struct work_struct	task;
 
-#ifdef CONFIG_PM
-	struct pm_dev		*pm;
-#endif
 #ifdef CONFIG_CPU_FREQ
-	struct notifier_block	clockchg;
+	struct notifier_block	freq_transition;
+	struct notifier_block	freq_policy;
 #endif
 };
 
@@ -127,6 +123,9 @@ struct sa1100fb_info {
 #define C_DISABLE_CLKCHANGE	(2)
 #define C_ENABLE_CLKCHANGE	(3)
 #define C_REENABLE		(4)
+#define C_DISABLE_PM		(5)
+#define C_ENABLE_PM		(6)
+#define C_STARTUP		(7)
 
 #define SA1100_NAME	"SA1100"
 

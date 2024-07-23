@@ -39,7 +39,7 @@
 #define IO_SPACE_LIMIT 0xffff
 
 #define XQUAD_PORTIO_BASE 0xfe400000
-#define XQUAD_PORTIO_LEN  0x40000   /* 256k per quad. Only remapping 1st */
+#define XQUAD_PORTIO_QUAD 0x40000  /* 256k per quad. */
 
 #ifdef __KERNEL__
 
@@ -49,24 +49,43 @@
  * Temporary debugging check to catch old code using
  * unmapped ISA addresses. Will be removed in 2.4.
  */
-#if CONFIG_DEBUG_IOVIRT
+#ifdef CONFIG_DEBUG_IOVIRT
   extern void *__io_virt_debug(unsigned long x, const char *file, int line);
-  extern unsigned long __io_phys_debug(unsigned long x, const char *file, int line);
   #define __io_virt(x) __io_virt_debug((unsigned long)(x), __FILE__, __LINE__)
-//#define __io_phys(x) __io_phys_debug((unsigned long)(x), __FILE__, __LINE__)
 #else
   #define __io_virt(x) ((void *)(x))
-//#define __io_phys(x) __pa(x)
 #endif
 
-/*
- * Change virtual addresses to physical addresses and vv.
- * These are pretty trivial
+/**
+ *	virt_to_phys	-	map virtual addresses to physical
+ *	@address: address to remap
+ *
+ *	The returned physical address is the physical (CPU) mapping for
+ *	the memory address given. It is only valid to use this function on
+ *	addresses directly mapped or allocated via kmalloc. 
+ *
+ *	This function does not give bus mappings for DMA transfers. In
+ *	almost all conceivable cases a device driver should not be using
+ *	this function
  */
+ 
 static inline unsigned long virt_to_phys(volatile void * address)
 {
 	return __pa(address);
 }
+
+/**
+ *	phys_to_virt	-	map physical address to virtual
+ *	@address: address to remap
+ *
+ *	The returned virtual address is a current CPU mapping for
+ *	the memory address given. It is only valid to use this function on
+ *	addresses that have a kernel mapping
+ *
+ *	This function does not handle bus mappings for DMA transfers. In
+ *	almost all conceivable cases a device driver should not be using
+ *	this function
+ */
 
 static inline void * phys_to_virt(unsigned long address)
 {
@@ -76,33 +95,53 @@ static inline void * phys_to_virt(unsigned long address)
 /*
  * Change "struct page" to physical address.
  */
-#define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
+#define page_to_phys(page)    ((dma_addr_t)page_to_pfn(page) << PAGE_SHIFT)
 
 extern void * __ioremap(unsigned long offset, unsigned long size, unsigned long flags);
+
+/**
+ * ioremap     -   map bus memory into CPU space
+ * @offset:    bus address of the memory
+ * @size:      size of the resource to map
+ *
+ * ioremap performs a platform specific sequence of operations to
+ * make bus memory CPU accessible via the readb/readw/readl/writeb/
+ * writew/writel functions and the other mmio helpers. The returned
+ * address is not guaranteed to be usable directly as a virtual
+ * address. 
+ */
 
 static inline void * ioremap (unsigned long offset, unsigned long size)
 {
 	return __ioremap(offset, size, 0);
 }
 
-/*
- * This one maps high address device memory and turns off caching for that area.
- * it's useful if some control registers are in such an area and write combining
- * or read caching is not desirable:
- */
-static inline void * ioremap_nocache (unsigned long offset, unsigned long size)
-{
-        return __ioremap(offset, size, _PAGE_PCD);
-}
-
+extern void * ioremap_nocache (unsigned long offset, unsigned long size);
 extern void iounmap(void *addr);
 
 /*
- * IO bus memory addresses are also 1:1 with the physical address
+ * bt_ioremap() and bt_iounmap() are for temporary early boot-time
+ * mappings, before the real ioremap() is functional.
+ * A boot-time mapping is currently limited to at most 16 pages.
+ */
+extern void *bt_ioremap(unsigned long offset, unsigned long size);
+extern void bt_iounmap(void *addr, unsigned long size);
+
+/*
+ * ISA I/O bus memory addresses are 1:1 with the physical address.
+ */
+#define isa_virt_to_bus virt_to_phys
+#define isa_page_to_bus page_to_phys
+#define isa_bus_to_virt phys_to_virt
+
+/*
+ * However PCI ones are not necessarily 1:1 and therefore these interfaces
+ * are forbidden in portable PCI drivers.
+ *
+ * Allow them on x86 for legacy drivers, though.
  */
 #define virt_to_bus virt_to_phys
 #define bus_to_virt phys_to_virt
-#define page_to_bus page_to_phys
 
 /*
  * readX/writeX() are used to access memory mapped devices. On some
@@ -126,8 +165,8 @@ extern void iounmap(void *addr);
 #define __raw_writel writel
 
 #define memset_io(a,b,c)	memset(__io_virt(a),(b),(c))
-#define memcpy_fromio(a,b,c)	memcpy((a),__io_virt(b),(c))
-#define memcpy_toio(a,b,c)	memcpy(__io_virt(a),(b),(c))
+#define memcpy_fromio(a,b,c)	__memcpy((a),__io_virt(b),(c))
+#define memcpy_toio(a,b,c)	__memcpy(__io_virt(a),(b),(c))
 
 /*
  * ISA space is 'always mapped' on a typical x86 system, no need to
@@ -157,6 +196,17 @@ extern void iounmap(void *addr);
 #define eth_io_copy_and_sum(a,b,c,d)		eth_copy_and_sum((a),__io_virt(b),(c),(d))
 #define isa_eth_io_copy_and_sum(a,b,c,d)	eth_copy_and_sum((a),__io_virt(__ISA_IO_base + (b)),(c),(d))
 
+/**
+ *	check_signature		-	find BIOS signatures
+ *	@io_addr: mmio address to check 
+ *	@signature:  signature block
+ *	@length: length of signature
+ *
+ *	Perform a signature comparison with the mmio address io_addr. This
+ *	address should have been obtained by ioremap.
+ *	Returns 1 on a match.
+ */
+ 
 static inline int check_signature(unsigned long io_addr,
 	const unsigned char *signature, int length)
 {
@@ -172,6 +222,20 @@ static inline int check_signature(unsigned long io_addr,
 out:
 	return retval;
 }
+
+/**
+ *	isa_check_signature		-	find BIOS signatures
+ *	@io_addr: mmio address to check 
+ *	@signature:  signature block
+ *	@length: length of signature
+ *
+ *	Perform a signature comparison with the ISA mmio address io_addr.
+ *	Returns 1 on a match.
+ *
+ *	This function is deprecated. New drivers should use ioremap and
+ *	check_signature.
+ */
+ 
 
 static inline int isa_check_signature(unsigned long io_addr,
 	const unsigned char *signature, int length)
@@ -222,109 +286,90 @@ static inline void flush_write_buffers(void)
 #endif /* __KERNEL__ */
 
 #ifdef SLOW_IO_BY_JUMPING
-#define __SLOW_DOWN_IO "\njmp 1f\n1:\tjmp 1f\n1:"
+#define __SLOW_DOWN_IO "jmp 1f; 1: jmp 1f; 1:"
 #else
-#define __SLOW_DOWN_IO "\noutb %%al,$0x80"
+#define __SLOW_DOWN_IO "outb %%al,$0x80;"
 #endif
 
+static inline void slow_down_io(void) {
+	__asm__ __volatile__(
+		__SLOW_DOWN_IO
 #ifdef REALLY_SLOW_IO
-#define __FULL_SLOW_DOWN_IO __SLOW_DOWN_IO __SLOW_DOWN_IO __SLOW_DOWN_IO __SLOW_DOWN_IO
+		__SLOW_DOWN_IO __SLOW_DOWN_IO __SLOW_DOWN_IO
+#endif
+		: : );
+}
+
+#ifdef CONFIG_X86_NUMAQ
+extern void *xquad_portio;    /* Where the IO area was mapped */
+#define XQUAD_PORT_ADDR(port, quad) (xquad_portio + (XQUAD_PORTIO_QUAD*quad) + port)
+#define __BUILDIO(bwl,bw,type) \
+static inline void out##bwl##_quad(unsigned type value, int port, int quad) { \
+	if (xquad_portio) \
+		write##bwl(value, XQUAD_PORT_ADDR(port, quad)); \
+	else \
+		out##bwl##_local(value, port); \
+} \
+static inline void out##bwl(unsigned type value, int port) { \
+	out##bwl##_quad(value, port, 0); \
+} \
+static inline unsigned type in##bwl##_quad(int port, int quad) { \
+	if (xquad_portio) \
+		return read##bwl(XQUAD_PORT_ADDR(port, quad)); \
+	else \
+		return in##bwl##_local(port); \
+} \
+static inline unsigned type in##bwl(int port) { \
+	return in##bwl##_quad(port, 0); \
+}
 #else
-#define __FULL_SLOW_DOWN_IO __SLOW_DOWN_IO
+#define __BUILDIO(bwl,bw,type) \
+static inline void out##bwl(unsigned type value, int port) { \
+	out##bwl##_local(value, port); \
+} \
+static inline unsigned type in##bwl(int port) { \
+	return in##bwl##_local(port); \
+}
 #endif
 
-#ifdef CONFIG_MULTIQUAD
-extern void *xquad_portio;    /* Where the IO area was mapped */
-#endif /* CONFIG_MULTIQUAD */
 
-/*
- * Talk about misusing macros..
- */
-#define __OUT1(s,x) \
-static inline void out##s(unsigned x value, unsigned short port) {
-
-#define __OUT2(s,s1,s2) \
-__asm__ __volatile__ ("out" #s " %" s1 "0,%" s2 "1"
-
-#ifdef CONFIG_MULTIQUAD
-/* Make the default portio routines operate on quad 0 for now */
-#define __OUT(s,s1,x) \
-__OUT1(s##_local,x) __OUT2(s,s1,"w") : : "a" (value), "Nd" (port)); } \
-__OUT1(s##_p_local,x) __OUT2(s,s1,"w") __FULL_SLOW_DOWN_IO : : "a" (value), "Nd" (port));} \
-__OUTQ0(s,s,x) \
-__OUTQ0(s,s##_p,x) 
-#else
-#define __OUT(s,s1,x) \
-__OUT1(s,x) __OUT2(s,s1,"w") : : "a" (value), "Nd" (port)); } \
-__OUT1(s##_p,x) __OUT2(s,s1,"w") __FULL_SLOW_DOWN_IO : : "a" (value), "Nd" (port));} 
-#endif /* CONFIG_MULTIQUAD */
-
-#ifdef CONFIG_MULTIQUAD
-#define __OUTQ0(s,ss,x)    /* Do the equivalent of the portio op on quad 0 */ \
-static inline void out##ss(unsigned x value, unsigned short port) { \
-	if (xquad_portio) \
-		write##s(value, (unsigned long) xquad_portio + port); \
-	else               /* We're still in early boot, running on quad 0 */ \
-		out##ss##_local(value, port); \
-} 
-
-#define __INQ0(s,ss)       /* Do the equivalent of the portio op on quad 0 */ \
-static inline RETURN_TYPE in##ss(unsigned short port) { \
-	if (xquad_portio) \
-		return read##s((unsigned long) xquad_portio + port); \
-	else               /* We're still in early boot, running on quad 0 */ \
-		return in##ss##_local(port); \
+#define BUILDIO(bwl,bw,type) \
+static inline void out##bwl##_local(unsigned type value, int port) { \
+	__asm__ __volatile__("out" #bwl " %" #bw "0, %w1" : : "a"(value), "Nd"(port)); \
+} \
+static inline unsigned type in##bwl##_local(int port) { \
+	unsigned type value; \
+	__asm__ __volatile__("in" #bwl " %w1, %" #bw "0" : "=a"(value) : "Nd"(port)); \
+	return value; \
+} \
+static inline void out##bwl##_local_p(unsigned type value, int port) { \
+	out##bwl##_local(value, port); \
+	slow_down_io(); \
+} \
+static inline unsigned type in##bwl##_local_p(int port) { \
+	unsigned type value = in##bwl##_local(port); \
+	slow_down_io(); \
+	return value; \
+} \
+__BUILDIO(bwl,bw,type) \
+static inline void out##bwl##_p(unsigned type value, int port) { \
+	out##bwl(value, port); \
+	slow_down_io(); \
+} \
+static inline unsigned type in##bwl##_p(int port) { \
+	unsigned type value = in##bwl(port); \
+	slow_down_io(); \
+	return value; \
+} \
+static inline void outs##bwl(int port, const void *addr, unsigned long count) { \
+	__asm__ __volatile__("rep; outs" #bwl : "+S"(addr), "+c"(count) : "d"(port)); \
+} \
+static inline void ins##bwl(int port, void *addr, unsigned long count) { \
+	__asm__ __volatile__("rep; ins" #bwl : "+D"(addr), "+c"(count) : "d"(port)); \
 }
-#endif /* CONFIG_MULTIQUAD */
 
-#define __IN1(s) \
-static inline RETURN_TYPE in##s(unsigned short port) { RETURN_TYPE _v;
-
-#define __IN2(s,s1,s2) \
-__asm__ __volatile__ ("in" #s " %" s2 "1,%" s1 "0"
-
-#ifdef CONFIG_MULTIQUAD
-#define __IN(s,s1,i...) \
-__IN1(s##_local) __IN2(s,s1,"w") : "=a" (_v) : "Nd" (port) ,##i ); return _v; } \
-__IN1(s##_p_local) __IN2(s,s1,"w") __FULL_SLOW_DOWN_IO : "=a" (_v) : "Nd" (port) ,##i ); return _v; } \
-__INQ0(s,s) \
-__INQ0(s,s##_p) 
-#else
-#define __IN(s,s1,i...) \
-__IN1(s) __IN2(s,s1,"w") : "=a" (_v) : "Nd" (port) ,##i ); return _v; } \
-__IN1(s##_p) __IN2(s,s1,"w") __FULL_SLOW_DOWN_IO : "=a" (_v) : "Nd" (port) ,##i ); return _v; } 
-#endif /* CONFIG_MULTIQUAD */
-
-#define __INS(s) \
-static inline void ins##s(unsigned short port, void * addr, unsigned long count) \
-{ __asm__ __volatile__ ("rep ; ins" #s \
-: "=D" (addr), "=c" (count) : "d" (port),"0" (addr),"1" (count)); }
-
-#define __OUTS(s) \
-static inline void outs##s(unsigned short port, const void * addr, unsigned long count) \
-{ __asm__ __volatile__ ("rep ; outs" #s \
-: "=S" (addr), "=c" (count) : "d" (port),"0" (addr),"1" (count)); }
-
-#define RETURN_TYPE unsigned char
-__IN(b,"")
-#undef RETURN_TYPE
-#define RETURN_TYPE unsigned short
-__IN(w,"")
-#undef RETURN_TYPE
-#define RETURN_TYPE unsigned int
-__IN(l,"")
-#undef RETURN_TYPE
-
-__OUT(b,"b",char)
-__OUT(w,"w",short)
-__OUT(l,,int)
-
-__INS(b)
-__INS(w)
-__INS(l)
-
-__OUTS(b)
-__OUTS(w)
-__OUTS(l)
+BUILDIO(b,b,char)
+BUILDIO(w,w,short)
+BUILDIO(l,,int)
 
 #endif

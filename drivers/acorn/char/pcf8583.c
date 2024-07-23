@@ -14,6 +14,8 @@
 #include <linux/string.h>
 #include <linux/mc146818rtc.h>
 #include <linux/init.h>
+#include <linux/errno.h>
+#include <linux/bcd.h>
 
 #include "pcf8583.h"
 
@@ -23,16 +25,16 @@ static unsigned short ignore[] = { I2C_CLIENT_END };
 static unsigned short normal_addr[] = { 0x50, I2C_CLIENT_END };
 
 static struct i2c_client_address_data addr_data = {
-	normal_i2c:		normal_addr,
-	normal_i2c_range:	ignore,
-	probe:			ignore,
-	probe_range:		ignore,
-	ignore:			ignore,
-	ignore_range:		ignore,
-	force:			ignore,
+	.normal_i2c		= normal_addr,
+	.normal_i2c_range	= ignore,
+	.probe			= ignore,
+	.probe_range		= ignore,
+	.ignore			= ignore,
+	.ignore_range		= ignore,
+	.force			= ignore,
 };
 
-#define DAT(x) ((unsigned int)(x->data))
+#define DAT(x) ((unsigned int)(x->dev.driver_data))
 
 static int
 pcf8583_attach(struct i2c_adapter *adap, int addr, unsigned short flags,
@@ -49,13 +51,13 @@ pcf8583_attach(struct i2c_adapter *adap, int addr, unsigned short flags,
 	if (!c)
 		return -ENOMEM;
 
-	strcpy(c->name, "PCF8583");
+	strcpy(c->dev.name, "PCF8583");
 	c->id		= pcf8583_driver.id;
 	c->flags	= 0;
 	c->addr		= addr;
 	c->adapter	= adap;
 	c->driver	= &pcf8583_driver;
-	c->data		= NULL;
+	c->dev.driver_data = NULL;
 
 	if (i2c_transfer(c->adapter, msgs, 2) == 2)
 		DAT(c) = buf[0];
@@ -73,6 +75,7 @@ static int
 pcf8583_detach(struct i2c_client *client)
 {
 	i2c_detach_client(client);
+	kfree(client);
 	return 0;
 }
 
@@ -224,12 +227,12 @@ pcf8583_command(struct i2c_client *client, unsigned int cmd, void *arg)
 }
 
 static struct i2c_driver pcf8583_driver = {
-	name:		"PCF8583",
-	id:		I2C_DRIVERID_PCF8583,
-	flags:		I2C_DF_NOTIFY,
-	attach_adapter:	pcf8583_probe,
-	detach_client:	pcf8583_detach,
-	command:	pcf8583_command
+	.name		= "PCF8583",
+	.id		= I2C_DRIVERID_PCF8583,
+	.flags		= I2C_DF_NOTIFY,
+	.attach_adapter	= pcf8583_probe,
+	.detach_client	= pcf8583_detach,
+	.command	= pcf8583_command
 };
 
 static __init int pcf8583_init(void)

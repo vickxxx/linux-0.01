@@ -22,27 +22,19 @@
 
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/interrupt.h>
 #include <linux/slab.h>
-#include <asm/errno.h>
-#include <asm/io.h>
-#include <asm/uaccess.h>
+#include <linux/errno.h>
 #include <linux/miscdevice.h>
 #include <linux/pci.h>
 #include <linux/wait.h>
 #include <linux/init.h>
-#include <linux/compatmac.h>
+
+#include <asm/io.h>
+#include <asm/uaccess.h>
 
 #include "applicom.h"
 
-#if LINUX_VERSION_CODE < 0x20300 
-/* These probably want adding to <linux/compatmac.h> */
-#define init_waitqueue_head(x) do { *(x) = NULL; } while (0);
-#define PCI_BASE_ADDRESS(dev) (dev->base_address[0])
-#define DECLARE_WAIT_QUEUE_HEAD(x) struct wait_queue *x
-#define __setup(x,y) /* */
-#else
-#define PCI_BASE_ADDRESS(dev) (dev->resource[0].start)
-#endif
 
 /* NOTE: We use for loops with {write,read}b() instead of 
    memcpy_{from,to}io throughout this driver. This is because
@@ -116,14 +108,14 @@ static ssize_t ac_read (struct file *, char *, size_t, loff_t *);
 static ssize_t ac_write (struct file *, const char *, size_t, loff_t *);
 static int ac_ioctl(struct inode *, struct file *, unsigned int,
 		    unsigned long);
-static void ac_interrupt(int, void *, struct pt_regs *);
+static irqreturn_t ac_interrupt(int, void *, struct pt_regs *);
 
 static struct file_operations ac_fops = {
-	owner:THIS_MODULE,
-	llseek:no_llseek,
-	read:ac_read,
-	write:ac_write,
-	ioctl:ac_ioctl,
+	.owner = THIS_MODULE,
+	.llseek = no_llseek,
+	.read = ac_read,
+	.write = ac_write,
+	.ioctl = ac_ioctl,
 };
 
 static struct miscdevice ac_miscdev = {
@@ -218,18 +210,18 @@ int __init applicom_init(void)
 		if (pci_enable_device(dev))
 			return -EIO;
 
-		RamIO = ioremap(PCI_BASE_ADDRESS(dev), LEN_RAM_IO);
+		RamIO = ioremap(dev->resource[0].start, LEN_RAM_IO);
 
 		if (!RamIO) {
-			printk(KERN_INFO "ac.o: Failed to ioremap PCI memory space at 0x%lx\n", PCI_BASE_ADDRESS(dev));
+			printk(KERN_INFO "ac.o: Failed to ioremap PCI memory space at 0x%lx\n", dev->resource[0].start);
 			return -EIO;
 		}
 
 		printk(KERN_INFO "Applicom %s found at mem 0x%lx, irq %d\n",
-		       applicom_pci_devnames[dev->device-1], PCI_BASE_ADDRESS(dev), 
+		       applicom_pci_devnames[dev->device-1], dev->resource[0].start, 
 		       dev->irq);
 
-		if (!(boardno = ac_register_board(PCI_BASE_ADDRESS(dev),
+		if (!(boardno = ac_register_board(dev->resource[0].start,
 						  (unsigned long)RamIO,0))) {
 			printk(KERN_INFO "ac.o: PCI Applicom device doesn't have correct signature.\n");
 			iounmap(RamIO);
@@ -614,11 +606,12 @@ static ssize_t ac_read (struct file *filp, char *buf, size_t count, loff_t *ptr)
 	} 
 }
 
-static void ac_interrupt(int vec, void *dev_instance, struct pt_regs *regs)
+static irqreturn_t ac_interrupt(int vec, void *dev_instance, struct pt_regs *regs)
 {
 	unsigned int i;
 	unsigned int FlagInt;
 	unsigned int LoopCount;
+	int handled = 0;
 
 	//    printk("Applicom interrupt on IRQ %d occurred\n", vec);
 
@@ -640,6 +633,7 @@ static void ac_interrupt(int vec, void *dev_instance, struct pt_regs *regs)
 				continue;
 			}
 
+			handled = 1;
 			FlagInt = 1;
 			writeb(0, apbs[i].RamIO + RAM_IT_TO_PC);
 
@@ -683,6 +677,7 @@ static void ac_interrupt(int vec, void *dev_instance, struct pt_regs *regs)
 		else
 			LoopCount++;
 	} while(LoopCount < 2);
+	return IRQ_RETVAL(handled);
 }
 
 

@@ -31,27 +31,87 @@
 #include <linux/blkdev.h>
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
+#include <linux/vfs.h>
+
+MODULE_LICENSE("GPL");
 
 /*================ Forward declarations ================*/
 
 static void hfs_read_inode(struct inode *);
 static void hfs_put_super(struct super_block *);
-static int hfs_statfs(struct super_block *, struct statfs *);
+static int hfs_statfs(struct super_block *, struct kstatfs *);
 static void hfs_write_super(struct super_block *);
+
+static kmem_cache_t * hfs_inode_cachep;
+
+static struct inode *hfs_alloc_inode(struct super_block *sb)
+{
+	struct hfs_inode_info *ei;
+	ei = (struct hfs_inode_info *)kmem_cache_alloc(hfs_inode_cachep, SLAB_KERNEL);
+	if (!ei)
+		return NULL;
+	return &ei->vfs_inode;
+}
+
+static void hfs_destroy_inode(struct inode *inode)
+{
+	kmem_cache_free(hfs_inode_cachep, HFS_I(inode));
+}
+
+static void init_once(void * foo, kmem_cache_t * cachep, unsigned long flags)
+{
+	struct hfs_inode_info *ei = (struct hfs_inode_info *) foo;
+
+	if ((flags & (SLAB_CTOR_VERIFY|SLAB_CTOR_CONSTRUCTOR)) ==
+	    SLAB_CTOR_CONSTRUCTOR)
+		inode_init_once(&ei->vfs_inode);
+}
+ 
+static int init_inodecache(void)
+{
+	hfs_inode_cachep = kmem_cache_create("hfs_inode_cache",
+					     sizeof(struct hfs_inode_info),
+					     0, SLAB_HWCACHE_ALIGN|SLAB_RECLAIM_ACCOUNT,
+					     init_once, NULL);
+	if (hfs_inode_cachep == NULL)
+		return -ENOMEM;
+	return 0;
+}
+
+static void destroy_inodecache(void)
+{
+	if (kmem_cache_destroy(hfs_inode_cachep))
+		printk(KERN_INFO "hfs_inode_cache: not all structures were freed\n");
+}
 
 /*================ Global variables ================*/
 
 static struct super_operations hfs_super_operations = { 
-	read_inode:	hfs_read_inode,
-	put_inode:	hfs_put_inode,
-	put_super:	hfs_put_super,
-	write_super:	hfs_write_super,
-	statfs:		hfs_statfs,
+	.alloc_inode	= hfs_alloc_inode,
+	.destroy_inode	= hfs_destroy_inode,
+	.read_inode	= hfs_read_inode,
+	.put_inode	= hfs_put_inode,
+	.put_super	= hfs_put_super,
+	.write_super	= hfs_write_super,
+	.statfs		= hfs_statfs,
 };
 
 /*================ File-local variables ================*/
 
-static DECLARE_FSTYPE_DEV(hfs_fs, "hfs", hfs_read_super);
+static struct super_block *hfs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_bdev(fs_type, flags, dev_name, data, hfs_fill_super);
+}
+
+static struct file_system_type hfs_fs = {
+	.owner		= THIS_MODULE,
+	.name		= "hfs",
+	.get_sb		= hfs_get_sb,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
 
 /*================ File-local functions ================*/
 
@@ -88,9 +148,10 @@ static void hfs_read_inode(struct inode *inode)
 static void hfs_write_super(struct super_block *sb)
 {
 	struct hfs_mdb *mdb = HFS_SB(sb)->s_mdb;
-
+	lock_kernel();
 	/* is this a valid hfs superblock? */
 	if (!sb || sb->s_magic != HFS_SUPER_MAGIC) {
+		unlock_kernel();
 		return;
 	}
 
@@ -99,6 +160,7 @@ static void hfs_write_super(struct super_block *sb)
 		hfs_mdb_commit(mdb, 0);
 	}
 	sb->s_dirt = 0;
+	unlock_kernel();
 }
 
 /*
@@ -120,8 +182,8 @@ static void hfs_put_super(struct super_block *sb)
 	/* release the MDB's resources */
 	hfs_mdb_put(mdb, sb->s_flags & MS_RDONLY);
 
-	/* restore default blocksize for the device */
-	set_blocksize(sb->s_dev, BLOCK_SIZE);
+	kfree(sb->s_fs_info);
+	sb->s_fs_info = NULL;
 }
 
 /*
@@ -133,7 +195,7 @@ static void hfs_put_super(struct super_block *sb)
  *
  * changed f_files/f_ffree to reflect the fs_ablock/free_ablocks.
  */
-static int hfs_statfs(struct super_block *sb, struct statfs *buf)
+static int hfs_statfs(struct super_block *sb, struct kstatfs *buf)
 {
 	struct hfs_mdb *mdb = HFS_SB(sb)->s_mdb;
 
@@ -181,8 +243,9 @@ static int parse_options(char *options, struct hfs_sb_info *hsb, int *part)
 	if (!options) {
 		goto done;
 	}
-	for (this_char = strtok(options,","); this_char;
-	     this_char = strtok(NULL,",")) {
+	while ((this_char = strsep(&options,",")) != NULL) {
+		if (!*this_char)
+			continue;
 		if ((value = strchr(this_char,'=')) != NULL) {
 			*value++ = 0;
 		}
@@ -385,23 +448,28 @@ done:
  * hfs_btree_init() to get the necessary data about the extents and
  * catalog B-trees and, finally, reading the root inode into memory.
  */
-struct super_block *hfs_read_super(struct super_block *s, void *data,
-				   int silent)
+int hfs_fill_super(struct super_block *s, void *data, int silent)
 {
+	struct hfs_sb_info *sbi;
 	struct hfs_mdb *mdb;
 	struct hfs_cat_key key;
-	kdev_t dev = s->s_dev;
 	hfs_s32 part_size, part_start;
 	struct inode *root_inode;
 	int part;
 
-	if (!parse_options((char *)data, HFS_SB(s), &part)) {
+	sbi = kmalloc(sizeof(struct hfs_sb_info), GFP_KERNEL);
+	if (!sbi)
+		return -ENOMEM;
+	s->s_fs_info = sbi;
+	memset(sbi, 0, sizeof(struct hfs_sb_info));
+
+	if (!parse_options((char *)data, sbi, &part)) {
 		hfs_warn("hfs_fs: unable to parse mount options.\n");
-		goto bail3;
+		goto bail2;
 	}
 
 	/* set the device driver to 512-byte blocks */
-	set_blocksize(dev, HFS_SECTOR_SIZE);
+	sb_set_blocksize(s, HFS_SECTOR_SIZE);
 
 #ifdef CONFIG_MAC_PARTITION
 	/* check to see if we're in a partition */
@@ -425,20 +493,18 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 	if (!mdb) {
 		if (!silent) {
 			hfs_warn("VFS: Can't find a HFS filesystem on dev %s.\n",
-			       kdevname(dev));
+			       s->s_id);
 		}
 		goto bail2;
 	}
 
-	HFS_SB(s)->s_mdb = mdb;
+	sbi->s_mdb = mdb;
 	if (HFS_ITYPE(mdb->next_id) != 0) {
 		hfs_warn("hfs_fs: too many files.\n");
 		goto bail1;
 	}
 
 	s->s_magic = HFS_SUPER_MAGIC;
-	s->s_blocksize_bits = HFS_SECTOR_SIZE_BITS;
-	s->s_blocksize = HFS_SECTOR_SIZE;
 	s->s_op = &hfs_super_operations;
 
 	/* try to get the root inode */
@@ -459,7 +525,7 @@ struct super_block *hfs_read_super(struct super_block *s, void *data,
 	s->s_root->d_op = &hfs_dentry_operations;
 
 	/* everything's okay */
-	return s;
+	return 0;
 
 bail_no_root: 
 	hfs_warn("hfs_fs: get root inode failed.\n");
@@ -467,20 +533,32 @@ bail_no_root:
 bail1:
 	hfs_mdb_put(mdb, s->s_flags & MS_RDONLY);
 bail2:
-	set_blocksize(dev, BLOCK_SIZE);
-bail3:
-	return NULL;	
+	kfree(sbi);
+	s->s_fs_info = NULL;
+	return -EINVAL;	
 }
 
 static int __init init_hfs_fs(void)
 {
+	int err = init_inodecache();
+	if (err)
+		goto out1;
         hfs_cat_init();
-	return register_filesystem(&hfs_fs);
+	err = register_filesystem(&hfs_fs);
+	if (err)
+		goto out;
+	return 0;
+out:
+	hfs_cat_free();
+	destroy_inodecache();
+out1:
+	return err;
 }
 
 static void __exit exit_hfs_fs(void) {
 	hfs_cat_free();
 	unregister_filesystem(&hfs_fs);
+	destroy_inodecache();
 }
 
 module_init(init_hfs_fs)

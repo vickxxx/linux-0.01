@@ -1,5 +1,5 @@
 /*
- * Various ISA level dependant constants.
+ * Various ISA level dependent constants.
  * Most of the following constants reflect the different layout
  * of Coprocessor 0 registers.
  *
@@ -10,7 +10,7 @@
 #ifndef __ASM_ISADEP_H
 #define __ASM_ISADEP_H
 
-#if defined(CONFIG_CPU_R3000)
+#if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX)
 /*
  * R2000 or R3000
  */

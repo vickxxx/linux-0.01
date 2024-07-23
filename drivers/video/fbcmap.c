@@ -94,16 +94,7 @@ int fb_alloc_cmap(struct fb_cmap *cmap, int len, int transp)
     int size = len*sizeof(u16);
 
     if (cmap->len != len) {
-	if (cmap->red)
-	    kfree(cmap->red);
-	if (cmap->green)
-	    kfree(cmap->green);
-	if (cmap->blue)
-	    kfree(cmap->blue);
-	if (cmap->transp)
-	    kfree(cmap->transp);
-	cmap->red = cmap->green = cmap->blue = cmap->transp = NULL;
-	cmap->len = 0;
+	fb_dealloc_cmap(cmap);
 	if (!len)
 	    return 0;
 	if (!(cmap->red = kmalloc(size, GFP_ATOMIC)))
@@ -124,6 +115,29 @@ int fb_alloc_cmap(struct fb_cmap *cmap, int len, int transp)
     return 0;
 }
 
+/**
+ *      fb_dealloc_cmap - deallocate a colormap
+ *      @cmap: frame buffer colormap structure
+ *
+ *      Deallocates a colormap that was previously allocated with
+ *      fb_alloc_cmap().
+ *
+ */
+
+void fb_dealloc_cmap(struct fb_cmap *cmap)
+{
+	if (cmap->red)
+		kfree(cmap->red);
+	if (cmap->green)
+		kfree(cmap->green);
+	if (cmap->blue)
+		kfree(cmap->blue);
+	if (cmap->transp)
+		kfree(cmap->transp);
+
+	cmap->red = cmap->green = cmap->blue = cmap->transp = NULL;
+	cmap->len = 0;
+}
 
 /**
  *	fb_copy_cmap - copy a colormap
@@ -140,20 +154,20 @@ int fb_alloc_cmap(struct fb_cmap *cmap, int len, int transp)
  *
  */
 
-void fb_copy_cmap(struct fb_cmap *from, struct fb_cmap *to, int fsfromto)
+int fb_copy_cmap(struct fb_cmap *from, struct fb_cmap *to, int fsfromto)
 {
-    int size;
     int tooff = 0, fromoff = 0;
-
+    int size;
+    
     if (to->start > from->start)
 	fromoff = to->start-from->start;
     else
 	tooff = from->start-to->start;
     size = to->len-tooff;
-    if (size > from->len-fromoff)
+    if (size > (int) (from->len - fromoff))
 	size = from->len-fromoff;
-    if (size < 0)
-	return;
+    if (size <= 0)
+	return -EINVAL;
     size *= sizeof(u16);
     
     switch (fsfromto) {
@@ -165,77 +179,30 @@ void fb_copy_cmap(struct fb_cmap *from, struct fb_cmap *to, int fsfromto)
 	    memcpy(to->transp+tooff, from->transp+fromoff, size);
         break;
     case 1:
-	copy_from_user(to->red+tooff, from->red+fromoff, size);
-	copy_from_user(to->green+tooff, from->green+fromoff, size);
-	copy_from_user(to->blue+tooff, from->blue+fromoff, size);
+	if (copy_from_user(to->red+tooff, from->red+fromoff, size))
+		return -EFAULT;
+	if (copy_from_user(to->green+tooff, from->green+fromoff, size))
+		return -EFAULT;	
+	if (copy_from_user(to->blue+tooff, from->blue+fromoff, size))
+		return -EFAULT;
 	if (from->transp && to->transp)
-            copy_from_user(to->transp+tooff, from->transp+fromoff, size);
+            if (copy_from_user(to->transp+tooff, from->transp+fromoff, size))
+		    return -EFAULT;	
 	break;
     case 2:
-	copy_to_user(to->red+tooff, from->red+fromoff, size);
-	copy_to_user(to->green+tooff, from->green+fromoff, size);
-	copy_to_user(to->blue+tooff, from->blue+fromoff, size);
+	if (copy_to_user(to->red+tooff, from->red+fromoff, size))
+		return -EFAULT;
+	if (copy_to_user(to->green+tooff, from->green+fromoff, size))
+		return -EFAULT;
+	if (copy_to_user(to->blue+tooff, from->blue+fromoff, size))
+		return -EFAULT;
 	if (from->transp && to->transp)
-	    copy_to_user(to->transp+tooff, from->transp+fromoff, size);
+		if (copy_to_user(to->transp+tooff, from->transp+fromoff, size))
+			return -EFAULT;
 	break;
-    }
-}
-
-
-/**
- *	fb_get_cmap - get a colormap
- *	@cmap: frame buffer colormap
- *	@kspc: boolean, 0 copy local, 1 put_user() function
- *	@getcolreg: pointer to a function to get a color register
- *	@info: frame buffer info structure
- *
- *	Get a colormap @cmap for a screen of device @info.
- *
- *	Returns negative errno on error, or zero on success.
- *
- */
-
-int fb_get_cmap(struct fb_cmap *cmap, int kspc,
-    	    	int (*getcolreg)(u_int, u_int *, u_int *, u_int *, u_int *,
-				 struct fb_info *),
-		struct fb_info *info)
-{
-    int i, start;
-    u16 *red, *green, *blue, *transp;
-    u_int hred, hgreen, hblue, htransp;
-
-    red = cmap->red;
-    green = cmap->green;
-    blue = cmap->blue;
-    transp = cmap->transp;
-    start = cmap->start;
-    if (start < 0)
-	return -EINVAL;
-    for (i = 0; i < cmap->len; i++) {
-	if (getcolreg(start++, &hred, &hgreen, &hblue, &htransp, info))
-	    return 0;
-	if (kspc) {
-	    *red = hred;
-	    *green = hgreen;
-	    *blue = hblue;
-	    if (transp)
-		*transp = htransp;
-	} else {
-	    put_user(hred, red);
-	    put_user(hgreen, green);
-	    put_user(hblue, blue);
-	    if (transp)
-		put_user(htransp, transp);
-	}
-	red++;
-	green++;
-	blue++;
-	if (transp)
-	    transp++;
     }
     return 0;
 }
-
 
 /**
  *	fb_set_cmap - set the colormap
@@ -249,10 +216,7 @@ int fb_get_cmap(struct fb_cmap *cmap, int kspc,
  *
  */
 
-int fb_set_cmap(struct fb_cmap *cmap, int kspc,
-    	    	int (*setcolreg)(u_int, u_int, u_int, u_int, u_int,
-				 struct fb_info *),
-		struct fb_info *info)
+int fb_set_cmap(struct fb_cmap *cmap, int kspc, struct fb_info *info)
 {
     int i, start;
     u16 *red, *green, *blue, *transp;
@@ -264,14 +228,14 @@ int fb_set_cmap(struct fb_cmap *cmap, int kspc,
     transp = cmap->transp;
     start = cmap->start;
 
-    if (start < 0)
+    if (start < 0 || !info->fbops->fb_setcolreg)
 	return -EINVAL;
     for (i = 0; i < cmap->len; i++) {
 	if (kspc) {
 	    hred = *red;
 	    hgreen = *green;
 	    hblue = *blue;
-	    htransp = transp ? *transp : 0;
+	    htransp = transp ? *transp : 0xffff;
 	} else {
 	    get_user(hred, red);
 	    get_user(hgreen, green);
@@ -279,14 +243,14 @@ int fb_set_cmap(struct fb_cmap *cmap, int kspc,
 	    if (transp)
 		get_user(htransp, transp);
 	    else
-		htransp = 0;
+		htransp = 0xffff;
 	}
 	red++;
 	green++;
 	blue++;
 	if (transp)
 	    transp++;
-	if (setcolreg(start++, hred, hgreen, hblue, htransp, info))
+	if (info->fbops->fb_setcolreg(start++, hred, hgreen, hblue, htransp, info))
 	    return 0;
     }
     return 0;
@@ -355,8 +319,8 @@ void fb_invert_cmaps(void)
      */
 
 EXPORT_SYMBOL(fb_alloc_cmap);
+EXPORT_SYMBOL(fb_dealloc_cmap);
 EXPORT_SYMBOL(fb_copy_cmap);
-EXPORT_SYMBOL(fb_get_cmap);
 EXPORT_SYMBOL(fb_set_cmap);
 EXPORT_SYMBOL(fb_default_cmap);
 EXPORT_SYMBOL(fb_invert_cmaps);

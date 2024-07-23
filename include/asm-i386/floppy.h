@@ -22,7 +22,7 @@
  * floppy accesses go through the track buffer.
  */
 #define _CROSS_64KB(a,s,vdma) \
-(!vdma && ((unsigned long)(a)/K_64 != ((unsigned long)(a) + (s) - 1) / K_64))
+(!(vdma) && ((unsigned long)(a)/K_64 != ((unsigned long)(a) + (s) - 1) / K_64))
 
 #define CROSS_64KB(a,s) _CROSS_64KB(a,s,use_virtual_dma & 1)
 
@@ -51,7 +51,7 @@ static char *virtual_dma_addr;
 static int virtual_dma_mode;
 static int doing_pdma;
 
-static void floppy_hardint(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t floppy_hardint(int irq, void *dev_id, struct pt_regs * regs)
 {
 	register unsigned char st;
 
@@ -63,10 +63,8 @@ static void floppy_hardint(int irq, void *dev_id, struct pt_regs * regs)
 	static int bytes=0;
 	static int dma_wait=0;
 #endif
-	if(!doing_pdma) {
-		floppy_interrupt(irq, dev_id, regs);
-		return;
-	}
+	if (!doing_pdma)
+		return floppy_interrupt(irq, dev_id, regs);
 
 #ifdef TRACE_FLPY_INT
 	if(!calls)
@@ -75,28 +73,28 @@ static void floppy_hardint(int irq, void *dev_id, struct pt_regs * regs)
 
 #ifndef NO_FLOPPY_ASSEMBLER
 	__asm__ (
-       "testl %1,%1
-	je 3f
-1:	inb %w4,%b0
-	andb $160,%b0
-	cmpb $160,%b0
-	jne 2f
-	incw %w4
-	testl %3,%3
-	jne 4f
-	inb %w4,%b0
-	movb %0,(%2)
-	jmp 5f
-4:     	movb (%2),%0
-	outb %b0,%w4
-5:	decw %w4
-	outb %0,$0x80
-	decl %1
-	incl %2
-	testl %1,%1
-	jne 1b
-3:	inb %w4,%b0
-2:	"
+       "testl %1,%1"
+	"je 3f"
+"1:	inb %w4,%b0"
+	"andb $160,%b0"
+	"cmpb $160,%b0"
+	"jne 2f"
+	"incw %w4"
+	"testl %3,%3"
+	"jne 4f"
+	"inb %w4,%b0"
+	"movb %0,(%2)"
+	"jmp 5f"
+"4:    	movb (%2),%0"
+	"outb %b0,%w4"
+"5:	decw %w4"
+	"outb %0,$0x80"
+	"decl %1"
+	"incl %2"
+	"testl %1,%1"
+	"jne 1b"
+"3:	inb %w4,%b0"
+"2:	"
        : "=a" ((char) st), 
        "=c" ((long) virtual_dma_count), 
        "=S" ((long) virtual_dma_addr)
@@ -130,7 +128,7 @@ static void floppy_hardint(int irq, void *dev_id, struct pt_regs * regs)
 	calls++;
 #endif
 	if(st == 0x20)
-		return;
+		return IRQ_HANDLED;
 	if(!(st & 0x20)) {
 		virtual_dma_residue += virtual_dma_count;
 		virtual_dma_count=0;
@@ -143,12 +141,13 @@ static void floppy_hardint(int irq, void *dev_id, struct pt_regs * regs)
 #endif
 		doing_pdma = 0;
 		floppy_interrupt(irq, dev_id, regs);
-		return;
+		return IRQ_HANDLED;
 	}
 #ifdef TRACE_FLPY_INT
 	if(!virtual_dma_count)
 		dma_wait++;
 #endif
+	return IRQ_HANDLED;
 }
 
 static void fd_disable_dma(void)
@@ -216,7 +215,7 @@ static void _fd_chose_dma_mode(char *addr, unsigned long size)
 {
 	if(can_use_virtual_dma == 2) {
 		if((unsigned int) addr >= (unsigned int) high_memory ||
-		   virt_to_bus(addr) >= 0x1000000 ||
+		   isa_virt_to_bus(addr) >= 0x1000000 ||
 		   _CROSS_64KB(addr, size, 0))
 			use_virtual_dma = 1;
 		else
@@ -252,7 +251,7 @@ static int hard_dma_setup(char *addr, unsigned long size, int mode, int io)
 	doing_pdma = 0;
 	clear_dma_ff(FLOPPY_DMA);
 	set_dma_mode(FLOPPY_DMA,mode);
-	set_dma_addr(FLOPPY_DMA,virt_to_bus(addr));
+	set_dma_addr(FLOPPY_DMA,isa_virt_to_bus(addr));
 	set_dma_count(FLOPPY_DMA,size);
 	enable_dma(FLOPPY_DMA);
 	return 0;

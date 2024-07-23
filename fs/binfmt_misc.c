@@ -24,6 +24,8 @@
 #include <linux/ctype.h>
 #include <linux/file.h>
 #include <linux/pagemap.h>
+#include <linux/namei.h>
+#include <linux/mount.h>
 
 #include <asm/uaccess.h>
 
@@ -35,10 +37,11 @@ static LIST_HEAD(entries);
 static int enabled = 1;
 
 enum {Enabled, Magic};
+#define MISC_FMT_PRESERVE_ARGV0 (1<<31)
 
 typedef struct {
 	struct list_head list;
-	int flags;			/* type, status, etc. */
+	unsigned long flags;		/* type, status, etc. */
 	int offset;			/* offset of magic */
 	int size;			/* size of magic/mask */
 	char *magic;			/* magic or filename extension */
@@ -49,6 +52,8 @@ typedef struct {
 } Node;
 
 static rwlock_t entries_lock __attribute__((unused)) = RW_LOCK_UNLOCKED;
+static struct vfsmount *bm_mnt;
+static int entry_count;
 
 /* 
  * Check if we support the binfmt
@@ -60,7 +65,7 @@ static Node *check_file(struct linux_binprm *bprm)
 	char *p = strrchr(bprm->filename, '.');
 	struct list_head *l;
 
-	for (l = entries.next; l != &entries; l = l->next) {
+	list_for_each(l, &entries) {
 		Node *e = list_entry(l, Node, list);
 		char *s;
 		int j;
@@ -108,10 +113,8 @@ static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	/* to keep locking time low, we copy the interpreter string */
 	read_lock(&entries_lock);
 	fmt = check_file(bprm);
-	if (fmt) {
-		strncpy(iname, fmt->interpreter, BINPRM_BUF_SIZE - 1);
-		iname[BINPRM_BUF_SIZE - 1] = '\0';
-	}
+	if (fmt)
+		strlcpy(iname, fmt->interpreter, BINPRM_BUF_SIZE);
 	read_unlock(&entries_lock);
 	if (!fmt)
 		goto _ret;
@@ -121,7 +124,9 @@ static int load_misc_binary(struct linux_binprm *bprm, struct pt_regs *regs)
 	bprm->file = NULL;
 
 	/* Build args for interpreter */
-	remove_arg_zero(bprm);
+	if (!(fmt->flags & MISC_FMT_PRESERVE_ARGV0)) {
+		remove_arg_zero(bprm);
+	}
 	retval = copy_strings_kernel(1, &bprm->filename, bprm);
 	if (retval < 0) goto _ret; 
 	bprm->argc++;
@@ -287,6 +292,11 @@ static Node *create_entry(const char *buffer, size_t count)
 	if (!e->interpreter[0])
 		goto Einval;
 
+	if (*p == 'P') {
+		p++;
+		e->flags |= MISC_FMT_PRESERVE_ARGV0;
+	}
+
 	if (*p == '\n')
 		p++;
 	if (p != buf + count)
@@ -387,14 +397,7 @@ static struct inode *bm_get_inode(struct super_block *sb, int mode)
 
 static void bm_clear_inode(struct inode *inode)
 {
-	Node *e = inode->u.generic_ip;
-
-	if (e) {
-		write_lock(&entries_lock);
-		list_del(&e->list);
-		write_unlock(&entries_lock);
-		kfree(e);
-	}
+	kfree(inode->u.generic_ip);
 }
 
 static void kill_node(Node *e)
@@ -404,8 +407,7 @@ static void kill_node(Node *e)
 	write_lock(&entries_lock);
 	dentry = e->dentry;
 	if (dentry) {
-		list_del(&e->list);
-		INIT_LIST_HEAD(&e->list);
+		list_del_init(&e->list);
 		e->dentry = NULL;
 	}
 	write_unlock(&entries_lock);
@@ -414,6 +416,7 @@ static void kill_node(Node *e)
 		dentry->d_inode->i_nlink--;
 		d_drop(dentry);
 		dput(dentry);
+		simple_release_fs(&bm_mnt, &entry_count);
 	}
 }
 
@@ -466,11 +469,9 @@ static ssize_t bm_entry_write(struct file *file, const char *buffer,
 			break;
 		case 3: root = dget(file->f_vfsmnt->mnt_sb->s_root);
 			down(&root->d_inode->i_sem);
-			down(&root->d_inode->i_zombie);
 
 			kill_node(e);
 
-			up(&root->d_inode->i_zombie);
 			up(&root->d_inode->i_sem);
 			dput(root);
 			break;
@@ -480,8 +481,8 @@ static ssize_t bm_entry_write(struct file *file, const char *buffer,
 }
 
 static struct file_operations bm_entry_operations = {
-	read:		bm_entry_read,
-	write:		bm_entry_write,
+	.read		= bm_entry_read,
+	.write		= bm_entry_write,
 };
 
 /* /register */
@@ -490,6 +491,7 @@ static ssize_t bm_register_write(struct file *file, const char *buffer,
 			       size_t count, loff_t *ppos)
 {
 	Node *e;
+	struct inode *inode;
 	struct dentry *root, *dentry;
 	struct super_block *sb = file->f_vfsmnt->mnt_sb;
 	int err = 0;
@@ -503,31 +505,39 @@ static ssize_t bm_register_write(struct file *file, const char *buffer,
 	down(&root->d_inode->i_sem);
 	dentry = lookup_one_len(e->name, root, strlen(e->name));
 	err = PTR_ERR(dentry);
-	if (!IS_ERR(dentry)) {
-		down(&root->d_inode->i_zombie);
-		if (dentry->d_inode) {
-			err = -EEXIST;
-		} else {
-			struct inode * inode = bm_get_inode(sb, S_IFREG | 0644);
-			err = -ENOMEM;
+	if (IS_ERR(dentry))
+		goto out;
 
-			if (inode) {
-				write_lock(&entries_lock);
+	err = -EEXIST;
+	if (dentry->d_inode)
+		goto out2;
 
-				e->dentry = dget(dentry);
-				inode->u.generic_ip = e;
-				inode->i_fop = &bm_entry_operations;
-				d_instantiate(dentry, inode);
+	inode = bm_get_inode(sb, S_IFREG | 0644);
 
-				list_add(&e->list, &entries);
-				write_unlock(&entries_lock);
+	err = -ENOMEM;
+	if (!inode)
+		goto out2;
 
-				err = 0;
-			}
-		}
-		up(&root->d_inode->i_zombie);
-		dput(dentry);
+	err = simple_pin_fs("binfmt_misc", &bm_mnt, &entry_count);
+	if (err) {
+		iput(inode);
+		inode = NULL;
+		goto out2;
 	}
+
+	e->dentry = dget(dentry);
+	inode->u.generic_ip = e;
+	inode->i_fop = &bm_entry_operations;
+
+	write_lock(&entries_lock);
+	d_instantiate(dentry, inode);
+	list_add(&e->list, &entries);
+	write_unlock(&entries_lock);
+
+	err = 0;
+out2:
+	dput(dentry);
+out:
 	up(&root->d_inode->i_sem);
 	dput(root);
 
@@ -539,7 +549,7 @@ static ssize_t bm_register_write(struct file *file, const char *buffer,
 }
 
 static struct file_operations bm_register_operations = {
-	write:		bm_register_write,
+	.write		= bm_register_write,
 };
 
 /* /status */
@@ -574,12 +584,10 @@ static ssize_t bm_status_write(struct file * file, const char * buffer,
 		case 2: enabled = 1; break;
 		case 3: root = dget(file->f_vfsmnt->mnt_sb->s_root);
 			down(&root->d_inode->i_sem);
-			down(&root->d_inode->i_zombie);
 
 			while (!list_empty(&entries))
 				kill_node(list_entry(entries.next, Node, list));
 
-			up(&root->d_inode->i_zombie);
 			up(&root->d_inode->i_sem);
 			dput(root);
 		default: return res;
@@ -588,122 +596,55 @@ static ssize_t bm_status_write(struct file * file, const char * buffer,
 }
 
 static struct file_operations bm_status_operations = {
-	read:		bm_status_read,
-	write:		bm_status_write,
-};
-
-/* / */
-
-static struct dentry * bm_lookup(struct inode *dir, struct dentry *dentry)
-{
-	d_add(dentry, NULL);
-	return NULL;
-}
-
-static struct file_operations bm_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	dcache_readdir,
-};
-
-static struct inode_operations bm_dir_inode_operations = {
-	lookup:		bm_lookup,
+	.read		= bm_status_read,
+	.write		= bm_status_write,
 };
 
 /* Superblock handling */
 
-static int bm_statfs(struct super_block *sb, struct statfs *buf)
-{
-	buf->f_type = sb->s_magic;
-	buf->f_bsize = PAGE_CACHE_SIZE;
-	buf->f_namelen = 255;
-	return 0;
-}
-
 static struct super_operations s_ops = {
-	statfs:		bm_statfs,
-	put_inode:	force_delete,
-	clear_inode:	bm_clear_inode,
+	.statfs		= simple_statfs,
+	.clear_inode	= bm_clear_inode,
 };
 
-static struct super_block *bm_read_super(struct super_block * sb, void * data, int silent)
+static int bm_fill_super(struct super_block * sb, void * data, int silent)
 {
-	struct qstr names[2] = {{name:"status"}, {name:"register"}};
-	struct inode * inode;
-	struct dentry * dentry[3];
-	int i;
+	static struct tree_descr bm_files[] = {
+		[1] = {"status", &bm_status_operations, S_IWUSR|S_IRUGO},
+		[2] = {"register", &bm_register_operations, S_IWUSR},
+		/* last one */ {""}
+	};
+	int err = simple_fill_super(sb, 0x42494e4d, bm_files);
+	if (!err)
+		sb->s_op = &s_ops;
+	return err;
+}
 
-	for (i=0; i<sizeof(names)/sizeof(names[0]); i++) {
-		names[i].len = strlen(names[i].name);
-		names[i].hash = full_name_hash(names[i].name, names[i].len);
-	}
-
-	sb->s_blocksize = PAGE_CACHE_SIZE;
-	sb->s_blocksize_bits = PAGE_CACHE_SHIFT;
-	sb->s_magic = 0x42494e4d;
-	sb->s_op = &s_ops;
-
-	inode = bm_get_inode(sb, S_IFDIR | 0755);
-	if (!inode)
-		return NULL;
-	inode->i_op = &bm_dir_inode_operations;
-	inode->i_fop = &bm_dir_operations;
-	dentry[0] = d_alloc_root(inode);
-	if (!dentry[0]) {
-		iput(inode);
-		return NULL;
-	}
-	dentry[1] = d_alloc(dentry[0], &names[0]);
-	if (!dentry[1])
-		goto out1;
-	dentry[2] = d_alloc(dentry[0], &names[1]);
-	if (!dentry[2])
-		goto out2;
-	inode = bm_get_inode(sb, S_IFREG | 0644);
-	if (!inode)
-		goto out3;
-	inode->i_fop = &bm_status_operations;
-	d_add(dentry[1], inode);
-	inode = bm_get_inode(sb, S_IFREG | 0400);
-	if (!inode)
-		goto out3;
-	inode->i_fop = &bm_register_operations;
-	d_add(dentry[2], inode);
-
-	sb->s_root = dentry[0];
-	return sb;
-
-out3:
-	dput(dentry[2]);
-out2:
-	dput(dentry[1]);
-out1:
-	dput(dentry[0]);
-	return NULL;
+static struct super_block *bm_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_single(fs_type, flags, data, bm_fill_super);
 }
 
 static struct linux_binfmt misc_format = {
-	NULL, THIS_MODULE, load_misc_binary, NULL, NULL, 0
+	.module = THIS_MODULE,
+	.load_binary = load_misc_binary,
 };
 
-static DECLARE_FSTYPE(bm_fs_type, "binfmt_misc", bm_read_super, FS_SINGLE|FS_LITTER);
-
-static struct vfsmount *bm_mnt;
+static struct file_system_type bm_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "binfmt_misc",
+	.get_sb		= bm_get_sb,
+	.kill_sb	= kill_litter_super,
+};
 
 static int __init init_misc_binfmt(void)
 {
 	int err = register_filesystem(&bm_fs_type);
 	if (!err) {
-		bm_mnt = kern_mount(&bm_fs_type);
-		err = PTR_ERR(bm_mnt);
-		if (IS_ERR(bm_mnt))
+		err = register_binfmt(&misc_format);
+		if (err)
 			unregister_filesystem(&bm_fs_type);
-		else {
-			err = register_binfmt(&misc_format);
-			if (err) {
-				unregister_filesystem(&bm_fs_type);
-				kern_umount(bm_mnt);
-			}
-		}
 	}
 	return err;
 }
@@ -712,10 +653,7 @@ static void __exit exit_misc_binfmt(void)
 {
 	unregister_binfmt(&misc_format);
 	unregister_filesystem(&bm_fs_type);
-	kern_umount(bm_mnt);
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(init_misc_binfmt);
 module_exit(exit_misc_binfmt);

@@ -4,8 +4,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 2000 Silicon Graphics, Inc.
- * Copyright (C) 2000 by Jack Steiner (steiner@sgi.com)
+ * Copyright (C) 2000-2003 Silicon Graphics, Inc. All rights reserved.
  */
 
 
@@ -13,8 +12,14 @@
 #define _ASM_IA64_SN_SN_CPUID_H
 
 #include <linux/config.h>
-#include <asm/processor.h>
-#include <asm/sn/mmzone_sn1.h>
+#include <linux/smp.h>
+#include <linux/sched.h>
+#include <linux/mmzone.h>
+#include <asm/sn/types.h>
+#include <asm/current.h>
+#include <asm/nodedata.h>
+#include <asm/sn/pda.h>
+
 
 /*
  * Functions for converting between cpuids, nodeids and NASIDs.
@@ -43,46 +48,42 @@
  *			hard_smp_processor_id()- cpu_physical_id of current processor
  *			cpu_physical_id(cpuid) - convert a <cpuid> to a <physical_cpuid>
  *			cpu_logical_id(phy_id) - convert a <physical_cpuid> to a <cpuid> 
- *				* not real efficient - dont use in perf critical code
+ *				* not real efficient - don't use in perf critical code
  *
  *         LID - processor defined register (see PRM V2).
- *		31:24 - id   Contains the NASID
- *		23:16 - eid  Contains 0-3 to identify the cpu on the node
- *				bit 17 - synergy number
- *				bit 16 - FSB slot number 
+ *
+ *           On SN2
+ *		31:28 - id   Contains 0-3 to identify the cpu on the node
+ *		27:16 - eid  Contains the NASID
  *
  *
  *
  * The following assumes the following mappings for LID register values:
  *
- * The macros convert between cpu physical ids & slice/fsb/synergy/nasid/cnodeid.
+ * The macros convert between cpu physical ids & slice/nasid/cnodeid.
  * These terms are described below:
  *
  *
+ * Brick
  *          -----   -----           -----   -----       CPU
- *          | 0 |   | 1 |           | 2 |   | 3 |       SLICE
+ *          | 0 |   | 1 |           | 0 |   | 1 |       SLICE
  *          -----   -----           -----   -----
  *            |       |               |       |
  *            |       |               |       |
- *          0 |       | 1           0 |       | 1       FSB SLOT
+ *          0 |       | 2           0 |       | 2       FSB SLOT
  *             -------                 -------  
  *                |                       |
  *                |                       |
- *             -------                 -------
- *             |     |                 |     |
- *             |  0  |                 |  1  |         SYNERGY
- *             |     |                 |     |
- *             -------                 -------
  *                |                       |
- *                |                       |
- *             -------------------------------
- *             |                             |
- *             |         BEDROCK             |        NASID   (0..127)
- *             |                             |        CNODEID (0..numnodes-1)
- *             |                             |
- *             |                             |
- *             -------------------------------
- *                           |
+ *             ------------      -------------
+ *             |          |      |           |
+ *             |    SHUB  |      |   SHUB    |        NASID   (0..MAX_NASIDS)
+ *             |          |----- |           |        CNODEID (0..num_compact_nodes-1)
+ *             |          |      |           |
+ *             |          |      |           |
+ *             ------------      -------------
+ *                   |                 |
+ *                           
  *
  */
 
@@ -91,19 +92,26 @@
 #define cpu_physical_id(cpuid)			((ia64_get_lid() >> 16) & 0xffff)
 #endif
 
-#define cpu_physical_id_to_nasid(cpi)		((cpi) >> 8)
-#define cpu_physical_id_to_synergy(cpi)		(((cpi) >> 1) & 1)
-#define cpu_physical_id_to_fsb_slot(cpi)	((cpi) & 1)
-#define cpu_physical_id_to_slice(cpi)		((cpi) & 3)
+/*
+ * macros for some of these exist in sn/addrs.h & sn/arch.h, etc. However, 
+ * trying #include these files here causes circular dependencies.
+ */
+#define cpu_physical_id_to_nasid(cpi)		((cpi) &0xfff)
+#define cpu_physical_id_to_slice(cpi)		((cpi>>12) & 3)
+#define get_nasid()				((ia64_get_lid() >> 16) & 0xfff)
+#define get_slice()				((ia64_get_lid() >> 28) & 0xf)
+#define get_node_number(addr)			(((unsigned long)(addr)>>38) & 0x7ff)
 
 /*
- * NOTE: id & eid refer to Intels definitions of the LID register
- *	(id = NASID, eid = slice)
+ * NOTE: id & eid refer to Intel's definitions of the LID register
+ * 
  * NOTE: on non-MP systems, only cpuid 0 exists
  */
-#define id_eid_to_cpu_physical_id(id,eid)       (((id)<<8) | (eid))
-#define id_eid_to_cpuid(id,eid)         	(cpu_logical_id(id_eid_to_cpu_physical_id((id),(eid))))
+#define id_eid_to_cpu_physical_id(id,eid)	 	(((id)<<8) | (eid))
 
+#define nasid_slice_to_cpuid(nasid,slice)		(cpu_logical_id(nasid_slice_to_cpu_physical_id((nasid),(slice))))
+
+#define nasid_slice_to_cpu_physical_id(nasid, slice)	(((slice)<<12) | (nasid))
 
 /*
  * The following table/struct  is used for managing PTC coherency domains.
@@ -115,127 +123,60 @@ typedef struct {
 } sn_sapicid_info_t;
 
 extern sn_sapicid_info_t	sn_sapicid_info[];	/* indexed by cpuid */
-
-
-
-/*
- * cpuid_to_fsb_slot  - convert a cpuid to the fsb slot number that it is in.
- *   (there are 2 cpus per FSB. This function returns 0 or 1)
- */
-static __inline__ int
-cpuid_to_fsb_slot(int cpuid)
-{
-	return cpu_physical_id_to_fsb_slot(cpu_physical_id(cpuid));
-}
-
-
-/*
- * cpuid_to_synergy  - convert a cpuid to the synergy that it resides on
- *   (there are 2 synergies per node. Function returns 0 or 1 to
- *    specify which synergy the cpu is on)
- */
-static __inline__ int
-cpuid_to_synergy(int cpuid)
-{
-	return cpu_physical_id_to_synergy(cpu_physical_id(cpuid));
-}
+extern short physical_node_map[];			/* indexed by nasid to get cnode */
 
 
 /*
  * cpuid_to_slice  - convert a cpuid to the slice that it resides on
  *  There are 4 cpus per node. This function returns 0 .. 3)
  */
-static __inline__ int
-cpuid_to_slice(int cpuid)
-{
-	return cpu_physical_id_to_slice(cpu_physical_id(cpuid));
-}
+#define cpuid_to_slice(cpuid)		(cpu_physical_id_to_slice(cpu_physical_id(cpuid)))
 
 
 /*
  * cpuid_to_nasid  - convert a cpuid to the NASID that it resides on
  */
-static __inline__ int
-cpuid_to_nasid(int cpuid)
-{
-	return cpu_physical_id_to_nasid(cpu_physical_id(cpuid));
-}
+#define cpuid_to_nasid(cpuid)		(cpu_physical_id_to_nasid(cpu_physical_id(cpuid)))
 
 
 /*
  * cpuid_to_cnodeid  - convert a cpuid to the cnode that it resides on
  */
-static __inline__ int
-cpuid_to_cnodeid(int cpuid)
-{
-	return nasid_map[cpuid_to_nasid(cpuid)];
-}
+#define cpuid_to_cnodeid(cpuid)		(physical_node_map[cpuid_to_nasid(cpuid)])
+
 
 /*
  * cnodeid_to_nasid - convert a cnodeid to a NASID
+ *	Macro relies on pg_data for a node being on the node itself.
+ *	Just extract the NASID from the pointer.
+ *
  */
-static __inline__ int
-cnodeid_to_nasid(int cnodeid)
-{
-	if (nasid_map[cnodeid_map[cnodeid]] != cnodeid)
-		panic("cnodeid_to_nasid, cnode = %d", cnodeid);
-	return cnodeid_map[cnodeid];
-}
+#define cnodeid_to_nasid(cnodeid)	pda->cnodeid_to_nasid_table[cnodeid]
+ 
 
 /*
  * nasid_to_cnodeid - convert a NASID to a cnodeid
  */
-static __inline__ int
-nasid_to_cnodeid(int nasid)
-{
-	if (cnodeid_map[nasid_map[nasid]] != nasid)
-		panic("nasid_to_cnodeid");
-	return nasid_map[nasid];
-}
+#define nasid_to_cnodeid(nasid)		(physical_node_map[nasid])
 
 
 /*
  * cnode_slice_to_cpuid - convert a codeid & slice to a cpuid
  */
-static __inline__ int
-cnode_slice_to_cpuid(int cnodeid, int slice) {
-	return(id_eid_to_cpuid(cnodeid_to_nasid(cnodeid),slice));
-}
+
+#define cnode_slice_to_cpuid(cnodeid,slice) (nasid_slice_to_cpuid(cnodeid_to_nasid(cnodeid),(slice)))
+ 
 
 /*
  * cpuid_to_subnode - convert a cpuid to the subnode it resides on.
  *   slice 0 & 1 are on subnode 0
  *   slice 2 & 3 are on subnode 1.
  */
-static __inline__ int
-cpuid_to_subnode(int cpuid) {
-	int ret = cpuid_to_slice(cpuid);
-	if (ret < 2) return 0;
-	else return 1;
-}
+#define cpuid_to_subnode(cpuid)		((cpuid_to_slice(cpuid)<2) ? 0 : 1)
+ 
 
-/*
- * cpuid_to_localslice - convert a cpuid to a local slice
- *    slice 0 & 2 are local slice 0
- *    slice 1 & 3 are local slice 1
- */
-static __inline__ int
-cpuid_to_localslice(int cpuid) {
-	return(cpuid_to_slice(cpuid) & 1);
-}
-
-static __inline__ int
-cnodeid_to_cpuid(int cnode) {
-	int cpu;
-
-	for (cpu = 0; cpu < smp_num_cpus; cpu++) {
-		if (cpuid_to_cnodeid(cpu) == cnode) {
-			break;
-		}
-	}
-	if (cpu == smp_num_cpus) cpu = -1;
-	return cpu;
-}
+#define smp_physical_node_id()			(cpuid_to_nasid(smp_processor_id()))
 
 
 #endif /* _ASM_IA64_SN_SN_CPUID_H */
+

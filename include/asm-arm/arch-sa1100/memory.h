@@ -12,14 +12,14 @@
 /*
  * Task size: 3GB
  */
-#define TASK_SIZE	(0xc0000000UL)
+#define TASK_SIZE	(0xbf000000UL)
 #define TASK_SIZE_26	(0x04000000UL)
 
 /*
  * This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
-#define TASK_UNMAPPED_BASE (TASK_SIZE / 3)
+#define TASK_UNMAPPED_BASE (0x40000000)
 
 /*
  * Page offset: 3GB
@@ -60,7 +60,7 @@
  * Because of the wide memory address space between physical RAM banks on the 
  * SA1100, it's much convenient to use Linux's NUMA support to implement our 
  * memory map representation.  Assuming all memory nodes have equal access 
- * characteristics, we then have generic discontigous memory support.
+ * characteristics, we then have generic discontiguous memory support.
  *
  * Of course, all this isn't mandatory for SA1100 implementations with only
  * one used memory bank.  For those, simply undefine CONFIG_DISCONTIGMEM.
@@ -79,49 +79,36 @@
 /*
  * Given a kernel address, find the home node of the underlying memory.
  */
-#define KVADDR_TO_NID(addr) \
-		(((unsigned long)(addr) - 0xc0000000) >> 27)
+#define KVADDR_TO_NID(addr) (((unsigned long)(addr) - PAGE_OFFSET) >> 27)
 
 /*
- * Given a physical address, convert it to a node id.
+ * Given a page frame number, convert it to a node id.
  */
-#define PHYS_TO_NID(addr) KVADDR_TO_NID(__phys_to_virt(addr))
+#define PFN_TO_NID(pfn)		(((pfn) - PHYS_PFN_OFFSET) >> (27 - PAGE_SHIFT))
 
 /*
  * Given a kaddr, ADDR_TO_MAPBASE finds the owning node of the memory
- * and returns the mem_map of that node.
+ * and return the mem_map of that node.
  */
-#define ADDR_TO_MAPBASE(kaddr) \
-			NODE_MEM_MAP(KVADDR_TO_NID((unsigned long)(kaddr)))
+#define ADDR_TO_MAPBASE(kaddr)	NODE_MEM_MAP(KVADDR_TO_NID(kaddr))
+
+/*
+ * Given a page frame number, find the owning node of the memory
+ * and return the mem_map of that node.
+ */
+#define PFN_TO_MAPBASE(pfn)	NODE_MEM_MAP(PFN_TO_NID(pfn))
 
 /*
  * Given a kaddr, LOCAL_MEM_MAP finds the owning node of the memory
  * and returns the index corresponding to the appropriate page in the
  * node's mem_map.
  */
-#define LOCAL_MAP_NR(kvaddr) \
-	(((unsigned long)(kvaddr) & 0x07ffffff) >> PAGE_SHIFT)
-
-/*
- * Given a kaddr, virt_to_page returns a pointer to the corresponding 
- * mem_map entry.
- */
-#define virt_to_page(kaddr) \
-	(ADDR_TO_MAPBASE(kaddr) + LOCAL_MAP_NR(kaddr))
-
-/*
- * VALID_PAGE returns a non-zero value if given page pointer is valid.
- * This assumes all node's mem_maps are stored within the node they refer to.
- */
-#define VALID_PAGE(page) \
-({ unsigned int node = KVADDR_TO_NID(page); \
-   ( (node < NR_NODES) && \
-     ((unsigned)((page) - NODE_MEM_MAP(node)) < NODE_DATA(node)->node_size) ); \
-})
+#define LOCAL_MAP_NR(addr) \
+	(((unsigned long)(addr) & 0x07ffffff) >> PAGE_SHIFT)
 
 #else
 
-#define PHYS_TO_NID(addr)	(0)
+#define PFN_TO_NID(addr)	(0)
 
 #endif
 

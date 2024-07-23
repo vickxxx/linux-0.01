@@ -11,6 +11,8 @@
 
 #include <net/flow.h>
 #include <net/ip6_fib.h>
+#include <linux/tcp.h>
+#include <linux/ip.h>
 
 struct pol_chain {
 	int			type;
@@ -21,9 +23,6 @@ struct pol_chain {
 
 extern struct rt6_info	ip6_null_entry;
 
-extern int ip6_rt_max_size;
-extern int ip6_rt_gc_min;
-extern int ip6_rt_gc_timeout;
 extern int ip6_rt_gc_interval;
 
 extern void			ip6_route_input(struct sk_buff *skb);
@@ -31,13 +30,19 @@ extern void			ip6_route_input(struct sk_buff *skb);
 extern struct dst_entry *	ip6_route_output(struct sock *sk,
 						 struct flowi *fl);
 
+extern int			ip6_route_me_harder(struct sk_buff *skb);
+
 extern void			ip6_route_init(void);
 extern void			ip6_route_cleanup(void);
 
 extern int			ipv6_route_ioctl(unsigned int cmd, void *arg);
 
-extern int			ip6_route_add(struct in6_rtmsg *rtmsg);
-extern int			ip6_del_rt(struct rt6_info *);
+extern int			ip6_route_add(struct in6_rtmsg *rtmsg,
+					      struct nlmsghdr *,
+					      void *rtattr);
+extern int			ip6_del_rt(struct rt6_info *,
+					   struct nlmsghdr *,
+					   void *rtattr);
 
 extern int			ip6_rt_addr_add(struct in6_addr *addr,
 						struct net_device *dev);
@@ -55,6 +60,8 @@ extern void			rt6_sndmsg(int type, struct in6_addr *dst,
 extern struct rt6_info		*rt6_lookup(struct in6_addr *daddr,
 					    struct in6_addr *saddr,
 					    int oif, int flags);
+
+extern struct rt6_info		*ip6_dst_alloc(void);
 
 /*
  *	support functions for ND
@@ -97,14 +104,14 @@ extern rwlock_t rt6_lock;
 static inline void ip6_dst_store(struct sock *sk, struct dst_entry *dst,
 				     struct in6_addr *daddr)
 {
-	struct ipv6_pinfo *np = &sk->net_pinfo.af_inet6;
+	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct rt6_info *rt = (struct rt6_info *) dst;
 
-	write_lock(&sk->dst_lock);
+	write_lock(&sk->sk_dst_lock);
 	__sk_dst_set(sk, dst);
 	np->daddr_cache = daddr;
 	np->dst_cookie = rt->rt6i_node ? rt->rt6i_node->fn_sernum : 0;
-	write_unlock(&sk->dst_lock);
+	write_unlock(&sk->sk_dst_lock);
 }
 
 #endif

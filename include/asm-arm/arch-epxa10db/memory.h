@@ -23,22 +23,20 @@
 /*
  * Task size: 3GB
  */
-#define TASK_SIZE	(0xc0000000UL)
+#define TASK_SIZE	(0xbf000000UL)
 #define TASK_SIZE_26	(0x04000000UL)
 
 /*
  * This decides where the kernel will search for a free chunk of vm
  * space during mmap's.
  */
-#define TASK_UNMAPPED_BASE (TASK_SIZE / 3)
+#define TASK_UNMAPPED_BASE (0x40000000)
 
 /*
  * Page offset: 3GB
  */
 #define PAGE_OFFSET	(0xc0000000UL)
 #define PHYS_OFFSET	(0x00000000UL)
-
-#define PHYS_TO_NID(addr)    (0)
 
 /*
  * On epxa10, the dram is contiguous

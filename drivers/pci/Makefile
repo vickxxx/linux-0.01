@@ -1,24 +1,20 @@
 #
 # Makefile for the PCI bus specific drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now inherited from the
-# parent makefile.
-#
 
-O_TARGET := driver.o
-
-export-objs := pci.o
-
-obj-$(CONFIG_PCI) += pci.o quirks.o compat.o names.o
+obj-y		+= access.o bus.o probe.o pci.o pool.o quirks.o \
+			names.o pci-driver.o search.o pci-sysfs.o
+obj-$(CONFIG_PM)  += power.o
 obj-$(CONFIG_PROC_FS) += proc.o
 
 ifndef CONFIG_SPARC64
-obj-$(CONFIG_PCI) += setup-res.o
+obj-y += setup-res.o
 endif
+
+obj-$(CONFIG_HOTPLUG) += hotplug.o
+
+# Build the PCI Hotplug drivers if we were asked to
+obj-$(CONFIG_HOTPLUG_PCI) += hotplug/
 
 #
 # Some architectures use the generic PCI setup functions
@@ -27,20 +23,32 @@ obj-$(CONFIG_ALPHA) += setup-bus.o setup-irq.o
 obj-$(CONFIG_ARM) += setup-bus.o setup-irq.o
 obj-$(CONFIG_PARISC) += setup-bus.o
 obj-$(CONFIG_SUPERH) += setup-bus.o setup-irq.o
-obj-$(CONFIG_ALL_PPC) += setup-bus.o
-obj-$(CONFIG_DDB5476) += setup-bus.o
+obj-$(CONFIG_PPC32) += setup-irq.o
+obj-$(CONFIG_PPC64) += setup-bus.o
 obj-$(CONFIG_SGI_IP27) += setup-irq.o
+obj-$(CONFIG_SGI_IP32) += setup-irq.o
+obj-$(CONFIG_X86_VISWS) += setup-irq.o
+
+# Cardbus & CompactPCI use setup-bus
+obj-$(CONFIG_HOTPLUG) += setup-bus.o
 
 ifndef CONFIG_X86
 obj-y += syscall.o
 endif
 
-include $(TOPDIR)/Rules.make
+host-progs := gen-devlist
 
-names.o: names.c devlist.h classlist.h
+# Dependencies on generated files need to be listed explicitly
+$(obj)/names.o: $(obj)/devlist.h $(obj)/classlist.h
+$(obj)/classlist.h: $(obj)/devlist.h
 
-devlist.h classlist.h: pci.ids gen-devlist
-	./gen-devlist <pci.ids
+# And that's how to generate them
+quiet_cmd_devlist = DEVLIST $@
+      cmd_devlist = ( cd $(obj); ./gen-devlist ) < $<
+$(obj)/devlist.h: $(src)/pci.ids $(obj)/gen-devlist
+	$(call cmd,devlist)
 
-gen-devlist: gen-devlist.c
-	$(HOSTCC) $(HOSTCFLAGS) -o gen-devlist gen-devlist.c
+# Files generated that shall be removed upon make clean
+clean-files := devlist.h classlist.h
+
+

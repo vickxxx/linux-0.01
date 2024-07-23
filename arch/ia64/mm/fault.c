@@ -1,7 +1,7 @@
 /*
  * MMU fault handling support.
  *
- * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2002 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #include <linux/sched.h>
@@ -43,21 +43,59 @@ expand_backing_store (struct vm_area_struct *vma, unsigned long address)
 	return 0;
 }
 
+/*
+ * Return TRUE if ADDRESS points at a page in the kernel's mapped segment
+ * (inside region 5, on ia64) and that page is present.
+ */
+static int
+mapped_kernel_page_is_present (unsigned long address)
+{
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *ptep, pte;
+
+	pgd = pgd_offset_k(address);
+	if (pgd_none(*pgd) || pgd_bad(*pgd))
+		return 0;
+
+	pmd = pmd_offset(pgd,address);
+	if (pmd_none(*pmd) || pmd_bad(*pmd))
+		return 0;
+
+	ptep = pte_offset_kernel(pmd, address);
+	if (!ptep)
+		return 0;
+
+	pte = *ptep;
+	return pte_present(pte);
+}
+
 void
 ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *regs)
 {
 	int signal = SIGSEGV, code = SEGV_MAPERR;
 	struct vm_area_struct *vma, *prev_vma;
 	struct mm_struct *mm = current->mm;
-	struct exception_fixup fix;
 	struct siginfo si;
 	unsigned long mask;
 
 	/*
 	 * If we're in an interrupt or have no user context, we must not take the fault..
 	 */
-	if (in_interrupt() || !mm)
+	if (in_atomic() || !mm)
 		goto no_context;
+
+#ifdef CONFIG_VIRTUAL_MEM_MAP
+	/*
+	 * If fault is in region 5 and we are in the kernel, we may already
+	 * have the mmap_sem (pfn_valid macro is called during mmap). There
+	 * is no vma for region 5 addr's anyway, so skip getting the semaphore
+	 * and go directly to the exception handling code.
+	 */
+
+	if ((REGION_NUMBER(address) == 5) && !user_mode(regs))
+		goto bad_area_no_up;
+#endif
 
 	down_read(&mm->mmap_sem);
 
@@ -80,7 +118,7 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 
 #	if (((1 << VM_READ_BIT) != VM_READ || (1 << VM_WRITE_BIT) != VM_WRITE) \
 	    || (1 << VM_EXEC_BIT) != VM_EXEC)
-#		error File is out of sync with <linux/mm.h>.  Pleaes update.
+#		error File is out of sync with <linux/mm.h>.  Please update.
 #	endif
 
 	mask = (  (((isr >> IA64_ISR_X_BIT) & 1UL) << VM_EXEC_BIT)
@@ -96,14 +134,14 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	 * sure we exit gracefully rather than endlessly redo the
 	 * fault.
 	 */
-	switch (handle_mm_fault(mm, vma, address, mask)) {
-	      case 1:
+	switch (handle_mm_fault(mm, vma, address, (mask & VM_WRITE) != 0)) {
+	      case VM_FAULT_MINOR:
 		++current->min_flt;
 		break;
-	      case 2:
+	      case VM_FAULT_MAJOR:
 		++current->maj_flt;
 		break;
-	      case 0:
+	      case VM_FAULT_SIGBUS:
 		/*
 		 * We ran out of memory, or some other thing happened
 		 * to us that made us unable to handle the page fault
@@ -111,8 +149,10 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		 */
 		signal = SIGBUS;
 		goto bad_area;
-	      default:
+	      case VM_FAULT_OOM:
 		goto out_of_memory;
+	      default:
+		BUG();
 	}
 	up_read(&mm->mmap_sem);
 	return;
@@ -121,15 +161,15 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 	if (!(prev_vma && (prev_vma->vm_flags & VM_GROWSUP) && (address == prev_vma->vm_end))) {
 		if (!(vma->vm_flags & VM_GROWSDOWN))
 			goto bad_area;
-		if (rgn_index(address) != rgn_index(vma->vm_start)
-		    || rgn_offset(address) >= RGN_MAP_LIMIT)
+		if (REGION_NUMBER(address) != REGION_NUMBER(vma->vm_start)
+		    || REGION_OFFSET(address) >= RGN_MAP_LIMIT)
 			goto bad_area;
 		if (expand_stack(vma, address))
 			goto bad_area;
 	} else {
 		vma = prev_vma;
-		if (rgn_index(address) != rgn_index(vma->vm_start)
-		    || rgn_offset(address) >= RGN_MAP_LIMIT)
+		if (REGION_NUMBER(address) != REGION_NUMBER(vma->vm_start)
+		    || REGION_OFFSET(address) >= RGN_MAP_LIMIT)
 			goto bad_area;
 		if (expand_backing_store(vma, address))
 			goto bad_area;
@@ -138,10 +178,16 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 
   bad_area:
 	up_read(&mm->mmap_sem);
-	if (isr & IA64_ISR_SP) {
+#ifdef CONFIG_VIRTUAL_MEM_MAP
+  bad_area_no_up:
+#endif
+	if ((isr & IA64_ISR_SP)
+	    || ((isr & IA64_ISR_NA) && (isr & IA64_ISR_CODE_MASK) == IA64_ISR_CODE_LFETCH))
+	{
 		/*
-		 * This fault was due to a speculative load set the "ed" bit in the psr to
-		 * ensure forward progress (target register will get a NaT).
+		 * This fault was due to a speculative load or lfetch.fault, set the "ed"
+		 * bit in the psr to ensure forward progress.  (Target register will get a
+		 * NaT for ld.s, lfetch will be canceled.)
 		 */
 		ia64_psr(regs)->ed = 1;
 		return;
@@ -151,6 +197,8 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		si.si_errno = 0;
 		si.si_code = code;
 		si.si_addr = (void *) address;
+		si.si_isr = isr;
+		si.si_flags = __ISR_VALID;
 		force_sig_info(signal, &si, current);
 		return;
 	}
@@ -165,15 +213,18 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
 		return;
 	}
 
-#ifdef GAS_HAS_LOCAL_TAGS
-	fix = search_exception_table(regs->cr_iip + ia64_psr(regs)->ri);
-#else
-	fix = search_exception_table(regs->cr_iip);
-#endif
-	if (fix.cont) {
-		handle_exception(regs, fix);
+	if (done_with_exception(regs))
 		return;
-	}
+
+	/*
+	 * Since we have no vma's for region 5, we might get here even if the address is
+	 * valid, due to the VHPT walker inserting a non present translation that becomes
+	 * stale. If that happens, the non present fault handler already purged the stale
+	 * translation, which fixed the problem. So, we check to see if the translation is
+	 * valid, and return if it is.
+	 */
+	if (REGION_NUMBER(address) == 5 && mapped_kernel_page_is_present(address))
+		return;
 
 	/*
 	 * Oops. The kernel tried to access some bad page. We'll have to terminate things
@@ -194,12 +245,11 @@ ia64_do_page_fault (unsigned long address, unsigned long isr, struct pt_regs *re
   out_of_memory:
 	up_read(&mm->mmap_sem);
 	if (current->pid == 1) {
-		current->policy |= SCHED_YIELD;
-		schedule();
+		yield();
 		down_read(&mm->mmap_sem);
 		goto survive;
 	}
-	printk("VM: killing process %s\n", current->comm);
+	printk(KERN_CRIT "VM: killing process %s\n", current->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);
 	goto no_context;

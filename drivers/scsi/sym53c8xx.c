@@ -1,7 +1,7 @@
 /******************************************************************************
 **  High Performance device driver for the Symbios 53C896 controller.
 **
-**  Copyright (C) 1998-2000  Gerard Roudier <groudier@club-internet.fr>
+**  Copyright (C) 1998-2001  Gerard Roudier <groudier@free.fr>
 **
 **  This driver also supports all the Symbios 53C8XX controller family, 
 **  except 53C810 revisions < 16, 53C825 revisions < 16 and all 
@@ -32,7 +32,7 @@
 **  The Linux port of the FreeBSD ncr driver has been achieved in 
 **  november 1995 by:
 **
-**          Gerard Roudier              <groudier@club-internet.fr>
+**          Gerard Roudier              <groudier@free.fr>
 **
 **  Being given that this driver originates from the FreeBSD version, and
 **  in order to keep synergy on both, any suggested enhancements and corrections
@@ -99,21 +99,21 @@
 **==========================================================
 */
 
-#define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
+#include <linux/version.h>
 
 #include <linux/module.h>
 
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <asm/system.h>
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,17)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,17)
 #include <linux/spinlock.h>
-#elif LINUX_VERSION_CODE >= LinuxVersionCode(2,1,93)
+#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,93)
 #include <asm/spinlock.h>
 #endif
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/signal.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/string.h>
@@ -123,10 +123,9 @@
 #include <linux/timer.h>
 #include <linux/stat.h>
 
-#include <linux/version.h>
 #include <linux/blk.h>
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,35)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,35)
 #include <linux/init.h>
 #endif
 
@@ -137,14 +136,12 @@
 #define	__initdata
 #endif
 
-#if LINUX_VERSION_CODE <= LinuxVersionCode(2,1,92)
+#if LINUX_VERSION_CODE <= KERNEL_VERSION(2,1,92)
 #include <linux/bios32.h>
 #endif
 
 #include "scsi.h"
 #include "hosts.h"
-#include "constants.h"
-#include "sd.h"
 
 #include <linux/types.h>
 
@@ -172,7 +169,7 @@ typedef u64 u_int64;
 **	Donnot compile integrity checking code for Linux-2.3.0 
 **	and above since SCSI data structures are not ready yet.
 */
-/* #if LINUX_VERSION_CODE < LinuxVersionCode(2,3,0) */
+/* #if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0) */
 #if 0
 #define	SCSI_NCR_INTEGRITY_CHECKING
 #endif
@@ -185,7 +182,7 @@ typedef u64 u_int64;
 **	despite the fact that the PCI specifications are looking 
 **	so smart and simple! ;-)
 */
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,47)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,47)
 #define SCSI_NCR_DYNAMIC_DMA_MAPPING
 #endif
 
@@ -441,7 +438,7 @@ static inline struct xpt_quehead *xpt_remque_tail(struct xpt_quehead *head)
 **	code.
 */
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,2,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0)
 
 typedef struct pci_dev *pcidev_t;
 #define PCIDEV_NULL		(0)
@@ -456,7 +453,7 @@ pci_get_base_cookie(struct pci_dev *pdev, int index)
 {
 	u_long base;
 
-#if LINUX_VERSION_CODE > LinuxVersionCode(2,3,12)
+#if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,12)
 	base = pdev->resource[index].start;
 #else
 	base = pdev->base_address[index];
@@ -495,8 +492,6 @@ typedef unsigned int pcidev_t;
 #define PciBusNumber(d)		((d)>>8)
 #define PciDeviceFn(d)		((d)&0xff)
 #define __PciDev(busn, devfn)	(((busn)<<8)+(devfn))
-
-#define pci_present pcibios_present
 
 #define pci_read_config_byte(d, w, v) \
 	pcibios_read_config_byte(PciBusNumber(d), PciDeviceFn(d), w, v)
@@ -576,13 +571,13 @@ pci_get_base_cookie(struct pci_dev *pdev, int offset)
 	return base;
 }
 
-#endif	/* LINUX_VERSION_CODE >= LinuxVersionCode(2,2,0) */
+#endif	/* LINUX_VERSION_CODE >= KERNEL_VERSION(2,2,0) */
 
 /* Does not make sense in earlier kernels */
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,4,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
 #define pci_enable_device(pdev)		(0)
 #endif
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,4,4)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,4)
 #define	scsi_set_pci_device(inst, pdev)	(0)
 #endif
 
@@ -632,7 +627,7 @@ static int ncr_debug = SCSI_NCR_DEBUG_FLAGS;
 **	  wished (e.g.: threaded by controller).
 */
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,93)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,93)
 
 spinlock_t sym53c8xx_lock = SPIN_LOCK_UNLOCKED;
 #define	NCR_LOCK_DRIVER(flags)     spin_lock_irqsave(&sym53c8xx_lock, flags)
@@ -642,10 +637,10 @@ spinlock_t sym53c8xx_lock = SPIN_LOCK_UNLOCKED;
 #define	NCR_LOCK_NCB(np, flags)    spin_lock_irqsave(&np->smp_lock, flags)
 #define	NCR_UNLOCK_NCB(np, flags)  spin_unlock_irqrestore(&np->smp_lock, flags)
 
-#define	NCR_LOCK_SCSI_DONE(np, flags) \
-		spin_lock_irqsave(&io_request_lock, flags)
-#define	NCR_UNLOCK_SCSI_DONE(np, flags) \
-		spin_unlock_irqrestore(&io_request_lock, flags)
+#define	NCR_LOCK_SCSI_DONE(host, flags) \
+		spin_lock_irqsave(((host)->host_lock), flags)
+#define	NCR_UNLOCK_SCSI_DONE(host, flags) \
+		spin_unlock_irqrestore(((host)->host_lock), flags)
 
 #else
 
@@ -656,8 +651,8 @@ spinlock_t sym53c8xx_lock = SPIN_LOCK_UNLOCKED;
 #define	NCR_LOCK_NCB(np, flags)    do { save_flags(flags); cli(); } while (0)
 #define	NCR_UNLOCK_NCB(np, flags)  do { restore_flags(flags); } while (0)
 
-#define	NCR_LOCK_SCSI_DONE(np, flags)    do {;} while (0)
-#define	NCR_UNLOCK_SCSI_DONE(np, flags)  do {;} while (0)
+#define	NCR_LOCK_SCSI_DONE(host, flags)    do {;} while (0)
+#define	NCR_UNLOCK_SCSI_DONE(host, flags)  do {;} while (0)
 
 #endif
 
@@ -672,7 +667,7 @@ spinlock_t sym53c8xx_lock = SPIN_LOCK_UNLOCKED;
 **	architecture.
 */
 
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,1,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,1,0)
 #define ioremap vremap
 #define iounmap vfree
 #endif
@@ -715,7 +710,7 @@ static void __init unmap_pci_mem(u_long vaddr, u_long size)
 **	inaccurate on Pentium processors.
 */
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,105)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,105)
 #define UDELAY udelay
 #define MDELAY mdelay
 #else
@@ -737,7 +732,7 @@ static void MDELAY(long ms) { while (ms--) UDELAY(1000); }
 **	real bus astraction, btw).
 */
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,0)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,0)
 #define __GetFreePages(flags, order) __get_free_pages(flags, order)
 #else
 #define __GetFreePages(flags, order) __get_free_pages(flags, order, 0)
@@ -1280,29 +1275,19 @@ static __inline__ int scsi_data_direction(Scsi_Cmnd *cmd)
 
 #endif	/* SCSI_DATA_UNKNOWN */
 
-/*
-**	Head of list of NCR boards
-**
-**	For kernel version < 1.3.70, host is retrieved by its irq level.
-**	For later kernels, the internal host control block address 
-**	(struct ncb) is used as device id parameter of the irq stuff.
-*/
-
-static struct Scsi_Host	*first_host = NULL;
-
 
 /*
 **	/proc directory entry and proc_info function
 */
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,3,27)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,27)
 static struct proc_dir_entry proc_scsi_sym53c8xx = {
     PROC_SCSI_SYM53C8XX, 9, NAME53C8XX,
     S_IFDIR | S_IRUGO | S_IXUGO, 2
 };
 #endif
 #ifdef SCSI_NCR_PROC_INFO_SUPPORT
-static int sym53c8xx_proc_info(char *buffer, char **start, off_t offset,
-			int length, int hostno, int func);
+static int sym53c8xx_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t offset,
+			int length, int func);
 #endif
 
 /*
@@ -1319,7 +1304,7 @@ static struct ncr_driver_setup
 	driver_safe_setup __initdata	= SCSI_NCR_DRIVER_SAFE_SETUP;
 # ifdef	MODULE
 char *sym53c8xx = 0;	/* command line passed by insmod */
-#  if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,30)
+#  if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,30)
 MODULE_PARM(sym53c8xx, "s");
 #  endif
 # endif
@@ -1342,8 +1327,6 @@ MODULE_PARM(sym53c8xx, "s");
 #define SetScsiAbortResult(cmd) SetScsiResult(cmd, DID_ABORT, 0xff)
 #endif
 
-static void sym53c8xx_select_queue_depths(
-	struct Scsi_Host *host, struct scsi_device *devlist);
 static void sym53c8xx_intr(int irq, void *dev_id, struct pt_regs * regs);
 static void sym53c8xx_timeout(unsigned long np);
 
@@ -2040,7 +2023,7 @@ struct ncb {
 					/*  when lcb is not allocated.	*/
 	Scsi_Cmnd	*done_list;	/* Commands waiting for done()  */
 					/* callback to be invoked.      */ 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,1,93)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,93)
 	spinlock_t	smp_lock;	/* Lock for SMP threading       */
 #endif
 
@@ -2651,7 +2634,7 @@ static	struct script script0 __initdata = {
 	**	The below GETJOB_BEGIN to GETJOB_END section of SCRIPTS 
 	**	is a critical path. If it is partially executed, it then 
 	**	may happen that the job address is not yet in the DSA 
-	**	and the the next queue position points to the next JOB.
+	**	and the next queue position points to the next JOB.
 	*/
 	SCR_LOAD_ABS (dsa, 4),
 		PADDRH (startpos),
@@ -2691,7 +2674,7 @@ static	struct script script0 __initdata = {
 	/*
 	**	Now there are 4 possibilities:
 	**
-	**	(1) The ncr looses arbitration.
+	**	(1) The ncr loses arbitration.
 	**	This is ok, because it will try again,
 	**	when the bus becomes idle.
 	**	(But beware of the timeout function!)
@@ -3667,7 +3650,7 @@ static	struct scripth scripth0 __initdata = {
 	**	some target to reset or some disconnected 
 	**	job to abort. Since error recovery is a serious 
 	**	busyness, we will really reset the SCSI BUS, if 
-	**	case of a SCSI interrupt occuring in this path.
+	**	case of a SCSI interrupt occurring in this path.
 	*/
 
 	/*
@@ -4645,7 +4628,7 @@ ncr_script_copy_and_bind (ncb_p np,ncrcmd *src,ncrcmd *dst,int len)
 		case 0x8:
 			/*
 			**	JUMP / CALL
-			**	dont't relocate if relative :-)
+			**	don't relocate if relative :-)
 			*/
 			if (opcode & 0x00800000)
 				relocs = 0;
@@ -4749,8 +4732,8 @@ static void PRINT_LUN(ncb_p np, int target, int lun)
 
 static void PRINT_ADDR(Scsi_Cmnd *cmd)
 {
-	struct host_data *host_data = (struct host_data *) cmd->host->hostdata;
-	PRINT_LUN(host_data->ncb, cmd->target, cmd->lun);
+	struct host_data *host_data = (struct host_data *) cmd->device->host->hostdata;
+	PRINT_LUN(host_data->ncb, cmd->device->id, cmd->device->lun);
 }
 
 /*==========================================================
@@ -4915,6 +4898,11 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	u_long	period;
 	int i;
 
+#ifdef CONFIG_PARISC
+	char scsi_mode = -1;
+	struct hardware_path hwpath;
+#endif
+
 	/*
 	**	Wide ?
 	*/
@@ -4986,6 +4974,31 @@ static int __init ncr_prepare_setting(ncb_p np, ncr_nvram *nvram)
 	 */
 
 	period = (4 * div_10M[0] + np->clock_khz - 1) / np->clock_khz;
+
+#ifdef CONFIG_PARISC
+	/* Host firmware (PDC) keeps a table for crippling SCSI capabilities.
+	 * Many newer machines export one channel of 53c896 chip
+	 * as SE, 50-pin HD.  Also used for Multi-initiator SCSI clusters
+	 * to set the SCSI Initiator ID.
+	 */
+	get_pci_node_path(np->pdev, &hwpath);
+	if (pdc_get_initiator(&hwpath, &np->myaddr, &period, &np->maxwide, &scsi_mode))
+	{
+		if (np->maxwide) 
+			np->features |= FE_WIDE;
+		if (scsi_mode >= 0) {
+			/* C3000 PDC reports period/mode */
+			driver_setup.diff_support = 0;
+			switch(scsi_mode) {
+			case 0:	np->scsi_mode = SMODE_SE; break;
+			case 1:	np->scsi_mode = SMODE_HVD; break;
+			case 2:	np->scsi_mode = SMODE_LVD; break;
+			default:	break;
+			}
+		}
+	}
+#endif
+
 	if	(period <= 250)		np->minsync = 10;
 	else if	(period <= 303)		np->minsync = 11;
 	else if	(period <= 500)		np->minsync = 12;
@@ -5439,7 +5452,7 @@ ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device)
 	/*
 	**	Store input informations in the host data structure.
 	*/
-	strncpy(np->chip_name, device->chip.name, sizeof(np->chip_name) - 1);
+	strlcpy(np->chip_name, device->chip.name, sizeof(np->chip_name));
 	np->unit	= unit;
 	np->verbose	= driver_setup.verbose;
 	sprintf(np->inst_name, NAME53C "%s-%d", np->chip_name, np->unit);
@@ -5827,7 +5840,7 @@ ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device)
 			((driver_setup.irqm & 0x20) ? 0 : SA_INTERRUPT),
 #else
 			((driver_setup.irqm & 0x10) ? 0 : SA_SHIRQ) |
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,2,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,2,0)
 			((driver_setup.irqm & 0x20) ? 0 : SA_INTERRUPT),
 #else
 			0,
@@ -5883,11 +5896,6 @@ ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device)
 
 	/*
 	**  Done.
-	*/
-        if (!first_host)
-        	first_host = instance;
-
-	/*
 	**	Fill Linux host instance structure
 	**	and return success.
 	*/
@@ -5896,7 +5904,7 @@ ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device)
 	instance->max_id	= np->maxwide ? 16 : 8;
 	instance->max_lun	= MAX_LUN;
 #ifndef SCSI_NCR_IOMAPPED
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,29)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,29)
 	instance->base		= (unsigned long) np->reg;
 #else
 	instance->base		= (char *) np->reg;
@@ -5909,7 +5917,7 @@ ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device)
 	instance->dma_channel	= 0;
 	instance->cmd_per_lun	= MAX_TAGS;
 	instance->can_queue	= (MAX_START-4);
-	scsi_set_pci_device(instance, device->pdev);
+	scsi_set_device(instance, &device->pdev->dev);
 
 	np->check_integrity       = 0;
 
@@ -5924,8 +5932,6 @@ ncr_attach (Scsi_Host_Template *tpnt, int unit, ncr_device *device)
 #endif
 #endif
 	
-	instance->select_queue_depths = sym53c8xx_select_queue_depths;
-
 	NCR_UNLOCK_NCB(np, flags);
 
 	/*
@@ -6526,8 +6532,8 @@ static int ncr_prepare_nego(ncb_p np, ccb_p cp, u_char *msgptr)
 static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 {
 /*	Scsi_Device        *device    = cmd->device; */
-	tcb_p tp                      = &np->target[cmd->target];
-	lcb_p lp		      = ncr_lp(np, tp, cmd->lun);
+	tcb_p tp                      = &np->target[cmd->device->id];
+	lcb_p lp		      = ncr_lp(np, tp, cmd->device->lun);
 	ccb_p cp;
 
 	u_char	idmsg, *msgptr;
@@ -6541,9 +6547,9 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 	**
 	**---------------------------------------------
 	*/
-	if ((cmd->target == np->myaddr	  ) ||
-		(cmd->target >= MAX_TARGET) ||
-		(cmd->lun    >= MAX_LUN   )) {
+	if ((cmd->device->id == np->myaddr	  ) ||
+		(cmd->device->id >= MAX_TARGET) ||
+		(cmd->device->lun    >= MAX_LUN   )) {
 		return(DID_BAD_TARGET);
         }
 
@@ -6583,7 +6589,7 @@ static int ncr_queue_command (ncb_p np, Scsi_Cmnd *cmd)
 			np->settle_time = tlimit;
 	}
 
-        if (np->settle_time || !(cp=ncr_get_ccb (np, cmd->target, cmd->lun))) {
+        if (np->settle_time || !(cp=ncr_get_ccb (np, cmd->device->id, cmd->device->lun))) {
 		insert_into_waiting_list(np, cmd);
 		return(DID_OK);
 	}
@@ -7005,7 +7011,7 @@ static void ncr_soft_reset(ncb_p np)
 			INW (nc_sist);
 		}
 		else if (istat & DIP) {
-			if (INB (nc_dstat) & ABRT);
+			if (INB (nc_dstat) & ABRT)
 				break;
 		}
 		UDELAY(5);
@@ -7235,7 +7241,6 @@ static int ncr_abort_command (ncb_p np, Scsi_Cmnd *cmd)
 **==========================================================
 */
 
-#ifdef MODULE
 static int ncr_detach(ncb_p np)
 {
 	int i;
@@ -7281,7 +7286,6 @@ static int ncr_detach(ncb_p np)
 
 	return 1;
 }
-#endif
 
 /*==========================================================
 **
@@ -7399,7 +7403,7 @@ void ncr_complete (ncb_p np, ccb_p cp)
 		}
 	}
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,99)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,99)
 	/*
 	**	Move residual byte count to user structure.
 	*/
@@ -7974,7 +7978,7 @@ static void ncr_getsync(ncb_p np, u_char sfac, u_char *fakp, u_char *scntl3p)
 	/*
 	**	Why not to try the immediate lower divisor and to choose 
 	**	the one that allows the fastest output speed ?
-	**	We dont want input speed too much greater than output speed.
+	**	We don't want input speed too much greater than output speed.
 	*/
 	if (div >= 1 && fak < 8) {
 		u_long fak2, per2;
@@ -9113,7 +9117,7 @@ void ncr_int_udc (ncb_p np)
 	ccb_p   cp  = ncr_ccb_from_dsa(np, dsa);
 
 	/*
-	 * Fix Up. Some disks respond to a PPR negotation with
+	 * Fix Up. Some disks respond to a PPR negotiation with
 	 * a bus free instead of a message reject. 
 	 * Disable ppr negotiation if this is first time
 	 * tried ppr negotiation.
@@ -12126,13 +12130,16 @@ static int ncr_scatter_896R1(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd)
 
 	if (!use_sg)
 		segn = ncr_scatter_no_sglist(np, cp, cmd);
-	else if (use_sg > MAX_SCATTER)
-		segn = -1;
 	else {
 		struct scatterlist *scatter = (struct scatterlist *)cmd->buffer;
 		struct scr_tblmove *data;
 
 		use_sg = map_scsi_sg_data(np, cmd);
+		if (use_sg > MAX_SCATTER) {
+			unmap_scsi_data(np, cmd);
+			return -1;
+		}
+
 		data = &cp->phys.data[MAX_SCATTER - use_sg];
 
 		for (segn = 0; segn < use_sg; segn++) {
@@ -12165,13 +12172,15 @@ static int ncr_scatter(ncb_p np, ccb_p cp, Scsi_Cmnd *cmd)
 
 	if (!use_sg)
 		segment = ncr_scatter_no_sglist(np, cp, cmd);
-	else if (use_sg > MAX_SCATTER)
-		segment = -1;
 	else {
 		struct scatterlist *scatter = (struct scatterlist *)cmd->buffer;
 		struct scr_tblmove *data;
 
 		use_sg = map_scsi_sg_data(np, cmd);
+		if (use_sg > MAX_SCATTER) {
+			unmap_scsi_data(np, cmd);
+			return -1;
+		}
 		data = &cp->phys.data[MAX_SCATTER - use_sg];
 
 		for (segment = 0; segment < use_sg; segment++) {
@@ -12762,7 +12771,7 @@ int __init sym53c8xx_setup(char *str)
 	return 1;
 }
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,3,13)
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,13)
 #ifndef MODULE
 __setup("sym53c8xx=", sym53c8xx_setup);
 #endif
@@ -12880,7 +12889,7 @@ static void __init ncr_detect_pqs_pds(void)
 **    differ and attach them using the order in the NVRAM.
 **
 **    If no NVRAM is found or data appears invalid attach boards in 
-**    the the order they are detected.
+**    the order they are detected.
 **===================================================================
 */
 int __init sym53c8xx_detect(Scsi_Host_Template *tpnt)
@@ -12894,16 +12903,10 @@ int __init sym53c8xx_detect(Scsi_Host_Template *tpnt)
 #endif
 
 	/*
-	**    PCI is required.
-	*/
-	if (!pci_present())
-		return 0;
-
-	/*
 	**    Initialize driver general stuff.
 	*/
 #ifdef SCSI_NCR_PROC_INFO_SUPPORT
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,3,27)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,3,27)
      tpnt->proc_dir  = &proc_scsi_sym53c8xx;
 #else
      tpnt->proc_name = NAME53C8XX;
@@ -12974,6 +12977,7 @@ if (sym53c8xx)
 		}
 		if (i != count)	/* Ignore this device if we already have it */
 			continue;
+		pci_set_master(pcidev);
 		devp = &devtbl[count];
 		devp->host_id = driver_setup.host_id;
 		devp->attach_done = 0;
@@ -13217,9 +13221,9 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, ncr_device *device)
 		return -1;
 	}
 
-#ifdef __powerpc__
+#if defined(__powerpc__) || defined(__hppa__)
 	/*
-	**	Fix-up for power/pc.
+	**	Fix-up for power/pc and hppa.
 	**	Should not be performed by the driver.
 	*/
 	if ((command & (PCI_COMMAND_IO | PCI_COMMAND_MEMORY))
@@ -13231,7 +13235,7 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, ncr_device *device)
 		pci_write_config_word(pdev, PCI_COMMAND, command);
 	}
 
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,2,0)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,2,0)
 	if ( is_prep ) {
 		if (io_port >= 0x10000000) {
 			printk(NAME53C8XX ": reallocating io_port (Wacky IBM)");
@@ -13257,7 +13261,7 @@ sym53c8xx_pci_init(Scsi_Host_Template *tpnt, pcidev_t pdev, ncr_device *device)
 
 #if defined(__i386__) && !defined(MODULE)
 	if (!cache_line_size) {
-#if LINUX_VERSION_CODE < LinuxVersionCode(2,1,75)
+#if LINUX_VERSION_CODE < KERNEL_VERSION(2,1,75)
 		extern char x86;
 		switch(x86) {
 #else
@@ -13541,56 +13545,57 @@ static int device_queue_depth(ncb_p np, int target, int lun)
 	return DEF_DEPTH;
 }
 
-static void sym53c8xx_select_queue_depths(struct Scsi_Host *host, struct scsi_device *devlist)
+int sym53c8xx_slave_configure(Scsi_Device *device)
 {
-	struct scsi_device *device;
+	struct Scsi_Host *host = device->host;
+	ncb_p np;
+	tcb_p tp;
+	lcb_p lp;
+	int numtags, depth_to_use;
 
-	for (device = devlist; device; device = device->next) {
-		ncb_p np;
-		tcb_p tp;
-		lcb_p lp;
-		int numtags;
+	np = ((struct host_data *) host->hostdata)->ncb;
+	tp = &np->target[device->id];
+	lp = ncr_lp(np, tp, device->lun);
 
-		if (device->host != host)
-			continue;
+	/*
+	**	Select queue depth from driver setup.
+	**	Donnot use more than configured by user.
+	**	Use at least 2.
+	**	Donnot use more than our maximum.
+	*/
+	numtags = device_queue_depth(np, device->id, device->lun);
+	if (numtags > tp->usrtags)
+		numtags = tp->usrtags;
+	if (!device->tagged_supported)
+		numtags = 1;
+	depth_to_use = numtags;
+	if (depth_to_use < 2)
+		depth_to_use = 2;
+	if (depth_to_use > MAX_TAGS)
+		depth_to_use = MAX_TAGS;
 
-		np = ((struct host_data *) host->hostdata)->ncb;
-		tp = &np->target[device->id];
-		lp = ncr_lp(np, tp, device->lun);
+	scsi_adjust_queue_depth(device,
+				(device->tagged_supported ?
+				 MSG_SIMPLE_TAG : 0),
+				depth_to_use);
 
-		/*
-		**	Select queue depth from driver setup.
-		**	Donnot use more than configured by user.
-		**	Use at least 2.
-		**	Donnot use more than our maximum.
-		*/
-		numtags = device_queue_depth(np, device->id, device->lun);
-		if (numtags > tp->usrtags)
-			numtags = tp->usrtags;
-		if (!device->tagged_supported)
-			numtags = 1;
-		device->queue_depth = numtags;
-		if (device->queue_depth < 2)
-			device->queue_depth = 2;
-		if (device->queue_depth > MAX_TAGS)
-			device->queue_depth = MAX_TAGS;
-
-		/*
-		**	Since the queue depth is not tunable under Linux,
-		**	we need to know this value in order not to 
-		**	announce stupid things to user.
-		*/
-		if (lp) {
-			lp->numtags = lp->maxtags = numtags;
-			lp->scdev_depth = device->queue_depth;
-		}
-		ncr_setup_tags (np, device->id, device->lun);
+	/*
+	**	Since the queue depth is not tunable under Linux,
+	**	we need to know this value in order not to 
+	**	announce stupid things to user.
+	*/
+	if (lp) {
+		lp->numtags = lp->maxtags = numtags;
+		lp->scdev_depth = depth_to_use;
+	}
+	ncr_setup_tags (np, device->id, device->lun);
 
 #ifdef DEBUG_SYM53C8XX
-printk("sym53c8xx_select_queue_depth: host=%d, id=%d, lun=%d, depth=%d\n",
-	np->unit, device->id, device->lun, device->queue_depth);
+	printk("sym53c8xx_select_queue_depth: host=%d, id=%d, lun=%d, depth=%d\n",
+	       np->unit, device->id, device->lun, depth_to_use);
 #endif
-	}
+
+	return 0;
 }
 
 /*
@@ -13607,7 +13612,7 @@ const char *sym53c8xx_info (struct Scsi_Host *host)
 
 int sym53c8xx_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
 {
-     ncb_p np = ((struct host_data *) cmd->host->hostdata)->ncb;
+     ncb_p np = ((struct host_data *) cmd->device->host->hostdata)->ncb;
      unsigned long flags;
      int sts;
 
@@ -13676,9 +13681,9 @@ static void sym53c8xx_intr(int irq, void *dev_id, struct pt_regs * regs)
      if (DEBUG_FLAGS & DEBUG_TINY) printk ("]\n");
 
      if (done_list) {
-          NCR_LOCK_SCSI_DONE(np, flags);
+          NCR_LOCK_SCSI_DONE(done_list->device->host, flags);
           ncr_flush_done_cmds(done_list);
-          NCR_UNLOCK_SCSI_DONE(np, flags);
+          NCR_UNLOCK_SCSI_DONE(done_list->device->host, flags);
      }
 }
 
@@ -13699,9 +13704,9 @@ static void sym53c8xx_timeout(unsigned long npref)
      NCR_UNLOCK_NCB(np, flags);
 
      if (done_list) {
-          NCR_LOCK_SCSI_DONE(np, flags);
+          NCR_LOCK_SCSI_DONE(done_list->device->host, flags);
           ncr_flush_done_cmds(done_list);
-          NCR_UNLOCK_SCSI_DONE(np, flags);
+          NCR_UNLOCK_SCSI_DONE(done_list->device->host, flags);
      }
 }
 
@@ -13715,7 +13720,7 @@ int sym53c8xx_reset(Scsi_Cmnd *cmd, unsigned int reset_flags)
 int sym53c8xx_reset(Scsi_Cmnd *cmd)
 #endif
 {
-	ncb_p np = ((struct host_data *) cmd->host->hostdata)->ncb;
+	ncb_p np = ((struct host_data *) cmd->device->host->hostdata)->ncb;
 	int sts;
 	unsigned long flags;
 	Scsi_Cmnd *done_list;
@@ -13777,7 +13782,7 @@ out:
 
 int sym53c8xx_abort(Scsi_Cmnd *cmd)
 {
-	ncb_p np = ((struct host_data *) cmd->host->hostdata)->ncb;
+	ncb_p np = ((struct host_data *) cmd->device->host->hostdata)->ncb;
 	int sts;
 	unsigned long flags;
 	Scsi_Cmnd *done_list;
@@ -13813,7 +13818,6 @@ out:
 }
 
 
-#ifdef MODULE
 int sym53c8xx_release(struct Scsi_Host *host)
 {
 #ifdef DEBUG_SYM53C8XX
@@ -13823,7 +13827,6 @@ printk("sym53c8xx : release\n");
 
      return 1;
 }
-#endif
 
 
 /*
@@ -14111,7 +14114,7 @@ printk("ncr_user_command: data=%ld\n", uc->data);
 	if (len)
 		return -EINVAL;
 	else {
-		long flags;
+		unsigned long flags;
 
 		NCR_LOCK_NCB(np, flags);
 		ncr_usercmd (np);
@@ -14215,48 +14218,36 @@ static int ncr_host_info(ncb_p np, char *ptr, off_t offset, int len)
 **	- func = 1 means write (parse user control command)
 */
 
-static int sym53c8xx_proc_info(char *buffer, char **start, off_t offset,
-			int length, int hostno, int func)
+static int sym53c8xx_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t offset,
+			int length, int func)
 {
-	struct Scsi_Host *host;
 	struct host_data *host_data;
 	ncb_p ncb = 0;
 	int retv;
 
 #ifdef DEBUG_PROC_INFO
-printk("sym53c8xx_proc_info: hostno=%d, func=%d\n", hostno, func);
+printk("sym53c8xx_proc_info: hostno=%d, func=%d\n", host->host_no, func);
 #endif
 
-	for (host = first_host; host; host = host->next) {
-		if (host->hostt != first_host->hostt)
-			continue;
-		if (host->host_no == hostno) {
-			host_data = (struct host_data *) host->hostdata;
-			ncb = host_data->ncb;
-			break;
-		}
-	}
-
+	host_data = (struct host_data *) host->hostdata;
+	ncb = host_data->ncb;
+	retv = -EINVAL;
 	if (!ncb)
-		return -EINVAL;
+		goto out;
 
 	if (func) {
 #ifdef	SCSI_NCR_USER_COMMAND_SUPPORT
 		retv = ncr_user_command(ncb, buffer, length);
-#else
-		retv = -EINVAL;
 #endif
-	}
-	else {
+	} else {
 		if (start)
 			*start = buffer;
 #ifdef SCSI_NCR_USER_INFO_SUPPORT
 		retv = ncr_host_info(ncb, buffer, offset, length);
-#else
-		retv = -EINVAL;
 #endif
 	}
 
+out:
 	return retv;
 }
 
@@ -14713,10 +14704,21 @@ sym_read_Tekram_nvram (ncr_slot *np, u_short device_id, Tekram_nvram *nvram)
 
 MODULE_LICENSE("GPL");
 
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,4,0)
-static
-#endif
-#if LINUX_VERSION_CODE >= LinuxVersionCode(2,4,0) || defined(MODULE)
-Scsi_Host_Template driver_template = SYM53C8XX;
+static Scsi_Host_Template driver_template = {
+	.name           = "sym53c8xx",
+	.detect         = sym53c8xx_detect,
+	.release        = sym53c8xx_release,
+	.info           = sym53c8xx_info, 
+	.queuecommand   = sym53c8xx_queue_command,
+	.slave_configure = sym53c8xx_slave_configure,
+	.abort          = sym53c8xx_abort,
+	.reset          = sym53c8xx_reset,
+	.can_queue      = SCSI_NCR_CAN_QUEUE,
+	.this_id        = 7,
+	.sg_tablesize   = SCSI_NCR_SG_TABLESIZE,
+	.cmd_per_lun    = SCSI_NCR_CMD_PER_LUN,
+	.max_sectors	= MAX_HW_SEGMENTS*8,
+	.use_clustering = DISABLE_CLUSTERING,
+	.highmem_io	= 1
+};
 #include "scsi_module.c"
-#endif

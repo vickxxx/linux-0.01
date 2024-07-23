@@ -62,25 +62,22 @@
  */
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/init.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
-
 #include <linux/version.h>
 #include <linux/module.h>
+
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/dma.h>
 
 #include "ni65.h"
 
@@ -187,11 +184,41 @@ static struct card {
 	short addr_offset;
 	unsigned char *vendor_id;
 	char *cardname;
-	unsigned char config;
+	long config;
 } cards[] = {
-	{ NI65_ID0,NI65_ID1,0x0e,0x10,0x0,0x8,ni_vendor,"ni6510", 0x1 } ,
-	{ NI65_EB_ID0,NI65_EB_ID1,0x0e,0x18,0x10,0x0,ni_vendor,"ni6510 EtherBlaster", 0x2 } ,
-	{ NE2100_ID0,NE2100_ID1,0x0e,0x18,0x10,0x0,NULL,"generic NE2100", 0x0 }
+	{
+		.id0	     = NI65_ID0,
+		.id1	     = NI65_ID1,
+		.id_offset   = 0x0e,
+		.total_size  = 0x10,
+		.cmd_offset  = 0x0,
+		.addr_offset = 0x8,
+		.vendor_id   = ni_vendor,
+		.cardname    = "ni6510",
+		.config	     = 0x1,
+       	},
+	{
+		.id0	     = NI65_EB_ID0,
+		.id1	     = NI65_EB_ID1,
+		.id_offset   = 0x0e,
+		.total_size  = 0x18,
+		.cmd_offset  = 0x10,
+		.addr_offset = 0x0,
+		.vendor_id   = ni_vendor,
+		.cardname    = "ni6510 EtherBlaster",
+		.config	     = 0x2,
+       	},
+	{
+		.id0	     = NE2100_ID0,
+		.id1	     = NE2100_ID1,
+		.id_offset   = 0x0e,
+		.total_size  = 0x18,
+		.cmd_offset  = 0x10,
+		.addr_offset = 0x0,
+		.vendor_id   = NULL,
+		.cardname    = "generic NE2100",
+		.config	     = 0x0,
+	},
 };
 #define NUM_CARDS 3
 
@@ -221,7 +248,7 @@ struct priv
 };
 
 static int  ni65_probe1(struct net_device *dev,int);
-static void ni65_interrupt(int irq, void * dev_id, struct pt_regs *regs);
+static irqreturn_t ni65_interrupt(int irq, void * dev_id, struct pt_regs *regs);
 static void ni65_recv_intr(struct net_device *dev,int);
 static void ni65_xmit_intr(struct net_device *dev,int);
 static int  ni65_open(struct net_device *dev);
@@ -280,7 +307,6 @@ static int ni65_open(struct net_device *dev)
 	if(ni65_lance_reinit(dev))
 	{
 		netif_start_queue(dev);
-		MOD_INC_USE_COUNT;
 		return 0;
 	}
 	else
@@ -314,7 +340,6 @@ static int ni65_close(struct net_device *dev)
 	}
 #endif
 	free_irq(dev->irq,dev);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -353,18 +378,21 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	unsigned long flags;
 
 	for(i=0;i<NUM_CARDS;i++) {
-		if(check_region(ioaddr, cards[i].total_size))
+		if(!request_region(ioaddr, cards[i].total_size, cards[i].cardname))
 			continue;
 		if(cards[i].id_offset >= 0) {
 			if(inb(ioaddr+cards[i].id_offset+0) != cards[i].id0 ||
 				 inb(ioaddr+cards[i].id_offset+1) != cards[i].id1) {
+				 release_region(ioaddr, cards[i].total_size);
 				 continue;
 			}
 		}
 		if(cards[i].vendor_id) {
 			for(j=0;j<3;j++)
-				if(inb(ioaddr+cards[i].addr_offset+j) != cards[i].vendor_id[j])
+				if(inb(ioaddr+cards[i].addr_offset+j) != cards[i].vendor_id[j]) {
+					release_region(ioaddr, cards[i].total_size);
 					continue;
+			  }
 		}
 		break;
 	}
@@ -374,8 +402,10 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	for(j=0;j<6;j++)
 		dev->dev_addr[j] = inb(ioaddr+cards[i].addr_offset+j);
 
-	if( (j=ni65_alloc_buffer(dev)) < 0)
+	if( (j=ni65_alloc_buffer(dev)) < 0) {
+		release_region(ioaddr, cards[i].total_size);
 		return j;
+	}
 	p = (struct priv *) dev->priv;
 	p->cmdr_addr = ioaddr + cards[i].cmd_offset;
 	p->cardno = i;
@@ -386,6 +416,7 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	if( (j=readreg(CSR0)) != 0x4) {
 		 printk(KERN_ERR "can't RESET card: %04x\n",j);
 		 ni65_free_buffer(p);
+		 release_region(ioaddr, cards[p->cardno].total_size);
 		 return -EAGAIN;
 	}
 
@@ -412,7 +443,8 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	else {
 		if(dev->dma == 0) {
 		/* 'stuck test' from lance.c */
-			int dma_channels = ((inb(DMA1_STAT_REG) >> 4) & 0x0f) | (inb(DMA2_STAT_REG) & 0xf0);
+			long dma_channels = ((inb(DMA1_STAT_REG) >> 4) & 0x0f) |
+					    (inb(DMA2_STAT_REG) & 0xf0);
 			for(i=1;i<5;i++) {
 				int dma = dmatab[i];
 				if(test_bit(dma,&dma_channels) || request_dma(dma,"ni6510"))
@@ -437,6 +469,7 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 			if(i == 5) {
 				printk("Can't detect DMA channel!\n");
 				ni65_free_buffer(p);
+				release_region(ioaddr, cards[p->cardno].total_size);
 				return -EAGAIN;
 			}
 			dev->dma = dmatab[i];
@@ -447,14 +480,19 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 
 		if(dev->irq < 2)
 		{
-			ni65_init_lance(p,dev->dev_addr,0,0);
-			autoirq_setup(0);
-			writereg(CSR0_INIT|CSR0_INEA,CSR0); /* trigger interrupt */
+			unsigned long irq_mask, delay;
 
-			if(!(dev->irq = autoirq_report(2)))
+			ni65_init_lance(p,dev->dev_addr,0,0);
+			irq_mask = probe_irq_on();
+			writereg(CSR0_INIT|CSR0_INEA,CSR0); /* trigger interrupt */
+			delay = jiffies + HZ/50;
+			while (time_before(jiffies, delay)) ;
+			dev->irq = probe_irq_off(irq_mask);
+			if(!dev->irq)
 			{
 				printk("Failed to detect IRQ line!\n");
 				ni65_free_buffer(p);
+				release_region(ioaddr, cards[p->cardno].total_size);
 				return -EAGAIN;
 			}
 			printk("IRQ %d (autodetected).\n",dev->irq);
@@ -467,16 +505,12 @@ static int __init ni65_probe1(struct net_device *dev,int ioaddr)
 	{
 		printk("%s: Can't request dma-channel %d\n",dev->name,(int) dev->dma);
 		ni65_free_buffer(p);
+		release_region(ioaddr, cards[p->cardno].total_size);
 		return -EAGAIN;
 	}
 
-	/*
-	 * Grab the region so we can find another board.
-	 */
-	request_region(ioaddr,cards[p->cardno].total_size,cards[p->cardno].cardname);
-
 	dev->base_addr = ioaddr;
-
+	SET_MODULE_OWNER(dev);
 	dev->open		= ni65_open;
 	dev->stop		= ni65_close;
 	dev->hard_start_xmit	= ni65_send_packet;
@@ -507,10 +541,10 @@ static void ni65_init_lance(struct priv *p,unsigned char *daddr,int filter,int m
 		p->ib.filter[i] = filter;
 	p->ib.mode = mode;
 
-	p->ib.trp = (u32) virt_to_bus(p->tmdhead) | TMDNUMMASK;
-	p->ib.rrp = (u32) virt_to_bus(p->rmdhead) | RMDNUMMASK;
+	p->ib.trp = (u32) isa_virt_to_bus(p->tmdhead) | TMDNUMMASK;
+	p->ib.rrp = (u32) isa_virt_to_bus(p->rmdhead) | RMDNUMMASK;
 	writereg(0,CSR3);	/* busmaster/no word-swap */
-	pib = (u32) virt_to_bus(&p->ib);
+	pib = (u32) isa_virt_to_bus(&p->ib);
 	writereg(pib & 0xffff,CSR1);
 	writereg(pib >> 16,CSR2);
 
@@ -551,7 +585,7 @@ static void *ni65_alloc_mem(struct net_device *dev,char *what,int size,int type)
 			return NULL;
 		}
 	}
-	if( (u32) virt_to_bus(ptr+size) > 0x1000000) {
+	if( (u32) virt_to_phys(ptr+size) > 0x1000000) {
 		printk("%s: unable to allocate %s memory in lower 16MB!\n",dev->name,what);
 		if(type)
 			kfree_skb(skb);
@@ -683,7 +717,7 @@ static void ni65_stop_start(struct net_device *dev,struct priv *p)
 #ifdef XMT_VIA_SKB
 			skb_save[i] = p->tmd_skb[i];
 #endif
-			buffer[i] = (u32) bus_to_virt(tmdp->u.buffer);
+			buffer[i] = (u32) isa_bus_to_virt(tmdp->u.buffer);
 			blen[i] = tmdp->blen;
 			tmdp->u.s.status = 0x0;
 		}
@@ -697,7 +731,7 @@ static void ni65_stop_start(struct net_device *dev,struct priv *p)
 
 		for(i=0;i<TMDNUM;i++) {
 			int num = (i + p->tmdlast) & (TMDNUM-1);
-			p->tmdhead[i].u.buffer = (u32) virt_to_bus((char *)buffer[num]); /* status is part of buffer field */
+			p->tmdhead[i].u.buffer = (u32) isa_virt_to_bus((char *)buffer[num]); /* status is part of buffer field */
 			p->tmdhead[i].blen = blen[num];
 			if(p->tmdhead[i].u.s.status & XMIT_OWN) {
 				 p->tmdnum = (p->tmdnum + 1) & (TMDNUM-1);
@@ -766,9 +800,9 @@ static int ni65_lance_reinit(struct net_device *dev)
 	 {
 		 struct rmd *rmdp = p->rmdhead + i;
 #ifdef RCV_VIA_SKB
-		 rmdp->u.buffer = (u32) virt_to_bus(p->recv_skb[i]->data);
+		 rmdp->u.buffer = (u32) isa_virt_to_bus(p->recv_skb[i]->data);
 #else
-		 rmdp->u.buffer = (u32) virt_to_bus(p->recvbounce[i]);
+		 rmdp->u.buffer = (u32) isa_virt_to_bus(p->recvbounce[i]);
 #endif
 		 rmdp->blen = -(R_BUF_SIZE-8);
 		 rmdp->mlen = 0;
@@ -803,7 +837,7 @@ static int ni65_lance_reinit(struct net_device *dev)
 /*
  * interrupt handler
  */
-static void ni65_interrupt(int irq, void * dev_id, struct pt_regs * regs)
+static irqreturn_t ni65_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 {
 	int csr0 = 0;
 	struct net_device *dev = dev_id;
@@ -904,7 +938,7 @@ static void ni65_interrupt(int irq, void * dev_id, struct pt_regs * regs)
 	else
 		writedatareg(CSR0_INEA);
 
-	return;
+	return IRQ_HANDLED;
 }
 
 /*
@@ -1033,7 +1067,7 @@ static void ni65_recv_intr(struct net_device *dev,int csr0)
 					struct sk_buff *skb1 = p->recv_skb[p->rmdnum];
 					skb_put(skb,R_BUF_SIZE);
 					p->recv_skb[p->rmdnum] = skb;
-					rmdp->u.buffer = (u32) virt_to_bus(skb->data);
+					rmdp->u.buffer = (u32) isa_virt_to_bus(skb->data);
 					skb = skb1;
 					skb_trim(skb,len);
 				}
@@ -1101,7 +1135,7 @@ static int ni65_send_packet(struct sk_buff *skb, struct net_device *dev)
 	{
 		short len = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		struct tmd *tmdp;
-		long flags;
+		unsigned long flags;
 
 #ifdef XMT_VIA_SKB
 		if( (unsigned long) (skb->data + skb->len) > 0x1000000) {
@@ -1109,13 +1143,15 @@ static int ni65_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 			memcpy((char *) p->tmdbounce[p->tmdbouncenum] ,(char *)skb->data,
 							 (skb->len > T_BUF_SIZE) ? T_BUF_SIZE : skb->len);
+			if (len > skb->len)
+				memset((char *)p->tmdbounce[p->tmdbouncenum]+skb->len, 0, len-skb->len);
 			dev_kfree_skb (skb);
 
 			save_flags(flags);
 			cli();
 
 			tmdp = p->tmdhead + p->tmdnum;
-			tmdp->u.buffer = (u32) virt_to_bus(p->tmdbounce[p->tmdbouncenum]);
+			tmdp->u.buffer = (u32) isa_virt_to_bus(p->tmdbounce[p->tmdbouncenum]);
 			p->tmdbouncenum = (p->tmdbouncenum + 1) & (TMDNUM - 1);
 
 #ifdef XMT_VIA_SKB
@@ -1125,7 +1161,7 @@ static int ni65_send_packet(struct sk_buff *skb, struct net_device *dev)
 			cli();
 
 			tmdp = p->tmdhead + p->tmdnum;
-			tmdp->u.buffer = (u32) virt_to_bus(skb->data);
+			tmdp->u.buffer = (u32) isa_virt_to_bus(skb->data);
 			p->tmd_skb[p->tmdnum] = skb;
 		}
 #endif
@@ -1174,7 +1210,7 @@ static void set_multicast_list(struct net_device *dev)
 }
 
 #ifdef MODULE
-static struct net_device dev_ni65 = { base_addr: 0x360, irq: 9, init: ni65_probe };
+static struct net_device dev_ni65 = { .base_addr = 0x360, .irq = 9, .init = ni65_probe };
 
 /* set: io,irq,dma or set it when calling insmod */
 static int irq;

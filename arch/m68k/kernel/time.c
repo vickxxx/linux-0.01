@@ -17,12 +17,16 @@
 #include <linux/param.h>
 #include <linux/string.h>
 #include <linux/mm.h>
+#include <linux/rtc.h>
 
 #include <asm/machdep.h>
 #include <asm/io.h>
 
+#include <linux/time.h>
 #include <linux/timex.h>
+#include <linux/profile.h>
 
+u64 jiffies_64 = INITIAL_JIFFIES;
 
 static inline int set_rtc_mmss(unsigned long nowtime)
 {
@@ -53,30 +57,13 @@ static inline void do_profile (unsigned long pc)
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-static void timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
+static irqreturn_t timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
 {
-	/* last time the cmos clock got updated */
-	static long last_rtc_update=0;
-
 	do_timer(regs);
 
 	if (!user_mode(regs))
 		do_profile(regs->pc);
 
-	/*
-	 * If we have an externally synchronized Linux clock, then update
-	 * CMOS clock accordingly every ~11 minutes. Set_rtc_mmss() has to be
-	 * called as close as possible to 500 ms before the new second starts.
-	 */
-	if ((time_status & STA_UNSYNC) == 0 &&
-	    xtime.tv_sec > last_rtc_update + 660 &&
-	    xtime.tv_usec >= 500000 - ((unsigned) tick) / 2 &&
-	    xtime.tv_usec <= 500000 + ((unsigned) tick) / 2) {
-	  if (set_rtc_mmss(xtime.tv_sec) == 0)
-	    last_rtc_update = xtime.tv_sec;
-	  else
-	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
-	}
 #ifdef CONFIG_HEARTBEAT
 	/* use power LED as a heartbeat instead -- much more useful
 	   for debugging -- based on the version for PReP by Cort */
@@ -100,44 +87,47 @@ static void timer_interrupt(int irq, void *dummy, struct pt_regs * regs)
 	    }
 	}
 #endif /* CONFIG_HEARTBEAT */
+	return IRQ_HANDLED;
 }
 
 void time_init(void)
 {
-	unsigned int year, mon, day, hour, min, sec;
+	struct rtc_time time;
 
-	extern void arch_gettod(int *year, int *mon, int *day, int *hour,
-				int *min, int *sec);
+	if (mach_hwclk) {
+		mach_hwclk(0, &time);
 
-	arch_gettod (&year, &mon, &day, &hour, &min, &sec);
-
-	if ((year += 1900) < 1970)
-		year += 100;
-	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	xtime.tv_usec = 0;
+		if ((time.tm_year += 1900) < 1970)
+			time.tm_year += 100;
+		xtime.tv_sec = mktime(time.tm_year, time.tm_mon, time.tm_mday,
+				      time.tm_hour, time.tm_min, time.tm_sec);
+		xtime.tv_nsec = 0;
+	}
 
 	mach_sched_init(timer_interrupt);
 }
-
-extern rwlock_t xtime_lock;
 
 /*
  * This version of gettimeofday has near microsecond resolution.
  */
 void do_gettimeofday(struct timeval *tv)
 {
-	extern unsigned long wall_jiffies;
 	unsigned long flags;
+	extern unsigned long wall_jiffies;
+	unsigned long seq;
 	unsigned long usec, sec, lost;
 
-	read_lock_irqsave(&xtime_lock, flags);
-	usec = mach_gettimeoffset();
-	lost = jiffies - wall_jiffies;
-	if (lost)
-		usec += lost * (1000000/HZ);
-	sec = xtime.tv_sec;
-	usec += xtime.tv_usec;
-	read_unlock_irqrestore(&xtime_lock, flags);
+	do {
+		seq = read_seqbegin_irqsave(&xtime_lock, flags);
+
+		usec = mach_gettimeoffset();
+		lost = jiffies - wall_jiffies;
+		if (lost)
+			usec += lost * (1000000/HZ);
+		sec = xtime.tv_sec;
+		usec += xtime.tv_nsec/1000;
+	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
+
 
 	while (usec >= 1000000) {
 		usec -= 1000000;
@@ -148,26 +138,34 @@ void do_gettimeofday(struct timeval *tv)
 	tv->tv_usec = usec;
 }
 
-void do_settimeofday(struct timeval *tv)
+int do_settimeofday(struct timespec *tv)
 {
-	write_lock_irq(&xtime_lock);
-	/* This is revolting. We need to set the xtime.tv_usec
+	extern unsigned long wall_jiffies;
+
+	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
+		return -EINVAL;
+
+	write_seqlock_irq(&xtime_lock);
+	/* This is revolting. We need to set the xtime.tv_nsec
 	 * correctly. However, the value in this location is
 	 * is value at the last tick.
 	 * Discover what correction gettimeofday
 	 * would have done, and then undo it!
 	 */
-	tv->tv_usec -= mach_gettimeoffset();
+	tv->tv_nsec -= 1000 * (mach_gettimeoffset() +
+			(jiffies - wall_jiffies) * (1000000 / HZ));
 
-	while (tv->tv_usec < 0) {
-		tv->tv_usec += 1000000;
+	while (tv->tv_nsec < 0) {
+		tv->tv_nsec += NSEC_PER_SEC;
 		tv->tv_sec--;
 	}
 
-	xtime = *tv;
+	xtime.tv_sec = tv->tv_sec;
+	xtime.tv_nsec = tv->tv_nsec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
-	write_unlock_irq(&xtime_lock);
+	write_sequnlock_irq(&xtime_lock);
+	return 0;
 }

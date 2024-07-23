@@ -36,12 +36,6 @@
 #define F_SETSIG	10	/*  for sockets. */
 #define F_GETSIG	11	/*  for sockets. */
 
-#ifdef __KERNEL__
-#define F_GETLK64	12
-#define F_SETLK64	13
-#define F_SETLKW64	14
-#endif
-
 /* for F_[GET|SET]FL */
 #define FD_CLOEXEC	1	/* actually anything with low bit set goes */
 
@@ -78,20 +72,6 @@ struct flock {
 	short __unused;
 };
 
-#ifdef __KERNEL__
-struct flock32 {
-	short l_type;
-	short l_whence;
-	__kernel_off_t32 l_start;
-	__kernel_off_t32 l_len;
-	__kernel_pid_t32 l_pid;
-	short __unused;
-};
-#endif
-
-#ifdef __KERNEL__
-#define flock64	flock
-#endif
-
 #define F_LINUX_SPECIFIC_BASE	1024
+
 #endif /* !(_SPARC64_FCNTL_H) */

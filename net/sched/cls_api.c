@@ -17,6 +17,7 @@
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
@@ -64,37 +65,38 @@ struct tcf_proto_ops * tcf_proto_lookup_ops(struct rtattr *kind)
 int register_tcf_proto_ops(struct tcf_proto_ops *ops)
 {
 	struct tcf_proto_ops *t, **tp;
+	int rc = -EEXIST;
 
 	write_lock(&cls_mod_lock);
-	for (tp = &tcf_proto_base; (t=*tp) != NULL; tp = &t->next) {
-		if (strcmp(ops->kind, t->kind) == 0) {
-			write_unlock(&cls_mod_lock);
-			return -EEXIST;
-		}
-	}
+	for (tp = &tcf_proto_base; (t = *tp) != NULL; tp = &t->next)
+		if (!strcmp(ops->kind, t->kind))
+			goto out;
 
 	ops->next = NULL;
 	*tp = ops;
+	rc = 0;
+out:
 	write_unlock(&cls_mod_lock);
-	return 0;
+	return rc;
 }
 
 int unregister_tcf_proto_ops(struct tcf_proto_ops *ops)
 {
 	struct tcf_proto_ops *t, **tp;
+	int rc = -ENOENT;
 
 	write_lock(&cls_mod_lock);
 	for (tp = &tcf_proto_base; (t=*tp) != NULL; tp = &t->next)
 		if (t == ops)
 			break;
 
-	if (!t) {
-		write_unlock(&cls_mod_lock);
-		return -ENOENT;
-	}
+	if (!t)
+		goto out;
 	*tp = t->next;
+	rc = 0;
+out:
 	write_unlock(&cls_mod_lock);
-	return 0;
+	return rc;
 }
 
 static int tfilter_notify(struct sk_buff *oskb, struct nlmsghdr *n,
@@ -202,11 +204,9 @@ static int tc_ctl_tfilter(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 #ifdef CONFIG_KMOD
 		if (tp_ops==NULL && tca[TCA_KIND-1] != NULL) {
 			struct rtattr *kind = tca[TCA_KIND-1];
-			char module_name[4 + IFNAMSIZ + 1];
 
 			if (RTA_PAYLOAD(kind) <= IFNAMSIZ) {
-				sprintf(module_name, "cls_%s", (char*)RTA_DATA(kind));
-				request_module (module_name);
+				request_module("cls_%s", (char*)RTA_DATA(kind));
 				tp_ops = tcf_proto_lookup_ops(kind);
 			}
 		}
@@ -223,8 +223,9 @@ static int tc_ctl_tfilter(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 		tp->q = q;
 		tp->classify = tp_ops->classify;
 		tp->classid = parent;
-		err = tp_ops->init(tp);
-		if (err) {
+		err = -EBUSY;
+		if (!try_module_get(tp_ops->owner) ||
+		    (err = tp_ops->init(tp)) != 0) {
 			kfree(tp);
 			goto errout;
 		}
@@ -246,7 +247,10 @@ static int tc_ctl_tfilter(struct sk_buff *skb, struct nlmsghdr *n, void *arg)
 			*back = tp->next;
 			spin_unlock_bh(&dev->queue_lock);
 			write_unlock(&qdisc_tree_lock);
-			tcf_destroy(tp);
+
+			tp->ops->destroy(tp);
+			module_put(tp->ops->owner);
+			kfree(tp);
 			err = 0;
 			goto errout;
 		}
@@ -366,11 +370,8 @@ static int tc_dump_tfilter(struct sk_buff *skb, struct netlink_callback *cb)
 		q = dev->qdisc_sleeping;
 	else
 		q = qdisc_lookup(dev, TC_H_MAJ(tcm->tcm_parent));
-	if (q == NULL) {
-		read_unlock(&qdisc_tree_lock);
-		dev_put(dev);
-		return skb->len;
-	}
+	if (!q)
+		goto out;
 	if ((cops = q->ops->cl_ops) == NULL)
 		goto errout;
 	if (TC_H_MIN(tcm->tcm_parent)) {
@@ -420,7 +421,7 @@ static int tc_dump_tfilter(struct sk_buff *skb, struct netlink_callback *cb)
 errout:
 	if (cl)
 		cops->put(q, cl);
-
+out:
 	read_unlock(&qdisc_tree_lock);
 	dev_put(dev);
 	return skb->len;

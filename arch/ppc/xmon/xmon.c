@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.xmon.c 1.16 09/22/01 15:25:10 trini
- */
-/*
  * Routines providing a simple monitor for use on the PowerMac.
  *
  * Copyright (C) 1996 Paul Mackerras.
@@ -10,10 +7,17 @@
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/smp.h>
+#include <linux/interrupt.h>
 #include <asm/ptrace.h>
 #include <asm/string.h>
 #include <asm/prom.h>
 #include <asm/bitops.h>
+#include <asm/bootx.h>
+#include <asm/machdep.h>
+#include <asm/xmon.h>
+#ifdef CONFIG_PMAC_BACKLIGHT
+#include <asm/backlight.h>
+#endif
 #include "nonstdio.h"
 #include "privinst.h"
 
@@ -90,6 +94,7 @@ static unsigned read_spr(int);
 static void write_spr(int, unsigned);
 static void super_regs(void);
 static void print_sysmap(void);
+static void sysmap_lookup(void);
 static void remove_bpts(void);
 static void insert_bpts(void);
 static struct bpt *at_breakpoint(unsigned pc);
@@ -98,11 +103,14 @@ static void cacheflush(void);
 #ifdef CONFIG_SMP
 static void cpu_cmd(void);
 #endif /* CONFIG_SMP */
-#if 0 /* Makes compile with -Wall */
-static char *pretty_print_addr(unsigned long addr);
-static char *lookup_name(unsigned long addr);
-#endif
+static int pretty_print_addr(unsigned long addr);
 static void csum(void);
+#ifdef CONFIG_BOOTX_TEXT
+static void vidcmds(void);
+#endif
+static void bootcmds(void);
+static void proccall(void);
+static void printtime(void);
 
 extern int print_insn_big_powerpc(FILE *, unsigned long, unsigned);
 extern void printf(const char *fmt, ...);
@@ -112,6 +120,11 @@ extern void longjmp(u_int *, int);
 
 extern void xmon_enter(void);
 extern void xmon_leave(void);
+extern char* xmon_find_symbol(unsigned long addr, unsigned long* saddr);
+extern unsigned long xmon_symbol_to_addr(char* symbol);
+
+static unsigned start_tb[NR_CPUS][2];
+static unsigned stop_tb[NR_CPUS][2];
 
 #define GETWORD(v)	(((v)[0] << 24) + ((v)[1] << 16) + ((v)[2] << 8) + (v)[3])
 
@@ -121,6 +134,7 @@ extern void xmon_leave(void);
 #define isalnum(c)	(('0' <= (c) && (c) <= '9') \
 			 || ('a' <= (c) && (c) <= 'z') \
 			 || ('A' <= (c) && (c) <= 'Z'))
+#define isspace(c)	(c == ' ' || c == '\t' || c == 10 || c == 13 || c == 0)
 
 static char *help_string = "\
 Commands:\n\
@@ -138,6 +152,8 @@ Commands:\n\
   r	print registers\n\
   S	print special registers\n\
   t	print backtrace\n\
+  la	lookup address in system.map\n\
+  ls	lookup symbol in system.map\n\
   x	exit monitor\n\
 ";
 
@@ -147,12 +163,40 @@ static int xmon_trace[NR_CPUS];
 
 static struct pt_regs *xmon_regs[NR_CPUS];
 
+extern inline void sync(void)
+{
+	asm volatile("sync; isync");
+}
+
+extern inline void __delay(unsigned int loops)
+{
+	if (loops != 0)
+		__asm__ __volatile__("mtctr %0; 1: bdnz 1b" : :
+				     "r" (loops) : "ctr");
+}
+
+static void get_tb(unsigned *p)
+{
+	unsigned hi, lo, hiagain;
+
+	if ((get_pvr() >> 16) == 1)
+		return;
+
+	do {
+		asm volatile("mftbu %0; mftb %1; mftbu %2"
+			     : "=r" (hi), "=r" (lo), "=r" (hiagain));
+	} while (hi != hiagain);
+	p[0] = hi;
+	p[1] = lo;
+}
+
 void
 xmon(struct pt_regs *excp)
 {
 	struct pt_regs regs;
 	int msr, cmd;
 
+	get_tb(stop_tb[smp_processor_id()]);
 	if (excp == NULL) {
 		asm volatile ("stw	0,0(%0)\n\
 			lwz	0,0(1)\n\
@@ -187,6 +231,16 @@ xmon(struct pt_regs *excp)
 	 */
 #endif /* CONFIG_SMP */
 	remove_bpts();
+#ifdef CONFIG_PMAC_BACKLIGHT
+	if( setjmp(bus_error_jmp) == 0 ) {
+		debugger_fault_handler = handle_fault;
+		sync();
+		set_backlight_enable(1);
+		set_backlight_level(BACKLIGHT_MAX);
+		sync();
+	}
+	debugger_fault_handler = 0;
+#endif	/* CONFIG_PMAC_BACKLIGHT */
 	cmd = cmds(excp);
 	if (cmd == 's') {
 		xmon_trace[smp_processor_id()] = SSTEP;
@@ -205,17 +259,18 @@ xmon(struct pt_regs *excp)
 	clear_bit(smp_processor_id(), &cpus_in_xmon);
 #endif /* CONFIG_SMP */
 	set_msr(msr);		/* restore interrupt enable */
+	get_tb(start_tb[smp_processor_id()]);
 }
 
-void
+irqreturn_t
 xmon_irq(int irq, void *d, struct pt_regs *regs)
 {
 	unsigned long flags;
-	__save_flags(flags);
-	__cli();
+	local_irq_save(flags);
 	printf("Keyboard interrupt\n");
 	xmon(regs);
-	__restore_flags(flags);
+	local_irq_restore(flags);
+	return IRQ_HANDLED;
 }
 
 int
@@ -301,7 +356,7 @@ at_breakpoint(unsigned pc)
 }
 
 static void
-insert_bpts()
+insert_bpts(void)
 {
 	int i;
 	struct bpt *bp;
@@ -318,7 +373,7 @@ insert_bpts()
 		}
 		store_inst((void *) bp->address);
 	}
-#if !defined(CONFIG_8xx) && !defined(CONFIG_POWER4)
+#if !defined(CONFIG_8xx)
 	if (dabr.enabled)
 		set_dabr(dabr.address);
 	if (iabr.enabled)
@@ -327,13 +382,13 @@ insert_bpts()
 }
 
 static void
-remove_bpts()
+remove_bpts(void)
 {
 	int i;
 	struct bpt *bp;
 	unsigned instr;
 
-#if !defined(CONFIG_8xx) && !defined(CONFIG_POWER4)
+#if !defined(CONFIG_8xx)
 	set_dabr(0);
 	set_iabr(0);
 #endif
@@ -398,6 +453,9 @@ cmds(struct pt_regs *excp)
 		case 'd':
 			dump();
 			break;
+		case 'l':
+			sysmap_lookup();
+			break;
 		case 'r':
 			if (excp != NULL)
 				prregs(excp);	/* print regs */
@@ -449,8 +507,50 @@ cmds(struct pt_regs *excp)
 			cpu_cmd();
 			break;
 #endif /* CONFIG_SMP */
+#ifdef CONFIG_BOOTX_TEXT
+		case 'v':
+			vidcmds();
+			break;
+#endif
+		case 'z':
+			bootcmds();
+			break;
+		case 'p':
+			proccall();
+			break;
+		case 'T':
+			printtime();
+			break;
 		}
 	}
+}
+
+extern unsigned tb_to_us;
+
+#define mulhwu(x,y) \
+({unsigned z; asm ("mulhwu %0,%1,%2" : "=r" (z) : "r" (x), "r" (y)); z;})
+
+static void printtime(void)
+{
+	unsigned int delta;
+
+	delta = stop_tb[smp_processor_id()][1]
+		- start_tb[smp_processor_id()][1];
+	delta = mulhwu(tb_to_us, delta);
+	printf("%u.%06u seconds\n", delta / 1000000, delta % 1000000);
+}
+
+static void bootcmds(void)
+{
+	int cmd;
+
+	cmd = inchar();
+	if (cmd == 'r')
+		ppc_md.restart(NULL);
+	else if (cmd == 'h')
+		ppc_md.halt();
+	else if (cmd == 'p')
+		ppc_md.power_off();
 }
 
 #ifdef CONFIG_SMP
@@ -464,8 +564,8 @@ static void cpu_cmd(void)
 	if (cmd == 'i') {
 		/* interrupt other cpu(s) */
 		cpu = MSG_ALL_BUT_SELF;
-		scanhex(&cpu);
-		smp_send_xmon_break(cpu);
+		if (scanhex(&cpu))
+			smp_send_xmon_break(cpu);
 		return;
 	}
 	termch = cmd;
@@ -502,6 +602,44 @@ static void cpu_cmd(void)
 	}
 }
 #endif /* CONFIG_SMP */
+
+#ifdef CONFIG_BOOTX_TEXT
+extern boot_infos_t disp_bi;
+
+static void vidcmds(void)
+{
+	int c = inchar();
+	unsigned int val, w;
+	extern int boot_text_mapped;
+
+	if (!boot_text_mapped)
+		return;
+	if (c != '\n' && scanhex(&val)) {
+		switch (c) {
+		case 'd':
+			w = disp_bi.dispDeviceRowBytes
+				/ (disp_bi.dispDeviceDepth >> 3);
+			disp_bi.dispDeviceDepth = val;
+			disp_bi.dispDeviceRowBytes = w * (val >> 3);
+			return;
+		case 'p':
+			disp_bi.dispDeviceRowBytes = val;
+			return;
+		case 'w':
+			disp_bi.dispDeviceRect[2] = val;
+			return;
+		case 'h':
+			disp_bi.dispDeviceRect[3] = val;
+			return;
+		}
+	}
+	printf("W = %d (0x%x) H = %d (0x%x) D = %d (0x%x) P = %d (0x%x)\n",
+	       disp_bi.dispDeviceRect[2], disp_bi.dispDeviceRect[2],
+	       disp_bi.dispDeviceRect[3], disp_bi.dispDeviceRect[3],
+	       disp_bi.dispDeviceDepth, disp_bi.dispDeviceDepth,
+	       disp_bi.dispDeviceRowBytes, disp_bi.dispDeviceRowBytes);
+}
+#endif /* CONFIG_BOOTX_TEXT */
 
 static unsigned short fcstab[256] = {
 	0x0000, 0x1189, 0x2312, 0x329b, 0x4624, 0x57ad, 0x6536, 0x74bf,
@@ -547,8 +685,10 @@ csum(void)
 	unsigned short fcs;
 	unsigned char v;
 
-	scanhex(&adrs);
-	scanhex(&ncsum);
+	if (!scanhex(&adrs))
+		return;
+	if (!scanhex(&ncsum))
+		return;
 	fcs = 0xffff;
 	for (i = 0; i < ncsum; ++i) {
 		if (mread(adrs+i, &v, 1) == 0) {
@@ -570,7 +710,7 @@ bpt_cmds(void)
 
 	cmd = inchar();
 	switch (cmd) {
-#if !defined(CONFIG_8xx) && !defined(CONFIG_POWER4)
+#if !defined(CONFIG_8xx)
 	case 'd':
 		mode = 7;
 		cmd = inchar();
@@ -578,6 +718,11 @@ bpt_cmds(void)
 			mode = 5;
 		else if (cmd == 'w')
 			mode = 6;
+		else
+			termch = cmd;
+		cmd = inchar();
+		if (cmd == 'p')
+			mode &= ~4;
 		else
 			termch = cmd;
 		dabr.address = 0;
@@ -588,11 +733,16 @@ bpt_cmds(void)
 			dabr.address = (dabr.address & ~7) | mode;
 		break;
 	case 'i':
+		cmd = inchar();
+		if (cmd == 'p')
+			mode = 2;
+		else
+			mode = 3;
 		iabr.address = 0;
 		iabr.count = 0;
 		iabr.enabled = scanhex(&iabr.address);
 		if (iabr.enabled)
-			iabr.address |= 3;
+			iabr.address |= mode;
 		scanhex(&iabr.count);
 		break;
 #endif
@@ -625,6 +775,8 @@ bpt_cmds(void)
 					printf("r");
 				if (dabr.address & 2)
 					printf("w");
+				if (!(dabr.address & 4))
+					printf("p");
 				printf("]\n");
 			}
 			if (iabr.enabled)
@@ -660,8 +812,7 @@ backtrace(struct pt_regs *excp)
 	unsigned sp;
 	unsigned stack[2];
 	struct pt_regs regs;
-	extern char ret_from_intercept, ret_from_syscall_1, ret_from_syscall_2;
-	extern char do_signal_ret, ret_from_except;
+	extern char ret_from_except, ret_from_except_full, ret_from_syscall;
 
 	printf("backtrace:\n");
 	
@@ -674,12 +825,11 @@ backtrace(struct pt_regs *excp)
 	for (; sp != 0; sp = stack[0]) {
 		if (mread(sp, stack, sizeof(stack)) != sizeof(stack))
 			break;
-		printf("%x ", stack[1]);
-		if (stack[1] == (unsigned) &ret_from_intercept
-		    || stack[1] == (unsigned) &ret_from_except
-		    || stack[1] == (unsigned) &ret_from_syscall_1
-		    || stack[1] == (unsigned) &ret_from_syscall_2
-		    || stack[1] == (unsigned) &do_signal_ret) {
+		pretty_print_addr(stack[1]);
+		printf(" ");
+		if (stack[1] == (unsigned) &ret_from_except
+		    || stack[1] == (unsigned) &ret_from_except_full
+		    || stack[1] == (unsigned) &ret_from_syscall) {
 			if (mread(sp+16, &regs, sizeof(regs)) != sizeof(regs))
 				break;
 			printf("\nexception:%x [%x] %x ", regs.trap, sp+16,
@@ -688,12 +838,12 @@ backtrace(struct pt_regs *excp)
 			if (mread(sp, stack, sizeof(stack)) != sizeof(stack))
 				break;
 		}
+		printf("\n");
 	}
-	printf("\n");
 }
 
 int
-getsp()
+getsp(void)
 {
     int x;
 
@@ -704,14 +854,18 @@ getsp()
 void
 excprint(struct pt_regs *fp)
 {
+	int trap;
+
 #ifdef CONFIG_SMP
 	printf("cpu %d: ", smp_processor_id());
 #endif /* CONFIG_SMP */
-	printf("vector: %x at pc = %x",
-	       fp->trap, fp->nip);
-	printf(", lr = %x, msr = %x, sp = %x [%x]\n",
-	       fp->link, fp->msr, fp->gpr[1], fp);
-	if (fp->trap == 0x300 || fp->trap == 0x600)
+	printf("vector: %x at pc = ", fp->trap);
+	pretty_print_addr(fp->nip);
+	printf(", lr = ");
+	pretty_print_addr(fp->link);
+	printf("\nmsr = %x, sp = %x [%x]\n", fp->msr, fp->gpr[1], fp);
+	trap = TRAP(fp);
+	if (trap == 0x300 || trap == 0x600)
 		printf("dar = %x, dsisr = %x\n", fp->dar, fp->dsisr);
 	if (current)
 		printf("current = %x, pid = %d, comm = %s\n",
@@ -726,9 +880,14 @@ prregs(struct pt_regs *fp)
 
 	if (scanhex(&base))
 		fp = (struct pt_regs *) base;
-	for (n = 0; n < 32; ++n)
+	for (n = 0; n < 32; ++n) {
 		printf("R%.2d = %.8x%s", n, fp->gpr[n],
 		       (n & 3) == 3? "\n": "   ");
+		if (n == 12 && !FULL_REGS(fp)) {
+			printf("\n");
+			break;
+		}
+	}
 	printf("pc  = %.8x   msr = %.8x   lr  = %.8x   cr  = %.8x\n",
 	       fp->nip, fp->msr, fp->link, fp->ccr);
 	printf("ctr = %.8x   xer = %.8x   trap = %4x\n",
@@ -795,14 +954,22 @@ void
 print_sysmap(void)
 {
 	extern char *sysmap;
-	if ( sysmap )
-		printf("System.map: \n%s", sysmap);
+	if ( sysmap ) {
+		printf("System.map: \n");
+		if( setjmp(bus_error_jmp) == 0 ) {
+			debugger_fault_handler = handle_fault;
+			sync();
+			xmon_puts(sysmap);
+			sync();
+		}
+		debugger_fault_handler = 0;
+	}
 	else
 		printf("No System.map\n");
 }
 
 void
-super_regs()
+super_regs(void)
 {
 	int i, cmd;
 	unsigned val;
@@ -850,33 +1017,13 @@ super_regs()
 	scannl();
 }
 
-#if 0
+#ifndef CONFIG_PPC_STD_MMU
 static void
-openforth()
+dump_hash_table(void)
 {
-    int c;
-    char *p;
-    char cmd[1024];
-    int args[5];
-    extern int (*prom_entry)(int *);
-
-    p = cmd;
-    c = skipbl();
-    while (c != '\n') {
-	*p++ = c;
-	c = inchar();
-    }
-    *p = 0;
-    args[0] = (int) "interpret";
-    args[1] = 1;
-    args[2] = 1;
-    args[3] = (int) cmd;
-    (*prom_entry)(args);
-    printf("\n");
-    if (args[4] != 0)
-	printf("error %x\n", args[4]);
+	printf("This CPU doesn't have a hash table.\n");
 }
-#endif
+#else
 
 #ifndef CONFIG_PPC64BRIDGE
 static void
@@ -1002,7 +1149,7 @@ static unsigned hash_start;
 static unsigned hash_end;
 
 static void
-dump_hash_table()
+dump_hash_table(void)
 {
 	int seg;
 	unsigned seg_start, seg_end;
@@ -1024,21 +1171,11 @@ dump_hash_table()
 		seg_start = seg_end + 0x1000;
 	}
 }
+#endif /* CONFIG_PPC_STD_MMU */
 
 /*
  * Stuff for reading and writing memory safely
  */
-extern inline void sync(void)
-{
-	asm volatile("sync; isync");
-}
-
-extern inline void __delay(unsigned int loops)
-{
-	if (loops != 0)
-		__asm__ __volatile__("mtctr %0; 1: bdnz 1b" : :
-				     "r" (loops) : "ctr");
-}
 
 int
 mread(unsigned adrs, void *buf, int size)
@@ -1101,12 +1238,14 @@ mwrite(unsigned adrs, void *buf, int size)
 }
 
 static int fault_type;
+static int fault_except;
 static char *fault_chars[] = { "--", "**", "##" };
 
 static void
 handle_fault(struct pt_regs *regs)
 {
-	fault_type = regs->trap == 0x200? 0: regs->trap == 0x300? 1: 2;
+	fault_except = TRAP(regs);
+	fault_type = TRAP(regs) == 0x200? 0: TRAP(regs) == 0x300? 1: 2;
 	longjmp(bus_error_jmp, 1);
 }
 
@@ -1132,7 +1271,7 @@ static int brev;
 static int mnoread;
 
 void
-memex()
+memex(void)
 {
     int cmd, inc, i, nslash;
     unsigned n;
@@ -1269,7 +1408,7 @@ memex()
 }
 
 int
-bsesc()
+bsesc(void)
 {
 	int c;
 
@@ -1284,7 +1423,7 @@ bsesc()
 }
 
 void
-dump()
+dump(void)
 {
 	int c;
 
@@ -1383,8 +1522,7 @@ ppc_inst_dump(unsigned adr, int count)
 }
 
 void
-print_address(addr)
-unsigned addr;
+print_address(unsigned addr)
 {
 	printf("0x%x", addr);
 }
@@ -1443,7 +1581,7 @@ static unsigned mend;
 static unsigned mask;
 
 void
-memlocate()
+memlocate(void)
 {
 	unsigned a, n;
 	unsigned char val[4];
@@ -1476,7 +1614,7 @@ static unsigned mskip = 0x1000;
 static unsigned mlim = 0xffffffff;
 
 void
-memzcan()
+memzcan(void)
 {
 	unsigned char v;
 	unsigned a;
@@ -1503,9 +1641,44 @@ memzcan()
 		printf("%.8x\n", a - mskip);
 }
 
+void proccall(void)
+{
+	unsigned int args[8];
+	unsigned int ret;
+	int i;
+	typedef unsigned int (*callfunc_t)(unsigned int, unsigned int,
+			unsigned int, unsigned int, unsigned int,
+			unsigned int, unsigned int, unsigned int);
+	callfunc_t func;
+
+	scanhex(&adrs);
+	if (termch != '\n')
+		termch = 0;
+	for (i = 0; i < 8; ++i)
+		args[i] = 0;
+	for (i = 0; i < 8; ++i) {
+		if (!scanhex(&args[i]) || termch == '\n')
+			break;
+		termch = 0;
+	}
+	func = (callfunc_t) adrs;
+	ret = 0;
+	if (setjmp(bus_error_jmp) == 0) {
+		debugger_fault_handler = handle_fault;
+		sync();
+		ret = func(args[0], args[1], args[2], args[3],
+			   args[4], args[5], args[6], args[7]);
+		sync();
+		printf("return value is %x\n", ret);
+	} else {
+		printf("*** %x exception occurred\n", fault_except);
+	}
+	debugger_fault_handler = 0;
+}
+
 /* Input scanning routines */
 int
-skipbl()
+skipbl(void)
 {
 	int c;
 
@@ -1530,8 +1703,7 @@ static char *regnames[N_PTREGS] = {
 };
 
 int
-scanhex(vp)
-unsigned *vp;
+scanhex(unsigned *vp)
 {
 	int c, d;
 	unsigned v;
@@ -1565,6 +1737,24 @@ unsigned *vp;
 		}
 		printf("invalid register name '%%%s'\n", regname);
 		return 0;
+	} else if (c == '$') {
+		static char symname[64];
+		int i;
+		for (i=0; i<63; i++) {
+			c = inchar();
+			if (isspace(c)) {
+				termch = c;
+				break;
+			}
+			symname[i] = c;
+		}
+		symname[i++] = 0;
+		*vp = xmon_symbol_to_addr(symname);
+		if (!(*vp)) {
+			printf("unknown symbol\n");
+			return 0;
+		}
+		return 1;
 	}
 
 	d = hexdigit(c);
@@ -1584,7 +1774,7 @@ unsigned *vp;
 }
 
 void
-scannl()
+scannl(void)
 {
 	int c;
 
@@ -1594,8 +1784,7 @@ scannl()
 		c = inchar();
 }
 
-int
-hexdigit(c)
+int hexdigit(int c)
 {
 	if( '0' <= c && c <= '9' )
 		return c - '0';
@@ -1627,13 +1816,13 @@ static char line[256];
 static char *lineptr;
 
 void
-flush_input()
+flush_input(void)
 {
 	lineptr = NULL;
 }
 
 int
-inchar()
+inchar(void)
 {
 	if (lineptr == NULL || *lineptr == 0) {
 		if (fgets(line, sizeof(line), stdin) == NULL) {
@@ -1646,44 +1835,174 @@ inchar()
 }
 
 void
-take_input(str)
-char *str;
+take_input(char *str)
 {
 	lineptr = str;
 }
 
-#if 0 /* Makes compile with -Wall */
-static char *pretty_print_addr(unsigned long addr)
+void
+sysmap_lookup(void)
 {
-	printf("%08x", addr);
-	if ( lookup_name(addr) )
-		printf(" %s", lookup_name(addr) );
-	return NULL;
-}
-#endif
+	int type = inchar();
+	unsigned addr;
+	static char tmp[64];
+	char* cur;
 
-#if 0 /* Makes compile with -Wall */
-static char *lookup_name(unsigned long addr)
-{
 	extern char *sysmap;
 	extern unsigned long sysmap_size;
-	char *c = sysmap;
-	unsigned long cmp;
+	if ( !sysmap || !sysmap_size )
+		return;
+
+	switch(type) {
+		case 'a':
+			if (scanhex(&addr)) {
+				pretty_print_addr(addr);
+				printf("\n");
+			}
+			termch = 0;
+			break;
+		case 's':
+			getstring(tmp, 64);
+			if( setjmp(bus_error_jmp) == 0 ) {
+				debugger_fault_handler = handle_fault;
+				sync();
+				cur = sysmap;
+				do {
+					cur = strstr(cur, tmp);
+					if (cur) {
+						static char res[64];
+						char *p, *d;
+						p = cur;
+						while(p > sysmap && *p != 10)
+							p--;
+						if (*p == 10) p++;
+						d = res;
+						while(*p && p < (sysmap + sysmap_size) && *p != 10)
+							*(d++) = *(p++);
+						*(d++) = 0;
+						printf("%s\n", res);
+						cur++;
+					}
+				} while (cur);
+				sync();
+			}
+			debugger_fault_handler = 0;
+			termch = 0;
+			break;
+	}
+}
+
+static int
+pretty_print_addr(unsigned long addr)
+{
+	char *sym;
+	unsigned long saddr;
+	
+	printf("%08x", addr);
+	sym = xmon_find_symbol(addr, &saddr);
+	if (sym)
+		printf(" (%s+0x%x)", sym, addr-saddr);
+	return (sym != 0);
+}
+
+char*
+xmon_find_symbol(unsigned long addr, unsigned long* saddr)
+{
+	static char rbuffer[64];
+	char *p, *ep, *limit;
+	unsigned long prev, next;
+	char* psym;
+
+	extern char *sysmap;
+	extern unsigned long sysmap_size;
 	if ( !sysmap || !sysmap_size )
 		return NULL;
-return NULL;	
-#if 0
-	cmp = simple_strtoul(c, &c, 8);
-	/* XXX crap, we don't want the whole of the rest of the map - paulus */
-	strcpy( last, strsep( &c, "\n"));
-	while ( c < (sysmap+sysmap_size) )
-	{
-		cmp = simple_strtoul(c, &c, 8);
-		if ( cmp < addr )
-			break;
-		strcpy( last, strsep( &c, "\n"));
+	
+	prev = 0;
+	psym = NULL;
+	p = sysmap;
+	limit = p + sysmap_size;
+	if( setjmp(bus_error_jmp) == 0 ) {
+		debugger_fault_handler = handle_fault;
+		sync();
+		do {
+			next = simple_strtoul(p, &p, 16);
+			if (next > addr && prev <= addr) {
+				if (!psym)
+					goto bail;
+				ep = rbuffer;
+				p = psym;
+				while(*p && p < limit && *p == 32)
+					p++;
+				while(*p && p < limit && *p != 10 && (ep - rbuffer) < 63)
+					*(ep++) = *(p++);
+				*(ep++) = 0;
+				if (saddr)
+					*saddr = prev;
+				debugger_fault_handler = 0;
+				return rbuffer;
+			}
+			prev = next;
+			psym = p;
+			while(*p && p < limit && *p != 10)
+				p++;
+			if (*p) p++;
+		} while(*p && p < limit && next);
+bail:
+		sync();
 	}
-	return last;
-#endif	
+	debugger_fault_handler = 0;
+	return NULL;
 }
-#endif
+
+unsigned long
+xmon_symbol_to_addr(char* symbol)
+{
+	char *p, *cur;
+	char *match;
+	int goodness = 0;
+	int result = 0;
+	
+	extern char *sysmap;
+	extern unsigned long sysmap_size;
+	if ( !sysmap || !sysmap_size )
+		return 0;
+
+	if( setjmp(bus_error_jmp) == 0 ) {
+		debugger_fault_handler = handle_fault;
+		sync();
+		cur = sysmap;
+		while(cur) {
+			cur = strstr(cur, symbol);
+			if (cur) {
+				int gd = 1;
+
+				/* best match if equal, better match if
+				 * begins with
+				 */
+				if (cur == sysmap || *(cur-1) == ' ') {
+					gd++;
+					if (cur[strlen(symbol)] == 10)
+						gd++;
+				}
+				if (gd > goodness) {
+					match = cur;
+					goodness = gd;
+					if (gd == 3)
+						break;
+				}
+				cur++;
+			}
+		}	
+		if (goodness) {
+			p = match;
+			while(p > sysmap && *p != 10)
+				p--;
+			if (*p == 10) p++;
+			result = simple_strtoul(p, &p, 16);
+		}
+		sync();
+	}
+	debugger_fault_handler = 0;
+	return result;
+}		

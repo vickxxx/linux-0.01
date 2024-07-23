@@ -22,28 +22,10 @@
 
 #define KERNEL_STACK_SIZE	PAGE_SIZE
 
-struct context_save_struct {
-	unsigned long cpsr;
-	unsigned long r4;
-	unsigned long r5;
-	unsigned long r6;
-	unsigned long r7;
-	unsigned long r8;
-	unsigned long r9;
-	unsigned long sl;
-	unsigned long fp;
-	unsigned long pc;
-};
-
-#define INIT_CSS (struct context_save_struct){ SVC_MODE, 0, 0, 0, 0, 0, 0, 0, 0, 0 }
-
-#define EXTRA_THREAD_STRUCT						\
-	unsigned int	domain;
-
-#define EXTRA_THREAD_STRUCT_INIT					\
-	domain:	  domain_val(DOMAIN_USER, DOMAIN_CLIENT) |		\
-		  domain_val(DOMAIN_KERNEL, DOMAIN_MANAGER) |		\
-		  domain_val(DOMAIN_IO, DOMAIN_CLIENT)
+#define INIT_EXTRA_THREAD_INFO						\
+	.cpu_domain	= domain_val(DOMAIN_USER, DOMAIN_MANAGER) |	\
+			  domain_val(DOMAIN_KERNEL, DOMAIN_MANAGER) |	\
+			  domain_val(DOMAIN_IO, DOMAIN_CLIENT)
 
 #define start_thread(regs,pc,sp)					\
 ({									\
@@ -54,21 +36,16 @@ struct context_save_struct {
 		regs->ARM_cpsr = USR_MODE;				\
 	else								\
 		regs->ARM_cpsr = USR26_MODE;				\
-	regs->ARM_pc = pc;		/* pc */			\
+	if (elf_hwcap & HWCAP_THUMB && pc & 1)				\
+		regs->ARM_cpsr |= PSR_T_BIT;				\
+	regs->ARM_pc = pc & ~1;		/* pc */			\
 	regs->ARM_sp = sp;		/* sp */			\
 	regs->ARM_r2 = stack[2];	/* r2 (envp) */			\
 	regs->ARM_r1 = stack[1];	/* r1 (argv) */			\
 	regs->ARM_r0 = stack[0];	/* r0 (argc) */			\
 })
 
-#define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1021])
-#define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)))[1019])
-
-/* Allocation and freeing of basic task resources. */
-/*
- * NOTE! The task struct and the stack go together
- */
-#define ll_alloc_task_struct() ((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
-#define ll_free_task_struct(p) free_pages((unsigned long)(p),1)
+#define KSTK_EIP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1019])
+#define KSTK_ESP(tsk)	(((unsigned long *)(4096+(unsigned long)(tsk)->thread_info))[1017])
 
 #endif

@@ -25,6 +25,8 @@
 #ifndef KERNEL_IRDA_H
 #define KERNEL_IRDA_H
 
+#include <linux/socket.h> /* only for sa_family_t */
+
 /* Hint bit positions for first hint byte */
 #define HINT_PNP         0x01
 #define HINT_PDA         0x02
@@ -67,6 +69,9 @@ typedef enum {
 	IRDA_AIRPORT_DONGLE      = 6,
 	IRDA_OLD_BELKIN_DONGLE   = 7,
 	IRDA_EP7211_IR           = 8,
+	IRDA_MCP2120_DONGLE      = 9,
+	IRDA_ACT200L_DONGLE      = 10,
+	IRDA_MA600_DONGLE        = 11,
 } IRDA_DONGLE;
 
 /* Protocol types to be used for SOCK_DGRAM */

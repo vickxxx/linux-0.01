@@ -2,11 +2,14 @@
 # This dir holds all of the images for PPC machines.
 # Tom Rini	January 2001
 
-include $(TOPDIR)/Rules.make
+extra-y		:= vmlinux.bin vmlinux.gz
 
-vmlinux.gz: $(TOPDIR)/vmlinux
-	$(OBJCOPY) -S -O binary $(TOPDIR)/vmlinux vmlinux
-	gzip -vf9 vmlinux
+OBJCOPYFLAGS_vmlinux.bin := -O binary
+$(obj)/vmlinux.bin: vmlinux FORCE
+	$(call if_changed,objcopy)
 
-clean:
-	rm -f sImage vmapus vmlinux.* miboot.image* zImage* zvmlinux.*
+$(obj)/vmlinux.gz: $(obj)/vmlinux.bin FORCE
+	$(call if_changed,gzip)
+
+# Files generated that shall be removed upon make clean
+clean-files	:= sImage vmapus vmlinux* miboot* zImage*

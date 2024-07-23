@@ -2,7 +2,7 @@
  *  linux/arch/arm/kernel/process.c
  *
  *  Copyright (C) 1996-2000 Russell King - Converted to ARM.
- *  Origional Copyright (C) 1995  Linus Torvalds
+ *  Original Copyright (C) 1995  Linus Torvalds
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -11,6 +11,7 @@
 #include <stdarg.h>
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
@@ -19,23 +20,18 @@
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/user.h>
+#include <linux/a.out.h>
 #include <linux/delay.h>
 #include <linux/reboot.h>
 #include <linux/interrupt.h>
+#include <linux/kallsyms.h>
 #include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/leds.h>
+#include <asm/processor.h>
 #include <asm/uaccess.h>
-
-/*
- * Values for cpu_do_idle()
- */
-#define IDLE_WAIT_SLOW	0
-#define IDLE_WAIT_FAST	1
-#define IDLE_CLOCK_SLOW	2
-#define IDLE_CLOCK_FAST	3
 
 extern const char *processor_modes[];
 extern void setup_mm_for_reboot(char mode);
@@ -76,6 +72,18 @@ void (*pm_idle)(void);
 void (*pm_power_off)(void);
 
 /*
+ * This is our default idle handler.  We need to disable
+ * interrupts here to ensure we don't miss a wakeup call.
+ */
+void default_idle(void)
+{
+	local_irq_disable();
+	if (!need_resched() && !hlt_counter)
+		arch_idle();
+	local_irq_enable();
+}
+
+/*
  * The idle thread.  We try to conserve power, while trying to keep
  * overall latency low.  The architecture specific idle is passed
  * a value to indicate the level of "idleness" of the system.
@@ -83,22 +91,17 @@ void (*pm_power_off)(void);
 void cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	init_idle();
-	current->nice = 20;
-	current->counter = -100;
-
 	while (1) {
 		void (*idle)(void) = pm_idle;
 		if (!idle)
-			idle = arch_idle;
+			idle = default_idle;
+		preempt_disable();
 		leds_event(led_idle_start);
-		while (!current->need_resched)
+		while (!need_resched())
 			idle();
 		leds_event(led_idle_end);
+		preempt_enable();
 		schedule();
-#ifndef CONFIG_NO_PGT_CACHE
-		check_pgt_cache();
-#endif
 	}
 }
 
@@ -158,6 +161,8 @@ void show_regs(struct pt_regs * regs)
 
 	flags = condition_codes(regs);
 
+	print_symbol("PC is at %s\n", instruction_pointer(regs));
+	print_symbol("LR is at %s\n", regs->ARM_lr);
 	printk("pc : [<%08lx>]    lr : [<%08lx>]    %s\n"
 	       "sp : %08lx  ip : %08lx  fp : %08lx\n",
 		instruction_pointer(regs),
@@ -173,19 +178,18 @@ void show_regs(struct pt_regs * regs)
 		regs->ARM_r3, regs->ARM_r2,
 		regs->ARM_r1, regs->ARM_r0);
 	printk("Flags: %c%c%c%c",
-		flags & CC_N_BIT ? 'N' : 'n',
-		flags & CC_Z_BIT ? 'Z' : 'z',
-		flags & CC_C_BIT ? 'C' : 'c',
-		flags & CC_V_BIT ? 'V' : 'v');
-	printk("  IRQs %s  FIQs %s  Mode %s%s  Segment %s\n",
-		interrupts_enabled(regs) ? "on" : "off",
-		fast_interrupts_enabled(regs) ? "on" : "off",
+		flags & PSR_N_BIT ? 'N' : 'n',
+		flags & PSR_Z_BIT ? 'Z' : 'z',
+		flags & PSR_C_BIT ? 'C' : 'c',
+		flags & PSR_V_BIT ? 'V' : 'v');
+	printk("  IRQs o%s  FIQs o%s  Mode %s%s  Segment %s\n",
+		interrupts_enabled(regs) ? "n" : "ff",
+		fast_interrupts_enabled(regs) ? "n" : "ff",
 		processor_modes[processor_mode(regs)],
 		thumb_mode(regs) ? " (T)" : "",
 		get_fs() == get_ds() ? "kernel" : "user");
-#if defined(CONFIG_CPU_32)
 	{
-		int ctrl, transbase, dac;
+		unsigned int ctrl, transbase, dac;
 		  __asm__ (
 		"	mrc p15, 0, %0, c1, c0\n"
 		"	mrc p15, 0, %1, c2, c0\n"
@@ -194,7 +198,6 @@ void show_regs(struct pt_regs * regs)
 		printk("Control: %04X  Table: %08X  DAC: %08X\n",
 		  	ctrl, transbase, dac);
 	}
-#endif
 }
 
 void show_fpregs(struct user_fp *regs)
@@ -229,51 +232,52 @@ void show_fpregs(struct user_fp *regs)
 /*
  * Task structure and kernel stack allocation.
  */
-static struct task_struct *task_struct_head;
-static unsigned int nr_task_struct;
+static unsigned long *thread_info_head;
+static unsigned int nr_thread_info;
 
-#ifdef CONFIG_CPU_32
 #define EXTRA_TASK_STRUCT	4
-#else
-#define EXTRA_TASK_STRUCT	0
-#endif
+#define ll_alloc_task_struct() ((struct thread_info *) __get_free_pages(GFP_KERNEL,1))
+#define ll_free_task_struct(p) free_pages((unsigned long)(p),1)
 
-struct task_struct *alloc_task_struct(void)
+struct thread_info *alloc_thread_info(struct task_struct *task)
 {
-	struct task_struct *tsk;
+	struct thread_info *thread = NULL;
 
-	if (EXTRA_TASK_STRUCT)
-		tsk = task_struct_head;
-	else
-		tsk = NULL;
+	if (EXTRA_TASK_STRUCT) {
+		unsigned long *p = thread_info_head;
 
-	if (tsk) {
-		task_struct_head = tsk->next_task;
-		nr_task_struct -= 1;
-	} else
-		tsk = ll_alloc_task_struct();
+		if (p) {
+			thread_info_head = (unsigned long *)p[0];
+			nr_thread_info -= 1;
+		}
+		thread = (struct thread_info *)p;
+	}
+
+	if (!thread)
+		thread = ll_alloc_task_struct();
 
 #ifdef CONFIG_SYSRQ
 	/*
 	 * The stack must be cleared if you want SYSRQ-T to
 	 * give sensible stack usage information
 	 */
-	if (tsk) {
-		char *p = (char *)tsk;
+	if (thread) {
+		char *p = (char *)thread;
 		memzero(p+KERNEL_STACK_SIZE, KERNEL_STACK_SIZE);
 	}
 #endif
-	return tsk;
+	return thread;
 }
 
-void __free_task_struct(struct task_struct *p)
+void free_thread_info(struct thread_info *thread)
 {
-	if (EXTRA_TASK_STRUCT && nr_task_struct < EXTRA_TASK_STRUCT) {
-		p->next_task = task_struct_head;
-		task_struct_head = p;
-		nr_task_struct += 1;
+	if (EXTRA_TASK_STRUCT && nr_thread_info < EXTRA_TASK_STRUCT) {
+		unsigned long *p = (unsigned long *)thread;
+		p[0] = (unsigned long)thread_info_head;
+		thread_info_head = p;
+		nr_thread_info += 1;
 	} else
-		ll_free_task_struct(p);
+		ll_free_task_struct(thread);
 }
 
 /*
@@ -283,12 +287,22 @@ void exit_thread(void)
 {
 }
 
+static void default_fp_init(union fp_state *fp)
+{
+	memset(fp, 0, sizeof(union fp_state));
+}
+
+void (*fp_init)(union fp_state *) = default_fp_init;
+
 void flush_thread(void)
 {
-	memset(&current->thread.debug, 0, sizeof(struct debug_info));
-	memset(&current->thread.fpstate, 0, sizeof(union fp_state));
-	current->used_math = 0;
-	current->flags &= ~PF_USEDFPU;
+	struct thread_info *thread = current_thread_info();
+	struct task_struct *tsk = current;
+
+	tsk->used_math = 0;
+
+	memset(&tsk->thread.debug, 0, sizeof(struct debug_info));
+	fp_init(&thread->fpstate);
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -297,25 +311,21 @@ void release_thread(struct task_struct *dead_task)
 
 asmlinkage void ret_from_fork(void) __asm__("ret_from_fork");
 
-int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
-	unsigned long unused,
-	struct task_struct * p, struct pt_regs * regs)
+int
+copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
+	    unsigned long unused, struct task_struct *p, struct pt_regs *regs)
 {
-	struct pt_regs * childregs;
-	struct context_save_struct * save;
+	struct thread_info *thread = p->thread_info;
+	struct pt_regs *childregs;
 
-	atomic_set(&p->thread.refcount, 1);
-
-	childregs = ((struct pt_regs *)((unsigned long)p + 8192)) - 1;
+	childregs = ((struct pt_regs *)((unsigned long)thread + THREAD_SIZE - 8)) - 1;
 	*childregs = *regs;
 	childregs->ARM_r0 = 0;
 	childregs->ARM_sp = esp;
 
-	save = ((struct context_save_struct *)(childregs)) - 1;
-	*save = INIT_CSS;
-	save->pc |= (unsigned long)ret_from_fork;
-
-	p->thread.save = save;
+	memset(&thread->cpu_context, 0, sizeof(struct cpu_context_save));
+	thread->cpu_context.sp = (unsigned long)childregs;
+	thread->cpu_context.pc = (unsigned long)ret_from_fork;
 
 	return 0;
 }
@@ -325,10 +335,13 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long esp,
  */
 int dump_fpu (struct pt_regs *regs, struct user_fp *fp)
 {
-	if (current->used_math)
-		memcpy(fp, &current->thread.fpstate.soft, sizeof (*fp));
+	struct thread_info *thread = current_thread_info();
+	int used_math = current->used_math;
 
-	return current->used_math;
+	if (used_math)
+		memcpy(fp, &thread->fpstate.soft, sizeof (*fp));
+
+	return used_math;
 }
 
 /*
@@ -348,8 +361,8 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
 
 	dump->u_debugreg[0] = tsk->thread.debug.bp[0].address;
 	dump->u_debugreg[1] = tsk->thread.debug.bp[1].address;
-	dump->u_debugreg[2] = tsk->thread.debug.bp[0].insn;
-	dump->u_debugreg[3] = tsk->thread.debug.bp[1].insn;
+	dump->u_debugreg[2] = tsk->thread.debug.bp[0].insn.arm;
+	dump->u_debugreg[3] = tsk->thread.debug.bp[1].insn.arm;
 	dump->u_debugreg[4] = tsk->thread.debug.nsaved;
 
 	if (dump->start_stack < 0x04000000)
@@ -369,23 +382,23 @@ void dump_thread(struct pt_regs * regs, struct user * dump)
  */
 pid_t kernel_thread(int (*fn)(void *), void *arg, unsigned long flags)
 {
-	pid_t __ret;
+	register unsigned int r0 asm("r0") = flags | CLONE_VM | CLONE_UNTRACED;
+	register unsigned int r1 asm("r1") = 0;
+	register pid_t __ret asm("r0");
 
 	__asm__ __volatile__(
-	"orr	r0, %1, %2	@ kernel_thread sys_clone
-	mov	r1, #0
-	"__syscall(clone)"
-	movs	%0, r0		@ if we are the child
-	bne	1f
-	mov	fp, #0		@ ensure that fp is zero
-	mov	r0, %4
-	mov	lr, pc
-	mov	pc, %3
-	b	sys_exit
+	__syscall(clone)"	@ kernel_thread sys_clone	\n\
+	movs	%0, r0		@ if we are the child		\n\
+	bne	1f						\n\
+	mov	fp, #0		@ ensure that fp is zero	\n\
+	mov	r0, %4						\n\
+	mov	lr, pc						\n\
+	mov	pc, %3						\n\
+	b	sys_exit					\n\
 1:	"
         : "=r" (__ret)
-        : "Ir" (flags), "I" (CLONE_VM), "r" (fn), "r" (arg)
-	: "r0", "r1", "lr");
+        : "0" (r0), "r" (r1), "r" (fn), "r" (arg)
+	: "lr");
 	return __ret;
 }
 
@@ -405,8 +418,8 @@ unsigned long get_wchan(struct task_struct *p)
 	if (!p || p == current || p->state == TASK_RUNNING)
 		return 0;
 
-	stack_page = 4096 + (unsigned long)p;
-	fp = get_css_fp(&p->thread);
+	stack_page = 4096 + (unsigned long)p->thread_info;
+	fp = thread_saved_fp(p);
 	do {
 		if (fp < stack_page || fp > 4092+stack_page)
 			return 0;

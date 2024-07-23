@@ -10,8 +10,6 @@
 #include <asm/pstate.h>
 #include <asm/ptrace.h>
 
-#define AOFF_task_fpregs	(((ASIZ_task) + (64 - 1)) & ~(64 - 1))
- 
 /* Clobbers %o5, %g1, %g2, %g3, %g7, %icc, %xcc */
 
 #define VISEntry					\
@@ -44,7 +42,7 @@
 	wr		%o5, 0, %fprs;
 
 #ifndef __ASSEMBLY__	
-extern __inline__ void save_and_clear_fpu(void) {
+static __inline__ void save_and_clear_fpu(void) {
 	__asm__ __volatile__ (
 "		rd %%fprs, %%o5\n"
 "		andcc %%o5, %0, %%g0\n"

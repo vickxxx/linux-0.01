@@ -32,34 +32,33 @@
 #include <linux/slab.h>
 #include <linux/version.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include <linux/pci.h>
-#include <asm/irq.h>
-#include <asm/io.h>
+#include <linux/wait.h>
 
 #include <linux/i2c.h>
 #include <linux/i2c-algo-pcf.h>
-#include <linux/i2c-elektor.h>
+
+#include <asm/io.h>
+#include <asm/irq.h>
+
 #include "i2c-pcf8584.h"
 
 #define DEFAULT_BASE 0x330
 
-static int base   = 0;
-static int irq    = 0;
+static int base;
+static int irq;
 static int clock  = 0x1c;
 static int own    = 0x55;
-static int mmapped = 0;
-static int i2c_debug = 0;
+static int mmapped;
+static int i2c_debug;
 
 /* vdovikin: removed static struct i2c_pcf_isa gpi; code - 
   this module in real supports only one device, due to missing arguments
   in some functions, called from the algo-pcf module. Sometimes it's
   need to be rewriten - but for now just remove this for simpler reading */
 
-#if (LINUX_VERSION_CODE < 0x020301)
-static struct wait_queue *pcf_wait = NULL;
-#else
 static wait_queue_head_t pcf_wait;
-#endif
 static int pcf_pending;
 
 /* ----- global defines -----------------------------------------------	*/
@@ -74,11 +73,12 @@ static void pcf_isa_setbyte(void *data, int ctl, int val)
 {
 	int address = ctl ? (base + 1) : base;
 
-	if (ctl && irq) {
+	/* enable irq if any specified for serial operation */
+	if (ctl && irq && (val & I2C_PCF_ESO)) {
 		val |= I2C_PCF_ENI;
 	}
 
-	DEB3(printk("i2c-elektor.o: Write 0x%X 0x%02X\n", address, val & 255));
+	DEB3(printk(KERN_DEBUG "i2c-elektor.o: Write 0x%X 0x%02X\n", address, val & 255));
 
 	switch (mmapped) {
 	case 0: /* regular I/O */
@@ -99,7 +99,7 @@ static int pcf_isa_getbyte(void *data, int ctl)
 	int address = ctl ? (base + 1) : base;
 	int val = mmapped ? readb(address) : inb(address);
 
-	DEB3(printk("i2c-elektor.o: Read 0x%X 0x%02X\n", address, val));
+	DEB3(printk(KERN_DEBUG "i2c-elektor.o: Read 0x%X 0x%02X\n", address, val));
 
 	return (val);
 }
@@ -132,25 +132,26 @@ static void pcf_isa_waitforpin(void) {
 }
 
 
-static void pcf_isa_handler(int this_irq, void *dev_id, struct pt_regs *regs) {
+static irqreturn_t pcf_isa_handler(int this_irq, void *dev_id, struct pt_regs *regs) {
 	pcf_pending = 1;
 	wake_up_interruptible(&pcf_wait);
+	return IRQ_HANDLED;
 }
 
 
 static int pcf_isa_init(void)
 {
 	if (!mmapped) {
-		if (check_region(base, 2) < 0 ) {
-			printk("i2c-elektor.o: requested I/O region (0x%X:2) is in use.\n", base);
+		if (!request_region(base, 2, "i2c (isa bus adapter)")) {
+			printk(KERN_ERR
+			       "i2c-elektor.o: requested I/O region (0x%X:2) "
+			       "is in use.\n", base);
 			return -ENODEV;
-		} else {
-			request_region(base, 2, "i2c (isa bus adapter)");
 		}
 	}
 	if (irq > 0) {
 		if (request_irq(irq, pcf_isa_handler, 0, "PCF8584", 0) < 0) {
-			printk("i2c-elektor.o: Request irq%d failed\n", irq);
+			printk(KERN_ERR "i2c-elektor.o: Request irq%d failed\n", irq);
 			irq = 0;
 		} else
 			enable_irq(irq);
@@ -158,76 +159,36 @@ static int pcf_isa_init(void)
 	return 0;
 }
 
-
-static void __exit pcf_isa_exit(void)
-{
-	if (irq > 0) {
-		disable_irq(irq);
-		free_irq(irq, 0);
-	}
-	if (!mmapped) {
-		release_region(base , 2);
-	}
-}
-
-
-static int pcf_isa_reg(struct i2c_client *client)
-{
-	return 0;
-}
-
-
-static int pcf_isa_unreg(struct i2c_client *client)
-{
-	return 0;
-}
-
-static void pcf_isa_inc_use(struct i2c_adapter *adap)
-{
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
-}
-
-static void pcf_isa_dec_use(struct i2c_adapter *adap)
-{
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
-}
-
-
 /* ------------------------------------------------------------------------
  * Encapsulate the above functions in the correct operations structure.
  * This is only done when more than one hardware adapter is supported.
  */
 static struct i2c_algo_pcf_data pcf_isa_data = {
-	NULL,
-	pcf_isa_setbyte,
-	pcf_isa_getbyte,
-	pcf_isa_getown,
-	pcf_isa_getclock,
-	pcf_isa_waitforpin,
-	10, 10, 100,		/*	waits, timeout */
+	.setpcf	    = pcf_isa_setbyte,
+	.getpcf	    = pcf_isa_getbyte,
+	.getown	    = pcf_isa_getown,
+	.getclock   = pcf_isa_getclock,
+	.waitforpin = pcf_isa_waitforpin,
+	.udelay	    = 10,
+	.mdelay	    = 10,
+	.timeout    = 100,
 };
 
 static struct i2c_adapter pcf_isa_ops = {
-	"PCF8584 ISA adapter",
-	I2C_HW_P_ELEK,
-	NULL,
-	&pcf_isa_data,
-	pcf_isa_inc_use,
-	pcf_isa_dec_use,
-	pcf_isa_reg,
-	pcf_isa_unreg,
+	.owner		= THIS_MODULE,
+	.id		= I2C_HW_P_ELEK,
+	.algo_data	= &pcf_isa_data,
+	.dev		= {
+		.name	= "PCF8584 ISA adapter",
+	},
 };
 
-int __init i2c_pcfisa_init(void) 
+static int __init i2c_pcfisa_init(void) 
 {
 #ifdef __alpha__
 	/* check to see we have memory mapped PCF8584 connected to the 
 	Cypress cy82c693 PCI-ISA bridge as on UP2000 board */
-	if ((base == 0) && pci_present()) {
+	if (base == 0) {
 		
 		struct pci_dev *cy693_dev =
                     pci_find_device(PCI_VENDOR_ID_CONTAQ, 
@@ -238,7 +199,7 @@ int __init i2c_pcfisa_init(void)
 			/* yeap, we've found cypress, let's check config */
 			if (!pci_read_config_byte(cy693_dev, 0x47, &config)) {
 				
-				DEB3(printk("i2c-elektor.o: found cy82c693, config register 0x47 = 0x%02x.\n", config));
+				DEB3(printk(KERN_DEBUG "i2c-elektor.o: found cy82c693, config register 0x47 = 0x%02x.\n", config));
 
 				/* UP2000 board has this register set to 0xe1,
                                    but the most significant bit as seems can be 
@@ -260,7 +221,7 @@ int __init i2c_pcfisa_init(void)
 					   8.25 MHz (PCI/4) clock
 					   (this can be read from cypress) */
 					clock = I2C_PCF_CLK | I2C_PCF_TRNS90;
-					printk("i2c-elektor.o: found API UP2000 like board, will probe PCF8584 later.\n");
+					printk(KERN_INFO "i2c-elektor.o: found API UP2000 like board, will probe PCF8584 later.\n");
 				}
 			}
 		}
@@ -269,35 +230,50 @@ int __init i2c_pcfisa_init(void)
 
 	/* sanity checks for mmapped I/O */
 	if (mmapped && base < 0xc8000) {
-		printk("i2c-elektor.o: incorrect base address (0x%0X) specified for mmapped I/O.\n", base);
+		printk(KERN_ERR "i2c-elektor.o: incorrect base address (0x%0X) specified for mmapped I/O.\n", base);
 		return -ENODEV;
 	}
 
-	printk("i2c-elektor.o: i2c pcf8584-isa adapter module\n");
+	printk(KERN_INFO "i2c-elektor.o: i2c pcf8584-isa adapter module version %s (%s)\n", I2C_VERSION, I2C_DATE);
 
 	if (base == 0) {
 		base = DEFAULT_BASE;
 	}
 
-#if (LINUX_VERSION_CODE >= 0x020301)
 	init_waitqueue_head(&pcf_wait);
-#endif
-	if (pcf_isa_init() == 0) {
-		if (i2c_pcf_add_bus(&pcf_isa_ops) < 0)
-			return -ENODEV;
-	} else {
+	if (pcf_isa_init())
 		return -ENODEV;
-	}
+	if (i2c_pcf_add_bus(&pcf_isa_ops) < 0)
+		goto fail;
 	
-	printk("i2c-elektor.o: found device at %#x.\n", base);
+	printk(KERN_ERR "i2c-elektor.o: found device at %#x.\n", base);
 
 	return 0;
+
+ fail:
+	if (irq > 0) {
+		disable_irq(irq);
+		free_irq(irq, 0);
+	}
+
+	if (!mmapped)
+		release_region(base , 2);
+	return -ENODEV;
 }
 
+static void i2c_pcfisa_exit(void)
+{
+	i2c_pcf_del_bus(&pcf_isa_ops);
 
-EXPORT_NO_SYMBOLS;
+	if (irq > 0) {
+		disable_irq(irq);
+		free_irq(irq, 0);
+	}
 
-#ifdef MODULE
+	if (!mmapped)
+		release_region(base , 2);
+}
+
 MODULE_AUTHOR("Hans Berglund <hb@spacetec.no>");
 MODULE_DESCRIPTION("I2C-Bus adapter routines for PCF8584 ISA bus adapter");
 MODULE_LICENSE("GPL");
@@ -309,15 +285,5 @@ MODULE_PARM(own, "i");
 MODULE_PARM(mmapped, "i");
 MODULE_PARM(i2c_debug, "i");
 
-int init_module(void) 
-{
-	return i2c_pcfisa_init();
-}
-
-void cleanup_module(void) 
-{
-	i2c_pcf_del_bus(&pcf_isa_ops);
-	pcf_isa_exit();
-}
-
-#endif
+module_init(i2c_pcfisa_init);
+module_exit(i2c_pcfisa_exit);

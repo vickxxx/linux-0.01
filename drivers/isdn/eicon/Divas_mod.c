@@ -10,7 +10,6 @@
 #undef N_DATA
 
 #include <linux/kernel.h>
-
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
@@ -24,6 +23,8 @@
 MODULE_DESCRIPTION("ISDN4Linux: Driver for Eicon Diva Server cards");
 MODULE_AUTHOR("Armin Schindler");
 MODULE_LICENSE("GPL");
+
+void DivasInitDpc(void);
 
 #ifdef MODULE
 #include "idi.h"
@@ -47,17 +48,11 @@ divas_init(void)
 	return -ENODEV;
 #endif
 
-	if (pci_present())
+	DivasInitDpc();
+
+	if (DivasCardsDiscover() < 0)
 	{
-		if (DivasCardsDiscover() < 0)
-		{
-			printk(KERN_WARNING "Divas: Not loaded\n");
-			return -ENODEV;
-		}
-	}
-	else
-	{
-		printk(KERN_WARNING "Divas: No PCI bus present\n");
+		printk(KERN_WARNING "Divas: Not loaded\n");
 		return -ENODEV;
 	}
 

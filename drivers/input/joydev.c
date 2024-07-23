@@ -1,37 +1,17 @@
 /*
- * $Id: joydev.c,v 1.19 2001/01/10 19:49:40 vojtech Exp $
+ * Joystick device driver for the input driver suite.
  *
- *  Copyright (c) 1999-2000 Vojtech Pavlik 
- *  Copyright (c) 1999 Colin Van Dyke 
+ * Copyright (c) 1999-2002 Vojtech Pavlik 
+ * Copyright (c) 1999 Colin Van Dyke 
  *
- *  Joystick device driver for the input driver suite.
- *
- *  Sponsored by SuSE and Intel
- */
-
-/*
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
  * the Free Software Foundation; either version 2 of the License, or 
  * (at your option) any later version.
- * 
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
- * 
- * You should have received a copy of the GNU General Public License
- * along with this program; if not, write to the Free Software
- * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA 02111-1307 USA
- * 
- * Should you need to contact me, the author, you can do so either by
- * e-mail - mail your message to <vojtech@suse.cz>, or by paper mail:
- * Vojtech Pavlik, Ucitelska 1576, Prague 8, 182 00 Czech Republic
  */
 
 #include <asm/io.h>
 #include <asm/system.h>
-#include <asm/segment.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
 #include <linux/joystick.h>
@@ -45,20 +25,28 @@
 #include <linux/poll.h>
 #include <linux/init.h>
 #include <linux/smp_lock.h>
+#include <linux/device.h>
+#include <linux/devfs_fs_kernel.h>
+
+MODULE_AUTHOR("Vojtech Pavlik <vojtech@ucw.cz>");
+MODULE_DESCRIPTION("Joystick device interfaces");
+MODULE_SUPPORTED_DEVICE("input/js");
+MODULE_LICENSE("GPL");
 
 #define JOYDEV_MINOR_BASE	0
-#define JOYDEV_MINORS		32
+#define JOYDEV_MINORS		16	
 #define JOYDEV_BUFFER_SIZE	64
+
+#define MSECS(t)	(1000 * ((t) / HZ) + 1000 * ((t) % HZ) / HZ)
 
 struct joydev {
 	int exist;
 	int open;
 	int minor;
+	char name[16];
 	struct input_handle handle;
 	wait_queue_head_t wait;
-	devfs_handle_t devfs;
-	struct joydev *next;
-	struct joydev_list *list;
+	struct list_head list;
 	struct js_corr corr[ABS_MAX];
 	struct JS_DATA_SAVE_TYPE glue;
 	int nabs;
@@ -77,15 +65,10 @@ struct joydev_list {
 	int startup;
 	struct fasync_struct *fasync;
 	struct joydev *joydev;
-	struct joydev_list *next;
+	struct list_head node;
 };
 
 static struct joydev *joydev_table[JOYDEV_MINORS];
-
-MODULE_AUTHOR("Vojtech Pavlik <vojtech@suse.cz>");
-MODULE_DESCRIPTION("Joystick device driver");
-MODULE_LICENSE("GPL");
-MODULE_SUPPORTED_DEVICE("input/js");
 
 static int joydev_correct(int value, struct js_corr *corr)
 {
@@ -110,7 +93,7 @@ static int joydev_correct(int value, struct js_corr *corr)
 static void joydev_event(struct input_handle *handle, unsigned int type, unsigned int code, int value)
 {
 	struct joydev *joydev = handle->private;
-	struct joydev_list *list = joydev->list;
+	struct joydev_list *list;
 	struct js_event event;
 
 	switch (type) {
@@ -134,9 +117,9 @@ static void joydev_event(struct input_handle *handle, unsigned int type, unsigne
 			return;
 	}  
 
-	event.time = jiffies * (1000 / HZ);
+	event.time = MSECS(jiffies);
 
-	while (list) {
+	list_for_each_entry(list, &joydev->list, node) {
 
 		memcpy(list->buffer + list->head, &event, sizeof(struct js_event));
 
@@ -145,8 +128,6 @@ static void joydev_event(struct input_handle *handle, unsigned int type, unsigne
 				list->startup = 0;
 
 		kill_fasync(&list->fasync, SIGIO, POLL_IN);
-
-		list = list->next;
 	}
 
 	wake_up_interruptible(&joydev->wait);
@@ -160,39 +141,36 @@ static int joydev_fasync(int fd, struct file *file, int on)
 	return retval < 0 ? retval : 0;
 }
 
+static void joydev_free(struct joydev *joydev)
+{
+	devfs_remove("js%d", joydev->minor);
+	joydev_table[joydev->minor] = NULL;
+	kfree(joydev);
+}
+
 static int joydev_release(struct inode * inode, struct file * file)
 {
 	struct joydev_list *list = file->private_data;
-	struct joydev_list **listptr;
 
-	lock_kernel();
-	listptr = &list->joydev->list;
 	joydev_fasync(-1, file, 0);
 
-	while (*listptr && (*listptr != list))
-		listptr = &((*listptr)->next);
-	*listptr = (*listptr)->next;
+	list_del(&list->node);
 
 	if (!--list->joydev->open) {
-		if (list->joydev->exist) {
+		if (list->joydev->exist)
 			input_close_device(&list->joydev->handle);
-		} else {
-			input_unregister_minor(list->joydev->devfs);
-			joydev_table[list->joydev->minor] = NULL;
-			kfree(list->joydev);
-		}
+		else
+			joydev_free(list->joydev);
 	}
 
 	kfree(list);
-	unlock_kernel();
-
 	return 0;
 }
 
 static int joydev_open(struct inode *inode, struct file *file)
 {
 	struct joydev_list *list;
-	int i = MINOR(inode->i_rdev) - JOYDEV_MINOR_BASE;
+	int i = minor(inode->i_rdev) - JOYDEV_MINOR_BASE;
 
 	if (i >= JOYDEV_MINORS || !joydev_table[i])
 		return -ENODEV;
@@ -202,9 +180,7 @@ static int joydev_open(struct inode *inode, struct file *file)
 	memset(list, 0, sizeof(struct joydev_list));
 
 	list->joydev = joydev_table[i];
-	list->next = joydev_table[i]->list;
-	joydev_table[i]->list = list;	
-
+	list_add_tail(&list->node, &joydev_table[i]->list);
 	file->private_data = list;
 
 	if (!list->joydev->open++)
@@ -221,11 +197,13 @@ static ssize_t joydev_write(struct file * file, const char * buffer, size_t coun
 
 static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *ppos)
 {
-	DECLARE_WAITQUEUE(wait, current);
 	struct joydev_list *list = file->private_data;
 	struct joydev *joydev = list->joydev;
 	struct input_dev *input = joydev->handle.dev;
 	int retval = 0;
+
+	if (!list->joydev->exist)
+		return -ENODEV;
 
 	if (count < sizeof(struct js_event))
 		return -EINVAL;
@@ -249,37 +227,24 @@ static ssize_t joydev_read(struct file *file, char *buf, size_t count, loff_t *p
 		return sizeof(struct JS_DATA_TYPE);
 	}
 
-	if (list->head == list->tail && list->startup == joydev->nabs + joydev->nkey) {
+	if (list->startup == joydev->nabs + joydev->nkey
+		&& list->head == list->tail && (file->f_flags & O_NONBLOCK))
+			return -EAGAIN;
 
-		add_wait_queue(&list->joydev->wait, &wait);
-		current->state = TASK_INTERRUPTIBLE;
-
-		while (list->head == list->tail) {
-
-			if (file->f_flags & O_NONBLOCK) {
-				retval = -EAGAIN;
-				break;
-			}
-			if (signal_pending(current)) {
-				retval = -ERESTARTSYS;
-				break;
-			}
-
-			schedule();
-		}
-
-		current->state = TASK_RUNNING;
-		remove_wait_queue(&list->joydev->wait, &wait);
-	}
+	retval = wait_event_interruptible(list->joydev->wait, list->joydev->exist
+		&& (list->startup < joydev->nabs + joydev->nkey || list->head != list->tail));
 
 	if (retval)
 		return retval;
+
+	if (!list->joydev->exist)
+		return -ENODEV;
 
 	while (list->startup < joydev->nabs + joydev->nkey && retval + sizeof(struct js_event) <= count) {
 
 		struct js_event event;
 
-		event.time = jiffies * (1000/HZ);
+		event.time = MSECS(jiffies);
 
 		if (list->startup < joydev->nkey) {
 			event.type = JS_EVENT_BUTTON | JS_EVENT_INIT;
@@ -327,6 +292,8 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 	struct input_dev *dev = joydev->handle.dev;
 	int i;
 
+	if (!joydev->exist) return -ENODEV;
+
 	switch (cmd) {
 
 		case JS_SET_CAL:
@@ -363,9 +330,9 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 			return copy_to_user((struct js_corr *) arg, joydev->corr,
 						sizeof(struct js_corr) * joydev->nabs) ? -EFAULT : 0;
 		case JSIOCSAXMAP:
-			if (copy_from_user((__u8 *) arg, joydev->abspam, sizeof(__u8) * ABS_MAX))
+			if (copy_from_user(joydev->abspam, (__u8 *) arg, sizeof(__u8) * ABS_MAX))
 				return -EFAULT;
-			for (i = 0; i < ABS_MAX; i++) {
+			for (i = 0; i < joydev->nabs; i++) {
 				if (joydev->abspam[i] > ABS_MAX) return -EINVAL;
 				joydev->absmap[joydev->abspam[i]] = i;
 			}
@@ -374,11 +341,11 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 			return copy_to_user((__u8 *) arg, joydev->abspam,
 						sizeof(__u8) * ABS_MAX) ? -EFAULT : 0;
 		case JSIOCSBTNMAP:
-			if (copy_from_user((__u16 *) arg, joydev->absmap, sizeof(__u16) * (KEY_MAX - BTN_MISC)))
+			if (copy_from_user(joydev->keypam, (__u16 *) arg, sizeof(__u16) * (KEY_MAX - BTN_MISC)))
 				return -EFAULT;
-			for (i = 0; i < KEY_MAX - BTN_MISC; i++); {
+			for (i = 0; i < joydev->nkey; i++) {
 				if (joydev->keypam[i] > KEY_MAX || joydev->keypam[i] < BTN_MISC) return -EINVAL;
-				joydev->keymap[joydev->abspam[i - BTN_MISC]] = i;
+				joydev->keymap[joydev->keypam[i] - BTN_MISC] = i;
 			}
 			return 0;
 		case JSIOCGBTNMAP:
@@ -398,25 +365,24 @@ static int joydev_ioctl(struct inode *inode, struct file *file, unsigned int cmd
 }
 
 static struct file_operations joydev_fops = {
-	owner:		THIS_MODULE,
-	read:		joydev_read,
-	write:		joydev_write,
-	poll:		joydev_poll,
-	open:		joydev_open,
-	release:	joydev_release,
-	ioctl:		joydev_ioctl,
-	fasync:		joydev_fasync,
+	.owner =	THIS_MODULE,
+	.read =		joydev_read,
+	.write =	joydev_write,
+	.poll =		joydev_poll,
+	.open =		joydev_open,
+	.release =	joydev_release,
+	.ioctl =	joydev_ioctl,
+	.fasync =	joydev_fasync,
 };
 
-static struct input_handle *joydev_connect(struct input_handler *handler, struct input_dev *dev)
+static struct input_handle *joydev_connect(struct input_handler *handler, struct input_dev *dev, struct input_device_id *id)
 {
 	struct joydev *joydev;
-	int i, j, minor;
+	int i, j, t, minor;
 
-	if (!(test_bit(EV_KEY, dev->evbit) && test_bit(EV_ABS, dev->evbit) &&
-	     (test_bit(ABS_X, dev->absbit) || test_bit(ABS_Y, dev->absbit)) &&
-	     (test_bit(BTN_TRIGGER, dev->keybit) || test_bit(BTN_A, dev->keybit)
-		|| test_bit(BTN_1, dev->keybit)))) return NULL; 
+	/* Avoid tablets */
+        if (test_bit(EV_KEY, dev->evbit) && test_bit(BTN_TOUCH, dev->keybit))
+		return NULL;
 
 	for (minor = 0; minor < JOYDEV_MINORS && joydev_table[minor]; minor++);
 	if (minor == JOYDEV_MINORS) {
@@ -428,16 +394,16 @@ static struct input_handle *joydev_connect(struct input_handler *handler, struct
 		return NULL;
 	memset(joydev, 0, sizeof(struct joydev));
 
+	INIT_LIST_HEAD(&joydev->list);
 	init_waitqueue_head(&joydev->wait);
 
 	joydev->minor = minor;
-	joydev_table[minor] = joydev;
-
+	joydev->exist = 1;
 	joydev->handle.dev = dev;
+	joydev->handle.name = joydev->name;
 	joydev->handle.handler = handler;
 	joydev->handle.private = joydev;
-
-	joydev->exist = 1;
+	sprintf(joydev->name, "js%d", minor);
 
 	for (i = 0; i < ABS_MAX; i++)
 		if (test_bit(i, dev->absbit)) {
@@ -470,15 +436,18 @@ static struct input_handle *joydev_connect(struct input_handler *handler, struct
 		joydev->corr[i].prec = dev->absfuzz[j];
 		joydev->corr[i].coef[0] = (dev->absmax[j] + dev->absmin[j]) / 2 - dev->absflat[j];
 		joydev->corr[i].coef[1] = (dev->absmax[j] + dev->absmin[j]) / 2 + dev->absflat[j];
-		joydev->corr[i].coef[2] = (1 << 29) / ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j]);
-		joydev->corr[i].coef[3] = (1 << 29) / ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j]);
+		if (!(t = ((dev->absmax[j] - dev->absmin[j]) / 2 - 2 * dev->absflat[j])))
+			continue;
+		joydev->corr[i].coef[2] = (1 << 29) / t;
+		joydev->corr[i].coef[3] = (1 << 29) / t;
 
 		joydev->abs[i] = joydev_correct(dev->abs[j], joydev->corr + i);
 	}
 
-	joydev->devfs = input_register_minor("js%d", minor, JOYDEV_MINOR_BASE);
-
-//	printk(KERN_INFO "js%d: Joystick device for input%d\n", minor, dev->number);
+	joydev_table[minor] = joydev;
+	
+	devfs_mk_cdev(MKDEV(INPUT_MAJOR, JOYDEV_MINOR_BASE + minor),
+			S_IFCHR|S_IRUGO|S_IWUSR, "js%d", minor);
 
 	return &joydev->handle;
 }
@@ -489,21 +458,41 @@ static void joydev_disconnect(struct input_handle *handle)
 
 	joydev->exist = 0;
 
-	if (joydev->open) {
+	if (joydev->open)
 		input_close_device(handle);	
-	} else {
-		input_unregister_minor(joydev->devfs);
-		joydev_table[joydev->minor] = NULL;
-		kfree(joydev);
-	}
+	else
+		joydev_free(joydev);
 }
 
+static struct input_device_id joydev_ids[] = {
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_ABSBIT,
+		.evbit = { BIT(EV_ABS) },
+		.absbit = { BIT(ABS_X) },
+	},
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_ABSBIT,
+		.evbit = { BIT(EV_ABS) },
+		.absbit = { BIT(ABS_WHEEL) },
+	},
+	{
+		.flags = INPUT_DEVICE_ID_MATCH_EVBIT | INPUT_DEVICE_ID_MATCH_ABSBIT,
+		.evbit = { BIT(EV_ABS) },
+		.absbit = { BIT(ABS_THROTTLE) },
+	},
+	{ }, 	/* Terminating entry */
+};
+
+MODULE_DEVICE_TABLE(input, joydev_ids);
+
 static struct input_handler joydev_handler = {
-	event:		joydev_event,
-	connect:	joydev_connect,
-	disconnect:	joydev_disconnect,
-	fops:		&joydev_fops,
-	minor:		JOYDEV_MINOR_BASE,
+	.event =	joydev_event,
+	.connect =	joydev_connect,
+	.disconnect =	joydev_disconnect,
+	.fops =		&joydev_fops,
+	.minor =	JOYDEV_MINOR_BASE,
+	.name =		"joydev",
+	.id_table =	joydev_ids,
 };
 
 static int __init joydev_init(void)

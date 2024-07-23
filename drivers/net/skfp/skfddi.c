@@ -33,7 +33,7 @@
  *   The driver architecture is based on the DEC FDDI driver by
  *   Lawrence V. Stefani and several ethernet drivers.
  *   I also used an existing Windows NT miniport driver.
- *   All hardware dependant fuctions are handled by the SysKonnect
+ *   All hardware dependent fuctions are handled by the SysKonnect
  *   Hardware Module.
  *   The only headerfiles that are directly related to this source
  *   are skfddi.c, h/types.h, h/osdef1st.h, h/targetos.h.
@@ -77,9 +77,7 @@ static const char *boot_msg =
 /* Include files */
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
@@ -88,15 +86,15 @@ static const char *boot_msg =
 #include <linux/interrupt.h>
 #include <linux/pci.h>
 #include <linux/delay.h>
+#include <linux/ctype.h>	// isdigit
+#include <linux/netdevice.h>
+#include <linux/fddidevice.h>
+#include <linux/skbuff.h>
+
 #include <asm/byteorder.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
-#include <linux/ctype.h>	// isdigit
-
-#include <linux/netdevice.h>
-#include <linux/fddidevice.h>
-#include <linux/skbuff.h>
 
 #include	"h/types.h"
 #undef ADDR			// undo Linux definition
@@ -120,7 +118,7 @@ static void link_modules(struct net_device *dev, struct net_device *tmp);
 static int skfp_driver_init(struct net_device *dev);
 static int skfp_open(struct net_device *dev);
 static int skfp_close(struct net_device *dev);
-static void skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static struct net_device_stats *skfp_ctl_get_stats(struct net_device *dev);
 static void skfp_ctl_set_multicast_list(struct net_device *dev);
 static void skfp_ctl_set_multicast_list_wo_lock(struct net_device *dev);
@@ -188,6 +186,7 @@ static struct pci_device_id skfddi_pci_tbl[] __initdata = {
 };
 MODULE_DEVICE_TABLE(pci, skfddi_pci_tbl);
 MODULE_LICENSE("GPL");
+MODULE_AUTHOR("Mirko Lindner <mlindner@syskonnect.de>");
 
 // Define module-wide (static) variables
 
@@ -196,8 +195,6 @@ static int num_fddi;
 static int autoprobed;
 
 #ifdef MODULE
-int init_module(void);
-void cleanup_module(void);
 static struct net_device *unlink_modules(struct net_device *p);
 static int loading_module = 1;
 #else
@@ -301,10 +298,6 @@ int skfp_probe(struct net_device *dev)
 	printk("%s\n", boot_msg);
 
 	/* Scan for Syskonnect FDDI PCI controllers */
-	if (!pci_present()) {	/* is PCI BIOS even present? */
-		printk("no PCI BIOS present\n");
-		return (-ENODEV);
-	}
 	for (i = 0; i < SKFP_MAX_NUM_BOARDS; i++) {	// scan for PCI cards
 		PRINTK(KERN_INFO "Check device %d\n", i);
 		if ((pdev=pci_find_device(PCI_VENDOR_ID_SK, PCI_DEVICE_ID_SK_FP,
@@ -520,8 +513,6 @@ static void init_dev(struct net_device *dev, u_long iobase)
 {
 	/* Initialize new device structure */
 
-	dev->rmem_end = 0;	/* shared memory isn't used */
-	dev->rmem_start = 0;	/* shared memory isn't used */
 	dev->mem_end = 0;	/* shared memory isn't used */
 	dev->mem_start = 0;	/* shared memory isn't used */
 	dev->base_addr = iobase;	/* save port (I/O) base address */
@@ -543,6 +534,8 @@ static void init_dev(struct net_device *dev, u_long iobase)
 	dev->set_config = NULL;	/* not supported for now &&& */
 	dev->header_cache_update = NULL;	/* not supported */
 	dev->change_mtu = NULL;	/* set in fddi_setup() */
+
+	SET_MODULE_OWNER(dev);
 
 	/* Initialize remaining device structure information */
 	fddi_setup(dev);
@@ -796,8 +789,6 @@ static int skfp_open(struct net_device *dev)
 	smt_online(smc, 1);
 	STI_FBI();
 
-	MOD_INC_USE_COUNT;
-
 	/* Clear local multicast address tables */
 	mac_clear_multicast(smc);
 
@@ -859,8 +850,6 @@ static int skfp_close(struct net_device *dev)
 		dev_kfree_skb(skb);
 	}
 
-	MOD_DEC_USE_COUNT;
-
 	return (0);
 }				// skfp_close
 
@@ -901,7 +890,7 @@ static int skfp_close(struct net_device *dev)
  *   Interrupts are disabled, then reenabled at the adapter.
  */
 
-void skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	struct s_smc *smc;	/* private board structure pointer */
@@ -910,7 +899,7 @@ void skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (dev == NULL) {
 		printk("%s: irq %d for unknown device\n", dev->name, irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	smc = (struct s_smc *) dev->priv;
@@ -918,12 +907,12 @@ void skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	// IRQs enabled or disabled ?
 	if (inpd(ADDR(B0_IMSK)) == 0) {
 		// IRQs are disabled: must be shared interrupt
-		return;
+		return IRQ_NONE;
 	}
 	// Note: At this point, IRQs are enabled.
 	if ((inpd(ISR_A) & smc->hw.is_imask) == 0) {	// IRQ?
 		// Adapter did not issue an IRQ: must be shared interrupt
-		return;
+		return IRQ_NONE;
 	}
 	CLI_FBI();		// Disable IRQs from our adapter.
 	spin_lock(&bp->DriverLock);
@@ -938,7 +927,7 @@ void skfp_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	spin_unlock(&bp->DriverLock);
 	STI_FBI();		// Enable IRQs from our adapter.
 
-	return;
+	return IRQ_HANDLED;
 }				// skfp_interrupt
 
 
@@ -1734,7 +1723,7 @@ u_long dma_master(struct s_smc * smc, void *virt, int len, int flag)
  *	dma_complete
  *
  *	The hardware module calls this routine when it has completed a DMA
- *	transfer. If the operating system dependant module has set up the DMA
+ *	transfer. If the operating system dependent module has set up the DMA
  *	channel via dma_master() (e.g. Windows NT or AIX) it should clean up
  *	the DMA channel.
  * Args
@@ -2546,72 +2535,25 @@ void drv_reset_indication(struct s_smc *smc)
 }				// drv_reset_indication
 
 
-
-//--------------- functions for use as a module ----------------
-
-#ifdef MODULE
-/************************
- *
- * Note now that module autoprobing is allowed under PCI. The
- * IRQ lines will not be auto-detected; instead I'll rely on the BIOSes
- * to "do the right thing".
- *
- ************************/
-#define LP(a) ((struct s_smc*)(a))
 static struct net_device *mdev;
 
-/************************
- *
- * init_module
- *
- *  If compiled as a module, find
- *  adapters and initialize them.
- *
- ************************/
-int init_module(void)
+static int __init skfd_init(void)
 {
 	struct net_device *p;
 
-	PRINTK(KERN_INFO "FDDI init module\n");
 	if ((mdev = insert_device(NULL, skfp_probe)) == NULL)
 		return -ENOMEM;
 
-	for (p = mdev; p != NULL; p = LP(p->priv)->os.next_module) {
-		PRINTK(KERN_INFO "device to register: %s\n", p->name);
+	for (p = mdev; p != NULL; p = ((struct s_smc *)p->priv)->os.next_module) {
 		if (register_netdev(p) != 0) {
 			printk("skfddi init_module failed\n");
 			return -EIO;
 		}
 	}
 
-	PRINTK(KERN_INFO "+++++ exit with success +++++\n");
 	return 0;
-}				// init_module
+}
 
-/************************
- *
- * cleanup_module
- *
- *  Release all resources claimed by this module.
- *
- ************************/
-void cleanup_module(void)
-{
-	PRINTK(KERN_INFO "cleanup_module\n");
-	while (mdev != NULL) {
-		mdev = unlink_modules(mdev);
-	}
-	return;
-}				// cleanup_module
-
-
-/************************
- *
- * unlink_modules
- *
- *  Unregister devices and release their memory.
- *
- ************************/
 static struct net_device *unlink_modules(struct net_device *p)
 {
 	struct net_device *next = NULL;
@@ -2645,5 +2587,11 @@ static struct net_device *unlink_modules(struct net_device *p)
 	return next;
 }				// unlink_modules
 
+static void __exit skfd_exit(void)
+{
+	while (mdev)
+		mdev = unlink_modules(mdev);
+}
 
-#endif				/* MODULE */
+module_init(skfd_init);
+module_exit(skfd_exit);

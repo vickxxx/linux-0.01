@@ -63,6 +63,7 @@ enum tbl_flag {
 	HAS_8023X		= 0x0400,
 	COMET_MAC_ADDR		= 0x0800,
 	HAS_PCI_MWI		= 0x1000,
+	HAS_PHY_IRQ		= 0x2000,
 };
 
 
@@ -84,6 +85,7 @@ enum chips {
 	COMPEX9881,
 	I21145,
 	DM910X,
+	CONEXANT,
 };
 
 
@@ -191,16 +193,6 @@ enum desc_status_bits {
 };
 
 
-enum t21041_csr13_bits {
-	csr13_eng = (0xEF0<<4), /* for eng. purposes only, hardcode at EF0h */
-	csr13_aui = (1<<3), /* clear to force 10bT, set to force AUI/BNC */
-	csr13_cac = (1<<2), /* CSR13/14/15 autoconfiguration */
-	csr13_srl = (1<<0), /* When reset, resets all SIA functions, machines */
-
-	csr13_mask_auibnc = (csr13_eng | csr13_aui | csr13_srl),
-	csr13_mask_10bt = (csr13_eng | csr13_srl),
-};
-
 enum t21143_csr6_bits {
 	csr6_sc = (1<<31),
 	csr6_ra = (1<<30),
@@ -290,7 +282,7 @@ enum t21143_csr6_bits {
 #define DESC_RING_WRAP 0x02000000
 
 
-#define EEPROM_SIZE 128 	/* 2 << EEPROM_ADDRLEN */
+#define EEPROM_SIZE 512 	/* 2 << EEPROM_ADDRLEN */
 
 
 #define RUN_AT(x) (jiffies + (x))
@@ -387,7 +379,8 @@ struct tulip_private {
 	int susp_rx;
 	unsigned long nir;
 	unsigned long base_addr;
-	int pad0, pad1;		/* Used for 8-byte alignment */
+	int csr12_shadow;
+	int pad0;		/* Used for 8-byte alignment */
 };
 
 
@@ -420,7 +413,7 @@ int tulip_read_eeprom(long ioaddr, int location, int addr_len);
 /* interrupt.c */
 extern unsigned int tulip_max_interrupt_work;
 extern int tulip_rx_copybreak;
-void tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
+irqreturn_t tulip_interrupt(int irq, void *dev_instance, struct pt_regs *regs);
 int tulip_refill_rx(struct net_device *dev);
 
 /* media.c */
@@ -446,9 +439,6 @@ extern const char * const medianame[];
 extern const char tulip_media_cap[];
 extern struct tulip_chip_table tulip_tbl[];
 extern u8 t21040_csr13[];
-extern u16 t21041_csr13[];
-extern u16 t21041_csr14[];
-extern u16 t21041_csr15[];
 
 #ifndef USE_IO_OPS
 #undef inb

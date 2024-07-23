@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.smp.c 1.34 10/11/01 12:06:01 trini
- */
-/*
  * Smp support for ppc.
  *
  * Written by Cort Dougan (cort@cs.nmt.edu) borrowing a great
@@ -23,6 +20,7 @@
 #include <linux/unistd.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
+#include <linux/cache.h>
 
 #include <asm/ptrace.h>
 #include <asm/atomic.h>
@@ -30,30 +28,31 @@
 #include <asm/page.h>
 #include <asm/pgtable.h>
 #include <asm/hardirq.h>
-#include <asm/softirq.h>
 #include <asm/io.h>
 #include <asm/prom.h>
 #include <asm/smp.h>
 #include <asm/residual.h>
 #include <asm/time.h>
-
-#include "open_pic.h"
+#include <asm/thread_info.h>
+#include <asm/tlbflush.h>
+#include <asm/xmon.h>
 
 int smp_threads_ready;
 volatile int smp_commenced;
-int smp_num_cpus = 1;
 int smp_tb_synchronized;
 struct cpuinfo_PPC cpu_data[NR_CPUS];
 struct klock_info_struct klock_info = { KLOCK_CLEAR, 0 };
 atomic_t ipi_recv;
 atomic_t ipi_sent;
-spinlock_t kernel_flag __cacheline_aligned = SPIN_LOCK_UNLOCKED;
-unsigned int prof_multiplier[NR_CPUS];
-unsigned int prof_counter[NR_CPUS];
-cycles_t cacheflush_time;
-static int max_cpus __initdata = NR_CPUS;
-unsigned long cpu_online_map;
+DEFINE_PER_CPU(unsigned int, prof_multiplier);
+DEFINE_PER_CPU(unsigned int, prof_counter);
+unsigned long cache_decay_ticks = HZ/100;
+unsigned long cpu_online_map = 1UL;
+unsigned long cpu_possible_map = 1UL;
 int smp_hw_index[NR_CPUS];
+struct thread_info *secondary_ti;
+
+/* SMP operations for this machine */
 static struct smp_ops_t *smp_ops;
 
 /* all cpu mappings are 1-1 -- Cort */
@@ -66,7 +65,11 @@ volatile unsigned long __initdata tb_offset = 0;
 int start_secondary(void *);
 extern int cpu_idle(void *unused);
 void smp_call_function_interrupt(void);
-void smp_message_pass(int target, int msg, unsigned long data, int wait);
+static int __smp_call_function(void (*func) (void *info), void *info,
+			       int wait, int target);
+
+/* Low level assembly function used to backup CPU 0 state */
+extern void __save_cpu_setup(void);
 
 /* Since OpenPIC has only 4 IPIs, we use slightly different message numbers.
  * 
@@ -90,9 +93,9 @@ void smp_local_timer_interrupt(struct pt_regs * regs)
 {
 	int cpu = smp_processor_id();
 
-	if (!--prof_counter[cpu]) {
+	if (!--per_cpu(prof_counter, cpu)) {
 		update_process_times(user_mode(regs));
-		prof_counter[cpu]=prof_multiplier[cpu];
+		per_cpu(prof_counter, cpu) = per_cpu(prof_multiplier, cpu);
 	}
 }
 
@@ -105,7 +108,7 @@ void smp_message_recv(int msg, struct pt_regs *regs)
 		smp_call_function_interrupt();
 		break;
 	case PPC_MSG_RESCHEDULE: 
-		current->need_resched = 1;
+		set_need_resched();
 		break;
 	case PPC_MSG_INVALIDATE_TLB:
 		_tlbia();
@@ -158,7 +161,7 @@ void smp_send_xmon_break(int cpu)
 
 static void stop_this_cpu(void *dummy)
 {
-	__cli();
+	local_irq_disable();
 	while (1)
 		;
 }
@@ -166,7 +169,6 @@ static void stop_this_cpu(void *dummy)
 void smp_send_stop(void)
 {
 	smp_call_function(stop_this_cpu, NULL, 1, 0);
-	smp_num_cpus = 1;
 }
 
 /*
@@ -189,8 +191,8 @@ static struct call_data_struct {
  * in the system.
  */
 
-int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
-			int wait)
+int smp_call_function(void (*func) (void *info), void *info, int nonatomic,
+		      int wait)
 /*
  * [SUMMARY] Run a function on all other CPUs.
  * <func> The function to run. This must be fast and non-blocking.
@@ -201,15 +203,28 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
  * remote CPUs are nearly ready to execute <<func>> or are or have executed.
  *
  * You must not call this function with disabled interrupts or from a
- * hardware interrupt handler, you may call it from a bottom half handler.
+ * hardware interrupt handler or from a bottom half handler.
  */
 {
-	struct call_data_struct data;
-	int ret = -1, cpus = smp_num_cpus-1;
-	int timeout;
-
-	if (!cpus)
+	/* FIXME: get cpu lock with hotplug cpus, or change this to
+           bitmask. --RR */
+	if (num_online_cpus() <= 1)
 		return 0;
+	return __smp_call_function(func, info, wait, MSG_ALL_BUT_SELF);
+}
+
+static int __smp_call_function(void (*func) (void *info), void *info,
+			       int wait, int target)
+{
+	struct call_data_struct data;
+	int ret = -1;
+	int timeout;
+	int ncpus = 1;
+
+	if (target == MSG_ALL_BUT_SELF)
+		ncpus = num_online_cpus() - 1;
+	else if (target == MSG_ALL)
+		ncpus = num_online_cpus();
 
 	data.func = func;
 	data.info = info;
@@ -218,14 +233,14 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	if (wait)
 		atomic_set(&data.finished, 0);
 
-	spin_lock_bh(&call_lock);
+	spin_lock(&call_lock);
 	call_data = &data;
 	/* Send a message to all other CPUs and wait for them to respond */
-	smp_message_pass(MSG_ALL_BUT_SELF, PPC_MSG_CALL_FUNCTION, 0, 0);
+	smp_message_pass(target, PPC_MSG_CALL_FUNCTION, 0, 0);
 
 	/* Wait for response */
 	timeout = 1000000;
-	while (atomic_read(&data.started) != cpus) {
+	while (atomic_read(&data.started) != ncpus) {
 		if (--timeout == 0) {
 			printk("smp_call_function on cpu %d: other cpus not responding (%d)\n",
 			       smp_processor_id(), atomic_read(&data.started));
@@ -237,7 +252,7 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 
 	if (wait) {
 		timeout = 1000000;
-		while (atomic_read(&data.finished) != cpus) {
+		while (atomic_read(&data.finished) != ncpus) {
 			if (--timeout == 0) {
 				printk("smp_call_function on cpu %d: other cpus not finishing (%d/%d)\n",
 				       smp_processor_id(), atomic_read(&data.finished), atomic_read(&data.started));
@@ -250,7 +265,7 @@ int smp_call_function (void (*func) (void *info), void *info, int nonatomic,
 	ret = 0;
 
  out:
-	spin_unlock_bh(&call_lock);
+	spin_unlock(&call_lock);
 	return ret;
 }
 
@@ -273,36 +288,59 @@ void smp_call_function_interrupt(void)
 		atomic_inc(&call_data->finished);
 }
 
-void __init smp_boot_cpus(void)
+/* FIXME: Do this properly for all archs --RR */
+static spinlock_t timebase_lock = SPIN_LOCK_UNLOCKED;
+static unsigned int timebase_upper = 0, timebase_lower = 0;
+
+void __devinit
+smp_generic_give_timebase(void)
 {
-	extern struct task_struct *current_set[NR_CPUS];
-	int i, cpu_nr;
-	struct task_struct *p;
+	spin_lock(&timebase_lock);
+	do {
+		timebase_upper = get_tbu();
+		timebase_lower = get_tbl();
+	} while (timebase_upper != get_tbu());
+	spin_unlock(&timebase_lock);
 
-	printk("Entering SMP Mode...\n");
-	smp_num_cpus = 1;
-        smp_store_cpu_info(0);
-	cpu_online_map = 1UL;
+	while (timebase_upper || timebase_lower)
+		rmb();
+}
 
-	/*
-	 * assume for now that the first cpu booted is
-	 * cpu 0, the master -- Cort
-	 */
-	cpu_callin_map[0] = 1;
-	current->processor = 0;
+void __devinit
+smp_generic_take_timebase(void)
+{
+	int done = 0;
 
-	init_idle();
-
-	for (i = 0; i < NR_CPUS; i++) {
-		prof_counter[i] = 1;
-		prof_multiplier[i] = 1;
+	while (!done) {
+		spin_lock(&timebase_lock);
+		if (timebase_upper || timebase_lower) {
+			set_tb(timebase_upper, timebase_lower);
+			timebase_upper = 0;
+			timebase_lower = 0;
+			done = 1;
+		}
+		spin_unlock(&timebase_lock);
 	}
+}
 
-	/*
-	 * XXX very rough, assumes 20 bus cycles to read a cache line,
-	 * timebase increments every 4 bus cycles, 32kB L1 data cache.
-	 */
-	cacheflush_time = 5 * 1024;
+static void __devinit smp_store_cpu_info(int id)
+{
+        struct cpuinfo_PPC *c = &cpu_data[id];
+
+	/* assume bogomips are same for everything */
+        c->loops_per_jiffy = loops_per_jiffy;
+        c->pvr = mfspr(PVR);
+	per_cpu(prof_counter, id) = 1;
+	per_cpu(prof_multiplier, id) = 1;
+}
+
+void __init smp_prepare_cpus(unsigned int max_cpus)
+{
+	int num_cpus;
+
+	/* Fixup boot cpu */
+        smp_store_cpu_info(smp_processor_id());
+	cpu_callin_map[smp_processor_id()] = 1;
 
 	smp_ops = ppc_md.smp_ops;
 	if (smp_ops == NULL) {
@@ -310,239 +348,21 @@ void __init smp_boot_cpus(void)
 		return;
 	}
 
-	/* Probe arch for CPUs */
-	cpu_nr = smp_ops->probe();
+	/* Probe platform for CPUs: always linear. */
+	num_cpus = smp_ops->probe();
+	cpu_possible_map = (1 << num_cpus)-1;
 
-	/*
-	 * only check for cpus we know exist.  We keep the callin map
-	 * with cpus at the bottom -- Cort
-	 */
-	if (cpu_nr > max_cpus)
-		cpu_nr = max_cpus;
-	for (i = 1; i < cpu_nr; i++) {
-		int c;
-		struct pt_regs regs;
-		
-		/* create a process for the processor */
-		/* we don't care about the values in regs since we'll
-		   never reschedule the forked task. */
-		/* We DO care about one bit in the pt_regs we
-		   pass to do_fork.  That is the MSR_FP bit in 
-		   regs.msr.  If that bit is on, then do_fork
-		   (via copy_thread) will call giveup_fpu.
-		   giveup_fpu will get a pointer to our (current's)
-		   last register savearea via current->thread.regs 
-		   and using that pointer will turn off the MSR_FP,
-		   MSR_FE0 and MSR_FE1 bits.  At this point, this 
-		   pointer is pointing to some arbitrary point within
-		   our stack. */
+	/* Backup CPU 0 state */
+	__save_cpu_setup();
 
-		memset(&regs, 0, sizeof(struct pt_regs));
-		
-		if (do_fork(CLONE_VM|CLONE_PID, 0, &regs, 0) < 0)
-			panic("failed fork for CPU %d", i);
-		p = init_task.prev_task;
-		if (!p)
-			panic("No idle task for CPU %d", i);
-		del_from_runqueue(p);
-		unhash_process(p);
-		init_tasks[i] = p;
-
-		p->processor = i;
-		p->cpus_runnable = 1 << i; /* we schedule the first task manually */
-		current_set[i] = p;
-
-		/*
-		 * There was a cache flush loop here to flush the cache
-		 * to memory for the first 8MB of RAM.  The cache flush
-		 * has been pushed into the kick_cpu function for those
-		 * platforms that need it.
-		 */
-
-		/* wake up cpus */
-		smp_ops->kick_cpu(i);
-		
-		/*
-		 * wait to see if the cpu made a callin (is actually up).
-		 * use this value that I found through experimentation.
-		 * -- Cort
-		 */
-		for ( c = 1000; c && !cpu_callin_map[i] ; c-- )
-			udelay(100);
-		
-		if ( cpu_callin_map[i] )
-		{
-			char buf[32];
-			sprintf(buf, "found cpu %d", i);
-			if (ppc_md.progress) ppc_md.progress(buf, 0x350+i);
-			printk("Processor %d found.\n", i);
-			smp_num_cpus++;
-		} else {
-			char buf[32];
-			sprintf(buf, "didn't find cpu %d", i);
-			if (ppc_md.progress) ppc_md.progress(buf, 0x360+i);
-			printk("Processor %d is stuck.\n", i);
-		}
-	}
-
-	/* Setup CPU 0 last (important) */
-	smp_ops->setup_cpu(0);
-	
-	if (smp_num_cpus < 2)
-		smp_tb_synchronized = 1;
+	if (smp_ops->space_timers)
+		smp_ops->space_timers(num_cpus);
 }
 
-void __init smp_software_tb_sync(int cpu)
+void __devinit smp_prepare_boot_cpu(void)
 {
-#define PASSES 4	/* 4 passes.. */
-	int pass;
-	int i, j;
-
-	/* stop - start will be the number of timebase ticks it takes for cpu0
-	 * to send a message to all others and the first reponse to show up.
-	 *
-	 * ASSUMPTION: this time is similiar for all cpus
-	 * ASSUMPTION: the time to send a one-way message is ping/2
-	 */
-	register unsigned long start = 0;
-	register unsigned long stop = 0;
-	register unsigned long temp = 0;
-
-	set_tb(0, 0);
-
-	/* multiple passes to get in l1 cache.. */
-	for (pass = 2; pass < 2+PASSES; pass++){
-		if (cpu == 0){
-			mb();
-			for (i = j = 1; i < smp_num_cpus; i++, j++){
-				/* skip stuck cpus */
-				while (!cpu_callin_map[j])
-					++j;
-				while (cpu_callin_map[j] != pass)
-					barrier();
-			}
-			mb();
-			tb_sync_flag = pass;
-			start = get_tbl();	/* start timing */
-			while (tb_sync_flag)
-				mb();
-			stop = get_tbl();	/* end timing */
-			/* theoretically, the divisor should be 2, but
-			 * I get better results on my dual mtx. someone
-			 * please report results on other smp machines..
-			 */
-			tb_offset = (stop-start)/4;
-			mb();
-			tb_sync_flag = pass;
-			udelay(10);
-			mb();
-			tb_sync_flag = 0;
-			mb();
-			set_tb(0,0);
-			mb();
-		} else {
-			cpu_callin_map[cpu] = pass;
-			mb();
-			while (!tb_sync_flag)
-				mb();		/* wait for cpu0 */
-			mb();
-			tb_sync_flag = 0;	/* send response for timing */
-			mb();
-			while (!tb_sync_flag)
-				mb();
-			temp = tb_offset;	/* make sure offset is loaded */
-			while (tb_sync_flag)
-				mb();
-			set_tb(0,temp);		/* now, set the timebase */
-			mb();
-		}
-	}
-	if (cpu == 0) {
-		smp_tb_synchronized = 1;
-		printk("smp_software_tb_sync: %d passes, final offset: %ld\n",
-			PASSES, tb_offset);
-	}
-	/* so time.c doesn't get confused */
-	set_dec(tb_ticks_per_jiffy);
-	last_jiffy_stamp(cpu) = 0;
-}
-
-void __init smp_commence(void)
-{
-	/*
-	 *	Lets the callin's below out of their loop.
-	 */
-	if (ppc_md.progress) ppc_md.progress("smp_commence", 0x370);
-	wmb();
-	smp_commenced = 1;
-
-	/* if the smp_ops->setup_cpu function has not already synched the
-	 * timebases with a nicer hardware-based method, do so now
-	 *
-	 * I am open to suggestions for improvements to this method
-	 * -- Troy <hozer@drgw.net>
-	 *
-	 * NOTE: if you are debugging, set smp_tb_synchronized for now
-	 * since if this code runs pretty early and needs all cpus that
-	 * reported in in smp_callin_map to be working
-	 *
-	 * NOTE2: this code doesn't seem to work on > 2 cpus. -- paulus/BenH
-	 */
-	if (!smp_tb_synchronized && smp_num_cpus == 2) {
-		unsigned long flags;
-		__save_and_cli(flags);	
-		smp_software_tb_sync(0);
-		__restore_flags(flags);
-	}
-}
-
-void __init smp_callin(void)
-{
-	int cpu = current->processor;
-	
-        smp_store_cpu_info(cpu);
-	set_dec(tb_ticks_per_jiffy);
-	cpu_callin_map[cpu] = 1;
-
-	smp_ops->setup_cpu(cpu);
-
-	init_idle();
-
-	/*
-	 * This cpu is now "online".  Only set them online
-	 * before they enter the loop below since write access
-	 * to the below variable is _not_ guaranteed to be
-	 * atomic.
-	 *   -- Cort <cort@fsmlabs.com>
-	 */
-	cpu_online_map |= 1UL << smp_processor_id();
-	
-	while(!smp_commenced)
-		barrier();
-
-	/* see smp_commence for more info */
-	if (!smp_tb_synchronized && smp_num_cpus == 2) {
-		smp_software_tb_sync(cpu);
-	}
-	__sti();
-}
-
-/* intel needs this */
-void __init initialize_secondary(void)
-{
-}
-
-/* Activate a secondary processor. */
-int __init start_secondary(void *unused)
-{
-	atomic_inc(&init_mm.mm_count);
-	current->active_mm = &init_mm;
-	smp_callin();
-	return cpu_idle(NULL);
-}
-
-void __init smp_setup(char *str, int *ints)
-{
+	set_bit(smp_processor_id(), &cpu_online_map);
+	set_bit(smp_processor_id(), &cpu_possible_map);
 }
 
 int __init setup_profiling_timer(unsigned int multiplier)
@@ -550,19 +370,85 @@ int __init setup_profiling_timer(unsigned int multiplier)
 	return 0;
 }
 
-void __init smp_store_cpu_info(int id)
+/* Processor coming up starts here */
+int __devinit start_secondary(void *unused)
 {
-        struct cpuinfo_PPC *c = &cpu_data[id];
+	int cpu;
 
-	/* assume bogomips are same for everything */
-        c->loops_per_jiffy = loops_per_jiffy;
-        c->pvr = mfspr(PVR);
+	atomic_inc(&init_mm.mm_count);
+	current->active_mm = &init_mm;
+
+	cpu = smp_processor_id();
+        smp_store_cpu_info(cpu);
+	set_dec(tb_ticks_per_jiffy);
+	cpu_callin_map[cpu] = 1;
+
+	printk("CPU %i done callin...\n", cpu);
+	smp_ops->setup_cpu(cpu);
+	printk("CPU %i done setup...\n", cpu);
+	local_irq_enable();
+	smp_ops->take_timebase();
+	printk("CPU %i done timebase take...\n", cpu);
+
+	return cpu_idle(NULL);
 }
 
-static int __init maxcpus(char *str)
+int __cpu_up(unsigned int cpu)
 {
-	get_option(&str, &max_cpus);
-	return 1;
+	struct pt_regs regs;
+	struct task_struct *p;
+	char buf[32];
+	int c;
+
+	/* create a process for the processor */
+	/* only regs.msr is actually used, and 0 is OK for it */
+	memset(&regs, 0, sizeof(struct pt_regs));
+	p = copy_process(CLONE_VM|CLONE_IDLETASK, 0, &regs, 0, NULL, NULL);
+	if (IS_ERR(p))
+		panic("failed fork for CPU %u: %li", cpu, PTR_ERR(p));
+	wake_up_forked_process(p);
+
+	init_idle(p, cpu);
+	unhash_process(p);
+
+	secondary_ti = p->thread_info;
+	p->thread_info->cpu = cpu;
+
+	/*
+	 * There was a cache flush loop here to flush the cache
+	 * to memory for the first 8MB of RAM.  The cache flush
+	 * has been pushed into the kick_cpu function for those
+	 * platforms that need it.
+	 */
+
+	/* wake up cpu */
+	smp_ops->kick_cpu(cpu);
+		
+	/*
+	 * wait to see if the cpu made a callin (is actually up).
+	 * use this value that I found through experimentation.
+	 * -- Cort
+	 */
+	for (c = 1000; c && !cpu_callin_map[cpu]; c--)
+		udelay(100);
+
+	if (!cpu_callin_map[cpu]) {
+		sprintf(buf, "didn't find cpu %u", cpu);
+		if (ppc_md.progress) ppc_md.progress(buf, 0x360+cpu);
+		printk("Processor %u is stuck.\n", cpu);
+		return -ENOENT;
+	}
+
+	sprintf(buf, "found cpu %u", cpu);
+	if (ppc_md.progress) ppc_md.progress(buf, 0x350+cpu);
+	printk("Processor %d found.\n", cpu);
+
+	smp_ops->give_timebase();
+	set_bit(cpu, &cpu_online_map);
+	return 0;
 }
 
-__setup("maxcpus=", maxcpus);
+void smp_cpus_done(unsigned int max_cpus)
+{
+	smp_ops->setup_cpu(0);
+}

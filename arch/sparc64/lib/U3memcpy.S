@@ -7,6 +7,8 @@
 #ifdef __KERNEL__
 #include <asm/visasm.h>
 #include <asm/asi.h>
+#include <asm/dcu.h>
+#include <asm/spitfire.h>
 #undef SMALL_COPY_USES_FPU
 #else
 #define ASI_BLK_P 0xf0
@@ -109,6 +111,16 @@ U3memcpy_enter:
 
 	.align		64
 U3memcpy_begin:
+#ifdef __KERNEL__
+	.globl		U3memcpy_nop_1_6
+U3memcpy_nop_1_6:
+	ldxa		[%g0] ASI_DCU_CONTROL_REG, %g3
+	sethi		%uhi(DCU_PE), %o3
+	sllx		%o3, 32, %o3
+	or		%g3, %o3, %o3
+	stxa		%o3, [%g0] ASI_DCU_CONTROL_REG	! Enable P-cache
+	membar		#Sync
+#endif
 	prefetch	[%o1 + 0x000], #one_read	! MS	Group1
 	prefetch	[%o1 + 0x040], #one_read	! MS	Group2
 	andn		%o2, (0x40 - 1), %o4		! A0
@@ -249,6 +261,13 @@ U3memcpy_loopfini:
 	stda		%f16, [%o0] ASI_BLK_P		! MS
 	add		%o0, 0x40, %o0			! A0
 	add		%o1, 0x40, %o1			! A1
+#ifdef __KERNEL__
+	.globl		U3memcpy_nop_2_3
+U3memcpy_nop_2_3:
+	mov		PRIMARY_CONTEXT, %o3
+	stxa		%g0, [%o3] ASI_DMMU		! Flush P-cache
+	stxa		%g3, [%g0] ASI_DCU_CONTROL_REG	! Disable P-cache
+#endif
 	membar		#Sync				! MS	Group26 (7-cycle stall)
 
 	/* Now we copy the (len modulo 64) bytes at the end.
@@ -325,7 +344,7 @@ U3memcpy_toosmall:
 
 2:	VISEntryHalf					! MS+MS
 
-	/* Compute (len - (len % 8)) into %g2.  This is guarenteed
+	/* Compute (len - (len % 8)) into %g2.  This is guaranteed
 	 * to be nonzero.
 	 */
 	andn		%o2, 0x7, %g2			! A0	Group
@@ -334,7 +353,7 @@ U3memcpy_toosmall:
 	 * one 8-byte longword past the end of src.  It actually
 	 * does not, as %g2 is subtracted as loads are done from
 	 * src, so we always stop before running off the end.
-	 * Also, we are guarenteed to have at least 0x10 bytes
+	 * Also, we are guaranteed to have at least 0x10 bytes
 	 * to move here.
 	 */
 	sub		%g2, 0x8, %g2			! A0	Group (reg-dep)

@@ -8,38 +8,22 @@
  *
  * Derived from arch/ppc/boot/prep/misc.c
  *
- * Copyright 2000-2001 MontaVista Software Inc.
- *
- * This program is free software; you can redistribute  it and/or modify it
- * under  the terms of  the GNU General  Public License as published by the
- * Free Software Foundation;  either version 2 of the  License, or (at your
- * option) any later version.
- *
- * THIS  SOFTWARE  IS PROVIDED   ``AS  IS'' AND   ANY  EXPRESS OR   IMPLIED
- * WARRANTIES,   INCLUDING, BUT NOT  LIMITED  TO, THE IMPLIED WARRANTIES OF
- * MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED.  IN
- * NO  EVENT  SHALL   THE AUTHOR  BE    LIABLE FOR ANY   DIRECT,  INDIRECT,
- * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT
- * NOT LIMITED   TO, PROCUREMENT OF  SUBSTITUTE GOODS  OR SERVICES; LOSS OF
- * USE, DATA,  OR PROFITS; OR  BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON
- * ANY THEORY OF LIABILITY, WHETHER IN  CONTRACT, STRICT LIABILITY, OR TORT
- * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF
- * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
- *
- * You should have received a copy of the  GNU General Public License along
- * with this program; if not, write  to the Free Software Foundation, Inc.,
- * 675 Mass Ave, Cambridge, MA 02139, USA.
+ * 2000-2001 (c) MontaVista, Software, Inc.  This file is licensed under
+ * the terms of the GNU General Public License version 2.  This program
+ * is licensed "as is" without any warranty of any kind, whether express
+ * or implied.
  */
 
 #include <stdarg.h>	/* for va_ bits */
 #include <linux/config.h>
+#include <linux/string.h>
 #include "zlib.h"
 #include "nonstdio.h"
 
-/* If we're on a ALL_PPC, assume we have a keyboard controller
- * Also note, if we're not ALL_PPC, we assume you are a serial
+/* If we're on a PReP, assume we have a keyboard controller
+ * Also note, if we're not PReP, we assume you are a serial
  * console - Tom */
-#if defined(CONFIG_ALL_PPC) && defined(CONFIG_VGA_CONSOLE)
+#if defined(CONFIG_PPC_PREP) && defined(CONFIG_VGA_CONSOLE)
 extern void cursor(int x, int y);
 extern void scroll(void);
 extern char *vidmem;
@@ -75,7 +59,7 @@ static int _cvt(unsigned long val, char *buf, long radix, char *digits);
 void _vprintk(void(*putc)(const char), const char *fmt0, va_list ap);
 unsigned char *ISA_io = NULL;
 
-#if defined(CONFIG_SERIAL_CONSOLE)
+#if defined(CONFIG_SERIAL_CONSOLE) || defined(CONFIG_SERIAL_8250_CONSOLE)
 extern unsigned long com_port;
 
 extern int serial_tstc(unsigned long com_port);
@@ -96,7 +80,7 @@ void exit(void)
 
 int tstc(void)
 {
-#if defined(CONFIG_SERIAL_CONSOLE)
+#if defined(CONFIG_SERIAL_CONSOLE) || defined(CONFIG_SERIAL_8250_CONSOLE)
 	if(keyb_present)
 		return (CRT_tstc() || serial_tstc(com_port));
 	else
@@ -109,10 +93,10 @@ int tstc(void)
 int getc(void)
 {
 	while (1) {
-#if defined(CONFIG_SERIAL_CONSOLE)
+#if defined(CONFIG_SERIAL_CONSOLE) || defined(CONFIG_SERIAL_8250_CONSOLE)
 		if (serial_tstc(com_port))
 			return (serial_getc(com_port));
-#endif /* CONFIG_SERIAL_CONSOLE */
+#endif /* serial console */
 		if (keyb_present)
 			if(CRT_tstc())
 				return (CRT_getc());
@@ -124,11 +108,11 @@ putc(const char c)
 {
 	int x,y;
 
-#if defined(CONFIG_SERIAL_CONSOLE)
+#if defined(CONFIG_SERIAL_CONSOLE) || defined(CONFIG_SERIAL_8250_CONSOLE)
 	serial_putc(com_port, c);
 	if ( c == '\n' )
 		serial_putc(com_port, '\r');
-#endif /* CONFIG_SERIAL_CONSOLE */
+#endif /* serial console */
 
 	x = orig_x;
 	y = orig_y;
@@ -171,10 +155,10 @@ void puts(const char *s)
 	y = orig_y;
 
 	while ( ( c = *s++ ) != '\0' ) {
-#if defined(CONFIG_SERIAL_CONSOLE)
+#if defined(CONFIG_SERIAL_CONSOLE) || defined(CONFIG_SERIAL_8250_CONSOLE)
 	        serial_putc(com_port, c);
 	        if ( c == '\n' ) serial_putc(com_port, '\r');
-#endif /* CONFIG_SERIAL_CONSOLE */
+#endif /* serial console */
 
 		if ( c == '\n' ) {
 			x = 0;

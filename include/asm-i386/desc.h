@@ -2,63 +2,27 @@
 #define __ARCH_DESC_H
 
 #include <asm/ldt.h>
-
-/*
- * The layout of the GDT under Linux:
- *
- *   0 - null
- *   1 - not used
- *   2 - kernel code segment
- *   3 - kernel data segment
- *   4 - user code segment                  <-- new cacheline 
- *   5 - user data segment
- *   6 - not used
- *   7 - not used
- *   8 - APM BIOS support                   <-- new cacheline 
- *   9 - APM BIOS support
- *  10 - APM BIOS support
- *  11 - APM BIOS support
- *
- * The TSS+LDT descriptors are spread out a bit so that every CPU
- * has an exclusive cacheline for the per-CPU TSS and LDT:
- *
- *  12 - CPU#0 TSS                          <-- new cacheline 
- *  13 - CPU#0 LDT
- *  14 - not used 
- *  15 - not used 
- *  16 - CPU#1 TSS                          <-- new cacheline 
- *  17 - CPU#1 LDT
- *  18 - not used 
- *  19 - not used 
- *  ... NR_CPUS per-CPU TSS+LDT's if on SMP
- *
- * Entry into gdt where to find first TSS.
- */
-#define __FIRST_TSS_ENTRY 12
-#define __FIRST_LDT_ENTRY (__FIRST_TSS_ENTRY+1)
-
-#define __TSS(n) (((n)<<2) + __FIRST_TSS_ENTRY)
-#define __LDT(n) (((n)<<2) + __FIRST_LDT_ENTRY)
+#include <asm/segment.h>
 
 #ifndef __ASSEMBLY__
-struct desc_struct {
-	unsigned long a,b;
-};
 
-extern struct desc_struct gdt_table[];
-extern struct desc_struct *idt, *gdt;
+#include <linux/preempt.h>
+#include <linux/smp.h>
+
+#include <asm/mmu.h>
+
+extern struct desc_struct cpu_gdt_table[NR_CPUS][GDT_ENTRIES];
 
 struct Xgt_desc_struct {
 	unsigned short size;
 	unsigned long address __attribute__((packed));
-};
+	unsigned short pad;
+} __attribute__ ((packed));
 
-#define idt_descr (*(struct Xgt_desc_struct *)((char *)&idt - 2))
-#define gdt_descr (*(struct Xgt_desc_struct *)((char *)&gdt - 2))
+extern struct Xgt_desc_struct idt_descr, cpu_gdt_descr[NR_CPUS];
 
-#define load_TR(n) __asm__ __volatile__("ltr %%ax"::"a" (__TSS(n)<<3))
-
-#define __load_LDT(n) __asm__ __volatile__("lldt %%ax"::"a" (__LDT(n)<<3))
+#define load_TR_desc() __asm__ __volatile__("ltr %%ax"::"a" (GDT_ENTRY_TSS*8))
+#define load_LDT_desc() __asm__ __volatile__("lldt %%ax"::"a" (GDT_ENTRY_LDT*8))
 
 /*
  * This is the ldt that every process will get unless we need
@@ -66,32 +30,97 @@ struct Xgt_desc_struct {
  */
 extern struct desc_struct default_ldt[];
 extern void set_intr_gate(unsigned int irq, void * addr);
-extern void set_ldt_desc(unsigned int n, void *addr, unsigned int size);
-extern void set_tss_desc(unsigned int n, void *addr);
+
+#define _set_tssldt_desc(n,addr,limit,type) \
+__asm__ __volatile__ ("movw %w3,0(%2)\n\t" \
+	"movw %%ax,2(%2)\n\t" \
+	"rorl $16,%%eax\n\t" \
+	"movb %%al,4(%2)\n\t" \
+	"movb %4,5(%2)\n\t" \
+	"movb $0,6(%2)\n\t" \
+	"movb %%ah,7(%2)\n\t" \
+	"rorl $16,%%eax" \
+	: "=m"(*(n)) : "a" (addr), "r"(n), "ir"(limit), "i"(type))
+
+static inline void __set_tss_desc(unsigned int cpu, unsigned int entry, void *addr)
+{
+	_set_tssldt_desc(&cpu_gdt_table[cpu][entry], (int)addr, 235, 0x89);
+}
+
+#define set_tss_desc(cpu,addr) __set_tss_desc(cpu, GDT_ENTRY_TSS, addr)
+
+static inline void set_ldt_desc(unsigned int cpu, void *addr, unsigned int size)
+{
+	_set_tssldt_desc(&cpu_gdt_table[cpu][GDT_ENTRY_LDT], (int)addr, ((size << 3)-1), 0x82);
+}
+
+#define LDT_entry_a(info) \
+	((((info)->base_addr & 0x0000ffff) << 16) | ((info)->limit & 0x0ffff))
+
+#define LDT_entry_b(info) \
+	(((info)->base_addr & 0xff000000) | \
+	(((info)->base_addr & 0x00ff0000) >> 16) | \
+	((info)->limit & 0xf0000) | \
+	(((info)->read_exec_only ^ 1) << 9) | \
+	((info)->contents << 10) | \
+	(((info)->seg_not_present ^ 1) << 15) | \
+	((info)->seg_32bit << 22) | \
+	((info)->limit_in_pages << 23) | \
+	((info)->useable << 20) | \
+	0x7000)
+
+#define LDT_empty(info) (\
+	(info)->base_addr	== 0	&& \
+	(info)->limit		== 0	&& \
+	(info)->contents	== 0	&& \
+	(info)->read_exec_only	== 1	&& \
+	(info)->seg_32bit	== 0	&& \
+	(info)->limit_in_pages	== 0	&& \
+	(info)->seg_not_present	== 1	&& \
+	(info)->useable		== 0	)
+
+#if TLS_SIZE != 24
+# error update this code.
+#endif
+
+static inline void load_TLS(struct thread_struct *t, unsigned int cpu)
+{
+#define C(i) cpu_gdt_table[cpu][GDT_ENTRY_TLS_MIN + i] = t->tls_array[i]
+	C(0); C(1); C(2);
+#undef C
+}
 
 static inline void clear_LDT(void)
 {
-	int cpu = smp_processor_id();
+	int cpu = get_cpu();
+
 	set_ldt_desc(cpu, &default_ldt[0], 5);
-	__load_LDT(cpu);
+	load_LDT_desc();
+	put_cpu();
 }
 
 /*
  * load one particular LDT into the current CPU
  */
-static inline void load_LDT (struct mm_struct *mm)
+static inline void load_LDT_nolock(mm_context_t *pc, int cpu)
 {
-	int cpu = smp_processor_id();
-	void *segments = mm->context.segments;
-	int count = LDT_ENTRIES;
+	void *segments = pc->ldt;
+	int count = pc->size;
 
-	if (!segments) {
+	if (likely(!count)) {
 		segments = &default_ldt[0];
 		count = 5;
 	}
 		
 	set_ldt_desc(cpu, segments, count);
-	__load_LDT(cpu);
+	load_LDT_desc();
+}
+
+static inline void load_LDT(mm_context_t *pc)
+{
+	int cpu = get_cpu();
+	load_LDT_nolock(pc, cpu);
+	put_cpu();
 }
 
 #endif /* !__ASSEMBLY__ */

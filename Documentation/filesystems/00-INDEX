@@ -8,6 +8,8 @@ affs.txt
 	- info and mount options for the Amiga Fast File System.
 bfs.txt
 	- info for the SCO UnixWare Boot Filesystem (BFS).
+cifs.txt
+	- description of the CIFS filesystem
 coda.txt
 	- description of the CODA filesystem.
 cramfs.txt
@@ -22,6 +24,8 @@ hpfs.txt
 	- info and mount options for the OS/2 HPFS.
 isofs.txt
 	- info and mount options for the ISO 9660 (CDROM) filesystem.
+jfs.txt
+	- info and mount options for the JFS filesystem.
 ncpfs.txt
 	- info on Novell Netware(tm) filesystem using NCP protocol.
 ntfs.txt
@@ -44,3 +48,5 @@ vfat.txt
 	- info on using the VFAT filesystem used in Windows NT and Windows 95
 vfs.txt
 	- Overview of the Virtual File System
+xfs.txt
+	- info and mount options for the XFS filesystem.

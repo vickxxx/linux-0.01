@@ -11,7 +11,7 @@
  * 
  *     Copyright (c) 1998-1999 Dag Brattli <dagb@cs.uit.no>
  *     All Rights Reserved.
- *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
+ *     Copyright (c) 2000-2003 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -136,14 +136,14 @@ void irlmp_link_data_indication(struct lap_cb *self, struct sk_buff *skb,
 	
 	if (lsap == NULL) {
 		IRDA_DEBUG(2, "IrLMP, Sorry, no LSAP for received frame!\n");
-		IRDA_DEBUG(2, "%s(), slsap_sel = %02x, dlsap_sel = %02x\n", __FUNCTION__, slsap_sel, 
-		      dlsap_sel);
+		IRDA_DEBUG(2, "%s(), slsap_sel = %02x, dlsap_sel = %02x\n",
+			   __FUNCTION__, slsap_sel, dlsap_sel);
 		if (fp[0] & CONTROL_BIT) {
-			IRDA_DEBUG(2, "%s(), received control frame %02x\n", __FUNCTION__, fp[2]);
+			IRDA_DEBUG(2, "%s(), received control frame %02x\n",
+				   __FUNCTION__, fp[2]);
 		} else {
 			IRDA_DEBUG(2, "%s(), received data frame\n", __FUNCTION__);
 		}
-		dev_kfree_skb(skb);
 		return;
 	}
 
@@ -160,21 +160,20 @@ void irlmp_link_data_indication(struct lap_cb *self, struct sk_buff *skb,
 			irlmp_do_lsap_event(lsap, LM_CONNECT_CONFIRM, skb);
 			break;
 		case DISCONNECT:
-			IRDA_DEBUG(4, "%s(), Disconnect indication!\n", __FUNCTION__);
+			IRDA_DEBUG(4, "%s(), Disconnect indication!\n",
+				   __FUNCTION__);
 			irlmp_do_lsap_event(lsap, LM_DISCONNECT_INDICATION, 
 					    skb);
 			break;
 		case ACCESSMODE_CMD:
 			IRDA_DEBUG(0, "Access mode cmd not implemented!\n");
-			dev_kfree_skb(skb);
 			break;
 		case ACCESSMODE_CNF:
 			IRDA_DEBUG(0, "Access mode cnf not implemented!\n");
-			dev_kfree_skb(skb);
 			break;
 		default:
-			IRDA_DEBUG(0, "%s(), Unknown control frame %02x\n", __FUNCTION__, fp[2]);
-			dev_kfree_skb(skb);
+			IRDA_DEBUG(0, "%s(), Unknown control frame %02x\n",
+				   __FUNCTION__, fp[2]);
 			break;
 		}
 	} else if (unreliable) {
@@ -206,6 +205,7 @@ void irlmp_link_unitdata_indication(struct lap_cb *self, struct sk_buff *skb)
 	__u8   dlsap_sel;   /* Destination LSAP address */
 	__u8   pid;         /* Protocol identifier */
 	__u8   *fp;
+	unsigned long flags;
 	
 	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
 
@@ -224,20 +224,19 @@ void irlmp_link_unitdata_indication(struct lap_cb *self, struct sk_buff *skb)
 	pid       = fp[2];
 	
 	if (pid & 0x80) {
-		IRDA_DEBUG(0, "%s(), extension in PID not supp!\n", __FUNCTION__);
-		dev_kfree_skb(skb);
-
+		IRDA_DEBUG(0, "%s(), extension in PID not supp!\n",
+			   __FUNCTION__);
 		return;
 	}
 
 	/* Check if frame is addressed to the connectionless LSAP */
 	if ((slsap_sel != LSAP_CONNLESS) || (dlsap_sel != LSAP_CONNLESS)) {
 		IRDA_DEBUG(0, "%s(), dropping frame!\n", __FUNCTION__);
-		dev_kfree_skb(skb);
-		
 		return;
 	}
 	
+	/* Search the connectionless LSAP */
+	spin_lock_irqsave(&irlmp->unconnected_lsaps->hb_spinlock, flags);
 	lsap = (struct lsap_cb *) hashbin_get_first(irlmp->unconnected_lsaps);
 	while (lsap != NULL) {
 		/*
@@ -251,11 +250,12 @@ void irlmp_link_unitdata_indication(struct lap_cb *self, struct sk_buff *skb)
 		}
 		lsap = (struct lsap_cb *) hashbin_get_next(irlmp->unconnected_lsaps);
 	}
+	spin_unlock_irqrestore(&irlmp->unconnected_lsaps->hb_spinlock, flags);
+
 	if (lsap)
 		irlmp_connless_data_indication(lsap, skb);
 	else {
 		IRDA_DEBUG(0, "%s(), found no matching LSAP!\n", __FUNCTION__);
-		dev_kfree_skb(skb);
 	}
 }
 #endif /* CONFIG_IRDA_ULTRA */
@@ -269,7 +269,7 @@ void irlmp_link_unitdata_indication(struct lap_cb *self, struct sk_buff *skb)
 void irlmp_link_disconnect_indication(struct lap_cb *lap, 
 				      struct irlap_cb *irlap, 
 				      LAP_REASON reason, 
-				      struct sk_buff *userdata)
+				      struct sk_buff *skb)
 {
 	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
 
@@ -279,9 +279,7 @@ void irlmp_link_disconnect_indication(struct lap_cb *lap,
 	lap->reason = reason;
 	lap->daddr = DEV_ADDR_ANY;
 
-        /* FIXME: must do something with the userdata if any */
-	if (userdata)
-		dev_kfree_skb(userdata);
+        /* FIXME: must do something with the skb if any */
 	
 	/*
 	 *  Inform station state machine
@@ -318,7 +316,7 @@ void irlmp_link_connect_indication(struct lap_cb *self, __u32 saddr,
  *
  */
 void irlmp_link_connect_confirm(struct lap_cb *self, struct qos_info *qos, 
-				struct sk_buff *userdata)
+				struct sk_buff *skb)
 {
 	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
 
@@ -326,9 +324,7 @@ void irlmp_link_connect_confirm(struct lap_cb *self, struct qos_info *qos,
 	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
 	ASSERT(qos != NULL, return;);
 
-	/* Don't need use the userdata for now */
-	if (userdata)
-		dev_kfree_skb(userdata);
+	/* Don't need use the skb for now */
 
 	/* Copy QoS settings for this session */
 	self->qos = qos;
@@ -370,6 +366,7 @@ void irlmp_link_discovery_indication(struct lap_cb *self,
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
 
+	/* Add to main log, cleanup */
 	irlmp_add_discovery(irlmp->cachelog, discovery);
 	
 	/* Just handle it the same way as a discovery confirm,
@@ -392,6 +389,7 @@ void irlmp_link_discovery_confirm(struct lap_cb *self, hashbin_t *log)
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == LMP_LAP_MAGIC, return;);
 	
+	/* Add to main log, cleanup */
 	irlmp_add_discovery_log(irlmp->cachelog, log);
 
 	/* Propagate event to various LSAPs registered for it.
@@ -404,27 +402,42 @@ void irlmp_link_discovery_confirm(struct lap_cb *self, hashbin_t *log)
 }
 
 #ifdef CONFIG_IRDA_CACHE_LAST_LSAP
-inline void irlmp_update_cache(struct lsap_cb *self)
+static inline void irlmp_update_cache(struct lap_cb *lap,
+				      struct lsap_cb *lsap)
 {
+	/* Prevent concurrent read to get garbage */
+	lap->cache.valid = FALSE;
 	/* Update cache entry */
-	irlmp->cache.dlsap_sel = self->dlsap_sel;
-	irlmp->cache.slsap_sel = self->slsap_sel;
-	irlmp->cache.lsap = self;
-	irlmp->cache.valid = TRUE;
+	lap->cache.dlsap_sel = lsap->dlsap_sel;
+	lap->cache.slsap_sel = lsap->slsap_sel;
+	lap->cache.lsap = lsap;
+	lap->cache.valid = TRUE;
 }
 #endif
 
 /*
  * Function irlmp_find_handle (self, dlsap_sel, slsap_sel, status, queue)
  *
- *    Find handle assosiated with destination and source LSAP
+ *    Find handle associated with destination and source LSAP
  *
+ * Any IrDA connection (LSAP/TSAP) is uniquely identified by
+ * 3 parameters, the local lsap, the remote lsap and the remote address. 
+ * We may initiate multiple connections to the same remote service
+ * (they will have different local lsap), a remote device may initiate
+ * multiple connections to the same local service (they will have
+ * different remote lsap), or multiple devices may connect to the same
+ * service and may use the same remote lsap (and they will have
+ * different remote address).
+ * So, where is the remote address ? Each LAP connection is made with
+ * a single remote device, so imply a specific remote address.
+ * Jean II
  */
 static struct lsap_cb *irlmp_find_lsap(struct lap_cb *self, __u8 dlsap_sel,
 				       __u8 slsap_sel, int status,
 				       hashbin_t *queue) 
 {
 	struct lsap_cb *lsap;
+	unsigned long flags;
 	
 	/* 
 	 *  Optimize for the common case. We assume that the last frame
@@ -432,13 +445,16 @@ static struct lsap_cb *irlmp_find_lsap(struct lap_cb *self, __u8 dlsap_sel,
 	 *  cache first to avoid the linear search
 	 */
 #ifdef CONFIG_IRDA_CACHE_LAST_LSAP
-	if ((irlmp->cache.valid) && 
-	    (irlmp->cache.slsap_sel == slsap_sel) && 
-	    (irlmp->cache.dlsap_sel == dlsap_sel)) 
+	if ((self->cache.valid) && 
+	    (self->cache.slsap_sel == slsap_sel) && 
+	    (self->cache.dlsap_sel == dlsap_sel)) 
 	{
-		return (irlmp->cache.lsap);
+		return (self->cache.lsap);
 	}
 #endif
+
+	spin_lock_irqsave(&queue->hb_spinlock, flags);
+
 	lsap = (struct lsap_cb *) hashbin_get_first(queue);
 	while (lsap != NULL) {
 		/* 
@@ -449,29 +465,27 @@ static struct lsap_cb *irlmp_find_lsap(struct lap_cb *self, __u8 dlsap_sel,
 		 */
 		if ((status == CONNECT_CMD) && 
 		    (lsap->slsap_sel == slsap_sel) &&      
-		    (lsap->dlsap_sel == LSAP_ANY)) 
-		{
+		    (lsap->dlsap_sel == LSAP_ANY)) {
+			/* This is where the dest lsap sel is set on incoming
+			 * lsaps */
 			lsap->dlsap_sel = dlsap_sel;
-			
-#ifdef CONFIG_IRDA_CACHE_LAST_LSAP
-			irlmp_update_cache(lsap);
-#endif
-			return lsap;
+			break;
 		}
 		/*
 		 *  Check if source LSAP and dest LSAP selectors match.
 		 */
 		if ((lsap->slsap_sel == slsap_sel) && 
 		    (lsap->dlsap_sel == dlsap_sel)) 
-		{
-#ifdef CONFIG_IRDA_CACHE_LAST_LSAP
-			irlmp_update_cache(lsap);
-#endif
-			return lsap;
-		}
+			break;
+
 		lsap = (struct lsap_cb *) hashbin_get_next(queue);
 	}
+#ifdef CONFIG_IRDA_CACHE_LAST_LSAP
+	if(lsap)
+		irlmp_update_cache(self, lsap);
+#endif
+	spin_unlock_irqrestore(&queue->hb_spinlock, flags);
 
-	/* Sorry not found! */
-	return NULL;
+	/* Return what we've found or NULL */
+	return lsap;
 }

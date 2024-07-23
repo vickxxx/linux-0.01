@@ -14,7 +14,6 @@
 #include <linux/module.h>
 #include <linux/pci.h>
 #include <linux/sched.h>
-#include <linux/tqueue.h>
 #include <linux/interrupt.h>
 #include <asm/io.h>
 
@@ -28,7 +27,6 @@ static int tpam_command_ioctl_dsprun(tpam_card *);
 static int tpam_command_ioctl_loopmode(tpam_card *, u8);
 static int tpam_command_dial(tpam_card *, u32, u8 *);
 static int tpam_command_setl2(tpam_card *, u32, u8);
-static int tpam_command_getl2(tpam_card *, u32);
 static int tpam_command_acceptd(tpam_card *, u32);
 static int tpam_command_acceptb(tpam_card *, u32);
 static int tpam_command_hangup(tpam_card *, u32);
@@ -94,14 +92,6 @@ int tpam_command(isdn_ctrl *c) {
 		case ISDN_CMD_SETL2:
 			return tpam_command_setl2(card, c->arg & 0xff, 
 						  c->arg >> 8);
-		case ISDN_CMD_GETL2:
-			return tpam_command_getl2(card, c->arg);
-		case ISDN_CMD_LOCK:
-			MOD_INC_USE_COUNT;
-			return 0;
-		case ISDN_CMD_UNLOCK:
-			MOD_DEC_USE_COUNT;
-			return 0;
 		case ISDN_CMD_PROCEED:
 			return tpam_command_proceed(card, c->arg);
 		default:
@@ -126,7 +116,6 @@ int tpam_command(isdn_ctrl *c) {
  */
 static int tpam_command_ioctl_dspload(tpam_card *card, u32 arg) {
 	tpam_dsp_ioctl tdl;
-	int ret;
 
 	dprintk("TurboPAM(tpam_command_ioctl_dspload): card=%d\n", card->id);
 
@@ -141,10 +130,9 @@ static int tpam_command_ioctl_dspload(tpam_card *card, u32 arg) {
 		return -EPERM;
 
 	/* write the data in the board's memory */
-	ret = copy_from_user_to_pam(card, (void *)tdl.address, 
-				    (void *)arg + sizeof(tpam_dsp_ioctl), 
-				    tdl.data_len);
-	return 0;
+	return copy_from_user_to_pam(card, (void *)tdl.address, 
+				     (void *)arg + sizeof(tpam_dsp_ioctl), 
+				     tdl.data_len);
 }
 
 /*
@@ -158,7 +146,6 @@ static int tpam_command_ioctl_dspload(tpam_card *card, u32 arg) {
  */
 static int tpam_command_ioctl_dspsave(tpam_card *card, u32 arg) {
 	tpam_dsp_ioctl tdl;
-	int ret;
 
 	dprintk("TurboPAM(tpam_command_ioctl_dspsave): card=%d\n", card->id);
 
@@ -171,9 +158,8 @@ static int tpam_command_ioctl_dspsave(tpam_card *card, u32 arg) {
 		return -EPERM;
 
 	/* read the data from the board's memory */
-	ret = copy_from_pam_to_user(card, (void *)arg + sizeof(tpam_dsp_ioctl),
-				    (void *)tdl.address, tdl.data_len);
-	return ret;
+	return copy_from_pam_to_user(card, (void *)arg + sizeof(tpam_dsp_ioctl),
+				     (void *)tdl.address, tdl.data_len);
 }
 
 /*
@@ -187,7 +173,8 @@ static int tpam_command_ioctl_dspsave(tpam_card *card, u32 arg) {
  * Return: 0 if OK, <0 on errors.
  */
 static int tpam_command_ioctl_dsprun(tpam_card *card) {
-	u32 signature = 0, timeout, i;
+	u32 signature = 0, i;
+	unsigned long timeout;
 	isdn_ctrl ctrl;
 	struct sk_buff *skb;
 
@@ -373,30 +360,6 @@ static int tpam_command_setl2(tpam_card *card, u32 channel, u8 proto) {
 			return -EINVAL;
 	}
 	return 0;
-}
-
-/*
- * Return the level2 protocol (modem or HDLC).
- *
- * 	card: the board
- * 	channel: the channel number
- *
- * Return: ISDN_PROTO_L2_HDLC/MODEM if OK, <0 if error.
- */
-static int tpam_command_getl2(tpam_card *card, u32 channel) {
-
-	dprintk("TurboPAM(tpam_command_getl2): card=%d, channel=%lu\n",
-		card->id, (unsigned long)channel);
-	
-	/* board must be running */
-	if (!card->running)
-		return -ENODEV;
-
-	/* return the current mode */
-	if (card->channels[channel].realhdlc)
-		return ISDN_PROTO_L2_HDLC;
-	else
-		return ISDN_PROTO_L2_MODEM;
 }
 
 /*
@@ -918,7 +881,7 @@ void tpam_recv_U3DataInd(tpam_card *card, struct sk_buff *skb) {
 		memcpy(skb_put(result, len), data, len);
 	}
 
-	/* In loop mode, resend the data immediatly */
+	/* In loop mode, resend the data immediately */
 	if (card->loopmode) {
 		struct sk_buff *loopskb;
 

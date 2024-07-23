@@ -34,7 +34,10 @@
 #include <linux/wait.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+#include <linux/spinlock.h>
+#include <linux/completion.h>
 #include <asm/uaccess.h>
+#include <asm/semaphore.h>
 #ifdef CONFIG_PPC
 #include <asm/prom.h>
 #include <asm/hydra.h>
@@ -63,7 +66,7 @@ static struct adb_driver *adb_driver_list[] = {
 #ifdef CONFIG_ADB_IOP
 	&adb_iop_driver,
 #endif
-#ifdef CONFIG_ADB_PMU
+#if defined(CONFIG_ADB_PMU) || defined(CONFIG_ADB_PMU68K)
 	&via_pmu_driver,
 #endif
 #ifdef CONFIG_ADB_MACIO
@@ -74,11 +77,11 @@ static struct adb_driver *adb_driver_list[] = {
 
 struct adb_driver *adb_controller;
 struct notifier_block *adb_client_list = NULL;
-static int adb_got_sleep = 0;
-static int adb_inited = 0;
+static int adb_got_sleep;
+static int adb_inited;
 static pid_t adb_probe_task_pid;
-static int adb_probe_task_flag;
-static wait_queue_head_t adb_probe_task_wq;
+static DECLARE_MUTEX(adb_probe_mutex);
+static struct completion adb_probe_task_comp;
 static int sleepy_trackpad;
 int __adb_probe_sync;
 
@@ -93,13 +96,26 @@ static struct pmu_sleep_notifier adb_sleep_notifier = {
 static int adb_scan_bus(void);
 static int do_adb_reset_bus(void);
 static void adbdev_init(void);
-
+static int try_handler_change(int, int);
 
 static struct adb_handler {
 	void (*handler)(unsigned char *, int, struct pt_regs *, int);
 	int original_address;
 	int handler_id;
+	int busy;
 } adb_handler[16];
+
+/*
+ * The adb_handler_sem mutex protects all accesses to the original_address
+ * and handler_id fields of adb_handler[i] for all i, and changes to the
+ * handler field.
+ * Accesses to the handler field are protected by the adb_handler_lock
+ * rwlock.  It is held across all calls to any handler, so that by the
+ * time adb_unregister returns, we know that the old handler isn't being
+ * called.
+ */
+static DECLARE_MUTEX(adb_handler_sem);
+static rwlock_t adb_handler_lock = RW_LOCK_UNLOCKED;
 
 #if 0
 static void printADBreply(struct adb_request *req)
@@ -119,7 +135,7 @@ static __inline__ void adb_wait_ms(unsigned int ms)
 {
 	if (current->pid && adb_probe_task_pid &&
 	  adb_probe_task_pid == current->pid) {
-		current->state = TASK_UNINTERRUPTIBLE;
+		set_task_state(current, TASK_UNINTERRUPTIBLE);
 		schedule_timeout(1 + ms * HZ / 1000);
 	} else
 		mdelay(ms);
@@ -229,19 +245,21 @@ static int adb_scan_bus(void)
 static int
 adb_probe_task(void *x)
 {
+	sigset_t blocked;
+
 	strcpy(current->comm, "kadbprobe");
-	
-	spin_lock_irq(&current->sigmask_lock);
-	sigfillset(&current->blocked);
+
+	sigfillset(&blocked);
+	sigprocmask(SIG_BLOCK, &blocked, NULL);
 	flush_signals(current);
-	spin_unlock_irq(&current->sigmask_lock);
 
 	printk(KERN_INFO "adb: starting probe task...\n");
 	do_adb_reset_bus();
 	printk(KERN_INFO "adb: finished probe task...\n");
 	
 	adb_probe_task_pid = 0;
-	clear_bit(0, &adb_probe_task_flag);
+	up(&adb_probe_mutex);
+	
 	return 0;
 }
 
@@ -252,31 +270,18 @@ __adb_probe_task(void *data)
 		SIGCHLD | CLONE_FS | CLONE_FILES | CLONE_SIGHAND);
 }
 
+static DECLARE_WORK(adb_reset_work, __adb_probe_task, NULL);
+
 int
 adb_reset_bus(void)
 {
-	static struct tq_struct tqs = {
-		routine:	__adb_probe_task,
-	};
-
 	if (__adb_probe_sync) {
 		do_adb_reset_bus();
 		return 0;
 	}
-		
-	/* We need to get a lock on the probe thread */
-	while (test_and_set_bit(0, &adb_probe_task_flag))
-		schedule();
 
-	/* Just wait for PID to be 0 just in case (possible race) */
-	while (adb_probe_task_pid != 0)
-		schedule();
-
-	/* Create probe thread as a child of keventd */
-	if (current_is_keventd())
-		__adb_probe_task(NULL);
-	else
-		schedule_task(&tqs);
+	down(&adb_probe_mutex);
+	schedule_work(&adb_reset_work);
 	return 0;
 }
 
@@ -315,10 +320,12 @@ int __init adb_init(void)
 #ifdef CONFIG_PMAC_PBOOK
 		pmu_register_sleep_notifier(&adb_sleep_notifier);
 #endif /* CONFIG_PMAC_PBOOK */
+#ifdef CONFIG_PPC
 		if (machine_is_compatible("AAPL,PowerBook1998") ||
 			machine_is_compatible("PowerBook1,1"))
 			sleepy_trackpad = 1;
-		init_waitqueue_head(&adb_probe_task_wq);
+#endif /* CONFIG_PPC */
+		init_completion(&adb_probe_task_comp);
 		adbdev_init();
 		adb_reset_bus();
 	}
@@ -340,21 +347,20 @@ adb_notify_sleep(struct pmu_sleep_notifier *self, int when)
 	case PBOOK_SLEEP_REQUEST:
 		adb_got_sleep = 1;
 		/* We need to get a lock on the probe thread */
-		while (test_and_set_bit(0, &adb_probe_task_flag))
-			schedule();
-		/* Just wait for PID to be 0 just in case (possible race) */
-		while (adb_probe_task_pid != 0)
-			schedule();
+		down(&adb_probe_mutex);
+		/* Stop autopoll */
 		if (adb_controller->autopoll)
 			adb_controller->autopoll(0);
 		ret = notifier_call_chain(&adb_client_list, ADB_MSG_POWERDOWN, NULL);
-		if (ret & NOTIFY_STOP_MASK)
+		if (ret & NOTIFY_STOP_MASK) {
+			up(&adb_probe_mutex);
 			return PBOOK_SLEEP_REFUSE;
+		}
 		break;
 	case PBOOK_SLEEP_REJECT:
 		if (adb_got_sleep) {
 			adb_got_sleep = 0;
-			clear_bit(0, &adb_probe_task_flag);
+			up(&adb_probe_mutex);
 			adb_reset_bus();
 		}
 		break;
@@ -363,7 +369,7 @@ adb_notify_sleep(struct pmu_sleep_notifier *self, int when)
 		break;
 	case PBOOK_WAKE:
 		adb_got_sleep = 0;
-		clear_bit(0, &adb_probe_task_flag);
+		up(&adb_probe_mutex);
 		adb_reset_bus();
 		break;
 	}
@@ -375,7 +381,6 @@ static int
 do_adb_reset_bus(void)
 {
 	int ret, nret, devs;
-	unsigned long flags;
 	
 	if (adb_controller == NULL)
 		return -ENXIO;
@@ -394,11 +399,11 @@ do_adb_reset_bus(void)
 		/* Let the trackpad settle down */
 		adb_wait_ms(500);
 	}
-	
-	save_flags(flags);
-	cli();
+
+	down(&adb_handler_sem);
+	write_lock_irq(&adb_handler_lock);
 	memset(adb_handler, 0, sizeof(adb_handler));
-	restore_flags(flags);
+	write_unlock_irq(&adb_handler_lock);
 
 	/* That one is still a bit synchronous, oh well... */
 	if (adb_controller->reset_bus)
@@ -416,6 +421,7 @@ do_adb_reset_bus(void)
 		if (adb_controller->autopoll)
 			adb_controller->autopoll(devs);
 	}
+	up(&adb_handler_sem);
 
 	nret = notifier_call_chain(&adb_client_list, ADB_MSG_POST_RESET, NULL);
 	if (nret & NOTIFY_STOP_MASK)
@@ -435,11 +441,12 @@ adb_poll(void)
 static void
 adb_probe_wakeup(struct adb_request *req)
 {
-	wake_up(&adb_probe_task_wq);
+	complete(&adb_probe_task_comp);
 }
 
+/* Static request used during probe */
 static struct adb_request adb_sreq;
-static int adb_sreq_lock; // Use semaphore ! */ 
+static unsigned long adb_sreq_lock; // Use semaphore ! */ 
 
 int
 adb_request(struct adb_request *req, void (*done)(struct adb_request *),
@@ -484,20 +491,11 @@ adb_request(struct adb_request *req, void (*done)(struct adb_request *),
 	if ((flags & ADBREQ_SYNC) &&
 	    (current->pid && adb_probe_task_pid &&
 	    adb_probe_task_pid == current->pid)) {
-		DECLARE_WAITQUEUE(wait, current);
 		req->done = adb_probe_wakeup;
-		add_wait_queue(&adb_probe_task_wq, &wait);
 		rc = adb_controller->send_request(req, 0);
 		if (rc || req->complete)
 			goto bail;
-		for (;;) {
-			set_current_state(TASK_UNINTERRUPTIBLE);
-			if (req->complete)
-				break;
-			schedule();
-		}
-		current->state = TASK_RUNNING;
-		remove_wait_queue(&adb_probe_task_wq, &wait);
+		wait_for_completion(&adb_probe_task_comp);
 		rc = 0;
 		goto bail;
 	}
@@ -523,31 +521,47 @@ adb_register(int default_id, int handler_id, struct adb_ids *ids,
 {
 	int i;
 
+	down(&adb_handler_sem);
 	ids->nids = 0;
 	for (i = 1; i < 16; i++) {
 		if ((adb_handler[i].original_address == default_id) &&
 		    (!handler_id || (handler_id == adb_handler[i].handler_id) || 
-		    adb_try_handler_change(i, handler_id))) {
+		    try_handler_change(i, handler_id))) {
 			if (adb_handler[i].handler != 0) {
 				printk(KERN_ERR
 				       "Two handlers for ADB device %d\n",
 				       default_id);
 				continue;
 			}
+			write_lock_irq(&adb_handler_lock);
 			adb_handler[i].handler = handler;
+			write_unlock_irq(&adb_handler_lock);
 			ids->id[ids->nids++] = i;
 		}
 	}
+	up(&adb_handler_sem);
 	return ids->nids;
 }
 
 int
 adb_unregister(int index)
 {
-	if (!adb_handler[index].handler)
-		return -ENODEV;
-	adb_handler[index].handler = 0;
-	return 0;
+	int ret = -ENODEV;
+
+	down(&adb_handler_sem);
+	write_lock_irq(&adb_handler_lock);
+	if (adb_handler[index].handler) {
+		while(adb_handler[index].busy) {
+			write_unlock_irq(&adb_handler_lock);
+			yield();
+			write_lock_irq(&adb_handler_lock);
+		}
+		ret = 0;
+		adb_handler[index].handler = 0;
+	}
+	write_unlock_irq(&adb_handler_lock);
+	up(&adb_handler_sem);
+	return ret;
 }
 
 void
@@ -555,6 +569,9 @@ adb_input(unsigned char *buf, int nb, struct pt_regs *regs, int autopoll)
 {
 	int i, id;
 	static int dump_adb_input = 0;
+	unsigned long flags;
+	
+	void (*handler)(unsigned char *, int, struct pt_regs *, int);
 
 	/* We skip keystrokes and mouse moves when the sleep process
 	 * has been started. We stop autopoll, but this is another security
@@ -569,14 +586,21 @@ adb_input(unsigned char *buf, int nb, struct pt_regs *regs, int autopoll)
 			printk(" %x", buf[i]);
 		printk(", id = %d\n", id);
 	}
-	if (adb_handler[id].handler != 0) {
-		(*adb_handler[id].handler)(buf, nb, regs, autopoll);
+	write_lock_irqsave(&adb_handler_lock, flags);
+	handler = adb_handler[id].handler;
+	if (handler != NULL)
+		adb_handler[id].busy = 1;
+	write_unlock_irqrestore(&adb_handler_lock, flags);
+	if (handler != NULL) {
+		(*handler)(buf, nb, regs, autopoll);
+		wmb();
+		adb_handler[id].busy = 0;
 	}
+		
 }
 
-/* Try to change handler to new_id. Will return 1 if successful */
-int
-adb_try_handler_change(int address, int new_id)
+/* Try to change handler to new_id. Will return 1 if successful. */
+static int try_handler_change(int address, int new_id)
 {
 	struct adb_request req;
 
@@ -596,11 +620,24 @@ adb_try_handler_change(int address, int new_id)
 }
 
 int
+adb_try_handler_change(int address, int new_id)
+{
+	int ret;
+
+	down(&adb_handler_sem);
+	ret = try_handler_change(address, new_id);
+	up(&adb_handler_sem);
+	return ret;
+}
+
+int
 adb_get_infos(int address, int *original_address, int *handler_id)
 {
+	down(&adb_handler_sem);
 	*original_address = adb_handler[address].original_address;
 	*handler_id = adb_handler[address].handler_id;
-	
+	up(&adb_handler_sem);
+
 	return (*original_address != 0);
 }
 
@@ -648,11 +685,34 @@ static void adb_write_done(struct adb_request *req)
 	spin_unlock_irqrestore(&state->lock, flags);
 }
 
+static int
+do_adb_query(struct adb_request *req)
+{
+	int	ret = -EINVAL;
+
+	switch(req->data[1])
+	{
+	case ADB_QUERY_GETDEVINFO:
+		if (req->nbytes < 3)
+			break;
+		down(&adb_handler_sem);
+		req->reply[0] = adb_handler[req->data[2]].original_address;
+		req->reply[1] = adb_handler[req->data[2]].handler_id;
+		up(&adb_handler_sem);
+		req->complete = 1;
+		req->reply_len = 2;
+		adb_write_done(req);
+		ret = 0;
+		break;
+	}
+	return ret;
+}
+
 static int adb_open(struct inode *inode, struct file *file)
 {
 	struct adbdev_state *state;
 
-	if (MINOR(inode->i_rdev) > 0 || adb_controller == NULL)
+	if (minor(inode->i_rdev) > 0 || adb_controller == NULL)
 		return -ENXIO;
 	state = kmalloc(sizeof(struct adbdev_state), GFP_KERNEL);
 	if (state == 0)
@@ -689,7 +749,7 @@ static int adb_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-static ssize_t adb_read(struct file *file, char *buf,
+static ssize_t adb_read(struct file *file, char __user *buf,
 			size_t count, loff_t *ppos)
 {
 	int ret;
@@ -707,17 +767,16 @@ static ssize_t adb_read(struct file *file, char *buf,
 		return ret;
 
 	req = NULL;
+	spin_lock_irqsave(&state->lock, flags);
 	add_wait_queue(&state->wait_queue, &wait);
 	current->state = TASK_INTERRUPTIBLE;
 
 	for (;;) {
-		spin_lock_irqsave(&state->lock, flags);
 		req = state->completed;
 		if (req != NULL)
 			state->completed = req->next;
 		else if (atomic_read(&state->n_pending) == 0)
 			ret = -EIO;
-		spin_unlock_irqrestore(&state->lock, flags);
 		if (req != NULL || ret != 0)
 			break;
 		
@@ -729,12 +788,15 @@ static ssize_t adb_read(struct file *file, char *buf,
 			ret = -ERESTARTSYS;
 			break;
 		}
+		spin_unlock_irqrestore(&state->lock, flags);
 		schedule();
+		spin_lock_irqsave(&state->lock, flags);
 	}
 
 	current->state = TASK_RUNNING;
 	remove_wait_queue(&state->wait_queue, &wait);
-
+	spin_unlock_irqrestore(&state->lock, flags);
+	
 	if (ret)
 		return ret;
 
@@ -748,7 +810,7 @@ static ssize_t adb_read(struct file *file, char *buf,
 	return ret;
 }
 
-static ssize_t adb_write(struct file *file, const char *buf,
+static ssize_t adb_write(struct file *file, const char __user *buf,
 			 size_t count, loff_t *ppos)
 {
 	int ret/*, i*/;
@@ -757,6 +819,8 @@ static ssize_t adb_write(struct file *file, const char *buf,
 
 	if (count < 2 || count > sizeof(req->data))
 		return -EINVAL;
+	if (adb_controller == NULL)
+		return -ENXIO;
 	ret = verify_area(VERIFY_READ, buf, count);
 	if (ret)
 		return ret;
@@ -776,22 +840,35 @@ static ssize_t adb_write(struct file *file, const char *buf,
 		goto out;
 
 	atomic_inc(&state->n_pending);
-	if (adb_controller == NULL) return -ENXIO;
 
+	/* If a probe is in progress or we are sleeping, wait for it to complete */
+	down(&adb_probe_mutex);
+
+	/* Queries are special requests sent to the ADB driver itself */
+	if (req->data[0] == ADB_QUERY) {
+		if (count > 1)
+			ret = do_adb_query(req);
+		else
+			ret = -EINVAL;
+		up(&adb_probe_mutex);
+	}
 	/* Special case for ADB_BUSRESET request, all others are sent to
 	   the controller */
-	if ((req->data[0] == ADB_PACKET)&&(count > 1)
+	else if ((req->data[0] == ADB_PACKET)&&(count > 1)
 		&&(req->data[1] == ADB_BUSRESET)) {
 		ret = do_adb_reset_bus();
+		up(&adb_probe_mutex);
 		atomic_dec(&state->n_pending);
+		if (ret == 0)
+			ret = count;
 		goto out;
 	} else {	
 		req->reply_expected = ((req->data[1] & 0xc) == 0xc);
-
 		if (adb_controller && adb_controller->send_request)
 			ret = adb_controller->send_request(req, 0);
 		else
 			ret = -ENXIO;
+		up(&adb_probe_mutex);
 	}
 
 	if (ret != 0) {
@@ -806,21 +883,19 @@ out:
 }
 
 static struct file_operations adb_fops = {
-	llseek:		no_llseek,
-	read:		adb_read,
-	write:		adb_write,
-	open:		adb_open,
-	release:	adb_release,
+	.llseek		= no_llseek,
+	.read		= adb_read,
+	.write		= adb_write,
+	.open		= adb_open,
+	.release	= adb_release,
 };
 
 static void
 adbdev_init(void)
 {
-	if (devfs_register_chrdev(ADB_MAJOR, "adb", &adb_fops))
+	if (register_chrdev(ADB_MAJOR, "adb", &adb_fops))
 		printk(KERN_ERR "adb: unable to get major %d\n", ADB_MAJOR);
 	else
-		devfs_register (NULL, "adb", DEVFS_FL_DEFAULT,
-				ADB_MAJOR, 0,
-				S_IFCHR | S_IRUSR | S_IWUSR,
-				&adb_fops, NULL);
+		devfs_mk_cdev(MKDEV(ADB_MAJOR, 0),
+				S_IFCHR | S_IRUSR | S_IWUSR, "adb");
 }

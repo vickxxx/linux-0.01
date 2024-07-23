@@ -20,42 +20,19 @@
 #define NBD_SET_SIZE_BLOCKS	_IO( 0xab, 7 )
 #define NBD_DISCONNECT  _IO( 0xab, 8 )
 
-#ifdef MAJOR_NR
+enum {
+	NBD_CMD_READ = 0,
+	NBD_CMD_WRITE = 1,
+	NBD_CMD_DISC = 2
+};
 
-#include <linux/locks.h>
-#include <asm/semaphore.h>
-
-#define LOCAL_END_REQUEST
-
-#include <linux/blk.h>
 
 #ifdef PARANOIA
 extern int requests_in;
 extern int requests_out;
 #endif
 
-static void
-nbd_end_request(struct request *req)
-{
-	struct buffer_head *bh;
-	unsigned nsect;
-	unsigned long flags;
-	int uptodate = (req->errors == 0) ? 1 : 0;
-
-#ifdef PARANOIA
-	requests_out++;
-#endif
-	spin_lock_irqsave(&io_request_lock, flags);
-	while((bh = req->bh) != NULL) {
-		nsect = bh->b_size >> 9;
-		blk_finished_io(nsect);
-		req->bh = bh->b_reqnext;
-		bh->b_reqnext = NULL;
-		bh->b_end_io(bh, uptodate);
-	}
-	blkdev_release_request(req);
-	spin_unlock_irqrestore(&io_request_lock, flags);
-}
+#define nbd_cmd(req) ((req)->cmd[0])
 
 #define MAX_NBD 128
 
@@ -66,12 +43,16 @@ struct nbd_device {
 #define NBD_READ_ONLY 0x0001
 #define NBD_WRITE_NOCHK 0x0002
 	struct socket * sock;
-	struct file * file; 		/* If == NULL, device is not ready, yet	*/
-	int magic;			/* FIXME: not if debugging is off	*/
-	struct list_head queue_head;	/* Requests are added here...			*/
-	struct semaphore queue_lock;
+	struct file * file; 	/* If == NULL, device is not ready, yet	*/
+	int magic;		/* FIXME: not if debugging is off	*/
+	spinlock_t queue_lock;
+	struct list_head queue_head;/* Requests are added here...	*/
+	struct semaphore tx_lock;
+	struct gendisk *disk;
+	int blksize;
+	int blksize_bits;
+	u64 bytesize;
 };
-#endif
 
 /* This now IS in some kind of include file...	*/
 

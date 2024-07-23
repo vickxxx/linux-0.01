@@ -35,14 +35,12 @@
 static char version[] = "sb1000.c:v1.1.2 6/01/98 (fventuri@mediaone.net)\n";
 
 #include <linux/module.h>
-
 #include <linux/version.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/errno.h>
+#include <linux/if_cablemodem.h> /* for SIOGCM/SIOSCM stuff */
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/ioport.h>
@@ -50,17 +48,13 @@ static char version[] = "sb1000.c:v1.1.2 6/01/98 (fventuri@mediaone.net)\n";
 #include <linux/if_arp.h>
 #include <linux/skbuff.h>
 #include <linux/delay.h>	/* for udelay() */
-#include <asm/processor.h>
+#include <linux/etherdevice.h>
+#include <linux/pnp.h>
 
 #include <asm/bitops.h>
 #include <asm/io.h>
+#include <asm/processor.h>
 #include <asm/uaccess.h>
-#include <linux/etherdevice.h>
-#include <linux/isapnp.h>
-
-/* for SIOGCM/SIOSCM stuff */
-
-#include <linux/if_cablemodem.h>
 
 #ifdef SB1000_DEBUG
 int sb1000_debug = SB1000_DEBUG;
@@ -90,7 +84,7 @@ extern int sb1000_probe(struct net_device *dev);
 static int sb1000_open(struct net_device *dev);
 static int sb1000_dev_ioctl (struct net_device *dev, struct ifreq *ifr, int cmd);
 static int sb1000_start_xmit(struct sk_buff *skb, struct net_device *dev);
-static void sb1000_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t sb1000_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static struct net_device_stats *sb1000_stats(struct net_device *dev);
 static int sb1000_close(struct net_device *dev);
 
@@ -137,144 +131,126 @@ static inline int sb1000_set_PIDs(const int ioaddr[], const char* name,
 static inline int sb1000_rx(struct net_device *dev);
 static inline void sb1000_error_dpc(struct net_device *dev);
 
-static struct isapnp_device_id id_table[] = {
-	{	ISAPNP_ANY_ID, ISAPNP_ANY_ID,
-		ISAPNP_VENDOR('G','I','C'), ISAPNP_FUNCTION(0x1000), 0 },
-	{0}
+static const struct pnp_device_id sb1000_pnp_ids[] = {
+	{ "GIC1000", 0 },
+	{ "", 0 }
 };
+MODULE_DEVICE_TABLE(pnp, sb1000_pnp_ids);
 
-MODULE_DEVICE_TABLE(isapnp, id_table);
-
-/* probe for SB1000 using Plug-n-Play mechanism */
-int
-sb1000_probe(struct net_device *dev)
+static int
+sb1000_probe_one(struct pnp_dev *pdev, const struct pnp_device_id *id)
 {
-
+	struct net_device *dev;
 	unsigned short ioaddr[2], irq;
-	struct pci_dev *idev=NULL;
 	unsigned int serial_number;
+	int error = -ENODEV;
 	
-	while(1)
-	{
-		/*
-		 *	Find the card
-		 */
-		 
-		idev=isapnp_find_dev(NULL, ISAPNP_VENDOR('G','I','C'),
-			ISAPNP_FUNCTION(0x1000), idev);
-			
-		/*
-		 *	No card
-		 */
-		 
-		if(idev==NULL)
-			return -ENODEV;
-			
-		/*
-		 *	Bring it online
-		 */
-		 
-		idev->prepare(idev);
-		idev->activate(idev);
+	if (pnp_device_attach(pdev) < 0)
+		return -ENODEV;
+	if (pnp_activate_dev(pdev) < 0)
+		goto out_detach;
+
+	if (!pnp_port_valid(pdev, 0) || !pnp_port_valid(pdev, 1))
+		goto out_disable;
+	if (!pnp_irq_valid(pdev, 0))
+		goto out_disable;
 		
-		/*
-		 *	Ports free ?
-		 */
-		 
-		if(!idev->resource[0].start || check_region(idev->resource[0].start, 16))
-			continue;
-		if(!idev->resource[1].start || check_region(idev->resource[1].start, 16))
-			continue;
+	serial_number = pdev->card->serial;
 		
-		serial_number = idev->bus->serial;
+	ioaddr[0] = pnp_port_start(pdev, 0);
+	ioaddr[1] = pnp_port_start(pdev, 0);
 		
-		ioaddr[0]=idev->resource[0].start;
-		ioaddr[1]=idev->resource[1].start;
-		
-		irq = idev->irq_resource[0].start;
+	irq = pnp_irq(pdev, 0);
 
-		/* check I/O base and IRQ */
-		if (dev->base_addr != 0 && dev->base_addr != ioaddr[0])
-			continue;
-		if (dev->rmem_end != 0 && dev->rmem_end != ioaddr[1])
-			continue;
-		if (dev->irq != 0 && dev->irq != irq)
-			continue;
-			
-		/*
-		 *	Ok set it up.
-		 */
-		 
-		 
-		dev->base_addr = ioaddr[0];
-		/* rmem_end holds the second I/O address - fv */
-		dev->rmem_end = ioaddr[1];
-		dev->irq = irq;
+	if (!request_region(ioaddr[0], 16, "sb1000"))
+		goto out_disable;
+	if (!request_region(ioaddr[1], 16, "sb1000"))
+		goto out_release_region0;
 
-		if (sb1000_debug > 0)
-			printk(KERN_NOTICE "%s: sb1000 at (%#3.3lx,%#3.3lx), "
-				"S/N %#8.8x, IRQ %d.\n", dev->name, dev->base_addr,
-				dev->rmem_end, serial_number, dev->irq);
-
-		dev = init_etherdev(dev, 0);
-		if (!dev)
-			return -ENOMEM;
-		SET_MODULE_OWNER(dev);
-
-		/* Make up a SB1000-specific-data structure. */
-		dev->priv = kmalloc(sizeof(struct sb1000_private), GFP_KERNEL);
-		if (dev->priv == NULL)
-			return -ENOMEM;
-		memset(dev->priv, 0, sizeof(struct sb1000_private));
-
-		if (sb1000_debug > 0)
-			printk(KERN_NOTICE "%s", version);
-
-		/* The SB1000-specific entries in the device structure. */
-		dev->open = sb1000_open;
-		dev->do_ioctl = sb1000_dev_ioctl;
-		dev->hard_start_xmit = sb1000_start_xmit;
-		dev->stop = sb1000_close;
-		dev->get_stats = sb1000_stats;
-
-		/* Fill in the generic fields of the device structure. */
-		dev->change_mtu		= NULL;
-		dev->hard_header	= NULL;
-		dev->rebuild_header 	= NULL;
-		dev->set_mac_address 	= NULL;
-		dev->header_cache_update= NULL;
-
-		dev->type		= ARPHRD_ETHER;
-		dev->hard_header_len 	= 0;
-		dev->mtu		= 1500;
-		dev->addr_len		= ETH_ALEN;
-		/* hardware address is 0:0:serial_number */
-		dev->dev_addr[0] = 0;
-		dev->dev_addr[1] = 0;
-		dev->dev_addr[2] = serial_number >> 24 & 0xff;
-		dev->dev_addr[3] = serial_number >> 16 & 0xff;
-		dev->dev_addr[4] = serial_number >>  8 & 0xff;
-		dev->dev_addr[5] = serial_number >>  0 & 0xff;
-		dev->tx_queue_len	= 0;
-	
-		/* New-style flags. */
-		dev->flags		= IFF_POINTOPOINT|IFF_NOARP;
-
-		/* Lock resources */
-
-		request_region(ioaddr[0], 16, dev->name);
-		request_region(ioaddr[1], 16, dev->name);
-
-		return 0;
+	dev = alloc_etherdev(sizeof(struct sb1000_private));
+	if (!dev) {
+		error = -ENOMEM;
+		goto out_release_regions;
 	}
+
+		 
+	dev->base_addr = ioaddr[0];
+	/* mem_start holds the second I/O address */
+	dev->mem_start = ioaddr[1];
+	dev->irq = irq;
+
+	if (sb1000_debug > 0)
+		printk(KERN_NOTICE "%s: sb1000 at (%#3.3lx,%#3.3lx), "
+			"S/N %#8.8x, IRQ %d.\n", dev->name, dev->base_addr,
+			dev->mem_start, serial_number, dev->irq);
+
+	/*
+	 * The SB1000 is an rx-only cable modem device.  The uplink is a modem
+	 * and we do not want to arp on it.
+	 */
+	dev->flags = IFF_POINTOPOINT|IFF_NOARP;
+
+	SET_MODULE_OWNER(dev);
+	SET_NETDEV_DEV(dev, &pdev->dev);
+
+	if (sb1000_debug > 0)
+		printk(KERN_NOTICE "%s", version);
+
+	/* The SB1000-specific entries in the device structure. */
+	dev->open		= sb1000_open;
+	dev->do_ioctl		= sb1000_dev_ioctl;
+	dev->hard_start_xmit	= sb1000_start_xmit;
+	dev->stop		= sb1000_close;
+	dev->get_stats		= sb1000_stats;
+
+	/* hardware address is 0:0:serial_number */
+	dev->dev_addr[2]	= serial_number >> 24 & 0xff;
+	dev->dev_addr[3]	= serial_number >> 16 & 0xff;
+	dev->dev_addr[4]	= serial_number >>  8 & 0xff;
+	dev->dev_addr[5]	= serial_number >>  0 & 0xff;
+
+	pnp_set_drvdata(pdev, dev);
+
+	error = register_netdev(dev);
+	if (error)
+		goto out_release_regions;
+	return 0;
+
+ out_release_regions:
+	release_region(ioaddr[1], 16);
+ out_release_region0:
+	release_region(ioaddr[0], 16);
+ out_disable:
+	pnp_disable_dev(pdev);
+ out_detach:
+	pnp_device_detach(pdev);
+	return error;
 }
+
+static void
+sb1000_remove_one(struct pnp_dev *pdev)
+{
+	struct net_device *dev = pnp_get_drvdata(pdev);
+
+	unregister_netdev(dev);
+	release_region(dev->base_addr, 16);
+	release_region(dev->mem_start, 16);
+	kfree(dev);
+}
+
+static struct pnp_driver sb1000_driver = {
+	.name		= "sb1000",
+	.id_table	= sb1000_pnp_ids,
+	.probe		= sb1000_probe_one,
+	.remove		= sb1000_remove_one,
+};
 
 
 /*
  * SB1000 hardware routines to be used during open/configuration phases
  */
 
-const int TimeOutJiffies = (int)(8.75 * HZ);
+const int TimeOutJiffies = (875 * HZ) / 100;
 
 static inline void nicedelay(unsigned long usecs)
 {
@@ -294,10 +270,10 @@ card_wait_for_busy_clear(const int ioaddr[], const char* name)
 	timeout = jiffies + TimeOutJiffies;
 	while (a & 0x80 || a & 0x40) {
 		/* a little sleep */
-		current->state = TASK_INTERRUPTIBLE;
-		schedule_timeout(0);
+		yield();
+
 		a = inb(ioaddr[0] + 7);
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: card_wait_for_busy_clear timeout\n",
 				name);
 			return -ETIME;
@@ -318,10 +294,10 @@ card_wait_for_ready(const int ioaddr[], const char* name, unsigned char in[])
 	timeout = jiffies + TimeOutJiffies;
 	while (a & 0x80 || !(a & 0x40)) {
 		/* a little sleep */
-		current->state = TASK_INTERRUPTIBLE;
-		schedule_timeout(0);
+		yield();
+
 		a = inb(ioaddr[1] + 6);
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: card_wait_for_ready timeout\n",
 				name);
 			return -ETIME;
@@ -395,7 +371,7 @@ sb1000_wait_for_ready(const int ioaddr[], const char* name)
 
 	timeout = jiffies + Sb1000TimeOutJiffies;
 	while (inb(ioaddr[1] + 6) & 0x80) {
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: sb1000_wait_for_ready timeout\n",
 				name);
 			return -ETIME;
@@ -403,7 +379,7 @@ sb1000_wait_for_ready(const int ioaddr[], const char* name)
 	}
 	timeout = jiffies + Sb1000TimeOutJiffies;
 	while (!(inb(ioaddr[1] + 6) & 0x40)) {
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: sb1000_wait_for_ready timeout\n",
 				name);
 			return -ETIME;
@@ -421,7 +397,7 @@ sb1000_wait_for_ready_clear(const int ioaddr[], const char* name)
 
 	timeout = jiffies + Sb1000TimeOutJiffies;
 	while (inb(ioaddr[1] + 6) & 0x80) {
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: sb1000_wait_for_ready_clear timeout\n",
 				name);
 			return -ETIME;
@@ -429,7 +405,7 @@ sb1000_wait_for_ready_clear(const int ioaddr[], const char* name)
 	}
 	timeout = jiffies + Sb1000TimeOutJiffies;
 	while (inb(ioaddr[1] + 6) & 0x40) {
-		if (jiffies >= timeout) {
+		if (time_after_eq(jiffies, timeout)) {
 			printk(KERN_WARNING "%s: sb1000_wait_for_ready_clear timeout\n",
 				name);
 			return -ETIME;
@@ -933,8 +909,8 @@ sb1000_error_dpc(struct net_device *dev)
 	const int ErrorDpcCounterInitialize = 200;
 
 	ioaddr[0] = dev->base_addr;
-	/* rmem_end holds the second I/O address - fv */
-	ioaddr[1] = dev->rmem_end;
+	/* mem_start holds the second I/O address */
+	ioaddr[1] = dev->mem_start;
 	name = dev->name;
 
 	sb1000_wait_for_ready_clear(ioaddr, name);
@@ -959,11 +935,9 @@ sb1000_open(struct net_device *dev)
 	const unsigned short FirmwareVersion[] = {0x01, 0x01};
 
 	ioaddr[0] = dev->base_addr;
-	/* rmem_end holds the second I/O address - fv */
-	ioaddr[1] = dev->rmem_end;
+	/* mem_start holds the second I/O address */
+	ioaddr[1] = dev->mem_start;
 	name = dev->name;
-	request_region(ioaddr[0], SB1000_IO_EXTENT, "sb1000");
-	request_region(ioaddr[1], SB1000_IO_EXTENT, "sb1000");
 
 	/* initialize sb1000 */
 	if ((status = sb1000_reset(ioaddr, name)))
@@ -1029,8 +1003,8 @@ static int sb1000_dev_ioctl(struct net_device *dev, struct ifreq *ifr, int cmd)
 		return -ENODEV;
 
 	ioaddr[0] = dev->base_addr;
-	/* rmem_end holds the second I/O address - fv */
-	ioaddr[1] = dev->rmem_end;
+	/* mem_start holds the second I/O address */
+	ioaddr[1] = dev->mem_start;
 	name = dev->name;
 
 	switch (cmd) {
@@ -1111,7 +1085,7 @@ sb1000_start_xmit(struct sk_buff *skb, struct net_device *dev)
 }
 
 /* SB1000 interrupt handler. */
-static void sb1000_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sb1000_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	char *name;
 	unsigned char st;
@@ -1126,18 +1100,18 @@ static void sb1000_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	if (dev == NULL) {
 		printk(KERN_ERR "sb1000_interrupt(): irq %d for unknown device.\n",
 			irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	ioaddr[0] = dev->base_addr;
-	/* rmem_end holds the second I/O address - fv */
-	ioaddr[1] = dev->rmem_end;
+	/* mem_start holds the second I/O address */
+	ioaddr[1] = dev->mem_start;
 	name = dev->name;
 
 	/* is it a good interrupt? */
 	st = inb(ioaddr[1] + 6);
 	if (!(st & 0x08 && st & 0x20)) {
-		return;
+		return IRQ_NONE;
 	}
 
 	if (sb1000_debug > 3)
@@ -1168,7 +1142,7 @@ static void sb1000_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		lp->rx_error_count = 0;
 	}
 
-	return;
+	return IRQ_HANDLED;
 }
 
 static struct net_device_stats *sb1000_stats(struct net_device *dev)
@@ -1189,8 +1163,8 @@ static int sb1000_close(struct net_device *dev)
 	netif_stop_queue(dev);
 	
 	ioaddr[0] = dev->base_addr;
-	/* rmem_end holds the second I/O address - fv */
-	ioaddr[1] = dev->rmem_end;
+	/* mem_start holds the second I/O address */
+	ioaddr[1] = dev->mem_start;
 
 	free_irq(dev->irq, dev);
 	/* If we don't do this, we can't re-insmod it later. */
@@ -1206,60 +1180,21 @@ static int sb1000_close(struct net_device *dev)
 	return 0;
 }
 
-#ifdef MODULE
 MODULE_AUTHOR("Franco Venturi <fventuri@mediaone.net>");
 MODULE_DESCRIPTION("General Instruments SB1000 driver");
 MODULE_LICENSE("GPL");
 
-MODULE_PARM(io, "1-2i");
-MODULE_PARM(irq, "i");
-MODULE_PARM_DESC(io, "SB1000 I/O base addresses");
-MODULE_PARM_DESC(irq, "SB1000 IRQ number");
-
-static struct net_device dev_sb1000;
-static int io[2];
-static int irq;
-
-int
-init_module(void)
+static int __init
+sb1000_init(void)
 {
-	int i;
-	for (i = 0; i < 100; i++) {
-		sprintf(dev_sb1000.name, "cm%d", i);
-		if (dev_get(dev_sb1000.name) == 0) break;
-	}
-	if (i == 100) {
-		printk(KERN_ERR "sb1000: can't register any device cm<n>\n");
-		return -ENFILE;
-	}
-	dev_sb1000.init = sb1000_probe;
-	dev_sb1000.base_addr = io[0];
-	/* rmem_end holds the second I/O address - fv */
-	dev_sb1000.rmem_end = io[1];
-	dev_sb1000.irq = irq;
-	if (register_netdev(&dev_sb1000) != 0) {
-		printk(KERN_ERR "sb1000: failed to register device (io: %03x,%03x   "
-			"irq: %d)\n", io[0], io[1], irq);
-		return -EIO;
-	}
-	return 0;
+	return pnp_register_driver(&sb1000_driver);
 }
 
-void cleanup_module(void)
+static void __exit
+sb1000_exit(void)
 {
-	unregister_netdev(&dev_sb1000);
-	release_region(dev_sb1000.base_addr, 16);
-	release_region(dev_sb1000.rmem_end, 16);
-	kfree(dev_sb1000.priv);
-	dev_sb1000.priv = NULL;
+	pnp_unregister_driver(&sb1000_driver);
 }
-#endif /* MODULE */
-
-/*
- * Local variables:
- *  compile-command: "gcc -D__KERNEL__ -DMODULE -Wall -Wstrict-prototypes -O -m486 -c sb1000.c"
- *  version-control: t
- *  tab-width: 4
- *  c-basic-offset: 4
- * End:
- */
+
+module_init(sb1000_init);
+module_exit(sb1000_exit);

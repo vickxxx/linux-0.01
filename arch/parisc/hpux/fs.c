@@ -9,6 +9,7 @@
 #include <linux/file.h>
 #include <linux/smp_lock.h>
 #include <linux/slab.h>
+#include <linux/ptrace.h>
 #include <asm/errno.h>
 #include <asm/uaccess.h>
 
@@ -34,8 +35,7 @@ out:
 }
 
 struct hpux_dirent {
-	long	d_off_pad; /* we only have a 32-bit off_t */
-	long	d_off;
+	loff_t	d_off;
 	ino_t	d_ino;
 	short	d_reclen;
 	short	d_namlen;
@@ -52,7 +52,8 @@ struct getdents_callback {
 #define NAME_OFFSET(de) ((int) ((de)->d_name - (char *) (de)))
 #define ROUND_UP(x) (((x)+sizeof(long)-1) & ~(sizeof(long)-1))
 
-static int filldir(void * __buf, const char * name, int namlen, loff_t offset, ino_t ino)
+static int filldir(void * __buf, const char * name, int namlen, loff_t offset,
+		ino_t ino, unsigned d_type)
 {
 	struct hpux_dirent * dirent;
 	struct getdents_callback * buf = (struct getdents_callback *) __buf;
@@ -83,42 +84,20 @@ static int filldir(void * __buf, const char * name, int namlen, loff_t offset, i
 int hpux_getdents(unsigned int fd, struct hpux_dirent *dirent, unsigned int count)
 {
 	struct file * file;
-	struct dentry * dentry;
-	struct inode * inode;
 	struct hpux_dirent * lastdirent;
 	struct getdents_callback buf;
-	int error;
+	int error = -EBADF;
 
-	lock_kernel();
-	error = -EBADF;
 	file = fget(fd);
 	if (!file)
 		goto out;
-
-	dentry = file->f_dentry;
-	if (!dentry)
-		goto out_putf;
-
-	inode = dentry->d_inode;
-	if (!inode)
-		goto out_putf;
 
 	buf.current_dir = dirent;
 	buf.previous = NULL;
 	buf.count = count;
 	buf.error = 0;
 
-	error = -ENOTDIR;
-	if (!file->f_op || !file->f_op->readdir)
-		goto out_putf;
-
-	/*
-	 * Get the inode's semaphore to prevent changes
-	 * to the directory while we read it.
-	 */
-	down(&inode->i_sem);
-	error = file->f_op->readdir(file, &buf, filldir);
-	up(&inode->i_sem);
+	error = vfs_readdir(file, filldir, &buf);
 	if (error < 0)
 		goto out_putf;
 	error = buf.error;
@@ -131,7 +110,6 @@ int hpux_getdents(unsigned int fd, struct hpux_dirent *dirent, unsigned int coun
 out_putf:
 	fput(file);
 out:
-	unlock_kernel();
 	return error;
 }
 
@@ -141,110 +119,56 @@ int hpux_mount(const char *fs, const char *path, int mflag,
 	return -ENOSYS;
 }
 
-static int cp_hpux_stat(struct inode * inode, struct hpux_stat64 * statbuf)
+static int cp_hpux_stat(struct kstat *stat, struct hpux_stat64 *statbuf)
 {
 	struct hpux_stat64 tmp;
-	unsigned int blocks, indirect;
 
 	memset(&tmp, 0, sizeof(tmp));
-	tmp.st_dev = kdev_t_to_nr(inode->i_dev);
-	tmp.st_ino = inode->i_ino;
-	tmp.st_mode = inode->i_mode;
-	tmp.st_nlink = inode->i_nlink;
-	tmp.st_uid = inode->i_uid;
-	tmp.st_gid = inode->i_gid;
-	tmp.st_rdev = kdev_t_to_nr(inode->i_rdev);
-	tmp.st_size = inode->i_size;
-	tmp.st_atime = inode->i_atime;
-	tmp.st_mtime = inode->i_mtime;
-	tmp.st_ctime = inode->i_ctime;
-
-#define D_B   7
-#define I_B   (BLOCK_SIZE / sizeof(unsigned short))
-
-	if (!inode->i_blksize) {
-		blocks = (tmp.st_size + BLOCK_SIZE - 1) / BLOCK_SIZE;
-		if (blocks > D_B) {
-			indirect = (blocks - D_B + I_B - 1) / I_B;
-			blocks += indirect;
-			if (indirect > 1) {
-				indirect = (indirect - 1 + I_B - 1) / I_B;
-				blocks += indirect;
-				if (indirect > 1)
-					blocks++;
-			}
-		}
-		tmp.st_blocks = (BLOCK_SIZE / 512) * blocks;
-		tmp.st_blksize = BLOCK_SIZE;
-	} else {
-		tmp.st_blocks = inode->i_blocks;
-		tmp.st_blksize = inode->i_blksize;
-	}
+	tmp.st_dev = stat->dev;
+	tmp.st_ino = stat->ino;
+	tmp.st_mode = stat->mode;
+	tmp.st_nlink = stat->nlink;
+	tmp.st_uid = stat->uid;
+	tmp.st_gid = stat->gid;
+	tmp.st_rdev = stat->rdev;
+	tmp.st_size = stat->size;
+	tmp.st_atime = stat->atime.tv_sec;
+	tmp.st_mtime = stat->mtime.tv_sec;
+	tmp.st_ctime = stat->ctime.tv_sec;
+	tmp.st_blocks = stat->blocks;
+	tmp.st_blksize = stat->blksize;
 	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
-/*
- * Revalidate the inode. This is required for proper NFS attribute caching.
- * Blatently copied wholesale from fs/stat.c
- */
-static __inline__ int
-do_revalidate(struct dentry *dentry)
+long hpux_stat64(char *filename, struct hpux_stat64 *statbuf)
 {
-	struct inode * inode = dentry->d_inode;
-	if (inode->i_op && inode->i_op->revalidate)
-		return inode->i_op->revalidate(dentry);
-	return 0;
-}
+	struct kstat stat;
+	int error = vfs_stat(filename, &stat);
 
-long hpux_stat64(const char *path, struct hpux_stat64 *buf)
-{
-	struct nameidata nd;
-	int error;
+	if (!error)
+		error = cp_hpux_stat(&stat, statbuf);
 
-	lock_kernel();
-	error = user_path_walk(path, &nd);
-	if (!error) {
-		error = do_revalidate(nd.dentry);
-		if (!error)
-			error = cp_hpux_stat(nd.dentry->d_inode, buf);
-		path_release(&nd);
-	}
-	unlock_kernel();
 	return error;
 }
 
 long hpux_fstat64(unsigned int fd, struct hpux_stat64 *statbuf)
 {
-	struct file * f;
-	int err = -EBADF;
+	struct kstat stat;
+	int error = vfs_fstat(fd, &stat);
 
-	lock_kernel();
-	f = fget(fd);
-	if (f) {
-		struct dentry * dentry = f->f_dentry;
+	if (!error)
+		error = cp_hpux_stat(&stat, statbuf);
 
-		err = do_revalidate(dentry);
-		if (!err)
-			err = cp_hpux_stat(dentry->d_inode, statbuf);
-		fput(f);
-	}
-	unlock_kernel();
-	return err;
+	return error;
 }
 
 long hpux_lstat64(char *filename, struct hpux_stat64 *statbuf)
 {
-	struct nameidata nd;
-	int error;
+	struct kstat stat;
+	int error = vfs_lstat(filename, &stat);
 
-	lock_kernel();
-	error = user_path_walk_link(filename, &nd);
-	if (!error) {
-		error = do_revalidate(nd.dentry);
-		if (!error)
-			error = cp_hpux_stat(nd.dentry->d_inode, statbuf);
-		path_release(&nd);
-	}
-	unlock_kernel();
+	if (!error)
+		error = cp_hpux_stat(&stat, statbuf);
+
 	return error;
 }

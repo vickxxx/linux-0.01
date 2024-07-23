@@ -4,17 +4,19 @@
  * Copyright (c) 1999 Al Smith
  */
 
+#include <linux/buffer_head.h>
 #include <linux/efs_fs.h>
+#include <linux/smp_lock.h>
 
 static int efs_readdir(struct file *, void *, filldir_t);
 
 struct file_operations efs_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	efs_readdir,
+	.read		= generic_read_dir,
+	.readdir	= efs_readdir,
 };
 
 struct inode_operations efs_dir_inode_operations = {
-	lookup:		efs_lookup,
+	.lookup		= efs_lookup,
 };
 
 static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
@@ -31,6 +33,8 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 	if (inode->i_size & (EFS_DIRBSIZE-1))
 		printk(KERN_WARNING "EFS: WARNING: readdir(): directory size not a multiple of EFS_DIRBSIZE\n");
 
+	lock_kernel();
+
 	/* work out where this entry can be found */
 	block = filp->f_pos >> EFS_DIRBSIZE_BITS;
 
@@ -40,7 +44,7 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 	/* look at all blocks */
 	while (block < inode->i_blocks) {
 		/* read the dir block */
-		bh = bread(inode->i_dev, efs_bmap(inode, block), EFS_DIRBSIZE);
+		bh = sb_bread(inode->i_sb, efs_bmap(inode, block));
 
 		if (!bh) {
 			printk(KERN_ERR "EFS: readdir(): failed to read dir block %d\n", block);
@@ -91,7 +95,7 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 				}
 				brelse(bh);
 				filp->f_pos = (block << EFS_DIRBSIZE_BITS) | slot;
-				return 0;
+				goto out;
 			}
 			slot++;
 		}
@@ -102,6 +106,8 @@ static int efs_readdir(struct file *filp, void *dirent, filldir_t filldir) {
 	}
 
 	filp->f_pos = (block << EFS_DIRBSIZE_BITS) | slot;
+out:
+	unlock_kernel();
 	return 0;
 }
 

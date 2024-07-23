@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.prom.h 1.19 08/17/01 15:23:17 paulus
- */
-/*
  * Definitions for talking to the Open Firmware PROM on
  * Power Macintosh computers.
  *
@@ -86,9 +83,24 @@ extern void prom_get_irq_senses(unsigned char *, int, int);
 extern int prom_n_addr_cells(struct device_node* np);
 extern int prom_n_size_cells(struct device_node* np);
 
+extern struct resource*
+request_OF_resource(struct device_node* node, int index, const char* name_postfix);
+extern int release_OF_resource(struct device_node* node, int index);
+
 extern void print_properties(struct device_node *node);
 extern int call_rtas(const char *service, int nargs, int nret,
 		     unsigned long *outputs, ...);
+
+/*
+ * PCI <-> OF matching functions 
+ */
+struct pci_bus;
+struct pci_dev;
+extern int pci_device_from_OF_node(struct device_node *node,
+				   u8* bus, u8* devfn);
+extern struct device_node* pci_busdev_to_OF_node(struct pci_bus *, int);
+extern struct device_node* pci_device_to_OF_node(struct pci_dev *);
+extern void pci_create_OF_bus_map(void);
 
 /*
  * When we call back to the Open Firmware client interface, we usually
@@ -103,10 +115,11 @@ extern int call_rtas(const char *service, int nargs, int nret,
  * pointer values.  See arch/ppc/kernel/prom.c for how these are used.
  */
 extern unsigned long reloc_offset(void);
+extern unsigned long add_reloc_offset(unsigned long);
+extern unsigned long sub_reloc_offset(unsigned long);
 
-#define PTRRELOC(x)	((typeof(x))((unsigned long)(x) + offset))
-#define PTRUNRELOC(x)	((typeof(x))((unsigned long)(x) - offset))
-#define RELOC(x)	(*PTRRELOC(&(x)))
+#define PTRRELOC(x)	((typeof(x))add_reloc_offset((unsigned long)(x)))
+#define PTRUNRELOC(x)	((typeof(x))sub_reloc_offset((unsigned long)(x)))
 
 #endif /* _PPC_PROM_H */
 #endif /* __KERNEL__ */

@@ -3,26 +3,20 @@
 #
 # create a compressed vmlinuz image from the original vmlinux
 #
-# Note! SYSTEM, ZTEXTADDR, ZBSSADDR and ZRELADDR are now exported
+# Note! ZTEXTADDR, ZBSSADDR and ZRELADDR are now exported
 # from arch/arm/boot/Makefile
 #
 
-HEAD		 = head.o
-OBJS		 = misc.o
-CFLAGS		 = $(CPPFLAGS) -O2 -DSTDC_HEADERS $(CFLAGS_PROC) -msoft-float
-FONTC		 = $(TOPDIR)/drivers/video/font_acorn_8x8.c
-ZLDFLAGS	 = -p -X -T vmlinux.lds
+HEAD	= head.o
+OBJS	= misc.o
+FONTC	= drivers/video/console/font_acorn_8x8.c
 
 #
 # Architecture dependencies
 #
 ifeq ($(CONFIG_ARCH_ACORN),y)
 OBJS		+= ll_char_wr.o font.o
-ZLDFLAGS	+= -defsym params=$(PARAMS_PHYS)
-endif
-
-ifeq ($(CONFIG_ARCH_NETWINDER),y)
-OBJS		+= head-netwinder.o
+CFLAGS_misc.o	:= -DPARAMS_PHYS=$(PARAMS_PHYS)
 endif
 
 ifeq ($(CONFIG_ARCH_SHARK),y)
@@ -31,6 +25,10 @@ endif
 
 ifeq ($(CONFIG_ARCH_INTEGRATOR),y)
 OBJS		+= head-integrator.o
+endif
+
+ifeq ($(CONFIG_ARCH_CAMELOT),y)
+OBJS		+= head-epxa10db.o
 endif
 
 ifeq ($(CONFIG_ARCH_FTVPCI),y)
@@ -57,41 +55,41 @@ ifeq ($(CONFIG_SA1100_NANOENGINE),y)
 endif
 endif
 
-SEDFLAGS	= s/TEXT_START/$(ZTEXTADDR)/;s/LOAD_ADDR/$(ZRELADDR)/;
-
-ifneq ($(ZBSSADDR),)
-SEDFLAGS	+= s/BSS_START/$(ZBSSADDR)/
-else
-SEDFLAGS	+= s/BSS_START/ALIGN(4)/
+ifeq ($(CONFIG_CPU_XSCALE),y)
+OBJS		+= head-xscale.o
 endif
 
-LIBGCC		:= $(shell $(CC) $(CFLAGS) --print-libgcc-file-name)
+SEDFLAGS	= s/TEXT_START/$(ZTEXTADDR)/;s/LOAD_ADDR/$(ZRELADDR)/;s/BSS_START/$(ZBSSADDR)/
 
-all:		vmlinux
+targets       := vmlinux vmlinux.lds piggy piggy.gz piggy.o \
+                 font.o head.o $(OBJS)
+EXTRA_CFLAGS  := $(CFLAGS_BOOT) -fpic
+EXTRA_AFLAGS  := -traditional
 
-vmlinux:	$(HEAD) $(OBJS) piggy.o vmlinux.lds
-		$(LD) $(ZLDFLAGS) $(HEAD) $(OBJS) piggy.o $(LIBGCC) -o vmlinux
+LDFLAGS_vmlinux := -p -X \
+	$(shell $(CC) $(CFLAGS) --print-libgcc-file-name) -T
 
-$(HEAD): 	$(HEAD:.o=.S)
-		$(CC) $(AFLAGS) -traditional -c $(HEAD:.o=.S)
+$(obj)/vmlinux: $(obj)/vmlinux.lds $(obj)/$(HEAD) $(obj)/piggy.o \
+	 	$(addprefix $(obj)/, $(OBJS)) FORCE
+	$(call if_changed,ld)
+	@:
 
-piggy.o:	$(SYSTEM)
-		$(OBJCOPY) -O binary -R .note -R .comment -S $(SYSTEM) piggy
-		gzip $(GZFLAGS) < piggy > piggy.gz
-		$(LD) -r -o $@ -b binary piggy.gz
-		rm -f piggy piggy.gz
 
-font.o:		$(FONTC)
-		$(CC) $(CFLAGS) -Dstatic= -c -o $@ $(FONTC)
+$(obj)/piggy: vmlinux FORCE
+	$(call if_changed,objcopy)
 
-vmlinux.lds:	vmlinux.lds.in
-		@sed "$(SEDFLAGS)" < vmlinux.lds.in > $@
+$(obj)/piggy.gz: $(obj)/piggy FORCE
+	$(call if_changed,gzip)
 
-clean:;		rm -f vmlinux core piggy* vmlinux.lds
+LDFLAGS_piggy.o := -r -b binary
+$(obj)/piggy.o:  $(obj)/piggy.gz FORCE
+	$(call if_changed,ld)
 
-.PHONY:	vmlinux.lds clean
+CFLAGS_font.o := -Dstatic=
+$(obj)/font.o: $(FONTC)
 
-misc.o: misc.c $(TOPDIR)/include/asm/arch/uncompress.h $(TOPDIR)/lib/inflate.c
+$(obj)/vmlinux.lds: $(obj)/vmlinux.lds.in Makefile arch/arm/boot/Makefile .config
+	@sed "$(SEDFLAGS)" < $< > $@
 
-%.o: %.S
-	$(CC) $(AFLAGS) $(EXTRA_AFLAGS) $(AFLAGS_$@) -c -o $@ $<
+$(obj)/misc.o: $(obj)/misc.c include/asm/arch/uncompress.h lib/inflate.c
+

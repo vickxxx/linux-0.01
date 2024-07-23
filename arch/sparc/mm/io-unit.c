@@ -1,4 +1,4 @@
-/* $Id: io-unit.c,v 1.23 2001/02/13 01:16:43 davem Exp $
+/* $Id: io-unit.c,v 1.24 2001/12/17 07:05:09 davem Exp $
  * io-unit.c:  IO-UNIT specific routines for memory management.
  *
  * Copyright (C) 1997,1998 Jakub Jelinek    (jj@sunsite.mff.cuni.cz)
@@ -9,6 +9,9 @@
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
+#include <linux/mm.h>
+#include <linux/highmem.h>	/* pte_offset_map => kmap_atomic */
+
 #include <asm/scatterlist.h>
 #include <asm/pgalloc.h>
 #include <asm/pgtable.h>
@@ -17,6 +20,8 @@
 #include <asm/io-unit.h>
 #include <asm/mxcc.h>
 #include <asm/bitops.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 /* #define IOUNIT_DEBUG */
 #ifdef IOUNIT_DEBUG
@@ -130,8 +135,9 @@ static void iounit_get_scsi_sgl(struct scatterlist *sg, int sz, struct sbus_bus 
 
 	/* FIXME: Cache some resolved pages - often several sg entries are to the same page */
 	spin_lock_irqsave(&iounit->lock, flags);
-	for (; sz >= 0; sz--) {
-		sg[sz].dvma_address = iounit_get_area(iounit, (unsigned long)sg[sz].address, sg[sz].length);
+	while (sz != 0) {
+		--sz;
+		sg[sz].dvma_address = iounit_get_area(iounit, (unsigned long)page_address(sg[sz].page) + sg[sz].offset, sg[sz].length);
 		sg[sz].dvma_length = sg[sz].length;
 	}
 	spin_unlock_irqrestore(&iounit->lock, flags);
@@ -158,7 +164,8 @@ static void iounit_release_scsi_sgl(struct scatterlist *sg, int sz, struct sbus_
 	struct iounit_struct *iounit = (struct iounit_struct *)sbus->iommu;
 
 	spin_lock_irqsave(&iounit->lock, flags);
-	for (; sz >= 0; sz--) {
+	while (sz != 0) {
+		--sz;
 		len = ((sg[sz].dvma_address & ~PAGE_MASK) + sg[sz].length + (PAGE_SIZE-1)) >> PAGE_SHIFT;
 		vaddr = (sg[sz].dvma_address - IOUNIT_DMA_BASE) >> PAGE_SHIFT;
 		IOD(("iounit_release %08lx-%08lx\n", (long)vaddr, (long)len+vaddr));
@@ -169,12 +176,14 @@ static void iounit_release_scsi_sgl(struct scatterlist *sg, int sz, struct sbus_
 }
 
 #ifdef CONFIG_SBUS
-static void iounit_map_dma_area(unsigned long va, __u32 addr, int len)
+static int iounit_map_dma_area(dma_addr_t *pba, unsigned long va, __u32 addr, int len)
 {
 	unsigned long page, end;
 	pgprot_t dvma_prot;
 	iopte_t *iopte;
 	struct sbus_bus *sbus;
+
+	*pba = addr;
 
 	dvma_prot = __pgprot(SRMMU_CACHE | SRMMU_ET_PTE | SRMMU_PRIV);
 	end = PAGE_ALIGN((addr + len));
@@ -188,7 +197,7 @@ static void iounit_map_dma_area(unsigned long va, __u32 addr, int len)
 
 			pgdp = pgd_offset(init_task.mm, addr);
 			pmdp = pmd_offset(pgdp, addr);
-			ptep = pte_offset(pmdp, addr);
+			ptep = pte_offset_map(pmdp, addr);
 
 			set_pte(ptep, pte_val(mk_pte(virt_to_page(page), dvma_prot)));
 			
@@ -206,6 +215,8 @@ static void iounit_map_dma_area(unsigned long va, __u32 addr, int len)
 	}
 	flush_cache_all();
 	flush_tlb_all();
+
+	return 0;
 }
 
 static void iounit_unmap_dma_area(unsigned long addr, int len)
@@ -214,7 +225,7 @@ static void iounit_unmap_dma_area(unsigned long addr, int len)
 }
 
 /* XXX We do not pass sbus device here, bad. */
-static unsigned long iounit_translate_dvma(unsigned long addr)
+static struct page *iounit_translate_dvma(unsigned long addr)
 {
 	struct sbus_bus *sbus = sbus_root;	/* They are all the same */
 	struct iounit_struct *iounit = (struct iounit_struct *)sbus->iommu;
@@ -223,7 +234,7 @@ static unsigned long iounit_translate_dvma(unsigned long addr)
 
 	i = ((addr - IOUNIT_DMA_BASE) >> PAGE_SHIFT);
 	iopte = (iopte_t *)(iounit->page_table + i);
-	return (iopte_val(*iopte) & 0xFFFFFFF0) << 4; /* XXX sun4d guru, help */
+	return pfn_to_page(iopte_val(*iopte) >> (PAGE_SHIFT-4)); /* XXX sun4d guru, help */
 }
 #endif
 

@@ -3,9 +3,6 @@
 
 #include <asm/scatterlist.h>
 
-#define MIN_PCI_PORT 0x000000
-#define MAX_PCI_PORT 0xffffff
-
 /*
 ** HP PCI platforms generally support multiple bus adapters.
 **    (workstations 1-~4, servers 2-~32)
@@ -19,7 +16,7 @@
 #define PCI_MAX_BUSSES	256
 
 /* [soapbox on]
-** Who the hell can develope stuff without ASSERT or VASSERT?
+** Who the hell can develop stuff without ASSERT or VASSERT?
 ** No one understands all the modules across all platforms.
 ** For linux add another dimension - processor architectures.
 **
@@ -49,18 +46,40 @@
 ** Data needed by pcibios layer belongs here.
 */
 struct pci_hba_data {
-	struct pci_hba_data *next;	/* global chain of HBAs */
-	char           *base_addr;	/* aka Host Physical Address */
-	struct hp_device *iodc_info;	/* Info from PA bus walk */
+	unsigned long	base_addr;	/* aka Host Physical Address */
+	const struct parisc_device *dev; /* device from PA bus walk */
 	struct pci_bus *hba_bus;	/* primary PCI bus below HBA */
 	int		hba_num;	/* I/O port space access "key" */
 	struct resource bus_num;	/* PCI bus numbers */
 	struct resource io_space;	/* PIOP */
-	struct resource mem_space;	/* LMMIO */
-	unsigned long   mem_space_offset;  /* VCLASS support */
+	struct resource lmmio_space;	/* bus addresses < 4Gb */
+	struct resource elmmio_space;	/* additional bus addresses < 4Gb */
+	unsigned long   lmmio_space_offset;  /* CPU view - PCI view */
+	void *          iommu;          /* IOMMU this device is under */
 	/* REVISIT - spinlock to protect resources? */
 };
 
+#define HBA_DATA(d)		((struct pci_hba_data *) (d))
+
+/* 
+** We support 2^16 I/O ports per HBA.  These are set up in the form
+** 0xbbxxxx, where bb is the bus number and xxxx is the I/O port
+** space address.
+*/
+#define HBA_PORT_SPACE_BITS	16
+
+#define HBA_PORT_BASE(h)	((h) << HBA_PORT_SPACE_BITS)
+#define HBA_PORT_SPACE_SIZE	(1UL << HBA_PORT_SPACE_BITS)
+
+#define PCI_PORT_HBA(a)		((a) >> HBA_PORT_SPACE_BITS)
+#define PCI_PORT_ADDR(a)	((a) & (HBA_PORT_SPACE_SIZE - 1))
+
+/*
+** Convert between PCI (IO_VIEW) addresses and processor (PA_VIEW) addresses.
+** Note that we currently support only LMMIO.
+*/
+#define PCI_BUS_ADDR(hba,a)	((a) - hba->lmmio_space_offset)
+#define PCI_HOST_ADDR(hba,a)	((a) + hba->lmmio_space_offset)
 
 /*
 ** KLUGE: linux/pci.h include asm/pci.h BEFORE declaring struct pci_bus
@@ -68,6 +87,12 @@ struct pci_hba_data {
 */
 struct pci_bus;
 struct pci_dev;
+
+/* The PCI address space does equal the physical memory
+ * address space.  The networking and block device layers use
+ * this boolean for bounce buffer decisions.
+ */
+#define PCI_DMA_BUS_IS_PHYS     (1)
 
 /*
 ** Most PCI devices (eg Tulip, NCR720) also export the same registers
@@ -106,81 +131,19 @@ struct pci_bios_ops {
 	void (*fixup_bus)(struct pci_bus *bus);
 };
 
-extern void pcibios_size_bridge(struct pci_bus *, struct pbus_set_ranges_data *);
-
-
-/*
-** See Documentation/DMA-mapping.txt
-*/
-struct pci_dma_ops {
-	int  (*dma_supported)(struct pci_dev *dev, u64 mask);
-	void *(*alloc_consistent)(struct pci_dev *dev, size_t size, dma_addr_t *iova);
-	void (*free_consistent)(struct pci_dev *dev, size_t size, void *vaddr, dma_addr_t iova);
-	dma_addr_t (*map_single)(struct pci_dev *dev, void *addr, size_t size, int direction);
-	void (*unmap_single)(struct pci_dev *dev, dma_addr_t iova, size_t size, int direction);
-	int  (*map_sg)(struct pci_dev *dev, struct scatterlist *sg, int nents, int direction);
-	void (*unmap_sg)(struct pci_dev *dev, struct scatterlist *sg, int nhwents, int direction);
-	void (*dma_sync_single)(struct pci_dev *dev, dma_addr_t iova, size_t size, int direction);
-	void (*dma_sync_sg)(struct pci_dev *dev, struct scatterlist *sg, int nelems, int direction);
-};
-
-
-/*
-** We could live without the hppa_dma_ops indirection if we didn't want
-** to support 4 different dma models with one binary or they were
-** all loadable modules:
-**     I/O MMU        consistent method           dma_sync behavior
-**  =============   ======================       =======================
-**  a) PA-7x00LC    uncachable host memory          flush/purge
-**  b) U2/Uturn      cachable host memory              NOP
-**  c) Ike/Astro     cachable host memory              NOP
-**  d) EPIC/SAGA     memory on EPIC/SAGA         flush/reset DMA channel
-**
-** PA-7[13]00LC processors have a GSC bus interface and no I/O MMU.
-**
-** Systems (eg PCX-T workstations) that don't fall into the above
-** categories will need to modify the needed drivers to perform
-** flush/purge and allocate "regular" cacheable pages for everything.
-*/
-
-extern struct pci_dma_ops *hppa_dma_ops;
-extern struct pci_dma_ops pcxl_dma_ops;
-extern struct pci_dma_ops pcx_dma_ops;
-
-/*
-** Oops hard if we haven't setup hppa_dma_ops by the time the first driver
-** attempts to initialize.
-** Since panic() is a (void)(), pci_dma_panic() is needed to satisfy
-** the (int)() required by pci_dma_supported() interface.
-*/
-static inline int pci_dma_panic(char *msg)
-{
-	panic(msg);
-	return -1;
-}
-
-#define pci_dma_supported(p, m)	( \
-	(NULL == hppa_dma_ops) \
-	?  pci_dma_panic("Dynamic DMA support missing...OOPS!\n(Hint: was Astro/Ike/U2/Uturn not claimed?)\n") \
-	: hppa_dma_ops->dma_supported(p,m) \
-)
-
-#define pci_alloc_consistent(p, s, a)	hppa_dma_ops->alloc_consistent(p,s,a)
-#define pci_free_consistent(p, s, v, a)	hppa_dma_ops->free_consistent(p,s,v,a)
-#define pci_map_single(p, v, s, d)	hppa_dma_ops->map_single(p, v, s, d)
-#define pci_unmap_single(p, a, s, d)	hppa_dma_ops->unmap_single(p, a, s, d)
-#define pci_map_sg(p, sg, n, d)		hppa_dma_ops->map_sg(p, sg, n, d)
-#define pci_unmap_sg(p, sg, n, d)	hppa_dma_ops->unmap_sg(p, sg, n, d)
-
-/* For U2/Astro/Ike based platforms (which are fully I/O coherent)
-** dma_sync is a NOP. Let's keep the performance path short here.
-*/
-#define pci_dma_sync_single(p, a, s, d)	{ if (hppa_dma_ops->dma_sync_single) \
-	hppa_dma_ops->dma_sync_single(p, a, s, d); \
-	}
-#define pci_dma_sync_sg(p, sg, n, d)	{ if (hppa_dma_ops->dma_sync_sg) \
-	hppa_dma_ops->dma_sync_sg(p, sg, n, d); \
-	}
+/* pci_unmap_{single,page} is not a nop, thus... */
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)	\
+	dma_addr_t ADDR_NAME;
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)		\
+	__u32 LEN_NAME;
+#define pci_unmap_addr(PTR, ADDR_NAME)			\
+	((PTR)->ADDR_NAME)
+#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)		\
+	(((PTR)->ADDR_NAME) = (VAL))
+#define pci_unmap_len(PTR, LEN_NAME)			\
+	((PTR)->LEN_NAME)
+#define pci_unmap_len_set(PTR, LEN_NAME, VAL)		\
+	(((PTR)->LEN_NAME) = (VAL))
 
 /*
 ** Stuff declared in arch/parisc/kernel/pci.c
@@ -188,10 +151,17 @@ static inline int pci_dma_panic(char *msg)
 extern struct pci_port_ops *pci_port;
 extern struct pci_bios_ops *pci_bios;
 extern int pci_post_reset_delay;	/* delay after de-asserting #RESET */
+extern int pci_hba_count;
+extern struct pci_hba_data *parisc_pci_hba[];
 
+#ifdef CONFIG_PCI
 extern void pcibios_register_hba(struct pci_hba_data *);
-extern void pcibios_assign_unassigned_resources(struct pci_bus *);
-
+extern void pcibios_set_master(struct pci_dev *);
+#else
+extern inline void pcibios_register_hba(struct pci_hba_data *x)
+{
+}
+#endif
 
 /*
 ** used by drivers/pci/pci.c:pci_do_scan_bus()
@@ -202,17 +172,19 @@ extern void pcibios_assign_unassigned_resources(struct pci_bus *);
 **   To date, only alpha sets this to one. We'll need to set this
 **   to zero for legacy platforms and one for PAT platforms.
 */
-#ifdef __LP64__
-extern int pdc_pat;  /* arch/parisc/kernel/inventory.c */
-#define pcibios_assign_all_busses()	pdc_pat
-#else
-#define pcibios_assign_all_busses()	0
-#endif
+#define pcibios_assign_all_busses()     (pdc_type == PDC_TYPE_PAT)
 
 #define PCIBIOS_MIN_IO          0x10
 #define PCIBIOS_MIN_MEM         0x1000 /* NBPG - but pci/setup-res.c dies */
 
-/* Return the index of the PCI controller for device PDEV. */
-#define pci_controller_num(PDEV)	(0)
+/* Don't support DAC yet. */
+#define pci_dac_dma_supported(pci_dev, mask)   (0)
+
+/* export the pci_ DMA API in terms of the dma_ one */
+#include <asm-generic/pci-dma-compat.h>
+
+extern void
+pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
+			 struct resource *res);
 
 #endif /* __ASM_PARISC_PCI_H */

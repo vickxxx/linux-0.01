@@ -21,9 +21,11 @@
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/string.h>
 #include <linux/wait.h>
+#include <linux/sched.h>
+#include <asm/current.h>
 #include <asm/uaccess.h>
 
 /* #define DEBUG */
@@ -98,7 +100,7 @@ struct autofs_sb_info {
 
 static inline struct autofs_sb_info *autofs4_sbi(struct super_block *sb)
 {
-	return (struct autofs_sb_info *)(sb->u.generic_sbp);
+	return (struct autofs_sb_info *)(sb->s_fs_info);
 }
 
 static inline struct autofs_info *autofs4_dentry_ino(struct dentry *dentry)
@@ -139,12 +141,11 @@ int autofs4_expire_multi(struct super_block *, struct vfsmount *,
 extern struct inode_operations autofs4_symlink_inode_operations;
 extern struct inode_operations autofs4_dir_inode_operations;
 extern struct inode_operations autofs4_root_inode_operations;
-extern struct file_operations autofs4_dir_operations;
 extern struct file_operations autofs4_root_operations;
 
 /* Initializing function */
 
-struct super_block *autofs4_read_super(struct super_block *, void *,int);
+int autofs4_fill_super(struct super_block *, void *, int);
 struct autofs_info *autofs4_init_ino(struct autofs_info *, struct autofs_sb_info *sbi, mode_t mode);
 
 /* Queue management functions */

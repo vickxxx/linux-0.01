@@ -1,29 +1,6 @@
 #
 # Makefile for the kernel character device drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definitions are now inherited from the
-# parent makes..
-#
-
-# Object file lists.
-
-obj-y		:=
-obj-m		:=
-obj-n		:=
-obj-		:=
-
-O_TARGET := radio.o
-
-# All of the (potential) objects that export symbols.
-# This list comes from 'grep -l EXPORT_SYMBOL *.[hc]'.
-
-export-objs     := miropcm20-rds-core.o
-
-list-multi	:= miropcm20.o
 
 miropcm20-objs	:= miropcm20-rds-core.o miropcm20-radio.o
 
@@ -42,8 +19,3 @@ obj-$(CONFIG_RADIO_GEMTEK) += radio-gemtek.o
 obj-$(CONFIG_RADIO_GEMTEK_PCI) += radio-gemtek-pci.o
 obj-$(CONFIG_RADIO_TRUST) += radio-trust.o
 obj-$(CONFIG_RADIO_MAESTRO) += radio-maestro.o
-
-include $(TOPDIR)/Rules.make
-
-miropcm20.o: $(miropcm20-objs)
-	$(LD) -r -o $@ $(miropcm20-objs)

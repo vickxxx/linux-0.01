@@ -2200,7 +2200,7 @@ fu_snan_s_p:
 	mov.l		LOCAL_SIZE+2+EXC_PC(%sp),LOCAL_SIZE+2+EXC_PC-0xc(%sp)
 	mov.l		LOCAL_SIZE+EXC_EA(%sp),LOCAL_SIZE+EXC_EA-0xc(%sp)
 
-# now, we copy the default result to it's proper location
+# now, we copy the default result to its proper location
 	mov.l		LOCAL_SIZE+FP_DST_EX(%sp),LOCAL_SIZE+0x4(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_HI(%sp),LOCAL_SIZE+0x8(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_LO(%sp),LOCAL_SIZE+0xc(%sp)
@@ -2240,7 +2240,7 @@ fu_operr_p_s:
 	mov.l		LOCAL_SIZE+2+EXC_PC(%sp),LOCAL_SIZE+2+EXC_PC-0xc(%sp)
 	mov.l		LOCAL_SIZE+EXC_EA(%sp),LOCAL_SIZE+EXC_EA-0xc(%sp)
 
-# now, we copy the default result to it's proper location
+# now, we copy the default result to its proper location
 	mov.l		LOCAL_SIZE+FP_DST_EX(%sp),LOCAL_SIZE+0x4(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_HI(%sp),LOCAL_SIZE+0x8(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_LO(%sp),LOCAL_SIZE+0xc(%sp)
@@ -2280,7 +2280,7 @@ fu_inex_s_p2:
 	mov.l		LOCAL_SIZE+2+EXC_PC(%sp),LOCAL_SIZE+2+EXC_PC-0xc(%sp)
 	mov.l		LOCAL_SIZE+EXC_EA(%sp),LOCAL_SIZE+EXC_EA-0xc(%sp)
 
-# now, we copy the default result to it's proper location
+# now, we copy the default result to its proper location
 	mov.l		LOCAL_SIZE+FP_DST_EX(%sp),LOCAL_SIZE+0x4(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_HI(%sp),LOCAL_SIZE+0x8(%sp)
 	mov.l		LOCAL_SIZE+FP_DST_LO(%sp),LOCAL_SIZE+0xc(%sp)
@@ -6269,7 +6269,7 @@ sgl_done:
 add_ext:
 	addq.l		&1,FTEMP_LO(%a0)	# add 1 to l-bit
 	bcc.b		xcc_clr			# test for carry out
-	addq.l		&1,FTEMP_HI(%a0)	# propogate carry
+	addq.l		&1,FTEMP_HI(%a0)	# propagate carry
 	bcc.b		xcc_clr
 	roxr.w		FTEMP_HI(%a0)		# mant is 0 so restore v-bit
 	roxr.w		FTEMP_HI+2(%a0)		# mant is 0 so restore v-bit
@@ -6289,7 +6289,7 @@ add_ext_done:
 add_dbl:
 	add.l		&ad_1_dbl, FTEMP_LO(%a0) # add 1 to lsb
 	bcc.b		dcc_clr			# no carry
-	addq.l		&0x1, FTEMP_HI(%a0)	# propogate carry
+	addq.l		&0x1, FTEMP_HI(%a0)	# propagate carry
 	bcc.b		dcc_clr			# no carry
 
 	roxr.w		FTEMP_HI(%a0)		# mant is 0 so restore v-bit

@@ -1,7 +1,7 @@
 /*
  * I2O Configuration Interface Driver
  *
- * (C) Copyright 1999   Red Hat Software
+ * (C) Copyright 1999-2002  Red Hat
  *	
  * Written by Alan Cox, Building Number Three Ltd
  *
@@ -16,8 +16,10 @@
  *   - Fixed ioctl_swdl()
  * Modified 10/04/1999 by Taneli Vähäkangas
  *   - Changed ioctl_swdl(), implemented ioctl_swul() and ioctl_swdel()
- * Modified 11/18/199 by Deepak Saxena
+ * Modified 11/18/1999 by Deepak Saxena
  *   - Added event managmenet support
+ *
+ * 2.4 rewrite ported to 2.5 - Alan Cox <alan@redhat.com>
  *
  * This program is free software; you can redistribute it and/or
  * modify it under the terms of the GNU General Public License
@@ -45,7 +47,7 @@ static void *page_buf;
 static spinlock_t i2o_config_lock = SPIN_LOCK_UNLOCKED;
 struct wait_queue *i2o_wait_queue;
 
-#define MODINC(x,y) (x = x++ % y)
+#define MODINC(x,y) ((x) = ((x) + 1) % (y))
 
 struct i2o_cfg_info
 {
@@ -277,7 +279,14 @@ int ioctl_getiops(unsigned long arg)
 		if(c)
 		{
 			foo[i] = 1;
-			i2o_unlock_controller(c);
+			if(pci_set_dma_mask(c->pdev, 0xffffffff))
+			{
+				printk(KERN_WARNING "i2o_config : No suitable DMA available on controller %d\n", i);
+				i2o_unlock_controller(c);
+				continue;
+			}
+		
+				i2o_unlock_controller(c);
 		}
 		else
 		{
@@ -428,7 +437,7 @@ static int ioctl_parms(unsigned long arg, unsigned int type)
 	put_user(len, kcmd.reslen);
 	if(len > reslen)
 		ret = -ENOBUFS;
-	else if(copy_to_user(cmd->resbuf, res, len))
+	else if(copy_to_user(kcmd.resbuf, res, len))
 		ret = -EFAULT;
 
 	kfree(res);
@@ -443,11 +452,12 @@ int ioctl_html(unsigned long arg)
 	struct i2o_controller *c;
 	u8 *res = NULL;
 	void *query = NULL;
+	dma_addr_t query_phys, res_phys;
 	int ret = 0;
 	int token;
 	u32 len;
 	u32 reslen;
-	u32 msg[MSG_FRAME_SIZE/4];
+	u32 msg[MSG_FRAME_SIZE];
 
 	if(copy_from_user(&kcmd, cmd, sizeof(struct i2o_html)))
 	{
@@ -473,7 +483,7 @@ int ioctl_html(unsigned long arg)
 
 	if(kcmd.qlen) /* Check for post data */
 	{
-		query = kmalloc(kcmd.qlen, GFP_KERNEL);
+		query = pci_alloc_consistent(c->pdev, kcmd.qlen, &query_phys);
 		if(!query)
 		{
 			i2o_unlock_controller(c);
@@ -483,16 +493,16 @@ int ioctl_html(unsigned long arg)
 		{
 			i2o_unlock_controller(c);
 			printk(KERN_INFO "i2o_config: could not get query\n");
-			kfree(query);
+			pci_free_consistent(c->pdev, kcmd.qlen, query, query_phys);
 			return -EFAULT;
 		}
 	}
 
-	res = kmalloc(65536, GFP_KERNEL);
+	res = pci_alloc_consistent(c->pdev, 65536, &res_phys);
 	if(!res)
 	{
 		i2o_unlock_controller(c);
-		kfree(query);
+		pci_free_consistent(c->pdev, kcmd.qlen, query, query_phys);
 		return -ENOMEM;
 	}
 
@@ -501,7 +511,7 @@ int ioctl_html(unsigned long arg)
 	msg[3] = 0;
 	msg[4] = kcmd.page;
 	msg[5] = 0xD0000000|65536;
-	msg[6] = virt_to_bus(res);
+	msg[6] = res_phys;
 	if(!kcmd.qlen) /* Check for post data */
 		msg[0] = SEVEN_WORD_MSG_SIZE|SGL_OFFSET_5;
 	else
@@ -509,7 +519,7 @@ int ioctl_html(unsigned long arg)
 		msg[0] = NINE_WORD_MSG_SIZE|SGL_OFFSET_5;
 		msg[5] = 0x50000000|65536;
 		msg[7] = 0xD4000000|(kcmd.qlen);
-		msg[8] = virt_to_bus(query);
+		msg[8] = query_phys;
 	}
 	/*
 	Wait for a considerable time till the Controller 
@@ -517,7 +527,7 @@ int ioctl_html(unsigned long arg)
 	take more time to process this request if there are
 	many devices connected to it.
 	*/
-	token = i2o_post_wait_mem(c, msg, 9*4, 400, query, res);
+	token = i2o_post_wait_mem(c, msg, 9*4, 400, query, res, query_phys, res_phys, kcmd.qlen, 65536);
 	if(token < 0)
 	{
 		printk(KERN_DEBUG "token = %#10x\n", token);
@@ -525,10 +535,10 @@ int ioctl_html(unsigned long arg)
 		
 		if(token != -ETIMEDOUT)
 		{
-			kfree(res);
-			if(kcmd.qlen) kfree(query);
+			pci_free_consistent(c->pdev, 65536, res, res_phys);
+			if(kcmd.qlen)
+				pci_free_consistent(c->pdev, kcmd.qlen, query, query_phys);
 		}
-
 		return token;
 	}
 	i2o_unlock_controller(c);
@@ -540,9 +550,9 @@ int ioctl_html(unsigned long arg)
 	if(copy_to_user(kcmd.resbuf, res, len))
 		ret = -EFAULT;
 
-	kfree(res);
-	if(kcmd.qlen) 
-		kfree(query);
+	pci_free_consistent(c->pdev, 65536, res, res_phys);
+	if(kcmd.qlen)
+		pci_free_consistent(c->pdev, kcmd.qlen, query, query_phys);
 
 	return ret;
 }
@@ -556,6 +566,7 @@ int ioctl_swdl(unsigned long arg)
 	u32 msg[9];
 	unsigned int status = 0, swlen = 0, fragsize = 8192;
 	struct i2o_controller *c;
+	dma_addr_t buffer_phys;
 
 	if(copy_from_user(&kxfer, pxfer, sizeof(struct i2o_sw_xfer)))
 		return -EFAULT;
@@ -578,7 +589,7 @@ int ioctl_swdl(unsigned long arg)
 	if(!c)
 		return -ENXIO;
 
-	buffer=kmalloc(fragsize, GFP_KERNEL);
+	buffer=pci_alloc_consistent(c->pdev, fragsize, &buffer_phys);
 	if (buffer==NULL)
 	{
 		i2o_unlock_controller(c);
@@ -595,14 +606,14 @@ int ioctl_swdl(unsigned long arg)
 	msg[5]= swlen;
 	msg[6]= kxfer.sw_id;
 	msg[7]= (0xD0000000 | fragsize);
-	msg[8]= virt_to_bus(buffer);
+	msg[8]= buffer_phys;
 
 //	printk("i2o_config: swdl frag %d/%d (size %d)\n", curfrag, maxfrag, fragsize);
-	status = i2o_post_wait_mem(c, msg, sizeof(msg), 60, buffer, NULL);
+	status = i2o_post_wait_mem(c, msg, sizeof(msg), 60, buffer, NULL, buffer_phys, 0, fragsize, 0);
 
 	i2o_unlock_controller(c);
 	if(status != -ETIMEDOUT)
-		kfree(buffer);
+		pci_free_consistent(c->pdev, fragsize, buffer, buffer_phys);
 	
 	if (status != I2O_POST_WAIT_OK)
 	{
@@ -624,7 +635,8 @@ int ioctl_swul(unsigned long arg)
 	u32 msg[9];
 	unsigned int status = 0, swlen = 0, fragsize = 8192;
 	struct i2o_controller *c;
-	
+	dma_addr_t buffer_phys;
+		
 	if(copy_from_user(&kxfer, pxfer, sizeof(struct i2o_sw_xfer)))
 		return -EFAULT;
 		
@@ -646,7 +658,7 @@ int ioctl_swul(unsigned long arg)
 	if(!c)
 		return -ENXIO;
 		
-	buffer=kmalloc(fragsize, GFP_KERNEL);
+	buffer=pci_alloc_consistent(c->pdev, fragsize, &buffer_phys);
 	if (buffer==NULL)
 	{
 		i2o_unlock_controller(c);
@@ -661,22 +673,22 @@ int ioctl_swul(unsigned long arg)
 	msg[5]= swlen;
 	msg[6]= kxfer.sw_id;
 	msg[7]= (0xD0000000 | fragsize);
-	msg[8]= virt_to_bus(buffer);
+	msg[8]= buffer_phys;
 	
 //	printk("i2o_config: swul frag %d/%d (size %d)\n", curfrag, maxfrag, fragsize);
-	status = i2o_post_wait_mem(c, msg, sizeof(msg), 60, buffer, NULL);
+	status = i2o_post_wait_mem(c, msg, sizeof(msg), 60, buffer, NULL, buffer_phys, 0, fragsize, 0);
 	i2o_unlock_controller(c);
 	
 	if (status != I2O_POST_WAIT_OK)
 	{
 		if(status != -ETIMEDOUT)
-			kfree(buffer);
+			pci_free_consistent(c->pdev, fragsize, buffer, buffer_phys);
 		printk(KERN_INFO "i2o_config: swul failed, DetailedStatus = %d\n", status);
 		return status;
 	}
 	
 	__copy_to_user(kxfer.buf, buffer, fragsize);
-	kfree(buffer);
+	pci_free_consistent(c->pdev, fragsize, buffer, buffer_phys);
 	
 	return 0;
 }
@@ -892,14 +904,14 @@ static int cfg_fasync(int fd, struct file *fp, int on)
 
 static struct file_operations config_fops =
 {
-	owner:		THIS_MODULE,
-	llseek:		no_llseek,
-	read:		cfg_read,
-	write:		cfg_write,
-	ioctl:		cfg_ioctl,
-	open:		cfg_open,
-	release:	cfg_release,
-	fasync:		cfg_fasync,
+	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
+	.read		= cfg_read,
+	.write		= cfg_write,
+	.ioctl		= cfg_ioctl,
+	.open		= cfg_open,
+	.release	= cfg_release,
+	.fasync		= cfg_fasync,
 };
 
 static struct miscdevice i2o_miscdev = {
@@ -908,11 +920,7 @@ static struct miscdevice i2o_miscdev = {
 	&config_fops
 };	
 
-#ifdef MODULE
-int init_module(void)
-#else
-int __init i2o_config_init(void)
-#endif
+static int __init i2o_config_init(void)
 {
 	printk(KERN_INFO "I2O configuration manager v 0.04.\n");
 	printk(KERN_INFO "  (C) Copyright 1999 Red Hat Software\n");
@@ -922,7 +930,7 @@ int __init i2o_config_init(void)
 		printk(KERN_ERR "i2o_config: no memory for page buffer.\n");
 		return -ENOBUFS;
 	}
-	if(misc_register(&i2o_miscdev)==-1)
+	if(misc_register(&i2o_miscdev) < 0)
 	{
 		printk(KERN_ERR "i2o_config: can't register device.\n");
 		kfree(page_buf);
@@ -946,9 +954,7 @@ int __init i2o_config_init(void)
 	return 0;
 }
 
-#ifdef MODULE
-
-void cleanup_module(void)
+static void i2o_config_exit(void)
 {
 	misc_deregister(&i2o_miscdev);
 	
@@ -958,9 +964,9 @@ void cleanup_module(void)
 		i2o_remove_handler(&cfg_handler);
 }
  
-EXPORT_NO_SYMBOLS;
 MODULE_AUTHOR("Red Hat Software");
 MODULE_DESCRIPTION("I2O Configuration");
 MODULE_LICENSE("GPL");
 
-#endif
+module_init(i2o_config_init);
+module_exit(i2o_config_exit);

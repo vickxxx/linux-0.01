@@ -627,12 +627,12 @@ typedef struct {
 
 struct amb_dev {
   u8               irq;
-  u8               flags;
+  long		   flags;
   u32              iobase;
   u32 *            membase;
 
 #ifdef FILL_RX_POOLS_IN_BH
-  struct tq_struct bh;
+  struct work_struct bh;
 #endif
   
   amb_cq           cq;

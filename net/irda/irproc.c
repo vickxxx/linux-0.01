@@ -25,11 +25,10 @@
 
 #include <linux/miscdevice.h>
 #include <linux/proc_fs.h>
-#define __NO_VERSION__
 #include <linux/module.h>
+#include <linux/init.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
 #include <net/irda/irlap.h>
 #include <net/irda/irlmp.h>
 
@@ -54,15 +53,13 @@ static struct irda_entry dir[] = {
 	{"irias",	irias_proc_read},
 };
 
-#define IRDA_ENTRIES_NUM (sizeof(dir)/sizeof(dir[0]))
- 
 /*
  * Function irda_proc_register (void)
  *
  *    Register irda entry in /proc file system
  *
  */
-void irda_proc_register(void) 
+void __init irda_proc_register(void) 
 {
 	int i;
 
@@ -71,7 +68,7 @@ void irda_proc_register(void)
 		return;
 	proc_irda->owner = THIS_MODULE;
 
-	for (i=0;i<IRDA_ENTRIES_NUM;i++)
+	for (i=0; i<ARRAY_SIZE(dir); i++)
 		create_proc_info_entry(dir[i].name,0,proc_irda,dir[i].fn);
 }
 
@@ -81,12 +78,12 @@ void irda_proc_register(void)
  *    Unregister irda entry in /proc file system
  *
  */
-void irda_proc_unregister(void) 
+void __exit irda_proc_unregister(void) 
 {
 	int i;
 
         if (proc_irda) {
-                for (i=0;i<IRDA_ENTRIES_NUM;i++)
+                for (i=0; i<ARRAY_SIZE(dir); i++)
                         remove_proc_entry(dir[i].name, proc_irda);
 
                 remove_proc_entry("net/irda", NULL);

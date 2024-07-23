@@ -137,16 +137,14 @@ static int rtc_release(struct inode *inode, struct file *file)
 }
 
 static struct file_operations rtc_fops = {
-	owner:		THIS_MODULE,
-	llseek:		no_llseek,
-	ioctl:		rtc_ioctl,
-	open:		rtc_open,
-	release:	rtc_release,
+	.owner =	THIS_MODULE,
+	.llseek =	no_llseek,
+	.ioctl =	rtc_ioctl,
+	.open =		rtc_open,
+	.release =	rtc_release,
 };
 
 static struct miscdevice rtc_dev = { RTC_MINOR, "rtc", &rtc_fops };
-
-EXPORT_NO_SYMBOLS;
 
 static int __init rtc_sun_init(void)
 {

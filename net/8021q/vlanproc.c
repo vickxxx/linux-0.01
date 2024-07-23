@@ -18,6 +18,7 @@
  *****************************************************************************/
 
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/stddef.h>	/* offsetof(), etc. */
 #include <linux/errno.h>	/* return codes */
 #include <linux/kernel.h>
@@ -25,7 +26,6 @@
 #include <linux/mm.h>		/* verify_area(), etc. */
 #include <linux/string.h>	/* inline mem*, str* functions */
 #include <linux/init.h>		/* __initfunc et al. */
-#include <asm/segment.h>	/* kernel <-> user copy */
 #include <asm/byteorder.h>	/* htons(), etc. */
 #include <asm/uaccess.h>	/* copy_to_user */
 #include <asm/io.h>
@@ -76,8 +76,9 @@ static char term_msg[]   = "***KERNEL:  Out of buffer space!***\n";
  */
 
 static struct file_operations vlan_fops = {
-	read:	vlan_proc_read,
-	ioctl: NULL, /* vlan_proc_ioctl */
+	.owner = THIS_MODULE,
+	.read =	vlan_proc_read,
+	.ioctl = NULL, /* vlan_proc_ioctl */
 };
 
 /*
@@ -85,8 +86,9 @@ static struct file_operations vlan_fops = {
  */
 
 static struct file_operations vlandev_fops = {
-	read:	vlan_proc_read,
-	ioctl:	NULL, /* vlan_proc_ioctl */
+	.owner = THIS_MODULE,
+	.read =	vlan_proc_read,
+	.ioctl =NULL, /* vlan_proc_ioctl */
 };
 
 /*
@@ -204,10 +206,8 @@ int vlan_proc_rem_dev(struct net_device *vlandev)
 #endif
 
 	/** NOTE:  This will consume the memory pointed to by dent, it seems. */
-	if (VLAN_DEV_INFO(vlandev)->dent) {
-		remove_proc_entry(VLAN_DEV_INFO(vlandev)->dent->name, proc_vlan_dir);
-		VLAN_DEV_INFO(vlandev)->dent = NULL;
-	}
+	remove_proc_entry(VLAN_DEV_INFO(vlandev)->dent->name, proc_vlan_dir);
+	VLAN_DEV_INFO(vlandev)->dent = NULL;
 
 	return 0;
 }
@@ -234,14 +234,12 @@ static ssize_t vlan_proc_read(struct file *file, char *buf,
 	struct inode *inode = file->f_dentry->d_inode;
 	struct proc_dir_entry *dent;
 	char *page;
-	int pos, len;
-	loff_t n = *ppos;
-	unsigned offs = n;
+	int pos, offs, len;
 
 	if (count <= 0)
 		return 0;
 
-	dent = inode->u.generic_ip;
+	dent = PDE(inode);
 	if ((dent == NULL) || (dent->get_info == NULL))
 		return 0;
 
@@ -253,14 +251,15 @@ static ssize_t vlan_proc_read(struct file *file, char *buf,
 		return -ENOBUFS;
 
 	pos = dent->get_info(page, dent->data, 0, 0);
-	if (offs == n && offs < pos) {
+	offs = file->f_pos;
+	if (offs < pos) {
 		len = min_t(int, pos - offs, count);
 		if (copy_to_user(buf, (page + offs), len)) {
 			kfree(page);
 			return -EFAULT;
 		}
 
-		*ppos = offs + len;
+		file->f_pos += len;
 	} else {
 		len = 0;
 	}

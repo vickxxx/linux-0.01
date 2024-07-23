@@ -1,11 +1,9 @@
-/*
- * BK Id: SCCS/s.machdep.h 1.25 11/13/01 21:26:07 paulus
- */
 #ifdef __KERNEL__
 #ifndef _PPC_MACHDEP_H
 #define _PPC_MACHDEP_H
 
 #include <linux/config.h>
+#include <linux/init.h>
 
 #ifdef CONFIG_APUS
 #include <asm-m68k/machdep.h>
@@ -16,13 +14,18 @@ struct pci_bus;
 struct pci_dev;
 struct seq_file;
 
+/* We export this macro for external modules like Alsa to know if
+ * ppc_md.feature_call is implemented or not
+ */
+#define CONFIG_PPC_HAS_FEATURE_CALLS
+
 struct machdep_calls {
 	void		(*setup_arch)(void);
 	/* Optional, may be NULL. */
 	int		(*show_cpuinfo)(struct seq_file *m);
 	int		(*show_percpuinfo)(struct seq_file *m, int i);
 	/* Optional, may be NULL. */
-	unsigned int	(*irq_cannonicalize)(unsigned int irq);
+	unsigned int	(*irq_canonicalize)(unsigned int irq);
 	void		(*init_IRQ)(void);
 	int		(*get_irq)(struct pt_regs *);
 	
@@ -33,6 +36,9 @@ struct machdep_calls {
 	void		(*restart)(char *cmd);
 	void		(*power_off)(void);
 	void		(*halt)(void);
+
+	void		(*idle)(void);
+	void		(*power_save)(void);
 
 	long		(*time_init)(void); /* Optional, may be NULL */
 	int		(*set_rtc_time)(unsigned long nowtime);
@@ -50,18 +56,6 @@ struct machdep_calls {
 
 	unsigned char 	(*nvram_read_val)(int addr);
 	void		(*nvram_write_val)(int addr, unsigned char val);
-
-	/* Tons of keyboard stuff. */
-	int		(*kbd_setkeycode)(unsigned int scancode,
-				unsigned int keycode);
-	int		(*kbd_getkeycode)(unsigned int scancode);
-	int		(*kbd_translate)(unsigned char scancode,
-				unsigned char *keycode,
-				char raw_mode);
-	char		(*kbd_unexpected_up)(unsigned char keycode);
-	void		(*kbd_leds)(unsigned char leds);
-	void		(*kbd_init_hw)(void);
-	unsigned char 	*ppc_kbd_sysrq_xlate;
 
 	/*
 	 * optional PCI "hooks"
@@ -95,6 +89,12 @@ struct machdep_calls {
 	/* this is for modules, since _machine can be a define -- Cort */
 	int ppc_machine;
 
+	/* Motherboard/chipset features. This is a kind of general purpose
+	 * hook used to control some machine specific features (like reset
+	 * lines, chip power control, etc...).
+	 */
+	int (*feature_call)(unsigned int feature, ...);
+
 #ifdef CONFIG_SMP
 	/* functions for dealing with other cpus */
 	struct smp_ops_t *smp_ops;
@@ -124,7 +124,14 @@ struct smp_ops_t {
 	int   (*probe)(void);
 	void  (*kick_cpu)(int nr);
 	void  (*setup_cpu)(int nr);
+	void  (*space_timers)(int nr);
+	void  (*take_timebase)(void);
+	void  (*give_timebase)(void);
 };
+
+/* Poor default implementations */
+extern void __devinit smp_generic_give_timebase(void);
+extern void __devinit smp_generic_take_timebase(void);
 #endif /* CONFIG_SMP */
 
 #endif /* _PPC_MACHDEP_H */

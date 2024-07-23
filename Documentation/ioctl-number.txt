@@ -72,6 +72,7 @@ Code	Seq#	Include File		Comments
 		linux/blkpg.h
 0x20	all	drivers/cdrom/cm206.h
 0x22	all	scsi/sg.h
+'#'	00-3F	IEEE 1394 Subsystem	Block for the entire subsystem
 '1'	00-1F	<linux/timepps.h>	PPS kit from Ulrich Windl
 					<ftp://ftp.de.kernel.org/pub/linux/daemons/ntp/PPS/>
 '6'	00-10	<asm-i386/processor.h>	Intel IA32 microcode update driver
@@ -101,7 +102,8 @@ Code	Seq#	Include File		Comments
 'S'	82-FF	scsi/scsi.h		conflict!
 'T'	all	linux/soundcard.h	conflict!
 'T'	all	asm-i386/ioctls.h	conflict!
-'U'	all	linux/drivers/usb/usb.h
+'U'	00-EF	linux/drivers/usb/usb.h
+'U'	F0-FF	drivers/usb/auerswald.c
 'V'	all	linux/vt.h
 'W'	00-1F	linux/watchdog.h	conflict!
 'W'	00-1F	linux/wanrouter.h	conflict!
@@ -172,7 +174,7 @@ Code	Seq#	Include File		Comments
 0xA0	all	linux/sdp/sdp.h		Industrial Device Project
 					<mailto:kenji@bitgate.com>
 0xA2    00-0F   DVD decoder driver      in development:
-                                        <http://linuxtv.org/dvd/api/>
+                                        <http://linuxtv.org/developer/dvdapi.html>
 0xA3	00-1F	Philips SAA7146 dirver	in development:
 					<mailto:Andreas.Beckmann@hamburg.sc.philips.com>
 0xA3	80-8F	Port ACL		in development:
@@ -187,5 +189,3 @@ Code	Seq#	Include File		Comments
 0xB1	00-1F	PPPoX			<mailto:mostrows@styx.uwaterloo.ca>
 0xCB	00-1F	CBM serial IEC bus	in development:
 					<mailto:michael.klein@puffin.lb.shuttle.de>
-
-0xFE	00-9F	Logical Volume Manager	<mailto:linux-lvm@sistina.com>

@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.checksum.S 1.8 08/20/01 22:09:34 paulus
- */
-/*
  * This file contains assembly-language implementations
  * of IP-style 1's complement checksum routines.
  *	
@@ -18,7 +15,7 @@
 #include <linux/sys.h>
 #include <asm/processor.h>
 #include <asm/errno.h>
-#include "../kernel/ppc_asm.tmpl"
+#include <asm/ppc_asm.h>
 
 	.text
 

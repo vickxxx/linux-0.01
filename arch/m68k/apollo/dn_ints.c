@@ -1,7 +1,8 @@
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/kernel_stat.h>
+#include <linux/timer.h>
 
 #include <asm/system.h>
 #include <asm/irq.h>
@@ -9,27 +10,24 @@
 #include <asm/page.h>
 #include <asm/machdep.h>
 #include <asm/apollohw.h>
+#include <asm/errno.h>
 
 static irq_handler_t dn_irqs[16];
 
-extern void write_keyb_cmd(u_short length, u_char *cmd);
-static char BellOnCommand[] =  { 0xFF, 0x21, 0x81 },
-		    BellOffCommand[] = { 0xFF, 0x21, 0x82 };
-
-extern void dn_serial_print (const char *str);
-void dn_process_int(int irq, struct pt_regs *fp) {
-
+irqreturn_t dn_process_int(int irq, struct pt_regs *fp)
+{
+  irqreturn_t res = IRQ_NONE;
 
   if(dn_irqs[irq-160].handler) {
-    dn_irqs[irq-160].handler(irq,dn_irqs[irq-160].dev_id,fp);
-  }
-  else {
+    res = dn_irqs[irq-160].handler(irq,dn_irqs[irq-160].dev_id,fp);
+  } else {
     printk("spurious irq %d occurred\n",irq);
   }
 
   *(volatile unsigned char *)(pica)=0x20;
   *(volatile unsigned char *)(picb)=0x20;
 
+  return res;
 }
 
 void dn_init_IRQ(void) {
@@ -45,7 +43,7 @@ void dn_init_IRQ(void) {
   
 }
 
-int dn_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *), unsigned long flags, const char *devname, void *dev_id) {
+int dn_request_irq(unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *), unsigned long flags, const char *devname, void *dev_id) {
 
   if((irq<0) || (irq>15)) {
     printk("Trying to request illegal IRQ\n");
@@ -104,7 +102,7 @@ void dn_disable_irq(unsigned int irq) {
 
 }
 
-int dn_get_irq_list(char *buf) {
+int show_dn_interrupts(struct seq_file *p, void *v) {
 
   printk("dn get irq list\n");
 
@@ -118,28 +116,6 @@ struct fb_info *dn_dummy_fb_init(long *mem_start) {
 
   return NULL;
 
-}
-
-static void dn_nosound (unsigned long ignored) {
-
-	write_keyb_cmd(sizeof(BellOffCommand),BellOffCommand);
-
-}
-
-void dn_mksound( unsigned int count, unsigned int ticks ) {
-
-	static struct timer_list sound_timer = { function: dn_nosound };
-
-	del_timer( &sound_timer );
-	if(count) {
-		write_keyb_cmd(sizeof(BellOnCommand),BellOnCommand);
-		if (ticks) {
-       		sound_timer.expires = jiffies + ticks;
-			add_timer( &sound_timer );
-		}
-	}
-	else
-		write_keyb_cmd(sizeof(BellOffCommand),BellOffCommand);
 }
 
 void dn_dummy_video_setup(char *options,int *ints) {

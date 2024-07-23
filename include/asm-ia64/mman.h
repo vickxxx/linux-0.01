@@ -2,13 +2,14 @@
 #define _ASM_IA64_MMAN_H
 
 /*
- * Copyright (C) 1998-2000 Hewlett-Packard Co
- * Copyright (C) 1998-2000 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1998-2000, 2002 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
 #define PROT_READ	0x1		/* page can be read */
 #define PROT_WRITE	0x2		/* page can be written */
 #define PROT_EXEC	0x4		/* page can be executed */
+#define PROT_SEM	0x8		/* page may be used for atomic ops */
 #define PROT_NONE	0x0		/* page can not be accessed */
 
 #define MAP_SHARED	0x01		/* Share changes */
@@ -17,14 +18,14 @@
 #define MAP_FIXED	0x10		/* Interpret addr exactly */
 #define MAP_ANONYMOUS	0x20		/* don't use a file */
 
-#define MAP_GROWSDOWN	0x0100		/* stack-like segment */
-#define MAP_GROWSUP	0x0200		/* register stack-like segment */
-#define MAP_DENYWRITE	0x0800		/* ETXTBSY */
-#define MAP_EXECUTABLE	0x1000		/* mark it as an executable */
-#define MAP_LOCKED	0x2000		/* pages are locked */
-#define MAP_NORESERVE	0x4000		/* don't check for reservations */
-#define MAP_WRITECOMBINED 0x10000	/* write-combine the area */
-#define MAP_NONCACHED	0x20000		/* don't cache the memory */
+#define MAP_GROWSDOWN	0x00100		/* stack-like segment */
+#define MAP_GROWSUP	0x00200		/* register stack-like segment */
+#define MAP_DENYWRITE	0x00800		/* ETXTBSY */
+#define MAP_EXECUTABLE	0x01000		/* mark it as an executable */
+#define MAP_LOCKED	0x02000		/* pages are locked */
+#define MAP_NORESERVE	0x04000		/* don't check for reservations */
+#define MAP_POPULATE	0x08000		/* populate (prefault) pagetables */
+#define MAP_NONBLOCK	0x10000		/* do not block on IO */
 
 #define MS_ASYNC	1		/* sync memory asynchronously */
 #define MS_INVALIDATE	2		/* invalidate the caches */

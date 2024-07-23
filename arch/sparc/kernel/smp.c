@@ -18,6 +18,7 @@
 #include <linux/mm.h>
 #include <linux/fs.h>
 #include <linux/seq_file.h>
+#include <linux/cache.h>
 
 #include <asm/ptrace.h>
 #include <asm/atomic.h>
@@ -29,7 +30,6 @@
 #include <asm/pgtable.h>
 #include <asm/oplib.h>
 #include <asm/hardirq.h>
-#include <asm/softirq.h>
 
 #define __KERNEL_SYSCALLS__
 #include <linux/unistd.h>
@@ -64,9 +64,6 @@ cycles_t cacheflush_time = 0; /* XXX */
  * compared to the Alpha and the Intel no?  Most Sparcs have 'swap'
  * instruction which is much better...
  */
-
-/* Kernel spinlock */
-spinlock_t kernel_flag = SPIN_LOCK_UNLOCKED;
 
 /* Used to make bitops atomic */
 unsigned char bitops_spinlock = 0;
@@ -103,13 +100,6 @@ void __init smp_commence(void)
 	local_flush_tlb_all();
 }
 
-/* Only broken Intel needs this, thus it should not even be referenced
- * globally...
- */
-void __init initialize_secondary(void)
-{
-}
-
 extern int cpu_idle(void);
 
 /* Activate a secondary processor. */
@@ -141,6 +131,16 @@ void __init smp_boot_cpus(void)
 		smp4m_boot_cpus();
 	else
 		smp4d_boot_cpus();
+}
+
+void smp_send_reschedule(int cpu)
+{
+	smp_message_pass (cpu, MSG_RESCHEDULE, 0, 0);
+}
+
+void smp_send_stop(void)
+{
+	smp_message_pass (MSG_ALL_BUT_SELF, MSG_STOP_CPU, 0, 0);
 }
 
 void smp_flush_cache_all(void)
@@ -176,23 +176,27 @@ void smp_flush_tlb_mm(struct mm_struct *mm)
 	}
 }
 
-void smp_flush_cache_range(struct mm_struct *mm, unsigned long start,
+void smp_flush_cache_range(struct vm_area_struct *vma, unsigned long start,
 			   unsigned long end)
 {
-	if(mm->context != NO_CONTEXT) {
+	struct mm_struct *mm = vma->vm_mm;
+
+	if (mm->context != NO_CONTEXT) {
 		if(mm->cpu_vm_mask != (1 << smp_processor_id()))
-			xc3((smpfunc_t) BTFIXUP_CALL(local_flush_cache_range), (unsigned long) mm, start, end);
-		local_flush_cache_range(mm, start, end);
+			xc3((smpfunc_t) BTFIXUP_CALL(local_flush_cache_range), (unsigned long) vma, start, end);
+		local_flush_cache_range(vma, start, end);
 	}
 }
 
-void smp_flush_tlb_range(struct mm_struct *mm, unsigned long start,
+void smp_flush_tlb_range(struct vm_area_struct *vma, unsigned long start,
 			 unsigned long end)
 {
-	if(mm->context != NO_CONTEXT) {
+	struct mm_struct *mm = vma->vm_mm;
+
+	if (mm->context != NO_CONTEXT) {
 		if(mm->cpu_vm_mask != (1 << smp_processor_id()))
-			xc3((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_range), (unsigned long) mm, start, end);
-		local_flush_tlb_range(mm, start, end);
+			xc3((smpfunc_t) BTFIXUP_CALL(local_flush_tlb_range), (unsigned long) vma, start, end);
+		local_flush_tlb_range(vma, start, end);
 	}
 }
 
@@ -242,13 +246,13 @@ void smp_flush_sig_insns(struct mm_struct *mm, unsigned long insn_addr)
 /* Reschedule call back. */
 void smp_reschedule_irq(void)
 {
-	current->need_resched = 1;
+	current->work.need_resched = 1;
 }
 
 /* Stopping processors. */
 void smp_stop_cpu_irq(void)
 {
-	__sti();
+	local_irq_enable();
 	while(1)
 		barrier();
 }

@@ -39,13 +39,14 @@
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/types.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/if_arp.h>
 #include <linux/inetdevice.h>
 #include <linux/pkt_sched.h>
 #include <linux/init.h>
+
 #include <asm/uaccess.h>
 
 #include "comx.h"
@@ -214,6 +215,7 @@ static void fr_set_keepalive(struct net_device *dev, int keepa)
 		}
 		fr->keepa_freq = keepa;
 		fr->local_cnt = fr->remote_cnt = 0;
+		init_timer(&fr->keepa_timer);
 		fr->keepa_timer.expires = jiffies + HZ;
 		fr->keepa_timer.function = fr_keepalive_timerfun;
 		fr->keepa_timer.data = (unsigned long)dev;
@@ -963,34 +965,30 @@ static int dlci_dump(struct net_device *dev)
 }
 
 static struct comx_protocol fr_master_protocol = {
-	name:		"frad", 
-	version:	VERSION,
-	encap_type:	ARPHRD_FRAD, 
-	line_init:	fr_master_init, 
-	line_exit:	fr_exit, 
+	.name		= "frad", 
+	.version	= VERSION,
+	.encap_type	= ARPHRD_FRAD, 
+	.line_init	= fr_master_init, 
+	.line_exit	= fr_exit, 
 };
 
 static struct comx_protocol fr_slave_protocol = {
-	name:		"ietf-ip", 
-	version:	VERSION,
-	encap_type:	ARPHRD_DLCI, 
-	line_init:	fr_slave_init, 
-	line_exit:	fr_exit, 
+	.name		= "ietf-ip", 
+	.version	= VERSION,
+	.encap_type	= ARPHRD_DLCI, 
+	.line_init	= fr_slave_init, 
+	.line_exit	= fr_exit, 
 };
 
 static struct comx_hardware fr_dlci = { 
-	name:		"dlci", 
-	version:	VERSION,
-	hw_init:	dlci_init, 
-	hw_exit:	dlci_exit, 
-	hw_dump:	dlci_dump, 
+	.name		= "dlci", 
+	.version	= VERSION,
+	.hw_init	= dlci_init, 
+	.hw_exit	= dlci_exit, 
+	.hw_dump	= dlci_dump, 
 };
 
-#ifdef MODULE
-#define comx_proto_fr_init init_module
-#endif
-
-int __init comx_proto_fr_init(void)
+static int __init comx_proto_fr_init(void)
 {
 	int ret; 
 
@@ -1003,12 +1001,12 @@ int __init comx_proto_fr_init(void)
 	return comx_register_protocol(&fr_slave_protocol);
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit comx_proto_fr_exit(void)
 {
 	comx_unregister_hardware(fr_dlci.name);
 	comx_unregister_protocol(fr_master_protocol.name);
 	comx_unregister_protocol(fr_slave_protocol.name);
 }
-#endif /* MODULE */
 
+module_init(comx_proto_fr_init);
+module_exit(comx_proto_fr_exit);

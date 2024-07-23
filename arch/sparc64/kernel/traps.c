@@ -1,4 +1,4 @@
-/* $Id: traps.c,v 1.79 2001/09/21 02:14:39 kanoj Exp $
+/* $Id: traps.c,v 1.85 2002/02/09 19:49:31 davem Exp $
  * arch/sparc64/kernel/traps.c
  *
  * Copyright (C) 1995,1997 David S. Miller (davem@caip.rutgers.edu)
@@ -12,10 +12,12 @@
 #include <linux/config.h>
 #include <linux/sched.h>  /* for jiffies */
 #include <linux/kernel.h>
+#include <linux/kallsyms.h>
 #include <linux/signal.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/mm.h>
+#include <linux/init.h>
 
 #include <asm/delay.h>
 #include <asm/system.h>
@@ -32,23 +34,58 @@
 #include <asm/chafsr.h>
 #include <asm/psrcompat.h>
 #include <asm/processor.h>
+#include <asm/timer.h>
 #ifdef CONFIG_KMOD
 #include <linux/kmod.h>
 #endif
 
+/* When an irrecoverable trap occurs at tl > 0, the trap entry
+ * code logs the trap state registers at every level in the trap
+ * stack.  It is found at (pt_regs + sizeof(pt_regs)) and the layout
+ * is as follows:
+ */
+struct tl1_traplog {
+	struct {
+		unsigned long tstate;
+		unsigned long tpc;
+		unsigned long tnpc;
+		unsigned long tt;
+	} trapstack[4];
+	unsigned long tl;
+};
+
+static void dump_tl1_traplog(struct tl1_traplog *p)
+{
+	int i;
+
+	printk("TRAPLOG: Error at trap level 0x%lx, dumping track stack.\n",
+	       p->tl);
+	for (i = 0; i < 4; i++) {
+		printk(KERN_CRIT
+		       "TRAPLOG: Trap level %d TSTATE[%016lx] TPC[%016lx] "
+		       "TNPC[%016lx] TT[%lx]\n",
+		       i + 1,
+		       p->trapstack[i].tstate, p->trapstack[i].tpc,
+		       p->trapstack[i].tnpc, p->trapstack[i].tt);
+	}
+}
+
 void bad_trap (struct pt_regs *regs, long lvl)
 {
+	char buffer[32];
 	siginfo_t info;
 
 	if (lvl < 0x100) {
-		char buffer[24];
-		
-		sprintf (buffer, "Bad hw trap %lx at tl0\n", lvl);
+		sprintf(buffer, "Bad hw trap %lx at tl0\n", lvl);
+		die_if_kernel(buffer, regs);
+	}
+
+	lvl -= 0x100;
+	if (regs->tstate & TSTATE_PRIV) {
+		sprintf(buffer, "Kernel bad sw trap %lx", lvl);
 		die_if_kernel (buffer, regs);
 	}
-	if (regs->tstate & TSTATE_PRIV)
-		die_if_kernel ("Kernel bad trap", regs);
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
@@ -56,20 +93,30 @@ void bad_trap (struct pt_regs *regs, long lvl)
 	info.si_errno = 0;
 	info.si_code = ILL_ILLTRP;
 	info.si_addr = (void *)regs->tpc;
-	info.si_trapno = lvl - 0x100;
+	info.si_trapno = lvl;
 	force_sig_info(SIGILL, &info, current);
 }
 
 void bad_trap_tl1 (struct pt_regs *regs, long lvl)
 {
-	char buffer[24];
+	char buffer[32];
 	
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
+
 	sprintf (buffer, "Bad trap %lx at tl>0", lvl);
 	die_if_kernel (buffer, regs);
 }
 
-void instruction_access_exception (struct pt_regs *regs,
-				   unsigned long sfsr, unsigned long sfar)
+#ifdef CONFIG_DEBUG_BUGVERBOSE
+void do_BUG(const char *file, int line)
+{
+	bust_spinlocks(1);
+	printk("kernel BUG at %s:%d!\n", file, line);
+}
+#endif
+
+void instruction_access_exception(struct pt_regs *regs,
+				  unsigned long sfsr, unsigned long sfar)
 {
 	siginfo_t info;
 
@@ -78,7 +125,7 @@ void instruction_access_exception (struct pt_regs *regs,
 		       sfsr, sfar);
 		die_if_kernel("Iax", regs);
 	}
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
@@ -90,6 +137,13 @@ void instruction_access_exception (struct pt_regs *regs,
 	force_sig_info(SIGSEGV, &info, current);
 }
 
+void instruction_access_exception_tl1(struct pt_regs *regs,
+				      unsigned long sfsr, unsigned long sfar)
+{
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
+	instruction_access_exception(regs, sfsr, sfar);
+}
+
 void data_access_exception (struct pt_regs *regs,
 			    unsigned long sfsr, unsigned long sfar)
 {
@@ -97,10 +151,10 @@ void data_access_exception (struct pt_regs *regs,
 
 	if (regs->tstate & TSTATE_PRIV) {
 		/* Test if this comes from uaccess places. */
-		unsigned long fixup, g2;
+		unsigned long fixup;
+		unsigned long g2 = regs->u_regs[UREG_G2];
 
-		g2 = regs->u_regs[UREG_G2];
-		if ((fixup = search_exception_table (regs->tpc, &g2))) {
+		if ((fixup = search_extables_range(regs->tpc, &g2))) {
 			/* Ouch, somebody is trying ugly VM hole tricks on us... */
 #ifdef DEBUG_EXCEPTIONS
 			printk("Exception: PC<%016lx> faddr<UNKNOWN>\n", regs->tpc);
@@ -134,43 +188,36 @@ extern volatile int pci_poke_faulted;
 #endif
 
 /* When access exceptions happen, we must do this. */
-static void clean_and_reenable_l1_caches(void)
+static void spitfire_clean_and_reenable_l1_caches(void)
 {
 	unsigned long va;
 
-	if (tlb_type == spitfire) {
-		/* Clean 'em. */
-		for (va =  0; va < (PAGE_SIZE << 1); va += 32) {
-			spitfire_put_icache_tag(va, 0x0);
-			spitfire_put_dcache_tag(va, 0x0);
-		}
+	if (tlb_type != spitfire)
+		BUG();
 
-		/* Re-enable in LSU. */
-		__asm__ __volatile__("flush %%g6\n\t"
-				     "membar #Sync\n\t"
-				     "stxa %0, [%%g0] %1\n\t"
-				     "membar #Sync"
-				     : /* no outputs */
-				     : "r" (LSU_CONTROL_IC | LSU_CONTROL_DC |
-					    LSU_CONTROL_IM | LSU_CONTROL_DM),
-				     "i" (ASI_LSU_CONTROL)
-				     : "memory");
-	} else if (tlb_type == cheetah) {
-		/* Flush D-cache */
-		for (va = 0; va < (1 << 16); va += (1 << 5)) {
-			__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
-					     "membar #Sync"
-					     : /* no outputs */
-					     : "r" (va), "i" (ASI_DCACHE_TAG));
-		}
+	/* Clean 'em. */
+	for (va =  0; va < (PAGE_SIZE << 1); va += 32) {
+		spitfire_put_icache_tag(va, 0x0);
+		spitfire_put_dcache_tag(va, 0x0);
 	}
+
+	/* Re-enable in LSU. */
+	__asm__ __volatile__("flush %%g6\n\t"
+			     "membar #Sync\n\t"
+			     "stxa %0, [%%g0] %1\n\t"
+			     "membar #Sync"
+			     : /* no outputs */
+			     : "r" (LSU_CONTROL_IC | LSU_CONTROL_DC |
+				    LSU_CONTROL_IM | LSU_CONTROL_DM),
+			     "i" (ASI_LSU_CONTROL)
+			     : "memory");
 }
 
 void do_iae(struct pt_regs *regs)
 {
 	siginfo_t info;
 
-	clean_and_reenable_l1_caches();
+	spitfire_clean_and_reenable_l1_caches();
 
 	info.si_signo = SIGBUS;
 	info.si_errno = 0;
@@ -184,12 +231,12 @@ void do_dae(struct pt_regs *regs)
 {
 #ifdef CONFIG_PCI
 	if (pci_poke_in_progress && pci_poke_cpu == smp_processor_id()) {
-		clean_and_reenable_l1_caches();
+		spitfire_clean_and_reenable_l1_caches();
 
 		pci_poke_faulted = 1;
 
 		/* Why the fuck did they have to change this? */
-		if (tlb_type == cheetah)
+		if (tlb_type == cheetah || tlb_type == cheetah_plus)
 			regs->tpc += 4;
 
 		regs->tnpc = regs->tpc + 4;
@@ -378,19 +425,23 @@ static __inline__ struct cheetah_err_info *cheetah_get_error_log(unsigned long a
 	return p;
 }
 
+extern unsigned int tl0_icpe[], tl1_icpe[];
+extern unsigned int tl0_dcpe[], tl1_dcpe[];
 extern unsigned int tl0_fecc[], tl1_fecc[];
 extern unsigned int tl0_cee[], tl1_cee[];
 extern unsigned int tl0_iae[], tl1_iae[];
 extern unsigned int tl0_dae[], tl1_dae[];
+extern unsigned int cheetah_plus_icpe_trap_vector[], cheetah_plus_icpe_trap_vector_tl1[];
+extern unsigned int cheetah_plus_dcpe_trap_vector[], cheetah_plus_dcpe_trap_vector_tl1[];
 extern unsigned int cheetah_fecc_trap_vector[], cheetah_fecc_trap_vector_tl1[];
 extern unsigned int cheetah_cee_trap_vector[], cheetah_cee_trap_vector_tl1[];
 extern unsigned int cheetah_deferred_trap_vector[], cheetah_deferred_trap_vector_tl1[];
 
-void cheetah_ecache_flush_init(void)
+void __init cheetah_ecache_flush_init(void)
 {
 	unsigned long largest_size, smallest_linesize, order;
 	char type[16];
-	int node, highest_cpu, i;
+	int node, i;
 
 	/* Scan all cpu device tree nodes, note two values:
 	 * 1) largest E-cache size
@@ -446,15 +497,7 @@ void cheetah_ecache_flush_init(void)
 	}
 
 	/* Now allocate error trap reporting scoreboard. */
-	highest_cpu = 0;
-#ifdef CONFIG_SMP
-	for (i = 0; i < NR_CPUS; i++) {
-		if ((1UL << i) & cpu_present_map)
-			highest_cpu = i;
-	}
-#endif
-	highest_cpu++;
-	node = highest_cpu * (2 * sizeof(struct cheetah_err_info));
+	node = NR_CPUS * (2 * sizeof(struct cheetah_err_info));
 	for (order = 0; order < MAX_ORDER; order++) {
 		if ((PAGE_SIZE << order) >= node)
 			break;
@@ -471,7 +514,7 @@ void cheetah_ecache_flush_init(void)
 	/* Mark all AFSRs as invalid so that the trap handler will
 	 * log new new information there.
 	 */
-	for (i = 0; i < 2 * highest_cpu; i++)
+	for (i = 0; i < 2 * NR_CPUS; i++)
 		cheetah_error_log[i].afsr = CHAFSR_INVALID;
 
 	/* Now patch trap tables. */
@@ -483,6 +526,12 @@ void cheetah_ecache_flush_init(void)
 	memcpy(tl1_iae, cheetah_deferred_trap_vector_tl1, (8 * 4));
 	memcpy(tl0_dae, cheetah_deferred_trap_vector, (8 * 4));
 	memcpy(tl1_dae, cheetah_deferred_trap_vector_tl1, (8 * 4));
+	if (tlb_type == cheetah_plus) {
+		memcpy(tl0_dcpe, cheetah_plus_dcpe_trap_vector, (8 * 4));
+		memcpy(tl1_dcpe, cheetah_plus_dcpe_trap_vector_tl1, (8 * 4));
+		memcpy(tl0_icpe, cheetah_plus_icpe_trap_vector, (8 * 4));
+		memcpy(tl1_icpe, cheetah_plus_icpe_trap_vector_tl1, (8 * 4));
+	}
 	flushi(PAGE_OFFSET);
 }
 
@@ -516,14 +565,69 @@ static void cheetah_flush_ecache_line(unsigned long physaddr)
 			       "i" (ASI_PHYS_USE_EC));
 }
 
+#ifdef CONFIG_SMP
+unsigned long __init cheetah_tune_scheduling(void)
+{
+	unsigned long tick1, tick2, raw;
+	unsigned long flush_base = ecache_flush_physbase;
+	unsigned long flush_linesize = ecache_flush_linesize;
+	unsigned long flush_size = ecache_flush_size;
+
+	/* Run through the whole cache to guarantee the timed loop
+	 * is really displacing cache lines.
+	 */
+	__asm__ __volatile__("1: subcc	%0, %4, %0\n\t"
+			     "   bne,pt	%%xcc, 1b\n\t"
+			     "    ldxa	[%2 + %0] %3, %%g0\n\t"
+			     : "=&r" (flush_size)
+			     : "0" (flush_size), "r" (flush_base),
+			       "i" (ASI_PHYS_USE_EC), "r" (flush_linesize));
+
+	/* The flush area is 2 X Ecache-size, so cut this in half for
+	 * the timed loop.
+	 */
+	flush_base = ecache_flush_physbase;
+	flush_linesize = ecache_flush_linesize;
+	flush_size = ecache_flush_size >> 1;
+
+	tick1 = tick_ops->get_tick();
+
+	__asm__ __volatile__("1: subcc	%0, %4, %0\n\t"
+			     "   bne,pt	%%xcc, 1b\n\t"
+			     "    ldxa	[%2 + %0] %3, %%g0\n\t"
+			     : "=&r" (flush_size)
+			     : "0" (flush_size), "r" (flush_base),
+			       "i" (ASI_PHYS_USE_EC), "r" (flush_linesize));
+
+	tick2 = tick_ops->get_tick();
+
+	raw = (tick2 - tick1);
+
+	return (raw - (raw >> 2));
+}
+#endif
+
 /* Unfortunately, the diagnostic access to the I-cache tags we need to
  * use to clear the thing interferes with I-cache coherency transactions.
  *
  * So we must only flush the I-cache when it is disabled.
  */
+static void __cheetah_flush_icache(void)
+{
+	unsigned long i;
+
+	/* Clear the valid bits in all the tags. */
+	for (i = 0; i < (1 << 15); i += (1 << 5)) {
+		__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
+				     "membar #Sync"
+				     : /* no outputs */
+				     : "r" (i | (2 << 3)), "i" (ASI_IC_TAG));
+	}
+}
+
 static void cheetah_flush_icache(void)
 {
-	unsigned long dcu_save, i;
+	unsigned long dcu_save;
 
 	/* Save current DCU, disable I-cache. */
 	__asm__ __volatile__("ldxa [%%g0] %1, %0\n\t"
@@ -534,13 +638,7 @@ static void cheetah_flush_icache(void)
 			     : "i" (ASI_DCU_CONTROL_REG), "i" (DCU_IC)
 			     : "g1");
 
-	/* Clear the valid bits in all the tags. */
-	for (i = 0; i < (1 << 16); i += (1 << 5)) {
-		__asm__ __volatile__("stxa %%g0, [%0] %1\n\t"
-				     "membar #Sync"
-				     : /* no outputs */
-				     : "r" (i | (2 << 3)), "i" (ASI_IC_TAG));
-	}
+	__cheetah_flush_icache();
 
 	/* Restore DCU register */
 	__asm__ __volatile__("stxa %0, [%%g0] %1\n\t"
@@ -558,6 +656,34 @@ static void cheetah_flush_dcache(void)
 				     "membar #Sync"
 				     : /* no outputs */
 				     : "r" (i), "i" (ASI_DCACHE_TAG));
+	}
+}
+
+/* In order to make the even parity correct we must do two things.
+ * First, we clear DC_data_parity and set DC_utag to an appropriate value.
+ * Next, we clear out all 32-bytes of data for that line.  Data of
+ * all-zero + tag parity value of zero == correct parity.
+ */
+static void cheetah_plus_zap_dcache_parity(void)
+{
+	unsigned long i;
+
+	for (i = 0; i < (1 << 16); i += (1 << 5)) {
+		unsigned long tag = (i >> 14);
+		unsigned long j;
+
+		__asm__ __volatile__("membar	#Sync\n\t"
+				     "stxa	%0, [%1] %2\n\t"
+				     "membar	#Sync"
+				     : /* no outputs */
+				     : "r" (tag), "r" (i),
+				       "i" (ASI_DCACHE_UTAG));
+		for (j = i; j < i + (1 << 5); j += (1 << 3))
+			__asm__ __volatile__("membar	#Sync\n\t"
+					     "stxa	%%g0, [%0] %1\n\t"
+					     "membar	#Sync"
+					     : /* no outputs */
+					     : "r" (j), "i" (ASI_DCACHE_DATA));
 	}
 }
 
@@ -947,6 +1073,7 @@ static int cheetah_fix_ce(unsigned long physaddr)
 	__asm__ __volatile__("ldxa	[%0] %3, %%g0\n\t"
 			     "ldxa	[%1] %3, %%g0\n\t"
 			     "casxa	[%2] %3, %%g0, %%g0\n\t"
+			     "membar	#StoreLoad | #StoreStore\n\t"
 			     "ldxa	[%0] %3, %%g0\n\t"
 			     "ldxa	[%1] %3, %%g0\n\t"
 			     "membar	#Sync"
@@ -1230,7 +1357,7 @@ void cheetah_deferred_handler(struct pt_regs *regs, unsigned long afsr, unsigned
 	/* "Recoverable" here means we try to yank the page from ever
 	 * being newly used again.  This depends upon a few things:
 	 * 1) Must be main memory, and AFAR must be valid.
-	 * 2) If we trapped from use, OK.
+	 * 2) If we trapped from user, OK.
 	 * 3) Else, if we trapped from kernel we must find exception
 	 *    table entry (ie. we have to have been accessing user
 	 *    space).
@@ -1245,7 +1372,7 @@ void cheetah_deferred_handler(struct pt_regs *regs, unsigned long afsr, unsigned
 			recoverable = 1;
 		} else {
 			unsigned long g2 = regs->u_regs[UREG_G2];
-			unsigned long fixup = search_exception_table(regs->tpc, &g2);
+			unsigned long fixup = search_extables_range(regs->tpc, &g2);
 
 			if (fixup != 0UL) {
 				/* OK, kernel access to userspace. */
@@ -1257,17 +1384,15 @@ void cheetah_deferred_handler(struct pt_regs *regs, unsigned long afsr, unsigned
 			}
 
 			if (recoverable) {
-				struct page *page = virt_to_page(__va(afar));
-
-				if (VALID_PAGE(page))
-					get_page(page);
+				if (pfn_valid(afar >> PAGE_SHIFT))
+					get_page(pfn_to_page(afar >> PAGE_SHIFT));
 				else
 					recoverable = 0;
 
 				/* Only perform fixup if we still have a
 				 * recoverable condition.
 				 */
-				if (fixup != 0UL && recoverable) {
+				if (recoverable) {
 					regs->tpc = fixup;
 					regs->tnpc = regs->tpc + 4;
 					regs->u_regs[UREG_G2] = g2;
@@ -1282,16 +1407,56 @@ void cheetah_deferred_handler(struct pt_regs *regs, unsigned long afsr, unsigned
 		panic("Irrecoverable deferred error trap.\n");
 }
 
+/* Handle a D/I cache parity error trap.  TYPE is encoded as:
+ *
+ * Bit0:	0=dcache,1=icache
+ * Bit1:	0=recoverable,1=unrecoverable
+ *
+ * The hardware has disabled both the I-cache and D-cache in
+ * the %dcr register.  
+ */
+void cheetah_plus_parity_error(int type, struct pt_regs *regs)
+{
+	if (type & 0x1)
+		__cheetah_flush_icache();
+	else
+		cheetah_plus_zap_dcache_parity();
+	cheetah_flush_dcache();
+
+	/* Re-enable I-cache/D-cache */
+	__asm__ __volatile__("ldxa [%%g0] %0, %%g1\n\t"
+			     "or %%g1, %1, %%g1\n\t"
+			     "stxa %%g1, [%%g0] %0\n\t"
+			     "membar #Sync"
+			     : /* no outputs */
+			     : "i" (ASI_DCU_CONTROL_REG),
+			       "i" (DCU_DC | DCU_IC)
+			     : "g1");
+
+	if (type & 0x2) {
+		printk(KERN_EMERG "CPU[%d]: Cheetah+ %c-cache parity error at TPC[%016lx]\n",
+		       smp_processor_id(),
+		       (type & 0x1) ? 'I' : 'D',
+		       regs->tpc);
+		panic("Irrecoverable Cheetah+ parity error.");
+	}
+
+	printk(KERN_WARNING "CPU[%d]: Cheetah+ %c-cache parity error at TPC[%016lx]\n",
+	       smp_processor_id(),
+	       (type & 0x1) ? 'I' : 'D',
+	       regs->tpc);
+}
+
 void do_fpe_common(struct pt_regs *regs)
 {
-	if(regs->tstate & TSTATE_PRIV) {
+	if (regs->tstate & TSTATE_PRIV) {
 		regs->tpc = regs->tnpc;
 		regs->tnpc += 4;
 	} else {
-		unsigned long fsr = current->thread.xfsr[0];
+		unsigned long fsr = current_thread_info()->xfsr[0];
 		siginfo_t info;
 
-		if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		if (test_thread_flag(TIF_32BIT)) {
 			regs->tpc &= 0xffffffff;
 			regs->tnpc &= 0xffffffff;
 		}
@@ -1328,7 +1493,7 @@ void do_fpother(struct pt_regs *regs)
 	struct fpustate *f = FPUSTATE;
 	int ret = 0;
 
-	switch ((current->thread.xfsr[0] & 0x1c000)) {
+	switch ((current_thread_info()->xfsr[0] & 0x1c000)) {
 	case (2 << 14): /* unfinished_FPop */
 	case (3 << 14): /* unimplemented_FPop */
 		ret = do_mathemu(regs, f);
@@ -1343,9 +1508,9 @@ void do_tof(struct pt_regs *regs)
 {
 	siginfo_t info;
 
-	if(regs->tstate & TSTATE_PRIV)
+	if (regs->tstate & TSTATE_PRIV)
 		die_if_kernel("Penguin overflow trap from kernel mode", regs);
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
@@ -1361,7 +1526,9 @@ void do_div0(struct pt_regs *regs)
 {
 	siginfo_t info;
 
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (regs->tstate & TSTATE_PRIV)
+		die_if_kernel("TL0: Kernel divide by zero.", regs);
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
@@ -1377,11 +1544,11 @@ void instruction_dump (unsigned int *pc)
 {
 	int i;
 
-	if((((unsigned long) pc) & 3))
+	if ((((unsigned long) pc) & 3))
 		return;
 
 	printk("Instruction DUMP:");
-	for(i = -3; i < 6; i++)
+	for (i = -3; i < 6; i++)
 		printk("%c%08x%c",i?' ':'<',pc[i],i?' ':'>');
 	printk("\n");
 }
@@ -1391,33 +1558,36 @@ void user_instruction_dump (unsigned int *pc)
 	int i;
 	unsigned int buf[9];
 	
-	if((((unsigned long) pc) & 3))
+	if ((((unsigned long) pc) & 3))
 		return;
 		
-	if(copy_from_user(buf, pc - 3, sizeof(buf)))
+	if (copy_from_user(buf, pc - 3, sizeof(buf)))
 		return;
 
 	printk("Instruction DUMP:");
-	for(i = 0; i < 9; i++)
+	for (i = 0; i < 9; i++)
 		printk("%c%08x%c",i==3?' ':'<',buf[i],i==3?' ':'>');
 	printk("\n");
 }
 
-void show_trace_task(struct task_struct *tsk)
+void show_stack(struct task_struct *tsk, unsigned long *_ksp)
 {
-	unsigned long pc, fp;
-	unsigned long task_base = (unsigned long)tsk;
+	unsigned long pc, fp, thread_base, ksp;
+	struct thread_info *tp = tsk->thread_info;
 	struct reg_window *rw;
 	int count = 0;
 
-	if (!tsk)
-		return;
+	ksp = (unsigned long) _ksp;
 
-	fp = tsk->thread.ksp + STACK_BIAS;
+	if (tp == current_thread_info())
+		flushw_all();
+
+	fp = ksp + STACK_BIAS;
+	thread_base = (unsigned long) tp;
 	do {
 		/* Bogus frame pointer? */
-		if (fp < (task_base + sizeof(struct task_struct)) ||
-		    fp >= (task_base + THREAD_SIZE))
+		if (fp < (thread_base + sizeof(struct thread_info)) ||
+		    fp >= (thread_base + THREAD_SIZE))
 			break;
 		rw = (struct reg_window *)fp;
 		pc = rw->ins[7];
@@ -1427,8 +1597,25 @@ void show_trace_task(struct task_struct *tsk)
 	printk("\n");
 }
 
+void show_trace_task(struct task_struct *tsk)
+{
+	if (tsk)
+		show_stack(tsk,
+			   (unsigned long *) tsk->thread_info->ksp);
+}
+
+void dump_stack(void)
+{
+	unsigned long *ksp;
+
+	__asm__ __volatile__("mov	%%fp, %0"
+			     : "=r" (ksp));
+	show_stack(current, ksp);
+}
+
 void die_if_kernel(char *str, struct pt_regs *regs)
 {
+	static int die_counter;
 	extern void __show_regs(struct pt_regs * regs);
 	extern void smp_report_regs(void);
 	int count = 0;
@@ -1441,10 +1628,10 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 "              /_| \\__/ |_\\\n"
 "                 \\__U_/\n");
 
-	printk("%s(%d): %s\n", current->comm, current->pid, str);
+	printk("%s(%d): %s [#%d]\n", current->comm, current->pid, str, ++die_counter);
 	__asm__ __volatile__("flushw");
 	__show_regs(regs);
-	if(regs->tstate & TSTATE_PRIV) {
+	if (regs->tstate & TSTATE_PRIV) {
 		struct reg_window *rw = (struct reg_window *)
 			(regs->u_regs[UREG_FP] + STACK_BIAS);
 
@@ -1452,20 +1639,22 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 		 * find some badly aligned kernel stack.
 		 */
 		lastrw = (struct reg_window *)current;
-		while(rw					&&
-		      count++ < 30				&&
-		      rw >= lastrw				&&
-		      (char *) rw < ((char *) current)
-		        + sizeof (union task_union) 		&&
-		      !(((unsigned long) rw) & 0x7)) {
-			printk("Caller[%016lx]\n", rw->ins[7]);
+		while (rw					&&
+		       count++ < 30				&&
+		       rw >= lastrw				&&
+		       (char *) rw < ((char *) current)
+		       + sizeof (union thread_union) 		&&
+		       !(((unsigned long) rw) & 0x7)) {
+			printk("Caller[%016lx]", rw->ins[7]);
+			print_symbol(": %s\n", rw->ins[7]);
+			printk("\n");
 			lastrw = rw;
 			rw = (struct reg_window *)
 				(rw->ins[6] + STACK_BIAS);
 		}
 		instruction_dump ((unsigned int *) regs->tpc);
 	} else {
-		if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+		if (test_thread_flag(TIF_32BIT)) {
 			regs->tpc &= 0xffffffff;
 			regs->tnpc &= 0xffffffff;
 		}
@@ -1475,7 +1664,7 @@ void die_if_kernel(char *str, struct pt_regs *regs)
 	smp_report_regs();
 #endif
                                                 	
-	if(regs->tstate & TSTATE_PRIV)
+	if (regs->tstate & TSTATE_PRIV)
 		do_exit(SIGKILL);
 	do_exit(SIGSEGV);
 }
@@ -1490,9 +1679,9 @@ void do_illegal_instruction(struct pt_regs *regs)
 	u32 insn;
 	siginfo_t info;
 
-	if(tstate & TSTATE_PRIV)
+	if (tstate & TSTATE_PRIV)
 		die_if_kernel("Kernel illegal instruction", regs);
-	if(current->thread.flags & SPARC_FLAG_32BIT)
+	if (test_thread_flag(TIF_32BIT))
 		pc = (u32)pc;
 	if (get_user(insn, (u32 *)pc) != -EFAULT) {
 		if ((insn & 0xc1ffc000) == 0x81700000) /* POPC */ {
@@ -1515,7 +1704,7 @@ void mem_address_unaligned(struct pt_regs *regs, unsigned long sfar, unsigned lo
 {
 	siginfo_t info;
 
-	if(regs->tstate & TSTATE_PRIV) {
+	if (regs->tstate & TSTATE_PRIV) {
 		extern void kernel_unaligned_trap(struct pt_regs *regs,
 						  unsigned int insn, 
 						  unsigned long sfar, unsigned long sfsr);
@@ -1534,7 +1723,7 @@ void do_privop(struct pt_regs *regs)
 {
 	siginfo_t info;
 
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
@@ -1559,56 +1748,67 @@ void do_cee(struct pt_regs *regs)
 
 void do_cee_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Cache Error Exception", regs);
 }
 
 void do_dae_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Data Access Exception", regs);
 }
 
 void do_iae_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Instruction Access Exception", regs);
 }
 
 void do_div0_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: DIV0 Exception", regs);
 }
 
 void do_fpdis_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: FPU Disabled", regs);
 }
 
 void do_fpieee_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: FPU IEEE Exception", regs);
 }
 
 void do_fpother_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: FPU Other Exception", regs);
 }
 
 void do_ill_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Illegal Instruction Exception", regs);
 }
 
 void do_irq_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: IRQ Exception", regs);
 }
 
 void do_lddfmna_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: LDDF Exception", regs);
 }
 
 void do_stdfmna_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: STDF Exception", regs);
 }
 
@@ -1619,6 +1819,7 @@ void do_paw(struct pt_regs *regs)
 
 void do_paw_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Phys Watchpoint Exception", regs);
 }
 
@@ -1629,11 +1830,13 @@ void do_vaw(struct pt_regs *regs)
 
 void do_vaw_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Virt Watchpoint Exception", regs);
 }
 
 void do_tof_tl1(struct pt_regs *regs)
 {
+	dump_tl1_traplog((struct tl1_traplog *)(regs + 1));
 	die_if_kernel("TL1: Tag Overflow Exception", regs);
 }
 
@@ -1642,19 +1845,49 @@ void do_getpsr(struct pt_regs *regs)
 	regs->u_regs[UREG_I0] = tstate_to_psr(regs->tstate);
 	regs->tpc   = regs->tnpc;
 	regs->tnpc += 4;
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
 }
 
-void trap_init(void)
+extern void thread_info_offsets_are_bolixed_dave(void);
+
+/* Only invoked on boot processor. */
+void __init trap_init(void)
 {
-	/* Attach to the address space of init_task. */
+	/* Compile time sanity check. */
+	if (TI_TASK != offsetof(struct thread_info, task) ||
+	    TI_FLAGS != offsetof(struct thread_info, flags) ||
+	    TI_CPU != offsetof(struct thread_info, cpu) ||
+	    TI_FPSAVED != offsetof(struct thread_info, fpsaved) ||
+	    TI_KSP != offsetof(struct thread_info, ksp) ||
+	    TI_FAULT_ADDR != offsetof(struct thread_info, fault_address) ||
+	    TI_KREGS != offsetof(struct thread_info, kregs) ||
+	    TI_UTRAPS != offsetof(struct thread_info, utraps) ||
+	    TI_EXEC_DOMAIN != offsetof(struct thread_info, exec_domain) ||
+	    TI_REG_WINDOW != offsetof(struct thread_info, reg_window) ||
+	    TI_RWIN_SPTRS != offsetof(struct thread_info, rwbuf_stkptrs) ||
+	    TI_GSR != offsetof(struct thread_info, gsr) ||
+	    TI_XFSR != offsetof(struct thread_info, xfsr) ||
+	    TI_USER_CNTD0 != offsetof(struct thread_info, user_cntd0) ||
+	    TI_USER_CNTD1 != offsetof(struct thread_info, user_cntd1) ||
+	    TI_KERN_CNTD0 != offsetof(struct thread_info, kernel_cntd0) ||
+	    TI_KERN_CNTD1 != offsetof(struct thread_info, kernel_cntd1) ||
+	    TI_PCR != offsetof(struct thread_info, pcr_reg) ||
+	    TI_CEE_STUFF != offsetof(struct thread_info, cee_stuff) ||
+	    TI_PRE_COUNT != offsetof(struct thread_info, preempt_count) ||
+	    TI_FPREGS != offsetof(struct thread_info, fpregs) ||
+	    (TI_FPREGS & (64 - 1)))
+		thread_info_offsets_are_bolixed_dave();
+
+	/* Attach to the address space of init_task.  On SMP we
+	 * do this in smp.c:smp_callin for other cpus.
+	 */
 	atomic_inc(&init_mm.mm_count);
 	current->active_mm = &init_mm;
 
-	/* NOTE: Other cpus have this done as they are started
-	 *       up on SMP.
-	 */
+#ifdef CONFIG_SMP
+	current_thread_info()->cpu = hard_smp_processor_id();
+#endif
 }

@@ -47,15 +47,12 @@
 
 #include <linux/kernel.h>
 #include <linux/init.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/timer.h>
 #include <linux/module.h>
-#include <asm/io.h>
-#include <asm/system.h>
-
+#include <linux/ethtool.h>
 #include <linux/netdevice.h>
 #include <linux/trdevice.h>
 #include <linux/ibmtr.h>
@@ -65,6 +62,10 @@
 #include <pcmcia/cs.h>
 #include <pcmcia/cistpl.h>
 #include <pcmcia/ds.h>
+
+#include <asm/uaccess.h>
+#include <asm/io.h>
+#include <asm/system.h>
 
 #define PCMCIA
 #include "../tokenring/ibmtr.c"
@@ -126,7 +127,7 @@ static dev_link_t *dev_list;
 
 extern int ibmtr_probe(struct net_device *dev);
 extern int trdev_init(struct net_device *dev);
-extern void tok_interrupt (int irq, void *dev_id, struct pt_regs *regs);
+extern irqreturn_t tok_interrupt (int irq, void *dev_id, struct pt_regs *regs);
 
 /*====================================================================*/
 
@@ -156,12 +157,35 @@ static void flush_stale_links(void)
     }
 }
 
-/*====================================================================*/
-
-static void cs_error(client_handle_t handle, int func, int ret)
+static int netdev_ethtool_ioctl(struct net_device *dev, void *useraddr)
 {
-    error_info_t err = { func, ret };
-    CardServices(ReportError, handle, &err);
+	u32 ethcmd;
+		
+	if (copy_from_user(&ethcmd, useraddr, sizeof(ethcmd)))
+		return -EFAULT;
+	
+	switch (ethcmd) {
+	case ETHTOOL_GDRVINFO: {
+		struct ethtool_drvinfo info = {ETHTOOL_GDRVINFO};
+		strncpy(info.driver, "ibmtr_cs", sizeof(info.driver)-1);
+		if (copy_to_user(useraddr, &info, sizeof(info)))
+			return -EFAULT;
+		return 0;
+	}
+	}
+	
+	return -EOPNOTSUPP;
+}
+
+static int private_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
+{
+
+       switch(cmd) {
+       case SIOCETHTOOL:
+	       return netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
+	default:
+	    return -EOPNOTSUPP;
+	}
 }
 
 /*======================================================================
@@ -184,11 +208,15 @@ static dev_link_t *ibmtr_attach(void)
     flush_stale_links();
 
     /* Create new token-ring device */
-    info = kmalloc(sizeof(*info), GFP_KERNEL);
-    if (!info) return NULL;
-    memset(info, 0, sizeof(*info));
-    link = &info->link; link->priv = info;
+    dev = alloc_trdev(sizeof(*info));
+    if (!dev)
+	    return NULL;
+    info = dev->priv;
 
+    link = &info->link;
+    link->priv = info;
+
+    init_timer(&link->release);
     link->release.function = &ibmtr_release;
     link->release.data = (u_long)link;
     link->io.Attributes1 = IO_DATA_PATH_WIDTH_8;
@@ -207,15 +235,10 @@ static dev_link_t *ibmtr_attach(void)
     link->conf.IntType = INT_MEMORY_AND_IO;
     link->conf.Present = PRESENT_OPTION;
 
-    dev = init_trdev(NULL,0);
-    if (dev == NULL) {
-	ibmtr_detach(link);
-        return NULL;
-    }
-    dev->priv = &info->ti;
     link->irq.Instance = info->dev = dev;
     
     dev->init = &ibmtr_probe;
+    dev->do_ioctl = &private_ioctl;
 
     /* Register with Card Services */
     link->next = dev_list;
@@ -232,11 +255,16 @@ static dev_link_t *ibmtr_attach(void)
     ret = CardServices(RegisterClient, &link->handle, &client_reg);
     if (ret != 0) {
         cs_error(link->handle, RegisterClient, ret);
-        ibmtr_detach(link);
-        return NULL;
+	goto out_detach;
     }
 
+out:
     return link;
+
+out_detach:
+    ibmtr_detach(link);
+    link = NULL;
+    goto out;
 } /* ibmtr_attach */
 
 /*======================================================================
@@ -281,12 +309,8 @@ static void ibmtr_detach(dev_link_t *link)
 
     /* Unlink device structure, free bits */
     *linkp = link->next;
-    if (info->dev) {
-	unregister_trdev(info->dev);
-	kfree(info->dev);
-    }
-    kfree(info);
-
+    unregister_netdev(dev);
+    kfree(dev);
 } /* ibmtr_detach */
 
 /*======================================================================
@@ -387,10 +411,10 @@ static void ibmtr_config(dev_link_t *link)
         Adapters Technical Reference"  SC30-3585 for this info.  */
     ibmtr_hw_setup(dev, mmiobase);
 
-    i = register_trdev(dev);
+    i = register_netdev(dev);
     
     if (i != 0) {
-	printk(KERN_NOTICE "ibmtr_cs: register_trdev() failed\n");
+	printk(KERN_NOTICE "ibmtr_cs: register_netdev() failed\n");
 	goto failed;
     }
 
@@ -551,28 +575,25 @@ static void ibmtr_hw_setup(struct net_device *dev, u_int mmiobase)
     return;
 }
 
-/*====================================================================*/
+static struct pcmcia_driver ibmtr_cs_driver = {
+	.owner		= THIS_MODULE,
+	.drv		= {
+		.name	= "ibmtr_cs",
+	},
+	.attach		= ibmtr_attach,
+	.detach		= ibmtr_detach,
+};
 
 static int __init init_ibmtr_cs(void)
 {
-    servinfo_t serv;
-    DEBUG(0, "%s", version);
-    CardServices(GetCardServicesInfo, &serv);
-    if (serv.Revision != CS_RELEASE_CODE) {
-        printk(KERN_NOTICE "ibmtr_cs: Card Services release "
-	       "does not match!\n");
-        return -1;
-    }
-    register_pccard_driver(&dev_info, &ibmtr_attach, &ibmtr_detach);
-    return 0;
+	return pcmcia_register_driver(&ibmtr_cs_driver);
 }
 
 static void __exit exit_ibmtr_cs(void)
 {
-    DEBUG(0, "ibmtr_cs: unloading\n");
-    unregister_pccard_driver(&dev_info);
-    while (dev_list != NULL)
-        ibmtr_detach(dev_list);
+	pcmcia_unregister_driver(&ibmtr_cs_driver);
+	while (dev_list != NULL)
+		ibmtr_detach(dev_list);
 }
 
 module_init(init_ibmtr_cs);

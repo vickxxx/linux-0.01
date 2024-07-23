@@ -1,23 +1,11 @@
 /*
- *	NET/ROM release 007
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- *	This code REQUIRES 2.1.15 or higher/ NET3.038
- *
- *	This module:
- *		This module is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
- *	History
- *	NET/ROM 001	Jonathan(G4KLX)	Cloned from loopback.c
- *	NET/ROM 002	Steve Whitehouse(GW7RRM) fixed the set_mac_address
- *	NET/ROM 003	Jonathan(G4KLX)	Put nr_rebuild_header into line with
- *					ax25_rebuild_header
- *	NET/ROM 004	Jonathan(G4KLX)	Callsign registration with AX.25.
- *	NET/ROM 006	Hans(PE1AYX)	Fixed interface to IP layer.
+ * Copyright Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
-
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/proc_fs.h>
@@ -114,7 +102,7 @@ static int nr_rebuild_header(struct sk_buff *skb)
 	kfree_skb(skb);
 
 	len = skbn->len;
-	
+
 	if (!nr_route_frame(skbn, NULL)) {
 		kfree_skb(skbn);
 		stats->tx_errors++;
@@ -182,7 +170,6 @@ static int nr_set_mac_address(struct net_device *dev, void *addr)
 
 static int nr_open(struct net_device *dev)
 {
-	MOD_INC_USE_COUNT;
 	netif_start_queue(dev);
 	ax25_listen_register((ax25_address *)dev->dev_addr, NULL);
 	return 0;
@@ -192,7 +179,6 @@ static int nr_close(struct net_device *dev)
 {
 	netif_stop_queue(dev);
 	ax25_listen_release((ax25_address *)dev->dev_addr, NULL);
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -211,6 +197,7 @@ static struct net_device_stats *nr_get_stats(struct net_device *dev)
 
 int nr_init(struct net_device *dev)
 {
+	SET_MODULE_OWNER(dev);
 	dev->mtu		= NR_MAX_PACKET_SIZE;
 	dev->hard_start_xmit	= nr_xmit;
 	dev->open		= nr_open;

@@ -5,7 +5,7 @@
  *	Authors:
  *	Lennert Buytenhek		<buytenh@gnu.org>
  *
- *	$Id: br.c,v 1.46.2.1 2001/12/24 00:56:13 davem Exp $
+ *	$Id: br.c,v 1.47 2001/12/24 00:56:41 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *	modify it under the terms of the GNU General Public License
@@ -21,8 +21,6 @@
 #include <linux/etherdevice.h>
 #include <linux/init.h>
 #include <linux/if_bridge.h>
-#include <linux/brlock.h>
-#include <linux/rtnetlink.h>
 #include <asm/uaccess.h>
 #include "br_private.h"
 
@@ -30,22 +28,19 @@
 #include "../atm/lec.h"
 #endif
 
-void br_dec_use_count()
-{
-	MOD_DEC_USE_COUNT;
-}
-
-void br_inc_use_count()
-{
-	MOD_INC_USE_COUNT;
-}
+int (*br_should_route_hook) (struct sk_buff **pskb) = NULL;
 
 static int __init br_init(void)
 {
 	printk(KERN_INFO "NET4: Ethernet Bridge 008 for NET4.0\n");
 
+#ifdef CONFIG_NETFILTER
+	if (br_netfilter_init())
+		return 1;
+#endif
+	brioctl_set(br_ioctl_deviceless_stub);
 	br_handle_frame_hook = br_handle_frame;
-	br_ioctl_hook = br_ioctl_deviceless_stub;
+
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 	br_fdb_get_hook = br_fdb_get;
 	br_fdb_put_hook = br_fdb_put;
@@ -57,23 +52,24 @@ static int __init br_init(void)
 
 static void __exit br_deinit(void)
 {
+#ifdef CONFIG_NETFILTER
+	br_netfilter_fini();
+#endif
 	unregister_netdevice_notifier(&br_device_notifier);
-
-	rtnl_lock();
-	br_ioctl_hook = NULL;
-	rtnl_unlock();
-
-	br_write_lock_bh(BR_NETPROTO_LOCK);
+	brioctl_set(NULL);
 	br_handle_frame_hook = NULL;
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
 
 #if defined(CONFIG_ATM_LANE) || defined(CONFIG_ATM_LANE_MODULE)
 	br_fdb_get_hook = NULL;
 	br_fdb_put_hook = NULL;
 #endif
+
+	br_cleanup_bridges();
+
+	synchronize_net();
 }
 
-EXPORT_NO_SYMBOLS;
+EXPORT_SYMBOL(br_should_route_hook);
 
 module_init(br_init)
 module_exit(br_deinit)

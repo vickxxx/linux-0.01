@@ -11,12 +11,11 @@
  * ------------------------------------------------------------------------- */
 
 #include <linux/kernel.h>
+#include <linux/mm.h>
 #include <linux/slab.h>
 #include <linux/file.h>
-#include <linux/locks.h>
 #include <asm/bitops.h>
 #include "autofs_i.h"
-#define __NO_VERSION__
 #include <linux/module.h>
 
 static void autofs_put_super(struct super_block *sb)
@@ -33,18 +32,17 @@ static void autofs_put_super(struct super_block *sb)
 			kfree(sbi->symlink[n].data);
 	}
 
-	kfree(sb->u.generic_sbp);
+	kfree(sb->s_fs_info);
 
 	DPRINTK(("autofs: shutting down\n"));
 }
 
-static int autofs_statfs(struct super_block *sb, struct statfs *buf);
 static void autofs_read_inode(struct inode *inode);
 
 static struct super_operations autofs_sops = {
-	read_inode:	autofs_read_inode,
-	put_super:	autofs_put_super,
-	statfs:		autofs_statfs,
+	.read_inode	= autofs_read_inode,
+	.put_super	= autofs_put_super,
+	.statfs		= simple_statfs,
 };
 
 static int parse_options(char *options, int *pipefd, uid_t *uid, gid_t *gid, pid_t *pgrp, int *minproto, int *maxproto)
@@ -60,7 +58,9 @@ static int parse_options(char *options, int *pipefd, uid_t *uid, gid_t *gid, pid
 	*pipefd = -1;
 
 	if ( !options ) return 1;
-	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
+	while ((this_char = strsep(&options,",")) != NULL) {
+		if (!*this_char)
+			continue;
 		if ((value = strchr(this_char,'=')) != NULL)
 			*value++ = 0;
 		if (!strcmp(this_char,"fd")) {
@@ -110,8 +110,7 @@ static int parse_options(char *options, int *pipefd, uid_t *uid, gid_t *gid, pid
 	return (*pipefd < 0);
 }
 
-struct super_block *autofs_read_super(struct super_block *s, void *data,
-				      int silent)
+int autofs_fill_super(struct super_block *s, void *data, int silent)
 {
 	struct inode * root_inode;
 	struct dentry * root;
@@ -120,12 +119,13 @@ struct super_block *autofs_read_super(struct super_block *s, void *data,
 	struct autofs_sb_info *sbi;
 	int minproto, maxproto;
 
-	sbi = (struct autofs_sb_info *) kmalloc(sizeof(struct autofs_sb_info), GFP_KERNEL);
+	sbi = kmalloc(sizeof(*sbi), GFP_KERNEL);
 	if ( !sbi )
 		goto fail_unlock;
+	memset(sbi, 0, sizeof(*sbi));
 	DPRINTK(("autofs: starting up, sbi = %p\n",sbi));
 
-	s->u.generic_sbp = sbi;
+	s->s_fs_info = sbi;
 	sbi->magic = AUTOFS_SBI_MAGIC;
 	sbi->catatonic = 0;
 	sbi->exp_timeout = 0;
@@ -174,7 +174,7 @@ struct super_block *autofs_read_super(struct super_block *s, void *data,
 	 * Success! Install the root dentry now to indicate completion.
 	 */
 	s->s_root = root;
-	return s;
+	return 0;
 
 fail_fput:
 	printk("autofs: pipe file descriptor does not contain proper ops\n");
@@ -188,15 +188,7 @@ fail_iput:
 fail_free:
 	kfree(sbi);
 fail_unlock:
-	return NULL;
-}
-
-static int autofs_statfs(struct super_block *sb, struct statfs *buf)
-{
-	buf->f_type = AUTOFS_SUPER_MAGIC;
-	buf->f_bsize = 1024;
-	buf->f_namelen = NAME_MAX;
-	return 0;
+	return -EINVAL;
 }
 
 static void autofs_read_inode(struct inode *inode)
@@ -207,8 +199,8 @@ static void autofs_read_inode(struct inode *inode)
 
 	/* Initialize to the default case (stub directory) */
 
-	inode->i_op = &autofs_dir_inode_operations;
-	inode->i_fop = &autofs_dir_operations;
+	inode->i_op = &simple_dir_inode_operations;
+	inode->i_fop = &simple_dir_operations;
 	inode->i_mode = S_IFDIR | S_IRUGO | S_IXUGO;
 	inode->i_nlink = 2;
 	inode->i_mtime = inode->i_atime = inode->i_ctime = CURRENT_TIME;
@@ -240,7 +232,8 @@ static void autofs_read_inode(struct inode *inode)
 		sl = &sbi->symlink[n];
 		inode->u.generic_ip = sl;
 		inode->i_mode = S_IFLNK | S_IRWXUGO;
-		inode->i_mtime = inode->i_ctime = sl->mtime;
+		inode->i_mtime.tv_sec = inode->i_ctime.tv_sec = sl->mtime;
+		inode->i_mtime.tv_nsec = inode->i_ctime.tv_nsec = 0;
 		inode->i_size = sl->len;
 		inode->i_nlink = 1;
 	}

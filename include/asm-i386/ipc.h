@@ -7,13 +7,14 @@
  * See arch/i386/kernel/sys_i386.c for ugly details..
  */
 struct ipc_kludge {
-	struct msgbuf *msgp;
+	struct msgbuf __user *msgp;
 	long msgtyp;
 };
 
 #define SEMOP		 1
 #define SEMGET		 2
 #define SEMCTL		 3
+#define SEMTIMEDOP	 4
 #define MSGSND		11
 #define MSGRCV		12
 #define MSGGET		13

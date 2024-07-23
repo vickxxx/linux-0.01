@@ -5,7 +5,6 @@
 #include <linux/netfilter_ipv4/ipt_ah.h>
 #include <linux/netfilter_ipv4/ip_tables.h>
 
-EXPORT_NO_SYMBOLS;
 MODULE_LICENSE("GPL");
 
 #ifdef DEBUG_CONNTRACK
@@ -15,11 +14,7 @@ MODULE_LICENSE("GPL");
 #endif
 
 struct ahhdr {
-	__u8    nexthdr;
-	__u8    hdrlen;
-	__u16   reserved;
 	__u32   spi;
-	__u32   seq_no;
 };
 
 /* Returns 1 if the spi is matched by the range, 0 otherwise */
@@ -40,14 +35,16 @@ match(const struct sk_buff *skb,
       const struct net_device *out,
       const void *matchinfo,
       int offset,
-      const void *hdr,
-      u_int16_t datalen,
       int *hotdrop)
 {
-	const struct ahhdr *ah = hdr;
+	struct ahhdr ah;
 	const struct ipt_ah *ahinfo = matchinfo;
 
-	if (offset == 0 && datalen < sizeof(struct ahhdr)) {
+	/* Must not be a fragment. */
+	if (offset)
+		return 0;
+
+	if (skb_copy_bits(skb, skb->nh.iph->ihl*4, &ah, sizeof(ah)) < 0) {
 		/* We've been asked to examine this packet, and we
 		   can't.  Hence, no choice but to drop. */
 		duprintf("Dropping evil AH tinygram.\n");
@@ -55,11 +52,9 @@ match(const struct sk_buff *skb,
 		return 0;
 	}
 
-	/* Must not be a fragment. */
-	return !offset
-		&& spi_match(ahinfo->spis[0], ahinfo->spis[1],
-			      ntohl(ah->spi),
-			      !!(ahinfo->invflags & IPT_AH_INV_SPI));
+	return spi_match(ahinfo->spis[0], ahinfo->spis[1],
+			 ntohl(ah.spi),
+			 !!(ahinfo->invflags & IPT_AH_INV_SPI));
 }
 
 /* Called when user tries to insert an entry of this type. */
@@ -92,8 +87,12 @@ checkentry(const char *tablename,
 	return 1;
 }
 
-static struct ipt_match ah_match
-= { { NULL, NULL }, "ah", &match, &checkentry, NULL, THIS_MODULE };
+static struct ipt_match ah_match = {
+	.name		= "ah",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

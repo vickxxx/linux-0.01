@@ -13,6 +13,7 @@
 #include <linux/net.h>
 #include <linux/in.h>
 #include <linux/unistd.h>
+#include <linux/mm.h>
 
 #include <linux/sunrpc/types.h>
 #include <linux/sunrpc/xdr.h>
@@ -27,18 +28,29 @@
  * Create an RPC service
  */
 struct svc_serv *
-svc_create(struct svc_program *prog, unsigned int bufsize, unsigned int xdrsize)
+svc_create(struct svc_program *prog, unsigned int bufsize)
 {
 	struct svc_serv	*serv;
+	int vers;
+	unsigned int xdrsize;
 
 	if (!(serv = (struct svc_serv *) kmalloc(sizeof(*serv), GFP_KERNEL)))
 		return NULL;
-
 	memset(serv, 0, sizeof(*serv));
 	serv->sv_program   = prog;
 	serv->sv_nrthreads = 1;
 	serv->sv_stats     = prog->pg_stats;
 	serv->sv_bufsz	   = bufsize? bufsize : 4096;
+	prog->pg_lovers = prog->pg_nvers-1;
+	xdrsize = 0;
+	for (vers=0; vers<prog->pg_nvers ; vers++)
+		if (prog->pg_vers[vers]) {
+			prog->pg_hivers = vers;
+			if (prog->pg_lovers > vers)
+				prog->pg_lovers = vers;
+			if (prog->pg_vers[vers]->vs_xdrsize > xdrsize)
+				xdrsize = prog->pg_vers[vers]->vs_xdrsize;
+		}
 	serv->sv_xdrsize   = xdrsize;
 	INIT_LIST_HEAD(&serv->sv_threads);
 	INIT_LIST_HEAD(&serv->sv_sockets);
@@ -86,6 +98,8 @@ svc_destroy(struct svc_serv *serv)
 				  sk_list);
 		svc_delete_socket(svsk);
 	}
+	
+	cache_clean_deferred(serv);
 
 	/* Unregister service with the portmapper */
 	svc_register(serv, 0, 0);
@@ -93,35 +107,48 @@ svc_destroy(struct svc_serv *serv)
 }
 
 /*
- * Allocate an RPC server buffer
- * Later versions may do nifty things by allocating multiple pages
- * of memory directly and putting them into the bufp->iov.
+ * Allocate an RPC server's buffer space.
+ * We allocate pages and place them in rq_argpages.
  */
-int
-svc_init_buffer(struct svc_buf *bufp, unsigned int size)
+static int
+svc_init_buffer(struct svc_rqst *rqstp, unsigned int size)
 {
-	if (!(bufp->area = (u32 *) kmalloc(size, GFP_KERNEL)))
-		return 0;
-	bufp->base   = bufp->area;
-	bufp->buf    = bufp->area;
-	bufp->len    = 0;
-	bufp->buflen = size >> 2;
-
-	bufp->iov[0].iov_base = bufp->area;
-	bufp->iov[0].iov_len  = size;
-	bufp->nriov = 1;
-
-	return 1;
+	int pages;
+	int arghi;
+	
+	if (size > RPCSVC_MAXPAYLOAD)
+		size = RPCSVC_MAXPAYLOAD;
+	pages = 2 + (size+ PAGE_SIZE -1) / PAGE_SIZE;
+	rqstp->rq_argused = 0;
+	rqstp->rq_resused = 0;
+	arghi = 0;
+	if (pages > RPCSVC_MAXPAGES)
+		BUG();
+	while (pages) {
+		struct page *p = alloc_page(GFP_KERNEL);
+		if (!p)
+			break;
+		rqstp->rq_argpages[arghi++] = p;
+		pages--;
+	}
+	rqstp->rq_arghi = arghi;
+	return ! pages;
 }
 
 /*
  * Release an RPC server buffer
  */
-void
-svc_release_buffer(struct svc_buf *bufp)
+static void
+svc_release_buffer(struct svc_rqst *rqstp)
 {
-	kfree(bufp->area);
-	bufp->area = 0;
+	while (rqstp->rq_arghi)
+		put_page(rqstp->rq_argpages[--rqstp->rq_arghi]);
+	while (rqstp->rq_resused) {
+		if (rqstp->rq_respages[--rqstp->rq_resused] == NULL)
+			continue;
+		put_page(rqstp->rq_respages[rqstp->rq_resused]);
+	}
+	rqstp->rq_argused = 0;
 }
 
 /*
@@ -142,7 +169,7 @@ svc_create_thread(svc_thread_fn func, struct svc_serv *serv)
 
 	if (!(rqstp->rq_argp = (u32 *) kmalloc(serv->sv_xdrsize, GFP_KERNEL))
 	 || !(rqstp->rq_resp = (u32 *) kmalloc(serv->sv_xdrsize, GFP_KERNEL))
-	 || !svc_init_buffer(&rqstp->rq_defbuf, serv->sv_bufsz))
+	 || !svc_init_buffer(rqstp, serv->sv_bufsz))
 		goto out_thread;
 
 	serv->sv_nrthreads++;
@@ -168,7 +195,7 @@ svc_exit_thread(struct svc_rqst *rqstp)
 {
 	struct svc_serv	*serv = rqstp->rq_server;
 
-	svc_release_buffer(&rqstp->rq_defbuf);
+	svc_release_buffer(rqstp);
 	if (rqstp->rq_resp)
 		kfree(rqstp->rq_resp);
 	if (rqstp->rq_argp)
@@ -198,7 +225,7 @@ svc_register(struct svc_serv *serv, int proto, unsigned short port)
 		progp->pg_name, proto == IPPROTO_UDP? "udp" : "tcp", port);
 
 	if (!port)
-		current->sigpending = 0;
+		clear_thread_flag(TIF_SIGPENDING);
 
 	for (i = 0; i < progp->pg_nvers; i++) {
 		if (progp->pg_vers[i] == NULL)
@@ -213,9 +240,9 @@ svc_register(struct svc_serv *serv, int proto, unsigned short port)
 	}
 
 	if (!port) {
-		spin_lock_irqsave(&current->sigmask_lock, flags);
-		recalc_sigpending(current);
-		spin_unlock_irqrestore(&current->sigmask_lock, flags);
+		spin_lock_irqsave(&current->sighand->siglock, flags);
+		recalc_sigpending();
+		spin_unlock_irqrestore(&current->sighand->siglock, flags);
 	}
 
 	return error;
@@ -230,57 +257,73 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 	struct svc_program	*progp;
 	struct svc_version	*versp = NULL;	/* compiler food */
 	struct svc_procedure	*procp = NULL;
-	struct svc_buf *	argp = &rqstp->rq_argbuf;
-	struct svc_buf *	resp = &rqstp->rq_resbuf;
+	struct iovec *		argv = &rqstp->rq_arg.head[0];
+	struct iovec *		resv = &rqstp->rq_res.head[0];
 	kxdrproc_t		xdr;
-	u32			*bufp, *statp;
+	u32			*statp;
 	u32			dir, prog, vers, proc,
 				auth_stat, rpc_stat;
 
 	rpc_stat = rpc_success;
-	bufp = argp->buf;
 
-	if (argp->len < 5)
+	if (argv->iov_len < 6*4)
 		goto err_short_len;
 
-	dir  = ntohl(*bufp++);
-	vers = ntohl(*bufp++);
+	/* setup response xdr_buf.
+	 * Initially it has just one page 
+	 */
+	svc_take_page(rqstp); /* must succeed */
+	resv->iov_base = page_address(rqstp->rq_respages[0]);
+	resv->iov_len = 0;
+	rqstp->rq_res.pages = rqstp->rq_respages+1;
+	rqstp->rq_res.len = 0;
+	rqstp->rq_res.page_base = 0;
+	rqstp->rq_res.page_len = 0;
+	rqstp->rq_res.tail[0].iov_len = 0;
+	/* tcp needs a space for the record length... */
+	if (rqstp->rq_prot == IPPROTO_TCP)
+		svc_putu32(resv, 0);
+
+	rqstp->rq_xid = svc_getu32(argv);
+	svc_putu32(resv, rqstp->rq_xid);
+
+	dir  = ntohl(svc_getu32(argv));
+	vers = ntohl(svc_getu32(argv));
 
 	/* First words of reply: */
-	svc_putlong(resp, xdr_one);		/* REPLY */
-	svc_putlong(resp, xdr_zero);		/* ACCEPT */
+	svc_putu32(resv, xdr_one);		/* REPLY */
 
 	if (dir != 0)		/* direction != CALL */
 		goto err_bad_dir;
 	if (vers != 2)		/* RPC version number */
 		goto err_bad_rpc;
 
-	rqstp->rq_prog = prog = ntohl(*bufp++);	/* program number */
-	rqstp->rq_vers = vers = ntohl(*bufp++);	/* version number */
-	rqstp->rq_proc = proc = ntohl(*bufp++);	/* procedure number */
+	svc_putu32(resv, xdr_zero);		/* ACCEPT */
 
-	argp->buf += 5;
-	argp->len -= 5;
-
-	/* Used by nfsd to only allow the NULL procedure for amd. */
-	if (rqstp->rq_auth && !rqstp->rq_client && proc) {
-		auth_stat = rpc_autherr_badcred;
-		goto err_bad_auth;
-	}
+	rqstp->rq_prog = prog = ntohl(svc_getu32(argv));	/* program number */
+	rqstp->rq_vers = vers = ntohl(svc_getu32(argv));	/* version number */
+	rqstp->rq_proc = proc = ntohl(svc_getu32(argv));	/* procedure number */
 
 	/*
 	 * Decode auth data, and add verifier to reply buffer.
 	 * We do this before anything else in order to get a decent
 	 * auth verifier.
 	 */
-	svc_authenticate(rqstp, &rpc_stat, &auth_stat);
-
-	if (rpc_stat != rpc_success)
-		goto err_garbage;
-
-	if (auth_stat != rpc_auth_ok)
+	switch (svc_authenticate(rqstp, &auth_stat)) {
+	case SVC_OK:
+		break;
+	case SVC_GARBAGE:
+		rpc_stat = rpc_garbage_args;
+		goto err_bad;
+	case SVC_SYSERR:
+		rpc_stat = rpc_system_err;
+		goto err_bad;
+	case SVC_DENIED:
 		goto err_bad_auth;
-
+	case SVC_DROP:
+		goto dropit;
+	}
+		
 	progp = serv->sv_program;
 	if (prog != progp->pg_prog)
 		goto err_bad_prog;
@@ -299,8 +342,8 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 	serv->sv_stats->rpccnt++;
 
 	/* Build the reply header. */
-	statp = resp->buf;
-	svc_putlong(resp, rpc_success);		/* RPC_SUCCESS */
+	statp = resv->iov_base +resv->iov_len;
+	svc_putu32(resv, rpc_success);		/* RPC_SUCCESS */
 
 	/* Bump per-procedure stats counter */
 	procp->pc_count++;
@@ -319,14 +362,14 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 	if (!versp->vs_dispatch) {
 		/* Decode arguments */
 		xdr = procp->pc_decode;
-		if (xdr && !xdr(rqstp, rqstp->rq_argbuf.buf, rqstp->rq_argp))
+		if (xdr && !xdr(rqstp, argv->iov_base, rqstp->rq_argp))
 			goto err_garbage;
 
 		*statp = procp->pc_func(rqstp, rqstp->rq_argp, rqstp->rq_resp);
 
 		/* Encode reply */
 		if (*statp == rpc_success && (xdr = procp->pc_encode)
-		 && !xdr(rqstp, rqstp->rq_resbuf.buf, rqstp->rq_resp)) {
+		 && !xdr(rqstp, resv->iov_base+resv->iov_len, rqstp->rq_resp)) {
 			dprintk("svc: failed to encode reply\n");
 			/* serv->sv_stats->rpcsystemerr++; */
 			*statp = rpc_system_err;
@@ -343,7 +386,7 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 
 	/* Check RPC status result */
 	if (*statp != rpc_success)
-		resp->len = statp + 1 - resp->base;
+		resv->iov_len = ((void*)statp)  - resv->iov_base + 4;
 
 	/* Release reply info */
 	if (procp->pc_release)
@@ -351,17 +394,21 @@ svc_process(struct svc_serv *serv, struct svc_rqst *rqstp)
 
 	if (procp->pc_encode == NULL)
 		goto dropit;
-sendit:
+
+ sendit:
+	if (svc_authorise(rqstp))
+		goto dropit;
 	return svc_send(rqstp);
 
-dropit:
+ dropit:
+	svc_authorise(rqstp);	/* doesn't hurt to call this twice */
 	dprintk("svc: svc_process dropit\n");
 	svc_drop(rqstp);
 	return 0;
 
 err_short_len:
 #ifdef RPC_PARANOIA
-	printk("svc: short len %d, dropping request\n", argp->len);
+	printk("svc: short len %Zd, dropping request\n", argv->iov_len);
 #endif
 	goto dropit;			/* drop request */
 
@@ -374,18 +421,19 @@ err_bad_dir:
 
 err_bad_rpc:
 	serv->sv_stats->rpcbadfmt++;
-	resp->buf[-1] = xdr_one;	/* REJECT */
-	svc_putlong(resp, xdr_zero);	/* RPC_MISMATCH */
-	svc_putlong(resp, xdr_two);	/* Only RPCv2 supported */
-	svc_putlong(resp, xdr_two);
+	svc_putu32(resv, xdr_one);	/* REJECT */
+	svc_putu32(resv, xdr_zero);	/* RPC_MISMATCH */
+	svc_putu32(resv, xdr_two);	/* Only RPCv2 supported */
+	svc_putu32(resv, xdr_two);
 	goto sendit;
 
 err_bad_auth:
 	dprintk("svc: authentication failed (%d)\n", ntohl(auth_stat));
 	serv->sv_stats->rpcbadauth++;
-	resp->buf[-1] = xdr_one;	/* REJECT */
-	svc_putlong(resp, xdr_one);	/* AUTH_ERROR */
-	svc_putlong(resp, auth_stat);	/* status */
+	resv->iov_len -= 4;
+	svc_putu32(resv, xdr_one);	/* REJECT */
+	svc_putu32(resv, xdr_one);	/* AUTH_ERROR */
+	svc_putu32(resv, auth_stat);	/* status */
 	goto sendit;
 
 err_bad_prog:
@@ -395,18 +443,17 @@ err_bad_prog:
 	/* else it is just a Solaris client seeing if ACLs are supported */
 #endif
 	serv->sv_stats->rpcbadfmt++;
-	svc_putlong(resp, rpc_prog_unavail);
+	svc_putu32(resv, rpc_prog_unavail);
 	goto sendit;
 
 err_bad_vers:
 #ifdef RPC_PARANOIA
-	if (vers)
-		printk("svc: unknown version (%d)\n", vers);
+	printk("svc: unknown version (%d)\n", vers);
 #endif
 	serv->sv_stats->rpcbadfmt++;
-	svc_putlong(resp, rpc_prog_mismatch);
-	svc_putlong(resp, htonl(progp->pg_lovers));
-	svc_putlong(resp, htonl(progp->pg_hivers));
+	svc_putu32(resv, rpc_prog_mismatch);
+	svc_putu32(resv, htonl(progp->pg_lovers));
+	svc_putu32(resv, htonl(progp->pg_hivers));
 	goto sendit;
 
 err_bad_proc:
@@ -414,14 +461,16 @@ err_bad_proc:
 	printk("svc: unknown procedure (%d)\n", proc);
 #endif
 	serv->sv_stats->rpcbadfmt++;
-	svc_putlong(resp, rpc_proc_unavail);
+	svc_putu32(resv, rpc_proc_unavail);
 	goto sendit;
 
 err_garbage:
 #ifdef RPC_PARANOIA
 	printk("svc: failed to decode args\n");
 #endif
+	rpc_stat = rpc_garbage_args;
+err_bad:
 	serv->sv_stats->rpcbadfmt++;
-	svc_putlong(resp, rpc_garbage_args);
+	svc_putu32(resv, rpc_stat);
 	goto sendit;
 }

@@ -36,8 +36,7 @@ struct fmi_device
 
 static int io = -1; 
 static int radio_nr = -1;
-static int users = 0;
-static struct pci_dev *dev = NULL;
+static struct pnp_dev *dev = NULL;
 static struct semaphore lock;
 
 /* freq is in 1/16 kHz to internal number, hw precision is 50 kHz */
@@ -83,25 +82,15 @@ static inline void fmi_unmute(int port)
 
 static inline int fmi_setfreq(struct fmi_device *dev)
 {
-        int myport = dev->port;
+	int myport = dev->port;
 	unsigned long freq = dev->curfreq;
-	int i;
-	
+
 	down(&lock);
-	
+
 	outbits(16, RSF16_ENCODE(freq), myport);
 	outbits(8, 0xC0, myport);
-	for(i=0; i< 100; i++)
-	{
-		udelay(1400);
-		if(current->need_resched)
-			schedule();
-	}
-/* If this becomes allowed use it ... 	
 	current->state = TASK_UNINTERRUPTIBLE;
 	schedule_timeout(HZ/7);
-*/	
-
 	up(&lock);
 	if (dev->curvol) fmi_unmute(myport);
 	return 0;
@@ -112,22 +101,14 @@ static inline int fmi_getsigstr(struct fmi_device *dev)
 	int val;
 	int res;
 	int myport = dev->port;
-	int i;
+
 	
 	down(&lock);
 	val = dev->curvol ? 0x08 : 0x00;	/* unmute/mute */
 	outb(val, myport);
 	outb(val | 0x10, myport);
-	for(i=0; i< 100; i++)
-	{
-		udelay(1400);
-		if(current->need_resched)
-			schedule();
-	}
-/* If this becomes allowed use it ... 	
-	current->state = TASK_UNINTERRUPTIBLE;
+	set_current_state(TASK_UNINTERRUPTIBLE);
 	schedule_timeout(HZ/7);
-*/	
 	res = (int)inb(myport+1);
 	outb(val, myport);
 	
@@ -135,121 +116,97 @@ static inline int fmi_getsigstr(struct fmi_device *dev)
 	return (res & 2) ? 0 : 0xFFFF;
 }
 
-static int fmi_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
+static int fmi_do_ioctl(struct inode *inode, struct file *file,
+			unsigned int cmd, void *arg)
 {
+	struct video_device *dev = video_devdata(file);
 	struct fmi_device *fmi=dev->priv;
 	
 	switch(cmd)
 	{
 		case VIDIOCGCAP:
 		{
-			struct video_capability v;
-			strcpy(v.name, "SF16-FMx radio");
-			v.type=VID_TYPE_TUNER;
-			v.channels=1;
-			v.audios=1;
-			/* No we don't do pictures */
-			v.maxwidth=0;
-			v.maxheight=0;
-			v.minwidth=0;
-			v.minheight=0;
-			if(copy_to_user(arg,&v,sizeof(v)))
-				return -EFAULT;
+			struct video_capability *v = arg;
+			memset(v,0,sizeof(*v));
+			strcpy(v->name, "SF16-FMx radio");
+			v->type=VID_TYPE_TUNER;
+			v->channels=1;
+			v->audios=1;
 			return 0;
 		}
 		case VIDIOCGTUNER:
 		{
-			struct video_tuner v;
+			struct video_tuner *v = arg;
 			int mult;
 
-			if(copy_from_user(&v, arg,sizeof(v))!=0)
-				return -EFAULT;
-			if(v.tuner)	/* Only 1 tuner */
+			if(v->tuner)	/* Only 1 tuner */
 				return -EINVAL;
-			strcpy(v.name, "FM");
+			strcpy(v->name, "FM");
 			mult = (fmi->flags & VIDEO_TUNER_LOW) ? 1 : 1000;
-			v.rangelow = RSF16_MINFREQ/mult;
-			v.rangehigh = RSF16_MAXFREQ/mult;
-			v.flags=fmi->flags;
-			v.mode=VIDEO_MODE_AUTO;
-			v.signal = fmi_getsigstr(fmi);
-			if(copy_to_user(arg,&v, sizeof(v)))
-				return -EFAULT;
+			v->rangelow = RSF16_MINFREQ/mult;
+			v->rangehigh = RSF16_MAXFREQ/mult;
+			v->flags=fmi->flags;
+			v->mode=VIDEO_MODE_AUTO;
+			v->signal = fmi_getsigstr(fmi);
 			return 0;
 		}
 		case VIDIOCSTUNER:
 		{
-			struct video_tuner v;
-			if(copy_from_user(&v, arg, sizeof(v)))
-				return -EFAULT;
-			if(v.tuner!=0)
+			struct video_tuner *v = arg;
+			if(v->tuner!=0)
 				return -EINVAL;
-			fmi->flags = v.flags & VIDEO_TUNER_LOW;
+			fmi->flags = v->flags & VIDEO_TUNER_LOW;
 			/* Only 1 tuner so no setting needed ! */
 			return 0;
 		}
 		case VIDIOCGFREQ:
 		{
-			unsigned long tmp = fmi->curfreq;
+			unsigned long *freq = arg;
+			*freq = fmi->curfreq;
 			if (!(fmi->flags & VIDEO_TUNER_LOW))
-				tmp /= 1000;
-			if(copy_to_user(arg, &tmp, sizeof(tmp)))
-				return -EFAULT;
+			    *freq /= 1000;
 			return 0;
 		}
 		case VIDIOCSFREQ:
 		{
-			unsigned long tmp;
-			if(copy_from_user(&tmp, arg, sizeof(tmp)))
-				return -EFAULT;
+			unsigned long *freq = arg;
 			if (!(fmi->flags & VIDEO_TUNER_LOW))
-				tmp *= 1000;
-			if ( tmp<RSF16_MINFREQ || tmp>RSF16_MAXFREQ )
-			  return -EINVAL;
+				*freq *= 1000;
+			if (*freq < RSF16_MINFREQ || *freq > RSF16_MAXFREQ )
+				return -EINVAL;
 			/*rounding in steps of 800 to match th freq
 			  that will be used */
-			fmi->curfreq = (tmp/800)*800; 
+			fmi->curfreq = (*freq/800)*800; 
 			fmi_setfreq(fmi);
 			return 0;
 		}
 		case VIDIOCGAUDIO:
 		{	
-			struct video_audio v;
-			v.audio=0;
-			v.volume=0;
-			v.bass=0;
-			v.treble=0;
-			v.flags=( (!fmi->curvol)*VIDEO_AUDIO_MUTE | VIDEO_AUDIO_MUTABLE);
-			strcpy(v.name, "Radio");
-			v.mode=VIDEO_SOUND_STEREO;
-			v.balance=0;
-			v.step=0; /* No volume, just (un)mute */
-			if(copy_to_user(arg,&v, sizeof(v)))
-				return -EFAULT;
+			struct video_audio *v = arg;
+			memset(v,0,sizeof(*v));
+			v->flags=( (!fmi->curvol)*VIDEO_AUDIO_MUTE | VIDEO_AUDIO_MUTABLE);
+			strcpy(v->name, "Radio");
+			v->mode=VIDEO_SOUND_STEREO;
 			return 0;			
 		}
 		case VIDIOCSAUDIO:
 		{
-			struct video_audio v;
-			if(copy_from_user(&v, arg, sizeof(v)))
-				return -EFAULT;
-			if(v.audio)
+			struct video_audio *v = arg;
+			if(v->audio)
 				return -EINVAL;
-			fmi->curvol= v.flags&VIDEO_AUDIO_MUTE ? 0 : 1;
+			fmi->curvol= v->flags&VIDEO_AUDIO_MUTE ? 0 : 1;
 			fmi->curvol ? 
-			  fmi_unmute(fmi->port) : fmi_mute(fmi->port);
+				fmi_unmute(fmi->port) : fmi_mute(fmi->port);
 			return 0;
 		}
 	        case VIDIOCGUNIT:
 		{
-               		struct video_unit v;
-			v.video=VIDEO_NO_UNIT;
-			v.vbi=VIDEO_NO_UNIT;
-			v.radio=dev->minor;
-			v.audio=0; /* How do we find out this??? */
-			v.teletext=VIDEO_NO_UNIT;
-			if(copy_to_user(arg, &v, sizeof(v)))
-				return -EFAULT;
+               		struct video_unit *v = arg;
+			v->video=VIDEO_NO_UNIT;
+			v->vbi=VIDEO_NO_UNIT;
+			v->radio=dev->minor;
+			v->audio=0; /* How do we find out this??? */
+			v->teletext=VIDEO_NO_UNIT;
 			return 0;			
 		}
 		default:
@@ -257,30 +214,29 @@ static int fmi_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
 	}
 }
 
-static int fmi_open(struct video_device *dev, int flags)
+static int fmi_ioctl(struct inode *inode, struct file *file,
+		     unsigned int cmd, unsigned long arg)
 {
-	if(users)
-		return -EBUSY;
-	users++;
-	return 0;
-}
-
-static void fmi_close(struct video_device *dev)
-{
-	users--;
+	return video_usercopy(inode, file, cmd, arg, fmi_do_ioctl);
 }
 
 static struct fmi_device fmi_unit;
 
+static struct file_operations fmi_fops = {
+	.owner		= THIS_MODULE,
+	.open           = video_exclusive_open,
+	.release        = video_exclusive_release,
+	.ioctl		= fmi_ioctl,
+	.llseek         = no_llseek,
+};
+
 static struct video_device fmi_radio=
 {
-	owner:		THIS_MODULE,
-	name:		"SF16FMx radio",
-	type:		VID_TYPE_TUNER,
-	hardware:	VID_HARDWARE_SF16MI,
-	open:		fmi_open,
-	close:		fmi_close,
-	ioctl:		fmi_ioctl,
+	.owner		= THIS_MODULE,
+	.name		= "SF16FMx radio",
+	.type		= VID_TYPE_TUNER,
+	.hardware	= VID_HARDWARE_SF16MI,
+	.fops           = &fmi_fops,
 };
 
 /* ladis: this is my card. does any other types exist? */
@@ -297,23 +253,27 @@ static int isapnp_fmi_probe(void)
 	int i = 0;
 
 	while (id_table[i].card_vendor != 0 && dev == NULL) {
-		dev = isapnp_find_dev(NULL, id_table[i].vendor,
-				      id_table[i].function, NULL);
+		dev = pnp_find_dev(NULL, id_table[i].vendor,
+				   id_table[i].function, NULL);
+		i++;
 	}
 
 	if (!dev)
 		return -ENODEV;
-	if (dev->prepare(dev) < 0)
+	if (pnp_device_attach(dev) < 0)
 		return -EAGAIN;
-	if (!(dev->resource[0].flags & IORESOURCE_IO))
-		return -ENODEV;
-	if (dev->activate(dev) < 0) {
-		printk ("radio-sf16fmi: ISAPnP configure failed (out of resources?)\n");
+	if (pnp_activate_dev(dev) < 0) {
+		printk ("radio-sf16fmi: PnP configure failed (out of resources?)\n");
+		pnp_device_detach(dev);
 		return -ENOMEM;
 	}
+	if (!pnp_port_valid(dev, 0)) {
+		pnp_device_detach(dev);
+		return -ENODEV;
+	}
 
-	i = dev->resource[0].start;
-	printk ("radio-sf16fmi: ISAPnP reports card at %#x\n", i);
+	i = pnp_port_start(dev, 0);
+	printk ("radio-sf16fmi: PnP reports card at %#x\n", i);
 
 	return i;
 }
@@ -323,7 +283,7 @@ static int __init fmi_init(void)
 	if (io < 0)
 		io = isapnp_fmi_probe();
 	if (io < 0) {
-		printk(KERN_ERR "radio-sf16fmi: No PnP card found.");
+		printk(KERN_ERR "radio-sf16fmi: No PnP card found.\n");
 		return io;
 	}
 	if (!request_region(io, 2, "radio-sf16fmi")) {
@@ -358,14 +318,12 @@ MODULE_PARM(io, "i");
 MODULE_PARM_DESC(io, "I/O address of the SF16MI card (0x284 or 0x384)");
 MODULE_PARM(radio_nr, "i");
 
-EXPORT_NO_SYMBOLS;
-
 static void __exit fmi_cleanup_module(void)
 {
 	video_unregister_device(&fmi_radio);
 	release_region(io, 2);
 	if (dev)
-		dev->deactivate(dev);
+		pnp_device_detach(dev);
 }
 
 module_init(fmi_init);

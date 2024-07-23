@@ -71,16 +71,29 @@ struct shm_info {
 };
 
 #ifdef __KERNEL__
+struct shmid_kernel /* private to the kernel */
+{	
+	struct kern_ipc_perm	shm_perm;
+	struct file *		shm_file;
+	int			id;
+	unsigned long		shm_nattch;
+	unsigned long		shm_segsz;
+	time_t			shm_atim;
+	time_t			shm_dtim;
+	time_t			shm_ctim;
+	pid_t			shm_cprid;
+	pid_t			shm_lprid;
+};
 
 /* shm_mode upper byte flags */
 #define	SHM_DEST	01000	/* segment will be destroyed on last detach */
 #define SHM_LOCKED      02000   /* segment will not be swapped */
+#define SHM_HUGETLB     04000   /* segment will use huge TLB pages */
 
+long sys_shmat (int shmid, char __user *shmaddr, int shmflg, unsigned long *addr);
 asmlinkage long sys_shmget (key_t key, size_t size, int flag);
-asmlinkage long sys_shmat (int shmid, char *shmaddr, int shmflg, unsigned long *addr);
-asmlinkage long sys_shmdt (char *shmaddr);
-asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds *buf);
-extern void shm_unuse(swp_entry_t entry, struct page *page);
+asmlinkage long sys_shmdt (char __user *shmaddr);
+asmlinkage long sys_shmctl (int shmid, int cmd, struct shmid_ds __user *buf);
 
 #endif /* __KERNEL__ */
 

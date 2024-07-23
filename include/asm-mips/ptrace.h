@@ -35,13 +35,17 @@ struct pt_regs {
 	/* Saved main processor registers. */
 	unsigned long regs[32];
 
-	/* Saved special registers. */
-	unsigned long cp0_status;
+	/* Other saved registers. */
 	unsigned long lo;
 	unsigned long hi;
-	unsigned long cp0_badvaddr;
-	unsigned long cp0_cause;
+
+	/*
+	 * saved cp0 registers
+	 */
 	unsigned long cp0_epc;
+	unsigned long cp0_badvaddr;
+	unsigned long cp0_status;
+	unsigned long cp0_cause;
 };
 
 #define __str2(x) #x
@@ -49,6 +53,7 @@ struct pt_regs {
 
 #define save_static_function(symbol)                                    \
 __asm__ (                                                               \
+	".text\n\t"							\
         ".globl\t" #symbol "\n\t"                                       \
         ".align\t2\n\t"                                                 \
         ".type\t" #symbol ", @function\n\t"                             \
@@ -80,10 +85,10 @@ __asm__ (                                                               \
 /* #define PTRACE_GETFPXREGS		18 */
 /* #define PTRACE_SETFPXREGS		19 */
 
-#define PTRACE_SETOPTIONS	21
+#define PTRACE_OLDSETOPTIONS	21
 
-/* options set using PTRACE_SETOPTIONS */
-#define PTRACE_O_TRACESYSGOOD	0x00000001
+#define PTRACE_GET_THREAD_AREA	25
+#define PTRACE_SET_THREAD_AREA	26
 
 #ifdef __ASSEMBLY__
 #include <asm/offset.h>

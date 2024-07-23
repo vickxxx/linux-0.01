@@ -7,21 +7,12 @@
  */
 
 #include <linux/config.h>
-#include <linux/fs.h>
-#include <linux/genhd.h>
-#include <linux/kernel.h>
-#include <linux/major.h>
-#include <linux/string.h>
-#include <linux/blk.h>
 #include <linux/ctype.h>
-
-#include <asm/system.h>
-
 #include "check.h"
 #include "mac.h"
 
-#ifdef CONFIG_ALL_PPC
-extern void note_bootable_part(kdev_t dev, int part, int goodness);
+#ifdef CONFIG_PPC_PMAC
+extern void note_bootable_part(dev_t dev, int part, int goodness);
 #endif
 
 /*
@@ -36,14 +27,14 @@ static inline void mac_fix_string(char *stg, int len)
 		stg[i] = 0;
 }
 
-int mac_partition(struct gendisk *hd, struct block_device *bdev,
-		unsigned long fsec, int first_part_minor)
+int mac_partition(struct parsed_partitions *state, struct block_device *bdev)
 {
+	int slot = 1;
 	Sector sect;
 	unsigned char *data;
 	int blk, blocks_in_map;
 	unsigned secsize;
-#ifdef CONFIG_ALL_PPC
+#ifdef CONFIG_PPC_PMAC
 	int found_root = 0;
 	int found_root_goodness = 0;
 #endif
@@ -79,11 +70,11 @@ int mac_partition(struct gendisk *hd, struct block_device *bdev,
 		part = (struct mac_partition *) (data + pos%512);
 		if (be16_to_cpu(part->signature) != MAC_PARTITION_MAGIC)
 			break;
-		add_gd_partition(hd, first_part_minor,
-			fsec + be32_to_cpu(part->start_block) * (secsize/512),
+		put_partition(state, slot,
+			be32_to_cpu(part->start_block) * (secsize/512),
 			be32_to_cpu(part->block_count) * (secsize/512));
 
-#ifdef CONFIG_ALL_PPC
+#ifdef CONFIG_PPC_PMAC
 		/*
 		 * If this is the first bootable partition, tell the
 		 * setup code, in case it wants to make this the root.
@@ -124,18 +115,16 @@ int mac_partition(struct gendisk *hd, struct block_device *bdev,
 				found_root_goodness = goodness;
 			}
 		}
-#endif /* CONFIG_ALL_PPC */
+#endif /* CONFIG_PPC_PMAC */
 
-		++first_part_minor;
+		++slot;
 	}
-#ifdef CONFIG_ALL_PPC
+#ifdef CONFIG_PPC_PMAC
 	if (found_root_goodness)
-		note_bootable_part(to_kdev_t(bdev->bd_dev),
-					found_root, found_root_goodness);
+		note_bootable_part(bdev->bd_dev, found_root, found_root_goodness);
 #endif
 
 	put_dev_sector(sect);
 	printk("\n");
 	return 1;
 }
-

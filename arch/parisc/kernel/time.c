@@ -1,5 +1,5 @@
 /*
- *  linux/arch/arm/kernel/time.c
+ *  linux/arch/parisc/kernel/time.c
  *
  *  Copyright (C) 1991, 1992, 1995  Linus Torvalds
  *  Modifications for ARM (C) 1994, 1995, 1996,1997 Russell King
@@ -10,6 +10,7 @@
  * 1998-12-20  Updated NTP code according to technical memorandum Jan '96
  *             "A Kernel Model for Precision Timekeeping" by Dave Mills
  */
+#include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/sched.h>
 #include <linux/kernel.h>
@@ -20,6 +21,7 @@
 #include <linux/time.h>
 #include <linux/init.h>
 #include <linux/smp.h>
+#include <linux/profile.h>
 
 #include <asm/uaccess.h>
 #include <asm/io.h>
@@ -30,69 +32,222 @@
 
 #include <linux/timex.h>
 
-extern rwlock_t xtime_lock;
+u64 jiffies_64 = INITIAL_JIFFIES;
 
-static int timer_value;
-static int timer_delta;
-static struct pdc_tod tod_data __attribute__((aligned(8)));
+/* xtime and wall_jiffies keep wall-clock time */
+extern unsigned long wall_jiffies;
 
-void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static long clocktick;	/* timer cycles per tick */
+static long halftick;
+
+#ifdef CONFIG_SMP
+extern void smp_do_timer(struct pt_regs *regs);
+#endif
+
+static inline void
+parisc_do_profile(struct pt_regs *regs)
 {
-	int old;
-	int lost = 0;
-	int cr16;
-	
-	old = timer_value;
+	unsigned long pc = regs->iaoq[0];
+	extern unsigned long prof_cpu_mask;
+	extern char _stext;
 
-	cr16 = mfctl(16);
-	while((timer_value - cr16) < (timer_delta / 2)) {
-		timer_value += timer_delta;
-		lost++;
+	profile_hook(regs);
+
+	if (user_mode(regs))
+		return;
+
+	if (!prof_buffer)
+		return;
+
+#if 0
+	if (!((1 << smp_processor_id()) & prof_cpu_mask))
+		return;
+#endif
+
+	pc -= (unsigned long) &_stext;
+	pc >>= prof_shift;
+	/*
+	 * Don't ignore out-of-bounds PC values silently,
+	 * put them into the last histogram slot, so if
+	 * present, they will show up as a sharp peak.
+	 */
+	if (pc > prof_len - 1)
+		pc = prof_len - 1;
+	atomic_inc((atomic_t *)&prof_buffer[pc]);
+}
+
+irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+{
+	long now;
+	long next_tick;
+	int nticks;
+	int cpu = smp_processor_id();
+
+	parisc_do_profile(regs);
+
+	now = mfctl(16);
+	/* initialize next_tick to time at last clocktick */
+	next_tick = cpu_data[cpu].it_value;
+
+	/* since time passes between the interrupt and the mfctl()
+	 * above, it is never true that last_tick + clocktick == now.  If we
+	 * never miss a clocktick, we could set next_tick = last_tick + clocktick
+	 * but maybe we'll miss ticks, hence the loop.
+	 *
+	 * Variables are *signed*.
+	 */
+
+	nticks = 0;
+	while((next_tick - now) < halftick) {
+		next_tick += clocktick;
+		nticks++;
+	}
+	mtctl(next_tick, 16);
+	cpu_data[cpu].it_value = next_tick;
+
+	while (nticks--) {
+#ifdef CONFIG_SMP
+		smp_do_timer(regs);
+#endif
+		if (cpu == 0) {
+			write_seqlock(&xtime_lock);
+			do_timer(regs);
+			write_sequnlock(&xtime_lock);
+		}
+	}
+    
+#ifdef CONFIG_CHASSIS_LCD_LED
+	/* Only schedule the led tasklet on cpu 0, and only if it
+	 * is enabled.
+	 */
+	if (cpu == 0 && !atomic_read(&led_tasklet.count))
+		tasklet_schedule(&led_tasklet);
+#endif
+
+	/* check soft power switch status */
+	if (cpu == 0 && !atomic_read(&power_tasklet.count))
+		tasklet_schedule(&power_tasklet);
+
+	return IRQ_HANDLED;
+}
+
+/*** converted from ia64 ***/
+/*
+ * Return the number of micro-seconds that elapsed since the last
+ * update to wall time (aka xtime aka wall_jiffies).  The xtime_lock
+ * must be at least read-locked when calling this routine.
+ */
+static inline unsigned long
+gettimeoffset (void)
+{
+#ifndef CONFIG_SMP
+	/*
+	 * FIXME: This won't work on smp because jiffies are updated by cpu 0.
+	 *    Once parisc-linux learns the cr16 difference between processors,
+	 *    this could be made to work.
+	 */
+	long last_tick;
+	long elapsed_cycles;
+
+	/* it_value is the intended time of the next tick */
+	last_tick = cpu_data[smp_processor_id()].it_value;
+
+	/* Subtract one tick and account for possible difference between
+	 * when we expected the tick and when it actually arrived.
+	 * (aka wall vs real)
+	 */
+	last_tick -= clocktick * (jiffies - wall_jiffies + 1);
+	elapsed_cycles = mfctl(16) - last_tick;
+
+	/* the precision of this math could be improved */
+	return elapsed_cycles / (PAGE0->mem_10msec / 10000);
+#else
+	return 0;
+#endif
+}
+
+void
+do_gettimeofday (struct timeval *tv)
+{
+	unsigned long flags, seq, usec, sec;
+
+	do {
+		seq = read_seqbegin_irqsave(&xtime_lock, flags);
+		usec = gettimeoffset();
+		sec = xtime.tv_sec;
+		usec += (xtime.tv_nsec / 1000);
+	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
+
+	while (usec >= 1000000) {
+		usec -= 1000000;
+		++sec;
 	}
 
-	mtctl(timer_value ,16);
-
-	do_timer(regs);
-    
-	led_interrupt_func();
+	tv->tv_sec = sec;
+	tv->tv_usec = usec;
 }
 
-void do_gettimeofday(struct timeval *tv)
+int
+do_settimeofday (struct timeval *tv)
 {
-	unsigned long flags;
-	
-	read_lock_irqsave(&xtime_lock, flags);
-	tv->tv_sec = xtime.tv_sec;
-	tv->tv_usec = xtime.tv_usec;
-	read_unlock_irqrestore(&xtime_lock, flags);
+	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
+		return -EINVAL;
 
+	write_seqlock_irq(&xtime_lock);
+	{
+		/*
+		 * This is revolting. We need to set "xtime"
+		 * correctly. However, the value in this location is
+		 * the value at the most recent update of wall time.
+		 * Discover what correction gettimeofday would have
+		 * done, and then undo it!
+		 */
+		tv->tv_nsec -= gettimeoffset() * 1000;
+		tv->tv_nsec -= (jiffies - wall_jiffies) * (NSEC_PER_SEC / HZ);
+
+		while (tv->tv_nsec < 0) {
+			tv->tv_nsec += NSEC_PER_SEC;
+			tv->tv_sec--;
+		}
+
+		xtime.tv_sec = tv->tv_sec;
+		xtime.tv_nsec = tv->tv_nsec;
+		time_adjust = 0;		/* stop active adjtime() */
+		time_status |= STA_UNSYNC;
+		time_maxerror = NTP_PHASE_LIMIT;
+		time_esterror = NTP_PHASE_LIMIT;
+	}
+	write_sequnlock_irq(&xtime_lock);
+	return 0;
 }
 
-void do_settimeofday(struct timeval *tv)
-{
-	write_lock_irq(&xtime_lock);
-	xtime.tv_sec = tv->tv_sec;
-	xtime.tv_usec = tv->tv_usec;
-	write_unlock_irq(&xtime_lock);
-}
 
 void __init time_init(void)
 {
-	timer_delta = (100 * PAGE0->mem_10msec) / HZ;
+	unsigned long next_tick;
+	static struct pdc_tod tod_data;
 
-	/* make the first timer interrupt go off in one second */
-	timer_value = mfctl(16) + (HZ * timer_delta);
-	mtctl(timer_value, 16);
+	clocktick = (100 * PAGE0->mem_10msec) / HZ;
+	halftick = clocktick / 2;
 
+	/* Setup clock interrupt timing */
+
+	next_tick = mfctl(16);
+	next_tick += clocktick;
+	cpu_data[smp_processor_id()].it_value = next_tick;
+
+	/* kick off Itimer (CR16) */
+	mtctl(next_tick, 16);
 
 	if(pdc_tod_read(&tod_data) == 0) {
+		write_seqlock_irq(&xtime_lock);
 		xtime.tv_sec = tod_data.tod_sec;
-		xtime.tv_usec = tod_data.tod_usec;
+		xtime.tv_nsec = tod_data.tod_usec * 1000;
+		write_sequnlock_irq(&xtime_lock);
 	} else {
 		printk(KERN_ERR "Error reading tod clock\n");
 	        xtime.tv_sec = 0;
-		xtime.tv_usec = 0;
+		xtime.tv_nsec = 0;
 	}
-
 }
 

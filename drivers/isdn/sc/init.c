@@ -6,6 +6,7 @@
 
 #include <linux/module.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 #include "includes.h"
 #include "hardware.h"
 #include "card.h"
@@ -35,7 +36,7 @@ static int do_reset = 0;
 static int sup_irq[] = { 11, 10, 9, 5, 12, 14, 7, 3, 4, 6 };
 #define MAX_IRQS	10
 
-extern void interrupt_handler(int, void *, struct pt_regs *);
+extern irqreturn_t interrupt_handler(int, void *, struct pt_regs *);
 extern int sndpkt(int, int, int, struct sk_buff *);
 extern int command(isdn_ctrl *);
 extern int indicate_status(int, int, ulong, char*);
@@ -261,39 +262,6 @@ static int __init sc_init(void)
 		}
 
 		pr_debug("current IRQ: %d  b: %d\n",irq[b],b);
-		/*
-		 * See if we should probe for an irq
-		 */
-		if(irq[b]) {
-			/*
-			 * No we were given one
-			 * See that it is supported and free
-			 */
-			pr_debug("Trying for IRQ: %d\n",irq[b]);
-			if (irq_supported(irq[b])) {
-				if(REQUEST_IRQ(irq[b], interrupt_handler, 
-					SA_PROBE, "sc_probe", NULL)) {
-					pr_debug("IRQ %d is already in use\n", 
-						irq[b]);
-					continue;
-				}
-				FREE_IRQ(irq[b], NULL);
-			}
-		}
-		else {
-			/*
-			 * Yes, we need to probe for an IRQ
-			 */
-			pr_debug("Probing for IRQ...\n");
-			for (i = 0; i < MAX_IRQS ; i++) {
-				if(!REQUEST_IRQ(sup_irq[i], interrupt_handler, SA_PROBE, "sc_probe", NULL)) {
-					pr_debug("Probed for and found IRQ %d\n", sup_irq[i]);
-					FREE_IRQ(sup_irq[i], NULL);
-					irq[b] = sup_irq[i];
-					break;
-				}
-			}
-		}
 
 		/*
 		 * Make sure we got an IRQ
@@ -319,6 +287,7 @@ static int __init sc_init(void)
 		}
 		memset(interface, 0, sizeof(isdn_if));
 
+		interface->owner = THIS_MODULE;
 		interface->hl_hdrlen = 0;
 		interface->channels = channels;
 		interface->maxbufsize = BUFFER_SIZE;
@@ -379,8 +348,16 @@ static int __init sc_init(void)
 		 * Lock down the hardware resources
 		 */
 		adapter[cinst]->interrupt = irq[b];
-		REQUEST_IRQ(adapter[cinst]->interrupt, interrupt_handler, SA_INTERRUPT, 
-			interface->id, NULL);
+		if (request_irq(adapter[cinst]->interrupt, interrupt_handler, SA_INTERRUPT, 
+			interface->id, NULL))
+		{
+			kfree(adapter[cinst]->channel);
+			indicate_status(cinst, ISDN_STAT_UNLOAD, 0, NULL);	/* Fix me */
+			kfree(interface);
+			kfree(adapter[cinst]);
+			continue;
+			
+		}
 		adapter[cinst]->iobase = io[b];
 		for(i = 0 ; i < MAX_IO_REGS - 1 ; i++) {
 			adapter[cinst]->ioport[i] = io[b] + i * 0x400;

@@ -19,16 +19,16 @@
 #include <linux/hfs_fs.h>
 #include <linux/smp_lock.h>
 
-static int hfs_revalidate_dentry(struct dentry *, int);
+static int hfs_revalidate_dentry(struct dentry *, struct nameidata *);
 static int hfs_hash_dentry(struct dentry *, struct qstr *);
 static int hfs_compare_dentry(struct dentry *, struct qstr *, struct qstr *);
 static void hfs_dentry_iput(struct dentry *, struct inode *);
 struct dentry_operations hfs_dentry_operations =
 {
-	d_revalidate:	hfs_revalidate_dentry,	
-	d_hash:		hfs_hash_dentry,
-	d_compare:	hfs_compare_dentry,
-	d_iput:		hfs_dentry_iput,
+	.d_revalidate	= hfs_revalidate_dentry,	
+	.d_hash		= hfs_hash_dentry,
+	.d_compare	= hfs_compare_dentry,
+	.d_iput		= hfs_dentry_iput,
 };
 
 /*
@@ -41,11 +41,11 @@ hfs_buffer hfs_buffer_get(hfs_sysmdb sys_mdb, int block, int read) {
 	hfs_buffer tmp = HFS_BAD_BUFFER;
 
 	if (read) {
-		tmp = bread(sys_mdb->s_dev, block, HFS_SECTOR_SIZE);
+		tmp = sb_bread(sys_mdb, block);
 	} else {
-		tmp = getblk(sys_mdb->s_dev, block, HFS_SECTOR_SIZE);
+		tmp = sb_getblk(sys_mdb, block);
 		if (tmp) {
-			mark_buffer_uptodate(tmp, 1);
+			set_buffer_uptodate(tmp);
 		}
 	}
 	if (!tmp) {
@@ -90,7 +90,7 @@ static void hfs_dentry_iput(struct dentry *dentry, struct inode *inode)
 	iput(inode);
 }
 
-static int hfs_revalidate_dentry(struct dentry *dentry, int flags)
+static int hfs_revalidate_dentry(struct dentry *dentry, struct nameidata *nd)
 {
 	struct inode *inode = dentry->d_inode;
 	int diff;
@@ -99,9 +99,9 @@ static int hfs_revalidate_dentry(struct dentry *dentry, int flags)
 	lock_kernel();
 	if (inode && 
 	    (diff = (hfs_to_utc(0) - HFS_I(inode)->tz_secondswest))) {
-		inode->i_ctime += diff;
-		inode->i_atime += diff;
-		inode->i_mtime += diff;
+		inode->i_ctime.tv_sec += diff;
+		inode->i_atime.tv_sec += diff;
+		inode->i_mtime.tv_sec += diff;
 		HFS_I(inode)->tz_secondswest += diff;
 	}
 	unlock_kernel();

@@ -18,7 +18,7 @@
 #include <linux/module.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/fs.h>
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/errno.h>
@@ -46,7 +46,7 @@ static DECLARE_MUTEX(phone_lock);
 
 static int phone_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = MINOR(inode->i_rdev);
+	unsigned int minor = minor(inode->i_rdev);
 	int err = 0;
 	struct phone_device *p;
 	struct file_operations *old_fops, *new_fops = NULL;
@@ -59,11 +59,8 @@ static int phone_open(struct inode *inode, struct file *file)
 	if (p)
 		new_fops = fops_get(p->f_op);
 	if (!new_fops) {
-		char modname[32];
-
 		up(&phone_lock);
-		sprintf(modname, "char-major-%d-%d", PHONE_MAJOR, minor);
-		request_module(modname);
+		request_module("char-major-%d-%d", PHONE_MAJOR, minor);
 		down(&phone_lock);
 		p = phone_device[minor];
 		if (p == NULL || (new_fops = fops_get(p->f_op)) == NULL)
@@ -135,8 +132,8 @@ void phone_unregister_device(struct phone_device *pfd)
 
 static struct file_operations phone_fops =
 {
-	owner:		THIS_MODULE,
-	open:		phone_open,
+	.owner		= THIS_MODULE,
+	.open		= phone_open,
 };
 
 /*

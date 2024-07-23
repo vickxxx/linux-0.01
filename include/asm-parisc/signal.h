@@ -64,7 +64,7 @@
 #define SA_SIGINFO	0x00000010
 #define SA_NODEFER	0x00000020
 #define SA_RESTART	0x00000040
-#define SA_NOCLDWAIT	0x00000080 /* not supported yet */
+#define SA_NOCLDWAIT	0x00000080
 #define _SA_SIGGFAULT	0x00000100 /* HPUX */
 
 #define SA_NOMASK	SA_NODEFER
@@ -155,6 +155,8 @@ struct sigaction {
 struct k_sigaction {
 	struct sigaction sa;
 };
+
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
 
 #include <asm/sigcontext.h>
 

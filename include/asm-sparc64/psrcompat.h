@@ -4,7 +4,7 @@
 
 #include <asm/pstate.h>
 
-/* Old 32-bit PSR fields for the compatability conversion code. */
+/* Old 32-bit PSR fields for the compatibility conversion code. */
 #define PSR_CWP     0x0000001f         /* current window pointer     */
 #define PSR_ET      0x00000020         /* enable traps field         */
 #define PSR_PS      0x00000040         /* previous privilege level   */
@@ -24,7 +24,7 @@
 #define PSR_V8PLUS  0xff000000         /* fake impl/ver, meaning a 64bit CPU is present */
 #define PSR_XCC	    0x000f0000         /* if PSR_V8PLUS, this is %xcc */
 
-extern inline unsigned int tstate_to_psr(unsigned long tstate)
+static inline unsigned int tstate_to_psr(unsigned long tstate)
 {
 	return ((tstate & TSTATE_CWP)			|
 		PSR_S					|
@@ -33,7 +33,7 @@ extern inline unsigned int tstate_to_psr(unsigned long tstate)
 		PSR_V8PLUS);
 }
 
-extern inline unsigned long psr_to_tstate_icc(unsigned int psr)
+static inline unsigned long psr_to_tstate_icc(unsigned int psr)
 {
 	unsigned long tstate = ((unsigned long)(psr & PSR_ICC)) << 12;
 	if ((psr & (PSR_VERS|PSR_IMPL)) == PSR_V8PLUS)

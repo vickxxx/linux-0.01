@@ -55,12 +55,12 @@ static struct
 } nat_initial_table __initdata
 = { { "nat", NAT_VALID_HOOKS, 4,
       sizeof(struct ipt_standard) * 3 + sizeof(struct ipt_error),
-      { [NF_IP_PRE_ROUTING] 0,
-	[NF_IP_POST_ROUTING] sizeof(struct ipt_standard),
-	[NF_IP_LOCAL_OUT] sizeof(struct ipt_standard) * 2 },
-      { [NF_IP_PRE_ROUTING] 0,
-	[NF_IP_POST_ROUTING] sizeof(struct ipt_standard),
-	[NF_IP_LOCAL_OUT] sizeof(struct ipt_standard) * 2 },
+      { [NF_IP_PRE_ROUTING] = 0,
+	[NF_IP_POST_ROUTING] = sizeof(struct ipt_standard),
+	[NF_IP_LOCAL_OUT] = sizeof(struct ipt_standard) * 2 },
+      { [NF_IP_PRE_ROUTING] = 0,
+	[NF_IP_POST_ROUTING] = sizeof(struct ipt_standard),
+	[NF_IP_LOCAL_OUT] = sizeof(struct ipt_standard) * 2 },
       0, NULL, { } },
     {
 	    /* PRE_ROUTING */
@@ -101,15 +101,19 @@ static struct
     }
 };
 
-static struct ipt_table nat_table
-= { { NULL, NULL }, "nat", &nat_initial_table.repl,
-    NAT_VALID_HOOKS, RW_LOCK_UNLOCKED, NULL, THIS_MODULE };
+static struct ipt_table nat_table = {
+	.name		= "nat",
+	.table		= &nat_initial_table.repl,
+	.valid_hooks	= NAT_VALID_HOOKS,
+	.lock		= RW_LOCK_UNLOCKED,
+	.me		= THIS_MODULE,
+};
 
 /* Source NAT */
 static unsigned int ipt_snat_target(struct sk_buff **pskb,
-				    unsigned int hooknum,
 				    const struct net_device *in,
 				    const struct net_device *out,
+				    unsigned int hooknum,
 				    const void *targinfo,
 				    void *userinfo)
 {
@@ -121,25 +125,28 @@ static unsigned int ipt_snat_target(struct sk_buff **pskb,
 	ct = ip_conntrack_get(*pskb, &ctinfo);
 
 	/* Connection must be valid and new. */
-	IP_NF_ASSERT(ct && (ctinfo == IP_CT_NEW || ctinfo == IP_CT_RELATED
-	                    || ctinfo == IP_CT_RELATED + IP_CT_IS_REPLY));
+	IP_NF_ASSERT(ct && (ctinfo == IP_CT_NEW || ctinfo == IP_CT_RELATED));
 	IP_NF_ASSERT(out);
 
 	return ip_nat_setup_info(ct, targinfo, hooknum);
 }
 
 static unsigned int ipt_dnat_target(struct sk_buff **pskb,
-				    unsigned int hooknum,
 				    const struct net_device *in,
 				    const struct net_device *out,
+				    unsigned int hooknum,
 				    const void *targinfo,
 				    void *userinfo)
 {
 	struct ip_conntrack *ct;
 	enum ip_conntrack_info ctinfo;
 
+#ifdef CONFIG_IP_NF_NAT_LOCAL
 	IP_NF_ASSERT(hooknum == NF_IP_PRE_ROUTING
 		     || hooknum == NF_IP_LOCAL_OUT);
+#else
+	IP_NF_ASSERT(hooknum == NF_IP_PRE_ROUTING);
+#endif
 
 	ct = ip_conntrack_get(*pskb, &ctinfo);
 
@@ -217,10 +224,17 @@ static int ipt_dnat_checkentry(const char *tablename,
 		return 0;
 	}
 	
+#ifndef CONFIG_IP_NF_NAT_LOCAL
+	if (hook_mask & (1 << NF_IP_LOCAL_OUT)) {
+		DEBUGP("DNAT: CONFIG_IP_NF_NAT_LOCAL not enabled\n");
+		return 0;
+	}
+#endif
+
 	return 1;
 }
 
-inline unsigned int
+static inline unsigned int
 alloc_null_binding(struct ip_conntrack *conntrack,
 		   struct ip_nat_info *info,
 		   unsigned int hooknum)
@@ -238,27 +252,6 @@ alloc_null_binding(struct ip_conntrack *conntrack,
 
 	DEBUGP("Allocating NULL binding for %p (%u.%u.%u.%u)\n", conntrack,
 	       NIPQUAD(ip));
-	return ip_nat_setup_info(conntrack, &mr, hooknum);
-}
-
-unsigned int
-alloc_null_binding_confirmed(struct ip_conntrack *conntrack,
-                             struct ip_nat_info *info,
-                             unsigned int hooknum)
-{
-	u_int32_t ip
-		= (HOOK2MANIP(hooknum) == IP_NAT_MANIP_SRC
-		   ? conntrack->tuplehash[IP_CT_DIR_REPLY].tuple.dst.ip
-		   : conntrack->tuplehash[IP_CT_DIR_REPLY].tuple.src.ip);
-	u_int16_t all
-		= (HOOK2MANIP(hooknum) == IP_NAT_MANIP_SRC
-		   ? conntrack->tuplehash[IP_CT_DIR_REPLY].tuple.dst.u.all
-		   : conntrack->tuplehash[IP_CT_DIR_REPLY].tuple.src.u.all);
-	struct ip_nat_multi_range mr
-		= { 1, { { IP_NAT_RANGE_MAP_IPS, ip, ip, { all }, { all } } } };
-
-	DEBUGP("Allocating NULL binding for confirmed %p (%u.%u.%u.%u)\n",
-	       conntrack, NIPQUAD(ip));
 	return ip_nat_setup_info(conntrack, &mr, hooknum);
 }
 
@@ -281,10 +274,17 @@ int ip_nat_rule_find(struct sk_buff **pskb,
 	return ret;
 }
 
-static struct ipt_target ipt_snat_reg
-= { { NULL, NULL }, "SNAT", ipt_snat_target, ipt_snat_checkentry, NULL };
-static struct ipt_target ipt_dnat_reg
-= { { NULL, NULL }, "DNAT", ipt_dnat_target, ipt_dnat_checkentry, NULL };
+static struct ipt_target ipt_snat_reg = {
+	.name		= "SNAT",
+	.target		= ipt_snat_target,
+	.checkentry	= ipt_snat_checkentry,
+};
+
+static struct ipt_target ipt_dnat_reg = {
+	.name		= "DNAT",
+	.target		= ipt_dnat_target,
+	.checkentry	= ipt_dnat_checkentry,
+};
 
 int __init ip_nat_rule_init(void)
 {

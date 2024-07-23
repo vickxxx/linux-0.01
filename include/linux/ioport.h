@@ -8,6 +8,7 @@
 #ifndef _LINUX_IOPORT_H
 #define _LINUX_IOPORT_H
 
+#include <linux/compiler.h>
 /*
  * Resources are tree-like, allowing
  * nesting etc..
@@ -42,6 +43,7 @@ struct resource_list {
 #define IORESOURCE_SHADOWABLE	0x00010000
 #define IORESOURCE_BUS_HAS_VGA	0x00080000
 
+#define IORESOURCE_DISABLED	0x10000000
 #define IORESOURCE_UNSET	0x20000000
 #define IORESOURCE_AUTO		0x40000000
 #define IORESOURCE_BUSY		0x80000000	/* Driver has marked this resource busy */
@@ -76,6 +78,7 @@ struct resource_list {
 #define IORESOURCE_MEM_8BIT		(0<<3)
 #define IORESOURCE_MEM_16BIT		(1<<3)
 #define IORESOURCE_MEM_8AND16BIT	(2<<3)
+#define IORESOURCE_MEM_32BIT		(3<<3)
 #define IORESOURCE_MEM_SHADOWABLE	(1<<5)	/* dup: IORESOURCE_SHADOWABLE */
 #define IORESOURCE_MEM_EXPANSIONROM	(1<<6)
 
@@ -85,24 +88,24 @@ extern struct resource iomem_resource;
 
 extern int get_resource_list(struct resource *, char *buf, int size);
 
-extern int check_resource(struct resource *root, unsigned long, unsigned long);
 extern int request_resource(struct resource *root, struct resource *new);
 extern int release_resource(struct resource *new);
 extern int allocate_resource(struct resource *root, struct resource *new,
 			     unsigned long size,
 			     unsigned long min, unsigned long max,
 			     unsigned long align,
-			     void (*alignf)(void *, struct resource *, unsigned long),
+			     void (*alignf)(void *, struct resource *,
+					    unsigned long, unsigned long),
 			     void *alignf_data);
 
 /* Convenience shorthand with allocation */
 #define request_region(start,n,name)	__request_region(&ioport_resource, (start), (n), (name))
 #define request_mem_region(start,n,name) __request_region(&iomem_resource, (start), (n), (name))
+#define rename_region(region, newname) do { (region)->name = (newname); } while (0)
 
 extern struct resource * __request_region(struct resource *, unsigned long start, unsigned long n, const char *name);
 
 /* Compatibility cruft */
-#define check_region(start,n)	__check_region(&ioport_resource, (start), (n))
 #define release_region(start,n)	__release_region(&ioport_resource, (start), (n))
 #define check_mem_region(start,n)	__check_region(&iomem_resource, (start), (n))
 #define release_mem_region(start,n)	__release_region(&iomem_resource, (start), (n))
@@ -110,11 +113,8 @@ extern struct resource * __request_region(struct resource *, unsigned long start
 extern int __check_region(struct resource *, unsigned long, unsigned long);
 extern void __release_region(struct resource *, unsigned long, unsigned long);
 
-#define get_ioport_list(buf)	get_resource_list(&ioport_resource, buf, PAGE_SIZE)
-#define get_mem_list(buf)	get_resource_list(&iomem_resource, buf, PAGE_SIZE)
-
-#define HAVE_AUTOIRQ
-extern void autoirq_setup(int waittime);
-extern int autoirq_report(int waittime);
-
+static inline int __deprecated check_region(unsigned long s, unsigned long n)
+{
+	return __check_region(&ioport_resource, s, n);
+}
 #endif	/* _LINUX_IOPORT_H */

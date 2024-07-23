@@ -64,13 +64,15 @@
  *	Trond Myklebust :	Add in preliminary support for NFSv3 and TCP.
  *				Fix bug in root_nfs_addr(). nfs_data.namlen
  *				is NOT for the length of the hostname.
+ *	Hua Qin		:	Support for mounting root file system via
+ *				NFS over TCP.
  */
 
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/init.h>
 #include <linux/sunrpc/clnt.h>
@@ -78,9 +80,10 @@
 #include <linux/nfs_fs.h>
 #include <linux/nfs_mount.h>
 #include <linux/in.h>
-#include <linux/inet.h>
 #include <linux/major.h>
 #include <linux/utsname.h>
+#include <linux/inet.h>
+#include <linux/root_dev.h>
 #include <net/ipconfig.h>
 
 /* Define this to allow debugging output */
@@ -202,8 +205,9 @@ static void __init root_nfs_parse(char *name, char *buf)
 
 	if ((options = strchr(name, ','))) {
 		*options++ = 0;
-		cp = strtok(options, ",");
-		while (cp) {
+		while ((cp = strsep(&options, ",")) != NULL) {
+			if (!*cp)
+				continue;
 			if ((val = strchr(cp, '='))) {
 				struct nfs_int_opts *opts = root_int_opts;
 				*val++ = '\0';
@@ -220,13 +224,10 @@ static void __init root_nfs_parse(char *name, char *buf)
 					nfs_data.flags |= opts->or_mask;
 				}
 			}
-			cp = strtok(NULL, ",");
 		}
 	}
-	if (name[0] && strcmp(name, "default")) {
-		strncpy(buf, name, NFS_MAXPATHLEN-1);
-		buf[NFS_MAXPATHLEN-1] = 0;
-	}
+	if (name[0] && strcmp(name, "default"))
+		strlcpy(buf, name, NFS_MAXPATHLEN);
 }
 
 
@@ -281,7 +282,8 @@ static int __init root_nfs_addr(void)
 		return -1;
 	}
 
-	strncpy(nfs_data.hostname, in_ntoa(servaddr), sizeof(nfs_data.hostname)-1);
+	snprintf(nfs_data.hostname, sizeof(nfs_data.hostname),
+		 "%u.%u.%u.%u", NIPQUAD(servaddr));
 	return 0;
 }
 
@@ -334,10 +336,9 @@ int __init root_nfs_init(void)
  */
 int __init nfs_root_setup(char *line)
 {
-	ROOT_DEV = MKDEV(UNNAMED_MAJOR, 255);
+	ROOT_DEV = Root_NFS;
 	if (line[0] == '/' || line[0] == ',' || (line[0] >= '0' && line[0] <= '9')) {
-		strncpy(nfs_root_name, line, sizeof(nfs_root_name));
-		nfs_root_name[sizeof(nfs_root_name)-1] = '\0';
+		strlcpy(nfs_root_name, line, sizeof(nfs_root_name));
 	} else {
 		int n = strlen(line) + strlen(NFS_ROOT);
 		if (n >= sizeof(nfs_root_name))
@@ -374,8 +375,8 @@ static int __init root_nfs_getport(int program, int version, int proto)
 {
 	struct sockaddr_in sin;
 
-	printk(KERN_NOTICE "Looking up port of RPC %d/%d on %s\n",
-		program, version, in_ntoa(servaddr));
+	printk(KERN_NOTICE "Looking up port of RPC %d/%d on %u.%u.%u.%u\n",
+		program, version, NIPQUAD(servaddr));
 	set_sockaddr(&sin, servaddr, 0);
 	return rpc_getport_external(&sin, program, version, proto);
 }
@@ -438,12 +439,14 @@ static int __init root_nfs_get_handle(void)
 {
 	struct sockaddr_in sin;
 	int status;
+	int protocol = (nfs_data.flags & NFS_MOUNT_TCP) ?
+					IPPROTO_TCP : IPPROTO_UDP;
+	int version = (nfs_data.flags & NFS_MOUNT_VER3) ?
+					NFS_MNT3_VERSION : NFS_MNT_VERSION;
 
 	set_sockaddr(&sin, servaddr, mount_port);
-	if (nfs_data.flags & NFS_MOUNT_VER3)
-		status = nfs3_mount(&sin, nfs_path, &nfs_data.root);
-	else
-		status = nfs_mount(&sin, nfs_path, &nfs_data.root);
+	status = nfsroot_mount(&sin, nfs_path, &nfs_data.root,
+							version, protocol);
 	if (status < 0)
 		printk(KERN_ERR "Root-NFS: Server returned error %d "
 				"while mounting %s\n", status, nfs_path);
@@ -453,7 +456,7 @@ static int __init root_nfs_get_handle(void)
 
 /*
  *  Get the NFS port numbers and file handle, and return the prepared 'data'
- *  argument for ->read_super() if everything went OK. Return NULL otherwise.
+ *  argument for mount() if everything went OK. Return NULL otherwise.
  */
 void * __init nfs_root_data(void)
 {

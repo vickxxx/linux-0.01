@@ -10,7 +10,7 @@
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
 #include <linux/umsdos_fs.h>
@@ -430,7 +430,9 @@ new_dentry->d_parent->d_name.name, new_dentry->d_name.name);
 		 */
 		dir->i_sb->u.msdos_sb.options.fs_uid = data.umsdos_dirent.uid;
 		dir->i_sb->u.msdos_sb.options.fs_gid = data.umsdos_dirent.gid;
-		dir->i_sb->u.msdos_sb.options.fs_umask = data.umsdos_dirent.mode;
+		dir->i_sb->u.msdos_sb.options.fs_fmask =
+			dir->i_sb->u.msdos_sb.options.fs_dmask =
+				data.umsdos_dirent.mode;
 		ret = 0;
 	}
 out:

@@ -7,7 +7,6 @@
  *              (jonm@bluemug.com).
  */
  
-#include <linux/config.h>
 #include <asm/irq.h>
 #include <asm/hardware.h>
 
@@ -30,9 +29,9 @@ ide_init_hwif_ports(hw_regs_t *hw, int data_port, int ctrl_port, int *irq)
 		hw->io_ports[i] = reg;
 		reg += regincr;
 	}
-	
+
 	hw->io_ports[IDE_CONTROL_OFFSET] = (ide_ioreg_t) ctrl_port;
-	
+
 	if (irq)
 		*irq = 0;
 }
@@ -47,10 +46,10 @@ ide_init_default_hwifs(void)
 {
     hw_regs_t hw;
 
-    ide_init_hwif_ports(&hw, IO_BASE + COMPACTFLASH, 
-    			IO_BASE + COMPACTFLASH + IDE_CONTROL_OFFSET, NULL);
+    ide_init_hwif_ports(&hw, IO_BASE + COMPACTFLASH,
+			IO_BASE + COMPACTFLASH + IDE_CONTROL_OFFSET, NULL);
     hw.irq = IRQ_COMPACTFLASH;
-    ide_register_hw(&hw, NULL);
+    ide_register_hw(&hw);
 }
 
 

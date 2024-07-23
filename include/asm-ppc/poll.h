@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.poll.h 1.5 05/17/01 18:14:25 cort
- */
 #ifndef __PPC_POLL_H
 #define __PPC_POLL_H
 
@@ -15,6 +12,7 @@
 #define POLLWRNORM	0x0100
 #define POLLWRBAND	0x0200
 #define POLLMSG		0x0400
+#define POLLREMOVE	0x1000
 
 struct pollfd {
 	int fd;

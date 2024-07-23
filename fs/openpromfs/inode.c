@@ -1,4 +1,4 @@
-/* $Id: inode.c,v 1.14 2001/02/13 01:17:17 davem Exp $
+/* $Id: inode.c,v 1.15 2001/11/12 09:43:39 davem Exp $
  * openpromfs.c: /proc/openprom handling routines
  *
  * Copyright (C) 1996-1999 Jakub Jelinek  (jakub@redhat.com)
@@ -10,7 +10,6 @@
 #include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/openprom_fs.h>
-#include <linux/locks.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/smp_lock.h>
@@ -60,9 +59,9 @@ static char *alias_names [ALIASES_NNODES];
 #define NODE2INO(node) (node + OPENPROM_FIRST_INO)
 #define NODEP2INO(no) (no + OPENPROM_FIRST_INO + last_node)
 
-static int openpromfs_create (struct inode *, struct dentry *, int);
+static int openpromfs_create (struct inode *, struct dentry *, int, struct nameidata *);
 static int openpromfs_readdir(struct file *, void *, filldir_t);
-static struct dentry *openpromfs_lookup(struct inode *, struct dentry *dentry);
+static struct dentry *openpromfs_lookup(struct inode *, struct dentry *dentry, struct nameidata *nd);
 static int openpromfs_unlink (struct inode *, struct dentry *dentry);
 
 static ssize_t nodenum_read(struct file *file, char *buf,
@@ -78,7 +77,8 @@ static ssize_t nodenum_read(struct file *file, char *buf,
 		return 0;
 	if (count > 9 - file->f_pos)
 		count = 9 - file->f_pos;
-	copy_to_user(buf, buffer + file->f_pos, count);
+	if (copy_to_user(buf, buffer + file->f_pos, count))
+		return -EFAULT;
 	file->f_pos += count;
 	return count;
 }
@@ -94,7 +94,7 @@ static ssize_t property_read(struct file *filp, char *buf,
 	openprom_property *op;
 	char buffer[64];
 	
-	if (filp->f_pos >= 0xffffff)
+	if (filp->f_pos >= 0xffffff || count >= 0xffffff)
 		return -EINVAL;
 	if (!filp->private_data) {
 		node = nodes[(u16)((long)inode->u.generic_ip)].node;
@@ -185,7 +185,8 @@ static ssize_t property_read(struct file *filp, char *buf,
 	if (count > i - k) count = i - k;
 	if (op->flag & OPP_STRING) {
 		if (!k) {
-			__put_user('\'', buf);
+			if (put_user('\'', buf))
+				return -EFAULT;
 			k++;
 			count--;
 		}
@@ -196,17 +197,21 @@ static ssize_t property_read(struct file *filp, char *buf,
 			j = count;
 
 		if (j >= 0) {
-			copy_to_user(buf + k - filp->f_pos,
-				     op->value + k - 1, j);
+			if (copy_to_user(buf + k - filp->f_pos,
+					 op->value + k - 1, j))
+				return -EFAULT;
 			count -= j;
 			k += j;
 		}
 
-		if (count)
-			__put_user('\'', &buf [k++ - filp->f_pos]);
-		if (count > 1)
-			__put_user('\n', &buf [k++ - filp->f_pos]);
-
+		if (count) {
+			if (put_user('\'', &buf [k++ - filp->f_pos]))
+				return -EFAULT;
+		}
+		if (count > 1) {
+			if (put_user('\n', &buf [k++ - filp->f_pos]))
+				return -EFAULT;
+		}
 	} else if (op->flag & OPP_STRINGLIST) {
 		char *tmp;
 
@@ -226,7 +231,8 @@ static ssize_t property_read(struct file *filp, char *buf,
 		}
 		strcpy(s, "'\n");
 
-		copy_to_user(buf, tmp + k, count);
+		if (copy_to_user(buf, tmp + k, count))
+			return -EFAULT;
 
 		kfree(tmp);
 		k += count;
@@ -244,53 +250,68 @@ static ssize_t property_read(struct file *filp, char *buf,
 
 		if (first == last) {
 			sprintf (buffer, "%08x.", *first);
-			copy_to_user (buf, buffer + first_off, last_cnt - first_off);
+			if (copy_to_user(buf, buffer + first_off,
+					 last_cnt - first_off))
+				return -EFAULT;
 			buf += last_cnt - first_off;
 		} else {		
 			for (q = first; q <= last; q++) {
 				sprintf (buffer, "%08x.", *q);
 				if (q == first) {
-					copy_to_user (buf, buffer + first_off,
-						      9 - first_off);
+					if (copy_to_user(buf, buffer + first_off,
+							 9 - first_off))
+						return -EFAULT;
 					buf += 9 - first_off;
 				} else if (q == last) {
-					copy_to_user (buf, buffer, last_cnt);
+					if (copy_to_user(buf, buffer, last_cnt))
+						return -EFAULT;
 					buf += last_cnt;
 				} else {
-					copy_to_user (buf, buffer, 9);
+					if (copy_to_user(buf, buffer, 9))
+						return -EFAULT;
 					buf += 9;
 				}
 			}
 		}
 
-		if (last == (u32 *)(op->value + op->len - 4) && last_cnt == 9)
-			__put_user('\n', (buf - 1));
+		if (last == (u32 *)(op->value + op->len - 4) && last_cnt == 9) {
+			if (put_user('\n', (buf - 1)))
+				return -EFAULT;
+		}
 
 		k += count;
 
 	} else if (op->flag & OPP_HEXSTRING) {
-		char buffer[2];
+		char buffer[3];
 
 		if ((k < i - 1) && (k & 1)) {
-			sprintf (buffer, "%02x", *(op->value + (k >> 1)));
-			__put_user(buffer[1], &buf[k++ - filp->f_pos]);
+			sprintf (buffer, "%02x",
+				 (unsigned char) *(op->value + (k >> 1)) & 0xff);
+			if (put_user(buffer[1], &buf[k++ - filp->f_pos]))
+				return -EFAULT;
 			count--;
 		}
 
 		for (; (count > 1) && (k < i - 1); k += 2) {
-			sprintf (buffer, "%02x", *(op->value + (k >> 1)));
-			copy_to_user (buf + k - filp->f_pos, buffer, 2);
+			sprintf (buffer, "%02x",
+				 (unsigned char) *(op->value + (k >> 1)) & 0xff);
+			if (copy_to_user(buf + k - filp->f_pos, buffer, 2))
+				return -EFAULT;
 			count -= 2;
 		}
 
 		if (count && (k < i - 1)) {
-			sprintf (buffer, "%02x", *(op->value + (k >> 1)));
-			__put_user(buffer[0], &buf[k++ - filp->f_pos]);
+			sprintf (buffer, "%02x",
+				 (unsigned char) *(op->value + (k >> 1)) & 0xff);
+			if (put_user(buffer[0], &buf[k++ - filp->f_pos]))
+				return -EFAULT;
 			count--;
 		}
 
-		if (count)
-			__put_user('\n', &buf [k++ - filp->f_pos]);
+		if (count) {
+			if (put_user('\n', &buf [k++ - filp->f_pos]))
+				return -EFAULT;
+		}
 	}
 	count = k - filp->f_pos;
 	filp->f_pos = k;
@@ -306,7 +327,7 @@ static ssize_t property_write(struct file *filp, const char *buf,
 	void *b;
 	openprom_property *op;
 	
-	if (filp->f_pos >= 0xffffff)
+	if (filp->f_pos >= 0xffffff || count >= 0xffffff)
 		return -EINVAL;
 	if (!filp->private_data) {
 		i = property_read (filp, NULL, 0, 0);
@@ -327,7 +348,8 @@ static ssize_t property_write(struct file *filp, const char *buf,
 			if (j == 9) j = 0;
 			if (!j) {
 				char ctmp;
-				__get_user(ctmp, &buf[i]);
+				if (get_user(ctmp, &buf[i]))
+					return -EFAULT;
 				if (ctmp != '.') {
 					if (ctmp != '\n') {
 						if (op->flag & OPP_BINARY)
@@ -342,7 +364,8 @@ static ssize_t property_write(struct file *filp, const char *buf,
 				}
 			} else {
 				char ctmp;
-				__get_user(ctmp, &buf[i]);
+				if (get_user(ctmp, &buf[i]))
+					return -EFAULT;
 				if (ctmp < '0' || 
 				    (ctmp > '9' && ctmp < 'A') ||
 				    (ctmp > 'F' && ctmp < 'a') ||
@@ -380,8 +403,10 @@ static ssize_t property_write(struct file *filp, const char *buf,
 		last_cnt = (k + count) % 9;
 		if (first + 1 == last) {
 			memset (tmp, '0', 8);
-			copy_from_user (tmp + first_off, buf,
-					(count + first_off > 8) ? 8 - first_off : count);
+			if (copy_from_user(tmp + first_off, buf,
+					   (count + first_off > 8) ?
+					   8 - first_off : count))
+				return -EFAULT;
 			mask = 0xffffffff;
 			mask2 = 0xffffffff;
 			for (j = 0; j < first_off; j++)
@@ -400,8 +425,10 @@ static ssize_t property_write(struct file *filp, const char *buf,
 				if (q == first) {
 					if (first_off < 8) {
 						memset (tmp, '0', 8);
-						copy_from_user (tmp + first_off, buf,
-								8 - first_off);
+						if (copy_from_user(tmp + first_off,
+								   buf,
+								   8 - first_off))
+							return -EFAULT;
 						mask = 0xffffffff;
 						for (j = 0; j < first_off; j++)
 							mask >>= 1;
@@ -412,7 +439,8 @@ static ssize_t property_write(struct file *filp, const char *buf,
 				} else if ((q == last - 1) && last_cnt
 					   && (last_cnt < 8)) {
 					memset (tmp, '0', 8);
-					copy_from_user (tmp, buf, last_cnt);
+					if (copy_from_user(tmp, buf, last_cnt))
+						return -EFAULT;
 					mask = 0xffffffff;
 					for (j = 0; j < 8 - last_cnt; j++)
 						mask <<= 1;
@@ -422,7 +450,8 @@ static ssize_t property_write(struct file *filp, const char *buf,
 				} else {
 					char tchars[17]; /* XXX yuck... */
 
-					copy_from_user(tchars, buf, 16);
+					if (copy_from_user(tchars, buf, 16))
+						return -EFAULT;
 					*q = simple_strtoul (tchars, 0, 16);
 					buf += 9;
 				}
@@ -445,7 +474,8 @@ write_try_string:
 			 */
 			if (k > 0)
 				return -EINVAL;
-			__get_user(ctmp, buf);
+			if (get_user(ctmp, buf))
+				return -EFAULT;
 			if (ctmp == '\'') {
 				op->flag |= OPP_QUOTED;
 				buf++;
@@ -477,7 +507,8 @@ write_try_string:
 			kfree (b);
 		}
 		p = op->value + filp->f_pos - ((op->flag & OPP_QUOTED) ? 1 : 0);
-		copy_from_user (p, buf, count);
+		if (copy_from_user(p, buf, count))
+			return -EFAULT;
 		op->flag |= OPP_DIRTY;
 		for (i = 0; i < count; i++, p++)
 			if (*p == '\n') {
@@ -502,7 +533,6 @@ write_try_string:
 int property_release (struct inode *inode, struct file *filp)
 {
 	openprom_property *op = (openprom_property *)filp->private_data;
-	unsigned long flags;
 	int error;
 	u32 node;
 	
@@ -527,19 +557,15 @@ int property_release (struct inode *inode, struct file *filp)
 	} else if (op->flag & OPP_DIRTY) {
 		if (op->flag & OPP_STRING) {
 			op->value [op->len] = 0;
-			save_and_cli (flags);
 			error = prom_setprop (node, op->name,
 					      op->value, op->len + 1);
-			restore_flags (flags);
 			if (error <= 0)
 				printk (KERN_WARNING "openpromfs: "
 					"Couldn't write property %s\n",
 					op->name);
 		} else if ((op->flag & OPP_BINARY) || !op->len) {
-			save_and_cli (flags);
 			error = prom_setprop (node, op->name,
 					      op->value, op->len);
-			restore_flags (flags);
 			if (error <= 0)
 				printk (KERN_WARNING "openpromfs: "
 					"Couldn't write property %s\n",
@@ -556,28 +582,28 @@ int property_release (struct inode *inode, struct file *filp)
 }
 
 static struct file_operations openpromfs_prop_ops = {
-	read:		property_read,
-	write:		property_write,
-	release:	property_release,
+	.read		= property_read,
+	.write		= property_write,
+	.release	= property_release,
 };
 
 static struct file_operations openpromfs_nodenum_ops = {
-	read:		nodenum_read,
+	.read		= nodenum_read,
 };
 
 static struct file_operations openprom_operations = {
-	read:		generic_read_dir,
-	readdir:	openpromfs_readdir,
+	.read		= generic_read_dir,
+	.readdir	= openpromfs_readdir,
 };
 
 static struct inode_operations openprom_alias_inode_operations = {
-	create:		openpromfs_create,
-	lookup:		openpromfs_lookup,
-	unlink:		openpromfs_unlink,
+	.create		= openpromfs_create,
+	.lookup		= openpromfs_lookup,
+	.unlink		= openpromfs_unlink,
 };
 
 static struct inode_operations openprom_inode_operations = {
-	lookup:		openpromfs_lookup,
+	.lookup		= openpromfs_lookup,
 };
 
 static int lookup_children(u16 n, const char * name, int len)
@@ -613,7 +639,7 @@ static int lookup_children(u16 n, const char * name, int len)
 	return 0;
 }
 
-static struct dentry *openpromfs_lookup(struct inode * dir, struct dentry *dentry)
+static struct dentry *openpromfs_lookup(struct inode * dir, struct dentry *dentry, struct nameidata *nd)
 {
 	int ino = 0;
 #define OPFSL_DIR	0
@@ -633,6 +659,7 @@ static struct dentry *openpromfs_lookup(struct inode * dir, struct dentry *dentr
 	inode = NULL;
 	name = dentry->d_name.name;
 	len = dentry->d_name.len;
+	lock_kernel();
 	if (name [0] == '.' && len == 5 && !strncmp (name + 1, "node", 4)) {
 		ino = NODEP2INO(NODE(dir->i_ino).first_prop);
 		type = OPFSL_NODENUM;
@@ -692,10 +719,13 @@ static struct dentry *openpromfs_lookup(struct inode * dir, struct dentry *dentr
 		ino = lookup_children (NODE(dir->i_ino).child, name, len);
 		if (ino)
 			type = OPFSL_DIR;
-		else
+		else {
+			unlock_kernel();
 			return ERR_PTR(-ENOENT);
+		}
 	}
 	inode = iget (dir->i_sb, ino);
+	unlock_kernel();
 	if (!inode)
 		return ERR_PTR(-EINVAL);
 	switch (type) {
@@ -752,12 +782,14 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 	u16 node;
 	char *p;
 	char buffer2[64];
+
+	lock_kernel();
 	
 	ino = inode->i_ino;
 	i = filp->f_pos;
 	switch (i) {
 	case 0:
-		if (filldir(dirent, ".", 1, i, ino, DT_DIR) < 0) return 0;
+		if (filldir(dirent, ".", 1, i, ino, DT_DIR) < 0) goto out;
 		i++;
 		filp->f_pos++;
 		/* fall thru */
@@ -765,7 +797,7 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 		if (filldir(dirent, "..", 2, i, 
 			(NODE(ino).parent == 0xffff) ? 
 			OPENPROM_ROOT_INO : NODE2INO(NODE(ino).parent), DT_DIR) < 0) 
-			return 0;
+			goto out;
 		i++;
 		filp->f_pos++;
 		/* fall thru */
@@ -778,17 +810,17 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 		}
 		while (node != 0xffff) {
 			if (prom_getname (nodes[node].node, buffer, 128) < 0)
-				return 0;
+				goto out;
 			if (filldir(dirent, buffer, strlen(buffer),
 				    filp->f_pos, NODE2INO(node), DT_DIR) < 0)
-				return 0;
+				goto out;
 			filp->f_pos++;
 			node = nodes[node].next;
 		}
 		j = NODEP2INO(NODE(ino).first_prop);
 		if (!i) {
 			if (filldir(dirent, ".node", 5, filp->f_pos, j, DT_REG) < 0)
-				return 0;
+				goto out;
 			filp->f_pos++;
 		} else
 			i--;
@@ -798,7 +830,7 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 				if (alias_names [i]) {
 					if (filldir (dirent, alias_names [i], 
 						strlen (alias_names [i]), 
-						filp->f_pos, j, DT_REG) < 0) return 0;
+						filp->f_pos, j, DT_REG) < 0) goto out; 
 					filp->f_pos++;
 				}
 			}
@@ -811,16 +843,19 @@ static int openpromfs_readdir(struct file * filp, void * dirent, filldir_t filld
 				else {
 					if (filldir(dirent, p, strlen(p),
 						    filp->f_pos, j, DT_REG) < 0)
-						return 0;
+						goto out;
 					filp->f_pos++;
 				}
 			}
 		}
 	}
+out:
+	unlock_kernel();
 	return 0;
 }
 
-static int openpromfs_create (struct inode *dir, struct dentry *dentry, int mode)
+static int openpromfs_create (struct inode *dir, struct dentry *dentry, int mode,
+		struct nameidata *nd)
 {
 	char *p;
 	struct inode *inode;
@@ -829,24 +864,31 @@ static int openpromfs_create (struct inode *dir, struct dentry *dentry, int mode
 		return -ENOENT;
 	if (dentry->d_name.len > 256)
 		return -EINVAL;
-	if (aliases_nodes == ALIASES_NNODES)
-		return -EIO;
 	p = kmalloc (dentry->d_name.len + 1, GFP_KERNEL);
 	if (!p)
 		return -ENOMEM;
 	strncpy (p, dentry->d_name.name, dentry->d_name.len);
 	p [dentry->d_name.len] = 0;
+	lock_kernel();
+	if (aliases_nodes == ALIASES_NNODES) {
+		kfree(p);
+		unlock_kernel();
+		return -EIO;
+	}
 	alias_names [aliases_nodes++] = p;
 	inode = iget (dir->i_sb,
 			NODEP2INO(NODE(dir->i_ino).first_prop) + aliases_nodes);
-	if (!inode)
+	if (!inode) {
+		unlock_kernel();
 		return -EINVAL;
+	}
 	inode->i_mode = S_IFREG | S_IRUGO | S_IWUSR;
 	inode->i_fop = &openpromfs_prop_ops;
 	inode->i_nlink = 1;
 	if (inode->i_size < 0) inode->i_size = 0;
 	inode->u.generic_ip = (void *)(long)(((u16)aliases) | 
 			(((u16)(aliases_nodes - 1)) << 16));
+	unlock_kernel();
 	d_instantiate(dentry, inode);
 	return 0;
 }
@@ -860,6 +902,7 @@ static int openpromfs_unlink (struct inode *dir, struct dentry *dentry)
 	
 	name = dentry->d_name.name;
 	len = dentry->d_name.len;
+	lock_kernel();
 	for (i = 0; i < aliases_nodes; i++)
 		if ((strlen (alias_names [i]) == len)
 		    && !strncmp (name, alias_names[i], len)) {
@@ -873,6 +916,7 @@ static int openpromfs_unlink (struct inode *dir, struct dentry *dentry)
 			buffer [10 + len] = 0;
 			prom_feval (buffer);
 		}
+	unlock_kernel();
 	return 0;
 }
 
@@ -982,24 +1026,12 @@ static void openprom_read_inode(struct inode * inode)
 	}
 }
 
-static int openprom_statfs(struct super_block *sb, struct statfs *buf)
-{
-	buf->f_type = OPENPROM_SUPER_MAGIC;
-	buf->f_bsize = PAGE_SIZE/sizeof(long);	/* ??? */
-	buf->f_bfree = 0;
-	buf->f_bavail = 0;
-	buf->f_ffree = 0;
-	buf->f_namelen = NAME_MAX;
-	return 0;
-}
-
 static struct super_operations openprom_sops = { 
-	read_inode:	openprom_read_inode,
-	statfs:		openprom_statfs,
+	.read_inode	= openprom_read_inode,
+	.statfs		= simple_statfs,
 };
 
-struct super_block *openprom_read_super(struct super_block *s,void *data, 
-				    int silent)
+static int openprom_fill_super(struct super_block *s, void *data, int silent)
 {
 	struct inode * root_inode;
 
@@ -1013,15 +1045,26 @@ struct super_block *openprom_read_super(struct super_block *s,void *data,
 	s->s_root = d_alloc_root(root_inode);
 	if (!s->s_root)
 		goto out_no_root;
-	return s;
+	return 0;
 
 out_no_root:
-	printk("openprom_read_super: get root inode failed\n");
+	printk("openprom_fill_super: get root inode failed\n");
 	iput(root_inode);
-	return NULL;
+	return -ENOMEM;
 }
 
-static DECLARE_FSTYPE(openprom_fs_type, "openpromfs", openprom_read_super, 0);
+static struct super_block *openprom_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_single(fs_type, flags, data, openprom_fill_super);
+}
+
+static struct file_system_type openprom_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "openpromfs",
+	.get_sb		= openprom_get_sb,
+	.kill_sb	= kill_anon_super,
+};
 
 static int __init init_openprom_fs(void)
 {
@@ -1048,8 +1091,6 @@ static void __exit exit_openprom_fs(void)
 			kfree (alias_names [i]);
 	nodes = NULL;
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(init_openprom_fs)
 module_exit(exit_openprom_fs)

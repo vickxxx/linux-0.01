@@ -4,8 +4,7 @@
 
 
 #include <linux/config.h>
-#include <linux/net.h>		/* struct socket, struct net_proto,
-				   struct proto_ops */
+#include <linux/net.h>		/* struct socket, struct proto_ops */
 #include <linux/atm.h>		/* ATM stuff */
 #include <linux/atmdev.h>	/* ATM devices */
 #include <linux/errno.h>	/* error codes */
@@ -47,7 +46,7 @@ static int pvc_bind(struct socket *sock,struct sockaddr *sockaddr,
 		if (vcc->vci != ATM_VCI_UNSPEC) addr->sap_addr.vci = vcc->vci;
 	}
 	error = vcc_connect(sock, addr->sap_addr.itf, addr->sap_addr.vpi,
-			   addr->sap_addr.vci);
+			    addr->sap_addr.vci);
 out:
 	release_sock(sk);
 	return error;
@@ -133,11 +132,8 @@ static int pvc_create(struct socket *sock,int protocol)
 
 
 static struct net_proto_family pvc_family_ops = {
-	PF_ATMPVC,
-	pvc_create,
-	0,			/* no authentication */
-	0,			/* no encryption */
-	0			/* no encrypt_net */
+	.family = PF_ATMPVC,
+	.create = pvc_create,
 };
 
 
@@ -146,7 +142,7 @@ static struct net_proto_family pvc_family_ops = {
  */
 
 
-int atmpvc_init(void)
+int __init atmpvc_init(void)
 {
 	return sock_register(&pvc_family_ops);
 }

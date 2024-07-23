@@ -11,42 +11,66 @@
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/highmem.h>
+#include <linux/pagemap.h>
 #include <linux/smp_lock.h>
+#include <linux/ptrace.h>
+#include <linux/security.h>
 
 #include <asm/pgtable.h>
 #include <asm/uaccess.h>
+
+/*
+ * ptrace a task: make the debugger its new parent and
+ * move it to the ptrace list.
+ *
+ * Must be called with the tasklist lock write-held.
+ */
+void __ptrace_link(task_t *child, task_t *new_parent)
+{
+	if (!list_empty(&child->ptrace_list))
+		BUG();
+	if (child->parent == new_parent)
+		return;
+	list_add(&child->ptrace_list, &child->parent->ptrace_children);
+	REMOVE_LINKS(child);
+	child->parent = new_parent;
+	SET_LINKS(child);
+}
+ 
+/*
+ * unptrace a task: move it back to its original parent and
+ * remove it from the ptrace list.
+ *
+ * Must be called with the tasklist lock write-held.
+ */
+void __ptrace_unlink(task_t *child)
+{
+	if (!child->ptrace)
+		BUG();
+	child->ptrace = 0;
+	if (list_empty(&child->ptrace_list))
+		return;
+	list_del_init(&child->ptrace_list);
+	REMOVE_LINKS(child);
+	child->parent = child->real_parent;
+	SET_LINKS(child);
+}
 
 /*
  * Check that we have indeed attached to the thing..
  */
 int ptrace_check_attach(struct task_struct *child, int kill)
 {
-
 	if (!(child->ptrace & PT_PTRACED))
 		return -ESRCH;
 
-	if (child->p_pptr != current)
+	if (child->parent != current)
 		return -ESRCH;
 
 	if (!kill) {
 		if (child->state != TASK_STOPPED)
 			return -ESRCH;
-#ifdef CONFIG_SMP
-		/* Make sure the child gets off its CPU.. */
-		for (;;) {
-			task_lock(child);
-			if (!task_has_cpu(child))
-				break;
-			task_unlock(child);
-			do {
-				if (child->state != TASK_STOPPED)
-					return -ESRCH;
-				barrier();
-				cpu_relax();
-			} while (task_has_cpu(child));
-		}
-		task_unlock(child);
-#endif		
+		wait_task_inactive(child);
 	}
 
 	/* All systems go.. */
@@ -55,10 +79,12 @@ int ptrace_check_attach(struct task_struct *child, int kill)
 
 int ptrace_attach(struct task_struct *task)
 {
+	int retval;
 	task_lock(task);
+	retval = -EPERM;
 	if (task->pid <= 1)
 		goto bad;
-	if (task->tgid == current->tgid)
+	if (task == current)
 		goto bad;
 	if (!task->mm)
 		goto bad;
@@ -67,14 +93,16 @@ int ptrace_attach(struct task_struct *task)
 	    (current->uid != task->uid) ||
  	    (current->gid != task->egid) ||
  	    (current->gid != task->sgid) ||
- 	    (!cap_issubset(task->cap_permitted, current->cap_permitted)) ||
  	    (current->gid != task->gid)) && !capable(CAP_SYS_PTRACE))
 		goto bad;
 	rmb();
-	if (!is_dumpable(task) && !capable(CAP_SYS_PTRACE))
+	if (!task->mm->dumpable && !capable(CAP_SYS_PTRACE))
 		goto bad;
 	/* the same process cannot be attached many times */
 	if (task->ptrace & PT_PTRACED)
+		goto bad;
+	retval = security_ptrace(current, task);
+	if (retval)
 		goto bad;
 
 	/* Go */
@@ -84,19 +112,15 @@ int ptrace_attach(struct task_struct *task)
 	task_unlock(task);
 
 	write_lock_irq(&tasklist_lock);
-	if (task->p_pptr != current) {
-		REMOVE_LINKS(task);
-		task->p_pptr = current;
-		SET_LINKS(task);
-	}
+	__ptrace_link(task, current);
 	write_unlock_irq(&tasklist_lock);
 
-	send_sig(SIGSTOP, task, 1);
+	force_sig_specific(SIGSTOP, task);
 	return 0;
 
 bad:
 	task_unlock(task);
-	return -EPERM;
+	return retval;
 }
 
 int ptrace_detach(struct task_struct *child, unsigned int data)
@@ -108,16 +132,15 @@ int ptrace_detach(struct task_struct *child, unsigned int data)
 	ptrace_disable(child);
 
 	/* .. re-parent .. */
-	child->ptrace = 0;
 	child->exit_code = data;
+
 	write_lock_irq(&tasklist_lock);
-	REMOVE_LINKS(child);
-	child->p_pptr = child->p_opptr;
-	SET_LINKS(child);
+	__ptrace_unlink(child);
+	/* .. and wake it up. */
+	if (child->state != TASK_ZOMBIE)
+		wake_up_process(child);
 	write_unlock_irq(&tasklist_lock);
 
-	/* .. and wake it up. */
-	wake_up_process(child);
 	return 0;
 }
 
@@ -134,12 +157,7 @@ int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, in
 	struct page *page;
 	void *old_buf = buf;
 
-	/* Worry about races with exit() */
-	task_lock(tsk);
-	mm = tsk->mm;
-	if (mm)
-		atomic_inc(&mm->mm_users);
-	task_unlock(tsk);
+	mm = get_task_mm(tsk);
 	if (!mm)
 		return 0;
 
@@ -161,18 +179,21 @@ int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, in
 
 		flush_cache_page(vma, addr);
 
+		/*
+		 * FIXME!  We used to have flush_page_to_ram() in here, but
+		 * that was wrong.  davem says we need a new per-arch primitive
+		 * to handle this correctly.
+		 */
+
 		maddr = kmap(page);
 		if (write) {
 			memcpy(maddr + offset, buf, bytes);
-			flush_page_to_ram(page);
-			flush_icache_user_range(vma, page, addr, len);
-			set_page_dirty(page);
+			flush_icache_user_range(vma, page, addr, bytes);
 		} else {
 			memcpy(buf, maddr + offset, bytes);
-			flush_page_to_ram(page);
 		}
 		kunmap(page);
-		put_page(page);
+		page_cache_release(page);
 		len -= bytes;
 		buf += bytes;
 		addr += bytes;
@@ -183,7 +204,7 @@ int access_process_vm(struct task_struct *tsk, unsigned long addr, void *buf, in
 	return buf - old_buf;
 }
 
-int ptrace_readdata(struct task_struct *tsk, unsigned long src, char *dst, int len)
+int ptrace_readdata(struct task_struct *tsk, unsigned long src, char __user *dst, int len)
 {
 	int copied = 0;
 
@@ -208,7 +229,7 @@ int ptrace_readdata(struct task_struct *tsk, unsigned long src, char *dst, int l
 	return copied;
 }
 
-int ptrace_writedata(struct task_struct *tsk, char * src, unsigned long dst, int len)
+int ptrace_writedata(struct task_struct *tsk, char __user *src, unsigned long dst, int len)
 {
 	int copied = 0;
 
@@ -231,4 +252,95 @@ int ptrace_writedata(struct task_struct *tsk, char * src, unsigned long dst, int
 		len -= retval;			
 	}
 	return copied;
+}
+
+static int ptrace_setoptions(struct task_struct *child, long data)
+{
+	child->ptrace &= ~PT_TRACE_MASK;
+
+	if (data & PTRACE_O_TRACESYSGOOD)
+		child->ptrace |= PT_TRACESYSGOOD;
+
+	if (data & PTRACE_O_TRACEFORK)
+		child->ptrace |= PT_TRACE_FORK;
+
+	if (data & PTRACE_O_TRACEVFORK)
+		child->ptrace |= PT_TRACE_VFORK;
+
+	if (data & PTRACE_O_TRACECLONE)
+		child->ptrace |= PT_TRACE_CLONE;
+
+	if (data & PTRACE_O_TRACEEXEC)
+		child->ptrace |= PT_TRACE_EXEC;
+
+	if (data & PTRACE_O_TRACEVFORKDONE)
+		child->ptrace |= PT_TRACE_VFORK_DONE;
+
+	if (data & PTRACE_O_TRACEEXIT)
+		child->ptrace |= PT_TRACE_EXIT;
+
+	return (data & ~PTRACE_O_MASK) ? -EINVAL : 0;
+}
+
+static int ptrace_getsiginfo(struct task_struct *child, siginfo_t __user * data)
+{
+	if (child->last_siginfo == NULL)
+		return -EINVAL;
+	return copy_siginfo_to_user(data, child->last_siginfo);
+}
+
+static int ptrace_setsiginfo(struct task_struct *child, siginfo_t __user * data)
+{
+	if (child->last_siginfo == NULL)
+		return -EINVAL;
+	if (copy_from_user(child->last_siginfo, data, sizeof (siginfo_t)) != 0)
+		return -EFAULT;
+	return 0;
+}
+
+int ptrace_request(struct task_struct *child, long request,
+		   long addr, long data)
+{
+	int ret = -EIO;
+
+	switch (request) {
+#ifdef PTRACE_OLDSETOPTIONS
+	case PTRACE_OLDSETOPTIONS:
+#endif
+	case PTRACE_SETOPTIONS:
+		ret = ptrace_setoptions(child, data);
+		break;
+	case PTRACE_GETEVENTMSG:
+		ret = put_user(child->ptrace_message, (unsigned long __user *) data);
+		break;
+	case PTRACE_GETSIGINFO:
+		ret = ptrace_getsiginfo(child, (siginfo_t __user *) data);
+		break;
+	case PTRACE_SETSIGINFO:
+		ret = ptrace_setsiginfo(child, (siginfo_t __user *) data);
+		break;
+	default:
+		break;
+	}
+
+	return ret;
+}
+
+void ptrace_notify(int exit_code)
+{
+	BUG_ON (!(current->ptrace & PT_PTRACED));
+
+	/* Let the debugger run.  */
+	current->exit_code = exit_code;
+	set_current_state(TASK_STOPPED);
+	notify_parent(current, SIGCHLD);
+	schedule();
+
+	/*
+	 * Signals sent while we were stopped might set TIF_SIGPENDING.
+	 */
+
+	spin_lock_irq(&current->sighand->siglock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 }

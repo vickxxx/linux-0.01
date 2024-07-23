@@ -32,12 +32,10 @@ do {	unsigned int *dest = &(__elf_regs[0]);		\
 	for(i = 0; i < 16; i++)				\
 		dest[i] = (unsigned int) src->u_regs[i];\
 	/* Don't try this at home kids... */		\
-	set_fs(USER_DS);				\
 	sp = (unsigned int *) (src->u_regs[14] &	\
 		0x00000000fffffffc);			\
 	for(i = 0; i < 16; i++)				\
 		__get_user(dest[i+16], &sp[i]);		\
-	set_fs(KERNEL_DS);				\
 	dest[32] = tstate_to_psr(src->tstate);		\
 	dest[33] = (unsigned int) src->tpc;		\
 	dest[34] = (unsigned int) src->tnpc;		\
@@ -88,11 +86,7 @@ typedef struct {
 #include <linux/module.h>
 #include <linux/config.h>
 #include <linux/elfcore.h>
-
-struct timeval32
-{
-	int tv_sec, tv_usec;
-};
+#include <linux/compat.h>
 
 #define elf_prstatus elf_prstatus32
 struct elf_prstatus32
@@ -105,10 +99,10 @@ struct elf_prstatus32
 	pid_t	pr_ppid;
 	pid_t	pr_pgrp;
 	pid_t	pr_sid;
-	struct timeval32 pr_utime;	/* User time */
-	struct timeval32 pr_stime;	/* System time */
-	struct timeval32 pr_cutime;	/* Cumulative user time */
-	struct timeval32 pr_cstime;	/* Cumulative system time */
+	struct compat_timeval pr_utime;	/* User time */
+	struct compat_timeval pr_stime;	/* System time */
+	struct compat_timeval pr_cutime;	/* Cumulative user time */
+	struct compat_timeval pr_cstime;	/* Cumulative system time */
 	elf_gregset_t pr_reg;	/* GP registers */
 	int pr_fpvalid;		/* True if math co-processor being used.  */
 };
@@ -136,8 +130,17 @@ struct elf_prpsinfo32
 #define NEW_TO_OLD_UID(uid) ((uid) > 65535) ? (u16)overflowuid : (u16)(uid)
 #define NEW_TO_OLD_GID(gid) ((gid) > 65535) ? (u16)overflowgid : (u16)(gid)
 
+#include <linux/time.h>
+
+#define jiffies_to_timeval jiffies_to_compat_timeval
+static __inline__ void
+jiffies_to_compat_timeval(unsigned long jiffies, struct compat_timeval *value)
+{
+	value->tv_usec = (jiffies % HZ) * (1000000L / HZ);
+	value->tv_sec = jiffies / HZ;
+}
+
 #define elf_addr_t	u32
-#define elf_caddr_t	u32
 #undef start_thread
 #define start_thread start_thread32
 #define init_elf_binfmt init_elf32_binfmt
@@ -149,7 +152,6 @@ struct elf_prpsinfo32
 #ifdef CONFIG_BINFMT_ELF32_MODULE
 #define CONFIG_BINFMT_ELF_MODULE CONFIG_BINFMT_ELF32_MODULE
 #endif
-#define ELF_FLAGS_INIT	current->thread.flags |= SPARC_FLAG_32BIT
 
 MODULE_DESCRIPTION("Binary format loader for compatibility with 32bit SparcLinux binaries on the Ultra");
 MODULE_AUTHOR("Eric Youngdale, David S. Miller, Jakub Jelinek");

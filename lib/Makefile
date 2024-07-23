@@ -1,48 +1,38 @@
- #
+#
 # Makefile for some libs needed in the kernel.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
 
-L_TARGET := lib.a
 
-export-objs := cmdline.o dec_and_lock.o rwsem-spinlock.o rwsem.o \
-	       rbtree.o crc32.o firmware_class.o
+lib-y := errno.o ctype.o string.o vsprintf.o cmdline.o \
+	 bust_spinlocks.o rbtree.o radix-tree.o dump_stack.o \
+	 kobject.o idr.o div64.o
 
-obj-y := errno.o ctype.o string.o vsprintf.o brlock.o cmdline.o \
-	 bust_spinlocks.o rbtree.o dump_stack.o
-
-obj-$(CONFIG_FW_LOADER) += firmware_class.o
-obj-$(CONFIG_RWSEM_GENERIC_SPINLOCK) += rwsem-spinlock.o
-obj-$(CONFIG_RWSEM_XCHGADD_ALGORITHM) += rwsem.o
+lib-$(CONFIG_RWSEM_GENERIC_SPINLOCK) += rwsem-spinlock.o
+lib-$(CONFIG_RWSEM_XCHGADD_ALGORITHM) += rwsem.o
+lib-$(CONFIG_SMP) += percpu_counter.o
 
 ifneq ($(CONFIG_HAVE_DEC_LOCK),y) 
-  obj-y += dec_and_lock.o
+  lib-y += dec_and_lock.o
 endif
 
-obj-$(CONFIG_CRC32)     += crc32.o
+obj-$(CONFIG_CRC32)	+= crc32.o
 
-subdir-$(CONFIG_ZLIB_INFLATE) += zlib_inflate
-subdir-$(CONFIG_ZLIB_DEFLATE) += zlib_deflate
+obj-$(CONFIG_ZLIB_INFLATE) += zlib_inflate/
+obj-$(CONFIG_ZLIB_DEFLATE) += zlib_deflate/
 
-include $(TOPDIR)/drivers/net/Makefile.lib
-include $(TOPDIR)/drivers/usb/Makefile.lib
-include $(TOPDIR)/drivers/bluetooth/Makefile.lib
-include $(TOPDIR)/fs/Makefile.lib
-include $(TOPDIR)/net/bluetooth/bnep/Makefile.lib
+include drivers/net/Makefile.lib
+include drivers/usb/Makefile.lib
+include fs/Makefile.lib
+include net/bluetooth/bnep/Makefile.lib
+include drivers/media/dvb/dvb-core/Makefile.lib
 
-# Include the subdirs, if necessary.
-obj-y += $(join $(subdir-y),$(subdir-y:%=/%.o))
+host-progs	:= gen_crc32table
+clean-files	:= crc32table.h
 
+$(obj)/crc32.o: $(obj)/crc32table.h
 
-include $(TOPDIR)/Rules.make
+quiet_cmd_crc32 = GEN     $@
+      cmd_crc32 = $< > $@
 
-crc32.o: crc32table.h
-
-gen_crc32table: gen_crc32table.c
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ $<
-
-crc32table.h: gen_crc32table
-	./$< > $@
+$(obj)/crc32table.h: $(obj)/gen_crc32table
+	$(call cmd,crc32)

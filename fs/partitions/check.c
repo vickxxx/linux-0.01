@@ -1,4 +1,6 @@
 /*
+ *  fs/partitions/check.c
+ *
  *  Code extracted from drivers/block/genhd.c
  *  Copyright (C) 1991-1998  Linus Torvalds
  *  Re-organised Feb 1998 Russell King
@@ -11,16 +13,16 @@
  *  Added needed MAJORS for new pairs, {hdi,hdj}, {hdk,hdl}
  */
 
-#include <linux/config.h>
-#include <linux/fs.h>
-#include <linux/genhd.h>
-#include <linux/kernel.h>
-#include <linux/major.h>
-#include <linux/blk.h>
 #include <linux/init.h>
-#include <linux/raid/md.h>
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/blk.h>
+#include <linux/kmod.h>
+#include <linux/ctype.h>
+#include <linux/devfs_fs_kernel.h>
 
 #include "check.h"
+#include "devfs.h"
 
 #include "acorn.h"
 #include "amiga.h"
@@ -28,22 +30,56 @@
 #include "ldm.h"
 #include "mac.h"
 #include "msdos.h"
+#include "nec98.h"
 #include "osf.h"
 #include "sgi.h"
 #include "sun.h"
 #include "ibm.h"
 #include "ultrix.h"
+#include "efi.h"
 
-extern int *blk_size[];
+#ifdef CONFIG_BLK_DEV_MD
+extern void md_autodetect_dev(dev_t dev);
+#endif
 
 int warn_no_part = 1; /*This is ugly: should make genhd removable media aware*/
 
-static int (*check_part[])(struct gendisk *hd, struct block_device *bdev, unsigned long first_sect, int first_minor) = {
-#ifdef CONFIG_ACORN_PARTITION
-	acorn_partition,
+static int (*check_part[])(struct parsed_partitions *, struct block_device *) = {
+	/*
+	 * Probe partition formats with tables at disk address 0
+	 * that also have an ADFS boot block at 0xdc0.
+	 */
+#ifdef CONFIG_ACORN_PARTITION_ICS
+	adfspart_check_ICS,
+#endif
+#ifdef CONFIG_ACORN_PARTITION_POWERTEC
+	adfspart_check_POWERTEC,
+#endif
+#ifdef CONFIG_ACORN_PARTITION_EESOX
+	adfspart_check_EESOX,
+#endif
+
+	/*
+	 * Now move on to formats that only have partition info at
+	 * disk address 0xdc0.  Since these may also have stale
+	 * PC/BIOS partition tables, they need to come before
+	 * the msdos entry.
+	 */
+#ifdef CONFIG_ACORN_PARTITION_CUMANA
+	adfspart_check_CUMANA,
+#endif
+#ifdef CONFIG_ACORN_PARTITION_ADFS
+	adfspart_check_ADFS,
+#endif
+
+#ifdef CONFIG_EFI_PARTITION
+	efi_partition,		/* this must come before msdos */
 #endif
 #ifdef CONFIG_LDM_PARTITION
 	ldm_partition,		/* this must come before msdos */
+#endif
+#ifdef CONFIG_NEC98_PARTITION
+	nec98_partition,	/* must be come before `msdos_partition' */
 #endif
 #ifdef CONFIG_MSDOS_PARTITION
 	msdos_partition,
@@ -74,18 +110,7 @@ static int (*check_part[])(struct gendisk *hd, struct block_device *bdev, unsign
 #endif
 	NULL
 };
-
-/*
- *	This is ucking fugly but its probably the best thing for 2.4.x
- *	Take it as a clear reminder than we should put the device name
- *	generation in the object kdev_t points to in 2.5.
- */
  
-#ifdef CONFIG_ARCH_S390
-int (*genhd_dasd_name)(char*,int,int,struct gendisk*) = NULL;
-EXPORT_SYMBOL(genhd_dasd_name);
-#endif
-
 /*
  * disk_name() is used by partition check code and the md driver.
  * It formats the devicename of the indicated disk into
@@ -93,336 +118,339 @@ EXPORT_SYMBOL(genhd_dasd_name);
  * a pointer to that same buffer (for convenience).
  */
 
-char *disk_name (struct gendisk *hd, int minor, char *buf)
+char *disk_name(struct gendisk *hd, int part, char *buf)
 {
-	const char *maj = hd->major_name;
-	unsigned int unit = (minor >> hd->minor_shift);
-	unsigned int part = (minor & ((1 << hd->minor_shift) -1 ));
-
-	if ((unit < hd->nr_real) && hd->part[minor].de) {
-		int pos;
-
-		pos = devfs_generate_path (hd->part[minor].de, buf, 64);
-		if (pos >= 0)
-			return buf + pos;
-	}
-
-#ifdef CONFIG_ARCH_S390
-	if (genhd_dasd_name
-	    && genhd_dasd_name (buf, unit, part, hd) == 0)
-		return buf;
-#endif
-	/*
-	 * IDE devices use multiple major numbers, but the drives
-	 * are named as:  {hda,hdb}, {hdc,hdd}, {hde,hdf}, {hdg,hdh}..
-	 * This requires special handling here.
-	 */
-	switch (hd->major) {
-		case IDE9_MAJOR:
-			unit += 2;
-		case IDE8_MAJOR:
-			unit += 2;
-		case IDE7_MAJOR:
-			unit += 2;
-		case IDE6_MAJOR:
-			unit += 2;
-		case IDE5_MAJOR:
-			unit += 2;
-		case IDE4_MAJOR:
-			unit += 2;
-		case IDE3_MAJOR:
-			unit += 2;
-		case IDE2_MAJOR:
-			unit += 2;
-		case IDE1_MAJOR:
-			unit += 2;
-		case IDE0_MAJOR:
-			maj = "hd";
-			break;
-		case MD_MAJOR:
-			sprintf(buf, "%s%d", maj, unit);
-			return buf;
-	}
-	if (hd->major >= SCSI_DISK1_MAJOR && hd->major <= SCSI_DISK7_MAJOR) {
-		unit = unit + (hd->major - SCSI_DISK1_MAJOR + 1) * 16;
-		if (unit+'a' > 'z') {
-			unit -= 26;
-			sprintf(buf, "sd%c%c", 'a' + unit / 26, 'a' + unit % 26);
-			if (part)
-				sprintf(buf + 4, "%d", part);
-			return buf;
-		}
-	}
-	if (hd->major >= COMPAQ_SMART2_MAJOR && hd->major <= COMPAQ_SMART2_MAJOR+7) {
-		int ctlr = hd->major - COMPAQ_SMART2_MAJOR;
- 		if (part == 0)
- 			sprintf(buf, "%s/c%dd%d", maj, ctlr, unit);
- 		else
- 			sprintf(buf, "%s/c%dd%dp%d", maj, ctlr, unit, part);
- 		return buf;
- 	}
-	if (hd->major >= COMPAQ_CISS_MAJOR && hd->major <= COMPAQ_CISS_MAJOR+7) {
-                int ctlr = hd->major - COMPAQ_CISS_MAJOR;
-                if (part == 0)
-                        sprintf(buf, "%s/c%dd%d", maj, ctlr, unit);
-                else
-                        sprintf(buf, "%s/c%dd%dp%d", maj, ctlr, unit, part);
-                return buf;
-	}
-	if (hd->major >= DAC960_MAJOR && hd->major <= DAC960_MAJOR+7) {
-		int ctlr = hd->major - DAC960_MAJOR;
- 		if (part == 0)
- 			sprintf(buf, "%s/c%dd%d", maj, ctlr, unit);
- 		else
- 			sprintf(buf, "%s/c%dd%dp%d", maj, ctlr, unit, part);
- 		return buf;
- 	}
-	if (hd->major == ATARAID_MAJOR) {
-		int disk = minor >> hd->minor_shift;
-		int part = minor & (( 1 << hd->minor_shift) - 1);
-		if (part == 0)
-			sprintf(buf, "%s/d%d", maj, disk);
-		else
-			sprintf(buf, "%s/d%dp%d", maj, disk, part);
-		return buf;
-	}
-	if (part)
-		sprintf(buf, "%s%c%d", maj, unit+'a', part);
+	if (!part)
+		snprintf(buf, BDEVNAME_SIZE, "%s", hd->disk_name);
+	else if (isdigit(hd->disk_name[strlen(hd->disk_name)-1]))
+		snprintf(buf, BDEVNAME_SIZE, "%sp%d", hd->disk_name, part);
 	else
-		sprintf(buf, "%s%c", maj, unit+'a');
+		snprintf(buf, BDEVNAME_SIZE, "%s%d", hd->disk_name, part);
+
 	return buf;
 }
 
+const char *bdevname(struct block_device *bdev, char *buf)
+{
+	int part = MINOR(bdev->bd_dev) - bdev->bd_disk->first_minor;
+	return disk_name(bdev->bd_disk, part, buf);
+}
+
 /*
- * Add a partitions details to the devices partition description.
+ * NOTE: this cannot be called from interrupt context.
+ *
+ * But in interrupt context you should really have a struct
+ * block_device anyway and use bdevname() above.
  */
-void add_gd_partition(struct gendisk *hd, int minor, int start, int size)
+const char *__bdevname(dev_t dev, char *buffer)
 {
-#ifndef CONFIG_DEVFS_FS
-	char buf[40];
-#endif
-
-	hd->part[minor].start_sect = start;
-	hd->part[minor].nr_sects   = size;
-#ifdef CONFIG_DEVFS_FS
-	printk(" p%d", (minor & ((1 << hd->minor_shift) - 1)));
-#else
-	if ((hd->major >= COMPAQ_SMART2_MAJOR+0 && hd->major <= COMPAQ_SMART2_MAJOR+7) ||
-	    (hd->major >= COMPAQ_CISS_MAJOR+0 && hd->major <= COMPAQ_CISS_MAJOR+7))
-		printk(" p%d", (minor & ((1 << hd->minor_shift) - 1)));
-	else
-		printk(" %s", disk_name(hd, minor, buf));
-#endif
-}
-
-static void check_partition(struct gendisk *hd, kdev_t dev, int first_part_minor)
-{
-	devfs_handle_t de = NULL;
-	static int first_time = 1;
-	unsigned long first_sector;
-	struct block_device *bdev;
-	char buf[64];
-	int i;
-
-	if (first_time)
-		printk(KERN_INFO "Partition check:\n");
-	first_time = 0;
-	first_sector = hd->part[MINOR(dev)].start_sect;
-
-	/*
-	 * This is a kludge to allow the partition check to be
-	 * skipped for specific drives (e.g. IDE CD-ROM drives)
-	 */
-	if ((int)first_sector == -1) {
-		hd->part[MINOR(dev)].start_sect = 0;
-		return;
-	}
-
-	if (hd->de_arr)
-		de = hd->de_arr[MINOR(dev) >> hd->minor_shift];
-	i = devfs_generate_path (de, buf, sizeof buf);
-	if (i >= 0)
-		printk(KERN_INFO " /dev/%s:", buf + i);
-	else
-		printk(KERN_INFO " %s:", disk_name(hd, MINOR(dev), buf));
-	bdev = bdget(kdev_t_to_nr(dev));
-	bdev->bd_inode->i_size = (loff_t)hd->part[MINOR(dev)].nr_sects << 9;
-	bdev->bd_inode->i_blkbits = blksize_bits(block_size(dev));
-	for (i = 0; check_part[i]; i++) {
-		int res;
-		res = check_part[i](hd, bdev, first_sector, first_part_minor);
-		if (res) {
-			if (res < 0 &&  warn_no_part)
-				printk(" unable to read partition table\n");
-			goto setup_devfs;
-		}
-	}
-
-	printk(" unknown partition table\n");
-setup_devfs:
-	invalidate_bdev(bdev, 1);
-	truncate_inode_pages(bdev->bd_inode->i_mapping, 0);
-	bdput(bdev);
-	i = first_part_minor - 1;
-	devfs_register_partitions (hd, i, hd->sizes ? 0 : 1);
-}
-
-#ifdef CONFIG_DEVFS_FS
-static void devfs_register_partition (struct gendisk *dev, int minor, int part)
-{
-	int devnum = minor >> dev->minor_shift;
-	devfs_handle_t dir;
-	unsigned int devfs_flags = DEVFS_FL_DEFAULT;
-	char devname[16];
-
-	if (dev->part[minor + part].de) return;
-	dir = devfs_get_parent (dev->part[minor].de);
-	if (!dir) return;
-	if ( dev->flags && (dev->flags[devnum] & GENHD_FL_REMOVABLE) )
-		devfs_flags |= DEVFS_FL_REMOVABLE;
-	sprintf (devname, "part%d", part);
-	dev->part[minor + part].de =
-	    devfs_register (dir, devname, devfs_flags,
-			    dev->major, minor + part,
-			    S_IFBLK | S_IRUSR | S_IWUSR,
-			    dev->fops, NULL);
-}
-
-static struct unique_numspace disc_numspace = UNIQUE_NUMBERSPACE_INITIALISER;
-
-static void devfs_register_disc (struct gendisk *dev, int minor)
-{
-	int pos = 0;
-	int devnum = minor >> dev->minor_shift;
-	devfs_handle_t dir, slave;
-	unsigned int devfs_flags = DEVFS_FL_DEFAULT;
-	char dirname[64], symlink[16];
-	static devfs_handle_t devfs_handle;
-
-	if (dev->part[minor].de) return;
-	if ( dev->flags && (dev->flags[devnum] & GENHD_FL_REMOVABLE) )
-		devfs_flags |= DEVFS_FL_REMOVABLE;
-	if (dev->de_arr) {
-		dir = dev->de_arr[devnum];
-		if (!dir)  /*  Aware driver wants to block disc management  */
-			return;
-		pos = devfs_generate_path (dir, dirname + 3, sizeof dirname-3);
-		if (pos < 0) return;
-		strncpy (dirname + pos, "../", 3);
-	}
-	else {
-		/*  Unaware driver: construct "real" directory  */
-		sprintf (dirname, "../%s/disc%d", dev->major_name, devnum);
-		dir = devfs_mk_dir (NULL, dirname + 3, NULL);
-	}
-	if (!devfs_handle)
-		devfs_handle = devfs_mk_dir (NULL, "discs", NULL);
-	dev->part[minor].number = devfs_alloc_unique_number (&disc_numspace);
-	sprintf (symlink, "disc%d", dev->part[minor].number);
-	devfs_mk_symlink (devfs_handle, symlink, DEVFS_FL_DEFAULT,
-			  dirname + pos, &slave, NULL);
-	dev->part[minor].de =
-	    devfs_register (dir, "disc", devfs_flags, dev->major, minor,
-			    S_IFBLK | S_IRUSR | S_IWUSR, dev->fops, NULL);
-	devfs_auto_unregister (dev->part[minor].de, slave);
-	if (!dev->de_arr)
-		devfs_auto_unregister (slave, dir);
-}
-#endif  /*  CONFIG_DEVFS_FS  */
-
-void devfs_register_partitions (struct gendisk *dev, int minor, int unregister)
-{
-#ifdef CONFIG_DEVFS_FS
+	struct gendisk *disk;
 	int part;
 
-	if (!unregister)
-		devfs_register_disc (dev, minor);
-	for (part = 1; part < dev->max_p; part++) {
-		if ( unregister || (dev->part[part + minor].nr_sects < 1) ) {
-			devfs_unregister (dev->part[part + minor].de);
-			dev->part[part + minor].de = NULL;
-			continue;
-		}
-		devfs_register_partition (dev, minor, part);
+	disk = get_gendisk(dev, &part);
+	if (disk) {
+		buffer = disk_name(disk, part, buffer);
+		put_disk(disk);
+	} else {
+		snprintf(buffer, BDEVNAME_SIZE, "unknown-block(%u,%u)",
+				MAJOR(dev), MINOR(dev));
 	}
-	if (unregister) {
-		devfs_unregister (dev->part[minor].de);
-		dev->part[minor].de = NULL;
-		devfs_dealloc_unique_number (&disc_numspace,
-					     dev->part[minor].number);
+
+	return buffer;
+}
+
+static struct parsed_partitions *
+check_partition(struct gendisk *hd, struct block_device *bdev)
+{
+	struct parsed_partitions *state;
+	int i, res;
+
+	state = kmalloc(sizeof(struct parsed_partitions), GFP_KERNEL);
+	if (!state)
+		return NULL;
+
+#ifdef CONFIG_DEVFS_FS
+	if (hd->devfs_name[0] != '\0') {
+		printk(KERN_INFO " /dev/%s:", hd->devfs_name);
+		sprintf(state->name, "p");
 	}
-#endif  /*  CONFIG_DEVFS_FS  */
+#endif
+	else {
+		disk_name(hd, 0, state->name);
+		printk(KERN_INFO " %s:", state->name);
+		if (isdigit(state->name[strlen(state->name)-1]))
+			sprintf(state->name, "p");
+	}
+	state->limit = hd->minors;
+	i = res = 0;
+	while (!res && check_part[i]) {
+		memset(&state->parts, 0, sizeof(state->parts));
+		res = check_part[i++](state, bdev);
+	}
+	if (res > 0)
+		return state;
+	if (!res)
+		printk(" unknown partition table\n");
+	else if (warn_no_part)
+		printk(" unable to read partition table\n");
+	kfree(state);
+	return NULL;
 }
 
 /*
- * This function will re-read the partition tables for a given device,
- * and set things back up again.  There are some important caveats,
- * however.  You must ensure that no one is using the device, and no one
- * can start using the device while this function is being executed.
- *
- * Much of the cleanup from the old partition tables should have already been
- * done
+ * sysfs bindings for partitions
  */
 
-void register_disk(struct gendisk *gdev, kdev_t dev, unsigned minors,
-	struct block_device_operations *ops, long size)
+struct part_attribute {
+	struct attribute attr;
+	ssize_t (*show)(struct hd_struct *,char *);
+};
+
+static ssize_t 
+part_attr_show(struct kobject * kobj, struct attribute * attr, char * page)
 {
-	if (!gdev)
-		return;
-	grok_partitions(gdev, MINOR(dev)>>gdev->minor_shift, minors, size);
+	struct hd_struct * p = container_of(kobj,struct hd_struct,kobj);
+	struct part_attribute * part_attr = container_of(attr,struct part_attribute,attr);
+	ssize_t ret = 0;
+	if (part_attr->show)
+		ret = part_attr->show(p,page);
+	return ret;
 }
 
-void grok_partitions(struct gendisk *dev, int drive, unsigned minors, long size)
+static struct sysfs_ops part_sysfs_ops = {
+	.show	=	part_attr_show,
+};
+
+static ssize_t part_dev_read(struct hd_struct * p, char *page)
 {
-	int i;
-	int first_minor	= drive << dev->minor_shift;
-	int end_minor	= first_minor + dev->max_p;
+	struct gendisk *disk = container_of(p->kobj.parent,struct gendisk,kobj);
+	int part = p->partno;
+	dev_t base = MKDEV(disk->major, disk->first_minor); 
+	return sprintf(page, "%04x\n", (unsigned)(base + part));
+}
+static ssize_t part_start_read(struct hd_struct * p, char *page)
+{
+	return sprintf(page, "%llu\n",(unsigned long long)p->start_sect);
+}
+static ssize_t part_size_read(struct hd_struct * p, char *page)
+{
+	return sprintf(page, "%llu\n",(unsigned long long)p->nr_sects);
+}
+static ssize_t part_stat_read(struct hd_struct * p, char *page)
+{
+	return sprintf(page, "%8u %8llu %8u %8llu\n",
+		       p->reads, (unsigned long long)p->read_sectors,
+		       p->writes, (unsigned long long)p->write_sectors);
+}
+static struct part_attribute part_attr_dev = {
+	.attr = {.name = "dev", .mode = S_IRUGO },
+	.show	= part_dev_read
+};
+static struct part_attribute part_attr_start = {
+	.attr = {.name = "start", .mode = S_IRUGO },
+	.show	= part_start_read
+};
+static struct part_attribute part_attr_size = {
+	.attr = {.name = "size", .mode = S_IRUGO },
+	.show	= part_size_read
+};
+static struct part_attribute part_attr_stat = {
+	.attr = {.name = "stat", .mode = S_IRUGO },
+	.show	= part_stat_read
+};
 
-	if(!dev->sizes)
-		blk_size[dev->major] = NULL;
+static struct attribute * default_attrs[] = {
+	&part_attr_dev.attr,
+	&part_attr_start.attr,
+	&part_attr_size.attr,
+	&part_attr_stat.attr,
+	NULL,
+};
 
-	dev->part[first_minor].nr_sects = size;
-	/* No such device or no minors to use for partitions */
-	if (!size || minors == 1)
+extern struct subsystem block_subsys;
+
+struct kobj_type ktype_part = {
+	.default_attrs	= default_attrs,
+	.sysfs_ops	= &part_sysfs_ops,
+};
+
+void delete_partition(struct gendisk *disk, int part)
+{
+	struct hd_struct *p = disk->part[part-1];
+	if (!p)
 		return;
+	if (!p->nr_sects)
+		return;
+	p->start_sect = 0;
+	p->nr_sects = 0;
+	p->reads = p->writes = p->read_sectors = p->write_sectors = 0;
+	devfs_remove("%s/part%d", disk->devfs_name, part);
+	kobject_unregister(&p->kobj);
+	disk->part[part-1] = NULL;
+	kfree(p);
+}
 
-	if (dev->sizes) {
-		dev->sizes[first_minor] = size >> (BLOCK_SIZE_BITS - 9);
-		for (i = first_minor + 1; i < end_minor; i++)
-			dev->sizes[i] = 0;
-	}
-	blk_size[dev->major] = dev->sizes;
-	check_partition(dev, MKDEV(dev->major, first_minor), 1 + first_minor);
+void add_partition(struct gendisk *disk, int part, sector_t start, sector_t len)
+{
+	struct hd_struct *p;
 
- 	/*
- 	 * We need to set the sizes array before we will be able to access
- 	 * any of the partitions on this device.
- 	 */
-	if (dev->sizes != NULL) {	/* optional safeguard in ll_rw_blk.c */
-		for (i = first_minor; i < end_minor; i++)
-			dev->sizes[i] = dev->part[i].nr_sects >> (BLOCK_SIZE_BITS - 9);
+	p = kmalloc(sizeof(*p), GFP_KERNEL);
+	if (!p)
+		return;
+	
+	memset(p, 0, sizeof(*p));
+	p->start_sect = start;
+	p->nr_sects = len;
+	p->partno = part;
+	disk->part[part-1] = p;
+
+	devfs_mk_bdev(MKDEV(disk->major, disk->first_minor + part),
+			S_IFBLK|S_IRUSR|S_IWUSR,
+			"%s/part%d", disk->devfs_name, part);
+
+	snprintf(p->kobj.name,KOBJ_NAME_LEN,"%s%d",disk->kobj.name,part);
+	p->kobj.parent = &disk->kobj;
+	p->kobj.ktype = &ktype_part;
+	kobject_register(&p->kobj);
+}
+
+static void disk_sysfs_symlinks(struct gendisk *disk)
+{
+	struct device *target = get_device(disk->driverfs_dev);
+	if (target) {
+		sysfs_create_link(&disk->kobj,&target->kobj,"device");
+		sysfs_create_link(&target->kobj,&disk->kobj,"block");
 	}
 }
 
-unsigned char *read_dev_sector(struct block_device *bdev, unsigned long n, Sector *p)
+/* Not exported, helper to add_disk(). */
+void register_disk(struct gendisk *disk)
+{
+	struct parsed_partitions *state;
+	struct block_device *bdev;
+	char *s;
+	int j;
+	int err;
+
+	strlcpy(disk->kobj.name,disk->disk_name,KOBJ_NAME_LEN);
+	/* ewww... some of these buggers have / in name... */
+	s = strchr(disk->kobj.name, '/');
+	if (s)
+		*s = '!';
+	if ((err = kobject_add(&disk->kobj)))
+		return;
+	disk_sysfs_symlinks(disk);
+
+	/* No minors to use for partitions */
+	if (disk->minors == 1) {
+		if (disk->devfs_name[0] != '\0')
+			devfs_add_disk(disk);
+		return;
+	}
+
+	/* No such device (e.g., media were just removed) */
+	if (!get_capacity(disk))
+		return;
+
+	bdev = bdget_disk(disk, 0);
+	if (blkdev_get(bdev, FMODE_READ, 0, BDEV_RAW) < 0)
+		return;
+	state = check_partition(disk, bdev);
+	devfs_add_partitioned(disk);
+	if (state) {
+		for (j = 1; j < state->limit; j++) {
+			sector_t size = state->parts[j].size;
+			sector_t from = state->parts[j].from;
+			if (!size)
+				continue;
+			add_partition(disk, j, from, size);
+#ifdef CONFIG_BLK_DEV_MD
+			if (!state->parts[j].flags)
+				continue;
+			md_autodetect_dev(bdev->bd_dev+j);
+#endif
+		}
+		kfree(state);
+	}
+	blkdev_put(bdev, BDEV_RAW);
+}
+
+int rescan_partitions(struct gendisk *disk, struct block_device *bdev)
+{
+	struct parsed_partitions *state;
+	int p, res;
+
+	if (bdev->bd_part_count)
+		return -EBUSY;
+	res = invalidate_partition(disk, 0);
+	if (res)
+		return res;
+	bdev->bd_invalidated = 0;
+	for (p = 1; p < disk->minors; p++)
+		delete_partition(disk, p);
+	if (disk->fops->revalidate_disk)
+		disk->fops->revalidate_disk(disk);
+	if (!get_capacity(disk) || !(state = check_partition(disk, bdev)))
+		return res;
+	for (p = 1; p < state->limit; p++) {
+		sector_t size = state->parts[p].size;
+		sector_t from = state->parts[p].from;
+		if (!size)
+			continue;
+		add_partition(disk, p, from, size);
+#ifdef CONFIG_BLK_DEV_MD
+		if (state->parts[p].flags)
+			md_autodetect_dev(bdev->bd_dev+p);
+#endif
+	}
+	kfree(state);
+	return res;
+}
+
+unsigned char *read_dev_sector(struct block_device *bdev, sector_t n, Sector *p)
 {
 	struct address_space *mapping = bdev->bd_inode->i_mapping;
-	int sect = PAGE_CACHE_SIZE / 512;
 	struct page *page;
 
-	page = read_cache_page(mapping, n/sect,
+	page = read_cache_page(mapping, (pgoff_t)(n >> (PAGE_CACHE_SHIFT-9)),
 			(filler_t *)mapping->a_ops->readpage, NULL);
 	if (!IS_ERR(page)) {
-		wait_on_page(page);
-		if (!Page_Uptodate(page))
+		wait_on_page_locked(page);
+		if (!PageUptodate(page))
 			goto fail;
 		if (PageError(page))
 			goto fail;
 		p->v = page;
-		return (unsigned char *)page_address(page) + 512 * (n % sect);
+		return (unsigned char *)page_address(page) +  ((n & ((1 << (PAGE_CACHE_SHIFT - 9)) - 1)) << 9);
 fail:
 		page_cache_release(page);
 	}
 	p->v = NULL;
 	return NULL;
+}
+
+void del_gendisk(struct gendisk *disk)
+{
+	int p;
+
+	/* invalidate stuff */
+	for (p = disk->minors - 1; p > 0; p--) {
+		invalidate_partition(disk, p);
+		delete_partition(disk, p);
+	}
+	invalidate_partition(disk, 0);
+	disk->capacity = 0;
+	disk->flags &= ~GENHD_FL_UP;
+	unlink_gendisk(disk);
+	disk_stat_set_all(disk, 0);
+	disk->stamp = disk->stamp_idle = 0;
+
+	devfs_remove_disk(disk);
+
+	if (disk->driverfs_dev) {
+		sysfs_remove_link(&disk->kobj, "device");
+		sysfs_remove_link(&disk->driverfs_dev->kobj, "block");
+		put_device(disk->driverfs_dev);
+	}
+	kobject_del(&disk->kobj);
 }

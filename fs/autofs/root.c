@@ -13,12 +13,12 @@
 #include <linux/errno.h>
 #include <linux/stat.h>
 #include <linux/param.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/smp_lock.h>
 #include "autofs_i.h"
 
 static int autofs_root_readdir(struct file *,void *,filldir_t);
-static struct dentry *autofs_root_lookup(struct inode *,struct dentry *);
+static struct dentry *autofs_root_lookup(struct inode *,struct dentry *, struct nameidata *);
 static int autofs_root_symlink(struct inode *,struct dentry *,const char *);
 static int autofs_root_unlink(struct inode *,struct dentry *);
 static int autofs_root_rmdir(struct inode *,struct dentry *);
@@ -26,17 +26,17 @@ static int autofs_root_mkdir(struct inode *,struct dentry *,int);
 static int autofs_root_ioctl(struct inode *, struct file *,unsigned int,unsigned long);
 
 struct file_operations autofs_root_operations = {
-	read:		generic_read_dir,
-	readdir:	autofs_root_readdir,
-	ioctl:		autofs_root_ioctl,
+	.read		= generic_read_dir,
+	.readdir	= autofs_root_readdir,
+	.ioctl		= autofs_root_ioctl,
 };
 
 struct inode_operations autofs_root_inode_operations = {
-        lookup:		autofs_root_lookup,
-        unlink:		autofs_root_unlink,
-        symlink:	autofs_root_symlink,
-        mkdir:		autofs_root_mkdir,
-        rmdir:		autofs_root_rmdir,
+        .lookup		= autofs_root_lookup,
+        .unlink		= autofs_root_unlink,
+        .symlink	= autofs_root_symlink,
+        .mkdir		= autofs_root_mkdir,
+        .rmdir		= autofs_root_rmdir,
 };
 
 static int autofs_root_readdir(struct file *filp, void *dirent, filldir_t filldir)
@@ -47,6 +47,8 @@ static int autofs_root_readdir(struct file *filp, void *dirent, filldir_t filldi
 	struct inode * inode = filp->f_dentry->d_inode;
 	off_t onr, nr;
 
+	lock_kernel();
+
 	sbi = autofs_sbi(inode->i_sb);
 	dirhash = &sbi->dirhash;
 	nr = filp->f_pos;
@@ -55,25 +57,27 @@ static int autofs_root_readdir(struct file *filp, void *dirent, filldir_t filldi
 	{
 	case 0:
 		if (filldir(dirent, ".", 1, nr, inode->i_ino, DT_DIR) < 0)
-			return 0;
+			goto out;
 		filp->f_pos = ++nr;
 		/* fall through */
 	case 1:
 		if (filldir(dirent, "..", 2, nr, inode->i_ino, DT_DIR) < 0)
-			return 0;
+			goto out;
 		filp->f_pos = ++nr;
 		/* fall through */
 	default:
 		while ( onr = nr, ent = autofs_hash_enum(dirhash,&nr,ent) ) {
 			if ( !ent->dentry || d_mountpoint(ent->dentry) ) {
 				if (filldir(dirent,ent->name,ent->len,onr,ent->ino,DT_UNKNOWN) < 0)
-					return 0;
+					goto out;
 				filp->f_pos = nr;
 			}
 		}
 		break;
 	}
 
+out:
+	unlock_kernel();
 	return 0;
 }
 
@@ -140,7 +144,7 @@ static int try_to_fill_dentry(struct dentry *dentry, struct super_block *sb, str
  * yet completely filled in, and revalidate has to delay such
  * lookups..
  */
-static int autofs_revalidate(struct dentry * dentry, int flags)
+static int autofs_revalidate(struct dentry * dentry, struct nameidata *nd)
 {
 	struct inode * dir;
 	struct autofs_sb_info *sbi;
@@ -188,19 +192,22 @@ static int autofs_revalidate(struct dentry * dentry, int flags)
 }
 
 static struct dentry_operations autofs_dentry_operations = {
-	d_revalidate:	autofs_revalidate,
+	.d_revalidate	= autofs_revalidate,
 };
 
-static struct dentry *autofs_root_lookup(struct inode *dir, struct dentry *dentry)
+static struct dentry *autofs_root_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
 	struct autofs_sb_info *sbi;
 	int oz_mode;
 
 	DPRINTK(("autofs_root_lookup: name = "));
+	lock_kernel();
 	autofs_say(dentry->d_name.name,dentry->d_name.len);
 
-	if (dentry->d_name.len > NAME_MAX)
+	if (dentry->d_name.len > NAME_MAX) {
+		unlock_kernel();
 		return ERR_PTR(-ENAMETOOLONG);/* File name too long to exist */
+	}
 
 	sbi = autofs_sbi(dir->i_sb);
 
@@ -223,7 +230,7 @@ static struct dentry *autofs_root_lookup(struct inode *dir, struct dentry *dentr
 	d_add(dentry, NULL);
 
 	up(&dir->i_sem);
-	autofs_revalidate(dentry, 0);
+	autofs_revalidate(dentry, nd);
 	down(&dir->i_sem);
 
 	/*
@@ -231,9 +238,12 @@ static struct dentry *autofs_root_lookup(struct inode *dir, struct dentry *dentr
 	 * a signal. If so we can force a restart..
 	 */
 	if (dentry->d_flags & DCACHE_AUTOFS_PENDING) {
-		if (signal_pending(current))
+		if (signal_pending(current)) {
+			unlock_kernel();
 			return ERR_PTR(-ERESTARTNOINTR);
+		}
 	}
+	unlock_kernel();
 
 	/*
 	 * If this dentry is unhashed, then we shouldn't honour this
@@ -259,15 +269,22 @@ static int autofs_root_symlink(struct inode *dir, struct dentry *dentry, const c
 	DPRINTK(("autofs_root_symlink: %s <- ", symname));
 	autofs_say(dentry->d_name.name,dentry->d_name.len);
 
-	if ( !autofs_oz_mode(sbi) )
+	lock_kernel();
+	if ( !autofs_oz_mode(sbi) ) {
+		unlock_kernel();
 		return -EACCES;
+	}
 
-	if ( autofs_hash_lookup(dh, &dentry->d_name) )
+	if ( autofs_hash_lookup(dh, &dentry->d_name) ) {
+		unlock_kernel();
 		return -EEXIST;
+	}
 
 	n = find_first_zero_bit(sbi->symlink_bitmap,AUTOFS_MAX_SYMLINKS);
-	if ( n >= AUTOFS_MAX_SYMLINKS )
+	if ( n >= AUTOFS_MAX_SYMLINKS ) {
+		unlock_kernel();
 		return -ENOSPC;
+	}
 
 	set_bit(n,sbi->symlink_bitmap);
 	sl = &sbi->symlink[n];
@@ -275,6 +292,7 @@ static int autofs_root_symlink(struct inode *dir, struct dentry *dentry, const c
 	sl->data = kmalloc(slsize = sl->len+1, GFP_KERNEL);
 	if ( !sl->data ) {
 		clear_bit(n,sbi->symlink_bitmap);
+		unlock_kernel();
 		return -ENOSPC;
 	}
 
@@ -282,6 +300,7 @@ static int autofs_root_symlink(struct inode *dir, struct dentry *dentry, const c
 	if ( !ent ) {
 		kfree(sl->data);
 		clear_bit(n,sbi->symlink_bitmap);
+		unlock_kernel();
 		return -ENOSPC;
 	}
 
@@ -290,11 +309,12 @@ static int autofs_root_symlink(struct inode *dir, struct dentry *dentry, const c
 		kfree(sl->data);
 		kfree(ent);
 		clear_bit(n,sbi->symlink_bitmap);
+		unlock_kernel();
 		return -ENOSPC;
 	}
 
 	memcpy(sl->data,symname,slsize);
-	sl->mtime = CURRENT_TIME;
+	sl->mtime = get_seconds();
 
 	ent->ino = AUTOFS_FIRST_SYMLINK + n;
 	ent->hash = dentry->d_name.hash;
@@ -303,7 +323,7 @@ static int autofs_root_symlink(struct inode *dir, struct dentry *dentry, const c
 
 	autofs_hash_insert(dh,ent);
 	d_instantiate(dentry, iget(dir->i_sb,ent->ino));
-
+	unlock_kernel();
 	return 0;
 }
 
@@ -326,18 +346,27 @@ static int autofs_root_unlink(struct inode *dir, struct dentry *dentry)
 	unsigned int n;
 
 	/* This allows root to remove symlinks */
-	if ( !autofs_oz_mode(sbi) && !capable(CAP_SYS_ADMIN) )
+	lock_kernel();
+	if ( !autofs_oz_mode(sbi) && !capable(CAP_SYS_ADMIN) ) {
+		unlock_kernel();
 		return -EACCES;
+	}
 
 	ent = autofs_hash_lookup(dh, &dentry->d_name);
-	if ( !ent )
+	if ( !ent ) {
+		unlock_kernel();
 		return -ENOENT;
+	}
 
 	n = ent->ino - AUTOFS_FIRST_SYMLINK;
-	if ( n >= AUTOFS_MAX_SYMLINKS )
+	if ( n >= AUTOFS_MAX_SYMLINKS ) {
+		unlock_kernel();
 		return -EISDIR;	/* It's a directory, dummy */
-	if ( !test_bit(n,sbi->symlink_bitmap) )
+	}
+	if ( !test_bit(n,sbi->symlink_bitmap) ) {
+		unlock_kernel();
 		return -EINVAL;	/* Nonexistent symlink?  Shouldn't happen */
+	}
 	
 	dentry->d_time = (unsigned long)(struct autofs_dirhash *)NULL;
 	autofs_hash_delete(ent);
@@ -345,6 +374,7 @@ static int autofs_root_unlink(struct inode *dir, struct dentry *dentry)
 	kfree(sbi->symlink[n].data);
 	d_drop(dentry);
 	
+	unlock_kernel();
 	return 0;
 }
 
@@ -354,15 +384,22 @@ static int autofs_root_rmdir(struct inode *dir, struct dentry *dentry)
 	struct autofs_dirhash *dh = &sbi->dirhash;
 	struct autofs_dir_ent *ent;
 
-	if ( !autofs_oz_mode(sbi) )
+	lock_kernel();
+	if ( !autofs_oz_mode(sbi) ) {
+		unlock_kernel();
 		return -EACCES;
+	}
 
 	ent = autofs_hash_lookup(dh, &dentry->d_name);
-	if ( !ent )
+	if ( !ent ) {
+		unlock_kernel();
 		return -ENOENT;
+	}
 
-	if ( (unsigned int)ent->ino < AUTOFS_FIRST_DIR_INO )
+	if ( (unsigned int)ent->ino < AUTOFS_FIRST_DIR_INO ) {
+		unlock_kernel();
 		return -ENOTDIR; /* Not a directory */
+	}
 
 	if ( ent->dentry != dentry ) {
 		printk("autofs_rmdir: odentry != dentry for entry %s\n", dentry->d_name.name);
@@ -372,6 +409,7 @@ static int autofs_root_rmdir(struct inode *dir, struct dentry *dentry)
 	autofs_hash_delete(ent);
 	dir->i_nlink--;
 	d_drop(dentry);
+	unlock_kernel();
 
 	return 0;
 }
@@ -383,26 +421,35 @@ static int autofs_root_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 	struct autofs_dir_ent *ent;
 	ino_t ino;
 
-	if ( !autofs_oz_mode(sbi) )
+	lock_kernel();
+	if ( !autofs_oz_mode(sbi) ) {
+		unlock_kernel();
 		return -EACCES;
+	}
 
 	ent = autofs_hash_lookup(dh, &dentry->d_name);
-	if ( ent )
+	if ( ent ) {
+		unlock_kernel();
 		return -EEXIST;
+	}
 
 	if ( sbi->next_dir_ino < AUTOFS_FIRST_DIR_INO ) {
 		printk("autofs: Out of inode numbers -- what the heck did you do??\n");
+		unlock_kernel();
 		return -ENOSPC;
 	}
 	ino = sbi->next_dir_ino++;
 
 	ent = kmalloc(sizeof(struct autofs_dir_ent), GFP_KERNEL);
-	if ( !ent )
+	if ( !ent ) {
+		unlock_kernel();
 		return -ENOSPC;
+	}
 
 	ent->name = kmalloc(dentry->d_name.len+1, GFP_KERNEL);
 	if ( !ent->name ) {
 		kfree(ent);
+		unlock_kernel();
 		return -ENOSPC;
 	}
 
@@ -414,6 +461,7 @@ static int autofs_root_mkdir(struct inode *dir, struct dentry *dentry, int mode)
 
 	dir->i_nlink++;
 	d_instantiate(dentry, iget(dir->i_sb,ino));
+	unlock_kernel();
 
 	return 0;
 }

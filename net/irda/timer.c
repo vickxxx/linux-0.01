@@ -11,7 +11,7 @@
  * 
  *     Copyright (c) 1997, 1999 Dag Brattli <dagb@cs.uit.no>, 
  *     All Rights Reserved.
- *     Copyright (c) 2000-2001 Jean Tourrilhes <jt@hpl.hp.com>
+ *     Copyright (c) 2000-2002 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -32,15 +32,15 @@
 #include <net/irda/irda.h>
 #include <net/irda/irtty.h>
 #include <net/irda/irlap.h>
-#include <net/irda/irlmp_event.h>
+#include <net/irda/irlmp.h>
 
 static void irlap_slot_timer_expired(void* data);
 static void irlap_query_timer_expired(void* data);
 static void irlap_final_timer_expired(void* data);
 static void irlap_wd_timer_expired(void* data);
 static void irlap_backoff_timer_expired(void* data);
-
 static void irlap_media_busy_expired(void* data); 
+
 /*
  * Function irda_start_timer (timer, timeout)
  *
@@ -50,19 +50,18 @@ static void irlap_media_busy_expired(void* data);
 void irda_start_timer(struct timer_list *ptimer, int timeout, void *data,
 		      TIMER_CALLBACK callback) 
 {
-	del_timer(ptimer);
- 
-	ptimer->data = (unsigned long) data;
-
 	/* 
 	 * For most architectures void * is the same as unsigned long, but
 	 * at least we try to use void * as long as possible. Since the 
 	 * timer functions use unsigned long, we cast the function here
 	 */
 	ptimer->function = (void (*)(unsigned long)) callback;
-	ptimer->expires = jiffies + timeout;
+	ptimer->data = (unsigned long) data;
 	
-	add_timer(ptimer);
+	/* Set new value for timer (update or add timer).
+	 * We use mod_timer() because it's more efficient and also
+	 * safer with respect to race conditions - Jean II */
+	mod_timer(ptimer, jiffies + timeout);
 }
 
 void irlap_start_slot_timer(struct irlap_cb *self, int timeout)
@@ -136,8 +135,7 @@ void irlmp_start_idle_timer(struct lap_cb *self, int timeout)
 void irlmp_stop_idle_timer(struct lap_cb *self) 
 {
 	/* If timer is activated, kill it! */
-	if(timer_pending(&self->idle_timer))
-		del_timer(&self->idle_timer);
+	del_timer(&self->idle_timer);
 }
 
 /*

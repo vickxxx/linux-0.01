@@ -4,8 +4,7 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1992 - 1997, 2000 Silicon Graphics, Inc.
- * Copyright (C) 2000 by Colin Ngam
+ * Copyright (C) 1992-1997,2000-2003 Silicon Graphics, Inc. All Rights Reserved.
  */
 #ifndef _ASM_SN_SN_XTALK_XBOW_H
 #define _ASM_SN_SN_XTALK_XBOW_H
@@ -14,10 +13,11 @@
  * xbow.h - header file for crossbow chip and xbow section of xbridge
  */
 
+#include <linux/config.h>
 #include <asm/sn/xtalk/xtalk.h>
 #include <asm/sn/xtalk/xwidget.h>
 #include <asm/sn/xtalk/xswitch.h>
-#ifdef LANGUAGE_C
+#ifndef __ASSEMBLY__
 #include <asm/sn/xtalk/xbow_info.h>
 #endif
 
@@ -42,11 +42,18 @@
 #define MAX_PORT_NUM	0x10	/* maximum port number + 1 */
 #define XBOW_WIDGET_ID	0	/* xbow is itself widget 0 */
 
+#define XBOW_HUBLINK_LOW  0xa
+#define XBOW_HUBLINK_HIGH 0xb
+
+#define XBOW_PEER_LINK(link) (link == XBOW_HUBLINK_LOW) ? \
+                                XBOW_HUBLINK_HIGH : XBOW_HUBLINK_LOW
+
+
 #define	XBOW_CREDIT	4
 
 #define MAX_XBOW_NAME 	16
 
-#if LANGUAGE_C
+#ifndef __ASSEMBLY__
 typedef uint32_t      xbowreg_t;
 
 #define XBOWCONST	(xbowreg_t)
@@ -236,7 +243,7 @@ typedef struct xbow_cfg_s {
 /* offset of arbitration register, given source widget id */
 #define XBOW_ARB_OFF(wid) 	(XBOW_ARB_IS_UPPER(wid) ? 0x1c : 0x24)
 
-#endif				/* LANGUAGE_C */
+#endif				/* __ASSEMBLY__ */
 
 #define	XBOW_WID_ID		WIDGET_ID
 #define	XBOW_WID_STAT		WIDGET_STATUS
@@ -384,6 +391,7 @@ typedef struct xbow_cfg_s {
 #define XXBOW_WIDGET_PART_NUM	0xd000		/* Xbridge */
 #define	XBOW_WIDGET_MFGR_NUM	0x0
 #define	XXBOW_WIDGET_MFGR_NUM	0x0
+#define PXBOW_WIDGET_PART_NUM   0xd100          /* PIC */
 
 #define	XBOW_REV_1_0		0x1	/* xbow rev 1.0 is "1" */
 #define	XBOW_REV_1_1		0x2	/* xbow rev 1.1 is "2" */
@@ -397,12 +405,20 @@ typedef struct xbow_cfg_s {
 /* XBOW_WID_ARB_RELOAD */
 #define	XBOW_WID_ARB_RELOAD_INT	0x3f	/* GBR reload interval */
 
+#define IS_XBRIDGE_XBOW(wid) \
+        (XWIDGET_PART_NUM(wid) == XXBOW_WIDGET_PART_NUM && \
+                        XWIDGET_MFG_NUM(wid) == XXBOW_WIDGET_MFGR_NUM)
 
-#define nasid_has_xbridge(nasid)	\
-	(XWIDGET_PART_NUM(XWIDGET_ID_READ(nasid, 0)) == XXBOW_WIDGET_PART_NUM)
+#define IS_PIC_XBOW(wid) \
+        (XWIDGET_PART_NUM(wid) == PXBOW_WIDGET_PART_NUM && \
+                        XWIDGET_MFG_NUM(wid) == XXBOW_WIDGET_MFGR_NUM)
+
+#define XBOW_WAR_ENABLED(pv, widid) ((1 << XWIDGET_REV_NUM(widid)) & pv)
+#define PV854827 (~0)     /* PIC: fake widget 0xf presence bit. permanent */
+#define PV863579 (1 << 1) /* PIC: PIO to PIC register */
 
 
-#ifdef _LANGUAGE_C
+#ifndef __ASSEMBLY__
 /*
  * XBOW Widget 0 Register formats.
  * Format for many of these registers are similar to the standard
@@ -891,5 +907,5 @@ struct macrofield_s     xbow_macrofield[] =
 
 #endif				/* MACROFIELD_LINE */
 
-#endif				/* _LANGUAGE_C */
+#endif				/* __ASSEMBLY__ */
 #endif                          /* _ASM_SN_SN_XTALK_XBOW_H */

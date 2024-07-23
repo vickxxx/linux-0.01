@@ -19,24 +19,22 @@ MODULE_LICENSE("GPL");
 
 static int match(const struct sk_buff *skb, const struct net_device *in,
 		 const struct net_device *out, const void *matchinfo,
-		 int offset, const void *hdr, u_int16_t datalen,
-		 int *hotdrop)
+		 int offset, int *hotdrop)
 {
 	const struct ipt_ttl_info *info = matchinfo;
-	const struct iphdr *iph = skb->nh.iph;
 
 	switch (info->mode) {
 		case IPT_TTL_EQ:
-			return (iph->ttl == info->ttl);
+			return (skb->nh.iph->ttl == info->ttl);
 			break;
 		case IPT_TTL_NE:
-			return (!(iph->ttl == info->ttl));
+			return (!(skb->nh.iph->ttl == info->ttl));
 			break;
 		case IPT_TTL_LT:
-			return (iph->ttl < info->ttl);
+			return (skb->nh.iph->ttl < info->ttl);
 			break;
 		case IPT_TTL_GT:
-			return (iph->ttl > info->ttl);
+			return (skb->nh.iph->ttl > info->ttl);
 			break;
 		default:
 			printk(KERN_WARNING "ipt_ttl: unknown mode %d\n", 
@@ -57,8 +55,12 @@ static int checkentry(const char *tablename, const struct ipt_ip *ip,
 	return 1;
 }
 
-static struct ipt_match ttl_match = { { NULL, NULL }, "ttl", &match,
-		&checkentry, NULL, THIS_MODULE };
+static struct ipt_match ttl_match = {
+	.name		= "ttl",
+	.match		= &match,
+	.checkentry	= &checkentry,
+	.me		= THIS_MODULE,
+};
 
 static int __init init(void)
 {

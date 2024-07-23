@@ -7,7 +7,7 @@
  *  Extended MS-DOS directory handling functions
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/string.h>
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
@@ -17,6 +17,7 @@
 #include <linux/umsdos_fs.h>
 #include <linux/slab.h>
 #include <linux/pagemap.h>
+#include <linux/smp_lock.h>
 
 #define UMSDOS_SPECIAL_DIRFPOS	3
 extern struct dentry *saved_root;
@@ -29,7 +30,7 @@ extern struct inode *pseudo_root;
  */
 
 /* nothing for now ... */
-static int umsdos_dentry_validate(struct dentry *dentry, int flags)
+static int umsdos_dentry_validate(struct dentry *dentry, struct nameidata *nd)
 {
 	return 1;
 }
@@ -47,8 +48,8 @@ static int umsdos_dentry_dput(struct dentry *dentry)
 
 struct dentry_operations umsdos_dentry_operations =
 {
-	d_revalidate:	umsdos_dentry_validate,
-	d_delete:	umsdos_dentry_dput,
+	.d_revalidate	= umsdos_dentry_validate,
+	.d_delete	= umsdos_dentry_dput,
 };
 
 struct UMSDOS_DIR_ONCE {
@@ -204,7 +205,7 @@ filp->f_dentry->d_name.name, entry.name);
 		if (!inode)
 			goto remove_name;
 #ifdef UMSDOS_DEBUG_VERBOSE
-if (inode->u.umsdos_i.i_is_hlink)
+if (UMSDOS_I(inode)->i_is_hlink)
 printk("umsdos_readdir_x: %s/%s already resolved, ino=%ld\n",
 dret->d_parent->d_name.name, dret->d_name.name, inode->i_ino);
 #endif
@@ -214,7 +215,7 @@ dret->d_parent->d_name.name, info.fake.fname, dret->d_inode->i_ino,
 entry.flags));
 		/* check whether to resolve a hard-link */
 		if ((entry.flags & UMSDOS_HLINK) &&
-		    !inode->u.umsdos_i.i_is_hlink) {
+		    !UMSDOS_I(inode)->i_is_hlink) {
 			dret = umsdos_solve_hlink (dret);
 			ret = PTR_ERR(dret);
 			if (IS_ERR(dret))
@@ -302,6 +303,8 @@ static int UMSDOS_readdir (struct file *filp, void *dirbuf, filldir_t filldir)
 	int ret = 0, count = 0;
 	struct UMSDOS_DIR_ONCE bufk;
 
+	lock_kernel();
+
 	bufk.dirbuf = dirbuf;
 	bufk.filldir = filldir;
 	bufk.stop = 0;
@@ -317,6 +320,7 @@ static int UMSDOS_readdir (struct file *filp, void *dirbuf, filldir_t filldir)
 			break;
 		count += bufk.count;
 	}
+	unlock_kernel();
 	Printk (("UMSDOS_readdir out %d count %d pos %Ld\n", 
 		ret, count, filp->f_pos));
 	return count ? : ret;
@@ -361,9 +365,9 @@ void umsdos_lookup_patch_new(struct dentry *dentry, struct umsdos_info *info)
 	/*
 	 * This part of the initialization depends only on i_patched.
 	 */
-	if (inode->u.umsdos_i.i_patched)
+	if (UMSDOS_I(inode)->i_patched)
 		goto out;
-	inode->u.umsdos_i.i_patched = 1;
+	UMSDOS_I(inode)->i_patched = 1;
 	if (S_ISREG (entry->mode))
 		entry->mtime = inode->i_mtime;
 	inode->i_mode = entry->mode;
@@ -498,7 +502,7 @@ dret->d_parent->d_name.name, dret->d_name.name, dret->d_inode->i_ino);
 
 	/* Check for a hard link */
 	if ((info.entry.flags & UMSDOS_HLINK) &&
-	    !inode->u.umsdos_i.i_is_hlink) {
+	    !UMSDOS_I(inode)->i_is_hlink) {
 		dret = umsdos_solve_hlink (dret);
 		ret = PTR_ERR(dret);
 		if (IS_ERR(dret))
@@ -560,7 +564,7 @@ out_remove:
  * Called by VFS; should fill dentry->d_inode via d_add.
  */
 
-struct dentry *UMSDOS_lookup (struct inode *dir, struct dentry *dentry)
+struct dentry *UMSDOS_lookup (struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
 	struct dentry *ret;
 
@@ -692,8 +696,8 @@ struct dentry *umsdos_solve_hlink (struct dentry *hlink)
 	dentry_dst=(struct dentry *)page;
 	if (IS_ERR(page))
 		goto out;
-	wait_on_page(page);
-	if (!Page_Uptodate(page))
+	wait_on_page_locked(page);
+	if (!PageUptodate(page))
 		goto async_fail;
 
 	dentry_dst = ERR_PTR(-ENOMEM);
@@ -756,7 +760,7 @@ dir->d_parent->d_name.name, dir->d_name.name, start, real);
 	if (!IS_ERR(dentry_dst)) {
 		struct inode *inode = dentry_dst->d_inode;
 		if (inode) {
-			inode->u.umsdos_i.i_is_hlink = 1;
+			UMSDOS_I(inode)->i_is_hlink = 1;
 #ifdef UMSDOS_DEBUG_VERBOSE
 printk ("umsdos_solve_hlink: resolved link %s/%s, ino=%ld\n",
 dentry_dst->d_parent->d_name.name, dentry_dst->d_name.name, inode->i_ino);
@@ -786,21 +790,21 @@ out_release:
 
 struct file_operations umsdos_dir_operations =
 {
-	read:		generic_read_dir,
-	readdir:	UMSDOS_readdir,
-	ioctl:		UMSDOS_ioctl_dir,
+	.read		= generic_read_dir,
+	.readdir	= UMSDOS_readdir,
+	.ioctl		= UMSDOS_ioctl_dir,
 };
 
 struct inode_operations umsdos_dir_inode_operations =
 {
-	create:		UMSDOS_create,
-	lookup:		UMSDOS_lookup,
-	link:		UMSDOS_link,
-	unlink:		UMSDOS_unlink,
-	symlink:	UMSDOS_symlink,
-	mkdir:		UMSDOS_mkdir,
-	rmdir:		UMSDOS_rmdir,
-	mknod:		UMSDOS_mknod,
-	rename:		UMSDOS_rename,
-	setattr:	UMSDOS_notify_change,
+	.create		= UMSDOS_create,
+	.lookup		= UMSDOS_lookup,
+	.link		= UMSDOS_link,
+	.unlink		= UMSDOS_unlink,
+	.symlink	= UMSDOS_symlink,
+	.mkdir		= UMSDOS_mkdir,
+	.rmdir		= UMSDOS_rmdir,
+	.mknod		= UMSDOS_mknod,
+	.rename		= UMSDOS_rename,
+	.setattr	= UMSDOS_notify_change,
 };

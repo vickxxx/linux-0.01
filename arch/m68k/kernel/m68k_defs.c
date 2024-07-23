@@ -14,7 +14,7 @@
 #include <asm/bootinfo.h>
 #include <asm/irq.h>
 #include <asm/amigahw.h>
-#include <video/font.h>
+#include <linux/font.h>
 
 #define DEFINE(sym, val) \
 	asm volatile("\n#define " #sym " %c0" : : "i" (val))
@@ -25,8 +25,11 @@ int main(void)
 	DEFINE(TASK_STATE, offsetof(struct task_struct, state));
 	DEFINE(TASK_FLAGS, offsetof(struct task_struct, flags));
 	DEFINE(TASK_PTRACE, offsetof(struct task_struct, ptrace));
-	DEFINE(TASK_SIGPENDING, offsetof(struct task_struct, sigpending));
-	DEFINE(TASK_NEEDRESCHED, offsetof(struct task_struct, need_resched));
+	DEFINE(TASK_WORK, offsetof(struct task_struct, thread.work));
+	DEFINE(TASK_NEEDRESCHED, offsetof(struct task_struct, thread.work.need_resched));
+	DEFINE(TASK_SYSCALL_TRACE, offsetof(struct task_struct, thread.work.syscall_trace));
+	DEFINE(TASK_SIGPENDING, offsetof(struct task_struct, thread.work.sigpending));
+	DEFINE(TASK_NOTIFY_RESUME, offsetof(struct task_struct, thread.work.notify_resume));
 	DEFINE(TASK_THREAD, offsetof(struct task_struct, thread));
 	DEFINE(TASK_MM, offsetof(struct task_struct, mm));
 	DEFINE(TASK_ACTIVE_MM, offsetof(struct task_struct, active_mm));
@@ -66,18 +69,22 @@ int main(void)
 	/* offsets into the kernel_stat struct */
 	DEFINE(STAT_IRQ, offsetof(struct kernel_stat, irqs));
 
+	/* offsets into the irq_cpustat_t struct */
+	DEFINE(CPUSTAT_SOFTIRQ_PENDING, offsetof(irq_cpustat_t, __softirq_pending));
+	DEFINE(CPUSTAT_SYSCALL_COUNT, offsetof(irq_cpustat_t, __syscall_count));
+
 	/* offsets into the bi_record struct */
 	DEFINE(BIR_TAG, offsetof(struct bi_record, tag));
 	DEFINE(BIR_SIZE, offsetof(struct bi_record, size));
 	DEFINE(BIR_DATA, offsetof(struct bi_record, data));
 
-	/* offsets into fbcon_font_desc (video/font.h) */
-	DEFINE(FBCON_FONT_DESC_IDX, offsetof(struct fbcon_font_desc, idx));
-	DEFINE(FBCON_FONT_DESC_NAME, offsetof(struct fbcon_font_desc, name));
-	DEFINE(FBCON_FONT_DESC_WIDTH, offsetof(struct fbcon_font_desc, width));
-	DEFINE(FBCON_FONT_DESC_HEIGHT, offsetof(struct fbcon_font_desc, height));
-	DEFINE(FBCON_FONT_DESC_DATA, offsetof(struct fbcon_font_desc, data));
-	DEFINE(FBCON_FONT_DESC_PREF, offsetof(struct fbcon_font_desc, pref));
+	/* offsets into font_desc (drivers/video/console/font.h) */
+	DEFINE(FONT_DESC_IDX, offsetof(struct font_desc, idx));
+	DEFINE(FONT_DESC_NAME, offsetof(struct font_desc, name));
+	DEFINE(FONT_DESC_WIDTH, offsetof(struct font_desc, width));
+	DEFINE(FONT_DESC_HEIGHT, offsetof(struct font_desc, height));
+	DEFINE(FONT_DESC_DATA, offsetof(struct font_desc, data));
+	DEFINE(FONT_DESC_PREF, offsetof(struct font_desc, pref));
 
 	/* signal defines */
 	DEFINE(SIGSEGV, SIGSEGV);

@@ -44,8 +44,6 @@
 #include <linux/ppp_channel.h>
 #include <linux/atmppp.h>
 
-#include "common.h"
-
 #if 0
 #define DPRINTK(format, args...) \
 	printk(KERN_DEBUG "pppoatm: " format, ##args)
@@ -233,7 +231,7 @@ static int pppoatm_send(struct ppp_channel *chan, struct sk_buff *skb)
 		kfree_skb(skb);
 		return 1;
 	}
-	atomic_add(skb->truesize, &ATM_SKB(skb)->vcc->sk->wmem_alloc);
+	atomic_add(skb->truesize, &ATM_SKB(skb)->vcc->sk->sk_wmem_alloc);
 	ATM_SKB(skb)->atm_options = ATM_SKB(skb)->vcc->atm_options;
 	DPRINTK("(unit %d): atm_skb(%p)->vcc(%p)->dev(%p)\n",
 	    pvcc->chan.unit, skb, ATM_SKB(skb)->vcc,
@@ -267,8 +265,8 @@ static int pppoatm_devppp_ioctl(struct ppp_channel *chan, unsigned int cmd,
 }
 
 static /*const*/ struct ppp_channel_ops pppoatm_ops = {
-	start_xmit: pppoatm_send,
-	ioctl: pppoatm_devppp_ioctl,
+	.start_xmit = pppoatm_send,
+	.ioctl = pppoatm_devppp_ioctl,
 };
 
 static int pppoatm_assign_vcc(struct atm_vcc *atmvcc, unsigned long arg)
@@ -346,15 +344,17 @@ static int pppoatm_ioctl(struct atm_vcc *atmvcc, unsigned int cmd,
 /* the following avoids some spurious warnings from the compiler */
 #define UNUSED __attribute__((unused))
 
+extern int (*pppoatm_ioctl_hook)(struct atm_vcc *, unsigned int, unsigned long);
+
 static int __init UNUSED pppoatm_init(void)
 {
-	pppoatm_ioctl_set(pppoatm_ioctl);
+	pppoatm_ioctl_hook = pppoatm_ioctl;
 	return 0;
 }
 
 static void __exit UNUSED pppoatm_exit(void)
 {
-	pppoatm_ioctl_set(NULL);
+	pppoatm_ioctl_hook = NULL;
 }
 
 module_init(pppoatm_init);

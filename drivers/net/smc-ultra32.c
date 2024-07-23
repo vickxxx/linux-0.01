@@ -48,16 +48,16 @@ static const char *version = "smc-ultra32.c: 06/97 v1.00\n";
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
 
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
 #include "8390.h"
 
 int ultra32_probe(struct net_device *dev);
@@ -231,8 +231,8 @@ static int __init ultra32_probe1(struct net_device *dev, int ioaddr)
 	/* All Ultra32 cards have 32KB memory with an 8KB window. */
 	ei_status.stop_page = 128;
 
-	dev->rmem_start = dev->mem_start + TX_PAGES*256;
-	dev->mem_end = dev->rmem_end = dev->mem_start + 0x1fff;
+	ei_status.rmem_start = dev->mem_start + TX_PAGES*256;
+	dev->mem_end = ei_status.rmem_end = dev->mem_start + 0x1fff;
 
 	printk(", IRQ %d, 32KB memory, 8KB window at 0x%lx-0x%lx.\n",
 	       dev->irq, dev->mem_start, dev->mem_end);
@@ -320,9 +320,11 @@ static void ultra32_get_8390_hdr(struct net_device *dev,
 	/* Select correct 8KB Window. */
 	outb(ei_status.reg0 | ((ring_page & 0x60) >> 5), RamReg);
 
-#ifdef notdef
+#ifdef __BIG_ENDIAN
 	/* Officially this is what we are doing, but the readl() is faster */
+	/* unfortunately it isn't endian aware of the struct               */
 	isa_memcpy_fromio(hdr, hdr_start, sizeof(struct e8390_pkt_hdr));
+	hdr->count = le16_to_cpu(hdr->count);
 #else
 	((unsigned int*)hdr)[0] = isa_readl(hdr_start);
 #endif
@@ -353,7 +355,7 @@ static void ultra32_block_input(struct net_device *dev,
 		} else {
 			/* Select first 8KB Window. */
 			outb(ei_status.reg0, RamReg);
-			isa_memcpy_fromio(skb->data + semi_count, dev->rmem_start, count);
+			isa_memcpy_fromio(skb->data + semi_count, ei_status.rmem_start, count);
 		}
 	} else {
 		/* Packet is in one chunk -- we can copy + cksum. */
@@ -378,6 +380,9 @@ static void ultra32_block_output(struct net_device *dev,
 #ifdef MODULE
 #define MAX_ULTRA32_CARDS   4	/* Max number of Ultra cards per module */
 static struct net_device dev_ultra[MAX_ULTRA32_CARDS];
+
+MODULE_DESCRIPTION("SMC Ultra32 EISA ethernet driver");
+MODULE_LICENSE("GPL");
 
 int init_module(void)
 {
@@ -415,5 +420,4 @@ void cleanup_module(void)
 	}
 }
 #endif /* MODULE */
-MODULE_LICENSE("GPL");
 

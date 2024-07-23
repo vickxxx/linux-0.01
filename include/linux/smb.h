@@ -76,7 +76,6 @@ struct smb_nls_codepage {
  * Contains all relevant data on a SMB networked file.
  */
 struct smb_fattr {
-
 	__u16 attr;
 
 	unsigned long	f_ino;
@@ -84,13 +83,14 @@ struct smb_fattr {
 	nlink_t		f_nlink;
 	uid_t		f_uid;
 	gid_t		f_gid;
-	kdev_t		f_rdev;
-	off_t		f_size;
-	time_t		f_atime;
-	time_t		f_mtime;
-	time_t		f_ctime;
+	dev_t		f_rdev;
+	loff_t		f_size;
+	struct timespec	f_atime;
+	struct timespec f_mtime;
+	struct timespec f_ctime;
 	unsigned long	f_blksize;
 	unsigned long	f_blocks;
+	int		f_unix;
 };
 
 enum smb_conn_state {

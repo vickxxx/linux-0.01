@@ -17,7 +17,6 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-#include <linux/config.h>
 #include <asm/system.h>
 #include <asm/leds.h>
 #include <asm/arch/hardware.h>
@@ -28,7 +27,8 @@
 /*
  * IRQ handler for the timer
  */
-static void excalibur_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+excalibur_timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 
 	// ...clear the interrupt
@@ -37,25 +37,24 @@ static void excalibur_timer_interrupt(int irq, void *dev_id, struct pt_regs *reg
 	do_leds();
 	do_timer(regs);
 	do_profile(regs);
+
+	return IRQ_HANDLED;
 }
 
 /*
  * Set up timer interrupt, and return the current time in seconds.
  */
-extern __inline__ void setup_timer(void)
+void __init time_init(void)
 {
-
-
 	timer_irq.handler = excalibur_timer_interrupt;
-
 
 	/* 
 	 * Make irqs happen for the system timer
 	 */
-	setup_arm_irq(IRQ_TIMER0, &timer_irq);
+	setup_irq(IRQ_TIMER0, &timer_irq);
 
 	/* Start the timer */
-	*TIMER0_LIMIT(IO_ADDRESS(EXC_TIMER00_BASE))=(unsigned int)(EXC_AHB2_CLK_FREQUENCY/50);
+	*TIMER0_LIMIT(IO_ADDRESS(EXC_TIMER00_BASE))=(unsigned int)(EXC_AHB2_CLK_FREQUENCY/200);
 	*TIMER0_PRESCALE(IO_ADDRESS(EXC_TIMER00_BASE))=1;
 	*TIMER0_CR(IO_ADDRESS(EXC_TIMER00_BASE))=TIMER0_CR_IE_MSK | TIMER0_CR_S_MSK;
 }

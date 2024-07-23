@@ -13,10 +13,9 @@
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/file.h>
-#include <linux/locks.h>
+#include <linux/pagemap.h>
 #include <asm/bitops.h>
 #include "autofs_i.h"
-#define __NO_VERSION__
 #include <linux/module.h>
 
 static void ino_lnkfree(struct autofs_info *ino)
@@ -80,7 +79,7 @@ static void autofs4_put_super(struct super_block *sb)
 {
 	struct autofs_sb_info *sbi = autofs4_sbi(sb);
 
-	sb->u.generic_sbp = NULL;
+	sb->s_fs_info = NULL;
 
 	if ( !sbi->catatonic )
 		autofs4_catatonic_mode(sbi); /* Free wait queues, close pipe */
@@ -90,11 +89,9 @@ static void autofs4_put_super(struct super_block *sb)
 	DPRINTK(("autofs: shutting down\n"));
 }
 
-static int autofs4_statfs(struct super_block *sb, struct statfs *buf);
-
 static struct super_operations autofs4_sops = {
-	put_super:	autofs4_put_super,
-	statfs:		autofs4_statfs,
+	.put_super	= autofs4_put_super,
+	.statfs		= simple_statfs,
 };
 
 static int parse_options(char *options, int *pipefd, uid_t *uid, gid_t *gid,
@@ -112,7 +109,9 @@ static int parse_options(char *options, int *pipefd, uid_t *uid, gid_t *gid,
 	*pipefd = -1;
 
 	if ( !options ) return 1;
-	for (this_char = strtok(options,","); this_char; this_char = strtok(NULL,",")) {
+	while ((this_char = strsep(&options,",")) != NULL) {
+		if (!*this_char)
+			continue;
 		if ((value = strchr(this_char,'=')) != NULL)
 			*value++ = 0;
 		if (!strcmp(this_char,"fd")) {
@@ -173,8 +172,7 @@ static struct autofs_info *autofs4_mkroot(struct autofs_sb_info *sbi)
 	return ino;
 }
 
-struct super_block *autofs4_read_super(struct super_block *s, void *data,
-				      int silent)
+int autofs4_fill_super(struct super_block *s, void *data, int silent)
 {
 	struct inode * root_inode;
 	struct dentry * root;
@@ -190,7 +188,7 @@ struct super_block *autofs4_read_super(struct super_block *s, void *data,
 
 	memset(sbi, 0, sizeof(*sbi));
 
-	s->u.generic_sbp = sbi;
+	s->s_fs_info = sbi;
 	sbi->magic = AUTOFS_SBI_MAGIC;
 	sbi->catatonic = 0;
 	sbi->exp_timeout = 0;
@@ -251,7 +249,7 @@ struct super_block *autofs4_read_super(struct super_block *s, void *data,
 	 * Success! Install the root dentry now to indicate completion.
 	 */
 	s->s_root = root;
-	return s;
+	return 0;
 	
 	/*
 	 * Failure ... clean up.
@@ -278,15 +276,7 @@ fail_iput:
 fail_free:
 	kfree(sbi);
 fail_unlock:
-	return NULL;
-}
-
-static int autofs4_statfs(struct super_block *sb, struct statfs *buf)
-{
-	buf->f_type = AUTOFS_SUPER_MAGIC;
-	buf->f_bsize = 1024;
-	buf->f_namelen = NAME_MAX;
-	return 0;
+	return -EINVAL;
 }
 
 struct inode *autofs4_get_inode(struct super_block *sb,
@@ -308,13 +298,13 @@ struct inode *autofs4_get_inode(struct super_block *sb,
 	}
 	inode->i_blksize = PAGE_CACHE_SIZE;
 	inode->i_blocks = 0;
-	inode->i_rdev = 0;
+	inode->i_rdev = NODEV;
 	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 
 	if (S_ISDIR(inf->mode)) {
 		inode->i_nlink = 2;
 		inode->i_op = &autofs4_dir_inode_operations;
-		inode->i_fop = &autofs4_dir_operations;
+		inode->i_fop = &simple_dir_operations;
 	} else if (S_ISLNK(inf->mode)) {
 		inode->i_size = inf->size;
 		inode->i_op = &autofs4_symlink_inode_operations;

@@ -23,6 +23,8 @@
 /* This is the kernel's entry point into the floating point emulator.
 It is called from the kernel with code similar to this:
 
+	sub	r4, r5, #4
+	ldrt	r0, [r4]			@ r0  = instruction
 	adrsvc	al, r9, ret_from_exception	@ r9  = normal FP return
 	adrsvc	al, lr, fpundefinstr		@ lr  = undefined instr return
 
@@ -50,11 +52,8 @@ want it.
 
 This routine does three things:
 
-1) It saves SP into a variable called userRegisters.  The kernel has
-created a struct pt_regs on the stack and saved the user registers
-into it.  See /usr/include/asm/proc/ptrace.h for details.  The
-emulator code uses userRegisters as the base of an array of words from
-which the contents of the registers can be extracted.
+1) The kernel has created a struct pt_regs on the stack and saved the
+user registers into it.  See /usr/include/asm/proc/ptrace.h for details.
 
 2) It calls EmulateAll to emulate a floating point instruction.
 EmulateAll returns 1 if the emulation was successful, or 0 if not.
@@ -73,44 +72,37 @@ several floating point instructions.  */
 
 	.globl	nwfpe_enter
 nwfpe_enter:
-	/* ?? Could put userRegisters and fpa11 into fixed regs during
-	   emulation.  This would reduce load/store overhead at the expense
-	   of stealing two regs from the register allocator.  Not sure if
-	   it's worth it.  */
-	str sp, [r10]                   @ Store the user registers pointer in the fpa11 structure.
-        mov r4, sp			@ use r4 for local pointer
-        mov r10, lr			@ save the failure-return addresses
+	mov	r4, lr			@ save the failure-return addresses
+	mov	sl, sp			@ we access the registers via 'sl'
 
-        ldr r5, [r4, #60]	 	@ get contents of PC;
-	sub r8, r5, #4
-.Lx2:	ldrt r0, [r8]			@ get actual instruction into r0
+	ldr	r5, [sp, #60]		@ get contents of PC;
 emulate:
-	bl EmulateAll			@ emulate the instruction
-   	cmp r0, #0			@ was emulation successful
-        moveq pc, r10			@ no, return failure
+	bl	EmulateAll		@ emulate the instruction
+	cmp	r0, #0			@ was emulation successful
+	moveq	pc, r4			@ no, return failure
 
 next:
-.Lx1:	ldrt r6, [r5], #4		@ get the next instruction and
+.Lx1:	ldrt	r6, [r5], #4		@ get the next instruction and
 					@ increment PC
 
-	and   r2, r6, #0x0F000000	@ test for FP insns
-        teq   r2, #0x0C000000
-        teqne r2, #0x0D000000
-        teqne r2, #0x0E000000
-        movne pc, r9			@ return ok if not a fp insn
+	and	r2, r6, #0x0F000000	@ test for FP insns
+	teq	r2, #0x0C000000
+	teqne	r2, #0x0D000000
+	teqne	r2, #0x0E000000
+	movne	pc, r9			@ return ok if not a fp insn
 
-        str r5, [r4, #60]		@ update PC copy in regs
+	str	r5, [sp, #60]		@ update PC copy in regs
 
-        mov r0, r6			@ save a copy
-        ldr r1, [r4, #64]		@ fetch the condition codes
-   	bl  checkCondition		@ check the condition
-   	cmp r0, #0			@ r0 = 0 ==> condition failed
+	mov	r0, r6			@ save a copy
+	ldr	r1, [sp, #64]		@ fetch the condition codes
+	bl	checkCondition		@ check the condition
+	cmp	r0, #0			@ r0 = 0 ==> condition failed
 
-        @ if condition code failed to match, next insn
-   	beq next			@ get the next instruction;
-   	    
-        mov r0, r6			@ prepare for EmulateAll()
-   	b emulate			@ if r0 != 0, goto EmulateAll
+	@ if condition code failed to match, next insn
+	beq	next			@ get the next instruction;
+
+	mov	r0, r6			@ prepare for EmulateAll()
+	b	emulate			@ if r0 != 0, goto EmulateAll
 
 	@ We need to be prepared for the instructions at .Lx1 and .Lx2 
 	@ to fault.  Emit the appropriate exception gunk to fix things up.
@@ -124,5 +116,4 @@ next:
 	.section __ex_table,"a"
 	.align	3
 	.long	.Lx1, .Lfix
-	.long	.Lx2, .Lfix
 	.previous

@@ -30,26 +30,51 @@
  *  look.
  */
 
-#include <linux/kernel.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
+#include <linux/kernel.h>
+#include <linux/mca.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/slab.h>
 #include <linux/blk.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
+#include <linux/mca-legacy.h>
 
 #include "scsi.h"
 #include "hosts.h"
 #include "NCR53C9x.h"
-#include "mca_53c9x.h"
 
 #include <asm/dma.h>
-#include <linux/mca.h>
 #include <asm/irq.h>
 #include <asm/mca_dma.h>
-
 #include <asm/pgtable.h>
+
+/*
+ * From ibmmca.c (IBM scsi controller card driver) -- used for turning PS2 disk
+ *  activity LED on and off
+ */
+
+#define PS2_SYS_CTR	0x92
+
+/* Ports the ncr's 53c94 can be put at; indexed by pos register value */
+
+#define MCA_53C9X_IO_PORTS {                             \
+                         0x0000, 0x0240, 0x0340, 0x0400, \
+	                 0x0420, 0x3240, 0x8240, 0xA240, \
+	                }
+			
+/*
+ * Supposedly there were some cards put together with the 'c9x and 86c01.  If
+ *   they have different ID's from the ones on the 3500 series machines, 
+ *   you can add them here and hopefully things will work out.
+ */
+			
+#define MCA_53C9X_IDS {          \
+                         0x7F4C, \
+			 0x0000, \
+                        }
 
 static int  dma_bytes_sent(struct NCR_ESP *, int);
 static int  dma_can_transfer(struct NCR_ESP *, Scsi_Cmnd *);
@@ -153,7 +178,7 @@ int mca_esp_detect(Scsi_Host_Template *tpnt)
 			esp->slot = slot;
 
 			if (request_irq(esp->irq, esp_intr, 0,
-			 "NCR 53c9x SCSI", esp_intr))
+			 "NCR 53c9x SCSI", esp->ehost))
 			{
 				printk("Unable to request IRQ %d.\n", esp->irq);
 				esp_deallocate(esp);
@@ -227,7 +252,7 @@ int mca_esp_detect(Scsi_Host_Template *tpnt)
 
 			esp->esp_command = (volatile unsigned char*)
 			  cmd_buffer;
-	 		esp->esp_command_dvma = virt_to_bus(cmd_buffer);
+	 		esp->esp_command_dvma = isa_virt_to_bus(cmd_buffer);
 
 			/* SCSI chip speed */
 
@@ -419,7 +444,22 @@ static void dma_led_off(struct NCR_ESP *esp)
 	outb(inb(PS2_SYS_CTR) & 0x3f, PS2_SYS_CTR);
 }
 
-static Scsi_Host_Template driver_template = MCA_53C9X;
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp",
+	.name			= "NCR 53c9x SCSI",
+	.detect			= mca_esp_detect,
+	.release		= mca_esp_release,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.unchecked_isa_dma	= 1,
+	.use_clustering		= DISABLE_CLUSTERING
+};
+
+
 #include "scsi_module.c"
 
 /*

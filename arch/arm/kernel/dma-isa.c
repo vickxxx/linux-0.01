@@ -16,7 +16,6 @@
  *   arch/arm/kernel/dma-ebsa285.c
  *   Copyright (C) 1998 Phil Blundell
  */
-#include <linux/sched.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/pci.h>
@@ -95,7 +94,7 @@ static void isa_enable_dma(dmach_t channel, dma_t *dma)
 			 * coherence.
 			 */
 			dma->buf.dma_address = pci_map_single(NULL,
-				dma->buf.address, dma->buf.length,
+				dma->buf.__address, dma->buf.length,
 				direction);
 		}
 
@@ -133,10 +132,10 @@ static void isa_disable_dma(dmach_t channel, dma_t *dma)
 }
 
 static struct dma_ops isa_dma_ops = {
-	type:		"ISA",
-	enable:		isa_enable_dma,
-	disable:	isa_disable_dma,
-	residue:	isa_get_dma_residue,
+	.type		= "ISA",
+	.enable		= isa_enable_dma,
+	.disable	= isa_disable_dma,
+	.residue	= isa_get_dma_residue,
 };
 
 static struct resource dma_resources[] = {

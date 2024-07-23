@@ -70,10 +70,10 @@ struct tc_u_hnode
 {
 	struct tc_u_hnode	*next;
 	u32			handle;
-	u32			prio;
 	struct tc_u_common	*tp_c;
 	int			refcnt;
 	unsigned		divisor;
+	u32			hgenerator;
 	struct tc_u_knode	*ht[1];
 };
 
@@ -203,17 +203,17 @@ static __inline__ struct tc_u_knode *
 u32_lookup_key(struct tc_u_hnode *ht, u32 handle)
 {
 	unsigned sel;
-	struct tc_u_knode *n;
+	struct tc_u_knode *n = NULL;
 
 	sel = TC_U32_HASH(handle);
 	if (sel > ht->divisor)
-		return 0;
+		goto out;
 
 	for (n = ht->ht[sel]; n; n = n->next)
 		if (n->handle == handle)
-			return n;
-
-	return NULL;
+			break;
+out:
+	return n;
 }
 
 
@@ -257,28 +257,23 @@ static int u32_init(struct tcf_proto *tp)
 	struct tc_u_hnode *root_ht;
 	struct tc_u_common *tp_c;
 
-	MOD_INC_USE_COUNT;
-
 	for (tp_c = u32_list; tp_c; tp_c = tp_c->next)
 		if (tp_c->q == tp->q)
 			break;
 
 	root_ht = kmalloc(sizeof(*root_ht), GFP_KERNEL);
-	if (root_ht == NULL) {
-		MOD_DEC_USE_COUNT;
+	if (root_ht == NULL)
 		return -ENOBUFS;
-	}
+
 	memset(root_ht, 0, sizeof(*root_ht));
 	root_ht->divisor = 0;
 	root_ht->refcnt++;
 	root_ht->handle = tp_c ? gen_new_htid(tp_c) : 0x80000000;
-	root_ht->prio = tp->prio;
 
 	if (tp_c == NULL) {
 		tp_c = kmalloc(sizeof(*tp_c), GFP_KERNEL);
 		if (tp_c == NULL) {
 			kfree(root_ht);
-			MOD_DEC_USE_COUNT;
 			return -ENOBUFS;
 		}
 		memset(tp_c, 0, sizeof(*tp_c));
@@ -403,7 +398,6 @@ static void u32_destroy(struct tcf_proto *tp)
 		kfree(tp_c);
 	}
 
-	MOD_DEC_USE_COUNT;
 	tp->data = NULL;
 }
 
@@ -536,7 +530,6 @@ static int u32_change(struct tcf_proto *tp, unsigned long base, u32 handle,
 		ht->refcnt = 0;
 		ht->divisor = divisor;
 		ht->handle = handle;
-		ht->prio = tp->prio;
 		ht->next = tp_c->hlist;
 		tp_c->hlist = ht;
 		*arg = (unsigned long)ht;
@@ -609,8 +602,6 @@ static void u32_walk(struct tcf_proto *tp, struct tcf_walker *arg)
 		return;
 
 	for (ht = tp_c->hlist; ht; ht = ht->next) {
-		if (ht->prio != tp->prio)
-			continue;
 		if (arg->count >= arg->skip) {
 			if (arg->fn(tp, (unsigned long)ht, arg) < 0) {
 				arg->stop = 1;
@@ -694,18 +685,18 @@ rtattr_failure:
 }
 
 struct tcf_proto_ops cls_u32_ops = {
-	NULL,
-	"u32",
-	u32_classify,
-	u32_init,
-	u32_destroy,
-
-	u32_get,
-	u32_put,
-	u32_change,
-	u32_delete,
-	u32_walk,
-	u32_dump
+	.next		=	NULL,
+	.kind		=	"u32",
+	.classify	=	u32_classify,
+	.init		=	u32_init,
+	.destroy	=	u32_destroy,
+	.get		=	u32_get,
+	.put		=	u32_put,
+	.change		=	u32_change,
+	.delete		=	u32_delete,
+	.walk		=	u32_walk,
+	.dump		=	u32_dump,
+	.owner		=	THIS_MODULE,
 };
 
 #ifdef MODULE

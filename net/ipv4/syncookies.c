@@ -9,7 +9,7 @@
  *      as published by the Free Software Foundation; either version
  *      2 of the License, or (at your option) any later version.
  * 
- *  $Id: syncookies.c,v 1.17 2001/10/26 14:55:41 davem Exp $
+ *  $Id: syncookies.c,v 1.18 2002/02/01 22:01:04 davem Exp $
  *
  *  Missing: IPv6 support. 
  */
@@ -17,6 +17,7 @@
 #include <linux/tcp.h>
 #include <linux/slab.h>
 #include <linux/random.h>
+#include <linux/kernel.h>
 #include <net/tcp.h>
 
 extern int sysctl_tcp_syncookies;
@@ -38,7 +39,7 @@ static __u16 const msstab[] = {
 	(__u16)-1
 };
 /* The number doesn't include the -1 terminator */
-#define NUM_MSS (sizeof(msstab)/sizeof(msstab[0]) - 1)
+#define NUM_MSS (ARRAY_SIZE(msstab) - 1)
 
 /*
  * Generate a syncookie.  mssp points to the mss, which is returned
@@ -46,11 +47,12 @@ static __u16 const msstab[] = {
  */
 __u32 cookie_v4_init_sequence(struct sock *sk, struct sk_buff *skb, __u16 *mssp)
 {
+	struct tcp_opt *tp = tcp_sk(sk);
 	int mssind;
 	const __u16 mss = *mssp;
 
 	
-	sk->tp_pinfo.af_tcp.last_synq_overflow = jiffies;
+	tp->last_synq_overflow = jiffies;
 
 	/* XXX sort msstab[] by probability?  Binary search? */
 	for (mssind = 0; mss > msstab[mssind + 1]; mssind++)
@@ -96,13 +98,14 @@ static inline struct sock *get_cookie_sock(struct sock *sk, struct sk_buff *skb,
 					   struct open_request *req,
 					   struct dst_entry *dst)
 {
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_opt *tp = tcp_sk(sk);
 	struct sock *child;
 
 	child = tp->af_specific->syn_recv_sock(sk, skb, req, dst);
-	if (child)
+	if (child) {
+		sk_set_owner(child, sk->sk_owner);
 		tcp_acceptq_queue(sk, req, child);
-	else
+	} else
 		tcp_openreq_free(req);
 
 	return child;
@@ -111,6 +114,7 @@ static inline struct sock *get_cookie_sock(struct sock *sk, struct sk_buff *skb,
 struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb,
 			     struct ip_options *opt)
 {
+	struct tcp_opt *tp = tcp_sk(sk);
 	__u32 cookie = ntohl(skb->h.th->ack_seq) - 1; 
 	struct sock *ret = sk;
 	struct open_request *req; 
@@ -121,7 +125,7 @@ struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb,
 	if (!sysctl_tcp_syncookies || !skb->h.th->ack)
 		goto out;
 
-  	if (time_after(jiffies, sk->tp_pinfo.af_tcp.last_synq_overflow + TCP_TIMEOUT_INIT) ||
+  	if (time_after(jiffies, tp->last_synq_overflow + TCP_TIMEOUT_INIT) ||
 	    (mss = cookie_check(skb, cookie)) == 0) {
 	 	NET_INC_STATS_BH(SyncookiesFailed);
 		goto out;
@@ -169,18 +173,25 @@ struct sock *cookie_v4_check(struct sock *sk, struct sk_buff *skb,
 	 * hasn't changed since we received the original syn, but I see
 	 * no easy way to do this. 
 	 */
-	if (ip_route_output(&rt,
-			    opt && 
-			    opt->srr ? opt->faddr : req->af.v4_req.rmt_addr,
-			    req->af.v4_req.loc_addr,
-			    RT_CONN_FLAGS(sk),
-			    0)) { 
-		tcp_openreq_free(req);
-		goto out; 
+	{
+		struct flowi fl = { .nl_u = { .ip4_u =
+					      { .daddr = ((opt && opt->srr) ?
+							  opt->faddr :
+							  req->af.v4_req.rmt_addr),
+						.saddr = req->af.v4_req.loc_addr,
+						.tos = RT_CONN_FLAGS(sk) } },
+				    .proto = IPPROTO_TCP,
+				    .uli_u = { .ports =
+					       { .sport = skb->h.th->dest,
+						 .dport = skb->h.th->source } } };
+		if (ip_route_output_key(&rt, &fl)) {
+			tcp_openreq_free(req);
+			goto out; 
+		}
 	}
 
 	/* Try to redo what tcp_v4_send_synack did. */
-	req->window_clamp = rt->u.dst.window;  
+	req->window_clamp = dst_metric(&rt->u.dst, RTAX_WINDOW);
 	tcp_select_initial_window(tcp_full_space(sk), req->mss,
 				  &req->rcv_wnd, &req->window_clamp, 
 				  0, &rcv_wscale);

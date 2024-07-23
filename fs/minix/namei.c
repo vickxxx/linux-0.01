@@ -4,9 +4,7 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/fs.h>
-#include <linux/minix_fs.h>
-#include <linux/pagemap.h>
+#include "minix.h"
 
 static inline void inc_count(struct inode *inode)
 {
@@ -38,7 +36,7 @@ static int minix_hash(struct dentry *dentry, struct qstr *qstr)
 	int i;
 	const unsigned char *name;
 
-	i = dentry->d_inode->i_sb->u.minix_sb.s_namelen;
+	i = minix_sb(dentry->d_inode->i_sb)->s_namelen;
 	if (i >= qstr->len)
 		return 0;
 	/* Truncate the name in place, avoids having to define a compare
@@ -53,17 +51,17 @@ static int minix_hash(struct dentry *dentry, struct qstr *qstr)
 }
 
 struct dentry_operations minix_dentry_operations = {
-	d_hash:		minix_hash,
+	.d_hash		= minix_hash,
 };
 
-static struct dentry *minix_lookup(struct inode * dir, struct dentry *dentry)
+static struct dentry *minix_lookup(struct inode * dir, struct dentry *dentry, struct nameidata *nd)
 {
 	struct inode * inode = NULL;
 	ino_t ino;
 
 	dentry->d_op = dir->i_sb->s_root->d_op;
 
-	if (dentry->d_name.len > dir->i_sb->u.minix_sb.s_namelen)
+	if (dentry->d_name.len > minix_sb(dir->i_sb)->s_namelen)
 		return ERR_PTR(-ENAMETOOLONG);
 
 	ino = minix_inode_by_name(dentry);
@@ -77,7 +75,7 @@ static struct dentry *minix_lookup(struct inode * dir, struct dentry *dentry)
 	return NULL;
 }
 
-static int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, int rdev)
+static int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, dev_t rdev)
 {
 	int error;
 	struct inode * inode = minix_new_inode(dir, &error);
@@ -91,7 +89,8 @@ static int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, int 
 	return error;
 }
 
-static int minix_create(struct inode * dir, struct dentry *dentry, int mode)
+static int minix_create(struct inode * dir, struct dentry *dentry, int mode,
+		struct nameidata *nd)
 {
 	return minix_mknod(dir, dentry, mode, 0);
 }
@@ -112,7 +111,7 @@ static int minix_symlink(struct inode * dir, struct dentry *dentry,
 
 	inode->i_mode = S_IFLNK | 0777;
 	minix_set_inode(inode, 0);
-	err = block_symlink(inode, symname, i);
+	err = page_symlink(inode, symname, i);
 	if (err)
 		goto out_fail;
 
@@ -131,10 +130,7 @@ static int minix_link(struct dentry * old_dentry, struct inode * dir,
 {
 	struct inode *inode = old_dentry->d_inode;
 
-	if (S_ISDIR(inode->i_mode))
-		return -EPERM;
-
-	if (inode->i_nlink >= inode->i_sb->u.minix_sb.s_link_max)
+	if (inode->i_nlink >= minix_sb(inode->i_sb)->s_link_max)
 		return -EMLINK;
 
 	inode->i_ctime = CURRENT_TIME;
@@ -148,7 +144,7 @@ static int minix_mkdir(struct inode * dir, struct dentry *dentry, int mode)
 	struct inode * inode;
 	int err = -EMLINK;
 
-	if (dir->i_nlink >= dir->i_sb->u.minix_sb.s_link_max)
+	if (dir->i_nlink >= minix_sb(dir->i_sb)->s_link_max)
 		goto out;
 
 	inc_count(dir);
@@ -224,7 +220,7 @@ static int minix_rmdir(struct inode * dir, struct dentry *dentry)
 static int minix_rename(struct inode * old_dir, struct dentry *old_dentry,
 			   struct inode * new_dir, struct dentry *new_dentry)
 {
-	struct minix_sb_info * info = &old_dir->i_sb->u.minix_sb;
+	struct minix_sb_info * info = minix_sb(old_dir->i_sb);
 	struct inode * old_inode = old_dentry->d_inode;
 	struct inode * new_inode = new_dentry->d_inode;
 	struct page * dir_page = NULL;
@@ -303,13 +299,14 @@ out:
  * directories can handle most operations...
  */
 struct inode_operations minix_dir_inode_operations = {
-	create:		minix_create,
-	lookup:		minix_lookup,
-	link:		minix_link,
-	unlink:		minix_unlink,
-	symlink:	minix_symlink,
-	mkdir:		minix_mkdir,
-	rmdir:		minix_rmdir,
-	mknod:		minix_mknod,
-	rename:		minix_rename,
+	.create		= minix_create,
+	.lookup		= minix_lookup,
+	.link		= minix_link,
+	.unlink		= minix_unlink,
+	.symlink	= minix_symlink,
+	.mkdir		= minix_mkdir,
+	.rmdir		= minix_rmdir,
+	.mknod		= minix_mknod,
+	.rename		= minix_rename,
+	.getattr	= minix_getattr,
 };

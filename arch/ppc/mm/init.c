@@ -1,8 +1,5 @@
 /*
- * BK Id: SCCS/s.init.c 1.36 09/22/01 14:03:09 paulus
- */
-/*
- *  PowerPC version 
+ *  PowerPC version
  *    Copyright (C) 1995-1996 Gary Thomas (gdt@linuxppc.org)
  *
  *  Modifications by Paul Mackerras (PowerMac) (paulus@cs.anu.edu.au)
@@ -31,9 +28,7 @@
 #include <linux/init.h>
 #include <linux/bootmem.h>
 #include <linux/highmem.h>
-#ifdef CONFIG_BLK_DEV_INITRD
-#include <linux/blk.h>		/* for initrd_* */
-#endif
+#include <linux/initrd.h>
 
 #include <asm/pgalloc.h>
 #include <asm/prom.h>
@@ -45,23 +40,33 @@
 #include <asm/machdep.h>
 #include <asm/btext.h>
 #include <asm/tlb.h>
+#include <asm/bootinfo.h>
 
 #include "mem_pieces.h"
 #include "mmu_decl.h"
 
-#define MAX_LOW_MEM	(0xF0000000UL - KERNELBASE)
+#if defined(CONFIG_KERNEL_START_BOOL) || defined(CONFIG_LOWMEM_SIZE_BOOL)
+/* The ammount of lowmem must be within 0xF0000000 - KERNELBASE. */
+#if (CONFIG_LOWMEM_SIZE > (0xF0000000 - KERNELBASE))
+#error "You must adjust CONFIG_LOWMEM_SIZE or CONFIG_START_KERNEL"
+#endif
+#endif
+#define MAX_LOW_MEM	CONFIG_LOWMEM_SIZE
 
-mmu_gather_t mmu_gathers[NR_CPUS];
+DEFINE_PER_CPU(struct mmu_gather, mmu_gathers);
 
-void *end_of_DRAM;
 unsigned long total_memory;
 unsigned long total_lowmem;
+
+unsigned long ppc_memstart;
+unsigned long ppc_memoffset = PAGE_OFFSET;
 
 int mem_init_done;
 int init_bootmem_done;
 int boot_mapsize;
-unsigned long totalram_pages;
-unsigned long totalhigh_pages;
+#ifdef CONFIG_PPC_PMAC
+unsigned long agp_special_page;
+#endif
 
 extern char _end[];
 extern char etext[], _stext[];
@@ -85,7 +90,7 @@ extern struct task_struct *current_set[NR_CPUS];
 char *klimit = _end;
 struct mem_pieces phys_avail;
 
-extern char *sysmap; 
+extern char *sysmap;
 extern unsigned long sysmap_size;
 
 /*
@@ -100,29 +105,10 @@ unsigned long __max_memory;
 /* max amount of low RAM to map in */
 unsigned long __max_low_memory = MAX_LOW_MEM;
 
-int do_check_pgt_cache(int low, int high)
-{
-	int freed = 0;
-	if (pgtable_cache_size > high) {
-		do {
-                        if (pgd_quicklist) {
-				free_pgd_slow(get_pgd_fast());
-				freed++;
-			}
-			if (pte_quicklist) {
-				pte_free_slow(pte_alloc_one_fast(NULL, 0));
-				freed++;
-			}
-		} while (pgtable_cache_size > low);
-	}
-	return freed;
-}
-
 void show_mem(void)
 {
 	int i,free = 0,total = 0,reserved = 0;
 	int shared = 0, cached = 0;
-	struct task_struct *p;
 	int highmem = 0;
 
 	printk("Mem-info:\n");
@@ -140,7 +126,7 @@ void show_mem(void)
 		else if (!page_count(mem_map+i))
 			free++;
 		else
-			shared += atomic_read(&mem_map[i].count) - 1;
+			shared += page_count(mem_map+i) - 1;
 	}
 	printk("%d pages of RAM\n",total);
 	printk("%d pages of HIGHMEM\n", highmem);
@@ -148,62 +134,6 @@ void show_mem(void)
 	printk("%d reserved pages\n",reserved);
 	printk("%d pages shared\n",shared);
 	printk("%d pages swap cached\n",cached);
-	printk("%d pages in page table cache\n",(int)pgtable_cache_size);
-	show_buffers();
-	printk("%-8s %3s %8s %8s %8s %9s %8s", "Process", "Pid",
-	       "Ctx", "Ctx<<4", "Last Sys", "pc", "task");
-#ifdef CONFIG_SMP
-	printk(" %3s", "CPU");
-#endif /* CONFIG_SMP */
-	printk("\n");
-	for_each_task(p)
-	{
-		printk("%-8.8s %3d %8ld %8ld %8ld %c%08lx %08lx ",
-		       p->comm,p->pid,
-		       (p->mm)?p->mm->context:0,
-		       (p->mm)?(p->mm->context<<4):0,
-		       p->thread.last_syscall,
-		       (p->thread.regs)?user_mode(p->thread.regs) ? 'u' : 'k' : '?',
-		       (p->thread.regs)?p->thread.regs->nip:0,
-		       (ulong)p);
-		{
-			int iscur = 0;
-#ifdef CONFIG_SMP
-			printk("%3d ", p->processor);
-			if ( (p->processor != NO_PROC_ID) &&
-			     (p == current_set[p->processor]) )
-			{
-				iscur = 1;
-				printk("current");
-			}
-#else
-			if ( p == current )
-			{
-				iscur = 1;
-				printk("current");
-			}
-			
-			if ( p == last_task_used_math )
-			{
-				if ( iscur )
-					printk(",");
-				printk("last math");
-			}			
-#endif /* CONFIG_SMP */
-			printk("\n");
-		}
-	}
-}
-
-void si_meminfo(struct sysinfo *val)
-{
-	val->totalram = totalram_pages;
-	val->sharedram = 0;
-	val->freeram = nr_free_pages();
-	val->bufferram = atomic_read(&buffermem_pages);
-	val->totalhigh = totalhigh_pages;
-	val->freehigh = nr_free_highpages();
-	val->mem_unit = PAGE_SIZE;
 }
 
 /* Free up now-unused memory */
@@ -306,9 +236,14 @@ void __init MMU_init(void)
 
 	/*
 	 * Figure out how much memory we have, how much
-	 * is lowmem, and how much is highmem.
+	 * is lowmem, and how much is highmem.  If we were
+	 * passed the total memory size from the bootloader,
+	 * just use it.
 	 */
-	total_memory = ppc_md.find_end_of_memory();
+	if (boot_mem_size)
+		total_memory = boot_mem_size;
+	else
+		total_memory = ppc_md.find_end_of_memory();
 
 	if (__max_memory && total_memory > __max_memory)
 		total_memory = __max_memory;
@@ -319,7 +254,6 @@ void __init MMU_init(void)
 		total_memory = total_lowmem;
 #endif /* CONFIG_HIGHMEM */
 	}
-	end_of_DRAM = __va(total_lowmem);
 	set_phys_avail(total_lowmem);
 
 	/* Initialize the MMU hardware */
@@ -352,9 +286,8 @@ void __init MMU_init(void)
 		ppc_md.progress("MMU:exit", 0x211);
 
 #ifdef CONFIG_BOOTX_TEXT
-	/* Must be done last, or ppc_md.progress will die */
-	if (have_of)
-		map_boot_text();
+	/* Must be done last, or ppc_md.progress will die. */
+	map_boot_text();
 #endif
 }
 
@@ -401,8 +334,12 @@ void __init do_init_bootmem(void)
 	}
 	start = PAGE_ALIGN(start);
 
-	boot_mapsize = init_bootmem(start >> PAGE_SHIFT,
-				    total_lowmem >> PAGE_SHIFT);
+	min_low_pfn = start >> PAGE_SHIFT;
+	max_low_pfn = (PPC_MEMSTART + total_lowmem) >> PAGE_SHIFT;
+	max_pfn = (PPC_MEMSTART + total_memory) >> PAGE_SHIFT;
+	boot_mapsize = init_bootmem_node(&contig_page_data, min_low_pfn,
+					 PPC_MEMSTART >> PAGE_SHIFT,
+					 max_low_pfn);
 
 	/* remove the bootmem bitmap from the available memory */
 	mem_pieces_remove(&phys_avail, start, boot_mapsize, 1);
@@ -424,9 +361,11 @@ void __init paging_init(void)
 
 #ifdef CONFIG_HIGHMEM
 	map_page(PKMAP_BASE, 0, 0);	/* XXX gross */
-	pkmap_page_table = pte_offset(pmd_offset(pgd_offset_k(PKMAP_BASE), PKMAP_BASE), PKMAP_BASE);
+	pkmap_page_table = pte_offset_kernel(pmd_offset(pgd_offset_k
+			(PKMAP_BASE), PKMAP_BASE), PKMAP_BASE);
 	map_page(KMAP_FIX_BEGIN, 0, 0);	/* XXX gross */
-	kmap_pte = pte_offset(pmd_offset(pgd_offset_k(KMAP_FIX_BEGIN), KMAP_FIX_BEGIN), KMAP_FIX_BEGIN);
+	kmap_pte = pte_offset_kernel(pmd_offset(pgd_offset_k
+			(KMAP_FIX_BEGIN), KMAP_FIX_BEGIN), KMAP_FIX_BEGIN);
 	kmap_prot = PAGE_KERNEL;
 #endif /* CONFIG_HIGHMEM */
 
@@ -455,12 +394,10 @@ void __init mem_init(void)
 
 	highmem_mapnr = total_lowmem >> PAGE_SHIFT;
 	highmem_start_page = mem_map + highmem_mapnr;
-	max_mapnr = total_memory >> PAGE_SHIFT;
-#else
-	max_mapnr = max_low_pfn;
 #endif /* CONFIG_HIGHMEM */
+	max_mapnr = total_memory >> PAGE_SHIFT;
 
-	high_memory = (void *) __va(max_low_pfn * PAGE_SIZE);
+	high_memory = (void *) __va(PPC_MEMSTART + total_lowmem);
 	num_physpages = max_mapnr;	/* RAM is assumed contiguous */
 
 	totalram_pages += free_all_bootmem();
@@ -474,21 +411,25 @@ void __init mem_init(void)
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
 
-#if defined(CONFIG_ALL_PPC)	
+#ifdef CONFIG_PPC_OF
 	/* mark the RTAS pages as reserved */
 	if ( rtas_data )
 		for (addr = (ulong)__va(rtas_data);
 		     addr < PAGE_ALIGN((ulong)__va(rtas_data)+rtas_size) ;
 		     addr += PAGE_SIZE)
 			SetPageReserved(virt_to_page(addr));
-#endif /* defined(CONFIG_ALL_PPC) */
+#endif
+#ifdef CONFIG_PPC_PMAC
+	if (agp_special_page)
+		SetPageReserved(virt_to_page(agp_special_page));
+#endif
 	if ( sysmap )
 		for (addr = (unsigned long)sysmap;
 		     addr < PAGE_ALIGN((unsigned long)sysmap+sysmap_size) ;
 		     addr += PAGE_SIZE)
 			SetPageReserved(virt_to_page(addr));
-	
-	for (addr = PAGE_OFFSET; addr < (unsigned long)end_of_DRAM;
+
+	for (addr = PAGE_OFFSET; addr < (unsigned long)high_memory;
 	     addr += PAGE_SIZE) {
 		if (!PageReserved(virt_to_page(addr)))
 			continue;
@@ -526,6 +467,23 @@ void __init mem_init(void)
 	if (sysmap)
 		printk("System.map loaded at 0x%08x for debugger, size: %ld bytes\n",
 			(unsigned int)sysmap, sysmap_size);
+#ifdef CONFIG_PPC_PMAC
+	if (agp_special_page)
+		printk(KERN_INFO "AGP special page: 0x%08lx\n", agp_special_page);
+#endif
+
+	/* Make sure all our pagetable pages have page->mapping
+	   and page->index set correctly. */
+	for (addr = KERNELBASE; addr != 0; addr += PGDIR_SIZE) {
+		struct page *pg;
+		pmd_t *pmd = pmd_offset(pgd_offset_k(addr), addr);
+		if (pmd_present(*pmd)) {
+			pg = pmd_page(*pmd);
+			pg->mapping = (void *) &init_mm;
+			pg->index = addr;
+		}
+	}
+
 	mem_init_done = 1;
 }
 
@@ -543,7 +501,7 @@ set_phys_avail(unsigned long total_memory)
 	 * physical memory.
 	 */
 
-	phys_avail.regions[0].address = 0;
+	phys_avail.regions[0].address = PPC_MEMSTART;
 	phys_avail.regions[0].size = total_memory;
 	phys_avail.n_regions = 1;
 
@@ -565,14 +523,30 @@ set_phys_avail(unsigned long total_memory)
 				  initrd_end - initrd_start, 1);
 	}
 #endif /* CONFIG_BLK_DEV_INITRD */
-#ifdef CONFIG_ALL_PPC
+#ifdef CONFIG_PPC_OF
 	/* remove the RTAS pages from the available memory */
 	if (rtas_data)
 		mem_pieces_remove(&phys_avail, rtas_data, rtas_size, 1);
+#endif
 	/* remove the sysmap pages from the available memory */
 	if (sysmap)
 		mem_pieces_remove(&phys_avail, __pa(sysmap), sysmap_size, 1);
-#endif /* CONFIG_ALL_PPC */
+#ifdef CONFIG_PPC_PMAC
+	/* Because of some uninorth weirdness, we need a page of
+	 * memory as high as possible (it must be outside of the
+	 * bus address seen as the AGP aperture). It will be used
+	 * by the r128 DRM driver
+	 * 
+	 * FIXME: We need to make sure that page doesn't overlap any of the\
+	 * above. This could be done by improving mem_pieces_find to be able
+	 * to do a backward search from the end of the list.
+	 */
+	if (_machine == _MACH_Pmac && find_devices("uni-north-agp")) {
+		agp_special_page = (total_memory - PAGE_SIZE);
+		mem_pieces_remove(&phys_avail, agp_special_page, PAGE_SIZE, 0);	
+		agp_special_page = (unsigned long)__va(agp_special_page);
+	}
+#endif /* CONFIG_PPC_PMAC */
 }
 
 /* Mark some memory as reserved by removing it from phys_avail. */
@@ -581,23 +555,73 @@ void __init reserve_phys_mem(unsigned long start, unsigned long size)
 	mem_pieces_remove(&phys_avail, start, size, 1);
 }
 
-void flush_page_to_ram(struct page *page)
+/*
+ * This is called when a page has been modified by the kernel.
+ * It just marks the page as not i-cache clean.  We do the i-cache
+ * flush later when the page is given to a user process, if necessary.
+ */
+void flush_dcache_page(struct page *page)
 {
-	unsigned long vaddr = (unsigned long) kmap(page);
-	__flush_page_to_ram(vaddr);
+	clear_bit(PG_arch_1, &page->flags);
+}
+
+void clear_user_page(void *page, unsigned long vaddr, struct page *pg)
+{
+	clear_page(page);
+	clear_bit(PG_arch_1, &pg->flags);
+}
+
+void copy_user_page(void *vto, void *vfrom, unsigned long vaddr,
+		    struct page *pg)
+{
+	copy_page(vto, vfrom);
+	clear_bit(PG_arch_1, &pg->flags);
+}
+
+void flush_icache_user_range(struct vm_area_struct *vma, struct page *page,
+			     unsigned long addr, int len)
+{
+	unsigned long maddr;
+
+	maddr = (unsigned long) kmap(page) + (addr & ~PAGE_MASK);
+	flush_icache_range(maddr, maddr + len);
 	kunmap(page);
 }
 
 /*
- * set_pte stores a linux PTE into the linux page table.
- * On machines which use an MMU hash table we avoid changing the
- * _PAGE_HASHPTE bit.
+ * This is called at the end of handling a user page fault, when the
+ * fault has been handled by updating a PTE in the linux page tables.
+ * We use it to preload an HPTE into the hash table corresponding to
+ * the updated linux PTE.
  */
-void set_pte(pte_t *ptep, pte_t pte)
+void update_mmu_cache(struct vm_area_struct *vma, unsigned long address,
+		      pte_t pte)
 {
-#if _PAGE_HASHPTE != 0
-	pte_update(ptep, ~_PAGE_HASHPTE, pte_val(pte) & ~_PAGE_HASHPTE);
-#else
-	*ptep = pte;
+	/* handle i-cache coherency */
+	unsigned long pfn = pte_pfn(pte);
+
+	if (pfn_valid(pfn)) {
+		struct page *page = pfn_to_page(pfn);
+		if (!PageReserved(page)
+		    && !test_bit(PG_arch_1, &page->flags)) {
+			if (vma->vm_mm == current->active_mm)
+				__flush_dcache_icache((void *) address);
+			else
+				__flush_dcache_icache_phys(pfn << PAGE_SHIFT);
+			set_bit(PG_arch_1, &page->flags);
+		}
+	}
+
+#ifdef CONFIG_PPC_STD_MMU
+	/* We only want HPTEs for linux PTEs that have _PAGE_ACCESSED set */
+	if (Hash != 0 && pte_young(pte)) {
+		struct mm_struct *mm;
+		pmd_t *pmd;
+
+		mm = (address < TASK_SIZE)? vma->vm_mm: &init_mm;
+		pmd = pmd_offset(pgd_offset(mm, address), address);
+		if (!pmd_none(*pmd))
+			add_hash_page(mm->context, address, pmd_val(*pmd));
+	}
 #endif
 }

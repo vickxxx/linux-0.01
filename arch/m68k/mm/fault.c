@@ -9,6 +9,7 @@
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 
 #include <asm/setup.h>
 #include <asm/traps.h>
@@ -34,10 +35,10 @@ int send_fault_sig(struct pt_regs *regs)
 		force_sig_info(siginfo.si_signo,
 			       &siginfo, current);
 	} else {
-		unsigned long fixup;
+		const struct exception_table_entry *fixup;
 
 		/* Are we prepared to handle this kernel fault? */
-		if ((fixup = search_exception_table(regs->pc))) {
+		if ((fixup = search_exception_tables(regs->pc))) {
 			struct pt_regs *tregs;
 			/* Create a new four word stack frame, discarding the old
 			   one.  */
@@ -45,7 +46,7 @@ int send_fault_sig(struct pt_regs *regs)
 			tregs =	(struct pt_regs *)((ulong)regs + regs->stkadj);
 			tregs->vector = regs->vector;
 			tregs->format = 0;
-			tregs->pc = fixup;
+			tregs->pc = fixup->fixup;
 			tregs->sr = regs->sr;
 			return -1;
 		}
@@ -152,22 +153,25 @@ good_area:
 	 * make sure we exit gracefully rather than endlessly redo
 	 * the fault.
 	 */
+
+ survive:
 	fault = handle_mm_fault(mm, vma, address, write);
 #ifdef DEBUG
  	printk("handle_mm_fault returns %d\n",fault);
 #endif
-	if (fault < 0)
-		goto out_of_memory;
-	if (!fault)
+	switch (fault) {
+	case 1:
+		current->min_flt++;
+		break;
+	case 2:
+		current->maj_flt++;
+		break;
+	case 0:
 		goto bus_err;
+	default:
+		goto out_of_memory;
+	}
 
-	/* There seems to be a missing invalidate somewhere in do_no_page.
-	 * Until I found it, this one cures the problem and makes
-	 * 1.2 run on the 68040 (Martin Apel).
-	 */
-	#warning should be obsolete now...
-	if (CPU_IS_040_OR_060)
-		flush_tlb_page(vma, address);
 	up_read(&mm->mmap_sem);
 	return 0;
 
@@ -176,6 +180,13 @@ good_area:
  * us unable to handle the page fault gracefully.
  */
 out_of_memory:
+	up_read(&mm->mmap_sem);
+	if (current->pid == 1) {
+		yield();
+		down_read(&mm->mmap_sem);
+		goto survive;
+	}
+	
 	printk("VM: killing process %s\n", current->comm);
 	if (user_mode(regs))
 		do_exit(SIGKILL);

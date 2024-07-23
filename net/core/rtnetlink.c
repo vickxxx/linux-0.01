@@ -34,6 +34,7 @@
 #include <linux/capability.h>
 #include <linux/skbuff.h>
 #include <linux/init.h>
+#include <linux/security.h>
 
 #include <asm/uaccess.h>
 #include <asm/system.h>
@@ -61,6 +62,8 @@ void rtnl_unlock(void)
 {
 	rtnl_exunlock();
 	rtnl_shunlock();
+
+	netdev_run_todo();
 }
 
 int rtattr_parse(struct rtattr *tb[], int maxattr, struct rtattr *rta, int len)
@@ -128,7 +131,7 @@ int rtnetlink_send(struct sk_buff *skb, u32 pid, unsigned group, int echo)
 	return err;
 }
 
-int rtnetlink_put_metrics(struct sk_buff *skb, unsigned *metrics)
+int rtnetlink_put_metrics(struct sk_buff *skb, u32 *metrics)
 {
 	struct rtattr *mx = (struct rtattr*)skb->tail;
 	int i;
@@ -136,7 +139,7 @@ int rtnetlink_put_metrics(struct sk_buff *skb, unsigned *metrics)
 	RTA_PUT(skb, RTA_METRICS, 0, NULL);
 	for (i=0; i<RTAX_MAX; i++) {
 		if (metrics[i])
-			RTA_PUT(skb, i+1, sizeof(unsigned), metrics+i);
+			RTA_PUT(skb, i+1, sizeof(u32), metrics+i);
 	}
 	mx->rta_len = skb->tail - (u8*)mx;
 	if (mx->rta_len == RTA_LENGTH(0))
@@ -218,6 +221,53 @@ int rtnetlink_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb)
 	cb->args[0] = idx;
 
 	return skb->len;
+}
+
+static int do_setlink(struct sk_buff *skb, struct nlmsghdr *nlh, void *arg)
+{
+	struct ifinfomsg  *ifm = NLMSG_DATA(nlh);
+	struct rtattr    **ida = arg;
+	struct net_device *dev;
+	int err;
+
+	dev = dev_get_by_index(ifm->ifi_index);
+	if (!dev)
+		return -ENODEV;
+
+	err = -EINVAL;
+
+	if (ida[IFLA_ADDRESS - 1]) {
+		if (!dev->set_mac_address) {
+			err = -EOPNOTSUPP;
+			goto out;
+		}
+		if (!netif_device_present(dev)) {
+			err = -ENODEV;
+			goto out;
+		}
+		if (ida[IFLA_ADDRESS - 1]->rta_len != RTA_LENGTH(dev->addr_len))
+			goto out;
+
+		err = dev->set_mac_address(dev, RTA_DATA(ida[IFLA_ADDRESS - 1]));
+		if (err)
+			goto out;
+	}
+
+	if (ida[IFLA_BROADCAST - 1]) {
+		if (ida[IFLA_BROADCAST - 1]->rta_len != RTA_LENGTH(dev->addr_len))
+			goto out;
+		memcpy(dev->broadcast, RTA_DATA(ida[IFLA_BROADCAST - 1]),
+		       dev->addr_len);
+	}
+
+	err = 0;
+
+out:
+	if (!err)
+		call_netdevice_notifiers(NETDEV_CHANGEADDR, dev);
+
+	dev_put(dev);
+	return err;
 }
 
 int rtnetlink_dump_all(struct sk_buff *skb, struct netlink_callback *cb)
@@ -316,7 +366,7 @@ rtnetlink_rcv_msg(struct sk_buff *skb, struct nlmsghdr *nlh, int *errp)
 	sz_idx = type>>2;
 	kind = type&3;
 
-	if (kind != 2 && !cap_raised(NETLINK_CB(skb).eff_cap, CAP_NET_ADMIN)) {
+	if (kind != 2 && security_netlink_recv(skb)) {
 		*errp = -EPERM;
 		return -1;
 	}
@@ -440,10 +490,11 @@ static void rtnetlink_rcv(struct sock *sk, int len)
 		if (rtnl_shlock_nowait())
 			return;
 
-		while ((skb = skb_dequeue(&sk->receive_queue)) != NULL) {
+		while ((skb = skb_dequeue(&sk->sk_receive_queue)) != NULL) {
 			if (rtnetlink_rcv_skb(skb)) {
 				if (skb->len)
-					skb_queue_head(&sk->receive_queue, skb);
+					skb_queue_head(&sk->sk_receive_queue,
+						       skb);
 				else
 					kfree_skb(skb);
 				break;
@@ -452,37 +503,21 @@ static void rtnetlink_rcv(struct sock *sk, int len)
 		}
 
 		up(&rtnl_sem);
-	} while (rtnl && rtnl->receive_queue.qlen);
+
+		netdev_run_todo();
+	} while (rtnl && rtnl->sk_receive_queue.qlen);
 }
 
 static struct rtnetlink_link link_rtnetlink_table[RTM_MAX-RTM_BASE+1] =
 {
-	{ NULL,			NULL,			},
-	{ NULL,			NULL,			},
-	{ NULL,			rtnetlink_dump_ifinfo,	},
-	{ NULL,			NULL,			},
-
-	{ NULL,			NULL,			},
-	{ NULL,			NULL,			},
-	{ NULL,			rtnetlink_dump_all,	},
-	{ NULL,			NULL,			},
-
-	{ NULL,			NULL,			},
-	{ NULL,			NULL,			},
-	{ NULL,			rtnetlink_dump_all,	},
-	{ NULL,			NULL,			},
-
-	{ neigh_add,		NULL,			},
-	{ neigh_delete,		NULL,			},
-	{ NULL,			neigh_dump_info,	},
-	{ NULL,			NULL,			},
-
-	{ NULL,			NULL,			},
-	{ NULL,			NULL,			},
-	{ NULL,			NULL,			},
-	{ NULL,			NULL,			},
+	[RTM_GETLINK  - RTM_BASE] = { .dumpit = rtnetlink_dump_ifinfo },
+	[RTM_SETLINK  - RTM_BASE] = { .doit   = do_setlink	      },
+	[RTM_GETADDR  - RTM_BASE] = { .dumpit = rtnetlink_dump_all    },
+	[RTM_GETROUTE - RTM_BASE] = { .dumpit = rtnetlink_dump_all    },
+	[RTM_NEWNEIGH - RTM_BASE] = { .doit   = neigh_add	      },
+	[RTM_DELNEIGH - RTM_BASE] = { .doit   = neigh_delete	      },
+	[RTM_GETNEIGH - RTM_BASE] = { .dumpit = neigh_dump_info	      }
 };
-
 
 static int rtnetlink_event(struct notifier_block *this, unsigned long event, void *ptr)
 {
@@ -509,9 +544,7 @@ static int rtnetlink_event(struct notifier_block *this, unsigned long event, voi
 }
 
 struct notifier_block rtnetlink_dev_notifier = {
-	rtnetlink_event,
-	NULL,
-	0
+	.notifier_call	= rtnetlink_event,
 };
 
 

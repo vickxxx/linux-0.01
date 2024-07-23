@@ -8,8 +8,10 @@
 
 #include <asm/cprefix.h>
 #include <asm/ptrace.h>
+#include <asm/asm_offsets.h>
 #include <asm/errno.h>
 #include <asm/winmacro.h>
+#include <asm/thread_info.h>
 #include <asm/psr.h>
 #include <asm/page.h>
 
@@ -35,21 +37,11 @@
 LABEL(sunosnop):
 	CC_AND_RETT
 
-#if 0
-/* Not SMP safe */
-	.globl	LABEL(sunosgetpid)
-LABEL(sunosgetpid):
-	LOAD_CURRENT(l4, l5)
-	ld	[%l4 + AOFF_task_pid], %i0
-	ld	[%l4 + AOFF_task_p_opptr], %l5
-	ld	[%l5 + AOFF_task_pid], %i1
-	CC_AND_RETT
-#endif
-
 #if (ASIZ_task_uid == 2 && ASIZ_task_euid == 2)
 	.globl	LABEL(sunosgetuid)
 LABEL(sunosgetuid):
 	LOAD_CURRENT(l4, l5)
+	ld	[%l4 + TI_TASK], %l4
 	lduh	[%l4 + AOFF_task_uid], %i0
 	lduh	[%l4 + AOFF_task_euid], %i1
 	CC_AND_RETT
@@ -59,6 +51,7 @@ LABEL(sunosgetuid):
 	.globl	LABEL(sunosgetgid)
 LABEL(sunosgetgid):
 	LOAD_CURRENT(l4, l5)
+	ld	[%l4 + TI_TASK], %l4
 	lduh	[%l4 + AOFF_task_gid], %i0
 	lduh	[%l4 + AOFF_task_egid], %i1
 	CC_AND_RETT
@@ -72,25 +65,6 @@ LABEL(sunosmctl):
 	.globl	LABEL(sunosgdtsize)
 LABEL(sunosgdtsize):	
 	mov	256, %i0
-	CC_AND_RETT
-
-	.globl	LABEL(sunossblock)
-LABEL(sunossblock):
-	LOAD_CURRENT(l4, l5)
-	set	-65793, %l5
-	and	%i0, %l5, %l5
-	ld	[%l4 + AOFF_task_blocked], %i0
-	or	%i0, %l5, %l5
-	st	%l5, [%l4 + AOFF_task_blocked]
-	CC_AND_RETT
-
-	.globl	LABEL(sunossmask)
-LABEL(sunossmask):
-	LOAD_CURRENT(l4, l5)
-	set	-65793, %l5
-	and	%i0, %l5, %l5
-	ld	[%l4 + AOFF_task_blocked], %i0
-	st	%l5, [%l4 + AOFF_task_blocked]
 	CC_AND_RETT
 
 	.globl	LABEL(getpagesize)

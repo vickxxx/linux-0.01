@@ -58,14 +58,11 @@
 #include <asm/pgtable.h>
 #include <asm/page.h>
 #include <linux/sched.h>
-#include <asm/segment.h>
 #include <linux/types.h>
-#include <linux/wrapper.h>
 
 #include <linux/spinlock.h>
 #include <linux/vmalloc.h>
 #include <linux/i2c-old.h>
-#define     MAP_NR(x)       virt_to_page(x)
 #define     ZORAN_HARDWARE  VID_HARDWARE_ZR36067
 
 #include <linux/videodev.h>
@@ -267,11 +264,11 @@ static void zoran_feed_stat_com(struct zoran *zr);
 /*
  *   Allocate the V4L grab buffers
  *
- *   These have to be pysically contiguous.
+ *   These have to be physically contiguous.
  *   If v4l_bufsize <= MAX_KMALLOC_MEM we use kmalloc
  *   else we try to allocate them with bigphysarea_alloc_pages
  *   if the bigphysarea patch is present in the kernel,
- *   else we try to use high memory (if the user has bootet
+ *   else we try to use high memory (if the user has booted
  *   Linux with the necessary memory left over).
  */
 
@@ -283,7 +280,7 @@ static int v4l_fbuffer_alloc(struct zoran *zr)
 	for (i = 0; i < v4l_nbufs; i++) {
 		if (zr->v4l_gbuf[i].fbuffer)
 			printk(KERN_WARNING
-			       "%s: v4l_fbuffer_alloc: buffer %d allready allocated ???\n",
+			       "%s: v4l_fbuffer_alloc: buffer %d already allocated ???\n",
 			       zr->name, i);
 
 		//udelay(20);
@@ -304,7 +301,7 @@ static int v4l_fbuffer_alloc(struct zoran *zr)
 			zr->v4l_gbuf[i].fbuffer_phys = virt_to_phys(mem);
 			zr->v4l_gbuf[i].fbuffer_bus = virt_to_bus(mem);
 			for (off = 0; off < v4l_bufsize; off += PAGE_SIZE)
-				mem_map_reserve(MAP_NR(mem + off));
+				SetPageReserved(virt_to_page(mem + off));
 			DEBUG1(printk
 			       (KERN_INFO
 				"%s: V4L frame %d mem 0x%lx (bus: 0x%lx)\n",
@@ -367,7 +364,7 @@ static void v4l_fbuffer_free(struct zoran *zr)
 		if (v4l_bufsize <= MAX_KMALLOC_MEM) {
 			mem = zr->v4l_gbuf[i].fbuffer;
 			for (off = 0; off < v4l_bufsize; off += PAGE_SIZE)
-				mem_map_unreserve(MAP_NR(mem + off));
+				ClearPageReserved(virt_to_page(mem + off));
 			kfree((void *) zr->v4l_gbuf[i].fbuffer);
 		}
 #if defined(CONFIG_BIGPHYS_AREA)
@@ -384,7 +381,7 @@ static void v4l_fbuffer_free(struct zoran *zr)
  *
  *   If the requested buffer size is smaller than MAX_KMALLOC_MEM,
  *   kmalloc is used to request a physically contiguous area,
- *   else we allocate the memory in framgents with get_free_page.
+ *   else we allocate the memory in framgents with get_zeroed_page.
  *
  *   If a Natoma chipset is present and this is a revision 1 zr36057,
  *   each MJPEG buffer needs to be physically contiguous.
@@ -397,7 +394,7 @@ static void v4l_fbuffer_free(struct zoran *zr)
  *       Therefore there is no need to allocate them with vmalloc in order
  *       to get a contiguous virtual memory space.
  *       I don't understand why many other drivers first allocate them with
- *       vmalloc (which uses internally also get_free_page, but delivers you
+ *       vmalloc (which uses internally also get_zeroed_page, but delivers you
  *       virtual addresses) and then again have to make a lot of efforts
  *       to get the physical address.
  *
@@ -416,15 +413,15 @@ static int jpg_fbuffer_alloc(struct zoran *zr)
 	for (i = 0; i < zr->jpg_nbufs; i++) {
 		if (zr->jpg_gbuf[i].frag_tab)
 			printk(KERN_WARNING
-			       "%s: jpg_fbuffer_alloc: buffer %d allready allocated ???\n",
+			       "%s: jpg_fbuffer_alloc: buffer %d already allocated ???\n",
 			       zr->name, i);
 
 		/* Allocate fragment table for this buffer */
 
-		mem = get_free_page(GFP_KERNEL);
+		mem = get_zeroed_page(GFP_KERNEL);
 		if (mem == 0) {
 			printk(KERN_ERR
-			       "%s: jpg_fbuffer_alloc: get_free_page (frag_tab) failed for buffer %d\n",
+			       "%s: jpg_fbuffer_alloc: get_zeroed_page (frag_tab) failed for buffer %d\n",
 			       zr->name, i);
 			jpg_fbuffer_free(zr);
 			return -ENOBUFS;
@@ -446,15 +443,15 @@ static int jpg_fbuffer_alloc(struct zoran *zr)
 			zr->jpg_gbuf[i].frag_tab[1] =
 			    ((zr->jpg_bufsize / 4) << 1) | 1;
 			for (off = 0; off < zr->jpg_bufsize; off += PAGE_SIZE)
-				mem_map_reserve(MAP_NR(mem + off));
+				SetPageReserved(virt_to_page(mem + off));
 		} else {
-			/* jpg_bufsize is allreay page aligned */
+			/* jpg_bufsize is already page aligned */
 			for (j = 0; j < zr->jpg_bufsize / PAGE_SIZE; j++) 
 			{
-				mem = get_free_page(GFP_KERNEL);
+				mem = get_zeroed_page(GFP_KERNEL);
 				if (mem == 0) {
 					printk(KERN_ERR
-					       "%s: jpg_fbuffer_alloc: get_free_page failed for buffer %d\n",
+					       "%s: jpg_fbuffer_alloc: get_zeroed_page failed for buffer %d\n",
 					       zr->name, i);
 					jpg_fbuffer_free(zr);
 					return -ENOBUFS;
@@ -464,7 +461,7 @@ static int jpg_fbuffer_alloc(struct zoran *zr)
 				    virt_to_bus((void *) mem);
 				zr->jpg_gbuf[i].frag_tab[2 * j + 1] =
 				    (PAGE_SIZE / 4) << 1;
-				mem_map_reserve(MAP_NR(mem));
+				SetPageReserved(virt_to_page(mem));
 			}
 
 			zr->jpg_gbuf[i].frag_tab[2 * j - 1] |= 1;
@@ -504,7 +501,7 @@ static void jpg_fbuffer_free(struct zoran *zr)
 								  [0]);
 				for (off = 0; off < zr->jpg_bufsize;
 				     off += PAGE_SIZE)
-					mem_map_unreserve(MAP_NR
+					ClearPageReserved(virt_to_page
 							  (mem + off));
 				kfree((void *) mem);
 				zr->jpg_gbuf[i].frag_tab[0] = 0;
@@ -514,7 +511,7 @@ static void jpg_fbuffer_free(struct zoran *zr)
 			for (j = 0; j < zr->jpg_bufsize / PAGE_SIZE; j++) {
 				if (!zr->jpg_gbuf[i].frag_tab[2 * j])
 					break;
-				mem_map_unreserve(MAP_NR
+				ClearPageReserved(virt_to_page
 						  (bus_to_virt
 						   (zr->jpg_gbuf[i].
 						    frag_tab[2 * j])));
@@ -938,7 +935,7 @@ static void zr36057_overlay(struct zoran *zr, int on)
 				fmt);
 
 		/* Start and length of each line MUST be 4-byte aligned.
-		   This should be allready checked before the call to this routine.
+		   This should be already checked before the call to this routine.
 		   All error messages are internal driver checking only! */
 
 		/* video display top and bottom registers */
@@ -1417,7 +1414,7 @@ static int zr36060_reset(struct zoran *zr)
 		zr36060_sleep(zr, 0);
 		post_office_write(zr, 3, 0, 0);
 		udelay(2);
-	default:
+	default:;
 	}
 	return 0;
 }
@@ -2609,7 +2606,7 @@ static void zoran_reap_stat_com(struct zoran *zr)
 		}
 		frame = zr->jpg_pend[zr->jpg_dma_tail & BUZ_MASK_FRAME];
 		gbuf = &zr->jpg_gbuf[frame];
-		get_fast_time(&gbuf->bs.timestamp);
+		do_gettimeofday(&gbuf->bs.timestamp);
 
 		if (zr->codec_mode == BUZ_MODE_MOTION_COMPRESS) {
 			gbuf->bs.length = (stat_com & 0x7fffff) >> 1;
@@ -2783,12 +2780,13 @@ static void error_handler(struct zoran *zr, u32 astat, u32 stat)
 	}
 }
 
-static void zoran_irq(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t zoran_irq(int irq, void *dev_id, struct pt_regs *regs)
 {
 	u32 stat, astat;
 	int count;
 	struct zoran *zr;
 	unsigned long flags;
+	int handled = 0;
 
 	zr = (struct zoran *) dev_id;
 	count = 0;
@@ -2807,7 +2805,7 @@ static void zoran_irq(int irq, void *dev_id, struct pt_regs *regs)
 		}
 		zr->last_isr = stat;
 		spin_unlock_irqrestore(&zr->lock, flags);
-		return;
+		return IRQ_HANDLED;
 	}
 
 	spin_lock_irqsave(&zr->lock, flags);
@@ -2818,6 +2816,7 @@ static void zoran_irq(int irq, void *dev_id, struct pt_regs *regs)
 		if (!astat) {
 			break;
 		}
+		handled = 1;
 		if (astat & cardvsync[zr->card]) {	// SW
 
 			if (zr->codec_mode == BUZ_MODE_MOTION_DECOMPRESS
@@ -3011,6 +3010,7 @@ static void zoran_irq(int irq, void *dev_id, struct pt_regs *regs)
 		zr->last_isr = stat;
 	}
 	spin_unlock_irqrestore(&zr->lock, flags);
+	return IRQ_RETVAL(handled);
 }
 
 /* Check a zoran_params struct for correctness, insert default params */
@@ -3242,7 +3242,7 @@ static int zoran_open(struct video_device *dev, int flags)
 	case 0:
 		if (zr->user > 1) {
 			DEBUG1(printk(KERN_WARNING
-			       "%s: zoran_open: Buz is allready in use\n",
+			       "%s: zoran_open: Buz is already in use\n",
 			       zr->name));
 			return -EBUSY;
 		}
@@ -3356,7 +3356,7 @@ static int do_zoran_ioctl(struct zoran *zr, unsigned int cmd,
 			struct video_capability b;
 			DEBUG2(printk("%s: ioctl VIDIOCGCAP\n", zr->name));
 
-			strncpy(b.name, zr->video_dev.name,
+			strlcpy(b.name, zr->video_dev.name,
 				sizeof(b.name));
 			b.type =
 			    VID_TYPE_CAPTURE | VID_TYPE_OVERLAY |
@@ -3630,7 +3630,7 @@ static int do_zoran_ioctl(struct zoran *zr, unsigned int cmd,
 			       ("%s: ioctl VIDIOCCAPTURE: %d\n", zr->name,
 				v));
 
-			/* If there is nothing to do, return immediatly */
+			/* If there is nothing to do, return immediately */
 
 			if ((v && zr->v4l_overlay_active)
 			    || (!v && !zr->v4l_overlay_active))
@@ -3759,7 +3759,7 @@ static int do_zoran_ioctl(struct zoran *zr, unsigned int cmd,
 			 *   Write the overlay mask if clips are wanted.
 			 */
 			 
-			if (vw.clipcount > 2048)
+			if (vw.clipcount < 0 || vw.clipcount > 2048)
 				return -EINVAL;
 			if (vw.clipcount) {
 				vcp =
@@ -4049,7 +4049,7 @@ static int do_zoran_ioctl(struct zoran *zr, unsigned int cmd,
 
 			zr->params = bp;
 
-			/* Make changes of input and norm go into effect immediatly */
+			/* Make changes of input and norm go into effect immediately */
 
 			/* We switch overlay off and on since a change in the norm
 			   needs different VFE settings */
@@ -4067,7 +4067,7 @@ static int do_zoran_ioctl(struct zoran *zr, unsigned int cmd,
 
 			if (zr->jpg_buffers_allocated) {
 				DEBUG1(printk(KERN_ERR
-				       "%s: BUZIOC_REQBUFS: buffers allready allocated\n",
+				       "%s: BUZIOC_REQBUFS: buffers already allocated\n",
 				       zr->name));
 				return -EINVAL;
 			}
@@ -4159,7 +4159,6 @@ static int do_zoran_ioctl(struct zoran *zr, unsigned int cmd,
 		{
 			struct zoran_status bs;
 			int norm, input, status;
-			unsigned long timeout;
 
 			if (zr->codec_mode != BUZ_MODE_IDLE) {
 				DEBUG1(printk(KERN_ERR
@@ -4205,9 +4204,8 @@ static int do_zoran_ioctl(struct zoran *zr, unsigned int cmd,
 
 			/* sleep 1 second */
 
-			timeout = jiffies + 1 * HZ;
-			while (jiffies < timeout)
-				schedule();
+			set_current_state(TASK_UNINTERRUPTIBLE);
+			schedule_timeout(HZ);
 
 			/* Get status of video decoder */
 
@@ -4275,7 +4273,7 @@ static int zoran_ioctl(struct video_device *dev, unsigned int cmd, void *arg)
  *
  */
 
-static int do_zoran_mmap(struct zoran *zr, const char *adr,
+static int do_zoran_mmap(struct vm_area_struct *vma, struct zoran *zr, const char *adr,
 		      unsigned long size)
 {
 	unsigned long start = (unsigned long) adr;
@@ -4322,7 +4320,7 @@ static int do_zoran_mmap(struct zoran *zr, const char *adr,
 				    frag_tab[2 * j];
 				page = virt_to_phys(bus_to_virt(pos));	/* should just be pos on i386 */
 				if (remap_page_range
-				    (start, page, todo, PAGE_SHARED)) {
+				    (vma, start, page, todo, PAGE_SHARED)) {
 					printk(KERN_ERR
 					       "%s: zoran_mmap(V4L): remap_page_range failed\n",
 					       zr->name);
@@ -4363,7 +4361,7 @@ static int do_zoran_mmap(struct zoran *zr, const char *adr,
 			       ("V4L remap page range %d 0x%lx %ld to 0x%lx\n",
 				i, page, todo, start));
 			if (remap_page_range
-			    (start, page, todo, PAGE_SHARED)) {
+			    (vma, start, page, todo, PAGE_SHARED)) {
 				printk(KERN_ERR
 				       "%s: zoran_mmap(V4L): remap_page_range failed\n",
 				       zr->name);
@@ -4378,14 +4376,14 @@ static int do_zoran_mmap(struct zoran *zr, const char *adr,
 	return 0;
 }
 
-static int zoran_mmap(struct video_device *dev, const char *adr,
+static int zoran_mmap(struct vm_area_struct *vma, struct video_device *dev, const char *adr,
 		      unsigned long size)
 {
 	int err;
 	struct zoran *zr = (struct zoran *) dev;
 	
 	down(&zr->sem);
-	err = do_zoran_mmap(zr, adr, size);
+	err = do_zoran_mmap(vma, zr, adr, size);
 	up(&zr->sem);
 		
 	return err;
@@ -4397,22 +4395,18 @@ static int zoran_init_done(struct video_device *dev)
 }
 
 static struct video_device zoran_template = {
-	THIS_MODULE,
-	ZORAN_NAME,
-	VID_TYPE_CAPTURE | VID_TYPE_OVERLAY | VID_TYPE_CLIPPING |
+	.owner		= THIS_MODULE,
+	.name		= ZORAN_NAME,
+	.type		= VID_TYPE_CAPTURE | VID_TYPE_OVERLAY | VID_TYPE_CLIPPING |
 	    VID_TYPE_FRAMERAM | VID_TYPE_SCALES | VID_TYPE_SUBCAPTURE,
-	ZORAN_HARDWARE,
-	zoran_open,
-	zoran_close,
-	zoran_read,
-	zoran_write,
-	NULL,
-	zoran_ioctl,
-	zoran_mmap,
-	zoran_init_done,
-	NULL,
-	0,
-	0
+	.hardware	= ZORAN_HARDWARE,
+	.open		= zoran_open,
+	.close		= zoran_close,
+	.read		= zoran_read,
+	.write		= zoran_write,
+	.ioctl		= zoran_ioctl,
+	.mmap		= zoran_mmap,
+	.initialize	= zoran_init_done,
 };
 
 /*

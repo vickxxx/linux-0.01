@@ -21,7 +21,6 @@
  *
  *  PCI functions for Integrator
  */
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/ptrace.h>
@@ -31,6 +30,7 @@
 #include <asm/irq.h>
 #include <asm/system.h>
 #include <asm/mach/pci.h>
+#include <asm/mach-types.h>
 
 /* 
  * A small note about bridges and interrupts.  The DECchip 21050 (and
@@ -110,13 +110,23 @@ static int __init integrator_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	return irq_tab[intnr];
 }
 
-extern void pci_v3_setup_resources(struct resource **res);
 extern void pci_v3_init(void *);
 
-struct hw_pci integrator_pci __initdata = {
-	setup_resources:	pci_v3_setup_resources,
-	init:			pci_v3_init,
-	mem_offset:		0x40000000,
-	swizzle:		integrator_swizzle,
-	map_irq:		integrator_map_irq,
+static struct hw_pci integrator_pci __initdata = {
+	.swizzle		= integrator_swizzle,
+	.map_irq		= integrator_map_irq,
+	.setup			= pci_v3_setup,
+	.nr_controllers		= 1,
+	.scan			= pci_v3_scan_bus,
+	.preinit		= pci_v3_preinit,
+	.postinit		= pci_v3_postinit,
 };
+
+static int __init integrator_pci_init(void)
+{
+	if (machine_is_integrator())
+		pci_common_init(&integrator_pci);
+	return 0;
+}
+
+subsys_initcall(integrator_pci_init);

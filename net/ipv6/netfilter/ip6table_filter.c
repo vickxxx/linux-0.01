@@ -35,12 +35,12 @@ static struct
 } initial_table __initdata
 = { { "filter", FILTER_VALID_HOOKS, 4,
       sizeof(struct ip6t_standard) * 3 + sizeof(struct ip6t_error),
-      { [NF_IP6_LOCAL_IN] 0,
-	[NF_IP6_FORWARD] sizeof(struct ip6t_standard),
-	[NF_IP6_LOCAL_OUT] sizeof(struct ip6t_standard) * 2 },
-      { [NF_IP6_LOCAL_IN] 0,
-	[NF_IP6_FORWARD] sizeof(struct ip6t_standard),
-	[NF_IP6_LOCAL_OUT] sizeof(struct ip6t_standard) * 2 },
+      { [NF_IP6_LOCAL_IN] = 0,
+	[NF_IP6_FORWARD] = sizeof(struct ip6t_standard),
+	[NF_IP6_LOCAL_OUT] = sizeof(struct ip6t_standard) * 2 },
+      { [NF_IP6_LOCAL_IN] = 0,
+	[NF_IP6_FORWARD] = sizeof(struct ip6t_standard),
+	[NF_IP6_LOCAL_OUT] = sizeof(struct ip6t_standard) * 2 },
       0, NULL, { } },
     {
 	    /* LOCAL_IN */
@@ -81,9 +81,13 @@ static struct
     }
 };
 
-static struct ip6t_table packet_filter
-= { { NULL, NULL }, "filter", &initial_table.repl,
-    FILTER_VALID_HOOKS, RW_LOCK_UNLOCKED, NULL, THIS_MODULE };
+static struct ip6t_table packet_filter = {
+	.name		= "filter",
+	.table		= &initial_table.repl,
+	.valid_hooks	= FILTER_VALID_HOOKS,
+	.lock		= RW_LOCK_UNLOCKED,
+	.me		= THIS_MODULE,
+};
 
 /* The work comes in here from netfilter.c. */
 static unsigned int
@@ -116,11 +120,28 @@ ip6t_local_out_hook(unsigned int hook,
 	return ip6t_do_table(pskb, hook, in, out, &packet_filter, NULL);
 }
 
-static struct nf_hook_ops ip6t_ops[]
-= { { { NULL, NULL }, ip6t_hook, PF_INET6, NF_IP6_LOCAL_IN, NF_IP6_PRI_FILTER },
-    { { NULL, NULL }, ip6t_hook, PF_INET6, NF_IP6_FORWARD, NF_IP6_PRI_FILTER },
-    { { NULL, NULL }, ip6t_local_out_hook, PF_INET6, NF_IP6_LOCAL_OUT,
-		NF_IP6_PRI_FILTER }
+static struct nf_hook_ops ip6t_ops[] = {
+	{
+		.hook		= ip6t_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET6,
+		.hooknum	= NF_IP6_LOCAL_IN,
+		.priority	= NF_IP6_PRI_FILTER,
+	},
+	{
+		.hook		= ip6t_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET6,
+		.hooknum	= NF_IP6_FORWARD,
+		.priority	= NF_IP6_PRI_FILTER,
+	},
+	{
+		.hook		= ip6t_local_out_hook,
+		.owner		= THIS_MODULE,
+		.pf		= PF_INET6,
+		.hooknum	= NF_IP6_LOCAL_OUT,
+		.priority	= NF_IP6_PRI_FILTER,
+	},
 };
 
 /* Default to forward because I got too much mail already. */

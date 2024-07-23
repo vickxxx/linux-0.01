@@ -1,10 +1,3 @@
-# BK Id: SCCS/s.Makefile 1.3 05/17/01 18:14:22 cort
-#
-#
-#
-#
-
-O_TARGET			:= math-emu.o
 
 obj-y				:= math.o fmr.o lfd.o stfd.o
 
@@ -18,5 +11,3 @@ obj-$(CONFIG_MATH_EMULATION)	+= fabs.o fadd.o fadds.o fcmpo.o fcmpu.o \
 					mcrfs.o mffs.o mtfsb0.o mtfsb1.o \
 					mtfsf.o mtfsfi.o stfiwx.o stfs.o \
 					udivmodti4.o
-
-include $(TOPDIR)/Rules.make

@@ -584,7 +584,7 @@ EVENT("error code 0x%x/0x%x\n",(here[3] & uPD98401_AAL5_ES) >>
 #ifdef CONFIG_ATM_ZATM_EXACT_TS
 		skb->stamp = exact_time(zatm_dev,here[1]);
 #else
-		skb->stamp = xtime;
+		do_gettimeofday(&skb->stamp);
 #endif
 #if 0
 printk("[-3..0] 0x%08lx 0x%08lx 0x%08lx 0x%08lx\n",((unsigned *) skb->data)[-3],
@@ -827,10 +827,10 @@ static int do_tx(struct sk_buff *skb)
 	vcc = ATM_SKB(skb)->vcc;
 	zatm_dev = ZATM_DEV(vcc->dev);
 	zatm_vcc = ZATM_VCC(vcc);
-	EVENT("iovcnt=%d\n",ATM_SKB(skb)->iovcnt,0);
+	EVENT("iovcnt=%d\n",skb_shinfo(skb)->nr_frags,0);
 	save_flags(flags);
 	cli();
-	if (!ATM_SKB(skb)->iovcnt) {
+	if (!skb_shinfo(skb)->nr_frags) {
 		if (zatm_vcc->txing == RING_ENTRIES-1) {
 			restore_flags(flags);
 			return RING_BUSY;
@@ -1214,15 +1214,17 @@ static int start_tx(struct atm_dev *dev)
 /*------------------------------- interrupts --------------------------------*/
 
 
-static void zatm_int(int irq,void *dev_id,struct pt_regs *regs)
+static irqreturn_t zatm_int(int irq,void *dev_id,struct pt_regs *regs)
 {
 	struct atm_dev *dev;
 	struct zatm_dev *zatm_dev;
 	u32 reason;
+	int handled = 0;
 
 	dev = dev_id;
 	zatm_dev = ZATM_DEV(dev);
 	while ((reason = zin(GSR))) {
+		handled = 1;
 		EVENT("reason 0x%x\n",reason,0);
 		if (reason & uPD98401_INT_PI) {
 			EVENT("PHY int\n",0,0);
@@ -1285,6 +1287,7 @@ static void zatm_int(int irq,void *dev_id,struct pt_regs *regs)
 		}
 		/* @@@ handle RCRn */
 	}
+	return IRQ_RETVAL(handled);
 }
 
 
@@ -1793,21 +1796,20 @@ static unsigned char zatm_phy_get(struct atm_dev *dev,unsigned long addr)
 
 
 static const struct atmdev_ops ops = {
-	open:		zatm_open,
-	close:		zatm_close,
-	ioctl:		zatm_ioctl,
-	getsockopt:	zatm_getsockopt,
-	setsockopt:	zatm_setsockopt,
-	send:		zatm_send,
+	.open		= zatm_open,
+	.close		= zatm_close,
+	.ioctl		= zatm_ioctl,
+	.getsockopt	= zatm_getsockopt,
+	.setsockopt	= zatm_setsockopt,
+	.send		= zatm_send,
 	/*zatm_sg_send*/
-	phy_put:	zatm_phy_put,
-	phy_get:	zatm_phy_get,
-	feedback:	zatm_feedback,
-	change_qos:	zatm_change_qos,
+	.phy_put	= zatm_phy_put,
+	.phy_get	= zatm_phy_get,
+	.feedback	= zatm_feedback,
+	.change_qos	= zatm_change_qos,
 };
 
-
-int __init zatm_detect(void)
+static int __init zatm_module_init(void)
 {
 	struct atm_dev *dev;
 	struct zatm_dev *zatm_dev;
@@ -1841,36 +1843,18 @@ int __init zatm_detect(void)
 			    zatm_dev),GFP_KERNEL);
 			if (!zatm_dev) {
 				printk(KERN_EMERG "zatm.c: memory shortage\n");
-				return devs;
+				goto out;
 			}
 		}
 	}
+out:
 	kfree(zatm_dev);
-	return devs;
-}
 
-
-#ifdef MODULE
- 
-MODULE_LICENSE("GPL");
-
-int init_module(void)
-{
-	if (!zatm_detect()) {
-		printk(KERN_ERR DEV_LABEL ": no adapter found\n");
-		return -ENXIO;
-	}
+	/* XXX: currently the driver is not unloadable.. */
 	MOD_INC_USE_COUNT;
 	return 0;
 }
- 
- 
-void cleanup_module(void)
-{
-	/*
-	 * Well, there's no way to get rid of the driver yet, so we don't
-	 * have to clean up, right ? :-)
-	 */
-}
- 
-#endif
+
+MODULE_LICENSE("GPL");
+
+module_init(zatm_module_init);

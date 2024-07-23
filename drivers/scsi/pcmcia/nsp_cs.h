@@ -10,13 +10,15 @@
 
 =========================================================*/
 
-/* $Id: nsp_cs.h,v 1.27 2001/09/10 10:31:13 elca Exp $ */
+/* $Id: nsp_cs.h,v 1.4 2002/11/05 12:06:29 elca Exp $ */
 
 #ifndef  __nsp_cs__
 #define  __nsp_cs__
 
+#include <linux/version.h>
+
 /* for debugging */
-/*#define PCMCIA_DEBUG 9*/
+//#define PCMCIA_DEBUG 9
 
 /*
 #define static
@@ -26,12 +28,12 @@
 /************************************
  * Some useful macros...
  */
-#define Number(arr) ((int) (sizeof(arr) / sizeof(arr[0])))
-#define BIT(x)      (1<<(x))
+#define NUMBER(arr) ((int) (sizeof(arr) / sizeof(arr[0]))) /* from XtNumber() in /usr/X11R6/include/X11/Intrinsic.h */
+#define BIT(x)      (1L << (x))
 #define MIN(a,b)    ((a) > (b) ? (b) : (a))
 
-/* SCSI initiator must be 7 */
-#define SCSI_INITIATOR_ID  7
+/* SCSI initiator must be ID 7 */
+#define NSP_INITIATOR_ID  7
 
 #define NSP_SELTIMEOUT 200
 
@@ -73,6 +75,7 @@
 #define CLOCKDIV	0x11
 #  define CLOCK_40M 0x02
 #  define CLOCK_20M 0x01
+#  define FAST_20   BIT(2)
 
 #define TERMPWRCTRL	0x13
 #  define POWER_ON BIT(0)
@@ -133,6 +136,9 @@
 #  define REQ_COUNTER_CLEAR  BIT(2)
 #  define HOST_COUNTER_CLEAR BIT(3)
 #  define READ_SOURCE        0x30
+#   define ACK_COUNTER       (0)
+#   define REQ_COUNTER       (BIT(4))
+#   define HOST_COUNTER      (BIT(5))
 
 #define TRANSFERCOUNT	0x1E  /* R */
 
@@ -177,7 +183,7 @@
 #define S_ATN		0x80	/**/
 #define S_SELECT	0x40	/**/
 #define S_REQUEST	0x20    /* Request line from SCSI bus*/
-#define S_ACK		0x10    /* Acknowlege line from SCSI bus*/
+#define S_ACK		0x10    /* Acknowledge line from SCSI bus*/
 #define S_BUSY		0x08    /* Busy line from SCSI bus*/
 #define S_CD		0x04    /* Command/Data line from SCSI bus*/
 #define S_IO		0x02    /* Input/Output line from SCSI bus*/
@@ -222,10 +228,13 @@ typedef struct _sync_data {
 	unsigned char AckWidth;
 } sync_data;
 
-typedef struct _nsp_data {
+typedef struct _nsp_hw_data {
 	unsigned int  BaseAddress;
 	unsigned int  NumAddress;
 	unsigned int  IrqNumber;
+
+	unsigned long MmioAddress;
+#define NSP_MMIO_OFFSET 0x0800
 
 	unsigned char ScsiClockDiv;
 
@@ -238,9 +247,9 @@ typedef struct _nsp_data {
 	int           FifoCount;
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0))
 	int           Residual;
-#define RESID data->Residual
+#define RESID (data->Residual)
 #else
-#define RESID SCpnt->resid
+#define RESID (SCpnt->resid)
 #endif
 
 #define MSGBUF_SIZE 20
@@ -248,29 +257,36 @@ typedef struct _nsp_data {
 	int MsgLen;
 
 #define N_TARGET 8
-#define N_LUN    8
-	sync_data     Sync[N_TARGET][N_LUN];
+	sync_data     Sync[N_TARGET];
+
+	char nspinfo[110];     /* description */
+	spinlock_t Lock;
 } nsp_hw_data;
 
+/* scatter-gather table */
+#if (LINUX_VERSION_CODE > KERNEL_VERSION(2,5,2))
+# define BUFFER_ADDR ((char *)((unsigned int)(SCpnt->SCp.buffer->page) + SCpnt->SCp.buffer->offset))
+#else
+# define BUFFER_ADDR SCpnt->SCp.buffer->address
+#endif
 
-static void nsp_cs_release(u_long arg);
-static int nsp_cs_event(event_t event, int priority, event_callback_args_t *args);
+
+
+static void        nsp_cs_release(u_long arg);
+static int         nsp_cs_event(event_t event, int priority, event_callback_args_t *args);
 static dev_link_t *nsp_cs_attach(void);
-static void nsp_cs_detach(dev_link_t *);
+static void        nsp_cs_detach(dev_link_t *);
 
 static unsigned int nsphw_start_selection(Scsi_Cmnd *SCpnt, nsp_hw_data *data);
 static void nsp_start_timer(Scsi_Cmnd *SCpnt, nsp_hw_data *data, int time);
 
-static int nsp_detect(Scsi_Host_Template * );
-static int nsp_release(struct Scsi_Host *shpnt);
-static const char * nsp_info(struct Scsi_Host *shpnt);
+static const char *nsp_info(struct Scsi_Host *shpnt);
+static int nsp_proc_info(struct Scsi_Host *host, char *buffer, char **start, off_t offset,
+			 int length, int inout);
 static int nsp_queuecommand(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
 
-static int nsp_abort(Scsi_Cmnd *);
-static int nsp_reset(Scsi_Cmnd *, unsigned int);
-
-static int nsp_eh_abort(Scsi_Cmnd * SCpnt);
-static int nsp_eh_device_reset(Scsi_Cmnd *SCpnt);
+/*static int nsp_eh_abort(Scsi_Cmnd * SCpnt);*/
+/*static int nsp_eh_device_reset(Scsi_Cmnd *SCpnt);*/
 static int nsp_eh_bus_reset(Scsi_Cmnd *SCpnt);
 static int nsp_eh_host_reset(Scsi_Cmnd *SCpnt);
 
@@ -294,17 +310,19 @@ static void show_message(nsp_hw_data *data);
  * SCSI phase
  */
 enum _scsi_phase {
-	PH_UNDETERMINED,
-	PH_ARBSTART,
-	PH_SELSTART,
-	PH_SELECTED,
-	PH_COMMAND,
-	PH_DATA,
-	PH_STATUS,
-	PH_MSG_IN,
-	PH_MSG_OUT,
-	PH_DISCONNECT,
-	PH_RESELECT
+	PH_UNDETERMINED ,
+	PH_ARBSTART     ,
+	PH_SELSTART     ,
+	PH_SELECTED     ,
+	PH_COMMAND      ,
+	PH_DATA         ,
+	PH_STATUS       ,
+	PH_MSG_IN       ,
+	PH_MSG_OUT      ,
+	PH_DISCONNECT   ,
+	PH_RESELECT     ,
+	PH_ABORT        ,
+	PH_RESET
 };
 
 enum _data_in_out {
@@ -313,11 +331,19 @@ enum _data_in_out {
 	IO_OUT
 };
 
+enum _burst_mode {
+	BURST_IO8 = 0,
+	BURST_IO32,
+	BURST_MEM32
+};
+
 
 /* SCSI messaage */
 #define MSG_COMMAND_COMPLETE 0x00
 #define MSG_EXTENDED         0x01
+#define MSG_ABORT            0x06
 #define MSG_NO_OPERATION     0x08
+#define MSG_BUS_DEVICE_RESET 0x0c
 
 #define MSG_EXT_SDTR         0x01
 

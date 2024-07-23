@@ -144,12 +144,10 @@ static int tcindex_init(struct tcf_proto *tp)
 	struct tcindex_data *p;
 
 	DPRINTK("tcindex_init(tp %p)\n",tp);
-	MOD_INC_USE_COUNT;
 	p = kmalloc(sizeof(struct tcindex_data),GFP_KERNEL);
-	if (!p) {
-		MOD_DEC_USE_COUNT;
+	if (!p)
 		return -ENOMEM;
-	}
+
 	tp->root = p;
 	p->perfect = NULL;
 	p->h = NULL;
@@ -161,8 +159,7 @@ static int tcindex_init(struct tcf_proto *tp)
 }
 
 
-static int
-__tcindex_delete(struct tcf_proto *tp, unsigned long arg, int lock)
+static int tcindex_delete(struct tcf_proto *tp, unsigned long arg)
 {
 	struct tcindex_data *p = PRIV(tp);
 	struct tcindex_filter_result *r = (struct tcindex_filter_result *) arg;
@@ -185,11 +182,9 @@ __tcindex_delete(struct tcf_proto *tp, unsigned long arg, int lock)
 
 found:
 		f = *walk;
-		if (lock)
-			tcf_tree_lock(tp);
+		tcf_tree_lock(tp); 
 		*walk = f->next;
-		if (lock)
-			tcf_tree_unlock(tp);
+		tcf_tree_unlock(tp);
 	}
 	cl = __cls_set_class(&r->res.class,0);
 	if (cl)
@@ -202,10 +197,6 @@ found:
 	return 0;
 }
 
-static int tcindex_delete(struct tcf_proto *tp, unsigned long arg)
-{
-	return __tcindex_delete(tp, arg, 1);
-}
 
 /*
  * There are no parameters for tcindex_init, so we overload tcindex_change
@@ -404,7 +395,7 @@ static void tcindex_walk(struct tcf_proto *tp, struct tcf_walker *walker)
 static int tcindex_destroy_element(struct tcf_proto *tp,
     unsigned long arg, struct tcf_walker *walker)
 {
-	return __tcindex_delete(tp, arg, 0);
+	return tcindex_delete(tp,arg);
 }
 
 
@@ -424,7 +415,6 @@ static void tcindex_destroy(struct tcf_proto *tp)
 		kfree(p->h);
 	kfree(p);
 	tp->root = NULL;
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -487,18 +477,18 @@ rtattr_failure:
 }
 
 struct tcf_proto_ops cls_tcindex_ops = {
-	NULL,
-	"tcindex",
-	tcindex_classify,
-	tcindex_init,
-	tcindex_destroy,
-
-	tcindex_get,
-	tcindex_put,
-	tcindex_change,
-	tcindex_delete,
-	tcindex_walk,
-	tcindex_dump
+	.next		=	NULL,
+	.kind		=	"tcindex",
+	.classify	=	tcindex_classify,
+	.init		=	tcindex_init,
+	.destroy	=	tcindex_destroy,
+	.get		=	tcindex_get,
+	.put		=	tcindex_put,
+	.change		=	tcindex_change,
+	.delete		=	tcindex_delete,
+	.walk		=	tcindex_walk,
+	.dump		=	tcindex_dump,
+	.owner		=	THIS_MODULE,
 };
 
 

@@ -220,7 +220,7 @@ static scq_info *get_scq(int size, u32 scd);
 static void free_scq(scq_info *scq, struct atm_vcc *vcc);
 static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
                        u32 handle2, u32 addr2);
-static void ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs);
 static int ns_open(struct atm_vcc *vcc, short vpi, int vci);
 static void ns_close(struct atm_vcc *vcc);
 static void fill_tst(ns_dev *card, int n, vc_map *vc);
@@ -259,14 +259,14 @@ static struct ns_dev *cards[NS_MAX_CARDS];
 static unsigned num_cards;
 static struct atmdev_ops atm_ops =
 {
-   open:	ns_open,
-   close:	ns_close,
-   ioctl:	ns_ioctl,
-   send:	ns_send,
-   phy_put:	ns_phy_put,
-   phy_get:	ns_phy_get,
-   proc_read:	ns_proc_read,
-   owner:	THIS_MODULE,
+   .open	= ns_open,
+   .close	= ns_close,
+   .ioctl	= ns_ioctl,
+   .send	= ns_send,
+   .phy_put	= ns_phy_put,
+   .phy_get	= ns_phy_get,
+   .proc_read	= ns_proc_read,
+   .owner	= THIS_MODULE,
 };
 static struct timer_list ns_timer;
 static char *mac[NS_MAX_CARDS];
@@ -276,20 +276,13 @@ MODULE_LICENSE("GPL");
 
 /* Functions*******************************************************************/
 
-#ifdef MODULE
-
-int __init init_module(void)
+static int __init nicstar_module_init(void)
 {
    int i;
    unsigned error = 0;	/* Initialized to remove compile warning */
    struct pci_dev *pcidev;
 
-   XPRINTK("nicstar: init_module() called.\n");
-   if(!pci_present())
-   {
-      printk("nicstar: no PCI subsystem found.\n");
-      return -EIO;
-   }
+   XPRINTK("nicstar: nicstar_module_init() called.\n");
 
    for(i = 0; i < NS_MAX_CARDS; i++)
       cards[i] = NULL;
@@ -323,7 +316,7 @@ int __init init_module(void)
 #ifdef PHY_LOOPBACK
    printk("nicstar: using PHY loopback.\n");
 #endif /* PHY_LOOPBACK */
-   XPRINTK("nicstar: init_module() returned.\n");
+   XPRINTK("nicstar: nicstar_module_init() returned.\n");
 
    init_timer(&ns_timer);
    ns_timer.expires = jiffies + NS_POLL_PERIOD;
@@ -335,7 +328,7 @@ int __init init_module(void)
 
 
 
-void cleanup_module(void)
+static void __exit nicstar_module_exit(void)
 {
    int i, j;
    unsigned short pci_command;
@@ -347,9 +340,6 @@ void cleanup_module(void)
    
    XPRINTK("nicstar: cleanup_module() called.\n");
 
-   if (MOD_IN_USE)
-      printk("nicstar: module in use, remove delayed.\n");
-
    del_timer(&ns_timer);
 
    for (i = 0; i < NS_MAX_CARDS; i++)
@@ -359,11 +349,8 @@ void cleanup_module(void)
 
       card = cards[i];
 
-#ifdef CONFIG_ATM_NICSTAR_USE_IDT77105
-      if (card->max_pcr == ATM_25_PCR) {
-        idt77105_stop(card->atmdev);
-      }
-#endif /* CONFIG_ATM_NICSTAR_USE_IDT77105 */
+      if (card->atmdev->phy && card->atmdev->phy->stop)
+        card->atmdev->phy->stop(card->atmdev);
 
       /* Stop everything */
       writel(0x00000000, card->membase + CFG);
@@ -418,60 +405,6 @@ void cleanup_module(void)
    }
    XPRINTK("nicstar: cleanup_module() returned.\n");
 }
-
-
-#else
-
-int __init nicstar_detect(void)
-{
-   int i;
-   unsigned error = 0;	/* Initialized to remove compile warning */
-   struct pci_dev *pcidev;
-
-   if(!pci_present())
-   {
-      printk("nicstar: no PCI subsystem found.\n");
-      return -EIO;
-   }
-
-   for(i = 0; i < NS_MAX_CARDS; i++)
-      cards[i] = NULL;
-
-   pcidev = NULL;
-   for(i = 0; i < NS_MAX_CARDS; i++)
-   {
-      if ((pcidev = pci_find_device(PCI_VENDOR_ID_IDT,
-                                    PCI_DEVICE_ID_IDT_IDT77201,
-                                    pcidev)) == NULL)
-         break;
-
-      error = ns_init_card(i, pcidev);
-      if (error)
-         cards[i--] = NULL;	/* Try to find another card but don't increment index */
-   }
-
-   if (i == 0 && error)
-      return -EIO;
-
-   TXPRINTK("nicstar: TX debug enabled.\n");
-   RXPRINTK("nicstar: RX debug enabled.\n");
-   PRINTK("nicstar: General debug enabled.\n");
-#ifdef PHY_LOOPBACK
-   printk("nicstar: using PHY loopback.\n");
-#endif /* PHY_LOOPBACK */
-   XPRINTK("nicstar: init_module() returned.\n");
-
-   init_timer(&ns_timer);
-   ns_timer.expires = jiffies + NS_POLL_PERIOD;
-   ns_timer.data = 0UL;
-   ns_timer.function = ns_poll;
-   add_timer(&ns_timer);
-   return i;
-}
-
-
-#endif /* MODULE */
-
 
 static u32 ns_read_sram(ns_dev *card, u32 sram_address)
 {
@@ -549,11 +482,6 @@ static int __init ns_init_card(int i, struct pci_dev *pcidev)
    card->atmdev = NULL;
    card->pcidev = pcidev;
    card->membase = pci_resource_start(pcidev, 1);
-#ifdef __powerpc__
-   /* Compensate for different memory map between host CPU and PCI bus.
-      Shouldn't we use a macro for this? */
-   card->membase += KERNELBASE;
-#endif /* __powerpc__ */
    card->membase = (unsigned long) ioremap(card->membase, NS_IOREMAP_SIZE);
    if (card->membase == 0)
    {
@@ -949,9 +877,14 @@ static int __init ns_init_card(int i, struct pci_dev *pcidev)
       return error;
    }
       
-   if (ns_parse_mac(mac[i], card->atmdev->esi))
+   if (ns_parse_mac(mac[i], card->atmdev->esi)) {
       nicstar_read_eprom(card->membase, NICSTAR_EPROM_MAC_ADDR_OFFSET,
                          card->atmdev->esi, 6);
+      if (memcmp(card->atmdev->esi, "\x00\x00\x00\x00\x00\x00", 6) == 0) {
+         nicstar_read_eprom(card->membase, NICSTAR_EPROM_MAC_ADDR_OFFSET_ALT,
+                         card->atmdev->esi, 6);
+      }
+   }
 
    printk("nicstar%d: MAC address %02X:%02X:%02X:%02X:%02X:%02X\n", i,
           card->atmdev->esi[0], card->atmdev->esi[1], card->atmdev->esi[2],
@@ -964,22 +897,13 @@ static int __init ns_init_card(int i, struct pci_dev *pcidev)
    card->atmdev->phy = NULL;
 
 #ifdef CONFIG_ATM_NICSTAR_USE_SUNI
-   if (card->max_pcr == ATM_OC3_PCR) {
+   if (card->max_pcr == ATM_OC3_PCR)
       suni_init(card->atmdev);
-
-      MOD_INC_USE_COUNT;
-      /* Can't remove the nicstar driver or the suni driver would oops */
-   }
 #endif /* CONFIG_ATM_NICSTAR_USE_SUNI */
 
 #ifdef CONFIG_ATM_NICSTAR_USE_IDT77105
-   if (card->max_pcr == ATM_25_PCR) {
+   if (card->max_pcr == ATM_25_PCR)
       idt77105_init(card->atmdev);
-      /* Note that for the IDT77105 PHY we don't need the awful
-       * module count hack that the SUNI needs because we can
-       * stop the '105 when the nicstar module is cleaned up.
-       */
-   }
 #endif /* CONFIG_ATM_NICSTAR_USE_IDT77105 */
 
    if (card->atmdev->phy && card->atmdev->phy->start)
@@ -1262,7 +1186,7 @@ static void push_rxbufs(ns_dev *card, u32 type, u32 handle1, u32 addr1,
 
 
 
-static void ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
 {
    u32 stat_r;
    ns_dev *card;
@@ -1442,6 +1366,7 @@ static void ns_irq_handler(int irq, void *dev_id, struct pt_regs *regs)
    
    spin_unlock_irqrestore(&card->int_lock, flags);
    PRINTK("nicstar%d: end of interrupt service\n", card->index);
+   return IRQ_HANDLED;
 }
 
 
@@ -1597,7 +1522,7 @@ static int ns_open(struct atm_vcc *vcc, short vpi, int vci)
          
 	 fill_tst(card, n, vc);
       }
-      else /* not CBR */
+      else if (vcc->qos.txtp.traffic_class == ATM_UBR)
       {
          vc->cbr_scd = 0x00000000;
 	 vc->scq = card->scq0;
@@ -1676,9 +1601,9 @@ static void ns_close(struct atm_vcc *vcc)
 	        card->index);
          iovb = vc->rx_iov;
          recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data,
-	                       ATM_SKB(iovb)->iovcnt);
-         ATM_SKB(iovb)->iovcnt = 0;
-         ATM_SKB(iovb)->vcc = NULL;
+	                       NS_SKB(iovb)->iovcnt);
+         NS_SKB(iovb)->iovcnt = 0;
+         NS_SKB(iovb)->vcc = NULL;
          ns_grab_int_lock(card, flags);
          recycle_iov_buf(card, iovb);
          spin_unlock_irqrestore(&card->int_lock, flags);
@@ -1876,7 +1801,7 @@ static int ns_send(struct atm_vcc *vcc, struct sk_buff *skb)
       return -EINVAL;
    }
    
-   if (ATM_SKB(skb)->iovcnt != 0)
+   if (skb_shinfo(skb)->nr_frags != 0)
    {
       printk("nicstar%d: No scatter-gather yet.\n", card->index);
       atomic_inc(&vcc->stats->tx_err);
@@ -2264,7 +2189,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          memcpy(sb->tail, cell, ATM_CELL_PAYLOAD);
          skb_put(sb, ATM_CELL_PAYLOAD);
          ATM_SKB(sb)->vcc = vcc;
-         sb->stamp = xtime;
+         do_gettimeofday(&sb->stamp);
          vcc->push(vcc, sb);
          atomic_inc(&vcc->stats->rx);
          cell += ATM_CELL_PAYLOAD;
@@ -2301,30 +2226,30 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 	    }
 	 }
       vc->rx_iov = iovb;
-      ATM_SKB(iovb)->iovcnt = 0;
+      NS_SKB(iovb)->iovcnt = 0;
       iovb->len = 0;
       iovb->tail = iovb->data = iovb->head;
-      ATM_SKB(iovb)->vcc = vcc;
+      NS_SKB(iovb)->vcc = vcc;
       /* IMPORTANT: a pointer to the sk_buff containing the small or large
                     buffer is stored as iovec base, NOT a pointer to the 
 	            small or large buffer itself. */
    }
-   else if (ATM_SKB(iovb)->iovcnt >= NS_MAX_IOVECS)
+   else if (NS_SKB(iovb)->iovcnt >= NS_MAX_IOVECS)
    {
       printk("nicstar%d: received too big AAL5 SDU.\n", card->index);
       atomic_inc(&vcc->stats->rx_err);
       recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data, NS_MAX_IOVECS);
-      ATM_SKB(iovb)->iovcnt = 0;
+      NS_SKB(iovb)->iovcnt = 0;
       iovb->len = 0;
       iovb->tail = iovb->data = iovb->head;
-      ATM_SKB(iovb)->vcc = vcc;
+      NS_SKB(iovb)->vcc = vcc;
    }
-   iov = &((struct iovec *) iovb->data)[ATM_SKB(iovb)->iovcnt++];
+   iov = &((struct iovec *) iovb->data)[NS_SKB(iovb)->iovcnt++];
    iov->iov_base = (void *) skb;
    iov->iov_len = ns_rsqe_cellcount(rsqe) * 48;
    iovb->len += iov->iov_len;
 
-   if (ATM_SKB(iovb)->iovcnt == 1)
+   if (NS_SKB(iovb)->iovcnt == 1)
    {
       if (skb->list != &card->sbpool.queue)
       {
@@ -2338,7 +2263,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          return;
       }
    }
-   else /* ATM_SKB(iovb)->iovcnt >= 2 */
+   else /* NS_SKB(iovb)->iovcnt >= 2 */
    {
       if (skb->list != &card->lbpool.queue)
       {
@@ -2347,7 +2272,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
          which_list(card, skb);
          atomic_inc(&vcc->stats->rx_err);
          recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data,
-	                       ATM_SKB(iovb)->iovcnt);
+	                       NS_SKB(iovb)->iovcnt);
          vc->rx_iov = NULL;
          recycle_iov_buf(card, iovb);
 	 return;
@@ -2371,7 +2296,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             printk(".\n");
          atomic_inc(&vcc->stats->rx_err);
          recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data,
-	   ATM_SKB(iovb)->iovcnt);
+	   NS_SKB(iovb)->iovcnt);
 	 vc->rx_iov = NULL;
          recycle_iov_buf(card, iovb);
 	 return;
@@ -2379,13 +2304,14 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 
       /* By this point we (hopefully) have a complete SDU without errors. */
 
-      if (ATM_SKB(iovb)->iovcnt == 1)	/* Just a small buffer */
+      if (NS_SKB(iovb)->iovcnt == 1)	/* Just a small buffer */
       {
          /* skb points to a small buffer */
          if (!atm_charge(vcc, skb->truesize))
          {
             push_rxbufs(card, BUF_SM, (u32) skb, (u32) virt_to_bus(skb->data),
                         0, 0);
+            atomic_inc(&vcc->stats->rx_drop);
          }
          else
 	 {
@@ -2395,12 +2321,12 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             skb->destructor = ns_sb_destructor;
 #endif /* NS_USE_DESTRUCTORS */
             ATM_SKB(skb)->vcc = vcc;
-            skb->stamp = xtime;
+            do_gettimeofday(&skb->stamp);
             vcc->push(vcc, skb);
             atomic_inc(&vcc->stats->rx);
          }
       }
-      else if (ATM_SKB(iovb)->iovcnt == 2)	/* One small plus one large buffer */
+      else if (NS_SKB(iovb)->iovcnt == 2)	/* One small plus one large buffer */
       {
          struct sk_buff *sb;
 
@@ -2413,6 +2339,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             {
                push_rxbufs(card, BUF_SM, (u32) sb, (u32) virt_to_bus(sb->data),
                            0, 0);
+               atomic_inc(&vcc->stats->rx_drop);
             }
             else
 	    {
@@ -2422,7 +2349,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                sb->destructor = ns_sb_destructor;
 #endif /* NS_USE_DESTRUCTORS */
                ATM_SKB(sb)->vcc = vcc;
-               sb->stamp = xtime;
+               do_gettimeofday(&sb->stamp);
                vcc->push(vcc, sb);
                atomic_inc(&vcc->stats->rx);
             }
@@ -2437,6 +2364,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             {
                push_rxbufs(card, BUF_LG, (u32) skb,
                            (u32) virt_to_bus(skb->data), 0, 0);
+               atomic_inc(&vcc->stats->rx_drop);
             }
             else
             {
@@ -2448,7 +2376,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                memcpy(skb->data, sb->data, NS_SMBUFSIZE);
                skb_put(skb, len - NS_SMBUFSIZE);
                ATM_SKB(skb)->vcc = vcc;
-               skb->stamp = xtime;
+               do_gettimeofday(&skb->stamp);
                vcc->push(vcc, skb);
                atomic_inc(&vcc->stats->rx);
             }
@@ -2475,7 +2403,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                printk("nicstar%d: Out of huge buffers.\n", card->index);
                atomic_inc(&vcc->stats->rx_drop);
                recycle_iovec_rx_bufs(card, (struct iovec *) iovb->data,
-	                             ATM_SKB(iovb)->iovcnt);
+	                             NS_SKB(iovb)->iovcnt);
                vc->rx_iov = NULL;
                recycle_iov_buf(card, iovb);
                return;
@@ -2513,7 +2441,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 
          if (!atm_charge(vcc, hb->truesize))
 	 {
-            recycle_iovec_rx_bufs(card, iov, ATM_SKB(iovb)->iovcnt);
+            recycle_iovec_rx_bufs(card, iov, NS_SKB(iovb)->iovcnt);
             if (card->hbpool.count < card->hbnr.max)
             {
                skb_queue_tail(&card->hbpool.queue, hb);
@@ -2521,6 +2449,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
             }
 	    else
 	       dev_kfree_skb_any(hb);
+	    atomic_inc(&vcc->stats->rx_drop);
          }
          else
 	 {
@@ -2535,7 +2464,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
                         0, 0);
 
             /* Copy all large buffers to the huge buffer and free them */
-            for (j = 1; j < ATM_SKB(iovb)->iovcnt; j++)
+            for (j = 1; j < NS_SKB(iovb)->iovcnt; j++)
             {
                lb = (struct sk_buff *) iov->iov_base;
                tocopy = MIN(remaining, iov->iov_len);
@@ -2554,7 +2483,7 @@ static void dequeue_rx(ns_dev *card, ns_rsqe *rsqe)
 #ifdef NS_USE_DESTRUCTORS
             hb->destructor = ns_hb_destructor;
 #endif /* NS_USE_DESTRUCTORS */
-            hb->stamp = xtime;
+            do_gettimeofday(&hb->stamp);
             vcc->push(vcc, hb);
             atomic_inc(&vcc->stats->rx);
          }
@@ -3156,3 +3085,6 @@ static unsigned char ns_phy_get(struct atm_dev *dev, unsigned long addr)
    spin_unlock_irqrestore(&card->res_lock, flags);
    return (unsigned char) data;
 }
+
+module_init(nicstar_module_init);
+module_exit(nicstar_module_exit);

@@ -18,12 +18,9 @@
 /* (I_HAVE_OVERRUNS stuff removed) */
 
 #ifndef ASM
-int atari_scsi_abort (Scsi_Cmnd *);
 int atari_scsi_detect (Scsi_Host_Template *);
 const char *atari_scsi_info (struct Scsi_Host *);
-int atari_scsi_queue_command (Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 int atari_scsi_reset (Scsi_Cmnd *, unsigned int);
-int atari_scsi_proc_info (char *, char **, off_t, int, int, int);
 #ifdef MODULE
 int atari_scsi_release (struct Scsi_Host *);
 #else
@@ -50,20 +47,6 @@ int atari_scsi_release (struct Scsi_Host *);
 
 #define	DEFAULT_USE_TAGGED_QUEUING	0
 
-
-#define ATARI_SCSI {    proc_info:         atari_scsi_proc_info,	\
-			name:              "Atari native SCSI",		\
-			detect:            atari_scsi_detect,		\
-			release:           atari_scsi_release,		\
-			info:              atari_scsi_info,		\
-			queuecommand:      atari_scsi_queue_command,	\
-			abort:             atari_scsi_abort,		\
-			reset:             atari_scsi_reset,		\
-			can_queue:         0, /* initialized at run-time */	\
-			this_id:           0, /* initialized at run-time */	\
-			sg_tablesize:      0, /* initialized at run-time */	\
-			cmd_per_lun:       0, /* initialized at run-time */	\
-			use_clustering:	   DISABLE_CLUSTERING }
 
 #define	NCR5380_implementation_fields	/* none */
 
@@ -257,8 +240,6 @@ int atari_scsi_release (struct Scsi_Host *);
 
 #define NCR_PRINT_STATUS(mask) \
 	((NDEBUG & (mask)) ? NCR5380_print_status(instance) : (void)0)
-
-#define NDEBUG_ANY	0xffffffff
 
 
 #endif /* ndef ASM */

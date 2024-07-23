@@ -32,7 +32,7 @@
 /***************************************************/
 /* The cards interrupt handler. Called from system */
 /***************************************************/
-static void
+static irqreturn_t
 ergo_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	hysdn_card *card = dev_id;	/* parameter from irq */
@@ -41,16 +41,16 @@ ergo_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	uchar volatile b;
 
 	if (!card)
-		return;		/* error -> spurious interrupt */
+		return IRQ_NONE;		/* error -> spurious interrupt */
 	if (!card->irq_enabled)
-		return;		/* other device interrupting or irq switched off */
+		return IRQ_NONE;		/* other device interrupting or irq switched off */
 
 	save_flags(flags);
 	cli();			/* no further irqs allowed */
 
 	if (!(bytein(card->iobase + PCI9050_INTR_REG) & PCI9050_INTR_REG_STAT1)) {
 		restore_flags(flags);	/* restore old state */
-		return;		/* no interrupt requested by E1 */
+		return IRQ_NONE;		/* no interrupt requested by E1 */
 	}
 	/* clear any pending ints on the board */
 	dpr = card->dpram;
@@ -59,11 +59,10 @@ ergo_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 	b |= dpr->ToHyInt;	/* and for champ */
 
 	/* start kernel task immediately after leaving all interrupts */
-	if (!card->hw_lock) {
-		queue_task(&card->irq_queue, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
-	}
+	if (!card->hw_lock)
+		schedule_work(&card->irq_queue);
 	restore_flags(flags);
+	return IRQ_HANDLED;
 }				/* ergo_interrupt */
 
 /******************************************************************************/
@@ -177,8 +176,7 @@ ergo_set_errlog_state(hysdn_card * card, int on)
 		card->err_log_state = ERRLOG_STATE_STOP;	/* request stop */
 
 	restore_flags(flags);
-	queue_task(&card->irq_queue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
+	schedule_work(&card->irq_queue);
 }				/* ergo_set_errlog_state */
 
 /******************************************/
@@ -424,16 +422,19 @@ ergo_releasehardware(hysdn_card * card)
 int
 ergo_inithardware(hysdn_card * card)
 {
-	if (check_region(card->iobase + PCI9050_INTR_REG, 1) ||
-	    check_region(card->iobase + PCI9050_USER_IO, 1))
-		return (-1);	/* ports already in use */
-
-	card->memend = card->membase + ERG_DPRAM_PAGE_SIZE - 1;
-	if (!(card->dpram = ioremap(card->membase, ERG_DPRAM_PAGE_SIZE)))
+	if (!request_region(card->iobase + PCI9050_INTR_REG, 1, "HYSDN")) 
 		return (-1);
+	if (!request_region(card->iobase + PCI9050_USER_IO, 1, "HYSDN")) {
+		release_region(card->iobase + PCI9050_INTR_REG, 1);
+		return (-1);	/* ports already in use */
+	}
+	card->memend = card->membase + ERG_DPRAM_PAGE_SIZE - 1;
+	if (!(card->dpram = ioremap(card->membase, ERG_DPRAM_PAGE_SIZE))) {
+		release_region(card->iobase + PCI9050_INTR_REG, 1);
+		release_region(card->iobase + PCI9050_USER_IO, 1);
+		return (-1);
+	}
 
-	request_region(card->iobase + PCI9050_INTR_REG, 1, "HYSDN");
-	request_region(card->iobase + PCI9050_USER_IO, 1, "HYSDN");
 	ergo_stopcard(card);	/* disable interrupts */
 	if (request_irq(card->irq, ergo_interrupt, SA_SHIRQ, "HYSDN", card)) {
 		ergo_releasehardware(card); /* return the acquired hardware */
@@ -447,9 +448,7 @@ ergo_inithardware(hysdn_card * card)
 	card->writebootseq = ergo_writebootseq;
 	card->waitpofready = ergo_waitpofready;
 	card->set_errlog_state = ergo_set_errlog_state;
-	card->irq_queue.sync = 0;
-	card->irq_queue.data = card;	/* init task queue for interrupt */
-	card->irq_queue.routine = (void *) (void *) ergo_irq_bh;
+	INIT_WORK(&card->irq_queue, (void *) (void *) ergo_irq_bh, card);
 
 	return (0);
 }				/* ergo_inithardware */

@@ -27,17 +27,12 @@
 #include <linux/config.h>
 #include <linux/errno.h>
 #include <linux/mm.h>
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/fcntl.h>
 
 #include <linux/zftape.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,6)
 #include <asm/uaccess.h>
-#else
-#include <asm/segment.h>
-#endif
 
 #include "../zftape/zftape-init.h"
 #include "../zftape/zftape-eof.h"
@@ -648,50 +643,6 @@ int zft_check_write_access(zft_position *pos)
 	TRACE_EXIT 0;
 }
 
-/*  decide when we should lock the module in memory, even when calling
- *  the release routine. This really is necessary for use with
- *  kerneld.
- *
- *  NOTE: we MUST NOT use zft_write_protected, because this includes
- *  the file access mode as well which has no meaning with our 
- *  asynchronous update scheme.
- *
- *  Ugly, ugly. We need to look the module if we changed the block size.
- *  How sad! Need persistent modules storage!
- *
- *  NOTE: I don't want to lock the module if the number of dma buffers 
- *  has been changed. It's enough! Stop the story! Give me persisitent
- *  module storage! Do it!
- */
-int zft_dirty(void)
-{
-	if (!ft_formatted || zft_offline) { 
-		/* cannot be dirty if not formatted or offline */
-		return 0;
-	}
-	if (zft_blk_sz != CONFIG_ZFT_DFLT_BLK_SZ) {
-		/* blocksize changed, must lock */
-		return 1;
-	}
-	if (zft_mt_compression != 0) {
-		/* compression mode with /dev/qft, must lock */
-		return 1;
-	}
-	if (!zft_header_read) {
-		/* tape is logical at BOT, no lock */
-		return 0;
-	}
-	if (!zft_tape_at_lbot(&zft_pos)) {
-		/* somewhere inside a volume, lock tape */
-		return 1;
-	}
-	if (zft_volume_table_changed || zft_header_changed) {
-		/* header segments dirty if tape not write protected */
-		return !(ft_write_protected || zft_old_ftape);
-	}
-	return 0;
-}
-
 /*      OPEN routine called by kernel-interface code
  *
  *      NOTE: this is also called by mt_reset() with dev_minor == -1
@@ -765,7 +716,7 @@ int _zft_open(unsigned int dev_minor, unsigned int access_mode)
 			    ftape_disable());
 	}
 	/* zft_seg_pos should be greater than the vtbl segpos but not
-	 * if in compatability mode and only after we read in the
+	 * if in compatibility mode and only after we read in the
 	 * header segments
 	 *
 	 * might also be a problem if the user makes a backup with a
@@ -834,13 +785,6 @@ int _zft_close(void)
 		zft_uninit_mem();
 		going_offline = 0;
 		zft_offline   = 1;
-	} else if (zft_dirty()) {
-		TRACE(ft_t_noise, "Keeping module locked in memory because:\n"
-		      KERN_INFO "header segments need updating: %s\n"
-		      KERN_INFO "tape not at BOT              : %s",
-		      (zft_volume_table_changed || zft_header_changed) 
-		      ? "yes" : "no",
-		      zft_tape_at_lbot(&zft_pos) ? "no" : "yes");
 	} else if (zft_cmpr_lock(0 /* don't load */) == 0) {
 		(*zft_cmpr_ops->reset)(); /* unlock it again */
 	}
@@ -1008,18 +952,11 @@ static int mtiocrdftseg(struct mtftseg * mtftseg, int arg_size)
 		 */
 		TRACE_EXIT 0;
 	}
-#if LINUX_VERSION_CODE > KERNEL_VER(2,1,3)
 	if (copy_to_user(mtftseg->mt_data,
 			 zft_deblock_buf,
 			 mtftseg->mt_result) != 0) {
 		TRACE_EXIT -EFAULT;
 	}
-#else
-	TRACE_CATCH(verify_area(VERIFY_WRITE, mtftseg->mt_data,
-				mtftseg->mt_result),);
-	memcpy_tofs(mtftseg->mt_data, zft_deblock_buf, 
-		    mtftseg->mt_result);
-#endif
 	TRACE_EXIT 0;
 }
 #endif
@@ -1067,19 +1004,11 @@ static int mtiocwrftseg(struct mtftseg * mtftseg, int arg_size)
 		TRACE_EXIT -ENXIO;
 	}
 	if (mtftseg->mt_mode != FT_WR_DELETE) {
-#if LINUX_VERSION_CODE > KERNEL_VER(2,1,3)
 		if (copy_from_user(zft_deblock_buf, 
 				   mtftseg->mt_data,
 				   FT_SEGMENT_SIZE) != 0) {
 			TRACE_EXIT -EFAULT;
 		}
-#else
-		TRACE_CATCH(verify_area(VERIFY_READ, 
-					mtftseg->mt_data, 
-					FT_SEGMENT_SIZE),);
-		memcpy_fromfs(zft_deblock_buf, mtftseg->mt_data,
-			      FT_SEGMENT_SIZE);
-#endif
 	}
 	mtftseg->mt_result = ftape_write_segment(mtftseg->mt_segno, 
 						 zft_deblock_buf,
@@ -1426,14 +1355,9 @@ int _zft_ioctl(unsigned int command, void * arg)
 			    ft_t_info, "bad argument size: %d", arg_size);
 	}
 	if (dir & _IOC_WRITE) {
-#if LINUX_VERSION_CODE > KERNEL_VER(2,1,3)
 		if (copy_from_user(&krnl_arg, arg, arg_size) != 0) {
 			TRACE_EXIT -EFAULT;
 		}
-#else
-		TRACE_CATCH(verify_area(VERIFY_READ, arg, arg_size),);
-		memcpy_fromfs(&krnl_arg, arg, arg_size);
-#endif
 	}
 	TRACE(ft_t_flow, "called with ioctl command: 0x%08x", command);
 	switch (command) {
@@ -1486,14 +1410,9 @@ int _zft_ioctl(unsigned int command, void * arg)
 		break;
 	}
 	if ((result >= 0) && (dir & _IOC_READ)) {
-#if LINUX_VERSION_CODE > KERNEL_VER(2,1,3)
 		if (copy_to_user(arg, &krnl_arg, arg_size) != 0) {
 			TRACE_EXIT -EFAULT;
 		}
-#else
-		TRACE_CATCH(verify_area(VERIFY_WRITE, arg, arg_size),);
-		memcpy_tofs(arg, &krnl_arg, arg_size);
-#endif
 	}
 	TRACE_EXIT result;
 }

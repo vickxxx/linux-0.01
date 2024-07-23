@@ -1,4 +1,4 @@
-/*  $Id: sun4d_irq.c,v 1.28 2001/07/17 16:17:33 anton Exp $
+/*  $Id: sun4d_irq.c,v 1.29 2001/12/11 04:55:51 davem Exp $
  *  arch/sparc/kernel/sun4d_irq.c:
  *			SS1000/SC2000 interrupt handling.
  *
@@ -7,12 +7,12 @@
  */
 
 #include <linux/config.h>
-#include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
 #include <linux/kernel_stat.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
+#include <linux/ptrace.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
 #include <linux/random.h>
@@ -20,6 +20,7 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/spinlock.h>
+#include <linux/seq_file.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
@@ -72,9 +73,9 @@ static int nsbi;
 spinlock_t sun4d_imsk_lock = SPIN_LOCK_UNLOCKED;
 #endif
 
-int sun4d_get_irq_list(char *buf)
+int show_sun4d_interrupts(struct seq_file *p, void *v)
 {
-	int i, j = 0, k = 0, len = 0, sbusl;
+	int i, j = 0, k = 0, sbusl;
 	struct irqaction * action;
 #ifdef CONFIG_SMP
 	int x;
@@ -94,21 +95,23 @@ int sun4d_get_irq_list(char *buf)
 			}
 			continue;
 		}
-found_it:	len += sprintf(buf+len, "%3d: ", i);
+found_it:	seq_printf(p, "%3d: ", i);
 #ifndef CONFIG_SMP
-		len += sprintf(buf+len, "%10u ", kstat_irqs(i));
+		seq_printf(p, "%10u ", kstat_irqs(i));
 #else
-		for (x = 0; x < smp_num_cpus; x++)
-			len += sprintf(buf+len, "%10u ",
-				       kstat.irqs[cpu_logical_map(x)][i]);
+		for (x = 0; x < NR_CPUS; x++) {
+			if (cpu_online)
+				seq_printf(p, "%10u ",
+				       kstat_cpu(cpu_logical_map(x)).irqs[i]);
+		}
 #endif
-		len += sprintf(buf+len, "%c %s",
+		seq_printf(p, "%c %s",
 			(action->flags & SA_INTERRUPT) ? '+' : ' ',
 			action->name);
 		action = action->next;
 		for (;;) {
 			for (; action; action = action->next) {
-				len += sprintf(buf+len, ",%s %s",
+				seq_printf(p, ",%s %s",
 					(action->flags & SA_INTERRUPT) ? " +" : "",
 					action->name);
 			}
@@ -123,9 +126,9 @@ found_it:	len += sprintf(buf+len, "%3d: ", i);
 				action = sbus_actions [(j << 5) + (sbusl << 2)].action;
 			}
 		}
-		len += sprintf(buf+len, "\n");
+		seq_putc(p, '\n');
 	}
-	return len;
+	return 0;
 }
 
 void sun4d_free_irq(unsigned int irq, void *dev_id)
@@ -195,8 +198,8 @@ void sun4d_handler_irq(int irq, struct pt_regs * regs)
 	
 	cc_set_iclr(1 << irq);
 	
-	irq_enter(cpu, irq);
-	kstat.irqs[cpu][irq]++;
+	irq_enter();
+	kstat_cpu(cpu).irqs[irq]++;
 	if (!sbusl) {
 		action = *(irq + irq_action);
 		if (!action)
@@ -236,9 +239,7 @@ void sun4d_handler_irq(int irq, struct pt_regs * regs)
 					}
 			}
 	}
-	irq_exit(cpu, irq);
-	if (softirq_pending(cpu))
-		do_softirq();
+	irq_exit();
 }
 
 unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq)
@@ -251,8 +252,17 @@ unsigned int sun4d_build_irq(struct sbus_dev *sdev, int irq)
 		return irq;
 }
 
+unsigned int sun4d_sbint_to_irq(struct sbus_dev *sdev, unsigned int sbint)
+{
+	if (sbint >= sizeof(sbus_to_pil)) {
+		printk(KERN_ERR "%s: bogus SBINT %d\n", sdev->prom_name, sbint);
+		BUG();
+	}
+	return sun4d_build_irq(sdev, sbus_to_pil[sbint]);
+}
+
 int sun4d_request_irq(unsigned int irq,
-		void (*handler)(int, void *, struct pt_regs *),
+		irqreturn_t (*handler)(int, void *, struct pt_regs *),
 		unsigned long irqflags, const char * devname, void *dev_id)
 {
 	struct irqaction *action, *tmp = NULL, **actionp;
@@ -435,7 +445,7 @@ static void sun4d_load_profile_irq(int cpu, unsigned int limit)
 	bw_set_prof_limit(cpu, limit);
 }
 
-static void __init sun4d_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
+static void __init sun4d_init_timers(irqreturn_t (*counter_fn)(int, void *, struct pt_regs *))
 {
 	int irq;
 	extern struct prom_cpuinfo linux_cpus[NR_CPUS];
@@ -487,14 +497,14 @@ static void __init sun4d_init_timers(void (*counter_fn)(int, void *, struct pt_r
 		 * has copied the firmwares level 14 vector into boot cpu's
 		 * trap table, we must fix this now or we get squashed.
 		 */
-		__save_and_cli(flags);
+		local_irq_save(flags);
 		patchme_maybe_smp_msg[0] = 0x01000000; /* NOP out the branch */
 		trap_table->inst_one = lvl14_save[0];
 		trap_table->inst_two = lvl14_save[1];
 		trap_table->inst_three = lvl14_save[2];
 		trap_table->inst_four = lvl14_save[3];
 		local_flush_cache_all();
-		__restore_flags(flags);
+		local_irq_restore(flags);
 	}
 #endif
 }
@@ -538,15 +548,16 @@ static char *sun4d_irq_itoa(unsigned int irq)
 
 void __init sun4d_init_IRQ(void)
 {
-	__cli();
+	local_irq_disable();
 
+	BTFIXUPSET_CALL(sbint_to_irq, sun4d_sbint_to_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(enable_irq, sun4d_enable_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(disable_irq, sun4d_disable_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(clear_clock_irq, sun4d_clear_clock_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(clear_profile_irq, sun4d_clear_profile_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(load_profile_irq, sun4d_load_profile_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(__irq_itoa, sun4d_irq_itoa, BTFIXUPCALL_NORM);
-	init_timers = sun4d_init_timers;
+	sparc_init_timers = sun4d_init_timers;
 #ifdef CONFIG_SMP
 	BTFIXUPSET_CALL(set_cpu_int, sun4d_set_cpu_int, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(clear_cpu_int, sun4d_clear_ipi, BTFIXUPCALL_NOP);

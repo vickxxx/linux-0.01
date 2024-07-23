@@ -17,24 +17,14 @@
 #include <linux/init.h>
 #include <asm/machdep.h>
 #include <asm/blinken.h>
-#include <asm/io.h>                               /* readb() and writeb() */
 #include <asm/hwtest.h>                           /* hwreg_present() */
 
 #include "ints.h"
 #include "time.h"
 
 extern void hp300_reset(void);
-extern void (*hp300_default_handler[])(int, void *, struct pt_regs *);
-extern int hp300_get_irq_list(char *buf);
-
-#ifdef CONFIG_VT
-extern int hp300_keyb_init(void);
-#else
-/* Dummy function for when there is no keyboard. */
-int __init hp300_keyb_init(void)
-{
-}
-#endif
+extern irqreturn_t (*hp300_default_handler[])(int, void *, struct pt_regs *);
+extern int show_hp300_interrupts(struct seq_file *, void *);
 
 #ifdef CONFIG_HEARTBEAT
 static void hp300_pulse(int x)
@@ -46,15 +36,6 @@ static void hp300_pulse(int x)
 }
 #endif
 
-static int hp300_kbdrate(struct kbd_repeat *k)
-{
-  return 0;
-}
-
-static void hp300_kbd_leds(unsigned int leds)
-{
-}
-
 static void hp300_get_model(char *model)
 {
   strcpy(model, "HP9000/300");
@@ -63,19 +44,13 @@ static void hp300_get_model(char *model)
 void __init config_hp300(void)
 {
   mach_sched_init      = hp300_sched_init;
-  mach_keyb_init       = hp300_keyb_init;
-  mach_kbdrate         = hp300_kbdrate;
-  mach_kbd_leds        = hp300_kbd_leds;
   mach_init_IRQ        = hp300_init_IRQ;
   mach_request_irq     = hp300_request_irq;
   mach_free_irq        = hp300_free_irq;
   mach_get_model       = hp300_get_model;
-  mach_get_irq_list    = hp300_get_irq_list;
+  mach_get_irq_list    = show_hp300_interrupts;
   mach_gettimeoffset   = hp300_gettimeoffset;
   mach_default_handler = &hp300_default_handler;
-#if 0
-  mach_gettod          = hp300_gettod;
-#endif
   mach_reset           = hp300_reset;
 #ifdef CONFIG_HEARTBEAT
   mach_heartbeat       = hp300_pulse;

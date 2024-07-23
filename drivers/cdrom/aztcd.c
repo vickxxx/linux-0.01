@@ -166,9 +166,6 @@
 */
 
 #include <linux/version.h>
-
-#define MAJOR_NR AZTECH_CDROM_MAJOR
-
 #include <linux/blk.h>
 #include "aztcd.h"
 
@@ -183,7 +180,6 @@
 #include <linux/ioport.h>
 #include <linux/string.h>
 #include <linux/major.h>
-#include <linux/devfs_fs_kernel.h>
 
 #include <linux/init.h>
 
@@ -191,13 +187,15 @@
 #include <asm/io.h>
 
 #include <asm/uaccess.h>
-static int aztcd_blocksizes[1] = { 2048 };
-
 
 /*###########################################################################
   Defines
   ###########################################################################
 */
+
+#define MAJOR_NR AZTECH_CDROM_MAJOR
+#define QUEUE (&azt_queue)
+#define CURRENT elv_next_request(&azt_queue)
 #define SET_TIMER(func, jifs)   delay_timer.expires = jiffies + (jifs); \
                                 delay_timer.function = (void *) (func); \
                                 add_timer(&delay_timer);
@@ -228,9 +226,14 @@ static int aztcd_blocksizes[1] = { 2048 };
 #define AZT_DEBUG_MULTISESSION
 #endif
 
-#define CURRENT_VALID \
-  (!QUEUE_EMPTY && MAJOR(CURRENT -> rq_dev) == MAJOR_NR && CURRENT -> cmd == READ \
-   && CURRENT -> sector != -1)
+static struct request_queue azt_queue;
+
+static int current_valid(void)
+{
+        return CURRENT &&
+		CURRENT->cmd == READ &&
+		CURRENT->sector != -1;
+}
 
 #define AFL_STATUSorDATA (AFL_STATUS | AFL_DATA)
 #define AZT_BUF_SIZ 16
@@ -295,7 +298,7 @@ static char azt_auto_eject = AZT_AUTO_EJECT;
 
 static int AztTimeout, AztTries;
 static DECLARE_WAIT_QUEUE_HEAD(azt_waitq);
-static struct timer_list delay_timer;
+static struct timer_list delay_timer = TIMER_INITIALIZER(NULL, 0, 0);
 
 static struct azt_DiskInfo DiskInfo;
 static struct azt_Toc Toc[MAX_TRACKS];
@@ -309,32 +312,16 @@ static unsigned char aztIndatum;
 static unsigned long aztTimeOutCount;
 static int aztCmd = 0;
 
+static spinlock_t aztSpin = SPIN_LOCK_UNLOCKED;
+
 /*###########################################################################
    Function Prototypes
   ###########################################################################
 */
 /* CDROM Drive Low Level I/O Functions */
-void op_ok(void);
-void pa_ok(void);
-void sten_low(void);
-void dten_low(void);
-void statusAzt(void);
 static void aztStatTimer(void);
 
 /* CDROM Drive Command Functions */
-static int aztSendCmd(int cmd);
-static int sendAztCmd(int cmd, struct azt_Play_msf *params);
-static int aztSeek(struct azt_Play_msf *params);
-static int aztSetDiskType(int type);
-static int aztStatus(void);
-static int getAztStatus(void);
-static int aztPlay(struct azt_Play_msf *arg);
-static void aztCloseDoor(void);
-static void aztLockDoor(void);
-static void aztUnlockDoor(void);
-static int aztGetValue(unsigned char *result);
-static int aztGetQChannelInfo(struct azt_Toc *qp);
-static int aztUpdateToc(void);
 static int aztGetDiskInfo(void);
 #if AZT_MULTISESSION
 static int aztGetMultiDiskInfo(void);
@@ -342,24 +329,18 @@ static int aztGetMultiDiskInfo(void);
 static int aztGetToc(int multi);
 
 /* Kernel Interface Functions */
-static int check_aztcd_media_change(kdev_t full_dev);
+static int check_aztcd_media_change(struct gendisk *disk);
 static int aztcd_ioctl(struct inode *ip, struct file *fp, unsigned int cmd,
 		       unsigned long arg);
-static void azt_transfer(void);
-static void do_aztcd_request(request_queue_t *);
-static void azt_invalidate_buffers(void);
-int aztcd_open(struct inode *ip, struct file *fp);
-
+static int aztcd_open(struct inode *ip, struct file *fp);
 static int aztcd_release(struct inode *inode, struct file *file);
 
-int aztcd_init(void);
-
 static struct block_device_operations azt_fops = {
-	owner:THIS_MODULE,
-	open:aztcd_open,
-	release:aztcd_release,
-	ioctl:aztcd_ioctl,
-	check_media_change:check_aztcd_media_change,
+	.owner		= THIS_MODULE,
+	.open		= aztcd_open,
+	.release	= aztcd_release,
+	.ioctl		= aztcd_ioctl,
+	.media_changed	= check_aztcd_media_change,
 };
 
 /* Aztcd State Machine: Controls Drive Operating State */
@@ -379,7 +360,7 @@ static int azt_bcd2bin(unsigned char bcd);
    busy waiting */
 /* Wait for OP_OK = drive answers with AFL_OP_OK after receiving a command*/
 # define OP_OK op_ok()
-void op_ok(void)
+static void op_ok(void)
 {
 	aztTimeOutCount = 0;
 	do {
@@ -394,7 +375,7 @@ void op_ok(void)
 
 /* Wait for PA_OK = drive answers with AFL_PA_OK after receiving parameters*/
 # define PA_OK pa_ok()
-void pa_ok(void)
+static void pa_ok(void)
 {
 	aztTimeOutCount = 0;
 	do {
@@ -409,7 +390,7 @@ void pa_ok(void)
 
 /* Wait for STEN=Low = handshake signal 'AFL_.._OK available or command executed*/
 # define STEN_LOW  sten_low()
-void sten_low(void)
+static void sten_low(void)
 {
 	aztTimeOutCount = 0;
 	do {
@@ -427,7 +408,7 @@ void sten_low(void)
 
 /* Wait for DTEN=Low = handshake signal 'Data available'*/
 # define DTEN_LOW dten_low()
-void dten_low(void)
+static void dten_low(void)
 {
 	aztTimeOutCount = 0;
 	do {
@@ -445,7 +426,7 @@ void dten_low(void)
  * may cause kernel panic when used in the wrong place
 */
 #define STEN_LOW_WAIT   statusAzt()
-void statusAzt(void)
+static void statusAzt(void)
 {
 	AztTimeout = AZT_STATUS_DELAY;
 	SET_TIMER(aztStatTimer, HZ / 100);
@@ -752,7 +733,7 @@ static int aztGetValue(unsigned char *result)
  * Read the current Q-channel info.  Also used for reading the
  * table of contents.
  */
-int aztGetQChannelInfo(struct azt_Toc *qp)
+static int aztGetQChannelInfo(struct azt_Toc *qp)
 {
 	unsigned char notUsed;
 	int st;
@@ -809,7 +790,7 @@ int aztGetQChannelInfo(struct azt_Toc *qp)
 /*
  * Read the table of contents (TOC) and TOC header if necessary
  */
-static int aztUpdateToc()
+static int aztUpdateToc(void)
 {
 	int st;
 
@@ -1160,7 +1141,7 @@ __setup("aztcd=", aztcd_setup);
 /* 
  * Checking if the media has been changed
 */
-static int check_aztcd_media_change(kdev_t full_dev)
+static int check_aztcd_media_change(struct gendisk *disk)
 {
 	if (aztDiskChanged) {	/* disk changed */
 		aztDiskChanged = 0;
@@ -1554,34 +1535,33 @@ static void azt_transfer(void)
 #ifdef AZT_TEST
 	printk("aztcd: executing azt_transfer Time:%li\n", jiffies);
 #endif
-	if (CURRENT_VALID) {
-		while (CURRENT->nr_sectors) {
-			int bn = CURRENT->sector / 4;
-			int i;
-			for (i = 0; i < AZT_BUF_SIZ && azt_buf_bn[i] != bn;
-			     ++i);
-			if (i < AZT_BUF_SIZ) {
-				int offs =
-				    (i * 4 + (CURRENT->sector & 3)) * 512;
-				int nr_sectors = 4 - (CURRENT->sector & 3);
-				if (azt_buf_out != i) {
-					azt_buf_out = i;
-					if (azt_buf_bn[i] != bn) {
-						azt_buf_out = -1;
-						continue;
-					}
+	if (!current_valid())
+	        return;
+
+	while (CURRENT->nr_sectors) {
+		int bn = CURRENT->sector / 4;
+		int i;
+		for (i = 0; i < AZT_BUF_SIZ && azt_buf_bn[i] != bn; ++i);
+		if (i < AZT_BUF_SIZ) {
+			int offs = (i * 4 + (CURRENT->sector & 3)) * 512;
+			int nr_sectors = 4 - (CURRENT->sector & 3);
+			if (azt_buf_out != i) {
+				azt_buf_out = i;
+				if (azt_buf_bn[i] != bn) {
+					azt_buf_out = -1;
+					continue;
 				}
-				if (nr_sectors > CURRENT->nr_sectors)
-					nr_sectors = CURRENT->nr_sectors;
-				memcpy(CURRENT->buffer, azt_buf + offs,
-				       nr_sectors * 512);
-				CURRENT->nr_sectors -= nr_sectors;
-				CURRENT->sector += nr_sectors;
-				CURRENT->buffer += nr_sectors * 512;
-			} else {
-				azt_buf_out = -1;
-				break;
 			}
+			if (nr_sectors > CURRENT->nr_sectors)
+			    nr_sectors = CURRENT->nr_sectors;
+			memcpy(CURRENT->buffer, azt_buf + offs,
+				nr_sectors * 512);
+			CURRENT->nr_sectors -= nr_sectors;
+			CURRENT->sector += nr_sectors;
+			CURRENT->buffer += nr_sectors * 512;
+		} else {
+			azt_buf_out = -1;
+			break;
 		}
 	}
 }
@@ -1594,25 +1574,21 @@ static void do_aztcd_request(request_queue_t * q)
 #endif
 	if (DiskInfo.audio) {
 		printk("aztcd: Error, tried to mount an Audio CD\n");
-		end_request(0);
+		end_request(CURRENT, 0);
 		return;
 	}
 	azt_transfer_is_active = 1;
-	while (CURRENT_VALID) {
-		if (CURRENT->bh) {
-			if (!buffer_locked(CURRENT->bh))
-				panic(DEVICE_NAME ": block not locked");
-		}
+	while (current_valid()) {
 		azt_transfer();
 		if (CURRENT->nr_sectors == 0) {
-			end_request(1);
+			end_request(CURRENT, 1);
 		} else {
 			azt_buf_out = -1;	/* Want to read a block not in buffer */
 			if (azt_state == AZT_S_IDLE) {
 				if ((!aztTocUpToDate) || aztDiskChanged) {
 					if (aztUpdateToc() < 0) {
-						while (CURRENT_VALID)
-							end_request(0);
+						while (current_valid())
+							end_request(CURRENT, 0);
 						break;
 					}
 				}
@@ -1648,7 +1624,7 @@ static void azt_invalidate_buffers(void)
 /*
  * Open the device special file.  Check that a disk is in.
  */
-int aztcd_open(struct inode *ip, struct file *fp)
+static int aztcd_open(struct inode *ip, struct file *fp)
 {
 	int st;
 
@@ -1701,8 +1677,8 @@ static int aztcd_release(struct inode *inode, struct file *file)
 {
 #ifdef AZT_DEBUG
 	printk("aztcd: executing aztcd_release\n");
-	printk("inode: %p, inode->i_rdev: %x    file: %p\n", inode,
-	       inode->i_rdev, file);
+	printk("inode: %p, device: %s    file: %p\n", inode,
+	       inode->i_bdev->bd_disk->disk_name, file);
 #endif
 	if (!--azt_open_count) {
 		azt_invalidate_buffers();
@@ -1714,27 +1690,29 @@ static int aztcd_release(struct inode *inode, struct file *file)
 	return 0;
 }
 
-
+static struct gendisk *azt_disk;
 
 /*
  * Test for presence of drive and initialize it.  Called at boot time.
  */
 
-int __init aztcd_init(void)
+static int __init aztcd_init(void)
 {
 	long int count, max_count;
 	unsigned char result[50];
 	int st;
+	void* status = NULL;
 	int i = 0;
+	int ret = 0;
 
 	if (azt_port == 0) {
-		printk("aztcd: no Aztech CD-ROM Initialization");
+		printk(KERN_INFO "aztcd: no Aztech CD-ROM Initialization");
 		return -EIO;
 	}
 
-	printk
-	    ("aztcd: AZTECH, ORCHID, OKANO, WEARNES, TXC, CyDROM CD-ROM Driver\n");
-	printk("aztcd: (C) 1994-98 W.Zimmermann\n");
+	printk(KERN_INFO "aztcd: AZTECH, ORCHID, OKANO, WEARNES, TXC, CyDROM "
+	       "CD-ROM Driver\n");
+	printk(KERN_INFO "aztcd: (C) 1994-98 W.Zimmermann\n");
 	if (azt_port == -1) {
 		printk
 		    ("aztcd: KernelVersion=%s DriverVersion=%s For IDE/ATAPI-drives use ide-cd.c\n",
@@ -1743,8 +1721,8 @@ int __init aztcd_init(void)
 		printk
 		    ("aztcd: DriverVersion=%s BaseAddress=0x%x  For IDE/ATAPI-drives use ide-cd.c\n",
 		     AZT_VERSION, azt_port);
-	printk
-	    ("aztcd: If you have problems, read /usr/src/linux/Documentation/cdrom/aztcd\n");
+	printk(KERN_INFO "aztcd: If you have problems, read /usr/src/linux/"
+	       "Documentation/cdrom/aztcd\n");
 
 
 #ifdef AZT_SW32			/*CDROM connected to Soundwave32 card */
@@ -1765,15 +1743,15 @@ int __init aztcd_init(void)
 
 	/* check for presence of drive */
 
-	if (azt_port == -1) {	/* autoprobing */
+	if (azt_port == -1) {	/* autoprobing for proprietary interface  */
 		for (i = 0; (azt_port_auto[i] != 0) && (i < 16); i++) {
 			azt_port = azt_port_auto[i];
-			printk("aztcd: Autoprobing BaseAddress=0x%x \n",
-			       azt_port);
-			st = check_region(azt_port, 4);	/*proprietary interfaces need 4 bytes */
-			if (st)
+			printk(KERN_INFO "aztcd: Autoprobing BaseAddress=0x%x"
+			       "\n", azt_port);
+			 /*proprietary interfaces need 4 bytes */
+			if (!request_region(azt_port, 4, "aztcd")) {
 				continue;
-
+			}
 			outb(POLLED, MODE_PORT);
 			inb(CMD_PORT);
 			inb(CMD_PORT);
@@ -1786,22 +1764,25 @@ int __init aztcd_init(void)
 				if (aztTimeOutCount >= AZT_FAST_TIMEOUT)
 					break;
 			} while (aztIndatum & AFL_STATUS);
-			if (inb(DATA_PORT) == AFL_OP_OK)
+			if (inb(DATA_PORT) == AFL_OP_OK) { /* OK drive found */
 				break;
+			}
+			else {  /* Drive not found on this port - try next one */
+				release_region(azt_port, 4);
+			}
 		}
 		if ((azt_port_auto[i] == 0) || (i == 16)) {
-			printk("aztcd: no AZTECH CD-ROM drive found\n");
+			printk(KERN_INFO "aztcd: no AZTECH CD-ROM drive found\n");
 			return -EIO;
 		}
 	} else {		/* no autoprobing */
 		if ((azt_port == 0x1f0) || (azt_port == 0x170))
-			st = check_region(azt_port, 8);	/*IDE-interfaces need 8 bytes */
+			status = request_region(azt_port, 8, "aztcd");	/*IDE-interfaces need 8 bytes */
 		else
-			st = check_region(azt_port, 4);	/*proprietary interfaces need 4 bytes */
-		if (st) {
-			printk
-			    ("aztcd: conflict, I/O port (%X) already used\n",
-			     azt_port);
+			status = request_region(azt_port, 4, "aztcd");	/*proprietary interfaces need 4 bytes */
+		if (!status) {
+			printk(KERN_WARNING "aztcd: conflict, I/O port (%X) "
+			       "already used\n", azt_port);
 			return -EIO;
 		}
 
@@ -1824,17 +1805,19 @@ int __init aztcd_init(void)
 		if (inb(DATA_PORT) != AFL_OP_OK) {	/*OP_OK? If not, reset and try again */
 #ifndef MODULE
 			if (azt_cont != 0x79) {
-				printk
-				    ("aztcd: no AZTECH CD-ROM drive found-Try boot parameter aztcd=<BaseAddress>,0x79\n");
-				return -EIO;
+				printk(KERN_WARNING "aztcd: no AZTECH CD-ROM "
+				       "drive found-Try boot parameter aztcd="
+				       "<BaseAddress>,0x79\n");
+				ret = -EIO;
+				goto err_out;
 			}
 #else
 			if (0) {
 			}
 #endif
 			else {
-				printk
-				    ("aztcd: drive reset - please wait\n");
+				printk(KERN_INFO "aztcd: drive reset - "
+				       "please wait\n");
 				for (count = 0; count < 50; count++) {
 					inb(STATUS_PORT);	/*removing all data from earlier tries */
 					inb(DATA_PORT);
@@ -1846,23 +1829,25 @@ int __init aztcd_init(void)
 				outb(ACMD_SOFT_RESET, CMD_PORT);	/*send reset */
 				STEN_LOW;
 				if (inb(DATA_PORT) != AFL_OP_OK) {	/*OP_OK? */
-					printk
-					    ("aztcd: no AZTECH CD-ROM drive found\n");
-					return -EIO;
+					printk(KERN_WARNING "aztcd: no AZTECH "
+					       "CD-ROM drive found\n");
+					ret = -EIO;
+					goto err_out;
 				}
 
 				for (count = 0; count < AZT_TIMEOUT;
 				     count++)
 					barrier();	/* Stop gcc 2.96 being smart */
+				/* use udelay(), damnit -- AV */
 
 				if ((st = getAztStatus()) == -1) {
-					printk
-					    ("aztcd: Drive Status Error Status=%x\n",
-					     st);
-					return -EIO;
+					printk(KERN_WARNING "aztcd: Drive Status"
+					       " Error Status=%x\n", st);
+					ret = -EIO;
+					goto err_out;
 				}
 #ifdef AZT_DEBUG
-				printk("aztcd: Status = %x\n", st);
+				printk(KERN_DEBUG "aztcd: Status = %x\n", st);
 #endif
 				outb(POLLED, MODE_PORT);
 				inb(CMD_PORT);
@@ -1917,41 +1902,53 @@ int __init aztcd_init(void)
 				printk("%c", result[count]);
 			printk("<<>> ");
 			printk("Aborted\n");
-			return -EIO;
+			ret = -EIO;
+			goto err_out;
 		}
 	}
-	devfs_register(NULL, "aztcd", DEVFS_FL_DEFAULT, MAJOR_NR, 0,
-		       S_IFBLK | S_IRUGO | S_IWUGO, &azt_fops, NULL);
-	if (devfs_register_blkdev(MAJOR_NR, "aztcd", &azt_fops) != 0) {
-		printk("aztcd: Unable to get major %d for Aztech CD-ROM\n",
-		       MAJOR_NR);
-		return -EIO;
+	azt_disk = alloc_disk(1);
+	if (!azt_disk)
+		goto err_out;
+
+	if (register_blkdev(MAJOR_NR, "aztcd")) {
+		ret = -EIO;
+		goto err_out2;
 	}
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	blksize_size[MAJOR_NR] = aztcd_blocksizes;
-	read_ahead[MAJOR_NR] = 4;
-	register_disk(NULL, MKDEV(MAJOR_NR, 0), 1, &azt_fops, 0);
 
-	if ((azt_port == 0x1f0) || (azt_port == 0x170))
-		request_region(azt_port, 8, "aztcd");	/*IDE-interface */
-	else
-		request_region(azt_port, 4, "aztcd");	/*proprietary interface */
-
+	blk_init_queue(&azt_queue, do_aztcd_request, &aztSpin);
+	blk_queue_hardsect_size(&azt_queue, 2048);
+	azt_disk->major = MAJOR_NR;
+	azt_disk->first_minor = 0;
+	azt_disk->fops = &azt_fops;
+	sprintf(azt_disk->disk_name, "aztcd");
+	sprintf(azt_disk->devfs_name, "aztcd");
+	azt_disk->queue = &azt_queue;
+	add_disk(azt_disk);
 	azt_invalidate_buffers();
 	aztPresent = 1;
 	aztCloseDoor();
-	return (0);
+	return 0;
+err_out2:
+	put_disk(azt_disk);
+err_out:
+	if ((azt_port == 0x1f0) || (azt_port == 0x170)) {
+		SWITCH_IDE_MASTER;
+		release_region(azt_port, 8);	/*IDE-interface */
+	} else
+		release_region(azt_port, 4);	/*proprietary interface */
+	return ret;
+
 }
 
-void __exit aztcd_exit(void)
+static void __exit aztcd_exit(void)
 {
-	devfs_unregister(devfs_find_handle
-			 (NULL, "aztcd", 0, 0, DEVFS_SPECIAL_BLK, 0));
-	if ((devfs_unregister_blkdev(MAJOR_NR, "aztcd") == -EINVAL)) {
+	del_gendisk(azt_disk);
+	put_disk(azt_disk);
+	if ((unregister_blkdev(MAJOR_NR, "aztcd") == -EINVAL)) {
 		printk("What's that: can't unregister aztcd\n");
 		return;
 	}
-	blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
+	blk_cleanup_queue(&azt_queue);
 	if ((azt_port == 0x1f0) || (azt_port == 0x170)) {
 		SWITCH_IDE_MASTER;
 		release_region(azt_port, 8);	/*IDE-interface */
@@ -1960,9 +1957,7 @@ void __exit aztcd_exit(void)
 	printk(KERN_INFO "aztcd module released.\n");
 }
 
-#ifdef MODULE
 module_init(aztcd_init);
-#endif
 module_exit(aztcd_exit);
 
 /*##########################################################################
@@ -1996,8 +1991,8 @@ static void azt_poll(void)
 				AztTries = 0;
 				loop_ctl = 0;
 			}
-			if (CURRENT_VALID)
-				end_request(0);
+			if (current_valid())
+				end_request(CURRENT, 0);
 			AztTries = 5;
 		}
 		azt_error = 0;
@@ -2046,7 +2041,7 @@ static void azt_poll(void)
 						aztDiskChanged = 1;
 						aztTocUpToDate = 0;
 						azt_invalidate_buffers();
-						end_request(0);
+						end_request(CURRENT, 0);
 						printk
 						    ("aztcd: Disk Changed or Not Ready 1 - Unmount Disk!\n");
 					}
@@ -2060,7 +2055,7 @@ static void azt_poll(void)
 				aztTocUpToDate = 0;
 				printk
 				    ("aztcd: Disk Changed or Not Ready 2 - Unmount Disk!\n");
-				end_request(0);
+				end_request(CURRENT, 0);
 				printk((st & AST_DOOR_OPEN) ?
 				       "aztcd: door open\n" :
 				       "aztcd: disk removed\n");
@@ -2070,13 +2065,13 @@ static void azt_poll(void)
 					break;
 				}
 				azt_state = AZT_S_IDLE;
-				while (CURRENT_VALID)
-					end_request(0);
+				while (current_valid())
+					end_request(CURRENT, 0);
 				return;
 			}
 
 /*	  if (aztSendCmd(ACMD_SET_MODE)) RETURN("azt_poll 3");
-	  outb(0x01, DATA_PORT);          
+	  outb(0x01, DATA_PORT);
 	  PA_OK;
 	  STEN_LOW;
 */
@@ -2106,7 +2101,7 @@ static void azt_poll(void)
 						azt_invalidate_buffers();
 						printk
 						    ("aztcd: Disk Changed or Not Ready 3 - Unmount Disk!\n");
-						end_request(0);
+						end_request(CURRENT, 0);
 					}
 				} else
 					break;
@@ -2125,12 +2120,12 @@ static void azt_poll(void)
 					break;
 				}
 				azt_state = AZT_S_IDLE;
-				while (CURRENT_VALID)
-					end_request(0);
+				while (current_valid())
+					end_request(CURRENT, 0);
 				return;
 			}
 
-			if (CURRENT_VALID) {
+			if (current_valid()) {
 				struct azt_Play_msf msf;
 				int i;
 				azt_next_bn = CURRENT->sector / 4;
@@ -2223,8 +2218,8 @@ static void azt_poll(void)
 						AztTries = 0;
 						break;
 					}
-					if (CURRENT_VALID)
-						end_request(0);
+					if (current_valid())
+						end_request(CURRENT, 0);
 					AztTries = 5;
 				}
 				azt_state = AZT_S_START;
@@ -2251,8 +2246,7 @@ static void azt_poll(void)
 				}
 #endif
 				AztTries = 5;
-				if (!CURRENT_VALID
-				    && azt_buf_in == azt_buf_out) {
+				if (!current_valid() && azt_buf_in == azt_buf_out) {
 					azt_state = AZT_S_STOP;
 					loop_ctl = 1;
 					break;
@@ -2283,7 +2277,7 @@ static void azt_poll(void)
 						azt_read_count = 0;
 						azt_state = AZT_S_STOP;
 						loop_ctl = 1;
-						end_request(1);	/*should we have here (1) or (0)? */
+						end_request(CURRENT, 1);	/*should we have here (1) or (0)? */
 					} else {
 						if (azt_read_mode ==
 						    AZT_MODE_2) {
@@ -2324,17 +2318,17 @@ static void azt_poll(void)
 					}
 				}
 				if (!azt_transfer_is_active) {
-					while (CURRENT_VALID) {
+					while (current_valid()) {
 						azt_transfer();
 						if (CURRENT->nr_sectors ==
 						    0)
-							end_request(1);
+							end_request(CURRENT, 1);
 						else
 							break;
 					}
 				}
 
-				if (CURRENT_VALID
+				if (current_valid()
 				    && (CURRENT->sector / 4 < azt_next_bn
 					|| CURRENT->sector / 4 >
 					azt_next_bn + AZT_BUF_SIZ)) {
@@ -2403,15 +2397,15 @@ static void azt_poll(void)
 				azt_invalidate_buffers();
 				printk
 				    ("aztcd: Disk Changed or Not Ready 4 - Unmount Disk!\n");
-				end_request(0);
+				end_request(CURRENT, 0);
 			}
 
 #ifdef AZT_TEST3
 			printk("CURRENT_VALID %d azt_mode %d\n",
-			       CURRENT_VALID, azt_mode);
+			       current_valid(), azt_mode);
 #endif
 
-			if (CURRENT_VALID) {
+			if (current_valid()) {
 				if (st != -1) {
 					if (azt_mode == 1) {
 						azt_state = AZT_S_READ;
@@ -2498,4 +2492,3 @@ static int azt_bcd2bin(unsigned char bcd)
 }
 
 MODULE_LICENSE("GPL");
-EXPORT_NO_SYMBOLS;

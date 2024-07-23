@@ -8,7 +8,6 @@
  * Copyright (C) 1997 Olaf Kirch <okir@monad.swb.de>
  */
 
-#define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/module.h>
 
@@ -16,7 +15,7 @@
 
 #include <linux/types.h>
 #include <linux/socket.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/uio.h>
 #include <linux/unistd.h>
 
@@ -32,7 +31,6 @@ EXPORT_SYMBOL(lockd_down);
 EXPORT_SYMBOL(nlmclnt_proc);
 
 /* NFS server entry points/hooks */
-EXPORT_SYMBOL(nlmsvc_invalidate_client);
 EXPORT_SYMBOL(nlmsvc_ops);
 
 #endif /* CONFIG_MODULES */

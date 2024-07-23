@@ -117,25 +117,22 @@ static const char version[] =
 #endif
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/string.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
-#include <asm/io.h>
 #include <linux/in.h>
-#include <linux/ptrace.h>
-#include <asm/system.h>
 #include <linux/errno.h>
 #include <linux/init.h>
-
 #include <linux/inet.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
+
+#include <asm/io.h>
+#include <asm/system.h>
 
 /* Constant definitions for the DE-620 registers, commands and bits */
 #include "de620.h"
@@ -191,6 +188,8 @@ static int clone = DE620_CLONE;
 
 static unsigned int de620_debug = DE620_DEBUG;
 
+static spinlock_t de620_lock;
+
 MODULE_PARM(bnc, "i");
 MODULE_PARM(utp, "i");
 MODULE_PARM(io, "i");
@@ -222,7 +221,7 @@ static void	de620_set_multicast_list(struct net_device *);
 static int	de620_start_xmit(struct sk_buff *, struct net_device *);
 
 /* Dispatch from interrupts. */
-static void	de620_interrupt(int, void *, struct pt_regs *);
+static irqreturn_t de620_interrupt(int, void *, struct pt_regs *);
 static int	de620_rx_intr(struct net_device *);
 
 /* Initialization */
@@ -316,7 +315,7 @@ de620_read_byte(struct net_device *dev)
 }
 
 static inline void
-de620_write_block(struct net_device *dev, byte *buffer, int count)
+de620_write_block(struct net_device *dev, byte *buffer, int count, int pad)
 {
 #ifndef LOWSPEED
 	byte uflip = NIC_Cmd ^ (DS0 | DS1);
@@ -334,6 +333,9 @@ de620_write_block(struct net_device *dev, byte *buffer, int count)
 	/* No further optimization useful, the limit is in the adapter. */
 	for ( ; count > 0; --count, ++buffer) {
 		de620_put_byte(dev,*buffer);
+	}
+	for ( count = pad ; count > 0; --count, ++buffer) {
+		de620_put_byte(dev, 0);
 	}
 	de620_send_command(dev,W_DUMMY);
 #ifdef COUNT_LOOPS
@@ -449,11 +451,17 @@ static int de620_open(struct net_device *dev)
 		return ret;
 	}
 
-	if (adapter_init(dev))
-		return -EIO;
+	if (adapter_init(dev)) {
+		ret = -EIO;
+		goto out_free_irq;
+	}
 
 	netif_start_queue(dev);
 	return 0;
+
+out_free_irq:
+	free_irq(dev->irq, dev);
+	return ret;
 }
 
 /************************************************
@@ -514,10 +522,7 @@ static void de620_set_multicast_list(struct net_device *dev)
  
 static void de620_timeout(struct net_device *dev)
 {
-	printk("%s: transmit timed out, %s?\n",
-		dev->name,
-		"network cable problem"
-		);
+	printk(KERN_WARNING "%s: transmit timed out, %s?\n", dev->name, "network cable problem");
 	/* Restart the adapter. */
 	if (!adapter_init(dev)) /* maybe close it */
 		netif_wake_queue(dev);
@@ -546,9 +551,8 @@ static int de620_start_xmit(struct sk_buff *skb, struct net_device *dev)
 		++len;
 
 	/* Start real output */
-	save_flags(flags);
-	cli();
 
+	spin_lock_irqsave(&de620_lock, flags)
 	PRINTK(("de620_start_xmit: len=%d, bufs 0x%02x\n",
 		(int)skb->len, using_txbuf));
 
@@ -567,17 +571,17 @@ static int de620_start_xmit(struct sk_buff *skb, struct net_device *dev)
 
 	case (TXBF0 | TXBF1): /* NONE!!! */
 		printk(KERN_WARNING "%s: No tx-buffer available!\n", dev->name);
-		restore_flags(flags);
+		spin_unlock_irqrestore(&de620_lock, flags);
 		return 1;
 	}
-	de620_write_block(dev, buffer, len);
+	de620_write_block(dev, buffer, skb->len, len-skb->len);
 
 	dev->trans_start = jiffies;
 	if(!(using_txbuf == (TXBF0 | TXBF1)))
 		netif_wake_queue(dev);
 
 	((struct net_device_stats *)(dev->priv))->tx_packets++;
-	restore_flags(flags); /* interrupts maybe back on */
+	spin_unlock_irqrestore(&de620_lock, flags);
 	dev_kfree_skb (skb);
 	return 0;
 }
@@ -587,19 +591,16 @@ static int de620_start_xmit(struct sk_buff *skb, struct net_device *dev)
  * Handle the network interface interrupts.
  *
  */
-static void de620_interrupt(int irq_in, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+de620_interrupt(int irq_in, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	byte irq_status;
 	int bogus_count = 0;
 	int again = 0;
 
-	/* This might be deleted now, no crummy drivers present :-) Or..? */
-	if ((dev == NULL) || (irq != irq_in)) {
-		printk("%s: bogus interrupt %d\n", dev?dev->name:"de620", irq_in);
-		return;
-	}
-
+	spin_lock(&de620_lock);
+	
 	/* Read the status register (_not_ the status port) */
 	irq_status = de620_get_register(dev, R_STS);
 
@@ -615,6 +616,9 @@ static void de620_interrupt(int irq_in, void *dev_id, struct pt_regs *regs)
 
 	if(de620_tx_buffs(dev) != (TXBF0 | TXBF1))
 		netif_wake_queue(dev);
+		
+	spin_unlock(&de620_lock);
+	return IRQ_HANDLED;
 }
 
 /**************************************
@@ -689,8 +693,7 @@ static int de620_rx_intr(struct net_device *dev)
 	else { /* Good packet? */
 		skb = dev_alloc_skb(size+2);
 		if (skb == NULL) { /* Yeah, but no place to put it... */
-			printk(KERN_WARNING "%s: Couldn't allocate a sk_buff of size %d.\n",
-				dev->name, size);
+			printk(KERN_WARNING "%s: Couldn't allocate a sk_buff of size %d.\n", dev->name, size);
 			((struct net_device_stats *)(dev->priv))->rx_dropped++;
 		}
 		else { /* Yep! Go get it! */
@@ -819,6 +822,8 @@ int __init de620_probe(struct net_device *dev)
 
 	SET_MODULE_OWNER(dev);
 
+	spin_lock_init(&de620_lock);
+	
 	/*
 	 * This is where the base_addr and irq gets set.
 	 * Tunable at compile-time and insmod-time
@@ -844,13 +849,10 @@ int __init de620_probe(struct net_device *dev)
 		return -ENODEV;
 	}
 
-#if 0 /* Not yet */
-	if (check_region(dev->base_addr, 3)) {
-		printk(", port 0x%x busy\n", dev->base_addr);
+	if (!request_region(dev->base_addr, 3, "de620")) {
+		printk(KERN_ERR "io 0x%3lX, which is busy.\n", dev->base_addr);
 		return -EBUSY;
 	}
-#endif
-	request_region(dev->base_addr, 3, "de620");
 
 	/* else, got it! */
 	printk(", Ethernet Address: %2.2X",

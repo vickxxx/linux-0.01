@@ -5,13 +5,13 @@
 #ifndef _SCSI_H
 #include "scsi.h"
 #endif
-#include <linux/devfs_fs_kernel.h>
 #include <linux/completion.h>
 
 /* The tape buffer descriptor. */
 typedef struct {
 	unsigned char in_use;
 	unsigned char dma;	/* DMA-able buffer */
+	unsigned char do_dio;
 	int buffer_size;
 	int buffer_blocks;
 	int buffer_bytes;
@@ -21,12 +21,20 @@ typedef struct {
 	int syscall_result;
 	Scsi_Request *last_SRpnt;
 	unsigned char *b_data;
-	unsigned short use_sg;	/* zero or number of segments for this adapter */
-	unsigned short sg_segs;	/* total number of allocated segments */
-	unsigned short orig_sg_segs;	/* number of segments allocated at first try */
+	unsigned short use_sg;	/* zero or max number of s/g segments for this adapter */
+	unsigned short sg_segs;		/* number of segments in s/g list */
+	unsigned short orig_frp_segs;	/* number of segments allocated at first try */
+	unsigned short frp_segs;	/* number of buffer segments */
+	unsigned int frp_sg_current;	/* driver buffer length currently in s/g list */
+	struct st_buf_fragment *frp;	/* the allocated buffer fragment list */
 	struct scatterlist sg[1];	/* MUST BE last item */
 } ST_buffer;
 
+/* The tape buffer fragment descriptor */
+struct st_buf_fragment {
+	struct page *page;
+	unsigned int length;
+};
 
 /* The tape mode definition */
 typedef struct {
@@ -62,7 +70,7 @@ typedef struct {
 
 /* The tape drive descriptor */
 typedef struct {
-	kdev_t devt;
+	struct scsi_driver *driver;
 	Scsi_Device *device;
 	struct semaphore lock;	/* For serialization */
 	struct completion wait;	/* For SCSI commands */
@@ -83,16 +91,18 @@ typedef struct {
 	unsigned char cln_sense_value;
 	unsigned char cln_sense_mask;
 	unsigned char use_pf;			/* Set Page Format bit in all mode selects? */
+	unsigned char try_dio;			/* try direct i/o? */
+	unsigned char c_algo;			/* compression algorithm */
+	unsigned char pos_unknown;			/* after reset position unknown */
 	int tape_type;
-	int write_threshold;
 	int timeout;		/* timeout for normal commands */
 	int long_timeout;	/* timeout for commands known to take long time */
+
+	unsigned long max_pfn;	/* the maximum page number reachable by the HBA */
 
 	/* Mode characteristics */
 	ST_mode modes[ST_NBR_MODES];
 	int current_mode;
-	devfs_handle_t de_r[ST_NBR_MODES];  /*  Rewind entries     */
-	devfs_handle_t de_n[ST_NBR_MODES];  /*  No-rewind entries  */
 
 	/* Status variables */
 	int partition;
@@ -124,9 +134,14 @@ typedef struct {
 	unsigned char write_pending;
 	int nbr_finished;
 	int nbr_waits;
+	int nbr_requests;
+	int nbr_dio;
+	int nbr_pages;
+	int nbr_combinable;
 	unsigned char last_cmnd[6];
 	unsigned char last_sense[16];
 #endif
+	struct gendisk *disk;
 } Scsi_Tape;
 
 /* Bit masks for use_pf */
@@ -144,6 +159,9 @@ typedef struct {
 #define ST_EOD		7
 /* EOD hit while reading => ST_EOD_1 => return zero => ST_EOD_2 =>
    return zero => ST_EOD, return ENOSPC */
+/* When writing: ST_EOM_OK == early warning found, write OK
+		 ST_EOD_1  == allow trying new write after early warning
+		 ST_EOM_ERROR == early warning found, not able to write all */
 
 /* Values of rw */
 #define	ST_IDLE		0

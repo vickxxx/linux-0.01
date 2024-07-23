@@ -13,10 +13,12 @@
  * on code by Martin von Loewis <martin@mira.isdn.cs.tu-berlin.de>.
  */
 
-#include <linux/sched.h>
-#include <linux/locks.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/ufs_fs.h>
+#include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
+#include <linux/sched.h>
 
 #include "swab.h"
 #include "util.h"
@@ -62,8 +64,10 @@ ufs_readdir (struct file * filp, void * dirent, filldir_t filldir)
 	int de_reclen;
 	unsigned flags;
 
+	lock_kernel();
+
 	sb = inode->i_sb;
-	flags = sb->u.ufs_sb.s_flags;
+	flags = UFS_SB(sb)->s_flags;
 
 	UFSD(("ENTER, ino %lu  f_pos %lu\n", inode->i_ino, (unsigned long) filp->f_pos))
 
@@ -74,7 +78,7 @@ ufs_readdir (struct file * filp, void * dirent, filldir_t filldir)
 	while (!error && !stored && filp->f_pos < inode->i_size) {
 		lblk = (filp->f_pos) >> sb->s_blocksize_bits;
 		blk = ufs_frag_map(inode, lblk);
-		if (!blk || !(bh = bread (sb->s_dev, blk, sb->s_blocksize))) {
+		if (!blk || !(bh = sb_bread(sb, blk))) {
 			/* XXX - error - skip to the next block */
 			printk("ufs_readdir: "
 			       "dir inode %lu has a hole at offset %lu\n",
@@ -117,6 +121,7 @@ revalidate:
 				              (sb->s_blocksize - 1)) +
 				               sb->s_blocksize;
 				brelse(bh);
+				unlock_kernel();
 				return stored;
 			}
 			if (!ufs_check_dir_entry ("ufs_readdir", inode, de,
@@ -127,6 +132,7 @@ revalidate:
 				              (sb->s_blocksize - 1)) +
 					       1;
 				brelse (bh);
+				unlock_kernel();
 				return stored;
 			}
 			offset += fs16_to_cpu(sb, de->d_reclen);
@@ -160,7 +166,8 @@ revalidate:
 		offset = 0;
 		brelse (bh);
 	}
-	UPDATE_ATIME(inode);
+	update_atime(inode);
+	unlock_kernel();
 	return 0;
 }
 
@@ -301,8 +308,8 @@ int ufs_check_dir_entry (const char * function,	struct inode * dir,
 		error_msg = "reclen is too small for namlen";
 	else if (((char *) de - bh->b_data) + rlen > dir->i_sb->s_blocksize)
 		error_msg = "directory entry across blocks";
-	else if (fs32_to_cpu(sb, de->d_ino) > (sb->u.ufs_sb.s_uspi->s_ipg *
-				      sb->u.ufs_sb.s_uspi->s_ncg))
+	else if (fs32_to_cpu(sb, de->d_ino) > (UFS_SB(sb)->s_uspi->s_ipg *
+				      UFS_SB(sb)->s_uspi->s_ncg))
 		error_msg = "inode out of bounds";
 
 	if (error_msg != NULL)
@@ -346,13 +353,11 @@ ino_t ufs_inode_by_name(struct inode * dir, struct dentry *dentry)
 void ufs_set_link(struct inode *dir, struct ufs_dir_entry *de,
 		struct buffer_head *bh, struct inode *inode)
 {
-	dir->i_version = ++event;
+	dir->i_version++;
 	de->d_ino = cpu_to_fs32(dir->i_sb, inode->i_ino);
 	mark_buffer_dirty(bh);
-	if (IS_SYNC(dir)) {
-		ll_rw_block (WRITE, 1, &bh);
-		wait_on_buffer(bh);
-	}
+	if (IS_DIRSYNC(dir))
+		sync_dirty_buffer(bh);
 	brelse (bh);
 }
 
@@ -379,7 +384,7 @@ int ufs_add_link(struct dentry *dentry, struct inode *inode)
 	UFSD(("ENTER, name %s, namelen %u\n", name, namelen))
 	
 	sb = dir->i_sb;
-	uspi = sb->u.ufs_sb.s_uspi;
+	uspi = UFS_SB(sb)->s_uspi;
 
 	if (!namelen)
 		return -EINVAL;
@@ -450,13 +455,11 @@ int ufs_add_link(struct dentry *dentry, struct inode *inode)
 	de->d_ino = cpu_to_fs32(sb, inode->i_ino);
 	ufs_set_de_type(sb, de, inode->i_mode);
 	mark_buffer_dirty(bh);
-	if (IS_SYNC(dir)) {
-		ll_rw_block (WRITE, 1, &bh);
-		wait_on_buffer (bh);
-	}
+	if (IS_DIRSYNC(dir))
+		sync_dirty_buffer(bh);
 	brelse (bh);
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
-	dir->i_version = ++event;
+	dir->i_version++;
 	mark_inode_dirty(dir);
 
 	UFSD(("EXIT\n"))
@@ -497,14 +500,12 @@ int ufs_delete_entry (struct inode * inode, struct ufs_dir_entry * dir,
 				fs16_add(sb, &pde->d_reclen,
 					fs16_to_cpu(sb, dir->d_reclen));
 			dir->d_ino = 0;
-			inode->i_version = ++event;
+			inode->i_version++;
 			inode->i_ctime = inode->i_mtime = CURRENT_TIME;
 			mark_inode_dirty(inode);
 			mark_buffer_dirty(bh);
-			if (IS_SYNC(inode)) {
-				ll_rw_block(WRITE, 1, &bh);
-				wait_on_buffer(bh);
-			}
+			if (IS_DIRSYNC(inode))
+				sync_dirty_buffer(bh);
 			brelse(bh);
 			UFSD(("EXIT\n"))
 			return 0;
@@ -616,7 +617,7 @@ int ufs_empty_dir (struct inode * inode)
 }
 
 struct file_operations ufs_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	ufs_readdir,
-	fsync:		file_fsync,
+	.read		= generic_read_dir,
+	.readdir	= ufs_readdir,
+	.fsync		= file_fsync,
 };

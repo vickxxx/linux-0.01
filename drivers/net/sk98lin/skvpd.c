@@ -88,7 +88,7 @@
  *	Revision 1.9  1998/09/16 07:33:52  malthoff
  *	remove memcmp() by SK_MEMCMP and
  *	memcpy() by SK_MEMCPY() to be
- *	independant from the 'C' Standard Library.
+ *	independent from the 'C' Standard Library.
  *	
  *	Revision 1.8  1998/08/19 12:52:35  malthoff
  *	compiler fix: use SK_VPD_KEY instead of S_VPD.
@@ -121,7 +121,7 @@
  ******************************************************************************/
 
 /*
-	Please refer skvpd.txt for infomation how to include this module
+	Please refer skvpd.txt for information how to include this module
  */
 static const char SysKonnectFileId[] =
 	"@(#)$Id: skvpd.c,v 1.26 2000/06/13 08:00:01 mkarl Exp $ (C) SK" ;
@@ -563,7 +563,7 @@ SK_IOC		IoC)	/* IO Context */
 
 /*
  *	find the Keyword 'key' in the VPD buffer and fills the
- *	parameter sturct 'p' with it's values
+ *	parameter sturct 'p' with its values
  *
  * returns	*p	success
  *		0:	parameter was not found or VPD encoding error
@@ -1064,7 +1064,8 @@ char		*buf)	/* buffer where the keyword value can be read from */
 		len = VPD_MAX_LEN ;
 		rtv = 2 ;
 		SK_DBG_MSG(pAC,SK_DBGMOD_VPD,SK_DBGCAT_ERR,
-			("keyword to long, cut after %d bytes\n",VPD_MAX_LEN)) ;
+			   ("keyword too long, cut after %d bytes\n",
+			    VPD_MAX_LEN));
 	}
 	if ((rtv2 = VpdSetupPara(pAC,key,buf,len,VPD_RW_KEY,OWR_KEY)) != 0) {
 		SK_DBG_MSG(pAC,SK_DBGMOD_VPD,SK_DBGCAT_ERR,

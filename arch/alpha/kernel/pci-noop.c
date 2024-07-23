@@ -48,7 +48,6 @@ asmlinkage long
 sys_pciconfig_iobase(long which, unsigned long bus, unsigned long dfn)
 {
 	struct pci_controller *hose;
-	struct pci_dev *dev;
 
 	/* from hose or from bus.devfn */
 	if (which & IOBASE_FROM_HOSE) {
@@ -104,21 +103,23 @@ sys_pciconfig_write(unsigned long bus, unsigned long dfn,
 }
 /* stubs for the routines in pci_iommu.c */
 void *
-pci_alloc_consistent(struct pci_dev *pdev, long size, dma_addr_t *dma_addrp)
+pci_alloc_consistent(struct pci_dev *pdev, size_t size, dma_addr_t *dma_addrp)
 {
+	return NULL;
 }
 void
-pci_free_consistent(struct pci_dev *pdev, long size, void *cpu_addr,
+pci_free_consistent(struct pci_dev *pdev, size_t size, void *cpu_addr,
 		    dma_addr_t dma_addr)
 {
 }
 dma_addr_t
-pci_map_single(struct pci_dev *pdev, void *cpu_addr, long size,
+pci_map_single(struct pci_dev *pdev, void *cpu_addr, size_t size,
 	       int direction)
 {
+	return (dma_addr_t) 0;
 }
 void
-pci_unmap_single(struct pci_dev *pdev, dma_addr_t dma_addr, long size,
+pci_unmap_single(struct pci_dev *pdev, dma_addr_t dma_addr, size_t size,
 		 int direction)
 {
 }
@@ -126,6 +127,7 @@ int
 pci_map_sg(struct pci_dev *pdev, struct scatterlist *sg, int nents,
 	   int direction)
 {
+	return 0;
 }
 void
 pci_unmap_sg(struct pci_dev *pdev, struct scatterlist *sg, int nents,

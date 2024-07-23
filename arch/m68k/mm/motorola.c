@@ -52,9 +52,9 @@ static pte_t * __init kernel_page_table(void)
 	ptablep = (pte_t *)alloc_bootmem_low_pages(PAGE_SIZE);
 
 	clear_page(ptablep);
-	__flush_page_to_ram((unsigned long) ptablep);
-	flush_tlb_kernel_page((unsigned long) ptablep);
-	nocache_page ((unsigned long)ptablep);
+	__flush_page_to_ram(ptablep);
+	flush_tlb_kernel_page(ptablep);
+	nocache_page(ptablep);
 
 	return ptablep;
 }
@@ -87,15 +87,15 @@ static pmd_t * __init kernel_ptr_table(void)
 #endif
 	}
 
-	if (((unsigned long)(last_pgtable + PTRS_PER_PMD) & ~PAGE_MASK) == 0) {
+	last_pgtable += PTRS_PER_PMD;
+	if (((unsigned long)last_pgtable & ~PAGE_MASK) == 0) {
 		last_pgtable = (pmd_t *)alloc_bootmem_low_pages(PAGE_SIZE);
 
 		clear_page(last_pgtable);
-		__flush_page_to_ram((unsigned long)last_pgtable);
-		flush_tlb_kernel_page((unsigned long)last_pgtable);
-		nocache_page((unsigned long)last_pgtable);
-	} else
-		last_pgtable += PTRS_PER_PMD;
+		__flush_page_to_ram(last_pgtable);
+		flush_tlb_kernel_page(last_pgtable);
+		nocache_page(last_pgtable);
+	}
 
 	return last_pgtable;
 }
@@ -176,7 +176,7 @@ map_chunk (unsigned long addr, long size)
 				pte_dir = kernel_page_table();
 				pmd_set(pmd_dir, pte_dir);
 			}
-			pte_dir = pte_offset(pmd_dir, virtaddr);
+			pte_dir = pte_offset_kernel(pmd_dir, virtaddr);
 
 			if (virtaddr) {
 				if (!pte_present(*pte_dir))
@@ -195,9 +195,6 @@ map_chunk (unsigned long addr, long size)
 
 	return virtaddr;
 }
-
-extern unsigned long empty_bad_page_table;
-extern unsigned long empty_bad_page;
 
 /*
  * paging_init() continues the virtual memory environment setup which
@@ -262,15 +259,13 @@ void __init paging_init(void)
 	 * initialize the bad page table and bad page to point
 	 * to a couple of allocated pages
 	 */
-	empty_bad_page_table = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	empty_bad_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	empty_zero_page = (unsigned long)alloc_bootmem_pages(PAGE_SIZE);
-	memset((void *)empty_zero_page, 0, PAGE_SIZE);
+	empty_zero_page = alloc_bootmem_pages(PAGE_SIZE);
+	memset(empty_zero_page, 0, PAGE_SIZE);
 
 	/*
-	 * Set up SFC/DFC registers (user data space)
+	 * Set up SFC/DFC registers
 	 */
-	set_fs (USER_DS);
+	set_fs(KERNEL_DS);
 
 #ifdef DEBUG
 	printk ("before free_area_init\n");
@@ -286,7 +281,6 @@ void __init paging_init(void)
 }
 
 extern char __init_begin, __init_end;
-extern unsigned long totalram_pages;
 
 void free_initmem(void)
 {

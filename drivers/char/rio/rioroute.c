@@ -33,7 +33,6 @@
 static char *_rioroute_c_sccs_ = "@(#)rioroute.c	1.3";
 #endif
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -46,7 +45,6 @@ static char *_rioroute_c_sccs_ = "@(#)rioroute.c	1.3";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 
@@ -521,7 +519,7 @@ int RIORouteRup( struct rio_info *p, uint Rup, struct Host *HostP, PKT *PacketP 
       /*
       ** If either of the modules on this unit is read-only or write-only
       ** or none-xprint, then we need to transfer that info over to the
-      ** relevent ports.
+      ** relevant ports.
       */
       if ( HostP->Mapping[ThisUnit].SysPort != NO_PORT )
       {
@@ -763,7 +761,7 @@ uint UnitId;
 #endif
 	UnitId--;		/* this trick relies on the Unit Id being UNSIGNED! */
 
-	if ( UnitId > MAX_RUP )		/* dontcha just lurv unsigned maths! */
+	if ( UnitId >= MAX_RUP )	/* dontcha just lurv unsigned maths! */
 		return(0);
 
 	if ( HostP->Mapping[UnitId].Flags & BEEN_HERE )
@@ -976,7 +974,7 @@ RIORemoveFromSavedTable(struct rio_info *p, struct Map *pMap)
     /*
     ** We loop for all entries even after finding an entry and
     ** zeroing it because we may have two entries to delete if
-    ** its a 16 port RTA.
+    ** it's a 16 port RTA.
     */
     for (entry = 0; entry < TOTAL_MAP_ENTRIES; entry++)
     {

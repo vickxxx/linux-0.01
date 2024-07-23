@@ -1,6 +1,74 @@
 /*
  *      u14-34f.c - Low-level driver for UltraStor 14F/34F SCSI host adapters.
  *
+ *      03 Jun 2003 Rev. 8.10 for linux-2.5.70
+ *        + Update for new IRQ API.
+ *        + Use "goto" when appropriate.
+ *        + Drop u14-34f.h.
+ *        + Update for new module_param API.
+ *        + Module parameters  can now be specified only in the
+ *          same format as the kernel boot options.
+ *
+ *             boot option    old module param 
+ *             -----------    ------------------
+ *             addr,...       io_port=addr,...
+ *             lc:[y|n]       linked_comm=[1|0]
+ *             mq:xx          max_queue_depth=xx
+ *             tm:[0|1|2]     tag_mode=[0|1|2]
+ *             et:[y|n]       ext_tran=[1|0]
+ *             of:[y|n]       have_old_firmware=[1|0]
+ *
+ *          A valid example using the new parameter format is:
+ *          modprobe u14-34f "u14-34f=0x340,0x330,lc:y,tm:0,mq:4"
+ *
+ *          which is equivalent to the old format:
+ *          modprobe u14-34f io_port=0x340,0x330 linked_comm=1 tag_mode=0 \
+ *                        max_queue_depth=4
+ *
+ *          With actual module code, u14-34f and u14_34f are equivalent
+ *          as module parameter names.
+ *
+ *      12 Feb 2003 Rev. 8.04 for linux 2.5.60
+ *        + Release irq before calling scsi_register.
+ *
+ *      12 Nov 2002 Rev. 8.02 for linux 2.5.47
+ *        + Release driver_lock before calling scsi_register.
+ *
+ *      11 Nov 2002 Rev. 8.01 for linux 2.5.47
+ *        + Fixed bios_param and scsicam_bios_param calling parameters.
+ *
+ *      28 Oct 2002 Rev. 8.00 for linux 2.5.44-ac4
+ *        + Use new tcq and adjust_queue_depth api.
+ *        + New command line option (tm:[0-2]) to choose the type of tags:
+ *          0 -> disable tagging ; 1 -> simple tags  ; 2 -> ordered tags.
+ *          Default is tm:0 (tagged commands disabled).
+ *          For compatibility the "tc:" option is an alias of the "tm:"
+ *          option; tc:n is equivalent to tm:0 and tc:y is equivalent to
+ *          tm:1.
+ *
+ *      10 Oct 2002 Rev. 7.70 for linux 2.5.42
+ *        + Foreport from revision 6.70.
+ *
+ *      25 Jun 2002 Rev. 6.70 for linux 2.4.19
+ *        + Fixed endian-ness problem due to bitfields.
+ *
+ *      21 Feb 2002 Rev. 6.52 for linux 2.4.18
+ *        + Backport from rev. 7.22 (use io_request_lock).
+ *
+ *      20 Feb 2002 Rev. 7.22 for linux 2.5.5
+ *        + Remove any reference to virt_to_bus().
+ *        + Fix pio hang while detecting multiple HBAs.
+ *
+ *      01 Jan 2002 Rev. 7.20 for linux 2.5.1
+ *        + Use the dynamic DMA mapping API.
+ *
+ *      19 Dec 2001 Rev. 7.02 for linux 2.5.1
+ *        + Use SCpnt->sc_data_direction if set.
+ *        + Use sglist.page instead of sglist.address.
+ *
+ *      11 Dec 2001 Rev. 7.00 for linux 2.5.1
+ *        + Use host->host_lock instead of io_request_lock.
+ *
  *       1 May 2001 Rev. 6.05 for linux 2.4.4
  *        + Fix data transfer direction for opcode SEND_CUE_SHEET (0x5d)
  *
@@ -20,7 +88,7 @@
  *        + When loaded as a module, accepts the new parameter boot_options
  *          which value is a string with the same format of the kernel boot
  *          command line options. A valid example is:
- *          modprobe u14-34f boot_options=\"0x230,0x340,lc:y,mq:4\"
+ *          modprobe u14-34f 'boot_options="0x230,0x340,lc:y,mq:4"'
  *
  *      22 Jul 1999 Rev. 5.00 for linux 2.2.10 and 2.3.11
  *        + Removed pre-2.2 source code compatibility.
@@ -157,7 +225,7 @@
  *          Auto detects if U14F boards have an old firmware revision.
  *          Max number of scatter/gather lists set to 16 for all boards
  *          (most installation run fine using 33 sglists, while other
- *          has problems when using more then 16).
+ *          has problems when using more than 16).
  *
  *      16 Jan 1995 rev. 1.13 for linux 1.1.81
  *          Display a message if check_region detects a port address
@@ -183,7 +251,7 @@
  *
  *          Multiple U14F and/or U34F host adapters are supported.
  *
- *  Copyright (C) 1994-2001 Dario Ballabio (ballabio_dario@emc.com)
+ *  Copyright (C) 1994-2003 Dario Ballabio (ballabio_dario@emc.com)
  *
  *  Alternate email: dario.ballabio@inwind.it, dario.ballabio@tiscalinet.it
  *
@@ -265,7 +333,7 @@
  *
  *  For U34F boards the latest bios prom is 38008-002 (BIOS rev. 2.01),
  *  the latest firmware prom is 28008-006. Older firmware 28008-005 has
- *  problems when using more then 16 scatter/gather lists.
+ *  problems when using more than 16 scatter/gather lists.
  *
  *  The list of i/o ports to be probed can be totally replaced by the
  *  boot command line option: "u14-34f=port0,port1,port2,...", where the
@@ -281,19 +349,22 @@
  *  et:n  use disk geometry jumpered on the board;
  *  lc:y  enables linked commands;
  *  lc:n  disables linked commands;
+ *  tm:0  disables tagged commands (same as tc:n);
+ *  tm:1  use simple queue tags (same as tc:y);
+ *  tm:2  use ordered queue tags (same as tc:2);
  *  of:y  enables old firmware support;
  *  of:n  disables old firmware support;
  *  mq:xx set the max queue depth to the value xx (2 <= xx <= 8).
  *
- *  The default value is: "u14-34f=lc:n,of:n,mq:8,et:n".
+ *  The default value is: "u14-34f=lc:n,of:n,mq:8,tm:0,et:n".
  *  An example using the list of detection probes could be:
- *  "u14-34f=0x230,0x340,lc:y,of:n,mq:4,et:n".
+ *  "u14-34f=0x230,0x340,lc:y,tm:2,of:n,mq:4,et:n".
  *
  *  When loading as a module, parameters can be specified as well.
  *  The above example would be (use 1 in place of y and 0 in place of n):
  *
  *  modprobe u14-34f io_port=0x230,0x340 linked_comm=1 have_old_firmware=0 \
- *                max_queue_depth=4 ext_tran=0
+ *                max_queue_depth=4 ext_tran=0 tag_mode=2
  *
  *  ----------------------------------------------------------------------------
  *  In this implementation, linked commands are designed to work with any DISK
@@ -334,26 +405,8 @@
  *  the driver sets host->wish_block = TRUE for all ISA boards.
  */
 
-#include <linux/module.h>
-#include <linux/version.h>
-
-#ifndef LinuxVersionCode
-#define LinuxVersionCode(v, p, s) (((v)<<16)+((p)<<8)+(s))
-#endif
-
-#define MAX_INT_PARAM 10
-
-MODULE_PARM(boot_options, "s");
-MODULE_PARM(io_port, "1-" __MODULE_STRING(MAX_INT_PARAM) "i");
-MODULE_PARM(linked_comm, "i");
-MODULE_PARM(have_old_firmware, "i");
-MODULE_PARM(link_statistics, "i");
-MODULE_PARM(max_queue_depth, "i");
-MODULE_PARM(ext_tran, "i");
-MODULE_AUTHOR("Dario Ballabio");
-
+#include <linux/config.h>
 #include <linux/string.h>
-#include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
@@ -362,24 +415,46 @@ MODULE_AUTHOR("Dario Ballabio");
 #include <asm/byteorder.h>
 #include <linux/proc_fs.h>
 #include <linux/blk.h>
-#include "scsi.h"
-#include "hosts.h"
-#include "sd.h"
-#include <asm/dma.h>
-#include <asm/irq.h>
-#include "u14-34f.h"
+#include <linux/interrupt.h>
 #include <linux/stat.h>
-#include <linux/config.h>
+#include <linux/pci.h>
 #include <linux/init.h>
 #include <linux/ctype.h>
 #include <linux/spinlock.h>
+#include <scsi/scsicam.h>
+#include "scsi.h"
+#include "hosts.h"
+#include <asm/dma.h>
+#include <asm/irq.h>
 
-#define SPIN_FLAGS unsigned long spin_flags;
-#define SPIN_LOCK spin_lock_irq(&io_request_lock);
-#define SPIN_LOCK_SAVE spin_lock_irqsave(&io_request_lock, spin_flags);
-#define SPIN_UNLOCK spin_unlock_irq(&io_request_lock);
-#define SPIN_UNLOCK_RESTORE \
-                  spin_unlock_irqrestore(&io_request_lock, spin_flags);
+static int u14_34f_detect(Scsi_Host_Template *);
+static int u14_34f_release(struct Scsi_Host *);
+static int u14_34f_queuecommand(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
+static int u14_34f_eh_abort(Scsi_Cmnd *);
+static int u14_34f_eh_host_reset(Scsi_Cmnd *);
+static int u14_34f_bios_param(struct scsi_device *, struct block_device *,
+                              sector_t, int *);
+static int u14_34f_slave_configure(Scsi_Device *);
+
+static Scsi_Host_Template driver_template = {
+                .name                    = "UltraStor 14F/34F rev. 8.10.00 ",
+                .detect                  = u14_34f_detect,
+                .release                 = u14_34f_release,
+                .queuecommand            = u14_34f_queuecommand,
+                .eh_abort_handler        = u14_34f_eh_abort,
+                .eh_device_reset_handler = NULL,
+                .eh_bus_reset_handler    = NULL,
+                .eh_host_reset_handler   = u14_34f_eh_host_reset,
+                .bios_param              = u14_34f_bios_param,
+                .slave_configure         = u14_34f_slave_configure,
+                .this_id                 = 7,
+                .unchecked_isa_dma       = 1,
+                .use_clustering          = ENABLE_CLUSTERING
+                };
+
+#if !defined(__BIG_ENDIAN_BITFIELD) && !defined(__LITTLE_ENDIAN_BITFIELD)
+#error "Adjust your <asm/byteorder.h> defines"
+#endif
 
 /* Values for the PRODUCT_ID ports for the 14/34F */
 #define PRODUCT_ID1  0x56
@@ -436,6 +511,9 @@ MODULE_AUTHOR("Dario Ballabio");
 #define ABORTING 6
 #define NO_DMA  0xff
 #define MAXLOOP  10000
+#define TAG_DISABLED 0
+#define TAG_SIMPLE   1
+#define TAG_ORDERED  2
 
 #define REG_LCL_MASK      0
 #define REG_LCL_INTR      1
@@ -447,7 +525,7 @@ MODULE_AUTHOR("Dario Ballabio");
 #define REG_CONFIG2       7
 #define REG_OGM           8
 #define REG_ICM           12
-#define REGION_SIZE       13
+#define REGION_SIZE       13UL
 #define BSY_ASSERTED      0x01
 #define IRQ_ASSERTED      0x01
 #define CMD_RESET         0xc0
@@ -469,29 +547,44 @@ struct sg_list {
 
 /* MailBox SCSI Command Packet */
 struct mscp {
-   unsigned char opcode: 3;             /* type of command */
-   unsigned char xdir: 2;               /* data transfer direction */
-   unsigned char dcn: 1;                /* disable disconnect */
-   unsigned char ca: 1;                 /* use cache (if available) */
-   unsigned char sg: 1;                 /* scatter/gather operation */
-   unsigned char target: 3;             /* SCSI target id */
-   unsigned char channel: 2;            /* SCSI channel number */
-   unsigned char lun: 3;                /* SCSI logical unit number */
+
+#if defined(__BIG_ENDIAN_BITFIELD)
+   unsigned char sg:1, ca:1, dcn:1, xdir:2, opcode:3;
+   unsigned char lun: 3, channel:2, target:3;
+#else
+   unsigned char opcode: 3,             /* type of command */
+                 xdir: 2,               /* data transfer direction */
+                 dcn: 1,                /* disable disconnect */
+                 ca: 1,                 /* use cache (if available) */
+                 sg: 1;                 /* scatter/gather operation */
+   unsigned char target: 3,             /* SCSI target id */
+                 channel: 2,            /* SCSI channel number */
+                 lun: 3;                /* SCSI logical unit number */
+#endif
+
    unsigned int data_address PACKED;    /* transfer data pointer */
    unsigned int data_len PACKED;        /* length in bytes */
    unsigned int link_address PACKED;    /* for linking command chains */
    unsigned char clink_id;              /* identifies command in chain */
    unsigned char use_sg;                /* (if sg is set) 8 bytes per list */
    unsigned char sense_len;
-   unsigned char scsi_cdbs_len;         /* 6, 10, or 12 */
-   unsigned char scsi_cdbs[12];         /* SCSI commands */
+   unsigned char cdb_len;               /* 6, 10, or 12 */
+   unsigned char cdb[12];               /* SCSI Command Descriptor Block */
    unsigned char adapter_status;        /* non-zero indicates HA error */
    unsigned char target_status;         /* non-zero indicates target error */
    unsigned int sense_addr PACKED;
+
+   /* Additional fields begin here. */
    Scsi_Cmnd *SCpnt;
-   unsigned int index;                  /* cp index */
-   struct sg_list *sglist;
+   unsigned int cpp_index;              /* cp index */
+
+   /* All the cp structure is zero filled by queuecommand except the
+      following CP_TAIL_SIZE bytes, initialized by detect */
+   dma_addr_t cp_dma_addr; /* dma handle for this cp structure */
+   struct sg_list *sglist; /* pointer to the allocated SG list */
    };
+
+#define CP_TAIL_SIZE (sizeof(struct sglist *) + sizeof(dma_addr_t))
 
 struct hostdata {
    struct mscp cp[MAX_MAILBOXES];       /* Mailboxes for this board */
@@ -500,23 +593,22 @@ struct hostdata {
    unsigned int iocount;                /* Total i/o done for this board */
    int board_number;                    /* Number of this board */
    char board_name[16];                 /* Name of this board */
-   char board_id[256];                  /* data from INQUIRY on this board */
    int in_reset;                        /* True if board is doing a reset */
    int target_to[MAX_TARGET][MAX_CHANNEL]; /* N. of timeout errors on target */
    int target_redo[MAX_TARGET][MAX_CHANNEL]; /* If TRUE redo i/o on target */
    unsigned int retries;                /* Number of internal retries */
    unsigned long last_retried_pid;      /* Pid of last retried command */
    unsigned char subversion;            /* Bus type, either ISA or ESA */
+   struct pci_dev *pdev;                /* Always NULL */
    unsigned char heads;
    unsigned char sectors;
-
-   /* slot != 0 for the U24F, slot == 0 for both the U14F and U34F */
-   unsigned char slot;
+   char board_id[256];                  /* data from INQUIRY on this board */
    };
 
 static struct Scsi_Host *sh[MAX_BOARDS + 1];
 static const char *driver_name = "Ux4F";
 static char sha[MAX_BOARDS];
+static spinlock_t driver_lock = SPIN_LOCK_UNLOCKED;
 
 /* Initialize num_boards so that ihdlr can work while detect is in progress */
 static unsigned int num_boards = MAX_BOARDS;
@@ -537,34 +629,27 @@ static unsigned long io_port[] = {
 #define HD(board) ((struct hostdata *) &sh[board]->hostdata)
 #define BN(board) (HD(board)->board_name)
 
-#define SWAP_BYTE(x) ((unsigned long)( \
-        (((unsigned long)(x) & 0x000000ffU) << 24) | \
-        (((unsigned long)(x) & 0x0000ff00U) <<  8) | \
-        (((unsigned long)(x) & 0x00ff0000U) >>  8) | \
-        (((unsigned long)(x) & 0xff000000U) >> 24)))
+/* Device is Little Endian */
+#define H2DEV(x) cpu_to_le32(x)
+#define DEV2H(x) le32_to_cpu(x)
 
-#if defined(__BIG_ENDIAN)
-#define H2DEV(x) SWAP_BYTE(x)
-#else
-#define H2DEV(x) (x)
-#endif
-
-#define DEV2H(x) H2DEV(x)
-#define V2DEV(addr) ((addr) ? H2DEV(virt_to_bus((void *)addr)) : 0)
-#define DEV2V(addr) ((addr) ? DEV2H(bus_to_virt((unsigned long)addr)) : 0)
-
-static void do_interrupt_handler(int, void *, struct pt_regs *);
+static irqreturn_t do_interrupt_handler(int, void *, struct pt_regs *);
 static void flush_dev(Scsi_Device *, unsigned long, unsigned int, unsigned int);
 static int do_trace = FALSE;
 static int setup_done = FALSE;
 static int link_statistics;
 static int ext_tran = FALSE;
-static char *boot_options;
 
 #if defined(HAVE_OLD_UX4F_FIRMWARE)
 static int have_old_firmware = TRUE;
 #else
 static int have_old_firmware = FALSE;
+#endif
+
+#if defined(CONFIG_SCSI_U14_34F_TAGGED_QUEUE)
+static int tag_mode = TAG_SIMPLE;
+#else
+static int tag_mode = TAG_DISABLED;
 #endif
 
 #if defined(CONFIG_SCSI_U14_34F_LINKED_COMMANDS)
@@ -579,61 +664,74 @@ static int max_queue_depth = CONFIG_SCSI_U14_34F_MAX_TAGS;
 static int max_queue_depth = MAX_CMD_PER_LUN;
 #endif
 
-static void select_queue_depths(struct Scsi_Host *host, Scsi_Device *devlist) {
-   Scsi_Device *dev;
-   int j, ntag = 0, nuntag = 0, tqd, utqd;
+#define MAX_INT_PARAM 10
+#define MAX_BOOT_OPTIONS_SIZE 256
+static char boot_options[MAX_BOOT_OPTIONS_SIZE];
+
+#if defined(MODULE)
+#include <linux/module.h>
+#include <linux/moduleparam.h>
+
+module_param_string(u14_34f, boot_options, MAX_BOOT_OPTIONS_SIZE, 0);
+MODULE_PARM_DESC(u14_34f, " equivalent to the \"u14-34f=...\" kernel boot " \
+"option." \
+"      Example: modprobe u14-34f \"u14_34f=0x340,0x330,lc:y,tm:0,mq:4\"");
+MODULE_AUTHOR("Dario Ballabio");
+MODULE_LICENSE("GPL");
+MODULE_DESCRIPTION("UltraStor 14F/34F SCSI Driver");
+
+#endif
+
+static int u14_34f_slave_configure(Scsi_Device *dev) {
+   int j, tqd, utqd;
+   char *tag_suffix, *link_suffix;
+   struct Scsi_Host *host = dev->host;
 
    j = ((struct hostdata *) host->hostdata)->board_number;
 
-   for(dev = devlist; dev; dev = dev->next) {
-
-      if (dev->host != host) continue;
-
-      if (TLDEV(dev->type) && (dev->tagged_supported || linked_comm))
-         ntag++;
-      else
-         nuntag++;
-      }
-
    utqd = MAX_CMD_PER_LUN;
+   tqd = max_queue_depth;
 
-   tqd = (host->can_queue - utqd * nuntag) / (ntag ? ntag : 1);
+   if (TLDEV(dev->type) && dev->tagged_supported)
 
-   if (tqd > max_queue_depth) tqd = max_queue_depth;
-
-   if (tqd < MAX_CMD_PER_LUN) tqd = MAX_CMD_PER_LUN;
-
-   for(dev = devlist; dev; dev = dev->next) {
-      char *tag_suffix = "", *link_suffix = "";
-
-      if (dev->host != host) continue;
-
-      if (TLDEV(dev->type) && (dev->tagged_supported || linked_comm))
-         dev->queue_depth = tqd;
-      else
-         dev->queue_depth = utqd;
-
-      if (TLDEV(dev->type)) {
-         if (linked_comm && dev->queue_depth > 2)
-            link_suffix = ", sorted";
-         else
-            link_suffix = ", unsorted";
+      if (tag_mode == TAG_SIMPLE) {
+         scsi_adjust_queue_depth(dev, MSG_SIMPLE_TAG, tqd);
+         tag_suffix = ", simple tags";
+         }
+      else if (tag_mode == TAG_ORDERED) {
+         scsi_adjust_queue_depth(dev, MSG_ORDERED_TAG, tqd);
+         tag_suffix = ", ordered tags";
+         }
+      else {
+         scsi_adjust_queue_depth(dev, 0, tqd);
+         tag_suffix = ", no tags";
          }
 
-      if (dev->tagged_supported && TLDEV(dev->type) && dev->tagged_queue)
-         tag_suffix = ", soft-tagged";
-      else if (dev->tagged_supported && TLDEV(dev->type))
-         tag_suffix = ", tagged";
-
-      printk("%s: scsi%d, channel %d, id %d, lun %d, cmds/lun %d%s%s.\n",
-             BN(j), host->host_no, dev->channel, dev->id, dev->lun,
-             dev->queue_depth, link_suffix, tag_suffix);
+   else if (TLDEV(dev->type) && linked_comm) {
+      scsi_adjust_queue_depth(dev, 0, tqd);
+      tag_suffix = ", untagged";
       }
 
-   return;
+   else {
+      scsi_adjust_queue_depth(dev, 0, utqd);
+      tag_suffix = "";
+      }
+
+   if (TLDEV(dev->type) && linked_comm && dev->queue_depth > 2)
+      link_suffix = ", sorted";
+   else if (TLDEV(dev->type))
+      link_suffix = ", unsorted";
+   else
+      link_suffix = "";
+
+   printk("%s: scsi%d, channel %d, id %d, lun %d, cmds/lun %d%s%s.\n",
+          BN(j), host->host_no, dev->channel, dev->id, dev->lun,
+          dev->queue_depth, link_suffix, tag_suffix);
+
+   return FALSE;
 }
 
-static inline int wait_on_busy(unsigned long iobase, unsigned int loop) {
+static int wait_on_busy(unsigned long iobase, unsigned int loop) {
 
    while (inb(iobase + REG_LCL_INTR) & BSY_ASSERTED) {
       udelay(1L);
@@ -645,16 +743,21 @@ static inline int wait_on_busy(unsigned long iobase, unsigned int loop) {
 
 static int board_inquiry(unsigned int j) {
    struct mscp *cpp;
+   dma_addr_t id_dma_addr;
    unsigned int time, limit = 0;
 
+   id_dma_addr = pci_map_single(HD(j)->pdev, HD(j)->board_id,
+                    sizeof(HD(j)->board_id), PCI_DMA_BIDIRECTIONAL);
    cpp = &HD(j)->cp[0];
-   memset(cpp, 0, sizeof(struct mscp));
+   cpp->cp_dma_addr = pci_map_single(HD(j)->pdev, cpp, sizeof(struct mscp),
+                                     PCI_DMA_BIDIRECTIONAL);
+   memset(cpp, 0, sizeof(struct mscp) - CP_TAIL_SIZE);
    cpp->opcode = OP_HOST_ADAPTER;
    cpp->xdir = DTD_IN;
-   cpp->data_address = V2DEV(HD(j)->board_id);
+   cpp->data_address = H2DEV(id_dma_addr);
    cpp->data_len = H2DEV(sizeof(HD(j)->board_id));
-   cpp->scsi_cdbs_len = 6;
-   cpp->scsi_cdbs[0] = HA_CMD_INQUIRY;
+   cpp->cdb_len = 6;
+   cpp->cdb[0] = HA_CMD_INQUIRY;
 
    if (wait_on_busy(sh[j]->io_port, MAXLOOP)) {
       printk("%s: board_inquiry, adapter busy.\n", BN(j));
@@ -667,15 +770,15 @@ static int board_inquiry(unsigned int j) {
    outb(CMD_CLR_INTR, sh[j]->io_port + REG_SYS_INTR);
 
    /* Store pointer in OGM address bytes */
-   outl(V2DEV(cpp), sh[j]->io_port + REG_OGM);
+   outl(H2DEV(cpp->cp_dma_addr), sh[j]->io_port + REG_OGM);
 
    /* Issue OGM interrupt */
    outb(CMD_OGM_INTR, sh[j]->io_port + REG_LCL_INTR);
 
-   SPIN_UNLOCK
+   spin_unlock_irq(&driver_lock);
    time = jiffies;
    while ((jiffies - time) < HZ && limit++ < 20000) udelay(100L);
-   SPIN_LOCK
+   spin_lock_irq(&driver_lock);
 
    if (cpp->adapter_status || HD(j)->cp_stat[0] != FREE) {
       HD(j)->cp_stat[0] = FREE;
@@ -683,10 +786,14 @@ static int board_inquiry(unsigned int j) {
       return TRUE;
       }
 
+   pci_unmap_single(HD(j)->pdev, cpp->cp_dma_addr, sizeof(struct mscp),
+                    PCI_DMA_BIDIRECTIONAL);
+   pci_unmap_single(HD(j)->pdev, id_dma_addr, sizeof(HD(j)->board_id),
+                    PCI_DMA_BIDIRECTIONAL);
    return FALSE;
 }
 
-static inline int port_detect \
+static int port_detect \
       (unsigned long port_base, unsigned int j, Scsi_Host_Template *tpnt) {
    unsigned char irq, dma_channel, subversion, i;
    unsigned char in_byte;
@@ -714,41 +821,47 @@ static inline int port_detect \
            };
 
    struct config_1 {
-      unsigned char bios_segment: 3;
-      unsigned char removable_disks_as_fixed: 1;
-      unsigned char interrupt: 2;
-      unsigned char dma_channel: 2;
+
+#if defined(__BIG_ENDIAN_BITFIELD)
+      unsigned char dma_channel: 2, interrupt:2,
+                    removable_disks_as_fixed:1, bios_segment: 3;
+#else
+      unsigned char bios_segment: 3, removable_disks_as_fixed: 1,
+                    interrupt: 2, dma_channel: 2;
+#endif
+
       } config_1;
 
    struct config_2 {
-      unsigned char ha_scsi_id: 3;
-      unsigned char mapping_mode: 2;
-      unsigned char bios_drive_number: 1;
-      unsigned char tfr_port: 2;
+
+#if defined(__BIG_ENDIAN_BITFIELD)
+      unsigned char tfr_port: 2, bios_drive_number: 1,
+                    mapping_mode: 2, ha_scsi_id: 3;
+#else
+      unsigned char ha_scsi_id: 3, mapping_mode: 2,
+                    bios_drive_number: 1, tfr_port: 2;
+#endif
+
       } config_2;
 
    char name[16];
 
    sprintf(name, "%s%d", driver_name, j);
 
-   if(!request_region(port_base, REGION_SIZE, driver_name)) {
+   if (!request_region(port_base, REGION_SIZE, driver_name)) {
 #if defined(DEBUG_DETECT)
       printk("%s: address 0x%03lx in use, skipping probe.\n", name, port_base);
 #endif
-      return FALSE;
+      goto fail;
       }
 
-   if (inb(port_base + REG_PRODUCT_ID1) != PRODUCT_ID1) {
-      release_region(port_base, REGION_SIZE);
-      return FALSE;
-      }
+   spin_lock_irq(&driver_lock);
+
+   if (inb(port_base + REG_PRODUCT_ID1) != PRODUCT_ID1) goto freelock;
 
    in_byte = inb(port_base + REG_PRODUCT_ID2);
 
-   if ((in_byte & 0xf0) != PRODUCT_ID2) {
-      release_region(port_base, REGION_SIZE);
-      return FALSE;
-      }
+   if ((in_byte & 0xf0) != PRODUCT_ID2) goto freelock;
 
    *(char *)&config_1 = inb(port_base + REG_CONFIG1);
    *(char *)&config_2 = inb(port_base + REG_CONFIG2);
@@ -762,31 +875,24 @@ static inline int port_detect \
              SA_INTERRUPT | ((subversion == ESA) ? SA_SHIRQ : 0),
              driver_name, (void *) &sha[j])) {
       printk("%s: unable to allocate IRQ %u, detaching.\n", name, irq);
-      release_region(port_base, REGION_SIZE);
-      return FALSE;
+      goto freelock;
       }
 
    if (subversion == ISA && request_dma(dma_channel, driver_name)) {
       printk("%s: unable to allocate DMA channel %u, detaching.\n",
              name, dma_channel);
-      free_irq(irq, &sha[j]);
-      release_region(port_base, REGION_SIZE);
-      return FALSE;
+      goto freeirq;
       }
 
    if (have_old_firmware) tpnt->use_clustering = DISABLE_CLUSTERING;
 
+   spin_unlock_irq(&driver_lock);
    sh[j] = scsi_register(tpnt, sizeof(struct hostdata));
+   spin_lock_irq(&driver_lock);
 
    if (sh[j] == NULL) {
       printk("%s: unable to register host, detaching.\n", name);
-
-      free_irq(irq, &sha[j]);
-
-      if (subversion == ISA) free_dma(dma_channel);
-
-      release_region(port_base, REGION_SIZE);
-      return FALSE;
+      goto freedma;
       }
 
    sh[j]->io_port = port_base;
@@ -798,7 +904,6 @@ static inline int port_detect \
    sh[j]->this_id = config_2.ha_scsi_id;
    sh[j]->can_queue = MAX_MAILBOXES;
    sh[j]->cmd_per_lun = MAX_CMD_PER_LUN;
-   sh[j]->select_queue_depths = select_queue_depths;
 
 #if defined(DEBUG_DETECT)
    {
@@ -820,6 +925,7 @@ static inline int port_detect \
    HD(j)->heads = mapping_table[config_2.mapping_mode].heads;
    HD(j)->sectors = mapping_table[config_2.mapping_mode].sectors;
    HD(j)->subversion = subversion;
+   HD(j)->pdev = NULL;
    HD(j)->board_number = j;
 
    if (have_old_firmware) sh[j]->sg_tablesize = MAX_SAFE_SGLIST;
@@ -832,16 +938,15 @@ static inline int port_detect \
       }
    else {
       unsigned long flags;
-      scsi_register_blocked_host(sh[j]);
       sh[j]->unchecked_isa_dma = TRUE;
-      
+
       flags=claim_dma_lock();
       disable_dma(dma_channel);
       clear_dma_ff(dma_channel);
       set_dma_mode(dma_channel, DMA_MODE_CASCADE);
       enable_dma(dma_channel);
       release_dma_lock(flags);
-      
+
       sh[j]->dma_channel = dma_channel;
       sprintf(BN(j), "U14F%d", j);
       bus_type = "ISA";
@@ -866,13 +971,18 @@ static inline int port_detect \
    if (dma_channel == NO_DMA) sprintf(dma_name, "%s", "BMST");
    else                       sprintf(dma_name, "DMA %u", dma_channel);
 
+   spin_unlock_irq(&driver_lock);
+
+   for (i = 0; i < sh[j]->can_queue; i++)
+      HD(j)->cp[i].cp_dma_addr = pci_map_single(HD(j)->pdev,
+            &HD(j)->cp[i], sizeof(struct mscp), PCI_DMA_BIDIRECTIONAL);
+
    for (i = 0; i < sh[j]->can_queue; i++)
       if (! ((&HD(j)->cp[i])->sglist = kmalloc(
             sh[j]->sg_tablesize * sizeof(struct sg_list),
             (sh[j]->unchecked_isa_dma ? GFP_DMA : 0) | GFP_ATOMIC))) {
          printk("%s: kmalloc SGlist failed, mbox %d, detaching.\n", BN(j), i);
-         u14_34f_release(sh[j]);
-         return FALSE;
+         goto release;
          }
 
    if (max_queue_depth > MAX_TAGGED_CMD_PER_LUN)
@@ -880,11 +990,14 @@ static inline int port_detect \
 
    if (max_queue_depth < MAX_CMD_PER_LUN) max_queue_depth = MAX_CMD_PER_LUN;
 
+   if (tag_mode != TAG_DISABLED && tag_mode != TAG_SIMPLE)
+      tag_mode = TAG_ORDERED;
+
    if (j == 0) {
-      printk("UltraStor 14F/34F: Copyright (C) 1994-2001 Dario Ballabio.\n");
-      printk("%s config options -> of:%c, lc:%c, mq:%d, et:%c.\n",
-             driver_name, YESNO(have_old_firmware), YESNO(linked_comm),
-             max_queue_depth, YESNO(ext_tran));
+      printk("UltraStor 14F/34F: Copyright (C) 1994-2003 Dario Ballabio.\n");
+      printk("%s config options -> of:%c, tm:%d, lc:%c, mq:%d, et:%c.\n",
+             driver_name, YESNO(have_old_firmware), tag_mode,
+             YESNO(linked_comm), max_queue_depth, YESNO(ext_tran));
       }
 
    printk("%s: %s 0x%03lx, BIOS 0x%05x, IRQ %u, %s, SG %d, MB %d.\n",
@@ -900,6 +1013,20 @@ static inline int port_detect \
              BN(j), i, sh[j]->this_id);
 
    return TRUE;
+
+freedma:
+   if (subversion == ISA) free_dma(dma_channel);
+freeirq:
+   free_irq(irq, &sha[j]);
+freelock:
+   spin_unlock_irq(&driver_lock);
+   release_region(port_base, REGION_SIZE);
+fail:
+   return FALSE;
+
+release:
+   u14_34f_release(sh[j]);
+   return FALSE;
 }
 
 static void internal_setup(char *str, int *ints) {
@@ -925,6 +1052,8 @@ static void internal_setup(char *str, int *ints) {
 
       if (!strncmp(cur, "lc:", 3)) linked_comm = val;
       else if (!strncmp(cur, "of:", 3)) have_old_firmware = val;
+      else if (!strncmp(cur, "tm:", 3)) tag_mode = val;
+      else if (!strncmp(cur, "tc:", 3)) tag_mode = val;
       else if (!strncmp(cur, "mq:", 3))  max_queue_depth = val;
       else if (!strncmp(cur, "ls:", 3))  link_statistics = val;
       else if (!strncmp(cur, "et:", 3))  ext_tran = val;
@@ -951,13 +1080,12 @@ static int option_setup(char *str) {
    return 1;
 }
 
-int u14_34f_detect(Scsi_Host_Template *tpnt)
-{
+static int u14_34f_detect(Scsi_Host_Template *tpnt) {
    unsigned int j = 0, k;
 
    tpnt->proc_name = "u14-34f";
 
-   if(boot_options) option_setup(boot_options);
+   if(strlen(boot_options)) option_setup(boot_options);
 
 #if defined(MODULE)
    /* io_port could have been modified when loading as a module */
@@ -980,26 +1108,98 @@ int u14_34f_detect(Scsi_Host_Template *tpnt)
    return j;
 }
 
-static inline void build_sg_list(struct mscp *cpp, Scsi_Cmnd *SCpnt) {
-   unsigned int k, data_len = 0;
+static void map_dma(unsigned int i, unsigned int j) {
+   unsigned int data_len = 0;
+   unsigned int k, count, pci_dir;
    struct scatterlist *sgpnt;
+   struct mscp *cpp;
+   Scsi_Cmnd *SCpnt;
+
+   cpp = &HD(j)->cp[i]; SCpnt = cpp->SCpnt;
+   pci_dir = scsi_to_pci_dma_dir(SCpnt->sc_data_direction);
+
+   if (SCpnt->sense_buffer)
+      cpp->sense_addr = H2DEV(pci_map_single(HD(j)->pdev, SCpnt->sense_buffer,
+                           sizeof SCpnt->sense_buffer, PCI_DMA_FROMDEVICE));
+
+   cpp->sense_len = sizeof SCpnt->sense_buffer;
+
+   if (!SCpnt->use_sg) {
+
+      /* If we get here with PCI_DMA_NONE, pci_map_single triggers a BUG() */
+      if (!SCpnt->request_bufflen) pci_dir = PCI_DMA_BIDIRECTIONAL;
+
+      if (SCpnt->request_buffer)
+         cpp->data_address = H2DEV(pci_map_single(HD(j)->pdev,
+                  SCpnt->request_buffer, SCpnt->request_bufflen, pci_dir));
+
+      cpp->data_len = H2DEV(SCpnt->request_bufflen);
+      return;
+      }
 
    sgpnt = (struct scatterlist *) SCpnt->request_buffer;
+   count = pci_map_sg(HD(j)->pdev, sgpnt, SCpnt->use_sg, pci_dir);
 
-   for (k = 0; k < SCpnt->use_sg; k++) {
-      cpp->sglist[k].address = V2DEV(sgpnt[k].address);
-      cpp->sglist[k].num_bytes = H2DEV(sgpnt[k].length);
+   for (k = 0; k < count; k++) {
+      cpp->sglist[k].address = H2DEV(sg_dma_address(&sgpnt[k]));
+      cpp->sglist[k].num_bytes = H2DEV(sg_dma_len(&sgpnt[k]));
       data_len += sgpnt[k].length;
       }
 
+   cpp->sg = TRUE;
    cpp->use_sg = SCpnt->use_sg;
-   cpp->data_address = V2DEV(cpp->sglist);
+   cpp->data_address = H2DEV(pci_map_single(HD(j)->pdev, cpp->sglist,
+                             SCpnt->use_sg * sizeof(struct sg_list), pci_dir));
    cpp->data_len = H2DEV(data_len);
 }
 
-static inline int do_qcomm(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) {
-   unsigned int i, j, k;
+static void unmap_dma(unsigned int i, unsigned int j) {
+   unsigned int pci_dir;
    struct mscp *cpp;
+   Scsi_Cmnd *SCpnt;
+
+   cpp = &HD(j)->cp[i]; SCpnt = cpp->SCpnt;
+   pci_dir = scsi_to_pci_dma_dir(SCpnt->sc_data_direction);
+
+   if (DEV2H(cpp->sense_addr))
+      pci_unmap_single(HD(j)->pdev, DEV2H(cpp->sense_addr),
+                       DEV2H(cpp->sense_len), PCI_DMA_FROMDEVICE);
+
+   if (SCpnt->use_sg)
+      pci_unmap_sg(HD(j)->pdev, SCpnt->request_buffer, SCpnt->use_sg, pci_dir);
+
+   if (!DEV2H(cpp->data_len)) pci_dir = PCI_DMA_BIDIRECTIONAL;
+
+   if (DEV2H(cpp->data_address))
+      pci_unmap_single(HD(j)->pdev, DEV2H(cpp->data_address),
+                       DEV2H(cpp->data_len), pci_dir);
+}
+
+static void sync_dma(unsigned int i, unsigned int j) {
+   unsigned int pci_dir;
+   struct mscp *cpp;
+   Scsi_Cmnd *SCpnt;
+
+   cpp = &HD(j)->cp[i]; SCpnt = cpp->SCpnt;
+   pci_dir = scsi_to_pci_dma_dir(SCpnt->sc_data_direction);
+
+   if (DEV2H(cpp->sense_addr))
+      pci_dma_sync_single(HD(j)->pdev, DEV2H(cpp->sense_addr),
+                          DEV2H(cpp->sense_len), PCI_DMA_FROMDEVICE);
+
+   if (SCpnt->use_sg)
+      pci_dma_sync_sg(HD(j)->pdev, SCpnt->request_buffer,
+                         SCpnt->use_sg, pci_dir);
+
+   if (!DEV2H(cpp->data_len)) pci_dir = PCI_DMA_BIDIRECTIONAL;
+
+   if (DEV2H(cpp->data_address))
+      pci_dma_sync_single(HD(j)->pdev, DEV2H(cpp->data_address),
+                       DEV2H(cpp->data_len), pci_dir);
+}
+
+static void scsi_to_dev_dir(unsigned int i, unsigned int j) {
+   unsigned int k;
 
    static const unsigned char data_out_cmds[] = {
       0x0a, 0x2a, 0x15, 0x55, 0x04, 0x07, 0x18, 0x1d, 0x24, 0x2e,
@@ -1010,11 +1210,53 @@ static inline int do_qcomm(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) {
    static const unsigned char data_none_cmds[] = {
       0x01, 0x0b, 0x10, 0x11, 0x13, 0x16, 0x17, 0x19, 0x2b, 0x1e,
       0x2c, 0xac, 0x2f, 0xaf, 0x33, 0xb3, 0x35, 0x36, 0x45, 0x47,
-      0x48, 0x49, 0xa9, 0x4b, 0xa5, 0xa6, 0xb5
+      0x48, 0x49, 0xa9, 0x4b, 0xa5, 0xa6, 0xb5, 0x00
       };
 
+   struct mscp *cpp;
+   Scsi_Cmnd *SCpnt;
+
+   cpp = &HD(j)->cp[i]; SCpnt = cpp->SCpnt;
+
+   if (SCpnt->sc_data_direction == SCSI_DATA_READ) {
+      cpp->xdir = DTD_IN;
+      return;
+      }
+   else if (SCpnt->sc_data_direction == SCSI_DATA_WRITE) {
+      cpp->xdir = DTD_OUT;
+      return;
+      }
+   else if (SCpnt->sc_data_direction == SCSI_DATA_NONE) {
+      cpp->xdir = DTD_NONE;
+      return;
+      }
+
+   if (SCpnt->sc_data_direction != SCSI_DATA_UNKNOWN)
+      panic("%s: qcomm, invalid SCpnt->sc_data_direction.\n", BN(j));
+
+   cpp->xdir = DTD_IN;
+
+   for (k = 0; k < ARRAY_SIZE(data_out_cmds); k++)
+      if (SCpnt->cmnd[0] == data_out_cmds[k]) {
+         cpp->xdir = DTD_OUT;
+         break;
+         }
+
+   if (cpp->xdir == DTD_IN)
+      for (k = 0; k < ARRAY_SIZE(data_none_cmds); k++)
+         if (SCpnt->cmnd[0] == data_none_cmds[k]) {
+            cpp->xdir = DTD_NONE;
+            break;
+            }
+
+}
+
+static int u14_34f_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) {
+   unsigned int i, j, k;
+   struct mscp *cpp;
+
    /* j is the board number */
-   j = ((struct hostdata *) SCpnt->host->hostdata)->board_number;
+   j = ((struct hostdata *) SCpnt->device->host->hostdata)->board_number;
 
    if (SCpnt->host_scribble)
       panic("%s: qcomm, pid %ld, SCpnt %p already active.\n",
@@ -1042,66 +1284,46 @@ static inline int do_qcomm(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) {
    /* Set pointer to control packet structure */
    cpp = &HD(j)->cp[i];
 
-   memset(cpp, 0, sizeof(struct mscp) - sizeof(struct sg_list *));
+   memset(cpp, 0, sizeof(struct mscp) - CP_TAIL_SIZE);
    SCpnt->scsi_done = done;
-   cpp->index = i;
-   SCpnt->host_scribble = (unsigned char *) &cpp->index;
+   cpp->cpp_index = i;
+   SCpnt->host_scribble = (unsigned char *) &cpp->cpp_index;
 
    if (do_trace) printk("%s: qcomm, mbox %d, target %d.%d:%d, pid %ld.\n",
-                        BN(j), i, SCpnt->channel, SCpnt->target,
-                        SCpnt->lun, SCpnt->pid);
-
-   cpp->xdir = DTD_IN;
-
-   for (k = 0; k < ARRAY_SIZE(data_out_cmds); k++)
-      if (SCpnt->cmnd[0] == data_out_cmds[k]) {
-         cpp->xdir = DTD_OUT;
-         break;
-         }
-
-   if (cpp->xdir == DTD_IN)
-      for (k = 0; k < ARRAY_SIZE(data_none_cmds); k++)
-         if (SCpnt->cmnd[0] == data_none_cmds[k]) {
-            cpp->xdir = DTD_NONE;
-            break;
-            }
+                        BN(j), i, SCpnt->device->channel, SCpnt->device->id,
+                        SCpnt->device->lun, SCpnt->pid);
 
    cpp->opcode = OP_SCSI;
-   cpp->channel = SCpnt->channel;
-   cpp->target = SCpnt->target;
-   cpp->lun = SCpnt->lun;
+   cpp->channel = SCpnt->device->channel;
+   cpp->target = SCpnt->device->id;
+   cpp->lun = SCpnt->device->lun;
    cpp->SCpnt = SCpnt;
-   cpp->sense_addr = V2DEV(SCpnt->sense_buffer);
-   cpp->sense_len = sizeof SCpnt->sense_buffer;
+   cpp->cdb_len = SCpnt->cmd_len;
+   memcpy(cpp->cdb, SCpnt->cmnd, SCpnt->cmd_len);
 
-   if (SCpnt->use_sg) {
-      cpp->sg = TRUE;
-      build_sg_list(cpp, SCpnt);
-      }
-   else {
-      cpp->data_address = V2DEV(SCpnt->request_buffer);
-      cpp->data_len = H2DEV(SCpnt->request_bufflen);
-      }
+   /* Use data transfer direction SCpnt->sc_data_direction */
+   scsi_to_dev_dir(i, j);
 
-   cpp->scsi_cdbs_len = SCpnt->cmd_len;
-   memcpy(cpp->scsi_cdbs, SCpnt->cmnd, cpp->scsi_cdbs_len);
+   /* Map DMA buffers and SG list */
+   map_dma(i, j);
 
    if (linked_comm && SCpnt->device->queue_depth > 2
                                      && TLDEV(SCpnt->device->type)) {
       HD(j)->cp_stat[i] = READY;
-      flush_dev(SCpnt->device, SCpnt->request.sector, j, FALSE);
+      flush_dev(SCpnt->device, SCpnt->request->sector, j, FALSE);
       return 0;
       }
 
    if (wait_on_busy(sh[j]->io_port, MAXLOOP)) {
+      unmap_dma(i, j);
       SCpnt->host_scribble = NULL;
       printk("%s: qcomm, target %d.%d:%d, pid %ld, adapter busy.\n",
-             BN(j), SCpnt->channel, SCpnt->target, SCpnt->lun, SCpnt->pid);
+             BN(j), SCpnt->device->channel, SCpnt->device->id, SCpnt->device->lun, SCpnt->pid);
       return 1;
       }
 
    /* Store pointer in OGM address bytes */
-   outl(V2DEV(cpp), sh[j]->io_port + REG_OGM);
+   outl(H2DEV(cpp->cp_dma_addr), sh[j]->io_port + REG_OGM);
 
    /* Issue OGM interrupt */
    outb(CMD_OGM_INTR, sh[j]->io_port + REG_LCL_INTR);
@@ -1110,27 +1332,20 @@ static inline int do_qcomm(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) {
    return 0;
 }
 
-int u14_34f_queuecommand(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *)) {
-   int rtn;
-
-   rtn = do_qcomm(SCpnt, done);
-   return rtn;
-}
-
-static inline int do_abort(Scsi_Cmnd *SCarg) {
+static int u14_34f_eh_abort(Scsi_Cmnd *SCarg) {
    unsigned int i, j;
 
-   j = ((struct hostdata *) SCarg->host->hostdata)->board_number;
+   j = ((struct hostdata *) SCarg->device->host->hostdata)->board_number;
 
    if (SCarg->host_scribble == NULL) {
       printk("%s: abort, target %d.%d:%d, pid %ld inactive.\n",
-             BN(j), SCarg->channel, SCarg->target, SCarg->lun, SCarg->pid);
+             BN(j), SCarg->device->channel, SCarg->device->id, SCarg->device->lun, SCarg->pid);
       return SUCCESS;
       }
 
    i = *(unsigned int *)SCarg->host_scribble;
    printk("%s: abort, mbox %d, target %d.%d:%d, pid %ld.\n",
-          BN(j), i, SCarg->channel, SCarg->target, SCarg->lun, SCarg->pid);
+          BN(j), i, SCarg->device->channel, SCarg->device->id, SCarg->device->lun, SCarg->pid);
 
    if (i >= sh[j]->can_queue)
       panic("%s: abort, invalid SCarg->host_scribble.\n", BN(j));
@@ -1156,6 +1371,7 @@ static inline int do_abort(Scsi_Cmnd *SCarg) {
          printk("%s: abort, mbox %d, interrupt pending.\n", BN(j), i);
 
       if (SCarg->eh_state == SCSI_STATE_TIMEOUT) {
+         unmap_dma(i, j);
          SCarg->host_scribble = NULL;
          HD(j)->cp_stat[i] = FREE;
          printk("%s, abort, mbox %d, eh_state timeout, pid %ld.\n",
@@ -1177,6 +1393,7 @@ static inline int do_abort(Scsi_Cmnd *SCarg) {
       }
 
    if (HD(j)->cp_stat[i] == READY || HD(j)->cp_stat[i] == ABORTING) {
+      unmap_dma(i, j);
       SCarg->result = DID_ABORT << 16;
       SCarg->host_scribble = NULL;
       HD(j)->cp_stat[i] = FREE;
@@ -1189,19 +1406,14 @@ static inline int do_abort(Scsi_Cmnd *SCarg) {
    panic("%s: abort, mbox %d, invalid cp_stat.\n", BN(j), i);
 }
 
-int u14_34f_abort(Scsi_Cmnd *SCarg) {
-
-   return do_abort(SCarg);
-}
-
-static inline int do_reset(Scsi_Cmnd *SCarg) {
+static int u14_34f_eh_host_reset(Scsi_Cmnd *SCarg) {
    unsigned int i, j, time, k, c, limit = 0;
    int arg_done = FALSE;
    Scsi_Cmnd *SCpnt;
 
-   j = ((struct hostdata *) SCarg->host->hostdata)->board_number;
+   j = ((struct hostdata *) SCarg->device->host->hostdata)->board_number;
    printk("%s: reset, enter, target %d.%d:%d, pid %ld.\n",
-          BN(j), SCarg->channel, SCarg->target, SCarg->lun, SCarg->pid);
+          BN(j), SCarg->device->channel, SCarg->device->id, SCarg->device->lun, SCarg->pid);
 
    if (SCarg->host_scribble == NULL)
       printk("%s: reset, pid %ld inactive.\n", BN(j), SCarg->pid);
@@ -1274,16 +1486,19 @@ static inline int do_reset(Scsi_Cmnd *SCarg) {
 #endif
 
    HD(j)->in_reset = TRUE;
-   SPIN_UNLOCK
+
+   spin_unlock_irq(sh[j]->host_lock);
    time = jiffies;
    while ((jiffies - time) < (10 * HZ) && limit++ < 200000) udelay(100L);
-   SPIN_LOCK
+   spin_lock_irq(sh[j]->host_lock);
+
    printk("%s: reset, interrupts disabled, loops %d.\n", BN(j), limit);
 
    for (i = 0; i < sh[j]->can_queue; i++) {
 
       if (HD(j)->cp_stat[i] == IN_RESET) {
          SCpnt = HD(j)->cp[i].SCpnt;
+         unmap_dma(i, j);
          SCpnt->result = DID_RESET << 16;
          SCpnt->host_scribble = NULL;
 
@@ -1296,6 +1511,7 @@ static inline int do_reset(Scsi_Cmnd *SCarg) {
 
       else if (HD(j)->cp_stat[i] == ABORTING) {
          SCpnt = HD(j)->cp[i].SCpnt;
+         unmap_dma(i, j);
          SCpnt->result = DID_RESET << 16;
          SCpnt->host_scribble = NULL;
 
@@ -1323,27 +1539,23 @@ static inline int do_reset(Scsi_Cmnd *SCarg) {
    return SUCCESS;
 }
 
-int u14_34f_reset(Scsi_Cmnd *SCarg) {
-
-   return do_reset(SCarg);
-}
-
-int u14_34f_biosparam(Disk *disk, kdev_t dev, int *dkinfo) {
+static int u14_34f_bios_param(struct scsi_device *disk,
+                 struct block_device *bdev, sector_t capacity, int *dkinfo) {
    unsigned int j = 0;
-   int size = disk->capacity;
+   unsigned int size = capacity;
 
    dkinfo[0] = HD(j)->heads;
    dkinfo[1] = HD(j)->sectors;
    dkinfo[2] = size / (HD(j)->heads * HD(j)->sectors);
 
-   if (ext_tran && (scsicam_bios_param(disk, dev, dkinfo) < 0)) {
+   if (ext_tran && (scsicam_bios_param(bdev, capacity, dkinfo) < 0)) {
       dkinfo[0] = 255;
       dkinfo[1] = 63;
       dkinfo[2] = size / (dkinfo[0] * dkinfo[1]);
       }
 
 #if defined (DEBUG_GEOMETRY)
-   printk ("%s: biosparam, head=%d, sec=%d, cyl=%d.\n", driver_name,
+   printk ("%s: bios_param, head=%d, sec=%d, cyl=%d.\n", driver_name,
            dkinfo[0], dkinfo[1], dkinfo[2]);
 #endif
 
@@ -1375,7 +1587,7 @@ static void sort(unsigned long sk[], unsigned int da[], unsigned int n,
    return;
    }
 
-static inline int reorder(unsigned int j, unsigned long cursec,
+static int reorder(unsigned int j, unsigned long cursec,
                  unsigned int ihdlr, unsigned int il[], unsigned int n_ready) {
    Scsi_Cmnd *SCpnt;
    struct mscp *cpp;
@@ -1405,11 +1617,11 @@ static inline int reorder(unsigned int j, unsigned long cursec,
 
       if (!(cpp->xdir == DTD_IN)) input_only = FALSE;
 
-      if (SCpnt->request.sector < minsec) minsec = SCpnt->request.sector;
-      if (SCpnt->request.sector > maxsec) maxsec = SCpnt->request.sector;
+      if (SCpnt->request->sector < minsec) minsec = SCpnt->request->sector;
+      if (SCpnt->request->sector > maxsec) maxsec = SCpnt->request->sector;
 
-      sl[n] = SCpnt->request.sector;
-      ioseek += SCpnt->request.nr_sectors;
+      sl[n] = SCpnt->request->sector;
+      ioseek += SCpnt->request->nr_sectors;
 
       if (!n) continue;
 
@@ -1437,7 +1649,7 @@ static inline int reorder(unsigned int j, unsigned long cursec,
 
    if (!input_only) for (n = 0; n < n_ready; n++) {
       k = il[n]; cpp = &HD(j)->cp[k]; SCpnt = cpp->SCpnt;
-      ll[n] = SCpnt->request.nr_sectors; pl[n] = SCpnt->pid;
+      ll[n] = SCpnt->request->nr_sectors; pl[n] = SCpnt->pid;
 
       if (!n) continue;
 
@@ -1465,7 +1677,7 @@ static inline int reorder(unsigned int j, unsigned long cursec,
                 " cur %ld s:%c r:%c rev:%c in:%c ov:%c xd %d.\n",
                 (ihdlr ? "ihdlr" : "qcomm"), SCpnt->channel, SCpnt->target,
                 SCpnt->lun, SCpnt->pid, k, flushcount, n_ready,
-                SCpnt->request.sector, SCpnt->request.nr_sectors, cursec,
+                SCpnt->request->sector, SCpnt->request->nr_sectors, cursec,
                 YESNO(s), YESNO(r), YESNO(rev), YESNO(input_only),
                 YESNO(overlap), cpp->xdir);
          }
@@ -1500,19 +1712,19 @@ static void flush_dev(Scsi_Device *dev, unsigned long cursec, unsigned int j,
       if (wait_on_busy(sh[j]->io_port, MAXLOOP)) {
          printk("%s: %s, target %d.%d:%d, pid %ld, mbox %d, adapter"\
                 " busy, will abort.\n", BN(j), (ihdlr ? "ihdlr" : "qcomm"),
-                SCpnt->channel, SCpnt->target, SCpnt->lun, SCpnt->pid, k);
+                SCpnt->device->channel, SCpnt->device->id, SCpnt->device->lun, SCpnt->pid, k);
          HD(j)->cp_stat[k] = ABORTING;
          continue;
          }
 
-      outl(V2DEV(cpp), sh[j]->io_port + REG_OGM);
+      outl(H2DEV(cpp->cp_dma_addr), sh[j]->io_port + REG_OGM);
       outb(CMD_OGM_INTR, sh[j]->io_port + REG_LCL_INTR);
       HD(j)->cp_stat[k] = IN_USE;
       }
 
 }
 
-static inline void ihdlr(int irq, unsigned int j) {
+static irqreturn_t ihdlr(int irq, unsigned int j) {
    Scsi_Cmnd *SCpnt;
    unsigned int i, k, c, status, tstatus, reg, ret;
    struct mscp *spp, *cpp;
@@ -1521,7 +1733,7 @@ static inline void ihdlr(int irq, unsigned int j) {
        panic("%s: ihdlr, irq %d, sh[j]->irq %d.\n", BN(j), irq, sh[j]->irq);
 
    /* Check if this board need to be serviced */
-   if (!((reg = inb(sh[j]->io_port + REG_SYS_INTR)) & IRQ_ASSERTED)) return;
+   if (!((reg = inb(sh[j]->io_port + REG_SYS_INTR)) & IRQ_ASSERTED)) goto none;
 
    HD(j)->iocount++;
 
@@ -1533,41 +1745,43 @@ static inline void ihdlr(int irq, unsigned int j) {
       outb(CMD_CLR_INTR, sh[j]->io_port + REG_SYS_INTR);
       printk("%s: ihdlr, busy timeout error,  irq %d, reg 0x%x, count %d.\n",
              BN(j), irq, reg, HD(j)->iocount);
-      return;
+      goto none;
       }
 
-   spp = (struct mscp *)DEV2V(ret = inl(sh[j]->io_port + REG_ICM));
-   cpp = spp;
+   ret = inl(sh[j]->io_port + REG_ICM);
 
    /* Clear interrupt pending flag */
    outb(CMD_CLR_INTR, sh[j]->io_port + REG_SYS_INTR);
 
-#if defined(DEBUG_GENERATE_ABORTS)
-   if ((HD(j)->iocount > 500) && ((HD(j)->iocount % 500) < 3)) return;
-#endif
-
    /* Find the mailbox to be serviced on this board */
-   i = cpp - HD(j)->cp;
+   for (i = 0; i < sh[j]->can_queue; i++)
+      if (H2DEV(HD(j)->cp[i].cp_dma_addr) == ret) break;
 
-   if (cpp < HD(j)->cp || cpp >= HD(j)->cp + sh[j]->can_queue
-                                     || i >= sh[j]->can_queue)
+   if (i >= sh[j]->can_queue)
       panic("%s: ihdlr, invalid mscp bus address %p, cp0 %p.\n", BN(j),
-            (void *)ret, HD(j)->cp);
+            (void *)ret, (void *)H2DEV(HD(j)->cp[0].cp_dma_addr));
+
+   cpp = &(HD(j)->cp[i]);
+   spp = cpp;
+
+#if defined(DEBUG_GENERATE_ABORTS)
+   if ((HD(j)->iocount > 500) && ((HD(j)->iocount % 500) < 3)) goto handled;
+#endif
 
    if (HD(j)->cp_stat[i] == IGNORE) {
       HD(j)->cp_stat[i] = FREE;
-      return;
+      goto handled;
       }
    else if (HD(j)->cp_stat[i] == LOCKED) {
       HD(j)->cp_stat[i] = FREE;
       printk("%s: ihdlr, mbox %d unlocked, count %d.\n", BN(j), i,
              HD(j)->iocount);
-      return;
+      goto handled;
       }
    else if (HD(j)->cp_stat[i] == FREE) {
       printk("%s: ihdlr, mbox %d is free, count %d.\n", BN(j), i,
              HD(j)->iocount);
-      return;
+      goto handled;
       }
    else if (HD(j)->cp_stat[i] == IN_RESET)
       printk("%s: ihdlr, mbox %d is in reset.\n", BN(j), i);
@@ -1588,9 +1802,11 @@ static inline void ihdlr(int irq, unsigned int j) {
       panic("%s: ihdlr, mbox %d, pid %ld, index mismatch %d.\n",
             BN(j), i, SCpnt->pid, *(unsigned int *)SCpnt->host_scribble);
 
+   sync_dma(i, j);
+
    if (linked_comm && SCpnt->device->queue_depth > 2
                                      && TLDEV(SCpnt->device->type))
-      flush_dev(SCpnt->device, SCpnt->request.sector, j, TRUE);
+      flush_dev(SCpnt->device, SCpnt->request->sector, j, TRUE);
 
    tstatus = status_byte(spp->target_status);
 
@@ -1608,7 +1824,7 @@ static inline void ihdlr(int irq, unsigned int j) {
 
          /* If there was a bus reset, redo operation on each target */
          else if (tstatus != GOOD && SCpnt->device->type == TYPE_DISK
-                  && HD(j)->target_redo[SCpnt->target][SCpnt->channel])
+                  && HD(j)->target_redo[SCpnt->device->id][SCpnt->device->channel])
             status = DID_BUS_BUSY << 16;
 
          /* Works around a flaw in scsi.c */
@@ -1621,29 +1837,29 @@ static inline void ihdlr(int irq, unsigned int j) {
             status = DID_OK << 16;
 
          if (tstatus == GOOD)
-            HD(j)->target_redo[SCpnt->target][SCpnt->channel] = FALSE;
+            HD(j)->target_redo[SCpnt->device->id][SCpnt->device->channel] = FALSE;
 
          if (spp->target_status && SCpnt->device->type == TYPE_DISK &&
              (!(tstatus == CHECK_CONDITION && HD(j)->iocount <= 1000 &&
                (SCpnt->sense_buffer[2] & 0xf) == NOT_READY)))
             printk("%s: ihdlr, target %d.%d:%d, pid %ld, "\
                    "target_status 0x%x, sense key 0x%x.\n", BN(j),
-                   SCpnt->channel, SCpnt->target, SCpnt->lun,
+                   SCpnt->device->channel, SCpnt->device->id, SCpnt->device->lun,
                    SCpnt->pid, spp->target_status,
                    SCpnt->sense_buffer[2]);
 
-         HD(j)->target_to[SCpnt->target][SCpnt->channel] = 0;
+         HD(j)->target_to[SCpnt->device->id][SCpnt->device->channel] = 0;
 
          if (HD(j)->last_retried_pid == SCpnt->pid) HD(j)->retries = 0;
 
          break;
       case ASST:     /* Selection Time Out */
 
-         if (HD(j)->target_to[SCpnt->target][SCpnt->channel] > 1)
+         if (HD(j)->target_to[SCpnt->device->id][SCpnt->device->channel] > 1)
             status = DID_ERROR << 16;
          else {
             status = DID_TIME_OUT << 16;
-            HD(j)->target_to[SCpnt->target][SCpnt->channel]++;
+            HD(j)->target_to[SCpnt->device->id][SCpnt->device->channel]++;
             }
 
          break;
@@ -1702,8 +1918,10 @@ static inline void ihdlr(int irq, unsigned int j) {
       printk("%s: ihdlr, mbox %2d, err 0x%x:%x,"\
              " target %d.%d:%d, pid %ld, reg 0x%x, count %d.\n",
              BN(j), i, spp->adapter_status, spp->target_status,
-             SCpnt->channel, SCpnt->target, SCpnt->lun, SCpnt->pid,
+             SCpnt->device->channel, SCpnt->device->id, SCpnt->device->lun, SCpnt->pid,
              reg, HD(j)->iocount);
+
+   unmap_dma(i, j);
 
    /* Set the command state to inactive */
    SCpnt->host_scribble = NULL;
@@ -1713,22 +1931,28 @@ static inline void ihdlr(int irq, unsigned int j) {
    if (do_trace) printk("%s: ihdlr, exit, irq %d, count %d.\n", BN(j), irq,
                         HD(j)->iocount);
 
-   return;
+handled:
+   return IRQ_HANDLED;
+none:
+   return IRQ_NONE;
 }
 
-static void do_interrupt_handler(int irq, void *shap, struct pt_regs *regs) {
+static irqreturn_t do_interrupt_handler(int irq, void *shap,
+                                        struct pt_regs *regs) {
    unsigned int j;
-   SPIN_FLAGS
+   unsigned long spin_flags;
+   irqreturn_t ret;
 
    /* Check if the interrupt must be processed by this handler */
-   if ((j = (unsigned int)((char *)shap - sha)) >= num_boards) return;
+   if ((j = (unsigned int)((char *)shap - sha)) >= num_boards) return IRQ_NONE;
 
-   SPIN_LOCK_SAVE
-   ihdlr(irq, j);
-   SPIN_UNLOCK_RESTORE
+   spin_lock_irqsave(sh[j]->host_lock, spin_flags);
+   ret = ihdlr(irq, j);
+   spin_unlock_irqrestore(sh[j]->host_lock, spin_flags);
+   return ret;
 }
 
-int u14_34f_release(struct Scsi_Host *shpnt) {
+static int u14_34f_release(struct Scsi_Host *shpnt) {
    unsigned int i, j;
 
    for (j = 0; sh[j] != NULL && sh[j] != shpnt; j++);
@@ -1736,12 +1960,12 @@ int u14_34f_release(struct Scsi_Host *shpnt) {
    if (sh[j] == NULL) panic("%s: release, invalid Scsi_Host pointer.\n",
                             driver_name);
 
-   if( sh[j]->unchecked_isa_dma ) {
-	   scsi_deregister_blocked_host(sh[j]);
-   }
-
    for (i = 0; i < sh[j]->can_queue; i++)
       if ((&HD(j)->cp[i])->sglist) kfree((&HD(j)->cp[i])->sglist);
+
+   for (i = 0; i < sh[j]->can_queue; i++)
+      pci_unmap_single(HD(j)->pdev, HD(j)->cp[i].cp_dma_addr,
+                     sizeof(struct mscp), PCI_DMA_BIDIRECTIONAL);
 
    free_irq(sh[j]->irq, &sha[j]);
 
@@ -1751,9 +1975,6 @@ int u14_34f_release(struct Scsi_Host *shpnt) {
    scsi_unregister(sh[j]);
    return FALSE;
 }
-
-MODULE_LICENSE("BSD without advertisement clause");
-static Scsi_Host_Template driver_template = ULTRASTOR_14_34F;
 
 #include "scsi_module.c"
 

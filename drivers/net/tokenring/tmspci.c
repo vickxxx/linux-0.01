@@ -28,17 +28,16 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/pci.h>
 #include <linux/init.h>
+#include <linux/netdevice.h>
+#include <linux/trdevice.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
-#include <linux/netdevice.h>
-#include <linux/trdevice.h>
 #include "tms380tr.h"
 
 static char version[] __initdata =
@@ -113,11 +112,11 @@ static int __init tms_pci_attach(struct pci_dev *pdev, const struct pci_device_i
 	pci_ioaddr = pci_resource_start (pdev, 0);
 
 	/* At this point we have found a valid card. */
-	dev = init_trdev(NULL, 0);
+	dev = alloc_trdev(0);
 	if (!dev)
 		return -ENOMEM;
 	SET_MODULE_OWNER(dev);
-		
+
 	if (!request_region(pci_ioaddr, TMS_PCI_IO_EXTENT, dev->name)) {
 		ret = -EBUSY;
 		goto err_out_trdev;
@@ -164,22 +163,22 @@ static int __init tms_pci_attach(struct pci_dev *pdev, const struct pci_device_i
 
 	dev->open = tms380tr_open;
 	dev->stop = tms380tr_close;
+	pci_set_drvdata(pdev, dev);
 
-	ret = register_trdev(dev);
+	ret = register_netdev(dev);
 	if (ret)
 		goto err_out_tmsdev;
 	
-	pci_set_drvdata(pdev, dev);
 	return 0;
 
 err_out_tmsdev:
+	pci_set_drvdata(pdev, NULL);
 	tmsdev_term(dev);
 err_out_irq:
 	free_irq(pdev->irq, dev);
 err_out_region:
 	release_region(pci_ioaddr, TMS_PCI_IO_EXTENT);
 err_out_trdev:
-	unregister_netdev(dev);
 	kfree(dev);
 	return ret;
 }
@@ -191,7 +190,7 @@ err_out_trdev:
  * Calling this on a board that does not support it can be a very
  * dangerous thing.  The Madge board, for instance, will lock your
  * machine hard when this is called.  Luckily, its supported in a
- * seperate driver.  --ASF
+ * separate driver.  --ASF
  */
 static void tms_pci_read_eeprom(struct net_device *dev)
 {
@@ -220,7 +219,7 @@ static unsigned short tms_pci_setnselout_pins(struct net_device *dev)
 	return val;
 }
 
-static void __exit tms_pci_detach (struct pci_dev *pdev)
+static void __devexit tms_pci_detach (struct pci_dev *pdev)
 {
 	struct net_device *dev = pci_get_drvdata(pdev);
 
@@ -235,10 +234,10 @@ static void __exit tms_pci_detach (struct pci_dev *pdev)
 }
 
 static struct pci_driver tms_pci_driver = {
-	name:		"tmspci",
-	id_table:	tmspci_pci_tbl,
-	probe:		tms_pci_attach,
-	remove:		tms_pci_detach,
+	.name		= "tmspci",
+	.id_table	= tmspci_pci_tbl,
+	.probe		= tms_pci_attach,
+	.remove		= __devexit_p(tms_pci_detach),
 };
 
 static int __init tms_pci_init (void)

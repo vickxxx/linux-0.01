@@ -25,21 +25,17 @@ DECLARE_RWSEM(crypto_alg_sem);
 
 static inline int crypto_alg_get(struct crypto_alg *alg)
 {
-	return try_inc_mod_count(alg->cra_module);
+	return try_module_get(alg->cra_module);
 }
 
 static inline void crypto_alg_put(struct crypto_alg *alg)
 {
-	if (alg->cra_module)
-		__MOD_DEC_USE_COUNT(alg->cra_module);
+	module_put(alg->cra_module);
 }
 
 struct crypto_alg *crypto_alg_lookup(const char *name)
 {
 	struct crypto_alg *q, *alg = NULL;
-
-	if (!name)
-		return NULL;
 	
 	down_read(&crypto_alg_sem);
 	
@@ -156,12 +152,8 @@ out:
 
 void crypto_free_tfm(struct crypto_tfm *tfm)
 {
-	struct crypto_alg *alg = tfm->__crt_alg;
-	int size = sizeof(*tfm) + alg->cra_ctxsize;
-
 	crypto_exit_ops(tfm);
-	crypto_alg_put(alg);
-	memset(tfm, 0, size);
+	crypto_alg_put(tfm->__crt_alg);
 	kfree(tfm);
 }
 

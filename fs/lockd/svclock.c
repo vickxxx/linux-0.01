@@ -237,17 +237,8 @@ nlmsvc_delete_block(struct nlm_block *block, int unlock)
 
 	/* Remove block from list */
 	nlmsvc_remove_block(block);
-
-	/* If granted, unlock it, else remove from inode block list */
-	if (unlock && block->b_granted) {
-		dprintk("lockd: deleting granted lock\n");
-		fl->fl_type = F_UNLCK;
-		posix_lock_file(&block->b_file->f_file, fl, 0);
-		block->b_granted = 0;
-	} else {
-		dprintk("lockd: unblocking blocked lock\n");
-		posix_unblock_lock(fl);
-	}
+	posix_unblock_lock(&file->f_file, fl);
+	block->b_granted = 0;
 
 	/* If the block is in the middle of a GRANT callback,
 	 * don't kill it yet. */
@@ -306,16 +297,14 @@ nlmsvc_lock(struct svc_rqst *rqstp, struct nlm_file *file,
 	struct nlm_block	*block;
 	int			error;
 
-	dprintk("lockd: nlmsvc_lock(%04x/%ld, ty=%d, pi=%d, %Ld-%Ld, bl=%d)\n",
-				file->f_file.f_dentry->d_inode->i_dev,
+	dprintk("lockd: nlmsvc_lock(%s/%ld, ty=%d, pi=%d, %Ld-%Ld, bl=%d)\n",
+				file->f_file.f_dentry->d_inode->i_sb->s_id,
 				file->f_file.f_dentry->d_inode->i_ino,
 				lock->fl.fl_type, lock->fl.fl_pid,
 				(long long)lock->fl.fl_start,
 				(long long)lock->fl.fl_end,
 				wait);
 
-	/* Lock file against concurrent access */
-	down(&file->f_sema);
 
 	/* Get existing block (in case client is busy-waiting) */
 	block = nlmsvc_lookup_block(file, lock, 0);
@@ -323,8 +312,11 @@ nlmsvc_lock(struct svc_rqst *rqstp, struct nlm_file *file,
 	lock->fl.fl_flags |= FL_LOCKD;
 
 again:
+	/* Lock file against concurrent access */
+	down(&file->f_sema);
+
 	if (!(conflock = posix_test_lock(&file->f_file, &lock->fl))) {
-		error = posix_lock_file(&file->f_file, &lock->fl, 0);
+		error = posix_lock_file(&file->f_file, &lock->fl);
 
 		if (block)
 			nlmsvc_delete_block(block, 0);
@@ -355,7 +347,10 @@ again:
 
 	/* If we don't have a block, create and initialize it. Then
 	 * retry because we may have slept in kmalloc. */
+	/* We have to release f_sema as nlmsvc_create_block may try to
+	 * to claim it while doing host garbage collection */
 	if (block == NULL) {
+		up(&file->f_sema);
 		dprintk("lockd: blocking on this lock (allocating).\n");
 		if (!(block = nlmsvc_create_block(rqstp, file, lock, cookie)))
 			return nlm_lck_denied_nolocks;
@@ -385,8 +380,8 @@ nlmsvc_testlock(struct nlm_file *file, struct nlm_lock *lock,
 {
 	struct file_lock	*fl;
 
-	dprintk("lockd: nlmsvc_testlock(%04x/%ld, ty=%d, %Ld-%Ld)\n",
-				file->f_file.f_dentry->d_inode->i_dev,
+	dprintk("lockd: nlmsvc_testlock(%s/%ld, ty=%d, %Ld-%Ld)\n",
+				file->f_file.f_dentry->d_inode->i_sb->s_id,
 				file->f_file.f_dentry->d_inode->i_ino,
 				lock->fl.fl_type,
 				(long long)lock->fl.fl_start,
@@ -417,8 +412,8 @@ nlmsvc_unlock(struct nlm_file *file, struct nlm_lock *lock)
 {
 	int	error;
 
-	dprintk("lockd: nlmsvc_unlock(%04x/%ld, pi=%d, %Ld-%Ld)\n",
-				file->f_file.f_dentry->d_inode->i_dev,
+	dprintk("lockd: nlmsvc_unlock(%s/%ld, pi=%d, %Ld-%Ld)\n",
+				file->f_file.f_dentry->d_inode->i_sb->s_id,
 				file->f_file.f_dentry->d_inode->i_ino,
 				lock->fl.fl_pid,
 				(long long)lock->fl.fl_start,
@@ -428,7 +423,7 @@ nlmsvc_unlock(struct nlm_file *file, struct nlm_lock *lock)
 	nlmsvc_cancel_blocked(file, lock);
 
 	lock->fl.fl_type = F_UNLCK;
-	error = posix_lock_file(&file->f_file, &lock->fl, 0);
+	error = posix_lock_file(&file->f_file, &lock->fl);
 
 	return (error < 0)? nlm_lck_denied_nolocks : nlm_granted;
 }
@@ -445,8 +440,8 @@ nlmsvc_cancel_blocked(struct nlm_file *file, struct nlm_lock *lock)
 {
 	struct nlm_block	*block;
 
-	dprintk("lockd: nlmsvc_cancel(%04x/%ld, pi=%d, %Ld-%Ld)\n",
-				file->f_file.f_dentry->d_inode->i_dev,
+	dprintk("lockd: nlmsvc_cancel(%s/%ld, pi=%d, %Ld-%Ld)\n",
+				file->f_file.f_dentry->d_inode->i_sb->s_id,
 				file->f_file.f_dentry->d_inode->i_ino,
 				lock->fl.fl_pid,
 				(long long)lock->fl.fl_start,
@@ -472,7 +467,6 @@ nlmsvc_notify_blocked(struct file_lock *fl)
 	struct nlm_block	**bp, *block;
 
 	dprintk("lockd: VFS unblock notification for block %p\n", fl);
-	posix_unblock_lock(fl);
 	for (bp = &nlm_blocked; (block = *bp); bp = &block->b_next) {
 		if (nlm_compare_locks(&block->b_call.a_args.lock.fl, fl)) {
 			nlmsvc_insert_block(block, 0);
@@ -533,7 +527,7 @@ nlmsvc_grant_blocked(struct nlm_block *block)
 	 * following yields an error, this is most probably due to low
 	 * memory. Retry the lock in a few seconds.
 	 */
-	if ((error = posix_lock_file(&file->f_file, &lock->fl, 0)) < 0) {
+	if ((error = posix_lock_file(&file->f_file, &lock->fl)) < 0) {
 		printk(KERN_WARNING "lockd: unexpected error %d in %s!\n",
 				-error, __FUNCTION__);
 		nlmsvc_insert_block(block, 10 * HZ);

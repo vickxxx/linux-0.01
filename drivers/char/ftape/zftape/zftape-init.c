@@ -25,7 +25,6 @@
 #include <linux/errno.h>
 #include <linux/version.h>
 #include <linux/fs.h>
-#include <asm/segment.h>
 #include <linux/kernel.h>
 #include <linux/signal.h>
 #include <linux/major.h>
@@ -34,7 +33,6 @@
 #include <linux/kmod.h>
 #endif
 #include <linux/fcntl.h>
-#include <linux/wrapper.h>
 #include <linux/smp_lock.h>
 #include <linux/devfs_fs_kernel.h>
 
@@ -46,7 +44,6 @@
 #include "../zftape/zftape-write.h"
 #include "../zftape/zftape-ctl.h"
 #include "../zftape/zftape-buffers.h"
-#include "../zftape/zftape_syms.h"
 
 char zft_src[] __initdata = "$Source: /homes/cvs/ftape-stacked/ftape/zftape/zftape-init.c,v $";
 char zft_rev[] __initdata = "$Revision: 1.8 $";
@@ -68,7 +65,8 @@ const ftape_info *zft_status;
 
 /*      Local vars.
  */
-static int busy_flag = 0;
+static unsigned long busy_flag;
+
 static sigset_t orig_sigmask;
 
 /*  the interface to the kernel vfs layer
@@ -96,13 +94,13 @@ static ssize_t zft_write(struct file *fp, const char *buff,
 
 static struct file_operations zft_cdev =
 {
-	owner:		THIS_MODULE,
-	read:		zft_read,
-	write:		zft_write,
-	ioctl:		zft_ioctl,
-	mmap:		zft_mmap,
-	open:		zft_open,
-	release:	zft_close,
+	.owner		= THIS_MODULE,
+	.read		= zft_read,
+	.write		= zft_write,
+	.ioctl		= zft_ioctl,
+	.mmap		= zft_mmap,
+	.open		= zft_open,
+	.release	= zft_close,
 };
 
 /*      Open floppy tape device
@@ -112,23 +110,22 @@ static int zft_open(struct inode *ino, struct file *filep)
 	int result;
 	TRACE_FUN(ft_t_flow);
 
-	TRACE(ft_t_flow, "called for minor %d", MINOR(ino->i_rdev));
-	if (busy_flag) {
+	TRACE(ft_t_flow, "called for minor %d", minor(ino->i_rdev));
+	if ( test_and_set_bit(0,&busy_flag) ) {
 		TRACE_ABORT(-EBUSY, ft_t_warn, "failed: already busy");
 	}
-	busy_flag = 1;
-	if ((MINOR(ino->i_rdev) & ~(ZFT_MINOR_OP_MASK | FTAPE_NO_REWIND))
+	if ((minor(ino->i_rdev) & ~(ZFT_MINOR_OP_MASK | FTAPE_NO_REWIND))
 	     > 
 	    FTAPE_SEL_D) {
-		busy_flag = 0;
+		clear_bit(0,&busy_flag);
 		TRACE_ABORT(-ENXIO, ft_t_err, "failed: illegal unit nr");
 	}
 	orig_sigmask = current->blocked;
 	sigfillset(&current->blocked);
-	result = _zft_open(MINOR(ino->i_rdev), filep->f_flags & O_ACCMODE);
+	result = _zft_open(minor(ino->i_rdev), filep->f_flags & O_ACCMODE);
 	if (result < 0) {
 		current->blocked = orig_sigmask; /* restore mask */
-		busy_flag = 0;
+		clear_bit(0,&busy_flag);
 		TRACE_ABORT(result, ft_t_err, "_ftape_open failed");
 	} else {
 		/* Mask signals that will disturb proper operation of the
@@ -147,10 +144,8 @@ static int zft_close(struct inode *ino, struct file *filep)
 	int result;
 	TRACE_FUN(ft_t_flow);
 
-	lock_kernel();
-	if (!busy_flag || MINOR(ino->i_rdev) != zft_unit) {
+	if ( !test_bit(0,&busy_flag) || minor(ino->i_rdev) != zft_unit) {
 		TRACE(ft_t_err, "failed: not busy or wrong unit");
-		unlock_kernel();
 		TRACE_EXIT 0;
 	}
 	sigfillset(&current->blocked);
@@ -159,8 +154,7 @@ static int zft_close(struct inode *ino, struct file *filep)
 		TRACE(ft_t_err, "_zft_close failed");
 	}
 	current->blocked = orig_sigmask; /* restore before open state */
-	busy_flag = 0;
-	unlock_kernel();
+	clear_bit(0,&busy_flag);
 	TRACE_EXIT 0;
 }
 
@@ -173,7 +167,7 @@ static int zft_ioctl(struct inode *ino, struct file *filep,
 	sigset_t old_sigmask;
 	TRACE_FUN(ft_t_flow);
 
-	if (!busy_flag || MINOR(ino->i_rdev) != zft_unit || ft_failure) {
+	if ( !test_bit(0,&busy_flag) || minor(ino->i_rdev) != zft_unit || ft_failure) {
 		TRACE_ABORT(-EIO, ft_t_err,
 			    "failed: not busy, failure or wrong unit");
 	}
@@ -193,8 +187,8 @@ static int  zft_mmap(struct file *filep, struct vm_area_struct *vma)
 	sigset_t old_sigmask;
 	TRACE_FUN(ft_t_flow);
 
-	if (!busy_flag || 
-	    MINOR(filep->f_dentry->d_inode->i_rdev) != zft_unit || 
+	if ( !test_bit(0,&busy_flag) || 
+	    minor(filep->f_dentry->d_inode->i_rdev) != zft_unit || 
 	    ft_failure)
 	{
 		TRACE_ABORT(-EIO, ft_t_err,
@@ -202,14 +196,12 @@ static int  zft_mmap(struct file *filep, struct vm_area_struct *vma)
 	}
 	old_sigmask = current->blocked; /* save mask */
 	sigfillset(&current->blocked);
-	lock_kernel();
 	if ((result = ftape_mmap(vma)) >= 0) {
 #ifndef MSYNC_BUG_WAS_FIXED
 		static struct vm_operations_struct dummy = { NULL, };
 		vma->vm_ops = &dummy;
 #endif
 	}
-	unlock_kernel();
 	current->blocked = old_sigmask; /* restore mask */
 	TRACE_EXIT result;
 }
@@ -225,7 +217,7 @@ static ssize_t zft_read(struct file *fp, char *buff,
 	TRACE_FUN(ft_t_flow);
 
 	TRACE(ft_t_data_flow, "called with count: %ld", (unsigned long)req_len);
-	if (!busy_flag || MINOR(ino->i_rdev) != zft_unit || ft_failure) {
+	if (!test_bit(0,&busy_flag)  || minor(ino->i_rdev) != zft_unit || ft_failure) {
 		TRACE_ABORT(-EIO, ft_t_err,
 			    "failed: not busy, failure or wrong unit");
 	}
@@ -248,7 +240,7 @@ static ssize_t zft_write(struct file *fp, const char *buff,
 	TRACE_FUN(ft_t_flow);
 
 	TRACE(ft_t_flow, "called with count: %ld", (unsigned long)req_len);
-	if (!busy_flag || MINOR(ino->i_rdev) != zft_unit || ft_failure) {
+	if (!test_bit(0,&busy_flag) || minor(ino->i_rdev) != zft_unit || ft_failure) {
 		TRACE_ABORT(-EIO, ft_t_err,
 			    "failed: not busy, failure or wrong unit");
 	}
@@ -338,11 +330,7 @@ KERN_INFO
 KERN_INFO
 "and builtin compression (lzrw3 algorithm).\n"
 KERN_INFO
-"Compiled for Linux version %s"
-#ifdef MODVERSIONS
-		       " with versioned symbols"
-#endif
-		       "\n", UTS_RELEASE);
+"Compiled for Linux version %s\n", UTS_RELEASE);
         }
 #else /* !MODULE */
 	/* print a short no-nonsense boot message */
@@ -351,41 +339,27 @@ KERN_INFO
 	TRACE(ft_t_info, "zft_init @ 0x%p", zft_init);
 	TRACE(ft_t_info,
 	      "installing zftape VFS interface for ftape driver ...");
-	TRACE_CATCH(devfs_register_chrdev(QIC117_TAPE_MAJOR, "zft", &zft_cdev),);
+	TRACE_CATCH(register_chrdev(QIC117_TAPE_MAJOR, "zft", &zft_cdev),);
 
 	for (i = 0; i < 4; i++) {
-		char devname[9];
-
-		sprintf (devname, "qft%i", i);
-		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
-			        QIC117_TAPE_MAJOR, i,
+		devfs_mk_cdev(MKDEV(QIC117_TAPE_MAJOR, i),
 				S_IFCHR | S_IRUSR | S_IWUSR,
-				&zft_cdev, NULL);
-		sprintf (devname, "nqft%i", i);
-		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
-				QIC117_TAPE_MAJOR, i + 4,
+				"qft%i", i);
+		devfs_mk_cdev(MKDEV(QIC117_TAPE_MAJOR, i + 4),
 				S_IFCHR | S_IRUSR | S_IWUSR,
-				&zft_cdev, NULL);
-		sprintf (devname, "zqft%i", i);
-		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
-				QIC117_TAPE_MAJOR, i + 16,
+				"nqft%i", i);
+		devfs_mk_cdev(MKDEV(QIC117_TAPE_MAJOR, i + 16),
 				S_IFCHR | S_IRUSR | S_IWUSR,
-				&zft_cdev, NULL);
-		sprintf (devname, "nzqft%i", i);
-		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
-				QIC117_TAPE_MAJOR, i + 20,
+				"zqft%i", i);
+		devfs_mk_cdev(MKDEV(QIC117_TAPE_MAJOR, i + 20),
 				S_IFCHR | S_IRUSR | S_IWUSR,
-				&zft_cdev, NULL);
-		sprintf (devname, "rawqft%i", i);
-		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
-				QIC117_TAPE_MAJOR, i + 32,
+				"nzqft%i", i);
+		devfs_mk_cdev(MKDEV(QIC117_TAPE_MAJOR, i + 32),
 				S_IFCHR | S_IRUSR | S_IWUSR,
-				&zft_cdev, NULL);
-		sprintf (devname, "nrawqft%i", i);
-		devfs_register (NULL, devname, DEVFS_FL_DEFAULT,
-				QIC117_TAPE_MAJOR, i + 36,
+				"rawqft%i", i);
+		devfs_mk_cdev(MKDEV(QIC117_TAPE_MAJOR, i + 36),
 				S_IFCHR | S_IRUSR | S_IWUSR,
-				&zft_cdev, NULL);
+				"nrawqft%i", i);
 	}
 
 #ifdef CONFIG_ZFT_COMPRESSOR
@@ -398,55 +372,30 @@ KERN_INFO
 }
 
 
-#ifdef MODULE
-/* Called by modules package before trying to unload the module
- */
-static int can_unload(void)
-{
-	return (GET_USE_COUNT(THIS_MODULE)||zft_dirty()||busy_flag)?-EBUSY:0;
-}
-/* Called by modules package when installing the driver
- */
-int init_module(void)
-{
-	if (!mod_member_present(&__this_module, can_unload)) {
-		return -EBUSY;
-	}
-	__this_module.can_unload = can_unload;
-	return zft_init();
-}
-
 /* Called by modules package when removing the driver 
  */
-void cleanup_module(void)
+static void zft_exit(void)
 {
 	int i;
-	char devname[9];
-
 	TRACE_FUN(ft_t_flow);
 
-	if (devfs_unregister_chrdev(QIC117_TAPE_MAJOR, "zft") != 0) {
+	if (unregister_chrdev(QIC117_TAPE_MAJOR, "zft") != 0) {
 		TRACE(ft_t_warn, "failed");
 	} else {
 		TRACE(ft_t_info, "successful");
 	}
         for (i = 0; i < 4; i++) {
-		sprintf(devname, "qft%i", i);
-		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i, DEVFS_SPECIAL_CHR, 0));
-		sprintf(devname, "nqft%i", i);
-		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 4, DEVFS_SPECIAL_CHR, 0));
-		sprintf(devname, "zqft%i", i);
-		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 16, DEVFS_SPECIAL_CHR, 0));
-		sprintf(devname, "nzqft%i", i);
-		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 20, DEVFS_SPECIAL_CHR, 0));
-		sprintf(devname, "rawqft%i", i);
-		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 32, DEVFS_SPECIAL_CHR, 0));
-		sprintf(devname, "nrawqft%i", i);
-		devfs_unregister(devfs_find_handle(NULL, devname, QIC117_TAPE_MAJOR, i + 36, DEVFS_SPECIAL_CHR, 0));
+		devfs_remove("qft%i", i);
+		devfs_remove("nqft%i", i);
+		devfs_remove("zqft%i", i);
+		devfs_remove("nzqft%i", i);
+		devfs_remove("rawqft%i", i);
+		devfs_remove("nrawqft%i", i);
 	}
 	zft_uninit_mem(); /* release remaining memory, if any */
         printk(KERN_INFO "zftape successfully unloaded.\n");
 	TRACE_EXIT;
 }
 
-#endif /* MODULE */
+module_init(zft_init);
+module_exit(zft_exit);

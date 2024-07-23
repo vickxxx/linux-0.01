@@ -15,7 +15,7 @@
  *		ftp://prep.ai.mit.edu/pub/gnu/GPL
  *	Each contributing author retains all rights to their own work.
  *
- *  (C) 1998-2000 Ben Fennema
+ *  (C) 1998-2001 Ben Fennema
  *
  * HISTORY
  *
@@ -25,9 +25,10 @@
 
 #include "udfdecl.h"
 #include <linux/fs.h>
-#include <linux/locks.h>
 #include <linux/quotaops.h>
 #include <linux/udf_fs.h>
+#include <linux/sched.h>
+#include <linux/slab.h>
 
 #include "udf_i.h"
 #include "udf_sb.h"
@@ -74,7 +75,7 @@ struct inode * udf_new_inode (struct inode *dir, int mode, int * err)
 	struct super_block *sb;
 	struct inode * inode;
 	int block;
-	Uint32 start = UDF_I_LOCATION(dir).logicalBlockNum;
+	uint32_t start = UDF_I_LOCATION(dir).logicalBlockNum;
 
 	sb = dir->i_sb;
 	inode = new_inode(sb);
@@ -95,11 +96,16 @@ struct inode * udf_new_inode (struct inode *dir, int mode, int * err)
 	}
 	lock_super(sb);
 
+	UDF_I_UNIQUE(inode) = 0;
+	UDF_I_LENEXTENTS(inode) = 0;
+	UDF_I_NEXT_ALLOC_BLOCK(inode) = 0;
+	UDF_I_NEXT_ALLOC_GOAL(inode) = 0;
+	UDF_I_STRAT4096(inode) = 0;
 	if (UDF_SB_LVIDBH(sb))
 	{
-		struct LogicalVolHeaderDesc *lvhd;
-		Uint64 uniqueID;
-		lvhd = (struct LogicalVolHeaderDesc *)(UDF_SB_LVID(sb)->logicalVolContentsUse);
+		struct logicalVolHeaderDesc *lvhd;
+		uint64_t uniqueID;
+		lvhd = (struct logicalVolHeaderDesc *)(UDF_SB_LVID(sb)->logicalVolContentsUse);
 		if (S_ISDIR(mode))
 			UDF_SB_LVIDIU(sb)->numDirs =
 				cpu_to_le32(le32_to_cpu(UDF_SB_LVIDIU(sb)->numDirs) + 1);
@@ -130,24 +136,28 @@ struct inode * udf_new_inode (struct inode *dir, int mode, int * err)
 	inode->i_blocks = 0;
 	UDF_I_LENEATTR(inode) = 0;
 	UDF_I_LENALLOC(inode) = 0;
+	UDF_I_USE(inode) = 0;
 	if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_EXTENDED_FE))
 	{
-		UDF_I_EXTENDED_FE(inode) = 1;
+		UDF_I_EFE(inode) = 1;
 		UDF_UPDATE_UDFREV(inode->i_sb, UDF_VERS_USE_EXTENDED_FE);
+		UDF_I_DATA(inode) = kmalloc(inode->i_sb->s_blocksize - sizeof(struct extendedFileEntry), GFP_KERNEL);
+		memset(UDF_I_DATA(inode), 0x00, inode->i_sb->s_blocksize - sizeof(struct extendedFileEntry));
 	}
 	else
-		UDF_I_EXTENDED_FE(inode) = 0;
+	{
+		UDF_I_EFE(inode) = 0;
+		UDF_I_DATA(inode) = kmalloc(inode->i_sb->s_blocksize - sizeof(struct fileEntry), GFP_KERNEL);
+		memset(UDF_I_DATA(inode), 0x00, inode->i_sb->s_blocksize - sizeof(struct fileEntry));
+	}
 	if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_AD_IN_ICB))
-		UDF_I_ALLOCTYPE(inode) = ICB_FLAG_AD_IN_ICB;
+		UDF_I_ALLOCTYPE(inode) = ICBTAG_FLAG_AD_IN_ICB;
 	else if (UDF_QUERY_FLAG(inode->i_sb, UDF_FLAG_USE_SHORT_AD))
-		UDF_I_ALLOCTYPE(inode) = ICB_FLAG_AD_SHORT;
+		UDF_I_ALLOCTYPE(inode) = ICBTAG_FLAG_AD_SHORT;
 	else
-		UDF_I_ALLOCTYPE(inode) = ICB_FLAG_AD_LONG;
+		UDF_I_ALLOCTYPE(inode) = ICBTAG_FLAG_AD_LONG;
 	inode->i_mtime = inode->i_atime = inode->i_ctime =
 		UDF_I_CRTIME(inode) = CURRENT_TIME;
-	UDF_I_UMTIME(inode) = UDF_I_UCTIME(inode) =
-		UDF_I_UCRTIME(inode) = CURRENT_UTIME;
-	UDF_I_NEW_INODE(inode) = 1;
 	insert_inode_hash(inode);
 	mark_inode_dirty(inode);
 

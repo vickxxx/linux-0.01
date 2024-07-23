@@ -18,9 +18,10 @@
  * 	(jj@sunsite.ms.mff.cuni.cz)
  */
 
-#include <linux/fs.h>
-#include <linux/ext2_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
+#include "ext2.h"
+#include "xattr.h"
+#include "acl.h"
 
 /*
  * Called when an inode is released. Note that this is different
@@ -39,16 +40,27 @@ static int ext2_release_file (struct inode * inode, struct file * filp)
  * the ext2 filesystem.
  */
 struct file_operations ext2_file_operations = {
-	llseek:		generic_file_llseek,
-	read:		generic_file_read,
-	write:		generic_file_write,
-	ioctl:		ext2_ioctl,
-	mmap:		generic_file_mmap,
-	open:		generic_file_open,
-	release:	ext2_release_file,
-	fsync:		ext2_sync_file,
+	.llseek		= generic_file_llseek,
+	.read		= generic_file_read,
+	.write		= generic_file_write,
+	.aio_read	= generic_file_aio_read,
+	.aio_write	= generic_file_aio_write,
+	.ioctl		= ext2_ioctl,
+	.mmap		= generic_file_mmap,
+	.open		= generic_file_open,
+	.release	= ext2_release_file,
+	.fsync		= ext2_sync_file,
+	.readv		= generic_file_readv,
+	.writev		= generic_file_writev,
+	.sendfile	= generic_file_sendfile,
 };
 
 struct inode_operations ext2_file_inode_operations = {
-	truncate:	ext2_truncate,
+	.truncate	= ext2_truncate,
+	.setxattr	= ext2_setxattr,
+	.getxattr	= ext2_getxattr,
+	.listxattr	= ext2_listxattr,
+	.removexattr	= ext2_removexattr,
+	.setattr	= ext2_setattr,
+	.permission	= ext2_permission,
 };

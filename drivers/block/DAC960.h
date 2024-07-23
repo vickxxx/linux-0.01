@@ -60,6 +60,12 @@
 #define DAC960_V1_MaxPhysicalDevices		45
 #define DAC960_V2_MaxPhysicalDevices		272
 
+/*
+  Define the pci dma mask supported by DAC960 V1 and V2 Firmware Controlers
+ */
+
+#define DAC690_V1_PciDmaMask	0xffffffff
+#define DAC690_V2_PciDmaMask	0xffffffffffffffff
 
 /*
   Define a Boolean data type.
@@ -109,6 +115,20 @@ typedef unsigned int DAC960_ByteCount32_T;
 
 typedef unsigned long long DAC960_ByteCount64_T;
 
+
+/*
+  dma_loaf is used by helper routines to divide a region of
+  dma mapped memory into smaller pieces, where those pieces
+  are not of uniform size.
+ */
+
+struct dma_loaf {
+	void	*cpu_base;
+	dma_addr_t dma_base;
+	size_t  length;
+	void	*cpu_free;
+	dma_addr_t dma_free;
+};
 
 /*
   Define the SCSI INQUIRY Standard Data structure.
@@ -2054,13 +2074,10 @@ extern int DAC960_KernelIOCTL(unsigned int Request, void *Argument);
 */
 
 #define DAC960_ControllerNumber(Device) \
-  (MAJOR(Device) - DAC960_MAJOR)
+  (major(Device) - DAC960_MAJOR)
 
 #define DAC960_LogicalDriveNumber(Device) \
-  (MINOR(Device) >> DAC960_MaxPartitionsBits)
-
-#define DAC960_PartitionNumber(Device) \
-  (MINOR(Device) & (DAC960_MaxPartitions - 1))
+  (minor(Device) >> DAC960_MaxPartitionsBits)
 
 #define DAC960_MajorNumber(ControllerNumber) \
   (DAC960_MAJOR + (ControllerNumber))
@@ -2074,7 +2091,7 @@ extern int DAC960_KernelIOCTL(unsigned int Request, void *Argument);
 #define DAC960_KernelDevice(ControllerNumber,				       \
 			    LogicalDriveNumber,				       \
 			    PartitionNumber)				       \
-   MKDEV(DAC960_MajorNumber(ControllerNumber),				       \
+   mk_kdev(DAC960_MajorNumber(ControllerNumber),				       \
 	 DAC960_MinorNumber(LogicalDriveNumber, PartitionNumber))
 
 
@@ -2186,32 +2203,12 @@ static char
   DAC960_Message(DAC960_UserCriticalLevel, Format, ##Arguments)
 
 
-/*
-  Define types for some of the structures that interface with the rest
-  of the Linux Kernel and I/O Subsystem.
-*/
-
-typedef struct buffer_head BufferHeader_T;
-typedef struct file File_T;
-typedef struct block_device_operations BlockDeviceOperations_T;
-typedef struct completion Completion_T;
-typedef struct gendisk GenericDiskInfo_T;
-typedef struct hd_geometry DiskGeometry_T;
-typedef struct hd_struct DiskPartition_T;
-typedef struct inode Inode_T;
-typedef struct inode_operations InodeOperations_T;
-typedef kdev_t KernelDevice_T;
-typedef struct list_head ListHead_T;
-typedef struct notifier_block NotifierBlock_T;
-typedef struct pci_dev PCI_Device_T;
-typedef struct proc_dir_entry PROC_DirectoryEntry_T;
-typedef unsigned long ProcessorFlags_T;
-typedef struct pt_regs Registers_T;
-typedef struct request IO_Request_T;
-typedef request_queue_t RequestQueue_T;
-typedef struct super_block SuperBlock_T;
-typedef struct timer_list Timer_T;
-typedef wait_queue_head_t WaitQueue_T;
+struct DAC960_privdata {
+	DAC960_HardwareType_T	HardwareType;
+	DAC960_FirmwareType_T	FirmwareType;
+	irqreturn_t (*InterruptHandler)(int, void *, struct pt_regs *);
+	unsigned int		MemoryWindowSize;
+};
 
 
 /*
@@ -2275,21 +2272,23 @@ typedef struct DAC960_Command
   DAC960_CommandType_T CommandType;
   struct DAC960_Controller *Controller;
   struct DAC960_Command *Next;
-  Completion_T *Completion;
+  struct completion *Completion;
   unsigned int LogicalDriveNumber;
   unsigned int BlockNumber;
   unsigned int BlockCount;
   unsigned int SegmentCount;
-  BufferHeader_T *BufferHeader;
-  void *RequestBuffer;
+  int	DmaDirection;
+  struct scatterlist *cmd_sglist;
+  struct request *Request;
+  struct pci_dev *PciDevice;
   union {
     struct {
       DAC960_V1_CommandMailbox_T CommandMailbox;
       DAC960_V1_KernelCommand_T *KernelCommand;
       DAC960_V1_CommandStatus_T CommandStatus;
-      DAC960_V1_ScatterGatherSegment_T
-	ScatterGatherList[DAC960_V1_ScatterGatherLimit]
-	__attribute__ ((aligned (sizeof(DAC960_V1_ScatterGatherSegment_T))));
+      DAC960_V1_ScatterGatherSegment_T *ScatterGatherList;
+      dma_addr_t ScatterGatherListDMA;
+      struct scatterlist ScatterList[DAC960_V1_ScatterGatherLimit];
       unsigned int EndMarker[0];
     } V1;
     struct {
@@ -2298,11 +2297,11 @@ typedef struct DAC960_Command
       DAC960_V2_CommandStatus_T CommandStatus;
       unsigned char RequestSenseLength;
       int DataTransferResidue;
-      DAC960_V2_ScatterGatherSegment_T
-	ScatterGatherList[DAC960_V2_ScatterGatherLimit]
-	__attribute__ ((aligned (sizeof(DAC960_V2_ScatterGatherSegment_T))));
-      DAC960_SCSI_RequestSense_T RequestSense
-	__attribute__ ((aligned (sizeof(int))));
+      DAC960_V2_ScatterGatherSegment_T *ScatterGatherList;
+      dma_addr_t ScatterGatherListDMA;
+      DAC960_SCSI_RequestSense_T *RequestSense;
+      dma_addr_t RequestSenseDMA;
+      struct scatterlist ScatterList[DAC960_V2_ScatterGatherLimit];
       unsigned int EndMarker[0];
     } V2;
   } FW;
@@ -2322,6 +2321,7 @@ typedef struct DAC960_Controller
   DAC960_HardwareType_T HardwareType;
   DAC960_IO_Address_T IO_Address;
   DAC960_PCI_Address_T PCI_Address;
+  struct pci_dev *PCIDevice;
   unsigned char ControllerNumber;
   unsigned char ControllerName[4];
   unsigned char ModelName[20];
@@ -2341,38 +2341,38 @@ typedef struct DAC960_Controller
   unsigned short MaxBlocksPerCommand;
   unsigned short ControllerScatterGatherLimit;
   unsigned short DriverScatterGatherLimit;
-  unsigned int ControllerUsageCount;
+  u64		BounceBufferLimit;
   unsigned int CombinedStatusBufferLength;
   unsigned int InitialStatusLength;
   unsigned int CurrentStatusLength;
   unsigned int ProgressBufferLength;
   unsigned int UserStatusLength;
-  unsigned long MemoryMailboxPagesAddress;
-  unsigned long MemoryMailboxPagesOrder;
+  struct dma_loaf DmaPages;
   unsigned long MonitoringTimerCount;
   unsigned long PrimaryMonitoringTime;
   unsigned long SecondaryMonitoringTime;
+  unsigned long ShutdownMonitoringTimer;
   unsigned long LastProgressReportTime;
   unsigned long LastCurrentStatusTime;
-  boolean ControllerDetectionSuccessful;
   boolean ControllerInitialized;
   boolean MonitoringCommandDeferred;
   boolean EphemeralProgressMessage;
   boolean DriveSpinUpMessageDisplayed;
   boolean MonitoringAlertMode;
   boolean SuppressEnclosureMessages;
-  Timer_T MonitoringTimer;
-  GenericDiskInfo_T GenericDiskInfo;
+  struct timer_list MonitoringTimer;
+  struct gendisk *disks[DAC960_MaxLogicalDrives];
+  struct pci_pool *ScatterGatherPool;
   DAC960_Command_T *FreeCommands;
   unsigned char *CombinedStatusBuffer;
   unsigned char *CurrentStatusBuffer;
-  RequestQueue_T *RequestQueue;
-  WaitQueue_T CommandWaitQueue;
-  WaitQueue_T HealthStatusWaitQueue;
+  struct request_queue RequestQueue;
+  spinlock_t queue_lock;
+  wait_queue_head_t CommandWaitQueue;
+  wait_queue_head_t HealthStatusWaitQueue;
   DAC960_Command_T InitialCommand;
   DAC960_Command_T *Commands[DAC960_MaxDriverQueueDepth];
-  PROC_DirectoryEntry_T *ControllerProcEntry;
-  unsigned int LogicalDriveUsageCount[DAC960_MaxLogicalDrives];
+  struct proc_dir_entry *ControllerProcEntry;
   boolean LogicalDriveInitiallyAccessible[DAC960_MaxLogicalDrives];
   void (*QueueCommand)(DAC960_Command_T *Command);
   boolean (*ReadControllerConfiguration)(struct DAC960_Controller *);
@@ -2405,36 +2405,63 @@ typedef struct DAC960_Controller
       boolean RebuildProgressFirst;
       boolean RebuildFlagPending;
       boolean RebuildStatusPending;
+
+      dma_addr_t	FirstCommandMailboxDMA;
       DAC960_V1_CommandMailbox_T *FirstCommandMailbox;
       DAC960_V1_CommandMailbox_T *LastCommandMailbox;
       DAC960_V1_CommandMailbox_T *NextCommandMailbox;
       DAC960_V1_CommandMailbox_T *PreviousCommandMailbox1;
       DAC960_V1_CommandMailbox_T *PreviousCommandMailbox2;
+
+      dma_addr_t	FirstStatusMailboxDMA;
       DAC960_V1_StatusMailbox_T *FirstStatusMailbox;
       DAC960_V1_StatusMailbox_T *LastStatusMailbox;
       DAC960_V1_StatusMailbox_T *NextStatusMailbox;
-      DAC960_V1_DCDB_T MonitoringDCDB;
+
+      DAC960_V1_DCDB_T *MonitoringDCDB;
+      dma_addr_t MonitoringDCDB_DMA;
+
       DAC960_V1_Enquiry_T Enquiry;
-      DAC960_V1_Enquiry_T NewEnquiry;
+      DAC960_V1_Enquiry_T *NewEnquiry;
+      dma_addr_t NewEnquiryDMA;
+
       DAC960_V1_ErrorTable_T ErrorTable;
-      DAC960_V1_ErrorTable_T NewErrorTable;
-      DAC960_V1_EventLogEntry_T EventLogEntry;
-      DAC960_V1_RebuildProgress_T RebuildProgress;
+      DAC960_V1_ErrorTable_T *NewErrorTable;
+      dma_addr_t NewErrorTableDMA;
+
+      DAC960_V1_EventLogEntry_T *EventLogEntry;
+      dma_addr_t EventLogEntryDMA;
+
+      DAC960_V1_RebuildProgress_T *RebuildProgress;
+      dma_addr_t RebuildProgressDMA;
       DAC960_V1_CommandStatus_T LastRebuildStatus;
       DAC960_V1_CommandStatus_T PendingRebuildStatus;
+
       DAC960_V1_LogicalDriveInformationArray_T LogicalDriveInformation;
-      DAC960_V1_LogicalDriveInformationArray_T NewLogicalDriveInformation;
+      DAC960_V1_LogicalDriveInformationArray_T *NewLogicalDriveInformation;
+      dma_addr_t NewLogicalDriveInformationDMA;
+
       DAC960_V1_BackgroundInitializationStatus_T
-        BackgroundInitializationStatus;
+        	*BackgroundInitializationStatus;
+      dma_addr_t BackgroundInitializationStatusDMA;
       DAC960_V1_BackgroundInitializationStatus_T
-        LastBackgroundInitializationStatus;
+        	LastBackgroundInitializationStatus;
+
       DAC960_V1_DeviceState_T
 	DeviceState[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
-      DAC960_V1_DeviceState_T NewDeviceState;
+      DAC960_V1_DeviceState_T *NewDeviceState;
+      dma_addr_t	NewDeviceStateDMA;
+
       DAC960_SCSI_Inquiry_T
 	InquiryStandardData[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
+      DAC960_SCSI_Inquiry_T *NewInquiryStandardData;
+      dma_addr_t NewInquiryStandardDataDMA;
+
       DAC960_SCSI_Inquiry_UnitSerialNumber_T
 	InquiryUnitSerialNumber[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
+      DAC960_SCSI_Inquiry_UnitSerialNumber_T *NewInquiryUnitSerialNumber;
+      dma_addr_t NewInquiryUnitSerialNumberDMA;
+
       int DeviceResetCount[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
       boolean DirectCommandActive[DAC960_V1_MaxChannels][DAC960_V1_MaxTargets];
     } V1;
@@ -2447,35 +2474,53 @@ typedef struct DAC960_Controller
       boolean NeedDeviceSerialNumberInformation;
       boolean StartLogicalDeviceInformationScan;
       boolean StartPhysicalDeviceInformationScan;
+      struct pci_pool *RequestSensePool;
+
+      dma_addr_t	FirstCommandMailboxDMA;
       DAC960_V2_CommandMailbox_T *FirstCommandMailbox;
       DAC960_V2_CommandMailbox_T *LastCommandMailbox;
       DAC960_V2_CommandMailbox_T *NextCommandMailbox;
       DAC960_V2_CommandMailbox_T *PreviousCommandMailbox1;
       DAC960_V2_CommandMailbox_T *PreviousCommandMailbox2;
+
+      dma_addr_t	FirstStatusMailboxDMA;
       DAC960_V2_StatusMailbox_T *FirstStatusMailbox;
       DAC960_V2_StatusMailbox_T *LastStatusMailbox;
       DAC960_V2_StatusMailbox_T *NextStatusMailbox;
+
+      dma_addr_t	HealthStatusBufferDMA;
       DAC960_V2_HealthStatusBuffer_T *HealthStatusBuffer;
+
       DAC960_V2_ControllerInfo_T ControllerInformation;
-      DAC960_V2_ControllerInfo_T NewControllerInformation;
+      DAC960_V2_ControllerInfo_T *NewControllerInformation;
+      dma_addr_t	NewControllerInformationDMA;
+
       DAC960_V2_LogicalDeviceInfo_T
 	*LogicalDeviceInformation[DAC960_MaxLogicalDrives];
-      DAC960_V2_LogicalDeviceInfo_T NewLogicalDeviceInformation;
+      DAC960_V2_LogicalDeviceInfo_T *NewLogicalDeviceInformation;
+      dma_addr_t	 NewLogicalDeviceInformationDMA;
+
       DAC960_V2_PhysicalDeviceInfo_T
 	*PhysicalDeviceInformation[DAC960_V2_MaxPhysicalDevices];
-      DAC960_V2_PhysicalDeviceInfo_T NewPhysicalDeviceInformation;
+      DAC960_V2_PhysicalDeviceInfo_T *NewPhysicalDeviceInformation;
+      dma_addr_t	NewPhysicalDeviceInformationDMA;
+
+      DAC960_SCSI_Inquiry_UnitSerialNumber_T *NewInquiryUnitSerialNumber;
+      dma_addr_t	NewInquiryUnitSerialNumberDMA;
       DAC960_SCSI_Inquiry_UnitSerialNumber_T
 	*InquiryUnitSerialNumber[DAC960_V2_MaxPhysicalDevices];
+
+      DAC960_V2_Event_T *Event;
+      dma_addr_t EventDMA;
+
+      DAC960_V2_PhysicalToLogicalDevice_T *PhysicalToLogicalDevice;
+      dma_addr_t PhysicalToLogicalDeviceDMA;
+
       DAC960_V2_PhysicalDevice_T
 	LogicalDriveToVirtualDevice[DAC960_MaxLogicalDrives];
-      DAC960_V2_Event_T Event;
       boolean LogicalDriveFoundDuringScan[DAC960_MaxLogicalDrives];
     } V2;
   } FW;
-  DiskPartition_T DiskPartitions[DAC960_MinorCount];
-  int PartitionSizes[DAC960_MinorCount];
-  int BlockSizes[DAC960_MinorCount];
-  int MaxSectorsPerRequest[DAC960_MinorCount];
   unsigned char ProgressBuffer[DAC960_ProgressBufferSize];
   unsigned char UserStatusBuffer[DAC960_UserMessageSize];
 }
@@ -2500,113 +2545,32 @@ DAC960_Controller_T;
 #define DAC960_QueueReadWriteCommand(Command) \
   (Controller->QueueReadWriteCommand)(Command)
 
-
 /*
-  DAC960_AcquireControllerLock acquires exclusive access to Controller.
-*/
-
+ * dma_addr_writeql is provided to write dma_addr_t types
+ * to a 64-bit pci address space register.  The controller
+ * will accept having the register written as two 32-bit
+ * values.
+ *
+ * In HIGHMEM kernels, dma_addr_t is a 64-bit value.
+ * without HIGHMEM,  dma_addr_t is a 32-bit value.
+ *
+ * The compiler should always fix up the assignment
+ * to u.wq appropriately, depending upon the size of
+ * dma_addr_t.
+ */
 static inline
-void DAC960_AcquireControllerLock(DAC960_Controller_T *Controller,
-				  ProcessorFlags_T *ProcessorFlags)
+void dma_addr_writeql(dma_addr_t addr, void *write_address)
 {
-  spin_lock_irqsave(&io_request_lock, *ProcessorFlags);
+	union {
+		u64 wq;
+		uint wl[2];
+	} u;
+
+	u.wq = addr;
+
+	writel(u.wl[0], write_address);
+	writel(u.wl[1], write_address + 4);
 }
-
-
-/*
-  DAC960_ReleaseControllerLock releases exclusive access to Controller.
-*/
-
-static inline
-void DAC960_ReleaseControllerLock(DAC960_Controller_T *Controller,
-				  ProcessorFlags_T *ProcessorFlags)
-{
-  spin_unlock_irqrestore(&io_request_lock, *ProcessorFlags);
-}
-
-
-/*
-  DAC960_AcquireControllerLockRF acquires exclusive access to Controller,
-  but is only called from the request function with the io_request_lock held.
-*/
-
-static inline
-void DAC960_AcquireControllerLockRF(DAC960_Controller_T *Controller,
-				    ProcessorFlags_T *ProcessorFlags)
-{
-}
-
-
-/*
-  DAC960_ReleaseControllerLockRF releases exclusive access to Controller,
-  but is only called from the request function with the io_request_lock held.
-*/
-
-static inline
-void DAC960_ReleaseControllerLockRF(DAC960_Controller_T *Controller,
-				    ProcessorFlags_T *ProcessorFlags)
-{
-}
-
-
-/*
-  DAC960_AcquireControllerLockIH acquires exclusive access to Controller,
-  but is only called from the interrupt handler.
-*/
-
-static inline
-void DAC960_AcquireControllerLockIH(DAC960_Controller_T *Controller,
-				    ProcessorFlags_T *ProcessorFlags)
-{
-  spin_lock_irqsave(&io_request_lock, *ProcessorFlags);
-}
-
-
-/*
-  DAC960_ReleaseControllerLockIH releases exclusive access to Controller,
-  but is only called from the interrupt handler.
-*/
-
-static inline
-void DAC960_ReleaseControllerLockIH(DAC960_Controller_T *Controller,
-				    ProcessorFlags_T *ProcessorFlags)
-{
-  spin_unlock_irqrestore(&io_request_lock, *ProcessorFlags);
-}
-
-
-/*
-  Virtual_to_Bus32 maps from Kernel Virtual Addresses to 32 Bit PCI Bus
-  Addresses.
-*/
-
-static inline DAC960_BusAddress32_T Virtual_to_Bus32(void *VirtualAddress)
-{
-  return (DAC960_BusAddress32_T) virt_to_bus(VirtualAddress);
-}
-
-
-/*
-  Bus32_to_Virtual maps from 32 Bit PCI Bus Addresses to Kernel Virtual
-  Addresses.
-*/
-
-static inline void *Bus32_to_Virtual(DAC960_BusAddress32_T BusAddress)
-{
-  return (void *) bus_to_virt(BusAddress);
-}
-
-
-/*
-  Virtual_to_Bus64 maps from Kernel Virtual Addresses to 64 Bit PCI Bus
-  Addresses.
-*/
-
-static inline DAC960_BusAddress64_T Virtual_to_Bus64(void *VirtualAddress)
-{
-  return (DAC960_BusAddress64_T) virt_to_bus(VirtualAddress);
-}
-
 
 /*
   Define the DAC960 BA Series Controller Interface Register Offsets.
@@ -2871,17 +2835,14 @@ void DAC960_BA_WriteCommandMailbox(DAC960_V2_CommandMailbox_T
   mb();
 }
 
+
 static inline
 void DAC960_BA_WriteHardwareMailbox(void *ControllerBaseAddress,
-				    DAC960_V2_CommandMailbox_T *CommandMailbox)
+				    dma_addr_t CommandMailboxDMA)
 {
-#ifdef __ia64__
-  writeq(Virtual_to_Bus64(CommandMailbox),
-	 ControllerBaseAddress + DAC960_BA_CommandMailboxBusAddressOffset);
-#else
-  writel(Virtual_to_Bus32(CommandMailbox),
-	 ControllerBaseAddress + DAC960_BA_CommandMailboxBusAddressOffset);
-#endif
+	dma_addr_writeql(CommandMailboxDMA,
+		ControllerBaseAddress +
+		DAC960_BA_CommandMailboxBusAddressOffset);
 }
 
 static inline DAC960_V2_CommandIdentifier_T
@@ -3179,15 +3140,11 @@ void DAC960_LP_WriteCommandMailbox(DAC960_V2_CommandMailbox_T
 
 static inline
 void DAC960_LP_WriteHardwareMailbox(void *ControllerBaseAddress,
-				    DAC960_V2_CommandMailbox_T *CommandMailbox)
+				    dma_addr_t CommandMailboxDMA)
 {
-#ifdef __ia64__
-  writeq(Virtual_to_Bus64(CommandMailbox),
-	 ControllerBaseAddress + DAC960_LP_CommandMailboxBusAddressOffset);
-#else
-  writel(Virtual_to_Bus32(CommandMailbox),
-	 ControllerBaseAddress + DAC960_LP_CommandMailboxBusAddressOffset);
-#endif
+	dma_addr_writeql(CommandMailboxDMA,
+		ControllerBaseAddress +
+		DAC960_LP_CommandMailboxBusAddressOffset);
 }
 
 static inline DAC960_V2_CommandIdentifier_T
@@ -3543,43 +3500,6 @@ DAC960_LA_ReadErrorStatus(void *ControllerBaseAddress,
   return true;
 }
 
-static inline
-void DAC960_LA_SaveMemoryMailboxInfo(DAC960_Controller_T *Controller)
-{
-#ifdef __i386__
-  void *ControllerBaseAddress = Controller->BaseAddress;
-  writel(0x743C485E,
-	 ControllerBaseAddress + DAC960_LA_CommandOpcodeRegisterOffset);
-  writel((unsigned long) Controller->V1.FirstCommandMailbox,
-	 ControllerBaseAddress + DAC960_LA_MailboxRegister4Offset);
-  writew(Controller->V1.NextCommandMailbox - Controller->V1.FirstCommandMailbox,
-	 ControllerBaseAddress + DAC960_LA_MailboxRegister8Offset);
-  writew(Controller->V1.NextStatusMailbox - Controller->V1.FirstStatusMailbox,
-	 ControllerBaseAddress + DAC960_LA_MailboxRegister10Offset);
-#endif
-}
-
-static inline
-void DAC960_LA_RestoreMemoryMailboxInfo(DAC960_Controller_T *Controller,
-					void **MemoryMailboxAddress,
-					short *NextCommandMailboxIndex,
-					short *NextStatusMailboxIndex)
-{
-#ifdef __i386__
-  void *ControllerBaseAddress = Controller->BaseAddress;
-  if (readl(ControllerBaseAddress
-	    + DAC960_LA_CommandOpcodeRegisterOffset) != 0x743C485E)
-    return;
-  *MemoryMailboxAddress =
-    (void *) readl(ControllerBaseAddress + DAC960_LA_MailboxRegister4Offset);
-  *NextCommandMailboxIndex =
-    readw(ControllerBaseAddress + DAC960_LA_MailboxRegister8Offset);
-  *NextStatusMailboxIndex =
-    readw(ControllerBaseAddress + DAC960_LA_MailboxRegister10Offset);
-#endif
-}
-
-
 /*
   Define the DAC960 PG Series Controller Interface Register Offsets.
 */
@@ -3905,43 +3825,6 @@ DAC960_PG_ReadErrorStatus(void *ControllerBaseAddress,
   return true;
 }
 
-static inline
-void DAC960_PG_SaveMemoryMailboxInfo(DAC960_Controller_T *Controller)
-{
-#ifdef __i386__
-  void *ControllerBaseAddress = Controller->BaseAddress;
-  writel(0x743C485E,
-	 ControllerBaseAddress + DAC960_PG_CommandOpcodeRegisterOffset);
-  writel((unsigned long) Controller->V1.FirstCommandMailbox,
-	 ControllerBaseAddress + DAC960_PG_MailboxRegister4Offset);
-  writew(Controller->V1.NextCommandMailbox - Controller->V1.FirstCommandMailbox,
-	 ControllerBaseAddress + DAC960_PG_MailboxRegister8Offset);
-  writew(Controller->V1.NextStatusMailbox - Controller->V1.FirstStatusMailbox,
-	 ControllerBaseAddress + DAC960_PG_MailboxRegister10Offset);
-#endif
-}
-
-static inline
-void DAC960_PG_RestoreMemoryMailboxInfo(DAC960_Controller_T *Controller,
-					void **MemoryMailboxAddress,
-					short *NextCommandMailboxIndex,
-					short *NextStatusMailboxIndex)
-{
-#ifdef __i386__
-  void *ControllerBaseAddress = Controller->BaseAddress;
-  if (readl(ControllerBaseAddress
-	    + DAC960_PG_CommandOpcodeRegisterOffset) != 0x743C485E)
-    return;
-  *MemoryMailboxAddress =
-    (void *) readl(ControllerBaseAddress + DAC960_PG_MailboxRegister4Offset);
-  *NextCommandMailboxIndex =
-    readw(ControllerBaseAddress + DAC960_PG_MailboxRegister8Offset);
-  *NextStatusMailboxIndex =
-    readw(ControllerBaseAddress + DAC960_PG_MailboxRegister10Offset);
-#endif
-}
-
-
 /*
   Define the DAC960 PD Series Controller Interface Register Offsets.
 */
@@ -4243,34 +4126,23 @@ void DAC960_P_To_PD_TranslateReadWriteCommand(DAC960_V1_CommandMailbox_T
 */
 
 static void DAC960_FinalizeController(DAC960_Controller_T *);
-static int DAC960_Notifier(NotifierBlock_T *, unsigned long, void *);
 static void DAC960_V1_QueueReadWriteCommand(DAC960_Command_T *);
-static void DAC960_V2_QueueReadWriteCommand(DAC960_Command_T *);
-static void DAC960_RequestFunction(RequestQueue_T *);
-static void DAC960_BA_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_LP_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_LA_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_PG_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_PD_InterruptHandler(int, void *, Registers_T *);
-static void DAC960_P_InterruptHandler(int, void *, Registers_T *);
+static void DAC960_V2_QueueReadWriteCommand(DAC960_Command_T *); 
+static void DAC960_RequestFunction(struct request_queue *);
+static irqreturn_t DAC960_BA_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_LP_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_LA_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_PG_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_PD_InterruptHandler(int, void *, struct pt_regs *);
+static irqreturn_t DAC960_P_InterruptHandler(int, void *, struct pt_regs *);
 static void DAC960_V1_QueueMonitoringCommand(DAC960_Command_T *);
 static void DAC960_V2_QueueMonitoringCommand(DAC960_Command_T *);
 static void DAC960_MonitoringTimerFunction(unsigned long);
-static int DAC960_Open(Inode_T *, File_T *);
-static int DAC960_Release(Inode_T *, File_T *);
-static int DAC960_IOCTL(Inode_T *, File_T *, unsigned int, unsigned long);
-static int DAC960_UserIOCTL(Inode_T *, File_T *, unsigned int, unsigned long);
+static int DAC960_UserIOCTL(struct inode *, struct file *,
+			    unsigned int, unsigned long);
 static void DAC960_Message(DAC960_MessageLevel_T, unsigned char *,
 			   DAC960_Controller_T *, ...);
-static void DAC960_CreateProcEntries(void);
-static void DAC960_DestroyProcEntries(void);
-
-
-/*
-  Export the Kernel Mode IOCTL interface.
-*/
-
-EXPORT_SYMBOL(DAC960_KernelIOCTL);
-
+static void DAC960_CreateProcEntries(DAC960_Controller_T *);
+static void DAC960_DestroyProcEntries(DAC960_Controller_T *);
 
 #endif /* DAC960_DriverVersion */

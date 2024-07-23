@@ -9,7 +9,7 @@
 #define _SPARC_NS87303_H 1
 
 /*
- * Controll Register Index Values
+ * Control Register Index Values
  */
 #define FER	0x00
 #define FAR	0x01
@@ -58,7 +58,7 @@
 #define TUP_EPP_TIMO	0x02	/* Enable EPP timeout IRQ                    */
 
 /* Advanced SuperIO Config Register (ASC) bits */
-#define ASC_LPT_IRQ7	0x01	/* Allways use IRQ7 for LPT                  */
+#define ASC_LPT_IRQ7	0x01	/* Always use IRQ7 for LPT                  */
 #define ASC_DRV2_SEL	0x02	/* Logical Drive Exchange controlled by TDR  */
 
 #define FER_RESERVED	0x00
@@ -78,8 +78,12 @@
 
 #ifdef __KERNEL__
 
+#include <linux/spinlock.h>
+
 #include <asm/system.h>
 #include <asm/io.h>
+
+extern spinlock_t ns87303_lock;
 
 static __inline__ int ns87303_modify(unsigned long port, unsigned int index,
 				     unsigned char clr, unsigned char set)
@@ -96,14 +100,16 @@ static __inline__ int ns87303_modify(unsigned long port, unsigned int index,
 	if (index > 0x0d)
 		return -EINVAL;
 
-	save_flags(flags); cli();
+	spin_lock_irqsave(&ns87303_lock, flags);
+
 	outb(index, port);
 	value = inb(port + 1);
 	value &= ~(reserved[index] | clr);
 	value |= set;
 	outb(value, port + 1);
 	outb(value, port + 1);
-	restore_flags(flags);
+
+	spin_unlock_irqrestore(&ns87303_lock, flags);
 
 	return 0;
 }

@@ -1,4 +1,4 @@
-/* $Id: fault.c,v 1.121 2001/10/30 04:54:22 davem Exp $
+/* $Id: fault.c,v 1.122 2001/11/17 07:19:26 davem Exp $
  * fault.c:  Page fault handlers for the Sparc.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -10,6 +10,7 @@
 
 #include <linux/string.h>
 #include <linux/types.h>
+#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/mman.h>
 #include <linux/threads.h>
@@ -19,6 +20,7 @@
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/interrupt.h>
+#include <linux/module.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
@@ -138,8 +140,8 @@ static void unhandled_fault(unsigned long address, struct task_struct *tsk,
                      struct pt_regs *regs)
 {
 	if((unsigned long) address < PAGE_SIZE) {
-		printk(KERN_ALERT "Unable to handle kernel NULL "
-		       "pointer dereference");
+		printk(KERN_ALERT
+		    "Unable to handle kernel NULL pointer dereference\n");
 	} else {
 		printk(KERN_ALERT "Unable to handle kernel paging request "
 		       "at virtual address %08lx\n", address);
@@ -155,34 +157,47 @@ static void unhandled_fault(unsigned long address, struct task_struct *tsk,
 asmlinkage int lookup_fault(unsigned long pc, unsigned long ret_pc, 
 			    unsigned long address)
 {
-	unsigned long g2;
-	int i;
-	unsigned insn;
 	struct pt_regs regs;
+	unsigned long g2;
+	unsigned int insn;
+	int i;
 	
-	i = search_exception_table (ret_pc, &g2);
+	i = search_extables_range(ret_pc, &g2);
 	switch (i) {
-	/* load & store will be handled by fixup */
-	case 3: return 3;
-	/* store will be handled by fixup, load will bump out */
-	/* for _to_ macros */
-	case 1: insn = (unsigned)pc; if ((insn >> 21) & 1) return 1; break;
-	/* load will be handled by fixup, store will bump out */
-	/* for _from_ macros */
-	case 2: insn = (unsigned)pc; 
-		if (!((insn >> 21) & 1) || ((insn>>19)&0x3f) == 15) return 2; 
+	case 3:
+		/* load & store will be handled by fixup */
+		return 3;
+
+	case 1:
+		/* store will be handled by fixup, load will bump out */
+		/* for _to_ macros */
+		insn = *((unsigned int *) pc);
+		if ((insn >> 21) & 1)
+			return 1;
+		break;
+
+	case 2:
+		/* load will be handled by fixup, store will bump out */
+		/* for _from_ macros */
+		insn = *((unsigned int *) pc);
+		if (!((insn >> 21) & 1) || ((insn>>19)&0x3f) == 15)
+			return 2; 
 		break; 
-	default: break;
-	}
-	memset (&regs, 0, sizeof (regs));
+
+	default:
+		break;
+	};
+
+	memset(&regs, 0, sizeof (regs));
 	regs.pc = pc;
 	regs.npc = pc + 4;
-	__asm__ __volatile__ (
+	__asm__ __volatile__(
 		"rd %%psr, %0\n\t"
 		"nop\n\t"
 		"nop\n\t"
 		"nop\n" : "=r" (regs.psr));
-	unhandled_fault (address, current, &regs);
+	unhandled_fault(address, current, &regs);
+
 	/* Not reached */
 	return 0;
 }
@@ -219,7 +234,7 @@ asmlinkage void do_sparc_fault(struct pt_regs *regs, int text_fault, int write,
 	 * If we're in an interrupt or have no user
 	 * context, we must not take the fault..
 	 */
-        if (in_interrupt() || !mm)
+        if (in_atomic() || !mm)
                 goto no_context;
 
 	down_read(&mm->mmap_sem);
@@ -302,7 +317,7 @@ bad_area_nosemaphore:
 	/* Is this in ex_table? */
 no_context:
 	g2 = regs->u_regs[UREG_G2];
-	if (!from_user && (fixup = search_exception_table (regs->pc, &g2))) {
+	if (!from_user && (fixup = search_extables_range(regs->pc, &g2))) {
 		if (fixup > 10) { /* Values below are reserved for other things */
 			extern const unsigned __memset_start[];
 			extern const unsigned __memset_end[];
@@ -388,7 +403,7 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 {
 	extern void sun4c_update_mmu_cache(struct vm_area_struct *,
 					   unsigned long,pte_t);
-	extern pte_t *sun4c_pte_offset(pmd_t *,unsigned long);
+	extern pte_t *sun4c_pte_offset_kernel(pmd_t *,unsigned long);
 	struct task_struct *tsk = current;
 	struct mm_struct *mm = tsk->mm;
 	pgd_t *pgdp;
@@ -408,7 +423,7 @@ asmlinkage void do_sun4c_fault(struct pt_regs *regs, int text_fault, int write,
 	}
 
 	pgdp = pgd_offset(mm, address);
-	ptep = sun4c_pte_offset((pmd_t *) pgdp, address);
+	ptep = sun4c_pte_offset_kernel((pmd_t *) pgdp, address);
 
 	if (pgd_val(*pgdp)) {
 	    if (write) {

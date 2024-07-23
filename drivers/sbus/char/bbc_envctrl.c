@@ -30,7 +30,7 @@ static int errno;
  *
  * The max1617 is capable of being programmed with power-off
  * temperature values, one low limit and one high limit.  These
- * can be controlled independantly for the cpu or ambient temperature.
+ * can be controlled independently for the cpu or ambient temperature.
  * If a limit is violated, the power is simply shut off.  The frequency
  * with which the max1617 does temperature sampling can be controlled
  * as well.
@@ -457,8 +457,8 @@ static struct task_struct *kenvctrld_task;
 
 static int kenvctrld(void *__unused)
 {
-	daemonize();
-	strcpy(current->comm, "kenvctrld");
+	daemonize("kenvctrld");
+	allow_signal(SIGKILL);
 	kenvctrld_task = current;
 
 	printk(KERN_INFO "bbc_envctrl: kenvctrld starting...\n");
@@ -571,12 +571,13 @@ static void attach_one_fan(struct linux_ebus_child *echild, int fan_idx)
 	set_fan_speeds(fp);
 }
 
-void bbc_envctrl_init(void)
+int bbc_envctrl_init(void)
 {
 	struct linux_ebus_child *echild;
 	int temp_index = 0;
 	int fan_index = 0;
 	int devidx = 0;
+	int err = 0;
 
 	while ((echild = bbc_i2c_getdev(devidx++)) != NULL) {
 		if (!strcmp(echild->prom_name, "temperature"))
@@ -585,7 +586,8 @@ void bbc_envctrl_init(void)
 			attach_one_fan(echild, fan_index++);
 	}
 	if (temp_index != 0 && fan_index != 0)
-		kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
+		err = kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
+	return err;
 }
 
 static void destroy_one_temp(struct bbc_cpu_temperature *tp)
@@ -612,7 +614,7 @@ void bbc_envctrl_cleanup(void)
 			int found = 0;
 
 			read_lock(&tasklist_lock);
-			for_each_task(p) {
+			for_each_process(p) {
 				if (p == kenvctrld_task) {
 					found = 1;
 					break;

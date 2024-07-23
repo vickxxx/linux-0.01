@@ -40,20 +40,20 @@
 /* usbdevfs ioctl codes */
 
 struct usbdevfs_ctrltransfer {
-	__u8 requesttype;
-	__u8 request;
-	__u16 value;
-	__u16 index;
-	__u16 length;
+	__u8 bRequestType;
+	__u8 bRequest;
+	__u16 wValue;
+	__u16 wIndex;
+	__u16 wLength;
 	__u32 timeout;  /* in milliseconds */
- 	void *data;
+ 	void __user *data;
 };
 
 struct usbdevfs_bulktransfer {
 	unsigned int ep;
 	unsigned int len;
 	unsigned int timeout; /* in milliseconds */
-	void *data;
+	void __user *data;
 };
 
 struct usbdevfs_setinterface {
@@ -78,9 +78,8 @@ struct usbdevfs_connectinfo {
 	unsigned char slow;
 };
 
-#define USBDEVFS_URB_DISABLE_SPD           1
+#define USBDEVFS_URB_SHORT_NOT_OK          1
 #define USBDEVFS_URB_ISO_ASAP              2
-#define USBDEVFS_URB_QUEUE_BULK            0x10
 
 #define USBDEVFS_URB_TYPE_ISO		   0
 #define USBDEVFS_URB_TYPE_INTERRUPT	   1
@@ -98,7 +97,7 @@ struct usbdevfs_urb {
 	unsigned char endpoint;
 	int status;
 	unsigned int flags;
-	void *buffer;
+	void __user *buffer;
 	int buffer_length;
 	int actual_length;
 	int start_frame;
@@ -109,12 +108,12 @@ struct usbdevfs_urb {
 	struct usbdevfs_iso_packet_desc iso_frame_desc[0];
 };
 
-/* ioctls for talking to drivers in the usbcore module: */
+/* ioctls for talking directly to drivers */
 struct usbdevfs_ioctl {
 	int	ifno;		/* interface 0..N ; negative numbers reserved */
 	int	ioctl_code;	/* MUST encode size + direction of data so the
 				 * macros in <asm/ioctl.h> give correct values */
-	void	*data;		/* param buffer (in, or out) */
+	void __user *data;	/* param buffer (in, or out) */
 };
 
 /* You can do most things with hubs just through control messages,
@@ -142,6 +141,8 @@ struct usbdevfs_hub_portinfo {
 #define USBDEVFS_HUB_PORTINFO      _IOR('U', 19, struct usbdevfs_hub_portinfo)
 #define USBDEVFS_RESET             _IO('U', 20)
 #define USBDEVFS_CLEAR_HALT        _IOR('U', 21, unsigned int)
+#define USBDEVFS_DISCONNECT        _IO('U', 22)
+#define USBDEVFS_CONNECT           _IO('U', 23)
 
 /* --------------------------------------------------------------------- */
 
@@ -150,17 +151,6 @@ struct usbdevfs_hub_portinfo {
 #include <linux/list.h>
 #include <asm/semaphore.h>
 
-/*
- * inode number macros
- */
-#define ITYPE(x)   ((x)&(0xf<<28))
-#define ISPECIAL   (0<<28)
-#define IBUS       (1<<28)
-#define IDEVICE    (2<<28)
-#define IBUSNR(x)  (((x)>>8)&0xff)
-#define IDEVNR(x)  ((x)&0xff)
-
-#define IROOT      1
 
 struct dev_state {
 	struct list_head list;      /* state list */

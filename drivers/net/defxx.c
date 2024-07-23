@@ -199,14 +199,13 @@
  *		Feb 2001	davej		PCI enable cleanups.
  */
 
+#error Please convert me to Documentation/DMA-mapping.txt
+
 /* Include files */
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
 #include <linux/slab.h>
@@ -215,12 +214,12 @@
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/netdevice.h>
+#include <linux/fddidevice.h>
+#include <linux/skbuff.h>
+
 #include <asm/byteorder.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
-
-#include <linux/fddidevice.h>
-#include <linux/skbuff.h>
 
 #include "defxx.h"
 
@@ -426,11 +425,7 @@ static int __devinit dfx_init_one_pci_or_eisa(struct pci_dev *pdev, long ioaddr)
 	}
 #endif
 
-	/*
-	 * init_fddidev() allocates a device structure with private data, clears the device structure and private data,
-	 * and  calls fddi_setup() and register_netdev(). Not much left to do for us here.
-	 */
-	dev = init_fddidev(NULL, sizeof(*bp));
+	dev = alloc_fddidev(sizeof(*bp));
 	if (!dev) {
 		printk (KERN_ERR "defxx: unable to allocate fddidev, aborting\n");
 		return -ENOMEM;
@@ -444,6 +439,7 @@ static int __devinit dfx_init_one_pci_or_eisa(struct pci_dev *pdev, long ioaddr)
 	}
 
 	SET_MODULE_OWNER(dev);
+	SET_NETDEV_DEV(dev, &pdev->dev);
 
 	bp = dev->priv;
 
@@ -483,12 +479,17 @@ static int __devinit dfx_init_one_pci_or_eisa(struct pci_dev *pdev, long ioaddr)
 		goto err_out_region;
 	}
 
+	err = register_netdev(dev);
+	if (err)
+		goto err_out_kfree;
+
 	return 0;
 
+err_out_kfree:
+	if (bp->kmalloced) kfree(bp->kmalloced);
 err_out_region:
 	release_region(ioaddr, pdev ? PFI_K_CSR_IO_LEN : PI_ESIC_K_CSR_IO_LEN);
 err_out:
-	unregister_netdev(dev);
 	kfree(dev);
 	return err;
 }
@@ -500,7 +501,7 @@ static int __devinit dfx_init_one(struct pci_dev *pdev, const struct pci_device_
 
 static int __init dfx_eisa_init(void)
 {
-	int rc = -NODEV;
+	int rc = -ENODEV;
 	int i;			/* used in for loops */
 	u16 port;		/* temporary I/O (port) address */
 	u32 slot_id;		/* EISA hardware (slot) ID read from adapter */
@@ -3358,10 +3359,10 @@ static struct pci_device_id dfx_pci_tbl[] __devinitdata = {
 MODULE_DEVICE_TABLE(pci, dfx_pci_tbl);
 
 static struct pci_driver dfx_driver = {
-	name:		"defxx",
-	probe:		dfx_init_one,
-	remove:		dfx_remove_one,
-	id_table:	dfx_pci_tbl,
+	.name		= "defxx",
+	.probe		= dfx_init_one,
+	.remove		= __devexit_p(dfx_remove_one),
+	.id_table	= dfx_pci_tbl,
 };
 
 static int dfx_have_pci;

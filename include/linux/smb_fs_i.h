@@ -11,6 +11,7 @@
 
 #ifdef __KERNEL__
 #include <linux/types.h>
+#include <linux/fs.h>
 
 /*
  * smb fs inode data (in memory only)
@@ -30,6 +31,8 @@ struct smb_inode_info {
 	unsigned long oldmtime;	/* last time refreshed */
 	unsigned long closed;	/* timestamp when closed */
 	unsigned openers;	/* number of fileid users */
+
+	struct inode vfs_inode;	/* must be at the end */
 };
 
 #endif

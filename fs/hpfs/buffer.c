@@ -6,6 +6,7 @@
  *  general buffer i/o
  */
 
+#include <linux/buffer_head.h>
 #include <linux/string.h>
 #include "hpfs_fn.h"
 
@@ -14,8 +15,7 @@ void hpfs_lock_creation(struct super_block *s)
 #ifdef DEBUG_LOCKS
 	printk("lock creation\n");
 #endif
-	while (s->s_hpfs_creation_de_lock) sleep_on(&s->s_hpfs_creation_de);
-	s->s_hpfs_creation_de_lock = 1;
+	down(&hpfs_sb(s)->hpfs_creation_de);
 }
 
 void hpfs_unlock_creation(struct super_block *s)
@@ -23,8 +23,7 @@ void hpfs_unlock_creation(struct super_block *s)
 #ifdef DEBUG_LOCKS
 	printk("unlock creation\n");
 #endif
-	s->s_hpfs_creation_de_lock = 0;
-	wake_up(&s->s_hpfs_creation_de);
+	up(&hpfs_sb(s)->hpfs_creation_de);
 }
 
 void hpfs_lock_iget(struct super_block *s, int mode)
@@ -32,8 +31,8 @@ void hpfs_lock_iget(struct super_block *s, int mode)
 #ifdef DEBUG_LOCKS
 	printk("lock iget\n");
 #endif
-	while (s->s_hpfs_rd_inode) sleep_on(&s->s_hpfs_iget_q);
-	s->s_hpfs_rd_inode = mode;
+	while (hpfs_sb(s)->sb_rd_inode) sleep_on(&hpfs_sb(s)->sb_iget_q);
+	hpfs_sb(s)->sb_rd_inode = mode;
 }
 
 void hpfs_unlock_iget(struct super_block *s)
@@ -41,44 +40,78 @@ void hpfs_unlock_iget(struct super_block *s)
 #ifdef DEBUG_LOCKS
 	printk("unlock iget\n");
 #endif
-	s->s_hpfs_rd_inode = 0;
-	wake_up(&s->s_hpfs_iget_q);
+	hpfs_sb(s)->sb_rd_inode = 0;
+	wake_up(&hpfs_sb(s)->sb_iget_q);
 }
 
 void hpfs_lock_inode(struct inode *i)
 {
-	if (i) down(&i->i_hpfs_sem);
+	if (i) {
+		struct hpfs_inode_info *hpfs_inode = hpfs_i(i);
+		down(&hpfs_inode->i_sem);
+	}
 }
 
 void hpfs_unlock_inode(struct inode *i)
 {
-	if (i) up(&i->i_hpfs_sem);
+	if (i) {
+		struct hpfs_inode_info *hpfs_inode = hpfs_i(i);
+		up(&hpfs_inode->i_sem);
+	}
 }
 
 void hpfs_lock_2inodes(struct inode *i1, struct inode *i2)
 {
-	if (!i1) { if (i2) down(&i2->i_hpfs_sem); return; }
-	if (!i2) { if (i1) down(&i1->i_hpfs_sem); return; }
+	struct hpfs_inode_info *hpfs_i1 = NULL, *hpfs_i2 = NULL;
+
+	if (!i1) {
+		if (i2) {
+			hpfs_i2 = hpfs_i(i2);
+			down(&hpfs_i2->i_sem);
+		}
+		return;
+	}
+	if (!i2) {
+		if (i1) {
+			hpfs_i1 = hpfs_i(i1);
+			down(&hpfs_i1->i_sem);
+		}
+		return;
+	}
 	if (i1->i_ino < i2->i_ino) {
-		down(&i1->i_hpfs_sem);
-		down(&i2->i_hpfs_sem);
+		down(&hpfs_i1->i_sem);
+		down(&hpfs_i2->i_sem);
 	} else if (i1->i_ino > i2->i_ino) {
-		down(&i2->i_hpfs_sem);
-		down(&i1->i_hpfs_sem);
-	} else down(&i1->i_hpfs_sem);
+		down(&hpfs_i2->i_sem);
+		down(&hpfs_i1->i_sem);
+	} else down(&hpfs_i1->i_sem);
 }
 
 void hpfs_unlock_2inodes(struct inode *i1, struct inode *i2)
 {
-	if (!i1) { if (i2) up(&i2->i_hpfs_sem); return; }
-	if (!i2) { if (i1) up(&i1->i_hpfs_sem); return; }
+	struct hpfs_inode_info *hpfs_i1 = NULL, *hpfs_i2 = NULL;
+
+	if (!i1) {
+		if (i2) {
+			hpfs_i2 = hpfs_i(i2);
+			up(&hpfs_i2->i_sem);
+		}
+		return;
+	}
+	if (!i2) {
+		if (i1) {
+			hpfs_i1 = hpfs_i(i1);
+			up(&hpfs_i1->i_sem);
+		}
+		return;
+	}
 	if (i1->i_ino < i2->i_ino) {
-		up(&i2->i_hpfs_sem);
-		up(&i1->i_hpfs_sem);
+		up(&hpfs_i2->i_sem);
+		up(&hpfs_i1->i_sem);
 	} else if (i1->i_ino > i2->i_ino) {
-		up(&i1->i_hpfs_sem);
-		up(&i2->i_hpfs_sem);
-	} else up(&i1->i_hpfs_sem);
+		up(&hpfs_i1->i_sem);
+		up(&hpfs_i2->i_sem);
+	} else up(&hpfs_i1->i_sem);
 }
 
 void hpfs_lock_3inodes(struct inode *i1, struct inode *i2, struct inode *i3)
@@ -87,13 +120,16 @@ void hpfs_lock_3inodes(struct inode *i1, struct inode *i2, struct inode *i3)
 	if (!i2) { hpfs_lock_2inodes(i1, i3); return; }
 	if (!i3) { hpfs_lock_2inodes(i1, i2); return; }
 	if (i1->i_ino < i2->i_ino && i1->i_ino < i3->i_ino) {
-		down(&i1->i_hpfs_sem);
+		struct hpfs_inode_info *hpfs_i1 = hpfs_i(i1);
+		down(&hpfs_i1->i_sem);
 		hpfs_lock_2inodes(i2, i3);
 	} else if (i2->i_ino < i1->i_ino && i2->i_ino < i3->i_ino) {
-		down(&i2->i_hpfs_sem);
+		struct hpfs_inode_info *hpfs_i2 = hpfs_i(i2);
+		down(&hpfs_i2->i_sem);
 		hpfs_lock_2inodes(i1, i3);
 	} else if (i3->i_ino < i1->i_ino && i3->i_ino < i2->i_ino) {
-		down(&i3->i_hpfs_sem);
+		struct hpfs_inode_info *hpfs_i3 = hpfs_i(i3);
+		down(&hpfs_i3->i_sem);
 		hpfs_lock_2inodes(i1, i2);
 	} else if (i1->i_ino != i2->i_ino) hpfs_lock_2inodes(i1, i2);
 	else hpfs_lock_2inodes(i1, i3);
@@ -105,14 +141,17 @@ void hpfs_unlock_3inodes(struct inode *i1, struct inode *i2, struct inode *i3)
 	if (!i2) { hpfs_unlock_2inodes(i1, i3); return; }
 	if (!i3) { hpfs_unlock_2inodes(i1, i2); return; }
 	if (i1->i_ino < i2->i_ino && i1->i_ino < i3->i_ino) {
+		struct hpfs_inode_info *hpfs_i1 = hpfs_i(i1);
 		hpfs_unlock_2inodes(i2, i3);
-		up(&i1->i_hpfs_sem);
+		up(&hpfs_i1->i_sem);
 	} else if (i2->i_ino < i1->i_ino && i2->i_ino < i3->i_ino) {
+		struct hpfs_inode_info *hpfs_i2 = hpfs_i(i2);
 		hpfs_unlock_2inodes(i1, i3);
-		up(&i2->i_hpfs_sem);
+		up(&hpfs_i2->i_sem);
 	} else if (i3->i_ino < i1->i_ino && i3->i_ino < i2->i_ino) {
+		struct hpfs_inode_info *hpfs_i3 = hpfs_i(i3);
 		hpfs_unlock_2inodes(i1, i2);
-		up(&i3->i_hpfs_sem);
+		up(&hpfs_i3->i_sem);
 	} else if (i1->i_ino != i2->i_ino) hpfs_unlock_2inodes(i1, i2);
 	else hpfs_unlock_2inodes(i1, i3);
 }
@@ -122,12 +161,9 @@ void hpfs_unlock_3inodes(struct inode *i1, struct inode *i2, struct inode *i3)
 void *hpfs_map_sector(struct super_block *s, unsigned secno, struct buffer_head **bhp,
 		 int ahead)
 {
-	kdev_t dev = s->s_dev;
 	struct buffer_head *bh;
 
-	if (!ahead || secno + ahead >= s->s_hpfs_fs_size)
-		*bhp = bh = bread(dev, secno, 512);
-	else *bhp = bh = bread(dev, secno, 512);
+	*bhp = bh = sb_bread(s, secno);
 	if (bh != NULL)
 		return bh->b_data;
 	else {
@@ -143,9 +179,9 @@ void *hpfs_get_sector(struct super_block *s, unsigned secno, struct buffer_head 
 	struct buffer_head *bh;
 	/*return hpfs_map_sector(s, secno, bhp, 0);*/
 
-	if ((*bhp = bh = getblk(s->s_dev, secno, 512)) != NULL) {
+	if ((*bhp = bh = sb_getblk(s, secno)) != NULL) {
 		if (!buffer_uptodate(bh)) wait_on_buffer(bh);
-		mark_buffer_uptodate(bh, 1);
+		set_buffer_uptodate(bh);
 		return bh->b_data;
 	} else {
 		printk("HPFS: hpfs_get_sector: getblk failed\n");
@@ -158,7 +194,6 @@ void *hpfs_get_sector(struct super_block *s, unsigned secno, struct buffer_head 
 void *hpfs_map_4sectors(struct super_block *s, unsigned secno, struct quad_buffer_head *qbh,
 		   int ahead)
 {
-	kdev_t dev = s->s_dev;
 	struct buffer_head *bh;
 	char *data;
 
@@ -173,24 +208,22 @@ void *hpfs_map_4sectors(struct super_block *s, unsigned secno, struct quad_buffe
 		goto bail;
 	}
 
-	if (!ahead || secno + 4 + ahead > s->s_hpfs_fs_size)
-		qbh->bh[0] = bh = bread(dev, secno, 512);
-	else qbh->bh[0] = bh = bread(dev, secno, 512);
+	qbh->bh[0] = bh = sb_bread(s, secno);
 	if (!bh)
 		goto bail0;
 	memcpy(data, bh->b_data, 512);
 
-	qbh->bh[1] = bh = bread(dev, secno + 1, 512);
+	qbh->bh[1] = bh = sb_bread(s, secno + 1);
 	if (!bh)
 		goto bail1;
 	memcpy(data + 512, bh->b_data, 512);
 
-	qbh->bh[2] = bh = bread(dev, secno + 2, 512);
+	qbh->bh[2] = bh = sb_bread(s, secno + 2);
 	if (!bh)
 		goto bail2;
 	memcpy(data + 2 * 512, bh->b_data, 512);
 
-	qbh->bh[3] = bh = bread(dev, secno + 3, 512);
+	qbh->bh[3] = bh = sb_bread(s, secno + 3);
 	if (!bh)
 		goto bail3;
 	memcpy(data + 3 * 512, bh->b_data, 512);

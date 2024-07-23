@@ -90,36 +90,33 @@ static const char version[] = "NET3 PLIP version 2.4-parport gniibe@mri.co.jp\n"
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
 #include <linux/string.h>
-#include <linux/ptrace.h>
 #include <linux/if_ether.h>
-#include <asm/system.h>
 #include <linux/in.h>
 #include <linux/errno.h>
 #include <linux/delay.h>
 #include <linux/lp.h>
 #include <linux/init.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/inetdevice.h>
 #include <linux/skbuff.h>
 #include <linux/if_plip.h>
-#include <net/neighbour.h>
-
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/ioport.h>
 #include <linux/spinlock.h>
+#include <linux/parport.h>
+
+#include <net/neighbour.h>
+
+#include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/irq.h>
 #include <asm/byteorder.h>
 #include <asm/semaphore.h>
-
-#include <linux/parport.h>
 
 /* Maximum number of devices to support. */
 #define PLIP_MAX  8
@@ -212,9 +209,9 @@ struct plip_local {
 
 struct net_local {
 	struct net_device_stats enet_stats;
-	struct tq_struct immediate;
-	struct tq_struct deferred;
-	struct tq_struct timer;
+	struct work_struct immediate;
+	struct work_struct deferred;
+	struct work_struct timer;
 	struct plip_local snd_data;
 	struct plip_local rcv_data;
 	struct pardevice *pardev;
@@ -349,22 +346,11 @@ plip_init_dev(struct net_device *dev, struct parport *pb)
 	nl->nibble	= PLIP_NIBBLE_WAIT;
 
 	/* Initialize task queue structures */
-	INIT_LIST_HEAD(&nl->immediate.list);
-	nl->immediate.sync = 0;
-	nl->immediate.routine = (void (*)(void *))plip_bh;
-	nl->immediate.data = dev;
+	INIT_WORK(&nl->immediate, (void (*)(void *))plip_bh, dev);
+	INIT_WORK(&nl->deferred, (void (*)(void *))plip_kick_bh, dev);
 
-	INIT_LIST_HEAD(&nl->deferred.list);
-	nl->deferred.sync = 0;
-	nl->deferred.routine = (void (*)(void *))plip_kick_bh;
-	nl->deferred.data = dev;
-
-	if (dev->irq == -1) {
-		INIT_LIST_HEAD(&nl->timer.list);
-		nl->timer.sync = 0;
-		nl->timer.routine = (void (*)(void *))plip_timer_bh;
-		nl->timer.data = dev;
-	}
+	if (dev->irq == -1)
+		INIT_WORK(&nl->timer, (void (*)(void *))plip_timer_bh, dev);
 
 	spin_lock_init(&nl->lock);
 
@@ -379,10 +365,8 @@ plip_kick_bh(struct net_device *dev)
 {
 	struct net_local *nl = (struct net_local *)dev->priv;
 
-	if (nl->is_deferred) {
-		queue_task(&nl->immediate, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
-	}
+	if (nl->is_deferred)
+		schedule_work(&nl->immediate);
 }
 
 /* Forward declarations of internal routines */
@@ -433,7 +417,7 @@ plip_bh(struct net_device *dev)
 	if ((r = (*f)(dev, nl, snd, rcv)) != OK
 	    && (r = plip_bh_timeout_error(dev, nl, snd, rcv, r)) != OK) {
 		nl->is_deferred = 1;
-		queue_task(&nl->deferred, &tq_timer);
+		schedule_delayed_work(&nl->deferred, 1);
 	}
 }
 
@@ -445,7 +429,7 @@ plip_timer_bh(struct net_device *dev)
 	if (!(atomic_read (&nl->kill_timer))) {
 		plip_interrupt (-1, dev, NULL);
 
-		queue_task (&nl->timer, &tq_timer);
+		schedule_delayed_work(&nl->timer, 1);
 	}
 	else {
 		up (&nl->killed_timer_sem);
@@ -518,7 +502,7 @@ plip_bh_timeout_error(struct net_device *dev, struct net_local *nl,
 	spin_unlock_irq(&nl->lock);
 	if (error == HS_TIMEOUT) {
 		DISABLE(dev->irq);
-		synchronize_irq();
+		synchronize_irq(dev->irq);
 	}
 	disable_parport_interrupts (dev);
 	netif_stop_queue (dev);
@@ -666,7 +650,7 @@ plip_receive_packet(struct net_device *dev, struct net_local *nl,
 				rcv->state = PLIP_PK_DONE;
 				nl->is_deferred = 1;
 				nl->connection = PLIP_CN_SEND;
-				queue_task(&nl->deferred, &tq_timer);
+				schedule_delayed_work(&nl->deferred, 1);
 				enable_parport_interrupts (dev);
 				ENABLE(dev->irq);
 				return OK;
@@ -741,8 +725,7 @@ plip_receive_packet(struct net_device *dev, struct net_local *nl,
 		if (snd->state != PLIP_PK_DONE) {
 			nl->connection = PLIP_CN_SEND;
 			spin_unlock_irq(&nl->lock);
-			queue_task(&nl->immediate, &tq_immediate);
-			mark_bh(IMMEDIATE_BH);
+			schedule_work(&nl->immediate);
 			enable_parport_interrupts (dev);
 			ENABLE(dev->irq);
 			return OK;
@@ -840,7 +823,7 @@ plip_send_packet(struct net_device *dev, struct net_local *nl,
 			if (c0 & 0x08) {
 				spin_unlock_irq(&nl->lock);
 				DISABLE(dev->irq);
-				synchronize_irq();
+				synchronize_irq(dev->irq);
 				if (nl->connection == PLIP_CN_RECEIVE) {
 					/* Interrupted.
 					   We don't need to enable irq,
@@ -910,7 +893,7 @@ plip_send_packet(struct net_device *dev, struct net_local *nl,
 			printk(KERN_DEBUG "%s: send end\n", dev->name);
 		nl->connection = PLIP_CN_CLOSING;
 		nl->is_deferred = 1;
-		queue_task(&nl->deferred, &tq_timer);
+		schedule_delayed_work(&nl->deferred, 1);
 		enable_parport_interrupts (dev);
 		ENABLE(dev->irq);
 		return OK;
@@ -954,7 +937,7 @@ plip_error(struct net_device *dev, struct net_local *nl,
 		netif_wake_queue (dev);
 	} else {
 		nl->is_deferred = 1;
-		queue_task(&nl->deferred, &tq_timer);
+		schedule_delayed_work(&nl->deferred, 1);
 	}
 
 	return OK;
@@ -998,8 +981,7 @@ plip_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		rcv->state = PLIP_PK_TRIGGER;
 		nl->connection = PLIP_CN_RECEIVE;
 		nl->timeout_count = 0;
-		queue_task(&nl->immediate, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
+		schedule_work(&nl->immediate);
 		break;
 
 	case PLIP_CN_RECEIVE:
@@ -1052,8 +1034,7 @@ plip_tx_packet(struct sk_buff *skb, struct net_device *dev)
 		nl->connection = PLIP_CN_SEND;
 		nl->timeout_count = 0;
 	}
-	queue_task(&nl->immediate, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
+	schedule_work(&nl->immediate);
 	spin_unlock_irq(&nl->lock);
 	
 	return 0;
@@ -1097,7 +1078,10 @@ int plip_hard_header_cache(struct neighbour *neigh,
 	
 	if ((ret = nl->orig_hard_header_cache(neigh, hh)) == 0)
 	{
-		struct ethhdr *eth = (struct ethhdr*)(((u8*)hh->hh_data) + 2);
+		struct ethhdr *eth;
+
+		eth = (struct ethhdr*)(((u8*)hh->hh_data) +
+				       HH_DATA_OFF(sizeof(*eth)));
 		plip_rewrite_address (neigh->dev, eth);
 	}
 	
@@ -1132,7 +1116,7 @@ plip_open(struct net_device *dev)
 	if (dev->irq == -1)
 	{
 		atomic_set (&nl->kill_timer, 0);
-		queue_task (&nl->timer, &tq_timer);
+		schedule_delayed_work(&nl->timer, 1);
 	}
 
 	/* Initialize the state machine. */
@@ -1178,7 +1162,7 @@ plip_close(struct net_device *dev)
 
 	netif_stop_queue (dev);
 	DISABLE(dev->irq);
-	synchronize_irq();
+	synchronize_irq(dev->irq);
 
 	if (dev->irq == -1)
 	{
@@ -1301,7 +1285,7 @@ MODULE_PARM_DESC(parport, "List of parport device numbers to use by plip");
 
 static struct net_device *dev_plip[PLIP_MAX] = { NULL, };
 
-static int inline 
+static inline int
 plip_searchfor(int list[], int a)
 {
 	int i;
@@ -1350,9 +1334,9 @@ static void plip_detach (struct parport *port)
 }
 
 static struct parport_driver plip_driver = {
-	name:	"plip",
-	attach:	plip_attach,
-	detach:	plip_detach
+	.name	= "plip",
+	.attach = plip_attach,
+	.detach = plip_detach
 };
 
 static void __exit plip_cleanup_module (void)

@@ -52,7 +52,7 @@
 /*
  * The launch routine is called only if the complement address is correct.
  *
- * Before control is transferred to a routine, the compliment address
+ * Before control is transferred to a routine, the complement address
  * is zeroed (invalidated) to prevent an accidental call from a spurious
  * interrupt.
  *
@@ -60,7 +60,7 @@
  * clears the BUSY flag after control is returned to it.
  */
 
-#ifdef _LANGUAGE_C
+#ifndef __ASSEMBLY__
 
 typedef int launch_state_t;
 typedef void (*launch_proc_t)(u64 call_parm);
@@ -102,21 +102,6 @@ typedef struct launch_s {
 #define LAUNCH_FLASH	(*(void (*)(void)) \
 			 IP27PROM_FLASHLEDS)
 
-#ifdef _STANDALONE
-
-launch_t       *launch_get(int nasid, int cpu);
-launch_t       *launch_get_current(void);
-void		launch_loop(void);
-void		launch_slave(int nasid, int cpu,
-			     launch_proc_t call_addr,
-			     __int64_t call_parm,
-			     void *stack_addr,
-			     void *gp_addr);
-int		launch_wait(int nasid, int cpu, int timeout_msec);
-launch_state_t	launch_poll(int nasid, int cpu);
-
-#endif /* _STANDALONE */
-
-#endif /* _LANGUAGE_C */
+#endif /* !__ASSEMBLY__ */
 
 #endif /* _ASM_SN_LAUNCH_H */

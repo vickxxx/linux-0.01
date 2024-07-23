@@ -11,24 +11,48 @@
 #include <linux/uio.h>
 #include <linux/smp_lock.h>
 #include <linux/dnotify.h>
+#include <linux/security.h>
+#include <linux/module.h>
 
 #include <asm/uaccess.h>
 
 struct file_operations generic_ro_fops = {
-	llseek:		generic_file_llseek,
-	read:		generic_file_read,
-	mmap:		generic_file_mmap,
+	.llseek		= generic_file_llseek,
+	.read		= generic_file_read,
+	.mmap		= generic_file_readonly_mmap,
+	.sendfile	= generic_file_sendfile,
 };
-
-ssize_t generic_read_dir(struct file *filp, char *buf, size_t siz, loff_t *ppos)
-{
-	return -EISDIR;
-}
 
 loff_t generic_file_llseek(struct file *file, loff_t offset, int origin)
 {
 	long long retval;
+	struct inode *inode = file->f_dentry->d_inode->i_mapping->host;
 
+	down(&inode->i_sem);
+	switch (origin) {
+		case 2:
+			offset += inode->i_size;
+			break;
+		case 1:
+			offset += file->f_pos;
+	}
+	retval = -EINVAL;
+	if (offset>=0 && offset<=inode->i_sb->s_maxbytes) {
+		if (offset != file->f_pos) {
+			file->f_pos = offset;
+			file->f_version = 0;
+		}
+		retval = offset;
+	}
+	up(&inode->i_sem);
+	return retval;
+}
+
+loff_t remote_llseek(struct file *file, loff_t offset, int origin)
+{
+	long long retval;
+
+	lock_kernel();
 	switch (origin) {
 		case 2:
 			offset += file->f_dentry->d_inode->i_size;
@@ -40,11 +64,11 @@ loff_t generic_file_llseek(struct file *file, loff_t offset, int origin)
 	if (offset>=0 && offset<=file->f_dentry->d_inode->i_sb->s_maxbytes) {
 		if (offset != file->f_pos) {
 			file->f_pos = offset;
-			file->f_reada = 0;
-			file->f_version = ++event;
+			file->f_version = 0;
 		}
 		retval = offset;
 	}
+	unlock_kernel();
 	return retval;
 }
 
@@ -57,6 +81,7 @@ loff_t default_llseek(struct file *file, loff_t offset, int origin)
 {
 	long long retval;
 
+	lock_kernel();
 	switch (origin) {
 		case 2:
 			offset += file->f_dentry->d_inode->i_size;
@@ -68,37 +93,35 @@ loff_t default_llseek(struct file *file, loff_t offset, int origin)
 	if (offset >= 0) {
 		if (offset != file->f_pos) {
 			file->f_pos = offset;
-			file->f_reada = 0;
-			file->f_version = ++event;
+			file->f_version = 0;
 		}
 		retval = offset;
 	}
+	unlock_kernel();
 	return retval;
 }
 
 static inline loff_t llseek(struct file *file, loff_t offset, int origin)
 {
 	loff_t (*fn)(struct file *, loff_t, int);
-	loff_t retval;
 
 	fn = default_llseek;
 	if (file->f_op && file->f_op->llseek)
 		fn = file->f_op->llseek;
-	lock_kernel();
-	retval = fn(file, offset, origin);
-	unlock_kernel();
-	return retval;
+	return fn(file, offset, origin);
 }
 
 asmlinkage off_t sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
 {
 	off_t retval;
 	struct file * file;
+	int fput_needed;
 
 	retval = -EBADF;
-	file = fget(fd);
+	file = fget_light(fd, &fput_needed);
 	if (!file)
 		goto bad;
+
 	retval = -EINVAL;
 	if (origin <= 2) {
 		loff_t res = llseek(file, offset, origin);
@@ -106,24 +129,26 @@ asmlinkage off_t sys_lseek(unsigned int fd, off_t offset, unsigned int origin)
 		if (res != (loff_t)retval)
 			retval = -EOVERFLOW;	/* LFS: should only happen on 32 bit platforms */
 	}
-	fput(file);
+	fput_light(file, fput_needed);
 bad:
 	return retval;
 }
 
 #if !defined(__alpha__)
 asmlinkage long sys_llseek(unsigned int fd, unsigned long offset_high,
-			   unsigned long offset_low, loff_t * result,
+			   unsigned long offset_low, loff_t __user * result,
 			   unsigned int origin)
 {
 	int retval;
 	struct file * file;
 	loff_t offset;
+	int fput_needed;
 
 	retval = -EBADF;
-	file = fget(fd);
+	file = fget_light(fd, &fput_needed);
 	if (!file)
 		goto bad;
+
 	retval = -EINVAL;
 	if (origin > 2)
 		goto out_putf;
@@ -138,147 +163,282 @@ asmlinkage long sys_llseek(unsigned int fd, unsigned long offset_high,
 			retval = 0;
 	}
 out_putf:
-	fput(file);
+	fput_light(file, fput_needed);
 bad:
 	return retval;
 }
 #endif
 
-asmlinkage ssize_t sys_read(unsigned int fd, char * buf, size_t count)
+ssize_t do_sync_read(struct file *filp, char __user *buf, size_t len, loff_t *ppos)
 {
+	struct kiocb kiocb;
 	ssize_t ret;
-	struct file * file;
 
-	ret = -EBADF;
-	file = fget(fd);
-	if (file) {
-		if (file->f_mode & FMODE_READ) {
-			ret = locks_verify_area(FLOCK_VERIFY_READ, file->f_dentry->d_inode,
-						file, file->f_pos, count);
-			if (!ret) {
-				ssize_t (*read)(struct file *, char *, size_t, loff_t *);
-				ret = -EINVAL;
-				if (file->f_op && (read = file->f_op->read) != NULL)
-					ret = read(file, buf, count, &file->f_pos);
-			}
-		}
-		if (ret > 0)
-			inode_dir_notify(file->f_dentry->d_parent->d_inode,
-				DN_ACCESS);
-		fput(file);
-	}
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = *ppos;
+	ret = filp->f_op->aio_read(&kiocb, buf, len, kiocb.ki_pos);
+	if (-EIOCBQUEUED == ret)
+		ret = wait_on_sync_kiocb(&kiocb);
+	*ppos = kiocb.ki_pos;
 	return ret;
 }
 
-asmlinkage ssize_t sys_write(unsigned int fd, const char * buf, size_t count)
+ssize_t vfs_read(struct file *file, char __user *buf, size_t count, loff_t *pos)
 {
+	struct inode *inode = file->f_dentry->d_inode;
 	ssize_t ret;
-	struct file * file;
 
-	ret = -EBADF;
-	file = fget(fd);
-	if (file) {
-		if (file->f_mode & FMODE_WRITE) {
-			struct inode *inode = file->f_dentry->d_inode;
-			ret = locks_verify_area(FLOCK_VERIFY_WRITE, inode, file,
-				file->f_pos, count);
-			if (!ret) {
-				ssize_t (*write)(struct file *, const char *, size_t, loff_t *);
-				ret = -EINVAL;
-				if (file->f_op && (write = file->f_op->write) != NULL)
-					ret = write(file, buf, count, &file->f_pos);
-			}
+	if (!(file->f_mode & FMODE_READ))
+		return -EBADF;
+	if (!file->f_op || (!file->f_op->read && !file->f_op->aio_read))
+		return -EINVAL;
+
+	ret = locks_verify_area(FLOCK_VERIFY_READ, inode, file, *pos, count);
+	if (!ret) {
+		ret = security_file_permission (file, MAY_READ);
+		if (!ret) {
+			if (file->f_op->read)
+				ret = file->f_op->read(file, buf, count, pos);
+			else
+				ret = do_sync_read(file, buf, count, pos);
+			if (ret > 0)
+				dnotify_parent(file->f_dentry, DN_ACCESS);
 		}
-		if (ret > 0)
-			inode_dir_notify(file->f_dentry->d_parent->d_inode,
-				DN_MODIFY);
-		fput(file);
 	}
+
 	return ret;
 }
 
+ssize_t do_sync_write(struct file *filp, const char __user *buf, size_t len, loff_t *ppos)
+{
+	struct kiocb kiocb;
+	ssize_t ret;
+
+	init_sync_kiocb(&kiocb, filp);
+	kiocb.ki_pos = *ppos;
+	ret = filp->f_op->aio_write(&kiocb, buf, len, kiocb.ki_pos);
+	if (-EIOCBQUEUED == ret)
+		ret = wait_on_sync_kiocb(&kiocb);
+	*ppos = kiocb.ki_pos;
+	return ret;
+}
+
+ssize_t vfs_write(struct file *file, const char __user *buf, size_t count, loff_t *pos)
+{
+	struct inode *inode = file->f_dentry->d_inode;
+	ssize_t ret;
+
+	if (!(file->f_mode & FMODE_WRITE))
+		return -EBADF;
+	if (!file->f_op || (!file->f_op->write && !file->f_op->aio_write))
+		return -EINVAL;
+
+	ret = locks_verify_area(FLOCK_VERIFY_WRITE, inode, file, *pos, count);
+	if (!ret) {
+		ret = security_file_permission (file, MAY_WRITE);
+		if (!ret) {
+			if (file->f_op->write)
+				ret = file->f_op->write(file, buf, count, pos);
+			else
+				ret = do_sync_write(file, buf, count, pos);
+			if (ret > 0)
+				dnotify_parent(file->f_dentry, DN_MODIFY);
+		}
+	}
+
+	return ret;
+}
+
+asmlinkage ssize_t sys_read(unsigned int fd, char __user * buf, size_t count)
+{
+	struct file *file;
+	ssize_t ret = -EBADF;
+	int fput_needed;
+
+	file = fget_light(fd, &fput_needed);
+	if (file) {
+		ret = vfs_read(file, buf, count, &file->f_pos);
+		fput_light(file, fput_needed);
+	}
+
+	return ret;
+}
+
+asmlinkage ssize_t sys_write(unsigned int fd, const char __user * buf, size_t count)
+{
+	struct file *file;
+	ssize_t ret = -EBADF;
+	int fput_needed;
+
+	file = fget_light(fd, &fput_needed);
+	if (file) {
+		ret = vfs_write(file, buf, count, &file->f_pos);
+		fput_light(file, fput_needed);
+	}
+
+	return ret;
+}
+
+asmlinkage ssize_t sys_pread64(unsigned int fd, char __user *buf,
+			     size_t count, loff_t pos)
+{
+	struct file *file;
+	ssize_t ret = -EBADF;
+	int fput_needed;
+
+	if (pos < 0)
+		return -EINVAL;
+
+	file = fget_light(fd, &fput_needed);
+	if (file) {
+		ret = vfs_read(file, buf, count, &pos);
+		fput_light(file, fput_needed);
+	}
+
+	return ret;
+}
+
+asmlinkage ssize_t sys_pwrite64(unsigned int fd, const char __user *buf,
+			      size_t count, loff_t pos)
+{
+	struct file *file;
+	ssize_t ret = -EBADF;
+	int fput_needed;
+
+	if (pos < 0)
+		return -EINVAL;
+
+	file = fget_light(fd, &fput_needed);
+	if (file) {
+		ret = vfs_write(file, buf, count, &pos);
+		fput_light(file, fput_needed);
+	}
+
+	return ret;
+}
+
+/*
+ * Reduce an iovec's length in-place.  Return the resulting number of segments
+ */
+unsigned long iov_shorten(struct iovec *iov, unsigned long nr_segs, size_t to)
+{
+	unsigned long seg = 0;
+	size_t len = 0;
+
+	while (seg < nr_segs) {
+		seg++;
+		if (len + iov->iov_len >= to) {
+			iov->iov_len = to - len;
+			break;
+		}
+		len += iov->iov_len;
+		iov++;
+	}
+	return seg;
+}
 
 static ssize_t do_readv_writev(int type, struct file *file,
-			       const struct iovec * vector,
-			       unsigned long count)
+			       const struct iovec __user * uvector,
+			       unsigned long nr_segs, loff_t *pos)
 {
-	typedef ssize_t (*io_fn_t)(struct file *, char *, size_t, loff_t *);
+	typedef ssize_t (*io_fn_t)(struct file *, char __user *, size_t, loff_t *);
 	typedef ssize_t (*iov_fn_t)(struct file *, const struct iovec *, unsigned long, loff_t *);
 
 	size_t tot_len;
 	struct iovec iovstack[UIO_FASTIOV];
-	struct iovec *iov=iovstack;
-	ssize_t ret, i;
+	struct iovec *iov=iovstack, *vector;
+	ssize_t ret;
+	int seg;
 	io_fn_t fn;
 	iov_fn_t fnv;
 	struct inode *inode;
 
 	/*
+	 * SuS says "The readv() function *may* fail if the iovcnt argument
+	 * was less than or equal to 0, or greater than {IOV_MAX}.  Linux has
+	 * traditionally returned zero for zero segments, so...
+	 */
+	ret = 0;
+	if (nr_segs == 0)
+		goto out;
+
+	/*
 	 * First get the "struct iovec" from user memory and
 	 * verify all the pointers
 	 */
-	ret = 0;
-	if (!count)
-		goto out_nofree;
 	ret = -EINVAL;
-	if (count > UIO_MAXIOV)
-		goto out_nofree;
+	if ((nr_segs > UIO_MAXIOV) || (nr_segs <= 0))
+		goto out;
 	if (!file->f_op)
-		goto out_nofree;
-	if (count > UIO_FASTIOV) {
+		goto out;
+	if (nr_segs > UIO_FASTIOV) {
 		ret = -ENOMEM;
-		iov = kmalloc(count*sizeof(struct iovec), GFP_KERNEL);
+		iov = kmalloc(nr_segs*sizeof(struct iovec), GFP_KERNEL);
 		if (!iov)
-			goto out_nofree;
+			goto out;
 	}
 	ret = -EFAULT;
-	if (copy_from_user(iov, vector, count*sizeof(*vector)))
+	if (copy_from_user(iov, uvector, nr_segs*sizeof(*uvector)))
 		goto out;
 
-	/* BSD readv/writev returns EINVAL if one of the iov_len
-	   values < 0 or tot_len overflowed a 32-bit integer. -ink */
+	/*
+	 * Single unix specification:
+	 * We should -EINVAL if an element length is not >= 0 and fitting an
+	 * ssize_t.  The total length is fitting an ssize_t
+	 *
+	 * Be careful here because iov_len is a size_t not an ssize_t
+	 */
 	tot_len = 0;
 	ret = -EINVAL;
-	for (i = 0 ; i < count ; i++) {
-		size_t tmp = tot_len;
-		int len = iov[i].iov_len;
-		if (len < 0)
+	for (seg = 0 ; seg < nr_segs; seg++) {
+		ssize_t tmp = tot_len;
+		ssize_t len = (ssize_t)iov[seg].iov_len;
+		if (len < 0)	/* size_t not fitting an ssize_t .. */
 			goto out;
-		(u32)tot_len += len;
-		if (tot_len < tmp || tot_len < (u32)len)
+		tot_len += len;
+		if (tot_len < tmp) /* maths overflow on the ssize_t */
 			goto out;
+	}
+	if (tot_len == 0) {
+		ret = 0;
+		goto out;
 	}
 
 	inode = file->f_dentry->d_inode;
 	/* VERIFY_WRITE actually means a read, as we write to user space */
-	ret = locks_verify_area((type == VERIFY_WRITE
+	ret = locks_verify_area((type == READ 
 				 ? FLOCK_VERIFY_READ : FLOCK_VERIFY_WRITE),
-				inode, file, file->f_pos, tot_len);
-	if (ret) goto out;
+				inode, file, *pos, tot_len);
+	if (ret)
+		goto out;
 
-	fnv = (type == VERIFY_WRITE ? file->f_op->readv : file->f_op->writev);
+	fnv = NULL;
+	if (type == READ) {
+		fn = file->f_op->read;
+		fnv = file->f_op->readv;
+	} else {
+		fn = (io_fn_t)file->f_op->write;
+		fnv = file->f_op->writev;
+	}
 	if (fnv) {
-		ret = fnv(file, iov, count, &file->f_pos);
+		ret = fnv(file, iov, nr_segs, pos);
 		goto out;
 	}
 
-	/* VERIFY_WRITE actually means a read, as we write to user space */
-	fn = (type == VERIFY_WRITE ? file->f_op->read :
-	      (io_fn_t) file->f_op->write);
-
+	/* Do it by hand, with file-ops */
 	ret = 0;
 	vector = iov;
-	while (count > 0) {
-		void * base;
+	while (nr_segs > 0) {
+		void __user * base;
 		size_t len;
 		ssize_t nr;
 
 		base = vector->iov_base;
 		len = vector->iov_len;
 		vector++;
-		count--;
+		nr_segs--;
 
-		nr = fn(file, base, len, &file->f_pos);
+		nr = fn(file, base, len, pos);
 
 		if (nr < 0) {
 			if (!ret) ret = nr;
@@ -288,121 +448,188 @@ static ssize_t do_readv_writev(int type, struct file *file,
 		if (nr != len)
 			break;
 	}
-
 out:
 	if (iov != iovstack)
 		kfree(iov);
-out_nofree:
-	/* VERIFY_WRITE actually means a read, as we write to user space */
-	if ((ret + (type == VERIFY_WRITE)) > 0)
-		inode_dir_notify(file->f_dentry->d_parent->d_inode,
-			(type == VERIFY_WRITE) ? DN_MODIFY : DN_ACCESS);
+	if ((ret + (type == READ)) > 0)
+		dnotify_parent(file->f_dentry,
+				(type == READ) ? DN_ACCESS : DN_MODIFY);
 	return ret;
 }
 
-asmlinkage ssize_t sys_readv(unsigned long fd, const struct iovec * vector,
-			     unsigned long count)
+ssize_t vfs_readv(struct file *file, const struct iovec __user *vec,
+		  unsigned long vlen, loff_t *pos)
 {
-	struct file * file;
-	ssize_t ret;
-
-
-	ret = -EBADF;
-	file = fget(fd);
-	if (!file)
-		goto bad_file;
-	if (file->f_op && (file->f_mode & FMODE_READ) &&
-	    (file->f_op->readv || file->f_op->read))
-		ret = do_readv_writev(VERIFY_WRITE, file, vector, count);
-	fput(file);
-
-bad_file:
-	return ret;
-}
-
-asmlinkage ssize_t sys_writev(unsigned long fd, const struct iovec * vector,
-			      unsigned long count)
-{
-	struct file * file;
-	ssize_t ret;
-
-
-	ret = -EBADF;
-	file = fget(fd);
-	if (!file)
-		goto bad_file;
-	if (file->f_op && (file->f_mode & FMODE_WRITE) &&
-	    (file->f_op->writev || file->f_op->write))
-		ret = do_readv_writev(VERIFY_READ, file, vector, count);
-	fput(file);
-
-bad_file:
-	return ret;
-}
-
-/* From the Single Unix Spec: pread & pwrite act like lseek to pos + op +
-   lseek back to original location.  They fail just like lseek does on
-   non-seekable files.  */
-
-asmlinkage ssize_t sys_pread(unsigned int fd, char * buf,
-			     size_t count, loff_t pos)
-{
-	ssize_t ret;
-	struct file * file;
-	ssize_t (*read)(struct file *, char *, size_t, loff_t *);
-
-	ret = -EBADF;
-	file = fget(fd);
-	if (!file)
-		goto bad_file;
 	if (!(file->f_mode & FMODE_READ))
-		goto out;
-	ret = locks_verify_area(FLOCK_VERIFY_READ, file->f_dentry->d_inode,
-				file, pos, count);
-	if (ret)
-		goto out;
-	ret = -EINVAL;
-	if (!file->f_op || !(read = file->f_op->read))
-		goto out;
-	if (pos < 0)
-		goto out;
-	ret = read(file, buf, count, &pos);
-	if (ret > 0)
-		inode_dir_notify(file->f_dentry->d_parent->d_inode, DN_ACCESS);
-out:
-	fput(file);
-bad_file:
-	return ret;
+		return -EBADF;
+	if (!file->f_op || (!file->f_op->readv && !file->f_op->read))
+		return -EINVAL;
+
+	return do_readv_writev(READ, file, vec, vlen, pos);
 }
 
-asmlinkage ssize_t sys_pwrite(unsigned int fd, const char * buf,
-			      size_t count, loff_t pos)
+ssize_t vfs_writev(struct file *file, const struct iovec __user *vec,
+		   unsigned long vlen, loff_t *pos)
 {
-	ssize_t ret;
-	struct file * file;
-	ssize_t (*write)(struct file *, const char *, size_t, loff_t *);
-
-	ret = -EBADF;
-	file = fget(fd);
-	if (!file)
-		goto bad_file;
 	if (!(file->f_mode & FMODE_WRITE))
-		goto out;
-	ret = locks_verify_area(FLOCK_VERIFY_WRITE, file->f_dentry->d_inode,
-				file, pos, count);
-	if (ret)
-		goto out;
-	ret = -EINVAL;
-	if (!file->f_op || !(write = file->f_op->write))
-		goto out;
-	if (pos < 0)
-		goto out;
+		return -EBADF;
+	if (!file->f_op || (!file->f_op->writev && !file->f_op->write))
+		return -EINVAL;
 
-	ret = write(file, buf, count, &pos);
-	if (ret > 0)
-		inode_dir_notify(file->f_dentry->d_parent->d_inode, DN_MODIFY);
-out:
-	fput(file);
-bad_file:
+	return do_readv_writev(WRITE, file, vec, vlen, pos);
+}
+
+
+asmlinkage ssize_t
+sys_readv(unsigned long fd, const struct iovec __user *vec, unsigned long vlen)
+{
+	struct file *file;
+	ssize_t ret = -EBADF;
+	int fput_needed;
+
+	file = fget_light(fd, &fput_needed);
+	if (file) {
+		ret = vfs_readv(file, vec, vlen, &file->f_pos);
+		fput_light(file, fput_needed);
+	}
+
 	return ret;
 }
+
+asmlinkage ssize_t
+sys_writev(unsigned long fd, const struct iovec __user *vec, unsigned long vlen)
+{
+	struct file *file;
+	ssize_t ret = -EBADF;
+	int fput_needed;
+
+	file = fget_light(fd, &fput_needed);
+	if (file) {
+		ret = vfs_writev(file, vec, vlen, &file->f_pos);
+		fput_light(file, fput_needed);
+	}
+
+	return ret;
+}
+
+static ssize_t do_sendfile(int out_fd, int in_fd, loff_t *ppos,
+			   size_t count, loff_t max)
+{
+	struct file * in_file, * out_file;
+	struct inode * in_inode, * out_inode;
+	loff_t pos;
+	ssize_t retval;
+	int fput_needed_in, fput_needed_out;
+
+	/*
+	 * Get input file, and verify that it is ok..
+	 */
+	retval = -EBADF;
+	in_file = fget_light(in_fd, &fput_needed_in);
+	if (!in_file)
+		goto out;
+	if (!(in_file->f_mode & FMODE_READ))
+		goto fput_in;
+	retval = -EINVAL;
+	in_inode = in_file->f_dentry->d_inode;
+	if (!in_inode)
+		goto fput_in;
+	if (!in_file->f_op || !in_file->f_op->sendfile)
+		goto fput_in;
+	retval = locks_verify_area(FLOCK_VERIFY_READ, in_inode, in_file, in_file->f_pos, count);
+	if (retval)
+		goto fput_in;
+
+	retval = security_file_permission (in_file, MAY_READ);
+	if (retval)
+		goto fput_in;
+
+	/*
+	 * Get output file, and verify that it is ok..
+	 */
+	retval = -EBADF;
+	out_file = fget_light(out_fd, &fput_needed_out);
+	if (!out_file)
+		goto fput_in;
+	if (!(out_file->f_mode & FMODE_WRITE))
+		goto fput_out;
+	retval = -EINVAL;
+	if (!out_file->f_op || !out_file->f_op->sendpage)
+		goto fput_out;
+	out_inode = out_file->f_dentry->d_inode;
+	retval = locks_verify_area(FLOCK_VERIFY_WRITE, out_inode, out_file, out_file->f_pos, count);
+	if (retval)
+		goto fput_out;
+
+	retval = security_file_permission (out_file, MAY_WRITE);
+	if (retval)
+		goto fput_out;
+
+	if (!ppos)
+		ppos = &in_file->f_pos;
+
+	if (!max)
+		max = min(in_inode->i_sb->s_maxbytes, out_inode->i_sb->s_maxbytes);
+
+	pos = *ppos;
+	retval = -EINVAL;
+	if (unlikely(pos < 0))
+		goto fput_out;
+	if (unlikely(pos + count > max)) {
+		retval = -EOVERFLOW;
+		if (pos >= max)
+			goto fput_out;
+		count = max - pos;
+	}
+
+	retval = in_file->f_op->sendfile(in_file, ppos, count, file_send_actor, out_file);
+
+	if (*ppos > max)
+		retval = -EOVERFLOW;
+
+fput_out:
+	fput_light(out_file, fput_needed_out);
+fput_in:
+	fput_light(in_file, fput_needed_in);
+out:
+	return retval;
+}
+
+asmlinkage ssize_t sys_sendfile(int out_fd, int in_fd, off_t __user *offset, size_t count)
+{
+	loff_t pos;
+	off_t off;
+	ssize_t ret;
+
+	if (offset) {
+		if (unlikely(get_user(off, offset)))
+			return -EFAULT;
+		pos = off;
+		ret = do_sendfile(out_fd, in_fd, &pos, count, MAX_NON_LFS);
+		if (unlikely(put_user(pos, offset)))
+			return -EFAULT;
+		return ret;
+	}
+
+	return do_sendfile(out_fd, in_fd, NULL, count, MAX_NON_LFS);
+}
+
+asmlinkage ssize_t sys_sendfile64(int out_fd, int in_fd, loff_t __user *offset, size_t count)
+{
+	loff_t pos;
+	ssize_t ret;
+
+	if (offset) {
+		if (unlikely(copy_from_user(&pos, offset, sizeof(loff_t))))
+			return -EFAULT;
+		ret = do_sendfile(out_fd, in_fd, &pos, count, 0);
+		if (unlikely(put_user(pos, offset)))
+			return -EFAULT;
+		return ret;
+	}
+
+	return do_sendfile(out_fd, in_fd, NULL, count, 0);
+}
+
+EXPORT_SYMBOL(do_sync_read);
+EXPORT_SYMBOL(do_sync_write);

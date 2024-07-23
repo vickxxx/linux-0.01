@@ -71,21 +71,15 @@ static void sci_enable_rx_interrupts(void *ptr);
 static int  sci_get_CD(void *ptr);
 static void sci_shutdown_port(void *ptr);
 static int sci_set_real_termios(void *ptr);
-static void sci_hungup(void *ptr);
-static void sci_close(void *ptr);
 static int sci_chars_in_buffer(void *ptr);
 static int sci_request_irq(struct sci_port *port);
 static void sci_free_irq(struct sci_port *port);
 static int sci_init_drivers(void);
 
-static struct tty_driver sci_driver, sci_callout_driver;
+static struct tty_driver *sci_driver;
 
 static struct sci_port sci_ports[SCI_NPORTS] = SCI_INIT;
-static struct tty_struct *sci_table[SCI_NPORTS] = { NULL, };
-static struct termios *sci_termios[SCI_NPORTS];
-static struct termios *sci_termios_locked[SCI_NPORTS];
 
-static int sci_refcount;
 static int sci_debug = 0;
 
 #ifdef MODULE
@@ -216,8 +210,6 @@ static struct real_driver sci_real_driver = {
 	sci_shutdown_port,
 	sci_set_real_termios,
 	sci_chars_in_buffer,
-	sci_close,
-	sci_hungup,
 	NULL
 };
 
@@ -431,8 +423,7 @@ static int sci_set_real_termios(void *ptr)
 static inline void sci_sched_event(struct sci_port *port, int event)
 {
 	port->event |= 1 << event;
-	queue_task(&port->tqueue, &tq_immediate);
-	mark_bh(IMMEDIATE_BH);
+	schedule_work(&port->tqueue);
 }
 
 static void sci_transmit_chars(struct sci_port *port)
@@ -813,7 +804,7 @@ static int sci_open(struct tty_struct * tty, struct file * filp)
 	struct sci_port *port;
 	int retval, line;
 
-	line = MINOR(tty->device) - SCI_MINOR_START;
+	line = tty->index;
 
 	if ((line < 0) || (line >= SCI_NPORTS))
 		return -ENODEV;
@@ -825,8 +816,7 @@ static int sci_open(struct tty_struct * tty, struct file * filp)
 	port->gs.count++;
 
 	port->event = 0;
-	port->tqueue.routine = do_softint;
-	port->tqueue.data = port;
+	INIT_WORK(&port->tqueue, do_softint, port);
 
 	/*
 	 * Start up serial port
@@ -840,26 +830,13 @@ static int sci_open(struct tty_struct * tty, struct file * filp)
 	sci_setsignals(port, 1,1);
 
 	if (port->gs.count == 1) {
-		MOD_INC_USE_COUNT;
-
 		retval = sci_request_irq(port);
-		if (retval) {
-			goto failed_2;
-		}
 	}
 
 	retval = gs_block_til_ready(port, filp);
 
 	if (retval) {
 		goto failed_3;
-	}
-
-	if ((port->gs.count == 1) && (port->gs.flags & ASYNC_SPLIT_TERMIOS)) {
-		if (tty->driver.subtype == SERIAL_TYPE_NORMAL)
-			*tty->termios = port->gs.normal_termios;
-		else 
-			*tty->termios = port->gs.callout_termios;
-		sci_set_real_termios(port);
 	}
 
 #ifdef CONFIG_SERIAL_CONSOLE
@@ -873,28 +850,13 @@ static int sci_open(struct tty_struct * tty, struct file * filp)
 
 	sci_enable_rx_interrupts(port);
 
-	port->gs.session = current->session;
-	port->gs.pgrp = current->pgrp;
-
 	return 0;
 
 failed_3:
 	sci_free_irq(port);
-failed_2:
-	MOD_DEC_USE_COUNT;
 failed_1:
 	port->gs.count--;
 	return retval;
-}
-
-static void sci_hungup(void *ptr)
-{
-	MOD_DEC_USE_COUNT;
-}
-
-static void sci_close(void *ptr)
-{
-	MOD_DEC_USE_COUNT;
 }
 
 static int sci_ioctl(struct tty_struct * tty, struct file * filp, 
@@ -919,7 +881,7 @@ static int sci_ioctl(struct tty_struct * tty, struct file * filp,
 	case TIOCGSERIAL:
 		if ((rc = verify_area(VERIFY_WRITE, (void *) arg,
 		                      sizeof(struct serial_struct))) == 0)
-			gs_getserial(&port->gs, (struct serial_struct *) arg);
+			rc = gs_getserial(&port->gs, (struct serial_struct *) arg);
 		break;
 	case TIOCSSERIAL:
 		if ((rc = verify_area(VERIFY_READ, (void *) arg,
@@ -1010,6 +972,27 @@ static int sci_read_proc(char *page, char **start, off_t off, int count,
 }
 #endif
 
+static struct tty_operations sci_ops = {
+	.open	= sci_open,
+	.close = gs_close,
+	.write = gs_write,
+	.put_char = gs_put_char,
+	.flush_chars = gs_flush_chars,
+	.write_room = gs_write_room,
+	.chars_in_buffer = gs_chars_in_buffer,
+	.flush_buffer = gs_flush_buffer,
+	.ioctl = sci_ioctl,
+	.throttle = sci_throttle,
+	.unthrottle = sci_unthrottle,
+	.set_termios = gs_set_termios,
+	.stop = gs_stop,
+	.start = gs_start,
+	.hangup = gs_hangup,
+#ifdef CONFIG_PROC_FS
+	.read_proc = sci_read_proc,
+#endif
+};
+
 /* ********************************************************************** *
  *                    Here are the initialization routines.               *
  * ********************************************************************** */
@@ -1018,73 +1001,31 @@ static int sci_init_drivers(void)
 {
 	int error;
 	struct sci_port *port;
+	sci_driver = alloc_tty_driver(SCI_NPORTS);
+	if (!sci_driver)
+		return -ENOMEM;
 
-	memset(&sci_driver, 0, sizeof(sci_driver));
-	sci_driver.magic = TTY_DRIVER_MAGIC;
-	sci_driver.driver_name = "sci";
-#ifdef CONFIG_DEVFS_FS
-	sci_driver.name = "ttsc/%d";
-#else
-	sci_driver.name = "ttySC";
-#endif
-	sci_driver.major = SCI_MAJOR;
-	sci_driver.minor_start = SCI_MINOR_START;
-	sci_driver.num = SCI_NPORTS;
-	sci_driver.type = TTY_DRIVER_TYPE_SERIAL;
-	sci_driver.subtype = SERIAL_TYPE_NORMAL;
-	sci_driver.init_termios = tty_std_termios;
-	sci_driver.init_termios.c_cflag =
+	sci_driver->owner = THIS_MODULE;
+	sci_driver->driver_name = "sci";
+	sci_driver->name = "ttySC";
+	sci_driver->devfs_name = "ttsc/";
+	sci_driver->major = SCI_MAJOR;
+	sci_driver->minor_start = SCI_MINOR_START;
+	sci_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	sci_driver->subtype = SERIAL_TYPE_NORMAL;
+	sci_driver->init_termios = tty_std_termios;
+	sci_driver->init_termios.c_cflag =
 		B9600 | CS8 | CREAD | HUPCL | CLOCAL | CRTSCTS;
-	sci_driver.flags = TTY_DRIVER_REAL_RAW;
-	sci_driver.refcount = &sci_refcount;
-	sci_driver.table = sci_table;
-	sci_driver.termios = sci_termios;
-	sci_driver.termios_locked = sci_termios_locked;
-
-	sci_driver.open	= sci_open;
-	sci_driver.close = gs_close;
-	sci_driver.write = gs_write;
-	sci_driver.put_char = gs_put_char;
-	sci_driver.flush_chars = gs_flush_chars;
-	sci_driver.write_room = gs_write_room;
-	sci_driver.chars_in_buffer = gs_chars_in_buffer;
-	sci_driver.flush_buffer = gs_flush_buffer;
-	sci_driver.ioctl = sci_ioctl;
-	sci_driver.throttle = sci_throttle;
-	sci_driver.unthrottle = sci_unthrottle;
-	sci_driver.set_termios = gs_set_termios;
-	sci_driver.stop = gs_stop;
-	sci_driver.start = gs_start;
-	sci_driver.hangup = gs_hangup;
-#ifdef CONFIG_PROC_FS
-	sci_driver.read_proc = sci_read_proc;
-#endif
-
-	sci_callout_driver = sci_driver;
-#ifdef CONFIG_DEVFS_FS
-	sci_callout_driver.name = "cusc/%d";
-#else
-	sci_callout_driver.name = "cusc";
-#endif
-	sci_callout_driver.major = SCI_MAJOR+1;
-	sci_callout_driver.subtype = SERIAL_TYPE_CALLOUT;
-	sci_callout_driver.read_proc = NULL;
-
-	if ((error = tty_register_driver(&sci_driver))) {
+	sci_driver->flags = TTY_DRIVER_REAL_RAW;
+	tty_set_operations(sci_driver, &sci_ops);
+	if ((error = tty_register_driver(sci_driver))) {
 		printk(KERN_ERR "sci: Couldn't register SCI driver, error = %d\n",
 		       error);
-		return 1;
-	}
-	if ((error = tty_register_driver(&sci_callout_driver))) {
-		tty_unregister_driver(&sci_driver);
-		printk(KERN_ERR "sci: Couldn't register SCI callout driver, error = %d\n",
-		       error);
+		put_tty_driver(sci_driver);
 		return 1;
 	}
 
 	for (port = &sci_ports[0]; port < &sci_ports[SCI_NPORTS]; port++) {
-		port->gs.callout_termios = sci_callout_driver.init_termios;
-		port->gs.normal_termios	= sci_driver.init_termios;
 		port->gs.magic = SCI_MAGIC;
 		port->gs.close_delay = HZ/2;
 		port->gs.closing_wait = 30 * HZ;
@@ -1163,8 +1104,8 @@ module_init(sci_init);
 
 void cleanup_module(void)
 {
-	tty_unregister_driver(&sci_driver);
-	tty_unregister_driver(&sci_callout_driver);
+	tty_unregister_driver(sci_driver);
+	put_tty_driver(sci_driver);
 }
 
 #include "generic_serial.c"
@@ -1181,18 +1122,10 @@ static void serial_console_write(struct console *co, const char *s,
 	put_string(sercons_port, s, count);
 }
 
-/*
- *	Receive character from the serial port
- */
-static int serial_console_wait_key(struct console *co)
+static struct tty_driver *serial_console_device(struct console *c, int *index)
 {
-	/* Not implemented yet */
-	return 0;
-}
-
-static kdev_t serial_console_device(struct console *c)
-{
-	return MKDEV(SCI_MAJOR, SCI_MINOR_START + c->index);
+	*index = c->index;
+	return sci_driver;
 }
 
 /*
@@ -1270,13 +1203,12 @@ static int __init serial_console_setup(struct console *co, char *options)
 }
 
 static struct console sercons = {
-	name:		"ttySC",
-	write:		serial_console_write,
-	device:		serial_console_device,
-	wait_key:	serial_console_wait_key,
-	setup:		serial_console_setup,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
+	.name		= "ttySC",
+	.write		= serial_console_write,
+	.device		= serial_console_device,
+	.setup		= serial_console_setup,
+	.flags		= CON_PRINTBUFFER,
+	.index		= -1,
 };
 
 /*
@@ -1287,7 +1219,7 @@ static struct console sercons = {
 extern void sh_console_unregister (void);
 #endif
 
-void __init sci_console_init(void)
+static int __init sci_console_init(void)
 {
 	register_console(&sercons);
 #ifdef CONFIG_SH_EARLY_PRINTK
@@ -1296,5 +1228,8 @@ void __init sci_console_init(void)
 	 */
 	sh_console_unregister();
 #endif
+	return 0;
 }
+console_initcall(sci_console_init);
+
 #endif /* CONFIG_SERIAL_CONSOLE */

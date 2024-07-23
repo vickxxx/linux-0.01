@@ -31,6 +31,7 @@ extern int parport_pc_init(int *io, int *io_hi, int *irq, int *dma);
 extern int parport_sunbpp_init(void);
 extern int parport_amiga_init(void);
 extern int parport_mfc3_init(void);
+extern int parport_atari_init(void);
 
 static int parport_setup_ptr __initdata = 0;
 
@@ -226,17 +227,3 @@ EXPORT_SYMBOL(parport_daisy_init);
 EXPORT_SYMBOL(parport_find_device);
 EXPORT_SYMBOL(parport_find_class);
 #endif
-
-void inc_parport_count(void)
-{
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
-}
-
-void dec_parport_count(void)
-{
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
-}

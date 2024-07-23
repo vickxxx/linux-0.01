@@ -23,11 +23,11 @@
 */
 
 /*
- * BlueZ Bluetooth address family and sockets.
+ *  Bluetooth address family and sockets.
  *
- * $Id: af_bluetooth.c,v 1.8 2002/07/22 20:32:54 maxk Exp $
+ * $Id: af_bluetooth.c,v 1.3 2002/04/17 17:37:15 maxk Exp $
  */
-#define VERSION "2.4"
+#define VERSION "2.2"
 
 #include <linux/config.h>
 #include <linux/module.h>
@@ -51,129 +51,147 @@
 
 #include <net/bluetooth/bluetooth.h>
 
-#ifndef AF_BLUETOOTH_DEBUG
+#ifndef CONFIG_BT_SOCK_DEBUG
 #undef  BT_DBG
 #define BT_DBG( A... )
 #endif
 
-/* Bluetooth sockets */
-#define BLUEZ_MAX_PROTO	7
-static struct net_proto_family *bluez_proto[BLUEZ_MAX_PROTO];
+#ifdef CONFIG_PROC_FS
+struct proc_dir_entry *proc_bt;
+#endif
 
-int bluez_sock_register(int proto, struct net_proto_family *ops)
+/* Bluetooth sockets */
+#define BT_MAX_PROTO	5
+static struct net_proto_family *bt_proto[BT_MAX_PROTO];
+
+static kmem_cache_t *bt_sock_cache;
+
+int bt_sock_register(int proto, struct net_proto_family *ops)
 {
-	if (proto < 0 || proto >= BLUEZ_MAX_PROTO)
+	if (proto >= BT_MAX_PROTO)
 		return -EINVAL;
 
-	if (bluez_proto[proto])
+	if (bt_proto[proto])
 		return -EEXIST;
 
-	bluez_proto[proto] = ops;
+	bt_proto[proto] = ops;
 	return 0;
 }
 
-int bluez_sock_unregister(int proto)
+int bt_sock_unregister(int proto)
 {
-	if (proto < 0 || proto >= BLUEZ_MAX_PROTO)
+	if (proto >= BT_MAX_PROTO)
 		return -EINVAL;
 
-	if (!bluez_proto[proto])
+	if (!bt_proto[proto])
 		return -ENOENT;
 
-	bluez_proto[proto] = NULL;
+	bt_proto[proto] = NULL;
 	return 0;
 }
 
-static int bluez_sock_create(struct socket *sock, int proto)
+static int bt_sock_create(struct socket *sock, int proto)
 {
-	if (proto < 0 || proto >= BLUEZ_MAX_PROTO)
+	int err = 0;
+
+	if (proto >= BT_MAX_PROTO)
 		return -EINVAL;
 
 #if defined(CONFIG_KMOD)
-	if (!bluez_proto[proto]) {
-		char module_name[30];
-		sprintf(module_name, "bt-proto-%d", proto);
-		request_module(module_name);
+	if (!bt_proto[proto]) {
+		request_module("bt-proto-%d", proto);
 	}
 #endif
-
-	if (!bluez_proto[proto])
-		return -ENOENT;
-
-	return bluez_proto[proto]->create(sock, proto);
-}
-
-void bluez_sock_init(struct socket *sock, struct sock *sk)
-{ 
-	sock_init_data(sock, sk);
-	INIT_LIST_HEAD(&bluez_pi(sk)->accept_q);
-}
-
-void bluez_sock_link(struct bluez_sock_list *l, struct sock *sk)
-{
-	write_lock_bh(&l->lock);
-	sk->next = l->head;
-	l->head = sk;
-	sock_hold(sk);
-	write_unlock_bh(&l->lock);
-}
-
-void bluez_sock_unlink(struct bluez_sock_list *l, struct sock *sk)
-{
-	struct sock **skp;
-
-	write_lock_bh(&l->lock);
-	for (skp = &l->head; *skp; skp = &((*skp)->next)) {
-		if (*skp == sk) {
-			*skp = sk->next;
-			__sock_put(sk);
-			break;
-		}
+	err = -EPROTONOSUPPORT;
+	if (bt_proto[proto] && try_module_get(bt_proto[proto]->owner)) {
+		err = bt_proto[proto]->create(sock, proto);
+		module_put(bt_proto[proto]->owner);
 	}
+	return err; 
+}
+
+struct sock *bt_sock_alloc(struct socket *sock, int proto, int pi_size, int prio)
+{
+	struct sock *sk;
+	void *pi;
+
+	sk = sk_alloc(PF_BLUETOOTH, prio, sizeof(struct bt_sock), bt_sock_cache);
+	if (!sk)
+		return NULL;
+	
+	if (pi_size) {
+		pi = kmalloc(pi_size, prio);
+		if (!pi) {
+			sk_free(sk);
+			return NULL;
+		}
+		memset(pi, 0, pi_size);
+		sk->sk_protinfo = pi;
+	}
+
+	sock_init_data(sock, sk);
+	INIT_LIST_HEAD(&bt_sk(sk)->accept_q);
+	
+	sk->sk_zapped   = 0;
+	sk->sk_protocol = proto;
+	sk->sk_state    = BT_OPEN;
+
+	return sk;
+}
+
+void bt_sock_link(struct bt_sock_list *l, struct sock *sk)
+{
+	write_lock_bh(&l->lock);
+	sk_add_node(sk, &l->head);
 	write_unlock_bh(&l->lock);
 }
 
-void bluez_accept_enqueue(struct sock *parent, struct sock *sk)
+void bt_sock_unlink(struct bt_sock_list *l, struct sock *sk)
+{
+	write_lock_bh(&l->lock);
+	sk_del_node_init(sk);
+	write_unlock_bh(&l->lock);
+}
+
+void bt_accept_enqueue(struct sock *parent, struct sock *sk)
 {
 	BT_DBG("parent %p, sk %p", parent, sk);
 
 	sock_hold(sk);
-	list_add_tail(&bluez_pi(sk)->accept_q, &bluez_pi(parent)->accept_q);
-	bluez_pi(sk)->parent = parent;
-	parent->ack_backlog++;
+	list_add_tail(&bt_sk(sk)->accept_q, &bt_sk(parent)->accept_q);
+	bt_sk(sk)->parent = parent;
+	parent->sk_ack_backlog++;
 }
 
-static void bluez_accept_unlink(struct sock *sk)
+static void bt_accept_unlink(struct sock *sk)
 {
-	BT_DBG("sk %p state %d", sk, sk->state);
+	BT_DBG("sk %p state %d", sk, sk->sk_state);
 
-	list_del_init(&bluez_pi(sk)->accept_q);
-	bluez_pi(sk)->parent->ack_backlog--;
-	bluez_pi(sk)->parent = NULL;
+	list_del_init(&bt_sk(sk)->accept_q);
+	bt_sk(sk)->parent->sk_ack_backlog--;
+	bt_sk(sk)->parent = NULL;
 	sock_put(sk);
 }
 
-struct sock *bluez_accept_dequeue(struct sock *parent, struct socket *newsock)
+struct sock *bt_accept_dequeue(struct sock *parent, struct socket *newsock)
 {
 	struct list_head *p, *n;
-	struct bluez_pinfo *pi;
 	struct sock *sk;
 	
 	BT_DBG("parent %p", parent);
 
-	list_for_each_safe(p, n, &bluez_pi(parent)->accept_q) {
-		pi = list_entry(p, struct bluez_pinfo, accept_q);
-		sk = bluez_sk(pi);
+	list_for_each_safe(p, n, &bt_sk(parent)->accept_q) {
+		sk = (struct sock *) list_entry(p, struct bt_sock, accept_q);
 		
 		lock_sock(sk);
-		if (sk->state == BT_CLOSED) {
+		if (sk->sk_state == BT_CLOSED) {
 			release_sock(sk);
-			bluez_accept_unlink(sk);
+			bt_accept_unlink(sk);
 			continue;
 		}
 		
-		if (sk->state == BT_CONNECTED || !newsock) {
-			bluez_accept_unlink(sk);
+		if (sk->sk_state == BT_CONNECTED || !newsock) {
+			bt_accept_unlink(sk);
 			if (newsock)
 				sock_graft(sk, newsock);
 			release_sock(sk);
@@ -184,7 +202,8 @@ struct sock *bluez_accept_dequeue(struct sock *parent, struct socket *newsock)
 	return NULL;
 }
 
-int bluez_sock_recvmsg(struct socket *sock, struct msghdr *msg, int len, int flags, struct scm_cookie *scm)
+int bt_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
+	struct msghdr *msg, int len, int flags)
 {
 	int noblock = flags & MSG_DONTWAIT;
 	struct sock *sk = sock->sk;
@@ -197,7 +216,7 @@ int bluez_sock_recvmsg(struct socket *sock, struct msghdr *msg, int len, int fla
 		return -EOPNOTSUPP;
 
 	if (!(skb = skb_recv_datagram(sk, flags, noblock, &err))) {
-		if (sk->shutdown & RCV_SHUTDOWN)
+		if (sk->sk_shutdown & RCV_SHUTDOWN)
 			return 0;
 		return err;
 	}
@@ -218,60 +237,54 @@ int bluez_sock_recvmsg(struct socket *sock, struct msghdr *msg, int len, int fla
 	return err ? : copied;
 }
 
-unsigned int bluez_sock_poll(struct file * file, struct socket *sock, poll_table *wait)
+unsigned int bt_sock_poll(struct file * file, struct socket *sock, poll_table *wait)
 {
 	struct sock *sk = sock->sk;
-	unsigned int mask = 0;
+	unsigned int mask;
 
 	BT_DBG("sock %p, sk %p", sock, sk);
 
-	poll_wait(file, sk->sleep, wait);
+	poll_wait(file, sk->sk_sleep, wait);
+	mask = 0;
 
-	if (sk->err || !skb_queue_empty(&sk->error_queue))
+	if (sk->sk_err || !skb_queue_empty(&sk->sk_error_queue))
 		mask |= POLLERR;
 
-	if (sk->shutdown == SHUTDOWN_MASK)
+	if (sk->sk_shutdown == SHUTDOWN_MASK)
 		mask |= POLLHUP;
 
-	if (!skb_queue_empty(&sk->receive_queue) || 
-			!list_empty(&bluez_pi(sk)->accept_q) ||
-			(sk->shutdown & RCV_SHUTDOWN))
+	if (!skb_queue_empty(&sk->sk_receive_queue) || 
+			!list_empty(&bt_sk(sk)->accept_q) ||
+			(sk->sk_shutdown & RCV_SHUTDOWN))
 		mask |= POLLIN | POLLRDNORM;
 
-	if (sk->state == BT_CLOSED)
+	if (sk->sk_state == BT_CLOSED)
 		mask |= POLLHUP;
 
-	if (sk->state == BT_CONNECT ||
-			sk->state == BT_CONNECT2 ||
-			sk->state == BT_CONFIG)
+	if (sk->sk_state == BT_CONNECT || sk->sk_state == BT_CONNECT2)
 		return mask;
-
+	
 	if (sock_writeable(sk))
 		mask |= POLLOUT | POLLWRNORM | POLLWRBAND;
 	else
-		set_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
+		set_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
 
 	return mask;
 }
 
-int bluez_sock_wait_state(struct sock *sk, int state, unsigned long timeo)
+int bt_sock_w4_connect(struct sock *sk, int flags)
 {
 	DECLARE_WAITQUEUE(wait, current);
+	long timeo = sock_sndtimeo(sk, flags & O_NONBLOCK);
 	int err = 0;
 
 	BT_DBG("sk %p", sk);
 
-	add_wait_queue(sk->sleep, &wait);
-	while (sk->state != state) {
+	add_wait_queue(sk->sk_sleep, &wait);
+	while (sk->sk_state != BT_CONNECTED) {
 		set_current_state(TASK_INTERRUPTIBLE);
-
 		if (!timeo) {
 			err = -EAGAIN;
-			break;
-		}
-
-		if (signal_pending(current)) {
-			err = sock_intr_errno(timeo);
 			break;
 		}
 
@@ -279,58 +292,77 @@ int bluez_sock_wait_state(struct sock *sk, int state, unsigned long timeo)
 		timeo = schedule_timeout(timeo);
 		lock_sock(sk);
 
-		if (sk->err) {
+		err = 0;
+		if (sk->sk_state == BT_CONNECTED)
+			break;
+
+		if (sk->sk_err) {
 			err = sock_error(sk);
+			break;
+		}
+
+		if (signal_pending(current)) {
+			err = sock_intr_errno(timeo);
 			break;
 		}
 	}
 	set_current_state(TASK_RUNNING);
-	remove_wait_queue(sk->sleep, &wait);
+	remove_wait_queue(sk->sk_sleep, &wait);
 	return err;
 }
 
-struct net_proto_family bluez_sock_family_ops =
-{
-	PF_BLUETOOTH, bluez_sock_create
+struct net_proto_family bt_sock_family_ops = {
+	.owner  = THIS_MODULE,
+	.family	= PF_BLUETOOTH,
+	.create	= bt_sock_create,
 };
 
-int bluez_init(void)
+extern int hci_sock_init(void);
+extern int hci_sock_cleanup(void);
+extern int hci_proc_init(void);
+extern int hci_proc_cleanup(void);
+
+static int __init bt_init(void)
 {
-	BT_INFO("BlueZ Core ver %s Copyright (C) 2000,2001 Qualcomm Inc",
-		 VERSION);
-	BT_INFO("Written 2000,2001 by Maxim Krasnyansky <maxk@qualcomm.com>");
+	BT_INFO("Core ver %s", VERSION);
 
-	proc_mkdir("bluetooth", NULL);
+	proc_bt = proc_mkdir("bluetooth", NULL);
+	if (proc_bt)
+		proc_bt->owner = THIS_MODULE;
+	
+	/* Init socket cache */
+	bt_sock_cache = kmem_cache_create("bt_sock",
+			sizeof(struct bt_sock), 0,
+			SLAB_HWCACHE_ALIGN, 0, 0);
 
-	sock_register(&bluez_sock_family_ops);
+	if (!bt_sock_cache) {
+		BT_ERR("Socket cache creation failed");
+		return -ENOMEM;
+	}
+	
+	sock_register(&bt_sock_family_ops);
 
-	/* Init HCI Core */
-	hci_core_init();
+	BT_INFO("HCI device and connection manager initialized");
 
-	/* Init sockets */
+	hci_proc_init();
 	hci_sock_init();
-
 	return 0;
 }
 
-void bluez_cleanup(void)
+static void __exit bt_cleanup(void)
 {
-	/* Release socket */
 	hci_sock_cleanup();
-
-	/* Release core */
-	hci_core_cleanup();
+	hci_proc_cleanup();
 
 	sock_unregister(PF_BLUETOOTH);
+	kmem_cache_destroy(bt_sock_cache);
 
 	remove_proc_entry("bluetooth", NULL);
 }
 
-#ifdef MODULE
-module_init(bluez_init);
-module_exit(bluez_cleanup);
+subsys_initcall(bt_init);
+module_exit(bt_cleanup);
 
 MODULE_AUTHOR("Maxim Krasnyansky <maxk@qualcomm.com>");
-MODULE_DESCRIPTION("BlueZ Core ver " VERSION);
+MODULE_DESCRIPTION("Bluetooth Core ver " VERSION);
 MODULE_LICENSE("GPL");
-#endif

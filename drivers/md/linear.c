@@ -1,6 +1,6 @@
 /*
    linear.c : Multiple Devices driver for Linux
-              Copyright (C) 1994-96 Marc ZYNGIER
+	      Copyright (C) 1994-96 Marc ZYNGIER
 	      <zyngier@ufr-info-p7.ibp.fr> or
 	      <maz@gloups.fdn.fr>
 
@@ -20,55 +20,127 @@
 
 #include <linux/raid/md.h>
 #include <linux/slab.h>
-
 #include <linux/raid/linear.h>
 
 #define MAJOR_NR MD_MAJOR
 #define MD_DRIVER
 #define MD_PERSONALITY
+#define DEVICE_NR(device) (minor(device))
+
+/*
+ * find which device holds a particular offset 
+ */
+static inline dev_info_t *which_dev(mddev_t *mddev, sector_t sector)
+{
+	struct linear_hash *hash;
+	linear_conf_t *conf = mddev_to_conf(mddev);
+	sector_t block = sector >> 1;
+
+	/*
+	 * sector_div(a,b) returns the remainer and sets a to a/b
+	 */
+	(void)sector_div(block, conf->smallest->size);
+	hash = conf->hash_table + block;
+
+	if ((sector>>1) >= (hash->dev0->size + hash->dev0->offset))
+		return hash->dev1;
+	else
+		return hash->dev0;
+}
+
+
+/**
+ *	linear_mergeable_bvec -- tell bio layer if a two requests can be merged
+ *	@q: request queue
+ *	@bio: the buffer head that's been built up so far
+ *	@biovec: the request that could be merged to it.
+ *
+ *	Return amount of bytes we can take at this offset
+ */
+static int linear_mergeable_bvec(request_queue_t *q, struct bio *bio, struct bio_vec *biovec)
+{
+	mddev_t *mddev = q->queuedata;
+	dev_info_t *dev0;
+	unsigned long maxsectors, bio_sectors = bio->bi_size >> 9;
+
+	dev0 = which_dev(mddev, bio->bi_sector);
+	maxsectors = (dev0->size << 1) - (bio->bi_sector - (dev0->offset<<1));
+
+	if (maxsectors < bio_sectors)
+		maxsectors = 0;
+	else
+		maxsectors -= bio_sectors;
+
+	if (maxsectors <= (PAGE_SIZE >> 9 ) && bio_sectors == 0)
+		return biovec->bv_len;
+	/* The bytes available at this offset could be really big,
+	 * so we cap at 2^31 to avoid overflow */
+	if (maxsectors > (1 << (31-9)))
+		return 1<<31;
+	return maxsectors << 9;
+}
 
 static int linear_run (mddev_t *mddev)
 {
 	linear_conf_t *conf;
 	struct linear_hash *table;
 	mdk_rdev_t *rdev;
-	int size, i, j, nb_zone;
+	int size, i, nb_zone, cnt;
 	unsigned int curr_offset;
+	struct list_head *tmp;
 
-	MOD_INC_USE_COUNT;
-
-	conf = kmalloc (sizeof (*conf), GFP_KERNEL);
+	conf = kmalloc (sizeof (*conf) + mddev->raid_disks*sizeof(dev_info_t),
+			GFP_KERNEL);
 	if (!conf)
 		goto out;
+	memset(conf, 0, sizeof(*conf) + mddev->raid_disks*sizeof(dev_info_t));
 	mddev->private = conf;
 
-	if (md_check_ordering(mddev)) {
-		printk("linear: disks are not ordered, aborting!\n");
-		goto out;
-	}
 	/*
 	 * Find the smallest device.
 	 */
 
 	conf->smallest = NULL;
-	curr_offset = 0;
-	ITERATE_RDEV_ORDERED(mddev,rdev,j) {
+	cnt = 0;
+	mddev->array_size = 0;
+
+	ITERATE_RDEV(mddev,rdev,tmp) {
+		int j = rdev->raid_disk;
 		dev_info_t *disk = conf->disks + j;
 
-		disk->dev = rdev->dev;
-		disk->size = rdev->size;
-		disk->offset = curr_offset;
+		if (j < 0 || j > mddev->raid_disks || disk->rdev) {
+			printk("linear: disk numbering problem. Aborting!\n");
+			goto out;
+		}
 
-		curr_offset += disk->size;
+		disk->rdev = rdev;
+		disk->size = rdev->size;
+		mddev->array_size += rdev->size;
 
 		if (!conf->smallest || (disk->size < conf->smallest->size))
 			conf->smallest = disk;
+		cnt++;
+	}
+	if (cnt != mddev->raid_disks) {
+		printk("linear: not enough drives present. Aborting!\n");
+		goto out;
 	}
 
-	nb_zone = conf->nr_zones =
-		md_size[mdidx(mddev)] / conf->smallest->size +
-		((md_size[mdidx(mddev)] % conf->smallest->size) ? 1 : 0);
-  
+	/*
+	 * This code was restructured to work around a gcc-2.95.3 internal
+	 * compiler error.  Alter it with care.
+	 */
+	{
+		sector_t sz;
+		unsigned round;
+		unsigned long base;
+
+		sz = mddev->array_size;
+		base = conf->smallest->size;
+		round = sector_div(sz, base);
+		nb_zone = conf->nr_zones = sz + (round ? 1 : 0);
+	}
+			
 	conf->hash_table = kmalloc (sizeof (struct linear_hash) * nb_zone,
 					GFP_KERNEL);
 	if (!conf->hash_table)
@@ -78,10 +150,13 @@ static int linear_run (mddev_t *mddev)
 	 * Here we generate the linear hash table
 	 */
 	table = conf->hash_table;
-	i = 0;
 	size = 0;
-	for (j = 0; j < mddev->nb_dev; j++) {
-		dev_info_t *disk = conf->disks + j;
+	curr_offset = 0;
+	for (i = 0; i < cnt; i++) {
+		dev_info_t *disk = conf->disks + i;
+
+		disk->offset = curr_offset;
+		curr_offset += disk->size;
 
 		if (size < 0) {
 			table[-1].dev1 = disk;
@@ -98,12 +173,12 @@ static int linear_run (mddev_t *mddev)
 	if (table-conf->hash_table != nb_zone)
 		BUG();
 
+	blk_queue_merge_bvec(&mddev->queue, linear_mergeable_bvec);
 	return 0;
 
 out:
 	if (conf)
 		kfree(conf);
-	MOD_DEC_USE_COUNT;
 	return 1;
 }
 
@@ -114,83 +189,98 @@ static int linear_stop (mddev_t *mddev)
 	kfree(conf->hash_table);
 	kfree(conf);
 
-	MOD_DEC_USE_COUNT;
-
 	return 0;
 }
 
-static int linear_make_request (mddev_t *mddev,
-			int rw, struct buffer_head * bh)
+static int linear_make_request (request_queue_t *q, struct bio *bio)
 {
-        linear_conf_t *conf = mddev_to_conf(mddev);
-        struct linear_hash *hash;
-        dev_info_t *tmp_dev;
-        long block;
+	mddev_t *mddev = q->queuedata;
+	dev_info_t *tmp_dev;
+	sector_t block;
 
-	block = bh->b_rsector >> 1;
-	hash = conf->hash_table + (block / conf->smallest->size);
+	tmp_dev = which_dev(mddev, bio->bi_sector);
+	block = bio->bi_sector >> 1;
   
-	if (block >= (hash->dev0->size + hash->dev0->offset)) {
-		if (!hash->dev1) {
-			printk ("linear_make_request : hash->dev1==NULL for block %ld\n",
-						block);
-			buffer_IO_error(bh);
-			return 0;
-		}
-		tmp_dev = hash->dev1;
-	} else
-		tmp_dev = hash->dev0;
-    
-	if (block >= (tmp_dev->size + tmp_dev->offset)
-				|| block < tmp_dev->offset) {
-		printk ("linear_make_request: Block %ld out of bounds on dev %s size %ld offset %ld\n", block, kdevname(tmp_dev->dev), tmp_dev->size, tmp_dev->offset);
-		buffer_IO_error(bh);
+	if (unlikely(!tmp_dev)) {
+		printk("linear_make_request: hash->dev1==NULL for block %llu\n",
+			(unsigned long long)block);
+		bio_io_error(bio, bio->bi_size);
 		return 0;
 	}
-	bh->b_rdev = tmp_dev->dev;
-	bh->b_rsector = bh->b_rsector - (tmp_dev->offset << 1);
+    
+	if (unlikely(block >= (tmp_dev->size + tmp_dev->offset)
+		     || block < tmp_dev->offset)) {
+		char b[BDEVNAME_SIZE];
+
+		printk("linear_make_request: Block %llu out of bounds on "
+			"dev %s size %ld offset %ld\n",
+			(unsigned long long)block,
+			bdevname(tmp_dev->rdev->bdev, b),
+			tmp_dev->size, tmp_dev->offset);
+		bio_io_error(bio, bio->bi_size);
+		return 0;
+	}
+	if (unlikely(bio->bi_sector + (bio->bi_size >> 9) >
+		     (tmp_dev->offset + tmp_dev->size)<<1)) {
+		/* This bio crosses a device boundary, so we have to
+		 * split it.
+		 */
+		struct bio_pair *bp;
+		bp = bio_split(bio, bio_split_pool, 
+			       (bio->bi_sector + (bio->bi_size >> 9) -
+				(tmp_dev->offset + tmp_dev->size))<<1);
+		if (linear_make_request(q, &bp->bio1))
+			generic_make_request(&bp->bio1);
+		if (linear_make_request(q, &bp->bio2))
+			generic_make_request(&bp->bio2);
+		bio_pair_release(bp);
+		return 0;
+	}
+		    
+	bio->bi_bdev = tmp_dev->rdev->bdev;
+	bio->bi_sector = bio->bi_sector - (tmp_dev->offset << 1) + tmp_dev->rdev->data_offset;
 
 	return 1;
 }
 
-static int linear_status (char *page, mddev_t *mddev)
+static void linear_status (struct seq_file *seq, mddev_t *mddev)
 {
-	int sz = 0;
 
 #undef MD_DEBUG
 #ifdef MD_DEBUG
 	int j;
 	linear_conf_t *conf = mddev_to_conf(mddev);
   
-	sz += sprintf(page+sz, "      ");
+	seq_printf(seq, "      ");
 	for (j = 0; j < conf->nr_zones; j++)
 	{
-		sz += sprintf(page+sz, "[%s",
-			partition_name(conf->hash_table[j].dev0->dev));
+		char b[BDEVNAME_SIZE];
+		seq_printf(seq, "[%s",
+			   bdevname(conf->hash_table[j].dev0->rdev->bdev,b));
 
 		if (conf->hash_table[j].dev1)
-			sz += sprintf(page+sz, "/%s] ",
-			  partition_name(conf->hash_table[j].dev1->dev));
+			seq_printf(seq, "/%s] ",
+				   bdevname(conf->hash_table[j].dev1->rdev->bdev,b));
 		else
-			sz += sprintf(page+sz, "] ");
+			seq_printf(seq, "] ");
 	}
-	sz += sprintf(page+sz, "\n");
+	seq_printf(seq, "\n");
 #endif
-	sz += sprintf(page+sz, " %dk rounding", mddev->param.chunk_size/1024);
-	return sz;
+	seq_printf(seq, " %dk rounding", mddev->chunk_size/1024);
 }
 
 
 static mdk_personality_t linear_personality=
 {
-	name:		"linear",
-	make_request:	linear_make_request,
-	run:		linear_run,
-	stop:		linear_stop,
-	status:		linear_status,
+	.name		= "linear",
+	.owner		= THIS_MODULE,
+	.make_request	= linear_make_request,
+	.run		= linear_run,
+	.stop		= linear_stop,
+	.status		= linear_status,
 };
 
-static int md__init linear_init (void)
+static int __init linear_init (void)
 {
 	return register_md_personality (LINEAR, &linear_personality);
 }

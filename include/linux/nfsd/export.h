@@ -35,46 +35,46 @@
 #define NFSEXP_UIDMAP		0x0040
 #define NFSEXP_KERBEROS		0x0080		/* not available */
 #define NFSEXP_SUNSECURE	0x0100
-#define NFSEXP_CROSSMNT		0x0200
+#define NFSEXP_NOHIDE		0x0200
 #define NFSEXP_NOSUBTREECHECK	0x0400
 #define	NFSEXP_NOAUTHNLM	0x0800		/* Don't authenticate NLM requests - just trust */
 #define NFSEXP_MSNFS		0x1000	/* do silly things that MS clients expect */
-#define NFSEXP_ALLFLAGS		0x1FFF
+#define NFSEXP_FSID		0x2000
+#define	NFSEXP_CROSSMNT		0x4000
+#define NFSEXP_ALLFLAGS		0x7FFF
 
 
 #ifdef __KERNEL__
 
-/* The following are hashtable sizes and must be powers of 2 */
-#define NFSCLNT_EXPMAX		16
-
-struct svc_client {
-	struct svc_client *	cl_next;
-	char			cl_ident[NFSCLNT_IDMAX];
-	int			cl_idlen;
-	int			cl_naddr;
-	struct in_addr		cl_addr[NFSCLNT_ADDRMAX];
-	struct svc_uidmap *	cl_umap;
-	struct svc_export *	cl_export[NFSCLNT_EXPMAX];
-};
-
 struct svc_export {
-	struct svc_export *	ex_next;
-	char			ex_path[NFS_MAXPATHLEN+1];
-	struct svc_export *	ex_parent;
-	struct svc_client *	ex_client;
+	struct cache_head	h;
+	struct auth_domain *	ex_client;
 	int			ex_flags;
 	struct vfsmount *	ex_mnt;
 	struct dentry *		ex_dentry;
-	kdev_t			ex_dev;
-	ino_t			ex_ino;
 	uid_t			ex_anon_uid;
 	gid_t			ex_anon_gid;
+	int			ex_fsid;
+};
+
+/* an "export key" (expkey) maps a filehandlefragement to an
+ * svc_export for a given client.  There can be two per export, one
+ * for type 0 (dev/ino), one for type 1 (fsid)
+ */
+struct svc_expkey {
+	struct cache_head	h;
+
+	struct auth_domain *	ek_client;
+	int			ek_fsidtype;
+	u32			ek_fsid[2];
+
+	struct svc_export *	ek_export;
 };
 
 #define EX_SECURE(exp)		(!((exp)->ex_flags & NFSEXP_INSECURE_PORT))
 #define EX_ISSYNC(exp)		(!((exp)->ex_flags & NFSEXP_ASYNC))
 #define EX_RDONLY(exp)		((exp)->ex_flags & NFSEXP_READONLY)
-#define EX_CROSSMNT(exp)	((exp)->ex_flags & NFSEXP_CROSSMNT)
+#define EX_NOHIDE(exp)	((exp)->ex_flags & NFSEXP_NOHIDE)
 #define EX_SUNSECURE(exp)	((exp)->ex_flags & NFSEXP_SUNSECURE)
 #define EX_WGATHER(exp)		((exp)->ex_flags & NFSEXP_GATHERED_WRITES)
 
@@ -84,17 +84,51 @@ struct svc_export {
  */
 void			nfsd_export_init(void);
 void			nfsd_export_shutdown(void);
+void			nfsd_export_flush(void);
 void			exp_readlock(void);
-int			exp_writelock(void);
-void			exp_unlock(void);
-struct svc_client *	exp_getclient(struct sockaddr_in *sin);
-void			exp_putclient(struct svc_client *clp);
-struct svc_export *	exp_get(struct svc_client *clp, kdev_t dev, ino_t ino);
-int			exp_rootfh(struct svc_client *, kdev_t, ino_t,
+void			exp_readunlock(void);
+struct svc_expkey *	exp_find_key(struct auth_domain *clp, 
+				     int fsid_type, u32 *fsidv,
+				     struct cache_req *reqp);
+struct svc_export *	exp_get_by_name(struct auth_domain *clp,
+					struct vfsmount *mnt,
+					struct dentry *dentry,
+					struct cache_req *reqp);
+struct svc_export *	exp_parent(struct auth_domain *clp,
+				   struct vfsmount *mnt,
+				   struct dentry *dentry,
+				   struct cache_req *reqp);
+int			exp_rootfh(struct auth_domain *, 
 					char *path, struct knfsd_fh *, int maxsize);
+int			exp_pseudoroot(struct auth_domain *, struct svc_fh *fhp, struct cache_req *creq);
 int			nfserrno(int errno);
-void			exp_nlmdetach(void);
 
+extern void expkey_put(struct cache_head *item, struct cache_detail *cd);
+extern void svc_export_put(struct cache_head *item, struct cache_detail *cd);
+extern struct cache_detail svc_export_cache, svc_expkey_cache;
+
+static inline void exp_put(struct svc_export *exp)
+{
+	svc_export_put(&exp->h, &svc_export_cache);
+}
+
+static inline struct svc_export *
+exp_find(struct auth_domain *clp, int fsid_type, u32 *fsidv,
+	 struct cache_req *reqp)
+{
+	struct svc_expkey *ek = exp_find_key(clp, fsid_type, fsidv, reqp);
+	if (ek && !IS_ERR(ek)) {
+		struct svc_export *exp = ek->ek_export;
+		int err;
+		cache_get(&exp->h);
+		expkey_put(&ek->h, &svc_expkey_cache);
+		if (exp &&
+		    (err = cache_check(&svc_export_cache, &exp->h, reqp)))
+			exp = ERR_PTR(err);
+		return exp;
+	} else
+		return ERR_PTR(PTR_ERR(ek));
+}
 
 #endif /* __KERNEL__ */
 

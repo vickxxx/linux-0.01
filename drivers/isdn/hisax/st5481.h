@@ -219,13 +219,13 @@ enum {
 #define L1_EVENT_COUNT (EV_TIMER3 + 1)
 
 #define ERR(format, arg...) \
-printk(KERN_ERR __FILE__ ": " __FUNCTION__ ": " format "\n" , ## arg)
+printk(KERN_ERR __FILE__ ": %s: " format "\n" , __FUNCTION__ , ## arg)
 
 #define WARN(format, arg...) \
-printk(KERN_WARNING __FILE__ ": " __FUNCTION__ ": " format "\n" , ## arg)
+printk(KERN_WARNING __FILE__ ": %s: " format "\n" , __FUNCTION__ , ## arg)
 
 #define INFO(format, arg...) \
-printk(KERN_INFO __FILE__ ": " __FUNCTION__ ": " format "\n" , ## arg)
+printk(KERN_INFO __FILE__ ": %s: " format "\n" , __FUNCTION__ , ## arg)
 
 #include "st5481_hdlc.h"
 #include "fsm.h"
@@ -238,7 +238,7 @@ printk(KERN_INFO __FILE__ ": " __FUNCTION__ ": " format "\n" , ## arg)
 
 /* Generic FIFO structure */ 
 struct fifo {
-	u_char r,w,count,size;
+	u8 r,w,count,size;
 	spinlock_t lock;
 };
 
@@ -309,7 +309,7 @@ static inline int fifo_remove(struct fifo *fifo)
 typedef void (*ctrl_complete_t)(void *);
 
 typedef struct ctrl_msg {
-	devrequest dr;
+	struct usb_ctrlrequest dr;
 	ctrl_complete_t complete;
 	void *context;
 } ctrl_msg; 
@@ -346,7 +346,7 @@ struct st5481_d_out {
 struct st5481_b_out {
 	struct hdlc_vars hdlc_state;
 	struct urb *urb[2]; /* double buffering */
-	u_char flow_event;
+	u8 flow_event;
 	u_long busy;
 	struct sk_buff *tx_skb;
 };
@@ -409,10 +409,10 @@ struct st5481_adapter {
  * Submit an URB with error reporting. This is a macro so
  * the __FUNCTION__ returns the caller function name.
  */
-#define SUBMIT_URB(urb) \
+#define SUBMIT_URB(urb, mem_flags) \
 ({ \
 	int status; \
-	if ((status = usb_submit_urb(urb)) < 0) { \
+	if ((status = usb_submit_urb(urb, mem_flags)) < 0) { \
 		WARN("usb_submit_urb failed,status=%d", status); \
 	} \
         status; \
@@ -452,7 +452,7 @@ void st5481_release_isocpipes(struct urb* urb[2]);
 
 int  st5481_isoc_flatten(struct urb *urb);
 void st5481_usb_pipe_reset(struct st5481_adapter *adapter,
-		    u_char pipe, ctrl_complete_t complete, void *context);
+		    u8 pipe, ctrl_complete_t complete, void *context);
 void st5481_usb_ctrl_msg(struct st5481_adapter *adapter,
 		  u8 request, u8 requesttype, u16 value, u16 index,
 		  ctrl_complete_t complete, void *context);
@@ -478,11 +478,11 @@ extern int st5481_debug;
   if (level & __debug_variable) dump_iso_packet(__FUNCTION__,urb)
 
 static void __attribute__((unused))
-dump_iso_packet(const char *name,urb_t *urb)
+dump_iso_packet(const char *name, struct urb *urb)
 {
 	int i,j;
 	int len,ofs;
-	u_char *data;
+	u8 *data;
 
 	printk(KERN_DEBUG "%s: packets=%d,errors=%d\n",
 	       name,urb->number_of_packets,urb->error_count);

@@ -43,7 +43,6 @@
 #define TIOCSETD	0x5423
 #define TIOCGETD	0x5424
 #define TCSBRKP		0x5425	/* Needed for POSIX tcsendbreak() */
-#define TIOCTTYGSTRUCT	0x5426  /* For debugging only */
 #define TIOCSBRK	0x5427  /* BSD compatibility */
 #define TIOCCBRK	0x5428  /* BSD compatibility */
 #define TIOCGSID	_IOR('T', 20, int) /* Return the session ID of FD */
@@ -67,6 +66,11 @@
 #define TIOCGICOUNT	0x545D	/* read serial port inline interrupt counts */
 #define TIOCGHAYESESP   0x545E  /* Get Hayes ESP configuration */
 #define TIOCSHAYESESP   0x545F  /* Set Hayes ESP configuration */
+#define FIOQSIZE	0x5460	/* Get exact space used by quota */
+
+#define TIOCSTART	0x5461
+#define TIOCSTOP	0x5462
+#define TIOCSLTC	0x5462
 
 /* Used for packet mode */
 #define TIOCPKT_DATA		 0

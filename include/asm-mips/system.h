@@ -6,6 +6,10 @@
  * Copyright (C) 1994 - 1999 by Ralf Baechle
  * Copyright (C) 1996 by Paul M. Antoine
  * Copyright (C) 1994 - 1999 by Ralf Baechle
+ *
+ * Changed set_except_vector declaration to allow return of previous
+ * vector address value - necessary for "borrowing" vectors.
+ *
  * Kevin D. Kissell, kevink@mips.org and Carsten Langgaard, carstenl@mips.com
  * Copyright (C) 2000 MIPS Technologies, Inc.
  */
@@ -21,7 +25,7 @@
 #include <asm/ptrace.h>
 
 __asm__ (
-	".macro\t__sti\n\t"
+	".macro\tlocal_irq_enable\n\t"
 	".set\tpush\n\t"
 	".set\treorder\n\t"
 	".set\tnoat\n\t"
@@ -32,11 +36,10 @@ __asm__ (
 	".set\tpop\n\t"
 	".endm");
 
-static __inline__ void
-__sti(void)
+extern inline void local_irq_enable(void)
 {
 	__asm__ __volatile__(
-		"__sti"
+		"local_irq_enable"
 		: /* no outputs */
 		: /* no inputs */
 		: "memory");
@@ -50,7 +53,7 @@ __sti(void)
  * no nops at all.
  */
 __asm__ (
-	".macro\t__cli\n\t"
+	".macro\tlocal_irq_disable\n\t"
 	".set\tpush\n\t"
 	".set\tnoat\n\t"
 	"mfc0\t$1,$12\n\t"
@@ -64,31 +67,30 @@ __asm__ (
 	".set\tpop\n\t"
 	".endm");
 
-static __inline__ void
-__cli(void)
+extern inline void local_irq_disable(void)
 {
 	__asm__ __volatile__(
-		"__cli"
+		"local_irq_disable"
 		: /* no outputs */
 		: /* no inputs */
 		: "memory");
 }
 
 __asm__ (
-	".macro\t__save_flags flags\n\t"
+	".macro\tlocal_save_flags flags\n\t"
 	".set\tpush\n\t"
 	".set\treorder\n\t"
 	"mfc0\t\\flags, $12\n\t"
 	".set\tpop\n\t"
 	".endm");
 
-#define __save_flags(x)							\
+#define local_save_flags(x)							\
 __asm__ __volatile__(							\
-	"__save_flags %0"						\
+	"local_save_flags %0"						\
 	: "=r" (x))
 
 __asm__ (
-	".macro\t__save_and_cli result\n\t"
+	".macro\tlocal_irq_save result\n\t"
 	".set\tpush\n\t"
 	".set\treorder\n\t"
 	".set\tnoat\n\t"
@@ -103,33 +105,14 @@ __asm__ (
 	".set\tpop\n\t"
 	".endm");
 
-#define __save_and_cli(x)						\
+#define local_irq_save(x)						\
 __asm__ __volatile__(							\
-	"__save_and_cli\t%0"						\
+	"local_irq_save\t%0"						\
 	: "=r" (x)							\
 	: /* no inputs */						\
 	: "memory")
 
-__asm__ (
-	".macro\t__save_and_sti result\n\t"
-	".set\tpush\n\t"
-	".set\treorder\n\t"
-	".set\tnoat\n\t"
-	"mfc0\t\\result, $12\n\t"
-	"ori\t$1, \\result, 1\n\t"
-	".set\tnoreorder\n\t"
-	"mtc0\t$1, $12\n\t"
-	".set\tpop\n\t"
-	".endm");
-
-#define __save_and_sti(x)						\
-__asm__ __volatile__(							\
-	"__save_and_sti\t%0"						\
-	: "=r" (x)							\
-	: /* no inputs */						\
-	: "memory")
-
-__asm__(".macro\t__restore_flags flags\n\t"
+__asm__(".macro\tlocal_irq_restore flags\n\t"
 	".set\tnoreorder\n\t"
 	".set\tnoat\n\t"
 	"mfc0\t$1, $12\n\t"
@@ -145,47 +128,77 @@ __asm__(".macro\t__restore_flags flags\n\t"
 	".set\treorder\n\t"
 	".endm");
 
-#define __restore_flags(flags)						\
+#define local_irq_restore(flags)						\
 do {									\
 	unsigned long __tmp1;						\
 									\
 	__asm__ __volatile__(						\
-		"__restore_flags\t%0"					\
+		"local_irq_restore\t%0"					\
 		: "=r" (__tmp1)						\
 		: "0" (flags)						\
 		: "memory");						\
 } while(0)
 
-#ifdef CONFIG_SMP
+#define irqs_disabled()							\
+({									\
+	unsigned long flags;						\
+	local_save_flags(flags);					\
+	!(flags & 1);							\
+})
 
-extern void __global_sti(void);
-extern void __global_cli(void);
-extern unsigned long __global_save_flags(void);
-extern void __global_restore_flags(unsigned long);
-#  define sti() __global_sti()
-#  define cli() __global_cli()
-#  define save_flags(x) do { x = __global_save_flags(); } while (0)
-#  define restore_flags(x) __global_restore_flags(x)
-#  define save_and_cli(x) do { save_flags(x); cli(); } while(0)
-#  define save_and_sti(x) do { save_flags(x); sti(); } while(0)
+/*
+ * read_barrier_depends - Flush all pending reads that subsequents reads
+ * depend on.
+ *
+ * No data-dependent reads from memory-like regions are ever reordered
+ * over this barrier.  All reads preceding this primitive are guaranteed
+ * to access memory (but not necessarily other CPUs' caches) before any
+ * reads following this primitive that depend on the data return by
+ * any of the preceding reads.  This primitive is much lighter weight than
+ * rmb() on most CPUs, and is never heavier weight than is
+ * rmb().
+ *
+ * These ordering constraints are respected by both the local CPU
+ * and the compiler.
+ *
+ * Ordering is not guaranteed by anything other than these primitives,
+ * not even by data dependencies.  See the documentation for
+ * memory_barrier() for examples and URLs to more information.
+ *
+ * For example, the following code would force ordering (the initial
+ * value of "a" is zero, "b" is one, and "p" is "&a"):
+ *
+ * <programlisting>
+ *	CPU 0				CPU 1
+ *
+ *	b = 2;
+ *	memory_barrier();
+ *	p = &b;				q = p;
+ *					read_barrier_depends();
+ *					d = *q;
+ * </programlisting>
+ *
+ * because the read of "*q" depends on the read of "p" and these
+ * two reads are separated by a read_barrier_depends().  However,
+ * the following code, with the same initial values for "a" and "b":
+ *
+ * <programlisting>
+ *	CPU 0				CPU 1
+ *
+ *	a = 2;
+ *	memory_barrier();
+ *	b = 3;				y = b;
+ *					read_barrier_depends();
+ *					x = a;
+ * </programlisting>
+ *
+ * does not enforce ordering, since there is no data dependency between
+ * the read of "a" and the read of "b".  Therefore, on some CPUs, such
+ * as Alpha, "y" could be set to 3 and "x" to 0.  Use rmb()
+ * in cases like thiswhere there are no data dependencies.
+ */
 
-#else /* Single processor */
-
-#  define sti() __sti()
-#  define cli() __cli()
-#  define save_flags(x) __save_flags(x)
-#  define save_and_cli(x) __save_and_cli(x)
-#  define restore_flags(x) __restore_flags(x)
-#  define save_and_sti(x) __save_and_sti(x)
-
-#endif /* SMP */
-
-/* For spinlocks etc */
-#define local_irq_save(x)	__save_and_cli(x)
-#define local_irq_set(x)	__save_and_sti(x)
-#define local_irq_restore(x)	__restore_flags(x)
-#define local_irq_disable()	__cli()
-#define local_irq_enable()	__sti()
+#define read_barrier_depends()	do { } while(0)
 
 #ifdef CONFIG_CPU_HAS_SYNC
 #define __sync()				\
@@ -228,8 +241,8 @@ extern void __global_restore_flags(unsigned long);
 
 #define wmb()		fast_wmb()
 #define rmb()		fast_rmb()
-#define mb()		wbflush()
-#define iob()		wbflush()
+#define mb()		wbflush();
+#define iob()		wbflush();
 
 #else /* !CONFIG_CPU_HAS_WB */
 
@@ -244,10 +257,12 @@ extern void __global_restore_flags(unsigned long);
 #define smp_mb()	mb()
 #define smp_rmb()	rmb()
 #define smp_wmb()	wmb()
+#define smp_read_barrier_depends()	read_barrier_depends()
 #else
 #define smp_mb()	barrier()
 #define smp_rmb()	barrier()
 #define smp_wmb()	barrier()
+#define smp_read_barrier_depends()	do { } while(0)
 #endif
 
 #define set_mb(var, value) \
@@ -260,22 +275,20 @@ do { var = value; wmb(); } while (0)
  * switch_to(n) should switch tasks to task nr n, first
  * checking that n isn't the current task, in which case it does nothing.
  */
-extern asmlinkage void *resume(void *last, void *next);
-
-#define prepare_to_switch()	do { } while(0)
+extern asmlinkage void *resume(void *last, void *next, void *next_ti);
 
 struct task_struct;
 
 #define switch_to(prev,next,last) \
 do { \
-	(last) = resume(prev, next); \
+	(last) = resume(prev, next, next->thread_info); \
 } while(0)
 
 /*
  * For 32 and 64 bit operands we can take advantage of ll and sc.
  * FIXME: This doesn't work for R3000 machines.
  */
-static __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
+extern __inline__ unsigned long xchg_u32(volatile int * m, unsigned long val)
 {
 #ifdef CONFIG_CPU_HAS_LLSC
 	unsigned long dummy;
@@ -332,5 +345,13 @@ extern void __die_if_kernel(const char *, struct pt_regs *, const char *file,
 	__die(msg, regs, __FILE__ ":", __FUNCTION__, __LINE__)
 #define die_if_kernel(msg, regs)					\
 	__die_if_kernel(msg, regs, __FILE__ ":", __FUNCTION__, __LINE__)
+
+extern int serial_console;
+extern int stop_a_enabled;
+
+static __inline__ int con_is_present(void)
+{
+	return serial_console ? 0 : 1;
+}
 
 #endif /* _ASM_SYSTEM_H */

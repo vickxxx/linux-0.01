@@ -90,8 +90,7 @@
 
 #include <asm/hardware.h>
 
-
-
+#include "generic.h"
 
 typedef struct {
 	int speed;
@@ -102,11 +101,11 @@ typedef struct {
 } sa1100_dram_regs_t;
 
 
-
+static struct cpufreq_driver sa1100_driver;
 
 static sa1100_dram_regs_t sa1100_dram_settings[] =
 {
-	/* { mdcnfg, mdcas0, mdcas1, mdcas2 } */ /* clock frequency */
+	/* speed,     mdcnfg,     mdcas0,     mdcas1,     mdcas2  clock frequency */
 	{  59000, 0x00dc88a3, 0xcccccccf, 0xfffffffc, 0xffffffff }, /*  59.0 MHz */
 	{  73700, 0x011490a3, 0xcccccccf, 0xfffffffc, 0xffffffff }, /*  73.7 MHz */
 	{  88500, 0x014e90a3, 0xcccccccf, 0xfffffffc, 0xffffffff }, /*  88.5 MHz */
@@ -126,28 +125,25 @@ static sa1100_dram_regs_t sa1100_dram_settings[] =
 	{ 0, 0, 0, 0, 0 } /* last entry */
 };
 
-
-
-
 static void sa1100_update_dram_timings(int current_speed, int new_speed)
 {
 	sa1100_dram_regs_t *settings = sa1100_dram_settings;
 
 	/* find speed */
-	while(settings->speed != 0) {
+	while (settings->speed != 0) {
 		if(new_speed == settings->speed)
 			break;
 		
 		settings++;
 	}
 
-	if(settings->speed == 0) {
+	if (settings->speed == 0) {
 		panic("%s: couldn't find dram setting for speed %d\n",
 		      __FUNCTION__, new_speed);
 	}
 
 	/* No risk, no fun: run with interrupts on! */
-	if(new_speed > current_speed) {
+	if (new_speed > current_speed) {
 		/* We're going FASTER, so first relax the memory
 		 * timings before changing the core frequency 
 		 */
@@ -180,53 +176,73 @@ static void sa1100_update_dram_timings(int current_speed, int new_speed)
 	}
 }
 
-
-
-
-static int sa1100_dram_notifier(struct notifier_block *nb, 
-				unsigned long val, void *data)
+static int sa1100_target(struct cpufreq_policy *policy,
+			 unsigned int target_freq,
+			 unsigned int relation)
 {
-	struct cpufreq_info *ci = data;
-	
-	switch(val) {
-	case CPUFREQ_MINMAX:
-		cpufreq_updateminmax(data, sa1100_dram_settings->speed, -1);
-		break;
+	unsigned int cur = sa11x0_getspeed();
+	unsigned int new_ppcr;
 
-	case CPUFREQ_PRECHANGE:
-		if(ci->new_freq > ci->old_freq)
-			sa1100_update_dram_timings(ci->old_freq, ci->new_freq);
+	struct cpufreq_freqs freqs;
+	switch(relation){
+	case CPUFREQ_RELATION_L:
+		new_ppcr = sa11x0_freq_to_ppcr(target_freq);
+		if (sa11x0_ppcr_to_freq(new_ppcr) > policy->max)
+			new_ppcr--;
 		break;
-
-	case CPUFREQ_POSTCHANGE:
-		if(ci->new_freq < ci->old_freq)
-			sa1100_update_dram_timings(ci->old_freq, ci->new_freq);
+	case CPUFREQ_RELATION_H:
+		new_ppcr = sa11x0_freq_to_ppcr(target_freq);
+		if ((sa11x0_ppcr_to_freq(new_ppcr) > target_freq) &&
+		    (sa11x0_ppcr_to_freq(new_ppcr - 1) >= policy->min))
+			mew_ppcr--;
 		break;
-		
-	default:
-		printk(KERN_INFO "%s: ignoring unknown notifier type (%ld)\n",
-		       __FUNCTION__, val);
 	}
+
+	freqs.old = cur;
+	freqs.new = sa11x0_ppcr_to_freq(new_ppcr);
+	freqs.cpu = 0;
+
+	cpufreq_notify_transition(&freqs, CPUFREQ_PRECHANGE);
+
+	if (freqs.new > cur)
+		sa1100_update_dram_timings(cur, freqs.new);
+
+	PPCR = new_ppcr;
+
+	if (freqs.new < cur)
+		sa1100_update_dram_timings(cur, freqs.new);
+
+	cpufreq_notify_transition(&freqs, CPUFREQ_POSTCHANGE);
 
 	return 0;
 }
 
+static int __init sa1100_cpu_init(struct cpufreq_policy *policy)
+{
+	if (policy->cpu != 0)
+		return -EINVAL;
+	policy->cur = policy->min = policy->max = sa11x0_getspeed();
+	policy->policy = CPUFREQ_POLICY_POWERSAVE;
+	policy->cpuinfo.min_freq = 59000;
+	policy->cpuinfo.max_freq = 287000;
+	policy->cpuinfo.transition_latency = CPUFREQ_ETERNAL;
+	return 0;
+}
 
-
-
-static struct notifier_block sa1100_dram_block = {
-	notifier_call: sa1100_dram_notifier,
+static struct cpufreq_driver sa1100_driver = {
+	.verify		= sa11x0_verify_speed,
+	.target		= sa1100_target,
+	.init		= sa1100_cpu_init,
+	.name		= "sa1100",
 };
-
-
-
 
 static int __init sa1100_dram_init(void)
 {
-	return cpufreq_register_notifier(&sa1100_dram_block);
+	cpufreq_gov_userspace_init();
+ 	if ((processor_id & CPU_SA1100_MASK) == CPU_SA1100_ID)
+		return cpufreq_register_driver(&sa1100_driver);
+	else
+		return -ENODEV;
 }
 
-
-
-
-__initcall(sa1100_dram_init);
+arch_initcall(sa1100_dram_init);

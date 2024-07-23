@@ -24,16 +24,14 @@
  *
  *  To do:
  *    1. Multicast support.
+ *
+ *  Initial 2.5 cleanup Alan Cox <alan@redhat.com>  2002/10/28
  */
 
-#ifdef MODULE
 #include <linux/module.h>
 #include <linux/version.h>
-#endif
-
 #include <linux/config.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
@@ -43,21 +41,21 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/time.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-#include <asm/irq.h>
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/mca.h>
 #include <linux/delay.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/trdevice.h>
+
+#include <asm/system.h>
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/dma.h>
+#include <asm/irq.h>
 
 #if BITS_PER_LONG == 64
 #error FIXME: driver does not support 64-bit platforms
@@ -145,7 +143,6 @@ static int smctr_hardware_send_packet(struct net_device *dev,
 /* I */
 static int smctr_init_acbs(struct net_device *dev);
 static int smctr_init_adapter(struct net_device *dev);
-static int __init smctr_init_card(struct net_device *dev);
 static int smctr_init_card_real(struct net_device *dev);
 static int smctr_init_rx_bdbs(struct net_device *dev);
 static int smctr_init_rx_fcbs(struct net_device *dev);
@@ -153,7 +150,7 @@ static int smctr_init_shared_memory(struct net_device *dev);
 static int smctr_init_tx_bdbs(struct net_device *dev);
 static int smctr_init_tx_fcbs(struct net_device *dev);
 static int smctr_internal_self_test(struct net_device *dev);
-static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static int smctr_issue_enable_int_cmd(struct net_device *dev,
         __u16 interrupt_enable_mask);
 static int smctr_issue_int_ack(struct net_device *dev, __u16 iack_code,
@@ -341,7 +338,7 @@ static int smctr_alloc_shared_memory(struct net_device *dev)
         struct net_local *tp = (struct net_local *)dev->priv;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_alloc_shared_memory\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_alloc_shared_memory\n", dev->name);
 
         /* Allocate initial System Control Block pointer.
          * This pointer is located in the last page, last offset - 4.
@@ -419,7 +416,7 @@ static int smctr_alloc_shared_memory(struct net_device *dev)
         tp->tx_buff_end[BUG_QUEUE] = (__u16 *)smctr_malloc(dev, 0);
 
         /* Allocate MAC receive data buffers.
-         * MAC Rx buffer doesn't have to be on a 256 byte boundry.
+         * MAC Rx buffer doesn't have to be on a 256 byte boundary.
          */
         tp->rx_buff_head[MAC_QUEUE] = (__u16 *)smctr_malloc(dev,
                 RX_DATA_BUFFER_SIZE * tp->num_rx_bdbs[MAC_QUEUE]);
@@ -440,7 +437,7 @@ static int smctr_alloc_shared_memory(struct net_device *dev)
          * To guarantee a minimum of 256 contigous memory to
          * UM_Receive_Packet's lookahead pointer, before a page
          * change or ring end is encountered, place each rx buffer on
-         * a 256 byte boundry.
+         * a 256 byte boundary.
          */
         smctr_malloc(dev, TO_256_BYTE_BOUNDRY(tp->sh_mem_used));
         tp->rx_buff_head[NON_MAC_QUEUE] = (__u16 *)smctr_malloc(dev,
@@ -456,10 +453,9 @@ static int smctr_bypass_state(struct net_device *dev)
         int err;
 
 	if(smctr_debug > 10)
-        	printk("%s: smctr_bypass_state\n", dev->name);
+        	printk(KERN_DEBUG "%s: smctr_bypass_state\n", dev->name);
 
-        err = smctr_setup_single_cmd(dev, ACB_CMD_CHANGE_JOIN_STATE,
-                JS_BYPASS_STATE);
+        err = smctr_setup_single_cmd(dev, ACB_CMD_CHANGE_JOIN_STATE, JS_BYPASS_STATE);
 
         return (err);
 }
@@ -470,7 +466,7 @@ static int smctr_checksum_firmware(struct net_device *dev)
         __u16 i, checksum = 0;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_checksum_firmware\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_checksum_firmware\n", dev->name);
 
         smctr_enable_adapter_ctrl_store(dev);
 
@@ -544,25 +540,18 @@ static int smctr_chk_mca(struct net_device *dev)
 			dev->irq = 15;
                		break;
 	}
-	if(request_irq(dev->irq, smctr_interrupt, SA_SHIRQ, smctr_name, dev))
-                return (-ENODEV);
+	if (request_irq(dev->irq, smctr_interrupt, SA_SHIRQ, smctr_name, dev)) {
+		release_region(dev->base_addr, SMCTR_IO_EXTENT);
+		return -ENODEV;
+	}
 
 	/* Get RAM base */
 	r3 = mca_read_stored_pos(tp->slot_num, 3);
-	if(r3 & 0x8) 
-	{ 
-        	if(r3 & 0x80)
-               		tp->ram_base = ((__u32)(r3 & 0x7) << 13) + 0xFD0000;
-            	else
-			tp->ram_base = ((__u32)(r3 & 0x7) << 13) + 0x0D0000;
-        }
-	else 
-	{
-            	if(r3 & 0x80)
-               		tp->ram_base = ((__u32)(r3 & 0x7) << 13) + 0xFC0000;
-            	else
-			tp->ram_base = ((__u32)(r3 & 0x7) << 13) + 0x0C0000;
-        }
+	tp->ram_base = ((__u32)(r3 & 0x7) << 13) + 0x0C0000;
+	if (r3 & 0x8)
+		tp->ram_base += 0x010000;
+	if (r3 & 0x80)
+		tp->ram_base += 0xF00000;
 
 	/* Get Ram Size */
 	r3 &= 0x30;
@@ -573,26 +562,24 @@ static int smctr_chk_mca(struct net_device *dev)
 	tp->board_id |= TOKEN_MEDIA;
 
 	r4 = mca_read_stored_pos(tp->slot_num, 4);
-	if(r4 & 0x8)
-		tp->rom_base = ((__u32)(r4 & 0x7) << 13) + 0xD0000;
-	else
-		tp->rom_base = ((__u32)(r4 & 0x7) << 13) + 0xC0000;
+	tp->rom_base = ((__u32)(r4 & 0x7) << 13) + 0x0C0000;
+	if (r4 & 0x8)
+		tp->rom_base += 0x010000;
 
 	/* Get ROM size. */
 	r4 >>= 4;
-	if(r4 == 0)
-		tp->rom_size = CNFG_SIZE_8KB;
-	else
-	{
-		if(r4 == 1)
+	switch (r4) {
+		case 0:
+			tp->rom_size = CNFG_SIZE_8KB;
+			break;
+		case 1:
 			tp->rom_size = CNFG_SIZE_16KB;
-		else
-		{
-			if(r4 == 2)
-				tp->rom_size = CNFG_SIZE_32KB;
-			else
-				tp->rom_size = ROM_DISABLE;
-		}
+			break;
+		case 2:
+			tp->rom_size = CNFG_SIZE_32KB;
+			break;
+		default:
+			tp->rom_size = ROM_DISABLE;
 	}
 
 	/* Get Media Type. */
@@ -656,7 +643,7 @@ static int smctr_chg_rx_mask(struct net_device *dev)
         int err = 0;
 
         if(smctr_debug > 10)
-		printk("%s: smctr_chg_rx_mask\n", dev->name);
+		printk(KERN_DEBUG "%s: smctr_chg_rx_mask\n", dev->name);
 
         smctr_enable_16bit(dev);
         smctr_set_page(dev, (__u8 *)tp->ram_access);
@@ -787,7 +774,7 @@ static int smctr_decode_firmware(struct net_device *dev)
         __u16 *mem;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_decode_firmware\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_decode_firmware\n", dev->name);
 
         weight  = *(long *)(tp->ptr_ucode + WEIGHT_OFFSET);
         tsize   = *(__u8 *)(tp->ptr_ucode + TREE_SIZE_OFFSET);
@@ -852,7 +839,7 @@ static int smctr_disable_adapter_ctrl_store(struct net_device *dev)
         int ioaddr = dev->base_addr;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_disable_adapter_ctrl_store\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_disable_adapter_ctrl_store\n", dev->name);
 
         tp->trc_mask |= CSR_WCSS;
         outb(tp->trc_mask, ioaddr + CSR);
@@ -898,7 +885,7 @@ static int smctr_enable_adapter_ctrl_store(struct net_device *dev)
         int ioaddr = dev->base_addr;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_enable_adapter_ctrl_store\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_enable_adapter_ctrl_store\n", dev->name);
 
         smctr_set_trc_reset(ioaddr);
         smctr_enable_adapter_ram(dev);
@@ -915,7 +902,7 @@ static int smctr_enable_adapter_ram(struct net_device *dev)
         __u8 r;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_enable_adapter_ram\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_enable_adapter_ram\n", dev->name);
 
         r = inb(ioaddr + MSR);
         outb(MSR_MEMB | r, ioaddr + MSR);
@@ -956,12 +943,19 @@ static int __init smctr_chk_isa(struct net_device *dev)
         __u8 r1, r2, b, chksum = 0;
         __u16 r;
 	int i;
+	int err = -ENODEV;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_chk_isa %#4x\n", dev->name, ioaddr);
+                printk(KERN_DEBUG "%s: smctr_chk_isa %#4x\n", dev->name, ioaddr);
 
 	if((ioaddr & 0x1F) != 0)
-                return (-ENODEV);
+                goto out;
+
+        /* Grab the region so that no one else tries to probe our ioports. */
+	if (!request_region(ioaddr, SMCTR_IO_EXTENT, smctr_name)) {
+		err = -EBUSY;
+		goto out;
+	}
 
         /* Checksum SMC node address */
         for(i = 0; i < 8; i++)
@@ -970,17 +964,14 @@ static int __init smctr_chk_isa(struct net_device *dev)
                 chksum += b;
         }
 
-        if(chksum != NODE_ADDR_CKSUM)
-                return (-ENODEV);            /* Adapter Not Found */
-
-        /* Grab the region so that no one else tries to probe our ioports. */
-        request_region(ioaddr, SMCTR_IO_EXTENT, smctr_name);
+        if (chksum != NODE_ADDR_CKSUM)
+                goto out2;
 
         b = inb(ioaddr + BDID);
 	if(b != BRD_ID_8115T)
         {
-                printk("%s: The adapter found is not supported\n", dev->name);
-                return (-1);
+                printk(KERN_ERR "%s: The adapter found is not supported\n", dev->name);
+                goto out2;
         }
 
         /* Check for 8115T Board ID */
@@ -993,7 +984,7 @@ static int __init smctr_chk_isa(struct net_device *dev)
 
         /* value of RegF adds up the sum to 0xFF */
         if((r2 != 0xFF) && (r2 != 0xEE))
-                return (-1);
+                goto out2;
 
         /* Get adapter ID */
         tp->board_id = smctr_get_boardid(dev, 0);
@@ -1079,12 +1070,12 @@ static int __init smctr_chk_isa(struct net_device *dev)
                         break;
 
                 default:
-                        printk("%s: No IRQ found aborting\n", dev->name);
-                        return(-1);
+                        printk(KERN_ERR "%s: No IRQ found aborting\n", dev->name);
+                        goto out2;
          }
 
-        if(request_irq(dev->irq, smctr_interrupt, SA_SHIRQ, smctr_name, dev))
-                return (-ENODEV);
+        if (request_irq(dev->irq, smctr_interrupt, SA_SHIRQ, smctr_name, dev))
+                goto out2;
 
         /* Get 58x Rom Base */
         r1 = inb(ioaddr + CNFG_BIO_583);
@@ -1159,13 +1150,19 @@ static int __init smctr_chk_isa(struct net_device *dev)
                 /* see if the chip is corrupted
                 if(smctr_read_584_chksum(ioaddr))
                 {
-                        printk("%s: EEPROM Checksum Failure\n", dev->name);
-                        return(-1);
+                        printk(KERN_ERR "%s: EEPROM Checksum Failure\n", dev->name);
+                        goto out3;
                 }
 		*/
         }
 
         return (0);
+out3:
+	free_irq(dev->irq, dev);
+out2:
+	release_region(ioaddr, SMCTR_IO_EXTENT);
+out:
+	return err;
 }
 
 static int __init smctr_get_boardid(struct net_device *dev, int mca)
@@ -1334,7 +1331,7 @@ static unsigned int smctr_get_num_rx_bdbs(struct net_device *dev)
         mem_used += tp->tx_buff_size[BUG_QUEUE];
 
         /* Allocate MAC receive data buffers.
-         * MAC receive buffers don't have to be on a 256 byte boundry.
+         * MAC receive buffers don't have to be on a 256 byte boundary.
          */
         mem_used += RX_DATA_BUFFER_SIZE * tp->num_rx_bdbs[MAC_QUEUE];
 
@@ -1351,7 +1348,7 @@ static unsigned int smctr_get_num_rx_bdbs(struct net_device *dev)
          *
          * Make sure the mem_used offset at this point is the
          * same as in allocate_shared memory or the following
-         * boundry adjustment will be incorrect (i.e. not allocating
+         * boundary adjustment will be incorrect (i.e. not allocating
          * the non-mac receive buffers above cannot change the 256
          * byte offset).
          *
@@ -1412,7 +1409,7 @@ static FCBlock *smctr_get_tx_fcb(struct net_device *dev, __u16 queue,
         unsigned short *temp;
 
         if(smctr_debug > 20)
-                printk("smctr_get_tx_fcb\n");
+                printk(KERN_DEBUG "smctr_get_tx_fcb\n");
 
         /* check if there is enough FCB blocks */
         if(tp->num_tx_fcbs_used[queue] >= tp->num_tx_fcbs[queue])
@@ -1481,7 +1478,7 @@ static int smctr_hardware_send_packet(struct net_device *dev,
         FCBlock *fcb;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_hardware_send_packet\n", dev->name);
+                printk(KERN_DEBUG"%s: smctr_hardware_send_packet\n", dev->name);
 
         if(tp->status != OPEN)
                 return (-1);
@@ -1533,7 +1530,7 @@ static int smctr_init_acbs(struct net_device *dev)
         ACBlock *acb;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_init_acbs\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_init_acbs\n", dev->name);
 
         acb                     = tp->acb_head;
         acb->cmd_done_status    = (ACB_COMMAND_DONE | ACB_COMMAND_SUCCESSFUL);
@@ -1576,7 +1573,7 @@ static int smctr_init_adapter(struct net_device *dev)
         int err;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_init_adapter\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_init_adapter\n", dev->name);
 
         tp->status              = CLOSED;
         tp->page_offset_mask    = (tp->ram_usable * 1024) - 1;
@@ -1605,12 +1602,12 @@ static int smctr_init_adapter(struct net_device *dev)
 
         if(smctr_checksum_firmware(dev))
 	{
-                printk("%s: Previously loaded firmware is missing\n",dev->name);                return (-ENOENT);
+                printk(KERN_ERR "%s: Previously loaded firmware is missing\n",dev->name);                return (-ENOENT);
         }
 
         if((err = smctr_ram_memory_test(dev)))
 	{
-                printk("%s: RAM memory test failed.\n", dev->name);
+                printk(KERN_ERR "%s: RAM memory test failed.\n", dev->name);
                 return (-EIO);
         }
 
@@ -1621,7 +1618,7 @@ static int smctr_init_adapter(struct net_device *dev)
         smctr_reset_adapter(dev);
         if((err = smctr_init_card_real(dev)))
 	{
-                printk("%s: Initialization of card failed (%d)\n",
+                printk(KERN_ERR "%s: Initialization of card failed (%d)\n",
                         dev->name, err);
                 return (-EINVAL);
         }
@@ -1629,7 +1626,7 @@ static int smctr_init_adapter(struct net_device *dev)
         /* This routine clobbers the TRC's internal registers. */
         if((err = smctr_internal_self_test(dev)))
 	{
-                printk("%s: Card failed internal self test (%d)\n",
+                printk(KERN_ERR "%s: Card failed internal self test (%d)\n",
                         dev->name, err);
                 return (-EINVAL);
         }
@@ -1638,7 +1635,7 @@ static int smctr_init_adapter(struct net_device *dev)
         smctr_reset_adapter(dev);
         if((err = smctr_init_card_real(dev)))
 	{
-                printk("%s: Initialization of card failed (%d)\n",
+                printk(KERN_ERR "%s: Initialization of card failed (%d)\n",
                         dev->name, err);
                 return (-EINVAL);
         }
@@ -1653,22 +1650,13 @@ static int smctr_init_adapter(struct net_device *dev)
         return (0);
 }
 
-/* Dummy function */
-static int __init smctr_init_card(struct net_device *dev)
-{
-        if(smctr_debug > 10)
-                printk("%s: smctr_init_card\n", dev->name);
-
-        return (0);
-}
-
 static int smctr_init_card_real(struct net_device *dev)
 {
         struct net_local *tp = (struct net_local *)dev->priv;
         int err = 0;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_init_card_real\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_init_card_real\n", dev->name);
 
         tp->sh_mem_used = 0;
         tp->num_acbs    = NUM_OF_ACBS;
@@ -1731,7 +1719,7 @@ static int smctr_init_card_real(struct net_device *dev)
 
         if((err = smctr_issue_init_txrx_cmd(dev)))
 	{
-                printk("%s: Hardware failure\n", dev->name);
+                printk(KERN_ERR "%s: Hardware failure\n", dev->name);
                 return (err);
         }
 
@@ -1746,7 +1734,7 @@ static int smctr_init_rx_bdbs(struct net_device *dev)
         __u16 *buf;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_init_rx_bdbs\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_init_rx_bdbs\n", dev->name);
 
         for(i = 0; i < NUM_RX_QS_USED; i++)
         {
@@ -1847,7 +1835,7 @@ static int smctr_init_shared_memory(struct net_device *dev)
         __u32 *iscpb;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_init_shared_memory\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_init_shared_memory\n", dev->name);
 
         smctr_set_page(dev, (__u8 *)(unsigned int)tp->iscpb_ptr);
 
@@ -2005,7 +1993,7 @@ static int smctr_internal_self_test(struct net_device *dev)
 /*
  * The typical workload of the driver: Handle the network interface interrupts.
  */
-static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
         struct net_device *dev = dev_id;
         struct net_local *tp;
@@ -2017,16 +2005,19 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
         if(dev == NULL)
         {
-                printk("%s: irq %d for unknown device.\n", dev->name, irq);
-                return;
+                printk(KERN_CRIT "%s: irq %d for unknown device.\n", dev->name, irq);
+                return IRQ_NONE;
         }
 
         ioaddr = dev->base_addr;
         tp = (struct net_local *)dev->priv;
+        
 
         if(tp->status == NOT_INITIALIZED)
-                return;
+                return IRQ_NONE;
 
+        spin_lock(&tp->lock);
+        
         smctr_disable_bic_int(dev);
         smctr_enable_16bit(dev);
 
@@ -2046,7 +2037,8 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                 if(isb_type >= 0x10)
                 {
                         smctr_disable_16bit(dev);
-                        return;
+		        spin_unlock(&tp->lock);
+                        return IRQ_HANDLED;
                 }
 
                 err = HARDWARE_FAILED;
@@ -2063,56 +2055,45 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                                 switch(isb_subtype)
                                 {
                                         case 0:
-                                                tp->monitor_state
-                                                = MS_MONITOR_FSM_INACTIVE;
-                                                break;
+                                                tp->monitor_state = MS_MONITOR_FSM_INACTIVE;
+                                               break;
 
                                         case 1:
-                                                tp->monitor_state
-                                                = MS_REPEAT_BEACON_STATE;
+                                                tp->monitor_state = MS_REPEAT_BEACON_STATE;
                                                 break;
 
                                         case 2:
-                                                tp->monitor_state
-                                                = MS_REPEAT_CLAIM_TOKEN_STATE;
+                                                tp->monitor_state = MS_REPEAT_CLAIM_TOKEN_STATE;
                                                 break;
 
                                         case 3:
-                                                tp->monitor_state
-                                                = MS_TRANSMIT_CLAIM_TOKEN_STATE;                                                break;
+                                                tp->monitor_state = MS_TRANSMIT_CLAIM_TOKEN_STATE;                                                break;
 
                                         case 4:
-                                                tp->monitor_state
-                                                = MS_STANDBY_MONITOR_STATE;
+                                                tp->monitor_state = MS_STANDBY_MONITOR_STATE;
                                                 break;
 
                                         case 5:
-                                                tp->monitor_state
-                                                = MS_TRANSMIT_BEACON_STATE;
+                                                tp->monitor_state = MS_TRANSMIT_BEACON_STATE;
                                                 break;
 
                                         case 6:
-                                                tp->monitor_state
-                                                = MS_ACTIVE_MONITOR_STATE;
+                                                tp->monitor_state = MS_ACTIVE_MONITOR_STATE;
                                                 break;
 
                                         case 7:
-                                                tp->monitor_state
-                                                = MS_TRANSMIT_RING_PURGE_STATE;
+                                                tp->monitor_state = MS_TRANSMIT_RING_PURGE_STATE;
                                                 break;
 
                                         case 8:   /* diagnostic state */
                                                 break;
 
                                         case 9:
-                                                tp->monitor_state
-                                                = MS_BEACON_TEST_STATE;
+                                                tp->monitor_state = MS_BEACON_TEST_STATE;
                                                 if(smctr_lobe_media_test(dev))
                                                 {
-                                                        tp->ring_status_flags
-                                                        = RING_STATUS_CHANGED;
-                                                        tp->ring_status
-                                                        = AUTO_REMOVAL_ERROR;
+                                                        tp->ring_status_flags = RING_STATUS_CHANGED;
+                                                        tp->ring_status = AUTO_REMOVAL_ERROR;
                                                         smctr_ring_status_chg(dev);
                                                         smctr_bypass_state(dev);
                                                 }
@@ -2162,16 +2143,14 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                                 /* BUG QUEUE for TRC stuck receive BUG */
                                 if(isb_subtype & TX_PENDING_PRIORITY_2)
                                 {
-                                        if((err = smctr_tx_complete(dev,
-                                                BUG_QUEUE)) != SUCCESS)
+                                        if((err = smctr_tx_complete(dev, BUG_QUEUE)) != SUCCESS)
                                                 break;
                                 }
 
                                 /* NON-MAC frames only */
                                 if(isb_subtype & TX_PENDING_PRIORITY_1)
                                 {
-                                        if((err = smctr_tx_complete(dev,
-                                                NON_MAC_QUEUE)) != SUCCESS)
+                                        if((err = smctr_tx_complete(dev, NON_MAC_QUEUE)) != SUCCESS)
                                                 break;
                                 }
 
@@ -2189,40 +2168,31 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                                          */
                                         interrupt_unmask_bits |= 0x800;
 
-                                        tp->tx_queue_status[BUG_QUEUE]
-                                                = NOT_TRANSMITING;
-                                        if((err = smctr_tx_complete(dev,
-                                                BUG_QUEUE)) != SUCCESS)
+                                        tp->tx_queue_status[BUG_QUEUE] = NOT_TRANSMITING;
+                                        if((err = smctr_tx_complete(dev, BUG_QUEUE)) != SUCCESS)
                                                 break;
-                                        if((err = smctr_restart_tx_chain(dev,
-                                                BUG_QUEUE)) != SUCCESS)
+                                        if((err = smctr_restart_tx_chain(dev, BUG_QUEUE)) != SUCCESS)
                                                 break;
                                 }
 
                                 /* NON-MAC queue only */
                                 if(isb_subtype & TX_PENDING_PRIORITY_1)
                                 {
-                                        tp->tx_queue_status[NON_MAC_QUEUE]
-                                                = NOT_TRANSMITING;
-                                        if((err = smctr_tx_complete(dev,
-                                                NON_MAC_QUEUE)) != SUCCESS)
+                                        tp->tx_queue_status[NON_MAC_QUEUE] = NOT_TRANSMITING;
+                                        if((err = smctr_tx_complete(dev, NON_MAC_QUEUE)) != SUCCESS)
                                                 break;
-                                        if((err = smctr_restart_tx_chain(dev,
-                                                NON_MAC_QUEUE)) != SUCCESS)
+                                        if((err = smctr_restart_tx_chain(dev, NON_MAC_QUEUE)) != SUCCESS)
                                                 break;
                                 }
 
                                 /* MAC queue only */
                                 if(isb_subtype & TX_PENDING_PRIORITY_0)
                                 {
-                                        tp->tx_queue_status[MAC_QUEUE]
-                                                = NOT_TRANSMITING;
-                                        if((err = smctr_tx_complete(dev,
-                                                MAC_QUEUE)) != SUCCESS)
+                                        tp->tx_queue_status[MAC_QUEUE] = NOT_TRANSMITING;
+                                        if((err = smctr_tx_complete(dev, MAC_QUEUE)) != SUCCESS)
                                                 break;
 
-                                        err = smctr_restart_tx_chain(dev,
-                                                MAC_QUEUE);
+                                        err = smctr_restart_tx_chain(dev, MAC_QUEUE);
                                 }
                                 break;
 
@@ -2328,7 +2298,7 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                                                  * complete posted
                                                  */
                                                 interrupt_unmask_bits &= (~0x800);
-                                                printk("Jay please send bug\n");//                                              smctr_send_bug(dev);
+                                                printk(KERN_CRIT "Jay please send bug\n");//                                              smctr_send_bug(dev);
                                         }
 
                                         if(tp->ptr_rx_fifo_overruns)
@@ -2346,7 +2316,7 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                                 err = SUCCESS;
                                 if(tp->acb_head->cmd == ACB_CMD_HIC_NOP)
                                 {
-                                        printk("i1\n");
+                                        printk(KERN_ERR "i1\n");
                                         smctr_disable_16bit(dev);
 
                                         /* XXXXXXXXXXXXXXXXX */
@@ -2387,8 +2357,7 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
                                                         if(err != SUCCESS)
                                                         {
-                                                                tp->acb_pending
-= 0;
+                                                                tp->acb_pending = 0;
                                                                 break;
                                                         }
                                                 }
@@ -2397,18 +2366,14 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                                                 {
                                                         if(tp->ptr_una)
                                                         {
-                                                                tp->ptr_una[0]
-                                                                        = SWAP_BYTES(((SBlock *)tp->misc_command_data)->UNA[0]);
-                                                                tp->ptr_una[1]
-                                                                        = SWAP_BYTES(((SBlock *)tp->misc_command_data)->UNA[1]);
-                                                                tp->ptr_una[2]
-                                                                        = SWAP_BYTES(((SBlock *)tp->misc_command_data)->UNA[2]);
+                                                                tp->ptr_una[0] = SWAP_BYTES(((SBlock *)tp->misc_command_data)->UNA[0]);
+                                                                tp->ptr_una[1] = SWAP_BYTES(((SBlock *)tp->misc_command_data)->UNA[1]);
+                                                                tp->ptr_una[2] = SWAP_BYTES(((SBlock *)tp->misc_command_data)->UNA[2]);
                                                         }
 
                                                 }
 
-                                                if(((SBlock *)tp->misc_command_data)->Status_CHG_Indicate
-                                                        & READY_TO_SEND_RQ_INIT)                                                {
+                                                if(((SBlock *)tp->misc_command_data)->Status_CHG_Indicate & READY_TO_SEND_RQ_INIT)                                                {
                                                         err = smctr_send_rq_init(dev);
                                                 }
                                         }
@@ -2446,45 +2411,37 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
                                                 break;
 
                                         case 1:
-                                                tp->join_state
-                                                        = JS_LOBE_TEST_STATE;
+                                                tp->join_state = JS_LOBE_TEST_STATE;
                                                 break;
 
                                         case 2:
-                                                tp->join_state
-                                                        = JS_DETECT_MONITOR_PRESENT_STATE;
+                                                tp->join_state = JS_DETECT_MONITOR_PRESENT_STATE;
                                                 break;
 
                                         case 3:
-                                                tp->join_state
-                                                        = JS_AWAIT_NEW_MONITOR_STATE;
+                                                tp->join_state = JS_AWAIT_NEW_MONITOR_STATE;
                                                 break;
 
                                         case 4:
-                                                tp->join_state
-                                                        = JS_DUPLICATE_ADDRESS_TEST_STATE;
+                                                tp->join_state = JS_DUPLICATE_ADDRESS_TEST_STATE;
                                                 break;
 
                                         case 5:
-                                                tp->join_state
-                                                        = JS_NEIGHBOR_NOTIFICATION_STATE;
+                                                tp->join_state = JS_NEIGHBOR_NOTIFICATION_STATE;
                                                 break;
 
                                         case 6:
-                                                tp->join_state
-                                                        = JS_REQUEST_INITIALIZATION_STATE;
+                                                tp->join_state = JS_REQUEST_INITIALIZATION_STATE;
                                                 break;
 
                                         case 7:
-                                                tp->join_state
-                                                        = JS_JOIN_COMPLETE_STATE;
+                                                tp->join_state = JS_JOIN_COMPLETE_STATE;
                                                 tp->status = OPEN;
                                                 err = smctr_status_chg(dev);
                                                 break;
 
                                         case 8:
-                                                tp->join_state
-                                                        = JS_BYPASS_WAIT_STATE;
+                                                tp->join_state = JS_BYPASS_WAIT_STATE;
                                                 break;
                                 }
                                 break ;
@@ -2514,13 +2471,13 @@ static void smctr_interrupt(int irq, void *dev_id, struct pt_regs *regs)
          * but we still want to issue ack to ISB
          */
         if(!(interrupt_ack_code & 0xff00))
-                smctr_issue_int_ack(dev, interrupt_ack_code,
-                        interrupt_unmask_bits);
+                smctr_issue_int_ack(dev, interrupt_ack_code, interrupt_unmask_bits);
 
         smctr_disable_16bit(dev);
         smctr_enable_bic_int(dev);
+        spin_unlock(&tp->lock);
 
-        return;
+        return IRQ_HANDLED;
 }
 
 static int smctr_issue_enable_int_cmd(struct net_device *dev,
@@ -2533,16 +2490,14 @@ static int smctr_issue_enable_int_cmd(struct net_device *dev,
                 return (err);
 
         tp->sclb_ptr->int_mask_control  = interrupt_enable_mask;
-        tp->sclb_ptr->valid_command     = SCLB_VALID
-                | SCLB_CMD_CLEAR_INTERRUPT_MASK;
+        tp->sclb_ptr->valid_command     = SCLB_VALID | SCLB_CMD_CLEAR_INTERRUPT_MASK;
 
         smctr_set_ctrl_attention(dev);
 
         return (0);
 }
 
-static int smctr_issue_int_ack(struct net_device *dev, __u16 iack_code,
-        __u16 ibits)
+static int smctr_issue_int_ack(struct net_device *dev, __u16 iack_code, __u16 ibits)
 {
         struct net_local *tp = (struct net_local *)dev->priv;
 
@@ -2551,9 +2506,7 @@ static int smctr_issue_int_ack(struct net_device *dev, __u16 iack_code,
 
         tp->sclb_ptr->int_mask_control = ibits;
         tp->sclb_ptr->iack_code = iack_code << 1; /* use the offset from base */        tp->sclb_ptr->resume_control = 0;
-        tp->sclb_ptr->valid_command =
-                SCLB_VALID | SCLB_IACK_CODE_VALID
-                | SCLB_CMD_CLEAR_INTERRUPT_MASK;
+        tp->sclb_ptr->valid_command = SCLB_VALID | SCLB_IACK_CODE_VALID | SCLB_CMD_CLEAR_INTERRUPT_MASK;
 
         smctr_set_ctrl_attention(dev);
 
@@ -2729,7 +2682,7 @@ static int smctr_issue_init_txrx_cmd(struct net_device *dev)
 
         if((err = smctr_wait_cmd(dev)))
 	{
-                printk("%s: Hardware failure\n", dev->name);
+                printk(KERN_ERR "%s: Hardware failure\n", dev->name);
                 return (err);
         }
 
@@ -2864,7 +2817,7 @@ static int smctr_issue_resume_rx_fcb_cmd(struct net_device *dev, __u16 queue)
         struct net_local *tp = (struct net_local *)dev->priv;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_issue_resume_rx_fcb_cmd\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_issue_resume_rx_fcb_cmd\n", dev->name);
 
         if(smctr_wait_while_cbusy(dev))
                 return (-1);
@@ -2886,7 +2839,7 @@ static int smctr_issue_resume_tx_fcb_cmd(struct net_device *dev, __u16 queue)
         struct net_local *tp = (struct net_local *)dev->priv;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_issue_resume_tx_fcb_cmd\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_issue_resume_tx_fcb_cmd\n", dev->name);
 
         if(smctr_wait_while_cbusy(dev))
                 return (-1);
@@ -3035,7 +2988,7 @@ static int smctr_load_firmware(struct net_device *dev)
         int err = 0;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_load_firmware\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_load_firmware\n", dev->name);
 
         tp->ptr_ucode           = smctr_code;
         tp->num_of_tx_buffs     = 4;
@@ -3101,28 +3054,12 @@ static int smctr_load_node_addr(struct net_device *dev)
         unsigned int i;
         __u8 r;
 
-        /* Check if node address has been specified by user. (non-0) */
-        for(i = 0; ((i < 6) && (dev->dev_addr[i] == 0)); i++);
+        for(i = 0; i < 6; i++)
         {
-                if(i != 6)
-                {
-                        for(i = 0; i < 6; i++)
-                        {
-                                r = inb(ioaddr + LAR0 + i);
-                                dev->dev_addr[i] = (char)r;
-                        }
-                        dev->addr_len = 6;
-                }
-                else    /* Node addr. not given by user, read it from board. */
-                {
-                        for(i = 0; i < 6; i++)
-                        {
-                                r = inb(ioaddr + LAR0 + i);
-                                dev->dev_addr[i] = (char)r;
-                        }
-                        dev->addr_len = 6;
-                }
+                r = inb(ioaddr + LAR0 + i);
+                dev->dev_addr[i] = (char)r;
         }
+        dev->addr_len = 6;
 
         return (0);
 }
@@ -3151,7 +3088,7 @@ static int smctr_lobe_media_test(struct net_device *dev)
         unsigned short saved_rcv_mask;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_lobe_media_test\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_lobe_media_test\n", dev->name);
 
         /* Clear receive mask for lobe test. */
         saved_rcv_mask          = tp->receive_mask;
@@ -3225,7 +3162,7 @@ static int smctr_lobe_media_test_cmd(struct net_device *dev)
         int err;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_lobe_media_test_cmd\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_lobe_media_test_cmd\n", dev->name);
 
         /* Change to lobe media test state. */
         if(tp->monitor_state != MS_BEACON_TEST_STATE)
@@ -3233,7 +3170,7 @@ static int smctr_lobe_media_test_cmd(struct net_device *dev)
                 smctr_lobe_media_test_state(dev);
                 if(smctr_wait_cmd(dev))
                 {
-                        printk("Lobe Failed test state\n");
+                        printk(KERN_ERR "Lobe Failed test state\n");
                         return (LOBE_MEDIA_TEST_FAILED);
                 }
         }
@@ -3548,7 +3485,7 @@ static int smctr_open(struct net_device *dev)
         int err;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_open\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_open\n", dev->name);
 
         err = smctr_init_adapter(dev);
         if(err < 0)
@@ -3569,7 +3506,7 @@ static int smctr_open_tr(struct net_device *dev)
         int err;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_open_tr\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_open_tr\n", dev->name);
 
         /* Now we can actually open the adapter. */
         if(tp->status == OPEN)
@@ -3577,9 +3514,10 @@ static int smctr_open_tr(struct net_device *dev)
         if(tp->status != INITIALIZED)
                 return (-1);
 
-        save_flags(flags);
-        cli();
-
+	/* FIXME: it would work a lot better if we masked the irq sources
+	   on the card here, then we could skip the locking and poll nicely */
+	spin_lock_irqsave(&tp->lock, flags);
+	
         smctr_set_page(dev, (__u8 *)tp->ram_access);
 
         if((err = smctr_issue_resume_rx_fcb_cmd(dev, (short)MAC_QUEUE)))
@@ -3642,14 +3580,14 @@ static int smctr_open_tr(struct net_device *dev)
 				else
                                 {
                                         if(err == LOBE_MEDIA_TEST_FAILED)
-                                                printk("%s: Lobe Media Test Failure - Check cable?\n", dev->name);
+                                                printk(KERN_WARNING "%s: Lobe Media Test Failure - Check cable?\n", dev->name);
                                 }
                         }
                 }
         }
 
 out:
-        restore_flags(flags);
+        spin_unlock_irqrestore(&tp->lock, flags);
 
         return (err);
 }
@@ -3661,8 +3599,14 @@ out:
 int __init smctr_probe (struct net_device *dev)
 {
         int i;
-        int base_addr = dev ? dev->base_addr : 0;
+        int base_addr;
 
+#ifndef MODULE
+	netdev_boot_setup_check(dev);
+	tr_setup(dev);
+#endif
+
+        base_addr = dev->base_addr;
         if(base_addr > 0x1ff)    /* Check a single specified location. */
                 return (smctr_probe1(dev, base_addr));
         else if(base_addr != 0)  /* Don't probe at all. */
@@ -3671,13 +3615,25 @@ int __init smctr_probe (struct net_device *dev)
         for(i = 0; smctr_portlist[i]; i++)
         {
                 int ioaddr = smctr_portlist[i];
-                if(check_region(ioaddr, SMCTR_IO_EXTENT))
-                        continue;
                 if (!smctr_probe1(dev, ioaddr))
                         return (0);
         }
 
         return (-ENODEV);
+}
+
+static void cleanup_card(struct net_device *dev)
+{
+#ifdef CONFIG_MCA
+	struct net_local *tp = (struct net_local *)dev->priv;
+	if (tp->slot_num)
+		mca_mark_as_unused(tp->slot_num);
+#endif
+	release_region(dev->base_addr, SMCTR_IO_EXTENT);
+	if (dev->irq)
+		free_irq(dev->irq, dev);
+	if (dev->priv)
+		kfree(dev->priv);
 }
 
 static int __init smctr_probe1(struct net_device *dev, int ioaddr)
@@ -3690,12 +3646,6 @@ static int __init smctr_probe1(struct net_device *dev, int ioaddr)
         if(smctr_debug && version_printed++ == 0)
                 printk(version);
 
-#ifndef MODULE
-        dev = init_trdev(dev, 0);
-        if(dev == NULL)
-                return (-ENOMEM);
-#endif
-
         /* Setup this devices private information structure */
         tp = (struct net_local *)kmalloc(sizeof(struct net_local),
                 GFP_KERNEL);
@@ -3704,6 +3654,8 @@ static int __init smctr_probe1(struct net_device *dev, int ioaddr)
 		goto out;
 	}
         memset(tp, 0, sizeof(struct net_local));
+        spin_lock_init(&tp->lock);
+        
         dev->priv = tp;
         dev->base_addr = ioaddr;
 
@@ -3718,8 +3670,8 @@ static int __init smctr_probe1(struct net_device *dev, int ioaddr)
         }
 
         tp = (struct net_local *)dev->priv;
-        dev->rmem_start = dev->mem_start = tp->ram_base;
-        dev->rmem_end = dev->mem_end = dev->mem_start + 0x10000;
+        dev->mem_start = tp->ram_base;
+        dev->mem_end = dev->mem_start + 0x10000;
         ram = (__u32 *)phys_to_virt(dev->mem_start);
         tp->ram_access = *(__u32 *)&ram;
 	tp->status = NOT_INITIALIZED;
@@ -3727,9 +3679,10 @@ static int __init smctr_probe1(struct net_device *dev, int ioaddr)
         err = smctr_load_firmware(dev);
         if(err != UCODE_PRESENT && err != SUCCESS)
         {
-                printk("%s: Firmware load failed (%d)\n", dev->name, err);
+                printk(KERN_ERR "%s: Firmware load failed (%d)\n", dev->name, err);
+		cleanup_card(dev);
 		err = -EIO;
-		goto out_tp;
+		goto out;
         }
 
 	/* Allow user to specify ring speed on module insert. */
@@ -3738,13 +3691,11 @@ static int __init smctr_probe1(struct net_device *dev, int ioaddr)
 	else
 		tp->media_type = MEDIA_UTP_16;
 
-        printk("%s: %s %s at Io %#4x, Irq %d, Rom %#4x, Ram %#4x.\n",
+        printk(KERN_INFO "%s: %s %s at Io %#4x, Irq %d, Rom %#4x, Ram %#4x.\n",
                 dev->name, smctr_name, smctr_model,
                 (unsigned int)dev->base_addr,
                 dev->irq, tp->rom_base, tp->ram_base);
 
-	/* AKPM: there's no point in this */
-        dev->init               = smctr_init_card;
         dev->open               = smctr_open;
         dev->stop               = smctr_close;
         dev->hard_start_xmit    = smctr_send_packet;
@@ -3777,8 +3728,7 @@ static int smctr_process_rx_packet(MAC_HEADER *rmf, __u16 size,
                 {
                         /* Received MAC Frames Processed by RS. */
                         case INIT:
-                                if((rcode = smctr_rcv_init(dev, rmf,
-                                        &correlator)) == HARDWARE_FAILED)
+                                if((rcode = smctr_rcv_init(dev, rmf, &correlator)) == HARDWARE_FAILED)
                                 {
                                         return (rcode);
                                 }
@@ -3982,7 +3932,7 @@ static int smctr_process_rx_packet(MAC_HEADER *rmf, __u16 size,
         return (err);
 }
 
-/* Adapter RAM test. Incremental word ODD boundry data test. */
+/* Adapter RAM test. Incremental word ODD boundary data test. */
 static int smctr_ram_memory_test(struct net_device *dev)
 {
         struct net_local *tp = (struct net_local *)dev->priv;
@@ -3993,13 +3943,13 @@ static int smctr_ram_memory_test(struct net_device *dev)
         __u8 err = 0;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_ram_memory_test\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_ram_memory_test\n", dev->name);
 
         start_pattern   = 0x0001;
         pages_of_ram    = tp->ram_size / tp->ram_usable;
         pword           = tp->ram_access;
 
-        /* Incremental word ODD boundry test. */
+        /* Incremental word ODD boundary test. */
         for(page = 0; (page < pages_of_ram) && (~err);
                 page++, start_pattern += 0x8000)
         {
@@ -4401,7 +4351,7 @@ static int smctr_restart_tx_chain(struct net_device *dev, short queue)
         int err = 0;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_restart_tx_chain\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_restart_tx_chain\n", dev->name);
 
         if(tp->num_tx_fcbs_used[queue] != 0
                 && tp->tx_queue_status[queue] == NOT_TRANSMITING)
@@ -4418,7 +4368,7 @@ static int smctr_ring_status_chg(struct net_device *dev)
         struct net_local *tp = (struct net_local *)dev->priv;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_ring_status_chg\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_ring_status_chg\n", dev->name);
 
         /* Check for ring_status_flag: whenever MONITOR_STATE_BIT
          * Bit is set, check value of monitor_state, only then we
@@ -4502,7 +4452,7 @@ static int smctr_ring_status_chg(struct net_device *dev)
                         break;
 
                 case SIGNAL_LOSS:
-                        printk(KERN_INFO "%s: Singal Loss\n", dev->name);
+                        printk(KERN_INFO "%s: Signal Loss\n", dev->name);
                         tp->current_ring_status |= SIGNAL_LOSS;
                         break;
 
@@ -4522,9 +4472,8 @@ static int smctr_rx_frame(struct net_device *dev)
         __u8 *pbuff;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_rx_frame\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_rx_frame\n", dev->name);
 
-        cli();
         queue = tp->receive_queue_number;
 
         while((status = tp->rx_fcb_curr[queue]->frame_status) != SUCCESS)
@@ -4554,7 +4503,6 @@ static int smctr_rx_frame(struct net_device *dev)
                                 	skb_put(skb, rx_size);
 
                                 	memcpy(skb->data, pbuff, rx_size);
-                                	sti();
 
                                 	/* Update Counters */
                                 	tp->MacStat.rx_packets++;
@@ -4566,7 +4514,6 @@ static int smctr_rx_frame(struct net_device *dev)
                                 	netif_rx(skb);
 					dev->last_rx = jiffies;
 				} else {
-                                	sti();
 				}
                         }
                         else
@@ -4593,7 +4540,7 @@ static int smctr_send_dat(struct net_device *dev)
         FCBlock *fcb;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_send_dat\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_send_dat\n", dev->name);
 
         if((fcb = smctr_get_tx_fcb(dev, MAC_QUEUE,
                 sizeof(MAC_HEADER))) == (FCBlock *)(-1L))
@@ -4670,7 +4617,7 @@ static int smctr_send_packet(struct sk_buff *skb, struct net_device *dev)
         struct net_local *tp = (struct net_local *)dev->priv;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_send_packet\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_send_packet\n", dev->name);
 
         /*
          * Block a transmit overlap
@@ -4700,7 +4647,7 @@ static int smctr_send_lobe_media_test(struct net_device *dev)
 	int err;
 
         if(smctr_debug > 15)
-                printk("%s: smctr_send_lobe_media_test\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_send_lobe_media_test\n", dev->name);
 
         if((fcb = smctr_get_tx_fcb(dev, MAC_QUEUE, sizeof(struct trh_hdr)
                 + S_WRAP_DATA + S_WRAP_DATA)) == (FCBlock *)(-1L))
@@ -5241,7 +5188,7 @@ static unsigned short smctr_set_ctrl_attention(struct net_device *dev)
 static void smctr_set_multicast_list(struct net_device *dev)
 {
         if(smctr_debug > 10)
-                printk("%s: smctr_set_multicast_list\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_set_multicast_list\n", dev->name);
 
         return;
 }
@@ -5310,7 +5257,7 @@ static int smctr_set_rx_look_ahead(struct net_device *dev)
         __u16 sword, rword;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_set_rx_look_ahead_flag\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_set_rx_look_ahead_flag\n", dev->name);
 
         tp->adapter_flags &= ~(FORCED_16BIT_MODE);
         tp->adapter_flags |= RX_VALID_LOOKAHEAD;
@@ -5353,7 +5300,7 @@ static int smctr_setup_single_cmd(struct net_device *dev,
         unsigned int err;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_setup_single_cmd\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_setup_single_cmd\n", dev->name);
 
         if((err = smctr_wait_while_cbusy(dev)))
                 return (err);
@@ -5403,7 +5350,7 @@ static int smctr_status_chg(struct net_device *dev)
         struct net_local *tp = (struct net_local *)dev->priv;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_status_chg\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_status_chg\n", dev->name);
 
         switch(tp->status)
         {
@@ -5440,7 +5387,7 @@ static int smctr_trc_send_packet(struct net_device *dev, FCBlock *fcb,
         int err = 0;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_trc_send_packet\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_trc_send_packet\n", dev->name);
 
         fcb->info = FCB_CHAIN_END | FCB_ENABLE_TFS;
         if(tp->num_tx_fcbs[queue] != 1)
@@ -5462,7 +5409,7 @@ static __u16 smctr_tx_complete(struct net_device *dev, __u16 queue)
         int cstatus;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_tx_complete\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_tx_complete\n", dev->name);
 
         while((status = tp->tx_fcb_end[queue]->frame_status) != SUCCESS)
         {
@@ -5518,7 +5465,7 @@ static unsigned short smctr_tx_move_frame(struct net_device *dev,
         __u8 *frag, *page;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_tx_move_frame\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_tx_move_frame\n", dev->name);
 
         ram_usable = ((unsigned int)tp->ram_usable) << 10;
         frag       = skb->data;
@@ -5636,7 +5583,7 @@ static int smctr_update_tx_chain(struct net_device *dev, FCBlock *fcb,
         struct net_local *tp = (struct net_local *)dev->priv;
 
         if(smctr_debug > 20)
-                printk("smctr_update_tx_chain\n");
+                printk(KERN_DEBUG "smctr_update_tx_chain\n");
 
         if(tp->num_tx_fcbs_used[queue] <= 0)
                 return (HARDWARE_FAILED);
@@ -5653,7 +5600,7 @@ static int smctr_update_tx_chain(struct net_device *dev, FCBlock *fcb,
                 /* if all transmit buffer are cleared
                  * need to set the tx_buff_curr[] to tx_buff_head[]
                  * otherwise, tx buffer will be segregate and cannot
-                 * accomodate and buffer greater than (curr - head) and
+                 * accommodate and buffer greater than (curr - head) and
                  * (end - curr) since we do not allow wrap around allocation.
                  */
                 if(tp->tx_buff_used[queue] == 0)
@@ -5673,7 +5620,7 @@ static int smctr_wait_cmd(struct net_device *dev)
         unsigned int loop_count = 0x20000;
 
         if(smctr_debug > 10)
-                printk("%s: smctr_wait_cmd\n", dev->name);
+                printk(KERN_DEBUG "%s: smctr_wait_cmd\n", dev->name);
 
         while(loop_count)
         {
@@ -5744,33 +5691,31 @@ int init_module(void)
 {
         int i;
 
-        for(i = 0; i < SMCTR_MAX_ADAPTERS; i++)
-        {
+        for(i = 0; i < SMCTR_MAX_ADAPTERS; i++) {
+		struct net_device *dev = alloc_trdev(0);
                 irq[i] = 0;
                 mem[i] = 0;
-                dev_smctr[i] = NULL;
-                dev_smctr[i] = init_trdev(dev_smctr[i], 0);
-                if(dev_smctr[i] == NULL)
-                        return (-ENOMEM);
+		if (!dev)
+			return -ENOMEM;
+                dev->base_addr = io[i];
+                dev->irq       = irq[i];
+                dev->mem_start = mem[i];
 
-                dev_smctr[i]->base_addr = io[i];
-                dev_smctr[i]->irq       = irq[i];
-                dev_smctr[i]->mem_start = mem[i];
-                dev_smctr[i]->init      = &smctr_probe;
-
-                if(register_trdev(dev_smctr[i]) != 0)
-                {
-                        kfree(dev_smctr[i]);
-                        dev_smctr[i] = NULL;
-                        if(i == 0)
-                        {
-                                printk("%s: register_trdev() returned (<0).\n",
+		if (smctr_probe(dev) != 0) {
+                        kfree(dev);
+                        if (i == 0) {
+                                printk(KERN_ERR "%s: smctr_probe failed.\n",
                                         cardname);
-                                return (-EIO);
+                                return -EIO;
                         }
-                        else
-                                return (0);
+			return 0;
                 }
+		if (register_netdev(dev) != 0) {
+                        cleanup_card(dev);
+			kfree(dev);
+			continue;
+                }
+                dev_smctr[i] = dev;
         }
 
         return (0);
@@ -5780,26 +5725,13 @@ void cleanup_module(void)
 {
         int i;
 
-        for(i = 0; i < SMCTR_MAX_ADAPTERS; i++)
-        {
-                if(dev_smctr[i])
-                {
-#ifdef CONFIG_MCA
-			struct net_local *tp 
-				= (struct net_local *)dev_smctr[i]->priv;
-			if(tp->slot_num)
-				mca_mark_as_unused(tp->slot_num);
-#endif
-                        unregister_trdev(dev_smctr[i]);
-                        release_region(dev_smctr[i]->base_addr,
-                                SMCTR_IO_EXTENT);
-                        if(dev_smctr[i]->irq)
-                                free_irq(dev_smctr[i]->irq, dev_smctr[i]);
-                        if(dev_smctr[i]->priv)
-                                kfree(dev_smctr[i]->priv);
-                        kfree(dev_smctr[i]);
-                        dev_smctr[i] = NULL;
-                }
+        for(i = 0; i < SMCTR_MAX_ADAPTERS; i++) {
+		struct net_device *dev = dev_smctr[i];
+		if (dev) {
+			unregister_netdev(dev);
+			cleanup_card(dev);
+			kfree(dev);
+		}
         }
 }
 #endif /* MODULE */

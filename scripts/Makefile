@@ -1,45 +1,35 @@
-HEADER=header.tk
-TAIL=tail.tk
+###
+# scripts contains sources for various helper programs used throughout
+# the kernel for the build process.
+# ---------------------------------------------------------------------------
+# fix-dep: 	 Used to generate dependency information during build process
+# split-include: Divide all config symbols up in a number of files in
+#                include/config/...
+# docproc: 	 Preprocess .tmpl file in order to generate .sgml docs
+# conmakehash:	 Create arrays for initializing the kernel console tables
 
-# Previous versions always remade kconfig.tk because they always depended
-# on soundscript.  This runs fairly fast, and I can't find all the
-# Config.in files to depend on anyways.  So I'll force it to remake.
+host-progs	:= fixdep split-include conmakehash docproc kallsyms modpost \
+		   mk_elfconfig pnmtologo
+always		:= $(host-progs) empty.o
 
-kconfig.tk: dummy
+modpost-objs	:= modpost.o file2alias.o
 
-kconfig.tk: ${TOPDIR}/Makefile ${TOPDIR}/arch/${ARCH}/config.in \
-		tkparse ${HEADER} ${TAIL}
-	@if [ -f /usr/local/bin/wish ];	then \
-		echo '#!'"/usr/local/bin/wish -f" > kconfig.tk; \
-	else \
-		echo '#!'"/usr/bin/wish -f" > kconfig.tk; \
-	fi
-	cat ${HEADER} >> ./kconfig.tk
-	./tkparse < ../arch/${ARCH}/config.in >> kconfig.tk
-	echo "set defaults \"arch/${ARCH}/defconfig\"" >> kconfig.tk
-	echo "set ARCH \"${ARCH}\"" >> kconfig.tk
-	cat ${TAIL} >> kconfig.tk
-	chmod 755 kconfig.tk
+subdir-$(CONFIG_MODVERSIONS)	+= genksyms
 
-tkparse: tkparse.o tkcond.o tkgen.o
-	${HOSTCC} -o tkparse tkparse.o tkcond.o tkgen.o
+# Let clean descend into subdirs
+subdir-	+= lxdialog kconfig
 
-tkparse.o: tkparse.c tkparse.h
+# fixdep is needed to compile other host programs
+$(addprefix $(obj)/,$(filter-out fixdep,$(always)) $(subdir-y)): $(obj)/fixdep
 
-tkcond.o: tkcond.c tkparse.h
+# dependencies on generated files need to be listed explicitly
 
-tkgen.o: tkgen.c tkparse.h
+$(obj)/modpost.o $(obj)/file2alias.o: $(obj)/elfconfig.h
 
-tkparse.o tkcond.o tkgen.o:
-	$(HOSTCC) $(HOSTCFLAGS) -c -o $@ $(@:.o=.c)
+quiet_cmd_elfconfig = MKELF   $@
+      cmd_elfconfig = $(obj)/mk_elfconfig $(ARCH) < $< > $@
 
-docproc.o: docproc.c
-	$(HOSTCC) $(HOSTCFLAGS) -c -o $@ $(@:.o=.c)
+$(obj)/elfconfig.h: $(obj)/empty.o $(obj)/mk_elfconfig FORCE
+	$(call if_changed,elfconfig)
 
-docproc: docproc.o
-	${HOSTCC} -o docproc docproc.o
-
-clean:
-	rm -f *~ kconfig.tk *.o tkparse mkdep split-include docproc
-
-include $(TOPDIR)/Rules.make
+targets += elfconfig.h

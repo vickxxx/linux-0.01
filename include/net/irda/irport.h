@@ -67,13 +67,14 @@ struct irport_cb {
 	__u32 new_speed;
 	int mode;
 	int index;                 /* Instance index */
+	int transmitting;	   /* Are we transmitting ? */
 
 	spinlock_t lock;           /* For serializing operations */
 
 	/* For piggyback drivers */
 	void *priv;                
 	void (*change_speed)(void *priv, __u32 speed);
-	void (*interrupt)(int irq, void *dev_id, struct pt_regs *regs);
+	int (*interrupt)(int irq, void *dev_id, struct pt_regs *regs);
 };
 
 struct irport_cb *irport_open(int i, unsigned int iobase, unsigned int irq);
@@ -81,7 +82,7 @@ int  irport_close(struct irport_cb *self);
 void irport_start(struct irport_cb *self);
 void irport_stop(struct irport_cb *self);
 void irport_change_speed(void *priv, __u32 speed);
-void irport_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+irqreturn_t irport_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 int  irport_hard_xmit(struct sk_buff *skb, struct net_device *dev);
 int  irport_net_open(struct net_device *dev);
 int  irport_net_close(struct net_device *dev);

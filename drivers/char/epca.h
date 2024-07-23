@@ -78,7 +78,6 @@ static char *board_desc[] =
 
 #define FEPTIMEOUT 200000  
 #define SERIAL_TYPE_NORMAL  1
-#define SERIAL_TYPE_CALLOUT 2
 #define SERIAL_TYPE_INFO    3
 #define EPCA_EVENT_HANGUP   1
 #define EPCA_MAGIC          0x5c6df104L
@@ -121,11 +120,9 @@ struct channel
 	int    close_delay;
 	int    count;
 	int    blocked_open;
-	int    event;
+	ulong  event;
 	int    asyncflags;
 	uint   dev;
-	long   session;
-	long   pgrp;
 	ulong  statusflags;
 	ulong  c_iflag;
 	ulong  c_cflag;
@@ -138,11 +135,9 @@ struct channel
 	volatile struct board_chan  *brdchan;
 	struct digi_struct          digiext;
 	struct tty_struct           *tty;
-	struct termios              normal_termios;
-	struct termios              callout_termios;
 	wait_queue_head_t           open_wait;
 	wait_queue_head_t           close_wait;
-	struct tq_struct            tqueue;
+	struct work_struct            tqueue;
 	volatile struct global_data *mailbox;
 };
 

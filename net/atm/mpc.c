@@ -13,7 +13,7 @@
 #include <linux/ip.h>
 #include <asm/byteorder.h>
 #include <asm/uaccess.h>
-#include <asm/checksum.h>   /* for ip_fast_csum() */
+#include <net/checksum.h>   /* for ip_fast_csum() */
 #include <net/arp.h>
 #include <net/dst.h>
 #include <linux/proc_fs.h>
@@ -104,7 +104,7 @@ extern void mpc_proc_clean(void);
 
 struct mpoa_client *mpcs = NULL; /* FIXME */
 static struct atm_mpoa_qos *qos_head = NULL;
-static struct timer_list mpc_timer;
+static struct timer_list mpc_timer = TIMER_INITIALIZER(NULL, 0, 0);
 
 
 static struct mpoa_client *find_mpc_by_itfnum(int itf)
@@ -256,8 +256,7 @@ static struct net_device *find_lec_by_itfnum(int itf)
 		return NULL;
 
 	dev = atm_lane_ops->get_lec(itf);
-	if (atm_lane_ops->owner)
-		__MOD_DEC_USE_COUNT(atm_lane_ops->owner);
+	module_put(atm_lane_ops->owner);
 	return dev;
 }
 
@@ -326,7 +325,9 @@ static void stop_mpc(struct mpoa_client *mpc)
 	return;
 }
 
-static const char * __attribute__ ((unused)) mpoa_device_type_string(char type)
+static const char *mpoa_device_type_string(char type) __attribute__ ((unused));
+
+static const char *mpoa_device_type_string(char type)
 {
 	switch(type) {
 	case NON_MPOA:
@@ -431,7 +432,7 @@ static void lane2_assoc_ind(struct net_device *dev, uint8_t *mac_addr,
 		if (tlvs == NULL) return;
 	}
 	if (end_of_tlvs - tlvs != 0)
-		printk("mpoa: (%s) lane2_assoc_ind: ignoring %d bytes of trailing TLV carbage\n",
+		printk("mpoa: (%s) lane2_assoc_ind: ignoring %Zd bytes of trailing TLV carbage\n",
 		       dev->name, end_of_tlvs - tlvs);
 	return;
 }
@@ -522,7 +523,7 @@ static int send_via_shortcut(struct sk_buff *skb, struct mpoa_client *mpc)
 		memcpy(skb->data, &llc_snap_mpoa_data, sizeof(struct llc_snap_hdr));
 	}
 
-	atomic_add(skb->truesize, &entry->shortcut->sk->wmem_alloc);
+	atomic_add(skb->truesize, &entry->shortcut->sk->sk_wmem_alloc);
 	ATM_SKB(skb)->atm_options = entry->shortcut->atm_options;
 	entry->shortcut->send(entry->shortcut, skb);
 	entry->packets_fwded++;
@@ -666,7 +667,8 @@ static void mpc_push(struct atm_vcc *vcc, struct sk_buff *skb)
 	skb->dev = dev;
 	if (memcmp(skb->data, &llc_snap_mpoa_ctrl, sizeof(struct llc_snap_hdr)) == 0) {
 		dprintk("mpoa: (%s) mpc_push: control packet arrived\n", dev->name);
-		skb_queue_tail(&vcc->sk->receive_queue, skb);           /* Pass control packets to daemon */
+		/* Pass control packets to daemon */
+		skb_queue_tail(&vcc->sk->sk_receive_queue, skb);
 		wake_up(&vcc->sleep);
 		return;
 	}
@@ -731,7 +733,7 @@ static void mpc_push(struct atm_vcc *vcc, struct sk_buff *skb)
 	eg->packets_rcvd++;
 	mpc->eg_ops->put(eg);
 
-	memset(ATM_SKB(new_skb), 0, sizeof(struct atm_skb_data));
+	memset(ATM_SKB(skb), 0, sizeof(struct atm_skb_data));
 	netif_rx(new_skb);
 
 	return;
@@ -747,7 +749,7 @@ static struct atm_dev mpc_dev = {
 	.type	= "mpc",
 	.number	= 42,
 	.lock	= SPIN_LOCK_UNLOCKED
-	/* rest of the members will be 0 */
+	/* members not explicitly initialised will be 0 */
 };
 
 int atm_mpoa_mpoad_attach (struct atm_vcc *vcc, int arg)
@@ -804,7 +806,7 @@ int atm_mpoa_mpoad_attach (struct atm_vcc *vcc, int arg)
 			send_set_mps_ctrl_addr(mpc->mps_ctrl_addr, mpc);
 	}
 
-	MOD_INC_USE_COUNT;
+	__module_get(THIS_MODULE);
 	return arg;
 }
 
@@ -847,14 +849,14 @@ static void mpoad_close(struct atm_vcc *vcc)
 	mpc->in_ops->destroy_cache(mpc);
 	mpc->eg_ops->destroy_cache(mpc);
 
-	while ( (skb = skb_dequeue(&vcc->sk->receive_queue)) ){
+	while ((skb = skb_dequeue(&vcc->sk->sk_receive_queue))) {
 		atm_return(vcc, skb->truesize);
 		kfree_skb(skb);
 	}
 	
 	printk("mpoa: (%s) going down\n",
 		(mpc->dev) ? mpc->dev->name : "<unknown>");
-	MOD_DEC_USE_COUNT;
+	module_put(THIS_MODULE);
 
 	return;
 }
@@ -867,7 +869,7 @@ static int msg_from_mpoad(struct atm_vcc *vcc, struct sk_buff *skb)
 	
 	struct mpoa_client *mpc = find_mpc_by_vcc(vcc);
 	struct k_message *mesg = (struct k_message*)skb->data;
-	atomic_sub(skb->truesize, &vcc->sk->wmem_alloc);
+	atomic_sub(skb->truesize, &vcc->sk->sk_wmem_alloc);
 	
 	if (mpc == NULL) {
 		printk("mpoa: msg_from_mpoad: no mpc found\n");
@@ -944,7 +946,7 @@ int msg_to_mpoad(struct k_message *mesg, struct mpoa_client *mpc)
 	skb_put(skb, sizeof(struct k_message));
 	memcpy(skb->data, mesg, sizeof(struct k_message));
 	atm_force_charge(mpc->mpoad_vcc, skb->truesize);
-	skb_queue_tail(&mpc->mpoad_vcc->sk->receive_queue, skb);
+	skb_queue_tail(&mpc->mpoad_vcc->sk->sk_receive_queue, skb);
 	wake_up(&mpc->mpoad_vcc->sleep);
 
 	return 0;
@@ -1223,7 +1225,7 @@ static void purge_egress_shortcut(struct atm_vcc *vcc, eg_cache_entry *entry)
 		purge_msg->content.eg_info = entry->ctrl_info;
 
 	atm_force_charge(vcc, skb->truesize);
-	skb_queue_tail(&vcc->sk->receive_queue, skb);
+	skb_queue_tail(&vcc->sk->sk_receive_queue, skb);
 	wake_up(&vcc->sleep);
 	dprintk("mpoa: purge_egress_shortcut: exiting:\n");
 
@@ -1426,10 +1428,6 @@ void __exit atm_mpoa_cleanup(void)
 	struct atm_mpoa_qos *qos, *nextqos;
 	struct lec_priv *priv;
 
-	if (MOD_IN_USE) {
-		printk("mpc.c: module in use\n");
-		return;
-	}
 #ifdef CONFIG_PROC_FS
 	mpc_proc_clean();
 #endif

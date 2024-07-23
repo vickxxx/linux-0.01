@@ -1,7 +1,7 @@
 
     D-Link DL2000-based Gigabit Ethernet Adapter Installation
     for Linux
-    Nov 12, 2001
+    May 23, 2002
 
 Contents
 ========
@@ -182,7 +182,7 @@ driver.
 mtu=packet_size			- Specifies the maximum packet size. default
 				  is 1500.
 
-media=xxxxxxxxx			- Specifies the media type the NIC operates at.
+media=media_type		- Specifies the media type the NIC operates at.
 				  autosense	Autosensing active media.
 				  10mbps_hd	10Mbps half duplex.
 				  10mbps_fd	10Mbps full duplex.
@@ -195,28 +195,51 @@ media=xxxxxxxxx			- Specifies the media type the NIC operates at.
 				  2		10Mbps full duplex.
 				  3		100Mbps half duplex.
 				  4		100Mbps full duplex.
-				  5          	1000Mbps full duplex.
-				  6          	1000Mbps half duplex.
+				  5          	1000Mbps half duplex.
+				  6          	1000Mbps full duplex.
 
 				  By default, the NIC operates at autosense.
-				  Note that only 1000mbps_fd and 1000mbps_hd
-				  types are available for fiber adapter.
+				  1000mbps_fd and 1000mbps_hd types are only
+				  available for fiber adapter.
 
-vlan=x				- Specifies the VLAN ID. If vlan=0, the
+vlan=n				- Specifies the VLAN ID. If vlan=0, the
 				  Virtual Local Area Network (VLAN) function is
 				  disable.
 
-jumbo=x				- Specifies the jumbo frame support. If jumbo=1,
+jumbo=[0|1]			- Specifies the jumbo frame support. If jumbo=1,
 				  the NIC accept jumbo frames. By default, this
 				  function is disabled.
 				  Jumbo frame usually improve the performance
 				  int gigabit.
+				  This feature need jumbo frame compatible 
+				  remote.
 				  
-int_count			- Rx frame count each interrupt.
-int_timeout			- Rx DMA wait time for an interrupt. Proper 
-				  values of int_count and int_timeout bring 
-				  a conspicuous performance in the fast machine. 
-				  Ex. int_count=5 and int_timeout=750 
+rx_coalesce=m			- Number of rx frame handled each interrupt.
+rx_timeout=n			- Rx DMA wait time for an interrupt. 
+				  If set rx_coalesce > 0, hardware only assert 
+				  an interrupt for m frames. Hardware won't 
+				  assert rx interrupt until m frames received or
+				  reach timeout of n * 640 nano seconds. 
+				  Set proper rx_coalesce and rx_timeout can 
+				  reduce congestion collapse and overload which
+				  has been a bottlenect for high speed network.
+				  
+				  For example, rx_coalesce=10 rx_timeout=800.
+				  that is, hardware assert only 1 interrupt 
+				  for 10 frames received or timeout of 512 us. 
+
+tx_coalesce=n			- Number of tx frame handled each interrupt.
+				  Set n > 1 can reduce the interrupts 
+				  congestion usually lower performance of
+				  high speed network card. Default is 16.
+				  
+tx_flow=[1|0]			- Specifies the Tx flow control. If tx_flow=0, 
+				  the Tx flow control disable else driver
+				  autodetect.
+rx_flow=[1|0]			- Specifies the Rx flow control. If rx_flow=0, 
+				  the Rx flow control enable else driver
+				  autodetect.
+
 
 Configuration Script Sample
 ===========================

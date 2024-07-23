@@ -36,7 +36,6 @@ static char *version =
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
-#include <asm/auxio.h>
 #include <asm/pgtable.h>
 #include <asm/irq.h>
 
@@ -133,7 +132,7 @@ static void socal_reset(fc_channel *fc)
 	socal_enable(s);
 }
 
-static void inline socal_solicited(struct socal *s, unsigned long qno)
+static inline void socal_solicited(struct socal *s, unsigned long qno)
 {
 	socal_rsp *hwrsp;
 	socal_cq *sw_cq;
@@ -225,7 +224,7 @@ static void inline socal_solicited(struct socal *s, unsigned long qno)
 	}
 }
 
-static void inline socal_request (struct socal *s, u32 cmd)
+static inline void socal_request (struct socal *s, u32 cmd)
 {
 	SOCAL_SETIMASK(s, s->imask & ~(cmd & SOCAL_CMD_REQ_QALL));
 	SOD(("imask %08x %08x\n", s->imask, sbus_readl(s->regs + IMASK)));
@@ -242,7 +241,7 @@ static void inline socal_request (struct socal *s, u32 cmd)
 		s->curr_port ^= 1;
 }
 
-static void inline socal_unsolicited (struct socal *s, unsigned long qno)
+static inline void socal_unsolicited (struct socal *s, unsigned long qno)
 {
 	socal_rsp *hwrsp, *hwrspc;
 	socal_cq *sw_cq;
@@ -405,13 +404,13 @@ update_out:
 	}
 }
 
-static void socal_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t socal_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	u32 cmd;
 	unsigned long flags;
 	register struct socal *s = (struct socal *)dev_id;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(&s->lock, flags);
 	cmd = sbus_readl(s->regs + CMD);
 	for (; (cmd = SOCAL_INTR (s, cmd)); cmd = sbus_readl(s->regs + CMD)) {
 #ifdef SOCALDEBUG
@@ -428,7 +427,9 @@ static void socal_intr(int irq, void *dev_id, struct pt_regs *regs)
 		if (cmd & SOCAL_CMD_REQ_QALL)
 			socal_request (s, cmd);
 	}
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(&s->lock, flags);
+
+	return IRQ_HANDLED;
 }
 
 #define TOKEN(proto, port, token) (((proto)<<12)|(token)|(port))
@@ -667,6 +668,7 @@ static inline void socal_init(struct sbus_dev *sdev, int no)
 	s = kmalloc (sizeof (struct socal), GFP_KERNEL);
 	if (!s) return;
 	memset (s, 0, sizeof(struct socal));
+	spin_lock_init(&s->lock);
 	s->socal_no = no;
 
 	SOD(("socals %08lx socal_intr %08lx socal_hw_enque %08lx\n",
@@ -880,7 +882,6 @@ static void __exit socal_cleanup(void)
 	
 	for_each_socal(s) {
 		irq = s->port[0].fc.irq;
-		disable_irq (irq);
 		free_irq (irq, s);
 
 		fcp_release(&(s->port[0].fc), 2);
@@ -899,8 +900,6 @@ static void __exit socal_cleanup(void)
 				     s->req_cpu, s->req_dvma);
 	}
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(socal_probe);
 module_exit(socal_cleanup);

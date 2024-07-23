@@ -38,7 +38,7 @@ struct serial_struct {
 /*
  * Definitions for ZILOG_struct (and serial_struct) flags field
  */
-#define ZILOG_HUP_NOTIFY 0x0001 /* Notify getty on hangups and closes 
+#define ZILOG_HUP_NOTIFY 0x0001 /* Notify getty on hangups and closes
 				   on the callout port */
 #define ZILOG_FOURPORT  0x0002	/* Set OU1, OUT2 per AST Fourport settings */
 #define ZILOG_SAK	0x0004	/* Secure Attention Key (Orange book) */
@@ -74,7 +74,7 @@ struct serial_struct {
 #ifdef __KERNEL__
 /*
  * This is our internal structure for each serial port's state.
- * 
+ *
  * Many fields are paralleled by the structure used by the serial_struct
  * structure.
  *
@@ -144,16 +144,12 @@ struct dec_serial {
 	int			line;
 	int			count;	    /* # of fd on device */
 	int			blocked_open; /* # of blocked opens */
-	long			session; /* Session of opening process */
-	long			pgrp; /* pgrp of opening process */
 	unsigned char 		*xmit_buf;
 	int			xmit_head;
 	int			xmit_tail;
 	int			xmit_cnt;
 	struct tq_struct	tqueue;
 	struct tq_struct	tqueue_hangup;
-	struct termios		normal_termios;
-	struct termios		callout_termios;
 	wait_queue_head_t	open_wait;
 	wait_queue_head_t	close_wait;
 };

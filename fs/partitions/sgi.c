@@ -4,45 +4,38 @@
  *  Code extracted from drivers/block/genhd.c
  */
 
-#include <linux/fs.h>
-#include <linux/genhd.h>
-#include <linux/kernel.h>
-#include <linux/major.h>
-#include <linux/string.h>
-#include <linux/blk.h>
-
-#include <asm/byteorder.h>
-#include <asm/system.h>
-
 #include "check.h"
 #include "sgi.h"
 
-int sgi_partition(struct gendisk *hd, struct block_device *bdev, unsigned long first_sector, int current_minor)
+struct sgi_disklabel {
+	s32 magic_mushroom;		/* Big fat spliff... */
+	s16 root_part_num;		/* Root partition number */
+	s16 swap_part_num;		/* Swap partition number */
+	s8 boot_file[16];		/* Name of boot file for ARCS */
+	u8 _unused0[48];		/* Device parameter useless crapola.. */
+	struct sgi_volume {
+		s8 name[8];		/* Name of volume */
+		s32 block_num;		/* Logical block number */
+		s32 num_bytes;		/* How big, in bytes */
+	} volume[15];
+	struct sgi_partition {
+		u32 num_blocks;		/* Size in logical blocks */
+		u32 first_block;	/* First logical block */
+		s32 type;		/* Type of this partition */
+	} partitions[16];
+	s32 csum;			/* Disk label checksum */
+	s32 _unused1;			/* Padding */
+};
+
+int sgi_partition(struct parsed_partitions *state, struct block_device *bdev)
 {
 	int i, csum, magic;
+	int slot = 1;
 	unsigned int *ui, start, blocks, cs;
 	Sector sect;
-	kdev_t dev = to_kdev_t(bdev->bd_dev);
-	struct sgi_disklabel {
-		int magic_mushroom;         /* Big fat spliff... */
-		short root_part_num;        /* Root partition number */
-		short swap_part_num;        /* Swap partition number */
-		char boot_file[16];         /* Name of boot file for ARCS */
-		unsigned char _unused0[48]; /* Device parameter useless crapola.. */
-		struct sgi_volume {
-			char name[8];       /* Name of volume */
-			int  block_num;     /* Logical block number */
-			int  num_bytes;     /* How big, in bytes */
-		} volume[15];
-		struct sgi_partition {
-			int num_blocks;     /* Size in logical blocks */
-			int first_block;    /* First logical block */
-			int type;           /* Type of this partition */
-		} partitions[16];
-		int csum;                   /* Disk label checksum */
-		int _unused1;               /* Padding */
-	} *label;
+	struct sgi_disklabel *label;
 	struct sgi_partition *p;
+	char b[BDEVNAME_SIZE];
 
 	label = (struct sgi_disklabel *) read_dev_sector(bdev, 0, &sect);
 	if (!label)
@@ -51,7 +44,7 @@ int sgi_partition(struct gendisk *hd, struct block_device *bdev, unsigned long f
 	magic = label->magic_mushroom;
 	if(be32_to_cpu(magic) != SGI_LABEL_MAGIC) {
 		/*printk("Dev %s SGI disklabel: bad magic %08x\n",
-		       bdevname(dev), magic);*/
+		       bdevname(bdev, b), magic);*/
 		put_dev_sector(sect);
 		return 0;
 	}
@@ -62,7 +55,7 @@ int sgi_partition(struct gendisk *hd, struct block_device *bdev, unsigned long f
 	}
 	if(csum) {
 		printk(KERN_WARNING "Dev %s SGI disklabel: csum bad, label corrupted\n",
-		       bdevname(dev));
+		       bdevname(bdev, b));
 		put_dev_sector(sect);
 		return 0;
 	}
@@ -74,10 +67,8 @@ int sgi_partition(struct gendisk *hd, struct block_device *bdev, unsigned long f
 	for(i = 0; i < 16; i++, p++) {
 		blocks = be32_to_cpu(p->num_blocks);
 		start  = be32_to_cpu(p->first_block);
-		if(!blocks)
-			continue;
-		add_gd_partition(hd, current_minor, start, blocks);
-		current_minor++;
+		if (blocks)
+			put_partition(state, slot++, start, blocks);
 	}
 	printk("\n");
 	put_dev_sector(sect);

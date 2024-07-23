@@ -11,7 +11,7 @@
 #include <linux/types.h>
 #include <linux/ncp.h>
 
-#define NCP_MOUNT_VERSION 3
+#define NCP_MOUNT_VERSION 3	/* Binary */
 
 /* Values for flags */
 #define NCP_MOUNT_SOFT		0x0001
@@ -21,6 +21,7 @@
 #define NCP_MOUNT_NO_NFS	0x0010	/* do not use NFS namespace */
 #define NCP_MOUNT_EXTRAS	0x0020
 #define NCP_MOUNT_SYMLINKS	0x0040	/* enable symlinks */
+#define NCP_MOUNT_NFS_EXTRAS	0x0080	/* Enable use of NFS NS meta-info */
 
 struct ncp_mount_data {
 	int version;
@@ -40,7 +41,7 @@ struct ncp_mount_data {
 	__kernel_mode_t dir_mode;
 };
 
-#define NCP_MOUNT_VERSION_V4	(4)
+#define NCP_MOUNT_VERSION_V4	(4)	/* Binary or text */
 
 struct ncp_mount_data_v4 {
 	int version;
@@ -65,6 +66,8 @@ struct ncp_mount_data_v4 {
 	unsigned long dir_mode;
 };
 
+#define NCP_MOUNT_VERSION_V5	(5)	/* Text only */
+
 #ifdef __KERNEL__
 
 struct ncp_mount_data_kernel {
@@ -82,6 +85,7 @@ struct ncp_mount_data_kernel {
 	__kernel_gid32_t gid;
 	__kernel_mode_t  file_mode;
 	__kernel_mode_t  dir_mode;
+	int		 info_fd;
 };
 
 #endif /* __KERNEL__ */

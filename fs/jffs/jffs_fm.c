@@ -16,7 +16,6 @@
  * Copyright (C) 2000  Alexander Larsson (alex@cendio.se), Cendio Systems AB
  *
  */
-#define __NO_VERSION__
 #include <linux/slab.h>
 #include <linux/blkdev.h>
 #include <linux/jffs.h>
@@ -31,7 +30,7 @@ extern kmem_cache_t     *node_cache;
 
 /* This function creates a new shiny flash memory control structure.  */
 struct jffs_fmcontrol *
-jffs_build_begin(struct jffs_control *c, kdev_t dev)
+jffs_build_begin(struct jffs_control *c, int unit)
 {
 	struct jffs_fmcontrol *fmc;
 	struct mtd_info *mtd;
@@ -46,7 +45,7 @@ jffs_build_begin(struct jffs_control *c, kdev_t dev)
 	}
 	DJM(no_jffs_fmcontrol++);
 
-	mtd = get_mtd_device(NULL, MINOR(dev));
+	mtd = get_mtd_device(NULL, unit);
 
 	if (!mtd) {
 		kfree(fmc);

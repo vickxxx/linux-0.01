@@ -198,6 +198,7 @@ History:
 #include <asm/io.h>
 
 #define MAJOR_NR CM206_CDROM_MAJOR
+
 #include <linux/blk.h>
 
 #undef DEBUG
@@ -261,8 +262,6 @@ struct toc_struct {		/* private copy of Table of Contents */
 	uch track, fsm[3], q0;
 };
 
-static int cm206_blocksizes[1] = { 2048 };
-
 struct cm206_struct {
 	volatile ush intr_ds;	/* data status read on last interrupt */
 	volatile ush intr_ls;	/* uart line status read on last interrupt */
@@ -302,6 +301,8 @@ struct cm206_struct {
 #define PLAY_TO cd->toc[0]	/* toc[0] records end-time in play */
 
 static struct cm206_struct *cd;	/* the main memory structure */
+static struct request_queue cm206_queue;
+static spinlock_t cm206_lock = SPIN_LOCK_UNLOCKED;
 
 /* First, we define some polling functions. These are actually
    only being used in the initialization. */
@@ -344,6 +345,8 @@ inline void clear_ur(void)
 	}
 }
 
+static struct tasklet_struct cm206_tasklet;
+
 /* The interrupt handler. When the cm260 generates an interrupt, very
    much care has to be taken in reading out the registers in the right
    order; in case of a receive_buffer_full interrupt, first the
@@ -357,8 +360,7 @@ inline void clear_ur(void)
    as there seems so reason for this to happen.
 */
 
-static void cm206_interrupt(int sig, void *dev_id, struct pt_regs *regs)
-/* you rang? */
+static irqreturn_t cm206_interrupt(int sig, void *dev_id, struct pt_regs *regs)
 {
 	volatile ush fool;
 	cd->intr_ds = inw(r_data_status);	/* resets data_ready, data_error,
@@ -431,8 +433,9 @@ static void cm206_interrupt(int sig, void *dev_id, struct pt_regs *regs)
 	if (cd->background
 	    && (cd->adapter_last - cd->adapter_first == cd->max_sectors
 		|| cd->fifo_overflowed))
-		mark_bh(CM206_BH);	/* issue a stop read command */
+		tasklet_schedule(&cm206_tasklet);	/* issue a stop read command */
 	stats(interrupt);
+	return IRQ_HANDLED;
 }
 
 /* we have put the address of the wait queue in who */
@@ -448,6 +451,7 @@ void cm206_timeout(unsigned long who)
 int sleep_or_timeout(wait_queue_head_t * wait, int timeout)
 {
 	cd->timed_out = 0;
+	init_timer(&cd->timer);
 	cd->timer.data = (unsigned long) wait;
 	cd->timer.expires = jiffies + timeout;
 	add_timer(&cd->timer);
@@ -700,7 +704,7 @@ int read_sector(int start)
    4 c_stop waits for receive_buffer_full: 0xff
 */
 
-void cm206_bh(void)
+static void cm206_tasklet_func(unsigned long ignore)
 {
 	debug(("bh: %d\n", cd->background));
 	switch (cd->background) {
@@ -744,6 +748,8 @@ void cm206_bh(void)
 	}
 }
 
+static DECLARE_TASKLET(cm206_tasklet, cm206_tasklet_func, 0);
+
 /* This command clears the dsb_possible_media_change flag, so we must 
  * retain it.
  */
@@ -764,15 +770,6 @@ void get_disc_status(void)
 		debug(("get_disc_status: error\n"));
 	}
 }
-
-struct block_device_operations cm206_bdops =
-{
-	owner:			THIS_MODULE,
-	open:			cdrom_open,
-	release:		cdrom_release,
-	ioctl:			cdrom_ioctl,
-	check_media_change:	cdrom_media_changed,
-};
 
 /* The new open. The real opening strategy is defined in cdrom.c. */
 
@@ -855,24 +852,25 @@ static void do_cm206_request(request_queue_t * q)
 	long int i, cd_sec_no;
 	int quarter, error;
 	uch *source, *dest;
+	struct request *req;
 
-	while (1) {		/* repeat until all requests have been satisfied */
-		INIT_REQUEST;
-		if (QUEUE_EMPTY || CURRENT->rq_status == RQ_INACTIVE)
+	while (1) {	/* repeat until all requests have been satisfied */
+		req = elv_next_request(q);
+		if (!req)
 			return;
-		if (CURRENT->cmd != READ) {
-			debug(("Non-read command %d on cdrom\n",
-			       CURRENT->cmd));
-			end_request(0);
+
+		if (req->cmd != READ) {
+			debug(("Non-read command %d on cdrom\n", req->cmd));
+			end_request(req, 0);
 			continue;
 		}
-		spin_unlock_irq(&io_request_lock);
+		spin_unlock_irq(q->queue_lock);
 		error = 0;
-		for (i = 0; i < CURRENT->nr_sectors; i++) {
+		for (i = 0; i < req->nr_sectors; i++) {
 			int e1, e2;
-			cd_sec_no = (CURRENT->sector + i) / BLOCKS_ISO;	/* 4 times 512 bytes */
-			quarter = (CURRENT->sector + i) % BLOCKS_ISO;
-			dest = CURRENT->buffer + i * LINUX_BLOCK_SIZE;
+			cd_sec_no = (req->sector + i) / BLOCKS_ISO;	/* 4 times 512 bytes */
+			quarter = (req->sector + i) % BLOCKS_ISO;
+			dest = req->buffer + i * LINUX_BLOCK_SIZE;
 			/* is already in buffer memory? */
 			if (cd->sector_first <= cd_sec_no
 			    && cd_sec_no < cd->sector_last) {
@@ -893,8 +891,8 @@ static void do_cm206_request(request_queue_t * q)
 				debug(("cm206_request: %d %d\n", e1, e2));
 			}
 		}
-		spin_lock_irq(&io_request_lock);
-		end_request(!error);
+		spin_lock_irq(q->queue_lock);
+		end_request(req, !error);
 	}
 }
 
@@ -1325,57 +1323,64 @@ int cm206_select_speed(struct cdrom_device_info *cdi, int speed)
 }
 
 static struct cdrom_device_ops cm206_dops = {
-	open:cm206_open,
-	release:cm206_release,
-	drive_status:cm206_drive_status,
-	media_changed:cm206_media_changed,
-	tray_move:cm206_tray_move,
-	lock_door:cm206_lock_door,
-	select_speed:cm206_select_speed,
-	get_last_session:cm206_get_last_session,
-	get_mcn:cm206_get_upc,
-	reset:cm206_reset,
-	audio_ioctl:cm206_audio_ioctl,
-	dev_ioctl:cm206_ioctl,
-	capability:CDC_CLOSE_TRAY | CDC_OPEN_TRAY | CDC_LOCK |
-	    CDC_MULTI_SESSION | CDC_MEDIA_CHANGED |
-	    CDC_MCN | CDC_PLAY_AUDIO | CDC_SELECT_SPEED |
-	    CDC_IOCTLS | CDC_DRIVE_STATUS,
-	n_minors:1,
+	.open			= cm206_open,
+	.release		= cm206_release,
+	.drive_status		= cm206_drive_status,
+	.media_changed		= cm206_media_changed,
+	.tray_move		= cm206_tray_move,
+	.lock_door		= cm206_lock_door,
+	.select_speed		= cm206_select_speed,
+	.get_last_session	= cm206_get_last_session,
+	.get_mcn		= cm206_get_upc,
+	.reset			= cm206_reset,
+	.audio_ioctl		= cm206_audio_ioctl,
+	.dev_ioctl		= cm206_ioctl,
+	.capability		= CDC_CLOSE_TRAY | CDC_OPEN_TRAY | CDC_LOCK |
+				  CDC_MULTI_SESSION | CDC_MEDIA_CHANGED |
+				  CDC_MCN | CDC_PLAY_AUDIO | CDC_SELECT_SPEED |
+				  CDC_IOCTLS | CDC_DRIVE_STATUS,
+	.n_minors		= 1,
 };
 
 
 static struct cdrom_device_info cm206_info = {
-	ops:&cm206_dops,
-	speed:2,
-	capacity:1,
-	name:"cm206",
+	.ops		= &cm206_dops,
+	.speed		= 2,
+	.capacity	= 1,
+	.name		= "cm206",
 };
 
-/* This routine gets called during initialization if things go wrong,
- * can be used in cleanup_module as well. */
-static void cleanup(int level)
+static int cm206_block_open(struct inode *inode, struct file *file)
 {
-	switch (level) {
-	case 4:
-		if (unregister_cdrom(&cm206_info)) {
-			printk("Can't unregister cdrom cm206\n");
-			return;
-		}
-		if (devfs_unregister_blkdev(MAJOR_NR, "cm206")) {
-			printk("Can't unregister major cm206\n");
-			return;
-		}
-		blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
-	case 3:
-		free_irq(cm206_irq, NULL);
-	case 2:
-	case 1:
-		kfree(cd);
-		release_region(cm206_base, 16);
-	default:;
-	}
+	return cdrom_open(&cm206_info, inode, file);
 }
+
+static int cm206_block_release(struct inode *inode, struct file *file)
+{
+	return cdrom_release(&cm206_info, file);
+}
+
+static int cm206_block_ioctl(struct inode *inode, struct file *file,
+				unsigned cmd, unsigned long arg)
+{
+	return cdrom_ioctl(&cm206_info, inode, cmd, arg);
+}
+
+static int cm206_block_media_changed(struct gendisk *disk)
+{
+	return cdrom_media_changed(&cm206_info);
+}
+
+static struct block_device_operations cm206_bdops =
+{
+	.owner		= THIS_MODULE,
+	.open		= cm206_block_open,
+	.release	= cm206_block_release,
+	.ioctl		= cm206_block_ioctl,
+	.media_changed	= cm206_block_media_changed,
+};
+
+static struct gendisk *cm206_gendisk;
 
 /* This function probes for the adapter card. It returns the base
    address if it has found the adapter card. One can specify a base 
@@ -1430,6 +1435,7 @@ int __init cm206_init(void)
 {
 	uch e = 0;
 	long int size = sizeof(struct cm206_struct);
+	struct gendisk *disk;
 
 	printk(KERN_INFO "cm206 cdrom driver " REVISION);
 	cm206_base = probe_base_port(auto_probe ? 0 : cm206_base);
@@ -1441,7 +1447,7 @@ int __init cm206_init(void)
 	request_region(cm206_base, 16, "cm206");
 	cd = (struct cm206_struct *) kmalloc(size, GFP_KERNEL);
 	if (!cd)
-		return -EIO;
+               goto out_base;
 	/* Now we have found the adaptor card, try to reset it. As we have
 	 * found out earlier, this process generates an interrupt as well,
 	 * so we might just exploit that fact for irq probing! */
@@ -1449,8 +1455,7 @@ int __init cm206_init(void)
 	cm206_irq = probe_irq(auto_probe ? 0 : cm206_irq);
 	if (cm206_irq <= 0) {
 		printk("can't find IRQ!\n");
-		cleanup(1);
-		return -EIO;
+		goto out_probe;
 	} else
 		printk(" IRQ %d found\n", cm206_irq);
 #else
@@ -1467,8 +1472,7 @@ int __init cm206_init(void)
 	if (send_receive_polled(c_drive_configuration) !=
 	    c_drive_configuration) {
 		printk(KERN_INFO " drive not there\n");
-		cleanup(1);
-		return -EIO;
+		goto out_probe;
 	}
 	e = send_receive_polled(c_gimme);
 	printk(KERN_INFO "Firmware revision %d", e & dcf_revision_code);
@@ -1481,38 +1485,53 @@ int __init cm206_init(void)
 		printk(", motorized tray");
 	if (request_irq(cm206_irq, cm206_interrupt, 0, "cm206", NULL)) {
 		printk("\nUnable to reserve IRQ---aborted\n");
-		cleanup(2);
-		return -EIO;
+		goto out_probe;
 	}
 	printk(".\n");
-	if (devfs_register_blkdev(MAJOR_NR, "cm206", &cm206_bdops) != 0) {
-		printk(KERN_INFO "Cannot register for major %d!\n",
-		       MAJOR_NR);
-		cleanup(3);
-		return -EIO;
-	}
-	cm206_info.dev = MKDEV(MAJOR_NR, 0);
+
+	if (register_blkdev(MAJOR_NR, "cm206"))
+		goto out_blkdev;
+
+	disk = alloc_disk(1);
+	if (!disk)
+		goto out_disk;
+	disk->major = MAJOR_NR;
+	disk->first_minor = 0;
+	sprintf(disk->disk_name, "cm206cd");
+	disk->fops = &cm206_bdops;
+	disk->flags = GENHD_FL_CD;
+	cm206_gendisk = disk;
 	if (register_cdrom(&cm206_info) != 0) {
-		printk(KERN_INFO "Cannot register for cdrom %d!\n",
-		       MAJOR_NR);
-		cleanup(3);
-		return -EIO;
+		printk(KERN_INFO "Cannot register for cdrom %d!\n", MAJOR_NR);
+		goto out_cdrom;
 	}
-	devfs_plain_cdrom(&cm206_info, &cm206_bdops);
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	blksize_size[MAJOR_NR] = cm206_blocksizes;
-	read_ahead[MAJOR_NR] = 16;	/* reads ahead what? */
-	init_bh(CM206_BH, cm206_bh);
+	blk_init_queue(&cm206_queue, do_cm206_request, &cm206_lock);
+	blk_queue_hardsect_size(&cm206_queue, 2048);
+	disk->queue = &cm206_queue;
+	add_disk(disk);
 
 	memset(cd, 0, sizeof(*cd));	/* give'm some reasonable value */
 	cd->sector_last = -1;	/* flag no data buffered */
 	cd->adapter_last = -1;
+	init_timer(&cd->timer);
 	cd->timer.function = cm206_timeout;
 	cd->max_sectors = (inw(r_data_status) & ds_ram_size) ? 24 : 97;
 	printk(KERN_INFO "%d kB adapter memory available, "
 	       " %ld bytes kernel memory used.\n", cd->max_sectors * 2,
 	       size);
 	return 0;
+
+out_cdrom:
+	put_disk(disk);
+out_disk:
+	unregister_blkdev(MAJOR_NR, "cm206");
+out_blkdev:
+	free_irq(cm206_irq, NULL);
+out_probe:
+	kfree(cd);
+out_base:
+	release_region(cm206_base, 16);
+	return -EIO;
 }
 
 #ifdef MODULE
@@ -1544,7 +1563,20 @@ int __cm206_init(void)
 
 void __exit cm206_exit(void)
 {
-	cleanup(4);
+	del_gendisk(cm206_gendisk);
+	put_disk(cm206_gendisk);
+	if (unregister_cdrom(&cm206_info)) {
+		printk("Can't unregister cdrom cm206\n");
+		return;
+	}
+	if (unregister_blkdev(MAJOR_NR, "cm206")) {
+		printk("Can't unregister major cm206\n");
+		return;
+	}
+	blk_cleanup_queue(&cm206_queue);
+	free_irq(cm206_irq, NULL);
+	kfree(cd);
+	release_region(cm206_base, 16);
 	printk(KERN_INFO "cm206 removed\n");
 }
 

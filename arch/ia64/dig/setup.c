@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1999 Intel Corp.
  * Copyright (C) 1999, 2001 Hewlett-Packard Co
- * Copyright (C) 1999, 2001 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 1999, 2001, 2003 David Mosberger-Tang <davidm@hpl.hp.com>
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
  * Copyright (C) 1999 Vijay Chander <vijay@engr.sgi.com>
@@ -19,6 +19,7 @@
 #include <linux/console.h>
 #include <linux/timex.h>
 #include <linux/sched.h>
+#include <linux/root_dev.h>
 
 #include <asm/io.h>
 #include <asm/machvec.h>
@@ -34,8 +35,6 @@
  */
 char drive_info[4*16];
 
-unsigned char aux_device_present = 0xaa;	/* XXX remove this when legacy I/O is gone */
-
 void __init
 dig_setup (char **cmdline_p)
 {
@@ -46,7 +45,7 @@ dig_setup (char **cmdline_p)
 	 * is physical disk 1 partition 1 and the Linux root disk is
 	 * physical disk 1 partition 2.
 	 */
-	ROOT_DEV = to_kdev_t(0x0802);		/* default to second partition on first drive */
+	ROOT_DEV = Root_SDA2;		/* default to second partition on first drive */
 
 #ifdef CONFIG_SMP
 	init_smp_config();
@@ -57,7 +56,7 @@ dig_setup (char **cmdline_p)
 	if (!ia64_boot_param->console_info.num_rows
 	    || !ia64_boot_param->console_info.num_cols)
 	{
-		printk("dig_setup: warning: invalid screen-info, guessing 80x25\n");
+		printk(KERN_WARNING "dig_setup: warning: invalid screen-info, guessing 80x25\n");
 		orig_x = 0;
 		orig_y = 0;
 		num_cols = 80;
@@ -81,13 +80,7 @@ dig_setup (char **cmdline_p)
 	screen_info.orig_video_ega_bx = 3;	/* XXX fake */
 }
 
-void
+void __init
 dig_irq_init (void)
 {
-	/*
-	 * Disable the compatibility mode interrupts (8259 style), needs IN/OUT support
-	 * enabled.
-	 */
-	outb(0xff, 0xA1);
-	outb(0xff, 0x21);
 }

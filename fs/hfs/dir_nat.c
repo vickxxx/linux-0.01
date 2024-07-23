@@ -26,10 +26,11 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/smp_lock.h>
 
 /*================ Forward declarations ================*/
 
-static struct dentry *nat_lookup(struct inode *, struct dentry *);
+static struct dentry *nat_lookup(struct inode *, struct dentry *, struct nameidata *);
 static int nat_readdir(struct file *, void *, filldir_t);
 static int nat_rmdir(struct inode *, struct dentry *);
 static int nat_hdr_unlink(struct inode *, struct dentry *);
@@ -63,27 +64,27 @@ const struct hfs_name hfs_nat_reserved2[] = {
 #define ROOTINFO        (&hfs_nat_reserved2[0])
 
 struct file_operations hfs_nat_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	nat_readdir,
-	fsync:		file_fsync,
+	.read		= generic_read_dir,
+	.readdir	= nat_readdir,
+	.fsync		= file_fsync,
 };
 
 struct inode_operations hfs_nat_ndir_inode_operations = {
-	create:		hfs_create,
-	lookup:		nat_lookup,
-	unlink:		hfs_unlink,
-	mkdir:		hfs_mkdir,
-	rmdir:		nat_rmdir,
-	rename:		hfs_rename,
-	setattr:	hfs_notify_change,
+	.create		= hfs_create,
+	.lookup		= nat_lookup,
+	.unlink		= hfs_unlink,
+	.mkdir		= hfs_mkdir,
+	.rmdir		= nat_rmdir,
+	.rename		= hfs_rename,
+	.setattr	= hfs_notify_change,
 };
 
 struct inode_operations hfs_nat_hdir_inode_operations = {
-	create:		hfs_create,
-	lookup:		nat_lookup,
-	unlink:		nat_hdr_unlink,
-	rename:		nat_hdr_rename,
-	setattr:	hfs_notify_change,
+	.create		= hfs_create,
+	.lookup		= nat_lookup,
+	.unlink		= nat_hdr_unlink,
+	.rename		= nat_hdr_rename,
+	.setattr	= hfs_notify_change,
 };
 
 /*================ File-local functions ================*/
@@ -96,7 +97,7 @@ struct inode_operations hfs_nat_hdir_inode_operations = {
  * the inode corresponding to an entry in a directory, given the inode
  * for the directory and the name (and its length) of the entry.
  */
-static struct dentry *nat_lookup(struct inode * dir, struct dentry *dentry)
+static struct dentry *nat_lookup(struct inode * dir, struct dentry *dentry, struct nameidata *nd)
 {
 	ino_t dtype;
 	struct hfs_name cname;
@@ -104,6 +105,7 @@ static struct dentry *nat_lookup(struct inode * dir, struct dentry *dentry)
 	struct hfs_cat_key key;
 	struct inode *inode = NULL;
 
+	lock_kernel();
 	dentry->d_op = &hfs_dentry_operations;
 	entry = HFS_I(dir)->entry;
 	dtype = HFS_ITYPE(dir->i_ino);
@@ -154,6 +156,7 @@ static struct dentry *nat_lookup(struct inode * dir, struct dentry *dentry)
 	}
 
 done:
+	unlock_kernel();
 	d_add(dentry, inode);
 	return NULL;
 }
@@ -185,6 +188,8 @@ static int nat_readdir(struct file * filp,
         struct hfs_cat_entry *entry;
 	struct inode *dir = filp->f_dentry->d_inode;
 
+	lock_kernel();
+	
 	entry = HFS_I(dir)->entry;
 	type = HFS_ITYPE(dir->i_ino);
 	skip_dirs = (type == HFS_NAT_HDIR);
@@ -193,7 +198,7 @@ static int nat_readdir(struct file * filp,
 		/* Entry 0 is for "." */
 		if (filldir(dirent, DOT->Name, DOT_LEN, 0, dir->i_ino,
 			    DT_DIR)) {
-			return 0;
+			goto out;
 		}
 		filp->f_pos = 1;
 	}
@@ -210,7 +215,7 @@ static int nat_readdir(struct file * filp,
 
 		if (filldir(dirent, DOT_DOT->Name,
 			    DOT_DOT_LEN, 1, ntohl(cnid), DT_DIR)) {
-			return 0;
+			goto out;
 		}
 		filp->f_pos = 2;
 	}
@@ -221,11 +226,11 @@ static int nat_readdir(struct file * filp,
 
 	    	if (hfs_cat_open(entry, &brec) ||
 		    hfs_cat_next(entry, &brec, filp->f_pos - 2, &cnid, &type)) {
-			return 0;
+			goto out;
 		}
 		while (filp->f_pos < (dir->i_size - 2)) {
 			if (hfs_cat_next(entry, &brec, 1, &cnid, &type)) {
-				return 0;
+				goto out;
 			}
 			if (!skip_dirs || (type != HFS_CDR_DIR)) {
 				ino_t ino;
@@ -238,7 +243,7 @@ static int nat_readdir(struct file * filp,
 				if (filldir(dirent, tmp_name, len,
 					    filp->f_pos, ino, DT_UNKNOWN)) {
 					hfs_cat_close(entry, &brec);
-					return 0;
+					goto out;
 				}
 			}
 			++filp->f_pos;
@@ -253,7 +258,7 @@ static int nat_readdir(struct file * filp,
 				    DOT_APPLEDOUBLE_LEN, filp->f_pos,
 				    ntohl(entry->cnid) | HFS_NAT_HDIR,
 				    DT_UNKNOWN)) {
-				return 0;
+				goto out;
 			}
 		} else if (type == HFS_NAT_HDIR) {
 			/* In .AppleDouble entry 2 is for ".Parent" */
@@ -261,7 +266,7 @@ static int nat_readdir(struct file * filp,
 				    DOT_PARENT_LEN, filp->f_pos,
 				    ntohl(entry->cnid) | HFS_NAT_HDR,
 				    DT_UNKNOWN)) {
-				return 0;
+				goto out;
 			}
 		}
 		++filp->f_pos;
@@ -275,12 +280,14 @@ static int nat_readdir(struct file * filp,
 				    ROOTINFO_LEN, filp->f_pos,
 				    ntohl(entry->cnid) | HFS_NAT_HDR,
 				    DT_UNKNOWN)) {
-				return 0;
+				goto out;
 			}
 		}
 		++filp->f_pos;
 	}
 
+out:
+	unlock_kernel();
 	return 0;
 }
 
@@ -330,6 +337,7 @@ static int nat_rmdir(struct inode *parent, struct dentry *dentry)
 	struct hfs_name cname;
 	int error;
 
+	lock_kernel();
 	hfs_nameout(parent, &cname, dentry->d_name.name, dentry->d_name.len);
 	if (hfs_streq(cname.Name, cname.Len,
 		      DOT_APPLEDOUBLE->Name, DOT_APPLEDOUBLE_LEN)) {
@@ -346,6 +354,7 @@ static int nat_rmdir(struct inode *parent, struct dentry *dentry)
 	} else {
 		error = hfs_rmdir(parent, dentry);
 	}
+	unlock_kernel();
 	return error;
 }
 
@@ -366,9 +375,11 @@ static int nat_rmdir(struct inode *parent, struct dentry *dentry)
  */
 static int nat_hdr_unlink(struct inode *dir, struct dentry *dentry)
 {
-	struct hfs_cat_entry *entry = HFS_I(dir)->entry;
+	struct hfs_cat_entry *entry;
 	int error = 0;
 
+	lock_kernel();
+	entry = HFS_I(dir)->entry;
 	if (!HFS_SB(dir->i_sb)->s_afpd) {
 		/* Not in AFPD compatibility mode */
 		error = -EPERM;
@@ -393,6 +404,7 @@ static int nat_hdr_unlink(struct inode *dir, struct dentry *dentry)
 			}
 		}
 	}
+	unlock_kernel();
 	return error;
 }
 
@@ -417,9 +429,11 @@ static int nat_hdr_unlink(struct inode *dir, struct dentry *dentry)
 static int nat_hdr_rename(struct inode *old_dir, struct dentry *old_dentry,
 			  struct inode *new_dir, struct dentry *new_dentry)
 {
-	struct hfs_cat_entry *entry = HFS_I(old_dir)->entry;
+	struct hfs_cat_entry *entry;
 	int error = 0;
 
+	lock_kernel();
+	entry = HFS_I(old_dir)->entry;
 	if (!HFS_SB(old_dir->i_sb)->s_afpd) {
 		/* Not in AFPD compatibility mode */
 		error = -EPERM;
@@ -448,5 +462,6 @@ static int nat_hdr_rename(struct inode *old_dir, struct dentry *old_dentry,
 			error = -EPERM;
 		}
 	}
+	unlock_kernel();
 	return error;
 }

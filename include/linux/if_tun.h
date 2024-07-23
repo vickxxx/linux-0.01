@@ -40,7 +40,7 @@ struct tun_struct {
 	wait_queue_head_t	read_wait;
 	struct sk_buff_head	readq;
 
-	struct net_device	dev;
+	struct net_device	*dev;
 	struct net_device_stats	stats;
 
 	struct fasync_struct    *fasync;
@@ -49,10 +49,6 @@ struct tun_struct {
 	int debug;
 #endif  
 };
-
-#ifndef MIN
-#define MIN(a,b) ( (a)<(b) ? (a):(b) ) 
-#endif
 
 #endif /* __KERNEL__ */
 

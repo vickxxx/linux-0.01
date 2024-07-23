@@ -38,7 +38,9 @@
 /************************************************************************/
 
 #define SECTOR_BITS 		9
+#ifndef SECTOR_SIZE
 #define SECTOR_SIZE		(1 << SECTOR_BITS)
+#endif
 #define SECTORS_PER_FRAME	(CD_FRAMESIZE >> SECTOR_BITS)
 #define SECTOR_BUFFER_SIZE	(CD_FRAMESIZE * 32)
 #define SECTORS_BUFFER		(SECTOR_BUFFER_SIZE >> SECTOR_BITS)
@@ -83,7 +85,8 @@ struct ide_cd_config_flags {
 	__u8 audio_play		: 1; /* can do audio related commands */
 	__u8 close_tray		: 1; /* can close the tray */
 	__u8 writing		: 1; /* pseudo write in progress */
-	__u8 reserved		: 3;
+	__u8 mo_drive		: 1; /* drive is an MO device */
+	__u8 reserved		: 2;
 	byte max_speed;		     /* Max speed of the drive */
 };
 #define CDROM_CONFIG_FLAGS(drive) (&(((struct cdrom_info *)(drive->driver_data))->config_flags))
@@ -101,16 +104,6 @@ struct ide_cd_state_flags {
 };
 
 #define CDROM_STATE_FLAGS(drive) (&(((struct cdrom_info *)(drive->driver_data))->state_flags))
-
-struct packet_command {
-	char *buffer;
-	int buflen;
-	int stat;
-	int quiet;
-	int timeout;
-	struct request_sense *sense;
-	unsigned char c[12];
-};
 
 /* Structure of a MSF cdrom address. */
 struct atapi_msf {
@@ -435,7 +428,7 @@ struct atapi_mechstat_header {
 
 	byte     curlba[3];
 	byte     nslots;
-	__u8 short slot_tablelen;
+	__u16	 slot_tablelen;
 };
 
 
@@ -477,7 +470,6 @@ struct cdrom_info {
 	struct request_sense sense_data;
 
 	struct request request_sense_request;
-	struct packet_command request_sense_pc;
 	int dma;
 	int cmd;
 	unsigned long last_block;

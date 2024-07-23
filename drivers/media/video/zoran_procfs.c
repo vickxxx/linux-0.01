@@ -111,12 +111,18 @@ static int zoran_write_proc(struct file *file, const char *buffer, unsigned long
 
 	zr = (struct zoran *) data;
 
+	if(count > 32768)		/* Stupidity filter */
+		count = 32768;
+
 	string = sp = vmalloc(count + 1);
 	if (!string) {
 		printk(KERN_ERR "%s: write_proc: can not allocate memory\n", zr->name);
 		return -ENOMEM;
 	}
-	memcpy(string, buffer, count);
+	if (copy_from_user(string, buffer, count)) {
+		vfree(string);
+		return -EFAULT;
+	}
 	string[count] = 0;
 	DEBUG2(printk(KERN_INFO "%s: write_proc: name=%s count=%lu data=%x\n", zr->name, file->f_dentry->d_name.name, count, (int) data));
 	ldelim = " \t\n";

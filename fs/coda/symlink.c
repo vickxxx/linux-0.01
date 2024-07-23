@@ -9,11 +9,11 @@
 
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/errno.h>
-#include <linux/locks.h>
+#include <linux/pagemap.h>
 #include <linux/smp_lock.h>
 
 #include <linux/coda.h>
@@ -40,16 +40,16 @@ static int coda_symlink_filler(struct file *file, struct page *page)
 		goto fail;
 	SetPageUptodate(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return 0;
 
 fail:
 	SetPageError(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return error;
 }
 
 struct address_space_operations coda_symlink_aops = {
-	readpage:	coda_symlink_filler
+	.readpage	= coda_symlink_filler,
 };

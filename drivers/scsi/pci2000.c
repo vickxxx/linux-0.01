@@ -35,8 +35,9 @@
  ****************************************************************************/
 #define PCI2000_VERSION		"1.20"
 
+#include <linux/blk.h>
+#include <linux/interrupt.h>
 #include <linux/module.h>
-
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
@@ -45,15 +46,15 @@
 #include <linux/delay.h>
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
-#include <asm/dma.h>
-#include <asm/system.h>
-#include <asm/io.h>
-#include <linux/blk.h>
-#include "scsi.h"
-#include "hosts.h"
 #include <linux/stat.h>
 #include <linux/spinlock.h>
 
+#include <asm/dma.h>
+#include <asm/system.h>
+#include <asm/io.h>
+
+#include "scsi.h"
+#include "hosts.h"
 #include "pci2000.h"
 #include "psi_roy.h"
 
@@ -261,7 +262,7 @@ static int PsiRaidCmd (PADAPTER2000 padapter, char cmd)
  *	Returns:		TRUE if drive is not ready in time.
  *
  ****************************************************************/
-static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	{
 	struct Scsi_Host   *shost = NULL;	// Pointer to host data block
 	PADAPTER2000		padapter;		// Pointer to adapter control structure
@@ -274,12 +275,7 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	int					bus;
 	int					z;
     unsigned long		flags;
-
-    /*
-     * Disable interrupts, if they aren't already disabled and acquire
-     * the I/O spinlock.
-     */
-    spin_lock_irqsave (&io_request_lock, flags);
+    int handled = 0;
 
 	DEB(printk ("\npci2000 received interrupt "));
 	for ( z = 0; z < NumAdapters;  z++ )										// scan for interrupt to process
@@ -298,9 +294,11 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	if ( !shost )
 		{
 		DEB (printk ("\npci2000: not my interrupt"));
-		goto irq_return;
+		goto out;
 		}
 
+    handled = 1;
+	spin_lock_irqsave(shost->host_lock, flags);
 	padapter = HOSTDATA(shost);
 
 	tag0 = tag & 0x7F;															// mask off the error bit
@@ -392,14 +390,11 @@ irqProceed:;
 	outb_p (CMD_DONE, padapter->cmd);										// complete the op
 	OpDone (SCpnt, DID_OK << 16);
 
-irq_return:;
-    /*
-     * Release the I/O spinlock and restore the original flags
-     * which will enable interrupts if and only if they were
-     * enabled on entry.
-     */
-    spin_unlock_irqrestore (&io_request_lock, flags);
-	}
+irq_return:
+    spin_unlock_irqrestore(shost->host_lock, flags);
+out:
+    return IRQ_RETVAL(handled);
+}
 /****************************************************************
  *	Name:	Pci2000_QueueCommand
  *
@@ -414,11 +409,11 @@ irq_return:;
 int Pci2000_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	{
 	UCHAR		   *cdb = (UCHAR *)SCpnt->cmnd;					// Pointer to SCSI CDB
-	PADAPTER2000	padapter = HOSTDATA(SCpnt->host);			// Pointer to adapter control structure
+	PADAPTER2000	padapter = HOSTDATA(SCpnt->device->host);			// Pointer to adapter control structure
 	int				rc		 = -1;								// command return code
-	UCHAR			bus		 = SCpnt->channel;
-	UCHAR			pun		 = SCpnt->target;
-	UCHAR			lun		 = SCpnt->lun;
+	UCHAR			bus		 = SCpnt->device->channel;
+	UCHAR			pun		 = SCpnt->device->id;
+	UCHAR			lun		 = SCpnt->device->lun;
 	UCHAR			cmd;
 	PDEV2000		pdev	 = &padapter->dev[bus][pun];
 
@@ -513,13 +508,16 @@ int Pci2000_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 			
 			if ( SCpnt->use_sg )
 				{
-				SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, ((struct scatterlist *)SCpnt->request_buffer)->address, 
-										  SCpnt->request_bufflen, scsi_to_pci_dma_dir (SCpnt->sc_data_direction));
+				SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev,
+									  ((struct scatterlist *)SCpnt->request_buffer)->address,
+									  SCpnt->request_bufflen,
+									  scsi_to_pci_dma_dir (SCpnt->sc_data_direction));
 				}
 			else
 				{
-				SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, SCpnt->request_buffer, 
-										  SCpnt->request_bufflen, scsi_to_pci_dma_dir (SCpnt->sc_data_direction));
+				SCpnt->SCp.have_data_in = pci_map_single (padapter->pdev, SCpnt->request_buffer,
+									  SCpnt->request_bufflen,
+									  scsi_to_pci_dma_dir (SCpnt->sc_data_direction));
 				}
 			outl (SCpnt->SCp.have_data_in, padapter->mb2);
 			outl (SCpnt->request_bufflen, padapter->mb3);
@@ -614,41 +612,6 @@ finished:;
 	return 0;
 	}
 /****************************************************************
- *	Name:	internal_done :LOCAL
- *
- *	Description:	Done handler for non-queued commands
- *
- *	Parameters:		SCpnt - Pointer to SCSI command structure.
- *
- *	Returns:		Nothing.
- *
- ****************************************************************/
-static void internal_done (Scsi_Cmnd * SCpnt)
-	{
-	SCpnt->SCp.Status++;
-	}
-/****************************************************************
- *	Name:	Pci2000_Command
- *
- *	Description:	Process a command from the SCSI manager.
- *
- *	Parameters:		SCpnt - Pointer to SCSI command structure.
- *
- *	Returns:		Status code.
- *
- ****************************************************************/
-int Pci2000_Command (Scsi_Cmnd *SCpnt)
-	{
-	DEB(printk("pci2000_command: ..calling pci2000_queuecommand\n"));
-
-	Pci2000_QueueCommand (SCpnt, internal_done);
-
-    SCpnt->SCp.Status = 0;
-	while (!SCpnt->SCp.Status)
-		barrier ();
-	return SCpnt->result;
-	}
-/****************************************************************
  *	Name:	Pci2000_Detect
  *
  *	Description:	Detect and initialize our boards.
@@ -669,13 +632,6 @@ int Pci2000_Detect (Scsi_Host_Template *tpnt)
 	struct pci_dev	   *pdev = NULL;
 	UCHAR			   *consistent;
 	dma_addr_t			consistentDma;
-
-
-	if ( !pci_present () )
-		{
-		printk ("pci2000: PCI BIOS not present\n");
-		return 0;
-		}
 
 	while ( (pdev = pci_find_device (VENDOR_PSI, DEVICE_ROY_1, pdev)) != NULL )
 		{
@@ -711,7 +667,7 @@ int Pci2000_Detect (Scsi_Host_Template *tpnt)
 			goto unregister;
 			}
 		
-		scsi_set_pci_device(pshost, pdev);
+		scsi_set_device(pshost, &pdev->dev);
 		pshost->irq = pdev->irq;
 		setirq = 1;
 		padapter->irqOwned = 0;
@@ -824,7 +780,6 @@ int Pci2000_Release (struct Scsi_Host *pshost)
     return 0;
 	}
 
-#include "sd.h"
 /****************************************************************
  *	Name:	Pci2000_BiosParam
  *
@@ -838,15 +793,16 @@ int Pci2000_Release (struct Scsi_Host *pshost)
  *	Returns:		zero.
  *
  ****************************************************************/
-int Pci2000_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
+int Pci2000_BiosParam (struct scsi_device *sdev, struct block_device *dev,
+		sector_t capacity, int geom[])
 	{
 	PADAPTER2000	    padapter;
 
-	padapter = HOSTDATA(disk->device->host);
+	padapter = HOSTDATA(sdev->host);
 
 	if ( WaitReady (padapter) )
 		return 0;
-	outb_p (disk->device->id, padapter->mb0);
+	outb_p (sdev->id, padapter->mb0);
 	outb_p (CMD_GET_PARMS, padapter->cmd);
 	if ( WaitReady (padapter) )
 		return 0;
@@ -859,7 +815,20 @@ int Pci2000_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 
 
 MODULE_LICENSE("Dual BSD/GPL");
-/* Eventually this will go into an include file, but this will be later */
-static Scsi_Host_Template driver_template = PCI2000;
 
+static Scsi_Host_Template driver_template = {
+	.proc_name	= "pci2000",
+	.name		= "PCI-2000 SCSI Intelligent Disk Controller",
+	.detect		= Pci2000_Detect,
+	.release	= Pci2000_Release,
+	.queuecommand	= Pci2000_QueueCommand,
+	.abort		= Pci2000_Abort,
+	.reset		= Pci2000_Reset,
+	.bios_param	= Pci2000_BiosParam,
+	.can_queue	= 16,
+	.this_id	= -1,
+	.sg_tablesize	= 16,
+	.cmd_per_lun	= 1,
+	.use_clustering	= DISABLE_CLUSTERING,
+};
 #include "scsi_module.c"

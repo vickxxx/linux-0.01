@@ -49,22 +49,6 @@ extern unsigned int csum_partial (const unsigned char * buff, int len,
  * Here it is even more important to align src and dst on a 32-bit (or
  * even better 64-bit) boundary.
  */
-extern unsigned int csum_partial_copy (const char *src, char *dst, int len,
-				       unsigned int sum);
-
-/*
- * The same as csum_partial, but copies from user space (but on the
- * ia-64 we have just one address space, so this is identical to the
- * above).
- *
- * This is obsolete and will go away.
- */
-#define csum_partial_copy_fromuser csum_partial_copy
-
-/*
- * This is a new version of the above that records errors it finds in
- * *errp, but continues and zeros the rest of the buffer.
- */
 extern unsigned int csum_partial_copy_from_user (const char *src, char *dst,
 						 int len, unsigned int sum,
 						 int *errp);
@@ -88,12 +72,5 @@ csum_fold (unsigned int sum)
 	sum = (sum & 0xffff) + (sum >> 16);
 	return ~sum;
 }
-
-#define _HAVE_ARCH_IPV6_CSUM
-extern unsigned short int csum_ipv6_magic (struct in6_addr *saddr,
-					   struct in6_addr *daddr,
-					   __u16 len,
-					   unsigned short proto,
-					   unsigned int sum);
 
 #endif /* _ASM_IA64_CHECKSUM_H */

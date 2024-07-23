@@ -48,6 +48,7 @@ struct serial_struct {
 	unsigned char	*iomem_base;
 	unsigned short	iomem_reg_shift;
 	unsigned int	port_high;
+	unsigned long	iomap_base;	/* cookie passed into ioremap */
 	int	reserved[1];
 };
 
@@ -80,7 +81,6 @@ struct serial_struct {
 #define SERIAL_IO_PORT	0
 #define SERIAL_IO_HUB6	1
 #define SERIAL_IO_MEM	2
-#define SERIAL_IO_GSC	3
 
 struct serial_uart_config {
 	char	*name;
@@ -91,6 +91,7 @@ struct serial_uart_config {
 #define UART_CLEAR_FIFO		0x01
 #define UART_USE_FIFO		0x02
 #define UART_STARTECH		0x04
+#define UART_NATSEMI		0x08
 
 /*
  * Definitions for async_struct (and serial_struct) flags field
@@ -179,14 +180,9 @@ struct serial_icounter_struct {
 extern int register_serial(struct serial_struct *req);
 extern void unregister_serial(int line);
 
-/* Allow complicated architectures to specify rs_table[] at run time */
-extern int early_serial_setup(struct serial_struct *req);
-
-#ifdef CONFIG_ACPI
-/* tty ports reserved for the ACPI serial console port and debug port */
-#define ACPI_SERIAL_CONSOLE_PORT        4
-#define ACPI_SERIAL_DEBUG_PORT          5
-#endif
+/* Allow architectures to override entries in serial8250_ports[] at run time: */
+struct uart_port;	/* forward declaration */
+extern int early_serial_setup(struct uart_port *port);
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_SERIAL_H */

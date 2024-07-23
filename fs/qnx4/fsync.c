@@ -12,19 +12,16 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
-#include <linux/locks.h>
 #include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
 
 #include <linux/fs.h>
 #include <linux/qnx4_fs.h>
 
-#include <asm/segment.h>
 #include <asm/system.h>
-
-#define blocksize QNX4_BLOCK_SIZE
 
 /*
  * The functions for qnx4 fs file synchronization.
@@ -40,7 +37,7 @@ static int sync_block(struct inode *inode, unsigned short *block, int wait)
 	if (!*block)
 		return 0;
 	tmp = *block;
-	bh = get_hash_table(inode->i_dev, *block, blocksize);
+	bh = sb_find_get_block(inode->i_sb, *block);
 	if (!bh)
 		return 0;
 	if (*block != tmp) {
@@ -74,7 +71,7 @@ static int sync_iblock(struct inode *inode, unsigned short *iblock,
 	rc = sync_block(inode, iblock, wait);
 	if (rc)
 		return rc;
-	*bh = bread(inode->i_dev, tmp, blocksize);
+	*bh = sb_bread(inode->i_sb, tmp);
 	if (tmp != *iblock) {
 		brelse(*bh);
 		*bh = NULL;
@@ -93,7 +90,7 @@ static int sync_direct(struct inode *inode, int wait)
 
 	for (i = 0; i < 7; i++) {
 		rc = sync_block(inode,
-				(unsigned short *) inode->u.qnx4_i.i_first_xtnt.xtnt_blk + i, wait);
+				(unsigned short *) qnx4_raw_inode(inode)->di_first_xtnt.xtnt_blk + i, wait);
 		if (rc > 0)
 			break;
 		if (rc)

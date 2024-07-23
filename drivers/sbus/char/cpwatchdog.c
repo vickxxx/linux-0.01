@@ -180,8 +180,6 @@ static int wd1_timeout = 0;
 static int wd2_timeout = 0;
 
 #ifdef MODULE
-EXPORT_NO_SYMBOLS;
-
 MODULE_PARM		(wd0_timeout, "i");
 MODULE_PARM_DESC(wd0_timeout, "Default watchdog0 timeout in 1/10secs");
 MODULE_PARM 	(wd1_timeout, "i");
@@ -203,7 +201,7 @@ MODULE_SUPPORTED_DEVICE
 #ifdef WD_DEBUG
 static void wd_dumpregs(void);
 #endif
-static void wd_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t wd_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void wd_toggleintr(struct wd_timer* pTimer, int enable);
 static void wd_pingtimer(struct wd_timer* pTimer);
 static void wd_starttimer(struct wd_timer* pTimer);
@@ -297,7 +295,7 @@ static inline int wd_opt_timeout(void)
 
 static int wd_open(struct inode *inode, struct file *f)
 {
-	switch(MINOR(inode->i_rdev))
+	switch(minor(inode->i_rdev))
 	{
 		case WD0_MINOR:
 			f->private_data = &wd_dev.watchdog[WD0_ID];
@@ -327,13 +325,11 @@ static int wd_open(struct inode *inode, struct file *f)
 		wd_dev.initialized = 1;
 	}
 
-	MOD_INC_USE_COUNT;
 	return(0);
 }
 
 static int wd_release(struct inode *inode, struct file *file)
 {
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -446,7 +442,7 @@ static ssize_t wd_read(struct file * file, char * buffer,
 #endif /* ifdef WD_DEBUG */
 }
 
-static void wd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t wd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	/* Only WD0 will interrupt-- others are NMI and we won't
 	 * see them here....
@@ -458,16 +454,16 @@ static void wd_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		wd_dev.watchdog[WD0_ID].runstatus |=  WD_STAT_SVCD;
 	}
 	spin_unlock_irq(&wd_dev.lock);
-	return;
+	return IRQ_HANDLED;
 }
 
 static struct file_operations wd_fops = {
-	owner:		THIS_MODULE,
-	ioctl:		wd_ioctl,
-	open:		wd_open,
-	write:		wd_write,
-	read:		wd_read,
-	release:	wd_release,
+	.owner =	THIS_MODULE,
+	.ioctl =	wd_ioctl,
+	.open =		wd_open,
+	.write =	wd_write,
+	.read =		wd_read,
+	.release =	wd_release,
 };
 
 static struct miscdevice wd0_miscdev = { WD0_MINOR, WD0_DEVNAME, &wd_fops };
@@ -687,6 +683,7 @@ static void wd_brokentimer(unsigned long data)
 
 	if(tripped) {
 		/* there is at least one timer brokenstopped-- reschedule */
+		init_timer(&wd_timer);
 		wd_timer.expires = WD_BTIMEOUT;
 		add_timer(&wd_timer);
 	}

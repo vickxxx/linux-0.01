@@ -24,6 +24,7 @@
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_cia.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -237,6 +238,8 @@ miata_init_pci(void)
 static void
 miata_kill_arch(int mode)
 {
+	cia_kill_arch(mode);
+
 	switch(mode) {
 	case LINUX_REBOOT_CMD_RESTART:
 		/* Who said DEC engineers have no sense of humor? ;-)  */ 
@@ -260,26 +263,26 @@ miata_kill_arch(int mode)
  */
 
 struct alpha_machine_vector miata_mv __initmv = {
-	vector_name:		"Miata",
+	.vector_name		= "Miata",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_PYXIS_IO,
 	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
-	pci_dac_offset:		PYXIS_DAC_OFFSET,
+	.machine_check		= cia_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= PYXIS_DAC_OFFSET,
 
-	nr_irqs:		48,
-	device_interrupt:	pyxis_device_interrupt,
+	.nr_irqs		= 48,
+	.device_interrupt	= pyxis_device_interrupt,
 
-	init_arch:		pyxis_init_arch,
-	init_irq:		miata_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		miata_init_pci,
-	kill_arch:		miata_kill_arch,
-	pci_map_irq:		miata_map_irq,
-	pci_swizzle:		miata_swizzle,
+	.init_arch		= pyxis_init_arch,
+	.init_irq		= miata_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= miata_init_pci,
+	.kill_arch		= miata_kill_arch,
+	.pci_map_irq		= miata_map_irq,
+	.pci_swizzle		= miata_swizzle,
 };
 ALIAS_MV(miata)

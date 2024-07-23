@@ -4,6 +4,8 @@
  *
  *	4 Jan 1997 Michael Chastain: changed to gnu as.
  *
+ *	This is only used for booting secondary CPUs in SMP machine
+ *
  *	Entry: CS:IP point to the start of our code, we are 
  *	in real mode with no stack, but the rest of the 
  *	trampoline page to make our stack and everything else
@@ -36,9 +38,7 @@
 
 ENTRY(trampoline_data)
 r_base = .
-#ifdef CONFIG_MULTIQUAD
-	wbinvd
-#endif /* CONFIG_MULTIQUAD */
+	wbinvd			# Needed for NUMA-Q should be harmless for others
 	mov	%cs, %ax	# Code and data in the same place
 	mov	%ax, %ds
 
@@ -48,24 +48,28 @@ r_base = .
 	movl	$0xA5A5A5A5, trampoline_data - r_base
 				# write marker for master knows we're running
 
-	lidt	idt_48 - r_base	# load idt with 0, 0
-	lgdt	gdt_48 - r_base	# load gdt with whatever is appropriate
+	lidt	boot_idt - r_base	# load idt with 0, 0
+	lgdt	boot_gdt - r_base	# load gdt with whatever is appropriate
 
 	xor	%ax, %ax
 	inc	%ax		# protected mode (PE) bit
 	lmsw	%ax		# into protected mode
 	jmp	flush_instr
 flush_instr:
-	ljmpl	$__KERNEL_CS, $0x00100000
+	ljmpl	$__BOOT_CS, $0x00100000
 			# jump to startup_32 in arch/i386/kernel/head.S
 
-idt_48:
+boot_idt:
 	.word	0			# idt limit = 0
 	.word	0, 0			# idt base = 0L
 
-gdt_48:
-	.word	0x0800			# gdt limit = 2048, 256 GDT entries
-	.long	gdt_table-__PAGE_OFFSET	# gdt base = gdt (first SMP CPU)
+#
+# NOTE: here we actually use CPU#0's GDT - but that is OK, we reload
+# the proper GDT shortly after booting up the secondary CPUs.
+#
+ENTRY(boot_gdt)
+	.word	__BOOT_DS + 7			# gdt limit
+	.long	boot_gdt_table-__PAGE_OFFSET	# gdt base = gdt (first SMP CPU)
 
-.globl SYMBOL_NAME(trampoline_end)
-SYMBOL_NAME_LABEL(trampoline_end)
+.globl trampoline_end
+trampoline_end:

@@ -1,4 +1,4 @@
-/* $Id: rtrap.S,v 1.57 2001/07/17 16:17:33 anton Exp $
+/* $Id: rtrap.S,v 1.58 2002/01/31 03:30:05 davem Exp $
  * rtrap.S: Return from Sparc trap low-level code.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -7,12 +7,14 @@
 #include <asm/cprefix.h>
 #include <asm/page.h>
 #include <asm/ptrace.h>
+#include <asm/asm_offsets.h>
 #include <asm/psr.h>
 #include <asm/asi.h>
 #include <asm/smp.h>
 #include <asm/contregs.h>
 #include <asm/winmacro.h>
 #include <asm/asmmacro.h>
+#include <asm/thread_info.h>
 
 #define t_psr     l0
 #define t_pc      l1
@@ -58,34 +60,35 @@ C_LABEL(ret_trap_lockless_ipi):
 	 nop
 
 1:
-	ld	[%curptr + AOFF_task_need_resched], %g2
-	orcc	%g2, %g0, %g0
+	ld	[%curptr + TI_FLAGS], %g2
+	andcc	%g2, (_TIF_NEED_RESCHED), %g0
 	be	signal_p
-	 ld	[%curptr + AOFF_task_sigpending], %g2
+	 nop
 
 	call	C_LABEL(schedule)
 	 nop
 
-	ld	[%curptr + AOFF_task_sigpending], %g2
+	ld	[%curptr + TI_FLAGS], %g2
 signal_p:
-	cmp	%g2, 0
+	andcc	%g2, (_TIF_NOTIFY_RESUME|_TIF_SIGPENDING), %g0
 	bz,a	ret_trap_continue
-	 ld	[%sp + REGWIN_SZ + PT_PSR], %t_psr
+	 ld	[%sp + STACKFRAME_SZ + PT_PSR], %t_psr
 
 	clr	%o0
 	mov	%l5, %o2
 	mov	%l6, %o3
 	call	C_LABEL(do_signal)
-	 add	%sp, REGWIN_SZ, %o1	! pt_regs ptr
+	 add	%sp, STACKFRAME_SZ, %o1	! pt_regs ptr
 
 	/* Fall through. */
-	ld	[%sp + REGWIN_SZ + PT_PSR], %t_psr
+	ld	[%sp + STACKFRAME_SZ + PT_PSR], %t_psr
 	clr	%l6
 ret_trap_continue:
 	wr	%t_psr, 0x0, %psr
 	WRITE_PAUSE
 
-	ld	[%curptr + AOFF_task_thread + AOFF_thread_w_saved], %twin_tmp1
+	ld	[%curptr + TI_TASK], %o5
+	ld	[%o5 + AOFF_task_thread + AOFF_thread_w_saved], %twin_tmp1
 	orcc	%g0, %twin_tmp1, %g0
 	be	ret_trap_nobufwins
 	 nop
@@ -95,10 +98,10 @@ ret_trap_continue:
 
 	mov	1, %o1
 	call	C_LABEL(try_to_clear_window_buffer)
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
 	b	signal_p
-	 ld	[%curptr + AOFF_task_sigpending], %g2
+	 ld	[%curptr + TI_FLAGS], %g2
 
 ret_trap_nobufwins:
 	/* Load up the user's out registers so we can pull
@@ -109,11 +112,11 @@ ret_trap_nobufwins:
 	/* If there are already live user windows in the
 	 * set we can return from trap safely.
 	 */
-	ld	[%curptr + AOFF_task_thread + AOFF_thread_uwinmask], %twin_tmp1
+	ld	[%curptr + TI_UWINMASK], %twin_tmp1
 	orcc	%g0, %twin_tmp1, %g0
 	bne	ret_trap_userwins_ok
 	 nop
-	
+
 		/* Calculate new %wim, we have to pull a register
 		 * window from the users stack.
 		 */
@@ -142,7 +145,7 @@ ret_trap_userwins_ok:
 	 nop
 
 	b	ret_trap_unaligned_pc
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
 1:
 	LOAD_PT_YREG(sp, g1)
@@ -155,9 +158,9 @@ ret_trap_userwins_ok:
 	rett	%t_npc
 	
 ret_trap_unaligned_pc:
-	ld	[%sp + REGWIN_SZ + PT_PC], %o1
-	ld	[%sp + REGWIN_SZ + PT_NPC], %o2
-	ld	[%sp + REGWIN_SZ + PT_PSR], %o3
+	ld	[%sp + STACKFRAME_SZ + PT_PC], %o1
+	ld	[%sp + STACKFRAME_SZ + PT_NPC], %o2
+	ld	[%sp + STACKFRAME_SZ + PT_PSR], %o3
 
 	wr	%t_wim, 0x0, %wim		! or else...
 
@@ -168,7 +171,7 @@ ret_trap_unaligned_pc:
 	 nop
 
 	b	signal_p
-	 ld	[%curptr + AOFF_task_sigpending], %g2
+	 ld	[%curptr + TI_FLAGS], %g2
 
 ret_trap_kernel:
 		/* Will the rett land us in the invalid window? */
@@ -215,10 +218,11 @@ ret_trap_user_stack_is_bolixed:
 	WRITE_PAUSE
 
 	call	C_LABEL(window_ret_fault)
-	 add	%sp, REGWIN_SZ, %o0
+	 add	%sp, STACKFRAME_SZ, %o0
 
 	b	signal_p
-	 ld	[%curptr + AOFF_task_sigpending], %g2
+	 ld	[%curptr + TI_FLAGS], %g2
+
 
 	.globl	C_LABEL(sun4c_rett_stackchk)
 C_LABEL(sun4c_rett_stackchk):

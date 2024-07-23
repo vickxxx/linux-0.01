@@ -2,15 +2,25 @@
  * taken from the i386 version by Russell King
  * Written by Martin Mares <mj@atrey.karlin.mff.cuni.cz>
  */
+
+#include <asm-generic/vmlinux.lds.h>
+	
 OUTPUT_ARCH(arm)
 ENTRY(stext)
+#ifndef __ARMEB__
+jiffies = jiffies_64;
+#else
+jiffies = jiffies_64 + 4;
+#endif
 SECTIONS
 {
 	. = TEXTADDR;
 	.init : {			/* Init code and data		*/
 		_stext = .;
 		__init_begin = .;
-			*(.text.init)
+			_sinittext = .;
+			*(.init.text)
+			_einittext = .;
 		__proc_info_begin = .;
 			*(.proc.info)
 		__proc_info_end = .;
@@ -20,21 +30,43 @@ SECTIONS
 		__tagtable_begin = .;
 			*(.taglist)
 		__tagtable_end = .;
-			*(.data.init)
+			*(.init.data)
 		. = ALIGN(16);
 		__setup_start = .;
-			*(.setup.init)
+			*(.init.setup)
 		__setup_end = .;
+		__early_begin = .;
+			*(__early_param)
+		__early_end = .;
+		__start___param = .;
+			*(__param)
+		__stop___param = .;
 		__initcall_start = .;
-			*(.initcall.init)
+			*(.initcall1.init)
+			*(.initcall2.init)
+			*(.initcall3.init)
+			*(.initcall4.init)
+			*(.initcall5.init)
+			*(.initcall6.init)
+			*(.initcall7.init)
 		__initcall_end = .;
+		__con_initcall_start = .;
+			*(.con_initcall.init)
+		__con_initcall_end = .;
+		__security_initcall_start = .;
+			*(.security_initcall.init)
+		__security_initcall_end = .;
+		. = ALIGN(32);
+		__initramfs_start = .;
+			usr/built-in.o(.init.ramfs)
+		__initramfs_end = .;
 		. = ALIGN(4096);
 		__init_end = .;
 	}
 
 	/DISCARD/ : {			/* Exit code and data		*/
-		*(.text.exit)
-		*(.data.exit)
+		*(.exit.text)
+		*(.exit.data)
 		*(.exitcall.exit)
 	}
 
@@ -43,7 +75,6 @@ SECTIONS
 			*(.text)
 			*(.fixup)
 			*(.gnu.warning)
-			*(.text.lock)	/* out-of-line lock text */
 			*(.rodata)
 			*(.rodata.*)
 			*(.glue_7)
@@ -53,8 +84,6 @@ SECTIONS
 		_etext = .;		/* End of text section		*/
 	}
 
-	.kstrtab : { *(.kstrtab) }
-
 	. = ALIGN(16);
 	__ex_table : {			/* Exception table		*/
 		__start___ex_table = .;
@@ -62,11 +91,7 @@ SECTIONS
 		__stop___ex_table = .;
 	}
 
-	__ksymtab : {			/* Kernel symbol table		*/
-		__start___ksymtab = .;
-			*(__ksymtab)
-		__stop___ksymtab = .;
-	}
+	RODATA
 
 	. = ALIGN(8192);
 

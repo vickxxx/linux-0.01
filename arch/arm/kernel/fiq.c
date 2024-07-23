@@ -37,9 +37,11 @@
  */
 #include <linux/config.h>
 #include <linux/module.h>
+#include <linux/kernel.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
 #include <linux/init.h>
+#include <linux/seq_file.h>
 
 #include <asm/fiq.h>
 #include <asm/io.h>
@@ -52,7 +54,6 @@
 
 static unsigned long no_fiq_insn;
 
-#ifdef CONFIG_CPU_32
 static inline void unprotect_page_0(void)
 {
 	modify_domain(DOMAIN_USER, DOMAIN_MANAGER);
@@ -62,12 +63,6 @@ static inline void protect_page_0(void)
 {
 	modify_domain(DOMAIN_USER, DOMAIN_CLIENT);
 }
-#else
-
-#define unprotect_page_0()
-#define protect_page_0()
-
-#endif
 
 /* Default reacquire function
  * - we always relinquish FIQ control
@@ -86,21 +81,18 @@ static int fiq_def_op(void *ref, int relinquish)
 }
 
 static struct fiq_handler default_owner = {
-	name:	"default",
-	fiq_op:	fiq_def_op,
+	.name	= "default",
+	.fiq_op = fiq_def_op,
 };
 
 static struct fiq_handler *current_fiq = &default_owner;
 
-int get_fiq_list(char *buf)
+int show_fiq_list(struct seq_file *p, void *v)
 {
-	char *p = buf;
-
 	if (current_fiq != &default_owner)
-		p += sprintf(p, "FIQ:              %s\n",
-			     current_fiq->name);
+		seq_printf(p, "FIQ:              %s\n", current_fiq->name);
 
-	return p - buf;
+	return 0;
 }
 
 void set_fiq_handler(void *start, unsigned int length)
@@ -121,17 +113,6 @@ void set_fiq_regs(struct pt_regs *regs)
 {
 	register unsigned long tmp, tmp2;
 	__asm__ volatile (
-#ifdef CONFIG_CPU_26
-	"mov	%0, pc
-	bic	%1, %0, #0x3
-	orr	%1, %1, %3
-	teqp	%1, #0		@ select FIQ mode
-	mov	r0, r0
-	ldmia	%2, {r8 - r14}
-	teqp	%0, #0		@ return to SVC mode
-	mov	r0, r0"
-#endif
-#ifdef CONFIG_CPU_32
 	"mrs	%0, cpsr
 	mov	%1, %3
 	msr	cpsr_c, %1	@ select FIQ mode
@@ -139,9 +120,8 @@ void set_fiq_regs(struct pt_regs *regs)
 	ldmia	%2, {r8 - r14}
 	msr	cpsr_c, %0	@ return to SVC mode
 	mov	r0, r0"
-#endif
 	: "=&r" (tmp), "=&r" (tmp2)
-	: "r" (&regs->ARM_r8), "I" (I_BIT | F_BIT | FIQ_MODE)
+	: "r" (&regs->ARM_r8), "I" (PSR_I_BIT | PSR_F_BIT | FIQ_MODE)
 	/* These registers aren't modified by the above code in a way
 	   visible to the compiler, but we mark them as clobbers anyway
 	   so that GCC won't put any of the input or output operands in
@@ -153,17 +133,6 @@ void get_fiq_regs(struct pt_regs *regs)
 {
 	register unsigned long tmp, tmp2;
 	__asm__ volatile (
-#ifdef CONFIG_CPU_26
-	"mov	%0, pc
-	bic	%1, %0, #0x3
-	orr	%1, %1, %3
-	teqp	%1, #0		@ select FIQ mode
-	mov	r0, r0
-	stmia	%2, {r8 - r14}
-	teqp	%0, #0		@ return to SVC mode
-	mov	r0, r0"
-#endif
-#ifdef CONFIG_CPU_32
 	"mrs	%0, cpsr
 	mov	%1, %3
 	msr	cpsr_c, %1	@ select FIQ mode
@@ -171,9 +140,8 @@ void get_fiq_regs(struct pt_regs *regs)
 	stmia	%2, {r8 - r14}
 	msr	cpsr_c, %0	@ return to SVC mode
 	mov	r0, r0"
-#endif
 	: "=&r" (tmp), "=&r" (tmp2)
-	: "r" (&regs->ARM_r8), "I" (I_BIT | F_BIT | FIQ_MODE)
+	: "r" (&regs->ARM_r8), "I" (PSR_I_BIT | PSR_F_BIT | FIQ_MODE)
 	/* These registers aren't modified by the above code in a way
 	   visible to the compiler, but we mark them as clobbers anyway
 	   so that GCC won't put any of the input or output operands in
@@ -205,9 +173,7 @@ void release_fiq(struct fiq_handler *f)
 	if (current_fiq != f) {
 		printk(KERN_ERR "%s FIQ trying to release %s FIQ\n",
 		       f->name, current_fiq->name);
-#ifdef CONFIG_DEBUG_ERRORS
-		__backtrace();
-#endif
+		dump_stack();
 		return;
 	}
 

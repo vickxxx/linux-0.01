@@ -9,6 +9,7 @@
 #include <linux/reiserfs_fs.h>
 #include <linux/stat.h>
 #include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
 #include <asm/uaccess.h>
 
 extern struct key  MIN_KEY;
@@ -17,31 +18,17 @@ static int reiserfs_readdir (struct file *, void *, filldir_t);
 int reiserfs_dir_fsync(struct file *filp, struct dentry *dentry, int datasync) ;
 
 struct file_operations reiserfs_dir_operations = {
-    read:	generic_read_dir,
-    readdir:	reiserfs_readdir,
-    fsync:	reiserfs_dir_fsync,
-};
-
-/*
- * directories can handle most operations...
- */
-struct inode_operations reiserfs_dir_inode_operations = {
-  //&reiserfs_dir_operations,	/* default_file_ops */
-    create:	reiserfs_create,
-    lookup:	reiserfs_lookup,
-    link:	reiserfs_link,
-    unlink:	reiserfs_unlink,
-    symlink:	reiserfs_symlink,
-    mkdir:	reiserfs_mkdir,
-    rmdir:	reiserfs_rmdir,
-    mknod:	reiserfs_mknod,
-    rename:	reiserfs_rename,
+    .read	= generic_read_dir,
+    .readdir	= reiserfs_readdir,
+    .fsync	= reiserfs_dir_fsync,
+    .ioctl	= reiserfs_ioctl,
 };
 
 int reiserfs_dir_fsync(struct file *filp, struct dentry *dentry, int datasync) {
-  lock_kernel();
-  reiserfs_commit_for_inode(dentry->d_inode) ;
-  unlock_kernel() ;
+  struct inode *inode = dentry->d_inode;
+  reiserfs_write_lock(inode->i_sb);
+  reiserfs_commit_for_inode(inode) ;
+  reiserfs_write_unlock(inode->i_sb) ;
   return 0 ;
 }
 
@@ -63,7 +50,9 @@ static int reiserfs_readdir (struct file * filp, void * dirent, filldir_t filldi
     loff_t next_pos;
     char small_buf[32] ; /* avoid kmalloc if we can */
     struct reiserfs_dir_entry de;
+    int ret = 0;
 
+    reiserfs_write_lock(inode->i_sb);
 
     reiserfs_check_lock_depth("readdir") ;
 
@@ -82,7 +71,8 @@ static int reiserfs_readdir (struct file * filp, void * dirent, filldir_t filldi
 	if (search_res == IO_ERROR) {
 	    // FIXME: we could just skip part of directory which could
 	    // not be read
-	    return -EIO;
+	    ret = -EIO;
+	    goto out;
 	}
 	entry_num = de.de_entry_num;
 	bh = de.de_bh;
@@ -92,7 +82,7 @@ static int reiserfs_readdir (struct file * filp, void * dirent, filldir_t filldi
 		
 	/* we must have found item, that is item of this directory, */
 	RFALSE( COMP_SHORT_KEYS (&(ih->ih_key), &pos_key),
-		"vs-9000: found item %h does not match to dir we readdir %k",
+		"vs-9000: found item %h does not match to dir we readdir %K",
 		ih, &pos_key);
 	RFALSE( item_num > B_NR_ITEMS (bh) - 1,
 		"vs-9005 item_num == %d, item amount == %d", 
@@ -121,7 +111,7 @@ static int reiserfs_readdir (struct file * filp, void * dirent, filldir_t filldi
 		if (!d_name[d_reclen - 1])
 		    d_reclen = strlen (d_name);
 	
-		if (d_reclen > REISERFS_MAX_NAME_LEN(inode->i_sb->s_blocksize)){
+		if (d_reclen > REISERFS_MAX_NAME(inode->i_sb->s_blocksize)){
 		    /* too big to send back to VFS */
 		    continue ;
 		}
@@ -131,13 +121,14 @@ static int reiserfs_readdir (struct file * filp, void * dirent, filldir_t filldi
 		if (d_reclen <= 32) {
 		  local_buf = small_buf ;
 		} else {
-		    local_buf = kmalloc(d_reclen, GFP_NOFS) ;
+		    local_buf = reiserfs_kmalloc(d_reclen, GFP_NOFS, inode->i_sb) ;
 		    if (!local_buf) {
 			pathrelse (&path_to_entry);
-			return -ENOMEM ;
+			ret = -ENOMEM ;
+			goto out;
 		    }
 		    if (item_moved (&tmp_ih, &path_to_entry)) {
-			kfree(local_buf) ;
+			reiserfs_kfree(local_buf, d_reclen, inode->i_sb) ;
 			goto research;
 		    }
 		}
@@ -149,12 +140,12 @@ static int reiserfs_readdir (struct file * filp, void * dirent, filldir_t filldi
 		if (filldir (dirent, local_buf, d_reclen, d_off, d_ino, 
 		             DT_UNKNOWN) < 0) {
 		    if (local_buf != small_buf) {
-			kfree(local_buf) ;
+			reiserfs_kfree(local_buf, d_reclen, inode->i_sb) ;
 		    }
 		    goto end;
 		}
 		if (local_buf != small_buf) {
-		    kfree(local_buf) ;
+		    reiserfs_kfree(local_buf, d_reclen, inode->i_sb) ;
 		}
 
 		// next entry should be looked for with such offset
@@ -186,15 +177,85 @@ static int reiserfs_readdir (struct file * filp, void * dirent, filldir_t filldi
 	}
 	
 	/* directory continues in the right neighboring block */
-	set_cpu_key_k_offset (&pos_key, le_key_k_offset (ITEM_VERSION_1, rkey));
+	set_cpu_key_k_offset (&pos_key, le_key_k_offset (KEY_FORMAT_3_5, rkey));
 
     } /* while */
 
 
  end:
-    // FIXME: ext2_readdir does not reset f_pos
     filp->f_pos = next_pos;
     pathrelse (&path_to_entry);
     reiserfs_check_path(&path_to_entry) ;
-    return 0;
+    update_atime(inode) ;
+ out:
+    reiserfs_write_unlock(inode->i_sb);
+    return ret;
+}
+
+/* compose directory item containing "." and ".." entries (entries are
+   not aligned to 4 byte boundary) */
+/* the last four params are LE */
+void make_empty_dir_item_v1 (char * body, __u32 dirid, __u32 objid,
+			     __u32 par_dirid, __u32 par_objid)
+{
+    struct reiserfs_de_head * deh;
+
+    memset (body, 0, EMPTY_DIR_SIZE_V1);
+    deh = (struct reiserfs_de_head *)body;
+    
+    /* direntry header of "." */
+    put_deh_offset( &(deh[0]), DOT_OFFSET );
+    /* these two are from make_le_item_head, and are are LE */
+    deh[0].deh_dir_id = dirid;
+    deh[0].deh_objectid = objid;
+    deh[0].deh_state = 0; /* Endian safe if 0 */
+    put_deh_location( &(deh[0]), EMPTY_DIR_SIZE_V1 - strlen( "." ));
+    mark_de_visible(&(deh[0]));
+  
+    /* direntry header of ".." */
+    put_deh_offset( &(deh[1]), DOT_DOT_OFFSET);
+    /* key of ".." for the root directory */
+    /* these two are from the inode, and are are LE */
+    deh[1].deh_dir_id = par_dirid;
+    deh[1].deh_objectid = par_objid;
+    deh[1].deh_state = 0; /* Endian safe if 0 */
+    put_deh_location( &(deh[1]), deh_location( &(deh[0]) ) - strlen( ".." ) );
+    mark_de_visible(&(deh[1]));
+
+    /* copy ".." and "." */
+    memcpy (body + deh_location( &(deh[0]) ), ".", 1);
+    memcpy (body + deh_location( &(deh[1]) ), "..", 2);
+}
+
+/* compose directory item containing "." and ".." entries */
+void make_empty_dir_item (char * body, __u32 dirid, __u32 objid,
+			  __u32 par_dirid, __u32 par_objid)
+{
+    struct reiserfs_de_head * deh;
+
+    memset (body, 0, EMPTY_DIR_SIZE);
+    deh = (struct reiserfs_de_head *)body;
+    
+    /* direntry header of "." */
+    put_deh_offset( &(deh[0]), DOT_OFFSET );
+    /* these two are from make_le_item_head, and are are LE */
+    deh[0].deh_dir_id = dirid;
+    deh[0].deh_objectid = objid;
+    deh[0].deh_state = 0; /* Endian safe if 0 */
+    put_deh_location( &(deh[0]), EMPTY_DIR_SIZE - ROUND_UP( strlen( "." ) ) );
+    mark_de_visible(&(deh[0]));
+  
+    /* direntry header of ".." */
+    put_deh_offset( &(deh[1]), DOT_DOT_OFFSET );
+    /* key of ".." for the root directory */
+    /* these two are from the inode, and are are LE */
+    deh[1].deh_dir_id = par_dirid;
+    deh[1].deh_objectid = par_objid;
+    deh[1].deh_state = 0; /* Endian safe if 0 */
+    put_deh_location( &(deh[1]), deh_location( &(deh[0])) - ROUND_UP( strlen( ".." ) ) );
+    mark_de_visible(&(deh[1]));
+
+    /* copy ".." and "." */
+    memcpy (body + deh_location( &(deh[0]) ), ".", 1);
+    memcpy (body + deh_location( &(deh[1]) ), "..", 2);
 }

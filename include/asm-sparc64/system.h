@@ -1,11 +1,10 @@
-/* $Id: system.h,v 1.64 2001/08/30 03:22:00 kanoj Exp $ */
+/* $Id: system.h,v 1.69 2002/02/09 19:49:31 davem Exp $ */
 #ifndef __SPARC64_SYSTEM_H
 #define __SPARC64_SYSTEM_H
 
 #include <linux/config.h>
 #include <asm/ptrace.h>
 #include <asm/processor.h>
-#include <asm/asm_offsets.h>
 #include <asm/visasm.h>
 
 #ifndef __ASSEMBLY__
@@ -34,10 +33,10 @@ enum sparc_cpu {
 #define setipl(__new_ipl) \
 	__asm__ __volatile__("wrpr	%0, %%pil"  : : "r" (__new_ipl) : "memory")
 
-#define __cli() \
+#define local_irq_disable() \
 	__asm__ __volatile__("wrpr	15, %%pil" : : : "memory")
 
-#define __sti() \
+#define local_irq_enable() \
 	__asm__ __volatile__("wrpr	0, %%pil" : : : "memory")
 
 #define getipl() \
@@ -62,36 +61,20 @@ enum sparc_cpu {
 	retval; \
 })
 
-#define __save_flags(flags)		((flags) = getipl())
-#define __save_and_cli(flags)		((flags) = read_pil_and_cli())
-#define __restore_flags(flags)		setipl((flags))
-#define local_irq_disable()		__cli()
-#define local_irq_enable()		__sti()
-#define local_irq_save(flags)		__save_and_cli(flags)
-#define local_irq_restore(flags)	__restore_flags(flags)
+#define local_save_flags(flags)		((flags) = getipl())
+#define local_irq_save(flags)		((flags) = read_pil_and_cli())
+#define local_irq_restore(flags)		setipl((flags))
 
-#ifndef CONFIG_SMP
-#define cli() __cli()
-#define sti() __sti()
-#define save_flags(x) __save_flags(x)
-#define restore_flags(x) __restore_flags(x)
-#define save_and_cli(x) __save_and_cli(x)
-#else
-
-#ifndef __ASSEMBLY__
-extern void __global_cli(void);
-extern void __global_sti(void);
-extern unsigned long __global_save_flags(void);
-extern void __global_restore_flags(unsigned long flags);
-#endif
-
-#define cli()			__global_cli()
-#define sti()			__global_sti()
-#define save_flags(x)		((x) = __global_save_flags())
-#define restore_flags(flags)	__global_restore_flags(flags)
-#define save_and_cli(flags)	do { save_flags(flags); cli(); } while(0)
-
-#endif
+/* On sparc64 IRQ flags are the PIL register.  A value of zero
+ * means all interrupt levels are enabled, any other value means
+ * only IRQ levels greater than that value will be received.
+ * Consequently this means that the lowest IRQ level is one.
+ */
+#define irqs_disabled()		\
+({	unsigned long flags;	\
+	local_save_flags(flags);\
+	(flags > 0);		\
+})
 
 #define nop() 		__asm__ __volatile__ ("nop")
 
@@ -100,6 +83,7 @@ extern void __global_restore_flags(unsigned long flags);
 	membar("#LoadLoad | #LoadStore | #StoreStore | #StoreLoad");
 #define rmb()		membar("#LoadLoad")
 #define wmb()		membar("#StoreStore")
+#define read_barrier_depends()		do { } while(0)
 #define set_mb(__var, __value) \
 	do { __var = __value; membar("#StoreLoad | #StoreStore"); } while(0)
 #define set_wmb(__var, __value) \
@@ -109,10 +93,12 @@ extern void __global_restore_flags(unsigned long flags);
 #define smp_mb()	mb()
 #define smp_rmb()	rmb()
 #define smp_wmb()	wmb()
+#define smp_read_barrier_depends()	read_barrier_depends()
 #else
 #define smp_mb()	__asm__ __volatile__("":::"memory");
 #define smp_rmb()	__asm__ __volatile__("":::"memory");
 #define smp_wmb()	__asm__ __volatile__("":::"memory");
+#define smp_read_barrier_depends()	do { } while(0)
 #endif
 
 #define flushi(addr)	__asm__ __volatile__ ("flush %0" : : "r" (addr) : "memory")
@@ -136,6 +122,15 @@ extern void __global_restore_flags(unsigned long flags);
 
 #ifndef __ASSEMBLY__
 
+extern void sun_do_break(void);
+extern int serial_console;
+extern int stop_a_enabled;
+
+static __inline__ int con_is_present(void)
+{
+	return serial_console ? 0 : 1;
+}
+
 extern void synchronize_user_stack(void);
 
 extern void __flushw_user(void);
@@ -143,7 +138,19 @@ extern void __flushw_user(void);
 
 #define flush_user_windows flushw_user
 #define flush_register_windows flushw_all
-#define prepare_to_switch flushw_all
+
+#define prepare_arch_switch(rq, next)		\
+do {	spin_lock(&(next)->switch_lock);	\
+	spin_unlock(&(rq)->lock);		\
+	flushw_all();				\
+} while (0)
+
+#define finish_arch_switch(rq, prev)		\
+do {	spin_unlock_irq(&(prev)->switch_lock);	\
+} while (0)
+
+#define task_running(rq, p) \
+	((rq)->curr == (p) || spin_is_locked(&(p)->switch_lock))
 
 	/* See what happens when you design the chip correctly?
 	 *
@@ -154,65 +161,69 @@ extern void __flushw_user(void);
 	 * not preserve it's value.  Hairy, but it lets us remove 2 loads
 	 * and 2 stores in this critical code path.  -DaveM
 	 */
-#define switch_to(prev, next, last)						\
-do {	if (current->thread.flags & SPARC_FLAG_PERFCTR) {			\
-		unsigned long __tmp;						\
-		read_pcr(__tmp);						\
-		current->thread.pcr_reg = __tmp;				\
-		read_pic(__tmp);						\
-		current->thread.kernel_cntd0 += (unsigned int)(__tmp);		\
-		current->thread.kernel_cntd1 += ((__tmp) >> 32);		\
-	}									\
-	save_and_clear_fpu();							\
-	/* If you are tempted to conditionalize the following */		\
-	/* so that ASI is only written if it changes, think again. */		\
-	__asm__ __volatile__("wr %%g0, %0, %%asi"				\
-			     : : "r" (next->thread.current_ds.seg));		\
-	__asm__ __volatile__(							\
-	"mov	%%g6, %%g5\n\t"							\
-	"wrpr	%%g0, 0x95, %%pstate\n\t"					\
-	"stx	%%i6, [%%sp + 2047 + 0x70]\n\t"					\
-	"stx	%%i7, [%%sp + 2047 + 0x78]\n\t"					\
-	"rdpr	%%wstate, %%o5\n\t"						\
-	"stx	%%o6, [%%g6 + %3]\n\t"						\
-	"stb	%%o5, [%%g6 + %2]\n\t"						\
-	"rdpr	%%cwp, %%o5\n\t"						\
-	"stb	%%o5, [%%g6 + %5]\n\t"						\
-	"mov	%1, %%g6\n\t"							\
-	"ldub	[%1 + %5], %%g1\n\t"						\
-	"wrpr	%%g1, %%cwp\n\t"						\
-	"ldx	[%%g6 + %3], %%o6\n\t"						\
-	"ldub	[%%g6 + %2], %%o5\n\t"						\
-	"ldub	[%%g6 + %4], %%o7\n\t"						\
-	"mov	%%g6, %%l2\n\t"							\
-	"wrpr	%%o5, 0x0, %%wstate\n\t"					\
-	"ldx	[%%sp + 2047 + 0x70], %%i6\n\t"					\
-	"ldx	[%%sp + 2047 + 0x78], %%i7\n\t"					\
-	"wrpr	%%g0, 0x94, %%pstate\n\t"					\
-	"mov	%%l2, %%g6\n\t"							\
-	"wrpr	%%g0, 0x96, %%pstate\n\t"					\
-	"andcc	%%o7, %6, %%g0\n\t"						\
-	"bne,pn	%%icc, ret_from_syscall\n\t"					\
-	" mov	%%g5, %0\n\t"							\
-	: "=&r" (last)								\
-	: "r" (next),								\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.wstate)),\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.ksp)),	\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.flags)),\
-	  "i" ((const unsigned long)(&((struct task_struct *)0)->thread.cwp)),	\
-	  "i" (SPARC_FLAG_NEWCHILD)						\
-	: "cc", "g1", "g2", "g3", "g5", "g7",					\
-	  "l2", "l3", "l4", "l5", "l6", "l7",					\
-	  "i0", "i1", "i2", "i3", "i4", "i5",					\
-	  "o0", "o1", "o2", "o3", "o4", "o5", "o7");				\
-	/* If you fuck with this, update ret_from_syscall code too. */		\
-	if (current->thread.flags & SPARC_FLAG_PERFCTR) {			\
-		write_pcr(current->thread.pcr_reg);				\
-		reset_pic();							\
-	}									\
+#if __GNUC__ >= 3
+#define EXTRA_CLOBBER ,"%l1"
+#else
+#define EXTRA_CLOBBER
+#endif
+#define switch_to(prev, next, last)					\
+do {	if (test_thread_flag(TIF_PERFCTR)) {				\
+		unsigned long __tmp;					\
+		read_pcr(__tmp);					\
+		current_thread_info()->pcr_reg = __tmp;			\
+		read_pic(__tmp);					\
+		current_thread_info()->kernel_cntd0 += (unsigned int)(__tmp);\
+		current_thread_info()->kernel_cntd1 += ((__tmp) >> 32);	\
+	}								\
+	save_and_clear_fpu();						\
+	/* If you are tempted to conditionalize the following */	\
+	/* so that ASI is only written if it changes, think again. */	\
+	__asm__ __volatile__("wr %%g0, %0, %%asi"			\
+	: : "r" (__thread_flag_byte_ptr(next->thread_info)[TI_FLAG_BYTE_CURRENT_DS]));\
+	__asm__ __volatile__(						\
+	"mov	%%g4, %%g5\n\t"						\
+	"wrpr	%%g0, 0x95, %%pstate\n\t"				\
+	"stx	%%i6, [%%sp + 2047 + 0x70]\n\t"				\
+	"stx	%%i7, [%%sp + 2047 + 0x78]\n\t"				\
+	"rdpr	%%wstate, %%o5\n\t"					\
+	"stx	%%o6, [%%g6 + %3]\n\t"					\
+	"stb	%%o5, [%%g6 + %2]\n\t"					\
+	"rdpr	%%cwp, %%o5\n\t"					\
+	"stb	%%o5, [%%g6 + %5]\n\t"					\
+	"mov	%1, %%g6\n\t"						\
+	"ldub	[%1 + %5], %%g1\n\t"					\
+	"wrpr	%%g1, %%cwp\n\t"					\
+	"ldx	[%%g6 + %3], %%o6\n\t"					\
+	"ldub	[%%g6 + %2], %%o5\n\t"					\
+	"ldx	[%%g6 + %4], %%o7\n\t"					\
+	"mov	%%g6, %%l2\n\t"						\
+	"wrpr	%%o5, 0x0, %%wstate\n\t"				\
+	"ldx	[%%sp + 2047 + 0x70], %%i6\n\t"				\
+	"ldx	[%%sp + 2047 + 0x78], %%i7\n\t"				\
+	"wrpr	%%g0, 0x94, %%pstate\n\t"				\
+	"mov	%%l2, %%g6\n\t"						\
+	"ldx	[%%g6 + %7], %%g4\n\t"					\
+	"wrpr	%%g0, 0x96, %%pstate\n\t"				\
+	"andcc	%%o7, %6, %%g0\n\t"					\
+	"bne,pn	%%icc, ret_from_syscall\n\t"				\
+	" mov	%%g5, %0\n\t"						\
+	: "=&r" (last)							\
+	: "0" (next->thread_info),					\
+	  "i" (TI_WSTATE), "i" (TI_KSP), "i" (TI_FLAGS), "i" (TI_CWP),	\
+	  "i" (_TIF_NEWCHILD), "i" (TI_TASK)				\
+	: "cc",								\
+	        "g1", "g2", "g3",       "g5",       "g7",		\
+	              "l2", "l3", "l4", "l5", "l6", "l7",		\
+	  "i0", "i1", "i2", "i3", "i4", "i5",				\
+	  "o0", "o1", "o2", "o3", "o4", "o5",       "o7" EXTRA_CLOBBER);\
+	/* If you fuck with this, update ret_from_syscall code too. */	\
+	if (test_thread_flag(TIF_PERFCTR)) {				\
+		write_pcr(current_thread_info()->pcr_reg);		\
+		reset_pic();						\
+	}								\
 } while(0)
 
-extern __inline__ unsigned long xchg32(__volatile__ unsigned int *m, unsigned int val)
+static __inline__ unsigned long xchg32(__volatile__ unsigned int *m, unsigned int val)
 {
 	__asm__ __volatile__(
 "	mov		%0, %%g5\n"
@@ -228,7 +239,7 @@ extern __inline__ unsigned long xchg32(__volatile__ unsigned int *m, unsigned in
 	return val;
 }
 
-extern __inline__ unsigned long xchg64(__volatile__ unsigned long *m, unsigned long val)
+static __inline__ unsigned long xchg64(__volatile__ unsigned long *m, unsigned long val)
 {
 	__asm__ __volatile__(
 "	mov		%0, %%g5\n"
@@ -272,11 +283,11 @@ extern void die_if_kernel(char *str, struct pt_regs *regs) __attribute__ ((noret
 
 #define __HAVE_ARCH_CMPXCHG 1
 
-extern __inline__ unsigned long
+static __inline__ unsigned long
 __cmpxchg_u32(volatile int *m, int old, int new)
 {
 	__asm__ __volatile__("cas [%2], %3, %0\n\t"
-			     "membar #StoreStore | #StoreLoad"
+			     "membar #StoreLoad | #StoreStore"
 			     : "=&r" (new)
 			     : "0" (new), "r" (m), "r" (old)
 			     : "memory");
@@ -284,11 +295,11 @@ __cmpxchg_u32(volatile int *m, int old, int new)
 	return new;
 }
 
-extern __inline__ unsigned long
+static __inline__ unsigned long
 __cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
 {
 	__asm__ __volatile__("casx [%2], %3, %0\n\t"
-			     "membar #StoreStore | #StoreLoad"
+			     "membar #StoreLoad | #StoreStore"
 			     : "=&r" (new)
 			     : "0" (new), "r" (m), "r" (old)
 			     : "memory");

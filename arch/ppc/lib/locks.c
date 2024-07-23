@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.locks.c 1.11 08/19/01 22:27:32 paulus
- */
-/*
  * Locks for smp ppc 
  * 
  * Written by Cort Dougan (cort@cs.nmt.edu)
@@ -16,7 +13,7 @@
 #include <asm/system.h>
 #include <asm/io.h>
 
-#ifdef SPINLOCK_DEBUG
+#ifdef CONFIG_DEBUG_SPINLOCK
 
 #undef INIT_STUCK
 #define INIT_STUCK 200000000 /*0xffffffff*/
@@ -28,15 +25,16 @@
  * since they may inhibit forward progress by other CPUs in getting
  * a lock.
  */
-static unsigned long __spin_trylock(volatile unsigned long *lock)
+unsigned long __spin_trylock(volatile unsigned long *lock)
 {
 	unsigned long ret;
 
 	__asm__ __volatile__ ("\n\
 1:	lwarx	%0,0,%1\n\
 	cmpwi	0,%0,0\n\
-	bne	2f\n\
-	stwcx.	%2,0,%1\n\
+	bne	2f\n"
+	PPC405_ERR77(0,%1)
+"	stwcx.	%2,0,%1\n\
 	bne-	1b\n\
 	isync\n\
 2:"
@@ -47,7 +45,7 @@ static unsigned long __spin_trylock(volatile unsigned long *lock)
 	return ret;
 }
 
-void _spin_lock(spinlock_t *lock)
+void _raw_spin_lock(spinlock_t *lock)
 {
 	int cpu = smp_processor_id();
 	unsigned int stuck = INIT_STUCK;
@@ -68,7 +66,7 @@ void _spin_lock(spinlock_t *lock)
 	lock->owner_cpu = cpu;
 }
 
-int spin_trylock(spinlock_t *lock)
+int _raw_spin_trylock(spinlock_t *lock)
 {
 	if (__spin_trylock(&lock->lock))
 		return 0;
@@ -77,7 +75,7 @@ int spin_trylock(spinlock_t *lock)
 	return 1;
 }
 
-void _spin_unlock(spinlock_t *lp)
+void _raw_spin_unlock(spinlock_t *lp)
 {
   	if ( !lp->lock )
 		printk("_spin_unlock(%p): no lock cpu %d curr PC %p %s/%d\n",
@@ -98,7 +96,7 @@ void _spin_unlock(spinlock_t *lp)
  * with the high bit (sign) being the "write" bit.
  * -- Cort
  */
-void _read_lock(rwlock_t *rw)
+void _raw_read_lock(rwlock_t *rw)
 {
 	unsigned long stuck = INIT_STUCK;
 	int cpu = smp_processor_id();
@@ -125,7 +123,7 @@ again:
 	wmb();
 }
 
-void _read_unlock(rwlock_t *rw)
+void _raw_read_unlock(rwlock_t *rw)
 {
 	if ( rw->lock == 0 )
 		printk("_read_unlock(): %s/%d (nip %08lX) lock %lx\n",
@@ -135,7 +133,7 @@ void _read_unlock(rwlock_t *rw)
 	atomic_dec((atomic_t *) &(rw)->lock);
 }
 
-void _write_lock(rwlock_t *rw)
+void _raw_write_lock(rwlock_t *rw)
 {
 	unsigned long stuck = INIT_STUCK;
 	int cpu = smp_processor_id();
@@ -175,7 +173,7 @@ again:
 	wmb();
 }
 
-void _write_unlock(rwlock_t *rw)
+void _raw_write_unlock(rwlock_t *rw)
 {
 	if ( !(rw->lock & (1<<31)) )
 		printk("_write_lock(): %s/%d (nip %08lX) lock %lx\n",

@@ -28,6 +28,7 @@
 #define NFS3_ACCESS_EXTEND	0x0008
 #define NFS3_ACCESS_DELETE	0x0010
 #define NFS3_ACCESS_EXECUTE	0x0020
+#define NFS3_ACCESS_FULL	0x003f
 
 /* Flags for create mode */
 enum nfs3_createmode {
@@ -56,6 +57,11 @@ enum nfs3_ftype {
 	NF3SOCK = 6,
 	NF3FIFO = 7,	/* changed from NFSv2 (was 8) */
 	NF3BAD  = 8
+};
+
+struct nfs3_fh {
+	unsigned short size;
+	unsigned char  data[NFS3_FHSIZE];
 };
 
 #define NFS3_VERSION		3

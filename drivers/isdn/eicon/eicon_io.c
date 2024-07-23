@@ -1,4 +1,4 @@
-/* $Id: eicon_io.c,v 1.13.6.2 2001/09/23 22:24:37 kai Exp $
+/* $Id: eicon_io.c,v 1.1.4.1.2.2 2002/10/01 11:29:13 armin Exp $
  *
  * ISDN low-level module for Eicon active ISDN-Cards.
  * Code for communicating with hardware.
@@ -501,7 +501,7 @@ eicon_io_transmit(eicon_card *ccard) {
 /*
  * IRQ handler 
  */
-void
+irqreturn_t
 eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 	eicon_card *ccard = (eicon_card *)dev_id;
         eicon_isa_card *isa_card;
@@ -521,7 +521,7 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 
         if (!ccard) {
                 eicon_log(ccard, 1, "eicon_irq: spurious interrupt %d\n", irq);
-                return;
+                return IRQ_NONE;
         }
 
 	if (ccard->type == EICON_CTYPE_QUADRO) {
@@ -554,7 +554,7 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 			break;
 		default:
                 	eicon_log(ccard, 1, "eicon_irq: unsupported card-type!\n");
-			return;
+			return IRQ_NONE;
 	}
 
 	if (*irqprobe) {
@@ -577,7 +577,7 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 				(*irqprobe)++;
 				break;
 		}
-		return;
+		return IRQ_HANDLED;
 	}
 
 	switch(ccard->type) {
@@ -588,7 +588,7 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 		case EICON_CTYPE_S2M:
 			if (!(readb(isa_card->intack))) { /* card did not interrupt */
 				eicon_log(ccard, 1, "eicon: IRQ: card reports no interrupt!\n");
-				return;
+				return IRQ_NONE;
 			} 
 			break;
 	}
@@ -744,6 +744,6 @@ eicon_irq(int irq, void *dev_id, struct pt_regs *regs) {
 			break;
 	}
 
-  return;
+  return IRQ_HANDLED;
 }
 #endif

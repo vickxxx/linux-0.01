@@ -40,9 +40,22 @@ extern void FASTCALL(rwsemtrace(struct rw_semaphore *sem, const char *str));
  */
 static inline void down_read(struct rw_semaphore *sem)
 {
+	might_sleep();
 	rwsemtrace(sem,"Entering down_read");
 	__down_read(sem);
 	rwsemtrace(sem,"Leaving down_read");
+}
+
+/*
+ * trylock for reading -- returns 1 if successful, 0 if contention
+ */
+static inline int down_read_trylock(struct rw_semaphore *sem)
+{
+	int ret;
+	rwsemtrace(sem,"Entering down_read_trylock");
+	ret = __down_read_trylock(sem);
+	rwsemtrace(sem,"Leaving down_read_trylock");
+	return ret;
 }
 
 /*
@@ -50,9 +63,22 @@ static inline void down_read(struct rw_semaphore *sem)
  */
 static inline void down_write(struct rw_semaphore *sem)
 {
+	might_sleep();
 	rwsemtrace(sem,"Entering down_write");
 	__down_write(sem);
 	rwsemtrace(sem,"Leaving down_write");
+}
+
+/*
+ * trylock for writing -- returns 1 if successful, 0 if contention
+ */
+static inline int down_write_trylock(struct rw_semaphore *sem)
+{
+	int ret;
+	rwsemtrace(sem,"Entering down_write_trylock");
+	ret = __down_write_trylock(sem);
+	rwsemtrace(sem,"Leaving down_write_trylock");
+	return ret;
 }
 
 /*
@@ -75,6 +101,15 @@ static inline void up_write(struct rw_semaphore *sem)
 	rwsemtrace(sem,"Leaving up_write");
 }
 
+/*
+ * downgrade write lock to read lock
+ */
+static inline void downgrade_write(struct rw_semaphore *sem)
+{
+	rwsemtrace(sem,"Entering downgrade_write");
+	__downgrade_write(sem);
+	rwsemtrace(sem,"Leaving downgrade_write");
+}
 
 #endif /* __KERNEL__ */
 #endif /* _LINUX_RWSEM_H */

@@ -28,7 +28,7 @@ target(struct sk_buff **pskb, unsigned int hooknum, const struct net_device *in,
 	arpptr = (*pskb)->nh.raw + sizeof(*arp);
 	pln = arp->ar_pln;
 	hln = arp->ar_hln;
-	/* We assume that hln was checked in the match */
+	/* We assume that pln and hln were checked in the match */
 	if (mangle->flags & ARPT_MANGLE_SDEV) {
 		if (ARPT_DEV_ADDR_LEN_MAX < hln ||
 		   (arpptr + hln > (**pskb).tail))

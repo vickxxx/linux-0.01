@@ -9,11 +9,15 @@
 
 #include <asm/page.h>
 
-/* PMD_SHIFT determines the size of the area a second-level page table can map */
+#ifdef __ASSEMBLY__
+#include <asm/thread_info.h>	/* TI_UWINMASK for WINDOW_FLUSH */
+#endif
+
+/* PMD_SHIFT determines the size of the area a second-level page table entry can map */
 #define SRMMU_PMD_SHIFT         18
 #define SRMMU_PMD_SIZE          (1UL << SRMMU_PMD_SHIFT)
 #define SRMMU_PMD_MASK          (~(SRMMU_PMD_SIZE-1))
-#define SRMMU_PMD_ALIGN(addr)   (((addr)+SRMMU_PMD_SIZE-1)&SRMMU_PMD_MASK)
+/* #define SRMMU_PMD_ALIGN(addr)   (((addr)+SRMMU_PMD_SIZE-1)&SRMMU_PMD_MASK) */
 
 /* PGDIR_SHIFT determines what a third-level page table entry can map */
 #define SRMMU_PGDIR_SHIFT       24
@@ -58,6 +62,10 @@
 #define SRMMU_PRIV         0x1c
 #define SRMMU_PRIV_RDONLY  0x18
 
+#define SRMMU_FILE         0x40	/* Implemented in software */
+
+#define SRMMU_PTE_FILE_SHIFT     8	/* == 32-PTE_FILE_MAX_BITS */
+
 #define SRMMU_CHG_MASK    (0xffffff00 | SRMMU_REF | SRMMU_DIRTY)
 
 /* Some day I will implement true fine grained access bits for
@@ -87,7 +95,7 @@
 
 #define WINDOW_FLUSH(tmp1, tmp2)					\
 	mov	0, tmp1;						\
-98:	ld	[%g6 + AOFF_task_thread + AOFF_thread_uwinmask], tmp2;	\
+98:	ld	[%g6 + TI_UWINMASK], tmp2;				\
 	orcc	%g0, tmp2, %g0;						\
 	add	tmp1, 1, tmp1;						\
 	bne	98b;							\

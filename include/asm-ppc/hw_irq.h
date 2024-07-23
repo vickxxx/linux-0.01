@@ -1,25 +1,63 @@
 /*
- * BK Id: SCCS/s.hw_irq.h 1.10 05/17/01 18:14:24 cort
- */
-/*
  * Copyright (C) 1999 Cort Dougan <cort@cs.nmt.edu>
  */
 #ifdef __KERNEL__
 #ifndef _PPC_HW_IRQ_H
 #define _PPC_HW_IRQ_H
 
-extern unsigned long timer_interrupt_intercept;
-extern unsigned long do_IRQ_intercept;
-int timer_interrupt(struct pt_regs *);
+extern void timer_interrupt(struct pt_regs *);
+extern void ppc_irq_dispatch_handler(struct pt_regs *regs, int irq);
 
-extern void __sti(void);
-extern void __cli(void);
-extern void __restore_flags(unsigned long);
-extern void __save_flags_ptr(unsigned long *);
-extern unsigned long __sti_end, __cli_end, __restore_flags_end, __save_flags_ptr_end;
+#define INLINE_IRQS
 
-#define __save_flags(flags) __save_flags_ptr((unsigned long *)&flags)
-#define __save_and_cli(flags) ({__save_flags(flags);__cli();})
+#define mfmsr()		({unsigned int rval; \
+			asm volatile("mfmsr %0" : "=r" (rval)); rval;})
+#define mtmsr(v)	asm volatile("mtmsr %0" : : "r" (v))
+
+#define irqs_disabled()	((mfmsr() & MSR_EE) == 0)
+
+#ifdef INLINE_IRQS
+
+static inline void local_irq_disable(void)
+{
+	unsigned long msr;
+	msr = mfmsr();
+	mtmsr(msr & ~MSR_EE);
+	__asm__ __volatile__("": : :"memory");
+}
+
+static inline void local_irq_enable(void)
+{
+	unsigned long msr;
+	__asm__ __volatile__("": : :"memory");
+	msr = mfmsr();
+	mtmsr(msr | MSR_EE);
+}
+
+static inline void local_irq_save_ptr(unsigned long *flags)
+{
+	unsigned long msr;
+	msr = mfmsr();
+	*flags = msr;
+	mtmsr(msr & ~MSR_EE);
+	__asm__ __volatile__("": : :"memory");
+}
+
+#define local_save_flags(flags)		((flags) = mfmsr())
+#define local_irq_save(flags)		local_irq_save_ptr(&flags)
+#define local_irq_restore(flags)	mtmsr(flags)
+
+#else
+
+extern void local_irq_enable(void);
+extern void local_irq_disable(void);
+extern void local_irq_restore(unsigned long);
+extern void local_save_flags_ptr(unsigned long *);
+
+#define local_save_flags(flags) local_save_flags_ptr(&flags)
+#define local_irq_save(flags) ({local_save_flags(flags);local_irq_disable();})
+
+#endif
 
 extern void do_lost_interrupts(unsigned long);
 

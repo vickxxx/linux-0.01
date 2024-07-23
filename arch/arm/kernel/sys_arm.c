@@ -229,7 +229,7 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
 		return sys_shmctl (first, second,
 				   (struct shmid_ds *) ptr);
 	default:
-		return -EINVAL;
+		return -ENOSYS;
 	}
 }
 
@@ -238,7 +238,7 @@ asmlinkage int sys_ipc (uint call, int first, int second, int third, void *ptr, 
  */
 asmlinkage int sys_fork(struct pt_regs *regs)
 {
-	return do_fork(SIGCHLD, regs->ARM_sp, regs, 0);
+	return do_fork(SIGCHLD, regs->ARM_sp, regs, 0, NULL, NULL);
 }
 
 /* Clone a task - this clones the calling program thread.
@@ -246,14 +246,21 @@ asmlinkage int sys_fork(struct pt_regs *regs)
  */
 asmlinkage int sys_clone(unsigned long clone_flags, unsigned long newsp, struct pt_regs *regs)
 {
+	/*
+	 * We don't support SETTID / CLEARTID
+	 */
+	if (clone_flags & (CLONE_PARENT_SETTID | CLONE_CHILD_CLEARTID))
+		return -EINVAL;
+
 	if (!newsp)
 		newsp = regs->ARM_sp;
-	return do_fork(clone_flags, newsp, regs, 0);
+
+	return do_fork(clone_flags & ~CLONE_IDLETASK, newsp, regs, 0, NULL, NULL);
 }
 
 asmlinkage int sys_vfork(struct pt_regs *regs)
 {
-	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->ARM_sp, regs, 0);
+	return do_fork(CLONE_VFORK | CLONE_VM | SIGCHLD, regs->ARM_sp, regs, 0, NULL, NULL);
 }
 
 /* sys_execve() executes a new program.
@@ -272,11 +279,4 @@ asmlinkage int sys_execve(char *filenamei, char **argv, char **envp, struct pt_r
 	putname(filename);
 out:
 	return error;
-}
-
-asmlinkage int sys_pause(void)
-{
-	current->state = TASK_INTERRUPTIBLE;
-	schedule();
-	return -ERESTARTNOHAND;
 }

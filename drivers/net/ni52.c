@@ -40,7 +40,7 @@
  *   The internal sysbus seems to be slow. So we often lose packets because of
  *   overruns while receiving from a fast remote host.
  *   This can slow down TCP connections. Maybe the newer ni5210 cards are better.
- *   my experience is, that if a machine sends with more then about 500-600K/s
+ *   my experience is, that if a machine sends with more than about 500-600K/s
  *   the fifo/sysbus overflows.
  *
  * IMPORTANT NOTE:
@@ -193,7 +193,7 @@ sizeof(nop_cmd) = 8;
 #define NI52_ADDR2 0x01
 
 static int     ni52_probe1(struct net_device *dev,int ioaddr);
-static void    ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr);
+static irqreturn_t ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr);
 static int     ni52_open(struct net_device *dev);
 static int     ni52_close(struct net_device *dev);
 static int     ni52_send_packet(struct sk_buff *,struct net_device *);
@@ -226,10 +226,11 @@ struct priv
 	volatile struct iscp_struct	*iscp;	/* volatile is important */
 	volatile struct scb_struct	*scb;	/* volatile is important */
 	volatile struct tbd_struct	*xmit_buffs[NUM_XMIT_BUFFS];
-	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 #if (NUM_XMIT_BUFFS == 1)
+	volatile struct transmit_cmd_struct *xmit_cmds[2];
 	volatile struct nop_cmd_struct *nop_cmds[2];
 #else
+	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 	volatile struct nop_cmd_struct *nop_cmds[NUM_XMIT_BUFFS];
 #endif
 	volatile int		nop_point,num_recv_buffs;
@@ -286,8 +287,8 @@ static int check586(struct net_device *dev,char *where,unsigned size)
 	char *iscp_addrs[2];
 	int i;
 
-	p->base = (unsigned long) bus_to_virt((unsigned long)where) + size - 0x01000000;
-	p->memtop = bus_to_virt((unsigned long)where) + size;
+	p->base = (unsigned long) isa_bus_to_virt((unsigned long)where) + size - 0x01000000;
+	p->memtop = isa_bus_to_virt((unsigned long)where) + size;
 	p->scp = (struct scp_struct *)(p->base + SCP_DEFAULT_ADDRESS);
 	memset((char *)p->scp,0, sizeof(struct scp_struct));
 	for(i=0;i<sizeof(struct scp_struct);i++) /* memory was writeable? */
@@ -297,7 +298,7 @@ static int check586(struct net_device *dev,char *where,unsigned size)
 	if(p->scp->sysbus != SYSBUSVAL)
 		return 0;
 
-	iscp_addrs[0] = bus_to_virt((unsigned long)where);
+	iscp_addrs[0] = isa_bus_to_virt((unsigned long)where);
 	iscp_addrs[1]= (char *) p->scp - sizeof(struct iscp_struct);
 
 	for(i=0;i<2;i++)
@@ -329,7 +330,7 @@ static void alloc586(struct net_device *dev)
 	DELAY(1);
 
 	p->scp	= (struct scp_struct *)	(p->base + SCP_DEFAULT_ADDRESS);
-	p->scb	= (struct scb_struct *)	bus_to_virt(dev->mem_start);
+	p->scb	= (struct scb_struct *)	isa_bus_to_virt(dev->mem_start);
 	p->iscp = (struct iscp_struct *) ((char *)p->scp - sizeof(struct iscp_struct));
 
 	memset((char *) p->iscp,0,sizeof(struct iscp_struct));
@@ -477,8 +478,8 @@ static int __init ni52_probe1(struct net_device *dev,int ioaddr)
 																	/* warning: we don't free it on errors */
 	memset((char *) dev->priv,0,sizeof(struct priv));
 
-	((struct priv *) (dev->priv))->memtop = bus_to_virt(dev->mem_start) + size;
-	((struct priv *) (dev->priv))->base =	(unsigned long) bus_to_virt(dev->mem_start) + size - 0x01000000;
+	((struct priv *) (dev->priv))->memtop = isa_bus_to_virt(dev->mem_start) + size;
+	((struct priv *) (dev->priv))->base =	(unsigned long) isa_bus_to_virt(dev->mem_start) + size - 0x01000000;
 	alloc586(dev);
 
 	/* set number of receive-buffs according to memsize */
@@ -491,10 +492,16 @@ static int __init ni52_probe1(struct net_device *dev,int ioaddr)
 
 	if(dev->irq < 2)
 	{
-		autoirq_setup(0);
+		unsigned long irq_mask, delay;
+
+		irq_mask = probe_irq_on();
 		ni_reset586();
 		ni_attn586();
-		if(!(dev->irq = autoirq_report(2)))
+
+		delay = jiffies + HZ/50;
+		while (time_before(jiffies, delay)) ;
+		dev->irq = probe_irq_off(irq_mask);
+		if(!dev->irq)
 		{
 			printk("?autoirq, Failed to detect IRQ line!\n");
 			kfree(dev->priv);
@@ -814,7 +821,7 @@ static void *alloc_rfa(struct net_device *dev,void *ptr)
  * Interrupt Handler ...
  */
 
-static void ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
+static irqreturn_t ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
 {
 	struct net_device *dev = dev_id;
 	unsigned short stat;
@@ -823,7 +830,7 @@ static void ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
 
 	if (!dev) {
 		printk ("ni5210-interrupt: irq %d for unknown device.\n",irq);
-		return;
+		return IRQ_NONE;
 	}
 	p = (struct priv *) dev->priv;
 
@@ -882,6 +889,7 @@ static void ni52_interrupt(int irq,void *dev_id,struct pt_regs *reg_ptr)
 
 	if(debuglevel > 1)
 		printk("i");
+	return IRQ_HANDLED;
 }
 
 /*******************************************************
@@ -1162,7 +1170,11 @@ static int ni52_send_packet(struct sk_buff *skb, struct net_device *dev)
 #endif
 	{
 		memcpy((char *)p->xmit_cbuffs[p->xmit_count],(char *)(skb->data),skb->len);
-		len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
+		len = skb->len;
+		if (len < ETH_ZLEN) {
+			len = ETH_ZLEN;
+			memset((char *)p->xmit_cbuffs[p->xmit_count]+skb->len, 0, len - skb->len);
+		}
 
 #if (NUM_XMIT_BUFFS == 1)
 #	ifdef NO_NOPCOMMANDS

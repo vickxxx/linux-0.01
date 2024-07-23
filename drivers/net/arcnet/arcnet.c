@@ -57,8 +57,8 @@
 /* "do nothing" functions for protocol drivers */
 static void null_rx(struct net_device *dev, int bufnum,
 		    struct archdr *pkthdr, int length);
-static int null_build_header(struct sk_buff *skb, unsigned short type,
-			     uint8_t daddr);
+static int null_build_header(struct sk_buff *skb, struct net_device *dev,
+			     unsigned short type, uint8_t daddr);
 static int null_prepare_tx(struct net_device *dev, struct archdr *pkt,
 			   int length, int bufnum);
 
@@ -73,13 +73,14 @@ struct ArcProto *arc_proto_map[256], *arc_proto_default, *arc_bcast_proto;
 
 struct ArcProto arc_proto_null =
 {
-	'?',
-	XMTU,
-	null_rx,
-	null_build_header,
-	null_prepare_tx
+	.suffix		= '?',
+	.mtu		= XMTU,
+	.rx		= null_rx,
+	.build_header	= null_build_header,
+	.prepare_tx	= null_prepare_tx,
 };
 
+static spinlock_t arcnet_lock = SPIN_LOCK_UNLOCKED;
 
 /* Exported function prototypes */
 int arcnet_debug = ARCNET_DEBUG;
@@ -105,13 +106,15 @@ static int arcnet_rebuild_header(struct sk_buff *skb);
 static struct net_device_stats *arcnet_get_stats(struct net_device *dev);
 static int go_tx(struct net_device *dev);
 
-void __init arcnet_init(void)
+static int debug = ARCNET_DEBUG;
+MODULE_PARM(debug, "i");
+MODULE_LICENSE("GPL");
+
+static int __init arcnet_init(void)
 {
-	static int arcnet_inited;
 	int count;
 
-	if (arcnet_inited++)
-		return;
+	arcnet_debug = debug;
 
 	printk(VERSION);
 
@@ -137,46 +140,15 @@ void __init arcnet_init(void)
 		sizeof(struct arc_rfc1051), sizeof(struct arc_eth_encap),
 		   sizeof(struct archdr));
 
-#ifdef CONFIG_ARCNET		/* We're not built as a module */
-	printk("arcnet: Available protocols:");
-#ifdef CONFIG_ARCNET_1201
-	printk(" RFC1201");
-	arcnet_rfc1201_init();
-#endif
-#ifdef CONFIG_ARCNET_1051
-	printk(" RFC1051");
-	arcnet_rfc1051_init();
-#endif
-#ifdef CONFIG_ARCNET_RAW
-	printk(" RAW");
-	arcnet_raw_init();
-#endif
-	printk("\n");
-#ifdef CONFIG_ARCNET_COM90xx
-	com90xx_probe(NULL);
-#endif
-#endif
-}
-
-
-#ifdef MODULE
-
-static int debug = ARCNET_DEBUG;
-MODULE_PARM(debug, "i");
-
-int __init init_module(void)
-{
-	arcnet_debug = debug;
-	arcnet_init();
 	return 0;
 }
 
-void cleanup_module(void)
+static void __exit arcnet_exit(void)
 {
 }
 
-#endif
-
+module_init(arcnet_init);
+module_exit(arcnet_exit);
 
 /*
  * Dump the contents of an sk_buff
@@ -185,10 +157,7 @@ void cleanup_module(void)
 void arcnet_dump_skb(struct net_device *dev, struct sk_buff *skb, char *desc)
 {
 	int i;
-	long flags;
 
-	save_flags(flags);
-	cli();
 	printk(KERN_DEBUG "%6s: skb dump (%s) follows:", dev->name, desc);
 	for (i = 0; i < skb->len; i++) {
 		if (i % 16 == 0)
@@ -196,7 +165,6 @@ void arcnet_dump_skb(struct net_device *dev, struct sk_buff *skb, char *desc)
 		printk("%02X ", ((u_char *) skb->data)[i]);
 	}
 	printk("\n");
-	restore_flags(flags);
 }
 
 EXPORT_SYMBOL(arcnet_dump_skb);
@@ -211,13 +179,14 @@ void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc)
 {
 	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 	int i, length;
-	long flags;
+	unsigned long flags;
 	static uint8_t buf[512];
 
-	save_flags(flags);
-	cli();
-
+	/* hw.copy_from_card expects IRQ context so take the IRQ lock
+	   to keep it single threaded */
+	spin_lock_irqsave(&arcnet_lock, flags);
 	lp->hw.copy_from_card(dev, bufnum, 0, buf, 512);
+	spin_unlock_irqrestore(&arcnet_lock, flags);
 
 	/* if the offset[0] byte is nonzero, this is a 256-byte packet */
 	length = (buf[2] ? 256 : 512);
@@ -230,7 +199,6 @@ void arcnet_dump_packet(struct net_device *dev, int bufnum, char *desc)
 	}
 	printk("\n");
 
-	restore_flags(flags);
 }
 
 EXPORT_SYMBOL(arcnet_dump_packet);
@@ -342,7 +310,7 @@ void arcdev_setup(struct net_device *dev)
 	dev->hard_header_len = sizeof(struct archdr);
 	dev->mtu = choose_mtu();
 
-	dev->addr_len = 1;
+	dev->addr_len = ARCNET_ALEN;
 	dev->tx_queue_len = 30;
 	dev->broadcast[0] = 0x00;	/* for us, broadcasts are address 0 */
 	dev->watchdog_timeo = TX_TIMEOUT;
@@ -511,7 +479,7 @@ static int arcnet_header(struct sk_buff *skb, struct net_device *dev,
 		       arc_bcast_proto->suffix);
 		proto = arc_bcast_proto;
 	}
-	return proto->build_header(skb, type, _daddr);
+	return proto->build_header(skb, dev, type, _daddr);
 }
 
 
@@ -527,6 +495,7 @@ static int arcnet_rebuild_header(struct sk_buff *skb)
 	int status = 0;		/* default is failure */
 	unsigned short type;
 	uint8_t daddr=0;
+	struct ArcProto *proto;
 
 	if (skb->nh.raw - skb->mac.raw != 2) {
 		BUGMSG(D_NORMAL,
@@ -555,7 +524,8 @@ static int arcnet_rebuild_header(struct sk_buff *skb)
 		return 0;
 
 	/* add the _real_ header this time! */
-	arc_proto_map[lp->default_proto[daddr]]->build_header(skb, type, daddr);
+	proto = arc_proto_map[lp->default_proto[daddr]];
+	proto->build_header(skb, dev, type, daddr);
 
 	return 1;		/* success */
 }
@@ -669,9 +639,7 @@ static void arcnet_timeout(struct net_device *dev)
 	int status = ASTATUS();
 	char *msg;
 
-	save_flags(flags);
-	cli();
-
+	spin_lock_irqsave(&arcnet_lock, flags);
 	if (status & TXFREEflag) {	/* transmit _DID_ finish */
 		msg = " - missed IRQ?";
 	} else {
@@ -686,8 +654,8 @@ static void arcnet_timeout(struct net_device *dev)
 	AINTMASK(0);
 	lp->intmask |= TXFREEflag;
 	AINTMASK(lp->intmask);
-
-	restore_flags(flags);
+	
+	spin_unlock_irqrestore(&arcnet_lock, flags);
 
 	if (jiffies - lp->last_timeout > 10*HZ) {
 		BUGMSG(D_EXTRA, "tx timed out%s (status=%Xh, intmask=%Xh, dest=%02Xh)\n",
@@ -705,7 +673,7 @@ static void arcnet_timeout(struct net_device *dev)
  * interrupts. Establish which device needs attention, and call the correct
  * chipset interrupt handler.
  */
-void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+irqreturn_t arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct arcnet_local *lp;
@@ -713,17 +681,14 @@ void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	BUGMSG(D_DURING, "\n");
 
-	if (dev == NULL) {
-		BUGMSG(D_DURING, "arcnet: irq %d for unknown device.\n", irq);
-		return;
-	}
 	BUGMSG(D_DURING, "in arcnet_interrupt\n");
 
+	spin_lock(&arcnet_lock);
+	
 	lp = (struct arcnet_local *) dev->priv;
-	if (!lp) {
-		BUGMSG(D_DURING, "arcnet: irq ignored due to missing lp.\n");
-		return;
-	}
+	if (!lp)
+		BUG();
+		
 	/*
 	 * RESET flag was enabled - if device is not running, we must clear it right
 	 * away (but nothing else).
@@ -732,7 +697,8 @@ void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 		if (ASTATUS() & RESETflag)
 			ACOMMAND(CFLAGScmd | RESETclear);
 		AINTMASK(0);
-		return;
+		spin_unlock(&arcnet_lock);
+		return IRQ_HANDLED;
 	}
 
 	BUGMSG(D_DURING, "in arcnet_inthandler (status=%Xh, intmask=%Xh)\n",
@@ -898,6 +864,9 @@ void arcnet_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	AINTMASK(0);
 	udelay(1);
 	AINTMASK(lp->intmask);
+	
+	spin_unlock(&arcnet_lock);
+	return IRQ_RETVAL(didsomething);
 }
 
 
@@ -985,10 +954,9 @@ static void null_rx(struct net_device *dev, int bufnum,
 }
 
 
-static int null_build_header(struct sk_buff *skb, unsigned short type,
-			     uint8_t daddr)
+static int null_build_header(struct sk_buff *skb, struct net_device *dev,
+			     unsigned short type, uint8_t daddr)
 {
-	struct net_device *dev = skb->dev;
 	struct arcnet_local *lp = (struct arcnet_local *) dev->priv;
 
 	BUGMSG(D_PROTO,

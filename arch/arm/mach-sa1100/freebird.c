@@ -9,6 +9,7 @@
 #include <linux/tty.h>
 
 #include <asm/hardware.h>
+#include <asm/mach-types.h>
 #include <asm/setup.h>
 
 #include <asm/mach/arch.h>
@@ -21,32 +22,44 @@
 unsigned long BCR_value = BCR_DB1110;
 EXPORT_SYMBOL(BCR_value);
 
-
-static void __init
-fixup_freebird(struct machine_desc *desc, struct param_struct *params,
-	       char **cmdline, struct meminfo *mi)
+static void freebird_backlight_power(int on)
 {
-#ifdef CONFIG_SA1100_FREEBIRD_OLD
-	SET_BANK( 0, 0xc0000000, 32*1024*1024 );
-	mi->nr_banks = 1;
-	ROOT_DEV = MKDEV(RAMDISK_MAJOR,0);
-	setup_ramdisk( 1, 0 ,0 , 8192 );
-	setup_initrd( 0xc0800000, 3*1024*1024 );
-#endif
+#error FIXME
+	if (on) {
+		BCR_set(BCR_FREEBIRD_LCD_PWR | BCR_FREEBIRD_LCD_DISP);
+		/* Turn on backlight, Chester */
+		BCR_set(BCR_FREEBIRD_LCD_BACKLIGHT);
+	} else {
+		BCR_clear(BCR_FREEBIRD_LCD_PWR | BCR_FREEBIRD_LCD_DISP
+			  /* | BCR_FREEBIRD_LCD_BACKLIGHT */);
+	}
 }
 
+static void freebird_lcd_power(int on)
+{
+}
+
+static int __init freebird_init(void)
+{
+	if (machine_is_freebird()) {
+		sa1100fb_backlight_power = freebird_backlight_power;
+		sa1100fb_lcd_power = freebird_lcd_power;
+	}
+	return 0;
+}
+
+arch_initcall(freebird_init);
+
 static struct map_desc freebird_io_desc[] __initdata = {
- /* virtual     physical    length      domain     r  w  c  b */
-  { 0xe8000000, 0x00000000, 0x02000000, DOMAIN_IO, 1, 1, 0, 0 }, /* Flash bank 0 */
-  { 0xf0000000, 0x12000000, 0x00100000, DOMAIN_IO, 1, 1, 0, 0 }, /* Board Control Register */
-  { 0xf2000000, 0x19000000, 0x00100000, DOMAIN_IO, 1, 1, 0, 0},
-   LAST_DESC
+ /* virtual     physical    length      type */
+  { 0xf0000000, 0x12000000, 0x00100000, MT_DEVICE }, /* Board Control Register */
+  { 0xf2000000, 0x19000000, 0x00100000, MT_DEVICE }
 };
 
 static void __init freebird_map_io(void)
 {
 	sa1100_map_io();
-	iotable_init(freebird_io_desc);
+	iotable_init(freebird_io_desc, ARRAY_SIZE(freebird_io_desc));
 
 	sa1100_register_uart(0, 3);
 	sa1100_register_uart(1, 1);
@@ -62,7 +75,6 @@ MACHINE_START(FREEBIRD, "Freebird-HPC-1.1")
 #ifdef CONFIG_SA1100_FREEBIRD_NEW
 	BOOT_PARAMS(0xc0000100)
 #endif
-	FIXUP(fixup_freebird)
 	MAPIO(freebird_map_io)
 	INITIRQ(sa1100_init_irq)
 MACHINE_END

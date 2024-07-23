@@ -36,10 +36,10 @@
 
 
 #include <linux/config.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/string.h>
-#include <linux/locks.h>
 #include <linux/reiserfs_fs.h>
+#include <linux/buffer_head.h>
 
 
 /* To make any changes in the tree we find a node, that contains item
@@ -795,8 +795,8 @@ static int  get_empty_nodes(
   else /* If we have enough already then there is nothing to do. */
     return CARRY_ON;
 
-  if ( reiserfs_new_blocknrs (p_s_tb->transaction_handle, a_n_blocknrs,
-			      PATH_PLAST_BUFFER(p_s_tb->tb_path)->b_blocknr, n_amount_needed) == NO_DISK_SPACE )
+  if ( reiserfs_new_form_blocknrs (p_s_tb, a_n_blocknrs,
+                                   n_amount_needed) == NO_DISK_SPACE )
     return NO_DISK_SPACE;
 
   /* for each blocknumber we just got, get a buffer and stick it on FEB */
@@ -806,33 +806,16 @@ static int  get_empty_nodes(
     RFALSE( ! *p_n_blocknr,
 	    "PAP-8135: reiserfs_new_blocknrs failed when got new blocks");
 
-    p_s_new_bh = reiserfs_getblk(p_s_sb->s_dev, *p_n_blocknr, p_s_sb->s_blocksize);
-    if (atomic_read (&(p_s_new_bh->b_count)) > 1) {
-/*&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&*/
-/*
-      reiserfs_warning ("waiting for buffer %b, iput inode pid = %d, this pid %d, mode %c, %h\n",
-			p_s_new_bh, put_inode_pid, current->pid, p_s_tb->tb_vn->vn_mode, p_s_tb->tb_vn->vn_ins_ih);
-      print_tb (0, 0, 0, p_s_tb, "tb");
-*/
-/*&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&&*/
-      if (atomic_read(&(p_s_new_bh->b_count)) > 2 || 
-          !(buffer_journaled(p_s_new_bh) || buffer_journal_dirty(p_s_new_bh))) {
-	n_retval = REPEAT_SEARCH ;
-	free_buffers_in_tb (p_s_tb);
-	wait_buffer_until_released (p_s_new_bh);
-      }
-    }
-    RFALSE( (atomic_read (&(p_s_new_bh->b_count)) != 1 || 
-	     buffer_dirty (p_s_new_bh)) && 
-	    (atomic_read(&(p_s_new_bh->b_count)) > 2 || 
-	     !(buffer_journaled(p_s_new_bh) || 
-	       buffer_journal_dirty(p_s_new_bh))),
-	    "PAP-8140: not free or dirty buffer %b for the new block", 
+    p_s_new_bh = sb_getblk(p_s_sb, *p_n_blocknr);
+    RFALSE (buffer_dirty (p_s_new_bh) ||
+	    buffer_journaled (p_s_new_bh) ||
+	    buffer_journal_dirty (p_s_new_bh),
+	    "PAP-8140: journlaled or dirty buffer %b for the new block", 
 	    p_s_new_bh);
     
     /* Put empty buffers into the array. */
-    if (p_s_tb->FEB[p_s_tb->cur_blknum])
-      BUG();
+    RFALSE (p_s_tb->FEB[p_s_tb->cur_blknum],
+	    "PAP-8141: busy slot for new buffer");
 
     mark_buffer_journal_new(p_s_new_bh) ;
     p_s_tb->FEB[p_s_tb->cur_blknum++] = p_s_new_bh;
@@ -920,7 +903,7 @@ static int  is_left_neighbor_in_cache(
   /* Get left neighbor block number. */
   n_left_neighbor_blocknr = B_N_CHILD_NUM(p_s_tb->FL[n_h], n_left_neighbor_position);
   /* Look for the left neighbor in the cache. */
-  if ( (left = get_hash_table(p_s_sb->s_dev, n_left_neighbor_blocknr, p_s_sb->s_blocksize)) ) {
+  if ( (left = sb_find_get_block(p_s_sb, n_left_neighbor_blocknr)) ) {
 
     RFALSE( buffer_uptodate (left) && ! B_IS_IN_TREE(left),
 	    "vs-8170: left neighbor (%b %z) is not in the tree", left, left);
@@ -1926,7 +1909,7 @@ static int  get_neighbors(
 
 	n_child_position = ( p_s_bh == p_s_tb->FL[n_h] ) ? p_s_tb->lkey[n_h] : B_NR_ITEMS (p_s_tb->FL[n_h]);
 	n_son_number = B_N_CHILD_NUM(p_s_tb->FL[n_h], n_child_position);
-	p_s_bh = reiserfs_bread(p_s_sb, n_son_number, p_s_sb->s_blocksize);
+	p_s_bh = sb_bread(p_s_sb, n_son_number);
 	if (!p_s_bh)
 	    return IO_ERROR;
 	if ( FILESYSTEM_CHANGED_TB (p_s_tb) ) {
@@ -1959,7 +1942,7 @@ static int  get_neighbors(
 
 	n_child_position = ( p_s_bh == p_s_tb->FR[n_h] ) ? p_s_tb->rkey[n_h] + 1 : 0;
 	n_son_number = B_N_CHILD_NUM(p_s_tb->FR[n_h], n_child_position);
-	p_s_bh = reiserfs_bread(p_s_sb, n_son_number, p_s_sb->s_blocksize);
+	p_s_bh = sb_bread(p_s_sb, n_son_number);
 	if (!p_s_bh)
 	    return IO_ERROR;
 	if ( FILESYSTEM_CHANGED_TB (p_s_tb) ) {
@@ -1979,7 +1962,7 @@ static int  get_neighbors(
     return CARRY_ON;
 }
 
-
+#ifdef CONFIG_REISERFS_CHECK
 void * reiserfs_kmalloc (size_t size, int flags, struct super_block * s)
 {
     void * vp;
@@ -1988,13 +1971,13 @@ void * reiserfs_kmalloc (size_t size, int flags, struct super_block * s)
 
     vp = kmalloc (size, flags);
     if (vp) {
-	s->u.reiserfs_sb.s_kmallocs += size;
-	if (s->u.reiserfs_sb.s_kmallocs > malloced + 200000) {
-	    reiserfs_warning ("vs-8301: reiserfs_kmalloc: allocated memory %d\n", s->u.reiserfs_sb.s_kmallocs);
-	    malloced = s->u.reiserfs_sb.s_kmallocs;
+	REISERFS_SB(s)->s_kmallocs += size;
+	if (REISERFS_SB(s)->s_kmallocs > malloced + 200000) {
+	    reiserfs_warning ("vs-8301: reiserfs_kmalloc: allocated memory %d\n", REISERFS_SB(s)->s_kmallocs);
+	    malloced = REISERFS_SB(s)->s_kmallocs;
 	}
     }
-/*printk ("malloc : size %d, allocated %d\n", size, s->u.reiserfs_sb.s_kmallocs);*/
+/*printk ("malloc : size %d, allocated %d\n", size, REISERFS_SB(s)->s_kmallocs);*/
     return vp;
 }
 
@@ -2002,42 +1985,30 @@ void reiserfs_kfree (const void * vp, size_t size, struct super_block * s)
 {
     kfree (vp);
   
-    s->u.reiserfs_sb.s_kmallocs -= size;
-    if (s->u.reiserfs_sb.s_kmallocs < 0)
-	reiserfs_warning ("vs-8302: reiserfs_kfree: allocated memory %d\n", s->u.reiserfs_sb.s_kmallocs);
+    REISERFS_SB(s)->s_kmallocs -= size;
+    if (REISERFS_SB(s)->s_kmallocs < 0)
+	reiserfs_warning ("vs-8302: reiserfs_kfree: allocated memory %d\n", REISERFS_SB(s)->s_kmallocs);
 
 }
+#endif
 
 
 static int get_virtual_node_size (struct super_block * sb, struct buffer_head * bh)
 {
-  //  int size = sizeof (struct virtual_item); /* for new item in case of insert */
-  //  int i, nr_items;
-  //  struct item_head * ih;
+    int max_num_of_items;
+    int max_num_of_entries;
+    unsigned long blocksize = sb->s_blocksize;
 
-  // this is enough for _ALL_ currently possible cases. In 4 k block
-  // one may put < 170 empty items. Each virtual item eats 12
-  // byte. The biggest direntry item may have < 256 entries. Each
-  // entry would eat 2 byte of virtual node space
-  return sb->s_blocksize;
+#define MIN_NAME_LEN 1
 
-#if 0
-  size = sizeof (struct virtual_node) + sizeof (struct virtual_item);
-  ih = B_N_PITEM_HEAD (bh, 0);
-  nr_items = B_NR_ITEMS (bh);
-  for (i = 0; i < nr_items; i ++, ih ++) {
-    /* each item occupies some space in virtual node */
-    size += sizeof (struct virtual_item);
-    if (is_direntry_le_ih (ih))
-      /* each entry and new one occupeis 2 byte in the virtual node */
-      size += (ih_entry_count(ih) + 1) * sizeof( __u16 );
-  }
-  
-  /* 1 bit for each bitmap block to note whether bitmap block was
-     dirtied in the operation */
- /* size += (SB_BMAP_NR (sb) * 2 / 8 + 4);*/
-  return size;
-#endif
+    max_num_of_items = (blocksize - BLKH_SIZE) / (IH_SIZE + MIN_ITEM_LEN);
+    max_num_of_entries = (blocksize - BLKH_SIZE - IH_SIZE) / 
+                         (DEH_SIZE + MIN_NAME_LEN);
+
+    return sizeof(struct virtual_node) + 
+           max(max_num_of_items * sizeof (struct virtual_item),
+	       sizeof (struct virtual_item) + sizeof(struct direntry_uarea) + 
+               (max_num_of_entries - 1) * sizeof (__u16));
 }
 
 
@@ -2071,14 +2042,14 @@ static int get_mem_for_virtual_node (struct tree_balance * tb)
 	    /* getting memory with GFP_KERNEL priority may involve
                balancing now (due to indirect_to_direct conversion on
                dcache shrinking). So, release path and collected
-               resourses here */
+               resources here */
 	    free_buffers_in_tb (tb);
 	    buf = reiserfs_kmalloc(size, GFP_NOFS, tb->tb_sb);
 	    if ( !buf ) {
 #ifdef CONFIG_REISERFS_CHECK
 		reiserfs_warning ("vs-8345: get_mem_for_virtual_node: "
 				  "kmalloc failed. reiserfs kmalloced %d bytes\n",
-				  tb->tb_sb->u.reiserfs_sb.s_kmallocs);
+				  REISERFS_SB(tb->tb_sb)->s_kmallocs);
 #endif
 		tb->vn_buf_size = 0;
 	    }
@@ -2104,21 +2075,27 @@ static void tb_buffer_sanity_check (struct super_block * p_s_sb,
   if (p_s_bh) {
     if (atomic_read (&(p_s_bh->b_count)) <= 0) {
 
-      reiserfs_panic (p_s_sb, "tb_buffer_sanity_check(): negative or zero reference counter for buffer %s[%d] (%b)\n", descr, level, p_s_bh);
+      reiserfs_panic (p_s_sb, "jmacd-1: tb_buffer_sanity_check(): negative or zero reference counter for buffer %s[%d] (%b)\n", descr, level, p_s_bh);
     }
 
     if ( ! buffer_uptodate (p_s_bh) ) {
-      reiserfs_panic (p_s_sb, "tb_buffer_sanity_check(): buffer is not up to date %s[%d] (%b)\n", descr, level, p_s_bh);
+      reiserfs_panic (p_s_sb, "jmacd-2: tb_buffer_sanity_check(): buffer is not up to date %s[%d] (%b)\n", descr, level, p_s_bh);
     }
 
     if ( ! B_IS_IN_TREE (p_s_bh) ) {
-      reiserfs_panic (p_s_sb, "tb_buffer_sanity_check(): buffer is not in tree %s[%d] (%b)\n", descr, level, p_s_bh);
+      reiserfs_panic (p_s_sb, "jmacd-3: tb_buffer_sanity_check(): buffer is not in tree %s[%d] (%b)\n", descr, level, p_s_bh);
     }
 
-    if (p_s_bh->b_dev != p_s_sb->s_dev || 
-	p_s_bh->b_size != p_s_sb->s_blocksize ||
-	p_s_bh->b_blocknr > SB_BLOCK_COUNT(p_s_sb)) {
-      reiserfs_panic (p_s_sb, "tb_buffer_sanity_check(): check failed for buffer %s[%d] (%b)\n", descr, level, p_s_bh);
+    if (p_s_bh->b_bdev != p_s_sb->s_bdev) {
+	reiserfs_panic (p_s_sb, "jmacd-4: tb_buffer_sanity_check(): buffer has wrong device %s[%d] (%b)\n", descr, level, p_s_bh);
+    }
+
+    if (p_s_bh->b_size != p_s_sb->s_blocksize) {
+	reiserfs_panic (p_s_sb, "jmacd-5: tb_buffer_sanity_check(): buffer has wrong blocksize %s[%d] (%b)\n", descr, level, p_s_bh);
+    }
+
+    if (p_s_bh->b_blocknr > SB_BLOCK_COUNT(p_s_sb)) {
+	reiserfs_panic (p_s_sb, "jmacd-6: tb_buffer_sanity_check(): buffer block number too high %s[%d] (%b)\n", descr, level, p_s_bh);
     }
   }
 }
@@ -2306,7 +2283,7 @@ int fix_nodes (int n_op_mode,
     int windex ;
     struct buffer_head  * p_s_tbS0 = PATH_PLAST_BUFFER(p_s_tb->tb_path);
 
-    ++ p_s_tb -> tb_sb -> u.reiserfs_sb.s_fix_nodes;
+    ++ REISERFS_SB(p_s_tb -> tb_sb) -> s_fix_nodes;
 
     n_pos_in_item = p_s_tb->tb_path->pos_in_item;
 
@@ -2343,15 +2320,6 @@ int fix_nodes (int n_op_mode,
 			"at the beginning of fix_nodes or not in tree (mode %c)", p_s_tbS0, p_s_tbS0, n_op_mode);
     }
 
-    // FIXME: new items have to be of 8 byte multiples. Including new
-    // directory items those look like old ones
-    /*
-    if (p_s_tb->insert_size[0] % 8)
-	reiserfs_panic (p_s_tb->tb_sb, "vs-: fix_nodes: incorrect insert_size %d, "
-			"mode %c",
-			p_s_tb->insert_size[0], n_op_mode);
-    */
-
     /* Check parameters. */
     switch (n_op_mode) {
     case M_INSERT:
@@ -2382,7 +2350,6 @@ int fix_nodes (int n_op_mode,
     for ( n_h = 0; n_h < MAX_HEIGHT && p_s_tb->insert_size[n_h]; n_h++ ) { 
 	if ( (n_ret_value = get_direct_parent(p_s_tb, n_h)) != CARRY_ON ) {
 	    goto repeat;
-	    return n_ret_value;
 	}
 
 	if ( (n_ret_value = check_balance (n_op_mode, p_s_tb, n_h, n_item_num,
@@ -2391,7 +2358,6 @@ int fix_nodes (int n_op_mode,
 		/* No balancing for higher levels needed. */
 		if ( (n_ret_value = get_neighbors(p_s_tb, n_h)) != CARRY_ON ) {
 		    goto repeat;
-		    return n_ret_value;
 		}
 		if ( n_h != MAX_HEIGHT - 1 )  
 		    p_s_tb->insert_size[n_h + 1] = 0;
@@ -2399,17 +2365,14 @@ int fix_nodes (int n_op_mode,
 		break;
 	    }
 	    goto repeat;
-	    return n_ret_value;
 	}
 
 	if ( (n_ret_value = get_neighbors(p_s_tb, n_h)) != CARRY_ON ) {
 	    goto repeat;
-	    return n_ret_value;
 	}
 
 	if ( (n_ret_value = get_empty_nodes(p_s_tb, n_h)) != CARRY_ON ) {
-	    goto repeat;
-	    return n_ret_value; /* No disk space, or schedule occurred and
+	    goto repeat;        /* No disk space, or schedule occurred and
 				   analysis may be invalid and needs to be redone. */
 	}
     

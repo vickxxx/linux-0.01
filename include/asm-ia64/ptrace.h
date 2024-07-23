@@ -2,9 +2,13 @@
 #define _ASM_IA64_PTRACE_H
 
 /*
- * Copyright (C) 1998-2001 Hewlett-Packard Co
- * Copyright (C) 1998-2001 David Mosberger-Tang <davidm@hpl.hp.com>
- * Copyright (C) 1998, 1999 Stephane Eranian <eranian@hpl.hp.com>
+ * Copyright (C) 1998-2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
+ *	Stephane Eranian <eranian@hpl.hp.com>
+ * Copyright (C) 2003 Intel Co
+ *	Suresh Siddha <suresh.b.siddha@intel.com>
+ *	Fenghua Yu <fenghua.yu@intel.com>
+ *	Arun Sharma <arun.sharma@intel.com>
  *
  * 12/07/98	S. Eranian	added pt_regs & switch_stack
  * 12/21/98	D. Mosberger	updated to match latest code
@@ -39,7 +43,9 @@
  *	      |	(growing upwards)    |	 |
  *            |			     |	 |
  *	      +----------------------+	 |  ---	IA64_RBS_OFFSET
- *	      |			     |	 |  ^
+ *            |  struct thread_info  |	 |  ^
+ *	      +----------------------+	 |  |
+ *	      |			     |	 |  |
  *            |  struct task_struct  |	 |  |
  * current -> |			     |   |  |
  *	      +----------------------+ -------
@@ -58,19 +64,19 @@
  * (including register backing store and memory stack):
  */
 #if defined(CONFIG_IA64_PAGE_SIZE_4KB)
-# define IA64_TASK_STRUCT_LOG_NUM_PAGES		3
+# define KERNEL_STACK_SIZE_ORDER		3
 #elif defined(CONFIG_IA64_PAGE_SIZE_8KB)
-# define IA64_TASK_STRUCT_LOG_NUM_PAGES		2
+# define KERNEL_STACK_SIZE_ORDER		2
 #elif defined(CONFIG_IA64_PAGE_SIZE_16KB)
-# define IA64_TASK_STRUCT_LOG_NUM_PAGES		1
+# define KERNEL_STACK_SIZE_ORDER		1
 #else
-# define IA64_TASK_STRUCT_LOG_NUM_PAGES		0
+# define KERNEL_STACK_SIZE_ORDER		0
 #endif
 
-#define IA64_RBS_OFFSET			((IA64_TASK_SIZE + 15) & ~15)
-#define IA64_STK_OFFSET			((1 << IA64_TASK_STRUCT_LOG_NUM_PAGES)*PAGE_SIZE)
+#define IA64_RBS_OFFSET			((IA64_TASK_SIZE + IA64_THREAD_INFO_SIZE + 15) & ~15)
+#define IA64_STK_OFFSET			((1 << KERNEL_STACK_SIZE_ORDER)*PAGE_SIZE)
 
-#define INIT_TASK_SIZE			IA64_STK_OFFSET
+#define KERNEL_STACK_SIZE		IA64_STK_OFFSET
 
 #ifndef __ASSEMBLY__
 
@@ -91,6 +97,16 @@
  */
 struct pt_regs {
 	/* The following registers are saved by SAVE_MIN: */
+	unsigned long b6;		/* scratch */
+	unsigned long b7;		/* scratch */
+
+	unsigned long ar_csd;           /* used by cmp8xchg16 (scratch) */
+	unsigned long ar_ssd;           /* reserved for future use (scratch) */
+
+	unsigned long r8;		/* scratch (return value register 0) */
+	unsigned long r9;		/* scratch (return value register 1) */
+	unsigned long r10;		/* scratch (return value register 2) */
+	unsigned long r11;		/* scratch (return value register 3) */
 
 	unsigned long cr_ipsr;		/* interrupted task's psr */
 	unsigned long cr_iip;		/* interrupted task's instruction pointer */
@@ -104,24 +120,23 @@ struct pt_regs {
 	unsigned long ar_bspstore;	/* RSE bspstore */
 
 	unsigned long pr;		/* 64 predicate registers (1 bit each) */
-	unsigned long b6;		/* scratch */
+	unsigned long b0;		/* return pointer (bp) */
 	unsigned long loadrs;		/* size of dirty partition << 16 */
 
 	unsigned long r1;		/* the gp pointer */
-	unsigned long r2;		/* scratch */
-	unsigned long r3;		/* scratch */
 	unsigned long r12;		/* interrupted task's memory stack pointer */
 	unsigned long r13;		/* thread pointer */
-	unsigned long r14;		/* scratch */
+
+	unsigned long ar_fpsr;		/* floating point status (preserved) */
 	unsigned long r15;		/* scratch */
 
-	unsigned long r8;		/* scratch (return value register 0) */
-	unsigned long r9;		/* scratch (return value register 1) */
-	unsigned long r10;		/* scratch (return value register 2) */
-	unsigned long r11;		/* scratch (return value register 3) */
+	/* The remaining registers are NOT saved for system calls.  */
+
+	unsigned long r14;		/* scratch */
+	unsigned long r2;		/* scratch */
+	unsigned long r3;		/* scratch */
 
 	/* The following registers are saved by SAVE_REST: */
-
 	unsigned long r16;		/* scratch */
 	unsigned long r17;		/* scratch */
 	unsigned long r18;		/* scratch */
@@ -140,18 +155,16 @@ struct pt_regs {
 	unsigned long r31;		/* scratch */
 
 	unsigned long ar_ccv;		/* compare/exchange value (scratch) */
-	unsigned long ar_fpsr;		/* floating point status (preserved) */
 
-	unsigned long b0;		/* return pointer (bp) */
-	unsigned long b7;		/* scratch */
 	/*
-	 * Floating point registers that the kernel considers
-	 * scratch:
+	 * Floating point registers that the kernel considers scratch:
 	 */
 	struct ia64_fpreg f6;		/* scratch */
 	struct ia64_fpreg f7;		/* scratch */
 	struct ia64_fpreg f8;		/* scratch */
 	struct ia64_fpreg f9;		/* scratch */
+	struct ia64_fpreg f10;		/* scratch */
+	struct ia64_fpreg f11;		/* scratch */
 };
 
 /*
@@ -168,8 +181,6 @@ struct switch_stack {
 	struct ia64_fpreg f4;		/* preserved */
 	struct ia64_fpreg f5;		/* preserved */
 
-	struct ia64_fpreg f10;		/* scratch, but untouched by kernel */
-	struct ia64_fpreg f11;		/* scratch, but untouched by kernel */
 	struct ia64_fpreg f12;		/* scratch, but untouched by kernel */
 	struct ia64_fpreg f13;		/* scratch, but untouched by kernel */
 	struct ia64_fpreg f14;		/* scratch, but untouched by kernel */
@@ -216,10 +227,33 @@ struct switch_stack {
 # define ia64_task_regs(t)		(((struct pt_regs *) ((char *) (t) + IA64_STK_OFFSET)) - 1)
 # define ia64_psr(regs)			((struct ia64_psr *) &(regs)->cr_ipsr)
 # define user_mode(regs)		(((struct ia64_psr *) &(regs)->cr_ipsr)->cpl != 0)
+# define user_stack(task,regs)	((long) regs - (long) task == IA64_STK_OFFSET - sizeof(*regs))
+# define fsys_mode(task,regs)					\
+  ({								\
+	  struct task_struct *_task = (task);			\
+	  struct pt_regs *_regs = (regs);			\
+	  !user_mode(_regs) && user_stack(_task, _regs);	\
+  })
+
+  /*
+   * System call handlers that, upon successful completion, need to return a negative value
+   * should call force_successful_syscall_return() right before returning.  On architectures
+   * where the syscall convention provides for a separate error flag (e.g., alpha, ia64,
+   * ppc{,64}, sparc{,64}, possibly others), this macro can be used to ensure that the error
+   * flag will not get set.  On architectures which do not support a separate error flag,
+   * the macro is a no-op and the spurious error condition needs to be filtered out by some
+   * other means (e.g., in user-level, by passing an extra argument to the syscall handler,
+   * or something along those lines).
+   *
+   * On ia64, we can clear the user's pt_regs->r8 to force a successful syscall.
+   */
+# define force_successful_syscall_return()	(ia64_task_regs(current)->r8 = 0)
 
   struct task_struct;			/* forward decl */
+  struct unw_frame_info;		/* forward decl */
 
   extern void show_regs (struct pt_regs *);
+  extern void ia64_do_show_stack (struct unw_frame_info *, void *);
   extern unsigned long ia64_get_user_rbs_end (struct task_struct *, struct pt_regs *,
 					      unsigned long *);
   extern long ia64_peek (struct task_struct *, struct switch_stack *, unsigned long,
@@ -239,22 +273,46 @@ struct switch_stack {
   extern void ia64_increment_ip (struct pt_regs *pt);
   extern void ia64_decrement_ip (struct pt_regs *pt);
 
-static inline void
-force_successful_syscall_return (void)
-{
-	ia64_task_regs(current)->r8 = 0;
-}
-
 #endif /* !__KERNEL__ */
 
+/* pt_all_user_regs is used for PTRACE_GETREGS PTRACE_SETREGS */
+struct pt_all_user_regs {
+	unsigned long nat;
+	unsigned long cr_iip;
+	unsigned long cfm;
+	unsigned long cr_ipsr;
+	unsigned long pr;
+
+	unsigned long gr[32];
+	unsigned long br[8];
+	unsigned long ar[128];
+	struct ia64_fpreg fr[128];
+};
+
 #endif /* !__ASSEMBLY__ */
+
+/* indices to application-registers array in pt_all_user_regs */
+#define PT_AUR_RSC	16
+#define PT_AUR_BSP	17
+#define PT_AUR_BSPSTORE	18
+#define PT_AUR_RNAT	19
+#define PT_AUR_CCV	32
+#define PT_AUR_UNAT	36
+#define PT_AUR_FPSR	40
+#define PT_AUR_PFS	64
+#define PT_AUR_LC	65
+#define PT_AUR_EC	66
 
 /*
  * The numbers chosen here are somewhat arbitrary but absolutely MUST
  * not overlap with any of the number assigned in <linux/ptrace.h>.
  */
 #define PTRACE_SINGLEBLOCK	12	/* resume execution until next branch */
-#define PTRACE_GETSIGINFO	13	/* get child's siginfo structure */
-#define PTRACE_SETSIGINFO	14	/* set child's siginfo structure */
+#define PTRACE_OLD_GETSIGINFO	13	/* (replaced by PTRACE_GETSIGINFO in <linux/ptrace.h>)  */
+#define PTRACE_OLD_SETSIGINFO	14	/* (replaced by PTRACE_SETSIGINFO in <linux/ptrace.h>)  */
+#define PTRACE_GETREGS		18	/* get all registers (pt_all_user_regs) in one shot */
+#define PTRACE_SETREGS		19	/* set all registers (pt_all_user_regs) in one shot */
+
+#define PTRACE_OLDSETOPTIONS	21
 
 #endif /* _ASM_IA64_PTRACE_H */

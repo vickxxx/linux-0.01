@@ -9,6 +9,7 @@
 #include <linux/string.h>
 #include <linux/efs_fs.h>
 #include <linux/pagemap.h>
+#include <linux/buffer_head.h>
 #include <linux/smp_lock.h>
 
 static int efs_symlink_readpage(struct file *file, struct page *page)
@@ -26,13 +27,13 @@ static int efs_symlink_readpage(struct file *file, struct page *page)
 	lock_kernel();
 	/* read first 512 bytes of link target */
 	err = -EIO;
-	bh = bread(inode->i_dev, efs_bmap(inode, 0), EFS_BLOCKSIZE);
+	bh = sb_bread(inode->i_sb, efs_bmap(inode, 0));
 	if (!bh)
 		goto fail;
 	memcpy(link, bh->b_data, (size > EFS_BLOCKSIZE) ? EFS_BLOCKSIZE : size);
 	brelse(bh);
 	if (size > EFS_BLOCKSIZE) {
-		bh = bread(inode->i_dev, efs_bmap(inode, 1), EFS_BLOCKSIZE);
+		bh = sb_bread(inode->i_sb, efs_bmap(inode, 1));
 		if (!bh)
 			goto fail;
 		memcpy(link + EFS_BLOCKSIZE, bh->b_data, size - EFS_BLOCKSIZE);
@@ -42,16 +43,16 @@ static int efs_symlink_readpage(struct file *file, struct page *page)
 	unlock_kernel();
 	SetPageUptodate(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return 0;
 fail:
 	unlock_kernel();
 	SetPageError(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return err;
 }
 
 struct address_space_operations efs_symlink_aops = {
-	readpage:	efs_symlink_readpage
+	.readpage	= efs_symlink_readpage
 };

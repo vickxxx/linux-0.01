@@ -1,6 +1,8 @@
 #ifndef __LINUX_NET_SCM_H
 #define __LINUX_NET_SCM_H
 
+#include <linux/limits.h>
+
 /* Well, we should have at least one descriptor open
  * to accept passed FDs 8)
  */
@@ -20,6 +22,7 @@ struct scm_cookie
 };
 
 extern void scm_detach_fds(struct msghdr *msg, struct scm_cookie *scm);
+extern void scm_detach_fds_compat(struct msghdr *msg, struct scm_cookie *scm);
 extern int __scm_send(struct socket *sock, struct msghdr *msg, struct scm_cookie *scm);
 extern void __scm_destroy(struct scm_cookie *scm);
 extern struct scm_fp_list * scm_fp_dup(struct scm_fp_list *fpl);

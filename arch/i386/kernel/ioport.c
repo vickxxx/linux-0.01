@@ -10,10 +10,11 @@
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/ioport.h>
-#include <linux/mm.h>
 #include <linux/smp.h>
 #include <linux/smp_lock.h>
 #include <linux/stddef.h>
+#include <linux/slab.h>
+#include <linux/thread_info.h>
 
 /* Set EXTENT bits starting at BASE in BITMAP to value TURN_ON. */
 static void set_bitmap(unsigned long *bitmap, short base, short extent, int new_value)
@@ -55,36 +56,48 @@ static void set_bitmap(unsigned long *bitmap, short base, short extent, int new_
 asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 {
 	struct thread_struct * t = &current->thread;
-	struct tss_struct * tss = init_tss + smp_processor_id();
+	struct tss_struct * tss;
+	unsigned long *bitmap = NULL;
+	int ret = 0;
 
 	if ((from + num <= from) || (from + num > IO_BITMAP_SIZE*32))
 		return -EINVAL;
 	if (turn_on && !capable(CAP_SYS_RAWIO))
 		return -EPERM;
+
 	/*
 	 * If it's the first ioperm() call in this thread's lifetime, set the
 	 * IO bitmap up. ioperm() is much less timing critical than clone(),
 	 * this is why we delay this operation until now:
 	 */
-	if (!t->ioperm) {
+	if (!t->ts_io_bitmap) {
+		bitmap = kmalloc(IO_BITMAP_BYTES, GFP_KERNEL);
+		if (!bitmap) {
+			ret = -ENOMEM;
+			goto out;
+		}
+
 		/*
 		 * just in case ...
 		 */
-		memset(t->io_bitmap,0xff,(IO_BITMAP_SIZE+1)*4);
-		t->ioperm = 1;
-		/*
-		 * this activates it in the TSS
-		 */
-		tss->bitmap = IO_BITMAP_OFFSET;
+		memset(bitmap, 0xff, IO_BITMAP_BYTES);
+		t->ts_io_bitmap = bitmap;
 	}
 
 	/*
 	 * do it in the per-thread copy and in the TSS ...
 	 */
-	set_bitmap(t->io_bitmap, from, num, !turn_on);
-	set_bitmap(tss->io_bitmap, from, num, !turn_on);
-
-	return 0;
+	set_bitmap(t->ts_io_bitmap, from, num, !turn_on);
+	tss = init_tss + get_cpu();
+	if (tss->bitmap == IO_BITMAP_OFFSET) { /* already active? */
+		set_bitmap(tss->io_bitmap, from, num, !turn_on);
+	} else {
+		memcpy(tss->io_bitmap, t->ts_io_bitmap, IO_BITMAP_BYTES);
+		tss->bitmap = IO_BITMAP_OFFSET;	/* Activate it in the TSS */
+	}
+	put_cpu();
+out:
+	return ret;
 }
 
 /*
@@ -100,7 +113,7 @@ asmlinkage int sys_ioperm(unsigned long from, unsigned long num, int turn_on)
 
 asmlinkage int sys_iopl(unsigned long unused)
 {
-	struct pt_regs * regs = (struct pt_regs *) &unused;
+	volatile struct pt_regs * regs = (struct pt_regs *) &unused;
 	unsigned int level = regs->ebx;
 	unsigned int old = (regs->eflags >> 12) & 3;
 
@@ -112,5 +125,7 @@ asmlinkage int sys_iopl(unsigned long unused)
 			return -EPERM;
 	}
 	regs->eflags = (regs->eflags & 0xffffcfff) | (level << 12);
+	/* Make sure we return the long way (not sysenter) */
+	set_thread_flag(TIF_IRET);
 	return 0;
 }

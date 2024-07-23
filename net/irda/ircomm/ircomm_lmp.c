@@ -11,6 +11,7 @@
  * Sources:       Previous IrLPT work by Thomas Davis
  * 
  *     Copyright (c) 1999 Dag Brattli, All Rights Reserved.
+ *     Copyright (c) 2000-2003 Jean Tourrilhes <jt@hpl.hp.com>
  *     
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -35,6 +36,7 @@
 #include <net/irda/irda.h>
 #include <net/irda/irlmp.h>
 #include <net/irda/iriap.h>
+#include <net/irda/irda_device.h>	/* struct irda_skb_cb */
 
 #include <net/irda/ircomm_event.h>
 #include <net/irda/ircomm_lmp.h>
@@ -49,7 +51,7 @@ int ircomm_open_lsap(struct ircomm_cb *self)
 {
 	notify_t notify;
 	
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
 	
         /* Register callbacks */
         irda_notify_init(&notify);
@@ -58,11 +60,11 @@ int ircomm_open_lsap(struct ircomm_cb *self)
         notify.connect_indication    = ircomm_lmp_connect_indication;
 	notify.disconnect_indication = ircomm_lmp_disconnect_indication;
 	notify.instance = self;
-	strncpy(notify.name, "IrCOMM", NOTIFY_MAX_NAME);
+	strlcpy(notify.name, "IrCOMM", sizeof(notify.name));
 
 	self->lsap = irlmp_open_lsap(LSAP_ANY, &notify, 0);
 	if (!self->lsap) {
-		IRDA_DEBUG(0, "%s failed to allocate tsap\n", __FUNCTION__);
+		IRDA_DEBUG(0,"%sfailed to allocate tsap\n", __FUNCTION__ );
 		return -1;
 	}
 	self->slsap_sel = self->lsap->slsap_sel;
@@ -90,7 +92,11 @@ int ircomm_lmp_connect_request(struct ircomm_cb *self,
 {
 	int ret = 0;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
+
+	/* Don't forget to refcount it - should be NULL anyway */
+	if(userdata)
+		skb_get(userdata);
 
 	ret = irlmp_connect_request(self->lsap, info->dlsap_sel,
 				    info->saddr, info->daddr, NULL, userdata); 
@@ -105,29 +111,32 @@ int ircomm_lmp_connect_request(struct ircomm_cb *self,
  */
 int ircomm_lmp_connect_response(struct ircomm_cb *self, struct sk_buff *userdata)
 {
-	struct sk_buff *skb;
+	struct sk_buff *tx_skb;
 	int ret;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
 	
 	/* Any userdata supplied? */
 	if (userdata == NULL) {
-		skb = dev_alloc_skb(64);
-		if (!skb)
+		tx_skb = dev_alloc_skb(64);
+		if (!tx_skb)
 			return -ENOMEM;
 
 		/* Reserve space for MUX and LAP header */
-		skb_reserve(skb, LMP_MAX_HEADER);
+		skb_reserve(tx_skb, LMP_MAX_HEADER);
 	} else {
-		skb = userdata;
 		/*  
 		 *  Check that the client has reserved enough space for 
 		 *  headers
 		 */
-		ASSERT(skb_headroom(skb) >= LMP_MAX_HEADER, return -1;);
+		ASSERT(skb_headroom(userdata) >= LMP_MAX_HEADER, return -1;);
+
+		/* Don't forget to refcount it - should be NULL anyway */
+		skb_get(userdata);
+		tx_skb = userdata;
 	}
 
-	ret = irlmp_connect_response(self->lsap, skb);
+	ret = irlmp_connect_response(self->lsap, tx_skb);
 
 	return 0;
 }
@@ -136,20 +145,24 @@ int ircomm_lmp_disconnect_request(struct ircomm_cb *self,
 				  struct sk_buff *userdata, 
 				  struct ircomm_info *info)
 {
-        struct sk_buff *skb;
+        struct sk_buff *tx_skb;
 	int ret;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
 
         if (!userdata) {
-                skb = dev_alloc_skb(64);
-		if (!skb)
+		tx_skb = dev_alloc_skb(64);
+		if (!tx_skb)
 			return -ENOMEM;
 		
 		/*  Reserve space for MUX and LAP header */
-		skb_reserve(skb, LMP_MAX_HEADER);		
-		userdata = skb;
+		skb_reserve(tx_skb, LMP_MAX_HEADER);		
+		userdata = tx_skb;
+	} else {
+		/* Don't forget to refcount it - should be NULL anyway */
+		skb_get(userdata);
 	}
+
 	ret = irlmp_disconnect_request(self->lsap, userdata);
 
 	return ret;
@@ -172,13 +185,13 @@ void ircomm_lmp_flow_control(struct sk_buff *skb)
 
 	cb = (struct irda_skb_cb *) skb->cb;
 
-	IRDA_DEBUG(2, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(2, "%s()\n", __FUNCTION__ );
  
         line = cb->line;
 
-	self = (struct ircomm_cb *) hashbin_find(ircomm, line, NULL);
+	self = (struct ircomm_cb *) hashbin_lock_find(ircomm, line, NULL);
         if (!self) {
-		IRDA_DEBUG(2, "%s(), didn't find myself\n", __FUNCTION__);
+		IRDA_DEBUG(2, "%s(), didn't find myself\n", __FUNCTION__ );
                 return;
 	}
 
@@ -188,7 +201,7 @@ void ircomm_lmp_flow_control(struct sk_buff *skb)
 	self->pkt_count--;
 
         if ((self->pkt_count < 2) && (self->flow_status == FLOW_STOP)) {
-                IRDA_DEBUG(2, "%s(), asking TTY to start again!\n", __FUNCTION__);
+                IRDA_DEBUG(2, "%s(), asking TTY to start again!\n", __FUNCTION__ );
                 self->flow_status = FLOW_START;
                 if (self->notify.flow_indication)
                         self->notify.flow_indication(self->notify.instance, 
@@ -214,12 +227,15 @@ int ircomm_lmp_data_request(struct ircomm_cb *self, struct sk_buff *skb,
 	
         cb->line = self->line;
 
-	IRDA_DEBUG(4, "%s(), sending frame\n", __FUNCTION__);
+	IRDA_DEBUG(4, "%s(), sending frame\n", __FUNCTION__ );
+
+	/* Don't forget to refcount it - see ircomm_tty_do_softint() */
+	skb_get(skb);
 
 	skb->destructor = ircomm_lmp_flow_control;
-	
+
         if ((self->pkt_count++ > 7) && (self->flow_status == FLOW_START)) {
-		IRDA_DEBUG(2, "%s(), asking TTY to slow down!\n", __FUNCTION__);
+		IRDA_DEBUG(2, "%s(), asking TTY to slow down!\n", __FUNCTION__ );
 	        self->flow_status = FLOW_STOP;
                 if (self->notify.flow_indication)
              	        self->notify.flow_indication(self->notify.instance, 
@@ -228,7 +244,7 @@ int ircomm_lmp_data_request(struct ircomm_cb *self, struct sk_buff *skb,
 	ret = irlmp_data_request(self->lsap, skb);
 	if (ret) {
 		ERROR("%s(), failed\n", __FUNCTION__);
-		dev_kfree_skb(skb);
+		/* irlmp_data_request already free the packet */
 	}
 
 	return ret;
@@ -245,13 +261,16 @@ int ircomm_lmp_data_indication(void *instance, void *sap,
 {
 	struct ircomm_cb *self = (struct ircomm_cb *) instance;
 
-	IRDA_DEBUG(4, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(4, "%s()\n", __FUNCTION__ );
 	
 	ASSERT(self != NULL, return -1;);
 	ASSERT(self->magic == IRCOMM_MAGIC, return -1;);
 	ASSERT(skb != NULL, return -1;);
 	
 	ircomm_do_event(self, IRCOMM_LMP_DATA_INDICATION, skb, NULL);
+
+	/* Drop reference count - see ircomm_tty_data_indication(). */
+	dev_kfree_skb(skb);
 
 	return 0;
 }
@@ -272,7 +291,7 @@ void ircomm_lmp_connect_confirm(void *instance, void *sap,
 	struct ircomm_cb *self = (struct ircomm_cb *) instance;
 	struct ircomm_info info;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
 
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == IRCOMM_MAGIC, return;);
@@ -284,6 +303,9 @@ void ircomm_lmp_connect_confirm(void *instance, void *sap,
 	info.qos = qos;
 
 	ircomm_do_event(self, IRCOMM_LMP_CONNECT_CONFIRM, skb, &info);
+
+	/* Drop reference count - see ircomm_tty_connect_confirm(). */
+	dev_kfree_skb(skb);
 }
 
 /*
@@ -302,7 +324,7 @@ void ircomm_lmp_connect_indication(void *instance, void *sap,
 	struct ircomm_cb *self = (struct ircomm_cb *)instance;
 	struct ircomm_info info;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
 
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == IRCOMM_MAGIC, return;);
@@ -314,6 +336,9 @@ void ircomm_lmp_connect_indication(void *instance, void *sap,
 	info.qos = qos;
 
 	ircomm_do_event(self, IRCOMM_LMP_CONNECT_INDICATION, skb, &info);
+
+	/* Drop reference count - see ircomm_tty_connect_indication(). */
+	dev_kfree_skb(skb);
 }
 
 /*
@@ -329,7 +354,7 @@ void ircomm_lmp_disconnect_indication(void *instance, void *sap,
 	struct ircomm_cb *self = (struct ircomm_cb *) instance;
 	struct ircomm_info info;
 
-	IRDA_DEBUG(0, "%s()\n", __FUNCTION__);
+	IRDA_DEBUG(0, "%s()\n", __FUNCTION__ );
 
 	ASSERT(self != NULL, return;);
 	ASSERT(self->magic == IRCOMM_MAGIC, return;);
@@ -337,4 +362,8 @@ void ircomm_lmp_disconnect_indication(void *instance, void *sap,
 	info.reason = reason;
 
 	ircomm_do_event(self, IRCOMM_LMP_DISCONNECT_INDICATION, skb, &info);
+
+	/* Drop reference count - see ircomm_tty_disconnect_indication(). */
+	if(skb)
+		dev_kfree_skb(skb);
 }

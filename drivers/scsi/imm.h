@@ -71,7 +71,6 @@
 #include  <linux/stddef.h>
 #include  <linux/module.h>
 #include  <linux/kernel.h>
-#include  <linux/tqueue.h>
 #include  <linux/ioport.h>
 #include  <linux/delay.h>
 #include  <linux/proc_fs.h>
@@ -81,7 +80,6 @@
 #include  <linux/interrupt.h>
 
 #include  <asm/io.h>
-#include  "sd.h"
 #include  "hosts.h"
 /* batteries not included :-) */
 
@@ -161,25 +159,8 @@ int imm_command(Scsi_Cmnd *);
 int imm_queuecommand(Scsi_Cmnd *, void (*done) (Scsi_Cmnd *));
 int imm_abort(Scsi_Cmnd *);
 int imm_reset(Scsi_Cmnd *);
-int imm_proc_info(char *, char **, off_t, int, int, int);
-int imm_biosparam(Disk *, kdev_t, int *);
+int imm_proc_info(struct Scsi_Host *, char *, char **, off_t, int, int);
+int imm_biosparam(struct scsi_device *, struct block_device *,
+		sector_t, int *);
 
-#define IMM {	proc_name:			"imm",			\
-		proc_info:			imm_proc_info,		\
-		name:				"Iomega VPI2 (imm) interface",\
-		detect:				imm_detect,		\
-		release:			imm_release,		\
-		command:			imm_command,		\
-		queuecommand:			imm_queuecommand,	\
-                eh_abort_handler:               imm_abort,              \
-                eh_device_reset_handler:        NULL,                   \
-                eh_bus_reset_handler:           imm_reset,              \
-                eh_host_reset_handler:          imm_reset,              \
-		use_new_eh_code:		1,			\
-		bios_param:		        imm_biosparam,		\
-		this_id:			7,			\
-		sg_tablesize:			SG_ALL,			\
-		cmd_per_lun:			1,			\
-		use_clustering:			ENABLE_CLUSTERING	\
-}
 #endif				/* _IMM_H */

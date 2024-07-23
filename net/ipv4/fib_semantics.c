@@ -5,7 +5,7 @@
  *
  *		IPv4 Forwarding Information Base: semantics.
  *
- * Version:	$Id: fib_semantics.c,v 1.18.2.2 2002/01/12 07:54:15 davem Exp $
+ * Version:	$Id: fib_semantics.c,v 1.19 2002/01/12 07:54:56 davem Exp $
  *
  * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
@@ -21,7 +21,7 @@
 #include <asm/bitops.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/mm.h>
 #include <linux/string.h>
 #include <linux/socket.h>
@@ -83,23 +83,62 @@ static struct
 {
 	int	error;
 	u8	scope;
-} fib_props[RTN_MAX+1] = {
-        { 0, RT_SCOPE_NOWHERE},		/* RTN_UNSPEC */
-	{ 0, RT_SCOPE_UNIVERSE},	/* RTN_UNICAST */
-	{ 0, RT_SCOPE_HOST},		/* RTN_LOCAL */
-	{ 0, RT_SCOPE_LINK},		/* RTN_BROADCAST */
-	{ 0, RT_SCOPE_LINK},		/* RTN_ANYCAST */
-	{ 0, RT_SCOPE_UNIVERSE},	/* RTN_MULTICAST */
-	{ -EINVAL, RT_SCOPE_UNIVERSE},	/* RTN_BLACKHOLE */
-	{ -EHOSTUNREACH, RT_SCOPE_UNIVERSE},/* RTN_UNREACHABLE */
-	{ -EACCES, RT_SCOPE_UNIVERSE},	/* RTN_PROHIBIT */
-	{ -EAGAIN, RT_SCOPE_UNIVERSE},	/* RTN_THROW */
+} fib_props[RTA_MAX + 1] = {
+        {
+		.error	= 0,
+		.scope	= RT_SCOPE_NOWHERE,
+	},	/* RTN_UNSPEC */
+	{
+		.error	= 0,
+		.scope	= RT_SCOPE_UNIVERSE,
+	},	/* RTN_UNICAST */
+	{
+		.error	= 0,
+		.scope	= RT_SCOPE_HOST,
+	},	/* RTN_LOCAL */
+	{
+		.error	= 0,
+		.scope	= RT_SCOPE_LINK,
+	},	/* RTN_BROADCAST */
+	{
+		.error	= 0,
+		.scope	= RT_SCOPE_LINK,
+	},	/* RTN_ANYCAST */
+	{
+		.error	= 0,
+		.scope	= RT_SCOPE_UNIVERSE,
+	},	/* RTN_MULTICAST */
+	{
+		.error	= -EINVAL,
+		.scope	= RT_SCOPE_UNIVERSE,
+	},	/* RTN_BLACKHOLE */
+	{
+		.error	= -EHOSTUNREACH,
+		.scope	= RT_SCOPE_UNIVERSE,
+	},	/* RTN_UNREACHABLE */
+	{
+		.error	= -EACCES,
+		.scope	= RT_SCOPE_UNIVERSE,
+	},	/* RTN_PROHIBIT */
+	{
+		.error	= -EAGAIN,
+		.scope	= RT_SCOPE_UNIVERSE,
+	},	/* RTN_THROW */
 #ifdef CONFIG_IP_ROUTE_NAT
-	{ 0, RT_SCOPE_HOST},		/* RTN_NAT */
+	{
+		.error	= 0,
+		.scope	= RT_SCOPE_HOST,
+	},	/* RTN_NAT */
 #else
-	{ -EINVAL, RT_SCOPE_NOWHERE},	/* RTN_NAT */
+	{
+		.error	= -EINVAL,
+		.scope	= RT_SCOPE_NOWHERE,
+	},	/* RTN_NAT */
 #endif
-	{ -EINVAL, RT_SCOPE_NOWHERE}	/* RTN_XRESOLVE */
+	{
+		.error	= -EINVAL,
+		.scope	= RT_SCOPE_NOWHERE,
+	},	/* RTN_XRESOLVE */
 };
 
 
@@ -317,7 +356,7 @@ int fib_nh_match(struct rtmsg *r, struct nlmsghdr *nlh, struct kern_rta *rta,
    Attempt to reconcile all of these (alas, self-contradictory) conditions
    results in pretty ugly and hairy code with obscure logic.
 
-   I choosed to generalized it instead, so that the size
+   I chose to generalized it instead, so that the size
    of code does not increase practically, but it becomes
    much more general.
    Every prefix is assigned a "scope" value: "host" is local address,
@@ -349,7 +388,6 @@ static int fib_check_nh(const struct rtmsg *r, struct fib_info *fi, struct fib_n
 	int err;
 
 	if (nh->nh_gw) {
-		struct rt_key key;
 		struct fib_result res;
 
 #ifdef CONFIG_IP_ROUTE_PERVASIVE
@@ -372,16 +410,18 @@ static int fib_check_nh(const struct rtmsg *r, struct fib_info *fi, struct fib_n
 			nh->nh_scope = RT_SCOPE_LINK;
 			return 0;
 		}
-		memset(&key, 0, sizeof(key));
-		key.dst = nh->nh_gw;
-		key.oif = nh->nh_oif;
-		key.scope = r->rtm_scope + 1;
+		{
+			struct flowi fl = { .nl_u = { .ip4_u =
+						      { .daddr = nh->nh_gw,
+							.scope = r->rtm_scope + 1 } },
+					    .oif = nh->nh_oif };
 
-		/* It is not necessary, but requires a bit of thinking */
-		if (key.scope < RT_SCOPE_LINK)
-			key.scope = RT_SCOPE_LINK;
-		if ((err = fib_lookup(&key, &res)) != 0)
-			return err;
+			/* It is not necessary, but requires a bit of thinking */
+			if (fl.fl4_scope < RT_SCOPE_LINK)
+				fl.fl4_scope = RT_SCOPE_LINK;
+			if ((err = fib_lookup(&fl, &res)) != 0)
+				return err;
+		}
 		err = -EINVAL;
 		if (res.type != RTN_UNICAST && res.type != RTN_LOCAL)
 			goto out;
@@ -430,9 +470,6 @@ fib_create_info(const struct rtmsg *r, struct kern_rta *rta,
 #else
 	const int nhs = 1;
 #endif
-
-	if (r->rtm_type > RTN_MAX)
-		goto err_inval;
 
 	/* Fast check to catch the most weird cases */
 	if (fib_props[r->rtm_type].scope > r->rtm_scope)
@@ -581,7 +618,7 @@ failure:
 }
 
 int 
-fib_semantic_match(int type, struct fib_info *fi, const struct rt_key *key, struct fib_result *res)
+fib_semantic_match(int type, struct fib_info *fi, const struct flowi *flp, struct fib_result *res)
 {
 	int err = fib_props[type].error;
 
@@ -606,7 +643,7 @@ fib_semantic_match(int type, struct fib_info *fi, const struct rt_key *key, stru
 			for_nexthops(fi) {
 				if (nh->nh_flags&RTNH_F_DEAD)
 					continue;
-				if (!key->oif || key->oif == nh->nh_oif)
+				if (!flp->oif || flp->oif == nh->nh_oif)
 					break;
 			}
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
@@ -952,7 +989,7 @@ int fib_sync_up(struct net_device *dev)
    fair weighted route distribution.
  */
 
-void fib_select_multipath(const struct rt_key *key, struct fib_result *res)
+void fib_select_multipath(const struct flowi *flp, struct fib_result *res)
 {
 	struct fib_info *fi = res->fi;
 	int w;
@@ -998,46 +1035,4 @@ void fib_select_multipath(const struct rt_key *key, struct fib_result *res)
 	res->nh_sel = 0;
 	spin_unlock_bh(&fib_multipath_lock);
 }
-#endif
-
-
-#ifdef CONFIG_PROC_FS
-
-static unsigned fib_flag_trans(int type, int dead, u32 mask, struct fib_info *fi)
-{
-	static unsigned type2flags[RTN_MAX+1] = {
-		0, 0, 0, 0, 0, 0, 0, RTF_REJECT, RTF_REJECT, 0, 0, 0
-	};
-	unsigned flags = type2flags[type];
-
-	if (fi && fi->fib_nh->nh_gw)
-		flags |= RTF_GATEWAY;
-	if (mask == 0xFFFFFFFF)
-		flags |= RTF_HOST;
-	if (!dead)
-		flags |= RTF_UP;
-	return flags;
-}
-
-void fib_node_get_info(int type, int dead, struct fib_info *fi, u32 prefix, u32 mask, char *buffer)
-{
-	int len;
-	unsigned flags = fib_flag_trans(type, dead, mask, fi);
-
-	if (fi) {
-		len = sprintf(buffer, "%s\t%08X\t%08X\t%04X\t%d\t%u\t%d\t%08X\t%d\t%u\t%u",
-			      fi->fib_dev ? fi->fib_dev->name : "*", prefix,
-			      fi->fib_nh->nh_gw, flags, 0, 0, fi->fib_priority,
-			      mask, (fi->fib_advmss ? fi->fib_advmss+40 : 0),
-			      fi->fib_window, fi->fib_rtt>>3);
-	} else {
-		len = sprintf(buffer, "*\t%08X\t%08X\t%04X\t%d\t%u\t%d\t%08X\t%d\t%u\t%u",
-			      prefix, 0,
-			      flags, 0, 0, 0,
-			      mask, 0, 0, 0);
-	}
-	memset(buffer+len, ' ', 127-len);
-	buffer[127] = '\n';
-}
-
 #endif

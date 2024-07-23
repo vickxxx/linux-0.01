@@ -9,22 +9,24 @@
 
 #include <linux/efs_fs.h>
 #include <linux/efs_fs_sb.h>
+#include <linux/buffer_head.h>
 #include <linux/module.h>
+#include <linux/fs.h>
 
 
-extern int efs_get_block(struct inode *, long, struct buffer_head *, int);
+extern int efs_get_block(struct inode *, sector_t, struct buffer_head *, int);
 static int efs_readpage(struct file *file, struct page *page)
 {
 	return block_read_full_page(page,efs_get_block);
 }
-static int _efs_bmap(struct address_space *mapping, long block)
+static sector_t _efs_bmap(struct address_space *mapping, sector_t block)
 {
 	return generic_block_bmap(mapping,block,efs_get_block);
 }
 struct address_space_operations efs_aops = {
-	readpage: efs_readpage,
-	sync_page: block_sync_page,
-	bmap: _efs_bmap
+	.readpage = efs_readpage,
+	.sync_page = block_sync_page,
+	.bmap = _efs_bmap
 };
 
 static inline void extent_copy(efs_extent *src, efs_extent *dst) {
@@ -77,7 +79,7 @@ void efs_read_inode(struct inode *inode) {
 			(EFS_BLOCKSIZE / sizeof(struct efs_dinode))) *
 		sizeof(struct efs_dinode);
 
-	bh = bread(inode->i_dev, block, EFS_BLOCKSIZE);
+	bh = sb_bread(inode->i_sb, block);
 	if (!bh) {
 		printk(KERN_WARNING "EFS: bread() failed at block %d\n", block);
 		goto read_inode_error;
@@ -90,9 +92,10 @@ void efs_read_inode(struct inode *inode) {
 	inode->i_uid   = (uid_t)be16_to_cpu(efs_inode->di_uid);
 	inode->i_gid   = (gid_t)be16_to_cpu(efs_inode->di_gid);
 	inode->i_size  = be32_to_cpu(efs_inode->di_size);
-	inode->i_atime = be32_to_cpu(efs_inode->di_atime);
-	inode->i_mtime = be32_to_cpu(efs_inode->di_mtime);
-	inode->i_ctime = be32_to_cpu(efs_inode->di_ctime);
+	inode->i_atime.tv_sec = be32_to_cpu(efs_inode->di_atime);
+	inode->i_mtime.tv_sec = be32_to_cpu(efs_inode->di_mtime);
+	inode->i_ctime.tv_sec = be32_to_cpu(efs_inode->di_ctime);
+	inode->i_atime.tv_nsec = inode->i_mtime.tv_nsec = inode->i_ctime.tv_nsec = 0;
 
 	/* this is the number of blocks in the file */
 	if (inode->i_size == 0) {
@@ -271,7 +274,7 @@ efs_block_t efs_map_block(struct inode *inode, efs_block_t block) {
 		if (first || lastblock != iblock) {
 			if (bh) brelse(bh);
 
-			bh = bread(inode->i_dev, iblock, EFS_BLOCKSIZE);
+			bh = sb_bread(inode->i_sb, iblock);
 			if (!bh) {
 				printk(KERN_ERR "EFS: bread() failed at block %d\n", iblock);
 				return 0;

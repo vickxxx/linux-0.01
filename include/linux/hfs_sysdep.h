@@ -19,8 +19,9 @@
 
 #include <linux/slab.h>
 #include <linux/types.h>
-#include <linux/locks.h>
 #include <linux/fs.h>
+#include <linux/sched.h>
+#include <linux/buffer_head.h>
 
 #include <asm/byteorder.h>
 #include <asm/unaligned.h>
@@ -86,7 +87,7 @@ static inline hfs_s32 hfs_to_utc(hfs_u32 time)
 }
 
 static inline hfs_u32 hfs_time(void) {
-	return htonl(hfs_from_utc(CURRENT_TIME)+2082844800U);
+	return htonl(hfs_from_utc(get_seconds())+2082844800U);
 }
 
 
@@ -122,7 +123,7 @@ static inline void hfs_mdb_dirty(hfs_sysmdb sys_mdb) {
 }
 
 static inline const char *hfs_mdb_name(hfs_sysmdb sys_mdb) {
-	return kdevname(sys_mdb->s_dev);
+	return sys_mdb->s_id;
 }
 
 
@@ -154,13 +155,8 @@ static inline void hfs_buffer_dirty(hfs_buffer buffer) {
 }
 
 static inline void hfs_buffer_sync(hfs_buffer buffer) {
-	while (buffer_locked(buffer)) {
-		wait_on_buffer(buffer);
-	}
-	if (buffer_dirty(buffer)) {
-		ll_rw_block(WRITE, 1, &buffer);
-		wait_on_buffer(buffer);
-	}
+	if (buffer_dirty(buffer))
+		sync_dirty_buffer(buffer);
 }
 
 static inline void *hfs_buffer_data(const hfs_buffer buffer) {
@@ -200,16 +196,16 @@ static inline void *hfs_buffer_data(const hfs_buffer buffer) {
 #endif
 
 static inline int hfs_clear_bit(int bitnr, hfs_u32 *lword) {
-	return test_and_clear_bit(BITNR(bitnr), lword);
+	return test_and_clear_bit(BITNR(bitnr), (unsigned long *)lword);
 }
 
 static inline int hfs_set_bit(int bitnr, hfs_u32 *lword) {
-	return test_and_set_bit(BITNR(bitnr), lword);
+	return test_and_set_bit(BITNR(bitnr), (unsigned long *)lword);
 }
 
 static inline int hfs_test_bit(int bitnr, const hfs_u32 *lword) {
 	/* the kernel should declare the second arg of test_bit as const */
-	return test_bit(BITNR(bitnr), (void *)lword);
+	return test_bit(BITNR(bitnr), (unsigned long *)lword);
 }
 
 #undef BITNR

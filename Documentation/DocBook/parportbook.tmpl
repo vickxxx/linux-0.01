@@ -595,7 +595,7 @@
    So, the first thing for the device driver to do is tell
    <literal>parport</literal> that it wants to know what parallel
    ports are on the system.  To do this, it uses the
-   <function>parport_register_device</function> function:
+   <function>parport_register_driver</function> function:
   </para>
 
   <funcsynopsis>
@@ -1149,7 +1149,7 @@ static struct parport_driver lp_driver = {
    peripheral what transfer mode it would like to use, and the
    peripheral either accepts that mode or rejects it; if the mode is
    rejected, the host can try again with a different mode.  This is
-   the negotation phase.  Once the peripheral has accepted a
+   the negotiation phase.  Once the peripheral has accepted a
    particular transfer mode, data transfer can begin that mode.
   </para>
 
@@ -2729,7 +2729,9 @@ to permit their use in free software.
  </appendix>
 
 </book>
-
+<!-- Additional function to be documented:
+!Ddrivers/parport/init.c
+-->
 <!-- Local Variables: -->
 <!-- sgml-indent-step: 1 -->
 <!-- sgml-indent-data: 1 -->

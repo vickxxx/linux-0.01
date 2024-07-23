@@ -104,7 +104,7 @@ extern int 	ni5010_probe(struct net_device *dev);
 static int	ni5010_probe1(struct net_device *dev, int ioaddr);
 static int	ni5010_open(struct net_device *dev);
 static int	ni5010_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void	ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void	ni5010_rx(struct net_device *dev);
 static void	ni5010_timeout(struct net_device *dev);
 static int	ni5010_close(struct net_device *dev);
@@ -114,7 +114,7 @@ static void	reset_receiver(struct net_device *dev);
 
 static int	process_xmt_interrupt(struct net_device *dev);
 #define tx_done(dev) 1
-static void	hardware_send_packet(struct net_device *dev, char *buf, int length);
+static void	hardware_send_packet(struct net_device *dev, char *buf, int length, int pad);
 static void 	chipset_init(struct net_device *dev, int startp);
 static void	dump_packet(void *buf, int len);
 static void 	ni5010_show_registers(struct net_device *dev);
@@ -254,11 +254,15 @@ static int __init ni5010_probe1(struct net_device *dev, int ioaddr)
 	if (dev->irq == 0xff)
 		;
 	else if (dev->irq < 2) {
+		unsigned long irq_mask, delay;
+
 		PRINTK2((KERN_DEBUG "%s: I/O #5 passed!\n", dev->name));
 
-		autoirq_setup(0);
+		irq_mask = probe_irq_on();
 		trigger_irq(ioaddr);
-		dev->irq = autoirq_report(2);
+		delay = jiffies + HZ/50;
+		while (time_before(jiffies, delay)) ;
+		dev->irq = probe_irq_off(irq_mask);
 
 		PRINTK2((KERN_DEBUG "%s: I/O #6 passed!\n", dev->name));
 
@@ -437,7 +441,7 @@ static int ni5010_send_packet(struct sk_buff *skb, struct net_device *dev)
 	 */
 	
 	netif_stop_queue(dev);
-	hardware_send_packet(dev, (unsigned char *)skb->data, length);
+	hardware_send_packet(dev, (unsigned char *)skb->data, skb->len, length-skb->len);
 	dev->trans_start = jiffies;
 	dev_kfree_skb (skb);
 	return 0;
@@ -447,7 +451,7 @@ static int ni5010_send_packet(struct sk_buff *skb, struct net_device *dev)
  * The typical workload of the driver:
  * Handle the network interface interrupts. 
  */
-static void  ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct ni5010_local *lp;
@@ -475,7 +479,7 @@ static void  ni5010_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (!xmit_was_error) 
 		reset_receiver(dev); 
-	return;
+	return IRQ_HANDLED;
 }
 
 
@@ -661,7 +665,7 @@ static void ni5010_set_multicast_list(struct net_device *dev)
 	}
 }
 
-static void hardware_send_packet(struct net_device *dev, char *buf, int length)
+static void hardware_send_packet(struct net_device *dev, char *buf, int length, int pad)
 {
 	struct ni5010_local *lp = (struct ni5010_local *)dev->priv;
 	int ioaddr = dev->base_addr;
@@ -686,8 +690,8 @@ static void hardware_send_packet(struct net_device *dev, char *buf, int length)
 	
 	if (NI5010_DEBUG > 3) dump_packet(buf, length);
 
-        buf_offs = NI5010_BUFSIZE - length;
-        lp->o_pkt_size = length;
+        buf_offs = NI5010_BUFSIZE - length - pad;
+        lp->o_pkt_size = length + pad;
 
 	save_flags(flags);	
 	cli();
@@ -698,6 +702,9 @@ static void hardware_send_packet(struct net_device *dev, char *buf, int length)
 
 	outw(buf_offs, IE_GP); /* Point GP at start of packet */
 	outsb(IE_XBUF, buf, length); /* Put data in buffer */
+	while(pad--)
+		outb(0, IE_XBUF);
+		
 	outw(buf_offs, IE_GP); /* Rewrite where packet starts */
 
 	/* should work without that outb() (Crynwr used it) */

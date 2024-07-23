@@ -16,12 +16,9 @@ Author: Marcell GAL, 2000, XDSL Ltd, Hungary
 #include <linux/ip.h>
 #include <asm/uaccess.h>
 #include <net/arp.h>
-#include <linux/atm.h>
-#include <linux/atmdev.h>
 
 #include <linux/atmbr2684.h>
 
-#include "common.h"
 #include "ipcommon.h"
 
 /*
@@ -191,7 +188,7 @@ static int br2684_xmit_vcc(struct sk_buff *skb, struct br2684_dev *brdev,
 		dev_kfree_skb(skb);
 		return 0;
 		}
-	atomic_add(skb->truesize, &atmvcc->sk->wmem_alloc);
+	atomic_add(skb->truesize, &atmvcc->sk->sk_wmem_alloc);
 	ATM_SKB(skb)->atm_options = atmvcc->atm_options;
 	brdev->stats.tx_packets++;
 	brdev->stats.tx_bytes += skb->len;
@@ -436,10 +433,6 @@ static void br2684_push(struct atm_vcc *atmvcc, struct sk_buff *skb)
 			dev_kfree_skb(skb);
 			return;
 		}
-
-		/* Strip FCS if present */
-		if (skb->len > 7 && skb->data[7] == 0x01)
-			__skb_trim(skb, skb->len - 4);
 	} else {
 		plen = PADLEN + ETH_HLEN;	/* pad, dstmac,srcmac, ethtype */
 		/* first 2 chars should be 0 */
@@ -558,7 +551,7 @@ Note: we do not have explicit unassign, but look at _push()
 	barrier();
 	atmvcc->push = br2684_push;
 	skb_queue_head_init(&copy);
-	skb_migrate(&atmvcc->sk->receive_queue, &copy);
+	skb_migrate(&atmvcc->sk->sk_receive_queue, &copy);
 	while ((skb = skb_dequeue(&copy))) {
 		BRPRIV(skb->dev)->stats.rx_bytes -= skb->len;
 		BRPRIV(skb->dev)->stats.rx_packets--;
@@ -682,7 +675,6 @@ static int br2684_ioctl(struct atm_vcc *atmvcc, unsigned int cmd,
 	return -ENOIOCTLCMD;
 }
 
-#ifdef CONFIG_PROC_FS
 /* Never put more than 256 bytes in at once */
 static int br2684_proc_engine(loff_t pos, char *buf)
 {
@@ -736,9 +728,7 @@ static ssize_t br2684_proc_read(struct file *file, char *buf, size_t count,
 {
 	unsigned long page;
 	int len = 0, x, left;
-	loff_t n = *pos;
-
-	page = get_free_page(GFP_KERNEL);
+	page = get_zeroed_page(GFP_KERNEL);
 	if (!page)
 		return -ENOMEM;
 	left = PAGE_SIZE - 256;
@@ -746,7 +736,7 @@ static ssize_t br2684_proc_read(struct file *file, char *buf, size_t count,
 		left = count;
 	read_lock(&devs_lock);
 	for (;;) {
-		x = br2684_proc_engine(n, &((char *) page)[len]);
+		x = br2684_proc_engine(*pos, &((char *) page)[len]);
 		if (x == 0)
 			break;
 		if (x > left)
@@ -761,12 +751,11 @@ static ssize_t br2684_proc_read(struct file *file, char *buf, size_t count,
 		}
 		len += x;
 		left -= x;
-		n++;
+		(*pos)++;
 		if (left < 256)
 			break;
 	}
 	read_unlock(&devs_lock);
-	*pos = n;
 	if (len > 0 && copy_to_user(buf, (char *) page, len))
 		len = -EFAULT;
 	free_page(page);
@@ -778,30 +767,27 @@ static struct file_operations br2684_proc_operations = {
 };
 
 extern struct proc_dir_entry *atm_proc_root;	/* from proc.c */
-#endif /* CONFIG_PROC_FS */
+
+extern int (*br2684_ioctl_hook)(struct atm_vcc *, unsigned int, unsigned long);
 
 /* the following avoids some spurious warnings from the compiler */
 #define UNUSED __attribute__((unused))
 
 static int __init UNUSED br2684_init(void)
 {
-#ifdef CONFIG_PROC_FS
 	struct proc_dir_entry *p;
 	if ((p = create_proc_entry("br2684", 0, atm_proc_root)) == NULL)
 		return -ENOMEM;
 	p->proc_fops = &br2684_proc_operations;
-#endif /* CONFIG_PROC_FS */
-	br2684_ioctl_set(br2684_ioctl);
+	br2684_ioctl_hook = br2684_ioctl;
 	return 0;
 }
 
 static void __exit UNUSED br2684_exit(void)
 {
 	struct br2684_dev *brdev;
-	br2684_ioctl_set(NULL);
-#ifdef CONFIG_PROC_FS
+	br2684_ioctl_hook = NULL;
 	remove_proc_entry("br2684", atm_proc_root);
-#endif /* CONFIG_PROC_FS */
 	while (!list_empty(&br2684_devs)) {
 		brdev = list_entry_brdev(br2684_devs.next);
 		unregister_netdev(&brdev->net_dev);

@@ -25,7 +25,7 @@
   * made the souce code not only hard to read but version problems hard
   * to track down.  If I'm overiding a function/etc with something in
   * this file it will be prefixed by "LMC_" which will mean look
-  * here for the version dependant change that's been done.
+  * here for the version dependent change that's been done.
   *
   */
 
@@ -69,12 +69,10 @@
 #if LINUX_VERSION_CODE < 0x20155 /* basically 2.2 plus */
 
 #define LMC_DEV_KFREE_SKB(skb) dev_kfree_skb((skb), FREE_WRITE)
-#define LMC_PCI_PRESENT() pcibios_present()
 
 #else /* Mostly 2.0 kernels */
 
 #define LMC_DEV_KFREE_SKB(skb) dev_kfree_skb(skb)
-#define LMC_PCI_PRESENT() pci_present()
 
 #endif
 

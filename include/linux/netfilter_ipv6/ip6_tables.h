@@ -435,6 +435,9 @@ struct ip6t_table
 
 	/* Man behind the curtain... */
 	struct ip6t_table_info *private;
+
+	/* Set this to THIS_MODULE if you are a module, otherwise NULL */
+	struct module *me;
 };
 
 extern int ip6t_register_table(struct ip6t_table *table);
@@ -445,6 +448,9 @@ extern unsigned int ip6t_do_table(struct sk_buff **pskb,
 				  const struct net_device *out,
 				  struct ip6t_table *table,
 				  void *userdata);
+
+/* Check for an extension */
+extern int ip6t_ext_hdr(u8 nexthdr);
 
 #define IP6T_ALIGN(s) (((s) + (__alignof__(struct ip6t_entry)-1)) & ~(__alignof__(struct ip6t_entry)-1))
 

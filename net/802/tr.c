@@ -20,7 +20,7 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/socket.h>
@@ -36,8 +36,6 @@
 #include <linux/init.h>
 #include <net/arp.h>
 
-void tr_source_route(struct sk_buff *skb, struct trh_hdr *trh,
-		     struct net_device *dev);
 static void tr_add_rif_info(struct trh_hdr *trh, struct net_device *dev);
 static void rif_check_expire(unsigned long dummy);
 
@@ -67,6 +65,7 @@ struct rif_cache_s {
  */
  
 static rif_cache rif_table[RIF_TABLE_SIZE];
+
 static spinlock_t rif_lock = SPIN_LOCK_UNLOCKED;
 
 #define RIF_TIMEOUT 60*10*HZ
@@ -231,8 +230,7 @@ unsigned short tr_type_trans(struct sk_buff *skb, struct net_device *dev)
  *	We try to do source routing... 
  */
 
-void tr_source_route(struct sk_buff *skb, struct trh_hdr *trh,
-		     struct net_device *dev) 
+void tr_source_route(struct sk_buff *skb,struct trh_hdr *trh,struct net_device *dev) 
 {
 	int i, slack;
 	unsigned int hash;
@@ -327,9 +325,9 @@ static void tr_add_rif_info(struct trh_hdr *trh, struct net_device *dev)
 	int i;
 	unsigned int hash, rii_p = 0;
 	rif_cache entry;
-	unsigned long flags;
 
-	spin_lock_irqsave(&rif_lock, flags);
+
+	spin_lock_bh(&rif_lock);
 	
 	/*
 	 *	Firstly see if the entry exists
@@ -368,7 +366,7 @@ printk("adding rif_entry: addr:%02X:%02X:%02X:%02X:%02X:%02X rcf:%04X\n",
 		if(!entry) 
 		{
 			printk(KERN_DEBUG "tr.c: Couldn't malloc rif cache entry !\n");
-			spin_unlock_irqrestore(&rif_lock,flags);
+			spin_unlock_bh(&rif_lock);
 			return;
 		}
 
@@ -410,7 +408,7 @@ printk("updating rif_entry: addr:%02X:%02X:%02X:%02X:%02X:%02X rcf:%04X\n",
 		    }                                         
            	entry->last_used=jiffies;               
 	}
-	spin_unlock_irqrestore(&rif_lock,flags);
+	spin_unlock_bh(&rif_lock);
 }
 
 /*
@@ -477,7 +475,7 @@ static int rif_get_info(char *buffer,char **start, off_t offset, int length)
 	pos+=size;
 	len+=size;
 
-	spin_lock_irqsave(&rif_lock, flags);
+	spin_lock_irqsave(&rif_lock,flags);
 	for(i=0;i < RIF_TABLE_SIZE;i++) 
 	{
 		for(entry=rif_table[i];entry;entry=entry->next) {
@@ -545,10 +543,10 @@ static int rif_get_info(char *buffer,char **start, off_t offset, int length)
 
 static int __init rif_init(void)
 {
+	init_timer(&rif_timer);
 	rif_timer.expires  = RIF_TIMEOUT;
 	rif_timer.data     = 0L;
 	rif_timer.function = rif_check_expire;
-	init_timer(&rif_timer);
 	add_timer(&rif_timer);
 
 	proc_net_create("tr_rif",0,rif_get_info);

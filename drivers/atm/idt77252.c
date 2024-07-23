@@ -134,22 +134,20 @@ static int idt77252_change_qos(struct atm_vcc *vcc, struct atm_qos *qos,
 			       int flags);
 static int idt77252_proc_read(struct atm_dev *dev, loff_t * pos,
 			      char *page);
-static void idt77252_interrupt(int irq, void *dev_id,
-			       struct pt_regs *regs);
 static void idt77252_softint(void *dev_id);
 
 
 static struct atmdev_ops idt77252_ops =
 {
-	dev_close:	idt77252_dev_close,
-	open:		idt77252_open,
-	close:		idt77252_close,
-	send:		idt77252_send,
-	send_oam:	idt77252_send_oam,
-	phy_put:	idt77252_phy_put,
-	phy_get:	idt77252_phy_get,
-	change_qos:	idt77252_change_qos,
-	proc_read:	idt77252_proc_read
+	.dev_close	= idt77252_dev_close,
+	.open		= idt77252_open,
+	.close		= idt77252_close,
+	.send		= idt77252_send,
+	.send_oam	= idt77252_send_oam,
+	.phy_put	= idt77252_phy_put,
+	.phy_get	= idt77252_phy_get,
+	.change_qos	= idt77252_change_qos,
+	.proc_read	= idt77252_proc_read
 };
 
 static struct idt77252_dev *idt77252_chain = NULL;
@@ -730,7 +728,8 @@ push_on_scq(struct idt77252_dev *card, struct vc_map *vc, struct sk_buff *skb)
 		struct atm_vcc *vcc = vc->tx_vcc;
 
 		vc->estimator->cells += (skb->len + 47) / 48;
-		if (atomic_read(&vcc->tx_inuse) > (vcc->sk->sndbuf >> 1)) {
+		if (atomic_read(&vcc->sk->sk_wmem_alloc) >
+		    (vcc->sk->sk_sndbuf >> 1)) {
 			u32 cps = vc->estimator->maxcps;
 
 			vc->estimator->cps = cps;
@@ -1099,7 +1098,7 @@ dequeue_rx(struct idt77252_dev *card, struct rsq_entry *rsqe)
 			       cell, ATM_CELL_PAYLOAD);
 
 			ATM_SKB(sb)->vcc = vcc;
-			sb->stamp = xtime;
+			do_gettimeofday(&sb->stamp);
 			vcc->push(vcc, sb);
 			atomic_inc(&vcc->stats->rx);
 
@@ -1177,7 +1176,7 @@ dequeue_rx(struct idt77252_dev *card, struct rsq_entry *rsqe)
 
 			skb_trim(skb, len);
 			ATM_SKB(skb)->vcc = vcc;
-			skb->stamp = xtime;
+			do_gettimeofday(&skb->stamp);
 
 			vcc->push(vcc, skb);
 			atomic_inc(&vcc->stats->rx);
@@ -1199,7 +1198,7 @@ dequeue_rx(struct idt77252_dev *card, struct rsq_entry *rsqe)
 
 		skb_trim(skb, len);
 		ATM_SKB(skb)->vcc = vcc;
-		skb->stamp = xtime;
+		do_gettimeofday(&skb->stamp);
 
 		vcc->push(vcc, skb);
 		atomic_inc(&vcc->stats->rx);
@@ -1337,7 +1336,7 @@ idt77252_rx_raw(struct idt77252_dev *card)
 		       ATM_CELL_PAYLOAD);
 
 		ATM_SKB(sb)->vcc = vcc;
-		sb->stamp = xtime;
+		do_gettimeofday(&sb->stamp);
 		vcc->push(vcc, sb);
 		atomic_inc(&vcc->stats->rx);
 
@@ -1988,7 +1987,7 @@ idt77252_send_skb(struct atm_vcc *vcc, struct sk_buff *skb, int oam)
 		return -EINVAL;
 	}
 
-	if (ATM_SKB(skb)->iovcnt != 0) {
+	if (skb_shinfo(skb)->nr_frags != 0) {
 		printk("%s: No scatter-gather yet.\n", card->name);
 		atomic_inc(&vcc->stats->tx_err);
 		dev_kfree_skb(skb);
@@ -2025,8 +2024,7 @@ idt77252_send_oam(struct atm_vcc *vcc, void *cell, int flags)
 		atomic_inc(&vcc->stats->tx_err);
 		return -ENOMEM;
 	}
-	atomic_add(skb->truesize + ATM_PDU_OVHD, &vcc->tx_inuse);
-	ATM_SKB(skb)->iovcnt = 0;
+	atomic_add(skb->truesize, &vcc->sk->sk_wmem_alloc);
 
 	memcpy(skb_put(skb, 52), cell, 52);
 
@@ -2148,9 +2146,9 @@ idt77252_init_est(struct vc_map *vc, int pcr)
 
 	est->interval = 2;		/* XXX: make this configurable */
 	est->ewma_log = 2;		/* XXX: make this configurable */
+	init_timer(&est->timer);
 	est->timer.data = (unsigned long)vc;
 	est->timer.function = idt77252_est_timer;
-	init_timer(&est->timer);
 
 	est->timer.expires = jiffies + ((HZ / 4) << est->interval);
 	add_timer(&est->timer);
@@ -2405,34 +2403,43 @@ idt77252_init_rx(struct idt77252_dev *card, struct vc_map *vc,
 static int
 idt77252_find_vcc(struct atm_vcc *vcc, short *vpi, int *vci)
 {
+	struct sock *s;
 	struct atm_vcc *walk;
 
+	read_lock(&vcc_sklist_lock);
 	if (*vpi == ATM_VPI_ANY) {
 		*vpi = 0;
-		walk = vcc->dev->vccs;
-		while (walk) {
+		s = sk_head(&vcc_sklist);
+		while (s) {
+			walk = atm_sk(s);
+			if (walk->dev != vcc->dev)
+				continue;
 			if ((walk->vci == *vci) && (walk->vpi == *vpi)) {
 				(*vpi)++;
-				walk = vcc->dev->vccs;
+				s = sk_head(&vcc_sklist);
 				continue;
 			}
-			walk = walk->next;
+			s = sk_next(s);
 		}
 	}
 
 	if (*vci == ATM_VCI_ANY) {
 		*vci = ATM_NOT_RSV_VCI;
-		walk = vcc->dev->vccs;
-		while (walk) {
+		s = sk_head(&vcc_sklist);
+		while (s) {
+			walk = atm_sk(s);
+			if (walk->dev != vcc->dev)
+				continue;
 			if ((walk->vci == *vci) && (walk->vpi == *vpi)) {
 				(*vci)++;
-				walk = vcc->dev->vccs;
+				s = sk_head(&vcc_sklist);
 				continue;
 			}
-			walk = walk->next;
+			s = sk_next(s);
 		}
 	}
 
+	read_unlock(&vcc_sklist_lock);
 	return 0;
 }
 
@@ -2812,7 +2819,7 @@ idt77252_collect_stat(struct idt77252_dev *card)
 #endif
 }
 
-static void
+static irqreturn_t
 idt77252_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 {
 	struct idt77252_dev *card = dev_id;
@@ -2820,7 +2827,7 @@ idt77252_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 
 	stat = readl(SAR_REG_STAT) & 0xffff;
 	if (!stat)	/* no interrupt for us */
-		return;
+		return IRQ_NONE;
 
 	if (test_and_set_bit(IDT77252_BIT_INTERRUPT, &card->flags)) {
 		printk("%s: Re-entering irq_handler()\n", card->name);
@@ -2896,12 +2903,12 @@ idt77252_interrupt(int irq, void *dev_id, struct pt_regs *ptregs)
 		if (stat & SAR_STAT_FBQ3A)
 			card->irqstat[8]++;
 
-		queue_task(&card->tqueue, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
+		schedule_work(&card->tqueue);
 	}
 
 out:
 	clear_bit(IDT77252_BIT_INTERRUPT, &card->flags);
+	return IRQ_HANDLED;
 }
 
 static void
@@ -3737,8 +3744,7 @@ idt77252_init_one(struct pci_dev *pcidev, const struct pci_device_id *id)
 	card->pcidev = pcidev;
 	sprintf(card->name, "idt77252-%d", card->index);
 
-	card->tqueue.routine = idt77252_softint;
-	card->tqueue.data = (void *)card;
+	INIT_WORK(&card->tqueue, idt77252_softint, (void *)card);
 
 	membase = pci_resource_start(pcidev, 1);
 	srambase = pci_resource_start(pcidev, 2);
@@ -3747,9 +3753,9 @@ idt77252_init_one(struct pci_dev *pcidev, const struct pci_device_id *id)
 	spin_lock_init(&card->cmd_lock);
 	spin_lock_init(&card->tst_lock);
 
+	init_timer(&card->tst_timer);
 	card->tst_timer.data = (unsigned long)card;
 	card->tst_timer.function = tst_timer;
-	init_timer(&card->tst_timer);
 
 	/* Do the I/O remapping... */
 	card->membase = (unsigned long) ioremap(membase, 1024);
@@ -3843,9 +3849,9 @@ static struct pci_device_id idt77252_pci_tbl[] __devinitdata =
 };
 
 static struct pci_driver idt77252_driver = {
-	name:		"idt77252",
-	id_table:	idt77252_pci_tbl,
-	probe:		idt77252_init_one,
+	.name		= "idt77252",
+	.id_table	= idt77252_pci_tbl,
+	.probe		= idt77252_init_one,
 };
 
 static int __init idt77252_init(void)
@@ -3894,7 +3900,6 @@ static void __exit idt77252_exit(void)
 module_init(idt77252_init);
 module_exit(idt77252_exit);
 
-EXPORT_NO_SYMBOLS;
 MODULE_LICENSE("GPL");
 
 MODULE_PARM(vpibits, "i");

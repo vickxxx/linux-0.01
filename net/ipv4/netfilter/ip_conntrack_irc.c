@@ -29,6 +29,7 @@
 #include <net/checksum.h>
 #include <net/tcp.h>
 
+#include <linux/netfilter_ipv4/lockhelp.h>
 #include <linux/netfilter_ipv4/ip_conntrack_helper.h>
 #include <linux/netfilter_ipv4/ip_conntrack_irc.h>
 
@@ -37,6 +38,8 @@ static int ports[MAX_PORTS];
 static int ports_c = 0;
 static int max_dcc_channels = 8;
 static unsigned int dcc_timeout = 300;
+/* This is slow, but it's simple. --RR */
+static char irc_buffer[65536];
 
 MODULE_AUTHOR("Harald Welte <laforge@gnumonks.org>");
 MODULE_DESCRIPTION("IRC (DCC) connection tracking module");
@@ -50,16 +53,10 @@ MODULE_PARM(dcc_timeout, "i");
 MODULE_PARM_DESC(dcc_timeout, "timeout on for unestablished DCC channels");
 #endif
 
-#define NUM_DCCPROTO 	5
-struct dccproto dccprotos[NUM_DCCPROTO] = {
-	{"SEND ", 5},
-	{"CHAT ", 5},
-	{"MOVE ", 5},
-	{"TSEND ", 6},
-	{"SCHAT ", 6}
-};
-#define MINMATCHLEN	5
+static char *dccprotos[] = { "SEND ", "CHAT ", "MOVE ", "TSEND ", "SCHAT " };
+#define MAXMATCHLEN	6
 
+DECLARE_LOCK(ip_irc_lock);
 struct module *ip_conntrack_irc = THIS_MODULE;
 
 #if 0
@@ -90,11 +87,9 @@ int parse_dcc(char *data, char *data_end, u_int32_t * ip, u_int16_t * port,
 	*ip = simple_strtoul(data, &data, 10);
 
 	/* skip blanks between ip and port */
-	while (*data == ' ') {
-		if (data >= data_end) 
-			return -1;
+	while (*data == ' ')
 		data++;
-	}
+
 
 	*port = simple_strtoul(data, &data, 10);
 	*ad_end_p = data;
@@ -102,18 +97,12 @@ int parse_dcc(char *data, char *data_end, u_int32_t * ip, u_int16_t * port,
 	return 0;
 }
 
-
-/* FIXME: This should be in userspace.  Later. */
-static int help(const struct iphdr *iph, size_t len,
+static int help(struct sk_buff *skb,
 		struct ip_conntrack *ct, enum ip_conntrack_info ctinfo)
 {
-	/* tcplen not negative guarenteed by ip_conntrack_tcp.c */
-	struct tcphdr *tcph = (void *) iph + iph->ihl * 4;
-	const char *data = (const char *) tcph + tcph->doff * 4;
-	const char *_data = data;
-	char *data_limit;
-	u_int32_t tcplen = len - iph->ihl * 4;
-	u_int32_t datalen = tcplen - tcph->doff * 4;
+	unsigned int dataoff;
+	struct tcphdr tcph;
+	char *data, *data_limit;
 	int dir = CTINFO2DIR(ctinfo);
 	struct ip_conntrack_expect expect, *exp = &expect;
 	struct ip_ct_irc_expect *exp_irc_info = &exp->help.exp_irc_info;
@@ -136,52 +125,41 @@ static int help(const struct iphdr *iph, size_t len,
 		return NF_ACCEPT;
 	}
 
-	/* Not whole TCP header? */
-	if (tcplen < sizeof(struct tcphdr) || tcplen < tcph->doff * 4) {
-		DEBUGP("tcplen = %u\n", (unsigned) tcplen);
+	/* Not a full tcp header? */
+	if (skb_copy_bits(skb, skb->nh.iph->ihl*4, &tcph, sizeof(tcph)) != 0)
 		return NF_ACCEPT;
-	}
 
-	/* Checksum invalid?  Ignore. */
-	/* FIXME: Source route IP option packets --RR */
-	if (tcp_v4_check(tcph, tcplen, iph->saddr, iph->daddr,
-			 csum_partial((char *) tcph, tcplen, 0))) {
-		DEBUGP("bad csum: %p %u %u.%u.%u.%u %u.%u.%u.%u\n",
-		     tcph, tcplen, NIPQUAD(iph->saddr),
-		     NIPQUAD(iph->daddr));
+	/* No data? */
+	dataoff = skb->nh.iph->ihl*4 + tcph.doff*4;
+	if (dataoff >= skb->len)
 		return NF_ACCEPT;
-	}
 
-	data_limit = (char *) data + datalen;
+	LOCK_BH(&ip_irc_lock);
+	skb_copy_bits(skb, dataoff, irc_buffer, skb->len - dataoff);
 
-	/* strlen("\1DCC SEND t AAAAAAAA P\1\n")=24
-	 *         5+MINMATCHLEN+strlen("t AAAAAAAA P\1\n")=14 */
-	while (data < (data_limit - (19 + MINMATCHLEN))) {
+	data = irc_buffer;
+	data_limit = irc_buffer + skb->len - dataoff;
+	while (data < (data_limit - (22 + MAXMATCHLEN))) {
 		if (memcmp(data, "\1DCC ", 5)) {
 			data++;
 			continue;
 		}
 
 		data += 5;
-		/* we have at least (19+MINMATCHLEN)-5 bytes valid data left */
 
 		DEBUGP("DCC found in master %u.%u.%u.%u:%u %u.%u.%u.%u:%u...\n",
-			NIPQUAD(iph->saddr), ntohs(tcph->source),
-			NIPQUAD(iph->daddr), ntohs(tcph->dest));
+			NIPQUAD(iph->saddr), ntohs(tcph.source),
+			NIPQUAD(iph->daddr), ntohs(tcph.dest));
 
-		for (i = 0; i < NUM_DCCPROTO; i++) {
-			if (memcmp(data, dccprotos[i].match,
-				   dccprotos[i].matchlen)) {
+		for (i = 0; i < ARRAY_SIZE(dccprotos); i++) {
+			if (memcmp(data, dccprotos[i], strlen(dccprotos[i]))) {
 				/* no match */
 				continue;
 			}
 
-			DEBUGP("DCC %s detected\n", dccprotos[i].match);
-			data += dccprotos[i].matchlen;
-			/* we have at least
-			 * (19+MINMATCHLEN)-5-dccprotos[i].matchlen bytes valid
-			 * data left (== 14/13 bytes) */
-			if (parse_dcc((char *) data, data_limit, &dcc_ip,
+			DEBUGP("DCC %s detected\n", dccprotos[i]);
+			data += strlen(dccprotos[i]);
+			if (parse_dcc((char *)data, data_limit, &dcc_ip,
 				       &dcc_port, &addr_beg_p, &addr_end_p)) {
 				/* unable to parse */
 				DEBUGP("unable to parse dcc command\n");
@@ -190,10 +168,7 @@ static int help(const struct iphdr *iph, size_t len,
 			DEBUGP("DCC bound ip/port: %u.%u.%u.%u:%u\n",
 				HIPQUAD(dcc_ip), dcc_port);
 
-			/* dcc_ip can be the internal OR external (NAT'ed) IP
-			 * Tiago Sousa <mirage@kaotik.org> */
-			if (ct->tuplehash[dir].tuple.src.ip != htonl(dcc_ip)
-			    && ct->tuplehash[IP_CT_DIR_REPLY].tuple.dst.ip != htonl(dcc_ip)) {
+			if (ct->tuplehash[dir].tuple.src.ip != htonl(dcc_ip)) {
 				if (net_ratelimit())
 					printk(KERN_WARNING
 						"Forged DCC command from "
@@ -207,9 +182,9 @@ static int help(const struct iphdr *iph, size_t len,
 			memset(&expect, 0, sizeof(expect));
 
 			/* save position of address in dcc string,
-			 * neccessary for NAT */
-			DEBUGP("tcph->seq = %u\n", tcph->seq);
-			exp->seq = ntohl(tcph->seq) + (addr_beg_p - _data);
+			 * necessary for NAT */
+			DEBUGP("tcph->seq = %u\n", tcph.seq);
+			exp->seq = ntohl(tcph.seq) + (addr_beg_p - irc_buffer);
 			exp_irc_info->len = (addr_end_p - addr_beg_p);
 			exp_irc_info->port = dcc_port;
 			DEBUGP("wrote info seq=%u (ofs=%u), len=%d\n",
@@ -217,7 +192,7 @@ static int help(const struct iphdr *iph, size_t len,
 
 			exp->tuple = ((struct ip_conntrack_tuple)
 				{ { 0, { 0 } },
-				  { ct->tuplehash[dir].tuple.src.ip, { .tcp = { htons(dcc_port) } },
+				  { htonl(dcc_ip), { .tcp = { htons(dcc_port) } },
 				    IPPROTO_TCP }});
 			exp->mask = ((struct ip_conntrack_tuple)
 				{ { 0, { 0 } },
@@ -232,10 +207,13 @@ static int help(const struct iphdr *iph, size_t len,
 				ntohs(exp->tuple.dst.u.tcp.port));
 
 			ip_conntrack_expect_related(ct, &expect);
-			return NF_ACCEPT;
+
+			goto out;
 		} /* for .. NUM_DCCPROTO */
 	} /* while data < ... */
 
+ out:
+	UNLOCK_BH(&ip_irc_lock);
 	return NF_ACCEPT;
 }
 
@@ -308,6 +286,9 @@ static void fini(void)
 		ip_conntrack_helper_unregister(&irc_helpers[i]);
 	}
 }
+
+PROVIDES_CONNTRACK(irc);
+EXPORT_SYMBOL(ip_irc_lock);
 
 module_init(init);
 module_exit(fini);

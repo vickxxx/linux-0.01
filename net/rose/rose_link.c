@@ -1,25 +1,17 @@
 /*
- *	ROSE release 003
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
  *
- *	This code REQUIRES 2.1.15 or higher/ NET3.038
- *
- *	This module:
- *		This module is free software; you can redistribute it and/or
- *		modify it under the terms of the GNU General Public License
- *		as published by the Free Software Foundation; either version
- *		2 of the License, or (at your option) any later version.
- *
- *	History
- *	ROSE 001	Jonathan(G4KLX)	Cloned from rose_timer.c
- *	ROSE 003	Jonathan(G4KLX)	New timer architecture.
+ * Copyright (C) Jonathan Naylor G4KLX (g4klx@g4klx.demon.co.uk)
  */
-
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
 #include <linux/in.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/timer.h>
 #include <linux/string.h>
 #include <linux/sockios.h>
@@ -29,7 +21,6 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/segment.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
@@ -143,25 +134,25 @@ void rose_link_rx_restart(struct sk_buff *skb, struct rose_neigh *neigh, unsigne
 	struct sk_buff *skbn;
 
 	switch (frametype) {
-		case ROSE_RESTART_REQUEST:
-			rose_stop_t0timer(neigh);
-			neigh->restarted = 1;
-			neigh->dce_mode  = (skb->data[3] == ROSE_DTE_ORIGINATED);
-			rose_transmit_restart_confirmation(neigh);
-			break;
+	case ROSE_RESTART_REQUEST:
+		rose_stop_t0timer(neigh);
+		neigh->restarted = 1;
+		neigh->dce_mode  = (skb->data[3] == ROSE_DTE_ORIGINATED);
+		rose_transmit_restart_confirmation(neigh);
+		break;
 
-		case ROSE_RESTART_CONFIRMATION:
-			rose_stop_t0timer(neigh);
-			neigh->restarted = 1;
-			break;
+	case ROSE_RESTART_CONFIRMATION:
+		rose_stop_t0timer(neigh);
+		neigh->restarted = 1;
+		break;
 
-		case ROSE_DIAGNOSTIC:
-			printk(KERN_WARNING "ROSE: received diagnostic #%d - %02X %02X %02X\n", skb->data[3], skb->data[4], skb->data[5], skb->data[6]);
-			break;
+	case ROSE_DIAGNOSTIC:
+		printk(KERN_WARNING "ROSE: received diagnostic #%d - %02X %02X %02X\n", skb->data[3], skb->data[4], skb->data[5], skb->data[6]);
+		break;
 
-		default:
-			printk(KERN_WARNING "ROSE: received unknown %02X with LCI 000\n", frametype);
-			break;
+	default:
+		printk(KERN_WARNING "ROSE: received unknown %02X with LCI 000\n", frametype);
+		break;
 	}
 
 	if (neigh->restarted) {
@@ -264,21 +255,15 @@ void rose_transmit_clear_request(struct rose_neigh *neigh, unsigned int lci, uns
 	struct sk_buff *skb;
 	unsigned char *dptr;
 	int len;
-	struct net_device *first;
-	int faclen = 0;
 
 	len = AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN + ROSE_MIN_LEN + 3;
 
-	first = rose_dev_first();
-	if (first)
-		faclen = 6 + AX25_ADDR_LEN + 3 + ROSE_ADDR_LEN;
-	
-	if ((skb = alloc_skb(len + faclen, GFP_ATOMIC)) == NULL)
+	if ((skb = alloc_skb(len, GFP_ATOMIC)) == NULL)
 		return;
 
 	skb_reserve(skb, AX25_BPQ_HEADER_LEN + AX25_MAX_HEADER_LEN);
 
-	dptr = skb_put(skb, ROSE_MIN_LEN + 3 + faclen);
+	dptr = skb_put(skb, ROSE_MIN_LEN + 3);
 
 	*dptr++ = AX25_P_ROSE;
 	*dptr++ = ((lci >> 8) & 0x0F) | ROSE_GFI;
@@ -286,21 +271,6 @@ void rose_transmit_clear_request(struct rose_neigh *neigh, unsigned int lci, uns
 	*dptr++ = ROSE_CLEAR_REQUEST;
 	*dptr++ = cause;
 	*dptr++ = diagnostic;
-
-	if (first) {	
-		*dptr++ = 0x00;		/* Address length */
-		*dptr++ = 4 + AX25_ADDR_LEN + 3 + ROSE_ADDR_LEN; /* Facilities length */
-		*dptr++ = 0;
-		*dptr++ = FAC_NATIONAL;
-		*dptr++ = FAC_NATIONAL_FAIL_CALL;
-		*dptr++ = AX25_ADDR_LEN;
-		memcpy(dptr, &rose_callsign, AX25_ADDR_LEN);
-		dptr += AX25_ADDR_LEN;
-		*dptr++ = FAC_NATIONAL_FAIL_ADD;
-		*dptr++ = ROSE_ADDR_LEN + 1;
-		*dptr++ = ROSE_ADDR_LEN * 2;
-		memcpy(dptr, first->dev_addr, ROSE_ADDR_LEN);
-	}
 
 	if (!rose_send_frame(skb, neigh))
 		kfree_skb(skb);

@@ -28,7 +28,6 @@
 #define _PSI240I_H
 
 #include <linux/types.h>
-#include <linux/kdev_t.h>
 
 #ifndef	PSI_EIDE_SCSIOP
 #define	PSI_EIDE_SCSIOP	1
@@ -315,24 +314,10 @@ int Psi240i_Command			(Scsi_Cmnd *SCpnt);
 int Psi240i_QueueCommand	(Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *));
 int Psi240i_Abort			(Scsi_Cmnd *SCpnt);
 int Psi240i_Reset			(Scsi_Cmnd *SCpnt, unsigned int flags);
-int Psi240i_BiosParam		(Disk *disk, kdev_t dev, int geom[]);
+int Psi240i_BiosParam		(struct scsi_device *sdev, struct block_device *bdev,
+					sector_t capacity, int geom[]);
 
 #ifndef NULL
 	#define NULL 0
 #endif
-
-#define PSI240I { proc_name:      "psi240i", \
-		  name:           "PSI-240I EIDE Disk Controller",\
-		  detect:         Psi240i_Detect,			\
-		  command:	  Psi240i_Command,			\
-		  queuecommand:	  Psi240i_QueueCommand,		\
-		  abort:	  Psi240i_Abort,			\
-		  reset:	  Psi240i_Reset,			\
-		  bios_param:	  Psi240i_BiosParam,                 	\
-		  can_queue:	  1, 					\
-		  this_id:	  -1, 					\
-		  sg_tablesize:	  SG_NONE,		 		\
-		  cmd_per_lun:	  1, 					\
-		  use_clustering: DISABLE_CLUSTERING }
-
 #endif

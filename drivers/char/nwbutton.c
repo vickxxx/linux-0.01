@@ -146,7 +146,7 @@ static void button_sequence_finished (unsigned long parameters)
  *  increments the counter.
  */ 
 
-static void button_handler (int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t button_handler (int irq, void *dev_id, struct pt_regs *regs)
 {
 	if (button_press_count) {
 		del_timer (&button_timer);
@@ -156,6 +156,8 @@ static void button_handler (int irq, void *dev_id, struct pt_regs *regs)
 	button_timer.function = button_sequence_finished;
 	button_timer.expires = (jiffies + bdelay);
 	add_timer (&button_timer);
+
+	return IRQ_HANDLED;
 }
 
 /*
@@ -183,8 +185,8 @@ static int button_read (struct file *filp, char *buffer,
  */
 
 static struct file_operations button_fops = {
-	owner:		THIS_MODULE,
-	read:		button_read,
+	.owner		= THIS_MODULE,
+	.read		= button_read,
 };
 
 /* 
@@ -241,7 +243,6 @@ static void __exit nwbutton_exit (void)
 
 MODULE_AUTHOR("Alex Holden");
 MODULE_LICENSE("GPL");
-EXPORT_NO_SYMBOLS;
 
 module_init(nwbutton_init);
 module_exit(nwbutton_exit);

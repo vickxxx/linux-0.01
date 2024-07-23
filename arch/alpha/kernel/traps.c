@@ -14,6 +14,7 @@
 #include <linux/tty.h>
 #include <linux/delay.h>
 #include <linux/smp_lock.h>
+#include <linux/module.h>
 
 #include <asm/gentrap.h>
 #include <asm/uaccess.h>
@@ -29,12 +30,15 @@
 */
 static int opDEC_testing = 0;
 static int opDEC_fix = 0;
+static int opDEC_checked = 0;
 static unsigned long opDEC_test_pc = 0;
 
 static void
 opDEC_check(void)
 {
 	unsigned long test_pc;
+
+	if (opDEC_checked) return;
 
 	lock_kernel();
 	opDEC_testing = 1;
@@ -48,6 +52,7 @@ opDEC_check(void)
 		: );
 
 	opDEC_testing = 0;
+	opDEC_checked = 1;
 	unlock_kernel();
 }
 
@@ -113,7 +118,7 @@ dik_show_trace(unsigned long *sp)
 	long i = 0;
 	printk("Trace:");
 	while (0x1ff8 & (unsigned long) sp) {
-		extern unsigned long _stext, _etext;
+		extern char _stext[], _etext[];
 		unsigned long tmp = *sp;
 		sp++;
 		if (tmp < (unsigned long) &_stext)
@@ -131,8 +136,8 @@ dik_show_trace(unsigned long *sp)
 
 void show_trace_task(struct task_struct * tsk)
 {
-	struct thread_struct * thread = &tsk->thread;
-	unsigned long fp, sp = thread->ksp, base = (unsigned long) thread;
+	struct thread_info *ti = tsk->thread_info;
+	unsigned long fp, sp = ti->pcb.ksp, base = (unsigned long) ti;
  
 	if (sp > base && sp+6*8 < base + 16*1024) {
 		fp = ((unsigned long*)sp)[6];
@@ -141,9 +146,9 @@ void show_trace_task(struct task_struct * tsk)
 	}
 }
 
-int kstack_depth_to_print = 24;
+static int kstack_depth_to_print = 24;
 
-void show_stack(unsigned long *sp)
+void show_stack(struct task_struct *task, unsigned long *sp)
 {
 	unsigned long *stack;
 	int i;
@@ -167,6 +172,11 @@ void show_stack(unsigned long *sp)
 	dik_show_trace(sp);
 }
 
+void dump_stack(void)
+{
+	show_stack(NULL, NULL);
+}
+
 void
 die_if_kernel(char * str, struct pt_regs *regs, long err, unsigned long *r9_15)
 {
@@ -180,12 +190,11 @@ die_if_kernel(char * str, struct pt_regs *regs, long err, unsigned long *r9_15)
 	dik_show_trace((unsigned long *)(regs+1));
 	dik_show_code((unsigned int *)regs->pc);
 
-	if (current->thread.flags & (1UL << 63)) {
+	if (test_and_set_thread_flag (TIF_DIE_IF_KERNEL)) {
 		printk("die_if_kernel recursion detected.\n");
-		sti();
+		local_irq_enable();
 		while (1);
 	}
-	current->thread.flags |= (1UL << 63);
 	do_exit(SIGSEGV);
 }
 
@@ -202,91 +211,144 @@ long alpha_fp_emul (unsigned long pc);
 
 asmlinkage void
 do_entArith(unsigned long summary, unsigned long write_mask,
-	    unsigned long a2, unsigned long a3, unsigned long a4,
-	    unsigned long a5, struct pt_regs regs)
+	    struct pt_regs *regs)
 {
+	long si_code = FPE_FLTINV;
+	siginfo_t info;
+
 	if (summary & 1) {
 		/* Software-completion summary bit is set, so try to
-		   emulate the instruction.  */
-		if (!amask(AMASK_PRECISE_TRAP)) {
-			/* 21264 (except pass 1) has precise exceptions.  */
-			if (alpha_fp_emul(regs.pc - 4))
-				return;
-		} else {
-			if (alpha_fp_emul_imprecise(&regs, write_mask))
-				return;
-		}
+		   emulate the instruction.  If the processor supports
+		   precise exceptions, we don't have to search.  */
+		if (!amask(AMASK_PRECISE_TRAP))
+			si_code = alpha_fp_emul(regs->pc - 4);
+		else
+			si_code = alpha_fp_emul_imprecise(regs, write_mask);
+		if (si_code == 0)
+			return;
 	}
+	die_if_kernel("Arithmetic fault", regs, 0, 0);
 
-#if 0
-	printk("%s: arithmetic trap at %016lx: %02lx %016lx\n",
-		current->comm, regs.pc, summary, write_mask);
-#endif
-	die_if_kernel("Arithmetic fault", &regs, 0, 0);
-	send_sig(SIGFPE, current, 1);
+	info.si_signo = SIGFPE;
+	info.si_errno = 0;
+	info.si_code = si_code;
+	info.si_addr = (void *) regs->pc;
+	send_sig_info(SIGFPE, &info, current);
 }
 
 asmlinkage void
-do_entIF(unsigned long type, unsigned long a1,
-	 unsigned long a2, unsigned long a3, unsigned long a4,
-	 unsigned long a5, struct pt_regs regs)
+do_entIF(unsigned long type, struct pt_regs *regs)
 {
+	siginfo_t info;
+	int signo, code;
+
 	if (!opDEC_testing || type != 4) {
+		if (type == 1) {
+			const unsigned int *data
+			  = (const unsigned int *) regs->pc;
+			printk("Kernel bug at %s:%d\n",
+			       (const char *)(data[1] | (long)data[2] << 32), 
+			       data[0]);
+		}
 		die_if_kernel((type == 1 ? "Kernel Bug" : "Instruction fault"),
-		      &regs, type, 0);
+			      regs, type, 0);
 	}
 
 	switch (type) {
 	      case 0: /* breakpoint */
+		info.si_signo = SIGTRAP;
+		info.si_errno = 0;
+		info.si_code = TRAP_BRKPT;
+		info.si_trapno = 0;
+		info.si_addr = (void *) regs->pc;
+
 		if (ptrace_cancel_bpt(current)) {
-			regs.pc -= 4;	/* make pc point to former bpt */
+			regs->pc -= 4;	/* make pc point to former bpt */
 		}
-		send_sig(SIGTRAP, current, 1);
+
+		send_sig_info(SIGTRAP, &info, current);
 		return;
 
 	      case 1: /* bugcheck */
-		send_sig(SIGTRAP, current, 1);
+		info.si_signo = SIGTRAP;
+		info.si_errno = 0;
+		info.si_code = __SI_FAULT;
+		info.si_addr = (void *) regs->pc;
+		info.si_trapno = 0;
+		send_sig_info(SIGTRAP, &info, current);
 		return;
-
+		
 	      case 2: /* gentrap */
-		/*
-		 * The exception code should be passed on to the signal
-		 * handler as the second argument.  Linux doesn't do that
-		 * yet (also notice that Linux *always* behaves like
-		 * DEC Unix with SA_SIGINFO off; see DEC Unix man page
-		 * for sigaction(2)).
-		 */
-		switch ((long) regs.r16) {
-		      case GEN_INTOVF: case GEN_INTDIV: case GEN_FLTOVF:
-		      case GEN_FLTDIV: case GEN_FLTUND: case GEN_FLTINV:
-		      case GEN_FLTINE: case GEN_ROPRAND:
-			send_sig(SIGFPE, current, 1);
-			return;
+		info.si_addr = (void *) regs->pc;
+		info.si_trapno = regs->r16;
+		switch ((long) regs->r16) {
+		case GEN_INTOVF:
+			signo = SIGFPE;
+			code = FPE_INTOVF;
+			break;
+		case GEN_INTDIV:
+			signo = SIGFPE;
+			code = FPE_INTDIV;
+			break;
+		case GEN_FLTOVF:
+			signo = SIGFPE;
+			code = FPE_FLTOVF;
+			break;
+		case GEN_FLTDIV:
+			signo = SIGFPE;
+			code = FPE_FLTDIV;
+			break;
+		case GEN_FLTUND:
+			signo = SIGFPE;
+			code = FPE_FLTUND;
+			break;
+		case GEN_FLTINV:
+			signo = SIGFPE;
+			code = FPE_FLTINV;
+			break;
+		case GEN_FLTINE:
+			signo = SIGFPE;
+			code = FPE_FLTRES;
+			break;
+		case GEN_ROPRAND:
+			signo = SIGFPE;
+			code = __SI_FAULT;
+			break;
 
-		      case GEN_DECOVF:
-		      case GEN_DECDIV:
-		      case GEN_DECINV:
-		      case GEN_ASSERTERR:
-		      case GEN_NULPTRERR:
-		      case GEN_STKOVF:
-		      case GEN_STRLENERR:
-		      case GEN_SUBSTRERR:
-		      case GEN_RANGERR:
-		      case GEN_SUBRNG:
-		      case GEN_SUBRNG1:
-		      case GEN_SUBRNG2:
-		      case GEN_SUBRNG3:
-		      case GEN_SUBRNG4:
-		      case GEN_SUBRNG5:
-		      case GEN_SUBRNG6:
-		      case GEN_SUBRNG7:
-			send_sig(SIGTRAP, current, 1);
-			return;
+		case GEN_DECOVF:
+		case GEN_DECDIV:
+		case GEN_DECINV:
+		case GEN_ASSERTERR:
+		case GEN_NULPTRERR:
+		case GEN_STKOVF:
+		case GEN_STRLENERR:
+		case GEN_SUBSTRERR:
+		case GEN_RANGERR:
+		case GEN_SUBRNG:
+		case GEN_SUBRNG1:
+		case GEN_SUBRNG2:
+		case GEN_SUBRNG3:
+		case GEN_SUBRNG4:
+		case GEN_SUBRNG5:
+		case GEN_SUBRNG6:
+		case GEN_SUBRNG7:
+		default:
+			signo = SIGTRAP;
+			code = __SI_FAULT;
+			break;
 		}
-		break;
+
+		info.si_signo = signo;
+		info.si_errno = 0;
+		info.si_code = code;
+		info.si_addr = (void *) regs->pc;
+		send_sig_info(signo, &info, current);
+		return;
 
 	      case 4: /* opDEC */
 		if (implver() == IMPLVER_EV4) {
+			long si_code;
+
 			/* The some versions of SRM do not handle
 			   the opDEC properly - they return the PC of the
 			   opDEC fault, not the instruction after as the
@@ -294,23 +356,31 @@ do_entIF(unsigned long type, unsigned long a1,
 			   We do this by intentionally causing an opDEC
 			   fault during the boot sequence and testing if
 			   we get the correct PC.  If not, we set a flag
-			   to correct it every time through.
-			*/
+			   to correct it every time through.  */
 			if (opDEC_testing) {
-				if (regs.pc == opDEC_test_pc) {
+				if (regs->pc == opDEC_test_pc) {
 					opDEC_fix = 4;
-					regs.pc += 4;
+					regs->pc += 4;
 					printk("opDEC fixup enabled.\n");
 				}
 				return;
 			}
-			regs.pc += opDEC_fix; 
+			regs->pc += opDEC_fix; 
 			
 			/* EV4 does not implement anything except normal
 			   rounding.  Everything else will come here as
 			   an illegal instruction.  Emulate them.  */
-			if (alpha_fp_emul(regs.pc-4))
+			si_code = alpha_fp_emul(regs->pc - 4);
+			if (si_code == 0)
 				return;
+			if (si_code > 0) {
+				info.si_signo = SIGFPE;
+				info.si_errno = 0;
+				info.si_code = si_code;
+				info.si_addr = (void *) regs->pc;
+				send_sig_info(SIGFPE, &info, current);
+				return;
+			}
 		}
 		break;
 
@@ -324,31 +394,41 @@ do_entIF(unsigned long type, unsigned long a1,
 		   FP registers, PAL_clrfen is not useful except for DoS
 		   attacks.  So turn the bleeding FPU back on and be done
 		   with it.  */
-		current->thread.pal_flags |= 1;
-		__reload_thread(&current->thread);
+		current_thread_info()->pcb.flags |= 1;
+		__reload_thread(&current_thread_info()->pcb);
 		return;
 
 	      case 5: /* illoc */
 	      default: /* unexpected instruction-fault type */
 		      ;
 	}
-	send_sig(SIGILL, current, 1);
+
+	info.si_signo = SIGILL;
+	info.si_errno = 0;
+	info.si_code = ILL_ILLOPC;
+	info.si_addr = (void *) regs->pc;
+	send_sig_info(SIGILL, &info, current);
 }
 
 /* There is an ifdef in the PALcode in MILO that enables a 
-   "kernel debugging entry point" as an unpriviledged call_pal.
+   "kernel debugging entry point" as an unprivileged call_pal.
 
    We don't want to have anything to do with it, but unfortunately
    several versions of MILO included in distributions have it enabled,
    and if we don't put something on the entry point we'll oops.  */
 
 asmlinkage void
-do_entDbg(unsigned long type, unsigned long a1,
-	  unsigned long a2, unsigned long a3, unsigned long a4,
-	  unsigned long a5, struct pt_regs regs)
+do_entDbg(struct pt_regs *regs)
 {
-	die_if_kernel("Instruction fault", &regs, type, 0);
-	force_sig(SIGILL, current);
+	siginfo_t info;
+
+	die_if_kernel("Instruction fault", regs, 0, 0);
+
+	info.si_signo = SIGILL;
+	info.si_errno = 0;
+	info.si_code = ILL_ILLOPC;
+	info.si_addr = (void *) regs->pc;
+	force_sig_info(SIGILL, &info, current);
 }
 
 
@@ -386,7 +466,7 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 {
 	long error, tmp1, tmp2, tmp3, tmp4;
 	unsigned long pc = regs.pc - 4;
-	unsigned fixup;
+	const struct exception_table_entry *fixup;
 
 	unaligned[0].count++;
 	unaligned[0].va = (unsigned long) va;
@@ -405,9 +485,9 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 		"	extwh %2,%3,%2\n"
 		"3:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %1,3b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %2,3b-2b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2)
@@ -425,9 +505,9 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 		"	extlh %2,%3,%2\n"
 		"3:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %1,3b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %2,3b-2b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2)
@@ -445,9 +525,9 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 		"	extqh %2,%3,%2\n"
 		"3:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %1,3b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %2,3b-2b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2)
@@ -474,13 +554,13 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 		"4:	stq_u %1,0(%5)\n"
 		"5:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %2,5b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %1,5b-2b(%0)\n"
-		"	.gprel32 3b\n"
+		"	.long 3b - .\n"
 		"	lda $31,5b-3b(%0)\n"
-		"	.gprel32 4b\n"
+		"	.long 4b - .\n"
 		"	lda $31,5b-4b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2),
@@ -504,13 +584,13 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 		"4:	stq_u %1,0(%5)\n"
 		"5:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %2,5b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %1,5b-2b(%0)\n"
-		"	.gprel32 3b\n"
+		"	.long 3b - .\n"
 		"	lda $31,5b-3b(%0)\n"
-		"	.gprel32 4b\n"
+		"	.long 4b - .\n"
 		"	lda $31,5b-4b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2),
@@ -534,13 +614,13 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 		"4:	stq_u %1,0(%5)\n"
 		"5:\n"
 		".section __ex_table,\"a\"\n\t"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %2,5b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %1,5b-2b(%0)\n"
-		"	.gprel32 3b\n"
+		"	.long 3b - .\n"
 		"	lda $31,5b-3b(%0)\n"
-		"	.gprel32 4b\n"
+		"	.long 4b - .\n"
 		"	lda $31,5b-4b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2),
@@ -559,7 +639,7 @@ do_entUna(void * va, unsigned long opcode, unsigned long reg,
 got_exception:
 	/* Ok, we caught the exception, but we don't want it.  Is there
 	   someone to pass it along to?  */
-	if ((fixup = search_exception_table(pc, regs.gp)) != 0) {
+	if ((fixup = search_exception_tables(pc)) != 0) {
 		unsigned long newpc;
 		newpc = fixup_exception(una_reg, fixup, pc);
 
@@ -605,12 +685,11 @@ got_exception:
 	dik_show_code((unsigned int *)pc);
 	dik_show_trace((unsigned long *)(&regs+1));
 
-	if (current->thread.flags & (1UL << 63)) {
+	if (test_and_set_thread_flag (TIF_DIE_IF_KERNEL)) {
 		printk("die_if_kernel recursion detected.\n");
-		sti();
+		local_irq_enable();
 		while (1);
 	}
-	current->thread.flags |= (1UL << 63);
 	do_exit(SIGSEGV);
 }
 
@@ -706,14 +785,13 @@ do_entUnaUser(void * va, unsigned long opcode,
 
 	unsigned long tmp1, tmp2, tmp3, tmp4;
 	unsigned long fake_reg, *reg_addr = &fake_reg;
-	unsigned long uac_bits;
+	siginfo_t info;
 	long error;
 
 	/* Check the UAC bits to decide what the user wants us to do
 	   with the unaliged access.  */
 
-	uac_bits = (current->thread.flags >> UAC_SHIFT) & UAC_BITMASK;
-	if (!(uac_bits & UAC_NOPRINT)) {
+	if (!test_thread_flag (TIF_UAC_NOPRINT)) {
 		if (cnt >= 5 && jiffies - last_time > 5*HZ) {
 			cnt = 0;
 		}
@@ -724,13 +802,11 @@ do_entUnaUser(void * va, unsigned long opcode,
 		}
 		last_time = jiffies;
 	}
-	if (uac_bits & UAC_SIGBUS) {
+	if (test_thread_flag (TIF_UAC_SIGBUS))
 		goto give_sigbus;
-	}
-	if (uac_bits & UAC_NOFIX) {
-		/* Not sure why you'd want to use this, but... */
+	/* Not sure why you'd want to use this, but... */
+	if (test_thread_flag (TIF_UAC_NOFIX))
 		return;
-	}
 
 	/* Don't bother reading ds in the access check since we already
 	   know that this came from the user.  Also rely on the fact that
@@ -769,9 +845,9 @@ do_entUnaUser(void * va, unsigned long opcode,
 		"	extwh %2,%3,%2\n"
 		"3:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %1,3b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %2,3b-2b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2)
@@ -789,9 +865,9 @@ do_entUnaUser(void * va, unsigned long opcode,
 		"	extlh %2,%3,%2\n"
 		"3:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %1,3b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %2,3b-2b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2)
@@ -809,9 +885,9 @@ do_entUnaUser(void * va, unsigned long opcode,
 		"	extqh %2,%3,%2\n"
 		"3:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %1,3b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %2,3b-2b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2)
@@ -829,9 +905,9 @@ do_entUnaUser(void * va, unsigned long opcode,
 		"	extlh %2,%3,%2\n"
 		"3:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %1,3b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %2,3b-2b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2)
@@ -849,9 +925,9 @@ do_entUnaUser(void * va, unsigned long opcode,
 		"	extqh %2,%3,%2\n"
 		"3:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %1,3b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %2,3b-2b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2)
@@ -878,13 +954,13 @@ do_entUnaUser(void * va, unsigned long opcode,
 		"4:	stq_u %1,0(%5)\n"
 		"5:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %2,5b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %1,5b-2b(%0)\n"
-		"	.gprel32 3b\n"
+		"	.long 3b - .\n"
 		"	lda $31,5b-3b(%0)\n"
-		"	.gprel32 4b\n"
+		"	.long 4b - .\n"
 		"	lda $31,5b-4b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2),
@@ -912,13 +988,13 @@ do_entUnaUser(void * va, unsigned long opcode,
 		"4:	stq_u %1,0(%5)\n"
 		"5:\n"
 		".section __ex_table,\"a\"\n"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %2,5b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %1,5b-2b(%0)\n"
-		"	.gprel32 3b\n"
+		"	.long 3b - .\n"
 		"	lda $31,5b-3b(%0)\n"
-		"	.gprel32 4b\n"
+		"	.long 4b - .\n"
 		"	lda $31,5b-4b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2),
@@ -946,13 +1022,13 @@ do_entUnaUser(void * va, unsigned long opcode,
 		"4:	stq_u %1,0(%5)\n"
 		"5:\n"
 		".section __ex_table,\"a\"\n\t"
-		"	.gprel32 1b\n"
+		"	.long 1b - .\n"
 		"	lda %2,5b-1b(%0)\n"
-		"	.gprel32 2b\n"
+		"	.long 2b - .\n"
 		"	lda %1,5b-2b(%0)\n"
-		"	.gprel32 3b\n"
+		"	.long 3b - .\n"
 		"	lda $31,5b-3b(%0)\n"
-		"	.gprel32 4b\n"
+		"	.long 4b - .\n"
 		"	lda $31,5b-4b(%0)\n"
 		".previous"
 			: "=r"(error), "=&r"(tmp1), "=&r"(tmp2),
@@ -974,29 +1050,35 @@ do_entUnaUser(void * va, unsigned long opcode,
 
 give_sigsegv:
 	regs->pc -= 4;  /* make pc point to faulting insn */
-	send_sig(SIGSEGV, current, 1);
+	info.si_signo = SIGSEGV;
+	info.si_errno = 0;
+
+	/* We need to replicate some of the logic in mm/fault.c,
+	   since we don't have access to the fault code in the
+	   exception handling return path.  */
+	if (!__access_ok((unsigned long)va, 0, USER_DS))
+		info.si_code = SEGV_ACCERR;
+	else {
+		struct mm_struct *mm = current->mm;
+		down_read(&mm->mmap_sem);
+		if (find_vma(mm, (unsigned long)va))
+			info.si_code = SEGV_ACCERR;
+		else
+			info.si_code = SEGV_MAPERR;
+		up_read(&mm->mmap_sem);
+	}
+	info.si_addr = va;
+	send_sig_info(SIGSEGV, &info, current);
 	return;
 
 give_sigbus:
 	regs->pc -= 4;
-	send_sig(SIGBUS, current, 1);
+	info.si_signo = SIGBUS;
+	info.si_errno = 0;
+	info.si_code = BUS_ADRALN;
+	info.si_addr = va;
+	send_sig_info(SIGBUS, &info, current);
 	return;
-}
-
-/*
- * Unimplemented system calls.
- */
-asmlinkage long
-alpha_ni_syscall(unsigned long a0, unsigned long a1, unsigned long a2,
-		 unsigned long a3, unsigned long a4, unsigned long a5,
-		 struct pt_regs regs)
-{
-	/* We only get here for OSF system calls, minus #112;
-	   the rest go to sys_ni_syscall.  */
-#if 0
-	printk("<sc %ld(%lx,%lx,%lx)>", regs.r0, a0, a1, a2);
-#endif
-	return -ENOSYS;
 }
 
 void
@@ -1014,9 +1096,7 @@ trap_init(void)
 	wrent(entDbg, 6);
 
 	/* Hack for Multia (UDB) and JENSEN: some of their SRMs have
-	 * a bug in the handling of the opDEC fault.  Fix it up if so.
-	 */
-	if (implver() == IMPLVER_EV4) {
+	   a bug in the handling of the opDEC fault.  Fix it up if so.  */
+	if (implver() == IMPLVER_EV4)
 		opDEC_check();
-	}
 }

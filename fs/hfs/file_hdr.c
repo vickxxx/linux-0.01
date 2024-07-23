@@ -29,6 +29,7 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/smp_lock.h>
 
 /* prodos types */
 #define PRODOSI_FTYPE_DIR   0x0F
@@ -46,20 +47,20 @@ static hfs_rwret_t hdr_write(struct file *, const char *,
 /*================ Global variables ================*/
 
 struct file_operations hfs_hdr_operations = {
-	llseek:		hdr_llseek,
-	read:		hdr_read,
-	write:		hdr_write,
-	fsync:		file_fsync,
+	.llseek		= hdr_llseek,
+	.read		= hdr_read,
+	.write		= hdr_write,
+	.fsync		= file_fsync,
 };
 
 struct inode_operations hfs_hdr_inode_operations = {
-	setattr:	hfs_notify_change_hdr,
+	.setattr	= hfs_notify_change_hdr,
 };
 
 const struct hfs_hdr_layout hfs_dbl_fil_hdr_layout = {
-	__constant_htonl(HFS_DBL_MAGIC),	/* magic   */
-	__constant_htonl(HFS_HDR_VERSION_2),	/* version */
-	6,					/* entries */
+	.magic		= __constant_htonl(HFS_DBL_MAGIC),	/* magic   */
+	.version	= __constant_htonl(HFS_HDR_VERSION_2),	/* version */
+	.entries	= 6,					/* entries */
 	{					/* descr[] */
 		{HFS_HDR_FNAME, offsetof(struct hfs_dbl_hdr, real_name),   ~0},
 		{HFS_HDR_DATES, offsetof(struct hfs_dbl_hdr, create_time), 16},
@@ -79,9 +80,9 @@ const struct hfs_hdr_layout hfs_dbl_fil_hdr_layout = {
 };
 
 const struct hfs_hdr_layout hfs_dbl_dir_hdr_layout = {
-	__constant_htonl(HFS_DBL_MAGIC),	/* magic   */
-	__constant_htonl(HFS_HDR_VERSION_2),	/* version */
-	5,					/* entries */
+	.magic		= __constant_htonl(HFS_DBL_MAGIC),	/* magic   */
+	.version	= __constant_htonl(HFS_HDR_VERSION_2),	/* version */
+	.entries	= 5,					/* entries */
 	{					/* descr[] */
 		{HFS_HDR_FNAME, offsetof(struct hfs_dbl_hdr, real_name),   ~0},
 		{HFS_HDR_DATES, offsetof(struct hfs_dbl_hdr, create_time), 16},
@@ -99,9 +100,9 @@ const struct hfs_hdr_layout hfs_dbl_dir_hdr_layout = {
 };
 
 const struct hfs_hdr_layout hfs_nat2_hdr_layout = {
-	__constant_htonl(HFS_DBL_MAGIC),	/* magic   */
-	__constant_htonl(HFS_HDR_VERSION_2),	/* version */
-	9,					/* entries */
+	.magic		= __constant_htonl(HFS_DBL_MAGIC),	/* magic   */
+	.version	= __constant_htonl(HFS_HDR_VERSION_2),	/* version */
+	.entries	= 9,					/* entries */
 	{					/* descr[] */
 		{HFS_HDR_FNAME, offsetof(struct hfs_dbl_hdr, real_name),   ~0},
 		{HFS_HDR_COMNT, offsetof(struct hfs_dbl_hdr, comment),      0},
@@ -127,9 +128,9 @@ const struct hfs_hdr_layout hfs_nat2_hdr_layout = {
 };
 
 const struct hfs_hdr_layout hfs_nat_hdr_layout = {
-	__constant_htonl(HFS_DBL_MAGIC),	/* magic   */
-	__constant_htonl(HFS_HDR_VERSION_1),	/* version */
-	5,					/* entries */
+	.magic		= __constant_htonl(HFS_DBL_MAGIC),	/* magic   */
+	.version	= __constant_htonl(HFS_HDR_VERSION_1),	/* version */
+	.entries	= 5,					/* entries */
 	{					/* descr[] */
 		{HFS_HDR_FNAME, offsetof(struct hfs_dbl_hdr, real_name),   ~0},
 		{HFS_HDR_COMNT, offsetof(struct hfs_dbl_hdr, comment),      0},
@@ -332,8 +333,11 @@ static void set_dates(struct hfs_cat_entry *entry, struct inode *inode,
 	tmp = hfs_h_to_mtime(dates[1]);
 	if (entry->modify_date != tmp) {
 		entry->modify_date = tmp;
-		inode->i_ctime = inode->i_atime = inode->i_mtime = 
+		inode->i_ctime.tv_sec = inode->i_atime.tv_sec = inode->i_mtime.tv_sec = 
 			hfs_h_to_utime(dates[1]);
+		inode->i_ctime.tv_nsec = 0;
+		inode->i_mtime.tv_nsec = 0;
+		inode->i_atime.tv_nsec = 0;
 		hfs_cat_mark_dirty(entry);
 	}
 	tmp = hfs_h_to_mtime(dates[2]);
@@ -347,6 +351,8 @@ loff_t hdr_llseek(struct file *file, loff_t offset, int origin)
 {
 	long long retval;
 
+	lock_kernel();
+
 	switch (origin) {
 		case 2:
 			offset += file->f_dentry->d_inode->i_size;
@@ -358,11 +364,10 @@ loff_t hdr_llseek(struct file *file, loff_t offset, int origin)
 	if (offset>=0 && offset<file->f_dentry->d_inode->i_size) {
 		if (offset != file->f_pos) {
 			file->f_pos = offset;
-			file->f_reada = 0;
-			file->f_version = ++event;
 		}
 		retval = offset;
 	}
+	unlock_kernel();
 	return retval;
 }
 
@@ -589,10 +594,8 @@ hfs_did_done:
 		if (p) {
 			left -= copy_to_user(buf, p + offset, left);
 		} else if (fork) {
-			left = hfs_do_read(inode, fork, offset, buf, left,
-					   filp->f_reada != 0);
+			left = hfs_do_read(inode, fork, offset, buf, left);
 			if (left > 0) {
-				filp->f_reada = 1;
 			} else if (!read) {
 				return left;
 			} else {

@@ -15,7 +15,7 @@
  *      ftp://prep.ai.mit.edu/pub/gnu/GPL
  *  Each contributing author retains all rights to their own work.
  *
- *  (C) 1999-2000 Ben Fennema
+ *  (C) 1999-2001 Ben Fennema
  *  (C) 1999-2000 Stelias Computing Inc
  *
  * HISTORY
@@ -26,7 +26,6 @@
 #include "udfdecl.h"
 
 #include <linux/fs.h>
-#include <linux/locks.h>
 #include <linux/smp_lock.h>
 
 /*
@@ -44,8 +43,7 @@ int udf_fsync_inode(struct inode *inode, int datasync)
 {
 	int err;
 
-	err = fsync_inode_buffers(inode);
-	err |= fsync_inode_data_buffers(inode);
+	err = sync_mapping_buffers(inode->i_mapping);
 	if (!(inode->i_state & I_DIRTY))
 		return err;
 	if (datasync && !(inode->i_state & I_DIRTY_DATASYNC))

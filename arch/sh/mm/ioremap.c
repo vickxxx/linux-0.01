@@ -1,4 +1,4 @@
-/* $Id: ioremap.c,v 1.4 2001/06/30 09:18:39 gniibe Exp $
+/* $Id: ioremap.c,v 1.6 2003/05/04 19:29:55 lethal Exp $
  *
  * arch/sh/mm/ioremap.c
  *
@@ -10,13 +10,18 @@
  */
 
 #include <linux/vmalloc.h>
+#include <linux/mm.h>
 #include <asm/io.h>
+#include <asm/page.h>
 #include <asm/pgalloc.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 static inline void remap_area_pte(pte_t * pte, unsigned long address,
 	unsigned long size, unsigned long phys_addr, unsigned long flags)
 {
 	unsigned long end;
+	unsigned long pfn;
 	pgprot_t pgprot = __pgprot(_PAGE_PRESENT | _PAGE_RW |
 				   _PAGE_DIRTY | _PAGE_ACCESSED |
 				   _PAGE_HW_SHARED | _PAGE_FLAGS_HARD | flags);
@@ -27,14 +32,15 @@ static inline void remap_area_pte(pte_t * pte, unsigned long address,
 		end = PMD_SIZE;
 	if (address >= end)
 		BUG();
+	pfn = phys_addr >> PAGE_SHIFT;
 	do {
 		if (!pte_none(*pte)) {
 			printk("remap_area_pte: page already exists\n");
 			BUG();
 		}
-		set_pte(pte, mk_pte_phys(phys_addr, pgprot));
+		set_pte(pte, pfn_pte(pfn, pgprot));
 		address += PAGE_SIZE;
-		phys_addr += PAGE_SIZE;
+		pfn++;
 		pte++;
 	} while (address && (address < end));
 }
@@ -52,7 +58,7 @@ static inline int remap_area_pmd(pmd_t * pmd, unsigned long address,
 	if (address >= end)
 		BUG();
 	do {
-		pte_t * pte = pte_alloc(&init_mm, pmd, address);
+		pte_t * pte = pte_alloc_kernel(&init_mm, pmd, address);
 		if (!pte)
 			return -ENOMEM;
 		remap_area_pte(pte, address, end - address, address + phys_addr, flags);

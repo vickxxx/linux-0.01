@@ -23,6 +23,7 @@
 #include <asm/pgtable.h>
 #include <asm/core_wildfire.h>
 #include <asm/hwrpb.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -157,13 +158,13 @@ wildfire_end_irq(unsigned int irq)
 }
 
 static struct hw_interrupt_type wildfire_irq_type = {
-	typename:	"WILDFIRE",
-	startup:	wildfire_startup_irq,
-	shutdown:	wildfire_disable_irq,
-	enable:		wildfire_enable_irq,
-	disable:	wildfire_disable_irq,
-	ack:		wildfire_mask_and_ack_irq,
-	end:		wildfire_end_irq,
+	.typename	= "WILDFIRE",
+	.startup	= wildfire_startup_irq,
+	.shutdown	= wildfire_disable_irq,
+	.enable		= wildfire_enable_irq,
+	.disable	= wildfire_disable_irq,
+	.ack		= wildfire_mask_and_ack_irq,
+	.end		= wildfire_end_irq,
 };
 
 static void __init
@@ -172,8 +173,8 @@ wildfire_init_irq_per_pca(int qbbno, int pcano)
 	int i, irq_bias;
 	unsigned long io_bias;
 	static struct irqaction isa_enable = {
-		handler:	no_action,
-		name:		"isa_enable",
+		.handler	= no_action,
+		.name		= "isa_enable",
 	};
 
 	irq_bias = qbbno * (WILDFIRE_PCA_PER_QBB * WILDFIRE_IRQ_PER_PCA)
@@ -313,7 +314,7 @@ wildfire_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 		{ 56,    56,    56+1, 56+2, 56+3}, /* IdSel 6 PCI 1 slot 6 */
 		{ 60,    60,    60+1, 60+2, 60+3}, /* IdSel 7 PCI 1 slot 7 */
 	};
-	const long min_idsel = 0, max_idsel = 7, irqs_per_slot = 5;
+	long min_idsel = 0, max_idsel = 7, irqs_per_slot = 5;
 
 	struct pci_controller *hose = dev->sysdata;
 	int irq = COMMON_TABLE_LOOKUP;
@@ -332,25 +333,30 @@ wildfire_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
  */
 
 struct alpha_machine_vector wildfire_mv __initmv = {
-	vector_name:		"WILDFIRE",
+	.vector_name		= "WILDFIRE",
 	DO_EV6_MMU,
 	DO_DEFAULT_RTC,
 	DO_WILDFIRE_IO,
 	DO_WILDFIRE_BUS,
-	machine_check:		wildfire_machine_check,
-	max_dma_address:	ALPHA_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
+	.machine_check		= wildfire_machine_check,
+	.max_isa_dma_address	= ALPHA_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
 
-	nr_irqs:		WILDFIRE_NR_IRQS,
-	device_interrupt:	wildfire_device_interrupt,
+	.nr_irqs		= WILDFIRE_NR_IRQS,
+	.device_interrupt	= wildfire_device_interrupt,
 
-	init_arch:		wildfire_init_arch,
-	init_irq:		wildfire_init_irq,
-	init_rtc:		common_init_rtc,
-	init_pci:		common_init_pci,
-	kill_arch:		wildfire_kill_arch,
-	pci_map_irq:		wildfire_map_irq,
-	pci_swizzle:		common_swizzle,
+	.init_arch		= wildfire_init_arch,
+	.init_irq		= wildfire_init_irq,
+	.init_rtc		= common_init_rtc,
+	.init_pci		= common_init_pci,
+	.kill_arch		= wildfire_kill_arch,
+	.pci_map_irq		= wildfire_map_irq,
+	.pci_swizzle		= common_swizzle,
+
+	.pa_to_nid		= wildfire_pa_to_nid,
+	.cpuid_to_nid		= wildfire_cpuid_to_nid,
+	.node_mem_start		= wildfire_node_mem_start,
+	.node_mem_size		= wildfire_node_mem_size,
 };
 ALIAS_MV(wildfire)

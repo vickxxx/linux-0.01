@@ -53,6 +53,7 @@ SCTP_DBG_OBJCNT(ep);
 SCTP_DBG_OBJCNT(transport);
 SCTP_DBG_OBJCNT(assoc);
 SCTP_DBG_OBJCNT(bind_addr);
+SCTP_DBG_OBJCNT(bind_bucket);
 SCTP_DBG_OBJCNT(chunk);
 SCTP_DBG_OBJCNT(addr);
 SCTP_DBG_OBJCNT(ssnmap);
@@ -61,13 +62,14 @@ SCTP_DBG_OBJCNT(datamsg);
 /* An array to make it easy to pretty print the debug information
  * to the proc fs.
  */
-static sctp_dbg_objcnt_entry_t sctp_dbg_objcnt[] = {
+sctp_dbg_objcnt_entry_t sctp_dbg_objcnt[] = {
 	SCTP_DBG_OBJCNT_ENTRY(sock),
 	SCTP_DBG_OBJCNT_ENTRY(ep),
 	SCTP_DBG_OBJCNT_ENTRY(assoc),
 	SCTP_DBG_OBJCNT_ENTRY(transport),
 	SCTP_DBG_OBJCNT_ENTRY(chunk),
 	SCTP_DBG_OBJCNT_ENTRY(bind_addr),
+	SCTP_DBG_OBJCNT_ENTRY(bind_bucket),
 	SCTP_DBG_OBJCNT_ENTRY(addr),
 	SCTP_DBG_OBJCNT_ENTRY(ssnmap),
 	SCTP_DBG_OBJCNT_ENTRY(datamsg),
@@ -132,7 +134,7 @@ void sctp_dbg_objcnt_init(void)
 /* Cleanup the objcount entry in the proc filesystem.  */
 void sctp_dbg_objcnt_exit(void)
 {
-	remove_proc_entry("sctp_dbg_objcnt", proc_net_sctp);
+	remove_proc_entry("sctp_dbg_objcount", proc_net_sctp);
 }
 
 

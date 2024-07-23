@@ -6,38 +6,25 @@
  *  Bits taken from various places.
  */
 #include <linux/config.h>
+#include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/pci.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 
-#include <asm/page.h> /* for BUG() */
+#include <asm/bug.h>
+#include <asm/io.h>
 #include <asm/irq.h>
 #include <asm/mach-types.h>
 #include <asm/mach/pci.h>
 
 static int debug_pci;
-int have_isa_bridge;
-
-struct pci_sys_data {
-	/*
-	 * The hardware we are attached to
-	 */
-	struct hw_pci	*hw;
-
-	unsigned long	mem_offset;
-
-	/*
-	 * These are the resources for the root bus.
-	 */
-	struct resource *resource[3];
-};
 
 void pcibios_report_status(u_int status_mask, int warn)
 {
-	struct pci_dev *dev;
+	struct pci_dev *dev = NULL;
 
-	pci_for_each_dev(dev) {
+	while ((dev = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL) {
 		u16 status;
 
 		/*
@@ -75,7 +62,7 @@ void pcibios_report_status(u_int status_mask, int warn)
  * Bug 3 is responsible for the sound DMA grinding to a halt.  We now
  * live with bug 2.
  */
-static void __init pci_fixup_83c553(struct pci_dev *dev)
+static void __devinit pci_fixup_83c553(struct pci_dev *dev)
 {
 	/*
 	 * Set memory region to start at address 0, and enable IO
@@ -126,7 +113,7 @@ static void __init pci_fixup_83c553(struct pci_dev *dev)
 	outb(0x08, 0x4d1);
 }
 
-static void __init pci_fixup_unassign(struct pci_dev *dev)
+static void __devinit pci_fixup_unassign(struct pci_dev *dev)
 {
 	dev->resource[0].end -= dev->resource[0].start;
 	dev->resource[0].start = 0;
@@ -137,7 +124,7 @@ static void __init pci_fixup_unassign(struct pci_dev *dev)
  * if it is the host bridge by marking it as such.  These resources are of
  * no consequence to the PCI layer (they are handled elsewhere).
  */
-static void __init pci_fixup_dec21285(struct pci_dev *dev)
+static void __devinit pci_fixup_dec21285(struct pci_dev *dev)
 {
 	int i;
 
@@ -153,10 +140,9 @@ static void __init pci_fixup_dec21285(struct pci_dev *dev)
 }
 
 /*
- * PCI IDE controllers use non-standard I/O port
- * decoding, respect it.
+ * PCI IDE controllers use non-standard I/O port decoding, respect it.
  */
-static void __init pci_fixup_ide_bases(struct pci_dev *dev)
+static void __devinit pci_fixup_ide_bases(struct pci_dev *dev)
 {
 	struct resource *r;
 	int i;
@@ -176,13 +162,86 @@ static void __init pci_fixup_ide_bases(struct pci_dev *dev)
 /*
  * Put the DEC21142 to sleep
  */
-static void __init pci_fixup_dec21142(struct pci_dev *dev)
+static void __devinit pci_fixup_dec21142(struct pci_dev *dev)
 {
 	pci_write_config_dword(dev, 0x40, 0x80000000);
 }
 
+/*
+ * The CY82C693 needs some rather major fixups to ensure that it does
+ * the right thing.  Idea from the Alpha people, with a few additions.
+ *
+ * We ensure that the IDE base registers are set to 1f0/3f4 for the
+ * primary bus, and 170/374 for the secondary bus.  Also, hide them
+ * from the PCI subsystem view as well so we won't try to perform
+ * our own auto-configuration on them.
+ *
+ * In addition, we ensure that the PCI IDE interrupts are routed to
+ * IRQ 14 and IRQ 15 respectively.
+ *
+ * The above gets us to a point where the IDE on this device is
+ * functional.  However, The CY82C693U _does not work_ in bus
+ * master mode without locking the PCI bus solid.
+ */
+static void __devinit pci_fixup_cy82c693(struct pci_dev *dev)
+{
+	if ((dev->class >> 8) == PCI_CLASS_STORAGE_IDE) {
+		u32 base0, base1;
+
+		if (dev->class & 0x80) {	/* primary */
+			base0 = 0x1f0;
+			base1 = 0x3f4;
+		} else {			/* secondary */
+			base0 = 0x170;
+			base1 = 0x374;
+		}
+
+		pci_write_config_dword(dev, PCI_BASE_ADDRESS_0,
+				       base0 | PCI_BASE_ADDRESS_SPACE_IO);
+		pci_write_config_dword(dev, PCI_BASE_ADDRESS_1,
+				       base1 | PCI_BASE_ADDRESS_SPACE_IO);
+
+		dev->resource[0].start = 0;
+		dev->resource[0].end   = 0;
+		dev->resource[0].flags = 0;
+
+		dev->resource[1].start = 0;
+		dev->resource[1].end   = 0;
+		dev->resource[1].flags = 0;
+	} else if (PCI_FUNC(dev->devfn) == 0) {
+		/*
+		 * Setup IDE IRQ routing.
+		 */
+		pci_write_config_byte(dev, 0x4b, 14);
+		pci_write_config_byte(dev, 0x4c, 15);
+
+		/*
+		 * Disable FREQACK handshake, enable USB.
+		 */
+		pci_write_config_byte(dev, 0x4d, 0x41);
+
+		/*
+		 * Enable PCI retry, and PCI post-write buffer.
+		 */
+		pci_write_config_byte(dev, 0x44, 0x17);
+
+		/*
+		 * Enable ISA master and DMA post write buffering.
+		 */
+		pci_write_config_byte(dev, 0x45, 0x03);
+	}
+}
+
 struct pci_fixup pcibios_fixups[] = {
 	{
+		PCI_FIXUP_HEADER,
+		PCI_VENDOR_ID_CONTAQ,	PCI_DEVICE_ID_CONTAQ_82C693,
+		pci_fixup_cy82c693
+	}, {
+		PCI_FIXUP_HEADER,
+		PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_21142,
+		pci_fixup_dec21142
+	}, {
 		PCI_FIXUP_HEADER,
 		PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_21285,
 		pci_fixup_dec21285
@@ -198,56 +257,13 @@ struct pci_fixup pcibios_fixups[] = {
 		PCI_FIXUP_HEADER,
 		PCI_ANY_ID,		PCI_ANY_ID,
 		pci_fixup_ide_bases
-	}, {
-		PCI_FIXUP_HEADER,
-		PCI_VENDOR_ID_DEC,	PCI_DEVICE_ID_DEC_21142,
-		pci_fixup_dec21142
 	}, { 0 }
 };
 
-void __init
-pcibios_update_resource(struct pci_dev *dev, struct resource *root,
-			struct resource *res, int resource)
-{
-	struct pci_sys_data *sys = dev->sysdata;
-	u32 val, check;
-	int reg;
-
-	if (debug_pci)
-		printk("PCI: Assigning %3s %08lx to %s\n",
-			res->flags & IORESOURCE_IO ? "IO" : "MEM",
-			res->start, dev->name);
-
-	if (resource < 6) {
-		reg = PCI_BASE_ADDRESS_0 + 4*resource;
-	} else if (resource == PCI_ROM_RESOURCE) {
-		reg = dev->rom_base_reg;
-	} else {
-		/* Somebody might have asked allocation of a
-		 * non-standard resource.
-		 */
-		return;
-	}
-
-	val = res->start;
-	if (res->flags & IORESOURCE_MEM)
-		val -= sys->mem_offset;
-	val |= res->flags & PCI_REGION_FLAG_MASK;
-
-	pci_write_config_dword(dev, reg, val);
-	pci_read_config_dword(dev, reg, &check);
-	if ((val ^ check) & ((val & PCI_BASE_ADDRESS_SPACE_IO) ?
-	    PCI_BASE_ADDRESS_IO_MASK : PCI_BASE_ADDRESS_MEM_MASK)) {
-		printk(KERN_ERR "PCI: Error while updating region "
-			"%s/%d (%08x != %08x)\n", dev->slot_name,
-			resource, val, check);
-	}
-}
-
-void __init pcibios_update_irq(struct pci_dev *dev, int irq)
+void __devinit pcibios_update_irq(struct pci_dev *dev, int irq)
 {
 	if (debug_pci)
-		printk("PCI: Assigning IRQ %02d to %s\n", irq, dev->name);
+		printk("PCI: Assigning IRQ %02d to %s\n", irq, dev->dev.name);
 	pci_write_config_byte(dev, PCI_INTERRUPT_LINE, irq);
 }
 
@@ -265,46 +281,32 @@ static inline int pdev_bad_for_parity(struct pci_dev *dev)
 /*
  * Adjust the device resources from bus-centric to Linux-centric.
  */
-static void __init
+static void __devinit
 pdev_fixup_device_resources(struct pci_sys_data *root, struct pci_dev *dev)
 {
+	unsigned long offset;
 	int i;
 
 	for (i = 0; i < PCI_NUM_RESOURCES; i++) {
 		if (dev->resource[i].start == 0)
 			continue;
-		if (dev->resource[i].flags & IORESOURCE_MEM) {
-			dev->resource[i].start += root->mem_offset;
-			dev->resource[i].end   += root->mem_offset;
-		}
+		if (dev->resource[i].flags & IORESOURCE_MEM)
+			offset = root->mem_offset;
+		else
+			offset = root->io_offset;
+
+		dev->resource[i].start += offset;
+		dev->resource[i].end   += offset;
 	}
 }
 
-static void __init
+static void __devinit
 pbus_assign_bus_resources(struct pci_bus *bus, struct pci_sys_data *root)
 {
 	struct pci_dev *dev = bus->self;
 	int i;
 
-	if (dev) {
-		for (i = 0; i < 3; i++) {
-			if(root->resource[i]) {
-				bus->resource[i] = &dev->resource[PCI_BRIDGE_RESOURCES+i];
-				bus->resource[i]->end  = root->resource[i]->end;
-				bus->resource[i]->name = bus->name;
-			}
-		}
-		bus->resource[0]->flags |= pci_bridge_check_io(dev);
-		bus->resource[1]->flags |= IORESOURCE_MEM;
-
-		if (root->resource[2])
-			bus->resource[2]->flags = root->resource[2]->flags;
-		else {
-			/* no prefetchable memory region - disable it */
-			bus->resource[2]->start = 1024*1024;
-			bus->resource[2]->end   = bus->resource[2]->start - 1;
-		}
-	} else {
+	if (!dev) {
 		/*
 		 * Assign root bus resources.
 		 */
@@ -317,12 +319,11 @@ pbus_assign_bus_resources(struct pci_bus *bus, struct pci_sys_data *root)
  * pcibios_fixup_bus - Called after each bus is probed,
  * but before its children are examined.
  */
-void __init pcibios_fixup_bus(struct pci_bus *bus)
+void __devinit pcibios_fixup_bus(struct pci_bus *bus)
 {
 	struct pci_sys_data *root = bus->sysdata;
-	struct list_head *walk;
-	u16 features = PCI_COMMAND_SERR | PCI_COMMAND_PARITY;
-	u16 all_status = -1;
+	struct pci_dev *dev;
+	u16 features = PCI_COMMAND_SERR | PCI_COMMAND_PARITY | PCI_COMMAND_FAST_BACK;
 
 	pbus_assign_bus_resources(bus, root);
 
@@ -330,47 +331,61 @@ void __init pcibios_fixup_bus(struct pci_bus *bus)
 	 * Walk the devices on this bus, working out what we can
 	 * and can't support.
 	 */
-	for (walk = bus->devices.next; walk != &bus->devices; walk = walk->next) {
-		struct pci_dev *dev = pci_dev_b(walk);
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		u16 status;
 
 		pdev_fixup_device_resources(root, dev);
 
 		pci_read_config_word(dev, PCI_STATUS, &status);
-		all_status &= status;
+
+		/*
+		 * If any device on this bus does not support fast back
+		 * to back transfers, then the bus as a whole is not able
+		 * to support them.  Having fast back to back transfers
+		 * on saves us one PCI cycle per transaction.
+		 */
+		if (!(status & PCI_STATUS_FAST_BACK))
+			features &= ~PCI_COMMAND_FAST_BACK;
 
 		if (pdev_bad_for_parity(dev))
 			features &= ~(PCI_COMMAND_SERR | PCI_COMMAND_PARITY);
 
-		/*
-		 * If this device is an ISA bridge, set the have_isa_bridge
-		 * flag.  We will then go looking for things like keyboard,
-		 * etc
-		 */
-		if (dev->class >> 8 == PCI_CLASS_BRIDGE_ISA ||
-		    dev->class >> 8 == PCI_CLASS_BRIDGE_EISA)
-			have_isa_bridge = !0;
+		switch (dev->class >> 8) {
+#if defined(CONFIG_ISA) || defined(CONFIG_EISA)
+		case PCI_CLASS_BRIDGE_ISA:
+		case PCI_CLASS_BRIDGE_EISA:
+			/*
+			 * If this device is an ISA bridge, set isa_bridge
+			 * to point at this device.  We will then go looking
+			 * for things like keyboard, etc.
+			 */
+			isa_bridge = dev;
+			break;
+#endif
 	}
-
-	/*
-	 * If any device on this bus does not support fast back to back
-	 * transfers, then the bus as a whole is not able to support them.
-	 * Having fast back to back transfers on saves us one PCI cycle
-	 * per transaction.
-	 */
-	if (all_status & PCI_STATUS_FAST_BACK)
-		features |= PCI_COMMAND_FAST_BACK;
 
 	/*
 	 * Now walk the devices again, this time setting them up.
 	 */
-	for (walk = bus->devices.next; walk != &bus->devices; walk = walk->next) {
-		struct pci_dev *dev = pci_dev_b(walk);
+	list_for_each_entry(dev, &bus->devices, bus_list) {
 		u16 cmd;
 
 		pci_read_config_word(dev, PCI_COMMAND, &cmd);
 		cmd |= features;
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
+
+		pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE,
+				      L1_CACHE_BYTES >> 2);
+	}
+
+	/*
+	 * Propagate the flags to the PCI bridge.
+	 */
+	if (bus->self && bus->self->hdr_type == PCI_HEADER_TYPE_BRIDGE) {
+		if (features & PCI_COMMAND_FAST_BACK)
+			bus->bridge_ctl |= PCI_BRIDGE_CTL_FAST_BACK;
+		if (features & PCI_COMMAND_PARITY)
+			bus->bridge_ctl |= PCI_BRIDGE_CTL_PARITY;
 	}
 
 	/*
@@ -383,116 +398,162 @@ void __init pcibios_fixup_bus(struct pci_bus *bus)
 /*
  * Convert from Linux-centric to bus-centric addresses for bridge devices.
  */
-void __init
-pcibios_fixup_pbus_ranges(struct pci_bus *bus, struct pbus_set_ranges_data *ranges)
+void __devinit
+pcibios_resource_to_bus(struct pci_dev *dev, struct pci_bus_region *region,
+			 struct resource *res)
 {
-	struct pci_sys_data *root = bus->sysdata;
+	struct pci_sys_data *root = dev->sysdata;
+	unsigned long offset = 0;
 
-	ranges->mem_start -= root->mem_offset;
-	ranges->mem_end -= root->mem_offset;
-	ranges->prefetch_start -= root->mem_offset;
-	ranges->prefetch_end -= root->mem_offset;
+	if (res->flags & IORESOURCE_IO)
+		offset = root->io_offset;
+	if (res->flags & IORESOURCE_MEM)
+		offset = root->mem_offset;
+
+	region->start = res->start - offset;
+	region->end   = res->end - offset;
 }
 
-u8 __init no_swizzle(struct pci_dev *dev, u8 *pin)
+#ifdef CONFIG_HOTPLUG
+EXPORT_SYMBOL(pcibios_fixup_bus);
+EXPORT_SYMBOL(pcibios_resource_to_bus);
+#endif
+
+/*
+ * This is the standard PCI-PCI bridge swizzling algorithm:
+ *
+ *   Dev: 0  1  2  3
+ *    A   A  B  C  D
+ *    B   B  C  D  A
+ *    C   C  D  A  B
+ *    D   D  A  B  C
+ *        ^^^^^^^^^^ irq pin on bridge
+ */
+u8 __devinit pci_std_swizzle(struct pci_dev *dev, u8 *pinp)
 {
-	return 0;
-}
+	int pin = *pinp - 1;
 
-extern struct hw_pci ebsa285_pci;
-extern struct hw_pci cats_pci;
-extern struct hw_pci netwinder_pci;
-extern struct hw_pci personal_server_pci;
-extern struct hw_pci ftv_pci;
-extern struct hw_pci shark_pci;
-extern struct hw_pci integrator_pci;
-
-void __init pcibios_init(void)
-{
-	struct pci_sys_data *root;
-	struct hw_pci *hw = NULL;
-
-	do {
-#ifdef CONFIG_ARCH_EBSA285
-		if (machine_is_ebsa285()) {
-			hw = &ebsa285_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_SHARK
-		if (machine_is_shark()) {
-			hw = &shark_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_CATS
-		if (machine_is_cats()) {
-			hw = &cats_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_NETWINDER
-		if (machine_is_netwinder()) {
-			hw = &netwinder_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_PERSONAL_SERVER
-		if (machine_is_personal_server()) {
-			hw = &personal_server_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_FTVPCI
-		if (machine_is_ftvpci()) {
-			hw = &ftv_pci;
-			break;
-		}
-#endif
-#ifdef CONFIG_ARCH_INTEGRATOR
-		if (machine_is_integrator()) {
-			hw = &integrator_pci;
-			break;
-		}
-#endif
-	} while (0);
-
-	if (hw == NULL)
-		return;
-
-	root = kmalloc(sizeof(*root), GFP_KERNEL);
-	if (!root)
-		panic("PCI: unable to allocate root data!");
-
-	root->hw = hw;
-	root->mem_offset = hw->mem_offset;
-
-	memset(root->resource, 0, sizeof(root->resource));
-
-	/*
-	 * Setup the resources for this bus.
-	 *   resource[0] - IO ports
-	 *   resource[1] - non-prefetchable memory
-	 *   resource[2] - prefetchable memory
-	 */
-	if (root->hw->setup_resources)
-		root->hw->setup_resources(root->resource);
-	else {
-		root->resource[0] = &ioport_resource;
-		root->resource[1] = &iomem_resource;
-		root->resource[2] = NULL;
+	while (dev->bus->self) {
+		pin = (pin + PCI_SLOT(dev->devfn)) & 3;
+		/*
+		 * move up the chain of bridges,
+		 * swizzling as we go.
+		 */
+		dev = dev->bus->self;
 	}
+	*pinp = pin + 1;
 
-	/*
-	 * Set up the host bridge, and scan the bus.
-	 */
-	root->hw->init(root);
+	return PCI_SLOT(dev->devfn);
+}
 
-	/*
-	 * Assign any unassigned resources.
-	 */
-	pci_assign_unassigned_resources();
-	pci_fixup_irqs(root->hw->swizzle, root->hw->map_irq);
+/*
+ * Swizzle the device pin each time we cross a bridge.
+ * This might update pin and returns the slot number.
+ */
+static u8 __devinit pcibios_swizzle(struct pci_dev *dev, u8 *pin)
+{
+	struct pci_sys_data *sys = dev->sysdata;
+	int slot = 0, oldpin = *pin;
+
+	if (sys->swizzle)
+		slot = sys->swizzle(dev, pin);
+
+	if (debug_pci)
+		printk("PCI: %s swizzling pin %d => pin %d slot %d\n",
+			dev->slot_name, oldpin, *pin, slot);
+
+	return slot;
+}
+
+/*
+ * Map a slot/pin to an IRQ.
+ */
+static int pcibios_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
+{
+	struct pci_sys_data *sys = dev->sysdata;
+	int irq = -1;
+
+	if (sys->map_irq)
+		irq = sys->map_irq(dev, slot, pin);
+
+	if (debug_pci)
+		printk("PCI: %s mapping slot %d pin %d => irq %d\n",
+			dev->slot_name, slot, pin, irq);
+
+	return irq;
+}
+
+static void __init pcibios_init_hw(struct hw_pci *hw)
+{
+	struct pci_sys_data *sys = NULL;
+	int ret;
+	int nr, busnr;
+
+	for (nr = busnr = 0; nr < hw->nr_controllers; nr++) {
+		sys = kmalloc(sizeof(struct pci_sys_data), GFP_KERNEL);
+		if (!sys)
+			panic("PCI: unable to allocate sys data!");
+
+		memset(sys, 0, sizeof(struct pci_sys_data));
+
+		sys->hw      = hw;
+		sys->busnr   = busnr;
+		sys->swizzle = hw->swizzle;
+		sys->map_irq = hw->map_irq;
+		sys->resource[0] = &ioport_resource;
+		sys->resource[1] = &iomem_resource;
+
+		ret = hw->setup(nr, sys);
+
+		if (ret > 0) {
+			sys->bus = hw->scan(nr, sys);
+
+			if (!sys->bus)
+				panic("PCI: unable to scan bus!");
+
+			busnr = sys->bus->subordinate + 1;
+
+			list_add(&sys->node, &hw->buses);
+		} else {
+			kfree(sys);
+			if (ret < 0)
+				break;
+		}
+	}
+}
+
+void __init pci_common_init(struct hw_pci *hw)
+{
+	struct pci_sys_data *sys;
+
+	INIT_LIST_HEAD(&hw->buses);
+
+	if (hw->preinit)
+		hw->preinit();
+	pcibios_init_hw(hw);
+	if (hw->postinit)
+		hw->postinit();
+
+	pci_fixup_irqs(pcibios_swizzle, pcibios_map_irq);
+
+	list_for_each_entry(sys, &hw->buses, node) {
+		struct pci_bus *bus = sys->bus;
+
+		/*
+		 * Size the bridge windows.
+		 */
+		pci_bus_size_bridges(bus);
+
+		/*
+		 * Assign resources.
+		 */
+		pci_bus_assign_resources(bus);
+
+		/*
+		 * Tell drivers about devices found.
+		 */
+		pci_bus_add_devices(bus);
+	}
 }
 
 char * __init pcibios_setup(char *str)
@@ -519,21 +580,22 @@ char * __init pcibios_setup(char *str)
  * but we want to try to avoid allocating at 0x2900-0x2bff
  * which might be mirrored at 0x0100-0x03ff..
  */
-void pcibios_align_resource(void *data, struct resource *res, unsigned long size)
+void pcibios_align_resource(void *data, struct resource *res,
+			    unsigned long size, unsigned long align)
 {
-	if (res->flags & IORESOURCE_IO) {
-		unsigned long start = res->start;
+	unsigned long start = res->start;
 
-		if (start & 0x300)
-			res->start = (start + 0x3ff) & ~0x3ff;
-	}
+	if (res->flags & IORESOURCE_IO && start & 0x300)
+		start = (start + 0x3ff) & ~0x3ff;
+
+	res->start = (start + align - 1) & ~(align - 1);
 }
 
 /**
  * pcibios_enable_device - Enable I/O and memory.
  * @dev: PCI device to be enabled
  */
-int pcibios_enable_device(struct pci_dev *dev)
+int pcibios_enable_device(struct pci_dev *dev, int mask)
 {
 	u16 cmd, old_cmd;
 	int idx;
@@ -542,6 +604,10 @@ int pcibios_enable_device(struct pci_dev *dev)
 	pci_read_config_word(dev, PCI_COMMAND, &cmd);
 	old_cmd = cmd;
 	for (idx = 0; idx < 6; idx++) {
+		/* Only set up the requested stuff */
+		if (!(mask & (1 << idx)))
+			continue;
+
 		r = dev->resource + idx;
 		if (!r->start && r->end) {
 			printk(KERN_ERR "PCI: Device %s not available because"
@@ -553,10 +619,43 @@ int pcibios_enable_device(struct pci_dev *dev)
 		if (r->flags & IORESOURCE_MEM)
 			cmd |= PCI_COMMAND_MEMORY;
 	}
+
+	/*
+	 * Bridges (eg, cardbus bridges) need to be fully enabled
+	 */
+	if ((dev->class >> 16) == PCI_BASE_CLASS_BRIDGE)
+		cmd |= PCI_COMMAND_IO | PCI_COMMAND_MEMORY;
+
 	if (cmd != old_cmd) {
 		printk("PCI: enabling device %s (%04x -> %04x)\n",
 		       dev->slot_name, old_cmd, cmd);
 		pci_write_config_word(dev, PCI_COMMAND, cmd);
 	}
+	return 0;
+}
+
+int pci_mmap_page_range(struct pci_dev *dev, struct vm_area_struct *vma,
+			enum pci_mmap_state mmap_state, int write_combine)
+{
+	struct pci_sys_data *root = dev->sysdata;
+	unsigned long phys;
+
+	if (mmap_state == pci_mmap_io) {
+		return -EINVAL;
+	} else {
+		phys = root->mem_offset + (vma->vm_pgoff << PAGE_SHIFT);
+	}
+
+	/*
+	 * Mark this as IO
+	 */
+	vma->vm_flags |= VM_SHM | VM_LOCKED | VM_IO;
+	vma->vm_page_prot = pgprot_noncached(vma->vm_page_prot);
+
+	if (remap_page_range(vma, vma->vm_start, phys,
+			     vma->vm_end - vma->vm_start,
+			     vma->vm_page_prot))
+		return -EAGAIN;
+
 	return 0;
 }

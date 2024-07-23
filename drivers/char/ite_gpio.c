@@ -140,7 +140,7 @@ int ite_gpio_in_status(__u32 device, __u32 mask, volatile __u32 *data)
 {
 	int ret=-1;
 
-	if (MAX_GPIO_LINE > *data >= 0) 
+	if ((MAX_GPIO_LINE > *data) && (*data >= 0)) 
 		ret=ite_gpio_irq_pending[*data];
  
 	DEB(printk("ite_gpio_in_status %d ret=%d\n",*data, ret));
@@ -238,7 +238,7 @@ EXPORT_SYMBOL(ite_gpio_int_wait);
 
 static int ite_gpio_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = MINOR(inode->i_rdev); 
+	unsigned int minor = minor(inode->i_rdev); 
 	if (minor != GPIO_MINOR)
 		return -ENODEV;
 
@@ -373,10 +373,10 @@ DEB(printk("interrupt 0x%x %d\n",ITE_GPAISR, i));
 
 static struct file_operations ite_gpio_fops =
 {
-	owner:		THIS_MODULE,
-	ioctl:		ite_gpio_ioctl,
-	open:		ite_gpio_open,
-	release:	ite_gpio_release,
+	.owner		= THIS_MODULE,
+	.ioctl		= ite_gpio_ioctl,
+	.open		= ite_gpio_open,
+	.release	= ite_gpio_release,
 };
 
 /* GPIO_MINOR in include/linux/miscdevice.h */
@@ -391,13 +391,14 @@ int __init ite_gpio_init(void)
 {
 	int i;
 
-	misc_register(&ite_gpio_miscdev);
+	if (misc_register(&ite_gpio_miscdev))
+		return -ENODEV;
 
-	if (check_region(ite_gpio_base, 0x1c) < 0 ) {
-           return -ENODEV;
-        } else {
-           request_region(ite_gpio_base, 0x1c, "ITE GPIO");
-        }     
+	if (!request_region(ite_gpio_base, 0x1c, "ITE GPIO"))
+	{
+		misc_deregister(&ite_gpio_miscdev);
+		return -EIO;
+	}
 
 	/* initialize registers */
         ITE_GPACR = 0xffff;
@@ -407,13 +408,18 @@ int __init ite_gpio_init(void)
         ITE_GPBICR = 0x00ff;
         ITE_GPCICR = 0x00ff;
         ITE_GCR = 0;
-
+	
 	for (i = 0; i < MAX_GPIO_LINE; i++) {
 		ite_gpio_irq_pending[i]=0;	
 		init_waitqueue_head(&ite_gpio_wait[i]);
 	}
-	if (request_irq(ite_gpio_irq, ite_gpio_irq_handler, SA_SHIRQ, "gpio", 0) < 0)
+
+	if (request_irq(ite_gpio_irq, ite_gpio_irq_handler, SA_SHIRQ, "gpio", 0) < 0) {
+		misc_deregister(&ite_gpio_miscdev);
+		release_region(ite_gpio_base, 0x1c);
 		return 0;
+	}
+
 	printk("GPIO at 0x%x (irq = %d)\n", ite_gpio_base, ite_gpio_irq);
 
 	return 0;

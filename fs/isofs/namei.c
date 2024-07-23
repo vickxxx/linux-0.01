@@ -6,15 +6,17 @@
  *  (C) 1991  Linus Torvalds - minix filesystem
  */
 
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/iso_fs.h>
 #include <linux/kernel.h>
 #include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
-#include <linux/slab.h>
+#include <linux/mm.h>
 #include <linux/errno.h>
 #include <linux/config.h>	/* Joliet? */
+#include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
 
 #include <asm/uaccess.h>
 
@@ -64,8 +66,9 @@ isofs_find_entry(struct inode *dir, struct dentry *dentry,
 	unsigned char bufbits = ISOFS_BUFFER_BITS(dir);
 	unsigned int block, f_pos, offset;
 	struct buffer_head * bh = NULL;
+	struct isofs_sb_info *sbi = ISOFS_SB(dir->i_sb);
 
-	if (!dir->u.isofs_i.i_first_extent)
+	if (!ISOFS_I(dir)->i_first_extent)
 		return 0;
   
 	f_pos = 0;
@@ -78,7 +81,7 @@ isofs_find_entry(struct inode *dir, struct dentry *dentry,
 		char *dpnt;
 
 		if (!bh) {
-			bh = isofs_bread(dir, bufsize, block);
+			bh = isofs_bread(dir, block);
 			if (!bh)
 				return 0;
 		}
@@ -108,7 +111,7 @@ isofs_find_entry(struct inode *dir, struct dentry *dentry,
 			brelse(bh);
 			bh = NULL;
 			if (offset) {
-				bh = isofs_bread(dir, bufsize, block);
+				bh = isofs_bread(dir, block);
 				if (!bh)
 					return 0;
 				memcpy((void *) tmpde + slop, bh->b_data, offset);
@@ -119,19 +122,19 @@ isofs_find_entry(struct inode *dir, struct dentry *dentry,
 		dlen = de->name_len[0];
 		dpnt = de->name;
 
-		if (dir->i_sb->u.isofs_sb.s_rock &&
+		if (sbi->s_rock &&
 		    ((i = get_rock_ridge_filename(de, tmpname, dir)))) {
 			dlen = i; 	/* possibly -1 */
 			dpnt = tmpname;
 #ifdef CONFIG_JOLIET
-		} else if (dir->i_sb->u.isofs_sb.s_joliet_level) {
+		} else if (sbi->s_joliet_level) {
 			dlen = get_joliet_filename(de, tmpname, dir);
 			dpnt = tmpname;
 #endif
-		} else if (dir->i_sb->u.isofs_sb.s_mapping == 'a') {
+		} else if (sbi->s_mapping == 'a') {
 			dlen = get_acorn_filename(de, tmpname, dir);
 			dpnt = tmpname;
-		} else if (dir->i_sb->u.isofs_sb.s_mapping == 'n') {
+		} else if (sbi->s_mapping == 'n') {
 			dlen = isofs_name_translate(de, tmpname, dir);
 			dpnt = tmpname;
 		}
@@ -141,8 +144,8 @@ isofs_find_entry(struct inode *dir, struct dentry *dentry,
 		 */
 		match = 0;
 		if (dlen > 0 &&
-		    (!(de->flags[-dir->i_sb->u.isofs_sb.s_high_sierra] & 5)
-		     || dir->i_sb->u.isofs_sb.s_unhide == 'y'))
+		    (!(de->flags[-sbi->s_high_sierra] & 5)
+		     || sbi->s_unhide == 'y'))
 		{
 			match = (isofs_cmp(dentry,dpnt,dlen) == 0);
 		}
@@ -155,7 +158,7 @@ isofs_find_entry(struct inode *dir, struct dentry *dentry,
 	return 0;
 }
 
-struct dentry *isofs_lookup(struct inode * dir, struct dentry * dentry)
+struct dentry *isofs_lookup(struct inode * dir, struct dentry * dentry, struct nameidata *nd)
 {
 	unsigned long ino;
 	struct inode *inode;
@@ -167,6 +170,7 @@ struct dentry *isofs_lookup(struct inode * dir, struct dentry * dentry)
 	if (!page)
 		return ERR_PTR(-ENOMEM);
 
+	lock_kernel();
 	ino = isofs_find_entry(dir, dentry, page_address(page),
 			       1024 + page_address(page));
 	__free_page(page);
@@ -174,9 +178,12 @@ struct dentry *isofs_lookup(struct inode * dir, struct dentry * dentry)
 	inode = NULL;
 	if (ino) {
 		inode = iget(dir->i_sb, ino);
-		if (!inode)
+		if (!inode) {
+			unlock_kernel();
 			return ERR_PTR(-EACCES);
+		}
 	}
+	unlock_kernel();
 	d_add(dentry, inode);
 	return NULL;
 }

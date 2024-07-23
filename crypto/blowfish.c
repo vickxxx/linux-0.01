@@ -3,9 +3,9 @@
  *
  * Blowfish Cipher Algorithm, by Bruce Schneier.
  * http://www.counterpane.com/blowfish.html
- *
- * Adapted from Kerneli implementation.
- *
+ * 
+ * Adapated from Kerneli implementation.
+ * 
  * Copyright (c) Herbert Valerio Riedel <hvr@hvrlab.org>
  * Copyright (c) Kyle McMartin <kyle@debian.org>
  * Copyright (c) 2002 James Morris <jmorris@intercode.com.au>
@@ -456,6 +456,7 @@ static struct crypto_alg alg = {
 	.cra_u			=	{ .cipher = {
 	.cia_min_keysize	=	BF_MIN_KEY_SIZE,
 	.cia_max_keysize	=	BF_MAX_KEY_SIZE,
+	.cia_ivsize		=	BF_BLOCK_SIZE,
 	.cia_setkey   		= 	bf_setkey,
 	.cia_encrypt 		=	bf_encrypt,
 	.cia_decrypt  		=	bf_decrypt } }

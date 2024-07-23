@@ -2,9 +2,11 @@
  *
  * Hardware accelerated Matrox Millennium I, II, Mystique, G100, G200 and G400
  *
- * (c) 1998,1999,2000 Petr Vandrovec <vandrove@vc.cvut.cz>
+ * (c) 1998-2002 Petr Vandrovec <vandrove@vc.cvut.cz>
  *
- * Version: 1.50 2000/08/10
+ * Portions Copyright (c) 2001 Matrox Graphics Inc.
+ *
+ * Version: 1.65 2002/08/14
  *
  * MTRR stuff: 1998 Tom Rini <trini@kernel.crashing.org>
  *
@@ -82,6 +84,7 @@
 #include "matroxfb_Ti3026.h"
 #include "matroxfb_misc.h"
 #include "matroxfb_accel.h"
+#include <linux/matroxfb.h>
 
 #ifdef CONFIG_FB_MATROX_MILLENIUM
 #define outTi3026 matroxfb_DAC_out
@@ -278,138 +281,11 @@ static const unsigned char MGADACbpp32[] =
   TVP3026_XCOLKEYCTRL_ZOOM1,
   0x00, 0x00, TVP3026_XCURCTRL_DIS };
 
-static void matroxfb_ti3026_flashcursor(unsigned long ptr) {
-	unsigned long flags;
-
-#define minfo ((struct matrox_fb_info*)ptr)
-	matroxfb_DAC_lock_irqsave(flags);
-	outTi3026(PMINFO TVP3026_XCURCTRL, inTi3026(PMINFO TVP3026_XCURCTRL) ^ TVP3026_XCURCTRL_DIS ^ TVP3026_XCURCTRL_XGA);
-	ACCESS_FBINFO(cursor.timer.expires) = jiffies + HZ/2;
-	add_timer(&ACCESS_FBINFO(cursor.timer));
-	matroxfb_DAC_unlock_irqrestore(flags);
-#undef minfo
-}
-
-static void matroxfb_ti3026_createcursor(WPMINFO struct display* p) {
-	unsigned long flags;
-	u_int32_t xline;
-	unsigned int i;
-	unsigned int to;
-
-	if (ACCESS_FBINFO(currcon_display) != p)
-		return;
-
-	DBG("matroxfb_ti3026_createcursor");
-
-	matroxfb_createcursorshape(PMINFO p, p->var.vmode);
-
-	xline = (~0) << (32 - ACCESS_FBINFO(cursor.w));
-	matroxfb_DAC_lock_irqsave(flags);
-	mga_outb(M_RAMDAC_BASE+TVP3026_INDEX, 0);
-	to = ACCESS_FBINFO(cursor.u);
-	for (i = 0; i < to; i++) {
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-	}
-	to = ACCESS_FBINFO(cursor.d);
-	for (; i < to; i++) {
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, xline >> 24);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, xline >> 16);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, xline >> 8);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, xline);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-	}
-	for (; i < 64; i++) {
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0);
-	}
-	for (i = 0; i < 512; i++)
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURRAMDATA, 0xFF);
-	matroxfb_DAC_unlock_irqrestore(flags);
-}
-
-static void matroxfb_ti3026_cursor(struct display* p, int mode, int x, int y) {
-	unsigned long flags;
-	MINFO_FROM_DISP(p);
-
-	DBG("matroxfb_ti3026_cursor")
-
-	if (ACCESS_FBINFO(currcon_display) != p)
-		return;
-
-	if (mode == CM_ERASE) {
-		if (ACCESS_FBINFO(cursor.state) != CM_ERASE) {
-			del_timer_sync(&ACCESS_FBINFO(cursor.timer));
-			matroxfb_DAC_lock_irqsave(flags);
-			ACCESS_FBINFO(cursor.state) = CM_ERASE;
-			outTi3026(PMINFO TVP3026_XCURCTRL, ACCESS_FBINFO(currenthw->DACreg[POS3026_XCURCTRL]));
-			matroxfb_DAC_unlock_irqrestore(flags);
-		}
-		return;
-	}
-	if ((p->conp->vc_cursor_type & CUR_HWMASK) != ACCESS_FBINFO(cursor.type))
-		matroxfb_ti3026_createcursor(PMINFO p);
-	x *= fontwidth(p);
-	y *= fontheight(p);
-	y -= p->var.yoffset;
-	if (p->var.vmode & FB_VMODE_DOUBLE)
-		y *= 2;
-	del_timer_sync(&ACCESS_FBINFO(cursor.timer));
-	matroxfb_DAC_lock_irqsave(flags);
-	if ((x != ACCESS_FBINFO(cursor.x)) || (y != ACCESS_FBINFO(cursor.y)) || ACCESS_FBINFO(cursor.redraw)) {
-		ACCESS_FBINFO(cursor.redraw) = 0;
-		ACCESS_FBINFO(cursor.x) = x;
-		ACCESS_FBINFO(cursor.y) = y;
-		x += 64;
-		y += 64;
-		outTi3026(PMINFO TVP3026_XCURCTRL, ACCESS_FBINFO(currenthw->DACreg[POS3026_XCURCTRL]));
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURPOSXL, x);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURPOSXH, x >> 8);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURPOSYL, y);
-		mga_outb(M_RAMDAC_BASE+TVP3026_CURPOSYH, y >> 8);
-	}
-	ACCESS_FBINFO(cursor.state) = CM_DRAW;
-	if (ACCESS_FBINFO(devflags.blink))
-		mod_timer(&ACCESS_FBINFO(cursor.timer), jiffies + HZ/2);
-	outTi3026(PMINFO TVP3026_XCURCTRL, ACCESS_FBINFO(currenthw->DACreg[POS3026_XCURCTRL]) | TVP3026_XCURCTRL_XGA);
-	matroxfb_DAC_unlock_irqrestore(flags);
-}
-
-static int matroxfb_ti3026_setfont(struct display* p, int width, int height) {
-
-	DBG("matrox_ti3026_setfont");
-
-	if (p && p->conp)
-		matroxfb_ti3026_createcursor(PMXINFO(p) p);
-	return 0;
-}
-
-static int matroxfb_ti3026_selhwcursor(WPMINFO struct display* p) {
-	ACCESS_FBINFO(dispsw.cursor) = matroxfb_ti3026_cursor;
-	ACCESS_FBINFO(dispsw.set_font) = matroxfb_ti3026_setfont;
-	return 0;
-}
-
 static int Ti3026_calcclock(CPMINFO unsigned int freq, unsigned int fmax, int* in, int* feed, int* post) {
 	unsigned int fvco;
 	unsigned int lin, lfeed, lpost;
 
-	DBG("Ti3026_calcclock")
+	DBG(__FUNCTION__)
 
 	fvco = PLL_calcclock(PMINFO freq, fmax, &lin, &lfeed, &lpost);
 	fvco >>= (*post = lpost);
@@ -418,11 +294,12 @@ static int Ti3026_calcclock(CPMINFO unsigned int freq, unsigned int fmax, int* i
 	return fvco;
 }
 
-static int Ti3026_setpclk(CPMINFO struct matrox_hw_state* hw, int clk, struct display* p) {
+static int Ti3026_setpclk(WPMINFO int clk) {
 	unsigned int f_pll;
 	unsigned int pixfeed, pixin, pixpost;
+	struct matrox_hw_state* hw = &ACCESS_FBINFO(hw);
 
-	DBG("Ti3026_setpclk")
+	DBG(__FUNCTION__)
 
 	f_pll = Ti3026_calcclock(PMINFO clk, ACCESS_FBINFO(max_pixel_clock), &pixin, &pixfeed, &pixpost);
 
@@ -430,18 +307,13 @@ static int Ti3026_setpclk(CPMINFO struct matrox_hw_state* hw, int clk, struct di
 	hw->DACclk[1] = pixfeed;
 	hw->DACclk[2] = pixpost | 0xB0;
 
-	if (p->type == FB_TYPE_TEXT) {
-		hw->DACreg[POS3026_XMEMPLLCTRL] = TVP3026_XMEMPLLCTRL_MCLK_MCLKPLL | TVP3026_XMEMPLLCTRL_RCLK_PIXPLL;
-		hw->DACclk[3] = 0xFD;
-		hw->DACclk[4] = 0x3D;
-		hw->DACclk[5] = 0x70;
-	} else {
+	{
 		unsigned int loopfeed, loopin, looppost, loopdiv, z;
 		unsigned int Bpp;
 
 		Bpp = ACCESS_FBINFO(curr.final_bppShift);
 
-		if (p->var.bits_per_pixel == 24) {
+		if (ACCESS_FBINFO(fbcon).var.bits_per_pixel == 24) {
 			loopfeed = 3;		/* set lm to any possible value */
 			loopin = 3 * 32 / Bpp;
 		} else {
@@ -460,7 +332,7 @@ static int Ti3026_setpclk(CPMINFO struct matrox_hw_state* hw, int clk, struct di
 			looppost = 3;
 			loopdiv = z/16;
 		}
-		if (p->var.bits_per_pixel == 24) {
+		if (ACCESS_FBINFO(fbcon).var.bits_per_pixel == 24) {
 			hw->DACclk[3] = ((65 - loopin) & 0x3F) | 0xC0;
 			hw->DACclk[4] = (65 - loopfeed) | 0x80;
 			if (ACCESS_FBINFO(accel.ramdac_rev) > 0x20) {
@@ -491,21 +363,14 @@ static int Ti3026_setpclk(CPMINFO struct matrox_hw_state* hw, int clk, struct di
 	return 0;
 }
 
-static int Ti3026_init(CPMINFO struct matrox_hw_state* hw, struct my_timming* m, struct display* p) {
+static int Ti3026_init(WPMINFO struct my_timming* m) {
 	u_int8_t muxctrl = isInterleave(MINFO) ? TVP3026_XMUXCTRL_MEMORY_64BIT : TVP3026_XMUXCTRL_MEMORY_32BIT;
+	struct matrox_hw_state* hw = &ACCESS_FBINFO(hw);
 
-	DBG("Ti3026_init")
+	DBG(__FUNCTION__)
 
 	memcpy(hw->DACreg, MGADACbpp32, sizeof(hw->DACreg));
-	if (p->type == FB_TYPE_TEXT) {
-		hw->DACreg[POS3026_XLATCHCTRL] = TVP3026_XLATCHCTRL_8_1;
-		hw->DACreg[POS3026_XTRUECOLORCTRL] = TVP3026_XTRUECOLORCTRL_PSEUDOCOLOR;
-		hw->DACreg[POS3026_XMUXCTRL] = TVP3026_XMUXCTRL_VGA;
-		hw->DACreg[POS3026_XCLKCTRL] = TVP3026_XCLKCTRL_SRC_PLL |
-					       TVP3026_XCLKCTRL_DIV4;
-		hw->DACreg[POS3026_XMISCCTRL] = TVP3026_XMISCCTRL_DAC_PUP | TVP3026_XMISCCTRL_DAC_6BIT | TVP3026_XMISCCTRL_PSEL_DIS | TVP3026_XMISCCTRL_PSEL_LOW;
-	} else {
-		switch (p->var.bits_per_pixel) {
+	switch (ACCESS_FBINFO(fbcon).var.bits_per_pixel) {
 		case 4:	hw->DACreg[POS3026_XLATCHCTRL] = TVP3026_XLATCHCTRL_16_1;	/* or _8_1, they are same */
 			hw->DACreg[POS3026_XTRUECOLORCTRL] = TVP3026_XTRUECOLORCTRL_PSEUDOCOLOR;
 			hw->DACreg[POS3026_XMUXCTRL] = muxctrl | TVP3026_XMUXCTRL_PIXEL_4BIT;
@@ -520,7 +385,7 @@ static int Ti3026_init(CPMINFO struct matrox_hw_state* hw, struct my_timming* m,
 			break;
 		case 16:
 			/* XLATCHCTRL should be _4_1 / _2_1... Why is not? (_2_1 is used everytime) */
-			hw->DACreg[POS3026_XTRUECOLORCTRL] = (p->var.green.length == 5)? (TVP3026_XTRUECOLORCTRL_DIRECTCOLOR | TVP3026_XTRUECOLORCTRL_ORGB_1555 ) : (TVP3026_XTRUECOLORCTRL_DIRECTCOLOR | TVP3026_XTRUECOLORCTRL_RGB_565);
+			hw->DACreg[POS3026_XTRUECOLORCTRL] = (ACCESS_FBINFO(fbcon).var.green.length == 5)? (TVP3026_XTRUECOLORCTRL_DIRECTCOLOR | TVP3026_XTRUECOLORCTRL_ORGB_1555 ) : (TVP3026_XTRUECOLORCTRL_DIRECTCOLOR | TVP3026_XTRUECOLORCTRL_RGB_565);
 			hw->DACreg[POS3026_XMUXCTRL] = muxctrl | TVP3026_XMUXCTRL_PIXEL_16BIT;
 			hw->DACreg[POS3026_XCLKCTRL] = TVP3026_XCLKCTRL_SRC_PLL | TVP3026_XCLKCTRL_DIV2;
 			break;
@@ -536,9 +401,8 @@ static int Ti3026_init(CPMINFO struct matrox_hw_state* hw, struct my_timming* m,
 			break;
 		default:
 			return 1;	/* TODO: failed */
-		}
 	}
-	if (matroxfb_vgaHWinit(PMINFO hw, m, p)) return 1;
+	if (matroxfb_vgaHWinit(PMINFO m)) return 1;
 
 	/* set SYNC */
 	hw->MiscOutReg = 0xCB;
@@ -564,21 +428,21 @@ static int Ti3026_init(CPMINFO struct matrox_hw_state* hw, struct my_timming* m,
 
 	/* set interleaving */
 	hw->MXoptionReg &= ~0x00001000;
-	if ((p->type != FB_TYPE_TEXT) && isInterleave(MINFO)) hw->MXoptionReg |= 0x00001000;
+	if (isInterleave(MINFO)) hw->MXoptionReg |= 0x00001000;
 
 	/* set DAC */
-	Ti3026_setpclk(PMINFO hw, m->pixclock, p);
+	Ti3026_setpclk(PMINFO m->pixclock);
 	return 0;
 }
 
-static void ti3026_setMCLK(CPMINFO struct matrox_hw_state* hw, int fout){
+static void ti3026_setMCLK(WPMINFO int fout){
 	unsigned int f_pll;
 	unsigned int pclk_m, pclk_n, pclk_p;
 	unsigned int mclk_m, mclk_n, mclk_p;
 	unsigned int rfhcnt, mclk_ctl;
 	int tmout;
 
-	DBG("ti3026_setMCLK")
+	DBG(__FUNCTION__)
 
 	f_pll = Ti3026_calcclock(PMINFO fout, ACCESS_FBINFO(max_pixel_clock), &mclk_n, &mclk_m, &mclk_p);
 
@@ -643,8 +507,8 @@ static void ti3026_setMCLK(CPMINFO struct matrox_hw_state* hw, int fout){
 		if (rfhcnt > 15)
 			rfhcnt = 0;
 	}
-	hw->MXoptionReg = (hw->MXoptionReg & ~0x000F0000) | (rfhcnt << 16);
-	pci_write_config_dword(ACCESS_FBINFO(pcidev), PCI_OPTION_REG, hw->MXoptionReg);
+	ACCESS_FBINFO(hw).MXoptionReg = (ACCESS_FBINFO(hw).MXoptionReg & ~0x000F0000) | (rfhcnt << 16);
+	pci_write_config_dword(ACCESS_FBINFO(pcidev), PCI_OPTION_REG, ACCESS_FBINFO(hw).MXoptionReg);
 
 	/* output MCLK to MCLK pin */
 	outTi3026(PMINFO TVP3026_XMEMPLLCTRL, (mclk_ctl & 0xE7) | TVP3026_XMEMPLLCTRL_MCLK_MCLKPLL);
@@ -670,9 +534,9 @@ static void ti3026_setMCLK(CPMINFO struct matrox_hw_state* hw, int fout){
 		printk(KERN_ERR "matroxfb: Pixel PLL not locked after 5 secs\n");
 }
 
-static void ti3026_ramdac_init(WPMINFO struct matrox_hw_state* hw){
+static void ti3026_ramdac_init(WPMINFO2) {
 
-	DBG("ti3026_ramdac_init")
+	DBG(__FUNCTION__)
 
 	ACCESS_FBINFO(features.pll.vco_freq_min) = 110000;
 	ACCESS_FBINFO(features.pll.ref_freq)	 = 114545;
@@ -683,14 +547,16 @@ static void ti3026_ramdac_init(WPMINFO struct matrox_hw_state* hw){
 	ACCESS_FBINFO(features.pll.post_shift_max) = 3;
 	if (ACCESS_FBINFO(devflags.noinit))
 		return;
-	ti3026_setMCLK(PMINFO hw, 60000);
+	ti3026_setMCLK(PMINFO 60000);
 }
 
-static void Ti3026_restore(WPMINFO struct matrox_hw_state* hw, struct matrox_hw_state* oldhw, struct display* p) {
+static void Ti3026_restore(WPMINFO2) {
 	int i;
+	unsigned char progdac[6];
+	struct matrox_hw_state* hw = &ACCESS_FBINFO(hw);
 	CRITFLAGS
 
-	DBG("Ti3026_restore")
+	DBG(__FUNCTION__)
 
 #ifdef DEBUG
 	dprintk(KERN_INFO "EXTVGA regs: ");
@@ -705,7 +571,7 @@ static void Ti3026_restore(WPMINFO struct matrox_hw_state* hw, struct matrox_hw_
 
 	CRITEND
 
-	matroxfb_vgaHWrestore(PMINFO hw, oldhw);
+	matroxfb_vgaHWrestore(PMINFO2);
 
 	CRITBEGIN
 
@@ -715,19 +581,19 @@ static void Ti3026_restore(WPMINFO struct matrox_hw_state* hw, struct matrox_hw_
 	for (i = 0; i < 21; i++) {
 		outTi3026(PMINFO DACseq[i], hw->DACreg[i]);
 	}
-	if (oldhw) {
-		outTi3026(PMINFO TVP3026_XPLLADDR, 0x00);
-		oldhw->DACclk[0] = inTi3026(PMINFO TVP3026_XPIXPLLDATA);
-		oldhw->DACclk[3] = inTi3026(PMINFO TVP3026_XLOOPPLLDATA);
-		outTi3026(PMINFO TVP3026_XPLLADDR, 0x15);
-		oldhw->DACclk[1] = inTi3026(PMINFO TVP3026_XPIXPLLDATA);
-		oldhw->DACclk[4] = inTi3026(PMINFO TVP3026_XLOOPPLLDATA);
-		outTi3026(PMINFO TVP3026_XPLLADDR, 0x2A);
-		oldhw->DACclk[2] = inTi3026(PMINFO TVP3026_XPIXPLLDATA);
-		oldhw->DACclk[5] = inTi3026(PMINFO TVP3026_XLOOPPLLDATA);
-	}
+
+	outTi3026(PMINFO TVP3026_XPLLADDR, 0x00);
+	progdac[0] = inTi3026(PMINFO TVP3026_XPIXPLLDATA);
+	progdac[3] = inTi3026(PMINFO TVP3026_XLOOPPLLDATA);
+	outTi3026(PMINFO TVP3026_XPLLADDR, 0x15);
+	progdac[1] = inTi3026(PMINFO TVP3026_XPIXPLLDATA);
+	progdac[4] = inTi3026(PMINFO TVP3026_XLOOPPLLDATA);
+	outTi3026(PMINFO TVP3026_XPLLADDR, 0x2A);
+	progdac[2] = inTi3026(PMINFO TVP3026_XPIXPLLDATA);
+	progdac[5] = inTi3026(PMINFO TVP3026_XLOOPPLLDATA);
+
 	CRITEND
-	if (!oldhw || memcmp(hw->DACclk, oldhw->DACclk, 6)) {
+	if (memcmp(hw->DACclk, progdac, 6)) {
 		/* agrhh... setting up PLL is very slow on Millennium... */
 		/* Mystique PLL is locked in few ms, but Millennium PLL lock takes about 0.15 s... */
 		/* Maybe even we should call schedule() ? */
@@ -781,7 +647,6 @@ static void Ti3026_restore(WPMINFO struct matrox_hw_state* hw, struct matrox_hw_
 				dprintk(KERN_INFO "LoopPLL: %d\n", 500000-tmout);
 		}
 	}
-	matrox_init_putc(PMINFO p, matroxfb_ti3026_createcursor);
 
 #ifdef DEBUG
 	dprintk(KERN_DEBUG "3026DACregs ");
@@ -796,31 +661,38 @@ static void Ti3026_restore(WPMINFO struct matrox_hw_state* hw, struct matrox_hw_
 #endif
 }
 
-static void Ti3026_reset(WPMINFO struct matrox_hw_state* hw){
+static void Ti3026_reset(WPMINFO2) {
 
-	DBG("Ti3026_reset")
+	DBG(__FUNCTION__)
 
-	matroxfb_fastfont_init(MINFO);
-
-	ti3026_ramdac_init(PMINFO hw);
+	ti3026_ramdac_init(PMINFO2);
 }
 
-static int Ti3026_preinit(WPMINFO struct matrox_hw_state* hw){
+static struct matrox_altout ti3026_output = {
+	.name	 = "Primary output",
+};
+
+static int Ti3026_preinit(WPMINFO2) {
 	static const int vxres_mill2[] = { 512,        640, 768,  800,  832,  960,
 					  1024, 1152, 1280,      1600, 1664, 1920,
 					  2048, 0};
 	static const int vxres_mill1[] = {             640, 768,  800,        960,
 					  1024, 1152, 1280,      1600,       1920,
 					  2048, 0};
+	struct matrox_hw_state* hw = &ACCESS_FBINFO(hw);
 
-	DBG("Ti3026_preinit")
+	DBG(__FUNCTION__)
 
 	ACCESS_FBINFO(millenium) = 1;
 	ACCESS_FBINFO(milleniumII) = (ACCESS_FBINFO(pcidev)->device != PCI_DEVICE_ID_MATROX_MIL);
 	ACCESS_FBINFO(capable.cfb4) = 1;
 	ACCESS_FBINFO(capable.text) = 1; /* isMilleniumII(MINFO); */
 	ACCESS_FBINFO(capable.vxres) = isMilleniumII(MINFO)?vxres_mill2:vxres_mill1;
-	ACCESS_FBINFO(cursor.timer.function) = matroxfb_ti3026_flashcursor;
+
+	ACCESS_FBINFO(outputs[0]).data = MINFO;
+	ACCESS_FBINFO(outputs[0]).output = &ti3026_output;
+	ACCESS_FBINFO(outputs[0]).src = MATROXFB_SRC_CRTC1;
+	ACCESS_FBINFO(outputs[0]).mode = MATROXFB_OUTPUT_MODE_MONITOR;
 
 	if (ACCESS_FBINFO(devflags.noinit))
 		return 0;
@@ -859,7 +731,7 @@ static int Ti3026_preinit(WPMINFO struct matrox_hw_state* hw){
 }
 
 struct matrox_switch matrox_millennium = {
-	Ti3026_preinit, Ti3026_reset, Ti3026_init, Ti3026_restore, matroxfb_ti3026_selhwcursor
+	Ti3026_preinit, Ti3026_reset, Ti3026_init, Ti3026_restore
 };
 EXPORT_SYMBOL(matrox_millennium);
 #endif

@@ -14,7 +14,6 @@
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/netfilter_ipv4.h>
-#include <linux/netfilter_ipv6.h>
 #include <linux/netfilter.h>
 #include <linux/smp.h>
 #include <net/pkt_sched.h>
@@ -46,7 +45,7 @@
 
 /* Thanks to Doron Oz for this hack
 */
-static int nf_registered = 0; 
+static int nf_registered; 
 
 struct ingress_qdisc_data {
 	struct Qdisc		*q;
@@ -233,22 +232,12 @@ used on the egress (might slow things for an iota)
 }
 
 /* after ipt_filter */
-static struct nf_hook_ops ing_ops =
-{
-	{ NULL, NULL},
-	ing_hook,
-	PF_INET,
-	NF_IP_PRE_ROUTING,
-	NF_IP_PRI_FILTER + 1
-};
-
-static struct nf_hook_ops ing6_ops =
-{
-	{ NULL, NULL},
-	ing_hook,
-	PF_INET6,
-	NF_IP6_PRE_ROUTING,
-	NF_IP6_PRI_FILTER + 1
+static struct nf_hook_ops ing_ops = {
+	.hook           = ing_hook,
+	.owner		= THIS_MODULE,
+	.pf             = PF_INET,
+	.hooknum        = NF_IP_PRE_ROUTING,
+	.priority       = NF_IP_PRI_FILTER + 1,
 };
 
 int ingress_init(struct Qdisc *sch,struct rtattr *opt)
@@ -261,16 +250,12 @@ int ingress_init(struct Qdisc *sch,struct rtattr *opt)
 			goto error;
 		}
 		nf_registered++;
-		if (nf_register_hook(&ing6_ops) < 0) {
-			printk("IPv6 ingress qdisc registration error, " \
-			    "disabling IPv6 support.\n");
-		} else
-			nf_registered++;
 	}
 
 	DPRINTK("ingress_init(sch %p,[qdisc %p],opt %p)\n",sch,p,opt);
+	memset(p, 0, sizeof(*p));
+	p->filter_list = NULL;
 	p->q = &noop_qdisc;
-	MOD_INC_USE_COUNT;
 	return 0;
 error:
 	return -EINVAL;
@@ -307,15 +292,15 @@ static void ingress_destroy(struct Qdisc *sch)
 	while (p->filter_list) {
 		tp = p->filter_list;
 		p->filter_list = tp->next;
-		tcf_destroy(tp);
+		tp->ops->destroy(tp);
 	}
+	memset(p, 0, sizeof(*p));
+	p->filter_list = NULL;
+
 #if 0
 /* for future use */
 	qdisc_destroy(p->q);
 #endif
- 
-	MOD_DEC_USE_COUNT;
-
 }
 
 
@@ -334,41 +319,35 @@ rtattr_failure:
 	return -1;
 }
 
-static struct Qdisc_class_ops ingress_class_ops =
-{
-	ingress_graft,			/* graft */
-	ingress_leaf,			/* leaf */
-	ingress_get,			/* get */
-	ingress_put,			/* put */
-	ingress_change,			/* change */
-	NULL,				/* delete */
-	ingress_walk,				/* walk */
-
-	ingress_find_tcf,		/* tcf_chain */
-	ingress_bind_filter,		/* bind_tcf */
-	ingress_put,			/* unbind_tcf */
-
-	NULL,		/* dump */
+static struct Qdisc_class_ops ingress_class_ops = {
+	.graft		=	ingress_graft,
+	.leaf		=	ingress_leaf,
+	.get		=	ingress_get,
+	.put		=	ingress_put,
+	.change		=	ingress_change,
+	.delete		=	NULL,
+	.walk		=	ingress_walk,
+	.tcf_chain	=	ingress_find_tcf,
+	.bind_tcf	=	ingress_bind_filter,
+	.unbind_tcf	=	ingress_put,
+	.dump		=	NULL,
 };
 
-struct Qdisc_ops ingress_qdisc_ops =
-{
-	NULL,				/* next */
-	&ingress_class_ops,		/* cl_ops */
-	"ingress",
-	sizeof(struct ingress_qdisc_data),
-
-	ingress_enqueue,		/* enqueue */
-	ingress_dequeue,		/* dequeue */
-	ingress_requeue,		/* requeue */
-	ingress_drop,			/* drop */
-
-	ingress_init,			/* init */
-	ingress_reset,			/* reset */
-	ingress_destroy,		/* destroy */
-	NULL,				/* change */
-
-	ingress_dump,			/* dump */
+struct Qdisc_ops ingress_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	&ingress_class_ops,
+	.id		=	"ingress",
+	.priv_size	=	sizeof(struct ingress_qdisc_data),
+	.enqueue	=	ingress_enqueue,
+	.dequeue	=	ingress_dequeue,
+	.requeue	=	ingress_requeue,
+	.drop		=	ingress_drop,
+	.init		=	ingress_init,
+	.reset		=	ingress_reset,
+	.destroy	=	ingress_destroy,
+	.change		=	NULL,
+	.dump		=	ingress_dump,
+	.owner		=	THIS_MODULE,
 };
 
 
@@ -389,11 +368,8 @@ int init_module(void)
 void cleanup_module(void) 
 {
 	unregister_qdisc(&ingress_qdisc_ops);
-	if (nf_registered) {
+	if (nf_registered)
 		nf_unregister_hook(&ing_ops);
-		if (nf_registered > 1)
-			nf_unregister_hook(&ing6_ops);
-	}
 }
 #endif
 MODULE_LICENSE("GPL");

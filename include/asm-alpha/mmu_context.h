@@ -21,8 +21,9 @@
 #include <asm/io.h>
 #endif
 
+
 extern inline unsigned long
-__reload_thread(struct thread_struct *pcb)
+__reload_thread(struct pcb_struct *pcb)
 {
 	register unsigned long a0 __asm__("$16");
 	register unsigned long v0 __asm__("$0");
@@ -32,7 +33,7 @@ __reload_thread(struct thread_struct *pcb)
 		"call_pal %2 #__reload_thread"
 		: "=r"(v0), "=r"(a0)
 		: "i"(PAL_swpctx), "r"(a0)
-		: "$1", "$16", "$22", "$23", "$24", "$25");
+		: "$1", "$22", "$23", "$24", "$25");
 
 	return v0;
 }
@@ -129,11 +130,12 @@ __get_new_mm_context(struct mm_struct *mm, long cpu)
 
 __EXTERN_INLINE void
 ev5_switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
-	      struct task_struct *next, long cpu)
+	      struct task_struct *next)
 {
 	/* Check if our ASN is of an older version, and thus invalid. */
 	unsigned long asn;
 	unsigned long mmc;
+	long cpu = smp_processor_id();
 
 #ifdef CONFIG_SMP
 	cpu_data[cpu].asn_lock = 1;
@@ -153,12 +155,12 @@ ev5_switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
 	/* Always update the PCB ASN.  Another thread may have allocated
 	   a new mm->context (via flush_tlb_mm) without the ASN serial
 	   number wrapping.  We have no way to detect when this is needed.  */
-	next->thread.asn = mmc & HARDWARE_ASN_MASK;
+	next->thread_info->pcb.asn = mmc & HARDWARE_ASN_MASK;
 }
 
 __EXTERN_INLINE void
 ev4_switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
-	      struct task_struct *next, long cpu)
+	      struct task_struct *next)
 {
 	/* As described, ASN's are broken for TLB usage.  But we can
 	   optimize for switching between threads -- if the mm is
@@ -173,7 +175,7 @@ ev4_switch_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm,
 
 	/* Do continue to allocate ASNs, because we can still use them
 	   to avoid flushing the icache.  */
-	ev5_switch_mm(prev_mm, next_mm, next, cpu);
+	ev5_switch_mm(prev_mm, next_mm, next);
 }
 
 extern void __load_new_mm_context(struct mm_struct *);
@@ -208,15 +210,17 @@ ev4_activate_mm(struct mm_struct *prev_mm, struct mm_struct *next_mm)
 	tbiap();
 }
 
+#define deactivate_mm(tsk,mm)	do { } while (0)
+
 #ifdef CONFIG_ALPHA_GENERIC
-# define switch_mm(a,b,c,d)	alpha_mv.mv_switch_mm((a),(b),(c),(d))
+# define switch_mm(a,b,c)	alpha_mv.mv_switch_mm((a),(b),(c))
 # define activate_mm(x,y)	alpha_mv.mv_activate_mm((x),(y))
 #else
 # ifdef CONFIG_ALPHA_EV4
-#  define switch_mm(a,b,c,d)	ev4_switch_mm((a),(b),(c),(d))
+#  define switch_mm(a,b,c)	ev4_switch_mm((a),(b),(c))
 #  define activate_mm(x,y)	ev4_activate_mm((x),(y))
 # else
-#  define switch_mm(a,b,c,d)	ev5_switch_mm((a),(b),(c),(d))
+#  define switch_mm(a,b,c)	ev5_switch_mm((a),(b),(c))
 #  define activate_mm(x,y)	ev5_activate_mm((x),(y))
 # endif
 #endif
@@ -226,9 +230,12 @@ init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 {
 	int i;
 
-	for (i = 0; i < smp_num_cpus; i++)
-		mm->context[cpu_logical_map(i)] = 0;
-        tsk->thread.ptbr = ((unsigned long)mm->pgd - IDENT_ADDR) >> PAGE_SHIFT;
+	for (i = 0; i < NR_CPUS; i++)
+		if (cpu_online(i))
+			mm->context[i] = 0;
+	if (tsk != current)
+		tsk->thread_info->pcb.ptbr
+		  = ((unsigned long)mm->pgd - IDENT_ADDR) >> PAGE_SHIFT;
 	return 0;
 }
 
@@ -239,9 +246,10 @@ destroy_context(struct mm_struct *mm)
 }
 
 static inline void
-enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk, unsigned cpu)
+enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 {
-	tsk->thread.ptbr = ((unsigned long)mm->pgd - IDENT_ADDR) >> PAGE_SHIFT;
+	tsk->thread_info->pcb.ptbr
+	  = ((unsigned long)mm->pgd - IDENT_ADDR) >> PAGE_SHIFT;
 }
 
 #ifdef __MMU_EXTERN_INLINE

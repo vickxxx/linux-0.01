@@ -10,77 +10,26 @@
 # modified by Cort (cort@cs.nmt.edu)
 #
 
-GZIP_FLAGS = -v9f
+CFLAGS	 	+= -fno-builtin -D__BOOTER__ -Iarch/$(ARCH)/boot/include
+HOSTCFLAGS	+= -Iarch/$(ARCH)/boot/include
 
-CFLAGS	+= -fno-builtin -D__BOOTER__ -I$(TOPDIR)/arch/$(ARCH)/boot/include
+BOOT_TARGETS	= zImage zImage.initrd znetboot znetboot.initrd
 
-AFLAGS	+= -D__BOOTER__
-OBJCOPY_ARGS = -O elf32-powerpc
+bootdir-y			:= simple
+bootdir-$(CONFIG_PPC_OF)	:= openfirmware
+bootdir-$(CONFIG_PPC_PREP)	+= prep
+subdir-y			:= lib/ common/ images/
+subdir-$(CONFIG_PPC_OF)		+= of1275/
 
-ifeq ($(CONFIG_SMP),y)
-TFTPSIMAGE=/tftpboot/sImage.smp
-else
-TFTPSIMAGE=/tftpboot/sImage
-endif
+# for cleaning
+subdir-				+= simple/ openfirmware/ prep/
 
-lib/zlib.a:
-	$(MAKE) -C lib
+host-progs := $(addprefix utils/, addnote mknote hack-coff mkprep mkbugboot mktree)
 
-images/vmlinux.gz: $(TOPDIR)/vmlinux
-	$(MAKE) -C images vmlinux.gz
+.PHONY: $(BOOT_TARGETS) $(bootdir-y)
 
-# Subdirs and tools needed for each.
-subdir-y			:= lib images common
-subdir-$(CONFIG_ALL_PPC)	+= chrp pmac prep
-tools-$(CONFIG_ALL_PPC)		:= addnote piggyback mknote hack-coff mkprep
-subdir-$(CONFIG_4xx)		+= tree
-subdir-$(CONFIG_8xx)		+= mbx
-subdir-$(CONFIG_8260)		+= mbx
-tools-$(CONFIG_GEMINI)		:= mksimage
+$(BOOT_TARGETS): $(bootdir-y)
 
-# These are dirs we don't want to go into on BOOT_TARGETS
-NONBOOT				:= lib images common
-
-# These are the subdirs we want to use
-BOOTDIRS			= $(filter-out $(NONBOOT), $(subdir-y))
-
-# This will make the tools we need.  We do it like this to ensure that we use
-# HOSTCC. -- Tom
-maketools:
-	$(MAKE) -C utils $(tools-y)
-
-# The targets all boards support for boot images.
-BOOT_TARGETS = zImage
-ifndef CONFIG_GEMINI
-BOOT_TARGETS += zImage.initrd znetboot znetboot.initrd
-endif
-
-$(BOOT_TARGETS): sImage vmapus lib/zlib.a images/vmlinux.gz maketools
-ifneq ($(BOOTDIRS),)
-	for d in $(BOOTDIRS); do $(MAKE) -C $$d $@; done
-endif
-
-sImage: $(TOPDIR)/vmlinux
-ifdef CONFIG_GEMINI
-	$(OBJCOPY) -I elf32-powerpc -O binary $(TOPDIR)/vmlinux images/sImage
-endif
-
-vmapus: $(TOPDIR)/vmlinux
-ifdef CONFIG_APUS
-	$(STRIP) $(TOPDIR)/vmlinux -o images/vmapus
-	gzip $(GZIP_FLAGS) images/vmapus
-endif
-
-ifdef CONFIG_GEMINI
-znetboot : zImage
-	cp images/sImage $(TFTPSIMAGE)
-endif
-
-# Clean up after ourselves.  We have to do it like this since only some dirs
-# need to be gone into. -- Tom
-clean:
-	$(MAKE) -C images clean
-	$(MAKE) -C tree clean
-	$(MAKE) -C utils clean
-
-include $(TOPDIR)/Rules.make
+$(bootdir-y): $(addprefix $(obj)/,$(subdir-y)) \
+		$(addprefix $(obj)/,$(host-progs))
+	$(Q)$(MAKE) $(build)=$(obj)/$@ $(MAKECMDGOALS)

@@ -16,8 +16,8 @@
 
 #ifndef __ASSEMBLY__
 
-extern void setup_initrd(unsigned int start, unsigned int size);
-extern void setup_ramdisk(int doload, int prompt, int start, unsigned int rd_sz);
+struct tag;
+struct meminfo;
 
 struct machine_desc {
 	/*
@@ -41,7 +41,7 @@ struct machine_desc {
 	unsigned int		reserve_lp2 :1;	/* never has lp2	*/
 	unsigned int		soft_reboot :1;	/* soft reboot		*/
 	void			(*fixup)(struct machine_desc *,
-					 struct param_struct *, char **,
+					 struct tag *, char **,
 					 struct meminfo *);
 	void			(*map_io)(void);/* IO mapping function	*/
 	void			(*init_irq)(void);
@@ -54,39 +54,37 @@ struct machine_desc {
 #define MACHINE_START(_type,_name)		\
 const struct machine_desc __mach_desc_##_type	\
  __attribute__((__section__(".arch.info"))) = {	\
-	nr:		MACH_TYPE_##_type,	\
-	name:		_name,
+	.nr		= MACH_TYPE_##_type,	\
+	.name		= _name,
 
 #define MAINTAINER(n)
 
 #define BOOT_MEM(_pram,_pio,_vio)		\
-	phys_ram:	_pram,	                \
-	phys_io:	_pio,  	                \
-	io_pg_offst:	((_vio)>>18)&0xfffc,
+	.phys_ram	= _pram,		\
+	.phys_io	= _pio,			\
+	.io_pg_offst	= ((_vio)>>18)&0xfffc,
 
 #define BOOT_PARAMS(_params)			\
-	param_offset:	_params,
+	.param_offset	= _params,
 
 #define VIDEO(_start,_end)			\
-	video_start:	_start,			\
-	video_end:	_end,
+	.video_start	= _start,		\
+	.video_end	= _end,
 
 #define DISABLE_PARPORT(_n)			\
-	reserve_lp##_n:	1,
-
-#define BROKEN_HLT /* unused */
+	.reserve_lp##_n	= 1,
 
 #define SOFT_REBOOT				\
-	soft_reboot:	1,
+	.soft_reboot	= 1,
 
 #define FIXUP(_func)				\
-	fixup:		_func,
+	.fixup		= _func,
 
 #define MAPIO(_func)				\
-	map_io:		_func,
+	.map_io		= _func,
 
 #define INITIRQ(_func)				\
-	init_irq:	_func,
+	.init_irq	= _func,
 
 #define MACHINE_END				\
 };

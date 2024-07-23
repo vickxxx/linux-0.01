@@ -17,7 +17,6 @@
 #include <asm/semaphore.h>
 #include <asm/checksum.h>
 #include <asm/hardirq.h>
-#include <asm/softirq.h>
 
 asmlinkage long long __ashldi3 (long long, int);
 asmlinkage long long __ashrdi3 (long long, int);
@@ -26,7 +25,6 @@ asmlinkage long long __muldi3 (long long, long long);
 extern char m68k_debug_device[];
 
 extern void dump_thread(struct pt_regs *, struct user *);
-extern int dump_fpu(elf_fpregset_t *);
 
 /* platform dependent support */
 
@@ -42,28 +40,33 @@ EXPORT_SYMBOL(cache_clear);
 EXPORT_SYMBOL(mm_vtop);
 EXPORT_SYMBOL(mm_ptov);
 EXPORT_SYMBOL(mm_end_of_chunk);
+#else
+EXPORT_SYMBOL(m68k_memoffset);
 #endif /* !CONFIG_SINGLE_MEMORY_CHUNK */
-EXPORT_SYMBOL(mm_vtop_fallback);
 EXPORT_SYMBOL(__ioremap);
 EXPORT_SYMBOL(iounmap);
 EXPORT_SYMBOL(kernel_set_cachemode);
 #endif /* !CONFIG_SUN3 */
 EXPORT_SYMBOL(m68k_debug_device);
+EXPORT_SYMBOL(mach_hwclk);
+EXPORT_SYMBOL(mach_get_ss);
+EXPORT_SYMBOL(mach_get_rtc_pll);
+EXPORT_SYMBOL(mach_set_rtc_pll);
+#ifdef CONFIG_INPUT_M68K_BEEP_MODULE
+EXPORT_SYMBOL(mach_beep);
+#endif
 EXPORT_SYMBOL(dump_fpu);
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(strstr);
-EXPORT_SYMBOL(strtok);
+EXPORT_SYMBOL(strpbrk);
 EXPORT_SYMBOL(enable_irq);
 EXPORT_SYMBOL(disable_irq);
 EXPORT_SYMBOL(kernel_thread);
 #ifdef CONFIG_VME
 EXPORT_SYMBOL(vme_brdtype);
 #endif
-
-/* Networking helper routines. */
-EXPORT_SYMBOL(csum_partial_copy);
 
 /* The following are special because they're not called
    explicitly (the C compiler generates them).  Fortunately,

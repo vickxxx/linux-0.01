@@ -1,4 +1,4 @@
-/* $Id: pgtable.h,v 1.109 2001/11/13 00:49:32 davem Exp $ */
+/* $Id: pgtable.h,v 1.110 2001/12/21 04:56:17 davem Exp $ */
 #ifndef _SPARC_PGTABLE_H
 #define _SPARC_PGTABLE_H
 
@@ -11,7 +11,7 @@
 
 #include <linux/config.h>
 #include <linux/spinlock.h>
-#include <asm/asi.h>
+#include <asm/types.h>
 #ifdef CONFIG_SUN4
 #include <asm/pgtsun4.h>
 #else
@@ -26,12 +26,11 @@
 
 #ifndef __ASSEMBLY__
 
+struct vm_area_struct;
+struct page;
+
 extern void load_mmu(void);
 extern unsigned long calc_highpages(void);
-			       
-BTFIXUPDEF_CALL(void, quick_kernel_fault, unsigned long)
-
-#define quick_kernel_fault(addr) BTFIXUP_CALL(quick_kernel_fault)(addr)
 
 /* Routines for data transfer buffers. */
 BTFIXUPDEF_CALL(char *, mmu_lockarea, char *, unsigned long)
@@ -53,15 +52,30 @@ BTFIXUPDEF_CALL(void,  mmu_release_scsi_sgl, struct scatterlist *, int, struct s
 
 /*
  * mmu_map/unmap are provided by iommu/iounit; Invalid to call on IIep.
+ *
+ * The mmu_map_dma_area establishes two mappings in one go.
+ * These mappings point to pages normally mapped at 'va' (linear address).
+ * First mapping is for CPU visible address at 'a', uncached.
+ * This is an alias, but it works because it is an uncached mapping.
+ * Second mapping is for device visible address, or "bus" address.
+ * The bus address is returned at '*pba'.
+ *
+ * These functions seem distinct, but are hard to split. On sun4c,
+ * at least for now, 'a' is equal to bus address, and retured in *pba.
+ * On sun4m, page attributes depend on the CPU type, so we have to
+ * know if we are mapping RAM or I/O, so it has to be an additional argument
+ * to a separate mapping function for CPU visible mappings.
  */
-BTFIXUPDEF_CALL(void,  mmu_map_dma_area, unsigned long va, __u32 addr, int len)
-BTFIXUPDEF_CALL(unsigned long /*phys*/, mmu_translate_dvma, unsigned long busa)
+BTFIXUPDEF_CALL(int,  mmu_map_dma_area, dma_addr_t *, unsigned long, unsigned long, int len)
+BTFIXUPDEF_CALL(struct page *, mmu_translate_dvma, unsigned long busa)
 BTFIXUPDEF_CALL(void,  mmu_unmap_dma_area, unsigned long busa, int len)
 
-#define mmu_map_dma_area(va, ba,len) BTFIXUP_CALL(mmu_map_dma_area)(va,ba,len)
+#define mmu_map_dma_area(pba,va,a,len) BTFIXUP_CALL(mmu_map_dma_area)(pba,va,a,len)
 #define mmu_unmap_dma_area(ba,len) BTFIXUP_CALL(mmu_unmap_dma_area)(ba,len)
 #define mmu_translate_dvma(ba)     BTFIXUP_CALL(mmu_translate_dvma)(ba)
 
+/*
+ */
 BTFIXUPDEF_SIMM13(pmd_shift)
 BTFIXUPDEF_SETHI(pmd_size)
 BTFIXUPDEF_SETHI(pmd_mask)
@@ -183,17 +197,11 @@ extern unsigned long empty_zero_page;
 
 #define BAD_PAGETABLE __bad_pagetable()
 #define BAD_PAGE __bad_page()
-#define ZERO_PAGE(vaddr) (mem_map + (((unsigned long)&empty_zero_page - PAGE_OFFSET + phys_base) >> PAGE_SHIFT))
+#define ZERO_PAGE(vaddr) (virt_to_page(&empty_zero_page))
 
-/* number of bits that fit into a memory pointer */
-#define BITS_PER_PTR      (8*sizeof(unsigned long))
-
-/* to align the pointer to a pointer address */
-#define PTR_MASK          (~(sizeof(void*)-1))
-
-#define SIZEOF_PTR_LOG2   2
-
-BTFIXUPDEF_CALL_CONST(unsigned long, pmd_page, pmd_t)
+/*
+ */
+BTFIXUPDEF_CALL_CONST(struct page *, pmd_page, pmd_t)
 BTFIXUPDEF_CALL_CONST(unsigned long, pgd_page, pgd_t)
 
 #define pmd_page(pmd) BTFIXUP_CALL(pmd_page)(pmd)
@@ -260,6 +268,19 @@ extern __inline__ int pte_young(pte_t pte)
 	return pte_val(pte) & BTFIXUP_HALF(pte_youngi);
 }
 
+/*
+ * The following only work if pte_present() is not true.
+ */
+BTFIXUPDEF_HALF(pte_filei)
+
+extern int pte_file(pte_t pte) __attribute__((const));
+extern __inline__ int pte_file(pte_t pte)
+{
+	return pte_val(pte) & BTFIXUP_HALF(pte_filei);
+}
+
+/*
+ */
 BTFIXUPDEF_HALF(pte_wrprotecti)
 BTFIXUPDEF_HALF(pte_mkcleani)
 BTFIXUPDEF_HALF(pte_mkoldi)
@@ -291,13 +312,12 @@ BTFIXUPDEF_CALL_CONST(pte_t, pte_mkyoung, pte_t)
 #define pte_mkyoung(pte) BTFIXUP_CALL(pte_mkyoung)(pte)
 
 #define page_pte_prot(page, prot)	mk_pte(page, prot)
-#define page_pte(page)			page_pte_prot(page, __pgprot(0))
+#define page_pte(page)			mk_pte(page, __pgprot(0))
+#define pfn_pte(pfn, prot)		mk_pte(pfn_to_page(pfn), prot)
 
-/* Permanent address of a page. */
-#define page_address(page)  ((page)->virtual)
-
-BTFIXUPDEF_CALL(struct page *, pte_page, pte_t)
-#define pte_page(pte) BTFIXUP_CALL(pte_page)(pte)
+BTFIXUPDEF_CALL(unsigned long,	 pte_pfn, pte_t)
+#define pte_pfn(pte) BTFIXUP_CALL(pte_pfn)(pte)
+#define pte_page(pte)	pfn_to_page(pte_pfn(pte))
 
 /*
  * Conversion functions: convert a page and protection to a page entry,
@@ -311,12 +331,6 @@ BTFIXUPDEF_CALL_CONST(pte_t, mk_pte_io, unsigned long, pgprot_t, int)
 #define mk_pte(page,pgprot) BTFIXUP_CALL(mk_pte)(page,pgprot)
 #define mk_pte_phys(page,pgprot) BTFIXUP_CALL(mk_pte_phys)(page,pgprot)
 #define mk_pte_io(page,pgprot,space) BTFIXUP_CALL(mk_pte_io)(page,pgprot,space)
-
-BTFIXUPDEF_CALL(void, pgd_set, pgd_t *, pmd_t *)
-BTFIXUPDEF_CALL(void, pmd_set, pmd_t *, pte_t *)
-
-#define pgd_set(pgdp,pmdp) BTFIXUP_CALL(pgd_set)(pgdp,pmdp)
-#define pmd_set(pmdp,ptep) BTFIXUP_CALL(pmd_set)(pmdp,ptep)
 
 BTFIXUPDEF_INT(pte_modify_mask)
 
@@ -335,19 +349,26 @@ extern __inline__ pte_t pte_modify(pte_t pte, pgprot_t newprot)
 /* to find an entry in a kernel page-table-directory */
 #define pgd_offset_k(address) pgd_offset(&init_mm, address)
 
-BTFIXUPDEF_CALL(pmd_t *, pmd_offset, pgd_t *, unsigned long)
-BTFIXUPDEF_CALL(pte_t *, pte_offset, pmd_t *, unsigned long)
-
 /* Find an entry in the second-level page table.. */
+BTFIXUPDEF_CALL(pmd_t *, pmd_offset, pgd_t *, unsigned long)
 #define pmd_offset(dir,addr) BTFIXUP_CALL(pmd_offset)(dir,addr)
 
 /* Find an entry in the third-level page table.. */ 
-#define pte_offset(dir,addr) BTFIXUP_CALL(pte_offset)(dir,addr)
+BTFIXUPDEF_CALL(pte_t *, pte_offset_kernel, pmd_t *, unsigned long)
+#define pte_offset_kernel(dir,addr) BTFIXUP_CALL(pte_offset_kernel)(dir,addr)
+
+/*
+ * This shortcut works on sun4m (and sun4d) because the nocache area is static,
+ * and sun4c is guaranteed to have no highmem anyway.
+ */
+#define pte_offset_map(d, a)		pte_offset_kernel(d,a)
+#define pte_offset_map_nested(d, a)	pte_offset_kernel(d,a)
+
+#define pte_unmap(pte)		do{}while(0)
+#define pte_unmap_nested(pte)	do{}while(0)
 
 /* The permissions for pgprot_val to make a page mapped on the obio space */
 extern unsigned int pg_iobits;
-
-#define flush_icache_page(vma, pg)      do { } while(0)
 
 /* Certain architectures need to do special things when pte's
  * within a page table are directly modified.  Thus, the following
@@ -372,15 +393,36 @@ BTFIXUPDEF_CALL(void, update_mmu_cache, struct vm_area_struct *, unsigned long, 
 
 #define update_mmu_cache(vma,addr,pte) BTFIXUP_CALL(update_mmu_cache)(vma,addr,pte)
 
+BTFIXUPDEF_CALL(void, sparc_mapiorange, unsigned int, unsigned long,
+    unsigned long, unsigned int)
+BTFIXUPDEF_CALL(void, sparc_unmapiorange, unsigned long, unsigned int)
+#define sparc_mapiorange(bus,pa,va,len) BTFIXUP_CALL(sparc_mapiorange)(bus,pa,va,len)
+#define sparc_unmapiorange(va,len) BTFIXUP_CALL(sparc_unmapiorange)(va,len)
+
 extern int invalid_segment;
 
 /* Encode and de-code a swap entry */
-#define SWP_TYPE(x)			(((x).val >> 2) & 0x7f)
-#define SWP_OFFSET(x)			(((x).val >> 9) & 0x3ffff)
-#define SWP_ENTRY(type,offset)		((swp_entry_t) { (((type) & 0x7f) << 2) | (((offset) & 0x3ffff) << 9) })
-#define pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
-#define swp_entry_to_pte(x)		((pte_t) { (x).val })
+#define __swp_type(x)			(((x).val >> 2) & 0x7f)
+#define __swp_offset(x)			(((x).val >> 9) & 0x3ffff)
+#define __swp_entry(type,offset)	((swp_entry_t) { (((type) & 0x7f) << 2) | (((offset) & 0x3ffff) << 9) })
+#define __pte_to_swp_entry(pte)		((swp_entry_t) { pte_val(pte) })
+#define __swp_entry_to_pte(x)		((pte_t) { (x).val })
 
+/* file-offset-in-pte helpers */
+BTFIXUPDEF_CALL(unsigned long, pte_to_pgoff, pte_t pte);
+BTFIXUPDEF_CALL(pte_t, pgoff_to_pte, unsigned long pgoff);
+
+#define pte_to_pgoff(pte) BTFIXUP_CALL(pte_to_pgoff)(pte)
+#define pgoff_to_pte(off) BTFIXUP_CALL(pgoff_to_pte)(off)
+
+/*
+ * This is made a constant because mm/fremap.c required a constant.
+ * Note that layout of these bits is different between sun4c.c and srmmu.c.
+ */
+#define PTE_FILE_MAX_BITS 24
+
+/*
+ */
 struct ctx_list {
 	struct ctx_list *next;
 	struct ctx_list *prev;
@@ -445,10 +487,12 @@ extern unsigned long *sparc_valid_addr_bitmap;
 #define kern_addr_valid(addr) \
 	(test_bit(__pa((unsigned long)(addr))>>20, sparc_valid_addr_bitmap))
 
-extern int io_remap_page_range(unsigned long from, unsigned long to,
+extern int io_remap_page_range(struct vm_area_struct *vma, unsigned long from, unsigned long to,
 			       unsigned long size, pgprot_t prot, int space);
 
 #include <asm-generic/pgtable.h>
+
+typedef pte_t *pte_addr_t;
 
 #endif /* !(__ASSEMBLY__) */
 

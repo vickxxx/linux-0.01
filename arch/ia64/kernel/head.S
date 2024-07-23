@@ -5,7 +5,7 @@
  * to set up the kernel's global pointer and jump to the kernel
  * entry point.
  *
- * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2001, 2003 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  *	Stephane Eranian <eranian@hpl.hp.com>
  * Copyright (C) 1999 VA Linux Systems
@@ -13,6 +13,8 @@
  * Copyright (C) 1999 Intel Corp.
  * Copyright (C) 1999 Asit Mallick <Asit.K.Mallick@intel.com>
  * Copyright (C) 1999 Don Dugger <Don.Dugger@intel.com>
+ * Copyright (C) 2002 Fenghua Yu <fenghua.yu@intel.com>
+ *   -Optimize __ia64_save_fpu() and __ia64_load_fpu() for Itanium 2.
  */
 
 #include <linux/config.h>
@@ -58,22 +60,42 @@ start_ap:
 	mov r4=r0
 	.body
 
-	/*
-	 * Initialize the region register for region 7 and install a translation register
-	 * that maps the kernel's text and data:
-	 */
 	rsm psr.i | psr.ic
-	mov r16=((ia64_rid(IA64_REGION_ID_KERNEL, PAGE_OFFSET) << 8) | (IA64_GRANULE_SHIFT << 2))
 	;;
 	srlz.i
+	;;
+	/*
+	 * Initialize kernel region registers:
+	 *	rr[5]: VHPT enabled, page size = PAGE_SHIFT
+	 *	rr[6]: VHPT disabled, page size = IA64_GRANULE_SHIFT
+	 *	rr[5]: VHPT disabled, page size = IA64_GRANULE_SHIFT
+	 */
+	mov r16=((ia64_rid(IA64_REGION_ID_KERNEL, (5<<61)) << 8) | (PAGE_SHIFT << 2) | 1)
+	movl r17=(5<<61)
+	mov r18=((ia64_rid(IA64_REGION_ID_KERNEL, (6<<61)) << 8) | (IA64_GRANULE_SHIFT << 2))
+	movl r19=(6<<61)
+	mov r20=((ia64_rid(IA64_REGION_ID_KERNEL, (7<<61)) << 8) | (IA64_GRANULE_SHIFT << 2))
+	movl r21=(7<<61)
+	;;
+	mov rr[r17]=r16
+	mov rr[r19]=r18
+	mov rr[r21]=r20
+	;;
+	/*
+	 * Now pin mappings into the TLB for kernel text and data
+	 */
 	mov r18=KERNEL_TR_PAGE_SHIFT<<2
 	movl r17=KERNEL_START
 	;;
-	mov rr[r17]=r16
 	mov cr.itir=r18
 	mov cr.ifa=r17
 	mov r16=IA64_TR_KERNEL
-	movl r18=((1 << KERNEL_TR_PAGE_SHIFT) | PAGE_KERNEL)
+	mov r3=ip
+	movl r18=PAGE_KERNEL
+	;;
+	dep r2=0,r3,0,KERNEL_TR_PAGE_SHIFT
+	;;
+	or r18=r2,r18
 	;;
 	srlz.i
 	;;
@@ -111,49 +133,58 @@ start_ap:
 	mov ar.fpsr=r2
 	;;
 
-#ifdef CONFIG_IA64_EARLY_PRINTK
-	mov r3=(6<<8) | (IA64_GRANULE_SHIFT<<2)
-	movl r2=6<<61
-	;;
-	mov rr[r2]=r3
-	;;
-	srlz.i
-	;;
-#endif
-
 #define isAP	p2	// are we an Application Processor?
 #define isBP	p3	// are we the Bootstrap Processor?
 
 #ifdef CONFIG_SMP
 	/*
 	 * Find the init_task for the currently booting CPU.  At poweron, and in
-	 * UP mode, cpucount is 0.
+	 * UP mode, task_for_booting_cpu is NULL.
 	 */
-	movl r3=cpucount
+	movl r3=task_for_booting_cpu
  	;;
-	ld4 r3=[r3]		// r3 <- smp_processor_id()
-	movl r2=init_tasks
+	ld8 r3=[r3]
+	movl r2=init_task
 	;;
-	shladd r2=r3,3,r2
+	cmp.eq isBP,isAP=r3,r0
 	;;
-	ld8 r2=[r2]
+(isAP)	mov r2=r3
 #else
-	mov r3=0
-	movl r2=init_task_union
-	;;
+	movl r2=init_task
+	cmp.eq isBP,isAP=r0,r0
 #endif
-	cmp4.ne isAP,isBP=r3,r0
-	;;			// RAW on r2
-	extr r3=r2,0,61		// r3 == phys addr of task struct
-	mov r16=KERNEL_TR_PAGE_NUM
 	;;
+	tpa r3=r2		// r3 == phys addr of task struct
+	// load mapping for stack (virtaddr in r2, physaddr in r3)
+	rsm psr.ic
+	movl r17=PAGE_KERNEL
+	;;
+	srlz.d
+	dep r18=0,r3,0,12
+	;;
+	or r18=r17,r18
+	dep r2=-1,r3,61,3	// IMVA of task
+	;;
+	mov r17=rr[r2]
+	shr.u r16=r3,IA64_GRANULE_SHIFT
+	;;
+	dep r17=0,r17,8,24
+	;;
+	mov cr.itir=r17
+	mov cr.ifa=r2
+
+	mov r19=IA64_TR_CURRENT_STACK
+	;;
+	itr.d dtr[r19]=r18
+	;;
+	ssm psr.ic
+	srlz.d
+  	;;
 
 	// load the "current" pointer (r13) and ar.k6 with the current task
-	mov r13=r2
-	mov IA64_KR(CURRENT)=r3		// Physical address
-
-	// initialize k4 to a safe value (64-128MB is mapped by TR_KERNEL)
+	mov IA64_KR(CURRENT)=r2		// virtual address
 	mov IA64_KR(CURRENT_STACK)=r16
+	mov r13=r2
 	/*
 	 * Reserve space at the top of the stack for "struct pt_regs".  Kernel threads
 	 * don't store interesting values in that structure, but the space still needs
@@ -180,10 +211,12 @@ start_ap:
 	.rodata
 alive_msg:
 	stringz "I'm alive and well\n"
+alive_msg_end:
 	.previous
 
 	alloc r2=ar.pfs,0,0,2,0
 	movl out0=alive_msg
+	movl out1=alive_msg_end-alive_msg-1
 	;;
 	br.call.sptk.many rp=early_printk
 1:	// force new bundle
@@ -260,448 +293,420 @@ GLOBAL_ENTRY(ia64_load_debug_regs)
 END(ia64_load_debug_regs)
 
 GLOBAL_ENTRY(__ia64_save_fpu)
-	alloc r2=ar.pfs,1,0,0,0
-	adds r3=16,in0
+	alloc r2=ar.pfs,1,4,0,0
+	adds loc0=96*16-16,in0
+	adds loc1=96*16-16-128,in0
 	;;
-	stf.spill.nta [in0]=f32,32
-	stf.spill.nta [ r3]=f33,32
+	stf.spill.nta [loc0]=f127,-256
+	stf.spill.nta [loc1]=f119,-256
 	;;
-	stf.spill.nta [in0]=f34,32
-	stf.spill.nta [ r3]=f35,32
+	stf.spill.nta [loc0]=f111,-256
+	stf.spill.nta [loc1]=f103,-256
 	;;
-	stf.spill.nta [in0]=f36,32
-	stf.spill.nta [ r3]=f37,32
+	stf.spill.nta [loc0]=f95,-256
+	stf.spill.nta [loc1]=f87,-256
 	;;
-	stf.spill.nta [in0]=f38,32
-	stf.spill.nta [ r3]=f39,32
+	stf.spill.nta [loc0]=f79,-256
+	stf.spill.nta [loc1]=f71,-256
 	;;
-	stf.spill.nta [in0]=f40,32
-	stf.spill.nta [ r3]=f41,32
+	stf.spill.nta [loc0]=f63,-256
+	stf.spill.nta [loc1]=f55,-256
+	adds loc2=96*16-32,in0
 	;;
-	stf.spill.nta [in0]=f42,32
-	stf.spill.nta [ r3]=f43,32
+	stf.spill.nta [loc0]=f47,-256
+	stf.spill.nta [loc1]=f39,-256
+	adds loc3=96*16-32-128,in0
 	;;
-	stf.spill.nta [in0]=f44,32
-	stf.spill.nta [ r3]=f45,32
+	stf.spill.nta [loc2]=f126,-256
+	stf.spill.nta [loc3]=f118,-256
 	;;
-	stf.spill.nta [in0]=f46,32
-	stf.spill.nta [ r3]=f47,32
+	stf.spill.nta [loc2]=f110,-256
+	stf.spill.nta [loc3]=f102,-256
 	;;
-	stf.spill.nta [in0]=f48,32
-	stf.spill.nta [ r3]=f49,32
+	stf.spill.nta [loc2]=f94,-256
+	stf.spill.nta [loc3]=f86,-256
 	;;
-	stf.spill.nta [in0]=f50,32
-	stf.spill.nta [ r3]=f51,32
+	stf.spill.nta [loc2]=f78,-256
+	stf.spill.nta [loc3]=f70,-256
 	;;
-	stf.spill.nta [in0]=f52,32
-	stf.spill.nta [ r3]=f53,32
+	stf.spill.nta [loc2]=f62,-256
+	stf.spill.nta [loc3]=f54,-256
+	adds loc0=96*16-48,in0
 	;;
-	stf.spill.nta [in0]=f54,32
-	stf.spill.nta [ r3]=f55,32
+	stf.spill.nta [loc2]=f46,-256
+	stf.spill.nta [loc3]=f38,-256
+	adds loc1=96*16-48-128,in0
 	;;
-	stf.spill.nta [in0]=f56,32
-	stf.spill.nta [ r3]=f57,32
+	stf.spill.nta [loc0]=f125,-256
+	stf.spill.nta [loc1]=f117,-256
 	;;
-	stf.spill.nta [in0]=f58,32
-	stf.spill.nta [ r3]=f59,32
+	stf.spill.nta [loc0]=f109,-256
+	stf.spill.nta [loc1]=f101,-256
 	;;
-	stf.spill.nta [in0]=f60,32
-	stf.spill.nta [ r3]=f61,32
+	stf.spill.nta [loc0]=f93,-256
+	stf.spill.nta [loc1]=f85,-256
 	;;
-	stf.spill.nta [in0]=f62,32
-	stf.spill.nta [ r3]=f63,32
+	stf.spill.nta [loc0]=f77,-256
+	stf.spill.nta [loc1]=f69,-256
 	;;
-	stf.spill.nta [in0]=f64,32
-	stf.spill.nta [ r3]=f65,32
+	stf.spill.nta [loc0]=f61,-256
+	stf.spill.nta [loc1]=f53,-256
+	adds loc2=96*16-64,in0
 	;;
-	stf.spill.nta [in0]=f66,32
-	stf.spill.nta [ r3]=f67,32
+	stf.spill.nta [loc0]=f45,-256
+	stf.spill.nta [loc1]=f37,-256
+	adds loc3=96*16-64-128,in0
 	;;
-	stf.spill.nta [in0]=f68,32
-	stf.spill.nta [ r3]=f69,32
+	stf.spill.nta [loc2]=f124,-256
+	stf.spill.nta [loc3]=f116,-256
 	;;
-	stf.spill.nta [in0]=f70,32
-	stf.spill.nta [ r3]=f71,32
+	stf.spill.nta [loc2]=f108,-256
+	stf.spill.nta [loc3]=f100,-256
 	;;
-	stf.spill.nta [in0]=f72,32
-	stf.spill.nta [ r3]=f73,32
+	stf.spill.nta [loc2]=f92,-256
+	stf.spill.nta [loc3]=f84,-256
 	;;
-	stf.spill.nta [in0]=f74,32
-	stf.spill.nta [ r3]=f75,32
+	stf.spill.nta [loc2]=f76,-256
+	stf.spill.nta [loc3]=f68,-256
 	;;
-	stf.spill.nta [in0]=f76,32
-	stf.spill.nta [ r3]=f77,32
+	stf.spill.nta [loc2]=f60,-256
+	stf.spill.nta [loc3]=f52,-256
+	adds loc0=96*16-80,in0
 	;;
-	stf.spill.nta [in0]=f78,32
-	stf.spill.nta [ r3]=f79,32
+	stf.spill.nta [loc2]=f44,-256
+	stf.spill.nta [loc3]=f36,-256
+	adds loc1=96*16-80-128,in0
 	;;
-	stf.spill.nta [in0]=f80,32
-	stf.spill.nta [ r3]=f81,32
+	stf.spill.nta [loc0]=f123,-256
+	stf.spill.nta [loc1]=f115,-256
 	;;
-	stf.spill.nta [in0]=f82,32
-	stf.spill.nta [ r3]=f83,32
+	stf.spill.nta [loc0]=f107,-256
+	stf.spill.nta [loc1]=f99,-256
 	;;
-	stf.spill.nta [in0]=f84,32
-	stf.spill.nta [ r3]=f85,32
+	stf.spill.nta [loc0]=f91,-256
+	stf.spill.nta [loc1]=f83,-256
 	;;
-	stf.spill.nta [in0]=f86,32
-	stf.spill.nta [ r3]=f87,32
+	stf.spill.nta [loc0]=f75,-256
+	stf.spill.nta [loc1]=f67,-256
 	;;
-	stf.spill.nta [in0]=f88,32
-	stf.spill.nta [ r3]=f89,32
+	stf.spill.nta [loc0]=f59,-256
+	stf.spill.nta [loc1]=f51,-256
+	adds loc2=96*16-96,in0
 	;;
-	stf.spill.nta [in0]=f90,32
-	stf.spill.nta [ r3]=f91,32
+	stf.spill.nta [loc0]=f43,-256
+	stf.spill.nta [loc1]=f35,-256
+	adds loc3=96*16-96-128,in0
 	;;
-	stf.spill.nta [in0]=f92,32
-	stf.spill.nta [ r3]=f93,32
+	stf.spill.nta [loc2]=f122,-256
+	stf.spill.nta [loc3]=f114,-256
 	;;
-	stf.spill.nta [in0]=f94,32
-	stf.spill.nta [ r3]=f95,32
+	stf.spill.nta [loc2]=f106,-256
+	stf.spill.nta [loc3]=f98,-256
 	;;
-	stf.spill.nta [in0]=f96,32
-	stf.spill.nta [ r3]=f97,32
+	stf.spill.nta [loc2]=f90,-256
+	stf.spill.nta [loc3]=f82,-256
 	;;
-	stf.spill.nta [in0]=f98,32
-	stf.spill.nta [ r3]=f99,32
+	stf.spill.nta [loc2]=f74,-256
+	stf.spill.nta [loc3]=f66,-256
 	;;
-	stf.spill.nta [in0]=f100,32
-	stf.spill.nta [ r3]=f101,32
+	stf.spill.nta [loc2]=f58,-256
+	stf.spill.nta [loc3]=f50,-256
+	adds loc0=96*16-112,in0
 	;;
-	stf.spill.nta [in0]=f102,32
-	stf.spill.nta [ r3]=f103,32
+	stf.spill.nta [loc2]=f42,-256
+	stf.spill.nta [loc3]=f34,-256
+	adds loc1=96*16-112-128,in0
 	;;
-	stf.spill.nta [in0]=f104,32
-	stf.spill.nta [ r3]=f105,32
+	stf.spill.nta [loc0]=f121,-256
+	stf.spill.nta [loc1]=f113,-256
 	;;
-	stf.spill.nta [in0]=f106,32
-	stf.spill.nta [ r3]=f107,32
+	stf.spill.nta [loc0]=f105,-256
+	stf.spill.nta [loc1]=f97,-256
 	;;
-	stf.spill.nta [in0]=f108,32
-	stf.spill.nta [ r3]=f109,32
+	stf.spill.nta [loc0]=f89,-256
+	stf.spill.nta [loc1]=f81,-256
 	;;
-	stf.spill.nta [in0]=f110,32
-	stf.spill.nta [ r3]=f111,32
+	stf.spill.nta [loc0]=f73,-256
+	stf.spill.nta [loc1]=f65,-256
 	;;
-	stf.spill.nta [in0]=f112,32
-	stf.spill.nta [ r3]=f113,32
+	stf.spill.nta [loc0]=f57,-256
+	stf.spill.nta [loc1]=f49,-256
+	adds loc2=96*16-128,in0
 	;;
-	stf.spill.nta [in0]=f114,32
-	stf.spill.nta [ r3]=f115,32
+	stf.spill.nta [loc0]=f41,-256
+	stf.spill.nta [loc1]=f33,-256
+	adds loc3=96*16-128-128,in0
 	;;
-	stf.spill.nta [in0]=f116,32
-	stf.spill.nta [ r3]=f117,32
+	stf.spill.nta [loc2]=f120,-256
+	stf.spill.nta [loc3]=f112,-256
 	;;
-	stf.spill.nta [in0]=f118,32
-	stf.spill.nta [ r3]=f119,32
+	stf.spill.nta [loc2]=f104,-256
+	stf.spill.nta [loc3]=f96,-256
 	;;
-	stf.spill.nta [in0]=f120,32
-	stf.spill.nta [ r3]=f121,32
+	stf.spill.nta [loc2]=f88,-256
+	stf.spill.nta [loc3]=f80,-256
 	;;
-	stf.spill.nta [in0]=f122,32
-	stf.spill.nta [ r3]=f123,32
+	stf.spill.nta [loc2]=f72,-256
+	stf.spill.nta [loc3]=f64,-256
 	;;
-	stf.spill.nta [in0]=f124,32
-	stf.spill.nta [ r3]=f125,32
+	stf.spill.nta [loc2]=f56,-256
+	stf.spill.nta [loc3]=f48,-256
 	;;
-	stf.spill.nta [in0]=f126,32
-	stf.spill.nta [ r3]=f127,32
+	stf.spill.nta [loc2]=f40
+	stf.spill.nta [loc3]=f32
 	br.ret.sptk.many rp
 END(__ia64_save_fpu)
 
 GLOBAL_ENTRY(__ia64_load_fpu)
-	alloc r2=ar.pfs,1,0,0,0
-	adds r3=16,in0
+	alloc r2=ar.pfs,1,2,0,0
+	adds r3=128,in0
+	adds r14=256,in0
+	adds r15=384,in0
+	mov loc0=512
+	mov loc1=-1024+16
 	;;
-	ldf.fill.nta f32=[in0],32
-	ldf.fill.nta f33=[ r3],32
+	ldf.fill.nta f32=[in0],loc0
+	ldf.fill.nta f40=[ r3],loc0
+	ldf.fill.nta f48=[r14],loc0
+	ldf.fill.nta f56=[r15],loc0
 	;;
-	ldf.fill.nta f34=[in0],32
-	ldf.fill.nta f35=[ r3],32
+	ldf.fill.nta f64=[in0],loc0
+	ldf.fill.nta f72=[ r3],loc0
+	ldf.fill.nta f80=[r14],loc0
+	ldf.fill.nta f88=[r15],loc0
 	;;
-	ldf.fill.nta f36=[in0],32
-	ldf.fill.nta f37=[ r3],32
+	ldf.fill.nta f96=[in0],loc1
+	ldf.fill.nta f104=[ r3],loc1
+	ldf.fill.nta f112=[r14],loc1
+	ldf.fill.nta f120=[r15],loc1
 	;;
-	ldf.fill.nta f38=[in0],32
-	ldf.fill.nta f39=[ r3],32
+	ldf.fill.nta f33=[in0],loc0
+	ldf.fill.nta f41=[ r3],loc0
+	ldf.fill.nta f49=[r14],loc0
+	ldf.fill.nta f57=[r15],loc0
 	;;
-	ldf.fill.nta f40=[in0],32
-	ldf.fill.nta f41=[ r3],32
+	ldf.fill.nta f65=[in0],loc0
+	ldf.fill.nta f73=[ r3],loc0
+	ldf.fill.nta f81=[r14],loc0
+	ldf.fill.nta f89=[r15],loc0
 	;;
-	ldf.fill.nta f42=[in0],32
-	ldf.fill.nta f43=[ r3],32
+	ldf.fill.nta f97=[in0],loc1
+	ldf.fill.nta f105=[ r3],loc1
+	ldf.fill.nta f113=[r14],loc1
+	ldf.fill.nta f121=[r15],loc1
 	;;
-	ldf.fill.nta f44=[in0],32
-	ldf.fill.nta f45=[ r3],32
+	ldf.fill.nta f34=[in0],loc0
+	ldf.fill.nta f42=[ r3],loc0
+	ldf.fill.nta f50=[r14],loc0
+	ldf.fill.nta f58=[r15],loc0
 	;;
-	ldf.fill.nta f46=[in0],32
-	ldf.fill.nta f47=[ r3],32
+	ldf.fill.nta f66=[in0],loc0
+	ldf.fill.nta f74=[ r3],loc0
+	ldf.fill.nta f82=[r14],loc0
+	ldf.fill.nta f90=[r15],loc0
 	;;
-	ldf.fill.nta f48=[in0],32
-	ldf.fill.nta f49=[ r3],32
+	ldf.fill.nta f98=[in0],loc1
+	ldf.fill.nta f106=[ r3],loc1
+	ldf.fill.nta f114=[r14],loc1
+	ldf.fill.nta f122=[r15],loc1
 	;;
-	ldf.fill.nta f50=[in0],32
-	ldf.fill.nta f51=[ r3],32
+	ldf.fill.nta f35=[in0],loc0
+	ldf.fill.nta f43=[ r3],loc0
+	ldf.fill.nta f51=[r14],loc0
+	ldf.fill.nta f59=[r15],loc0
 	;;
-	ldf.fill.nta f52=[in0],32
-	ldf.fill.nta f53=[ r3],32
+	ldf.fill.nta f67=[in0],loc0
+	ldf.fill.nta f75=[ r3],loc0
+	ldf.fill.nta f83=[r14],loc0
+	ldf.fill.nta f91=[r15],loc0
 	;;
-	ldf.fill.nta f54=[in0],32
-	ldf.fill.nta f55=[ r3],32
+	ldf.fill.nta f99=[in0],loc1
+	ldf.fill.nta f107=[ r3],loc1
+	ldf.fill.nta f115=[r14],loc1
+	ldf.fill.nta f123=[r15],loc1
 	;;
-	ldf.fill.nta f56=[in0],32
-	ldf.fill.nta f57=[ r3],32
+	ldf.fill.nta f36=[in0],loc0
+	ldf.fill.nta f44=[ r3],loc0
+	ldf.fill.nta f52=[r14],loc0
+	ldf.fill.nta f60=[r15],loc0
 	;;
-	ldf.fill.nta f58=[in0],32
-	ldf.fill.nta f59=[ r3],32
+	ldf.fill.nta f68=[in0],loc0
+	ldf.fill.nta f76=[ r3],loc0
+	ldf.fill.nta f84=[r14],loc0
+	ldf.fill.nta f92=[r15],loc0
 	;;
-	ldf.fill.nta f60=[in0],32
-	ldf.fill.nta f61=[ r3],32
+	ldf.fill.nta f100=[in0],loc1
+	ldf.fill.nta f108=[ r3],loc1
+	ldf.fill.nta f116=[r14],loc1
+	ldf.fill.nta f124=[r15],loc1
 	;;
-	ldf.fill.nta f62=[in0],32
-	ldf.fill.nta f63=[ r3],32
+	ldf.fill.nta f37=[in0],loc0
+	ldf.fill.nta f45=[ r3],loc0
+	ldf.fill.nta f53=[r14],loc0
+	ldf.fill.nta f61=[r15],loc0
 	;;
-	ldf.fill.nta f64=[in0],32
-	ldf.fill.nta f65=[ r3],32
+	ldf.fill.nta f69=[in0],loc0
+	ldf.fill.nta f77=[ r3],loc0
+	ldf.fill.nta f85=[r14],loc0
+	ldf.fill.nta f93=[r15],loc0
 	;;
-	ldf.fill.nta f66=[in0],32
-	ldf.fill.nta f67=[ r3],32
+	ldf.fill.nta f101=[in0],loc1
+	ldf.fill.nta f109=[ r3],loc1
+	ldf.fill.nta f117=[r14],loc1
+	ldf.fill.nta f125=[r15],loc1
 	;;
-	ldf.fill.nta f68=[in0],32
-	ldf.fill.nta f69=[ r3],32
+	ldf.fill.nta f38 =[in0],loc0
+	ldf.fill.nta f46 =[ r3],loc0
+	ldf.fill.nta f54 =[r14],loc0
+	ldf.fill.nta f62 =[r15],loc0
 	;;
-	ldf.fill.nta f70=[in0],32
-	ldf.fill.nta f71=[ r3],32
+	ldf.fill.nta f70 =[in0],loc0
+	ldf.fill.nta f78 =[ r3],loc0
+	ldf.fill.nta f86 =[r14],loc0
+	ldf.fill.nta f94 =[r15],loc0
 	;;
-	ldf.fill.nta f72=[in0],32
-	ldf.fill.nta f73=[ r3],32
+	ldf.fill.nta f102=[in0],loc1
+	ldf.fill.nta f110=[ r3],loc1
+	ldf.fill.nta f118=[r14],loc1
+	ldf.fill.nta f126=[r15],loc1
 	;;
-	ldf.fill.nta f74=[in0],32
-	ldf.fill.nta f75=[ r3],32
+	ldf.fill.nta f39 =[in0],loc0
+	ldf.fill.nta f47 =[ r3],loc0
+	ldf.fill.nta f55 =[r14],loc0
+	ldf.fill.nta f63 =[r15],loc0
 	;;
-	ldf.fill.nta f76=[in0],32
-	ldf.fill.nta f77=[ r3],32
+	ldf.fill.nta f71 =[in0],loc0
+	ldf.fill.nta f79 =[ r3],loc0
+	ldf.fill.nta f87 =[r14],loc0
+	ldf.fill.nta f95 =[r15],loc0
 	;;
-	ldf.fill.nta f78=[in0],32
-	ldf.fill.nta f79=[ r3],32
-	;;
-	ldf.fill.nta f80=[in0],32
-	ldf.fill.nta f81=[ r3],32
-	;;
-	ldf.fill.nta f82=[in0],32
-	ldf.fill.nta f83=[ r3],32
-	;;
-	ldf.fill.nta f84=[in0],32
-	ldf.fill.nta f85=[ r3],32
-	;;
-	ldf.fill.nta f86=[in0],32
-	ldf.fill.nta f87=[ r3],32
-	;;
-	ldf.fill.nta f88=[in0],32
-	ldf.fill.nta f89=[ r3],32
-	;;
-	ldf.fill.nta f90=[in0],32
-	ldf.fill.nta f91=[ r3],32
-	;;
-	ldf.fill.nta f92=[in0],32
-	ldf.fill.nta f93=[ r3],32
-	;;
-	ldf.fill.nta f94=[in0],32
-	ldf.fill.nta f95=[ r3],32
-	;;
-	ldf.fill.nta f96=[in0],32
-	ldf.fill.nta f97=[ r3],32
-	;;
-	ldf.fill.nta f98=[in0],32
-	ldf.fill.nta f99=[ r3],32
-	;;
-	ldf.fill.nta f100=[in0],32
-	ldf.fill.nta f101=[ r3],32
-	;;
-	ldf.fill.nta f102=[in0],32
-	ldf.fill.nta f103=[ r3],32
-	;;
-	ldf.fill.nta f104=[in0],32
-	ldf.fill.nta f105=[ r3],32
-	;;
-	ldf.fill.nta f106=[in0],32
-	ldf.fill.nta f107=[ r3],32
-	;;
-	ldf.fill.nta f108=[in0],32
-	ldf.fill.nta f109=[ r3],32
-	;;
-	ldf.fill.nta f110=[in0],32
-	ldf.fill.nta f111=[ r3],32
-	;;
-	ldf.fill.nta f112=[in0],32
-	ldf.fill.nta f113=[ r3],32
-	;;
-	ldf.fill.nta f114=[in0],32
-	ldf.fill.nta f115=[ r3],32
-	;;
-	ldf.fill.nta f116=[in0],32
-	ldf.fill.nta f117=[ r3],32
-	;;
-	ldf.fill.nta f118=[in0],32
-	ldf.fill.nta f119=[ r3],32
-	;;
-	ldf.fill.nta f120=[in0],32
-	ldf.fill.nta f121=[ r3],32
-	;;
-	ldf.fill.nta f122=[in0],32
-	ldf.fill.nta f123=[ r3],32
-	;;
-	ldf.fill.nta f124=[in0],32
-	ldf.fill.nta f125=[ r3],32
-	;;
-	ldf.fill.nta f126=[in0],32
-	ldf.fill.nta f127=[ r3],32
+	ldf.fill.nta f103=[in0]
+	ldf.fill.nta f111=[ r3]
+	ldf.fill.nta f119=[r14]
+	ldf.fill.nta f127=[r15]
 	br.ret.sptk.many rp
 END(__ia64_load_fpu)
 
 GLOBAL_ENTRY(__ia64_init_fpu)
-	alloc r2=ar.pfs,0,0,0,0
-	stf.spill [sp]=f0
-	mov      f32=f0
+	stf.spill [sp]=f0		// M3
+	mov	 f32=f0			// F
+	nop.b	 0
+
+	ldfps	 f33,f34=[sp]		// M0
+	ldfps	 f35,f36=[sp]		// M1
+	mov      f37=f0			// F
 	;;
-	ldf.fill f33=[sp]
-	ldf.fill f34=[sp]
-	mov      f35=f0
-	;;
-	ldf.fill f36=[sp]
-	ldf.fill f37=[sp]
-	mov      f38=f0
-	;;
-	ldf.fill f39=[sp]
-	ldf.fill f40=[sp]
-	mov      f41=f0
-	;;
-	ldf.fill f42=[sp]
-	ldf.fill f43=[sp]
-	mov      f44=f0
-	;;
-	ldf.fill f45=[sp]
-	ldf.fill f46=[sp]
-	mov      f47=f0
-	;;
-	ldf.fill f48=[sp]
-	ldf.fill f49=[sp]
-	mov      f50=f0
-	;;
-	ldf.fill f51=[sp]
-	ldf.fill f52=[sp]
-	mov      f53=f0
-	;;
-	ldf.fill f54=[sp]
-	ldf.fill f55=[sp]
-	mov      f56=f0
-	;;
-	ldf.fill f57=[sp]
-	ldf.fill f58=[sp]
-	mov      f59=f0
-	;;
-	ldf.fill f60=[sp]
-	ldf.fill f61=[sp]
-	mov      f62=f0
-	;;
-	ldf.fill f63=[sp]
-	ldf.fill f64=[sp]
-	mov      f65=f0
-	;;
-	ldf.fill f66=[sp]
-	ldf.fill f67=[sp]
-	mov      f68=f0
-	;;
-	ldf.fill f69=[sp]
-	ldf.fill f70=[sp]
-	mov      f71=f0
-	;;
-	ldf.fill f72=[sp]
-	ldf.fill f73=[sp]
-	mov      f74=f0
-	;;
-	ldf.fill f75=[sp]
-	ldf.fill f76=[sp]
-	mov      f77=f0
-	;;
-	ldf.fill f78=[sp]
-	ldf.fill f79=[sp]
-	mov      f80=f0
-	;;
-	ldf.fill f81=[sp]
-	ldf.fill f82=[sp]
-	mov      f83=f0
-	;;
-	ldf.fill f84=[sp]
-	ldf.fill f85=[sp]
-	mov      f86=f0
-	;;
-	ldf.fill f87=[sp]
-	ldf.fill f88=[sp]
-	mov      f89=f0
-	;;
-	ldf.fill f90=[sp]
-	ldf.fill f91=[sp]
-	mov      f92=f0
-	;;
-	ldf.fill f93=[sp]
-	ldf.fill f94=[sp]
-	mov      f95=f0
-	;;
-	ldf.fill f96=[sp]
-	ldf.fill f97=[sp]
-	mov      f98=f0
-	;;
-	ldf.fill f99=[sp]
-	ldf.fill f100=[sp]
-	mov      f101=f0
-	;;
-	ldf.fill f102=[sp]
-	ldf.fill f103=[sp]
-	mov      f104=f0
-	;;
-	ldf.fill f105=[sp]
-	ldf.fill f106=[sp]
-	mov      f107=f0
-	;;
-	ldf.fill f108=[sp]
-	ldf.fill f109=[sp]
-	mov      f110=f0
-	;;
-	ldf.fill f111=[sp]
-	ldf.fill f112=[sp]
-	mov      f113=f0
-	;;
-	ldf.fill f114=[sp]
-	ldf.fill f115=[sp]
-	mov      f116=f0
-	;;
-	ldf.fill f117=[sp]
-	ldf.fill f118=[sp]
-	mov      f119=f0
-	;;
-	ldf.fill f120=[sp]
-	ldf.fill f121=[sp]
-	mov      f122=f0
-	;;
-	ldf.fill f123=[sp]
-	ldf.fill f124=[sp]
-	mov      f125=f0
-	;;
-	ldf.fill f126=[sp]
-	mov      f127=f0
-	br.ret.sptk.many rp
+
+	setf.s	 f38=r0			// M2
+	setf.s	 f39=r0			// M3
+	mov      f40=f0			// F
+
+	ldfps	 f41,f42=[sp]		// M0
+	ldfps	 f43,f44=[sp]		// M1
+	mov      f45=f0			// F
+
+	setf.s	 f46=r0			// M2
+	setf.s	 f47=r0			// M3
+	mov      f48=f0			// F
+
+	ldfps	 f49,f50=[sp]		// M0
+	ldfps	 f51,f52=[sp]		// M1
+	mov      f53=f0			// F
+
+	setf.s	 f54=r0			// M2
+	setf.s	 f55=r0			// M3
+	mov      f56=f0			// F
+
+	ldfps	 f57,f58=[sp]		// M0
+	ldfps	 f59,f60=[sp]		// M1
+	mov      f61=f0			// F
+
+	setf.s	 f62=r0			// M2
+	setf.s	 f63=r0			// M3
+	mov      f64=f0			// F
+
+	ldfps	 f65,f66=[sp]		// M0
+	ldfps	 f67,f68=[sp]		// M1
+	mov      f69=f0			// F
+
+	setf.s	 f70=r0			// M2
+	setf.s	 f71=r0			// M3
+	mov      f72=f0			// F
+
+	ldfps	 f73,f74=[sp]		// M0
+	ldfps	 f75,f76=[sp]		// M1
+	mov      f77=f0			// F
+
+	setf.s	 f78=r0			// M2
+	setf.s	 f79=r0			// M3
+	mov      f80=f0			// F
+
+	ldfps	 f81,f82=[sp]		// M0
+	ldfps	 f83,f84=[sp]		// M1
+	mov      f85=f0			// F
+
+	setf.s	 f86=r0			// M2
+	setf.s	 f87=r0			// M3
+	mov      f88=f0			// F
+
+	/*
+	 * When the instructions are cached, it would be faster to initialize
+	 * the remaining registers with simply mov instructions (F-unit).
+	 * This gets the time down to ~29 cycles.  However, this would use up
+	 * 33 bundles, whereas continuing with the above pattern yields
+	 * 10 bundles and ~30 cycles.
+	 */
+
+	ldfps	 f89,f90=[sp]		// M0
+	ldfps	 f91,f92=[sp]		// M1
+	mov      f93=f0			// F
+
+	setf.s	 f94=r0			// M2
+	setf.s	 f95=r0			// M3
+	mov      f96=f0			// F
+
+	ldfps	 f97,f98=[sp]		// M0
+	ldfps	 f99,f100=[sp]		// M1
+	mov      f101=f0		// F
+
+	setf.s	 f102=r0		// M2
+	setf.s	 f103=r0		// M3
+	mov      f104=f0		// F
+
+	ldfps	 f105,f106=[sp]		// M0
+	ldfps	 f107,f108=[sp]		// M1
+	mov      f109=f0		// F
+
+	setf.s	 f110=r0		// M2
+	setf.s	 f111=r0		// M3
+	mov      f112=f0		// F
+
+	ldfps	 f113,f114=[sp]		// M0
+	ldfps	 f115,f116=[sp]		// M1
+	mov      f117=f0		// F
+
+	setf.s	 f118=r0		// M2
+	setf.s	 f119=r0		// M3
+	mov      f120=f0		// F
+
+	ldfps	 f121,f122=[sp]		// M0
+	ldfps	 f123,f124=[sp]		// M1
+	mov      f125=f0		// F
+
+	setf.s	 f126=r0		// M2
+	setf.s	 f127=r0		// M3
+	br.ret.sptk.many rp		// F
 END(__ia64_init_fpu)
 
 /*
- * Switch execution mode from virtual to physical or vice versa.
+ * Switch execution mode from virtual to physical
  *
  * Inputs:
  *	r16 = new psr to establish
  *
  * Note: RSE must already be in enforced lazy mode
  */
-GLOBAL_ENTRY(ia64_switch_mode)
+GLOBAL_ENTRY(ia64_switch_mode_phys)
  {
 	alloc r2=ar.pfs,0,0,0,0
 	rsm psr.i | psr.ic		// disable interrupts and interrupt collection
@@ -711,35 +716,86 @@ GLOBAL_ENTRY(ia64_switch_mode)
  {
 	flushrs				// must be first insn in group
 	srlz.i
-	shr.u r19=r15,61		// r19 <- top 3 bits of current IP
  }
 	;;
 	mov cr.ipsr=r16			// set new PSR
-	add r3=1f-ia64_switch_mode,r15
-	xor r15=0x7,r19			// flip the region bits
+	add r3=1f-ia64_switch_mode_phys,r15
 
 	mov r17=ar.bsp
 	mov r14=rp			// get return address into a general register
+	;;
 
-	// switch RSE backing store:
+	// going to physical mode, use tpa to translate virt->phys
+	tpa r17=r17
+	tpa r3=r3
+	tpa sp=sp
+	tpa r14=r14
 	;;
-	dep r17=r15,r17,61,3		// make ar.bsp physical or virtual
+
 	mov r18=ar.rnat			// save ar.rnat
-	;;
 	mov ar.bspstore=r17		// this steps on ar.rnat
-	dep r3=r15,r3,61,3		// make rfi return address physical or virtual
-	;;
 	mov cr.iip=r3
 	mov cr.ifs=r0
-	dep sp=r15,sp,61,3		// make stack pointer physical or virtual
 	;;
 	mov ar.rnat=r18			// restore ar.rnat
-	dep r14=r15,r14,61,3		// make function return address physical or virtual
 	rfi				// must be last insn in group
 	;;
 1:	mov rp=r14
 	br.ret.sptk.many rp
-END(ia64_switch_mode)
+END(ia64_switch_mode_phys)
+
+/*
+ * Switch execution mode from physical to virtual
+ *
+ * Inputs:
+ *	r16 = new psr to establish
+ *
+ * Note: RSE must already be in enforced lazy mode
+ */
+GLOBAL_ENTRY(ia64_switch_mode_virt)
+ {
+	alloc r2=ar.pfs,0,0,0,0
+	rsm psr.i | psr.ic		// disable interrupts and interrupt collection
+	mov r15=ip
+ }
+	;;
+ {
+	flushrs				// must be first insn in group
+	srlz.i
+ }
+	;;
+	mov cr.ipsr=r16			// set new PSR
+	add r3=1f-ia64_switch_mode_virt,r15
+
+	mov r17=ar.bsp
+	mov r14=rp			// get return address into a general register
+	;;
+
+	// going to virtual
+	//   - for code addresses, set upper bits of addr to KERNEL_START
+	//   - for stack addresses, set upper 3 bits to 0xe.... Dont change any of the
+	//     lower bits since we want it to stay identity mapped
+	movl r18=KERNEL_START
+	dep r3=0,r3,KERNEL_TR_PAGE_SHIFT,64-KERNEL_TR_PAGE_SHIFT
+	dep r14=0,r14,KERNEL_TR_PAGE_SHIFT,64-KERNEL_TR_PAGE_SHIFT
+	dep r17=-1,r17,61,3
+	dep sp=-1,sp,61,3
+	;;
+	or r3=r3,r18
+	or r14=r14,r18
+	;;
+
+	mov r18=ar.rnat			// save ar.rnat
+	mov ar.bspstore=r17		// this steps on ar.rnat
+	mov cr.iip=r3
+	mov cr.ifs=r0
+	;;
+	mov ar.rnat=r18			// restore ar.rnat
+	rfi				// must be last insn in group
+	;;
+1:	mov rp=r14
+	br.ret.sptk.many rp
+END(ia64_switch_mode_virt)
 
 #ifdef CONFIG_IA64_BRL_EMU
 
@@ -764,71 +820,80 @@ SET_REG(b5);
 #endif /* CONFIG_IA64_BRL_EMU */
 
 #ifdef CONFIG_SMP
-
 	/*
-	 * This routine handles spinlock contention.  It uses a simple exponential backoff
-	 * algorithm to reduce unnecessary bus traffic.  The initial delay is selected from
-	 * the low-order bits of the cycle counter (a cheap "randomizer").  I'm sure this
-	 * could use additional tuning, especially on systems with a large number of CPUs.
-	 * Also, I think the maximum delay should be made a function of the number of CPUs in
-	 * the system. --davidm 00/08/05
+	 * This routine handles spinlock contention.  It uses a non-standard calling
+	 * convention to avoid converting leaf routines into interior routines.  Because
+	 * of this special convention, there are several restrictions:
 	 *
-	 * WARNING: This is not a normal procedure.  It gets called from C code without
-	 * the compiler knowing about it.  Thus, we must not use any scratch registers
-	 * beyond those that were declared "clobbered" at the call-site (see spin_lock()
-	 * macro).  We may not even use the stacked registers, because that could overwrite
-	 * output registers.  Similarly, we can't use the scratch stack area as it may be
-	 * in use, too.
+	 * - do not use gp relative variables, this code is called from the kernel
+	 *   and from modules, r1 is undefined.
+	 * - do not use stacked registers, the caller owns them.
+	 * - do not use the scratch stack space, the caller owns it.
+	 * - do not use any registers other than the ones listed below
 	 *
 	 * Inputs:
-	 *	ar.ccv = 0 (and available for use)
-	 *	r28 = available for use
-	 *	r29 = available for use
-	 *	r30 = non-zero (and available for use)
-	 *	r31 = address of lock we're trying to acquire
-	 *	p15 = available for use
+	 *   ar.pfs - saved CFM of caller
+	 *   ar.ccv - 0 (and available for use)
+	 *   r28    - available for use.
+	 *   r29    - available for use.
+	 *   r30    - available for use.
+	 *   r31    - address of lock, available for use.
+	 *   b6     - return address
+	 *   p14    - available for use.
+	 *
+	 * If you patch this code to use more registers, do not forget to update
+	 * the clobber lists for spin_lock() in include/asm-ia64/spinlock.h.
 	 */
 
-#	define delay	r28
-#	define timeout	r29
-#	define tmp	r30
+#if __GNUC__ < 3 || (__GNUC__ == 3 && __GNUC_MINOR__ < 4)
+
+GLOBAL_ENTRY(ia64_spinlock_contention_pre3_4)
+	.prologue
+	.save ar.pfs, r0	// this code effectively has a zero frame size
+	.save rp, r28
+	.body
+	nop 0
+	nop 0
+	.restore sp		// pop existing prologue after next insn
+	mov b6 = r28
+	.prologue
+	.save ar.pfs, r0
+	.altrp b6
+	.body
+.wait:
+	// exponential backoff, kdb, lockmeter etc. go in here
+	hint @pause
+	ld4.bias r30=[r31]
+	nop 0
+	;;
+	cmp4.eq p14,p0=r30,r0
+(p14)	br.cond.sptk.few b6	// lock is now free, try to acquire
+	br.cond.sptk.few .wait
+END(ia64_spinlock_contention_pre3_4)
+
+#else
 
 GLOBAL_ENTRY(ia64_spinlock_contention)
-	mov tmp=ar.itc
+	.prologue
+	.altrp b6
+	.body
+.wait:
+	// exponential backoff, kdb, lockmeter etc. go in here
+	hint @pause
+	ld4.bias r30=[r31]
 	;;
-	and delay=0x3f,tmp
+	cmp4.ne p14,p0=r30,r0
+	mov r30 = 1
+(p14)	br.cond.sptk.few .wait
 	;;
+	cmpxchg4.acq r30=[r31], r30, ar.ccv
+	;;
+	cmp4.ne p14,p0=r0,r30
+(p14)	br.cond.sptk.few .wait
 
-.retry:	add timeout=tmp,delay
-	shl delay=delay,1
-	;;
-	dep delay=delay,r0,0,13	// limit delay to 8192 cycles
-	;;
-	// delay a little...
-.wait:	sub tmp=tmp,timeout
-	or delay=0xf,delay	// make sure delay is non-zero (otherwise we get stuck with 0)
-	;;
-	cmp.lt p15,p0=tmp,r0
-	mov tmp=ar.itc
-(p15)	br.cond.sptk .wait
-	;;
-	ld4 tmp=[r31]
-	;;
-	cmp.ne p15,p0=tmp,r0
-	mov tmp=ar.itc
-(p15)	br.cond.sptk .retry	// lock is still busy
-	;;
-	// try acquiring lock (we know ar.ccv is still zero!):
-	mov tmp=1
-	;;
-	cmpxchg4.acq tmp=[r31],tmp,ar.ccv
-	;;
-	cmp.eq p15,p0=tmp,r0
-
-	mov tmp=ar.itc
-(p15)	br.ret.sptk.many b7	// got lock -> return
-	br .retry		// still no luck, retry
-
+	br.ret.sptk.many b6	// lock is now taken
 END(ia64_spinlock_contention)
 
 #endif
+
+#endif /* CONFIG_SMP */

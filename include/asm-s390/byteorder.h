@@ -13,77 +13,101 @@
 
 #ifdef __GNUC__
 
-static __inline__ __const__ __u32 ___arch__swab32(__u32 x)
+#ifdef __s390x__
+static __inline__ __const__ __u64 ___arch__swab64p(__u64 *x)
 {
-  __u32 temp;
+	__u64 result;
 
-  __asm__ __volatile__ (
-          "        st    %0,0(%1)\n"
-          "        icm   %0,8,3(%1)\n"
-          "        icm   %0,4,2(%1)\n"
-          "        icm   %0,2,1(%1)\n"
-          "        ic    %0,0(%1)"
-          : "+&d" (x) : "a" (&temp) : "cc" );
-  return x;
+	__asm__ __volatile__ (
+		"   lrvg %0,%1"
+		: "=d" (result) : "m" (*x) );
+	return result;
 }
+
+static __inline__ __const__ __u64 ___arch__swab64(__u64 x)
+{
+	__u64 result;
+
+	__asm__ __volatile__ (
+		"   lrvgr %0,%1"
+		: "=d" (result) : "d" (x) );
+	return result;
+}
+
+static __inline__ void ___arch__swab64s(__u64 *x)
+{
+	*x = ___arch__swab64p(x);
+}
+#endif /* __s390x__ */
 
 static __inline__ __const__ __u32 ___arch__swab32p(__u32 *x)
 {
-  __u32 result;
+	__u32 result;
+	
+	__asm__ __volatile__ (
+#ifndef __s390x__
+		"        icm   %0,8,3(%1)\n"
+		"        icm   %0,4,2(%1)\n"
+		"        icm   %0,2,1(%1)\n"
+		"        ic    %0,0(%1)"
+		: "=&d" (result) : "a" (x) : "cc" );
+#else /* __s390x__ */
+		"   lrv  %0,%1"
+		: "=d" (result) : "m" (*x) );
+#endif /* __s390x__ */
+	return result;
+}
 
-  __asm__ __volatile__ (
-          "        icm   %0,8,3(%1)\n"
-          "        icm   %0,4,2(%1)\n"
-          "        icm   %0,2,1(%1)\n"
-          "        ic    %0,0(%1)"
-          : "=&d" (result) : "a" (x) : "cc" );
-  return result;
+static __inline__ __const__ __u32 ___arch__swab32(__u32 x)
+{
+#ifndef __s390x__
+	return ___arch__swab32p(&x);
+#else /* __s390x__ */
+	__u32 result;
+	
+	__asm__ __volatile__ (
+		"   lrvr  %0,%1"
+		: "=d" (result) : "d" (x) );
+	return result;
+#endif /* __s390x__ */
 }
 
 static __inline__ void ___arch__swab32s(__u32 *x)
 {
-  __asm__ __volatile__ (
-          "        icm   0,8,3(%0)\n"
-          "        icm   0,4,2(%0)\n"
-          "        icm   0,2,1(%0)\n"
-          "        ic    0,0(%0)\n"
-          "        st    0,0(%0)"
-          : : "a" (x) : "0", "memory", "cc");
-}
-
-static __inline__ __const__ __u16 ___arch__swab16(__u16 x)
-{
-  __u16 temp;
-
-  __asm__ __volatile__ (
-          "        sth   %0,0(%1)\n"
-          "        icm   %0,2,1(%1)\n"
-          "        ic    %0,0(%1)\n"
-          : "+&d" (x) : "a" (&temp) : "memory", "cc" );
-  return x;
+	*x = ___arch__swab32p(x);
 }
 
 static __inline__ __const__ __u16 ___arch__swab16p(__u16 *x)
 {
-  __u16 result;
+	__u16 result;
+	
+	__asm__ __volatile__ (
+#ifndef __s390x__
+		"        icm   %0,2,1(%1)\n"
+		"        ic    %0,0(%1)\n"
+		: "=&d" (result) : "a" (x) : "cc" );
+#else /* __s390x__ */
+		"   lrvh %0,%1"
+		: "=d" (result) : "m" (*x) );
+#endif /* __s390x__ */
+	return result;
+}
 
-  __asm__ __volatile__ (
-          "        sr    %0,%0\n"
-          "        icm   %0,2,1(%1)\n"
-          "        ic    %0,0(%1)\n"
-          : "=&d" (result) : "a" (x) : "cc" );
-  return result;
+static __inline__ __const__ __u16 ___arch__swab16(__u16 x)
+{
+	return ___arch__swab16p(&x);
 }
 
 static __inline__ void ___arch__swab16s(__u16 *x)
 {
-  __asm__ __volatile__(
-          "        icm   0,2,1(%0)\n"
-          "        ic    0,0(%0)\n"
-          "        sth   0,0(%0)"
-          : : "a" (x) : "0", "memory", "cc" );
+	*x = ___arch__swab16p(x);
 }
 
+#ifdef __s390x__
+#define __arch__swab64(x) ___arch__swab64(x)
+#define __arch__swab64p(x) ___arch__swab64p(x)
+#define __arch__swab64s(x) ___arch__swab64s(x)
+#endif /* __s390x__ */
 #define __arch__swab32(x) ___arch__swab32(x)
 #define __arch__swab16(x) ___arch__swab16(x)
 #define __arch__swab32p(x) ___arch__swab32p(x)
@@ -91,10 +115,14 @@ static __inline__ void ___arch__swab16s(__u16 *x)
 #define __arch__swab32s(x) ___arch__swab32s(x)
 #define __arch__swab16s(x) ___arch__swab16s(x)
 
+#ifndef __s390x__
 #if !defined(__STRICT_ANSI__) || defined(__KERNEL__)
 #  define __BYTEORDER_HAS_U64__
 #  define __SWAB_64_THRU_32__
 #endif
+#else /* __s390x__ */
+#define __BYTEORDER_HAS_U64__
+#endif /* __s390x__ */
 
 #endif /* __GNUC__ */
 

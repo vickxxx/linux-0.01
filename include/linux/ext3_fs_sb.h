@@ -19,15 +19,9 @@
 #ifdef __KERNEL__
 #include <linux/timer.h>
 #include <linux/wait.h>
+#include <linux/blockgroup_lock.h>
+#include <linux/percpu_counter.h>
 #endif
-
-/*
- * The following is not needed anymore since the descriptors buffer
- * heads are now dynamically allocated
- */
-/* #define EXT3_MAX_GROUP_DESC	8 */
-
-#define EXT3_MAX_GROUP_LOADED	8
 
 /*
  * third extended-fs super-block data in memory
@@ -46,12 +40,6 @@ struct ext3_sb_info {
 	struct buffer_head * s_sbh;	/* Buffer containing the super block */
 	struct ext3_super_block * s_es;	/* Pointer to the super block in the buffer */
 	struct buffer_head ** s_group_desc;
-	unsigned short s_loaded_inode_bitmaps;
-	unsigned short s_loaded_block_bitmaps;
-	unsigned long s_inode_bitmap_number[EXT3_MAX_GROUP_LOADED];
-	struct buffer_head * s_inode_bitmap[EXT3_MAX_GROUP_LOADED];
-	unsigned long s_block_bitmap_number[EXT3_MAX_GROUP_LOADED];
-	struct buffer_head * s_block_bitmap[EXT3_MAX_GROUP_LOADED];
 	unsigned long  s_mount_opt;
 	uid_t s_resuid;
 	gid_t s_resgid;
@@ -61,6 +49,14 @@ struct ext3_sb_info {
 	int s_desc_per_block_bits;
 	int s_inode_size;
 	int s_first_ino;
+	u32 s_next_generation;
+	u32 s_hash_seed[4];
+	int s_def_hash_version;
+        u8 *s_debts;
+	struct percpu_counter s_freeblocks_counter;
+	struct percpu_counter s_freeinodes_counter;
+	struct percpu_counter s_dirs_counter;
+	struct blockgroup_lock s_blockgroup_lock;
 
 	/* Journaling */
 	struct inode * s_journal_inode;

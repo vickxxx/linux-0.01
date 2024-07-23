@@ -34,8 +34,11 @@
  *
  ****************************************************************************/
 
+#error Convert me to understand page+offset based scatterlists
+
 //#define DEBUG 1
 
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
@@ -47,13 +50,14 @@
 #include <linux/sched.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
-#include <linux/kdev_t.h>
 #include <linux/blk.h>
 #include <linux/timer.h>
 #include <linux/spinlock.h>
+
 #include <asm/dma.h>
 #include <asm/system.h>
 #include <asm/io.h>
+
 #include "scsi.h"
 #include "hosts.h"
 #include "pci2220i.h"
@@ -1152,6 +1156,7 @@ static int InitFailover (PADAPTER2220I padapter, POUR_DEVICE pdev)
 static void TimerExpiry (unsigned long data)
 	{
 	PADAPTER2220I	padapter = (PADAPTER2220I)data;
+	struct Scsi_Host *host = padapter->SCpnt->device->host;
 	POUR_DEVICE		pdev = padapter->pdev;
 	UCHAR			status = IDE_STATUS_BUSY;
 	UCHAR			temp, temp1;
@@ -1161,7 +1166,7 @@ static void TimerExpiry (unsigned long data)
      * Disable interrupts, if they aren't already disabled and acquire
      * the I/O spinlock.
      */
-    spin_lock_irqsave (&io_request_lock, flags);
+    spin_lock_irqsave (host->host_lock, flags);
 	DEB (printk ("\nPCI2220I: Timeout expired "));
 
 	if ( padapter->failinprog )
@@ -1295,7 +1300,7 @@ timerExpiryDone:;
      * which will enable interrupts if and only if they were
      * enabled on entry.
      */
-    spin_unlock_irqrestore (&io_request_lock, flags);
+    spin_unlock_irqrestore (host->host_lock, flags);
 	}
 /****************************************************************
  *	Name:			SetReconstruct	:LOCAL
@@ -1328,7 +1333,8 @@ static LONG SetReconstruct (POUR_DEVICE pdev, int index)
  ****************************************************************/
 static void ReconTimerExpiry (unsigned long data)
 	{
-	PADAPTER2220I	padapter;
+	PADAPTER2220I	padapter = (PADAPTER2220I)data;
+	struct Scsi_Host *host = padapter->SCpnt->device->host;
 	POUR_DEVICE		pdev;
 	ULONG			testsize = 0;
 	PIDENTIFY_DATA	pid;
@@ -1342,9 +1348,8 @@ static void ReconTimerExpiry (unsigned long data)
      * Disable interrupts, if they aren't already disabled and acquire
      * the I/O spinlock.
      */
-    spin_lock_irqsave (&io_request_lock, flags);
+    spin_lock_irqsave(host->host_lock, flags);
 
-	padapter = (PADAPTER2220I)data;
 	if ( padapter->SCpnt )
 		goto reconTimerExpiry;
 
@@ -1434,14 +1439,14 @@ static void ReconTimerExpiry (unsigned long data)
 				break;
 				}
 
-	        // test LBA and multiper sector transfer compatability
+	        // test LBA and multiper sector transfer compatibility
 			if (!pid->SupportLBA || (pid->NumSectorsPerInt < SECTORSXFER) || !pid->Valid_64_70 )
 				{
 				DEB (printk ("\npci2220i: sub 3"));
 				break;
 				}
 
-	        // test PIO/bus matering mode compatability
+	        // test PIO/bus matering mode compatibility
 			if ( (pid->MinPIOCycleWithoutFlow > 240) && !pid->SupportIORDYDisable && !padapter->timingPIO )
 				{
 				DEB (printk ("\npci2220i: sub 4"));
@@ -1567,7 +1572,7 @@ reconTimerExpiry:;
      * which will enable interrupts if and only if they were
      * enabled on entry.
      */
-    spin_unlock_irqrestore (&io_request_lock, flags);
+    spin_unlock_irqrestore(host->host_lock, flags);
 	}
 /****************************************************************
  *	Name:	Irq_Handler	:LOCAL
@@ -1581,7 +1586,7 @@ reconTimerExpiry:;
  *	Returns:		TRUE if drive is not ready in time.
  *
  ****************************************************************/
-static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	{
 	struct Scsi_Host   *shost = NULL;	// Pointer to host data block
 	PADAPTER2220I		padapter;		// Pointer to adapter control structure
@@ -1595,12 +1600,7 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	int					z;
 	ULONG				zl;
     unsigned long		flags;
-
-    /*
-     * Disable interrupts, if they aren't already disabled and acquire
-     * the I/O spinlock.
-     */
-    spin_lock_irqsave (&io_request_lock, flags);
+    int handled = 0;
 
 //	DEB (printk ("\npci2220i received interrupt\n"));
 
@@ -1619,9 +1619,11 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 	if ( !shost )
 		{
 		DEB (printk ("\npci2220i: not my interrupt"));
-		goto irq_return;
+		goto out;
 		}
 
+	handled = 1;
+	spin_lock_irqsave(shost->host_lock, flags);
 	padapter = HOSTDATA(shost);
 	pdev = padapter->pdev;
 	SCpnt = padapter->SCpnt;
@@ -2023,14 +2025,12 @@ static void Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 		zl = DID_OK << 16;
 
 	OpDone (padapter, zl);
-irq_return:;
-    /*
-     * Release the I/O spinlock and restore the original flags
-     * which will enable interrupts if and only if they were
-     * enabled on entry.
-     */
-    spin_unlock_irqrestore (&io_request_lock, flags);
-	}
+irq_return:
+    spin_unlock_irqrestore(shost->host_lock, flags);
+out:
+	return IRQ_RETVAL(handled);
+}
+
 /****************************************************************
  *	Name:	Pci2220i_QueueCommand
  *
@@ -2045,8 +2045,8 @@ irq_return:;
 int Pci2220i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	{
 	UCHAR		   *cdb = (UCHAR *)SCpnt->cmnd;					// Pointer to SCSI CDB
-	PADAPTER2220I	padapter = HOSTDATA(SCpnt->host);			// Pointer to adapter control structure
-	POUR_DEVICE		pdev	 = &padapter->device[SCpnt->target];// Pointer to device information
+	PADAPTER2220I	padapter = HOSTDATA(SCpnt->device->host);			// Pointer to adapter control structure
+	POUR_DEVICE		pdev	 = &padapter->device[SCpnt->device->id];// Pointer to device information
 	UCHAR			rc;											// command return code
 	int				z; 
 	PDEVICE_RAID1	pdr;
@@ -2077,9 +2077,9 @@ int Pci2220i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 		{
 		UCHAR			zlo, zhi;
 
-		DEB (printk ("\nPCI2242I: ID %d, LUN %d opcode %X ", SCpnt->target, SCpnt->lun, *cdb));
+		DEB (printk ("\nPCI2242I: ID %d, LUN %d opcode %X ", SCpnt->device->id, SCpnt->device->lun, *cdb));
 		padapter->pdev = pdev;
-		if ( !pdev->byte6 || SCpnt->lun )
+		if ( !pdev->byte6 || SCpnt->device->lun )
 			{
 			OpDone (padapter, DID_BAD_TARGET << 16);
 			return 0;
@@ -2142,7 +2142,7 @@ int Pci2220i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 		padapter->reconTimer.data = 0;
 		}
 		
-	if ( (SCpnt->target >= padapter->numberOfDrives) || SCpnt->lun )
+	if ( (SCpnt->device->id >= padapter->numberOfDrives) || SCpnt->device->lun )
 		{
 		OpDone (padapter, DID_BAD_TARGET << 16);
 		return 0;
@@ -2307,28 +2307,6 @@ int Pci2220i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 		}
 	return 0;
 	}
-static void internal_done(Scsi_Cmnd *SCpnt)
-	{
-	SCpnt->SCp.Status++;
-	}
-/****************************************************************
- *	Name:	Pci2220i_Command
- *
- *	Description:	Process a command from the SCSI manager.
- *
- *	Parameters:		SCpnt - Pointer to SCSI command structure.
- *
- *	Returns:		Status code.
- *
- ****************************************************************/
-int Pci2220i_Command (Scsi_Cmnd *SCpnt)
-	{
-	Pci2220i_QueueCommand (SCpnt, internal_done);
-    SCpnt->SCp.Status = 0;
-	while (!SCpnt->SCp.Status)
-		barrier ();
-	return SCpnt->result;
-	}
 /****************************************************************
  *	Name:			ReadFlash
  *
@@ -2393,7 +2371,7 @@ static USHORT GetRegs (struct Scsi_Host *pshost, BOOL bigd, struct pci_dev *pcid
 	padapter->regRemap		= zr + RTR_LOCAL_REMAP;					// 32 bit local space remap
 	padapter->regDesc		= zr + RTR_REGIONS;	  					// 32 bit local region descriptor
 	padapter->regRange		= zr + RTR_LOCAL_RANGE;					// 32 bit local range
-	padapter->regIrqControl	= zr + RTR_INT_CONTROL_STATUS;			// 16 bit interupt control and status
+	padapter->regIrqControl	= zr + RTR_INT_CONTROL_STATUS;			// 16 bit interrupt control and status
 	padapter->regScratchPad	= zr + RTR_MAILBOX;	  					// 16 byte scratchpad I/O base address
 
 	padapter->regBase		= zl;
@@ -2534,12 +2512,6 @@ int Pci2220i_Detect (Scsi_Host_Template *tpnt)
 	UCHAR				device;
 	struct pci_dev	   *pcidev = NULL;
 
-	if ( !pci_present () )
-		{
-		printk ("pci2220i: PCI BIOS not present\n");
-		return 0;
-		}
-
 	while ( (pcidev = pci_find_device (VENDOR_PSI, DEVICE_DALE_1, pcidev)) != NULL )
 		{
 		if (pci_enable_device(pcidev))
@@ -2553,7 +2525,7 @@ int Pci2220i_Detect (Scsi_Host_Template *tpnt)
 		if ( GetRegs (pshost, FALSE, pcidev) )
 			goto unregister;
 
-		scsi_set_pci_device(pshost, pcidev);
+		scsi_set_device(pshost, &pcidev->dev);
 		pshost->max_id = padapter->numberOfDrives;
 		for ( z = 0;  z < padapter->numberOfDrives;  z++ )
 			{
@@ -2795,8 +2767,8 @@ unregister1:;
  ****************************************************************/
 int Pci2220i_Abort (Scsi_Cmnd *SCpnt)
 	{
-	PADAPTER2220I	padapter = HOSTDATA(SCpnt->host);			// Pointer to adapter control structure
-	POUR_DEVICE		pdev	 = &padapter->device[SCpnt->target];// Pointer to device information
+	PADAPTER2220I	padapter = HOSTDATA(SCpnt->device->host);			// Pointer to adapter control structure
+	POUR_DEVICE		pdev	 = &padapter->device[SCpnt->device->id];// Pointer to device information
 
 	if ( !padapter->SCpnt )
 		return SCSI_ABORT_NOT_RUNNING;
@@ -2827,8 +2799,8 @@ int Pci2220i_Abort (Scsi_Cmnd *SCpnt)
  ****************************************************************/
 int Pci2220i_Reset (Scsi_Cmnd *SCpnt, unsigned int reset_flags)
 	{
-	PADAPTER2220I	padapter = HOSTDATA(SCpnt->host);			// Pointer to adapter control structure
-	POUR_DEVICE		pdev	 = &padapter->device[SCpnt->target];// Pointer to device information
+	PADAPTER2220I	padapter = HOSTDATA(SCpnt->device->host);			// Pointer to adapter control structure
+	POUR_DEVICE		pdev	 = &padapter->device[SCpnt->device->id];// Pointer to device information
 
 	if ( padapter->atapi )
 		{
@@ -2894,8 +2866,6 @@ int Pci2220i_Release (struct Scsi_Host *pshost)
     return 0;
 	}
 
-#include "sd.h"
-
 /****************************************************************
  *	Name:	Pci2220i_BiosParam
  *
@@ -2909,13 +2879,14 @@ int Pci2220i_Release (struct Scsi_Host *pshost)
  *	Returns:		zero.
  *
  ****************************************************************/
-int Pci2220i_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
+int Pci2220i_BiosParam (struct scsi_device *sdev, struct block_device *dev,
+		sector_t capacity, int geom[])
 	{
 	POUR_DEVICE	pdev;
 
-	if ( !(HOSTDATA(disk->device->host))->atapi )
+	if ( !(HOSTDATA(sdev->host))->atapi )
 		{
-		pdev = &(HOSTDATA(disk->device->host)->device[disk->device->id]);
+		pdev = &(HOSTDATA(sdev->host)->device[sdev->id]);
 
 		geom[0] = pdev->heads;
 		geom[1] = pdev->sectors;
@@ -2926,7 +2897,19 @@ int Pci2220i_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 
 MODULE_LICENSE("Dual BSD/GPL");
 
-/* Eventually this will go into an include file, but this will be later */
-static Scsi_Host_Template driver_template = PCI2220I;
-
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "pci2220i",
+	.name			= "PCI-2220I/PCI-2240I",
+	.detect			= Pci2220i_Detect,
+	.release		= Pci2220i_Release,
+	.queuecommand		= Pci2220i_QueueCommand,
+	.abort			= Pci2220i_Abort,
+	.reset			= Pci2220i_Reset,
+	.bios_param		= Pci2220i_BiosParam,
+	.can_queue		= 1,
+	.this_id		= -1,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= DISABLE_CLUSTERING,
+};
 #include "scsi_module.c"

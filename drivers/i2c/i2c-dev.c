@@ -3,6 +3,7 @@
 
     Copyright (C) 1995-97 Simon G. Vogl
     Copyright (C) 1998-99 Frodo Looijaard <frodol@dds.nl>
+    Copyright (C) 2003 Greg Kroah-Hartman <greg@kroah.com>
 
     This program is free software; you can redistribute it and/or modify
     it under the terms of the GNU General Public License as published by
@@ -28,146 +29,116 @@
 /* The devfs code is contributed by Philipp Matthias Hahn 
    <pmhahn@titan.lahn.de> */
 
-/* $Id: i2c-dev.c,v 1.40 2001/08/25 01:28:01 mds Exp $ */
+/* If you want debugging uncomment: */
+/* #define DEBUG 1 */
 
-#include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/fs.h>
 #include <linux/slab.h>
-#include <linux/version.h>
-#if LINUX_KERNEL_VERSION >= KERNEL_VERSION(2,4,0)
 #include <linux/smp_lock.h>
-#endif /* LINUX_KERNEL_VERSION >= KERNEL_VERSION(2,4,0) */
-#ifdef CONFIG_DEVFS_FS
 #include <linux/devfs_fs_kernel.h>
-#endif
-
-
-/* If you want debugging uncomment: */
-/* #define DEBUG */
-
 #include <linux/init.h>
-#include <asm/uaccess.h>
-
 #include <linux/i2c.h>
 #include <linux/i2c-dev.h>
+#include <asm/uaccess.h>
 
-#ifdef MODULE
-extern int init_module(void);
-extern int cleanup_module(void);
-#endif /* def MODULE */
+static struct i2c_client i2cdev_client_template;
 
-/* struct file_operations changed too often in the 2.1 series for nice code */
-
-#if LINUX_KERNEL_VERSION < KERNEL_VERSION(2,4,9)
-static loff_t i2cdev_lseek (struct file *file, loff_t offset, int origin);
-#endif
-static ssize_t i2cdev_read (struct file *file, char *buf, size_t count, 
-                            loff_t *offset);
-static ssize_t i2cdev_write (struct file *file, const char *buf, size_t count, 
-                             loff_t *offset);
-
-static int i2cdev_ioctl (struct inode *inode, struct file *file, 
-                         unsigned int cmd, unsigned long arg);
-static int i2cdev_open (struct inode *inode, struct file *file);
-
-static int i2cdev_release (struct inode *inode, struct file *file);
-
-static int i2cdev_attach_adapter(struct i2c_adapter *adap);
-static int i2cdev_detach_client(struct i2c_client *client);
-static int i2cdev_command(struct i2c_client *client, unsigned int cmd,
-                           void *arg);
-
-#ifdef MODULE
-static
-#else
-extern
-#endif
-       int __init i2c_dev_init(void);
-static int i2cdev_cleanup(void);
-
-static struct file_operations i2cdev_fops = {
-#if LINUX_KERNEL_VERSION >= KERNEL_VERSION(2,4,0)
-	owner:		THIS_MODULE,
-#endif /* LINUX_KERNEL_VERSION >= KERNEL_VERSION(2,4,0) */
-#if LINUX_KERNEL_VERSION < KERNEL_VERSION(2,4,9)
-	llseek:		i2cdev_lseek,
-#else
-	llseek:		no_llseek,
-#endif
-	read:		i2cdev_read,
-	write:		i2cdev_write,
-	ioctl:		i2cdev_ioctl,
-	open:		i2cdev_open,
-	release:	i2cdev_release,
+struct i2c_dev {
+	int minor;
+	struct i2c_adapter *adap;
+	struct class_device class_dev;
 };
+#define to_i2c_dev(d) container_of(d, struct i2c_dev, class_dev)
 
-#define I2CDEV_ADAPS_MAX I2C_ADAP_MAX
-static struct i2c_adapter *i2cdev_adaps[I2CDEV_ADAPS_MAX];
-#ifdef CONFIG_DEVFS_FS
-static devfs_handle_t devfs_i2c[I2CDEV_ADAPS_MAX];
-static devfs_handle_t devfs_handle = NULL;
-#endif
+#define I2C_MINORS	256
+static struct i2c_dev *i2c_dev_array[I2C_MINORS];
+static spinlock_t i2c_dev_array_lock = SPIN_LOCK_UNLOCKED;
 
-static struct i2c_driver i2cdev_driver = {
-	name:		"i2c-dev dummy driver",
-	id:		I2C_DRIVERID_I2CDEV,
-	flags:		I2C_DF_DUMMY,
-	attach_adapter:	i2cdev_attach_adapter,
-	detach_client:	i2cdev_detach_client,
-	command:	i2cdev_command,
-/*	inc_use:	NULL,
-	dec_use:	NULL, */
-};
-
-static struct i2c_client i2cdev_client_template = {
-	name:		"I2C /dev entry",
-	id:		1,
-	flags:		0,
-	addr:		-1,
-/*	adapter:	NULL, */
-	driver:		&i2cdev_driver,
-/*	data:		NULL */
-};
-
-static int i2cdev_initialized;
-
-#if LINUX_KERNEL_VERSION < KERNEL_VERSION(2,4,9)
-/* Note that the lseek function is called llseek in 2.1 kernels. But things
-   are complicated enough as is. */
-loff_t i2cdev_lseek (struct file *file, loff_t offset, int origin)
+struct i2c_dev *i2c_dev_get_by_minor(unsigned index)
 {
-#ifdef DEBUG
-	struct inode *inode = file->f_dentry->d_inode;
-	printk("i2c-dev.o: i2c-%d lseek to %ld bytes relative to %d.\n",
-	       MINOR(inode->i_rdev),(long) offset,origin);
-#endif /* DEBUG */
-	return -ESPIPE;
-}
-#endif
+	struct i2c_dev *i2c_dev;
 
-static ssize_t i2cdev_read (struct file *file, char *buf, size_t count,
+	spin_lock(&i2c_dev_array_lock);
+	i2c_dev = i2c_dev_array[index];
+	spin_unlock(&i2c_dev_array_lock);
+	return i2c_dev;
+}
+
+struct i2c_dev *i2c_dev_get_by_adapter(struct i2c_adapter *adap)
+{
+	struct i2c_dev *i2c_dev = NULL;
+	int i;
+
+	spin_lock(&i2c_dev_array_lock);
+	for (i = 0; i < I2C_MINORS; ++i) {
+		if ((i2c_dev_array[i]) &&
+		    (i2c_dev_array[i]->adap == adap)) {
+			i2c_dev = i2c_dev_array[i];
+			break;
+		}
+	}
+	spin_unlock(&i2c_dev_array_lock);
+	return i2c_dev;
+}
+
+static struct i2c_dev *get_free_i2c_dev(void)
+{
+	struct i2c_dev *i2c_dev;
+	unsigned int i;
+
+	i2c_dev = kmalloc(sizeof(*i2c_dev), GFP_KERNEL);
+	if (!i2c_dev)
+		return ERR_PTR(-ENOMEM);
+	memset(i2c_dev, 0x00, sizeof(*i2c_dev));
+
+	spin_lock(&i2c_dev_array_lock);
+	for (i = 0; i < I2C_MINORS; ++i) {
+		if (i2c_dev_array[i])
+			continue;
+		i2c_dev->minor = i;
+		i2c_dev_array[i] = i2c_dev;
+		spin_unlock(&i2c_dev_array_lock);
+		return i2c_dev;
+	}
+	spin_unlock(&i2c_dev_array_lock);
+	kfree(i2c_dev);
+	return ERR_PTR(-ENODEV);
+}
+
+static void return_i2c_dev(struct i2c_dev *i2c_dev)
+{
+	spin_lock(&i2c_dev_array_lock);
+	i2c_dev_array[i2c_dev->minor] = NULL;
+	spin_unlock(&i2c_dev_array_lock);
+	kfree(i2c_dev);
+}
+
+static ssize_t show_dev(struct class_device *class_dev, char *buf)
+{
+	struct i2c_dev *i2c_dev = to_i2c_dev(class_dev);
+	return sprintf(buf, "%04x\n", MKDEV(I2C_MAJOR, i2c_dev->minor));
+}
+static CLASS_DEVICE_ATTR(dev, S_IRUGO, show_dev, NULL);
+
+static ssize_t i2cdev_read (struct file *file, char __user *buf, size_t count,
                             loff_t *offset)
 {
 	char *tmp;
 	int ret;
 
-#ifdef DEBUG
-	struct inode *inode = file->f_dentry->d_inode;
-#endif /* DEBUG */
-
 	struct i2c_client *client = (struct i2c_client *)file->private_data;
 
-	/* copy user space data to kernel space. */
+	if (count > 8192)
+		count = 8192;
+
 	tmp = kmalloc(count,GFP_KERNEL);
 	if (tmp==NULL)
 		return -ENOMEM;
 
-#ifdef DEBUG
-	printk("i2c-dev.o: i2c-%d reading %d bytes.\n",MINOR(inode->i_rdev),
-	       count);
-#endif
+	pr_debug("i2c-dev.o: i2c-%d reading %d bytes.\n",
+		minor(file->f_dentry->d_inode->i_rdev), count);
 
 	ret = i2c_master_recv(client,tmp,count);
 	if (ret >= 0)
@@ -176,18 +147,16 @@ static ssize_t i2cdev_read (struct file *file, char *buf, size_t count,
 	return ret;
 }
 
-static ssize_t i2cdev_write (struct file *file, const char *buf, size_t count,
+static ssize_t i2cdev_write (struct file *file, const char __user *buf, size_t count,
                              loff_t *offset)
 {
 	int ret;
 	char *tmp;
 	struct i2c_client *client = (struct i2c_client *)file->private_data;
 
-#ifdef DEBUG
-	struct inode *inode = file->f_dentry->d_inode;
-#endif /* DEBUG */
+	if (count > 8192)
+		count = 8192;
 
-	/* copy user space data to kernel space. */
 	tmp = kmalloc(count,GFP_KERNEL);
 	if (tmp==NULL)
 		return -ENOMEM;
@@ -196,10 +165,9 @@ static ssize_t i2cdev_write (struct file *file, const char *buf, size_t count,
 		return -EFAULT;
 	}
 
-#ifdef DEBUG
-	printk("i2c-dev.o: i2c-%d writing %d bytes.\n",MINOR(inode->i_rdev),
-	       count);
-#endif
+	pr_debug("i2c-dev.o: i2c-%d writing %d bytes.\n",
+		minor(file->f_dentry->d_inode->i_rdev), count);
+
 	ret = i2c_master_send(client,tmp,count);
 	kfree(tmp);
 	return ret;
@@ -216,10 +184,8 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 	int i,datasize,res;
 	unsigned long funcs;
 
-#ifdef DEBUG
-	printk("i2c-dev.o: i2c-%d ioctl, cmd: 0x%x, arg: %lx.\n", 
-	       MINOR(inode->i_rdev),cmd, arg);
-#endif /* DEBUG */
+	dev_dbg(&client->dev, "i2c-%d ioctl, cmd: 0x%x, arg: %lx.\n",
+		minor(inode->i_rdev),cmd, arg);
 
 	switch ( cmd ) {
 	case I2C_SLAVE:
@@ -237,17 +203,28 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 		else
 			client->flags &= ~I2C_M_TEN;
 		return 0;
+	case I2C_PEC:
+		if (arg)
+			client->flags |= I2C_CLIENT_PEC;
+		else
+			client->flags &= ~I2C_CLIENT_PEC;
+		return 0;
 	case I2C_FUNCS:
 		funcs = i2c_get_functionality(client->adapter);
-		return (copy_to_user((unsigned long *)arg,&funcs,
+		return (copy_to_user((unsigned long __user *)arg, &funcs,
 		                     sizeof(unsigned long)))?-EFAULT:0;
 
         case I2C_RDWR:
 		if (copy_from_user(&rdwr_arg, 
-				   (struct i2c_rdwr_ioctl_data *)arg, 
+				   (struct i2c_rdwr_ioctl_data __user *)arg, 
 				   sizeof(rdwr_arg)))
 			return -EFAULT;
 
+		/* Put an arbritrary limit on the number of messages that can
+		 * be sent at once */
+		if (rdwr_arg.nmsgs > 42)
+			return -EINVAL;
+		
 		rdwr_pa = (struct i2c_msg *)
 			kmalloc(rdwr_arg.nmsgs * sizeof(struct i2c_msg), 
 			GFP_KERNEL);
@@ -255,45 +232,48 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 		if (rdwr_pa == NULL) return -ENOMEM;
 
 		res = 0;
-		for( i=0; i<rdwr_arg.nmsgs; i++ )
-		{
+		for( i=0; i<rdwr_arg.nmsgs; i++ ) {
 		    	if(copy_from_user(&(rdwr_pa[i]),
 					&(rdwr_arg.msgs[i]),
-					sizeof(rdwr_pa[i])))
-			{
+					sizeof(rdwr_pa[i]))) {
 			        res = -EFAULT;
 				break;
 			}
+			/* Limit the size of the message to a sane amount */
+			if (rdwr_pa[i].len > 8192) {
+				res = -EINVAL;
+				break;
+			}
 			rdwr_pa[i].buf = kmalloc(rdwr_pa[i].len, GFP_KERNEL);
-			if(rdwr_pa[i].buf == NULL)
-			{
+			if(rdwr_pa[i].buf == NULL) {
 				res = -ENOMEM;
 				break;
 			}
 			if(copy_from_user(rdwr_pa[i].buf,
 				rdwr_arg.msgs[i].buf,
-				rdwr_pa[i].len))
-			{
-			    	kfree(rdwr_pa[i].buf);
+				rdwr_pa[i].len)) {
 			    	res = -EFAULT;
 				break;
 			}
 		}
-		if (!res) 
-		{
+		if (res < 0) {
+			int j;
+			for (j = 0; j < i; ++j)
+				kfree(rdwr_pa[j].buf);
+			kfree(rdwr_pa);
+			return res;
+		}
+		if (!res) {
 			res = i2c_transfer(client->adapter,
 				rdwr_pa,
 				rdwr_arg.nmsgs);
 		}
-		while(i-- > 0)
-		{
-			if( res>=0 && (rdwr_pa[i].flags & I2C_M_RD))
-			{
+		while(i-- > 0) {
+			if( res>=0 && (rdwr_pa[i].flags & I2C_M_RD)) {
 				if(copy_to_user(
 					rdwr_arg.msgs[i].buf,
 					rdwr_pa[i].buf,
-					rdwr_pa[i].len))
-				{
+					rdwr_pa[i].len)) {
 					res = -EFAULT;
 				}
 			}
@@ -304,7 +284,7 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 
 	case I2C_SMBUS:
 		if (copy_from_user(&data_arg,
-		                   (struct i2c_smbus_ioctl_data *) arg,
+		                   (struct i2c_smbus_ioctl_data __user *) arg,
 		                   sizeof(struct i2c_smbus_ioctl_data)))
 			return -EFAULT;
 		if ((data_arg.size != I2C_SMBUS_BYTE) && 
@@ -313,21 +293,20 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 		    (data_arg.size != I2C_SMBUS_WORD_DATA) &&
 		    (data_arg.size != I2C_SMBUS_PROC_CALL) &&
 		    (data_arg.size != I2C_SMBUS_BLOCK_DATA) &&
-		    (data_arg.size != I2C_SMBUS_I2C_BLOCK_DATA)) {
-#ifdef DEBUG
-			printk("i2c-dev.o: size out of range (%x) in ioctl I2C_SMBUS.\n",
-			       data_arg.size);
-#endif
+		    (data_arg.size != I2C_SMBUS_I2C_BLOCK_DATA) &&
+		    (data_arg.size != I2C_SMBUS_BLOCK_PROC_CALL)) {
+			dev_dbg(&client->dev,
+				"size out of range (%x) in ioctl I2C_SMBUS.\n",
+				data_arg.size);
 			return -EINVAL;
 		}
 		/* Note that I2C_SMBUS_READ and I2C_SMBUS_WRITE are 0 and 1, 
 		   so the check is valid if size==I2C_SMBUS_QUICK too. */
 		if ((data_arg.read_write != I2C_SMBUS_READ) && 
 		    (data_arg.read_write != I2C_SMBUS_WRITE)) {
-#ifdef DEBUG
-			printk("i2c-dev.o: read_write out of range (%x) in ioctl I2C_SMBUS.\n",
-			       data_arg.read_write);
-#endif
+			dev_dbg(&client->dev, 
+				"read_write out of range (%x) in ioctl I2C_SMBUS.\n",
+				data_arg.read_write);
 			return -EINVAL;
 		}
 
@@ -338,15 +317,14 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 		    (data_arg.read_write == I2C_SMBUS_WRITE)))
 			/* These are special: we do not use data */
 			return i2c_smbus_xfer(client->adapter, client->addr,
-			                      client->flags,
-			                      data_arg.read_write,
-			                      data_arg.command,
-			                      data_arg.size, NULL);
+					      client->flags,
+					      data_arg.read_write,
+					      data_arg.command,
+					      data_arg.size, NULL);
 
 		if (data_arg.data == NULL) {
-#ifdef DEBUG
-			printk("i2c-dev.o: data is NULL pointer in ioctl I2C_SMBUS.\n");
-#endif
+			dev_dbg(&client->dev,
+				"data is NULL pointer in ioctl I2C_SMBUS.\n");
 			return -EINVAL;
 		}
 
@@ -356,10 +334,11 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 		else if ((data_arg.size == I2C_SMBUS_WORD_DATA) || 
 		         (data_arg.size == I2C_SMBUS_PROC_CALL))
 			datasize = sizeof(data_arg.data->word);
-		else /* size == I2C_SMBUS_BLOCK_DATA */
+		else /* size == smbus block, i2c block, or block proc. call */
 			datasize = sizeof(data_arg.data->block);
 
 		if ((data_arg.size == I2C_SMBUS_PROC_CALL) || 
+		    (data_arg.size == I2C_SMBUS_BLOCK_PROC_CALL) || 
 		    (data_arg.read_write == I2C_SMBUS_WRITE)) {
 			if (copy_from_user(&temp, data_arg.data, datasize))
 				return -EFAULT;
@@ -368,6 +347,7 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 		      data_arg.read_write,
 		      data_arg.command,data_arg.size,&temp);
 		if (! res && ((data_arg.size == I2C_SMBUS_PROC_CALL) || 
+		              (data_arg.size == I2C_SMBUS_BLOCK_PROC_CALL) || 
 			      (data_arg.read_write == I2C_SMBUS_READ))) {
 			if (copy_to_user(data_arg.data, &temp, datasize))
 				return -EFAULT;
@@ -380,99 +360,108 @@ int i2cdev_ioctl (struct inode *inode, struct file *file, unsigned int cmd,
 	return 0;
 }
 
-int i2cdev_open (struct inode *inode, struct file *file)
+static int i2cdev_open(struct inode *inode, struct file *file)
 {
-	unsigned int minor = MINOR(inode->i_rdev);
+	unsigned int minor = minor(inode->i_rdev);
 	struct i2c_client *client;
+	struct i2c_adapter *adap;
+	struct i2c_dev *i2c_dev;
 
-	if ((minor >= I2CDEV_ADAPS_MAX) || ! (i2cdev_adaps[minor])) {
-#ifdef DEBUG
-		printk("i2c-dev.o: Trying to open unattached adapter i2c-%d\n",
-		       minor);
-#endif
+	i2c_dev = i2c_dev_get_by_minor(minor);
+	if (!i2c_dev)
 		return -ENODEV;
-	}
 
-	/* Note that we here allocate a client for later use, but we will *not*
-	   register this client! Yes, this is safe. No, it is not very clean. */
-	if(! (client = kmalloc(sizeof(struct i2c_client),GFP_KERNEL)))
+	adap = i2c_get_adapter(i2c_dev->adap->nr);
+	if (!adap)
+		return -ENODEV;
+
+	client = kmalloc(sizeof(*client), GFP_KERNEL);
+	if (!client) {
+		i2c_put_adapter(adap);
 		return -ENOMEM;
-	memcpy(client,&i2cdev_client_template,sizeof(struct i2c_client));
-	client->adapter = i2cdev_adaps[minor];
+	}
+	memcpy(client, &i2cdev_client_template, sizeof(*client));
+
+	/* registered with adapter, passed as client to user */
+	client->adapter = adap;
 	file->private_data = client;
 
-	if (i2cdev_adaps[minor]->inc_use)
-		i2cdev_adaps[minor]->inc_use(i2cdev_adaps[minor]);
-#if LINUX_KERNEL_VERSION < KERNEL_VERSION(2,4,0)
-	MOD_INC_USE_COUNT;
-#endif /* LINUX_KERNEL_VERSION < KERNEL_VERSION(2,4,0) */
-
-#ifdef DEBUG
-	printk("i2c-dev.o: opened i2c-%d\n",minor);
-#endif
 	return 0;
 }
 
-static int i2cdev_release (struct inode *inode, struct file *file)
+static int i2cdev_release(struct inode *inode, struct file *file)
 {
-	unsigned int minor = MINOR(inode->i_rdev);
-	kfree(file->private_data);
-	file->private_data=NULL;
-#ifdef DEBUG
-	printk("i2c-dev.o: Closed: i2c-%d\n", minor);
-#endif
-#if LINUX_KERNEL_VERSION < KERNEL_VERSION(2,4,0)
-	MOD_DEC_USE_COUNT;
-#else /* LINUX_KERNEL_VERSION >= KERNEL_VERSION(2,4,0) */
-	lock_kernel();
-#endif /* LINUX_KERNEL_VERSION < KERNEL_VERSION(2,4,0) */
-	if (i2cdev_adaps[minor]->dec_use)
-		i2cdev_adaps[minor]->dec_use(i2cdev_adaps[minor]);
-#if LINUX_KERNEL_VERSION >= KERNEL_VERSION(2,4,0)
-	unlock_kernel();
-#endif /* LINUX_KERNEL_VERSION >= KERNEL_VERSION(2,4,0) */
+	struct i2c_client *client = file->private_data;
+
+	i2c_put_adapter(client->adapter);
+	kfree(client);
+	file->private_data = NULL;
+
 	return 0;
 }
 
-int i2cdev_attach_adapter(struct i2c_adapter *adap)
+static struct file_operations i2cdev_fops = {
+	.owner		= THIS_MODULE,
+	.llseek		= no_llseek,
+	.read		= i2cdev_read,
+	.write		= i2cdev_write,
+	.ioctl		= i2cdev_ioctl,
+	.open		= i2cdev_open,
+	.release	= i2cdev_release,
+};
+
+static struct class i2c_dev_class = {
+	.name	= "i2c-dev",
+};
+
+static int i2cdev_attach_adapter(struct i2c_adapter *adap)
 {
-	int i;
-	char name[8];
+	struct i2c_dev *i2c_dev;
+	int retval;
 
-	if ((i = i2c_adapter_id(adap)) < 0) {
-		printk("i2c-dev.o: Unknown adapter ?!?\n");
+	i2c_dev = get_free_i2c_dev();
+	if (IS_ERR(i2c_dev))
+		return PTR_ERR(i2c_dev);
+
+	devfs_mk_cdev(MKDEV(I2C_MAJOR, i2c_dev->minor),
+			S_IFCHR|S_IRUSR|S_IWUSR, "i2c/%d", i2c_dev->minor);
+	dev_dbg(&adap->dev, "Registered as minor %d\n", i2c_dev->minor);
+
+	/* register this i2c device with the driver core */
+	i2c_dev->adap = adap;
+	if (adap->dev.parent == &legacy_bus)
+		i2c_dev->class_dev.dev = &adap->dev;
+	else
+		i2c_dev->class_dev.dev = adap->dev.parent;
+	i2c_dev->class_dev.class = &i2c_dev_class;
+	snprintf(i2c_dev->class_dev.class_id, BUS_ID_SIZE, "i2c-%d", i2c_dev->minor);
+	retval = class_device_register(&i2c_dev->class_dev);
+	if (retval)
+		goto error;
+	class_device_create_file(&i2c_dev->class_dev, &class_device_attr_dev);
+	return 0;
+error:
+	return_i2c_dev(i2c_dev);
+	return retval;
+}
+
+static int i2cdev_detach_adapter(struct i2c_adapter *adap)
+{
+	struct i2c_dev *i2c_dev;
+
+	i2c_dev = i2c_dev_get_by_adapter(adap);
+	if (!i2c_dev)
 		return -ENODEV;
-	}
-	if (i >= I2CDEV_ADAPS_MAX) {
-		printk("i2c-dev.o: Adapter number too large?!? (%d)\n",i);
-		return -ENODEV;
-	}
 
-	sprintf (name, "%d", i);
-	if (! i2cdev_adaps[i]) {
-		i2cdev_adaps[i] = adap;
-#ifdef CONFIG_DEVFS_FS
-		devfs_i2c[i] = devfs_register (devfs_handle, name,
-			DEVFS_FL_DEFAULT, I2C_MAJOR, i,
-			S_IFCHR | S_IRUSR | S_IWUSR,
-			&i2cdev_fops, NULL);
-#endif
-		printk("i2c-dev.o: Registered '%s' as minor %d\n",adap->name,i);
-	} else {
-		/* This is actually a detach_adapter call! */
-#ifdef CONFIG_DEVFS_FS
-		devfs_unregister(devfs_i2c[i]);
-#endif
-		i2cdev_adaps[i] = NULL;
-#ifdef DEBUG
-		printk("i2c-dev.o: Adapter unregistered: %s\n",adap->name);
-#endif
-	}
+	class_device_unregister(&i2c_dev->class_dev);
+	devfs_remove("i2c/%d", i2c_dev->minor);
+	return_i2c_dev(i2c_dev);
 
+	dev_dbg(&adap->dev, "Adapter unregistered\n");
 	return 0;
 }
 
-int i2cdev_detach_client(struct i2c_client *client)
+static int i2cdev_detach_client(struct i2c_client *client)
 {
 	return 0;
 }
@@ -483,82 +472,61 @@ static int i2cdev_command(struct i2c_client *client, unsigned int cmd,
 	return -1;
 }
 
-int __init i2c_dev_init(void)
+static struct i2c_driver i2cdev_driver = {
+	.owner		= THIS_MODULE,
+	.name		= "dev driver",
+	.id		= I2C_DRIVERID_I2CDEV,
+	.flags		= I2C_DF_NOTIFY,
+	.attach_adapter	= i2cdev_attach_adapter,
+	.detach_adapter	= i2cdev_detach_adapter,
+	.detach_client	= i2cdev_detach_client,
+	.command	= i2cdev_command,
+};
+
+static struct i2c_client i2cdev_client_template = {
+	.dev		= {
+		.name	= "I2C /dev entry",
+	},
+	.id		= 1,
+	.addr		= -1,
+	.driver		= &i2cdev_driver,
+};
+
+static int __init i2c_dev_init(void)
 {
 	int res;
 
-	printk("i2c-dev.o: i2c /dev entries driver module\n");
+	printk(KERN_INFO "i2c /dev entries driver module version %s (%s)\n",
+		I2C_VERSION, I2C_DATE);
 
-	i2cdev_initialized = 0;
-#ifdef CONFIG_DEVFS_FS
-	if (devfs_register_chrdev(I2C_MAJOR, "i2c", &i2cdev_fops)) {
-#else
 	if (register_chrdev(I2C_MAJOR,"i2c",&i2cdev_fops)) {
-#endif
-		printk("i2c-dev.o: unable to get major %d for i2c bus\n",
+		printk(KERN_ERR "i2c-dev.o: unable to get major %d for i2c bus\n",
 		       I2C_MAJOR);
 		return -EIO;
 	}
-#ifdef CONFIG_DEVFS_FS
-	devfs_handle = devfs_mk_dir(NULL, "i2c", NULL);
-#endif
-	i2cdev_initialized ++;
-
+	devfs_mk_dir("i2c");
+	class_register(&i2c_dev_class);
 	if ((res = i2c_add_driver(&i2cdev_driver))) {
-		printk("i2c-dev.o: Driver registration failed, module not inserted.\n");
-		i2cdev_cleanup();
+		printk(KERN_ERR "i2c-dev.o: Driver registration failed, module not inserted.\n");
+		devfs_remove("i2c");
+		unregister_chrdev(I2C_MAJOR,"i2c");
 		return res;
 	}
-	i2cdev_initialized ++;
 	return 0;
 }
 
-int i2cdev_cleanup(void)
+static void __exit i2c_dev_exit(void)
 {
-	int res;
-
-	if (i2cdev_initialized >= 2) {
-		if ((res = i2c_del_driver(&i2cdev_driver))) {
-			printk("i2c-dev.o: Driver deregistration failed, "
-			       "module not removed.\n");
-			return res;
-		}
-	i2cdev_initialized --;
-	}
-
-	if (i2cdev_initialized >= 1) {
-#ifdef CONFIG_DEVFS_FS
-		devfs_unregister(devfs_handle);
-		if ((res = devfs_unregister_chrdev(I2C_MAJOR, "i2c"))) {
-#else
-		if ((res = unregister_chrdev(I2C_MAJOR,"i2c"))) {
-#endif
-			printk("i2c-dev.o: unable to release major %d for i2c bus\n",
-			       I2C_MAJOR);
-			return res;
-		}
-		i2cdev_initialized --;
-	}
-	return 0;
+	i2c_del_driver(&i2cdev_driver);
+	class_unregister(&i2c_dev_class);
+	devfs_remove("i2c");
+	unregister_chrdev(I2C_MAJOR,"i2c");
 }
 
-EXPORT_NO_SYMBOLS;
-
-#ifdef MODULE
-
-MODULE_AUTHOR("Frodo Looijaard <frodol@dds.nl> and Simon G. Vogl <simon@tk.uni-linz.ac.at>");
+MODULE_AUTHOR("Frodo Looijaard <frodol@dds.nl> and "
+		"Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C /dev entries driver");
 MODULE_LICENSE("GPL");
 
-int init_module(void)
-{
-	return i2c_dev_init();
-}
-
-int cleanup_module(void)
-{
-	return i2cdev_cleanup();
-}
-
-#endif /* def MODULE */
-
+module_init(i2c_dev_init);
+module_exit(i2c_dev_exit);

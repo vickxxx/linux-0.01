@@ -1,7 +1,7 @@
 /*
- * net/dst.c	Protocol independent destination cache.
+ * net/core/dst.c	Protocol independent destination cache.
  *
- * Authors:	Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
+ * Authors:		Alexey Kuznetsov, <kuznet@ms2.inr.ac.ru>
  *
  */
 
@@ -36,10 +36,10 @@ static spinlock_t		 dst_lock = SPIN_LOCK_UNLOCKED;
 static unsigned long dst_gc_timer_expires;
 static unsigned long dst_gc_timer_inc = DST_GC_MAX;
 static void dst_run_gc(unsigned long);
+static void ___dst_free(struct dst_entry * dst);
 
 static struct timer_list dst_gc_timer =
-	{ data: DST_GC_MIN, function: dst_run_gc };
-
+	TIMER_INITIALIZER(dst_run_gc, 0, DST_GC_MIN);
 
 static void dst_run_gc(unsigned long dummy)
 {
@@ -61,7 +61,25 @@ static void dst_run_gc(unsigned long dummy)
 			continue;
 		}
 		*dstp = dst->next;
-		dst_destroy(dst);
+
+		dst = dst_destroy(dst);
+		if (dst) {
+			/* NOHASH and still referenced. Unless it is already
+			 * on gc list, invalidate it and add to gc list.
+			 *
+			 * Note: this is temporary. Actually, NOHASH dst's
+			 * must be obsoleted when parent is obsoleted.
+			 * But we do not have state "obsoleted, but
+			 * referenced by parent", so it is right.
+			 */
+			if (dst->obsolete > 1)
+				continue;
+
+			___dst_free(dst);
+			dst->next = *dstp;
+			*dstp = dst;
+			dstp = &dst->next;
+		}
 	}
 	if (!dst_garbage_list) {
 		dst_gc_timer_inc = DST_GC_MAX;
@@ -108,6 +126,7 @@ void * dst_alloc(struct dst_ops * ops)
 	atomic_set(&dst->__refcnt, 0);
 	dst->ops = ops;
 	dst->lastuse = jiffies;
+	dst->path = dst;
 	dst->input = dst_discard;
 	dst->output = dst_blackhole;
 #if RT_CACHE_DEBUG >= 2 
@@ -117,10 +136,8 @@ void * dst_alloc(struct dst_ops * ops)
 	return dst;
 }
 
-void __dst_free(struct dst_entry * dst)
+static void ___dst_free(struct dst_entry * dst)
 {
-	spin_lock_bh(&dst_lock);
-
 	/* The first case (dev==NULL) is required, when
 	   protocol module is unloaded.
 	 */
@@ -129,6 +146,12 @@ void __dst_free(struct dst_entry * dst)
 		dst->output = dst_blackhole;
 	}
 	dst->obsolete = 2;
+}
+
+void __dst_free(struct dst_entry * dst)
+{
+	spin_lock_bh(&dst_lock);
+	___dst_free(dst);
 	dst->next = dst_garbage_list;
 	dst_garbage_list = dst;
 	if (dst_gc_timer_inc > DST_GC_INC) {
@@ -136,19 +159,19 @@ void __dst_free(struct dst_entry * dst)
 		dst_gc_timer_expires = DST_GC_MIN;
 		mod_timer(&dst_gc_timer, jiffies + dst_gc_timer_expires);
 	}
-
 	spin_unlock_bh(&dst_lock);
 }
 
-void dst_destroy(struct dst_entry * dst)
+struct dst_entry *dst_destroy(struct dst_entry * dst)
 {
+	struct dst_entry *child;
 	struct neighbour *neigh;
 	struct hh_cache *hh;
 
-	smp_rmb();
-
+again:
 	neigh = dst->neighbour;
 	hh = dst->hh;
+	child = dst->child;
 
 	dst->hh = NULL;
 	if (hh && atomic_dec_and_test(&hh->hh_refcnt))
@@ -169,6 +192,21 @@ void dst_destroy(struct dst_entry * dst)
 	atomic_dec(&dst_total);
 #endif
 	kmem_cache_free(dst->ops->kmem_cachep, dst);
+
+	dst = child;
+	if (dst) {
+		if (atomic_dec_and_test(&dst->__refcnt)) {
+			/* We were real parent of this dst, so kill child. */
+			if (dst->flags&DST_NOHASH)
+				goto again;
+		} else {
+			/* Child is still referenced, return it for freeing. */
+			if (dst->flags&DST_NOHASH)
+				return dst;
+			/* Child is still in his hash table */
+		}
+	}
+	return NULL;
 }
 
 static int dst_dev_event(struct notifier_block *this, unsigned long event, void *ptr)
@@ -189,7 +227,6 @@ static int dst_dev_event(struct notifier_block *this, unsigned long event, void 
 				   _race_ _condition_.
 				 */
 				if (event!=NETDEV_DOWN &&
-				    !(dev->features & NETIF_F_DYNALLOC) &&
 				    dst->output == dst_blackhole) {
 					dst->dev = &loopback_dev;
 					dev_put(dev);
@@ -213,9 +250,7 @@ static int dst_dev_event(struct notifier_block *this, unsigned long event, void 
 }
 
 struct notifier_block dst_dev_notifier = {
-	dst_dev_event,
-	NULL,
-	0
+	.notifier_call	= dst_dev_event,
 };
 
 void __init dst_init(void)

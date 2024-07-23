@@ -1,13 +1,10 @@
-/*
- * BK Id: SCCS/s.unistd.h 1.11 10/18/01 17:29:53 trini
- */
 #ifndef _ASM_PPC_UNISTD_H_
 #define _ASM_PPC_UNISTD_H_
 
 /*
  * This file contains the system call numbers.
  */
-
+#define __NR_restart_syscall	  0
 #define __NR_exit		  1
 #define __NR_fork		  2
 #define __NR_read		  3
@@ -186,8 +183,8 @@
 #define __NR_rt_sigtimedwait	176
 #define __NR_rt_sigqueueinfo	177
 #define __NR_rt_sigsuspend	178
-#define __NR_pread		179
-#define __NR_pwrite		180
+#define __NR_pread64		179
+#define __NR_pwrite64		180
 #define __NR_chown		181
 #define __NR_getcwd		182
 #define __NR_capget		183
@@ -215,9 +212,51 @@
 #define __NR_madvise		205
 #define __NR_mincore		206
 #define __NR_gettid		207
+#define __NR_tkill		208
+#define __NR_setxattr		209
+#define __NR_lsetxattr		210
+#define __NR_fsetxattr		211
+#define __NR_getxattr		212
+#define __NR_lgetxattr		213
+#define __NR_fgetxattr		214
+#define __NR_listxattr		215
+#define __NR_llistxattr		216
+#define __NR_flistxattr		217
+#define __NR_removexattr	218
+#define __NR_lremovexattr	219
+#define __NR_fremovexattr	220
+#define __NR_futex		221
+#define __NR_sched_setaffinity	222
+#define __NR_sched_getaffinity	223
+/* 224 currently unused */
+#define __NR_tuxcall		225
+#define __NR_sendfile64		226
+#define __NR_io_setup		227
+#define __NR_io_destroy		228
+#define __NR_io_getevents	229
+#define __NR_io_submit		230
+#define __NR_io_cancel		231
+#define __NR_set_tid_address	232
+#define __NR_fadvise64		233
+#define __NR_exit_group		234
+#define __NR_lookup_dcookie	235
+#define __NR_epoll_create	236
+#define __NR_epoll_ctl		237
+#define __NR_epoll_wait		238
+#define __NR_remap_file_pages	239
+#define __NR_timer_create	240
+#define __NR_timer_settime	241
+#define __NR_timer_gettime	242
+#define __NR_timer_getoverrun	243
+#define __NR_timer_delete	244
+#define __NR_clock_settime	245
+#define __NR_clock_gettime	246
+#define __NR_clock_getres	247
+#define __NR_clock_nanosleep	248
+
+#define __NR_syscalls		249
 
 #define __NR(n)	#n
-
 
 #define __syscall_return(type) \
 	return (__sc_err & 0x10000000 ? errno = __sc_ret, __sc_ret = -1 : 0), \
@@ -387,8 +426,10 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
 	__syscall_return (type);					\
 }
 
+#ifdef __KERNEL__
 
-#ifdef __KERNEL_SYSCALLS__
+#define __NR__exit __NR_exit
+#define NR_syscalls	__NR_syscalls
 
 /*
  * Forking from kernel space will result in the child getting a new,
@@ -398,29 +439,32 @@ type name(type1 arg1, type2 arg2, type3 arg3, type4 arg4, type5 arg5)	\
  * the child.
  */
 
+#ifdef __KERNEL_SYSCALLS__
 /*
  * System call prototypes.
  */
-#define __NR__exit __NR_exit
-static inline _syscall0(int,pause)
-static inline _syscall0(int,sync)
-static inline _syscall0(pid_t,setsid)
-static inline _syscall3(int,write,int,fd,const char *,buf,off_t,count)
-static inline _syscall3(int,read,int,fd,char *,buf,off_t,count)
-static inline _syscall3(off_t,lseek,int,fd,off_t,offset,int,count)
-static inline _syscall1(int,dup,int,fd)
-static inline _syscall3(int,execve,const char *,file,char **,argv,char **,envp)
-static inline _syscall3(int,open,const char *,file,int,flag,int,mode)
-static inline _syscall1(int,close,int,fd)
-static inline _syscall1(int,_exit,int,exitcode)
-static inline _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
-static inline _syscall1(int,delete_module,const char *,name)
-
-static inline pid_t wait(int * wait_stat) 
-{
-	return waitpid(-1,wait_stat,0);
-}
+extern pid_t setsid(void);
+extern int write(int fd, const char *buf, off_t count);
+extern int read(int fd, char *buf, off_t count);
+extern off_t lseek(int fd, off_t offset, int count);
+extern int dup(int fd);
+extern int execve(const char *file, char **argv, char **envp);
+extern int open(const char *file, int flag, int mode);
+extern int close(int fd);
+extern pid_t waitpid(pid_t pid, int *wait_stat, int options);
 
 #endif /* __KERNEL_SYSCALLS__ */
+
+/*
+ * "Conditional" syscalls
+ *
+ * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
+ * but it doesn't work on all toolchains, so we just do it by hand
+ */
+#ifndef cond_syscall
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
+#endif
+
+#endif /* __KERNEL__ */
 
 #endif /* _ASM_PPC_UNISTD_H_ */

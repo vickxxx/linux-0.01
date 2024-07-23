@@ -2,10 +2,11 @@
 #define _ASM_IA64_HW_IRQ_H
 
 /*
- * Copyright (C) 2001 Hewlett-Packard Co
- * Copyright (C) 2001 David Mosberger-Tang <davidm@hpl.hp.com>
+ * Copyright (C) 2001-2003 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 
+#include <linux/interrupt.h>
 #include <linux/sched.h>
 #include <linux/types.h>
 
@@ -52,6 +53,10 @@ typedef u8 ia64_vector;
 #define IA64_IPI_RESCHEDULE		0xfd	/* SMP reschedule */
 #define IA64_IPI_VECTOR			0xfe	/* inter-processor interrupt vector */
 
+/* Used for encoding redirected irqs */
+
+#define IA64_IRQ_REDIRECTED		(1 << 31)
+
 /* IA64 inter-cpu interrupt related definitions */
 
 #define IA64_IPI_DEFAULT_BASE_ADDR	0xfee00000
@@ -72,7 +77,7 @@ extern unsigned long ipi_base_addr;
 
 extern struct hw_interrupt_type irq_type_ia64_lsapic;	/* CPU-internal interrupt controller */
 
-extern int ia64_alloc_irq (void);	/* allocate a free irq */
+extern int ia64_alloc_vector (void);	/* allocate a free vector */
 extern void ia64_send_ipi (int cpu, int vector, int delivery_mode, int redirect);
 extern void register_percpu_irq (ia64_vector vec, struct irqaction *action);
 
@@ -86,9 +91,10 @@ hw_resend_irq (struct hw_interrupt_type *h, unsigned int vector)
  * Default implementations for the irq-descriptor API:
  */
 
-extern struct irq_desc _irq_desc[NR_IRQS];
+extern irq_desc_t _irq_desc[NR_IRQS];
 
-static inline struct irq_desc *
+#ifndef CONFIG_IA64_GENERIC
+static inline irq_desc_t *
 __ia64_irq_desc (unsigned int irq)
 {
 	return _irq_desc + irq;
@@ -105,6 +111,7 @@ __ia64_local_vector_to_irq (ia64_vector vec)
 {
 	return (unsigned int) vec;
 }
+#endif
 
 /*
  * Next follows the irq descriptor interface.  On IA-64, each CPU supports 256 interrupt
@@ -117,8 +124,8 @@ __ia64_local_vector_to_irq (ia64_vector vec)
  */
 
 /* Return a pointer to the irq descriptor for IRQ.  */
-static inline struct irq_desc *
-irq_desc (int irq)
+static inline irq_desc_t *
+irq_descp (int irq)
 {
 	return platform_irq_desc(irq);
 }

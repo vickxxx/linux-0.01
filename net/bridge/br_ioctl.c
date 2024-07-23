@@ -16,9 +16,27 @@
 #include <linux/kernel.h>
 #include <linux/if_bridge.h>
 #include <linux/inetdevice.h>
-#include <linux/rtnetlink.h>
 #include <asm/uaccess.h>
 #include "br_private.h"
+
+/* import values in USER_HZ  */
+static inline unsigned long user_to_ticks(unsigned long utick)
+{
+	return (utick * HZ) / USER_HZ;
+}
+
+/* export values in USER_HZ */
+static inline unsigned long ticks_to_user(unsigned long tick)
+{
+	return (tick * USER_HZ) / HZ;
+}
+
+/* Report time remaining in user HZ  */
+static unsigned long timer_residue(const struct timer_list *timer)
+{
+	return ticks_to_user(timer_pending(timer) 
+			     ? (timer->expires - jiffies) : 0);
+}
 
 static int br_ioctl_device(struct net_bridge *br,
 			   unsigned int cmd,
@@ -55,25 +73,26 @@ static int br_ioctl_device(struct net_bridge *br,
 		struct __bridge_info b;
 
 		memset(&b, 0, sizeof(struct __bridge_info));
+		rcu_read_lock();
 		memcpy(&b.designated_root, &br->designated_root, 8);
 		memcpy(&b.bridge_id, &br->bridge_id, 8);
 		b.root_path_cost = br->root_path_cost;
-		b.max_age = br->max_age;
-		b.hello_time = br->hello_time;
+		b.max_age = ticks_to_user(br->max_age);
+		b.hello_time = ticks_to_user(br->hello_time);
 		b.forward_delay = br->forward_delay;
 		b.bridge_max_age = br->bridge_max_age;
 		b.bridge_hello_time = br->bridge_hello_time;
-		b.bridge_forward_delay = br->bridge_forward_delay;
+		b.bridge_forward_delay = ticks_to_user(br->bridge_forward_delay);
 		b.topology_change = br->topology_change;
 		b.topology_change_detected = br->topology_change_detected;
 		b.root_port = br->root_port;
 		b.stp_enabled = br->stp_enabled;
-		b.ageing_time = br->ageing_time;
-		b.gc_interval = br->gc_interval;
-		b.hello_timer_value = br_timer_get_residue(&br->hello_timer);
-		b.tcn_timer_value = br_timer_get_residue(&br->tcn_timer);
-		b.topology_change_timer_value = br_timer_get_residue(&br->topology_change_timer);
-		b.gc_timer_value = br_timer_get_residue(&br->gc_timer);
+		b.ageing_time = ticks_to_user(br->ageing_time);
+		b.hello_timer_value = timer_residue(&br->hello_timer);
+		b.tcn_timer_value = timer_residue(&br->tcn_timer);
+		b.topology_change_timer_value = timer_residue(&br->topology_change_timer);
+		b.gc_timer_value = timer_residue(&br->gc_timer);
+	        rcu_read_unlock();
 
 		if (copy_to_user((void *)arg0, &b, sizeof(b)))
 			return -EFAULT;
@@ -83,43 +102,51 @@ static int br_ioctl_device(struct net_bridge *br,
 
 	case BRCTL_GET_PORT_LIST:
 	{
-		int i;
-		int indices[256];
+		int *indices;
+		int ret = 0;
 
-		for (i=0;i<256;i++)
-			indices[i] = 0;
+		indices = kmalloc(256*sizeof(int), GFP_KERNEL);
+		if (indices == NULL)
+			return -ENOMEM;
+
+		memset(indices, 0, 256*sizeof(int));
 
 		br_get_port_ifindices(br, indices);
 		if (copy_to_user((void *)arg0, indices, 256*sizeof(int)))
-			return -EFAULT;
-
-		return 0;
+			ret =  -EFAULT;
+		kfree(indices);
+		return ret;
 	}
 
 	case BRCTL_SET_BRIDGE_FORWARD_DELAY:
-		br->bridge_forward_delay = arg0;
+		spin_lock_bh(&br->lock);
+		br->bridge_forward_delay = user_to_ticks(arg0);
 		if (br_is_root_bridge(br))
-			br->forward_delay = arg0;
+			br->forward_delay = br->bridge_forward_delay;
+		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_BRIDGE_HELLO_TIME:
-		br->bridge_hello_time = arg0;
+		spin_lock_bh(&br->lock);
+		br->bridge_hello_time = user_to_ticks(arg0);
 		if (br_is_root_bridge(br))
-			br->hello_time = arg0;
+			br->hello_time = br->bridge_hello_time;
+		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_BRIDGE_MAX_AGE:
-		br->bridge_max_age = arg0;
+		spin_lock_bh(&br->lock);
+		br->bridge_max_age = user_to_ticks(arg0);
 		if (br_is_root_bridge(br))
-			br->max_age = arg0;
+			br->max_age = br->bridge_max_age;
+		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_AGEING_TIME:
-		br->ageing_time = arg0;
+		br->ageing_time = user_to_ticks(arg0);
 		return 0;
 
-	case BRCTL_SET_GC_INTERVAL:
-		br->gc_interval = arg0;
+	case BRCTL_SET_GC_INTERVAL:	 /* no longer used */
 		return 0;
 
 	case BRCTL_GET_PORT_INFO:
@@ -127,8 +154,11 @@ static int br_ioctl_device(struct net_bridge *br,
 		struct __port_info p;
 		struct net_bridge_port *pt;
 
-		if ((pt = br_get_port(br, arg1)) == NULL)
+		rcu_read_lock();
+		if ((pt = br_get_port(br, arg1)) == NULL) {
+			rcu_read_unlock();
 			return -EINVAL;
+		}
 
 		memset(&p, 0, sizeof(struct __port_info));
 		memcpy(&p.designated_root, &pt->designated_root, 8);
@@ -140,9 +170,11 @@ static int br_ioctl_device(struct net_bridge *br,
 		p.state = pt->state;
 		p.top_change_ack = pt->topology_change_ack;
 		p.config_pending = pt->config_pending;
-		p.message_age_timer_value = br_timer_get_residue(&pt->message_age_timer);
-		p.forward_delay_timer_value = br_timer_get_residue(&pt->forward_delay_timer);
-		p.hold_timer_value = br_timer_get_residue(&pt->hold_timer);
+		p.message_age_timer_value = timer_residue(&pt->message_age_timer);
+		p.forward_delay_timer_value = timer_residue(&pt->forward_delay_timer);
+		p.hold_timer_value = timer_residue(&pt->hold_timer);
+
+		rcu_read_unlock();
 
 		if (copy_to_user((void *)arg0, &p, sizeof(p)))
 			return -EFAULT;
@@ -155,27 +187,37 @@ static int br_ioctl_device(struct net_bridge *br,
 		return 0;
 
 	case BRCTL_SET_BRIDGE_PRIORITY:
+		spin_lock_bh(&br->lock);
 		br_stp_set_bridge_priority(br, arg0);
+		spin_unlock_bh(&br->lock);
 		return 0;
 
 	case BRCTL_SET_PORT_PRIORITY:
 	{
 		struct net_bridge_port *p;
+		int ret = 0;
 
-		if ((p = br_get_port(br, arg0)) == NULL)
-			return -EINVAL;
-		br_stp_set_port_priority(p, arg1);
-		return 0;
+		spin_lock_bh(&br->lock);
+		if ((p = br_get_port(br, arg0)) == NULL) 
+			ret = -EINVAL;
+		else
+			br_stp_set_port_priority(p, arg1);
+		spin_unlock_bh(&br->lock);
+		return ret;
 	}
 
 	case BRCTL_SET_PATH_COST:
 	{
 		struct net_bridge_port *p;
+		int ret = 0;
 
+		spin_lock_bh(&br->lock);
 		if ((p = br_get_port(br, arg0)) == NULL)
-			return -EINVAL;
-		br_stp_set_path_cost(p, arg1);
-		return 0;
+			ret = -EINVAL;
+		else
+			br_stp_set_path_cost(p, arg1);
+		spin_unlock_bh(&br->lock);
+		return ret;
 	}
 
 	case BRCTL_GET_FDB_ENTRIES:
@@ -196,19 +238,24 @@ static int br_ioctl_deviceless(unsigned int cmd,
 
 	case BRCTL_GET_BRIDGES:
 	{
-		int i;
-		int indices[64];
-
-		for (i=0;i<64;i++)
-			indices[i] = 0;
+		int *indices;
+		int ret = 0;
 
 		if (arg1 > 64)
 			arg1 = 64;
-		arg1 = br_get_bridge_ifindices(indices, arg1);
-		if (copy_to_user((void *)arg0, indices, arg1*sizeof(int)))
-			return -EFAULT;
 
-		return arg1;
+		indices = kmalloc(arg1*sizeof(int), GFP_KERNEL);
+		if (indices == NULL)
+			return -ENOMEM;
+
+		memset(indices, 0, arg1*sizeof(int));
+		arg1 = br_get_bridge_ifindices(indices, arg1);
+
+		ret = copy_to_user((void *)arg0, indices, arg1*sizeof(int))
+			? -EFAULT : arg1;
+
+		kfree(indices);
+		return ret;
 	}
 
 	case BRCTL_ADD_BRIDGE:
@@ -231,10 +278,10 @@ static int br_ioctl_deviceless(unsigned int cmd,
 	return -EOPNOTSUPP;
 }
 
+
 int br_ioctl_deviceless_stub(unsigned long arg)
 {
 	unsigned long i[3];
-	int err;
 
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
@@ -242,17 +289,19 @@ int br_ioctl_deviceless_stub(unsigned long arg)
 	if (copy_from_user(i, (void *)arg, 3*sizeof(unsigned long)))
 		return -EFAULT;
 
-	rtnl_lock();
-	err =  br_ioctl_deviceless(i[0], i[1], i[2]);
-	rtnl_unlock();
-	return err;
+	return br_ioctl_deviceless(i[0], i[1], i[2]);
 }
 
 int br_ioctl(struct net_bridge *br, unsigned int cmd, unsigned long arg0, unsigned long arg1, unsigned long arg2)
 {
+	int err;
+
 	if (!capable(CAP_NET_ADMIN))
 		return -EPERM;
 
-	ASSERT_RTNL();
-	return br_ioctl_device(br, cmd, arg0, arg1, arg2);
+	err = br_ioctl_deviceless(cmd, arg0, arg1);
+	if (err == -EOPNOTSUPP)
+		err = br_ioctl_device(br, cmd, arg0, arg1, arg2);
+
+	return err;
 }

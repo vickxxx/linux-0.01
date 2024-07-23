@@ -6,6 +6,8 @@
 #ifndef _QLOGICPTI_H
 #define _QLOGICPTI_H
 
+#include <linux/config.h>
+
 /* Qlogic/SBUS controller registers. */
 #define SBUS_CFG1	0x006UL
 #define SBUS_CTRL	0x008UL
@@ -44,18 +46,6 @@
  */
 #define QLOGICPTI_REQ_QUEUE_LEN	255	/* must be power of two - 1 */
 #define QLOGICPTI_MAX_SG(ql)	(4 + ((ql) > 0) ? 7*((ql) - 1) : 0)
-
-#ifndef NULL
-#define NULL (0)
-#endif
-
-int qlogicpti_detect(Scsi_Host_Template *);
-int qlogicpti_release(struct Scsi_Host *);
-const char * qlogicpti_info(struct Scsi_Host *);
-int qlogicpti_queuecommand(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
-int qlogicpti_queuecommand_slow(Scsi_Cmnd *, void (* done)(Scsi_Cmnd *));
-int qlogicpti_abort(Scsi_Cmnd *);
-int qlogicpti_reset(Scsi_Cmnd *, unsigned int);
 
 /* mailbox command complete status codes */
 #define MBOX_COMMAND_COMPLETE		0x4000
@@ -511,21 +501,6 @@ struct qlogicpti {
 #define HCCTRL_EBENAB           0x0010      /* External breakpoint enable       */
 #define HCCTRL_B1ENAB           0x0008      /* Breakpoint 1 enable              */
 #define HCCTRL_B0ENAB           0x0004      /* Breakpoint 0 enable              */
-
-#define QLOGICPTI {						   \
-	detect:		qlogicpti_detect,			   \
-	release:	qlogicpti_release,			   \
-	info:		qlogicpti_info,				   \
-	queuecommand:	qlogicpti_queuecommand_slow,		   \
-	abort:		qlogicpti_abort,			   \
-	reset:		qlogicpti_reset,			   \
-	can_queue:	QLOGICPTI_REQ_QUEUE_LEN,		   \
-	this_id:	7,					   \
-	sg_tablesize:	QLOGICPTI_MAX_SG(QLOGICPTI_REQ_QUEUE_LEN), \
-	cmd_per_lun:	1,					   \
-	use_clustering:	ENABLE_CLUSTERING,			   \
-	use_new_eh_code: 0					   \
-}
 
 /* For our interrupt engine. */
 #define for_each_qlogicpti(qp) \

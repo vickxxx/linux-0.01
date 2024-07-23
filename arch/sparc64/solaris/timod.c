@@ -1,4 +1,4 @@
-/* $Id: timod.c,v 1.16 2001/09/18 22:29:06 davem Exp $
+/* $Id: timod.c,v 1.19 2002/02/08 03:57:14 davem Exp $
  * timod.c: timod emulation.
  *
  * Copyright (C) 1998 Patrik Rak (prak3264@ss1000.ms.mff.cuni.cz)
@@ -29,11 +29,9 @@
 
 extern asmlinkage int sys_ioctl(unsigned int fd, unsigned int cmd, 
 	unsigned long arg);
-extern asmlinkage int sys32_ioctl(unsigned int fd, unsigned int cmd,
-	u32 arg);
 asmlinkage int solaris_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 
-spinlock_t timod_pagelock = SPIN_LOCK_UNLOCKED;
+static spinlock_t timod_pagelock = SPIN_LOCK_UNLOCKED;
 static char * page = NULL ;
 
 #ifndef DEBUG_SOLARIS_KMALLOC
@@ -46,7 +44,7 @@ static char * page = NULL ;
 void * mykmalloc(size_t s, int gfp)
 {
 	static char * page;
-	static size_t free = 0;
+	static size_t free;
 	void * r;
 	s = ((s + 63) & ~63);
 	if( s > PAGE_SIZE ) {
@@ -149,12 +147,12 @@ static void timod_wake_socket(unsigned int fd)
 	struct socket *sock;
 
 	SOLD("wakeing socket");
-	sock = &current->files->fd[fd]->f_dentry->d_inode->u.socket_i;
+	sock = SOCKET_I(current->files->fd[fd]->f_dentry->d_inode);
 	wake_up_interruptible(&sock->wait);
-	read_lock(&sock->sk->callback_lock);
+	read_lock(&sock->sk->sk_callback_lock);
 	if (sock->fasync_list && !test_bit(SOCK_ASYNC_WAITDATA, &sock->flags))
 		__kill_fasync(sock->fasync_list, SIGIO, POLL_IN);
-	read_unlock(&sock->sk->callback_lock);
+	read_unlock(&sock->sk->sk_callback_lock);
 	SOLD("done");
 }
 
@@ -640,7 +638,7 @@ int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, s32 *ctl_len,
 	ino = filp->f_dentry->d_inode;
 	sock = (struct sol_socket_struct *)filp->private_data;
 	SOLDD(("%p %p\n", sock->pfirst, sock->pfirst ? sock->pfirst->next : NULL));
-	if ( ctl_maxlen > 0 && !sock->pfirst && ino->u.socket_i.type == SOCK_STREAM
+	if ( ctl_maxlen > 0 && !sock->pfirst && SOCKET_I(ino)->type == SOCK_STREAM
 		&& sock->state == TS_IDLE) {
 		SOLD("calling LISTEN");
 		args[0] = fd;
@@ -651,10 +649,11 @@ int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, s32 *ctl_len,
 		SOLD("LISTEN done");
 	}
 	if (!(filp->f_flags & O_NONBLOCK)) {
-		poll_table wait_table, *wait;
+		struct poll_wqueues wait_table;
+		poll_table *wait;
 
 		poll_initwait(&wait_table);
-		wait = &wait_table;
+		wait = &wait_table.pt;
 		for(;;) {
 			SOLD("loop");
 			set_current_state(TASK_INTERRUPTIBLE);
@@ -730,7 +729,7 @@ int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, s32 *ctl_len,
 	*flags_p = 0;
 	if (ctl_maxlen >= 0) {
 		SOLD("ACCEPT perhaps?");
-		if (ino->u.socket_i.type == SOCK_STREAM && sock->state == TS_IDLE) {
+		if (SOCKET_I(ino)->type == SOCK_STREAM && sock->state == TS_IDLE) {
 			struct T_conn_ind ind;
 			char *buf = getpage();
 			int len = BUF_SIZE;
@@ -820,14 +819,18 @@ int timod_getmsg(unsigned int fd, char *ctl_buf, int ctl_maxlen, s32 *ctl_len,
 	if (error && ctl_maxlen > sizeof(udi) && sock->state == TS_IDLE) {
 		SOLD("generating udi");
 		udi.PRIM_type = T_UNITDATA_IND;
-		get_user(udi.SRC_length, ctl_len);
+		if (get_user(udi.SRC_length, ctl_len))
+			return -EFAULT;
 		udi.SRC_offset = sizeof(udi);
 		udi.OPT_length = udi.OPT_offset = 0;
-		copy_to_user(ctl_buf, &udi, sizeof(udi));
-		put_user(sizeof(udi)+udi.SRC_length, ctl_len);
+		if (copy_to_user(ctl_buf, &udi, sizeof(udi)) ||
+		    put_user(sizeof(udi)+udi.SRC_length, ctl_len))
+			return -EFAULT;
 		SOLD("udi done");
-	} else
-		put_user(0, ctl_len);
+	} else {
+		if (put_user(0, ctl_len))
+			return -EFAULT;
+	}
 	put_user(error, data_len);
 	SOLD("done");
 	return 0;
@@ -921,7 +924,7 @@ asmlinkage int solaris_putmsg(unsigned int fd, u32 arg1, u32 arg2, u32 arg3)
 	if (!ino) goto out;
 
 	if (!ino->i_sock &&
-		(MAJOR(ino->i_rdev) != 30 || MINOR(ino->i_rdev) != 1))
+		(major(ino->i_rdev) != 30 || minor(ino->i_rdev) != 1))
 		goto out;
 
 	ctlptr = (struct strbuf *)A(arg1);

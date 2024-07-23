@@ -1,4 +1,4 @@
-/* $Id: io.h,v 1.40 2001/11/10 09:24:56 davem Exp $ */
+/* $Id: io.h,v 1.47 2001/12/13 10:36:02 davem Exp $ */
 #ifndef __SPARC64_IO_H
 #define __SPARC64_IO_H
 
@@ -17,6 +17,11 @@ extern unsigned long virt_to_bus_not_defined_use_pci_map(volatile void *addr);
 #define virt_to_bus virt_to_bus_not_defined_use_pci_map
 extern unsigned long bus_to_virt_not_defined_use_pci_map(volatile void *addr);
 #define bus_to_virt bus_to_virt_not_defined_use_pci_map
+
+/* BIO layer definitions. */
+extern unsigned long phys_base;
+#define page_to_phys(page)	((((page) - mem_map) << PAGE_SHIFT)+phys_base)
+#define BIO_VMERGE_BOUNDARY	8192
 
 /* Different PCI controllers we support have their PCI MEM space
  * mapped to an either 2GB (Psycho) or 4GB (Sabre) aligned area,
@@ -252,6 +257,7 @@ static __inline__ void _raw_writeq(u64 q, unsigned long addr)
 #define __raw_readb(__addr)		(_raw_readb((unsigned long)(__addr)))
 #define __raw_readw(__addr)		(_raw_readw((unsigned long)(__addr)))
 #define __raw_readl(__addr)		(_raw_readl((unsigned long)(__addr)))
+#define __raw_readq(__addr)		(_raw_readq((unsigned long)(__addr)))
 #define __raw_writeb(__b, __addr)	(_raw_writeb((u8)(__b), (unsigned long)(__addr)))
 #define __raw_writew(__w, __addr)	(_raw_writew((u16)(__w), (unsigned long)(__addr)))
 #define __raw_writel(__l, __addr)	(_raw_writel((u32)(__l), (unsigned long)(__addr)))
@@ -298,6 +304,17 @@ static __inline__ u32 _sbus_readl(unsigned long addr)
 	return ret;
 }
 
+static __inline__ u64 _sbus_readq(unsigned long addr)
+{
+	u64 ret;
+
+	__asm__ __volatile__("ldxa\t[%1] %2, %0\t/* sbus_readq */"
+			     : "=r" (ret)
+			     : "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E));
+
+	return ret;
+}
+
 static __inline__ void _sbus_writeb(u8 b, unsigned long addr)
 {
 	__asm__ __volatile__("stba\t%r0, [%1] %2\t/* sbus_writeb */"
@@ -319,12 +336,21 @@ static __inline__ void _sbus_writel(u32 l, unsigned long addr)
 			     : "Jr" (l), "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E));
 }
 
+static __inline__ void _sbus_writeq(u64 l, unsigned long addr)
+{
+	__asm__ __volatile__("stxa\t%r0, [%1] %2\t/* sbus_writeq */"
+			     : /* no outputs */
+			     : "Jr" (l), "r" (addr), "i" (ASI_PHYS_BYPASS_EC_E));
+}
+
 #define sbus_readb(__addr)		(_sbus_readb((unsigned long)(__addr)))
 #define sbus_readw(__addr)		(_sbus_readw((unsigned long)(__addr)))
 #define sbus_readl(__addr)		(_sbus_readl((unsigned long)(__addr)))
+#define sbus_readq(__addr)		(_sbus_readq((unsigned long)(__addr)))
 #define sbus_writeb(__b, __addr)	(_sbus_writeb((__b), (unsigned long)(__addr)))
 #define sbus_writew(__w, __addr)	(_sbus_writew((__w), (unsigned long)(__addr)))
 #define sbus_writel(__l, __addr)	(_sbus_writel((__l), (unsigned long)(__addr)))
+#define sbus_writeq(__l, __addr)	(_sbus_writeq((__l), (unsigned long)(__addr)))
 
 static inline void *_sbus_memset_io(unsigned long dst, int c, __kernel_size_t n)
 {
@@ -409,7 +435,7 @@ out:
  */
 #define ioremap(__offset, __size)	((void *)(__offset))
 #define ioremap_nocache(X,Y)		ioremap((X),(Y))
-#define iounmap(__addr)			do { } while(0)
+#define iounmap(__addr)			do { (void)(__addr); } while(0)
 
 /* Similarly for SBUS. */
 #define sbus_ioremap(__res, __offset, __size, __name) \

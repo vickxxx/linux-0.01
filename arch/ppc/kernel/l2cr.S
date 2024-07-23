@@ -30,13 +30,21 @@
 	***********
 	Thu, July 13, 2000.
 	- Terry: Added isync to correct for an errata.
+
+	22 August 2001.
+	- DanM: Finally added the 7450 patch I've had for the past
+		several months.  The L2CR is similar, but I'm going
+		to assume the user of this functions knows what they
+		are doing.
 	
 	Author:	Terry Greeniaus (tgree@phys.ualberta.ca)
 	Please e-mail updates to this file to me, thanks!
 */
+#include <linux/config.h>
 #include <asm/processor.h>
 #include <asm/cputable.h>
-#include "ppc_asm.h"
+#include <asm/ppc_asm.h>
+#include <asm/cache.h>
 
 /* Usage:
 	
@@ -71,6 +79,15 @@
 	features, such as L2DO which caches only data, or L2TS which
 	causes cache pushes from the L1 cache to go to the L2 cache
 	instead of to main memory.
+
+IMPORTANT:
+	Starting with the 7450, the bits in this register have moved
+	or behave differently.  The Enable, Parity Enable, Size,
+	and L2 Invalidate are the only bits that have not moved.
+	The size is read-only for these processors with internal L2
+	cache, and the invalidate is a control as well as status.
+		-- Dan
+
 */
 /*
  * Summary: this procedure ignores the L2I bit in the value passed in,
@@ -86,6 +103,14 @@ BEGIN_FTR_SECTION
 	blr
 END_FTR_SECTION_IFCLR(CPU_FTR_L2CR)
 
+	mflr	r9
+	
+	/* Stop DST streams */
+BEGIN_FTR_SECTION
+	DSSALL
+	sync
+END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
+
 	/* Turn off interrupts and data relocation. */
 	mfmsr	r7		/* Save MSR in r7 */
 	rlwinm	r4,r7,0,17,15
@@ -94,6 +119,22 @@ END_FTR_SECTION_IFCLR(CPU_FTR_L2CR)
 	mtmsr	r4
 	isync
 
+	/* Before we perform the global invalidation, we must disable dynamic
+	 * power management via HID0[DPM] to work around a processor bug where
+	 * DPM can possibly interfere with the state machine in the processor
+	 * that invalidates the L2 cache tags.
+	 */
+	mfspr	r8,HID0			/* Save HID0 in r8 */
+	rlwinm	r4,r8,0,12,10		/* Turn off HID0[DPM] */
+	sync
+	mtspr	HID0,r4			/* Disable DPM */
+	sync
+
+	/* Flush & disable L1 */
+	mr	r5,r3
+	bl	__flush_disable_L1
+	mr	r3,r5
+	
 	/* Get the current enable bit of the L2CR into r4 */
 	mfspr	r4,L2CR
 	
@@ -115,7 +156,11 @@ END_FTR_SECTION_IFCLR(CPU_FTR_L2CR)
 	 /**** Might be a good idea to set L2DO here - to prevent instructions
 	       from getting into the cache.  But since we invalidate
 	       the next time we enable the cache it doesn't really matter.
+	       Don't do this unless you accomodate all processor variations.
+	       The bit moved on the 7450.....
 	  ****/
+
+	/* TODO: use HW flush assist when available */
 
 	lis	r4,0x0002
 	mtctr	r4
@@ -124,6 +169,7 @@ END_FTR_SECTION_IFCLR(CPU_FTR_L2CR)
 	lwzx	r0,r0,r4
 	addi	r4,r4,32		/* Go to start of next cache line */
 	bdnz	1b
+	isync
 	
 	/* Now, flush the first 4MB of memory */
 	lis	r4,0x0002
@@ -131,27 +177,29 @@ END_FTR_SECTION_IFCLR(CPU_FTR_L2CR)
 	li	r4,0
 	sync
 1:
-	dcbf	r0,r4
+	dcbf	0,r4
 	addi	r4,r4,32		/* Go to start of next cache line */
 	bdnz	1b
 
 2:
 	/* Set up the L2CR configuration bits (and switch L2 off) */
+	/* CPU errata: Make sure the mtspr below is already in the
+	 * L1 icache
+	 */
+	b	20f
+	.balign	L1_CACHE_LINE_SIZE
+22:
 	sync
 	mtspr	L2CR,r3
 	sync
-
-	/* Before we perform the global invalidation, we must disable dynamic
-	 * power management via HID0[DPM] to work around a processor bug where
-	 * DPM can possibly interfere with the state machine in the processor
-	 * that invalidates the L2 cache tags.
-	 */
-	mfspr	r8,HID0			/* Save HID0 in r8 */
-	rlwinm	r4,r8,0,12,10		/* Turn off HID0[DPM] */
-	sync
-	mtspr	HID0,r4			/* Disable DPM */
-	sync
-
+	b	23f
+20:
+	b	21f
+21:	sync
+	isync
+	b	22b
+		
+23:
 	/* Perform a global invalidation */
 	oris	r3,r3,0x0020
 	sync
@@ -159,21 +207,25 @@ END_FTR_SECTION_IFCLR(CPU_FTR_L2CR)
 	sync
 	isync				/* For errata */
 
+BEGIN_FTR_SECTION
+	/* On the 7450, we wait for the L2I bit to clear......
+	*/
+10:	mfspr	r3,L2CR
+	andis.	r4,r3,0x0020
+	bne	10b
+	b	11f
+END_FTR_SECTION_IFSET(CPU_FTR_SPEC7450)
+
 	/* Wait for the invalidation to complete */
 3:	mfspr	r3,L2CR
 	rlwinm.	r4,r3,0,31,31
 	bne	3b
 	
-	rlwinm	r3,r3,0,11,9		/* Turn off the L2I bit */
+11:	rlwinm	r3,r3,0,11,9		/* Turn off the L2I bit */
 	sync
 	mtspr	L2CR,r3
 	sync
 	
-	/* Restore HID0[DPM] to whatever it was before */
-	sync
-	mtspr	1008,r8
-	sync
-
 	/* See if we need to enable the cache */
 	cmplwi	r5,0
 	beq	4f
@@ -183,10 +235,20 @@ END_FTR_SECTION_IFCLR(CPU_FTR_L2CR)
 	mtspr	L2CR,r3
 	sync
 
+4:
+	bl	__inval_enable_L1
+
+	/* Restore HID0[DPM] to whatever it was before */
+	sync
+	mtspr	1008,r8
+	sync
+
 	/* Restore MSR (restores EE and DR bits to original state) */
-4:	SYNC
+	SYNC
 	mtmsr	r7
 	isync
+
+	mtlr	r9
 	blr
 
 _GLOBAL(_get_L2CR)
@@ -197,5 +259,194 @@ BEGIN_FTR_SECTION
 END_FTR_SECTION_IFSET(CPU_FTR_L2CR)
 	blr
 
+
+/*
+ * Here is a similar routine for dealing with the L3 cache
+ * on the 745x family of chips
+ */
+ 
+_GLOBAL(_set_L3CR)
+	/* Make sure this is a 745x chip */
+BEGIN_FTR_SECTION
+	li	r3,-1
+	blr
+END_FTR_SECTION_IFCLR(CPU_FTR_L3CR)
+
+	/* Turn off interrupts and data relocation. */
+	mfmsr	r7		/* Save MSR in r7 */
+	rlwinm	r4,r7,0,17,15
+	rlwinm	r4,r4,0,28,26	/* Turn off DR bit */
+	sync
+	mtmsr	r4
+	isync
+
+	/* Stop DST streams */
+	DSSALL
+	sync
+	
+	/* Get the current enable bit of the L3CR into r4 */
+	mfspr	r4,SPRN_L3CR
+	
+	/* Tweak some bits */
+	rlwinm	r5,r3,0,0,0		/* r5 contains the new enable bit */
+	rlwinm	r3,r3,0,22,20		/* Turn off the invalidate bit */
+	rlwinm	r3,r3,0,1,31		/* Turn off the enable bit */
+	rlwinm	r3,r3,0,5,3		/* Turn off the clken bit */
+	/* Check to see if we need to flush */
+	rlwinm.	r4,r4,0,0,0
+	beq	2f
+
+	/* Flush the cache.
+	 */
+		
+	/* TODO: use HW flush assist */
+
+	lis	r4,0x0008
+	mtctr	r4
+	li	r4,0
+1:
+	lwzx	r0,r0,r4
+	dcbf	0,r4
+	addi	r4,r4,32		/* Go to start of next cache line */
+	bdnz	1b
+	
+2:
+	/* Set up the L3CR configuration bits (and switch L3 off) */
+	sync
+	mtspr	SPRN_L3CR,r3
+	sync
+
+	oris	r3,r3,L3CR_L3RES@h		/* Set reserved bit 5 */
+	mtspr	SPRN_L3CR,r3
+	sync
+	oris	r3,r3,L3CR_L3CLKEN@h		/* Set clken */
+	mtspr	SPRN_L3CR,r3
+	sync
+
+	/* Wait for stabilize */
+	li	r0,256
+	mtctr	r0
+1:	bdnz	1b
+	
+	/* Perform a global invalidation */
+	ori	r3,r3,0x0400
+	sync
+	mtspr	SPRN_L3CR,r3
+	sync
+	isync
+
+	/* We wait for the L3I bit to clear...... */
+10:	mfspr	r3,SPRN_L3CR
+	andi.	r4,r3,0x0400
+	bne	10b
+
+	/* Clear CLKEN */
+	rlwinm	r3,r3,0,5,3		/* Turn off the clken bit */
+	mtspr	SPRN_L3CR,r3
+	sync
+
+	/* Wait for stabilize */
+	li	r0,256
+	mtctr	r0
+1:	bdnz	1b
+	
+	/* See if we need to enable the cache */
+	cmplwi	r5,0
+	beq	4f
+
+	/* Enable the cache */
+	oris	r3,r3,(L3CR_L3E | L3CR_L3CLKEN)@h
+	mtspr	SPRN_L3CR,r3
+	sync
+
+	/* Wait for stabilize */
+	li	r0,256
+	mtctr	r0
+1:	bdnz	1b
+
+	/* Restore MSR (restores EE and DR bits to original state) */
+4:	SYNC
+	mtmsr	r7
+	isync
+	blr
+
+_GLOBAL(_get_L3CR)
+	/* Return the L3CR contents */
+	li	r3,0
+BEGIN_FTR_SECTION
+	mfspr	r3,SPRN_L3CR
+END_FTR_SECTION_IFSET(CPU_FTR_L3CR)
+	blr
+
 /* --- End of PowerLogix code ---
  */
+
+
+/* flush_disable_L1()	- Flush and disable L1 cache
+ *
+ * clobbers r0, r3, ctr, cr0
+ *
+ */
+ 	.globl	__flush_disable_L1
+ __flush_disable_L1:
+ 
+	/* Stop pending alitvec streams and memory accesses */
+BEGIN_FTR_SECTION
+	DSSALL
+END_FTR_SECTION_IFSET(CPU_FTR_ALTIVEC)
+ 	sync
+ 	
+	/* Load counter to 0x1000 cache lines (128k) and
+	 * load cache with datas
+	 */
+	lis	r3,0x0002
+//	li	r3,0x1000	/* 128kB / 32B */
+	mtctr	r3
+	li	r3, 0
+1:
+	lwz	r0,0(r3)
+	addi	r3,r3,0x0020	/* Go to start of next cache line */
+	bdnz	1b
+	isync
+	sync
+
+	/* Now flush those cache lines */
+	lis	r3,0x0002
+//	li	r3,0x1000	/* 128kB / 32B */
+	mtctr	r3
+	li	r3, 0
+1:
+	dcbf	0,r3
+	addi	r3,r3,0x0020	/* Go to start of next cache line */
+	bdnz	1b
+	sync
+
+	/* We can now disable the L1 cache (HID0:DCE, HID0:ICE) */
+	mfspr	r3,SPRN_HID0
+	rlwinm	r3,r3,0,18,15
+	mtspr	SPRN_HID0,r3
+	sync
+	isync	
+ 	blr
+
+/* inval_enable_L1	- Invalidate and enable L1 cache
+ *
+ * Assumes L1 is already disabled and MSR:EE is off
+ *
+ * clobbers r3
+ */
+ 	.globl	__inval_enable_L1
+ __inval_enable_L1:
+	/* Enable and then Flash inval the instruction & data cache */
+	mfspr	r3,SPRN_HID0
+	ori	r3,r3, HID0_ICE|HID0_ICFI|HID0_DCE|HID0_DCI
+	sync
+	isync
+	mtspr	SPRN_HID0,r3
+	xori	r3,r3, HID0_ICFI|HID0_DCI
+	mtspr	SPRN_HID0,r3
+	sync
+
+ 	blr
+
+ 

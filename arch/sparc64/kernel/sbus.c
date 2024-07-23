@@ -1,4 +1,4 @@
-/* $Id: sbus.c,v 1.17 2001/10/09 02:24:33 davem Exp $
+/* $Id: sbus.c,v 1.19 2002/01/23 11:27:32 davem Exp $
  * sbus.c: UltraSparc SBUS controller support.
  *
  * Copyright (C) 1999 David S. Miller (davem@redhat.com)
@@ -10,6 +10,7 @@
 #include <linux/spinlock.h>
 #include <linux/slab.h>
 #include <linux/init.h>
+#include <linux/interrupt.h>
 
 #include <asm/page.h>
 #include <asm/sbus.h>
@@ -23,7 +24,7 @@
 #include "iommu_common.h"
 
 /* These should be allocated on an SMP_CACHE_BYTES
- * aligned boundry for optimal performance.
+ * aligned boundary for optimal performance.
  *
  * On SYSIO, using an 8K page size we have 1GB of SBUS
  * DMA space mapped.  We divide this space into equally
@@ -377,9 +378,7 @@ void sbus_unmap_single(struct sbus_dev *sdev, dma_addr_t dma_addr, size_t size, 
 }
 
 #define SG_ENT_PHYS_ADDRESS(SG)	\
-	((SG)->address ? \
-	 __pa((SG)->address) : \
-	 (__pa(page_address((SG)->page)) + (SG)->offset))
+	(__pa(page_address((SG)->page)) + (SG)->offset)
 
 static inline void fill_sg(iopte_t *iopte, struct scatterlist *sg, int nused, int nelems, unsigned long iopte_bits)
 {
@@ -470,9 +469,7 @@ int sbus_map_sg(struct sbus_dev *sdev, struct scatterlist *sg, int nents, int di
 	if (nents == 1) {
 		sg->dma_address =
 			sbus_map_single(sdev,
-					(sg->address ?
-					 sg->address :
-					 (page_address(sg->page) + sg->offset)),
+					(page_address(sg->page) + sg->offset),
 					sg->length, dir);
 		sg->dma_length = sg->length;
 		return 1;
@@ -632,11 +629,11 @@ void sbus_set_sbus64(struct sbus_dev *sdev, int bursts)
 
 /* SBUS SYSIO INO number to Sparc PIL level. */
 static unsigned char sysio_ino_to_pil[] = {
-	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 0 */
-	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 1 */
-	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 2 */
-	0, 1, 2, 7, 5, 7, 8, 9,		/* SBUS slot 3 */
-	3, /* Onboard SCSI */
+	0, 4, 4, 7, 5, 7, 8, 9,		/* SBUS slot 0 */
+	0, 4, 4, 7, 5, 7, 8, 9,		/* SBUS slot 1 */
+	0, 4, 4, 7, 5, 7, 8, 9,		/* SBUS slot 2 */
+	0, 4, 4, 7, 5, 7, 8, 9,		/* SBUS slot 3 */
+	4, /* Onboard SCSI */
 	5, /* Onboard Ethernet */
 /*XXX*/	8, /* Onboard BPP */
 	0, /* Bogon */
@@ -731,7 +728,7 @@ static unsigned long sysio_irq_offsets[] = {
 
 #define NUM_SYSIO_OFFSETS (sizeof(sysio_irq_offsets) / sizeof(sysio_irq_offsets[0]))
 
-/* Convert Interrupt Mapping register pointer to assosciated
+/* Convert Interrupt Mapping register pointer to associated
  * Interrupt Clear register pointer, SYSIO specific version.
  */
 #define SYSIO_ICLR_UNUSED0	0x3400UL
@@ -758,6 +755,10 @@ unsigned int sbus_build_irq(void *buscookie, unsigned int ino)
 		printk("sbus_irq_build: Bad SYSIO INO[%x]\n", ino);
 		panic("Bad SYSIO IRQ translations...");
 	}
+
+	if (PIL_RESERVED(pil))
+		BUG();
+
 	imap = sysio_irq_offsets[ino];
 	if (imap == ((unsigned long)-1)) {
 		prom_printf("get_irq_translations: Bad SYSIO INO[%x] cpu[%d]\n",
@@ -766,7 +767,7 @@ unsigned int sbus_build_irq(void *buscookie, unsigned int ino)
 	}
 	imap += reg_base;
 
-	/* SYSIO inconsistancy.  For external SLOTS, we have to select
+	/* SYSIO inconsistency.  For external SLOTS, we have to select
 	 * the right ICLR register based upon the lower SBUS irq level
 	 * bits.
 	 */
@@ -812,7 +813,7 @@ unsigned int sbus_build_irq(void *buscookie, unsigned int ino)
 #define  SYSIO_UEAFSR_SIZE	0x00001c0000000000 /* Bad transfer size is 2**SIZE */
 #define  SYSIO_UEAFSR_MID	0x000003e000000000 /* UPA MID causing the fault    */
 #define  SYSIO_UEAFSR_RESV2	0x0000001fffffffff /* Reserved                     */
-static void sysio_ue_handler(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sysio_ue_handler(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct sbus_bus *sbus = dev_id;
 	struct sbus_iommu *iommu = sbus->iommu;
@@ -866,6 +867,8 @@ static void sysio_ue_handler(int irq, void *dev_id, struct pt_regs *regs)
 	if (!reported)
 		printk("(none)");
 	printk("]\n");
+
+	return IRQ_HANDLED;
 }
 
 #define SYSIO_CE_AFSR	0x0040UL
@@ -882,7 +885,7 @@ static void sysio_ue_handler(int irq, void *dev_id, struct pt_regs *regs)
 #define  SYSIO_CEAFSR_SIZE	0x00001c0000000000 /* Bad transfer size is 2**SIZE */
 #define  SYSIO_CEAFSR_MID	0x000003e000000000 /* UPA MID causing the fault    */
 #define  SYSIO_CEAFSR_RESV2	0x0000001fffffffff /* Reserved                     */
-static void sysio_ce_handler(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sysio_ce_handler(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct sbus_bus *sbus = dev_id;
 	struct sbus_iommu *iommu = sbus->iommu;
@@ -941,6 +944,8 @@ static void sysio_ce_handler(int irq, void *dev_id, struct pt_regs *regs)
 	if (!reported)
 		printk("(none)");
 	printk("]\n");
+
+	return IRQ_HANDLED;
 }
 
 #define SYSIO_SBUS_AFSR		0x2010UL
@@ -957,7 +962,7 @@ static void sysio_ce_handler(int irq, void *dev_id, struct pt_regs *regs)
 #define  SYSIO_SBAFSR_SIZE	0x00001c0000000000 /* Size of transfer             */
 #define  SYSIO_SBAFSR_MID	0x000003e000000000 /* MID causing the error        */
 #define  SYSIO_SBAFSR_RESV3	0x0000001fffffffff /* Reserved                     */
-static void sysio_sbus_error_handler(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t sysio_sbus_error_handler(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct sbus_bus *sbus = dev_id;
 	struct sbus_iommu *iommu = sbus->iommu;
@@ -1012,6 +1017,8 @@ static void sysio_sbus_error_handler(int irq, void *dev_id, struct pt_regs *regs
 	printk("]\n");
 
 	/* XXX check iommu/strbuf for further error status XXX */
+
+	return IRQ_HANDLED;
 }
 
 #define ECC_CONTROL	0x0020UL
@@ -1091,7 +1098,7 @@ void __init sbus_iommu_init(int prom_node, struct sbus_bus *sbus)
 		prom_halt();
 	}
 
-	/* Align on E$ line boundry. */
+	/* Align on E$ line boundary. */
 	iommu = (struct sbus_iommu *)
 		(((unsigned long)iommu + (SMP_CACHE_BYTES - 1UL)) &
 		 ~(SMP_CACHE_BYTES - 1UL));

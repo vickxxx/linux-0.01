@@ -1,4 +1,4 @@
-/*  $Id: process.c,v 1.157 2001/11/13 00:57:05 davem Exp $
+/*  $Id: process.c,v 1.161 2002/01/23 11:27:32 davem Exp $
  *  linux/arch/sparc/kernel/process.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -27,6 +27,7 @@
 #include <linux/smp_lock.h>
 #include <linux/reboot.h>
 #include <linux/delay.h>
+#include <linux/pm.h>
 
 #include <asm/auxio.h>
 #include <asm/oplib.h>
@@ -40,10 +41,30 @@
 #include <asm/psr.h>
 #include <asm/elf.h>
 
+/* 
+ * Power management idle function 
+ * Set in pm platform drivers
+ */
+void (*pm_idle)(void);
+
+/* 
+ * Power-off handler instantiation for pm.h compliance
+ * This is done via auxio, but could be used as a fallback
+ * handler when auxio is not present-- unused for now...
+ */
+void (*pm_power_off)(void);
+
 extern void fpsave(unsigned long *, unsigned long *, void *, unsigned long *);
 
 struct task_struct *last_task_used_math = NULL;
-struct task_struct *current_set[NR_CPUS] = {&init_task, };
+struct thread_info *current_set[NR_CPUS];
+
+/*
+ * default_idle is new in 2.5. XXX Review, currently stolen from sparc64.
+ */
+void default_idle(void)
+{
+}
 
 #ifndef CONFIG_SMP
 
@@ -60,16 +81,12 @@ int cpu_idle(void)
 		goto out;
 
 	/* endless idle loop with no priority at all */
-	current->nice = 20;
-	current->counter = -100;
-	init_idle();
-
 	for (;;) {
 		if (ARCH_SUN4C_SUN4) {
 			static int count = HZ;
-			static unsigned long last_jiffies = 0;
-			static unsigned long last_faults = 0;
-			static unsigned long fps = 0;
+			static unsigned long last_jiffies;
+			static unsigned long last_faults;
+			static unsigned long fps;
 			unsigned long now;
 			unsigned long faults;
 			unsigned long flags;
@@ -77,7 +94,7 @@ int cpu_idle(void)
 			extern unsigned long sun4c_kernel_faults;
 			extern void sun4c_grow_kernel_ring(void);
 
-			save_and_cli(flags);
+			local_irq_save(flags);
 			now = jiffies;
 			count -= (now - last_jiffies);
 			last_jiffies = now;
@@ -87,16 +104,21 @@ int cpu_idle(void)
 				fps = (fps + (faults - last_faults)) >> 1;
 				last_faults = faults;
 #if 0
-				printk("kernel faults / second = %d\n", fps);
+				printk("kernel faults / second = %ld\n", fps);
 #endif
 				if (fps >= SUN4C_FAULT_HIGH) {
 					sun4c_grow_kernel_ring();
 				}
 			}
-			restore_flags(flags);
+			local_irq_restore(flags);
 		}
-		check_pgt_cache();
+
+		while((!need_resched()) && pm_idle) {
+			(*pm_idle)();		/* XXX Huh? On sparc?! */
+		}
+
 		schedule();
+		check_pgt_cache();
 	}
 	ret = 0;
 out:
@@ -109,12 +131,8 @@ out:
 int cpu_idle(void)
 {
 	/* endless idle loop with no priority at all */
-	current->nice = 20;
-	current->counter = -100;
-	init_idle();
-
 	while(1) {
-		if(current->need_resched) {
+		if(need_resched()) {
 			schedule();
 			check_pgt_cache();
 		}
@@ -126,21 +144,15 @@ int cpu_idle(void)
 
 extern char reboot_command [];
 
-extern int serial_console;
-
-#ifdef CONFIG_SUN_CONSOLE
 extern void (*prom_palette)(int);
-#endif
 
 void machine_halt(void)
 {
 	sti();
 	mdelay(8);
 	cli();
-#ifdef CONFIG_SUN_CONSOLE
 	if (!serial_console && prom_palette)
 		prom_palette (1);
-#endif
 	prom_halt();
 	panic("Halt failed!");
 }
@@ -155,10 +167,8 @@ void machine_restart(char * cmd)
 
 	p = strchr (reboot_command, '\n');
 	if (p) *p = 0;
-#ifdef CONFIG_SUN_CONSOLE
 	if (!serial_console && prom_palette)
 		prom_palette (1);
-#endif
 	if (cmd)
 		prom_reboot(cmd);
 	if (*reboot_command)
@@ -174,18 +184,6 @@ void machine_power_off(void)
 		*auxio_power_register |= AUXIO_POWER_OFF;
 #endif
 	machine_halt();
-}
-
-void show_regwindow(struct reg_window *rw)
-{
-	printk("l0: %08lx l1: %08lx l2: %08lx l3: %08lx "
-	       "l4: %08lx l5: %08lx l6: %08lx l7: %08lx\n",
-	       rw->locals[0], rw->locals[1], rw->locals[2], rw->locals[3],
-	       rw->locals[4], rw->locals[5], rw->locals[6], rw->locals[7]);
-	printk("i0: %08lx i1: %08lx i2: %08lx i3: %08lx "
-	       "i4: %08lx i5: %08lx fp: %08lx i7: %08lx\n",
-	       rw->ins[0], rw->ins[1], rw->ins[2], rw->ins[3],
-	       rw->ins[4], rw->ins[5], rw->ins[6], rw->ins[7]);
 }
 
 static spinlock_t sparc_backtrace_lock = SPIN_LOCK_UNLOCKED;
@@ -238,6 +236,7 @@ void smp_show_backtrace_all_cpus(void)
 }
 #endif
 
+#if 0
 void show_stackframe(struct sparc_stackf *sf)
 {
 	unsigned long size;
@@ -265,57 +264,64 @@ void show_stackframe(struct sparc_stackf *sf)
 		printk("s%d: %08lx\n", i++, *stk++);
 	} while ((size -= sizeof(unsigned long)));
 }
-
-void show_regs(struct pt_regs * regs)
-{
-        printk("PSR: %08lx PC: %08lx NPC: %08lx Y: %08lx    %s\n", regs->psr,
-	       regs->pc, regs->npc, regs->y, print_tainted());
-	printk("g0: %08lx g1: %08lx g2: %08lx g3: %08lx ",
-	       regs->u_regs[0], regs->u_regs[1], regs->u_regs[2],
-	       regs->u_regs[3]);
-	printk("g4: %08lx g5: %08lx g6: %08lx g7: %08lx\n",
-	       regs->u_regs[4], regs->u_regs[5], regs->u_regs[6],
-	       regs->u_regs[7]);
-	printk("o0: %08lx o1: %08lx o2: %08lx o3: %08lx ",
-	       regs->u_regs[8], regs->u_regs[9], regs->u_regs[10],
-	       regs->u_regs[11]);
-	printk("o4: %08lx o5: %08lx sp: %08lx o7: %08lx\n",
-	       regs->u_regs[12], regs->u_regs[13], regs->u_regs[14],
-	       regs->u_regs[15]);
-	show_regwindow((struct reg_window *)regs->u_regs[14]);
-}
-
-#if NOTUSED
-void show_thread(struct thread_struct *thread)
-{
-	int i;
-
-	printk("uwinmask:          0x%08lx  kregs:             0x%08lx\n", thread->uwinmask, (unsigned long)thread->kregs);
-	show_regs(thread->kregs);
-	printk("ksp:               0x%08lx  kpc:               0x%08lx\n", thread->ksp, thread->kpc);
-	printk("kpsr:              0x%08lx  kwim:              0x%08lx\n", thread->kpsr, thread->kwim);
-	printk("fork_kpsr:         0x%08lx  fork_kwim:         0x%08lx\n", thread->fork_kpsr, thread->fork_kwim);
-
-	for (i = 0; i < NSWINS; i++) {
-		if (!thread->rwbuf_stkptrs[i])
-			continue;
-		printk("reg_window[%d]:\n", i);
-		printk("stack ptr:         0x%08lx\n", thread->rwbuf_stkptrs[i]);
-		show_regwindow(&thread->reg_window[i]);
-	}
-	printk("w_saved:           0x%08lx\n", thread->w_saved);
-
-	/* XXX missing: float_regs */
-	printk("fsr:               0x%08lx  fpqdepth:          0x%08lx\n", thread->fsr, thread->fpqdepth);
-	/* XXX missing: fpqueue */
-
-	printk("flags:             0x%08lx  current_ds:        0x%08lx\n", thread->flags, thread->current_ds.seg);
-	
-	show_regwindow((struct reg_window *)thread->ksp);
-
-	/* XXX missing: core_exec */
-}
 #endif
+
+void show_regs(struct pt_regs *r)
+{
+	struct reg_window *rw = (struct reg_window *) r->u_regs[14];
+
+        printk("PSR: %08lx PC: %08lx NPC: %08lx Y: %08lx    %s\n",
+	       r->psr, r->pc, r->npc, r->y, print_tainted());
+	printk("%%G: %08lx %08lx  %08lx %08lx  %08lx %08lx  %08lx %08lx\n",
+	       r->u_regs[0], r->u_regs[1], r->u_regs[2], r->u_regs[3],
+	       r->u_regs[4], r->u_regs[5], r->u_regs[6], r->u_regs[7]);
+	printk("%%O: %08lx %08lx  %08lx %08lx  %08lx %08lx  %08lx %08lx\n",
+	       r->u_regs[8], r->u_regs[9], r->u_regs[10], r->u_regs[11],
+	       r->u_regs[12], r->u_regs[13], r->u_regs[14], r->u_regs[15]);
+
+	printk("%%L: %08lx %08lx  %08lx %08lx  %08lx %08lx  %08lx %08lx\n",
+	       rw->locals[0], rw->locals[1], rw->locals[2], rw->locals[3],
+	       rw->locals[4], rw->locals[5], rw->locals[6], rw->locals[7]);
+	printk("%%I: %08lx %08lx  %08lx %08lx  %08lx %08lx  %08lx %08lx\n",
+	       rw->ins[0], rw->ins[1], rw->ins[2], rw->ins[3],
+	       rw->ins[4], rw->ins[5], rw->ins[6], rw->ins[7]);
+}
+
+void show_stack(struct task_struct *tsk, unsigned long *_ksp)
+{
+	unsigned long pc, fp;
+	unsigned long task_base = (unsigned long) tsk;
+	struct reg_window *rw;
+	int count = 0;
+
+	fp = (unsigned long) _ksp;
+	do {
+		/* Bogus frame pointer? */
+		if (fp < (task_base + sizeof(struct task_struct)) ||
+		    fp >= (task_base + (PAGE_SIZE << 1)))
+			break;
+		rw = (struct reg_window *) fp;
+		pc = rw->ins[7];
+		printk("[%08lx] ", pc);
+		fp = rw->ins[6];
+	} while (++count < 16);
+	printk("\n");
+}
+
+void show_trace_task(struct task_struct *tsk)
+{
+	if (tsk)
+		show_stack(tsk,
+			   (unsigned long *) tsk->thread_info->ksp);
+}
+
+/*
+ * Note: sparc64 has a pretty intricated thread_saved_pc, check it out.
+ */
+unsigned long thread_saved_pc(struct task_struct *tsk)
+{
+	return tsk->thread_info->kpc;
+}
 
 /*
  * Free current thread data structures etc..
@@ -367,58 +373,10 @@ void flush_thread(void)
 		current->thread.flags &= ~SPARC_FLAG_KTHREAD;
 
 		/* We must fixup kregs as well. */
+		/* XXX This was not fixed for ti for a while, worked. Unused? */
 		current->thread.kregs = (struct pt_regs *)
-			(((unsigned long)current) +
-			 (TASK_UNION_SIZE - TRACEREG_SZ));
+		    ((char *)current->thread_info + (THREAD_SIZE - TRACEREG_SZ));
 	}
-}
-
-static __inline__ void copy_regs(struct pt_regs *dst, struct pt_regs *src)
-{
-	__asm__ __volatile__("ldd\t[%1 + 0x00], %%g2\n\t"
-			     "ldd\t[%1 + 0x08], %%g4\n\t"
-			     "ldd\t[%1 + 0x10], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x00]\n\t"
-			     "std\t%%g4, [%0 + 0x08]\n\t"
-			     "std\t%%o4, [%0 + 0x10]\n\t"
-			     "ldd\t[%1 + 0x18], %%g2\n\t"
-			     "ldd\t[%1 + 0x20], %%g4\n\t"
-			     "ldd\t[%1 + 0x28], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x18]\n\t"
-			     "std\t%%g4, [%0 + 0x20]\n\t"
-			     "std\t%%o4, [%0 + 0x28]\n\t"
-			     "ldd\t[%1 + 0x30], %%g2\n\t"
-			     "ldd\t[%1 + 0x38], %%g4\n\t"
-			     "ldd\t[%1 + 0x40], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x30]\n\t"
-			     "std\t%%g4, [%0 + 0x38]\n\t"
-			     "ldd\t[%1 + 0x48], %%g2\n\t"
-			     "std\t%%o4, [%0 + 0x40]\n\t"
-			     "std\t%%g2, [%0 + 0x48]\n\t" : :
-			     "r" (dst), "r" (src) :
-			     "g2", "g3", "g4", "g5", "o4", "o5");
-}
-
-static __inline__ void copy_regwin(struct reg_window *dst, struct reg_window *src)
-{
-	__asm__ __volatile__("ldd\t[%1 + 0x00], %%g2\n\t"
-			     "ldd\t[%1 + 0x08], %%g4\n\t"
-			     "ldd\t[%1 + 0x10], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x00]\n\t"
-			     "std\t%%g4, [%0 + 0x08]\n\t"
-			     "std\t%%o4, [%0 + 0x10]\n\t"
-			     "ldd\t[%1 + 0x18], %%g2\n\t"
-			     "ldd\t[%1 + 0x20], %%g4\n\t"
-			     "ldd\t[%1 + 0x28], %%o4\n\t"
-			     "std\t%%g2, [%0 + 0x18]\n\t"
-			     "std\t%%g4, [%0 + 0x20]\n\t"
-			     "std\t%%o4, [%0 + 0x28]\n\t"
-			     "ldd\t[%1 + 0x30], %%g2\n\t"
-			     "ldd\t[%1 + 0x38], %%g4\n\t"
-			     "std\t%%g2, [%0 + 0x30]\n\t"
-			     "std\t%%g4, [%0 + 0x38]\n\t" : :
-			     "r" (dst), "r" (src) :
-			     "g2", "g3", "g4", "g5", "o4", "o5");
 }
 
 static __inline__ struct sparc_stackf *
@@ -442,6 +400,25 @@ clone_stackframe(struct sparc_stackf *dst, struct sparc_stackf *src)
 	return sp;
 }
 
+asmlinkage int sparc_do_fork(unsigned long clone_flags,
+                             unsigned long stack_start,
+                             struct pt_regs *regs,
+                             unsigned long stack_size)
+{
+	unsigned long parent_tid_ptr = 0;
+	unsigned long child_tid_ptr = 0;
+
+	clone_flags &= ~CLONE_IDLETASK;
+
+	if (clone_flags & (CLONE_CHILD_SETTID | CLONE_CHILD_CLEARTID)) {
+		parent_tid_ptr = regs->u_regs[UREG_G2];
+		child_tid_ptr = regs->u_regs[UREG_G3];
+	}
+	return do_fork(clone_flags, stack_start,
+		       regs, stack_size,
+		       (int *) parent_tid_ptr,
+		       (int *) child_tid_ptr);
+}
 
 /* Copy a Sparc thread.  The fork() return value conventions
  * under SunOS are nothing short of bletcherous:
@@ -454,6 +431,7 @@ clone_stackframe(struct sparc_stackf *dst, struct sparc_stackf *src)
  *       if the parent should sleep while trying to
  *       allocate the task_struct and kernel stack in
  *       do_fork().
+ * XXX See comment above sys_vfork in sparc64. todo.
  */
 extern void ret_from_fork(void);
 
@@ -461,9 +439,9 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		unsigned long unused,
 		struct task_struct *p, struct pt_regs *regs)
 {
+	struct thread_info *ti = p->thread_info;
 	struct pt_regs *childregs;
-	struct reg_window *new_stack;
-	unsigned long stack_offset;
+	char *new_stack;
 
 #ifndef CONFIG_SMP
 	if(last_task_used_math == current) {
@@ -478,20 +456,32 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 #endif
 	}
 
-	/* Calculate offset to stack_frame & pt_regs */
-	stack_offset = TASK_UNION_SIZE - TRACEREG_SZ;
+	p->set_child_tid = p->clear_child_tid = NULL;
 
-	if(regs->psr & PSR_PS)
-		stack_offset -= REGWIN_SZ;
-	childregs = ((struct pt_regs *) (((unsigned long)p) + stack_offset));
-	copy_regs(childregs, regs);
-	new_stack = (((struct reg_window *) childregs) - 1);
-	copy_regwin(new_stack, (((struct reg_window *) regs) - 1));
+	/*
+	 *  p->thread_info         new_stack   childregs
+	 *  !                      !           !             {if(PSR_PS) }
+	 *  V                      V (stk.fr.) V  (pt_regs)  { (stk.fr.) }
+	 *  +----- - - - - - ------+===========+============={+==========}+
+	 */
+	new_stack = (char*)ti + THREAD_SIZE;
+	if (regs->psr & PSR_PS)
+		new_stack -= STACKFRAME_SZ;
+	new_stack -= STACKFRAME_SZ + TRACEREG_SZ;
+	memcpy(new_stack, (char *)regs - STACKFRAME_SZ, STACKFRAME_SZ + TRACEREG_SZ);
+	childregs = (struct pt_regs *) (new_stack + STACKFRAME_SZ);
 
-	p->thread.ksp = (unsigned long) new_stack;
-	p->thread.kpc = (((unsigned long) ret_from_fork) - 0x8);
-	p->thread.kpsr = current->thread.fork_kpsr;
-	p->thread.kwim = current->thread.fork_kwim;
+	/*
+	 * A new process must start with interrupts closed in 2.5,
+	 * because this is how Mingo's scheduler works (see schedule_tail
+	 * and finish_arch_switch). If we do not do it, a timer interrupt hits
+	 * before we unlock, attempts to re-take the rq->lock, and then we die.
+	 * Thus, kpsr|=PSR_PIL.
+	 */
+	ti->ksp = (unsigned long) new_stack;
+	ti->kpc = (((unsigned long) ret_from_fork) - 0x8);
+	ti->kpsr = current->thread.fork_kpsr | PSR_PIL;
+	ti->kwim = current->thread.fork_kwim;
 
 	/* This is used for sun4c only */
 	atomic_set(&p->thread.refcount, 1);
@@ -500,17 +490,12 @@ int copy_thread(int nr, unsigned long clone_flags, unsigned long sp,
 		extern struct pt_regs fake_swapper_regs;
 
 		p->thread.kregs = &fake_swapper_regs;
-		new_stack = (struct reg_window *)
-			((((unsigned long)p) +
-			  (TASK_UNION_SIZE)) -
-			 (REGWIN_SZ));
+		new_stack += STACKFRAME_SZ + TRACEREG_SZ;
 		childregs->u_regs[UREG_FP] = (unsigned long) new_stack;
 		p->thread.flags |= SPARC_FLAG_KTHREAD;
 		p->thread.current_ds = KERNEL_DS;
-		memcpy((void *)new_stack,
-		       (void *)regs->u_regs[UREG_FP],
-		       sizeof(struct reg_window));
-		childregs->u_regs[UREG_G6] = (unsigned long) p;
+		memcpy(new_stack, (void *)regs->u_regs[UREG_FP], STACKFRAME_SZ);
+		childregs->u_regs[UREG_G6] = (unsigned long) ti;
 	} else {
 		p->thread.kregs = childregs;
 		childregs->u_regs[UREG_FP] = sp;
@@ -653,6 +638,8 @@ asmlinkage int sparc_execve(struct pt_regs *regs)
 	error = do_execve(filename, (char **) regs->u_regs[base + UREG_I1],
 			  (char **) regs->u_regs[base + UREG_I2], regs);
 	putname(filename);
+	if (error == 0)
+		current->ptrace &= ~PT_DTRACE;
 out:
 	return error;
 }
@@ -685,8 +672,44 @@ pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags)
 			   /* Notreached by child. */
 			   "1: mov %%o0, %0\n\t" :
 			   "=r" (retval) :
-			   "i" (__NR_clone), "r" (flags | CLONE_VM),
+			   "i" (__NR_clone), "r" (flags | CLONE_VM | CLONE_UNTRACED),
 			   "i" (__NR_exit),  "r" (fn), "r" (arg) :
 			   "g1", "g2", "g3", "o0", "o1", "memory", "cc");
 	return retval;
 }
+
+extern void scheduling_functions_start_here(void);
+extern void scheduling_functions_end_here(void);
+
+unsigned long get_wchan(struct task_struct *task)
+{
+	unsigned long pc, fp, bias = 0;
+	unsigned long task_base = (unsigned long) task;
+        unsigned long ret = 0;
+	struct reg_window *rw;
+	int count = 0;
+
+	if (!task || task == current ||
+            task->state == TASK_RUNNING)
+		goto out;
+
+	fp = task->thread_info->ksp + bias;
+	do {
+		/* Bogus frame pointer? */
+		if (fp < (task_base + sizeof(struct task_struct)) ||
+		    fp >= (task_base + (2 * PAGE_SIZE)))
+			break;
+		rw = (struct reg_window *) fp;
+		pc = rw->ins[7];
+		if (pc < ((unsigned long) scheduling_functions_start_here) ||
+                    pc >= ((unsigned long) scheduling_functions_end_here)) {
+			ret = pc;
+			goto out;
+		}
+		fp = rw->ins[6] + bias;
+	} while (++count < 16);
+
+out:
+	return ret;
+}
+

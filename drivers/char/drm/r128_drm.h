@@ -162,7 +162,7 @@ typedef struct drm_r128_sarea {
 	unsigned int last_dispatch;
 
 	drm_tex_region_t tex_list[R128_NR_TEX_HEAPS][R128_NR_TEX_REGIONS+1];
-	int tex_age[R128_NR_TEX_HEAPS];
+	unsigned int tex_age[R128_NR_TEX_HEAPS];
 	int ctx_owner;
 } drm_r128_sarea_t;
 
@@ -170,6 +170,28 @@ typedef struct drm_r128_sarea {
 /* WARNING: If you change any of these defines, make sure to change the
  * defines in the Xserver file (xf86drmR128.h)
  */
+
+/* Rage 128 specific ioctls
+ * The device specific ioctl range is 0x40 to 0x79.
+ */
+#define DRM_IOCTL_R128_INIT		DRM_IOW( 0x40, drm_r128_init_t)
+#define DRM_IOCTL_R128_CCE_START	DRM_IO(  0x41)
+#define DRM_IOCTL_R128_CCE_STOP		DRM_IOW( 0x42, drm_r128_cce_stop_t)
+#define DRM_IOCTL_R128_CCE_RESET	DRM_IO(  0x43)
+#define DRM_IOCTL_R128_CCE_IDLE		DRM_IO(  0x44)
+#define DRM_IOCTL_R128_RESET		DRM_IO(  0x46)
+#define DRM_IOCTL_R128_SWAP		DRM_IO(  0x47)
+#define DRM_IOCTL_R128_CLEAR		DRM_IOW( 0x48, drm_r128_clear_t)
+#define DRM_IOCTL_R128_VERTEX		DRM_IOW( 0x49, drm_r128_vertex_t)
+#define DRM_IOCTL_R128_INDICES		DRM_IOW( 0x4a, drm_r128_indices_t)
+#define DRM_IOCTL_R128_BLIT		DRM_IOW( 0x4b, drm_r128_blit_t)
+#define DRM_IOCTL_R128_DEPTH		DRM_IOW( 0x4c, drm_r128_depth_t)
+#define DRM_IOCTL_R128_STIPPLE		DRM_IOW( 0x4d, drm_r128_stipple_t)
+#define DRM_IOCTL_R128_INDIRECT		DRM_IOWR(0x4f, drm_r128_indirect_t)
+#define DRM_IOCTL_R128_FULLSCREEN	DRM_IOW( 0x50, drm_r128_fullscreen_t)
+#define DRM_IOCTL_R128_CLEAR2		DRM_IOW( 0x51, drm_r128_clear2_t)
+#define DRM_IOCTL_R128_GETPARAM		DRM_IOW( 0x52, drm_r128_getparam_t)
+
 typedef struct drm_r128_init {
 	enum {
 		R128_INIT_CCE    = 0x01,
@@ -283,5 +305,15 @@ typedef struct drm_r128_fullscreen {
 		R128_CLEANUP_FULLSCREEN = 0x02
 	} func;
 } drm_r128_fullscreen_t;
+
+/* 2.3: An ioctl to get parameters that aren't available to the 3d
+ * client any other way.  
+ */
+#define R128_PARAM_IRQ_NR            1
+
+typedef struct drm_r128_getparam {
+	int param;
+	int *value;
+} drm_r128_getparam_t;
 
 #endif

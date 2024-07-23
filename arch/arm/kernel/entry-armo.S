@@ -26,6 +26,7 @@
  *  adhering to the above criteria.
  */
 #include <linux/config.h>
+#include <linux/init.h>
 #include "entry-header.S"
 
 		.text
@@ -147,7 +148,7 @@ _unexp_fiq:	ldr	sp, .LCfiq
 		mov	r0, r0
 		stmfd	sp!, {r0 - r3, ip, lr}
 		adr	r0, Lfiqmsg
-		bl	SYMBOL_NAME(printk)
+		bl	printk
 		ldmfd	sp!, {r0 - r3, ip, lr}
 		teqp	pc, #0x0c000001
 		mov	r0, r0
@@ -169,17 +170,17 @@ vector_undefinstr:
 		bne	__und_svc
 		save_user_regs
 		zero_fp
-		teqp	pc, #I_BIT | MODE_SVC
+		teqp	pc, #PSR_I_BIT | MODE_SVC
 .Lbug_undef:
 		ldr	r4, .LC2
 		ldr	pc, [r4]			@ Call FP module USR entry point
 
-		.globl	SYMBOL_NAME(fpundefinstr)
-SYMBOL_NAME(fpundefinstr):				@ Called by FP module on undefined instr
+		.globl	fpundefinstr
+fpundefinstr:						@ Called by FP module on undefined instr
 		mov	r0, lr
 		mov	r1, sp
 		teqp	pc, #MODE_SVC
-		bl	SYMBOL_NAME(do_undefinstr)
+		bl	do_undefinstr
 		b	ret_from_exception		@ Normal FP exit
 
 __und_svc:	SVC_SAVE_ALL				@ Non-user mode
@@ -187,7 +188,7 @@ __und_svc:	SVC_SAVE_ALL				@ Non-user mode
 		and	r2, lr, #3
 		sub	r0, r0, #4
 		mov	r1, sp
-		bl	SYMBOL_NAME(do_undefinstr)
+		bl	do_undefinstr
 		SVC_RESTORE_ALL
 
 #if defined CONFIG_FPE_NWFPE || defined CONFIG_FPE_FASTFPE
@@ -232,7 +233,7 @@ wfs_mask_data:	.word	0x0e200110			@ WFS/RFS
 		.word	0x0f0f0f00
 #endif
 
-.LC2:		.word	SYMBOL_NAME(fp_enter)
+.LC2:		.word	fp_enter
 
 /*=============================================================================
  * Prefetch abort handler
@@ -244,15 +245,15 @@ vector_prefetch:
 		tst	lr, #3
 		bne	__pabt_invalid
 		save_user_regs
-		teqp	pc, #0x00000003		@ NOT a problem - doesnt change mode
+		teqp	pc, #0x00000003		@ NOT a problem - doesn't change mode
 		mask_pc	r0, lr			@ Address of abort
 		mov	r1, sp			@ Tasks registers
-		bl	SYMBOL_NAME(do_PrefetchAbort)
+		bl	do_PrefetchAbort
 		teq	r0, #0			@ If non-zero, we believe this abort..
 		bne	ret_from_exception
 #ifdef DEBUG_UNDEF
 		adr	r0, t
-		bl	SYMBOL_NAME(printk)
+		bl	printk
 #endif
 		ldr	lr, [sp,#S_PC]		@ program to test this on.  I think its
 		b	.Lbug_undef		@ broken at the moment though!)
@@ -261,7 +262,7 @@ __pabt_invalid:	SVC_SAVE_ALL
 		mov	r0, sp				@ Prefetch aborts are definitely *not*
 		mov	r1, #BAD_PREFETCH		@ allowed in non-user modes.  We cant
 		and	r2, lr, #3			@ recover from this problem.
-		b	SYMBOL_NAME(bad_mode)
+		b	bad_mode
 
 #ifdef DEBUG_UNDEF
 t:		.ascii "*** undef ***\r\n\0"
@@ -287,7 +288,7 @@ vector_addrexcptn:
 		mov	r1, sp			@ Point to registers
 		mov	r2, #0x400
 		mov	lr, pc
-		bl	SYMBOL_NAME(do_excpt)
+		bl	do_excpt
 		b	ret_from_exception
 
 Laddrexcptn_not_user:
@@ -295,11 +296,11 @@ Laddrexcptn_not_user:
 		and	r2, lr, #3
 		teq	r2, #3
 		bne	Laddrexcptn_illegal_mode
-		teqp	pc, #0x00000003		@ NOT a problem - doesnt change mode
+		teqp	pc, #0x00000003		@ NOT a problem - doesn't change mode
 		mask_pc	r0, lr
 		mov	r1, sp
 		orr	r2, r2, #0x400
-		bl	SYMBOL_NAME(do_excpt)
+		bl	do_excpt
 		ldmia	sp, {r0 - lr}		@ I cant remember the reason I changed this...
 		add	sp, sp, #15*4
 		movs	pc, lr
@@ -324,7 +325,7 @@ Laddrexcptn_illegal_mode:
 		stmfd	sp!, {r0-r7}
 		mov	r0, sp
 		mov	r1, #BAD_ADDREXCPTN
-		b	SYMBOL_NAME(bad_mode)
+		b	bad_mode
 
 /*=============================================================================
  * Interrupt (IRQ) handler
@@ -354,7 +355,7 @@ vector_IRQ:	ldr	r13, .LCirq			@ I will leave this one in just in case...
 		@
 		adr	lr, 1b
 		orr	lr, lr, #0x08000003		@ Force SVC
-		bne	do_IRQ
+		bne	asm_do_IRQ
 
 		mov	why, #0
 		get_current_task r5
@@ -377,12 +378,12 @@ __irq_svc:	teqp	pc, #0x08000003
 		@
 		adr	lr, 1b
 		orr	lr, lr, #0x08000003		@ Force SVC
-		bne	do_IRQ				@ Returns to 1b
+		bne	asm_do_IRQ			@ Returns to 1b
 		SVC_RESTORE_ALL
 
 __irq_invalid:	mov	r0, sp
 		mov	r1, #BAD_IRQ
-		b	SYMBOL_NAME(bad_mode)
+		b	bad_mode
 
 /*=============================================================================
  * Data abort handler code
@@ -399,7 +400,7 @@ vector_data:	sub	lr, lr, #8		@ Correct lr
 		tst	lr, #3
 		bne	Ldata_not_user
 		save_user_regs
-		teqp	pc, #0x00000003		@ NOT a problem - doesnt change mode
+		teqp	pc, #0x00000003		@ NOT a problem - doesn't change mode
 		mask_pc	r0, lr
 		bl	Ldata_do
 		b	ret_from_exception
@@ -410,7 +411,7 @@ Ldata_not_user:
 		teq	r2, #3
 		bne	Ldata_illegal_mode
 		tst	lr, #0x08000000
-		teqeqp	pc, #0x00000003		@ NOT a problem - doesnt change mode
+		teqeqp	pc, #0x00000003		@ NOT a problem - doesn't change mode
 		mask_pc	r0, lr
 		bl	Ldata_do
 		SVC_RESTORE_ALL
@@ -418,14 +419,14 @@ Ldata_not_user:
 Ldata_illegal_mode:
 		mov	r0, sp
 		mov	r1, #BAD_DATA
-		b	SYMBOL_NAME(bad_mode)
+		b	bad_mode
 
 Ldata_do:	mov	r3, sp
 		ldr	r4, [r0]		@ Get instruction
 		mov	r2, #0
 		tst	r4, #1 << 20		@ Check to see if it is a write instruction
 		orreq	r2, r2, #FAULT_CODE_WRITE @ Indicate write instruction
-		mov	r1, r4, lsr #22		@ Now branch to the relevent processing routine
+		mov	r1, r4, lsr #22		@ Now branch to the relevant processing routine
 		and	r1, r1, #15 << 2
 		add	pc, pc, r1
 		movs	pc, lr
@@ -460,7 +461,7 @@ Ldata_ldrstr_post:
 #ifdef FAULT_CODE_LDRSTRPOST
 		orr	r2, r2, #FAULT_CODE_LDRSTRPOST
 #endif
-		b	SYMBOL_NAME(do_DataAbort)
+		b	do_DataAbort
 
 Ldata_ldrstr_numindex:
 		mov	r0, r4, lsr #14		@ Get Rn
@@ -476,7 +477,7 @@ Ldata_ldrstr_numindex:
 #ifdef FAULT_CODE_LDRSTRPRE
 		orr	r2, r2, #FAULT_CODE_LDRSTRPRE
 #endif
-		b	SYMBOL_NAME(do_DataAbort)
+		b	do_DataAbort
 
 Ldata_ldrstr_regindex:
 		mov	r0, r4, lsr #14		@ Get Rn
@@ -506,7 +507,7 @@ Ldata_ldrstr_regindex:
 #ifdef FAULT_CODE_LDRSTRREG
 		orr	r2, r2, #FAULT_CODE_LDRSTRREG
 #endif
-		b	SYMBOL_NAME(do_DataAbort)
+		b	do_DataAbort
 
 Ldata_ldmstm:
 		mov	r7, #0x11
@@ -543,7 +544,7 @@ Ldata_ldmstm:
 #ifdef FAULT_CODE_LDMSTM
 		orr	r2, r2, #FAULT_CODE_LDMSTM
 #endif
-		b	SYMBOL_NAME(do_DataAbort)
+		b	do_DataAbort
 
 Ldata_ldcstc_pre:
 		mov	r0, r4, lsr #14		@ Get Rn
@@ -559,7 +560,7 @@ Ldata_ldcstc_pre:
 #ifdef FAULT_CODE_LDCSTC
 		orr	r2, r2, #FAULT_CODE_LDCSTC
 #endif
-		b	SYMBOL_NAME(do_DataAbort)
+		b	do_DataAbort
 
 
 /*
@@ -597,7 +598,7 @@ ENTRY(__switch_to)
  * What we need to put into 0-0x1c are branches to branch to the kernel.
  */
 
-		.section ".text.init",#alloc,#execinstr
+		__INIT
 
 .Ljump_addresses:
 		swi	SYS_ERROR0

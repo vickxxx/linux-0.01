@@ -1,11 +1,11 @@
 
 #include <linux/config.h>
 #include <linux/module.h>
-#include <linux/skbuff.h>
 #include <net/protocol.h>
 #include <net/ipv6.h>
 #include <net/addrconf.h>
 #include <net/ip6_route.h>
+#include <net/xfrm.h>
 
 EXPORT_SYMBOL(ipv6_addr_type);
 EXPORT_SYMBOL(icmpv6_send);
@@ -32,6 +32,14 @@ EXPORT_SYMBOL(inet6_getname);
 EXPORT_SYMBOL(inet6_ioctl);
 EXPORT_SYMBOL(ipv6_get_saddr);
 EXPORT_SYMBOL(ipv6_chk_addr);
+EXPORT_SYMBOL(in6addr_any);
+EXPORT_SYMBOL(in6addr_loopback);
 EXPORT_SYMBOL(in6_dev_finish_destroy);
-EXPORT_SYMBOL(ipv6_skip_exthdr);
-
+EXPORT_SYMBOL(ip6_find_1stfragopt);
+EXPORT_SYMBOL(xfrm6_rcv);
+EXPORT_SYMBOL(rt6_lookup);
+EXPORT_SYMBOL(fl6_sock_lookup);
+EXPORT_SYMBOL(ipv6_ext_hdr);
+EXPORT_SYMBOL(ip6_append_data);
+EXPORT_SYMBOL(ip6_flush_pending_frames);
+EXPORT_SYMBOL(ip6_push_pending_frames);

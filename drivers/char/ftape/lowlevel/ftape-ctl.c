@@ -29,15 +29,10 @@
 #include <linux/errno.h>
 #include <linux/mm.h>
 #include <linux/mman.h>
-#include <linux/wrapper.h>
 
 #include <linux/ftape.h>
 #include <linux/qic117.h>
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,6)
 #include <asm/uaccess.h>
-#else
-#include <asm/segment.h>
-#endif
 #include <asm/io.h>
 
 /* ease porting between pre-2.4.x and later kernels */
@@ -731,7 +726,7 @@ int ftape_mmap(struct vm_area_struct *vma)
 		ftape_reset_buffer();
 	}
 	for (i = 0; i < num_buffers; i++) {
-		TRACE_CATCH(remap_page_range(vma->vm_start +
+		TRACE_CATCH(remap_page_range(vma, vma->vm_start +
 					     i * FT_BUFF_SIZE,
 					     virt_to_phys(ft_buffer[i]->address),
 					     FT_BUFF_SIZE,

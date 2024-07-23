@@ -42,7 +42,7 @@ static inline void pgd_clear (pgd_t * pgdp) 	{ }
  */
 #define set_pte(pteptr, pteval) (*(pteptr) = pteval)
 /*
- * (pmds are folded into pgds so this doesnt get actually called,
+ * (pmds are folded into pgds so this doesn't get actually called,
  * but the define is needed for a generic inline function.)
  */
 #define set_pmd(pmdptr, pmdval) (*(pmdptr) = pmdval)
@@ -55,6 +55,11 @@ static inline pmd_t * pmd_offset(pgd_t * dir, unsigned long address)
 {
 	return (pmd_t *) dir;
 }
+
+#define pte_pfn(x)		((unsigned long)(((x).pte >> PAGE_SHIFT)))
+#define pfn_pte(pfn, prot)	__pte(((pfn) << PAGE_SHIFT) | pgprot_val(prot))
+#define pfn_pmd(pfn, prot)	__pmd(((pfn) << PAGE_SHIFT) | pgprot_val(prot))
+
 #endif /* !__ASSEMBLY__ */
 
 #endif /* __ASM_SH_PGTABLE_2LEVEL_H */

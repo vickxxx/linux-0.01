@@ -23,9 +23,9 @@
 */
 
 /*
- * BlueZ kernel library.
+ * Bluetooth kernel library.
  *
- * $Id: lib.c,v 1.2 2002/06/20 19:55:08 maxk Exp $
+ * $Id: lib.c,v 1.1 2002/03/08 21:06:59 maxk Exp $
  */
 
 #include <linux/kernel.h>
@@ -35,7 +35,7 @@
 
 #include <net/bluetooth/bluetooth.h>
 
-void bluez_dump(char *pref, __u8 *buf, int count)
+void bt_dump(char *pref, __u8 *buf, int count)
 {
 	char *ptr;
 	char line[100];
@@ -83,7 +83,7 @@ char *batostr(bdaddr_t *ba)
 }
 
 /* Bluetooth error codes to Unix errno mapping */
-int bterr(__u16 code)
+int bt_err(__u16 code)
 {
 	switch (code) {
 	case 0:
@@ -171,5 +171,5 @@ int bterr(__u16 code)
 
 	default:
 		return ENOSYS;
-	};
+	}
 }

@@ -91,13 +91,14 @@
 #define T_DATA_REG_OFFSET	0x1e00	/* rw 512 bytes long */
 
 #ifndef ASM
-int t128_abort(Scsi_Cmnd *);
-int t128_biosparam(Disk *, kdev_t, int*);
-int t128_detect(Scsi_Host_Template *);
-int t128_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-int t128_reset(Scsi_Cmnd *, unsigned int reset_flags);
-int t128_proc_info (char *buffer, char **start, off_t offset,
-		   int length, int hostno, int inout);
+static int t128_abort(Scsi_Cmnd *);
+static int t128_biosparam(struct scsi_device *, struct block_device *,
+			  sector_t, int*);
+static int t128_detect(Scsi_Host_Template *);
+static int t128_queue_command(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
+static int t128_host_reset(Scsi_Cmnd *);
+static int t128_bus_reset(Scsi_Cmnd *);
+static int t128_device_reset(Scsi_Cmnd *);
 
 #ifndef NULL
 #define NULL 0
@@ -110,25 +111,6 @@ int t128_proc_info (char *buffer, char **start, off_t offset,
 #ifndef CAN_QUEUE
 #define CAN_QUEUE 32 
 #endif
-
-/* 
- * I hadn't thought of this with the earlier drivers - but to prevent
- * macro definition conflicts, we shouldn't define all of the internal
- * macros when this is being used solely for the host stub.
- */
-
-#define TRANTOR_T128 {					\
-	name:           "Trantor T128/T128F/T228",	\
-	detect:         t128_detect,			\
-	queuecommand:   t128_queue_command,		\
-	abort:          t128_abort,			\
-	reset:          t128_reset,			\
-	bios_param:     t128_biosparam,			\
-	can_queue:      CAN_QUEUE,			\
-        this_id:        7,				\
-	sg_tablesize:   SG_ALL,				\
-	cmd_per_lun:    CMD_PER_LUN,			\
-	use_clustering: DISABLE_CLUSTERING}
 
 #ifndef HOSTS_C
 
@@ -162,7 +144,9 @@ int t128_proc_info (char *buffer, char **start, off_t offset,
 #define do_NCR5380_intr do_t128_intr
 #define NCR5380_queue_command t128_queue_command
 #define NCR5380_abort t128_abort
-#define NCR5380_reset t128_reset
+#define NCR5380_host_reset t128_host_reset
+#define NCR5380_device_reset t128_device_reset
+#define NCR5380_bus_reset t128_bus_reset
 #define NCR5380_proc_info t128_proc_info
 
 /* 15 14 12 10 7 5 3 

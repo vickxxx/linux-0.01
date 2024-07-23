@@ -1,6 +1,11 @@
-/* net/atm/resources.c - Staticly allocated resources */
+/* net/atm/resources.c - Statically allocated resources */
 
 /* Written 1995-2000 by Werner Almesberger, EPFL LRC/ICA */
+
+/* Fixes
+ * Arnaldo Carvalho de Melo <acme@conectiva.com.br>
+ * 2002/01 - don't free the whole struct sock on sk->destruct time,
+ * 	     use the default destruct function initialized by sock_init_data */
 
 
 #include <linux/config.h>
@@ -12,7 +17,6 @@
 #include <linux/module.h>
 #include <linux/bitops.h>
 #include <net/sock.h>	 /* for struct sock */
-#include <asm/segment.h> /* for get_fs_long and put_fs_long */
 
 #include "common.h"
 #include "resources.h"
@@ -21,7 +25,6 @@
 
 LIST_HEAD(atm_devs);
 spinlock_t atm_dev_lock = SPIN_LOCK_UNLOCKED;
-
 
 static struct atm_dev *__alloc_atm_dev(const char *type)
 {
@@ -38,7 +41,6 @@ static struct atm_dev *__alloc_atm_dev(const char *type)
 
 	return dev;
 }
-
 
 static void __free_atm_dev(struct atm_dev *dev)
 {
@@ -71,10 +73,9 @@ struct atm_dev *atm_dev_lookup(int number)
 }
 
 struct atm_dev *atm_dev_register(const char *type, const struct atmdev_ops *ops,
-				 int number, atm_dev_flags_t *flags)
+				 int number, unsigned long *flags)
 {
 	struct atm_dev *dev, *inuse;
-
 
 	dev = __alloc_atm_dev(type);
 	if (!dev) {
@@ -100,9 +101,9 @@ struct atm_dev *atm_dev_register(const char *type, const struct atmdev_ops *ops,
 	}
 
 	dev->ops = ops;
-	if (flags) 
+	if (flags)
 		dev->flags = *flags;
-	else 
+	else
 		memset(&dev->flags, 0, sizeof(dev->flags));
 	memset(&dev->stats, 0, sizeof(dev->stats));
 	atomic_set(&dev->refcnt, 1);
@@ -140,18 +141,18 @@ void atm_dev_deregister(struct atm_dev *dev)
 	list_del(&dev->dev_list);
 	spin_unlock(&atm_dev_lock);
 
-	warning_time = jiffies;
-	while (atomic_read(&dev->refcnt) != 1) {
-		current->state = TASK_INTERRUPTIBLE;
-		schedule_timeout(HZ / 4);
-		current->state = TASK_RUNNING;
-		if ((jiffies - warning_time) > 10 * HZ) {
-			printk(KERN_EMERG "atm_dev_deregister: waiting for "
-			       "dev %d to become free. Usage count = %d\n",
-			       dev->number, atomic_read(&dev->refcnt));
-			warning_time = jiffies;
-		}
-	}
+        warning_time = jiffies;
+        while (atomic_read(&dev->refcnt) != 1) {
+                current->state = TASK_INTERRUPTIBLE;
+                schedule_timeout(HZ / 4);
+                current->state = TASK_RUNNING;
+                if ((jiffies - warning_time) > 10 * HZ) {
+                        printk(KERN_EMERG "atm_dev_deregister: waiting for "
+                               "dev %d to become free. Usage count = %d\n",
+                               dev->number, atomic_read(&dev->refcnt));
+                        warning_time = jiffies;
+                }
+        }
 
 	__free_atm_dev(dev);
 }
@@ -208,42 +209,42 @@ static int fetch_stats(struct atm_dev *dev, struct atm_dev_stats *arg, int zero)
 int atm_dev_ioctl(unsigned int cmd, unsigned long arg)
 {
 	void *buf;
-	int error = 0, len, number, size = 0;
+	int error, len, number, size = 0;
 	struct atm_dev *dev;
+	struct list_head *p;
+	int *tmp_buf, *tmp_p;
 
-	if (cmd == ATM_GETNAMES) {
-		int *tmp_buf, *tmp_bufp;
-		struct list_head *p;
-		/*
-		 * ATM_GETNAMES is a special case: it doesn't require a
-		 * device number argument
-		 */
-		if (get_user(buf, &((struct atm_iobuf *) arg)->buffer))
-			return -EFAULT;
-		if (get_user(len, &((struct atm_iobuf *) arg)->length))
-			return -EFAULT;
-		spin_lock(&atm_dev_lock);
-		list_for_each(p, &atm_devs)
-			size += sizeof(int);
-		if (size > len) {
+	switch (cmd) {
+		case ATM_GETNAMES:
+			if (get_user(buf, &((struct atm_iobuf *) arg)->buffer))
+				return -EFAULT;
+			if (get_user(len, &((struct atm_iobuf *) arg)->length))
+				return -EFAULT;
+			spin_lock(&atm_dev_lock);
+			list_for_each(p, &atm_devs)
+				size += sizeof(int);
+			if (size > len) {
+				spin_unlock(&atm_dev_lock);
+				return -E2BIG;
+			}
+			tmp_buf = kmalloc(size, GFP_ATOMIC);
+			if (!tmp_buf) {
+				spin_unlock(&atm_dev_lock);
+				return -ENOMEM;
+			}
+			tmp_p = tmp_buf;
+			list_for_each(p, &atm_devs) {
+				dev = list_entry(p, struct atm_dev, dev_list);
+				*tmp_p++ = dev->number;
+			}
 			spin_unlock(&atm_dev_lock);
-			return -E2BIG;
-		}
-		tmp_buf = tmp_bufp = kmalloc(size, GFP_ATOMIC);
-		if (!tmp_buf) {
-			spin_unlock(&atm_dev_lock);
-			return -ENOMEM;
-		}
-		list_for_each(p, &atm_devs) {
-			dev = list_entry(p, struct atm_dev, dev_list);
-			*tmp_bufp++ = dev->number;
-		}
-		spin_unlock(&atm_dev_lock);
-	        error = (copy_to_user(buf, tmp_buf, size) ||
-				put_user(size, &((struct atm_iobuf *) arg)->length))
-					? -EFAULT : 0;
-		kfree(tmp_buf);
-		return error;
+		        error = ((copy_to_user(buf, tmp_buf, size)) ||
+					put_user(size, &((struct atm_iobuf *) arg)->length))
+						? -EFAULT : 0;
+			kfree(tmp_buf);
+			return error;
+		default:
+			break;
 	}
 
 	if (get_user(buf, &((struct atmif_sioc *) arg)->arg))
@@ -355,8 +356,11 @@ int atm_dev_ioctl(unsigned int cmd, unsigned long arg)
 			if (error < 0)
 				goto done;
 			size = error;
-			/* write back size even if it's zero */
-			goto write_size;
+			/* may return 0, but later on size == 0 means "don't
+			   write the length" */
+			error = put_user(size, &((struct atmif_sioc *) arg)->length)
+				? -EFAULT : 0;
+			goto done;
 		case ATM_SETLOOP:
 			if (__ATM_LM_XTRMT((int) (long) buf) &&
 			    __ATM_LM_XTLOC((int) (long) buf) >
@@ -387,12 +391,11 @@ int atm_dev_ioctl(unsigned int cmd, unsigned long arg)
 			}
 	}
 	
-	if (size) {
-write_size:
-		error = put_user(size,
-			  &((struct atmif_sioc *) arg)->length)
-			  ? -EFAULT : 0;
-	}
+	if (size)
+		error = put_user(size, &((struct atmif_sioc *) arg)->length)
+			? -EFAULT : 0;
+	else
+		error = 0;
 done:
 	atm_dev_put(dev);
 	return error;

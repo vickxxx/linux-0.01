@@ -36,7 +36,7 @@
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/types.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/if_arp.h>
@@ -247,26 +247,24 @@ static struct comx_protocol hdlc_protocol = {
 	NULL 
 };
 
-
-#ifdef MODULE
-#define comx_proto_ppp_init init_module
-#endif
-
-int __init comx_proto_ppp_init(void)
+static int __init comx_proto_ppp_init(void)
 {
 	int ret;
 
-	if(0!=(ret=comx_register_protocol(&hdlc_protocol))) {
-		return ret;
+	ret = comx_register_protocol(&hdlc_protocol);
+	if (!ret) {
+		ret = comx_register_protocol(&syncppp_protocol);
+		if (ret)
+			comx_unregister_protocol(hdlc_protocol.name);
 	}
-	return comx_register_protocol(&syncppp_protocol);
+	return ret;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit comx_proto_ppp_exit(void)
 {
 	comx_unregister_protocol(syncppp_protocol.name);
 	comx_unregister_protocol(hdlc_protocol.name);
 }
-#endif /* MODULE */
 
+module_init(comx_proto_ppp_init);
+module_exit(comx_proto_ppp_exit);

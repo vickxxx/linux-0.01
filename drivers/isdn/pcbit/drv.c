@@ -17,8 +17,6 @@
  *		
  */
 
-#define __NO_VERSION__
-
 #include <linux/module.h>
 
 #include <linux/sched.h>
@@ -132,9 +130,7 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 	memset(dev->b2, 0, sizeof(struct pcbit_chan));
 	dev->b2->id = 1;
 
-	dev->qdelivery.sync = 0;
-	dev->qdelivery.routine = pcbit_deliver;
-	dev->qdelivery.data = dev;
+	INIT_WORK(&dev->qdelivery, pcbit_deliver, dev);
 
 	/*
 	 *  interrupts
@@ -175,9 +171,10 @@ int pcbit_init_dev(int board, int mem_base, int irq)
 
 	dev->dev_if = dev_if;
 
+	dev_if->owner = THIS_MODULE;
+
 	dev_if->channels = 2;
-
-
+	
 	dev_if->features = (ISDN_FEATURE_P_EURO  | ISDN_FEATURE_L3_TRANS | 
 			    ISDN_FEATURE_L2_HDLC | ISDN_FEATURE_L2_TRANS );
 
@@ -280,15 +277,6 @@ int pcbit_command(isdn_ctrl* ctl)
 	case ISDN_CMD_SETL2:
 		chan->proto = (ctl->arg >> 8);
 		break;
-	case ISDN_CMD_GETL2:
-		return chan->proto;
-		break;
-	case ISDN_CMD_LOCK:
-		MOD_INC_USE_COUNT;
-		break;
-	case ISDN_CMD_UNLOCK:
-		MOD_DEC_USE_COUNT;
-		break;
 	case ISDN_CMD_CLREAZ:
 		pcbit_clear_msn(dev);
 		break;
@@ -298,14 +286,6 @@ int pcbit_command(isdn_ctrl* ctl)
 	case ISDN_CMD_SETL3:
 		if ((ctl->arg >> 8) != ISDN_PROTO_L3_TRANS)
 			printk(KERN_DEBUG "L3 protocol unknown\n");
-		break;
-	case ISDN_CMD_GETL3:
-		return ISDN_PROTO_L3_TRANS;
-		break;
-	case ISDN_CMD_GETEAZ:
-	case ISDN_CMD_SETSIL:
-	case ISDN_CMD_GETSIL:
-		printk(KERN_DEBUG "pcbit_command: code %d not implemented yet\n", ctl->command);
 		break;
 	default:
 		printk(KERN_DEBUG "pcbit_command: unknown command\n");
@@ -430,7 +410,7 @@ int pcbit_writecmd(const u_char* buf, int len, int user, int driver, int channel
 	switch(dev->l2_state) {
 	case L2_LWMODE:
 		/* check (size <= rdp_size); write buf into board */
-		if (len > BANK4 + 1)
+		if (len < 0 || len > BANK4 + 1 || len > 1024)
 		{
 			printk("pcbit_writecmd: invalid length %d\n", len);
 			return -EINVAL;
@@ -1091,6 +1071,7 @@ static void pcbit_set_msn(struct pcbit_dev *dev, char *list)
 		ptr->msn = kmalloc(len, GFP_ATOMIC);
 		if (!ptr->msn) {
 			printk(KERN_WARNING "kmalloc failed\n");
+			kfree(ptr);
 			return;
 		}
 

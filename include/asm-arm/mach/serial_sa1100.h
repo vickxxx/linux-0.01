@@ -18,20 +18,15 @@ struct uart_info;
  */
 struct sa1100_port_fns {
 	void	(*set_mctrl)(struct uart_port *, u_int);
-	int	(*get_mctrl)(struct uart_port *);
-	void	(*enable_ms)(struct uart_port *);
+	u_int	(*get_mctrl)(struct uart_port *);
 	void	(*pm)(struct uart_port *, u_int, u_int);
-	int	(*open)(struct uart_port *, struct uart_info *);
-	void	(*close)(struct uart_port *, struct uart_info *);
+	int	(*set_wake)(struct uart_port *, u_int);
 };
 
-#if defined(CONFIG_SERIAL_SA1100) && !defined(CONFIG_SERIAL_SA1100_OLD)
+#ifdef CONFIG_SERIAL_SA1100
 void sa1100_register_uart_fns(struct sa1100_port_fns *fns);
 void sa1100_register_uart(int idx, int port);
 #else
 #define sa1100_register_uart_fns(fns) do { } while (0)
 #define sa1100_register_uart(idx,port) do { } while (0)
 #endif
-
-void sa1100_uart1_altgpio(void);
-

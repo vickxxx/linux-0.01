@@ -31,6 +31,7 @@
 #include <linux/init.h>
 #include <linux/delay.h>
 #include <linux/ioport.h>
+#include <linux/vt_kern.h>
 
 #include <asm/bootinfo.h>
 #include <asm/setup.h>
@@ -57,51 +58,30 @@ extern void atari_floppy_setup(char *, int *);
 static void atari_get_model(char *model);
 static int atari_get_hardware_list(char *buffer);
 
-/* atari specific keyboard functions */
-extern int atari_keyb_init(void);
-extern int atari_kbdrate (struct kbd_repeat *);
-extern int atari_kbd_translate(unsigned char keycode, unsigned char *keycodep,
-			       char raw_mode);
-extern void atari_kbd_leds (unsigned int);
 /* atari specific irq functions */
 extern void atari_init_IRQ (void);
-extern int atari_request_irq (unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+extern int atari_request_irq (unsigned int irq, irqreturn_t (*handler)(int, void *, struct pt_regs *),
                               unsigned long flags, const char *devname, void *dev_id);
 extern void atari_free_irq (unsigned int irq, void *dev_id);
 extern void atari_enable_irq (unsigned int);
 extern void atari_disable_irq (unsigned int);
-extern int atari_get_irq_list (char *buf);
+extern int show_atari_interrupts (struct seq_file *, void *);
 extern void atari_mksound( unsigned int count, unsigned int ticks );
 #ifdef CONFIG_HEARTBEAT
 static void atari_heartbeat( int on );
 #endif
 
 /* atari specific timer functions (in time.c) */
-extern void atari_sched_init(void (*)(int, void *, struct pt_regs *));
+extern void atari_sched_init(irqreturn_t (*)(int, void *, struct pt_regs *));
 extern unsigned long atari_gettimeoffset (void);
-extern void atari_mste_gettod (int *, int *, int *, int *, int *, int *);
-extern void atari_tt_gettod (int *, int *, int *, int *, int *, int *);
-extern int atari_mste_hwclk (int, struct hwclk_time *);
-extern int atari_tt_hwclk (int, struct hwclk_time *);
+extern int atari_mste_hwclk (int, struct rtc_time *);
+extern int atari_tt_hwclk (int, struct rtc_time *);
 extern int atari_mste_set_clock_mmss (unsigned long);
 extern int atari_tt_set_clock_mmss (unsigned long);
 
 /* atari specific debug functions (in debug.c) */
 extern void atari_debug_init(void);
 
-#ifdef CONFIG_MAGIC_SYSRQ
-static char atari_sysrq_xlate[128] =
-	"\000\0331234567890-=\177\t"					/* 0x00 - 0x0f */
-	"qwertyuiop[]\r\000as"							/* 0x10 - 0x1f */
-	"dfghjkl;'`\000\\zxcv"							/* 0x20 - 0x2f */
-	"bnm,./\000\000\000 \000\201\202\203\204\205"	/* 0x30 - 0x3f */
-	"\206\207\210\211\212\000\000\000\000\000-\000\000\000+\000"/* 0x40 - 0x4f */
-	"\000\000\000\177\000\000\000\000\000\000\000\000\000\000\000\000" /* 0x50 - 0x5f */
-	"\000\000\000()/*789456123"						/* 0x60 - 0x6f */
-	"0.\r\000\000\000\000\000\000\000\000\000\000\000\000\000";	/* 0x70 - 0x7f */
-#endif
-
-extern void (*kd_mksound)(unsigned int, unsigned int);
 
 /* I've moved hwreg_present() and hwreg_present_bywrite() out into
  * mm/hwtest.c, to avoid having multiple copies of the same routine
@@ -205,14 +185,15 @@ void __init atari_switches_setup( const char *str, unsigned len )
     char switches[len+1];
     char *p;
     int ovsc_shift;
+    char *args = switches;
 
-    /* copy string to local array, strtok works destructively... */
-    strncpy( switches, str, len );
-    switches[len] = 0;
+    /* copy string to local array, strsep works destructively... */
+    strlcpy( switches, str, sizeof(switches) );
     atari_switches = 0;
 
     /* parse the options */
-    for( p = strtok( switches, "," ); p; p = strtok( NULL, "," ) ) {
+    while ((p = strsep(&args, ",")) != NULL) {
+	if (!*p) continue;
 	ovsc_shift = 0;
 	if (strncmp( p, "ov_", 3 ) == 0) {
 	    p += 3;
@@ -253,11 +234,6 @@ void __init config_atari(void)
                                            to 4GB. */
 
     mach_sched_init      = atari_sched_init;
-    mach_keyb_init       = atari_keyb_init;
-    mach_kbdrate         = atari_kbdrate;
-    mach_kbd_translate   = atari_kbd_translate;
-    SYSRQ_KEY            = 0xff;
-    mach_kbd_leds        = atari_kbd_leds;
     mach_init_IRQ        = atari_init_IRQ;
     mach_request_irq     = atari_request_irq;
     mach_free_irq        = atari_free_irq;
@@ -265,7 +241,7 @@ void __init config_atari(void)
     disable_irq          = atari_disable_irq;
     mach_get_model	 = atari_get_model;
     mach_get_hardware_list = atari_get_hardware_list;
-    mach_get_irq_list	 = atari_get_irq_list;
+    mach_get_irq_list	 = show_atari_interrupts;
     mach_gettimeoffset   = atari_gettimeoffset;
     mach_reset           = atari_reset;
 #ifdef CONFIG_ATARI_FLOPPY
@@ -275,12 +251,8 @@ void __init config_atari(void)
     conswitchp	         = &dummy_con;
 #endif
     mach_max_dma_address = 0xffffff;
-    kd_mksound		 = atari_mksound;
-#ifdef CONFIG_MAGIC_SYSRQ
-    mach_sysrq_key = 98;          /* HELP */
-    mach_sysrq_shift_state = 8;   /* Alt */
-    mach_sysrq_shift_mask = 0xff; /* all modifiers except CapsLock */
-    mach_sysrq_xlate = atari_sysrq_xlate;
+#if defined(CONFIG_INPUT_M68K_BEEP) || defined(CONFIG_INPUT_M68K_BEEP_MODULE)
+    mach_beep          = atari_mksound;
 #endif
 #ifdef CONFIG_HEARTBEAT
     mach_heartbeat = atari_heartbeat;
@@ -440,14 +412,12 @@ void __init config_atari(void)
     if (hwreg_present( &tt_rtc.regsel )) {
 	ATARIHW_SET(TT_CLK);
         printk( "TT_CLK " );
-        mach_gettod = atari_tt_gettod;
         mach_hwclk = atari_tt_hwclk;
         mach_set_clock_mmss = atari_tt_set_clock_mmss;
     }
     if (!MACH_IS_HADES && hwreg_present( &mste_rtc.sec_ones)) {
 	ATARIHW_SET(MSTE_CLK);
         printk( "MSTE_CLK ");
-        mach_gettod = atari_mste_gettod;
         mach_hwclk = atari_mste_hwclk;
         mach_set_clock_mmss = atari_mste_set_clock_mmss;
     }
@@ -538,12 +508,11 @@ static void atari_heartbeat( int on )
     if (atari_dont_touch_floppy_select)
 	return;
     
-    save_flags(flags);
-    cli();
+    local_irq_save(flags);
     sound_ym.rd_data_reg_sel = 14; /* Select PSG Port A */
     tmp = sound_ym.rd_data_reg_sel;
     sound_ym.wd_data = on ? (tmp & ~0x02) : (tmp | 0x02);
-    restore_flags(flags);
+    local_irq_restore(flags);
 }
 #endif
 
@@ -598,7 +567,7 @@ static void atari_reset (void)
     /* processor independent: turn off interrupts and reset the VBR;
      * the caches must be left enabled, else prefetching the final jump
      * instruction doesn't work. */
-    cli();
+    local_irq_disable();
     __asm__ __volatile__
 	("moveq	#0,%/d0\n\t"
 	 "movec	%/d0,%/vbr"

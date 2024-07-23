@@ -1,8 +1,5 @@
 /*
- * BK Id: SCCS/s.gg2.h 1.5 05/17/01 18:14:24 cort
- */
-/*
- *  asm-ppc/gg2.h -- VLSI VAS96011/12 `Golden Gate 2' register definitions
+ *  include/asm-ppc/gg2.h -- VLSI VAS96011/12 `Golden Gate 2' register definitions
  *
  *  Copyright (C) 1997 Geert Uytterhoeven
  *
@@ -36,6 +33,8 @@
     /*
      *  GG2 specific PCI Registers
      */
+
+extern unsigned long gg2_pci_config_base;	/* kernel virtual address */
 
 #define GG2_PCI_BUSNO		0x40	/* Bus number */
 #define GG2_PCI_SUBBUSNO	0x41	/* Subordinate bus number */

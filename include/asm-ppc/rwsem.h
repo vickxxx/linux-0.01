@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.rwsem.h 1.6 05/17/01 18:14:25 cort
- */
-/*
  * include/asm-ppc/rwsem.h: R/W semaphores for PPC using the stuff
  * in lib/rwsem.c.  Adapted largely from include/asm-i386/rwsem.h
  * by Paul Mackerras <paulus@samba.org>.
@@ -55,6 +52,7 @@ struct rw_semaphore {
 extern struct rw_semaphore *rwsem_down_read_failed(struct rw_semaphore *sem);
 extern struct rw_semaphore *rwsem_down_write_failed(struct rw_semaphore *sem);
 extern struct rw_semaphore *rwsem_wake(struct rw_semaphore *sem);
+extern struct rw_semaphore *rwsem_downgrade_wake(struct rw_semaphore *sem);
 
 static inline void init_rwsem(struct rw_semaphore *sem)
 {
@@ -71,10 +69,24 @@ static inline void init_rwsem(struct rw_semaphore *sem)
  */
 static inline void __down_read(struct rw_semaphore *sem)
 {
-	if (atomic_inc_return((atomic_t *)(&sem->count)) >= 0)
+	if (atomic_inc_return((atomic_t *)(&sem->count)) > 0)
 		smp_wmb();
 	else
 		rwsem_down_read_failed(sem);
+}
+
+static inline int __down_read_trylock(struct rw_semaphore *sem)
+{
+	int tmp;
+
+	while ((tmp = sem->count) >= 0) {
+		if (tmp == cmpxchg(&sem->count, tmp,
+				   tmp + RWSEM_ACTIVE_READ_BIAS)) {
+			smp_wmb();
+			return 1;
+		}
+	}
+	return 0;
 }
 
 /*
@@ -90,6 +102,16 @@ static inline void __down_write(struct rw_semaphore *sem)
 		smp_wmb();
 	else
 		rwsem_down_write_failed(sem);
+}
+
+static inline int __down_write_trylock(struct rw_semaphore *sem)
+{
+	int tmp;
+
+	tmp = cmpxchg(&sem->count, RWSEM_UNLOCKED_VALUE,
+		      RWSEM_ACTIVE_WRITE_BIAS);
+	smp_wmb();
+	return tmp == RWSEM_UNLOCKED_VALUE;
 }
 
 /*
@@ -122,6 +144,19 @@ static inline void __up_write(struct rw_semaphore *sem)
 static inline void rwsem_atomic_add(int delta, struct rw_semaphore *sem)
 {
 	atomic_add(delta, (atomic_t *)(&sem->count));
+}
+
+/*
+ * downgrade write lock to read lock
+ */
+static inline void __downgrade_write(struct rw_semaphore *sem)
+{
+	int tmp;
+
+	smp_wmb();
+	tmp = atomic_add_return(-RWSEM_WAITING_BIAS, (atomic_t *)(&sem->count));
+	if (tmp < 0)
+		rwsem_downgrade_wake(sem);
 }
 
 /*

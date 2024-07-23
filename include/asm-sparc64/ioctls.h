@@ -52,8 +52,8 @@
 #define TIOCMBIC	_IOW('t', 107, int)
 #define TIOCMBIS	_IOW('t', 108, int)
 #define TIOCMSET	_IOW('t', 109, int)
-#define __TIOCSTART       _IO('t', 110) /* SunOS Specific */
-#define __TIOCSTOP        _IO('t', 111) /* SunOS Specific */
+#define TIOCSTART       _IO('t', 110)
+#define TIOCSTOP        _IO('t', 111)
 #define TIOCPKT		_IOW('t', 112, int)
 #define TIOCNOTTY	_IO('t', 113)
 #define TIOCSTI		_IOW('t', 114, char)
@@ -87,6 +87,7 @@
 #define FIONBIO		_IOW('f', 126, int)
 #define FIONREAD	_IOR('f', 127, int)
 #define TIOCINQ		FIONREAD
+#define FIOQSIZE	_IOR('f', 128, loff_t)
 
 /* SCARY Rutgers local SunOS kernel hackery, perhaps I will support it
  * someday.  This is completely bogus, I know...
@@ -99,7 +100,6 @@
 #define TIOCGSERIAL	0x541E
 #define TIOCSSERIAL	0x541F
 #define TCSBRKP		0x5425
-#define TIOCTTYGSTRUCT	0x5426
 #define TIOCSERCONFIG	0x5453
 #define TIOCSERGWILD	0x5454
 #define TIOCSERSWILD	0x5455

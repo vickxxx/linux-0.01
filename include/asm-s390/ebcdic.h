@@ -21,10 +21,10 @@ extern __u8 _ebcasc[];   /* EBCDIC -> ASCII conversion table */
 extern __u8 _ebc_tolower[]; /* EBCDIC -> lowercase */
 extern __u8 _ebc_toupper[]; /* EBCDIC -> uppercase */
 
-extern __inline__ 
-void codepage_convert(const __u8 *codepage, volatile __u8 * addr, int nr)
+extern __inline__ void
+codepage_convert(const __u8 *codepage, volatile __u8 * addr, unsigned long nr)
 {
-	if (nr <= 0)
+	if (nr-- <= 0)
 		return;
         __asm__ __volatile__(
 		"   bras 1,1f\n"
@@ -32,9 +32,9 @@ void codepage_convert(const __u8 *codepage, volatile __u8 * addr, int nr)
                 "0: tr   0(256,%0),0(%2)\n"
 		"   la   %0,256(%0)\n"
 		"1: ahi  %1,-256\n"
-		"   jp   0b\n"
+		"   jnm  0b\n"
 		"   ex   %1,0(1)"
-                : "+&a" (addr), "+&a" (nr-1)
+                : "+&a" (addr), "+&a" (nr)
                 : "a" (codepage) : "cc", "memory", "1" );
 }
 

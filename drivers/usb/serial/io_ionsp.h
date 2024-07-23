@@ -19,7 +19,7 @@
 The data to and from all ports on the peripheral is multiplexed
 through a single endpoint pair (EP1 since it supports 64-byte
 MaxPacketSize). Therefore, the data, commands, and status for
-each port must be preceeded by a short header identifying the
+each port must be preceded by a short header identifying the
 destination port. The header also identifies the bytes that follow
 as data or as command/status info.
 
@@ -88,12 +88,12 @@ All 16-bit fields are sent in little-endian (Intel) format.
 // Interrupt pipe
 //
 
-typedef struct _INT_STATUS_PKT {
+struct int_status_pkt {
 	__u16      RxBytesAvail;		    // Additional bytes available to
 						    // be read from Bulk IN pipe
 	__u16      TxCredits[ MAX_RS232_PORTS ];   // Additional space available in
 						    // given port's TxBuffer
-} INT_STATUS_PKT, *PINT_STATUS_PKT;
+};
 
 
 #define GET_INT_STATUS_SIZE(NumPorts) (sizeof(__u16) + (sizeof(__u16) * (NumPorts)))

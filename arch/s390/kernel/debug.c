@@ -16,11 +16,11 @@
 #include <linux/errno.h>
 #include <linux/slab.h>
 #include <linux/ctype.h>
-#include <linux/version.h>
 #include <asm/uaccess.h>
 #include <asm/semaphore.h>
 
 #include <linux/module.h>
+#include <linux/init.h>
 
 #include <asm/debug.h>
 
@@ -68,13 +68,6 @@ static ssize_t debug_input(struct file *file, const char *user_buf,
 			   size_t user_len, loff_t * offset);
 static int debug_open(struct inode *inode, struct file *file);
 static int debug_close(struct inode *inode, struct file *file);
-static struct proc_dir_entry 
-*debug_create_proc_dir_entry(struct proc_dir_entry *root,
-			     const char *name, mode_t mode,
-			     struct inode_operations *iops,
-			     struct file_operations *fops);
-static void debug_delete_proc_dir_entry(struct proc_dir_entry *root,
-					struct proc_dir_entry *entry);
 static debug_info_t*  debug_info_create(char *name, int page_order, int nr_areas, int buf_size);
 static void debug_info_get(debug_info_t *);
 static void debug_info_put(debug_info_t *);
@@ -151,27 +144,17 @@ unsigned int debug_feature_version = __DEBUG_FEATURE_VERSION;
 
 static debug_info_t *debug_area_first = NULL;
 static debug_info_t *debug_area_last = NULL;
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,98))
-static struct semaphore debug_lock = MUTEX;
-#else
 DECLARE_MUTEX(debug_lock);
-#endif
 
-static int initialized = 0;
+static int initialized;
 
 static struct file_operations debug_file_ops = {
-	read:    debug_output,
-	write:   debug_input,	
-	open:    debug_open,
-	release: debug_close,
+	.owner	 = THIS_MODULE,
+	.read    = debug_output,
+	.write   = debug_input,	
+	.open    = debug_open,
+	.release = debug_close,
 };
-
-static struct inode_operations debug_inode_ops = {
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,98))
-	default_file_ops: &debug_file_ops,	/* file ops */
-#endif
-};
-
 
 static struct proc_dir_entry *debug_proc_root_entry;
 
@@ -225,11 +208,12 @@ static debug_info_t*  debug_info_alloc(char *name, int page_order,
 	rc->level       = DEBUG_DEFAULT_LEVEL;
 	rc->buf_size    = buf_size;
 	rc->entry_size  = sizeof(debug_entry_t) + buf_size;
-	strncpy(rc->name, name, MIN(strlen(name), (DEBUG_MAX_PROCF_LEN - 1)));
-	rc->name[MIN(strlen(name), (DEBUG_MAX_PROCF_LEN - 1))] = 0;
+	strlcpy(rc->name, name, sizeof(rc->name));
 	memset(rc->views, 0, DEBUG_MAX_VIEWS * sizeof(struct debug_view *));
+#ifdef CONFIG_PROC_FS
 	memset(rc->proc_entries, 0 ,DEBUG_MAX_VIEWS *
 		sizeof(struct proc_dir_entry*));
+#endif /* CONFIG_PROC_FS */
 	atomic_set(&(rc->ref_count), 0);
 
 	return rc;
@@ -276,20 +260,14 @@ static debug_info_t*  debug_info_create(char *name, int page_order,
 
 
 	/* create proc rood directory */
-
-        rc->proc_root_entry =
-            debug_create_proc_dir_entry(debug_proc_root_entry, rc->name,
-                                        S_IFDIR | S_IRUGO | S_IXUGO |
-                                        S_IWUSR | S_IWGRP, NULL, NULL);
+        rc->proc_root_entry = proc_mkdir(rc->name, debug_proc_root_entry);
 
 	/* append new element to linked list */
-
-        if(debug_area_first == NULL){
+        if (debug_area_first == NULL) {
                 /* first element in list */
                 debug_area_first = rc;
                 rc->prev = NULL;
-        }
-        else{
+        } else {
                 /* append element to end of list */
                 debug_area_last->next = rc;
                 rc->prev = debug_area_last;
@@ -346,16 +324,22 @@ static void debug_info_put(debug_info_t *db_info)
 	if (!db_info)
 		return;
 	if (atomic_dec_and_test(&db_info->ref_count)) {
+#ifdef DEBUG
 		printk(KERN_INFO "debug: freeing debug area %p (%s)\n",
 		       db_info, db_info->name);
+#endif
 		for (i = 0; i < DEBUG_MAX_VIEWS; i++) {
-			if (db_info->views[i] != NULL)
-				debug_delete_proc_dir_entry
-				    (db_info->proc_root_entry,
-				     db_info->proc_entries[i]);
+			if (db_info->views[i] == NULL)
+				continue;
+#ifdef CONFIG_PROC_FS
+			remove_proc_entry(db_info->proc_entries[i]->name,
+					  db_info->proc_root_entry);
+#endif
 		}
-		debug_delete_proc_dir_entry(debug_proc_root_entry,
-					    db_info->proc_root_entry);
+#ifdef CONFIG_PROC_FS
+		remove_proc_entry(db_info->proc_root_entry->name,
+				  debug_proc_root_entry);
+#endif
 		if(db_info == debug_area_first)
 			debug_area_first = db_info->next;
 		if(db_info == debug_area_last)
@@ -439,7 +423,6 @@ static ssize_t debug_output(struct file *file,	/* file descriptor */
 {
 	size_t count = 0;
 	size_t entry_offset, size = 0;
-	int rc;
 	file_private_info_t *p_info;
 
 	p_info = ((file_private_info_t *) file->private_data);
@@ -455,9 +438,9 @@ static ssize_t debug_output(struct file *file,	/* file descriptor */
 		size = MIN((len - count), (size - entry_offset));
 
 		if(size){
-			if ((rc = copy_to_user(user_buf + count, 
-					p_info->temp_buf + entry_offset, size)))
-			return rc;
+			if (copy_to_user(user_buf + count, 
+					p_info->temp_buf + entry_offset, size))
+			return -EFAULT;
 		}
 		count += size;
 		entry_offset = 0;
@@ -513,7 +496,6 @@ static int debug_open(struct inode *inode, struct file *file)
 #ifdef DEBUG
 	printk("debug_open\n");
 #endif
-	MOD_INC_USE_COUNT;
 	down(&debug_lock);
 
 	/* find debug log and view */
@@ -523,8 +505,8 @@ static int debug_open(struct inode *inode, struct file *file)
 		for (i = 0; i < DEBUG_MAX_VIEWS; i++) {
 			if (debug_info->views[i] == NULL)
 				continue;
-			else if (debug_info->proc_entries[i]->low_ino ==
-				 file->f_dentry->d_inode->i_ino) {
+			else if (debug_info->proc_entries[i] ==
+				 PDE(file->f_dentry->d_inode)) {
 				goto found;	/* found view ! */
 			}
 		}
@@ -541,14 +523,18 @@ static int debug_open(struct inode *inode, struct file *file)
 	debug_info_snapshot = debug_info_copy(debug_info);
 
 	if(!debug_info_snapshot){
+#ifdef DEBUG
 		printk(KERN_ERR "debug_open: debug_info_copy failed (out of mem)\n");
+#endif
 		rc = -ENOMEM;
 		goto out;
 	}
 
 	if ((file->private_data =
 	     kmalloc(sizeof(file_private_info_t), GFP_ATOMIC)) == 0) {
+#ifdef DEBUG
 		printk(KERN_ERR "debug_open: kmalloc failed\n");
+#endif
 		debug_info_free(debug_info_snapshot);	
 		rc = -ENOMEM;
 		goto out;
@@ -566,8 +552,6 @@ static int debug_open(struct inode *inode, struct file *file)
 
       out:
 	up(&debug_lock);
-	if (rc != 0)
-		MOD_DEC_USE_COUNT;
 	return rc;
 }
 
@@ -587,71 +571,7 @@ static int debug_close(struct inode *inode, struct file *file)
 	debug_info_free(p_info->debug_info_snap);
 	debug_info_put(p_info->debug_info_org);
 	kfree(file->private_data);
-	MOD_DEC_USE_COUNT;
 	return 0;		/* success */
-}
-
-/*
- * debug_create_proc_dir_entry:
- * - initializes proc-dir-entry and registers it
- */
-
-static struct proc_dir_entry *debug_create_proc_dir_entry
-    (struct proc_dir_entry *root, const char *name, mode_t mode,
-     struct inode_operations *iops, struct file_operations *fops) 
-{
-	struct proc_dir_entry *rc = NULL;
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,98))
-	const char *fn = name;
-	int len;
-	len = strlen(fn);
-
-	rc = (struct proc_dir_entry *) kmalloc(sizeof(struct proc_dir_entry)
-					       + len + 1, GFP_ATOMIC);
-	if (!rc)
-		goto out;
-
-	memset(rc, 0, sizeof(struct proc_dir_entry));
-	memcpy(((char *) rc) + sizeof(*rc), fn, len + 1);
-	rc->name = ((char *) rc) + sizeof(*rc);
-	rc->namelen = len;
-	rc->low_ino = 0, rc->mode = mode;
-	rc->nlink = 1;
-	rc->uid = 0;
-	rc->gid = 0;
-	rc->size = 0;
-	rc->get_info = NULL;
-	rc->ops = iops;
-
-	proc_register(root, rc);
-#else
-	rc = create_proc_entry(name, mode, root);
-	if (!rc)
-		goto out;
-	if (fops)
-		rc->proc_fops = fops;
-#endif
-
-      out:
-	return rc;
-}
-
-
-/*
- * delete_proc_dir_entry:
- */
-
-static void debug_delete_proc_dir_entry
-    (struct proc_dir_entry *root, struct proc_dir_entry *proc_entry) 
-{
-
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,98))
-	proc_unregister(root, proc_entry->low_ino);
-	kfree(proc_entry);
-#else
-	remove_proc_entry(proc_entry->name, root);
-#endif
 }
 
 /*
@@ -665,9 +585,8 @@ debug_info_t *debug_register
 {
 	debug_info_t *rc = NULL;
 
-	MOD_INC_USE_COUNT;
 	if (!initialized)
-		debug_init();
+		BUG();
 	down(&debug_lock);
 
         /* create new debug_info */
@@ -677,13 +596,14 @@ debug_info_t *debug_register
 		goto out;
 	debug_register_view(rc, &debug_level_view);
         debug_register_view(rc, &debug_flush_view);
+#ifdef DEBUG
 	printk(KERN_INFO
 	       "debug: reserved %d areas of %d pages for debugging %s\n",
 	       nr_areas, 1 << page_order, rc->name);
+#endif
       out:
         if (rc == NULL){
 		printk(KERN_ERR "debug: debug_register failed for %s\n",name);
-		MOD_DEC_USE_COUNT;
         }
 	up(&debug_lock);
 	return rc;
@@ -699,11 +619,12 @@ void debug_unregister(debug_info_t * id)
 	if (!id)
 		goto out;
 	down(&debug_lock);
+#ifdef DEBUG
 	printk(KERN_INFO "debug: unregistering %s\n", id->name);
+#endif
 	debug_info_put(id);
 	up(&debug_lock);
 
-	MOD_DEC_USE_COUNT;
       out:
 	return;
 }
@@ -728,8 +649,10 @@ void debug_set_level(debug_info_t* id, int new_level)
                         id->name, new_level, 0, DEBUG_MAX_LEVEL);
         } else {
                 id->level = new_level;
+#ifdef DEBUG
                 printk(KERN_INFO 
 			"debug: %s: new level %i\n",id->name,id->level);
+#endif
         }
 	spin_unlock_irqrestore(&id->lock,flags);
 }
@@ -900,20 +823,16 @@ debug_entry_t *debug_sprintf_exception(debug_info_t* id,
  * - is called exactly once to initialize the debug feature
  */
 
-int debug_init(void)
+static int __init debug_init(void)
 {
 	int rc = 0;
 
 	down(&debug_lock);
-	if (!initialized) {
-		debug_proc_root_entry =
-		    debug_create_proc_dir_entry(&proc_root, DEBUG_DIR_ROOT,
-						S_IFDIR | S_IRUGO | S_IXUGO
-						| S_IWUSR | S_IWGRP, NULL,
-						NULL);
-		printk(KERN_INFO "debug: Initialization complete\n");
-		initialized = 1;
-	}
+#ifdef CONFIG_PROC_FS
+	debug_proc_root_entry = proc_mkdir(DEBUG_DIR_ROOT, NULL);
+#endif /* CONFIG_PROC_FS */
+	printk(KERN_INFO "debug: Initialization complete\n");
+	initialized = 1;
 	up(&debug_lock);
 
 	return rc;
@@ -929,9 +848,17 @@ int debug_register_view(debug_info_t * id, struct debug_view *view)
 	int i;
 	unsigned long flags;
 	mode_t mode = S_IFREG;
+	struct proc_dir_entry *pde;
 
 	if (!id)
 		goto out;
+	pde = create_proc_entry(view->name, mode, id->proc_root_entry);
+	if (!pde){
+		printk(KERN_WARNING "debug: create_proc_entry() failed! Cannot register view %s/%s\n", id->name,view->name);
+		rc = -1;
+		goto out;
+	}
+
 	spin_lock_irqsave(&id->lock, flags);
 	for (i = 0; i < DEBUG_MAX_VIEWS; i++) {
 		if (id->views[i] == NULL)
@@ -942,6 +869,7 @@ int debug_register_view(debug_info_t * id, struct debug_view *view)
 			id->name,view->name);
 		printk(KERN_WARNING 
 			"debug: maximum number of views reached (%i)!\n", i);
+		remove_proc_entry(pde->name, id->proc_root_entry);
 		rc = -1;
 	}
 	else {
@@ -950,12 +878,8 @@ int debug_register_view(debug_info_t * id, struct debug_view *view)
 			mode |= S_IRUSR;
 		if (view->input_proc)
 			mode |= S_IWUSR;
-		id->proc_entries[i] =
-		    debug_create_proc_dir_entry(id->proc_root_entry,
-						view->name, mode,
-						&debug_inode_ops,
-						&debug_file_ops);
-		rc = 0;
+		pde->proc_fops = &debug_file_ops;
+		id->proc_entries[i] = pde;
 	}
 	spin_unlock_irqrestore(&id->lock, flags);
       out:
@@ -982,8 +906,10 @@ int debug_unregister_view(debug_info_t * id, struct debug_view *view)
 	if (i == DEBUG_MAX_VIEWS)
 		rc = -1;
 	else {
-		debug_delete_proc_dir_entry(id->proc_root_entry,
-					    id->proc_entries[i]);		
+#ifdef CONFIG_PROC_FS
+		remove_proc_entry(id->proc_entries[i]->name,
+				  id->proc_root_entry);
+#endif
 		id->views[i] = NULL;
 		rc = 0;
 	}
@@ -1186,17 +1112,10 @@ int debug_dflt_header_fn(debug_info_t * id, struct debug_view *view,
 		except_str = "*";
 	else
 		except_str = "-";
-	caller = (unsigned long) entry->caller;
-#if defined(CONFIG_ARCH_S390X)
-	rc += sprintf(out_buf, "%02i %011lu:%06lu %1u %1s %02i %016lx  ",
+	caller = ((unsigned long) entry->caller) & PSW_ADDR_INSN;
+	rc += sprintf(out_buf, "%02i %011lu:%06lu %1u %1s %02i %p  ",
 		      area, time_val.tv_sec, time_val.tv_usec, level,
-		      except_str, entry->id.fields.cpuid, caller);
-#else
-	caller &= 0x7fffffff;
-	rc += sprintf(out_buf, "%02i %011lu:%06lu %1u %1s %02i %08lx  ",
-		      area, time_val.tv_sec, time_val.tv_usec, level,
-		      except_str, entry->id.fields.cpuid, caller);
-#endif
+		      except_str, entry->id.fields.cpuid, (void *) caller);
 	return rc;
 }
 
@@ -1246,36 +1165,25 @@ out:
 }
 
 /*
- * init_module:
+ * clean up module
  */
-
-#ifdef MODULE
-int init_module(void)
-{
-	int rc = 0;
-#ifdef DEBUG
-	printk("debug_module_init: \n");
-#endif
-	rc = debug_init();
-	if (rc) 
-		printk(KERN_INFO "debug: an error occurred with debug_init\n");
-	return rc;
-}
-
-/*
- * cleanup_module:
- */
-
-void cleanup_module(void)
+void __exit debug_exit(void)
 {
 #ifdef DEBUG
 	printk("debug_cleanup_module: \n");
 #endif
-	debug_delete_proc_dir_entry(&proc_root, debug_proc_root_entry);
+#ifdef CONFIG_PROC_FS
+	remove_proc_entry(debug_proc_root_entry->name, NULL);
+#endif /* CONFIG_PROC_FS */
 	return;
 }
 
-#endif			/* MODULE */
+/*
+ * module definitions
+ */
+core_initcall(debug_init);
+module_exit(debug_exit);
+MODULE_LICENSE("GPL");
 
 EXPORT_SYMBOL(debug_register);
 EXPORT_SYMBOL(debug_unregister); 

@@ -1,8 +1,5 @@
 /*
- * BK Id: SCCS/s.ints.c 1.5 05/17/01 18:14:20 cort
- */
-/*
- *  linux/arch/ppc/amiga/ints.c
+ *  arch/ppc/amiga/ints.c
  *
  *  Linux/m68k general interrupt handling code from arch/m68k/kernel/ints.c
  *  Needed to drive the m68k emulating IRQ hardware on the PowerUp boards.
@@ -13,6 +10,7 @@
 #include <linux/kernel_stat.h>
 #include <linux/errno.h>
 #include <linux/init.h>
+#include <linux/seq_file.h>
 
 #include <asm/setup.h>
 #include <asm/system.h>
@@ -132,7 +130,7 @@ asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
 {
 	if (vec >= VEC_INT1 && vec <= VEC_INT7 && !MACH_IS_BVME6000) {
 		vec -= VEC_SPUR;
-		kstat.irqs[0][vec]++;
+		kstat_cpu(0).irqs[vec]++;
 		irq_list[vec].handler(vec, irq_list[vec].dev_id, fp);
 	} else {
 		if (mach_process_int)
@@ -143,20 +141,20 @@ asmlinkage void process_int(unsigned long vec, struct pt_regs *fp)
 	}
 }
 
-int m68k_get_irq_list(char *buf)
+int m68k_get_irq_list(struct seq_file *p, void *v)
 {
-	int i, len = 0;
+	int i;
 
 	/* autovector interrupts */
 	if (mach_default_handler) {
 		for (i = 0; i < SYS_IRQS; i++) {
-			len += sprintf(buf+len, "auto %2d: %10u ", i,
-			               i ? kstat.irqs[0][i] : num_spurious);
-				len += sprintf(buf+len, "  ");
-			len += sprintf(buf+len, "%s\n", irq_list[i].devname);
+			seq_printf(p, "auto %2d: %10u ", i,
+			               i ? kstat_cpu(0).irqs[i] : num_spurious);
+			seq_puts(p, "  ");
+			seq_printf(p, "%s\n", irq_list[i].devname);
 		}
 	}
 
-	len += mach_get_irq_list(buf+len);
-	return len;
+	mach_get_irq_list(p, v);
+	return 0;
 }

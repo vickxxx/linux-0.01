@@ -81,28 +81,34 @@
    added option to disable multicast as is causes problems
        Ganesh Sittampalam <ganesh.sittampalam@magdalen.oxford.ac.uk>
        Stuart Adamson <stuart.adamson@compsoc.net>
+   Nov 2001
+   added support for ethtool (jgarzik)
 	
    $Header: /fsys2/home/chrisb/linux-1.3.59-MCA/drivers/net/RCS/3c523.c,v 1.1 1996/02/05 01:53:46 chrisb Exp chrisb $
  */
 
+#define DRV_NAME		"3c523"
+#define DRV_VERSION		"17-Nov-2001"
+
+#include <linux/init.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/errno.h>
 #include <linux/ioport.h>
+#include <linux/skbuff.h>
 #include <linux/slab.h>
 #include <linux/interrupt.h>
 #include <linux/delay.h>
 #include <linux/mca.h>
+#include <linux/ethtool.h>
+
+#include <asm/uaccess.h>
 #include <asm/processor.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
-
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
-#include <linux/init.h>
 
 #include "3c523.h"
 
@@ -173,7 +179,7 @@ sizeof(nop_cmd) = 8;
       	dev->name,__LINE__); \
       elmc_id_reset586(); } } }
 
-static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr);
+static irqreturn_t elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr);
 static int elmc_open(struct net_device *dev);
 static int elmc_close(struct net_device *dev);
 static int elmc_send_packet(struct sk_buff *, struct net_device *);
@@ -182,6 +188,7 @@ static void elmc_timeout(struct net_device *dev);
 #ifdef ELMC_MULTICAST
 static void set_multicast_list(struct net_device *dev);
 #endif
+static int netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd);
 
 /* helper-functions */
 static int init586(struct net_device *dev);
@@ -203,10 +210,11 @@ struct priv {
 	volatile struct iscp_struct *iscp;	/* volatile is important */
 	volatile struct scb_struct *scb;	/* volatile is important */
 	volatile struct tbd_struct *xmit_buffs[NUM_XMIT_BUFFS];
-	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 #if (NUM_XMIT_BUFFS == 1)
+	volatile struct transmit_cmd_struct *xmit_cmds[2];
 	volatile struct nop_cmd_struct *nop_cmds[2];
 #else
+	volatile struct transmit_cmd_struct *xmit_cmds[NUM_XMIT_BUFFS];
 	volatile struct nop_cmd_struct *nop_cmds[NUM_XMIT_BUFFS];
 #endif
 	volatile int nop_point, num_recv_buffs;
@@ -304,13 +312,13 @@ static int __init check586(struct net_device *dev, unsigned long where, unsigned
 	char *iscp_addrs[2];
 	int i = 0;
 
-	p->base = (unsigned long) bus_to_virt((unsigned long)where) + size - 0x01000000;
-	p->memtop = bus_to_virt((unsigned long)where) + size;
+	p->base = (unsigned long) isa_bus_to_virt((unsigned long)where) + size - 0x01000000;
+	p->memtop = isa_bus_to_virt((unsigned long)where) + size;
 	p->scp = (struct scp_struct *)(p->base + SCP_DEFAULT_ADDRESS);
 	memset((char *) p->scp, 0, sizeof(struct scp_struct));
 	p->scp->sysbus = SYSBUSVAL;	/* 1 = 8Bit-Bus, 0 = 16 Bit */
 
-	iscp_addrs[0] = bus_to_virt((unsigned long)where);
+	iscp_addrs[0] = isa_bus_to_virt((unsigned long)where);
 	iscp_addrs[1] = (char *) p->scp - sizeof(struct iscp_struct);
 
 	for (i = 0; i < 2; i++) {
@@ -347,7 +355,7 @@ void alloc586(struct net_device *dev)
 	DELAY(2);
 
 	p->scp = (struct scp_struct *) (p->base + SCP_DEFAULT_ADDRESS);
-	p->scb = (struct scb_struct *) bus_to_virt(dev->mem_start);
+	p->scb = (struct scb_struct *) isa_bus_to_virt(dev->mem_start);
 	p->iscp = (struct iscp_struct *) ((char *) p->scp - sizeof(struct iscp_struct));
 
 	memset((char *) p->iscp, 0, sizeof(struct iscp_struct));
@@ -529,8 +537,8 @@ int __init elmc_probe(struct net_device *dev)
 	}
 	dev->mem_end = dev->mem_start + size;	/* set mem_end showed by 'ifconfig' */
 
-	pr->memtop = bus_to_virt(dev->mem_start) + size;
-	pr->base = (unsigned long) bus_to_virt(dev->mem_start) + size - 0x01000000;
+	pr->memtop = isa_bus_to_virt(dev->mem_start) + size;
+	pr->base = (unsigned long) isa_bus_to_virt(dev->mem_start) + size - 0x01000000;
 	alloc586(dev);
 
 	elmc_id_reset586();	/* make sure it doesn't generate spurious ints */
@@ -563,7 +571,8 @@ int __init elmc_probe(struct net_device *dev)
 #else
 	dev->set_multicast_list = NULL;
 #endif
-
+	dev->do_ioctl = netdev_ioctl;
+	
 	ether_setup(dev);
 
 	/* note that we haven't actually requested the IRQ from the kernel.
@@ -867,7 +876,8 @@ static void *alloc_rfa(struct net_device *dev, void *ptr)
  * Interrupt Handler ...
  */
 
-static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
+static irqreturn_t
+elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
 	unsigned short stat;
@@ -875,7 +885,7 @@ static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 
 	if (dev == NULL) {
 		printk(KERN_ERR "elmc-interrupt: irq %d for unknown device.\n", (int) -(((struct pt_regs *) reg_ptr)->orig_eax + 2));
-		return;
+		return IRQ_NONE;
 	} else if (!netif_running(dev)) {
 		/* The 3c523 has this habit of generating interrupts during the
 		   reset.  I'm not sure if the ni52 has this same problem, but it's
@@ -884,10 +894,10 @@ static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 		   might have missed a few. */
 
 		elmc_id_attn586();	/* ack inter. and disable any more */
-		return;
+		return IRQ_HANDLED;
 	} else if (!(ELMC_CTRL_INT & inb(dev->base_addr + ELMC_CTRL))) {
 		/* wasn't this device */
-		return;
+		return IRQ_NONE;
 	}
 	/* reading ELMC_CTRL also clears the INT bit. */
 
@@ -934,6 +944,7 @@ static void elmc_interrupt(int irq, void *dev_id, struct pt_regs *reg_ptr)
 			break;
 		}
 	}
+	return IRQ_HANDLED;
 }
 
 /*******************************************************
@@ -1111,8 +1122,11 @@ static int elmc_send_packet(struct sk_buff *skb, struct net_device *dev)
 
 	netif_stop_queue(dev);
 
-	memcpy((char *) p->xmit_cbuffs[p->xmit_count], (char *) (skb->data), skb->len);
 	len = (ETH_ZLEN < skb->len) ? skb->len : ETH_ZLEN;
+	
+	if (len != skb->len)
+		memset((char *) p->xmit_cbuffs[p->xmit_count], 0, ETH_ZLEN);
+	memcpy((char *) p->xmit_cbuffs[p->xmit_count], (char *) (skb->data), skb->len);
 
 #if (NUM_XMIT_BUFFS == 1)
 #ifdef NO_NOPCOMMANDS
@@ -1214,6 +1228,69 @@ static void set_multicast_list(struct net_device *dev)
 }
 #endif
 
+/**
+ * netdev_ethtool_ioctl: Handle network interface SIOCETHTOOL ioctls
+ * @dev: network interface on which out-of-band action is to be performed
+ * @useraddr: userspace address to which data is to be read and returned
+ *
+ * Process the various commands of the SIOCETHTOOL interface.
+ */
+
+static int netdev_ethtool_ioctl (struct net_device *dev, void *useraddr)
+{
+	u32 ethcmd;
+
+	/* dev_ioctl() in ../../net/core/dev.c has already checked
+	   capable(CAP_NET_ADMIN), so don't bother with that here.  */
+
+	if (get_user(ethcmd, (u32 *)useraddr))
+		return -EFAULT;
+
+	switch (ethcmd) {
+
+	case ETHTOOL_GDRVINFO: {
+		struct ethtool_drvinfo info = { ETHTOOL_GDRVINFO };
+		strcpy (info.driver, DRV_NAME);
+		strcpy (info.version, DRV_VERSION);
+		sprintf(info.bus_info, "MCA 0x%lx", dev->base_addr);
+		if (copy_to_user (useraddr, &info, sizeof (info)))
+			return -EFAULT;
+		return 0;
+	}
+
+	default:
+		break;
+	}
+
+	return -EOPNOTSUPP;
+}
+
+/**
+ * netdev_ioctl: Handle network interface ioctls
+ * @dev: network interface on which out-of-band action is to be performed
+ * @rq: user request data
+ * @cmd: command issued by user
+ *
+ * Process the various out-of-band ioctls passed to this driver.
+ */
+
+static int netdev_ioctl (struct net_device *dev, struct ifreq *rq, int cmd)
+{
+	int rc = 0;
+
+	switch (cmd) {
+	case SIOCETHTOOL:
+		rc = netdev_ethtool_ioctl(dev, (void *) rq->ifr_data);
+		break;
+
+	default:
+		rc = -EOPNOTSUPP;
+		break;
+	}
+
+	return rc;
+}
+ 
 /*************************************************************************/
 
 #ifdef MODULE

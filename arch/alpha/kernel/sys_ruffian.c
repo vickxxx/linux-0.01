@@ -24,6 +24,7 @@
 #include <asm/io.h>
 #include <asm/pgtable.h>
 #include <asm/core_cia.h>
+#include <asm/tlbflush.h>
 
 #include "proto.h"
 #include "irq_impl.h"
@@ -84,6 +85,7 @@ ruffian_init_rtc(void)
 static void
 ruffian_kill_arch (int mode)
 {
+	cia_kill_arch(mode);
 #if 0
 	/* This only causes re-entry to ARCSBIOS */
 	/* Perhaps this works for other PYXIS as well?  */
@@ -211,26 +213,26 @@ ruffian_get_bank_size(unsigned long offset)
  */
 
 struct alpha_machine_vector ruffian_mv __initmv = {
-	vector_name:		"Ruffian",
+	.vector_name		= "Ruffian",
 	DO_EV5_MMU,
 	DO_DEFAULT_RTC,
 	DO_PYXIS_IO,
 	DO_CIA_BUS,
-	machine_check:		cia_machine_check,
-	max_dma_address:	ALPHA_RUFFIAN_MAX_DMA_ADDRESS,
-	min_io_address:		DEFAULT_IO_BASE,
-	min_mem_address:	DEFAULT_MEM_BASE,
-	pci_dac_offset:		PYXIS_DAC_OFFSET,
+	.machine_check		= cia_machine_check,
+	.max_isa_dma_address	= ALPHA_RUFFIAN_MAX_ISA_DMA_ADDRESS,
+	.min_io_address		= DEFAULT_IO_BASE,
+	.min_mem_address	= DEFAULT_MEM_BASE,
+	.pci_dac_offset		= PYXIS_DAC_OFFSET,
 
-	nr_irqs:		48,
-	device_interrupt:	pyxis_device_interrupt,
+	.nr_irqs		= 48,
+	.device_interrupt	= pyxis_device_interrupt,
 
-	init_arch:		pyxis_init_arch,
-	init_irq:		ruffian_init_irq,
-	init_rtc:		ruffian_init_rtc,
-	init_pci:		cia_init_pci,
-	kill_arch:		ruffian_kill_arch,
-	pci_map_irq:		ruffian_map_irq,
-	pci_swizzle:		ruffian_swizzle,
+	.init_arch		= pyxis_init_arch,
+	.init_irq		= ruffian_init_irq,
+	.init_rtc		= ruffian_init_rtc,
+	.init_pci		= cia_init_pci,
+	.kill_arch		= ruffian_kill_arch,
+	.pci_map_irq		= ruffian_map_irq,
+	.pci_swizzle		= ruffian_swizzle,
 };
 ALIAS_MV(ruffian)

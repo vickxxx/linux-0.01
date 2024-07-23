@@ -24,7 +24,6 @@
 #include <linux/if_ether.h>
 #include <linux/if.h>
 #include <linux/netdevice.h>
-#include <linux/sched.h>
 #include <asm/semaphore.h>
 #include <linux/ppp_channel.h>
 #endif /* __KERNEL__ */
@@ -113,11 +112,35 @@ struct pppoe_hdr {
 } __attribute__ ((packed));
 
 #ifdef __KERNEL__
+struct pppoe_opt {
+	struct net_device      *dev;	  /* device associated with socket*/
+	struct pppoe_addr	pa;	  /* what this socket is bound to*/
+	struct sockaddr_pppox	relay;	  /* what socket data will be
+					     relayed to (PPPoE relaying) */
+};
+
+struct pppox_opt {
+	struct ppp_channel	chan;
+	struct sock		*sk;
+	struct pppox_opt	*next;	  /* for hash table */
+	union {
+		struct pppoe_opt pppoe;
+	} proto;
+	unsigned short		num;
+};
+#define pppoe_dev	proto.pppoe.dev
+#define pppoe_pa	proto.pppoe.pa
+#define pppoe_relay	proto.pppoe.relay
+
+#define pppox_sk(__sk) ((struct pppox_opt *)(__sk)->sk_protinfo)
+
+struct module;
 
 struct pppox_proto {
-	int (*create)(struct socket *sock);
-	int (*ioctl)(struct socket *sock, unsigned int cmd,
-		     unsigned long arg);
+	int		(*create)(struct socket *sock);
+	int		(*ioctl)(struct socket *sock, unsigned int cmd,
+				 unsigned long arg);
+	struct module	*owner;
 };
 
 extern int register_pppox_proto(int proto_num, struct pppox_proto *pp);
@@ -126,18 +149,17 @@ extern void pppox_unbind_sock(struct sock *sk);/* delete ppp-channel binding */
 extern int pppox_channel_ioctl(struct ppp_channel *pc, unsigned int cmd,
 			       unsigned long arg);
 
-/* PPPoE socket states */
+/* PPPoX socket states */
 enum {
     PPPOX_NONE		= 0,  /* initial state */
     PPPOX_CONNECTED	= 1,  /* connection established ==TCP_ESTABLISHED */
     PPPOX_BOUND		= 2,  /* bound to ppp device */
     PPPOX_RELAY		= 4,  /* forwarding is enabled */
-    PPPOX_DEAD		= 8
+    PPPOX_ZOMBIE	= 8,  /* dead, but still bound to ppp device */
+    PPPOX_DEAD		= 16  /* dead, useless, please clean me up!*/
 };
 
 extern struct ppp_channel_ops pppoe_chan_ops;
-
-extern int pppox_proto_init(struct net_proto *np);
 
 #endif /* __KERNEL__ */
 

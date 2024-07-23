@@ -15,7 +15,7 @@
  *		ftp://prep.ai.mit.edu/pub/gnu/GPL
  *	Each contributing author retains all rights to their own work.
  *
- *  (C) 1998-2000 Ben Fennema
+ *  (C) 1998-2001 Ben Fennema
  *  (C) 1999 Stelias Computing Inc 
  *
  * HISTORY
@@ -29,23 +29,24 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/udf_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/mm.h>
 #include <linux/stat.h>
 #include <linux/slab.h>
 #include <linux/pagemap.h>
 #include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
 #include "udf_i.h"
 
-static void udf_pc_to_char(char *from, int fromlen, char *to)
+static void udf_pc_to_char(struct super_block *sb, char *from, int fromlen, char *to)
 {
-	struct PathComponent *pc;
+	struct pathComponent *pc;
 	int elen = 0;
 	char *p = to;
 
 	while (elen < fromlen)
 	{
-		pc = (struct PathComponent *)(from + elen);
+		pc = (struct pathComponent *)(from + elen);
 		switch (pc->componentType)
 		{
 			case 1:
@@ -65,11 +66,11 @@ static void udf_pc_to_char(char *from, int fromlen, char *to)
 				/* that would be . - just ignore */
 				break;
 			case 5:
-				memcpy(p, pc->componentIdent, pc->lengthComponentIdent);
-				p += pc->lengthComponentIdent;
+				p += udf_get_filename(sb, pc->componentIdent, p, pc->lengthComponentIdent);
 				*p++ = '/';
+				break;
 		}
-		elen += sizeof(struct PathComponent) + pc->lengthComponentIdent;
+		elen += sizeof(struct pathComponent) + pc->lengthComponentIdent;
 	}
 	if (p > to+1)
 		p[-1] = '\0';
@@ -84,21 +85,13 @@ static int udf_symlink_filler(struct file *file, struct page *page)
 	char *symlink;
 	int err = -EIO;
 	char *p = kmap(page);
-	
+
 	lock_kernel();
-	if (UDF_I_ALLOCTYPE(inode) == ICB_FLAG_AD_IN_ICB)
-	{
-		bh = udf_tread(inode->i_sb, inode->i_ino, inode->i_sb->s_blocksize);
-
-		if (!bh)
-			goto out;
-
-		symlink = bh->b_data + udf_file_entry_alloc_offset(inode);
-	}
+	if (UDF_I_ALLOCTYPE(inode) == ICBTAG_FLAG_AD_IN_ICB)
+		symlink = UDF_I_DATA(inode) + UDF_I_LENEATTR(inode);
 	else
 	{
-		bh = bread(inode->i_dev, udf_block_map(inode, 0),
-				inode->i_sb->s_blocksize);
+		bh = sb_bread(inode->i_sb, udf_block_map(inode, 0));
 
 		if (!bh)
 			goto out;
@@ -106,19 +99,19 @@ static int udf_symlink_filler(struct file *file, struct page *page)
 		symlink = bh->b_data;
 	}
 
-	udf_pc_to_char(symlink, inode->i_size, p);
+	udf_pc_to_char(inode->i_sb, symlink, inode->i_size, p);
 	udf_release_data(bh);
 
 	unlock_kernel();
 	SetPageUptodate(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return 0;
 out:
 	unlock_kernel();
 	SetPageError(page);
 	kunmap(page);
-	UnlockPage(page);
+	unlock_page(page);
 	return err;
 }
 
@@ -126,5 +119,5 @@ out:
  * symlinks can't do much...
  */
 struct address_space_operations udf_symlink_aops = {
-	readpage:		udf_symlink_filler,
+	.readpage		= udf_symlink_filler,
 };

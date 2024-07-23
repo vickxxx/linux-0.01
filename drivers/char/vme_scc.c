@@ -29,7 +29,6 @@
 #include <linux/fcntl.h>
 #include <linux/major.h>
 #include <linux/delay.h>
-#include <linux/tqueue.h>
 #include <linux/version.h>
 #include <linux/slab.h>
 #include <linux/miscdevice.h>
@@ -84,21 +83,17 @@ static int scc_ioctl(struct tty_struct * tty, struct file * filp,
                      unsigned int cmd, unsigned long arg);
 static void scc_throttle(struct tty_struct *tty);
 static void scc_unthrottle(struct tty_struct *tty);
-static void scc_tx_int(int irq, void *data, struct pt_regs *fp);
-static void scc_rx_int(int irq, void *data, struct pt_regs *fp);
-static void scc_stat_int(int irq, void *data, struct pt_regs *fp);
-static void scc_spcond_int(int irq, void *data, struct pt_regs *fp);
+static irqreturn_t scc_tx_int(int irq, void *data, struct pt_regs *fp);
+static irqreturn_t scc_rx_int(int irq, void *data, struct pt_regs *fp);
+static irqreturn_t scc_stat_int(int irq, void *data, struct pt_regs *fp);
+static irqreturn_t scc_spcond_int(int irq, void *data, struct pt_regs *fp);
 static void scc_setsignals(struct scc_port *port, int dtr, int rts);
 static void scc_break_ctl(struct tty_struct *tty, int break_state);
 
-static struct tty_driver scc_driver, scc_callout_driver;
+static struct tty_driver *scc_driver;
 
-static struct tty_struct *scc_table[2] = { NULL, };
-static struct termios * scc_termios[2];
-static struct termios * scc_termios_locked[2];
 struct scc_port scc_ports[2];
 
-int scc_refcount;
 int scc_initialized = 0;
 
 /*---------------------------------------------------------------------------
@@ -120,6 +115,25 @@ static struct real_driver scc_real_driver = {
 };
 
 
+static struct tty_operations scc_ops = {
+	.open	= scc_open,
+	.close = gs_close,
+	.write = gs_write,
+	.put_char = gs_put_char,
+	.flush_chars = gs_flush_chars,
+	.write_room = gs_write_room,
+	.chars_in_buffer = gs_chars_in_buffer,
+	.flush_buffer = gs_flush_buffer,
+	.ioctl = scc_ioctl,
+	.throttle = scc_throttle,
+	.unthrottle = scc_unthrottle,
+	.set_termios = gs_set_termios,
+	.stop = gs_stop,
+	.start = gs_start,
+	.hangup = gs_hangup,
+	.break_ctl = scc_break_ctl,
+};
+
 /*----------------------------------------------------------------------------
  * vme_scc_init() and support functions
  *---------------------------------------------------------------------------*/
@@ -128,55 +142,27 @@ static int scc_init_drivers(void)
 {
 	int error;
 
-	memset(&scc_driver, 0, sizeof(scc_driver));
-	scc_driver.magic = TTY_DRIVER_MAGIC;
-	scc_driver.driver_name = "scc";
-	scc_driver.name = "ttyS";
-	scc_driver.major = TTY_MAJOR;
-	scc_driver.minor_start = SCC_MINOR_BASE;
-	scc_driver.num = 2;
-	scc_driver.type = TTY_DRIVER_TYPE_SERIAL;
-	scc_driver.subtype = SERIAL_TYPE_NORMAL;
-	scc_driver.init_termios = tty_std_termios;
-	scc_driver.init_termios.c_cflag =
+	scc_driver = alloc_tty_driver(2);
+	if (!scc_driver)
+		return -ENOMEM;
+	scc_driver->owner = THIS_MODULE;
+	scc_driver->driver_name = "scc";
+	scc_driver->name = "ttyS";
+	scc_driver->devfs_name = "tts/";
+	scc_driver->major = TTY_MAJOR;
+	scc_driver->minor_start = SCC_MINOR_BASE;
+	scc_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	scc_driver->subtype = SERIAL_TYPE_NORMAL;
+	scc_driver->init_termios = tty_std_termios;
+	scc_driver->init_termios.c_cflag =
 	  B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-	scc_driver.flags = TTY_DRIVER_REAL_RAW;
-	scc_driver.refcount = &scc_refcount;
-	scc_driver.table = scc_table;
-	scc_driver.termios = scc_termios;
-	scc_driver.termios_locked = scc_termios_locked;
+	scc_driver->flags = TTY_DRIVER_REAL_RAW;
+	tty_set_operations(scc_driver, &scc_ops);
 
-	scc_driver.open	= scc_open;
-	scc_driver.close = gs_close;
-	scc_driver.write = gs_write;
-	scc_driver.put_char = gs_put_char;
-	scc_driver.flush_chars = gs_flush_chars;
-	scc_driver.write_room = gs_write_room;
-	scc_driver.chars_in_buffer = gs_chars_in_buffer;
-	scc_driver.flush_buffer = gs_flush_buffer;
-	scc_driver.ioctl = scc_ioctl;
-	scc_driver.throttle = scc_throttle;
-	scc_driver.unthrottle = scc_unthrottle;
-	scc_driver.set_termios = gs_set_termios;
-	scc_driver.stop = gs_stop;
-	scc_driver.start = gs_start;
-	scc_driver.hangup = gs_hangup;
-	scc_driver.break_ctl = scc_break_ctl;
-
-	scc_callout_driver = scc_driver;
-	scc_callout_driver.name = "cua";
-	scc_callout_driver.major = TTYAUX_MAJOR;
-	scc_callout_driver.subtype = SERIAL_TYPE_CALLOUT;
-
-	if ((error = tty_register_driver(&scc_driver))) {
+	if ((error = tty_register_driver(scc_driver))) {
 		printk(KERN_ERR "scc: Couldn't register scc driver, error = %d\n",
 		       error);
-		return 1;
-	}
-	if ((error = tty_register_driver(&scc_callout_driver))) {
-		tty_unregister_driver(&scc_driver);
-		printk(KERN_ERR "scc: Couldn't register scc callout driver, error = %d\n",
-		       error);
+		put_tty_driver(scc_driver);
 		return 1;
 	}
 
@@ -194,8 +180,6 @@ static void scc_init_portstructs(void)
 
 	for (i = 0; i < 2; i++) {
 		port = scc_ports + i;
-		port->gs.callout_termios = tty_std_termios;
-		port->gs.normal_termios = tty_std_termios;
 		port->gs.magic = SCC_MAGIC;
 		port->gs.close_delay = HZ/2;
 		port->gs.closing_wait = 30 * HZ;
@@ -214,7 +198,7 @@ static int mvme147_scc_init(void)
 {
 	struct scc_port *port;
 
-	printk("SCC: MVME147 Serial Driver\n");
+	printk(KERN_INFO "SCC: MVME147 Serial Driver\n");
 	/* Init channel A */
 	port = &scc_ports[0];
 	port->channel = CHANNEL_A;
@@ -284,7 +268,7 @@ static int mvme162_scc_init(void)
 	if (!(mvme16x_config & MVME16x_CONFIG_GOT_SCCA))
 		return (-ENODEV);
 
-	printk("SCC: MVME162 Serial Driver\n");
+	printk(KERN_INFO "SCC: MVME162 Serial Driver\n");
 	/* Init channel A */
 	port = &scc_ports[0];
 	port->channel = CHANNEL_A;
@@ -352,7 +336,7 @@ static int bvme6000_scc_init(void)
 {
 	struct scc_port *port;
 
-	printk("SCC: BVME6000 Serial Driver\n");
+	printk(KERN_INFO "SCC: BVME6000 Serial Driver\n");
 	/* Init channel A */
 	port = &scc_ports[0];
 	port->channel = CHANNEL_A;
@@ -440,7 +424,7 @@ int vme_scc_init(void)
  * Interrupt handlers
  *--------------------------------------------------------------------------*/
 
-static void scc_rx_int(int irq, void *data, struct pt_regs *fp)
+static irqreturn_t scc_rx_int(int irq, void *data, struct pt_regs *fp)
 {
 	unsigned char	ch;
 	struct scc_port *port = data;
@@ -449,9 +433,9 @@ static void scc_rx_int(int irq, void *data, struct pt_regs *fp)
 
 	ch = SCCread_NB(RX_DATA_REG);
 	if (!tty) {
-		printk ("scc_rx_int with NULL tty!\n");
+		printk(KERN_WARNING "scc_rx_int with NULL tty!\n");
 		SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
-		return;
+		return IRQ_HANDLED;
 	}
 	if (tty->flip.count < TTY_FLIPBUF_SIZE) {
 		*tty->flip.char_buf_ptr = ch;
@@ -468,16 +452,17 @@ static void scc_rx_int(int irq, void *data, struct pt_regs *fp)
 	if (SCCread(INT_PENDING_REG) &
 	    (port->channel == CHANNEL_A ? IPR_A_RX : IPR_B_RX)) {
 		scc_spcond_int (irq, data, fp);
-		return;
+		return IRQ_HANDLED;
 	}
 
 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
 
 	tty_flip_buffer_push(tty);
+	return IRQ_HANDLED;
 }
 
 
-static void scc_spcond_int(int irq, void *data, struct pt_regs *fp)
+static irqreturn_t scc_spcond_int(int irq, void *data, struct pt_regs *fp)
 {
 	struct scc_port *port = data;
 	struct tty_struct *tty = port->gs.tty;
@@ -487,10 +472,10 @@ static void scc_spcond_int(int irq, void *data, struct pt_regs *fp)
 	SCC_ACCESS_INIT(port);
 	
 	if (!tty) {
-		printk ("scc_spcond_int with NULL tty!\n");
+		printk(KERN_WARNING "scc_spcond_int with NULL tty!\n");
 		SCCwrite(COMMAND_REG, CR_ERROR_RESET);
 		SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
-		return;
+		return IRQ_HANDLED;
 	}
 	do {
 		stat = SCCread(SPCOND_STATUS_REG);
@@ -524,20 +509,21 @@ static void scc_spcond_int(int irq, void *data, struct pt_regs *fp)
 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
 
 	tty_flip_buffer_push(tty);
+	return IRQ_HANDLED;
 }
 
 
-static void scc_tx_int(int irq, void *data, struct pt_regs *fp)
+static irqreturn_t scc_tx_int(int irq, void *data, struct pt_regs *fp)
 {
 	struct scc_port *port = data;
 	SCC_ACCESS_INIT(port);
 
 	if (!port->gs.tty) {
-		printk ("scc_tx_int with NULL tty!\n");
+		printk(KERN_WARNING "scc_tx_int with NULL tty!\n");
 		SCCmod (INT_AND_DMA_REG, ~IDR_TX_INT_ENAB, 0);
 		SCCwrite(COMMAND_REG, CR_TX_PENDING_RESET);
 		SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
-		return;
+		return IRQ_HANDLED;
 	}
 	while ((SCCread_NB(STATUS_REG) & SR_TX_BUF_EMPTY)) {
 		if (port->x_char) {
@@ -569,10 +555,11 @@ static void scc_tx_int(int irq, void *data, struct pt_regs *fp)
 	}
 
 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+	return IRQ_HANDLED;
 }
 
 
-static void scc_stat_int(int irq, void *data, struct pt_regs *fp)
+static irqreturn_t scc_stat_int(int irq, void *data, struct pt_regs *fp)
 {
 	struct scc_port *port = data;
 	unsigned channel = port->channel;
@@ -588,22 +575,16 @@ static void scc_stat_int(int irq, void *data, struct pt_regs *fp)
 		if (!(port->gs.flags & ASYNC_CHECK_CD))
 			;	/* Don't report DCD changes */
 		else if (port->c_dcd) {
-			if (~(port->gs.flags & ASYNC_NORMAL_ACTIVE) ||
-				~(port->gs.flags & ASYNC_CALLOUT_ACTIVE)) {
-				/* Are we blocking in open?*/
-				wake_up_interruptible(&port->gs.open_wait);
-			}
+			wake_up_interruptible(&port->gs.open_wait);
 		}
 		else {
-			if (!((port->gs.flags & ASYNC_CALLOUT_ACTIVE) &&
-					(port->gs.flags & ASYNC_CALLOUT_NOHUP))) {
-				if (port->gs.tty)
-					tty_hangup (port->gs.tty);
-			}
+			if (port->gs.tty)
+				tty_hangup (port->gs.tty);
 		}
 	}
 	SCCwrite(COMMAND_REG, CR_EXTSTAT_RESET);
 	SCCwrite_NB(COMMAND_REG, CR_HIGHEST_IUS_RESET);
+	return IRQ_HANDLED;
 }
 
 
@@ -617,11 +598,10 @@ static void scc_disable_tx_interrupts(void *ptr)
 	unsigned long	flags;
 	SCC_ACCESS_INIT(port);
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	SCCmod(INT_AND_DMA_REG, ~IDR_TX_INT_ENAB, 0);
 	port->gs.flags &= ~GS_TX_INTEN;
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 
@@ -631,12 +611,11 @@ static void scc_enable_tx_interrupts(void *ptr)
 	unsigned long	flags;
 	SCC_ACCESS_INIT(port);
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	SCCmod(INT_AND_DMA_REG, 0xff, IDR_TX_INT_ENAB);
 	/* restart the transmitter */
 	scc_tx_int (0, port, 0);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 
@@ -646,11 +625,10 @@ static void scc_disable_rx_interrupts(void *ptr)
 	unsigned long	flags;
 	SCC_ACCESS_INIT(port);
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	SCCmod(INT_AND_DMA_REG,
 	    ~(IDR_RX_INT_MASK|IDR_PARERR_AS_SPCOND|IDR_EXTSTAT_INT_ENAB), 0);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 
@@ -660,11 +638,10 @@ static void scc_enable_rx_interrupts(void *ptr)
 	unsigned long	flags;
 	SCC_ACCESS_INIT(port);
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	SCCmod(INT_AND_DMA_REG, 0xff,
 		IDR_EXTSTAT_INT_ENAB|IDR_PARERR_AS_SPCOND|IDR_RX_INT_ALL);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 
@@ -710,16 +687,15 @@ static int scc_set_real_termios (void *ptr)
 
 	if (baud == 0) {
 		/* speed == 0 -> drop DTR */
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		SCCmod(TX_CTRL_REG, ~TCR_DTR, 0);
-		restore_flags(flags);
+		local_irq_restore(flags);
 		return 0;
 	}
 	else if ((MACH_IS_MVME16x && (baud < 50 || baud > 38400)) ||
 		 (MACH_IS_MVME147 && (baud < 50 || baud > 19200)) ||
 		 (MACH_IS_BVME6000 &&(baud < 50 || baud > 76800))) {
-		printk("SCC: Bad speed requested, %d\n", baud);
+		printk(KERN_NOTICE "SCC: Bad speed requested, %d\n", baud);
 		return 0;
 	}
 
@@ -731,20 +707,17 @@ static int scc_set_real_termios (void *ptr)
 #ifdef CONFIG_MVME147_SCC
 	if (MACH_IS_MVME147)
 		brgval = (M147_SCC_PCLK + baud/2) / (16 * 2 * baud) - 2;
-	else
 #endif
 #ifdef CONFIG_MVME162_SCC
 	if (MACH_IS_MVME16x)
 		brgval = (MVME_SCC_PCLK + baud/2) / (16 * 2 * baud) - 2;
-	else
 #endif
 #ifdef CONFIG_BVME6000_SCC
 	if (MACH_IS_BVME6000)
 		brgval = (BVME_SCC_RTxC + baud/2) / (16 * 2 * baud) - 2;
 #endif
 	/* Now we have all parameters and can go to set them: */
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	/* receiver's character size and auto-enables */
 	SCCmod(RX_CTRL_REG, ~(RCR_CHSIZE_MASK|RCR_AUTO_ENAB_MODE),
@@ -768,7 +741,7 @@ static int scc_set_real_termios (void *ptr)
 	/* BRG enable, and clock source never changes */
 	SCCmod(DPLL_CTRL_REG, 0xff, DCR_BRG_ENAB);
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 
 	return 0;
 }
@@ -783,11 +756,19 @@ static int scc_chars_in_buffer (void *ptr)
 }
 
 
+/* Comment taken from sx.c (2.4.0):
+   I haven't the foggiest why the decrement use count has to happen
+   here. The whole linux serial drivers stuff needs to be redesigned.
+   My guess is that this is a hack to minimize the impact of a bug
+   elsewhere. Thinking about it some more. (try it sometime) Try
+   running minicom on a serial port that is driven by a modularized
+   driver. Have the modem hangup. Then remove the driver module. Then
+   exit minicom.  I expect an "oops".  -- REW */
+
 static void scc_hungup(void *ptr)
 {
 	scc_disable_tx_interrupts(ptr);
 	scc_disable_rx_interrupts(ptr);
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -808,12 +789,12 @@ static void scc_setsignals(struct scc_port *port, int dtr, int rts)
 	unsigned char t;
 	SCC_ACCESS_INIT(port);
 
-	save_flags(flags);
+	local_irq_save(flags);
 	t = SCCread(TX_CTRL_REG);
 	if (dtr >= 0) t = dtr? (t | TCR_DTR): (t & ~TCR_DTR);
 	if (rts >= 0) t = rts? (t | TCR_RTS): (t & ~TCR_RTS);
 	SCCwrite(TX_CTRL_REG, t);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 
@@ -833,7 +814,7 @@ static void scc_send_xchar(struct tty_struct *tty, char ch)
 
 static int scc_open (struct tty_struct * tty, struct file * filp)
 {
-	int line = MINOR(tty->device) - SCC_MINOR_BASE;
+	int line = tty->index;
 	int retval;
 	struct scc_port *port = &scc_ports[line];
 	int i, channel = port->channel;
@@ -898,8 +879,7 @@ static int scc_open (struct tty_struct * tty, struct file * filp)
 	};
 #endif
 	if (!(port->gs.flags & ASYNC_INITIALIZED)) {
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 #if defined(CONFIG_MVME147_SCC) || defined(CONFIG_MVME162_SCC)
 		if (MACH_IS_MVME147 || MACH_IS_MVME16x) {
 			for (i=0; i<sizeof(mvme_init_tab)/sizeof(*mvme_init_tab); ++i)
@@ -918,7 +898,7 @@ static int scc_open (struct tty_struct * tty, struct file * filp)
 
 		port->c_dcd = 0;	/* Prevent initial 1->0 interrupt */
 		scc_setsignals (port, 1,1);
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
 
 	tty->driver_data = port;
@@ -930,27 +910,13 @@ static int scc_open (struct tty_struct * tty, struct file * filp)
 		return retval;
 	}
 	port->gs.flags |= GS_ACTIVE;
-	if (port->gs.count == 1) {
-		MOD_INC_USE_COUNT;
-	}
-	retval = block_til_ready(port, filp);
+	retval = gs_block_til_ready(port, filp);
 
 	if (retval) {
-		MOD_DEC_USE_COUNT;
 		port->gs.count--;
 		return retval;
 	}
 
-	if ((port->gs.count == 1) && (port->gs.flags & ASYNC_SPLIT_TERMIOS)) {
-		if (tty->driver.subtype == SERIAL_TYPE_NORMAL)
-			*tty->termios = port->gs.normal_termios;
-		else 
-			*tty->termios = port->gs.callout_termios;
-		scc_set_real_termios (port);
-	}
-
-	port->gs.session = current->session;
-	port->gs.pgrp = current->pgrp;
 	port->c_dcd = scc_get_CD (port);
 
 	scc_enable_rx_interrupts(port);
@@ -966,10 +932,9 @@ static void scc_throttle (struct tty_struct * tty)
 	SCC_ACCESS_INIT(port);
 
 	if (tty->termios->c_cflag & CRTSCTS) {
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		SCCmod(TX_CTRL_REG, ~TCR_RTS, 0);
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
 	if (I_IXOFF(tty))
 		scc_send_xchar(tty, STOP_CHAR(tty));
@@ -983,10 +948,9 @@ static void scc_unthrottle (struct tty_struct * tty)
 	SCC_ACCESS_INIT(port);
 
 	if (tty->termios->c_cflag & CRTSCTS) {
-		save_flags(flags);
-		cli();
+		local_irq_save(flags);
 		SCCmod(TX_CTRL_REG, 0xff, TCR_RTS);
-		restore_flags(flags);
+		local_irq_restore(flags);
 	}
 	if (I_IXOFF(tty))
 		scc_send_xchar(tty, START_CHAR(tty));
@@ -1006,11 +970,10 @@ static void scc_break_ctl(struct tty_struct *tty, int break_state)
 	unsigned long	flags;
 	SCC_ACCESS_INIT(port);
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 	SCCmod(TX_CTRL_REG, ~TCR_SEND_BREAK, 
 			break_state ? TCR_SEND_BREAK : 0);
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 
@@ -1053,8 +1016,7 @@ static void scc_console_write (struct console *co, const char *str, unsigned cou
 {
 	unsigned long	flags;
 
-	save_flags(flags);
-	cli();
+	local_irq_save(flags);
 
 	while (count--)
 	{
@@ -1062,47 +1024,13 @@ static void scc_console_write (struct console *co, const char *str, unsigned cou
 			scc_ch_write ('\r');
 		scc_ch_write (*str++);
 	}
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
-
-static int scc_console_wait_key(struct console *co)
+static struct tty_driver *scc_console_device(struct console *c, int *index)
 {
-	unsigned long	flags;
-	volatile char *p = NULL;
-	int c;
-	
-#ifdef CONFIG_MVME147_SCC
-	if (MACH_IS_MVME147)
-		p = (volatile char *)M147_SCC_A_ADDR;
-#endif
-#ifdef CONFIG_MVME162_SCC
-	if (MACH_IS_MVME16x)
-		p = (volatile char *)MVME_SCC_A_ADDR;
-#endif
-#ifdef CONFIG_BVME6000_SCC
-	if (MACH_IS_BVME6000)
-		p = (volatile char *)BVME_SCC_A_ADDR;
-#endif
-
-	save_flags(flags);
-	cli();
-
-	/* wait for rx buf filled */
-	while ((*p & 0x01) == 0)
-		;
-
-	*p = 8;
-	scc_delay();
-	c = *p;
-	restore_flags(flags);
-	return c;
-}
-
-
-static kdev_t scc_console_device(struct console *c)
-{
-	return MKDEV(TTY_MAJOR, SCC_MINOR_BASE + c->index);
+	*index = c->index;
+	return scc_driver;
 }
 
 
@@ -1113,17 +1041,16 @@ static int __init scc_console_setup(struct console *co, char *options)
 
 
 static struct console sercons = {
-	name:		"ttyS",
-	write:		scc_console_write,
-	device:		scc_console_device,
-	wait_key:	scc_console_wait_key,
-	setup:		scc_console_setup,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
+	.name		= "ttyS",
+	.write		= scc_console_write,
+	.device		= scc_console_device,
+	.setup		= scc_console_setup,
+	.flags		= CON_PRINTBUFFER,
+	.index		= -1,
 };
 
 
-void __init vme_scc_console_init(void)
+static int __init vme_scc_console_init(void)
 {
 	if (vme_brdtype == VME_TYPE_MVME147 ||
 			vme_brdtype == VME_TYPE_MVME162 ||
@@ -1131,5 +1058,6 @@ void __init vme_scc_console_init(void)
 			vme_brdtype == VME_TYPE_BVME4000 ||
 			vme_brdtype == VME_TYPE_BVME6000)
 		register_console(&sercons);
+	return 0;
 }
-
+console_initcall(vme_scc_console_init);

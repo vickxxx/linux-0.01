@@ -19,9 +19,10 @@
 #define NF_REPEAT 4
 #define NF_MAX_VERDICT NF_REPEAT
 
-/* Generic cache responses from hook functions. */
-#define NFC_ALTERED 0x8000
+/* Generic cache responses from hook functions.
+   <= 0x2000 is used for protocol-flags. */
 #define NFC_UNKNOWN 0x4000
+#define NFC_ALTERED 0x8000
 
 #ifdef __KERNEL__
 #include <linux/config.h>
@@ -47,6 +48,7 @@ struct nf_hook_ops
 
 	/* User fills in from here down. */
 	nf_hookfn *hook;
+	struct module *owner;
 	int pf;
 	int hooknum;
 	/* Hooks are ordered in ascending priority. */
@@ -117,17 +119,23 @@ extern struct list_head nf_hooks[NPROTO][NF_MAX_HOOKS];
 /* This is gross, but inline doesn't cut it for avoiding the function
    call in fast path: gcc doesn't inline (needs value tracking?). --RR */
 #ifdef CONFIG_NETFILTER_DEBUG
-#define NF_HOOK nf_hook_slow
+#define NF_HOOK(pf, hook, skb, indev, outdev, okfn)			\
+ nf_hook_slow((pf), (hook), (skb), (indev), (outdev), (okfn), INT_MIN)
+#define NF_HOOK_THRESH nf_hook_slow
 #else
 #define NF_HOOK(pf, hook, skb, indev, outdev, okfn)			\
 (list_empty(&nf_hooks[(pf)][(hook)])					\
  ? (okfn)(skb)								\
- : nf_hook_slow((pf), (hook), (skb), (indev), (outdev), (okfn)))
+ : nf_hook_slow((pf), (hook), (skb), (indev), (outdev), (okfn), INT_MIN))
+#define NF_HOOK_THRESH(pf, hook, skb, indev, outdev, okfn, thresh)	\
+(list_empty(&nf_hooks[(pf)][(hook)])					\
+ ? (okfn)(skb)								\
+ : nf_hook_slow((pf), (hook), (skb), (indev), (outdev), (okfn), (thresh)))
 #endif
 
 int nf_hook_slow(int pf, unsigned int hook, struct sk_buff *skb,
 		 struct net_device *indev, struct net_device *outdev,
-		 int (*okfn)(struct sk_buff *));
+		 int (*okfn)(struct sk_buff *), int thresh);
 
 /* Call setsockopt() */
 int nf_setsockopt(struct sock *sk, int pf, int optval, char *opt, 
@@ -158,26 +166,5 @@ extern void nf_invalidate_cache(int pf);
 #define NF_HOOK(pf, hook, skb, indev, outdev, okfn) (okfn)(skb)
 #endif /*CONFIG_NETFILTER*/
 
-/* From arch/i386/kernel/smp.c:
- *
- *	Why isn't this somewhere standard ??
- *
- * Maybe because this procedure is horribly buggy, and does
- * not deserve to live.  Think about signedness issues for five
- * seconds to see why.		- Linus
- */
-
-/* Two signed, return a signed. */
-#define SMAX(a,b) ((ssize_t)(a)>(ssize_t)(b) ? (ssize_t)(a) : (ssize_t)(b))
-#define SMIN(a,b) ((ssize_t)(a)<(ssize_t)(b) ? (ssize_t)(a) : (ssize_t)(b))
-
-/* Two unsigned, return an unsigned. */
-#define UMAX(a,b) ((size_t)(a)>(size_t)(b) ? (size_t)(a) : (size_t)(b))
-#define UMIN(a,b) ((size_t)(a)<(size_t)(b) ? (size_t)(a) : (size_t)(b))
-
-/* Two unsigned, return a signed. */
-#define SUMAX(a,b) ((size_t)(a)>(size_t)(b) ? (ssize_t)(a) : (ssize_t)(b))
-#define SUMIN(a,b) ((size_t)(a)<(size_t)(b) ? (ssize_t)(a) : (ssize_t)(b))
 #endif /*__KERNEL__*/
-
 #endif /*__LINUX_NETFILTER_H*/

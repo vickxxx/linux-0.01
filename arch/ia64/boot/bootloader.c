@@ -3,12 +3,14 @@
  *
  * Loads an ELF kernel.
  *
- * Copyright (C) 1998, 1999, 2001 Hewlett-Packard Co
- * Copyright (C) 1998, 1999, 2001 David Mosberger-Tang <davidm@hpl.hp.com>
- * Copyright (C) 1998, 1999 Stephane Eranian <eranian@hpl.hp.com>
+ * Copyright (C) 1998-2002 Hewlett-Packard Co
+ *	David Mosberger-Tang <davidm@hpl.hp.com>
+ *	Stephane Eranian <eranian@hpl.hp.com>
  *
  * 01/07/99 S.Eranian modified to pass command line arguments to kernel
  */
+struct task_struct;	/* forward declaration for elf.h */
+
 #include <linux/config.h>
 #include <linux/elf.h>
 #include <linux/init.h>
@@ -52,6 +54,18 @@ struct disk_stat {
 };
 
 #include "../kernel/fw-emu.c"
+
+/* This needs to be defined because lib/string.c:strlcat() calls it in case of error... */
+asm (".global printk; printk = 0");
+
+/*
+ * Set a break point on this function so that symbols are available to set breakpoints in
+ * the kernel being debugged.
+ */
+static void
+debug_break (void)
+{
+}
 
 static void
 cons_write (const char *buf)
@@ -170,10 +184,10 @@ _start (void)
 			continue;
 
 		req.len = elf_phdr->p_filesz;
-		req.addr = __pa(elf_phdr->p_vaddr);
+		req.addr = __pa(elf_phdr->p_paddr);
 		ssc(fd, 1, (long) &req, elf_phdr->p_offset, SSC_READ);
 		ssc((long) &stat, 0, 0, 0, SSC_WAIT_COMPLETION);
-		memset((char *)__pa(elf_phdr->p_vaddr) + elf_phdr->p_filesz, 0,
+		memset((char *)__pa(elf_phdr->p_paddr) + elf_phdr->p_filesz, 0,
 		       elf_phdr->p_memsz - elf_phdr->p_filesz);
 	}
 	ssc(fd, 0, 0, 0, SSC_CLOSE);
@@ -187,6 +201,7 @@ _start (void)
 
 	ssc(0, (long) kpath, 0, 0, SSC_LOAD_SYMBOLS);
 
+	debug_break();
 	asm volatile ("mov sp=%2; mov r28=%1; br.sptk.few %0"
 		      :: "b"(e_entry), "r"(bp), "r"(__pa(&stack)));
 

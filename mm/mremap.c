@@ -1,25 +1,33 @@
 /*
- *	linux/mm/remap.c
+ *	mm/mremap.c
  *
  *	(C) Copyright 1996 Linus Torvalds
+ *
+ *	Address space accounting code	<alan@redhat.com>
+ *	(C) Copyright 2002 Red Hat Inc, All Rights Reserved
  */
 
+#include <linux/mm.h>
+#include <linux/hugetlb.h>
 #include <linux/slab.h>
-#include <linux/smp_lock.h>
 #include <linux/shm.h>
 #include <linux/mman.h>
 #include <linux/swap.h>
+#include <linux/fs.h>
+#include <linux/highmem.h>
+#include <linux/rmap-locking.h>
+#include <linux/security.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgalloc.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
-extern int vm_enough_memory(long pages);
-
-static inline pte_t *get_one_pte(struct mm_struct *mm, unsigned long addr)
+static pte_t *get_one_pte_map_nested(struct mm_struct *mm, unsigned long addr)
 {
-	pgd_t * pgd;
-	pmd_t * pmd;
-	pte_t * pte = NULL;
+	pgd_t *pgd;
+	pmd_t *pmd;
+	pte_t *pte = NULL;
 
 	pgd = pgd_offset(mm, addr);
 	if (pgd_none(*pgd))
@@ -39,30 +47,56 @@ static inline pte_t *get_one_pte(struct mm_struct *mm, unsigned long addr)
 		goto end;
 	}
 
-	pte = pte_offset(pmd, addr);
-	if (pte_none(*pte))
+	pte = pte_offset_map_nested(pmd, addr);
+	if (pte_none(*pte)) {
+		pte_unmap_nested(pte);
 		pte = NULL;
+	}
 end:
 	return pte;
 }
 
-static inline pte_t *alloc_one_pte(struct mm_struct *mm, unsigned long addr)
+#ifdef CONFIG_HIGHPTE	/* Save a few cycles on the sane machines */
+static inline int page_table_present(struct mm_struct *mm, unsigned long addr)
 {
-	pmd_t * pmd;
-	pte_t * pte = NULL;
+	pgd_t *pgd;
+	pmd_t *pmd;
+
+	pgd = pgd_offset(mm, addr);
+	if (pgd_none(*pgd))
+		return 0;
+	pmd = pmd_offset(pgd, addr);
+	return pmd_present(*pmd);
+}
+#else
+#define page_table_present(mm, addr)	(1)
+#endif
+
+static inline pte_t *alloc_one_pte_map(struct mm_struct *mm, unsigned long addr)
+{
+	pmd_t *pmd;
+	pte_t *pte = NULL;
 
 	pmd = pmd_alloc(mm, pgd_offset(mm, addr), addr);
 	if (pmd)
-		pte = pte_alloc(mm, pmd, addr);
+		pte = pte_alloc_map(mm, pmd, addr);
 	return pte;
 }
 
-static inline int copy_one_pte(struct mm_struct *mm, pte_t * src, pte_t * dst)
+static int
+copy_one_pte(struct mm_struct *mm, pte_t *src, pte_t *dst,
+		struct pte_chain **pte_chainp)
 {
 	int error = 0;
 	pte_t pte;
+	struct page *page = NULL;
+
+	if (pte_present(*src))
+		page = pte_page(*src);
 
 	if (!pte_none(*src)) {
+		if (page)
+			page_remove_rmap(page, src);
 		pte = ptep_get_and_clear(src);
 		if (!dst) {
 			/* No dest?  We must put it back. */
@@ -70,33 +104,58 @@ static inline int copy_one_pte(struct mm_struct *mm, pte_t * src, pte_t * dst)
 			error++;
 		}
 		set_pte(dst, pte);
+		if (page)
+			*pte_chainp = page_add_rmap(page, dst, *pte_chainp);
 	}
 	return error;
 }
 
-static int move_one_page(struct mm_struct *mm, unsigned long old_addr, unsigned long new_addr)
+static int
+move_one_page(struct vm_area_struct *vma, unsigned long old_addr,
+		unsigned long new_addr)
 {
+	struct mm_struct *mm = vma->vm_mm;
 	int error = 0;
-	pte_t * src, * dst;
+	pte_t *src, *dst;
+	struct pte_chain *pte_chain;
 
-	spin_lock(&mm->page_table_lock);
-	src = get_one_pte(mm, old_addr);
-	if (src) {
-		dst = alloc_one_pte(mm, new_addr);
-		src = get_one_pte(mm, old_addr);
-		if (src) 
-			error = copy_one_pte(mm, src, dst);
+	pte_chain = pte_chain_alloc(GFP_KERNEL);
+	if (!pte_chain) {
+		error = -ENOMEM;
+		goto out;
 	}
+	spin_lock(&mm->page_table_lock);
+	src = get_one_pte_map_nested(mm, old_addr);
+	if (src) {
+		/*
+		 * Look to see whether alloc_one_pte_map needs to perform a
+		 * memory allocation.  If it does then we need to drop the
+		 * atomic kmap
+		 */
+		if (!page_table_present(mm, new_addr)) {
+			pte_unmap_nested(src);
+			src = NULL;
+		}
+		dst = alloc_one_pte_map(mm, new_addr);
+		if (src == NULL)
+			src = get_one_pte_map_nested(mm, old_addr);
+		error = copy_one_pte(mm, src, dst, &pte_chain);
+		pte_unmap_nested(src);
+		pte_unmap(dst);
+	}
+	flush_tlb_page(vma, old_addr);
 	spin_unlock(&mm->page_table_lock);
+	pte_chain_free(pte_chain);
+out:
 	return error;
 }
 
-static int move_page_tables(struct mm_struct * mm,
+static int move_page_tables(struct vm_area_struct *vma,
 	unsigned long new_addr, unsigned long old_addr, unsigned long len)
 {
 	unsigned long offset = len;
 
-	flush_cache_range(mm, old_addr, old_addr + len);
+	flush_cache_range(vma, old_addr, old_addr + len);
 
 	/*
 	 * This is not the clever way to do this, but we're taking the
@@ -105,10 +164,9 @@ static int move_page_tables(struct mm_struct * mm,
 	 */
 	while (offset) {
 		offset -= PAGE_SIZE;
-		if (move_one_page(mm, old_addr + offset, new_addr + offset))
+		if (move_one_page(vma, old_addr + offset, new_addr + offset))
 			goto oops_we_failed;
 	}
-	flush_tlb_range(mm, old_addr, old_addr + len);
 	return 0;
 
 	/*
@@ -119,43 +177,48 @@ static int move_page_tables(struct mm_struct * mm,
 	 * the old page tables)
 	 */
 oops_we_failed:
-	flush_cache_range(mm, new_addr, new_addr + len);
+	flush_cache_range(vma, new_addr, new_addr + len);
 	while ((offset += PAGE_SIZE) < len)
-		move_one_page(mm, new_addr + offset, old_addr + offset);
-	zap_page_range(mm, new_addr, len);
+		move_one_page(vma, new_addr + offset, old_addr + offset);
+	zap_page_range(vma, new_addr, len);
 	return -1;
 }
 
-static inline unsigned long move_vma(struct vm_area_struct * vma,
+static unsigned long move_vma(struct vm_area_struct *vma,
 	unsigned long addr, unsigned long old_len, unsigned long new_len,
 	unsigned long new_addr)
 {
-	struct mm_struct * mm = vma->vm_mm;
-	struct vm_area_struct * new_vma, * next, * prev;
+	struct mm_struct *mm = vma->vm_mm;
+	struct vm_area_struct *new_vma, *next, *prev;
 	int allocated_vma;
+	int split = 0;
 
 	new_vma = NULL;
 	next = find_vma_prev(mm, new_addr, &prev);
 	if (next) {
 		if (prev && prev->vm_end == new_addr &&
-		    can_vma_merge(prev, vma->vm_flags) && !vma->vm_file && !(vma->vm_flags & VM_SHARED)) {
+		    can_vma_merge(prev, vma->vm_flags) && !vma->vm_file &&
+					!(vma->vm_flags & VM_SHARED)) {
 			spin_lock(&mm->page_table_lock);
 			prev->vm_end = new_addr + new_len;
 			spin_unlock(&mm->page_table_lock);
 			new_vma = prev;
 			if (next != prev->vm_next)
 				BUG();
-			if (prev->vm_end == next->vm_start && can_vma_merge(next, prev->vm_flags)) {
+			if (prev->vm_end == next->vm_start &&
+					can_vma_merge(next, prev->vm_flags)) {
 				spin_lock(&mm->page_table_lock);
 				prev->vm_end = next->vm_end;
 				__vma_unlink(mm, next, prev);
 				spin_unlock(&mm->page_table_lock);
-
+				if (vma == next)
+					vma = prev;
 				mm->map_count--;
 				kmem_cache_free(vm_area_cachep, next);
 			}
 		} else if (next->vm_start == new_addr + new_len &&
-			   can_vma_merge(next, vma->vm_flags) && !vma->vm_file && !(vma->vm_flags & VM_SHARED)) {
+			  	can_vma_merge(next, vma->vm_flags) &&
+				!vma->vm_file && !(vma->vm_flags & VM_SHARED)) {
 			spin_lock(&mm->page_table_lock);
 			next->vm_start = new_addr;
 			spin_unlock(&mm->page_table_lock);
@@ -164,7 +227,8 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 	} else {
 		prev = find_vma(mm, new_addr-1);
 		if (prev && prev->vm_end == new_addr &&
-		    can_vma_merge(prev, vma->vm_flags) && !vma->vm_file && !(vma->vm_flags & VM_SHARED)) {
+		    can_vma_merge(prev, vma->vm_flags) && !vma->vm_file &&
+				!(vma->vm_flags & VM_SHARED)) {
 			spin_lock(&mm->page_table_lock);
 			prev->vm_end = new_addr + new_len;
 			spin_unlock(&mm->page_table_lock);
@@ -180,15 +244,15 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 		allocated_vma = 1;
 	}
 
-	if (!move_page_tables(current->mm, new_addr, addr, old_len)) {
+	if (!move_page_tables(vma, new_addr, addr, old_len)) {
 		unsigned long vm_locked = vma->vm_flags & VM_LOCKED;
 
 		if (allocated_vma) {
 			*new_vma = *vma;
+			INIT_LIST_HEAD(&new_vma->shared);
 			new_vma->vm_start = new_addr;
 			new_vma->vm_end = new_addr+new_len;
 			new_vma->vm_pgoff += (addr-vma->vm_start) >> PAGE_SHIFT;
-			new_vma->vm_raend = 0;
 			if (new_vma->vm_file)
 				get_file(new_vma->vm_file);
 			if (new_vma->vm_ops && new_vma->vm_ops->open)
@@ -196,8 +260,25 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 			insert_vm_struct(current->mm, new_vma);
 		}
 
-		/* XXX: possible errors masked, mapping might remain */
+		/* Conceal VM_ACCOUNT so old reservation is not undone */
+		if (vma->vm_flags & VM_ACCOUNT) {
+			vma->vm_flags &= ~VM_ACCOUNT;
+			if (addr > vma->vm_start) {
+				if (addr + old_len < vma->vm_end)
+					split = 1;
+			} else if (addr + old_len == vma->vm_end)
+				vma = NULL;	/* it will be removed */
+		} else
+			vma = NULL;		/* nothing more to do */
+
 		do_munmap(current->mm, addr, old_len);
+
+		/* Restore VM_ACCOUNT if one or two pieces of vma left */
+		if (vma) {
+			vma->vm_flags |= VM_ACCOUNT;
+			if (split)
+				vma->vm_next->vm_flags |= VM_ACCOUNT;
+		}
 
 		current->mm->total_vm += new_len >> PAGE_SHIFT;
 		if (vm_locked) {
@@ -227,6 +308,7 @@ unsigned long do_mremap(unsigned long addr,
 {
 	struct vm_area_struct *vma;
 	unsigned long ret = -EINVAL;
+	unsigned long charged = 0;
 
 	if (flags & ~(MREMAP_FIXED | MREMAP_MAYMOVE))
 		goto out;
@@ -236,12 +318,6 @@ unsigned long do_mremap(unsigned long addr,
 
 	old_len = PAGE_ALIGN(old_len);
 	new_len = PAGE_ALIGN(new_len);
-
-	if (old_len > TASK_SIZE || addr > TASK_SIZE - old_len)
-		goto out;
-
-	if (addr >= TASK_SIZE)
-		goto out;
 
 	/* new_addr is only valid if MREMAP_FIXED is specified */
 	if (flags & MREMAP_FIXED) {
@@ -253,17 +329,6 @@ unsigned long do_mremap(unsigned long addr,
 		if (new_len > TASK_SIZE || new_addr > TASK_SIZE - new_len)
 			goto out;
 
-		if (new_addr >= TASK_SIZE)
-			goto out;
-
-		/*
-		 * Allow new_len == 0 only if new_addr == addr
-		 * to preserve truncation in place (that was working
-		 * safe and some app may depend on it).
-		 */
-		if (unlikely(!new_len && new_addr != addr))
-			goto out;
-
 		/* Check if the location we're moving into overlaps the
 		 * old location at all, and fail if it does.
 		 */
@@ -273,28 +338,20 @@ unsigned long do_mremap(unsigned long addr,
 		if ((addr <= new_addr) && (addr+old_len) > new_addr)
 			goto out;
 
-		/* Ensure a non-privileged process is not trying to map
-		 * lower pages.
-		 */
-		if (new_addr < mmap_min_addr && !capable(CAP_SYS_RAWIO))
-			return -EPERM;
-
-		ret = do_munmap(current->mm, new_addr, new_len);
-		if (ret && new_len)
-			goto out;
+		do_munmap(current->mm, new_addr, new_len);
 	}
 
 	/*
 	 * Always allow a shrinking remap: that just unmaps
 	 * the unnecessary pages..
+	 * do_munmap does all the needed commit accounting
 	 */
+	ret = addr;
 	if (old_len >= new_len) {
-		ret = do_munmap(current->mm, addr+new_len, old_len - new_len);
-		if (ret && old_len != new_len)
-			goto out;
-		ret = addr;
+		do_munmap(current->mm, addr+new_len, old_len - new_len);
 		if (!(flags & MREMAP_FIXED) || (new_addr == addr))
 			goto out;
+		old_len = new_len;
 	}
 
 	/*
@@ -304,6 +361,10 @@ unsigned long do_mremap(unsigned long addr,
 	vma = find_vma(current->mm, addr);
 	if (!vma || vma->vm_start > addr)
 		goto out;
+	if (is_vm_hugetlb_page(vma)) {
+		ret = -EINVAL;
+		goto out;
+	}
 	/* We can't remap across vm area boundaries */
 	if (old_len > vma->vm_end - addr)
 		goto out;
@@ -322,11 +383,12 @@ unsigned long do_mremap(unsigned long addr,
 	if ((current->mm->total_vm << PAGE_SHIFT) + (new_len - old_len)
 	    > current->rlim[RLIMIT_AS].rlim_cur)
 		goto out;
-	/* Private writable mapping? Check memory availability.. */
-	if ((vma->vm_flags & (VM_SHARED | VM_WRITE)) == VM_WRITE &&
-	    !(flags & MAP_NORESERVE)				 &&
-	    !vm_enough_memory((new_len - old_len) >> PAGE_SHIFT))
-		goto out;
+
+	if (vma->vm_flags & VM_ACCOUNT) {
+		charged = (new_len - old_len) >> PAGE_SHIFT;
+		if (security_vm_enough_memory(charged))
+			goto out_nc;
+	}
 
 	/* old_len exactly to the end of the area..
 	 * And we're not relocating the area.
@@ -365,7 +427,8 @@ unsigned long do_mremap(unsigned long addr,
 			if (vma->vm_flags & VM_SHARED)
 				map_flags |= MAP_SHARED;
 
-			new_addr = get_unmapped_area(vma->vm_file, 0, new_len, vma->vm_pgoff, map_flags);
+			new_addr = get_unmapped_area(vma->vm_file, 0, new_len,
+						vma->vm_pgoff, map_flags);
 			ret = new_addr;
 			if (new_addr & ~PAGE_MASK)
 				goto out;
@@ -373,6 +436,9 @@ unsigned long do_mremap(unsigned long addr,
 		ret = move_vma(vma, addr, old_len, new_len, new_addr);
 	}
 out:
+	if (ret & ~PAGE_MASK)
+		vm_unacct_memory(charged);
+out_nc:
 	return ret;
 }
 

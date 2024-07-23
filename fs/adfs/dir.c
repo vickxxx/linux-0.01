@@ -14,26 +14,30 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/adfs_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/spinlock.h>
+#include <linux/smp_lock.h>
+#include <linux/buffer_head.h>		/* for file_fsync() */
 
 #include "adfs.h"
 
 /*
  * For future.  This should probably be per-directory.
  */
-static rwlock_t adfs_dir_lock;
+static rwlock_t adfs_dir_lock = RW_LOCK_UNLOCKED;
 
 static int
 adfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
 	struct inode *inode = filp->f_dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
-	struct adfs_dir_ops *ops = sb->u.adfs_sb.s_dir;
+	struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
 	struct object_info obj;
 	struct adfs_dir dir;
 	int ret = 0;
+
+	lock_kernel();	
 
 	if (filp->f_pos >> 32)
 		goto out;
@@ -76,6 +80,7 @@ free_out:
 	ops->free(&dir);
 
 out:
+	unlock_kernel();
 	return ret;
 }
 
@@ -84,7 +89,7 @@ adfs_dir_update(struct super_block *sb, struct object_info *obj)
 {
 	int ret = -EINVAL;
 #ifdef CONFIG_ADFS_FS_RW
-	struct adfs_dir_ops *ops = sb->u.adfs_sb.s_dir;
+	struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
 	struct adfs_dir dir;
 
 	printk(KERN_INFO "adfs_dir_update: object %06X in dir %06X\n",
@@ -138,7 +143,7 @@ static int
 adfs_dir_lookup_byname(struct inode *inode, struct qstr *name, struct object_info *obj)
 {
 	struct super_block *sb = inode->i_sb;
-	struct adfs_dir_ops *ops = sb->u.adfs_sb.s_dir;
+	struct adfs_dir_ops *ops = ADFS_SB(sb)->s_dir;
 	struct adfs_dir dir;
 	int ret;
 
@@ -146,9 +151,9 @@ adfs_dir_lookup_byname(struct inode *inode, struct qstr *name, struct object_inf
 	if (ret)
 		goto out;
 
-	if (inode->u.adfs_i.parent_id != dir.parent_id) {
+	if (ADFS_I(inode)->parent_id != dir.parent_id) {
 		adfs_error(sb, "parent directory changed under me! (%lx but got %lx)\n",
-			   inode->u.adfs_i.parent_id, dir.parent_id);
+			   ADFS_I(inode)->parent_id, dir.parent_id);
 		ret = -EIO;
 		goto free_out;
 	}
@@ -193,15 +198,15 @@ out:
 }
 
 struct file_operations adfs_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	adfs_readdir,
-	fsync:		file_fsync,
+	.read		= generic_read_dir,
+	.readdir	= adfs_readdir,
+	.fsync		= file_fsync,
 };
 
 static int
 adfs_hash(struct dentry *parent, struct qstr *qstr)
 {
-	const unsigned int name_len = parent->d_sb->u.adfs_sb.s_namelen;
+	const unsigned int name_len = ADFS_SB(parent->d_sb)->s_namelen;
 	const unsigned char *name;
 	unsigned long hash;
 	int i;
@@ -260,17 +265,18 @@ adfs_compare(struct dentry *parent, struct qstr *entry, struct qstr *name)
 }
 
 struct dentry_operations adfs_dentry_operations = {
-	d_hash:		adfs_hash,
-	d_compare:	adfs_compare,
+	.d_hash		= adfs_hash,
+	.d_compare	= adfs_compare,
 };
 
-struct dentry *adfs_lookup(struct inode *dir, struct dentry *dentry)
+struct dentry *adfs_lookup(struct inode *dir, struct dentry *dentry, struct nameidata *nd)
 {
 	struct inode *inode = NULL;
 	struct object_info obj;
 	int error;
 
 	dentry->d_op = &adfs_dentry_operations;	
+	lock_kernel();
 	error = adfs_dir_lookup_byname(dir, &dentry->d_name, &obj);
 	if (error == 0) {
 		error = -EACCES;
@@ -282,6 +288,7 @@ struct dentry *adfs_lookup(struct inode *dir, struct dentry *dentry)
 		if (inode)
 			error = 0;
 	}
+	unlock_kernel();
 	d_add(dentry, inode);
 	return ERR_PTR(error);
 }
@@ -290,6 +297,6 @@ struct dentry *adfs_lookup(struct inode *dir, struct dentry *dentry)
  * directories can handle most operations...
  */
 struct inode_operations adfs_dir_inode_operations = {
-	lookup:		adfs_lookup,
-	setattr:	adfs_notify_change,
+	.lookup		= adfs_lookup,
+	.setattr	= adfs_notify_change,
 };

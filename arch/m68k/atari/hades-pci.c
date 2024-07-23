@@ -297,49 +297,47 @@ static void __init hades_fixup(int pci_modify)
 			    IRQ_TT_MFP_SCC,	/* Slot 2. */
 			    IRQ_TT_MFP_SCSIDMA	/* Slot 3. */
 			  };
-	struct pci_dev *dev;
+	struct pci_dev *dev = NULL;
 	unsigned char slot;
 
 	/*
 	 * Go through all devices, fixing up irqs as we see fit:
 	 */
 
-	for (dev = pci_devices; dev; dev = dev->next)
+	while ((dev = pci_find_device(PCI_ANY_ID, PCI_ANY_ID, dev)) != NULL)
 	{
 		if (dev->class >> 16 != PCI_BASE_CLASS_BRIDGE)
 		{
 			slot = PCI_SLOT(dev->devfn);	/* Determine slot number. */
 			dev->irq = irq_tab[slot];
 			if (pci_modify)
-				pcibios_write_config_byte(dev->bus->number, dev->devfn,
-							  PCI_INTERRUPT_LINE, dev->irq);
+				pci_write_config_byte(dev, PCI_INTERRUPT_LINE, dev->irq);
 		}
 	}
 }
 
 /*
- * static void hades_conf_device(unsigned char bus, unsigned char device_fn)
+ * static void hades_conf_device(struct pci_dev *dev)
  *
  * Machine dependent Configure the given device.
  *
  * Parameters:
  *
- * bus		- bus number of the device.
- * device_fn	- device and function number of the device.
+ * dev		- the pci device.
  */
 
-static void __init hades_conf_device(unsigned char bus, unsigned char device_fn)
+static void __init hades_conf_device(struct pci_dev *dev)
 {
-	pcibios_write_config_byte(bus, device_fn, PCI_CACHE_LINE_SIZE, 0);
+	pci_write_config_byte(dev, PCI_CACHE_LINE_SIZE, 0);
 }
 
 static struct pci_ops hades_pci_ops = {
-	read_byte:	hades_read_config_byte
-	read_word:	hades_read_config_word
-	read_dword:	hades_read_config_dword
-	write_byte:	hades_write_config_byte
-	write_word:	hades_write_config_word
-	write_dword:	hades_write_config_dword
+	.read_byte =	hades_read_config_byte,
+	.read_word =	hades_read_config_word,
+	.read_dword =	hades_read_config_dword,
+	.write_byte =	hades_write_config_byte,
+	.write_word =	hades_write_config_word,
+	.write_dword =	hades_write_config_dword
 };
 
 /*
@@ -377,7 +375,7 @@ struct pci_bus_info * __init init_hades_pci(void)
 	memset(bus, 0, sizeof(struct pci_bus_info));
 
 	/*
-	 * Claim resources. The m68k has no seperate I/O space, both
+	 * Claim resources. The m68k has no separate I/O space, both
 	 * PCI memory space and PCI I/O space are in memory space. Therefore
 	 * the I/O resources are requested in memory space as well.
 	 */

@@ -1,4 +1,4 @@
-/* $Id: sys_sparc.c,v 1.54 2001/10/28 20:49:13 davem Exp $
+/* $Id: sys_sparc.c,v 1.57 2002/02/09 19:49:30 davem Exp $
  * linux/arch/sparc64/kernel/sys_sparc.c
  *
  * This file contains various random system calls that
@@ -40,12 +40,15 @@ asmlinkage unsigned long sys_getpagesize(void)
 	return PAGE_SIZE;
 }
 
-#define COLOUR_ALIGN(addr)	(((addr)+SHMLBA-1)&~(SHMLBA-1))
+#define COLOUR_ALIGN(addr,pgoff)		\
+	((((addr)+SHMLBA-1)&~(SHMLBA-1)) +	\
+	 (((pgoff)<<PAGE_SHIFT) & (SHMLBA-1)))
 
 unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsigned long len, unsigned long pgoff, unsigned long flags)
 {
 	struct vm_area_struct * vmm;
 	unsigned long task_size = TASK_SIZE;
+	int do_color_align;
 
 	if (flags & MAP_FIXED) {
 		/* We do not accept a shared mapping if it would violate
@@ -56,18 +59,21 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 		return addr;
 	}
 
-	if (current->thread.flags & SPARC_FLAG_32BIT)
+	if (test_thread_flag(TIF_32BIT))
 		task_size = 0xf0000000UL;
 	if (len > task_size || len > -PAGE_OFFSET)
 		return -ENOMEM;
 	if (!addr)
 		addr = TASK_UNMAPPED_BASE;
 
-	if (flags & MAP_SHARED)
-		addr = COLOUR_ALIGN(addr);
+	do_color_align = 0;
+	if (filp || (flags & MAP_SHARED))
+		do_color_align = 1;
+
+	if (do_color_align)
+		addr = COLOUR_ALIGN(addr, pgoff);
 	else
 		addr = PAGE_ALIGN(addr);
-
 	task_size -= len;
 
 	for (vmm = find_vma(current->mm, addr); ; vmm = vmm->vm_next) {
@@ -81,8 +87,8 @@ unsigned long arch_get_unmapped_area(struct file *filp, unsigned long addr, unsi
 		if (!vmm || addr + len <= vmm->vm_start)
 			return addr;
 		addr = vmm->vm_end;
-		if (flags & MAP_SHARED)
-			addr = COLOUR_ALIGN(addr);
+		if (do_color_align)
+			addr = COLOUR_ALIGN(addr, pgoff);
 	}
 }
 
@@ -134,7 +140,7 @@ extern asmlinkage unsigned long sys_brk(unsigned long brk);
 asmlinkage unsigned long sparc_brk(unsigned long brk)
 {
 	/* People could try to be nasty and use ta 0x6d in 32bit programs */
-	if ((current->thread.flags & SPARC_FLAG_32BIT) &&
+	if (test_thread_flag(TIF_32BIT) &&
 	    brk >= 0xf0000000UL)
 		return current->mm->brk;
 
@@ -193,7 +199,7 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			goto out;
 			}
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		}
 	if (call <= MSGCTL) 
@@ -212,14 +218,20 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			err = sys_msgctl (first, second | IPC_64, (struct msqid_ds *) ptr);
 			goto out;
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		}
 	if (call <= SHMCTL) 
 		switch (call) {
-		case SHMAT:
-			err = sys_shmat (first, (char *) ptr, second, (ulong *) third);
+		case SHMAT: {
+			ulong raddr;
+			err = sys_shmat (first, (char *) ptr, second, &raddr);
+			if (!err) {
+				if (put_user(raddr, (ulong __user *) third))
+					err = -EFAULT;
+			}
 			goto out;
+		}
 		case SHMDT:
 			err = sys_shmdt ((char *)ptr);
 			goto out;
@@ -230,23 +242,23 @@ asmlinkage int sys_ipc (unsigned call, int first, int second, unsigned long thir
 			err = sys_shmctl (first, second | IPC_64, (struct shmid_ds *) ptr);
 			goto out;
 		default:
-			err = -EINVAL;
+			err = -ENOSYS;
 			goto out;
 		}
 	else
-		err = -EINVAL;
+		err = -ENOSYS;
 out:
 	return err;
 }
 
-extern asmlinkage int sys_newuname(struct new_utsname * name);
+extern asmlinkage int sys_newuname(struct new_utsname __user *name);
 
-asmlinkage int sparc64_newuname(struct new_utsname * name)
+asmlinkage int sparc64_newuname(struct new_utsname __user *name)
 {
 	int ret = sys_newuname(name);
 	
 	if (current->personality == PER_LINUX32 && !ret) {
-		ret = copy_to_user(name->machine, "sparc\0\0", 8);
+		ret = copy_to_user(name->machine, "sparc\0\0", 8) ? -EFAULT : 0;
 	}
 	return ret;
 }
@@ -255,27 +267,15 @@ extern asmlinkage long sys_personality(unsigned long);
 
 asmlinkage int sparc64_personality(unsigned long personality)
 {
-	unsigned long ret, trying, orig_ret;
+	int ret;
 
-	trying = ret = personality;
-
-	if (current->personality == PER_LINUX32 &&
-	    trying == PER_LINUX)
-		trying = ret = PER_LINUX32;
-
-	/* For PER_LINUX32 we want to retain &default_exec_domain.  */
-	if (trying == PER_LINUX32)
+	if (current->personality == PER_LINUX32 && personality == PER_LINUX)
+		personality = PER_LINUX32;
+	ret = sys_personality(personality);
+	if (ret == PER_LINUX32)
 		ret = PER_LINUX;
 
-	orig_ret = ret;
-	ret = sys_personality(ret);
-
-	if (orig_ret == PER_LINUX && trying == PER_LINUX32) {
-		current->personality = PER_LINUX32;
-		ret = PER_LINUX;
-	}
-
-	return (int) ret;
+	return ret;
 }
 
 /* Linux version of mmap */
@@ -295,7 +295,7 @@ asmlinkage unsigned long sys_mmap(unsigned long addr, unsigned long len,
 	len = PAGE_ALIGN(len);
 	retval = -EINVAL;
 
-	if (current->thread.flags & SPARC_FLAG_32BIT) {
+	if (test_thread_flag(TIF_32BIT)) {
 		if (len > 0xf0000000UL ||
 		    ((flags & MAP_FIXED) && addr > 0xf0000000UL - len))
 			goto out_putf;
@@ -340,7 +340,7 @@ asmlinkage unsigned long sys64_mremap(unsigned long addr,
 {
 	struct vm_area_struct *vma;
 	unsigned long ret = -EINVAL;
-	if (current->thread.flags & SPARC_FLAG_32BIT)
+	if (test_thread_flag(TIF_32BIT))
 		goto out;
 	if (old_len > -PAGE_OFFSET || new_len > -PAGE_OFFSET)
 		goto out;
@@ -386,7 +386,7 @@ out:
 asmlinkage unsigned long
 c_sys_nis_syscall (struct pt_regs *regs)
 {
-	static int count=0;
+	static int count;
 	
 	/* Don't make the system unusable, if someone goes stuck */
 	if (count++ > 5)
@@ -407,7 +407,7 @@ sparc_breakpoint (struct pt_regs *regs)
 {
 	siginfo_t info;
 
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
@@ -427,7 +427,7 @@ sparc_breakpoint (struct pt_regs *regs)
 
 extern void check_pending(int signum);
 
-asmlinkage int sys_getdomainname(char *name, int len)
+asmlinkage int sys_getdomainname(char __user *name, int len)
 {
         int nlen;
 	int err = -EFAULT;
@@ -438,9 +438,9 @@ asmlinkage int sys_getdomainname(char *name, int len)
 
         if (nlen < len)
                 len = nlen;
-	if(len > __NEW_UTS_LEN)
+	if (len > __NEW_UTS_LEN)
 		goto done;
-	if(copy_to_user(name, system_utsname.domainname, len))
+	if (copy_to_user(name, system_utsname.domainname, len))
 		goto done;
 	err = 0;
 done:
@@ -448,23 +448,17 @@ done:
 	return err;
 }
 
-/* only AP+ systems have sys_aplib */
-asmlinkage int sys_aplib(void)
-{
-	return -ENOSYS;
-}
-
 asmlinkage int solaris_syscall(struct pt_regs *regs)
 {
-	static int count = 0;
+	static int count;
 
 	regs->tpc = regs->tnpc;
 	regs->tnpc += 4;
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
-	if(++count <= 5) {
+	if (++count <= 5) {
 		printk ("For Solaris binary emulation you need solaris module loaded\n");
 		show_regs (regs);
 	}
@@ -476,15 +470,15 @@ asmlinkage int solaris_syscall(struct pt_regs *regs)
 #ifndef CONFIG_SUNOS_EMUL
 asmlinkage int sunos_syscall(struct pt_regs *regs)
 {
-	static int count = 0;
+	static int count;
 
 	regs->tpc = regs->tnpc;
 	regs->tnpc += 4;
-	if ((current->thread.flags & SPARC_FLAG_32BIT) != 0) {
+	if (test_thread_flag(TIF_32BIT)) {
 		regs->tpc &= 0xffffffff;
 		regs->tnpc &= 0xffffffff;
 	}
-	if(++count <= 20)
+	if (++count <= 20)
 		printk ("SunOS binary emulation not compiled in\n");
 	force_sig(SIGSEGV, current);
 
@@ -492,19 +486,21 @@ asmlinkage int sunos_syscall(struct pt_regs *regs)
 }
 #endif
 
-asmlinkage int sys_utrap_install(utrap_entry_t type, utrap_handler_t new_p,
+asmlinkage int sys_utrap_install(utrap_entry_t type,
+				 utrap_handler_t new_p,
 				 utrap_handler_t new_d,
-				 utrap_handler_t *old_p, utrap_handler_t *old_d)
+				 utrap_handler_t __user *old_p,
+				 utrap_handler_t __user *old_d)
 {
 	if (type < UT_INSTRUCTION_EXCEPTION || type > UT_TRAP_INSTRUCTION_31)
 		return -EINVAL;
 	if (new_p == (utrap_handler_t)(long)UTH_NOCHANGE) {
 		if (old_p) {
-			if (!current->thread.utraps) {
+			if (!current_thread_info()->utraps) {
 				if (put_user(NULL, old_p))
 					return -EFAULT;
 			} else {
-				if (put_user((utrap_handler_t)(current->thread.utraps[type]), old_p))
+				if (put_user((utrap_handler_t)(current_thread_info()->utraps[type]), old_p))
 					return -EFAULT;
 			}
 		}
@@ -514,39 +510,41 @@ asmlinkage int sys_utrap_install(utrap_entry_t type, utrap_handler_t new_p,
 		}
 		return 0;
 	}
-	if (!current->thread.utraps) {
-		current->thread.utraps =
+	if (!current_thread_info()->utraps) {
+		current_thread_info()->utraps =
 			kmalloc((UT_TRAP_INSTRUCTION_31+1)*sizeof(long), GFP_KERNEL);
-		if (!current->thread.utraps) return -ENOMEM;
-		current->thread.utraps[0] = 1;
-		memset(current->thread.utraps+1, 0, UT_TRAP_INSTRUCTION_31*sizeof(long));
+		if (!current_thread_info()->utraps)
+			return -ENOMEM;
+		current_thread_info()->utraps[0] = 1;
+		memset(current_thread_info()->utraps+1, 0,
+		       UT_TRAP_INSTRUCTION_31*sizeof(long));
 	} else {
-		if ((utrap_handler_t)current->thread.utraps[type] != new_p &&
-		    current->thread.utraps[0] > 1) {
-			long *p = current->thread.utraps;
+		if ((utrap_handler_t)current_thread_info()->utraps[type] != new_p &&
+		    current_thread_info()->utraps[0] > 1) {
+			long *p = current_thread_info()->utraps;
 
-			current->thread.utraps =
+			current_thread_info()->utraps =
 				kmalloc((UT_TRAP_INSTRUCTION_31+1)*sizeof(long),
 					GFP_KERNEL);
-			if (!current->thread.utraps) {
-				current->thread.utraps = p;
+			if (!current_thread_info()->utraps) {
+				current_thread_info()->utraps = p;
 				return -ENOMEM;
 			}
 			p[0]--;
-			current->thread.utraps[0] = 1;
-			memcpy(current->thread.utraps+1, p+1,
+			current_thread_info()->utraps[0] = 1;
+			memcpy(current_thread_info()->utraps+1, p+1,
 			       UT_TRAP_INSTRUCTION_31*sizeof(long));
 		}
 	}
 	if (old_p) {
-		if (put_user((utrap_handler_t)(current->thread.utraps[type]), old_p))
+		if (put_user((utrap_handler_t)(current_thread_info()->utraps[type]), old_p))
 			return -EFAULT;
 	}
 	if (old_d) {
 		if (put_user(NULL, old_d))
 			return -EFAULT;
 	}
-	current->thread.utraps[type] = (long)new_p;
+	current_thread_info()->utraps[type] = (long)new_p;
 
 	return 0;
 }
@@ -595,10 +593,10 @@ update_perfctrs(void)
 	unsigned long pic, tmp;
 
 	read_pic(pic);
-	tmp = (current->thread.kernel_cntd0 += (unsigned int)pic);
-	__put_user(tmp, current->thread.user_cntd0);
-	tmp = (current->thread.kernel_cntd1 += (pic >> 32));
-	__put_user(tmp, current->thread.user_cntd1);
+	tmp = (current_thread_info()->kernel_cntd0 += (unsigned int)pic);
+	__put_user(tmp, current_thread_info()->user_cntd0);
+	tmp = (current_thread_info()->kernel_cntd1 += (pic >> 32));
+	__put_user(tmp, current_thread_info()->user_cntd1);
 	reset_pic();
 }
 
@@ -609,24 +607,24 @@ sys_perfctr(int opcode, unsigned long arg0, unsigned long arg1, unsigned long ar
 
 	switch(opcode) {
 	case PERFCTR_ON:
-		current->thread.pcr_reg = arg2;
-		current->thread.user_cntd0 = (u64 *) arg0;
-		current->thread.user_cntd1 = (u64 *) arg1;
-		current->thread.kernel_cntd0 =
-			current->thread.kernel_cntd1 = 0;
+		current_thread_info()->pcr_reg = arg2;
+		current_thread_info()->user_cntd0 = (u64 *) arg0;
+		current_thread_info()->user_cntd1 = (u64 *) arg1;
+		current_thread_info()->kernel_cntd0 =
+			current_thread_info()->kernel_cntd1 = 0;
 		write_pcr(arg2);
 		reset_pic();
-		current->thread.flags |= SPARC_FLAG_PERFCTR;
+		set_thread_flag(TIF_PERFCTR);
 		break;
 
 	case PERFCTR_OFF:
 		err = -EINVAL;
-		if ((current->thread.flags & SPARC_FLAG_PERFCTR) != 0) {
-			current->thread.user_cntd0 =
-				current->thread.user_cntd1 = NULL;
-			current->thread.pcr_reg = 0;
+		if (test_thread_flag(TIF_PERFCTR)) {
+			current_thread_info()->user_cntd0 =
+				current_thread_info()->user_cntd1 = NULL;
+			current_thread_info()->pcr_reg = 0;
 			write_pcr(0);
-			current->thread.flags &= ~(SPARC_FLAG_PERFCTR);
+			clear_thread_flag(TIF_PERFCTR);
 			err = 0;
 		}
 		break;
@@ -634,50 +632,50 @@ sys_perfctr(int opcode, unsigned long arg0, unsigned long arg1, unsigned long ar
 	case PERFCTR_READ: {
 		unsigned long pic, tmp;
 
-		if (!(current->thread.flags & SPARC_FLAG_PERFCTR)) {
+		if (!test_thread_flag(TIF_PERFCTR)) {
 			err = -EINVAL;
 			break;
 		}
 		read_pic(pic);
-		tmp = (current->thread.kernel_cntd0 += (unsigned int)pic);
-		err |= __put_user(tmp, current->thread.user_cntd0);
-		tmp = (current->thread.kernel_cntd1 += (pic >> 32));
-		err |= __put_user(tmp, current->thread.user_cntd1);
+		tmp = (current_thread_info()->kernel_cntd0 += (unsigned int)pic);
+		err |= __put_user(tmp, current_thread_info()->user_cntd0);
+		tmp = (current_thread_info()->kernel_cntd1 += (pic >> 32));
+		err |= __put_user(tmp, current_thread_info()->user_cntd1);
 		reset_pic();
 		break;
 	}
 
 	case PERFCTR_CLRPIC:
-		if (!(current->thread.flags & SPARC_FLAG_PERFCTR)) {
+		if (!test_thread_flag(TIF_PERFCTR)) {
 			err = -EINVAL;
 			break;
 		}
-		current->thread.kernel_cntd0 =
-			current->thread.kernel_cntd1 = 0;
+		current_thread_info()->kernel_cntd0 =
+			current_thread_info()->kernel_cntd1 = 0;
 		reset_pic();
 		break;
 
 	case PERFCTR_SETPCR: {
 		u64 *user_pcr = (u64 *)arg0;
-		if (!(current->thread.flags & SPARC_FLAG_PERFCTR)) {
+		if (!test_thread_flag(TIF_PERFCTR)) {
 			err = -EINVAL;
 			break;
 		}
-		err |= __get_user(current->thread.pcr_reg, user_pcr);
-		write_pcr(current->thread.pcr_reg);
-		current->thread.kernel_cntd0 =
-			current->thread.kernel_cntd1 = 0;
+		err |= __get_user(current_thread_info()->pcr_reg, user_pcr);
+		write_pcr(current_thread_info()->pcr_reg);
+		current_thread_info()->kernel_cntd0 =
+			current_thread_info()->kernel_cntd1 = 0;
 		reset_pic();
 		break;
 	}
 
 	case PERFCTR_GETPCR: {
 		u64 *user_pcr = (u64 *)arg0;
-		if (!(current->thread.flags & SPARC_FLAG_PERFCTR)) {
+		if (!test_thread_flag(TIF_PERFCTR)) {
 			err = -EINVAL;
 			break;
 		}
-		err |= __put_user(current->thread.pcr_reg, user_pcr);
+		err |= __put_user(current_thread_info()->pcr_reg, user_pcr);
 		break;
 	}
 

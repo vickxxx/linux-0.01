@@ -13,7 +13,6 @@
 #include <linux/rtnetlink.h>
 #include <net/pkt_sched.h>
 #include <net/dsfield.h>
-#include <net/inet_ecn.h>
 #include <asm/byteorder.h>
 
 
@@ -78,7 +77,6 @@ static int dsmark_graft(struct Qdisc *sch,unsigned long arg,
 	*old = xchg(&p->q,new);
 	if (*old)
 		qdisc_reset(*old);
-	sch->q.qlen = 0;
 	sch_tree_unlock(sch); /* @@@ move up ? */
         return 0;
 }
@@ -195,14 +193,13 @@ static int dsmark_enqueue(struct sk_buff *skb,struct Qdisc *sch)
 
 	D2PRINTK("dsmark_enqueue(skb %p,sch %p,[qdisc %p])\n",skb,sch,p);
 	if (p->set_tc_index) {
+		/* FIXME: Safe with non-linear skbs? --RR */
 		switch (skb->protocol) {
 			case __constant_htons(ETH_P_IP):
-				skb->tc_index = ipv4_get_dsfield(skb->nh.iph)
-					& ~INET_ECN_MASK;
+				skb->tc_index = ipv4_get_dsfield(skb->nh.iph);
 				break;
 			case __constant_htons(ETH_P_IPV6):
-				skb->tc_index = ipv6_get_dsfield(skb->nh.ipv6h)
-					& ~INET_ECN_MASK;
+				skb->tc_index = ipv6_get_dsfield(skb->nh.ipv6h);
 				break;
 			default:
 				skb->tc_index = 0;
@@ -327,11 +324,12 @@ int dsmark_init(struct Qdisc *sch,struct rtattr *opt)
 	__u16 tmp;
 
 	DPRINTK("dsmark_init(sch %p,[qdisc %p],opt %p)\n",sch,p,opt);
-	if (!opt ||
-	    rtattr_parse(tb,TCA_DSMARK_MAX,RTA_DATA(opt),RTA_PAYLOAD(opt)) < 0 ||
+	if (rtattr_parse(tb,TCA_DSMARK_MAX,RTA_DATA(opt),RTA_PAYLOAD(opt)) < 0 ||
 	    !tb[TCA_DSMARK_INDICES-1] ||
 	    RTA_PAYLOAD(tb[TCA_DSMARK_INDICES-1]) < sizeof(__u16))
                 return -EINVAL;
+	memset(p,0,sizeof(*p));
+	p->filter_list = NULL;
 	p->indices = *(__u16 *) RTA_DATA(tb[TCA_DSMARK_INDICES-1]);
 	if (!p->indices)
 		return -EINVAL;
@@ -356,7 +354,6 @@ int dsmark_init(struct Qdisc *sch,struct rtattr *opt)
 	if (!(p->q = qdisc_create_dflt(sch->dev, &pfifo_qdisc_ops)))
 		p->q = &noop_qdisc;
 	DPRINTK("dsmark_init: qdisc %p\n",&p->q);
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -380,12 +377,11 @@ static void dsmark_destroy(struct Qdisc *sch)
 	while (p->filter_list) {
 		tp = p->filter_list;
 		p->filter_list = tp->next;
-		tcf_destroy(tp);
+		tp->ops->destroy(tp);
 	}
 	qdisc_destroy(p->q);
 	p->q = &noop_qdisc;
 	kfree(p->mask);
-	MOD_DEC_USE_COUNT;
 }
 
 
@@ -436,41 +432,35 @@ rtattr_failure:
 	return -1;
 }
 
-static struct Qdisc_class_ops dsmark_class_ops =
-{
-	dsmark_graft,			/* graft */
-	dsmark_leaf,			/* leaf */
-	dsmark_get,			/* get */
-	dsmark_put,			/* put */
-	dsmark_change,			/* change */
-	dsmark_delete,			/* delete */
-	dsmark_walk,			/* walk */
-
-	dsmark_find_tcf,		/* tcf_chain */
-	dsmark_bind_filter,		/* bind_tcf */
-	dsmark_put,			/* unbind_tcf */
-
-	dsmark_dump_class,		/* dump */
+static struct Qdisc_class_ops dsmark_class_ops = {
+	.graft		=	dsmark_graft,
+	.leaf		=	dsmark_leaf,
+	.get		=	dsmark_get,
+	.put		=	dsmark_put,
+	.change		=	dsmark_change,
+	.delete		=	dsmark_delete,
+	.walk		=	dsmark_walk,
+	.tcf_chain	=	dsmark_find_tcf,
+	.bind_tcf	=	dsmark_bind_filter,
+	.unbind_tcf	=	dsmark_put,
+	.dump		=	dsmark_dump_class,
 };
 
-struct Qdisc_ops dsmark_qdisc_ops =
-{
-	NULL,				/* next */
-	&dsmark_class_ops,		/* cl_ops */
-	"dsmark",
-	sizeof(struct dsmark_qdisc_data),
-
-	dsmark_enqueue,			/* enqueue */
-	dsmark_dequeue,			/* dequeue */
-	dsmark_requeue,			/* requeue */
-	dsmark_drop,			/* drop */
-
-	dsmark_init,			/* init */
-	dsmark_reset,			/* reset */
-	dsmark_destroy,			/* destroy */
-	NULL,				/* change */
-
-	dsmark_dump			/* dump */
+struct Qdisc_ops dsmark_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	&dsmark_class_ops,
+	.id		=	"dsmark",
+	.priv_size	=	sizeof(struct dsmark_qdisc_data),
+	.enqueue	=	dsmark_enqueue,
+	.dequeue	=	dsmark_dequeue,
+	.requeue	=	dsmark_requeue,
+	.drop		=	dsmark_drop,
+	.init		=	dsmark_init,
+	.reset		=	dsmark_reset,
+	.destroy	=	dsmark_destroy,
+	.change		=	NULL,
+	.dump		=	dsmark_dump,
+	.owner		=	THIS_MODULE,
 };
 
 #ifdef MODULE

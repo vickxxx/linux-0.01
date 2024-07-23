@@ -37,9 +37,9 @@
  *	Known problem: this driver wasn't tested on multiprocessor machine.
  */
 
+#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/ptrace.h>
 #include <linux/fcntl.h>
 #include <linux/ioport.h>
@@ -47,6 +47,14 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/errno.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
+#include <linux/pci.h>
+#include <linux/skbuff.h>
+#include <linux/timer.h>
+#include <linux/init.h>
+
+#include <net/arp.h>
 
 #include <asm/io.h>
 #include <asm/types.h>
@@ -54,24 +62,7 @@
 #include <asm/irq.h>
 #include <asm/uaccess.h>
 
-
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
-#include <linux/timer.h>
-#include <linux/init.h>
-
-#include <net/arp.h>
-#include <linux/pci.h>
-
-
-#ifndef MODULE
-#include <linux/string.h>
-#endif
-
-#include <linux/config.h>
 #include "sbni.h"
-
 
 /* device private data */
 
@@ -128,7 +119,7 @@ static int  sbni_ioctl( struct net_device *, struct ifreq *, int );
 static struct net_device_stats  *sbni_get_stats( struct net_device * );
 static void  set_multicast_list( struct net_device * );
 
-static void  sbni_interrupt( int, void *, struct pt_regs * );
+static irqreturn_t sbni_interrupt( int, void *, struct pt_regs * );
 static void  handle_channel( struct net_device * );
 static int   recv_frame( struct net_device * );
 static void  send_frame( struct net_device * );
@@ -203,7 +194,7 @@ static inline int __init
 sbni_isa_probe( struct net_device  *dev )
 {
 	if( dev->base_addr > 0x1ff
-	    &&  !check_region( dev->base_addr, SBNI_IO_EXTENT )
+	    &&  request_region( dev->base_addr, SBNI_IO_EXTENT, dev->name )
 	    &&  sbni_probe1( dev, dev->base_addr, dev->irq ) )
 
 		return  0;
@@ -258,7 +249,7 @@ sbni_probe( struct net_device  *dev )
 
 	for( i = 0;  netcard_portlist[ i ];  ++i ) {
 		int  ioaddr = netcard_portlist[ i ];
-		if( !check_region( ioaddr, SBNI_IO_EXTENT )
+		if( request_region( ioaddr, SBNI_IO_EXTENT, dev->name )
 		    &&  sbni_probe1( dev, ioaddr, 0 ))
 			return 0;
 	}
@@ -271,9 +262,6 @@ int __init
 sbni_pci_probe( struct net_device  *dev )
 {
 	struct pci_dev  *pdev = NULL;
-
-	if( !pci_present( ) )
-		return  -ENODEV;
 
 	while( (pdev = pci_find_class( PCI_CLASS_NETWORK_OTHER << 8, pdev ))
 	       != NULL ) {
@@ -289,7 +277,7 @@ sbni_pci_probe( struct net_device  *dev )
 		pci_irq_line = pdev->irq;
 
 		/* Avoid already found cards from previous calls */
-		if( check_region( pci_ioaddr, SBNI_IO_EXTENT ) ) {
+		if( !pci_request_region( pci_ioaddr, SBNI_IO_EXTENT, dev->name ) ) {
 			pci_read_config_word( pdev, PCI_SUBSYSTEM_ID, &subsys );
 			if( subsys != 2  ||	/* Dual adapter is present */
 			    check_region( pci_ioaddr += 4, SBNI_IO_EXTENT ) )
@@ -319,9 +307,6 @@ sbni_probe1( struct net_device  *dev,  unsigned long  ioaddr,  int  irq )
 {
 	struct net_local  *nl;
 
-	if( !request_region( ioaddr, SBNI_IO_EXTENT, dev->name ) )
-		return  0;
-
 	if( sbni_card_probe( ioaddr ) ) {
 		release_region( ioaddr, SBNI_IO_EXTENT );
 		return  0;
@@ -330,10 +315,14 @@ sbni_probe1( struct net_device  *dev,  unsigned long  ioaddr,  int  irq )
 	outb( 0, ioaddr + CSR0 );
 
 	if( irq < 2 ) {
-		autoirq_setup( 5 );
+		unsigned long irq_mask, delay;
+
+		irq_mask = probe_irq_on();
 		outb( EN_INT | TR_REQ, ioaddr + CSR0 );
 		outb( PR_RES, ioaddr + CSR1 );
-		irq = autoirq_report( 5 );
+		delay = jiffies + HZ/20;
+		while (time_before(jiffies, delay)) ;
+		irq = probe_irq_off(irq_mask);
 		outb( 0, ioaddr + CSR0 );
 
 		if( !irq ) {
@@ -477,7 +466,7 @@ sbni_start_xmit( struct sk_buff  *skb,  struct net_device  *dev )
  * this board to be "master".
  */ 
 
-static void
+static irqreturn_t
 sbni_interrupt( int  irq,  void  *dev_id,  struct pt_regs  *regs )
 {
 	struct net_device	  *dev = (struct net_device *) dev_id;
@@ -502,6 +491,7 @@ sbni_interrupt( int  irq,  void  *dev_id,  struct pt_regs  *regs )
 	if( nl->second )
 		spin_unlock( &((struct net_local *)nl->second->priv)->lock );
 	spin_unlock( &nl->lock );
+	return IRQ_HANDLED;
 }
 
 
@@ -692,7 +682,7 @@ upload_data( struct net_device  *dev,  unsigned  framelen,  unsigned  frameno,
 
 		/*
 		 * if CRC is right but framelen incorrect then transmitter
-		 * error was occured... drop entire packet
+		 * error was occurred... drop entire packet
 		 */
 		else if( (frame_ok = skip_tail( dev->base_addr, framelen, crc ))
 			 != 0 )
@@ -1509,7 +1499,6 @@ cleanup_module( void )
 	struct net_device  *dev;
 	int  num;
 
-	/* No need to check MOD_IN_USE, as sys_delete_module( ) checks. */
 	for( num = 0;  num < SBNI_MAX_NUM_CARDS;  ++num )
 		if( (dev = sbni_cards[ num ]) != NULL ) {
 			unregister_netdev( dev );

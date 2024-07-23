@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.semaphore.h 1.15 05/17/01 18:14:25 cort
- */
 #ifndef _PPC_SEMAPHORE_H
 #define _PPC_SEMAPHORE_H
 
@@ -12,7 +9,7 @@
  * -- Ani Joshi (ajoshi@unixbox.com)
  *
  * Remove spinlock-based RW semaphores; RW semaphore definitions are
- * now in rwsem.h and we use the the generic lib/rwsem.c implementation.
+ * now in rwsem.h and we use the generic lib/rwsem.c implementation.
  * Rework semaphores to use atomic_dec_if_positive.
  * -- Paul Mackerras (paulus@samba.org)
  */
@@ -32,12 +29,12 @@ struct semaphore {
 	 */
 	atomic_t count;
 	wait_queue_head_t wait;
-#if WAITQUEUE_DEBUG
+#ifdef WAITQUEUE_DEBUG
 	long __magic;
 #endif
 };
 
-#if WAITQUEUE_DEBUG
+#ifdef WAITQUEUE_DEBUG
 # define __SEM_DEBUG_INIT(name) \
 		, (long)&(name).__magic
 #else
@@ -62,7 +59,7 @@ static inline void sema_init (struct semaphore *sem, int val)
 {
 	atomic_set(&sem->count, val);
 	init_waitqueue_head(&sem->wait);
-#if WAITQUEUE_DEBUG
+#ifdef WAITQUEUE_DEBUG
 	sem->__magic = (long)&sem->__magic;
 #endif
 }
@@ -83,9 +80,10 @@ extern void __up(struct semaphore * sem);
 
 extern inline void down(struct semaphore * sem)
 {
-#if WAITQUEUE_DEBUG
+#ifdef WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
+	might_sleep();
 
 	/*
 	 * Try to get the semaphore, take the slow path if we fail.
@@ -99,9 +97,10 @@ extern inline int down_interruptible(struct semaphore * sem)
 {
 	int ret = 0;
 
-#if WAITQUEUE_DEBUG
+#ifdef WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
+	might_sleep();
 
 	if (atomic_dec_return(&sem->count) < 0)
 		ret = __down_interruptible(sem);
@@ -113,7 +112,7 @@ extern inline int down_trylock(struct semaphore * sem)
 {
 	int ret;
 
-#if WAITQUEUE_DEBUG
+#ifdef WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
 
@@ -124,7 +123,7 @@ extern inline int down_trylock(struct semaphore * sem)
 
 extern inline void up(struct semaphore * sem)
 {
-#if WAITQUEUE_DEBUG
+#ifdef WAITQUEUE_DEBUG
 	CHECK_MAGIC(sem->__magic);
 #endif
 

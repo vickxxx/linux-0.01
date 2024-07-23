@@ -12,34 +12,6 @@
 
 #include <asm/uaccess.h>
 
-/*
- * change timeval to jiffies, trying to avoid the 
- * most obvious overflows..
- *
- * The tv_*sec values are signed, but nothing seems to 
- * indicate whether we really should use them as signed values
- * when doing itimers. POSIX doesn't mention this (but if
- * alarm() uses itimers without checking, we have to use unsigned
- * arithmetic).
- */
-static unsigned long tvtojiffies(struct timeval *value)
-{
-	unsigned long sec = (unsigned) value->tv_sec;
-	unsigned long usec = (unsigned) value->tv_usec;
-
-	if (sec > (ULONG_MAX / HZ))
-		return ULONG_MAX;
-	usec += 1000000 / HZ - 1;
-	usec /= 1000000 / HZ;
-	return HZ*sec+usec;
-}
-
-static void jiffiestotv(unsigned long jiffies, struct timeval *value)
-{
-	value->tv_usec = (jiffies % HZ) * (1000000 / HZ);
-	value->tv_sec = jiffies / HZ;
-}
-
 int do_getitimer(int which, struct itimerval *value)
 {
 	register unsigned long val, interval;
@@ -70,13 +42,13 @@ int do_getitimer(int which, struct itimerval *value)
 	default:
 		return(-EINVAL);
 	}
-	jiffiestotv(val, &value->it_value);
-	jiffiestotv(interval, &value->it_interval);
+	jiffies_to_timeval(val, &value->it_value);
+	jiffies_to_timeval(interval, &value->it_interval);
 	return 0;
 }
 
 /* SMP: Only we modify our itimer values. */
-asmlinkage long sys_getitimer(int which, struct itimerval *value)
+asmlinkage long sys_getitimer(int which, struct itimerval __user *value)
 {
 	int error = -EFAULT;
 	struct itimerval get_buffer;
@@ -95,7 +67,7 @@ void it_real_fn(unsigned long __data)
 	struct task_struct * p = (struct task_struct *) __data;
 	unsigned long interval;
 
-	send_sig(SIGALRM, p, 1);
+	send_group_sig_info(SIGALRM, SEND_SIG_PRIV, p);
 	interval = p->it_real_incr;
 	if (interval) {
 		if (interval > (unsigned long) LONG_MAX)
@@ -110,8 +82,8 @@ int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 	register unsigned long i, j;
 	int k;
 
-	i = tvtojiffies(&value->it_interval);
-	j = tvtojiffies(&value->it_value);
+	i = timeval_to_jiffies(&value->it_interval);
+	j = timeval_to_jiffies(&value->it_value);
 	if (ovalue && (k = do_getitimer(which, ovalue)) < 0)
 		return k;
 	switch (which) {
@@ -148,8 +120,9 @@ int do_setitimer(int which, struct itimerval *value, struct itimerval *ovalue)
 /* SMP: Again, only we play with our itimers, and signals are SMP safe
  *      now so that is not an issue at all anymore.
  */
-asmlinkage long sys_setitimer(int which, struct itimerval *value,
-			      struct itimerval *ovalue)
+asmlinkage long sys_setitimer(int which,
+			      struct itimerval __user *value,
+			      struct itimerval __user *ovalue)
 {
 	struct itimerval set_buffer, get_buffer;
 	int error;

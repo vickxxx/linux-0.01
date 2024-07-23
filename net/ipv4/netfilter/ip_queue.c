@@ -23,9 +23,9 @@
 #include <linux/netfilter_ipv4/ip_tables.h>
 #include <linux/netlink.h>
 #include <linux/spinlock.h>
-#include <linux/brlock.h>
 #include <linux/sysctl.h>
 #include <linux/proc_fs.h>
+#include <linux/security.h>
 #include <net/sock.h>
 #include <net/route.h>
 
@@ -62,9 +62,7 @@ static DECLARE_MUTEX(ipqnl_sem);
 static void
 ipq_issue_verdict(struct ipq_queue_entry *entry, int verdict)
 {
-	local_bh_disable();
 	nf_reinject(entry->skb, entry->info, verdict);
-	local_bh_enable();
 	kfree(entry);
 }
 
@@ -502,7 +500,7 @@ ipq_rcv_skb(struct sk_buff *skb)
 	if (type <= IPQM_BASE)
 		return;
 		
-	if(!cap_raised(NETLINK_CB(skb).eff_cap, CAP_NET_ADMIN))
+	if (security_netlink_recv(skb))
 		RCV_SKB_FAIL(-EPERM);
 	
 	write_lock_bh(&queue_lock);
@@ -519,7 +517,7 @@ ipq_rcv_skb(struct sk_buff *skb)
 	write_unlock_bh(&queue_lock);
 	
 	status = ipq_receive_peer(NLMSG_DATA(nlh), type,
-	                          nlmsglen - NLMSG_LENGTH(0));
+	                          skblen - NLMSG_LENGTH(0));
 	if (status < 0)
 		RCV_SKB_FAIL(status);
 		
@@ -537,14 +535,14 @@ ipq_rcv_sk(struct sock *sk, int len)
 		if (down_trylock(&ipqnl_sem))
 			return;
 			
-		while ((skb = skb_dequeue(&sk->receive_queue)) != NULL) {
+		while ((skb = skb_dequeue(&sk->sk_receive_queue)) != NULL) {
 			ipq_rcv_skb(skb);
 			kfree_skb(skb);
 		}
 		
 		up(&ipqnl_sem);
 
-	} while (ipqnl && ipqnl->receive_queue.qlen);
+	} while (ipqnl && ipqnl->sk_receive_queue.qlen);
 }
 
 static int
@@ -560,9 +558,7 @@ ipq_rcv_dev_event(struct notifier_block *this,
 }
 
 static struct notifier_block ipq_dev_notifier = {
-	ipq_rcv_dev_event,
-	NULL,
-	0
+	.notifier_call	= ipq_rcv_dev_event,
 };
 
 static int
@@ -582,27 +578,42 @@ ipq_rcv_nl_event(struct notifier_block *this,
 }
 
 static struct notifier_block ipq_nl_notifier = {
-	ipq_rcv_nl_event,
-	NULL,
-	0
+	.notifier_call	= ipq_rcv_nl_event,
 };
 
+static int sysctl_maxlen = IPQ_QMAX_DEFAULT;
 static struct ctl_table_header *ipq_sysctl_header;
 
 static ctl_table ipq_table[] = {
-	{ NET_IPQ_QMAX, NET_IPQ_QMAX_NAME, &queue_maxlen,
-	  sizeof(queue_maxlen), 0644,  NULL, proc_dointvec },
- 	{ 0 }
+	{
+		.ctl_name	= NET_IPQ_QMAX,
+		.procname	= NET_IPQ_QMAX_NAME,
+		.data		= &sysctl_maxlen,
+		.maxlen		= sizeof(sysctl_maxlen),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec
+	},
+ 	{ .ctl_name = 0 }
 };
 
 static ctl_table ipq_dir_table[] = {
-	{NET_IPV4, "ipv4", NULL, 0, 0555, ipq_table, 0, 0, 0, 0, 0},
-	{ 0 }
+	{
+		.ctl_name	= NET_IPV4,
+		.procname	= "ipv4",
+		.mode		= 0555,
+		.child		= ipq_table
+	},
+	{ .ctl_name = 0 }
 };
 
 static ctl_table ipq_root_table[] = {
-	{CTL_NET, "net", NULL, 0, 0555, ipq_dir_table, 0, 0, 0, 0, 0},
-	{ 0 }
+	{
+		.ctl_name	= CTL_NET,
+		.procname	= "net",
+		.mode		= 0555,
+		.child		= ipq_dir_table
+	},
+	{ .ctl_name = 0 }
 };
 
 static int
@@ -671,8 +682,7 @@ init_or_cleanup(int init)
 
 cleanup:
 	nf_unregister_queue_handler(PF_INET);
-	br_write_lock_bh(BR_NETPROTO_LOCK);
-	br_write_unlock_bh(BR_NETPROTO_LOCK);
+	synchronize_net();
 	ipq_flush(NF_DROP);
 	
 cleanup_sysctl:
@@ -681,7 +691,7 @@ cleanup_sysctl:
 	proc_net_remove(IPQ_PROC_FS_NAME);
 	
 cleanup_ipqnl:
-	sock_release(ipqnl->socket);
+	sock_release(ipqnl->sk_socket);
 	down(&ipqnl_sem);
 	up(&ipqnl_sem);
 	

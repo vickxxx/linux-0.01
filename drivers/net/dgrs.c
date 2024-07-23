@@ -85,7 +85,6 @@
 
 #include <linux/module.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/delay.h>
 #include <linux/errno.h>
@@ -275,7 +274,7 @@ check_board_dma(struct net_device *dev0)
 	ulong	x;
 
 	/*
-	 *	If Space.c says not to use DMA, or if its not a PLX based
+	 *	If Space.c says not to use DMA, or if it's not a PLX based
 	 *	PCI board, or if the expansion ROM space is not PCI
 	 *	configured, then return false.
 	 */
@@ -332,10 +331,10 @@ check_board_dma(struct net_device *dev0)
  *	Initiate DMA using PLX part on PCI board.  Spin the
  *	processor until completed.  All addresses are physical!
  *
- *	If pciaddr is NULL, then its a chaining DMA, and lcladdr is
+ *	If pciaddr is NULL, then it's a chaining DMA, and lcladdr is
  *	the address of the first DMA descriptor in the chain.
  *
- *	If pciaddr is not NULL, then its a single DMA.
+ *	If pciaddr is not NULL, then it's a single DMA.
  *
  *	In either case, "lcladdr" must have been fixed up to make
  *	sure the MSB isn't set using the S2DMA macro before passing
@@ -512,7 +511,7 @@ again:
 	if (priv0->use_dma && priv0->dmadesc_h && len > 64)
 	{
 		/*
-		 *	If we can use DMA and its a long frame, copy it using
+		 *	If we can use DMA and it's a long frame, copy it using
 		 *	DMA chaining.
 		 */
 		DMACHAIN	*ddp_h;	/* Host virtual DMA desc. pointer */
@@ -584,7 +583,7 @@ again:
 	else if (priv0->use_dma)
 	{
 		/*
-		 *	If we can use DMA and its a shorter frame, copy it
+		 *	If we can use DMA and it's a shorter frame, copy it
 		 *	using single DMA transfers.
 		 */
 		uchar		*phys_p;
@@ -889,7 +888,7 @@ static int dgrs_ioctl(struct net_device *devN, struct ifreq *ifr, int cmd)
  *	dev, priv will always refer to the 0th device in Multi-NIC mode.
  */
 
-static void dgrs_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t dgrs_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device	*dev0 = (struct net_device *) dev_id;
 	DGRS_PRIV	*priv0 = (DGRS_PRIV *) dev0->priv;
@@ -972,6 +971,8 @@ static void dgrs_intr(int irq, void *dev_id, struct pt_regs *regs)
 ack_intr:
 	if (priv0->plxreg)
 		OUTL(dev0->base_addr + PLX_LCL2PCI_DOORBELL, 1);
+
+	return IRQ_HANDLED;
 }
 
 /*
@@ -982,7 +983,7 @@ dgrs_download(struct net_device *dev0)
 {
 	DGRS_PRIV	*priv0 = (DGRS_PRIV *) dev0->priv;
 	int		is;
-	int		i;
+	unsigned long	i;
 
 	static int	iv2is[16] = {
 				0, 0, 0, ES4H_IS_INT3,
@@ -1141,7 +1142,7 @@ int __init
 dgrs_probe1(struct net_device *dev)
 {
 	DGRS_PRIV	*priv = (DGRS_PRIV *) dev->priv;
-	int		i;
+	unsigned long	i;
 	int		rc;
 
 	printk("%s: Digi RightSwitch io=%lx mem=%lx irq=%d plx=%lx dma=%lx\n",
@@ -1153,9 +1154,7 @@ dgrs_probe1(struct net_device *dev)
 	 */
 	rc = dgrs_download(dev);
 	if (rc)
-	{
-		return rc;
-	}
+		goto err_out;
 
 	/*
 	 * Get ether address of board
@@ -1169,7 +1168,8 @@ dgrs_probe1(struct net_device *dev)
 	if (dev->dev_addr[0] & 1)
 	{
 		printk("%s: Illegal Ethernet Address\n", dev->name);
-		return (-ENXIO);
+		rc = -ENXIO;
+		goto err_out;
 	}
 
 	/*
@@ -1178,9 +1178,10 @@ dgrs_probe1(struct net_device *dev)
 	 */
 	if (priv->plxreg)
 		OUTL(dev->base_addr + PLX_LCL2PCI_DOORBELL, 1);
+	
 	rc = request_irq(dev->irq, &dgrs_intr, SA_SHIRQ, "RightSwitch", dev);
 	if (rc)
-		return (rc);
+		goto err_out;
 
 	priv->intrcnt = 0;
 	for (i = jiffies + 2*HZ + HZ/2; time_after(i, jiffies); )
@@ -1191,16 +1192,22 @@ dgrs_probe1(struct net_device *dev)
 	}
 	if (priv->intrcnt < 2)
 	{
-		printk("%s: Not interrupting on IRQ %d (%d)\n",
+		printk(KERN_ERR "%s: Not interrupting on IRQ %d (%d)\n",
 				dev->name, dev->irq, priv->intrcnt);
-		return (-ENXIO);
+		rc = -ENXIO;
+		goto err_free_irq;
 	}
 
 	/*
 	 *	Register the /proc/ioports information...
 	 */
-	request_region(dev->base_addr, 256, "RightSwitch");
-
+	if (!request_region(dev->base_addr, 256, "RightSwitch")) {
+		printk(KERN_ERR "%s: io 0x%3lX, which is busy.\n", dev->name,
+				dev->base_addr);
+		rc = -EBUSY;
+		goto err_free_irq;
+	}
+	
 	/*
 	 *	Entry points...
 	 */
@@ -1211,7 +1218,12 @@ dgrs_probe1(struct net_device *dev)
 	dev->set_multicast_list = &dgrs_set_multicast_list;
 	dev->do_ioctl = &dgrs_ioctl;
 
-	return (0);
+	return rc;
+
+err_free_irq:
+	free_irq(dev->irq, dev);
+err_out:
+       	return rc;
 }
 
 int __init 
@@ -1268,8 +1280,10 @@ dgrs_found_device(
 	dev->init = dgrs_probe1;
 	SET_MODULE_OWNER(dev);
 	ether_setup(dev);
-	if (register_netdev(dev) != 0)
+	if (register_netdev(dev) != 0) {
+		kfree(dev);
 		return -EIO;
+	}
 
 	priv->next_dev = dgrs_root_dev;
 	dgrs_root_dev = dev;
@@ -1342,55 +1356,51 @@ static int __init  dgrs_scan(void)
 	uint	irq;
 	uint	plxreg;
 	uint	plxdma;
+	struct pci_dev *pdev = NULL;
 
 	/*
 	 *	First, check for PCI boards
 	 */
-	if (pci_present())
+	while ((pdev = pci_find_device(SE6_PCI_VENDOR_ID, SE6_PCI_DEVICE_ID, pdev)) != NULL)
 	{
-		struct pci_dev *pdev = NULL;
+		/*
+		 * Get and check the bus-master and latency values.
+		 * Some PCI BIOSes fail to set the master-enable bit,
+		 * and the latency timer must be set to the maximum
+		 * value to avoid data corruption that occurs when the
+		 * timer expires during a transfer.  Yes, it's a bug.
+		 */
+		if (pci_enable_device(pdev))
+			continue;
+		pci_set_master(pdev);
 
-		while ((pdev = pci_find_device(SE6_PCI_VENDOR_ID, SE6_PCI_DEVICE_ID, pdev)) != NULL)
-		{
-			/*
-			 * Get and check the bus-master and latency values.
-			 * Some PCI BIOSes fail to set the master-enable bit,
-			 * and the latency timer must be set to the maximum
-			 * value to avoid data corruption that occurs when the
-			 * timer expires during a transfer.  Yes, it's a bug.
-			 */
-			if (pci_enable_device(pdev))
-				continue;
-			pci_set_master(pdev);
+		plxreg = pci_resource_start (pdev, 0);
+		io = pci_resource_start (pdev, 1);
+		mem = pci_resource_start (pdev, 2);
+		pci_read_config_dword(pdev, 0x30, &plxdma);
+		irq = pdev->irq;
+		plxdma &= ~15;
 
-			plxreg = pci_resource_start (pdev, 0);
-			io = pci_resource_start (pdev, 1);
-			mem = pci_resource_start (pdev, 2);
-			pci_read_config_dword(pdev, 0x30, &plxdma);
-			irq = pdev->irq;
-			plxdma &= ~15;
+		/*
+		 * On some BIOSES, the PLX "expansion rom" (used for DMA)
+		 * address comes up as "0".  This is probably because
+		 * the BIOS doesn't see a valid 55 AA ROM signature at
+		 * the "ROM" start and zeroes the address.  To get
+		 * around this problem the SE-6 is configured to ask
+		 * for 4 MB of space for the dual port memory.  We then
+		 * must set its range back to 2 MB, and use the upper
+		 * half for DMA register access
+		 */
+		OUTL(io + PLX_SPACE0_RANGE, 0xFFE00000L);
+		if (plxdma == 0)
+			plxdma = mem + (2048L * 1024L);
+		pci_write_config_dword(pdev, 0x30, plxdma + 1);
+		pci_read_config_dword(pdev, 0x30, &plxdma);
+		plxdma &= ~15;
 
-			/*
-			 * On some BIOSES, the PLX "expansion rom" (used for DMA)
-			 * address comes up as "0".  This is probably because
-			 * the BIOS doesn't see a valid 55 AA ROM signature at
-			 * the "ROM" start and zeroes the address.  To get
-			 * around this problem the SE-6 is configured to ask
-			 * for 4 MB of space for the dual port memory.  We then
-			 * must set its range back to 2 MB, and use the upper
-			 * half for DMA register access
-			 */
-			OUTL(io + PLX_SPACE0_RANGE, 0xFFE00000L);
-			if (plxdma == 0)
-				plxdma = mem + (2048L * 1024L);
-			pci_write_config_dword(pdev, 0x30, plxdma + 1);
-			pci_read_config_dword(pdev, 0x30, &plxdma);
-			plxdma &= ~15;
+		dgrs_found_device(io, mem, irq, plxreg, plxdma);
 
-			dgrs_found_device(io, mem, irq, plxreg, plxdma);
-
-			cards_found++;
-		}
+		cards_found++;
 	}
 
 	/*

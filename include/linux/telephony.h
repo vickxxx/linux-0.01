@@ -68,7 +68,7 @@
 * device installed in your system.  The PHONECTL_CAPABILITIES ioctl
 * returns an integer value indicating the number of capabilities the   
 * device has.  The PHONECTL_CAPABILITIES_LIST will fill an array of 
-* capability structs with all of it's capabilities.  The
+* capability structs with all of its capabilities.  The
 * PHONECTL_CAPABILITIES_CHECK takes a single capability struct and returns
 * a TRUE if the device has that capability, otherwise it returns false.
 * 
@@ -228,8 +228,8 @@ struct phone_codec_data
 * indicate the current state of the hookswitch.  The pstn_ring bit
 * indicates that the DAA on a LineJACK card has detected ring voltage on
 * the PSTN port.  The caller_id bit indicates that caller_id data has been
-* recieved and is available.  The pstn_wink bit indicates that the DAA on
-* the LineJACK has recieved a wink from the telco switch.  The f0, f1, f2
+* received and is available.  The pstn_wink bit indicates that the DAA on
+* the LineJACK has received a wink from the telco switch.  The f0, f1, f2
 * and f3 bits indicate that the filter has been triggered by detecting the
 * frequency programmed into that filter.
 *

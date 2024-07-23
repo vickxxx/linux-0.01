@@ -32,7 +32,6 @@
 #include "scsi.h"
 #include "hosts.h"
 #include "NCR53C9x.h"
-#include "oktagon_esp.h"
 
 #include <linux/zorro.h>
 #include <asm/irq.h>
@@ -40,11 +39,18 @@
 #include <asm/amigahw.h>
 
 #ifdef USE_BOTTOM_HALF
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/interrupt.h>
 #endif
 
 #include <linux/unistd.h>
+
+/* The controller registers can be found in the Z2 config area at these
+ * offsets:
+ */
+#define OKTAGON_ESP_ADDR 0x03000
+#define OKTAGON_DMA_ADDR 0x01000
+
 
 static int  dma_bytes_sent(struct NCR_ESP *esp, int fifo_count);
 static int  dma_can_transfer(struct NCR_ESP *esp, Scsi_Cmnd *sp);
@@ -77,7 +83,7 @@ static void dma_commit(void *opaque);
 long oktag_to_io(long *paddr, long *addr, long len);
 long oktag_from_io(long *addr, long *paddr, long len);
 
-static struct tq_struct tq_fake_dma = { NULL, 0, dma_commit, NULL };
+static DECLARE_WORK(tq_fake_dma, dma_commit, NULL);
 
 #define DMA_MAXTRANSFER 0x8000
 
@@ -198,7 +204,7 @@ int oktagon_esp_detect(Scsi_Host_Template *tpnt)
 
 		esp->irq = IRQ_AMIGA_PORTS;
 		request_irq(IRQ_AMIGA_PORTS, esp_intr, SA_SHIRQ,
-			    "BSC Oktagon SCSI", esp_intr);
+			    "BSC Oktagon SCSI", esp->ehost);
 
 		/* Figure out our scsi ID on the bus */
 		esp->scsi_id = 7;
@@ -239,7 +245,7 @@ oktagon_notify_reboot(struct notifier_block *this, unsigned long code, void *x)
   if((code == SYS_DOWN || code == SYS_HALT) && (esp = current_esp))
    {
     esp_bootup_reset(esp,esp->eregs);
-    udelay(500); /* Settle time. Maybe unneccessary. */
+    udelay(500); /* Settle time. Maybe unnecessary. */
    }
   return NOTIFY_DONE;
 }
@@ -513,9 +519,7 @@ static void dma_irq_exit(struct NCR_ESP *esp)
 #ifdef USE_BOTTOM_HALF
 	if(dma_on)
 	 {
-	  tq_fake_dma.sync = 0;
-	  queue_task(&tq_fake_dma,&tq_immediate);
-	  mark_bh(IMMEDIATE_BH);
+	  schedule_work(&tq_fake_dma);
 	 }
 #else
 	while(len && !dma_irq_p(esp))
@@ -552,8 +556,8 @@ void dma_mmu_get_scsi_one(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 
 void dma_mmu_get_scsi_sgl(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 {
-        sp->SCp.ptr = 
-                sp->SCp.buffer->address;
+        sp->SCp.ptr = page_address(sp->SCp.buffer->page)+
+		      sp->SCp.buffer->offset;
 }
 
 void dma_mmu_release_scsi_one(struct NCR_ESP *esp, Scsi_Cmnd *sp)
@@ -566,17 +570,12 @@ void dma_mmu_release_scsi_sgl(struct NCR_ESP *esp, Scsi_Cmnd *sp)
 
 void dma_advance_sg(Scsi_Cmnd *sp)
 {
-  sp->SCp.ptr = sp->SCp.buffer->address;
+	sp->SCp.ptr = page_address(sp->SCp.buffer->page)+
+		      sp->SCp.buffer->offset;
 }
 
 
 #define HOSTS_C
-
-#include "oktagon_esp.h"
-
-static Scsi_Host_Template driver_template = SCSI_OKTAGON_ESP;
-
-#include "scsi_module.c"
 
 int oktagon_esp_release(struct Scsi_Host *instance)
 {
@@ -589,3 +588,25 @@ int oktagon_esp_release(struct Scsi_Host *instance)
 #endif
 	return 1;
 }
+
+
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "esp-oktagon",
+	.proc_info		= &esp_proc_info,
+	.name			= "BSC Oktagon SCSI",
+	.detect			= oktagon_esp_detect,
+	.release		= oktagon_esp_release,
+	.queuecommand		= esp_queue,
+	.eh_abort_handler	= esp_abort,
+	.eh_bus_reset_handler	= esp_reset,
+	.can_queue		= 7,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= 1,
+	.use_clustering		= ENABLE_CLUSTERING
+};
+
+
+#include "scsi_module.c"
+
+MODULE_LICENSE("GPL");

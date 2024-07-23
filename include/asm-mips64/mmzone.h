@@ -24,12 +24,9 @@ extern plat_pg_data_t *plat_node_data[];
 
 #define PHYSADDR_TO_NID(pa)		NASID_TO_COMPACT_NODEID(NASID_GET(pa))
 #define PLAT_NODE_DATA(n)		(plat_node_data[n])
-#define PLAT_NODE_DATA_STARTNR(n)    (PLAT_NODE_DATA(n)->gendata.node_start_mapnr)
-#define PLAT_NODE_DATA_SIZE(n)	     (PLAT_NODE_DATA(n)->gendata.node_size)
+#define PLAT_NODE_DATA_SIZE(n)	     (PLAT_NODE_DATA(n)->gendata.node_spanned_pages)
 #define PLAT_NODE_DATA_LOCALNR(p, n) \
-		(((p) - PLAT_NODE_DATA(n)->gendata.node_start_paddr) >> PAGE_SHIFT)
-
-#define numa_node_id()	cputocnode(current->processor)
+		(((p) >> PAGE_SHIFT) - PLAT_NODE_DATA(n)->gendata.node_start_pfn)
 
 #ifdef CONFIG_DISCONTIGMEM
 
@@ -76,14 +73,22 @@ extern plat_pg_data_t *plat_node_data[];
 #define MIPS64_NR(kaddr) (((unsigned long)(kaddr) > (unsigned long)high_memory)\
 		? (max_mapnr + 1) : (LOCAL_MAP_NR((kaddr)) + \
 		(((unsigned long)ADDR_TO_MAPBASE((kaddr)) - PAGE_OFFSET) / \
-		sizeof(mem_map_t))))
+		sizeof(struct page))))
 
 #define kern_addr_valid(addr)	((KVADDR_TO_NID((unsigned long)addr) > \
 	-1) ? 0 : (test_bit(LOCAL_MAP_NR((addr)), \
 	NODE_DATA(KVADDR_TO_NID((unsigned long)addr))->valid_addr_bitmap)))
 
-#define virt_to_page(kaddr)	(mem_map + MIPS64_NR(kaddr))
-#define VALID_PAGE(page)	((page - mem_map) < max_mapnr)
+#define pfn_to_page(pfn)	(mem_map + (pfn))
+#define page_to_pfn(page) \
+	((((page)-(page)->zone->zone_mem_map) + (page)->zone->zone_start_pfn) \
+	 << PAGE_SHIFT)
+#define virt_to_page(kaddr)	pfn_to_page(MIPS64_NR(kaddr))
+
+#define pfn_valid(pfn)		((pfn) < max_mapnr)
+#define virt_addr_valid(kaddr)	pfn_valid(__pa(kaddr) >> PAGE_SHIFT)
+#define pte_pfn(x)		((unsigned long)((x).pte >> PAGE_SHIFT))
+#define pfn_pte(pfn, prot)	__pte(((pfn) << PAGE_SHIFT) | pgprot_val(prot))
 
 #endif /* CONFIG_DISCONTIGMEM */
 

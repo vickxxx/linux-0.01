@@ -17,16 +17,15 @@
 */
 
 /*
- * $Id: bnep2.h,v 1.9 2002/07/14 07:09:19 maxk Exp $
+ * $Id: bnep.h,v 1.5 2002/08/04 21:23:58 maxk Exp $
  */
 
 #ifndef _BNEP_H
 #define _BNEP_H
 
 #include <linux/types.h>
-#include <net/bluetooth/bluetooth.h>
-
 #include <linux/crc32.h>
+#include <net/bluetooth/bluetooth.h>
 
 // Limits
 #define BNEP_MAX_PROTO_FILTERS     5

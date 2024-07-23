@@ -13,9 +13,11 @@
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/adfs_fs.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/stat.h>
 #include <linux/spinlock.h>
+#include <linux/buffer_head.h>
+#include <linux/string.h>
 
 #include "adfs.h"
 #include "dir_f.h"
@@ -193,7 +195,7 @@ adfs_dir_read(struct super_block *sb, unsigned long object_id,
 			goto release_buffers;
 		}
 
-		dir->bh[blk] = bread(sb->s_dev, phys, sb->s_blocksize);
+		dir->bh[blk] = sb_bread(sb, phys);
 		if (!dir->bh[blk])
 			goto release_buffers;
 	}
@@ -257,7 +259,7 @@ adfs_obj2dir(struct adfs_direntry *de, struct object_info *obj)
 
 /*
  * get a directory entry.  Note that the caller is responsible
- * for holding the relevent locks.
+ * for holding the relevant locks.
  */
 int
 __adfs_dir_get(struct adfs_dir *dir, int pos, struct object_info *obj)
@@ -468,11 +470,9 @@ adfs_f_free(struct adfs_dir *dir)
 }
 
 struct adfs_dir_ops adfs_f_dir_ops = {
-	adfs_f_read,
-	adfs_f_setpos,
-	adfs_f_getnext,
-	adfs_f_update,
-	NULL,
-	NULL,
-	adfs_f_free
+	.read		= adfs_f_read,
+	.setpos		= adfs_f_setpos,
+	.getnext	= adfs_f_getnext,
+	.update		= adfs_f_update,
+	.free		= adfs_f_free
 };

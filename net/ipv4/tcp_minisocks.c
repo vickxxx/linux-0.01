@@ -5,7 +5,7 @@
  *
  *		Implementation of the Transmission Control Protocol(TCP).
  *
- * Version:	$Id: tcp_minisocks.c,v 1.14.2.1 2002/03/05 04:30:08 davem Exp $
+ * Version:	$Id: tcp_minisocks.c,v 1.15 2002/02/01 22:01:04 davem Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -23,8 +23,10 @@
 #include <linux/config.h>
 #include <linux/mm.h>
 #include <linux/sysctl.h>
+#include <linux/workqueue.h>
 #include <net/tcp.h>
 #include <net/inet_common.h>
+#include <net/xfrm.h>
 
 #ifdef CONFIG_SYSCTL
 #define SYNC_INIT 0 /* let the user enable it */
@@ -32,11 +34,11 @@
 #define SYNC_INIT 1
 #endif
 
-int sysctl_tcp_tw_recycle = 0;
+int sysctl_tcp_tw_recycle;
 int sysctl_tcp_max_tw_buckets = NR_FILE*2;
 
 int sysctl_tcp_syncookies = SYNC_INIT; 
-int sysctl_tcp_abort_on_overflow = 0;
+int sysctl_tcp_abort_on_overflow;
 
 static __inline__ int tcp_in_window(u32 seq, u32 end_seq, u32 s_win, u32 e_win)
 {
@@ -49,48 +51,40 @@ static __inline__ int tcp_in_window(u32 seq, u32 end_seq, u32 s_win, u32 e_win)
 
 /* New-style handling of TIME_WAIT sockets. */
 
-int tcp_tw_count = 0;
+int tcp_tw_count;
 
 
 /* Must be called with locally disabled BHs. */
-void tcp_timewait_kill(struct tcp_tw_bucket *tw)
+static void tcp_timewait_kill(struct tcp_tw_bucket *tw)
 {
 	struct tcp_ehash_bucket *ehead;
 	struct tcp_bind_hashbucket *bhead;
 	struct tcp_bind_bucket *tb;
 
 	/* Unlink from established hashes. */
-	ehead = &tcp_ehash[tw->hashent];
+	ehead = &tcp_ehash[tw->tw_hashent];
 	write_lock(&ehead->lock);
-	if (!tw->pprev) {
+	if (hlist_unhashed(&tw->tw_node)) {
 		write_unlock(&ehead->lock);
 		return;
 	}
-	if(tw->next)
-		tw->next->pprev = tw->pprev;
-	*(tw->pprev) = tw->next;
-	tw->pprev = NULL;
+	__hlist_del(&tw->tw_node);
+	sk_node_init(&tw->tw_node);
 	write_unlock(&ehead->lock);
 
 	/* Disassociate with bind bucket. */
-	bhead = &tcp_bhash[tcp_bhashfn(tw->num)];
+	bhead = &tcp_bhash[tcp_bhashfn(tw->tw_num)];
 	spin_lock(&bhead->lock);
-	tb = tw->tb;
-	if(tw->bind_next)
-		tw->bind_next->bind_pprev = tw->bind_pprev;
-	*(tw->bind_pprev) = tw->bind_next;
-	tw->tb = NULL;
-	if (tb->owners == NULL) {
-		if (tb->next)
-			tb->next->pprev = tb->pprev;
-		*(tb->pprev) = tb->next;
-		kmem_cache_free(tcp_bucket_cachep, tb);
-	}
+	tb = tw->tw_tb;
+	__hlist_del(&tw->tw_bind_node);
+	tw->tw_tb = NULL;
+	tcp_bucket_destroy(tb);
 	spin_unlock(&bhead->lock);
 
 #ifdef INET_REFCNT_DEBUG
-	if (atomic_read(&tw->refcnt) != 1) {
-		printk(KERN_DEBUG "tw_bucket %p refcnt=%d\n", tw, atomic_read(&tw->refcnt));
+	if (atomic_read(&tw->tw_refcnt) != 1) {
+		printk(KERN_DEBUG "tw_bucket %p refcnt=%d\n", tw,
+		       atomic_read(&tw->tw_refcnt));
 	}
 #endif
 	tcp_tw_put(tw);
@@ -132,33 +126,34 @@ tcp_timewait_state_process(struct tcp_tw_bucket *tw, struct sk_buff *skb,
 	int paws_reject = 0;
 
 	tp.saw_tstamp = 0;
-	if (th->doff > (sizeof(struct tcphdr)>>2) && tw->ts_recent_stamp) {
+	if (th->doff > (sizeof(struct tcphdr) >> 2) && tw->tw_ts_recent_stamp) {
 		tcp_parse_options(skb, &tp, 0);
 
 		if (tp.saw_tstamp) {
-			tp.ts_recent = tw->ts_recent;
-			tp.ts_recent_stamp = tw->ts_recent_stamp;
+			tp.ts_recent	   = tw->tw_ts_recent;
+			tp.ts_recent_stamp = tw->tw_ts_recent_stamp;
 			paws_reject = tcp_paws_check(&tp, th->rst);
 		}
 	}
 
-	if (tw->substate == TCP_FIN_WAIT2) {
+	if (tw->tw_substate == TCP_FIN_WAIT2) {
 		/* Just repeat all the checks of tcp_rcv_state_process() */
 
 		/* Out of window, send ACK */
 		if (paws_reject ||
 		    !tcp_in_window(TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq,
-				   tw->rcv_nxt, tw->rcv_nxt + tw->rcv_wnd))
+				   tw->tw_rcv_nxt,
+				   tw->tw_rcv_nxt + tw->tw_rcv_wnd))
 			return TCP_TW_ACK;
 
 		if (th->rst)
 			goto kill;
 
-		if (th->syn && !before(TCP_SKB_CB(skb)->seq, tw->rcv_nxt))
+		if (th->syn && !before(TCP_SKB_CB(skb)->seq, tw->tw_rcv_nxt))
 			goto kill_with_rst;
 
 		/* Dup ACK? */
-		if (!after(TCP_SKB_CB(skb)->end_seq, tw->rcv_nxt) ||
+		if (!after(TCP_SKB_CB(skb)->end_seq, tw->tw_rcv_nxt) ||
 		    TCP_SKB_CB(skb)->end_seq == TCP_SKB_CB(skb)->seq) {
 			tcp_tw_put(tw);
 			return TCP_TW_SUCCESS;
@@ -167,20 +162,20 @@ tcp_timewait_state_process(struct tcp_tw_bucket *tw, struct sk_buff *skb,
 		/* New data or FIN. If new data arrive after half-duplex close,
 		 * reset.
 		 */
-		if (!th->fin || TCP_SKB_CB(skb)->end_seq != tw->rcv_nxt+1) {
+		if (!th->fin ||
+		    TCP_SKB_CB(skb)->end_seq != tw->tw_rcv_nxt + 1) {
 kill_with_rst:
 			tcp_tw_deschedule(tw);
-			tcp_timewait_kill(tw);
 			tcp_tw_put(tw);
 			return TCP_TW_RST;
 		}
 
 		/* FIN arrived, enter true time-wait state. */
-		tw->substate = TCP_TIME_WAIT;
-		tw->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
+		tw->tw_substate	= TCP_TIME_WAIT;
+		tw->tw_rcv_nxt	= TCP_SKB_CB(skb)->end_seq;
 		if (tp.saw_tstamp) {
-			tw->ts_recent_stamp = xtime.tv_sec;
-			tw->ts_recent = tp.rcv_tsval;
+			tw->tw_ts_recent_stamp	= xtime.tv_sec;
+			tw->tw_ts_recent	= tp.rcv_tsval;
 		}
 
 		/* I am shamed, but failed to make it more elegant.
@@ -188,10 +183,10 @@ kill_with_rst:
 		 * to generalize to IPv6. Taking into account that IPv6
 		 * do not undertsnad recycling in any case, it not
 		 * a big problem in practice. --ANK */
-		if (tw->family == AF_INET &&
-		    sysctl_tcp_tw_recycle && tw->ts_recent_stamp &&
+		if (tw->tw_family == AF_INET &&
+		    sysctl_tcp_tw_recycle && tw->tw_ts_recent_stamp &&
 		    tcp_v4_tw_remember_stamp(tw))
-			tcp_tw_schedule(tw, tw->timeout);
+			tcp_tw_schedule(tw, tw->tw_timeout);
 		else
 			tcp_tw_schedule(tw, TCP_TIMEWAIT_LEN);
 		return TCP_TW_ACK;
@@ -215,7 +210,7 @@ kill_with_rst:
 	 */
 
 	if (!paws_reject &&
-	    (TCP_SKB_CB(skb)->seq == tw->rcv_nxt &&
+	    (TCP_SKB_CB(skb)->seq == tw->tw_rcv_nxt &&
 	     (TCP_SKB_CB(skb)->seq == TCP_SKB_CB(skb)->end_seq || th->rst))) {
 		/* In window segment, it may be only reset or bare ack. */
 
@@ -227,7 +222,6 @@ kill_with_rst:
 			if (sysctl_tcp_rfc1337 == 0) {
 kill:
 				tcp_tw_deschedule(tw);
-				tcp_timewait_kill(tw);
 				tcp_tw_put(tw);
 				return TCP_TW_SUCCESS;
 			}
@@ -235,8 +229,8 @@ kill:
 		tcp_tw_schedule(tw, TCP_TIMEWAIT_LEN);
 
 		if (tp.saw_tstamp) {
-			tw->ts_recent = tp.rcv_tsval;
-			tw->ts_recent_stamp = xtime.tv_sec;
+			tw->tw_ts_recent	= tp.rcv_tsval;
+			tw->tw_ts_recent_stamp	= xtime.tv_sec;
 		}
 
 		tcp_tw_put(tw);
@@ -261,9 +255,9 @@ kill:
 	 */
 
 	if (th->syn && !th->rst && !th->ack && !paws_reject &&
-	    (after(TCP_SKB_CB(skb)->seq, tw->rcv_nxt) ||
-	     (tp.saw_tstamp && (s32)(tw->ts_recent - tp.rcv_tsval) < 0))) {
-		u32 isn = tw->snd_nxt+65535+2;
+	    (after(TCP_SKB_CB(skb)->seq, tw->tw_rcv_nxt) ||
+	     (tp.saw_tstamp && (s32)(tw->tw_ts_recent - tp.rcv_tsval) < 0))) {
+		u32 isn = tw->tw_snd_nxt + 65535 + 2;
 		if (isn == 0)
 			isn++;
 		TCP_SKB_CB(skb)->when = isn;
@@ -299,43 +293,29 @@ kill:
  */
 static void __tcp_tw_hashdance(struct sock *sk, struct tcp_tw_bucket *tw)
 {
-	struct tcp_ehash_bucket *ehead = &tcp_ehash[sk->hashent];
+	struct tcp_ehash_bucket *ehead = &tcp_ehash[sk->sk_hashent];
 	struct tcp_bind_hashbucket *bhead;
-	struct sock **head, *sktw;
 
 	/* Step 1: Put TW into bind hash. Original socket stays there too.
-	   Note, that any socket with sk->num!=0 MUST be bound in binding
-	   cache, even if it is closed.
+	   Note, that any socket with inet_sk(sk)->num != 0 MUST be bound in
+	   binding cache, even if it is closed.
 	 */
-	bhead = &tcp_bhash[tcp_bhashfn(sk->num)];
+	bhead = &tcp_bhash[tcp_bhashfn(inet_sk(sk)->num)];
 	spin_lock(&bhead->lock);
-	tw->tb = (struct tcp_bind_bucket *)sk->prev;
-	BUG_TRAP(sk->prev!=NULL);
-	if ((tw->bind_next = tw->tb->owners) != NULL)
-		tw->tb->owners->bind_pprev = &tw->bind_next;
-	tw->tb->owners = (struct sock*)tw;
-	tw->bind_pprev = &tw->tb->owners;
+	tw->tw_tb = tcp_sk(sk)->bind_hash;
+	BUG_TRAP(tcp_sk(sk)->bind_hash);
+	tw_add_bind_node(tw, &tw->tw_tb->owners);
 	spin_unlock(&bhead->lock);
 
 	write_lock(&ehead->lock);
 
 	/* Step 2: Remove SK from established hash. */
-	if (sk->pprev) {
-		if(sk->next)
-			sk->next->pprev = sk->pprev;
-		*sk->pprev = sk->next;
-		sk->pprev = NULL;
-		sock_prot_dec_use(sk->prot);
-	}
+	if (__sk_del_node_init(sk))
+		sock_prot_dec_use(sk->sk_prot);
 
 	/* Step 3: Hash TW into TIMEWAIT half of established hash table. */
-	head = &(ehead + tcp_ehash_size)->chain;
-	sktw = (struct sock *)tw;
-	if((sktw->next = *head) != NULL)
-		(*head)->pprev = &sktw->next;
-	*head = sktw;
-	sktw->pprev = head;
-	atomic_inc(&tw->refcnt);
+	tw_add_node(tw, &(ehead + tcp_ehash_size)->chain);
+	atomic_inc(&tw->tw_refcnt);
 
 	write_unlock(&ehead->lock);
 }
@@ -346,7 +326,7 @@ static void __tcp_tw_hashdance(struct sock *sk, struct tcp_tw_bucket *tw)
 void tcp_time_wait(struct sock *sk, int state, int timeo)
 {
 	struct tcp_tw_bucket *tw = NULL;
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_opt *tp = tcp_sk(sk);
 	int recycle_ok = 0;
 
 	if (sysctl_tcp_tw_recycle && tp->ts_recent_stamp)
@@ -356,38 +336,37 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 		tw = kmem_cache_alloc(tcp_timewait_cachep, SLAB_ATOMIC);
 
 	if(tw != NULL) {
+		struct inet_opt *inet = inet_sk(sk);
 		int rto = (tp->rto<<2) - (tp->rto>>1);
 
 		/* Give us an identity. */
-		tw->daddr	= sk->daddr;
-		tw->rcv_saddr	= sk->rcv_saddr;
-		tw->bound_dev_if= sk->bound_dev_if;
-		tw->num		= sk->num;
-		tw->state	= TCP_TIME_WAIT;
-		tw->substate	= state;
-		tw->sport	= sk->sport;
-		tw->dport	= sk->dport;
-		tw->family	= sk->family;
-		tw->reuse	= sk->reuse;
-		tw->rcv_wscale	= tp->rcv_wscale;
-		atomic_set(&tw->refcnt, 1);
+		tw->tw_daddr		= inet->daddr;
+		tw->tw_rcv_saddr	= inet->rcv_saddr;
+		tw->tw_bound_dev_if	= sk->sk_bound_dev_if;
+		tw->tw_num		= inet->num;
+		tw->tw_state		= TCP_TIME_WAIT;
+		tw->tw_substate		= state;
+		tw->tw_sport		= inet->sport;
+		tw->tw_dport		= inet->dport;
+		tw->tw_family		= sk->sk_family;
+		tw->tw_reuse		= sk->sk_reuse;
+		tw->tw_rcv_wscale	= tp->rcv_wscale;
+		atomic_set(&tw->tw_refcnt, 1);
 
-		tw->hashent	= sk->hashent;
-		tw->rcv_nxt	= tp->rcv_nxt;
-		tw->snd_nxt	= tp->snd_nxt;
-		tw->rcv_wnd	= tcp_receive_window(tp);
-		tw->ts_recent	= tp->ts_recent;
-		tw->ts_recent_stamp= tp->ts_recent_stamp;
-		tw->pprev_death = NULL;
+		tw->tw_hashent		= sk->sk_hashent;
+		tw->tw_rcv_nxt		= tp->rcv_nxt;
+		tw->tw_snd_nxt		= tp->snd_nxt;
+		tw->tw_rcv_wnd		= tcp_receive_window(tp);
+		tw->tw_ts_recent	= tp->ts_recent;
+		tw->tw_ts_recent_stamp	= tp->ts_recent_stamp;
+		tw_dead_node_init(tw);
 
 #if defined(CONFIG_IPV6) || defined(CONFIG_IPV6_MODULE)
-		if(tw->family == PF_INET6) {
-			memcpy(&tw->v6_daddr,
-			       &sk->net_pinfo.af_inet6.daddr,
-			       sizeof(struct in6_addr));
-			memcpy(&tw->v6_rcv_saddr,
-			       &sk->net_pinfo.af_inet6.rcv_saddr,
-			       sizeof(struct in6_addr));
+		if (tw->tw_family == PF_INET6) {
+			struct ipv6_pinfo *np = inet6_sk(sk);
+
+			ipv6_addr_copy(&tw->tw_v6_daddr, &np->daddr);
+			ipv6_addr_copy(&tw->tw_v6_rcv_saddr, &np->rcv_saddr);
 		}
 #endif
 		/* Linkage updates. */
@@ -398,9 +377,9 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 			timeo = rto;
 
 		if (recycle_ok) {
-			tw->timeout = rto;
+			tw->tw_timeout = rto;
 		} else {
-			tw->timeout = TCP_TIMEWAIT_LEN;
+			tw->tw_timeout = TCP_TIMEWAIT_LEN;
 			if (state == TCP_TIME_WAIT)
 				timeo = TCP_TIMEWAIT_LEN;
 		}
@@ -421,18 +400,30 @@ void tcp_time_wait(struct sock *sk, int state, int timeo)
 }
 
 /* Kill off TIME_WAIT sockets once their lifetime has expired. */
-static int tcp_tw_death_row_slot = 0;
+static int tcp_tw_death_row_slot;
 
 static void tcp_twkill(unsigned long);
 
-static struct tcp_tw_bucket *tcp_tw_death_row[TCP_TWKILL_SLOTS];
-static spinlock_t tw_death_lock = SPIN_LOCK_UNLOCKED;
-static struct timer_list tcp_tw_timer = { function: tcp_twkill };
+/* TIME_WAIT reaping mechanism. */
+#define TCP_TWKILL_SLOTS	8	/* Please keep this a power of 2. */
+#define TCP_TWKILL_PERIOD	(TCP_TIMEWAIT_LEN/TCP_TWKILL_SLOTS)
 
-static void SMP_TIMER_NAME(tcp_twkill)(unsigned long dummy)
+#define TCP_TWKILL_QUOTA	100
+
+static struct hlist_head tcp_tw_death_row[TCP_TWKILL_SLOTS];
+static spinlock_t tw_death_lock = SPIN_LOCK_UNLOCKED;
+static struct timer_list tcp_tw_timer = TIMER_INITIALIZER(tcp_twkill, 0, 0);
+static void twkill_work(void *);
+static DECLARE_WORK(tcp_twkill_work, twkill_work, NULL);
+static u32 twkill_thread_slots;
+
+/* Returns non-zero if quota exceeded.  */
+static int tcp_do_twkill_work(int slot, unsigned int quota)
 {
 	struct tcp_tw_bucket *tw;
-	int killed = 0;
+	struct hlist_node *node, *safe;
+	unsigned int killed;
+	int ret;
 
 	/* NOTE: compare this to previous version where lock
 	 * was released after detaching chain. It was racy,
@@ -440,36 +431,85 @@ static void SMP_TIMER_NAME(tcp_twkill)(unsigned long dummy)
 	 * in 2.3 (with netfilter), and with softnet it is common, because
 	 * soft irqs are not sequenced.
 	 */
+	killed = 0;
+	ret = 0;
+	tw_for_each_inmate(tw, node, safe,
+			   &tcp_tw_death_row[slot]) {
+		__tw_del_dead_node(tw);
+		spin_unlock(&tw_death_lock);
+		tcp_timewait_kill(tw);
+		tcp_tw_put(tw);
+		killed++;
+		spin_lock(&tw_death_lock);
+		if (killed > quota) {
+			ret = 1;
+			break;
+		}
+	}
+
+	tcp_tw_count -= killed;
+	NET_ADD_STATS_BH(TimeWaited, killed);
+
+	return ret;
+}
+
+static void tcp_twkill(unsigned long dummy)
+{
+	int need_timer, ret;
+
 	spin_lock(&tw_death_lock);
 
 	if (tcp_tw_count == 0)
 		goto out;
 
-	while((tw = tcp_tw_death_row[tcp_tw_death_row_slot]) != NULL) {
-		tcp_tw_death_row[tcp_tw_death_row_slot] = tw->next_death;
-		if (tw->next_death)
-			tw->next_death->pprev_death = tw->pprev_death;
-		tw->pprev_death = NULL;
-		spin_unlock(&tw_death_lock);
-
-		tcp_timewait_kill(tw);
-		tcp_tw_put(tw);
-
-		killed++;
-
-		spin_lock(&tw_death_lock);
+	need_timer = 0;
+	ret = tcp_do_twkill_work(tcp_tw_death_row_slot, TCP_TWKILL_QUOTA);
+	if (ret) {
+		twkill_thread_slots |= (1 << tcp_tw_death_row_slot);
+		mb();
+		schedule_work(&tcp_twkill_work);
+		need_timer = 1;
+	} else {
+		/* We purged the entire slot, anything left?  */
+		if (tcp_tw_count)
+			need_timer = 1;
 	}
 	tcp_tw_death_row_slot =
 		((tcp_tw_death_row_slot + 1) & (TCP_TWKILL_SLOTS - 1));
-
-	if ((tcp_tw_count -= killed) != 0)
-		mod_timer(&tcp_tw_timer, jiffies+TCP_TWKILL_PERIOD);
-	net_statistics[smp_processor_id()*2].TimeWaited += killed;
+	if (need_timer)
+		mod_timer(&tcp_tw_timer, jiffies + TCP_TWKILL_PERIOD);
 out:
 	spin_unlock(&tw_death_lock);
 }
 
-SMP_TIMER_DEFINE(tcp_twkill, tcp_twkill_task);
+extern void twkill_slots_invalid(void);
+
+static void twkill_work(void *dummy)
+{
+	int i;
+
+	if ((TCP_TWKILL_SLOTS - 1) > (sizeof(twkill_thread_slots) * 8))
+		twkill_slots_invalid();
+
+	while (twkill_thread_slots) {
+		spin_lock_bh(&tw_death_lock);
+		for (i = 0; i < TCP_TWKILL_SLOTS; i++) {
+			if (!(twkill_thread_slots & (1 << i)))
+				continue;
+
+			while (tcp_do_twkill_work(i, TCP_TWKILL_QUOTA) != 0) {
+				if (need_resched()) {
+					spin_unlock_bh(&tw_death_lock);
+					schedule();
+					spin_lock_bh(&tw_death_lock);
+				}
+			}
+
+			twkill_thread_slots &= ~(1 << i);
+		}
+		spin_unlock_bh(&tw_death_lock);
+	}
+}
 
 /* These are always called from BH context.  See callers in
  * tcp_input.c to verify this.
@@ -479,16 +519,13 @@ SMP_TIMER_DEFINE(tcp_twkill, tcp_twkill_task);
 void tcp_tw_deschedule(struct tcp_tw_bucket *tw)
 {
 	spin_lock(&tw_death_lock);
-	if (tw->pprev_death) {
-		if(tw->next_death)
-			tw->next_death->pprev_death = tw->pprev_death;
-		*tw->pprev_death = tw->next_death;
-		tw->pprev_death = NULL;
+	if (tw_del_dead_node(tw)) {
 		tcp_tw_put(tw);
 		if (--tcp_tw_count == 0)
 			del_timer(&tcp_tw_timer);
 	}
 	spin_unlock(&tw_death_lock);
+	tcp_timewait_kill(tw);
 }
 
 /* Short-time timewait calendar */
@@ -496,12 +533,13 @@ void tcp_tw_deschedule(struct tcp_tw_bucket *tw)
 static int tcp_twcal_hand = -1;
 static int tcp_twcal_jiffie;
 static void tcp_twcal_tick(unsigned long);
-static struct timer_list tcp_twcal_timer = {function: tcp_twcal_tick};
-static struct tcp_tw_bucket *tcp_twcal_row[TCP_TW_RECYCLE_SLOTS];
+static struct timer_list tcp_twcal_timer =
+		TIMER_INITIALIZER(tcp_twcal_tick, 0, 0);
+static struct hlist_head tcp_twcal_row[TCP_TW_RECYCLE_SLOTS];
 
 void tcp_tw_schedule(struct tcp_tw_bucket *tw, int timeo)
 {
-	struct tcp_tw_bucket **tpp;
+	struct hlist_head *list;
 	int slot;
 
 	/* timeout := RTO * 3.5
@@ -533,14 +571,10 @@ void tcp_tw_schedule(struct tcp_tw_bucket *tw, int timeo)
 	spin_lock(&tw_death_lock);
 
 	/* Unlink it, if it was scheduled */
-	if (tw->pprev_death) {
-		if(tw->next_death)
-			tw->next_death->pprev_death = tw->pprev_death;
-		*tw->pprev_death = tw->next_death;
-		tw->pprev_death = NULL;
+	if (tw_del_dead_node(tw))
 		tcp_tw_count--;
-	} else
-		atomic_inc(&tw->refcnt);
+	else
+		atomic_inc(&tw->tw_refcnt);
 
 	if (slot >= TCP_TW_RECYCLE_SLOTS) {
 		/* Schedule to slow timer */
@@ -551,11 +585,11 @@ void tcp_tw_schedule(struct tcp_tw_bucket *tw, int timeo)
 			if (slot >= TCP_TWKILL_SLOTS)
 				slot = TCP_TWKILL_SLOTS-1;
 		}
-		tw->ttd = jiffies + timeo;
+		tw->tw_ttd = jiffies + timeo;
 		slot = (tcp_tw_death_row_slot + slot) & (TCP_TWKILL_SLOTS - 1);
-		tpp = &tcp_tw_death_row[slot];
+		list = &tcp_tw_death_row[slot];
 	} else {
-		tw->ttd = jiffies + (slot<<TCP_TW_RECYCLE_TICK);
+		tw->tw_ttd = jiffies + (slot << TCP_TW_RECYCLE_TICK);
 
 		if (tcp_twcal_hand < 0) {
 			tcp_twcal_hand = 0;
@@ -563,24 +597,21 @@ void tcp_tw_schedule(struct tcp_tw_bucket *tw, int timeo)
 			tcp_twcal_timer.expires = tcp_twcal_jiffie + (slot<<TCP_TW_RECYCLE_TICK);
 			add_timer(&tcp_twcal_timer);
 		} else {
-			if ((long)(tcp_twcal_timer.expires - jiffies) > (slot<<TCP_TW_RECYCLE_TICK))
+			if (time_after(tcp_twcal_timer.expires, jiffies + (slot<<TCP_TW_RECYCLE_TICK)))
 				mod_timer(&tcp_twcal_timer, jiffies + (slot<<TCP_TW_RECYCLE_TICK));
 			slot = (tcp_twcal_hand + slot)&(TCP_TW_RECYCLE_SLOTS-1);
 		}
-		tpp = &tcp_twcal_row[slot];
+		list = &tcp_twcal_row[slot];
 	}
 
-	if((tw->next_death = *tpp) != NULL)
-		(*tpp)->pprev_death = &tw->next_death;
-	*tpp = tw;
-	tw->pprev_death = tpp;
+	hlist_add_head(&tw->tw_death_node, list);
 
 	if (tcp_tw_count++ == 0)
 		mod_timer(&tcp_tw_timer, jiffies+TCP_TWKILL_PERIOD);
 	spin_unlock(&tw_death_lock);
 }
 
-void SMP_TIMER_NAME(tcp_twcal_tick)(unsigned long dummy)
+void tcp_twcal_tick(unsigned long dummy)
 {
 	int n, slot;
 	unsigned long j;
@@ -596,13 +627,13 @@ void SMP_TIMER_NAME(tcp_twcal_tick)(unsigned long dummy)
 	j = tcp_twcal_jiffie;
 
 	for (n=0; n<TCP_TW_RECYCLE_SLOTS; n++) {
-		if ((long)(j - now) <= 0) {
+		if (time_before_eq(j, now)) {
+			struct hlist_node *node, *safe;
 			struct tcp_tw_bucket *tw;
 
-			while((tw = tcp_twcal_row[slot]) != NULL) {
-				tcp_twcal_row[slot] = tw->next_death;
-				tw->pprev_death = NULL;
-
+			tw_for_each_inmate(tw, node, safe,
+					   &tcp_twcal_row[slot]) {
+				__tw_del_dead_node(tw);
 				tcp_timewait_kill(tw);
 				tcp_tw_put(tw);
 				killed++;
@@ -614,7 +645,7 @@ void SMP_TIMER_NAME(tcp_twcal_tick)(unsigned long dummy)
 				tcp_twcal_hand = slot;
 			}
 
-			if (tcp_twcal_row[slot] != NULL) {
+			if (!hlist_empty(&tcp_twcal_row[slot])) {
 				mod_timer(&tcp_twcal_timer, j);
 				goto out;
 			}
@@ -627,12 +658,9 @@ void SMP_TIMER_NAME(tcp_twcal_tick)(unsigned long dummy)
 out:
 	if ((tcp_tw_count -= killed) == 0)
 		del_timer(&tcp_tw_timer);
-	net_statistics[smp_processor_id()*2].TimeWaitKilled += killed;
+	NET_ADD_STATS_BH(TimeWaitKilled, killed);
 	spin_unlock(&tw_death_lock);
 }
-
-SMP_TIMER_DEFINE(tcp_twcal_tick, tcp_twcal_tasklet);
-
 
 /* This is not only more efficient than what we used to do, it eliminates
  * a lot of code duplication between IPv4/IPv6 SYN recv processing. -DaveM
@@ -642,50 +670,57 @@ SMP_TIMER_DEFINE(tcp_twcal_tick, tcp_twcal_tasklet);
  */
 struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req, struct sk_buff *skb)
 {
-	struct sock *newsk = sk_alloc(PF_INET, GFP_ATOMIC, 0);
+	/* allocate the newsk from the same slab of the master sock,
+	 * if not, at sk_free time we'll try to free it from the wrong
+	 * slabcache (i.e. is it TCPv4 or v6?) -acme */
+	struct sock *newsk = sk_alloc(PF_INET, GFP_ATOMIC, 0, sk->sk_slab);
 
 	if(newsk != NULL) {
 		struct tcp_opt *newtp;
-#ifdef CONFIG_FILTER
 		struct sk_filter *filter;
-#endif
 
-		memcpy(newsk, sk, sizeof(*newsk));
-		newsk->state = TCP_SYN_RECV;
+		memcpy(newsk, sk, sizeof(struct tcp_sock));
+		newsk->sk_state = TCP_SYN_RECV;
 
 		/* SANITY */
-		newsk->pprev = NULL;
-		newsk->prev = NULL;
+		sk_node_init(&newsk->sk_node);
+		tcp_sk(newsk)->bind_hash = NULL;
 
 		/* Clone the TCP header template */
-		newsk->dport = req->rmt_port;
+		inet_sk(newsk)->dport = req->rmt_port;
 
 		sock_lock_init(newsk);
 		bh_lock_sock(newsk);
 
-		newsk->dst_lock	= RW_LOCK_UNLOCKED;
-		atomic_set(&newsk->rmem_alloc, 0);
-		skb_queue_head_init(&newsk->receive_queue);
-		atomic_set(&newsk->wmem_alloc, 0);
-		skb_queue_head_init(&newsk->write_queue);
-		atomic_set(&newsk->omem_alloc, 0);
-		newsk->wmem_queued = 0;
-		newsk->forward_alloc = 0;
+		newsk->sk_dst_lock = RW_LOCK_UNLOCKED;
+		atomic_set(&newsk->sk_rmem_alloc, 0);
+		skb_queue_head_init(&newsk->sk_receive_queue);
+		atomic_set(&newsk->sk_wmem_alloc, 0);
+		skb_queue_head_init(&newsk->sk_write_queue);
+		atomic_set(&newsk->sk_omem_alloc, 0);
+		newsk->sk_wmem_queued = 0;
+		newsk->sk_forward_alloc = 0;
 
-		newsk->done = 0;
-		newsk->userlocks = sk->userlocks & ~SOCK_BINDPORT_LOCK;
-		newsk->proc = 0;
-		newsk->backlog.head = newsk->backlog.tail = NULL;
-		newsk->callback_lock = RW_LOCK_UNLOCKED;
-		skb_queue_head_init(&newsk->error_queue);
-		newsk->write_space = tcp_write_space;
-#ifdef CONFIG_FILTER
-		if ((filter = newsk->filter) != NULL)
+		sock_reset_flag(newsk, SOCK_DONE);
+		newsk->sk_userlocks = sk->sk_userlocks & ~SOCK_BINDPORT_LOCK;
+		newsk->sk_backlog.head = newsk->sk_backlog.tail = NULL;
+		newsk->sk_callback_lock = RW_LOCK_UNLOCKED;
+		skb_queue_head_init(&newsk->sk_error_queue);
+		newsk->sk_write_space = tcp_write_space;
+
+		if ((filter = newsk->sk_filter) != NULL)
 			sk_filter_charge(newsk, filter);
-#endif
+
+		if (unlikely(xfrm_sk_clone_policy(newsk))) {
+			/* It is still raw copy of parent, so invalidate
+			 * destructor and make plain sk_free() */
+			newsk->sk_destruct = NULL;
+			sk_free(newsk);
+			return NULL;
+		}
 
 		/* Now setup tcp_opt */
-		newtp = &(newsk->tp_pinfo.af_tcp);
+		newtp = tcp_sk(newsk);
 		newtp->pred_flags = 0;
 		newtp->rcv_nxt = req->rcv_isn + 1;
 		newtp->snd_nxt = req->snt_isn + 1;
@@ -720,7 +755,7 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req,
 		newtp->frto_counter = 0;
 		newtp->frto_highmark = 0;
 
-		tcp_set_ca_state(newtp, TCP_CA_Open);
+		newtp->ca_state = TCP_CA_Open;
 		tcp_init_xmit_timers(newsk);
 		skb_queue_head_init(&newtp->out_of_order_queue);
 		newtp->send_head = NULL;
@@ -743,18 +778,20 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req,
 		memset(&newtp->syn_wait_lock, 0, sizeof(newtp->syn_wait_lock));
 
 		/* Back to base struct sock members. */
-		newsk->err = 0;
-		newsk->priority = 0;
-		atomic_set(&newsk->refcnt, 2);
+		newsk->sk_err = 0;
+		newsk->sk_priority = 0;
+		atomic_set(&newsk->sk_refcnt, 2);
 #ifdef INET_REFCNT_DEBUG
 		atomic_inc(&inet_sock_nr);
 #endif
 		atomic_inc(&tcp_sockets_allocated);
 
-		if (newsk->keepopen)
-			tcp_reset_keepalive_timer(newsk, keepalive_time_when(newtp));
-		newsk->socket = NULL;
-		newsk->sleep = NULL;
+		if (sock_flag(newsk, SOCK_KEEPOPEN))
+			tcp_reset_keepalive_timer(newsk,
+						  keepalive_time_when(newtp));
+		newsk->sk_socket = NULL;
+		newsk->sk_sleep = NULL;
+		newsk->sk_owner = NULL;
 
 		newtp->tstamp_ok = req->tstamp_ok;
 		if((newtp->sack_ok = req->sack_ok) != 0) {
@@ -787,8 +824,9 @@ struct sock *tcp_create_openreq_child(struct sock *sk, struct open_request *req,
 			newtp->ack.last_seg_size = skb->len-newtp->tcp_header_len;
 		newtp->mss_clamp = req->mss;
 		TCP_ECN_openreq_child(newtp, req);
+		if (newtp->ecn_flags&TCP_ECN_OK)
+			newsk->sk_no_largesend = 1;
 
-		tcp_ca_init(newtp);
 		TCP_INC_STATS_BH(TcpPassiveOpens);
 	}
 	return newsk;
@@ -804,7 +842,7 @@ struct sock *tcp_check_req(struct sock *sk,struct sk_buff *skb,
 			   struct open_request **prev)
 {
 	struct tcphdr *th = skb->h.th;
-	struct tcp_opt *tp = &(sk->tp_pinfo.af_tcp);
+	struct tcp_opt *tp = tcp_sk(sk);
 	u32 flg = tcp_flag_word(th) & (TCP_FLAG_RST|TCP_FLAG_SYN|TCP_FLAG_ACK);
 	int paws_reject = 0;
 	struct tcp_opt ttp;
@@ -963,6 +1001,7 @@ struct sock *tcp_check_req(struct sock *sk,struct sk_buff *skb,
 	if (child == NULL)
 		goto listen_overflow;
 
+	sk_set_owner(child, sk->sk_owner);
 	tcp_synq_unlink(tp, req, prev);
 	tcp_synq_removed(sk, req);
 
@@ -994,14 +1033,14 @@ int tcp_child_process(struct sock *parent, struct sock *child,
 		      struct sk_buff *skb)
 {
 	int ret = 0;
-	int state = child->state;
+	int state = child->sk_state;
 
-	if (child->lock.users == 0) {
+	if (!sock_owned_by_user(child)) {
 		ret = tcp_rcv_state_process(child, skb, skb->h.th, skb->len);
 
 		/* Wakeup parent, send SIGIO */
-		if (state == TCP_SYN_RECV && child->state != state)
-			parent->data_ready(parent, 0);
+		if (state == TCP_SYN_RECV && child->sk_state != state)
+			parent->sk_data_ready(parent, 0);
 	} else {
 		/* Alas, it is possible again, because we do lookup
 		 * in main socket hash table and lock on listening

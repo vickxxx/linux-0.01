@@ -10,12 +10,10 @@
 #include <linux/version.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/fs.h>
 #include <linux/stat.h>
 #include <linux/errno.h>
-#include <linux/locks.h>
-#include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <linux/string.h>
 
@@ -25,30 +23,13 @@
 #include <linux/coda_fs_i.h>
 
 /* initialize the debugging variables */
-int coda_debug;
-int coda_print_entry; 
-int coda_access_cache = 1;
 int coda_fake_statfs;
 
 /* print a fid */
 char * coda_f2s(ViceFid *f)
 {
 	static char s[60];
-	if ( f ) {
-		sprintf(s, "(%-#lx,%-#lx,%-#lx)", 
-			 f->Volume, f->Vnode, f->Unique);
-	}
-	return s;
-}
-
-/* print another fid */
-char * coda_f2s2(ViceFid *f)
-{
-	static char s[60];
-	if ( f ) {
-		sprintf(s, "(%-#lx,%-#lx,%-#lx)", 
-			 f->Volume, f->Vnode, f->Unique);
-	}
+	sprintf(s, "(%-#lx.%-#lx.%-#lx)", f->Volume, f->Vnode, f->Unique);
 	return s;
 }
 
@@ -93,35 +74,23 @@ unsigned short coda_flags_to_cflags(unsigned short flags)
 {
 	unsigned short coda_flags = 0;
 	
-	if ( (flags & O_ACCMODE) == O_RDONLY ){ 
-		CDEBUG(D_FILE, "--> C_O_READ added\n");
+	if ((flags & O_ACCMODE) == O_RDONLY)
 		coda_flags |= C_O_READ;
-	}
 
-	if ( (flags & O_ACCMODE) ==  O_RDWR ) { 
-		CDEBUG(D_FILE, "--> C_O_READ | C_O_WRITE added\n");
+	if ((flags & O_ACCMODE) == O_RDWR)
 		coda_flags |= C_O_READ | C_O_WRITE;
-	}
 
-	if ( (flags & O_ACCMODE) == O_WRONLY ){ 
-		CDEBUG(D_FILE, "--> C_O_WRITE added\n");
+	if ((flags & O_ACCMODE) == O_WRONLY)
 		coda_flags |= C_O_WRITE;
-	}
 
-	if ( flags & O_TRUNC )  { 
-		CDEBUG(D_FILE, "--> C_O_TRUNC added\n");
+	if (flags & O_TRUNC)
 		coda_flags |= C_O_TRUNC;
-	}
 
-	if ( flags & O_CREAT )  { 
-		CDEBUG(D_FILE, "--> C_O_CREAT added\n");
+	if (flags & O_CREAT)
 		coda_flags |= C_O_CREAT;
-	}
 
-	if ( flags & O_EXCL ) {
+	if (flags & O_EXCL)
 		coda_flags |= C_O_EXCL;
-		CDEBUG(D_FILE, "--> C_O_EXCL added\n");
-	}
 
 	return coda_flags;
 }
@@ -131,7 +100,7 @@ unsigned short coda_flags_to_cflags(unsigned short flags)
 void coda_vattr_to_iattr(struct inode *inode, struct coda_vattr *attr)
 {
         int inode_type;
-        /* inode's i_dev, i_flags, i_ino are set by iget 
+        /* inode's i_flags, i_ino are set by iget 
            XXX: is this all we need ??
            */
         switch (attr->va_type) {
@@ -167,11 +136,11 @@ void coda_vattr_to_iattr(struct inode *inode, struct coda_vattr *attr)
 	if (attr->va_size != -1)
 		inode->i_blocks = (attr->va_size + 511) >> 9;
 	if (attr->va_atime.tv_sec != -1) 
-	        inode->i_atime = attr->va_atime.tv_sec;
+	        inode->i_atime = attr->va_atime;
 	if (attr->va_mtime.tv_sec != -1)
-	        inode->i_mtime = attr->va_mtime.tv_sec;
+	        inode->i_mtime = attr->va_mtime;
         if (attr->va_ctime.tv_sec != -1)
-	        inode->i_ctime = attr->va_ctime.tv_sec;
+	        inode->i_ctime = attr->va_ctime;
 }
 
 
@@ -193,10 +162,10 @@ void coda_iattr_to_vattr(struct iattr *iattr, struct coda_vattr *vattr)
         vattr->va_gid = (vgid_t) -1;
         vattr->va_size = (off_t) -1;
 	vattr->va_atime.tv_sec = (time_t) -1;
-        vattr->va_mtime.tv_sec  = (time_t) -1;
-	vattr->va_ctime.tv_sec  = (time_t) -1;
 	vattr->va_atime.tv_nsec =  (time_t) -1;
+        vattr->va_mtime.tv_sec = (time_t) -1;
         vattr->va_mtime.tv_nsec = (time_t) -1;
+	vattr->va_ctime.tv_sec = (time_t) -1;
 	vattr->va_ctime.tv_nsec = (time_t) -1;
         vattr->va_type = C_VNON;
 	vattr->va_fileid = -1;
@@ -237,16 +206,13 @@ void coda_iattr_to_vattr(struct iattr *iattr, struct coda_vattr *vattr)
                 vattr->va_size = iattr->ia_size;
 	}
         if ( valid & ATTR_ATIME ) {
-                vattr->va_atime.tv_sec = iattr->ia_atime;
-                vattr->va_atime.tv_nsec = 0;
+                vattr->va_atime = iattr->ia_atime;
 	}
         if ( valid & ATTR_MTIME ) {
-                vattr->va_mtime.tv_sec = iattr->ia_mtime;
-                vattr->va_mtime.tv_nsec = 0;
+                vattr->va_mtime = iattr->ia_mtime;
 	}
         if ( valid & ATTR_CTIME ) {
-                vattr->va_ctime.tv_sec = iattr->ia_ctime;
-                vattr->va_ctime.tv_nsec = 0;
+                vattr->va_ctime = iattr->ia_ctime;
 	}
 }
 

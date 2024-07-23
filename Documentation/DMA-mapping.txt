@@ -5,10 +5,14 @@
 		 Richard Henderson <rth@cygnus.com>
 		  Jakub Jelinek <jakub@redhat.com>
 
+This document describes the DMA mapping system in terms of the pci_
+API.  For a similar API that works for generic devices, see
+DMA-API.txt.
+
 Most of the 64bit platforms have special hardware that translates bus
 addresses (DMA addresses) into physical addresses.  This is similar to
 how page tables and/or a TLB translates virtual addresses to physical
-addresses on a cpu.  This is needed so that e.g. PCI devices can
+addresses on a CPU.  This is needed so that e.g. PCI devices can
 access with a Single Address Cycle (32bit DMA address) any page in the
 64bit physical address space.  Previously in Linux those 64bit
 platforms had to set artificial limits on the maximum RAM size in the
@@ -37,7 +41,7 @@ returned from the DMA mapping functions.
 			 What memory is DMA'able?
 
 The first piece of information you must know is what kernel memory can
-be used with the DMA mapping facilitites.  There has been an unwritten
+be used with the DMA mapping facilities.  There has been an unwritten
 set of rules regarding this, and this text is an attempt to finally
 write them down.
 
@@ -60,6 +64,9 @@ nor may you use kernel stack addresses for DMA.  Both of these items
 might be mapped somewhere entirely different than the rest of physical
 memory.
 
+Also, this means that you cannot take the return of a kmap()
+call and DMA to/from that.  This is similar to vmalloc().
+
 What about block I/O and networking buffers?  The block I/O and
 networking subsystems make sure that the buffers they use are valid
 for you to DMA from/to.
@@ -76,6 +83,15 @@ By default, the kernel assumes that your device can address the full
 to be increased.  And for a device with limitations, as discussed in
 the previous paragraph, it needs to be decreased.
 
+pci_alloc_consistent() by default will return 32-bit DMA addresses.
+PCI-X specification requires PCI-X devices to support 64-bit
+addressing (DAC) for all transactions. And at least one platform (SGI
+SN2) requires 64-bit consistent allocations to operate correctly when
+the IO bus is in PCI-X mode. Therefore, like with pci_set_dma_mask(),
+it's good practice to call pci_set_consistent_dma_mask() to set the
+appropriate mask even if your device only supports 32-bit DMA
+(default) and especially if it's a PCI-X device.
+
 For correct operation, you must interrogate the PCI layer in your
 device probe routine to see if the PCI controller on the machine can
 properly support the DMA addressing limitation your device has.  It is
@@ -86,6 +102,11 @@ device.
 The query is performed via a call to pci_set_dma_mask():
 
 	int pci_set_dma_mask(struct pci_dev *pdev, u64 device_mask);
+
+The query for consistent allocations is performed via a a call to
+pci_set_consistent_dma_mask():
+
+	int pci_set_consistent_dma_mask(struct pci_dev *pdev, u64 device_mask);
 
 Here, pdev is a pointer to the PCI device struct of your device, and
 device_mask is a bit mask describing which bits of a PCI address your
@@ -103,7 +124,7 @@ This means that in the failure case, you have three options:
 3) Ignore this device and do not initialize it.
 
 It is recommended that your driver print a kernel KERN_WARNING message
-when you end up performing either #2 or #2.  In this manner, if a user
+when you end up performing either #2 or #3.  In this manner, if a user
 of your driver reports that performance is bad or that the device is not
 even detected, you can ask them for the kernel messages to find out
 exactly why.
@@ -126,7 +147,7 @@ addressing.  Rather, it may fail in this case simply because
 Sparc64 is one platform which behaves in this way.
 
 Here is how you would handle a 64-bit capable device which can drive
-all 64-bits during a DAC cycle:
+all 64-bits when accessing streaming DMA:
 
 	int using_dac;
 
@@ -140,10 +161,34 @@ all 64-bits during a DAC cycle:
 		goto ignore_this_device;
 	}
 
+If a card is capable of using 64-bit consistent allocations as well,
+the case would look like this:
+
+	int using_dac, consistent_using_dac;
+
+	if (!pci_set_dma_mask(pdev, 0xffffffffffffffff)) {
+		using_dac = 1;
+	   	consistent_using_dac = 1;
+		pci_set_consistent_dma_mask(pdev, 0xffffffffffffffff)
+	} else if (!pci_set_dma_mask(pdev, 0xffffffff)) {
+		using_dac = 0;
+		consistent_using_dac = 0;
+		pci_set_consistent_dma_mask(pdev, 0xffffffff)
+	} else {
+		printk(KERN_WARNING
+		       "mydev: No suitable DMA available.\n");
+		goto ignore_this_device;
+	}
+
+pci_set_consistent_dma_mask() will always be able to set the same or a
+smaller mask as pci_set_dma_mask(). However for the rare case that a
+device driver only uses consistent allocations, one would have to
+check the return value from pci_set_consistent().
+
 If your 64-bit device is going to be an enormous consumer of DMA
 mappings, this can be problematic since the DMA mappings are a
 finite resource on many platforms.  Please see the "DAC Addressing
-for Address Space Hungry Devices" setion near the end of this
+for Address Space Hungry Devices" section near the end of this
 document for how to handle this case.
 
 Finally, if your device can only drive the low 24-bits of
@@ -202,15 +247,16 @@ There are two types of DMA mappings:
 
 - Consistent DMA mappings which are usually mapped at driver
   initialization, unmapped at the end and for which the hardware should
-  guarantee that the device and the cpu can access the data
+  guarantee that the device and the CPU can access the data
   in parallel and will see updates made by each other without any
   explicit software flushing.
 
   Think of "consistent" as "synchronous" or "coherent".
 
-  Consistent DMA mappings are always SAC addressable.  That is
-  to say, consistent DMA addresses given to the driver will always
-  be in the low 32-bits of the PCI bus space.
+  The current default is to return consistent memory in the low 32
+  bits of the PCI bus space.  However, for future compatibility you
+  should set the consistent mask even if this default is fine for your
+  driver.
 
   Good examples of what to use consistent mappings for are:
 
@@ -219,12 +265,12 @@ There are two types of DMA mappings:
 	- Device firmware microcode executed out of
 	  main memory.
 
-  The invariant these examples all require is that any cpu store
+  The invariant these examples all require is that any CPU store
   to memory is immediately visible to the device, and vice
   versa.  Consistent mappings guarantee this.
 
   IMPORTANT: Consistent DMA memory does not preclude the usage of
-             proper memory barriers.  The cpu may reorder stores to
+             proper memory barriers.  The CPU may reorder stores to
 	     consistent memory just as it may normal memory.  Example:
 	     if it is important for the device to see the first word
 	     of a descriptor updated before the second, you must do
@@ -280,15 +326,14 @@ __get_free_pages (but takes size instead of a page order).  If your
 driver needs regions sized smaller than a page, you may prefer using
 the pci_pool interface, described below.
 
-The consistent DMA mapping interfaces, for non-NULL dev, will always
-return a DMA address which is SAC (Single Address Cycle) addressible.
-Even if the device indicates (via PCI dma mask) that it may address
-the upper 32-bits and thus perform DAC cycles, consistent allocation
-will still only return 32-bit PCI addresses for DMA.  This is true
-of the pci_pool interface as well.
-
-In fact, as mentioned above, all consistent memory provided by the
-kernel DMA APIs are always SAC addressable.
+The consistent DMA mapping interfaces, for non-NULL dev, will by
+default return a DMA address which is SAC (Single Address Cycle)
+addressable.  Even if the device indicates (via PCI dma mask) that it
+may address the upper 32-bits and thus perform DAC cycles, consistent
+allocation will only return > 32-bit PCI addresses for DMA if the
+consistent dma mask has been explicitly changed via
+pci_set_consistent_dma_mask().  This is true of the pci_pool interface
+as well.
 
 pci_alloc_consistent returns two values: the virtual address which you
 can use to access it from the CPU and dma_handle which you pass to the
@@ -320,16 +365,12 @@ Create a pci_pool like this:
 
 	struct pci_pool *pool;
 
-	pool = pci_pool_create(name, dev, size, align, alloc, flags);
+	pool = pci_pool_create(name, dev, size, align, alloc);
 
 The "name" is for diagnostics (like a kmem_cache name); dev and size
 are as above.  The device's hardware alignment requirement for this
 type of data is "align" (which is expressed in bytes, and must be a
-power of two).  The flags are SLAB_ flags as you'd pass to
-kmem_cache_create.  Not all flags are understood, but SLAB_POISON may
-help you find driver bugs.  If you call this in a non- sleeping
-context (f.e. in_interrupt is true or while holding SMP locks), pass
-SLAB_ATOMIC.  If your device has no boundary crossing restrictions,
+power of two).  If your device has no boundary crossing restrictions,
 pass 0 for alloc; passing 4096 says memory allocated from this pool
 must not cross 4KByte boundaries (but at that time it may be better to
 go for pci_alloc_consistent directly instead).
@@ -481,7 +522,7 @@ limited number of scatter-gather entries) and returns the actual number
 of sg entries it mapped them to.
 
 Then you should loop count times (note: this can be less than nents times)
-and use sg_dma_address() and sg_dma_length() macros where you previously
+and use sg_dma_address() and sg_dma_len() macros where you previously
 accessed sg->address and sg->length as shown above.
 
 To unmap a scatterlist, just call:
@@ -619,7 +660,7 @@ use the normal APIs without any problems.
 Note that for streaming type mappings you must either use these
 interfaces, or the dynamic mapping interfaces above.  You may not mix
 usage of both for the same device.  Such an act is illegal and is
-guarenteed to put a banana in your tailpipe.
+guaranteed to put a banana in your tailpipe.
 
 However, consistent mappings may in fact be used in conjunction with
 these interfaces.  Remember that, as defined, consistent mappings are
@@ -634,7 +675,7 @@ This routine behaves identically to pci_set_dma_mask.  You may not
 use the following interfaces if this routine fails.
 
 Next, DMA addresses using this API are kept track of using the
-dma64_addr_t type.  It is guarenteed to be big enough to hold any
+dma64_addr_t type.  It is guaranteed to be big enough to hold any
 DAC address the platform layer will give to you from the following
 routines.  If you have consistent mappings as well, you still
 use plain dma_addr_t to keep track of those.
@@ -685,6 +726,89 @@ the following interfaces are provided:
 
 This is possible with the DAC interfaces purely because they are
 not translated in any way.
+
+		Optimizing Unmap State Space Consumption
+
+On many platforms, pci_unmap_{single,page}() is simply a nop.
+Therefore, keeping track of the mapping address and length is a waste
+of space.  Instead of filling your drivers up with ifdefs and the like
+to "work around" this (which would defeat the whole purpose of a
+portable API) the following facilities are provided.
+
+Actually, instead of describing the macros one by one, we'll
+transform some example code.
+
+1) Use DECLARE_PCI_UNMAP_{ADDR,LEN} in state saving structures.
+   Example, before:
+
+	struct ring_state {
+		struct sk_buff *skb;
+		dma_addr_t mapping;
+		__u32 len;
+	};
+
+   after:
+
+	struct ring_state {
+		struct sk_buff *skb;
+		DECLARE_PCI_UNMAP_ADDR(mapping)
+		DECLARE_PCI_UNMAP_LEN(len)
+	};
+
+   NOTE: DO NOT put a semicolon at the end of the DECLARE_*()
+         macro.
+
+2) Use pci_unmap_{addr,len}_set to set these values.
+   Example, before:
+
+	ringp->mapping = FOO;
+	ringp->len = BAR;
+
+   after:
+
+	pci_unmap_addr_set(ringp, mapping, FOO);
+	pci_unmap_len_set(ringp, len, BAR);
+
+3) Use pci_unmap_{addr,len} to access these values.
+   Example, before:
+
+	pci_unmap_single(pdev, ringp->mapping, ringp->len,
+			 PCI_DMA_FROMDEVICE);
+
+   after:
+
+	pci_unmap_single(pdev,
+			 pci_unmap_addr(ringp, mapping),
+			 pci_unmap_len(ringp, len),
+			 PCI_DMA_FROMDEVICE);
+
+It really should be self-explanatory.  We treat the ADDR and LEN
+separately, because it is possible for an implementation to only
+need the address in order to perform the unmap operation.
+
+			Platform Issues
+
+If you are just writing drivers for Linux and do not maintain
+an architecture port for the kernel, you can safely skip down
+to "Closing".
+
+1) Struct scatterlist requirements.
+
+   Struct scatterlist must contain, at a minimum, the following
+   members:
+
+	struct page *page;
+	unsigned int offset;
+	unsigned int length;
+
+   The base address is specified by a "page+offset" pair.
+
+   Previous versions of struct scatterlist contained a "void *address"
+   field that was sometimes used instead of page+offset.  As of Linux
+   2.5., page+offset is always used, and the "address" field has been
+   deleted.
+
+2) More to come...
 
 			   Closing
 

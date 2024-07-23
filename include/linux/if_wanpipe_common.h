@@ -19,27 +19,20 @@
 
 #include <linux/version.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
- #define netdevice_t struct net_device
-#else
- #define netdevice_t struct device
-#endif
-
-
 typedef struct {
-	netdevice_t *slave;
+	struct net_device *slave;
 	atomic_t packet_sent;
 	atomic_t receive_block;
 	atomic_t command;
 	atomic_t disconnect;
 	atomic_t driver_busy;
-	unsigned char common_critical;
+	long common_critical;
 	struct timer_list *tx_timer;
 	struct sock *sk;		/* Wanpipe Sock bind's here */ 
-	int   (*func) (struct sk_buff *, netdevice_t *, 
-                       struct sock *);
+	int (*func)(struct sk_buff *skb, struct net_device *dev, 
+		    struct sock *sk);
 
-	struct tq_struct wanpipe_task;    /* Immediate BH handler task */
+	struct work_struct wanpipe_work;    /* deferred keventd work */
 	unsigned char rw_bind;			  /* Sock bind state */
 	unsigned char usedby;
 	unsigned char state;

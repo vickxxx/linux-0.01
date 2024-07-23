@@ -1,10 +1,15 @@
 #ifndef __LINUX_NETLINK_H
 #define __LINUX_NETLINK_H
 
+#include <linux/socket.h> /* for sa_family_t */
+
 #define NETLINK_ROUTE		0	/* Routing/device hook				*/
 #define NETLINK_SKIP		1	/* Reserved for ENskip  			*/
 #define NETLINK_USERSOCK	2	/* Reserved for user mode socket protocols 	*/
 #define NETLINK_FIREWALL	3	/* Firewalling hook				*/
+#define NETLINK_TCPDIAG		4	/* TCP socket monitoring			*/
+#define NETLINK_NFLOG		5	/* netfilter/iptables ULOG */
+#define NETLINK_XFRM		6	/* ipsec */
 #define NETLINK_ARPD		8
 #define NETLINK_ROUTE6		11	/* af_inet6 route comm channel */
 #define NETLINK_IP6_FW		13
@@ -84,6 +89,8 @@ struct nlmsgerr
 
 #ifdef __KERNEL__
 
+#include <linux/capability.h>
+
 struct netlink_skb_parms
 {
 	struct ucred		creds;		/* Skb credentials	*/
@@ -101,13 +108,14 @@ struct netlink_skb_parms
 extern int netlink_attach(int unit, int (*function)(int,struct sk_buff *skb));
 extern void netlink_detach(int unit);
 extern int netlink_post(int unit, struct sk_buff *skb);
-extern int init_netlink(void);
 extern struct sock *netlink_kernel_create(int unit, void (*input)(struct sock *sk, int len));
 extern void netlink_ack(struct sk_buff *in_skb, struct nlmsghdr *nlh, int err);
 extern int netlink_unicast(struct sock *ssk, struct sk_buff *skb, __u32 pid, int nonblock);
-extern void netlink_broadcast(struct sock *ssk, struct sk_buff *skb, __u32 pid,
-			      __u32 group, int allocation);
+extern int netlink_broadcast(struct sock *ssk, struct sk_buff *skb, __u32 pid,
+			     __u32 group, int allocation);
 extern void netlink_set_err(struct sock *ssk, __u32 pid, __u32 group, int code);
+extern int netlink_register_notifier(struct notifier_block *nb);
+extern int netlink_unregister_notifier(struct notifier_block *nb);
 
 /*
  *	skb should fit one page. This choice is good for headerless malloc.
@@ -125,6 +133,12 @@ struct netlink_callback
 	int		(*done)(struct netlink_callback *cb);
 	int		family;
 	long		args[4];
+};
+
+struct netlink_notify
+{
+	int pid;
+	int protocol;
 };
 
 static __inline__ struct nlmsghdr *
@@ -151,6 +165,10 @@ extern int netlink_dump_start(struct sock *ssk, struct sk_buff *skb,
 			      int (*dump)(struct sk_buff *skb, struct netlink_callback*),
 			      int (*done)(struct netlink_callback*));
 
+
+#define NL_NONROOT_RECV 0x1
+#define NL_NONROOT_SEND 0x2
+extern void netlink_set_nonroot(int protocol, unsigned flag);
 
 #endif /* __KERNEL__ */
 

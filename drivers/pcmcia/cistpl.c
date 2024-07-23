@@ -2,7 +2,7 @@
 
     PCMCIA Card Information Structure parser
 
-    cistpl.c 1.97 2001/10/04 03:33:49
+    cistpl.c 1.99 2002/10/24 06:11:48
 
     The contents of this file are subject to the Mozilla Public
     License Version 1.1 (the "License"); you may not use this file
@@ -31,8 +31,6 @@
     
 ======================================================================*/
 
-#define __NO_VERSION__
-
 #include <linux/config.h>
 #include <linux/module.h>
 #include <linux/kernel.h>
@@ -49,7 +47,6 @@
 #include <asm/byteorder.h>
 
 #include <pcmcia/cs_types.h>
-#include <pcmcia/bus_ops.h>
 #include <pcmcia/ss.h>
 #include <pcmcia/cs.h>
 #include <pcmcia/bulkmem.h>
@@ -85,6 +82,51 @@ static const u_int exponent[] = {
 
 INT_MODULE_PARM(cis_width,	0);		/* 16-bit CIS? */
 
+void release_cis_mem(struct pcmcia_socket *s)
+{
+    if (s->cis_mem.sys_start != 0) {
+	s->cis_mem.flags &= ~MAP_ACTIVE;
+	s->ss_entry->set_mem_map(s, &s->cis_mem);
+	if (!(s->features & SS_CAP_STATIC_MAP))
+	    release_mem_region(s->cis_mem.sys_start, s->map_size);
+	iounmap(s->cis_virt);
+	s->cis_mem.sys_start = 0;
+	s->cis_virt = NULL;
+    }
+}
+
+/*
+ * Map the card memory at "card_offset" into virtual space.
+ * If flags & MAP_ATTRIB, map the attribute space, otherwise
+ * map the memory space.
+ */
+static unsigned char *
+set_cis_map(struct pcmcia_socket *s, unsigned int card_offset, unsigned int flags)
+{
+    pccard_mem_map *mem = &s->cis_mem;
+    if (!(s->features & SS_CAP_STATIC_MAP) &&
+	mem->sys_start == 0) {
+	validate_mem(s);
+	mem->sys_start = 0;
+	if (find_mem_region(&mem->sys_start, s->map_size,
+			    s->map_size, 0, "card services", s)) {
+	    printk(KERN_NOTICE "cs: unable to map card memory!\n");
+	    return NULL;
+	}
+	mem->sys_stop = mem->sys_start+s->map_size-1;
+	s->cis_virt = ioremap(mem->sys_start, s->map_size);
+    }
+    mem->card_start = card_offset;
+    mem->flags = flags;
+    s->ss_entry->set_mem_map(s, mem);
+    if (s->features & SS_CAP_STATIC_MAP) {
+	if (s->cis_virt)
+	    iounmap(s->cis_virt);
+	s->cis_virt = ioremap(mem->sys_start, s->map_size);
+    }
+    return s->cis_virt;
+}
+
 /*======================================================================
 
     Low-level functions to read and write CIS memory.  I think the
@@ -96,199 +138,122 @@ INT_MODULE_PARM(cis_width,	0);		/* 16-bit CIS? */
 #define IS_ATTR		1
 #define IS_INDIRECT	8
 
-static int setup_cis_mem(socket_info_t *s);
-
-static void set_cis_map(socket_info_t *s, pccard_mem_map *mem)
+int read_cis_mem(struct pcmcia_socket *s, int attr, u_int addr,
+		 u_int len, void *ptr)
 {
-    s->ss_entry->set_mem_map(s->sock, mem);
-    if (s->cap.features & SS_CAP_STATIC_MAP) {
-	if (s->cis_virt)
-	    bus_iounmap(s->cap.bus, s->cis_virt);
-	s->cis_virt = bus_ioremap(s->cap.bus, mem->sys_start,
-				  s->cap.map_size);
-    }
-}
-
-void read_cis_mem(socket_info_t *s, int attr, u_int addr,
-		  u_int len, void *ptr)
-{
-    pccard_mem_map *mem = &s->cis_mem;
-    u_char *sys, *buf = ptr;
+    u_char *sys, *end, *buf = ptr;
     
     DEBUG(3, "cs: read_cis_mem(%d, %#x, %u)\n", attr, addr, len);
-    if (setup_cis_mem(s) != 0) {
-	memset(ptr, 0xff, len);
-	return;
-    }
-    mem->flags = MAP_ACTIVE | ((cis_width) ? MAP_16BIT : 0);
 
     if (attr & IS_INDIRECT) {
 	/* Indirect accesses use a bunch of special registers at fixed
 	   locations in common memory */
 	u_char flags = ICTRL0_COMMON|ICTRL0_AUTOINC|ICTRL0_BYTEGRAN;
-	if (attr & IS_ATTR) { addr *= 2; flags = ICTRL0_AUTOINC; }
-	mem->card_start = 0; mem->flags = MAP_ACTIVE;
-	set_cis_map(s, mem);
-	sys = s->cis_virt;
-	bus_writeb(s->cap.bus, flags, sys+CISREG_ICTRL0);
-	bus_writeb(s->cap.bus, addr & 0xff, sys+CISREG_IADDR0);
-	bus_writeb(s->cap.bus, (addr>>8) & 0xff, sys+CISREG_IADDR1);
-	bus_writeb(s->cap.bus, (addr>>16) & 0xff, sys+CISREG_IADDR2);
-	bus_writeb(s->cap.bus, (addr>>24) & 0xff, sys+CISREG_IADDR3);
+	if (attr & IS_ATTR) {
+	    addr *= 2;
+	    flags = ICTRL0_AUTOINC;
+	}
+
+	sys = set_cis_map(s, 0, MAP_ACTIVE | ((cis_width) ? MAP_16BIT : 0));
+	if (!sys) {
+	    memset(ptr, 0xff, len);
+	    return -1;
+	}
+
+	writeb(flags, sys+CISREG_ICTRL0);
+	writeb(addr & 0xff, sys+CISREG_IADDR0);
+	writeb((addr>>8) & 0xff, sys+CISREG_IADDR1);
+	writeb((addr>>16) & 0xff, sys+CISREG_IADDR2);
+	writeb((addr>>24) & 0xff, sys+CISREG_IADDR3);
 	for ( ; len > 0; len--, buf++)
-	    *buf = bus_readb(s->cap.bus, sys+CISREG_IDATA0);
+	    *buf = readb(sys+CISREG_IDATA0);
     } else {
-	u_int inc = 1;
-	if (attr) { mem->flags |= MAP_ATTRIB; inc++; addr *= 2; }
-	sys += (addr & (s->cap.map_size-1));
-	mem->card_start = addr & ~(s->cap.map_size-1);
+	u_int inc = 1, card_offset, flags;
+
+	flags = MAP_ACTIVE | ((cis_width) ? MAP_16BIT : 0);
+	if (attr) {
+	    flags |= MAP_ATTRIB;
+	    inc++;
+	    addr *= 2;
+	}
+
+	card_offset = addr & ~(s->map_size-1);
 	while (len) {
-	    set_cis_map(s, mem);
-	    sys = s->cis_virt + (addr & (s->cap.map_size-1));
-	    for ( ; len > 0; len--, buf++, sys += inc) {
-		if (sys == s->cis_virt+s->cap.map_size) break;
-		*buf = bus_readb(s->cap.bus, sys);
+	    sys = set_cis_map(s, card_offset, flags);
+	    if (!sys) {
+		memset(ptr, 0xff, len);
+		return -1;
 	    }
-	    mem->card_start += s->cap.map_size;
+	    end = sys + s->map_size;
+	    sys = sys + (addr & (s->map_size-1));
+	    for ( ; len > 0; len--, buf++, sys += inc) {
+		if (sys == end)
+		    break;
+		*buf = readb(sys);
+	    }
+	    card_offset += s->map_size;
 	    addr = 0;
 	}
     }
     DEBUG(3, "cs:  %#2.2x %#2.2x %#2.2x %#2.2x ...\n",
 	  *(u_char *)(ptr+0), *(u_char *)(ptr+1),
 	  *(u_char *)(ptr+2), *(u_char *)(ptr+3));
+    return 0;
 }
 
-void write_cis_mem(socket_info_t *s, int attr, u_int addr,
+void write_cis_mem(struct pcmcia_socket *s, int attr, u_int addr,
 		   u_int len, void *ptr)
 {
-    pccard_mem_map *mem = &s->cis_mem;
-    u_char *sys, *buf = ptr;
+    u_char *sys, *end, *buf = ptr;
     
     DEBUG(3, "cs: write_cis_mem(%d, %#x, %u)\n", attr, addr, len);
-    if (setup_cis_mem(s) != 0) return;
-    mem->flags = MAP_ACTIVE | ((cis_width) ? MAP_16BIT : 0);
 
     if (attr & IS_INDIRECT) {
 	/* Indirect accesses use a bunch of special registers at fixed
 	   locations in common memory */
 	u_char flags = ICTRL0_COMMON|ICTRL0_AUTOINC|ICTRL0_BYTEGRAN;
-	if (attr & IS_ATTR) { addr *= 2; flags = ICTRL0_AUTOINC; }
-	mem->card_start = 0; mem->flags = MAP_ACTIVE;
-	set_cis_map(s, mem);
-	sys = s->cis_virt;
-	bus_writeb(s->cap.bus, flags, sys+CISREG_ICTRL0);
-	bus_writeb(s->cap.bus, addr & 0xff, sys+CISREG_IADDR0);
-	bus_writeb(s->cap.bus, (addr>>8) & 0xff, sys+CISREG_IADDR1);
-	bus_writeb(s->cap.bus, (addr>>16) & 0xff, sys+CISREG_IADDR2);
-	bus_writeb(s->cap.bus, (addr>>24) & 0xff, sys+CISREG_IADDR3);
+	if (attr & IS_ATTR) {
+	    addr *= 2;
+	    flags = ICTRL0_AUTOINC;
+	}
+
+	sys = set_cis_map(s, 0, MAP_ACTIVE | ((cis_width) ? MAP_16BIT : 0));
+	if (!sys)
+		return; /* FIXME: Error */
+
+	writeb(flags, sys+CISREG_ICTRL0);
+	writeb(addr & 0xff, sys+CISREG_IADDR0);
+	writeb((addr>>8) & 0xff, sys+CISREG_IADDR1);
+	writeb((addr>>16) & 0xff, sys+CISREG_IADDR2);
+	writeb((addr>>24) & 0xff, sys+CISREG_IADDR3);
 	for ( ; len > 0; len--, buf++)
-	    bus_writeb(s->cap.bus, *buf, sys+CISREG_IDATA0);
+	    writeb(*buf, sys+CISREG_IDATA0);
     } else {
-	int inc = 1;
-	if (attr & IS_ATTR) { mem->flags |= MAP_ATTRIB; inc++; addr *= 2; }
-	mem->card_start = addr & ~(s->cap.map_size-1);
+	u_int inc = 1, card_offset, flags;
+
+	flags = MAP_ACTIVE | ((cis_width) ? MAP_16BIT : 0);
+	if (attr & IS_ATTR) {
+	    flags |= MAP_ATTRIB;
+	    inc++;
+	    addr *= 2;
+	}
+
+	card_offset = addr & ~(s->map_size-1);
 	while (len) {
-	    set_cis_map(s, mem);
-	    sys = s->cis_virt + (addr & (s->cap.map_size-1));
+	    sys = set_cis_map(s, card_offset, flags);
+	    if (!sys)
+		return; /* FIXME: error */
+
+	    end = sys + s->map_size;
+	    sys = sys + (addr & (s->map_size-1));
 	    for ( ; len > 0; len--, buf++, sys += inc) {
-		if (sys == s->cis_virt+s->cap.map_size) break;
-		bus_writeb(s->cap.bus, *buf, sys);
+		if (sys == end)
+		    break;
+		writeb(*buf, sys);
 	    }
-	    mem->card_start += s->cap.map_size;
+	    card_offset += s->map_size;
 	    addr = 0;
 	}
-    }
-}
-
-/*======================================================================
-
-    This is tricky... when we set up CIS memory, we try to validate
-    the memory window space allocations.
-    
-======================================================================*/
-
-/* Scratch pointer to the socket we use for validation */
-static socket_info_t *vs = NULL;
-
-/* Validation function for cards with a valid CIS */
-static int cis_readable(u_long base)
-{
-    cisinfo_t info1, info2;
-    int ret;
-    vs->cis_mem.sys_start = base;
-    vs->cis_mem.sys_stop = base+vs->cap.map_size-1;
-    vs->cis_virt = bus_ioremap(vs->cap.bus, base, vs->cap.map_size);
-    ret = pcmcia_validate_cis(vs->clients, &info1);
-    /* invalidate mapping and CIS cache */
-    bus_iounmap(vs->cap.bus, vs->cis_virt); vs->cis_used = 0;
-    if ((ret != 0) || (info1.Chains == 0))
-	return 0;
-    vs->cis_mem.sys_start = base+vs->cap.map_size;
-    vs->cis_mem.sys_stop = base+2*vs->cap.map_size-1;
-    vs->cis_virt = bus_ioremap(vs->cap.bus, base+vs->cap.map_size,
-			       vs->cap.map_size);
-    ret = pcmcia_validate_cis(vs->clients, &info2);
-    bus_iounmap(vs->cap.bus, vs->cis_virt); vs->cis_used = 0;
-    return ((ret == 0) && (info1.Chains == info2.Chains));
-}
-
-/* Validation function for simple memory cards */
-static int checksum(u_long base)
-{
-    int i, a, b, d;
-    vs->cis_mem.sys_start = base;
-    vs->cis_mem.sys_stop = base+vs->cap.map_size-1;
-    vs->cis_virt = bus_ioremap(vs->cap.bus, base, vs->cap.map_size);
-    vs->cis_mem.card_start = 0;
-    vs->cis_mem.flags = MAP_ACTIVE;
-    vs->ss_entry->set_mem_map(vs->sock, &vs->cis_mem);
-    /* Don't bother checking every word... */
-    a = 0; b = -1;
-    for (i = 0; i < vs->cap.map_size; i += 44) {
-	d = bus_readl(vs->cap.bus, vs->cis_virt+i);
-	a += d; b &= d;
-    }
-    bus_iounmap(vs->cap.bus, vs->cis_virt);
-    return (b == -1) ? -1 : (a>>1);
-}
-
-static int checksum_match(u_long base)
-{
-    int a = checksum(base), b = checksum(base+vs->cap.map_size);
-    return ((a == b) && (a >= 0));
-}
-
-static int setup_cis_mem(socket_info_t *s)
-{
-    if (!(s->cap.features & SS_CAP_STATIC_MAP) &&
-	(s->cis_mem.sys_start == 0)) {
-	int low = !(s->cap.features & SS_CAP_PAGE_REGS);
-	vs = s;
-	validate_mem(cis_readable, checksum_match, low);
-	s->cis_mem.sys_start = 0;
-	vs = NULL;
-	if (find_mem_region(&s->cis_mem.sys_start, s->cap.map_size,
-			    s->cap.map_size, low, "card services")) {
-	    printk(KERN_NOTICE "cs: unable to map card memory!\n");
-	    return CS_OUT_OF_RESOURCE;
-	}
-	s->cis_mem.sys_stop = s->cis_mem.sys_start+s->cap.map_size-1;
-	s->cis_virt = bus_ioremap(s->cap.bus, s->cis_mem.sys_start,
-				  s->cap.map_size);
-    }
-    return 0;
-}
-
-void release_cis_mem(socket_info_t *s)
-{
-    if (s->cis_mem.sys_start != 0) {
-	s->cis_mem.flags &= ~MAP_ACTIVE;
-	s->ss_entry->set_mem_map(s->sock, &s->cis_mem);
-	if (!(s->cap.features & SS_CAP_STATIC_MAP))
-	    release_mem_region(s->cis_mem.sys_start, s->cap.map_size);
-	bus_iounmap(s->cap.bus, s->cis_virt);
-	s->cis_mem.sys_start = 0;
-	s->cis_virt = NULL;
     }
 }
 
@@ -300,11 +265,11 @@ void release_cis_mem(socket_info_t *s)
     
 ======================================================================*/
 
-static void read_cis_cache(socket_info_t *s, int attr, u_int addr,
+static void read_cis_cache(struct pcmcia_socket *s, int attr, u_int addr,
 			   u_int len, void *ptr)
 {
-    int i;
-    char *caddr;
+    struct cis_cache_entry *cis;
+    int ret;
 
     if (s->fake_cis) {
 	if (s->fake_cis_len > addr+len)
@@ -313,32 +278,55 @@ static void read_cis_cache(socket_info_t *s, int attr, u_int addr,
 	    memset(ptr, 0xff, len);
 	return;
     }
-    caddr = s->cis_cache;
-    for (i = 0; i < s->cis_used; i++) {
-	if ((s->cis_table[i].addr == addr) &&
-	    (s->cis_table[i].len == len) &&
-	    (s->cis_table[i].attr == attr)) break;
-	caddr += s->cis_table[i].len;
+
+    list_for_each_entry(cis, &s->cis_cache, node) {
+	if (cis->addr == addr && cis->len == len && cis->attr == attr) {
+	    memcpy(ptr, cis->cache, len);
+	    return;
+	}
     }
-    if (i < s->cis_used) {
-	memcpy(ptr, caddr, len);
-	return;
-    }
+
 #ifdef CONFIG_CARDBUS
     if (s->state & SOCKET_CARDBUS)
-	read_cb_mem(s, 0, attr, addr, len, ptr);
+	ret = read_cb_mem(s, attr, addr, len, ptr);
     else
 #endif
-	read_cis_mem(s, attr, addr, len, ptr);
-    /* Copy data into the cache, if there is room */
-    if ((i < MAX_CIS_TABLE) &&
-	(caddr+len < s->cis_cache+MAX_CIS_DATA)) {
-	s->cis_table[i].addr = addr;
-	s->cis_table[i].len = len;
-	s->cis_table[i].attr = attr;
-	s->cis_used++;
-	memcpy(caddr, ptr, len);
-    }	    
+	ret = read_cis_mem(s, attr, addr, len, ptr);
+
+    /* Copy data into the cache */
+    cis = kmalloc(sizeof(struct cis_cache_entry) + len, GFP_KERNEL);
+    if (cis) {
+	cis->addr = addr;
+	cis->len = len;
+	cis->attr = attr;
+	memcpy(cis->cache, ptr, len);
+	list_add(&cis->node, &s->cis_cache);
+    }
+}
+
+static void
+remove_cis_cache(struct pcmcia_socket *s, int attr, u_int addr, u_int len)
+{
+	struct cis_cache_entry *cis;
+
+	list_for_each_entry(cis, &s->cis_cache, node)
+		if (cis->addr == addr && cis->len == len && cis->attr == attr) {
+			list_del(&cis->node);
+			kfree(cis);
+			break;
+		}
+}
+
+void destroy_cis_cache(struct pcmcia_socket *s)
+{
+	struct list_head *l, *n;
+
+	list_for_each_safe(l, n, &s->cis_cache) {
+		struct cis_cache_entry *cis = list_entry(l, struct cis_cache_entry, node);
+
+		list_del(&cis->node);
+		kfree(cis);
+	}
 }
 
 /*======================================================================
@@ -348,26 +336,27 @@ static void read_cis_cache(socket_info_t *s, int attr, u_int addr,
     
 ======================================================================*/
 
-int verify_cis_cache(socket_info_t *s)
+int verify_cis_cache(struct pcmcia_socket *s)
 {
-    char buf[256], *caddr;
-    int i;
-    
-    caddr = s->cis_cache;
-    for (i = 0; i < s->cis_used; i++) {
+	struct cis_cache_entry *cis;
+	char buf[256];
+
+	list_for_each_entry(cis, &s->cis_cache, node) {
+		int len = cis->len;
+
+		if (len > 256)
+			len = 256;
 #ifdef CONFIG_CARDBUS
-	if (s->state & SOCKET_CARDBUS)
-	    read_cb_mem(s, 0, s->cis_table[i].attr, s->cis_table[i].addr,
-			s->cis_table[i].len, buf);
-	else
+		if (s->state & SOCKET_CARDBUS)
+			read_cb_mem(s, cis->attr, cis->addr, len, buf);
+		else
 #endif
-	    read_cis_mem(s, s->cis_table[i].attr, s->cis_table[i].addr,
-			 s->cis_table[i].len, buf);
-	if (memcmp(buf, caddr, s->cis_table[i].len) != 0)
-	    break;
-	caddr += s->cis_table[i].len;
-    }
-    return (i < s->cis_used);
+			read_cis_mem(s, cis->attr, cis->addr, len, buf);
+
+		if (memcmp(buf, cis->cache, len) != 0)
+			return -1;
+	}
+	return 0;
 }
 
 /*======================================================================
@@ -379,7 +368,7 @@ int verify_cis_cache(socket_info_t *s)
 
 int pcmcia_replace_cis(client_handle_t handle, cisdump_t *cis)
 {
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     if (CHECK_HANDLE(handle))
 	return CS_BAD_HANDLE;
     s = SOCKET(handle);
@@ -419,7 +408,7 @@ int pcmcia_get_next_tuple(client_handle_t handle, tuple_t *tuple);
 
 int pcmcia_get_first_tuple(client_handle_t handle, tuple_t *tuple)
 {
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     if (CHECK_HANDLE(handle))
 	return CS_BAD_HANDLE;
     s = SOCKET(handle);
@@ -428,8 +417,9 @@ int pcmcia_get_first_tuple(client_handle_t handle, tuple_t *tuple)
     tuple->TupleLink = tuple->Flags = 0;
 #ifdef CONFIG_CARDBUS
     if (s->state & SOCKET_CARDBUS) {
+	struct pci_dev *dev = s->cb_dev;
 	u_int ptr;
-	pcibios_read_config_dword(s->cap.cb_dev->subordinate->number, 0, 0x28, &ptr);
+	pci_bus_read_config_dword(dev->subordinate, 0, PCI_CARDBUS_CIS, &ptr);
 	tuple->CISOffset = ptr & ~7;
 	SPACE(tuple->Flags) = (ptr & 7);
     } else
@@ -454,7 +444,7 @@ int pcmcia_get_first_tuple(client_handle_t handle, tuple_t *tuple)
     return pcmcia_get_next_tuple(handle, tuple);
 }
 
-static int follow_link(socket_info_t *s, tuple_t *tuple)
+static int follow_link(struct pcmcia_socket *s, tuple_t *tuple)
 {
     u_char link[5];
     u_int ofs;
@@ -482,19 +472,21 @@ static int follow_link(socket_info_t *s, tuple_t *tuple)
 	if ((link[0] == CISTPL_LINKTARGET) && (link[1] >= 3) &&
 	    (strncmp(link+2, "CIS", 3) == 0))
 	    return ofs;
+	remove_cis_cache(s, SPACE(tuple->Flags), ofs, 5);
 	/* Then, we try the wrong spot... */
 	ofs = ofs >> 1;
     }
     read_cis_cache(s, SPACE(tuple->Flags), ofs, 5, link);
-    if ((link[0] != CISTPL_LINKTARGET) || (link[1] < 3) ||
-	(strncmp(link+2, "CIS", 3) != 0))
-	return -1;
-    return ofs;
+    if ((link[0] == CISTPL_LINKTARGET) && (link[1] >= 3) &&
+	(strncmp(link+2, "CIS", 3) == 0))
+	return ofs;
+    remove_cis_cache(s, SPACE(tuple->Flags), ofs, 5);
+    return -1;
 }
 
 int pcmcia_get_next_tuple(client_handle_t handle, tuple_t *tuple)
 {
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     u_char link[2], tmp;
     int ofs, i, attr;
     
@@ -595,7 +587,7 @@ int pcmcia_get_next_tuple(client_handle_t handle, tuple_t *tuple)
 
 int pcmcia_get_tuple_data(client_handle_t handle, tuple_t *tuple)
 {
-    socket_info_t *s;
+    struct pcmcia_socket *s;
     u_int len;
     
     if (CHECK_HANDLE(handle))

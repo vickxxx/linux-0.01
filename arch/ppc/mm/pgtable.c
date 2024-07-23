@@ -1,7 +1,4 @@
 /*
- * BK Id: %F% %I% %G% %U% %#%
- */
-/*
  * This file contains the routines setting up the linux page tables.
  *  -- paulus
  * 
@@ -26,8 +23,10 @@
 #include <linux/config.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
+#include <linux/mm.h>
 #include <linux/vmalloc.h>
 #include <linux/init.h>
+#include <linux/highmem.h>
 
 #include <asm/pgtable.h>
 #include <asm/pgalloc.h>
@@ -35,15 +34,9 @@
 
 #include "mmu_decl.h"
 
-unsigned long ram_phys_base;
-
 unsigned long ioremap_base;
 unsigned long ioremap_bot;
 int io_bat_index;
-
-#ifndef CONFIG_SMP
-struct pgtable_cache_struct quicklists;
-#endif
 
 #if defined(CONFIG_6xx) || defined(CONFIG_POWER3)
 #define HAVE_BATS	1
@@ -62,7 +55,61 @@ void setbat(int index, unsigned long virt, unsigned long phys,
 #define p_mapped_by_bats(x)	(0UL)
 #endif /* HAVE_BATS */
 
-#ifndef CONFIG_PPC_ISERIES
+pgd_t *pgd_alloc(struct mm_struct *mm)
+{
+	pgd_t *ret;
+
+	if ((ret = (pgd_t *)__get_free_page(GFP_KERNEL)) != NULL)
+		clear_page(ret);
+	return ret;
+}
+
+void pgd_free(pgd_t *pgd)
+{
+	free_page((unsigned long)pgd);
+}
+
+pte_t *pte_alloc_one_kernel(struct mm_struct *mm, unsigned long address)
+{
+	pte_t *pte;
+	extern int mem_init_done;
+	extern void *early_get_page(void);
+
+	if (mem_init_done)
+		pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
+	else
+		pte = (pte_t *)early_get_page();
+	if (pte)
+		clear_page(pte);
+	return pte;
+}
+
+struct page *pte_alloc_one(struct mm_struct *mm, unsigned long address)
+{
+	struct page *pte;
+
+#ifdef CONFIG_HIGHPTE
+	int flags = GFP_KERNEL | __GFP_HIGHMEM | __GFP_REPEAT;
+#else
+	int flags = GFP_KERNEL | __GFP_REPEAT;
+#endif
+
+	pte = alloc_pages(flags, 0);
+	if (pte)
+		clear_highpage(pte);
+	return pte;
+}
+
+void pte_free_kernel(pte_t *pte)
+{
+	free_page((unsigned long)pte);
+}
+
+void pte_free(struct page *pte)
+{
+	__free_page(pte);
+}
+
 void *
 ioremap(unsigned long addr, unsigned long size)
 {
@@ -143,7 +190,7 @@ __ioremap(unsigned long addr, unsigned long size, unsigned long flags)
 		err = map_page(v+i, p+i, flags);
 	if (err) {
 		if (mem_init_done)
-			vfree((void *)v);
+			vunmap((void *)v);
 		return NULL;
 	}
 
@@ -160,9 +207,8 @@ void iounmap(void *addr)
 	if (v_mapped_by_bats((unsigned long)addr)) return;
 
 	if (addr > high_memory && (unsigned long) addr < ioremap_bot)
-		vfree((void *) (PAGE_MASK & (unsigned long) addr));
+		vunmap((void *) (PAGE_MASK & (unsigned long)addr));
 }
-#endif /* CONFIG_PPC_ISERIES */
 
 int
 map_page(unsigned long va, unsigned long pa, int flags)
@@ -175,12 +221,12 @@ map_page(unsigned long va, unsigned long pa, int flags)
 	/* Use upper 10 bits of VA to index the first level map */
 	pd = pmd_offset(pgd_offset_k(va), va);
 	/* Use middle 10 bits of VA to index the second-level map */
-	pg = pte_alloc(&init_mm, pd, va);
+	pg = pte_alloc_kernel(&init_mm, pd, va);
 	if (pg != 0) {
 		err = 0;
-		set_pte(pg, mk_pte_phys(pa & PAGE_MASK, __pgprot(flags)));
+		set_pte(pg, pfn_pte(pa >> PAGE_SHIFT, __pgprot(flags)));
 		if (mem_init_done)
-			flush_HPTE(0, va, pg);
+			flush_HPTE(0, va, pmd_val(*pd));
 	}
 	spin_unlock(&init_mm.page_table_lock);
 	return err;
@@ -193,31 +239,14 @@ void __init mapin_ram(void)
 {
 	unsigned long v, p, s, f;
 
-#ifdef HAVE_BATS
-	if (!__map_without_bats)
-		bat_mapin_ram();
-#endif /* HAVE_BATS */
-
-	v = KERNELBASE;
-	p = ram_phys_base;
-	for (s = 0; s < total_lowmem; s += PAGE_SIZE) {
-		/* On the MPC8xx, we want the page shared so we
-		 * don't get ASID compares on kernel space.
-		 */
-		f = _PAGE_PRESENT | _PAGE_ACCESSED | _PAGE_SHARED;
-#if defined(CONFIG_KGDB) || defined(CONFIG_XMON)
-		/* Allows stub to set breakpoints everywhere */
-		f |= _PAGE_RW | _PAGE_DIRTY;
-#else
-		if ((char *) v < _stext || (char *) v >= etext)
-			f |= _PAGE_RW | _PAGE_DIRTY;
-#ifdef CONFIG_PPC_STD_MMU
+	s = mmu_mapin_ram();
+	v = KERNELBASE + s;
+	p = PPC_MEMSTART + s;
+	for (; s < total_lowmem; s += PAGE_SIZE) {
+		if ((char *) v >= _stext && (char *) v < etext)
+			f = _PAGE_RAM_TEXT;
 		else
-			/* On the powerpc (not all), no user access
-			   forces R/W kernel access */
-			f |= _PAGE_USER;
-#endif /* CONFIG_PPC_STD_MMU */
-#endif /* CONFIG_KGDB */
+			f = _PAGE_RAM;
 		map_page(v, p, f);
 		v += PAGE_SIZE;
 		p += PAGE_SIZE;
@@ -274,10 +303,11 @@ get_pteptr(struct mm_struct *mm, unsigned long addr, pte_t **ptep)
         if (pgd) {
                 pmd = pmd_offset(pgd, addr & PAGE_MASK);
                 if (pmd_present(*pmd)) {
-                        pte = pte_offset(pmd, addr & PAGE_MASK);
+                        pte = pte_offset_map(pmd, addr & PAGE_MASK);
                         if (pte) {
 				retval = 1;
 				*ptep = pte;
+				/* XXX caller needs to do pte_unmap, yuck */
                         }
                 }
         }
@@ -314,8 +344,10 @@ unsigned long iopa(unsigned long addr)
 		mm = &init_mm;
 	
 	pa = 0;
-	if (get_pteptr(mm, addr, &pte))
+	if (get_pteptr(mm, addr, &pte)) {
 		pa = (pte_val(*pte) & PAGE_MASK) | (addr & ~PAGE_MASK);
+		pte_unmap(pte);
+	}
 
 	return(pa);
 }

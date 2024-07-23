@@ -20,13 +20,12 @@
 #include <linux/module.h>
 
 #include <linux/stat.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/iso_fs.h>
 #include <linux/kernel.h>
 #include <linux/major.h>
 #include <linux/mm.h>
 #include <linux/string.h>
-#include <linux/locks.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
 #include <linux/cdrom.h>
@@ -36,7 +35,8 @@
 #include <linux/smp_lock.h>
 #include <linux/blkdev.h>
 #include <linux/vmalloc.h>
-#include <linux/zlib_fs.h>
+#include <linux/zlib.h>
+#include <linux/buffer_head.h>
 
 #include <asm/system.h>
 #include <asm/uaccess.h>
@@ -72,8 +72,8 @@ static int zisofs_readpage(struct file *file, struct page *page)
 	unsigned long bufmask  = bufsize - 1;
 	int err = -EIO;
 	int i;
-	unsigned int header_size = inode->u.isofs_i.i_format_parm[0];
-	unsigned int zisofs_block_shift = inode->u.isofs_i.i_format_parm[1];
+	unsigned int header_size = ISOFS_I(inode)->i_format_parm[0];
+	unsigned int zisofs_block_shift = ISOFS_I(inode)->i_format_parm[1];
 	/* unsigned long zisofs_block_size = 1UL << zisofs_block_shift; */
 	unsigned int zisofs_block_page_shift = zisofs_block_shift-PAGE_CACHE_SHIFT;
 	unsigned long zisofs_block_pages = 1UL << zisofs_block_page_shift;
@@ -164,7 +164,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 				flush_dcache_page(page);
 				SetPageUptodate(page);
 				kunmap(page);
-				UnlockPage(page);
+				unlock_page(page);
 				if ( fpage == xpage )
 					err = 0; /* The critical page */
 				else
@@ -209,7 +209,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 		stream.workspace = zisofs_zlib_workspace;
 		down(&zisofs_zlib_semaphore);
 		
-		zerr = zlib_fs_inflateInit(&stream);
+		zerr = zlib_inflateInit(&stream);
 		if ( zerr != Z_OK ) {
 			if ( err && zerr == Z_MEM_ERROR )
 				err = -ENOMEM;
@@ -250,7 +250,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 					}
 				}
 				ao = stream.avail_out;  ai = stream.avail_in;
-				zerr = zlib_fs_inflate(&stream, Z_SYNC_FLUSH);
+				zerr = zlib_inflate(&stream, Z_SYNC_FLUSH);
 				left_out = stream.avail_out;
 				if ( zerr == Z_BUF_ERROR && stream.avail_in == 0 )
 					continue;
@@ -282,7 +282,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 					flush_dcache_page(page);
 					SetPageUptodate(page);
 					kunmap(page);
-					UnlockPage(page);
+					unlock_page(page);
 					if ( fpage == xpage )
 						err = 0; /* The critical page */
 					else
@@ -291,7 +291,7 @@ static int zisofs_readpage(struct file *file, struct page *page)
 				fpage++;
 			}
 		}
-		zlib_fs_inflateEnd(&stream);
+		zlib_inflateEnd(&stream);
 
 	z_eio:
 		up(&zisofs_zlib_semaphore);
@@ -313,7 +313,7 @@ eio:
 			if ( fpage == xpage )
 				SetPageError(page);
 			kunmap(page);
-			UnlockPage(page);
+			unlock_page(page);
 			if ( fpage != xpage )
 				page_cache_release(page);
 		}
@@ -325,12 +325,12 @@ eio:
 }
 
 struct address_space_operations zisofs_aops = {
-	readpage: zisofs_readpage,
+	.readpage = zisofs_readpage,
 	/* No sync_page operation supported? */
 	/* No bmap operation supported */
 };
 
-static int initialized = 0;
+static int initialized;
 
 int __init zisofs_init(void)
 {
@@ -339,7 +339,7 @@ int __init zisofs_init(void)
 		return 0;
 	}
 
-	zisofs_zlib_workspace = vmalloc(zlib_fs_inflate_workspacesize());
+	zisofs_zlib_workspace = vmalloc(zlib_inflate_workspacesize());
 	if ( !zisofs_zlib_workspace )
 		return -ENOMEM;
 	init_MUTEX(&zisofs_zlib_semaphore);
@@ -348,7 +348,7 @@ int __init zisofs_init(void)
 	return 0;
 }
 
-void __exit zisofs_cleanup(void)
+void zisofs_cleanup(void)
 {
 	if ( !initialized ) {
 		printk("zisofs_cleanup: called without initialization\n");

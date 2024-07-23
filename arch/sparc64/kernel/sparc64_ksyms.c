@@ -1,4 +1,4 @@
-/* $Id: sparc64_ksyms.c,v 1.116 2001/10/26 15:49:21 davem Exp $
+/* $Id: sparc64_ksyms.c,v 1.121 2002/02/09 19:49:31 davem Exp $
  * arch/sparc64/kernel/sparc64_ksyms.c: Sparc64 specific ksyms support.
  *
  * Copyright (C) 1996 David S. Miller (davem@caip.rutgers.edu)
@@ -20,6 +20,8 @@
 #include <linux/interrupt.h>
 #include <linux/fs_struct.h>
 #include <linux/mm.h>
+#include <linux/socket.h>
+#include <net/compat.h>
 
 #include <asm/oplib.h>
 #include <asm/delay.h>
@@ -28,7 +30,6 @@
 #include <asm/pgtable.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/softirq.h>
 #include <asm/hardirq.h>
 #include <asm/idprom.h>
 #include <asm/svr4.h>
@@ -42,6 +43,7 @@
 #include <asm/checksum.h>
 #include <asm/fpumacro.h>
 #include <asm/pgalloc.h>
+#include <asm/cacheflush.h>
 #ifdef CONFIG_SBUS
 #include <asm/sbus.h>
 #include <asm/dma.h>
@@ -51,6 +53,8 @@
 #include <asm/isa.h>
 #endif
 #include <asm/a.out.h>
+#include <asm/ns87303.h>
+#include <asm/timer.h>
 
 struct poll {
 	int fd;
@@ -58,7 +62,6 @@ struct poll {
 	short revents;
 };
 
-extern unsigned prom_cpu_nodes[64];
 extern void die_if_kernel(char *str, struct pt_regs *regs);
 extern pid_t kernel_thread(int (*fn)(void *), void * arg, unsigned long flags);
 void _sigpause_common (unsigned int set, struct pt_regs *);
@@ -80,25 +83,25 @@ extern u32 sunos_sys_table[], sys_call_table32[];
 extern void tl0_solaris(void);
 extern void sys_sigsuspend(void);
 extern int sys_getppid(void);
+extern int sys_getpid(void);
+extern int sys_geteuid(void);
+extern int sys_getuid(void);
+extern int sys_getegid(void);
+extern int sys_getgid(void);
 extern int svr4_getcontext(svr4_ucontext_t *uc, struct pt_regs *regs);
 extern int svr4_setcontext(svr4_ucontext_t *uc, struct pt_regs *regs);
 extern int sys_ioctl(unsigned int fd, unsigned int cmd, unsigned long arg);
-extern int sys32_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
+extern int compat_sys_ioctl(unsigned int fd, unsigned int cmd, u32 arg);
 extern int (*handle_mathemu)(struct pt_regs *, struct fpustate *);
 extern long sparc32_open(const char * filename, int flags, int mode);
-extern int register_ioctl32_conversion(unsigned int cmd, int (*handler)(unsigned int, unsigned int, unsigned long, struct file *));
-extern int unregister_ioctl32_conversion(unsigned int cmd);
-extern int io_remap_page_range(unsigned long from, unsigned long offset, unsigned long size, pgprot_t prot, int space);
+extern int io_remap_page_range(struct vm_area_struct *vma, unsigned long from, unsigned long offset, unsigned long size, pgprot_t prot, int space);
                 
 extern int __ashrdi3(int, int);
 
 extern void dump_thread(struct pt_regs *, struct user *);
 extern int dump_fpu (struct pt_regs * regs, elf_fpregset_t * fpregs);
 
-#ifdef CONFIG_SMP
-extern spinlock_t kernel_flag;
-extern int smp_num_cpus;
-#ifdef SPIN_LOCK_DEBUG
+#if defined(CONFIG_SMP) && defined(CONFIG_DEBUG_SPINLOCK)
 extern void _do_spin_lock (spinlock_t *lock, char *str);
 extern void _do_spin_unlock (spinlock_t *lock);
 extern int _spin_trylock (spinlock_t *lock);
@@ -107,13 +110,23 @@ extern void _do_read_unlock(rwlock_t *rw, char *str);
 extern void _do_write_lock(rwlock_t *rw, char *str);
 extern void _do_write_unlock(rwlock_t *rw);
 #endif
-#endif
 
 extern unsigned long phys_base;
+extern unsigned long pfn_base;
+
+extern unsigned int sys_call_table[];
+
+extern void xor_vis_2(unsigned long, unsigned long *, unsigned long *);
+extern void xor_vis_3(unsigned long, unsigned long *, unsigned long *,
+		      unsigned long *);
+extern void xor_vis_4(unsigned long, unsigned long *, unsigned long *,
+		      unsigned long *, unsigned long *);
+extern void xor_vis_5(unsigned long, unsigned long *, unsigned long *,
+		      unsigned long *, unsigned long *, unsigned long *);
 
 /* used by various drivers */
 #ifdef CONFIG_SMP
-#ifndef SPIN_LOCK_DEBUG
+#ifndef CONFIG_DEBUG_SPINLOCK
 /* Out of line rw-locking implementation. */
 EXPORT_SYMBOL(__read_lock);
 EXPORT_SYMBOL(__read_unlock);
@@ -121,31 +134,25 @@ EXPORT_SYMBOL(__write_lock);
 EXPORT_SYMBOL(__write_unlock);
 #endif
 
-/* Kernel wide locking */
-EXPORT_SYMBOL(kernel_flag);
-
 /* Hard IRQ locking */
-EXPORT_SYMBOL(global_irq_holder);
-#ifdef CONFIG_SMP
 EXPORT_SYMBOL(synchronize_irq);
+
+#if defined(CONFIG_MCOUNT)
+extern void mcount(void);
+EXPORT_SYMBOL_NOVERS(mcount);
 #endif
-EXPORT_SYMBOL(__global_cli);
-EXPORT_SYMBOL(__global_sti);
-EXPORT_SYMBOL(__global_save_flags);
-EXPORT_SYMBOL(__global_restore_flags);
 
 /* Per-CPU information table */
 EXPORT_SYMBOL(cpu_data);
 
-/* Misc SMP information */
-#ifdef CONFIG_SMP
-EXPORT_SYMBOL(smp_num_cpus);
-#endif
-EXPORT_SYMBOL(__cpu_number_map);
-EXPORT_SYMBOL(__cpu_logical_map);
+/* CPU online map and active count.  */
+EXPORT_SYMBOL(cpu_online_map);
+EXPORT_SYMBOL(sparc64_num_cpus_online);
+EXPORT_SYMBOL(phys_cpu_present_map);
+EXPORT_SYMBOL(sparc64_num_cpus_possible);
 
 /* Spinlock debugging library, optional. */
-#ifdef SPIN_LOCK_DEBUG
+#ifdef CONFIG_DEBUG_SPINLOCK
 EXPORT_SYMBOL(_do_spin_lock);
 EXPORT_SYMBOL(_do_spin_unlock);
 EXPORT_SYMBOL(_spin_trylock);
@@ -155,16 +162,16 @@ EXPORT_SYMBOL(_do_write_lock);
 EXPORT_SYMBOL(_do_write_unlock);
 #endif
 
-#ifdef CONFIG_SMP
 EXPORT_SYMBOL(smp_call_function);
-#endif
+#endif /* CONFIG_SMP */
 
-#endif
+EXPORT_SYMBOL(sparc64_get_clock_tick);
 
 /* semaphores */
-EXPORT_SYMBOL(__down);
-EXPORT_SYMBOL(__down_interruptible);
-EXPORT_SYMBOL(__up);
+EXPORT_SYMBOL(down);
+EXPORT_SYMBOL(down_trylock);
+EXPORT_SYMBOL(down_interruptible);
+EXPORT_SYMBOL(up);
 
 /* Atomic counter implementation. */
 EXPORT_SYMBOL(__atomic_add);
@@ -190,14 +197,16 @@ EXPORT_SYMBOL(tlb_type);
 EXPORT_SYMBOL(get_fb_unmapped_area);
 EXPORT_SYMBOL(flush_icache_range);
 EXPORT_SYMBOL(flush_dcache_page);
+EXPORT_SYMBOL(__flush_dcache_range);
 
 EXPORT_SYMBOL(mostek_lock);
 EXPORT_SYMBOL(mstk48t02_regs);
 EXPORT_SYMBOL(request_fast_irq);
-#if CONFIG_SUN_AUXIO
-EXPORT_SYMBOL(auxio_register);
+#ifdef CONFIG_SUN_AUXIO
+EXPORT_SYMBOL(auxio_set_led);
+EXPORT_SYMBOL(auxio_set_lte);
 #endif
-#if CONFIG_SBUS
+#ifdef CONFIG_SBUS
 EXPORT_SYMBOL(sbus_root);
 EXPORT_SYMBOL(dma_chain);
 EXPORT_SYMBOL(sbus_set_sbus64);
@@ -231,20 +240,17 @@ EXPORT_SYMBOL(pci_dma_sync_sg);
 EXPORT_SYMBOL(pci_dma_supported);
 #endif
 
-/* IOCTL32 emulation hooks. */
-EXPORT_SYMBOL(register_ioctl32_conversion);
-EXPORT_SYMBOL(unregister_ioctl32_conversion);
-
 /* I/O device mmaping on Sparc64. */
 EXPORT_SYMBOL(io_remap_page_range);
 
 /* Solaris/SunOS binary compatibility */
 EXPORT_SYMBOL(_sigpause_common);
+EXPORT_SYMBOL(verify_compat_iovec);
 
 /* Should really be in linux/kernel/ksyms.c */
 EXPORT_SYMBOL(dump_thread);
 EXPORT_SYMBOL(dump_fpu);
-EXPORT_SYMBOL(pte_alloc_one);
+EXPORT_SYMBOL(pte_alloc_one_kernel);
 #ifndef CONFIG_SMP
 EXPORT_SYMBOL(pgt_quicklists);
 #endif
@@ -293,7 +299,6 @@ EXPORT_SYMBOL(strcmp);
 EXPORT_SYMBOL(strchr);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(strpbrk);
-EXPORT_SYMBOL(strtok);
 EXPORT_SYMBOL(strstr);
 
 #ifdef CONFIG_SOLARIS_EMUL_MODULE
@@ -307,11 +312,16 @@ EXPORT_SYMBOL(sys_call_table32);
 EXPORT_SYMBOL(tl0_solaris);
 EXPORT_SYMBOL(sys_sigsuspend);
 EXPORT_SYMBOL(sys_getppid);
+EXPORT_SYMBOL(sys_getpid);
+EXPORT_SYMBOL(sys_geteuid);
+EXPORT_SYMBOL(sys_getuid);
+EXPORT_SYMBOL(sys_getegid);
+EXPORT_SYMBOL(sys_getgid);
 EXPORT_SYMBOL(svr4_getcontext);
 EXPORT_SYMBOL(svr4_setcontext);
 EXPORT_SYMBOL(prom_cpu_nodes);
 EXPORT_SYMBOL(sys_ioctl);
-EXPORT_SYMBOL(sys32_ioctl);
+EXPORT_SYMBOL(compat_sys_ioctl);
 EXPORT_SYMBOL(sparc32_open);
 #endif
 
@@ -319,7 +329,6 @@ EXPORT_SYMBOL(sparc32_open);
 EXPORT_SYMBOL(__memcpy);
 EXPORT_SYMBOL(__memset);
 EXPORT_SYMBOL(_clear_page);
-EXPORT_SYMBOL(_copy_page);
 EXPORT_SYMBOL(clear_user_page);
 EXPORT_SYMBOL(copy_user_page);
 EXPORT_SYMBOL(__bzero);
@@ -328,8 +337,10 @@ EXPORT_SYMBOL(__memscan_generic);
 EXPORT_SYMBOL(__memcmp);
 EXPORT_SYMBOL(__strncmp);
 EXPORT_SYMBOL(__memmove);
+EXPORT_SYMBOL(memchr);
 
 EXPORT_SYMBOL(csum_partial_copy_sparc64);
+EXPORT_SYMBOL(ip_fast_csum);
 
 /* Moving data to/from userspace. */
 EXPORT_SYMBOL(__copy_to_user);
@@ -339,6 +350,7 @@ EXPORT_SYMBOL(__bzero_noasi);
 
 /* Various address conversion macros use this. */
 EXPORT_SYMBOL(phys_base);
+EXPORT_SYMBOL(pfn_base);
 EXPORT_SYMBOL(sparc64_valid_addr_bitmap);
 
 /* No version information on this, heavily used in inline asm,
@@ -354,4 +366,26 @@ EXPORT_SYMBOL_NOVERS(memmove);
 
 void VISenter(void);
 /* RAID code needs this */
-EXPORT_SYMBOL(VISenter);
+EXPORT_SYMBOL_NOVERS(VISenter);
+
+/* for input/keybdev */
+EXPORT_SYMBOL(sun_do_break);
+EXPORT_SYMBOL(serial_console);
+EXPORT_SYMBOL(stop_a_enabled);
+
+#ifdef CONFIG_DEBUG_BUGVERBOSE
+EXPORT_SYMBOL(do_BUG);
+#endif
+
+/* for ns8703 */
+EXPORT_SYMBOL(ns87303_lock);
+
+/* for solaris compat module */
+EXPORT_SYMBOL_GPL(sys_call_table);
+
+EXPORT_SYMBOL(tick_ops);
+
+EXPORT_SYMBOL(xor_vis_2);
+EXPORT_SYMBOL(xor_vis_3);
+EXPORT_SYMBOL(xor_vis_4);
+EXPORT_SYMBOL(xor_vis_5);

@@ -9,6 +9,8 @@
 #ifndef DEBUG_H
 #define DEBUG_H
 
+#include <linux/string.h>
+
 /* Note:
  * struct __debug_entry must be defined outside of #ifdef __KERNEL__ 
  * in order to allow a user program to analyze the 'raw'-view.
@@ -54,7 +56,7 @@ struct __debug_entry{
 #define DEBUG_DATA(entry) (char*)(entry + 1) /* data is stored behind */
                                              /* the entry information */
 
-#define STCK(x)	asm volatile ("STCK %0" : "=m" (x) : : "cc" )
+#define STCK(x)	asm volatile ("STCK 0(%1)" : "=m" (x) : "a" (&(x)) : "cc")
 
 typedef struct __debug_entry debug_entry_t;
 
@@ -160,7 +162,8 @@ debug_text_event(debug_info_t* id, int level, const char* txt)
 }
 
 extern debug_entry_t *
-debug_sprintf_event(debug_info_t* id,int level,char *string,...);
+debug_sprintf_event(debug_info_t* id,int level,char *string,...)
+	__attribute__ ((format(printf, 3, 4)));
 
 
 extern inline debug_entry_t* 
@@ -195,7 +198,8 @@ debug_text_exception(debug_info_t* id, int level, const char* txt)
 
 
 extern debug_entry_t *
-debug_sprintf_exception(debug_info_t* id,int level,char *string,...);
+debug_sprintf_exception(debug_info_t* id,int level,char *string,...)
+	__attribute__ ((format(printf, 3, 4)));
 
 int debug_register_view(debug_info_t* id, struct debug_view* view);
 int debug_unregister_view(debug_info_t* id, struct debug_view* view);
@@ -259,7 +263,7 @@ int debug_unregister_view(debug_info_t* id, struct debug_view* view);
 void *b;
 #define kmalloc(x...) (PRINT_INFO(" kmalloc %p\n",b=kmalloc(x)),b)
 #define kfree(x) PRINT_INFO(" kfree %p\n",x);kfree(x)
-#define get_free_page(x...) (PRINT_INFO(" gfp %p\n",b=get_free_page(x)),b)
+#define get_zeroed_page(x...) (PRINT_INFO(" gfp %p\n",b=get_zeroed_page(x)),b)
 #define __get_free_pages(x...) (PRINT_INFO(" gfps %p\n",b=__get_free_pages(x)),b)
 #endif				/* DEBUG_MALLOC */
 

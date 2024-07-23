@@ -42,6 +42,17 @@
 #include <net/sctp/sctp.h>
 #include <net/sctp/sm.h>
 
+/* Create a new sctp_command_sequence.  */
+sctp_cmd_seq_t *sctp_new_cmd_seq(int gfp)
+{
+	sctp_cmd_seq_t *retval = t_new(sctp_cmd_seq_t, gfp);
+
+	if (retval)
+		sctp_init_cmd_seq(retval);
+
+	return retval;
+}
+
 /* Initialize a block of memory as a command sequence. */
 int sctp_init_cmd_seq(sctp_cmd_seq_t *seq)
 {
@@ -66,6 +77,13 @@ fail:
 	return 0;
 }
 
+/* Rewind an sctp_cmd_seq_t to iterate from the start.  */
+int sctp_rewind_sequence(sctp_cmd_seq_t *seq)
+{
+	seq->next_cmd = 0;
+	return 1;		/* We always succeed. */
+}
+
 /* Return the next command structure in a sctp_cmd_seq.
  * Returns NULL at the end of the sequence.
  */
@@ -79,3 +97,8 @@ sctp_cmd_t *sctp_next_cmd(sctp_cmd_seq_t *seq)
 	return retval;
 }
 
+/* Dispose of a command sequence.  */
+void sctp_free_cmd_seq(sctp_cmd_seq_t *seq)
+{
+	kfree(seq);
+}

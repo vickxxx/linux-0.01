@@ -35,6 +35,9 @@
 #include <linux/poll.h>
 #include <linux/smp.h>
 #include <linux/major.h>
+#include <linux/fs.h>
+#include <linux/smp_lock.h>
+#include <linux/fs.h>
 
 #include <asm/processor.h>
 #include <asm/msr.h>
@@ -61,6 +64,7 @@ static inline void do_cpuid(int cpu, u32 reg, u32 *data)
 {
   struct cpuid_command cmd;
   
+  preempt_disable();
   if ( cpu == smp_processor_id() ) {
     cpuid(reg, &data[0], &data[1], &data[2], &data[3]);
   } else {
@@ -70,6 +74,7 @@ static inline void do_cpuid(int cpu, u32 reg, u32 *data)
     
     smp_call_function(cpuid_smp_cpuid, &cmd, 1, 1);
   }
+  preempt_enable();
 }
 #else /* ! CONFIG_SMP */
 
@@ -82,16 +87,25 @@ static inline void do_cpuid(int cpu, u32 reg, u32 *data)
 
 static loff_t cpuid_seek(struct file *file, loff_t offset, int orig)
 {
+  loff_t ret;
+
+  lock_kernel();
+
   switch (orig) {
   case 0:
     file->f_pos = offset;
-    return file->f_pos;
+    ret = file->f_pos;
+    break;
   case 1:
     file->f_pos += offset;
-    return file->f_pos;
+    ret = file->f_pos;
+    break;
   default:
-    return -EINVAL;	/* SEEK_END not supported */
+    ret = -EINVAL;
   }
+
+  unlock_kernel();
+  return ret;
 }
 
 static ssize_t cpuid_read(struct file * file, char * buf,
@@ -101,7 +115,7 @@ static ssize_t cpuid_read(struct file * file, char * buf,
   u32 data[4];
   size_t rv;
   u32 reg = *ppos;
-  int cpu = MINOR(file->f_dentry->d_inode->i_rdev);
+  int cpu = minor(file->f_dentry->d_inode->i_rdev);
   
   if ( count % 16 )
     return -EINVAL; /* Invalid chunk size */
@@ -119,7 +133,7 @@ static ssize_t cpuid_read(struct file * file, char * buf,
 
 static int cpuid_open(struct inode *inode, struct file *file)
 {
-  int cpu = MINOR(file->f_dentry->d_inode->i_rdev);
+  int cpu = minor(file->f_dentry->d_inode->i_rdev);
   struct cpuinfo_x86 *c = &(cpu_data)[cpu];
 
   if ( !(cpu_online_map & (1UL << cpu)) )
@@ -134,10 +148,10 @@ static int cpuid_open(struct inode *inode, struct file *file)
  * File operations we support
  */
 static struct file_operations cpuid_fops = {
-  owner:	THIS_MODULE,
-  llseek:	cpuid_seek,
-  read:		cpuid_read,
-  open:		cpuid_open,
+  .owner	= THIS_MODULE,
+  .llseek	= cpuid_seek,
+  .read		= cpuid_read,
+  .open		= cpuid_open,
 };
 
 int __init cpuid_init(void)
@@ -158,8 +172,6 @@ void __exit cpuid_exit(void)
 
 module_init(cpuid_init);
 module_exit(cpuid_exit)
-
-EXPORT_NO_SYMBOLS;
 
 MODULE_AUTHOR("H. Peter Anvin <hpa@zytor.com>");
 MODULE_DESCRIPTION("x86 generic CPUID driver");

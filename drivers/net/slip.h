@@ -100,7 +100,7 @@ struct slip {
 
   unsigned char		mode;		/* SLIP mode			*/
   unsigned char		leased;
-  kdev_t		line;
+  dev_t			line;
   pid_t			pid;
 #define SL_MODE_SLIP	0
 #define SL_MODE_CSLIP	1
@@ -116,10 +116,6 @@ struct slip {
 #endif  
 };
 
-
-
 #define SLIP_MAGIC 0x5302
-
-extern int slip_init(struct net_device *dev);
 
 #endif	/* _LINUX_SLIP.H */

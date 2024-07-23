@@ -33,6 +33,8 @@ struct nfsd3_readargs {
 	struct svc_fh		fh;
 	__u64			offset;
 	__u32			count;
+	struct iovec		vec[RPCSVC_MAXPAGES];
+	int			vlen;
 };
 
 struct nfsd3_writeargs {
@@ -40,8 +42,9 @@ struct nfsd3_writeargs {
 	__u64			offset;
 	__u32			count;
 	int			stable;
-	__u8 *			data;
 	int			len;
+	struct iovec		vec[RPCSVC_MAXPAGES];
+	int			vlen;
 };
 
 struct nfsd3_createargs {
@@ -71,6 +74,11 @@ struct nfsd3_renameargs {
 	int			tlen;
 };
 
+struct nfsd3_readlinkargs {
+	struct svc_fh		fh;
+	char *			buffer;
+};
+
 struct nfsd3_linkargs {
 	struct svc_fh		ffh;
 	struct svc_fh		tfh;
@@ -93,6 +101,7 @@ struct nfsd3_readdirargs {
 	__u32			dircount;
 	__u32			count;
 	__u32 *			verf;
+	u32 *			buffer;
 };
 
 struct nfsd3_commitargs {
@@ -156,11 +165,18 @@ struct nfsd3_readdirres {
 	struct svc_fh		fh;
 	int			count;
 	__u32			verf[2];
+
+	struct readdir_cd	common;
+	u32 *			buffer;
+	int			buflen;
+	u32 *			offset;
+	struct svc_rqst *	rqstp;
+
 };
 
 struct nfsd3_fsstatres {
 	__u32			status;
-	struct statfs		stats;
+	struct kstatfs		stats;
 	__u32			invarsec;
 };
 
@@ -228,7 +244,7 @@ union nfsd3_xdrstore {
 
 #define NFS3_SVC_XDRSIZE		sizeof(union nfsd3_xdrstore)
 
-int nfs3svc_decode_fhandle(struct svc_rqst *, u32 *, struct svc_fh *);
+int nfs3svc_decode_fhandle(struct svc_rqst *, u32 *, struct nfsd_fhandle *);
 int nfs3svc_decode_sattrargs(struct svc_rqst *, u32 *,
 				struct nfsd3_sattrargs *);
 int nfs3svc_decode_diropargs(struct svc_rqst *, u32 *,
@@ -247,6 +263,8 @@ int nfs3svc_decode_mknodargs(struct svc_rqst *, u32 *,
 				struct nfsd3_mknodargs *);
 int nfs3svc_decode_renameargs(struct svc_rqst *, u32 *,
 				struct nfsd3_renameargs *);
+int nfs3svc_decode_readlinkargs(struct svc_rqst *, u32 *,
+				struct nfsd3_readlinkargs *);
 int nfs3svc_decode_linkargs(struct svc_rqst *, u32 *,
 				struct nfsd3_linkargs *);
 int nfs3svc_decode_symlinkargs(struct svc_rqst *, u32 *,

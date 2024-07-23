@@ -13,7 +13,7 @@
 
 #include <linux/config.h>
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/kernel.h>
 #include <linux/param.h>
 #include <linux/string.h>
@@ -124,27 +124,27 @@ void TAUupdate(int cpu)
 
 void TAUException(struct pt_regs * regs)
 {
-	unsigned long cpu = smp_processor_id();
+	int cpu = smp_processor_id();
 
-	hardirq_enter(cpu);
+	irq_enter();
 	tau[cpu].interrupts++;
 	
 	TAUupdate(cpu);
 
-	hardirq_exit(cpu);
-	return;
+	irq_exit();
 }
 #endif /* CONFIG_TAU_INT */
 
 static void tau_timeout(void * info)
 {
-	unsigned long cpu = smp_processor_id();
+	int cpu;
 	unsigned long flags;
 	int size;
 	int shrink;
  
 	/* disabling interrupts *should* be okay */
-	save_flags(flags); cli();
+	local_irq_save(flags);
+	cpu = smp_processor_id();
 
 #ifndef CONFIG_TAU_INT
 	TAUupdate(cpu);
@@ -186,7 +186,7 @@ static void tau_timeout(void * info)
 	 */
 	mtspr(SPRN_THRM3, THRM3_SITV(500*60) | THRM3_E);
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 }
 
 static void tau_timeout_smp(unsigned long unused)
@@ -194,10 +194,7 @@ static void tau_timeout_smp(unsigned long unused)
 
 	/* schedule ourselves to be run again */
 	mod_timer(&tau_timer, jiffies + shrink_timer) ;
-#ifdef CONFIG_SMP
-	smp_call_function(tau_timeout, NULL, 1, 0);
-#endif
-	tau_timeout(NULL);
+	on_each_cpu(tau_timeout, NULL, 1, 0);
 }
 
 /*
@@ -239,10 +236,7 @@ int __init TAU_init(void)
 	tau_timer.expires = jiffies + shrink_timer;
 	add_timer(&tau_timer);
 	
-#ifdef CONFIG_SMP
-	smp_call_function(TAU_init_smp, NULL, 1, 0);
-#endif
-	TAU_init_smp(NULL);
+	on_each_cpu(TAU_init_smp, NULL, 1, 0);
 	
 	printk("Thermal assist unit ");
 #ifdef CONFIG_TAU_INT

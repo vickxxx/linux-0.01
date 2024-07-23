@@ -9,6 +9,7 @@
 
 #include <linux/config.h>
 #include <asm/system.h>
+#include <asm/asm_offsets.h>
 
 .globl swapper_pg_dir
 .globl _stext
@@ -22,10 +23,10 @@ __start:
 	.prologue 0
 	br	$27,1f
 1:	ldgp	$29,0($27)
-	/* We need to get current loaded up with our first task...  */
-	lda	$8,init_task_union
+	/* We need to get current_task_info loaded up...  */
+	lda	$8,init_thread_union
 	/* ... and find our stack ... */
-	lda	$30,0x4000($8)
+	lda	$30,0x4000 - SIZEOF_PT_REGS($8)
 	/* ... and then we can start the kernel.  */
 	jsr	$26,start_kernel
 	call_pal PAL_halt

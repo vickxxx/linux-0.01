@@ -34,8 +34,8 @@
 #define NFSCTL_DELCLIENT	2	/* Remove an NFS client. */
 #define NFSCTL_EXPORT		3	/* export a file system. */
 #define NFSCTL_UNEXPORT		4	/* unexport a file system. */
-#define NFSCTL_UGIDUPDATE	5	/* update a client's uid/gid map. */
-#define NFSCTL_GETFH		6	/* get an fh by ino (used by mountd) */
+/*#define NFSCTL_UGIDUPDATE	5	/ * update a client's uid/gid map. DISCARDED */
+/*#define NFSCTL_GETFH		6	/ * get an fh by ino DISCARDED */
 #define NFSCTL_GETFD		7	/* get an fh by path (used by mountd) */
 #define	NFSCTL_GETFS		8	/* get an fh by path with max FH len */
 
@@ -59,30 +59,11 @@ struct nfsctl_client {
 struct nfsctl_export {
 	char			ex_client[NFSCLNT_IDMAX+1];
 	char			ex_path[NFS_MAXPATHLEN+1];
-	__kernel_dev_t		ex_dev;
+	__kernel_old_dev_t	ex_dev;
 	__kernel_ino_t		ex_ino;
 	int			ex_flags;
 	__kernel_uid_t		ex_anon_uid;
 	__kernel_gid_t		ex_anon_gid;
-};
-
-/* UGIDUPDATE */
-struct nfsctl_uidmap {
-	char *			ug_ident;
-	__kernel_uid_t		ug_uidbase;
-	int			ug_uidlen;
-	__kernel_uid_t *	ug_udimap;
-	__kernel_gid_t		ug_gidbase;
-	int			ug_gidlen;
-	__kernel_gid_t *	ug_gdimap;
-};
-
-/* GETFH */
-struct nfsctl_fhparm {
-	struct sockaddr		gf_addr;
-	__kernel_dev_t		gf_dev;
-	__kernel_ino_t		gf_ino;
-	int			gf_version;
 };
 
 /* GETFD */
@@ -108,19 +89,21 @@ struct nfsctl_arg {
 		struct nfsctl_svc	u_svc;
 		struct nfsctl_client	u_client;
 		struct nfsctl_export	u_export;
-		struct nfsctl_uidmap	u_umap;
-		struct nfsctl_fhparm	u_getfh;
 		struct nfsctl_fdparm	u_getfd;
 		struct nfsctl_fsparm	u_getfs;
+		/*
+		 * The following dummy member is needed to preserve binary compatibility
+		 * on platforms where alignof(void*)>alignof(int).  It's needed because
+		 * this union used to contain a member (u_umap) which contained a
+		 * pointer.
+		 */
+		void *u_ptr;
 	} u;
 #define ca_svc		u.u_svc
 #define ca_client	u.u_client
 #define ca_export	u.u_export
-#define ca_umap		u.u_umap
-#define ca_getfh	u.u_getfh
 #define ca_getfd	u.u_getfd
 #define	ca_getfs	u.u_getfs
-#define ca_authd	u.u_authd
 };
 
 union nfsctl_res {
@@ -132,11 +115,7 @@ union nfsctl_res {
 /*
  * Kernel syscall implementation.
  */
-#if defined(CONFIG_NFSD) || defined(CONFIG_NFSD_MODULE)
-extern asmlinkage long	sys_nfsservctl(int, void *, void *);
-#else
-#define sys_nfsservctl		sys_ni_syscall
-#endif
+extern asmlinkage long	sys_nfsservctl(int, struct nfsctl_arg __user *, void __user *);
 extern int		exp_addclient(struct nfsctl_client *ncp);
 extern int		exp_delclient(struct nfsctl_client *ncp);
 extern int		exp_export(struct nfsctl_export *nxp);

@@ -29,11 +29,7 @@
 
 #include <linux/zftape.h>
 
-#if LINUX_VERSION_CODE >= KERNEL_VER(2,1,6)
 #include <asm/uaccess.h>
-#else
-#include <asm/segment.h>
-#endif
 
 #include "../zftape/zftape-init.h"
 #include "../zftape/zftape-eof.h"
@@ -321,14 +317,9 @@ static int zft_simple_write(int *cnt,
 	 */
 	space_left = seg_sz - pos->seg_byte_pos;
 	*cnt = req_len < space_left ? req_len : space_left;
-#if LINUX_VERSION_CODE > KERNEL_VER(2,1,3)
 	if (copy_from_user(dst_buf + pos->seg_byte_pos, src_buf, *cnt) != 0) {
 		TRACE_EXIT -EFAULT;
 	}
-#else
-	TRACE_CATCH(verify_area(VERIFY_READ, src_buf, *cnt),);
-	memcpy_fromfs(dst_buf + pos->seg_byte_pos, src_buf, *cnt);
-#endif
 	TRACE_EXIT *cnt;
 }
 
@@ -366,7 +357,7 @@ static int check_write_access(int req_len,
 	*volume = zft_find_volume(pos->seg_pos);
 	DUMP_VOLINFO(ft_t_noise, "", *volume);
 	zft_just_before_eof = 0;
-	/* now merge with old data if neccessary */
+	/* now merge with old data if necessary */
 	if (!zft_qic_mode && pos->seg_byte_pos != 0){
 		result = zft_fetch_segment(pos->seg_pos,
 					   zft_deblock_buf,

@@ -17,8 +17,9 @@
 #include <linux/fs.h>
 #include <linux/qnx4_fs.h>
 #include <linux/stat.h>
+#include <linux/smp_lock.h>
+#include <linux/buffer_head.h>
 
-#include <asm/segment.h>
 
 static int qnx4_readdir(struct file *filp, void *dirent, filldir_t filldir)
 {
@@ -34,9 +35,11 @@ static int qnx4_readdir(struct file *filp, void *dirent, filldir_t filldir)
 	QNX4DEBUG(("qnx4_readdir:i_size = %ld\n", (long) inode->i_size));
 	QNX4DEBUG(("filp->f_pos         = %ld\n", (long) filp->f_pos));
 
+	lock_kernel();
+
 	while (filp->f_pos < inode->i_size) {
 		blknum = qnx4_block_map( inode, filp->f_pos >> QNX4_BLOCK_SIZE_BITS );
-		bh = bread(inode->i_dev, blknum, QNX4_BLOCK_SIZE);
+		bh = sb_bread(inode->i_sb, blknum);
 		if(bh==NULL) {
 			printk(KERN_ERR "qnx4_readdir: bread failed (%ld)\n", blknum);
 			break;
@@ -64,7 +67,7 @@ static int qnx4_readdir(struct file *filp, void *dirent, filldir_t filldir)
 					}
 					if (filldir(dirent, de->di_fname, size, filp->f_pos, ino, DT_UNKNOWN) < 0) {
 						brelse(bh);
-						return 0;
+						goto out;
 					}
 				}
 			}
@@ -73,24 +76,26 @@ static int qnx4_readdir(struct file *filp, void *dirent, filldir_t filldir)
 		}
 		brelse(bh);
 	}
-	UPDATE_ATIME(inode);
+	update_atime(inode);
 
+out:
+	unlock_kernel();
 	return 0;
 }
 
 struct file_operations qnx4_dir_operations =
 {
-	read:		generic_read_dir,
-	readdir:	qnx4_readdir,
-	fsync:		file_fsync,
+	.read		= generic_read_dir,
+	.readdir	= qnx4_readdir,
+	.fsync		= file_fsync,
 };
 
 struct inode_operations qnx4_dir_inode_operations =
 {
-	lookup:		qnx4_lookup,
+	.lookup		= qnx4_lookup,
 #ifdef CONFIG_QNX4FS_RW
-	create:		qnx4_create,
-	unlink:		qnx4_unlink,
-	rmdir:		qnx4_rmdir,
+	.create		= qnx4_create,
+	.unlink		= qnx4_unlink,
+	.rmdir		= qnx4_rmdir,
 #endif
 };

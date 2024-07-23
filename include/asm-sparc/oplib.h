@@ -1,4 +1,4 @@
-/* $Id: oplib.h,v 1.21 2000/08/26 02:38:04 anton Exp $
+/* $Id: oplib.h,v 1.23 2001/12/21 00:54:31 davem Exp $
  * oplib.h:  Describes the interface and available routines in the
  *           Linux Prom library.
  *
@@ -153,8 +153,9 @@ extern char prom_getchar(void);
 /* Blocking put character to console. */
 extern void prom_putchar(char character);
 
-/* Prom's internal printf routine, don't use in kernel/boot code. */
-void prom_printf(char *fmt, ...);
+/* Prom's internal routines, don't use in kernel/boot code. */
+extern void prom_printf(char *fmt, ...);
+extern void prom_write(const char *buf, unsigned int len);
 
 /* Query for input device type */
 
@@ -298,15 +299,7 @@ extern int prom_inst2pkg(int);
 
 /* Dorking with Bus ranges... */
 
-/* Adjust reg values with the passed ranges. */
-extern void prom_adjust_regs(struct linux_prom_registers *regp, int nregs,
-			     struct linux_prom_ranges *rangep, int nranges);
-
-/* Adjust child ranges with the passed parent ranges. */
-extern void prom_adjust_ranges(struct linux_prom_ranges *cranges, int ncranges,
-			       struct linux_prom_ranges *pranges, int npranges);
-
-/* Apply promlib probed OBIO ranges to registers. */
+/* Apply promlib probes OBIO ranges to registers. */
 extern void prom_apply_obio_ranges(struct linux_prom_registers *obioregs, int nregs);
 
 /* Apply ranges of any prom node (and optionally parent node as well) to registers. */

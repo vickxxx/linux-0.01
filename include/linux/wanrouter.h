@@ -43,27 +43,8 @@
 * Jan 16, 1997	Gene Kozin	router_devlist made public
 * Jan 02, 1997	Gene Kozin	Initial version (based on wanpipe.h).
 *****************************************************************************/
-#include <linux/version.h>
 
-#ifndef KERNEL_VERSION
-  #define KERNEL_VERSION(a,b,c) (((a) << 16) + ((b) << 8) + (c))
-#endif
-
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,0)
- #define LINUX_2_4
- #define netdevice_t struct net_device
- #include <linux/spinlock.h>       /* Support for SMP Locking */
-
-#elif LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,0)
- #define LINUX_2_1
- #define netdevice_t struct device
- #include <asm/spinlock.h>       /* Support for SMP Locking */
-
-#else
- #define LINUX_2_0
- #define netdevice_t struct device
- #define spinlock_t int
-#endif
+#include <linux/spinlock.h>       /* Support for SMP Locking */
 
 #ifndef	_ROUTER_H
 #define	_ROUTER_H
@@ -475,13 +456,11 @@ typedef struct wanif_conf
 
 #include <linux/fs.h>		/* support for device drivers */
 #include <linux/proc_fs.h>	/* proc filesystem pragmatics */
-#include <linux/inet.h>		/* in_aton(), in_ntoa() prototypes */
 #include <linux/netdevice.h>	/* support for network drivers */
 /*----------------------------------------------------------------------------
  * WAN device data space.
  */
-typedef struct wan_device
-{
+struct wan_device {
 	unsigned magic;			/* magic number */
 	char* name;			/* -> WAN device name (ASCIIZ) */
 	void* private;			/* -> driver private data */
@@ -513,11 +492,7 @@ typedef struct wan_device
 					/****** status and statistics *******/
 	char state;			/* device state */
 	char api_status;		/* device api status */
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 	struct net_device_stats stats; 	/* interface statistics */
-#else
-	struct enet_statistics stats;	/* interface statistics */
-#endif
 	unsigned reserved[16];		/* reserved for future use */
 	unsigned long critical;		/* critical section flag */
 	spinlock_t lock;                /* Support for SMP Locking */
@@ -528,31 +503,29 @@ typedef struct wan_device
 	int (*update) (struct wan_device *wandev);
 	int (*ioctl) (struct wan_device *wandev, unsigned cmd,
 		unsigned long arg);
-	int (*new_if) (struct wan_device *wandev, netdevice_t *dev,
-		wanif_conf_t *conf);
-	int (*del_if) (struct wan_device *wandev, netdevice_t *dev);
+	int (*new_if)(struct wan_device *wandev, struct net_device *dev,
+		      wanif_conf_t *conf);
+	int (*del_if)(struct wan_device *wandev, struct net_device *dev);
 					/****** maintained by the router ****/
 	struct wan_device* next;	/* -> next device */
-	netdevice_t* dev;		/* list of network interfaces */
+	struct net_device* dev;		/* list of network interfaces */
 	unsigned ndev;			/* number of interfaces */
-#ifdef LINUX_2_4
 	struct proc_dir_entry *dent;	/* proc filesystem entry */
-#else
-	struct proc_dir_entry dent;	/* proc filesystem entry */
-#endif
-} wan_device_t;
+};
 
 /* Public functions available for device drivers */
-extern int register_wan_device(wan_device_t *wandev);
+extern int register_wan_device(struct wan_device *wandev);
 extern int unregister_wan_device(char *name);
-unsigned short wanrouter_type_trans(struct sk_buff *skb, netdevice_t *dev);
-int wanrouter_encapsulate(struct sk_buff *skb, netdevice_t *dev,unsigned short type);
+unsigned short wanrouter_type_trans(struct sk_buff *skb,
+				    struct net_device *dev);
+int wanrouter_encapsulate(struct sk_buff *skb, struct net_device *dev,
+			  unsigned short type);
 
 /* Proc interface functions. These must not be called by the drivers! */
 extern int wanrouter_proc_init(void);
 extern void wanrouter_proc_cleanup(void);
-extern int wanrouter_proc_add(wan_device_t *wandev);
-extern int wanrouter_proc_delete(wan_device_t *wandev);
+extern int wanrouter_proc_add(struct wan_device *wandev);
+extern int wanrouter_proc_delete(struct wan_device *wandev);
 extern int wanrouter_ioctl( struct inode *inode, struct file *file, unsigned int cmd, unsigned long arg);
 
 extern void lock_adapter_irq(spinlock_t *lock, unsigned long *smp_flags);
@@ -561,7 +534,8 @@ extern void unlock_adapter_irq(spinlock_t *lock, unsigned long *smp_flags);
 
 
 /* Public Data */
-extern wan_device_t *router_devlist;	/* list of registered devices */
+/* list of registered devices */
+extern struct wan_device *wanrouter_router_devlist;
 
 #endif	/* __KERNEL__ */
 #endif	/* _ROUTER_H */

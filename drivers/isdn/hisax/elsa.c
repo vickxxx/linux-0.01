@@ -18,7 +18,6 @@
  *
  */
 
-#define __NO_VERSION__
 #include <linux/init.h>
 #include <linux/config.h>
 #include "hisax.h"
@@ -28,10 +27,12 @@
 #include "hscx.h"
 #include "isdnl1.h"
 #include <linux/pci.h>
+#include <linux/isapnp.h>
 #include <linux/serial.h>
 #include <linux/serial_reg.h>
 
 extern const char *CardType[];
+static spinlock_t elsa_lock = SPIN_LOCK_UNLOCKED;
 
 const char *Elsa_revision = "$Revision: 2.26.6.6 $";
 const char *Elsa_Types[] =
@@ -105,7 +106,6 @@ const char *ITACVer[] =
 /* Status Flags */
 #define ELSA_TIMER_AKTIV 1
 #define ELSA_BAD_PWR     2
-#define ELSA_ASSIGN      4
 
 #define RS_ISR_PASS_LIMIT 256
 #define _INLINE_ inline
@@ -141,144 +141,163 @@ static void set_arcofi(struct IsdnCardState *cs, int bc);
 #include "elsa_ser.c"
 #endif /* ARCOFI_USE */
 
-static inline u_char
-readreg(unsigned int ale, unsigned int adr, u_char off)
+static inline u8
+readreg(struct IsdnCardState *cs, unsigned int adr, u8 off)
 {
-	register u_char ret;
-	long flags;
+	u8 ret;
+	unsigned long flags;
 
-	save_flags(flags);
-	cli();
-	byteout(ale, off);
+	spin_lock_irqsave(&elsa_lock, flags);
+	byteout(cs->hw.elsa.ale, off);
 	ret = bytein(adr);
-	restore_flags(flags);
-	return (ret);
+	spin_unlock_irqrestore(&elsa_lock, flags);
+	return ret;
 }
 
 static inline void
-readfifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
+writereg(struct IsdnCardState *cs, unsigned int adr, u8 off, u8 data)
 {
-	/* fifo read without cli because it's allready done  */
+	unsigned long flags;
 
-	byteout(ale, off);
+	spin_lock_irqsave(&elsa_lock, flags);
+	byteout(cs->hw.elsa.ale, off);
+	byteout(adr, data);
+	spin_unlock_irqrestore(&elsa_lock, flags);
+}
+
+static inline void
+readfifo(struct IsdnCardState *cs, unsigned int adr, u8 off, u8 * data, int size)
+{
+	byteout(cs->hw.elsa.ale, off);
 	insb(adr, data, size);
 }
 
-
 static inline void
-writereg(unsigned int ale, unsigned int adr, u_char off, u_char data)
+writefifo(struct IsdnCardState *cs, unsigned int adr, u8 off, u8 * data, int size)
 {
-	long flags;
-
-	save_flags(flags);
-	cli();
-	byteout(ale, off);
-	byteout(adr, data);
-	restore_flags(flags);
-}
-
-static inline void
-writefifo(unsigned int ale, unsigned int adr, u_char off, u_char * data, int size)
-{
-	/* fifo write without cli because it's allready done  */
-	byteout(ale, off);
+	byteout(cs->hw.elsa.ale, off);
 	outsb(adr, data, size);
 }
 
-/* Interface functions */
-
-static u_char
-ReadISAC(struct IsdnCardState *cs, u_char offset)
+static u8
+isac_read(struct IsdnCardState *cs, u8 offset)
 {
-	return (readreg(cs->hw.elsa.ale, cs->hw.elsa.isac, offset));
+	return readreg(cs, cs->hw.elsa.isac, offset);
 }
 
 static void
-WriteISAC(struct IsdnCardState *cs, u_char offset, u_char value)
+isac_write(struct IsdnCardState *cs, u8 offset, u8 value)
 {
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, offset, value);
+	writereg(cs, cs->hw.elsa.isac, offset, value);
 }
 
 static void
-ReadISACfifo(struct IsdnCardState *cs, u_char * data, int size)
+isac_read_fifo(struct IsdnCardState *cs, u8 *data, int size)
 {
-	readfifo(cs->hw.elsa.ale, cs->hw.elsa.isac, 0, data, size);
+	readfifo(cs, cs->hw.elsa.isac, 0, data, size);
 }
 
 static void
-WriteISACfifo(struct IsdnCardState *cs, u_char * data, int size)
+isac_write_fifo(struct IsdnCardState *cs, u8 *data, int size)
 {
-	writefifo(cs->hw.elsa.ale, cs->hw.elsa.isac, 0, data, size);
+	writefifo(cs, cs->hw.elsa.isac, 0, data, size);
 }
 
-static u_char
-ReadISAC_IPAC(struct IsdnCardState *cs, u_char offset)
-{
-	return (readreg(cs->hw.elsa.ale, cs->hw.elsa.isac, offset+0x80));
-}
+static struct dc_hw_ops isac_ops = {
+	.read_reg   = isac_read,
+	.write_reg  = isac_write,
+	.read_fifo  = isac_read_fifo,
+	.write_fifo = isac_write_fifo,
+};
 
-static void
-WriteISAC_IPAC(struct IsdnCardState *cs, u_char offset, u_char value)
+static u8
+hscx_read(struct IsdnCardState *cs, int hscx, u8 offset)
 {
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, offset|0x80, value);
-}
-
-static void
-ReadISACfifo_IPAC(struct IsdnCardState *cs, u_char * data, int size)
-{
-	readfifo(cs->hw.elsa.ale, cs->hw.elsa.isac, 0x80, data, size);
+	return readreg(cs, cs->hw.elsa.hscx, offset + (hscx ? 0x40 : 0));
 }
 
 static void
-WriteISACfifo_IPAC(struct IsdnCardState *cs, u_char * data, int size)
+hscx_write(struct IsdnCardState *cs, int hscx, u8 offset, u8 value)
 {
-	writefifo(cs->hw.elsa.ale, cs->hw.elsa.isac, 0x80, data, size);
-}
-
-static u_char
-ReadHSCX(struct IsdnCardState *cs, int hscx, u_char offset)
-{
-	return (readreg(cs->hw.elsa.ale,
-			cs->hw.elsa.hscx, offset + (hscx ? 0x40 : 0)));
+	writereg(cs, cs->hw.elsa.hscx, offset + (hscx ? 0x40 : 0), value);
 }
 
 static void
-WriteHSCX(struct IsdnCardState *cs, int hscx, u_char offset, u_char value)
+hscx_read_fifo(struct IsdnCardState *cs, int hscx, u8 *data, int size)
 {
-	writereg(cs->hw.elsa.ale,
-		 cs->hw.elsa.hscx, offset + (hscx ? 0x40 : 0), value);
+	writefifo(cs, cs->hw.elsa.hscx, hscx ? 0x40 : 0, data, size);
 }
 
-static inline u_char
-readitac(struct IsdnCardState *cs, u_char off)
+static void
+hscx_write_fifo(struct IsdnCardState *cs, int hscx, u8 *data, int size)
 {
-	register u_char ret;
-	long flags;
+	writefifo(cs, cs->hw.elsa.hscx, hscx ? 0x40 : 0, data, size);
+}
 
-	save_flags(flags);
-	cli();
-	byteout(cs->hw.elsa.ale, off);
-	ret = bytein(cs->hw.elsa.itac);
-	restore_flags(flags);
-	return (ret);
+static struct bc_hw_ops hscx_ops = {
+	.read_reg   = hscx_read,
+	.write_reg  = hscx_write,
+	.read_fifo  = hscx_read_fifo,
+	.write_fifo = hscx_write_fifo,
+};
+
+static inline u8
+ipac_read(struct IsdnCardState *cs, u8 offset)
+{
+	return readreg(cs, cs->hw.elsa.isac, offset);
 }
 
 static inline void
-writeitac(struct IsdnCardState *cs, u_char off, u_char data)
+ipac_write(struct IsdnCardState *cs, u8 offset, u8 value)
 {
-	long flags;
+	writereg(cs, cs->hw.elsa.isac, offset, value);
+}
 
-	save_flags(flags);
-	cli();
+static inline void
+ipac_readfifo(struct IsdnCardState *cs, u8 offset, u8 *data, int size)
+{
+	readfifo(cs, cs->hw.elsa.isac, offset, data, size);
+}
+
+static inline void
+ipac_writefifo(struct IsdnCardState *cs, u8 offset, u8 *data, int size)
+{
+	writefifo(cs, cs->hw.elsa.isac, offset, data, size);
+}
+
+/* This will generate ipac_dc_ops and ipac_bc_ops using the functions
+ * above */
+
+BUILD_IPAC_OPS(ipac);
+
+static inline u8
+readitac(struct IsdnCardState *cs, u8 off)
+{
+	u8 ret;
+	unsigned long flags;
+
+	spin_lock_irqsave(&elsa_lock, flags);
+	byteout(cs->hw.elsa.ale, off);
+	ret = bytein(cs->hw.elsa.itac);
+	spin_unlock_irqrestore(&elsa_lock, flags);
+	return ret;
+}
+
+static inline void
+writeitac(struct IsdnCardState *cs, u8 off, u8 data)
+{
+	unsigned long flags;
+
+	spin_lock_irqsave(&elsa_lock, flags);
 	byteout(cs->hw.elsa.ale, off);
 	byteout(cs->hw.elsa.itac, data);
-	restore_flags(flags);
+	spin_unlock_irqrestore(&elsa_lock, flags);
 }
 
 static inline int
 TimerRun(struct IsdnCardState *cs)
 {
-	register u_char v;
+	register u8 v;
 
 	v = bytein(cs->hw.elsa.cfg);
 	if ((cs->subtyp == ELSA_QS1000) || (cs->subtyp == ELSA_QS3000))
@@ -287,78 +306,32 @@ TimerRun(struct IsdnCardState *cs)
 		return (v & ELSA_TIMER_RUN_PCC8);
 	return (v & ELSA_TIMER_RUN);
 }
-/*
- * fast interrupt HSCX stuff goes here
- */
 
-#define READHSCX(cs, nr, reg) readreg(cs->hw.elsa.ale, \
-		cs->hw.elsa.hscx, reg + (nr ? 0x40 : 0))
-#define WRITEHSCX(cs, nr, reg, data) writereg(cs->hw.elsa.ale, \
-		cs->hw.elsa.hscx, reg + (nr ? 0x40 : 0), data)
-
-#define READHSCXFIFO(cs, nr, ptr, cnt) readfifo(cs->hw.elsa.ale, \
-		cs->hw.elsa.hscx, (nr ? 0x40 : 0), ptr, cnt)
-
-#define WRITEHSCXFIFO(cs, nr, ptr, cnt) writefifo(cs->hw.elsa.ale, \
-		cs->hw.elsa.hscx, (nr ? 0x40 : 0), ptr, cnt)
-
-#include "hscx_irq.c"
-
-static void
+static irqreturn_t
 elsa_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char val;
-	int icnt=5;
+	u8 val;
 
-	if (!cs) {
-		printk(KERN_WARNING "Elsa: Spurious interrupt!\n");
-		return;
-	}
 	if ((cs->typ == ISDN_CTYPE_ELSA_PCMCIA) && (*cs->busy_flag == 1)) {
 	/* The card tends to generate interrupts while being removed
 	   causing us to just crash the kernel. bad. */
 		printk(KERN_WARNING "Elsa: card not available!\n");
-		return;
+		return IRQ_NONE;
 	}
 #if ARCOFI_USE
 	if (cs->hw.elsa.MFlag) {
 		val = serial_inp(cs, UART_IIR);
 		if (!(val & UART_IIR_NO_INT)) {
 			debugl1(cs,"IIR %02x", val);
+			spin_lock(&cs->lock);
 			rs_interrupt_elsa(intno, cs);
+			spin_unlock(&cs->lock);
 		}
 	}
 #endif
-	val = readreg(cs->hw.elsa.ale, cs->hw.elsa.hscx, HSCX_ISTA + 0x40);
-      Start_HSCX:
-	if (val) {
-		hscx_int_main(cs, val);
-	}
-	val = readreg(cs->hw.elsa.ale, cs->hw.elsa.isac, ISAC_ISTA);
-      Start_ISAC:
-	if (val) {
-		isac_interrupt(cs, val);
-	}
-	val = readreg(cs->hw.elsa.ale, cs->hw.elsa.hscx, HSCX_ISTA + 0x40);
-	if (val && icnt) {
-		if (cs->debug & L1_DEB_HSCX)
-			debugl1(cs, "HSCX IntStat after IntRoutine");
-		icnt--;
-		goto Start_HSCX;
-	}
-	val = readreg(cs->hw.elsa.ale, cs->hw.elsa.isac, ISAC_ISTA);
-	if (val && icnt) {
-		if (cs->debug & L1_DEB_ISAC)
-			debugl1(cs, "ISAC IntStat after IntRoutine");
-		icnt--;
-		goto Start_ISAC;
-	}
-	if (!icnt)
-		printk(KERN_WARNING"ELSA IRQ LOOP\n");
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.hscx, HSCX_MASK, 0xFF);
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.hscx, HSCX_MASK + 0x40, 0xFF);
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, ISAC_MASK, 0xFF);
+	hscxisac_irq(intno, dev_id, regs);
+
 	if (cs->hw.elsa.status & ELSA_TIMER_AKTIV) {
 		if (!TimerRun(cs)) {
 			/* Timer Restart */
@@ -378,77 +351,42 @@ elsa_interrupt(int intno, void *dev_id, struct pt_regs *regs)
 #endif
 	if (cs->hw.elsa.trig)
 		byteout(cs->hw.elsa.trig, 0x00);
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.hscx, HSCX_MASK, 0x0);
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.hscx, HSCX_MASK + 0x40, 0x0);
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, ISAC_MASK, 0x0);
+	return IRQ_HANDLED;
 }
 
-static void
+static irqreturn_t
 elsa_interrupt_ipac(int intno, void *dev_id, struct pt_regs *regs)
 {
 	struct IsdnCardState *cs = dev_id;
-	u_char ista,val;
-	int icnt=5;
+	u8 val;
 
 	if (!cs) {
 		printk(KERN_WARNING "Elsa: Spurious interrupt!\n");
-		return;
+		return IRQ_NONE;
 	}
 	if (cs->subtyp == ELSA_QS1000PCI || cs->subtyp == ELSA_QS3000PCI) {
 		val = bytein(cs->hw.elsa.cfg + 0x4c); /* PCI IRQ */
-		if (!(val & ELSA_PCI_IRQ_MASK))
-			return;
+		if (!test_bit(FLG_BUGGY_PLX9050, &cs->HW_Flags) && 
+		    !(val & ELSA_PCI_IRQ_MASK))
+			return IRQ_NONE;
 	}
 #if ARCOFI_USE
 	if (cs->hw.elsa.MFlag) {
 		val = serial_inp(cs, UART_IIR);
 		if (!(val & UART_IIR_NO_INT)) {
 			debugl1(cs,"IIR %02x", val);
+			spin_lock(&cs->lock);
 			rs_interrupt_elsa(intno, cs);
+			spin_unlock(&cs->lock);
 		}
 	}
 #endif
-	ista = readreg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ISTA);
-Start_IPAC:
-	if (cs->debug & L1_DEB_IPAC)
-		debugl1(cs, "IPAC ISTA %02X", ista);
-	if (ista & 0x0f) {
-		val = readreg(cs->hw.elsa.ale, cs->hw.elsa.hscx, HSCX_ISTA + 0x40);
-		if (ista & 0x01)
-			val |= 0x01;
-		if (ista & 0x04)
-			val |= 0x02;
-		if (ista & 0x08)
-			val |= 0x04;
-		if (val)
-			hscx_int_main(cs, val);
-	}
-	if (ista & 0x20) {
-		val = 0xfe & readreg(cs->hw.elsa.ale, cs->hw.elsa.isac, ISAC_ISTA + 0x80);
-		if (val) {
-			isac_interrupt(cs, val);
-		}
-	}
-	if (ista & 0x10) {
-		val = 0x01;
-		isac_interrupt(cs, val);
-	}
-	ista  = readreg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ISTA);
-	if ((ista & 0x3f) && icnt) {
-		icnt--;
-		goto Start_IPAC;
-	}
-	if (!icnt)
-		printk(KERN_WARNING "ELSA IRQ LOOP\n");
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_MASK, 0xFF);
-	writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_MASK, 0xC0);
+	return ipac_irq(intno, dev_id, regs);
 }
 
-void
-release_io_elsa(struct IsdnCardState *cs)
+static void
+elsa_release(struct IsdnCardState *cs)
 {
-	int bytecnt = 8;
-
 	del_timer(&cs->hw.elsa.tl);
 #if ARCOFI_USE
 	clear_arcofi(cs);
@@ -457,36 +395,29 @@ release_io_elsa(struct IsdnCardState *cs)
 		byteout(cs->hw.elsa.ctrl, 0);	/* LEDs Out */
 	if (cs->subtyp == ELSA_QS1000PCI) {
 		byteout(cs->hw.elsa.cfg + 0x4c, 0x01);  /* disable IRQ */
-		writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ATX, 0xff);
-		bytecnt = 2;
-		release_region(cs->hw.elsa.cfg, 0x80);
+		writereg(cs, cs->hw.elsa.isac, IPAC_ATX, 0xff);
 	}
 	if (cs->subtyp == ELSA_QS3000PCI) {
 		byteout(cs->hw.elsa.cfg + 0x4c, 0x03); /* disable ELSA PCI IRQ */
-		writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ATX, 0xff);
-		release_region(cs->hw.elsa.cfg, 0x80);
+		writereg(cs, cs->hw.elsa.isac, IPAC_ATX, 0xff);
 	}
  	if (cs->subtyp == ELSA_PCMCIA_IPAC) {
-		writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ATX, 0xff);
+		writereg(cs, cs->hw.elsa.isac, IPAC_ATX, 0xff);
  	}
+#if ARCOFI_USE
 	if ((cs->subtyp == ELSA_PCFPRO) ||
 		(cs->subtyp == ELSA_QS3000) ||
 		(cs->subtyp == ELSA_PCF) ||
 		(cs->subtyp == ELSA_QS3000PCI)) {
-		bytecnt = 16;
-#if ARCOFI_USE
 		release_modem(cs);
-#endif
 	}
-	if (cs->hw.elsa.base)
-		release_region(cs->hw.elsa.base, bytecnt);
+#endif
+	hisax_release_resources(cs);
 }
 
-static void
-reset_elsa(struct IsdnCardState *cs)
+static int
+elsa_reset(struct IsdnCardState *cs)
 {
-	long flags;
-
 	if (cs->hw.elsa.timer) {
 		/* Wait 1 Timer */
 		byteout(cs->hw.elsa.timer, 0);
@@ -506,30 +437,28 @@ reset_elsa(struct IsdnCardState *cs)
 			byteout(cs->hw.elsa.trig, 0xff);
 	}
 	if ((cs->subtyp == ELSA_QS1000PCI) || (cs->subtyp == ELSA_QS3000PCI) || (cs->subtyp == ELSA_PCMCIA_IPAC)) {
-		save_flags(flags);
-		sti();
-		writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_POTA2, 0x20);
+		writereg(cs, cs->hw.elsa.isac, IPAC_POTA2, 0x20);
 		set_current_state(TASK_UNINTERRUPTIBLE);
 		schedule_timeout((10*HZ)/1000); /* Timeout 10ms */
-		writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_POTA2, 0x00);
+		writereg(cs, cs->hw.elsa.isac, IPAC_POTA2, 0x00);
 		set_current_state(TASK_UNINTERRUPTIBLE);
-		writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_MASK, 0xc0);
+		writereg(cs, cs->hw.elsa.isac, IPAC_MASK, 0xc0);
 		schedule_timeout((10*HZ)/1000); /* Timeout 10ms */
-		restore_flags(flags);
 		if (cs->subtyp != ELSA_PCMCIA_IPAC) {
-			writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ACFG, 0x0);
-			writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_AOE, 0x3c);
+			writereg(cs, cs->hw.elsa.isac, IPAC_ACFG, 0x0);
+			writereg(cs, cs->hw.elsa.isac, IPAC_AOE, 0x3c);
 		} else {
-			writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_PCFG, 0x10);
-			writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ACFG, 0x4);
-			writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_AOE, 0xf8);
+			writereg(cs, cs->hw.elsa.isac, IPAC_PCFG, 0x10);
+			writereg(cs, cs->hw.elsa.isac, IPAC_ACFG, 0x4);
+			writereg(cs, cs->hw.elsa.isac, IPAC_AOE, 0xf8);
 		}
-		writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ATX, 0xff);
+		writereg(cs, cs->hw.elsa.isac, IPAC_ATX, 0xff);
 		if (cs->subtyp == ELSA_QS1000PCI)
 			byteout(cs->hw.elsa.cfg + 0x4c, 0x41); /* enable ELSA PCI IRQ */
 		else if (cs->subtyp == ELSA_QS3000PCI)
 			byteout(cs->hw.elsa.cfg + 0x4c, 0x43); /* enable ELSA PCI IRQ */
 	}
+	return 0;
 }
 
 #if ARCOFI_USE
@@ -547,7 +476,7 @@ check_arcofi(struct IsdnCardState *cs)
 	int arcofi_present = 0;
 	char tmp[40];
 	char *t;
-	u_char *p;
+	u8 *p;
 
 	if (!cs->dc.isac.mon_tx)
 		if (!(cs->dc.isac.mon_tx=kmalloc(MAX_MON_FRAME, GFP_ATOMIC))) {
@@ -596,32 +525,14 @@ check_arcofi(struct IsdnCardState *cs)
 				"Elsa: %s detected modem at 0x%lx\n",
 				Elsa_Types[cs->subtyp],
 				cs->hw.elsa.base+8);
-			release_region(cs->hw.elsa.base, 8);
-			if (check_region(cs->hw.elsa.base, 16)) {
-				printk(KERN_WARNING
-				"HiSax: %s config port %lx-%lx already in use\n",
-				Elsa_Types[cs->subtyp],
-				cs->hw.elsa.base + 8,
-				cs->hw.elsa.base + 16);
-			} else
-				request_region(cs->hw.elsa.base, 16,
-					"elsa isdn modem");
+			request_io(&cs->rs, cs->hw.elsa.base+8, 8, "elsa isdn modem");
 		} else if (cs->subtyp==ELSA_PCC16) {
 			cs->subtyp = ELSA_PCF;
 			printk(KERN_INFO
 				"Elsa: %s detected modem at 0x%lx\n",
 				Elsa_Types[cs->subtyp],
 				cs->hw.elsa.base+8);
-			release_region(cs->hw.elsa.base, 8);
-			if (check_region(cs->hw.elsa.base, 16)) {
-				printk(KERN_WARNING
-				"HiSax: %s config port %lx-%lx already in use\n",
-				Elsa_Types[cs->subtyp],
-				cs->hw.elsa.base + 8,
-				cs->hw.elsa.base + 16);
-			} else
-				request_region(cs->hw.elsa.base, 16,
-					"elsa isdn modem");
+			request_io(&cs->rs, cs->hw.elsa.base+8, 8, "elsa isdn modem");
 		} else
 			printk(KERN_INFO
 				"Elsa: %s detected modem at 0x%lx\n",
@@ -642,149 +553,7 @@ elsa_led_handler(struct IsdnCardState *cs)
 
 	if (cs->subtyp == ELSA_PCMCIA || cs->subtyp == ELSA_PCMCIA_IPAC)
 		return;
-	del_timer(&cs->hw.elsa.tl);
-	if (cs->hw.elsa.status & ELSA_ASSIGN)
-		cs->hw.elsa.ctrl_reg |= ELSA_STAT_LED;
-	else if (cs->hw.elsa.status & ELSA_BAD_PWR)
-		cs->hw.elsa.ctrl_reg &= ~ELSA_STAT_LED;
-	else {
-		cs->hw.elsa.ctrl_reg ^= ELSA_STAT_LED;
-		blink = 250;
-	}
-	if (cs->hw.elsa.status & 0xf000)
-		cs->hw.elsa.ctrl_reg |= ELSA_LINE_LED;
-	else if (cs->hw.elsa.status & 0x0f00) {
-		cs->hw.elsa.ctrl_reg ^= ELSA_LINE_LED;
-		blink = 500;
-	} else
-		cs->hw.elsa.ctrl_reg &= ~ELSA_LINE_LED;
 
-	if ((cs->subtyp == ELSA_QS1000PCI) ||
-		(cs->subtyp == ELSA_QS3000PCI)) {
-		u_char led = 0xff;
-		if (cs->hw.elsa.ctrl_reg & ELSA_LINE_LED)
-			led ^= ELSA_IPAC_LINE_LED;
-		if (cs->hw.elsa.ctrl_reg & ELSA_STAT_LED)
-			led ^= ELSA_IPAC_STAT_LED;
-		writereg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ATX, led);
-	} else
-		byteout(cs->hw.elsa.ctrl, cs->hw.elsa.ctrl_reg);
-	if (blink) {
-		init_timer(&cs->hw.elsa.tl);
-		cs->hw.elsa.tl.expires = jiffies + ((blink * HZ) / 1000);
-		add_timer(&cs->hw.elsa.tl);
-	}
-}
-
-static int
-Elsa_card_msg(struct IsdnCardState *cs, int mt, void *arg)
-{
-	int ret = 0;
-	long flags;
-
-	switch (mt) {
-		case CARD_RESET:
-			reset_elsa(cs);
-			return(0);
-		case CARD_RELEASE:
-			release_io_elsa(cs);
-			return(0);
-		case CARD_INIT:
-			cs->debug |= L1_DEB_IPAC;
-			inithscxisac(cs, 1);
-			if ((cs->subtyp == ELSA_QS1000) ||
-			    (cs->subtyp == ELSA_QS3000))
-			{
-				byteout(cs->hw.elsa.timer, 0);
-			}
-			if (cs->hw.elsa.trig)
-				byteout(cs->hw.elsa.trig, 0xff);
-			inithscxisac(cs, 2);
-			return(0);
-		case CARD_TEST:
-			if ((cs->subtyp == ELSA_PCMCIA) ||
-				(cs->subtyp == ELSA_PCMCIA_IPAC) ||
-				(cs->subtyp == ELSA_QS1000PCI)) {
-				return(0);
-			} else if (cs->subtyp == ELSA_QS3000PCI) {
-				ret = 0;
-			} else {
-				save_flags(flags);
-				cs->hw.elsa.counter = 0;
-				sti();
-				cs->hw.elsa.ctrl_reg |= ELSA_ENA_TIMER_INT;
-				cs->hw.elsa.status |= ELSA_TIMER_AKTIV;
-				byteout(cs->hw.elsa.ctrl, cs->hw.elsa.ctrl_reg);
-				byteout(cs->hw.elsa.timer, 0);
-				set_current_state(TASK_UNINTERRUPTIBLE);
-				schedule_timeout((110*HZ)/1000);
-				restore_flags(flags);
-				cs->hw.elsa.ctrl_reg &= ~ELSA_ENA_TIMER_INT;
-				byteout(cs->hw.elsa.ctrl, cs->hw.elsa.ctrl_reg);
-				cs->hw.elsa.status &= ~ELSA_TIMER_AKTIV;
-				printk(KERN_INFO "Elsa: %d timer tics in 110 msek\n",
-				       cs->hw.elsa.counter);
-				if ((cs->hw.elsa.counter > 10) &&
-					(cs->hw.elsa.counter < 16)) {
-					printk(KERN_INFO "Elsa: timer and irq OK\n");
-					ret = 0;
-				} else {
-					printk(KERN_WARNING
-					       "Elsa: timer tic problem (%d/12) maybe an IRQ(%d) conflict\n",
-					       cs->hw.elsa.counter, cs->irq);
-					ret = 1;
-				}
-			}
-#if ARCOFI_USE
-			if (check_arcofi(cs)) {
-				init_modem(cs);
-			}
-#endif
-			elsa_led_handler(cs);
-			return(ret);
-		case (MDL_REMOVE | REQUEST):
-			cs->hw.elsa.status &= 0;
-			break;
-		case (MDL_ASSIGN | REQUEST):
-			cs->hw.elsa.status |= ELSA_ASSIGN;
-			break;
-		case MDL_INFO_SETUP:
-			if ((long) arg)
-				cs->hw.elsa.status |= 0x0200;
-			else
-				cs->hw.elsa.status |= 0x0100;
-			break;
-		case MDL_INFO_CONN:
-			if ((long) arg)
-				cs->hw.elsa.status |= 0x2000;
-			else
-				cs->hw.elsa.status |= 0x1000;
-			break;
-		case MDL_INFO_REL:
-			if ((long) arg) {
-				cs->hw.elsa.status &= ~0x2000;
-				cs->hw.elsa.status &= ~0x0200;
-			} else {
-				cs->hw.elsa.status &= ~0x1000;
-				cs->hw.elsa.status &= ~0x0100;
-			}
-			break;
-#if ARCOFI_USE
-		case CARD_AUX_IND:
-			if (cs->hw.elsa.MFlag) {
-				int len;
-				u_char *msg;
-
-				if (!arg)
-					return(0);
-				msg = arg;
-				len = *msg;
-				msg++;
-				modem_write_cmd(cs, msg, len);
-			}
-			break;
-#endif
-	}
 	if (cs->typ == ISDN_CTYPE_ELSA) {
 		int pwr = bytein(cs->hw.elsa.ale);
 		if (pwr & 0x08)
@@ -792,31 +561,192 @@ Elsa_card_msg(struct IsdnCardState *cs, int mt, void *arg)
 		else
 			cs->hw.elsa.status &= ~ELSA_BAD_PWR;
 	}
-	elsa_led_handler(cs);
-	return(ret);
+	if (cs->status & 0x0001)
+		cs->hw.elsa.ctrl_reg |= ELSA_STAT_LED;
+	else if (cs->hw.elsa.status & ELSA_BAD_PWR)
+		cs->hw.elsa.ctrl_reg &= ~ELSA_STAT_LED;
+	else {
+		cs->hw.elsa.ctrl_reg ^= ELSA_STAT_LED;
+		blink = 250;
+	}
+	if (cs->status & 0xf000)
+		cs->hw.elsa.ctrl_reg |= ELSA_LINE_LED;
+	else if (cs->status & 0x0f00) {
+		cs->hw.elsa.ctrl_reg ^= ELSA_LINE_LED;
+		blink = 500;
+	} else
+		cs->hw.elsa.ctrl_reg &= ~ELSA_LINE_LED;
+
+	if ((cs->subtyp == ELSA_QS1000PCI) ||
+		(cs->subtyp == ELSA_QS3000PCI)) {
+		u8 led = 0xff;
+		if (cs->hw.elsa.ctrl_reg & ELSA_LINE_LED)
+			led ^= ELSA_IPAC_LINE_LED;
+		if (cs->hw.elsa.ctrl_reg & ELSA_STAT_LED)
+			led ^= ELSA_IPAC_STAT_LED;
+		writereg(cs, cs->hw.elsa.isac, IPAC_ATX, led);
+	} else
+		byteout(cs->hw.elsa.ctrl, cs->hw.elsa.ctrl_reg);
+
+	if (blink)
+		mod_timer(&cs->hw.elsa.tl, jiffies + (blink * HZ) / 1000);
 }
 
-static unsigned char
+#if ARCOFI_USE
+static void
+elsa_aux_ind(struct IsdnCardState *cs, void *arg)
+{
+	 if (cs->hw.elsa.MFlag) {
+		 int len;
+		 u8 *msg;
+		 
+		 if (!arg)
+			 return;
+		 msg = arg;
+		 len = *msg;
+		 msg++;
+		 modem_write_cmd(cs, msg, len);
+	 }
+}
+#else
+#define elsa_aux_ind NULL
+#endif
+
+static void
+elsa_init(struct IsdnCardState *cs)
+{
+	if (cs->subtyp == ELSA_QS1000 || cs->subtyp == ELSA_QS3000)
+		byteout(cs->hw.elsa.timer, 0);
+
+	if (cs->hw.elsa.trig)
+		byteout(cs->hw.elsa.trig, 0xff);
+
+	inithscxisac(cs);
+}
+
+static void
+elsa_ipac_init(struct IsdnCardState *cs)
+{
+	if (cs->hw.elsa.trig)
+		byteout(cs->hw.elsa.trig, 0xff);
+
+	ipac_init(cs);
+}
+
+static void
+elsa_test(struct IsdnCardState *cs)
+{
+	if ((cs->subtyp == ELSA_PCMCIA) ||
+	    (cs->subtyp == ELSA_PCMCIA_IPAC) ||
+	    (cs->subtyp == ELSA_QS1000PCI)) {
+		return;
+	} 
+	if (cs->subtyp != ELSA_QS3000PCI) {
+		cs->hw.elsa.counter = 0;
+		cs->hw.elsa.ctrl_reg |= ELSA_ENA_TIMER_INT;
+		cs->hw.elsa.status |= ELSA_TIMER_AKTIV;
+		byteout(cs->hw.elsa.ctrl, cs->hw.elsa.ctrl_reg);
+		byteout(cs->hw.elsa.timer, 0);
+		set_current_state(TASK_UNINTERRUPTIBLE);
+		schedule_timeout((110*HZ)/1000);
+		cs->hw.elsa.ctrl_reg &= ~ELSA_ENA_TIMER_INT;
+		byteout(cs->hw.elsa.ctrl, cs->hw.elsa.ctrl_reg);
+		cs->hw.elsa.status &= ~ELSA_TIMER_AKTIV;
+		printk(KERN_INFO "Elsa: %d timer tics in 110 msek\n",
+		       cs->hw.elsa.counter);
+		if ((cs->hw.elsa.counter > 10) &&
+		    (cs->hw.elsa.counter < 16)) {
+			printk(KERN_INFO "Elsa: timer and irq OK\n");
+		} else {
+			printk(KERN_WARNING
+			       "Elsa: timer tic problem (%d/12) maybe an IRQ(%d) conflict\n",
+			       cs->hw.elsa.counter, cs->irq);
+		}
+	}
+#if ARCOFI_USE
+	if (check_arcofi(cs)) {
+		init_modem(cs);
+	}
+#endif
+	elsa_led_handler(cs);
+}
+
+static struct card_ops elsa_ops = {
+	.init        = elsa_init,
+	.test        = elsa_test,
+	.reset       = elsa_reset,
+	.release     = elsa_release,
+	.aux_ind     = elsa_aux_ind,
+	.led_handler = elsa_led_handler,
+	.irq_func    = elsa_interrupt,
+};
+
+static struct card_ops elsa_ipac_ops = {
+	.init        = elsa_ipac_init,
+	.test        = elsa_test,
+	.reset       = elsa_reset,
+	.release     = elsa_release,
+	.aux_ind     = elsa_aux_ind,
+	.led_handler = elsa_led_handler,
+	.irq_func    = elsa_interrupt_ipac,
+};
+
+static void __init
+elsa_arcofi_init(struct IsdnCardState *cs)
+{
+#if ARCOFI_USE
+	init_arcofi(cs);
+#endif
+}
+
+static void __init
+elsa_timer_init(struct IsdnCardState *cs)
+{
+	cs->hw.elsa.tl.function = (void *) elsa_led_handler;
+	cs->hw.elsa.tl.data = (long) cs;
+	init_timer(&cs->hw.elsa.tl);
+}
+
+static int __init
+elsa_timer_test(struct IsdnCardState *cs)
+{
+	/* test timer */
+	byteout(cs->hw.elsa.trig, 0xff);
+	byteout(cs->hw.elsa.timer, 0);
+	if (!TimerRun(cs)) {
+		byteout(cs->hw.elsa.timer, 0);	/* second attempt */
+		if (!TimerRun(cs)) {
+			printk(KERN_WARNING "Elsa: timer does not start\n");
+			goto err;
+		}
+	}
+	HZDELAY(10 * HZ / 1000); /* wait >=10 ms */
+	if (TimerRun(cs)) {
+		printk(KERN_WARNING "Elsa: timer does not run\n");
+		goto err;
+	}
+	printk(KERN_INFO "Elsa: timer OK; resetting card\n");
+	return 0;
+ err:
+	return -EBUSY;
+}
+
+static unsigned char __init
 probe_elsa_adr(unsigned int adr, int typ)
 {
 	int i, in1, in2, p16_1 = 0, p16_2 = 0, p8_1 = 0, p8_2 = 0, pc_1 = 0,
 	 pc_2 = 0, pfp_1 = 0, pfp_2 = 0;
-	long flags;
 
 	/* In case of the elsa pcmcia card, this region is in use,
 	   reserved for us by the card manager. So we do not check it
 	   here, it would fail. */
-	if (typ != ISDN_CTYPE_ELSA_PCMCIA && check_region(adr, 8)) {
-		printk(KERN_WARNING
-		       "Elsa: Probing Port 0x%x: already in use\n",
-		       adr);
-		return (0);
+	if (typ != ISDN_CTYPE_ELSA_PCMCIA && !request_region(adr, 8, "elsa")) {
+		printk(KERN_WARNING "Elsa: probing port 0x%x: in use\n",  adr);
+		return 0;
 	}
-	save_flags(flags);
-	cli();
 	for (i = 0; i < 16; i++) {
-		in1 = inb(adr + ELSA_CONFIG);	/* 'toggelt' bei */
-		in2 = inb(adr + ELSA_CONFIG);	/* jedem Zugriff */
+		in1 = inb(adr + ELSA_CONFIG);	/* 'toggels' at */
+		in2 = inb(adr + ELSA_CONFIG);	/* each access  */
 		p16_1 += 0x04 & in1;
 		p16_2 += 0x04 & in2;
 		p8_1 += 0x02 & in1;
@@ -826,7 +756,7 @@ probe_elsa_adr(unsigned int adr, int typ)
 		pfp_1 += 0x40 & in1;
 		pfp_2 += 0x40 & in2;
 	}
-	restore_flags(flags);
+	release_region(adr, 8);
 	printk(KERN_INFO "Elsa: Probing IO 0x%x", adr);
 	if (65 == ++p16_1 * ++p16_2) {
 		printk(" PCC-16/PCF found\n");
@@ -846,309 +776,80 @@ probe_elsa_adr(unsigned int adr, int typ)
 	}
 }
 
-static unsigned int
-probe_elsa(struct IsdnCardState *cs)
+static int __init
+elsa_probe(struct IsdnCardState *cs, struct IsdnCard *card)
 {
-	int i;
-	unsigned int CARD_portlist[] =
-	{0x160, 0x170, 0x260, 0x360, 0};
+	u8 val;
+	int i, bytecnt = 8;
+	unsigned int CARD_portlist[] = {0x160, 0x170, 0x260, 0x360, 0};
 
-	for (i = 0; CARD_portlist[i]; i++) {
-		if ((cs->subtyp = probe_elsa_adr(CARD_portlist[i], cs->typ)))
+	cs->hw.elsa.base = card->para[0];
+	printk(KERN_INFO "Elsa: Microlink IO probing\n");
+	if (cs->hw.elsa.base) {
+		cs->subtyp = probe_elsa_adr(cs->hw.elsa.base, cs->typ);
+		if (!cs->subtyp) {
+			printk(KERN_WARNING "Elsa: no Microlink at %#lx\n",
+			       cs->hw.elsa.base);
+			goto err;
+		}
+	} else {
+		for (i = 0; CARD_portlist[i]; i++) {
+			cs->subtyp = probe_elsa_adr(CARD_portlist[i], cs->typ);
+			if (cs->subtyp)
+				cs->hw.elsa.base = CARD_portlist[i];
 			break;
+		}
 	}
-	return (CARD_portlist[i]);
-}
-
-static 	struct pci_dev *dev_qs1000 __devinitdata = NULL;
-static 	struct pci_dev *dev_qs3000 __devinitdata = NULL;
-
-int __devinit
-setup_elsa(struct IsdnCard *card)
-{
-	long flags;
-	int bytecnt;
-	u_char val;
-	struct IsdnCardState *cs = card->cs;
-	char tmp[64];
-
-	strcpy(tmp, Elsa_revision);
-	printk(KERN_INFO "HiSax: Elsa driver Rev. %s\n", HiSax_getrev(tmp));
-	cs->hw.elsa.ctrl_reg = 0;
-	cs->hw.elsa.status = 0;
-	cs->hw.elsa.MFlag = 0;
-	if (cs->typ == ISDN_CTYPE_ELSA) {
-		cs->hw.elsa.base = card->para[0];
-		printk(KERN_INFO "Elsa: Microlink IO probing\n");
-		if (cs->hw.elsa.base) {
-			if (!(cs->subtyp = probe_elsa_adr(cs->hw.elsa.base,
-							  cs->typ))) {
-				printk(KERN_WARNING
-				       "Elsa: no Elsa Microlink at %#lx\n",
-				       cs->hw.elsa.base);
-				return (0);
-			}
-		} else
-			cs->hw.elsa.base = probe_elsa(cs);
-		if (cs->hw.elsa.base) {
-			cs->hw.elsa.cfg = cs->hw.elsa.base + ELSA_CONFIG;
-			cs->hw.elsa.ctrl = cs->hw.elsa.base + ELSA_CONTROL;
-			cs->hw.elsa.ale = cs->hw.elsa.base + ELSA_ALE;
-			cs->hw.elsa.isac = cs->hw.elsa.base + ELSA_ISAC;
-			cs->hw.elsa.itac = cs->hw.elsa.base + ELSA_ITAC;
-			cs->hw.elsa.hscx = cs->hw.elsa.base + ELSA_HSCX;
-			cs->hw.elsa.trig = cs->hw.elsa.base + ELSA_TRIG_IRQ;
-			cs->hw.elsa.timer = cs->hw.elsa.base + ELSA_START_TIMER;
-			val = bytein(cs->hw.elsa.cfg);
-			if (cs->subtyp == ELSA_PC) {
-				const u_char CARD_IrqTab[8] =
-				{7, 3, 5, 9, 0, 0, 0, 0};
-				cs->irq = CARD_IrqTab[(val & ELSA_IRQ_IDX_PC) >> 2];
-			} else if (cs->subtyp == ELSA_PCC8) {
-				const u_char CARD_IrqTab[8] =
-				{7, 3, 5, 9, 0, 0, 0, 0};
-				cs->irq = CARD_IrqTab[(val & ELSA_IRQ_IDX_PCC8) >> 4];
-			} else {
-				const u_char CARD_IrqTab[8] =
-				{15, 10, 15, 3, 11, 5, 11, 9};
-				cs->irq = CARD_IrqTab[(val & ELSA_IRQ_IDX) >> 3];
-			}
-			val = bytein(cs->hw.elsa.ale) & ELSA_HW_RELEASE;
-			if (val < 3)
-				val |= 8;
-			val += 'A' - 3;
-			if (val == 'B' || val == 'C')
-				val ^= 1;
-			if ((cs->subtyp == ELSA_PCFPRO) && (val = 'G'))
-				val = 'C';
-			printk(KERN_INFO
-			       "Elsa: %s found at %#lx Rev.:%c IRQ %d\n",
-			       Elsa_Types[cs->subtyp],
-			       cs->hw.elsa.base,
-			       val, cs->irq);
-			val = bytein(cs->hw.elsa.ale) & ELSA_S0_POWER_BAD;
-			if (val) {
-				printk(KERN_WARNING
-				   "Elsa: Microlink S0 bus power bad\n");
-				cs->hw.elsa.status |= ELSA_BAD_PWR;
-			}
-		} else {
-			printk(KERN_WARNING
-			       "No Elsa Microlink found\n");
-			return (0);
-		}
-	} else if (cs->typ == ISDN_CTYPE_ELSA_PNP) {
-		cs->hw.elsa.base = card->para[1];
-		cs->irq = card->para[0];
-		cs->subtyp = ELSA_QS1000;
-		cs->hw.elsa.cfg = cs->hw.elsa.base + ELSA_CONFIG;
-		cs->hw.elsa.ale = cs->hw.elsa.base + ELSA_ALE;
-		cs->hw.elsa.isac = cs->hw.elsa.base + ELSA_ISAC;
-		cs->hw.elsa.hscx = cs->hw.elsa.base + ELSA_HSCX;
-		cs->hw.elsa.trig = cs->hw.elsa.base + ELSA_TRIG_IRQ;
-		cs->hw.elsa.timer = cs->hw.elsa.base + ELSA_START_TIMER;
-		cs->hw.elsa.ctrl = cs->hw.elsa.base + ELSA_CONTROL;
-		printk(KERN_INFO
-		       "Elsa: %s defined at %#lx IRQ %d\n",
-		       Elsa_Types[cs->subtyp],
-		       cs->hw.elsa.base,
-		       cs->irq);
-	} else if (cs->typ == ISDN_CTYPE_ELSA_PCMCIA) {
-		cs->hw.elsa.base = card->para[1];
-		cs->irq = card->para[0];
-		val = readreg(cs->hw.elsa.base + 0, cs->hw.elsa.base + 2, IPAC_ID);
-		if ((val == 1) || (val == 2)) { /* IPAC version 1.1/1.2 */
-			cs->subtyp = ELSA_PCMCIA_IPAC;
-			cs->hw.elsa.ale = cs->hw.elsa.base + 0;
-			cs->hw.elsa.isac = cs->hw.elsa.base + 2;
-			cs->hw.elsa.hscx = cs->hw.elsa.base + 2;
-			test_and_set_bit(HW_IPAC, &cs->HW_Flags);
-		} else {
-			cs->subtyp = ELSA_PCMCIA;
-			cs->hw.elsa.ale = cs->hw.elsa.base + ELSA_ALE_PCM;
-			cs->hw.elsa.isac = cs->hw.elsa.base + ELSA_ISAC_PCM;
-			cs->hw.elsa.hscx = cs->hw.elsa.base + ELSA_HSCX;
-		}
-		cs->hw.elsa.timer = 0;
-		cs->hw.elsa.trig = 0;
-		cs->hw.elsa.ctrl = 0;
-		printk(KERN_INFO
-		       "Elsa: %s defined at %#lx IRQ %d\n",
-		       Elsa_Types[cs->subtyp],
-		       cs->hw.elsa.base,
-		       cs->irq);
-	} else if (cs->typ == ISDN_CTYPE_ELSA_PCI) {
-#if CONFIG_PCI
-		if (!pci_present()) {
-			printk(KERN_ERR "Elsa: no PCI bus present\n");
-			return(0);
-		}
-		cs->subtyp = 0;
-		if ((dev_qs1000 = pci_find_device(PCI_VENDOR_ID_ELSA,
-			PCI_DEVICE_ID_ELSA_MICROLINK, dev_qs1000))) {
-			if (pci_enable_device(dev_qs1000))
-				return(0);
-			cs->subtyp = ELSA_QS1000PCI;
-			cs->irq = dev_qs1000->irq;
-			cs->hw.elsa.cfg = pci_resource_start(dev_qs1000, 1);
-			cs->hw.elsa.base = pci_resource_start(dev_qs1000, 3);
-		} else if ((dev_qs3000 = pci_find_device(PCI_VENDOR_ID_ELSA,
-			PCI_DEVICE_ID_ELSA_QS3000, dev_qs3000))) {
-			if (pci_enable_device(dev_qs3000))
-				return(0);
-			cs->subtyp = ELSA_QS3000PCI;
-			cs->irq = dev_qs3000->irq;
-			cs->hw.elsa.cfg = pci_resource_start(dev_qs3000, 1);
-			cs->hw.elsa.base = pci_resource_start(dev_qs3000, 3);
-		} else {
-			printk(KERN_WARNING "Elsa: No PCI card found\n");
-			return(0);
-		}
-		if (!cs->irq) {
-			printk(KERN_WARNING "Elsa: No IRQ for PCI card found\n");
-			return(0);
-		}
-
-		if (!(cs->hw.elsa.base && cs->hw.elsa.cfg)) {
-			printk(KERN_WARNING "Elsa: No IO-Adr for PCI card found\n");
-			return(0);
-		}
-		if ((cs->hw.elsa.cfg & 0xff) || (cs->hw.elsa.base & 0xf)) {
-			printk(KERN_WARNING "Elsa: You may have a wrong PCI bios\n");
-			printk(KERN_WARNING "Elsa: If your system hangs now, read\n");
-			printk(KERN_WARNING "Elsa: Documentation/isdn/README.HiSax\n");
-			printk(KERN_WARNING "Elsa: Waiting 5 sec to sync discs\n");
-			save_flags(flags);
-			sti();
-			HZDELAY(500);	/* wait 500*10 ms */
-			restore_flags(flags);
-		}
-		cs->hw.elsa.ale  = cs->hw.elsa.base;
-		cs->hw.elsa.isac = cs->hw.elsa.base +1;
-		cs->hw.elsa.hscx = cs->hw.elsa.base +1; 
-		test_and_set_bit(HW_IPAC, &cs->HW_Flags);
-		cs->hw.elsa.timer = 0;
-		cs->hw.elsa.trig  = 0;
-		cs->irq_flags |= SA_SHIRQ;
-		printk(KERN_INFO
-		       "Elsa: %s defined at %#lx/0x%x IRQ %d\n",
-		       Elsa_Types[cs->subtyp],
-		       cs->hw.elsa.base,
-		       cs->hw.elsa.cfg,
-		       cs->irq);
-#else
-		printk(KERN_WARNING "Elsa: Elsa PCI and NO_PCI_BIOS\n");
-		printk(KERN_WARNING "Elsa: unable to config Elsa PCI\n");
-		return (0);
-#endif /* CONFIG_PCI */
-	} else 
-		return (0);
-
+	if (!cs->hw.elsa.base)
+		goto err;
+		
+	cs->hw.elsa.cfg   = cs->hw.elsa.base + ELSA_CONFIG;
+	cs->hw.elsa.ctrl  = cs->hw.elsa.base + ELSA_CONTROL;
+	cs->hw.elsa.ale   = cs->hw.elsa.base + ELSA_ALE;
+	cs->hw.elsa.isac  = cs->hw.elsa.base + ELSA_ISAC;
+	cs->hw.elsa.itac  = cs->hw.elsa.base + ELSA_ITAC;
+	cs->hw.elsa.hscx  = cs->hw.elsa.base + ELSA_HSCX;
+	cs->hw.elsa.trig  = cs->hw.elsa.base + ELSA_TRIG_IRQ;
+	cs->hw.elsa.timer = cs->hw.elsa.base + ELSA_START_TIMER;
+	val = bytein(cs->hw.elsa.cfg);
+	if (cs->subtyp == ELSA_PC) {
+		const u8 CARD_IrqTab[8] = {7, 3, 5, 9, 0, 0, 0, 0};
+		cs->irq = CARD_IrqTab[(val & ELSA_IRQ_IDX_PC) >> 2];
+	} else if (cs->subtyp == ELSA_PCC8) {
+		const u8 CARD_IrqTab[8] = {7, 3, 5, 9, 0, 0, 0, 0};
+		cs->irq = CARD_IrqTab[(val & ELSA_IRQ_IDX_PCC8) >> 4];
+	} else {
+		const u8 CARD_IrqTab[8] = {15, 10, 15, 3, 11, 5, 11, 9};
+		cs->irq = CARD_IrqTab[(val & ELSA_IRQ_IDX) >> 3];
+	}
+	val = bytein(cs->hw.elsa.ale) & ELSA_HW_RELEASE;
+	if (val < 3)
+		val |= 8;
+	val += 'A' - 3;
+	if (val == 'B' || val == 'C')
+		val ^= 1;
+	if ((cs->subtyp == ELSA_PCFPRO) && (val = 'G'))
+		val = 'C';
+	printk(KERN_INFO "Elsa: %s found at %#lx Rev.:%c IRQ %d\n",
+	       Elsa_Types[cs->subtyp], cs->hw.elsa.base, val, cs->irq);
+	val = bytein(cs->hw.elsa.ale) & ELSA_S0_POWER_BAD;
+	if (val) {
+		printk(KERN_WARNING "Elsa: Microlink S0 bus power bad\n");
+		cs->hw.elsa.status |= ELSA_BAD_PWR;
+	}
 	switch (cs->subtyp) {
-		case ELSA_PC:
-		case ELSA_PCC8:
-		case ELSA_PCC16:
-		case ELSA_QS1000:
-		case ELSA_PCMCIA:
-		case ELSA_PCMCIA_IPAC:
-			bytecnt = 8;
-			break;
-		case ELSA_PCFPRO:
-		case ELSA_PCF:
-		case ELSA_QS3000PCI:
-			bytecnt = 16;
-			break;
-		case ELSA_QS1000PCI:
-			bytecnt = 2;
-			break;
-		default:
-			printk(KERN_WARNING
-			       "Unknown ELSA subtype %d\n", cs->subtyp);
-			return (0);
+	case ELSA_PCFPRO: bytecnt = 16;	break;
 	}
-	/* In case of the elsa pcmcia card, this region is in use,
-	   reserved for us by the card manager. So we do not check it
-	   here, it would fail. */
-	if (cs->typ != ISDN_CTYPE_ELSA_PCMCIA && check_region(cs->hw.elsa.base, bytecnt)) {
-		printk(KERN_WARNING
-		       "HiSax: %s config port %#lx-%#lx already in use\n",
-		       CardType[card->typ],
-		       cs->hw.elsa.base,
-		       cs->hw.elsa.base + bytecnt);
-		return (0);
-	} else {
-		request_region(cs->hw.elsa.base, bytecnt, "elsa isdn");
-	}
-	if ((cs->subtyp == ELSA_QS1000PCI) || (cs->subtyp == ELSA_QS3000PCI)) {
-		if (check_region(cs->hw.elsa.cfg, 0x80)) {
-			printk(KERN_WARNING
-			       "HiSax: %s pci port %x-%x already in use\n",
-				CardType[card->typ],
-				cs->hw.elsa.cfg,
-				cs->hw.elsa.cfg + 0x80);
-			release_region(cs->hw.elsa.base, bytecnt);
-			return (0);
-		} else {
-			request_region(cs->hw.elsa.cfg, 0x80, "elsa isdn pci");
-		}
-	}
-#if ARCOFI_USE
-	init_arcofi(cs);
-#endif
-	cs->hw.elsa.tl.function = (void *) elsa_led_handler;
-	cs->hw.elsa.tl.data = (long) cs;
-	init_timer(&cs->hw.elsa.tl);
-	/* Teste Timer */
-	if (cs->hw.elsa.timer) {
-		byteout(cs->hw.elsa.trig, 0xff);
-		byteout(cs->hw.elsa.timer, 0);
-		if (!TimerRun(cs)) {
-			byteout(cs->hw.elsa.timer, 0);	/* 2. Versuch */
-			if (!TimerRun(cs)) {
-				printk(KERN_WARNING
-				       "Elsa: timer do not start\n");
-				release_io_elsa(cs);
-				return (0);
-			}
-		}
-		save_flags(flags);
-		sti();
-		HZDELAY(1);	/* wait >=10 ms */
-		restore_flags(flags);
-		if (TimerRun(cs)) {
-			printk(KERN_WARNING "Elsa: timer do not run down\n");
-			release_io_elsa(cs);
-			return (0);
-		}
-		printk(KERN_INFO "Elsa: timer OK; resetting card\n");
-	}
-	cs->BC_Read_Reg = &ReadHSCX;
-	cs->BC_Write_Reg = &WriteHSCX;
-	cs->BC_Send_Data = &hscx_fill_fifo;
-	cs->cardmsg = &Elsa_card_msg;
-	reset_elsa(cs);
-	if ((cs->subtyp == ELSA_QS1000PCI) || (cs->subtyp == ELSA_QS3000PCI) || (cs->subtyp == ELSA_PCMCIA_IPAC)) {
-		cs->readisac = &ReadISAC_IPAC;
-		cs->writeisac = &WriteISAC_IPAC;
-		cs->readisacfifo = &ReadISACfifo_IPAC;
-		cs->writeisacfifo = &WriteISACfifo_IPAC;
-		cs->irq_func = &elsa_interrupt_ipac;
-		val = readreg(cs->hw.elsa.ale, cs->hw.elsa.isac, IPAC_ID);
-		printk(KERN_INFO "Elsa: IPAC version %x\n", val);
-	} else {
-		cs->readisac = &ReadISAC;
-		cs->writeisac = &WriteISAC;
-		cs->readisacfifo = &ReadISACfifo;
-		cs->writeisacfifo = &WriteISACfifo;
-		cs->irq_func = &elsa_interrupt;
-		ISACVersion(cs, "Elsa:");
-		if (HscxVersion(cs, "Elsa:")) {
-			printk(KERN_WARNING
-				"Elsa: wrong HSCX versions check IO address\n");
-			release_io_elsa(cs);
-			return (0);
-		}
-	}
+	if (!request_io(&cs->rs, cs->hw.elsa.base, bytecnt, "elsa isdn"))
+		goto err;
+	elsa_arcofi_init(cs);
+	elsa_timer_init(cs);
+	if (elsa_timer_test(cs))
+		goto err;
+	elsa_reset(cs);
+	cs->card_ops = &elsa_ops;
+	if (hscxisac_setup(cs, &isac_ops, &hscx_ops))
+		goto err;
 	if (cs->subtyp == ELSA_PC) {
 		val = readitac(cs, ITAC_SYS);
 		printk(KERN_INFO "Elsa: ITAC version %s\n", ITACVer[val & 7]);
@@ -1158,5 +859,263 @@ setup_elsa(struct IsdnCard *card)
 		writeitac(cs, ITAC_SCIE, 0);
 		writeitac(cs, ITAC_STIE, 0);
 	}
-	return (1);
+	return 0;
+ err:
+	elsa_release(cs);
+	return -EBUSY;
+}
+
+static int __init
+elsa_qs_probe(struct IsdnCardState *cs, struct IsdnCard *card)
+{
+	int bytecnt = 8;
+
+	cs->irq           = card->para[0];
+	cs->hw.elsa.base  = card->para[1];
+	cs->hw.elsa.cfg   = cs->hw.elsa.base + ELSA_CONFIG;
+	cs->hw.elsa.ale   = cs->hw.elsa.base + ELSA_ALE;
+	cs->hw.elsa.isac  = cs->hw.elsa.base + ELSA_ISAC;
+	cs->hw.elsa.hscx  = cs->hw.elsa.base + ELSA_HSCX;
+	cs->hw.elsa.trig  = cs->hw.elsa.base + ELSA_TRIG_IRQ;
+	cs->hw.elsa.timer = cs->hw.elsa.base + ELSA_START_TIMER;
+	cs->hw.elsa.ctrl  = cs->hw.elsa.base + ELSA_CONTROL;
+	printk(KERN_INFO "Elsa: %s defined at %#lx IRQ %d\n",
+	       Elsa_Types[cs->subtyp], cs->hw.elsa.base, cs->irq);
+	switch (cs->subtyp) {
+	case ELSA_QS3000: bytecnt = 16;	break;
+	}
+	if (!request_io(&cs->rs, cs->hw.elsa.base, bytecnt, "elsa isdn"))
+		goto err;
+	elsa_arcofi_init(cs);
+	elsa_timer_init(cs);
+	if (elsa_timer_test(cs))
+		goto err;
+	elsa_reset(cs);
+	cs->card_ops = &elsa_ops;
+	if (hscxisac_setup(cs, &isac_ops, &hscx_ops))
+		goto err;
+	return 0;
+ err:
+	elsa_release(cs);
+	return -EBUSY;
+}
+
+static int __init
+elsa_qs1000_probe(struct IsdnCardState *cs, struct IsdnCard *card)
+{
+	cs->subtyp = ELSA_QS1000;
+	return elsa_qs_probe(cs, card);
+}
+
+static int __init
+elsa_qs3000_probe(struct IsdnCardState *cs, struct IsdnCard *card)
+{
+	cs->subtyp = ELSA_QS3000;
+	return elsa_qs_probe(cs, card);
+}
+
+static int __init
+elsa_pcmcia_probe(struct IsdnCardState *cs, struct IsdnCard *card)
+{
+	u8 val;
+
+	cs->irq = card->para[0];
+	cs->hw.elsa.base = card->para[1];
+	cs->hw.elsa.ale = cs->hw.elsa.base + 0;
+	val = readreg(cs, cs->hw.elsa.base + 2, IPAC_ID);
+	if ((val == 1) || (val == 2)) { /* IPAC version 1.1/1.2 */
+		cs->subtyp = ELSA_PCMCIA_IPAC;
+		cs->hw.elsa.isac = cs->hw.elsa.base + 2;
+	} else {
+		cs->subtyp = ELSA_PCMCIA;
+		cs->hw.elsa.ale = cs->hw.elsa.base + ELSA_ALE_PCM;
+		cs->hw.elsa.isac = cs->hw.elsa.base + ELSA_ISAC_PCM;
+		cs->hw.elsa.hscx = cs->hw.elsa.base + ELSA_HSCX;
+	}
+	cs->hw.elsa.timer = 0;
+	cs->hw.elsa.trig = 0;
+	cs->hw.elsa.ctrl = 0;
+	printk(KERN_INFO "Elsa: %s defined at %#lx IRQ %d\n",
+	       Elsa_Types[cs->subtyp], cs->hw.elsa.base, cs->irq);
+	elsa_arcofi_init(cs);
+	elsa_reset(cs);
+	if (cs->subtyp == ELSA_PCMCIA_IPAC) {
+		cs->card_ops = &elsa_ipac_ops;
+		if (ipac_setup(cs, &ipac_dc_ops, &ipac_bc_ops))
+			goto err;
+	} else {
+		cs->card_ops = &elsa_ops;
+		if (hscxisac_setup(cs, &isac_ops, &hscx_ops))
+			goto err;
+	}
+	return 0;
+ err:
+	elsa_release(cs);
+	return -EBUSY;
+}
+
+static int __init
+elsa_qs_pci_probe(struct IsdnCardState *cs, struct pci_dev *pdev,
+		  int subtyp)
+{
+	int bytecnt = 2;
+	u8 pci_rev;
+
+	if (pci_enable_device(pdev))
+		goto err;
+
+	cs->subtyp = subtyp;
+	cs->irq = pdev->irq;
+	cs->irq_flags |= SA_SHIRQ;
+	cs->hw.elsa.cfg = pci_resource_start(pdev, 1);
+	cs->hw.elsa.base = pci_resource_start(pdev, 3);
+	pci_read_config_byte(pdev, PCI_REVISION_ID, &pci_rev);
+	if (cs->hw.elsa.cfg & 0x80 && pci_rev == 1) {
+		printk(KERN_INFO "Elsa: PLX9050 rev1 workaround activated\n");
+		__set_bit(FLG_BUGGY_PLX9050, &cs->HW_Flags);
+	}
+	cs->hw.elsa.ale  = cs->hw.elsa.base;
+	cs->hw.elsa.isac = cs->hw.elsa.base +1;
+	cs->hw.elsa.hscx = cs->hw.elsa.base +1; 
+	printk(KERN_INFO "Elsa: %s defined at %#lx/%#x IRQ %d\n",
+	       Elsa_Types[cs->subtyp], cs->hw.elsa.base, cs->hw.elsa.cfg,
+	       cs->irq);
+	switch (cs->subtyp) {
+	case ELSA_QS3000PCI: bytecnt = 16; break;
+	}
+	if (!request_io(&cs->rs, cs->hw.elsa.base, bytecnt, "elsa isdn"))
+		goto err;
+	if (!request_io(&cs->rs, cs->hw.elsa.cfg, 0x80, "elsa isdn pci"))
+		goto err;
+	elsa_arcofi_init(cs);
+	elsa_timer_init(cs);
+	elsa_reset(cs);
+	cs->card_ops = &elsa_ipac_ops;
+	if (ipac_setup(cs, &ipac_dc_ops, &ipac_bc_ops))
+		goto err;
+	return 0;
+ err:
+	elsa_release(cs);
+	return -EBUSY;
+}
+
+static 	struct pci_dev *dev_qs1000 __devinitdata = NULL;
+static 	struct pci_dev *dev_qs3000 __devinitdata = NULL;
+
+#ifdef __ISAPNP__
+static struct isapnp_device_id elsa_ids[] __initdata = {
+	{ ISAPNP_VENDOR('E', 'L', 'S'), ISAPNP_FUNCTION(0x0133),
+	  ISAPNP_VENDOR('E', 'L', 'S'), ISAPNP_FUNCTION(0x0133), 
+	  (unsigned long) "Elsa QS1000" },
+	{ ISAPNP_VENDOR('E', 'L', 'S'), ISAPNP_FUNCTION(0x0134),
+	  ISAPNP_VENDOR('E', 'L', 'S'), ISAPNP_FUNCTION(0x0134), 
+	  (unsigned long) "Elsa QS3000" },
+	{ 0, }
+};
+
+static struct isapnp_device_id *pdev = &elsa_ids[0];
+static struct pnp_card *pnp_c __devinitdata = NULL;
+#endif
+
+int __devinit
+setup_elsa(struct IsdnCard *card)
+{
+	char tmp[64];
+
+	strcpy(tmp, Elsa_revision);
+	printk(KERN_INFO "HiSax: Elsa driver Rev. %s\n", HiSax_getrev(tmp));
+
+	if (card->typ == ISDN_CTYPE_ELSA) {
+		if (elsa_probe(card->cs, card))
+			return 0;
+		return 1;
+	} else if (card->typ == ISDN_CTYPE_ELSA_PNP) {
+#ifdef __ISAPNP__
+		if (!card->para[1] && isapnp_present()) {
+			struct pnp_card *pb;
+			struct pnp_dev *pd;
+			
+			while(pdev->card_vendor) {
+				if ((pb = pnp_find_card(pdev->card_vendor,
+							pdev->card_device,
+							pnp_c))) {
+					pnp_c = pb;
+					pd = NULL;
+					if ((pd = pnp_find_dev(pnp_c,
+							       pdev->vendor,
+							       pdev->function,
+							       pd))) {
+						printk(KERN_INFO "HiSax: %s detected\n",
+							(char *)pdev->driver_data);
+						if (pnp_device_attach(pd) < 0) {
+							printk(KERN_ERR "Elsa PnP: attach failed\n");
+							return 0;
+						}
+						if (pnp_activate_dev(pd) < 0) {
+							pnp_device_detach(pd);
+							printk(KERN_ERR "Elsa PnP: activate failed\n");
+							return 0;
+						}
+						if (!pnp_port_valid(pd, 0) ||
+						    !pnp_irq_valid(pd, 0)) {
+							printk(KERN_ERR "Elsa PnP:some resources are missing %ld/%lx\n",
+							       pnp_irq(pd, 0), pnp_port_start(pd, 0));
+							pnp_device_detach(pd);
+							return(0);
+						}
+						card->para[1] = pnp_port_start(pd, 0);
+						card->para[0] = pnp_irq(pd, 0);
+						if (pdev->function == ISAPNP_FUNCTION(0x133)) {
+							if (elsa_qs1000_probe(card->cs, card))
+								return 0;
+							return 1;
+						} else {
+							if (elsa_qs3000_probe(card->cs, card))
+								return 0;
+							return 1;
+						}
+						break;
+					} else {
+						printk(KERN_ERR "Elsa PnP: PnP error card found, no device\n");
+						return(0);
+					}
+				}
+				pdev++;
+				pnp_c=NULL;
+			} 
+			if (!pdev->card_vendor) {
+				printk(KERN_INFO "Elsa PnP: no ISAPnP card found\n");
+				return(0);
+			}
+		}
+#endif
+		if (elsa_qs1000_probe(card->cs, card))
+			return 0;
+		return 1;
+
+	} else if (card->typ == ISDN_CTYPE_ELSA_PCMCIA) {
+		if (elsa_pcmcia_probe(card->cs, card))
+			return 0;
+		return 1;
+	} else if (card->typ == ISDN_CTYPE_ELSA_PCI) {
+#ifdef CONFIG_PCI
+		if ((dev_qs1000 = pci_find_device(PCI_VENDOR_ID_ELSA,
+			PCI_DEVICE_ID_ELSA_MICROLINK, dev_qs1000))) {
+			if (elsa_qs_pci_probe(card->cs, dev_qs1000,
+					      ELSA_QS1000PCI))
+				return 0;
+			return 1;
+		} else if ((dev_qs3000 = pci_find_device(PCI_VENDOR_ID_ELSA,
+			PCI_DEVICE_ID_ELSA_QS3000, dev_qs3000))) {
+			if (elsa_qs_pci_probe(card->cs, dev_qs3000,
+					      ELSA_QS3000PCI))
+				return 0;
+			return 1;
+		} else {
+			printk(KERN_WARNING "Elsa: No PCI card found\n");
+			return 0;
+		}
+#endif /* CONFIG_PCI */
+	}
+	return 0;
 }

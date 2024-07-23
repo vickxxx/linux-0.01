@@ -49,12 +49,12 @@
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
 #include <linux/ioport.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+
 #include <asm/uaccess.h>
 #include <asm/io.h>
 
@@ -96,7 +96,7 @@ extern struct comx_hardware hicomx_hw;
 extern struct comx_hardware comx_hw;
 extern struct comx_hardware cmx_hw;
 
-static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
 static void COMX_board_on(struct net_device *dev)
 {
@@ -335,7 +335,7 @@ static inline char comx_line_change(struct net_device *dev, char linestat)
 
 
 
-static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct comx_channel *ch = dev->priv;
@@ -348,7 +348,7 @@ static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 
 	if (dev == NULL) {
 		printk(KERN_ERR "COMX_interrupt: irq %d for unknown device\n", irq);
-		return;
+		return IRQ_NONE;
 	}
 
 	jiffs = jiffies;
@@ -445,6 +445,7 @@ static void COMX_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	}
 
 	ch->HW_release_board(dev, interrupted);
+	return IRQ_HANDLED;
 }
 
 static int COMX_open(struct net_device *dev)
@@ -466,16 +467,16 @@ static int COMX_open(struct net_device *dev)
 	}
 
 	if (!twin_open) {
-		if (check_region(dev->base_addr, hw->io_extent)) {
+		if (!request_region(dev->base_addr, hw->io_extent, dev->name)) {
 			return -EAGAIN;
 		}
 		if (request_irq(dev->irq, COMX_interrupt, 0, dev->name, 
 		   (void *)dev)) {
 			printk(KERN_ERR "comx-hw-comx: unable to obtain irq %d\n", dev->irq);
+			release_region(dev->base_addr, hw->io_extent);
 			return -EAGAIN;
 		}
 		ch->init_status |= IRQ_ALLOCATED;
-		request_region(dev->base_addr, hw->io_extent, dev->name);
 		if (!ch->HW_load_board || ch->HW_load_board(dev)) {
 			ch->init_status &= ~IRQ_ALLOCATED;
 			retval=-ENODEV;
@@ -492,11 +493,11 @@ static int COMX_open(struct net_device *dev)
 
 	COMX_CMD(dev, COMX_CMD_INIT); 
 	jiffs = jiffies;
-	while (COMX_readw(dev, OFF_A_L2_LINKUP) != 1 && jiffies < jiffs + HZ) {
+	while (COMX_readw(dev, OFF_A_L2_LINKUP) != 1 && time_before(jiffies, jiffs + HZ)) {
 		schedule_timeout(1);
 	}
 	
-	if (jiffies >= jiffs + HZ) {
+	if (time_after_eq(jiffies, jiffs + HZ)) {
 		printk(KERN_ERR "%s: board timeout on INIT command\n", dev->name);
 		ch->HW_release_board(dev, savep);
 		retval=-EIO;
@@ -507,11 +508,11 @@ static int COMX_open(struct net_device *dev)
 	COMX_CMD(dev, COMX_CMD_OPEN);
 
 	jiffs = jiffies;
-	while (COMX_readw(dev, OFF_A_L2_LINKUP) != 3 && jiffies < jiffs + HZ) {
+	while (COMX_readw(dev, OFF_A_L2_LINKUP) != 3 && time_before(jiffies, jiffs + HZ)) {
 		schedule_timeout(1);
 	}
 	
-	if (jiffies >= jiffs + HZ) {
+	if (time_after_eq(jiffies, jiffs + HZ)) {
 		printk(KERN_ERR "%s: board timeout on OPEN command\n", dev->name);
 		ch->HW_release_board(dev, savep);
 		retval=-EIO;
@@ -1426,24 +1427,20 @@ static struct comx_hardware hicomx_hw = {
 	NULL
 };
 
-#ifdef MODULE
-#define comx_hw_comx_init init_module
-#endif
-
-int __init comx_hw_comx_init(void)
+static int __init comx_hw_comx_init(void)
 {
 	comx_register_hardware(&comx_hw);
 	comx_register_hardware(&cmx_hw);
 	comx_register_hardware(&hicomx_hw);
-	memset(memory_used, 0, sizeof(memory_used));
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit comx_hw_comx_exit(void)
 {
 	comx_unregister_hardware("comx");
 	comx_unregister_hardware("cmx");
 	comx_unregister_hardware("hicomx");
 }
-#endif
+
+module_init(comx_hw_comx_init);
+module_exit(comx_hw_comx_exit);

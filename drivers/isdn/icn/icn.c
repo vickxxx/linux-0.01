@@ -424,7 +424,6 @@ static icn_stat icn_stat_table[] =
 	{"AOC",            ISDN_STAT_CINF,  6},	/* Charge-info, DSS1-type     */
 	{"CAU",            ISDN_STAT_CAUSE, 7},	/* Cause code                 */
 	{"TEI OK",         ISDN_STAT_RUN,   0},	/* Card connected to wallplug */
-	{"NO D-CHAN",      ISDN_STAT_NODCH, 0},	/* No D-channel available     */
 	{"E_L1: ACT FAIL", ISDN_STAT_BHUP,  8},	/* Layer-1 activation failed  */
 	{"E_L2: DATA LIN", ISDN_STAT_BHUP,  8},	/* Layer-2 data link lost     */
 	{"E_L1: ACTIVATION FAILED",
@@ -510,7 +509,7 @@ icn_parse_status(u_char * status, int channel, icn_card * card)
 				char *s = strpbrk(t, ",");
 
 				*s++ = '\0';
-				strncpy(cmd.parm.setup.phone, t,
+				strlcpy(cmd.parm.setup.phone, t,
 					sizeof(cmd.parm.setup.phone));
 				s = strpbrk(t = s, ",");
 				*s++ = '\0';
@@ -526,7 +525,7 @@ icn_parse_status(u_char * status, int channel, icn_card * card)
 				else
 					cmd.parm.setup.si2 =
 					    simple_strtoul(t, NULL, 10);
-				strncpy(cmd.parm.setup.eazmsn, s,
+				strlcpy(cmd.parm.setup.eazmsn, s,
 					sizeof(cmd.parm.setup.eazmsn));
 			}
 			cmd.parm.setup.plan = 0;
@@ -541,19 +540,19 @@ icn_parse_status(u_char * status, int channel, icn_card * card)
 			cmd.parm.setup.screen = 0;
 			break;
 		case 5:
-			strncpy(cmd.parm.num, status + 3, sizeof(cmd.parm.num) - 1);
+			strlcpy(cmd.parm.num, status + 3, sizeof(cmd.parm.num));
 			break;
 		case 6:
-			sprintf(cmd.parm.num, "%d",
+			snprintf(cmd.parm.num, sizeof(cmd.parm.num), "%d",
 			     (int) simple_strtoul(status + 7, NULL, 16));
 			break;
 		case 7:
 			status += 3;
 			if (strlen(status) == 4)
-				sprintf(cmd.parm.num, "%s%c%c",
+				snprintf(cmd.parm.num, sizeof(cmd.parm.num), "%s%c%c",
 				     status + 2, *status, *(status + 1));
 			else
-				strncpy(cmd.parm.num, status + 1, sizeof(cmd.parm.num) - 1);
+				strlcpy(cmd.parm.num, status + 1, sizeof(cmd.parm.num));
 			break;
 		case 8:
 			card->flags &= ~ICN_FLAGS_B1ACTIVE;
@@ -819,34 +818,34 @@ icn_loadboot(u_char * buffer, icn_card * card)
 #endif
 	if (!(codebuf = kmalloc(ICN_CODE_STAGE1, GFP_KERNEL))) {
 		printk(KERN_WARNING "icn: Could not allocate code buffer\n");
-		return -ENOMEM;
+		ret = -ENOMEM;
+		goto out;
 	}
-	if ((ret = copy_from_user(codebuf, buffer, ICN_CODE_STAGE1))) {
-		kfree(codebuf);
-		return ret;
+	if (copy_from_user(codebuf, buffer, ICN_CODE_STAGE1)) {
+		ret = -EFAULT;
+		goto out_kfree;
 	}
 	if (!card->rvalid) {
-		if (check_region(card->port, ICN_PORTLEN)) {
+		if (!request_region(card->port, ICN_PORTLEN, card->regname)) {
 			printk(KERN_WARNING
 			       "icn: (%s) ports 0x%03x-0x%03x in use.\n",
 			       CID,
 			       card->port,
 			       card->port + ICN_PORTLEN);
-			kfree(codebuf);
-			return -EBUSY;
+			ret = -EBUSY;
+			goto out_kfree;
 		}
-		request_region(card->port, ICN_PORTLEN, card->regname);
 		card->rvalid = 1;
 		if (card->doubleS0)
 			card->other->rvalid = 1;
 	}
 	if (!dev.mvalid) {
-		if (check_mem_region(dev.memaddr, 0x4000)) {
+		if (!request_mem_region(dev.memaddr, 0x4000, "icn-isdn (all cards)")) {
 			printk(KERN_WARNING
 			       "icn: memory at 0x%08lx in use.\n", dev.memaddr);
-			return -EBUSY;
+			ret = -EBUSY;
+			goto out_kfree;
 		}
-		request_mem_region(dev.memaddr, 0x4000, "icn-isdn (all cards)");
 		dev.shmem = ioremap(dev.memaddr, 0x4000);
 		dev.mvalid = 1;
 	}
@@ -888,13 +887,15 @@ icn_loadboot(u_char * buffer, icn_card * card)
 		printk(KERN_DEBUG "Bootloader transferred\n");
 #endif
 	}
-	kfree(codebuf);
 	SLEEP(1);
 	OUTB_P(0xff, ICN_RUN);  /* Start Boot-Code */
-	if ((ret = icn_check_loader(card->doubleS0 ? 2 : 1)))
-		return ret;
-	if (!card->doubleS0)
-		return 0;
+	if ((ret = icn_check_loader(card->doubleS0 ? 2 : 1))) {
+		goto out_kfree;
+	}
+	if (!card->doubleS0) {
+		ret = 0;
+		goto out_kfree;
+	}
 	/* reached only, if we have a Double-S0-Card */
 #ifdef BOOT_DEBUG
 	printk(KERN_DEBUG "Map Bank 0\n");
@@ -905,7 +906,12 @@ icn_loadboot(u_char * buffer, icn_card * card)
 	icn_lock_channel(card, 0);	/* Lock Bank 0     */
 	restore_flags(flags);
 	SLEEP(1);
-	return (icn_check_loader(1));
+	ret = (icn_check_loader(1));
+
+ out_kfree:
+	kfree(codebuf);
+ out:
+	return ret;
 }
 
 static int
@@ -1057,9 +1063,10 @@ icn_writecmd(const u_char * buf, int len, int user, icn_card * card)
 		count = cmd_free;
 		if (count > len)
 			count = len;
-		if (user)
-			copy_from_user(msg, buf, count);
-		else
+		if (user) {
+			if (copy_from_user(msg, buf, count))
+				return -EFAULT;
+		} else
 			memcpy(msg, buf, count);
 
 		save_flags(flags);
@@ -1237,15 +1244,17 @@ icn_command(isdn_ctrl * c, icn_card * card)
 				case ICN_IOCTL_GETDOUBLE:
 					return (int) card->doubleS0;
 				case ICN_IOCTL_DEBUGVAR:
-					if ((i = copy_to_user((char *) a,
-					  (char *) &card, sizeof(ulong))))
-						return i;
+					if (copy_to_user((char *)a,
+							 (char *)&card,
+							 sizeof(ulong)))
+						return -EFAULT;
 					a += sizeof(ulong);
 					{
 						ulong l = (ulong) & dev;
-						if ((i = copy_to_user((char *) a,
-							     (char *) &l, sizeof(ulong))))
-							return i;
+						if (copy_to_user((char *)a,
+								 (char *)&l,
+								 sizeof(ulong)))
+							return -EFAULT;
 					}
 					return 0;
 				case ICN_IOCTL_LOADBOOT:
@@ -1266,8 +1275,10 @@ icn_command(isdn_ctrl * c, icn_card * card)
 				case ICN_IOCTL_ADDCARD:
 					if (!dev.firstload)
 						return -EBUSY;
-					if ((i = copy_from_user((char *) &cdef, (char *) a, sizeof(cdef))))
-						return i;
+					if (copy_from_user((char *)&cdef,
+							   (char *)a,
+							   sizeof(cdef)))
+						return -EFAULT;
 					return (icn_addcard(cdef.port, cdef.id1, cdef.id2));
 					break;
 				case ICN_IOCTL_LEASEDCFG:
@@ -1430,42 +1441,10 @@ icn_command(isdn_ctrl * c, icn_card * card)
 				card->l2_proto[a & 255] = (a >> 8);
 			}
 			break;
-		case ISDN_CMD_GETL2:
-			if (!card->flags & ICN_FLAGS_RUNNING)
-				return -ENODEV;
-			if ((c->arg & 255) < ICN_BCH)
-				return card->l2_proto[c->arg & 255];
-			else
-				return -ENODEV;
 		case ISDN_CMD_SETL3:
 			if (!card->flags & ICN_FLAGS_RUNNING)
 				return -ENODEV;
 			return 0;
-		case ISDN_CMD_GETL3:
-			if (!card->flags & ICN_FLAGS_RUNNING)
-				return -ENODEV;
-			if ((c->arg & 255) < ICN_BCH)
-				return ISDN_PROTO_L3_TRANS;
-			else
-				return -ENODEV;
-		case ISDN_CMD_GETEAZ:
-			if (!card->flags & ICN_FLAGS_RUNNING)
-				return -ENODEV;
-			break;
-		case ISDN_CMD_SETSIL:
-			if (!card->flags & ICN_FLAGS_RUNNING)
-				return -ENODEV;
-			break;
-		case ISDN_CMD_GETSIL:
-			if (!card->flags & ICN_FLAGS_RUNNING)
-				return -ENODEV;
-			break;
-		case ISDN_CMD_LOCK:
-			MOD_INC_USE_COUNT;
-			break;
-		case ISDN_CMD_UNLOCK:
-			MOD_DEC_USE_COUNT;
-			break;
 		default:
 			return -EINVAL;
 	}
@@ -1566,6 +1545,7 @@ icn_initcard(int port, char *id)
 	}
 	memset((char *) card, 0, sizeof(icn_card));
 	card->port = port;
+	card->interface.owner = THIS_MODULE;
 	card->interface.hl_hdrlen = 1;
 	card->interface.channels = ICN_BCH;
 	card->interface.maxbufsize = 4000;
@@ -1578,7 +1558,7 @@ icn_initcard(int port, char *id)
 	    ISDN_FEATURE_L3_TRANS |
 	    ISDN_FEATURE_P_UNKNOWN;
 	card->ptype = ISDN_PTYPE_UNKNOWN;
-	strncpy(card->interface.id, id, sizeof(card->interface.id) - 1);
+	strlcpy(card->interface.id, id, sizeof(card->interface.id));
 	card->msg_buf_write = card->msg_buf;
 	card->msg_buf_read = card->msg_buf;
 	card->msg_buf_end = &card->msg_buf[sizeof(card->msg_buf) - 1];

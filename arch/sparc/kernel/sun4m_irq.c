@@ -10,12 +10,12 @@
  */
 
 #include <linux/config.h>
-#include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
 #include <linux/kernel_stat.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
+#include <linux/ptrace.h>
 #include <linux/smp.h>
 #include <linux/interrupt.h>
 #include <linux/slab.h>
@@ -36,6 +36,7 @@
 #include <asm/smp.h>
 #include <asm/irq.h>
 #include <asm/io.h>
+#include <asm/sbus.h>
 
 static unsigned long dummy;
 
@@ -76,6 +77,17 @@ static unsigned long irq_mask[] = {
 	SUN4M_INT_SBUS(5),				  /* 13 irq 11 */
 	SUN4M_INT_SBUS(6)				  /* 14 irq 13 */
 };
+
+static int sun4m_pil_map[] = { 0, 2, 3, 5, 7, 9, 11, 13 };
+
+unsigned int sun4m_sbint_to_irq(struct sbus_dev *sdev, unsigned int sbint) 
+{
+	if (sbint >= sizeof(sun4m_pil_map)) {
+		printk(KERN_ERR "%s: bogus SBINT %d\n", sdev->prom_name, sbint);
+		BUG();
+	}
+	return sun4m_pil_map[sbint] | 0x30;
+}
 
 inline unsigned long sun4m_get_irqmask(unsigned int irq)
 {
@@ -223,7 +235,7 @@ char *sun4m_irq_itoa(unsigned int irq)
 	return buff;
 }
 
-static void __init sun4m_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
+static void __init sun4m_init_timers(irqreturn_t (*counter_fn)(int, void *, struct pt_regs *))
 {
 	int reg_count, irq, cpu;
 	struct linux_prom_registers cnt_regs[PROMREG_MAX];
@@ -297,13 +309,13 @@ static void __init sun4m_init_timers(void (*counter_fn)(int, void *, struct pt_r
 		 * has copied the firmwares level 14 vector into boot cpu's
 		 * trap table, we must fix this now or we get squashed.
 		 */
-		__save_and_cli(flags);
+		local_irq_save(flags);
 		trap_table->inst_one = lvl14_save[0];
 		trap_table->inst_two = lvl14_save[1];
 		trap_table->inst_three = lvl14_save[2];
 		trap_table->inst_four = lvl14_save[3];
 		local_flush_cache_all();
-		__restore_flags(flags);
+		local_irq_restore(flags);
 	}
 #endif
 }
@@ -315,7 +327,7 @@ void __init sun4m_init_IRQ(void)
 	int num_regs;
 	struct resource r;
     
-	__cli();
+	local_irq_disable();
 	if((ie_node = prom_searchsiblings(prom_getchild(prom_root_node), "obio")) == 0 ||
 	   (ie_node = prom_getchild (ie_node)) == 0 ||
 	   (ie_node = prom_searchsiblings (ie_node, "interrupt")) == 0) {
@@ -366,6 +378,7 @@ void __init sun4m_init_IRQ(void)
 				&sun4m_interrupts->undirected_target;
 		sun4m_interrupts->undirected_target = 0;
 	}
+	BTFIXUPSET_CALL(sbint_to_irq, sun4m_sbint_to_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(enable_irq, sun4m_enable_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(disable_irq, sun4m_disable_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(enable_pil_irq, sun4m_enable_pil_irq, BTFIXUPCALL_NORM);
@@ -374,7 +387,7 @@ void __init sun4m_init_IRQ(void)
 	BTFIXUPSET_CALL(clear_profile_irq, sun4m_clear_profile_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(load_profile_irq, sun4m_load_profile_irq, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(__irq_itoa, sun4m_irq_itoa, BTFIXUPCALL_NORM);
-	init_timers = sun4m_init_timers;
+	sparc_init_timers = sun4m_init_timers;
 #ifdef CONFIG_SMP
 	BTFIXUPSET_CALL(set_cpu_int, sun4m_send_ipi, BTFIXUPCALL_NORM);
 	BTFIXUPSET_CALL(clear_cpu_int, sun4m_clear_ipi, BTFIXUPCALL_NORM);

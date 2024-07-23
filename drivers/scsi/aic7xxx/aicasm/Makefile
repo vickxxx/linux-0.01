@@ -1,15 +1,19 @@
 PROG=	aicasm
 
-.SUFFIXES= .l .y .c
+.SUFFIXES= .l .y .c .h
 
 CSRCS=	aicasm.c aicasm_symbol.c
-GENSRCS= aicasm_gram.c aicasm_scan.c
-GENHDRS= y.tab.h aicdb.h
+YSRCS=	aicasm_gram.y aicasm_macro_gram.y
+LSRCS=	aicasm_scan.l aicasm_macro_scan.l
 
-SRCS=	${GENSRCS} ${CSRCS}
-CLEANFILES= ${GENSRCS} ${GENHDRS} y.output
+GENHDRS=	aicdb.h $(YSRCS:.y=.h)
+GENSRCS=	$(YSRCS:.y=.c) $(LSRCS:.l=.c)
+
+SRCS=	${CSRCS} ${GENSRCS}
+LIBS=	-ldb
+clean-files:= ${GENSRCS} ${GENHDRS} $(YSRCS:.y=.output) $(PROG)
 # Override default kernel CFLAGS.  This is a userland app.
-AICASM_CFLAGS:= -I/usr/include -I. -ldb
+AICASM_CFLAGS:= -I/usr/include -I.
 YFLAGS= -d
 
 NOMAN=	noman
@@ -26,8 +30,8 @@ YFLAGS+= -t -v
 LFLAGS= -d
 endif
 
-$(PROG):  $(SRCS) $(GENHDRS)
-	$(AICASM_CC) $(AICASM_CFLAGS) $(SRCS) -o $(PROG)
+$(PROG):  ${GENHDRS} $(SRCS)
+	$(AICASM_CC) $(AICASM_CFLAGS) $(SRCS) -o $(PROG) $(LIBS)
 
 aicdb.h:
 	@if [ -e "/usr/include/db3/db_185.h" ]; then		\
@@ -43,10 +47,20 @@ aicdb.h:
 	 fi
 
 clean:
-	rm -f $(CLEANFILES) $(PROG)
+	rm -f $(clean-files)
 
-y.tab.h aicasm_gram.c: aicasm_gram.y
-	$(YACC) $(YFLAGS) aicasm_gram.y
-	mv y.tab.c aicasm_gram.c
+aicasm_gram.c aicasm_gram.h: aicasm_gram.y
+	$(YACC) $(YFLAGS) -b $(<:.y=) $<
+	mv $(<:.y=).tab.c $(<:.y=.c)
+	mv $(<:.y=).tab.h $(<:.y=.h)
 
-aicasm_scan.c: y.tab.h
+aicasm_macro_gram.c aicasm_macro_gram.h: aicasm_macro_gram.y
+	$(YACC) $(YFLAGS) -b $(<:.y=) -p mm $<
+	mv $(<:.y=).tab.c $(<:.y=.c)
+	mv $(<:.y=).tab.h $(<:.y=.h)
+
+aicasm_scan.c: aicasm_scan.l
+	$(LEX) $(LFLAGS) -o$@ $<
+
+aicasm_macro_scan.c: aicasm_macro_scan.l
+	$(LEX) $(LFLAGS) -Pmm -o$@ $<

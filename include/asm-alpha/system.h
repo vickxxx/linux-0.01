@@ -23,7 +23,7 @@
 #ifdef CONFIG_ALPHA_LEGACY_START_ADDRESS
 #define KERNEL_START_PHYS	0x300000 /* Old bootloaders hardcoded this.  */
 #else
-#define KERNEL_START_PHYS	0x800000 /* Wildfire has a huge console */
+#define KERNEL_START_PHYS	0x1000000 /* required: Wildfire/Titan/Marvel */
 #endif
 
 #define KERNEL_START	(PAGE_OFFSET+KERNEL_START_PHYS)
@@ -61,7 +61,8 @@ struct el_common {
 	int		retry	:  1;	/* retry flag */
 	unsigned int	proc_offset;	/* processor-specific offset */
 	unsigned int	sys_offset;	/* system-specific offset */
-	unsigned long	code;		/* machine check code */
+	unsigned int	code;		/* machine check code */
+	unsigned int	frame_rev;	/* frame revision */
 };
 
 /* Machine Check Frame for uncorrectable errors (Large format)
@@ -117,11 +118,11 @@ struct el_common_EV6_mcheck {
 	unsigned long DC0_SYNDROME;
 	unsigned long C_STAT;
 	unsigned long C_STS;
-	unsigned long RESERVED0;
+	unsigned long MM_STAT;
 	unsigned long EXC_ADDR;
 	unsigned long IER_CM;
 	unsigned long ISUM;
-	unsigned long MM_STAT;
+	unsigned long RESERVED0;
 	unsigned long PAL_BASE;
 	unsigned long I_CTL;
 	unsigned long PCTX;
@@ -130,17 +131,14 @@ struct el_common_EV6_mcheck {
 extern void halt(void) __attribute__((noreturn));
 #define __halt() __asm__ __volatile__ ("call_pal %0 #halt" : : "i" (PAL_halt))
 
-#define prepare_to_switch()	do { } while(0)
-#define switch_to(prev,next,last)			\
-do {							\
-	unsigned long pcbb;				\
-	current = (next);				\
-	pcbb = virt_to_phys(&current->thread);		\
-	(last) = alpha_switch_to(pcbb, (prev));		\
-	check_mmu_context();				\
-} while (0)
+#define switch_to(P,N,L)						\
+  do {									\
+    (L) = alpha_switch_to(virt_to_phys(&(N)->thread_info->pcb), (P));	\
+    check_mmu_context();						\
+  } while (0)
 
-extern struct task_struct* alpha_switch_to(unsigned long, struct task_struct*);
+struct task_struct;
+extern struct task_struct *alpha_switch_to(unsigned long, struct task_struct*);
 
 #define mb() \
 __asm__ __volatile__("mb": : :"memory")
@@ -151,14 +149,19 @@ __asm__ __volatile__("mb": : :"memory")
 #define wmb() \
 __asm__ __volatile__("wmb": : :"memory")
 
+#define read_barrier_depends() \
+__asm__ __volatile__("mb": : :"memory")
+
 #ifdef CONFIG_SMP
 #define smp_mb()	mb()
 #define smp_rmb()	rmb()
 #define smp_wmb()	wmb()
+#define smp_read_barrier_depends()	read_barrier_depends()
 #else
 #define smp_mb()	barrier()
 #define smp_rmb()	barrier()
 #define smp_wmb()	barrier()
+#define smp_read_barrier_depends()	barrier()
 #endif
 
 #define set_mb(var, value) \
@@ -200,6 +203,7 @@ enum implver_enum {
 enum amask_enum {
 	AMASK_BWX = (1UL << 0),
 	AMASK_FIX = (1UL << 1),
+	AMASK_CIX = (1UL << 2),
 	AMASK_MAX = (1UL << 8),
 	AMASK_PRECISE_TRAP = (1UL << 9),
 };
@@ -305,42 +309,13 @@ extern int __min_ipl;
 #define getipl()		(rdps() & 7)
 #define setipl(ipl)		((void) swpipl(ipl))
 
-#define __cli()			do { setipl(IPL_MAX); barrier(); } while(0)
-#define __sti()			do { barrier(); setipl(IPL_MIN); } while(0)
-#define __save_flags(flags)	((flags) = rdps())
-#define __save_and_cli(flags)	do { (flags) = swpipl(IPL_MAX); barrier(); } while(0)
-#define __restore_flags(flags)	do { barrier(); setipl(flags); barrier(); } while(0)
+#define local_irq_disable()			do { setipl(IPL_MAX); barrier(); } while(0)
+#define local_irq_enable()			do { barrier(); setipl(IPL_MIN); } while(0)
+#define local_save_flags(flags)	((flags) = rdps())
+#define local_irq_save(flags)	do { (flags) = swpipl(IPL_MAX); barrier(); } while(0)
+#define local_irq_restore(flags)	do { barrier(); setipl(flags); barrier(); } while(0)
 
-#define local_irq_save(flags)		__save_and_cli(flags)
-#define local_irq_restore(flags)	__restore_flags(flags)
-#define local_irq_disable()		__cli()
-#define local_irq_enable()		__sti()
-
-#ifdef CONFIG_SMP
-
-extern int global_irq_holder;
-
-#define save_and_cli(flags)     (save_flags(flags), cli())
-
-extern void __global_cli(void);
-extern void __global_sti(void);
-extern unsigned long __global_save_flags(void);
-extern void __global_restore_flags(unsigned long flags);
-
-#define cli()                   __global_cli()
-#define sti()                   __global_sti()
-#define save_flags(flags)	((flags) = __global_save_flags())
-#define restore_flags(flags)    __global_restore_flags(flags)
-
-#else /* CONFIG_SMP */
-
-#define cli()			__cli()
-#define sti()			__sti()
-#define save_flags(flags)	__save_flags(flags)
-#define save_and_cli(flags)	__save_and_cli(flags)
-#define restore_flags(flags)	__restore_flags(flags)
-
-#endif /* CONFIG_SMP */
+#define irqs_disabled()	(getipl() == IPL_MAX)
 
 /*
  * TB routines..
@@ -369,7 +344,59 @@ extern void __global_restore_flags(unsigned long flags);
  * it must clobber "memory" (also for interrupts in UP).
  */
 
-extern __inline__ unsigned long
+static inline unsigned long
+__xchg_u8(volatile char *m, unsigned long val)
+{
+	unsigned long ret, tmp, addr64;
+
+	__asm__ __volatile__(
+	"	andnot	%4,7,%3\n"
+	"	insbl	%1,%4,%1\n"
+	"1:	ldq_l	%2,0(%3)\n"
+	"	extbl	%2,%4,%0\n"
+	"	mskbl	%2,%4,%2\n"
+	"	or	%1,%2,%2\n"
+	"	stq_c	%2,0(%3)\n"
+	"	beq	%2,2f\n"
+#ifdef CONFIG_SMP
+	"	mb\n"
+#endif
+	".subsection 2\n"
+	"2:	br	1b\n"
+	".previous"
+	: "=&r" (ret), "=&r" (val), "=&r" (tmp), "=&r" (addr64)
+	: "r" ((long)m), "1" (val) : "memory");
+
+	return ret;
+}
+
+static inline unsigned long
+__xchg_u16(volatile short *m, unsigned long val)
+{
+	unsigned long ret, tmp, addr64;
+
+	__asm__ __volatile__(
+	"	andnot	%4,7,%3\n"
+	"	inswl	%1,%4,%1\n"
+	"1:	ldq_l	%2,0(%3)\n"
+	"	extwl	%2,%4,%0\n"
+	"	mskwl	%2,%4,%2\n"
+	"	or	%1,%2,%2\n"
+	"	stq_c	%2,0(%3)\n"
+	"	beq	%2,2f\n"
+#ifdef CONFIG_SMP
+	"	mb\n"
+#endif
+	".subsection 2\n"
+	"2:	br	1b\n"
+	".previous"
+	: "=&r" (ret), "=&r" (val), "=&r" (tmp), "=&r" (addr64)
+	: "r" ((long)m), "1" (val) : "memory");
+
+	return ret;
+}
+
+static inline unsigned long
 __xchg_u32(volatile int *m, unsigned long val)
 {
 	unsigned long dummy;
@@ -391,7 +418,7 @@ __xchg_u32(volatile int *m, unsigned long val)
 	return val;
 }
 
-extern __inline__ unsigned long
+static inline unsigned long
 __xchg_u64(volatile long *m, unsigned long val)
 {
 	unsigned long dummy;
@@ -417,10 +444,14 @@ __xchg_u64(volatile long *m, unsigned long val)
    if something tries to do an invalid xchg().  */
 extern void __xchg_called_with_bad_pointer(void);
 
-static __inline__ unsigned long
+static inline unsigned long
 __xchg(volatile void *ptr, unsigned long x, int size)
 {
 	switch (size) {
+		case 1:
+			return __xchg_u8(ptr, x);
+		case 2:
+			return __xchg_u16(ptr, x);
 		case 4:
 			return __xchg_u32(ptr, x);
 		case 8:
@@ -452,7 +483,65 @@ __xchg(volatile void *ptr, unsigned long x, int size)
 
 #define __HAVE_ARCH_CMPXCHG 1
 
-extern __inline__ unsigned long
+static inline unsigned long
+__cmpxchg_u8(volatile char *m, long old, long new)
+{
+	unsigned long prev, tmp, cmp, addr64;
+
+	__asm__ __volatile__(
+	"	andnot	%5,7,%4\n"
+	"	insbl	%1,%5,%1\n"
+	"1:	ldq_l	%2,0(%4)\n"
+	"	extbl	%2,%5,%0\n"
+	"	cmpeq	%0,%6,%3\n"
+	"	beq	%3,2f\n"
+	"	mskbl	%2,%5,%2\n"
+	"	or	%1,%2,%2\n"
+	"	stq_c	%2,0(%4)\n"
+	"	beq	%2,3f\n"
+#ifdef CONFIG_SMP
+	"	mb\n"
+#endif
+	"2:\n"
+	".subsection 2\n"
+	"3:	br	1b\n"
+	".previous"
+	: "=&r" (prev), "=&r" (new), "=&r" (tmp), "=&r" (cmp), "=&r" (addr64)
+	: "r" ((long)m), "Ir" (old), "1" (new) : "memory");
+
+	return prev;
+}
+
+static inline unsigned long
+__cmpxchg_u16(volatile short *m, long old, long new)
+{
+	unsigned long prev, tmp, cmp, addr64;
+
+	__asm__ __volatile__(
+	"	andnot	%5,7,%4\n"
+	"	inswl	%1,%5,%1\n"
+	"1:	ldq_l	%2,0(%4)\n"
+	"	extwl	%2,%5,%0\n"
+	"	cmpeq	%0,%6,%3\n"
+	"	beq	%3,2f\n"
+	"	mskwl	%2,%5,%2\n"
+	"	or	%1,%2,%2\n"
+	"	stq_c	%2,0(%4)\n"
+	"	beq	%2,3f\n"
+#ifdef CONFIG_SMP
+	"	mb\n"
+#endif
+	"2:\n"
+	".subsection 2\n"
+	"3:	br	1b\n"
+	".previous"
+	: "=&r" (prev), "=&r" (new), "=&r" (tmp), "=&r" (cmp), "=&r" (addr64)
+	: "r" ((long)m), "Ir" (old), "1" (new) : "memory");
+
+	return prev;
+}
+
+static inline unsigned long
 __cmpxchg_u32(volatile int *m, int old, int new)
 {
 	unsigned long prev, cmp;
@@ -477,7 +566,7 @@ __cmpxchg_u32(volatile int *m, int old, int new)
 	return prev;
 }
 
-extern __inline__ unsigned long
+static inline unsigned long
 __cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
 {
 	unsigned long prev, cmp;
@@ -506,10 +595,14 @@ __cmpxchg_u64(volatile long *m, unsigned long old, unsigned long new)
    if something tries to do an invalid cmpxchg().  */
 extern void __cmpxchg_called_with_bad_pointer(void);
 
-static __inline__ unsigned long
+static inline unsigned long
 __cmpxchg(volatile void *ptr, unsigned long old, unsigned long new, int size)
 {
 	switch (size) {
+		case 1:
+			return __cmpxchg_u8(ptr, old, new);
+		case 2:
+			return __cmpxchg_u16(ptr, old, new);
 		case 4:
 			return __cmpxchg_u32(ptr, old, new);
 		case 8:

@@ -1,7 +1,7 @@
 /* SCTP kernel reference Implementation
- * (C) Copyright IBM Corp. 2001, 2003
  * Copyright (c) Cisco 1999,2000
  * Copyright (c) Motorola 1999,2000,2001
+ * Copyright (c) International Business Machines Corp., 2001,2002
  * Copyright (c) La Monte H.P. Yarroll 2001
  *
  * This file is part of the SCTP kernel reference implementation.
@@ -102,6 +102,23 @@ out:
 		sctp_bind_addr_clean(dest);
 
 	return error;
+}
+
+/* Create a new SCTP_bind_addr from nothing.  */
+struct sctp_bind_addr *sctp_bind_addr_new(int gfp)
+{
+	struct sctp_bind_addr *retval;
+
+	retval = t_new(struct sctp_bind_addr, gfp);
+	if (!retval)
+		goto nomem;
+
+	sctp_bind_addr_init(retval, 0);
+	retval->malloced = 1;
+	SCTP_DBG_OBJCNT_INC(bind_addr);
+
+nomem:
+	return retval;
 }
 
 /* Initialize the SCTP_bind_addr structure for either an endpoint or
@@ -206,8 +223,6 @@ union sctp_params sctp_bind_addrs_to_raw(const struct sctp_bind_addr *bp,
 	int len;
 	struct sctp_sockaddr_entry *addr;
 	struct list_head *pos;
-	struct sctp_af *af;
-
 	addrparms_len = 0;
 	len = 0;
 
@@ -232,8 +247,7 @@ union sctp_params sctp_bind_addrs_to_raw(const struct sctp_bind_addr *bp,
 
 	list_for_each(pos, &bp->address_list) {
 		addr = list_entry(pos, struct sctp_sockaddr_entry, list);
-		af = sctp_get_af_specific(addr->a.v4.sin_family);
-		len = af->to_addr_param(&addr->a, &rawaddr);
+		len = sockaddr2sctp_addr(&addr->a, &rawaddr);
 		memcpy(addrparms.v, &rawaddr, len);
 		addrparms.v += len;
 		addrparms_len += len;
@@ -256,31 +270,34 @@ int sctp_raw_to_bind_addrs(struct sctp_bind_addr *bp, __u8 *raw_addr_list,
 	union sctp_addr addr;
 	int retval = 0;
 	int len;
-	struct sctp_af *af;
 
 	/* Convert the raw address to standard address format */
 	while (addrs_len) {
 		param = (struct sctp_paramhdr *)raw_addr_list;
 		rawaddr = (union sctp_addr_param *)raw_addr_list;
 
-		af = sctp_get_af_specific(param_type2af(param->type));
-		if (unlikely(!af)) {
+		switch (param->type) {
+		case SCTP_PARAM_IPV4_ADDRESS:
+		case SCTP_PARAM_IPV6_ADDRESS:
+			sctp_param2sockaddr(&addr, rawaddr, port, 0);
+			retval = sctp_add_bind_addr(bp, &addr, gfp);
+			if (retval) {
+				/* Can't finish building the list, clean up. */
+				sctp_bind_addr_clean(bp);
+				break;;
+			}
+			len = ntohs(param->length);
+			addrs_len -= len;
+			raw_addr_list += len;
+			break;
+		default:
+			/* Corrupted raw addr list! */
 			retval = -EINVAL;
 			sctp_bind_addr_clean(bp);
 			break;
 		}
-
-		af->from_addr_param(&addr, rawaddr, port, 0);
-		retval = sctp_add_bind_addr(bp, &addr, gfp);
-		if (retval) {
-			/* Can't finish building the list, clean up. */
-			sctp_bind_addr_clean(bp);
-			break;;
-		}
-
-		len = ntohs(param->length);
-		addrs_len -= len;
-		raw_addr_list += len;
+		if (retval)
+			break;
 	}
 
 	return retval;
@@ -305,43 +322,6 @@ int sctp_bind_addr_match(struct sctp_bind_addr *bp,
 	}
 
 	return 0;
-}
-
-/* Find the first address in the bind address list that is not present in
- * the addrs packed array.
- */
-union sctp_addr *sctp_find_unmatch_addr(struct sctp_bind_addr	*bp,
-					const union sctp_addr	*addrs,
-					int			addrcnt,
-					struct sctp_opt		*opt)
-{
-	struct sctp_sockaddr_entry	*laddr;
-	union sctp_addr			*addr;
-	void 				*addr_buf;
-	struct sctp_af			*af;
-	struct list_head		*pos;
-	int				i;
-
-	list_for_each(pos, &bp->address_list) {
-		laddr = list_entry(pos, struct sctp_sockaddr_entry, list);
-		
-		addr_buf = (union sctp_addr *)addrs;
-		for (i = 0; i < addrcnt; i++) {
-			addr = (union sctp_addr *)addr_buf;
-			af = sctp_get_af_specific(addr->v4.sin_family);
-			if (!af) 
-				return NULL;
-
-			if (opt->pf->cmp_addr(&laddr->a, addr, opt))
-				break;
-
-			addr_buf += af->sockaddr_len;
-		}
-		if (i == addrcnt)
-			return &laddr->a;
-	}
-
-	return NULL;
 }
 
 /* Copy out addresses from the global local address list. */

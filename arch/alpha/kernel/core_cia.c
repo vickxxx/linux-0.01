@@ -47,6 +47,15 @@
 
 #define vip	volatile int  *
 
+/* Save CIA configuration data as the console had it set up.  */
+
+struct 
+{
+	unsigned int w_base;
+	unsigned int w_mask;
+	unsigned int t_base;
+} saved_config[4] __attribute((common));
+
 /*
  * Given a bus, device, and function number, compute resulting
  * configuration space address.  It is therefore not safe to have
@@ -89,11 +98,10 @@
  */
 
 static int
-mk_conf_addr(struct pci_dev *dev, int where, unsigned long *pci_addr,
-	     unsigned char *type1)
+mk_conf_addr(struct pci_bus *bus_dev, unsigned int device_fn, int where,
+	     unsigned long *pci_addr, unsigned char *type1)
 {
-	u8 bus = dev->bus->number;
-	u8 device_fn = dev->devfn;
+	u8 bus = bus_dev->number;
 
 	*type1 = (bus != 0);
 	*pci_addr = (bus << 16) | (device_fn << 8) | where;
@@ -113,7 +121,7 @@ conf_read(unsigned long addr, unsigned char type1)
 	int cia_cfg = 0;
 
 	DBGC(("conf_read(addr=0x%lx, type1=%d) ", addr, type1));
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
 	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vip)CIA_IOC_CIA_ERR;
@@ -154,7 +162,7 @@ conf_read(unsigned long addr, unsigned char type1)
 		*(vip)CIA_IOC_CFG;
 	}
 
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	DBGC(("done\n"));
 
 	return value;
@@ -167,7 +175,7 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 	int stat0, cia_cfg = 0;
 
 	DBGC(("conf_write(addr=0x%lx, type1=%d) ", addr, type1));
-	__save_and_cli(flags);
+	local_irq_save(flags);
 
 	/* Reset status register to avoid losing errors.  */
 	stat0 = *(vip)CIA_IOC_CIA_ERR;
@@ -204,92 +212,50 @@ conf_write(unsigned long addr, unsigned int value, unsigned char type1)
 		*(vip)CIA_IOC_CFG;
 	}
 
-	__restore_flags(flags);
+	local_irq_restore(flags);
 	DBGC(("done\n"));
 }
 
-static int
-cia_read_config_byte(struct pci_dev *dev, int where, u8 *value)
+static int 
+cia_read_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		u32 *value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
 	unsigned char type1;
+	int shift;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x00 + CIA_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
+	mask = (size - 1) * 8;
+	shift = (where & 3) * 8;
+	addr = (pci_addr << 5) + mask + CIA_CONF;
+	*value = conf_read(addr, type1) >> (shift);
 	return PCIBIOS_SUCCESSFUL;
 }
 
 static int 
-cia_read_config_word(struct pci_dev *dev, int where, u16 *value)
+cia_write_config(struct pci_bus *bus, unsigned int devfn, int where, int size,
+		 u32 value)
 {
 	unsigned long addr, pci_addr;
+	long mask;
 	unsigned char type1;
 
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
+	if (mk_conf_addr(bus, devfn, where, &pci_addr, &type1))
 		return PCIBIOS_DEVICE_NOT_FOUND;
 
-	addr = (pci_addr << 5) + 0x08 + CIA_CONF;
-	*value = conf_read(addr, type1) >> ((where & 3) * 8);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-cia_read_config_dword(struct pci_dev *dev, int where, u32 *value)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
-	addr = (pci_addr << 5) + 0x18 + CIA_CONF;
-	*value = conf_read(addr, type1);
-	return PCIBIOS_SUCCESSFUL;
-}
-
-static int 
-cia_write_config(struct pci_dev *dev, int where, u32 value, long mask)
-{
-	unsigned long addr, pci_addr;
-	unsigned char type1;
-
-	if (mk_conf_addr(dev, where, &pci_addr, &type1))
-		return PCIBIOS_DEVICE_NOT_FOUND;
-
+	mask = (size - 1) * 8;
 	addr = (pci_addr << 5) + mask + CIA_CONF;
 	conf_write(addr, value << ((where & 3) * 8), type1);
 	return PCIBIOS_SUCCESSFUL;
 }
 
-static int
-cia_write_config_byte(struct pci_dev *dev, int where, u8 value)
-{
-	return cia_write_config(dev, where, value, 0x00);
-}
-
-static int 
-cia_write_config_word(struct pci_dev *dev, int where, u16 value)
-{
-	return cia_write_config(dev, where, value, 0x08);
-}
-
-static int 
-cia_write_config_dword(struct pci_dev *dev, int where, u32 value)
-{
-	return cia_write_config(dev, where, value, 0x18);
-}
-
 struct pci_ops cia_pci_ops = 
 {
-	read_byte:	cia_read_config_byte,
-	read_word:	cia_read_config_word,
-	read_dword:	cia_read_config_dword,
-	write_byte:	cia_write_config_byte,
-	write_word:	cia_write_config_word,
-	write_dword:	cia_write_config_dword
+	.read = 	cia_read_config,
+	.write =	cia_write_config,
 };
 
 /*
@@ -370,7 +336,7 @@ cia_pci_tbi_try2(struct pci_controller *hose,
 }
 
 static inline void
-cia_prepare_tbia_workaround(void)
+cia_prepare_tbia_workaround(int window)
 {
 	unsigned long *ppte, pte;
 	long i;
@@ -382,10 +348,10 @@ cia_prepare_tbia_workaround(void)
 	for (i = 0; i < CIA_BROKEN_TBIA_SIZE / sizeof(unsigned long); ++i)
 		ppte[i] = pte;
 
-	*(vip)CIA_IOC_PCI_W1_BASE = CIA_BROKEN_TBIA_BASE | 3;
-	*(vip)CIA_IOC_PCI_W1_MASK = (CIA_BROKEN_TBIA_SIZE*1024 - 1)
-				    & 0xfff00000;
-	*(vip)CIA_IOC_PCI_T1_BASE = virt_to_phys(ppte) >> 2;
+	*(vip)CIA_IOC_PCI_Wn_BASE(window) = CIA_BROKEN_TBIA_BASE | 3;
+	*(vip)CIA_IOC_PCI_Wn_MASK(window)
+	  = (CIA_BROKEN_TBIA_SIZE*1024 - 1) & 0xfff00000;
+	*(vip)CIA_IOC_PCI_Tn_BASE(window) = virt_to_phys(ppte) >> 2;
 }
 
 static void __init
@@ -605,8 +571,7 @@ static void __init
 do_init_arch(int is_pyxis)
 {
 	struct pci_controller *hose;
-	int temp;
-	int cia_rev;
+	int temp, cia_rev, tbia_window;
 
 	cia_rev = *(vip)CIA_IOC_CIA_REV & CIA_REV_MASK;
 	printk("pci: cia revision %d%s\n",
@@ -645,7 +610,7 @@ do_init_arch(int is_pyxis)
 		*(vip)CIA_IOC_CIA_CNFG = temp;
 	}
 
-	/* Syncronize with all previous changes.  */
+	/* Synchronize with all previous changes.  */
 	mb();
 	*(vip)CIA_IOC_CIA_REV;
 
@@ -681,13 +646,31 @@ do_init_arch(int is_pyxis)
 		hose->dense_io_base = CIA_BW_IO - IDENT_ADDR;
 	}
 
+	/* Save CIA configuration data as the console had it set up.  */
+
+	saved_config[0].w_base = *(vip)CIA_IOC_PCI_W0_BASE;
+	saved_config[0].w_mask = *(vip)CIA_IOC_PCI_W0_MASK;
+	saved_config[0].t_base = *(vip)CIA_IOC_PCI_T0_BASE;
+
+	saved_config[1].w_base = *(vip)CIA_IOC_PCI_W1_BASE;
+	saved_config[1].w_mask = *(vip)CIA_IOC_PCI_W1_MASK;
+	saved_config[1].t_base = *(vip)CIA_IOC_PCI_T1_BASE;
+
+	saved_config[2].w_base = *(vip)CIA_IOC_PCI_W2_BASE;
+	saved_config[2].w_mask = *(vip)CIA_IOC_PCI_W2_MASK;
+	saved_config[2].t_base = *(vip)CIA_IOC_PCI_T2_BASE;
+
+	saved_config[3].w_base = *(vip)CIA_IOC_PCI_W3_BASE;
+	saved_config[3].w_mask = *(vip)CIA_IOC_PCI_W3_MASK;
+	saved_config[3].t_base = *(vip)CIA_IOC_PCI_T3_BASE;
+
 	/*
 	 * Set up the PCI to main memory translation windows.
 	 *
-	 * Window 0 is scatter-gather 8MB at 8MB (for isa)
-	 * Window 1 is scatter-gather 1MB at 768MB (for tbia)
+	 * Window 0 is S/G 8MB at 8MB (for isa)
+	 * Window 1 is S/G 1MB at 768MB (for tbia) (unused for CIA rev 1)
 	 * Window 2 is direct access 2GB at 2GB
-	 * Window 3 is DAC access 4GB at 8GB
+	 * Window 3 is DAC access 4GB at 8GB (or S/G for tbia if CIA rev 1)
 	 *
 	 * ??? NetBSD hints that page tables must be aligned to 32K,
 	 * possibly due to a hardware bug.  This is over-aligned
@@ -697,6 +680,7 @@ do_init_arch(int is_pyxis)
 
 	hose->sg_pci = NULL;
 	hose->sg_isa = iommu_arena_new(hose, 0x00800000, 0x00800000, 32768);
+
 	__direct_map_base = 0x80000000;
 	__direct_map_size = 0x80000000;
 
@@ -715,8 +699,20 @@ do_init_arch(int is_pyxis)
 	   are compared against W_DAC.  We can, however, directly map 4GB,
 	   which is better than before.  However, due to assumptions made
 	   elsewhere, we should not claim that we support DAC unless that
-	   4GB covers all of physical memory.  */
-	if (is_pyxis || max_low_pfn > (0x100000000 >> PAGE_SHIFT)) {
+	   4GB covers all of physical memory.
+
+	   On CIA rev 1, apparently W1 and W2 can't be used for SG. 
+	   At least, there are reports that it doesn't work for Alcor. 
+	   In that case, we have no choice but to use W3 for the TBIA 
+	   workaround, which means we can't use DAC at all. */ 
+
+	tbia_window = 1;
+	if (is_pyxis) {
+		*(vip)CIA_IOC_PCI_W3_BASE = 0;
+	} else if (cia_rev == 1) {
+		*(vip)CIA_IOC_PCI_W1_BASE = 0;
+		tbia_window = 3;
+	} else if (max_low_pfn > (0x100000000UL >> PAGE_SHIFT)) {
 		*(vip)CIA_IOC_PCI_W3_BASE = 0;
 	} else {
 		*(vip)CIA_IOC_PCI_W3_BASE = 0x00000000 | 1 | 8;
@@ -728,7 +724,7 @@ do_init_arch(int is_pyxis)
 	}
 
 	/* Prepare workaround for apparently broken tbia. */
-	cia_prepare_tbia_workaround();
+	cia_prepare_tbia_workaround(tbia_window);
 }
 
 void __init
@@ -762,6 +758,26 @@ pyxis_init_arch(void)
 	do_init_arch(1);
 }
 
+void
+cia_kill_arch(int mode)
+{
+	*(vip)CIA_IOC_PCI_W0_BASE = saved_config[0].w_base;
+	*(vip)CIA_IOC_PCI_W0_MASK = saved_config[0].w_mask;
+	*(vip)CIA_IOC_PCI_T0_BASE = saved_config[0].t_base;
+
+	*(vip)CIA_IOC_PCI_W1_BASE = saved_config[1].w_base;
+	*(vip)CIA_IOC_PCI_W1_MASK = saved_config[1].w_mask;
+	*(vip)CIA_IOC_PCI_T1_BASE = saved_config[1].t_base;
+
+	*(vip)CIA_IOC_PCI_W2_BASE = saved_config[2].w_base;
+	*(vip)CIA_IOC_PCI_W2_MASK = saved_config[2].w_mask;
+	*(vip)CIA_IOC_PCI_T2_BASE = saved_config[2].t_base;
+
+	*(vip)CIA_IOC_PCI_W3_BASE = saved_config[3].w_base;
+	*(vip)CIA_IOC_PCI_W3_MASK = saved_config[3].w_mask;
+	*(vip)CIA_IOC_PCI_T3_BASE = saved_config[3].t_base;
+}
+
 void __init
 cia_init_pci(void)
 {
@@ -781,6 +797,7 @@ cia_pci_clr_err(void)
 	*(vip)CIA_IOC_CIA_ERR;		/* re-read to force write.  */
 }
 
+#ifdef CONFIG_VERBOSE_MCHECK
 static void
 cia_decode_pci_error(struct el_CIA_sysdata_mcheck *cia, const char *msg)
 {
@@ -1048,13 +1065,13 @@ cia_decode_parity_error(struct el_CIA_sysdata_mcheck *cia)
 	printk(KERN_CRIT "  Command: %s, Parity bit: %d\n", cmd, par);
 	printk(KERN_CRIT "  Address: %#010lx, Mask: %#lx\n", addr, mask);
 }
+#endif
 
 static int
 cia_decode_mchk(unsigned long la_ptr)
 {
 	struct el_common *com;
 	struct el_CIA_sysdata_mcheck *cia;
-	int which;
 
 	com = (void *)la_ptr;
 	cia = (void *)(la_ptr + com->sys_offset);
@@ -1062,8 +1079,8 @@ cia_decode_mchk(unsigned long la_ptr)
 	if ((cia->cia_err & CIA_ERR_VALID) == 0)
 		return 0;
 
-	which = cia->cia_err & 0xfff;
-	switch (ffs(which) - 1) {
+#ifdef CONFIG_VERBOSE_MCHECK
+	switch (ffs(cia->cia_err & 0xfff) - 1) {
 	case 0: /* CIA_ERR_COR_ERR */
 		cia_decode_ecc_error(cia, "Corrected ECC error");
 		break;
@@ -1135,6 +1152,7 @@ cia_decode_mchk(unsigned long la_ptr)
 	if (cia->cia_err & CIA_ERR_LOST_IOA_TIMEOUT)
 		printk(KERN_CRIT "CIA lost machine check: "
 		       "I/O timeout\n");
+#endif
 
 	return 1;
 }

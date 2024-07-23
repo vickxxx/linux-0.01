@@ -1,12 +1,12 @@
 /*
- *  Copyright (c) 2000-2001 LSI Logic Corporation.
+ *  Copyright (c) 2000-2002 LSI Logic Corporation.
  *
  *
  *           Name:  MPI_TARG.H
  *          Title:  MPI Target mode messages and structures
  *  Creation Date:  June 22, 2000
  *
- *    MPI Version:  01.01.04
+ *    MPI_TARG.H Version:  01.02.07
  *
  *  Version History
  *  ---------------
@@ -26,6 +26,21 @@
  *                      Added structures for MPI_TARGET_SCSI_SPI_CMD_BUFFER and
  *                      MPI_TARGET_FCP_CMD_BUFFER.
  *  03-27-01  01.01.04  Added structure offset comments.
+ *  08-08-01  01.02.01  Original release for v1.2 work.
+ *  09-28-01  01.02.02  Added structure for MPI_TARGET_SCSI_SPI_STATUS_IU.
+ *                      Added PriorityReason field to some replies and
+ *                      defined more PriorityReason codes.
+ *                      Added some defines for to support previous version
+ *                      of MPI.
+ *  10-04-01  01.02.03  Added PriorityReason to MSG_TARGET_ERROR_REPLY.
+ *  11-01-01  01.02.04  Added define for TARGET_STATUS_SEND_FLAGS_HIGH_PRIORITY.
+ *  03-14-02  01.02.05  Modified MPI_TARGET_FCP_RSP_BUFFER to get the proper
+ *                      byte ordering.
+ *  05-31-02  01.02.06  Modified TARGET_MODE_REPLY_ALIAS_MASK to only include
+ *                      one bit.
+ *                      Added AliasIndex field to MPI_TARGET_FCP_CMD_BUFFER.
+ *  09-16-02  01.02.07  Added flags for confirmed completion.
+ *                      Added PRIORITY_REASON_TARGET_BUSY.
  *  --------------------------------------------------------------------------
  */
 
@@ -78,6 +93,7 @@ typedef struct _MSG_TARGET_CMD_BUFFER_POST_REQUEST
 #define CMD_BUFFER_POST_FLAGS_64_BIT_ADDR       (0x80)
 
 #define CMD_BUFFER_POST_IO_INDEX_MASK           (0x00003FFF)
+#define CMD_BUFFER_POST_IO_INDEX_MASK_0100      (0x000003FF) /* obsolete */
 
 
 typedef struct _MSG_TARGET_CMD_BUFFER_POST_REPLY
@@ -97,7 +113,7 @@ typedef struct _MSG_TARGET_CMD_BUFFER_POST_REPLY
 } MSG_TARGET_CMD_BUFFER_POST_REPLY, MPI_POINTER PTR_MSG_TARGET_CMD_BUFFER_POST_REPLY,
   TargetCmdBufferPostReply_t, MPI_POINTER pTargetCmdBufferPostReply_t;
 
-
+/* the following structure is obsolete as of MPI v1.2 */
 typedef struct _MSG_PRIORITY_CMD_RECEIVED_REPLY
 {
     U16                     Reserved;                   /* 00h */
@@ -117,6 +133,14 @@ typedef struct _MSG_PRIORITY_CMD_RECEIVED_REPLY
 
 #define PRIORITY_REASON_NO_DISCONNECT           (0x00)
 #define PRIORITY_REASON_SCSI_TASK_MANAGEMENT    (0x01)
+#define PRIORITY_REASON_CMD_PARITY_ERR          (0x02)
+#define PRIORITY_REASON_MSG_OUT_PARITY_ERR      (0x03)
+#define PRIORITY_REASON_LQ_CRC_ERR              (0x04)
+#define PRIORITY_REASON_CMD_CRC_ERR             (0x05)
+#define PRIORITY_REASON_PROTOCOL_ERR            (0x06)
+#define PRIORITY_REASON_DATA_OUT_PARITY_ERR     (0x07)
+#define PRIORITY_REASON_DATA_OUT_CRC_ERR        (0x08)
+#define PRIORITY_REASON_TARGET_BUSY             (0x09)
 #define PRIORITY_REASON_UNKNOWN                 (0xFF)
 
 
@@ -129,7 +153,8 @@ typedef struct _MSG_TARGET_CMD_BUFFER_POST_ERROR_REPLY
     U8                      Reserved2;                  /* 06h */
     U8                      MsgFlags;                   /* 07h */
     U32                     MsgContext;                 /* 08h */
-    U16                     Reserved3;                  /* 0Ch */
+    U8                      PriorityReason;             /* 0Ch */
+    U8                      Reserved3;                  /* 0Dh */
     U16                     IOCStatus;                  /* 0Eh */
     U32                     IOCLogInfo;                 /* 10h */
     U32                     ReplyWord;                  /* 14h */
@@ -144,6 +169,9 @@ typedef struct _MPI_TARGET_FCP_CMD_BUFFER
     U8      FcpCntl[4];                                 /* 08h */
     U8      FcpCdb[16];                                 /* 0Ch */
     U32     FcpDl;                                      /* 1Ch */
+    U8      AliasIndex;                                 /* 20h */
+    U8      Reserved1;                                  /* 21h */
+    U16     Reserved2;                                  /* 22h */
 } MPI_TARGET_FCP_CMD_BUFFER, MPI_POINTER PTR_MPI_TARGET_FCP_CMD_BUFFER,
   MpiTargetFcpCmdBuffer, MPI_POINTER pMpiTargetFcpCmdBuffer;
 
@@ -192,6 +220,7 @@ typedef struct _MSG_TARGET_ASSIST_REQUEST
 #define TARGET_ASSIST_FLAGS_DATA_DIRECTION          (0x01)
 #define TARGET_ASSIST_FLAGS_AUTO_STATUS             (0x02)
 #define TARGET_ASSIST_FLAGS_HIGH_PRIORITY           (0x04)
+#define TARGET_ASSIST_FLAGS_CONFIRMED               (0x08)
 #define TARGET_ASSIST_FLAGS_REPOST_CMD_BUFFER       (0x80)
 
 
@@ -204,7 +233,8 @@ typedef struct _MSG_TARGET_ERROR_REPLY
     U8                      Reserved2;                  /* 06h */
     U8                      MsgFlags;                   /* 07h */
     U32                     MsgContext;                 /* 08h */
-    U16                     Reserved3;                  /* 0Ch */
+    U8                      PriorityReason;             /* 0Ch */
+    U8                      Reserved3;                  /* 0Dh */
     U16                     IOCStatus;                  /* 0Eh */
     U32                     IOCLogInfo;                 /* 10h */
     U32                     ReplyWord;                  /* 14h */
@@ -234,8 +264,43 @@ typedef struct _MSG_TARGET_STATUS_SEND_REQUEST
   TargetStatusSendRequest_t, MPI_POINTER pTargetStatusSendRequest_t;
 
 #define TARGET_STATUS_SEND_FLAGS_AUTO_GOOD_STATUS   (0x01)
+#define TARGET_STATUS_SEND_FLAGS_HIGH_PRIORITY      (0x04)
+#define TARGET_STATUS_SEND_FLAGS_CONFIRMED          (0x08)
 #define TARGET_STATUS_SEND_FLAGS_REPOST_CMD_BUFFER  (0x80)
 
+/*
+ * NOTE: FCP_RSP data is big-endian. When used on a little-endian system, this
+ * structure properly orders the bytes.
+ */
+typedef struct _MPI_TARGET_FCP_RSP_BUFFER
+{
+    U8      Reserved0[8];                               /* 00h */
+    U8      Reserved1[2];                               /* 08h */
+    U8      FcpFlags;                                   /* 0Ah */
+    U8      FcpStatus;                                  /* 0Bh */
+    U32     FcpResid;                                   /* 0Ch */
+    U32     FcpSenseLength;                             /* 10h */
+    U32     FcpResponseLength;                          /* 14h */
+    U8      FcpResponseData[8];                         /* 18h */
+    U8      FcpSenseData[32]; /* Pad to 64 bytes */     /* 20h */
+} MPI_TARGET_FCP_RSP_BUFFER, MPI_POINTER PTR_MPI_TARGET_FCP_RSP_BUFFER,
+  MpiTargetFcpRspBuffer, MPI_POINTER pMpiTargetFcpRspBuffer;
+
+/*
+ * NOTE: The SPI status IU is big-endian. When used on a little-endian system,
+ * this structure properly orders the bytes.
+ */
+typedef struct _MPI_TARGET_SCSI_SPI_STATUS_IU
+{
+    U8      Reserved0;                                  /* 00h */
+    U8      Reserved1;                                  /* 01h */
+    U8      Valid;                                      /* 02h */
+    U8      Status;                                     /* 03h */
+    U32     SenseDataListLength;                        /* 04h */
+    U32     PktFailuresListLength;                      /* 08h */
+    U8      SenseData[52]; /* Pad the IU to 64 bytes */ /* 0Ch */
+} MPI_TARGET_SCSI_SPI_STATUS_IU, MPI_POINTER PTR_MPI_TARGET_SCSI_SPI_STATUS_IU,
+  TargetScsiSpiStatusIU_t, MPI_POINTER pTargetScsiSpiStatusIU_t;
 
 /****************************************************************************/
 /* Target Mode Abort Request                                                */
@@ -288,7 +353,7 @@ typedef struct _MSG_TARGET_MODE_ABORT_REPLY
 #define TARGET_MODE_REPLY_IO_INDEX_SHIFT        (0)
 #define TARGET_MODE_REPLY_INITIATOR_INDEX_MASK  (0x03FFC000)
 #define TARGET_MODE_REPLY_INITIATOR_INDEX_SHIFT (14)
-#define TARGET_MODE_REPLY_ALIAS_MASK            (0x0C000000)
+#define TARGET_MODE_REPLY_ALIAS_MASK            (0x04000000)
 #define TARGET_MODE_REPLY_ALIAS_SHIFT           (26)
 #define TARGET_MODE_REPLY_PORT_MASK             (0x10000000)
 #define TARGET_MODE_REPLY_PORT_SHIFT            (28)
@@ -323,6 +388,41 @@ typedef struct _MSG_TARGET_MODE_ABORT_REPLY
 #define SET_PORT(t, p)  ((t) = ((t) & ~TARGET_MODE_REPLY_PORT_MASK) |          \
                                     (((p) << TARGET_MODE_REPLY_PORT_SHIFT) &   \
                                                   TARGET_MODE_REPLY_PORT_MASK))
+
+/* the following obsolete values are for MPI v1.0 support */
+#define TARGET_MODE_REPLY_0100_MASK_HOST_INDEX       (0x000003FF)
+#define TARGET_MODE_REPLY_0100_SHIFT_HOST_INDEX      (0)
+#define TARGET_MODE_REPLY_0100_MASK_IOC_INDEX        (0x001FF800)
+#define TARGET_MODE_REPLY_0100_SHIFT_IOC_INDEX       (11)
+#define TARGET_MODE_REPLY_0100_PORT_MASK             (0x00400000)
+#define TARGET_MODE_REPLY_0100_PORT_SHIFT            (22)
+#define TARGET_MODE_REPLY_0100_MASK_INITIATOR_INDEX  (0x1F800000)
+#define TARGET_MODE_REPLY_0100_SHIFT_INITIATOR_INDEX (23)
+
+#define GET_HOST_INDEX_0100(x) (((x) & TARGET_MODE_REPLY_0100_MASK_HOST_INDEX) \
+                                  >> TARGET_MODE_REPLY_0100_SHIFT_HOST_INDEX)
+
+#define SET_HOST_INDEX_0100(t, hi)                                             \
+            ((t) = ((t) & ~TARGET_MODE_REPLY_0100_MASK_HOST_INDEX) |           \
+                         (((hi) << TARGET_MODE_REPLY_0100_SHIFT_HOST_INDEX) &  \
+                                      TARGET_MODE_REPLY_0100_MASK_HOST_INDEX))
+
+#define GET_IOC_INDEX_0100(x)   (((x) & TARGET_MODE_REPLY_0100_MASK_IOC_INDEX) \
+                                  >> TARGET_MODE_REPLY_0100_SHIFT_IOC_INDEX)
+
+#define SET_IOC_INDEX_0100(t, ii)                                              \
+            ((t) = ((t) & ~TARGET_MODE_REPLY_0100_MASK_IOC_INDEX) |            \
+                        (((ii) << TARGET_MODE_REPLY_0100_SHIFT_IOC_INDEX) &    \
+                                     TARGET_MODE_REPLY_0100_MASK_IOC_INDEX))
+
+#define GET_INITIATOR_INDEX_0100(x)                                            \
+            (((x) & TARGET_MODE_REPLY_0100_MASK_INITIATOR_INDEX)               \
+                              >> TARGET_MODE_REPLY_0100_SHIFT_INITIATOR_INDEX)
+
+#define SET_INITIATOR_INDEX_0100(t, ii)                                        \
+        ((t) = ((t) & ~TARGET_MODE_REPLY_0100_MASK_INITIATOR_INDEX) |          \
+                   (((ii) << TARGET_MODE_REPLY_0100_SHIFT_INITIATOR_INDEX) &   \
+                                TARGET_MODE_REPLY_0100_MASK_INITIATOR_INDEX))
 
 
 #endif

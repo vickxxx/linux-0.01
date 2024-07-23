@@ -31,7 +31,7 @@
 #include<linux/stat.h>
 
 extern int ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip, 
-			   u32 base, int io_port, int irq, int dma,
+			   unsigned long base, int io_port, int irq, int dma,
 			   long long options, int clock);
 
 int __init amiga7xx_detect(Scsi_Host_Template *tpnt)
@@ -86,7 +86,7 @@ int __init amiga7xx_detect(Scsi_Host_Template *tpnt)
 #ifdef CONFIG_WARPENGINE_SCSI
     	    case ZORRO_PROD_MACROSYSTEMS_WARP_ENGINE_40xx:
 		if (request_mem_region(address+0x40000, 0x1000, "ncr53c710")) {
-		    address = (unsigned long)ioremap(address, size);
+		    address = (unsigned long)z_ioremap(address, size);
 		    options = OPTION_MEMORY_MAPPED | OPTION_DEBUG_TEST1 |
 			      OPTION_INTFLY | OPTION_SYNCHRONOUS |
 			      OPTION_ALWAYS_SYNCHRONOUS | OPTION_DISCONNECT;
@@ -102,7 +102,7 @@ int __init amiga7xx_detect(Scsi_Host_Template *tpnt)
 	    case ZORRO_PROD_CBM_A4091_1:
 	    case ZORRO_PROD_CBM_A4091_2:
 		if (request_mem_region(address+0x800000, 0x1000, "ncr53c710")) {
-		    address = (unsigned long)ioremap(address, size);
+		    address = (unsigned long)z_ioremap(address, size);
 		    options = OPTION_MEMORY_MAPPED | OPTION_DEBUG_TEST1 |
 			      OPTION_INTFLY | OPTION_SYNCHRONOUS |
 			      OPTION_ALWAYS_SYNCHRONOUS | OPTION_DISCONNECT;
@@ -134,5 +134,31 @@ int __init amiga7xx_detect(Scsi_Host_Template *tpnt)
     return num;
 }
 
-static Scsi_Host_Template driver_template = AMIGA7XX_SCSI;
+static int amiga7xx_release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	if (shost->dma_channel != 0xff)
+		free_dma(shost->dma_channel);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
+}
+
+static Scsi_Host_Template driver_template = {
+	.name			= "Amiga NCR53c710 SCSI",
+	.detect			= amiga7xx_detect,
+	.release		= amiga7xx_release,
+	.queuecommand		= NCR53c7xx_queue_command,
+	.abort			= NCR53c7xx_abort,
+	.reset			= NCR53c7xx_reset,
+	.can_queue		= 24,
+	.this_id		= 7,
+	.sg_tablesize		= 63,
+	.cmd_per_lun		= 3,
+	.use_clustering		= DISABLE_CLUSTERING
+};
+
+
 #include "scsi_module.c"

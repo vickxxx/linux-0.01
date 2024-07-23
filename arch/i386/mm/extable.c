@@ -7,13 +7,11 @@
 #include <linux/spinlock.h>
 #include <asm/uaccess.h>
 
-extern const struct exception_table_entry __start___ex_table[];
-extern const struct exception_table_entry __stop___ex_table[];
-
-static inline unsigned long
-search_one_table(const struct exception_table_entry *first,
-		 const struct exception_table_entry *last,
-		 unsigned long value)
+/* Simple binary search */
+const struct exception_table_entry *
+search_extable(const struct exception_table_entry *first,
+	       const struct exception_table_entry *last,
+	       unsigned long value)
 {
         while (first <= last) {
 		const struct exception_table_entry *mid;
@@ -22,41 +20,39 @@ search_one_table(const struct exception_table_entry *first,
 		mid = (last - first) / 2 + first;
 		diff = mid->insn - value;
                 if (diff == 0)
-                        return mid->fixup;
+                        return mid;
                 else if (diff < 0)
                         first = mid+1;
                 else
                         last = mid-1;
         }
-        return 0;
+        return NULL;
 }
 
-extern spinlock_t modlist_lock;
-
-unsigned long
-search_exception_table(unsigned long addr)
+int fixup_exception(struct pt_regs *regs)
 {
-	unsigned long ret = 0;
-	
-#ifndef CONFIG_MODULES
-	/* There is only the kernel to search.  */
-	ret = search_one_table(__start___ex_table, __stop___ex_table-1, addr);
-	return ret;
-#else
-	unsigned long flags;
-	/* The kernel is the last "module" -- no need to treat it special.  */
-	struct module *mp;
+	const struct exception_table_entry *fixup;
 
-	spin_lock_irqsave(&modlist_lock, flags);
-	for (mp = module_list; mp != NULL; mp = mp->next) {
-		if (mp->ex_table_start == NULL || !(mp->flags&(MOD_RUNNING|MOD_INITIALIZING)))
-			continue;
-		ret = search_one_table(mp->ex_table_start,
-				       mp->ex_table_end - 1, addr);
-		if (ret)
-			break;
+#ifdef CONFIG_PNPBIOS
+	if (unlikely((regs->xcs | 8) == 0x88)) /* 0x80 or 0x88 */
+	{
+		extern u32 pnp_bios_fault_eip, pnp_bios_fault_esp;
+		extern u32 pnp_bios_is_utter_crap;
+		pnp_bios_is_utter_crap = 1;
+		printk(KERN_CRIT "PNPBIOS fault.. attempting recovery.\n");
+		__asm__ volatile(
+			"movl %0, %%esp\n\t"
+			"jmp *%1\n\t"
+			: "=a" (pnp_bios_fault_esp), "=b" (pnp_bios_fault_eip));
+		panic("do_trap: can't hit this");
 	}
-	spin_unlock_irqrestore(&modlist_lock, flags);
-	return ret;
 #endif
+
+	fixup = search_exception_tables(regs->eip);
+	if (fixup) {
+		regs->eip = fixup->fixup;
+		return 1;
+	}
+
+	return 0;
 }

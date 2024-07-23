@@ -1,14 +1,8 @@
 /*
- * BK Id: %F% %I% %G% %U% %#%
- */
-/*
  * This file contains the routines for handling the MMU on those
  * PowerPC implementations where the MMU substantially follows the
  * architecture specification.  This includes the 6xx, 7xx, 7xxx,
  * 8260, and POWER3 implementations but excludes the 8xx and 4xx.
- * Although the iSeries hardware does comply with the architecture
- * specification, the need to work through the hypervisor makes
- * things sufficiently different that it is handled elsewhere.
  *  -- paulus
  * 
  *  Derived from arch/ppc/mm/init.c:
@@ -34,6 +28,7 @@
 #include <linux/init.h>
 
 #include <asm/mmu_context.h>
+#include <asm/tlbflush.h>
 
 mm_context_t next_mmu_context;
 unsigned long context_map[LAST_CONTEXT / BITS_PER_LONG + 1];
@@ -46,7 +41,8 @@ void steal_context(void);
 /*
  * Initialize the context management stuff.
  */
-void __init mmu_context_init(void)
+void __init
+mmu_context_init(void)
 {
 	/*
 	 * Some processors have too few contexts to reserve one for
@@ -74,7 +70,8 @@ void __init mmu_context_init(void)
  * place to implement an LRU scheme if anyone was motivated to do it.
  *  -- paulus
  */
-void steal_context(void)
+void
+steal_context(void)
 {
 	struct mm_struct *mm;
 

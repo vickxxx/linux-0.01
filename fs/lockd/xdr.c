@@ -216,25 +216,6 @@ nlm_encode_testres(u32 *p, struct nlm_res *resp)
 	return p;
 }
 
-/*
- * Check buffer bounds after decoding arguments
- */
-static inline int
-xdr_argsize_check(struct svc_rqst *rqstp, u32 *p)
-{
-	struct svc_buf	*buf = &rqstp->rq_argbuf;
-
-	return p - buf->base <= buf->buflen;
-}
-
-static inline int
-xdr_ressize_check(struct svc_rqst *rqstp, u32 *p)
-{
-	struct svc_buf	*buf = &rqstp->rq_resbuf;
-
-	buf->len = p - buf->base;
-	return (buf->len <= buf->buflen);
-}
 
 /*
  * First, the server side XDR functions
@@ -369,6 +350,8 @@ nlmsvc_decode_reboot(struct svc_rqst *rqstp, u32 *p, struct nlm_reboot *argp)
 	argp->state = ntohl(*p++);
 	/* Preserve the address in network byte order */
 	argp->addr = *p++;
+	argp->vers = *p++;
+	argp->proto = *p++;
 	return xdr_argsize_check(rqstp, p);
 }
 
@@ -396,18 +379,13 @@ nlmsvc_encode_void(struct svc_rqst *rqstp, u32 *p, void *dummy)
 /*
  * Now, the client side XDR functions
  */
-static int
-nlmclt_encode_void(struct rpc_rqst *req, u32 *p, void *ptr)
-{
-	req->rq_slen = xdr_adjust_iovec(req->rq_svec, p);
-	return 0;
-}
-
+#ifdef NLMCLNT_SUPPORT_SHARES
 static int
 nlmclt_decode_void(struct rpc_rqst *req, u32 *p, void *ptr)
 {
 	return 0;
 }
+#endif
 
 static int
 nlmclt_encode_testargs(struct rpc_rqst *req, u32 *p, nlm_args *argp)
@@ -561,53 +539,47 @@ nlmclt_decode_res(struct rpc_rqst *req, u32 *p, struct nlm_res *resp)
 #define nlmclt_decode_norep	NULL
 
 #define PROC(proc, argtype, restype)	\
-    { "nlm_" #proc,						\
-      (kxdrproc_t) nlmclt_encode_##argtype,			\
-      (kxdrproc_t) nlmclt_decode_##restype,			\
-      MAX(NLM_##argtype##_sz, NLM_##restype##_sz) << 2,		\
-      0								\
-    }
+[NLMPROC_##proc] = {							\
+	.p_proc      = NLMPROC_##proc,					\
+	.p_encode    = (kxdrproc_t) nlmclt_encode_##argtype,		\
+	.p_decode    = (kxdrproc_t) nlmclt_decode_##restype,		\
+	.p_bufsiz    = MAX(NLM_##argtype##_sz, NLM_##restype##_sz) << 2	\
+	}
 
 static struct rpc_procinfo	nlm_procedures[] = {
-    PROC(null,		void,		void),
-    PROC(test,		testargs,	testres),
-    PROC(lock,		lockargs,	res),
-    PROC(canc,		cancargs,	res),
-    PROC(unlock,	unlockargs,	res),
-    PROC(granted,	testargs,	res),
-    PROC(test_msg,	testargs,	norep),
-    PROC(lock_msg,	lockargs,	norep),
-    PROC(canc_msg,	cancargs,	norep),
-    PROC(unlock_msg,	unlockargs,	norep),
-    PROC(granted_msg,	testargs,	norep),
-    PROC(test_res,	testres,	norep),
-    PROC(lock_res,	res,		norep),
-    PROC(canc_res,	res,		norep),
-    PROC(unlock_res,	res,		norep),
-    PROC(granted_res,	res,		norep),
-    PROC(undef,		void,		void),
-    PROC(undef,		void,		void),
-    PROC(undef,		void,		void),
-    PROC(undef,		void,		void),
+    PROC(TEST,		testargs,	testres),
+    PROC(LOCK,		lockargs,	res),
+    PROC(CANCEL,	cancargs,	res),
+    PROC(UNLOCK,	unlockargs,	res),
+    PROC(GRANTED,	testargs,	res),
+    PROC(TEST_MSG,	testargs,	norep),
+    PROC(LOCK_MSG,	lockargs,	norep),
+    PROC(CANCEL_MSG,	cancargs,	norep),
+    PROC(UNLOCK_MSG,	unlockargs,	norep),
+    PROC(GRANTED_MSG,	testargs,	norep),
+    PROC(TEST_RES,	testres,	norep),
+    PROC(LOCK_RES,	res,		norep),
+    PROC(CANCEL_RES,	res,		norep),
+    PROC(UNLOCK_RES,	res,		norep),
+    PROC(GRANTED_RES,	res,		norep),
 #ifdef NLMCLNT_SUPPORT_SHARES
-    PROC(share,		shareargs,	shareres),
-    PROC(unshare,	shareargs,	shareres),
-    PROC(nm_lock,	lockargs,	res),
-    PROC(free_all,	notify,		void),
-#else
-    PROC(undef,		void,		void),
-    PROC(undef,		void,		void),
-    PROC(undef,		void,		void),
-    PROC(undef,		void,		void),
+    PROC(SHARE,		shareargs,	shareres),
+    PROC(UNSHARE,	shareargs,	shareres),
+    PROC(NM_LOCK,	lockargs,	res),
+    PROC(FREE_ALL,	notify,		void),
 #endif
 };
 
 static struct rpc_version	nlm_version1 = {
-	1, 16, nlm_procedures,
+		.number		= 1,
+		.nrprocs	= 16,
+		.procs		= nlm_procedures,
 };
 
 static struct rpc_version	nlm_version3 = {
-	3, 24, nlm_procedures,
+		.number		= 3,
+		.nrprocs	= 24,
+		.procs		= nlm_procedures,
 };
 
 #ifdef 	CONFIG_LOCKD_V4
@@ -615,32 +587,20 @@ extern struct rpc_version nlm_version4;
 #endif
 
 static struct rpc_version *	nlm_versions[] = {
-	NULL,
-	&nlm_version1,
-	NULL,
-	&nlm_version3,
+	[1] = &nlm_version1,
+	[3] = &nlm_version3,
 #ifdef 	CONFIG_LOCKD_V4
-	&nlm_version4,
+	[4] = &nlm_version4,
 #endif
 };
 
 static struct rpc_stat		nlm_stats;
 
 struct rpc_program		nlm_program = {
-	"lockd",
-	NLM_PROGRAM,
-	sizeof(nlm_versions) / sizeof(nlm_versions[0]),
-	nlm_versions,
-	&nlm_stats,
+		.name		= "lockd",
+		.number		= NLM_PROGRAM,
+		.nrvers		= sizeof(nlm_versions) / sizeof(nlm_versions[0]),
+		.version	= nlm_versions,
+		.stats		= &nlm_stats,
 };
-
-#ifdef LOCKD_DEBUG
-char *
-nlm_procname(u32 proc)
-{
-	if (proc < sizeof(nlm_procedures)/sizeof(nlm_procedures[0]))
-		return nlm_procedures[proc].p_procname;
-	return "unknown";
-}
-#endif
 

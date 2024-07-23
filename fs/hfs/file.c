@@ -20,6 +20,8 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/buffer_head.h>
+#include <linux/smp_lock.h>
 
 /*================ Forward declarations ================*/
 
@@ -32,16 +34,16 @@ static void hfs_file_truncate(struct inode *);
 /*================ Global variables ================*/
 
 struct file_operations hfs_file_operations = {
-	llseek:		generic_file_llseek,
-	read:		hfs_file_read,
-	write:		hfs_file_write,
-	mmap:		generic_file_mmap,
-	fsync:		file_fsync,
+	.llseek		= generic_file_llseek,
+	.read		= hfs_file_read,
+	.write		= hfs_file_write,
+	.mmap		= generic_file_mmap,
+	.fsync		= file_fsync,
 };
 
 struct inode_operations hfs_file_inode_operations = {
-	truncate:	hfs_file_truncate,
-	setattr:	hfs_notify_change,
+	.truncate	= hfs_file_truncate,
+	.setattr	= hfs_notify_change,
 };
 
 /*================ Variable-like macros ================*/
@@ -61,7 +63,7 @@ struct inode_operations hfs_file_inode_operations = {
 struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 {
 	int tmp;
-	kdev_t dev = fork->entry->mdb->sys_mdb->s_dev;
+	struct super_block *sb = fork->entry->mdb->sys_mdb;
 
 	tmp = hfs_extent_map(fork, block, create);
 
@@ -71,7 +73,7 @@ struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 		*/
 		if (tmp) {
 			hfs_cat_mark_dirty(fork->entry);
-			return getblk(dev, tmp, HFS_SECTOR_SIZE);
+			return sb_getblk(sb, tmp);
 		}
 		return NULL;
 	} else {
@@ -80,8 +82,7 @@ struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
 		   we waited on the I/O in getblk to complete.
 		*/
 		do {
-			struct buffer_head *bh =
-					getblk(dev, tmp, HFS_SECTOR_SIZE);
+			struct buffer_head *bh = sb_getblk(sb, tmp);
 			int tmp2 = hfs_extent_map(fork, block, 0);
 
 			if (tmp2 == tmp) {
@@ -107,17 +108,15 @@ struct buffer_head *hfs_getblk(struct hfs_fork *fork, int block, int create)
  * block number.  This function just calls hfs_extent_map() to do the
  * real work and then stuffs the appropriate info into the buffer_head.
  */
-int hfs_get_block(struct inode *inode, long iblock, struct buffer_head *bh_result, int create)
+int hfs_get_block(struct inode *inode, sector_t iblock, struct buffer_head *bh_result, int create)
 {
 	unsigned long phys;
 
 	phys = hfs_extent_map(HFS_I(inode)->fork, iblock, create);
 	if (phys) {
-		bh_result->b_dev = inode->i_dev;
-		bh_result->b_blocknr = phys;
-		bh_result->b_state |= (1UL << BH_Mapped);
 		if (create)
-			bh_result->b_state |= (1UL << BH_New);
+			set_buffer_new(bh_result);
+		map_bh(bh_result, inode->i_sb, phys);
 		return 0;
 	}
 
@@ -166,10 +165,8 @@ static hfs_rwret_t hfs_file_read(struct file * filp, char * buf,
 	if (left <= 0) {
 		return 0;
 	}
-	if ((read = hfs_do_read(inode, HFS_I(inode)->fork, pos,
-				buf, left, filp->f_reada != 0)) > 0) {
+	if ((read = hfs_do_read(inode, HFS_I(inode)->fork, pos, buf, left)) > 0) {
 	        *ppos += read;
-		filp->f_reada = 1;
 	}
 
 	return read;
@@ -226,8 +223,10 @@ static hfs_rwret_t hfs_file_write(struct file * filp, const char * buf,
  */
 static void hfs_file_truncate(struct inode * inode)
 {
-	struct hfs_fork *fork = HFS_I(inode)->fork;
+	struct hfs_fork *fork;
 
+	lock_kernel();
+	fork = HFS_I(inode)->fork;
 	fork->lsize = inode->i_size;
 	hfs_extent_adj(fork);
 	hfs_cat_mark_dirty(HFS_I(inode)->entry);
@@ -235,6 +234,7 @@ static void hfs_file_truncate(struct inode * inode)
 	inode->i_size = fork->lsize;
 	inode->i_blocks = fork->psize;
 	mark_inode_dirty(inode);
+	unlock_kernel();
 }
 
 /*
@@ -291,9 +291,8 @@ static inline int xlate_from_user(char *data, const char *buf, int count)
  * It has been changed to take into account that HFS files have no holes.
  */
 hfs_s32 hfs_do_read(struct inode *inode, struct hfs_fork * fork, hfs_u32 pos,
-		    char * buf, hfs_u32 count, int reada)
+		    char * buf, hfs_u32 count)
 {
-	kdev_t dev = inode->i_dev;
 	hfs_s32 size, chars, offset, block, blocks, read = 0;
 	int bhrequest, uptodate;
 	int convert = HFS_I(inode)->convert;
@@ -312,14 +311,6 @@ hfs_s32 hfs_do_read(struct inode *inode, struct hfs_fork * fork, hfs_u32 pos,
 	blocks = (count+offset+HFS_SECTOR_SIZE-1) >> HFS_SECTOR_SIZE_BITS;
 
 	bhb = bhe = buflist;
-	if (reada) {
-		if (blocks < read_ahead[MAJOR(dev)] / (HFS_SECTOR_SIZE>>9)) {
-			blocks = read_ahead[MAJOR(dev)] / (HFS_SECTOR_SIZE>>9);
-		}
-		if (block + blocks > size) {
-			blocks = size - block;
-		}
-	}
 
 	/* We do this in a two stage process.  We first try and
 	   request as many blocks as we can, then we wait for the
@@ -489,7 +480,7 @@ hfs_s32 hfs_do_write(struct inode *inode, struct hfs_fork * fork, hfs_u32 pos,
 		pos += c;
 		written += c;
 		buf += c;
-		mark_buffer_uptodate(bh, 1);
+		set_buffer_uptodate(bh);
 		mark_buffer_dirty(bh);
 		brelse(bh);
 	}
@@ -500,7 +491,7 @@ hfs_s32 hfs_do_write(struct inode *inode, struct hfs_fork * fork, hfs_u32 pos,
 		if (pos > fork->lsize) {
 			fork->lsize = pos;
 		}
-		entry->modify_date = hfs_u_to_mtime(CURRENT_TIME);
+		entry->modify_date = hfs_u_to_mtime(get_seconds());
 		hfs_cat_mark_dirty(entry);
 	}
 	return written;

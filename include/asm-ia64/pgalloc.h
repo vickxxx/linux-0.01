@@ -15,7 +15,9 @@
 
 #include <linux/config.h>
 
+#include <linux/compiler.h>
 #include <linux/mm.h>
+#include <linux/page-flags.h>
 #include <linux/threads.h>
 
 #include <asm/mmu_context.h>
@@ -30,7 +32,6 @@
  */
 #define pgd_quicklist		(local_cpu_data->pgd_quick)
 #define pmd_quicklist		(local_cpu_data->pmd_quick)
-#define pte_quicklist		(local_cpu_data->pte_quick)
 #define pgtable_cache_size	(local_cpu_data->pgtable_cache_sz)
 
 static inline pgd_t*
@@ -38,7 +39,7 @@ pgd_alloc_one_fast (struct mm_struct *mm)
 {
 	unsigned long *ret = pgd_quicklist;
 
-	if (__builtin_expect(ret != NULL, 1)) {
+	if (likely(ret != NULL)) {
 		pgd_quicklist = (unsigned long *)(*ret);
 		ret[0] = 0;
 		--pgtable_cache_size;
@@ -53,9 +54,9 @@ pgd_alloc (struct mm_struct *mm)
 	/* the VM system never calls pgd_alloc_one_fast(), so we do it here. */
 	pgd_t *pgd = pgd_alloc_one_fast(mm);
 
-	if (__builtin_expect(pgd == NULL, 0)) {
+	if (unlikely(pgd == NULL)) {
 		pgd = (pgd_t *)__get_free_page(GFP_KERNEL);
-		if (__builtin_expect(pgd != NULL, 1))
+		if (likely(pgd != NULL))
 			clear_page(pgd);
 	}
 	return pgd;
@@ -81,7 +82,7 @@ pmd_alloc_one_fast (struct mm_struct *mm, unsigned long addr)
 {
 	unsigned long *ret = (unsigned long *)pmd_quicklist;
 
-	if (__builtin_expect(ret != NULL, 1)) {
+	if (likely(ret != NULL)) {
 		pmd_quicklist = (unsigned long *)(*ret);
 		ret[0] = 0;
 		--pgtable_cache_size;
@@ -92,9 +93,9 @@ pmd_alloc_one_fast (struct mm_struct *mm, unsigned long addr)
 static inline pmd_t*
 pmd_alloc_one (struct mm_struct *mm, unsigned long addr)
 {
-	pmd_t *pmd = (pmd_t *) __get_free_page(GFP_KERNEL);
+	pmd_t *pmd = (pmd_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
 
-	if (__builtin_expect(pmd != NULL, 1))
+	if (likely(pmd != NULL))
 		clear_page(pmd);
 	return pmd;
 }
@@ -107,165 +108,54 @@ pmd_free (pmd_t *pmd)
 	++pgtable_cache_size;
 }
 
+#define __pmd_free_tlb(tlb, pmd)	pmd_free(pmd)
+
 static inline void
-pmd_populate (struct mm_struct *mm, pmd_t *pmd_entry, pte_t *pte)
+pmd_populate (struct mm_struct *mm, pmd_t *pmd_entry, struct page *pte)
+{
+	pmd_val(*pmd_entry) = page_to_phys(pte);
+}
+
+static inline void
+pmd_populate_kernel (struct mm_struct *mm, pmd_t *pmd_entry, pte_t *pte)
 {
 	pmd_val(*pmd_entry) = __pa(pte);
 }
 
-static inline pte_t*
-pte_alloc_one_fast (struct mm_struct *mm, unsigned long addr)
-{
-	unsigned long *ret = (unsigned long *)pte_quicklist;
-
-	if (__builtin_expect(ret != NULL, 1)) {
-		pte_quicklist = (unsigned long *)(*ret);
-		ret[0] = 0;
-		--pgtable_cache_size;
-	}
-	return (pte_t *)ret;
-}
-
-
-static inline pte_t*
+static inline struct page *
 pte_alloc_one (struct mm_struct *mm, unsigned long addr)
 {
-	pte_t *pte = (pte_t *) __get_free_page(GFP_KERNEL);
+	struct page *pte = alloc_pages(GFP_KERNEL|__GFP_REPEAT, 0);
 
-	if (__builtin_expect(pte != NULL, 1))
+	if (likely(pte != NULL))
+		clear_page(page_address(pte));
+	return pte;
+}
+
+static inline pte_t *
+pte_alloc_one_kernel (struct mm_struct *mm, unsigned long addr)
+{
+	pte_t *pte = (pte_t *)__get_free_page(GFP_KERNEL|__GFP_REPEAT);
+
+	if (likely(pte != NULL))
 		clear_page(pte);
 	return pte;
 }
 
 static inline void
-pte_free (pte_t *pte)
+pte_free (struct page *pte)
 {
-	*(unsigned long *)pte = (unsigned long) pte_quicklist;
-	pte_quicklist = (unsigned long *) pte;
-	++pgtable_cache_size;
-}
-
-extern int do_check_pgt_cache (int, int);
-
-/*
- * Now for some TLB flushing routines.  This is the kind of stuff that
- * can be very expensive, so try to avoid them whenever possible.
- */
-
-/*
- * Flush everything (kernel mapping may also have changed due to
- * vmalloc/vfree).
- */
-extern void __flush_tlb_all (void);
-
-#ifdef CONFIG_SMP
-  extern void smp_flush_tlb_all (void);
-# define flush_tlb_all()	smp_flush_tlb_all()
-#else
-# define flush_tlb_all()	__flush_tlb_all()
-#endif
-
-/*
- * Flush a specified user mapping
- */
-static inline void
-flush_tlb_mm (struct mm_struct *mm)
-{
-	if (mm) {
-		mm->context = 0;
-		if (mm == current->active_mm) {
-			/* This is called, e.g., as a result of exec().  */
-			get_new_mmu_context(mm);
-			reload_context(mm);
-		}
-	}
-}
-
-extern void flush_tlb_range (struct mm_struct *mm, unsigned long start, unsigned long end);
-
-/*
- * Page-granular tlb flush.
- */
-static inline void
-flush_tlb_page (struct vm_area_struct *vma, unsigned long addr)
-{
-#ifdef CONFIG_SMP
-	flush_tlb_range(vma->vm_mm, (addr & PAGE_MASK), (addr & PAGE_MASK) + PAGE_SIZE);
-#else
-	if (vma->vm_mm == current->active_mm)
-		asm volatile ("ptc.l %0,%1" :: "r"(addr), "r"(PAGE_SHIFT << 2) : "memory");
-#endif
-}
-
-/*
- * Flush the TLB entries mapping the virtually mapped linear page
- * table corresponding to address range [START-END).
- */
-static inline void
-flush_tlb_pgtables (struct mm_struct *mm, unsigned long start, unsigned long end)
-{
-	if (rgn_index(start) != rgn_index(end))
-		printk("flush_tlb_pgtables: can't flush across regions!!\n");
-	flush_tlb_range(mm, ia64_thash(start), ia64_thash(end));
-}
-
-/*
- * Now for some cache flushing routines.  This is the kind of stuff
- * that can be very expensive, so try to avoid them whenever possible.
- */
-
-/* Caches aren't brain-dead on the IA-64. */
-#define flush_cache_all()			do { } while (0)
-#define flush_cache_mm(mm)			do { } while (0)
-#define flush_cache_range(mm, start, end)	do { } while (0)
-#define flush_cache_page(vma, vmaddr)		do { } while (0)
-#define flush_page_to_ram(page)			do { } while (0)
-
-extern void flush_icache_range (unsigned long start, unsigned long end);
-
-static inline void
-flush_dcache_page (struct page *page)
-{
-	clear_bit(PG_arch_1, &page->flags);
+	__free_page(pte);
 }
 
 static inline void
-clear_user_page (void *addr, unsigned long vaddr, struct page *page)
+pte_free_kernel (pte_t *pte)
 {
-	clear_page(addr);
-	flush_dcache_page(page);
+	free_page((unsigned long) pte);
 }
 
-static inline void
-copy_user_page (void *to, void *from, unsigned long vaddr, struct page *page)
-{
-	copy_page(to, from);
-	flush_dcache_page(page);
-}
+#define __pte_free_tlb(tlb, pte)	tlb_remove_page((tlb), (pte))
 
-/*
- * IA-64 doesn't have any external MMU info: the page tables contain all the necessary
- * information.  However, we use this macro to take care of any (delayed) i-cache flushing
- * that may be necessary.
- */
-static inline void
-update_mmu_cache (struct vm_area_struct *vma, unsigned long vaddr, pte_t pte)
-{
-	unsigned long addr;
-	struct page *page;
-
-	if (!pte_exec(pte))
-		return;				/* not an executable page... */
-
-	page = pte_page(pte);
-	/* don't use VADDR: it may not be mapped on this CPU (or may have just been flushed): */
-	addr = (unsigned long) page_address(page);
-
-	if (test_bit(PG_arch_1, &page->flags))
-		return;				/* i-cache is already coherent with d-cache */
-
-	flush_icache_range(addr, addr + PAGE_SIZE);
-	set_bit(PG_arch_1, &page->flags);	/* mark page as clean */
-}
+extern void check_pgt_cache (void);
 
 #endif /* _ASM_IA64_PGALLOC_H */

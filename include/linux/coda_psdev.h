@@ -6,6 +6,8 @@
 
 #define CODA_SUPER_MAGIC	0x73757245
 
+struct statfs;
+
 struct coda_sb_info
 {
 	struct venus_comm * sbi_vcomm;
@@ -26,7 +28,7 @@ struct venus_comm {
 
 static inline struct coda_sb_info *coda_sbp(struct super_block *sb)
 {
-    return ((struct coda_sb_info *)((sb)->u.generic_sbp));
+    return ((struct coda_sb_info *)((sb)->s_fs_info));
 }
 
 
@@ -47,13 +49,13 @@ int venus_close(struct super_block *sb, struct ViceFid *fid, int flags,
 int venus_open(struct super_block *sb, struct ViceFid *fid,
 		int flags, struct file **f);
 int venus_mkdir(struct super_block *sb, struct ViceFid *dirfid, 
-			  const char *name, int length, 
-			  struct ViceFid *newfid, struct coda_vattr *attrs);
+		const char *name, int length, 
+		struct ViceFid *newfid, struct coda_vattr *attrs);
 int venus_create(struct super_block *sb, struct ViceFid *dirfid, 
-		    const char *name, int length, int excl, int mode, int rdev,
-		    struct ViceFid *newfid, struct coda_vattr *attrs) ;
+		 const char *name, int length, int excl, int mode, dev_t rdev,
+		 struct ViceFid *newfid, struct coda_vattr *attrs) ;
 int venus_rmdir(struct super_block *sb, struct ViceFid *dirfid, 
-		    const char *name, int length);
+		const char *name, int length);
 int venus_remove(struct super_block *sb, struct ViceFid *dirfid, 
 		 const char *name, int length);
 int venus_readlink(struct super_block *sb, struct ViceFid *fid, 
@@ -71,7 +73,7 @@ int venus_pioctl(struct super_block *sb, struct ViceFid *fid,
 		 unsigned int cmd, struct PioctlData *data);
 int coda_downcall(int opcode, union outputArgs *out, struct super_block *sb);
 int venus_fsync(struct super_block *sb, struct ViceFid *fid);
-int venus_statfs(struct super_block *sb, struct statfs *sfs);
+int venus_statfs(struct super_block *sb, struct kstatfs *sfs);
 
 
 /* messages between coda filesystem in kernel and Venus */
@@ -98,27 +100,7 @@ struct upc_req {
 /*
  * Statistics
  */
-struct coda_upcallstats {
-	int	ncalls;			/* client requests */
-	int	nbadcalls;		/* upcall failures */
-	int	reqs[CODA_NCALLS];	/* count of each request */
-} ;
 
-extern struct coda_upcallstats coda_callstats;
 extern struct venus_comm coda_comms[];
-
-static inline void clstats(int opcode)
-{
-    coda_callstats.ncalls++;
-    if ( (0 <= opcode) && (opcode <= CODA_NCALLS) )
-	coda_callstats.reqs[opcode]++;
-    else
-	printk("clstats called with bad opcode %d\n", opcode); 
-}
-
-static inline void badclstats(void)
-{
-    coda_callstats.nbadcalls++;
-}
 
 #endif

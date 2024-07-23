@@ -96,7 +96,7 @@
 #define PARAM_VESAPM_SEG	0x2e
 #define PARAM_VESAPM_OFF	0x30
 #define PARAM_LFB_PAGES		0x32
-
+#define PARAM_VESA_ATTRIB	0x34
 
 /* Define DO_STORE according to CONFIG_VIDEO_RETAIN */
 #ifdef CONFIG_VIDEO_RETAIN
@@ -133,6 +133,7 @@ vid1:
 #ifdef CONFIG_VIDEO_RETAIN
 	call	restore_screen			# Restore screen contents
 #endif /* CONFIG_VIDEO_RETAIN */
+	call	store_edid
 #endif /* CONFIG_VIDEO_SELECT */
 	call	mode_params			# Store mode parameters
 	popw	%ds				# Restore original DS
@@ -221,6 +222,8 @@ mopar_gr:
 	movl	%eax, %fs:(PARAM_LFB_COLORS)
 	movl	35(%di), %eax
 	movl	%eax, %fs:(PARAM_LFB_COLORS+4)
+	movw	0(%di), %ax
+	movw	%ax, %fs:(PARAM_VESA_ATTRIB)
 
 # get video mem size
 	leaw	modelist+1024, %di
@@ -438,6 +441,7 @@ setalias:
 
 # Setting of user mode (AX=mode ID) => CF=success
 mode_set:
+	movw	%ax, %fs:(0x01fa)		# Store mode for use in acpi_wakeup.S
 	movw	%ax, %bx
 	cmpb	$0xff, %ah
 	jz	setalias
@@ -1882,6 +1886,39 @@ skip10:	movb	%ah, %al
 	call	prtchr	
 	popw	%cx
 	popw	%ax
+	ret
+
+store_edid:
+	pushw	%es				# just save all registers 
+	pushw	%ax				
+	pushw	%bx
+	pushw   %cx
+	pushw	%dx
+	pushw   %di
+
+	pushw	%fs                             
+	popw    %es
+
+	movl	$0x13131313, %eax		# memset block with 0x13
+	movw    $32, %cx
+	movw	$0x440, %di
+	cld
+	rep 
+	stosl  
+
+	movw	$0x4f15, %ax                    # do VBE/DDC 
+	movw	$0x01, %bx
+	movw	$0x00, %cx
+	movw    $0x01, %dx
+	movw	$0x440, %di
+	int	$0x10	
+
+	popw	%di				# restore all registers        
+	popw	%dx
+	popw	%cx
+	popw	%bx
+	popw	%ax
+	popw	%es	
 	ret
 
 # VIDEO_SELECT-only variables

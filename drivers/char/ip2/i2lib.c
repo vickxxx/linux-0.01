@@ -84,8 +84,8 @@ static void iiSendPendingMail(i2eBordStrPtr);
 static void serviceOutgoingFifo(i2eBordStrPtr);
 
 // Functions defined in ip2.c as part of interrupt handling
-static void do_input(i2ChanStrPtr);
-static void do_status(i2ChanStrPtr);
+static void do_input(void *);
+static void do_status(void *);
 
 //***************
 //* Debug  Data *
@@ -326,17 +326,13 @@ i2InitChannels ( i2eBordStrPtr pB, int nChannels, i2ChanStrPtr pCh)
 		pCh->speed       = CBR_9600;
 
 		pCh->flags    = 0;
-		pCh->session  = 0;
-		pCh->pgrp     = 0;
 
 		pCh->ClosingDelay     = 5*HZ/10;
 		pCh->ClosingWaitTime  = 30*HZ;
 
 		// Initialize task queue objects
-		pCh->tqueue_input.routine = (void(*)(void*)) do_input;
-		pCh->tqueue_input.data = pCh;
-		pCh->tqueue_status.routine = (void(*)(void*)) do_status;
-		pCh->tqueue_status.data = pCh;
+		INIT_WORK(&pCh->tqueue_input, do_input, pCh);
+		INIT_WORK(&pCh->tqueue_status, do_status, pCh);
 
 #ifdef IP2DEBUG_TRACE
 		pCh->trace = ip2trace;
@@ -1330,7 +1326,7 @@ i2DrainOutput(i2ChanStrPtr pCh, int timeout)
 
 	// if expires == 0 then timer poped, then do not need to del_timer
 	if ((timeout > 0) && pCh->BookmarkTimer.expires && 
-				(pCh->BookmarkTimer.expires > jiffies)) {
+	                     time_before(jiffies, pCh->BookmarkTimer.expires)) {
 		del_timer( &(pCh->BookmarkTimer) );
 		pCh->BookmarkTimer.expires = 0;
 
@@ -1582,8 +1578,7 @@ i2StripFifo(i2eBordStrPtr pB)
 			WRITE_UNLOCK_IRQRESTORE(&pB->read_fifo_spinlock,bflags);
 
 #ifdef USE_IQ
-			queue_task(&pCh->tqueue_input, &tq_immediate);
-			mark_bh(IMMEDIATE_BH);
+			schedule_work(&pCh->tqueue_input);
 #else
 			do_input(pCh);
 #endif
@@ -1820,8 +1815,7 @@ i2StripFifo(i2eBordStrPtr pB)
 					}  /* End of switch on status type */
 					if (dss_change) {
 #ifdef USE_IQ
-						queue_task(&pCh->tqueue_status, &tq_immediate);
-						mark_bh(IMMEDIATE_BH);
+						schedule_work(&pCh->tqueue_status);
 #else
 						do_status(pCh);
 #endif

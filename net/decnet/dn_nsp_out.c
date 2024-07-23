@@ -21,6 +21,7 @@
  *         Paul Koning:  Connect Confirm message fix.
  *      Eduardo Serrat:  Fix to stop dn_nsp_do_disc() sending malformed packets.
  *    Steve Whitehouse:  dn_nsp_output() and friends needed a spring clean
+ *    Steve Whitehouse:  Moved dn_nsp_send() in here from route.h
  */
 
 /******************************************************************************
@@ -51,7 +52,6 @@
 #include <linux/inet.h>
 #include <linux/route.h>
 #include <net/sock.h>
-#include <asm/segment.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
@@ -64,12 +64,50 @@
 #include <linux/if_packet.h>
 #include <net/neighbour.h>
 #include <net/dst.h>
+#include <net/flow.h>
+#include <net/dn.h>
 #include <net/dn_nsp.h>
 #include <net/dn_dev.h>
 #include <net/dn_route.h>
 
 
 static int nsp_backoff[NSP_MAXRXTSHIFT + 1] = { 1, 2, 4, 8, 16, 32, 64, 64, 64, 64, 64, 64, 64 };
+
+static void dn_nsp_send(struct sk_buff *skb)
+{
+	struct sock *sk = skb->sk;
+	struct dn_scp *scp = DN_SK(sk);
+	struct dst_entry *dst;
+	struct flowi fl;
+
+	skb->h.raw = skb->data;
+	scp->stamp = jiffies;
+
+	dst = sk_dst_check(sk, 0);
+	if (dst) {
+try_again:
+		skb->dst = dst;
+		dst_output(skb);
+		return;
+	}
+
+	memset(&fl, 0, sizeof(fl));
+	fl.oif = sk->sk_bound_dev_if;
+	fl.fld_src = dn_saddr2dn(&scp->addr);
+	fl.fld_dst = dn_saddr2dn(&scp->peer);
+	dn_sk_ports_copy(&fl, scp);
+	fl.proto = DNPROTO_NSP;
+	if (dn_route_output_sock(&sk->sk_dst_cache, &fl, sk, 0) == 0) {
+		dst = sk_dst_get(sk);
+		sk->sk_route_caps = dst->dev->features;
+		goto try_again;
+	}
+
+	sk->sk_err = EHOSTUNREACH;
+	if (!sock_flag(sk, SOCK_DEAD))
+		sk->sk_state_change(sk);
+}
+
 
 /*
  * If sk == NULL, then we assume that we are supposed to be making
@@ -117,40 +155,42 @@ struct sk_buff *dn_alloc_send_skb(struct sock *sk, int *size, int noblock, int *
 			break;
 		}
 
-		if (sk->shutdown & SEND_SHUTDOWN) {
+		if (sk->sk_shutdown & SEND_SHUTDOWN) {
 			*err = EINVAL;
 			break;
 		}
 
-		if (sk->err)
+		if (sk->sk_err)
 			break;
 
 		len = *size + 11;
-		space = sk->sndbuf - atomic_read(&sk->wmem_alloc);
+		space = sk->sk_sndbuf - atomic_read(&sk->sk_wmem_alloc);
 
 		if (space < len) {
-			if ((sk->socket->type == SOCK_STREAM) && (space >= (16 + 11)))
+			if ((sk->sk_socket->type == SOCK_STREAM) &&
+			    (space >= (16 + 11)))
 				len = space;
 		}
 
 		if (space < len) {
-			set_bit(SOCK_ASYNC_NOSPACE, &sk->socket->flags);
+			set_bit(SOCK_ASYNC_NOSPACE, &sk->sk_socket->flags);
 			if (noblock) {
 				*err = EWOULDBLOCK;
 				break;
 			}
 
-			clear_bit(SOCK_ASYNC_WAITDATA, &sk->socket->flags);
+			clear_bit(SOCK_ASYNC_WAITDATA, &sk->sk_socket->flags);
 			SOCK_SLEEP_PRE(sk)
 
-			if ((sk->sndbuf - atomic_read(&sk->wmem_alloc)) < len)
+			if ((sk->sk_sndbuf - atomic_read(&sk->sk_wmem_alloc)) <
+			    len)
 				schedule();
 
 			SOCK_SLEEP_POST(sk)
 			continue;
 		}
 
-		if ((skb = dn_alloc_skb(sk, len, sk->allocation)) == NULL)
+		if ((skb = dn_alloc_skb(sk, len, sk->sk_allocation)) == NULL)
 			continue;
 
 		*size = len - 11;
@@ -312,8 +352,7 @@ static inline unsigned char *dn_mk_common_header(struct dn_scp *scp, struct sk_b
 {
 	unsigned char *ptr = skb_push(skb, len);
 
-	if (len < 5)
-		BUG();
+	BUG_ON(len < 5);
 
 	*ptr++ = msgflag;
 	*((unsigned short *)ptr) = scp->addrrem;
@@ -330,8 +369,7 @@ static unsigned short *dn_mk_ack_header(struct sock *sk, struct sk_buff *skb, un
 	unsigned short ackcrs = scp->numoth_rcv & 0x0FFF;
 	unsigned short *ptr;
 
-	if (hlen < 9)
-		BUG();
+	BUG_ON(hlen < 9);
 
 	scp->ackxmt_dat = acknum;
 	scp->ackxmt_oth = ackcrs;
@@ -356,11 +394,32 @@ static unsigned short *dn_mk_ack_header(struct sock *sk, struct sk_buff *skb, un
 	return ptr;
 }
 
+static unsigned short *dn_nsp_mk_data_header(struct sock *sk, struct sk_buff *skb, int oth)
+{
+	struct dn_scp *scp = DN_SK(sk);
+	struct dn_skb_cb *cb = DN_SKB_CB(skb);
+	unsigned short *ptr = dn_mk_ack_header(sk, skb, cb->nsp_flags, 11, oth);
+
+	if (unlikely(oth)) {
+		cb->segnum = scp->numoth;
+		seq_add(&scp->numoth, 1);
+	} else {
+		cb->segnum = scp->numdat;
+		seq_add(&scp->numdat, 1);
+	}
+	*(ptr++) = dn_htons(cb->segnum);
+
+	return ptr;
+}
+
 void dn_nsp_queue_xmit(struct sock *sk, struct sk_buff *skb, int gfp, int oth)
 {
 	struct dn_scp *scp = DN_SK(sk);
 	struct dn_skb_cb *cb = DN_SKB_CB(skb);
 	unsigned long t = ((scp->nsp_srtt >> 2) + scp->nsp_rttvar) >> 1;
+
+	cb->xmit_count = 0;
+	dn_nsp_mk_data_header(sk, skb, oth);
 
 	/*
 	 * Slow start: If we have been idle for more than
@@ -368,10 +427,6 @@ void dn_nsp_queue_xmit(struct sock *sk, struct sk_buff *skb, int gfp, int oth)
 	 */
 	if ((jiffies - scp->stamp) > t)
 		scp->snd_window = NSP_MIN_WINDOW;
-
-	/* printk(KERN_DEBUG "Window: %lu\n", scp->snd_window); */
-
-	cb->xmit_count = 0;
 
 	if (oth)
 		skb_queue_tail(&scp->other_xmit_queue, skb);
@@ -402,7 +457,7 @@ int dn_nsp_check_xmit_queue(struct sock *sk, struct sk_buff *skb, struct sk_buff
 	while(list != skb2) {
 		struct dn_skb_cb *cb2 = DN_SKB_CB(skb2);
 
-		if (before_or_equal(cb2->segnum, acknum))
+		if (dn_before_or_equal(cb2->segnum, acknum))
 			ack = skb2;
 
 		/* printk(KERN_DEBUG "ack: %s %04x %04x\n", ack ? "ACK" : "SKIP", (int)cb2->segnum, (int)acknum); */
@@ -431,15 +486,15 @@ int dn_nsp_check_xmit_queue(struct sock *sk, struct sk_buff *skb, struct sk_buff
 		 * We don't expect to see acknowledgements for packets we
 		 * haven't sent yet.
 		 */
-		if (xmit_count == 0)
-			BUG();
+		WARN_ON(xmit_count == 0);
+
 		/*
 		 * If the packet has only been sent once, we can use it
 		 * to calculate the RTT and also open the window a little
 		 * further.
 		 */
 		if (xmit_count == 1) {
-			if (equal(segnum, acknum)) 
+			if (dn_equal(segnum, acknum)) 
 				dn_nsp_rtt(sk, (long)(pkttime - reftime));
 
 			if (scp->snd_window < scp->max_window)
@@ -493,7 +548,7 @@ void dn_send_conn_ack (struct sock *sk)
 	struct sk_buff *skb = NULL;
         struct nsp_conn_ack_msg *msg;
 
-	if ((skb = dn_alloc_skb(sk, 3, sk->allocation)) == NULL)
+	if ((skb = dn_alloc_skb(sk, 3, sk->sk_allocation)) == NULL)
 		return;
 
         msg = (struct nsp_conn_ack_msg *)skb_put(skb, 3);
@@ -588,12 +643,12 @@ static __inline__ void dn_nsp_do_disc(struct sock *sk, unsigned char msgflg,
 	}
 
 	/*
-	 * This doesn't go via the dn_nsp_send() fucntion since we need
+	 * This doesn't go via the dn_nsp_send() function since we need
 	 * to be able to send disc packets out which have no socket
 	 * associations.
 	 */
 	skb->dst = dst_clone(dst);
-	skb->dst->output(skb);
+	dst_output(skb);
 }
 
 
@@ -609,7 +664,7 @@ void dn_nsp_send_disc(struct sock *sk, unsigned char msgflg,
 	if (reason == 0)
 		reason = scp->discdata_out.opt_status;
 
-	dn_nsp_do_disc(sk, msgflg, reason, gfp, sk->dst_cache, ddl, 
+	dn_nsp_do_disc(sk, msgflg, reason, gfp, sk->sk_dst_cache, ddl, 
 		scp->discdata_out.opt_data, scp->addrrem, scp->addrloc);
 }
 
@@ -630,19 +685,15 @@ void dn_nsp_send_link(struct sock *sk, unsigned char lsflags, char fcval)
 {
 	struct dn_scp *scp = DN_SK(sk);
 	struct sk_buff *skb;
-	unsigned short *segnum;
 	unsigned char *ptr;
 	int gfp = GFP_ATOMIC;
 
-	if ((skb = dn_alloc_skb(sk, 13, gfp)) == NULL)
+	if ((skb = dn_alloc_skb(sk, DN_MAX_NSP_DATA_HEADER + 2, gfp)) == NULL)
 		return;
 
-	skb_reserve(skb, 13);
-	segnum = dn_mk_ack_header(sk, skb, 0x10, 13, 1);
-	*segnum = dn_htons(scp->numoth);
-        DN_SKB_CB(skb)->segnum = scp->numoth;
-	seq_add(&scp->numoth, 1);
-	ptr = (unsigned char *)(segnum + 1);
+	skb_reserve(skb, DN_MAX_NSP_DATA_HEADER);
+	ptr = skb_put(skb, 2);
+	DN_SKB_CB(skb)->nsp_flags = 0x10;
 	*ptr++ = lsflags;
 	*ptr = fcval;
 
@@ -665,14 +716,15 @@ static int dn_nsp_retrans_conninit(struct sock *sk)
 void dn_nsp_send_conninit(struct sock *sk, unsigned char msgflg)
 {
 	struct dn_scp *scp = DN_SK(sk);
-	struct sk_buff *skb = NULL;
 	struct nsp_conn_init_msg *msg;
 	unsigned char aux;
 	unsigned char menuver;
 	struct dn_skb_cb *cb;
 	unsigned char type = 1;
+	int allocation = (msgflg == NSP_CI) ? sk->sk_allocation : GFP_ATOMIC;
+	struct sk_buff *skb = dn_alloc_skb(sk, 200, allocation);
 
-	if ((skb = dn_alloc_skb(sk, 200, (msgflg == NSP_CI) ? sk->allocation : GFP_ATOMIC)) == NULL)
+	if (!skb)
 		return;
 
 	cb  = DN_SKB_CB(skb);

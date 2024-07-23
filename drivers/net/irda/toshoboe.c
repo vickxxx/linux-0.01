@@ -69,8 +69,6 @@ static char *rcsid = "$Id: toshoboe.c,v 1.91 1999/06/29 14:21:06 root Exp $";
 
 #include <net/irda/wrapper.h>
 #include <net/irda/irda.h>
-#include <net/irda/irmod.h>
-#include <net/irda/irlap_frame.h>
 #include <net/irda/irda_device.h>
 
 #include <linux/pm.h>
@@ -94,7 +92,7 @@ static int max_baud = 4000000;
 static void
 toshoboe_stopchip (struct toshoboe_cb *self)
 {
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   outb_p (0x0e, OBOE_REG_11);
 
@@ -115,7 +113,7 @@ static void
 toshoboe_setbaud (struct toshoboe_cb *self, int baud)
 {
   unsigned long flags;
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   printk (KERN_WARNING "ToshOboe: setting baud to %d\n", baud);
 
@@ -185,7 +183,7 @@ toshoboe_startchip (struct toshoboe_cb *self)
 {
   __u32 physaddr;
 
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
 
   outb_p (0, OBOE_LOCK);
@@ -214,7 +212,7 @@ toshoboe_startchip (struct toshoboe_cb *self)
 static void
 toshoboe_enablebm (struct toshoboe_cb *self)
 {
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
   pci_set_master (self->pdev);
 }
 
@@ -223,7 +221,7 @@ static void
 toshoboe_disablebm (struct toshoboe_cb *self)
 {
   __u8 command;
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   pci_read_config_byte (self->pdev, PCI_COMMAND, &command);
   command &= ~PCI_COMMAND_MASTER;
@@ -238,7 +236,7 @@ toshoboe_initbuffs (struct toshoboe_cb *self)
   int i;
   unsigned long flags;
 
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   save_flags (flags);
   cli ();
@@ -351,7 +349,7 @@ toshoboe_hard_xmit (struct sk_buff *skb, struct net_device *dev)
 }
 
 /*interrupt handler */
-static void
+static irqreturn_t
 toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
 {
   struct toshoboe_cb *self = (struct toshoboe_cb *) dev_id;
@@ -362,16 +360,16 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
     {
       printk (KERN_WARNING "%s: irq %d for unknown device.\n",
               driver_name, irq);
-      return;
+      return IRQ_NONE;
     }
 
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   irqstat = inb_p (OBOE_ISR);
 
 /* woz it us */
   if (!(irqstat & 0xf8))
-    return;
+    return IRQ_NONE;
 
   outb_p (irqstat, OBOE_ISR);   /*Acknologede it */
 
@@ -423,8 +421,8 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
             }
           else
             {
-              printk (KERN_INFO __FUNCTION__
-                      "(), memory squeeze, dropping frame.\n");
+              printk (KERN_INFO
+                      "%s(), memory squeeze, dropping frame.\n", __FUNCTION__);
             }
 
           self->taskfile->recv[self->rxs].control = 0x83;
@@ -433,8 +431,10 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
           self->rxs++;
           self->rxs %= RX_SLOTS;
 
-          if (skb)
+          if (skb) {
             netif_rx (skb);
+            self->netdev->last_rx = jiffies;
+          }
 
         }
 
@@ -456,14 +456,13 @@ toshoboe_interrupt (int irq, void *dev_id, struct pt_regs *regs)
       self->stats.rx_errors++;
 
     }
-
-
+  return IRQ_HANDLED;
 }
 
 static int
 toshoboe_net_init (struct net_device *dev)
 {
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   /* Setup to be a normal IrDA network device driver */
   irda_device_setup (dev);
@@ -512,7 +511,7 @@ toshoboe_net_open (struct net_device *dev)
   struct toshoboe_cb *self;
   char hwname[32];
 
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   ASSERT (dev != NULL, return -1;
     );
@@ -559,7 +558,7 @@ toshoboe_net_close (struct net_device *dev)
 {
   struct toshoboe_cb *self;
 
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   ASSERT (dev != NULL, return -1;
     );
@@ -608,7 +607,7 @@ static int toshoboe_net_ioctl(struct net_device *dev, struct ifreq *rq, int cmd)
 
 	ASSERT(self != NULL, return -1;);
 
-	IRDA_DEBUG(2, __FUNCTION__ "(), %s, (cmd=0x%X)\n", dev->name, cmd);
+	IRDA_DEBUG(2, "%s(), %s, (cmd=0x%X)\n", __FUNCTION__ , dev->name, cmd);
 	
 	/* Disable interrupts & save flags */
 	save_flags(flags);
@@ -654,7 +653,7 @@ toshoboe_remove (struct pci_dev *pci_dev)
   int i;
   struct toshoboe_cb *self = (struct toshoboe_cb*)pci_get_drvdata(pci_dev);
 
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   ASSERT (self != NULL, return;
     );
@@ -680,12 +679,8 @@ toshoboe_remove (struct pci_dev *pci_dev)
       self->recv_bufs[i] = NULL;
     }
 
-  if (self->netdev) {
-	  /* Remove netdevice */
-	  rtnl_lock();
-	  unregister_netdevice(self->netdev);
-	  rtnl_unlock();
-  }
+  if (self->netdev)
+	  unregister_netdev(self->netdev);
 
   kfree (self->taskfilebuf);
   self->taskfilebuf = NULL;
@@ -704,7 +699,7 @@ toshoboe_probe (struct pci_dev *pci_dev, const struct pci_device_id *pdid)
   int ok = 0;
   int err;
 
-  IRDA_DEBUG (4, __FUNCTION__ "()\n");
+  IRDA_DEBUG (4, "%s()\n", __FUNCTION__ );
 
   if ((err=pci_enable_device(pci_dev)))
 	  return err;
@@ -733,7 +728,7 @@ toshoboe_probe (struct pci_dev *pci_dev, const struct pci_device_id *pdid)
   /* Lock the port that we need */
   if (NULL==request_region (self->io.sir_base, self->io.sir_ext, driver_name))
     {
-      IRDA_DEBUG (0, __FUNCTION__ "(), can't get iobase of 0x%03x\n",
+      IRDA_DEBUG (0, "%s(), can't get iobase of 0x%03x\n", __FUNCTION__ ,
              self->io.sir_base);
 
       err = -EBUSY;
@@ -824,7 +819,7 @@ toshoboe_probe (struct pci_dev *pci_dev, const struct pci_device_id *pdid)
 
 
   if (!(dev = dev_alloc("irda%d", &err))) {
-      ERROR(__FUNCTION__ "(), dev_alloc() failed!\n");
+      ERROR("%s(), dev_alloc() failed!\n", __FUNCTION__);
       err = -ENOMEM;
       goto freebufs;
   }
@@ -843,7 +838,7 @@ toshoboe_probe (struct pci_dev *pci_dev, const struct pci_device_id *pdid)
   err = register_netdevice(dev);
   rtnl_unlock();
   if (err) {
-	  ERROR(__FUNCTION__ "(), register_netdev() failed!\n");
+	  ERROR("%s(), register_netdev() failed!\n", __FUNCTION__);
 	  /* XXX there is not freeing for dev? */
           goto freebufs;
   }
@@ -938,12 +933,12 @@ toshoboe_resume (struct pci_dev *pci_dev)
 }
 
 static struct pci_driver toshoboe_pci_driver = {
-  name		: "toshoboe",
-  id_table	: toshoboe_pci_tbl,
-  probe		: toshoboe_probe,
-  remove	: toshoboe_remove,
-  suspend	: toshoboe_suspend,
-  resume	: toshoboe_resume 
+	.name		= "toshoboe",
+	.id_table	= toshoboe_pci_tbl,
+	.probe		= toshoboe_probe,
+	.remove		= toshoboe_remove,
+	.suspend	= toshoboe_suspend,
+	.resume		= toshoboe_resume 
 };
 
 int __init

@@ -81,6 +81,9 @@
                     : Make `version[]' __initdata
                     : Uninlined the read/write reg/word functions.
 
+  Oskar Schirmer    : oskar@scara.com
+                    : HiCO.SH4 (superh) support added (irq#1, cs89x0_media=)
+
 */
 
 /* Always include 'config.h' first in case the user wants to turn on
@@ -112,29 +115,27 @@
 
 */
 
+#include <linux/errno.h>
+#include <linux/netdevice.h>
+#include <linux/etherdevice.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
+#include <linux/skbuff.h>
 #include <linux/slab.h>
+#include <linux/spinlock.h>
 #include <linux/string.h>
 #include <linux/init.h>
+
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
 #if ALLOW_DMA
 #include <asm/dma.h>
 #endif
-#include <linux/errno.h>
-#include <linux/spinlock.h>
-
-#include <linux/netdevice.h>
-#include <linux/etherdevice.h>
-#include <linux/skbuff.h>
 
 #include "cs89x0.h"
 
@@ -156,6 +157,10 @@ static char version[] __initdata =
 static unsigned int netcard_portlist[] __initdata =
    { 0x80090303, 0x300, 0x320, 0x340, 0x360, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x2e0, 0};
 static unsigned int cs8900_irq_map[] = {12,0,0,0};
+#elif defined(CONFIG_SH_HICOSH4)
+static unsigned int netcard_portlist[] __initdata =
+   { 0x0300, 0};
+static unsigned int cs8900_irq_map[] = {1,0,0,0};
 #else
 static unsigned int netcard_portlist[] __initdata =
    { 0x300, 0x320, 0x340, 0x360, 0x200, 0x220, 0x240, 0x260, 0x280, 0x2a0, 0x2c0, 0x2e0, 0};
@@ -213,7 +218,7 @@ extern int cs89x0_probe(struct net_device *dev);
 static int cs89x0_probe1(struct net_device *dev, int ioaddr);
 static int net_open(struct net_device *dev);
 static int net_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void set_multicast_list(struct net_device *dev);
 static void net_timeout(struct net_device *dev);
 static void net_rx(struct net_device *dev);
@@ -246,6 +251,20 @@ static int __init dma_fn(char *str)
 
 __setup("cs89x0_dma=", dma_fn);
 #endif	/* !defined(MODULE) && (ALLOW_DMA != 0) */
+
+#ifndef MODULE
+static int g_cs89x0_media__force;
+
+static int __init media_fn(char *str)
+{
+	if (!strcmp(str, "rj45")) g_cs89x0_media__force = FORCE_RJ45;
+	else if (!strcmp(str, "aui")) g_cs89x0_media__force = FORCE_AUI;
+	else if (!strcmp(str, "bnc")) g_cs89x0_media__force = FORCE_BNC;
+	return 1;
+}
+
+__setup("cs89x0_media=", media_fn);
+#endif
 
 
 /* Check for a network adaptor of this type, and return '0' iff one exists.
@@ -383,6 +402,9 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
 			lp->dmasize = 16;	/* Could make this an option... */
 		}
 #endif
+#ifndef MODULE
+		lp->force = g_cs89x0_media__force;
+#endif
         }
 	lp = (struct net_local *)dev->priv;
 
@@ -393,6 +415,12 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
 		retval = -EBUSY;
 		goto out1;
 	}
+
+#ifdef CONFIG_SH_HICOSH4
+	/* truely reset the chip */
+	outw(0x0114, ioaddr + ADD_PORT);
+	outw(0x0040, ioaddr + DATA_PORT);
+#endif
 
 	/* if they give us an odd I/O address, then do ONE write to
            the address port, to get it back to address zero, where we
@@ -413,7 +441,7 @@ cs89x0_probe1(struct net_device *dev, int ioaddr)
 	}
 printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 
-        if (inw(ioaddr + DATA_PORT) != CHIP_EISA_ID_SIG) {
+	if (inw(ioaddr + DATA_PORT) != CHIP_EISA_ID_SIG) {
 		printk(KERN_ERR "%s: incorrect signature 0x%x\n",
 			dev->name, inw(ioaddr + DATA_PORT));
   		retval = -ENODEV;
@@ -454,6 +482,39 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 	   EEPROM read on reset. So, if the chip says it read the EEPROM
 	   the driver will always do *something* instead of complain that
 	   adapter_cnf is 0. */
+
+#ifdef CONFIG_SH_HICOSH4
+	if (1) {
+		/* For the HiCO.SH4 board, things are different: we don't
+		   have EEPROM, but there is some data in flash, so we go
+		   get it there directly (MAC). */
+		__u16 *confd;
+		short cnt;
+		if (((* (volatile __u32 *) 0xa0013ff0) & 0x00ffffff)
+			== 0x006c3000) {
+			confd = (__u16*) 0xa0013fc0;
+		} else {
+			confd = (__u16*) 0xa001ffc0;
+		}
+		cnt = (*confd++ & 0x00ff) >> 1;
+		while (--cnt > 0) {
+			__u16 j = *confd++;
+			
+			switch (j & 0x0fff) {
+			case PP_IA:
+				for (i = 0; i < ETH_ALEN/2; i++) {
+					dev->dev_addr[i*2] = confd[i] & 0xFF;
+					dev->dev_addr[i*2+1] = confd[i] >> 8;
+				}
+				break;
+			}
+			j = (j >> 12) + 1;
+			confd += j;
+			cnt -= j;
+		}
+	} else
+#endif
+
         if ((readreg(dev, PP_SelfST) & (EEPROM_OK | EEPROM_PRESENT)) == 
 	      (EEPROM_OK|EEPROM_PRESENT)) {
 	        /* Load the MAC. */
@@ -507,6 +568,11 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
         printk("\n");
    
 	/* First check to see if an EEPROM is attached. */
+#ifdef CONFIG_SH_HICOSH4 /* no EEPROM on HiCO, don't hazzle with it here */
+	if (1) {
+		printk(KERN_NOTICE "cs89x0: No EEPROM on HiCO.SH4\n");
+	} else
+#endif
 	if ((readreg(dev, PP_SelfST) & EEPROM_PRESENT) == 0)
 		printk(KERN_WARNING "cs89x0: No EEPROM, relying on command line....\n");
 	else if (get_eeprom_data(dev, START_EEPROM_DATA,CHKSUM_LEN,eeprom_buff) < 0) {
@@ -537,7 +603,7 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
                         dev->dev_addr[i*2+1] = eeprom_buff[i] >> 8;
                 }
 		if (net_debug > 1)
-			printk(KERN_DEBUG "%s: new adapter_cnf: 0%x\n",
+			printk(KERN_DEBUG "%s: new adapter_cnf: 0x%x\n",
 				dev->name, lp->adapter_cnf);
         }
 
@@ -582,8 +648,8 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 		i = lp->isa_config & INT_NO_MASK;
 		if (lp->chip_type == CS8900) {
 			/* Translate the IRQ using the IRQ mapping table. */
-			if (i > sizeof(cs8900_irq_map)/sizeof(cs8900_irq_map[0]))
-				printk("\ncs89x0: bug: isa_config is %d\n", i);
+			if (i >= sizeof(cs8900_irq_map)/sizeof(cs8900_irq_map[0]))
+				printk("\ncs89x0: invalid ISA interrupt number %d\n", i);
 			else
 				i = cs8900_irq_map[i];
 			
@@ -616,10 +682,10 @@ printk("PP_addr=0x%x\n", inw(ioaddr + ADD_PORT));
 	}
 
 	/* print the ethernet address. */
-	printk(", MAC ");
+	printk(", MAC");
 	for (i = 0; i < ETH_ALEN; i++)
 	{
-		printk("%s%02x", i ? ":" : "", dev->dev_addr[i]);
+		printk("%c%02x", i ? ':' : ' ', dev->dev_addr[i]);
 	}
 
 	dev->open		= net_open;
@@ -1046,6 +1112,7 @@ net_open(struct net_device *dev)
 	int i;
 	int ret;
 
+#ifndef CONFIG_SH_HICOSH4 /* uses irq#1, so this won't work */
 	if (dev->irq < 2) {
 		/* Allow interrupts to be generated by the chip */
 /* Cirrus' release had this: */
@@ -1056,7 +1123,7 @@ net_open(struct net_device *dev)
 		writereg(dev, PP_BusCTL, ENABLE_IRQ | MEMORY_ON);
 
 		for (i = 2; i < CS8920_NO_INTS; i++) {
-			if ((1 << dev->irq) & lp->irq_map) {
+			if ((1 << i) & lp->irq_map) {
 				if (request_irq(i, net_interrupt, 0, dev->name, dev) == 0) {
 					dev->irq = i;
 					write_irq(dev, lp->chip_type, i);
@@ -1072,7 +1139,10 @@ net_open(struct net_device *dev)
 			ret = -EAGAIN;
 			goto bad_out;
 		}
-	} else {
+	}
+	else
+#endif
+	{
 		if (((1 << dev->irq) & lp->irq_map) == 0) {
 			printk(KERN_ERR "%s: IRQ %d is not in our map of allowable IRQs, which is %x\n",
                                dev->name, dev->irq, lp->irq_map);
@@ -1109,7 +1179,7 @@ net_open(struct net_device *dev)
 				printk(	"%s: dma %lx %lx\n",
 					dev->name,
 					(unsigned long)lp->dma_buff,
-					(unsigned long)virt_to_bus(lp->dma_buff));
+					(unsigned long)isa_virt_to_bus(lp->dma_buff));
 			}
 			if ((unsigned long) lp->dma_buff >= MAX_DMA_ADDRESS ||
 			    !dma_page_eq(lp->dma_buff, lp->dma_buff+lp->dmasize*1024-1)) {
@@ -1128,7 +1198,7 @@ net_open(struct net_device *dev)
 			disable_dma(dev->dma);
 			clear_dma_ff(dev->dma);
 			set_dma_mode(dev->dma, 0x14); /* auto_init as well */
-			set_dma_addr(dev->dma, virt_to_bus(lp->dma_buff));
+			set_dma_addr(dev->dma, isa_virt_to_bus(lp->dma_buff));
 			set_dma_count(dev->dma, lp->dmasize*1024);
 			enable_dma(dev->dma);
 			spin_unlock_irqrestore(&lp->lock, flags);
@@ -1331,12 +1401,13 @@ static int net_send_packet(struct sk_buff *skb, struct net_device *dev)
 /* The typical workload of the driver:
    Handle the network interface interrupts. */
    
-static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device *dev = dev_id;
 	struct net_local *lp;
 	int ioaddr, status;
- 
+ 	int handled = 0;
+
 	ioaddr = dev->base_addr;
 	lp = (struct net_local *)dev->priv;
 
@@ -1349,6 +1420,7 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
            vista, baby!  */
 	while ((status = readword(dev, ISQ_PORT))) {
 		if (net_debug > 4)printk("%s: event=%04x\n", dev->name, status);
+		handled = 1;
 		switch(status & ISQ_EVENT_MASK) {
 		case ISQ_RECEIVER_EVENT:
 			/* Got a packet(s). */
@@ -1415,6 +1487,7 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			break;
 		}
 	}
+	return IRQ_RETVAL(handled);
 }
 
 static void
@@ -1557,16 +1630,21 @@ static void set_multicast_list(struct net_device *dev)
 }
 
 
-static int set_mac_address(struct net_device *dev, void *addr)
+static int set_mac_address(struct net_device *dev, void *p)
 {
 	int i;
+	struct sockaddr *addr = p;
+
 
 	if (netif_running(dev))
 		return -EBUSY;
+
+	memcpy(dev->dev_addr, addr->sa_data, dev->addr_len);
+
 	if (net_debug) {
 		printk("%s: Setting MAC address to ", dev->name);
-		for (i = 0; i < 6; i++)
-			printk(" %2.2x", dev->dev_addr[i] = ((unsigned char *)addr)[i]);
+		for (i = 0; i < dev->addr_len; i++)
+			printk(" %2.2x", dev->dev_addr[i]);
 		printk(".\n");
 	}
 	/* set the Ethernet address */
@@ -1578,11 +1656,7 @@ static int set_mac_address(struct net_device *dev, void *addr)
 
 #ifdef MODULE
 
-static struct net_device dev_cs89x0 = {
-        "",
-        0, 0, 0, 0,
-        0, 0,
-        0, 0, 0, NULL, NULL };
+static struct net_device dev_cs89x0;
 
 /*
  * Support the 'debug' module parm even if we're compiled for non-debug to 
@@ -1630,8 +1704,6 @@ MODULE_PARM_DESC(use_dma , "(ignored)");
 MODULE_AUTHOR("Mike Cruse, Russwll Nelson <nelson@crynwr.com>, Andrew Morton <andrewm@uow.edu.au>");
 MODULE_LICENSE("GPL");
 
-
-EXPORT_NO_SYMBOLS;
 
 /*
 * media=t             - specify media type

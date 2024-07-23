@@ -150,7 +150,7 @@ struct  srcobj_fmt
  * numbers used in NSP. Similar in operation to the functions
  * of the same name in TCP.
  */
-static __inline__ int before(unsigned short seq1, unsigned short seq2)
+static __inline__ int dn_before(unsigned short seq1, unsigned short seq2)
 {
         seq1 &= 0x0fff;
         seq2 &= 0x0fff;
@@ -159,7 +159,7 @@ static __inline__ int before(unsigned short seq1, unsigned short seq2)
 }
 
 
-static __inline__ int after(unsigned short seq1, unsigned short seq2)
+static __inline__ int dn_after(unsigned short seq1, unsigned short seq2)
 {
         seq1 &= 0x0fff;
         seq2 &= 0x0fff;
@@ -167,14 +167,14 @@ static __inline__ int after(unsigned short seq1, unsigned short seq2)
         return (int)((seq2 - seq1) & 0x0fff) > 2048;
 }
 
-static __inline__ int equal(unsigned short seq1, unsigned short seq2)
+static __inline__ int dn_equal(unsigned short seq1, unsigned short seq2)
 {
         return ((seq1 ^ seq2) & 0x0fff) == 0;
 }
 
-static __inline__ int before_or_equal(unsigned short seq1, unsigned short seq2)
+static __inline__ int dn_before_or_equal(unsigned short seq1, unsigned short seq2)
 {
-	return (before(seq1, seq2) || equal(seq1, seq2));
+	return (dn_before(seq1, seq2) || dn_equal(seq1, seq2));
 }
 
 static __inline__ void seq_add(unsigned short *seq, unsigned short off)
@@ -185,7 +185,7 @@ static __inline__ void seq_add(unsigned short *seq, unsigned short off)
 
 static __inline__ int seq_next(unsigned short seq1, unsigned short seq2)
 {
-	return equal(seq1 + 1, seq2);
+	return dn_equal(seq1 + 1, seq2);
 }
 
 /*
@@ -201,7 +201,9 @@ static __inline__ int sendack(unsigned short seq)
  */
 static __inline__ int dn_congested(struct sock *sk)
 {
-        return atomic_read(&sk->rmem_alloc) > (sk->rcvbuf >> 1);
+        return atomic_read(&sk->sk_rmem_alloc) > (sk->sk_rcvbuf >> 1);
 }
+
+#define DN_MAX_NSP_DATA_HEADER (11)
 
 #endif /* _NET_DN_NSP_H */

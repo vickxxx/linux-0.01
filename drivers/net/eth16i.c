@@ -146,13 +146,10 @@ static char *version =
     "eth16i.c: v0.35 01-Jul-1999 Mika Kuoppala (miku@iki.fi)\n";
 
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>		  
 #include <linux/fcntl.h>		  
 #include <linux/interrupt.h>		  
-#include <linux/ptrace.h>		  
 #include <linux/ioport.h>		  
 #include <linux/in.h>		  
 #include <linux/slab.h>		  
@@ -160,7 +157,6 @@ static char *version =
 #include <linux/errno.h>
 #include <linux/init.h>
 #include <linux/spinlock.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
@@ -416,7 +412,7 @@ static int     eth16i_close(struct net_device *dev);
 static int     eth16i_tx(struct sk_buff *skb, struct net_device *dev);
 static void    eth16i_rx(struct net_device *dev);
 static void    eth16i_timeout(struct net_device *dev);
-static void    eth16i_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t eth16i_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void    eth16i_reset(struct net_device *dev);
 static void    eth16i_timeout(struct net_device *dev);
 static void    eth16i_skip_packet(struct net_device *dev);
@@ -1056,10 +1052,16 @@ static int eth16i_tx(struct sk_buff *skb, struct net_device *dev)
 	struct eth16i_local *lp = (struct eth16i_local *)dev->priv;
 	int ioaddr = dev->base_addr;
 	int status = 0;
-	ushort length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
+	ushort length = skb->len;
 	unsigned char *buf = skb->data;
 	unsigned long flags;
 
+	if (length < ETH_ZLEN) {
+		skb = skb_padto(skb, ETH_ZLEN);
+		if (skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
 
 	netif_stop_queue(dev);
 		
@@ -1217,11 +1219,12 @@ static void eth16i_rx(struct net_device *dev)
 	} /* while */
 }
 
-static void eth16i_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t eth16i_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	struct net_device *dev = dev_id;
 	struct eth16i_local *lp;
 	int ioaddr = 0, status;
+	int handled = 0;
 
 	ioaddr = dev->base_addr;
 	lp = (struct eth16i_local *)dev->priv;
@@ -1229,11 +1232,14 @@ static void eth16i_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	/* Turn off all interrupts from adapter */
 	outw(ETH16I_INTR_OFF, ioaddr + TX_INTR_REG);
 
-	/* eth16i_tx wont be called */
+	/* eth16i_tx won't be called */
 	spin_lock(&lp->lock);
 
 	status = inw(ioaddr + TX_STATUS_REG);      /* Get the status */
 	outw(status, ioaddr + TX_STATUS_REG);      /* Clear status bits */
+
+	if (status)
+		handled = 1;
 
 	if(eth16i_debug > 3)
 		printk(KERN_DEBUG "%s: Interrupt with status %04x.\n", dev->name, status);
@@ -1312,7 +1318,7 @@ static void eth16i_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 	
 	spin_unlock(&lp->lock);
 	
-	return;
+	return IRQ_RETVAL(handled);
 }
 
 static void eth16i_skip_packet(struct net_device *dev)
@@ -1402,7 +1408,6 @@ static int irq[MAX_ETH16I_CARDS];
 static char* mediatype[MAX_ETH16I_CARDS];
 static int debug = -1;
 
-#if (LINUX_VERSION_CODE >= 0x20115) 
 MODULE_AUTHOR("Mika Kuoppala <miku@iki.fi>");
 MODULE_DESCRIPTION("ICL EtherTeam 16i/32 driver");
 MODULE_LICENSE("GPL");
@@ -1421,7 +1426,6 @@ MODULE_PARM_DESC(mediatype, "eth16i media type of interface(s) (bnc,tp,dix,auto,
 
 MODULE_PARM(debug, "i");
 MODULE_PARM_DESC(debug, "eth16i debug level (0-6)");
-#endif
 
 int init_module(void)
 {

@@ -10,8 +10,6 @@
 #ifndef __ASM_PROC_SYSTEM_H
 #define __ASM_PROC_SYSTEM_H
 
-#include <asm/proc-fns.h>
-
 #define vectors_base()	(0)
 
 static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size)
@@ -39,7 +37,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * Save the current interrupt enable state & disable IRQs
  */
-#define __save_flags_cli(x)				\
+#define local_save_flags_cli(x)				\
 	do {						\
 	  unsigned long temp;				\
 	  __asm__ __volatile__(				\
@@ -55,7 +53,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * Enable IRQs
  */
-#define __sti()					\
+#define local_irq_enable()					\
 	do {					\
 	  unsigned long temp;			\
 	  __asm__ __volatile__(			\
@@ -70,7 +68,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * Disable IRQs
  */
-#define __cli()					\
+#define local_irq_disable()					\
 	do {					\
 	  unsigned long temp;			\
 	  __asm__ __volatile__(			\
@@ -103,7 +101,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * save current IRQ & FIQ state
  */
-#define __save_flags(x)				\
+#define local_save_flags(x)				\
 	do {					\
 	  __asm__ __volatile__(			\
 "	mov	%0, pc		@ save_flags\n"	\
@@ -114,7 +112,7 @@ static inline unsigned long __xchg(unsigned long x, volatile void *ptr, int size
 /*
  * restore saved IRQ & FIQ state
  */
-#define __restore_flags(x)				\
+#define local_irq_restore(x)				\
 	do {						\
 	  unsigned long temp;				\
 	  __asm__ __volatile__(				\

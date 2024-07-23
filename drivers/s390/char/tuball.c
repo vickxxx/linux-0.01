@@ -24,7 +24,7 @@
 /* Module parameters */
 int tubdebug;
 int tubscrolltime = -1;
-int tubxcorrect = 1;            /* Do correct ebc<->asc tables */
+static int tubxcorrect = 1;            /* Do correct ebc<->asc tables */
 #ifdef MODULE
 MODULE_PARM(tubdebug, "i");
 MODULE_PARM(tubscrolltime, "i");
@@ -38,19 +38,27 @@ MODULE_PARM(tubxcorrect, "i");
  */
 int tubnummins;
 tub_t *(*tubminors)[TUBMAXMINS];
-tub_t *(*(*tubirqs)[256])[256];
+static tub_t *(*(*tubirqs)[256])[256];
 unsigned char tub_ascebc[256];
 unsigned char tub_ebcasc[256];
-int tubinitminors(void);
-void tubfiniminors(void);
-void tubint(int, void *, struct pt_regs *);
+static int tubinitminors(void);
+static void tubfiniminors(void);
+static void tubint(int, void *, struct pt_regs *);
+
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
+static int tubmakemin(int, dev_info_t *);
+#else
+static int tubmakemin(int, s390_dev_info_t *);
+#endif
+
 
 /* Lookup-by-irq functions */
-int tubaddbyirq(tub_t *, int);
-tub_t *tubfindbyirq(int);
-void tubdelbyirq(tub_t *, int);
-void tubfiniirqs(void);
+static int tubaddbyirq(tub_t *, int);
+static tub_t *tubfindbyirq(int);
+static void tubdelbyirq(tub_t *, int);
+static void tubfiniirqs(void);
 
+/* FIXME: put extern declarations in a header */
 extern int fs3270_init(void);
 extern void fs3270_fini(void);
 extern int tty3270_init(void);
@@ -74,7 +82,7 @@ int tub3270_init(void);
  * Can't have this driver a module & support console at the same time
  */
 #ifdef CONFIG_TN3270_CONSOLE
-static kdev_t tub3270_con_device(struct console *);
+static struct tty_driver *tub3270_con_device(struct console *, int *);
 static void tub3270_con_unblank(void);
 static void tub3270_con_write(struct console *, const char *,
 	unsigned int);
@@ -84,7 +92,6 @@ static struct console tub3270_con = {
 	tub3270_con_write,	/* write */
 	NULL,			/* read */
 	tub3270_con_device,	/* device */
-	NULL,			/* wait_key */
 	tub3270_con_unblank,	/* unblank */
 	NULL,			/* setup */
 	CON_PRINTBUFFER,	/* flags */
@@ -95,7 +102,7 @@ static struct console tub3270_con = {
 
 static bcb_t tub3270_con_bcb;		/* Buffer that receives con writes */
 static spinlock_t tub3270_con_bcblock;	/* Lock for the buffer */
-int tub3270_con_irq = -1;		/* set nonneg by _activate() */
+static int tub3270_con_irq = -1;		/* set nonneg by _activate() */
 tub_t *tub3270_con_tubp;		/* set nonzero by _activate() */
 struct tty_driver tty3270_con_driver;	/* for /dev/console at 4, 64 */
 
@@ -124,7 +131,7 @@ __initfunc (long tub3270_con_init(long kmem_start, long kmem_end))
 #else
 #define tub3270_con_devno console_device
 
-void __init tub3270_con_init(void)
+static void __init tub3270_con_init(void)
 {
 	tub3270_con_bcb.bc_len = 65536;
 	if (!CONSOLE_IS_3270)
@@ -133,12 +140,15 @@ void __init tub3270_con_init(void)
 		tub3270_con_bcb.bc_len);
 	register_console(&tub3270_con);
 }
+console_initcall(tub3270_con_init);
+
 #endif
 
-static kdev_t
-tub3270_con_device(struct console *conp)
+static struct tty_driver *tub3270_con_device(struct console *conp, int *index)
 {
-	return MKDEV(IBM_TTY3270_MAJOR, conp->index + 1);
+	*index = conp->index + 1;
+	extern struct tty_driver *tty3270_driver;
+	return tty3270_driver;
 }
 
 static void
@@ -147,8 +157,6 @@ tub3270_con_unblank(void)
 	/* flush everything:  panic has occurred */
 }
 
-int tub3270_con_write_deadlock_ct;
-int tub3270_con_write_deadlock_bytes;
 static void
 tub3270_con_write(struct console *conp,
 	const char *buf, unsigned int count)
@@ -211,16 +219,14 @@ cleanup_module(void)
 }
 #endif /* Not a MODULE or a MODULE */
 
-void
-tub_inc_use_count(void)
+static int
+tub3270_is_ours(s390_dev_info_t *dp)
 {
-	MOD_INC_USE_COUNT;
-}
-
-void
-tub_dec_use_count(void)
-{
-	MOD_DEC_USE_COUNT;
+	if ((dp->sid_data.cu_type & 0xfff0) == 0x3270)
+		return 1;
+	if (dp->sid_data.cu_type == 0x3174)
+		return 1;
+	return 0;
 }
 
 /*
@@ -278,7 +284,7 @@ tub3270_init(void)
 		}
 #endif /* LINUX_VERSION_CODE */
 #endif /* CONFIG_TN3270_CONSOLE */
-		if ((d.sid_data.cu_type & 0xfff0) != 0x3270)
+		if (!tub3270_is_ours(&d))
 			continue;
 
 		rc = tubmakemin(i, &d);
@@ -360,7 +366,7 @@ tub3270_movedata(bcb_t *ib, bcb_t *ob, int fromuser)
 /*
  * receive an interrupt
  */
-void
+static void
 tubint(int irq, void *ipp, struct pt_regs *prp)
 {
 	devstat_t *dsp = ipp;
@@ -374,7 +380,7 @@ tubint(int irq, void *ipp, struct pt_regs *prp)
  * Initialize array of pointers to minor structures tub_t.
  * Returns 0 or -ENOMEM.
  */
-int
+static int
 tubinitminors(void)
 {
 	tubminors = (tub_t *(*)[TUBMAXMINS])kmalloc(sizeof *tubminors,
@@ -394,7 +400,7 @@ tubinitminors(void)
  * The first looks up from minor number at context time; the second
  * looks up from irq at interrupt time.
  */
-int
+static int
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
 tubmakemin(int irq, dev_info_t *dp)
 #else
@@ -462,9 +468,8 @@ tubmakemin(int irq, s390_dev_info_t *dp)
 	}
 #endif /* CONFIG_TN3270_CONSOLE */
 
-#ifdef CONFIG_DEVFS_FS
-	fs3270_devfs_register(tubp);
-#endif
+	devfs_mk_cdev(MKDEV(IBM_FS3270_MAJOR, tubp->minor),
+			S_IFCHR|S_IRUSR|S_IWUSR, "3270/tub%.4x");
 
 	TUBUNLOCK(tubp->irq, flags);
 	return minor;
@@ -474,7 +479,7 @@ tubmakemin(int irq, s390_dev_info_t *dp)
  * Release array of pointers to minor structures tub_t, but first
  * release any storage pointed to by them.
  */
-void
+static void
 tubfiniminors(void)
 {
 	int i;
@@ -486,13 +491,15 @@ tubfiniminors(void)
 	for (i = 0; i < TUBMAXMINS; i++) {
 		tubpp = &(*tubminors)[i];
 		if ((tubp = *tubpp)) {
-#ifdef CONFIG_DEVFS_FS
-			fs3270_devfs_unregister(tubp);
-#endif
+			devfs_remove("3270/tub%.4x", tubp->devno);
 			tubdelbyirq(tubp, tubp->irq);
 			tty3270_rcl_fini(tubp);
 			kfree(tubp->tty_bcb.bc_buf);
 			tubp->tty_bcb.bc_buf = NULL;
+			if (tubp->tty_input) {
+				kfree(tubp->tty_input);
+				tubp->tty_input = NULL;
+			}
 			tubp->ttyscreen = NULL;
 			kfree(tubp);
 			*tubpp = NULL;
@@ -506,7 +513,7 @@ tubfiniminors(void)
 /*
  * tubaddbyirq() -- Add tub_t for irq lookup in tubint()
  */
-int
+static int
 tubaddbyirq(tub_t *tubp, int irq)
 {
 	int irqhi = (irq >> 8) & 255;
@@ -551,7 +558,7 @@ tubaddbyirq(tub_t *tubp, int irq)
 /*
  * tubfindbyirq(irq)
  */
-tub_t *
+static tub_t *
 tubfindbyirq(int irq)
 {
 	int irqhi = (irq >> 8) & 255;
@@ -571,7 +578,7 @@ tubfindbyirq(int irq)
 /*
  * tubdelbyirq(tub_t*, irq)
  */
-void
+static void
 tubdelbyirq(tub_t *tubp, int irq)
 {
 	int irqhi = (irq >> 8) & 255;
@@ -600,7 +607,7 @@ tubdelbyirq(tub_t *tubp, int irq)
 /*
  * tubfiniirqs() -- clean up storage in tub_t *(*(*tubirqs)[256])[256]
  */
-void
+static void
 tubfiniirqs(void)
 {
 	int i;

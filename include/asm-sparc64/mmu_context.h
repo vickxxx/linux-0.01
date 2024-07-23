@@ -1,4 +1,4 @@
-/* $Id: mmu_context.h,v 1.51 2001/08/17 04:55:09 kanoj Exp $ */
+/* $Id: mmu_context.h,v 1.54 2002/02/09 19:49:31 davem Exp $ */
 #ifndef __SPARC64_MMU_CONTEXT_H
 #define __SPARC64_MMU_CONTEXT_H
 
@@ -27,7 +27,7 @@
 #include <asm/system.h>
 #include <asm/spitfire.h>
 
-static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk, unsigned cpu)
+static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 {
 }
 
@@ -82,7 +82,7 @@ do { \
 	register unsigned long pgd_cache asm("o4"); \
 	paddr = __pa((__mm)->pgd); \
 	pgd_cache = 0UL; \
-	if ((__tsk)->thread.flags & SPARC_FLAG_32BIT) \
+	if ((__tsk)->thread_info->flags & _TIF_32BIT) \
 		pgd_cache = pgd_val((__mm)->pgd[0]) << 11UL; \
 	__asm__ __volatile__("wrpr	%%g0, 0x494, %%pstate\n\t" \
 			     "mov	%3, %%g4\n\t" \
@@ -106,7 +106,7 @@ do { \
 extern void __flush_tlb_mm(unsigned long, unsigned long);
 
 /* Switch the current MM context. */
-static inline void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm, struct task_struct *tsk, int cpu)
+static inline void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm, struct task_struct *tsk)
 {
 	unsigned long ctx_valid;
 
@@ -125,7 +125,7 @@ static inline void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm, str
 	}
 
 	{
-		unsigned long vm_mask = (1UL << cpu);
+		unsigned long vm_mask = (1UL << smp_processor_id());
 
 		/* Even if (mm == old_mm) we _must_ check
 		 * the cpu_vm_mask.  If we do not we could
@@ -140,6 +140,10 @@ static inline void switch_mm(struct mm_struct *old_mm, struct mm_struct *mm, str
 	}
 	spin_unlock(&mm->page_table_lock);
 }
+
+extern void __flush_tlb_mm(unsigned long, unsigned long);
+
+#define deactivate_mm(tsk,mm)	do { } while (0)
 
 /* Activate a new MM instance for the current task. */
 static inline void activate_mm(struct mm_struct *active_mm, struct mm_struct *mm)

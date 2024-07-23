@@ -14,12 +14,10 @@
 #include <linux/config.h>
 
 struct pt_regs;
-struct kbd_struct;
 struct tty_struct;
 
 struct sysrq_key_op {
-	void (*handler)(int, struct pt_regs *,
-			struct kbd_struct *, struct tty_struct *);
+	void (*handler)(int, struct pt_regs *, struct tty_struct *);
 	char *help_msg;
 	char *action_msg;
 };
@@ -31,19 +29,14 @@ struct sysrq_key_op {
  * are available -- else NULL's).
  */
 
-void handle_sysrq(int, struct pt_regs *,
-		struct kbd_struct *, struct tty_struct *);
-
+void handle_sysrq(int, struct pt_regs *, struct tty_struct *);
 
 /* 
  * Nonlocking version of handle sysrq, used by sysrq handlers that need to
  * call sysrq handlers
  */
 
-void __handle_sysrq_nolock(int, struct pt_regs *,
-                struct kbd_struct *, struct tty_struct *);
-
-
+void __handle_sysrq_nolock(int, struct pt_regs *, struct tty_struct *);
 
 /*
  * Sysrq registration manipulation functions
@@ -98,22 +91,4 @@ static inline int __reterr(void)
 #define register_sysrq_key(ig,nore) __reterr()
 #define unregister_sysrq_key(ig,nore) __reterr()
 
-#endif
-
-
-/* Deferred actions */
-
-extern int emergency_sync_scheduled;
-
-#define EMERG_SYNC 1
-#define EMERG_REMOUNT 2
-
-void do_emergency_sync(void);
-
-#ifdef CONFIG_MAGIC_SYSRQ
-#define CHECK_EMERGENCY_SYNC			\
-	if (emergency_sync_scheduled)		\
-		do_emergency_sync();
-#else
-#define CHECK_EMERGENCY_SYNC
 #endif

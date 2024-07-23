@@ -21,9 +21,12 @@
  *
  * These are the low level assembler for performing cache and TLB
  * functions on the arm1020.
+ *
+ *  CONFIG_CPU_ARM1020_CPU_IDLE -> nohlt
  */
 #include <linux/linkage.h>
 #include <linux/config.h>
+#include <linux/init.h>
 #include <asm/assembler.h>
 #include <asm/constants.h>
 #include <asm/procinfo.h>
@@ -40,49 +43,28 @@
 #define MAX_AREA_SIZE	32768
 
 /*
- * the cache line size of the I and D cache
+ * The size of one data cache line.
  */
-#define DCACHELINESIZE	32
-#define ICACHELINESIZE	32
+#define CACHE_DLINESIZE	32
 
 /*
- * and the page size
+ * The number of data cache segments.
  */
-#define PAGESIZE	4096
+#define CACHE_DSEGMENTS	16
+
+/*
+ * The number of lines in a cache segment.
+ */
+#define CACHE_DENTRIES	64
+
+/*
+ * This is the size at which it becomes more efficient to
+ * clean the whole cache, rather than using the individual
+ * cache line maintainence instructions.
+ */
+#define CACHE_DLIMIT	32768
 
 	.text
-
-/*
- * cpu_arm1020_data_abort()
- *
- * obtain information about current aborted instruction
- *
- * r0 = address of aborted instruction
- *
- * Returns:
- *  r0 = address of abort
- *  r1 != 0 if writing
- *  r3 = FSR
- */
-	.align	5
-ENTRY(cpu_arm1020_data_abort)
-	ldr	r1, [r0]			@ read aborted instruction
-	mrc	p15, 0, r0, c6, c0, 0		@ get FAR
-	tst	r1, r1, lsr #21 		@ C = bit 20
-	mrc	p15, 0, r3, c5, c0, 0		@ get FSR
-	sbc	r1, r1, r1			@ r1 = C - 1
-	and	r3, r3, #255
-	mov	pc, lr
-
-/*
- * cpu_arm1020_check_bugs()
- */
-ENTRY(cpu_arm1020_check_bugs)
-	mrs	ip, cpsr
-	bic	ip, ip, #F_BIT
-	msr	cpsr, ip
-	mov	pc, lr
-
 /*
  * cpu_arm1020_proc_init()
  */
@@ -94,7 +76,7 @@ ENTRY(cpu_arm1020_proc_init)
  */
 ENTRY(cpu_arm1020_proc_fin)
 	stmfd	sp!, {lr}
-	mov	ip, #F_BIT | I_BIT | SVC_MODE
+	mov	ip, #PSR_F_BIT | PSR_I_BIT | SVC_MODE
 	msr	cpsr_c, ip
 	bl	cpu_arm1020_cache_clean_invalidate_all
 	mrc	p15, 0, r0, c1, c0, 0		@ ctrl register
@@ -130,396 +112,238 @@ ENTRY(cpu_arm1020_reset)
 	.align	5
 ENTRY(cpu_arm1020_do_idle)
 	mcr	p15, 0, r0, c7, c0, 4		@ Wait for interrupt
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
 	mov	pc, lr
 
 /* ================================= CACHE ================================ */
 
-
-/*
- * cpu_arm1020_cache_clean_invalidate_all()
- *
- * clean and invalidate all cache lines
- *
- * Note:
- *  1. we should preserve r0 at all times
- */
 	.align	5
-ENTRY(cpu_arm1020_cache_clean_invalidate_all)
-	mov	r2, #1
-cpu_arm1020_cache_clean_invalidate_all_r2:
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-	mcr	p15, 0, ip, c7, c10, 4
-
-	mov	r1, #0xf			@ 16 segments
-1:	mov	r3, #0x3F			@ 64 entries
-2:	mov	ip, r3, LSL #26 		@ shift up entry
-	orr	ip, ip, r1, LSL #5		@ shift in/up index
-	mcr	p15, 0, ip, c7, c14, 2		@ Clean & Inval DCache entry
-	mcr	p15, 0, ip, c7, c10, 4		@ drain WB 
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	ip, ip
+/*
+ *	flush_user_cache_all()
+ *
+ *	Invalidate all cache entries in a particular address
+ *	space.
+ */
+ENTRY(arm1020_flush_user_cache_all)
+	/* FALLTHROUGH */
+/*
+ *	flush_kern_cache_all()
+ *
+ *	Clean and invalidate the entire cache.
+ */
+ENTRY(arm1020_flush_kern_cache_all)
+	mov	r2, #VM_EXEC
+	mov	ip, #0
+__flush_whole_cache:
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	mov	r1, #(CACHE_DSEGMENTS - 1) << 5	@ 16 segments
+1:	orr	r3, r1, #(CACHE_DENTRIES - 1) << 26 @ 64 entries
+2:	mcr	p15, 0, r3, c7, c14, 2		@ clean+invalidate D index
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	subs	r3, r3, #1 << 26
+	bcs	2b				@ entries 63 to 0
+	subs	r1, r1, #1 << 5
+	bcs	1b				@ segments 15 to 0
 #endif
-	subs	r3, r3, #1
-	cmp	r3, #0
-	bge	2b				@ entries 3F to 0
-	subs	r1, r1, #1
-	cmp	r1, #0
-	bge	1b				@ segments 7 to 0
-#endif
-        
-#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
-	teq	r2, #0
+	tst	r2, #VM_EXEC
+#ifndef CONFIG_CPU_ICACHE_DISABLE
 	mcrne	p15, 0, ip, c7, c5, 0		@ invalidate I cache
 #endif
+	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+/*
+ *	flush_user_cache_range(start, end, flags)
+ *
+ *	Invalidate a range of cache entries in the specified
+ *	address space.
+ *
+ *	- start	- start address (inclusive)
+ *	- end	- end address (exclusive)
+ *	- flags	- vm_flags for this space
+ */
+ENTRY(arm1020_flush_user_cache_range)
+	mov	ip, #0
+	sub	r3, r1, r0			@ calculate total size
+	cmp	r3, #CACHE_DLIMIT
+	bhs	__flush_whole_cache
+
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	mcr	p15, 0, ip, c7, c10, 4
+1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
 	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	ip, ip
-	mov	ip, ip
-#endif
-	mov	pc, lr
-
-/*
- * cpu_arm1020_cache_clean_invalidate_range(start, end, flags)
- *
- * clean and invalidate all cache lines associated with this area of memory
- *
- * start: Area start address
- * end:   Area end address
- * flags: nonzero for I cache as well
- */
-	.align	5
-ENTRY(cpu_arm1020_cache_clean_invalidate_range)
-	bic	r0, r0, #DCACHELINESIZE - 1
-	sub	r3, r1, r0
-	cmp	r3, #MAX_AREA_SIZE
-	bgt	cpu_arm1020_cache_clean_invalidate_all_r2
-	mcr	p15, 0, r3, c7, c10, 4
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-1:	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-#endif
-	add	r0, r0, #DCACHELINESIZE
-	cmp	r0, r1
-	blt	1b
-#endif
-
-#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
-	teq	r2, #0
-	movne	r0, #0
-	mcrne	p15, 0, r0, c7, c5, 0		@ invalidate I cache
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
-#endif
-	mov	pc, lr
-
-/*
- * cpu_arm1020_flush_ram_page(page)
- *
- * clean and invalidate all cache lines associated with this area of memory
- *
- * page: page to clean and invalidate
- */
-	.align	5
-ENTRY(cpu_arm1020_flush_ram_page)
-	mcr	p15, 0, r1, c7, c10, 4
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-	mov	r1, #PAGESIZE
-1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
-	subs	r1, r1, #2 * DCACHELINESIZE
-	bne	1b
-	mov	r0, #0
-
-#endif
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
-	mov	pc, lr
-
-/* ================================ D-CACHE =============================== */
-
-/*
- * cpu_arm1020_dcache_invalidate_range(start, end)
- *
- * throw away all D-cached data in specified region without an obligation
- * to write them back.	Note however that we must clean the D-cached entries
- * around the boundaries if the start and/or end address are not cache
- * aligned.
- *
- * start: virtual start address
- * end:   virtual end address
- */
-	.align	5
-ENTRY(cpu_arm1020_dcache_invalidate_range)
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-	/* D cache are on */
-	tst	r0, #DCACHELINESIZE - 1
-	bic	r0, r0, #DCACHELINESIZE - 1
-	mcrne	p15, 0, r0, c7, c10, 4
-	mcrne	p15, 0, r0, c7, c10, 1		@ clean D entry at start
-	mcrne	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
-	tst	r1, #DCACHELINESIZE - 1
-	mcrne	p15, 0, r1, c7, c10, 4
-	mcrne	p15, 0, r1, c7, c10, 1		@ clean D entry at end
-	mcrne	p15, 0, r1, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r1, r1
-	mov	r1, r1
-	mov	r1, r1
-#endif
-        
-1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-#endif
-	add	r0, r0, #DCACHELINESIZE
-	cmp	r0, r1
-	blt	1b
-#else
-	/* D cache off, but still drain the write buffer */
-	mcr	p15, 0, r0, c7, c10, 4		@ Drain write buffer
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
-#endif
-	mov	pc, lr
-
-/*
- * cpu_arm1020_dcache_clean_range(start, end)
- *
- * For the specified virtual address range, ensure that all caches contain
- * clean data, such that peripheral accesses to the physical RAM fetch
- * correct data.
- *
- * start: virtual start address
- * end:   virtual end address
- */
-	.align	5
-ENTRY(cpu_arm1020_dcache_clean_range)
-	bic	r0, r0, #DCACHELINESIZE - 1
-	sub	r3, r1, r0
-	cmp	r3, #MAX_AREA_SIZE
-	bgt	cpu_arm1020_cache_clean_invalidate_all_r2
-	mcr	p15, 0, r3, c7, c10, 4
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-1:	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c14, 1		@ clean and invalidate D entry
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-#endif
-	add	r0, r0, #DCACHELINESIZE
-	cmp	r0, r1
-	blt	1b
-#endif
-
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
-	mov	pc, lr
-
-/*
- * cpu_arm1020_dcache_clean_page(page)
- *
- * Cleans a single page of dcache so that if we have any future aliased
- * mappings, they will be consistent at the time that they are created.
- *
- * page: virtual address of page to clean from dcache
- *
- * Note:
- *  1. we don't need to flush the write buffer in this case.
- *  2. we don't invalidate the entries since when we write the page
- *     out to disk, the entries may get reloaded into the cache.
- */
-	.align	5
-ENTRY(cpu_arm1020_dcache_clean_page)
-	mov	r1, #PAGESIZE
-	mcr	p15, 0, r0, c7, c10, 4
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry  (drain is done by TLB fns)
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-#endif
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-#endif
-	add	r0, r0, #DCACHELINESIZE
-	subs	r1, r1, #2 * DCACHELINESIZE
-	bhi	1b
-#endif
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
-	mov	pc, lr
-
-/*
- * cpu_arm1020_dcache_clean_entry(addr)
- *
- * Clean the specified entry of any caches such that the MMU
- * translation fetches will obtain correct data.
- *
- * addr: cache-unaligned virtual address
- */
-	.align	5
-ENTRY(cpu_arm1020_dcache_clean_entry)
-	mov	r1, #0
-	mcr	p15, 0, r1, c7, c10, 4
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-	mcr	p15, 0, r0, c7, c10, 1		@ clean single D entry
-	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
-#endif
-#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
-	mcr	p15, 0, r1, c7, c5, 1		@ invalidate I entry
-#endif
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r1, r1
-	mov	r1, r1
-#endif
-	mov	pc, lr
-
-/* ================================ I-CACHE =============================== */
-
-/*
- * cpu_arm1020_icache_invalidate_range(start, end)
- *
- * invalidate a range of virtual addresses from the Icache
- *
- * start: virtual start address
- * end:   virtual end address
- */
-	.align	5
-ENTRY(cpu_arm1020_icache_invalidate_range)
-1:	mcr	p15, 0, r0, c7, c10, 4
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-	mcr	p15, 0, r0, c7, c10, 1		@ Clean D entry
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	add	r0, r0, #DCACHELINESIZE
-	mcr	p15, 0, r0, c7, c10, 1		@ Clean D entry
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#endif
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-#endif
-	add	r0, r0, #DCACHELINESIZE
+	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
 	blo	1b
-ENTRY(cpu_arm1020_icache_invalidate_page)
-	mcr	p15, 0, r0, c7, c5, 0		@ invalidate I cache
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
 #endif
-	mov	pc, lr
-
-/* ================================== TLB ================================= */
-
-/*
- * cpu_arm1020_tlb_invalidate_all()
- *
- * Invalidate all TLB entries
- */
-	.align	5
-ENTRY(cpu_arm1020_tlb_invalidate_all)
-	mov	r0, #0
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-	mcr	p15, 0, r0, c8, c7, 0		@ invalidate I & D tlbs
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
+	tst	r2, #VM_EXEC
+#ifndef CONFIG_CPU_ICACHE_DISABLE
+	mcrne	p15, 0, ip, c7, c5, 0		@ invalidate I cache
 #endif
+	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm1020_tlb_invalidate_range(start, end)
+ *	coherent_kern_range(start, end)
  *
- * invalidate TLB entries covering the specified range
+ *	Ensure coherency between the Icache and the Dcache in the
+ *	region described by start.  If you have non-snooping
+ *	Harvard caches, you need to implement this function.
  *
- * start: range start address
- * end:   range end address
+ *	- start	- virtual start address
+ *	- end	- virtual end address
  */
-	.align	5
-ENTRY(cpu_arm1020_tlb_invalidate_range)
-	mov	r3, #0
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-1:	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
-	mcr	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
-	add	r0, r0, #PAGESIZE
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
+ENTRY(arm1020_coherent_kern_range)
+	mov	ip, #0
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+	mcr	p15, 0, ip, c7, c10, 4
+1:
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
 #endif
+#ifndef CONFIG_CPU_ICACHE_DISABLE
+	mcr	p15, 0, r0, c7, c5, 1		@ invalidate I entry
+#endif
+	add	r0, r0, #CACHE_DLINESIZE
 	cmp	r0, r1
-	blt	1b
+	blo	1b
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
 	mov	pc, lr
 
 /*
- * cpu_arm1020_tlb_invalidate_page(page, flags)
+ *	flush_kern_dcache_page(void *page)
  *
- * invalidate the TLB entries for the specified page.
+ *	Ensure no D cache aliasing occurs, either with itself or
+ *	the I cache
  *
- * page:  page to invalidate
- * flags: non-zero if we include the I TLB
+ *	- page	- page aligned address
  */
-	.align	5
-ENTRY(cpu_arm1020_tlb_invalidate_page)
-	mov	r3, #0
-	mcr	p15, 0, r3, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
+ENTRY(arm1020_flush_kern_dcache_page)
+	mov	ip, #0
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	add	r1, r0, #PAGE_SZ
+1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
 #endif
-	teq	r1, #0
-	mcr	p15, 0, r0, c8, c6, 1		@ invalidate D TLB entry
-	mcrne	p15, 0, r0, c8, c5, 1		@ invalidate I TLB entry
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+/*
+ *	dma_inv_range(start, end)
+ *
+ *	Invalidate (discard) the specified virtual address range.
+ *	May not write back any entries.  If 'start' or 'end'
+ *	are not cache line aligned, those lines must be written
+ *	back.
+ *
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ *
+ * (same as v4wb)
+ */
+ENTRY(arm1020_dma_inv_range)
+	mov	ip, #0
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	tst	r0, #CACHE_DLINESIZE - 1
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+	mcrne	p15, 0, ip, c7, c10, 4
+	mcrne	p15, 0, r0, c7, c10, 1		@ clean D entry
+	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
+	tst	r1, #CACHE_DLINESIZE - 1
+	mcrne	p15, 0, ip, c7, c10, 4
+	mcrne	p15, 0, r1, c7, c10, 1		@ clean D entry
+	mcrne	p15, 0, ip, c7, c10, 4		@ drain WB
+1:	mcr	p15, 0, r0, c7, c6, 1		@ invalidate D entry
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
+#endif
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+/*
+ *	dma_clean_range(start, end)
+ *
+ *	Clean the specified virtual address range.
+ *
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ *
+ * (same as v4wb)
+ */
+ENTRY(arm1020_dma_clean_range)
+	mov	ip, #0
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
+#endif
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+/*
+ *	dma_flush_range(start, end)
+ *
+ *	Clean and invalidate the specified virtual address range.
+ *
+ *	- start	- virtual start address
+ *	- end	- virtual end address
+ */
+ENTRY(arm1020_dma_flush_range)
+	mov	ip, #0
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	bic	r0, r0, #CACHE_DLINESIZE - 1
+	mcr	p15, 0, ip, c7, c10, 4
+1:	mcr	p15, 0, r0, c7, c14, 1		@ clean+invalidate D entry
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	add	r0, r0, #CACHE_DLINESIZE
+	cmp	r0, r1
+	blo	1b
+#endif
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	mov	pc, lr
+
+ENTRY(arm1020_cache_fns)
+	.long	arm1020_flush_kern_cache_all
+	.long	arm1020_flush_user_cache_all
+	.long	arm1020_flush_user_cache_range
+	.long	arm1020_coherent_kern_range
+	.long	arm1020_flush_kern_dcache_page
+	.long	arm1020_dma_inv_range
+	.long	arm1020_dma_clean_range
+	.long	arm1020_dma_flush_range
+
+	.align	5
+ENTRY(cpu_arm1020_dcache_clean_area)
+#ifndef CONFIG_CPU_DCACHE_DISABLE
+	mov	ip, #0
+1:	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
+	mcr	p15, 0, ip, c7, c10, 4		@ drain WB
+	add	r0, r0, #CACHE_DLINESIZE
+	subs	r1, r1, #CACHE_DLINESIZE
+	bhi	1b
 #endif
 	mov	pc, lr
 
 /* =============================== PageTable ============================== */
 
 /*
- * cpu_arm1020_set_pgd(pgd)
+ * cpu_arm1020_switch_mm(pgd)
  *
  * Set the translation base pointer to be as described by pgd.
  *
  * pgd: new page tables
  */
 	.align	5
-ENTRY(cpu_arm1020_set_pgd)
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
+ENTRY(cpu_arm1020_switch_mm)
+#ifndef CONFIG_CPU_DCACHE_DISABLE
 	mcr	p15, 0, r3, c7, c10, 4
 	mov	r1, #0xF			@ 16 segments
 1:	mov	r3, #0x3F			@ 64 entries
@@ -528,9 +352,6 @@ ENTRY(cpu_arm1020_set_pgd)
 	mcr	p15, 0, ip, c7, c14, 2		@ Clean & Inval DCache entry
 	mov	ip, #0
 	mcr	p15, 0, ip, c7, c10, 4
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	ip, ip
-#endif
 	subs	r3, r3, #1
 	cmp	r3, #0
 	bge	2b				@ entries 3F to 0
@@ -540,46 +361,14 @@ ENTRY(cpu_arm1020_set_pgd)
 
 #endif
 	mov	r1, #0
-#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
+#ifndef CONFIG_CPU_ICACHE_DISABLE
 	mcr	p15, 0, r1, c7, c5, 0		@ invalidate I cache
 #endif
 	mcr	p15, 0, r1, c7, c10, 4		@ drain WB
 	mcr	p15, 0, r0, c2, c0, 0		@ load page table pointer
 	mcr	p15, 0, r1, c8, c7, 0		@ invalidate I & D TLBs
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	ip, ip
-	mov	ip, ip
-#endif
 	mov	pc, lr
         
-/*
- * cpu_arm1020_set_pmd(pmdp, pmd)
- *
- * Set a level 1 translation table entry, and clean it out of
- * any caches such that the MMUs can load it correctly.
- *
- * pmdp: pointer to PMD entry
- * pmd:  PMD value to store
- */
-	.align	5
-ENTRY(cpu_arm1020_set_pmd)
-#ifdef CONFIG_CPU_ARM1020_FORCE_WRITE_THROUGH
-	eor	r2, r1, #0x0a			@ C & Section
-	tst	r2, #0x0b
-	biceq	r1, r1, #4			@ clear bufferable bit
-#endif
-	str	r1, [r0]
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
-	mcr	p15, 0, r0, c7, c10, 4
-	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry  (drain is done by TLB fns)
-#endif
-	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
-	mov	pc, lr
-
 /*
  * cpu_arm1020_set_pte(ptep, pte)
  *
@@ -587,7 +376,7 @@ ENTRY(cpu_arm1020_set_pmd)
  */
 	.align	5
 ENTRY(cpu_arm1020_set_pte)
-	str	r1, [r0], #-1024		@ linux version
+	str	r1, [r0], #-2048		@ linux version
 
 	eor	r1, r1, #LPTE_PRESENT | LPTE_YOUNG | LPTE_WRITE | LPTE_DIRTY
 
@@ -595,7 +384,7 @@ ENTRY(cpu_arm1020_set_pte)
 	bic	r2, r2, #3
 	orr	r2, r2, #HPTE_TYPE_SMALL
 
-	tst	r1, #LPTE_USER | LPTE_EXEC	@ User or Exec?
+	tst	r1, #LPTE_USER			@ User?
 	orrne	r2, r2, #HPTE_AP_READ
 
 	tst	r1, #LPTE_WRITE | LPTE_DIRTY	@ Write and Dirty?
@@ -604,53 +393,44 @@ ENTRY(cpu_arm1020_set_pte)
 	tst	r1, #LPTE_PRESENT | LPTE_YOUNG	@ Present and Young?
 	movne	r2, #0
 
-#ifdef CONFIG_CPU_ARM1020_FORCE_WRITE_THROUGH
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	eor	r3, r1, #0x0a			@ C & small page?
 	tst	r3, #0x0b
 	biceq	r2, r2, #4
 #endif
 	str	r2, [r0]			@ hardware version
 	mov	r0, r0
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
+#ifndef CONFIG_CPU_DCACHE_DISABLE
 	mcr	p15, 0, r0, c7, c10, 4
 	mcr	p15, 0, r0, c7, c10, 1		@ clean D entry
 #endif
 	mcr	p15, 0, r0, c7, c10, 4		@ drain WB
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
-	mov	r0, r0
-	mov	r0, r0
-#endif
 	mov	pc, lr
 
 
-cpu_manu_name:
-	.asciz	"ARM/VLSI"
 ENTRY(cpu_arm1020_name)
 	.ascii	"Arm1020"
-#if defined(CONFIG_CPU_ARM1020_CPU_IDLE)
-	.ascii	"s"
-#endif
-#if defined(CONFIG_CPU_ARM1020_I_CACHE_ON)
+#ifndef CONFIG_CPU_ICACHE_DISABLE
 	.ascii	"i"
 #endif
-#if defined(CONFIG_CPU_ARM1020_D_CACHE_ON)
+#ifndef CONFIG_CPU_DCACHE_DISABLE
 	.ascii	"d"
-#if defined(CONFIG_CPU_ARM1020_FORCE_WRITE_THROUGH)
+#ifdef CONFIG_CPU_DCACHE_WRITETHROUGH
 	.ascii	"(wt)"
 #else
 	.ascii	"(wb)"
 #endif
 #endif
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
+#ifndef CONFIG_CPU_BPREDICT_DISABLE
 	.ascii	"B"
 #endif
-#ifdef CONFIG_CPU_ARM1020_ROUND_ROBIN
+#ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
 	.ascii	"RR"
 #endif
 	.ascii	"\0"
 	.align
 
-	.section ".text.init", #alloc, #execinstr
+	__INIT
 
 __arm1020_setup:
 	mov	r0, #0
@@ -674,16 +454,16 @@ __arm1020_setup:
 	orr	r0, r0, #0x0031 		@ ..........DP...M
 	orr	r0, r0, #0x0100 		@ .......S........
 
-#ifdef CONFIG_CPU_ARM1020_ROUND_ROBIN
+#ifdef CONFIG_CPU_CACHE_ROUND_ROBIN
 	orr	r0, r0, #0x4000 		@ .R..............
 #endif
-#ifdef CONFIG_CPU_ARM1020_BRANCH_PREDICTION
+#ifndef CONFIG_CPU_BPREDICT_DISABLE
 	orr	r0, r0, #0x0800 		@ ....Z...........
 #endif
-#ifdef CONFIG_CPU_ARM1020_D_CACHE_ON
+#ifndef CONFIG_CPU_DCACHE_DISABLE
 	orr	r0, r0, #0x0004 		@ Enable D cache
 #endif
-#ifdef CONFIG_CPU_ARM1020_I_CACHE_ON
+#ifndef CONFIG_CPU_ICACHE_DISABLE
 	orr	r0, r0, #0x1000 		@ I Cache on
 #endif
 	mov	pc, lr
@@ -696,48 +476,20 @@ __arm1020_setup:
  */
 	.type	arm1020_processor_functions, #object
 arm1020_processor_functions:
-	.word	cpu_arm1020_data_abort
-	.word	cpu_arm1020_check_bugs
+	.word	v4t_early_abort
 	.word	cpu_arm1020_proc_init
 	.word	cpu_arm1020_proc_fin
 	.word	cpu_arm1020_reset
 	.word	cpu_arm1020_do_idle
-
-	/* cache */
-	.word	cpu_arm1020_cache_clean_invalidate_all
-	.word	cpu_arm1020_cache_clean_invalidate_range
-	.word	cpu_arm1020_flush_ram_page
-
-	/* dcache */
-	.word	cpu_arm1020_dcache_invalidate_range
-	.word	cpu_arm1020_dcache_clean_range
-	.word	cpu_arm1020_dcache_clean_page
-	.word	cpu_arm1020_dcache_clean_entry
-
-	/* icache */
-	.word	cpu_arm1020_icache_invalidate_range
-	.word	cpu_arm1020_icache_invalidate_page
-
-	/* tlb */
-	.word	cpu_arm1020_tlb_invalidate_all
-	.word	cpu_arm1020_tlb_invalidate_range
-	.word	cpu_arm1020_tlb_invalidate_page
-
-	/* pgtable */
-	.word	cpu_arm1020_set_pgd
-	.word	cpu_arm1020_set_pmd
+	.word	cpu_arm1020_dcache_clean_area
+	.word	cpu_arm1020_switch_mm
 	.word	cpu_arm1020_set_pte
-	.size	arm1020_processor_functions, . - arm1020_processor_functions
 
-	.type	cpu_arm1020_info, #object
-cpu_arm1020_info:
-	.long	cpu_manu_name
-	.long	cpu_arm1020_name
-	.size	cpu_arm1020_info, . - cpu_arm1020_info
+	.size	arm1020_processor_functions, . - arm1020_processor_functions
 
 	.type	cpu_arch_name, #object
 cpu_arch_name:
-	.asciz	"armv4"
+	.asciz	"armv4t"
 	.size	cpu_arch_name, . - cpu_arch_name
 
 	.type	cpu_elf_name, #object
@@ -756,7 +508,10 @@ __arm1020_proc_info:
 	b	__arm1020_setup
 	.long	cpu_arch_name
 	.long	cpu_elf_name
-	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_26BIT
-	.long	cpu_arm1020_info
+	.long	HWCAP_SWP | HWCAP_HALF | HWCAP_THUMB
+	.long	cpu_arm1020_name
 	.long	arm1020_processor_functions
+	.long	v4wbi_tlb_fns
+	.long	v4wb_user_fns
+	.long	arm1020_cache_fns
 	.size	__arm1020_proc_info, . - __arm1020_proc_info

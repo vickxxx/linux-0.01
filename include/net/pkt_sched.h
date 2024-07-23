@@ -8,6 +8,7 @@
 #define PSCHED_CLOCK_SOURCE	PSCHED_JIFFIES
 
 #include <linux/config.h>
+#include <linux/types.h>
 #include <linux/pkt_sched.h>
 #include <net/pkt_cls.h>
 
@@ -48,6 +49,8 @@ struct Qdisc_class_ops
 	int			(*dump)(struct Qdisc *, unsigned long, struct sk_buff *skb, struct tcmsg*);
 };
 
+struct module;
+
 struct Qdisc_ops
 {
 	struct Qdisc_ops	*next;
@@ -58,7 +61,7 @@ struct Qdisc_ops
 	int 			(*enqueue)(struct sk_buff *, struct Qdisc *);
 	struct sk_buff *	(*dequeue)(struct Qdisc *);
 	int 			(*requeue)(struct sk_buff *, struct Qdisc *);
-	int			(*drop)(struct Qdisc *);
+	unsigned int		(*drop)(struct Qdisc *);
 
 	int			(*init)(struct Qdisc *, struct rtattr *arg);
 	void			(*reset)(struct Qdisc *);
@@ -66,6 +69,8 @@ struct Qdisc_ops
 	int			(*change)(struct Qdisc *, struct rtattr *arg);
 
 	int			(*dump)(struct Qdisc *, struct sk_buff *);
+
+	struct module		*owner;
 };
 
 extern rwlock_t qdisc_tree_lock;
@@ -221,7 +226,7 @@ extern psched_time_t	psched_time_base;
 
 #define PSCHED_EXPORTLIST_2
 
-#if ~0UL == 0xFFFFFFFF
+#if BITS_PER_LONG <= 32
 
 #define PSCHED_WATCHER unsigned long
 
@@ -358,8 +363,8 @@ extern int psched_tod_diff(int delta_sec, int bound);
 #define PSCHED_TDIFF(tv1, tv2) (long)((tv1) - (tv2))
 #define PSCHED_TDIFF_SAFE(tv1, tv2, bound, guard) \
 ({ \
-	   long __delta = (tv1) - (tv2); \
-	   if ( __delta > (bound)) {  __delta = (bound); guard; } \
+	   long long __delta = (tv1) - (tv2); \
+	   if ( __delta > (long long)(bound)) {  __delta = (bound); guard; } \
 	   __delta; \
 })
 

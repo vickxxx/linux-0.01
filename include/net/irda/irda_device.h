@@ -11,6 +11,7 @@
  * 
  *     Copyright (c) 1999-2000 Dag Brattli, All Rights Reserved.
  *     Copyright (c) 1998 Thomas Davis, <ratbert@radiks.net>,
+ *     Copyright (c) 2000-2002 Jean Tourrilhes <jt@hpl.hp.com>
  *
  *     This program is free software; you can redistribute it and/or 
  *     modify it under the terms of the GNU General Public License as 
@@ -29,18 +30,27 @@
  *     
  ********************************************************************/
 
+/*
+ * This header contains all the IrDA definitions a driver really
+ * needs, and therefore the driver should not need to include
+ * any other IrDA headers - Jean II
+ */
+
 #ifndef IRDA_DEVICE_H
 #define IRDA_DEVICE_H
 
 #include <linux/tty.h>
 #include <linux/netdevice.h>
 #include <linux/spinlock.h>
+#include <linux/skbuff.h>		/* struct sk_buff */
 #include <linux/irda.h>
 
 #include <net/irda/irda.h>
-#include <net/irda/qos.h>
-#include <net/irda/irqueue.h>
-#include <net/irda/irlap_frame.h>
+#include <net/irda/qos.h>		/* struct qos_info */
+#include <net/irda/irqueue.h>		/* irda_queue_t */
+
+/* A few forward declarations (to make compiler happy) */
+struct irlap_cb;
 
 /* Some non-standard interface flags (should not conflict with any in if.h) */
 #define IFF_SIR 	0x0001 /* Supports SIR speeds */
@@ -120,6 +130,22 @@ struct dongle_reg {
 	int  (*change_speed)(struct irda_task *task);
 };
 
+/* 
+ * Per-packet information we need to hide inside sk_buff 
+ * (must not exceed 48 bytes, check with struct sk_buff) 
+ */
+struct irda_skb_cb {
+	magic_t magic;       /* Be sure that we can trust the information */
+	__u32   next_speed;  /* The Speed to be set *after* this frame */
+	__u16   mtt;         /* Minimum turn around time */
+	__u16   xbofs;       /* Number of xbofs required, used by SIR mode */
+	__u16   next_xbofs;  /* Number of xbofs required *after* this frame */
+	void    *context;    /* May be used by drivers */
+	void    (*destructor)(struct sk_buff *skb); /* Used for flow control */
+	__u16   xbofs_delay; /* Number of xbofs used for generating the mtt */
+	__u8    line;        /* Used by IrCOMM in IrLPT mode */
+};
+
 /* Chip specific info */
 typedef struct {
 	int cfg_base;         /* Config register IO base */
@@ -147,16 +173,44 @@ typedef struct {
 
 	__u8 *head;	      /* start of buffer */
 	__u8 *data;	      /* start of data in buffer */
-	__u8 *tail;           /* end of data in buffer */
 
-	int len;	      /* length of data */
-	int truesize;	      /* total size of buffer */
+	int len;	      /* current length of data */
+	int truesize;	      /* total allocated size of buffer */
 	__u16 fcs;
+
+	struct sk_buff *skb;	/* ZeroCopy Rx in async_unwrap_char() */
 } iobuff_t;
+
+/* Maximum SIR frame (skb) that we expect to receive *unwrapped*.
+ * Max LAP MTU (I field) is 2048 bytes max (IrLAP 1.1, chapt 6.6.5, p40).
+ * Max LAP header is 2 bytes (for now).
+ * Max CRC is 2 bytes at SIR, 4 bytes at FIR. 
+ * Need 1 byte for skb_reserve() to align IP header for IrLAN.
+ * Add a few extra bytes just to be safe (buffer is power of two anyway)
+ * Jean II */
+#define IRDA_SKB_MAX_MTU	2064
+/* Maximum SIR frame that we expect to send, wrapped (i.e. with XBOFS
+ * and escaped characters on top of above). */
+#define IRDA_SIR_MAX_FRAME	4269
+
+/* The SIR unwrapper async_unwrap_char() will use a Rx-copy-break mechanism
+ * when using the optional ZeroCopy Rx, where only small frames are memcpy
+ * to a smaller skb to save memory. This is the threshold under which copy
+ * will happen (and over which it won't happen).
+ * Some FIR drivers may use this #define as well...
+ * This is the same value as various Ethernet drivers. - Jean II */
+#define IRDA_RX_COPY_THRESHOLD  256
 
 /* Function prototypes */
 int  irda_device_init(void);
 void irda_device_cleanup(void);
+
+/* IrLAP entry points used by the drivers.
+ * We declare them here to avoid the driver pulling a whole bunch stack
+ * headers they don't really need - Jean II */
+struct irlap_cb *irlap_open(struct net_device *dev, struct qos_info *qos,
+			    char *	hw_name);
+void irlap_close(struct irlap_cb *self);
 
 /* Interface to be uses by IrLAP */
 void irda_device_set_media_busy(struct net_device *dev, int status);

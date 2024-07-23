@@ -14,7 +14,6 @@
 #include <linux/module.h>
 
 #include <asm/system.h>
-#include <asm/segment.h>
 #include <asm/io.h>
 
 #include <linux/types.h>
@@ -300,9 +299,13 @@ static int __init h8_init(void)
         }
         printk(KERN_INFO "H8 at 0x%x IRQ %d\n", h8_base, h8_irq);
 
-        create_proc_info_entry("driver/h8", 0, NULL, h8_get_info);
+        if (!request_region(h8_base, 8, "h8"))
+	 {
+		free_irq(h8_irq, NULL);
+		return -EIO;
+	 }
 
-        request_region(h8_base, 8, "h8");
+        create_proc_info_entry("driver/h8", 0, NULL, h8_get_info);
 
 	h8_alloc_queues();
 
@@ -1178,4 +1181,3 @@ static void h8_clear_event_mask(int mask)
 }
 
 MODULE_LICENSE("GPL");
-EXPORT_NO_SYMBOLS;

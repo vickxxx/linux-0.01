@@ -27,7 +27,7 @@
  * SUCH DAMAGE.
  */
 
-#ident "$Id: vxfs_super.c,v 1.26 2001/08/07 16:13:30 hch Exp hch $"
+#ident "$Id: vxfs_super.c,v 1.29 2002/01/02 22:02:12 hch Exp hch $"
 
 /*
  * Veritas filesystem driver - superblock related routines.
@@ -37,9 +37,11 @@
 
 #include <linux/blkdev.h>
 #include <linux/fs.h>
+#include <linux/buffer_head.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/stat.h>
+#include <linux/vfs.h>
 
 #include "vxfs.h"
 #include "vxfs_extern.h"
@@ -53,7 +55,7 @@ MODULE_LICENSE("Dual BSD/GPL");
 
 
 static void		vxfs_put_super(struct super_block *);
-static int		vxfs_statfs(struct super_block *, struct statfs *);
+static int		vxfs_statfs(struct super_block *, struct kstatfs *);
 
 static struct super_operations vxfs_super_ops = {
 	.read_inode =		vxfs_read_inode,
@@ -61,19 +63,6 @@ static struct super_operations vxfs_super_ops = {
 	.put_super =		vxfs_put_super,
 	.statfs =		vxfs_statfs,
 };
-
-static __inline__ u_long
-vxfs_validate_bsize(kdev_t dev)
-{
-	u_long			bsize;
-	
-	bsize = get_hardsect_size(dev);
-	if (bsize < BLOCK_SIZE)
-		bsize = BLOCK_SIZE;
-
-	set_blocksize(dev, bsize);
-	return (bsize);
-}
 
 /**
  * vxfs_put_super - free superblock resources
@@ -110,13 +99,13 @@ vxfs_put_super(struct super_block *sbp)
  *   Zero.
  *
  * Locking:
- *   We are under bkl and @sbp->s_lock.
+ *   No locks held.
  *
  * Notes:
  *   This is everything but complete...
  */
 static int
-vxfs_statfs(struct super_block *sbp, struct statfs *bufp)
+vxfs_statfs(struct super_block *sbp, struct kstatfs *bufp)
 {
 	struct vxfs_sb_info		*infp = VXFS_SBI(sbp);
 
@@ -148,26 +137,28 @@ vxfs_statfs(struct super_block *sbp, struct statfs *bufp)
  * Locking:
  *   We are under the bkl and @sbp->s_lock.
  */
-static struct super_block *
-vxfs_read_super(struct super_block *sbp, void *dp, int silent)
+static int vxfs_fill_super(struct super_block *sbp, void *dp, int silent)
 {
 	struct vxfs_sb_info	*infp;
 	struct vxfs_sb		*rsbp;
-	struct buffer_head	*bp;
+	struct buffer_head	*bp = NULL;
 	u_long			bsize;
-	kdev_t			dev = sbp->s_dev;
 
-	infp = kmalloc(sizeof(struct vxfs_sb_info), GFP_KERNEL);
+	infp = kmalloc(sizeof(*infp), GFP_KERNEL);
 	if (!infp) {
 		printk(KERN_WARNING "vxfs: unable to allocate incore superblock\n");
-		return NULL;
+		return -ENOMEM;
 	}
-	memset(infp, 0, sizeof(struct vxfs_sb_info));
+	memset(infp, 0, sizeof(*infp));
 
-	bsize = vxfs_validate_bsize(dev);
+	bsize = sb_min_blocksize(sbp, BLOCK_SIZE);
+	if (!bsize) {
+		printk(KERN_WARNING "vxfs: unable to set blocksize\n");
+		goto out;
+	}
 
-	bp = bread(dev, 1, bsize);
-	if (!bp) {
+	bp = sb_bread(sbp, 1);
+	if (!bp || !buffer_mapped(bp)) {
 		if (!silent) {
 			printk(KERN_WARNING
 				"vxfs: unable to read disk superblock\n");
@@ -194,31 +185,15 @@ vxfs_read_super(struct super_block *sbp, void *dp, int silent)
 #endif
 
 	sbp->s_magic = rsbp->vs_magic;
-	sbp->s_blocksize = rsbp->vs_bsize;
-	sbp->u.generic_sbp = (void *)infp;
+	sbp->s_fs_info = (void *)infp;
 
 	infp->vsi_raw = rsbp;
 	infp->vsi_bp = bp;
 	infp->vsi_oltext = rsbp->vs_oltext[0];
 	infp->vsi_oltsize = rsbp->vs_oltsize;
-	
 
-	switch (rsbp->vs_bsize) {
-	case 1024:
-		sbp->s_blocksize_bits = 10;
-		break;
-	case 2048:
-		sbp->s_blocksize_bits = 11;
-		break;
-	case 4096:
-		sbp->s_blocksize_bits = 12;
-		break;
-	default:
-		if (!silent) {
-			printk(KERN_WARNING
-				"vxfs: unsupported blocksise: %d\n",
-				rsbp->vs_bsize);
-		}
+	if (!sb_set_blocksize(sbp, rsbp->vs_bsize)) {
+		printk(KERN_WARNING "vxfs: unable to set final block size\n");
 		goto out;
 	}
 
@@ -239,7 +214,7 @@ vxfs_read_super(struct super_block *sbp, void *dp, int silent)
 		goto out_free_ilist;
 	}
 
-	return (sbp);
+	return 0;
 	
 out_free_ilist:
 	vxfs_put_fake_inode(infp->vsi_fship);
@@ -248,19 +223,32 @@ out_free_ilist:
 out:
 	brelse(bp);
 	kfree(infp);
-	return NULL;
+	return -EINVAL;
 }
 
 /*
  * The usual module blurb.
  */
-static DECLARE_FSTYPE_DEV(vxfs_fs_type, "vxfs", vxfs_read_super);
+static struct super_block *vxfs_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_bdev(fs_type, flags, dev_name, data, vxfs_fill_super);
+}
+
+static struct file_system_type vxfs_fs_type = {
+	.owner		= THIS_MODULE,
+	.name		= "vxfs",
+	.get_sb		= vxfs_get_sb,
+	.kill_sb	= kill_block_super,
+	.fs_flags	= FS_REQUIRES_DEV,
+};
 
 static int __init
 vxfs_init(void)
 {
 	vxfs_inode_cachep = kmem_cache_create("vxfs_inode",
-			sizeof(struct vxfs_inode_info), 0, 0, NULL, NULL);
+			sizeof(struct vxfs_inode_info), 0, 
+			SLAB_RECLAIM_ACCOUNT, NULL, NULL);
 	if (vxfs_inode_cachep)
 		return (register_filesystem(&vxfs_fs_type));
 	return -ENOMEM;

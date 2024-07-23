@@ -10,196 +10,82 @@
 
 #ifdef __KERNEL__
 
-#include <linux/kernel.h>
+#include <linux/config.h>
 #include <linux/list.h>
 #include <linux/stddef.h>
 #include <linux/spinlock.h>
-#include <linux/config.h>
+#include <asm/system.h>
 
-#include <asm/page.h>
-#include <asm/processor.h>
-
-/*
- * Debug control.  Slow but useful.
- */
-#if defined(CONFIG_DEBUG_WAITQ)
-#define WAITQUEUE_DEBUG 1
-#else
-#define WAITQUEUE_DEBUG 0
-#endif
+typedef struct __wait_queue wait_queue_t;
+typedef int (*wait_queue_func_t)(wait_queue_t *wait, unsigned mode, int sync);
+extern int default_wake_function(wait_queue_t *wait, unsigned mode, int sync);
 
 struct __wait_queue {
 	unsigned int flags;
 #define WQ_FLAG_EXCLUSIVE	0x01
 	struct task_struct * task;
+	wait_queue_func_t func;
 	struct list_head task_list;
-#if WAITQUEUE_DEBUG
-	long __magic;
-	long __waker;
-#endif
 };
-typedef struct __wait_queue wait_queue_t;
-
-/*
- * 'dual' spinlock architecture. Can be switched between spinlock_t and
- * rwlock_t locks via changing this define. Since waitqueues are quite
- * decoupled in the new architecture, lightweight 'simple' spinlocks give
- * us slightly better latencies and smaller waitqueue structure size.
- */
-#define USE_RW_WAIT_QUEUE_SPINLOCK 0
-
-#if USE_RW_WAIT_QUEUE_SPINLOCK
-# define wq_lock_t rwlock_t
-# define WAITQUEUE_RW_LOCK_UNLOCKED RW_LOCK_UNLOCKED
-
-# define wq_read_lock read_lock
-# define wq_read_lock_irqsave read_lock_irqsave
-# define wq_read_unlock_irqrestore read_unlock_irqrestore
-# define wq_read_unlock read_unlock
-# define wq_write_lock_irq write_lock_irq
-# define wq_write_lock_irqsave write_lock_irqsave
-# define wq_write_unlock_irqrestore write_unlock_irqrestore
-# define wq_write_unlock write_unlock
-#else
-# define wq_lock_t spinlock_t
-# define WAITQUEUE_RW_LOCK_UNLOCKED SPIN_LOCK_UNLOCKED
-
-# define wq_read_lock spin_lock
-# define wq_read_lock_irqsave spin_lock_irqsave
-# define wq_read_unlock spin_unlock
-# define wq_read_unlock_irqrestore spin_unlock_irqrestore
-# define wq_write_lock_irq spin_lock_irq
-# define wq_write_lock_irqsave spin_lock_irqsave
-# define wq_write_unlock_irqrestore spin_unlock_irqrestore
-# define wq_write_unlock spin_unlock
-#endif
 
 struct __wait_queue_head {
-	wq_lock_t lock;
+	spinlock_t lock;
 	struct list_head task_list;
-#if WAITQUEUE_DEBUG
-	long __magic;
-	long __creator;
-#endif
 };
 typedef struct __wait_queue_head wait_queue_head_t;
 
 
 /*
- * Debugging macros.  We eschew `do { } while (0)' because gcc can generate
- * spurious .aligns.
- */
-#if WAITQUEUE_DEBUG
-#define WQ_BUG()	BUG()
-#define CHECK_MAGIC(x)							\
-	do {									\
-		if ((x) != (long)&(x)) {					\
-			printk("bad magic %lx (should be %lx), ",		\
-				(long)x, (long)&(x));				\
-			WQ_BUG();						\
-		}								\
-	} while (0)
-#define CHECK_MAGIC_WQHEAD(x)							\
-	do {									\
-		if ((x)->__magic != (long)&((x)->__magic)) {			\
-			printk("bad magic %lx (should be %lx, creator %lx), ",	\
-			(x)->__magic, (long)&((x)->__magic), (x)->__creator);	\
-			WQ_BUG();						\
-		}								\
-	} while (0)
-#define WQ_CHECK_LIST_HEAD(list) 						\
-	do {									\
-		if (!(list)->next || !(list)->prev)				\
-			WQ_BUG();						\
-	} while(0)
-#define WQ_NOTE_WAKER(tsk)							\
-	do {									\
-		(tsk)->__waker = (long)__builtin_return_address(0);		\
-	} while (0)
-#else
-#define WQ_BUG()
-#define CHECK_MAGIC(x)
-#define CHECK_MAGIC_WQHEAD(x)
-#define WQ_CHECK_LIST_HEAD(list)
-#define WQ_NOTE_WAKER(tsk)
-#endif
-
-/*
  * Macros for declaration and initialisaton of the datatypes
  */
 
-#if WAITQUEUE_DEBUG
-# define __WAITQUEUE_DEBUG_INIT(name) (long)&(name).__magic, 0
-# define __WAITQUEUE_HEAD_DEBUG_INIT(name) (long)&(name).__magic, (long)&(name).__magic
-#else
-# define __WAITQUEUE_DEBUG_INIT(name)
-# define __WAITQUEUE_HEAD_DEBUG_INIT(name)
-#endif
-
 #define __WAITQUEUE_INITIALIZER(name, tsk) {				\
-	task:		tsk,						\
-	task_list:	{ NULL, NULL },					\
-			 __WAITQUEUE_DEBUG_INIT(name)}
+	.task		= tsk,						\
+	.func		= default_wake_function,			\
+	.task_list	= { NULL, NULL } }
 
 #define DECLARE_WAITQUEUE(name, tsk)					\
 	wait_queue_t name = __WAITQUEUE_INITIALIZER(name, tsk)
 
 #define __WAIT_QUEUE_HEAD_INITIALIZER(name) {				\
-	lock:		WAITQUEUE_RW_LOCK_UNLOCKED,			\
-	task_list:	{ &(name).task_list, &(name).task_list },	\
-			__WAITQUEUE_HEAD_DEBUG_INIT(name)}
+	.lock		= SPIN_LOCK_UNLOCKED,				\
+	.task_list	= { &(name).task_list, &(name).task_list } }
 
 #define DECLARE_WAIT_QUEUE_HEAD(name) \
 	wait_queue_head_t name = __WAIT_QUEUE_HEAD_INITIALIZER(name)
 
 static inline void init_waitqueue_head(wait_queue_head_t *q)
 {
-#if WAITQUEUE_DEBUG
-	if (!q)
-		WQ_BUG();
-#endif
-	q->lock = WAITQUEUE_RW_LOCK_UNLOCKED;
+	q->lock = SPIN_LOCK_UNLOCKED;
 	INIT_LIST_HEAD(&q->task_list);
-#if WAITQUEUE_DEBUG
-	q->__magic = (long)&q->__magic;
-	q->__creator = (long)current_text_addr();
-#endif
 }
 
 static inline void init_waitqueue_entry(wait_queue_t *q, struct task_struct *p)
 {
-#if WAITQUEUE_DEBUG
-	if (!q || !p)
-		WQ_BUG();
-#endif
 	q->flags = 0;
 	q->task = p;
-#if WAITQUEUE_DEBUG
-	q->__magic = (long)&q->__magic;
-#endif
+	q->func = default_wake_function;
+}
+
+static inline void init_waitqueue_func_entry(wait_queue_t *q,
+					wait_queue_func_t func)
+{
+	q->flags = 0;
+	q->task = NULL;
+	q->func = func;
 }
 
 static inline int waitqueue_active(wait_queue_head_t *q)
 {
-#if WAITQUEUE_DEBUG
-	if (!q)
-		WQ_BUG();
-	CHECK_MAGIC_WQHEAD(q);
-#endif
-
 	return !list_empty(&q->task_list);
 }
 
+extern void FASTCALL(add_wait_queue(wait_queue_head_t *q, wait_queue_t * wait));
+extern void FASTCALL(add_wait_queue_exclusive(wait_queue_head_t *q, wait_queue_t * wait));
+extern void FASTCALL(remove_wait_queue(wait_queue_head_t *q, wait_queue_t * wait));
+
 static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
 {
-#if WAITQUEUE_DEBUG
-	if (!head || !new)
-		WQ_BUG();
-	CHECK_MAGIC_WQHEAD(head);
-	CHECK_MAGIC(new->__magic);
-	if (!head->task_list.next || !head->task_list.prev)
-		WQ_BUG();
-#endif
 	list_add(&new->task_list, &head->task_list);
 }
 
@@ -209,28 +95,185 @@ static inline void __add_wait_queue(wait_queue_head_t *head, wait_queue_t *new)
 static inline void __add_wait_queue_tail(wait_queue_head_t *head,
 						wait_queue_t *new)
 {
-#if WAITQUEUE_DEBUG
-	if (!head || !new)
-		WQ_BUG();
-	CHECK_MAGIC_WQHEAD(head);
-	CHECK_MAGIC(new->__magic);
-	if (!head->task_list.next || !head->task_list.prev)
-		WQ_BUG();
-#endif
 	list_add_tail(&new->task_list, &head->task_list);
 }
 
 static inline void __remove_wait_queue(wait_queue_head_t *head,
 							wait_queue_t *old)
 {
-#if WAITQUEUE_DEBUG
-	if (!old)
-		WQ_BUG();
-	CHECK_MAGIC(old->__magic);
-#endif
 	list_del(&old->task_list);
 }
 
+extern void FASTCALL(__wake_up(wait_queue_head_t *q, unsigned int mode, int nr));
+extern void FASTCALL(__wake_up_locked(wait_queue_head_t *q, unsigned int mode));
+extern void FASTCALL(__wake_up_sync(wait_queue_head_t *q, unsigned int mode, int nr));
+
+#define wake_up(x)			__wake_up((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 1)
+#define wake_up_nr(x, nr)		__wake_up((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, nr)
+#define wake_up_all(x)			__wake_up((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 0)
+#define wake_up_all_sync(x)			__wake_up_sync((x),TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE, 0)
+#define wake_up_interruptible(x)	__wake_up((x),TASK_INTERRUPTIBLE, 1)
+#define wake_up_interruptible_nr(x, nr)	__wake_up((x),TASK_INTERRUPTIBLE, nr)
+#define wake_up_interruptible_all(x)	__wake_up((x),TASK_INTERRUPTIBLE, 0)
+#define	wake_up_locked(x)		__wake_up_locked((x), TASK_UNINTERRUPTIBLE | TASK_INTERRUPTIBLE)
+#define wake_up_interruptible_sync(x)   __wake_up_sync((x),TASK_INTERRUPTIBLE, 1)
+
+#define __wait_event(wq, condition) 					\
+do {									\
+	wait_queue_t __wait;						\
+	init_waitqueue_entry(&__wait, current);				\
+									\
+	add_wait_queue(&wq, &__wait);					\
+	for (;;) {							\
+		set_current_state(TASK_UNINTERRUPTIBLE);		\
+		if (condition)						\
+			break;						\
+		schedule();						\
+	}								\
+	current->state = TASK_RUNNING;					\
+	remove_wait_queue(&wq, &__wait);				\
+} while (0)
+
+#define wait_event(wq, condition) 					\
+do {									\
+	if (condition)	 						\
+		break;							\
+	__wait_event(wq, condition);					\
+} while (0)
+
+#define __wait_event_interruptible(wq, condition, ret)			\
+do {									\
+	wait_queue_t __wait;						\
+	init_waitqueue_entry(&__wait, current);				\
+									\
+	add_wait_queue(&wq, &__wait);					\
+	for (;;) {							\
+		set_current_state(TASK_INTERRUPTIBLE);			\
+		if (condition)						\
+			break;						\
+		if (!signal_pending(current)) {				\
+			schedule();					\
+			continue;					\
+		}							\
+		ret = -ERESTARTSYS;					\
+		break;							\
+	}								\
+	current->state = TASK_RUNNING;					\
+	remove_wait_queue(&wq, &__wait);				\
+} while (0)
+
+#define wait_event_interruptible(wq, condition)				\
+({									\
+	int __ret = 0;							\
+	if (!(condition))						\
+		__wait_event_interruptible(wq, condition, __ret);	\
+	__ret;								\
+})
+
+#define __wait_event_interruptible_timeout(wq, condition, ret)		\
+do {									\
+	wait_queue_t __wait;						\
+	init_waitqueue_entry(&__wait, current);				\
+									\
+	add_wait_queue(&wq, &__wait);					\
+	for (;;) {							\
+		set_current_state(TASK_INTERRUPTIBLE);			\
+		if (condition)						\
+			break;						\
+		if (!signal_pending(current)) {				\
+			ret = schedule_timeout(ret);			\
+			if (!ret)					\
+				break;					\
+			continue;					\
+		}							\
+		ret = -ERESTARTSYS;					\
+		break;							\
+	}								\
+	current->state = TASK_RUNNING;					\
+	remove_wait_queue(&wq, &__wait);				\
+} while (0)
+
+#define wait_event_interruptible_timeout(wq, condition, timeout)	\
+({									\
+	long __ret = timeout;						\
+	if (!(condition))						\
+		__wait_event_interruptible_timeout(wq, condition, __ret); \
+	__ret;								\
+})
+	
+/*
+ * Must be called with the spinlock in the wait_queue_head_t held.
+ */
+static inline void add_wait_queue_exclusive_locked(wait_queue_head_t *q,
+						   wait_queue_t * wait)
+{
+	wait->flags |= WQ_FLAG_EXCLUSIVE;
+	__add_wait_queue_tail(q,  wait);
+}
+
+/*
+ * Must be called with the spinlock in the wait_queue_head_t held.
+ */
+static inline void remove_wait_queue_locked(wait_queue_head_t *q,
+					    wait_queue_t * wait)
+{
+	__remove_wait_queue(q,  wait);
+}
+
+#define add_wait_queue_cond(q, wait, cond) \
+	({							\
+		unsigned long flags;				\
+		int _raced = 0;					\
+		spin_lock_irqsave(&(q)->lock, flags);	\
+		(wait)->flags = 0;				\
+		__add_wait_queue((q), (wait));			\
+		rmb();						\
+		if (!(cond)) {					\
+			_raced = 1;				\
+			__remove_wait_queue((q), (wait));	\
+		}						\
+		spin_lock_irqrestore(&(q)->lock, flags);	\
+		_raced;						\
+	})
+
+/*
+ * These are the old interfaces to sleep waiting for an event.
+ * They are racy.  DO NOT use them, use the wait_event* interfaces above.  
+ * We plan to remove these interfaces during 2.7.
+ */
+extern void FASTCALL(sleep_on(wait_queue_head_t *q));
+extern long FASTCALL(sleep_on_timeout(wait_queue_head_t *q,
+				      signed long timeout));
+extern void FASTCALL(interruptible_sleep_on(wait_queue_head_t *q));
+extern long FASTCALL(interruptible_sleep_on_timeout(wait_queue_head_t *q,
+						    signed long timeout));
+
+/*
+ * Waitqueues which are removed from the waitqueue_head at wakeup time
+ */
+void FASTCALL(prepare_to_wait(wait_queue_head_t *q,
+				wait_queue_t *wait, int state));
+void FASTCALL(prepare_to_wait_exclusive(wait_queue_head_t *q,
+				wait_queue_t *wait, int state));
+void FASTCALL(finish_wait(wait_queue_head_t *q, wait_queue_t *wait));
+int autoremove_wake_function(wait_queue_t *wait, unsigned mode, int sync);
+
+#define DEFINE_WAIT(name)						\
+	wait_queue_t name = {						\
+		.task		= current,				\
+		.func		= autoremove_wake_function,		\
+		.task_list	= {	.next = &name.task_list,	\
+					.prev = &name.task_list,	\
+				},					\
+	}
+
+#define init_wait(wait)							\
+	do {								\
+		wait->task = current;					\
+		wait->func = autoremove_wake_function;			\
+		INIT_LIST_HEAD(&wait->task_list);			\
+	} while (0)
+	
 #endif /* __KERNEL__ */
 
 #endif

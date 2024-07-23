@@ -15,7 +15,7 @@
  * an odd scheme for converting hardware values to/from framebuffer values, here are
  * some hacked-up formulas:
  *
- *  The Dreamcast has screen offsets from each side of it's four borders and the start
+ *  The Dreamcast has screen offsets from each side of its four borders and the start
  *  offsets of the display window.  I used these values to calculate 'pseudo' values
  *  (think of them as placeholders) for the fb video mode, so that when it came time
  *  to convert these values back into their hardware values, I could just add mode-
@@ -157,7 +157,6 @@ static struct pvr2fb_par {
 	
 } currentpar;
 
-static int currcon = 0;
 static int currbpp;
 static struct display disp;
 static struct fb_info fb_info;
@@ -214,6 +213,9 @@ static int pvr2fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
                              struct fb_info *info);
 static int pvr2fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
                              struct fb_info *info);
+static int pvr2fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
+                            u_int transp, struct fb_info *info);
+static int pvr2fb_blank(int blank, struct fb_info *info);
 
 	/*
 	 * Interface to the low level console driver
@@ -221,19 +223,15 @@ static int pvr2fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 
 static int pvr2fbcon_switch(int con, struct fb_info *info);
 static int pvr2fbcon_updatevar(int con, struct fb_info *info);
-static void pvr2fbcon_blank(int blank, struct fb_info *info);
 
 	/*
 	 * Internal/hardware-specific routines
 	 */
 
-static void do_install_cmap(int con, struct fb_info *info);
 static u_long get_line_length(int xres_virtual, int bpp);
 static void set_color_bitfields(struct fb_var_screeninfo *var);
 static int pvr2_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
                             u_int *transp, struct fb_info *info);
-static int pvr2_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
-                            u_int transp, struct fb_info *info);
 
 static int pvr2_encode_fix(struct fb_fix_screeninfo *fix,
                              struct pvr2fb_par *par);
@@ -248,19 +246,21 @@ static int pvr2_update_par(void);
 static void pvr2_update_display(void);
 static void pvr2_init_display(void);
 static void pvr2_do_blank(void);
-static void pvr2fb_interrupt(int irq, void *dev_id, struct pt_regs *fp);
+static irqreturn_t pvr2fb_interrupt(int irq, void *dev_id, struct pt_regs *fp);
 static int pvr2_init_cable(void);
 static int pvr2_get_param(const struct pvr2_params *p, const char *s,
                             int val, int size);
 
 static struct fb_ops pvr2fb_ops = {
-	owner:		THIS_MODULE,
-	fb_get_fix:	pvr2fb_get_fix,
-	fb_get_var:	pvr2fb_get_var,
-	fb_set_var:	pvr2fb_set_var,
-	fb_get_cmap:	pvr2fb_get_cmap,
-	fb_set_cmap:	pvr2fb_set_cmap,
-	fb_pan_display: pvr2fb_pan_display,
+	.owner =	THIS_MODULE,
+	.fb_get_fix =	pvr2fb_get_fix,
+	.fb_get_var =	pvr2fb_get_var,
+	.fb_set_var =	pvr2fb_set_var,
+	.fb_get_cmap =	pvr2fb_get_cmap,
+	.fb_set_cmap =	pvr2fb_set_cmap,
+	.fb_setcolreg =	pvr2fb_setcolreg,
+	.fb_pan_display = pvr2fb_pan_display,
+	.fb_blank =	pvr2fb_blank,
 };
 
 static struct fb_videomode pvr2_modedb[] __initdata = {
@@ -381,7 +381,6 @@ static int pvr2fb_set_var(struct fb_var_screeninfo *var, int con,
 			struct fb_fix_screeninfo fix;
 
 			pvr2_encode_fix(&fix, &par);
-			display->screen_base = (char *)fix.smem_start;
 			display->scrollmode = SCROLL_YREDRAW;
 			display->visual = fix.visual;
 			display->type = fix.type;
@@ -422,7 +421,7 @@ static int pvr2fb_set_var(struct fb_var_screeninfo *var, int con,
 				return err;
 			do_install_cmap(con, info);
 		}
-		if (con == currcon)
+		if (con == info->currcon)
 			pvr2_set_var(&display->var);
 	}
 
@@ -448,7 +447,7 @@ static int pvr2fb_pan_display(struct fb_var_screeninfo *var, int con,
 		    fb_display[con].var.yres_virtual)
 		    return -EINVAL;
 	}
-	if (con == currcon)
+	if (con == info->currcon)
 		pvr2_pan_var(var);
 	fb_display[con].var.xoffset = var->xoffset;
 	fb_display[con].var.yoffset = var->yoffset;
@@ -465,7 +464,7 @@ static int pvr2fb_pan_display(struct fb_var_screeninfo *var, int con,
 static int pvr2fb_get_cmap(struct fb_cmap *cmap, int kspc, int con,
                              struct fb_info *info)
 {
-	if (con == currcon) /* current console? */
+	if (con == info->currcon) /* current console? */
 		return fb_get_cmap(cmap, kspc, pvr2_getcolreg, info);
 	else if (fb_display[con].cmap.len) /* non default colormap? */
 		fb_copy_cmap(&fb_display[con].cmap, cmap, kspc ? 0 : 2);
@@ -488,8 +487,8 @@ static int pvr2fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 					 0)))
 			 return err;
 	}
-	if (con == currcon)                     /* current console? */
-		return fb_set_cmap(cmap, kspc, pvr2_setcolreg, info);
+	if (con == info->currcon)                     /* current console? */
+		return fb_set_cmap(cmap, kspc, info);
 	else
 		fb_copy_cmap(cmap, &fb_display[con].cmap, kspc ? 0 : 1);
 
@@ -499,10 +498,10 @@ static int pvr2fb_set_cmap(struct fb_cmap *cmap, int kspc, int con,
 static int pvr2fbcon_switch(int con, struct fb_info *info)
 {
 	/* Do we have to save the colormap? */
-	if (fb_display[currcon].cmap.len)
-		fb_get_cmap(&fb_display[currcon].cmap, 1, pvr2_getcolreg, info);
+	if (fb_display[info->currcon].cmap.len)
+		fb_get_cmap(&fb_display[info->currcon].cmap, 1, pvr2_getcolreg, info);
 
-	currcon = con;
+	info->currcon = con;
 	pvr2_set_var(&fb_display[con].var);
 	/* Install new colormap */
 	do_install_cmap(con, info);
@@ -515,22 +514,9 @@ static int pvr2fbcon_updatevar(int con, struct fb_info *info)
 	return 0;
 }
 
-static void pvr2fbcon_blank(int blank, struct fb_info *info)
+static int pvr2fb_blank(int blank, struct fb_info *info)
 {
 	do_blank = blank ? blank : -1;
-}
-
-/* Setup the colormap */
-
-static void do_install_cmap(int con, struct fb_info *info)
-{
-	if (con != currcon)
-		return;
-	if (fb_display[con].cmap.len)
-		fb_set_cmap(&fb_display[con].cmap, 1, pvr2_setcolreg, info);
-	else
-		fb_set_cmap(fb_default_cmap(1<<fb_display[con].var.bits_per_pixel),
-                            1, pvr2_setcolreg, info);
 }
 
 static inline u_long get_line_length(int xres_virtual, int bpp)
@@ -575,7 +561,7 @@ static int pvr2_getcolreg(u_int regno, u_int *red, u_int *green, u_int *blue,
 	return 0;
 }
 	
-static int pvr2_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
+static int pvr2fb_setcolreg(u_int regno, u_int red, u_int green, u_int blue,
                             u_int transp, struct fb_info *info)
 {
 	if (regno > 255)
@@ -953,7 +939,7 @@ static void pvr2_do_blank(void)
 	is_blanked = do_blank > 0 ? do_blank : 0;
 }
 
-static void pvr2fb_interrupt(int irq, void *dev_id, struct pt_regs *fp)
+static irqreturn_t pvr2fb_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 {
 	if (do_vmode_pan || do_vmode_full)
 		pvr2_update_display();
@@ -972,6 +958,7 @@ static void pvr2fb_interrupt(int irq, void *dev_id, struct pt_regs *fp)
 	if (do_vmode_full) {
 		do_vmode_full = 0;
 	}
+	return IRQ_HANDLED;
 }
 
 /*
@@ -1034,12 +1021,12 @@ int __init pvr2fb_init(void)
 	
 	strcpy(fb_info.modename, pvr2fb_name);
 	fb_info.changevar = NULL;
-	fb_info.node = -1;
 	fb_info.fbops = &pvr2fb_ops;
+	fb_info.screen_base = (char *) videomemory;
 	fb_info.disp = &disp;
+	fb_info.currcon = -1;
 	fb_info.switch_con = &pvr2fbcon_switch;
 	fb_info.updatevar = &pvr2fbcon_updatevar;
-	fb_info.blank = &pvr2fbcon_blank;
 	fb_info.flags = FBINFO_FLAG_DEFAULT;
 	memset(&var, 0, sizeof(var));
 
@@ -1072,10 +1059,10 @@ int __init pvr2fb_init(void)
 	modememused = get_line_length(var.xres_virtual, var.bits_per_pixel);
 	modememused *= var.yres_virtual;
 	printk("fb%d: %s frame buffer device, using %ldk/%ldk of video memory\n",
-	       GET_FB_IDX(fb_info.node), fb_info.modename, modememused>>10,
+	       fb_info.node, fb_info.modename, modememused>>10,
 	       videomemorysize>>10);
 	printk("fb%d: Mode %dx%d-%d pitch = %ld cable: %s video output: %s\n", 
-	       GET_FB_IDX(fb_info.node), var.xres, var.yres, var.bits_per_pixel, 
+	       fb_info.node, var.xres, var.yres, var.bits_per_pixel, 
 	       get_line_length(var.xres, var.bits_per_pixel),
 	       (char *)pvr2_get_param(cables, NULL, cable_type, 3),
 	       (char *)pvr2_get_param(outputs, NULL, video_output, 3));

@@ -20,9 +20,15 @@
 
 #include <linux/kernel.h>
 #include <linux/slab.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/string.h>
 #include <linux/wait.h>
+#include <linux/dcache.h>
+#include <linux/namei.h>
+#include <linux/mount.h>
+#include <linux/sched.h>
+
+#include <asm/current.h>
 #include <asm/uaccess.h>
 
 #ifdef DEBUG
@@ -109,7 +115,7 @@ struct autofs_sb_info {
 
 static inline struct autofs_sb_info *autofs_sbi(struct super_block *sb)
 {
-	return (struct autofs_sb_info *)(sb->u.generic_sbp);
+	return (struct autofs_sb_info *)(sb->s_fs_info);
 }
 
 /* autofs_oz_mode(): do we see the man behind the curtain?  (The
@@ -139,13 +145,11 @@ struct autofs_dir_ent *autofs_expire(struct super_block *,struct autofs_sb_info 
 
 extern struct inode_operations autofs_root_inode_operations;
 extern struct inode_operations autofs_symlink_inode_operations;
-extern struct inode_operations autofs_dir_inode_operations;
 extern struct file_operations autofs_root_operations;
-extern struct file_operations autofs_dir_operations;
 
 /* Initializing function */
 
-struct super_block *autofs_read_super(struct super_block *, void *,int);
+int autofs_fill_super(struct super_block *, void *, int);
 
 /* Queue management functions */
 

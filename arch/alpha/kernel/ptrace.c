@@ -13,6 +13,7 @@
 #include <linux/ptrace.h>
 #include <linux/user.h>
 #include <linux/slab.h>
+#include <linux/security.h>
 
 #include <asm/uaccess.h>
 #include <asm/pgtable.h>
@@ -101,12 +102,14 @@ get_reg_addr(struct task_struct * task, unsigned long regno)
 	long *addr;
 
 	if (regno == 30) {
-		addr = &task->thread.usp;
-	} else if (regno == 31 || regno > 64) {
+		addr = &task->thread_info->pcb.usp;
+	} else if (regno == 65) {
+		addr = &task->thread_info->pcb.unique;
+	} else if (regno == 31 || regno > 65) {
 		zero = 0;
 		addr = &zero;
 	} else {
-		addr = (long *)((long)task + regoff[regno]);
+		addr = (long *)((long)task->thread_info + regoff[regno]);
 	}
 	return addr;
 }
@@ -120,7 +123,8 @@ get_reg(struct task_struct * task, unsigned long regno)
 	/* Special hack for fpcr -- combine hardware and software bits.  */
 	if (regno == 63) {
 		unsigned long fpcr = *get_reg_addr(task, regno);
-		unsigned long swcr = task->thread.flags & IEEE_SW_MASK;
+		unsigned long swcr
+		  = task->thread_info->ieee_state & IEEE_SW_MASK;
 		swcr = swcr_update_status(swcr, fpcr);
 		return fpcr | swcr;
 	}
@@ -134,8 +138,9 @@ static int
 put_reg(struct task_struct *task, unsigned long regno, long data)
 {
 	if (regno == 63) {
-		task->thread.flags = ((task->thread.flags & ~IEEE_SW_MASK)
-				      | (data & IEEE_SW_MASK));
+		task->thread_info->ieee_state
+		  = ((task->thread_info->ieee_state & ~IEEE_SW_MASK)
+		     | (data & IEEE_SW_MASK));
 		data = (data & FPCR_DYN_MASK) | ieee_swcr_to_fpcr(data);
 	}
 	*get_reg_addr(task, regno) = data;
@@ -182,31 +187,34 @@ ptrace_set_bpt(struct task_struct * child)
 		 * branch (emulation can be tricky for fp branches).
 		 */
 		displ = ((s32)(insn << 11)) >> 9;
-		child->thread.bpt_addr[nsaved++] = pc + 4;
+		child->thread_info->bpt_addr[nsaved++] = pc + 4;
 		if (displ)		/* guard against unoptimized code */
-			child->thread.bpt_addr[nsaved++] = pc + 4 + displ;
+			child->thread_info->bpt_addr[nsaved++]
+			  = pc + 4 + displ;
 		DBG(DBG_BPT, ("execing branch\n"));
 	} else if (op_code == 0x1a) {
 		reg_b = (insn >> 16) & 0x1f;
-		child->thread.bpt_addr[nsaved++] = get_reg(child, reg_b);
+		child->thread_info->bpt_addr[nsaved++] = get_reg(child, reg_b);
 		DBG(DBG_BPT, ("execing jump\n"));
 	} else {
-		child->thread.bpt_addr[nsaved++] = pc + 4;
+		child->thread_info->bpt_addr[nsaved++] = pc + 4;
 		DBG(DBG_BPT, ("execing normal insn\n"));
 	}
 
 	/* install breakpoints: */
 	for (i = 0; i < nsaved; ++i) {
-		res = read_int(child, child->thread.bpt_addr[i], &insn);
+		res = read_int(child, child->thread_info->bpt_addr[i], &insn);
 		if (res < 0)
 			return res;
-		child->thread.bpt_insn[i] = insn;
-		DBG(DBG_BPT, ("    -> next_pc=%lx\n", child->thread.bpt_addr[i]));
-		res = write_int(child, child->thread.bpt_addr[i], BREAKINST);
+		child->thread_info->bpt_insn[i] = insn;
+		DBG(DBG_BPT, ("    -> next_pc=%lx\n",
+			      child->thread_info->bpt_addr[i]));
+		res = write_int(child, child->thread_info->bpt_addr[i],
+				BREAKINST);
 		if (res < 0)
 			return res;
 	}
-	child->thread.bpt_nsaved = nsaved;
+	child->thread_info->bpt_nsaved = nsaved;
 	return 0;
 }
 
@@ -217,9 +225,9 @@ ptrace_set_bpt(struct task_struct * child)
 int
 ptrace_cancel_bpt(struct task_struct * child)
 {
-	int i, nsaved = child->thread.bpt_nsaved;
+	int i, nsaved = child->thread_info->bpt_nsaved;
 
-	child->thread.bpt_nsaved = 0;
+	child->thread_info->bpt_nsaved = 0;
 
 	if (nsaved > 2) {
 		printk("ptrace_cancel_bpt: bogus nsaved: %d!\n", nsaved);
@@ -227,8 +235,8 @@ ptrace_cancel_bpt(struct task_struct * child)
 	}
 
 	for (i = 0; i < nsaved; ++i) {
-		write_int(child, child->thread.bpt_addr[i],
-			  child->thread.bpt_insn[i]);
+		write_int(child, child->thread_info->bpt_addr[i],
+			  child->thread_info->bpt_insn[i]);
 	}
 	return (nsaved != 0);
 }
@@ -244,10 +252,12 @@ void ptrace_disable(struct task_struct *child)
 }
 
 asmlinkage long
-sys_ptrace(long request, long pid, long addr, long data,
-	   int a4, int a5, struct pt_regs regs)
+do_sys_ptrace(long request, long pid, long addr, long data,
+	      struct pt_regs *regs)
 {
 	struct task_struct *child;
+	unsigned long tmp;
+	size_t copied;
 	long ret;
 
 	lock_kernel();
@@ -258,6 +268,9 @@ sys_ptrace(long request, long pid, long addr, long data,
 		/* are we already being traced? */
 		if (current->ptrace & PT_PTRACED)
 			goto out_notsk;
+		ret = security_ptrace(current->parent, current);
+		if (ret)
+			goto out_notsk;
 		/* set the ptrace bit in the process ptrace flags. */
 		current->ptrace |= PT_PTRACED;
 		ret = 0;
@@ -265,6 +278,7 @@ sys_ptrace(long request, long pid, long addr, long data,
 	}
 	if (pid == 1)		/* you may not mess with init */
 		goto out_notsk;
+
 	ret = -ESRCH;
 	read_lock(&tasklist_lock);
 	child = find_task_by_pid(pid);
@@ -273,77 +287,65 @@ sys_ptrace(long request, long pid, long addr, long data,
 	read_unlock(&tasklist_lock);
 	if (!child)
 		goto out_notsk;
+
 	if (request == PTRACE_ATTACH) {
 		ret = ptrace_attach(child);
 		goto out;
 	}
-	ret = -ESRCH;
-	if (!(child->ptrace & PT_PTRACED)) {
-		DBG(DBG_MEM, ("child not traced\n"));
+
+	ret = ptrace_check_attach(child, request == PTRACE_KILL);
+	if (ret < 0)
 		goto out;
-	}
-	if (child->state != TASK_STOPPED) {
-		DBG(DBG_MEM, ("child process not stopped\n"));
-		if (request != PTRACE_KILL)
-			goto out;
-	}
-	if (child->p_pptr != current) {
-		DBG(DBG_MEM, ("child not parent of this process\n"));
-		goto out;
-	}
 
 	switch (request) {
 	/* When I and D space are separate, these will need to be fixed.  */
 	case PTRACE_PEEKTEXT: /* read word at location addr. */
-	case PTRACE_PEEKDATA: {
-		unsigned long tmp;
-		int copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
+	case PTRACE_PEEKDATA:
+		copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 0);
 		ret = -EIO;
 		if (copied != sizeof(tmp))
-			goto out;
+			break;
 		
-		regs.r0 = 0;	/* special return: no errors */
+		regs->r0 = 0;	/* special return: no errors */
 		ret = tmp;
-		goto out;
-	}
+		break;
 
 	/* Read register number ADDR. */
 	case PTRACE_PEEKUSR:
-		regs.r0 = 0;	/* special return: no errors */
+		regs->r0 = 0;	/* special return: no errors */
 		ret = get_reg(child, addr);
 		DBG(DBG_MEM, ("peek $%ld->%#lx\n", addr, ret));
-		goto out;
+		break;
 
 	/* When I and D space are separate, this will have to be fixed.  */
 	case PTRACE_POKETEXT: /* write the word at location addr. */
-	case PTRACE_POKEDATA: {
-		unsigned long tmp = data;
-		int copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 1);
+	case PTRACE_POKEDATA:
+		tmp = data;
+		copied = access_process_vm(child, addr, &tmp, sizeof(tmp), 1);
 		ret = (copied == sizeof(tmp)) ? 0 : -EIO;
-		goto out;
-	}
+		break;
 
 	case PTRACE_POKEUSR: /* write the specified register */
 		DBG(DBG_MEM, ("poke $%ld<-%#lx\n", addr, data));
 		ret = put_reg(child, addr, data);
-		goto out;
+		break;
 
-	case PTRACE_SYSCALL: /* continue and stop at next
-				(return from) syscall */
+	case PTRACE_SYSCALL:
+		/* continue and stop at next (return from) syscall */
 	case PTRACE_CONT:    /* restart after signal. */
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
-			goto out;
+			break;
 		if (request == PTRACE_SYSCALL)
-			child->ptrace |= PT_TRACESYS;
+			set_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		else
-			child->ptrace &= ~PT_TRACESYS;
+			clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		child->exit_code = data;
-		wake_up_process(child);
 		/* make sure single-step breakpoint is gone. */
 		ptrace_cancel_bpt(child);
-		ret = data;
-		goto out;
+		wake_up_process(child);
+		ret = 0;
+		break;
 
 	/*
 	 * Make the child exit.  Best I can do is send it a sigkill.
@@ -351,21 +353,22 @@ sys_ptrace(long request, long pid, long addr, long data,
 	 * exit.
 	 */
 	case PTRACE_KILL:
-		if (child->state != TASK_ZOMBIE) {
-			wake_up_process(child);
-			child->exit_code = SIGKILL;
-		}
+		ret = 0;
+		if (child->state == TASK_ZOMBIE)
+			break;
+		child->exit_code = SIGKILL;
 		/* make sure single-step breakpoint is gone. */
 		ptrace_cancel_bpt(child);
-		ret = 0;
+		wake_up_process(child);
 		goto out;
 
 	case PTRACE_SINGLESTEP:  /* execute single instruction. */
 		ret = -EIO;
 		if ((unsigned long) data > _NSIG)
-			goto out;
-		child->thread.bpt_nsaved = -1;	/* mark single-stepping */
-		child->ptrace &= ~PT_TRACESYS;
+			break;
+		/* Mark single stepping.  */
+		child->thread_info->bpt_nsaved = -1;
+		clear_tsk_thread_flag(child, TIF_SYSCALL_TRACE);
 		wake_up_process(child);
 		child->exit_code = data;
 		/* give it a chance to run. */
@@ -377,11 +380,11 @@ sys_ptrace(long request, long pid, long addr, long data,
 		goto out;
 
 	default:
-		ret = -EIO;
+		ret = ptrace_request(child, request, addr, data);
 		goto out;
 	}
  out:
-	free_task_struct(child);
+	put_task_struct(child);
  out_notsk:
 	unlock_kernel();
 	return ret;
@@ -390,13 +393,15 @@ sys_ptrace(long request, long pid, long addr, long data,
 asmlinkage void
 syscall_trace(void)
 {
-	if ((current->ptrace & (PT_PTRACED|PT_TRACESYS))
-	    != (PT_PTRACED|PT_TRACESYS))
+	if (!test_thread_flag(TIF_SYSCALL_TRACE))
 		return;
-	current->exit_code = SIGTRAP;
-	current->state = TASK_STOPPED;
-	notify_parent(current, SIGCHLD);
-	schedule();
+	if (!(current->ptrace & PT_PTRACED))
+		return;
+	/* The 0x80 provides a way for the tracing parent to distinguish
+	   between a syscall stop and SIGTRAP delivery */
+	ptrace_notify(SIGTRAP | ((current->ptrace & PT_TRACESYSGOOD)
+				 ? 0x80 : 0));
+
 	/*
 	 * This isn't the same as continuing with a signal, but it will do
 	 * for normal use.  strace only continues with a signal if the

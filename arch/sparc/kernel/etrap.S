@@ -12,8 +12,10 @@
 #include <asm/page.h>
 #include <asm/psr.h>
 #include <asm/ptrace.h>
+#include <asm/asm_offsets.h>
 #include <asm/winmacro.h>
 #include <asm/asmmacro.h>
+#include <asm/thread_info.h>
 
 /* Registers to not touch at all. */
 #define t_psr        l0 /* Set by caller */
@@ -86,7 +88,7 @@ trap_setup:
 	/* From kernel, allocate more kernel stack and
 	 * build a pt_regs trap frame.
 	 */
-	sub	%fp, (REGWIN_SZ + TRACEREG_SZ), %t_kstack
+	sub	%fp, (STACKFRAME_SZ + TRACEREG_SZ), %t_kstack
 	STORE_PT_ALL(t_kstack, t_psr, t_pc, t_npc, g2)
 
 	/* See if we are in the trap window. */
@@ -101,7 +103,7 @@ trap_setup:
 	 mov	%t_kstack, %sp		! jump onto new stack
 
 trap_setup_kernel_spill:
-	ld	[%curptr + AOFF_task_thread + AOFF_thread_uwinmask], %g1
+	ld	[%curptr + TI_UWINMASK], %g1
 	orcc	%g0, %g1, %g0
 	bne	trap_setup_user_spill	! there are some user windows, yuck
 	/* Spill from kernel, but only kernel windows, adjust
@@ -127,7 +129,8 @@ tsetup_patch2:
 	jmpl	%t_retpc + 0x8, %g0	! return to caller
 	 mov	%t_kstack, %sp		! and onto new kernel stack
 
-#define STACK_OFFSET (TASK_UNION_SIZE - (TRACEREG_SZ + REGWIN_SZ))
+#define STACK_OFFSET (THREAD_SIZE - TRACEREG_SZ - STACKFRAME_SZ)
+
 trap_setup_from_user:
 	/* We can't use %curptr yet. */
 	LOAD_CURRENT(t_kstack, t_twinmask)
@@ -143,18 +146,19 @@ trap_setup_from_user:
 	STORE_PT_ALL(t_kstack, t_psr, t_pc, t_npc, g2)
 
 #if 0
-	/* If we're sure every task_struct is TASK_UNION_SIZE aligned,
+	/* If we're sure every task_struct is THREAD_SIZE aligned,
 	   we can speed this up. */
 	sethi	%hi(STACK_OFFSET), %curptr
 	or	%curptr, %lo(STACK_OFFSET), %curptr
 	sub	%t_kstack, %curptr, %curptr
 #else
-	sethi	%hi(~(TASK_UNION_SIZE - 1)), %curptr
+	sethi	%hi(~(THREAD_SIZE - 1)), %curptr
 	and	%t_kstack, %curptr, %curptr
 #endif
 
 	/* Clear current->thread.w_saved */
-	st	%g0, [%curptr + AOFF_task_thread + AOFF_thread_w_saved]
+	ld	[%curptr + TI_TASK], %g2
+	st	%g0, [%g2 + AOFF_task_thread + AOFF_thread_w_saved]
 
 	/* See if we are in the trap window. */
 	andcc	%t_twinmask, %t_wim, %g0
@@ -185,7 +189,7 @@ trap_setup_from_user:
 	andn	%g2, %t_twinmask, %g2
 tsetup_patch3:
 	and	%g2, 0xff, %g2			! patched on 7win Sparcs
-	st	%g2, [%curptr + AOFF_task_thread + AOFF_thread_uwinmask]	! store new umask
+	st	%g2, [%curptr + TI_UWINMASK]	! store new umask
 
 	jmpl	%t_retpc + 0x8, %g0		! return to caller
 	 mov	%t_kstack, %sp			! and onto kernel stack
@@ -206,7 +210,7 @@ tsetup_patch5:
 tsetup_patch6:
 	and	%g2, 0xff, %g2		! patched on 7win Sparcs
 	andn	%g1, %g2, %g1		! clear this bit in %g1
-	st	%g1, [%curptr + AOFF_task_thread + AOFF_thread_uwinmask]
+	st	%g1, [%curptr + TI_UWINMASK]
 
 	save	%g0, %g0, %g0
 
@@ -288,7 +292,8 @@ trap_setup_user_stack_is_bolixed:
 	/* From user/kernel into invalid window w/bad user
 	 * stack. Save bad user stack, and return to caller.
 	 */
-	SAVE_BOLIXED_USER_STACK(curptr, g3)
+	ld	[%curptr + TI_TASK], %glob_tmp
+	SAVE_BOLIXED_USER_STACK(glob_tmp, g3)
 	restore	%g0, %g0, %g0
 
 	jmpl	%t_retpc + 0x8, %g0

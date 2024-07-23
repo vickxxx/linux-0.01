@@ -130,6 +130,7 @@ Table 1-1: Process specific entries in /proc
  stat    Process status                                 
  statm   Process memory status information              
  status  Process status in human readable form          
+ wchan   If CONFIG_KALLSYMS is set, a pre-decoded wchan
 ..............................................................................
 
 For example, to get the status information of a process, all you have to do is
@@ -191,6 +192,7 @@ Table 1-3: Kernel info in /proc
 ..............................................................................
  File        Content                                           
  apm         Advanced power management info                    
+ buddyinfo   Kernel memory allocator information (see text)	(2.5)
  bus         Directory containing bus specific information     
  cmdline     Kernel command line                               
  cpuinfo     Info about the CPU                                
@@ -275,7 +277,7 @@ output of a SMP machine):
   ERR:       2155
 
 NMI is incremented in this case because every timer interrupt generates a NMI
-(Non Maskable Interrupt) which is used by the NMI Watchdog to detect lookups.
+(Non Maskable Interrupt) which is used by the NMI Watchdog to detect lockups.
 
 LOC is the local interrupt counter of the internal APIC of every CPU.
 
@@ -326,6 +328,25 @@ Linux uses  slab  pools for memory management above page level in version 2.2.
 Commonly used  objects  have  their  own  slab  pool (such as network buffers,
 directory cache, and so on).
 
+..............................................................................
+
+> cat /proc/buddyinfo
+
+Node 0, zone      DMA      0      4      5      4      4      3 ...
+Node 0, zone   Normal      1      0      0      1    101      8 ...
+Node 0, zone  HighMem      2      0      0      1      1      0 ...
+
+Memory fragmentation is a problem under some workloads, and buddyinfo is a 
+useful tool for helping diagnose these problems.  Buddyinfo will give you a 
+clue as to how big an area you can safely allocate, or why a previous
+allocation failed.
+
+Each column represents the number of pages of a certain order which are 
+available.  In this case, there are 0 chunks of 2^0*PAGE_SIZE available in 
+ZONE_DMA, 4 chunks of 2^1*PAGE_SIZE in ZONE_DMA, 101 chunks of 2^4*PAGE_SIZE 
+available in ZONE_NORMAL, etc... 
+
+
 1.3 IDE devices in /proc/ide
 ----------------------------
 
@@ -341,6 +362,93 @@ IDE devices:
   ide-cdrom version 4.53 
   ide-disk version 1.08 
 
+..............................................................................
+
+meminfo:
+
+Provides information about distribution and utilization of memory.  This
+varies by architecture and compile options.  The following is from a
+16GB PIII, which has highmem enabled.  You may not have all of these fields.
+
+> cat /proc/meminfo
+
+
+MemTotal:     16344972 kB
+MemFree:      13634064 kB
+Buffers:          3656 kB
+Cached:        1195708 kB
+SwapCached:          0 kB
+Active:         891636 kB
+Inactive:      1077224 kB
+HighTotal:    15597528 kB
+HighFree:     13629632 kB
+LowTotal:       747444 kB
+LowFree:          4432 kB
+SwapTotal:           0 kB
+SwapFree:            0 kB
+Dirty:             968 kB
+Writeback:           0 kB
+Mapped:         280372 kB
+Slab:           684068 kB
+Committed_AS:  1576424 kB
+PageTables:      24448 kB
+ReverseMaps:   1080904
+VmallocTotal:   112216 kB
+VmallocUsed:       428 kB
+VmallocChunk:   111088 kB
+
+    MemTotal: Total usable ram (i.e. physical ram minus a few reserved
+              bits and the kernel binary code)
+     MemFree: The sum of LowFree+HighFree
+     Buffers: Relatively temporary storage for raw disk blocks
+              shouldn't get tremendously large (20MB or so)
+      Cached: in-memory cache for files read from the disk (the
+              pagecache).  Doesn't include SwapCached
+  SwapCached: Memory that once was swapped out, is swapped back in but
+              still also is in the swapfile (if memory is needed it
+              doesn't need to be swapped out AGAIN because it is already
+              in the swapfile. This saves I/O)
+      Active: Memory that has been used more recently and usually not
+              reclaimed unless absolutely necessary.
+    Inactive: Memory which has been less recently used.  It is more
+              eligible to be reclaimed for other purposes
+   HighTotal:
+    HighFree: Highmem is all memory above ~860MB of physical memory
+              Highmem areas are for use by userspace programs, or
+              for the pagecache.  The kernel must use tricks to access
+              this memory, making it slower to access than lowmem.
+    LowTotal:
+     LowFree: Lowmem is memory which can be used for everything that
+              highmem can be used for, but it is also availble for the
+              kernel's use for its own data structures.  Among many
+              other things, it is where everything from the Slab is
+              allocated.  Bad things happen when you're out of lowmem.
+   SwapTotal: total amount of swap space available
+    SwapFree: Memory which has been evicted from RAM, and is temporarily
+              on the disk
+       Dirty: Memory which is waiting to get written back to the disk
+   Writeback: Memory which is actively being written back to the disk
+      Mapped: files which have been mmaped, such as libraries
+              Slab: in-kernel data structures cache
+Committed_AS: An estimate of how much RAM you would need to make a
+              99.99% guarantee that there never is OOM (out of memory)
+              for this workload. Normally the kernel will overcommit
+              memory. That means, say you do a 1GB malloc, nothing
+              happens, really. Only when you start USING that malloc
+              memory you will get real memory on demand, and just as
+              much as you use. So you sort of take a mortgage and hope
+              the bank doesn't go bust. Other cases might include when
+              you mmap a file that's shared only when you write to it
+              and you get a private copy of that data. While it normally
+              is shared between processes. The Committed_AS is a
+              guesstimate of how much RAM/swap you would need
+              worst-case.
+  PageTables: amount of memory dedicated to the lowest level of page
+              tables.
+ ReverseMaps: number of reverse mappings performed
+VmallocTotal: total size of vmalloc memory area
+ VmallocUsed: amount of vmalloc area which is used
+VmallocChunk: largest contigious block of vmalloc area which is free
 
 More detailed  information  can  be  found  in  the  controller  specific
 subdirectories. These  are  named  ide0,  ide1  and  so  on.  Each  of  these
@@ -708,36 +816,26 @@ allocated file  handles  come close to the maximum, but the number of actually
 used ones  is  far  behind,  you've  encountered  a peak in your usage of file
 handles and you don't need to increase the maximum.
 
-inode-state, inode-nr and inode-max
------------------------------------
-
-As with  file  handles, the kernel allocates the inode structures dynamically,
-but can't free them yet.
-
-The value  in  inode-max  denotes  the  maximum number of inode handlers. This
-value should  be  3 to 4 times larger than the value in file-max, since stdin,
-stdout, and  network  sockets also need an inode struct to handle them. If you
-regularly run out of inodes, you should increase this value.
+inode-state and inode-nr
+------------------------
 
 The file inode-nr contains the first two items from inode-state, so we'll skip
 to that file...
 
-inode-state contains  three  actual numbers and four dummy values. The numbers
-are nr_inodes, nr_free_inodes, and preshrink (in order of appearance).
+inode-state contains  two  actual numbers and five dummy values. The numbers
+are nr_inodes and nr_free_inodes (in order of appearance).
 
 nr_inodes
 ~~~~~~~~~
 
-Denotes the  number  of  inodes the system has allocated. This can be slightly
-more than inode-max because Linux allocates them one pageful at a time.
+Denotes the  number  of  inodes the system has allocated. This number will
+grow and shrink dynamically.
 
 nr_free_inodes
 --------------
 
-Represents the  number  of free inodes and preshrink is nonzero when nr_inodes
-is greater than inode-max and the system needs to prune the inode list instead
-of allocating more.
-
+Represents the  number of free inodes. Ie. The number of inuse inodes is
+(nr_inodes - nr_free_inodes).
 
 super-nr and super-max
 ----------------------
@@ -900,7 +998,7 @@ printk
 The four values in printk denote
 * console_loglevel,
 * default_message_loglevel,
-* minimum_console_level and
+* minimum_console_loglevel and
 * default_console_loglevel
 respectively.
 
@@ -948,156 +1046,90 @@ program to load modules on demand.
 -----------------------------------------------
 
 The files  in  this directory can be used to tune the operation of the virtual
-memory (VM)  subsystem  of  the  Linux  kernel.  In addition, one of the files
-(bdflush) has some influence on disk usage.
+memory (VM)  subsystem  of  the  Linux  kernel.
 
-bdflush
--------
+dirty_background_ratio
+----------------------
 
-This file  controls  the  operation of the bdflush kernel daemon. It currently
-contains nine  integer  values,  six of which are actually used by the kernel.
-They are listed in table 2-2.
+Contains, as a percentage of total system memory, the number of pages at which
+the pdflush background writeback daemon will start writing out dirty data.
 
+dirty_ratio
+-----------------
 
-Table 2-2: Parameters in /proc/sys/vm/bdflush 
-..............................................................................
- Value      Meaning                                                            
- nfract     Percentage of buffer cache dirty to  activate bdflush              
- ndirty     Maximum number of dirty blocks to  write out per wake-cycle        
- nrefill    Number of clean buffers to try to obtain  each time we call refill 
- nref_dirt  buffer threshold for activating bdflush when trying to refill
-            buffers. 
- dummy      Unused                                                             
- age_buffer Time for normal buffer to age before we flush it                   
- age_super  Time for superblock to age before we flush it                      
- dummy      Unused                                                             
- dummy      Unused                                                             
-..............................................................................
+Contains, as a percentage of total system memory, the number of pages at which
+a process which is generating disk writes will itself start writing out dirty
+data.
 
-nfract
-------
+dirty_writeback_centisecs
+-------------------------
 
-This parameter  governs  the  maximum  number  of  dirty buffers in the buffer
-cache. Dirty means that the contents of the buffer still have to be written to
-disk (as  opposed  to  a  clean  buffer,  which  can just be forgotten about).
-Setting this  to  a  higher value means that Linux can delay disk writes for a
-long time, but it also means that it will have to do a lot of I/O at once when
-memory becomes short. A lower value will spread out disk I/O more evenly.
+The pdflush writeback daemons will periodically wake up and write `old' data
+out to disk.  This tunable expresses the interval between those wakeups, in
+100'ths of a second.
 
-ndirty
-------
+Setting this to zero disables periodic writeback altogether.
 
-Ndirty gives the maximum number of dirty buffers that bdflush can write to the
-disk at  one  time.  A high value will mean delayed, bursty I/O, while a small
-value can lead to memory shortage when bdflush isn't woken up often enough.
+dirty_expire_centisecs
+----------------------
 
-nrefill
--------
+This tunable is used to define when dirty data is old enough to be eligible
+for writeout by the pdflush daemons.  It is expressed in 100'ths of a second. 
+Data which has been dirty in-memory for longer than this interval will be
+written out next time a pdflush daemon wakes up.
 
-This is  the  number  of  buffers  that  bdflush  will add to the list of free
-buffers when  refill_freelist()  is  called.  It is necessary to allocate free
-buffers beforehand,  since  the  buffers  are  often  different sizes than the
-memory pages  and some bookkeeping needs to be done beforehand. The higher the
-number, the  more  memory  will be wasted and the less often refill_freelist()
-will need to run.
+lower_zone_protection
+---------------------
 
-nref_dirt
----------
+For some specialised workloads on highmem machines it is dangerous for
+the kernel to allow process memory to be allocated from the "lowmem"
+zone.  This is because that memory could then be pinned via the mlock()
+system call, or by unavailability of swapspace.
 
-When refill_freelist() comes across more than nref_dirt dirty buffers, it will
-wake up bdflush.
+And on large highmem machines this lack of reclaimable lowmem memory
+can be fatal.
 
-age_buffer and age_super
-------------------------
+So the Linux page allocator has a mechanism which prevents allocations
+which _could_ use highmem from using too much lowmem.  This means that
+a certain amount of lowmem is defended from the possibility of being
+captured into pinned user memory.
 
-Finally, the age_buffer and age_super parameters govern the maximum time Linux
-waits before  writing  out  a  dirty buffer to disk. The value is expressed in
-jiffies (clockticks),  the  number of jiffies per second is 100. Age_buffer is
-the maximum age for data blocks, while age_super is for filesystems meta data.
+(The same argument applies to the old 16 megabyte ISA DMA region.  This
+mechanism will also defend that region from allocations which could use
+highmem or lowmem).
 
-buffermem
----------
+The `lower_zone_protection' tunable determines how aggressive the kernel is
+in defending these lower zones.  The default value is zero - no
+protection at all.
 
-The three  values  in  this  file  control  how much memory should be used for
-buffer memory.  The  percentage  is calculated as a percentage of total system
-memory.
+If you have a machine which uses highmem or ISA DMA and your
+applications are using mlock(), or if you are running with no swap then
+you probably should increase the lower_zone_protection setting.
 
-The values are:
+The units of this tunable are fairly vague.  It is approximately equal
+to "megabytes".  So setting lower_zone_protection=100 will protect around 100
+megabytes of the lowmem zone from user allocations.  It will also make
+those 100 megabytes unavaliable for use by applications and by
+pagecache, so there is a cost.
 
-min_percent
------------
+The effects of this tunable may be observed by monitoring
+/proc/meminfo:LowFree.  Write a single huge file and observe the point
+at which LowFree ceases to fall.
 
-This is  the  minimum  percentage  of  memory  that  should be spent on buffer
-memory.
+A reasonable value for lower_zone_protection is 100.
 
-borrow_percent
---------------
-
-When Linux is short on memory, and the buffer cache uses more than it has been
-allotted, the  memory  management  (MM)  subsystem will prune the buffer cache
-more heavily than other memory to compensate.
-
-max_percent
------------
-
-This is the maximum amount of memory that can be used for buffer memory.
-
-freepages
----------
-
-This file contains three values: min, low and high:
-
-min
----
-When the  number  of  free  pages  in the system reaches this number, only the
-kernel can allocate more memory.
-
-low
----
-If the number of free pages falls below this point, the kernel starts swapping
-aggressively.
-
-high
-----
-The kernel  tries  to  keep  up to this amount of memory free; if memory falls
-below this point, the kernel starts gently swapping in the hopes that it never
-has to do really aggressive swapping.
-
-kswapd
-------
-
-Kswapd is  the  kernel  swap  out daemon. That is, kswapd is that piece of the
-kernel that  frees  memory when it gets fragmented or full. Since every system
-is different, you'll probably want some control over this piece of the system.
-
-The file contains three numbers:
-
-tries_base
-----------
-
-The maximum  number  of  pages kswapd tries to free in one round is calculated
-from this  number.  Usually  this  number  will  be  divided  by  4  or 8 (see
-mm/vmscan.c), so it isn't as big as it looks.
-
-When you  need to increase the bandwidth to/from swap, you'll want to increase
-this number.
-
-tries_min
----------
-
-This is  the  minimum number of times kswapd tries to free a page each time it
-is called. Basically it's just there to make sure that kswapd frees some pages
-even when it's being called with minimum priority.
-
-swap_cluster
+page-cluster
 ------------
 
-This is probably the greatest influence on system performance.
+page-cluster controls the number of pages which are written to swap in
+a single attempt.  The swap I/O size.
 
-swap_cluster is  the  number  of  pages kswapd writes in one turn. You'll want
-this value  to  be  large  so that kswapd does its I/O in large chunks and the
-disk doesn't  have  to  seek  as  often, but you don't want it to be too large
-since that would flood the request queue.
+It is a logarithmic value - setting it to zero means "1 page", setting
+it to 1 means "2 pages", setting it to 2 means "4 pages", etc.
+
+The default value is three (eight pages at a time).  There may be some
+small benefits in tuning this to a different value if your workload is
+swap-intensive.
 
 overcommit_memory
 -----------------
@@ -1112,79 +1144,6 @@ malloc(), when in fact the system has enough memory for the program to run.
 On the  other  hand,  enabling this feature can cause you to run out of memory
 and thrash the system to death, so large and/or important servers will want to
 set this value to 0.
-
-pagecache
----------
-
-This file  does exactly the same job as buffermem, only this file controls the
-amount of memory allowed for memory mapping and generic caching of files.
-
-You don't  want  the  minimum level to be too low, otherwise your system might
-thrash when memory is tight or fragmentation is high.
-
-pagetable_cache
----------------
-
-The kernel  keeps a number of page tables in a per-processor cache (this helps
-a lot  on  SMP systems). The cache size for each processor will be between the
-low and the high value.
-
-On a  low-memory,  single  CPU system, you can safely set these values to 0 so
-you don't  waste  memory.  It  is  used  on SMP systems so that the system can
-perform fast  pagetable allocations without having to acquire the kernel memory
-lock.
-
-For large  systems,  the  settings  are probably fine. For normal systems they
-won't hurt  a  bit.  For  small  systems  (  less  than  16MB ram) it might be
-advantageous to set both values to 0.
-
-swapctl
--------
-
-This file  contains  no less than 8 variables. All of these values are used by
-kswapd.
-
-The first four variables
-* sc_max_page_age,
-* sc_page_advance,
-* sc_page_decline and
-* sc_page_initial_age
-are used  to  keep  track  of  Linux's page aging. Page aging is a bookkeeping
-method to  track  which pages of memory are often used, and which pages can be
-swapped out without consequences.
-
-When a  page  is  swapped in, it starts at sc_page_initial_age (default 3) and
-when the  page  is  scanned  by  kswapd,  its age is adjusted according to the
-following scheme:
-
-* If  the  page  was used since the last time we scanned, its age is increased
-  by sc_page_advance  (default  3).  Where  the  maximum  value  is  given  by
-  sc_max_page_age (default 20).
-* Otherwise  (meaning  it wasn't used) its age is decreased by sc_page_decline
-  (default 1).
-
-When a page reaches age 0, it's ready to be swapped out.
-
-The variables  sc_age_cluster_fract, sc_age_cluster_min, sc_pageout_weight and
-sc_bufferout_weight, can  be  used  to  control  kswapd's  aggressiveness  in
-swapping out pages.
-
-Sc_age_cluster_fract is used to calculate how many pages from a process are to
-be scanned by kswapd. The formula used is
-
-(sc_age_cluster_fract divided by 1024) times resident set size
-
-So if you want kswapd to scan the whole process, sc_age_cluster_fract needs to
-have a  value  of  1024.  The  minimum  number  of  pages  kswapd will scan is
-represented by sc_age_cluster_min, which is done so that kswapd will also scan
-small processes.
-
-The values  of  sc_pageout_weight  and sc_bufferout_weight are used to control
-how many  tries  kswapd  will make in order to swap out one page/buffer. These
-values can  be used to fine-tune the ratio between user pages and buffer/cache
-memory. When  you find that your Linux system is swapping out too many process
-pages in  order  to  satisfy  buffer  memory  demands,  you may want to either
-increase sc_bufferout_weight, or decrease the value of sc_pageout_weight.
 
 2.5 /proc/sys/dev - Device specific parameters
 ----------------------------------------------
@@ -1592,10 +1551,14 @@ routing issues.
 error_burst and error_cost
 --------------------------
 
-These parameters  are used to limit the warning messages written to the kernel
-log from  the  routing  code.  The  higher the error_cost factor is, the fewer
-messages will  be written. Error_burst controls when messages will be dropped.
-The default settings limit warning messages to one every five seconds.
+These  parameters  are used to limit how many ICMP destination unreachable to 
+send  from  the  host  in question. ICMP destination unreachable messages are 
+sent  when  we can not reach the next hop, while trying to transmit a packet. 
+It  will also print some error messages to kernel logs if someone is ignoring 
+our   ICMP  redirects.  The  higher  the  error_cost  factor  is,  the  fewer 
+destination  unreachable  and error messages will be let through. Error_burst 
+controls  when  destination  unreachable  messages and error messages will be
+dropped. The default settings limit warning messages to five every second.
 
 flush
 -----

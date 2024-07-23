@@ -110,7 +110,7 @@ gred_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 	unsigned long	qave=0;	
 	int i=0;
 
-	if (!t->initd && skb_queue_len(&sch->q) < (sch->dev->tx_queue_len ? : 1)) {
+	if (!t->initd && skb_queue_len(&sch->q) <= sch->dev->tx_queue_len) {
 		D2PRINTK("NO GRED Queues setup yet! Enqueued anyway\n");
 		goto do_enqueue;
 	}
@@ -175,7 +175,7 @@ gred_enqueue(struct sk_buff *skb, struct Qdisc* sch)
 	if ((q->qave+qave) < q->qth_min) {
 		q->qcount = -1;
 enqueue:
-		if (q->backlog + skb->len <= q->limit) {
+		if (q->backlog <= q->limit) {
 			q->backlog += skb->len;
 do_enqueue:
 			__skb_queue_tail(&sch->q, skb);
@@ -339,7 +339,7 @@ static int gred_change(struct Qdisc *sch, struct rtattr *opt)
 		rtattr_parse(tb2, TCA_GRED_DPS, RTA_DATA(opt),
 		    RTA_PAYLOAD(opt));
 
-		if (tb2[TCA_GRED_DPS-1] == 0)
+	    if (tb2[TCA_GRED_DPS-1] == 0) 
 			return -EINVAL;
 
 		sopt = RTA_DATA(tb2[TCA_GRED_DPS-1]);
@@ -348,7 +348,6 @@ static int gred_change(struct Qdisc *sch, struct rtattr *opt)
 		table->grio=sopt->grio; 
 		table->initd=0;
 		/* probably need to clear all the table DP entries as well */
-		MOD_INC_USE_COUNT;
 		return 0;
 	    }
 
@@ -416,7 +415,7 @@ static int gred_change(struct Qdisc *sch, struct rtattr *opt)
 	memcpy(q->Stab, RTA_DATA(tb[TCA_GRED_STAB-1]), 256);
 
 	if ( table->initd && table->grio) {
-	/* this looks ugly but its not in the fast path */
+	/* this looks ugly but it's not in the fast path */
 		for (i=0;i<table->DPs;i++) {
 			if ((!table->tab[i]) || (i==q->DP) )    
 				continue; 
@@ -479,10 +478,10 @@ static int gred_init(struct Qdisc *sch, struct rtattr *opt)
 		rtattr_parse(tb, TCA_GRED_STAB, RTA_DATA(opt), RTA_PAYLOAD(opt)) )
 			return -EINVAL;
 
-	if (tb[TCA_GRED_PARMS-1] == 0 && tb[TCA_GRED_STAB-1] == 0 ) {
+	if (tb[TCA_GRED_PARMS-1] == 0 && tb[TCA_GRED_STAB-1] == 0) {
 		rtattr_parse(tb2, TCA_GRED_DPS, RTA_DATA(opt),RTA_PAYLOAD(opt));
 
-		if (tb2[TCA_GRED_DPS-1] == 0)
+	    if (tb2[TCA_GRED_DPS-1] == 0) 
 			return -EINVAL;
 
 		sopt = RTA_DATA(tb2[TCA_GRED_DPS-1]);
@@ -490,7 +489,6 @@ static int gred_init(struct Qdisc *sch, struct rtattr *opt)
 		table->def=sopt->def_DP; 
 		table->grio=sopt->grio; 
 		table->initd=0;
-		MOD_INC_USE_COUNT;
 		return 0;
 	}
 
@@ -602,24 +600,23 @@ static void gred_destroy(struct Qdisc *sch)
 		if (table->tab[i])
 			kfree(table->tab[i]);
 	}
-	MOD_DEC_USE_COUNT;
 }
 
-struct Qdisc_ops gred_qdisc_ops =
-{
-	NULL,
-	NULL,
-	"gred",
-	sizeof(struct gred_sched),
-	gred_enqueue,
-	gred_dequeue,
-	gred_requeue,
-	gred_drop,
-	gred_init,
-	gred_reset,
-	gred_destroy,
-	gred_change, /* change */
-	gred_dump,
+struct Qdisc_ops gred_qdisc_ops = {
+	.next		=	NULL,
+	.cl_ops		=	NULL,
+	.id		=	"gred",
+	.priv_size	=	sizeof(struct gred_sched),
+	.enqueue	=	gred_enqueue,
+	.dequeue	=	gred_dequeue,
+	.requeue	=	gred_requeue,
+	.drop		=	gred_drop,
+	.init		=	gred_init,
+	.reset		=	gred_reset,
+	.destroy	=	gred_destroy,
+	.change		=	gred_change,
+	.dump		=	gred_dump,
+	.owner		=	THIS_MODULE,
 };
 
 

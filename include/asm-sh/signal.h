@@ -4,6 +4,7 @@
 #include <linux/types.h>
 
 /* Avoid too many header ordering problems.  */
+struct pt_regs;
 struct siginfo;
 
 #define _NSIG		64
@@ -73,7 +74,7 @@ typedef struct {
  * Unix names RESETHAND and NODEFER respectively.
  */
 #define SA_NOCLDSTOP	0x00000001
-#define SA_NOCLDWAIT	0x00000002 /* not supported yet */
+#define SA_NOCLDWAIT	0x00000002
 #define SA_SIGINFO	0x00000004
 #define SA_ONSTACK	0x08000000
 #define SA_RESTART	0x10000000
@@ -165,7 +166,7 @@ typedef struct sigaltstack {
 #ifdef __KERNEL__
 #include <asm/sigcontext.h>
 
-#define sigmask(sig)	(1UL << ((sig) - 1))
+#define ptrace_signal_deliver(regs, cookie) do { } while (0)
 
 #endif /* __KERNEL__ */
 

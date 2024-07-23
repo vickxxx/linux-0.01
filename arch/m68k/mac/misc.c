@@ -11,7 +11,7 @@
 #include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/time.h>
-
+#include <linux/rtc.h>
 #include <linux/mm.h>
 
 #include <linux/adb.h>
@@ -165,11 +165,10 @@ static void via_pram_writebyte(__u8 data)
 
 static void via_pram_command(int command, __u8 *data)
 {
-	unsigned long cpu_flags;
+	unsigned long flags;
 	int	is_read;
 
-	save_flags(cpu_flags);
-	cli();
+	local_irq_save(flags);
 
 	/* Enable the RTC and make sure the strobe line is high */
 
@@ -193,7 +192,7 @@ static void via_pram_command(int command, __u8 *data)
 
 	via1[vBufB] |= VIA1B_vRTCEnb;
 
-	restore_flags(cpu_flags);
+	local_irq_restore(flags);
 }
 
 static __u8 via_read_pram(int offset)
@@ -229,8 +228,8 @@ static long via_read_time(void)
 	do {
 		if (++ct > 10) {
 			printk("via_read_time: couldn't get valid time, "
-			       "last read = 0x%08X and 0x%08X\n", last_result.idata,
-			       result.idata);
+			       "last read = 0x%08lx and 0x%08lx\n",
+			       last_result.idata, result.idata);
 			break;
 		}
 
@@ -405,7 +404,7 @@ void mac_poweroff(void)
 		pmu_shutdown();
 #endif
 	}
-	sti();
+	local_irq_enable();
 	printk("It is now safe to turn off your Macintosh.\n");
 	while(1);
 }
@@ -413,7 +412,7 @@ void mac_poweroff(void)
 void mac_reset(void)
 {
 	if (macintosh_config->adb_type == MAC_ADB_II) {
-		unsigned long cpu_flags;
+		unsigned long flags;
 
 		/* need ROMBASE in booter */
 		/* indeed, plus need to MAP THE ROM !! */
@@ -429,12 +428,11 @@ void mac_reset(void)
 			 * MSch: Machines known to crash on ROM reset ...
 			 */
 		} else {
-			save_flags(cpu_flags);
-			cli();
+			local_irq_save(flags);
 
 			rom_reset();
 
-			restore_flags(cpu_flags);
+			local_irq_restore(flags);
 		}
 #ifdef CONFIG_ADB_CUDA
 	} else if (macintosh_config->adb_type == MAC_ADB_CUDA) {
@@ -459,7 +457,7 @@ void mac_reset(void)
 		unsigned long virt = (unsigned long) mac_reset;
 		unsigned long phys = virt_to_phys(mac_reset);
 		unsigned long offset = phys-virt;
-		cli(); /* lets not screw this up, ok? */
+		local_irq_disable(); /* lets not screw this up, ok? */
 		__asm__ __volatile__(".chip 68030\n\t"
 				     "pmove %0,%/tt0\n\t"
 				     ".chip 68k"
@@ -495,7 +493,7 @@ void mac_reset(void)
 	}
 
 	/* should never get here */
-	sti();
+	local_irq_enable();
 	printk ("Restart failed.  Please restart manually.\n");
 	while(1);
 }
@@ -571,31 +569,11 @@ static void unmktime(unsigned long time, long offset,
 	return;
 }
 
-/*
- * Return the boot time for use in initializing the kernel clock.
- *
- * I'd like to read the hardware clock here but many machines read
- * the PRAM through ADB, and interrupts aren't initialized when this
- * is called so ADB obviously won't work.
- */
-
-void mac_gettod(int *yearp, int *monp, int *dayp,
-	       int *hourp, int *minp, int *secp)
-{
-	/* Yes the GMT bias is backwards.  It looks like Penguin is
-           screwing up the boottime it gives us... This works for me
-           in Canada/Eastern but it might be wrong everywhere else. */
-	unmktime(mac_bi_data.boottime, -mac_bi_data.gmtbias * 60,
-		yearp, monp, dayp, hourp, minp, secp);
-	/* For some reason this is off by one */
-	*monp = *monp + 1;
-}
-
 /* 
  * Read/write the hardware clock.
  */
 
-int mac_hwclk(int op, struct hwclk_time *t)
+int mac_hwclk(int op, struct rtc_time *t)
 {
 	unsigned long now;
 
@@ -613,19 +591,19 @@ int mac_hwclk(int op, struct hwclk_time *t)
 			now = 0;
 		}
 
-		t->wday = 0;
+		t->tm_wday = 0;
 		unmktime(now, 0,
-			 &t->year, &t->mon, &t->day,
-			 &t->hour, &t->min, &t->sec);
+			 &t->tm_year, &t->tm_mon, &t->tm_mday,
+			 &t->tm_hour, &t->tm_min, &t->tm_sec);
 		printk("mac_hwclk: read %04d-%02d-%-2d %02d:%02d:%02d\n",
-			t->year + 1900, t->mon + 1, t->day, t->hour, t->min, t->sec);
+			t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
 	} else { /* write */
 		printk("mac_hwclk: tried to write %04d-%02d-%-2d %02d:%02d:%02d\n",
-			t->year + 1900, t->mon + 1, t->day, t->hour, t->min, t->sec);
+			t->tm_year + 1900, t->tm_mon + 1, t->tm_mday, t->tm_hour, t->tm_min, t->tm_sec);
 
 #if 0	/* it trashes my rtc */
-		now = mktime(t->year + 1900, t->mon + 1, t->day,
-			     t->hour, t->min, t->sec);
+		now = mktime(t->tm_year + 1900, t->tm_mon + 1, t->tm_mday,
+			     t->tm_hour, t->tm_min, t->tm_sec);
 
 		if (macintosh_config->adb_type == MAC_ADB_II) {
 			via_write_time(now);
@@ -648,11 +626,11 @@ int mac_hwclk(int op, struct hwclk_time *t)
 
 int mac_set_clock_mmss (unsigned long nowtime)
 {
-	struct hwclk_time now;
+	struct rtc_time now;
 
 	mac_hwclk(0, &now);
-	now.sec = nowtime % 60;
-	now.min = (nowtime / 60) % 60;
+	now.tm_sec = nowtime % 60;
+	now.tm_min = (nowtime / 60) % 60;
 	mac_hwclk(1, &now);
 
 	return 0;

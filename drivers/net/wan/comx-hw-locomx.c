@@ -36,18 +36,19 @@
 
 #define VERSION "0.14"
 
+#include <linux/interrupt.h>
 #include <linux/module.h>
 #include <linux/version.h>
 #include <linux/types.h>
-#include <linux/sched.h>
 #include <linux/netdevice.h>
 #include <linux/proc_fs.h>
+#include <linux/ioport.h>
+#include <linux/init.h>
+
 #include <asm/types.h>
 #include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/dma.h>
-#include <linux/ioport.h>
-#include <linux/init.h>
 
 #include "comx.h"
 #include "z85230.h"
@@ -154,11 +155,9 @@ static int LOCOMX_open(struct net_device *dev)
 		return -ENODEV;
 	}
 
-	if (check_region(dev->base_addr, hw->io_extent)) {
+	if (!request_region(dev->base_addr, hw->io_extent, dev->name)) {
 		return -EAGAIN;
 	}
-
-	request_region(dev->base_addr, hw->io_extent, dev->name);
 
 	hw->board.chanA.ctrlio=dev->base_addr + 5;
 	hw->board.chanA.dataio=dev->base_addr + 7;
@@ -480,20 +479,16 @@ static struct comx_hardware locomx_hw = {
 	NULL
 };
 	
-#ifdef MODULE
-#define comx_hw_locomx_init init_module
-#endif
-
-int __init comx_hw_locomx_init(void)
+static int __init comx_hw_locomx_init(void)
 {
 	comx_register_hardware(&locomx_hw);
 	return 0;
 }
 
-#ifdef MODULE
-void cleanup_module(void)
+static void __exit comx_hw_locomx_exit(void)
 {
 	comx_unregister_hardware("locomx");
-	return;
 }
-#endif
+
+module_init(comx_hw_locomx_init);
+module_exit(comx_hw_locomx_exit);

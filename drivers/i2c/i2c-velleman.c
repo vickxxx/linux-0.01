@@ -18,18 +18,16 @@
     Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.		     */
 /* ------------------------------------------------------------------------- */
 
-/* $Id: i2c-velleman.c,v 1.19 2000/01/24 02:06:33 mds Exp $ */
+/* $Id: i2c-velleman.c,v 1.29 2003/01/21 08:08:16 kmalkki Exp $ */
 
 #include <linux/kernel.h>
 #include <linux/ioport.h>
 #include <linux/module.h>
 #include <linux/init.h>
-#include <linux/string.h>  /* for 2.0 kernels to get NULL   */
-#include <asm/errno.h>     /* for 2.0 kernels to get ENODEV */
-#include <asm/io.h>
-
+#include <linux/delay.h>
 #include <linux/i2c.h>
 #include <linux/i2c-algo-bit.h>
+#include <asm/io.h>
 
 /* ----- global defines -----------------------------------------------	*/
 #define DEB(x)		/* should be reasonable open, close &c. 	*/
@@ -90,47 +88,13 @@ static int bit_velle_getsda(void *data)
 
 static int bit_velle_init(void)
 {
-	if (check_region(base,(base == 0x3bc)? 3 : 8) < 0 ) {
-		DEBE(printk("i2c-velleman.o: Port %#x already in use.\n",
-		     base));
+	if (!request_region(base, (base == 0x3bc) ? 3 : 8, 
+			"i2c (Vellemann adapter)"))
 		return -ENODEV;
-	} else {
-		request_region(base, (base == 0x3bc)? 3 : 8, 
-			"i2c (Vellemann adapter)");
-		bit_velle_setsda((void*)base,1);
-		bit_velle_setscl((void*)base,1);
-	}
+
+	bit_velle_setsda((void*)base,1);
+	bit_velle_setscl((void*)base,1);
 	return 0;
-}
-
-static void __exit bit_velle_exit(void)
-{	
-	release_region( base , (base == 0x3bc)? 3 : 8 );
-}
-
-
-static int bit_velle_reg(struct i2c_client *client)
-{
-	return 0;
-}
-
-static int bit_velle_unreg(struct i2c_client *client)
-{
-	return 0;
-}
-
-static void bit_velle_inc_use(struct i2c_adapter *adap)
-{
-#ifdef MODULE
-	MOD_INC_USE_COUNT;
-#endif
-}
-
-static void bit_velle_dec_use(struct i2c_adapter *adap)
-{
-#ifdef MODULE
-	MOD_DEC_USE_COUNT;
-#endif
 }
 
 /* ------------------------------------------------------------------------
@@ -139,28 +103,27 @@ static void bit_velle_dec_use(struct i2c_adapter *adap)
  */
 
 static struct i2c_algo_bit_data bit_velle_data = {
-	NULL,
-	bit_velle_setsda,
-	bit_velle_setscl,
-	bit_velle_getsda,
-	bit_velle_getscl,
-	10, 10, 100,		/*	waits, timeout */
+	.setsda		= bit_velle_setsda,
+	.setscl		= bit_velle_setscl,
+	.getsda		= bit_velle_getsda,
+	.getscl		= bit_velle_getscl,
+	.udelay		= 10,
+	.mdelay		= 10,
+	.timeout	= HZ
 };
 
 static struct i2c_adapter bit_velle_ops = {
-	"Velleman K8000",
-	I2C_HW_B_VELLE,
-	NULL,
-	&bit_velle_data,
-	bit_velle_inc_use,
-	bit_velle_dec_use,
-	bit_velle_reg,
-	bit_velle_unreg,
+	.owner		= THIS_MODULE,
+	.id		= I2C_HW_B_VELLE,
+	.algo_data	= &bit_velle_data,
+	.dev		= {
+		.name	= "Velleman K8000",
+	},
 };
 
-int __init  i2c_bitvelle_init(void)
+static int __init i2c_bitvelle_init(void)
 {
-	printk("i2c-velleman.o: i2c Velleman K8000 adapter module\n");
+	printk(KERN_INFO "i2c-velleman.o: i2c Velleman K8000 adapter module version %s (%s)\n", I2C_VERSION, I2C_DATE);
 	if (base==0) {
 		/* probe some values */
 		base=DEFAULT_BASE;
@@ -180,28 +143,21 @@ int __init  i2c_bitvelle_init(void)
 			return -ENODEV;
 		}
 	}
-	printk("i2c-velleman.o: found device at %#x.\n",base);
+	printk(KERN_DEBUG "i2c-velleman.o: found device at %#x.\n",base);
 	return 0;
 }
 
-EXPORT_NO_SYMBOLS;
+static void __exit i2c_bitvelle_exit(void)
+{	
+	i2c_bit_del_bus(&bit_velle_ops);
+	release_region(base, (base == 0x3bc) ? 3 : 8);
+}
 
-#ifdef MODULE
 MODULE_AUTHOR("Simon G. Vogl <simon@tk.uni-linz.ac.at>");
 MODULE_DESCRIPTION("I2C-Bus adapter routines for Velleman K8000 adapter");
 MODULE_LICENSE("GPL");
 
 MODULE_PARM(base, "i");
 
-int init_module(void) 
-{
-	return i2c_bitvelle_init();
-}
-
-void cleanup_module(void) 
-{
-	i2c_bit_del_bus(&bit_velle_ops);
-	bit_velle_exit();
-}
-
-#endif
+module_init(i2c_bitvelle_init);
+module_exit(i2c_bitvelle_exit);

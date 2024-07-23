@@ -1,6 +1,8 @@
 #ifndef _ISO_FS_I
 #define _ISO_FS_I
 
+#include <linux/fs.h>
+
 enum isofs_file_format {
 	isofs_file_normal = 0,
 	isofs_file_sparse = 1,
@@ -16,6 +18,7 @@ struct iso_inode_info {
 	unsigned char i_format_parm[3];
 	unsigned long i_next_section_ino;
 	off_t i_section_size;
+	struct inode vfs_inode;
 };
 
 #endif

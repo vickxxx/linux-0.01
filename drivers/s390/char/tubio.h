@@ -13,6 +13,7 @@
 
 #include <linux/module.h>
 #include <linux/version.h>
+#include <linux/tty.h>
 
 #include <linux/major.h>
 #ifndef IBM_TTY3270_MAJOR
@@ -26,6 +27,7 @@
 #include <linux/slab.h>
 #include <asm/irq.h>
 #include <asm/io.h>
+#include <asm/idals.h>
 #include <linux/console.h>
 #include <linux/interrupt.h>
 #include <asm/ebcdic.h>
@@ -80,10 +82,17 @@
 #define TAT_CHARS 0x43
 #define TAT_TRANS 0x46
 
+/* Extended-Highlighting Bytes */
+#define TAX_RESET 0x00
+#define TAX_BLINK 0xf1
+#define TAX_REVER 0xf2
+#define TAX_UNDER 0xf4
+
 /* Reset value */
 #define TAR_RESET 0x00
 
 /* Color values */
+#define TAC_RESET 0x00
 #define TAC_BLUE 0xf1
 #define TAC_RED 0xf2
 #define TAC_PINK 0xf3
@@ -219,7 +228,7 @@ typedef struct tub_s {
 	devstat_t       devstat;
 	ccw1_t          rccw;
 	ccw1_t          wccw;
-	void            *wbuf;
+	addr_t		*wbuf;
 	int             cswl;
 	void            (*intv)(struct tub_s *, devstat_t *);
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
@@ -233,7 +242,7 @@ typedef struct tub_s {
 	enum tubstat    stat;
 	enum tubcmd     cmd;
 	int             flags;		/* See below for values */
-	struct tq_struct tqueue;
+	struct tasklet_struct tasklet;
 
 	/* Stuff for fs-driver support */
 	pid_t           fs_pid;         /* Pid if TBM_FS */
@@ -241,12 +250,13 @@ typedef struct tub_s {
 
 	/* Stuff for tty-driver support */
 	struct tty_struct *tty;
-	char tty_input[GEOM_MAXINPLEN]; /* tty input area */
+	char *tty_input;		/* tty input area */
 	int tty_inattr;         	/* input-area field attribute */
 #define TTY_OUTPUT_SIZE 1024
 	bcb_t tty_bcb;			/* Output buffer control info */
 	int tty_oucol;                  /* Kludge */
 	int tty_nextlogx;               /* next screen-log position */
+	int tty_savecursor;		/* saved cursor position */
 	int tty_scrolltime;             /* scrollforward wait time, sec */
 	struct timer_list tty_stimer;   /* timer for scrolltime */
 	aid_t tty_aid[64];              /* Aid descriptors */
@@ -284,15 +294,27 @@ typedef struct tub_s {
 #define	TUB_UE_BUSY	0x0800
 #define	TUB_INPUT_HACK	0x1000		/* Early init of command line */
 
-#ifdef CONFIG_TN3270_CONSOLE
+#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
+#define	S390_CONSOLE_DEV MKDEV(TTY_MAJOR, 64)
+#define tub_major(x) MAJOR(x)
+#define tub_minor(x) MINOR(x)
+#define tub_mkdev(x, y) MKDEV(x, y)
+#elif (LINUX_VERSION_CODE < KERNEL_VERSION(2,5,0))
+#define	S390_CONSOLE_DEV MKDEV(TTYAUX_MAJOR, 1)
+#define tub_major(x) MAJOR(x)
+#define tub_minor(x) MINOR(x)
+#define tub_mkdev(x, y) MKDEV(x, y)
+#else
+#define S390_CONSOLE_DEV mk_kdev(TTYAUX_MAJOR, 1)
+#define tub_major(x) major(x)
+#define tub_minor(x) minor(x)
+#define tub_mkdev(x, y) mk_kdev(x, y)
+#endif
+
 /*
  * Extra stuff for 3270 console support
  */
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
-#define	S390_CONSOLE_DEV MKDEV(TTY_MAJOR, 64)
-#else
-#define	S390_CONSOLE_DEV MKDEV(TTYAUX_MAJOR, 1)
-#endif
+#ifdef CONFIG_TN3270_CONSOLE
 extern int tub3270_con_devno;
 extern char (*tub3270_con_output)[];
 extern int tub3270_con_outputl;
@@ -314,22 +336,16 @@ extern int fs3270_major;
 extern int tty3270_major;
 extern int tty3270_proc_misc;
 extern enum tubwhat tty3270_proc_what;
-extern struct tty_driver tty3270_driver;
-#ifdef CONFIG_DEVFS_FS
-extern devfs_handle_t fs3270_devfs_dir;
-extern void fs3270_devfs_register(tub_t *);
-extern void fs3270_devfs_unregister(tub_t *);
-#endif
+extern struct tty_driver *tty3270_driver;
 
 #ifndef spin_trylock_irqsave
 #define spin_trylock_irqsave(lock, flags) \
 ({ \
 	int success; \
-	__save_flags(flags); \
-	__cli(); \
+	local_irq_save(flags); \
 	success = spin_trylock(lock); \
 	if (success == 0) \
-		__restore_flags(flags); \
+		local_irq_restore(flags); \
 	success; \
 })
 #endif /* if not spin_trylock_irqsave */
@@ -351,7 +367,9 @@ extern void fs3270_devfs_unregister(tub_t *);
 /*
  * Find tub_t * given fullscreen device's irq (subchannel number)
  */
+#if 0
 extern tub_t *tubfindbyirq(int);
+#endif
 #define IRQ2TUB(irq) tubfindbyirq(irq)
 /*
  * Find tub_t * given fullscreen device's inode pointer
@@ -359,19 +377,11 @@ extern tub_t *tubfindbyirq(int);
  */
 extern inline tub_t *INODE2TUB(struct inode *ip)
 {
-	unsigned int minor = MINOR(ip->i_rdev);
+	unsigned int minor = minor(ip->i_rdev);
 	tub_t *tubp = NULL;
-	if (minor == 0 && current->tty != NULL) {
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
-#ifdef CONFIG_TN3270_CONSOLE
-		if (tub3270_con_tubp != NULL &&
-		    current->tty->device == S390_CONSOLE_DEV)
-			minor = tub3270_con_tubp->minor;
-		else
-#endif
-#endif
-		if (MAJOR(current->tty->device) == IBM_TTY3270_MAJOR)
-			minor = MINOR(current->tty->device);
+	if (minor == 0 && current->tty) {
+		if (current->tty->driver == tty3270_driver)
+			minor = current->tty->index;
 	}
 	if (minor <= tubnummins && minor > 0)
 		tubp = (*tubminors)[minor];
@@ -383,28 +393,21 @@ extern inline tub_t *INODE2TUB(struct inode *ip)
  */
 extern inline tub_t *TTY2TUB(struct tty_struct *tty)
 {
-	unsigned int minor = MINOR(tty->device);
+	unsigned index = tty->index;
 	tub_t *tubp = NULL;
 
-#if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
-#ifdef CONFIG_TN3270_CONSOLE
-	if (tty->device == S390_CONSOLE_DEV)
-		tubp = tub3270_con_tubp;
-	else
-#endif
-#endif
-	if (minor <= tubnummins && minor > 0)
-		tubp = (*tubminors)[minor];
+	if (index <= tubnummins && index > 0)
+		tubp = (*tubminors)[index];
 	return tubp;
 }
 
-extern void tub_inc_use_count(void);
-extern void tub_dec_use_count(void);
 extern int tub3270_movedata(bcb_t *, bcb_t *, int);
+#if 0
 #if (LINUX_VERSION_CODE < KERNEL_VERSION(2,3,0))
 extern int tubmakemin(int, dev_info_t *);
 #else
 extern int tubmakemin(int, s390_dev_info_t *);
+#endif
 #endif
 extern int tub3270_con_copy(tub_t *);
 extern int tty3270_rcl_init(tub_t *);
@@ -412,9 +415,12 @@ extern int tty3270_rcl_set(tub_t *, char *, int);
 extern void tty3270_rcl_fini(tub_t *);
 extern int tty3270_rcl_get(tub_t *, char *, int, int);
 extern void tty3270_rcl_put(tub_t *, char *, int);
-extern void tty3270_rcl_sync(tub_t *);
 extern void tty3270_rcl_purge(tub_t *);
+#if 0
+/* these appear to be unused outside of tubttyrcl */
+extern void tty3270_rcl_sync(tub_t *);
 extern int tty3270_rcl_resize(tub_t *, int);
+#endif
 extern int tty3270_size(tub_t *, long *);
 extern int tty3270_aid_init(tub_t *);
 extern void tty3270_aid_fini(tub_t *);

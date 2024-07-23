@@ -5,8 +5,9 @@
 #include <linux/config.h>
 #include <asm/uaccess.h>
 #include <linux/string.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/reiserfs_fs.h>
+#include <linux/buffer_head.h>
 
 /* this is one and only function that is used outside (do_balance.c) */
 int	balance_internal (
@@ -623,10 +624,10 @@ static void balance_internal_when_delete (struct tree_balance * tb,
 		new_root = tb->L[h-1];
 	    /* switch super block's tree root block number to the new value */
             PUT_SB_ROOT_BLOCK( tb->tb_sb, new_root->b_blocknr );
-	    //tb->tb_sb->u.reiserfs_sb.s_rs->s_tree_height --;
+	    //REISERFS_SB(tb->tb_sb)->s_rs->s_tree_height --;
             PUT_SB_TREE_HEIGHT( tb->tb_sb, SB_TREE_HEIGHT(tb->tb_sb) - 1 );
 
-	    do_balance_mark_sb_dirty (tb, tb->tb_sb->u.reiserfs_sb.s_sbh, 1);
+	    do_balance_mark_sb_dirty (tb, REISERFS_SB(tb->tb_sb)->s_sbh, 1);
 	    /*&&&&&&&&&&&&&&&&&&&&&&*/
 	    if (h > 1)
 		/* use check_internal if new root is an internal node */
@@ -949,7 +950,7 @@ int balance_internal (struct tree_balance * tb,			/* tree_balance structure 		*/
 	/* Change root in structure super block. */
         PUT_SB_ROOT_BLOCK( tb->tb_sb, tbSh->b_blocknr );
         PUT_SB_TREE_HEIGHT( tb->tb_sb, SB_TREE_HEIGHT(tb->tb_sb) + 1 );
-	do_balance_mark_sb_dirty (tb, tb->tb_sb->u.reiserfs_sb.s_sbh, 1);
+	do_balance_mark_sb_dirty (tb, REISERFS_SB(tb->tb_sb)->s_sbh, 1);
 	tb->tb_sb->s_dirt = 1;
     }
 	
@@ -1027,10 +1028,9 @@ int balance_internal (struct tree_balance * tb,			/* tree_balance structure 		*/
 	/* new_insert_ptr = node_pointer to S_new */
 	new_insert_ptr = S_new;
 
-	RFALSE(( buffer_locked(S_new) || atomic_read (&(S_new->b_count)) != 1) &&
-	       (buffer_locked(S_new) || atomic_read(&(S_new->b_count)) > 2 ||
-		!(buffer_journaled(S_new) || buffer_journal_dirty(S_new))),
-	       "cm-00001: bad S_new (%b)", S_new);
+	RFALSE (!buffer_journaled(S_new) || buffer_journal_dirty(S_new) ||
+		buffer_dirty (S_new),
+		"cm-00001: bad S_new (%b)", S_new);
 
 	// S_new is released in unfix_nodes
     }

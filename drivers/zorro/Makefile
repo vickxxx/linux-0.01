@@ -1,27 +1,20 @@
 #
 # Makefile for the Zorro bus specific drivers.
 #
-# Note! Dependencies are done automagically by 'make dep', which also
-# removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
-#
-# Note 2! The CFLAGS definition is now inherited from the
-# parent makefile.
-#
-
-O_TARGET := driver.o
-
-export-objs		:= zorro.o
 
 obj-$(CONFIG_ZORRO)	+= zorro.o names.o
 obj-$(CONFIG_PROC_FS)	+= proc.o
 
-include $(TOPDIR)/Rules.make
+host-progs 		:= gen-devlist
 
-names.o: names.c devlist.h
+# Files generated that shall be removed upon make clean
+clean-files := devlist.h
 
-devlist.h: zorro.ids gen-devlist
-	./gen-devlist <zorro.ids
+# Dependencies on generated files need to be listed explicitly
 
-gen-devlist: gen-devlist.c
-	$(HOSTCC) $(HOSTCFLAGS) -o gen-devlist gen-devlist.c
+$(obj)/names.o: $(obj)/devlist.h
+
+# And that's how to generate them
+
+$(obj)/devlist.h: $(src)/zorro.ids $(obj)/gen-devlist
+	( cd $(obj); ./gen-devlist ) < $<

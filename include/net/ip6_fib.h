@@ -67,19 +67,12 @@ struct rt6_info
 	
 	u32				rt6i_flags;
 	u32				rt6i_metric;
-	u8				rt6i_hoplimit;
 	atomic_t			rt6i_ref;
-
-	union {
-		struct flow_rule	*rt6iu_flowr;
-		struct flow_filter	*rt6iu_filter;
-	} flow_u;
-
-#define rt6i_flowr			flow_u.rt6iu_flowr
-#define rt6i_filter			flow_u.rt6iu_filter
 
 	struct rt6key			rt6i_dst;
 	struct rt6key			rt6i_src;
+
+	u8				rt6i_protocol;
 };
 
 struct fib6_walker_t
@@ -118,9 +111,10 @@ static inline void fib6_walker_unlink(struct fib6_walker_t *w)
 struct rt6_statistics {
 	__u32		fib_nodes;
 	__u32		fib_route_nodes;
-	__u32		fib_rt_alloc;		/* permanet routes	*/
+	__u32		fib_rt_alloc;		/* permanent routes	*/
 	__u32		fib_rt_entries;		/* rt entries in table	*/
 	__u32		fib_rt_cache;		/* cache routes		*/
+	__u32		fib_discarded_routes;
 };
 
 #define RTN_TL_ROOT	0x0001
@@ -168,11 +162,16 @@ extern int			fib6_walk(struct fib6_walker_t *w);
 extern int			fib6_walk_continue(struct fib6_walker_t *w);
 
 extern int			fib6_add(struct fib6_node *root,
-					 struct rt6_info *rt);
+					 struct rt6_info *rt,
+					 struct nlmsghdr *nlh,
+					 void *rtattr);
 
-extern int			fib6_del(struct rt6_info *rt);
+extern int			fib6_del(struct rt6_info *rt,
+					 struct nlmsghdr *nlh,
+					 void *rtattr);
 
-extern void			inet6_rt_notify(int event, struct rt6_info *rt);
+extern void			inet6_rt_notify(int event, struct rt6_info *rt,
+						struct nlmsghdr *nlh);
 
 extern void			fib6_run_gc(unsigned long dummy);
 

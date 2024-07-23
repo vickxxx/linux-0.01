@@ -13,11 +13,14 @@
 #include <linux/ioport.h>
 #include <linux/delay.h>
 #include <linux/utsname.h>
-#include <linux/blk.h>
+#include <linux/initrd.h>
 #include <linux/console.h>
 #include <linux/bootmem.h>
 #include <linux/seq_file.h>
+#include <linux/tty.h>
 #include <linux/init.h>
+#include <linux/root_dev.h>
+#include <linux/cpu.h>
 
 #include <asm/elf.h>
 #include <asm/hardware.h>
@@ -25,16 +28,13 @@
 #include <asm/procinfo.h>
 #include <asm/setup.h>
 #include <asm/mach-types.h>
+#include <asm/tlbflush.h>
 
 #include <asm/mach/arch.h>
 #include <asm/mach/irq.h>
 
 #ifndef MEM_SIZE
 #define MEM_SIZE	(16*1024*1024)
-#endif
-
-#ifndef CONFIG_CMDLINE
-#define CONFIG_CMDLINE ""
 #endif
 
 #if defined(CONFIG_FPE_NWFPE) || defined(CONFIG_FPE_FASTFPE)
@@ -51,14 +51,14 @@ __setup("fpe=", fpe_setup);
 
 extern unsigned int mem_fclk_21285;
 extern void paging_init(struct meminfo *, struct machine_desc *desc);
-extern void convert_to_tag_list(struct param_struct *params, int mem_init);
+extern void convert_to_tag_list(struct tag *tags);
+extern void squash_mem_tags(struct tag *tag);
 extern void bootmem_init(struct meminfo *);
 extern void reboot_setup(char *str);
 extern int root_mountflags;
 extern int _stext, _text, _etext, _edata, _end;
 
 unsigned int processor_id;
-unsigned int compat;
 unsigned int __machine_arch_type;
 unsigned int system_rev;
 unsigned int system_serial_low;
@@ -68,13 +68,24 @@ unsigned int elf_hwcap;
 #ifdef MULTI_CPU
 struct processor processor;
 #endif
+#ifdef MULTI_TLB
+struct cpu_tlb_fns cpu_tlb;
+#endif
+#ifdef MULTI_USER
+struct cpu_user_fns cpu_user;
+#endif
+#ifdef MULTI_CACHE
+struct cpu_cache_fns cpu_cache;
+#endif
 
 unsigned char aux_device_present;
 char elf_platform[ELF_PLATFORM_SIZE];
 char saved_command_line[COMMAND_LINE_SIZE];
+unsigned long phys_initrd_start __initdata = 0;
+unsigned long phys_initrd_size __initdata = 0;
 
 static struct meminfo meminfo __initdata = { 0, };
-static struct proc_info_item proc_info;
+static const char *cpu_name;
 static const char *machine_name;
 static char command_line[COMMAND_LINE_SIZE];
 
@@ -105,6 +116,140 @@ static struct resource io_res[] = {
 #define lp1 io_res[1]
 #define lp2 io_res[2]
 
+static const char *cache_types[16] = {
+	"write-through",
+	"write-back",
+	"write-back",
+	"undefined 3",
+	"undefined 4",
+	"undefined 5",
+	"write-back",
+	"write-back",
+	"undefined 8",
+	"undefined 9",
+	"undefined 10",
+	"undefined 11",
+	"undefined 12",
+	"undefined 13",
+	"undefined 14",
+	"undefined 15",
+};
+
+static const char *cache_clean[16] = {
+	"not required",
+	"read-block",
+	"cp15 c7 ops",
+	"undefined 3",
+	"undefined 4",
+	"undefined 5",
+	"cp15 c7 ops",
+	"cp15 c7 ops",
+	"undefined 8",
+	"undefined 9",
+	"undefined 10",
+	"undefined 11",
+	"undefined 12",
+	"undefined 13",
+	"undefined 14",
+	"undefined 15",
+};
+
+static const char *cache_lockdown[16] = {
+	"not supported",
+	"not supported",
+	"not supported",
+	"undefined 3",
+	"undefined 4",
+	"undefined 5",
+	"format A",
+	"format B",
+	"undefined 8",
+	"undefined 9",
+	"undefined 10",
+	"undefined 11",
+	"undefined 12",
+	"undefined 13",
+	"undefined 14",
+	"undefined 15",
+};
+
+static const char *proc_arch[] = {
+	"undefined/unknown",
+	"3",
+	"4",
+	"4T",
+	"5",
+	"5T",
+	"5TE",
+	"?(8)",
+	"?(9)",
+	"?(10)",
+	"?(11)",
+	"?(12)",
+	"?(13)",
+	"?(14)",
+	"?(15)",
+	"?(16)",
+	"?(17)",
+};
+
+#define CACHE_TYPE(x)	(((x) >> 25) & 15)
+#define CACHE_S(x)	((x) & (1 << 24))
+#define CACHE_DSIZE(x)	(((x) >> 12) & 4095)	/* only if S=1 */
+#define CACHE_ISIZE(x)	((x) & 4095)
+
+#define CACHE_SIZE(y)	(((y) >> 6) & 7)
+#define CACHE_ASSOC(y)	(((y) >> 3) & 7)
+#define CACHE_M(y)	((y) & (1 << 2))
+#define CACHE_LINE(y)	((y) & 3)
+
+static inline void dump_cache(const char *prefix, unsigned int cache)
+{
+	unsigned int mult = 2 + (CACHE_M(cache) ? 1 : 0);
+
+	printk("%s: %d bytes, associativity %d, %d byte lines, %d sets\n",
+		prefix,
+		mult << (8 + CACHE_SIZE(cache)),
+		(mult << CACHE_ASSOC(cache)) >> 1,
+		8 << CACHE_LINE(cache),
+		1 << (6 + CACHE_SIZE(cache) - CACHE_ASSOC(cache) -
+			CACHE_LINE(cache)));
+}
+
+static void __init dump_cpu_info(void)
+{
+	unsigned int info;
+
+	asm("mrc p15, 0, %0, c0, c0, 1" : "=r" (info));
+
+	if (info != processor_id) {
+		printk("CPU: D %s cache\n", cache_types[CACHE_TYPE(info)]);
+		if (CACHE_S(info)) {
+			dump_cache("CPU: I cache", CACHE_ISIZE(info));
+			dump_cache("CPU: D cache", CACHE_DSIZE(info));
+		} else {
+			dump_cache("CPU: cache", CACHE_ISIZE(info));
+		}
+	}
+}
+
+int cpu_architecture(void)
+{
+	int cpu_arch;
+
+	if ((processor_id & 0x0000f000) == 0) {
+		cpu_arch = CPU_ARCH_UNKNOWN;
+	} else if ((processor_id & 0x0000f000) == 0x00007000) {
+		cpu_arch = (processor_id & (1 << 23)) ? CPU_ARCH_ARMv4T : CPU_ARCH_ARMv3;
+	} else {
+		cpu_arch = (processor_id >> 16) & 15;
+		if (cpu_arch)
+			cpu_arch += CPU_ARCH_ARMv3;
+	}
+
+	return cpu_arch;
+}
+
 static void __init setup_processor(void)
 {
 	extern struct proc_info_list __proc_info_begin, __proc_info_end;
@@ -129,15 +274,26 @@ static void __init setup_processor(void)
 		while (1);
 	}
 
-	proc_info = *list->info;
+	cpu_name = list->cpu_name;
 
 #ifdef MULTI_CPU
 	processor = *list->proc;
 #endif
+#ifdef MULTI_TLB
+	cpu_tlb = *list->tlb;
+#endif
+#ifdef MULTI_USER
+	cpu_user = *list->user;
+#endif
+#ifdef MULTI_CACHE
+	cpu_cache = *list->cache;
+#endif
 
-	printk("Processor: %s %s revision %d\n",
-	       proc_info.manufacturer, proc_info.cpu_name,
-	       (int)processor_id & 15);
+	printk("CPU: %s [%08x] revision %d (ARMv%s)\n",
+	       cpu_name, processor_id, (int)processor_id & 15,
+	       proc_arch[cpu_architecture()]);
+
+	dump_cpu_info();
 
 	sprintf(system_utsname.machine, "%s%c", list->arch_name, ENDIANNESS);
 	sprintf(elf_platform, "%s%c", list->elf_name, ENDIANNESS);
@@ -146,7 +302,7 @@ static void __init setup_processor(void)
 	cpu_proc_init();
 }
 
-static struct machine_desc * __init setup_architecture(unsigned int nr)
+static struct machine_desc * __init setup_machine(unsigned int nr)
 {
 	extern struct machine_desc __arch_info_begin, __arch_info_end;
 	struct machine_desc *list;
@@ -168,53 +324,83 @@ static struct machine_desc * __init setup_architecture(unsigned int nr)
 		while (1);
 	}
 
-	printk("Architecture: %s\n", list->name);
-	if (compat)
-		printk(KERN_WARNING "Using compatibility code "
-			"scheduled for removal in v%d.%d.%d\n",
-			compat >> 24, (compat >> 12) & 0x3ff,
-			compat & 0x3ff);
+	printk("Machine: %s\n", list->name);
 
 	return list;
 }
 
+static void __init early_initrd(char **p)
+{
+	unsigned long start, size;
+
+	start = memparse(*p, p);
+	if (**p == ',') {
+		size = memparse((*p) + 1, p);
+
+		phys_initrd_start = start;
+		phys_initrd_size = size;
+	}
+}
+__early_param("initrd=", early_initrd);
+
 /*
- * Initial parsing of the command line.  We need to pick out the
- * memory size.  We look for mem=size@start, where start and size
- * are "size[KkMm]"
+ * Pick out the memory size.  We look for mem=size@start,
+ * where start and size are "size[KkMm]"
  */
-static void __init
-parse_cmdline(struct meminfo *mi, char **cmdline_p, char *from)
+static void __init early_mem(char **p)
+{
+	static int usermem __initdata = 0;
+	unsigned long size, start;
+
+	/*
+	 * If the user specifies memory size, we
+	 * blow away any automatically generated
+	 * size.
+	 */
+	if (usermem == 0) {
+		usermem = 1;
+		meminfo.nr_banks = 0;
+	}
+
+	start = PHYS_OFFSET;
+	size  = memparse(*p, p);
+	if (**p == '@')
+		start = memparse(*p + 1, p);
+
+	meminfo.bank[meminfo.nr_banks].start = start;
+	meminfo.bank[meminfo.nr_banks].size  = size;
+	meminfo.bank[meminfo.nr_banks].node  = PHYS_TO_NID(start);
+	meminfo.nr_banks += 1;
+}
+__early_param("mem=", early_mem);
+
+/*
+ * Initial parsing of the command line.
+ */
+static void __init parse_cmdline(char **cmdline_p, char *from)
 {
 	char c = ' ', *to = command_line;
-	int usermem = 0, len = 0;
+	int len = 0;
 
 	for (;;) {
-		if (c == ' ' && !memcmp(from, "mem=", 4)) {
-			unsigned long size, start;
+		if (c == ' ') {
+			extern struct early_params __early_begin, __early_end;
+			struct early_params *p;
 
-			if (to != command_line)
-				to -= 1;
+			for (p = &__early_begin; p < &__early_end; p++) {
+				int len = strlen(p->arg);
 
-			/*
-			 * If the user specifies memory size, we
-			 * blow away any automatically generated
-			 * size.
-			 */
-			if (usermem == 0) {
-				usermem = 1;
-				mi->nr_banks = 0;
+				if (memcmp(from, p->arg, len) == 0) {
+					if (to != command_line)
+						to -= 1;
+					from += len;
+					p->fn(&from);
+
+					while (*from != ' ' && *from != '\0')
+						from++;
+					break;
+				}
 			}
-
-			start = PHYS_OFFSET;
-			size  = memparse(from + 4, &from);
-			if (*from == '@')
-				start = memparse(from + 1, &from);
-
-			mi->bank[mi->nr_banks].start = start;
-			mi->bank[mi->nr_banks].size  = size;
-			mi->bank[mi->nr_banks].node  = PHYS_TO_NID(start);
-			mi->nr_banks += 1;
 		}
 		c = *from++;
 		if (!c)
@@ -227,11 +413,11 @@ parse_cmdline(struct meminfo *mi, char **cmdline_p, char *from)
 	*cmdline_p = command_line;
 }
 
-void __init
+static void __init
 setup_ramdisk(int doload, int prompt, int image_start, unsigned int rd_sz)
 {
 #ifdef CONFIG_BLK_DEV_RAM
-	extern int rd_size;
+	extern int rd_size, rd_image_start, rd_prompt, rd_doload;
 
 	rd_image_start = image_start;
 	rd_prompt = prompt;
@@ -239,19 +425,6 @@ setup_ramdisk(int doload, int prompt, int image_start, unsigned int rd_sz)
 
 	if (rd_sz)
 		rd_size = rd_sz;
-#endif
-}
-
-/*
- * initial ram disk
- */
-void __init setup_initrd(unsigned int start, unsigned int size)
-{
-#ifdef CONFIG_BLK_DEV_INITRD
-	if (start == 0)
-		size = 0;
-	initrd_start = start;
-	initrd_end   = start + size;
 #endif
 }
 
@@ -324,7 +497,7 @@ static int __init parse_tag_core(const struct tag *tag)
 	if (tag->hdr.size > 2) {
 		if ((tag->u.core.flags & 1) == 0)
 			root_mountflags &= ~MS_RDONLY;
-		ROOT_DEV = to_kdev_t(tag->u.core.rootdev);
+		ROOT_DEV = tag->u.core.rootdev;
 	}
 	return 0;
 }
@@ -351,12 +524,12 @@ __tagtable(ATAG_MEM, parse_tag_mem32);
 
 #if defined(CONFIG_VGA_CONSOLE) || defined(CONFIG_DUMMY_CONSOLE)
 struct screen_info screen_info = {
- orig_video_lines:	30,
- orig_video_cols:	80,
- orig_video_mode:	0,
- orig_video_ega_bx:	0,
- orig_video_isVGA:	1,
- orig_video_points:	8
+ .orig_video_lines	= 30,
+ .orig_video_cols	= 80,
+ .orig_video_mode	= 0,
+ .orig_video_ega_bx	= 0,
+ .orig_video_isVGA	= 1,
+ .orig_video_points	= 8
 };
 
 static int __init parse_tag_videotext(const struct tag *tag)
@@ -388,11 +561,23 @@ __tagtable(ATAG_RAMDISK, parse_tag_ramdisk);
 
 static int __init parse_tag_initrd(const struct tag *tag)
 {
-	setup_initrd(tag->u.initrd.start, tag->u.initrd.size);
+	printk(KERN_WARNING "ATAG_INITRD is deprecated; "
+		"please update your bootloader.\n");
+	phys_initrd_start = __virt_to_phys(tag->u.initrd.start);
+	phys_initrd_size = tag->u.initrd.size;
 	return 0;
 }
 
 __tagtable(ATAG_INITRD, parse_tag_initrd);
+
+static int __init parse_tag_initrd2(const struct tag *tag)
+{
+	phys_initrd_start = tag->u.initrd.start;
+	phys_initrd_size = tag->u.initrd.size;
+	return 0;
+}
+
+__tagtable(ATAG_INITRD2, parse_tag_initrd2);
 
 static int __init parse_tag_serialnr(const struct tag *tag)
 {
@@ -413,8 +598,7 @@ __tagtable(ATAG_REVISION, parse_tag_revision);
 
 static int __init parse_tag_cmdline(const struct tag *tag)
 {
-	strncpy(default_command_line, tag->u.cmdline.cmdline, COMMAND_LINE_SIZE);
-	default_command_line[COMMAND_LINE_SIZE - 1] = '\0';
+	strlcpy(default_command_line, tag->u.cmdline.cmdline, COMMAND_LINE_SIZE);
 	return 0;
 }
 
@@ -452,16 +636,31 @@ static void __init parse_tags(const struct tag *t)
 				t->hdr.tag);
 }
 
+/*
+ * This holds our defaults.
+ */
+static struct init_tags {
+	struct tag_header hdr1;
+	struct tag_core   core;
+	struct tag_header hdr2;
+	struct tag_mem32  mem;
+	struct tag_header hdr3;
+} init_tags __initdata = {
+	{ tag_size(tag_core), ATAG_CORE },
+	{ 1, PAGE_SIZE, 0xff },
+	{ tag_size(tag_mem32), ATAG_MEM },
+	{ MEM_SIZE, PHYS_OFFSET },
+	{ 0, ATAG_NONE }
+};
+
 void __init setup_arch(char **cmdline_p)
 {
-	struct tag *tags = NULL;
+	struct tag *tags = (struct tag *)&init_tags;
 	struct machine_desc *mdesc;
 	char *from = default_command_line;
 
-	ROOT_DEV = MKDEV(0, 255);
-
 	setup_processor();
-	mdesc = setup_architecture(machine_arch_type);
+	mdesc = setup_machine(machine_arch_type);
 	machine_name = mdesc->name;
 
 	if (mdesc->soft_reboot)
@@ -471,28 +670,21 @@ void __init setup_arch(char **cmdline_p)
 		tags = phys_to_virt(mdesc->param_offset);
 
 	/*
-	 * Do the machine-specific fixups before we parse the
-	 * parameters or tags.
-	 */
-	if (mdesc->fixup)
-		mdesc->fixup(mdesc, (struct param_struct *)tags,
-			     &from, &meminfo);
-
-	/*
 	 * If we have the old style parameters, convert them to
-	 * a tag list before.
+	 * a tag list.
 	 */
-	if (tags && tags->hdr.tag != ATAG_CORE)
-		convert_to_tag_list((struct param_struct *)tags,
-				    meminfo.nr_banks == 0);
+	if (tags->hdr.tag != ATAG_CORE)
+		convert_to_tag_list(tags);
+	if (tags->hdr.tag != ATAG_CORE)
+		tags = (struct tag *)&init_tags;
 
-	if (tags && tags->hdr.tag == ATAG_CORE)
+	if (mdesc->fixup)
+		mdesc->fixup(mdesc, tags, &from, &meminfo);
+
+	if (tags->hdr.tag == ATAG_CORE) {
+		if (meminfo.nr_banks != 0)
+			squash_mem_tags(tags);
 		parse_tags(tags);
-
-	if (meminfo.nr_banks == 0) {
-		meminfo.nr_banks      = 1;
-		meminfo.bank[0].start = PHYS_OFFSET;
-		meminfo.bank[0].size  = MEM_SIZE;
 	}
 
 	init_mm.start_code = (unsigned long) &_text;
@@ -502,7 +694,7 @@ void __init setup_arch(char **cmdline_p)
 
 	memcpy(saved_command_line, from, COMMAND_LINE_SIZE);
 	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';
-	parse_cmdline(&meminfo, cmdline_p, from);
+	parse_cmdline(cmdline_p, from);
 	bootmem_init(&meminfo);
 	paging_init(&meminfo, mdesc);
 	request_standard_resources(&meminfo, mdesc);
@@ -521,6 +713,15 @@ void __init setup_arch(char **cmdline_p)
 #endif
 }
 
+static struct cpu cpu[1];
+
+static int __init topology_init(void)
+{
+	return register_cpu(cpu, 0, NULL);
+}
+
+subsys_initcall(topology_init);
+
 static const char *hwcap_str[] = {
 	"swp",
 	"half",
@@ -533,13 +734,28 @@ static const char *hwcap_str[] = {
 	NULL
 };
 
+static void
+c_show_cache(struct seq_file *m, const char *type, unsigned int cache)
+{
+	unsigned int mult = 2 + (CACHE_M(cache) ? 1 : 0);
+
+	seq_printf(m, "%s size\t\t: %d\n"
+		      "%s assoc\t\t: %d\n"
+		      "%s line length\t: %d\n"
+		      "%s sets\t\t: %d\n",
+		type, mult << (8 + CACHE_SIZE(cache)),
+		type, (mult << CACHE_ASSOC(cache)) >> 1,
+		type, 8 << CACHE_LINE(cache),
+		type, 1 << (6 + CACHE_SIZE(cache) - CACHE_ASSOC(cache) -
+			    CACHE_LINE(cache)));
+}
+
 static int c_show(struct seq_file *m, void *v)
 {
 	int i;
 
-	seq_printf(m, "Processor\t: %s %s rev %d (%s)\n",
-		   proc_info.manufacturer, proc_info.cpu_name,
-		   (int)processor_id & 15, elf_platform);
+	seq_printf(m, "Processor\t: %s rev %d (%s)\n",
+		   cpu_name, (int)processor_id & 15, elf_platform);
 
 	seq_printf(m, "BogoMIPS\t: %lu.%02lu\n",
 		   loops_per_jiffy / (500000/HZ),
@@ -552,7 +768,51 @@ static int c_show(struct seq_file *m, void *v)
 		if (elf_hwcap & (1 << i))
 			seq_printf(m, "%s ", hwcap_str[i]);
 
-	seq_puts(m, "\n\n");
+	seq_printf(m, "\nCPU implementer\t: 0x%02x\n", processor_id >> 24);
+	seq_printf(m, "CPU architecture: %s\n", proc_arch[cpu_architecture()]);
+
+	if ((processor_id & 0x0000f000) == 0x00000000) {
+		/* pre-ARM7 */
+		seq_printf(m, "CPU part\t\t: %07x\n", processor_id >> 4);
+	} else {
+		if ((processor_id & 0x0000f000) == 0x00007000) {
+			/* ARM7 */
+			seq_printf(m, "CPU variant\t: 0x%02x\n",
+				   (processor_id >> 16) & 127);
+		} else {
+			/* post-ARM7 */
+			seq_printf(m, "CPU variant\t: 0x%x\n",
+				   (processor_id >> 20) & 15);
+		}
+		seq_printf(m, "CPU part\t: 0x%03x\n",
+			   (processor_id >> 4) & 0xfff);
+	}
+	seq_printf(m, "CPU revision\t: %d\n", processor_id & 15);
+
+	{
+		unsigned int cache_info;
+
+		asm("mrc p15, 0, %0, c0, c0, 1" : "=r" (cache_info));
+		if (cache_info != processor_id) {
+			seq_printf(m, "Cache type\t: %s\n"
+				      "Cache clean\t: %s\n"
+				      "Cache lockdown\t: %s\n"
+				      "Cache unified\t: %s\n",
+				   cache_types[CACHE_TYPE(cache_info)],
+				   cache_clean[CACHE_TYPE(cache_info)],
+				   cache_lockdown[CACHE_TYPE(cache_info)],
+				   CACHE_S(cache_info) ? "Harvard" : "Unified");
+
+			if (CACHE_S(cache_info)) {
+				c_show_cache(m, "I", CACHE_ISIZE(cache_info));
+				c_show_cache(m, "D", CACHE_DSIZE(cache_info));
+			} else {
+				c_show_cache(m, "Cache", CACHE_ISIZE(cache_info));
+			}
+		}
+	}
+
+	seq_puts(m, "\n");
 
 	seq_printf(m, "Hardware\t: %s\n", machine_name);
 	seq_printf(m, "Revision\t: %04x\n", system_rev);
@@ -578,8 +838,8 @@ static void c_stop(struct seq_file *m, void *v)
 }
 
 struct seq_operations cpuinfo_op = {
-	start:	c_start,
-	next:	c_next,
-	stop:	c_stop,
-	show:	c_show
+	.start	= c_start,
+	.next	= c_next,
+	.stop	= c_stop,
+	.show	= c_show
 };

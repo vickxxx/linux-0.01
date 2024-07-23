@@ -33,33 +33,25 @@ Boston, MA 02111-1307, USA.  */
    This exception does not however invalidate any other reasons why
    the executable file might be covered by the GNU General Public License.
  */
-/* This code is derived from gcc 2.95.3 */
-/* I Molton     29/07/01 */
+/* This code is derived from gcc 2.95.3
+ * 29/07/01 Adapted for linux
+ * 27/03/03 Ian Molton Clean up CONFIG_CPU
+ */
 
 #include <linux/linkage.h>
 #include <asm/assembler.h>
 #include <asm/hardware.h>
 #include <linux/config.h>
 
-#ifdef CONFIG_CPU_26
-#define RET	movs
-#define RETc(x)	mov##x##s
-#define RETCOND ^
-#else
 #define RET	mov
 #define RETc(x)	mov##x
 #define RETCOND
-#endif
 
 dividend	.req	r0
 divisor		.req	r1
 result		.req	r2
 overdone        .req    r2
 curbit		.req	r3
-ip		.req	r12
-sp		.req	r13
-lr		.req	r14
-pc		.req	r15
 	
 ENTRY(__udivsi3)
 	cmp	divisor, #0

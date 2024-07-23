@@ -14,6 +14,7 @@
 #include <linux/config.h>
 #include <linux/proc_fs.h>
 #include <linux/devfs_fs_kernel.h>
+#include <linux/kernel.h>
 #include <linux/unistd.h>
 #include <linux/string.h>
 #include <linux/ctype.h>
@@ -23,51 +24,32 @@
 #include <linux/init.h>
 #include <linux/smp_lock.h>
 #include <linux/blk.h>
+#include <linux/initrd.h>
 #include <linux/hdreg.h>
-#include <linux/iobuf.h>
 #include <linux/bootmem.h>
-#include <linux/file.h>
 #include <linux/tty.h>
+#include <linux/gfp.h>
+#include <linux/percpu.h>
+#include <linux/kernel_stat.h>
+#include <linux/security.h>
+#include <linux/workqueue.h>
+#include <linux/profile.h>
+#include <linux/rcupdate.h>
+#include <linux/moduleparam.h>
+#include <linux/writeback.h>
+#include <linux/cpu.h>
 
 #include <asm/io.h>
 #include <asm/bugs.h>
 
-#if defined(CONFIG_ARCH_S390)
-#include <asm/s390mach.h>
-#include <asm/ccwcache.h>
+/*
+ * This is one of the first .c files built. Error out early
+ * if we have compiler trouble..
+ */
+#if __GNUC__ == 2 && __GNUC_MINOR__ == 96
+#ifdef CONFIG_FRAME_POINTER
+#error This compiler cannot compile correctly with frame pointers enabled
 #endif
-
-#ifdef CONFIG_ACPI
-#include <linux/acpi.h>
-#endif
-
-#ifdef CONFIG_PCI
-#include <linux/pci.h>
-#endif
-
-#ifdef CONFIG_DIO
-#include <linux/dio.h>
-#endif
-
-#ifdef CONFIG_ZORRO
-#include <linux/zorro.h>
-#endif
-
-#ifdef CONFIG_MTRR
-#  include <asm/mtrr.h>
-#endif
-
-#ifdef CONFIG_NUBUS
-#include <linux/nubus.h>
-#endif
-
-#ifdef CONFIG_ISAPNP
-#include <linux/isapnp.h>
-#endif
-
-#ifdef CONFIG_IRDA
-extern int irda_proto_init(void);
-extern int irda_device_init(void);
 #endif
 
 #ifdef CONFIG_X86_LOCAL_APIC
@@ -80,42 +62,43 @@ extern int irda_device_init(void);
  * To avoid associated bogus bug reports, we flatly refuse to compile
  * with a gcc that is known to be too old from the very beginning.
  */
-#if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 91)
+#if __GNUC__ < 2 || (__GNUC__ == 2 && __GNUC_MINOR__ < 95)
 #error Sorry, your GCC is too old. It builds incorrect kernels.
 #endif
 
-extern char _stext, _etext;
 extern char *linux_banner;
 
 static int init(void *);
 
 extern void init_IRQ(void);
-extern void init_modules(void);
 extern void sock_init(void);
 extern void fork_init(unsigned long);
 extern void mca_init(void);
 extern void sbus_init(void);
-extern void ppc_init(void);
 extern void sysctl_init(void);
 extern void signals_init(void);
-extern int init_pcmcia_ds(void);
-
+extern void buffer_init(void);
+extern void pidhash_init(void);
+extern void pidmap_init(void);
+extern void pte_chain_init(void);
+extern void radix_tree_init(void);
 extern void free_initmem(void);
-#ifdef  CONFIG_ACPI_BUS
-extern void acpi_early_init(void);
-#else
-static inline void acpi_early_init(void) { }
-#endif
+extern void populate_rootfs(void);
+extern void driver_init(void);
 
 #ifdef CONFIG_TC
 extern void tc_init(void);
 #endif
 
-extern void ecard_init(void);
-
 #if defined(CONFIG_SYSVIPC)
 extern void ipc_init(void);
 #endif
+
+/*
+ * Are we up and running (ie do we have all the infrastructure
+ * set up)
+ */
+int system_running = 0;
 
 /*
  * Boot command-line arguments
@@ -130,21 +113,44 @@ int rows, cols;
 
 char *execute_command;
 
-static char * argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
-char * envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
+/* Setup configured maximum number of CPUs to activate */
+static unsigned int max_cpus = NR_CPUS;
 
-static int __init profile_setup(char *str)
+/*
+ * Setup routine for controlling SMP activation
+ *
+ * Command-line option of "nosmp" or "maxcpus=0" will disable SMP
+ * activation entirely (the MPS table probe still happens, though).
+ *
+ * Command-line option of "maxcpus=<NUM>", where <NUM> is an integer
+ * greater than 0, limits the maximum number of CPUs activated in
+ * SMP mode to <NUM>.
+ */
+static int __init nosmp(char *str)
 {
-    int par;
-    if (get_option(&str,&par)) prof_shift = par;
+	max_cpus = 0;
 	return 1;
 }
 
+__setup("nosmp", nosmp);
+
+static int __init maxcpus(char *str)
+{
+	get_option(&str, &max_cpus);
+	return 1;
+}
+
+__setup("maxcpus=", maxcpus);
+
+static char * argv_init[MAX_INIT_ARGS+2] = { "init", NULL, };
+char * envp_init[MAX_INIT_ENVS+2] = { "HOME=/", "TERM=linux", NULL, };
+
 __setup("profile=", profile_setup);
 
-static int __init checksetup(char *line)
+static int __init obsolete_checksetup(char *line)
 {
-	struct kernel_param *p;
+	struct obs_kernel_param *p;
+	extern struct obs_kernel_param __setup_start, __setup_end;
 
 	p = &__setup_start;
 	do {
@@ -227,78 +233,63 @@ static int __init quiet_kernel(char *str)
 __setup("debug", debug_kernel);
 __setup("quiet", quiet_kernel);
 
-/*
- * This is a simple kernel command line parsing function: it parses
- * the command line, and fills in the arguments/environment to init
- * as appropriate. Any cmd-line option is taken to be an environment
- * variable if it contains the character '='.
- *
- * This routine also checks for options meant for the kernel.
- * These options are not given to init - they are for internal kernel use only.
- */
-static void __init parse_options(char *line)
+/* Unknown boot options get handed to init, unless they look like
+   failed parameters */
+static int __init unknown_bootoption(char *param, char *val)
 {
-	char *next,*quote;
-	int args, envs;
+	/* Change NUL term back to "=", to make "param" the whole string. */
+	if (val)
+		val[-1] = '=';
 
-	if (!*line)
-		return;
-	args = 0;
-	envs = 1;	/* TERM is set to 'linux' by default */
-	next = line;
-	while ((line = next) != NULL) {
-                quote = strchr(line,'"');
-                next = strchr(line, ' ');
-                while (next != NULL && quote != NULL && quote < next) {
-                        /* we found a left quote before the next blank
-                         * now we have to find the matching right quote
-                         */
-                        next = strchr(quote+1, '"');
-                        if (next != NULL) {
-                                quote = strchr(next+1, '"');
-                                next = strchr(next+1, ' ');
-                        }
-                }
-                if (next != NULL)
-                        *next++ = 0;
-		if (!strncmp(line,"init=",5)) {
-			line += 5;
-			execute_command = line;
-			/* In case LILO is going to boot us with default command line,
-			 * it prepends "auto" before the whole cmdline which makes
-			 * the shell think it should execute a script with such name.
-			 * So we ignore all arguments entered _before_ init=... [MJ]
-			 */
-			args = 0;
-			continue;
-		}
-		if (checksetup(line))
-			continue;
-		
-		/*
-		 * Then check if it's an environment variable or
-		 * an option.
-		 */
-		if (strchr(line,'=')) {
-			if (envs >= MAX_INIT_ENVS)
-				break;
-			envp_init[++envs] = line;
-		} else {
-			if (args >= MAX_INIT_ARGS)
-				break;
-			if (*line)
-				argv_init[++args] = line;
-		}
+	/* Handle obsolete-style parameters */
+	if (obsolete_checksetup(param))
+		return 0;
+
+	/* Preemptive maintenance for "why didn't my mispelled command
+           line work?" */
+	if (strchr(param, '.') && (!val || strchr(param, '.') < val)) {
+		printk(KERN_ERR "Unknown boot option `%s': ignoring\n", param);
+		return 0;
 	}
-	argv_init[args+1] = NULL;
-	envp_init[envs+1] = NULL;
+
+	if (val) {
+		/* Environment option */
+		unsigned int i;
+		for (i = 0; envp_init[i]; i++) {
+			if (i == MAX_INIT_ENVS)
+				panic("Too many boot env vars at `%s'", param);
+		}
+		envp_init[i] = param;
+	} else {
+		/* Command line option */
+		unsigned int i;
+		for (i = 0; argv_init[i]; i++) {
+			if (i == MAX_INIT_ARGS)
+				panic("Too many boot init vars at `%s'",param);
+		}
+		argv_init[i] = param;
+	}
+	return 0;
 }
 
+static int __init init_setup(char *str)
+{
+	unsigned int i;
+
+	execute_command = str;
+	/* In case LILO is going to boot us with default command line,
+	 * it prepends "auto" before the whole cmdline which makes
+	 * the shell think it should execute a script with such name.
+	 * So we ignore all arguments entered _before_ init=... [MJ]
+	 */
+	for (i = 1; i < MAX_INIT_ARGS; i++)
+		argv_init[i] = NULL;
+	return 1;
+}
+__setup("init=", init_setup);
 
 extern void setup_arch(char **);
 extern void cpu_idle(void);
-
-unsigned long wait_init_idle;
 
 #ifndef CONFIG_SMP
 
@@ -311,27 +302,61 @@ static void __init smp_init(void)
 #define smp_init()	do { } while (0)
 #endif
 
+static inline void setup_per_cpu_areas(void) { }
+static inline void smp_prepare_cpus(unsigned int maxcpus) { }
+
 #else
 
+#ifdef __GENERIC_PER_CPU
+unsigned long __per_cpu_offset[NR_CPUS];
+
+static void __init setup_per_cpu_areas(void)
+{
+	unsigned long size, i;
+	char *ptr;
+	/* Created by linker magic */
+	extern char __per_cpu_start[], __per_cpu_end[];
+
+	/* Copy section for each CPU (we discard the original) */
+	size = ALIGN(__per_cpu_end - __per_cpu_start, SMP_CACHE_BYTES);
+#ifdef CONFIG_MODULES
+	if (size < PERCPU_ENOUGH_ROOM)
+		size = PERCPU_ENOUGH_ROOM;
+#endif
+
+	ptr = alloc_bootmem(size * NR_CPUS);
+
+	for (i = 0; i < NR_CPUS; i++, ptr += size) {
+		__per_cpu_offset[i] = ptr - __per_cpu_start;
+		memcpy(ptr, __per_cpu_start, __per_cpu_end - __per_cpu_start);
+	}
+}
+#endif /* !__GENERIC_PER_CPU */
 
 /* Called by boot processor to activate the rest. */
 static void __init smp_init(void)
 {
+	unsigned int i;
+
+	/* FIXME: This should be done in userspace --RR */
+	for (i = 0; i < NR_CPUS; i++) {
+		if (num_online_cpus() >= max_cpus)
+			break;
+		if (cpu_possible(i) && !cpu_online(i)) {
+			printk("Bringing up %i\n", i);
+			cpu_up(i);
+		}
+	}
+
+	/* Any cleanup work */
+	printk("CPUS done %u\n", max_cpus);
+	smp_cpus_done(max_cpus);
+#if 0
 	/* Get other processors into their bootup holding patterns. */
-	smp_boot_cpus();
-	wait_init_idle = cpu_online_map;
-	clear_bit(current->processor, &wait_init_idle); /* Don't wait on me! */
 
 	smp_threads_ready=1;
 	smp_commence();
-
-	/* Wait for the other cpus to set up their idle processes */
-	printk("Waiting on wait_init_idle (map = 0x%lx)\n", wait_init_idle);
-	while (wait_init_idle) {
-		cpu_relax();
-		barrier();
-	}
-	printk("All processors have done init_idle\n");
+#endif
 }
 
 #endif
@@ -345,9 +370,8 @@ static void __init smp_init(void)
 
 static void rest_init(void)
 {
-	kernel_thread(init, NULL, CLONE_FS | CLONE_FILES | CLONE_SIGNAL);
+	kernel_thread(init, NULL, CLONE_KERNEL);
 	unlock_kernel();
-	current->need_resched = 1;
  	cpu_idle();
 } 
 
@@ -359,6 +383,7 @@ asmlinkage void __init start_kernel(void)
 {
 	char * command_line;
 	extern char saved_command_line[];
+	extern struct kernel_param __start___param[], __stop___param[];
 /*
  * Interrupts are still disabled. Do necessary setups, then
  * enable them
@@ -366,10 +391,25 @@ asmlinkage void __init start_kernel(void)
 	lock_kernel();
 	printk(linux_banner);
 	setup_arch(&command_line);
+	setup_per_zone_pages_min();
+	setup_per_cpu_areas();
+
+	/*
+	 * Mark the boot cpu "online" so that it can call console drivers in
+	 * printk() and can access its per-cpu storage.
+	 */
+	smp_prepare_boot_cpu();
+
+	build_all_zonelists();
+	page_alloc_init();
 	printk("Kernel command line: %s\n", saved_command_line);
-	parse_options(command_line);
+	parse_args("Booting kernel", command_line, __start___param,
+		   __stop___param - __start___param,
+		   &unknown_bootoption);
 	trap_init();
+	rcu_init();
 	init_IRQ();
+	pidhash_init();
 	sched_init();
 	softirq_init();
 	time_init();
@@ -380,21 +420,8 @@ asmlinkage void __init start_kernel(void)
 	 * this. But we do want output early, in case something goes wrong.
 	 */
 	console_init();
-#ifdef CONFIG_MODULES
-	init_modules();
-#endif
-	if (prof_shift) {
-		unsigned int size;
-		/* only text is profiled */
-		prof_len = (unsigned long) &_etext - (unsigned long) &_stext;
-		prof_len >>= prof_shift;
-		
-		size = prof_len * sizeof(unsigned int) + PAGE_SIZE-1;
-		prof_buffer = (unsigned int *) alloc_bootmem(size);
-	}
-
-	kmem_cache_init();
-	sti();
+	profile_init();
+	local_irq_enable();
 	calibrate_delay();
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (initrd_start && !initrd_below_start_ok &&
@@ -404,34 +431,29 @@ asmlinkage void __init start_kernel(void)
 		initrd_start = 0;
 	}
 #endif
+	page_address_init();
 	mem_init();
-	kmem_cache_sizes_init();
+	kmem_cache_init();
+	pidmap_init();
 	pgtable_cache_init();
-
-	/*
-	 * For architectures that have highmem, num_mappedpages represents
-	 * the amount of memory the kernel can use.  For other architectures
-	 * it's the same as the total pages.  We need both numbers because
-	 * some subsystems need to initialize based on how much memory the
-	 * kernel can use.
-	 */
-	if (num_mappedpages == 0)
-		num_mappedpages = num_physpages;
-  
-	fork_init(num_mappedpages);
+	pte_chain_init();
+	fork_init(num_physpages);
 	proc_caches_init();
+	buffer_init();
+	security_scaffolding_startup();
 	vfs_caches_init(num_physpages);
-	buffer_init(num_physpages);
-	page_cache_init(num_physpages);
-#if defined(CONFIG_ARCH_S390)
-	ccwcache_init();
-#endif
+	radix_tree_init();
 	signals_init();
+	/* rootfs populating might need page-writeback */
+	page_writeback_init();
+	populate_rootfs();
 #ifdef CONFIG_PROC_FS
 	proc_root_init();
 #endif
+#if defined(CONFIG_SYSVIPC)
+	ipc_init();
+#endif
 	check_bugs();
-	acpi_early_init(); /* before LAPIC and SMP init */
 	printk("POSIX conformance testing by UNIFIX\n");
 
 	/* 
@@ -439,27 +461,55 @@ asmlinkage void __init start_kernel(void)
 	 *	Like idlers init is an unlocked kernel thread, which will
 	 *	make syscalls (and thus be locked).
 	 */
-	smp_init();
-#if defined(CONFIG_SYSVIPC)
-	ipc_init();
-#endif
+	init_idle(current, smp_processor_id());
+
+	/* Do the rest non-__init'ed, we're now alive */
 	rest_init();
 }
 
+int __initdata initcall_debug;
+
+static int __init initcall_debug_setup(char *str)
+{
+	initcall_debug = 1;
+	return 1;
+}
+__setup("initcall_debug", initcall_debug_setup);
+
 struct task_struct *child_reaper = &init_task;
+
+extern initcall_t __initcall_start, __initcall_end;
 
 static void __init do_initcalls(void)
 {
 	initcall_t *call;
+	int count = preempt_count();
 
-	call = &__initcall_start;
-	do {
+	for (call = &__initcall_start; call < &__initcall_end; call++) {
+		char *msg;
+
+		if (initcall_debug)
+			printk("calling initcall 0x%p\n", *call);
+
 		(*call)();
-		call++;
-	} while (call < &__initcall_end);
+
+		msg = NULL;
+		if (preempt_count() != count) {
+			msg = "preemption imbalance";
+			preempt_count() = count;
+		}
+		if (irqs_disabled()) {
+			msg = "disabled interrupts";
+			local_irq_enable();
+		}
+		if (msg) {
+			printk("error in initcall at 0x%p: "
+				"returned with %s\n", *call, msg);
+		}
+	}
 
 	/* Make sure there is no pending stuff from the initcall sequence */
-	flush_scheduled_tasks();
+	flush_scheduled_work();
 }
 
 /*
@@ -471,7 +521,38 @@ static void __init do_initcalls(void)
  */
 static void __init do_basic_setup(void)
 {
+	driver_init();
 
+#ifdef CONFIG_SYSCTL
+	sysctl_init();
+#endif
+
+	/* Networking initialization needs a process context */ 
+	sock_init();
+
+	init_workqueues();
+	do_initcalls();
+}
+
+static void do_pre_smp_initcalls(void)
+{
+	extern int spawn_ksoftirqd(void);
+#ifdef CONFIG_SMP
+	extern int migration_init(void);
+
+	migration_init();
+#endif
+	node_nr_running_init();
+	spawn_ksoftirqd();
+}
+
+extern void prepare_namespace(void);
+
+static int init(void * unused)
+{
+	static char * argv_sh[] = { "sh", NULL, };
+
+	lock_kernel();
 	/*
 	 * Tell the world that we're going to be the grim
 	 * reaper of innocent orphaned children.
@@ -482,87 +563,12 @@ static void __init do_basic_setup(void)
 	 */
 	child_reaper = current;
 
-#if defined(CONFIG_MTRR)	/* Do this after SMP initialization */
-/*
- * We should probably create some architecture-dependent "fixup after
- * everything is up" style function where this would belong better
- * than in init/main.c..
- */
-	mtrr_init();
-#endif
+	/* Sets up cpus_possible() */
+	smp_prepare_cpus(max_cpus);
 
-#ifdef CONFIG_SYSCTL
-	sysctl_init();
-#endif
+	do_pre_smp_initcalls();
 
-	/*
-	 * Ok, at this point all CPU's should be initialized, so
-	 * we can start looking into devices..
-	 */
-#if defined(CONFIG_ARCH_S390)
-	s390_init_machine_check();
-#endif
-#ifdef CONFIG_ACPI_INTERPRETER
-	acpi_init();
-#endif
-#ifdef CONFIG_PCI
-	pci_init();
-#endif
-#ifdef CONFIG_SBUS
-	sbus_init();
-#endif
-#if defined(CONFIG_PPC)
-	ppc_init();
-#endif
-#ifdef CONFIG_MCA
-	mca_init();
-#endif
-#ifdef CONFIG_ARCH_ACORN
-	ecard_init();
-#endif
-#ifdef CONFIG_ZORRO
-	zorro_init();
-#endif
-#ifdef CONFIG_DIO
-	dio_init();
-#endif
-#ifdef CONFIG_NUBUS
-	nubus_init();
-#endif
-#ifdef CONFIG_ISAPNP
-	isapnp_init();
-#endif
-#ifdef CONFIG_TC
-	tc_init();
-#endif
-
-	/* Networking initialization needs a process context */ 
-	sock_init();
-
-	start_context_thread();
-	do_initcalls();
-
-#ifdef CONFIG_IRDA
-	irda_proto_init();
-	irda_device_init(); /* Must be done after protocol initialization */
-#endif
-#ifdef CONFIG_PCMCIA
-	init_pcmcia_ds();		/* Do this last */
-#endif
-}
-
-static void run_init_process(char *init_filename)
-{
-	argv_init[0] = init_filename;
-	execve(init_filename, argv_init, envp_init);
-}
-
-extern void prepare_namespace(void);
-
-static int init(void * unused)
-{
-	struct files_struct *files;
-	lock_kernel();
+	smp_init();
 	do_basic_setup();
 
 	prepare_namespace();
@@ -574,17 +580,8 @@ static int init(void * unused)
 	 */
 	free_initmem();
 	unlock_kernel();
-	
-	/*
-	 * Right now we are a thread sharing with a ton of kernel
-	 * stuff. We don't want to end up in user space in that state
-	 */
-	 
-	files = current->files;
-	if(unshare_files())
-		panic("unshare");
-	put_files_struct(files);
-	
+	system_running = 1;
+
 	if (open("/dev/console", O_RDWR, 0) < 0)
 		printk("Warning: unable to open an initial console.\n");
 
@@ -599,12 +596,10 @@ static int init(void * unused)
 	 */
 
 	if (execute_command)
-		run_init_process(execute_command);
-
-	run_init_process("/sbin/init");
-	run_init_process("/etc/init");
-	run_init_process("/bin/init");
-	run_init_process("/bin/sh");
-
+		execve(execute_command,argv_init,envp_init);
+	execve("/sbin/init",argv_init,envp_init);
+	execve("/etc/init",argv_init,envp_init);
+	execve("/bin/init",argv_init,envp_init);
+	execve("/bin/sh",argv_sh,envp_init);
 	panic("No init found.  Try passing init= option to kernel.");
 }

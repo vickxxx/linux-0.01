@@ -1,6 +1,7 @@
 #ifndef _KBD_KERN_H
 #define _KBD_KERN_H
 
+#include <linux/tty.h>
 #include <linux/interrupt.h>
 #include <linux/keyboard.h>
 
@@ -42,11 +43,12 @@ struct kbd_struct {
 #define LED_SHOW_IOCTL 1        /* only change leds upon ioctl */
 #define LED_SHOW_MEM 2          /* `heartbeat': peek into memory */
 
-	unsigned char ledflagstate:3;	/* flags, not lights */
-	unsigned char default_ledflagstate:3;
+	unsigned char ledflagstate:4;	/* flags, not lights */
+	unsigned char default_ledflagstate:4;
 #define VC_SCROLLOCK	0	/* scroll-lock mode */
 #define VC_NUMLOCK	1	/* numeric lock mode */
 #define VC_CAPSLOCK	2	/* capslock mode */
+#define VC_KANALOCK	3	/* kanalock mode */
 
 	unsigned char kbdmode:2;	/* one 2-bit value */
 #define VC_XLATE	0	/* translate keycodes using keymap */
@@ -140,7 +142,6 @@ struct console;
 int getkeycode(unsigned int scancode);
 int setkeycode(unsigned int scancode, unsigned int keycode);
 void compute_shiftstate(void);
-int keyboard_wait_for_keypress(struct console *);
 
 /* defkeymap.c */
 
@@ -150,7 +151,7 @@ extern unsigned int keymap_count;
 
 static inline void con_schedule_flip(struct tty_struct *t)
 {
-	schedule_task(&t->flip.tqueue);
+	schedule_work(&t->flip.work);
 }
 
 #endif

@@ -1,9 +1,6 @@
 /*
- * BK Id: SCCS/s.mem_pieces.c 1.5 05/17/01 18:14:23 cort
- */
-/*
  *    Copyright (c) 1996 Paul Mackerras <paulus@cs.anu.edu.au>
- *      Changes to accomodate Power Macintoshes.
+ *      Changes to accommodate Power Macintoshes.
  *    Cort Dougan <cort@cs.nmt.edu>
  *      Rewrites.
  *    Grant Erickson <grant@lcse.umn.edu>
@@ -45,7 +42,7 @@ mem_pieces_find(unsigned int size, unsigned int align)
 		a = (a + align - 1) & -align;
 		if (a + size <= e) {
 			mem_pieces_remove(mp, a, size, 1);
-			return __va(a);
+			return (void *) __va(a);
 		}
 	}
 	panic("Couldn't find %u bytes at %u alignment\n", size, align);
@@ -123,7 +120,7 @@ mem_pieces_print(struct mem_pieces *mp)
 	printk("\n");
 }
 
-#if defined(CONFIG_APUS) || defined(CONFIG_ALL_PPC)
+#if defined(CONFIG_APUS) || defined(CONFIG_PPC_OF)
 /*
  * Add some memory to an array of pieces
  */
@@ -138,7 +135,7 @@ mem_pieces_append(struct mem_pieces *mp, unsigned int start, unsigned int size)
 	rp->address = start;
 	rp->size = size;
 }
-#endif /* CONFIG_APUS || CONFIG_ALL_PPC */
+#endif /* CONFIG_APUS || CONFIG_PPC_OF */
 
 void __init
 mem_pieces_sort(struct mem_pieces *mp)

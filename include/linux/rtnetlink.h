@@ -17,6 +17,7 @@
 #define	RTM_NEWLINK	(RTM_BASE+0)
 #define	RTM_DELLINK	(RTM_BASE+1)
 #define	RTM_GETLINK	(RTM_BASE+2)
+#define	RTM_SETLINK	(RTM_BASE+3)
 
 #define	RTM_NEWADDR	(RTM_BASE+4)
 #define	RTM_DELADDR	(RTM_BASE+5)
@@ -49,7 +50,7 @@
 #define	RTM_MAX		(RTM_BASE+31)
 
 /* 
-   Generic structure for encapsulation optional route information.
+   Generic structure for encapsulation of optional route information.
    It is reminiscent of sockaddr, but with sa_family replaced
    with attribute type.
  */
@@ -77,7 +78,7 @@ struct rtattr
 
 
 /******************************************************************************
- *		Definitions used in routing table administation.
+ *		Definitions used in routing table administration.
  ****/
 
 struct rtmsg
@@ -128,14 +129,14 @@ enum
 #define RTPROT_STATIC	4	/* Route installed by administrator	*/
 
 /* Values of protocol >= RTPROT_STATIC are not interpreted by kernel;
-   they just passed from user and back as is.
+   they are just passed from user and back as is.
    It will be used by hypothetical multiple routing daemons.
    Note that protocol values should be standardized in order to
    avoid conflicts.
  */
 
 #define RTPROT_GATED	8	/* Apparently, GateD */
-#define RTPROT_RA	9	/* RDISC/ND router advertisments */
+#define RTPROT_RA	9	/* RDISC/ND router advertisements */
 #define RTPROT_MRT	10	/* Merit MRT */
 #define RTPROT_ZEBRA	11	/* Zebra */
 #define RTPROT_BIRD	12	/* BIRD */
@@ -198,18 +199,19 @@ enum rtattr_type_t
 	RTA_MULTIPATH,
 	RTA_PROTOINFO,
 	RTA_FLOW,
-	RTA_CACHEINFO
+	RTA_CACHEINFO,
+	RTA_SESSION,
 };
 
-#define RTA_MAX RTA_CACHEINFO
+#define RTA_MAX RTA_SESSION
 
 #define RTM_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct rtmsg))))
 #define RTM_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct rtmsg))
 
 /* RTM_MULTIPATH --- array of struct rtnexthop.
  *
- * "struct rtnexthop" describres all necessary nexthop information,
- * i.e. parameters of path to a destination via this nextop.
+ * "struct rtnexthop" describes all necessary nexthop information,
+ * i.e. parameters of path to a destination via this nexthop.
  *
  * At the moment it is impossible to set different prefsrc, mtu, window
  * and rtt for different paths from multipath.
@@ -280,10 +282,39 @@ enum
 #define RTAX_ADVMSS RTAX_ADVMSS
 	RTAX_REORDERING,
 #define RTAX_REORDERING RTAX_REORDERING
+	RTAX_HOPLIMIT,
+#define RTAX_HOPLIMIT RTAX_HOPLIMIT
+	RTAX_INITCWND,
+#define RTAX_INITCWND RTAX_INITCWND
+	RTAX_FEATURES,
+#define RTAX_FEATURES RTAX_FEATURES
 };
 
-#define RTAX_MAX RTAX_REORDERING
+#define RTAX_MAX RTAX_FEATURES
 
+#define RTAX_FEATURE_ECN	0x00000001
+#define RTAX_FEATURE_SACK	0x00000002
+#define RTAX_FEATURE_TIMESTAMP	0x00000004
+
+struct rta_session
+{
+	__u8	proto;
+
+	union {
+		struct {
+			__u16	sport;
+			__u16	dport;
+		} ports;
+
+		struct {
+			__u8	type;
+			__u8	code;
+			__u16	ident;
+		} icmpt;
+
+		__u32		spi;
+	} u;
+};
 
 
 /*********************************************************
@@ -315,6 +346,7 @@ enum
 /* ifa_flags */
 
 #define IFA_F_SECONDARY		0x01
+#define IFA_F_TEMPORARY		IFA_F_SECONDARY
 
 #define IFA_F_DEPRECATED	0x20
 #define IFA_F_TENTATIVE		0x40
@@ -440,12 +472,14 @@ enum
 #define IFLA_COST IFLA_COST
 	IFLA_PRIORITY,
 #define IFLA_PRIORITY IFLA_PRIORITY
-	IFLA_MASTER
+	IFLA_MASTER,
 #define IFLA_MASTER IFLA_MASTER
+	IFLA_WIRELESS,		/* Wireless Extension event - see wireless.h */
+#define IFLA_WIRELESS IFLA_WIRELESS
 };
 
 
-#define IFLA_MAX IFLA_MASTER
+#define IFLA_MAX IFLA_WIRELESS
 
 #define IFLA_RTA(r)  ((struct rtattr*)(((char*)(r)) + NLMSG_ALIGN(sizeof(struct ifinfomsg))))
 #define IFLA_PAYLOAD(n) NLMSG_PAYLOAD(n,sizeof(struct ifinfomsg))
@@ -461,7 +495,7 @@ enum
 
    Comments:
    - Combination IFF_BROADCAST|IFF_POINTOPOINT is invalid
-   - If neiher of these three flags are set;
+   - If neither of these three flags are set;
      the interface is NBMA.
 
    - IFF_MULTICAST does not mean anything special:
@@ -546,7 +580,6 @@ static __inline__ int rtattr_strcmp(struct rtattr *rta, char *str)
 
 extern int rtattr_parse(struct rtattr *tb[], int maxattr, struct rtattr *rta, int len);
 
-#ifdef CONFIG_RTNETLINK
 extern struct sock *rtnl;
 
 struct rtnetlink_link
@@ -558,7 +591,7 @@ struct rtnetlink_link
 extern struct rtnetlink_link * rtnetlink_links[NPROTO];
 extern int rtnetlink_dump_ifinfo(struct sk_buff *skb, struct netlink_callback *cb);
 extern int rtnetlink_send(struct sk_buff *skb, u32 pid, u32 group, int echo);
-extern int rtnetlink_put_metrics(struct sk_buff *skb, unsigned *metrics);
+extern int rtnetlink_put_metrics(struct sk_buff *skb, u32 *metrics);
 
 extern void __rta_fill(struct sk_buff *skb, int attrtype, int attrlen, const void *data);
 
@@ -567,12 +600,6 @@ extern void __rta_fill(struct sk_buff *skb, int attrtype, int attrlen, const voi
    __rta_fill(skb, attrtype, attrlen, data); })
 
 extern void rtmsg_ifinfo(int type, struct net_device *dev, unsigned change);
-
-#else
-
-#define rtmsg_ifinfo(a,b,c) do { } while (0)
-
-#endif
 
 extern struct semaphore rtnl_sem;
 
@@ -583,23 +610,19 @@ extern struct semaphore rtnl_sem;
 #define rtnl_shlock()		down(&rtnl_sem)
 #define rtnl_shlock_nowait()	down_trylock(&rtnl_sem)
 
-#ifndef CONFIG_RTNETLINK
-#define rtnl_shunlock()	up(&rtnl_sem)
-#else
 #define rtnl_shunlock()	do { up(&rtnl_sem); \
-		             if (rtnl && rtnl->receive_queue.qlen) \
-				     rtnl->data_ready(rtnl, 0); \
+		             if (rtnl && rtnl->sk_receive_queue.qlen) \
+				     rtnl->sk_data_ready(rtnl, 0); \
 		        } while(0)
-#endif
 
 extern void rtnl_lock(void);
 extern void rtnl_unlock(void);
 extern void rtnetlink_init(void);
 
 #define ASSERT_RTNL() do { if (down_trylock(&rtnl_sem) == 0)  { up(&rtnl_sem); \
-printk("RTNL: assertion failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); } \
-		   } while(0);
-#define BUG_TRAP(x) if (!(x)) { printk("KERNEL: assertion (" #x ") failed at " __FILE__ "(%d):" __FUNCTION__ "\n", __LINE__); }
+printk("RTNL: assertion failed at " __FILE__ "(%d)\n", __LINE__); } \
+		   } while(0)
+#define BUG_TRAP(x) if (!(x)) { printk("KERNEL: assertion (" #x ") failed at " __FILE__ "(%d)\n", __LINE__); }
 
 
 #endif /* __KERNEL__ */

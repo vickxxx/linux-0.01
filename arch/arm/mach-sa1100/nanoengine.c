@@ -15,35 +15,25 @@
 
 #include "generic.h"
 
-
 static void __init
-fixup_nanoengine(struct machine_desc *desc, struct param_struct *params,
+fixup_nanoengine(struct machine_desc *desc, struct tag *tags,
 		 char **cmdline, struct meminfo *mi)
 {
-	SET_BANK( 0, 0xc0000000, 32*1024*1024 );
-	mi->nr_banks = 1;
-
-	ROOT_DEV = MKDEV(RAMDISK_MAJOR,0);
-	setup_ramdisk( 1, 0, 0, 8192 );
-	setup_initrd( __phys_to_virt(0xc0800000), 4*1024*1024 );
-
 	/* Get command line parameters passed from the loader (if any) */
-	if( *((char*)0xc0000100) )
+	if (*((char*)0xc0000100))
 		*cmdline = ((char *)0xc0000100);
 }
 
 static struct map_desc nanoengine_io_desc[] __initdata = {
- /* virtual     physical    length      domain     r  w  c  b */
-  { 0xe8000000, 0x00000000, 0x02000000, DOMAIN_IO, 1, 1, 0, 0 }, /* Flash bank 0 */
-  { 0xf0000000, 0x10000000, 0x00100000, DOMAIN_IO, 1, 1, 0, 0 }, /* System Registers */
-  { 0xf1000000, 0x18A00000, 0x00100000, DOMAIN_IO, 1, 1, 0, 0 }, /* Internal PCI Config Space */
-  LAST_DESC
+ /* virtual     physical    length      type */
+  { 0xf0000000, 0x10000000, 0x00100000, MT_DEVICE }, /* System Registers */
+  { 0xf1000000, 0x18A00000, 0x00100000, MT_DEVICE }  /* Internal PCI Config Space */
 };
 
 static void __init nanoengine_map_io(void)
 {
 	sa1100_map_io();
-	iotable_init(nanoengine_io_desc);
+	iotable_init(nanoengine_io_desc, ARRAY_SIZE(nanoengine_io_desc));
 
 	sa1100_register_uart(0, 1);
 	sa1100_register_uart(1, 2);

@@ -2,18 +2,8 @@
 # Makefile for s390-specific library files..
 #
 
-ifdef SMP
-.S.o:
-	$(CC) -D__ASSEMBLY__ $(AFLAGS) -traditional -c $< -o $*.o
-else
-.S.o:
-	$(CC) -D__ASSEMBLY__ -traditional -c $< -o $*.o
-endif
+EXTRA_AFLAGS := -traditional
 
-L_TARGET = lib.a
-
-obj-y = checksum.o delay.o memset.o misaligned.o strcmp.o strncpy.o uaccess.o
-export-objs += misaligned.o
-
-include $(TOPDIR)/Rules.make
-
+lib-y += delay.o 
+lib-$(CONFIG_ARCH_S390_31) += memset.o strcmp.o strncpy.o uaccess.o
+lib-$(CONFIG_ARCH_S390X) += memset64.o strcmp64.o strncpy64.o uaccess64.o

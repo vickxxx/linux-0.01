@@ -12,27 +12,27 @@
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/slab.h>
+#include <linux/fs.h>
+#include <linux/miscdevice.h>
 #include <asm/uaccess.h>
-#include <linux/devfs_fs_kernel.h>
 #include "miropcm20-rds-core.h"
 
-devfs_handle_t dfsh;
-char * text_buffer;
+static char * text_buffer;
 static int rds_users = 0;
 
 
 static int rds_f_open(struct inode *in, struct file *fi)
 {
-	if(rds_users)
+	if (rds_users)
 		return -EBUSY;
 
+	rds_users++;
 	if ((text_buffer=kmalloc(66, GFP_KERNEL)) == 0) {
+		rds_users--;
 		printk(KERN_NOTICE "aci-rds: Out of memory by open()...\n");
 		return -ENOMEM;
 	}
 
-	rds_users++;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -41,7 +41,6 @@ static int rds_f_release(struct inode *in, struct file *fi)
 	kfree(text_buffer);
 
 	rds_users--;
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
@@ -105,35 +104,28 @@ static ssize_t rds_f_read(struct file *file, char *buffer, size_t length, loff_t
 	}
 }
 
-static struct file_operations rds_f_ops = {
-	read:    rds_f_read,
-	open:    rds_f_open,
-	release: rds_f_release
+static struct file_operations rds_fops = {
+	.owner		= THIS_MODULE,
+	.read		= rds_f_read,
+	.open		= rds_f_open,
+	.release	= rds_f_release
 };
 
+static struct miscdevice rds_miscdev = {
+	.minor		= MISC_DYNAMIC_MINOR,
+	.name		= "radiotext",
+	.devfs_name	= "v4l/rds/radiotext",
+	.fops		= &rds_fops,
+};
 
 static int __init miropcm20_rds_init(void)
 {
-	if ((dfsh = devfs_register(NULL, "v4l/rds/radiotext", 
-				   DEVFS_FL_DEFAULT | DEVFS_FL_AUTO_DEVNUM,
-				   0, 0, S_IRUGO | S_IFCHR, &rds_f_ops, NULL))
-	    == NULL)
-		goto devfs_register;
-
-	printk("miropcm20-rds: userinterface driver loaded.\n");
-#if DEBUG
-	printk("v4l-name: %s\n", devfs_get_name(pcm20_radio.devfs_handle, 0));
-#endif
-
-	return 0;
-
- devfs_register:
-	return -EINVAL;
+	return misc_register(&rds_miscdev);
 }
 
 static void __exit miropcm20_rds_cleanup(void)
 {
-	devfs_unregister(dfsh);
+	misc_deregister(&rds_miscdev);
 }
 
 module_init(miropcm20_rds_init);

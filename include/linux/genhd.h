@@ -12,9 +12,13 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/major.h>
+#include <linux/device.h>
+#include <linux/smp.h>
+#include <linux/string.h>
+#include <linux/fs.h>
 
 enum {
-/* These three have identical behaviour; use the second one if DOS fdisk gets
+/* These three have identical behaviour; use the second one if DOS FDISK gets
    confused about extended/logical partitions starting past cylinder 1023. */
 	DOS_EXTENDED_PARTITION = 5,
 	LINUX_EXTENDED_PARTITION = 0x85,
@@ -25,20 +29,17 @@ enum {
 
 	SOLARIS_X86_PARTITION =	LINUX_SWAP_PARTITION,
 
-	DM6_PARTITION =	0x54,	/* has DDO: use xlated geom & offset */
-	EZD_PARTITION =	0x55,	/* EZ-DRIVE */
 	DM6_AUX1PARTITION = 0x51,	/* no DDO:  use xlated geom */
 	DM6_AUX3PARTITION = 0x53,	/* no DDO:  use xlated geom */
+	DM6_PARTITION =	0x54,		/* has DDO: use xlated geom & offset */
+	EZD_PARTITION =	0x55,		/* EZ-DRIVE */
 
-	FREEBSD_PARTITION = 0xa5,    /* FreeBSD Partition ID */
-	OPENBSD_PARTITION = 0xa6,    /* OpenBSD Partition ID */
-	NETBSD_PARTITION = 0xa9,   /* NetBSD Partition ID */
-	BSDI_PARTITION = 0xb7,    /* BSDI Partition ID */
-/* Ours is not to wonder why.. */
-	BSD_PARTITION =	FREEBSD_PARTITION,
-	MINIX_PARTITION = 0x81,  /* Minix Partition ID */
-	UNIXWARE_PARTITION = 0x63,		/* Partition ID, same as */
-						/* GNU_HURD and SCO Unix */
+	FREEBSD_PARTITION = 0xa5,	/* FreeBSD Partition ID */
+	OPENBSD_PARTITION = 0xa6,	/* OpenBSD Partition ID */
+	NETBSD_PARTITION = 0xa9,	/* NetBSD Partition ID */
+	BSDI_PARTITION = 0xb7,		/* BSDI Partition ID */
+	MINIX_PARTITION = 0x81,		/* Minix Partition ID */
+	UNIXWARE_PARTITION = 0x63,	/* Same as GNU_HURD and SCO Unix */
 };
 
 struct partition {
@@ -55,42 +56,157 @@ struct partition {
 } __attribute__((packed));
 
 #ifdef __KERNEL__
-#  include <linux/devfs_fs_kernel.h>
-
 struct hd_struct {
-	unsigned long start_sect;
-	unsigned long nr_sects;
-	devfs_handle_t de;              /* primary (master) devfs entry  */
-	int number;                     /* stupid old code wastes space  */
+	sector_t start_sect;
+	sector_t nr_sects;
+	struct kobject kobj;
+	unsigned reads, read_sectors, writes, write_sectors;
+	int policy, partno;
 };
 
 #define GENHD_FL_REMOVABLE  1
+#define GENHD_FL_DRIVERFS  2
+#define GENHD_FL_CD	8
+#define GENHD_FL_UP	16
 
+struct disk_stats {
+	unsigned read_sectors, write_sectors;
+	unsigned reads, writes;
+	unsigned read_merges, write_merges;
+	unsigned read_ticks, write_ticks;
+	unsigned io_ticks;
+	int in_flight;
+	unsigned time_in_queue;
+};
+	
 struct gendisk {
 	int major;			/* major number of driver */
-	const char *major_name;		/* name of major driver */
-	int minor_shift;		/* number of times minor is shifted to
-					   get real minor */
-	int max_p;			/* maximum partitions per device */
-
-	struct hd_struct *part;		/* [indexed by minor] */
-	int *sizes;			/* [idem], device size in blocks */
-	int nr_real;			/* number of real devices */
-
-	void *real_devices;		/* internal use */
-	struct gendisk *next;
+	int first_minor;
+	int minors;
+	char disk_name[16];		/* name of major driver */
+	struct hd_struct **part;	/* [indexed by minor] */
 	struct block_device_operations *fops;
+	struct request_queue *queue;
+	void *private_data;
+	sector_t capacity;
 
-	devfs_handle_t *de_arr;         /* one per physical disc */
-	char *flags;                    /* one per physical disc */
+	int flags;
+	char devfs_name[64];		/* devfs crap */
+	int number;			/* more of the same */
+	struct device *driverfs_dev;
+	struct kobject kobj;
+
+	struct timer_rand_state *random;
+	int policy;
+
+	unsigned sync_io;		/* RAID */
+	unsigned long stamp, stamp_idle;
+#ifdef	CONFIG_SMP
+	struct disk_stats *dkstats;
+#else
+	struct disk_stats dkstats;
+#endif
 };
 
-/* drivers/block/genhd.c */
-extern struct gendisk *gendisk_head;
+/* 
+ * Macros to operate on percpu disk statistics:
+ * Since writes to disk_stats are serialised through the queue_lock,
+ * smp_processor_id() should be enough to get to the per_cpu versions
+ * of statistics counters
+ */
+#ifdef	CONFIG_SMP
+#define disk_stat_add(gendiskp, field, addnd) 	\
+	(per_cpu_ptr(gendiskp->dkstats, smp_processor_id())->field += addnd)
+#define disk_stat_read(gendiskp, field)					\
+({									\
+	typeof(gendiskp->dkstats->field) res = 0;			\
+	int i;								\
+	for (i=0; i < NR_CPUS; i++) {					\
+		if (!cpu_possible(i))					\
+			continue;					\
+		res += per_cpu_ptr(gendiskp->dkstats, i)->field;	\
+	}								\
+	res;								\
+})
 
-extern void add_gendisk(struct gendisk *gp);
+static inline void disk_stat_set_all(struct gendisk *gendiskp, int value)	{
+	int i;
+	for (i=0; i < NR_CPUS; i++) {
+		if (cpu_possible(i)) {
+			memset(per_cpu_ptr(gendiskp->dkstats, i), value,	
+					sizeof (struct disk_stats));
+		}
+	}
+}		
+				
+#else
+#define disk_stat_add(gendiskp, field, addnd) (gendiskp->dkstats.field += addnd)
+#define disk_stat_read(gendiskp, field)	(gendiskp->dkstats.field)
+
+static inline void disk_stat_set_all(struct gendisk *gendiskp, int value)	{
+	memset(&gendiskp->dkstats, value, sizeof (struct disk_stats));
+}
+#endif
+
+#define disk_stat_inc(gendiskp, field) disk_stat_add(gendiskp, field, 1)
+#define disk_stat_dec(gendiskp, field) disk_stat_add(gendiskp, field, -1)
+#define disk_stat_sub(gendiskp, field, subnd) \
+		disk_stat_add(gendiskp, field, -subnd)
+
+
+/* Inlines to alloc and free disk stats in struct gendisk */
+#ifdef  CONFIG_SMP
+static inline int init_disk_stats(struct gendisk *disk)
+{
+	disk->dkstats = alloc_percpu(struct disk_stats);
+	if (!disk->dkstats)
+		return 0;
+	return 1;
+}
+
+static inline void free_disk_stats(struct gendisk *disk)
+{
+	free_percpu(disk->dkstats);
+}
+#else	/* CONFIG_SMP */
+static inline int init_disk_stats(struct gendisk *disk)
+{
+	return 1;
+}
+
+static inline void free_disk_stats(struct gendisk *disk)
+{
+}
+#endif	/* CONFIG_SMP */
+
+/* drivers/block/ll_rw_blk.c */
+extern void disk_round_stats(struct gendisk *disk);
+
+/* drivers/block/genhd.c */
+extern void add_disk(struct gendisk *disk);
 extern void del_gendisk(struct gendisk *gp);
-extern struct gendisk *get_gendisk(kdev_t dev);
+extern void unlink_gendisk(struct gendisk *gp);
+extern struct gendisk *get_gendisk(dev_t dev, int *part);
+
+extern void set_device_ro(struct block_device *bdev, int flag);
+extern void set_disk_ro(struct gendisk *disk, int flag);
+
+/* drivers/char/random.c */
+extern void add_disk_randomness(struct gendisk *disk);
+extern void rand_initialize_disk(struct gendisk *disk);
+
+static inline sector_t get_start_sect(struct block_device *bdev)
+{
+	return bdev->bd_offset;
+}
+static inline sector_t get_capacity(struct gendisk *disk)
+{
+	return disk->capacity;
+}
+static inline void set_capacity(struct gendisk *disk, sector_t size)
+{
+	disk->capacity = size;
+}
 
 #endif  /*  __KERNEL__  */
 
@@ -239,40 +355,26 @@ struct unixware_disklabel {
 
 #ifdef __KERNEL__
 
-char *disk_name (struct gendisk *hd, int minor, char *buf);
+char *disk_name (struct gendisk *hd, int part, char *buf);
 
-extern void devfs_register_partitions (struct gendisk *dev, int minor,
-				       int unregister);
+extern int rescan_partitions(struct gendisk *disk, struct block_device *bdev);
+extern void add_partition(struct gendisk *, int, sector_t, sector_t);
+extern void delete_partition(struct gendisk *, int);
 
+extern struct gendisk *alloc_disk(int minors);
+extern struct kobject *get_disk(struct gendisk *disk);
+extern void put_disk(struct gendisk *disk);
 
+extern void blk_register_region(dev_t dev, unsigned long range,
+			struct module *module,
+			struct kobject *(*probe)(dev_t, int *, void *),
+			int (*lock)(dev_t, void *),
+			void *data);
+extern void blk_unregister_region(dev_t dev, unsigned long range);
 
-/*
- * FIXME: this should use genhd->minor_shift, but that is slow to look up.
- */
-static inline unsigned int disk_index (kdev_t dev)
+static inline struct block_device *bdget_disk(struct gendisk *disk, int index)
 {
-	int major = MAJOR(dev);
-	int minor = MINOR(dev);
-	unsigned int index;
-
-	switch (major) {
-		case DAC960_MAJOR+0:
-			index = (minor & 0x00f8) >> 3;
-			break;
-		case SCSI_DISK0_MAJOR:
-			index = (minor & 0x00f0) >> 4;
-			break;
-		case IDE0_MAJOR:	/* same as HD_MAJOR */
-		case XT_DISK_MAJOR:
-			index = (minor & 0x0040) >> 6;
-			break;
-		case IDE1_MAJOR:
-			index = ((minor & 0x0040) >> 6) + 2;
-			break;
-		default:
-			return 0;
-	}
-	return index;
+	return bdget(MKDEV(disk->major, disk->first_minor) + index);
 }
 
 #endif

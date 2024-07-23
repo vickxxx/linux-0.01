@@ -18,131 +18,96 @@
  * PCMCIA implementation routines for stork
  *
  */
-
-#include <linux/config.h>
 #include <linux/module.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
+#include <linux/device.h>
 #include <linux/i2c.h>
 
 #include <asm/hardware.h>
+#include <asm/mach-types.h>
 #include <asm/irq.h>
-#include <asm/arch/pcmcia.h>
+#include "sa1100_generic.h"
 
 static int debug = 0;
 
-static struct pcmcia_init sa1100_stork_pcmcia_init;
+static struct pcmcia_irqs irqs[] = {
+	{ 0, IRQ_GPIO_STORK_PCMCIA_A_CARD_DETECT, "PCMCIA_CD0" },
+	{ 1, IRQ_GPIO_STORK_PCMCIA_B_CARD_DETECT, "PCMCIA_CD1" },
+};
 
-static int stork_pcmcia_init(struct pcmcia_init *init)
+static int stork_pcmcia_hw_init(struct sa1100_pcmcia_socket *skt)
 {
-        int irq, res;
-        printk("in stork_pcmcia_init\n");
+	printk("in stork_pcmcia_init\n");
 
-        sa1100_stork_pcmcia_init = *init;
+	skt->irq = skt->nr ? IRQ_GPIO_STORK_PCMCIA_B_RDY
+			   : IRQ_GPIO_STORK_PCMCIA_A_RDY;
 
-        /* Enable CF bus: */
-        storkSetLatchA(STORK_PCMCIA_PULL_UPS_POWER_ON);
-
-        /* All those are inputs */
-	GPDR &= ~(GPIO_STORK_PCMCIA_A_CARD_DETECT | GPIO_STORK_PCMCIA_B_CARD_DETECT | GPIO_STORK_PCMCIA_A_RDY| GPIO_STORK_PCMCIA_B_RDY);
-
-	/* Set transition detect */
-	set_GPIO_IRQ_edge( GPIO_STORK_PCMCIA_A_CARD_DETECT | GPIO_STORK_PCMCIA_B_CARD_DETECT, GPIO_BOTH_EDGES );
-        set_GPIO_IRQ_edge( GPIO_STORK_PCMCIA_A_RDY| GPIO_STORK_PCMCIA_B_RDY, GPIO_FALLING_EDGE );
-
-	/* Register interrupts */
-	irq = IRQ_GPIO_STORK_PCMCIA_A_CARD_DETECT;
-	res = request_irq( irq, init->handler, SA_INTERRUPT, "PCMCIA_CD0", NULL );
-	if( res < 0 ) goto irq_err;
-	irq = IRQ_GPIO_STORK_PCMCIA_B_CARD_DETECT;
-	res = request_irq( irq, init->handler, SA_INTERRUPT, "PCMCIA_CD1", NULL );
-	if( res < 0 ) goto irq_err;
-
-        return 2;
-
- irq_err:
-        printk( KERN_ERR __FUNCTION__ ": Request for IRQ %u failed\n", irq );
-        return -1;
+	return sa11xx_request_irqs(skt, irqs, ARRAY_SIZE(irqs));
 }
 
-static int stork_pcmcia_shutdown(void)
+static void stork_pcmcia_hw_shutdown(struct sa1100_pcmcia_socket *skt)
 {
+	int i;
+
         printk(__FUNCTION__ "\n");
+
         /* disable IRQs */
-        free_irq( IRQ_GPIO_STORK_PCMCIA_A_CARD_DETECT, NULL );
-        free_irq( IRQ_GPIO_STORK_PCMCIA_B_CARD_DETECT, NULL );
+        sa11xx_free_irqs(skt, irqs, ARRAY_SIZE(irqs));
   
         /* Disable CF bus: */
         storkClearLatchA(STORK_PCMCIA_PULL_UPS_POWER_ON);
 	storkClearLatchA(STORK_PCMCIA_A_POWER_ON);
 	storkClearLatchA(STORK_PCMCIA_B_POWER_ON);
-        return 0;
 }
 
-static int stork_pcmcia_socket_state(struct pcmcia_state_array *state_array)
+static void
+stork_pcmcia_socket_state(struct sa1100_pcmcia_socket *skt,
+			  struct pcmcia_state *state)
 {
-        unsigned long levels;
-
-        if(state_array->size<2) return -1;
-
-        memset(state_array->state, 0, 
-               (state_array->size)*sizeof(struct pcmcia_state));
-
-        levels=GPLR;
+        unsigned long levels = GPLR;
 
 	if (debug > 1)
-		printk(__FUNCTION__ " GPLR=%x IRQ[1:0]=%x\n", GPLR, (GPLR & (GPIO_STORK_PCMCIA_A_RDY|GPIO_STORK_PCMCIA_B_RDY)));
-	state_array->state[0].detect=((levels & GPIO_STORK_PCMCIA_A_CARD_DETECT)==0)?1:0;
-	state_array->state[0].ready=(levels & GPIO_STORK_PCMCIA_A_RDY)?1:0;
-	state_array->state[0].bvd1= 1;
-	state_array->state[0].bvd2= 1;
-	state_array->state[0].wrprot=0;
-	state_array->state[0].vs_3v=1;
-	state_array->state[0].vs_Xv=0;
+		printk(__FUNCTION__ " GPLR=%x IRQ[1:0]=%x\n", levels,
+			(levels & (GPIO_STORK_PCMCIA_A_RDY|GPIO_STORK_PCMCIA_B_RDY)));
 
-	state_array->state[1].detect=((levels & GPIO_STORK_PCMCIA_B_CARD_DETECT)==0)?1:0;
-	state_array->state[1].ready=(levels & GPIO_STORK_PCMCIA_B_RDY)?1:0;
-	state_array->state[1].bvd1=1;
-	state_array->state[1].bvd2=1;
-	state_array->state[1].wrprot=0;
-	state_array->state[1].vs_3v=1;
-	state_array->state[1].vs_Xv=0;
+	switch (skt->nr) {
+	case 0:
+		state->detect=((levels & GPIO_STORK_PCMCIA_A_CARD_DETECT)==0)?1:0;
+		state->ready=(levels & GPIO_STORK_PCMCIA_A_RDY)?1:0;
+		state->bvd1= 1;
+		state->bvd2= 1;
+		state->wrprot=0;
+		state->vs_3v=1;
+		state->vs_Xv=0;
+		break;
 
-        return 1;
+	case 1:
+		state->detect=((levels & GPIO_STORK_PCMCIA_B_CARD_DETECT)==0)?1:0;
+		state->ready=(levels & GPIO_STORK_PCMCIA_B_RDY)?1:0;
+		state->bvd1=1;
+		state->bvd2=1;
+		state->wrprot=0;
+		state->vs_3v=1;
+		state->vs_Xv=0;
+		break;
+	}
 }
 
-static int stork_pcmcia_get_irq_info(struct pcmcia_irq_info *info)
+static int
+stork_pcmcia_configure_socket(struct sa1100_pcmcia_socket *skt,
+			      const socket_state_t *state)
 {
-
-        switch (info->sock) {
-        case 0:
-                info->irq=IRQ_GPIO_STORK_PCMCIA_A_RDY;
-                break;
-        case 1:
-                info->irq=IRQ_GPIO_STORK_PCMCIA_B_RDY;
-                break;
-        default:
-                return -1;
-        }
-        return 0;
-}
-
-static int stork_pcmcia_configure_socket(const struct pcmcia_configure *configure)
-{
-        int card = configure->sock;
 	unsigned long flags;
-
         int DETECT, RDY, POWER, RESET;
 
-        if (card > 1) return -1;
+	printk("%s: socket=%d vcc=%d vpp=%d reset=%d\n", __FUNCTION__,
+		skt->nr, state->Vcc, state->Vpp, state->flags & SS_RESET ? 1 : 0);
 
-	printk(__FUNCTION__ ": socket=%d vcc=%d vpp=%d reset=%d\n", 
-                       card, configure->vcc, configure->vpp, configure->reset);
+	local_irq_save(flags);
 
-	save_flags_cli(flags);
-
-        if (card == 0) {
+        if (skt->nr == 0) {
     	    DETECT = GPIO_STORK_PCMCIA_A_CARD_DETECT;
     	    RDY = GPIO_STORK_PCMCIA_A_RDY;
     	    POWER = STORK_PCMCIA_A_POWER_ON;
@@ -159,7 +124,7 @@ static int stork_pcmcia_configure_socket(const struct pcmcia_configure *configur
            printk("no card detected - but resetting anyway\r\n");
         }
 */
-	switch (configure->vcc) {
+	switch (state->Vcc) {
 	case 0:
 /*		storkClearLatchA(STORK_PCMCIA_PULL_UPS_POWER_ON); */
                 storkClearLatchA(POWER);
@@ -173,30 +138,62 @@ static int stork_pcmcia_configure_socket(const struct pcmcia_configure *configur
 
 	default:
 		printk(KERN_ERR "%s(): unrecognized Vcc %u\n", __FUNCTION__,
-		       configure->vcc);
-		restore_flags(flags);
+		       state->Vcc);
+		local_irq_restore(flags);
 		return -1;
 	}
 
-	if (configure->reset)
+	if (state->flags & SS_RESET)
                 storkSetLatchB(RESET);
 	else
                 storkClearLatchB(RESET);
 
-	restore_flags(flags);
+	local_irq_restore(flags);
 
         /* silently ignore vpp and speaker enables. */
 
-        printk(__FUNCTION__ ": finished\n");
+        printk("%s: finished\n", __FUNCTION__);
 
         return 0;
 }
 
-struct pcmcia_low_level stork_pcmcia_ops = { 
-        stork_pcmcia_init,
-        stork_pcmcia_shutdown,
-        stork_pcmcia_socket_state,
-        stork_pcmcia_get_irq_info,
-        stork_pcmcia_configure_socket
+static void stork_pcmcia_socket_init(struct sa1100_pcmcia_socket *skt)
+{
+        storkSetLatchA(STORK_PCMCIA_PULL_UPS_POWER_ON);
+
+        sa11xx_enable_irqs(skt, irqs, ARRAY_SIZE(irqs));
+}
+
+static void stork_pcmcia_socket_suspend(struct sa1100_pcmcia_socket *skt)
+{
+	sa11xx_disable_irqs(skt, irqs, ARRAY_SIZE(irqs));
+
+	/*
+	 * Hack!
+	 */
+	if (skt->nr == 1)
+	        storkClearLatchA(STORK_PCMCIA_PULL_UPS_POWER_ON);
+
+	return 0;
+}
+
+static struct pcmcia_low_level stork_pcmcia_ops = { 
+	.owner			= THIS_MODULE,
+	.hw_init		= stork_pcmcia_hw_init,
+	.hw_shutdown		= stork_pcmcia_hw_shutdown,
+	.socket_state		= stork_pcmcia_socket_state,
+	.configure_socket	= stork_pcmcia_configure_socket,
+
+	.socket_init		= stork_pcmcia_socket_init,
+	.socket_suspend		= stork_pcmcia_socket_suspend,
 };
 
+int __init pcmcia_stork_init(struct device *dev)
+{
+	int ret = -ENODEV;
+
+	if (machine_is_stork())
+		ret = sa11xx_drv_pcmcia_probe(dev, &stork_pcmcia_ops, 0, 2);
+
+	return ret;
+}

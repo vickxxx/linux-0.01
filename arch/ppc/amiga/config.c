@@ -1,10 +1,7 @@
-/*
- * BK Id: SCCS/s.config.c 1.12 09/18/01 11:19:06 paulus
- */
 #define m68k_debug_device debug_device
 
 /*
- *  linux/arch/m68k/amiga/config.c
+ *  arch/ppc/amiga/config.c
  *
  *  Copyright (C) 1993 Hamish Macdonald
  *
@@ -36,7 +33,6 @@
 #include <asm/amigahw.h>
 #include <asm/amigaints.h>
 #include <asm/irq.h>
-#include <asm/keyboard.h>
 #include <asm/machdep.h>
 #include <asm/io.h>
 
@@ -75,10 +71,7 @@ static char amiga_model_name[13] = "Amiga ";
 
 extern char m68k_debug_device[];
 
-static void amiga_sched_init(void (*handler)(int, void *, struct pt_regs *));
-/* amiga specific keyboard functions */
-extern int amiga_keyb_init(void);
-extern int amiga_kbdrate (struct kbd_repeat *);
+static void amiga_sched_init(irqreturn_t (*handler)(int, void *, struct pt_regs *));
 /* amiga specific irq functions */
 extern void amiga_init_IRQ (void);
 extern void (*amiga_default_handler[]) (int, void *, struct pt_regs *);
@@ -91,19 +84,16 @@ extern void amiga_enable_irq (unsigned int);
 extern void amiga_disable_irq (unsigned int);
 static void amiga_get_model(char *model);
 static int amiga_get_hardware_list(char *buffer);
-extern int amiga_get_irq_list (char *);
 /* amiga specific timer functions */
 static unsigned long amiga_gettimeoffset (void);
 static void a3000_gettod (int *, int *, int *, int *, int *, int *);
 static void a2000_gettod (int *, int *, int *, int *, int *, int *);
 static int amiga_hwclk (int, struct hwclk_time *);
 static int amiga_set_clock_mmss (unsigned long);
-extern void amiga_mksound( unsigned int count, unsigned int ticks );
 #ifdef CONFIG_AMIGA_FLOPPY
 extern void amiga_floppy_setup(char *, int *);
 #endif
 static void amiga_reset (void);
-static int amiga_wait_key (struct console *co);
 extern void amiga_init_sound(void);
 static void amiga_savekmsg_init(void);
 static void amiga_mem_console_write(struct console *co, const char *b,
@@ -116,25 +106,10 @@ static void amiga_heartbeat(int on);
 #endif
 
 static struct console amiga_console_driver = {
-	name:		"debug",
-	wait_key:	amiga_wait_key,
-	flags:		CON_PRINTBUFFER,
-	index:		-1,
+	.name =		"debug",
+	.flags =	CON_PRINTBUFFER,
+	.index =	-1,
 };
-
-#ifdef CONFIG_MAGIC_SYSRQ
-char amiga_sysrq_xlate[128] =
-	"\0001234567890-=\\\000\000"					/* 0x00 - 0x0f */
-	"qwertyuiop[]\000123"							/* 0x10 - 0x1f */
-	"asdfghjkl;'\000\000456"						/* 0x20 - 0x2f */
-	"\000zxcvbnm,./\000+789"						/* 0x30 - 0x3f */
-	" \177\t\r\r\000\177\000\000\000-\000\000\000\000\000"	/* 0x40 - 0x4f */
-	"\000\201\202\203\204\205\206\207\210\211()/*+\000"	/* 0x50 - 0x5f */
-	"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000"	/* 0x60 - 0x6f */
-	"\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000\000";	/* 0x70 - 0x7f */
-#endif
-
-extern void (*kd_mksound)(unsigned int, unsigned int);
 
 
     /*
@@ -145,10 +120,10 @@ static struct {
     struct resource _ciab, _ciaa, _custom, _kickstart;
 } mb_resources = {
 //    { "Ranger Memory", 0x00c00000, 0x00c7ffff },
-    _ciab:	{ "CIA B", 0x00bfd000, 0x00bfdfff },
-    _ciaa:	{ "CIA A", 0x00bfe000, 0x00bfefff },
-    _custom:	{ "Custom I/O", 0x00dff000, 0x00dfffff },
-    _kickstart:	{ "Kickstart ROM", 0x00f80000, 0x00ffffff }
+    ._ciab =	  { "CIA B", 0x00bfd000, 0x00bfdfff },
+    ._ciaa =	  { "CIA A", 0x00bfe000, 0x00bfefff },
+    ._custom =	  { "Custom I/O", 0x00dff000, 0x00dfffff },
+    ._kickstart = { "Kickstart ROM", 0x00f80000, 0x00ffffff }
 };
 
 static struct resource rtc_resource = {
@@ -410,11 +385,9 @@ void __init config_amiga(void)
     request_resource(&iomem_resource, &((struct resource *)&mb_resources)[i]);
 
   mach_sched_init      = amiga_sched_init;
-  mach_keyb_init       = amiga_keyb_init;
-  mach_kbdrate         = amiga_kbdrate;
   mach_init_IRQ        = amiga_init_IRQ;
-  mach_default_handler = &amiga_default_handler;
 #ifndef CONFIG_APUS
+  mach_default_handler = &amiga_default_handler;
   mach_request_irq     = amiga_request_irq;
   mach_free_irq        = amiga_free_irq;
   enable_irq           = amiga_enable_irq;
@@ -422,7 +395,6 @@ void __init config_amiga(void)
 #endif
   mach_get_model       = amiga_get_model;
   mach_get_hardware_list = amiga_get_hardware_list;
-  mach_get_irq_list    = amiga_get_irq_list;
   mach_gettimeoffset   = amiga_gettimeoffset;
   if (AMIGAHW_PRESENT(A3000_CLK)){
     mach_gettod  = a3000_gettod;
@@ -454,7 +426,6 @@ void __init config_amiga(void)
 #ifdef CONFIG_DUMMY_CONSOLE
   conswitchp           = &dummy_con;
 #endif
-  kd_mksound           = amiga_mksound;
 #ifdef CONFIG_HEARTBEAT
   mach_heartbeat = amiga_heartbeat;
 #endif
@@ -507,8 +478,8 @@ void __init config_amiga(void)
 
 static unsigned short jiffy_ticks;
 
-static void __init amiga_sched_init(void (*timer_routine)(int, void *,
-							  struct pt_regs *))
+static void __init amiga_sched_init(irqreturn_t (*timer_routine)(int, void *,
+						struct pt_regs *))
 {
 	static struct resource sched_res = {
 	    "timer", 0x00bfd400, 0x00bfd5ff,
@@ -735,33 +706,6 @@ static int amiga_set_clock_mmss (unsigned long nowtime)
 	return 0;
 }
 
-static int amiga_wait_key (struct console *co)
-{
-    int i;
-
-    while (1) {
-	while (ciaa.pra & 0x40);
-
-	/* debounce */
-	for (i = 0; i < 1000; i++);
-
-	if (!(ciaa.pra & 0x40))
-	    break;
-    }
-
-    /* wait for button up */
-    while (1) {
-	while (!(ciaa.pra & 0x40));
-
-	/* debounce */
-	for (i = 0; i < 1000; i++);
-
-	if (ciaa.pra & 0x40)
-	    break;
-    }
-    return 0;
-}
-
 static NORET_TYPE void amiga_reset( void )
     ATTRIB_NORET;
 
@@ -983,8 +927,9 @@ static int amiga_get_hardware_list(char *buffer)
     AMIGAHW_ANNOUNCE(MAGIC_REKICK, "Magic Hard Rekick");
     AMIGAHW_ANNOUNCE(PCMCIA, "PCMCIA Slot");
     if (AMIGAHW_PRESENT(ZORRO))
-	len += sprintf(buffer+len, "\tZorro%s AutoConfig: %d Expansion Device%s\n",
-		       AMIGAHW_PRESENT(ZORRO3) ? " III" : "",
+	len += sprintf(buffer+len, "\tZorro II%s AutoConfig: %d Expansion "
+				   "Device%s\n",
+		       AMIGAHW_PRESENT(ZORRO3) ? "I" : "",
 		       zorro_num_autocon, zorro_num_autocon == 1 ? "" : "s");
 
 #undef AMIGAHW_ANNOUNCE

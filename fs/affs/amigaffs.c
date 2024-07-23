@@ -10,12 +10,12 @@
 
 #include <stdarg.h>
 #include <linux/stat.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/affs_fs.h>
 #include <linux/string.h>
-#include <linux/locks.h>
 #include <linux/mm.h>
 #include <linux/amigaffs.h>
+#include <linux/buffer_head.h>
 
 extern struct timezone sys_tz;
 
@@ -69,7 +69,7 @@ affs_insert_hash(struct inode *dir, struct buffer_head *bh)
 	affs_brelse(dir_bh);
 
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
-	dir->i_version = ++event;
+	dir->i_version++;
 	mark_inode_dirty(dir);
 
 	return 0;
@@ -121,7 +121,7 @@ affs_remove_hash(struct inode *dir, struct buffer_head *rem_bh)
 	affs_brelse(bh);
 
 	dir->i_mtime = dir->i_ctime = CURRENT_TIME;
-	dir->i_version = ++event;
+	dir->i_version++;
 	mark_inode_dirty(dir);
 
 	return retval;
@@ -246,7 +246,7 @@ affs_empty_dir(struct inode *inode)
 		goto done;
 
 	retval = -ENOTEMPTY;
-	for (size = AFFS_SB->s_hashsize - 1; size >= 0; size--)
+	for (size = AFFS_SB(sb)->s_hashsize - 1; size >= 0; size--)
 		if (AFFS_HEAD(bh)->table[size])
 			goto not_empty;
 	retval = 0;
@@ -419,7 +419,7 @@ prot_to_mode(u32 prot)
 void
 mode_to_prot(struct inode *inode)
 {
-	u32 prot = AFFS_INODE->i_protect;
+	u32 prot = AFFS_I(inode)->i_protect;
 	mode_t mode = inode->i_mode;
 
 	if (!(mode & S_IXUSR))
@@ -441,7 +441,7 @@ mode_to_prot(struct inode *inode)
 	if (mode & S_IWOTH)
 		prot |= FIBF_OTR_WRITE;
 
-	AFFS_INODE->i_protect = prot;
+	AFFS_I(inode)->i_protect = prot;
 }
 
 void
@@ -453,12 +453,12 @@ affs_error(struct super_block *sb, const char *function, const char *fmt, ...)
 	vsprintf(ErrorBuffer,fmt,args);
 	va_end(args);
 
-	printk(KERN_CRIT "AFFS error (device %s): %s(): %s\n", bdevname(sb->s_dev),
+	printk(KERN_CRIT "AFFS error (device %s): %s(): %s\n", sb->s_id,
 		function,ErrorBuffer);
 	if (!(sb->s_flags & MS_RDONLY))
 		printk(KERN_WARNING "AFFS: Remounting filesystem read-only\n");
 	sb->s_flags |= MS_RDONLY;
-	AFFS_SB->s_flags |= SF_READONLY;	/* Don't allow to remount rw */
+	AFFS_SB(sb)->s_flags |= SF_READONLY;	/* Don't allow to remount rw */
 }
 
 void
@@ -470,7 +470,7 @@ affs_warning(struct super_block *sb, const char *function, const char *fmt, ...)
 	vsprintf(ErrorBuffer,fmt,args);
 	va_end(args);
 
-	printk(KERN_WARNING "AFFS warning (device %s): %s(): %s\n", bdevname(sb->s_dev),
+	printk(KERN_WARNING "AFFS warning (device %s): %s(): %s\n", sb->s_id,
 		function,ErrorBuffer);
 }
 

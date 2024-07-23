@@ -20,26 +20,86 @@ extern ctl_table ipv6_icmp_table[];
 #ifdef CONFIG_SYSCTL
 
 ctl_table ipv6_table[] = {
-	{NET_IPV6_ROUTE, "route", NULL, 0, 0555, ipv6_route_table},
-	{NET_IPV6_ICMP, "icmp", NULL, 0, 0500, ipv6_icmp_table},
-	{NET_IPV6_BINDV6ONLY, "bindv6only",
-	 &sysctl_ipv6_bindv6only, sizeof(int), 0644, NULL, &proc_dointvec},
-	{NET_IPV6_MLD_MAX_MSF, "mld_max_msf",
-	 &sysctl_mld_max_msf, sizeof(int), 0644, NULL, &proc_dointvec},
-	{0}
+	{
+		.ctl_name	= NET_IPV6_ROUTE,
+		.procname	= "route",
+		.maxlen		= 0,
+		.mode		= 0555,
+		.child		= ipv6_route_table
+	},
+	{
+		.ctl_name	= NET_IPV6_ICMP,
+		.procname	= "icmp",
+		.maxlen		= 0,
+		.mode		= 0500,
+		.child		= ipv6_icmp_table
+	},
+	{
+		.ctl_name	= NET_IPV6_BINDV6ONLY,
+		.procname	= "bindv6only",
+		.data		= &sysctl_ipv6_bindv6only,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+	{
+		.ctl_name	= NET_IPV6_IP6FRAG_HIGH_THRESH,
+		.procname	= "ip6frag_high_thresh",
+		.data		= &sysctl_ip6frag_high_thresh,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+	{
+		.ctl_name	= NET_IPV6_IP6FRAG_LOW_THRESH,
+		.procname	= "ip6frag_low_thresh",
+		.data		= &sysctl_ip6frag_low_thresh,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec
+	},
+	{
+		.ctl_name	= NET_IPV6_IP6FRAG_TIME,
+		.procname	= "ip6frag_time",
+		.data		= &sysctl_ip6frag_time,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_jiffies,
+		.strategy	= &sysctl_jiffies,
+	},
+	{
+		.ctl_name	= NET_IPV6_IP6FRAG_SECRET_INTERVAL,
+		.procname	= "ip6frag_secret_interval",
+		.data		= &sysctl_ip6frag_secret_interval,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_jiffies,
+		.strategy	= &sysctl_jiffies
+	},
+	{ .ctl_name = 0 }
 };
 
 #ifdef MODULE
 static struct ctl_table_header *ipv6_sysctl_header;
 
 static ctl_table ipv6_net_table[] = {
-	{NET_IPV6, "ipv6", NULL, 0, 0555, ipv6_table},
-        {0}
+	{
+		.ctl_name	= NET_IPV6,
+		.procname	= "ipv6",
+		.mode		= 0555,
+		.child		= ipv6_table
+	},
+        { .ctl_name = 0 }
 };
 
 static ctl_table ipv6_root_table[] = {
-	{CTL_NET, "net", NULL, 0, 0555, ipv6_net_table},
-        {0}
+	{
+		.ctl_name	= CTL_NET,
+		.procname	= "net",
+		.mode		= 0555,
+		.child		= ipv6_net_table
+	},
+        { .ctl_name = 0 }
 };
 
 void ipv6_sysctl_register(void)

@@ -13,15 +13,14 @@
  *        RDS support for MiroSound PCM20 radio
  */
 
-#define _NO_VERSION_
-
-/* #include <linux/kernel.h> */
 #include <linux/module.h>
+#include <linux/errno.h>
+#include <linux/string.h>
 #include <linux/init.h>
 #include <linux/slab.h>
 #include <asm/semaphore.h>
 #include <asm/io.h>
-#include "../../sound/aci.h"
+#include "../../../sound/oss/aci.h"
 #include "miropcm20-rds-core.h"
 
 #define DEBUG 0
@@ -90,7 +89,7 @@ static int rds_waitread(void)
 	}
 }
 
-/* dont use any ..._nowait() function if you are not sure what you do... */
+/* don't use any ..._nowait() function if you are not sure what you do... */
 
 static inline void rds_rawwrite_nowait(unsigned char byte)
 {

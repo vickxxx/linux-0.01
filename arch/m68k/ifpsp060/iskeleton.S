@@ -75,9 +75,9 @@ _060_isp_done:
 .Lnotkern:
 	SAVE_ALL_INT
 	GET_CURRENT(%d0)
-	tstl	%curptr@(TASK_NEEDRESCHED)
-	jne	SYMBOL_NAME(ret_from_exception)	| deliver signals,
-						| reschedule etc..
+	tstb	%curptr@(TASK_NEEDRESCHED)
+	jne	ret_from_exception	| deliver signals,
+					| reschedule etc..
 	RESTORE_ALL
 
 |
@@ -113,7 +113,7 @@ _060_real_chk:
 |	bral		_060_real_trace
 
 real_chk_end:
-	bral		SYMBOL_NAME(trap)	| jump to trap handler
+	bral		trap			| jump to trap handler
 
 |
 | _060_real_divbyzero:
@@ -153,7 +153,7 @@ _060_real_divbyzero:
 |	bral		_060_real_trace
 
 real_divbyzero_end:
-	bral		SYMBOL_NAME(trap)	| jump to trap handler
+	bral		trap			| jump to trap handler
 
 |##########################
 
@@ -270,7 +270,6 @@ _060_isp_cas_restart:
 
 | The size of this section MUST be 128 bytes!!!
 
-	.global	_I_CALL_TOP
 _I_CALL_TOP:
 	.long	_060_real_chk		- _I_CALL_TOP
 	.long	_060_real_divbyzero	- _I_CALL_TOP
@@ -304,4 +303,4 @@ _I_CALL_TOP:
 |###########################################################################
 
 | 060 INTEGER KERNEL PACKAGE MUST GO HERE!!!
-	.include "isp.sa"
+#include "isp.sa"

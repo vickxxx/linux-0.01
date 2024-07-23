@@ -19,19 +19,22 @@
  */
 
 #include <linux/config.h>
+#include <linux/mm.h>
+#include <linux/swap.h>
 #include <linux/slab.h>
 #include <linux/sysctl.h>
-#include <linux/swapctl.h>
 #include <linux/proc_fs.h>
 #include <linux/ctype.h>
 #include <linux/utsname.h>
 #include <linux/capability.h>
 #include <linux/smp_lock.h>
 #include <linux/init.h>
+#include <linux/kernel.h>
 #include <linux/sysrq.h>
 #include <linux/highuid.h>
-#include <linux/swap.h>
-
+#include <linux/writeback.h>
+#include <linux/hugetlb.h>
+#include <linux/security.h>
 #include <asm/uaccess.h>
 
 #ifdef CONFIG_ROOT_NFS
@@ -43,18 +46,18 @@
 /* External variables not in a header file. */
 extern int panic_timeout;
 extern int C_A_D;
-extern int bdf_prm[], bdflush_min[], bdflush_max[];
 extern int sysctl_overcommit_memory;
+extern int sysctl_overcommit_ratio;
 extern int max_threads;
 extern atomic_t nr_queued_signals;
 extern int max_queued_signals;
 extern int sysrq_enabled;
 extern int core_uses_pid;
-extern int core_setuid_ok;
 extern char core_pattern[];
 extern int cad_pid;
-extern int laptop_mode;
-extern int block_dump;
+extern int pid_max;
+extern int sysctl_lower_zone_protection;
+extern int min_free_kbytes;
 
 /* this is needed for the proc_dointvec_minmax for [fs_]overflow UID and GID */
 static int maxolduid = 65535;
@@ -79,12 +82,9 @@ extern int msg_ctlmni;
 extern int sem_ctls[];
 #endif
 
-extern int exception_trace;
-
 #ifdef __sparc__
 extern char reboot_command [];
 extern int stop_a_enabled;
-extern int scons_pwroff;
 #endif
 
 #ifdef CONFIG_ARCH_S390
@@ -94,24 +94,20 @@ extern int sysctl_ieee_emulation_warnings;
 extern int sysctl_userprocess_debug;
 #endif
 
-#ifdef CONFIG_PPC32
-extern unsigned long zero_paged_on, powersave_nap;
+#if defined(CONFIG_PPC32) && defined(CONFIG_6xx)
+extern unsigned long powersave_nap;
 int proc_dol2crvec(ctl_table *table, int write, struct file *filp,
-		void *buffer, size_t *lenp);
-int proc_dol3crvec(ctl_table *table, int write, struct file *filp,
-		void *buffer, size_t *lenp);
+		  void *buffer, size_t *lenp);
 #endif
 
 #ifdef CONFIG_BSD_PROCESS_ACCT
 extern int acct_parm[];
 #endif
 
-extern int pgt_cache_water[];
-
-static int parse_table(int *, int, void *, size_t *, void *, size_t,
+static int parse_table(int __user *, int, void __user *, size_t __user *, void __user *, size_t,
 		       ctl_table *, void **);
 static int proc_doutsstring(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp);
+		  void __user *buffer, size_t *lenp);
 
 static ctl_table root_table[];
 static struct ctl_table_header root_table_header =
@@ -132,290 +128,669 @@ extern ctl_table random_table[];
 
 #ifdef CONFIG_PROC_FS
 
-static ssize_t proc_readsys(struct file *, char *, size_t, loff_t *);
-static ssize_t proc_writesys(struct file *, const char *, size_t, loff_t *);
-static int proc_sys_permission(struct inode *, int);
+static ssize_t proc_readsys(struct file *, char __user *, size_t, loff_t *);
+static ssize_t proc_writesys(struct file *, const char __user *, size_t, loff_t *);
+static int proc_sys_permission(struct inode *, int, struct nameidata *);
 
 struct file_operations proc_sys_file_operations = {
-	read:		proc_readsys,
-	write:		proc_writesys,
+	.read		= proc_readsys,
+	.write		= proc_writesys,
 };
 
 static struct inode_operations proc_sys_inode_operations = {
-	permission:	proc_sys_permission,
+	.permission	= proc_sys_permission,
 };
 
 extern struct proc_dir_entry *proc_sys_root;
 
-static void register_proc_table(ctl_table *, struct proc_dir_entry *, void *);
+static void register_proc_table(ctl_table *, struct proc_dir_entry *);
 static void unregister_proc_table(ctl_table *, struct proc_dir_entry *);
 #endif
 
 /* The default sysctl tables: */
 
 static ctl_table root_table[] = {
-	{CTL_KERN, "kernel", NULL, 0, 0555, kern_table},
-	{CTL_VM, "vm", NULL, 0, 0555, vm_table},
+	{
+		.ctl_name	= CTL_KERN,
+		.procname	= "kernel",
+		.mode		= 0555,
+		.child		= kern_table,
+	},
+	{
+		.ctl_name	= CTL_VM,
+		.procname	= "vm",
+		.mode		= 0555,
+		.child		= vm_table,
+	},
 #ifdef CONFIG_NET
-	{CTL_NET, "net", NULL, 0, 0555, net_table},
+	{
+		.ctl_name	= CTL_NET,
+		.procname	= "net",
+		.mode		= 0555,
+		.child		= net_table,
+	},
 #endif
-	{CTL_PROC, "proc", NULL, 0, 0555, proc_table},
-	{CTL_FS, "fs", NULL, 0, 0555, fs_table},
-	{CTL_DEBUG, "debug", NULL, 0, 0555, debug_table},
-        {CTL_DEV, "dev", NULL, 0, 0555, dev_table},
-	{0}
+	{
+		.ctl_name	= CTL_PROC,
+		.procname	= "proc",
+		.mode		= 0555,
+		.child		= proc_table,
+	},
+	{
+		.ctl_name	= CTL_FS,
+		.procname	= "fs",
+		.mode		= 0555,
+		.child		= fs_table,
+	},
+	{
+		.ctl_name	= CTL_DEBUG,
+		.procname	= "debug",
+		.mode		= 0555,
+		.child		= debug_table,
+	},
+	{
+		.ctl_name	= CTL_DEV,
+		.procname	= "dev",
+		.mode		= 0555,
+		.child		= dev_table,
+	},
+	{ .ctl_name = 0 }
 };
 
 static ctl_table kern_table[] = {
-	{KERN_OSTYPE, "ostype", system_utsname.sysname, 64,
-	 0444, NULL, &proc_doutsstring, &sysctl_string},
-	{KERN_OSRELEASE, "osrelease", system_utsname.release, 64,
-	 0444, NULL, &proc_doutsstring, &sysctl_string},
-	{KERN_VERSION, "version", system_utsname.version, 64,
-	 0444, NULL, &proc_doutsstring, &sysctl_string},
-	{KERN_NODENAME, "hostname", system_utsname.nodename, 64,
-	 0644, NULL, &proc_doutsstring, &sysctl_string},
-	{KERN_DOMAINNAME, "domainname", system_utsname.domainname, 64,
-	 0644, NULL, &proc_doutsstring, &sysctl_string},
-	{KERN_PANIC, "panic", &panic_timeout, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_CORE_USES_PID, "core_uses_pid", &core_uses_pid, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_CORE_SETUID, "core_setuid_ok", &core_setuid_ok, sizeof(int),
-	0644, NULL, &proc_dointvec},
-	{KERN_CORE_PATTERN, "core_pattern", core_pattern, 64,
-	 0644, NULL, &proc_dostring, &sysctl_string},
-	{KERN_TAINTED, "tainted", &tainted, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_CAP_BSET, "cap-bound", &cap_bset, sizeof(kernel_cap_t),
-	 0600, NULL, &proc_dointvec_bset},
+	{
+		.ctl_name	= KERN_OSTYPE,
+		.procname	= "ostype",
+		.data		= system_utsname.sysname,
+		.maxlen		= 64,
+		.mode		= 0444,
+		.proc_handler	= &proc_doutsstring,
+		.strategy	= &sysctl_string,
+	},
+	{
+		.ctl_name	= KERN_OSRELEASE,
+		.procname	= "osrelease",
+		.data		= system_utsname.release,
+		.maxlen		= 64,
+		.mode		= 0444,
+		.proc_handler	= &proc_doutsstring,
+		.strategy	= &sysctl_string,
+	},
+	{
+		.ctl_name	= KERN_VERSION,
+		.procname	= "version",
+		.data		= system_utsname.version,
+		.maxlen		= 64,
+		.mode		= 0444,
+		.proc_handler	= &proc_doutsstring,
+		.strategy	= &sysctl_string,
+	},
+	{
+		.ctl_name	= KERN_NODENAME,
+		.procname	= "hostname",
+		.data		= system_utsname.nodename,
+		.maxlen		= 64,
+		.mode		= 0644,
+		.proc_handler	= &proc_doutsstring,
+		.strategy	= &sysctl_string,
+	},
+	{
+		.ctl_name	= KERN_DOMAINNAME,
+		.procname	= "domainname",
+		.data		= system_utsname.domainname,
+		.maxlen		= 64,
+		.mode		= 0644,
+		.proc_handler	= &proc_doutsstring,
+		.strategy	= &sysctl_string,
+	},
+	{
+		.ctl_name	= KERN_PANIC,
+		.procname	= "panic",
+		.data		= &panic_timeout,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_CORE_USES_PID,
+		.procname	= "core_uses_pid",
+		.data		= &core_uses_pid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_CORE_PATTERN,
+		.procname	= "core_pattern",
+		.data		= core_pattern,
+		.maxlen		= 64,
+		.mode		= 0644,
+		.proc_handler	= &proc_dostring,
+		.strategy	= &sysctl_string,
+	},
+	{
+		.ctl_name	= KERN_TAINTED,
+		.procname	= "tainted",
+		.data		= &tainted,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_CAP_BSET,
+		.procname	= "cap-bound",
+		.data		= &cap_bset,
+		.maxlen		= sizeof(kernel_cap_t),
+		.mode		= 0600,
+		.proc_handler	= &proc_dointvec_bset,
+	},
 #ifdef CONFIG_BLK_DEV_INITRD
-	{KERN_REALROOTDEV, "real-root-dev", &real_root_dev, sizeof(int),
-	 0644, NULL, &proc_dointvec},
+	{
+		.ctl_name	= KERN_REALROOTDEV,
+		.procname	= "real-root-dev",
+		.data		= &real_root_dev,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 #endif
 #ifdef __sparc__
-	{KERN_SPARC_REBOOT, "reboot-cmd", reboot_command,
-	 256, 0644, NULL, &proc_dostring, &sysctl_string },
-	{KERN_SPARC_STOP_A, "stop-a", &stop_a_enabled, sizeof (int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_SPARC_SCONS_PWROFF, "scons-poweroff", &scons_pwroff, sizeof (int),
-	 0644, NULL, &proc_dointvec},
+	{
+		.ctl_name	= KERN_SPARC_REBOOT,
+		.procname	= "reboot-cmd",
+		.data		= reboot_command,
+		.maxlen		= 256,
+		.mode		= 0644,
+		.proc_handler	= &proc_dostring,
+		.strategy	= &sysctl_string,
+	},
+	{
+		.ctl_name	= KERN_SPARC_STOP_A,
+		.procname	= "stop-a",
+		.data		= &stop_a_enabled,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 #endif
-#ifdef CONFIG_PPC32
-	{KERN_PPC_ZEROPAGED, "zero-paged", &zero_paged_on, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_PPC_POWERSAVE_NAP, "powersave-nap", &powersave_nap, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_PPC_L2CR, "l2cr", NULL, 0,
-	 0644, NULL, &proc_dol2crvec},
-	{KERN_PPC_L3CR, "l3cr", NULL, 0,
-	 0644, NULL, &proc_dol3crvec},
+#if defined(CONFIG_PPC32) && defined(CONFIG_6xx)
+	{
+		.ctl_name	= KERN_PPC_POWERSAVE_NAP,
+		.procname	= "powersave-nap",
+		.data		= &powersave_nap,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_PPC_L2CR,
+		.procname	= "l2cr",
+		.mode		= 0644,
+		.proc_handler	= &proc_dol2crvec,
+	},
 #endif
-	{KERN_CTLALTDEL, "ctrl-alt-del", &C_A_D, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_PRINTK, "printk", &console_loglevel, 4*sizeof(int),
-	 0644, NULL, &proc_dointvec},
+	{
+		.ctl_name	= KERN_CTLALTDEL,
+		.procname	= "ctrl-alt-del",
+		.data		= &C_A_D,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_PRINTK,
+		.procname	= "printk",
+		.data		= &console_loglevel,
+		.maxlen		= 4*sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 #ifdef CONFIG_KMOD
-	{KERN_MODPROBE, "modprobe", &modprobe_path, 256,
-	 0644, NULL, &proc_dostring, &sysctl_string },
+	{
+		.ctl_name	= KERN_MODPROBE,
+		.procname	= "modprobe",
+		.data		= &modprobe_path,
+		.maxlen		= 256,
+		.mode		= 0644,
+		.proc_handler	= &proc_dostring,
+		.strategy	= &sysctl_string,
+	},
 #endif
 #ifdef CONFIG_HOTPLUG
-	{KERN_HOTPLUG, "hotplug", &hotplug_path, 256,
-	 0644, NULL, &proc_dostring, &sysctl_string },
+	{
+		.ctl_name	= KERN_HOTPLUG,
+		.procname	= "hotplug",
+		.data		= &hotplug_path,
+		.maxlen		= 256,
+		.mode		= 0644,
+		.proc_handler	= &proc_dostring,
+		.strategy	= &sysctl_string,
+	},
 #endif
 #ifdef CONFIG_CHR_DEV_SG
-	{KERN_SG_BIG_BUFF, "sg-big-buff", &sg_big_buff, sizeof (int),
-	 0444, NULL, &proc_dointvec},
+	{
+		.ctl_name	= KERN_SG_BIG_BUFF,
+		.procname	= "sg-big-buff",
+		.data		= &sg_big_buff,
+		.maxlen		= sizeof (int),
+		.mode		= 0444,
+		.proc_handler	= &proc_dointvec,
+	},
 #endif
 #ifdef CONFIG_BSD_PROCESS_ACCT
-	{KERN_ACCT, "acct", &acct_parm, 3*sizeof(int),
-	0644, NULL, &proc_dointvec},
+	{
+		.ctl_name	= KERN_ACCT,
+		.procname	= "acct",
+		.data		= &acct_parm,
+		.maxlen		= 3*sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 #endif
-	{KERN_RTSIGNR, "rtsig-nr", &nr_queued_signals, sizeof(int),
-	 0444, NULL, &proc_dointvec},
-	{KERN_RTSIGMAX, "rtsig-max", &max_queued_signals, sizeof(int),
-	 0644, NULL, &proc_dointvec},
+	{
+		.ctl_name	= KERN_RTSIGNR,
+		.procname	= "rtsig-nr",
+		.data		= &nr_queued_signals,
+		.maxlen		= sizeof(int),
+		.mode		= 0444,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_RTSIGMAX,
+		.procname	= "rtsig-max",
+		.data		= &max_queued_signals,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 #ifdef CONFIG_SYSVIPC
-	{KERN_SHMMAX, "shmmax", &shm_ctlmax, sizeof (size_t),
-	 0644, NULL, &proc_doulongvec_minmax},
-	{KERN_SHMALL, "shmall", &shm_ctlall, sizeof (size_t),
-	 0644, NULL, &proc_doulongvec_minmax},
-	{KERN_SHMMNI, "shmmni", &shm_ctlmni, sizeof (int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_MSGMAX, "msgmax", &msg_ctlmax, sizeof (int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_MSGMNI, "msgmni", &msg_ctlmni, sizeof (int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_MSGMNB, "msgmnb", &msg_ctlmnb, sizeof (int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_SEM, "sem", &sem_ctls, 4*sizeof (int),
-	 0644, NULL, &proc_dointvec},
+	{
+		.ctl_name	= KERN_SHMMAX,
+		.procname	= "shmmax",
+		.data		= &shm_ctlmax,
+		.maxlen		= sizeof (size_t),
+		.mode		= 0644,
+		.proc_handler	= &proc_doulongvec_minmax,
+	},
+	{
+		.ctl_name	= KERN_SHMALL,
+		.procname	= "shmall",
+		.data		= &shm_ctlall,
+		.maxlen		= sizeof (size_t),
+		.mode		= 0644,
+		.proc_handler	= &proc_doulongvec_minmax,
+	},
+	{
+		.ctl_name	= KERN_SHMMNI,
+		.procname	= "shmmni",
+		.data		= &shm_ctlmni,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_MSGMAX,
+		.procname	= "msgmax",
+		.data		= &msg_ctlmax,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_MSGMNI,
+		.procname	= "msgmni",
+		.data		= &msg_ctlmni,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_MSGMNB,
+		.procname	=  "msgmnb",
+		.data		= &msg_ctlmnb,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_SEM,
+		.procname	= "sem",
+		.data		= &sem_ctls,
+		.maxlen		= 4*sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 #endif
 #ifdef CONFIG_MAGIC_SYSRQ
-	{KERN_SYSRQ, "sysrq", &sysrq_enabled, sizeof (int),
-	 0644, NULL, &proc_dointvec},
-#endif	 
-	{KERN_CADPID, "cad_pid", &cad_pid, sizeof (int),
-	 0600, NULL, &proc_dointvec},
-	{KERN_MAX_THREADS, "threads-max", &max_threads, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{KERN_RANDOM, "random", NULL, 0, 0555, random_table},
-	{KERN_OVERFLOWUID, "overflowuid", &overflowuid, sizeof(int), 0644, NULL,
-	 &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	 &minolduid, &maxolduid},
-	{KERN_OVERFLOWGID, "overflowgid", &overflowgid, sizeof(int), 0644, NULL,
-	 &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	 &minolduid, &maxolduid},
+	{
+		.ctl_name	= KERN_SYSRQ,
+		.procname	= "sysrq",
+		.data		= &sysrq_enabled,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+#endif
+	{
+		.ctl_name	= KERN_CADPID,
+		.procname	= "cad_pid",
+		.data		= &cad_pid,
+		.maxlen		= sizeof (int),
+		.mode		= 0600,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_MAX_THREADS,
+		.procname	= "threads-max",
+		.data		= &max_threads,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_RANDOM,
+		.procname	= "random",
+		.mode		= 0555,
+		.child		= random_table,
+	},
+	{
+		.ctl_name	= KERN_OVERFLOWUID,
+		.procname	= "overflowuid",
+		.data		= &overflowuid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &minolduid,
+		.extra2		= &maxolduid,
+	},
+	{
+		.ctl_name	= KERN_OVERFLOWGID,
+		.procname	= "overflowgid",
+		.data		= &overflowgid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &minolduid,
+		.extra2		= &maxolduid,
+	},
 #ifdef CONFIG_ARCH_S390
 #ifdef CONFIG_MATHEMU
-	{KERN_IEEE_EMULATION_WARNINGS,"ieee_emulation_warnings",
-	 &sysctl_ieee_emulation_warnings,sizeof(int),0644,NULL,&proc_dointvec},
+	{
+		.ctl_name	= KERN_IEEE_EMULATION_WARNINGS,
+		.procname	= "ieee_emulation_warnings",
+		.data		= &sysctl_ieee_emulation_warnings,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 #endif
-	{KERN_S390_USER_DEBUG_LOGGING,"userprocess_debug",
-	 &sysctl_userprocess_debug,sizeof(int),0644,NULL,&proc_dointvec},
+	{
+		.ctl_name	= KERN_S390_USER_DEBUG_LOGGING,
+		.procname	= "userprocess_debug",
+		.data		= &sysctl_userprocess_debug,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
 #endif
-#ifdef __x86_64__
-	{KERN_EXCEPTION_TRACE,"exception-trace",
-	 &exception_trace,sizeof(int),0644,NULL,&proc_dointvec},
-#endif	
-	{0}
+	{
+		.ctl_name	= KERN_PIDMAX,
+		.procname	= "pid_max",
+		.data		= &pid_max,
+		.maxlen		= sizeof (int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= KERN_PANIC_ON_OOPS,
+		.procname	= "panic_on_oops",
+		.data		= &panic_on_oops,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{ .ctl_name = 0 }
 };
 
+/* Constants for minimum and maximum testing in vm_table.
+   We use these as one-element integer vectors. */
+static int zero = 0;
+static int one_hundred = 100;
+
+
 static ctl_table vm_table[] = {
-	{VM_GFP_DEBUG, "vm_gfp_debug", 
-	 &vm_gfp_debug, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_VFS_SCAN_RATIO, "vm_vfs_scan_ratio", 
-	 &vm_vfs_scan_ratio, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_CACHE_SCAN_RATIO, "vm_cache_scan_ratio", 
-	 &vm_cache_scan_ratio, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_MAPPED_RATIO, "vm_mapped_ratio", 
-	 &vm_mapped_ratio, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_ANON_LRU, "vm_anon_lru", 
-	 &vm_anon_lru, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_LRU_BALANCE_RATIO, "vm_lru_balance_ratio", 
-	 &vm_lru_balance_ratio, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_PASSES, "vm_passes", 
-	 &vm_passes, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_BDFLUSH, "bdflush", &bdf_prm, 9*sizeof(int), 0644, NULL,
-	 &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	 &bdflush_min, &bdflush_max},
-	{VM_OVERCOMMIT_MEMORY, "overcommit_memory", &sysctl_overcommit_memory,
-	 sizeof(sysctl_overcommit_memory), 0644, NULL, &proc_dointvec},
-	{VM_PAGERDAEMON, "kswapd",
-	 &pager_daemon, sizeof(pager_daemon_t), 0644, NULL, &proc_dointvec},
-	{VM_PGT_CACHE, "pagetable_cache", 
-	 &pgt_cache_water, 2*sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_PAGE_CLUSTER, "page-cluster", 
-	 &page_cluster, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_MIN_READAHEAD, "min-readahead",
-	&vm_min_readahead,sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_MAX_READAHEAD, "max-readahead",
-	&vm_max_readahead,sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_MAX_MAP_COUNT, "max_map_count",
-	 &max_map_count, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_LAPTOP_MODE, "laptop_mode",
-	 &laptop_mode, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_BLOCK_DUMP, "block_dump",
-	 &block_dump, sizeof(int), 0644, NULL, &proc_dointvec},
-	{VM_MMAP_MIN_ADDR, "mmap_min_addr",
-	 &mmap_min_addr, sizeof(unsigned long), 0644, NULL, &proc_doulongvec_minmax},
-	{0}
+	{
+		.ctl_name	= VM_OVERCOMMIT_MEMORY,
+		.procname	= "overcommit_memory",
+		.data		= &sysctl_overcommit_memory,
+		.maxlen		= sizeof(sysctl_overcommit_memory),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= VM_OVERCOMMIT_RATIO,
+		.procname	= "overcommit_ratio",
+		.data		= &sysctl_overcommit_ratio,
+		.maxlen		= sizeof(sysctl_overcommit_ratio),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= VM_PAGE_CLUSTER,
+		.procname	= "page-cluster", 
+		.data		= &page_cluster,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= VM_DIRTY_BACKGROUND,
+		.procname	= "dirty_background_ratio",
+		.data		= &dirty_background_ratio,
+		.maxlen		= sizeof(dirty_background_ratio),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &zero,
+		.extra2		= &one_hundred,
+	},
+	{
+		.ctl_name	= VM_DIRTY_RATIO,
+		.procname	= "dirty_ratio",
+		.data		= &vm_dirty_ratio,
+		.maxlen		= sizeof(vm_dirty_ratio),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &zero,
+		.extra2		= &one_hundred,
+	},
+	{
+		.ctl_name	= VM_DIRTY_WB_CS,
+		.procname	= "dirty_writeback_centisecs",
+		.data		= &dirty_writeback_centisecs,
+		.maxlen		= sizeof(dirty_writeback_centisecs),
+		.mode		= 0644,
+		.proc_handler	= dirty_writeback_centisecs_handler,
+	},
+	{
+		.ctl_name	= VM_DIRTY_EXPIRE_CS,
+		.procname	= "dirty_expire_centisecs",
+		.data		= &dirty_expire_centisecs,
+		.maxlen		= sizeof(dirty_expire_centisecs),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= VM_NR_PDFLUSH_THREADS,
+		.procname	= "nr_pdflush_threads",
+		.data		= &nr_pdflush_threads,
+		.maxlen		= sizeof nr_pdflush_threads,
+		.mode		= 0444 /* read-only*/,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= VM_SWAPPINESS,
+		.procname	= "swappiness",
+		.data		= &vm_swappiness,
+		.maxlen		= sizeof(vm_swappiness),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &zero,
+		.extra2		= &one_hundred,
+	},
+#ifdef CONFIG_HUGETLB_PAGE
+	 {
+		.ctl_name	= VM_HUGETLB_PAGES,
+		.procname	= "nr_hugepages",
+		.data		= &htlbpage_max,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &hugetlb_sysctl_handler,
+	 },
+#endif
+	{
+		.ctl_name	= VM_LOWER_ZONE_PROTECTION,
+		.procname	= "lower_zone_protection",
+		.data		= &sysctl_lower_zone_protection,
+		.maxlen		= sizeof(sysctl_lower_zone_protection),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &zero,
+	},
+	{
+		.ctl_name	= VM_MIN_FREE_KBYTES,
+		.procname	= "min_free_kbytes",
+		.data		= &min_free_kbytes,
+		.maxlen		= sizeof(min_free_kbytes),
+		.mode		= 0644,
+		.proc_handler	= &min_free_kbytes_sysctl_handler,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &zero,
+	},
+	{ .ctl_name = 0 }
 };
 
 static ctl_table proc_table[] = {
-	{0}
+	{ .ctl_name = 0 }
 };
 
 static ctl_table fs_table[] = {
-	{FS_NRINODE, "inode-nr", &inodes_stat, 2*sizeof(int),
-	 0444, NULL, &proc_dointvec},
-	{FS_STATINODE, "inode-state", &inodes_stat, 7*sizeof(int),
-	 0444, NULL, &proc_dointvec},
-	{FS_NRFILE, "file-nr", &files_stat, 3*sizeof(int),
-	 0444, NULL, &proc_dointvec},
-	{FS_MAXFILE, "file-max", &files_stat.max_files, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{FS_DENTRY, "dentry-state", &dentry_stat, 6*sizeof(int),
-	 0444, NULL, &proc_dointvec},
-	{FS_OVERFLOWUID, "overflowuid", &fs_overflowuid, sizeof(int), 0644, NULL,
-	 &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	 &minolduid, &maxolduid},
-	{FS_OVERFLOWGID, "overflowgid", &fs_overflowgid, sizeof(int), 0644, NULL,
-	 &proc_dointvec_minmax, &sysctl_intvec, NULL,
-	 &minolduid, &maxolduid},
-	{FS_LEASES, "leases-enable", &leases_enable, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{FS_DIR_NOTIFY, "dir-notify-enable", &dir_notify_enable,
-	 sizeof(int), 0644, NULL, &proc_dointvec},
-	{FS_LEASE_TIME, "lease-break-time", &lease_break_time, sizeof(int),
-	 0644, NULL, &proc_dointvec},
-	{0}
+	{
+		.ctl_name	= FS_NRINODE,
+		.procname	= "inode-nr",
+		.data		= &inodes_stat,
+		.maxlen		= 2*sizeof(int),
+		.mode		= 0444,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= FS_STATINODE,
+		.procname	= "inode-state",
+		.data		= &inodes_stat,
+		.maxlen		= 7*sizeof(int),
+		.mode		= 0444,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= FS_NRFILE,
+		.procname	= "file-nr",
+		.data		= &files_stat,
+		.maxlen		= 3*sizeof(int),
+		.mode		= 0444,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= FS_MAXFILE,
+		.procname	= "file-max",
+		.data		= &files_stat.max_files,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= FS_DENTRY,
+		.procname	= "dentry-state",
+		.data		= &dentry_stat,
+		.maxlen		= 6*sizeof(int),
+		.mode		= 0444,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= FS_OVERFLOWUID,
+		.procname	= "overflowuid",
+		.data		= &fs_overflowuid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &minolduid,
+		.extra2		= &maxolduid,
+	},
+	{
+		.ctl_name	= FS_OVERFLOWGID,
+		.procname	= "overflowgid",
+		.data		= &fs_overflowgid,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec_minmax,
+		.strategy	= &sysctl_intvec,
+		.extra1		= &minolduid,
+		.extra2		= &maxolduid,
+	},
+	{
+		.ctl_name	= FS_LEASES,
+		.procname	= "leases-enable",
+		.data		= &leases_enable,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= FS_DIR_NOTIFY,
+		.procname	= "dir-notify-enable",
+		.data		= &dir_notify_enable,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{
+		.ctl_name	= FS_LEASE_TIME,
+		.procname	= "lease-break-time",
+		.data		= &lease_break_time,
+		.maxlen		= sizeof(int),
+		.mode		= 0644,
+		.proc_handler	= &proc_dointvec,
+	},
+	{ .ctl_name = 0 }
 };
 
 static ctl_table debug_table[] = {
-	{0}
+	{ .ctl_name = 0 }
 };
 
 static ctl_table dev_table[] = {
-	{0}
+	{ .ctl_name = 0 }
 };  
 
 extern void init_irq_proc (void);
 
-static spinlock_t sysctl_lock = SPIN_LOCK_UNLOCKED;
-
-/* called under sysctl_lock */
-static int use_table(struct ctl_table_header *p)
-{
-	if (unlikely(p->unregistering != NULL))
-		return 0;
-	p->used++;
-	return 1;
-}
-
-/* called under sysctl_lock */
-static void unuse_table(struct ctl_table_header *p)
-{
-	if (!--p->used)
-		if (unlikely(p->unregistering != NULL))
-			complete(p->unregistering);
-}
-
-/* called under sysctl_lock, will reacquire if has to wait */
-static void start_unregistering(struct ctl_table_header *p)
-{
-	/*
-	 * if p->used is 0, nobody will ever touch that entry again;
-	 * we'll eliminate all paths to it before dropping sysctl_lock
-	 */
-	if (unlikely(p->used)) {
-		struct completion wait;
-		init_completion(&wait);
-		p->unregistering = &wait;
-		spin_unlock(&sysctl_lock);
-		wait_for_completion(&wait);
-		spin_lock(&sysctl_lock);
-	}
-	/*
-	 * do not remove from the list until nobody holds it; walking the
-	 * list in do_sysctl() relies on that.
-	 */
-	list_del_init(&p->ctl_entry);
-}
-
 void __init sysctl_init(void)
 {
 #ifdef CONFIG_PROC_FS
-	register_proc_table(root_table, proc_sys_root, &root_table_header);
+	register_proc_table(root_table, proc_sys_root);
 	init_irq_proc();
 #endif
 }
 
-int do_sysctl(int *name, int nlen, void *oldval, size_t *oldlenp,
-	       void *newval, size_t newlen)
+int do_sysctl(int __user *name, int nlen, void __user *oldval, size_t __user *oldlenp,
+	       void __user *newval, size_t newlen)
 {
 	struct list_head *tmp;
-	int error = -ENOTDIR;
 
 	if (nlen <= 0 || nlen >= CTL_MAXNAME)
 		return -ENOTDIR;
@@ -423,38 +798,25 @@ int do_sysctl(int *name, int nlen, void *oldval, size_t *oldlenp,
 		int old_len;
 		if (!oldlenp || get_user(old_len, oldlenp))
 			return -EFAULT;
-		/* XXX: insufficient for SMP, but should be redundant anyway */
-		if ((ssize_t)old_len < 0)
-			return -EINVAL;
 	}
-	spin_lock(&sysctl_lock);
 	tmp = &root_table_header.ctl_entry;
 	do {
 		struct ctl_table_header *head =
 			list_entry(tmp, struct ctl_table_header, ctl_entry);
 		void *context = NULL;
-
-		if (!use_table(head))
-			continue;
-
-		spin_unlock(&sysctl_lock);
-
-		error = parse_table(name, nlen, oldval, oldlenp, 
+		int error = parse_table(name, nlen, oldval, oldlenp, 
 					newval, newlen, head->ctl_table,
 					&context);
 		if (context)
 			kfree(context);
-
-		spin_lock(&sysctl_lock);
-		unuse_table(head);
 		if (error != -ENOTDIR)
-			break;
-	} while ((tmp = tmp->next) != &root_table_header.ctl_entry);
-	spin_unlock(&sysctl_lock);
-	return error;
+			return error;
+		tmp = tmp->next;
+	} while (tmp != &root_table_header.ctl_entry);
+	return -ENOTDIR;
 }
 
-extern asmlinkage long sys_sysctl(struct __sysctl_args *args)
+asmlinkage long sys_sysctl(struct __sysctl_args __user *args)
 {
 	struct __sysctl_args tmp;
 	int error;
@@ -487,12 +849,16 @@ static int test_perm(int mode, int op)
 
 static inline int ctl_perm(ctl_table *table, int op)
 {
+	int error;
+	error = security_sysctl(table, op);
+	if (error)
+		return error;
 	return test_perm(table->mode, op);
 }
 
-static int parse_table(int *name, int nlen,
-		       void *oldval, size_t *oldlenp,
-		       void *newval, size_t newlen,
+static int parse_table(int __user *name, int nlen,
+		       void __user *oldval, size_t __user *oldlenp,
+		       void __user *newval, size_t newlen,
 		       ctl_table *table, void **context)
 {
 	int n;
@@ -531,9 +897,9 @@ repeat:
 
 /* Perform the actual read/write of a sysctl table entry. */
 int do_sysctl_strategy (ctl_table *table, 
-			int *name, int nlen,
-			void *oldval, size_t *oldlenp,
-			void *newval, size_t newlen, void **context)
+			int __user *name, int nlen,
+			void __user *oldval, size_t __user *oldlenp,
+			void __user *newval, size_t newlen, void **context)
 {
 	int op = 0, rc;
 	size_t len;
@@ -558,8 +924,7 @@ int do_sysctl_strategy (ctl_table *table,
 	 * zero, proceed with automatic r/w */
 	if (table->data && table->maxlen) {
 		if (oldval && oldlenp) {
-			if (get_user(len, oldlenp))
-				return -EFAULT;
+			get_user(len, oldlenp);
 			if (len) {
 				if (len > table->maxlen)
 					len = table->maxlen;
@@ -658,16 +1023,12 @@ struct ctl_table_header *register_sysctl_table(ctl_table * table,
 		return NULL;
 	tmp->ctl_table = table;
 	INIT_LIST_HEAD(&tmp->ctl_entry);
-	tmp->used = 0;
-	tmp->unregistering = NULL;
-	spin_lock(&sysctl_lock);
 	if (insert_at_head)
 		list_add(&tmp->ctl_entry, &root_table_header.ctl_entry);
 	else
 		list_add_tail(&tmp->ctl_entry, &root_table_header.ctl_entry);
-	spin_unlock(&sysctl_lock);
 #ifdef CONFIG_PROC_FS
-	register_proc_table(table, proc_sys_root, tmp);
+	register_proc_table(table, proc_sys_root);
 #endif
 	return tmp;
 }
@@ -681,12 +1042,10 @@ struct ctl_table_header *register_sysctl_table(ctl_table * table,
  */
 void unregister_sysctl_table(struct ctl_table_header * header)
 {
-	spin_lock(&sysctl_lock);
-	start_unregistering(header);
+	list_del(&header->ctl_entry);
 #ifdef CONFIG_PROC_FS
 	unregister_proc_table(header->ctl_table, proc_sys_root);
 #endif
-	spin_unlock(&sysctl_lock);
 	kfree(header);
 }
 
@@ -697,7 +1056,7 @@ void unregister_sysctl_table(struct ctl_table_header * header)
 #ifdef CONFIG_PROC_FS
 
 /* Scan the sysctl entries in table and add them all into /proc */
-static void register_proc_table(ctl_table * table, struct proc_dir_entry *root, void *set)
+static void register_proc_table(ctl_table * table, struct proc_dir_entry *root)
 {
 	struct proc_dir_entry *de;
 	int len;
@@ -733,7 +1092,6 @@ static void register_proc_table(ctl_table * table, struct proc_dir_entry *root, 
 			de = create_proc_entry(table->procname, mode, root);
 			if (!de)
 				continue;
-			de->set = set;
 			de->data = (void *) table;
 			if (table->proc_handler) {
 				de->proc_fops = &proc_sys_file_operations;
@@ -742,7 +1100,7 @@ static void register_proc_table(ctl_table * table, struct proc_dir_entry *root, 
 		}
 		table->de = de;
 		if (de->mode & S_IFDIR)
-			register_proc_table(table->child, de, set);
+			register_proc_table(table->child, de);
 	}
 }
 
@@ -767,13 +1125,6 @@ static void unregister_proc_table(ctl_table * table, struct proc_dir_entry *root
 				continue;
 		}
 
-		/*
-		 * In any case, mark the entry as goner; we'll keep it
-		 * around if it's busy, but we'll know to do nothing with
-		 * its fields.  We are under sysctl_lock here.
-		 */
-		de->data = NULL;
-
 		/* Don't unregister proc entries that are still being used.. */
 		if (atomic_read(&de->count))
 			continue;
@@ -783,63 +1134,50 @@ static void unregister_proc_table(ctl_table * table, struct proc_dir_entry *root
 	}
 }
 
-static ssize_t do_rw_proc(int write, struct file * file, char * buf,
+static ssize_t do_rw_proc(int write, struct file * file, char __user * buf,
 			  size_t count, loff_t *ppos)
 {
 	int op;
-	struct proc_dir_entry *de =
-	  (struct proc_dir_entry*) file->f_dentry->d_inode->u.generic_ip;
+	struct proc_dir_entry *de;
 	struct ctl_table *table;
 	size_t res;
-	ssize_t error = -ENOTDIR;
+	ssize_t error;
+	
+	de = PDE(file->f_dentry->d_inode);
+	if (!de || !de->data)
+		return -ENOTDIR;
+	table = (struct ctl_table *) de->data;
+	if (!table || !table->proc_handler)
+		return -ENOTDIR;
+	op = (write ? 002 : 004);
+	if (ctl_perm(table, op))
+		return -EPERM;
+	
+	res = count;
 
-	spin_lock(&sysctl_lock);
-	if (de && de->data && use_table(de->set)) {
-		/*
-		 * at that point we know that sysctl was not unregistered
-		 * and won't be until we finish
-		 */
-		spin_unlock(&sysctl_lock);
-		table = (struct ctl_table *) de->data;
-		if (!table || !table->proc_handler)
-			goto out;
-		error = -EPERM;
-		op = (write ? 002 : 004);
-		if (ctl_perm(table, op))
-			goto out;
-		
-		/* careful: calling conventions are nasty here */
-		res = count;
+	/*
+	 * FIXME: we need to pass on ppos to the handler.
+	 */
 
-		/*
-		 * FIXME: we need to pass on ppos to the handler.
-		 */
-
-		error = (*table->proc_handler)(table, write, file,
-						buf, &res);
-		if (!error)
-			error = res;
-	out:
-		spin_lock(&sysctl_lock);
-		unuse_table(de->set);
-	}
-	spin_unlock(&sysctl_lock);
-	return error;
+	error = (*table->proc_handler) (table, write, file, buf, &res);
+	if (error)
+		return error;
+	return res;
 }
 
-static ssize_t proc_readsys(struct file * file, char * buf,
+static ssize_t proc_readsys(struct file * file, char __user * buf,
 			    size_t count, loff_t *ppos)
 {
 	return do_rw_proc(0, file, buf, count, ppos);
 }
 
-static ssize_t proc_writesys(struct file * file, const char * buf,
+static ssize_t proc_writesys(struct file * file, const char __user * buf,
 			     size_t count, loff_t *ppos)
 {
-	return do_rw_proc(1, file, (char *) buf, count, ppos);
+	return do_rw_proc(1, file, (char __user *) buf, count, ppos);
 }
 
-static int proc_sys_permission(struct inode *inode, int op)
+static int proc_sys_permission(struct inode *inode, int op, struct nameidata *nd)
 {
 	return test_perm(inode->i_mode, op);
 }
@@ -862,10 +1200,11 @@ static int proc_sys_permission(struct inode *inode, int op)
  * Returns 0 on success.
  */
 int proc_dostring(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp)
+		  void __user *buffer, size_t *lenp)
 {
 	size_t len;
-	char *p, c;
+	char __user *p;
+	char c;
 	
 	if (!table->data || !table->maxlen || !*lenp ||
 	    (filp->f_pos && !write)) {
@@ -877,7 +1216,7 @@ int proc_dostring(ctl_table *table, int write, struct file *filp,
 		len = 0;
 		p = buffer;
 		while (len < *lenp) {
-			if (get_user(c, p++))
+			if(get_user(c, p++))
 				return -EFAULT;
 			if (c == 0 || c == '\n')
 				break;
@@ -915,7 +1254,7 @@ int proc_dostring(ctl_table *table, int write, struct file *filp,
  */
  
 static int proc_doutsstring(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp)
+		  void __user *buffer, size_t *lenp)
 {
 	int r;
 
@@ -938,7 +1277,7 @@ static int proc_doutsstring(ctl_table *table, int write, struct file *filp,
 #define OP_MIN	4
 
 static int do_proc_dointvec(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp, int conv, int op)
+		  void __user *buffer, size_t *lenp, int conv, int op)
 {
 	int *i, vleft, first=1, neg, val;
 	size_t left, len;
@@ -960,7 +1299,7 @@ static int do_proc_dointvec(ctl_table *table, int write, struct file *filp,
 		if (write) {
 			while (left) {
 				char c;
-				if (get_user(c, (char *) buffer))
+				if (get_user(c,(char __user *) buffer))
 					return -EFAULT;
 				if (!isspace(c))
 					break;
@@ -1026,7 +1365,7 @@ static int do_proc_dointvec(ctl_table *table, int write, struct file *filp,
 		p = (char *) buffer;
 		while (left) {
 			char c;
-			if (get_user(c, p++))
+			if(get_user(c, p++))
 				return -EFAULT;
 			if (!isspace(c))
 				break;
@@ -1054,7 +1393,7 @@ static int do_proc_dointvec(ctl_table *table, int write, struct file *filp,
  * Returns 0 on success.
  */
 int proc_dointvec(ctl_table *table, int write, struct file *filp,
-		     void *buffer, size_t *lenp)
+		     void __user *buffer, size_t *lenp)
 {
     return do_proc_dointvec(table,write,filp,buffer,lenp,1,OP_SET);
 }
@@ -1064,7 +1403,7 @@ int proc_dointvec(ctl_table *table, int write, struct file *filp,
  */
  
 int proc_dointvec_bset(ctl_table *table, int write, struct file *filp,
-			void *buffer, size_t *lenp)
+			void __user *buffer, size_t *lenp)
 {
 	if (!capable(CAP_SYS_MODULE)) {
 		return -EPERM;
@@ -1090,7 +1429,7 @@ int proc_dointvec_bset(ctl_table *table, int write, struct file *filp,
  * Returns 0 on success.
  */
 int proc_dointvec_minmax(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp)
+		  void __user *buffer, size_t *lenp)
 {
 	int *i, *min, *max, vleft, first=1, neg, val;
 	size_t len, left;
@@ -1113,7 +1452,7 @@ int proc_dointvec_minmax(ctl_table *table, int write, struct file *filp,
 		if (write) {
 			while (left) {
 				char c;
-				if (get_user(c, (char *) buffer))
+				if(get_user(c, (char *) buffer))
 					return -EFAULT;
 				if (!isspace(c))
 					break;
@@ -1172,7 +1511,7 @@ int proc_dointvec_minmax(ctl_table *table, int write, struct file *filp,
 		p = (char *) buffer;
 		while (left) {
 			char c;
-			if (get_user(c, p++))
+			if(get_user(c, p++))
 				return -EFAULT;
 			if (!isspace(c))
 				break;
@@ -1188,7 +1527,7 @@ int proc_dointvec_minmax(ctl_table *table, int write, struct file *filp,
 
 static int do_proc_doulongvec_minmax(ctl_table *table, int write,
 				     struct file *filp,
-				     void *buffer, size_t *lenp,
+				     void __user *buffer, size_t *lenp,
 				     unsigned long convmul,
 				     unsigned long convdiv)
 {
@@ -1210,11 +1549,11 @@ static int do_proc_doulongvec_minmax(ctl_table *table, int write,
 	vleft = table->maxlen / sizeof(unsigned long);
 	left = *lenp;
 	
-	for (; left && vleft--; i++, first=0) {
+	for (; left && vleft--; i++, min++, max++, first=0) {
 		if (write) {
 			while (left) {
 				char c;
-				if (get_user(c, (char *) buffer))
+				if (get_user(c, (char __user *) buffer))
 					return -EFAULT;
 				if (!isspace(c))
 					break;
@@ -1227,7 +1566,7 @@ static int do_proc_doulongvec_minmax(ctl_table *table, int write,
 			len = left;
 			if (len > TMPBUFLEN-1)
 				len = TMPBUFLEN-1;
-			if(copy_from_user(buf, buffer, len))
+			if (copy_from_user(buf, buffer, len))
 				return -EFAULT;
 			buf[len] = 0;
 			p = buf;
@@ -1248,9 +1587,7 @@ static int do_proc_doulongvec_minmax(ctl_table *table, int write,
 
 			if(neg)
 				continue;
-			if (min && val < *min++)
-				continue;
-			if (max && val > *max++)
+			if ((min && val < *min) || (max && val > *max))
 				continue;
 			*i = val;
 		} else {
@@ -1277,7 +1614,7 @@ static int do_proc_doulongvec_minmax(ctl_table *table, int write,
 		p = (char *) buffer;
 		while (left) {
 			char c;
-			if (get_user(c, p++))
+			if(get_user(c, p++))
 				return -EFAULT;
 			if (!isspace(c))
 				break;
@@ -1309,7 +1646,7 @@ static int do_proc_doulongvec_minmax(ctl_table *table, int write,
  * Returns 0 on success.
  */
 int proc_doulongvec_minmax(ctl_table *table, int write, struct file *filp,
-			   void *buffer, size_t *lenp)
+			   void __user *buffer, size_t *lenp)
 {
     return do_proc_doulongvec_minmax(table, write, filp, buffer, lenp, 1l, 1l);
 }
@@ -1333,7 +1670,7 @@ int proc_doulongvec_minmax(ctl_table *table, int write, struct file *filp,
  */
 int proc_doulongvec_ms_jiffies_minmax(ctl_table *table, int write,
 				      struct file *filp,
-				      void *buffer, size_t *lenp)
+				      void __user *buffer, size_t *lenp)
 {
     return do_proc_doulongvec_minmax(table, write, filp, buffer,
 				     lenp, HZ, 1000l);
@@ -1356,7 +1693,7 @@ int proc_doulongvec_ms_jiffies_minmax(ctl_table *table, int write,
  * Returns 0 on success.
  */
 int proc_dointvec_jiffies(ctl_table *table, int write, struct file *filp,
-			  void *buffer, size_t *lenp)
+			  void __user *buffer, size_t *lenp)
 {
     return do_proc_dointvec(table,write,filp,buffer,lenp,HZ,OP_SET);
 }
@@ -1421,9 +1758,9 @@ int proc_doulongvec_ms_jiffies_minmax(ctl_table *table, int write,
  */
 
 /* The generic string strategy routine: */
-int sysctl_string(ctl_table *table, int *name, int nlen,
-		  void *oldval, size_t *oldlenp,
-		  void *newval, size_t newlen, void **context)
+int sysctl_string(ctl_table *table, int __user *name, int nlen,
+		  void __user *oldval, size_t __user *oldlenp,
+		  void __user *newval, size_t newlen, void **context)
 {
 	size_t l, len;
 	
@@ -1431,7 +1768,7 @@ int sysctl_string(ctl_table *table, int *name, int nlen,
 		return -ENOTDIR;
 	
 	if (oldval && oldlenp) {
-		if (get_user(len, oldlenp))
+		if(get_user(len, oldlenp))
 			return -EFAULT;
 		if (len) {
 			l = strlen(table->data);
@@ -1464,9 +1801,9 @@ int sysctl_string(ctl_table *table, int *name, int nlen,
  * are between the minimum and maximum values given in the arrays
  * table->extra1 and table->extra2, respectively.
  */
-int sysctl_intvec(ctl_table *table, int *name, int nlen,
-		void *oldval, size_t *oldlenp,
-		void *newval, size_t newlen, void **context)
+int sysctl_intvec(ctl_table *table, int __user *name, int nlen,
+		void __user *oldval, size_t __user *oldlenp,
+		void __user *newval, size_t newlen, void **context)
 {
 	int i, *vec, *min, *max;
 	size_t length;
@@ -1488,8 +1825,7 @@ int sysctl_intvec(ctl_table *table, int *name, int nlen,
 
 		for (i = 0; i < length; i++) {
 			int value;
-			if (get_user(value, vec + i))
-				return -EFAULT;
+			get_user(value, vec + i);
 			if (min && value < min[i])
 				return -EINVAL;
 			if (max && value > max[i])
@@ -1500,9 +1836,9 @@ int sysctl_intvec(ctl_table *table, int *name, int nlen,
 }
 
 /* Strategy function to convert jiffies to seconds */ 
-int sysctl_jiffies(ctl_table *table, int *name, int nlen,
-		void *oldval, size_t *oldlenp,
-		void *newval, size_t newlen, void **context)
+int sysctl_jiffies(ctl_table *table, int __user *name, int nlen,
+		void __user *oldval, size_t __user *oldlenp,
+		void __user *newval, size_t newlen, void **context)
 {
 	if (oldval) {
 		size_t olen;
@@ -1531,52 +1867,52 @@ int sysctl_jiffies(ctl_table *table, int *name, int nlen,
 #else /* CONFIG_SYSCTL */
 
 
-extern asmlinkage long sys_sysctl(struct __sysctl_args *args)
+extern asmlinkage long sys_sysctl(struct __sysctl_args __user *args)
 {
 	return -ENOSYS;
 }
 
-int sysctl_string(ctl_table *table, int *name, int nlen,
-		  void *oldval, size_t *oldlenp,
-		  void *newval, size_t newlen, void **context)
+int sysctl_string(ctl_table *table, int __user *name, int nlen,
+		  void __user *oldval, size_t __user *oldlenp,
+		  void __user *newval, size_t newlen, void **context)
 {
 	return -ENOSYS;
 }
 
-int sysctl_intvec(ctl_table *table, int *name, int nlen,
-		void *oldval, size_t *oldlenp,
-		void *newval, size_t newlen, void **context)
+int sysctl_intvec(ctl_table *table, int __user *name, int nlen,
+		void __user *oldval, size_t __user *oldlenp,
+		void __user *newval, size_t newlen, void **context)
 {
 	return -ENOSYS;
 }
 
-int sysctl_jiffies(ctl_table *table, int *name, int nlen,
-		void *oldval, size_t *oldlenp,
-		void *newval, size_t newlen, void **context)
+int sysctl_jiffies(ctl_table *table, int __user *name, int nlen,
+		void __user *oldval, size_t __user *oldlenp,
+		void __user *newval, size_t newlen, void **context)
 {
 	return -ENOSYS;
 }
 
 int proc_dostring(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp)
+		  void __user *buffer, size_t *lenp)
 {
 	return -ENOSYS;
 }
 
 int proc_dointvec(ctl_table *table, int write, struct file *filp,
-		  void *buffer, size_t *lenp)
+		  void __user *buffer, size_t *lenp)
 {
 	return -ENOSYS;
 }
 
 int proc_dointvec_bset(ctl_table *table, int write, struct file *filp,
-			void *buffer, size_t *lenp)
+			void __user *buffer, size_t *lenp)
 {
 	return -ENOSYS;
 }
 
 int proc_dointvec_minmax(ctl_table *table, int write, struct file *filp,
-		    void *buffer, size_t *lenp)
+		    void __user *buffer, size_t *lenp)
 {
 	return -ENOSYS;
 }
@@ -1588,14 +1924,14 @@ int proc_dointvec_jiffies(ctl_table *table, int write, struct file *filp,
 }
 
 int proc_doulongvec_minmax(ctl_table *table, int write, struct file *filp,
-		    void *buffer, size_t *lenp)
+		    void __user *buffer, size_t *lenp)
 {
 	return -ENOSYS;
 }
 
 int proc_doulongvec_ms_jiffies_minmax(ctl_table *table, int write,
 				      struct file *filp,
-				      void *buffer, size_t *lenp)
+				      void __user *buffer, size_t *lenp)
 {
     return -ENOSYS;
 }

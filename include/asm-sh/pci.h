@@ -4,6 +4,8 @@
 #ifdef __KERNEL__
 
 #include <linux/config.h>
+#include <linux/mm.h>		/* for struct page */
+#include <asm/cacheflush.h>
 
 /* Can be used to override the logic in pci_scan_bus for skipping
    already-configured bus numbers - to be used for buggy BIOSes
@@ -29,6 +31,10 @@
 #elif defined(CONFIG_SH_7751_SOLUTION_ENGINE)
 #define PCIBIOS_MIN_IO          0x4000
 #define PCIBIOS_MIN_MEM         0xFD000000
+
+#elif defined(CONFIG_SH_MPC1211)
+#define PCIBIOS_MIN_IO          0x2000
+#define PCIBIOS_MIN_MEM         0xb0000000
 #endif
 
 struct pci_dev;
@@ -43,6 +49,12 @@ static inline void pcibios_penalize_isa_irq(int irq)
 /* Dynamic DMA mapping stuff.
  * SuperH has everything mapped statically like x86.
  */
+
+/* The PCI address space does equal the physical memory
+ * address space.  The networking and block device layers use
+ * this boolean for bounce buffer decisions.
+ */
+#define PCI_DMA_BUS_IS_PHYS	(1)
 
 #include <linux/types.h>
 #include <linux/slab.h>
@@ -89,11 +101,36 @@ static inline dma_addr_t pci_map_single(struct pci_dev *hwdev, void *ptr,
 	return virt_to_bus(ptr);
 }
 
+/* pci_unmap_{single,page} being a nop depends upon the
+ * configuration.
+ */
+#ifdef CONFIG_SH_PCIDMA_NONCOHERENT
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)	\
+	dma_addr_t ADDR_NAME;
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)		\
+	__u32 LEN_NAME;
+#define pci_unmap_addr(PTR, ADDR_NAME)			\
+	((PTR)->ADDR_NAME)
+#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)		\
+	(((PTR)->ADDR_NAME) = (VAL))
+#define pci_unmap_len(PTR, LEN_NAME)			\
+	((PTR)->LEN_NAME)
+#define pci_unmap_len_set(PTR, LEN_NAME, VAL)		\
+	(((PTR)->LEN_NAME) = (VAL))
+#else
+#define DECLARE_PCI_UNMAP_ADDR(ADDR_NAME)
+#define DECLARE_PCI_UNMAP_LEN(LEN_NAME)
+#define pci_unmap_addr(PTR, ADDR_NAME)		(0)
+#define pci_unmap_addr_set(PTR, ADDR_NAME, VAL)	do { } while (0)
+#define pci_unmap_len(PTR, LEN_NAME)		(0)
+#define pci_unmap_len_set(PTR, LEN_NAME, VAL)	do { } while (0)
+#endif
+
 /* Unmap a single streaming mode DMA translation.  The dma_addr and size
  * must match what was provided for in a previous pci_map_single call.  All
  * other usages are undefined.
  *
- * After this call, reads by the cpu to the buffer are guarenteed to see
+ * After this call, reads by the cpu to the buffer are guaranteed to see
  * whatever the device wrote there.
  */
 static inline void pci_unmap_single(struct pci_dev *hwdev, dma_addr_t dma_addr,
@@ -123,8 +160,10 @@ static inline int pci_map_sg(struct pci_dev *hwdev, struct scatterlist *sg,
 #ifdef CONFIG_SH_PCIDMA_NONCOHERENT
 	int i;
 
-	for (i=0; i<nents; i++)
-		dma_cache_wback_inv(sg[i].address, sg[i].length);
+	for (i=0; i<nents; i++) {
+		dma_cache_wback_inv(page_address(sg[i].page) + sg[i].offset, sg[i].length);
+		sg[i].dma_address = page_to_phys(sg[i].page) + sg[i].offset;
+	}
 #endif
 	if (direction == PCI_DMA_NONE)
                 BUG();
@@ -180,8 +219,10 @@ static inline void pci_dma_sync_sg(struct pci_dev *hwdev,
 #ifdef CONFIG_SH_PCIDMA_NONCOHERENT
 	int i;
 
-	for (i=0; i<nelems; i++)
-		dma_cache_wback_inv(sg[i].address, sg[i].length);
+	for (i=0; i<nelems; i++) {
+		dma_cache_wback_inv(page_address(sg[i].page) + sg[i].offset, sg[i].length);
+		sg[i].dma_address = page_to_phys(sg[i].page) + sg[i].offset;
+	}
 #endif
 }
 
@@ -196,8 +237,10 @@ static inline int pci_dma_supported(struct pci_dev *hwdev, u64 mask)
 	return 1;
 }
 
-/* Return the index of the PCI controller for device PDEV. */
-#define pci_controller_num(PDEV)	(0)
+/* Not supporting more than 32-bit PCI bus addresses now, but
+ * must satisfy references to this function.  Change if needed.
+ */
+#define pci_dac_dma_supported(pci_dev, mask) (0)
 
 /* These macros should be used after a pci_map_sg call has been done
  * to get bus addresses of each of the SG entries and their lengths.
@@ -205,11 +248,38 @@ static inline int pci_dma_supported(struct pci_dev *hwdev, u64 mask)
  * returns, or alternatively stop on the first sg_dma_len(sg) which
  * is 0.
  */
-#define sg_dma_address(sg)	(virt_to_bus((sg)->address))
+#define sg_dma_address(sg)	(virt_to_bus((sg)->dma_address))
 #define sg_dma_len(sg)		((sg)->length)
+
+/*
+ * A board can define one or more PCI channels that represent built-in (or
+ * external) PCI controllers.
+ */
+struct pci_channel {
+	struct pci_ops *pci_ops;
+	struct resource *io_resource;
+	struct resource *mem_resource;
+	int first_devfn;
+	int last_devfn;
+};
+
+/*
+ * Each board initializes this array and terminates it with a NULL entry.
+ */
+extern struct pci_channel board_pci_channels[];
+
+/* Board-specific fixup routines. */
+extern void pcibios_fixup(void);
+extern void pcibios_fixup_irqs(void);
+
+#ifdef CONFIG_PCI_AUTO
+extern int pciauto_assign_resources(int busno, struct pci_channel *hose);
+#endif
 
 #endif /* __KERNEL__ */
 
+/* generic pci stuff */
+#include <asm-generic/pci.h>
 
 #endif /* __ASM_SH_PCI_H */
 

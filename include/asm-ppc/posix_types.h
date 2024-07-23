@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.posix_types.h 1.5 05/17/01 18:14:25 cort
- */
 #ifndef _PPC_POSIX_TYPES_H
 #define _PPC_POSIX_TYPES_H
 
@@ -11,7 +8,7 @@
  */
 
 typedef unsigned int	__kernel_dev_t;
-typedef unsigned int	__kernel_ino_t;
+typedef unsigned long	__kernel_ino_t;
 typedef unsigned int	__kernel_mode_t;
 typedef unsigned short	__kernel_nlink_t;
 typedef long		__kernel_off_t;
@@ -24,6 +21,8 @@ typedef long		__kernel_ptrdiff_t;
 typedef long		__kernel_time_t;
 typedef long		__kernel_suseconds_t;
 typedef long		__kernel_clock_t;
+typedef int		__kernel_timer_t;
+typedef int		__kernel_clockid_t;
 typedef int		__kernel_daddr_t;
 typedef char *		__kernel_caddr_t;
 typedef short             __kernel_ipc_pid_t;
@@ -34,6 +33,7 @@ typedef unsigned int	__kernel_gid32_t;
 
 typedef unsigned int	__kernel_old_uid_t;
 typedef unsigned int	__kernel_old_gid_t;
+typedef unsigned int	__kernel_old_dev_t;
 
 #ifdef __GNUC__
 typedef long long	__kernel_loff_t;

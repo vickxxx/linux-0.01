@@ -3,6 +3,7 @@
 #include <linux/blk.h>
 #include <linux/sched.h>
 #include <linux/version.h>
+#include <linux/interrupt.h>
 
 #include <asm/page.h>
 #include <asm/pgtable.h>
@@ -20,12 +21,13 @@
 
 static struct Scsi_Host *mvme147_host = NULL;
 
-static void mvme147_intr (int irq, void *dummy, struct pt_regs *fp)
+static irqreturn_t mvme147_intr (int irq, void *dummy, struct pt_regs *fp)
 {
     if (irq == MVME147_IRQ_SCSI_PORT)
 	wd33c93_intr (mvme147_host);
     else
 	m147_pcc->dma_intr = 0x89;	/* Ack and enable ints */
+    return IRQ_HANDLED;
 }
 
 static int dma_setup (Scsi_Cmnd *cmd, int dir_in)
@@ -111,11 +113,33 @@ int mvme147_detect(Scsi_Host_Template *tpnt)
     return 0;
 }
 
+static int mvme147_bus_reset(Scsi_Cmnd *cmd)
+{
+	/* FIXME perform bus-specific reset */
+	wd33c93_host_reset(cmd);
+	return SUCCESS;
+}
+
 #define HOSTS_C
 
 #include "mvme147.h"
 
-static Scsi_Host_Template driver_template = MVME147_SCSI;
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "MVME147",
+	.name			= "MVME147 built-in SCSI",
+	.detect			= mvme147_detect,
+	.release		= mvme147_release,
+	.queuecommand		= wd33c93_queuecommand,
+	.eh_abort_handler	= wd33c93_abort,
+	.eh_bus_reset_handler	= mvme147_bus_reset,
+	.eh_host_reset_handler	= wd33c93_host_reset,
+	.can_queue		= CAN_QUEUE,
+	.this_id		= 7,
+	.sg_tablesize		= SG_ALL,
+	.cmd_per_lun		= CMD_PER_LUN,
+	.use_clustering		= ENABLE_CLUSTERING
+};
+
 
 #include "scsi_module.c"
 

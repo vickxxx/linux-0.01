@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
- * Copyright (C) 2001 Hewlett-Packard Co
+ * Copyright (C) 2001-2003 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
  */
 #ifndef _ASM_IA64_SMP_H
@@ -17,6 +17,7 @@
 #include <linux/threads.h>
 #include <linux/kernel.h>
 
+#include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/param.h>
 #include <asm/processor.h>
@@ -27,7 +28,7 @@
 #define SMP_IRQ_REDIRECTION	(1 << 0)
 #define SMP_IPI_REDIRECTION	(1 << 1)
 
-#define smp_processor_id()	(current->processor)
+#define smp_processor_id()	(current_thread_info()->cpu)
 
 extern struct smp_boot_data {
 	int cpu_count;
@@ -36,29 +37,44 @@ extern struct smp_boot_data {
 
 extern char no_int_routing __initdata;
 
+extern unsigned long phys_cpu_present_map;
 extern volatile unsigned long cpu_online_map;
 extern unsigned long ipi_base_addr;
 extern unsigned char smp_int_redirect;
-extern int smp_num_cpus;
 
 extern volatile int ia64_cpu_to_sapicid[];
 #define cpu_physical_id(i)	ia64_cpu_to_sapicid[i]
-#define cpu_number_map(i)	(i)
-#define cpu_logical_map(i)	(i)
 
 extern unsigned long ap_wakeup_vector;
 
+#define cpu_possible(cpu)	(phys_cpu_present_map & (1UL << (cpu)))
+#define cpu_online(cpu)		(cpu_online_map & (1UL << (cpu)))
+
+static inline unsigned int
+num_online_cpus (void)
+{
+	return hweight64(cpu_online_map);
+}
+
+static inline unsigned int
+any_online_cpu (unsigned int mask)
+{
+	if (mask & cpu_online_map)
+		return __ffs(mask & cpu_online_map);
+	return NR_CPUS;
+}
+
 /*
- * Function to map hard smp processor id to logical id.  Slow, so
- * don't use this in performance-critical code.
+ * Function to map hard smp processor id to logical id.  Slow, so don't use this in
+ * performance-critical code.
  */
 static inline int
 cpu_logical_id (int cpuid)
 {
 	int i;
 
-	for (i = 0; i < smp_num_cpus; ++i)
-		if (cpu_physical_id(i) == (__u32) cpuid)
+	for (i = 0; i < NR_CPUS; ++i)
+		if (cpu_physical_id(i) == cpuid)
 			break;
 	return i;
 }
@@ -108,20 +124,18 @@ hard_smp_processor_id (void)
 	return lid.f.id << 8 | lid.f.eid;
 }
 
-#define NO_PROC_ID		0xffffffff	/* no processor magic marker */
-
-/*
- * Extra overhead to move a task from one cpu to another (due to TLB and cache misses).
- * Expressed in "negative nice value" units (larger number means higher priority/penalty).
- */
-#define PROC_CHANGE_PENALTY	20
+/* Upping and downing of CPUs */
+extern int __cpu_disable (void);
+extern void __cpu_die (unsigned int cpu);
+extern int __cpu_up (unsigned int cpu);
+extern void __init smp_build_cpu_map(void);
 
 extern void __init init_smp_config (void);
 extern void smp_do_timer (struct pt_regs *regs);
 
 extern int smp_call_function_single (int cpuid, void (*func) (void *info), void *info,
 				     int retry, int wait);
-
+extern void smp_send_reschedule (int cpu);
 
 #endif /* CONFIG_SMP */
 #endif /* _ASM_IA64_SMP_H */

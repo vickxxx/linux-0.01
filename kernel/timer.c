@@ -13,32 +13,452 @@
  *              serialize accesses to xtime/lost_ticks).
  *                              Copyright (C) 1998  Andrea Arcangeli
  *  1999-03-10  Improved NTP compatibility by Ulrich Windl
+ *  2002-05-31	Move sys_sysinfo here and make its locking sane, Robert Love
+ *  2000-10-05  Implemented scalable SMP per-CPU timer handling.
+ *                              Copyright (C) 2000, 2001, 2002  Ingo Molnar
+ *              Designed by David S. Miller, Alexey Kuznetsov and Ingo Molnar
  */
 
-#include <linux/config.h>
-#include <linux/mm.h>
-#include <linux/timex.h>
-#include <linux/delay.h>
-#include <linux/smp_lock.h>
-#include <linux/interrupt.h>
 #include <linux/kernel_stat.h>
+#include <linux/interrupt.h>
+#include <linux/percpu.h>
+#include <linux/init.h>
+#include <linux/mm.h>
+#include <linux/swap.h>
+#include <linux/notifier.h>
+#include <linux/thread_info.h>
+#include <linux/time.h>
+#include <linux/jiffies.h>
+#include <linux/cpu.h>
 
 #include <asm/uaccess.h>
+#include <asm/div64.h>
+#include <asm/timex.h>
+
+/*
+ * per-CPU timer vector definitions:
+ */
+#define TVN_BITS 6
+#define TVR_BITS 8
+#define TVN_SIZE (1 << TVN_BITS)
+#define TVR_SIZE (1 << TVR_BITS)
+#define TVN_MASK (TVN_SIZE - 1)
+#define TVR_MASK (TVR_SIZE - 1)
+
+typedef struct tvec_s {
+	struct list_head vec[TVN_SIZE];
+} tvec_t;
+
+typedef struct tvec_root_s {
+	struct list_head vec[TVR_SIZE];
+} tvec_root_t;
+
+struct tvec_t_base_s {
+	spinlock_t lock;
+	unsigned long timer_jiffies;
+	struct timer_list *running_timer;
+	tvec_root_t tv1;
+	tvec_t tv2;
+	tvec_t tv3;
+	tvec_t tv4;
+	tvec_t tv5;
+} ____cacheline_aligned_in_smp;
+
+typedef struct tvec_t_base_s tvec_base_t;
+
+static inline void set_running_timer(tvec_base_t *base,
+					struct timer_list *timer)
+{
+#ifdef CONFIG_SMP
+	base->running_timer = timer;
+#endif
+}
+
+/* Fake initialization */
+static DEFINE_PER_CPU(tvec_base_t, tvec_bases) = { SPIN_LOCK_UNLOCKED };
+
+static void check_timer_failed(struct timer_list *timer)
+{
+	static int whine_count;
+	if (whine_count < 16) {
+		whine_count++;
+		printk("Uninitialised timer!\n");
+		printk("This is just a warning.  Your computer is OK\n");
+		printk("function=0x%p, data=0x%lx\n",
+			timer->function, timer->data);
+		dump_stack();
+	}
+	/*
+	 * Now fix it up
+	 */
+	spin_lock_init(&timer->lock);
+	timer->magic = TIMER_MAGIC;
+}
+
+static inline void check_timer(struct timer_list *timer)
+{
+	if (timer->magic != TIMER_MAGIC)
+		check_timer_failed(timer);
+}
+
+
+static void internal_add_timer(tvec_base_t *base, struct timer_list *timer)
+{
+	unsigned long expires = timer->expires;
+	unsigned long idx = expires - base->timer_jiffies;
+	struct list_head *vec;
+
+	if (idx < TVR_SIZE) {
+		int i = expires & TVR_MASK;
+		vec = base->tv1.vec + i;
+	} else if (idx < 1 << (TVR_BITS + TVN_BITS)) {
+		int i = (expires >> TVR_BITS) & TVN_MASK;
+		vec = base->tv2.vec + i;
+	} else if (idx < 1 << (TVR_BITS + 2 * TVN_BITS)) {
+		int i = (expires >> (TVR_BITS + TVN_BITS)) & TVN_MASK;
+		vec = base->tv3.vec + i;
+	} else if (idx < 1 << (TVR_BITS + 3 * TVN_BITS)) {
+		int i = (expires >> (TVR_BITS + 2 * TVN_BITS)) & TVN_MASK;
+		vec = base->tv4.vec + i;
+	} else if ((signed long) idx < 0) {
+		/*
+		 * Can happen if you add a timer with expires == jiffies,
+		 * or you set a timer to go off in the past
+		 */
+		vec = base->tv1.vec + (base->timer_jiffies & TVR_MASK);
+	} else {
+		int i;
+		/* If the timeout is larger than 0xffffffff on 64-bit
+		 * architectures then we use the maximum timeout:
+		 */
+		if (idx > 0xffffffffUL) {
+			idx = 0xffffffffUL;
+			expires = idx + base->timer_jiffies;
+		}
+		i = (expires >> (TVR_BITS + 3 * TVN_BITS)) & TVN_MASK;
+		vec = base->tv5.vec + i;
+	}
+	/*
+	 * Timers are FIFO:
+	 */
+	list_add_tail(&timer->entry, vec);
+}
+
+/***
+ * add_timer - start a timer
+ * @timer: the timer to be added
+ *
+ * The kernel will do a ->function(->data) callback from the
+ * timer interrupt at the ->expired point in the future. The
+ * current time is 'jiffies'.
+ *
+ * The timer's ->expired, ->function (and if the handler uses it, ->data)
+ * fields must be set prior calling this function.
+ *
+ * Timers with an ->expired field in the past will be executed in the next
+ * timer tick. It's illegal to add an already pending timer.
+ */
+void add_timer(struct timer_list *timer)
+{
+	tvec_base_t *base = &get_cpu_var(tvec_bases);
+  	unsigned long flags;
+  
+  	BUG_ON(timer_pending(timer) || !timer->function);
+
+	check_timer(timer);
+
+	spin_lock_irqsave(&base->lock, flags);
+	internal_add_timer(base, timer);
+	timer->base = base;
+	spin_unlock_irqrestore(&base->lock, flags);
+	put_cpu_var(tvec_bases);
+}
+
+/***
+ * add_timer_on - start a timer on a particular CPU
+ * @timer: the timer to be added
+ * @cpu: the CPU to start it on
+ *
+ * This is not very scalable on SMP.
+ */
+void add_timer_on(struct timer_list *timer, int cpu)
+{
+	tvec_base_t *base = &per_cpu(tvec_bases, cpu);
+  	unsigned long flags;
+  
+  	BUG_ON(timer_pending(timer) || !timer->function);
+
+	check_timer(timer);
+
+	spin_lock_irqsave(&base->lock, flags);
+	internal_add_timer(base, timer);
+	timer->base = base;
+	spin_unlock_irqrestore(&base->lock, flags);
+}
+
+/***
+ * mod_timer - modify a timer's timeout
+ * @timer: the timer to be modified
+ *
+ * mod_timer is a more efficient way to update the expire field of an
+ * active timer (if the timer is inactive it will be activated)
+ *
+ * mod_timer(timer, expires) is equivalent to:
+ *
+ *     del_timer(timer); timer->expires = expires; add_timer(timer);
+ *
+ * Note that if there are multiple unserialized concurrent users of the
+ * same timer, then mod_timer() is the only safe way to modify the timeout,
+ * since add_timer() cannot modify an already running timer.
+ *
+ * The function returns whether it has modified a pending timer or not.
+ * (ie. mod_timer() of an inactive timer returns 0, mod_timer() of an
+ * active timer returns 1.)
+ */
+int mod_timer(struct timer_list *timer, unsigned long expires)
+{
+	tvec_base_t *old_base, *new_base;
+	unsigned long flags;
+	int ret = 0;
+
+	BUG_ON(!timer->function);
+
+	check_timer(timer);
+
+	/*
+	 * This is a common optimization triggered by the
+	 * networking code - if the timer is re-modified
+	 * to be the same thing then just return:
+	 */
+	if (timer->expires == expires && timer_pending(timer))
+		return 1;
+
+	spin_lock_irqsave(&timer->lock, flags);
+	new_base = &__get_cpu_var(tvec_bases);
+repeat:
+	old_base = timer->base;
+
+	/*
+	 * Prevent deadlocks via ordering by old_base < new_base.
+	 */
+	if (old_base && (new_base != old_base)) {
+		if (old_base < new_base) {
+			spin_lock(&new_base->lock);
+			spin_lock(&old_base->lock);
+		} else {
+			spin_lock(&old_base->lock);
+			spin_lock(&new_base->lock);
+		}
+		/*
+		 * The timer base might have been cancelled while we were
+		 * trying to take the lock(s):
+		 */
+		if (timer->base != old_base) {
+			spin_unlock(&new_base->lock);
+			spin_unlock(&old_base->lock);
+			goto repeat;
+		}
+	} else
+		spin_lock(&new_base->lock);
+
+	/*
+	 * Delete the previous timeout (if there was any), and install
+	 * the new one:
+	 */
+	if (old_base) {
+		list_del(&timer->entry);
+		ret = 1;
+	}
+	timer->expires = expires;
+	internal_add_timer(new_base, timer);
+	timer->base = new_base;
+
+	if (old_base && (new_base != old_base))
+		spin_unlock(&old_base->lock);
+	spin_unlock(&new_base->lock);
+	spin_unlock_irqrestore(&timer->lock, flags);
+
+	return ret;
+}
+
+/***
+ * del_timer - deactive a timer.
+ * @timer: the timer to be deactivated
+ *
+ * del_timer() deactivates a timer - this works on both active and inactive
+ * timers.
+ *
+ * The function returns whether it has deactivated a pending timer or not.
+ * (ie. del_timer() of an inactive timer returns 0, del_timer() of an
+ * active timer returns 1.)
+ */
+int del_timer(struct timer_list *timer)
+{
+	unsigned long flags;
+	tvec_base_t *base;
+
+	check_timer(timer);
+
+repeat:
+ 	base = timer->base;
+	if (!base)
+		return 0;
+	spin_lock_irqsave(&base->lock, flags);
+	if (base != timer->base) {
+		spin_unlock_irqrestore(&base->lock, flags);
+		goto repeat;
+	}
+	list_del(&timer->entry);
+	timer->base = NULL;
+	spin_unlock_irqrestore(&base->lock, flags);
+
+	return 1;
+}
+
+#ifdef CONFIG_SMP
+/***
+ * del_timer_sync - deactivate a timer and wait for the handler to finish.
+ * @timer: the timer to be deactivated
+ *
+ * This function only differs from del_timer() on SMP: besides deactivating
+ * the timer it also makes sure the handler has finished executing on other
+ * CPUs.
+ *
+ * Synchronization rules: callers must prevent restarting of the timer,
+ * otherwise this function is meaningless. It must not be called from
+ * interrupt contexts. Upon exit the timer is not queued and the handler
+ * is not running on any CPU.
+ *
+ * The function returns whether it has deactivated a pending timer or not.
+ */
+int del_timer_sync(struct timer_list *timer)
+{
+	tvec_base_t *base;
+	int i, ret = 0;
+
+	check_timer(timer);
+
+del_again:
+	ret += del_timer(timer);
+
+	for (i = 0; i < NR_CPUS; i++) {
+		if (!cpu_online(i))
+			continue;
+
+		base = &per_cpu(tvec_bases, i);
+		if (base->running_timer == timer) {
+			while (base->running_timer == timer) {
+				cpu_relax();
+				preempt_check_resched();
+			}
+			break;
+		}
+	}
+	if (timer_pending(timer))
+		goto del_again;
+
+	return ret;
+}
+#endif
+
+
+static int cascade(tvec_base_t *base, tvec_t *tv, int index)
+{
+	/* cascade all the timers from tv up one level */
+	struct list_head *head, *curr;
+
+	head = tv->vec + index;
+	curr = head->next;
+	/*
+	 * We are removing _all_ timers from the list, so we don't  have to
+	 * detach them individually, just clear the list afterwards.
+	 */
+	while (curr != head) {
+		struct timer_list *tmp;
+
+		tmp = list_entry(curr, struct timer_list, entry);
+		BUG_ON(tmp->base != base);
+		curr = curr->next;
+		internal_add_timer(base, tmp);
+	}
+	INIT_LIST_HEAD(head);
+
+	return index;
+}
+
+/***
+ * __run_timers - run all expired timers (if any) on this CPU.
+ * @base: the timer vector to be processed.
+ *
+ * This function cascades all vectors and executes all expired timer
+ * vectors.
+ */
+#define INDEX(N) (base->timer_jiffies >> (TVR_BITS + N * TVN_BITS)) & TVN_MASK
+
+static inline void __run_timers(tvec_base_t *base)
+{
+	struct timer_list *timer;
+
+	spin_lock_irq(&base->lock);
+	while (time_after_eq(jiffies, base->timer_jiffies)) {
+		struct list_head work_list = LIST_HEAD_INIT(work_list);
+		struct list_head *head = &work_list;
+ 		int index = base->timer_jiffies & TVR_MASK;
+ 
+		/*
+		 * Cascade timers:
+		 */
+		if (!index &&
+			(!cascade(base, &base->tv2, INDEX(0))) &&
+				(!cascade(base, &base->tv3, INDEX(1))) &&
+					!cascade(base, &base->tv4, INDEX(2)))
+			cascade(base, &base->tv5, INDEX(3));
+		++base->timer_jiffies; 
+		list_splice_init(base->tv1.vec + index, &work_list);
+repeat:
+		if (!list_empty(head)) {
+			void (*fn)(unsigned long);
+			unsigned long data;
+
+			timer = list_entry(head->next,struct timer_list,entry);
+ 			fn = timer->function;
+ 			data = timer->data;
+
+			list_del(&timer->entry);
+			timer->base = NULL;
+			set_running_timer(base, timer);
+			spin_unlock_irq(&base->lock);
+			fn(data);
+			spin_lock_irq(&base->lock);
+			goto repeat;
+		}
+	}
+	set_running_timer(base, NULL);
+	spin_unlock_irq(&base->lock);
+}
+
+/******************************************************************/
 
 /*
  * Timekeeping variables
  */
+unsigned long tick_usec = TICK_USEC; 		/* USER_HZ period (usec) */
+unsigned long tick_nsec = TICK_NSEC;		/* ACTHZ period (nsec) */
 
-long tick = (1000000 + HZ/2) / HZ;	/* timer interrupt period */
-
-/* The current time */
-struct timeval xtime __attribute__ ((aligned (16)));
+/* 
+ * The current time 
+ * wall_to_monotonic is what we need to add to xtime (or xtime corrected 
+ * for sub jiffie times) to get to monotonic time.  Monotonic is pegged at zero
+ * at zero at system boot time, so wall_to_monotonic will be negative,
+ * however, we will ALWAYS keep the tv_nsec part positive so we can use
+ * the usual normalization.
+ */
+struct timespec xtime __attribute__ ((aligned (16)));
+struct timespec wall_to_monotonic __attribute__ ((aligned (16)));
 
 /* Don't completely fail for HZ > 500.  */
 int tickadj = 500/HZ ? : 1;		/* microsecs */
 
-DECLARE_TASK_QUEUE(tq_timer);
-DECLARE_TASK_QUEUE(tq_immediate);
 
 /*
  * phase-lock loop variables
@@ -53,303 +473,11 @@ long time_precision = 1;		/* clock precision (us)		*/
 long time_maxerror = NTP_PHASE_LIMIT;	/* maximum error (us)		*/
 long time_esterror = NTP_PHASE_LIMIT;	/* estimated error (us)		*/
 long time_phase;			/* phase offset (scaled us)	*/
-long time_freq = ((1000000 + HZ/2) % HZ - HZ/2) << SHIFT_USEC;
+long time_freq = (((NSEC_PER_SEC + HZ/2) % HZ - HZ/2) << SHIFT_USEC) / NSEC_PER_USEC;
 					/* frequency offset (scaled ppm)*/
 long time_adj;				/* tick adjust (scaled 1 / HZ)	*/
 long time_reftime;			/* time at last adjustment (s)	*/
-
 long time_adjust;
-long time_adjust_step;
-
-unsigned long event;
-
-extern int do_setitimer(int, struct itimerval *, struct itimerval *);
-
-unsigned long volatile jiffies;
-
-unsigned int * prof_buffer;
-unsigned long prof_len;
-unsigned long prof_shift;
-
-/*
- * Event timer code
- */
-#define TVN_BITS 6
-#define TVR_BITS 8
-#define TVN_SIZE (1 << TVN_BITS)
-#define TVR_SIZE (1 << TVR_BITS)
-#define TVN_MASK (TVN_SIZE - 1)
-#define TVR_MASK (TVR_SIZE - 1)
-
-struct timer_vec {
-	int index;
-	struct list_head vec[TVN_SIZE];
-};
-
-struct timer_vec_root {
-	int index;
-	struct list_head vec[TVR_SIZE];
-};
-
-static struct timer_vec tv5;
-static struct timer_vec tv4;
-static struct timer_vec tv3;
-static struct timer_vec tv2;
-static struct timer_vec_root tv1;
-
-static struct timer_vec * const tvecs[] = {
-	(struct timer_vec *)&tv1, &tv2, &tv3, &tv4, &tv5
-};
-
-static struct list_head * run_timer_list_running;
-
-#define NOOF_TVECS (sizeof(tvecs) / sizeof(tvecs[0]))
-
-void init_timervecs (void)
-{
-	int i;
-
-	for (i = 0; i < TVN_SIZE; i++) {
-		INIT_LIST_HEAD(tv5.vec + i);
-		INIT_LIST_HEAD(tv4.vec + i);
-		INIT_LIST_HEAD(tv3.vec + i);
-		INIT_LIST_HEAD(tv2.vec + i);
-	}
-	for (i = 0; i < TVR_SIZE; i++)
-		INIT_LIST_HEAD(tv1.vec + i);
-}
-
-static unsigned long timer_jiffies;
-
-static inline void internal_add_timer(struct timer_list *timer)
-{
-	/*
-	 * must be cli-ed when calling this
-	 */
-	unsigned long expires = timer->expires;
-	unsigned long idx = expires - timer_jiffies;
-	struct list_head * vec;
-
-	if (run_timer_list_running)
-		vec = run_timer_list_running;
-	else if (idx < TVR_SIZE) {
-		int i = expires & TVR_MASK;
-		vec = tv1.vec + i;
-	} else if (idx < 1 << (TVR_BITS + TVN_BITS)) {
-		int i = (expires >> TVR_BITS) & TVN_MASK;
-		vec = tv2.vec + i;
-	} else if (idx < 1 << (TVR_BITS + 2 * TVN_BITS)) {
-		int i = (expires >> (TVR_BITS + TVN_BITS)) & TVN_MASK;
-		vec =  tv3.vec + i;
-	} else if (idx < 1 << (TVR_BITS + 3 * TVN_BITS)) {
-		int i = (expires >> (TVR_BITS + 2 * TVN_BITS)) & TVN_MASK;
-		vec = tv4.vec + i;
-	} else if ((signed long) idx < 0) {
-		/* can happen if you add a timer with expires == jiffies,
-		 * or you set a timer to go off in the past
-		 */
-		vec = tv1.vec + tv1.index;
-	} else if (idx <= 0xffffffffUL) {
-		int i = (expires >> (TVR_BITS + 3 * TVN_BITS)) & TVN_MASK;
-		vec = tv5.vec + i;
-	} else {
-		/* Can only get here on architectures with 64-bit jiffies */
-		INIT_LIST_HEAD(&timer->list);
-		return;
-	}
-	/*
-	 * Timers are FIFO!
-	 */
-	list_add(&timer->list, vec->prev);
-}
-
-/* Initialize both explicitly - let's try to have them in the same cache line */
-spinlock_t timerlist_lock = SPIN_LOCK_UNLOCKED;
-
-#ifdef CONFIG_SMP
-volatile struct timer_list * volatile running_timer;
-#define timer_enter(t) do { running_timer = t; mb(); } while (0)
-#define timer_exit() do { running_timer = NULL; } while (0)
-#define timer_is_running(t) (running_timer == t)
-#define timer_synchronize(t) while (timer_is_running(t)) barrier()
-#else
-#define timer_enter(t)		do { } while (0)
-#define timer_exit()		do { } while (0)
-#endif
-
-void add_timer(struct timer_list *timer)
-{
-	unsigned long flags;
-
-	spin_lock_irqsave(&timerlist_lock, flags);
-	if (timer_pending(timer))
-		goto bug;
-	internal_add_timer(timer);
-	spin_unlock_irqrestore(&timerlist_lock, flags);
-	return;
-bug:
-	spin_unlock_irqrestore(&timerlist_lock, flags);
-	printk("bug: kernel timer added twice at %p.\n",
-			__builtin_return_address(0));
-}
-
-static inline int detach_timer (struct timer_list *timer)
-{
-	if (!timer_pending(timer))
-		return 0;
-	list_del(&timer->list);
-	return 1;
-}
-
-int mod_timer(struct timer_list *timer, unsigned long expires)
-{
-	int ret;
-	unsigned long flags;
-
-	spin_lock_irqsave(&timerlist_lock, flags);
-	timer->expires = expires;
-	ret = detach_timer(timer);
-	internal_add_timer(timer);
-	spin_unlock_irqrestore(&timerlist_lock, flags);
-	return ret;
-}
-
-int del_timer(struct timer_list * timer)
-{
-	int ret;
-	unsigned long flags;
-
-	spin_lock_irqsave(&timerlist_lock, flags);
-	ret = detach_timer(timer);
-	timer->list.next = timer->list.prev = NULL;
-	spin_unlock_irqrestore(&timerlist_lock, flags);
-	return ret;
-}
-
-#ifdef CONFIG_SMP
-void sync_timers(void)
-{
-	spin_unlock_wait(&global_bh_lock);
-}
-
-/*
- * SMP specific function to delete periodic timer.
- * Caller must disable by some means restarting the timer
- * for new. Upon exit the timer is not queued and handler is not running
- * on any CPU. It returns number of times, which timer was deleted
- * (for reference counting).
- */
-
-int del_timer_sync(struct timer_list * timer)
-{
-	int ret = 0;
-
-	for (;;) {
-		unsigned long flags;
-		int running;
-
-		spin_lock_irqsave(&timerlist_lock, flags);
-		ret += detach_timer(timer);
-		timer->list.next = timer->list.prev = 0;
-		running = timer_is_running(timer);
-		spin_unlock_irqrestore(&timerlist_lock, flags);
-
-		if (!running)
-			break;
-
-		timer_synchronize(timer);
-	}
-
-	return ret;
-}
-#endif
-
-
-static inline void cascade_timers(struct timer_vec *tv)
-{
-	/* cascade all the timers from tv up one level */
-	struct list_head *head, *curr, *next;
-
-	head = tv->vec + tv->index;
-	curr = head->next;
-	/*
-	 * We are removing _all_ timers from the list, so we don't  have to
-	 * detach them individually, just clear the list afterwards.
-	 */
-	while (curr != head) {
-		struct timer_list *tmp;
-
-		tmp = list_entry(curr, struct timer_list, list);
-		next = curr->next;
-		list_del(curr); // not needed
-		internal_add_timer(tmp);
-		curr = next;
-	}
-	INIT_LIST_HEAD(head);
-	tv->index = (tv->index + 1) & TVN_MASK;
-}
-
-static inline void run_timer_list(void)
-{
-	spin_lock_irq(&timerlist_lock);
-	while ((long)(jiffies - timer_jiffies) >= 0) {
-		LIST_HEAD(queued);
-		struct list_head *head, *curr;
-		if (!tv1.index) {
-			int n = 1;
-			do {
-				cascade_timers(tvecs[n]);
-			} while (tvecs[n]->index == 1 && ++n < NOOF_TVECS);
-		}
-		run_timer_list_running = &queued;
-repeat:
-		head = tv1.vec + tv1.index;
-		curr = head->next;
-		if (curr != head) {
-			struct timer_list *timer;
-			void (*fn)(unsigned long);
-			unsigned long data;
-
-			timer = list_entry(curr, struct timer_list, list);
- 			fn = timer->function;
- 			data= timer->data;
-
-			detach_timer(timer);
-			timer->list.next = timer->list.prev = NULL;
-			timer_enter(timer);
-			spin_unlock_irq(&timerlist_lock);
-			fn(data);
-			spin_lock_irq(&timerlist_lock);
-			timer_exit();
-			goto repeat;
-		}
-		run_timer_list_running = NULL;
-		++timer_jiffies; 
-		tv1.index = (tv1.index + 1) & TVR_MASK;
-
-		curr = queued.next;
-		while (curr != &queued) {
-			struct timer_list *timer;
-
-			timer = list_entry(curr, struct timer_list, list);
-			curr = curr->next;
-			internal_add_timer(timer);
-		}			
-	}
-	spin_unlock_irq(&timerlist_lock);
-}
-
-spinlock_t tqueue_lock = SPIN_LOCK_UNLOCKED;
-
-void tqueue_bh(void)
-{
-	run_task_queue(&tq_timer);
-}
-
-void immediate_bh(void)
-{
-	run_task_queue(&tq_immediate);
-}
 
 /*
  * this routine handles the overflow of the microsecond field
@@ -392,7 +520,10 @@ static void second_overflow(void)
     case TIME_INS:
 	if (xtime.tv_sec % 86400 == 0) {
 	    xtime.tv_sec--;
+	    wall_to_monotonic.tv_sec++;
+	    time_interpolator_update(-NSEC_PER_SEC);
 	    time_state = TIME_OOP;
+	    clock_was_set();
 	    printk(KERN_NOTICE "Clock: inserting leap second 23:59:60 UTC\n");
 	}
 	break;
@@ -400,7 +531,10 @@ static void second_overflow(void)
     case TIME_DEL:
 	if ((xtime.tv_sec + 1) % 86400 == 0) {
 	    xtime.tv_sec++;
+	    wall_to_monotonic.tv_sec--;
+	    time_interpolator_update(NSEC_PER_SEC);
 	    time_state = TIME_WAIT;
+	    clock_was_set();
 	    printk(KERN_NOTICE "Clock: deleting leap second 23:59:59 UTC\n");
 	}
 	break;
@@ -477,6 +611,8 @@ static void second_overflow(void)
 /* in the NTP reference this is called "hardclock()" */
 static void update_wall_time_one_tick(void)
 {
+	long time_adjust_step, delta_nsec;
+
 	if ( (time_adjust_step = time_adjust) != 0 ) {
 	    /* We are doing an adjtime thing. 
 	     *
@@ -491,26 +627,28 @@ static void update_wall_time_one_tick(void)
 		time_adjust_step = tickadj;
 	     else if (time_adjust < -tickadj)
 		time_adjust_step = -tickadj;
-	     
+
 	    /* Reduce by this step the amount of time left  */
 	    time_adjust -= time_adjust_step;
 	}
-	xtime.tv_usec += tick + time_adjust_step;
+	delta_nsec = tick_nsec + time_adjust_step * 1000;
 	/*
 	 * Advance the phase, once it gets to one microsecond, then
 	 * advance the tick more.
 	 */
 	time_phase += time_adj;
-	if (time_phase <= -FINEUSEC) {
-		long ltemp = -time_phase >> SHIFT_SCALE;
-		time_phase += ltemp << SHIFT_SCALE;
-		xtime.tv_usec -= ltemp;
+	if (time_phase <= -FINENSEC) {
+		long ltemp = -time_phase >> (SHIFT_SCALE - 10);
+		time_phase += ltemp << (SHIFT_SCALE - 10);
+		delta_nsec -= ltemp;
 	}
-	else if (time_phase >= FINEUSEC) {
-		long ltemp = time_phase >> SHIFT_SCALE;
-		time_phase -= ltemp << SHIFT_SCALE;
-		xtime.tv_usec += ltemp;
+	else if (time_phase >= FINENSEC) {
+		long ltemp = time_phase >> (SHIFT_SCALE - 10);
+		time_phase -= ltemp << (SHIFT_SCALE - 10);
+		delta_nsec += ltemp;
 	}
+	xtime.tv_nsec += delta_nsec;
+	time_interpolator_update(delta_nsec);
 }
 
 /*
@@ -527,9 +665,10 @@ static void update_wall_time(unsigned long ticks)
 		update_wall_time_one_tick();
 	} while (ticks);
 
-	if (xtime.tv_usec >= 1000000) {
-	    xtime.tv_usec -= 1000000;
+	if (xtime.tv_nsec >= 1000000000) {
+	    xtime.tv_nsec -= 1000000000;
 	    xtime.tv_sec++;
+	    time_interpolator_update(NSEC_PER_SEC);
 	    second_overflow();
 	}
 }
@@ -539,8 +678,8 @@ static inline void do_process_times(struct task_struct *p,
 {
 	unsigned long psecs;
 
-	psecs = (p->times.tms_utime += user);
-	psecs += (p->times.tms_stime += system);
+	psecs = (p->utime += user);
+	psecs += (p->stime += system);
 	if (psecs / HZ > p->rlim[RLIMIT_CPU].rlim_cur) {
 		/* Send SIGXCPU every second.. */
 		if (!(psecs % HZ))
@@ -581,8 +720,6 @@ static inline void do_it_prof(struct task_struct *p)
 void update_one_process(struct task_struct *p, unsigned long user,
 			unsigned long system, int cpu)
 {
-	p->per_cpu_utime[cpu] += user;
-	p->per_cpu_stime[cpu] += system;
 	do_process_times(p, user, system);
 	do_it_virt(p, user);
 	do_it_prof(p);
@@ -598,25 +735,8 @@ void update_process_times(int user_tick)
 	int cpu = smp_processor_id(), system = user_tick ^ 1;
 
 	update_one_process(p, user_tick, system, cpu);
-	if (p->pid) {
-		if (--p->counter <= 0) {
-			p->counter = 0;
-			/*
-			 * SCHED_FIFO is priority preemption, so this is 
-			 * not the place to decide whether to reschedule a
-			 * SCHED_FIFO task or not - Bhavesh Davda
-			 */
-			if (p->policy != SCHED_FIFO) {
-				p->need_resched = 1;
-			}
-		}
-		if (p->nice > 0)
-			kstat.per_cpu_nice[cpu] += user_tick;
-		else
-			kstat.per_cpu_user[cpu] += user_tick;
-		kstat.per_cpu_system[cpu] += system;
-	} else if (local_bh_count(cpu) || local_irq_count(cpu) > 1)
-		kstat.per_cpu_system[cpu] += system;
+	run_local_timers();
+	scheduler_tick(user_tick, system);
 }
 
 /*
@@ -624,17 +744,7 @@ void update_process_times(int user_tick)
  */
 static unsigned long count_active_tasks(void)
 {
-	struct task_struct *p;
-	unsigned long nr = 0;
-
-	read_lock(&tasklist_lock);
-	for_each_task(p) {
-		if ((p->state == TASK_RUNNING ||
-		     (p->state & TASK_UNINTERRUPTIBLE)))
-			nr += FIXED_1;
-	}
-	read_unlock(&tasklist_lock);
-	return nr;
+	return (nr_running() + nr_uninterruptible()) * FIXED_1;
 }
 
 /*
@@ -642,9 +752,15 @@ static unsigned long count_active_tasks(void)
  * imply that avenrun[] is the standard name for this kind of thing.
  * Nothing else seems to be standardized: the fractional size etc
  * all seem to differ on different machines.
+ *
+ * Requires xtime_lock to access.
  */
 unsigned long avenrun[3];
 
+/*
+ * calc_load - given tick count, update the avenrun load estimates.
+ * This is called while holding a write_lock on xtime_lock.
+ */
 static inline void calc_load(unsigned long ticks)
 {
 	unsigned long active_tasks; /* fixed-point */
@@ -661,55 +777,71 @@ static inline void calc_load(unsigned long ticks)
 }
 
 /* jiffies at the most recent update of wall time */
-unsigned long wall_jiffies;
+unsigned long wall_jiffies = INITIAL_JIFFIES;
 
 /*
- * This spinlock protect us from races in SMP while playing with xtime. -arca
+ * This read-write spinlock protects us from races in SMP while
+ * playing with xtime and avenrun.
  */
-rwlock_t xtime_lock = RW_LOCK_UNLOCKED;
+#ifndef ARCH_HAVE_XTIME_LOCK
+seqlock_t xtime_lock __cacheline_aligned_in_smp = SEQLOCK_UNLOCKED;
+#endif
 
+/*
+ * This function runs timers and the timer-tq in bottom half context.
+ */
+static void run_timer_softirq(struct softirq_action *h)
+{
+	tvec_base_t *base = &__get_cpu_var(tvec_bases);
+
+	if (time_after_eq(jiffies, base->timer_jiffies))
+		__run_timers(base);
+}
+
+/*
+ * Called by the local, per-CPU timer interrupt on SMP.
+ */
+void run_local_timers(void)
+{
+	raise_softirq(TIMER_SOFTIRQ);
+}
+
+/*
+ * Called by the timer interrupt. xtime_lock must already be taken
+ * by the timer IRQ!
+ */
 static inline void update_times(void)
 {
 	unsigned long ticks;
-
-	/*
-	 * update_times() is run from the raw timer_bh handler so we
-	 * just know that the irqs are locally enabled and so we don't
-	 * need to save/restore the flags of the local CPU here. -arca
-	 */
-	write_lock_irq(&xtime_lock);
-	vxtime_lock();
 
 	ticks = jiffies - wall_jiffies;
 	if (ticks) {
 		wall_jiffies += ticks;
 		update_wall_time(ticks);
 	}
-	vxtime_unlock();
-	write_unlock_irq(&xtime_lock);
 	calc_load(ticks);
 }
-
-void timer_bh(void)
-{
-	update_times();
-	run_timer_list();
-}
+  
+/*
+ * The 64-bit jiffies value is not atomic - you MUST NOT read it
+ * without sampling the sequence number in xtime_lock.
+ * jiffies is defined in the linker script...
+ */
 
 void do_timer(struct pt_regs *regs)
 {
-	(*(unsigned long *)&jiffies)++;
+	jiffies_64++;
 #ifndef CONFIG_SMP
 	/* SMP process accounting uses the local APIC timer */
 
 	update_process_times(user_mode(regs));
 #endif
-	mark_bh(TIMER_BH);
-	if (TQ_ACTIVE(tq_timer))
-		mark_bh(TQUEUE_BH);
+	update_times();
 }
 
 #if !defined(__alpha__) && !defined(__ia64__)
+
+extern int do_setitimer(int, struct itimerval *, struct itimerval *);
 
 /*
  * For backwards compatibility?  This can be done in libc so Alpha
@@ -756,8 +888,8 @@ asmlinkage long sys_getpid(void)
 }
 
 /*
- * This is not strictly SMP safe: p_opptr could change
- * from under us. However, rather than getting any lock
+ * Accessing ->group_leader->real_parent is not SMP-safe, it could
+ * change from under us. However, rather than getting any lock
  * we can use an optimistic algorithm: get the parent
  * pid, and go back and check that the parent is still
  * the same. If it has changed (which is extremely unlikely
@@ -765,33 +897,31 @@ asmlinkage long sys_getpid(void)
  *
  * NOTE! This depends on the fact that even if we _do_
  * get an old value of "parent", we can happily dereference
- * the pointer: we just can't necessarily trust the result
+ * the pointer (it was and remains a dereferencable kernel pointer
+ * no matter what): we just can't necessarily trust the result
  * until we know that the parent pointer is valid.
  *
- * The "mb()" macro is a memory barrier - a synchronizing
- * event. It also makes sure that gcc doesn't optimize
- * away the necessary memory references.. The barrier doesn't
- * have to have all that strong semantics: on x86 we don't
- * really require a synchronizing instruction, for example.
- * The barrier is more important for code generation than
- * for any real memory ordering semantics (even if there is
- * a small window for a race, using the old pointer is
- * harmless for a while).
+ * NOTE2: ->group_leader never changes from under us.
  */
 asmlinkage long sys_getppid(void)
 {
 	int pid;
-	struct task_struct * me = current;
-	struct task_struct * parent;
+	struct task_struct *me = current;
+	struct task_struct *parent;
 
-	parent = me->p_opptr;
+	parent = me->group_leader->real_parent;
 	for (;;) {
-		pid = parent->pid;
-#if CONFIG_SMP
+		pid = parent->tgid;
+#ifdef CONFIG_SMP
 {
 		struct task_struct *old = parent;
-		mb();
-		parent = me->p_opptr;
+
+		/*
+		 * Make sure we read the pid before re-reading the
+		 * parent pointer:
+		 */
+		rmb();
+		parent = me->group_leader->real_parent;
 		if (old != parent)
 			continue;
 }
@@ -827,50 +957,349 @@ asmlinkage long sys_getegid(void)
 
 #endif
 
+static void process_timeout(unsigned long __data)
+{
+	wake_up_process((task_t *)__data);
+}
+
+/**
+ * schedule_timeout - sleep until timeout
+ * @timeout: timeout value in jiffies
+ *
+ * Make the current task sleep until @timeout jiffies have
+ * elapsed. The routine will return immediately unless
+ * the current task state has been set (see set_current_state()).
+ *
+ * You can set the task state as follows -
+ *
+ * %TASK_UNINTERRUPTIBLE - at least @timeout jiffies are guaranteed to
+ * pass before the routine returns. The routine will return 0
+ *
+ * %TASK_INTERRUPTIBLE - the routine may return early if a signal is
+ * delivered to the current task. In this case the remaining time
+ * in jiffies will be returned, or 0 if the timer expired in time
+ *
+ * The current task state is guaranteed to be TASK_RUNNING when this
+ * routine returns.
+ *
+ * Specifying a @timeout value of %MAX_SCHEDULE_TIMEOUT will schedule
+ * the CPU away without a bound on the timeout. In this case the return
+ * value will be %MAX_SCHEDULE_TIMEOUT.
+ *
+ * In all cases the return value is guaranteed to be non-negative.
+ */
+signed long schedule_timeout(signed long timeout)
+{
+	struct timer_list timer;
+	unsigned long expire;
+
+	switch (timeout)
+	{
+	case MAX_SCHEDULE_TIMEOUT:
+		/*
+		 * These two special cases are useful to be comfortable
+		 * in the caller. Nothing more. We could take
+		 * MAX_SCHEDULE_TIMEOUT from one of the negative value
+		 * but I' d like to return a valid offset (>=0) to allow
+		 * the caller to do everything it want with the retval.
+		 */
+		schedule();
+		goto out;
+	default:
+		/*
+		 * Another bit of PARANOID. Note that the retval will be
+		 * 0 since no piece of kernel is supposed to do a check
+		 * for a negative retval of schedule_timeout() (since it
+		 * should never happens anyway). You just have the printk()
+		 * that will tell you if something is gone wrong and where.
+		 */
+		if (timeout < 0)
+		{
+			printk(KERN_ERR "schedule_timeout: wrong timeout "
+			       "value %lx from %p\n", timeout,
+			       __builtin_return_address(0));
+			current->state = TASK_RUNNING;
+			goto out;
+		}
+	}
+
+	expire = timeout + jiffies;
+
+	init_timer(&timer);
+	timer.expires = expire;
+	timer.data = (unsigned long) current;
+	timer.function = process_timeout;
+
+	add_timer(&timer);
+	schedule();
+	del_timer_sync(&timer);
+
+	timeout = expire - jiffies;
+
+ out:
+	return timeout < 0 ? 0 : timeout;
+}
+
 /* Thread ID - the internal kernel "pid" */
 asmlinkage long sys_gettid(void)
 {
 	return current->pid;
+}
+#ifndef FOLD_NANO_SLEEP_INTO_CLOCK_NANO_SLEEP
+
+static long nanosleep_restart(struct restart_block *restart)
+{
+	unsigned long expire = restart->arg0, now = jiffies;
+	struct timespec *rmtp = (struct timespec *) restart->arg1;
+	long ret;
+
+	/* Did it expire while we handled signals? */
+	if (!time_after(expire, now))
+		return 0;
+
+	current->state = TASK_INTERRUPTIBLE;
+	expire = schedule_timeout(expire - now);
+
+	ret = 0;
+	if (expire) {
+		struct timespec t;
+		jiffies_to_timespec(expire, &t);
+
+		ret = -ERESTART_RESTARTBLOCK;
+		if (rmtp && copy_to_user(rmtp, &t, sizeof(t)))
+			ret = -EFAULT;
+		/* The 'restart' block is already filled in */
+	}
+	return ret;
 }
 
 asmlinkage long sys_nanosleep(struct timespec *rqtp, struct timespec *rmtp)
 {
 	struct timespec t;
 	unsigned long expire;
+	long ret;
 
-	if(copy_from_user(&t, rqtp, sizeof(struct timespec)))
+	if (copy_from_user(&t, rqtp, sizeof(t)))
 		return -EFAULT;
 
-	if (t.tv_nsec >= 1000000000L || t.tv_nsec < 0 || t.tv_sec < 0)
+	if ((t.tv_nsec >= 1000000000L) || (t.tv_nsec < 0) || (t.tv_sec < 0))
 		return -EINVAL;
 
-
-	if (t.tv_sec == 0 && t.tv_nsec <= 2000000L &&
-	    current->policy != SCHED_OTHER)
-	{
-		/*
-		 * Short delay requests up to 2 ms will be handled with
-		 * high precision by a busy wait for all real-time processes.
-		 *
-		 * Its important on SMP not to do this holding locks.
-		 */
-		udelay((t.tv_nsec + 999) / 1000);
-		return 0;
-	}
-
 	expire = timespec_to_jiffies(&t) + (t.tv_sec || t.tv_nsec);
-
 	current->state = TASK_INTERRUPTIBLE;
 	expire = schedule_timeout(expire);
 
+	ret = 0;
 	if (expire) {
-		if (rmtp) {
-			jiffies_to_timespec(expire, &t);
-			if (copy_to_user(rmtp, &t, sizeof(struct timespec)))
-				return -EFAULT;
-		}
-		return -EINTR;
+		struct restart_block *restart;
+		jiffies_to_timespec(expire, &t);
+		if (rmtp && copy_to_user(rmtp, &t, sizeof(t)))
+			return -EFAULT;
+
+		restart = &current_thread_info()->restart_block;
+		restart->fn = nanosleep_restart;
+		restart->arg0 = jiffies + expire;
+		restart->arg1 = (unsigned long) rmtp;
+		ret = -ERESTART_RESTARTBLOCK;
 	}
+	return ret;
+}
+#endif // ! FOLD_NANO_SLEEP_INTO_CLOCK_NANO_SLEEP
+
+/*
+ * sys_sysinfo - fill in sysinfo struct
+ */ 
+asmlinkage long sys_sysinfo(struct sysinfo __user *info)
+{
+	struct sysinfo val;
+	unsigned long mem_total, sav_total;
+	unsigned int mem_unit, bitcount;
+	unsigned long seq;
+
+	memset((char *)&val, 0, sizeof(struct sysinfo));
+
+	do {
+		struct timespec tp;
+		seq = read_seqbegin(&xtime_lock);
+
+		/*
+		 * This is annoying.  The below is the same thing
+		 * posix_get_clock_monotonic() does, but it wants to
+		 * take the lock which we want to cover the loads stuff
+		 * too.
+		 */
+
+		do_gettimeofday((struct timeval *)&tp);
+		tp.tv_nsec *= NSEC_PER_USEC;
+		tp.tv_sec += wall_to_monotonic.tv_sec;
+		tp.tv_nsec += wall_to_monotonic.tv_nsec;
+		if (tp.tv_nsec - NSEC_PER_SEC >= 0) {
+			tp.tv_nsec = tp.tv_nsec - NSEC_PER_SEC;
+			tp.tv_sec++;
+		}
+		val.uptime = tp.tv_sec + (tp.tv_nsec ? 1 : 0);
+
+		val.loads[0] = avenrun[0] << (SI_LOAD_SHIFT - FSHIFT);
+		val.loads[1] = avenrun[1] << (SI_LOAD_SHIFT - FSHIFT);
+		val.loads[2] = avenrun[2] << (SI_LOAD_SHIFT - FSHIFT);
+
+		val.procs = nr_threads;
+	} while (read_seqretry(&xtime_lock, seq));
+
+	si_meminfo(&val);
+	si_swapinfo(&val);
+
+	/*
+	 * If the sum of all the available memory (i.e. ram + swap)
+	 * is less than can be stored in a 32 bit unsigned long then
+	 * we can be binary compatible with 2.2.x kernels.  If not,
+	 * well, in that case 2.2.x was broken anyways...
+	 *
+	 *  -Erik Andersen <andersee@debian.org>
+	 */
+
+	mem_total = val.totalram + val.totalswap;
+	if (mem_total < val.totalram || mem_total < val.totalswap)
+		goto out;
+	bitcount = 0;
+	mem_unit = val.mem_unit;
+	while (mem_unit > 1) {
+		bitcount++;
+		mem_unit >>= 1;
+		sav_total = mem_total;
+		mem_total <<= 1;
+		if (mem_total < sav_total)
+			goto out;
+	}
+
+	/*
+	 * If mem_total did not overflow, multiply all memory values by
+	 * val.mem_unit and set it to 1.  This leaves things compatible
+	 * with 2.2.x, and also retains compatibility with earlier 2.4.x
+	 * kernels...
+	 */
+
+	val.mem_unit = 1;
+	val.totalram <<= bitcount;
+	val.freeram <<= bitcount;
+	val.sharedram <<= bitcount;
+	val.bufferram <<= bitcount;
+	val.totalswap <<= bitcount;
+	val.freeswap <<= bitcount;
+	val.totalhigh <<= bitcount;
+	val.freehigh <<= bitcount;
+
+ out:
+	if (copy_to_user(info, &val, sizeof(struct sysinfo)))
+		return -EFAULT;
+
 	return 0;
 }
 
+static void __devinit init_timers_cpu(int cpu)
+{
+	int j;
+	tvec_base_t *base;
+       
+	base = &per_cpu(tvec_bases, cpu);
+	spin_lock_init(&base->lock);
+	for (j = 0; j < TVN_SIZE; j++) {
+		INIT_LIST_HEAD(base->tv5.vec + j);
+		INIT_LIST_HEAD(base->tv4.vec + j);
+		INIT_LIST_HEAD(base->tv3.vec + j);
+		INIT_LIST_HEAD(base->tv2.vec + j);
+	}
+	for (j = 0; j < TVR_SIZE; j++)
+		INIT_LIST_HEAD(base->tv1.vec + j);
+
+	base->timer_jiffies = jiffies;
+}
+	
+static int __devinit timer_cpu_notify(struct notifier_block *self, 
+				unsigned long action, void *hcpu)
+{
+	long cpu = (long)hcpu;
+	switch(action) {
+	case CPU_UP_PREPARE:
+		init_timers_cpu(cpu);
+		break;
+	default:
+		break;
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block __devinitdata timers_nb = {
+	.notifier_call	= timer_cpu_notify,
+};
+
+
+void __init init_timers(void)
+{
+	timer_cpu_notify(&timers_nb, (unsigned long)CPU_UP_PREPARE,
+				(void *)(long)smp_processor_id());
+	register_cpu_notifier(&timers_nb);
+	open_softirq(TIMER_SOFTIRQ, run_timer_softirq, NULL);
+}
+
+#ifdef CONFIG_TIME_INTERPOLATION
+volatile unsigned long last_nsec_offset;
+#ifndef __HAVE_ARCH_CMPXCHG
+spinlock_t last_nsec_offset_lock = SPIN_LOCK_UNLOCKED;
+#endif
+
+struct time_interpolator *time_interpolator;
+static struct time_interpolator *time_interpolator_list;
+static spinlock_t time_interpolator_lock = SPIN_LOCK_UNLOCKED;
+
+static inline int
+is_better_time_interpolator(struct time_interpolator *new)
+{
+	if (!time_interpolator)
+		return 1;
+	return new->frequency > 2*time_interpolator->frequency ||
+	    (unsigned long)new->drift < (unsigned long)time_interpolator->drift;
+}
+
+void
+register_time_interpolator(struct time_interpolator *ti)
+{
+	spin_lock(&time_interpolator_lock);
+	write_seqlock_irq(&xtime_lock);
+	if (is_better_time_interpolator(ti))
+		time_interpolator = ti;
+	write_sequnlock_irq(&xtime_lock);
+
+	ti->next = time_interpolator_list;
+	time_interpolator_list = ti;
+	spin_unlock(&time_interpolator_lock);
+}
+
+void
+unregister_time_interpolator(struct time_interpolator *ti)
+{
+	struct time_interpolator *curr, **prev;
+
+	spin_lock(&time_interpolator_lock);
+	prev = &time_interpolator_list;
+	for (curr = *prev; curr; curr = curr->next) {
+		if (curr == ti) {
+			*prev = curr->next;
+			break;
+		}
+		prev = &curr->next;
+	}
+
+	write_seqlock_irq(&xtime_lock);
+	if (ti == time_interpolator) {
+		/* we lost the best time-interpolator: */
+		time_interpolator = NULL;
+		/* find the next-best interpolator */
+		for (curr = time_interpolator_list; curr; curr = curr->next)
+			if (is_better_time_interpolator(curr))
+				time_interpolator = curr;
+	}
+	write_sequnlock_irq(&xtime_lock);
+	spin_unlock(&time_interpolator_lock);
+}
+#endif /* CONFIG_TIME_INTERPOLATION */

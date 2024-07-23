@@ -8,6 +8,7 @@ struct dn_ifaddr {
 	struct dn_ifaddr *ifa_next;
 	struct dn_dev    *ifa_dev;
 	dn_address       ifa_local;
+	dn_address       ifa_address;
 	unsigned char    ifa_flags;
 	unsigned char    ifa_scope;
 	char             ifa_label[IFNAMSIZ];
@@ -45,7 +46,7 @@ struct dn_ifaddr {
  * device will come up. In the dn_dev structure, it is the actual
  * state.
  *
- * Things have changed here. I've killed timer1 since its a user space
+ * Things have changed here. I've killed timer1 since it's a user space
  * issue for a user space routing deamon to sort out. The kernel does
  * not need to be bothered with it.
  *
@@ -57,7 +58,7 @@ struct dn_ifaddr {
  * up() - Called to initialize device, return value can veto use of
  *        device with DECnet.
  * down() - Called to turn device off when it goes down
- * timer3() - Called when timer 3 goes off
+ * timer3() - Called once for each ifaddr when timer 3 goes off
  * 
  * sysctl - Hook for sysctl things
  *
@@ -70,7 +71,6 @@ struct dn_dev_parms {
 #define DN_DEV_MPOINT 4
 	int state;                /* Initial state                      */
 	int forwarding;	          /* 0=EndNode, 1=L1Router, 2=L2Router  */
-	unsigned short blksize;   /* Block Size                         */
 	unsigned long t2;         /* Default value of t2                */
 	unsigned long t3;         /* Default value of t3                */
 	int priority;             /* Priority to be a router            */
@@ -78,7 +78,7 @@ struct dn_dev_parms {
 	int ctl_name;             /* Index for sysctl                   */
 	int  (*up)(struct net_device *);
 	void (*down)(struct net_device *);
-	void (*timer3)(struct net_device *);
+	void (*timer3)(struct net_device *, struct dn_ifaddr *ifa);
 	void *sysctl;
 };
 
@@ -167,9 +167,14 @@ extern void dn_dev_hello(struct sk_buff *skb);
 extern void dn_dev_up(struct net_device *);
 extern void dn_dev_down(struct net_device *);
 
-extern struct net_device *decnet_default_device;
+extern int dn_dev_set_default(struct net_device *dev, int force);
+extern struct net_device *dn_dev_get_default(void);
+extern int dn_dev_bind_default(dn_address *addr);
 
-static __inline__ int dn_dev_islocal(struct net_device *dev, dn_address addr)
+extern int register_dnaddr_notifier(struct notifier_block *nb);
+extern int unregister_dnaddr_notifier(struct notifier_block *nb);
+
+static inline int dn_dev_islocal(struct net_device *dev, dn_address addr)
 {
 	struct dn_dev *dn_db = dev->dn_ptr;
 	struct dn_ifaddr *ifa;

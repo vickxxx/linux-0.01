@@ -26,25 +26,25 @@
 
 #include <linux/module.h>
 
+#include <linux/blk.h>
 #include <linux/kernel.h>
 #include <linux/types.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/delay.h>
-#include <linux/sched.h>
+#include <linux/interrupt.h>
 #include <linux/proc_fs.h>
 #include <linux/spinlock.h>
+#include <linux/stat.h>
+
 #include <asm/dma.h>
 #include <asm/system.h>
 #include <asm/io.h>
-#include <linux/blk.h>
 #include "scsi.h"
 #include "hosts.h"
 
 #include "psi240i.h"
 #include "psi_chip.h"
-
-#include<linux/stat.h>
 
 //#define DEBUG 1
 
@@ -54,7 +54,7 @@
 #define DEB(x)
 #endif
 
-#define MAXBOARDS 2	/* Increase this and the sizes of the arrays below, if you need more. */
+#define MAXBOARDS 6	/* Increase this and the sizes of the arrays below, if you need more. */
 
 #define	PORT_DATA				0
 #define	PORT_ERROR				1
@@ -367,14 +367,18 @@ irqerror:;
 	SCpnt->result = DecodeError (shost, status);
 	SCpnt->scsi_done (SCpnt);
 	}
-static void do_Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
-	{
-	unsigned long flags;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+static irqreturn_t do_Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
+{
+	unsigned long flags;
+	struct Scsi_Host *dev = dev_id;
+	
+	spin_lock_irqsave(dev->host_lock, flags);
 	Irq_Handler(irq, dev_id, regs);
-	spin_unlock_irqrestore(&io_request_lock, flags);
-	}
+	spin_unlock_irqrestore(dev->host_lock, flags);
+	return IRQ_HANDLED;
+}
+
 /****************************************************************
  *	Name:	Psi240i_QueueCommand
  *
@@ -389,8 +393,8 @@ static void do_Irq_Handler (int irq, void *dev_id, struct pt_regs *regs)
 int Psi240i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	{
 	UCHAR		   *cdb = (UCHAR *)SCpnt->cmnd;					// Pointer to SCSI CDB
-	PADAPTER240I	padapter = HOSTDATA(SCpnt->host);			// Pointer to adapter control structure
-	POUR_DEVICE		pdev	 = &padapter->device[SCpnt->target];// Pointer to device information
+	PADAPTER240I	padapter = HOSTDATA (SCpnt->device->host); 			// Pointer to adapter control structure
+	POUR_DEVICE 		pdev	 = &padapter->device [SCpnt->device->id];// Pointer to device information
 	UCHAR			rc;											// command return code
 
 	SCpnt->scsi_done = done;
@@ -492,31 +496,6 @@ int Psi240i_QueueCommand (Scsi_Cmnd *SCpnt, void (*done)(Scsi_Cmnd *))
 	return 0;
 	}
 
-static void internal_done(Scsi_Cmnd * SCpnt)
-	{
-	SCpnt->SCp.Status++;
-	}
-/****************************************************************
- *	Name:	Psi240i_Command
- *
- *	Description:	Process a command from the SCSI manager.
- *
- *	Parameters:		SCpnt - Pointer to SCSI command structure.
- *
- *	Returns:		Status code.
- *
- ****************************************************************/
-int Psi240i_Command (Scsi_Cmnd *SCpnt)
-	{
-	DEB(printk("psi240i_command: ..calling psi240i_queuecommand\n"));
-
-	Psi240i_QueueCommand (SCpnt, internal_done);
-
-    SCpnt->SCp.Status = 0;
-	while (!SCpnt->SCp.Status)
-		barrier ();
-	return SCpnt->result;
-	}
 /***************************************************************************
  *	Name:			ReadChipMemory
  *
@@ -565,25 +544,25 @@ int Psi240i_Detect (Scsi_Host_Template *tpnt)
 	int					count = 0;
 	int					unit;
 	int					z;
-	USHORT				port;
+	USHORT				port, port_range = 16;
 	CHIP_CONFIG_N		chipConfig;
 	CHIP_DEVICE_N		chipDevice[8];
 	struct Scsi_Host   *pshost;
-	ULONG				flags;
 
-	for ( board = 0;  board < 6;  board++ )					// scan for I/O ports
+	for ( board = 0;  board < MAXBOARDS;  board++ )					// scan for I/O ports
 		{
+		pshost = NULL;
 		port = portAddr[board];								// get base address to test
-		if ( check_region (port, 16) )						// test for I/O addresses available
-			continue;										//   nope
-		if ( inb_p (port + REG_FAIL) != CHIP_ID )			// do the first test for likley hood that it is us
+		if ( !request_region (port, port_range, "psi240i") )
 			continue;
+		if ( inb_p (port + REG_FAIL) != CHIP_ID )			// do the first test for likley hood that it is us
+			goto host_init_failure;
 		outb_p (SEL_NONE, port + REG_SEL_FAIL);				// setup EEPROM/RAM access
 		outw (0, port + REG_ADDRESS);						// setup EEPROM address zero
 		if ( inb_p (port) != 0x55 )							// test 1st byte
-			continue;										//   nope
+			goto host_init_failure;									//   nope
 		if ( inb_p (port + 1) != 0xAA )						// test 2nd byte
-			continue;										//   nope
+			goto host_init_failure;								//   nope
 
 		// at this point our board is found and can be accessed.  Now we need to initialize
 		// our informatation and register with the kernel.
@@ -594,20 +573,11 @@ int Psi240i_Detect (Scsi_Host_Template *tpnt)
 		ReadChipMemory (&ChipSetup, CHIP_EEPROM_DATA, sizeof (ChipSetup), port);
 
 		if ( !chipConfig.numDrives )						// if no devices on this board
-			continue;
+			goto host_init_failure;
 
 		pshost = scsi_register (tpnt, sizeof(ADAPTER240I));
 		if(pshost == NULL)
-			continue;
-
-		save_flags (flags);
-		cli ();
-		if ( request_irq (chipConfig.irq, do_Irq_Handler, 0, "psi240i", NULL) )
-			{
-			printk ("Unable to allocate IRQ for PSI-240I controller.\n");
-			restore_flags (flags);
-			goto unregister;
-			}
+			goto host_init_failure;	
 
 		PsiHost[chipConfig.irq - 10] = pshost;
 		pshost->unique_id = port;
@@ -641,17 +611,36 @@ int Psi240i_Detect (Scsi_Host_Template *tpnt)
 			DEB (printk ("\n          blocks    = %lX", HOSTDATA(pshost)->device[unit].blocks));
 			}
 
-		restore_flags (flags);
-		printk("\nPSI-240I EIDE CONTROLLER: at I/O = %x  IRQ = %d\n", port, chipConfig.irq);
-		printk("(C) 1997 Perceptive Solutions, Inc. All rights reserved\n\n");
-		count++;
-		continue;
+		if ( request_irq (chipConfig.irq, do_Irq_Handler, 0, "psi240i", pshost) == 0 ) 
+			{
+			printk("\nPSI-240I EIDE CONTROLLER: at I/O = %x  IRQ = %d\n", port, chipConfig.irq);
+		        printk("(C) 1997 Perceptive Solutions, Inc. All rights reserved\n\n");
+		        count++;
+		        continue;
+			}
 
-unregister:;
-		scsi_unregister (pshost);
+		printk ("Unable to allocate IRQ for PSI-240I controller.\n");
+           
+host_init_failure:
+		
+		release_region (port, port_range);
+		if (pshost)
+			scsi_unregister (pshost);
+
 		}
 	return count;
 	}
+
+static int Psi240i_Release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
+}
+
 /****************************************************************
  *	Name:	Psi240i_Abort
  *
@@ -687,8 +676,6 @@ int Psi240i_Reset (Scsi_Cmnd *SCpnt, unsigned int reset_flags)
 	return SCSI_RESET_PUNT;
 	}
 
-#include "sd.h"
-
 /****************************************************************
  *	Name:	Psi240i_BiosParam
  *
@@ -702,11 +689,12 @@ int Psi240i_Reset (Scsi_Cmnd *SCpnt, unsigned int reset_flags)
  *	Returns:		zero.
  *
  ****************************************************************/
-int Psi240i_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
+int Psi240i_BiosParam (struct scsi_device *sdev, struct block_device *dev,
+		sector_t capacity, int geom[])
 	{
 	POUR_DEVICE	pdev;
 
-	pdev = &(HOSTDATA(disk->device->host)->device[disk->device->id]);
+	pdev = &(HOSTDATA(sdev->host)->device[sdev->id]);
 
 	geom[0] = pdev->heads;
 	geom[1] = pdev->sectors;
@@ -716,8 +704,19 @@ int Psi240i_BiosParam (Scsi_Disk *disk, kdev_t dev, int geom[])
 
 MODULE_LICENSE("GPL");
 
-/* Eventually this will go into an include file, but this will be later */
-static Scsi_Host_Template driver_template = PSI240I;
-
+static Scsi_Host_Template driver_template = {
+	.proc_name		= "psi240i", 
+	.name			= "PSI-240I EIDE Disk Controller",
+	.detect			= Psi240i_Detect,
+	.release		= Psi240i_Release,
+	.queuecommand		= Psi240i_QueueCommand,
+	.abort	  		= Psi240i_Abort,
+	.reset	  		= Psi240i_Reset,
+	.bios_param	  	= Psi240i_BiosParam,
+	.can_queue	  	= 1,
+	.this_id	  	= -1,
+	.sg_tablesize	  	= SG_NONE,
+	.cmd_per_lun	  	= 1, 
+	.use_clustering		= DISABLE_CLUSTERING,
+};
 #include "scsi_module.c"
-

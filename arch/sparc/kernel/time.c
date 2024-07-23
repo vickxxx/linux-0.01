@@ -1,4 +1,4 @@
-/* $Id: time.c,v 1.59 2001/10/30 04:54:21 davem Exp $
+/* $Id: time.c,v 1.60 2002/01/23 14:33:55 davem Exp $
  * linux/arch/sparc/kernel/time.c
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -23,10 +23,12 @@
 #include <linux/string.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
+#include <linux/time.h>
 #include <linux/timex.h>
 #include <linux/init.h>
 #include <linux/pci.h>
 #include <linux/ioport.h>
+#include <linux/profile.h>
 
 #include <asm/oplib.h>
 #include <asm/segment.h>
@@ -41,14 +43,17 @@
 #include <asm/page.h>
 #include <asm/pcic.h>
 
-extern rwlock_t xtime_lock;
+extern unsigned long wall_jiffies;
 
+u64 jiffies_64 = INITIAL_JIFFIES;
+
+spinlock_t rtc_lock = SPIN_LOCK_UNLOCKED;
 enum sparc_clock_type sp_clock_typ;
 spinlock_t mostek_lock = SPIN_LOCK_UNLOCKED;
 unsigned long mstk48t02_regs = 0UL;
 static struct mostek48t08 *mstk48t08_regs = 0;
 static int set_rtc_mmss(unsigned long);
-static void sbus_do_settimeofday(struct timeval *tv);
+static int sbus_do_settimeofday(struct timespec *tv);
 
 #ifdef CONFIG_SUN4
 struct intersil *intersil_clock;
@@ -112,16 +117,21 @@ __volatile__ unsigned int *master_l10_limit;
  * timer_interrupt() needs to keep up the real-time clock,
  * as well as call the "do_timer()" routine every clocktick
  */
-void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+
+#define TICK_SIZE (tick_nsec / 1000)
+
+irqreturn_t timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	/* last time the cmos clock got updated */
-	static long last_rtc_update=0;
+	static long last_rtc_update;
 
 #ifndef CONFIG_SMP
 	if(!user_mode(regs))
 		sparc_do_profile(regs->pc, regs->u_regs[UREG_RETPC]);
 #endif
 
+	/* Protect counter clear so that do_gettimeoffset works */
+	write_seqlock(&xtime_lock);
 #ifdef CONFIG_SUN4
 	if((idprom->id_machtype == (SM_SUN4 | SM_4_260)) ||
 	   (idprom->id_machtype == (SM_SUN4 | SM_4_110))) {
@@ -133,21 +143,21 @@ void timer_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 #endif
 	clear_clock_irq();
 
-	write_lock(&xtime_lock);
-
 	do_timer(regs);
 
 	/* Determine when to update the Mostek clock. */
 	if ((time_status & STA_UNSYNC) == 0 &&
 	    xtime.tv_sec > last_rtc_update + 660 &&
-	    xtime.tv_usec >= 500000 - ((unsigned) tick) / 2 &&
-	    xtime.tv_usec <= 500000 + ((unsigned) tick) / 2) {
+	    (xtime.tv_nsec / 1000) >= 500000 - ((unsigned) TICK_SIZE) / 2 &&
+	    (xtime.tv_nsec / 1000) <= 500000 + ((unsigned) TICK_SIZE) / 2) {
 	  if (set_rtc_mmss(xtime.tv_sec) == 0)
 	    last_rtc_update = xtime.tv_sec;
 	  else
 	    last_rtc_update = xtime.tv_sec - 600; /* do it again in 60 s */
 	}
-	write_unlock(&xtime_lock);
+	write_sequnlock(&xtime_lock);
+
+	return IRQ_HANDLED;
 }
 
 /* Kick start a stopped clock (procedure from the Sun NVRAM/hostid FAQ). */
@@ -371,7 +381,6 @@ void __init sbus_time_init(void)
 	struct intersil *iregs;
 #endif
 
-	do_get_fast_time = do_gettimeofday;
 	BTFIXUPSET_CALL(bus_do_settimeofday, sbus_do_settimeofday, BTFIXUPCALL_NORM);
 	btfixup();
 
@@ -380,7 +389,7 @@ void __init sbus_time_init(void)
 	else
 		clock_probe();
 
-	init_timers(timer_interrupt);
+	sparc_init_timers(timer_interrupt);
 	
 #ifdef CONFIG_SUN4
 	if(idprom->id_machtype == (SM_SUN4 | SM_4_330)) {
@@ -399,7 +408,9 @@ void __init sbus_time_init(void)
 	mon = MSTK_REG_MONTH(mregs);
 	year = MSTK_CVT_YEAR( MSTK_REG_YEAR(mregs) );
 	xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-	xtime.tv_usec = 0;
+	wall_to_monotonic.tv_sec = -xtime.tv_sec;
+	xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
+	wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
 	mregs->creg &= ~MSTK_CREG_READ;
 	spin_unlock_irq(&mostek_lock);
 #ifdef CONFIG_SUN4
@@ -430,13 +441,15 @@ void __init sbus_time_init(void)
 		intersil_start(iregs);
 
 		xtime.tv_sec = mktime(year, mon, day, hour, min, sec);
-		xtime.tv_usec = 0;
+		wall_to_monotonic.tv_sec = -xtime.tv_sec;
+		xtime.tv_nsec = (INITIAL_JIFFIES % HZ) * (NSEC_PER_SEC / HZ);
+		wall_to_monotonic.tv_nsec = -xtime.tv_nsec;
 		printk("%u/%u/%u %u:%u:%u\n",day,mon,year,hour,min,sec);
 	}
 #endif
 
 	/* Now that OBP ticker has been silenced, it is safe to enable IRQ. */
-	__sti();
+	local_irq_enable();
 }
 
 void __init time_init(void)
@@ -453,82 +466,88 @@ void __init time_init(void)
 
 extern __inline__ unsigned long do_gettimeoffset(void)
 {
-	struct tasklet_struct *t;
-	unsigned long offset = 0;
-	unsigned int count;
-
-	count = (*master_l10_counter >> 10) & 0x1fffff;
-
-	t = &bh_task_vec[TIMER_BH];
-	if (test_bit(TASKLET_STATE_SCHED, &t->state))
-		offset = 1000000;
-
-	return offset + count;
+	return (*master_l10_counter >> 10) & 0x1fffff;
 }
 
-/* This need not obtain the xtime_lock as it is coded in
- * an implicitly SMP safe way already.
+/* Ok, my cute asm atomicity trick doesn't work anymore.
+ * There are just too many variables that need to be protected
+ * now (both members of xtime, wall_jiffies, et al.)
  */
 void do_gettimeofday(struct timeval *tv)
 {
-	/* Load doubles must be used on xtime so that what we get
-	 * is guarenteed to be atomic, this is why we can run this
-	 * with interrupts on full blast.  Don't touch this... -DaveM
+	unsigned long flags;
+	unsigned long seq;
+	unsigned long usec, sec;
+
+	do {
+		seq = read_seqbegin_irqsave(&xtime_lock, flags);
+		usec = do_gettimeoffset();
+		{
+			unsigned long lost = jiffies - wall_jiffies;
+			if (lost)
+				usec += lost * (1000000 / HZ);
+		}
+		sec = xtime.tv_sec;
+		usec += (xtime.tv_nsec / 1000);
+	} while (read_seqretry_irqrestore(&xtime_lock, seq, flags));
+
+	while (usec >= 1000000) {
+		usec -= 1000000;
+		sec++;
+	}
+
+	tv->tv_sec = sec;
+	tv->tv_usec = usec;
+}
+
+int do_settimeofday(struct timespec *tv)
+{
+	int ret;
+
+	write_seqlock_irq(&xtime_lock);
+	ret = bus_do_settimeofday(tv);
+	write_sequnlock_irq(&xtime_lock);
+	return ret;
+}
+
+static int sbus_do_settimeofday(struct timespec *tv)
+{
+	if ((unsigned long)tv->tv_nsec >= NSEC_PER_SEC)
+		return -EINVAL;
+
+	/*
+	 * This is revolting. We need to set "xtime" correctly. However, the
+	 * value in this location is the value at the most recent update of
+	 * wall time.  Discover what correction gettimeofday() would have
+	 * made, and then undo it!
 	 */
-	__asm__ __volatile__(
-	"sethi	%hi(master_l10_counter), %o1\n\t"
-	"ld	[%o1 + %lo(master_l10_counter)], %g3\n\t"
-	"sethi	%hi(xtime), %g2\n"
-	"1:\n\t"
-	"ldd	[%g2 + %lo(xtime)], %o4\n\t"
-	"ld	[%g3], %o1\n\t"
-	"ldd	[%g2 + %lo(xtime)], %o2\n\t"
-	"xor	%o4, %o2, %o2\n\t"
-	"xor	%o5, %o3, %o3\n\t"
-	"orcc	%o2, %o3, %g0\n\t"
-	"bne	1b\n\t"
-	" cmp	%o1, 0\n\t"
-	"bge	1f\n\t"
-	" srl	%o1, 0xa, %o1\n\t"
-	"sethi	%hi(tick), %o3\n\t"
-	"ld	[%o3 + %lo(tick)], %o3\n\t"
-	"sethi	%hi(0x1fffff), %o2\n\t"
-	"or	%o2, %lo(0x1fffff), %o2\n\t"
-	"add	%o5, %o3, %o5\n\t"
-	"and	%o1, %o2, %o1\n"
-	"1:\n\t"
-	"add	%o5, %o1, %o5\n\t"
-	"sethi	%hi(1000000), %o2\n\t"
-	"or	%o2, %lo(1000000), %o2\n\t"
-	"cmp	%o5, %o2\n\t"
-	"bl,a	1f\n\t"
-	" st	%o4, [%o0 + 0x0]\n\t"
-	"add	%o4, 0x1, %o4\n\t"
-	"sub	%o5, %o2, %o5\n\t"
-	"st	%o4, [%o0 + 0x0]\n"
-	"1:\n\t"
-	"st	%o5, [%o0 + 0x4]\n");
-}
+	tv->tv_nsec -= 1000 * (do_gettimeoffset() +
+			(jiffies - wall_jiffies) * (USEC_PER_SEC / HZ));
 
-void do_settimeofday(struct timeval *tv)
-{
-	write_lock_irq(&xtime_lock);
-	bus_do_settimeofday(tv);
-	write_unlock_irq(&xtime_lock);
-}
-
-static void sbus_do_settimeofday(struct timeval *tv)
-{
-	tv->tv_usec -= do_gettimeoffset();
-	if(tv->tv_usec < 0) {
-		tv->tv_usec += 1000000;
+	while (tv->tv_nsec < 0) {
+		tv->tv_nsec += NSEC_PER_SEC;
 		tv->tv_sec--;
 	}
-	xtime = *tv;
+
+	wall_to_monotonic.tv_sec += xtime.tv_sec - tv->tv_sec;
+	wall_to_monotonic.tv_nsec += xtime.tv_nsec - tv->tv_nsec;
+
+	if (wall_to_monotonic.tv_nsec > NSEC_PER_SEC) {
+		wall_to_monotonic.tv_nsec -= NSEC_PER_SEC;
+		wall_to_monotonic.tv_sec++;
+	}
+	if (wall_to_monotonic.tv_nsec < 0) {
+		wall_to_monotonic.tv_nsec += NSEC_PER_SEC;
+		wall_to_monotonic.tv_sec--;
+	}
+
+	xtime.tv_sec = tv->tv_sec;
+	xtime.tv_nsec = tv->tv_nsec;
 	time_adjust = 0;		/* stop active adjtime() */
 	time_status |= STA_UNSYNC;
 	time_maxerror = NTP_PHASE_LIMIT;
 	time_esterror = NTP_PHASE_LIMIT;
+	return 0;
 }
 
 /*

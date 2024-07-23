@@ -1,7 +1,4 @@
 /*
- * BK Id: SCCS/s.hack-coff.c 1.8 05/18/01 06:20:29 patch
- */
-/*
  * hack-coff.c - hack the header of an xcoff file to fill in
  * a few fields needed by the Open Firmware xcoff loader on
  * Power Macs but not initialized by objcopy.
@@ -14,8 +11,10 @@
  * 2 of the License, or (at your option) any later version.
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <string.h>
 #include "rs6000.h"
 
 #define AOUT_MAGIC	0x010b

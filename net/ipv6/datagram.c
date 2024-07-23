@@ -3,9 +3,9 @@
  *	Linux INET6 implementation 
  *
  *	Authors:
- *	Pedro Roque		<pedro_m@yahoo.com>	
+ *	Pedro Roque		<roque@di.fc.ul.pt>	
  *
- *	$Id: datagram.c,v 1.23 2001/09/01 00:31:50 davem Exp $
+ *	$Id: datagram.c,v 1.24 2002/02/01 22:01:04 davem Exp $
  *
  *	This program is free software; you can redistribute it and/or
  *      modify it under the terms of the GNU General Public License
@@ -35,10 +35,11 @@
 void ipv6_icmp_error(struct sock *sk, struct sk_buff *skb, int err, 
 		     u16 port, u32 info, u8 *payload)
 {
+	struct ipv6_pinfo *np  = inet6_sk(sk);
 	struct icmp6hdr *icmph = (struct icmp6hdr *)skb->h.raw;
 	struct sock_exterr_skb *serr;
 
-	if (!sk->net_pinfo.af_inet6.recverr)
+	if (!np->recverr)
 		return;
 
 	skb = skb_clone(skb, GFP_ATOMIC);
@@ -65,11 +66,12 @@ void ipv6_icmp_error(struct sock *sk, struct sk_buff *skb, int err,
 
 void ipv6_local_error(struct sock *sk, int err, struct flowi *fl, u32 info)
 {
+	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct sock_exterr_skb *serr;
 	struct ipv6hdr *iph;
 	struct sk_buff *skb;
 
-	if (!sk->net_pinfo.af_inet6.recverr)
+	if (!np->recverr)
 		return;
 
 	skb = alloc_skb(sizeof(struct ipv6hdr), GFP_ATOMIC);
@@ -78,7 +80,7 @@ void ipv6_local_error(struct sock *sk, int err, struct flowi *fl, u32 info)
 
 	iph = (struct ipv6hdr*)skb_put(skb, sizeof(struct ipv6hdr));
 	skb->nh.ipv6h = iph;
-	memcpy(&iph->daddr, fl->fl6_dst, 16);
+	ipv6_addr_copy(&iph->daddr, &fl->fl6_dst);
 
 	serr = SKB_EXT_ERR(skb);
 	serr->ee.ee_errno = err;
@@ -89,7 +91,7 @@ void ipv6_local_error(struct sock *sk, int err, struct flowi *fl, u32 info)
 	serr->ee.ee_info = info;
 	serr->ee.ee_data = 0;
 	serr->addr_offset = (u8*)&iph->daddr - skb->nh.raw;
-	serr->port = fl->uli_u.ports.dport;
+	serr->port = fl->fl_ip_dport;
 
 	skb->h.raw = skb->tail;
 	__skb_pull(skb, skb->tail - skb->data);
@@ -103,6 +105,7 @@ void ipv6_local_error(struct sock *sk, int err, struct flowi *fl, u32 info)
  */
 int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 {
+	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct sock_exterr_skb *serr;
 	struct sk_buff *skb, *skb2;
 	struct sockaddr_in6 *sin;
@@ -114,7 +117,7 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 	int copied;
 
 	err = -EAGAIN;
-	skb = skb_dequeue(&sk->error_queue);
+	skb = skb_dequeue(&sk->sk_error_queue);
 	if (skb == NULL)
 		goto out;
 
@@ -138,8 +141,9 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 		sin->sin6_port = serr->port; 
 		sin->sin6_scope_id = 0;
 		if (serr->ee.ee_origin == SO_EE_ORIGIN_ICMP6) {
-			memcpy(&sin->sin6_addr, skb->nh.raw + serr->addr_offset, 16);
-			if (sk->net_pinfo.af_inet6.sndflow)
+			ipv6_addr_copy(&sin->sin6_addr,
+			  (struct in6_addr *)(skb->nh.raw + serr->addr_offset));
+			if (np->sndflow)
 				sin->sin6_flowinfo = *(u32*)(skb->nh.raw + serr->addr_offset - 24) & IPV6_FLOWINFO_MASK;
 			if (ipv6_addr_type(&sin->sin6_addr) & IPV6_ADDR_LINKLOCAL) {
 				struct inet6_skb_parm *opt = (struct inet6_skb_parm *) skb->cb;
@@ -160,18 +164,20 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 		sin->sin6_flowinfo = 0;
 		sin->sin6_scope_id = 0;
 		if (serr->ee.ee_origin == SO_EE_ORIGIN_ICMP6) {
-			memcpy(&sin->sin6_addr, &skb->nh.ipv6h->saddr, 16);
-			if (sk->net_pinfo.af_inet6.rxopt.all)
+			ipv6_addr_copy(&sin->sin6_addr, &skb->nh.ipv6h->saddr);
+			if (np->rxopt.all)
 				datagram_recv_ctl(sk, msg, skb);
 			if (ipv6_addr_type(&sin->sin6_addr) & IPV6_ADDR_LINKLOCAL) {
 				struct inet6_skb_parm *opt = (struct inet6_skb_parm *) skb->cb;
 				sin->sin6_scope_id = opt->iif;
 			}
 		} else {
+			struct inet_opt *inet = inet_sk(sk);
+
 			ipv6_addr_set(&sin->sin6_addr, 0, 0,
 				      htonl(0xffff),
 				      skb->nh.iph->saddr);
-			if (sk->protinfo.af_inet.cmsg_flags)
+			if (inet->cmsg_flags)
 				ip_cmsg_recv(msg, skb);
 		}
 	}
@@ -184,14 +190,14 @@ int ipv6_recv_error(struct sock *sk, struct msghdr *msg, int len)
 	err = copied;
 
 	/* Reset and regenerate socket error */
-	spin_lock_irq(&sk->error_queue.lock);
-	sk->err = 0;
-	if ((skb2 = skb_peek(&sk->error_queue)) != NULL) {
-		sk->err = SKB_EXT_ERR(skb2)->ee.ee_errno;
-		spin_unlock_irq(&sk->error_queue.lock);
-		sk->error_report(sk);
+	spin_lock_irq(&sk->sk_error_queue.lock);
+	sk->sk_err = 0;
+	if ((skb2 = skb_peek(&sk->sk_error_queue)) != NULL) {
+		sk->sk_err = SKB_EXT_ERR(skb2)->ee.ee_errno;
+		spin_unlock_irq(&sk->sk_error_queue.lock);
+		sk->sk_error_report(sk);
 	} else {
-		spin_unlock_irq(&sk->error_queue.lock);
+		spin_unlock_irq(&sk->sk_error_queue.lock);
 	}
 
 out_free_skb:	
@@ -204,7 +210,7 @@ out:
 
 int datagram_recv_ctl(struct sock *sk, struct msghdr *msg, struct sk_buff *skb)
 {
-	struct ipv6_pinfo *np = &sk->net_pinfo.af_inet6;
+	struct ipv6_pinfo *np = inet6_sk(sk);
 	struct inet6_skb_parm *opt = (struct inet6_skb_parm *) skb->cb;
 
 	if (np->rxopt.bits.rxinfo) {
@@ -260,7 +266,9 @@ int datagram_send_ctl(struct msghdr *msg, struct flowi *fl,
 
 	for (cmsg = CMSG_FIRSTHDR(msg); cmsg; cmsg = CMSG_NXTHDR(msg, cmsg)) {
 
-		if (!CMSG_OK(msg, cmsg)) {
+		if (cmsg->cmsg_len < sizeof(struct cmsghdr) ||
+		    (unsigned long)(((char*)cmsg - (char*)msg->msg_control)
+				    + cmsg->cmsg_len) > msg->msg_controllen) {
 			err = -EINVAL;
 			goto exit_f;
 		}
@@ -289,7 +297,8 @@ int datagram_send_ctl(struct msghdr *msg, struct flowi *fl,
 					goto exit_f;
 				}
 
-				fl->fl6_src = &src_info->ipi6_addr;
+				ipv6_addr_copy(&fl->fl6_src,
+					       &src_info->ipi6_addr);
 			}
 
 			break;

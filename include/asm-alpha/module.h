@@ -1,28 +1,23 @@
-#ifndef _ASM_ALPHA_MODULE_H
-#define _ASM_ALPHA_MODULE_H
-/*
- * This file contains the alpha architecture specific module code.
- */
+#ifndef _ALPHA_MODULE_H
+#define _ALPHA_MODULE_H
 
-#define module_map(x)		vmalloc(x)
-#define module_unmap(x)		vfree(x)
-#define module_arch_init(x)	alpha_module_init(x)
-#define arch_init_modules(x)	alpha_init_modules(x)
-
-static inline int
-alpha_module_init(struct module *mod)
+struct mod_arch_specific
 {
-        if (!mod_bound(mod->gp - 0x8000, 0, mod)) {
-                printk(KERN_ERR "module_arch_init: mod->gp out of bounds.\n");
-                return 1;
-        }
-	return 0;
-}
+	unsigned int gotsecindex;
+};
 
-static inline void
-alpha_init_modules(struct module *mod)
-{
-	__asm__("stq $29,%0" : "=m" (mod->gp));
-}
+#define Elf_Sym Elf64_Sym
+#define Elf_Shdr Elf64_Shdr
+#define Elf_Ehdr Elf64_Ehdr
+#define Elf_Phdr Elf64_Phdr
+#define Elf_Dyn Elf64_Dyn
+#define Elf_Rel Elf64_Rel
+#define Elf_Rela Elf64_Rela
 
-#endif /* _ASM_ALPHA_MODULE_H */
+#define ARCH_SHF_SMALL SHF_ALPHA_GPREL
+
+#ifdef MODULE
+asm(".section .got,\"aws\",@nobits; .align 3; .previous");
+#endif
+
+#endif /*_ALPHA_MODULE_H*/

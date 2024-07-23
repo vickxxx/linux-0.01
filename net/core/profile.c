@@ -1,7 +1,7 @@
 #include <linux/config.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
-#include <linux/sched.h>
+#include <linux/jiffies.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
 #include <linux/netdevice.h>
@@ -34,8 +34,7 @@ long alpha_hi;
 
 static void alpha_tick(unsigned long);
 
-static struct timer_list alpha_timer =
-	{ NULL, NULL, 0, 0L, alpha_tick };
+static struct timer_list alpha_timer = TIMER_INITIALIZER(alpha_tick, 0, 0);
 
 void alpha_tick(unsigned long dummy)
 {
@@ -158,10 +157,12 @@ static void whitehole_inject(unsigned long);
 int whitehole_init(struct net_device *dev);
 
 static struct timer_list whitehole_timer =
-	{ NULL, NULL, 0, 0L, whitehole_inject };
+		TIMER_INITIALIZER(whitehole_inject, 0, 0);
 
 static struct net_device whitehole_dev = {
-	"whitehole", 0x0, 0x0, 0x0, 0x0, 0, 0, 0, 0, 0, NULL, whitehole_init, };
+	.name	= "whitehole",
+	.init	= whitehole_init,
+};
 
 static int whitehole_open(struct net_device *dev)
 {

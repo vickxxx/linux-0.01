@@ -22,10 +22,6 @@
 
 struct sx_port {
   struct gs_port          gs;
-  /*
-  struct tq_struct        tqueue;
-  struct tq_struct        tqueue_hangup;
-  */
   struct wait_queue       *shutdown_wait;
   int                     ch_base;
   int                     c_dcd;
@@ -48,7 +44,7 @@ struct sx_board {
   int poll;
   int ta_type;
   struct timer_list       timer;
-  int                     locks;
+  long                    locks;
 };
 
 struct vpd_prom {
@@ -73,6 +69,7 @@ struct vpd_prom {
 #define SX_CFPCI_BOARD       0x00000008
 #define SX_CFISA_BOARD       0x00000010
 #define SI_EISA_BOARD        0x00000020
+#define SI1_ISA_BOARD        0x00000040
 
 #define SX_BOARD_PRESENT     0x00001000
 #define SX_BOARD_INITIALIZED 0x00002000
@@ -84,6 +81,7 @@ struct vpd_prom {
                                             SX_ISA_BOARD | SX_CFISA_BOARD))
 
 #define IS_SI_BOARD(board) (board->flags & SI_ISA_BOARD)
+#define IS_SI1_BOARD(board) (board->flags & SI1_ISA_BOARD)
 
 #define IS_EISA_BOARD(board) (board->flags & SI_EISA_BOARD)
 

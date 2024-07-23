@@ -48,10 +48,7 @@
 #include <linux/init.h>
 
 #include <linux/tty.h>
-#include <linux/selection.h>
 #include <linux/kmod.h>
-
-#include "busmouse.h"
 
 /*
  * Head entry for the doubly linked miscdevice list
@@ -65,7 +62,6 @@ static DECLARE_MUTEX(misc_sem);
 #define DYNAMIC_MINORS 64 /* like dynamic majors */
 static unsigned char misc_minors[DYNAMIC_MINORS / 8];
 
-extern int psaux_init(void);
 #ifdef CONFIG_SGI_NEWPORT_GFX
 extern void gfx_register(void);
 #endif
@@ -104,7 +100,7 @@ static int misc_read_proc(char *buf, char **start, off_t offset,
 
 static int misc_open(struct inode * inode, struct file * file)
 {
-	int minor = MINOR(inode->i_rdev);
+	int minor = minor(inode->i_rdev);
 	struct miscdevice *c;
 	int err = -ENODEV;
 	struct file_operations *old_fops, *new_fops = NULL;
@@ -118,10 +114,8 @@ static int misc_open(struct inode * inode, struct file * file)
 	if (c != &misc_list)
 		new_fops = fops_get(c->fops);
 	if (!new_fops) {
-		char modname[20];
 		up(&misc_sem);
-		sprintf(modname, "char-major-%d-%d", MISC_MAJOR, minor);
-		request_module(modname);
+		request_module("char-major-%d-%d", MISC_MAJOR, minor);
 		down(&misc_sem);
 		c = misc_list.next;
 		while ((c != &misc_list) && (c->minor != minor))
@@ -147,8 +141,8 @@ fail:
 }
 
 static struct file_operations misc_fops = {
-	owner:		THIS_MODULE,
-	open:		misc_open,
+	.owner		= THIS_MODULE,
+	.open		= misc_open,
 };
 
 
@@ -170,7 +164,6 @@ static struct file_operations misc_fops = {
  
 int misc_register(struct miscdevice * misc)
 {
-	static devfs_handle_t devfs_handle;
 	struct miscdevice *c;
 	
 	if (misc->next || misc->prev)
@@ -197,15 +190,16 @@ int misc_register(struct miscdevice * misc)
 		}
 		misc->minor = i;
 	}
+
 	if (misc->minor < DYNAMIC_MINORS)
 		misc_minors[misc->minor >> 3] |= 1 << (misc->minor & 7);
-	if (!devfs_handle)
-		devfs_handle = devfs_mk_dir (NULL, "misc", NULL);
-	misc->devfs_handle =
-	    devfs_register (devfs_handle, misc->name, DEVFS_FL_NONE,
-			    MISC_MAJOR, misc->minor,
-			    S_IFCHR | S_IRUSR | S_IWUSR | S_IRGRP,
-			    misc->fops, NULL);
+	if (misc->devfs_name[0] == '\0') {
+		snprintf(misc->devfs_name, sizeof(misc->devfs_name),
+				"misc/%s", misc->name);
+	}
+
+	devfs_mk_cdev(MKDEV(MISC_MAJOR, misc->minor),
+			S_IFCHR|S_IRUSR|S_IWUSR|S_IRGRP, misc->devfs_name);
 
 	/*
 	 * Add it to the front, so that later devices can "override"
@@ -239,7 +233,7 @@ int misc_deregister(struct miscdevice * misc)
 	misc->next->prev = misc->prev;
 	misc->next = NULL;
 	misc->prev = NULL;
-	devfs_unregister (misc->devfs_handle);
+	devfs_remove(misc->devfs_name);
 	if (i < DYNAMIC_MINORS && i>0) {
 		misc_minors[i>>3] &= ~(1 << (misc->minor & 7));
 	}
@@ -280,7 +274,7 @@ int __init misc_init(void)
 #ifdef CONFIG_I8K
 	i8k_init();
 #endif
-	if (devfs_register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
+	if (register_chrdev(MISC_MAJOR,"misc",&misc_fops)) {
 		printk("unable to get major %d for misc devices\n",
 		       MISC_MAJOR);
 		return -EIO;

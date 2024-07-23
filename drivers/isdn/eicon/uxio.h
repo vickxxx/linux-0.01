@@ -28,8 +28,7 @@ struct ux_diva_card_s
 	int		reset_base;
 	int		card_type;
 	byte		*mapped;
-	int		bus_num;
-	int		func_num;
+	struct pci_dev  *pdev;
 	int		slot;
 	int		irq;
 	byte		*pDRAM;
@@ -60,7 +59,7 @@ void	UxCardHandleFree(ux_diva_card_t *card);
  */
 
 long		UxCardLock(ux_diva_card_t *card);
-void	UxCardUnlock(ux_diva_card_t *card, long ipl);
+void	UxCardUnlock(ux_diva_card_t *card, unsigned long ipl);
 
 /*
  * Set the mapping address for PCI cards

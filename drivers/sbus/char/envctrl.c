@@ -1,4 +1,4 @@
-/* $Id: envctrl.c,v 1.24 2001/10/08 22:19:51 davem Exp $
+/* $Id: envctrl.c,v 1.25 2002/01/15 09:01:26 davem Exp $
  * envctrl.c: Temperature and Fan monitoring on Machines providing it.
  *
  * Copyright (C) 1998  Eddie C. Dost  (ecd@skynet.be)
@@ -707,7 +707,6 @@ static int
 envctrl_open(struct inode *inode, struct file *file)
 {
 	file->private_data = 0;
-	MOD_INC_USE_COUNT;
 	return 0;
 }
 
@@ -717,16 +716,15 @@ envctrl_open(struct inode *inode, struct file *file)
 static int
 envctrl_release(struct inode *inode, struct file *file)
 {
-	MOD_DEC_USE_COUNT;
 	return 0;
 }
 
 static struct file_operations envctrl_fops = {
-	owner:		THIS_MODULE,
-	read:		envctrl_read,
-	ioctl:		envctrl_ioctl,
-	open:		envctrl_open,
-	release:	envctrl_release,
+	.owner =	THIS_MODULE,
+	.read =		envctrl_read,
+	.ioctl =	envctrl_ioctl,
+	.open =		envctrl_open,
+	.release =	envctrl_release,
 };	
 
 static struct miscdevice envctrl_dev = {
@@ -776,24 +774,19 @@ static void envctrl_set_mon(struct i2c_child_t *pchild,
 static void envctrl_init_adc(struct i2c_child_t *pchild, int node)
 {
 	char chnls_desc[CHANNEL_DESC_SZ];
-	int i, len, j = 0;
-	char *ptr;
+	int i = 0, len;
+	char *pos = chnls_desc;
 
-	/* Firmware describe channels into a stream separated by a '\0'.
-	 * Replace all '\0' with a space.
-	 */
-        len = prom_getproperty(node, "channels-description", chnls_desc,
+	/* Firmware describe channels into a stream separated by a '\0'. */
+	len = prom_getproperty(node, "channels-description", chnls_desc,
 			       CHANNEL_DESC_SZ);
-        for (i = 0; i < len; i++) {
-                if (chnls_desc[i] == '\0')
-                        chnls_desc[i] = ' ';
-        }
+	chnls_desc[CHANNEL_DESC_SZ - 1] = '\0';
 
-	ptr = strtok(chnls_desc, " ");
-	while (ptr != NULL) {
-		envctrl_set_mon(pchild, ptr, j);
-		ptr = strtok(NULL, " ");
-		j++;
+	while (len > 0) {
+		int l = strlen(pos) + 1;
+		envctrl_set_mon(pchild, pos, i++);
+		len -= l;
+		pos += l;
 	}
 
 	/* Get optional properties. */
@@ -815,7 +808,7 @@ static void envctrl_init_fanstat(struct i2c_child_t *pchild)
 		pchild->fan_mask |= chnls_mask[(pchild->chnl_array[i]).chnl_no];
 
 	/* We only need to know if this child has fan status monitored.
-	 * We dont care which channels since we have the mask already.
+	 * We don't care which channels since we have the mask already.
 	 */
 	pchild->mon_type[0] = ENVCTRL_FANSTAT_MON;
 }
@@ -847,7 +840,7 @@ static void envctrl_init_globaladdr(struct i2c_child_t *pchild)
 	}
 
 	/* We only need to know if this child has global addressing 
-	 * line monitored.  We dont care which channels since we know 
+	 * line monitored.  We don't care which channels since we know 
 	 * the mask already (ENVCTRL_GLOBALADDR_ADDR_MASK).
 	 */
 	pchild->mon_type[0] = ENVCTRL_GLOBALADDR_MON;
@@ -863,7 +856,7 @@ static void envctrl_init_voltage_status(struct i2c_child_t *pchild)
 		pchild->voltage_mask |= chnls_mask[(pchild->chnl_array[i]).chnl_no];
 
 	/* We only need to know if this child has voltage status monitored.
-	 * We dont care which channels since we have the mask already.
+	 * We don't care which channels since we have the mask already.
 	 */
 	pchild->mon_type[0] = ENVCTRL_VOLTAGESTAT_MON;
 }
@@ -897,6 +890,10 @@ static void envctrl_init_i2c_child(struct linux_ebus_child *edev_child,
 		}
 
                 pchild->tables = kmalloc(tbls_size, GFP_KERNEL);
+		if (pchild->tables == NULL){
+			printk("envctrl: Failed to allocate table.\n");
+			return;
+		}
                 len = prom_getproperty(node, "tables",
 				       (char *) pchild->tables, tbls_size);
                 if (len <= 0) {
@@ -1017,8 +1014,9 @@ static int kenvctrld(void *__unused)
 
 	poll_interval = 5 * HZ; /* TODO env_mon_interval */
 
-	daemonize();
-	strcpy(current->comm, "kenvctrld");
+	daemonize("kenvctrld");
+	allow_signal(SIGKILL);
+
 	kenvctrld_task = current;
 
 	printk(KERN_INFO "envctrl: %s starting...\n", current->comm);
@@ -1055,7 +1053,7 @@ static int __init envctrl_init(void)
 	struct linux_ebus *ebus = NULL;
 	struct linux_ebus_device *edev = NULL;
 	struct linux_ebus_child *edev_child = NULL;
-	int i = 0;
+	int err, i = 0;
 
 	for_each_ebus(ebus) {
 		for_each_ebusdev(edev, ebus) {
@@ -1110,12 +1108,14 @@ done:
 	udelay(200);
 
 	/* Register the device as a minor miscellaneous device. */
-	if (misc_register(&envctrl_dev)) {
+	err = misc_register(&envctrl_dev);
+	if (err) {
 		printk("envctrl: Unable to get misc minor %d\n",
 		       envctrl_dev.minor);
+		goto out_iounmap;
 	}
 
-	/* Note above traversal routine post-incremented 'i' to accomodate 
+	/* Note above traversal routine post-incremented 'i' to accommodate 
 	 * a next child device, so we decrement before reverse-traversal of
 	 * child devices.
 	 */
@@ -1127,9 +1127,21 @@ done:
 			i2c_childlist[i].addr, (0 == i) ? ("\n") : (" "));
 	}
 
-	kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
+	err = kernel_thread(kenvctrld, NULL, CLONE_FS | CLONE_FILES);
+	if (err)
+		goto out_deregister;
 
 	return 0;
+
+out_deregister:
+	misc_deregister(&envctrl_dev);
+out_iounmap:
+	iounmap(i2c);
+	for (i = 0; i < ENVCTRL_MAX_CPU * 2; i++) {
+		if (i2c_childlist[i].tables)
+			kfree(i2c_childlist[i].tables);
+	}
+	return err;
 #else
 	return -ENODEV;
 #endif
@@ -1146,7 +1158,7 @@ static void __exit envctrl_cleanup(void)
 			int found = 0;
 
 			read_lock(&tasklist_lock);
-			for_each_task(p) {
+			for_each_process(p) {
 				if (p == kenvctrld_task) {
 					found = 1;
 					break;

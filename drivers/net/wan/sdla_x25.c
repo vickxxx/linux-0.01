@@ -95,12 +95,7 @@
 #include <asm/atomic.h>
 #include <linux/delay.h>	/* Experimental delay */
 
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
- #include <asm/uaccess.h>
-#else
- #include <asm/segment.h>
- #include <net/route.h>
-#endif
+#include <asm/uaccess.h>
 
 #include <linux/if.h>
 #include <linux/if_arp.h>
@@ -246,7 +241,7 @@ static void dbg_kfree(void * v, int line) {
  *	
  * Assumptions:
  *
- * Description:	This is an extention of the 'netdevice_t' 
+ * Description:	This is an extention of the struct net_device
  *              we create for each network interface to keep 
  *              the rest of X.25 channel-specific data. 
  *
@@ -276,16 +271,12 @@ typedef struct x25_channel
 	atomic_t  bh_buff_used;
 
 	sdla_t* card;			/* -> owner */
-	netdevice_t *dev;		/* -> bound devce */
+	struct net_device *dev;		/* -> bound devce */
 
 	int ch_idx;
 	unsigned char enable_IPX;
 	unsigned long network_number;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 	struct net_device_stats ifstats;	/* interface statistics */
-#else
-	struct enet_statistics ifstats;
-#endif	
 	unsigned short transmit_length;
 	unsigned short tx_offset;
 	char transmit_buffer[X25_CHAN_MTU+sizeof(x25api_hdr_t)];
@@ -339,10 +330,10 @@ typedef struct x25_call_info
  * WAN link driver entry points. These are 
  * called by the WAN router module.
  */
-static int update (wan_device_t* wandev);
-static int new_if (wan_device_t* wandev, netdevice_t* dev,
-	wanif_conf_t* conf);
-static int del_if (wan_device_t* wandev, netdevice_t* dev);
+static int update(struct wan_device* wandev);
+static int new_if(struct wan_device* wandev, struct net_device* dev,
+		  wanif_conf_t* conf);
+static int del_if(struct wan_device* wandev, struct net_device* dev);
 static void disable_comm (sdla_t* card);
 static void disable_comm_shutdown(sdla_t *card);
 
@@ -352,26 +343,24 @@ static void disable_comm_shutdown(sdla_t *card);
  *	WANPIPE-specific entry points 
  */
 static int wpx_exec (struct sdla* card, void* u_cmd, void* u_data);
-static void x25api_bh (netdevice_t *);
-static int x25api_bh_cleanup (netdevice_t *);
-static int bh_enqueue (netdevice_t *, struct sk_buff *);
+static void x25api_bh(struct net_device *dev);
+static int x25api_bh_cleanup(struct net_device *dev);
+static int bh_enqueue(struct net_device *dev, struct sk_buff *skb);
 
 
 /*=================================================  
  * 	Network device interface 
  */
-static int if_init   (netdevice_t* dev);
-static int if_open   (netdevice_t* dev);
-static int if_close  (netdevice_t* dev);
-static int if_header (struct sk_buff* skb, netdevice_t* dev,
+static int if_init(struct net_device* dev);
+static int if_open(struct net_device* dev);
+static int if_close(struct net_device* dev);
+static int if_header(struct sk_buff* skb, struct net_device* dev,
 	unsigned short type, void* daddr, void* saddr, unsigned len);
 static int if_rebuild_hdr (struct sk_buff* skb);
-static int if_send (struct sk_buff* skb, netdevice_t* dev);
-static struct net_device_stats *if_stats (netdevice_t* dev);
+static int if_send(struct sk_buff* skb, struct net_device* dev);
+static struct net_device_stats *if_stats(struct net_device* dev);
 
-#ifdef LINUX_2_4
-static void if_tx_timeout (netdevice_t *dev);
-#endif
+static void if_tx_timeout(struct net_device *dev);
 
 /*=================================================  
  * 	Interrupt handlers 
@@ -384,8 +373,9 @@ static void event_intr	(sdla_t *);
 static void spur_intr	(sdla_t *);
 static void timer_intr  (sdla_t *);
 
-static int tx_intr_send(sdla_t *, netdevice_t *);
-static netdevice_t * move_dev_to_next (sdla_t *, netdevice_t *);
+static int tx_intr_send(sdla_t *card, struct net_device *dev);
+static struct net_device *move_dev_to_next(sdla_t *card,
+					   struct net_device *dev);
 
 /*=================================================  
  *	Background polling routines 
@@ -436,35 +426,41 @@ static int restart_event (sdla_t* card, int cmd, int lcn, TX25Mbox* mb);
  */
 static int connect (sdla_t* card);
 static int disconnect (sdla_t* card);
-static netdevice_t* get_dev_by_lcn(wan_device_t* wandev, unsigned lcn);
-static int chan_connect (netdevice_t* dev);
-static int chan_disc (netdevice_t* dev);
-static void set_chan_state (netdevice_t* dev, int state);
-static int chan_send (netdevice_t* , void* , unsigned, unsigned char);
+static struct net_device* get_dev_by_lcn(struct wan_device* wandev,
+					 unsigned lcn);
+static int chan_connect(struct net_device* dev);
+static int chan_disc(struct net_device* dev);
+static void set_chan_state(struct net_device* dev, int state);
+static int chan_send(struct net_device *dev, void* buff, unsigned data_len,
+		     unsigned char tx_intr);
 static unsigned char bps_to_speed_code (unsigned long bps);
 static unsigned int dec_to_uint (unsigned char* str, int len);
 static unsigned int hex_to_uint (unsigned char*, int);
 static void parse_call_info (unsigned char*, x25_call_info_t*);
-static netdevice_t * find_channel(sdla_t *, unsigned);
-static void bind_lcn_to_dev (sdla_t *, netdevice_t *,unsigned);
-static void setup_for_delayed_transmit (netdevice_t*, void*, unsigned);
+static struct net_device *find_channel(sdla_t *card, unsigned lcn);
+static void bind_lcn_to_dev(sdla_t *card, struct net_device *dev, unsigned lcn);
+static void setup_for_delayed_transmit(struct net_device *dev,
+				       void *buf, unsigned len);
 
 
 /*=================================================  
  *      X25 API Functions 
  */
-static int wanpipe_pull_data_in_skb (sdla_t *, netdevice_t *, struct sk_buff **);
+static int wanpipe_pull_data_in_skb(sdla_t *card, struct net_device *dev,
+				    struct sk_buff **);
 static void timer_intr_exec(sdla_t *, unsigned char);
-static int execute_delayed_cmd (sdla_t*, netdevice_t *, mbox_cmd_t *,char);
+static int execute_delayed_cmd(sdla_t *card, struct net_device *dev,
+			       mbox_cmd_t *usr_cmd, char bad_cmd);
 static int api_incoming_call (sdla_t*, TX25Mbox *, int);
 static int alloc_and_init_skb_buf (sdla_t *,struct sk_buff **, int);
-static void send_delayed_cmd_result(sdla_t *, netdevice_t *dev, TX25Mbox*);
+static void send_delayed_cmd_result(sdla_t *card, struct net_device *dev,
+				    TX25Mbox* mbox);
 static int clear_confirm_event (sdla_t *, TX25Mbox*);
-static void send_oob_msg (sdla_t *, netdevice_t *, TX25Mbox *);
+static void send_oob_msg (sdla_t *card, struct net_device *dev, TX25Mbox *mbox);
 static int timer_intr_cmd_exec(sdla_t *card);
 static void api_oob_event (sdla_t *card,TX25Mbox *mbox);
-static int check_bad_command (sdla_t *, netdevice_t *);
-static int channel_disconnect (sdla_t*, netdevice_t *);
+static int check_bad_command(sdla_t *card, struct net_device *dev);
+static int channel_disconnect(sdla_t* card, struct net_device *dev);
 static void hdlc_link_down (sdla_t*);
 
 /*=================================================
@@ -475,7 +471,9 @@ static int udp_pkt_type( struct sk_buff *, sdla_t*);
 static int reply_udp( unsigned char *, unsigned int); 
 static void init_x25_channel_struct( x25_channel_t *);
 static void init_global_statistics( sdla_t *);
-static int store_udp_mgmt_pkt(int, char, sdla_t*, netdevice_t *, struct sk_buff *, int);
+static int store_udp_mgmt_pkt(int udp_type, char udp_pkt_src, sdla_t *card,
+			      struct net_device *dev,
+			      struct sk_buff *skb, int lcn);
 static unsigned short calc_checksum (char *, int);
 
 
@@ -792,9 +790,6 @@ int wpx_init (sdla_t* card, wandev_conf_t* conf)
 	
 	init_global_statistics(card);	
 
-#ifndef LINUX_2_4
-	card->u.x.x25_poll_task.next = NULL;
-#endif
 	card->u.x.x25_poll_task.sync=0;
 	card->u.x.x25_poll_task.routine = (void*)(void*)wpx_poll;
 	card->u.x.x25_poll_task.data = card;
@@ -844,7 +839,7 @@ int wpx_init (sdla_t* card, wandev_conf_t* conf)
  * 		<0	Failed (or busy).
  */
 
-static int update (wan_device_t* wandev)
+static int update(struct wan_device* wandev)
 {
 	volatile sdla_t* card;
 	TX25Status* status;
@@ -909,7 +904,8 @@ static int update (wan_device_t* wandev)
  * Return: 	0 	Ok
  *		<0 	Failed (channel will not be created)
  */
-static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
+static int new_if(struct wan_device* wandev, struct net_device* dev,
+		  wanif_conf_t* conf)
 {
 	sdla_t* card = wandev->private;
 	x25_channel_t* chan;
@@ -1011,18 +1007,8 @@ static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
 		chan->network_number = 0xDEADBEEF;
 
 	/* prepare network device data space for registration */
-#ifdef LINUX_2_4
 	strcpy(dev->name,chan->name);
-#else
-	dev->name = (char *)kmalloc(strlen(chan->name) + 2, GFP_KERNEL); 
-	if(dev->name == NULL)
-	{
-		kfree(chan);
-		dev->priv = NULL;
-		return -ENOMEM;
-	}
-	sprintf(dev->name, "%s", chan->name);
-#endif
+
 	dev->init = &if_init;
 
 	init_x25_channel_struct(chan);
@@ -1053,7 +1039,7 @@ static int new_if (wan_device_t* wandev, netdevice_t* dev, wanif_conf_t* conf)
 
 //FIXME Del IF Should be taken out now.
 
-static int del_if (wan_device_t* wandev, netdevice_t* dev)
+static int del_if(struct wan_device* wandev, struct net_device* dev)
 {
 	return 0;
 }
@@ -1119,14 +1105,11 @@ static void disable_comm(sdla_t* card)
  *
  * Return: 	0 	Ok : Void function.
  */
-static int if_init (netdevice_t* dev)
+static int if_init(struct net_device* dev)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
-	wan_device_t* wandev = &card->wandev;
-#ifdef LINUX_2_0
-	int i;
-#endif
+	struct wan_device* wandev = &card->wandev;
 
 	/* Initialize device driver entry points */
 	dev->open		= &if_open;
@@ -1135,19 +1118,11 @@ static int if_init (netdevice_t* dev)
 	dev->rebuild_header	= &if_rebuild_hdr;
 	dev->hard_start_xmit	= &if_send;
 	dev->get_stats		= &if_stats;
-
-#ifdef LINUX_2_4
 	dev->tx_timeout		= &if_tx_timeout;
 	dev->watchdog_timeo	= TX_TIMEOUT;
-#endif
 
 	/* Initialize media-specific parameters */
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 	dev->type		= ARPHRD_PPP;		/* ARP h/w type */
-#else
-        dev->family             = AF_INET;      /* address family */
-        dev->type               = ARPHRD_PPP;   /* no x25 type */
-#endif
 	dev->flags		|= IFF_POINTOPOINT;
 	dev->flags		|= IFF_NOARP;
 
@@ -1173,12 +1148,8 @@ static int if_init (netdevice_t* dev)
 
         /* Set transmit buffer queue length */
         dev->tx_queue_len = 100;
+	SET_MODULE_OWNER(dev);
 
-	/* Initialize socket buffers */
-#if !defined(LINUX_2_1) && !defined(LINUX_2_4)
-        for (i = 0; i < DEV_NUMBUFFS; ++i)
-                skb_queue_head_init(&dev->buffs[i]);
-#endif
 	/* FIXME Why are we doing this */
 	set_chan_state(dev, WAN_DISCONNECTED);
 	return 0;
@@ -1207,22 +1178,19 @@ static int if_init (netdevice_t* dev)
  * 		<0 	Failur: Interface will not come up.
  */
 
-static int if_open (netdevice_t* dev)
+static int if_open(struct net_device* dev)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
 	struct timeval tv;
 	unsigned long smp_flags;
 	
-	if (is_dev_running(dev))
+	if (netif_running(dev))
 		return -EBUSY;
 
 	chan->tq_working = 0;
 
 	/* Initialize the task queue */
-#ifndef LINUX_2_4
-	chan->common.wanpipe_task.next = NULL;
-#endif
 	chan->common.wanpipe_task.sync = 0;
 	chan->common.wanpipe_task.routine = (void *)(void *)x25api_bh;
 	chan->common.wanpipe_task.data = dev;
@@ -1267,22 +1235,15 @@ static int if_open (netdevice_t* dev)
 			connect(card);
 			S508_S514_unlock(card, &smp_flags);
 
-			del_timer(&card->u.x.x25_timer);
-			card->u.x.x25_timer.expires=jiffies+HZ;
-			add_timer(&card->u.x.x25_timer);
+			mod_timer(&card->u.x.x25_timer, jiffies + HZ);
 		}
 	}
-	/* Device is not up untill the we are in connected state */
+	/* Device is not up until the we are in connected state */
 	do_gettimeofday( &tv );
 	chan->router_start_time = tv.tv_sec;
 
-#ifdef LINUX_2_4
 	netif_start_queue(dev);
-#else	
-	dev->interrupt = 0;
-	dev->tbusy = 0;
-	dev->start = 1;
-#endif
+
 	return 0;
 }
 
@@ -1308,16 +1269,13 @@ static int if_open (netdevice_t* dev)
  * Return: 	0 	Ok
  * 		<0 	Failure: Interface will not exit properly.
  */
-static int if_close (netdevice_t* dev)
+static int if_close(struct net_device* dev)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
 	unsigned long smp_flags;
 	
-	stop_net_queue(dev);
-#ifndef LINUX_2_4
-	dev->start=0;
-#endif
+	netif_stop_queue(dev);
 
 	if ((chan->common.state == WAN_CONNECTED) || 
 	    (chan->common.state == WAN_CONNECTING)){
@@ -1336,7 +1294,7 @@ static int if_close (netdevice_t* dev)
 		for (i=0; i<(MAX_BH_BUFF+1); i++){
 			skb = ((bh_data_t *)&chan->bh_head[i])->skb;
 			if (skb != NULL){
-                		wan_dev_kfree_skb(skb, FREE_READ);
+                		dev_kfree_skb_any(skb);
 			}
 		}
 		kfree(chan->bh_head);
@@ -1369,8 +1327,9 @@ static int if_close (netdevice_t* dev)
  * 	Return:		media header length.
  *======================================================================*/
 
-static int if_header (struct sk_buff* skb, netdevice_t* dev,
-	unsigned short type, void* daddr, void* saddr, unsigned len)
+static int if_header(struct sk_buff* skb, struct net_device* dev,
+		     unsigned short type, void* daddr, void* saddr,
+		     unsigned len)
 {
 	x25_channel_t* chan = dev->priv;
 	int hdr_len = dev->hard_header_len;
@@ -1395,7 +1354,7 @@ static int if_header (struct sk_buff* skb, netdevice_t* dev,
 
 static int if_rebuild_hdr (struct sk_buff* skb)
 {
-	netdevice_t *dev = skb->dev; 
+	struct net_device *dev = skb->dev; 
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
 
@@ -1405,11 +1364,10 @@ static int if_rebuild_hdr (struct sk_buff* skb)
 }
 
 
-#ifdef LINUX_2_4
 /*============================================================================
  * Handle transmit timeout event from netif watchdog
  */
-static void if_tx_timeout (netdevice_t *dev)
+static void if_tx_timeout(struct net_device *dev)
 {
     	x25_channel_t* chan = dev->priv;
 	sdla_t *card = chan->card;
@@ -1425,7 +1383,6 @@ static void if_tx_timeout (netdevice_t *dev)
 			card->devname, dev->name);
 	netif_wake_queue (dev);
 }
-#endif
 
 
 /*=========================================================================
@@ -1447,7 +1404,7 @@ static void if_tx_timeout (netdevice_t *dev)
  *
  *========================================================================*/
 
-static int if_send (struct sk_buff* skb, netdevice_t* dev)
+static int if_send(struct sk_buff* skb, struct net_device* dev)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
@@ -1457,32 +1414,10 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 
 	++chan->if_send_stat.if_send_entry;
 
-#ifdef LINUX_2_4
 	netif_stop_queue(dev);
-#endif
 
 	/* No need to check frame length, since socket code
          * will perform the check for us */
-
-#ifndef LINUX_2_4
-	if (dev->tbusy){
-		netdevice_t *dev2;
-		
-		++chan->if_send_stat.if_send_tbusy;
-		if ((jiffies - chan->tick_counter) < (5*HZ)){
-			return 1;
-		}
-		printk(KERN_INFO "%s: Transmit time out %s!\n",
-			card->devname, dev->name);
-		
-		for( dev2 = card->wandev.dev; dev2; 
-		     dev2 = *((netdevice_t**)dev2->priv)){
-
-	        	dev2->tbusy = 0;
-		}
-		++chan->if_send_stat.if_send_tbusy_timeout;
-	}
-#endif
 
 	chan->tick_counter = jiffies;
 	
@@ -1506,7 +1441,7 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
                                 chan->if_send_stat.if_send_PIPE_request++;
 			}
                	}
-		start_net_queue(dev);
+		netif_start_queue(dev);
 		clear_bit(SEND_CRIT,(void*)&card->wandev.critical);
 		S508_S514_unlock(card, &smp_flags);
 		return 0;
@@ -1518,7 +1453,7 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 			chan->transmit_length=0;
 			atomic_set(&chan->common.driver_busy,0);
 		}else{
-			stop_net_queue(dev);
+			netif_stop_queue(dev);
 			++card->u.x.tx_interrupts_pending;
 		        status->imask |= INTR_ON_TX_FRAME;
 			clear_bit(SEND_CRIT,(void*)&card->wandev.critical);
@@ -1589,21 +1524,21 @@ static int if_send (struct sk_buff* skb, netdevice_t* dev)
 
 if_send_crit_exit:
 	
-       	wan_dev_kfree_skb(skb, FREE_WRITE);
+       	dev_kfree_skb_any(skb);
 
-	start_net_queue(dev);
+	netif_start_queue(dev);
 	clear_bit(SEND_CRIT,(void*)&card->wandev.critical);
 	S508_S514_unlock(card, &smp_flags);
 	return 0;
 }
 
 /*============================================================================
- * Setup so that a frame can be transmitted on the occurence of a transmit
+ * Setup so that a frame can be transmitted on the occurrence of a transmit
  * interrupt.
  *===========================================================================*/
 
-static void setup_for_delayed_transmit (netdevice_t* dev, void* buf,
-	unsigned len)
+static void setup_for_delayed_transmit(struct net_device* dev, void* buf,
+				       unsigned len)
 {
         x25_channel_t* chan = dev->priv;
         sdla_t* card = chan->card;
@@ -1654,7 +1589,7 @@ static void setup_for_delayed_transmit (netdevice_t* dev, void* buf,
  * 	Return a pointer to struct enet_statistics.
  *
  *==============================================================*/
-static struct net_device_stats *if_stats (netdevice_t* dev)
+static struct net_device_stats *if_stats(struct net_device* dev)
 {
 	x25_channel_t *chan = dev->priv;
 
@@ -1750,7 +1685,7 @@ static void rx_intr (sdla_t* card)
 {
 	TX25Mbox* rxmb = card->rxmb;
 	unsigned lcn = rxmb->cmd.lcn;
-	netdevice_t* dev = find_channel(card,lcn);
+	struct net_device* dev = find_channel(card,lcn);
 	x25_channel_t* chan;
 	struct sk_buff* skb=NULL;
 
@@ -1787,14 +1722,12 @@ static void rx_intr (sdla_t* card)
 			++chan->ifstats.rx_dropped;
 			++card->wandev.stats.rx_dropped;
 			++chan->rx_intr_stat.rx_intr_bfr_not_passed_to_stack;
-			wan_dev_kfree_skb(skb, FREE_READ);
+			dev_kfree_skb_any(skb);
 			return;
 		}		
 
 		++chan->ifstats.rx_packets;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 		chan->ifstats.rx_bytes += skb->len;
-#endif
 		
 
 		chan->rx_skb = NULL;
@@ -1814,7 +1747,7 @@ static void rx_intr (sdla_t* card)
 	/* Decapsulate packet, if necessary */
 	if (!skb->protocol && !wanrouter_type_trans(skb, dev)){
 		/* can't decapsulate packet */
-                wan_dev_kfree_skb(skb, FREE_READ);
+                dev_kfree_skb_any(skb);
 		++chan->ifstats.rx_errors;
 		++chan->ifstats.rx_dropped;
 		++card->wandev.stats.rx_dropped;
@@ -1829,7 +1762,7 @@ static void rx_intr (sdla_t* card)
 				if(chan_send(dev, skb->data, skb->len,0)){
 					chan->tx_skb = skb;
 				}else{
-                                        wan_dev_kfree_skb(skb, FREE_WRITE);
+                                        dev_kfree_skb_any(skb);
 					++chan->rx_intr_stat.rx_intr_bfr_not_passed_to_stack;
 				}
 			}else{
@@ -1839,9 +1772,7 @@ static void rx_intr (sdla_t* card)
 			}
 		}else{
 			skb->mac.raw = skb->data;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 			chan->ifstats.rx_bytes += skb->len;
-#endif
 			++chan->ifstats.rx_packets;
 			++chan->rx_intr_stat.rx_intr_bfr_passed_to_stack;
 			netif_rx(skb);
@@ -1852,7 +1783,8 @@ static void rx_intr (sdla_t* card)
 }
 
 
-static int wanpipe_pull_data_in_skb (sdla_t *card, netdevice_t *dev, struct sk_buff **skb)
+static int wanpipe_pull_data_in_skb(sdla_t *card, struct net_device *dev,
+				    struct sk_buff **skb)
 {
 	void *bufptr;
 	TX25Mbox* rxmb = card->rxmb;
@@ -1898,7 +1830,7 @@ static int wanpipe_pull_data_in_skb (sdla_t *card, netdevice_t *dev, struct sk_b
 
 	if (skb_tailroom(new_skb) < len){
 		/* No room for the packet. Call off the whole thing! */
-                wan_dev_kfree_skb(new_skb, FREE_READ);
+                dev_kfree_skb_any(new_skb);
 		if (chan->common.usedby == WANPIPE){
 			chan->rx_skb = NULL;
 			if (qdm & 0x01){ 
@@ -1962,7 +1894,7 @@ static int wanpipe_pull_data_in_skb (sdla_t *card, netdevice_t *dev, struct sk_b
 
 static void tx_intr (sdla_t* card)
 {
-	netdevice_t *dev;
+	struct net_device *dev;
 	TX25Status* status = card->flags;
 	unsigned char more_to_tx=0;
 	x25_channel_t *chan=NULL;
@@ -1985,12 +1917,12 @@ static void tx_intr (sdla_t* card)
 				chan->transmit_length = 0;
 				atomic_set(&chan->common.driver_busy,0);
 				chan->tx_offset=0;
-				if (is_queue_stopped(dev)){
+				if (netif_queue_stopped(dev)){
 					if (chan->common.usedby == API){
-						start_net_queue(dev);
+						netif_start_queue(dev);
 						wakeup_sk_bh(dev);
 					}else{
-						wake_net_dev(dev);
+						netif_wake_queue(dev);
 					}
 				}
 				dev = move_dev_to_next(card,dev);
@@ -2056,14 +1988,13 @@ static void tx_intr (sdla_t* card)
  *===============================================================*/
 
 
-netdevice_t * move_dev_to_next (sdla_t *card, netdevice_t *dev)
+struct net_device *move_dev_to_next(sdla_t *card, struct net_device *dev)
 {
 	if (card->u.x.no_dev != 1){
-		if (*((netdevice_t**)dev->priv) == NULL){
+		if (!*((struct net_device **)dev->priv))
 			return card->wandev.dev;
-		}else{
-			return *((netdevice_t**)dev->priv);
-		}
+		else
+			return *((struct net_device **)dev->priv);
 	}
 	return dev;
 }
@@ -2074,7 +2005,7 @@ netdevice_t * move_dev_to_next (sdla_t *card, netdevice_t *dev)
  *
  *===============================================================*/
 
-static int tx_intr_send(sdla_t *card, netdevice_t *dev)
+static int tx_intr_send(sdla_t *card, struct net_device *dev)
 {
 	x25_channel_t* chan = dev->priv; 
 
@@ -2092,12 +2023,12 @@ static int tx_intr_send(sdla_t *card, netdevice_t *dev)
 
 	/* If we are in API mode, wakeup the 
          * sock BH handler, not the NET_BH */
-	if (is_queue_stopped(dev)){
+	if (netif_queue_stopped(dev)){
 		if (chan->common.usedby == API){
-			start_net_queue(dev);
+			netif_start_queue(dev);
 			wakeup_sk_bh(dev);
 		}else{
-			wake_net_dev(dev);
+			netif_wake_queue(dev);
 		}
 	}
 	return 0;
@@ -2137,7 +2068,7 @@ static void timer_intr (sdla_t *card)
 
 	}else if (card->u.x.timer_int_enabled & TMR_INT_ENABLED_POLL_ACTIVE) {
 
-		netdevice_t *dev = card->u.x.poll_device;
+		struct net_device *dev = card->u.x.poll_device;
 		x25_channel_t *chan = NULL;
 
 		if (!dev){
@@ -2158,7 +2089,7 @@ static void timer_intr (sdla_t *card)
 
 		wanpipe_set_state(card, WAN_CONNECTED);
 		if (card->u.x.LAPB_hdlc){
-			netdevice_t *dev = card->wandev.dev;
+			struct net_device *dev = card->wandev.dev;
 			set_chan_state(dev,WAN_CONNECTED);
 			send_delayed_cmd_result(card,dev,card->mbox);	
 		}
@@ -2214,7 +2145,7 @@ static void status_intr (sdla_t* card)
 
 	TX25Mbox* mbox = card->mbox;
 	TX25ModemStatus *modem_status;
-	netdevice_t *dev;
+	struct net_device *dev;
 	x25_channel_t *chan;
 	int err;
 
@@ -2243,7 +2174,8 @@ static void status_intr (sdla_t* card)
 				mbox->cmd.result = 0x08;
 
 				/* Send a OOB to all connected sockets */
-				for (dev = card->wandev.dev; dev; dev = *((netdevice_t**)dev->priv)){
+				for (dev = card->wandev.dev; dev;
+				     dev = *((struct net_device**)dev->priv)) {
 					chan=dev->priv;
 					if (chan->common.usedby == API){
 						send_oob_msg(card,dev,mbox);				
@@ -2342,11 +2274,7 @@ wpx_poll_exit:
 
 static void trigger_x25_poll(sdla_t *card)
 {
-#ifdef LINUX_2_4
 	schedule_task(&card->u.x.x25_poll_task);
-#else
-	queue_task(&card->u.x.x25_poll_task, &tq_scheduler);
-#endif
 }
 
 /*====================================================================
@@ -2377,7 +2305,7 @@ static void poll_connecting (sdla_t* card)
 
 static void poll_disconnected (sdla_t* card)
 {
-	netdevice_t *dev; 
+	struct net_device *dev; 
 	x25_channel_t *chan;
 	TX25Status* status = card->flags;
 
@@ -2414,10 +2342,11 @@ static void poll_disconnected (sdla_t* card)
 
 static void poll_active (sdla_t* card)
 {
-	netdevice_t* dev;
+	struct net_device* dev;
 	TX25Status* status = card->flags;
 
-	for (dev = card->wandev.dev; dev; dev = *((netdevice_t**)dev->priv)){
+	for (dev = card->wandev.dev; dev;
+	     dev = *((struct net_device **)dev->priv)){
 		x25_channel_t* chan = dev->priv;
 
 		/* If SVC has been idle long enough, close virtual circuit */
@@ -3064,7 +2993,7 @@ dflt_1:
 
 		/* Bug Fix: Mar 14 2000
                  * The Protocol violation error conditions were  
-                 * not handeled previously */
+                 * not handled previously */
 
 		switch (mb->cmd.pktType & 0x7F){
 
@@ -3178,15 +3107,15 @@ dflt_2:
  *	   when clearing a call because protocol encapsulation is not 
  *	   supported.
  *	4. If an incoming call is received while a call request is 
- *	   pending (i.e. call collision has occured), the incoming call 
+ *	   pending (i.e. call collision has occurred), the incoming call 
  *	   shall be rejected and call request shall be retried.
  *====================================================================*/
 
 static int incoming_call (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 {
-	wan_device_t* wandev = &card->wandev;
+	struct wan_device* wandev = &card->wandev;
 	int new_lcn = mb->cmd.lcn;
-	netdevice_t* dev = get_dev_by_lcn(wandev, new_lcn);
+	struct net_device* dev = get_dev_by_lcn(wandev, new_lcn);
 	x25_channel_t* chan = NULL;
 	int accept = 0;		/* set to '1' if o.k. to accept call */
 	unsigned int user_data;
@@ -3238,7 +3167,7 @@ static int incoming_call (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 	user_data = hex_to_uint(info->user,2);
 
 	/* Find available channel */
-	for (dev = wandev->dev; dev; dev = *((netdevice_t**)dev->priv)){
+	for (dev = wandev->dev; dev; dev = *((struct net_device **)dev->priv)) {
 		chan = dev->priv;
 
 		if (chan->common.usedby == API)
@@ -3335,7 +3264,7 @@ static int incoming_call (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 static int call_accepted (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 {
 	unsigned new_lcn = mb->cmd.lcn;
-	netdevice_t* dev = find_channel(card, new_lcn);
+	struct net_device* dev = find_channel(card, new_lcn);
 	x25_channel_t* chan;
 
 	if (dev == NULL){
@@ -3375,7 +3304,7 @@ static int call_accepted (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 static int call_cleared (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 {
 	unsigned new_lcn = mb->cmd.lcn;
-	netdevice_t* dev = find_channel(card, new_lcn);
+	struct net_device* dev = find_channel(card, new_lcn);
 	x25_channel_t *chan;
 	unsigned char old_state;
 
@@ -3419,8 +3348,8 @@ static int call_cleared (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 
 static int restart_event (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 {
-	wan_device_t* wandev = &card->wandev;
-	netdevice_t* dev;
+	struct wan_device* wandev = &card->wandev;
+	struct net_device* dev;
 	x25_channel_t *chan;
 	unsigned char old_state;
 
@@ -3429,7 +3358,7 @@ static int restart_event (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 		card->devname, mb->cmd.cause, mb->cmd.diagn);
 
 	/* down all logical channels */
-	for (dev = wandev->dev; dev; dev = *((netdevice_t**)dev->priv)){
+	for (dev = wandev->dev; dev; dev = *((struct net_device **)dev->priv)) {
 		chan=dev->priv;
 		old_state = chan->common.state;
 
@@ -3460,7 +3389,7 @@ static int timeout_event (sdla_t* card, int cmd, int lcn, TX25Mbox* mb)
 
 	if (mb->cmd.pktType == 0x05)	/* call request time out */
 	{
-		netdevice_t* dev = find_channel(card,new_lcn);
+		struct net_device* dev = find_channel(card,new_lcn);
 
 		printk(KERN_INFO "%s: X.25 call timed timeout on LCN %d!\n",
 			card->devname, new_lcn);
@@ -3530,11 +3459,12 @@ static int disconnect (sdla_t* card)
  * Find network device by its channel number.
  */
 
-static netdevice_t* get_dev_by_lcn (wan_device_t* wandev, unsigned lcn)
+static struct net_device* get_dev_by_lcn(struct wan_device* wandev,
+					 unsigned lcn)
 {
-	netdevice_t* dev;
+	struct net_device* dev;
 
-	for (dev = wandev->dev; dev; dev = *((netdevice_t**)dev->priv))
+	for (dev = wandev->dev; dev; dev = *((struct net_device **)dev->priv))
 		if (((x25_channel_t*)dev->priv)->common.lcn == lcn) 
 			break;
 	return dev;
@@ -3550,7 +3480,7 @@ static netdevice_t* get_dev_by_lcn (wan_device_t* wandev, unsigned lcn)
  *			<0	failure
  */
 
-static int chan_connect (netdevice_t* dev)
+static int chan_connect(struct net_device* dev)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
@@ -3583,7 +3513,7 @@ static int chan_connect (netdevice_t* dev)
  * 	o if SVC then clear X.25 call
  */
 
-static int chan_disc (netdevice_t* dev)
+static int chan_disc(struct net_device* dev)
 {
 	x25_channel_t* chan = dev->priv;
 
@@ -3606,7 +3536,7 @@ static int chan_disc (netdevice_t* dev)
  * 	Set logical channel state.
  */
 
-static void set_chan_state (netdevice_t* dev, int state)
+static void set_chan_state(struct net_device* dev, int state)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
@@ -3658,8 +3588,8 @@ static void set_chan_state (netdevice_t* dev, int state)
 					chan->transmit_length=0;
 					atomic_set(&chan->common.driver_busy,0);
 					chan->tx_offset=0;
-					if (is_queue_stopped(dev)){
-						wake_net_dev(dev);
+					if (netif_queue_stopped(dev)){
+						netif_wake_queue(dev);
 					}
 				}
 				atomic_set(&chan->common.command,0);
@@ -3696,7 +3626,8 @@ static void set_chan_state (netdevice_t* dev, int state)
  *    	to the router.
  */
 
-static int chan_send (netdevice_t* dev, void* buff, unsigned data_len, unsigned char tx_intr)
+static int chan_send(struct net_device* dev, void* buff, unsigned data_len,
+		     unsigned char tx_intr)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
@@ -3766,9 +3697,7 @@ static int chan_send (netdevice_t* dev, void* buff, unsigned data_len, unsigned 
 		case 0x00:	/* success */
 			chan->i_timeout_sofar = jiffies;
 
-#ifdef LINUX_2_4
 			dev->trans_start=jiffies;
-#endif
 			
 			if ((qdm & M_BIT) && !card->u.x.LAPB_hdlc){
 				if (!tx_intr){
@@ -3780,9 +3709,7 @@ static int chan_send (netdevice_t* dev, void* buff, unsigned data_len, unsigned 
 					chan->tx_offset += len;
 
 					++chan->ifstats.tx_packets;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 					chan->ifstats.tx_bytes += len;
-#endif
 					
 					if (chan->tx_offset < orig_len){
 						setup_for_delayed_transmit (dev, buff, data_len);
@@ -3795,9 +3722,7 @@ static int chan_send (netdevice_t* dev, void* buff, unsigned data_len, unsigned 
                                          * be X number of times larger than max data size.
 					 */
 					++chan->ifstats.tx_packets;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 					chan->ifstats.tx_bytes += len;
-#endif
 					
 					++chan->if_send_stat.if_send_bfr_passed_to_adptr;
 					chan->tx_offset += len;
@@ -3817,9 +3742,7 @@ static int chan_send (netdevice_t* dev, void* buff, unsigned data_len, unsigned 
 				}
 			}else{
 				++chan->ifstats.tx_packets;
-#if defined(LINUX_2_1) || defined(LINUX_2_4)
 				chan->ifstats.tx_bytes += len;
-#endif
 				++chan->if_send_stat.if_send_bfr_passed_to_adptr;
 				res=0;
 			}
@@ -4088,7 +4011,7 @@ static int handle_IPXWAN(unsigned char *sendpacket, char *devname, unsigned char
 
 		return 1;
 	} else {
-		/*If we get here its an IPX-data packet, so it'll get passed up the stack.
+		/*If we get here it's an IPX-data packet, so it'll get passed up the stack.
 		 */
 		/* switch the network numbers */
 		switch_net_numbers(sendpacket, network_number, 1);	
@@ -4171,7 +4094,7 @@ static void switch_net_numbers(unsigned char *sendpacket, unsigned long network_
  *===============================================================*/
 
 
-netdevice_t * find_channel(sdla_t *card, unsigned lcn)
+struct net_device *find_channel(sdla_t *card, unsigned lcn)
 {
 	if (card->u.x.LAPB_hdlc){
 
@@ -4218,7 +4141,7 @@ netdevice_t * find_channel(sdla_t *card, unsigned lcn)
 	}
 }
 
-void bind_lcn_to_dev (sdla_t *card, netdevice_t *dev,unsigned lcn)
+void bind_lcn_to_dev(sdla_t *card, struct net_device *dev, unsigned lcn)
 {
 	x25_channel_t *chan = dev->priv;
 
@@ -4245,7 +4168,7 @@ void bind_lcn_to_dev (sdla_t *card, netdevice_t *dev,unsigned lcn)
  *
  *==============================================================*/
 
-static void x25api_bh (netdevice_t * dev)
+static void x25api_bh(struct net_device* dev)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t* card = chan->card;
@@ -4288,7 +4211,7 @@ static void x25api_bh (netdevice_t * dev)
 			if (chan->common.sk == NULL || chan->common.func == NULL){
 				printk(KERN_INFO "%s: BH: Socket disconnected, dropping\n",
 						card->devname);
-				wan_dev_kfree_skb(skb, FREE_READ);
+				dev_kfree_skb_any(skb);
 				x25api_bh_cleanup(dev);
 				++chan->ifstats.rx_dropped;
 				++chan->rx_intr_stat.rx_intr_bfr_not_passed_to_stack;
@@ -4321,7 +4244,7 @@ static void x25api_bh (netdevice_t * dev)
  *
  *==============================================================*/
 
-static int x25api_bh_cleanup (netdevice_t *dev)
+static int x25api_bh_cleanup(struct net_device *dev)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t *card = chan->card;
@@ -4360,7 +4283,7 @@ static int x25api_bh_cleanup (netdevice_t *dev)
  *
  *==============================================================*/
 
-static int bh_enqueue (netdevice_t *dev, struct sk_buff *skb)
+static int bh_enqueue(struct net_device *dev, struct sk_buff *skb)
 {
 	x25_channel_t* chan = dev->priv;
 	sdla_t *card = chan->card;
@@ -4400,7 +4323,7 @@ static int bh_enqueue (netdevice_t *dev, struct sk_buff *skb)
 
 static int timer_intr_cmd_exec (sdla_t* card)
 {
-	netdevice_t *dev;
+	struct net_device *dev;
 	unsigned char more_to_exec=0;
 	volatile x25_channel_t *chan=NULL;
 	int i=0,bad_cmd=0,err=0;	
@@ -4527,7 +4450,8 @@ static int timer_intr_cmd_exec (sdla_t* card)
  *
  *===============================================================*/
 
-static int execute_delayed_cmd (sdla_t* card, netdevice_t *dev, mbox_cmd_t *usr_cmd,char bad_cmd)
+static int execute_delayed_cmd(sdla_t* card, struct net_device *dev,
+			       mbox_cmd_t *usr_cmd, char bad_cmd)
 {
 	TX25Mbox* mbox = card->mbox;
 	int err;
@@ -4721,7 +4645,7 @@ static int execute_delayed_cmd (sdla_t* card, netdevice_t *dev, mbox_cmd_t *usr_
 /*===============================================================
  * api_incoming_call 
  *
- *	Pass an incoming call request up the the listening
+ *	Pass an incoming call request up the listening
  *      sock.  If the API sock is not listening reject the
  *      call.
  *
@@ -4745,7 +4669,7 @@ static int api_incoming_call (sdla_t* card, TX25Mbox *mbox, int lcn)
 
 	if (card->func(skb,card->sk) < 0){
 		printk(KERN_INFO "%s: MAJOR ERROR: Failed to send up place call \n",card->devname);
-                wan_dev_kfree_skb(skb, FREE_READ);
+                dev_kfree_skb_any(skb);
 		return 1;
 	}
 
@@ -4756,11 +4680,12 @@ static int api_incoming_call (sdla_t* card, TX25Mbox *mbox, int lcn)
  * send_delayed_cmd_result
  *
  *	Wait commands like PLEACE CALL or CLEAR CALL must wait
- *      untill the result arrivers. This function passes
+ *      until the result arrives. This function passes
  *      the result to a waiting sock. 
  *
  *===============================================================*/
-static void send_delayed_cmd_result(sdla_t *card, netdevice_t *dev, TX25Mbox* mbox)
+static void send_delayed_cmd_result(sdla_t *card, struct net_device *dev,
+				    TX25Mbox* mbox)
 {
 	x25_channel_t *chan = dev->priv;
 	mbox_cmd_t *usr_cmd = (mbox_cmd_t *)chan->common.mbox;
@@ -4815,7 +4740,7 @@ static void send_delayed_cmd_result(sdla_t *card, netdevice_t *dev, TX25Mbox* mb
 
 static int clear_confirm_event (sdla_t *card, TX25Mbox* mb)
 {
-	netdevice_t *dev;
+	struct net_device *dev;
 	x25_channel_t *chan;
 	unsigned char old_state;	
 
@@ -4863,7 +4788,7 @@ static int clear_confirm_event (sdla_t *card, TX25Mbox* mb)
  *
  *===============================================================*/
 
-static void send_oob_msg (sdla_t *card, netdevice_t *dev, TX25Mbox *mbox)
+static void send_oob_msg(sdla_t *card, struct net_device *dev, TX25Mbox *mbox)
 {
 	x25_channel_t *chan = dev->priv;
 	mbox_cmd_t *usr_cmd = (mbox_cmd_t *)chan->common.mbox;
@@ -4912,7 +4837,7 @@ static void send_oob_msg (sdla_t *card, netdevice_t *dev, TX25Mbox *mbox)
 	if (chan->common.func(skb,dev,chan->common.sk) < 0){
 		if (bh_enqueue(dev,skb)){
 			printk(KERN_INFO "%s: Dropping OOB MSG\n",card->devname);
-                	wan_dev_kfree_skb(skb, FREE_READ);
+                	dev_kfree_skb_any(skb);
 		}
 	}
 
@@ -4940,7 +4865,7 @@ static int alloc_and_init_skb_buf (sdla_t *card, struct sk_buff **skb, int len)
 
 	if (skb_tailroom(new_skb) < len){
 		/* No room for the packet. Call off the whole thing! */
-                wan_dev_kfree_skb(new_skb, FREE_READ);
+                dev_kfree_skb_any(new_skb);
 		printk(KERN_INFO "%s: Listen: unexpectedly long packet sequence\n"
 			,card->devname);
 		*skb = NULL;
@@ -4961,7 +4886,7 @@ static int alloc_and_init_skb_buf (sdla_t *card, struct sk_buff **skb, int len)
 
 static void api_oob_event (sdla_t *card,TX25Mbox *mbox)
 {
-	netdevice_t *dev = find_channel(card,mbox->cmd.lcn);
+	struct net_device *dev = find_channel(card, mbox->cmd.lcn);
 	x25_channel_t *chan;
 
 	if (!dev)
@@ -4977,7 +4902,7 @@ static void api_oob_event (sdla_t *card,TX25Mbox *mbox)
 
 
 
-static int channel_disconnect (sdla_t* card, netdevice_t *dev)
+static int channel_disconnect(sdla_t* card, struct net_device *dev)
 {
 
 	int err;
@@ -5051,7 +4976,7 @@ static void hdlc_link_down (sdla_t *card)
 	
 }
 
-static int check_bad_command (sdla_t* card, netdevice_t *dev)
+static int check_bad_command(sdla_t* card, struct net_device *dev)
 {
 	x25_channel_t *chan = dev->priv;
 	int bad_cmd = 0;
@@ -5104,7 +5029,7 @@ static int process_udp_mgmt_pkt(sdla_t *card)
 	TX25Mbox       *mbox = card->mbox;
 	int            err;
 	int            udp_mgmt_req_valid = 1;
-	netdevice_t  *dev;
+	struct net_device *dev;
         x25_channel_t  *chan;
 	unsigned short lcn;
 	struct timeval tv;
@@ -5428,7 +5353,8 @@ unsigned short calc_checksum (char *data, int len)
  */
 
 static int store_udp_mgmt_pkt(int udp_type, char udp_pkt_src, sdla_t* card,
-                                netdevice_t *dev, struct sk_buff *skb, int lcn)
+			      struct net_device *dev, struct sk_buff *skb,
+			      int lcn)
 {
         int udp_pkt_stored = 0;
 
@@ -5448,9 +5374,9 @@ static int store_udp_mgmt_pkt(int udp_type, char udp_pkt_src, sdla_t* card,
 	}
 
         if(udp_pkt_src == UDP_PKT_FRM_STACK){
-                wan_dev_kfree_skb(skb, FREE_WRITE);
+                dev_kfree_skb_any(skb);
 	}else{
-                wan_dev_kfree_skb(skb, FREE_READ);
+                dev_kfree_skb_any(skb);
 	}
 
         return(udp_pkt_stored);

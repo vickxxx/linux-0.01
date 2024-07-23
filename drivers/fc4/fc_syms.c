@@ -2,7 +2,6 @@
  * We should not even be trying to compile this if we are not doing
  * a module.
  */
-#define __NO_VERSION__
 #include <linux/config.h>
 #include <linux/module.h>
 
@@ -26,7 +25,6 @@ EXPORT_SYMBOL(fc_do_prli);
 
 /* SCSI stuff */
 EXPORT_SYMBOL(fcp_scsi_queuecommand);
-EXPORT_SYMBOL(fcp_old_abort);
 EXPORT_SYMBOL(fcp_scsi_abort);
 EXPORT_SYMBOL(fcp_scsi_dev_reset);
 EXPORT_SYMBOL(fcp_scsi_bus_reset);

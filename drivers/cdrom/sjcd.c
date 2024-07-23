@@ -70,17 +70,19 @@
 #include <linux/string.h>
 #include <linux/major.h>
 #include <linux/init.h>
-#include <linux/devfs_fs_kernel.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/uaccess.h>
-
-#define MAJOR_NR SANYO_CDROM_MAJOR
 #include <linux/blk.h>
 #include "sjcd.h"
 
 static int sjcd_present = 0;
+static struct request_queue sjcd_queue;
+
+#define MAJOR_NR SANYO_CDROM_MAJOR
+#define QUEUE (&sjcd_queue)
+#define CURRENT elv_next_request(&sjcd_queue)
 
 #define SJCD_BUF_SIZ 32		/* cdr-h94a has internal 64K buffer */
 
@@ -105,6 +107,7 @@ static volatile unsigned char sjcd_completion_status = 0;
 static volatile unsigned char sjcd_completion_error = 0;
 static unsigned short sjcd_command_is_in_progress = 0;
 static unsigned short sjcd_error_reported = 0;
+static spinlock_t sjcd_lock = SPIN_LOCK_UNLOCKED;
 
 static int sjcd_open_count;
 
@@ -148,7 +151,7 @@ static struct sjcd_stat statistic;
 /*
  * Timer.
  */
-static struct timer_list sjcd_delay_timer;
+static struct timer_list sjcd_delay_timer = TIMER_INITIALIZER(NULL, 0, 0);
 
 #define SJCD_SET_TIMER( func, tmout )           \
     ( sjcd_delay_timer.expires = jiffies+tmout,         \
@@ -156,8 +159,6 @@ static struct timer_list sjcd_delay_timer;
       add_timer( &sjcd_delay_timer ) )
 
 #define CLEAR_TIMER del_timer( &sjcd_delay_timer )
-
-static int sjcd_cleanup(void);
 
 /*
  * Set up device, i.e., use command line data to set
@@ -453,15 +454,11 @@ static void sjcd_get_status(void)
 /*
  * Check the drive if the disk is changed. Should be revised.
  */
-static int sjcd_disk_change(kdev_t full_dev)
+static int sjcd_disk_change(struct gendisk *disk)
 {
 #if 0
-	printk("SJCD: sjcd_disk_change( 0x%x )\n", full_dev);
+	printk("SJCD: sjcd_disk_change(%s)\n", disk->disk_name);
 #endif
-	if (MINOR(full_dev) > 0) {
-		printk("SJCD: request error: invalid device minor.\n");
-		return 0;
-	}
 	if (!sjcd_command_is_in_progress)
 		sjcd_get_status();
 	return (sjcd_status_valid ? sjcd_media_is_changed : 0);
@@ -794,16 +791,12 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 
 	case CDROMPLAYTRKIND:{
 			struct cdrom_ti ti;
-			int s;
+			int s = -EFAULT;
 #if defined( SJCD_TRACE )
 			printk("SJCD: ioctl: playtrkind\n");
 #endif
-			if ((s =
-			     verify_area(VERIFY_READ, (void *) arg,
-					 sizeof(ti))) == 0) {
-				copy_from_user(&ti, (void *) arg,
-					       sizeof(ti));
-
+			if (!copy_from_user(&ti, (void *) arg, sizeof(ti))) {
+				s = 0;
 				if (ti.cdti_trk0 < sjcd_first_track_no)
 					return (-EINVAL);
 				if (ti.cdti_trk1 > sjcd_last_track_no)
@@ -878,19 +871,15 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 
 	case CDROMREADTOCHDR:{
 			struct cdrom_tochdr toc_header;
-			int s;
 #if defined (SJCD_TRACE )
 			printk("SJCD: ioctl: readtocheader\n");
 #endif
-			if ((s =
-			     verify_area(VERIFY_WRITE, (void *) arg,
-					 sizeof(toc_header))) == 0) {
-				toc_header.cdth_trk0 = sjcd_first_track_no;
-				toc_header.cdth_trk1 = sjcd_last_track_no;
-				copy_to_user((void *) arg, &toc_header,
-					     sizeof(toc_header));
-			}
-			return (s);
+			toc_header.cdth_trk0 = sjcd_first_track_no;
+			toc_header.cdth_trk1 = sjcd_last_track_no;
+			if (copy_to_user((void *)arg, &toc_header,
+					 sizeof(toc_header)))
+				return -EFAULT;
+			return 0;
 		}
 
 	case CDROMREADTOCENTRY:{
@@ -941,8 +930,9 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 				default:
 					return (-EINVAL);
 				}
-				copy_to_user((void *) arg, &toc_entry,
-					     sizeof(toc_entry));
+				if (copy_to_user((void *) arg, &toc_entry,
+						 sizeof(toc_entry)))
+					s = -EFAULT;
 			}
 			return (s);
 		}
@@ -997,8 +987,9 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 				default:
 					return (-EINVAL);
 				}
-				copy_to_user((void *) arg, &subchnl,
-					     sizeof(subchnl));
+				if (copy_to_user((void *) arg, &subchnl,
+					         sizeof(subchnl)))
+					s = -EFAULT;
 			}
 			return (s);
 		}
@@ -1040,16 +1031,13 @@ static int sjcd_ioctl(struct inode *ip, struct file *fp,
 
 #if defined( SJCD_GATHER_STAT )
 	case 0xABCD:{
-			int s;
 #if defined( SJCD_TRACE )
 			printk("SJCD: ioctl: statistic\n");
 #endif
-			if ((s =
-			     verify_area(VERIFY_WRITE, (void *) arg,
-					 sizeof(statistic))) == 0)
-				copy_to_user((void *) arg, &statistic,
-					     sizeof(statistic));
-			return (s);
+			if (copy_to_user((void *)arg, &statistic,
+					 sizeof(statistic)))
+				return -EFAULT;
+			return 0;
 		}
 #endif
 
@@ -1073,16 +1061,19 @@ static void sjcd_invalidate_buffers(void)
  * When Linux gets variable block sizes this will probably go away.
  */
 
-#define CURRENT_IS_VALID                                      \
-    ( !QUEUE_EMPTY && MAJOR( CURRENT->rq_dev ) == MAJOR_NR && \
-      CURRENT->cmd == READ && CURRENT->sector != -1 )
+static int current_valid(void)
+{
+        return CURRENT &&
+		CURRENT->cmd == READ &&
+		CURRENT->sector != -1;
+}
 
 static void sjcd_transfer(void)
 {
 #if defined( SJCD_TRACE )
 	printk("SJCD: transfer:\n");
 #endif
-	if (CURRENT_IS_VALID) {
+	if (current_valid()) {
 		while (CURRENT->nr_sectors) {
 			int i, bn = CURRENT->sector / 4;
 			for (i = 0;
@@ -1238,7 +1229,7 @@ static void sjcd_poll(void)
 					}
 				}
 
-				if (CURRENT_IS_VALID) {
+				if (current_valid()) {
 					struct sjcd_play_msf msf;
 
 					sjcd_next_bn = CURRENT->sector / 4;
@@ -1306,8 +1297,8 @@ static void sjcd_poll(void)
 					    ("SJCD: read block %d failed, maybe audio disk? Giving up\n",
 					     sjcd_next_bn);
 #endif
-					if (CURRENT_IS_VALID)
-						end_request(0);
+					if (current_valid())
+						end_request(CURRENT, 0);
 #if defined( SJCD_TRACE )
 					printk
 					    ("SJCD_S_DATA: pre-cmd failed: go to SJCD_S_STOP mode\n");
@@ -1331,7 +1322,7 @@ static void sjcd_poll(void)
 				 * Otherwise cdrom hangs up. Check to see if we have something to copy
 				 * to.
 				 */
-				if (!CURRENT_IS_VALID
+				if (!current_valid()
 				    && sjcd_buf_in == sjcd_buf_out) {
 #if defined( SJCD_TRACE )
 					printk
@@ -1372,7 +1363,7 @@ static void sjcd_poll(void)
 					 * OK, request seems to be precessed. Continue transferring...
 					 */
 					if (!sjcd_transfer_is_active) {
-						while (CURRENT_IS_VALID) {
+						while (current_valid()) {
 							/*
 							 * Continue transferring.
 							 */
@@ -1381,12 +1372,12 @@ static void sjcd_poll(void)
 							    nr_sectors ==
 							    0)
 								end_request
-								    (1);
+								    (CURRENT, 1);
 							else
 								break;
 						}
 					}
-					if (CURRENT_IS_VALID &&
+					if (current_valid() &&
 					    (CURRENT->sector / 4 <
 					     sjcd_next_bn
 					     || CURRENT->sector / 4 >
@@ -1449,7 +1440,7 @@ static void sjcd_poll(void)
 					sjcd_toc_uptodate = 0;
 					sjcd_invalidate_buffers();
 				}
-				if (CURRENT_IS_VALID) {
+				if (current_valid()) {
 					if (sjcd_status_valid)
 						sjcd_transfer_state =
 						    SJCD_S_READ;
@@ -1475,8 +1466,8 @@ static void sjcd_poll(void)
 
 	if (--sjcd_transfer_timeout == 0) {
 		printk("SJCD: timeout in state %d\n", sjcd_transfer_state);
-		while (CURRENT_IS_VALID)
-			end_request(0);
+		while (current_valid())
+			end_request(CURRENT, 0);
 		sjcd_send_cmd(SCMD_STOP);
 		sjcd_transfer_state = SJCD_S_IDLE;
 		goto ReSwitch;
@@ -1496,16 +1487,10 @@ static void do_sjcd_request(request_queue_t * q)
 	       CURRENT->sector, CURRENT->nr_sectors);
 #endif
 	sjcd_transfer_is_active = 1;
-	while (CURRENT_IS_VALID) {
-		/*
-		 * Who of us are paranoiac?
-		 */
-		if (CURRENT->bh && !buffer_locked(CURRENT->bh))
-			panic(DEVICE_NAME ": block not locked");
-
+	while (current_valid()) {
 		sjcd_transfer();
 		if (CURRENT->nr_sectors == 0)
-			end_request(1);
+			end_request(CURRENT, 1);
 		else {
 			sjcd_buf_out = -1;	/* Want to read a block not in buffer */
 			if (sjcd_transfer_state == SJCD_S_IDLE) {
@@ -1513,8 +1498,8 @@ static void do_sjcd_request(request_queue_t * q)
 					if (sjcd_update_toc() < 0) {
 						printk
 						    ("SJCD: transfer: discard\n");
-						while (CURRENT_IS_VALID)
-							end_request(0);
+						while (current_valid())
+							end_request(CURRENT, 0);
 						break;
 					}
 				}
@@ -1537,7 +1522,7 @@ static void do_sjcd_request(request_queue_t * q)
 /*
  * Open the device special file. Check disk is in.
  */
-int sjcd_open(struct inode *ip, struct file *fp)
+static int sjcd_open(struct inode *ip, struct file *fp)
 {
 	/*
 	 * Check the presence of device.
@@ -1656,15 +1641,12 @@ static int sjcd_release(struct inode *inode, struct file *file)
  * A list of file operations allowed for this cdrom.
  */
 static struct block_device_operations sjcd_fops = {
-	owner:THIS_MODULE,
-	open:sjcd_open,
-	release:sjcd_release,
-	ioctl:sjcd_ioctl,
-	check_media_change:sjcd_disk_change,
+	.owner		= THIS_MODULE,
+	.open		= sjcd_open,
+	.release	= sjcd_release,
+	.ioctl		= sjcd_ioctl,
+	.media_changed	= sjcd_disk_change,
 };
-
-static int blksize = 2048;
-static int secsize = 2048;
 
 /*
  * Following stuff is intended for initialization of the cdrom. It
@@ -1676,11 +1658,13 @@ static struct {
 	unsigned char major, minor;
 } sjcd_version;
 
+static struct gendisk *sjcd_disk;
+
 /*
  * Test for presence of drive and initialize it. Called at boot time.
  * Probe cdrom, find out version and status.
  */
-int __init sjcd_init(void)
+static int __init sjcd_init(void)
 {
 	int i;
 
@@ -1692,25 +1676,28 @@ int __init sjcd_init(void)
 	printk("SJCD: sjcd=0x%x: ", sjcd_base);
 #endif
 
-	hardsect_size[MAJOR_NR] = &secsize;
-	blksize_size[MAJOR_NR] = &blksize;
+	if (register_blkdev(MAJOR_NR, "sjcd"))
+		return -EIO;
 
-	if (devfs_register_blkdev(MAJOR_NR, "sjcd", &sjcd_fops) != 0) {
-		printk("SJCD: Unable to get major %d for Sanyo CD-ROM\n",
-		       MAJOR_NR);
-		return (-EIO);
+	blk_init_queue(&sjcd_queue, do_sjcd_request, &sjcd_lock);
+	blk_queue_hardsect_size(&sjcd_queue, 2048);
+
+	sjcd_disk = alloc_disk(1);
+	if (!sjcd_disk) {
+		printk(KERN_ERR "SJCD: can't allocate disk");
+		goto out1;
 	}
-
-	blk_init_queue(BLK_DEFAULT_QUEUE(MAJOR_NR), DEVICE_REQUEST);
-	read_ahead[MAJOR_NR] = 4;
-	register_disk(NULL, MKDEV(MAJOR_NR, 0), 1, &sjcd_fops, 0);
+	sjcd_disk->major = MAJOR_NR,
+	sjcd_disk->first_minor = 0,
+	sjcd_disk->fops = &sjcd_fops,
+	sprintf(sjcd_disk->disk_name, "sjcd");
+	sprintf(sjcd_disk->devfs_name, "sjcd");
 
 	if (check_region(sjcd_base, 4)) {
 		printk
 		    ("SJCD: Init failed, I/O port (%X) is already in use\n",
 		     sjcd_base);
-		sjcd_cleanup();
-		return (-EIO);
+		goto out2;
 	}
 
 	/*
@@ -1732,8 +1719,7 @@ int __init sjcd_init(void)
 	}
 	if (i == 0 || sjcd_command_failed) {
 		printk(" reset failed, no drive found.\n");
-		sjcd_cleanup();
-		return (-EIO);
+		goto out3;
 	} else
 		printk("\n");
 
@@ -1755,8 +1741,7 @@ int __init sjcd_init(void)
 	}
 	if (i == 0 || sjcd_command_failed) {
 		printk(" get version failed, no drive found.\n");
-		sjcd_cleanup();
-		return (-EIO);
+		goto out3;
 	}
 
 	if (sjcd_load_response(&sjcd_version, sizeof(sjcd_version)) == 0) {
@@ -1764,8 +1749,7 @@ int __init sjcd_init(void)
 		       (int) sjcd_version.minor);
 	} else {
 		printk(" read version failed, no drive found.\n");
-		sjcd_cleanup();
-		return (-EIO);
+		goto out3;
 	}
 
 	/*
@@ -1788,47 +1772,40 @@ int __init sjcd_init(void)
 		}
 		if (i == 0 || sjcd_command_failed) {
 			printk(" get status failed, no drive found.\n");
-			sjcd_cleanup();
-			return (-EIO);
+			goto out3;
 		} else
 			printk("\n");
 	}
 
 	printk(KERN_INFO "SJCD: Status: port=0x%x.\n", sjcd_base);
-	devfs_register(NULL, "sjcd", DEVFS_FL_DEFAULT, MAJOR_NR, 0,
-		       S_IFBLK | S_IRUGO | S_IWUGO, &sjcd_fops, NULL);
+	sjcd_disk->queue = &sjcd_queue;
+	add_disk(sjcd_disk);
 
 	sjcd_present++;
 	return (0);
-}
-
-static int sjcd_cleanup(void)
-{
-	if ((devfs_unregister_blkdev(MAJOR_NR, "sjcd") == -EINVAL))
+out3:
+	release_region(sjcd_base, 4);
+	blk_cleanup_queue(&sjcd_queue);
+out2:
+	put_disk(sjcd_disk);
+out1:
+	if ((unregister_blkdev(MAJOR_NR, "sjcd") == -EINVAL))
 		printk("SJCD: cannot unregister device.\n");
-	else {
-		release_region(sjcd_base, 4);
-		blk_cleanup_queue(BLK_DEFAULT_QUEUE(MAJOR_NR));
-	}
-
-	return (0);
+	return (-EIO);
 }
 
-
-void __exit sjcd_exit(void)
+static void __exit sjcd_exit(void)
 {
-	devfs_unregister(devfs_find_handle
-			 (NULL, "sjcd", 0, 0, DEVFS_SPECIAL_BLK, 0));
-	if (sjcd_cleanup())
-		printk("SJCD: module: cannot be removed.\n");
-	else
-		printk(KERN_INFO "SJCD: module: removed.\n");
+	del_gendisk(sjcd_disk);
+	put_disk(sjcd_disk);
+	release_region(sjcd_base, 4);
+	blk_cleanup_queue(&sjcd_queue);
+	if ((unregister_blkdev(MAJOR_NR, "sjcd") == -EINVAL))
+		printk("SJCD: cannot unregister device.\n");
+	printk(KERN_INFO "SJCD: module: removed.\n");
 }
 
-#ifdef MODULE
 module_init(sjcd_init);
-#endif
 module_exit(sjcd_exit);
-
 
 MODULE_LICENSE("GPL");

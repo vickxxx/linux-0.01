@@ -1,7 +1,7 @@
 /*
  * linux/drivers/char/synclink.c
  *
- * $Id: synclink.c,v 3.12 2001/07/18 19:14:21 paulkf Exp $
+ * $Id: synclink.c,v 4.12 2003/06/18 15:29:32 paulkf Exp $
  *
  * Device driver for Microgate SyncLink ISA and PCI
  * high speed multiprotocol serial adapters.
@@ -100,21 +100,16 @@
 #include <asm/bitops.h>
 #include <asm/types.h>
 #include <linux/termios.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 
 #ifdef CONFIG_SYNCLINK_SYNCPPP_MODULE
 #define CONFIG_SYNCLINK_SYNCPPP 1
 #endif
 
 #ifdef CONFIG_SYNCLINK_SYNCPPP
-#if LINUX_VERSION_CODE < VERSION(2,4,3) 
-#include "../net/wan/syncppp.h"
-#else
 #include <net/syncppp.h>
 #endif
-#endif
 
-#include <asm/segment.h>
 #define GET_USER(error,value,addr) error = get_user(value,addr)
 #define COPY_FROM_USER(error,dest,src,size) error = copy_from_user(dest,src,size) ? -EFAULT : 0
 #define PUT_USER(error,value,addr) error = put_user(value,addr)
@@ -198,20 +193,16 @@ struct mgsl_struct {
 	int			flags;
 	int			count;		/* count of opens */
 	int			line;
+	int                     hw_version;
 	unsigned short		close_delay;
 	unsigned short		closing_wait;	/* time to wait before closing */
 	
 	struct mgsl_icount	icount;
 	
-	struct termios		normal_termios;
-	struct termios		callout_termios;
-	
 	struct tty_struct 	*tty;
 	int			timeout;
 	int			x_char;		/* xon/xoff character */
 	int			blocked_open;	/* # of blocked opens */
-	long			session;	/* Session of opening process */
-	long			pgrp;		/* pgrp of opening process */
 	u16			read_status_mask;
 	u16			ignore_status_mask;	
 	unsigned char 		*xmit_buf;
@@ -228,7 +219,7 @@ struct mgsl_struct {
 	struct mgsl_struct	*next_device;	/* device list link */
 	
 	spinlock_t irq_spinlock;		/* spinlock for synchronizing with ISR */
-	struct tq_struct task;		/* task structure for scheduling bh */
+	struct work_struct task;		/* task structure for scheduling bh */
 
 	u32 EventMask;			/* event trigger mask */
 	u32 RecordedEvents;		/* pending events */
@@ -859,9 +850,9 @@ isr_dispatch_func UscIsrTable[7] =
 /*
  * ioctl call handlers
  */
-static int set_modem_info(struct mgsl_struct * info, unsigned int cmd,
-			  unsigned int *value);
-static int get_modem_info(struct mgsl_struct * info, unsigned int *value);
+static int tiocmget(struct tty_struct *tty, struct file *file);
+static int tiocmset(struct tty_struct *tty, struct file *file,
+		    unsigned int set, unsigned int clear);
 static int mgsl_get_stats(struct mgsl_struct * info, struct mgsl_icount
 	*user_icount);
 static int mgsl_get_params(struct mgsl_struct * info, MGSL_PARAMS *user_params);
@@ -880,22 +871,20 @@ static int mgsl_loopmode_send_done( struct mgsl_struct * info );
  * Global linked list of SyncLink devices
  */
 struct mgsl_struct *mgsl_device_list;
-int mgsl_device_count;
+static int mgsl_device_count;
 
 /*
  * Set this param to non-zero to load eax with the
  * .text section address and breakpoint on module load.
  * This is useful for use with gdb and add-symbol-file command.
  */
-int break_on_load;
+static int break_on_load;
 
 /*
  * Driver major number, defaults to zero to get auto
  * assigned major number. May be forced as module parameter.
  */
-int ttymajor;
-
-int cuamajor;
+static int ttymajor;
 
 /*
  * Array of user specified options for ISA adapters.
@@ -911,7 +900,6 @@ static int txholdbufs[MAX_TOTAL_DEVICES];
 	
 MODULE_PARM(break_on_load,"i");
 MODULE_PARM(ttymajor,"i");
-MODULE_PARM(cuamajor,"i");
 MODULE_PARM(io,"1-" __MODULE_STRING(MAX_ISA_DEVICES) "i");
 MODULE_PARM(irq,"1-" __MODULE_STRING(MAX_ISA_DEVICES) "i");
 MODULE_PARM(dma,"1-" __MODULE_STRING(MAX_ISA_DEVICES) "i");
@@ -922,14 +910,15 @@ MODULE_PARM(txdmabufs,"1-" __MODULE_STRING(MAX_TOTAL_DEVICES) "i");
 MODULE_PARM(txholdbufs,"1-" __MODULE_STRING(MAX_TOTAL_DEVICES) "i");
 
 static char *driver_name = "SyncLink serial driver";
-static char *driver_version = "$Revision: 3.12 $";
+static char *driver_version = "$Revision: 4.12 $";
 
-static int __init synclink_init_one (struct pci_dev *dev,
+static int synclink_init_one (struct pci_dev *dev,
 				     const struct pci_device_id *ent);
-static void __exit synclink_remove_one (struct pci_dev *dev);
+static void synclink_remove_one (struct pci_dev *dev);
 
 static struct pci_device_id synclink_pci_tbl[] __devinitdata = {
 	{ PCI_VENDOR_ID_MICROGATE, PCI_DEVICE_ID_MICROGATE_USC, PCI_ANY_ID, PCI_ANY_ID, },
+	{ PCI_VENDOR_ID_MICROGATE, 0x0210, PCI_ANY_ID, PCI_ANY_ID, },
 	{ 0, }, /* terminate list */
 };
 MODULE_DEVICE_TABLE(pci, synclink_pci_tbl);
@@ -937,14 +926,13 @@ MODULE_DEVICE_TABLE(pci, synclink_pci_tbl);
 MODULE_LICENSE("GPL");
 
 static struct pci_driver synclink_pci_driver = {
-	name:		"synclink",
-	id_table:	synclink_pci_tbl,
-	probe:		synclink_init_one,
-	remove:		synclink_remove_one,
+	.name		= "synclink",
+	.id_table	= synclink_pci_tbl,
+	.probe		= synclink_init_one,
+	.remove		= __devexit_p(synclink_remove_one),
 };
 
-static struct tty_driver serial_driver, callout_driver;
-static int serial_refcount;
+static struct tty_driver *serial_driver;
 
 /* number of characters left in xmit buffer before we ask for more */
 #define WAKEUP_CHARS 256
@@ -952,10 +940,6 @@ static int serial_refcount;
 
 static void mgsl_change_params(struct mgsl_struct *info);
 static void mgsl_wait_until_sent(struct tty_struct *tty, int timeout);
-
-static struct tty_struct *serial_table[MAX_TOTAL_DEVICES];
-static struct termios *serial_termios[MAX_TOTAL_DEVICES];
-static struct termios *serial_termios_locked[MAX_TOTAL_DEVICES];
 
 #ifndef MIN
 #define MIN(a,b)	((a) < (b) ? (a) : (b))
@@ -983,7 +967,7 @@ static unsigned char *tmp_buf;
 static DECLARE_MUTEX(tmp_buf_sem);
 
 static inline int mgsl_paranoia_check(struct mgsl_struct *info,
-					kdev_t device, const char *routine)
+					char *name, const char *routine)
 {
 #ifdef MGSL_PARANOIA_CHECK
 	static const char *badmagic =
@@ -992,11 +976,11 @@ static inline int mgsl_paranoia_check(struct mgsl_struct *info,
 		"Warning: null mgsl_struct for (%s) in %s\n";
 
 	if (!info) {
-		printk(badinfo, kdevname(device), routine);
+		printk(badinfo, name, routine);
 		return 1;
 	}
 	if (info->magic != MGSL_MAGIC) {
-		printk(badmagic, kdevname(device), routine);
+		printk(badmagic, name, routine);
 		return 1;
 	}
 #endif
@@ -1013,7 +997,7 @@ static void mgsl_stop(struct tty_struct *tty)
 	struct mgsl_struct *info = (struct mgsl_struct *)tty->driver_data;
 	unsigned long flags;
 	
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_stop"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_stop"))
 		return;
 	
 	if ( debug_level >= DEBUG_LEVEL_INFO )
@@ -1036,7 +1020,7 @@ static void mgsl_start(struct tty_struct *tty)
 	struct mgsl_struct *info = (struct mgsl_struct *)tty->driver_data;
 	unsigned long flags;
 	
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_start"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_start"))
 		return;
 	
 	if ( debug_level >= DEBUG_LEVEL_INFO )
@@ -1380,8 +1364,7 @@ void mgsl_isr_io_pin( struct mgsl_struct *info )
 				       (status & MISCSTATUS_DCD) ? "on" : "off");
 			if (status & MISCSTATUS_DCD)
 				wake_up_interruptible(&info->open_wait);
-			else if (!((info->flags & ASYNC_CALLOUT_ACTIVE) &&
-				   (info->flags & ASYNC_CALLOUT_NOHUP))) {
+			else {
 				if ( debug_level >= DEBUG_LEVEL_ISR )
 					printk("doing serial hangup...");
 				if (info->tty)
@@ -1709,7 +1692,7 @@ void mgsl_isr_transmit_dma( struct mgsl_struct *info )
  * 	
  * Return Value: None
  */
-static void mgsl_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static irqreturn_t mgsl_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct mgsl_struct * info;
 	u16 UscVector;
@@ -1721,7 +1704,7 @@ static void mgsl_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 
 	info = (struct mgsl_struct *)dev_id;	
 	if (!info)
-		return;
+		return IRQ_NONE;
 		
 	spin_lock(&info->irq_spinlock);
 
@@ -1762,8 +1745,7 @@ static void mgsl_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		if ( debug_level >= DEBUG_LEVEL_ISR )	
 			printk("%s(%d):%s queueing bh task.\n",
 				__FILE__,__LINE__,info->device_name);
-		queue_task(&info->task, &tq_immediate);
-		mark_bh(IMMEDIATE_BH);
+		schedule_work(&info->task);
 		info->bh_requested = 1;
 	}
 
@@ -1772,7 +1754,7 @@ static void mgsl_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 	if ( debug_level >= DEBUG_LEVEL_ISR )	
 		printk("%s(%d):mgsl_interrupt(%d)exit.\n",
 			__FILE__,__LINE__,irq);
-
+	return IRQ_HANDLED;
 }	/* end of mgsl_interrupt() */
 
 /* startup()
@@ -1794,7 +1776,7 @@ static int startup(struct mgsl_struct * info)
 	
 	if (!info->xmit_buf) {
 		/* allocate a page of memory for a transmit buffer */
-		info->xmit_buf = (unsigned char *)get_free_page(GFP_KERNEL);
+		info->xmit_buf = (unsigned char *)get_zeroed_page(GFP_KERNEL);
 		if (!info->xmit_buf) {
 			printk(KERN_ERR"%s(%d):%s can't allocate transmit buffer\n",
 				__FILE__,__LINE__,info->device_name);
@@ -1811,7 +1793,7 @@ static int startup(struct mgsl_struct * info)
 	/* Allocate and claim adapter resources */
 	retval = mgsl_claim_resources(info);
 	
-	/* perform existance check and diagnostics */
+	/* perform existence check and diagnostics */
 	if ( !retval )
 		retval = mgsl_adapter_test(info);
 		
@@ -2054,7 +2036,7 @@ static void mgsl_put_char(struct tty_struct *tty, unsigned char ch)
 			__FILE__,__LINE__,ch,info->device_name);
 	}		
 	
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_put_char"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_put_char"))
 		return;
 
 	if (!tty || !info->xmit_buf)
@@ -2092,7 +2074,7 @@ static void mgsl_flush_chars(struct tty_struct *tty)
 		printk( "%s(%d):mgsl_flush_chars() entry on %s xmit_cnt=%d\n",
 			__FILE__,__LINE__,info->device_name,info->xmit_cnt);
 	
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_flush_chars"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_flush_chars"))
 		return;
 
 	if (info->xmit_cnt <= 0 || tty->stopped || tty->hw_stopped ||
@@ -2145,7 +2127,7 @@ static int mgsl_write(struct tty_struct * tty, int from_user,
 		printk( "%s(%d):mgsl_write(%s) count=%d\n",
 			__FILE__,__LINE__,info->device_name,count);
 	
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_write"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_write"))
 		goto cleanup;
 
 	if (!tty || !info->xmit_buf || !tmp_buf)
@@ -2321,7 +2303,7 @@ static int mgsl_write_room(struct tty_struct *tty)
 	struct mgsl_struct *info = (struct mgsl_struct *)tty->driver_data;
 	int	ret;
 				
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_write_room"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_write_room"))
 		return 0;
 	ret = SERIAL_XMIT_SIZE - info->xmit_cnt - 1;
 	if (ret < 0)
@@ -2359,7 +2341,7 @@ static int mgsl_chars_in_buffer(struct tty_struct *tty)
 		printk("%s(%d):mgsl_chars_in_buffer(%s)\n",
 			 __FILE__,__LINE__, info->device_name );
 			 
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_chars_in_buffer"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_chars_in_buffer"))
 		return 0;
 		
 	if (debug_level >= DEBUG_LEVEL_INFO)
@@ -2394,7 +2376,7 @@ static void mgsl_flush_buffer(struct tty_struct *tty)
 		printk("%s(%d):mgsl_flush_buffer(%s) entry\n",
 			 __FILE__,__LINE__, info->device_name );
 	
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_flush_buffer"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_flush_buffer"))
 		return;
 		
 	spin_lock_irqsave(&info->irq_spinlock,flags); 
@@ -2426,7 +2408,7 @@ static void mgsl_send_xchar(struct tty_struct *tty, char ch)
 		printk("%s(%d):mgsl_send_xchar(%s,%d)\n",
 			 __FILE__,__LINE__, info->device_name, ch );
 			 
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_send_xchar"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_send_xchar"))
 		return;
 
 	info->x_char = ch;
@@ -2455,7 +2437,7 @@ static void mgsl_throttle(struct tty_struct * tty)
 		printk("%s(%d):mgsl_throttle(%s) entry\n",
 			 __FILE__,__LINE__, info->device_name );
 
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_throttle"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_throttle"))
 		return;
 	
 	if (I_IXOFF(tty))
@@ -2485,7 +2467,7 @@ static void mgsl_unthrottle(struct tty_struct * tty)
 		printk("%s(%d):mgsl_unthrottle(%s) entry\n",
 			 __FILE__,__LINE__, info->device_name );
 
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_unthrottle"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_unthrottle"))
 		return;
 	
 	if (I_IXOFF(tty)) {
@@ -2927,110 +2909,58 @@ static int modem_input_wait(struct mgsl_struct *info,int arg)
 	return rc;
 }
 
-/* get_modem_info()
- * 
- * 	Read the state of the serial control and
- * 	status signals and return to caller.
- * 	
- * Arguments:	 	info	pointer to device instance data
- * 			value	pointer to int to hold returned info
- * 	
- * Return Value:	0 if success, otherwise error code
+/* return the state of the serial control and status signals
  */
-static int get_modem_info(struct mgsl_struct * info, unsigned int *value)
+static int tiocmget(struct tty_struct *tty, struct file *file)
 {
-	unsigned int result = 0;
+	struct mgsl_struct *info = (struct mgsl_struct *)tty->driver_data;
+	unsigned int result;
  	unsigned long flags;
-	int err;
- 
+
 	spin_lock_irqsave(&info->irq_spinlock,flags);
  	usc_get_serial_signals(info);
 	spin_unlock_irqrestore(&info->irq_spinlock,flags);
 
-	if (info->serial_signals & SerialSignal_RTS)
-		result |= TIOCM_RTS;
-	if (info->serial_signals & SerialSignal_DTR)
-		result |= TIOCM_DTR;
-	if (info->serial_signals & SerialSignal_DCD)
-		result |= TIOCM_CAR;
-	if (info->serial_signals & SerialSignal_RI)
-		result |= TIOCM_RNG;
-	if (info->serial_signals & SerialSignal_DSR)
-		result |= TIOCM_DSR;
-	if (info->serial_signals & SerialSignal_CTS)
-		result |= TIOCM_CTS;
+	result = ((info->serial_signals & SerialSignal_RTS) ? TIOCM_RTS:0) +
+		((info->serial_signals & SerialSignal_DTR) ? TIOCM_DTR:0) +
+		((info->serial_signals & SerialSignal_DCD) ? TIOCM_CAR:0) +
+		((info->serial_signals & SerialSignal_RI)  ? TIOCM_RNG:0) +
+		((info->serial_signals & SerialSignal_DSR) ? TIOCM_DSR:0) +
+		((info->serial_signals & SerialSignal_CTS) ? TIOCM_CTS:0);
 
 	if (debug_level >= DEBUG_LEVEL_INFO)
-		printk("%s(%d):mgsl_get_modem_info %s value=%08X\n",
+		printk("%s(%d):%s tiocmget() value=%08X\n",
 			 __FILE__,__LINE__, info->device_name, result );
-			
-	PUT_USER(err,result,value);
-	return err;
-}	/* end of get_modem_info() */
+	return result;
+}
 
-/* set_modem_info()
- * 
- * 	Set the state of the modem control signals (DTR/RTS)
- * 	
- * Arguments:
- * 
- * 	info	pointer to device instance data
- * 	cmd	signal command: TIOCMBIS = set bit TIOCMBIC = clear bit
- *		TIOCMSET = set/clear signal values
- * 	value	bit mask for command
- * 	
- * Return Value:	0 if success, otherwise error code
+/* set modem control signals (DTR/RTS)
  */
-static int set_modem_info(struct mgsl_struct * info, unsigned int cmd,
-			  unsigned int *value)
+static int tiocmset(struct tty_struct *tty, struct file *file,
+		    unsigned int set, unsigned int clear)
 {
- 	int error;
- 	unsigned int arg;
+	struct mgsl_struct *info = (struct mgsl_struct *)tty->driver_data;
  	unsigned long flags;
- 
+
 	if (debug_level >= DEBUG_LEVEL_INFO)
-		printk("%s(%d):mgsl_set_modem_info %s\n", __FILE__,__LINE__,
-			info->device_name );
-			
- 	GET_USER(error,arg,value);
- 	if (error)
- 		return error;
-		
- 	switch (cmd) {
- 	case TIOCMBIS: 
- 		if (arg & TIOCM_RTS)
- 			info->serial_signals |= SerialSignal_RTS;
- 		if (arg & TIOCM_DTR)
- 			info->serial_signals |= SerialSignal_DTR;
- 		break;
- 	case TIOCMBIC:
- 		if (arg & TIOCM_RTS)
- 			info->serial_signals &= ~SerialSignal_RTS;
- 		if (arg & TIOCM_DTR)
- 			info->serial_signals &= ~SerialSignal_DTR;
- 		break;
- 	case TIOCMSET:
- 		if (arg & TIOCM_RTS)
- 			info->serial_signals |= SerialSignal_RTS;
-		else
- 			info->serial_signals &= ~SerialSignal_RTS;
-		
- 		if (arg & TIOCM_DTR)
- 			info->serial_signals |= SerialSignal_DTR;
-		else
- 			info->serial_signals &= ~SerialSignal_DTR;
- 		break;
- 	default:
- 		return -EINVAL;
- 	}
-	
+		printk("%s(%d):%s tiocmset(%x,%x)\n",
+			__FILE__,__LINE__,info->device_name, set, clear);
+
+	if (set & TIOCM_RTS)
+		info->serial_signals |= SerialSignal_RTS;
+	if (set & TIOCM_DTR)
+		info->serial_signals |= SerialSignal_DTR;
+	if (clear & TIOCM_RTS)
+		info->serial_signals &= ~SerialSignal_RTS;
+	if (clear & TIOCM_DTR)
+		info->serial_signals &= ~SerialSignal_DTR;
+
 	spin_lock_irqsave(&info->irq_spinlock,flags);
  	usc_set_serial_signals(info);
 	spin_unlock_irqrestore(&info->irq_spinlock,flags);
-	
+
 	return 0;
-	
-}	/* end of set_modem_info() */
+}
 
 /* mgsl_break()		Set or clear transmit break condition
  *
@@ -3047,7 +2977,7 @@ static void mgsl_break(struct tty_struct *tty, int break_state)
 		printk("%s(%d):mgsl_break(%s,%d)\n",
 			 __FILE__,__LINE__, info->device_name, break_state);
 			 
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_break"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_break"))
 		return;
 
 	spin_lock_irqsave(&info->irq_spinlock,flags);
@@ -3079,7 +3009,7 @@ static int mgsl_ioctl(struct tty_struct *tty, struct file * file,
 		printk("%s(%d):mgsl_ioctl %s cmd=%08X\n", __FILE__,__LINE__,
 			info->device_name, cmd );
 	
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_ioctl"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_ioctl"))
 		return -ENODEV;
 
 	if ((cmd != TIOCGSERIAL) && (cmd != TIOCSSERIAL) &&
@@ -3099,12 +3029,6 @@ int mgsl_ioctl_common(struct mgsl_struct *info, unsigned int cmd, unsigned long 
 	unsigned long flags;
 	
 	switch (cmd) {
-		case TIOCMGET:
-			return get_modem_info(info, (unsigned int *) arg);
-		case TIOCMBIS:
-		case TIOCMBIC:
-		case TIOCMSET:
-			return set_modem_info(info, cmd, (unsigned int *) arg);
 		case MGSL_IOCGPARAMS:
 			return mgsl_get_params(info,(MGSL_PARAMS *)arg);
 		case MGSL_IOCSPARAMS:
@@ -3125,11 +3049,6 @@ int mgsl_ioctl_common(struct mgsl_struct *info, unsigned int cmd, unsigned long 
 			return mgsl_wait_event(info,(int*)arg);
 		case MGSL_IOCLOOPTXDONE:
 			return mgsl_loopmode_send_done(info);
-		case MGSL_IOCCLRMODCOUNT:
-			while(MOD_IN_USE)
-				MOD_DEC_USE_COUNT;
-			return 0;
-
 		/* Wait for modem input (DCD,RI,DSR,CTS) change
 		 * as specified by mask in arg (TIOCM_RNG/DSR/CD/CTS)
 		 */
@@ -3194,7 +3113,7 @@ static void mgsl_set_termios(struct tty_struct *tty, struct termios *old_termios
 	
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):mgsl_set_termios %s\n", __FILE__,__LINE__,
-			tty->driver.name );
+			tty->driver->name );
 	
 	/* just return if nothing has changed */
 	if ((tty->termios->c_cflag == old_termios->c_cflag)
@@ -3251,14 +3170,17 @@ static void mgsl_close(struct tty_struct *tty, struct file * filp)
 {
 	struct mgsl_struct * info = (struct mgsl_struct *)tty->driver_data;
 
-	if (!info || mgsl_paranoia_check(info, tty->device, "mgsl_close"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_close"))
 		return;
 	
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):mgsl_close(%s) entry, count=%d\n",
 			 __FILE__,__LINE__, info->device_name, info->count);
 			 
-	if (!info->count || tty_hung_up_p(filp))
+	if (!info->count)
+		return;
+
+	if (tty_hung_up_p(filp))
 		goto cleanup;
 			
 	if ((tty->count == 1) && (info->count != 1)) {
@@ -3280,14 +3202,6 @@ static void mgsl_close(struct tty_struct *tty, struct file * filp)
 	
 	info->flags |= ASYNC_CLOSING;
 	
-	/* Save the termios structure, since this port may have
-	 * separate termios for callout and dialin.
-	 */
-	if (info->flags & ASYNC_NORMAL_ACTIVE)
-		info->normal_termios = *tty->termios;
-	if (info->flags & ASYNC_CALLOUT_ACTIVE)
-		info->callout_termios = *tty->termios;
-		
 	/* set tty->closing to notify line discipline to 
 	 * only process XON/XOFF characters. Only the N_TTY
 	 * discipline appears to use this (ppp does not).
@@ -3306,8 +3220,8 @@ static void mgsl_close(struct tty_struct *tty, struct file * filp)
  	if (info->flags & ASYNC_INITIALIZED)
  		mgsl_wait_until_sent(tty, info->timeout);
 
-	if (tty->driver.flush_buffer)
-		tty->driver.flush_buffer(tty);
+	if (tty->driver->flush_buffer)
+		tty->driver->flush_buffer(tty);
 		
 	if (tty->ldisc.flush_buffer)
 		tty->ldisc.flush_buffer(tty);
@@ -3325,17 +3239,14 @@ static void mgsl_close(struct tty_struct *tty, struct file * filp)
 		wake_up_interruptible(&info->open_wait);
 	}
 	
-	info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE|
-			 ASYNC_CLOSING);
+	info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CLOSING);
 			 
 	wake_up_interruptible(&info->close_wait);
 	
 cleanup:			
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):mgsl_close(%s) exit, count=%d\n", __FILE__,__LINE__,
-			tty->driver.name, info->count);
-	if(MOD_IN_USE)
-		MOD_DEC_USE_COUNT;
+			tty->driver->name, info->count);
 			
 }	/* end of mgsl_close() */
 
@@ -3362,7 +3273,7 @@ static void mgsl_wait_until_sent(struct tty_struct *tty, int timeout)
 		printk("%s(%d):mgsl_wait_until_sent(%s) entry\n",
 			 __FILE__,__LINE__, info->device_name );
       
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_wait_until_sent"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_wait_until_sent"))
 		return;
 
 	if (!(info->flags & ASYNC_INITIALIZED))
@@ -3393,7 +3304,7 @@ static void mgsl_wait_until_sent(struct tty_struct *tty, int timeout)
 			schedule_timeout(char_time);
 			if (signal_pending(current))
 				break;
-			if (timeout && ((orig_jiffies + timeout) < jiffies))
+			if (timeout && time_after(jiffies, orig_jiffies + timeout))
 				break;
 		}
 	} else {
@@ -3403,7 +3314,7 @@ static void mgsl_wait_until_sent(struct tty_struct *tty, int timeout)
 			schedule_timeout(char_time);
 			if (signal_pending(current))
 				break;
-			if (timeout && ((orig_jiffies + timeout) < jiffies))
+			if (timeout && time_after(jiffies, orig_jiffies + timeout))
 				break;
 		}
 	}
@@ -3431,14 +3342,14 @@ static void mgsl_hangup(struct tty_struct *tty)
 		printk("%s(%d):mgsl_hangup(%s)\n",
 			 __FILE__,__LINE__, info->device_name );
 			 
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_hangup"))
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_hangup"))
 		return;
 
 	mgsl_flush_buffer(tty);
 	shutdown(info);
 	
 	info->count = 0;	
-	info->flags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE);
+	info->flags &= ~ASYNC_NORMAL_ACTIVE;
 	info->tty = 0;
 
 	wake_up_interruptible(&info->open_wait);
@@ -3468,42 +3379,17 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):block_til_ready on %s\n",
-			 __FILE__,__LINE__, tty->driver.name );
+			 __FILE__,__LINE__, tty->driver->name );
 
-	if (tty->driver.subtype == SERIAL_TYPE_CALLOUT) {
-		/* this is a callout device */
-		/* just verify that normal device is not in use */
-		if (info->flags & ASYNC_NORMAL_ACTIVE)
-			return -EBUSY;
-		if ((info->flags & ASYNC_CALLOUT_ACTIVE) &&
-		    (info->flags & ASYNC_SESSION_LOCKOUT) &&
-		    (info->session != current->session))
-		    return -EBUSY;
-		if ((info->flags & ASYNC_CALLOUT_ACTIVE) &&
-		    (info->flags & ASYNC_PGRP_LOCKOUT) &&
-		    (info->pgrp != current->pgrp))
-		    return -EBUSY;
-		info->flags |= ASYNC_CALLOUT_ACTIVE;
-		return 0;
-	}
-	
 	if (filp->f_flags & O_NONBLOCK || tty->flags & (1 << TTY_IO_ERROR)){
 		/* nonblock mode is set or port is not enabled */
-		/* just verify that callout device is not active */
-		if (info->flags & ASYNC_CALLOUT_ACTIVE)
-			return -EBUSY;
 		info->flags |= ASYNC_NORMAL_ACTIVE;
 		return 0;
 	}
 
-	if (info->flags & ASYNC_CALLOUT_ACTIVE) {
-		if (info->normal_termios.c_cflag & CLOCAL)
-			do_clocal = 1;
-	} else {
-		if (tty->termios->c_cflag & CLOCAL)
-			do_clocal = 1;
-	}
-	
+	if (tty->termios->c_cflag & CLOCAL)
+		do_clocal = 1;
+
 	/* Wait for carrier detect and the line to become
 	 * free (i.e., not in use by the callout).  While we are in
 	 * this loop, info->count is dropped by one, so that
@@ -3516,19 +3402,18 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):block_til_ready before block on %s count=%d\n",
-			 __FILE__,__LINE__, tty->driver.name, info->count );
+			 __FILE__,__LINE__, tty->driver->name, info->count );
 
-	save_flags(flags); cli();
+	spin_lock_irqsave(&info->irq_spinlock, flags);
 	if (!tty_hung_up_p(filp)) {
 		extra_count = 1;
 		info->count--;
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore(&info->irq_spinlock, flags);
 	info->blocked_open++;
 	
 	while (1) {
-		if (!(info->flags & ASYNC_CALLOUT_ACTIVE) &&
- 		    (tty->termios->c_cflag & CBAUD)) {
+		if (tty->termios->c_cflag & CBAUD) {
 			spin_lock_irqsave(&info->irq_spinlock,flags);
 			info->serial_signals |= SerialSignal_RTS + SerialSignal_DTR;
 		 	usc_set_serial_signals(info);
@@ -3547,8 +3432,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	 	usc_get_serial_signals(info);
 		spin_unlock_irqrestore(&info->irq_spinlock,flags);
 		
- 		if (!(info->flags & ASYNC_CALLOUT_ACTIVE) &&
- 		    !(info->flags & ASYNC_CLOSING) &&
+ 		if (!(info->flags & ASYNC_CLOSING) &&
  		    (do_clocal || (info->serial_signals & SerialSignal_DCD)) ) {
  			break;
 		}
@@ -3560,7 +3444,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		
 		if (debug_level >= DEBUG_LEVEL_INFO)
 			printk("%s(%d):block_til_ready blocking on %s count=%d\n",
-				 __FILE__,__LINE__, tty->driver.name, info->count );
+				 __FILE__,__LINE__, tty->driver->name, info->count );
 				 
 		schedule();
 	}
@@ -3574,7 +3458,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 	
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):block_til_ready after blocking on %s count=%d\n",
-			 __FILE__,__LINE__, tty->driver.name, info->count );
+			 __FILE__,__LINE__, tty->driver->name, info->count );
 			 
 	if (!retval)
 		info->flags |= ASYNC_NORMAL_ACTIVE;
@@ -3601,7 +3485,7 @@ static int mgsl_open(struct tty_struct *tty, struct file * filp)
 	unsigned long flags;
 
 	/* verify range of specified line number */	
-	line = MINOR(tty->device) - tty->driver.minor_start;
+	line = tty->index;
 	if ((line < 0) || (line >= mgsl_device_count)) {
 		printk("%s(%d):mgsl_open with illegal line #%d.\n",
 			__FILE__,__LINE__,line);
@@ -3612,23 +3496,16 @@ static int mgsl_open(struct tty_struct *tty, struct file * filp)
 	info = mgsl_device_list;
 	while(info && info->line != line)
 		info = info->next_device;
-	if ( !info ){
-		printk("%s(%d):Can't find specified device on open (line=%d)\n",
-			__FILE__,__LINE__,line);
+	if (mgsl_paranoia_check(info, tty->name, "mgsl_open"))
 		return -ENODEV;
-	}
 	
 	tty->driver_data = info;
 	info->tty = tty;
-	if (mgsl_paranoia_check(info, tty->device, "mgsl_open"))
-		return -ENODEV;
 		
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):mgsl_open(%s), old ref count = %d\n",
-			 __FILE__,__LINE__,tty->driver.name, info->count);
+			 __FILE__,__LINE__,tty->driver->name, info->count);
 
-	MOD_INC_USE_COUNT;
-	
 	/* If port is closing, signal caller to try again */
 	if (tty_hung_up_p(filp) || info->flags & ASYNC_CLOSING){
 		if (info->flags & ASYNC_CLOSING)
@@ -3639,7 +3516,7 @@ static int mgsl_open(struct tty_struct *tty, struct file * filp)
 	}
 	
 	if (!tmp_buf) {
-		page = get_free_page(GFP_KERNEL);
+		page = get_zeroed_page(GFP_KERNEL);
 		if (!page) {
 			retval = -ENOMEM;
 			goto cleanup;
@@ -3676,18 +3553,6 @@ static int mgsl_open(struct tty_struct *tty, struct file * filp)
 		goto cleanup;
 	}
 
-	if ((info->count == 1) &&
-	    info->flags & ASYNC_SPLIT_TERMIOS) {
-		if (tty->driver.subtype == SERIAL_TYPE_NORMAL)
-			*tty->termios = info->normal_termios;
-		else 
-			*tty->termios = info->callout_termios;
-		mgsl_change_params(info);
-	}
-	
-	info->session = current->session;
-	info->pgrp    = current->pgrp;
-
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("%s(%d):mgsl_open(%s) success\n",
 			 __FILE__,__LINE__, info->device_name);
@@ -3695,8 +3560,8 @@ static int mgsl_open(struct tty_struct *tty, struct file * filp)
 	
 cleanup:			
 	if (retval) {
-		if(MOD_IN_USE)
-			MOD_DEC_USE_COUNT;
+		if (tty->count == 1)
+			info->tty = 0; /* tty layer will release tty struct */
 		if(info->count)
 			info->count--;
 	}
@@ -3984,7 +3849,7 @@ int mgsl_alloc_buffer_list_memory( struct mgsl_struct *info )
 		if ( info->buffer_list == NULL )
 			return -ENOMEM;
 			
-		info->buffer_list_phys = virt_to_bus(info->buffer_list);
+		info->buffer_list_phys = isa_virt_to_bus(info->buffer_list);
 	}
 
 	/* We got the memory for the buffer entry lists. */
@@ -4095,7 +3960,7 @@ int mgsl_alloc_frame_memory(struct mgsl_struct *info,DMABUFFERENTRY *BufferList,
 				kmalloc(DMABUFFERSIZE, GFP_KERNEL | GFP_DMA);
 			if ( BufferList[i].virt_addr == NULL )
 				return -ENOMEM;
-			phys_addr = virt_to_bus(BufferList[i].virt_addr);
+			phys_addr = isa_virt_to_bus(BufferList[i].virt_addr);
 		}
 		BufferList[i].phys_addr = phys_addr;
 	}
@@ -4273,7 +4138,7 @@ int load_next_tx_holding_buffer(struct mgsl_struct *info)
 
 	if ( info->tx_holding_count ) {
 		/* determine if we have enough tx dma buffers
-		 * to accomodate the next tx frame
+		 * to accommodate the next tx frame
 		 */
 		struct tx_holding_buffer *ptx =
 			&info->tx_holding_buffers[info->get_tx_holding_index];
@@ -4291,9 +4156,7 @@ int load_next_tx_holding_buffer(struct mgsl_struct *info)
 				info->get_tx_holding_index=0;
 
 			/* restart transmit timer */
-			del_timer(&info->tx_timer);
-			info->tx_timer.expires = jiffies + jiffies_from_ms(5000);
-			add_timer(&info->tx_timer);
+			mod_timer(&info->tx_timer, jiffies + jiffies_from_ms(5000));
 
 			ret = 1;
 		}
@@ -4511,12 +4374,12 @@ void mgsl_add_device( struct mgsl_struct *info )
 		info->max_frame_size = 65535;
 	
 	if ( info->bus_type == MGSL_BUS_TYPE_PCI ) {
-		printk( "SyncLink device %s added:PCI bus IO=%04X IRQ=%d Mem=%08X LCR=%08X MaxFrameSize=%u\n",
-			info->device_name, info->io_base, info->irq_level,
+		printk( "SyncLink PCI v%d %s: IO=%04X IRQ=%d Mem=%08X,%08X MaxFrameSize=%u\n",
+			info->hw_version + 1, info->device_name, info->io_base, info->irq_level,
 			info->phys_memory_base, info->phys_lcr_base,
 		     	info->max_frame_size );
 	} else {
-		printk( "SyncLink device %s added:ISA bus IO=%04X IRQ=%d DMA=%d MaxFrameSize=%u\n",
+		printk( "SyncLink ISA %s: IO=%04X IRQ=%d DMA=%d MaxFrameSize=%u\n",
 			info->device_name, info->io_base, info->irq_level, info->dma_level,
 		     	info->max_frame_size );
 	}
@@ -4548,9 +4411,7 @@ struct mgsl_struct* mgsl_allocate_device()
 	} else {
 		memset(info, 0, sizeof(struct mgsl_struct));
 		info->magic = MGSL_MAGIC;
-		info->task.sync = 0;
-		info->task.routine = mgsl_bh_handler;
-		info->task.data    = info;
+		INIT_WORK(&info->task, mgsl_bh_handler, info);
 		info->max_frame_size = 4096;
 		info->close_delay = 5*HZ/10;
 		info->closing_wait = 30*HZ;
@@ -4570,90 +4431,59 @@ struct mgsl_struct* mgsl_allocate_device()
 
 }	/* end of mgsl_allocate_device()*/
 
+static struct tty_operations mgsl_ops = {
+	.open = mgsl_open,
+	.close = mgsl_close,
+	.write = mgsl_write,
+	.put_char = mgsl_put_char,
+	.flush_chars = mgsl_flush_chars,
+	.write_room = mgsl_write_room,
+	.chars_in_buffer = mgsl_chars_in_buffer,
+	.flush_buffer = mgsl_flush_buffer,
+	.ioctl = mgsl_ioctl,
+	.throttle = mgsl_throttle,
+	.unthrottle = mgsl_unthrottle,
+	.send_xchar = mgsl_send_xchar,
+	.break_ctl = mgsl_break,
+	.wait_until_sent = mgsl_wait_until_sent,
+ 	.read_proc = mgsl_read_proc,
+	.set_termios = mgsl_set_termios,
+	.stop = mgsl_stop,
+	.start = mgsl_start,
+	.hangup = mgsl_hangup,
+	.tiocmget = tiocmget,
+	.tiocmset = tiocmset,
+};
+
 /*
  * perform tty device initialization
  */
 int mgsl_init_tty(void);
 int mgsl_init_tty()
 {
-	struct mgsl_struct *info;
-
-	memset(serial_table,0,sizeof(struct tty_struct*)*MAX_TOTAL_DEVICES);
-	memset(serial_termios,0,sizeof(struct termios*)*MAX_TOTAL_DEVICES);
-	memset(serial_termios_locked,0,sizeof(struct termios*)*MAX_TOTAL_DEVICES);
-
-	/* Initialize the tty_driver structure */
+	serial_driver = alloc_tty_driver(mgsl_device_count);
+	if (!serial_driver)
+		return -ENOMEM;
 	
-	memset(&serial_driver, 0, sizeof(struct tty_driver));
-	serial_driver.magic = TTY_DRIVER_MAGIC;
-	serial_driver.driver_name = "synclink";
-	serial_driver.name = "ttySL";
-	serial_driver.major = ttymajor;
-	serial_driver.minor_start = 64;
-	serial_driver.num = mgsl_device_count;
-	serial_driver.type = TTY_DRIVER_TYPE_SERIAL;
-	serial_driver.subtype = SERIAL_TYPE_NORMAL;
-	serial_driver.init_termios = tty_std_termios;
-	serial_driver.init_termios.c_cflag =
+	serial_driver->owner = THIS_MODULE;
+	serial_driver->driver_name = "synclink";
+	serial_driver->name = "ttySL";
+	serial_driver->major = ttymajor;
+	serial_driver->minor_start = 64;
+	serial_driver->type = TTY_DRIVER_TYPE_SERIAL;
+	serial_driver->subtype = SERIAL_TYPE_NORMAL;
+	serial_driver->init_termios = tty_std_termios;
+	serial_driver->init_termios.c_cflag =
 		B9600 | CS8 | CREAD | HUPCL | CLOCAL;
-	serial_driver.flags = TTY_DRIVER_REAL_RAW;
-	serial_driver.refcount = &serial_refcount;
-	serial_driver.table = serial_table;
-	serial_driver.termios = serial_termios;
-	serial_driver.termios_locked = serial_termios_locked;
-
-	serial_driver.open = mgsl_open;
-	serial_driver.close = mgsl_close;
-	serial_driver.write = mgsl_write;
-	serial_driver.put_char = mgsl_put_char;
-	serial_driver.flush_chars = mgsl_flush_chars;
-	serial_driver.write_room = mgsl_write_room;
-	serial_driver.chars_in_buffer = mgsl_chars_in_buffer;
-	serial_driver.flush_buffer = mgsl_flush_buffer;
-	serial_driver.ioctl = mgsl_ioctl;
-	serial_driver.throttle = mgsl_throttle;
-	serial_driver.unthrottle = mgsl_unthrottle;
-	serial_driver.send_xchar = mgsl_send_xchar;
-	serial_driver.break_ctl = mgsl_break;
-	serial_driver.wait_until_sent = mgsl_wait_until_sent;
- 	serial_driver.read_proc = mgsl_read_proc;
-	serial_driver.set_termios = mgsl_set_termios;
-	serial_driver.stop = mgsl_stop;
-	serial_driver.start = mgsl_start;
-	serial_driver.hangup = mgsl_hangup;
-	
-	/*
-	 * The callout device is just like normal device except for
-	 * major number and the subtype code.
-	 */
-	callout_driver = serial_driver;
-	callout_driver.name = "cuaSL";
-	callout_driver.major = cuamajor;
-	callout_driver.subtype = SERIAL_TYPE_CALLOUT;
-	callout_driver.read_proc = 0;
-	callout_driver.proc_entry = 0;
-
-	if (tty_register_driver(&serial_driver) < 0)
+	serial_driver->flags = TTY_DRIVER_REAL_RAW;
+	tty_set_operations(serial_driver, &mgsl_ops);
+	if (tty_register_driver(serial_driver) < 0)
 		printk("%s(%d):Couldn't register serial driver\n",
 			__FILE__,__LINE__);
 			
-	if (tty_register_driver(&callout_driver) < 0)
-		printk("%s(%d):Couldn't register callout driver\n",
-			__FILE__,__LINE__);
-
- 	printk("%s %s, tty major#%d callout major#%d\n",
+ 	printk("%s %s, tty major#%d\n",
 		driver_name, driver_version,
-		serial_driver.major, callout_driver.major);
-		
-	/* Propagate these values to all device instances */
-	
-	info = mgsl_device_list;
-	while(info){
-		info->callout_termios = callout_driver.init_termios;
-		info->normal_termios  = serial_driver.init_termios;
-		info = info->next_device;
-	}
-
+		serial_driver->major);
 	return 0;
 }
 
@@ -4682,7 +4512,7 @@ int mgsl_enum_isa_devices()
 		/* Copy user configuration info to device instance data */
 		info->io_base = (unsigned int)io[i];
 		info->irq_level = (unsigned int)irq[i];
-		info->irq_level = irq_cannonicalize(info->irq_level);
+		info->irq_level = irq_canonicalize(info->irq_level);
 		info->dma_level = (unsigned int)dma[i];
 		info->bus_type = MGSL_BUS_TYPE_ISA;
 		info->io_addr_size = 16;
@@ -4705,8 +4535,6 @@ int __init mgsl_init(void)
 {
 	int rc;
 
-	EXPORT_NO_SYMBOLS;
-	
  	printk("%s %s\n", driver_name, driver_version);
 	
 	mgsl_enum_isa_devices();
@@ -4738,22 +4566,17 @@ static int __init synclink_init(void)
 
 static void __exit synclink_exit(void) 
 {
-	unsigned long flags;
 	int rc;
 	struct mgsl_struct *info;
 	struct mgsl_struct *tmp;
 
 	printk("Unloading %s: %s\n", driver_name, driver_version);
-	save_flags(flags);
-	cli();
-	if ((rc = tty_unregister_driver(&serial_driver)))
+
+	if ((rc = tty_unregister_driver(serial_driver)))
 		printk("%s(%d) failed to unregister tty driver err=%d\n",
 		       __FILE__,__LINE__,rc);
-	if ((rc = tty_unregister_driver(&callout_driver)))
-		printk("%s(%d) failed to unregister callout driver err=%d\n",
-		       __FILE__,__LINE__,rc);
-	restore_flags(flags);
 
+	put_tty_driver(serial_driver);
 	info = mgsl_device_list;
 	while(info) {
 #ifdef CONFIG_SYNCLINK_SYNCPPP
@@ -5375,10 +5198,11 @@ void usc_set_sdlc_mode( struct mgsl_struct *info )
 	info->mbre_bit = BIT8;
 	outw( BIT8, info->io_base );			/* set Master Bus Enable (DCAR) */
 
-	/* Enable DMAEN (Port 7, Bit 14) */
-	/* This connects the DMA request signal to the ISA bus */
-	/* on the ISA adapter. This has no effect for the PCI adapter */
-	usc_OutReg( info, PCR, (u16)((usc_InReg(info, PCR) | BIT15) & ~BIT14) );
+	if (info->bus_type == MGSL_BUS_TYPE_ISA) {
+		/* Enable DMAEN (Port 7, Bit 14) */
+		/* This connects the DMA request signal to the ISA bus */
+		usc_OutReg(info, PCR, (u16)((usc_InReg(info, PCR) | BIT15) & ~BIT14));
+	}
 
 	/* DMA Control Register (DCR)
 	 *
@@ -6118,7 +5942,7 @@ void usc_reset( struct mgsl_struct *info )
 	/*
 	 * Program the Bus Configuration Register (BCR)
 	 *
-	 * <15>		0	Don't use seperate address
+	 * <15>		0	Don't use separate address
 	 * <14..6>	0	reserved
 	 * <5..4>	00	IAckmode = Default, don't care
 	 * <3>		1	Bus Request Totem Pole output
@@ -6355,10 +6179,11 @@ void usc_set_async_mode( struct mgsl_struct *info )
 
 	usc_EnableMasterIrqBit( info );
 
-	/* Enable INTEN (Port 6, Bit12) */
-	/* This connects the IRQ request signal to the ISA bus */
-	/* on the ISA adapter. This has no effect for the PCI adapter */
-	usc_OutReg( info, PCR, (u16)((usc_InReg(info, PCR) | BIT13) & ~BIT12) );
+	if (info->bus_type == MGSL_BUS_TYPE_ISA) {
+		/* Enable INTEN (Port 6, Bit12) */
+		/* This connects the IRQ request signal to the ISA bus */
+		usc_OutReg(info, PCR, (u16)((usc_InReg(info, PCR) | BIT13) & ~BIT12));
+	}
 
 }	/* end of usc_set_async_mode() */
 
@@ -6449,10 +6274,11 @@ void usc_set_sync_mode( struct mgsl_struct *info )
 	usc_loopback_frame( info );
 	usc_set_sdlc_mode( info );
 
-	/* Enable INTEN (Port 6, Bit12) */
-	/* This connects the IRQ request signal to the ISA bus */
-	/* on the ISA adapter. This has no effect for the PCI adapter */
-	usc_OutReg(info, PCR, (u16)((usc_InReg(info, PCR) | BIT13) & ~BIT12));
+	if (info->bus_type == MGSL_BUS_TYPE_ISA) {
+		/* Enable INTEN (Port 6, Bit12) */
+		/* This connects the IRQ request signal to the ISA bus */
+		usc_OutReg(info, PCR, (u16)((usc_InReg(info, PCR) | BIT13) & ~BIT12));
+	}
 
 	usc_enable_aux_clock(info, info->params.clock_speed);
 
@@ -7496,7 +7322,7 @@ BOOLEAN mgsl_dma_test( struct mgsl_struct *info )
 	EndTime = jiffies + jiffies_from_ms(100);
 
 	for(;;) {
-		if ( jiffies > EndTime ) {
+		if (time_after(jiffies, EndTime)) {
 			rc = FALSE;
 			break;
 		}
@@ -7552,7 +7378,7 @@ BOOLEAN mgsl_dma_test( struct mgsl_struct *info )
 	EndTime = jiffies + jiffies_from_ms(100);
 
 	for(;;) {
-		if ( jiffies > EndTime ) {
+		if (time_after(jiffies, EndTime)) {
 			rc = FALSE;
 			break;
 		}
@@ -7600,7 +7426,7 @@ BOOLEAN mgsl_dma_test( struct mgsl_struct *info )
 		spin_unlock_irqrestore(&info->irq_spinlock,flags);
 
 		while ( !(status & (BIT6+BIT5+BIT4+BIT2+BIT1)) ) {
-			if ( jiffies > EndTime ) {
+			if (time_after(jiffies, EndTime)) {
 				rc = FALSE;
 				break;
 			}
@@ -7627,8 +7453,7 @@ BOOLEAN mgsl_dma_test( struct mgsl_struct *info )
 		/* Wait for 16C32 to write receive status to buffer entry. */
 		status=info->rx_buffer_list[0].status;
 		while ( status == 0 ) {
-			if ( jiffies > EndTime ) {
-			printk(KERN_ERR"mark 4\n");
+			if (time_after(jiffies, EndTime)) {
 				rc = FALSE;
 				break;
 			}
@@ -7642,7 +7467,7 @@ BOOLEAN mgsl_dma_test( struct mgsl_struct *info )
 		status = info->rx_buffer_list[0].status;
 
 		if ( status & (BIT8 + BIT3 + BIT1) ) {
-			/* receive error has occured */
+			/* receive error has occurred */
 			rc = FALSE;
 		} else {
 			if ( memcmp( info->tx_buffer_list[0].virt_addr ,
@@ -7990,10 +7815,6 @@ void mgsl_sppp_init(struct mgsl_struct *info)
 	d->tx_timeout = mgsl_sppp_tx_timeout;
 	d->watchdog_timeo = 10*HZ;
 
-#if LINUX_VERSION_CODE < VERSION(2,4,4) 
-	dev_init_buffers(d);
-#endif
-
 	if (register_netdev(d) == -1) {
 		printk(KERN_WARNING "%s: register_netdev failed.\n", d->name);
 		sppp_detach(info->netdev);
@@ -8016,7 +7837,7 @@ int mgsl_sppp_open(struct net_device *d)
 {
 	struct mgsl_struct *info = d->priv;
 	int err;
-	long flags;
+	unsigned long flags;
 
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("mgsl_sppp_open(%s)\n",info->netname);	
@@ -8028,7 +7849,6 @@ int mgsl_sppp_open(struct net_device *d)
 		return -EBUSY;
 	}
 	info->netcount=1;
-	MOD_INC_USE_COUNT;
 	spin_unlock_irqrestore(&info->netlock, flags);
 
 	/* claim resources and init adapter */
@@ -8051,7 +7871,6 @@ int mgsl_sppp_open(struct net_device *d)
 open_fail:
 	spin_lock_irqsave(&info->netlock, flags);
 	info->netcount=0;
-	MOD_DEC_USE_COUNT;
 	spin_unlock_irqrestore(&info->netlock, flags);
 	return err;
 }
@@ -8059,7 +7878,7 @@ open_fail:
 void mgsl_sppp_tx_timeout(struct net_device *dev)
 {
 	struct mgsl_struct *info = dev->priv;
-	long flags;
+	unsigned long flags;
 
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("mgsl_sppp_tx_timeout(%s)\n",info->netname);	
@@ -8117,7 +7936,6 @@ int mgsl_sppp_close(struct net_device *d)
 
 	spin_lock_irqsave(&info->netlock, flags);
 	info->netcount=0;
-	MOD_DEC_USE_COUNT;
 	spin_unlock_irqrestore(&info->netlock, flags);
 	return 0;
 }
@@ -8128,7 +7946,7 @@ void mgsl_sppp_rx_done(struct mgsl_struct *info, char *buf, int size)
 	if (debug_level >= DEBUG_LEVEL_INFO)
 		printk("mgsl_sppp_rx_done(%s)\n",info->netname);	
 	if (skb == NULL) {
-		printk(KERN_NOTICE "%s: cant alloc skb, dropping packet\n",
+		printk(KERN_NOTICE "%s: can't alloc skb, dropping packet\n",
 			info->netname);
 		info->netstats.rx_dropped++;
 		return;
@@ -8202,24 +8020,27 @@ static int __init synclink_init_one (struct pci_dev *dev,
 	info->bus_type = MGSL_BUS_TYPE_PCI;
 	info->io_addr_size = 8;
 	info->irq_flags = SA_SHIRQ;
-		
-	/* Store the PCI9050 misc control register value because a flaw
-	 * in the PCI9050 prevents LCR registers from being read if 
-	 * BIOS assigns an LCR base address with bit 7 set.
-	 *  
-	 * Only the misc control register is accessed for which only 
-	 * write access is needed, so set an initial value and change 
-	 * bits to the device instance data as we write the value
-	 * to the actual misc control register.
-	 */
-	info->misc_ctrl_value = 0x087e4546;
+
+	if (dev->device == 0x0210) {
+		/* Version 1 PCI9030 based universal PCI adapter */
+		info->misc_ctrl_value = 0x007c4080;
+		info->hw_version = 1;
+	} else {
+		/* Version 0 PCI9050 based 5V PCI adapter
+		 * A PCI9050 bug prevents reading LCR registers if 
+		 * LCR base address bit 7 is set. Maintain shadow
+		 * value so we can write to LCR misc control reg.
+		 */
+		info->misc_ctrl_value = 0x087e4546;
+		info->hw_version = 0;
+	}
 				
 	mgsl_add_device(info);
 
 	return 0;
 }
 
-static void __exit synclink_remove_one (struct pci_dev *dev)
+static void __devexit synclink_remove_one (struct pci_dev *dev)
 {
 }
 

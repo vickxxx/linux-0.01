@@ -1,9 +1,9 @@
 /*
  * Architecture-specific setup.
  *
- * Copyright (C) 1998-2001 Hewlett-Packard Co
+ * Copyright (C) 1998-2001, 2003 Hewlett-Packard Co
  *	David Mosberger-Tang <davidm@hpl.hp.com>
- * Copyright (C) 1998, 1999, 2001 Stephane Eranian <eranian@hpl.hp.com>
+ *	Stephane Eranian <eranian@hpl.hp.com>
  * Copyright (C) 2000, Rohit Seth <rohit.seth@intel.com>
  * Copyright (C) 1999 VA Linux Systems
  * Copyright (C) 1999 Walt Drummond <drummond@valinux.com>
@@ -19,7 +19,9 @@
 #include <linux/config.h>
 #include <linux/init.h>
 
+#include <linux/acpi.h>
 #include <linux/bootmem.h>
+#include <linux/console.h>
 #include <linux/delay.h>
 #include <linux/kernel.h>
 #include <linux/reboot.h>
@@ -27,43 +29,55 @@
 #include <linux/seq_file.h>
 #include <linux/string.h>
 #include <linux/threads.h>
-#include <linux/console.h>
+#include <linux/tty.h>
+#include <linux/efi.h>
+#include <linux/initrd.h>
 
-#include <asm/acpi-ext.h>
 #include <asm/ia32.h>
-#include <asm/page.h>
 #include <asm/machvec.h>
+#include <asm/mca.h>
+#include <asm/page.h>
+#include <asm/patch.h>
+#include <asm/pgtable.h>
 #include <asm/processor.h>
 #include <asm/sal.h>
-#include <asm/system.h>
-#include <asm/efi.h>
-#include <asm/mca.h>
 #include <asm/smp.h>
-
-#ifdef CONFIG_BLK_DEV_RAM
-# include <linux/blk.h>
-#endif
+#include <asm/system.h>
+#include <asm/unistd.h>
 
 #if defined(CONFIG_SMP) && (IA64_CPU_SIZE > PAGE_SIZE)
 # error "struct cpuinfo_ia64 too big!"
 #endif
 
-#define MIN(a,b)	((a) < (b) ? (a) : (b))
-#define MAX(a,b)	((a) > (b) ? (a) : (b))
-
 extern char _end;
 
-#ifdef CONFIG_NUMA
- struct cpuinfo_ia64 *boot_cpu_data;
-#else
- struct cpuinfo_ia64 _cpu_data[NR_CPUS] __attribute__ ((section ("__special_page_section")));
+#ifdef CONFIG_SMP
+unsigned long __per_cpu_offset[NR_CPUS];
 #endif
 
+DEFINE_PER_CPU(struct cpuinfo_ia64, cpu_info);
+DEFINE_PER_CPU(unsigned long, ia64_phys_stacked_size_p8);
 unsigned long ia64_cycles_per_usec;
 struct ia64_boot_param *ia64_boot_param;
 struct screen_info screen_info;
 
+unsigned long ia64_max_cacheline_size;
 unsigned long ia64_iobase;	/* virtual address for I/O accesses */
+struct io_space io_space[MAX_IO_SPACES];
+unsigned int num_io_spaces;
+
+unsigned char aux_device_present = 0xaa;        /* XXX remove this when legacy I/O is gone */
+
+/*
+ * The merge_mask variable needs to be set to (max(iommu_page_size(iommu)) - 1).  This
+ * mask specifies a mask of address bits that must be 0 in order for two buffers to be
+ * mergeable by the I/O MMU (i.e., the end address of the first buffer and the start
+ * address of the second buffer must be aligned to (merge_mask+1) in order to be
+ * mergeable).  By default, we assume there is no I/O MMU which can merge physically
+ * discontiguous buffers, so we set the merge_mask to ~0UL, which corresponds to a iommu
+ * page-size of 2^64.
+ */
+unsigned long ia64_max_iommu_merge_mask = ~0UL;
 
 #define COMMAND_LINE_SIZE	512
 
@@ -92,35 +106,85 @@ struct rsvd_region {
 static struct rsvd_region rsvd_region[IA64_MAX_RSVD_REGIONS + 1];
 static int num_rsvd_regions;
 
+#define IGNORE_PFN0	1	/* XXX fix me: ignore pfn 0 until TLB miss handler is updated... */
+
+#ifndef CONFIG_DISCONTIGMEM
+
 static unsigned long bootmap_start; /* physical address where the bootmem map is located */
 
 static int
 find_max_pfn (unsigned long start, unsigned long end, void *arg)
 {
-	unsigned long *max_pfn = arg, pfn;
+	unsigned long *max_pfnp = arg, pfn;
 
 	pfn = (PAGE_ALIGN(end - 1) - PAGE_OFFSET) >> PAGE_SHIFT;
-	if (pfn > *max_pfn)
-		*max_pfn = pfn;
+	if (pfn > *max_pfnp)
+		*max_pfnp = pfn;
 	return 0;
 }
 
-#define IGNORE_PFN0	1	/* XXX fix me: ignore pfn 0 until TLB miss handler is updated... */
+#else /* CONFIG_DISCONTIGMEM */
 
 /*
- * Free available memory based on the primitive map created from
- * the boot parameters. This routine does not assume the incoming
- * segments are sorted.
+ * efi_memmap_walk() knows nothing about layout of memory across nodes. Find
+ * out to which node a block of memory belongs.  Ignore memory that we cannot
+ * identify, and split blocks that run across multiple nodes.
+ *
+ * Take this opportunity to round the start address up and the end address
+ * down to page boundaries.
  */
-static int
-free_available_memory (unsigned long start, unsigned long end, void *arg)
+void
+call_pernode_memory (unsigned long start, unsigned long end, void *arg)
+{
+	unsigned long rs, re;
+	void (*func)(unsigned long, unsigned long, int, int);
+	int i;
+
+	start = PAGE_ALIGN(start);
+	end &= PAGE_MASK;
+	if (start >= end)
+		return;
+
+	func = arg;
+
+	if (!num_memblks) {
+		/*
+		 * This machine doesn't have SRAT, so call func with
+		 * nid=0, bank=0.
+		 */
+		if (start < end)
+			(*func)(start, end - start, 0, 0);
+		return;
+	}
+
+	for (i = 0; i < num_memblks; i++) {
+		rs = max(start, node_memblk[i].start_paddr);
+		re = min(end, node_memblk[i].start_paddr+node_memblk[i].size);
+
+		if (rs < re)
+			(*func)(rs, re-rs, node_memblk[i].nid,
+				node_memblk[i].bank);
+	}
+}
+
+#endif /* CONFIG_DISCONTIGMEM */
+
+/*
+ * Filter incoming memory segments based on the primitive map created from the boot
+ * parameters. Segments contained in the map are removed from the memory ranges. A
+ * caller-specified function is called with the memory ranges that remain after filtering.
+ * This routine does not assume the incoming segments are sorted.
+ */
+int
+filter_rsvd_memory (unsigned long start, unsigned long end, void *arg)
 {
 	unsigned long range_start, range_end, prev_start;
+	void (*func)(unsigned long, unsigned long);
 	int i;
 
 #if IGNORE_PFN0
 	if (start == PAGE_OFFSET) {
-		printk("warning: skipping physical page 0\n");
+		printk(KERN_WARNING "warning: skipping physical page 0\n");
 		start += PAGE_SIZE;
 		if (start >= end) return 0;
 	}
@@ -129,13 +193,18 @@ free_available_memory (unsigned long start, unsigned long end, void *arg)
 	 * lowest possible address(walker uses virtual)
 	 */
 	prev_start = PAGE_OFFSET;
+	func = arg;
 
 	for (i = 0; i < num_rsvd_regions; ++i) {
-		range_start = MAX(start, prev_start);
-		range_end   = MIN(end, rsvd_region[i].start);
+		range_start = max(start, prev_start);
+		range_end   = min(end, rsvd_region[i].start);
 
 		if (range_start < range_end)
-			free_bootmem(__pa(range_start), range_end - range_start);
+#ifdef CONFIG_DISCONTIGMEM
+			call_pernode_memory(__pa(range_start), __pa(range_end), func);
+#else
+			(*func)(__pa(range_start), range_end - range_start);
+#endif
 
 		/* nothing more available in this segment */
 		if (range_end == end) return 0;
@@ -147,6 +216,11 @@ free_available_memory (unsigned long start, unsigned long end, void *arg)
 }
 
 
+#ifndef CONFIG_DISCONTIGMEM
+/*
+ * Find a place to put the bootmap and return its starting address in bootmap_start.
+ * This address must be page-aligned.
+ */
 static int
 find_bootmap_location (unsigned long start, unsigned long end, void *arg)
 {
@@ -164,8 +238,8 @@ find_bootmap_location (unsigned long start, unsigned long end, void *arg)
 	free_start = PAGE_OFFSET;
 
 	for (i = 0; i < num_rsvd_regions; i++) {
-		range_start = MAX(start, free_start);
-		range_end   = MIN(end, rsvd_region[i].start);
+		range_start = max(start, free_start);
+		range_end   = min(end, rsvd_region[i].start & PAGE_MASK);
 
 		if (range_end <= range_start) continue;	/* skip over empty range */
 
@@ -177,10 +251,11 @@ find_bootmap_location (unsigned long start, unsigned long end, void *arg)
 		/* nothing more available in this segment */
 		if (range_end == end) return 0;
 
-		free_start = rsvd_region[i].end;
+		free_start = PAGE_ALIGN(rsvd_region[i].end);
 	}
 	return 0;
 }
+#endif /* !CONFIG_DISCONTIGMEM */
 
 static void
 sort_regions (struct rsvd_region *rsvd_region, int max)
@@ -203,9 +278,8 @@ sort_regions (struct rsvd_region *rsvd_region, int max)
 static void
 find_memory (void)
 {
-#	define KERNEL_END	((unsigned long) &_end)
+#	define KERNEL_END	(&_end)
 	unsigned long bootmap_size;
-	unsigned long max_pfn;
 	int n = 0;
 
 	/*
@@ -224,8 +298,8 @@ find_memory (void)
 				+ strlen(__va(ia64_boot_param->command_line)) + 1);
 	n++;
 
-	rsvd_region[n].start = KERNEL_START;
-	rsvd_region[n].end   = KERNEL_END;
+	rsvd_region[n].start = (unsigned long) ia64_imva((void *)KERNEL_START);
+	rsvd_region[n].end   = (unsigned long) ia64_imva(KERNEL_END);
 	n++;
 
 #ifdef CONFIG_BLK_DEV_INITRD
@@ -245,6 +319,15 @@ find_memory (void)
 
 	sort_regions(rsvd_region, num_rsvd_regions);
 
+#ifdef CONFIG_DISCONTIGMEM
+	{
+		extern void discontig_mem_init (void);
+
+		bootmap_size = max_pfn = 0;	/* stop gcc warnings */
+		discontig_mem_init();
+	}
+#else /* !CONFIG_DISCONTIGMEM */
+
 	/* first find highest page frame number */
 	max_pfn = 0;
 	efi_memmap_walk(find_max_pfn, &max_pfn);
@@ -261,15 +344,16 @@ find_memory (void)
 	bootmap_size = init_bootmem(bootmap_start >> PAGE_SHIFT, max_pfn);
 
 	/* Free all available memory, then mark bootmem-map as being in use.  */
-	efi_memmap_walk(free_available_memory, 0);
+	efi_memmap_walk(filter_rsvd_memory, free_bootmem);
 	reserve_bootmem(bootmap_start, bootmap_size);
+#endif /* !CONFIG_DISCONTIGMEM */
 
 #ifdef CONFIG_BLK_DEV_INITRD
 	if (ia64_boot_param->initrd_start) {
 		initrd_start = (unsigned long)__va(ia64_boot_param->initrd_start);
 		initrd_end   = initrd_start+ia64_boot_param->initrd_size;
 
-		printk("Initial ramdisk at: 0x%lx (%lu bytes)\n",
+		printk(KERN_INFO "Initial ramdisk at: 0x%lx (%lu bytes)\n",
 		       initrd_start, ia64_boot_param->initrd_size);
 	}
 #endif
@@ -278,15 +362,30 @@ find_memory (void)
 void __init
 setup_arch (char **cmdline_p)
 {
+	extern unsigned long *__start___vtop_patchlist[], *__end____vtop_patchlist[];
 	extern unsigned long ia64_iobase;
+	unsigned long phys_iobase;
 
 	unw_init();
 
+	ia64_patch_vtop((u64) __start___vtop_patchlist, (u64) __end____vtop_patchlist);
+
 	*cmdline_p = __va(ia64_boot_param->command_line);
-	strncpy(saved_command_line, *cmdline_p, sizeof(saved_command_line));
-	saved_command_line[COMMAND_LINE_SIZE-1] = '\0';		/* for safety */
+	strlcpy(saved_command_line, *cmdline_p, sizeof(saved_command_line));
 
 	efi_init();
+
+#ifdef CONFIG_ACPI_BOOT
+	/* Initialize the ACPI boot-time table parser */
+	acpi_table_init();
+# ifdef CONFIG_ACPI_NUMA
+	acpi_numa_init();
+# endif
+#else
+# ifdef CONFIG_SMP
+	smp_build_cpu_map();	/* happens, e.g., with the Ski simulator */
+# endif
+#endif /* CONFIG_APCI_BOOT */
 
 	find_memory();
 
@@ -306,25 +405,34 @@ setup_arch (char **cmdline_p)
 	/* process SAL system table: */
 	ia64_sal_init(efi.sal_systab);
 
+#ifdef CONFIG_IA64_GENERIC
+	machvec_init(acpi_get_sysname());
+#endif
+
 	/*
-	 *  Set `iobase' to the appropriate address in region 6
-	 *    (uncached access range)
+	 *  Set `iobase' to the appropriate address in region 6 (uncached access range).
 	 *
-	 *  The EFI memory map is the "prefered" location to get the I/O port
-	 *  space base, rather the relying on AR.KR0. This should become more
-	 *  clear in future SAL specs. We'll fall back to getting it out of
-	 *  AR.KR0 if no appropriate entry is found in the memory map.
+	 *  The EFI memory map is the "preferred" location to get the I/O port space base,
+	 *  rather the relying on AR.KR0. This should become more clear in future SAL
+	 *  specs. We'll fall back to getting it out of AR.KR0 if no appropriate entry is
+	 *  found in the memory map.
 	 */
-	ia64_iobase = efi_get_iobase();
-	if (ia64_iobase)
+	phys_iobase = efi_get_iobase();
+	if (phys_iobase)
 		/* set AR.KR0 since this is all we use it for anyway */
-		ia64_set_kr(IA64_KR_IO_BASE, ia64_iobase);
+		ia64_set_kr(IA64_KR_IO_BASE, phys_iobase);
 	else {
-		ia64_iobase = ia64_get_kr(IA64_KR_IO_BASE);
-		printk("No I/O port range found in EFI memory map, falling back to AR.KR0\n");
-		printk("I/O port base = 0x%lx\n", ia64_iobase);
+		phys_iobase = ia64_get_kr(IA64_KR_IO_BASE);
+		printk(KERN_INFO "No I/O port range found in EFI memory map, falling back "
+		       "to AR.KR0\n");
+		printk(KERN_INFO "I/O port base = 0x%lx\n", phys_iobase);
 	}
-	ia64_iobase = __IA64_UNCACHED_OFFSET | (ia64_iobase & ~PAGE_OFFSET);
+	ia64_iobase = (unsigned long) ioremap(phys_iobase, 0);
+
+	/* setup legacy IO port space */
+	io_space[0].mmio_base = ia64_iobase;
+	io_space[0].sparse = 1;
+	num_io_spaces = 1;
 
 #ifdef CONFIG_SMP
 	cpu_physical_id(0) = hard_smp_processor_id();
@@ -332,23 +440,30 @@ setup_arch (char **cmdline_p)
 
 	cpu_init();	/* initialize the bootstrap CPU */
 
-#ifdef CONFIG_IA64_GENERIC
-	machvec_init(acpi_get_sysname());
+#ifdef CONFIG_ACPI_BOOT
+	acpi_boot_init();
 #endif
+#ifdef CONFIG_SERIAL_8250_HCDP
+	if (efi.hcdp) {
+		void setup_serial_hcdp(void *);
 
-	if (efi.acpi20) {
-		/* Parse the ACPI 2.0 tables */
-		acpi20_parse(efi.acpi20);
-	} else if (efi.acpi) {
-		/* Parse the ACPI tables */
-		acpi_parse(efi.acpi);
+		/* Setup the serial ports described by HCDP */
+		setup_serial_hcdp(efi.hcdp);
 	}
-
+#endif
 #ifdef CONFIG_VT
-# if defined(CONFIG_VGA_CONSOLE)
-	conswitchp = &vga_con;
-# elif defined(CONFIG_DUMMY_CONSOLE)
+# if defined(CONFIG_DUMMY_CONSOLE)
 	conswitchp = &dummy_con;
+# endif
+# if defined(CONFIG_VGA_CONSOLE)
+	/*
+	 * Non-legacy systems may route legacy VGA MMIO range to system
+	 * memory.  vga_con probes the MMIO hole, so memory looks like
+	 * a VGA device to it.  The EFI memory map can tell us if it's
+	 * memory so we can avoid this problem.
+	 */
+	if (efi_mem_type(0xA0000) != EFI_CONVENTIONAL_MEMORY)
+		conswitchp = &vga_con;
 # endif
 #endif
 
@@ -359,8 +474,6 @@ setup_arch (char **cmdline_p)
 
 	platform_setup(cmdline_p);
 	paging_init();
-
-	unw_create_gate_table();
 }
 
 /*
@@ -371,39 +484,56 @@ show_cpuinfo (struct seq_file *m, void *v)
 {
 #ifdef CONFIG_SMP
 #	define lpj	c->loops_per_jiffy
+#	define cpunum	c->cpu
 #else
 #	define lpj	loops_per_jiffy
+#	define cpunum	0
 #endif
-	char family[32], features[128], *cp;
+	static struct {
+		unsigned long mask;
+		const char *feature_name;
+	} feature_bits[] = {
+		{ 1UL << 0, "branchlong" },
+		{ 1UL << 1, "spontaneous deferral"},
+		{ 1UL << 2, "16-byte atomic ops" }
+	};
+	char family[32], features[128], *cp, sep;
 	struct cpuinfo_ia64 *c = v;
-	unsigned long mask, cpu = c - cpu_data(0);
-
-#ifdef CONFIG_SMP
-	if (!(cpu_online_map & (1 << cpu)))
-		return 0;
-#endif
+	unsigned long mask;
+	int i;
 
 	mask = c->features;
 
 	switch (c->family) {
 	      case 0x07:	memcpy(family, "Itanium", 8); break;
-	      case 0x1f:	memcpy(family, "McKinley", 9); break;
+	      case 0x1f:	memcpy(family, "Itanium 2", 10); break;
 	      default:		sprintf(family, "%u", c->family); break;
 	}
 
 	/* build the feature string: */
 	memcpy(features, " standard", 10);
 	cp = features;
-	if (mask & 1) {
-		strcpy(cp, " branchlong");
-		cp = strchr(cp, '\0');
-		mask &= ~1UL;
+	sep = 0;
+	for (i = 0; i < (int) ARRAY_SIZE(feature_bits); ++i) {
+		if (mask & feature_bits[i].mask) {
+			if (sep)
+				*cp++ = sep;
+			sep = ',';
+			*cp++ = ' ';
+			strcpy(cp, feature_bits[i].feature_name);
+			cp += strlen(feature_bits[i].feature_name);
+			mask &= ~feature_bits[i].mask;
+		}
 	}
-	if (mask)
+	if (mask) {
+		/* print unknown features as a hex value: */
+		if (sep)
+			*cp++ = sep;
 		sprintf(cp, " 0x%lx", mask);
+	}
 
 	seq_printf(m,
-		   "processor  : %lu\n"
+		   "processor  : %d\n"
 		   "vendor     : %s\n"
 		   "arch       : IA-64\n"
 		   "family     : %s\n"
@@ -416,7 +546,7 @@ show_cpuinfo (struct seq_file *m, void *v)
 		   "cpu MHz    : %lu.%06lu\n"
 		   "itc MHz    : %lu.%06lu\n"
 		   "BogoMIPS   : %lu.%02lu\n\n",
-		   cpu, c->vendor, family, c->model, c->revision, c->archrev,
+		   cpunum, c->vendor, family, c->model, c->revision, c->archrev,
 		   features, c->ppn, c->number,
 		   c->proc_freq / 1000000, c->proc_freq % 1000000,
 		   c->itc_freq / 1000000, c->itc_freq % 1000000,
@@ -427,6 +557,10 @@ show_cpuinfo (struct seq_file *m, void *v)
 static void *
 c_start (struct seq_file *m, loff_t *pos)
 {
+#ifdef CONFIG_SMP
+	while (*pos < NR_CPUS && !(cpu_online_map & (1UL << *pos)))
+		++*pos;
+#endif
 	return *pos < NR_CPUS ? cpu_data(*pos) : NULL;
 }
 
@@ -443,10 +577,10 @@ c_stop (struct seq_file *m, void *v)
 }
 
 struct seq_operations cpuinfo_op = {
-	start:	c_start,
-	next:	c_next,
-	stop:	c_stop,
-	show:	show_cpuinfo
+	.start =	c_start,
+	.next =		c_next,
+	.stop =		c_stop,
+	.show =		show_cpuinfo
 };
 
 void
@@ -483,6 +617,9 @@ identify_cpu (struct cpuinfo_ia64 *c)
 		cpuid.bits[i] = ia64_get_cpuid(i);
 
 	memcpy(c->vendor, cpuid.field.vendor, 16);
+#ifdef CONFIG_SMP
+	c->cpu = smp_processor_id();
+#endif
 	c->ppn = cpuid.field.ppn;
 	c->number = cpuid.field.number;
 	c->revision = cpuid.field.revision;
@@ -496,10 +633,50 @@ identify_cpu (struct cpuinfo_ia64 *c)
 		impl_va_msb = vm2.pal_vm_info_2_s.impl_va_msb;
 		phys_addr_size = vm1.pal_vm_info_1_s.phys_add_size;
 	}
-	printk("CPU %d: %lu virtual and %lu physical address bits\n",
+	printk(KERN_INFO "CPU %d: %lu virtual and %lu physical address bits\n",
 	       smp_processor_id(), impl_va_msb + 1, phys_addr_size);
 	c->unimpl_va_mask = ~((7L<<61) | ((1L << (impl_va_msb + 1)) - 1));
 	c->unimpl_pa_mask = ~((1L<<63) | ((1L << phys_addr_size) - 1));
+}
+
+void
+setup_per_cpu_areas (void)
+{
+	/* start_kernel() requires this... */
+}
+
+static void
+get_max_cacheline_size (void)
+{
+	unsigned long line_size, max = 1;
+	u64 l, levels, unique_caches;
+        pal_cache_config_info_t cci;
+        s64 status;
+
+        status = ia64_pal_cache_summary(&levels, &unique_caches);
+        if (status != 0) {
+                printk(KERN_ERR "%s: ia64_pal_cache_summary() failed (status=%ld)\n",
+                       __FUNCTION__, status);
+                max = SMP_CACHE_BYTES;
+		goto out;
+        }
+
+	for (l = 0; l < levels; ++l) {
+		status = ia64_pal_cache_config_info(l, /* cache_type (data_or_unified)= */ 2,
+						    &cci);
+		if (status != 0) {
+			printk(KERN_ERR
+			       "%s: ia64_pal_cache_config_info(l=%lu) failed (status=%ld)\n",
+			       __FUNCTION__, l, status);
+			max = SMP_CACHE_BYTES;
+		}
+		line_size = 1 << cci.pcci_line_size;
+		if (line_size > max)
+			max = line_size;
+        }
+  out:
+	if (max > ia64_max_cacheline_size)
+		ia64_max_cacheline_size = max;
 }
 
 /*
@@ -509,46 +686,42 @@ identify_cpu (struct cpuinfo_ia64 *c)
 void
 cpu_init (void)
 {
+	extern char __per_cpu_start[], __phys_per_cpu_start[];
 	extern void __init ia64_mmu_init (void *);
 	unsigned long num_phys_stacked;
 	pal_vm_info_2_u_t vmi;
 	unsigned int max_ctx;
-	struct cpuinfo_ia64 *my_cpu_data;
-#ifdef CONFIG_NUMA
-	int cpu, order;
+	struct cpuinfo_ia64 *cpu_info;
+	void *cpu_data;
+
+#ifdef CONFIG_SMP
+	extern char __per_cpu_end[];
+	int cpu;
 
 	/*
-	 * If NUMA is configured, the cpu_data array is not preallocated. The boot cpu
-	 * allocates entries for every possible cpu. As the remaining cpus come online,
-	 * they reallocate a new cpu_data structure on their local node. This extra work
-	 * is required because some boot code references all cpu_data structures
-	 * before the cpus are actually started.
+	 * get_free_pages() cannot be used before cpu_init() done.  BSP allocates
+	 * "NR_CPUS" pages for all CPUs to avoid that AP calls get_zeroed_page().
 	 */
-	if (!boot_cpu_data) {
-		my_cpu_data = alloc_bootmem_pages_node(NODE_DATA(numa_node_id()),
-						       sizeof(struct cpuinfo_ia64));
-		boot_cpu_data = my_cpu_data;
-		my_cpu_data->cpu_data[0] = my_cpu_data;
-		for (cpu = 1; cpu < NR_CPUS; ++cpu)
-			my_cpu_data->cpu_data[cpu]
-				= alloc_bootmem_pages_node(NODE_DATA(numa_node_id()),
-							   sizeof(struct cpuinfo_ia64));
-		for (cpu = 1; cpu < NR_CPUS; ++cpu)
-			memcpy(my_cpu_data->cpu_data[cpu]->cpu_data_ptrs,
-			       my_cpu_data->cpu_data, sizeof(my_cpu_data->cpu_data));
-	} else {
-		order = get_order(sizeof(struct cpuinfo_ia64));
-		my_cpu_data = page_address(alloc_pages_node(numa_node_id(), GFP_KERNEL, order));
-		memcpy(my_cpu_data, boot_cpu_data->cpu_data[smp_processor_id()],
-		       sizeof(struct cpuinfo_ia64));
-		__free_pages(virt_to_page(boot_cpu_data->cpu_data[smp_processor_id()]),
-			     order);
-		for (cpu = 0; cpu < NR_CPUS; ++cpu)
-			boot_cpu_data->cpu_data[cpu]->cpu_data[smp_processor_id()] = my_cpu_data;
+	if (smp_processor_id() == 0) {
+		cpu_data = __alloc_bootmem(PERCPU_PAGE_SIZE * NR_CPUS, PERCPU_PAGE_SIZE,
+					   __pa(MAX_DMA_ADDRESS));
+		for (cpu = 0; cpu < NR_CPUS; cpu++) {
+			memcpy(cpu_data, __phys_per_cpu_start, __per_cpu_end - __per_cpu_start);
+			__per_cpu_offset[cpu] = (char *) cpu_data - __per_cpu_start;
+			cpu_data += PERCPU_PAGE_SIZE;
+		}
 	}
-#else
-	my_cpu_data = cpu_data(smp_processor_id());
+	cpu_data = __per_cpu_start + __per_cpu_offset[smp_processor_id()];
+#else /* !CONFIG_SMP */
+	cpu_data = __phys_per_cpu_start;
+#endif /* !CONFIG_SMP */
+
+	cpu_info = cpu_data + ((char *) &__get_cpu_var(cpu_info) - __per_cpu_start);
+#ifdef CONFIG_NUMA
+	cpu_info->node_data = get_node_data_ptr();
 #endif
+
+	get_max_cacheline_size();
 
 	/*
 	 * We can't pass "local_cpu_data" to identify_cpu() because we haven't called
@@ -556,10 +729,26 @@ cpu_init (void)
 	 * depends on the data returned by identify_cpu().  We break the dependency by
 	 * accessing cpu_data() the old way, through identity mapped space.
 	 */
-	identify_cpu(my_cpu_data);
+	identify_cpu(cpu_info);
+
+#ifdef CONFIG_MCKINLEY
+	{
+#		define FEATURE_SET 16
+		struct ia64_pal_retval iprv;
+
+		if (cpu_info->family == 0x1f) {
+			PAL_CALL_PHYS(iprv, PAL_PROC_GET_FEATURES, 0, FEATURE_SET, 0);
+			if ((iprv.status == 0) && (iprv.v0 & 0x80) && (iprv.v2 & 0x80))
+				PAL_CALL_PHYS(iprv, PAL_PROC_SET_FEATURES,
+				              (iprv.v1 | 0x80), FEATURE_SET, 0);
+		}
+	}
+#endif
 
 	/* Clear the stack memory reserved for pt_regs: */
 	memset(ia64_task_regs(current), 0, sizeof(struct pt_regs));
+
+	ia64_set_kr(IA64_KR_FPU_OWNER, 0);
 
 	/*
 	 * Initialize default control register to defer all speculative faults.  The
@@ -569,20 +758,17 @@ cpu_init (void)
 	 * shouldn't be affected by this (moral: keep your ia32 locks aligned and you'll
 	 * be fine).
 	 */
-	ia64_set_dcr(  IA64_DCR_DM | IA64_DCR_DP | IA64_DCR_DK | IA64_DCR_DX | IA64_DCR_DR
+	ia64_set_dcr(  IA64_DCR_DP | IA64_DCR_DK | IA64_DCR_DX | IA64_DCR_DR
 		     | IA64_DCR_DA | IA64_DCR_DD | IA64_DCR_LC);
-#ifndef CONFIG_SMP
-	ia64_set_fpu_owner(0);
-#endif
-
 	atomic_inc(&init_mm.mm_count);
 	current->active_mm = &init_mm;
+	if (current->mm)
+		BUG();
 
-	ia64_mmu_init(my_cpu_data);
+	ia64_mmu_init(ia64_imva(cpu_data));
 
 #ifdef CONFIG_IA32_SUPPORT
-	/* initialize global ia32 state - CR0 and CR4 */
-	asm volatile ("mov ar.cflg = %0" :: "r" (((ulong) IA32_CR4 << 32) | IA32_CR0));
+	ia32_cpu_init();
 #endif
 
 	/* disable all local interrupt sources: */
@@ -602,7 +788,7 @@ cpu_init (void)
 	if (ia64_pal_vm_summary(NULL, &vmi) == 0)
 		max_ctx = (1U << (vmi.pal_vm_info_2_s.rid_size - 3)) - 1;
 	else {
-		printk("cpu_init: PAL VM summary failed, assuming 18 RID bits\n");
+		printk(KERN_WARNING "cpu_init: PAL VM summary failed, assuming 18 RID bits\n");
 		max_ctx = (1U << 15) - 1;	/* use architected minimum */
 	}
 	while (max_ctx < ia64_ctx.max_ctx) {
@@ -612,8 +798,21 @@ cpu_init (void)
 	}
 
 	if (ia64_pal_rse_info(&num_phys_stacked, 0) != 0) {
-		printk ("cpu_init: PAL RSE info failed, assuming 96 physical stacked regs\n");
+		printk(KERN_WARNING "cpu_init: PAL RSE info failed; assuming 96 physical "
+		       "stacked regs\n");
 		num_phys_stacked = 96;
 	}
-	local_cpu_data->phys_stacked_size_p8 = num_phys_stacked*8 + 8;
+	/* size of physical stacked register partition plus 8 bytes: */
+	__get_cpu_var(ia64_phys_stacked_size_p8) = num_phys_stacked*8 + 8;
+	platform_cpu_init();
+}
+
+void
+check_bugs (void)
+{
+	extern char __start___mckinley_e9_bundles[];
+	extern char __end___mckinley_e9_bundles[];
+
+	ia64_patch_mckinley_e9((unsigned long) __start___mckinley_e9_bundles,
+			       (unsigned long) __end___mckinley_e9_bundles);
 }

@@ -1,4 +1,4 @@
-/* $Id: unistd.h,v 1.72 2001/10/18 08:27:05 davem Exp $ */
+/* $Id: unistd.h,v 1.74 2002/02/08 03:57:18 davem Exp $ */
 #ifndef _SPARC_UNISTD_H
 #define _SPARC_UNISTD_H
 
@@ -16,6 +16,7 @@
  * Copyright (C) 1995 Adrian M. Rodriguez (adrian@remus.rutgers.edu)
  */
 
+#define __NR_restart_syscall      0 /* Linux Specific				   */
 #define __NR_exit                 1 /* Common                                      */
 #define __NR_fork                 2 /* Common                                      */
 #define __NR_read                 3 /* Common                                      */
@@ -82,8 +83,8 @@
 #define __NR_getpagesize         64 /* Common                                      */
 #define __NR_msync               65 /* Common in newer 1.3.x revs...               */
 #define __NR_vfork               66 /* Common                                      */
-#define __NR_pread               67 /* Linux Specific                              */
-#define __NR_pwrite              68 /* Linux Specific                              */
+#define __NR_pread64             67 /* Linux Specific                              */
+#define __NR_pwrite64            68 /* Linux Specific                              */
 #define __NR_geteuid32           69 /* Linux sparc32, sbrk under SunOS             */
 #define __NR_getegid32           70 /* Linux sparc32, sstk under SunOS             */
 #define __NR_mmap                71 /* Common                                      */
@@ -155,9 +156,9 @@
 #define __NR_rmdir              137 /* Common                                      */
 #define __NR_utimes             138 /* SunOS Specific                              */
 #define __NR_stat64		139 /* Linux sparc32 Specific			   */
-/* #define __NR_adjtime         140    SunOS Specific                              */
+#define __NR_sendfile64         140 /* adjtime under SunOS                         */
 #define __NR_getpeername        141 /* Common                                      */
-/* #define __NR_gethostid       142    SunOS Specific                              */
+#define __NR_futex              142 /* gethostid under SunOS                       */
 #define __NR_gettid             143 /* ENOSYS under SunOS                          */
 #define __NR_getrlimit          144 /* Common                                      */
 #define __NR_setrlimit          145 /* Common                                      */
@@ -171,46 +172,46 @@
 #define __NR_poll               153 /* Common                                      */
 #define __NR_getdents64		154 /* Linux specific				   */
 #define __NR_fcntl64		155 /* Linux sparc32 Specific                      */
-/* #define __NR_getdirentries   156    SunOS Specific                              */
+/* #define __NR_getdirentires 	156    SunOS Specific                              */
 #define __NR_statfs             157 /* Common                                      */
 #define __NR_fstatfs            158 /* Common                                      */
 #define __NR_umount             159 /* Common                                      */
-/* #define __NR_async_daemon    160    SunOS Specific                              */
-/* #define __NR_getfh           161    SunOS Specific                              */
+#define __NR_sched_set_affinity 160 /* Linux specific, async_daemon under SunOS    */
+#define __NR_sched_get_affinity 161 /* Linux specific, getfh under SunOS           */
 #define __NR_getdomainname      162 /* SunOS Specific                              */
 #define __NR_setdomainname      163 /* Common                                      */
 /* #define __NR_ni_syscall	164    ENOSYS under SunOS			   */
 #define __NR_quotactl           165 /* Common                                      */
-/* #define __NR_exportfs        166    SunOS Specific                              */
+#define __NR_set_tid_address    166 /* Linux specific, exportfs under SunOS        */
 #define __NR_mount              167 /* Common                                      */
 #define __NR_ustat              168 /* Common                                      */
-/* #define __NR_semsys          169    SunOS Specific                              */
-/* #define __NR_msgsys          170    SunOS Specific                              */
-/* #define __NR_shmsys          171    SunOS Specific                              */
-/* #define __NR_auditsys        172    SunOS Specific                              */
-/* #define __NR_rfssys          173    SunOS Specific                              */
+#define __NR_setxattr           169 /* SunOS: semsys                               */
+#define __NR_lsetxattr          170 /* SunOS: msgsys                               */
+#define __NR_fsetxattr          171 /* SunOS: shmsys                               */
+#define __NR_getxattr           172 /* SunOS: auditsys                             */
+#define __NR_lgetxattr          173 /* SunOS: rfssys                               */
 #define __NR_getdents           174 /* Common                                      */
 #define __NR_setsid             175 /* Common                                      */
 #define __NR_fchdir             176 /* Common                                      */
-/* #define __NR_fchroot         177    SunOS Specific                              */
-/* #define __NR_vpixsys         178    SunOS Specific                              */
-/* #define __NR_aioread         179    SunOS Specific                              */
-/* #define __NR_aiowrite        180    SunOS Specific                              */
-/* #define __NR_aiowait         181    SunOS Specific                              */
-/* #define __NR_aiocancel       182    SunOS Specific                              */
+#define __NR_fgetxattr          177 /* SunOS: fchroot                              */
+#define __NR_listxattr          178 /* SunOS: vpixsys                              */
+#define __NR_llistxattr         179 /* SunOS: aioread                              */
+#define __NR_flistxattr         180 /* SunOS: aiowrite                             */
+#define __NR_removexattr        181 /* SunOS: aiowait                              */
+#define __NR_lremovexattr       182 /* SunOS: aiocancel                            */
 #define __NR_sigpending         183 /* Common                                      */
 #define __NR_query_module	184 /* Linux Specific				   */
 #define __NR_setpgid            185 /* Common                                      */
-/* #define __NR_pathconf        186    SunOS Specific                              */
-/* #define __NR_fpathconf       187    SunOS Specific                              */
-/* #define __NR_sysconf         188    SunOS Specific                              */
+#define __NR_fremovexattr       186 /* SunOS: pathconf                             */
+#define __NR_tkill              187 /* SunOS: fpathconf                            */
+#define __NR_exit_group		188 /* Linux specific, sysconf undef SunOS         */
 #define __NR_uname              189 /* Linux Specific                              */
 #define __NR_init_module        190 /* Linux Specific                              */
 #define __NR_personality        191 /* Linux Specific                              */
-/* #define __NR_prof            192    Linux Specific                              */
-/* #define __NR_break           193    Linux Specific                              */
-/* #define __NR_lock            194    Linux Specific                              */
-/* #define __NR_mpx             195    Linux Specific                              */
+#define __NR_remap_file_pages   192 /* Linux Specific                              */
+#define __NR_epoll_create       193 /* Linux Specific                              */
+#define __NR_epoll_ctl          194 /* Linux Specific                              */
+#define __NR_epoll_wait         195 /* Linux Specific                              */
 /* #define __NR_ulimit          196    Linux Specific                              */
 #define __NR_getppid            197 /* Linux Specific                              */
 #define __NR_sigaction          198 /* Linux Specific                              */
@@ -223,7 +224,7 @@
 #define __NR_readahead          205 /* Linux Specific                              */
 #define __NR_socketcall         206 /* Linux Specific                              */
 #define __NR_syslog             207 /* Linux Specific                              */
-/* #define __NR_olduname        208    Linux Specific                              */
+#define __NR_lookup_dcookie     208 /* Linux Specific                              */
 /* #define __NR_iopl            209    Linux Specific - i386 specific, unused      */
 /* #define __NR_idle            210    Linux Specific - was sys_idle, now unused   */
 /* #define __NR_vm86            211    Linux Specific - i386 specific, unused      */
@@ -249,8 +250,8 @@
 #define __NR_time               231 /* Linux Specific                              */
 /* #define __NR_oldstat         232    Linux Specific                              */
 #define __NR_stime              233 /* Linux Specific                              */
-/* #define __NR_oldfstat        234    Linux Specific                              */
-/* #define __NR_phys            235    Linux Specific                              */
+#define __NR_statfs64           234 /* Linux Specific                              */
+#define __NR_fstatfs64          235 /* Linux Specific                              */
 #define __NR__llseek            236 /* Linux Specific                              */
 #define __NR_mlock              237
 #define __NR_munlock            238
@@ -271,6 +272,11 @@
 #define __NR_fdatasync          253
 #define __NR_nfsservctl         254
 #define __NR_aplib              255
+/* WARNING: You MAY NOT add syscall numbers larger than 255, since
+ *          all of the syscall tables in the Sparc kernel are
+ *          sized to have 256 entries (starting at zero).  Therefore
+ *          find a free slot in the 0-255 range.
+ */
 
 #define _syscall0(type,name) \
 type name(void) \
@@ -416,8 +422,6 @@ return -1; \
  * some others too.
  */
 #define __NR__exit __NR_exit
-static __inline__ _syscall0(int,pause)
-static __inline__ _syscall0(int,sync)
 static __inline__ _syscall0(pid_t,setsid)
 static __inline__ _syscall3(int,write,int,fd,__const__ char *,buf,off_t,count)
 static __inline__ _syscall3(int,read,int,fd,char *,buf,off_t,count)
@@ -428,13 +432,15 @@ static __inline__ _syscall3(int,open,__const__ char *,file,int,flag,int,mode)
 static __inline__ _syscall1(int,close,int,fd)
 static __inline__ _syscall1(int,_exit,int,exitcode)
 static __inline__ _syscall3(pid_t,waitpid,pid_t,pid,int *,wait_stat,int,options)
-static __inline__ _syscall1(int,delete_module,const char *,name)
-
-static __inline__ pid_t wait(int * wait_stat)
-{
-	return waitpid(-1,wait_stat,0);
-}
 
 #endif /* __KERNEL_SYSCALLS__ */
+
+/*
+ * "Conditional" syscalls
+ *
+ * What we want is __attribute__((weak,alias("sys_ni_syscall"))),
+ * but it doesn't work on all toolchains, so we just do it by hand
+ */
+#define cond_syscall(x) asm(".weak\t" #x "\n\t.set\t" #x ",sys_ni_syscall");
 
 #endif /* _SPARC_UNISTD_H */

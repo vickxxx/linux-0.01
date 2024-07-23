@@ -1,5 +1,5 @@
 /* SCTP kernel reference Implementation
- * (C) Copyright IBM Corp. 2002, 2004
+ * Copyright (c) 2002 International Business Machines Corp.
  * Copyright (c) 2002 Intel Corp.
  *
  * This file is part of the SCTP kernel reference Implementation
@@ -35,7 +35,6 @@
  *    Jon Grimm             <jgrimm@us.ibm.com>
  *    Ardelle Fan           <ardelle.fan@intel.com>
  *    Ryan Layer            <rmlayer@us.ibm.com>
- *    Sridhar Samudrala     <sri@us.ibm.com>
  *
  * Any bugs reported given to us we will try to fix... any fixes shared will
  * be incorporated into the next SCTP release.
@@ -45,7 +44,7 @@
 #include <linux/sysctl.h>
 
 static ctl_handler sctp_sysctl_jiffies_ms;
-static long rto_timer_min = 1;
+static long rto_timer_min = 0;
 static long rto_timer_max = 86400000; /* One day */
 
 static ctl_table sctp_table[] = {
@@ -163,22 +162,6 @@ static ctl_table sctp_table[] = {
 		.mode		= 0644,
 		.proc_handler	= &proc_dointvec
 	},
-	{
-		.ctl_name	= NET_SCTP_ADDIP_ENABLE,
-		.procname	= "addip_enable",
-		.data		= &sctp_addip_enable,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
-	},
-	{
-		.ctl_name	= NET_SCTP_PRSCTP_ENABLE,
-		.procname	= "prsctp_enable",
-		.data		= &sctp_prsctp_enable,
-		.maxlen		= sizeof(int),
-		.mode		= 0644,
-		.proc_handler	= &proc_dointvec
-	},
 	{ .ctl_name = 0 }
 };
 
@@ -217,10 +200,10 @@ void sctp_sysctl_unregister(void)
 }
 
 /* Strategy function to convert jiffies to milliseconds.  */
-static int sctp_sysctl_jiffies_ms(ctl_table *table, int *name, int nlen,
-				  void *oldval, size_t *oldlenp,
-				  void *newval, size_t newlen, void **context)
-{
+static int sctp_sysctl_jiffies_ms(ctl_table *table, int __user *name, int nlen,
+		void __user *oldval, size_t __user *oldlenp,
+		void __user *newval, size_t newlen, void **context) {
+
 	if (oldval) {
 		size_t olen;
 
@@ -231,7 +214,7 @@ static int sctp_sysctl_jiffies_ms(ctl_table *table, int *name, int nlen,
 			if (olen != sizeof (int))
 				return -EINVAL;
 		}
-		if (put_user((*(int *)(table->data) * 1000) / HZ,
+		if (put_user((*(int *)(table->data) / HZ) * 1000,
 			(int *)oldval) ||
 		    (oldlenp && put_user(sizeof (int), oldlenp)))
 			return -EFAULT;
@@ -245,7 +228,7 @@ static int sctp_sysctl_jiffies_ms(ctl_table *table, int *name, int nlen,
 		if (get_user(new, (int *)newval))
 			return -EFAULT;
 
-		*(int *)(table->data) = (new * HZ) / 1000;
+		*(int *)(table->data) = (new * HZ) * 1000;
 	}
 	return 1;
 }

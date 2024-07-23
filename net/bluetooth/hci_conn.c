@@ -25,7 +25,7 @@
 /*
  * HCI Connection handling.
  *
- * $Id: hci_conn.c,v 1.5 2002/07/17 18:46:25 maxk Exp $
+ * $Id: hci_conn.c,v 1.2 2002/04/17 17:37:16 maxk Exp $
  */
 
 #include <linux/config.h>
@@ -52,7 +52,7 @@
 #include <net/bluetooth/bluetooth.h>
 #include <net/bluetooth/hci_core.h>
 
-#ifndef HCI_CORE_DEBUG
+#ifndef CONFIG_BT_HCI_CORE_DEBUG
 #undef  BT_DBG
 #define BT_DBG( A... )
 #endif
@@ -61,7 +61,7 @@ void hci_acl_connect(struct hci_conn *conn)
 {
 	struct hci_dev *hdev = conn->hdev;
 	struct inquiry_entry *ie;
-	create_conn_cp cp;
+	struct hci_cp_create_conn cp;
 
 	BT_DBG("%p", conn);
 
@@ -71,7 +71,7 @@ void hci_acl_connect(struct hci_conn *conn)
 
 	memset(&cp, 0, sizeof(cp));
 	bacpy(&cp.bdaddr, &conn->dst);
-	cp.pscan_rep_mode = 0x02;
+	cp.pscan_rep_mode = 0x01;
 
 	if ((ie = inquiry_cache_lookup(hdev, &conn->dst)) &&
 			inquiry_entry_age(ie) <= INQUIRY_ENTRY_AGE_MAX) {
@@ -86,13 +86,12 @@ void hci_acl_connect(struct hci_conn *conn)
 	else
 		cp.role_switch	= 0x00;
 		
-	hci_send_cmd(hdev, OGF_LINK_CTL, OCF_CREATE_CONN,
-				CREATE_CONN_CP_SIZE, &cp);
+	hci_send_cmd(hdev, OGF_LINK_CTL, OCF_CREATE_CONN, sizeof(cp), &cp);
 }
 
 void hci_acl_disconn(struct hci_conn *conn, __u8 reason)
 {
-	disconnect_cp cp;
+	struct hci_cp_disconnect cp;
 
 	BT_DBG("%p", conn);
 
@@ -100,14 +99,13 @@ void hci_acl_disconn(struct hci_conn *conn, __u8 reason)
 
 	cp.handle = __cpu_to_le16(conn->handle);
 	cp.reason = reason;
-	hci_send_cmd(conn->hdev, OGF_LINK_CTL, OCF_DISCONNECT,
-				DISCONNECT_CP_SIZE, &cp);
+	hci_send_cmd(conn->hdev, OGF_LINK_CTL, OCF_DISCONNECT, sizeof(cp), &cp);
 }
 
 void hci_add_sco(struct hci_conn *conn, __u16 handle)
 {
 	struct hci_dev *hdev = conn->hdev;
-	add_sco_cp cp;
+	struct hci_cp_add_sco cp;
 
 	BT_DBG("%p", conn);
 
@@ -117,7 +115,7 @@ void hci_add_sco(struct hci_conn *conn, __u16 handle)
 	cp.pkt_type = __cpu_to_le16(hdev->pkt_type & SCO_PTYPE_MASK);
 	cp.handle   = __cpu_to_le16(handle);
 
-	hci_send_cmd(hdev, OGF_LINK_CTL, OCF_ADD_SCO, ADD_SCO_CP_SIZE, &cp);
+	hci_send_cmd(hdev, OGF_LINK_CTL, OCF_ADD_SCO, sizeof(cp), &cp);
 }
 
 static void hci_conn_timeout(unsigned long arg)
@@ -169,7 +167,7 @@ struct hci_conn *hci_conn_add(struct hci_dev *hdev, int type, bdaddr_t *dst)
 	hci_dev_hold(hdev);
 
 	tasklet_disable(&hdev->tx_task);
-	conn_hash_add(hdev, conn);
+	hci_conn_hash_add(hdev, conn);
 	tasklet_enable(&hdev->tx_task);
 
 	return conn;
@@ -199,7 +197,7 @@ int hci_conn_del(struct hci_conn *conn)
 	}
 
 	tasklet_disable(&hdev->tx_task);
-	conn_hash_del(hdev, conn);
+	hci_conn_hash_del(hdev, conn);
 	tasklet_enable(&hdev->tx_task);
 
 	skb_queue_purge(&conn->data_q);
@@ -218,11 +216,10 @@ struct hci_dev *hci_get_route(bdaddr_t *dst, bdaddr_t *src)
 
 	BT_DBG("%s -> %s", batostr(src), batostr(dst));
 
-	read_lock_bh(&hdev_list_lock);
+	read_lock_bh(&hci_dev_list_lock);
 
-	list_for_each(p, &hdev_list) {
-		struct hci_dev *d;
-		d = list_entry(p, struct hci_dev, list);
+	list_for_each(p, &hci_dev_list) {
+		struct hci_dev *d = list_entry(p, struct hci_dev, list);
 		
 		if (!test_bit(HCI_UP, &d->flags))
 			continue;
@@ -244,9 +241,9 @@ struct hci_dev *hci_get_route(bdaddr_t *dst, bdaddr_t *src)
 	}
 
 	if (hdev)
-		hci_dev_hold(hdev);
+		hdev = hci_dev_hold(hdev);
 
-	read_unlock_bh(&hdev_list_lock);
+	read_unlock_bh(&hci_dev_list_lock);
 	return hdev;
 }
 
@@ -258,7 +255,7 @@ struct hci_conn * hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst)
 
 	BT_DBG("%s dst %s", hdev->name, batostr(dst));
 
-	if (!(acl = conn_hash_lookup_ba(hdev, ACL_LINK, dst))) {
+	if (!(acl = hci_conn_hash_lookup_ba(hdev, ACL_LINK, dst))) {
 		if (!(acl = hci_conn_add(hdev, ACL_LINK, dst)))
 			return NULL;
 	}
@@ -271,7 +268,7 @@ struct hci_conn * hci_connect(struct hci_dev *hdev, int type, bdaddr_t *dst)
 	if (type == SCO_LINK) {
 		struct hci_conn *sco;
 
-		if (!(sco = conn_hash_lookup_ba(hdev, SCO_LINK, dst))) {
+		if (!(sco = hci_conn_hash_lookup_ba(hdev, SCO_LINK, dst))) {
 			if (!(sco = hci_conn_add(hdev, SCO_LINK, dst))) {
 				hci_conn_put(acl);
 				return NULL;
@@ -301,10 +298,9 @@ int hci_conn_auth(struct hci_conn *conn)
 		return 1;
 	
 	if (!test_and_set_bit(HCI_CONN_AUTH_PEND, &conn->pend)) {
-		auth_requested_cp ar;
-		ar.handle = __cpu_to_le16(conn->handle);
-		hci_send_cmd(conn->hdev, OGF_LINK_CTL, OCF_AUTH_REQUESTED,
-				AUTH_REQUESTED_CP_SIZE, &ar);
+		struct hci_cp_auth_requested cp;
+		cp.handle = __cpu_to_le16(conn->handle);
+		hci_send_cmd(conn->hdev, OGF_LINK_CTL, OCF_AUTH_REQUESTED, sizeof(cp), &cp);
 	}
 	return 0;
 }
@@ -321,11 +317,10 @@ int hci_conn_encrypt(struct hci_conn *conn)
 		return 0;
 
 	if (hci_conn_auth(conn)) {
-		set_conn_encrypt_cp ce;
-		ce.handle  = __cpu_to_le16(conn->handle);
-		ce.encrypt = 1; 
-		hci_send_cmd(conn->hdev, OGF_LINK_CTL, OCF_SET_CONN_ENCRYPT,
-				SET_CONN_ENCRYPT_CP_SIZE, &ce);
+		struct hci_cp_set_conn_encrypt cp;
+		cp.handle  = __cpu_to_le16(conn->handle);
+		cp.encrypt = 1; 
+		hci_send_cmd(conn->hdev, OGF_LINK_CTL, OCF_SET_CONN_ENCRYPT, sizeof(cp), &cp);
 	}
 	return 0;
 }
@@ -333,7 +328,7 @@ int hci_conn_encrypt(struct hci_conn *conn)
 /* Drop all connection on the device */
 void hci_conn_hash_flush(struct hci_dev *hdev)
 {
-	struct conn_hash *h = &hdev->conn_hash;
+	struct hci_conn_hash *h = &hdev->conn_hash;
         struct list_head *p;
 
 	BT_DBG("hdev %s", hdev->name);
@@ -358,24 +353,21 @@ int hci_get_conn_list(unsigned long arg)
 	struct hci_conn_info *ci;
 	struct hci_dev *hdev;
 	struct list_head *p;
-	int n = 0, size, err;
+	int n = 0, size;
 
 	if (copy_from_user(&req, (void *) arg, sizeof(req)))
 		return -EFAULT;
 
-	if (!req.conn_num || req.conn_num > (PAGE_SIZE * 2) / sizeof(*ci))
-		return -EINVAL;
+	if (!(hdev = hci_dev_get(req.dev_id)))
+		return -ENODEV;
 
-	size = sizeof(req) + req.conn_num * sizeof(*ci);
+	size = req.conn_num * sizeof(struct hci_conn_info) + sizeof(req);
+
+	if (verify_area(VERIFY_WRITE, (void *)arg, size))
+		return -EFAULT;
 
 	if (!(cl = (void *) kmalloc(size, GFP_KERNEL)))
 		return -ENOMEM;
-
-	if (!(hdev = hci_dev_get(req.dev_id))) {
-		kfree(cl);
-		return -ENODEV;
-	}
-
 	ci = cl->conn_info;
 
 	hci_dev_lock_bh(hdev);
@@ -389,21 +381,20 @@ int hci_get_conn_list(unsigned long arg)
 		(ci + n)->out   = c->out;
 		(ci + n)->state = c->state;
 		(ci + n)->link_mode = c->link_mode;
-		if (++n >= req.conn_num)
-			break;
+		n++;
 	}
 	hci_dev_unlock_bh(hdev);
 
 	cl->dev_id = hdev->id;
 	cl->conn_num = n;
-	size = sizeof(req) + n * sizeof(*ci);
+	size = n * sizeof(struct hci_conn_info) + sizeof(req);
 
 	hci_dev_put(hdev);
 
-	err = copy_to_user((void *) arg, cl, size);
+	copy_to_user((void *) arg, cl, size);
 	kfree(cl);
 
-	return err ? -EFAULT : 0;
+	return 0;
 }
 
 int hci_get_conn_info(struct hci_dev *hdev, unsigned long arg)
@@ -416,8 +407,11 @@ int hci_get_conn_info(struct hci_dev *hdev, unsigned long arg)
 	if (copy_from_user(&req, (void *) arg, sizeof(req)))
 		return -EFAULT;
 
+	if (verify_area(VERIFY_WRITE, ptr, sizeof(ci)))
+		return -EFAULT;
+
 	hci_dev_lock_bh(hdev);
-	conn = conn_hash_lookup_ba(hdev, req.type, &req.bdaddr);
+	conn = hci_conn_hash_lookup_ba(hdev, req.type, &req.bdaddr);
 	if (conn) {
 		bacpy(&ci.bdaddr, &conn->dst);
 		ci.handle = conn->handle;
@@ -431,5 +425,6 @@ int hci_get_conn_info(struct hci_dev *hdev, unsigned long arg)
 	if (!conn)
 		return -ENOENT;
 
-	return copy_to_user(ptr, &ci, sizeof(ci)) ? -EFAULT : 0;
+	copy_to_user(ptr, &ci, sizeof(ci));
+	return 0;
 }

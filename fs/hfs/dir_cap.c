@@ -24,10 +24,11 @@
 #include <linux/hfs_fs_sb.h>
 #include <linux/hfs_fs_i.h>
 #include <linux/hfs_fs.h>
+#include <linux/smp_lock.h>
 
 /*================ Forward declarations ================*/
 
-static struct dentry *cap_lookup(struct inode *, struct dentry *);
+static struct dentry *cap_lookup(struct inode *, struct dentry *, struct nameidata *);
 static int cap_readdir(struct file *, void *, filldir_t);
 
 /*================ Global variables ================*/
@@ -58,30 +59,30 @@ const struct hfs_name hfs_cap_reserved2[] = {
 #define DOT_ROOTINFO	(&hfs_cap_reserved2[0])
 
 struct file_operations hfs_cap_dir_operations = {
-	read:		generic_read_dir,
-	readdir:	cap_readdir,
-	fsync:		file_fsync,
+	.read		= generic_read_dir,
+	.readdir	= cap_readdir,
+	.fsync		= file_fsync,
 };
 
 struct inode_operations hfs_cap_ndir_inode_operations = {
-	create:		hfs_create,
-	lookup:		cap_lookup,
-	unlink:		hfs_unlink,
-	mkdir:		hfs_mkdir,
-	rmdir:		hfs_rmdir,
-	rename:		hfs_rename,
-	setattr:	hfs_notify_change,
+	.create		= hfs_create,
+	.lookup		= cap_lookup,
+	.unlink		= hfs_unlink,
+	.mkdir		= hfs_mkdir,
+	.rmdir		= hfs_rmdir,
+	.rename		= hfs_rename,
+	.setattr	= hfs_notify_change,
 };
 
 struct inode_operations hfs_cap_fdir_inode_operations = {
-	lookup:		cap_lookup,
-	setattr:	hfs_notify_change,
+	.lookup		= cap_lookup,
+	.setattr	= hfs_notify_change,
 };
 
 struct inode_operations hfs_cap_rdir_inode_operations = {
-	create:		hfs_create,
-	lookup:		cap_lookup,
-	setattr:	hfs_notify_change,
+	.create		= hfs_create,
+	.lookup		= cap_lookup,
+	.setattr	= hfs_notify_change,
 };
 
 /*================ File-local functions ================*/
@@ -94,13 +95,15 @@ struct inode_operations hfs_cap_rdir_inode_operations = {
  * inode corresponding to an entry in a directory, given the inode for
  * the directory and the name (and its length) of the entry.
  */
-static struct dentry *cap_lookup(struct inode * dir, struct dentry *dentry)
+static struct dentry *cap_lookup(struct inode * dir, struct dentry *dentry, struct nameidata *nd)
 {
 	ino_t dtype;
 	struct hfs_name cname;
 	struct hfs_cat_entry *entry;
 	struct hfs_cat_key key;
 	struct inode *inode = NULL;
+
+	lock_kernel();
 
 	dentry->d_op = &hfs_dentry_operations;
 	entry = HFS_I(dir)->entry;
@@ -112,7 +115,7 @@ static struct dentry *cap_lookup(struct inode * dir, struct dentry *dentry)
 
 	/* no need to check for "."  or ".." */
 
-	/* Check for special directories if in a normal directory.
+	/* Check for epecial directories if in a normal directory.
 	   Note that cap_dupdir() does an iput(dir). */
 	if (dtype==HFS_CAP_NDIR) {
 		/* Check for ".resource", ".finderinfo" and ".rootinfo" */
@@ -149,6 +152,7 @@ static struct dentry *cap_lookup(struct inode * dir, struct dentry *dentry)
 	}
 
 done:
+	unlock_kernel();
 	d_add(dentry, inode);
 	return NULL;
 }
@@ -184,6 +188,8 @@ static int cap_readdir(struct file * filp,
         struct hfs_cat_entry *entry;
 	struct inode *dir = filp->f_dentry->d_inode;
 
+	lock_kernel();
+
 	entry = HFS_I(dir)->entry;
 	type = HFS_ITYPE(dir->i_ino);
 	skip_dirs = (type == HFS_CAP_RDIR);
@@ -191,7 +197,7 @@ static int cap_readdir(struct file * filp,
 	if (filp->f_pos == 0) {
 		/* Entry 0 is for "." */
 		if (filldir(dirent, DOT->Name, DOT_LEN, 0, dir->i_ino, DT_DIR)) {
-			return 0;
+			goto out;
 		}
 		filp->f_pos = 1;
 	}
@@ -208,7 +214,7 @@ static int cap_readdir(struct file * filp,
 
 		if (filldir(dirent, DOT_DOT->Name,
 			    DOT_DOT_LEN, 1, ntohl(cnid), DT_DIR)) {
-			return 0;
+			goto out;
 		}
 		filp->f_pos = 2;
 	}
@@ -219,11 +225,11 @@ static int cap_readdir(struct file * filp,
 
 	    	if (hfs_cat_open(entry, &brec) ||
 	    	    hfs_cat_next(entry, &brec, filp->f_pos - 2, &cnid, &type)) {
-			return 0;
+			goto out;
 		}
 		while (filp->f_pos < (dir->i_size - 3)) {
 			if (hfs_cat_next(entry, &brec, 1, &cnid, &type)) {
-				return 0;
+				goto out;
 			}
 			if (!skip_dirs || (type != HFS_CDR_DIR)) {
 				ino_t ino;
@@ -236,7 +242,7 @@ static int cap_readdir(struct file * filp,
 				if (filldir(dirent, tmp_name, len,
 					    filp->f_pos, ino, DT_UNKNOWN)) {
 					hfs_cat_close(entry, &brec);
-					return 0;
+					goto out;
 				}
 			}
 			++filp->f_pos;
@@ -252,7 +258,7 @@ static int cap_readdir(struct file * filp,
 				    DOT_ROOTINFO_LEN, filp->f_pos,
 				    ntohl(entry->cnid) | HFS_CAP_FNDR,
 				    DT_UNKNOWN)) {
-				return 0;
+				goto out;
 			}
 		}
 		++filp->f_pos;
@@ -265,7 +271,7 @@ static int cap_readdir(struct file * filp,
 				    DOT_FINDERINFO_LEN, filp->f_pos,
 				    ntohl(entry->cnid) | HFS_CAP_FDIR,
 				    DT_UNKNOWN)) {
-				return 0;
+				goto out;
 			}
 		}
 		++filp->f_pos;
@@ -278,12 +284,14 @@ static int cap_readdir(struct file * filp,
 				    DOT_RESOURCE_LEN, filp->f_pos,
 				    ntohl(entry->cnid) | HFS_CAP_RDIR,
 				    DT_UNKNOWN)) {
-				return 0;
+				goto out;
 			}
 		}
 		++filp->f_pos;
 	}
 
+out:
+	unlock_kernel();
 	return 0;
 }
 

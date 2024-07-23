@@ -17,6 +17,7 @@
 #include <linux/config.h>
 #include <linux/parport.h>
 #include <linux/delay.h>
+#include <linux/sched.h>
 #include <asm/uaccess.h>
 
 #undef DEBUG /* undef me for production */
@@ -57,7 +58,7 @@ size_t parport_ieee1284_write_compat (struct parport *port,
 	parport_write_control (port, ctl);
 	parport_data_forward (port);
 	while (count < len) {
-		long expire = jiffies + dev->timeout;
+		unsigned long expire = jiffies + dev->timeout;
 		long wait = (HZ + 99) / 100;
 		unsigned char mask = (PARPORT_STATUS_ERROR
 				      | PARPORT_STATUS_BUSY);
@@ -136,7 +137,7 @@ size_t parport_ieee1284_write_compat (struct parport *port,
                 /* Let another process run if it needs to. */
 		if (time_before (jiffies, expire))
 			if (!parport_yield_blocking (dev)
-			    && current->need_resched)
+			    && need_resched())
 				schedule ();
 	}
  stop:
@@ -430,7 +431,7 @@ size_t parport_ieee1284_ecp_write_data (struct parport *port,
 			      | PARPORT_CONTROL_INIT,
 			      PARPORT_CONTROL_INIT);
 	for (written = 0; written < len; written++, buf++) {
-		long expire = jiffies + port->cad->timeout;
+		unsigned long expire = jiffies + port->cad->timeout;
 		unsigned char byte;
 
 		byte = *buf;
@@ -514,11 +515,12 @@ size_t parport_ieee1284_ecp_read_data (struct parport *port,
 
 	/* Set HostAck low to start accepting data. */
 	ctl = parport_read_control (port);
-	ctl &= ~(PARPORT_CONTROL_STROBE | PARPORT_CONTROL_INIT);
+	ctl &= ~(PARPORT_CONTROL_STROBE | PARPORT_CONTROL_INIT |
+		 PARPORT_CONTROL_AUTOFD);
 	parport_write_control (port,
 			       ctl | PARPORT_CONTROL_AUTOFD);
 	while (count < len) {
-		long expire = jiffies + dev->timeout;
+		unsigned long expire = jiffies + dev->timeout;
 		unsigned char byte;
 		int command;
 
@@ -666,7 +668,7 @@ size_t parport_ieee1284_ecp_write_addr (struct parport *port,
 			      PARPORT_CONTROL_AUTOFD
 			      | PARPORT_CONTROL_INIT);
 	for (written = 0; written < len; written++, buf++) {
-		long expire = jiffies + port->cad->timeout;
+		unsigned long expire = jiffies + port->cad->timeout;
 		unsigned char byte;
 
 		byte = *buf;
@@ -823,35 +825,40 @@ size_t parport_ieee1284_epp_write_addr (struct parport *port,
 					const void *buffer, size_t len,
 					int flags)
 {
-	/* This is untested */
 	unsigned char *bp = (unsigned char *) buffer;
 	size_t ret = 0;
 
+	/* set EPP idle state (just to make sure) with strobe low */
 	parport_frob_control (port,
 			      PARPORT_CONTROL_STROBE |
+			      PARPORT_CONTROL_AUTOFD |
 			      PARPORT_CONTROL_SELECT |
-			      PARPORT_CONTROL_AUTOFD,
+			      PARPORT_CONTROL_INIT,
 			      PARPORT_CONTROL_STROBE |
-			      PARPORT_CONTROL_SELECT);
+			      PARPORT_CONTROL_INIT);
 	port->ops->data_forward (port);
 	for (; len > 0; len--, bp++) {
-		/* Write data and assert nAStrb. */
+		/* Event 56: Write data and set nAStrb low. */
 		parport_write_data (port, *bp);
 		parport_frob_control (port, PARPORT_CONTROL_SELECT,
 				      PARPORT_CONTROL_SELECT);
 
-		if (parport_poll_peripheral (port, PARPORT_STATUS_BUSY,
-					     PARPORT_STATUS_BUSY, 10))
+		/* Event 58: wait for busy (nWait) to go high */
+		if (parport_poll_peripheral (port, PARPORT_STATUS_BUSY, 0, 10))
 			break;
 
+		/* Event 59: set nAStrb high */
 		parport_frob_control (port, PARPORT_CONTROL_SELECT, 0);
 
-		if (parport_poll_peripheral (port, PARPORT_STATUS_BUSY, 0, 5))
+		/* Event 60: wait for busy (nWait) to go low */
+		if (parport_poll_peripheral (port, PARPORT_STATUS_BUSY,
+					     PARPORT_STATUS_BUSY, 5))
 			break;
 
 		ret++;
 	}
 
+	/* Event 61: set strobe (nWrite) high */
 	parport_frob_control (port, PARPORT_CONTROL_STROBE, 0);
 
 	return ret;
@@ -862,28 +869,36 @@ size_t parport_ieee1284_epp_read_addr (struct parport *port,
 				       void *buffer, size_t len,
 				       int flags)
 {
-	/* This is untested. */
 	unsigned char *bp = (unsigned char *) buffer;
 	unsigned ret = 0;
 
+	/* Set EPP idle state (just to make sure) with strobe high */
 	parport_frob_control (port,
 			      PARPORT_CONTROL_STROBE |
-			      PARPORT_CONTROL_AUTOFD, 0);
+			      PARPORT_CONTROL_AUTOFD |
+			      PARPORT_CONTROL_SELECT |
+			      PARPORT_CONTROL_INIT,
+			      PARPORT_CONTROL_INIT);
 	port->ops->data_reverse (port);
 	for (; len > 0; len--, bp++) {
-		parport_frob_control (port, PARPORT_CONTROL_SELECT, 0);
-
-		/* Event 58 */
-		if (parport_poll_peripheral (port, PARPORT_STATUS_BUSY,
-					     PARPORT_STATUS_BUSY, 10))
-			break;
-
-		*bp = parport_read_data (port);
-
+		/* Event 64: set nSelectIn (nAStrb) low */
 		parport_frob_control (port, PARPORT_CONTROL_SELECT,
 				      PARPORT_CONTROL_SELECT);
 
-		if (parport_poll_peripheral (port, PARPORT_STATUS_BUSY, 0, 5))
+		/* Event 58: wait for Busy to go high */
+		if (parport_wait_peripheral (port, PARPORT_STATUS_BUSY, 0)) {
+			break;
+		}
+
+		*bp = parport_read_data (port);
+
+		/* Event 59: set nSelectIn (nAStrb) high */
+		parport_frob_control (port, PARPORT_CONTROL_SELECT,
+				      PARPORT_CONTROL_SELECT);
+
+		/* Event 60: wait for Busy to go low */
+		if (parport_poll_peripheral (port, PARPORT_STATUS_BUSY, 
+					     PARPORT_STATUS_BUSY, 5))
 			break;
 
 		ret++;

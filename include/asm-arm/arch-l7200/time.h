@@ -42,23 +42,26 @@
 /*
  * Handler for RTC timer interrupt
  */
-static void timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t
+timer_interrupt(int irq, void *dev_id, struct pt_regs *regs)
 {
 	do_timer(regs);
 	do_profile(regs);
 	RTC_RTCC = 0;				/* Clear interrupt */
+
+	return IRQ_HANDLED;
 }
 
 /*
  * Set up RTC timer interrupt, and return the current time in seconds.
  */
-static inline void setup_timer(void)
+void __init time_init(void)
 {
 	RTC_RTCC = 0;				/* Clear interrupt */
 
 	timer_irq.handler = timer_interrupt;
 
-	setup_arm_irq(IRQ_RTC_TICK, &timer_irq);
+	setup_irq(IRQ_RTC_TICK, &timer_irq);
 
 	RTC_RTCCR = RTC_RATE_128 | RTC_EN_TIC;	/* Set rate and enable timer */
 }

@@ -23,9 +23,9 @@
 
 #include<linux/stat.h>
 
-extern ncr53c7xx_init (Scsi_Host_Template *tpnt, int board, int chip,
-			u32 base, int io_port, int irq, int dma,
-			long long options, int clock);
+extern int ncr53c7xx_init(Scsi_Host_Template *tpnt, int board, int chip,
+			  unsigned long base, int io_port, int irq, int dma,
+			  long long options, int clock);
 
 int bvme6000_scsi_detect(Scsi_Host_Template *tpnt)
 {
@@ -44,12 +44,38 @@ int bvme6000_scsi_detect(Scsi_Host_Template *tpnt)
 
     clock = 40000000;	/* 66MHz SCSI Clock */
 
-    ncr53c7xx_init(tpnt, 0, 710, (u32)BVME_NCR53C710_BASE,
+    ncr53c7xx_init(tpnt, 0, 710, (unsigned long)BVME_NCR53C710_BASE,
 			0, BVME_IRQ_SCSI, DMA_NONE,
 			options, clock);
     called = 1;
     return 1;
 }
 
-static Scsi_Host_Template driver_template = BVME6000_SCSI;
+static int mvme6000_scsi_release(struct Scsi_Host *shost)
+{
+	if (shost->irq)
+		free_irq(shost->irq, NULL);
+	if (shost->dma_channel != 0xff)
+		free_dma(shost->dma_channel);
+	if (shost->io_port && shost->n_io_port)
+		release_region(shost->io_port, shost->n_io_port);
+	scsi_unregister(shost);
+	return 0;
+}
+
+static Scsi_Host_Template driver_template = {
+	.name			= "BVME6000 NCR53c710 SCSI",
+	.detect			= bvme6000_scsi_detect,
+	.release		= bvme6000_scsi_release,
+	.queuecommand		= NCR53c7xx_queue_command,
+	.abort			= NCR53c7xx_abort,
+	.reset			= NCR53c7xx_reset,
+	.can_queue		= 24,
+	.this_id		= 7,
+	.sg_tablesize		= 63,
+	.cmd_per_lun		= 3,
+	.use_clustering		= DISABLE_CLUSTERING
+};
+
+
 #include "scsi_module.c"

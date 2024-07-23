@@ -1,6 +1,8 @@
 #ifndef _INCLUDE_GUARD_i82092aa_H_
 #define _INCLUDE_GUARD_i82092aa_H_
 
+#include <linux/interrupt.h>
+
 /* $Id: i82092aa.h,v 1.1.1.1 2001/09/19 14:53:15 dwmw2 Exp $ */
 
 /* Debuging defines */
@@ -21,23 +23,18 @@
 static int  i82092aa_pci_probe(struct pci_dev *dev, const struct pci_device_id *id);
 static void i82092aa_pci_remove(struct pci_dev *dev);
 static int card_present(int socketno);
-static void i82092aa_interrupt(int irq, void *dev, struct pt_regs *regs);
+static irqreturn_t i82092aa_interrupt(int irq, void *dev, struct pt_regs *regs);
 
 
 
 
-static int i82092aa_get_status(unsigned int sock, u_int *value);
-static int i82092aa_get_socket(unsigned int sock, socket_state_t *state);
-static int i82092aa_set_socket(unsigned int sock, socket_state_t *state);
-static int i82092aa_get_io_map(unsigned int sock, struct pccard_io_map *io);
-static int i82092aa_set_io_map(unsigned int sock, struct pccard_io_map *io);
-static int i82092aa_get_mem_map(unsigned int sock, struct pccard_mem_map *mem);
-static int i82092aa_set_mem_map(unsigned int sock, struct pccard_mem_map *mem);
-static int i82092aa_init(unsigned int s);
-static int i82092aa_suspend(unsigned int sock);
-static int i82092aa_register_callback(unsigned int sock, void (*handler)(void *, unsigned int), void * info);
-static int i82092aa_inquire_socket(unsigned int sock, socket_cap_t *cap);
-static void i82092aa_proc_setup(unsigned int sock, struct proc_dir_entry *base);
+static int i82092aa_get_status(struct pcmcia_socket *socket, u_int *value);
+static int i82092aa_get_socket(struct pcmcia_socket *socket, socket_state_t *state);
+static int i82092aa_set_socket(struct pcmcia_socket *socket, socket_state_t *state);
+static int i82092aa_set_io_map(struct pcmcia_socket *socket, struct pccard_io_map *io);
+static int i82092aa_set_mem_map(struct pcmcia_socket *socket, struct pccard_mem_map *mem);
+static int i82092aa_init(struct pcmcia_socket *socket);
+static int i82092aa_suspend(struct pcmcia_socket *socket);
 
 #endif
 

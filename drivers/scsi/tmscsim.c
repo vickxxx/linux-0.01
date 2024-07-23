@@ -1,17 +1,18 @@
-/***********************************************************************
- *	FILE NAME : TMSCSIM.C					       *
- *	     BY   : C.L. Huang,  ching@tekram.com.tw		       *
- *	Description: Device Driver for Tekram DC-390(T) PCI SCSI       *
- *		     Bus Master Host Adapter			       *
- * (C)Copyright 1995-1996 Tekram Technology Co., Ltd.		       *
- ***********************************************************************/
-/* (C) Copyright: put under GNU GPL in 10/96  (see README.tmscsim)	*
-*************************************************************************/
-/* $Id: tmscsim.c,v 2.60.2.30 2000/12/20 01:07:12 garloff Exp $		*/
-/*	Enhancements and bugfixes by					*
+/************************************************************************
+ *	FILE NAME : TMSCSIM.C						*
+ *	     BY   : C.L. Huang,  ching@tekram.com.tw			*
+ *	Description: Device Driver for Tekram DC-390(T) PCI SCSI	*
+ *		     Bus Master Host Adapter				*
+ * (C)Copyright 1995-1996 Tekram Technology Co., Ltd.			*
+ ************************************************************************
+ * (C) Copyright: put under GNU GPL in 10/96				*
+ *				(see Documentation/scsi/tmscsim.txt)	*
+ ************************************************************************
+ * $Id: tmscsim.c,v 2.60.2.30 2000/12/20 01:07:12 garloff Exp $		*
+ *	Enhancements and bugfixes by					*
  *	Kurt Garloff <kurt@garloff.de>	<garloff@suse.de>		*
- ***********************************************************************/
-/*	HISTORY:							*
+ ************************************************************************
+ *	HISTORY:							*
  *									*
  *	REV#	DATE	NAME	DESCRIPTION				*
  *	1.00  96/04/24	CLH	First release				*
@@ -228,8 +229,6 @@
 
 #include "scsi.h"
 #include "hosts.h"
-#include "constants.h"
-#include "sd.h"
 #include <linux/stat.h>
 #include <scsi/scsicam.h>
 
@@ -254,8 +253,6 @@
  * undef  : traditional save_flags; cli; restore_flags;
  */
 
-//#define DEBUG_SPINLOCKS 2	/* Set to 0, 1 or 2 in include/linux/spinlock.h */
-
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,1,30)
 # include <linux/init.h>
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,30)
@@ -279,10 +276,10 @@
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,99)
 static struct pci_device_id tmscsim_pci_tbl[] __initdata = {
 	{
-		vendor: PCI_VENDOR_ID_AMD,
-		device: PCI_DEVICE_ID_AMD53C974,
-		subvendor: PCI_ANY_ID,
-		subdevice: PCI_ANY_ID,
+		.vendor		= PCI_VENDOR_ID_AMD,
+		.device		= PCI_DEVICE_ID_AMD53C974,
+		.subvendor	= PCI_ANY_ID,
+		.subdevice	= PCI_ANY_ID,
 	},
 	{ }		/* Terminating entry */
 };
@@ -293,7 +290,7 @@ MODULE_DEVICE_TABLE(pci, tmscsim_pci_tbl);
 
 # if USE_SPINLOCKS == 3 /* both */
 
-#  if defined (CONFIG_SMP) || DEBUG_SPINLOCKS > 0
+#  if defined (CONFIG_SMP)
 #   define DC390_LOCKA_INIT { spinlock_t __unlocked = SPIN_LOCK_UNLOCKED; pACB->lock = __unlocked; };
 #  else
 #   define DC390_LOCKA_INIT
@@ -304,8 +301,8 @@ MODULE_DEVICE_TABLE(pci, tmscsim_pci_tbl);
 #  define DC390_IFLAGS unsigned long iflags;
 #  define DC390_DFLAGS unsigned long dflags; 
 
-#  define DC390_LOCK_IO spin_lock_irqsave (&io_request_lock, iflags)
-#  define DC390_UNLOCK_IO spin_unlock_irqrestore (&io_request_lock, iflags)
+#  define DC390_LOCK_IO spin_lock_irqsave (((struct Scsi_Host *)dev)->host_lock, iflags)
+#  define DC390_UNLOCK_IO spin_unlock_irqrestore (((struct Scsi_Host *)dev)->host_lock, iflags)
 
 #  define DC390_LOCK_DRV spin_lock_irqsave (&dc390_drvlock, dflags)
 #  define DC390_UNLOCK_DRV spin_unlock_irqrestore (&dc390_drvlock, dflags)
@@ -322,7 +319,7 @@ MODULE_DEVICE_TABLE(pci, tmscsim_pci_tbl);
 
 #  if USE_SPINLOCKS == 2 /* adapter specific locks */
 
-#   if defined (CONFIG_SMP) || DEBUG_SPINLOCKS > 0
+#   if defined (CONFIG_SMP)
 #    define DC390_LOCKA_INIT { spinlock_t __unlocked = SPIN_LOCK_UNLOCKED; pACB->lock = __unlocked; };
 #   else
 #    define DC390_LOCKA_INIT
@@ -331,8 +328,8 @@ MODULE_DEVICE_TABLE(pci, tmscsim_pci_tbl);
 #   define DC390_AFLAGS unsigned long aflags;
 #   define DC390_IFLAGS 
 #  define DC390_DFLAGS unsigned long dflags; 
-#   define DC390_LOCK_IO /* spin_lock_irqsave (&io_request_lock, iflags) */
-#   define DC390_UNLOCK_IO /* spin_unlock_irqrestore (&io_request_lock, iflags) */
+#   define DC390_LOCK_IO(dev) /* spin_lock_irqsave (&io_request_lock, iflags) */
+#   define DC390_UNLOCK_IO(dev) /* spin_unlock_irqrestore (&io_request_lock, iflags) */
 #   define DC390_LOCK_DRV spin_lock_irqsave (&dc390_drvlock, dflags)
 #   define DC390_UNLOCK_DRV spin_unlock_irqrestore (&dc390_drvlock, dflags)
 #   define DC390_LOCK_DRV_NI spin_lock (&dc390_drvlock)
@@ -349,8 +346,8 @@ MODULE_DEVICE_TABLE(pci, tmscsim_pci_tbl);
 #   define DC390_IFLAGS unsigned long iflags;
 #   define DC390_DFLAGS unsigned long dflags; 
     spinlock_t dc390_drvlock = SPIN_LOCK_UNLOCKED;
-#   define DC390_LOCK_IO spin_lock_irqsave (&io_request_lock, iflags)
-#   define DC390_UNLOCK_IO spin_unlock_irqrestore (&io_request_lock, iflags)
+#   define DC390_LOCK_IO(dev) spin_lock_irqsave (((struct Scsi_Host *)dev)->host_lock, iflags)
+#   define DC390_UNLOCK_IO(dev) spin_unlock_irqrestore (((struct Scsi_Host *)dev)->host_lock, iflags)
 #   define DC390_LOCK_DRV spin_lock_irqsave (&dc390_drvlock, dflags)
 #   define DC390_UNLOCK_DRV spin_unlock_irqrestore (&dc390_drvlock, dflags)
 #   define DC390_LOCK_DRV_NI spin_lock (&dc390_drvlock)
@@ -397,7 +394,7 @@ MODULE_DEVICE_TABLE(pci, tmscsim_pci_tbl);
 # define PCI_WRITE_CONFIG_WORD(pd, rv, bv) pci_write_config_word (pd, rv, bv)
 # define PCI_READ_CONFIG_WORD(pd, rv, bv) pci_read_config_word (pd, rv, bv)
 # define PCI_BUS_DEV pdev->bus->number, pdev->devfn
-# define PCI_PRESENT pci_present ()
+# define PCI_PRESENT (1)
 # define PCI_SET_MASTER pci_set_master (pdev)
 # define PCI_FIND_DEVICE(vend, id) (pdev = pci_find_device (vend, id, pdev))
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(2,3,10)
@@ -1074,11 +1071,11 @@ void DC390_waiting_timed_out (unsigned long ptr)
 	DC390_IFLAGS
 	DC390_AFLAGS
 	DEBUG0(printk ("DC390: Debug: Waiting queue woken up by timer!\n");)
-	DC390_LOCK_IO;
+	DC390_LOCK_IO(pACB.pScsiHost);
 	DC390_LOCK_ACB;
 	dc390_Waiting_process (pACB);
 	DC390_UNLOCK_ACB;
-	DC390_UNLOCK_IO;
+	DC390_UNLOCK_IO(pACB.pScsiHost);
 }
 
 /***********************************************************************
@@ -1187,7 +1184,7 @@ static void dc390_Query_to_Waiting (PACB pACB)
 	if (!pSRB) return;
 	pcmd = dc390_Query_get ( pACB );
 	if (!pcmd) { dc390_Free_insert (pACB, pSRB); return; }; /* should not happen */
-	pDCB = dc390_findDCB (pACB, pcmd->target, pcmd->lun);
+	pDCB = dc390_findDCB (pACB, pcmd->device->id, pcmd->device->lun);
 	if (!pDCB) 
 	{ 
 		dc390_Free_insert (pACB, pSRB);
@@ -1226,12 +1223,12 @@ int DC390_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
     PDCB   pDCB;
     PSRB   pSRB;
     DC390_AFLAGS
-    PACB   pACB = (PACB) cmd->host->hostdata;
+    PACB   pACB = (PACB) cmd->device->host->hostdata;
 
 
     DEBUG0(/*  if(pACB->scan_devices) */	\
 	printk(KERN_INFO "DC390: Queue Cmd=%02x,Tgt=%d,LUN=%d (pid=%li)\n",\
-		cmd->cmnd[0],cmd->target,cmd->lun,cmd->pid);)
+		cmd->cmnd[0],cmd->device->id,cmd->device->lun,cmd->pid);)
 
     DC390_LOCK_ACB;
     
@@ -1248,11 +1245,11 @@ int DC390_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
     else if( (pACB->scan_devices) && (cmd->cmnd[0] == READ_6) )
 	pACB->scan_devices = 0;
 
-    if ( ( cmd->target >= pACB->pScsiHost->max_id ) || 
-	 (cmd->lun >= pACB->pScsiHost->max_lun) )
+    if ( ( cmd->device->id >= pACB->pScsiHost->max_id ) || 
+	 (cmd->device->lun >= pACB->pScsiHost->max_lun) )
     {
 /*	printk ("DC390: Ignore target %d lun %d\n",
-		cmd->target, cmd->lun); */
+		cmd->device->id, cmd->device->lun); */
 	DC390_UNLOCK_ACB;
 	//return (1);
 	done (cmd);
@@ -1260,15 +1257,15 @@ int DC390_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
     }
 
     if( (pACB->scan_devices || cmd->cmnd[0] == TEST_UNIT_READY || cmd->cmnd[0] == INQUIRY) && 
-       !(pACB->DCBmap[cmd->target] & (1 << cmd->lun)) )
+       !(pACB->DCBmap[cmd->device->id] & (1 << cmd->device->lun)) )
     {
         pACB->scan_devices = 1;
 
-	dc390_initDCB( pACB, &pDCB, cmd->target, cmd->lun );
+	dc390_initDCB( pACB, &pDCB, cmd->device->id, cmd->device->lun );
 	if (!pDCB)
 	  {
 	    printk (KERN_ERR "DC390: kmalloc for DCB failed, target %02x lun %02x\n", 
-		    cmd->target, cmd->lun);
+		    cmd->device->id, cmd->device->lun);
 	    DC390_UNLOCK_ACB;
 	    printk ("DC390: No DCB in queue_command!\n");
 #ifdef USE_NEW_EH
@@ -1280,10 +1277,10 @@ int DC390_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
 	  };
             
     }
-    else if( !(pACB->scan_devices) && !(pACB->DCBmap[cmd->target] & (1 << cmd->lun)) )
+    else if( !(pACB->scan_devices) && !(pACB->DCBmap[cmd->device->id] & (1 << cmd->device->lun)) )
     {
 	printk(KERN_INFO "DC390: Ignore target %02x lun %02x\n",
-		cmd->target, cmd->lun); 
+		cmd->device->id, cmd->device->lun); 
 	DC390_UNLOCK_ACB;
 	//return (1);
 	done (cmd);
@@ -1291,11 +1288,11 @@ int DC390_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
     }
     else
     {
-	pDCB = dc390_findDCB (pACB, cmd->target, cmd->lun);
+	pDCB = dc390_findDCB (pACB, cmd->device->id, cmd->device->lun);
 	if (!pDCB)
 	 {  /* should never happen */
 	    printk (KERN_ERR "DC390: no DCB failed, target %02x lun %02x\n", 
-		    cmd->target, cmd->lun);
+		    cmd->device->id, cmd->device->lun);
 	    DC390_UNLOCK_ACB;
 	    printk ("DC390: No DCB in queuecommand (2)!\n");
 #ifdef USE_NEW_EH
@@ -1371,7 +1368,7 @@ int DC390_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
 #include <asm/unaligned.h>
 
 /*
- * Function : static int partsize(struct buffer_head *bh, unsigned long 
+ * Function : static int partsize(unsigned char *buf, unsigned long 
  *     capacity,unsigned int *cyls, unsigned int *hds, unsigned int *secs);
  *
  * Purpose : to determine the BIOS mapping used to create the partition
@@ -1381,7 +1378,7 @@ int DC390_queue_command (Scsi_Cmnd *cmd, void (* done)(Scsi_Cmnd *))
  *
  */
 
-static int partsize(struct buffer_head *bh, unsigned long capacity,
+static int partsize(unsigned char *buf, unsigned long capacity,
     unsigned int  *cyls, unsigned int *hds, unsigned int *secs) {
     struct partition *p, *largest = NULL;
     int i, largest_cyl;
@@ -1389,9 +1386,9 @@ static int partsize(struct buffer_head *bh, unsigned long capacity,
     unsigned int logical_end, physical_end, ext_physical_end;
     
 
-    if (*(unsigned short *) (bh->b_data+510) == 0xAA55) {
-	for (largest_cyl = -1, p = (struct partition *) 
-    	    (0x1BE + bh->b_data), i = 0; i < 4; ++i, ++p) {
+    if (*(unsigned short *) (buf+64) == 0xAA55) {
+	for (largest_cyl = -1, p = (struct partition *) buf, 
+    	    i = 0; i < 4; ++i, ++p) {
     	    if (!p->sys_ind)
     	    	continue;
     	    cyl = p->cyl + ((p->sector & 0xc0) << 2);
@@ -1442,20 +1439,21 @@ static int partsize(struct buffer_head *bh, unsigned long capacity,
  * Note:
  *   In contrary to other externally callable funcs (DC390_), we don't lock
  ***********************************************************************/
-int DC390_bios_param (Disk *disk, kdev_t devno, int geom[])
+int DC390_bios_param (struct scsi_device *sdev, struct block_device *bdev,
+		sector_t capacity, int geom[])
 {
     int heads, sectors, cylinders;
-    PACB pACB = (PACB) disk->device->host->hostdata;
-    struct buffer_head *bh;
+    PACB pACB = (PACB) sdev->host->hostdata;
     int ret_code = -1;
-    int size = disk->capacity;
+    int size = capacity;
+    unsigned char *buf;
 
-    if ((bh = bread(MKDEV(MAJOR(devno), MINOR(devno)&~0xf), 0, 1024)))
+    if ((buf = scsi_bios_ptable(bdev)))
     {
 	/* try to infer mapping from partition table */
-	ret_code = partsize (bh, (unsigned long) size, (unsigned int *) geom + 2,
+	ret_code = partsize (buf, (unsigned long) size, (unsigned int *) geom + 2,
 			     (unsigned int *) geom + 0, (unsigned int *) geom + 1);
-	brelse (bh);
+	kfree (buf);
     }
     if (ret_code == -1)
     {
@@ -1478,9 +1476,10 @@ int DC390_bios_param (Disk *disk, kdev_t devno, int geom[])
     return (0);
 }
 #else
-int DC390_bios_param (Disk *disk, kdev_t devno, int geom[])
+int DC390_bios_param (struct scsi_device *sdev, struct block_device *bdev,
+		sector_t capacity, int geom[])
 {
-    return scsicam_bios_param (disk, devno, geom);
+    return scsicam_bios_param (bdev, capacity, geom);
 };
 #endif
 
@@ -1523,7 +1522,7 @@ void dc390_dumpinfo (PACB pACB, PDCB pDCB, PSRB pSRB)
     DC390_write32 (DMA_ScsiBusCtrl, EN_INT_ON_PCI_ABORT);
     PDEVSET1; PCI_READ_CONFIG_WORD(PDEV, PCI_STATUS, &pstat);
     printk ("DC390: Register dump: PCI Status: %04x\n", pstat);
-    printk ("DC390: In case of driver trouble read linux/drivers/scsi/README.tmscsim\n");
+    printk ("DC390: In case of driver trouble read linux/Documentation/scsi/tmscsim.txt\n");
 };
 
 
@@ -1548,12 +1547,12 @@ int DC390_abort (Scsi_Cmnd *cmd)
     int   status;
     //ULONG sbac;
     DC390_AFLAGS
-    PACB  pACB = (PACB) cmd->host->hostdata;
+    PACB  pACB = (PACB) cmd->device->host->hostdata;
 
     DC390_LOCK_ACB;
 
     printk ("DC390: Abort command (pid %li, Device %02i-%02i)\n",
-	    cmd->pid, cmd->target, cmd->lun);
+	    cmd->pid, cmd->device->id, cmd->device->lun);
 
     /* First scan Query list */
     if( pACB->QueryCnt )
@@ -1587,7 +1586,7 @@ int DC390_abort (Scsi_Cmnd *cmd)
 	}
     }
 	
-    pDCB = dc390_findDCB (pACB, cmd->target, cmd->lun);
+    pDCB = dc390_findDCB (pACB, cmd->device->id, cmd->device->lun);
     if( !pDCB ) goto  NOT_RUN;
 
     /* Added 98/07/02 KG */
@@ -1786,7 +1785,7 @@ int DC390_reset (Scsi_Cmnd *cmd, unsigned int resetFlags)
 {
     UCHAR   bval;
     DC390_AFLAGS
-    PACB    pACB = (PACB) cmd->host->hostdata;
+    PACB    pACB = (PACB) cmd->device->host->hostdata;
 
     printk(KERN_INFO "DC390: RESET ... ");
 
@@ -2207,7 +2206,7 @@ static int __init DC390_init (PSHT psht, ULONG io_port, UCHAR Irq, PDEVDECL, UCH
     psh = scsi_register( psht, sizeof(DC390_ACB) );
     if( !psh ) return( -1 );
 	
-    scsi_set_pci_device(psh, pdev);
+    scsi_set_device(psh, &pdev->dev);
     pACB = (PACB) psh->hostdata;
     DC390_LOCKA_INIT;
     DC390_LOCK_ACB;
@@ -2359,11 +2358,11 @@ int __init DC390_detect (Scsi_Host_Template *psht)
 static void dc390_inquiry_done (Scsi_Cmnd* cmd)
 {
    printk (KERN_INFO "DC390: INQUIRY (ID %02x LUN %02x) returned %08x\n",
-	   cmd->target, cmd->lun, cmd->result);
+	   cmd->device->id, cmd->device->lun, cmd->result);
    if (cmd->result)
    {
-	PACB pACB = (PACB)cmd->host->hostdata;
-	PDCB pDCB = dc390_findDCB (pACB, cmd->target, cmd->lun);
+	PACB pACB = (PACB)cmd->device->host->hostdata;
+	PDCB pDCB = dc390_findDCB (pACB, cmd->device->id, cmd->device->lun);
 	printk ("DC390: Unsetting DsCn, Sync and TagQ!\n");
 	if (pDCB)
 	{
@@ -2388,9 +2387,10 @@ void dc390_inquiry (PACB pACB, PDCB pDCB)
    cmd->cmnd[4] = 0xff;
    
    cmd->cmd_len = 6; cmd->old_cmd_len = 6;
-   cmd->host = pACB->pScsiHost;
-   cmd->target = pDCB->TargetID;
-   cmd->lun = pDCB->TargetLUN; 
+/* TODO FIXME */
+/*    cmd->host = pACB->pScsiHost; */
+   cmd->device->id = pDCB->TargetID;
+   cmd->device->lun = pDCB->TargetLUN; 
    cmd->serial_number = 1;
    cmd->pid = 390;
    cmd->bufflen = 128;
@@ -2420,7 +2420,7 @@ void dc390_inquiry (PACB pACB, PDCB pDCB)
 static void dc390_sendstart_done (Scsi_Cmnd* cmd)
 {
    printk (KERN_INFO "DC390: SENDSTART (ID %02x LUN %02x) returned %08x\n",
-	   cmd->target, cmd->lun, cmd->result);
+	   cmd->device->id, cmd->device->lun, cmd->result);
    kfree (cmd);
 };
 
@@ -2438,9 +2438,10 @@ void dc390_sendstart (PACB pACB, PDCB pDCB)
    cmd->cmnd[4] = 0x01; /* START */
    
    cmd->cmd_len = 6; cmd->old_cmd_len = 6;
-   cmd->host = pACB->pScsiHost;
-   cmd->target = pDCB->TargetID;
-   cmd->lun = pDCB->TargetLUN; 
+/* TODO FIXME */
+/*    cmd->host = pACB->pScsiHost; */
+   cmd->device->id = pDCB->TargetID;
+   cmd->device->lun = pDCB->TargetLUN; 
    cmd->serial_number = 1;
    cmd->pid = 310;
    cmd->bufflen = 128;
@@ -2468,68 +2469,68 @@ void dc390_sendstart (PACB pACB, PDCB pDCB)
  * '-' means no change
  *******************************************************************/
 
-static int dc390_scanf (char** p1, char** p2, int* var)
+static int dc390_scanf (char** buffer, char** pos, char** p0, int* var)
 {
-   *p2 = *p1;
-   *var = simple_strtoul (*p2, p1, 10);
-   if (*p2 == *p1) return -1;
-   *p1 = strtok (0, " \t\n:=,;.");
+   *p0 = *pos;
+   *var = simple_strtoul (*p0, pos, 10);
+   if (*p0 == *pos) return -1;
+   *pos = strsep (buffer, " \t\n:=,;.");
    return 0;
 };
 
-#define SCANF(p1, p2, var, min, max)		\
-if (dc390_scanf (&p1, &p2, &var)) goto einv;	\
+#define SCANF(buffer, pos, p0, var, min, max)		\
+if (dc390_scanf (&buffer, &pos, &p0, &var)) goto einv;	\
 else if (var<min || var>max) goto einv2
 
-static int dc390_yesno (char** p, char* var, char bmask)
+static int dc390_yesno (char** buffer, char** pos, char* var, char bmask)
 {
-   switch (**p)
+   switch (**pos)
      {
       case 'Y': *var |= bmask; break;
       case 'N': *var &= ~bmask; break;
       case '-': break;
       default: return -1;
      }
-   *p = strtok (0, " \t\n:=,;");
+   *pos = strsep (buffer, " \t\n:=,;");
    return 0;
 };
 
-#define YESNO(p, var, bmask)			\
-if (dc390_yesno (&p, &var, bmask)) goto einv;	\
+#define YESNO(buffer, pos, var, bmask)			\
+if (dc390_yesno (&buffer, &pos, &var, bmask)) goto einv;	\
 else dc390_updateDCB (pACB, pDCB);		\
 if (!p) goto ok
 
-static int dc390_search (char **p1, char **p2, char *var, char* txt, int max, int scale, char* ign)
+static int dc390_search (char** buffer, char** pos, char** p0, char* var, char* txt, int max, int scale, char* ign)
 {
    int dum;
-   if (! memcmp (*p1, txt, strlen(txt)))
+   if (! memcmp (*pos, txt, strlen(txt)))
      {
-	*p2 = strtok (0, " \t\n:=,;");
-	if (!*p2) return -1;
-	dum = simple_strtoul (*p2, p1, 10);
-	if (*p2 == *p1) return -1;
+	*p0 = strsep (buffer, " \t\n:=,;");
+	if (!*p0) return -1;
+	dum = simple_strtoul (*p0, pos, 10);
+	if (*p0 == *pos) return -1;
 	if (dum >= 0 && dum <= max) 
 	  { *var = (dum * 100) / scale; }
 	else return -2;
-	*p1 = strtok (0, " \t\n:=,;");
-	if (*ign && *p1 && strlen(*p1) >= strlen(ign) && 
-	    !(memcmp (*p1, ign, strlen(ign)))) 
-		*p1 = strtok (0, " \t\n:=,;");
+	*pos = strsep (buffer, " \t\n:=,;");
+	if (*ign && *pos && strlen(*pos) >= strlen(ign) && 
+	    !(memcmp (*pos, ign, strlen(ign)))) 
+		*pos = strsep (buffer, " \t\n:=,;");
 
      }
    return 0;
 };
 
-#define SEARCH(p1, p2, var, txt, max)						\
-if (dc390_search (&p1, &p2, (PUCHAR)(&var), txt, max, 100, "")) goto einv2;	\
+#define SEARCH(buffer, pos, p0, var, txt, max)						\
+if (dc390_search (&buffer, &pos, &p0, (PUCHAR)(&var), txt, max, 100, "")) goto einv2;	\
 else if (!p1) goto ok2
 
-#define SEARCH2(p1, p2, var, txt, max, scale)					\
-if (dc390_search (&p1, &p2, &var, txt, max, scale, "")) goto einv2; 		\
+#define SEARCH2(buffer, pos, p0, var, txt, max, scale)					\
+if (dc390_search (&buffer, &pos, &p0, &var, txt, max, scale, "")) goto einv2; 		\
 else if (!p1) goto ok2
 
-#define SEARCH3(p1, p2, var, txt, max, scale, ign)				\
-if (dc390_search (&p1, &p2, &var, txt, max, scale, ign)) goto einv2;		\
+#define SEARCH3(buffer, pos, p0, var, txt, max, scale, ign)				\
+if (dc390_search (&buffer, &pos, &p0, &var, txt, max, scale, ign)) goto einv2;		\
 else if (!p1) goto ok2
 
 
@@ -2558,19 +2559,16 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
   DC390_AFLAGS 
   pos[length] = 0;
 
-  DC390_LOCK_IO;
+  DC390_LOCK_IO(pACB.pScsiHost);
   DC390_LOCK_ACB;
   /* UPPERCASE */ 
   /* Don't use kernel toupper, because of 2.0.x bug: ctmp unexported */
   while (*pos) 
     { if (*pos >='a' && *pos <= 'z') *pos = *pos + 'A' - 'a'; pos++; };
   
-  /* We should protect __strtok ! */
-  /* spin_lock (strtok_lock); */
-
   /* Remove WS */
-  pos = strtok (buffer, " \t:\n=,;");
-  if (!pos) goto ok;
+  pos = strsep (&buffer, " \t:\n=,;");
+  if (!*pos) goto ok;
    
  next:
   if (!memcmp (pos, "RESET", 5)) goto reset;
@@ -2586,10 +2584,10 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
       int dev, id, lun; char* pdec;
       char olddevmode;
       
-      SCANF (pos, p0, dev, 0, pACB->DCBCnt-1);
-      if (pos) { SCANF (pos, p0, id, 0, 7); } else goto einv;
-      if (pos) { SCANF (pos, p0, lun, 0, 7); } else goto einv;
-      if (!pos) goto einv;
+      SCANF (buffer, pos, p0, dev, 0, pACB->DCBCnt-1);
+      if (*pos) { SCANF (buffer, pos, p0, id, 0, 7); } else goto einv;
+      if (*pos) { SCANF (buffer, pos, p0, lun, 0, 7); } else goto einv;
+      if (!*pos) goto einv;
       
       PARSEDEBUG(printk (KERN_INFO "DC390: config line %i %i %i:\"%s\"\n", dev, id, lun, prstr (pos, &buffer[length]));)
       pDCB = pACB->pLinkDCB;
@@ -2610,20 +2608,20 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
       };
 	  
       olddevmode = pDCB->DevMode;
-      YESNO (pos, pDCB->DevMode, PARITY_CHK_);
+      YESNO (buffer, pos, pDCB->DevMode, PARITY_CHK_);
       needs_inquiry++;
-      YESNO (pos, pDCB->DevMode, SYNC_NEGO_);
+      YESNO (buffer, pos, pDCB->DevMode, SYNC_NEGO_);
       if ((olddevmode & SYNC_NEGO_) == (pDCB->DevMode & SYNC_NEGO_)) needs_inquiry--;
       needs_inquiry++;
-      YESNO (pos, pDCB->DevMode, EN_DISCONNECT_);
+      YESNO (buffer, pos, pDCB->DevMode, EN_DISCONNECT_);
       if ((olddevmode & EN_DISCONNECT_) == (pDCB->DevMode & EN_DISCONNECT_)) needs_inquiry--;
-      YESNO (pos, pDCB->DevMode, SEND_START_);
+      YESNO (buffer, pos, pDCB->DevMode, SEND_START_);
       needs_inquiry++;
-      YESNO (pos, pDCB->DevMode, TAG_QUEUEING_);
+      YESNO (buffer, pos, pDCB->DevMode, TAG_QUEUEING_);
       if ((olddevmode & TAG_QUEUEING_) == (pDCB->DevMode & TAG_QUEUEING_)) needs_inquiry--;
 
       dc390_updateDCB (pACB, pDCB);
-      if (!pos) goto ok;
+      if (!*pos) goto ok;
        
       olddevmode = pDCB->NegoPeriod;
       /* Look for decimal point (Speed) */
@@ -2632,22 +2630,22 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
       /* NegoPeriod */
       if (*pos != '-')
 	{
-	  SCANF (pos, p0, dum, 72, 800); 
+	  SCANF (buffer, pos, p0, dum, 72, 800); 
 	  pDCB->NegoPeriod = dum >> 2;
 	  if (pDCB->NegoPeriod != olddevmode) needs_inquiry++;
 	  if (!pos) goto ok;
-	  if (memcmp (pos, "NS", 2) == 0) pos = strtok (0, " \t\n:=,;.");
+	  if (memcmp (pos, "NS", 2) == 0) pos = strsep (*pos, " \t\n:=,;.");
 	}
-      else pos = strtok (0, " \t\n:=,;.");
-      if (!pos) goto ok;
+      else pos = strsep (*pos, " \t\n:=,;.");
+      if (!*pos) goto ok;
       
       /* Sync Speed in MHz */
       if (*pos != '-')
 	{
-	  SCANF (pos, p0, dum, 1, 13); 
+	  SCANF (buffer, pos, p0, dum, 1, 13); 
 	  pDCB->NegoPeriod = (1000/dum) >> 2;
 	  if (pDCB->NegoPeriod != olddevmode && !pos) needs_inquiry++;
-	  if (!pos) goto ok;
+	  if (!*pos) goto ok;
 	  /* decimal */
 	  if (pos-1 == pdec)
 	     {
@@ -2656,38 +2654,38 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
 		for (; p0-pos > 1; p0--) dum /= 10;
 		pDCB->NegoPeriod = (100000/(100*dumold + dum)) >> 2;
 		if (pDCB->NegoPeriod < 19) pDCB->NegoPeriod = 19;
-		pos = strtok (0, " \t\n:=,;");
-		if (!pos) goto ok;
+		pos = strsep (*pos, " \t\n:=,;");
+		if (!*pos) goto ok;
 	     };
-	  if (*pos == 'M') pos = strtok (0, " \t\n:=,;");
+	  if (*pos == 'M') pos = strsep (*pos, " \t\n:=,;");
 	  if (pDCB->NegoPeriod != olddevmode) needs_inquiry++;
 	}
-      else pos = strtok (0, " \t\n:=,;");
+      else pos = strsep (*pos, " \t\n:=,;");
       /* dc390_updateDCB (pACB, pDCB); */
-      if (!pos) goto ok;
+      if (!*pos) goto ok;
 
       olddevmode = pDCB->SyncOffset;
       /* SyncOffs */
       if (*pos != '-')
 	{
-	  SCANF (pos, p0, dum, 0, 0x0f); 
+	  SCANF (buffer, pos, p0, dum, 0, 0x0f); 
 	  pDCB->SyncOffset = dum;
 	  if (pDCB->SyncOffset > olddevmode) needs_inquiry++;
 	}
-      else pos = strtok (0, " \t\n:=,;");
-      if (!pos) goto ok;
+      else pos = strsep (*pos, " \t\n:=,;");
+      if (!*pos) goto ok;
       dc390_updateDCB (pACB, pDCB);
 
       //olddevmode = pDCB->MaxCommand;
       /* MaxCommand (Tags) */
       if (*pos != '-')
 	{
-	  SCANF (pos, p0, dum, 1, 32 /*pACB->TagMaxNum*/);
+	  SCANF (buffer, pos, p0, dum, 1, 32 /*pACB->TagMaxNum*/);
 	  if (pDCB->SyncMode & EN_TAG_QUEUEING)
 		pDCB->MaxCommand = dum;
 	  else printk (KERN_INFO "DC390: Can't set MaxCmd larger than one without Tag Queueing!\n");
 	}
-      else pos = strtok (0, " \t\n:=,;");
+      else pos = strsep (*pos, " \t\n:=,;");
 
     }
   else
@@ -2696,14 +2694,14 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
       PARSEDEBUG(printk (KERN_INFO "DC390: chg adapt cfg \"%s\"\n", prstr (pos, &buffer[length]));)
       dum = GLITCH_TO_NS (pACB->glitch_cfg);
       /* Adapter setting */
-      SEARCH (pos, p0, pACB->pScsiHost->max_id, "MAXID", 8); 
-      SEARCH (pos, p0, pACB->pScsiHost->max_lun, "MAXLUN", 8); 
-      SEARCH (pos, p0, newadaptid, "ADAPTERID", 7);
-      SEARCH (pos, p0, pACB->TagMaxNum, "TAGMAXNUM", 32);
-      SEARCH (pos, p0, pACB->ACBFlag, "ACBFLAG", 255);
-      SEARCH3 (pos, p0, dum, "GLITCHEATER", 40, 1000, "NS");
-      SEARCH3 (pos, p0, pACB->sel_timeout, "SELTIMEOUT", 400, 163, "MS");
-      SEARCH3 (pos, p0, dc390_eepromBuf[pACB->AdapterIndex][EE_DELAY], "DELAYRESET", 180, 100, "S");
+      SEARCH (buffer, pos, p0, pACB->pScsiHost->max_id, "MAXID", 8); 
+      SEARCH (buffer, pos, p0, pACB->pScsiHost->max_lun, "MAXLUN", 8); 
+      SEARCH (buffer, pos, p0, newadaptid, "ADAPTERID", 7);
+      SEARCH (buffer, pos, p0, pACB->TagMaxNum, "TAGMAXNUM", 32);
+      SEARCH (buffer, pos, p0, pACB->ACBFlag, "ACBFLAG", 255);
+      SEARCH3 (buffer, pos, p0, dum, "GLITCHEATER", 40, 1000, "NS");
+      SEARCH3 (buffer, pos, p0, pACB->sel_timeout, "SELTIMEOUT", 400, 163, "MS");
+      SEARCH3 (buffer, pos, p0, dc390_eepromBuf[pACB->AdapterIndex][EE_DELAY], "DELAYRESET", 180, 100, "S");
     ok2:
       pACB->glitch_cfg = NS_TO_GLITCH (dum);
       if (pACB->sel_timeout < 60) pACB->sel_timeout = 60;
@@ -2719,32 +2717,32 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
       // All devs should be INQUIRED now
       if (pos == p1) goto einv;
     }
-  if (pos) goto next;
+  if (*pos) goto next;
       
  ok:
-  /* spin_unlock (strtok_lock); */
   DC390_UNLOCK_ACB;
   if (needs_inquiry) 
      { dc390_updateDCB (pACB, pDCB); dc390_inquiry (pACB, pDCB); };
-  DC390_UNLOCK_IO;
+  DC390_UNLOCK_IO(pACB.pScsiHost);
   return (length);
 
  einv2:
   pos = p0;
  einv:
-  /* spin_unlock (strtok_lock); */
   DC390_UNLOCK_ACB;
-  DC390_UNLOCK_IO;
+  DC390_UNLOCK_IO(pACB.pScsiHost);
   printk (KERN_WARNING "DC390: parse error near \"%s\"\n", (pos? pos: "NULL"));
   return (-EINVAL);
    
  reset:
      {
-	Scsi_Cmnd cmd; cmd.host = pACB->pScsiHost;
+	Scsi_Cmnd cmd;
+	/* TODO FIXME */
+	/* cmd.host = pACB->pScsiHost; */
 	printk (KERN_WARNING "DC390: Driver reset requested!\n");
 	DC390_UNLOCK_ACB;
 	DC390_reset (&cmd, 0);
-	DC390_UNLOCK_IO;
+	DC390_UNLOCK_IO(pACB.pScsiHost);
      };
   return (length);
 
@@ -2752,13 +2750,13 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
      {
 	dc390_dumpinfo (pACB, 0, 0);
 	DC390_UNLOCK_ACB;
-	DC390_UNLOCK_IO;       
+	DC390_UNLOCK_IO(pACB.pScsiHost);       
      }
   return (length);
 	
  inquiry:
      {
-	pos = strtok (0, " \t\n.:;="); if (!pos) goto einv;
+	pos = strsep (*pos, " \t\n.:;="); if (!*pos) goto einv;
 	dev = simple_strtoul (pos, &p0, 10);
 	if (dev >= pACB->DCBCnt) goto einv_dev;
 	for (dum = 0; dum < dev; dum++) pDCB = pDCB->pNextDCB;
@@ -2766,13 +2764,13 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
 		dev, pDCB->TargetID, pDCB->TargetLUN);
 	DC390_UNLOCK_ACB;
 	dc390_inquiry (pACB, pDCB);
-	DC390_UNLOCK_IO;
+	DC390_UNLOCK_IO(pACB.pScsiHost);
      };
    return (length);
 
  remove:
      {
-	pos = strtok (0, " \t\n.:;="); if (!pos) goto einv;
+	pos = strsep (*pos, " \t\n.:;="); if (!*pos) goto einv;
 	dev = simple_strtoul (pos, &p0, 10);
 	if (dev >= pACB->DCBCnt) goto einv_dev;
 	for (dum = 0; dum < dev; dum++) pDCB = pDCB->pNextDCB;
@@ -2781,38 +2779,38 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
 	/* TO DO: We should make sure no pending commands are left */
 	dc390_remove_dev (pACB, pDCB);
 	DC390_UNLOCK_ACB;
-	DC390_UNLOCK_IO;
+	DC390_UNLOCK_IO(pACB.pScsiHost);
      };
    return (length);
 
  add:
      {
 	int id, lun;
-	pos = strtok (0, " \t\n.:;=");
-	if (pos) { SCANF (pos, p0, id, 0, 7); } else goto einv;
-	if (pos) { SCANF (pos, p0, lun, 0, 7); } else goto einv;
+	pos = strsep (*pos, " \t\n.:;=");
+	if (*pos) { SCANF (buffer, pos, p0, id, 0, 7); } else goto einv;
+	if (*pos) { SCANF (buffer, pos, p0, lun, 0, 7); } else goto einv;
 	pDCB = dc390_findDCB (pACB, id, lun);
 	if (pDCB) { printk ("DC390: ADD: Device already existing\n"); goto einv; };
 	dc390_initDCB (pACB, &pDCB, id, lun);
 	DC390_UNLOCK_ACB;
 	dc390_inquiry (pACB, pDCB);
-	DC390_UNLOCK_IO;
+	DC390_UNLOCK_IO(pACB.pScsiHost);
      };
    return (length);
 
  start:
      {
 	int id, lun;
-	pos = strtok (0, " \t\n.:;=");
-	if (pos) { SCANF (pos, p0, id, 0, 7); } else goto einv;
-	if (pos) { SCANF (pos, p0, lun, 0, 7); } else goto einv;
+	pos = strsep (*pos, " \t\n.:;=");
+	if (*pos) { SCANF (buffer, pos, p0, id, 0, 7); } else goto einv;
+	if (*pos) { SCANF (buffer, pos, p0, lun, 0, 7); } else goto einv;
 	pDCB = dc390_findDCB (pACB, id, lun);
 	if (pDCB) printk ("DC390: SendStart: Device already existing ...\n");
 	else dc390_initDCB (pACB, &pDCB, id, lun);
 	DC390_UNLOCK_ACB;
 	dc390_sendstart (pACB, pDCB);
 	dc390_inquiry (pACB, pDCB);
-	DC390_UNLOCK_IO;
+	DC390_UNLOCK_IO(pACB.pScsiHost);
      };
    return (length);
 
@@ -2820,7 +2818,7 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
    printk (KERN_WARNING "DC390: Ignore cmnd to illegal Dev(Idx) %i. Valid range: 0 - %i.\n", 
 	   dev, pACB->DCBCnt - 1);
    DC390_UNLOCK_ACB;
-   DC390_UNLOCK_IO;
+   DC390_UNLOCK_IO(pACB.pScsiHost);
    return (-EINVAL);
 	     
 	     
@@ -2857,12 +2855,11 @@ int dc390_set_info (char *buffer, int length, PACB pACB)
  else SPRINTF(" No  ")
 
 
-int DC390_proc_info (char *buffer, char **start,
-		     off_t offset, int length, int hostno, int inout)
+int DC390_proc_info (struct Scsi_Host *shpnt, char *buffer, char **start,
+		     off_t offset, int length, int inout)
 {
   int dev, spd, spd1;
   char *pos = buffer;
-  PSH shpnt = 0;
   PACB pACB;
   PDCB pDCB;
   PSCSICMD pcmd;
@@ -2872,13 +2869,12 @@ int DC390_proc_info (char *buffer, char **start,
 
   while(pACB != (PACB)-1)
      {
-	shpnt = pACB->pScsiHost;
-	if (shpnt->host_no == hostno) break;
+	if (shpnt == pACB->pScsiHost)
+		break;
 	pACB = pACB->pNextACB;
      }
 
   if (pACB == (PACB)-1) return(-ESRCH);
-  if(!shpnt) return(-ESRCH);
 
   if(inout) /* Has data been written to the file ? */
       return dc390_set_info(buffer, length, pACB);
@@ -3041,13 +3037,13 @@ int DC390_release (struct Scsi_Host *host)
     DC390_AFLAGS DC390_IFLAGS
     PACB pACB = (PACB)(host->hostdata);
 
-    DC390_LOCK_IO;
+    DC390_LOCK_IO(host);
     DC390_LOCK_ACB;
 
     /* TO DO: We should check for outstanding commands first. */
     dc390_shutdown (host);
 
-    if (host->irq != IRQ_NONE)
+    if (host->irq != SCSI_IRQ_NONE)
     {
 	DEBUG0(printk(KERN_INFO "DC390: Free IRQ %i\n",host->irq);)
 	free_irq (host->irq, pACB);
@@ -3056,12 +3052,25 @@ int DC390_release (struct Scsi_Host *host)
     release_region(host->io_port,host->n_io_port);
     dc390_freeDCBs (host);
     DC390_UNLOCK_ACB;
-    DC390_UNLOCK_IO;
+    DC390_UNLOCK_IO(host);
     return( 1 );
 }
 #endif /* def MODULE */
 
-#if LINUX_VERSION_CODE > KERNEL_VERSION(2,3,99)
 static Scsi_Host_Template driver_template = DC390_T;
+   .proc_name      = "tmscsim", 
+   .proc_info      = DC390_proc_info,
+   .name           = DC390_BANNER " V" DC390_VERSION,
+   .detect         = DC390_detect,
+   .release        = DC390_release,
+   .queuecommand   = DC390_queue_command,
+   .abort          = DC390_abort,
+   .reset          = DC390_reset,
+   .bios_param     = DC390_bios_param,
+   .can_queue      = 42,
+   .this_id        = 7,
+   .sg_tablesize   = SG_ALL,
+   .cmd_per_lun    = 16,
+   .use_clustering = DISABLE_CLUSTERING,
+};
 #include "scsi_module.c"
-#endif

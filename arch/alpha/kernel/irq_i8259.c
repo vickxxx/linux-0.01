@@ -22,7 +22,7 @@
 
 /* Note mask bit is true for DISABLED irqs.  */
 static unsigned int cached_irq_mask = 0xffff;
-spinlock_t i8259_irq_lock = SPIN_LOCK_UNLOCKED;
+static spinlock_t i8259_irq_lock = SPIN_LOCK_UNLOCKED;
 
 static inline void
 i8259_update_irq_hw(unsigned int irq, unsigned long mask)
@@ -85,21 +85,21 @@ i8259a_end_irq(unsigned int irq)
 }
 
 struct hw_interrupt_type i8259a_irq_type = {
-	typename:	"XT-PIC",
-	startup:	i8259a_startup_irq,
-	shutdown:	i8259a_disable_irq,
-	enable:		i8259a_enable_irq,
-	disable:	i8259a_disable_irq,
-	ack:		i8259a_mask_and_ack_irq,
-	end:		i8259a_end_irq,
+	.typename	= "XT-PIC",
+	.startup	= i8259a_startup_irq,
+	.shutdown	= i8259a_disable_irq,
+	.enable		= i8259a_enable_irq,
+	.disable	= i8259a_disable_irq,
+	.ack		= i8259a_mask_and_ack_irq,
+	.end		= i8259a_end_irq,
 };
 
 void __init
 init_i8259a_irqs(void)
 {
 	static struct irqaction cascade = {
-		handler:	no_action,
-		name:		"cascade",
+		.handler	= no_action,
+		.name		= "cascade",
 	};
 
 	long i;
@@ -130,11 +130,11 @@ init_i8259a_irqs(void)
 # define IACK_SC	TITAN_IACK_SC
 #elif defined(CONFIG_ALPHA_TSUNAMI)
 # define IACK_SC	TSUNAMI_IACK_SC
-#elif defined(CONFIG_ALPHA_POLARIS)
-# define IACK_SC	POLARIS_IACK_SC
 #elif defined(CONFIG_ALPHA_IRONGATE)
 # define IACK_SC        IRONGATE_IACK_SC
 #endif
+/* Note that CONFIG_ALPHA_POLARIS is intentionally left out here, since
+   sys_rx164 wants to use isa_no_iack_sc_device_interrupt for some reason.  */
 
 #if defined(IACK_SC)
 void

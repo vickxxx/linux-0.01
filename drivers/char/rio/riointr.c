@@ -34,7 +34,6 @@ static char *_riointr_c_sccs_ = "@(#)riointr.c	1.2";
 #endif
 
 
-#define __NO_VERSION__
 #include <linux/module.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
@@ -48,7 +47,6 @@ static char *_riointr_c_sccs_ = "@(#)riointr.c	1.2";
 #include <linux/termios.h>
 #include <linux/serial.h>
 
-#include <linux/compatmac.h>
 #include <linux/generic_serial.h>
 
 #include <linux/delay.h>

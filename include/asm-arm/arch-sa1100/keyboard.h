@@ -8,21 +8,13 @@
 
 #include <linux/config.h>
 #include <asm/mach-types.h>
-#include <asm/arch/assabet.h>
 
-#define kbd_disable_irq()	do { } while(0);
-#define kbd_enable_irq()	do { } while(0);
-
-extern void sa1111_kbd_init_hw(void);
 extern void gc_kbd_init_hw(void);
 extern void smartio_kbd_init_hw(void);
 extern void cerf_kbd_init_hw(void);
 
 static inline void kbd_init_hw(void)
 {
-	if ((machine_is_assabet() && machine_has_neponset()) ||
-	    machine_is_graphicsmaster())
-		sa1111_kbd_init_hw();
 	if (machine_is_graphicsclient())
 		gc_kbd_init_hw();
 	if (machine_is_adsbitsy())

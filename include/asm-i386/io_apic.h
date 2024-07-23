@@ -3,6 +3,7 @@
 
 #include <linux/config.h>
 #include <asm/types.h>
+#include <asm/mpspec.h>
 
 /*
  * Intel IO-APIC support for SMP and UP systems.
@@ -15,30 +16,50 @@
 #define APIC_MISMATCH_DEBUG
 
 #define IO_APIC_BASE(idx) \
-		((volatile int *)__fix_to_virt(FIX_IO_APIC_BASE_0 + idx))
+		((volatile int *)(__fix_to_virt(FIX_IO_APIC_BASE_0 + idx) \
+		+ (mp_ioapics[idx].mpc_apicaddr & ~PAGE_MASK)))
 
 /*
  * The structure of the IO-APIC:
  */
-struct IO_APIC_reg_00 {
-	__u32	__reserved_2	: 24,
-		ID		:  4,
-		__reserved_1	:  4;
-} __attribute__ ((packed));
+union IO_APIC_reg_00 {
+	u32	raw;
+	struct {
+		u32	__reserved_2	: 14,
+			LTS		:  1,
+			delivery_type	:  1,
+			__reserved_1	:  8,
+			ID		:  8;
+	} __attribute__ ((packed)) bits;
+};
 
-struct IO_APIC_reg_01 {
-	__u32	version		:  8,
-		__reserved_2	:  7,
-		PRQ		:  1,
-		entries		:  8,
-		__reserved_1	:  8;
-} __attribute__ ((packed));
+union IO_APIC_reg_01 {
+	u32	raw;
+	struct {
+		u32	version		:  8,
+			__reserved_2	:  7,
+			PRQ		:  1,
+			entries		:  8,
+			__reserved_1	:  8;
+	} __attribute__ ((packed)) bits;
+};
 
-struct IO_APIC_reg_02 {
-	__u32	__reserved_2	: 24,
-		arbitration	:  4,
-		__reserved_1	:  4;
-} __attribute__ ((packed));
+union IO_APIC_reg_02 {
+	u32	raw;
+	struct {
+		u32	__reserved_2	: 24,
+			arbitration	:  4,
+			__reserved_1	:  4;
+	} __attribute__ ((packed)) bits;
+};
+
+union IO_APIC_reg_03 {
+	u32	raw;
+	struct {
+		u32	boot_DT		:  1,
+			__reserved_1	: 31;
+	} __attribute__ ((packed)) bits;
+};
 
 /*
  * # of IO-APICs and # of IRQ routing registers
@@ -116,9 +137,14 @@ static inline void io_apic_write(unsigned int apic, unsigned int reg, unsigned i
 /*
  * Re-write a value: to be used for read-modify-write
  * cycles where the read already set up the index register.
+ *
+ * Older SiS APIC requires we rewrite the index regiser
  */
-static inline void io_apic_modify(unsigned int apic, unsigned int value)
+extern int sis_apic_bug;
+static inline void io_apic_modify(unsigned int apic, unsigned int reg, unsigned int value)
 {
+	if (sis_apic_bug)
+		*IO_APIC_BASE(apic) = reg;
 	*(IO_APIC_BASE(apic)+4) = value;
 }
 
@@ -139,6 +165,13 @@ extern int skip_ioapic_setup;
  * assignment of PCI IRQ's.
  */
 #define io_apic_assign_pci_irqs (mp_irq_entries && !skip_ioapic_setup)
+
+#ifdef CONFIG_ACPI_BOOT
+extern int io_apic_get_unique_id (int ioapic, int apic_id);
+extern int io_apic_get_version (int ioapic);
+extern int io_apic_get_redir_entries (int ioapic);
+extern int io_apic_set_pci_routing (int ioapic, int pin, int irq);
+#endif /*CONFIG_ACPI_BOOT*/
 
 #else  /* !CONFIG_X86_IO_APIC */
 #define io_apic_assign_pci_irqs 0

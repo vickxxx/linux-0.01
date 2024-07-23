@@ -36,7 +36,7 @@
 #include <linux/nfs.h>
 
 #define NLMDBG_FACILITY		NLMDBG_SVC
-#define LOCKD_BUFSIZE		(1024 + NLMSSVC_XDRSIZE)
+#define LOCKD_BUFSIZE		(1024 + NLMSVC_XDRSIZE)
 #define ALLOWED_SIGS		(sigmask(SIGKILL))
 
 extern struct svc_program	nlmsvc_program;
@@ -97,15 +97,10 @@ lockd(struct svc_rqst *rqstp)
 	nlmsvc_pid = current->pid;
 	up(&lockd_start);
 
-	daemonize();
-	reparent_to_init();
-	sprintf(current->comm, "lockd");
+	daemonize("lockd");
 
-	/* Process request with signals blocked.  */
-	spin_lock_irq(&current->sigmask_lock);
-	siginitsetinv(&current->blocked, sigmask(SIGKILL));
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	/* Process request with signals blocked, but allow SIGKILL.  */
+	allow_signal(SIGKILL);
 
 	/* kick rpciod */
 	rpciod_up();
@@ -123,15 +118,13 @@ lockd(struct svc_rqst *rqstp)
 	 * NFS mount or NFS daemon has gone away, and we've been sent a
 	 * signal, or else another process has taken over our job.
 	 */
-	while ((nlmsvc_users || !signalled()) && nlmsvc_pid == current->pid)
-	{
+	while ((nlmsvc_users || !signalled()) && nlmsvc_pid == current->pid) {
 		long timeout = MAX_SCHEDULE_TIMEOUT;
+
 		if (signalled()) {
-			spin_lock_irq(&current->sigmask_lock);
 			flush_signals(current);
-			spin_unlock_irq(&current->sigmask_lock);
 			if (nlmsvc_ops) {
-				nlmsvc_ops->detach();
+				nlmsvc_invalidate_all();
 				grace_period_expire = set_grace_period();
 			}
 		}
@@ -164,22 +157,8 @@ lockd(struct svc_rqst *rqstp)
 		dprintk("lockd: request from %08x\n",
 			(unsigned)ntohl(rqstp->rq_addr.sin_addr.s_addr));
 
-		/*
-		 * Look up the NFS client handle. The handle is needed for
-		 * all but the GRANTED callback RPCs.
-		 */
-		rqstp->rq_client = NULL;
-		if (nlmsvc_ops) {
-			nlmsvc_ops->exp_readlock();
-			rqstp->rq_client =
-				nlmsvc_ops->exp_getclient(&rqstp->rq_addr);
-		}
-
 		svc_process(serv, rqstp);
 
-		/* Unlock export hash tables */
-		if (nlmsvc_ops)
-			nlmsvc_ops->exp_unlock();
 	}
 
 	/*
@@ -188,7 +167,7 @@ lockd(struct svc_rqst *rqstp)
 	 */
 	if (!nlmsvc_pid || current->pid == nlmsvc_pid) {
 		if (nlmsvc_ops)
-			nlmsvc_ops->detach();
+			nlmsvc_invalidate_all();
 		nlm_shutdown_hosts();
 		nlmsvc_pid = 0;
 	} else
@@ -203,6 +182,7 @@ lockd(struct svc_rqst *rqstp)
 	rpciod_down();
 
 	/* Release module */
+	unlock_kernel();
 	MOD_DEC_USE_COUNT;
 }
 
@@ -237,7 +217,7 @@ lockd_up(void)
 			"lockd_up: no pid, %d users??\n", nlmsvc_users);
 
 	error = -ENOMEM;
-	serv = svc_create(&nlmsvc_program, 0, NLMSVC_XDRSIZE);
+	serv = svc_create(&nlmsvc_program, LOCKD_BUFSIZE);
 	if (!serv) {
 		printk(KERN_WARNING "lockd_up: create service failed\n");
 		goto out;
@@ -304,16 +284,16 @@ lockd_down(void)
 	 * Wait for the lockd process to exit, but since we're holding
 	 * the lockd semaphore, we can't wait around forever ...
 	 */
-	current->sigpending = 0;
+	clear_thread_flag(TIF_SIGPENDING);
 	interruptible_sleep_on_timeout(&lockd_exit, HZ);
 	if (nlmsvc_pid) {
 		printk(KERN_WARNING 
 			"lockd_down: lockd failed to exit, clearing pid\n");
 		nlmsvc_pid = 0;
 	}
-	spin_lock_irq(&current->sigmask_lock);
-	recalc_sigpending(current);
-	spin_unlock_irq(&current->sigmask_lock);
+	spin_lock_irq(&current->sighand->siglock);
+	recalc_sigpending();
+	spin_unlock_irq(&current->sighand->siglock);
 out:
 	up(&nlmsvc_sema);
 }
@@ -369,34 +349,41 @@ __setup("lockd.tcpport=", tcpport_set);
  * Define NLM program and procedures
  */
 static struct svc_version	nlmsvc_version1 = {
-	1, 17, nlmsvc_procedures, NULL
+		.vs_vers	= 1,
+		.vs_nproc	= 17,
+		.vs_proc	= nlmsvc_procedures,
+		.vs_xdrsize	= NLMSVC_XDRSIZE,
 };
 static struct svc_version	nlmsvc_version3 = {
-	3, 24, nlmsvc_procedures, NULL
+		.vs_vers	= 3,
+		.vs_nproc	= 24,
+		.vs_proc	= nlmsvc_procedures,
+		.vs_xdrsize	= NLMSVC_XDRSIZE,
 };
 #ifdef CONFIG_LOCKD_V4
 static struct svc_version	nlmsvc_version4 = {
-	4, 24, nlmsvc_procedures4, NULL
+		.vs_vers	= 4,
+		.vs_nproc	= 24,
+		.vs_proc	= nlmsvc_procedures4,
+		.vs_xdrsize	= NLMSVC_XDRSIZE,
 };
 #endif
 static struct svc_version *	nlmsvc_version[] = {
-	NULL,
-	&nlmsvc_version1,
-	NULL,
-	&nlmsvc_version3,
+	[1] = &nlmsvc_version1,
+	[3] = &nlmsvc_version3,
 #ifdef CONFIG_LOCKD_V4
-	&nlmsvc_version4,
+	[4] = &nlmsvc_version4,
 #endif
 };
 
 static struct svc_stat		nlmsvc_stats;
 
 #define NLM_NRVERS	(sizeof(nlmsvc_version)/sizeof(nlmsvc_version[0]))
-struct svc_program		nlmsvc_program = {
-	NLM_PROGRAM,		/* program number */
-	1, NLM_NRVERS-1,	/* version range */
-	NLM_NRVERS,		/* number of entries in nlmsvc_version */
-	nlmsvc_version,		/* version table */
-	"lockd",		/* service name */
-	&nlmsvc_stats,		/* stats table */
+struct svc_program	nlmsvc_program = {
+	.pg_prog	= NLM_PROGRAM,		/* program number */
+	.pg_nvers	= NLM_NRVERS,		/* number of entries in nlmsvc_version */
+	.pg_vers	= nlmsvc_version,	/* version table */
+	.pg_name	= "lockd",		/* service name */
+	.pg_class	= "nfsd",		/* share authentication with nfsd */
+	.pg_stats	= &nlmsvc_stats,	/* stats table */
 };

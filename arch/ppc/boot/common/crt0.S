@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.crt0.S 1.12 08/09/01 17:09:10 paulus
- */
 /*    Copyright (c) 1997 Paul Mackerras <paulus@cs.anu.edu.au>
  *      Initial Power Macintosh COFF version.
  *    Copyright (c) 1999 Grant Erickson <grant@lcse.umn.edu>
@@ -22,7 +19,7 @@
  */
 
 #include <linux/config.h>
-#include "../../kernel/ppc_asm.tmpl"
+#include <asm/ppc_asm.h>
 
 	.text
 
@@ -69,7 +66,7 @@ __start:
 	bdnz	1b			# If we are not done yet, keep clearing
 2:
 
-#ifdef CONFIG_4xx
+#ifdef CONFIG_40x
 	## Set up the stack
 
 	lis	r9,_start@h		# r9 = &_start (text section entry)

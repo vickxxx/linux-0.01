@@ -5,9 +5,9 @@
  * PPPoE --- PPP over Ethernet (RFC 2516)
  *
  *
- * Version:	0.5.1
+ * Version:	0.5.2
  *
- * Author:	Michal Ostrowski <mostrows@styx.uwaterloo.ca>
+ * Author:	Michal Ostrowski <mostrows@speakeasy.net>
  *
  * 051000 :	Initialization cleanup
  *
@@ -21,55 +21,46 @@
 
 #include <linux/string.h>
 #include <linux/module.h>
-
-#include <asm/uaccess.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/slab.h>
 #include <linux/errno.h>
-
 #include <linux/netdevice.h>
 #include <linux/net.h>
 #include <linux/init.h>
 #include <linux/if_pppox.h>
-#include <net/sock.h>
 #include <linux/ppp_defs.h>
 #include <linux/if_ppp.h>
 #include <linux/ppp_channel.h>
 
-static struct pppox_proto *proto[PX_MAX_PROTO+1];
+#include <net/sock.h>
+
+#include <asm/uaccess.h>
+
+static struct pppox_proto *pppox_protos[PX_MAX_PROTO + 1];
 
 int register_pppox_proto(int proto_num, struct pppox_proto *pp)
 {
-	if (proto_num < 0 || proto_num > PX_MAX_PROTO) {
+	if (proto_num < 0 || proto_num > PX_MAX_PROTO)
 		return -EINVAL;
-	}
-
-	if (proto[proto_num])
+	if (pppox_protos[proto_num])
 		return -EALREADY;
-
-	MOD_INC_USE_COUNT;
-
-	proto[proto_num] = pp;
+	pppox_protos[proto_num] = pp;
 	return 0;
 }
 
 void unregister_pppox_proto(int proto_num)
 {
-	if (proto_num >= 0 && proto_num <= PX_MAX_PROTO) {
-	    proto[proto_num] = NULL;
-	    MOD_DEC_USE_COUNT;
-	}
+	if (proto_num >= 0 && proto_num <= PX_MAX_PROTO)
+		pppox_protos[proto_num] = NULL;
 }
 
 void pppox_unbind_sock(struct sock *sk)
 {
 	/* Clear connection to ppp device, if attached. */
 
-	if (sk->state & PPPOX_BOUND) {
-		ppp_unregister_channel(&sk->protinfo.pppox->chan);
-		sk->state &= ~PPPOX_BOUND;
+	if (sk->sk_state & (PPPOX_BOUND | PPPOX_ZOMBIE)) {
+		ppp_unregister_channel(&pppox_sk(sk)->chan);
+		sk->sk_state = PPPOX_DEAD;
 	}
 }
 
@@ -77,78 +68,76 @@ EXPORT_SYMBOL(register_pppox_proto);
 EXPORT_SYMBOL(unregister_pppox_proto);
 EXPORT_SYMBOL(pppox_unbind_sock);
 
-static int pppox_ioctl(struct socket* sock, unsigned int cmd,
+static int pppox_ioctl(struct socket* sock, unsigned int cmd, 
 		       unsigned long arg)
 {
 	struct sock *sk = sock->sk;
-	struct pppox_opt *po;
-	int err = 0;
-
-	po = sk->protinfo.pppox;
+	struct pppox_opt *po = pppox_sk(sk);
+	int rc = 0;
 
 	lock_sock(sk);
 
 	switch (cmd) {
-	case PPPIOCGCHAN:{
+	case PPPIOCGCHAN: {
 		int index;
-		err = -ENOTCONN;
-		if (!(sk->state & PPPOX_CONNECTED))
+		rc = -ENOTCONN;
+		if (!(sk->sk_state & PPPOX_CONNECTED))
 			break;
 
-		err = -EINVAL;
+		rc = -EINVAL;
 		index = ppp_channel_index(&po->chan);
 		if (put_user(index , (int *) arg))
 			break;
 
-		err = 0;
-		sk->state |= PPPOX_BOUND;
+		rc = 0;
+		sk->sk_state |= PPPOX_BOUND;
 		break;
 	}
 	default:
-		if (proto[sk->protocol]->ioctl)
-			err = (*proto[sk->protocol]->ioctl)(sock, cmd, arg);
+		if (pppox_protos[sk->sk_protocol]->ioctl)
+			rc = pppox_protos[sk->sk_protocol]->ioctl(sock, cmd,
+								  arg);
 
 		break;
 	};
 
 	release_sock(sk);
-	return err;
+	return rc;
 }
 
 
 static int pppox_create(struct socket *sock, int protocol)
 {
-	int err = 0;
+	int rc = -EPROTOTYPE;
 
 	if (protocol < 0 || protocol > PX_MAX_PROTO)
-	    return -EPROTOTYPE;
+		goto out;
 
-	if (proto[protocol] == NULL)
-	    return -EPROTONOSUPPORT;
+	rc = -EPROTONOSUPPORT;
+	if (!pppox_protos[protocol] ||
+	    !try_module_get(pppox_protos[protocol]->owner))
+		goto out;
 
-	err = (*proto[protocol]->create)(sock);
-
-	if (err == 0) {
+	rc = pppox_protos[protocol]->create(sock);
+	if (!rc) {
 		/* We get to set the ioctl handler. */
 		/* For everything else, pppox is just a shell. */
 		sock->ops->ioctl = pppox_ioctl;
 	}
-
-	return err;
+	module_put(pppox_protos[protocol]->owner);
+out:
+	return rc;
 }
 
 static struct net_proto_family pppox_proto_family = {
-	PF_PPPOX,
-	pppox_create
+	.family	= PF_PPPOX,
+	.create	= pppox_create,
+	.owner	= THIS_MODULE,
 };
 
 static int __init pppox_init(void)
 {
-	int err = 0;
-
-	err = sock_register(&pppox_proto_family);
-
-	return err;
+	return sock_register(&pppox_proto_family);
 }
 
 static void __exit pppox_exit(void)

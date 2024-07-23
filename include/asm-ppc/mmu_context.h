@@ -1,6 +1,3 @@
-/*
- * BK Id: SCCS/s.mmu_context.h 1.18 09/26/01 16:02:49 paulus
- */
 #ifdef __KERNEL__
 #ifndef __PPC_MMU_CONTEXT_H
 #define __PPC_MMU_CONTEXT_H
@@ -51,7 +48,7 @@
    	-- Dan
  */
 
-static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk, unsigned cpu)
+static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 {
 }
 
@@ -60,7 +57,7 @@ static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk,
 #define LAST_CONTEXT    	15
 #define FIRST_CONTEXT    	0
 
-#elif CONFIG_4xx
+#elif defined(CONFIG_4xx)
 #define NO_CONTEXT      	256
 #define LAST_CONTEXT    	255
 #define FIRST_CONTEXT    	1
@@ -156,12 +153,14 @@ static inline void destroy_context(struct mm_struct *mm)
 }
 
 static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
-			     struct task_struct *tsk, int cpu)
+			     struct task_struct *tsk)
 {
 	tsk->thread.pgdir = next->pgd;
 	get_mmu_context(next);
 	set_context(next->context, next->pgd);
 }
+
+#define deactivate_mm(tsk,mm)	do { } while (0)
 
 /*
  * After we have set current->mm to a new value, this activates

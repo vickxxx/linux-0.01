@@ -202,6 +202,10 @@
 #define CIA_IOC_PCI_W3_MASK		(IDENT_ADDR + 0x8760000740UL)
 #define CIA_IOC_PCI_T3_BASE		(IDENT_ADDR + 0x8760000780UL)
 
+#define CIA_IOC_PCI_Wn_BASE(N)	(IDENT_ADDR + 0x8760000400UL + (N)*0x100) 
+#define CIA_IOC_PCI_Wn_MASK(N)	(IDENT_ADDR + 0x8760000440UL + (N)*0x100) 
+#define CIA_IOC_PCI_Tn_BASE(N)	(IDENT_ADDR + 0x8760000480UL + (N)*0x100) 
+
 #define CIA_IOC_PCI_W_DAC		(IDENT_ADDR + 0x87600007C0UL)
 
 /*
@@ -289,6 +293,7 @@ struct el_CIA_sysdata_mcheck {
 #ifdef __KERNEL__
 
 #ifndef __EXTERN_INLINE
+/* Do not touch, this should *NOT* be static inline */
 #define __EXTERN_INLINE extern inline
 #define __IO_EXTERN_INLINE
 #endif

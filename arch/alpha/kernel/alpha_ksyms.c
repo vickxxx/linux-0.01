@@ -25,20 +25,20 @@
 #include <asm/processor.h>
 #include <asm/checksum.h>
 #include <linux/interrupt.h>
-#include <asm/softirq.h>
 #include <asm/fpu.h>
 #include <asm/irq.h>
 #include <asm/machvec.h>
 #include <asm/pgalloc.h>
 #include <asm/semaphore.h>
+#include <asm/tlbflush.h>
+#include <asm/cacheflush.h>
+#include <asm/vga.h>
 
 #define __KERNEL_SYSCALLS__
 #include <asm/unistd.h>
 
 extern struct hwrpb_struct *hwrpb;
 extern void dump_thread(struct pt_regs *, struct user *);
-extern int dump_fpu(struct pt_regs *, elf_fpregset_t *);
-extern spinlock_t kernel_flag;
 extern spinlock_t rtc_lock;
 
 /* these are C runtime functions with special calling conventions: */
@@ -58,11 +58,12 @@ EXPORT_SYMBOL(disable_irq_nosync);
 EXPORT_SYMBOL(probe_irq_mask);
 EXPORT_SYMBOL(screen_info);
 EXPORT_SYMBOL(perf_irq);
-#ifdef CONFIG_ALPHA_SRM
 EXPORT_SYMBOL(callback_getenv);
 EXPORT_SYMBOL(callback_setenv);
 EXPORT_SYMBOL(callback_save_env);
-#endif /* CONFIG_ALPHA_SRM */
+#ifdef CONFIG_ALPHA_GENERIC
+EXPORT_SYMBOL(alpha_using_srm);
+#endif /* CONFIG_ALPHA_GENERIC */
 
 /* platform dependent support */
 EXPORT_SYMBOL(_inb);
@@ -88,6 +89,7 @@ EXPORT_SYMBOL(___raw_writeq);
 EXPORT_SYMBOL(_memcpy_fromio);
 EXPORT_SYMBOL(_memcpy_toio);
 EXPORT_SYMBOL(_memset_c_io);
+EXPORT_SYMBOL(scr_memcpyw);
 EXPORT_SYMBOL(insb);
 EXPORT_SYMBOL(insw);
 EXPORT_SYMBOL(insl);
@@ -103,22 +105,18 @@ EXPORT_SYMBOL(strncpy);
 EXPORT_SYMBOL(strnlen);
 EXPORT_SYMBOL(strncat);
 EXPORT_SYMBOL(strstr);
-EXPORT_SYMBOL(strtok);
 EXPORT_SYMBOL(strpbrk);
 EXPORT_SYMBOL(strchr);
 EXPORT_SYMBOL(strrchr);
 EXPORT_SYMBOL(memcmp);
 EXPORT_SYMBOL(memmove);
+EXPORT_SYMBOL(memscan);
 EXPORT_SYMBOL(__memcpy);
 EXPORT_SYMBOL(__memset);
 EXPORT_SYMBOL(__memsetw);
 EXPORT_SYMBOL(__constant_c_memset);
 EXPORT_SYMBOL(copy_page);
 EXPORT_SYMBOL(clear_page);
-
-EXPORT_SYMBOL(__delay);
-EXPORT_SYMBOL(__udelay);
-EXPORT_SYMBOL(udelay);
 
 EXPORT_SYMBOL(__direct_map_base);
 EXPORT_SYMBOL(__direct_map_size);
@@ -140,9 +138,10 @@ EXPORT_SYMBOL(pci_dac_dma_to_offset);
 #endif
 
 EXPORT_SYMBOL(dump_thread);
-EXPORT_SYMBOL(dump_fpu);
+EXPORT_SYMBOL(dump_elf_thread);
+EXPORT_SYMBOL(dump_elf_task);
+EXPORT_SYMBOL(dump_elf_task_fp);
 EXPORT_SYMBOL(hwrpb);
-EXPORT_SYMBOL(wrusp);
 EXPORT_SYMBOL(start_thread);
 EXPORT_SYMBOL(alpha_read_fp_reg);
 EXPORT_SYMBOL(alpha_read_fp_reg_s);
@@ -157,16 +156,14 @@ EXPORT_SYMBOL(sys_exit);
 EXPORT_SYMBOL(sys_write);
 EXPORT_SYMBOL(sys_read);
 EXPORT_SYMBOL(sys_lseek);
-EXPORT_SYMBOL(__kernel_execve);
+EXPORT_SYMBOL(execve);
 EXPORT_SYMBOL(sys_setsid);
-EXPORT_SYMBOL(sys_sync);
 EXPORT_SYMBOL(sys_wait4);
 
 /* Networking helper routines. */
 EXPORT_SYMBOL(csum_tcpudp_magic);
 EXPORT_SYMBOL(ip_compute_csum);
 EXPORT_SYMBOL(ip_fast_csum);
-EXPORT_SYMBOL(csum_partial_copy);
 EXPORT_SYMBOL(csum_partial_copy_nocheck);
 EXPORT_SYMBOL(csum_partial_copy_from_user);
 EXPORT_SYMBOL(csum_ipv6_magic);
@@ -204,7 +201,6 @@ EXPORT_SYMBOL(up);
  */
 
 #ifdef CONFIG_SMP
-EXPORT_SYMBOL(kernel_flag);
 EXPORT_SYMBOL(synchronize_irq);
 EXPORT_SYMBOL(flush_tlb_all);
 EXPORT_SYMBOL(flush_tlb_mm);
@@ -212,27 +208,28 @@ EXPORT_SYMBOL(flush_tlb_range);
 EXPORT_SYMBOL(flush_tlb_page);
 EXPORT_SYMBOL(smp_imb);
 EXPORT_SYMBOL(cpu_data);
-EXPORT_SYMBOL(__cpu_number_map);
 EXPORT_SYMBOL(smp_num_cpus);
 EXPORT_SYMBOL(smp_call_function);
 EXPORT_SYMBOL(smp_call_function_on_cpu);
-EXPORT_SYMBOL(global_irq_holder);
-EXPORT_SYMBOL(__global_cli);
-EXPORT_SYMBOL(__global_sti);
-EXPORT_SYMBOL(__global_save_flags);
-EXPORT_SYMBOL(__global_restore_flags);
 EXPORT_SYMBOL(atomic_dec_and_lock);
 #ifdef CONFIG_DEBUG_SPINLOCK
-EXPORT_SYMBOL(spin_unlock);
+EXPORT_SYMBOL(_raw_spin_unlock);
 EXPORT_SYMBOL(debug_spin_lock);
 EXPORT_SYMBOL(debug_spin_trylock);
 #endif
 #ifdef CONFIG_DEBUG_RWLOCK
-EXPORT_SYMBOL(write_lock);
-EXPORT_SYMBOL(read_lock);
+EXPORT_SYMBOL(_raw_write_lock);
+EXPORT_SYMBOL(_raw_read_lock);
 #endif
 EXPORT_SYMBOL(cpu_present_mask);
 #endif /* CONFIG_SMP */
+
+/*
+ * NUMA specific symbols
+ */
+#ifdef CONFIG_DISCONTIGMEM
+EXPORT_SYMBOL(node_data);
+#endif /* CONFIG_DISCONTIGMEM */
 
 EXPORT_SYMBOL(rtc_lock);
 
@@ -258,3 +255,8 @@ EXPORT_SYMBOL_NOVERS(memset);
 EXPORT_SYMBOL_NOVERS(memchr);
 
 EXPORT_SYMBOL(get_wchan);
+
+#ifdef CONFIG_ALPHA_IRONGATE
+EXPORT_SYMBOL(irongate_ioremap);
+EXPORT_SYMBOL(irongate_iounmap);
+#endif

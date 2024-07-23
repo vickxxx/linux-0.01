@@ -14,7 +14,7 @@
  *		0.15	Mike Mclagan	Packet freeing, bug in kmalloc call
  *					DLCI_RET handling
  *		0.20	Mike McLagan	More conservative on which packets
- *					are returned for retry and whic are
+ *					are returned for retry and which are
  *					are dropped.  If DLCI_RET_DROP is
  *					returned from the FRAD, the packet is
  *				 	sent back to Linux for re-transmission
@@ -30,32 +30,30 @@
 
 #include <linux/config.h> /* for CONFIG_DLCI_COUNT */
 #include <linux/module.h>
-
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
 #include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
+#include <linux/init.h>
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/init.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
-#include <asm/uaccess.h>
-
 #include <linux/errno.h>
-
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <linux/if_arp.h>
 #include <linux/if_frad.h>
 
 #include <net/sock.h>
+
+#include <asm/system.h>
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/dma.h>
+#include <asm/uaccess.h>
 
 static const char devname[] = "dlci";
 static const char version[] = "DLCI driver v0.35, 4 Jan 1997, mike.mclagan@linux.org";
@@ -95,6 +93,8 @@ int register_frad(const char *name)
 
 	return(0);
 }
+
+EXPORT_SYMBOL(register_frad);
 
 int unregister_frad(const char *name)
 {
@@ -578,9 +578,10 @@ int dlci_init(struct net_device *dev)
 	return(0);
 }
 
-int __init dlci_setup(void)
+int __init init_dlci(void)
 {
 	int i;
+	dlci_ioctl_set(dlci_ioctl);
 
 	printk("%s.\n", version);
 	
@@ -590,25 +591,16 @@ int __init dlci_setup(void)
 	for(i=0;i<sizeof(basename) / sizeof(char *);i++)
 		basename[i] = NULL;
 
-	return(0);
+	return 0;
 }
 
-#ifdef MODULE
-
-extern int (*dlci_ioctl_hook)(unsigned int, void *);
-
-int init_module(void)
+void __exit dlci_exit(void)
 {
-	dlci_ioctl_hook = dlci_ioctl;
-
-	return(dlci_setup());
+	dlci_ioctl_set(NULL);
 }
 
-void cleanup_module(void)
-{
-	dlci_ioctl_hook = NULL;
-}
-#endif /* MODULE */
+module_init(init_dlci);
+module_exit(dlci_exit);
 
 MODULE_AUTHOR("Mike McLagan");
 MODULE_DESCRIPTION("Frame Relay DLCI layer");

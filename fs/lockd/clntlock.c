@@ -10,7 +10,7 @@
 
 #include <linux/module.h>
 #include <linux/types.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/nfs_fs.h>
 #include <linux/unistd.h>
 #include <linux/sunrpc/clnt.h>
@@ -188,7 +188,7 @@ nlmclnt_recovery(struct nlm_host *host, u32 newstate)
 		nlmclnt_prepare_reclaim(host, newstate);
 		nlm_get_host(host);
 		MOD_INC_USE_COUNT;
-		kernel_thread(reclaimer, host, CLONE_SIGNAL);
+		kernel_thread(reclaimer, host, CLONE_KERNEL);
 	}
 }
 
@@ -201,11 +201,8 @@ reclaimer(void *ptr)
 	struct file_lock *fl;
 	struct inode *inode;
 
-	daemonize();
-	reparent_to_init();
-	snprintf(current->comm, sizeof(current->comm),
-		 "%s-reclaim",
-		 host->h_name);
+	daemonize("%s-reclaim", host->h_name);
+	allow_signal(SIGKILL);
 
 	/* This one ensures that our parent doesn't terminate while the
 	 * reclaim is in progress */

@@ -12,9 +12,11 @@
 #define _ASM_MMU_CONTEXT_H
 
 #include <linux/config.h>
+#include <linux/errno.h>
+#include <linux/sched.h>
 #include <linux/slab.h>
-#include <asm/pgalloc.h>
-#include <asm/pgtable.h>
+#include <asm/cacheflush.h>
+#include <asm/tlbflush.h>
 
 /*
  * For the fast tlb miss handlers, we currently keep a per cpu array
@@ -31,19 +33,10 @@
 	TLBMISS_HANDLER_SETUP_PGD(swapper_pg_dir)
 extern unsigned long pgd_current[];
 
-#define cpu_context(cpu, mm)	((mm)->context[cpu])
-#define cpu_asid(cpu, mm)	(cpu_context((cpu), (mm)) & ASID_MASK)
-#define asid_cache(cpu)		(cpu_data[cpu].asid_cache)
-
 #if defined(CONFIG_CPU_R3000) || defined(CONFIG_CPU_TX39XX)
 
 #define ASID_INC	0x40
 #define ASID_MASK	0xfc0
-
-#elif defined(CONFIG_CPU_RM9000)
-
-#define ASID_INC	0x1
-#define ASID_MASK	0xfff
 
 #else /* FIXME: not correct for R6000, R8000 */
 
@@ -52,7 +45,11 @@ extern unsigned long pgd_current[];
 
 #endif
 
-static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk, unsigned cpu)
+#define cpu_context(cpu, mm)	((mm)->context[cpu])
+#define cpu_asid(cpu, mm)	(cpu_context((cpu), (mm)) & ASID_MASK)
+#define asid_cache(cpu)		(cpu_data[cpu].asid_cache)
+
+static inline void enter_lazy_tlb(struct mm_struct *mm, struct task_struct *tsk)
 {
 }
 
@@ -69,7 +66,9 @@ get_new_mmu_context(struct mm_struct *mm, unsigned long cpu)
 	unsigned long asid = asid_cache(cpu);
 
 	if (! ((asid += ASID_INC) & ASID_MASK) ) {
+#ifdef CONFIG_VTAG_ICACHE
 		flush_icache_all();
+#endif
 		local_flush_tlb_all();	/* start new asid cycle */
 		if (!asid)		/* fix version if needed */
 			asid = ASID_FIRST_VERSION;
@@ -86,15 +85,17 @@ init_new_context(struct task_struct *tsk, struct mm_struct *mm)
 {
 	int i;
 
-	for (i = 0; i < smp_num_cpus; i++)
+	for (i = 0; i < num_online_cpus(); i++)
 		cpu_context(i, mm) = 0;
+
 	return 0;
 }
 
 static inline void switch_mm(struct mm_struct *prev, struct mm_struct *next,
-                             struct task_struct *tsk, unsigned cpu)
+                             struct task_struct *tsk)
 {
 	unsigned long flags;
+	unsigned cpu = smp_processor_id();
 
 	local_irq_save(flags);
 
@@ -123,6 +124,8 @@ static inline void destroy_context(struct mm_struct *mm)
 {
 }
 
+#define deactivate_mm(tsk,mm)	do { } while (0)
+
 /*
  * After we have set current->mm to a new value, this activates
  * the context for the new mm so we see the new mappings.
@@ -141,7 +144,7 @@ activate_mm(struct mm_struct *prev, struct mm_struct *next)
 	write_c0_entryhi(cpu_context(cpu, next));
 	TLBMISS_HANDLER_SETUP_PGD(next->pgd);
 
-	/* mark mmu ownership change */
+	/* mark mmu ownership change */	
 	clear_bit(cpu, &prev->cpu_vm_mask);
 	set_bit(cpu, &next->cpu_vm_mask);
 

@@ -1,5 +1,5 @@
 /*
- * $Id: io.h,v 1.29 2001/11/10 09:28:34 davem Exp $
+ * $Id: io.h,v 1.30 2001/12/21 01:23:21 davem Exp $
  */
 #ifndef __SPARC_IO_H
 #define __SPARC_IO_H
@@ -11,8 +11,7 @@
 #include <asm/page.h>      /* IO address mapping routines need this */
 #include <asm/system.h>
 
-#define virt_to_bus virt_to_phys
-#define bus_to_virt phys_to_virt
+#define page_to_phys(page)	((page - mem_map) << PAGE_SHIFT)
 
 static __inline__ u32 flip_dword (u32 d)
 {
@@ -26,38 +25,17 @@ static __inline__ u16 flip_word (u16 d)
 
 /*
  * Memory mapped I/O to PCI
+ *
+ * Observe that ioremap returns void* cookie, but accessors, such
+ * as readb, take unsigned long as address, by API. This mismatch
+ * happened historically. The ioremap is much older than accessors,
+ * so at one time ioremap's cookie was used as address (*a = val).
+ * When accessors came about, they were designed to be compatible across
+ * buses, so that drivers can select proper ones like sunhme.c did.
+ * To make that easier, they use same aruments (ulong) for sbus, pci, isa.
+ * The offshot is, we must cast readb et. al. arguments with a #define.
  */
-static __inline__ u8 readb(unsigned long addr)
-{
-	return *(volatile u8 *)addr;
-}
 
-static __inline__ u16 readw(unsigned long addr)
-{
-	return flip_word(*(volatile u16 *)addr);
-}
-
-static __inline__ u32 readl(unsigned long addr)
-{
-	return flip_dword(*(volatile u32 *)addr);
-}
-
-static __inline__ void writeb(u8 b, unsigned long addr)
-{
-	*(volatile u8 *)addr = b;
-}
-
-static __inline__ void writew(u16 b, unsigned long addr)
-{
-	*(volatile u16 *)addr = flip_word(b);
-}
-
-static __inline__ void writel(u32 b, unsigned long addr)
-{
-	*(volatile u32 *)addr = flip_dword(b);
-}
-
-/* Now the 'raw' versions. */
 static __inline__ u8 __raw_readb(unsigned long addr)
 {
 	return *(volatile u8 *)addr;
@@ -87,6 +65,14 @@ static __inline__ void __raw_writel(u32 b, unsigned long addr)
 {
 	*(volatile u32 *)addr = b;
 }
+
+#define readb(addr)	(*(volatile u8 *)(addr))
+#define readw(addr)	flip_word(*(volatile u16 *)(addr))
+#define readl(addr)	flip_dword(*(volatile u32 *)(addr))
+
+#define writeb(b, a)	(*(volatile u8 *)(a) = b)
+#define writew(b, a)	(*(volatile u16 *)(a) = flip_word(b))
+#define writel(b, a)	(*(volatile u32 *)(a) = flip_dword(b))
 
 /*
  * I/O space operations
@@ -164,7 +150,6 @@ static __inline__ void _sbus_writel(u32 b, unsigned long addr)
 
 /*
  * The only reason for #define's is to hide casts to unsigned long.
- * XXX Rewrite drivers without structures for registers.
  */
 #define sbus_readb(a)		_sbus_readb((unsigned long)(a))
 #define sbus_readw(a)		_sbus_readw((unsigned long)(a))
@@ -194,18 +179,13 @@ extern void *ioremap(unsigned long offset, unsigned long size);
 #define ioremap_nocache(X,Y)	ioremap((X),(Y))
 extern void iounmap(void *addr);
 
-/* P3: talk davem into dropping "name" argument in favor of res->name */
 /*
  * Bus number may be in res->flags... somewhere.
  */
 extern unsigned long sbus_ioremap(struct resource *res, unsigned long offset,
     unsigned long size, char *name);
-/* XXX Partial deallocations? I think not! */
 extern void sbus_iounmap(unsigned long vaddr, unsigned long size);
 
-
-#define virt_to_phys(x) __pa((unsigned long)(x))
-#define phys_to_virt(x) __va((unsigned long)(x))
 
 /*
  * At the moment, we do not use CMOS_READ anywhere outside of rtc.c,
@@ -216,7 +196,7 @@ extern void sbus_iounmap(unsigned long vaddr, unsigned long size);
 #define RTC_ALWAYS_BCD  0
 
 /* Nothing to do */
-/* P3: Only IDE DMA may need these. */
+/* P3: Only IDE DMA may need these. XXX Verify that it still does... */
 
 #define dma_cache_inv(_start,_size)		do { } while (0)
 #define dma_cache_wback(_start,_size)		do { } while (0)

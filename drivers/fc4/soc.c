@@ -40,7 +40,6 @@ static char *version =
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
-#include <asm/auxio.h>
 #include <asm/pgtable.h>
 #include <asm/irq.h>
 
@@ -104,7 +103,7 @@ static void soc_reset(fc_channel *fc)
 	soc_enable(s);
 }
 
-static void inline soc_solicited (struct soc *s)
+static inline void soc_solicited (struct soc *s)
 {
 	fc_hdr fchdr;
 	soc_rsp *hwrsp;
@@ -165,7 +164,7 @@ static void inline soc_solicited (struct soc *s)
 	}
 }
 
-static void inline soc_request (struct soc *s, u32 cmd)
+static inline void soc_request (struct soc *s, u32 cmd)
 {
 	SOC_SETIMASK(s, s->imask & ~(cmd & SOC_CMD_REQ_QALL));
 	SOD(("imask %08lx %08lx\n", s->imask, sbus_readl(s->regs + IMASK)));
@@ -184,7 +183,7 @@ static void inline soc_request (struct soc *s, u32 cmd)
 		s->curr_port ^= 1;
 }
 
-static void inline soc_unsolicited (struct soc *s)
+static inline void soc_unsolicited (struct soc *s)
 {
 	soc_rsp *hwrsp, *hwrspc;
 	soc_cq *sw_cq;
@@ -335,20 +334,22 @@ update_out:
 	}
 }
 
-static void soc_intr(int irq, void *dev_id, struct pt_regs *regs)
+static irqreturn_t soc_intr(int irq, void *dev_id, struct pt_regs *regs)
 {
 	u32 cmd;
 	unsigned long flags;
 	register struct soc *s = (struct soc *)dev_id;
 
-	spin_lock_irqsave(&io_request_lock, flags);
+	spin_lock_irqsave(&s->lock, flags);
 	cmd = sbus_readl(s->regs + CMD);
 	for (; (cmd = SOC_INTR (s, cmd)); cmd = sbus_readl(s->regs + CMD)) {
 		if (cmd & SOC_CMD_RSP_Q1) soc_unsolicited (s);
 		if (cmd & SOC_CMD_RSP_Q0) soc_solicited (s);
 		if (cmd & SOC_CMD_REQ_QALL) soc_request (s, cmd);
 	}
-	spin_unlock_irqrestore(&io_request_lock, flags);
+	spin_unlock_irqrestore(&s->lock, flags);
+
+	return IRQ_HANDLED;
 }
 
 #define TOKEN(proto, port, token) (((proto)<<12)|(token)|(port))
@@ -559,6 +560,7 @@ static inline void soc_init(struct sbus_dev *sdev, int no)
 	if (s == NULL)
 		return;
 	memset (s, 0, sizeof(struct soc));
+	spin_lock_init(&s->lock);
 	s->soc_no = no;
 
 	SOD(("socs %08lx soc_intr %08lx soc_hw_enque %08x\n",
@@ -741,7 +743,6 @@ static void __exit soc_cleanup(void)
 	
 	for_each_soc(s) {
 		irq = s->port[0].fc.irq;
-		disable_irq (irq);
 		free_irq (irq, s);
 
 		fcp_release(&(s->port[0].fc), 2);
@@ -759,8 +760,6 @@ static void __exit soc_cleanup(void)
 				     s->req_cpu, s->req_dvma);
 	}
 }
-
-EXPORT_NO_SYMBOLS;
 
 module_init(soc_probe);
 module_exit(soc_cleanup);

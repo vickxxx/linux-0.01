@@ -685,6 +685,7 @@ static int lan_saa9730_rx(struct net_device *dev)
 						 len, 0);
 				skb->protocol = eth_type_trans(skb, dev);
 				netif_rx(skb);
+				dev->last_rx = jiffies;
 			}
 		} else {
 			/* We got an error packet. */
@@ -744,7 +745,7 @@ static int lan_saa9730_rx(struct net_device *dev)
 	return 0;
 }
 
-static void lan_saa9730_interrupt(const int irq, void *dev_id,
+static irqreturn_t lan_saa9730_interrupt(const int irq, void *dev_id,
 				  struct pt_regs *regs)
 {
 	struct net_device *dev = (struct net_device *) dev_id;
@@ -772,7 +773,7 @@ static void lan_saa9730_interrupt(const int irq, void *dev_id,
 	/* Enable the EVM LAN interrupt. */
 	evm_saa9730_unblock_lan_int(lp);
 
-	return;
+	return IRQ_HANDLED;
 }
 
 static int lan_saa9730_open_fail(struct net_device *dev)
@@ -1049,31 +1050,30 @@ static int lan_saa9730_init(struct net_device *dev, int ioaddr, int irq)
 static int __init saa9730_probe(void)
 {
 	struct net_device *dev = NULL;
+	struct pci_dev *pdev = NULL;
 
-	if (pci_present()) {
-		struct pci_dev *pdev = NULL;
-		if (lan_saa9730_debug > 1)
-			printk
-			    ("saa9730.c: PCI bios is present, checking for devices...\n");
+	if (lan_saa9730_debug > 1)
+		printk
+		    ("saa9730.c: PCI bios is present, checking for devices...\n");
 
-		while ((pdev = pci_find_device(PCI_VENDOR_ID_PHILIPS,
-					       PCI_DEVICE_ID_PHILIPS_SAA9730,
-					       pdev))) {
-			unsigned int pci_ioaddr;
+	while ((pdev = pci_find_device(PCI_VENDOR_ID_PHILIPS,
+				       PCI_DEVICE_ID_PHILIPS_SAA9730,
+				       pdev))) {
+		unsigned int pci_ioaddr;
 
-			pci_irq_line = pdev->irq;
-			/* LAN base address in located at BAR 1. */
+		pci_irq_line = pdev->irq;
+		/* LAN base address in located at BAR 1. */
 
-			pci_ioaddr = pci_resource_start(pdev, 1);
-			pci_set_master(pdev);
+		pci_ioaddr = pci_resource_start(pdev, 1);
+		pci_set_master(pdev);
 
-			printk("Found SAA9730 (PCI) at %#x, irq %d.\n",
-			       pci_ioaddr, pci_irq_line);
-			if (!lan_saa9730_init
-			    (dev, pci_ioaddr, pci_irq_line)) return 0;
-			else
-				printk("Lan init failed.\n");
-		}
+		printk("Found SAA9730 (PCI) at %#x, irq %d.\n",
+		       pci_ioaddr, pci_irq_line);
+		if (!lan_saa9730_init
+		    (dev, pci_ioaddr, pci_irq_line))
+			return 0;
+		else
+			printk("Lan init failed.\n");
 	}
 
 	return -ENODEV;

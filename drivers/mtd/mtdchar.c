@@ -1,8 +1,7 @@
 /*
- * $Id: mtdchar.c,v 1.44 2001/10/02 15:05:11 dwmw2 Exp $
+ * $Id: mtdchar.c,v 1.54 2003/05/21 10:50:43 dwmw2 Exp $
  *
  * Character-device access to raw MTD devices.
- * Pure 2.4 version - compatibility cruft removed to mtdchar-compat.c
  *
  */
 
@@ -11,6 +10,9 @@
 #include <linux/module.h>
 #include <linux/mtd/mtd.h>
 #include <linux/slab.h>
+#include <linux/init.h>
+#include <linux/fs.h>
+#include <asm/uaccess.h>
 
 #ifdef CONFIG_DEVFS_FS
 #include <linux/devfs_fs_kernel.h>
@@ -18,13 +20,10 @@ static void mtd_notify_add(struct mtd_info* mtd);
 static void mtd_notify_remove(struct mtd_info* mtd);
 
 static struct mtd_notifier notifier = {
-	add:	mtd_notify_add,
-	remove:	mtd_notify_remove,
+	.add	= mtd_notify_add,
+	.remove	= mtd_notify_remove,
 };
 
-static devfs_handle_t devfs_dir_handle;
-static devfs_handle_t devfs_rw_handle[MAX_MTD_DEVICES];
-static devfs_handle_t devfs_ro_handle[MAX_MTD_DEVICES];
 #endif
 
 static loff_t mtd_lseek (struct file *file, loff_t offset, int orig)
@@ -60,7 +59,7 @@ static loff_t mtd_lseek (struct file *file, loff_t offset, int orig)
 
 static int mtd_open(struct inode *inode, struct file *file)
 {
-	int minor = MINOR(inode->i_rdev);
+	int minor = minor(inode->i_rdev);
 	int devnum = minor >> 1;
 	struct mtd_info *mtd;
 
@@ -287,7 +286,12 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 
 	case MEMERASE:
 	{
-		struct erase_info *erase=kmalloc(sizeof(struct erase_info),GFP_KERNEL);
+		struct erase_info *erase;
+
+		if(!(file->f_mode & 2))
+			return -EPERM;
+
+		erase=kmalloc(sizeof(struct erase_info),GFP_KERNEL);
 		if (!erase)
 			ret = -ENOMEM;
 		else {
@@ -338,6 +342,9 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 		void *databuf;
 		ssize_t retlen;
 		
+		if(!(file->f_mode & 2))
+			return -EPERM;
+
 		if (copy_from_user(&buf, (struct mtd_oob_buf *)arg, sizeof(struct mtd_oob_buf)))
 			return -EFAULT;
 		
@@ -434,6 +441,12 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 		break;
 	}
 
+	case MEMSETOOBSEL:
+	{
+		if (copy_from_user(&mtd->oobinfo ,(void *)arg, sizeof(struct nand_oobinfo)))
+			return -EFAULT;
+		break;
+	}
 		
 	default:
 		DEBUG(MTD_DEBUG_LEVEL0, "Invalid ioctl %x (MEMGETINFO = %x)\n", cmd, MEMGETINFO);
@@ -444,13 +457,13 @@ static int mtd_ioctl(struct inode *inode, struct file *file,
 } /* memory_ioctl */
 
 static struct file_operations mtd_fops = {
-	owner:		THIS_MODULE,
-	llseek:		mtd_lseek,     	/* lseek */
-	read:		mtd_read,	/* read */
-	write: 		mtd_write, 	/* write */
-	ioctl:		mtd_ioctl,	/* ioctl */
-	open:		mtd_open,	/* open */
-	release:	mtd_close,	/* release */
+	.owner		= THIS_MODULE,
+	.llseek		= mtd_lseek,
+	.read		= mtd_read,
+	.write		= mtd_write,
+	.ioctl		= mtd_ioctl,
+	.open		= mtd_open,
+	.release	= mtd_close,
 };
 
 
@@ -460,56 +473,36 @@ static struct file_operations mtd_fops = {
 
 static void mtd_notify_add(struct mtd_info* mtd)
 {
-	char name[8];
-
 	if (!mtd)
 		return;
-
-	sprintf(name, "%d", mtd->index);
-	devfs_rw_handle[mtd->index] = devfs_register(devfs_dir_handle, name,
-			DEVFS_FL_DEFAULT, MTD_CHAR_MAJOR, mtd->index*2,
-			S_IFCHR | S_IRUGO | S_IWUGO,
-			&mtd_fops, NULL);
-
-	sprintf(name, "%dro", mtd->index);
-	devfs_ro_handle[mtd->index] = devfs_register(devfs_dir_handle, name,
-			DEVFS_FL_DEFAULT, MTD_CHAR_MAJOR, mtd->index*2+1,
-			S_IFCHR | S_IRUGO | S_IWUGO,
-			&mtd_fops, NULL);
+	devfs_mk_cdev(MKDEV(MTD_CHAR_MAJOR, mtd->index*2),
+			S_IFCHR | S_IRUGO | S_IWUGO, "mtd/%d", mtd->index);
+	devfs_mk_cdev(MKDEV(MTD_CHAR_MAJOR, mtd->index*2+1),
+			S_IFCHR | S_IRUGO | S_IWUGO, "mtd/%dro", mtd->index);
 }
 
 static void mtd_notify_remove(struct mtd_info* mtd)
 {
 	if (!mtd)
 		return;
-
-	devfs_unregister(devfs_rw_handle[mtd->index]);
-	devfs_unregister(devfs_ro_handle[mtd->index]);
+	devfs_remove("mtd/%d", mtd->index);
+	devfs_remove("mtd/%dro", mtd->index);
 }
 #endif
 
 static int __init init_mtdchar(void)
 {
-#ifdef CONFIG_DEVFS_FS
-	if (devfs_register_chrdev(MTD_CHAR_MAJOR, "mtd", &mtd_fops))
-	{
+	if (register_chrdev(MTD_CHAR_MAJOR, "mtd", &mtd_fops)) {
 		printk(KERN_NOTICE "Can't allocate major number %d for Memory Technology Devices.\n",
 		       MTD_CHAR_MAJOR);
 		return -EAGAIN;
 	}
 
-	devfs_dir_handle = devfs_mk_dir(NULL, "mtd", NULL);
+#ifdef CONFIG_DEVFS_FS
+	devfs_mk_dir("mtd");
 
 	register_mtd_user(&notifier);
-#else
-	if (register_chrdev(MTD_CHAR_MAJOR, "mtd", &mtd_fops))
-	{
-		printk(KERN_NOTICE "Can't allocate major number %d for Memory Technology Devices.\n",
-		       MTD_CHAR_MAJOR);
-		return -EAGAIN;
-	}
 #endif
-
 	return 0;
 }
 
@@ -517,11 +510,9 @@ static void __exit cleanup_mtdchar(void)
 {
 #ifdef CONFIG_DEVFS_FS
 	unregister_mtd_user(&notifier);
-	devfs_unregister(devfs_dir_handle);
-	devfs_unregister_chrdev(MTD_CHAR_MAJOR, "mtd");
-#else
-	unregister_chrdev(MTD_CHAR_MAJOR, "mtd");
+	devfs_remove("mtd");
 #endif
+	unregister_chrdev(MTD_CHAR_MAJOR, "mtd");
 }
 
 module_init(init_mtdchar);

@@ -23,6 +23,8 @@
 	This is a compatibility hardware problem.
 
 	Versions:
+	0.13a   in memory shortage, drop packets also in board
+		(Michael Westermann <mw@microdata-pos.de>, 07/30/2002)
 	0.13    irq sharing, rewrote probe function, fixed a nasty bug in
 		hardware_send_packet and a major cleanup (aris, 11/08/2001)
 	0.12d	fixing a problem with single card detected as eight eth devices
@@ -129,27 +131,25 @@ static const char version[] =
 */
 
 #include <linux/kernel.h>
-#include <linux/sched.h>
 #include <linux/types.h>
 #include <linux/fcntl.h>
 #include <linux/interrupt.h>
-#include <linux/ptrace.h>
 #include <linux/ioport.h>
 #include <linux/in.h>
 #include <linux/slab.h>
 #include <linux/string.h>
-#include <asm/system.h>
-#include <asm/bitops.h>
-#include <asm/io.h>
-#include <asm/dma.h>
 #include <linux/errno.h>
-
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
 #include <linux/skbuff.h>
 #include <linux/spinlock.h>
 #include <linux/init.h>
 #include <linux/delay.h>
+
+#include <asm/system.h>
+#include <asm/bitops.h>
+#include <asm/io.h>
+#include <asm/dma.h>
 
 #define compat_dev_kfree_skb( skb, mode ) dev_kfree_skb( (skb) )
 /* I had reports of looong delays with SLOW_DOWN defined as udelay(2) */
@@ -307,7 +307,7 @@ extern int eepro_probe(struct net_device *dev);
 static int	eepro_probe1(struct net_device *dev, short ioaddr);
 static int	eepro_open(struct net_device *dev);
 static int	eepro_send_packet(struct sk_buff *skb, struct net_device *dev);
-static void	eepro_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t eepro_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void 	eepro_rx(struct net_device *dev);
 static void 	eepro_transmit_interrupt(struct net_device *dev);
 static int	eepro_close(struct net_device *dev);
@@ -665,37 +665,37 @@ static void eepro_print_info (struct net_device *dev)
 
 	i = inb(dev->base_addr + ID_REG);
 	printk(KERN_DEBUG " id: %#x ",i);
-	printk(KERN_DEBUG " io: %#x ", (unsigned)dev->base_addr);
+	printk(" io: %#x ", (unsigned)dev->base_addr);
 
 	switch (lp->eepro) {
 		case LAN595FX_10ISA:
-			printk(KERN_INFO "%s: Intel EtherExpress 10 ISA\n at %#x,",
+			printk("%s: Intel EtherExpress 10 ISA\n at %#x,",
 					dev->name, (unsigned)dev->base_addr);
 			break;
 		case LAN595FX:
-			printk(KERN_INFO "%s: Intel EtherExpress Pro/10+ ISA\n at %#x,", 
+			printk("%s: Intel EtherExpress Pro/10+ ISA\n at %#x,", 
 					dev->name, (unsigned)dev->base_addr);
 			break;
 		case LAN595TX:
-			printk(KERN_INFO "%s: Intel EtherExpress Pro/10 ISA at %#x,",
+			printk("%s: Intel EtherExpress Pro/10 ISA at %#x,",
 					dev->name, (unsigned)dev->base_addr);
 			break;
 		case LAN595:
-			printk(KERN_INFO "%s: Intel 82595-based lan card at %#x,", 
+			printk("%s: Intel 82595-based lan card at %#x,", 
 					dev->name, (unsigned)dev->base_addr);
 	}
 
 	for (i=0; i < 6; i++)
-		printk(KERN_INFO "%c%02x", i ? ':' : ' ', dev->dev_addr[i]);
+		printk("%c%02x", i ? ':' : ' ', dev->dev_addr[i]);
 
 	if (net_debug > 3)
 		printk(KERN_DEBUG ", %dK RCV buffer",
 				(int)(lp->rcv_ram)/1024);
 
 	if (dev->irq > 2)
-		printk(KERN_INFO ", IRQ %d, %s.\n", dev->irq, ifmap[dev->if_port]);
+		printk(", IRQ %d, %s.\n", dev->irq, ifmap[dev->if_port]);
 	else 
-		printk(KERN_INFO ", %s.\n", ifmap[dev->if_port]);
+		printk(", %s.\n", ifmap[dev->if_port]);
 
 	if (net_debug > 3) {
 		i = read_eeprom(dev->base_addr, 5, dev);
@@ -820,7 +820,6 @@ static int __init eepro_probe1(struct net_device *dev, short ioaddr)
 				}
 				if (dev->irq < 2) {
 			printk(KERN_ERR " Duh! illegal interrupt vector stored in EEPROM.\n");
-					kfree(dev->priv);
 			retval = -ENODEV;
 			goto freeall;
 				} else
@@ -828,8 +827,10 @@ static int __init eepro_probe1(struct net_device *dev, short ioaddr)
 			}
 
 			/* Grab the region so we can find another board if autoIRQ fails. */
-			request_region(ioaddr, EEPRO_IO_EXTENT, dev->name);
-
+			if (!request_region(ioaddr, EEPRO_IO_EXTENT, dev->name)) { 
+				printk(KERN_WARNING "EEPRO: io-port 0x%04x in use \n", ioaddr);
+				goto freeall;
+			}
 			((struct eepro_local *)dev->priv)->lock = SPIN_LOCK_UNLOCKED;
 
 			dev->open               = eepro_open;
@@ -896,12 +897,16 @@ static int	eepro_grab_irq(struct net_device *dev)
 		eepro_sw2bank0(ioaddr); /* Switch back to Bank 0 */
 
 		if (request_irq (*irqp, NULL, SA_SHIRQ, "bogus", dev) != EBUSY) {
+			unsigned long irq_mask, delay;
 			/* Twinkle the interrupt, and check if it's seen */
-			autoirq_setup(0);
+			irq_mask = probe_irq_on();
 
 			eepro_diag(ioaddr); /* RESET the 82595 */
 
-			if (*irqp == autoirq_report(2))  /* It's a good IRQ line */
+			delay = jiffies + HZ/50;
+			while (time_before(jiffies, delay)) ;
+
+			if (*irqp == probe_irq_off(irq_mask))  /* It's a good IRQ line */
 				break;
 
 			/* clear all interrupts */
@@ -1099,8 +1104,6 @@ static int eepro_open(struct net_device *dev)
 	/* enabling rx */
 	eepro_en_rx(ioaddr);
 
-	MOD_INC_USE_COUNT;
-
 	return 0;
 }
 
@@ -1125,17 +1128,23 @@ static int eepro_send_packet(struct sk_buff *skb, struct net_device *dev)
 	struct eepro_local *lp = (struct eepro_local *)dev->priv;
 	unsigned long flags;
 	int ioaddr = dev->base_addr;
+	short length = skb->len;
 
 	if (net_debug > 5)
 		printk(KERN_DEBUG  "%s: entering eepro_send_packet routine.\n", dev->name);
 
+	if (length < ETH_ZLEN) {
+		skb = skb_padto(skb, ETH_ZLEN);
+		if (skb == NULL)
+			return 0;
+		length = ETH_ZLEN;
+	}
 	netif_stop_queue (dev);
 
 	eepro_dis_int(ioaddr);
 	spin_lock_irqsave(&lp->lock, flags);
 
 	{
-		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		unsigned char *buf = skb->data;
 
 		if (hardware_send_packet(dev, buf, length))
@@ -1167,17 +1176,18 @@ static int eepro_send_packet(struct sk_buff *skb, struct net_device *dev)
 /*	The typical workload of the driver:
 	Handle the network interface interrupts. */
 
-static void
+static irqreturn_t
 eepro_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
 	struct net_device *dev =  (struct net_device *)dev_id;
 	                      /* (struct net_device *)(irq2dev_map[irq]);*/
 	struct eepro_local *lp;
 	int ioaddr, status, boguscount = 20;
+	int handled = 0;
 
 	if (dev == NULL) {
                 printk (KERN_ERR "eepro_interrupt(): irq %d for unknown device.\\n", irq);
-                return;
+                return IRQ_NONE;
         }
 
 	lp = (struct eepro_local *)dev->priv;
@@ -1191,6 +1201,7 @@ eepro_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 
 	while (((status = inb(ioaddr + STATUS_REG)) & (RX_INT|TX_INT)) && (boguscount--))
 	{
+		handled = 1;
 		if (status & RX_INT) {
 			if (net_debug > 4)
 				printk(KERN_DEBUG "%s: packet received interrupt.\n", dev->name);
@@ -1222,7 +1233,7 @@ eepro_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 		printk(KERN_DEBUG "%s: exiting eepro_interrupt routine.\n", dev->name);
 
 	spin_unlock(&lp->lock);
-	return;
+	return IRQ_RETVAL(handled);
 }
 
 static int eepro_close(struct net_device *dev)
@@ -1263,8 +1274,6 @@ static int eepro_close(struct net_device *dev)
 #endif
 
 	/* Update the statistics here. What statistics? */
-
-	MOD_DEC_USE_COUNT;
 
 	return 0;
 }
@@ -1578,6 +1587,10 @@ eepro_rx(struct net_device *dev)
 			if (skb == NULL) {
 				printk(KERN_NOTICE "%s: Memory squeeze, dropping packet.\n", dev->name);
 				lp->stats.rx_dropped++;
+				rcv_car = lp->rx_start + RCV_HEADER + rcv_size;
+				lp->rx_start = rcv_next_frame;
+				outw(rcv_next_frame, ioaddr + HOST_ADDRESS_REG);
+
 				break;
 			}
 			skb->dev = dev;
@@ -1702,7 +1715,7 @@ static int autodetect;
 static int n_eepro;
 /* For linux 2.1.xx */
 
-MODULE_AUTHOR("Pascal Dupuis <dupuis@lei.ucl.ac.be> for the 2.1 stuff (locking,...)");
+MODULE_AUTHOR("Pascal Dupuis, and aris@cathedrallabs.org");
 MODULE_DESCRIPTION("Intel i82595 ISA EtherExpressPro10/10+ driver");
 MODULE_LICENSE("GPL");
 

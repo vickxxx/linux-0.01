@@ -1,7 +1,8 @@
 #ifndef _RRUNNER_H_
 #define _RRUNNER_H_
 
-#include<linux/config.h>
+#include <linux/config.h>
+#include <linux/interrupt.h>
 
 #if ((BITS_PER_LONG != 32) && (BITS_PER_LONG != 64))
 #error "BITS_PER_LONG not defined or not valid"
@@ -351,7 +352,7 @@ struct rr_regs {
  */
 
 #define EVT_RING_ENTRIES	64
-#define EVT_RING_SIZE	(EVT_RING_ENTRIES * sizeof(struct event))
+#define EVT_RING_SIZE		(EVT_RING_ENTRIES * sizeof(struct event))
 
 struct event {
 #ifdef __LITTLE_ENDIAN
@@ -496,9 +497,9 @@ typedef struct {
 } rraddr;
 
 
-static inline void set_rraddr(rraddr *ra, volatile void *addr)
+static inline void set_rraddr(rraddr *ra, dma_addr_t addr)
 {
-	unsigned long baddr = virt_to_bus((void *)addr);
+	unsigned long baddr = addr;
 #if (BITS_PER_LONG == 64)
 	ra->addrlo = baddr;
 #else
@@ -509,9 +510,9 @@ static inline void set_rraddr(rraddr *ra, volatile void *addr)
 }
 
 
-static inline void set_rxaddr(struct rr_regs *regs, volatile void *addr)
+static inline void set_rxaddr(struct rr_regs *regs, volatile dma_addr_t addr)
 {
-	unsigned long baddr = virt_to_bus((void *)addr);
+	unsigned long baddr = addr;
 #if (BITS_PER_LONG == 64) && defined(__LITTLE_ENDIAN)
 	writel(baddr & 0xffffffff, &regs->RxRingHi);
 	writel(baddr >> 32, &regs->RxRingLo);
@@ -526,9 +527,9 @@ static inline void set_rxaddr(struct rr_regs *regs, volatile void *addr)
 }
 
 
-static inline void set_infoaddr(struct rr_regs *regs, volatile void *addr)
+static inline void set_infoaddr(struct rr_regs *regs, volatile dma_addr_t addr)
 {
-	unsigned long baddr = virt_to_bus((void *)addr);
+	unsigned long baddr = addr;
 #if (BITS_PER_LONG == 64) && defined(__LITTLE_ENDIAN)
 	writel(baddr & 0xffffffff, &regs->InfoPtrHi);
 	writel(baddr >> 32, &regs->InfoPtrLo);
@@ -552,7 +553,7 @@ static inline void set_infoaddr(struct rr_regs *regs, volatile void *addr)
 #else
 #define TX_RING_ENTRIES	16
 #endif
-#define TX_RING_SIZE	(TX_RING_ENTRIES * sizeof(struct tx_desc))
+#define TX_TOTAL_SIZE	(TX_RING_ENTRIES * sizeof(struct tx_desc))
 
 struct tx_desc{
 	rraddr	addr;
@@ -574,7 +575,7 @@ struct tx_desc{
 #else
 #define RX_RING_ENTRIES 16
 #endif
-#define RX_RING_SIZE	(RX_RING_ENTRIES * sizeof(struct rx_desc))
+#define RX_TOTAL_SIZE	(RX_RING_ENTRIES * sizeof(struct rx_desc))
 
 struct rx_desc{
 	rraddr	addr;
@@ -798,24 +799,30 @@ struct rr_info {
 
 struct rr_private
 {
-	struct rx_desc		rx_ring[RX_RING_ENTRIES];
-	struct tx_desc		tx_ring[TX_RING_ENTRIES];
-	struct event		evt_ring[EVT_RING_ENTRIES];
+	struct rx_desc		*rx_ring;
+	struct tx_desc		*tx_ring;
+	struct event		*evt_ring;
+	dma_addr_t 		tx_ring_dma;
+	dma_addr_t 		rx_ring_dma;
+	dma_addr_t 		evt_ring_dma;
+	/* Alignment ok ? */
 	struct sk_buff		*rx_skbuff[RX_RING_ENTRIES];
 	struct sk_buff		*tx_skbuff[TX_RING_ENTRIES];
 	struct rr_regs		*regs;		/* Register base */
 	struct ring_ctrl	*rx_ctrl;	/* Receive ring control */
 	struct rr_info		*info;		/* Shared info page */
-	struct net_device		*next;
+	dma_addr_t 		rx_ctrl_dma;
+	dma_addr_t 		info_dma;
 	spinlock_t		lock;
 	struct timer_list	timer;
 	u32			cur_rx, cur_cmd, cur_evt;
 	u32			dirty_rx, dirty_tx;
 	u32			tx_full;
 	u32			fw_rev;
-	short			fw_running;
+	volatile short		fw_running;
 	char			name[24];	/* The assigned name */
 	struct net_device_stats stats;
+	struct pci_dev		*pci_dev;
 };
 
 
@@ -824,7 +831,7 @@ struct rr_private
  */
 static int rr_init(struct net_device *dev);
 static int rr_init1(struct net_device *dev);
-static void rr_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static irqreturn_t rr_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 
 static int rr_open(struct net_device *dev);
 static int rr_start_xmit(struct sk_buff *skb, struct net_device *dev);
@@ -837,5 +844,6 @@ static unsigned int rr_read_eeprom(struct rr_private *rrpriv,
 				   unsigned long length);
 static u32 rr_read_eeprom_word(struct rr_private *rrpriv, void * offset);
 static int rr_load_firmware(struct net_device *dev);
-
+static inline void rr_raz_tx(struct rr_private *, struct net_device *);
+static inline void rr_raz_rx(struct rr_private *, struct net_device *);
 #endif /* _RRUNNER_H_ */

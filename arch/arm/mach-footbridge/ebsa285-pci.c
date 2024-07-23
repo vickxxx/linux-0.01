@@ -11,14 +11,9 @@
 
 #include <asm/irq.h>
 #include <asm/mach/pci.h>
-#include <asm/hardware/dec21285.h>
+#include <asm/mach-types.h>
 
 static int irqmap_ebsa285[] __initdata = { IRQ_IN3, IRQ_IN1, IRQ_IN0, IRQ_PCI };
-
-static u8 __init ebsa285_swizzle(struct pci_dev *dev, u8 *pin)
-{
-	return PCI_SLOT(dev->devfn);
-}
 
 static int __init ebsa285_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 {
@@ -33,10 +28,21 @@ static int __init ebsa285_map_irq(struct pci_dev *dev, u8 slot, u8 pin)
 	return irqmap_ebsa285[(slot + pin) & 3];
 }
 
-struct hw_pci ebsa285_pci __initdata = {
-	setup_resources:	dc21285_setup_resources,
-	init:			dc21285_init,
-	mem_offset:		DC21285_PCI_MEM,
-	swizzle:		ebsa285_swizzle,
-	map_irq:		ebsa285_map_irq,
+static struct hw_pci ebsa285_pci __initdata = {
+	.swizzle		= pci_std_swizzle,
+	.map_irq		= ebsa285_map_irq,
+	.nr_controllers		= 1,
+	.setup			= dc21285_setup,
+	.scan			= dc21285_scan_bus,
+	.preinit		= dc21285_preinit,
+	.postinit		= dc21285_postinit,
 };
+
+static int __init ebsa285_init_pci(void)
+{
+	if (machine_is_ebsa285())
+		pci_common_init(&ebsa285_pci);
+	return 0;
+}
+
+subsys_initcall(ebsa285_init_pci);

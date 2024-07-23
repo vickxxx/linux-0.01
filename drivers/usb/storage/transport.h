@@ -1,7 +1,7 @@
 /* Driver for USB Mass Storage compliant devices
  * Transport Functions Header File
  *
- * $Id: transport.h,v 1.15 2001/03/17 20:06:23 jrmayfield Exp $
+ * $Id: transport.h,v 1.18 2002/04/21 02:57:59 mdharm Exp $
  *
  * Current development and maintenance by:
  *   (c) 1999, 2000 Matthew Dharm (mdharm-usb@one-eyed-alien.net)
@@ -55,22 +55,26 @@
 #define US_PR_SCM_ATAPI	0x80		/* SCM-ATAPI bridge */
 #endif
 #ifdef CONFIG_USB_STORAGE_SDDR09
-#define US_PR_EUSB_SDDR09	0x81	/* SCM-SCSI bridge for
-						SDDR-09 */
+#define US_PR_EUSB_SDDR09	0x81	/* SCM-SCSI bridge for SDDR-09 */
+#endif
+#ifdef CONFIG_USB_STORAGE_SDDR55
+#define US_PR_SDDR55	0x82		/* SDDR-55 (made up) */
 #endif
 #define US_PR_DPCM_USB  0xf0		/* Combination CB/SDDR09 */
 
 #ifdef CONFIG_USB_STORAGE_FREECOM
-#define US_PR_FREECOM   0xf1            /* Freecom */
+#define US_PR_FREECOM   0xf1		/* Freecom */
 #endif
 
 #ifdef CONFIG_USB_STORAGE_DATAFAB
-#define US_PR_DATAFAB   0xf2            /* Datafab chipsets */
+#define US_PR_DATAFAB   0xf2		/* Datafab chipsets */
 #endif
 
 #ifdef CONFIG_USB_STORAGE_JUMPSHOT
-#define US_PR_JUMPSHOT  0xf3            /* Lexar Jumpshot */
+#define US_PR_JUMPSHOT  0xf3		/* Lexar Jumpshot */
 #endif
+
+#define US_PR_DEVICE	0xff		/* Use device's value */
 
 /*
  * Bulk only data structures
@@ -103,6 +107,8 @@ struct bulk_cs_wrap {
 
 #define US_BULK_CS_WRAP_LEN	13
 #define US_BULK_CS_SIGN		0x53425355	/* spells out 'USBS' */
+/* This is for Olympus Camedia digital cameras */
+#define US_BULK_CS_OLYMPUS_SIGN		0x55425355	/* spells out 'USBU' */
 #define US_BULK_STAT_OK		0
 #define US_BULK_STAT_FAIL	1
 #define US_BULK_STAT_PHASE	2
@@ -112,12 +118,14 @@ struct bulk_cs_wrap {
 #define US_BULK_GET_MAX_LUN	0xfe
 
 /*
- * us_bulk_transfer() return codes
+ * usb_stor_bulk_transfer_xxx() return codes, in order of severity
  */
-#define US_BULK_TRANSFER_GOOD		0  /* good transfer                 */
-#define US_BULK_TRANSFER_SHORT		1  /* transfered less than expected */
-#define US_BULK_TRANSFER_FAILED		2  /* transfer died in the middle   */
-#define US_BULK_TRANSFER_ABORTED	3  /* transfer canceled             */
+
+#define USB_STOR_XFER_GOOD	0	/* good transfer                 */
+#define USB_STOR_XFER_SHORT	1	/* transferred less than expected */
+#define USB_STOR_XFER_STALLED	2	/* endpoint stalled              */
+#define USB_STOR_XFER_LONG	3	/* device tried to send too much */
+#define USB_STOR_XFER_ERROR	4	/* transfer died in the middle   */
 
 /*
  * Transport return codes
@@ -125,8 +133,16 @@ struct bulk_cs_wrap {
 
 #define USB_STOR_TRANSPORT_GOOD	   0   /* Transport good, command good	   */
 #define USB_STOR_TRANSPORT_FAILED  1   /* Transport good, command failed   */
-#define USB_STOR_TRANSPORT_ERROR   2   /* Transport bad (i.e. device dead) */
-#define USB_STOR_TRANSPORT_ABORTED 3   /* Transport aborted                */
+#define USB_STOR_TRANSPORT_NO_SENSE 2  /* Command failed, no auto-sense    */
+#define USB_STOR_TRANSPORT_ERROR   3   /* Transport bad (i.e. device dead) */
+
+/*
+ * We used to have USB_STOR_XFER_ABORTED and USB_STOR_TRANSPORT_ABORTED
+ * return codes.  But now the transport and low-level transfer routines
+ * treat an abort as just another error (-ENOENT for a cancelled URB).
+ * It is up to the invoke_transport() function to test for aborts and
+ * distinguish them from genuine communication errors.
+ */
 
 /*
  * CBI accept device specific command
@@ -134,7 +150,6 @@ struct bulk_cs_wrap {
 
 #define US_CBI_ADSC		0
 
-extern void usb_stor_CBI_irq(struct urb*);
 extern int usb_stor_CBI_transport(Scsi_Cmnd*, struct us_data*);
 
 extern int usb_stor_CB_transport(Scsi_Cmnd*, struct us_data*);
@@ -144,13 +159,25 @@ extern int usb_stor_Bulk_transport(Scsi_Cmnd*, struct us_data*);
 extern int usb_stor_Bulk_max_lun(struct us_data*);
 extern int usb_stor_Bulk_reset(struct us_data*);
 
-extern unsigned int usb_stor_transfer_length(Scsi_Cmnd*);
 extern void usb_stor_invoke_transport(Scsi_Cmnd*, struct us_data*);
-extern int usb_stor_transfer_partial(struct us_data*, char*, int);
-extern int usb_stor_bulk_msg(struct us_data*, void*, int, unsigned int,
-		unsigned int*);
-extern int usb_stor_control_msg(struct us_data*, unsigned int, u8, u8,
-		u16, u16, void*, u16);
-extern void usb_stor_transfer(Scsi_Cmnd*, struct us_data*);
-extern int usb_stor_clear_halt(struct usb_device*, int );
+extern void usb_stor_stop_transport(struct us_data*);
+
+extern int usb_stor_control_msg(struct us_data *us, unsigned int pipe,
+		u8 request, u8 requesttype, u16 value, u16 index,
+		void *data, u16 size, int timeout);
+extern int usb_stor_clear_halt(struct us_data *us, unsigned int pipe);
+
+extern int usb_stor_ctrl_transfer(struct us_data *us, unsigned int pipe,
+		u8 request, u8 requesttype, u16 value, u16 index,
+		void *data, u16 size);
+extern int usb_stor_intr_transfer(struct us_data *us, void *buf,
+		unsigned int length);
+extern int usb_stor_bulk_transfer_buf(struct us_data *us, unsigned int pipe,
+		void *buf, unsigned int length, unsigned int *act_len);
+extern int usb_stor_bulk_transfer_sglist(struct us_data *us, unsigned int pipe,
+		struct scatterlist *sg, int num_sg, unsigned int length,
+		unsigned int *act_len);
+extern int usb_stor_bulk_transfer_sg(struct us_data *us, unsigned int pipe,
+		void *buf, unsigned int length, int use_sg, int *residual);
+
 #endif

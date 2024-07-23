@@ -632,7 +632,7 @@ static inline void reset_board(const struct lanai_dev *lanai)
  * anytime it wants to consult its table of vccs - for instance
  * when handling an incoming PDU.  This also explains why we would
  * probably want the write_lock while in _change_qos - to prevent
- * handling of PDUs while possibly in an inconsistant state.
+ * handling of PDUs while possibly in an inconsistent state.
  * Also, _send would grab the lock for reading.
  *
  * One problem with this is that _open and _close could no longer
@@ -1300,7 +1300,7 @@ static inline int vcc_tx_space(const struct lanai_vcc *lvcc, int endptr)
 #define DESCRIPTOR_AAL5_STREAM	(0x00004000)
 #define DESCRIPTOR_CLP		(0x00002000)
 
-/* Add 32-bit descriptor with it's padding */
+/* Add 32-bit descriptor with its padding */
 static inline void vcc_tx_add_aal5_descriptor(struct lanai_vcc *lvcc,
 	u32 flags, int len)
 {
@@ -1606,7 +1606,7 @@ static void vcc_rx_aal5(struct lanai_vcc *lvcc, int endptr)
 	}
 	skb_put(skb, size);
 	ATM_SKB(skb)->vcc = lvcc->rx.atmvcc;
-	skb->stamp = xtime;
+	do_gettimeofday(&skb->stamp);
 	vcc_rx_memcpy(skb->data, lvcc, size);
 	lvcc->rx.atmvcc->push(lvcc->rx.atmvcc, skb);
 	atomic_inc(&lvcc->rx.atmvcc->stats->rx);
@@ -1624,7 +1624,7 @@ static void vcc_rx_aal0(struct lanai_dev *lanai)
 
 /* -------------------- MANAGING HOST-BASED VCC TABLE: */
 
-/* Decide whether to use vmalloc or get_free_page for VCC table */
+/* Decide whether to use vmalloc or get_zeroed_page for VCC table */
 #if (NUM_VCI * BITS_PER_LONG) <= PAGE_SIZE
 #define VCCTABLE_GETFREEPAGE
 #else
@@ -1636,7 +1636,7 @@ static int __init vcc_table_allocate(struct lanai_dev *lanai)
 #ifdef VCCTABLE_GETFREEPAGE
 	APRINTK((lanai->num_vci) * sizeof(struct lanai_vcc *) <= PAGE_SIZE,
 	    "vcc table > PAGE_SIZE!");
-	lanai->vccs = (struct lanai_vcc **) get_free_page(GFP_KERNEL);
+	lanai->vccs = (struct lanai_vcc **) get_zeroed_page(GFP_KERNEL);
 	return (lanai->vccs == NULL) ? -ENOMEM : 0;
 #else
 	int bytes = (lanai->num_vci) * sizeof(struct lanai_vcc *);
@@ -2047,10 +2047,12 @@ static inline void lanai_int_1(struct lanai_dev *lanai, u32 reason)
 		reg_write(lanai, ack, IntAck_Reg);
 }
 
-static void lanai_int(int irq, void *devid, struct pt_regs *regs)
+static irqreturn_t lanai_int(int irq, void *devid, struct pt_regs *regs)
 {
 	struct lanai_dev *lanai = (struct lanai_dev *) devid;
 	u32 reason;
+	int handled = 0;
+
 	(void) irq; (void) regs;	/* unused variables */
 #ifdef USE_POWERDOWN
 	if (lanai->conf1 & CONFIG1_POWERDOWN) {
@@ -2062,8 +2064,11 @@ static void lanai_int(int irq, void *devid, struct pt_regs *regs)
 		conf2_write(lanai);
 	}
 #endif
-	while ((reason = intr_pending(lanai)) != 0)
+	while ((reason = intr_pending(lanai)) != 0) {
+		handled = 1;
 		lanai_int_1(lanai, reason);
+	}
+	return IRQ_RETVAL(handled);
 }
 
 /* TODO - it would be nice if we could use the "delayed interrupt" system
@@ -2108,8 +2113,7 @@ static inline int __init lanai_pci_start(struct lanai_dev *lanai)
 	}
 	result = pci_read_config_word(pci, PCI_SUBSYSTEM_ID, &w);
 	if (result != PCIBIOS_SUCCESSFUL) {
-		printk(KERN_ERR DEV_LABEL "(itf %d): can't read ""
-		    PCI_SUBSYSTEM_ID: %d\n", lanai->number, result);
+		printk(KERN_ERR DEV_LABEL "(itf %d): can't read PCI_SUBSYSTEM_ID: %d\n", lanai->number, result);
 		return -EINVAL;
 	}
 	if ((result = check_board_id_and_rev("PCI", w, NULL)) != 0)
@@ -2829,21 +2833,20 @@ static int lanai_proc_read(struct atm_dev *atmdev, loff_t *pos, char *page)
 /* -------------------- HOOKS: */
 
 static const struct atmdev_ops ops = {
-	dev_close:	lanai_dev_close,
-	open:		lanai_open,
-	close:		lanai_close,
-	ioctl:		lanai_ioctl,
-	getsockopt:	NULL,
-	setsockopt:	NULL,
-	send:		lanai_send,
-	sg_send:	NULL,		/* no scatter-gather on card */
-	send_oam:	NULL,		/* OAM support not in linux yet */
-	phy_put:	NULL,
-	phy_get:	NULL,
-	feedback:	NULL,
-	change_qos:	lanai_change_qos,
-	free_rx_skb:	NULL,
-	proc_read:	lanai_proc_read
+	.dev_close	= lanai_dev_close,
+	.open		= lanai_open,
+	.close		= lanai_close,
+	.ioctl		= lanai_ioctl,
+	.getsockopt	= NULL,
+	.setsockopt	= NULL,
+	.send		= lanai_send,
+	.sg_send	= NULL,		/* no scatter-gather on card */
+	.send_oam	= NULL,		/* OAM support not in linux yet */
+	.phy_put	= NULL,
+	.phy_get	= NULL,
+	.feedback	= NULL,
+	.change_qos	= lanai_change_qos,
+	.proc_read	= lanai_proc_read
 };
 
 /* detect one type of card LANAI2 or LANAIHB */
@@ -2882,27 +2885,16 @@ static int __init lanai_detect_1(unsigned int vendor, unsigned int device)
 	return count;
 }
 
-#ifdef MODULE
-static
-#endif
-int __init lanai_detect(void)
+static int __init lanai_module_init(void)
 {
-	return lanai_detect_1(PCI_VENDOR_ID_EF, PCI_VENDOR_ID_EF_ATM_LANAI2) +
-	       lanai_detect_1(PCI_VENDOR_ID_EF, PCI_VENDOR_ID_EF_ATM_LANAIHB);
+	if (lanai_detect_1(PCI_VENDOR_ID_EF, PCI_VENDOR_ID_EF_ATM_LANAI2) +
+	    lanai_detect_1(PCI_VENDOR_ID_EF, PCI_VENDOR_ID_EF_ATM_LANAIHB))
+		return 0;
+	printk(KERN_ERR DEV_LABEL ": no adaptor found\n");
+	return -ENODEV;
 }
 
-#ifdef MODULE
-
-int init_module(void)
-{
-	if (lanai_detect() == 0) {
-		printk(KERN_ERR DEV_LABEL ": no adaptor found\n");
-		return -ENODEV;
-	}
-	return 0;
-}
-
-void cleanup_module(void)
+static void __exit lanai_module_exit(void)
 {
 	/* We'll only get called when all the interfaces are already
 	 * gone, so there isn't much to do
@@ -2910,8 +2902,9 @@ void cleanup_module(void)
 	DPRINTK("cleanup_module()\n");
 }
 
+module_init(lanai_module_init);
+module_exit(lanai_module_exit);
+
 MODULE_AUTHOR("Mitchell Blank Jr <mitch@sfgoth.com>");
 MODULE_DESCRIPTION("Efficient Networks Speedstream 3010 driver");
 MODULE_LICENSE("GPL");
-
-#endif /* MODULE */

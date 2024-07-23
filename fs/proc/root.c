@@ -9,13 +9,14 @@
 #include <asm/uaccess.h>
 
 #include <linux/errno.h>
-#include <linux/sched.h>
+#include <linux/time.h>
 #include <linux/proc_fs.h>
 #include <linux/stat.h>
 #include <linux/config.h>
 #include <linux/init.h>
 #include <linux/module.h>
 #include <asm/bitops.h>
+#include <linux/smp_lock.h>
 
 struct proc_dir_entry *proc_net, *proc_bus, *proc_root_fs, *proc_root_driver;
 
@@ -23,11 +24,25 @@ struct proc_dir_entry *proc_net, *proc_bus, *proc_root_fs, *proc_root_driver;
 struct proc_dir_entry *proc_sys_root;
 #endif
 
-static DECLARE_FSTYPE(proc_fs_type, "proc", proc_read_super, FS_SINGLE);
+static struct super_block *proc_get_sb(struct file_system_type *fs_type,
+	int flags, const char *dev_name, void *data)
+{
+	return get_sb_single(fs_type, flags, data, proc_fill_super);
+}
 
+static struct file_system_type proc_fs_type = {
+	.name		= "proc",
+	.get_sb		= proc_get_sb,
+	.kill_sb	= kill_anon_super,
+};
+
+extern int __init proc_init_inodecache(void);
 void __init proc_root_init(void)
 {
-	int err = register_filesystem(&proc_fs_type);
+	int err = proc_init_inodecache();
+	if (err)
+		return;
+	err = register_filesystem(&proc_fs_type);
 	if (err)
 		return;
 	proc_mnt = kern_mount(&proc_fs_type);
@@ -64,35 +79,43 @@ void __init proc_root_init(void)
 	proc_bus = proc_mkdir("bus", 0);
 }
 
-static struct dentry *proc_root_lookup(struct inode * dir, struct dentry * dentry)
+static struct dentry *proc_root_lookup(struct inode * dir, struct dentry * dentry, struct nameidata *nd)
 {
-	if (dir->i_ino == PROC_ROOT_INO) { /* check for safety... */
-		int nlink = proc_root.nlink;
+	/*
+	 * nr_threads is actually protected by the tasklist_lock;
+	 * however, it's conventional to do reads, especially for
+	 * reporting, without any locking whatsoever.
+	 */
+	if (dir->i_ino == PROC_ROOT_INO) /* check for safety... */
+		dir->i_nlink = proc_root.nlink + nr_threads;
 
-		nlink += nr_threads;
-
-		dir->i_nlink = nlink;
-	}
-
-	if (!proc_lookup(dir, dentry))
+	if (!proc_lookup(dir, dentry, nd)) {
 		return NULL;
+	}
 	
-	return proc_pid_lookup(dir, dentry);
+	return proc_pid_lookup(dir, dentry, nd);
 }
 
 static int proc_root_readdir(struct file * filp,
 	void * dirent, filldir_t filldir)
 {
 	unsigned int nr = filp->f_pos;
+	int ret;
+
+	lock_kernel();
 
 	if (nr < FIRST_PROCESS_ENTRY) {
 		int error = proc_readdir(filp, dirent, filldir);
-		if (error <= 0)
+		if (error <= 0) {
+			unlock_kernel();
 			return error;
+		}
 		filp->f_pos = FIRST_PROCESS_ENTRY;
 	}
+	unlock_kernel();
 
-	return proc_pid_readdir(filp, dirent, filldir);
+	ret = proc_pid_readdir(filp, dirent, filldir);
+	return ret;
 }
 
 /*
@@ -101,29 +124,29 @@ static int proc_root_readdir(struct file * filp,
  * directory handling functions for that..
  */
 static struct file_operations proc_root_operations = {
-	read:		 generic_read_dir,
-	readdir:	 proc_root_readdir,
+	.read		 = generic_read_dir,
+	.readdir	 = proc_root_readdir,
 };
 
 /*
  * proc root can do almost nothing..
  */
 static struct inode_operations proc_root_inode_operations = {
-	lookup:		proc_root_lookup,
+	.lookup		= proc_root_lookup,
 };
 
 /*
  * This is the root "inode" in the /proc tree..
  */
 struct proc_dir_entry proc_root = {
-	low_ino:	PROC_ROOT_INO, 
-	namelen:	5, 
-	name:		"/proc",
-	mode:		S_IFDIR | S_IRUGO | S_IXUGO, 
-	nlink:		2, 
-	proc_iops:	&proc_root_inode_operations, 
-	proc_fops:	&proc_root_operations,
-	parent:		&proc_root,
+	.low_ino	= PROC_ROOT_INO, 
+	.namelen	= 5, 
+	.name		= "/proc",
+	.mode		= S_IFDIR | S_IRUGO | S_IXUGO, 
+	.nlink		= 2, 
+	.proc_iops	= &proc_root_inode_operations, 
+	.proc_fops	= &proc_root_operations,
+	.parent		= &proc_root,
 };
 
 #ifdef CONFIG_SYSCTL

@@ -26,6 +26,7 @@
 #include <linux/spinlock.h>
 #include <linux/rwsem.h>
 #include <linux/init.h>
+#include <linux/smp_lock.h>
 
 #include <asm/hardware/dec21285.h>
 #include <asm/io.h>
@@ -46,7 +47,7 @@ static int write_block(unsigned long p, const char *buf, int count);
 static int flash_ioctl(struct inode *inodep, struct file *filep, unsigned int cmd, unsigned long arg);
 static ssize_t flash_read(struct file *file, char *buf, size_t count, loff_t * ppos);
 static ssize_t flash_write(struct file *file, const char *buf, size_t count, loff_t * ppos);
-static long long flash_llseek(struct file *file, long long offset, int orig);
+static loff_t flash_llseek(struct file *file, loff_t offset, int orig);
 
 #define KFLASH_SIZE	1024*1024	//1 Meg
 #define KFLASH_SIZE4	4*1024*1024	//4 Meg
@@ -158,7 +159,8 @@ static ssize_t flash_read(struct file *file, char *buf, size_t size, loff_t * pp
 		if (ret == 0) {
 			ret = count;
 			*ppos += count;
-		}
+		} else
+			ret = -EFAULT;
 		up(&nwflash_sem);
 	}
 	return ret;
@@ -213,7 +215,7 @@ static ssize_t flash_write(struct file *file, const char *buf, size_t size, loff
 	temp = ((int) (p + count) >> 16) - nBlock + 1;
 
 	/*
-	 * write ends at exactly 64k boundry?
+	 * write ends at exactly 64k boundary?
 	 */
 	if (((int) (p + count) & 0xFFFF) == 0)
 		temp -= 1;
@@ -299,32 +301,47 @@ static ssize_t flash_write(struct file *file, const char *buf, size_t size, loff
  * also note that seeking relative to the "end of file" isn't supported:
  * it has no meaning, so it returns -EINVAL.
  */
-static long long flash_llseek(struct file *file, long long offset, int orig)
+static loff_t flash_llseek(struct file *file, loff_t offset, int orig)
 {
+	loff_t ret;
+
+	lock_kernel();
 	if (flashdebug)
 		printk(KERN_DEBUG "flash_llseek: offset=0x%X, orig=0x%X.\n",
 		       (unsigned int) offset, orig);
 
 	switch (orig) {
 	case 0:
-		if (offset < 0)
-			return -EINVAL;
+		if (offset < 0) {
+			ret = -EINVAL;
+			break;
+		}
 
-		if ((unsigned int) offset > gbFlashSize)
-			return -EINVAL;
+		if ((unsigned int) offset > gbFlashSize) {
+			ret = -EINVAL;
+			break;
+		}
 
 		file->f_pos = (unsigned int) offset;
-		return file->f_pos;
+		ret = file->f_pos;
+		break;
 	case 1:
-		if ((file->f_pos + offset) > gbFlashSize)
-			return -EINVAL;
-		if ((file->f_pos + offset) < 0)
-			return -EINVAL;
+		if ((file->f_pos + offset) > gbFlashSize) {
+			ret = -EINVAL;
+			break;
+		}
+		if ((file->f_pos + offset) < 0) {
+			ret = -EINVAL;
+			break;
+		}
 		file->f_pos += offset;
-		return file->f_pos;
+		ret = file->f_pos;
+		break;
 	default:
-		return -EINVAL;
+		ret = -EINVAL;
 	}
+	unlock_kernel();
+	return ret;
 }
 
 
@@ -337,6 +354,7 @@ static int erase_block(int nBlock)
 {
 	volatile unsigned int c1;
 	volatile unsigned char *pWritePtr;
+	unsigned long timeout;
 	int temp, temp1;
 
 	/*
@@ -389,9 +407,9 @@ static int erase_block(int nBlock)
 	/*
 	 * wait while erasing in process (up to 10 sec)
 	 */
-	temp = jiffies + 10 * HZ;
+	timeout = jiffies + 10 * HZ;
 	c1 = 0;
-	while (!(c1 & 0x80) && time_before(jiffies, temp)) {
+	while (!(c1 & 0x80) && time_before(jiffies, timeout)) {
 		flash_wait(HZ / 100);
 		/*
 		 * read any address
@@ -449,8 +467,8 @@ static int write_block(unsigned long p, const char *buf, int count)
 	unsigned char *pWritePtr;
 	unsigned int uAddress;
 	unsigned int offset;
-	unsigned int timeout;
-	unsigned int timeout1;
+	unsigned long timeout;
+	unsigned long timeout1;
 
 	/*
 	 * red LED == write
@@ -635,11 +653,11 @@ static void kick_open(void)
 
 static struct file_operations flash_fops =
 {
-	owner:		THIS_MODULE,
-	llseek:		flash_llseek,
-	read:		flash_read,
-	write:		flash_write,
-	ioctl:		flash_ioctl,
+	.owner		= THIS_MODULE,
+	.llseek		= flash_llseek,
+	.read		= flash_read,
+	.write		= flash_write,
+	.ioctl		= flash_ioctl,
 };
 
 static struct miscdevice flash_miscdev =
@@ -656,7 +674,7 @@ static int __init nwflash_init(void)
 	if (machine_is_netwinder()) {
 		int id;
 
-		FLASH_BASE = __ioremap(DC21285_FLASH, KFLASH_SIZE4, 0);
+		FLASH_BASE = ioremap(DC21285_FLASH, KFLASH_SIZE4);
 		if (!FLASH_BASE)
 			goto out;
 
@@ -671,9 +689,10 @@ static int __init nwflash_init(void)
 		printk("Flash ROM driver v.%s, flash device ID 0x%04X, size %d Mb.\n",
 		       NWFLASH_VERSION, id, gbFlashSize / (1024 * 1024));
 
-		misc_register(&flash_miscdev);
-
-		ret = 0;
+		ret = misc_register(&flash_miscdev);
+		if (ret < 0) {
+			iounmap((void *)FLASH_BASE);
+		}
 	}
 out:
 	return ret;
@@ -684,8 +703,6 @@ static void __exit nwflash_exit(void)
 	misc_deregister(&flash_miscdev);
 	iounmap((void *)FLASH_BASE);
 }
-
-EXPORT_NO_SYMBOLS;
 
 MODULE_LICENSE("GPL");
 

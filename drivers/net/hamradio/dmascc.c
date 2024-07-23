@@ -36,14 +36,13 @@
 #include <linux/netdevice.h>
 #include <linux/rtnetlink.h>
 #include <linux/sockios.h>
-#include <linux/tqueue.h>
+#include <linux/workqueue.h>
 #include <linux/version.h>
 #include <asm/atomic.h>
 #include <asm/bitops.h>
 #include <asm/dma.h>
 #include <asm/io.h>
 #include <asm/irq.h>
-#include <asm/segment.h>
 #include <asm/uaccess.h>
 #include <net/ax25.h>
 #include "z8530.h"
@@ -226,7 +225,7 @@ struct scc_priv {
   char rx_buf[NUM_RX_BUF][BUF_SIZE];
   int rx_len[NUM_RX_BUF];
   int rx_ptr;
-  struct tq_struct rx_task;
+  struct work_struct rx_work;
   int rx_head, rx_tail, rx_count;
   int rx_over;
   char tx_buf[NUM_TX_BUF][BUF_SIZE];
@@ -236,6 +235,8 @@ struct scc_priv {
   int state;
   unsigned long tx_start;
   int rr0;
+  spinlock_t *register_lock;	/* Per scc_info */
+  spinlock_t ring_lock;
 };
 
 struct scc_info {
@@ -244,12 +245,11 @@ struct scc_info {
   struct net_device dev[2];
   struct scc_priv priv[2];
   struct scc_info *next;
+  spinlock_t register_lock;	/* Per device register lock */
 };
 
 
 /* Function declarations */
-
-int dmascc_init(void) __init;
 static int setup_adapter(int card_base, int type, int n) __init;
 
 static void write_scc(struct scc_priv *priv, int reg, int val);
@@ -264,7 +264,7 @@ static int scc_send_packet(struct sk_buff *skb, struct net_device *dev);
 static struct net_device_stats *scc_get_stats(struct net_device *dev);
 static int scc_set_mac_address(struct net_device *dev, void *sa);
 
-static void scc_isr(int irq, void *dev_id, struct pt_regs * regs);
+static irqreturn_t scc_isr(int irq, void *dev_id, struct pt_regs * regs);
 static inline void z8530_isr(struct scc_info *info);
 static void rx_isr(struct scc_priv *priv);
 static void special_condition(struct scc_priv *priv, int rc);
@@ -283,9 +283,8 @@ static inline unsigned char random(void);
 /* Initialization variables */
 
 static int io[MAX_NUM_DEVS] __initdata = { 0, };
-/* Beware! hw[] is also used in cleanup_module(). If __initdata also applies
-   to modules, we may not declare hw[] as __initdata */
-static struct scc_hardware hw[NUM_TYPES] __initdata = HARDWARE;
+/* Beware! hw[] is also used in cleanup_module(). */
+static struct scc_hardware hw[NUM_TYPES] __initdata_or_module = HARDWARE;
 static char ax25_broadcast[7] __initdata =
   { 'Q'<<1, 'S'<<1, 'T'<<1, ' '<<1, ' '<<1, ' '<<1, '0'<<1 };
 static char ax25_test[7] __initdata =
@@ -298,22 +297,12 @@ static struct scc_info *first;
 static unsigned long rand;
 
 
-/* Module functions */
-
-#ifdef MODULE
-
-
 MODULE_AUTHOR("Klaus Kudielka");
 MODULE_DESCRIPTION("Driver for high-speed SCC boards");
 MODULE_PARM(io, "1-" __MODULE_STRING(MAX_NUM_DEVS) "i");
+MODULE_LICENSE("GPL");
 
-
-int init_module(void) {
-  return dmascc_init();
-}
-
-
-void cleanup_module(void) {
+static void __exit dmascc_exit(void) {
   int i;
   struct scc_info *info;
 
@@ -323,9 +312,7 @@ void cleanup_module(void) {
     /* Unregister devices */
     for (i = 0; i < 2; i++) {
       if (info->dev[i].name)
-	rtnl_lock();
-	unregister_netdevice(&info->dev[i]);
-	rtnl_unlock();
+	unregister_netdev(&info->dev[i]);
     }
 
     /* Reset board */
@@ -341,24 +328,16 @@ void cleanup_module(void) {
   }
 }
 
-
-#else
-
-
+#ifndef MODULE
 void __init dmascc_setup(char *str, int *ints) {
    int i;
 
    for (i = 0; i < MAX_NUM_DEVS && i < ints[0]; i++)
       io[i] = ints[i+1];
 }
-
-
 #endif
 
-
-/* Initialization functions */
-
-int __init dmascc_init(void) {
+static int __init dmascc_init(void) {
   int h, i, j, n;
   int base[MAX_NUM_DEVS], tcmd[MAX_NUM_DEVS], t0[MAX_NUM_DEVS],
     t1[MAX_NUM_DEVS];
@@ -371,7 +350,7 @@ int __init dmascc_init(void) {
   /* Cards found = 0 */
   n = 0;
   /* Warning message */
-  if (!io[0]) printk("dmascc: autoprobing (dangerous)\n");
+  if (!io[0]) printk(KERN_INFO "dmascc: autoprobing (dangerous)\n");
 
   /* Run autodetection for each card type */
   for (h = 0; h < NUM_TYPES; h++) {
@@ -397,7 +376,7 @@ int __init dmascc_init(void) {
     /* Check valid I/O address regions */
     for (i = 0; i < hw[h].num_devs; i++)
       if (base[i]) {
-	if (check_region(base[i], hw[h].io_size))
+	if (!request_region(base[i], hw[h].io_size, "dmascc"))
 	  base[i] = 0;
 	else {
 	  tcmd[i] = base[i] + hw[h].tmr_offset + TMR_CTRL;
@@ -443,11 +422,12 @@ int __init dmascc_init(void) {
     /* Evaluate measurements */
     for (i = 0; i < hw[h].num_devs; i++)
       if (base[i]) {
-	if (delay[i] >= 9 && delay[i] <= 11) {
-	  /* Ok, we have found an adapter */
-	  if (setup_adapter(base[i], h, n) == 0)
-	    n++;
-	}
+	if ((delay[i] >= 9 && delay[i] <= 11)&& 
+	    /* Ok, we have found an adapter */
+	    (setup_adapter(base[i], h, n) == 0))
+	  n++;
+	else
+	  release_region(base[i], hw[h].io_size);
       }
 
   } /* NUM_TYPES */
@@ -456,9 +436,12 @@ int __init dmascc_init(void) {
   if (n) return 0;
 
   /* If no adapter found, return error */
-  printk("dmascc: no adapters found\n");
+  printk(KERN_INFO "dmascc: no adapters found\n");
   return -EIO;
 }
+
+module_init(dmascc_init);
+module_exit(dmascc_exit);
 
 
 int __init setup_adapter(int card_base, int type, int n) {
@@ -475,18 +458,21 @@ int __init setup_adapter(int card_base, int type, int n) {
   /* Allocate memory */
   info = kmalloc(sizeof(struct scc_info), GFP_KERNEL | GFP_DMA);
   if (!info) {
-    printk("dmascc: could not allocate memory for %s at %#3x\n",
+    printk(KERN_ERR "dmascc: could not allocate memory for %s at %#3x\n",
 	   hw[type].name, card_base);
     return -1;
   }
 
   /* Initialize what is necessary for write_scc and write_scc_data */
   memset(info, 0, sizeof(struct scc_info));
+  spin_lock_init(&info->register_lock);
+  
   priv = &info->priv[0];
   priv->type = type;
   priv->card_base = card_base;
   priv->scc_cmd = scc_base + SCCA_CMD;
   priv->scc_data = scc_base + SCCA_DATA;
+  priv->register_lock = &info->register_lock;
 
   /* Reset SCC */
   write_scc(priv, R9, FHWRES | MIE | NV);
@@ -510,7 +496,6 @@ int __init setup_adapter(int card_base, int type, int n) {
   write_scc(priv, R15, 0);
 
   /* Start IRQ auto-detection */
-  sti();
   irqs = probe_irq_on();
 
   /* Enable interrupts */
@@ -543,7 +528,7 @@ int __init setup_adapter(int card_base, int type, int n) {
   }
 
   if (irq <= 0) {
-    printk("dmascc: could not find irq of %s at %#3x (irq=%d)\n",
+    printk(KERN_ERR "dmascc: could not find irq of %s at %#3x (irq=%d)\n",
 	   hw[type].name, card_base, irq);
     kfree(info);
     return -1;
@@ -558,6 +543,8 @@ int __init setup_adapter(int card_base, int type, int n) {
     priv->dev = dev;
     priv->info = info;
     priv->channel = i;
+    spin_lock_init(&priv->ring_lock);
+    priv->register_lock = &info->register_lock;
     priv->card_base = card_base;
     priv->scc_cmd = scc_base + (i ? SCCB_CMD : SCCA_CMD);
     priv->scc_data = scc_base + (i ? SCCB_DATA : SCCA_DATA);
@@ -569,13 +556,13 @@ int __init setup_adapter(int card_base, int type, int n) {
     priv->param.clocks = TCTRxCP | RCRTxCP;
     priv->param.persist = 256;
     priv->param.dma = -1;
-    priv->rx_task.routine = rx_bh;
-    priv->rx_task.data = priv;
+    INIT_WORK(&priv->rx_work, rx_bh, priv);
     dev->priv = priv;
 #if LINUX_VERSION_CODE < KERNEL_VERSION(2,4,0)
     if (sizeof(dev->name) == sizeof(char *)) dev->name = priv->name;
 #endif
     sprintf(dev->name, "dmascc%i", 2*n+i);
+    SET_MODULE_OWNER(dev);
     dev->base_addr = card_base;
     dev->irq = irq;
     dev->open = scc_open;
@@ -595,16 +582,15 @@ int __init setup_adapter(int card_base, int type, int n) {
     memcpy(dev->dev_addr, ax25_test, 7);
     rtnl_lock();
     if (register_netdevice(dev)) {
-      printk("dmascc: could not register %s\n", dev->name);
+      printk(KERN_ERR "dmascc: could not register %s\n", dev->name);
     }
     rtnl_unlock();
   }
 
-  request_region(card_base, hw[type].io_size, "dmascc");
 
   info->next = first;
   first = info;
-  printk("dmascc: found %s (%s) at %#3x, irq %d\n", hw[type].name,
+  printk(KERN_INFO "dmascc: found %s (%s) at %#3x, irq %d\n", hw[type].name,
 	 chipnames[chip], card_base, irq);
   return 0;
 }
@@ -624,13 +610,12 @@ static void write_scc(struct scc_priv *priv, int reg, int val) {
     outb_p(val, priv->scc_cmd);
     return;
   default:
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(priv->register_lock, flags);
     outb_p(0, priv->card_base + PI_DREQ_MASK);
     if (reg) outb_p(reg, priv->scc_cmd);
     outb_p(val, priv->scc_cmd);
     outb(1, priv->card_base + PI_DREQ_MASK);
-    restore_flags(flags);
+    spin_unlock_irqrestore(priv->register_lock, flags);
     return;
   }
 }
@@ -648,12 +633,11 @@ static void write_scc_data(struct scc_priv *priv, int val, int fast) {
   default:
     if (fast) outb_p(val, priv->scc_data);
     else {
-      save_flags(flags);
-      cli();
+      spin_lock_irqsave(priv->register_lock, flags);
       outb_p(0, priv->card_base + PI_DREQ_MASK);
       outb_p(val, priv->scc_data);
       outb(1, priv->card_base + PI_DREQ_MASK);
-      restore_flags(flags);
+      spin_unlock_irqrestore(priv->register_lock, flags);
     }
     return;
   }
@@ -671,13 +655,12 @@ static int read_scc(struct scc_priv *priv, int reg) {
     if (reg) outb_p(reg, priv->scc_cmd);
     return inb_p(priv->scc_cmd);
   default:
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(priv->register_lock, flags);
     outb_p(0, priv->card_base + PI_DREQ_MASK);
     if (reg) outb_p(reg, priv->scc_cmd);
     rc = inb_p(priv->scc_cmd);
     outb(1, priv->card_base + PI_DREQ_MASK);
-    restore_flags(flags);
+    spin_unlock_irqrestore(priv->register_lock, flags);
     return rc;
   }
 }
@@ -692,12 +675,11 @@ static int read_scc_data(struct scc_priv *priv) {
   case TYPE_TWIN:
     return inb_p(priv->scc_data);
   default:
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(priv->register_lock, flags);
     outb_p(0, priv->card_base + PI_DREQ_MASK);
     rc = inb_p(priv->scc_data);
     outb(1, priv->card_base + PI_DREQ_MASK);
-    restore_flags(flags);
+    spin_unlock_irqrestore(priv->register_lock, flags);
     return rc;
   }
 }
@@ -708,12 +690,9 @@ static int scc_open(struct net_device *dev) {
   struct scc_info *info = priv->info;
   int card_base = priv->card_base;
 
-  MOD_INC_USE_COUNT;
-
   /* Request IRQ if not already used by other channel */
   if (!info->irq_used) {
     if (request_irq(dev->irq, scc_isr, 0, "dmascc", info)) {
-      MOD_DEC_USE_COUNT;
       return -EAGAIN;
     }
   }
@@ -723,7 +702,6 @@ static int scc_open(struct net_device *dev) {
   if (priv->param.dma >= 0) {
     if (request_dma(priv->param.dma, "dmascc")) {
       if (--info->irq_used == 0) free_irq(dev->irq, info);
-      MOD_DEC_USE_COUNT;
       return -EAGAIN;
     } else {
       unsigned long flags = claim_dma_lock();
@@ -867,7 +845,6 @@ static int scc_close(struct net_device *dev) {
   }
   if (--info->irq_used == 0) free_irq(dev->irq, info);
 
-  MOD_DEC_USE_COUNT;
   return 0;
 }
 
@@ -906,9 +883,8 @@ static int scc_send_packet(struct sk_buff *skb, struct net_device *dev) {
   priv->tx_len[i] = skb->len-1;
 
   /* Clear interrupts while we touch our circular buffers */
-  save_flags(flags);
-  cli();
 
+  spin_lock_irqsave(&priv->ring_lock, flags);
   /* Move the ring buffer's head */
   priv->tx_head = (i + 1) % NUM_TX_BUF;
   priv->tx_count++;
@@ -929,7 +905,7 @@ static int scc_send_packet(struct sk_buff *skb, struct net_device *dev) {
   }
 
   /* Turn interrupts back on and free buffer */
-  restore_flags(flags);
+  spin_unlock_irqrestore(&priv->ring_lock, flags);
   dev_kfree_skb(skb);
 
   return 0;
@@ -949,9 +925,10 @@ static int scc_set_mac_address(struct net_device *dev, void *sa) {
 }
 
 
-static void scc_isr(int irq, void *dev_id, struct pt_regs * regs) {
+static irqreturn_t scc_isr(int irq, void *dev_id, struct pt_regs * regs) {
   struct scc_info *info = dev_id;
 
+  spin_lock(info->priv[0].register_lock);
   /* At this point interrupts are enabled, and the interrupt under service
      is already acknowledged, but masked off.
 
@@ -979,6 +956,8 @@ static void scc_isr(int irq, void *dev_id, struct pt_regs * regs) {
       }
     }
   } else z8530_isr(info);
+  spin_unlock(info->priv[0].register_lock);
+  return IRQ_HANDLED;
 }
 
 
@@ -1003,7 +982,7 @@ static inline void z8530_isr(struct scc_info *info) {
     i++;
   }
   if (i < 0) {
-    printk("dmascc: stuck in ISR with RR3=0x%02x.\n", is);
+    printk(KERN_ERR "dmascc: stuck in ISR with RR3=0x%02x.\n", is);
   }
   /* Ok, no interrupts pending from this 8530. The INT line should
      be inactive now. */
@@ -1072,9 +1051,7 @@ static void special_condition(struct scc_priv *priv, int rc) {
 	  priv->rx_len[priv->rx_head] = cb;
 	  priv->rx_head = (priv->rx_head + 1) % NUM_RX_BUF;
 	  priv->rx_count++;
-	  /* Mark bottom half handler */
-	  queue_task(&priv->rx_task, &tq_immediate);
-	  mark_bh(IMMEDIATE_BH);
+	  schedule_work(&priv->rx_work);
 	} else {
 	  priv->stats.rx_errors++;
 	  priv->stats.rx_over_errors++;
@@ -1102,11 +1079,9 @@ static void rx_bh(void *arg) {
   struct sk_buff *skb;
   unsigned char *data;
 
-  save_flags(flags);
-  cli();
-
+  spin_lock_irqsave(&priv->ring_lock, flags);
   while (priv->rx_count) {
-    restore_flags(flags);
+    spin_unlock_irqrestore(&priv->ring_lock, flags);
     cb = priv->rx_len[i];
     /* Allocate buffer */
     skb = dev_alloc_skb(cb+1);
@@ -1122,17 +1097,16 @@ static void rx_bh(void *arg) {
       skb->protocol = ntohs(ETH_P_AX25);
       skb->mac.raw = skb->data;
       netif_rx(skb);
+      priv->dev->last_rx = jiffies;
       priv->stats.rx_packets++;
       priv->stats.rx_bytes += cb;
     }
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(&priv->ring_lock, flags);
     /* Move tail */
     priv->rx_tail = i = (i + 1) % NUM_RX_BUF;
     priv->rx_count--;
   }
-
-  restore_flags(flags);
+  spin_unlock_irqrestore(&priv->ring_lock, flags);
 }
 
 
@@ -1321,12 +1295,11 @@ static inline void tx_on(struct scc_priv *priv) {
     else
       write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN | WT_RDY_ENAB);
     /* Write first byte(s) */
-    save_flags(flags);
-    cli();
+    spin_lock_irqsave(priv->register_lock, flags);
     for (i = 0; i < n; i++)
       write_scc_data(priv, priv->tx_buf[priv->tx_tail][i], 1);
     enable_dma(priv->param.dma);
-    restore_flags(flags);
+    spin_unlock_irqrestore(priv->register_lock, flags);
   } else {
     write_scc(priv, R15, TxUIE);
     write_scc(priv, R1, EXT_INT_ENAB | WT_FN_RDYFN | TxINT_ENAB);
