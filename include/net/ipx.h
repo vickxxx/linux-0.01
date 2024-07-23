@@ -1,4 +1,3 @@
-
 /*
  *	The following information is in its entirety obtained from:
  *
@@ -12,47 +11,41 @@
 #define _NET_INET_IPX_H_
 
 #include <linux/netdevice.h>
-#include <linux/skbuff.h>
 #include <net/datalink.h>
 #include <linux/ipx.h>
 
 typedef struct
 {
-	unsigned long net;
-	unsigned char  node[IPX_NODE_LEN]; 
-	unsigned short sock;
+	__u32   net;
+	__u8    node[IPX_NODE_LEN]; 
+	__u16   sock;
 } ipx_address;
 
 #define ipx_broadcast_node	"\377\377\377\377\377\377"
 #define ipx_this_node           "\0\0\0\0\0\0"
 
-typedef struct ipx_packet
+struct ipxhdr
 {
-	unsigned short	ipx_checksum __attribute__ ((packed));
+	__u16           ipx_checksum __attribute__ ((packed));
 #define IPX_NO_CHECKSUM	0xFFFF
-	unsigned short  ipx_pktsize __attribute__ ((packed));
-	unsigned char   ipx_tctrl;
-	unsigned char   ipx_type;
+	__u16           ipx_pktsize __attribute__ ((packed));
+	__u8            ipx_tctrl;
+	__u8            ipx_type;
 #define IPX_TYPE_UNKNOWN	0x00
 #define IPX_TYPE_RIP		0x01	/* may also be 0 */
 #define IPX_TYPE_SAP		0x04	/* may also be 0 */
-#define IPX_TYPE_SPX		0x05	/* Not yet implemented */
+#define IPX_TYPE_SPX		0x05	/* SPX protocol */
 #define IPX_TYPE_NCP		0x11	/* $lots for docs on this (SPIT) */
 #define IPX_TYPE_PPROP		0x14	/* complicated flood fill brdcast [Not supported] */
 	ipx_address	ipx_dest __attribute__ ((packed));
 	ipx_address	ipx_source __attribute__ ((packed));
-} ipx_packet;
-
-
-typedef struct sock ipx_socket;
+};
 
 #include <net/ipxcall.h>
-extern int ipx_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt);
-extern void ipxrtr_device_down(struct device *dev);
 
 typedef struct ipx_interface {
 	/* IPX address */
-	unsigned long	if_netnum;
+	__u32           if_netnum;
 	unsigned char	if_node[IPX_NODE_LEN];
 
 	/* physical device info */
@@ -62,7 +55,7 @@ typedef struct ipx_interface {
 
 	/* socket support */
 	unsigned short	if_sknum;
-	ipx_socket	*if_sklist;
+	struct sock	*if_sklist;
 
 	/* administrative overhead */
 	int		if_ipx_offset;
@@ -73,7 +66,7 @@ typedef struct ipx_interface {
 }	ipx_interface;
 
 typedef struct ipx_route {
-	unsigned long ir_net;
+	__u32         ir_net;
 	ipx_interface *ir_intrfc;
 	unsigned char ir_routed;
 	unsigned char ir_router_node[IPX_NODE_LEN];
@@ -83,4 +76,7 @@ typedef struct ipx_route {
 #define IPX_MIN_EPHEMERAL_SOCKET	0x4000
 #define IPX_MAX_EPHEMERAL_SOCKET	0x7fff
 
-#endif
+extern int ipx_register_spx(struct proto_ops **, struct net_proto_family *);
+extern int ipx_unregister_spx(void);
+
+#endif /* def _NET_INET_IPX_H_ */

@@ -8,6 +8,15 @@
 #define AMIGAMOUSE_MINOR 4
 #define ATARIMOUSE_MINOR 5
 #define SUN_MOUSE_MINOR 6
+#define APOLLO_MOUSE_MINOR 7
+#define PC110PAD_MINOR 9
+#define MAC_MOUSE_MINOR 10
+#define WATCHDOG_MINOR		130	/* Watchdog timer     */
+#define TEMP_MINOR		131	/* Temperature Sensor */
+#define RTC_MINOR 135
+#define SUN_OPENPROM_MINOR 139
+#define NVRAM_MINOR 144
+#define RADIO_MINOR 152
 #define MISC_DYNAMIC_MINOR 255
 
 extern int misc_init(void);

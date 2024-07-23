@@ -19,9 +19,34 @@
 # Portions of this script were borrowed from the original Configure
 # script.
 #
-# Please send comments / questions / bug fixes to roadcapw@cfw.com
+# William Roadcap was the original author of Menuconfig.
+# Michael Elizabeth Chastain (mec@shout.net) is the current maintainer.
 #
-#----------------------------------------------------------------------------
+# 070497 Bernhard Kaindl (bkaindl@netway.at) - get default values for
+# new bool, tristate and dep_tristate parameters from the defconfig file.
+# new configuration parameters are marked with '(NEW)' as in make config.
+#
+# 180697 Bernhard Kaindl (bkaindl@netway.at) - added the needed support
+# for string options. They are handled like the int and hex options.
+#
+# 081297 Pavel Machek (pavel@atrey.karlin.mff.cuni.cz) - better error 
+# handling
+#
+# 131197 Michael Chastain (mec@shout.net) - output all lines for a
+# choice list, not just the selected one.  This makes the output
+# the same as Configure output, which is important for smart config
+# dependencies.
+#
+# 101297 Michael Chastain (mec@shout.net) - remove sound driver cruft.
+#
+# 221297 Michael Chastain (mec@shout.net) - make define_bool actually
+# define its arguments so that later tests on them work right.
+#
+# 160198 Michael Chastain (mec@shout.net) - fix bug with 'c' command
+# (complement existing value) when used on virgin uninitialized variables.
+#
+# 090398 Axel Boldt (boldt@math.ucsb.edu) - allow for empty lines in help
+# texts.
 
 
 #
@@ -40,9 +65,21 @@ single_menu_mode=
 #
 set -h +o posix
 
+#
+# Converts "# xxx is not..." to xxx=n
+#
+parse_config () {
+	sed -e 's/# \(.*\) is not.*/\1=n/'
+}
 
-
-
+#
+# Parses the defconfig file to set the default for a new parameter.
+#
+function get_def () {
+	parse_config < arch/$ARCH/defconfig | grep "^$1=" > /tmp/conf.$$
+	. /tmp/conf.$$
+	rm /tmp/conf.$$
+}
 
 #
 # Load the functions used by the config.in files.
@@ -56,6 +93,19 @@ set -h +o posix
 load_functions () {
 
 #
+# Macro for setting the x and info varibles. get's default from defconfig
+# file if it's a new parameter.
+#
+function set_x () {
+	eval x=\$$1
+	if [ -z "$x" ]; then
+		get_def "$1"
+		eval x=\${$1:-'n'} INFO_$1="' (NEW)'"
+	fi
+	eval info="\$INFO_$1"
+}
+
+#
 # Additional comments
 #
 function comment () {
@@ -64,10 +114,10 @@ function comment () {
 }
 
 #
-# Don't need this yet, but we don't want to puke either.
+# Define a boolean to a specific value.
 #
 function define_bool () {
-	:	
+	eval $1=$2
 }
 
 #
@@ -75,14 +125,14 @@ function define_bool () {
 # which calls our local bool function.
 #
 function bool () {
-	eval $2=\${$2:-'n'}  x=\$$2
+	set_x "$2"
 
 	case $x in
 	y|m)	flag="*" ;;
 	n)	flag=" " ;;
 	esac
 
-	echo -ne "'$2' '[$flag] $1' " >>MCmenu
+	echo -ne "'$2' '[$flag] $1$info' " >>MCmenu
 
 	echo -e "function $2 () { l_bool '$2' \"\$1\" ;}\n" >>MCradiolists
 }
@@ -98,7 +148,7 @@ function tristate () {
 	then
 		bool "$1" "$2"
 	else
-		eval $2=\${$2:-'n'}  x=\$$2
+		set_x "$2"
 	
 		case $x in
 		y) flag="*" ;;
@@ -106,7 +156,7 @@ function tristate () {
 		*) flag=" " ;;
 		esac
 	
-		echo -ne "'$2' '<$flag> $1' " >>MCmenu
+		echo -ne "'$2' '<$flag> $1$info' " >>MCmenu
 	
 		echo -e "
 		function $2 () { l_tristate '$2' \"\$1\" ;}" >>MCradiolists
@@ -151,7 +201,7 @@ function int () {
 }
 
 #
-# Add a menu item which will call our local int function.
+# Add a menu item which will call our local hex function.
 # 
 function hex () {
 	eval $2=\${$2:-"$3"} x=\${$2##*[x,X]}
@@ -159,6 +209,17 @@ function hex () {
 	echo -ne "'$2' '($x) $1' " >>MCmenu
 
 	echo -e "function $2 () { l_hex '$1' '$2' '$3' '$x' ;}" >>MCradiolists
+}
+
+#
+# Add a menu item which will call our local string function.
+# 
+function string () {
+	eval $2=\${$2:-"$3"} x=\$$2
+
+	echo -ne "'$2' '     $1: \"$x\"' " >>MCmenu
+
+	echo -e "function $2 () { l_string '$1' '$2' '$3' '$x' ;}" >>MCradiolists
 }
 
 #
@@ -219,9 +280,11 @@ function extract_help () {
      var=$(echo "$1"|sed 's/[][\/.^$*]/\\&/g')
      #now pick out the right help text:
      text=$(sed -n "/^$var[ 	]*\$/,\${
-                        /^$var[ 	]*\$/d
-                        /^#.*/d
-			/^[ 	]*\$/q
+                        /^$var[ 	]*\$/c\\
+${var}:\\
+
+                        /^#/b
+                        /^[^ 	]/q
                         s/^  //
                         p
                     }" Documentation/Configure.help)
@@ -283,23 +346,6 @@ function submenu () {
 }
 
 #
-# Create a menu entry to handle the traditional sound configuration.
-#
-function soundcfg () {
-	echo -ne "'l_soundcfg' "\
-		 "'Old configuration script "\
-		 "(For: SM Wave, PSS & AudioTrix Pro) -->' " >>MCmenu
-}
-
-#
-# Startup the traditional sound configuration program.
-#
-function l_soundcfg () {
-	clear
-	$MAKE -C drivers/sound config
-}
-
-#
 # Handle a boolean (Yes/No) option.
 #
 function l_bool () {
@@ -311,6 +357,7 @@ function l_bool () {
 		   	case $x in
 		   	y) eval $1=n ;;
 		   	n) eval $1=y ;;
+			*) eval $1=y ;;
 		   	esac ;;
 		*)	eval $1=n ;;
 		esac
@@ -323,14 +370,14 @@ function l_bool () {
 # Same as bool() except options are (Module/No)
 #
 function mod_bool () {
-	eval $2=\${$2:-'n'}  x=\$$2
+	set_x "$2"
 
 	case $x in
 	y|m) flag='M' ;;
 	*)   flag=' ' ;;
 	esac
 
-	echo -ne "'$2' '<$flag> $1' " >>MCmenu
+	echo -ne "'$2' '<$flag> $1$info' " >>MCmenu
 
 	echo -e "function $2 () { l_mod_bool '$2' \"\$1\" ;}" >>MCradiolists
 }
@@ -354,6 +401,7 @@ As a result, this feature will be built as a module." 4 70
 			case $x in
 			m) eval $1=n ;;
 			n) eval $1=m ;;
+			*) eval $1=m ;;
 			esac ;;
 		*)	eval $1=n ;;
 		esac
@@ -378,6 +426,7 @@ function l_tristate () {
 		   y) eval $1=n ;;
 		   n) eval $1=m ;;
 		   m) eval $1=y ;;
+		   *) eval $1=y ;;
 		   esac ;;
 		*) eval $1=n ;;
 		esac
@@ -400,7 +449,9 @@ function l_int () {
 			answer="`cat MCdialog.out`"
 			answer="${answer:-$3}"
 
-			if expr $answer : '0$\|-?[1-9][0-9]*$' >/dev/null
+			# Semantics of + and ? in GNU expr changed, so
+			# we avoid them:
+			if expr "$answer" : '0$\|-[1-9][0-9]*$\|[1-9][0-9]*$' >/dev/null
 			then
 				eval $2="$answer"
 			else
@@ -433,7 +484,7 @@ function l_hex () {
 			answer="${answer:-$3}"
 			answer="${answer##*[x,X]}"
 
-			if expr $answer : '[0-9a-fA-F]+$' >/dev/null
+			if expr "$answer" : '[0-9a-fA-F][0-9a-fA-F]*$' >/dev/null
 			then
 				eval $2="$answer"
 			else
@@ -452,7 +503,35 @@ function l_hex () {
 }
 
 #
-# Handle a on-of-many choice list.
+# Create a dialog for entering a string into a kernel option.
+#
+function l_string () {
+	while true
+	do
+		if $DIALOG --title "$1" \
+			--backtitle "$backtitle" \
+			--inputbox "$inputbox_instructions_string" \
+			10 75 "$4" 2>MCdialog.out
+		then
+			answer="`cat MCdialog.out`"
+			answer="${answer:-$3}"
+
+			#
+			# Someone may add a nice check for the entered
+			# string here...
+			#
+			eval $2=\"$answer\"
+
+			break
+		fi
+
+		help "$2" "$1"
+	done
+}
+
+
+#
+# Handle a one-of-many choice list.
 #
 function l_choice () {
 	#
@@ -493,7 +572,7 @@ function l_choice () {
 	done
 
 	#
-	# Now set the boolean value of each option base on
+	# Now set the boolean value of each option based on
 	# the selection made from the radiolist.
 	#
 	set -- $choices
@@ -510,12 +589,18 @@ function l_choice () {
 	done
 }
 
+#
+# Call awk, and watch for error codes, etc.
+#
+function callawk () {
+awk "$1" || echo "Awk died with error code $?. Giving up." || exit 1
+}
 
 #
 # A faster awk based recursive parser. (I hope)
 #
 function parser1 () {
-awk '
+callawk '
 BEGIN {
 	menu_no = 0
 	comment_is_option = 0
@@ -550,11 +635,6 @@ function parser(ifile,menu) {
 			printf("") >>menu
 		}
 		else if ($1 == "source") {
-			# Yuk!  Blah!  Phooey!
-			if ($2 ~ "drivers/sound") {
-				printf("soundcfg\n") >>menu
-			}
-
 			parser($2,menu)
 		}
 		else {
@@ -568,7 +648,7 @@ function parser(ifile,menu) {
 # Secondary parser for single menu mode.
 #
 function parser2 () {
-awk '
+callawk '
 BEGIN {
 	parser("'$CONFIG_IN'","MCmenu0")
 }
@@ -583,9 +663,6 @@ function parser(ifile,menu) {
 			printf("") >>menu
 		}
 		else if ($1 == "source") {
-			if ($2 ~ "drivers/sound") {
-				printf("soundcfg\n") >>menu
-			}
 			parser($2,menu)
 		}
 		else {
@@ -627,9 +704,9 @@ function parse_config_files () {
 	#
 	for i in MCmenu*
 	do
+		echo -n "."
 		source ./$i
 	done
-
 	rm -f MCmenu*
 }
 
@@ -651,13 +728,11 @@ function activate_menu () {
 		then
 			clear
 			cat <<EOM
-
 Menuconfig has encountered a possible error in one of the kernel's
 configuration files and is unable to continue.
 
-Please report this to the author <roadcapw@cfw.com>.  You may also
-send a problem report to linux-kernel@vger.rutgers.edu or post a
-message to the linux.dev.kernel news group.
+Please report this to the maintainer <mec@shout.net>.  You may also
+send a problem report to <linux-kernel@vger.rutgers.edu>.
 
 Please indicate the kernel version you are trying to configure and
 which menu you were trying to enter when this error occurred.
@@ -703,7 +778,6 @@ EOM
 			stty sane
 			clear
 			cat <<EOM
-
 There seems to be a problem with the lxdialog companion utility which is
 built prior to running Menuconfig.  Usually this is an indicator that you
 have upgraded/downgraded your ncurses libraries and did not remove the 
@@ -718,8 +792,8 @@ the /usr/src/linux/scripts/lxdialog directory and issuing the
 "make clean all" command.
 
 If you have verified that your ncurses install is correct, you may email
-the author <roadcapw@cfw.com> or post a message on the linux.dev.kernel
-news group for additional assistance. 
+the maintainer <mec@shout.net> or post a message to
+<linux-kernel@vger.rutgers.edu> for additional assistance. 
 
 EOM
 			cleanup
@@ -860,11 +934,11 @@ EOM
 
 #
 # Load config options from a file.
-# Converts all "# OPTION is not set" lines to "OPTION=" lines
+# Converts all "# OPTION is not set" lines to "OPTION=n" lines
 #
 function load_config_file () {
 	awk '
-	  /# .* is not set.*/ { printf("%s=\n", $2) }
+	  /# .* is not set.*/ { printf("%s=n\n", $2) }
 	! /# .* is not set.*/ { print }
 	' $1 >.tmpconfig
 
@@ -876,8 +950,20 @@ function load_config_file () {
 # Just what it says.
 #
 save_configuration () {
-	${DIALOG} --backtitle "$backtitle" \
-		  --infobox "Saving your kernel configuration..."  3 40
+        echo
+	echo -n "Saving your kernel configuration."
+
+	#
+	# Macro for setting the newval varible. get's default from defconfig
+	# file if it's a new parameter and it has not been shown yet.
+	#
+	function set_newval () {
+		eval newval=\$$1
+		if [ -z "$newval" ]; then
+			get_def "$1"
+			eval newval=\${$1:-'n'}
+		fi
+	}
 
 	#
 	# Now, let's redefine the configuration functions for final
@@ -886,25 +972,27 @@ save_configuration () {
 	# Nested function definitions, YIPEE!
 	#
 	function bool () {
-		eval define_bool "$2" "\${$2:-n}"
+		set_newval "$2"
+		eval define_bool "$2" "$newval"
 	}
 
 	function tristate () {
-		eval define_bool "$2" "\${$2:-n}"
+		set_newval "$2"
+		eval define_bool "$2" "$newval"
 	}
 
 	function dep_tristate () {
-		eval x=\${$2:-n}
+		set_newval "$2"
 
 		if eval [ "_$3" = "_m" ]
 		then
-			if [ "$x" = "y" ]
+			if [ "$newval" = "y" ]
 			then
-				x="m"
+				newval="m"
 			fi
 		fi
 
-		define_bool "$2" "$x"
+		define_bool "$2" "$newval"
 	}
 
 	function int () {
@@ -917,6 +1005,12 @@ save_configuration () {
 		eval x=\${$2:-"$3"}
 		echo "$2=$x" 			 >>$CONFIG
 		echo "#define $2 0x${x##*[x,X]}" >>$CONFIG_H
+	}
+
+	function string () {
+		eval x=\${$2:-"$3"}
+		echo "$2=\"$x\"" 			 >>$CONFIG
+		echo "#define $2 \"$x\""	>>$CONFIG_H
 	}
 
 	function define_bool () {
@@ -972,11 +1066,19 @@ save_configuration () {
 		: ${current:=$default}
 
 		#
-		# Then extract the actual option from the list of choices.
+		# Output all choices (to be compatible with other configs).
 		#
-		current=${choices#*$current} ; set $current
-
-		define_bool "$1" "y"
+		set -- $choices
+		while [ -n "$2" ]
+		do
+			if eval [ "$1" = "$current" ]
+			then
+			    define_bool "$2" "y"
+			else
+			    define_bool "$2" "n"
+			fi
+			shift ; shift
+		done
 	}
 
 	function mainmenu_name () {
@@ -1007,6 +1109,8 @@ save_configuration () {
 		fi
 	}
 
+	echo -n "."
+
 	DEF_CONFIG="${1:-.config}"
 	DEF_CONFIG_H="include/linux/autoconf.h"
 
@@ -1020,24 +1124,13 @@ save_configuration () {
 	echo "/*" >$CONFIG_H
 	echo " * Automatically generated by make menuconfig: don't edit" >>$CONFIG_H
 	echo " */" >>$CONFIG_H
+	echo "#define AUTOCONF_INCLUDED" >> $CONFIG_H
 
-	MAKE=:	#To prevent sound Makefile from running.
-	
+	echo -n "."
 	if . $CONFIG_IN >>.menuconfig.log 2>&1
 	then
 		if [ "$DEF_CONFIG" = ".config" ]
 		then
-			#
-			# Create the sound driver's config files for cards
-			# Which are compatible with the new config method.
-			#
-			if [ "_$CONFIG_TRIX"   != "_y" -a\
-			     "_$CONFIG_PSS"    != "_y" -a\
-			     "_$CONFIG_SMWAVE" != "_y"   ]
-			then
-				make -C drivers/sound kernelconfig >>.menuconfig.log 2>&1
-			fi
-
 			mv $CONFIG_H $DEF_CONFIG_H
 		fi
 
@@ -1111,7 +1204,7 @@ followed by the <SPACE BAR>.
 Press <?> for additional information about this option."
 
 inputbox_instructions_int="\
-Please enter a decimal value between 1 and 9999. \
+Please enter a decimal value. \
 Fractions will not be accepted.  \
 Use the <TAB> key to move from the input field to the buttons below it."
 
@@ -1119,13 +1212,17 @@ inputbox_instructions_hex="\
 Please enter a hexadecimal value. \
 Use the <TAB> key to move from the input field to the buttons below it."
 
-backtitle="Linux Kernel Configuration"
+inputbox_instructions_string="\
+Please enter a string value. \
+Use the <TAB> key to move from the input field to the buttons below it."
 
 DIALOG="./scripts/lxdialog/lxdialog"
 
 kernel_version="${VERSION}.${PATCHLEVEL}.${SUBLEVEL}"
 
-trap "cleanup ; rm -f .menuconfig ; exit 1" 1 2 15
+backtitle="Linux Kernel v$kernel_version Configuration"
+
+trap "cleanup ; exit 1" 1 2 15
 
 
 #
@@ -1143,56 +1240,41 @@ fi
 
 if [ -f $DEFAULTS ]
 then
-  echo "#"
-  echo "# Using defaults found in" $DEFAULTS
-  echo "#"
-  . $DEFAULTS
+  echo "Using defaults found in" $DEFAULTS
+  load_config_file $DEFAULTS
 else
-  echo "#"
-  echo "# No defaults found"
-  echo "#"
+  echo "No defaults found"
 fi
 
 
 # Fresh new log.
 >.menuconfig.log
 
-$DIALOG	--backtitle "$backtitle" \
-	--infobox "Preparing configuration scripts..." 3 40
-
-#
-# Check kernel version of previous menuconfig build.
-# If it's different then we should tell the sound driver
-# to rebuild its Config.in file.
-#
-rebuildsound=TRUE
-if [ -e .menuconfig ]
-then
-	read x <.menuconfig
-	if [ "$x" = "# $kernel_version" ]
-	then
-		rebuildsound=
-	fi
-fi
-
-if [ "$rebuildsound" ]
-then
-	# Activate the Linux compatible sound configuration.
-	# This may not work for all sound cards.  (See sound docs)
-	#
-	make -C drivers/sound mkscript kernelconfig >>.menuconfig.log 2>&1
-
-	echo "# $kernel_version" >.menuconfig
-fi
+echo -n "Preparing configuration scripts: version" 
 
 # Load the functions used by the config.in files.
+echo -n ", functions"
 load_functions
+
+if [ ! -e $CONFIG_IN ]
+then
+	echo "Your main config.in file ($CONFIG_IN) does not exist"
+	exit 1
+fi
+
+if [ ! -x $DIALOG ]
+then
+	echo "Your lxdialog utility does not exist"
+	exit 1
+fi
 
 #
 # Read config.in files and parse them into one shell function per menu.
 #
+echo -n ", parsing"
 parse_config_files $CONFIG_IN
 
+echo "done."
 #
 # Start the ball rolling from the top.
 #
@@ -1208,25 +1290,12 @@ cleanup1
 #
 if $DIALOG --backtitle "$backtitle" \
 	   --yesno "Do you wish to save your new kernel configuration?" 5 60
-	   
 then
 	save_configuration
-
-	clear
-	cat <<EOM
-
-
-The linux kernel is now hopefully configured for your setup.
-Check the top-level Makefile for additional configuration,
-and do a 'make dep ; make clean' if you want to be sure all
-the files are correctly re-made.
-
-EOM
+	echo
+	echo The linux kernel is now configured for your setup.
 else
-	clear
-	echo -e "Your kernel configuration changes were NOT saved.\n"
+    	echo 
+	echo Your kernel configuration changes were NOT saved.
 fi
-
-
 exit 0
-

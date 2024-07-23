@@ -128,7 +128,9 @@ static const char *version =
 #include <asm/bitops.h>
 #include <asm/io.h>
 #include <asm/dma.h>
+#include <asm/uaccess.h>
 #include <linux/errno.h>              
+#include <linux/init.h>
 
 #include <linux/netdevice.h>
 #include <linux/if.h>
@@ -154,12 +156,7 @@ static int eql_close(struct device *dev); /*  */
 static int eql_ioctl(struct device *dev, struct ifreq *ifr, int cmd); /*  */
 static int eql_slave_xmit(struct sk_buff *skb, struct device *dev); /*  */
 
-static struct enet_statistics *eql_get_stats(struct device *dev); /*  */
-static int eql_header(struct sk_buff *skb, struct device *dev, 
-		      unsigned short type, void *daddr, void *saddr, 
-		      unsigned len); /*  */
-static int eql_rebuild_header(void *buff, struct device *dev, 
-			      unsigned long raddr, struct sk_buff *skb); /*  */
+static struct net_device_stats *eql_get_stats(struct device *dev); /*  */
 
 /* ioctl() handlers
    ---------------- */
@@ -212,12 +209,11 @@ static void eql_timer(unsigned long param);	/*  */
    ---------------------------------------------------------
    */
 
-int eql_init(struct device *dev)
+__initfunc(int eql_init(struct device *dev))
 {
 	static unsigned version_printed = 0;
 	/* static unsigned num_masters     = 0; */
 	equalizer_t *eql = 0;
-	int i;
 
 	if ( version_printed++ == 0 && eql_debug > 0)
 		printk(version);
@@ -230,14 +226,14 @@ int eql_init(struct device *dev)
 	memset (dev->priv, 0, sizeof (equalizer_t));
 	eql = (equalizer_t *) dev->priv;
 
-	eql->stats = kmalloc (sizeof (struct enet_statistics), GFP_KERNEL);
+	eql->stats = kmalloc (sizeof (struct net_device_stats), GFP_KERNEL);
 	if (eql->stats == NULL) 
 	{
 		kfree(dev->priv);
 		dev->priv = NULL;
 		return -ENOMEM;
 	}
-	memset (eql->stats, 0, sizeof (struct enet_statistics));
+	memset (eql->stats, 0, sizeof (struct net_device_stats));
 
 	init_timer (&eql->timer);
 	eql->timer.data     	= (unsigned long) dev->priv;
@@ -253,16 +249,11 @@ int eql_init(struct device *dev)
   
   	/*
   	 *	Fill in the fields of the device structure with 
-	 *	eql-generic values. This should be in a common 
-	 *	file instead of per-driver.  
+	 *	eql-generic values. 
 	 */
 
-	for (i = 0; i < DEV_NUMBUFFS; i++)
-		skb_queue_head_init(&dev->buffs[i]);
-
-	dev->hard_header	= eql_header; 
-	dev->rebuild_header	= eql_rebuild_header;
-
+	dev_init_buffers(dev);
+	
 	/*
 	 *	Now we undo some of the things that eth_setup does
 	 * 	that we don't like 
@@ -270,12 +261,6 @@ int eql_init(struct device *dev)
 	 
 	dev->mtu        	= EQL_DEFAULT_MTU;	/* set to 576 in eql.h */
 	dev->flags      	= IFF_MASTER;
-
-	dev->family     	= AF_INET;
-	dev->pa_addr    	= 0;
-	dev->pa_brdaddr 	= 0;
-	dev->pa_mask    	= 0;
-	dev->pa_alen    	= 4;
 
 	dev->type       	= ARPHRD_SLIP;
 	dev->tx_queue_len 	= 5;		/* Hands them off fast */
@@ -344,7 +329,8 @@ static int eql_close(struct device *dev)
 
 static int eql_ioctl(struct device *dev, struct ifreq *ifr, int cmd)
 {  
-	if(!suser() && cmd!=EQL_GETMASTRCFG && cmd!=EQL_GETSLAVECFG)
+	if(cmd!=EQL_GETMASTRCFG && cmd!=EQL_GETSLAVECFG && 
+	   !capable(CAP_NET_ADMIN))
 	  	return -EPERM;
 	switch (cmd)
 	{
@@ -384,11 +370,13 @@ static int eql_slave_xmit(struct sk_buff *skb, struct device *dev)
 	{
 #ifdef EQL_DEBUG
 		if (eql_debug >= 100)
-			printk ("%s: %d slaves xmitng %ld B %s\n", 
+			printk ("%s: %d slaves xmitng %d B %s\n", 
 				dev->name, eql_number_slaves (eql->queue), skb->len,
 				slave_dev->name);
 #endif
-		dev_queue_xmit (skb, slave_dev, 1);
+		skb->dev = slave_dev;
+		skb->priority = 1;
+		dev_queue_xmit (skb);
 		eql->stats->tx_packets++;
 		slave->bytes_queued += skb->len; 
 	}
@@ -400,31 +388,16 @@ static int eql_slave_xmit(struct sk_buff *skb, struct device *dev)
 		 */
 
 		eql->stats->tx_dropped++;
-		dev_kfree_skb(skb, FREE_WRITE);
+		dev_kfree_skb(skb);
 	}	  
 	return 0;
 }
 
 
-static struct enet_statistics * eql_get_stats(struct device *dev)
+static struct net_device_stats * eql_get_stats(struct device *dev)
 {
 	equalizer_t *eql = (equalizer_t *) dev->priv;
 	return eql->stats;
-}
-
-
-static int  eql_header(struct sk_buff *skb, struct device *dev, 
-	   unsigned short type, void *daddr, void *saddr, 
-	   unsigned len)
-{
-	return 0;
-}
-
-
-static int eql_rebuild_header(void *buff, struct device *dev, 
-		   unsigned long raddr, struct sk_buff *skb)
-{
-	return 0;
 }
 
 /*
@@ -447,7 +420,7 @@ static int eql_enslave(struct device *dev, slaving_request_t *srqp)
 #endif  
 		return err;
 	  }
-	memcpy_fromfs (&srq, srqp, sizeof (slaving_request_t));
+	copy_from_user (&srq, srqp, sizeof (slaving_request_t));
 
 #ifdef EQL_DEBUG
 	if (eql_debug >= 20)
@@ -504,7 +477,7 @@ static int eql_emancipate(struct device *dev, slaving_request_t *srqp)
 	if (err) 
 		return err;
 
-	memcpy_fromfs (&srq, srqp, sizeof (slaving_request_t));
+	copy_from_user (&srq, srqp, sizeof (slaving_request_t));
 #ifdef EQL_DEBUG
 	if (eql_debug >= 20)
 		printk ("%s: emancipate `%s`\n", dev->name, srq.slave_name);
@@ -535,7 +508,7 @@ static int eql_g_slave_cfg(struct device *dev, slave_config_t *scp)
 	if (err) 
 		return err;
 
-	memcpy_fromfs (&sc, scp, sizeof (slave_config_t));
+	copy_from_user (&sc, scp, sizeof (slave_config_t));
 #ifdef EQL_DEBUG
 	if (eql_debug >= 20)
 		printk ("%s: get config for slave `%s'\n", dev->name, sc.slave_name);
@@ -552,7 +525,7 @@ static int eql_g_slave_cfg(struct device *dev, slave_config_t *scp)
 			err = verify_area(VERIFY_WRITE, (void *)scp, sizeof (slave_config_t));
 			if (err) 
 				return err;
-			memcpy_tofs (scp, &sc, sizeof (slave_config_t));
+			copy_to_user (scp, &sc, sizeof (slave_config_t));
 			return 0;
 		}
 	}
@@ -577,7 +550,7 @@ static int eql_s_slave_cfg(struct device *dev, slave_config_t *scp)
 		printk ("%s: set config for slave `%s'\n", dev->name, sc.slave_name);
 #endif
   
-	memcpy_fromfs (&sc, scp, sizeof (slave_config_t));
+	copy_from_user (&sc, scp, sizeof (slave_config_t));
 
 	eql = (equalizer_t *) dev->priv;
 	slave_dev = dev_get (sc.slave_name);
@@ -616,7 +589,7 @@ static int eql_g_master_cfg(struct device *dev, master_config_t *mcp)
 		eql = (equalizer_t *) dev->priv;
 		mc.max_slaves = eql->max_slaves;
 		mc.min_slaves = eql->min_slaves;
-		memcpy_tofs (mcp, &mc, sizeof (master_config_t));
+		copy_to_user (mcp, &mc, sizeof (master_config_t));
 		return 0;
 	}
 	return -EINVAL;
@@ -636,7 +609,7 @@ static int eql_s_master_cfg(struct device *dev, master_config_t *mcp)
 	if (eql_debug >= 20)
 		printk ("%s: set master config\n", dev->name);
 #endif
-	memcpy_fromfs (&mc, mcp, sizeof (master_config_t));
+	copy_from_user (&mc, mcp, sizeof (master_config_t));
 	if ( eql_is_master (dev) )
 	{
 		eql = (equalizer_t *) dev->priv;

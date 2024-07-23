@@ -20,7 +20,7 @@
 
 	Paul Gortmaker	: multiple card support for module users, support
 			  for non-standard memory sizes.
-			 
+
 
 */
 
@@ -33,6 +33,7 @@ static const char *version =
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/init.h>
 #include <asm/io.h>
 #include <asm/system.h>
 
@@ -41,7 +42,7 @@ static const char *version =
 #include "8390.h"
 
 /* A zero-terminated list of I/O addresses to be probed. */
-static unsigned int wd_portlist[] =
+static unsigned int wd_portlist[] __initdata =
 {0x300, 0x280, 0x380, 0x240, 0};
 
 int wd_probe(struct device *dev);
@@ -54,8 +55,8 @@ static void wd_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
 static void wd_block_input(struct device *dev, int count,
 						  struct sk_buff *skb, int ring_offset);
 static void wd_block_output(struct device *dev, int count,
-							const unsigned char *buf, const start_page);
-static int wd_close_card(struct device *dev);
+							const unsigned char *buf, int start_page);
+static int wd_close(struct device *dev);
 
 
 #define WD_START_PG		0x00	/* First page of TX buffer */
@@ -85,7 +86,7 @@ struct netdev_entry wd_drv =
 {"wd", wd_probe1, WD_IO_EXTENT, wd_portlist};
 #else
 
-int wd_probe(struct device *dev)
+__initfunc(int wd_probe(struct device *dev))
 {
 	int i;
 	int base_addr = dev ? dev->base_addr : 0;
@@ -107,7 +108,7 @@ int wd_probe(struct device *dev)
 }
 #endif
 
-int wd_probe1(struct device *dev, int ioaddr)
+__initfunc(int wd_probe1(struct device *dev, int ioaddr))
 {
 	int i;
 	int checksum = 0;
@@ -122,6 +123,10 @@ int wd_probe1(struct device *dev, int ioaddr)
 		|| inb(ioaddr + 9) == 0xff
 		|| (checksum & 0xff) != 0xFF)
 		return ENODEV;
+
+	/* Looks like we have a card. Make sure 8390 support is available. */
+        if (load_8390_module("wd.c"))
+                return -ENOSYS;
 
 	/* We should have a "dev" from Space.c or the static module table. */
 	if (dev == NULL) {
@@ -139,7 +144,7 @@ int wd_probe1(struct device *dev, int ioaddr)
 	if (ei_debug  &&  version_printed++ == 0)
 		printk(version);
 
-	printk("%s: WD80x3 at %#3x, ", dev->name, ioaddr);
+	printk("%s: WD80x3 at %#3x,", dev->name, ioaddr);
 	for (i = 0; i < 6; i++)
 		printk(" %2.2X", dev->dev_addr[i] = inb(ioaddr + 8 + i));
 
@@ -251,18 +256,19 @@ int wd_probe1(struct device *dev, int ioaddr)
 	} else if (dev->irq == 2)		/* Fixup bogosity: IRQ2 is really IRQ9 */
 		dev->irq = 9;
 
-	/* Snarf the interrupt now.  There's no point in waiting since we cannot
-	   share and the board will usually be enabled. */
-	if (request_irq(dev->irq, ei_interrupt, 0, model_name, NULL)) {
-		printk (" unable to get IRQ %d.\n", dev->irq);
-		return EAGAIN;
+	/* Allocate dev->priv and fill in 8390 specific dev fields. */
+	if (ethdev_init(dev)) {
+		printk (" unable to get memory for dev->priv.\n");
+		return -ENOMEM;
 	}
 
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {	
-		printk (" unable to get memory for dev->priv.\n");
-		free_irq(dev->irq, NULL);
-		return -ENOMEM;
+	/* Snarf the interrupt now.  There's no point in waiting since we cannot
+	   share and the board will usually be enabled. */
+	if (request_irq(dev->irq, ei_interrupt, 0, model_name, dev)) {
+		printk (" unable to get IRQ %d.\n", dev->irq);
+		kfree(dev->priv);
+		dev->priv = NULL;
+		return EAGAIN;
 	}
 
 	/* OK, were are certain this is going to work.  Setup the device. */
@@ -293,7 +299,7 @@ int wd_probe1(struct device *dev, int ioaddr)
 	ei_status.block_output = &wd_block_output;
 	ei_status.get_8390_hdr = &wd_get_8390_hdr;
 	dev->open = &wd_open;
-	dev->stop = &wd_close_card;
+	dev->stop = &wd_close;
 	NS8390_init(dev, 0);
 
 #if 1
@@ -413,7 +419,7 @@ wd_block_output(struct device *dev, int count, const unsigned char *buf,
 
 
 static int
-wd_close_card(struct device *dev)
+wd_close(struct device *dev)
 {
 	int wd_cmdreg = dev->base_addr - WD_NIC_OFFSET; /* WD_CMDREG */
 
@@ -452,6 +458,11 @@ static int irq[MAX_WD_CARDS]  = { 0, };
 static int mem[MAX_WD_CARDS] = { 0, };
 static int mem_end[MAX_WD_CARDS] = { 0, };	/* for non std. mem size */
 
+MODULE_PARM(io, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
+MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
+MODULE_PARM(mem_end, "1-" __MODULE_STRING(MAX_WD_CARDS) "i");
+
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
 int
@@ -473,12 +484,15 @@ init_module(void)
 		}
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "wd.c: No wd80x3 card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) return 0;	/* Got at least one. */
+			if (found != 0) {	/* Got at least one. */
+				lock_8390_module();
+				return 0;
+			}
 			return -ENXIO;
 		}
 		found++;
 	}
-
+	lock_8390_module();
 	return 0;
 }
 
@@ -490,13 +504,13 @@ cleanup_module(void)
 	for (this_dev = 0; this_dev < MAX_WD_CARDS; this_dev++) {
 		struct device *dev = &dev_wd[this_dev];
 		if (dev->priv != NULL) {
+			void *priv = dev->priv;
 			int ioaddr = dev->base_addr - WD_NIC_OFFSET;
-			kfree(dev->priv);
-			dev->priv = NULL;
-			free_irq(dev->irq, NULL);
-			irq2dev_map[dev->irq] = NULL;
+			free_irq(dev->irq, dev);
 			release_region(ioaddr, WD_IO_EXTENT);
 			unregister_netdev(dev);
+			kfree(priv);
+			unlock_8390_module();
 		}
 	}
 }

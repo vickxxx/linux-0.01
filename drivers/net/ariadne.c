@@ -6,7 +6,7 @@
  *			Peter De Schrijver
  *		       (Peter.DeSchrijver@linux.cc.kuleuven.ac.be)
  *
- *  ----------------------------------------------------------------------------------
+ *  ---------------------------------------------------------------------------
  *
  *  This program is based on
  *
@@ -20,13 +20,13 @@
  *	MC68230:	Parallel Interface/Timer (PI/T)
  *			Motorola Semiconductors, December, 1983
  *
- *  ----------------------------------------------------------------------------------
+ *  ---------------------------------------------------------------------------
  *
  *  This file is subject to the terms and conditions of the GNU General Public
  *  License.  See the file COPYING in the main directory of the Linux
  *  distribution for more details.
  *
- *  ----------------------------------------------------------------------------------
+ *  ---------------------------------------------------------------------------
  *
  *  The Ariadne is a Zorro-II board made by Village Tronic. It contains:
  *
@@ -49,12 +49,12 @@
 #include <linux/etherdevice.h>
 #include <linux/interrupt.h>
 #include <linux/skbuff.h>
+#include <linux/init.h>
 
 #include <asm/bitops.h>
 #include <asm/amigaints.h>
 #include <asm/amigahw.h>
-#include <asm/zorro.h>
-#include <asm/bootinfo.h>
+#include <linux/zorro.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
@@ -104,10 +104,10 @@ struct ariadne_private {
     u_short *rx_buff[RX_RING_SIZE];
     int cur_tx, cur_rx;			/* The next free ring entry */
     int dirty_tx;			/* The ring entries to be free()ed. */
-    struct enet_statistics stats;
+    struct net_device_stats stats;
     char tx_full;
     unsigned long lock;
-    int key;
+    unsigned int key;
 };
 
 
@@ -127,9 +127,9 @@ static int ariadne_open(struct device *dev);
 static void ariadne_init_ring(struct device *dev);
 static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev);
 static int ariadne_rx(struct device *dev);
-static void ariadne_interrupt(int irq, struct pt_regs *fp, void *data);
+static void ariadne_interrupt(int irq, void *data, struct pt_regs *fp);
 static int ariadne_close(struct device *dev);
-static struct enet_statistics *ariadne_get_stats(struct device *dev);
+static struct net_device_stats *ariadne_get_stats(struct device *dev);
 #ifdef HAVE_MULTICAST
 static void set_multicast_list(struct device *dev);
 #endif
@@ -146,15 +146,15 @@ static void memcpyw(u_short *dest, u_short *src, int len)
 }
 
 
-int ariadne_probe(struct device *dev)
+__initfunc(int ariadne_probe(struct device *dev))
 {
-    int key;
-    struct ConfigDev *cd;
+    unsigned int key;
+    const struct ConfigDev *cd;
     u_long board;
     struct ariadne_private *priv;
 
     /* Ethernet is part 0, Parallel is part 1 */
-    if ((key = zorro_find(MANUF_VILLAGE_TRONIC, PROD_ARIADNE, 0, 0))) {
+    if ((key = zorro_find(ZORRO_PROD_VILLAGE_TRONIC_ARIADNE, 0, 0))) {
 	cd = zorro_get_board(key);
 	if ((board = (u_long)cd->cd_BoardAddr)) {
 	    dev->dev_addr[0] = 0x00;
@@ -291,8 +291,8 @@ static int ariadne_open(struct device *dev)
     dev->interrupt = 0;
     dev->start = 1;
 
-    if (!add_isr(IRQ_AMIGA_PORTS, ariadne_interrupt, 0, dev,
-    		 "Ariadne Ethernet"))
+    if (request_irq(IRQ_AMIGA_PORTS, ariadne_interrupt, 0,
+                    "Ariadne Ethernet", dev))
 	return(-EAGAIN);
 
     board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
@@ -366,14 +366,14 @@ static int ariadne_close(struct device *dev)
     if (ariadne_debug > 1) {
 	printk("%s: Shutting down ethercard, status was %2.2x.\n", dev->name,
 	       board->Lance.RDP);
-	printk("%s: %d packets missed\n", dev->name,
+	printk("%s: %lu packets missed\n", dev->name,
 	       priv->stats.rx_missed_errors);
     }
 
     /* We stop the LANCE here -- it occasionally polls memory if we don't. */
     board->Lance.RDP = STOP;
 
-    remove_isr(IRQ_AMIGA_PORTS, ariadne_interrupt, dev);
+    free_irq(IRQ_AMIGA_PORTS, dev);
 
     MOD_DEC_USE_COUNT;
 
@@ -381,7 +381,7 @@ static int ariadne_close(struct device *dev)
 }
 
 
-static void ariadne_interrupt(int irq, struct pt_regs *fp, void *data)
+static void ariadne_interrupt(int irq, void *data, struct pt_regs *fp)
 {
     struct device *dev = (struct device *)data;
     struct ariadne_private *priv;
@@ -545,6 +545,7 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
     struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
     struct AriadneBoard *board = priv->board;
     int entry;
+    unsigned long flags;
 
     /* Transmitter timeout, serious problems. */
     if (dev->tbusy) {
@@ -582,14 +583,6 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
 	return(0);
     }
 
-    if (skb == NULL) {
-	dev_tint(dev);
-	return(0);
-    }
-
-    if (skb->len <= 0)
-	return(0);
-
 #if 0
     if (ariadne_debug > 3) {
 	board->Lance.RAP = CSR0;	/* PCnet-ISA Controller Status */
@@ -601,12 +594,12 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
 
     /* Block a timer-based transmit from overlapping.  This could better be
 	done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-    if (set_bit(0, (void*)&dev->tbusy) != 0) {
+    if (test_and_set_bit(0, (void*)&dev->tbusy) != 0) {
 	printk("%s: Transmitter access conflict.\n", dev->name);
 	return(1);
     }
 
-    if (set_bit(0, (void*)&priv->lock) != 0) {
+    if (test_and_set_bit(0, (void*)&priv->lock) != 0) {
 	if (ariadne_debug > 0)
 	    printk("%s: tx queue lock!.\n", dev->name);
 	/* don't clear dev->tbusy flag. */
@@ -632,6 +625,9 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
     }
     printk(" data 0x%08x len %d\n", (int)skb->data, (int)skb->len);
 #endif
+
+    save_flags(flags);
+    cli();
 
     entry = priv->cur_tx % TX_RING_SIZE;
 
@@ -663,7 +659,7 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
 
     priv->tx_ring[entry]->TMD1 = (priv->tx_ring[entry]->TMD1&0xff00)|TF_OWN|TF_STP|TF_ENP;
 
-    dev_kfree_skb(skb, FREE_WRITE);
+    dev_kfree_skb(skb);
 
     priv->cur_tx++;
     if ((priv->cur_tx >= TX_RING_SIZE) && (priv->dirty_tx >= TX_RING_SIZE)) {
@@ -683,13 +679,12 @@ static int ariadne_start_xmit(struct sk_buff *skb, struct device *dev)
 
     dev->trans_start = jiffies;
 
-    cli();
     priv->lock = 0;
     if (lowb(priv->tx_ring[(entry+1) % TX_RING_SIZE]->TMD1) == 0)
 	dev->tbusy = 0;
     else
 	priv->tx_full = 1;
-    sti();
+    restore_flags(flags);
 
     return(0);
 }
@@ -783,18 +778,20 @@ static int ariadne_rx(struct device *dev)
 }
 
 
-static struct enet_statistics *ariadne_get_stats(struct device *dev)
+static struct net_device_stats *ariadne_get_stats(struct device *dev)
 {
     struct ariadne_private *priv = (struct ariadne_private *)dev->priv;
     struct AriadneBoard *board = priv->board;
     short saved_addr;
+    unsigned long flags;
 
+    save_flags(flags);
     cli();
     saved_addr = board->Lance.RAP;
     board->Lance.RAP = CSR112;	/* Missed Frame Count */
     priv->stats.rx_missed_errors = swapw(board->Lance.RDP);
     board->Lance.RAP = saved_addr;
-    sti();
+    restore_flags(flags);
 
     return(&priv->stats);
 }

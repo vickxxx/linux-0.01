@@ -1,47 +1,24 @@
 #ifndef _M68K_BYTEORDER_H
 #define _M68K_BYTEORDER_H
 
-#ifndef __BIG_ENDIAN
-#define __BIG_ENDIAN 4321
-#endif
+#include <asm/types.h>
 
-#ifndef __BIG_ENDIAN_BITFIELD
-#define __BIG_ENDIAN_BITFIELD
-#endif
+#ifdef __GNUC__
 
-#undef ntohl
-#undef ntohs
-#undef htonl
-#undef htons
-
-extern unsigned long int	ntohl(unsigned long int);
-extern unsigned short int	ntohs(unsigned short int);
-extern unsigned long int	htonl(unsigned long int);
-extern unsigned short int	htons(unsigned short int);
-
-extern __inline__ unsigned long int	__ntohl(unsigned long int);
-extern __inline__ unsigned short int	__ntohs(unsigned short int);
-
-extern __inline__ unsigned long int
-__ntohl(unsigned long int x)
+static __inline__ __const__ __u32 ___arch__swab32(__u32 val)
 {
-	return x;
+	__asm__("rolw #8,%0; swap %0; rolw #8,%0" : "=d" (val) : "0" (val));
+	return val;
 }
+#define __arch__swab32(x) ___arch__swab32(x)
 
-extern __inline__ unsigned short int
-__ntohs(unsigned short int x)
-{
-	return x;
-}
-
-#define __htonl(x) __ntohl(x)
-#define __htons(x) __ntohs(x)
-
-#ifdef __OPTIMIZE__
-#define ntohl(x) __ntohl(x)
-#define ntohs(x) __ntohs(x)
-#define htonl(x) __htonl(x)
-#define htons(x) __htons(x)
 #endif
 
+#if defined(__GNUC__) && !defined(__STRICT_ANSI__) || defined(__KERNEL__)
+#  define __BYTEORDER_HAS_U64__
+#  define __SWAB_64_THRU_32__
 #endif
+
+#include <linux/byteorder/big_endian.h>
+
+#endif /* _M68K_BYTEORDER_H */

@@ -35,14 +35,8 @@
 |
 
 #include <linux/linkage.h>
+#include <asm/entry.h>
 
-LOFF_ORIG_D0	= 0x20
-
-#define SAVE_ALL				\
-	clrl	%sp@-;     /* stk_adj */	\
-	movel	%d0,%sp@-; /* orig d0 */	\
-	movel	%d0,%sp@-; /* d0 */		\
-	moveml	%d1-%d5/%a0-%a1,%sp@-
 
 |################################
 | (1) EXAMPLE CALL-OUTS 	#
@@ -78,14 +72,12 @@ _060_isp_done:
 	beq	Lnotkern
 	rte
 Lnotkern:
-	tstl	SYMBOL_NAME(need_resched)
-	bne	Lmustsched
-	rte
-Lmustsched:
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | indicate stack frame not for syscall
-	bral	SYMBOL_NAME(ret_from_exception)	| deliver signals, reschedule etc..
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
+	tstl	%curptr@(LTASK_NEEDRESCHED)
+	jne	SYMBOL_NAME(ret_from_exception)	| deliver signals,
+						| reschedule etc..
+	RESTORE_ALL
 
 |
 | _060_real_chk():
@@ -189,7 +181,7 @@ _060_real_cas2:
 |
 | _060_lock_page():
 |
-| Entry point for the operating system's routine to "lock" a page
+| Entry point for the operating system`s routine to "lock" a page
 | from being paged out. This routine is needed by the cas/cas2
 | algorithms so that no page faults occur within the "core" code
 | region. Note: the routine must lock two pages if the operand 
@@ -214,7 +206,7 @@ _060_real_lock_page:
 |
 | _060_unlock_page():
 |
-| Entry point for the operating system's routine to "unlock" a
+| Entry point for the operating system`s routine to "unlock" a
 | page that has been "locked" previously with _real_lock_page.
 | Note: the routine must unlock two pages if the operand spans
 | two pages.

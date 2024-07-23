@@ -55,22 +55,25 @@
 #include <linux/ioport.h>
 #include <linux/major.h>
 #include <linux/string.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #define MAJOR_NR GOLDSTAR_CDROM_MAJOR
 #include <linux/blk.h>
 #define gscd_port gscd /* for compatible parameter passing with "insmod" */
-#include <linux/gscd.h>
+#include "gscd.h"
 
+static int gscd_blocksizes[1] = {512};
 
 static int gscdPresent            = 0;
 
 static unsigned char gscd_buf[2048];    /* buffer for block size conversion */
 static int   gscd_bn              = -1;
 static short gscd_port            = GSCD_BASE_ADDR;
+MODULE_PARM(gscd, "h");
 
 /* Kommt spaeter vielleicht noch mal dran ...
  *    static struct wait_queue *gscd_waitq = NULL;
@@ -86,7 +89,7 @@ static void gscd_bin2bcd          (unsigned char *p);
 static void do_gscd_request       (void);
 static int  gscd_ioctl            (struct inode *, struct file *, unsigned int, unsigned long);
 static int  gscd_open             (struct inode *, struct file *);
-static void gscd_release          (struct inode *, struct file *);
+static int  gscd_release          (struct inode *, struct file *);
 static int  check_gscd_med_chg    (kdev_t);
 
 /*      GoldStar Funktionen    */
@@ -154,10 +157,11 @@ static struct file_operations gscd_fops = {
 	block_read,		/* read - general block-dev read */
 	block_write,		/* write - general block-dev write */
 	NULL,			/* readdir - bad */
-	NULL,			/* select */
+	NULL,			/* poll */
 	gscd_ioctl,		/* ioctl */
 	NULL,			/* mmap */
 	gscd_open,		/* open */
+	NULL,			/* flush */
 	gscd_release,		/* release */
 	NULL,                   /* fsync */
 	NULL,                   /* fasync*/
@@ -190,7 +194,7 @@ static int check_gscd_med_chg (kdev_t full_dev)
 }
 
 
-void gscd_setup (char *str, int *ints)
+__initfunc(void gscd_setup (char *str, int *ints))
 {
   if (ints[0] > 0) 
   {
@@ -393,7 +397,7 @@ printk ( "GSCD: open\n" );
  * On close, we flush all gscd blocks from the buffer cache.
  */
 
-static void gscd_release (struct inode * inode, struct file * file)
+static int gscd_release (struct inode * inode, struct file * file)
 {
 
 #ifdef GSCD_DEBUG
@@ -405,6 +409,7 @@ printk ( "GSCD: release\n" );
 	invalidate_buffers(inode -> i_rdev);
 
 	MOD_DEC_USE_COUNT;
+	return 0;
 }
 
 
@@ -846,7 +851,7 @@ int  i;
      return;
 }
 
-int find_drives (void)
+__initfunc(int find_drives (void))
 {
 int *pdrv;
 int drvnum;
@@ -897,7 +902,7 @@ int i;
     return drvnum;
 }    
 
-void init_cd_drive ( int num )
+__initfunc(void init_cd_drive ( int num ))
 {
 char resp [50];
 int  i;
@@ -989,7 +994,7 @@ void cleanup_module (void)
 
 
 /* Test for presence of drive and initialize it.  Called only at boot time. */
-int gscd_init (void)
+__initfunc(int gscd_init (void))
 {
    return my_gscd_init ();
 }
@@ -997,7 +1002,7 @@ int gscd_init (void)
 
 /* This is the common initialisation for the GoldStar drive. */
 /* It is called at boot time AND for module init.           */
-int my_gscd_init (void)
+__initfunc(int my_gscd_init (void))
 {
 int i;
 int result;
@@ -1056,6 +1061,7 @@ int result;
 	}
 
 	blk_dev[MAJOR_NR].request_fn = DEVICE_REQUEST;
+	blksize_size[MAJOR_NR] = gscd_blocksizes;
 	read_ahead[MAJOR_NR] = 4;
         
         disk_state = 0;
@@ -1069,7 +1075,7 @@ int result;
 
 static void gscd_hsg2msf (long hsg, struct msf *msf)
 {
-	hsg += CD_BLOCK_OFFSET;
+	hsg += CD_MSF_OFFSET;
 	msf -> min = hsg / (CD_FRAMES*CD_SECS);
 	hsg %= CD_FRAMES*CD_SECS;
 	msf -> sec = hsg / CD_FRAMES;
@@ -1097,7 +1103,7 @@ static long gscd_msf2hsg (struct msf *mp)
 	return gscd_bcd2bin(mp -> frame)
 		+ gscd_bcd2bin(mp -> sec) * CD_FRAMES
 		+ gscd_bcd2bin(mp -> min) * CD_FRAMES * CD_SECS
-		- CD_BLOCK_OFFSET;
+		- CD_MSF_OFFSET;
 }
 
 static int gscd_bcd2bin (unsigned char bcd)

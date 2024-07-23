@@ -1,6 +1,7 @@
 #ifndef _I386_CHECKSUM_H
 #define _I386_CHECKSUM_H
 
+
 /*
  * computes the checksum of a memory block at buff, length len,
  * and adds in "sum" (32-bit)
@@ -17,20 +18,63 @@ unsigned int csum_partial(const unsigned char * buff, int len, unsigned int sum)
 
 /*
  * the same as csum_partial, but copies from src while it
- * checksums
+ * checksums, and handles user-space pointer exceptions correctly, when needed.
  *
  * here even more important to align src and dst on a 32-bit (or even
  * better 64-bit) boundary
  */
 
-unsigned int csum_partial_copy( const char *src, char *dst, int len, int sum);
-
+unsigned int csum_partial_copy_generic( const char *src, char *dst, int len, int sum,
+					int *src_err_ptr, int *dst_err_ptr);
 
 /*
- * the same as csum_partial, but copies from user space (but on the x86
- * we have just one address space, so this is identical to the above)
+ *	Note: when you get a NULL pointer exception here this means someone
+ *	passed in an incorrect kernel address to one of these functions. 
+ *	
+ *	If you use these functions directly please don't forget the 
+ *	verify_area().
  */
+extern __inline__
+unsigned int csum_partial_copy_nocheck ( const char *src, char *dst,
+					int len, int sum)
+{
+	return csum_partial_copy_generic ( src, dst, len, sum, NULL, NULL);
+}
+
+extern __inline__
+unsigned int csum_partial_copy_from_user ( const char *src, char *dst,
+						int len, int sum, int *err_ptr)
+{
+	return csum_partial_copy_generic ( src, dst, len, sum, err_ptr, NULL);
+}
+
+#if 0
+
+/* Not used at the moment. It is difficult to imagine for what purpose
+   it can be used :-) Please, do not forget to verify_area before it --ANK
+ */
+
+/*
+ * This combination is currently not used, but possible:
+ */
+
+extern __inline__
+unsigned int csum_partial_copy_to_user ( const char *src, char *dst,
+					int len, int sum, int *err_ptr)
+{
+	return csum_partial_copy_generic ( src, dst, len, sum, NULL, err_ptr);
+}
+#endif
+
+/*
+ * These are the old (and unsafe) way of doing checksums, a warning message will be
+ * printed if they are used and an exeption occurs.
+ *
+ * these functions should go away after some time.
+ */
+
 #define csum_partial_copy_fromuser csum_partial_copy
+unsigned int csum_partial_copy( const char *src, char *dst, int len, int sum);
 
 /*
  *	This is a version of ip_compute_csum() optimized for IP headers,
@@ -86,16 +130,12 @@ static inline unsigned int csum_fold(unsigned int sum)
 	return (~sum) >> 16;
 }
  
-/*
- * computes the checksum of the TCP/UDP pseudo-header
- * returns a 16-bit checksum, already complemented
- */
-
-static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
+static inline unsigned long csum_tcpudp_nofold(unsigned long saddr,
 						   unsigned long daddr,
 						   unsigned short len,
 						   unsigned short proto,
-						   unsigned int sum) {
+						   unsigned int sum) 
+{
     __asm__("
 	addl %1, %0
 	adcl %2, %0
@@ -104,8 +144,22 @@ static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
 	"
 	: "=r" (sum)
 	: "g" (daddr), "g"(saddr), "g"((ntohs(len)<<16)+proto*256), "0"(sum));
-	return csum_fold(sum);
+    return sum;
 }
+
+/*
+ * computes the checksum of the TCP/UDP pseudo-header
+ * returns a 16-bit checksum, already complemented
+ */
+static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
+						   unsigned long daddr,
+						   unsigned short len,
+						   unsigned short proto,
+						   unsigned int sum) 
+{
+	return csum_fold(csum_tcpudp_nofold(saddr,daddr,len,proto,sum));
+}
+
 /*
  * this routine is used for miscellaneous IP-like checksums, mainly
  * in icmp.c
@@ -113,6 +167,49 @@ static inline unsigned short int csum_tcpudp_magic(unsigned long saddr,
 
 static inline unsigned short ip_compute_csum(unsigned char * buff, int len) {
     return csum_fold (csum_partial(buff, len, 0));
+}
+
+#define _HAVE_ARCH_IPV6_CSUM
+static __inline__ unsigned short int csum_ipv6_magic(struct in6_addr *saddr,
+						     struct in6_addr *daddr,
+						     __u16 len,
+						     unsigned short proto,
+						     unsigned int sum) 
+{
+	__asm__("
+		addl 0(%1), %0
+		adcl 4(%1), %0
+		adcl 8(%1), %0
+		adcl 12(%1), %0
+		adcl 0(%2), %0
+		adcl 4(%2), %0
+		adcl 8(%2), %0
+		adcl 12(%2), %0
+		adcl %3, %0
+		adcl %4, %0
+		adcl $0, %0
+		"
+		: "=&r" (sum)
+		: "r" (saddr), "r" (daddr), 
+		  "r"(htonl((__u32) (len))), "r"(htonl(proto)), "0"(sum));
+
+	return csum_fold(sum);
+}
+
+/* 
+ *	Copy and checksum to user
+ */
+#define HAVE_CSUM_COPY_USER
+static __inline__ unsigned int csum_and_copy_to_user (const char *src, char *dst,
+				    int len, int sum, int *err_ptr)
+{
+	if (access_ok(VERIFY_WRITE, dst, len))
+		return csum_partial_copy_generic(src, dst, len, sum, NULL, err_ptr);
+
+	if (len)
+		*err_ptr = -EFAULT;
+
+	return -1; /* invalid checksum */
 }
 
 #endif

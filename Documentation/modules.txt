@@ -3,15 +3,18 @@ in the Linux kernel. This is not a technical description on
 the internals of module, but mostly a sample of how to compile
 and use modules.
 
-Note: You should ensure that the modules-X.Y.Z.tar.gz you are using
+Note: You should ensure that the modutils-X.Y.Z.tar.gz you are using
 is the most up to date one for this kernel. The "X.Y.Z" will reflect
 the kernel version at the time of the release of the modules package.
 Some older modules packages aren't aware of some of the newer modular
-features that the kernel now supports. (If you are unsure, you can 
-usually find out what the current release of the modules-X.Y.Z.tar.gz
-package is by looking up the URL listed for "Bjorn Ekwall" in the 
-file ./linux/CREDITS)
+features that the kernel now supports.  The current required version
+is listed in the file linux/Documentation/Changes.
 
+* * * NOTE * * *
+The kernel has been changed to remove kerneld support and use
+the new kmod support.  Keep this in mind when reading this file.  Kmod
+does the exact same thing as kerneld, but doesn't require an external
+program (see Documentation/kmod.txt)
 
 In the beginning...
 -------------------
@@ -49,7 +52,7 @@ the official kernel sources, you will certainly like this option...
 
 Here is a sample of the available modules included in the kernel sources:
 
-	Most filesystems: minix, xiafs, msdos, umsdos, sysv, isofs, hpfs,
+	Most filesystems: minix, msdos, umsdos, sysv, isofs, hpfs,
 			  smbfs, nfs
 
 	Mid-level SCSI support (required by top and low level scsi drivers).

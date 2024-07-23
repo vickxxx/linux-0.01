@@ -6,6 +6,7 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *
  *  Added kerneld support: Jacques Gelinas and Bjorn Ekwall
+ *  (changed to kmod)
  */
 
 #include <linux/config.h>
@@ -13,16 +14,15 @@
 #include <linux/major.h>
 #include <linux/string.h>
 #include <linux/sched.h>
-#include <linux/ext_fs.h>
 #include <linux/stat.h>
 #include <linux/fcntl.h>
 #include <linux/errno.h>
-#ifdef CONFIG_KERNELD
-#include <linux/kerneld.h>
+#ifdef CONFIG_KMOD
+#include <linux/kmod.h>
 
 #include <linux/tty.h>
 
-/* serial module kerneld load support */
+/* serial module kmod load support */
 struct tty_driver *get_tty_driver(kdev_t device);
 #define isa_tty_dev(ma)	(ma == TTY_MAJOR || ma == TTYAUX_MAJOR)
 #define need_serial(ma,mi) (get_tty_driver(MKDEV(ma,mi)) == NULL)
@@ -49,13 +49,13 @@ int get_device_list(char * page)
 	len = sprintf(page, "Character devices:\n");
 	for (i = 0; i < MAX_CHRDEV ; i++) {
 		if (chrdevs[i].fops) {
-			len += sprintf(page+len, "%2d %s\n", i, chrdevs[i].name);
+			len += sprintf(page+len, "%3d %s\n", i, chrdevs[i].name);
 		}
 	}
 	len += sprintf(page+len, "\nBlock devices:\n");
 	for (i = 0; i < MAX_BLKDEV ; i++) {
 		if (blkdevs[i].fops) {
-			len += sprintf(page+len, "%2d %s\n", i, blkdevs[i].name);
+			len += sprintf(page+len, "%3d %s\n", i, blkdevs[i].name);
 		}
 	}
 	return len;
@@ -75,12 +75,12 @@ static struct file_operations * get_fops(
 	struct file_operations *ret = NULL;
 
 	if (major < maxdev){
-#ifdef CONFIG_KERNELD
+#ifdef CONFIG_KMOD
 		/*
 		 * I do get request for device 0. I have no idea why. It happen
 		 * at shutdown time for one. Without the following test, the
 		 * kernel will happily trigger a request_module() which will
-		 * trigger kerneld and modprobe for nothing (since there
+		 * trigger kmod and modprobe for nothing (since there
 		 * is no device with major number == 0. And furthermore
 		 * it locks the reboot process :-(
 		 *
@@ -88,7 +88,7 @@ static struct file_operations * get_fops(
 		 *
 		 * A. Haritsis <ah@doc.ic.ac.uk>: fix for serial module
 		 *  though we need the minor here to check if serial dev,
-		 *  we pass only the normal major char dev to kerneld 
+		 *  we pass only the normal major char dev to kmod 
 		 *  as there is no other loadable dev on these majors
 		 */
 		if ((isa_tty_dev(major) && need_serial(major,minor)) ||
@@ -199,6 +199,7 @@ int check_disk_change(kdev_t dev)
 {
 	int i;
 	struct file_operations * fops;
+	struct super_block * sb;
 
 	i = MAJOR(dev);
 	if (i >= MAX_BLKDEV || (fops = blkdevs[i].fops) == NULL)
@@ -210,10 +211,11 @@ int check_disk_change(kdev_t dev)
 
 	printk(KERN_DEBUG "VFS: Disk change detected on device %s\n",
 		kdevname(dev));
-	for (i=0 ; i<NR_SUPER ; i++)
-		if (super_blocks[i].s_dev == dev)
-			put_super(super_blocks[i].s_dev);
-	invalidate_inodes(dev);
+
+	sb = get_super(dev);
+	if (sb && invalidate_inodes(sb))
+		printk("VFS: busy inodes on changed media..\n");
+
 	invalidate_buffers(dev);
 
 	if (fops->revalidate)
@@ -236,11 +238,12 @@ int blkdev_open(struct inode * inode, struct file * filp)
 	return ret;
 }	
 
-void blkdev_release(struct inode * inode)
+int blkdev_release(struct inode * inode)
 {
 	struct file_operations *fops = get_blkfops(MAJOR(inode->i_rdev));
 	if (fops && fops->release)
-		fops->release(inode,NULL);
+		return fops->release(inode,NULL);
+	return 0;
 }
 
 
@@ -254,10 +257,11 @@ struct file_operations def_blk_fops = {
 	NULL,		/* read */
 	NULL,		/* write */
 	NULL,		/* readdir */
-	NULL,		/* select */
+	NULL,		/* poll */
 	NULL,		/* ioctl */
 	NULL,		/* mmap */
 	blkdev_open,	/* open */
+	NULL,		/* flush */
 	NULL,		/* release */
 };
 
@@ -273,7 +277,6 @@ struct inode_operations blkdev_inode_operations = {
 	NULL,			/* mknod */
 	NULL,			/* rename */
 	NULL,			/* readlink */
-	NULL,			/* follow_link */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
 	NULL,			/* bmap */
@@ -307,10 +310,11 @@ struct file_operations def_chr_fops = {
 	NULL,		/* read */
 	NULL,		/* write */
 	NULL,		/* readdir */
-	NULL,		/* select */
+	NULL,		/* poll */
 	NULL,		/* ioctl */
 	NULL,		/* mmap */
 	chrdev_open,	/* open */
+	NULL,		/* flush */
 	NULL,		/* release */
 };
 
@@ -326,7 +330,6 @@ struct inode_operations chrdev_inode_operations = {
 	NULL,			/* mknod */
 	NULL,			/* rename */
 	NULL,			/* readlink */
-	NULL,			/* follow_link */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
 	NULL,			/* bmap */

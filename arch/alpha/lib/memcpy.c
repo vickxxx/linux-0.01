@@ -81,7 +81,7 @@ static inline void __memcpy_unaligned(unsigned long d, unsigned long s, long n)
 }
 
 /*
- * Hmm.. Strange. The __asm__ here is there to make gcc use a integer register
+ * Hmm.. Strange. The __asm__ here is there to make gcc use an integer register
  * for the load-store. I don't know why, but it would seem that using a floating
  * point register for the move seems to slow things down (very small difference,
  * though).
@@ -104,7 +104,7 @@ static inline void __memcpy_aligned(unsigned long d, unsigned long s, long n)
 	DO_REST_ALIGNED(d,s,n);
 }
 
-void * __memcpy(void * dest, const void *src, size_t n)
+void * memcpy(void * dest, const void *src, size_t n)
 {
 	if (!(((unsigned long) dest ^ (unsigned long) src) & 7)) {
 		__memcpy_aligned((unsigned long) dest, (unsigned long) src, n);
@@ -114,22 +114,5 @@ void * __memcpy(void * dest, const void *src, size_t n)
 	return dest;
 }
 
-/*
- * Broken compiler uses "bcopy" to do internal
- * assignments. Silly OSF/1 BSDism.
- */
-char * bcopy(const char * src, char * dest, size_t n)
-{
-	__memcpy(dest, src, n);
-	return dest;
-}
-
-/*
- * gcc-2.7.1 and newer generate calls to memset and memcpy.  So we
- * need to define that here:
- */
-#ifdef __ELF__
- asm (".weak memcpy; memcpy = __memcpy");
-#else
- asm (".weakext memcpy, __memcpy");
-#endif
+/* For backward modules compatibility, define __memcpy.  */
+asm("__memcpy = memcpy; .globl __memcpy");

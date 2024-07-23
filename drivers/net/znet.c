@@ -69,6 +69,7 @@ static const char *version = "znet.c:v1.02 9/23/94 becker@cesdis.gsfc.nasa.gov\n
 #include <linux/errno.h>
 #include <linux/interrupt.h>
 #include <linux/ioport.h>
+#include <linux/init.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <asm/io.h>
@@ -121,7 +122,7 @@ static unsigned int znet_debug = ZNET_DEBUG;
 #define net_local znet_private
 struct znet_private {
 	int rx_dma, tx_dma;
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 	/* The starting, current, and end pointers for the packet buffers. */
 	ushort *rx_start, *rx_cur, *rx_end;
 	ushort *tx_start, *tx_cur, *tx_end;
@@ -185,7 +186,7 @@ static int	znet_send_packet(struct sk_buff *skb, struct device *dev);
 static void	znet_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void	znet_rx(struct device *dev);
 static int	znet_close(struct device *dev);
-static struct enet_statistics *net_get_stats(struct device *dev);
+static struct net_device_stats *net_get_stats(struct device *dev);
 static void set_multicast_list(struct device *dev);
 static void hardware_init(struct device *dev);
 static void update_stop_hit(short ioaddr, unsigned short rx_stop_offset);
@@ -199,7 +200,7 @@ static struct sigaction znet_sigaction = { &znet_interrupt, 0, 0, NULL, };
    BIOS area.  We just scan for the signature, and pull the vital parameters
    out of the structure. */
 
-int znet_probe(struct device *dev)
+__initfunc(int znet_probe(struct device *dev))
 {
 	int i;
 	struct netidblk *netinfo;
@@ -246,13 +247,12 @@ int znet_probe(struct device *dev)
 	zn.tx_dma = netinfo->dma2;
 
 	/* These should never fail.  You can't add devices to a sealed box! */
-	if (request_irq(dev->irq, &znet_interrupt, 0, "ZNet", NULL)
+	if (request_irq(dev->irq, &znet_interrupt, 0, "ZNet", dev)
 		|| request_dma(zn.rx_dma,"ZNet rx")
 		|| request_dma(zn.tx_dma,"ZNet tx")) {
 		printk(KERN_WARNING "%s: Not opened -- resource busy?!?\n", dev->name);
 		return EBUSY;
 	}
-	irq2dev_map[dev->irq] = dev;
 
 	/* Allocate buffer memory.	We can cross a 128K boundary, so we
 	   must be careful about the allocation.  It's easiest to waste 8K. */
@@ -317,6 +317,7 @@ static int znet_open(struct device *dev)
 static int znet_send_packet(struct sk_buff *skb, struct device *dev)
 {
 	int ioaddr = dev->base_addr;
+	struct net_local *lp = (struct net_local *)dev->priv;
 
 	if (znet_debug > 4)
 		printk(KERN_DEBUG "%s: ZNet_send_packet(%ld).\n", dev->name, dev->tbusy);
@@ -340,11 +341,6 @@ static int znet_send_packet(struct sk_buff *skb, struct device *dev)
 		hardware_init(dev);
 	}
 
-	if (skb == NULL) {
-		dev_tint(dev);
-		return 0;
-	}
-
 	/* Check that the part hasn't reset itself, probably from suspend. */
 	outb(CMD0_STAT0, ioaddr);
 	if (inw(ioaddr) == 0x0010
@@ -354,13 +350,15 @@ static int znet_send_packet(struct sk_buff *skb, struct device *dev)
 
 	/* Block a timer-based transmit from overlapping.  This could better be
 	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-	if (set_bit(0, (void*)&dev->tbusy) != 0)
+	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0)
 		printk(KERN_WARNING "%s: Transmitter access conflict.\n", dev->name);
 	else {
 		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		unsigned char *buf = (void *)skb->data;
 		ushort *tx_link = zn.tx_cur - 1;
 		ushort rnd_len = (length + 1)>>1;
+		
+		lp->stats.tx_bytes+=length;
 
 		{
 			short dma_port = ((zn.tx_dma&3)<<2) + IO_DMA2_BASE;
@@ -397,14 +395,14 @@ static int znet_send_packet(struct sk_buff *skb, struct device *dev)
 		if (znet_debug > 4)
 		  printk(KERN_DEBUG "%s: Transmitter queued, length %d.\n", dev->name, length);
 	}
-	dev_kfree_skb(skb, FREE_WRITE); 
+	dev_kfree_skb(skb); 
 	return 0;
 }
 
 /* The ZNET interrupt handler. */
 static void	znet_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct device *dev = irq2dev_map[irq];
+	struct device *dev = dev_id;
 	int ioaddr;
 	int boguscnt = 20;
 
@@ -593,6 +591,7 @@ static void znet_rx(struct device *dev)
 /* The inverse routine to znet_open(). */
 static int znet_close(struct device *dev)
 {
+	unsigned long flags;
 	int ioaddr = dev->base_addr;
 
 	dev->tbusy = 1;
@@ -600,10 +599,12 @@ static int znet_close(struct device *dev)
 
 	outb(CMD0_RESET, ioaddr);			/* CMD0_RESET */
 
+	flags=claim_dma_lock();
 	disable_dma(zn.rx_dma);
 	disable_dma(zn.tx_dma);
+	release_dma_lock(flags);
 
-	free_irq(dev->irq, NULL);
+	free_irq(dev->irq, dev);
 
 	if (znet_debug > 1)
 		printk(KERN_DEBUG "%s: Shutting down ethercard.\n", dev->name);
@@ -616,7 +617,7 @@ static int znet_close(struct device *dev)
 
 /* Get the current statistics.	This may be called with the card open or
    closed. */
-static struct enet_statistics *net_get_stats(struct device *dev)
+static struct net_device_stats *net_get_stats(struct device *dev)
 {
 		struct net_local *lp = (struct net_local *)dev->priv;
 
@@ -664,16 +665,21 @@ static void set_multicast_list(struct device *dev)
 
 void show_dma(void)
 {
+	unsigned long flags;
 	short dma_port = ((zn.tx_dma&3)<<2) + IO_DMA2_BASE;
 	unsigned addr = inb(dma_port);
 	addr |= inb(dma_port) << 8;
+
+	flags=claim_dma_lock();
 	printk("Addr: %04x cnt:%3x...", addr<<1, get_dma_residue(zn.tx_dma));
+	release_dma_lock(flags);
 }
 
 /* Initialize the hardware.  We have to do this when the board is open()ed
    or when we come out of suspend mode. */
 static void hardware_init(struct device *dev)
 {
+	unsigned long flags;
 	short ioaddr = dev->base_addr;
 
 	zn.rx_cur = zn.rx_start;
@@ -682,22 +688,22 @@ static void hardware_init(struct device *dev)
 	/* Reset the chip, and start it up. */
 	outb(CMD0_RESET, ioaddr);
 
-	cli(); {							/* Protect against a DMA flip-flop */
-		disable_dma(zn.rx_dma); 		/* reset by an interrupting task. */
-		clear_dma_ff(zn.rx_dma);
-		set_dma_mode(zn.rx_dma, DMA_RX_MODE);
-		set_dma_addr(zn.rx_dma, (unsigned int) zn.rx_start);
-		set_dma_count(zn.rx_dma, RX_BUF_SIZE);
-		enable_dma(zn.rx_dma);
-		/* Now set up the Tx channel. */
-		disable_dma(zn.tx_dma);
-		clear_dma_ff(zn.tx_dma);
-		set_dma_mode(zn.tx_dma, DMA_TX_MODE);
-		set_dma_addr(zn.tx_dma, (unsigned int) zn.tx_start);
-		set_dma_count(zn.tx_dma, zn.tx_buf_len<<1);
-		enable_dma(zn.tx_dma);
-	} sti();
-
+	flags=claim_dma_lock();
+	disable_dma(zn.rx_dma); 		/* reset by an interrupting task. */
+	clear_dma_ff(zn.rx_dma);
+	set_dma_mode(zn.rx_dma, DMA_RX_MODE);
+	set_dma_addr(zn.rx_dma, (unsigned int) zn.rx_start);
+	set_dma_count(zn.rx_dma, RX_BUF_SIZE);
+	enable_dma(zn.rx_dma);
+	/* Now set up the Tx channel. */
+	disable_dma(zn.tx_dma);
+	clear_dma_ff(zn.tx_dma);
+	set_dma_mode(zn.tx_dma, DMA_TX_MODE);
+	set_dma_addr(zn.tx_dma, (unsigned int) zn.tx_start);
+	set_dma_count(zn.tx_dma, zn.tx_buf_len<<1);
+	enable_dma(zn.tx_dma);
+	release_dma_lock(flags);
+	
 	if (znet_debug > 1)
 	  printk(KERN_DEBUG "%s: Initializing the i82593, tx buf %p... ", dev->name,
 			 zn.tx_start);

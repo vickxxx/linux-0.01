@@ -1,13 +1,14 @@
-/*  $Id: init.c,v 1.37 1996/04/25 06:09:33 davem Exp $
+/*  $Id: init.c,v 1.60 1998/09/13 04:30:31 davem Exp $
  *  linux/arch/sparc/mm/init.c
  *
  *  Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ *  Copyright (C) 1995 Eddie C. Dost (ecd@skynet.be)
+ *  Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
 #include <linux/config.h>
 #include <linux/signal.h>
 #include <linux/sched.h>
-#include <linux/head.h>
 #include <linux/kernel.h>
 #include <linux/errno.h>
 #include <linux/string.h>
@@ -16,6 +17,11 @@
 #include <linux/mman.h>
 #include <linux/mm.h>
 #include <linux/swap.h>
+#include <linux/swapctl.h>
+#ifdef CONFIG_BLK_DEV_INITRD
+#include <linux/blk.h>
+#endif
+#include <linux/init.h>
 
 #include <asm/system.h>
 #include <asm/segment.h>
@@ -24,15 +30,26 @@
 #include <asm/pgtable.h>
 #include <asm/vaddrs.h>
 
+/* Turn this off if you suspect some place in some physical memory hole
+   might get into page tables (something would be broken very much). */
+   
+#define FREE_UNUSED_MEM_MAP
+
 extern void show_net_buffers(void);
 
 struct sparc_phys_banks sp_banks[SPARC_PHYS_BANKS];
+unsigned long sparc_unmapped_base;
+
+struct pgtable_cache_struct pgt_quicklists;
+
+/* References to section boundaries */
+extern char __init_begin, __init_end, etext;
 
 /*
  * BAD_PAGE is the page that is used for page faults when linux
  * is out-of-memory. Older versions of linux just did a
  * do_exit(), but using this instead means there is less risk
- * for a process dying in kernel mode, possibly leaving a inode
+ * for a process dying in kernel mode, possibly leaving an inode
  * unused etc..
  *
  * BAD_PAGETABLE is the accompanying page-table: it is initialized
@@ -55,26 +72,38 @@ pte_t __bad_page(void)
 
 void show_mem(void)
 {
-	int i,free = 0,total = 0,reserved = 0;
-	int shared = 0;
+	int free = 0,total = 0,reserved = 0;
+	int shared = 0, cached = 0;
+	struct page *page, *end;
 
 	printk("\nMem-info:\n");
 	show_free_areas();
 	printk("Free swap:       %6dkB\n",nr_swap_pages<<(PAGE_SHIFT-10));
-	i = MAP_NR(high_memory);
-	while (i-- > 0) {
+	for (page = mem_map, end = mem_map + max_mapnr;
+	     page < end; page++) {
+		if (PageSkip(page)) {
+			if (page->next_hash < page)
+				break;
+			page = page->next_hash;
+		}
 		total++;
-		if (PageReserved(mem_map + i))
+		if (PageReserved(page))
 			reserved++;
-		else if (!mem_map[i].count)
+		else if (PageSwapCache(page))
+			cached++;
+		else if (!atomic_read(&page->count))
 			free++;
 		else
-			shared += mem_map[i].count-1;
+			shared += atomic_read(&page->count) - 1;
 	}
 	printk("%d pages of RAM\n",total);
 	printk("%d free pages\n",free);
 	printk("%d reserved pages\n",reserved);
 	printk("%d pages shared\n",shared);
+	printk("%d pages swap cached\n",cached);
+	printk("%ld page tables cached\n",pgtable_cache_size);
+	if (sparc_cpu_model == sun4m || sparc_cpu_model == sun4d)
+		printk("%ld page dirs cached\n", pgd_cache_size);
 	show_buffers();
 #ifdef CONFIG_NET
 	show_net_buffers();
@@ -83,7 +112,7 @@ void show_mem(void)
 
 extern pgprot_t protection_map[16];
 
-unsigned long sparc_context_init(unsigned long start_mem, int numctx)
+__initfunc(unsigned long sparc_context_init(unsigned long start_mem, int numctx))
 {
 	int ctx;
 
@@ -112,17 +141,32 @@ extern unsigned long sun4c_paging_init(unsigned long, unsigned long);
 extern unsigned long srmmu_paging_init(unsigned long, unsigned long);
 extern unsigned long device_scan(unsigned long);
 
-unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
+__initfunc(unsigned long 
+paging_init(unsigned long start_mem, unsigned long end_mem))
 {
 	switch(sparc_cpu_model) {
 	case sun4c:
 	case sun4e:
+	case sun4:
 		start_mem = sun4c_paging_init(start_mem, end_mem);
+		sparc_unmapped_base = 0xe0000000;
+		BTFIXUPSET_SETHI(sparc_unmapped_base, 0xe0000000);
 		break;
 	case sun4m:
 	case sun4d:
 		start_mem = srmmu_paging_init(start_mem, end_mem);
+		sparc_unmapped_base = 0x50000000;
+		BTFIXUPSET_SETHI(sparc_unmapped_base, 0x50000000);
 		break;
+
+	case ap1000:
+#if CONFIG_AP1000
+		start_mem = apmmu_paging_init(start_mem, end_mem);
+		sparc_unmapped_base = 0x50000000;
+		BTFIXUPSET_SETHI(sparc_unmapped_base, 0x50000000);
+		break;
+#endif
+
 	default:
 		prom_printf("paging_init: Cannot init paging on this Sparc\n");
 		prom_printf("paging_init: sparc_cpu_model = %d\n", sparc_cpu_model);
@@ -130,9 +174,7 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 		prom_halt();
 	};
 
-	/* Initialize the protection map with non-constant values
-	 * MMU dependent values.
-	 */
+	/* Initialize the protection map with non-constant, MMU dependent values. */
 	protection_map[0] = PAGE_NONE;
 	protection_map[1] = PAGE_READONLY;
 	protection_map[2] = PAGE_COPY;
@@ -149,23 +191,24 @@ unsigned long paging_init(unsigned long start_mem, unsigned long end_mem)
 	protection_map[13] = PAGE_READONLY;
 	protection_map[14] = PAGE_SHARED;
 	protection_map[15] = PAGE_SHARED;
+	btfixup();
 	return device_scan(start_mem);
 }
 
 struct cache_palias *sparc_aliases;
 
-extern int min_free_pages;
-extern int free_pages_low;
-extern int free_pages_high;
+extern void srmmu_frob_mem_map(unsigned long);
 
-int physmem_mapped_contig = 1;
+int physmem_mapped_contig __initdata = 1;
 
-static void taint_real_pages(unsigned long start_mem, unsigned long end_mem)
+__initfunc(static void taint_real_pages(unsigned long start_mem, unsigned long end_mem))
 {
 	unsigned long addr, tmp2 = 0;
 
 	if(physmem_mapped_contig) {
-		for(addr = start_mem; addr < end_mem; addr += PAGE_SIZE) {
+		for(addr = PAGE_OFFSET; addr < end_mem; addr += PAGE_SIZE) {
+			if(addr >= KERNBASE && addr < start_mem)
+				addr = start_mem;
 			for(tmp2=0; sp_banks[tmp2].num_bytes != 0; tmp2++) {
 				unsigned long phys_addr = (addr - PAGE_OFFSET);
 				unsigned long base = sp_banks[tmp2].base_addr;
@@ -177,76 +220,139 @@ static void taint_real_pages(unsigned long start_mem, unsigned long end_mem)
 			}
 		}
 	} else {
-		for(addr = start_mem; addr < end_mem; addr += PAGE_SIZE)
-			mem_map[MAP_NR(addr)].flags &= ~(1<<PG_reserved);
+		if((sparc_cpu_model == sun4m) || (sparc_cpu_model == sun4d)) {
+			srmmu_frob_mem_map(start_mem);
+		} else {
+			for(addr = start_mem; addr < end_mem; addr += PAGE_SIZE)
+				mem_map[MAP_NR(addr)].flags &= ~(1<<PG_reserved);
+		}
 	}
 }
 
-void mem_init(unsigned long start_mem, unsigned long end_mem)
+__initfunc(void mem_init(unsigned long start_mem, unsigned long end_mem))
 {
 	int codepages = 0;
 	int datapages = 0;
-	unsigned long tmp2, addr;
-	extern char etext;
+	int initpages = 0; 
+	unsigned long addr;
+	struct page *page, *end;
 
 	/* Saves us work later. */
 	memset((void *) ZERO_PAGE, 0, PAGE_SIZE);
 
 	end_mem &= PAGE_MASK;
-	high_memory = end_mem;
+	max_mapnr = MAP_NR(end_mem);
+	high_memory = (void *) end_mem;
 
 	start_mem = PAGE_ALIGN(start_mem);
+	num_physpages = 0;
 
-	addr = PAGE_OFFSET;
+	addr = KERNBASE;
 	while(addr < start_mem) {
-		mem_map[MAP_NR(addr)].flags |= (1<<PG_reserved);
+#ifdef CONFIG_BLK_DEV_INITRD
+		if (initrd_below_start_ok && addr >= initrd_start && addr < initrd_end)
+			mem_map[MAP_NR(addr)].flags &= ~(1<<PG_reserved);
+		else
+#endif	
+			mem_map[MAP_NR(addr)].flags |= (1<<PG_reserved);
 		addr += PAGE_SIZE;
 	}
 
 	taint_real_pages(start_mem, end_mem);
+	
+#ifdef FREE_UNUSED_MEM_MAP
+	end = mem_map + max_mapnr;
+	for (page = mem_map; page < end; page++) {
+		if (PageSkip(page)) {
+			unsigned long low, high;
+
+			low = PAGE_ALIGN((unsigned long)(page+1));
+			if (page->next_hash < page)
+				high = ((unsigned long)end) & PAGE_MASK;
+			else
+				high = ((unsigned long)page->next_hash) & PAGE_MASK;
+			while (low < high) {
+				mem_map[MAP_NR(low)].flags &= ~(1<<PG_reserved);
+				low += PAGE_SIZE;
+			}
+		}
+	}
+#endif
+	
 	for (addr = PAGE_OFFSET; addr < end_mem; addr += PAGE_SIZE) {
+		if (PageSkip(mem_map + MAP_NR(addr))) {
+			unsigned long next = mem_map[MAP_NR(addr)].next_hash - mem_map;
+
+			next = (next << PAGE_SHIFT) + PAGE_OFFSET;
+			if (next < addr || next >= end_mem)
+				break;
+			addr = next;
+		}
+		num_physpages++;
 		if(PageReserved(mem_map + MAP_NR(addr))) {
-			if (addr < (unsigned long) &etext)
+			if ((addr < (unsigned long) &etext) && (addr >= KERNBASE))
 				codepages++;
-			else if(addr < start_mem)
+			else if((addr >= (unsigned long)&__init_begin && addr < (unsigned long)&__init_end))
+				initpages++;
+			else if((addr < start_mem) && (addr >= KERNBASE))
 				datapages++;
 			continue;
 		}
-		mem_map[MAP_NR(addr)].count = 1;
-		free_page(addr);
+		atomic_set(&mem_map[MAP_NR(addr)].count, 1);
+#ifdef CONFIG_BLK_DEV_INITRD
+		if (!initrd_start ||
+		    (addr < initrd_start || addr >= initrd_end))
+#endif
+			free_page(addr);
 	}
 
-	tmp2 = nr_free_pages << PAGE_SHIFT;
-
-	printk("Memory: %luk available (%dk kernel code, %dk data)\n",
-	       tmp2 >> 10,
+	printk("Memory: %dk available (%dk kernel code, %dk data, %dk init) [%08lx,%08lx]\n",
+	       nr_free_pages << (PAGE_SHIFT-10),
 	       codepages << (PAGE_SHIFT-10),
-	       datapages << (PAGE_SHIFT-10));
+	       datapages << (PAGE_SHIFT-10), 
+	       initpages << (PAGE_SHIFT-10),
+	       (unsigned long)PAGE_OFFSET, end_mem);
 
-	min_free_pages = nr_free_pages >> 7;
-	if(min_free_pages < 16)
-		min_free_pages = 16;
-	free_pages_low = min_free_pages + (min_free_pages >> 1);
-	free_pages_high = min_free_pages + min_free_pages;
+	freepages.min = nr_free_pages >> 7;
+	if(freepages.min < 16)
+		freepages.min = 16;
+	freepages.low = freepages.min + (freepages.min >> 1);
+	freepages.high = freepages.min + freepages.min;
+}
 
+void free_initmem (void)
+{
+	unsigned long addr;
+	
+	addr = (unsigned long)(&__init_begin);
+	for (; addr < (unsigned long)(&__init_end); addr += PAGE_SIZE) {
+		mem_map[MAP_NR(addr)].flags &= ~(1 << PG_reserved);
+		atomic_set(&mem_map[MAP_NR(addr)].count, 1);
+		free_page(addr);
+	}
 }
 
 void si_meminfo(struct sysinfo *val)
 {
-	int i;
+	struct page *page, *end;
 
-	i = MAP_NR(high_memory);
 	val->totalram = 0;
 	val->sharedram = 0;
 	val->freeram = nr_free_pages << PAGE_SHIFT;
 	val->bufferram = buffermem;
-	while (i-- > 0)  {
-		if (PageReserved(mem_map + i))
+	for (page = mem_map, end = mem_map + max_mapnr;
+	     page < end; page++) {
+		if (PageSkip(page)) {
+			if (page->next_hash < page)
+				break;
+			page = page->next_hash;
+		}
+		if (PageReserved(page))
 			continue;
 		val->totalram++;
-		if (!mem_map[i].count)
+		if (!atomic_read(&page->count))
 			continue;
-		val->sharedram += mem_map[i].count-1;
+		val->sharedram += atomic_read(&page->count) - 1;
 	}
 	val->totalram <<= PAGE_SHIFT;
 	val->sharedram <<= PAGE_SHIFT;

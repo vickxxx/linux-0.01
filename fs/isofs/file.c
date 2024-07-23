@@ -1,7 +1,7 @@
 /*
  *  linux/fs/isofs/file.c
  *
- *  (C) 1992, 1993, 1994  Eric Youngdale Modified for ISO9660 filesystem.
+ *  (C) 1992, 1993, 1994  Eric Youngdale Modified for ISO 9660 filesystem.
  *
  *  (C) 1991  Linus Torvalds - minix filesystem
  *
@@ -19,7 +19,7 @@
 #include <linux/iso_fs.h>
 
 /*
- * We have mostly NULL's here: the current defaults are ok for
+ * We have mostly NULLs here: the current defaults are OK for
  * the isofs filesystem.
  */
 static struct file_operations isofs_file_operations = {
@@ -27,10 +27,11 @@ static struct file_operations isofs_file_operations = {
 	generic_file_read,	/* read */
 	NULL,			/* write */
 	NULL,			/* readdir - bad */
-	NULL,			/* select - default */
+	NULL,			/* poll - default */
 	NULL,			/* ioctl - default */
 	generic_file_mmap,	/* mmap */
 	NULL,			/* no special open is needed */
+	NULL,			/* flush */
 	NULL,			/* release */
 	NULL			/* fsync */
 };

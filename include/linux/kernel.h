@@ -11,7 +11,8 @@
 #include <linux/linkage.h>
 
 /* Optimization barrier */
-#define barrier() __asm__("": : :"memory")
+/* The "volatile" is due to gcc bugs */
+#define barrier() __asm__ __volatile__("": : :"memory")
 
 #define INT_MAX		((int)(~0U>>1))
 #define UINT_MAX	(~0U)
@@ -33,20 +34,23 @@
 # define ATTRIB_NORET  __attribute__((noreturn))
 # define NORET_AND     noreturn,
 
+#ifdef __i386__
+#define FASTCALL(x)	x __attribute__((regparm(3)))
+#else
+#define FASTCALL(x)	x
+#endif
+
 extern void math_error(void);
 NORET_TYPE void panic(const char * fmt, ...)
 	__attribute__ ((NORET_AND format (printf, 1, 2)));
 NORET_TYPE void do_exit(long error_code)
 	ATTRIB_NORET;
 extern unsigned long simple_strtoul(const char *,char **,unsigned int);
+extern long simple_strtol(const char *,char **,unsigned int);
 extern int sprintf(char * buf, const char * fmt, ...);
 extern int vsprintf(char *buf, const char *, va_list);
 
 extern int session_of_pgrp(int pgrp);
-
-extern int kill_proc(int pid, int sig, int priv);
-extern int kill_pg(int pgrp, int sig, int priv);
-extern int kill_sl(int sess, int sig, int priv);
 
 asmlinkage int printk(const char * fmt, ...)
 	__attribute__ ((format (printf, 1, 2)));
@@ -63,10 +67,14 @@ asmlinkage int printk(const char * fmt, ...)
 	printk(KERN_INFO fmt,##arg)
 
 /*
- * "suser()" checks against the effective user id, while "fsuser()"
- * is used for file permission checking and checks against the fsuid..
+ *      Display an IP address in readable format.
  */
-#define fsuser() (current->fsuid == 0)
+
+#define NIPQUAD(addr) \
+	(int)(((addr) >> 0)  & 0xff), \
+	(int)(((addr) >> 8)  & 0xff), \
+	(int)(((addr) >> 16) & 0xff), \
+	(int)(((addr) >> 24) & 0xff)
 
 #endif /* __KERNEL__ */
 

@@ -1,7 +1,6 @@
-
 	Linux kernel release 2.1.xx
 
-These are the release notes for linux version 2.1.  Read them carefully,
+These are the release notes for Linux version 2.1.  Read them carefully,
 as they tell you what this is all about, explain how to install the
 kernel, and what to do if something goes wrong. 
 
@@ -18,6 +17,9 @@ If you decide to use 2.1, it is recommended that you join the kernel mailing
 list.  To do this, e-mail majordomo@vger.rutgers.edu, and put in the body
 of the message "subscribe linux-kernel" or "subscribe linux-kernel-digest"
 for a daily digest of the mailing list (it is a high-traffic list.)
+
+However, please make sure you don't ask questions which are already answered
+in various files in the Documentation directory.  See DOCUMENTATION below.
 
 WHAT IS LINUX?
 
@@ -36,13 +38,13 @@ WHAT IS LINUX?
 ON WHAT HARDWARE DOES IT RUN?
 
   Linux was first developed for 386/486-based PCs.  These days it also
-  runs on DEC Alphas, SUN Sparcs, M68000 machines (like Atari and Amiga),
-  MIPS and PowerPC.
+  runs on ARMs, DEC Alphas, SUN Sparcs, M68000 machines (like Atari and
+  Amiga), MIPS and PowerPC, and others.
 
 DOCUMENTATION:
 
  - There is a lot of documentation available both in electronic form on
-   the internet and in books, both Linux-specific and pertaining to
+   the Internet and in books, both Linux-specific and pertaining to
    general UNIX questions.  I'd recommend looking into the documentation
    subdirectories on any Linux ftp site for the LDP (Linux Documentation
    Project) books.  This README is not meant to be documentation on the
@@ -51,7 +53,9 @@ DOCUMENTATION:
  - There are various readme's in the kernel Documentation/ subdirectory:
    these typically contain kernel-specific installation notes for some 
    drivers for example. See ./Documentation/00-INDEX for a list of what
-   is contained in each file.
+   is contained in each file.  Please read the Changes file, as it
+   contains information about the problems, which may result by upgrading
+   your kernel.
 
 INSTALLING the kernel:
 
@@ -63,14 +67,16 @@ INSTALLING the kernel:
    to get it all put in place. Replace "XX" with the version number of the
    latest kernel.
 
- - You can also upgrade between 2.1.xx releases by patching.  Each
-   patch that is released for 2.1.xx contains only bugfixes.  No
-   new features will be added to the Linux kernel until the 2.1.xx
-   development effort begins.  To install by patching, get all the
-   newer patch files and do
+ - You can also upgrade between 2.1.xx releases by patching.  Patches are
+   distributed in the traditional gzip and the new bzip2 format.  To
+   install by patching, get all the newer patch files and do
 
 		cd /usr/src
 		gzip -cd patchXX.gz | patch -p0
+
+   or
+		cd /usr/src
+		bzip2 -dc patchXX.bz2 | patch -p0
 
    (repeat xx for all versions bigger than the version of your current
    source tree, _in_order_) and you should be ok.  You may want to remove
@@ -90,15 +96,6 @@ INSTALLING the kernel:
    the current directory, but an alternative directory can be specified
    as the second argument.
 
- - Make sure your /usr/include/asm, /usr/include/linux, and /usr/include/scsi
-   directories are just symlinks to the kernel sources:
-
-		cd /usr/include
-		rm -rf asm linux scsi
-		ln -s /usr/src/linux/include/asm-i386 asm
-		ln -s /usr/src/linux/include/linux linux
-		ln -s /usr/src/linux/include/scsi scsi
-
  - Make sure you have no stale .o files and dependencies lying around:
 
 		cd /usr/src/linux
@@ -106,15 +103,35 @@ INSTALLING the kernel:
 
    You should now have the sources correctly installed.
 
+SOFTWARE REQUIREMENTS
+
+   Compiling and running the 2.1.x kernels requires up-to-date
+   versions of various software packages.  Consult
+   ./Documentation/Changes for the minimum version numbers required
+   and how to get updates for these packages.  Beware that using
+   excessively old versions of these packages can cause indirect
+   errors that are very difficult to track down, so don't assume that
+   you can just update packages when obvious problems arise during
+   build or operation.
+
 CONFIGURING the kernel:
 
- - Do a "make config" to configure the basic kernel.  "make config"
-   needs bash to work: it will search for bash in $BASH, /bin/bash and
-   /bin/sh (in that order), so hopefully one of those is correct. 
+ - Do a "make config" to configure the basic kernel.  "make config" needs
+   bash to work: it will search for bash in $BASH, /bin/bash and /bin/sh
+   (in that order), so one of those must be correct for it to work. 
+
+   Do not skip this step even if you are only upgrading one minor
+   version.  New configuration options are added in each release, and
+   odd problems will turn up if the configuration files are not set up
+   as expected.  If you want to carry your existing configuration to a
+   new version with minimal work, use "make oldconfig", which will
+   only ask you for the answers to new questions.
 
  - Alternate configuration commands are:
 	"make menuconfig"  Text based color menus, radiolists & dialogs.
 	"make xconfig"     X windows based configuration tool.
+	"make oldconfig"   Default all questions based on the contents of
+			   your existing ./.config file.
    
 	NOTES on "make config":
 	- having unnecessary drivers will make the kernel bigger, and can
@@ -132,8 +149,8 @@ CONFIGURING the kernel:
 	  bigger or slower kernel (or both), and can even make the kernel
 	  less stable by configuring some routines to actively try to
 	  break bad code to find kernel problems (kmalloc()).  Thus you
-	  should probably answer 'n' to the questions for a "production"
-	  kernel. 
+	  should probably answer 'n' to the questions for
+          "development", "experimental", or "debugging" features.
 
  - Check the top Makefile for further site-dependent configuration
    (default SVGA mode etc). 
@@ -143,14 +160,17 @@ CONFIGURING the kernel:
 COMPILING the kernel:
 
  - Make sure you have gcc-2.7.0 or newer available.  It seems older gcc
-   versions can have problems compiling newer versions of linux.  This
-   is mainly because they only compile programs in the a.out binary
-   format.  As of Linux 2.1.0, the kernel must be compiled as ELF.  If
-   you upgrade your compiler, remember to get the new binutils package too
-   (for as/ld/nm and company).
+   versions can have problems compiling newer versions of Linux.  This
+   is mainly because the older compilers can only generate "a.out"-format
+   executables.  As of Linux 2.1.0, the kernel must be compiled as an
+   "ELF" binary.  If you upgrade your compiler, remember to get the new
+   binutils package too (for as/ld/nm and company).
+
+   Please note that you can still run a.out user programs with this
+   kernel.
 
  - Do a "make zImage" to create a compressed kernel image.  If you want
-   to make a bootdisk (without root filesystem or lilo), insert a floppy
+   to make a boot disk (without root filesystem or LILO), insert a floppy
    in your A: drive, and do a "make zdisk".  It is also possible to do
    "make zlilo" if you have lilo installed to suit the kernel makefiles,
    but you may want to check your particular lilo setup first. 
@@ -165,7 +185,11 @@ COMPILING the kernel:
 
  - Keep a backup kernel handy in case something goes wrong.  This is 
    especially true for the development releases, since each new release
-   contains new code which has not been debugged. 
+   contains new code which has not been debugged.  Make sure you keep a
+   backup of the modules corresponding to that kernel, as well.  If you
+   are installing a new kernel with the same version number as your
+   working kernel, make a backup of your modules directory before you
+   do a "make modules_install".
 
  - In order to boot your new kernel, you'll need to copy the kernel
    image (found in /usr/src/linux/arch/i386/boot/zImage after compilation)
@@ -173,16 +197,16 @@ COMPILING the kernel:
 
    For some, this is on a floppy disk, in which case you can "cp
    /usr/src/linux/arch/i386/boot/zImage /dev/fd0" to make a bootable
-   floppy.  Note that a change in the 1.3.x series prevented a kernel
-   copied to a 720k double-density 3.5" floppy from booting.  In this
+   floppy.  Please note that you can not boot a kernel by
+   directly dumping it to a 720k double-density 3.5" floppy.  In this
    case, it is highly recommended that you install LILO on your
-   double-density bootfloppy or switch to high-density floppies.
+   double-density boot floppy or switch to high-density floppies.
 
    If you boot Linux from the hard drive, chances are you use LILO which
    uses the kernel image as specified in the file /etc/lilo.conf.  The
    kernel image file is usually /vmlinuz, or /zImage, or /etc/zImage. 
-   To use the new kernel, copy the new image over the old one (save a
-   backup of the original!).  Then, you MUST RERUN LILO to update the
+   To use the new kernel, save a copy of the old image and copy the new
+   image over the old one.  Then, you MUST RERUN LILO to update the
    loading map!! If you don't, you won't be able to boot the new kernel
    image. 
 
@@ -207,7 +231,7 @@ IF SOMETHING GOES WRONG:
    the file MAINTAINERS to see if there is a particular person associated
    with the part of the kernel that you are having trouble with. If there
    isn't anyone listed there, then the second best thing is to mail
-   them to me (Linus.Torvalds@Helsinki.FI), and possibly to any other
+   them to me (torvalds@transmeta.com), and possibly to any other
    relevant mailing-list or to the newsgroup.  The mailing-lists are
    useful especially for SCSI and NETworking problems, as I can't test
    either of those personally anyway. 

@@ -7,7 +7,26 @@
 
 #define MAX_SWAPFILES 8
 
+union swap_header {
+	struct 
+	{
+		char reserved[PAGE_SIZE - 10];
+		char magic[10];
+	} magic;
+	struct 
+	{
+		char	     bootbits[1024];	/* Space for disklabel etc. */
+		unsigned int version;
+		unsigned int last_page;
+		unsigned int nr_badpages;
+		unsigned int padding[125];
+		unsigned int badpages[1];
+	} info;
+};
+
 #ifdef __KERNEL__
+
+#undef DEBUG_SWAP
 
 #include <asm/atomic.h>
 
@@ -16,16 +35,19 @@
 
 #define SWAP_CLUSTER_MAX 32
 
+#define SWAP_MAP_MAX	0x7fff
+#define SWAP_MAP_BAD	0x8000
+
 struct swap_info_struct {
 	unsigned int flags;
 	kdev_t swap_device;
-	struct inode * swap_file;
-	unsigned char * swap_map;
+	struct dentry * swap_file;
+	unsigned short * swap_map;
 	unsigned char * swap_lockmap;
-	int lowest_bit;
-	int highest_bit;
-	int cluster_next;
-	int cluster_nr;
+	unsigned int lowest_bit;
+	unsigned int highest_bit;
+	unsigned int cluster_next;
+	unsigned int cluster_nr;
 	int prio;			/* swap priority */
 	int pages;
 	unsigned long max;
@@ -35,9 +57,18 @@ struct swap_info_struct {
 extern int nr_swap_pages;
 extern int nr_free_pages;
 extern atomic_t nr_async_pages;
-extern int min_free_pages;
-extern int free_pages_low;
-extern int free_pages_high;
+extern struct inode swapper_inode;
+extern unsigned long page_cache_size;
+extern int buffermem;
+
+struct swap_stats 
+{
+	long	proc_freepage_attempts;
+	long	proc_freepage_successes;
+	long	kswap_freepage_attempts;
+	long	kswap_freepage_successes;
+};
+extern struct swap_stats swap_stats;
 
 /* Incomplete types for prototype declarations: */
 struct task_struct;
@@ -47,15 +78,15 @@ struct sysinfo;
 /* linux/ipc/shm.c */
 extern int shm_swap (int, int);
 
+/* linux/mm/swap.c */
+extern void swap_setup (void);
+
 /* linux/mm/vmscan.c */
-extern int try_to_free_page(int, int, int);
+extern int try_to_free_pages(unsigned int gfp_mask, int count);
 
 /* linux/mm/page_io.c */
 extern void rw_swap_page(int, unsigned long, char *, int);
-#define read_swap_page(nr,buf) \
-	rw_swap_page(READ,(nr),(buf),1)
-#define write_swap_page(nr,buf) \
-	rw_swap_page(WRITE,(nr),(buf),1)
+extern void rw_swap_page_nocache(int, unsigned long, char *);
 extern void swap_after_unlock_page (unsigned long entry);
 
 /* linux/mm/page_alloc.c */
@@ -65,31 +96,45 @@ extern void swap_in(struct task_struct *, struct vm_area_struct *,
 
 /* linux/mm/swap_state.c */
 extern void show_swap_cache_info(void);
-extern int add_to_swap_cache(unsigned long, unsigned long);
-extern unsigned long init_swap_cache(unsigned long, unsigned long);
-extern void swap_duplicate(unsigned long);
+extern int add_to_swap_cache(struct page *, unsigned long);
+extern int swap_duplicate(unsigned long);
+extern int swap_check_entry(unsigned long);
+struct page * lookup_swap_cache(unsigned long);
+extern struct page * read_swap_cache_async(unsigned long, int);
+#define read_swap_cache(entry) read_swap_cache_async(entry, 1);
+extern int FASTCALL(swap_count(unsigned long));
+/*
+ * Make these inline later once they are working properly.
+ */
+extern void delete_from_swap_cache(struct page *page);
+extern void free_page_and_swap_cache(unsigned long addr);
 
 /* linux/mm/swapfile.c */
-extern int nr_swapfiles;
+extern unsigned int nr_swapfiles;
 extern struct swap_info_struct swap_info[];
 void si_swapinfo(struct sysinfo *);
 unsigned long get_swap_page(void);
-extern void swap_free(unsigned long);
+extern void FASTCALL(swap_free(unsigned long));
+struct swap_list_t {
+	int head;	/* head of priority-ordered swapfile list */
+	int next;	/* swapfile to be used next */
+};
+extern struct swap_list_t swap_list;
+asmlinkage int sys_swapoff(const char *);
+asmlinkage int sys_swapon(const char *, int);
 
 /*
  * vm_ops not present page codes for shared memory.
  *
  * Will go away eventually..
  */
-#define SHM_SWP_TYPE 0x40
+#define SHM_SWP_TYPE 0x20
 
 /*
  * swap cache stuff (in linux/mm/swap_state.c)
  */
 
 #define SWAP_CACHE_INFO
-
-extern unsigned long * swap_cache;
 
 #ifdef SWAP_CACHE_INFO
 extern unsigned long swap_cache_add_total;
@@ -100,44 +145,36 @@ extern unsigned long swap_cache_find_total;
 extern unsigned long swap_cache_find_success;
 #endif
 
-extern inline unsigned long in_swap_cache(unsigned long index)
+extern inline unsigned long in_swap_cache(struct page *page)
 {
-	return swap_cache[index]; 
-}
-
-extern inline long find_in_swap_cache(unsigned long index)
-{
-	unsigned long entry;
-
-#ifdef SWAP_CACHE_INFO
-	swap_cache_find_total++;
-#endif
-	entry = xchg(swap_cache + index, 0);
-#ifdef SWAP_CACHE_INFO
-	if (entry)
-		swap_cache_find_success++;
-#endif	
-	return entry;
-}
-
-extern inline int delete_from_swap_cache(unsigned long index)
-{
-	unsigned long entry;
-	
-#ifdef SWAP_CACHE_INFO
-	swap_cache_del_total++;
-#endif	
-	entry = xchg(swap_cache + index, 0);
-	if (entry)  {
-#ifdef SWAP_CACHE_INFO
-		swap_cache_del_success++;
-#endif
-		swap_free(entry);
-		return 1;
-	}
+	if (PageSwapCache(page))
+		return page->offset;
 	return 0;
 }
 
+/*
+ * Work out if there are any other processes sharing this page, ignoring
+ * any page reference coming from the swap cache, or from outstanding
+ * swap IO on this page.  (The page cache _does_ count as another valid
+ * reference to the page, however.)
+ */
+static inline int is_page_shared(struct page *page)
+{
+	unsigned int count;
+	if (PageReserved(page))
+		return 1;
+	count = atomic_read(&page->count);
+	if (PageSwapCache(page))
+	{
+		/* PARANOID */
+		if (page->inode != &swapper_inode)
+			panic("swap cache page has wrong inode\n");
+		count += swap_count(page->offset) - 2;
+	}
+	if (PageFreeAfter(page))
+		count--;
+	return  count > 1;
+}
 
 #endif /* __KERNEL__*/
 

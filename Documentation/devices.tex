@@ -1,9 +1,9 @@
 \documentstyle{article}
-%
+% $Id: devices.tex,v 1.14 1998/08/10 22:39:24 hpa Exp $
+% ---------------------------------------------------------------------------
 % Adopt somewhat reasonable margins, so it doesn't take a million
 % pages to print... :-)  If you're actually putting this in print, you
 % may wish to change these.
-%
 \oddsidemargin=0in
 \textwidth=6.5in
 \topmargin=0in
@@ -15,6 +15,7 @@
 %
 \begin{document}
 \newcommand{\file}{\tt}			% Style to use for a filename
+\newcommand{\url}{\it}		        % Style to use for an URL
 \newcommand{\hex}{\tt}			% Style to use for a hex number
 \newcommand{\ud}{(Under development)}	% Abbreviation
 \newcommand{\1}{\({}^1\)}
@@ -29,44 +30,41 @@
 \newcommand{\minordots}{\> \> \> \dots \\}
 \newenvironment{devicelist}%
  {\begin{tabbing}%
-000--000 \= blockxxx \= 000 \= {\file /dev/crambamboli} \= foo \kill}%
+000--000 \= blockxxx \= 000 \= {\file /dev/input/keyboardxxx} \= foo \kill}%
  {\end{tabbing}}
 \newcommand{\link}[4]{{\file #1} \> {\file #2} \> #3 \> #4 \\}
 \newcommand{\vlink}[4]{{\file #1} \> {\em #2 \/} \> #3 \> #4 \\}
 \newcommand{\node}[3]{{\file #1} \> #2 \> #3 \\}
+\newcommand{\tum}{$''$}
 \newenvironment{nodelist}%
  {\begin{tabbing}%
 {\file /dev/crambamboli} \= {\file /proc/self/fd/99} \= symbolicxxx \=
 foo \kill}%
  {\end{tabbing}}
 %
+% If you reformat this document, *please* make sure this information
+% gets included!  This list changes frequently, so it is crucial to
+% know the date of the revision.
+%
 \title{{\bf Linux Allocated Devices}}
 \author{Maintained by H. Peter Anvin $<$hpa@zytor.com$>$}
-\date{Last revised: July 9, 1996}
+\date{Last revised: August 10, 1998}
 \maketitle
 %
 \noindent
-This list is the successor to Rick Miller's Linux Device List, which
-he stopped maintaining when he got busy with other things in 1993.  It
-is a registry of allocated major device numbers, as well as the
-recommended {\file /dev} directory nodes for these devices.
+This list is the Linux Device List, the official registry of allocated
+device numbers and {\file /dev} directory nodes for the Linux
+operating system.
 
 The latest version of this list is included with the Linux kernel
-sources in \LaTeX\ and ASCII form.  In case of discrepancy, the
-\LaTeX\ version is authoritative.
+sources in \LaTeX\ and ASCII form.  It is also available separately
+from {\url ftp://ftp.kernel.org/pub/linux/docs/device-list/}.  In case
+of discrepancy between the text and \LaTeX\ versions, the \LaTeX\
+version is authoritative.
 
 This document is included by reference into the Linux Filesystem
-Standard (FSSTND).  The FSSTND is available via FTP from
-tsx-11.mit.edu in the directory {\file
-/pub/linux/docs/linux-standards/fsstnd}.
-
-To have a major number allocated, or a minor number in situations
-where that applies (e.g.\ busmice), please contact me with the
-appropriate device information.  Also, if you have additional
-information regarding any of the devices listed below, or if I have
-made a mistake, I would greatly appreciate a note.  When sending me
-mail, please include the word ``device'' in the subject so your mail
-won't accidentally get buried!
+Standard (FSSTND).  The FSSTND is available from
+{\url ftp://tsx-11.mit.edu/pub/linux/docs/linux-standards/fsstnd/}.
 
 Allocations marked (68k/Amiga) apply to Linux/68k on the Amiga
 platform only.  Allocations marked (68k/Atari) apply to Linux/68k on
@@ -84,6 +82,28 @@ I do not have any information about these devices beyond what appears
 on this list.  Any such information requests will be deleted without
 reply.
 
+\section{How to submit a device entry}
+
+To have a major number allocated, or a minor number in situations
+where that applies (e.g. busmice), please contact me with the
+appropriate device information.  Also, if you have additional
+information regarding any of the devices listed below, or if I have
+made a mistake, I would greatly appreciate a note.
+
+I do, however, make two requests about the nature of your report.
+This is necessary for me to be able to keep this list up to date and
+correct in a timely manner.  First of all, {\em please\/} include the
+word ``device'' in the subject so your mail won't accidentally get
+buried!  I receive hundreds of email messages a day, so mail sent with
+other subjects may very well get lost in the avalanche.
+
+Second, please include a description of the device {\em in the same
+format as this list\/}.  The reason for this is that it is the only
+way I have found to ensure I have all the requisite information to
+publish your device and avoid conflicts.
+
+Your cooperation is appreciated.
+
 \section{Major numbers}
 
 \begin{devicelist}
@@ -93,13 +113,13 @@ reply.
 \major{ 2}{}{char }{Pseudo-TTY masters}
 \major{  }{}{block}{Floppy disks}
 \major{ 3}{}{char }{Pseudo-TTY slaves}
-\major{  }{}{block}{First MFM, RLL and IDE hard disk/CD-ROM interface}
+\major{  }{}{block}{First MFM, RLL or IDE hard disk/CD-ROM interface}
 \major{ 4}{}{char }{TTY devices}
 \major{ 5}{}{char }{Alternate TTY devices}
 \major{ 6}{}{char }{Parallel printer devices}
 \major{ 7}{}{char }{Virtual console access devices}
 \major{  }{}{block}{Loopback devices}
-\major{ 8}{}{block}{SCSI disk devices}
+\major{ 8}{}{block}{SCSI disk devices (0-15)}
 \major{ 9}{}{char }{SCSI tape devices}
 \major{  }{}{block}{Metadisk (RAID) devices}
 \major{10}{}{char }{Non-serial mice, misc features}
@@ -120,10 +140,11 @@ reply.
 \major{18}{}{char }{Chase serial card -- alternate devices}
 \major{  }{}{block}{Sanyo CD-ROM}
 \major{19}{}{char }{Cyclades serial card}
-\major{  }{}{block}{Double compressed disk}
+\major{  }{}{block}{``Double'' compressed disk}
 \major{20}{}{char }{Cyclades serial card -- alternate devices}
 \major{  }{}{block}{Hitachi CD-ROM}
 \major{21}{}{char }{Generic SCSI access}
+\major{  }{}{block }{Acorn MFM hard drive interface}
 \major{22}{}{char }{Digiboard serial card}
 \major{  }{}{block}{Second IDE hard disk/CD-ROM interface}
 \major{23}{}{char }{Digiboard serial card -- alternate devices}
@@ -139,21 +160,21 @@ reply.
 \major{28}{}{char }{Stallion serial card -- card programming}
 \major{  }{}{char }{Atari SLM ACSI laser printer (68k/Atari)}
 \major{  }{}{block}{Fourth Matsushita (Panasonic/SoundBlaster) CD-ROM}
-\major{  }{}{block}{ACSI disk (68k/Atari)}
+\major{  }{}{block}{ACSI disk/CD-ROM (68k/Atari)}
 \major{29}{}{char }{Universal frame buffer}
 \major{  }{}{block}{Aztech/Orchid/Okano/Wearnes CD-ROM}
-\major{30}{}{char }{iBCS-2}
-\major{  }{}{block}{Philips LMS-205 CD-ROM}
+\major{30}{}{char }{iBCS-2 compatibility devices}
+\major{  }{}{block}{Philips LMS CM-205 CD-ROM}
 \major{31}{}{char }{MPU-401 MIDI}
 \major{  }{}{block}{ROM/flash memory card}
 \major{32}{}{char }{Specialix serial card}
-\major{  }{}{block}{Philips LMS-206 CD-ROM}
+\major{  }{}{block}{Philips LMS CM-206 CD-ROM}
 \major{33}{}{char }{Specialix serial card -- alternate devices}
 \major{  }{}{block}{Third IDE hard disk/CD-ROM interface}
 \major{34}{}{char }{Z8530 HDLC driver}
 \major{  }{}{block}{Fourth IDE hard disk/CD-ROM interface}
 \major{35}{}{char }{tclmidi MIDI driver}
-\major{  }{}{block}{Modular RAM disk}
+\major{  }{}{block}{Slow memory ramdisk}
 \major{36}{}{char }{Netlink support}
 \major{  }{}{block}{MCA ESDI hard disk}
 \major{37}{}{char }{IDE tape}
@@ -168,36 +189,111 @@ reply.
 \major{  }{}{block}{MicroSolutions BackPack parallel port CD-ROM}
 \major{42}{}{}{Demo/sample use}
 \major{43}{}{char }{isdn4linux virtual modem}
+\major{  }{}{block}{Network block devices}
 \major{44}{}{char }{isdn4linux virtual modem -- alternate devices}
+\major{  }{}{block}{Flash Translation Layer (FTL) filesystems}
 \major{45}{}{char }{isdn4linux ISDN BRI driver}
+\major{  }{}{block}{Parallel port IDE disk devices}
 \major{46}{}{char }{Comtrol Rocketport serial card}
+\major{  }{}{block}{Parallel port ATAPI CD-ROM devices}
 \major{47}{}{char }{Comtrol Rocketport serial card -- alternate devices}
+\major{  }{}{block}{Parallel port ATAPI disk devices}
 \major{48}{}{char }{SDL RISCom serial card}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \major{49}{}{char }{SDL RISCom serial card -- alternate devices}
-\major{50}{}{char }{Reserved for GLINT}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
+\major{50}{}{char}{Reserved for GLINT}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \major{51}{}{char }{Baycom radio modem}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \major{52}{}{char }{Spellcaster DataComm/BRI ISDN card}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \major{53}{}{char }{BDM interface for remote debugging MC683xx microcontrollers}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \major{54}{}{char }{Electrocardiognosis Holter serial card}
-\major{55}{--59}{}{Unallocated}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
+\major{55}{}{char }{DSP56001 digital signal processor}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
+\major{56}{}{char }{Apple Desktop Bus}
+\major{  }{}{block}{Fifth IDE hard disk/CD-ROM interface}
+\major{57}{}{char }{Hayes ESP serial card}
+\major{  }{}{block}{Sixth IDE hard disk/CD-ROM interface}
+\major{58}{}{char }{Hayes ESP serial card -- alternate devices}
+\major{  }{}{block}{Reserved for logical volume manager}
+\major{59}{}{char }{sf firewall package}
 \major{60}{--63}{}{Local/experimental use}
-\major{64}{--119}{}{Unallocated}
+\major{64}{}{char }{ENskip kernel encryption package}
+\major{65}{}{char }{Sundance ``plink'' Transputer boards}
+\major{  }{}{block}{SCSI disk devices (16-31)}
+\major{66}{}{char }{YARC PowerPC PCI coprocessor card}
+\major{  }{}{block}{SCSI disk devices (32-47)}
+\major{67}{}{char }{Coda network filesystem}
+\major{  }{}{block}{SCSI disk devices (48-63)}
+\major{68}{}{char }{CAPI 2.0 interface}
+\major{  }{}{block}{SCSI disk devices (64-79)}
+\major{69}{}{char }{MA16 numeric accelerator card}
+\major{  }{}{block}{SCSI disk devices (80-95)}
+\major{70}{}{char }{SpellCaster Protocol Services Interface}
+\major{  }{}{block}{SCSI disk devices (96-111)}
+\major{71}{}{char }{Computone IntelliPort II serial card}
+\major{  }{}{block}{SCSI disk devices (112-127)}
+\major{72}{}{char }{Computone IntelliPort II serial card -- alternate devices}
+\major{73}{}{char }{Computone IntelliPort II serial card -- control devices}
+\major{74}{}{char }{SCI bridge}
+\major{75}{}{char }{Specialix IO8+ serial card}
+\major{76}{}{char }{Specialix IO8+ serial card -- alternate devices}
+\major{77}{}{char }{ComScire Quantum Noise Generator}
+\major{78}{}{char }{PAM Software's multimodem boards}
+\major{79}{}{char }{PAM Software's multimodem boards -- alternate devices}
+\major{80}{}{char }{Photometrics AT200 CCD camera}
+\major{81}{}{char }{video4linux}
+\major{82}{}{char }{WiNRADiO communications receiver card}
+\major{83}{}{char }{Teletext/videotext interfaces}
+\major{84}{}{char }{Ikon 1011[57] Versatec Greensheet Interface}
+\major{85}{}{char }{Linux/SGI shared memory input queue}
+\major{86}{}{char }{SCSI media changer}
+\major{87}{}{char }{Sony Control-A1 stereo control bus}
+\major{88}{}{char }{COMX synchronous serial card}
+\major{89}{}{char }{I$^2$C bus interface}
+\major{90}{}{char }{Memory Technology Device (RAM, ROM, Flash)}
+\major{91}{}{char }{CAN-Bus controller}
+\major{92}{}{char }{Reserved for ith Kommunikationstechnik MIC ISDN card}
+\major{93}{}{char }{IBM Smart Capture Card frame grabber}
+\major{94}{}{char }{miroVIDEO DC10/30 capture/playback device}
+\major{95}{}{char }{IP filter}
+\major{96}{}{char }{Parallel port ATAPI tape devices}
+\major{97}{}{char }{Parallel port generic ATAPI interface}
+\major{98}{}{char }{Control and Mesurement Device (comedi)}
+\major{99}{}{char }{Raw parallel ports}
+\major{100}{}{char }{POTS (analogue telephone) A/B port}
+\major{101}{}{char }{Motorola DSP 56xxx board}
+\major{102}{}{char }{Philips SAA5249 Teletext signal decoder}
+\major{103}{}{char }{Arla network file system}
+\major{104}{}{char }{Flash BIOS support}
+\major{105}{}{char }{Comtrol VS-1000 serial card}
+\major{106}{}{char }{Comtrol VS-1000 serial card -- alternate devices}
+\major{107}{}{char }{3Dfx Voodoo Graphics device}
+\major{108}{}{char }{Device independent PPP interface}
+\major{109}{}{char }{Reserved for logical volume manager}
+\major{110}{}{char }{miroMEDIA Surround board}
+\major{111}{--119}{}{Unallocated}
 \major{120}{--127}{}{Local/experimental use}
-\major{128}{--239}{}{Unallocated}
+\major{128}{--135}{char }{Unix98 PTY masters}
+\major{136}{--143}{char }{Unix98 PTY slaves}
+\major{144}{--239}{}{Unallocated}
 \major{240}{--254}{}{Local/experimental use}
 \major{255}{}{}{Reserved}
 \end{devicelist}
 
 \section{Minor numbers}
 
-
 \begin{devicelist}
-\major{0}{}{}{Unnamed devices (e.g. non-device mounts)}
+\major{ 0}{}{}{Unnamed devices (e.g. non-device mounts)}
 	\minor{0}{}{reserved as null device number}
 \end{devicelist}
 
 \begin{devicelist}
-\major{1}{}{char}{Memory devices}
+\major{ 1}{}{char}{Memory devices}
 	\minor{1}{/dev/mem}{Physical memory access}
 	\minor{2}{/dev/kmem}{Kernel virtual memory access}
 	\minor{3}{/dev/null}{Null device}
@@ -220,7 +316,7 @@ Earlier kernels had {\file /dev/ramdisk} (1, 1) here.  {\file /dev/initrd}
 refers to a RAM disk which was preloaded by the boot loader.
 
 \begin{devicelist}
-\major{2}{}{char}{Pseudo-TTY masters}
+\major{ 2}{}{char}{Pseudo-TTY masters}
 	\minor{0}{/dev/ptyp0}{First PTY master}
 	\minor{1}{/dev/ptyp1}{Second PTY master}
 	\minordots
@@ -237,6 +333,11 @@ the 1st through 16th series of 16 pseudo-ttys each, and
 the position within the series.
 \end{itemize}
 
+\noindent
+These are the old-style (BSD) PTY devices; Unix98 devices are on major
+128 and above and use the PTY master multiplex ({\file /dev/ptmx}) to
+acquire a PTY on demand.
+
 \begin{devicelist}
 \major{}{}{block}{Floppy disks}
 	\minor{0}{/dev/fd0}{Controller 1, drive 1 autodetect}
@@ -250,37 +351,38 @@ the position within the series.
 \\
 \major{}{}{}{To specify format, add to the autodetect device number}
 	\minor{  0}{/dev/fd?}{Autodetect format}
-	\minor{  4}{/dev/fd?d360}{5.25" \num{4}{360}K in a \num{4}{360}K drive\1}
-	\minor{ 20}{/dev/fd?h360}{5.25" \num{4}{360}K in a 1200K drive\1}
-	\minor{ 48}{/dev/fd?h410}{5.25" \num{4}{410}K in a 1200K drive}
-	\minor{ 64}{/dev/fd?h420}{5.25" \num{4}{420}K in a 1200K drive}
-	\minor{ 24}{/dev/fd?h720}{5.25" \num{4}{720}K in a 1200K drive}
-	\minor{ 80}{/dev/fd?h880}{5.25" \num{4}{880}K in a 1200K drive\1}
-	\minor{  8}{/dev/fd?h1200}{5.25" 1200K in a 1200K drive\1}
-	\minor{ 40}{/dev/fd?h1440}{5.25" 1440K in a 1200K drive\1}
-	\minor{ 56}{/dev/fd?h1476}{5.25" 1476K in a 1200K drive}
-	\minor{ 72}{/dev/fd?h1494}{5.25" 1494K in a 1200K drive}
-	\minor{ 92}{/dev/fd?h1600}{5.25" 1600K in a 1200K drive\1}
 	\minor{}{}{}
-	\minor{ 12}{/dev/fd?u360}{3.5" \num{4}{360}K Double Density}
-	\minor{ 16}{/dev/fd?u720}{3.5" \num{4}{720}K Double Density\1}
-	\minor{120}{/dev/fd?u800}{3.5" \num{4}{800}K Double Density\2}
-	\minor{ 52}{/dev/fd?u820}{3.5" \num{4}{820}K Double Density}
-	\minor{ 68}{/dev/fd?u830}{3.5" \num{4}{830}K Double Density}
-	\minor{ 84}{/dev/fd?u1040}{3.5" 1040K Double Density\1}
-	\minor{ 88}{/dev/fd?u1120}{3.5" 1120K Double Density\1}
-	\minor{ 28}{/dev/fd?u1440}{3.5" 1440K High Density\1}
-	\minor{124}{/dev/fd?u1600}{3.5" 1600K High Density\1}
-	\minor{ 44}{/dev/fd?u1680}{3.5" 1680K High Density\3}
-	\minor{ 60}{/dev/fd?u1722}{3.5" 1722K High Density}
-	\minor{ 76}{/dev/fd?u1743}{3.5" 1743K High Density}
-	\minor{ 96}{/dev/fd?u1760}{3.5" 1760K High Density}
-	\minor{116}{/dev/fd?u1840}{3.5" 1840K High Density\3}
-	\minor{100}{/dev/fd?u1920}{3.5" 1920K High Density\1}
-	\minor{ 32}{/dev/fd?u2880}{3.5" 2880K Extra Density\1}
-	\minor{104}{/dev/fd?u3200}{3.5" 3200K Extra Density}
-	\minor{108}{/dev/fd?u3520}{3.5" 3520K Extra Density}
-	\minor{112}{/dev/fd?u3840}{3.5" 3840K Extra Density\1}
+	\minor{  4}{/dev/fd?d360}{5.25\tum\ \num{4}{360}K in a \num{4}{360}K drive\1}
+	\minor{ 20}{/dev/fd?h360}{5.25\tum\ \num{4}{360}K in a 1200K drive\1}
+	\minor{ 48}{/dev/fd?h410}{5.25\tum\ \num{4}{410}K in a 1200K drive}
+	\minor{ 64}{/dev/fd?h420}{5.25\tum\ \num{4}{420}K in a 1200K drive}
+	\minor{ 24}{/dev/fd?h720}{5.25\tum\ \num{4}{720}K in a 1200K drive}
+	\minor{ 80}{/dev/fd?h880}{5.25\tum\ \num{4}{880}K in a 1200K drive\1}
+	\minor{  8}{/dev/fd?h1200}{5.25\tum\ 1200K in a 1200K drive\1}
+	\minor{ 40}{/dev/fd?h1440}{5.25\tum\ 1440K in a 1200K drive\1}
+	\minor{ 56}{/dev/fd?h1476}{5.25\tum\ 1476K in a 1200K drive}
+	\minor{ 72}{/dev/fd?h1494}{5.25\tum\ 1494K in a 1200K drive}
+	\minor{ 92}{/dev/fd?h1600}{5.25\tum\ 1600K in a 1200K drive\1}
+	\minor{}{}{}
+	\minor{ 12}{/dev/fd?u360}{3.5\tum\ \num{4}{360}K Double Density\2}
+	\minor{ 16}{/dev/fd?u720}{3.5\tum\ \num{4}{720}K Double Density\1}
+	\minor{120}{/dev/fd?u800}{3.5\tum\ \num{4}{800}K Double Density\2}
+	\minor{ 52}{/dev/fd?u820}{3.5\tum\ \num{4}{820}K Double Density}
+	\minor{ 68}{/dev/fd?u830}{3.5\tum\ \num{4}{830}K Double Density}
+	\minor{ 84}{/dev/fd?u1040}{3.5\tum\ 1040K Double Density\1}
+	\minor{ 88}{/dev/fd?u1120}{3.5\tum\ 1120K Double Density\1}
+	\minor{ 28}{/dev/fd?u1440}{3.5\tum\ 1440K High Density\1}
+	\minor{124}{/dev/fd?u1600}{3.5\tum\ 1600K High Density\1}
+	\minor{ 44}{/dev/fd?u1680}{3.5\tum\ 1680K High Density\3}
+	\minor{ 60}{/dev/fd?u1722}{3.5\tum\ 1722K High Density}
+	\minor{ 76}{/dev/fd?u1743}{3.5\tum\ 1743K High Density}
+	\minor{ 96}{/dev/fd?u1760}{3.5\tum\ 1760K High Density}
+	\minor{116}{/dev/fd?u1840}{3.5\tum\ 1840K High Density\3}
+	\minor{100}{/dev/fd?u1920}{3.5\tum\ 1920K High Density\1}
+	\minor{ 32}{/dev/fd?u2880}{3.5\tum\ 2880K Extra Density\1}
+	\minor{104}{/dev/fd?u3200}{3.5\tum\ 3200K Extra Density}
+	\minor{108}{/dev/fd?u3520}{3.5\tum\ 3520K Extra Density}
+	\minor{112}{/dev/fd?u3840}{3.5\tum\ 3840K Extra Density\1}
 	\minor{}{}{}
 	\minor{36}{/dev/fd?CompaQ}{Compaq 2880K drive; probably obsolete}
 \\
@@ -290,19 +392,26 @@ the position within the series.
 \end{devicelist}
 
 NOTE: The letter in the device name ({\file d}, {\file q}, {\file h}
-or {\file u}) signifies the type of drive supported: 5.25" Double
-Density ({\file d}), 5.25" Quad Density ({\file q}), 5.25" High
-Density ({\file h}) or 3.5" (any type, {\file u}).  The capital
-letters {\file D}, {\file H}, or {\file E} for the 3.5" models have
-been deprecated, since the drive type is insignificant for these devices.
+or {\file u}) signifies the type of drive supported: 5.25\tum\ Double
+Density ({\file d}), 5.25\tum\ Quad Density ({\file q}), 5.25\tum\
+High Density ({\file h}) or 3.5\tum\ (any type, {\file u}).  The
+capital letters {\file D}, {\file H}, or {\file E} for the 3.5\tum\
+models have been deprecated, since the drive type is insignificant for
+these devices.
 
 \begin{devicelist}
-\major{3}{}{char}{Pseudo-TTY slaves}
+\major{ 3}{}{char}{Pseudo-TTY slaves}
 	\minor{0}{/dev/ttyp0}{First PTY slave}
 	\minor{1}{/dev/ttyp1}{Second PTY slave}
 	\minordots
 	\minor{255}{/dev/ttyef}{256th PTY slave}
-\\
+\end{devicelist}
+
+\noindent
+These are the old-style (BSD) PTY devices; Unix98 devices are on major
+136 and above.
+
+\begin{devicelist}
 \major{}{}{block}{First MFM, RLL and IDE hard disk/CD-ROM interface}
 	\minor{0}{/dev/hda}{Master: whole disk (or CD-ROM)}
 	\minor{64}{/dev/hdb}{Slave: whole disk (or CD-ROM)}
@@ -316,40 +425,46 @@ been deprecated, since the drive type is insignificant for these devices.
 \end{devicelist}
 
 \noindent
-For Linux/i386, partitions 1-4 are the primary partitions, partitions
-5 and up are logical partitions.  Other versions of Linux use
-partitioning schemes appropriate to their respective architectures.
+For MS-DOS style partition tables (typically used by Linux/i386 and
+sometimes on Linux/Alpha), partitions 1-4 are the primary partitions,
+partitions 5 and up are logical partitions.  For other partitioning
+schemes, the meaning of the numbers vary.
 
 \begin{devicelist}
 \major{ 4}{}{char }{TTY devices}
-	\minor{0}{/dev/console}{Console device}
+	\minor{0}{/dev/tty0}{Current virtual console}
 	\minor{1}{/dev/tty1}{First virtual console}
 	\minordots
 	\minor{63}{/dev/tty63}{63rd virtual console}
 	\minor{64}{/dev/ttyS0}{First serial port}
 	\minordots
 	\minor{127}{/dev/ttyS63}{64th serial port}
-	\minor{128}{/dev/ptyp0}{First pseudo-tty master}
+	\minor{128}{/dev/ptyp0}{OBSOLETE}
 	\minordots
-	\minor{191}{/dev/ptysf}{64th pseudo-tty master}
-	\minor{192}{/dev/ttyp0}{First pseudo-tty slave}
+	\minor{191}{/dev/ptysf}{OBSOLETE}
+	\minor{192}{/dev/ttyp0}{OBSOLETE}
 	\minordots
-	\minor{255}{/dev/ttysf}{64th pseudo-tty slave}
+	\minor{255}{/dev/ttysf}{OBSOLETE}
 \end{devicelist}
 
 \noindent
-For compatibility with previous versions of Linux, the first 64 PTYs
-are replicated under this device number.  This use will be obsolescent
-with the release of Linux 2.0 and may be removed in a future version
-of Linux.
+Older versions of the Linux kernel used this major number for BSD PTY
+devices.  As of Linux 2.1.115, this is no longer supported.  Use major
+numbers 2 and 3.
 
 \begin{devicelist}
 \major{ 5}{}{char }{Alternate TTY devices}
 	\minor{0}{/dev/tty}{Current TTY device}
+	\minor{1}{/dev/console}{System console}
+	\minor{2}{/dev/ptmx}{PTY master multiplex}
 	\minor{64}{/dev/cua0}{Callout device corresponding to {\file ttyS0}}
 	\minordots
 	\minor{127}{/dev/cua63}{Callout device corresponding to {\file ttyS63}}
 \end{devicelist}
+
+\noindent
+(5,1) is {\file /dev/console} starting with Linux 2.1.71.  See the
+section on terminal devices for more information on {\file /dev/console}.
 
 \begin{devicelist}
 \major{ 6}{}{char }{Parallel printer devices}
@@ -384,8 +499,13 @@ NOTE: These devices permit both read and write access.
 	\minordots
 \end{devicelist}
 
+\noindent
+The loopback devices are used to mount filesystems not associated with
+block devices.  The binding to the loopback devices is handled by
+{\bf mount}(8) or {\bf losetup}(8).
+
 \begin{devicelist}
-\major{ 8}{}{block}{SCSI disk devices}
+\major{ 8}{}{block}{SCSI disk devices (0-15)}
 	\minor{0}{/dev/sda}{First SCSI disk whole disk}
 	\minor{16}{/dev/sdb}{Second SCSI disk whole disk}
 	\minor{32}{/dev/sdc}{Third SCSI disk whole disk}
@@ -453,6 +573,8 @@ physical disks.
 	\minor{5}{/dev/atarimouse}{Atari mouse}
 	\minor{6}{/dev/sunmouse}{Sun mouse}
 	\minor{7}{/dev/amigamouse1}{Second Amiga mouse}
+	\minor{8}{/dev/smouse}{Simple serial mouse driver}
+	\minor{9}{/dev/pc110pad}{IBM PC-110 digitizer pad}
 	\minor{128}{/dev/beep}{Fancy beep device}
 	\minor{129}{/dev/modreq}{Kernel module load request}
 	\minor{130}{/dev/watchdog}{Watchdog timer port}
@@ -461,16 +583,22 @@ physical disks.
 	\minor{133}{/dev/exttrp}{External device trap}
 	\minor{134}{/dev/apm\_bios}{Advanced Power Management BIOS}
 	\minor{135}{/dev/rtc}{Real Time Clock}
-	\minor{136}{/dev/qcam0}{QuickCam on {\file lp0}}
-	\minor{137}{/dev/qcam1}{QuickCam on {\file lp1}}
-	\minor{138}{/dev/qcam2}{QuickCam on {\file lp2}}
 	\minor{139}{/dev/openprom}{SPARC OpenBoot PROM}
+	\minor{140}{/dev/relay8}{Berkshire Products Octal relay card}
+	\minor{141}{/dev/relay16}{Berkshire Products ISO-16 relay card}
+	\minor{142}{/dev/msr}{x86 model specific registers}
+	\minor{143}{/dev/pciconf}{PCI configuration space}
+	\minor{144}{/dev/nvram}{Non-volatile configuration RAM}
+	\minor{145}{/dev/hfmodem}{Soundcard shortwave modem control}
+	\minor{146}{/dev/graphics}{Linux/SGI graphics device}
+	\minor{147}{/dev/opengl}{Linux/SGI OpenGL pipe}
+	\minor{148}{/dev/gfx}{Linux/SGI graphics effects device}
+	\minor{149}{/dev/input/mouse}{Linux/SGI Irix emulation mouse}
+	\minor{150}{/dev/input/keyboard}{Linux/SGI Irix emulation keyboard}
+	\minor{151}{/dev/led}{Front panel LEDs}
+	\minor{153}{/dev/mergemem}{Memory merge device}
+	\minor{154}{/dev/pmu}{Macintosh PowerBook power manager}
 \end{devicelist}
-
-\noindent
-The loopback devices are used to mount filesystems not associated with
-block devices.  The binding to the loopback devices is usually handled
-by {\bf mount}(8).
 
 \begin{devicelist}
 \major{11}{}{char }{Raw keyboard device}
@@ -635,11 +763,27 @@ See the Double documentation for an explanation of the ``mirror'' devices.
 	\minordots
 \end{devicelist}
 
+\noindent
+Most distributions name these {\file /dev/sga}, {\file /dev/sgb}...
+This sets an unneccesary limit of 26 SCSI devices in the system, and
+is counter to standard Linux device-naming practice.
+
+\begin{devicelist}
+\major{  }{}{block }{Acorn MFM hard drive interface}
+	\minor{0}{/dev/mfma}{First MFM drive whole disk}
+	\minor{64}{/dev/mfmb}{Second MFM drive whole disk}
+\end{devicelist}
+
+\noindent
+This device is used on the ARM-based Acorn RiscPC.  Partitions are
+handled the same way as for IDE disks (see major number 3).
+
 \begin{devicelist}
 \major{22}{}{char }{Digiboard serial card}
 	\minor{0}{/dev/ttyD0}{First Digiboard port}
 	\minor{1}{/dev/ttyD1}{Second Digiboard port}
 	\minordots
+\\
 \major{  }{}{block}{Second IDE hard disk/CD-ROM interface}
 	\minor{0}{/dev/hdc}{Master: whole disk (or CD-ROM)}
 	\minor{64}{/dev/hdd}{Slave: whole disk (or CD-ROM)}
@@ -712,14 +856,30 @@ major number 3).
 
 \begin{devicelist}
 \major{27}{}{char }{QIC-117 tape}
-	\minor{0}{/dev/rft0}{Unit 0, rewind-on-close}
-	\minor{1}{/dev/rft1}{Unit 1, rewind-on-close}
-	\minor{2}{/dev/rft2}{Unit 2, rewind-on-close}
-	\minor{3}{/dev/rft3}{Unit 3, rewind-on-close}
-	\minor{4}{/dev/nrft0}{Unit 0, no rewind-on-close}
-	\minor{5}{/dev/nrft1}{Unit 1, no rewind-on-close}
-	\minor{6}{/dev/nrft2}{Unit 2, no rewind-on-close}
-	\minor{7}{/dev/nrft3}{Unit 3, no rewind-on-close}
+	\minor{0}{/dev/qft0}{Unit 0, rewind-on-close}
+	\minor{1}{/dev/qft1}{Unit 1, rewind-on-close}
+	\minor{2}{/dev/qft2}{Unit 2, rewind-on-close}
+	\minor{3}{/dev/qft3}{Unit 3, rewind-on-close}
+	\minor{4}{/dev/nqft0}{Unit 0, no rewind-on-close}
+	\minor{5}{/dev/nqft1}{Unit 1, no rewind-on-close}
+	\minor{6}{/dev/nqft2}{Unit 2, no rewind-on-close}
+	\minor{7}{/dev/nqft3}{Unit 3, no rewind-on-close}
+	\minor{16}{/dev/zqft0}{Unit 0, rewind-on-close, compression}
+	\minor{17}{/dev/zqft1}{Unit 1, rewind-on-close, compression}
+	\minor{18}{/dev/zqft2}{Unit 2, rewind-on-close, compression}
+	\minor{19}{/dev/zqft3}{Unit 3, rewind-on-close, compression}
+	\minor{20}{/dev/nzqft0}{Unit 0, no rewind-on-close, compression}
+	\minor{21}{/dev/nzqft1}{Unit 1, no rewind-on-close, compression}
+	\minor{22}{/dev/nzqft2}{Unit 2, no rewind-on-close, compression}
+	\minor{23}{/dev/nzqft3}{Unit 3, no rewind-on-close, compression}
+	\minor{32}{/dev/rawqft0}{Unit 0, rewind-on-close, no file marks}
+	\minor{33}{/dev/rawqft1}{Unit 1, rewind-on-close, no file marks}
+	\minor{34}{/dev/rawqft2}{Unit 2, rewind-on-close, no file marks}
+	\minor{35}{/dev/rawqft3}{Unit 3, rewind-on-close, no file marks}
+	\minor{36}{/dev/nrawqft0}{Unit 0, no rewind-on-close, no file marks}
+	\minor{37}{/dev/nrawqft1}{Unit 1, no rewind-on-close, no file marks}
+	\minor{38}{/dev/nrawqft2}{Unit 2, no rewind-on-close, no file marks}
+	\minor{39}{/dev/nrawqft3}{Unit 3, no rewind-on-close, no file marks}
 \\
 \major{  }{}{block}{Third Matsushita (Panasonic/SoundBlaster) CD-ROM}
 	\minor{0}{/dev/sbpcd8}{Panasonic CD-ROM controller 2 unit 0}
@@ -762,29 +922,14 @@ disk (same as SCSI.)
 \begin{devicelist}
 \major{29}{}{char }{Universal frame buffer}
 	\minor{0}{/dev/fb0}{First frame buffer}
-	\minor{1}{/dev/fb0autodetect}{}
-	\minor{24}{/dev/fb0user0}{}
-	\minordots
-	\minor{31}{/dev/fb0user7}{}
 	\minor{32}{/dev/fb1}{Second frame buffer}
-	\minor{33}{/dev/fb1autodetect}{}
-	\minor{56}{/dev/fb1user0}{}
+	\minor{64}{/dev/fb2}{Third frame buffer}
 	\minordots
-	\minor{63}{/dev/fb1user7}{}
-	\minordots
+	\minor{224}{/dev/fb7}{Eighth frame buffer}
 \end{devicelist}
 
 \noindent
-The universal frame buffer device is currently supported only on
-Linux/68k and Linux/SPARC.  The plain device accesses the frame
-buffer at current resolution (Linux/68k calls this file {\file
-current}, e.g. {\file /dev/fb0current}); the {\file autodetect} one at
-bootup (default) resolution.  Minor numbers 2--23 within each frame
-buffer assignment are used for specific device-dependent resolutions.
-There appears to be no standard naming for these devices.  Finally,
-24--31 within each device are reserved for user-selected modes,
-usually entered at boot time.  Currently only Linux/68k uses the
-mode-specific devices.
+All additional minor device numbers are reserved.
 
 \begin{devicelist}
 \major{  }{}{block}{Aztech/Orchid/Okano/Wearnes CD-ROM}
@@ -803,8 +948,8 @@ mode-specific devices.
 \end{devicelist}
 
 \noindent
-iBCS-2 requires {\file /dev/nfsd} to be a link to {\file /dev/socksys}
-and {\file /dev/X0R} to be a link to {\file /dev/null}.
+Additionally, iBCS-2 requires {\file /dev/nfsd} to be a link to {\file
+/dev/socksys} and {\file /dev/X0R} to be a link to {\file /dev/null}.
 
 \begin{devicelist}
 \major{  }{}{block}{Philips LMS CM-205 CD-ROM}
@@ -903,13 +1048,9 @@ major number 3).
 	\minor{130}{/dev/smpte2}{Third MIDI port, SMPTE timed}
 	\minor{131}{/dev/smpte3}{Fourth MIDI port, SMPTE timed}
 \\
-\major{  }{}{block}{Modular RAM disk}
+\major{  }{}{block}{Slow memory ramdisk}
+	\minor{0}{/dev/slram}{Slow memory ramdisk}
 \end{devicelist}
-
-\noindent
-This device number is provided for older kernels which did not have
-the modular RAM disk in the standard distribution.  See major number
-1.  This assignment will be removed when the 2.0 kernel is released.
 
 \begin{devicelist}
 \major{36}{}{char }{Netlink support}
@@ -988,8 +1129,10 @@ networking device.
 \end{devicelist}
 
 \noindent
-Partitions are handled the same way as for IDE disks (see major number
-3).
+This device is obsolete and will be removed in a future version of
+Linux.  It has been replaced with the parallel port IDE disk driver at
+major number 45.  Partitions are handled the same way as for IDE disks
+(see major number 3).
 
 \begin{devicelist}
 \major{41}{}{char }{Yet Another Micro Monitor}
@@ -998,6 +1141,11 @@ Partitions are handled the same way as for IDE disks (see major number
 \major{  }{}{block}{MicroSolutions BackPack parallel port CD-ROM}
 	\minor{0}{/dev/bpcd}{BackPack CD-ROM}
 \end{devicelist}
+
+\noindent
+This device is obsolete and will be removed in a future version of
+Linux.  It has been replaced with the parallel port ATAPI CD-ROM
+driver at major number 46.
 
 \begin{devicelist}
 \major{42}{}{}{Demo/sample use}
@@ -1011,19 +1159,46 @@ use the local/experimental range.  The sudden addition or removal of a
 driver with this number should not cause ill effects to the system
 (bugs excepted.)
 
+IN PARTICULAR, ANY DISTRIBUTION WHICH CONTAINS A DEVICE DRIVER USING
+MAJOR NUMBER 42 IS NONCOMPLIANT.
+
 \begin{devicelist}
 \major{43}{}{char }{isdn4linux virtual modem}
 	\minor{0}{/dev/ttyI0}{First virtual modem}
 	\minordots
 	\minor{63}{/dev/ttyI63}{64th virtual modem}
+\\
+\major{  }{}{block}{Network block devices}
+	\minor{0}{/dev/nd0}{First network block device}
+	\minor{1}{/dev/nd1}{Second network block device}
+	\minordots
 \end{devicelist}
+
+\noindent
+Network Block Device is somehow similar to loopback devices: If you
+read from it, it sends packet accross network asking server for
+data. If you write to it, it sends packet telling server to write. It
+could be used to mounting filesystems over the net, swapping over the
+net, implementing block device in userland etc.
 
 \begin{devicelist}
 \major{44}{}{char }{isdn4linux virtual modem -- alternate devices}
 	\minor{0}{/dev/cui0}{Callout device corresponding to {\file ttyI0}}
 	\minordots
 	\minor{63}{/dev/cui63}{Callout device corresponding to {\file ttyI63}}
+\\
+\major{  }{}{block}{Flash Translation Layer (FTL) filesystems}
+        \minor{0}{/dev/ftla}{FTL on first Memory Technology Device}
+        \minor{16}{/dev/ftlb}{FTL on second Memory Technology Device}
+        \minor{32}{/dev/ftlc}{FTL on third Memory Technology Device}
+        \minordots
+        \minor{240}{/dev/ftlp}{FTL on 16th Memory Technology Device}
 \end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) expect that the partition limit is 15 rather than 63 per
+disk (same as SCSI.)
 
 \begin{devicelist}
 \major{45}{}{char }{isdn4linux ISDN BRI driver}
@@ -1037,13 +1212,30 @@ driver with this number should not cause ill effects to the system
 	\minordots
 	\minor{191}{/dev/ippp63}{64th SyncPPP device}
 	\minor{255}{/dev/isdninfo}{ISDN monitor interface}
+\\
+\major{  }{}{block}{Parallel port IDE disk devices}
+	\minor{0}{/dev/pda}{First parallel port IDE disk}
+	\minor{16}{/dev/pdb}{Second parallel port IDE disk}
+	\minor{32}{/dev/pdc}{Third parallel port IDE disk}
+	\minor{48}{/dev/pdd}{Fourth parallel port IDE disk}
 \end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) except that the partition limit is 15 rather than 63 per
+disk.
 
 \begin{devicelist}
 \major{46}{}{char }{Comtrol Rocketport serial card}
 	\minor{0}{/dev/ttyR0}{First Rocketport port}
 	\minor{1}{/dev/ttyR1}{Second Rocketport port}
 	\minordots
+\\
+\major{  }{}{block}{Parallel port ATAPI CD-ROM devices}
+	\minor{0}{/dev/pcd0}{First parallel port ATAPI CD-ROM}
+	\minor{1}{/dev/pcd1}{Second parallel port ATAPI CD-ROM}
+	\minor{2}{/dev/pcd2}{Third parallel port ATAPI CD-ROM}
+	\minor{3}{/dev/pcd3}{Fourth parallel port ATAPI CD-ROM}
 \end{devicelist}
 
 \begin{devicelist}
@@ -1051,13 +1243,25 @@ driver with this number should not cause ill effects to the system
 	\minor{0}{/dev/cur0}{Callout device corresponding to {\file ttyR0}}
 	\minor{1}{/dev/cur1}{Callout device corresponding to {\file ttyR1}}
 	\minordots
+\\
+\major{  }{}{block}{Parallel port ATAPI disk devices}
+	\minor{0}{/dev/pf0}{First parallel port ATAPI disk}
+	\minor{1}{/dev/pf1}{Second parallel port ATAPI disk}
+	\minor{2}{/dev/pf2}{Third parallel port ATAPI disk}
+	\minor{3}{/dev/pf3}{Fourth parallel port ATAPI disk}
 \end{devicelist}
+
+\noindent
+This driver is intended for floppy disks and similar devices and hence
+does not support partitioning.
 
 \begin{devicelist}
 \major{48}{}{char }{SDL RISCom serial card}
 	\minor{0}{/dev/ttyL0}{First RISCom port}
 	\minor{1}{/dev/ttyL1}{Second RISCom port}
 	\minordots
+\\
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \end{devicelist}
 
 \begin{devicelist}
@@ -1065,10 +1269,14 @@ driver with this number should not cause ill effects to the system
 	\minor{0}{/dev/cul0}{Callout device corresponding to {\file ttyL0}}
 	\minor{1}{/dev/cul1}{Callout device corresponding to {\file ttyL1}}
 	\minordots
+\\
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \end{devicelist}
 
 \begin{devicelist}
 \major{50}{}{char}{Reserved for GLINT}
+\\
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \end{devicelist}
 
 \begin{devicelist}
@@ -1076,6 +1284,8 @@ driver with this number should not cause ill effects to the system
 	\minor{0}{/dev/bc0}{First Baycom radio modem}
 	\minor{1}{/dev/bc1}{Second Baycom radio modem}
 	\minordots
+\\
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \end{devicelist}
 
 \begin{devicelist}
@@ -1084,11 +1294,12 @@ driver with this number should not cause ill effects to the system
 	\minor{1}{/dev/dcbri1}{Second DataComm card}
 	\minor{2}{/dev/dcbri2}{Third DataComm card}
 	\minor{3}{/dev/dcbri3}{Fourth DataComm card}
+\\
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
 \end{devicelist}
 
 \begin{devicelist}
-\major{53}{}{char }{BDM interface for remote debugging MC683xx
-microcontrollers}
+\major{53}{}{char }{BDM interface for remote debugging MC683xx microcontrollers}
 	\minor{0}{/dev/pd\_bdm0}{PD BDM interface on {\file lp0}}
 	\minor{1}{/dev/pd\_bdm1}{PD BDM interface on {\file lp1}}
 	\minor{2}{/dev/pd\_bdm2}{PD BDM interface on {\file lp2}}
@@ -1104,6 +1315,10 @@ interface. PD is the Motorola Public Domain Interface and ICD is the
 commercial interface by P\&E.
 
 \begin{devicelist}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
+\end{devicelist}
+
+\begin{devicelist}
 \major{54}{}{char }{Electrocardiognosis Holter serial card}
 	\minor{0}{/dev/holter0}{First Holter port}
 	\minor{1}{/dev/holter1}{Second Holter port}
@@ -1116,7 +1331,62 @@ $<$mseritan@ottonel.pub.ro$>$ to transfer data from Holter 24-hour
 heart monitoring equipment.
 
 \begin{devicelist}
-\major{55}{--59}{}{Unallocated}
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
+\end{devicelist}
+
+\begin{devicelist}
+\major{55}{}{char }{DSP56001 digital signal processor}
+	\minor{0}{/dev/dsp56k}{First DSP56001}
+\\
+\major{  }{}{block}{Reserved for Mylex DAC960 PCI RAID Controller}
+\end{devicelist}
+
+\begin{devicelist}
+\major{56}{}{char }{Apple Desktop Bus}
+	\minor{0}{/dev/adb}{ADB bus control}
+\end{devicelist}
+
+\noindent
+Additional devices will be added to this number, all starting with
+{\file /dev/adb}.
+
+\begin{devicelist}
+\major{  }{}{block}{Fifth IDE hard disk/CD-ROM interface}
+	\minor{0}{/dev/hdi}{Master: whole disk (or CD-ROM)}
+	\minor{64}{/dev/hdj}{Slave: whole disk (or CD-ROM)}
+\end{devicelist}
+
+\noindent
+Partitions are handled the same way as for the first interface (see
+major number 3).
+
+\begin{devicelist}
+\major{57}{}{char }{Hayes ESP serial card}
+	\minor{0}{/dev/ttyP0}{First ESP port}
+	\minor{1}{/dev/ttyP1}{Second ESP port}
+	\minordots
+\\
+\major{  }{}{block}{Sixth IDE hard disk/CD-ROM interface}
+	\minor{0}{/dev/hdk}{Master: whole disk (or CD-ROM)}
+	\minor{64}{/dev/hdl}{Slave: whole disk (or CD-ROM)}
+\end{devicelist}
+
+\noindent
+Partitions are handled the same way as for the first interface (see
+major number 3).
+
+\begin{devicelist}
+\major{58}{}{char }{Hayes ESP serial card -- alternate devices}
+	\minor{0}{/dev/cup0}{Callout device corresponding to {\file ttyP0}}
+	\minor{1}{/dev/cup1}{Callout device corresponding to {\file ttyP1}}
+	\minordots
+\\
+\major{  }{}{block}{Reserved for logical volume manager}
+\end{devicelist}
+
+\begin{devicelist}
+\major{59}{}{char }{sf firewall package}
+	\minor{0}{/dev/firewall}{Communication with sf kernel module}
 \end{devicelist}
 
 \begin{devicelist}
@@ -1128,7 +1398,526 @@ For devices not assigned official numbers, these ranges should be
 used, in order to avoid conflict with future assignments.
 
 \begin{devicelist}
-\major{64}{--119}{}{Unallocated}
+\major{64}{}{char }{ENskip kernel encryption package}
+	\minor{0}{/dev/enskip}{Communication with ENskip kernel
+	module}
+\end{devicelist}
+
+\begin{devicelist}
+\major{65}{}{char }{Sundance ``plink'' Transputer boards}
+	\minor{0}{/dev/plink0}{First plink device}
+	\minor{1}{/dev/plink1}{Second plink device}
+	\minor{2}{/dev/plink2}{Third plink device}
+	\minor{3}{/dev/plink3}{Fourth plink device}
+	\minor{64}{/dev/rplink0}{First plink device, raw}
+	\minor{65}{/dev/rplink1}{Second plink device, raw}
+	\minor{66}{/dev/rplink2}{Third plink device, raw}
+	\minor{67}{/dev/rplink3}{Fourth plink device, raw}
+	\minor{128}{/dev/plink0d}{First plink device, debug}
+	\minor{129}{/dev/plink1d}{Second plink device, debug}
+	\minor{130}{/dev/plink2d}{Third plink device, debug}
+	\minor{131}{/dev/plink3d}{Fourth plink device, debug}
+	\minor{192}{/dev/rplink0d}{First plink device, raw, debug}
+	\minor{193}{/dev/rplink1d}{Second plink device, raw, debug}
+	\minor{194}{/dev/rplink2d}{Third plink device, raw, debug}
+	\minor{195}{/dev/rplink3d}{Fourth plink device, raw, debug}
+\end{devicelist}
+
+\noindent
+This is a commercial driver; contact James Howes
+$<$jth@prosig.demon.co.uk$>$ for information. 
+
+\begin{devicelist}
+\major{  }{}{block}{SCSI disk devices (16-31)}
+	\minor{0}{/dev/sdq}{17th SCSI disk whole disk}
+	\minor{16}{/dev/sdr}{18th SCSI disk whole disk}
+	\minor{32}{/dev/sds}{19th SCSI disk whole disk}
+	\minordots
+	\minor{240}{/dev/sdaf}{32nd SCSI disk whole disk}
+\end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) except that the partition limit is 15 rather than 63 per
+disk.
+
+\begin{devicelist}
+\major{66}{}{char }{YARC PowerPC PCI coprocessor card}
+	\minor{0}{/dev/yppcpci0}{First YARC card}
+	\minor{1}{/dev/yppcpci1}{Second YARC card}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{  }{}{block}{SCSI disk devices (32-47)}
+	\minor{0}{/dev/sdag}{33rd SCSI disk whole disk}
+	\minor{16}{/dev/sdah}{34th SCSI disk whole disk}
+	\minor{32}{/dev/sdai}{35th SCSI disk whole disk}
+	\minordots
+	\minor{240}{/dev/sdav}{48th SCSI disk whole disk}
+\end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) except that the partition limit is 15 rather than 63 per
+disk.
+
+\begin{devicelist}
+\major{67}{}{char }{Coda network filesystem}
+	\minor{0}{/dev/cfs0}{Coda cache manager}
+\end{devicelist}
+
+\noindent
+See {\url http://www.coda.cs.cmu.edu\/} for information about Coda.
+
+\begin{devicelist}
+\major{  }{}{block}{SCSI disk devices (48-63)}
+	\minor{0}{/dev/sdaw}{49th SCSI disk whole disk}
+	\minor{16}{/dev/sdax}{50th SCSI disk whole disk}
+	\minor{32}{/dev/sday}{51st SCSI disk whole disk}
+	\minordots
+	\minor{240}{/dev/sdbl}{64th SCSI disk whole disk}
+\end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) except that the partition limit is 15 rather than 63 per
+disk.
+
+\begin{devicelist}
+\major{68}{}{char }{CAPI 2.0 interface}
+	\minor{0}{/dev/capi20}{Control device}
+	\minor{1}{/dev/capi20.00}{First CAPI 2.0 application}
+	\minor{2}{/dev/capi20.01}{Second CAPI 2.0 application}
+	\minordots
+	\minor{20}{/dev/capi20.19}{19th CAPI 2.0 application}
+\end{devicelist}
+
+\noindent
+ISDN CAPI 2.0 driver for use with CAPI 2.0 applications; currently
+supports the AVM B1 card.
+
+\begin{devicelist}
+\major{  }{}{block}{SCSI disk devices (64-79)}
+	\minor{0}{/dev/sdbm}{65th SCSI disk whole disk}
+	\minor{16}{/dev/sdbn}{66th SCSI disk whole disk}
+	\minor{32}{/dev/sdbo}{67th SCSI disk whole disk}
+	\minordots
+	\minor{240}{/dev/sdcb}{80th SCSI disk whole disk}
+\end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) except that the partition limit is 15 rather than 63 per
+disk.
+
+\begin{devicelist}
+\major{69}{}{char }{MA16 numeric accelerator card}
+	\minor{0}{/dev/ma16}{Board memory access}
+\end{devicelist}
+
+\begin{devicelist}
+\major{  }{}{block}{SCSI disk devices (80-95)}
+	\minor{0}{/dev/sdcc}{81st SCSI disk whole disk}
+	\minor{16}{/dev/sdcd}{82nd SCSI disk whole disk}
+	\minor{32}{/dev/sdce}{83th SCSI disk whole disk}
+	\minordots
+	\minor{240}{/dev/sdcr}{96th SCSI disk whole disk}
+\end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) except that the partition limit is 15 rather than 63 per
+disk.
+
+\begin{devicelist}
+\major{70}{}{char }{SpellCaster Protocol Services Interface}
+	\minor{0}{/dev/apscfg}{Configuration interface}
+	\minor{1}{/dev/apsauth}{Authentication interface}
+	\minor{2}{/dev/apslog}{Logging interface}
+	\minor{3}{/dev/apsdbg}{Debugging interface}
+	\minor{64}{/dev/apsisdn}{ISDN command interface}
+	\minor{65}{/dev/apsasync}{Async command interface}
+	\minor{128}{/dev/apsmon}{Monitor interface}
+\end{devicelist}
+
+\begin{devicelist}
+\major{  }{}{block}{SCSI disk devices (96-111)}
+	\minor{0}{/dev/sdcs}{97th SCSI disk whole disk}
+	\minor{16}{/dev/sdct}{98th SCSI disk whole disk}
+	\minor{32}{/dev/sdcu}{99th SCSI disk whole disk}
+	\minordots
+	\minor{240}{/dev/sddh}{112th SCSI disk whole disk}
+\end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) except that the partition limit is 15 rather than 63 per
+disk.
+
+\begin{devicelist}
+\major{71}{}{char }{Computone IntelliPort II serial card}
+	\minor{0}{/dev/ttyF0}{IntelliPort II board 0, port 0}
+	\minor{1}{/dev/ttyF1}{IntelliPort II board 0, port 1}
+	\minordots
+	\minor{63}{/dev/ttyF63}{IntelliPort II board 0, port 63}
+	\minor{64}{/dev/ttyF64}{IntelliPort II board 1, port 0}
+	\minor{65}{/dev/ttyF65}{IntelliPort II board 1, port 1}
+	\minordots
+	\minor{127}{/dev/ttyF127}{IntelliPort II board 1, port 63}
+	\minor{128}{/dev/ttyF128}{IntelliPort II board 2, port 0}
+	\minor{129}{/dev/ttyF129}{IntelliPort II board 2, port 1}
+	\minordots
+	\minor{191}{/dev/ttyF191}{IntelliPort II board 2, port 63}
+	\minor{192}{/dev/ttyF192}{IntelliPort II board 3, port 0}
+	\minor{193}{/dev/ttyF193}{IntelliPort II board 3, port 1}
+	\minordots
+	\minor{255}{/dev/ttyF255}{IntelliPort II board 3, port 63}
+\end{devicelist}
+
+\begin{devicelist}
+\major{  }{}{block}{SCSI disk devices (112-127)}
+	\minor{0}{/dev/sddi}{113th SCSI disk whole disk}
+	\minor{16}{/dev/sddj}{114th SCSI disk whole disk}
+	\minor{32}{/dev/sddk}{115th SCSI disk whole disk}
+	\minordots
+	\minor{240}{/dev/sddx}{128th SCSI disk whole disk}
+\end{devicelist}
+
+\noindent
+Partitions are handled in the same way as for IDE disks (see major
+number 3) except that the partition limit is 15 rather than 63 per
+disk.
+
+\begin{devicelist}
+\major{72}{}{char }{Computone IntelliPort II serial card -- alternate devices}
+	\minor{0}{/dev/cuf0}{Callout device corresponding to {\file ttyF0}}
+	\minor{1}{/dev/cuf1}{Callout device corresponding to {\file ttyF1}}
+	\minordots
+	\minor{63}{/dev/cuf63}{Callout device corresponding to {\file ttyF63}}
+	\minor{64}{/dev/cuf64}{Callout device corresponding to {\file ttyF64}}
+	\minor{65}{/dev/cuf65}{Callout device corresponding to {\file ttyF65}}
+	\minordots
+	\minor{127}{/dev/cuf127}{Callout device corresponding to {\file ttyF127}}
+	\minor{128}{/dev/cuf128}{Callout device corresponding to {\file ttyF128}}
+	\minor{129}{/dev/cuf129}{Callout device corresponding to {\file ttyF129}}
+	\minordots
+	\minor{191}{/dev/cuf191}{Callout device corresponding to {\file ttyF191}}
+	\minor{192}{/dev/cuf192}{Callout device corresponding to {\file ttyF192}}
+	\minor{193}{/dev/cuf193}{Callout device corresponding to {\file ttyF193}}
+	\minordots
+	\minor{255}{/dev/cuf255}{Callout device corresponding to {\file ttyF255}}
+\end{devicelist}
+
+\begin{devicelist}
+\major{73}{}{char }{Computone IntelliPort II serial card -- control devices}
+	\minor{0}{/dev/ip2ipl0}{Loadware device for board 0}
+	\minor{1}{/dev/ip2stat0}{Status device for board 0}
+	\minor{4}{/dev/ip2ipl1}{Loadware device for board 1}
+	\minor{5}{/dev/ip2stat1}{Status device for board 1}
+	\minor{8}{/dev/ip2ipl2}{Loadware device for board 2}
+	\minor{9}{/dev/ip2stat2}{Status device for board 2}
+	\minor{12}{/dev/ip2ipl3}{Loadware device for board 3}
+	\minor{13}{/dev/ip2stat3}{Status device for board 3}
+\end{devicelist}
+
+\begin{devicelist}
+\major{74}{}{char }{SCI bridge}
+	\minor{0}{/dev/SCI/0}{SCI device 0}
+	\minor{1}{/dev/SCI/1}{SCI device 1}
+	\minordots
+\end{devicelist}
+
+\noindent
+Currently for Dolphin Interconnect Solutions' PCI-SCI bridge.
+
+\begin{devicelist}
+\major{75}{}{char }{Specialix IO8+ serial card}
+	\minor{0}{/dev/ttyW0}{First IO8+ port, first card}
+	\minor{1}{/dev/ttyW1}{Second IO8+ port, first card}
+	\minordots
+	\minor{8}{/dev/ttyW8}{First IO8+ port, second card}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{76}{}{char }{Specialix IO8+ serial card -- alternate devices}
+	\minor{0}{/dev/cuw0}{Callout device corresponding to {\file ttyW0}}
+	\minor{1}{/dev/cuw1}{Callout device corresponding to {\file ttyW1}}
+	\minordots
+	\minor{8}{/dev/cuw8}{Callout device corresponding to {\file ttyW8}}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{77}{}{char }{ComScire Quantum Noise Generator}
+	\minor{0}{/dev/qng}{ComScire Quantum Noise Generator}
+\end{devicelist}
+
+\begin{devicelist}
+\major{78}{}{char }{PAM Software's multimodem boards}
+	\minor{0}{/dev/ttyM0}{First PAM modem}
+	\minor{1}{/dev/ttyM1}{Second PAM modem}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{79}{}{char }{PAM Software's multimodem boards -- alternate devices}
+	\minor{0}{/dev/cum0}{Callout device corresponding to {\file ttyM0}}
+	\minor{1}{/dev/cum1}{Callout device corresponding to {\file ttyM1}}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{80}{}{char }{Photometrics AT200 CCD camera}
+	\minor{0}{/dev/at200}{Photometrics AT200 CCD camera}
+\end{devicelist}
+
+\begin{devicelist}
+\major{81}{}{char }{video4linux}
+	\minor{0}{/dev/video0}{Video capture/overlay device}
+	\minordots
+	\minor{63}{/dev/video63}{Video capture/overlay device}
+	\minor{64}{/dev/radio0}{Radio device}
+	\minordots
+	\minor{127}{/dev/radio63}{Radio device}
+	\minor{192}{/dev/vtx0}{Teletext device}
+	\minordots
+	\minor{223}{/dev/vtx31}{Teletext device}
+	\minor{224}{/dev/vbi0}{Vertical blank interupt}
+	\minordots
+	\minor{255}{/dev/vbi31}{Vertical blank interupt}
+\end{devicelist}
+
+\begin{devicelist}
+\major{82}{}{char }{WiNRADiO communications receiver card}
+	\minor{0}{/dev/winradio0}{First WiNRADiO card}
+	\minor{1}{/dev/winradio1}{Second WiNRADiO card}
+	\minordots
+\end{devicelist}
+
+\noindent
+The driver and documentation may be obtained from
+{\url http://www.proximity.com.au/~brian/winradio/\/}.
+
+\begin{devicelist}
+\major{83}{}{char }{Teletext/videotext interfaces}
+        \minor{0}{/dev/vtx}{Teletext decoder}
+        \minor{16}{/dev/vttuner}{TV tuner on teletext interface}
+\end{devicelist}
+
+\noindent
+Devices for the driver contained in the VideoteXt package. More information
+on {\url http://home.pages.de/~videotext/\/}.
+
+\begin{devicelist}
+\major{84}{}{char }{Ikon 1011[57] Versatec Greensheet Interface}
+	\minor{0}{/dev/ihcp0}{First Greensheet port}
+	\minor{1}{/dev/ihcp1}{Second Greensheet port}
+\end{devicelist}
+
+\begin{devicelist}
+\major{85}{}{char }{Linux/SGI shared memory input queue}
+	\minor{0}{/dev/shmiq}{Master shared input queue}
+	\minor{1}{/dev/qcntl0}{First device pushed}
+	\minor{2}{/dev/qcntl1}{Second device pushed}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{86}{}{char }{SCSI media changer}
+	\minor{0}{/dev/sch0}{First SCSI media changer}
+	\minor{1}{/dev/sch1}{Second SCSI media changer}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{87}{}{char }{Sony Control-A1 stereo control bus}
+	\minor{0}{/dev/controla0}{First device on chain}
+	\minor{1}{/dev/controla1}{Second device on chain}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{88}{}{char }{COMX synchronous serial card}
+	\minor{0}{/dev/comx0}{Channel 0}
+	\minor{1}{/dev/comx1}{Channel 1}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{89}{}{char }{I$^2$C bus interface}
+	\minor{0}{/dev/i2c0}{First I$^2$C adapter}
+	\minor{1}{/dev/i2c1}{Second I$^2$C adapter}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{90}{}{char }{Memory Technology Device (RAM, ROM, Flash)}
+        \minor{0}{/dev/mtd0}{First MTD (rw)}
+        \minor{1}{/dev/mtdr0}{First MTD (ro)}
+        \minordots
+        \minor{30}{/dev/mtd15}{16th MTD (rw)}
+        \minor{31}{/dev/mtdr15}{16th MTD (ro)}
+\end{devicelist}
+
+\begin{devicelist}
+\major{91}{}{char }{CAN-Bus controller}
+	\minor{0}{/dev/can0}{First CAN-Bus controller}
+	\minor{1}{/dev/can1}{Second CAN-Bus controller}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{92}{}{char }{Reserved for ith Kommunikationstechnik MIC ISDN card}
+\end{devicelist}
+
+\begin{devicelist}
+\major{93}{}{char }{IBM Smart Capture Card frame grabber}
+	\minor{0}{/dev/iscc0}{First Smart Capture Card}
+	\minor{1}{/dev/iscc1}{Second Smart Capture Card}
+	\minordots
+	\minor{128}{/dev/isccctl0}{First Smart Capture Card control}
+	\minor{129}{/dev/isccctl1}{Second Smart Capture Card control}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{94}{}{char }{miroVIDEO DC10/30 capture/playback device}
+	\minor{0}{/dev/dcxx0}{First capture card}
+	\minor{1}{/dev/dcxx1}{Second capture card}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{95}{}{char }{IP filter}
+	\minor{0}{/dev/ipl}{Filter control device/log file}
+	\minor{1}{/dev/ipnat}{NAT control device/log file}
+	\minor{2}{/dev/ipstate}{State information log file}
+	\minor{3}{/dev/ipauth}{Authentication control device/log file}
+\end{devicelist}
+
+\begin{devicelist}
+\major{96}{}{char }{Parallel port ATAPI tape devices}
+	\minor{0}{/dev/pt0}{First parallel port ATAPI tape}
+	\minor{1}{/dev/pt1}{Second parallel port ATAPI tape}
+	\minor{2}{/dev/pt2}{Third parallel port ATAPI tape}
+	\minor{3}{/dev/pt3}{Fourth parallel port ATAPI tape}
+	\minor{128}{/dev/npt0}{First parallel port ATAPI tape, no rewind}
+	\minor{129}{/dev/npt1}{Second parallel port ATAPI tape, no rewind}
+	\minor{130}{/dev/npt2}{Third parallel port ATAPI tape, no rewind}
+	\minor{131}{/dev/npt3}{Fourth parallel port ATAPI tape, no rewind}
+\end{devicelist}
+
+\begin{devicelist}
+\major{97}{}{char }{Parallel port generic ATAPI interface}
+	\minor{0}{/dev/pg0}{First parallel port ATAPI device}
+	\minor{1}{/dev/pg1}{Second parallel port ATAPI device}
+	\minor{2}{/dev/pg2}{Third parallel port ATAPI device}
+	\minor{3}{/dev/pg3}{Fourth parallel port ATAPI device}
+\end{devicelist}
+
+\noindent
+These devices support the same API as the generic SCSI devices.
+
+\begin{devicelist}
+\major{98}{}{char }{Control and Mesurement Device (comedi)}
+	\minor{0}{/dev/comedi0}{First comedi device}
+	\minor{1}{/dev/comedi1}{Second comedi device}
+	\minordots
+\end{devicelist}
+
+\noindent
+See {\url http://stm.lbl.gov/comedi/} or {\url
+http://www.llp.fu-berlin.de/}.
+
+\begin{devicelist}
+\major{99}{}{char }{Raw parallel ports}
+	\minor{0}{/dev/parport0}{First parallel port}
+	\minor{1}{/dev/parport1}{Second parallel port}
+	\minordots
+\end{devicelist}
+
+\noindent
+These devices can be used to drive parallel port devices from
+user-space while interacting with the parport sharing code.
+
+\begin{devicelist}
+\major{100}{}{char }{POTS (analogue telephone) A/B port}
+	\minor{0}{/dev/phone0}{First telephone port}
+	\minor{1}{/dev/phone1}{Second telephone port}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{101}{}{char }{Motorola DSP 56xxx board}
+	\minor{0}{/dev/mdspstat}{Status information}
+	\minor{1}{/dev/mdsp1}{First DSP board I/O and controls}
+	\minordots
+	\minor{16}{/dev/mdsp16}{16th DSP board I/O and controls}
+\end{devicelist}
+
+\begin{devicelist}
+\major{102}{}{char }{Philips SAA5249 Teletext signal decoder}
+	\minor{0}{/dev/tlk0}{First Teletext decoder}
+	\minor{1}{/dev/tlk1}{Second Teletext decoder}
+	\minor{2}{/dev/tlk2}{Third Teletext decoder}
+	\minor{3}{/dev/tlk3}{Fourth Teletext decoder}
+\end{devicelist}
+
+\begin{devicelist}
+\major{103}{}{char }{Arla network file system}
+	\minor{0}{/dev/xfs0}{Arla XFS}
+\end{devicelist}
+
+\noindent
+Arla is a free clone of the Andrew File System, AFS.  Any resemblance
+with the Swedish milk producer is coincidental.  For more information
+about the project, write to $<$arla-drinkers@stacken.kth.se$>$ or
+subscribe to the arla-announce mailing list by sending a mail to
+$<$arla-announce-request@stacken.kth.se$>$.
+
+\begin{devicelist}
+\major{104}{}{char }{Flash BIOS support}
+\end{devicelist}
+
+\begin{devicelist}
+\major{105}{}{char }{Comtrol VS-1000 serial card}
+	\minor{0}{/dev/ttyV0}{First VS-1000 port}
+	\minor{1}{/dev/ttyV1}{Second VS-1000 port}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{106}{}{char }{Comtrol VS-1000 serial card -- alternate devices}
+	\minor{0}{/dev/cuv0}{Callout device corresponding to {\file ttyV0}}
+	\minor{1}{/dev/cuv1}{Callout device corresponding to {\file ttyV1}}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{107}{}{char }{3Dfx Voodoo Graphics device}
+	\minor{0}{/dev/3dfx}{Primary 3Dfx graphics device}
+\end{devicelist}
+
+\begin{devicelist}
+\major{108}{}{char }{Device independent PPP interface}
+	\minor{0}{/dev/ppp}{Device independent PPP interface}
+\end{devicelist}
+
+\begin{devicelist}
+\major{109}{}{char }{Reserved for logical volume manager}
+\end{devicelist}
+
+\begin{devicelist}
+\major{110}{}{char }{miroMEDIA Surround board}
+	\minor{0}{/dev/srnd0}{First miroMEDIA Surround board}
+	\minor{1}{/dev/srnd1}{First miroMEDIA Surround board}
+	\minordots
+\end{devicelist}
+
+\begin{devicelist}
+\major{111}{--119}{}{Unallocated}
 \end{devicelist}
 
 \begin{devicelist}
@@ -1136,7 +1925,28 @@ used, in order to avoid conflict with future assignments.
 \end{devicelist}
 
 \begin{devicelist}
-\major{128}{--239}{}{Unallocated}
+\major{128}{--135}{char }{Unix98 PTY masters}
+\end{devicelist}
+
+\noindent
+These devices should not have corresponding device nodes; instead they
+should be accessed through the {\file /dev/ptmx} cloning device.
+
+\begin{devicelist}
+\major{136}{--143}{char }{Unix98 PTY slaves}
+	\minor{0}{/dev/pts/0}{First Unix98 pseudo-TTY}
+	\minor{1}{/dev/pts/1}{Second Unix98 pseudo-TTY}
+	\minordots
+\end{devicelist}
+
+\noindent
+These device nodes are automatically generated with the proper
+permissions and modes by mounting the {\file devpts} filesystem onto
+{\file /dev/pts} with the appropriate mount options (distribution
+dependent.)
+
+\begin{devicelist}
+\major{144}{--239}{}{Unallocated}
 \end{devicelist}
 
 \begin{devicelist}
@@ -1146,6 +1956,11 @@ used, in order to avoid conflict with future assignments.
 \begin{devicelist}
 \major{255}{}{}{Reserved}
 \end{devicelist}
+
+\noindent
+This major is reserved to assist the expansion to a larger number
+space.  No device nodes with this major should ever be created on any
+filesystem.
 
 \section{Additional /dev directory entries}
 
@@ -1180,11 +1995,10 @@ It is recommended that these links exist on all systems:
 \begin{nodelist}
 \link{/dev/core}{/proc/kcore}{symbolic}{Backward compatibility}
 \link{/dev/ramdisk}{ram0}{symbolic}{Backward compatibility}
-\link{/dev/ftape}{rft0}{symbolic}{Backward compatibility}
+\link{/dev/ftape}{qft0}{symbolic}{Backward compatibility}
+\link{/dev/bttv0}{video0}{symbolic}{Backward compatibility}
+\link{/dev/radio}{radio0}{symbolic}{Backward compatibility}
 \link{/dev/scd?}{sr?}{hard}{Alternate name for CD-ROMs}
-%\link{/dev/fd?H*}{fd?D*}{hard}{Compatible floppy formats}
-%\link{/dev/fd?E*}{fd?D*}{hard}{Compatible floppy formats}
-%\link{/dev/fd?E*}{fd?H*}{hard}{Compatible floppy formats}
 \end{nodelist}
 
 \subsection{Locally defined links}
@@ -1209,17 +2023,18 @@ exist, they should have the following uses.
 {\file /dev/modem} should not be used for a modem which supports
 dialin as well as dialout, as it tends to cause lock file problems.
 If it exists, {\file /dev/modem} should point to the appropriate
-dialout (alternate) device.
+primary TTY device (the use of the alternate callout devices is
+deprecated.)
 
 For SCSI devices, {\file /dev/tape} and {\file /dev/cdrom} should
 point to the ``cooked'' devices ({\file /dev/st*} and {\file
 /dev/sr*}, respectively), whereas {\file /dev/cdwriter} and {\file
 /dev/scanner} should point to the appropriate generic SCSI devices
-({\file /dev/sg*}.)
+({\file /dev/sg*}).
 
 {\file /dev/mouse} may point to a primary serial TTY device, a
 hardware mouse device, or a socket for a mouse driver program
-(e.g. {\file /dev/gpmdata}.)
+(e.g. {\file /dev/gpmdata}).
 
 \subsection{Sockets and pipes}
 
@@ -1232,5 +2047,119 @@ Common entries are:
 \node{/dev/gpmdata}{socket}{{\file gpm} mouse multiplexer}
 \end{nodelist}
 
-\end{document}
+\section{Terminal devices}
 
+Terminal, or TTY devices are a special class of character devices.  A
+terminal device is any device that could act as a controlling terminal
+for a session; this includes virtual consoles, serial ports, and
+pseudoterminals (PTYs).
+
+All terminal devices share a common set of capabilities known as line
+diciplines; these include the common terminal line dicipline as well
+as SLIP and PPP modes.
+
+All terminal devices are named similarly; this section explains the
+naming and use of the various types of TTYs.  Note that the naming
+conventions include several historical warts; some of these are
+Linux-specific, some were inherited from other systems, and some
+reflect Linux outgrowing a borrowed convention.
+
+A hash mark ($\#$) in a device name is in all cases used here to
+indicate a decimal number without leading zeroes.
+
+\subsection{Virtual consoles and the console device}
+
+Virtual consoles are full-screen terminal displays on the system video
+monitor.  Virtual consoles are named {\file /dev/tty$\#$}, with
+numbering starting at {\file /dev/tty1}; {\file /dev/tty0} is the
+current virtual console.  {\file /dev/tty0} is the device that should
+be used to access the system video card on those architectures for
+which the frame buffer devices ({\file /dev/fb*}) are not applicable.
+Do not use {\file /dev/console} for this purpose.
+
+The {\em console device\/}, {\file /dev/console}, is the device to
+which system messages should be sent, and on which logins should be
+permitted in single-user mode.  Starting with Linux 2.1.71, {\file
+/dev/console} is managed by the kernel; for previous versions it
+should be a symbolic link to either {\file /dev/tty0}, a specific
+virtual console such as {\file /dev/tty1}, or to a serial port primary
+({\file tty*}, not {\file cu*}) device, depending on the configuration
+of the system.
+
+\subsection{Serial ports}
+
+Serial ports are RS-232 serial ports and any device which simulates
+one, either in hardware (such as internal modems) or in software (such
+as the ISDN driver.)  Under Linux, each serial ports has two device
+names, the primary or callin device and the alternate or callout one.
+Each kind of device is indicated by a different letter.  For any
+letter $X$, the names of the devices are {\file /dev/tty${X\#}$} and
+{\file /dev/cu${x\#}$}, respectively; for historical reasons, {\file
+/dev/ttyS$\#$} and {\file /dev/ttyC$\#$} correspond to {\file
+/dev/cua$\#$} and {\file /dev/cub$\#$}.  In the future, it should be
+expected that multiple letters will be used; all letters will be upper
+case for the {\file tty} device (e.g. {\file /dev/ttyDP$\#$} and lower
+case for the {\file cu} device (e.g. {\file /dev/cudp$\#$}.
+
+The use of the callout devices is deprecated.
+
+The names {\file /dev/ttyQ$\#$} and {\file /dev/cuq$\#$} are reserved
+for local use.
+
+The alternate devices provide for kernel-based exclusion and somewhat
+different defaults than the primary devices.  Their main purpose is to
+allow the use of serial ports with programs with no inherent or broken
+support for serial ports.  Their use is deprecated, and they may be
+removed from a future version of Linux.
+
+Arbitration of serial ports is provided by the use of lock files with
+the names {\file /var/lock/LCK..tty${X\#}$}.  The contents of the lock
+file should be the PID of the locking process as an ASCII number.
+
+It is common practice to install links such as {\file /dev/modem\/}
+which point to serial ports.  In order to ensure proper locking in the
+presence of these links, it is recommended that software chase
+symlinks and lock all possible names; additionally, it is recommended
+that a lock file be installed with the corresponding alternate
+device.  In order to avoid deadlocks, it is recommended that the locks
+are acquired in the following order, and released in the reverse:
+\begin{itemize}
+\item{The symbolic link name, if any ({\file /var/lock/LCK..modem})}
+\item{The {\file tty} name ({\file /var/lock/LCK..ttyS2})}
+\item{The alternate device name ({\file /var/lock/LCK..cua2})}
+\end{itemize}
+In the case of nested symbolic links, the lock files should be
+installed in the order the symlinks are resolved.
+
+Under no circumstances should an application hold a lock while waiting
+for another to be released.  In addition, applications which attempt
+to create lock files for the corresponding alternate device names
+should take into account the possibility of being used on a non-serial
+port TTY, for which no alternate device would exist.
+
+\subsection{Pseudoterminals (PTYs)}
+
+Pseudoterminals, or PTYs, are used to create login sessions or provide
+other capabilities requiring a TTY line dicipline (including SLIP or
+PPP capability) to arbitrary data-generation processes.  Each PTY has
+a {\em master\/} side, named {\file /dev/pty[p-za-e][0-9a-f]\/}, and a
+{\em slave\/} side, named {\file /dev/tty[p-za-e][0-9a-f]\/}.  The
+kernel arbitrates the use of PTYs by allowing each master side to be
+opened only once.
+
+Once the master side has been opened, the corresponding slave device
+can be used in the same manner as any TTY device.  The master and
+slave devices are connected by the kernel, generating the equivalent
+of a bidirectional pipe with TTY capabilities.
+
+Recent versions of the Linux kernels and GNU libc contain support for
+the System V/Unix98 naming scheme for PTYs, which assigns a common
+device {\file /dev/ptmx\/} to all the masters (opening it will
+automatically give you a previously unassigned PTY) and a subdirectory
+{\file /dev/pts\/} for the slaves; the slaves are named with decimal
+integers ({\file /dev/pts/$\#$\/} in our notation).  This removes the
+problem of exhausting the namespace and enables the kernel to
+automatically create the device nodes for the slaves on demand using
+the {\file devpts\/} filesystem.
+
+\end{document}

@@ -1,4 +1,4 @@
-/* $Id: delay.h,v 1.8 1996/01/28 02:09:21 davem Exp $
+/* $Id: delay.h,v 1.10 1997/11/07 18:24:30 mj Exp $
  * delay.h: Linux delay routines on the Sparc.
  *
  * Copyright (C) 1994 David S. Miller (davem@caip.rutgers.edu).
@@ -15,14 +15,11 @@ extern __inline__ void __delay(unsigned long loops)
 			     "1: bne 1b\n\t"
 			     "subcc %0, 1, %0\n" :
 			     "=&r" (loops) :
-			     "0" (loops));
+			     "0" (loops) :
+			     "cc");
 }
 
 /* This is too messy with inline asm on the Sparc. */
 extern void udelay(unsigned long usecs);
 
-/* calibrate_delay() wants this... */
-#define muldiv(a, b, c)    (((a)*(b))/(c))
-
 #endif /* defined(__SPARC_DELAY_H) */
-

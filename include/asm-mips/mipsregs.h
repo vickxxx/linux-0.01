@@ -1,37 +1,26 @@
-/*
- * include/asm-mips/mipsregs.h
+/* $Id: mipsregs.h,v 1.6 1998/08/17 11:27:08 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1994, 1995 by Ralf Baechle
+ * Copyright (C) 1994, 1995, 1996, 1997 by Ralf Baechle
+ * Modified for further R[236]000 support by Paul M. Antoine, 1996.
  */
-
 #ifndef __ASM_MIPS_MIPSREGS_H
 #define __ASM_MIPS_MIPSREGS_H
+
+#include <linux/linkage.h>
 
 /*
  * The following macros are especially useful for __asm__
  * inline assembler.
  */
-
 #ifndef __STR
 #define __STR(x) #x
 #endif
 #ifndef STR
 #define STR(x) __STR(x)
-#endif
-
-/*
- * On the R2000/3000 load instructions are not interlocked -
- * we therefore sometimes need to fill load delay slots with a nop
- * which would be useless for ISA >= 2.
- */
-#if !defined (__R4000__)
-#define FILL_LDS nop
-#else
-#define FILL_LDS
 #endif
 
 /*
@@ -65,6 +54,20 @@
 #define CP0_TAGLO $28
 #define CP0_TAGHI $29
 #define CP0_ERROREPC $30
+
+/*
+ * R4640/R4650 cp0 register names.  These registers are listed
+ * here only for completeness; without MMU these CPUs are not useable
+ * by Linux.  A future ELKS port might take make Linux run on them
+ * though ...
+ */
+#define CP0_IBASE $0
+#define CP0_IBOUND $1
+#define CP0_DBASE $2
+#define CP0_DBOUND $3
+#define CP0_CALG $17
+#define CP0_IWATCH $18
+#define CP0_DWATCH $19
 
 /*
  * Coprocessor 1 (FPU) register names
@@ -104,6 +107,9 @@
         : "=r" (__res));                                        \
         __res;})
 
+/*
+ * For now use this only with interrupts disabled!
+ */
 #define read_64bit_cp0_register(source)                         \
 ({ int __res;                                                   \
         __asm__ __volatile__(                                   \
@@ -148,12 +154,12 @@
 #define C_IRQ4          (1<<14)
 #define C_IRQ5          (1<<15)
 
-#ifndef __LANGUAGE_ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 /*
  * Manipulate the status register.
  * Mostly used to access the interrupt bits.
  */
-#define BUILD_SET_CP0(name,register)                            \
+#define __BUILD_SET_CP0(name,register)                          \
 extern __inline__ unsigned int                                  \
 set_cp0_##name(unsigned int change, unsigned int new)           \
 {                                                               \
@@ -168,17 +174,23 @@ set_cp0_##name(unsigned int change, unsigned int new)           \
 	return res;                                             \
 }
 
-BUILD_SET_CP0(status,CP0_STATUS)
-BUILD_SET_CP0(cause,CP0_CAUSE)
+__BUILD_SET_CP0(status,CP0_STATUS)
+__BUILD_SET_CP0(cause,CP0_CAUSE)
+__BUILD_SET_CP0(config,CP0_CONFIG)
 
-#endif /* defined (__LANGUAGE_ASSEMBLY__) */
+#endif /* defined (_LANGUAGE_ASSEMBLY) */
 
 /*
  * Inline code for use of the ll and sc instructions
  *
- * FIXME: This instruction is only available on MIPS ISA >=3.
+ * FIXME: This instruction is only available on MIPS ISA >=2.
  * Since these operations are only being used for atomic operations
  * the easiest workaround for the R[23]00 is to disable interrupts.
+ * This fails for R3000 SMP machines which use that many different
+ * technologies as replacement that it is difficult to create even
+ * just a hook for for all machines to hook into.  The only good
+ * thing is that there is currently no R3000 SMP machine on the
+ * Linux/MIPS target list ...
  */
 #define load_linked(addr)                                       \
 ({                                                              \
@@ -187,7 +199,7 @@ BUILD_SET_CP0(cause,CP0_CAUSE)
 	__asm__ __volatile__(                                   \
 	"ll\t%0,(%1)"                                           \
 	: "=r" (__res)                                          \
-	: "r" ((unsigned int) (addr)));                         \
+	: "r" ((unsigned long) (addr)));                        \
                                                                 \
 	__res;                                                  \
 })
@@ -205,35 +217,69 @@ BUILD_SET_CP0(cause,CP0_CAUSE)
 })
 
 /*
- * Bitfields in the cp0 status register
- *
- * Refer to the MIPS R4xx0 manuals, chapter 5 for explanation.
- * FIXME: This doesn't cover all R4xx0 processors.
+ * Bitfields in the R4xx0 cp0 status register
  */
-#define ST0_IE			(1   <<  0)
-#define ST0_EXL			(1   <<  1)
-#define ST0_ERL			(1   <<  2)
-#define ST0_KSU			(3   <<  3)
-#  define KSU_USER		(2  <<   3)
-#  define KSU_SUPERVISOR	(1  <<   3)
-#  define KSU_KERNEL		(0  <<   3)
-#define ST0_UX			(1   <<  5)
-#define ST0_SX			(1   <<  6)
-#define ST0_KX 			(1   <<  7)
-#define ST0_IM			(255 <<  8)
-#define ST0_DE			(1   << 16)
-#define ST0_CE			(1   << 17)
-#define ST0_CH			(1   << 18)
-#define ST0_SR			(1   << 20)
-#define ST0_BEV			(1   << 22)
-#define ST0_RE			(1   << 25)
-#define ST0_FR			(1   << 26)
-#define ST0_CU			(15  << 28)
-#define ST0_CU0			(1   << 28)
-#define ST0_CU1			(1   << 29)
-#define ST0_CU2			(1   << 30)
-#define ST0_CU3			(1   << 31)
-#define ST0_XX			(1   << 31)	/* R8000/R10000 naming */
+#define ST0_IE			0x00000001
+#define ST0_EXL			0x00000002
+#define ST0_ERL			0x00000004
+#define ST0_KSU			0x00000018
+#  define KSU_USER		0x00000010
+#  define KSU_SUPERVISOR	0x00000008
+#  define KSU_KERNEL		0x00000000
+#define ST0_UX			0x00000020
+#define ST0_SX			0x00000040
+#define ST0_KX 			0x00000080
+
+/*
+ * Bitfields in the R[23]000 cp0 status register.
+ */
+#define ST0_KUC			0x00000001
+#define ST0_IEP			0x00000002
+#define ST0_KUP			0x00000004
+#define ST0_IEO			0x00000008
+#define ST0_KUO			0x00000010
+/* bits 6 & 7 are reserved on R[23]000 */
+
+/*
+ * Bits specific to the R4640/R4650
+ */
+#define ST0_UM                 <1   <<  4)
+#define ST0_IL                 (1   << 23)
+#define ST0_DL                 (1   << 24)
+
+/*
+ * Status register bits available in all MIPS CPUs.
+ */
+#define ST0_IM			0x0000ff00
+#define  STATUSB_IP0		8
+#define  STATUSF_IP0		(1   <<  8)
+#define  STATUSB_IP1		9
+#define  STATUSF_IP1		(1   <<  9)
+#define  STATUSB_IP2		10
+#define  STATUSF_IP2		(1   << 10)
+#define  STATUSB_IP3		11
+#define  STATUSF_IP3		(1   << 11)
+#define  STATUSB_IP4		12
+#define  STATUSF_IP4		(1   << 12)
+#define  STATUSB_IP5		13
+#define  STATUSF_IP5		(1   << 13)
+#define  STATUSB_IP6		14
+#define  STATUSF_IP6		(1   << 14)
+#define  STATUSB_IP7		15
+#define  STATUSF_IP7		(1   << 15)
+#define ST0_DE			0x00010000
+#define ST0_CE			0x00020000
+#define ST0_CH			0x00040000
+#define ST0_SR			0x00100000
+#define ST0_BEV			0x00400000
+#define ST0_RE			0x02000000
+#define ST0_FR			0x04000000
+#define ST0_CU			0xf0000000
+#define ST0_CU0			0x10000000
+#define ST0_CU1			0x20000000
+#define ST0_CU2			0x40000000
+#define ST0_CU3			0x80000000
+#define ST0_XX			0x80000000	/* MIPS IV naming */
 
 /*
  * Bitfields and bit numbers in the coprocessor 0 cause register.
@@ -260,9 +306,93 @@ BUILD_SET_CP0(cause,CP0_CAUSE)
 #define  CAUSEF_IP6		(1   << 14)
 #define  CAUSEB_IP7		15
 #define  CAUSEF_IP7		(1   << 15)
+#define  CAUSEB_IV		23
+#define  CAUSEF_IV		(1   << 23)
 #define  CAUSEB_CE		28
 #define  CAUSEF_CE		(3   << 28)
 #define  CAUSEB_BD		31
 #define  CAUSEF_BD		(1   << 31)
+
+/*
+ * Bits in the coprozessor 0 config register.
+ */
+#define CONF_CM_CACHABLE_NO_WA		0
+#define CONF_CM_CACHABLE_WA		1
+#define CONF_CM_UNCACHED		2
+#define CONF_CM_CACHABLE_NONCOHERENT	3
+#define CONF_CM_CACHABLE_CE		4
+#define CONF_CM_CACHABLE_COW		5
+#define CONF_CM_CACHABLE_CUW		6
+#define CONF_CM_CACHABLE_ACCELERATED	7
+#define CONF_CM_CMASK			7
+#define CONF_DB				(1 <<  4)
+#define CONF_IB				(1 <<  5)
+#define CONF_SC				(1 << 17)
+
+/*
+ * R10000 performance counter definitions.
+ *
+ * FIXME: The R10000 performance counter opens a nice way to implement CPU
+ *        time accounting with a precission of one cycle.  I don't have
+ *        R10000 silicon but just a manual, so ...
+ */
+
+/*
+ * Events counted by counter #0
+ */
+#define CE0_CYCLES			0
+#define CE0_INSN_ISSUED			1
+#define CE0_LPSC_ISSUED			2
+#define CE0_S_ISSUED			3
+#define CE0_SC_ISSUED			4
+#define CE0_SC_FAILED			5
+#define CE0_BRANCH_DECODED		6
+#define CE0_QW_WB_SECONDARY		7
+#define CE0_CORRECTED_ECC_ERRORS	8
+#define CE0_ICACHE_MISSES		9
+#define CE0_SCACHE_I_MISSES		10
+#define CE0_SCACHE_I_WAY_MISSPREDICTED	11
+#define CE0_EXT_INTERVENTIONS_REQ	12
+#define CE0_EXT_INVALIDATE_REQ		13
+#define CE0_VIRTUAL_COHERENCY_COND	14
+#define CE0_INSN_GRADUATED		15
+
+/*
+ * Events counted by counter #1
+ */
+#define CE1_CYCLES			0
+#define CE1_INSN_GRADUATED		1
+#define CE1_LPSC_GRADUATED		2
+#define CE1_S_GRADUATED			3
+#define CE1_SC_GRADUATED		4
+#define CE1_FP_INSN_GRADUATED		5
+#define CE1_QW_WB_PRIMARY		6
+#define CE1_TLB_REFILL			7
+#define CE1_BRANCH_MISSPREDICTED	8
+#define CE1_DCACHE_MISS			9
+#define CE1_SCACHE_D_MISSES		10
+#define CE1_SCACHE_D_WAY_MISSPREDICTED	11
+#define CE1_EXT_INTERVENTION_HITS	12
+#define CE1_EXT_INVALIDATE_REQ		13
+#define CE1_SP_HINT_TO_CEXCL_SC_BLOCKS	14
+#define CE1_SP_HINT_TO_SHARED_SC_BLOCKS	15
+
+/*
+ * These flags define in which priviledge mode the counters count events
+ */
+#define CEB_USER	8	/* Count events in user mode, EXL = ERL = 0 */
+#define CEB_SUPERVISOR	4	/* Count events in supvervisor mode EXL = ERL = 0 */
+#define CEB_KERNEL	2	/* Count events in kernel mode EXL = ERL = 0 */
+#define CEB_EXL		1	/* Count events with EXL = 1, ERL = 0 */
+
+#ifndef _LANGUAGE_ASSEMBLY
+/*
+ * Functions to access the performance counter and control registers
+ */
+extern asmlinkage unsigned int read_perf_cntr(unsigned int counter);
+extern asmlinkage void write_perf_cntr(unsigned int counter, unsigned int val);
+extern asmlinkage unsigned int read_perf_cntl(unsigned int counter);
+extern asmlinkage void write_perf_cntl(unsigned int counter, unsigned int val);
+#endif
 
 #endif /* __ASM_MIPS_MIPSREGS_H */

@@ -9,6 +9,7 @@
  *  Copyright (C) 1996 Dave Redman (djhr@tadpole.co.uk)
  */
 
+#include <linux/config.h>
 #include <linux/ptrace.h>
 #include <linux/errno.h>
 #include <linux/linkage.h>
@@ -17,6 +18,7 @@
 #include <linux/sched.h>
 #include <linux/interrupt.h>
 #include <linux/malloc.h>
+#include <linux/init.h>
 
 #include <asm/ptrace.h>
 #include <asm/processor.h>
@@ -29,6 +31,9 @@
 #include <asm/traps.h>
 #include <asm/irq.h>
 #include <asm/io.h>
+#include <asm/sun4paddr.h>
+#include <asm/idprom.h>
+#include <asm/machines.h>
 
 /* Pointer to the interrupt enable byte
  *
@@ -46,7 +51,7 @@ static void sun4c_disable_irq(unsigned int irq_nr)
 	unsigned long flags;
 	unsigned char current_mask, new_mask;
     
-	save_flags(flags); cli();
+	save_and_cli(flags);
 	irq_nr &= NR_IRQS;
 	current_mask = *interrupt_enable;
 	switch(irq_nr) {
@@ -75,7 +80,7 @@ static void sun4c_enable_irq(unsigned int irq_nr)
 	unsigned long flags;
 	unsigned char current_mask, new_mask;
     
-	save_flags(flags); cli();
+	save_and_cli(flags);
 	irq_nr &= NR_IRQS;
 	current_mask = *interrupt_enable;
 	switch(irq_nr) {
@@ -104,30 +109,48 @@ static void sun4c_enable_irq(unsigned int irq_nr)
 
 volatile struct sun4c_timer_info *sun4c_timers;
 
+#ifdef CONFIG_SUN4
+/* This is an ugly hack to work around the
+   current timer code, and make it work with 
+   the sun4/260 intersil 
+   */
+volatile struct sun4c_timer_info sun4_timer;
+#endif
+
 static void sun4c_clear_clock_irq(void)
 {
 	volatile unsigned int clear_intr;
+#ifdef CONFIG_SUN4
+	if (idprom->id_machtype == (SM_SUN4 | SM_4_260)) 
+	  clear_intr = sun4_timer.timer_limit10;
+	else
+#endif
 	clear_intr = sun4c_timers->timer_limit10;
 }
 
-static void sun4c_clear_profile_irq(void )
+static void sun4c_clear_profile_irq(int cpu)
 {
 	/* Errm.. not sure how to do this.. */
 }
 
-static void sun4c_load_profile_irq(unsigned int limit)
+static void sun4c_load_profile_irq(int cpu, unsigned int limit)
 {
 	/* Errm.. not sure how to do this.. */
 }
 
-static void sun4c_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
+__initfunc(static void sun4c_init_timers(void (*counter_fn)(int, void *, struct pt_regs *)))
 {
 	int irq;
 
 	/* Map the Timer chip, this is implemented in hardware inside
 	 * the cache chip on the sun4c.
 	 */
-	sun4c_timers = sparc_alloc_io ((void *) SUN4C_TIMER_PHYSADDR, 0,
+#ifdef CONFIG_SUN4
+	if (idprom->id_machtype == (SM_SUN4 | SM_4_260))
+		sun4c_timers = &sun4_timer;
+	else
+#endif
+	sun4c_timers = sparc_alloc_io (SUN_TIMER_PHYSADDR, 0,
 				       sizeof(struct sun4c_timer_info),
 				       "timer", 0x0, 0x0);
     
@@ -136,6 +159,8 @@ static void sun4c_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
 	 * them until we have a real console driver so L1-A works.
 	 */
 	sun4c_timers->timer_limit10 = (((1000000/HZ) + 1) << 10);
+	master_l10_counter = &sun4c_timers->cur_count10;
+	master_l10_limit = &sun4c_timers->timer_limit10;
 
 	irq = request_irq(TIMER_IRQ,
 			  counter_fn,
@@ -146,40 +171,60 @@ static void sun4c_init_timers(void (*counter_fn)(int, void *, struct pt_regs *))
 		prom_halt();
 	}
     
+#if 0
+	/* This does not work on 4/330 */
+	sun4c_enable_irq(10);
+#endif
 	claim_ticker14(NULL, PROFILE_IRQ, 0);
 }
 
-static void sun4c_nop(void)
-{
-}
+#ifdef __SMP__
+static void sun4c_nop(void) {}
+#endif
 
-void sun4c_init_IRQ(void)
+extern char *sun4m_irq_itoa(unsigned int irq);
+
+__initfunc(void sun4c_init_IRQ(void))
 {
 	struct linux_prom_registers int_regs[2];
 	int ie_node;
-    
-	ie_node = prom_searchsiblings (prom_getchild(prom_root_node),
-				       "interrupt-enable");
-	if(ie_node == 0)
-		panic("Cannot find /interrupt-enable node");
 
-	/* Depending on the "address" property is bad news... */
-	prom_getproperty(ie_node, "reg", (char *) int_regs, sizeof(int_regs));
-	interrupt_enable = (char *) sparc_alloc_io(int_regs[0].phys_addr, 0,
-						   int_regs[0].reg_size,
-						   "sun4c_interrupts",
-						   int_regs[0].which_io, 0x0);
-	enable_irq = sun4c_enable_irq;
-	disable_irq = sun4c_disable_irq;
-	clear_clock_irq = sun4c_clear_clock_irq;
-	clear_profile_irq = sun4c_clear_profile_irq;
-	load_profile_irq = sun4c_load_profile_irq;
+	if (ARCH_SUN4) {
+		interrupt_enable =
+			(char *) sparc_alloc_io(sun4_ie_physaddr, 0,
+					   	PAGE_SIZE,
+					   	"sun4c_interrupts",
+					   	0x0, 0x0);
+	} else {
+    
+		ie_node = prom_searchsiblings (prom_getchild(prom_root_node),
+				       	"interrupt-enable");
+		if(ie_node == 0)
+			panic("Cannot find /interrupt-enable node");
+
+		/* Depending on the "address" property is bad news... */
+		prom_getproperty(ie_node, "reg", (char *) int_regs, sizeof(int_regs));
+		interrupt_enable =
+			(char *) sparc_alloc_io(int_regs[0].phys_addr, 0,
+					   	int_regs[0].reg_size,
+					   	"sun4c_interrupts",
+					   	int_regs[0].which_io, 0x0);
+	}
+
+	BTFIXUPSET_CALL(enable_irq, sun4c_enable_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(disable_irq, sun4c_disable_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(enable_pil_irq, sun4c_enable_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(disable_pil_irq, sun4c_disable_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(clear_clock_irq, sun4c_clear_clock_irq, BTFIXUPCALL_NORM);
+	BTFIXUPSET_CALL(clear_profile_irq, sun4c_clear_profile_irq, BTFIXUPCALL_NOP);
+	BTFIXUPSET_CALL(load_profile_irq, sun4c_load_profile_irq, BTFIXUPCALL_NOP);
+	BTFIXUPSET_CALL(__irq_itoa, sun4m_irq_itoa, BTFIXUPCALL_NORM);
 	init_timers = sun4c_init_timers;
 #ifdef __SMP__
-	set_cpu_int = sun4c_nop;
-	clear_cpu_int = sun4c_nop;
-	set_irq_udt = sun4c_nop;
+	BTFIXUPSET_CALL(set_cpu_int, sun4c_nop, BTFIXUPCALL_NOP);
+	BTFIXUPSET_CALL(clear_cpu_int, sun4c_nop, BTFIXUPCALL_NOP);
+	BTFIXUPSET_CALL(set_irq_udt, sun4c_nop, BTFIXUPCALL_NOP);
 #endif
 	*interrupt_enable = (SUN4C_INT_ENABLE);
-	sti();
+	/* Cannot enable interrupts until OBP ticker is disabled. */
 }

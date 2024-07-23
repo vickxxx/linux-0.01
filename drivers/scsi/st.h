@@ -13,6 +13,7 @@
 typedef struct {
   unsigned char in_use;
   unsigned char dma;	/* DMA-able buffer */
+  int this_size;        /* allocated size of the structure */
   int buffer_size;
   int buffer_blocks;
   int buffer_bytes;
@@ -20,15 +21,19 @@ typedef struct {
   int writing;
   int last_result;
   int last_result_fatal;
+  Scsi_Cmnd *last_SCpnt;
   unsigned char *b_data;
-  int orig_size;
-  unsigned char *orig_b_data;
+  unsigned short   use_sg;     /* zero or number of segments for this adapter */
+  unsigned short sg_segs;      /* total number of allocated segments */
+  unsigned short orig_sg_segs; /* number of segments allocated at first try */
+  struct scatterlist sg[1];    /* MUST BE last item */
 } ST_buffer;
 
 
 /* The tape mode definition */
 typedef struct {
   unsigned char defined;
+  unsigned char sysv;   /* SYS V semantics? */
   unsigned char do_async_writes;
   unsigned char do_buffer_writes;
   unsigned char do_read_ahead;
@@ -46,10 +51,12 @@ typedef struct {
 /* The status related to each partition */
 typedef struct {
   unsigned char rw;
-  unsigned char moves_after_eof;
+  unsigned char eof;
   unsigned char at_sm;
   unsigned char last_block_valid;
   u32 last_block_visited;
+  int drv_block;	/* The block where the drive head is */
+  int drv_file;
 } ST_partstat;
 
 #define ST_NBR_PARTITIONS 4
@@ -60,7 +67,6 @@ typedef struct {
   unsigned capacity;
   struct wait_queue * waiting;
   Scsi_Device* device;
-  Scsi_Cmnd SCpnt;
   struct semaphore sem;
   ST_buffer * buffer;
 
@@ -75,6 +81,8 @@ typedef struct {
   unsigned char scsi2_logical;
   unsigned char default_drvbuffer;  /* 0xff = don't touch, value 3 bits */
   int write_threshold;
+  int timeout;			/* timeout for normal commands */
+  int long_timeout;		/* timeout for commands known to take long time*/
 
   /* Mode characteristics */
   ST_mode modes[ST_NBR_MODES];
@@ -87,11 +95,9 @@ typedef struct {
   ST_partstat ps[ST_NBR_PARTITIONS];
   unsigned char dirty;
   unsigned char ready;
-  unsigned char eof;
   unsigned char write_prot;
   unsigned char drv_write_prot;
   unsigned char in_use;
-  unsigned char eof_hit;
   unsigned char blksize_changed;
   unsigned char density_changed;
   unsigned char compression_changed;
@@ -103,13 +109,14 @@ typedef struct {
   int min_block;
   int max_block;
   int recover_count;
-  int drv_block;	/* The block where the drive head is */
   struct mtget * mt_status;
 
 #if DEBUG
   unsigned char write_pending;
   int nbr_finished;
   int nbr_waits;
+  unsigned char last_cmnd[6];
+  unsigned char last_sense[16];
 #endif
 } Scsi_Tape;
 
@@ -117,10 +124,15 @@ extern Scsi_Tape * scsi_tapes;
 
 /* Values of eof */
 #define	ST_NOEOF	0
-#define	ST_FM		1
-#define	ST_EOM_OK	2
-#define ST_EOM_ERROR	3
-#define ST_EOD		4
+#define ST_FM_HIT       1
+#define ST_FM           2
+#define ST_EOM_OK       3
+#define ST_EOM_ERROR	4
+#define	ST_EOD_1        5
+#define ST_EOD_2        6
+#define ST_EOD		7
+/* EOD hit while reading => ST_EOD_1 => return zero => ST_EOD_2 =>
+   return zero => ST_EOD, return ENOSPC */
 
 /* Values of rw */
 #define	ST_IDLE		0

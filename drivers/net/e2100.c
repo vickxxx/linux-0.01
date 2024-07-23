@@ -43,6 +43,8 @@ static const char *version =
 #include <linux/ioport.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/init.h>
+#include <linux/delay.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
@@ -59,7 +61,7 @@ static int e21_probe_list[] = {0x300, 0x280, 0x380, 0x220, 0};
 #define E21_MEM_ENABLE	0x10
 #define  E21_MEM_ON		0x05	/* Enable memory in 16 bit mode. */
 #define  E21_MEM_ON_8	0x07	/* Enable memory in  8 bit mode. */
-#define E21_MEM_BASE	0x11	
+#define E21_MEM_BASE	0x11
 #define E21_IRQ_LOW		0x12	/* The low three bits of the IRQ number. */
 #define E21_IRQ_HIGH	0x14	/* The high IRQ bit and media select ...  */
 #define E21_MEDIA		0x14	/* (alias). */
@@ -101,7 +103,7 @@ static void e21_reset_8390(struct device *dev);
 static void e21_block_input(struct device *dev, int count,
 						   struct sk_buff *skb, int ring_offset);
 static void e21_block_output(struct device *dev, int count,
-							 const unsigned char *buf, const start_page);
+							 const unsigned char *buf, int start_page);
 static void e21_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
 							int ring_page);
 
@@ -115,7 +117,7 @@ static int e21_close(struct device *dev);
 	station address).
  */
 
-int e2100_probe(struct device *dev)
+__initfunc(int e2100_probe(struct device *dev))
 {
 	int *port;
 	int base_addr = dev->base_addr;
@@ -135,7 +137,7 @@ int e2100_probe(struct device *dev)
 	return ENODEV;
 }
 
-int e21_probe1(struct device *dev, int ioaddr)
+__initfunc(int e21_probe1(struct device *dev, int ioaddr))
 {
 	int i, status;
 	unsigned char *station_addr = dev->dev_addr;
@@ -149,7 +151,7 @@ int e21_probe1(struct device *dev, int ioaddr)
 
 	/* Verify by making certain that there is a 8390 at there. */
 	outb(E8390_NODMA + E8390_STOP, ioaddr);
-	SLOW_DOWN_IO;
+	udelay(1);	/* we want to delay one I/O cycle - which is 2MHz */
 	status = inb(ioaddr);
 	if (status != 0x21 && status != 0x23)
 		return ENODEV;
@@ -160,6 +162,9 @@ int e21_probe1(struct device *dev, int ioaddr)
 
 	inb(ioaddr + E21_MEDIA); 		/* Point to media selection. */
 	outb(0, ioaddr + E21_ASIC); 	/* and disable the secondary interface. */
+
+	if (load_8390_module("e2100.c"))
+		return -ENOSYS;
 
 	if (ei_debug  &&  version_printed++ == 0)
 		printk(version);
@@ -174,6 +179,12 @@ int e21_probe1(struct device *dev, int ioaddr)
 	for (i = 0; i < 6; i++)
 		printk(" %02X", station_addr[i]);
 
+	/* Allocate dev->priv and fill in 8390 specific dev fields. */
+	if (ethdev_init(dev)) {
+		printk (" unable to get memory for dev->priv.\n");
+		return -ENOMEM;
+	}
+
 	if (dev->irq < 2) {
 		int irqlist[] = {15,11,10,12,5,9,3,4}, i;
 		for (i = 0; i < 8; i++)
@@ -187,12 +198,6 @@ int e21_probe1(struct device *dev, int ioaddr)
 		}
 	} else if (dev->irq == 2)	/* Fixup luser bogosity: IRQ2 is really IRQ9 */
 		dev->irq = 9;
-
-	/* Allocate dev->priv and fill in 8390 specific dev fields. */
-	if (ethdev_init(dev)) {
-		printk (" unable to get memory for dev->priv.\n");
-		return -ENOMEM;
-	}
 
 	/* Grab the region so we can find a different board if IRQ select fails. */
 	request_region(ioaddr, E21_IO_EXTENT, "e2100");
@@ -226,7 +231,7 @@ int e21_probe1(struct device *dev, int ioaddr)
 	   over the 128K region! */
 	if (dev->mem_start == 0)
 		dev->mem_start = 0xd0000;
-	
+
 #ifdef notdef
 	/* These values are unused.  The E2100 has a 2K window into the packet
 	   buffer.  The window can be set to start on any page boundary. */
@@ -253,10 +258,9 @@ e21_open(struct device *dev)
 {
 	short ioaddr = dev->base_addr;
 
-	if (request_irq(dev->irq, ei_interrupt, 0, "e2100", NULL)) {
+	if (request_irq(dev->irq, ei_interrupt, 0, "e2100", dev)) {
 		return EBUSY;
 	}
-	irq2dev_map[dev->irq] = dev;
 
 	/* Set the interrupt line and memory base on the hardware. */
 	inb(ioaddr + E21_IRQ_LOW);
@@ -352,7 +356,7 @@ e21_close(struct device *dev)
 	if (ei_debug > 1)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 
-	free_irq(dev->irq, NULL);
+	free_irq(dev->irq, dev);
 	dev->irq = ei_status.saved_irq;
 
 	/* Shut off the interrupt line and secondary interface. */
@@ -360,8 +364,6 @@ e21_close(struct device *dev)
 	outb(0, ioaddr + E21_ASIC);
 	inb(ioaddr + E21_IRQ_HIGH); 			/* High IRQ bit, and if_port. */
 	outb(0, ioaddr + E21_ASIC);
-
-	irq2dev_map[dev->irq] = NULL;
 
 	ei_close(dev);
 
@@ -398,6 +400,11 @@ static int irq[MAX_E21_CARDS]  = { 0, };
 static int mem[MAX_E21_CARDS] = { 0, };
 static int xcvr[MAX_E21_CARDS] = { 0, };		/* choose int. or ext. xcvr */
 
+MODULE_PARM(io, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
+MODULE_PARM(mem, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
+MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_E21_CARDS) "i");
+
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
 int
@@ -419,12 +426,15 @@ init_module(void)
 		}
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "e2100.c: No E2100 card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) return 0;	/* Got at least one. */
+			if (found != 0) {	/* Got at least one. */
+				lock_8390_module();
+				return 0;
+			}
 			return -ENXIO;
 		}
 		found++;
 	}
-
+	lock_8390_module();
 	return 0;
 }
 
@@ -436,13 +446,14 @@ cleanup_module(void)
 	for (this_dev = 0; this_dev < MAX_E21_CARDS; this_dev++) {
 		struct device *dev = &dev_e21[this_dev];
 		if (dev->priv != NULL) {
-			/* NB: e21_close() handles free_irq + irq2dev map */
-			kfree(dev->priv);
-			dev->priv = NULL;
+			void *priv = dev->priv;
+			/* NB: e21_close() handles free_irq */
 			release_region(dev->base_addr, E21_IO_EXTENT);
 			unregister_netdev(dev);
+			kfree(priv);
 		}
 	}
+	unlock_8390_module();
 }
 #endif /* MODULE */
 

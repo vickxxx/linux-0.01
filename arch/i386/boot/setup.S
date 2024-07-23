@@ -18,7 +18,7 @@
 ! March 1993/June 1994 (Christoph.Niemann@linux.org)
 !
 ! add APM BIOS checking by Stephen Rothwell, May 1994
-! (Stephen.Rothwell@pd.necisa.oz.au)
+! (Stephen.Rothwell@canb.auug.org.au)
 !
 ! High load stuff, initrd support and position independency
 ! by Hans Lermen & Werner Almesberger, February 1996
@@ -26,13 +26,17 @@
 !
 ! Video handling moved to video.S by Martin Mares, March 1996
 ! <mj@k332.feld.cvut.cz>
+!
+! Extended memory detection scheme retwiddled by orc@pell.chi.il.us (david
+! parsons) to avoid loadlin confusion, July 1997
+!
 
-! NOTE! These had better be the same as in bootsect.s!
 #define __ASSEMBLY__
 #include <linux/config.h>
 #include <asm/segment.h>
 #include <linux/version.h>
 #include <linux/compile.h>
+#include <asm/boot.h>
 
 ! Signature words to ensure LILO loaded us right
 #define SIG1	0xAA55
@@ -79,23 +83,32 @@ type_of_loader:	.byte	0		! = 0, old one (LILO, Loadlin,
 					!	T=3 for SYSLX
 					!	T=4 for ETHERBOOT
 					!       V = version
-loadflags:	.byte	0	! unused bits =0 (reserved for future development)
+loadflags:			! flags, unused bits must be zero (RFU)
 LOADED_HIGH	= 1		! bit within loadflags,
 				! if set, then the kernel is loaded high
 CAN_USE_HEAP	= 0x80		! if set, the loader also has set heap_end_ptr
 				! to tell how much space behind setup.S
 				| can be used for heap purposes.
 				! Only the loader knows what is free!
+#ifndef __BIG_KERNEL__
+		.byte	0x00
+#else
+		.byte	LOADED_HIGH
+#endif
+
 setup_move_size: .word  0x8000	! size to move, when we (setup) are not
 				! loaded at 0x90000. We will move ourselves
 				! to 0x90000 then just before jumping into
 				! the kernel. However, only the loader
 				! know how much of data behind us also needs
 				! to be loaded.
-code32_start:	.long	0x1000		! here loaders can put a different
+code32_start:				! here loaders can put a different
 					! start address for 32-bit code.
-					!   0x1000 = default for zImage
-					! 0x100000 = default for big kernel
+#ifndef __BIG_KERNEL__
+		.long	0x1000		!   0x1000 = default for zImage
+#else
+		.long	0x100000	! 0x100000 = default for big kernel
+#endif
 ramdisk_image:	.long	0	! address of loaded ramdisk image
 				! Here the loader (or kernel generator) puts
 				! the 32-bit address were it loaded the image.
@@ -132,7 +145,7 @@ start_of_setup:
 	jne	bad_sig
 	jmp	good_sig1
 
-! Routine to print asciiz-string at DS:SI
+! Routine to print ASCIIz string at DS:SI
 
 prtstr:	lodsb
 	and	al,al
@@ -146,7 +159,7 @@ fin:	ret
 prtsp2:	call	prtspc		! Print double space
 prtspc:	mov	al,#0x20	! Print single space (fall-thru!)
 
-! Part of above routine, this one just prints ascii al
+! Part of above routine, this one just prints ASCII al
 
 prtchr:	push	ax
 	push	cx
@@ -213,12 +226,12 @@ good_sig:
 
 ! check if an old loader tries to load a big-kernel
 	seg cs
-	test	byte ptr loadflags,#LOADED_HIGH ! have we a big kernel ?
+	test	byte ptr loadflags,#LOADED_HIGH ! Have we a big kernel?
 	jz	loader_ok	! NO, no danger even for old loaders
 				! YES, we have a big-kernel
 	seg cs
-	cmp	byte ptr type_of_loader,#0 ! have we one of the new loaders ?
-	jnz	loader_ok	! YES, ok
+	cmp	byte ptr type_of_loader,#0 ! Have we one of the new loaders?
+	jnz	loader_ok	! YES, OK
 				! NO, we have an old loader, must give up
 	push    cs
 	pop	ds
@@ -226,12 +239,44 @@ good_sig:
 	call	prtstr
 	jmp	no_sig_loop
 loader_panic_mess: 
-	.ascii	"Wrong loader, giving up..."
+	.ascii	"Wrong loader:  giving up."
 	db	0
 
 loader_ok:
 ! Get memory size (extended mem, kB)
 
+#ifndef STANDARD_MEMORY_BIOS_CALL
+	push	ebx
+
+        xor     ebx,ebx		! preload new memory slot with 0k
+        mov	[0x1e0], ebx
+
+        mov     ax,#0xe801
+	int     0x15
+	jc      oldstylemem
+
+! Memory size is in 1 k chunksizes, to avoid confusing loadlin.
+! We store the 0xe801 memory size in a completely different place,
+! because it will most likely be longer than 16 bits.
+! (use 1e0 because that's what Larry Augustine uses in his
+! alternative new memory detection scheme, and it's sensible
+! to write everything into the same place.)
+
+	and     ebx, #0xffff    ! clear sign extend
+	shl     ebx, 6          ! and go from 64k to 1k chunks
+	mov     [0x1e0],ebx     ! store extended memory size
+
+	and     eax, #0xffff    ! clear sign extend
+ 	add     [0x1e0],eax     ! and add lower memory into total size.
+  
+	! and fall into the old memory detection code to populate the
+	! compatibility slot.
+
+oldstylemem:
+	pop	ebx
+#else
+	mov     dword ptr [0x1e0], #0
+#endif
 	mov	ah,#0x88
 	int	0x15
 	mov	[2],ax
@@ -245,7 +290,7 @@ loader_ok:
 ! Check for video adapter and its parameters and allow the
 ! user to browse video modes.
 
-	call	video	! NOTE: we need DS pointing to bootsector
+	call	video	! NOTE: we need DS pointing to boot sector
 
 ! Get hd0 data
 
@@ -294,6 +339,37 @@ no_disk1:
 	stosb
 is_disk1:
 
+! check for Micro Channel (MCA) bus
+	mov ax,cs		! aka #SETUPSEG
+	sub ax,#DELTA_INITSEG	! aka #INITSEG
+	mov ds,ax
+	mov ds,ax
+	xor ax,ax
+	mov [0xa0], ax		! set table length to 0
+	mov ah, #0xc0
+	stc
+	int 0x15		! puts feature table at es:bx
+	jc no_mca
+	push ds
+	mov ax,es
+	mov ds,ax
+	mov ax,cs		! aka #SETUPSEG
+	sub ax, #DELTA_INITSEG	! aka #INITSEG
+	mov es,ax
+	mov si,bx
+	mov di,#0xa0
+	mov cx,(si)
+	add cx,#2		! table length is a short
+	cmp cx,#0x10
+	jc sysdesc_ok
+	mov cx,#0x10		! we keep only first 16 bytes
+sysdesc_ok:
+	rep
+	movsb
+	pop ds
+
+no_mca:
+
 ! Check for PS/2 pointing device
 
 	mov	ax,cs		! aka #SETUPSEG
@@ -308,7 +384,7 @@ no_psmouse:
 
 #ifdef CONFIG_APM
 ! check for APM BIOS
-		! NOTE:	DS is pointing to the bootsector
+		! NOTE:	DS is pointing to the boot sector
 		!
 	mov	[64],#0		! version == 0 means no APM BIOS
 
@@ -320,8 +396,6 @@ no_psmouse:
 	cmp	bx,#0x0504d	! check for "PM" signature
 	jne	done_apm_bios	! no signature -> no APM BIOS
 
-	mov	[64],ax		! record the APM BIOS version
-	mov	[76],cx		!	and flags
 	and	cx,#0x02	! Is 32 bit supported?
 	je	done_apm_bios	!	no ...
 
@@ -338,8 +412,28 @@ no_psmouse:
 	mov	[68],ebx	! BIOS entry point offset
 	mov	[72],cx		! BIOS 16 bit code segment
 	mov	[74],dx		! BIOS data segment
-	mov	[78],si		! BIOS code segment length
-	mov	[80],di		! BIOS data segment length
+	mov	[78],esi	! BIOS code segment length
+	mov	[82],di		! BIOS data segment length
+!
+! Redo the installation check as the 32 bit connect
+! modifies the flags returned on some BIOSs
+!
+	mov	ax,#0x05300	! APM BIOS installation check
+	xor	bx,bx
+	int	0x15
+	jc	apm_disconnect	! error -> should not happen, tidy up
+
+	cmp	bx,#0x0504d	! check for "PM" signature
+	jne	apm_disconnect	! no signature -> should not happen, tidy up
+
+	mov	[64],ax		! record the APM BIOS version
+	mov	[76],cx		!	and flags
+	jmp	done_apm_bios
+
+apm_disconnect:
+	mov	ax,#0x05304	! Disconnect
+	xor	bx,bx
+	int	0x15		! ignore return code
 	jmp	done_apm_bios
 
 no_32_apm_bios:
@@ -407,7 +501,7 @@ end_move:
 	mov	ds,ax
 
 ! If we have our code not at 0x90000, we need to move it there now.
-! We also then need to move the params behind it (commandline)
+! We also then need to move the parameters behind it (command line)
 ! Because we would overwrite the code on the current IP, we move
 ! it in two steps, jumping high after the first one.
 	mov	ax,cs
@@ -459,6 +553,29 @@ end_move_self:
 	out	#0x60,al
 	call	empty_8042
 
+! wait until a20 really *is* enabled; it can take a fair amount of
+! time on certain systems; Toshiba Tecras are known to have this
+! problem.  The memory location used here is the int 0x1f vector,
+! which should be safe to use; any *unused* memory location < 0xfff0
+! should work here.  
+
+#define	TEST_ADDR 0x7c
+
+	push	ds
+	xor	ax,ax			! segment 0x0000
+	mov	ds,ax
+	dec	ax			! segment 0xffff (HMA)
+	mov	gs,ax
+	mov	bx,[TEST_ADDR]		! we want to restore the value later
+a20_wait:
+	inc	ax
+	mov	[TEST_ADDR],ax
+	seg	gs
+	cmp	ax,[TEST_ADDR+0x10]
+	je	a20_wait		! loop until no longer aliased
+	mov	[TEST_ADDR],bx		! restore original value
+	pop	ds
+		
 ! make sure any possible coprocessor is properly reset..
 
 	xor	ax,ax
@@ -505,12 +622,12 @@ end_move_self:
 
 ! Well, that certainly wasn't fun :-(. Hopefully it works, and we don't
 ! need no steenking BIOS anyway (except for the initial loading :-).
-! The BIOS-routine wants lots of unnecessary data, and it's less
+! The BIOS routine wants lots of unnecessary data, and it's less
 ! "interesting" anyway. This is how REAL programmers do it.
 !
 ! Well, now's the time to actually move into protected mode. To make
 ! things as simple as possible, we do no register set-up or anything,
-! we let the gnu-compiled 32-bit programs do that. We just jump to
+! we let the GNU-compiled 32-bit programs do that. We just jump to
 ! absolute address 0x1000 (or the loader supplied one),
 ! in 32-bit protected mode.
 !
@@ -524,7 +641,7 @@ flush_instr:
 	xor	bx,bx		! Flag to indicate a boot
 
 ! NOTE: For high loaded big kernels we need a
-!	jmpi    0x100000,KERNEL_CS
+!	jmpi    0x100000,__KERNEL_CS
 !
 !	but we yet haven't reloaded the CS register, so the default size 
 !	of the target offset still is 16 bit.
@@ -533,7 +650,7 @@ flush_instr:
 !	Manual, Mixing 16-bit and 32-bit code, page 16-6)
 	db	0x66,0xea	! prefix + jmpi-opcode
 code32:	dd	0x1000		! will be set to 0x100000 for big kernels
-	dw	KERNEL_CS
+	dw	__KERNEL_CS
 
 
 kernel_version:	.ascii	UTS_RELEASE
@@ -630,7 +747,7 @@ bootsect_panic:
 bootsect_panic_loop:
 	jmp	bootsect_panic_loop
 bootsect_panic_mess:
-	.ascii	"INT15 refuses to access high mem, giving up..."
+	.ascii	"INT15 refuses to access high memory.  Giving up."
 	db	0
 
 ! This routine checks that the keyboard command queue is empty
@@ -652,7 +769,7 @@ no_output:
 	ret
 
 !
-! Read the cmos clock. Return the seconds in al
+! Read the CMOS clock. Return the seconds in al
 !
 gettime:
 	push	cx

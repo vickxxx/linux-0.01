@@ -1,5 +1,5 @@
 /*	linux/drivers/cdrom/optcd.c - Optics Storage 8000 AT CDROM driver
-	$Id: optcd.c,v 1.29 1996/02/22 22:38:30 root Exp $
+	$Id: optcd.c,v 1.11 1997/01/26 07:13:00 davem Exp $
 
 	Copyright (C) 1995 Leo Spiekman (spiekman@dutette.et.tudelft.nl)
 
@@ -65,13 +65,16 @@
 #include <linux/module.h>
 #include <linux/mm.h>
 #include <linux/ioport.h>
+#include <linux/init.h>
 #include <asm/io.h>
 
 #define MAJOR_NR OPTICS_CDROM_MAJOR
 #include <linux/blk.h>
 
 #include <linux/cdrom.h>
-#include <linux/optcd.h>
+#include "optcd.h"
+
+#include <asm/uaccess.h>
 
 
 /* Debug support */
@@ -104,7 +107,7 @@ static void debug(int debug_this, const char* fmt, ...)
 
 #define optcd_port optcd			/* Needed for the modutils. */
 static short optcd_port = OPTCD_PORTBASE;	/* I/O base of drive. */
-
+MODULE_PARM(optcd_port, "h");
 /* Drive registers, read */
 #define DATA_PORT	optcd_port	/* Read data/status */
 #define STATUS_PORT	optcd_port+1	/* Indicate data/status availability */
@@ -1447,7 +1450,7 @@ static int cdromplaymsf(unsigned long arg)
 	status = verify_area(VERIFY_READ, (void *) arg, sizeof msf);
 	if (status)
 		return status;
-	memcpy_fromfs(&msf, (void *) arg, sizeof msf);
+	copy_from_user(&msf, (void *) arg, sizeof msf);
 
 	bin2bcd(&msf);
 	status = exec_long_cmd(COMPLAY, &msf);
@@ -1471,7 +1474,7 @@ static int cdromplaytrkind(unsigned long arg)
 	status = verify_area(VERIFY_READ, (void *) arg, sizeof ti);
 	if (status)
 		return status;
-	memcpy_fromfs(&ti, (void *) arg, sizeof ti);
+	copy_from_user(&ti, (void *) arg, sizeof ti);
 
 	if (ti.cdti_trk0 < disk_info.first
 	    || ti.cdti_trk0 > disk_info.last
@@ -1520,7 +1523,7 @@ static int cdromreadtochdr(unsigned long arg)
 	tochdr.cdth_trk0 = disk_info.first;
 	tochdr.cdth_trk1 = disk_info.last;
 
-	memcpy_tofs((void *) arg, &tochdr, sizeof tochdr);
+	copy_to_user((void *) arg, &tochdr, sizeof tochdr);
 	return 0;
 }
 
@@ -1534,7 +1537,7 @@ static int cdromreadtocentry(unsigned long arg)
 	status = verify_area(VERIFY_WRITE, (void *) arg, sizeof entry);
 	if (status)
 		return status;
-	memcpy_fromfs(&entry, (void *) arg, sizeof entry);
+	copy_from_user(&entry, (void *) arg, sizeof entry);
 
 	if (entry.cdte_track == CDROM_LEADOUT)
 		tocptr = &toc[disk_info.last + 1];
@@ -1556,7 +1559,7 @@ static int cdromreadtocentry(unsigned long arg)
 	else if (entry.cdte_format != CDROM_MSF)
 		return -EINVAL;
 
-	memcpy_tofs((void *) arg, &entry, sizeof entry);
+	copy_to_user((void *) arg, &entry, sizeof entry);
 	return 0;
 }
 
@@ -1570,7 +1573,7 @@ static int cdromvolctrl(unsigned long arg)
 	status = verify_area(VERIFY_READ, (void *) arg, sizeof volctrl);
 	if (status)
 		return status;
-	memcpy_fromfs(&volctrl, (char *) arg, sizeof volctrl);
+	copy_from_user(&volctrl, (char *) arg, sizeof volctrl);
 
 	msf.cdmsf_min0 = 0x10;
 	msf.cdmsf_sec0 = 0x32;
@@ -1596,7 +1599,7 @@ static int cdromsubchnl(unsigned long arg)
 	status = verify_area(VERIFY_WRITE, (void *) arg, sizeof subchnl);
 	if (status)
 		return status;
-	memcpy_fromfs(&subchnl, (void *) arg, sizeof subchnl);
+	copy_from_user(&subchnl, (void *) arg, sizeof subchnl);
 
 	if (subchnl.cdsc_format != CDROM_LBA
 	    && subchnl.cdsc_format != CDROM_MSF)
@@ -1608,7 +1611,7 @@ static int cdromsubchnl(unsigned long arg)
 		return -EIO;
 	}
 
-	memcpy_tofs((void *) arg, &subchnl, sizeof subchnl);
+	copy_to_user((void *) arg, &subchnl, sizeof subchnl);
 	return 0;
 }
 
@@ -1622,7 +1625,7 @@ static int cdromread(unsigned long arg, int blocksize, int cmd)
 	status = verify_area(VERIFY_WRITE, (void *) arg, blocksize);
 	if (status)
 		return status;
-	memcpy_fromfs(&msf, (void *) arg, sizeof msf);
+	copy_from_user(&msf, (void *) arg, sizeof msf);
 
 	bin2bcd(&msf);
 	msf.cdmsf_min1 = 0;
@@ -1636,7 +1639,7 @@ static int cdromread(unsigned long arg, int blocksize, int cmd)
 		return -EIO;
 	fetch_data(buf, blocksize);
 
-	memcpy_tofs((void *) arg, &buf, blocksize);
+	copy_to_user((void *) arg, &buf, blocksize);
 	return 0;
 }
 
@@ -1649,7 +1652,7 @@ static int cdromseek(unsigned long arg)
 	status = verify_area(VERIFY_READ, (void *) arg, sizeof msf);
 	if (status)
 		return status;
-	memcpy_fromfs(&msf, (void *) arg, sizeof msf);
+	copy_from_user(&msf, (void *) arg, sizeof msf);
 
 	bin2bcd(&msf);
 	status = exec_seek_cmd(COMSEEK, &msf);
@@ -1671,7 +1674,7 @@ static int cdrommultisession(unsigned long arg)
 	status = verify_area(VERIFY_WRITE, (void*) arg, sizeof ms);
 	if (status)
 		return status;
-	memcpy_fromfs(&ms, (void*) arg, sizeof ms);
+	copy_from_user(&ms, (void*) arg, sizeof ms);
 
 	ms.addr.msf.minute = disk_info.last_session.minute;
 	ms.addr.msf.second = disk_info.last_session.second;
@@ -1685,7 +1688,7 @@ static int cdrommultisession(unsigned long arg)
 
 	ms.xa_flag = disk_info.xa;
 
-  	memcpy_tofs((void*) arg, &ms,
+  	copy_to_user((void*) arg, &ms,
 		sizeof(struct cdrom_multisession));
 
 #if DEBUG_MULTIS
@@ -1835,7 +1838,7 @@ static int opt_ioctl(struct inode *ip, struct file *fp,
 	case CDROMMULTISESSION:	retval = cdrommultisession(arg); break;
 #endif
 
-	case CDROM_GET_UPC:	retval = -EINVAL; break; /* not implemented */
+	case CDROM_GET_MCN:	retval = -EINVAL; break; /* not implemented */
 	case CDROMVOLREAD:	retval = -EINVAL; break; /* not implemented */
 
 	case CDROMREADRAW:
@@ -1912,7 +1915,7 @@ static int opt_open(struct inode *ip, struct file *fp)
 
 
 /* Release device special file; flush all blocks from the buffer cache */
-static void opt_release(struct inode *ip, struct file *fp)
+static int opt_release(struct inode *ip, struct file *fp)
 {
 	int status;
 
@@ -1937,6 +1940,7 @@ static void opt_release(struct inode *ip, struct file *fp)
 		CLEAR_REQ_TIMER;
 	}
 	MOD_DEC_USE_COUNT;
+	return 0;
 }
 
 
@@ -1958,7 +1962,7 @@ static int opt_media_change(kdev_t dev)
 
 /* Returns 1 if a drive is detected with a version string
    starting with "DOLPHIN". Otherwise 0. */
-static int version_ok(void)
+__initfunc(static int version_ok(void))
 {
 	char devname[100];
 	int count, i, ch, status;
@@ -2000,10 +2004,11 @@ static struct file_operations opt_fops = {
 	block_read,		/* read - general block-dev read */
 	block_write,		/* write - general block-dev write */
 	NULL,			/* readdir - bad */
-	NULL,			/* select */
+	NULL,			/* poll */
 	opt_ioctl,		/* ioctl */
 	NULL,			/* mmap */
 	opt_open,		/* open */
+	NULL,			/* flush */
 	opt_release,		/* release */
 	NULL,			/* fsync */
 	NULL,			/* fasync */
@@ -2013,7 +2018,7 @@ static struct file_operations opt_fops = {
 
 
 /* Get kernel parameter when used as a kernel driver */
-void optcd_setup(char *str, int *ints)
+__initfunc(void optcd_setup(char *str, int *ints))
 {
 	if (ints[0] > 0)
 		optcd_port = ints[1];
@@ -2021,7 +2026,7 @@ void optcd_setup(char *str, int *ints)
 
 /* Test for presence of drive and initialize it. Called at boot time
    or during module initialisation. */
-int optcd_init(void)
+__initfunc(int optcd_init(void))
 {
 	int status;
 

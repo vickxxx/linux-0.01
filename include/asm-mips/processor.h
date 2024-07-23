@@ -1,26 +1,47 @@
-/*
- * include/asm-mips/processor.h
+/* $Id: processor.h,v 1.18 1998/10/14 20:31:12 ralf Exp $
  *
- * Copyright (C) 1994  Waldorf Electronics
- * written by Ralf Baechle
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1994 Waldorf GMBH
+ * Copyright (C) 1995, 1996, 1997, 1998 Ralf Baechle
+ * Modified further for R[236]000 compatibility by Paul M. Antoine
  */
-
 #ifndef __ASM_MIPS_PROCESSOR_H
 #define __ASM_MIPS_PROCESSOR_H
 
-#if !defined (__LANGUAGE_ASSEMBLY__)
+#if !defined (_LANGUAGE_ASSEMBLY)
 #include <asm/cachectl.h>
 #include <asm/mipsregs.h>
 #include <asm/reg.h>
 #include <asm/system.h>
 
+struct mips_cpuinfo {
+	unsigned long *pgd_quick;
+	unsigned long *pte_quick;
+	unsigned long pgtable_cache_sz;
+};
+
 /*
- * System setup and hardware bug flags..
+ * System setup and hardware flags..
+ * XXX: Should go into mips_cpuinfo.
  */
 extern char wait_available;		/* only available on R4[26]00 */
+extern char cyclecounter_available;	/* only available from R4000 upwards. */
+extern char dedicated_iv_available;	/* some embedded MIPS like Nevada */
+extern char vce_available;		/* Supports VCED / VCEI exceptions */
 
-extern unsigned long intr_count;
-extern unsigned long event;
+extern struct mips_cpuinfo boot_cpu_data;
+extern unsigned int vced_count, vcei_count;
+
+#ifdef __SMP__
+extern struct mips_cpuinfo cpu_data[];
+#define current_cpu_data cpu_data[smp_processor_id()]
+#else
+#define cpu_data &boot_cpu_data
+#define current_cpu_data boot_cpu_data
+#endif
 
 /*
  * Bus types (default is ISA, but people can check others with these..)
@@ -39,11 +60,21 @@ extern int EISA_bus;
 #define wp_works_ok 1
 #define wp_works_ok__is_a_macro /* for versions in ksyms.c */
 
+/* Lazy FPU handling on uni-processor */
+extern struct task_struct *last_task_used_math;
+
 /*
  * User space process size: 2GB. This is hardcoded into a few places,
- * so don't change it unless you know what you are doing.
+ * so don't change it unless you know what you are doing.  TASK_SIZE
+ * for a 64 bit kernel expandable to 8192EB, of which the current MIPS
+ * implementations will "only" be able to use 1TB ...
  */
 #define TASK_SIZE	(0x80000000UL)
+
+/* This decides where the kernel will search for a free chunk of vm
+ * space during mmap's.
+ */
+#define TASK_UNMAPPED_BASE	(TASK_SIZE / 3)
 
 /*
  * Size of io_bitmap in longwords: 32 is ports 0-0x3ff.
@@ -62,7 +93,7 @@ struct mips_fpu_hard_struct {
  */
 struct mips_fpu_soft_struct {
 	long	dummy;
-	};
+};
 
 union mips_fpu_union {
         struct mips_fpu_hard_struct hard;
@@ -73,75 +104,50 @@ union mips_fpu_union {
 	{{0,},} \
 }
 
+typedef struct {
+	unsigned long seg;
+} mm_segment_t;
+
 /*
  * If you change thread_struct remember to change the #defines below too!
  */
 struct thread_struct {
-        /*
-         * saved main processor registers
-         */
-        unsigned long   reg16, reg17, reg18, reg19, reg20, reg21, reg22, reg23;
-        unsigned long                               reg28, reg29, reg30, reg31;
-	/*
-	 * saved cp0 stuff
-	 */
+        /* Saved main processor registers. */
+        unsigned long reg16;
+	unsigned long reg17, reg18, reg19, reg20, reg21, reg22, reg23;
+        unsigned long reg29, reg30, reg31;
+
+	/* Saved cp0 stuff. */
 	unsigned long cp0_status;
-	/*
-	 * saved fpu/fpu emulator stuff
-	 */
+
+	/* Saved fpu/fpu emulator stuff. */
 	union mips_fpu_union fpu;
-	/*
-	 * Other stuff associated with the thread
-	 */
-	unsigned long cp0_badvaddr;
+
+	/* Other stuff associated with the thread. */
+	unsigned long cp0_badvaddr;	/* Last user fault */
+	unsigned long cp0_baduaddr;	/* Last kernel fault accessing USEG */
 	unsigned long error_code;
 	unsigned long trap_no;
-	unsigned long ksp;		/* Top of kernel stack   */
-	unsigned long pg_dir;		/* L1 page table pointer */
-#define MF_FIXADE 1
+	unsigned long pg_dir;                   /* used in tlb refill    */
+#define MF_FIXADE 1			/* Fix address errors in software */
+#define MF_LOGADE 2			/* Log address errors to syslog */
 	unsigned long mflags;
+	mm_segment_t current_ds;
+	unsigned long irix_trampoline;  /* Wheee... */
+	unsigned long irix_oldctx;
 };
 
-#endif /* !defined (__LANGUAGE_ASSEMBLY__) */
-
-/*
- * If you change the #defines remember to change thread_struct above too!
- */
-#define TOFF_REG16		0
-#define TOFF_REG17		(TOFF_REG16+4)
-#define TOFF_REG18		(TOFF_REG17+4)
-#define TOFF_REG19		(TOFF_REG18+4)
-#define TOFF_REG20		(TOFF_REG19+4)
-#define TOFF_REG21		(TOFF_REG20+4)
-#define TOFF_REG22		(TOFF_REG21+4)
-#define TOFF_REG23		(TOFF_REG22+4)
-#define TOFF_REG28		(TOFF_REG23+4)
-#define TOFF_REG29		(TOFF_REG28+4)
-#define TOFF_REG30		(TOFF_REG29+4)
-#define TOFF_REG31		(TOFF_REG30+4)
-#define TOFF_CP0_STATUS		(TOFF_REG31+4)
-/*
- * Pad for 8 byte boundary!
- */
-#define TOFF_FPU		(((TOFF_CP0_STATUS+4)+(8-1))&~(8-1))
-#define TOFF_CP0_BADVADDR	(TOFF_FPU+264)
-#define TOFF_ERROR_CODE		(TOFF_CP0_BADVADDR+4)
-#define TOFF_TRAP_NO		(TOFF_ERROR_CODE+4)
-#define TOFF_KSP		(TOFF_TRAP_NO+4)
-#define TOFF_PG_DIR		(TOFF_KSP+4)
-#define TOFF_MFLAGS		(TOFF_PG_DIR+4)
-
-#if !defined (__LANGUAGE_ASSEMBLY__)
+#endif /* !defined (_LANGUAGE_ASSEMBLY) */
 
 #define INIT_MMAP { &init_mm, KSEG0, KSEG1, PAGE_SHARED, \
-                    VM_READ | VM_WRITE | VM_EXEC }
+                    VM_READ | VM_WRITE | VM_EXEC, NULL, &init_mm.mmap }
 
 #define INIT_TSS  { \
         /* \
          * saved main processor registers \
          */ \
 	0, 0, 0, 0, 0, 0, 0, 0, \
-	            0, 0, 0, 0, \
+	               0, 0, 0, \
 	/* \
 	 * saved cp0 stuff \
 	 */ \
@@ -151,78 +157,85 @@ struct thread_struct {
 	 */ \
 	INIT_FPU, \
 	/* \
-	 * Other stuff associated with the process\
+	 * Other stuff associated with the process \
 	 */ \
-	0, 0, 0, sizeof(init_kernel_stack) + (unsigned long)init_kernel_stack - 8, \
-	(unsigned long) swapper_pg_dir - PT_OFFSET, 0 \
+	0, 0, 0, 0, (unsigned long) swapper_pg_dir, \
+	/* \
+	 * For now the default is to fix address errors \
+	 */ \
+	MF_FIXADE, { 0 }, 0, 0 \
 }
+
+#ifdef __KERNEL__
+
+#define KERNEL_STACK_SIZE 8192
+
+#if !defined (_LANGUAGE_ASSEMBLY)
+
+/* Free all resources held by a thread. */
+extern void release_thread(struct task_struct *);
+
+/* Copy and release all segment info associated with a VM */
+#define copy_segments(nr, p, mm) do { } while(0)
+#define release_segments(mm) do { } while(0)
 
 /*
  * Return saved PC of a blocked thread.
  */
 extern inline unsigned long thread_saved_pc(struct thread_struct *t)
 {
-	return ((unsigned long *)t->reg29)[EF_CP0_EPC];
+	extern void ret_from_sys_call(void);
+
+	/* New born processes are a special case */
+	if (t->reg31 == (unsigned long) ret_from_sys_call)
+		return t->reg31;
+
+	return ((unsigned long*)t->reg29)[17];
 }
+
+extern int (*user_mode)(struct pt_regs *);
 
 /*
  * Do necessary setup to start up a newly executed thread.
  */
-static __inline__
-void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp)
-{
-	/*
-	 * Pure paranoia; probably not needed.
-	 */
-	sys_cacheflush(0, ~0, BCACHE);
-	sync_mem();
-	regs->cp0_epc = pc;
-	/*
-	 * New thread loses kernel privileges.
-	 */
-	regs->cp0_status = (regs->cp0_status & ~(ST0_CU0|ST0_KSU)) | KSU_USER;
-	/*
-	 * Reserve argument save space for registers a0 - a3.
-	regs->reg29 = sp - 4 * sizeof(unsigned long);
-	 */
-	regs->reg29 = sp;
-}
+extern void start_thread(struct pt_regs * regs, unsigned long pc, unsigned long sp);
 
-#ifdef __KERNEL__
-
+/* Allocation and freeing of basic task resources. */
 /*
- * switch_to(n) should switch tasks to task nr n, first
- * checking that n isn't the current task, in which case it does nothing.
+ * NOTE! The task struct and the stack go together
  */
-asmlinkage void resume(struct task_struct *tsk, int offset);
+#define alloc_task_struct() \
+	((struct task_struct *) __get_free_pages(GFP_KERNEL,1))
+#define free_task_struct(p)	free_pages((unsigned long)(p),1)
 
-#define switch_to(n) \
-	resume(n, ((int)(&((struct task_struct *)0)->tss)))
+#define init_task	(init_task_union.task)
+#define init_stack	(init_task_union.stack)
 
-/*
- * Does the process account for user or for system time?
- */
-#if defined (__R4000__)
-
-#define USES_USER_TIME(regs) (!((regs)->cp0_status & 0x18))
-
-#else /* !defined (__R4000__) */
-
-#define USES_USER_TIME(regs) (!((regs)->cp0_status & 0x4))
-
-#endif /* !defined (__R4000__) */
-
+#endif /* !defined (_LANGUAGE_ASSEMBLY) */
 #endif /* __KERNEL__ */
 
-#endif /* !defined (__LANGUAGE_ASSEMBLY__) */
-
 /*
- * ELF support
- *
- * Using EM_MIPS is actually wrong - this one is reserved for big endian
- * machines only
+ * Return_address is a replacement for __builtin_return_address(count)
+ * which on certain architectures cannot reasonably be implemented in GCC
+ * (MIPS, Alpha) or is unuseable with -fomit-frame-pointer (i386).
+ * Note that __builtin_return_address(x>=1) is forbidden because GCC
+ * aborts compilation on some CPUs.  It's simply not possible to unwind
+ * some CPU's stackframes.
  */
-#define INCOMPATIBLE_MACHINE(m) ((m) != EM_MIPS && (m) != EM_MIPS_RS4_BE)
-#define ELF_EM_CPU EM_MIPS
+#if (__GNUC__ > 2 || (__GNUC__ == 2 && __GNUC_MINOR__ >= 8))
+/*
+ * __builtin_return_address works only for non-leaf functions.  We avoid the
+ * overhead of a function call by forcing the compiler to save the return
+ * address register on the stack.
+ */
+#define return_address() ({__asm__ __volatile__("":::"$31");__builtin_return_address(0);})
+#else
+/*
+ * __builtin_return_address is not implemented at all.  Calling it
+ * will return senseless values.  Return NULL which at least is an obviously
+ * senseless value.
+ */
+#define return_address() NULL
+#endif
 
 #endif /* __ASM_MIPS_PROCESSOR_H */

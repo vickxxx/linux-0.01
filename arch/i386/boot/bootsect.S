@@ -1,11 +1,4 @@
 !
-! SYS_SIZE is the number of clicks (16 bytes) to be loaded.
-! 0x7F00 is 0x7F000 bytes = 508kB, more than enough for current
-! versions of linux which compress the kernel
-!
-#include <linux/config.h>
-SYSSIZE = DEF_SYSSIZE
-!
 !	bootsect.s		Copyright (C) 1991, 1992 Linus Torvalds
 !	modified by Drew Eckhardt
 !	modified by Bruce Evans (bde)
@@ -29,13 +22,18 @@ SYSSIZE = DEF_SYSSIZE
 ! read errors will result in a unbreakable loop. Reboot by hand. It
 ! loads pretty fast by getting whole tracks at a time whenever possible.
 
+#include <linux/config.h> /* for CONFIG_ROOT_RDONLY */
+#include <asm/boot.h>
+
 .text
 
-SETUPSECS = 4				! nr of setup-sectors
+SETUPSECS = 4				! default nr of setup-sectors
 BOOTSEG   = 0x07C0			! original address of boot-sector
 INITSEG   = DEF_INITSEG			! we move boot here - out of the way
 SETUPSEG  = DEF_SETUPSEG		! setup starts here
 SYSSEG    = DEF_SYSSEG			! system loaded at 0x10000 (65536).
+SYSSIZE	  = DEF_SYSSIZE			! system size: number of 16-byte clicks
+					! to be loaded
 
 ! ROOT_DEV & SWAP_DEV are now written by "build".
 ROOT_DEV = 0
@@ -415,7 +413,7 @@ print_digit:
 	rol	dx, #4		! rotate so that lowest 4 bits are used
 	mov	ax, #0xe0f	! ah = request, al = mask for nybble
 	and	al, dl
-	add	al, #0x90	! convert al to ascii hex (four instructions)
+	add	al, #0x90	! convert al to ASCII hex (four instructions)
 	daa
 	adc	al, #0x40
 	daa

@@ -16,6 +16,8 @@
 #define O_NDELAY	O_NONBLOCK
 #define O_SYNC		010000
 #define FASYNC		020000	/* fcntl, for BSD compatibility */
+#define O_DIRECTORY	040000	/* must be a directory */
+#define O_NOFOLLOW	0100000	/* don't follow links */
 
 #define F_DUPFD		0	/* dup */
 #define F_GETFD		1	/* get f_flags */
@@ -28,6 +30,8 @@
 
 #define F_SETOWN	8	/*  for sockets. */
 #define F_GETOWN	9	/*  for sockets. */
+#define F_SETSIG	10	/*  for sockets. */
+#define F_GETSIG	11	/*  for sockets. */
 
 /* for F_[GET|SET]FL */
 #define FD_CLOEXEC	1	/* actually anything with low bit set goes */
@@ -47,6 +51,12 @@
 #define LOCK_NB		4	/* or'd with one of the above to prevent
 				   blocking */
 #define LOCK_UN		8	/* remove lock */
+
+#ifdef __KERNEL__
+#define F_POSIX		1
+#define F_FLOCK		2
+#define F_BROKEN	4	/* broken flock() emulation */
+#endif /* __KERNEL__ */
 
 struct flock {
 	short l_type;

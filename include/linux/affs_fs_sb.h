@@ -15,8 +15,8 @@
 
 struct affs_bm_info {
 	struct buffer_head *bm_bh;	/* Buffer head if loaded (bm_count > 0) */
-	int bm_firstblk;		/* Block number of first bit in this map */
-	int bm_key;			/* Disk block number */
+	s32 bm_firstblk;		/* Block number of first bit in this map */
+	s32 bm_key;			/* Disk block number */
 	int bm_count;			/* Usage counter */
 };
 
@@ -37,11 +37,12 @@ struct affs_zone {
 
 struct affs_sb_info {
 	int s_partition_size;		/* Partition size in blocks. */
-	int s_root_block;		/* FFS root block number. */
+	int s_blksize;			/* Initial device blksize */
+	s32 s_root_block;		/* FFS root block number. */
 	int s_hashsize;			/* Size of hash table. */
 	unsigned long s_flags;		/* See below. */
-	short s_uid;			/* uid to override */
-	short s_gid;			/* gid to override */
+	s16 s_uid;			/* uid to override */
+	s16 s_gid;			/* gid to override */
 	umode_t s_mode;			/* mode to override */
 	int s_reserved;			/* Number of reserved blocks. */
 	struct buffer_head *s_root_bh;	/* Cached root block. */
@@ -68,5 +69,6 @@ struct affs_sb_info {
 #define SF_OFS		0x0200		/* Old filesystem */
 #define SF_PREFIX	0x0400		/* Buffer for prefix is allocated */
 #define SF_VERBOSE	0x0800		/* Talk about fs when mounting */
+#define SF_READONLY	0x1000		/* Don't allow to remount rw */
 
 #endif

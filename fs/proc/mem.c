@@ -9,9 +9,10 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/proc_fs.h>
 
 #include <asm/page.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/io.h>
 #include <asm/pgtable.h>
 
@@ -55,16 +56,10 @@ static struct task_struct * get_task(int pid)
 	struct task_struct * tsk = current;
 
 	if (pid != tsk->pid) {
-		int i;
-		tsk = NULL;
-		for (i = 1 ; i < NR_TASKS ; i++)
-			if (task[i] && task[i]->pid == pid) {
-				tsk = task[i];
-				break;
-			}
-		/*
-		 * allow accesses only under the same circumstances
-		 * that we would allow ptrace to work
+		tsk = find_task_by_pid(pid);
+
+		/* Allow accesses only under the same circumstances
+		 * that we would allow ptrace to work.
 		 */
 		if (tsk) {
 			if (!(tsk->flags & PF_PTRACED)
@@ -76,9 +71,10 @@ static struct task_struct * get_task(int pid)
 	return tsk;
 }
 
-static long mem_read(struct inode * inode, struct file * file,
-	char * buf, unsigned long count)
+static ssize_t mem_read(struct file * file, char * buf,
+			size_t count, loff_t *ppos)
 {
+	struct inode * inode = file->f_dentry->d_inode;
 	pgd_t *page_dir;
 	pmd_t *page_middle;
 	pte_t pte;
@@ -86,18 +82,20 @@ static long mem_read(struct inode * inode, struct file * file,
 	struct task_struct * tsk;
 	unsigned long addr;
 	char *tmp;
-	int i;
+	ssize_t scount, i;
 
+	read_lock(&tasklist_lock);
 	tsk = get_task(inode->i_ino >> 16);
+	read_unlock(&tasklist_lock);	/* FIXME: This should really be done only afetr not using tsk any more!!! */
 	if (!tsk)
 		return -ESRCH;
-	addr = file->f_pos;
-	count = check_range(tsk->mm, addr, count);
-	if (count < 0)
-		return count;
+	addr = *ppos;
+	scount = check_range(tsk->mm, addr, count);
+	if (scount < 0)
+		return scount;
 	tmp = buf;
-	while (count > 0) {
-		if (current->signal & ~current->blocked)
+	while (scount > 0) {
+		if (signal_pending(current))
 			break;
 		page_dir = pgd_offset(tsk->mm,addr);
 		if (pgd_none(*page_dir))
@@ -120,22 +118,23 @@ static long mem_read(struct inode * inode, struct file * file,
 			break;
 		page = (char *) pte_page(pte) + (addr & ~PAGE_MASK);
 		i = PAGE_SIZE-(addr & ~PAGE_MASK);
-		if (i > count)
-			i = count;
-		memcpy_tofs(tmp, page, i);
+		if (i > scount)
+			i = scount;
+		copy_to_user(tmp, page, i);
 		addr += i;
 		tmp += i;
-		count -= i;
+		scount -= i;
 	}
-	file->f_pos = addr;
+	*ppos = addr;
 	return tmp-buf;
 }
 
 #ifndef mem_write
 
-static long mem_write(struct inode * inode, struct file * file,
-	char * buf, unsigned long count)
+static ssize_t mem_write(struct file * file, char * buf,
+			 size_t count, loff_t *ppos)
 {
+	struct inode * inode = file->f_dentry->d_inode;
 	pgd_t *page_dir;
 	pmd_t *page_middle;
 	pte_t pte;
@@ -143,15 +142,15 @@ static long mem_write(struct inode * inode, struct file * file,
 	struct task_struct * tsk;
 	unsigned long addr;
 	char *tmp;
-	int i;
+	long i;
 
-	addr = file->f_pos;
+	addr = *ppos;
 	tsk = get_task(inode->i_ino >> 16);
 	if (!tsk)
 		return -ESRCH;
 	tmp = buf;
 	while (count > 0) {
-		if (current->signal & ~current->blocked)
+		if (signal_pending(current))
 			break;
 		page_dir = pgd_offset(tsk,addr);
 		if (pgd_none(*page_dir))
@@ -178,23 +177,22 @@ static long mem_write(struct inode * inode, struct file * file,
 		i = PAGE_SIZE-(addr & ~PAGE_MASK);
 		if (i > count)
 			i = count;
-		memcpy_fromfs(page, tmp, i);
+		copy_from_user(page, tmp, i);
 		addr += i;
 		tmp += i;
 		count -= i;
 	}
-	file->f_pos = addr;
+	*ppos = addr;
 	if (tmp != buf)
 		return tmp-buf;
-	if (current->signal & ~current->blocked)
+	if (signal_pending(current))
 		return -ERESTARTSYS;
 	return 0;
 }
 
 #endif
 
-static long long mem_lseek(struct inode * inode, struct file * file,
-	long long offset, int orig)
+static long long mem_lseek(struct file * file, long long offset, int orig)
 {
 	switch (orig) {
 		case 0:
@@ -211,16 +209,16 @@ static long long mem_lseek(struct inode * inode, struct file * file,
 /*
  * This isn't really reliable by any means..
  */
-int mem_mmap(struct inode * inode, struct file * file,
-	     struct vm_area_struct * vma)
+int mem_mmap(struct file * file, struct vm_area_struct * vma)
 {
 	struct task_struct *tsk;
 	pgd_t *src_dir, *dest_dir;
 	pmd_t *src_middle, *dest_middle;
 	pte_t *src_table, *dest_table;
-	unsigned long stmp, dtmp;
+	unsigned long stmp, dtmp, mapnr;
 	struct vm_area_struct *src_vma = NULL;
-
+	struct inode *inode = file->f_dentry->d_inode;
+	
 	/* Get the source's task information */
 
 	tsk = get_task(inode->i_ino >> 16);
@@ -291,14 +289,16 @@ int mem_mmap(struct inode * inode, struct file * file,
 			return -ENOMEM;
 
 		if (!pte_present(*src_table))
-			do_no_page(tsk, src_vma, stmp, 1);
+			handle_mm_fault(tsk, src_vma, stmp, 1);
 
 		if ((vma->vm_flags & VM_WRITE) && !pte_write(*src_table))
-			do_wp_page(tsk, src_vma, stmp, 1);
+			handle_mm_fault(tsk, src_vma, stmp, 1);
 
 		set_pte(src_table, pte_mkdirty(*src_table));
 		set_pte(dest_table, *src_table);
-		mem_map[MAP_NR(pte_page(*src_table))].count++;
+		mapnr = MAP_NR(pte_page(*src_table));
+		if (mapnr < max_mapnr)
+			atomic_inc(&mem_map[MAP_NR(pte_page(*src_table))].count);
 
 		stmp += PAGE_SIZE;
 		dtmp += PAGE_SIZE;
@@ -314,10 +314,11 @@ static struct file_operations proc_mem_operations = {
 	mem_read,
 	mem_write,
 	NULL,		/* mem_readdir */
-	NULL,		/* mem_select */
+	NULL,		/* mem_poll */
 	NULL,		/* mem_ioctl */
 	mem_mmap,	/* mmap */
 	NULL,		/* no special open code */
+	NULL,		/* flush */
 	NULL,		/* no special release code */
 	NULL		/* can't fsync */
 };
@@ -339,5 +340,5 @@ struct inode_operations proc_mem_inode_operations = {
 	NULL,			/* writepage */
 	NULL,			/* bmap */
 	NULL,			/* truncate */
-	NULL			/* permission */
+	proc_permission		/* permission */
 };

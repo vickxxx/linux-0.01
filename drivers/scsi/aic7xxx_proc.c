@@ -21,13 +21,15 @@
  *  o Modified from the EATA-DMA /proc support.
  *  o Additional support for device block statistics provided by
  *    Matthew Jacob.
+ *  o Correction of overflow by Heinz Mauelshagen
+ *  o Adittional corrections by Doug Ledford
  *
  *  Dean W. Gehnert, deang@teleport.com, 05/01/96
  *
- *  $Id: aic7xxx_proc.c,v 3.2 1996/07/23 03:37:26 deang Exp $
+ *  $Id: aic7xxx_proc.c,v 4.1 1997/06/97 08:23:42 deang Exp $
  *-M*************************************************************************/
 
-#define BLS buffer + len + size
+#define	BLS	(&aic7xxx_buffer[size])
 #define HDRB \
 "        < 512 512-1K   1-2K   2-4K   4-8K  8-16K 16-32K 32-64K 64-128K >128K"
 
@@ -49,6 +51,10 @@ proc_debug(const char *fmt, ...)
 #  define proc_debug(fmt, args...)
 #endif /* PROC_DEBUG */
 
+static int aic7xxx_buffer_size = 0;
+static char *aic7xxx_buffer = NULL;
+
+
 /*+F*************************************************************************
  * Function:
  *   aic7xxx_set_info
@@ -63,6 +69,7 @@ aic7xxx_set_info(char *buffer, int length, struct Scsi_Host *HBAptr)
   return (-ENOSYS);  /* Currently this is a no-op */
 }
 
+
 /*+F*************************************************************************
  * Function:
  *   aic7xxx_proc_info
@@ -71,110 +78,160 @@ aic7xxx_set_info(char *buffer, int length, struct Scsi_Host *HBAptr)
  *   Return information to handle /proc support for the driver.
  *-F*************************************************************************/
 int
-aic7xxx_proc_info(char *buffer, char **start, off_t offset, int length, 
-    int hostno, int inout)
+aic7xxx_proc_info ( char *buffer, char **start, off_t offset, int length, 
+                    int hostno, int inout)
 {
   struct Scsi_Host *HBAptr;
   struct aic7xxx_host *p;
-  static u8 buff[512];
-  int   i; 
-  int   size = 0;
-  int   len = 0;
-  off_t begin = 0;
-  off_t pos = 0;
-  static char *bus_names[] = { "Single", "Twin", "Wide" };
-  static char *chip_names[] = { "AIC-777x", "AIC-785x", "AIC-787x", "AIC-788x" };
+  int    size = 0;
+  unsigned char i;
+  struct aic7xxx_xferstats *sp;
+  unsigned char target, lun;
 
   HBAptr = NULL;
-  for (i = 0; i < NUMBER(aic7xxx_boards); i++)
+
+  for(p=first_aic7xxx; p->host->host_no != hostno; p=p->next)
+    ;
+
+  if (!p)
   {
-    if ((HBAptr = aic7xxx_boards[i]) != NULL)
+    size += sprintf(buffer, "Can't find adapter for host number %d\n", hostno);
+    if (size > length)
     {
-      if (HBAptr->host_no == hostno)
-      {
-        break;
-      }
-
-      while ((HBAptr->hostdata != NULL) &&
-          ((HBAptr = ((struct aic7xxx_host *) HBAptr->hostdata)->next) != NULL))
-      {
-        if (HBAptr->host_no == hostno)
-        {
-          break; break;
-        }
-      }
-
-      HBAptr = NULL;
+      return (size);
+    }
+    else
+    {
+      return (length);
     }
   }
 
-  if (HBAptr == NULL)
-  {
-    size += sprintf(BLS, "Can't find adapter for host number %d\n", hostno);
-    len += size; pos = begin + len; size = 0;
-    goto stop_output;
-  }
+  HBAptr = p->host;
 
   if (inout == TRUE) /* Has data been written to the file? */ 
   {
     return (aic7xxx_set_info(buffer, length, HBAptr));
   }
 
-  if (offset == 0)
-  {
-    memset(buff, 0, sizeof(buff));
-  }
-
   p = (struct aic7xxx_host *) HBAptr->hostdata;
 
-  size += sprintf(BLS, "Adaptec AIC7xxx driver version: ");
-  size += sprintf(BLS, "%s/", rcs_version(AIC7XXX_C_VERSION));
-  size += sprintf(BLS, "%s/", rcs_version(AIC7XXX_H_VERSION));
-  size += sprintf(BLS, "%s\n", rcs_version(AIC7XXX_SEQ_VER));
-  len += size; pos = begin + len; size = 0;
+  /*
+   * It takes roughly 1K of space to hold all relevant card info, not
+   * counting any proc stats, so we start out with a 1.5k buffer size and
+   * if proc_stats is defined, then we sweep the stats structure to see
+   * how many drives we will be printing out for and add 384 bytes per
+   * device with active stats.
+   *
+   * Hmmmm...that 1.5k seems to keep growing as items get added so they
+   * can be easily viewed for debugging purposes.  So, we bumped that
+   * 1.5k to 4k so we can quit having to bump it all the time.
+   */
 
+  size = 4096;
+  for (target = 0; target < MAX_TARGETS; target++)
+  {
+    for (lun = 0; lun < MAX_LUNS; lun++)
+    {
+      if (p->stats[target][lun].r_total != 0)
+#ifdef AIC7XXX_PROC_STATS
+        size += 512;
+#else
+        size += 256;
+#endif
+    }
+  }
+  if (aic7xxx_buffer_size != size)
+  {
+    if (aic7xxx_buffer != NULL) 
+    {
+      kfree(aic7xxx_buffer);
+      aic7xxx_buffer_size = 0;
+    }
+    aic7xxx_buffer = kmalloc(size, GFP_KERNEL);
+  }
+  if (aic7xxx_buffer == NULL)
+  {
+    size = sprintf(buffer, "AIC7xxx - kmalloc error at line %d\n",
+        __LINE__);
+    return size;
+  }
+  aic7xxx_buffer_size = size;
+
+  size = 0;
+  size += sprintf(BLS, "Adaptec AIC7xxx driver version: ");
+  size += sprintf(BLS, "%s/", AIC7XXX_C_VERSION);
+  size += sprintf(BLS, "%s", AIC7XXX_H_VERSION);
   size += sprintf(BLS, "\n");
   size += sprintf(BLS, "Compile Options:\n");
 #ifdef AIC7XXX_RESET_DELAY
   size += sprintf(BLS, "  AIC7XXX_RESET_DELAY    : %d\n", AIC7XXX_RESET_DELAY);
 #endif
-#ifdef AIC7XXX_CMDS_PER_LUN
-  size += sprintf(BLS, "  AIC7XXX_CMDS_PER_LUN   : %d\n", AIC7XXX_CMDS_PER_LUN);
-#endif
-#ifdef AIC7XXX_TWIN_SUPPORT
-  size += sprintf(BLS, "  AIC7XXX_TWIN_SUPPORT   : Enabled\n");
-#else
-  size += sprintf(BLS, "  AIC7XXX_TWIN_SUPPORT   : Disabled\n");
-#endif
-#ifdef AIC7XXX_TAGGED_QUEUEING
-  size += sprintf(BLS, "  AIC7XXX_TAGGED_QUEUEING: Enabled\n");
-#else
-  size += sprintf(BLS, "  AIC7XXX_TAGGED_QUEUEING: Disabled\n");
-#endif
-#ifdef AIC7XXX_PAGE_ENABLE
-  size += sprintf(BLS, "  AIC7XXX_PAGE_ENABLE    : Enabled\n");
-#else
-  size += sprintf(BLS, "  AIC7XXX_PAGE_ENABLE    : Disabled\n");
-#endif
+  size += sprintf(BLS, "  AIC7XXX_TAGGED_QUEUEING: Adapter Support Enabled\n");
+  size += sprintf(BLS, "                             Check below to see "
+                       "which\n"
+                       "                             devices use tagged "
+                       "queueing\n");
+  size += sprintf(BLS, "  AIC7XXX_PAGE_ENABLE    : Enabled (This is no longer "
+                       "an option)\n");
 #ifdef AIC7XXX_PROC_STATS
   size += sprintf(BLS, "  AIC7XXX_PROC_STATS     : Enabled\n");
 #else
   size += sprintf(BLS, "  AIC7XXX_PROC_STATS     : Disabled\n");
 #endif
-  len += size; pos = begin + len; size = 0;
-
   size += sprintf(BLS, "\n");
   size += sprintf(BLS, "Adapter Configuration:\n");
-  size += sprintf(BLS, "          SCSI Adapter: %s\n", board_names[p->type]);
-  size += sprintf(BLS, "                        (%s chipset)\n",
-      chip_names[p->chip_type]);
-  size += sprintf(BLS, "              Host Bus: %s\n", bus_names[p->bus_type]);
-  size += sprintf(BLS, "               Base IO: %#.4x\n", p->base);
-  size += sprintf(BLS, "                   IRQ: %d\n", HBAptr->irq);
-  size += sprintf(BLS, "                  SCBs: Used %d, HW %d, Page %d\n",
-      p->numscbs, p->maxhscbs, p->maxscbs);
-  size += sprintf(BLS, "            Interrupts: %d", p->isr_count);
-  if (p->chip_type == AIC_777x)
+  size += sprintf(BLS, "           SCSI Adapter: %s\n",
+      board_names[p->board_name_index]);
+  if (p->flags & AHC_TWIN)
+    size += sprintf(BLS, "                         Twin Channel\n");
+  else
+  {
+    char *channel = "";
+    char *ultra = "";
+    char *wide = "Narrow ";
+    if (p->flags & AHC_MULTI_CHANNEL)
+    {
+      channel = " Channel A";
+      if (p->flags & (AHC_CHNLB|AHC_CHNLC))
+        channel = (p->flags & AHC_CHNLB) ? " Channel B" : " Channel C";
+    }
+    if (p->features & AHC_WIDE)
+      wide = "Wide ";
+    if (p->features & AHC_ULTRA2)
+      ultra = "Ultra2-LVD/SE ";
+    else if (p->features & AHC_ULTRA)
+      ultra = "Ultra ";
+    size += sprintf(BLS, "                           %s%sController%s\n",
+      ultra, wide, channel);
+  }
+  if( !(p->maddr) )
+  {
+    size += sprintf(BLS, "    Programmed I/O Base: %lx\n", p->base);
+  }
+  else
+  {
+    size += sprintf(BLS, "    PCI MMAPed I/O Base: 0x%lx\n", p->mbase);
+  }
+  if( (p->chip & (AHC_VL | AHC_EISA)) )
+  {
+    size += sprintf(BLS, "    BIOS Memory Address: 0x%08x\n", p->bios_address);
+  }
+  size += sprintf(BLS, " Adapter SEEPROM Config: %s\n",
+          (p->flags & AHC_SEEPROM_FOUND) ? "SEEPROM found and used." :
+         ((p->flags & AHC_USEDEFAULTS) ? "SEEPROM not found, using defaults." :
+           "SEEPROM not found, using leftover BIOS values.") );
+  size += sprintf(BLS, "      Adaptec SCSI BIOS: %s\n",
+          (p->flags & AHC_BIOS_ENABLED) ? "Enabled" : "Disabled");
+  size += sprintf(BLS, "                    IRQ: %d\n", HBAptr->irq);
+  size += sprintf(BLS, "                   SCBs: Active %d, Max Active %d,\n",
+            p->activescbs, p->max_activescbs);
+  size += sprintf(BLS, "                         Allocated %d, HW %d, "
+            "Page %d\n", p->scb_data->numscbs, p->scb_data->maxhscbs,
+            p->scb_data->maxscbs);
+  if (p->flags & AHC_EXTERNAL_SRAM)
+    size += sprintf(BLS, "                         Using External SCB SRAM\n");
+  size += sprintf(BLS, "             Interrupts: %ld", p->isr_count);
+  if (p->chip & AHC_EISA)
   {
     size += sprintf(BLS, " %s\n",
         (p->pause & IRQMS) ? "(Level Sensitive)" : "(Edge Triggered)");
@@ -183,79 +240,144 @@ aic7xxx_proc_info(char *buffer, char **start, off_t offset, int length,
   {
     size += sprintf(BLS, "\n");
   }
-  size += sprintf(BLS, "         Serial EEPROM: %s\n",
-      (p->flags & HAVE_SEEPROM) ? "True" : "False");
-  size += sprintf(BLS, "  Extended Translation: %sabled\n",
-      (p->flags & EXTENDED_TRANSLATION) ? "En" : "Dis");
-  size += sprintf(BLS, "        SCSI Bus Reset: %sabled\n",
-      aic7xxx_no_reset ? "Dis" : "En");
-  size += sprintf(BLS, "            Ultra SCSI: %sabled\n",
-      (p->flags & ULTRA_ENABLED) ? "En" : "Dis");
-  size += sprintf(BLS, "     Target Disconnect: %sabled\n",
-      p->discenable ? "En" : "Dis");
-  len += size; pos = begin + len; size = 0;
-
-#ifdef AIC7XXX_PROC_STATS
+  size += sprintf(BLS, "      BIOS Control Word: 0x%04x\n",
+            p->bios_control);
+  size += sprintf(BLS, "   Adapter Control Word: 0x%04x\n",
+            p->adapter_control);
+  size += sprintf(BLS, "   Extended Translation: %sabled\n",
+      (p->flags & AHC_EXTEND_TRANS_A) ? "En" : "Dis");
+  size += sprintf(BLS, "Disconnect Enable Flags: 0x%04x\n", p->discenable);
+  if (p->features & (AHC_ULTRA | AHC_ULTRA2))
   {
-    struct aic7xxx_xferstats *sp;
-    int channel, target, lun;
+    size += sprintf(BLS, "     Ultra Enable Flags: 0x%04x\n", p->ultraenb);
+  }
+  size += sprintf(BLS, " Tag Queue Enable Flags: 0x%04x\n", p->tagenable);
+  size += sprintf(BLS, "Ordered Queue Tag Flags: 0x%04x\n", p->orderedtag);
+#ifdef AIC7XXX_CMDS_PER_LUN
+  size += sprintf(BLS, "Default Tag Queue Depth: %d\n", AIC7XXX_CMDS_PER_LUN);
+#else
+  size += sprintf(BLS, "Default Tag Queue Depth: %d\n", 8);
+#endif
+  size += sprintf(BLS, "    Tagged Queue By Device array for aic7xxx host "
+                       "instance %d:\n", p->instance);
+  size += sprintf(BLS, "      {");
+  for(i=0; i < (MAX_TARGETS - 1); i++)
+    size += sprintf(BLS, "%d,",aic7xxx_tag_info[p->instance].tag_commands[i]);
+  size += sprintf(BLS, "%d}\n",aic7xxx_tag_info[p->instance].tag_commands[i]);
+  size += sprintf(BLS, "    Actual queue depth per device for aic7xxx host "
+                       "instance %d:\n", p->instance);
+  size += sprintf(BLS, "      {");
+  for(i=0; i < (MAX_TARGETS - 1); i++)
+    size += sprintf(BLS, "%d,", p->dev_max_queue_depth[i]);
+  size += sprintf(BLS, "%d}\n", p->dev_max_queue_depth[i]);
 
-    /*
-     * XXX: Need to fix this to avoid overflow...
-     */
-    size += sprintf(BLS, "\n");
-    size += sprintf(BLS, "Statistics:\n");
-    for (channel = 0; channel < 2; channel++)
+  size += sprintf(BLS, "\n");
+  size += sprintf(BLS, "Statistics:\n");
+  for (target = 0; target < MAX_TARGETS; target++)
+  {
+    for (lun = 0; lun < MAX_LUNS; lun++)
     {
-      for (target = 0; target < 16; target++)
+      sp = &p->stats[target][lun];
+      if (sp->r_total == 0)
       {
-        for (lun = 0; lun < 8; lun++)
+        continue;
+      }
+      if (p->features & AHC_TWIN)
+      {
+        size += sprintf(BLS, "(scsi%d:%d:%d:%d)\n",
+            p->host_no, (target >> 3), (target & 0x7), lun);
+      }
+      else
+      {
+        size += sprintf(BLS, "(scsi%d:%d:%d:%d)\n",
+            p->host_no, 0, target, lun);
+      }
+      size += sprintf(BLS, "  Device using %s/%s\n",
+            (p->transinfo[target].cur_width == MSG_EXT_WDTR_BUS_16_BIT) ?
+            "Wide" : "Narrow",
+            (p->transinfo[target].cur_offset != 0) ?
+            "Sync transfers at" : "Async transfers." );
+      if (p->transinfo[target].cur_offset != 0)
+      {
+        struct aic7xxx_syncrate *sync_rate;
+        int period = p->transinfo[target].cur_period;
+        int rate = (p->transinfo[target].cur_width ==
+                    MSG_EXT_WDTR_BUS_16_BIT) ? 1 : 0;
+
+        sync_rate = aic7xxx_find_syncrate(p, &period, AHC_SYNCRATE_ULTRA2);
+        if (sync_rate != NULL)
         {
-          sp = &p->stats[channel][target][lun];
-          if (sp->xfers == 0)
-          {
-            continue;
-          }
-          size += sprintf(BLS, "CHAN#%c (TGT %d LUN %d):\n",
-              'A' + channel, target, lun);
-          size += sprintf(BLS, "nxfers %ld (%ld read;%ld written)\n",
-              sp->xfers, sp->r_total, sp->w_total);
-          size += sprintf(BLS, "blks(512) rd=%ld; blks(512) wr=%ld\n",
-              sp->r_total512, sp->w_total512);
-          size += sprintf(BLS, "%s\n", HDRB);
-          size += sprintf(BLS, " Reads:");
-          size += sprintf(BLS, "%6ld %6ld %6ld %6ld ", sp->r_bins[0],
-              sp->r_bins[1], sp->r_bins[2], sp->r_bins[3]);
-          size += sprintf(BLS, "%6ld %6ld %6ld %6ld ", sp->r_bins[4],
-              sp->r_bins[5], sp->r_bins[6], sp->r_bins[7]);
-          size += sprintf(BLS, "%6ld %6ld\n", sp->r_bins[8],
-              sp->r_bins[9]);
-          size += sprintf(BLS, "Writes:");
-          size += sprintf(BLS, "%6ld %6ld %6ld %6ld ", sp->w_bins[0],
-              sp->w_bins[1], sp->w_bins[2], sp->w_bins[3]);
-          size += sprintf(BLS, "%6ld %6ld %6ld %6ld ", sp->w_bins[4],
-              sp->w_bins[5], sp->w_bins[6], sp->w_bins[7]);
-          size += sprintf(BLS, "%6ld %6ld\n", sp->w_bins[8],
-              sp->w_bins[9]);
-          size += sprintf(BLS, "\n");
+          size += sprintf(BLS, "  %s MByte/sec, offset %d\n",
+                          sync_rate->rate[rate],
+                          p->transinfo[target].cur_offset );
+        }
+        else
+        {
+          size += sprintf(BLS, "  3.3 MByte/sec, offset %d\n",
+                          p->transinfo[target].cur_offset );
         }
       }
-    }
-    len += size; pos = begin + len; size = 0;
-  }
+      size += sprintf(BLS, "    Device Negotiation Settings\n");
+      size += sprintf(BLS, "        Period Offset Bus Width\n");
+      size += sprintf(BLS, "User       %03d    %03d        %d\n",
+                      p->transinfo[target].user_period,
+                      p->transinfo[target].user_offset,
+                      p->transinfo[target].user_width);
+      size += sprintf(BLS, "Goal       %03d    %03d        %d\n",
+                      p->transinfo[target].goal_period,
+                      p->transinfo[target].goal_offset,
+                      p->transinfo[target].goal_width);
+      size += sprintf(BLS, "Current    %03d    %03d        %d\n",
+                      p->transinfo[target].cur_period,
+                      p->transinfo[target].cur_offset,
+                      p->transinfo[target].cur_width);
+#ifdef AIC7XXX_PROC_STATS
+      size += sprintf(BLS, "    Total transfers %ld (%ld read;%ld written)\n",
+          sp->xfers, sp->r_total, sp->w_total);
+      size += sprintf(BLS, "      blks(512) rd=%ld; blks(512) wr=%ld\n",
+          sp->r_total512, sp->w_total512);
+      size += sprintf(BLS, "%s\n", HDRB);
+      size += sprintf(BLS, " Reads:");
+      for (i = 0; i < NUMBER(sp->r_bins); i++)
+      {
+        size += sprintf(BLS, "%6ld ", sp->r_bins[i]);
+      }
+      size += sprintf(BLS, "\n");
+      size += sprintf(BLS, "Writes:");
+      for (i = 0; i < NUMBER(sp->w_bins); i++)
+      {
+        size += sprintf(BLS, "%6ld ", sp->w_bins[i]);
+      }
+#else
+      size += sprintf(BLS, "    Total transfers: %ld/%ld read/written)\n",
+          sp->r_total, sp->w_total);
 #endif /* AIC7XXX_PROC_STATS */
-
-stop_output:
-  proc_debug("2pos: %ld offset: %ld len: %d\n", pos, offset, len);
-  *start = buffer + (offset - begin);   /* Start of wanted data */
-  len -= (offset - begin);      /* Start slop */
-  if (len > length)
-  {
-    len = length;               /* Ending slop */
+      size += sprintf(BLS, "\n\n");
+    }
   }
-  proc_debug("3pos: %ld offset: %ld len: %d\n", pos, offset, len);
-  
-  return (len);     
+
+  if (size >= aic7xxx_buffer_size)
+  {
+    printk(KERN_WARNING "aic7xxx: Overflow in aic7xxx_proc.c\n");
+  }
+
+  if (offset > size - 1)
+  {
+    kfree(aic7xxx_buffer);
+    aic7xxx_buffer = NULL;
+    aic7xxx_buffer_size = length = 0;
+    *start = NULL;
+  }
+  else
+  {
+    *start = &aic7xxx_buffer[offset];   /* Start of wanted data */
+    if (size - offset < length)
+    {
+      length = size - offset;
+    }
+  }
+
+  return (length);
 }
 
 /*

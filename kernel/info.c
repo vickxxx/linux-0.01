@@ -6,25 +6,20 @@
 
 /* This implements the sysinfo() system call */
 
-#include <asm/segment.h>
-
-#include <linux/sched.h>
-#include <linux/string.h>
-#include <linux/unistd.h>
-#include <linux/types.h>
 #include <linux/mm.h>
+#include <linux/unistd.h>
 #include <linux/swap.h>
+#include <linux/smp_lock.h>
+
+#include <asm/uaccess.h>
 
 asmlinkage int sys_sysinfo(struct sysinfo *info)
 {
-	int error;
 	struct sysinfo val;
 
-	error = verify_area(VERIFY_WRITE, info, sizeof(struct sysinfo));
-	if (error)
-		return error;
 	memset((char *)&val, 0, sizeof(struct sysinfo));
 
+	cli();
 	val.uptime = jiffies / HZ;
 
 	val.loads[0] = avenrun[0] << (SI_LOAD_SHIFT - FSHIFT);
@@ -32,10 +27,12 @@ asmlinkage int sys_sysinfo(struct sysinfo *info)
 	val.loads[2] = avenrun[2] << (SI_LOAD_SHIFT - FSHIFT);
 
 	val.procs = nr_tasks-1;
+	sti();
 
 	si_meminfo(&val);
 	si_swapinfo(&val);
 
-	memcpy_tofs(info, &val, sizeof(struct sysinfo));
+	if (copy_to_user(info, &val, sizeof(struct sysinfo)))
+		return -EFAULT;
 	return 0;
 }

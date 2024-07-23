@@ -19,8 +19,8 @@
 #define _ASM_DMA_H
 
 #include <linux/config.h>
-
-#include <asm/io.h>		/* need byte IO */
+#include <asm/io.h>
+#include <asm/spinlock.h>
 
 #define dma_outb	outb
 #define dma_inb		inb
@@ -75,10 +75,13 @@
 
 #define MAX_DMA_CHANNELS	8
 
-#ifdef CONFIG_ALPHA_XL
 /* The maximum address that we can perform a DMA transfer to on Alpha XL,
    due to a hardware SIO (PCI<->ISA bus bridge) chip limitation, is 64MB.
    See <asm/apecs.h> for more info.
+*/
+/* The maximum address that we can perform a DMA transfer to on RUFFIAN,
+   due to a hardware SIO (PCI<->ISA bus bridge) chip limitation, is 16MB.
+   See <asm/pyxis.h> for more info.
 */
 /* NOTE: we must define the maximum as something less than 64Mb, to prevent 
    virt_to_bus() from returning an address in the first window, for a
@@ -86,12 +89,21 @@
    We MUST coordinate the maximum with <asm/apecs.h> for consistency.
    For now, this limit is set to 48Mb...
 */
-#define MAX_DMA_ADDRESS		(0xfffffc0003000000UL)
-#else /* CONFIG_ALPHA_XL */
-/* The maximum address that we can perform a DMA transfer to on normal
-   Alpha platforms */
-#define MAX_DMA_ADDRESS		(~0UL)
-#endif /* CONFIG_ALPHA_XL */
+#define ALPHA_XL_MAX_DMA_ADDRESS	(IDENT_ADDR+0x3000000UL)
+#define ALPHA_RUFFIAN_MAX_DMA_ADDRESS	(IDENT_ADDR+0x1000000UL)
+#define ALPHA_MAX_DMA_ADDRESS		(~0UL)
+
+#ifdef CONFIG_ALPHA_GENERIC
+# define MAX_DMA_ADDRESS		(alpha_mv.max_dma_address)
+#else
+# ifdef CONFIG_ALPHA_XL
+#  define MAX_DMA_ADDRESS		ALPHA_XL_MAX_DMA_ADDRESS
+# elif defined(CONFIG_ALPHA_RUFFIAN)
+#  define MAX_DMA_ADDRESS		ALPHA_RUFFIAN_MAX_DMA_ADDRESS
+# else
+#  define MAX_DMA_ADDRESS		ALPHA_MAX_DMA_ADDRESS
+# endif
+#endif
 
 /* 8237 DMA controllers */
 #define IO_DMA1_BASE	0x00	/* 8 bit slave DMA, channels 0..3 */
@@ -160,6 +172,20 @@
 #define DMA_MODE_READ	0x44	/* I/O to memory, no autoinit, increment, single mode */
 #define DMA_MODE_WRITE	0x48	/* memory to I/O, no autoinit, increment, single mode */
 #define DMA_MODE_CASCADE 0xC0   /* pass thru DREQ->HRQ, DACK<-HLDA only */
+
+extern spinlock_t  dma_spin_lock;
+
+static __inline__ unsigned long claim_dma_lock(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dma_spin_lock, flags);
+	return flags;
+}
+
+static __inline__ void release_dma_lock(unsigned long flags)
+{
+	spin_unlock_irqrestore(&dma_spin_lock, flags);
+}
 
 /* enable/disable a specific DMA channel */
 static __inline__ void enable_dma(unsigned int dmanr)
@@ -313,6 +339,16 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 /* These are in kernel/dma.c: */
 extern int request_dma(unsigned int dmanr, const char * device_id);	/* reserve a DMA channel */
 extern void free_dma(unsigned int dmanr);	/* release it again */
+#define KERNEL_HAVE_CHECK_DMA
+extern int check_dma(unsigned int dmanr);
+
+/* From PCI */
+
+#ifdef CONFIG_PCI_QUIRKS
+extern int isa_dma_bridge_buggy;
+#else
+#define isa_dma_bridge_buggy 	(0)
+#endif
 
 
 #endif /* _ASM_DMA_H */

@@ -10,11 +10,15 @@
 #include <linux/stat.h>
 #include <linux/malloc.h>
 #include <linux/binfmts.h>
+#include <linux/init.h>
 
 static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 {
-	char *cp, *interp, *i_name, *i_arg;
+	char *cp, *i_name, *i_name_start, *i_arg;
+	struct dentry * dentry;
+	char interp[128];
 	int retval;
+
 	if ((bprm->buf[0] != '#') || (bprm->buf[1] != '!') || (bprm->sh_bang)) 
 		return -ENOEXEC;
 	/*
@@ -23,8 +27,8 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	 */
 
 	bprm->sh_bang++;
-	iput(bprm->inode);
-	bprm->dont_iput=1;
+	dput(bprm->dentry);
+	bprm->dentry = NULL;
 
 	bprm->buf[127] = '\0';
 	if ((cp = strchr(bprm->buf, '\n')) == NULL)
@@ -38,9 +42,9 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 			break;
 	}
 	for (cp = bprm->buf+2; (*cp == ' ') || (*cp == '\t'); cp++);
-	if (!cp || *cp == '\0') 
+	if (*cp == '\0') 
 		return -ENOEXEC; /* No interpreter name found */
-	interp = i_name = cp;
+	i_name_start = i_name = cp;
 	i_arg = 0;
 	for ( ; *cp && (*cp != ' ') && (*cp != '\t'); cp++) {
  		if (*cp == '/')
@@ -50,6 +54,7 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 		*cp++ = '\0';
 	if (*cp)
 		i_arg = cp;
+	strcpy (interp, i_name_start);
 	/*
 	 * OK, we've parsed out the interpreter name and
 	 * (optional) argument.
@@ -72,16 +77,15 @@ static int do_load_script(struct linux_binprm *bprm,struct pt_regs *regs)
 	if (!bprm->p) 
 		return -E2BIG;
 	/*
-	 * OK, now restart the process with the interpreter's inode.
-	 * Note that we use open_namei() as the name is now in kernel
-	 * space, and we don't need to copy it.
+	 * OK, now restart the process with the interpreter's dentry.
 	 */
-	retval = open_namei(interp, 0, 0, &bprm->inode, NULL);
-	if (retval)
-		return retval;
-	bprm->dont_iput=0;
-	retval=prepare_binprm(bprm);
-	if(retval<0)
+	dentry = open_namei(interp, 0, 0);
+	if (IS_ERR(dentry))
+		return PTR_ERR(dentry);
+
+	bprm->dentry = dentry;
+	retval = prepare_binprm(bprm);
+	if (retval < 0)
 		return retval;
 	return search_binary_handler(bprm,regs);
 }
@@ -99,11 +103,12 @@ struct linux_binfmt script_format = {
 #ifndef MODULE
 	NULL, 0, load_script, NULL, NULL
 #else
-	NULL, &mod_use_count_, load_script, NULL, NULL
+	NULL, &__this_module, load_script, NULL, NULL
 #endif
 };
 
-int init_script_binfmt(void) {
+int __init init_script_binfmt(void)
+{
 	return register_binfmt(&script_format);
 }
 

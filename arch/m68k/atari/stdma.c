@@ -1,6 +1,5 @@
-
 /*
- *  linux/atari/stmda.c
+ *  linux/arch/m68k/atari/stmda.c
  *
  *  Copyright (C) 1994 Roman Hodek
  *
@@ -32,11 +31,11 @@
 #include <linux/types.h>
 #include <linux/genhd.h>
 #include <linux/sched.h>
-#include <asm/setup.h>
+#include <linux/init.h>
+
 #include <asm/atari_stdma.h>
 #include <asm/atariints.h>
 #include <asm/atarihw.h>
-#include <asm/atarihdreg.h>
 #include <asm/io.h>
 #include <asm/irq.h>
 
@@ -172,7 +171,7 @@ int stdma_islocked(void)
  *
  */
 
-void stdma_init(void)
+__initfunc(void stdma_init(void))
 {
 	stdma_isr = NULL;
 	request_irq(IRQ_MFP_FDC, stdma_int, IRQ_TYPE_SLOW,

@@ -15,6 +15,7 @@
 
 /* Not the same as the bogus LINK_MAX in <linux/limits.h>. Oh well. */
 #define MINIX_LINK_MAX	250
+#define MINIX2_LINK_MAX	65530
 
 #define MINIX_I_MAP_SLOTS	8
 #define MINIX_Z_MAP_SLOTS	64
@@ -88,19 +89,17 @@ struct minix_dir_entry {
 
 #ifdef __KERNEL__
 
-extern int minix_lookup(struct inode * dir,const char * name, int len,
-                        struct inode ** result);
-extern int minix_create(struct inode * dir,const char * name, int len, int mode,
-	struct inode ** result);
-extern int minix_mkdir(struct inode * dir, const char * name, int len, int mode);
-extern int minix_rmdir(struct inode * dir, const char * name, int len);
-extern int minix_unlink(struct inode * dir, const char * name, int len);
-extern int minix_symlink(struct inode * inode, const char * name, int len,
+extern int minix_lookup(struct inode * dir, struct dentry *dentry);
+extern int minix_create(struct inode * dir, struct dentry *dentry, int mode);
+extern int minix_mkdir(struct inode * dir, struct dentry *dentry, int mode);
+extern int minix_rmdir(struct inode * dir, struct dentry *dentry);
+extern int minix_unlink(struct inode * dir, struct dentry *dentry);
+extern int minix_symlink(struct inode * inode, struct dentry *dentry,
 	const char * symname);
-extern int minix_link(struct inode * oldinode, struct inode * dir, const char * name, int len);
-extern int minix_mknod(struct inode * dir, const char * name, int len, int mode, int rdev);
-extern int minix_rename(struct inode * old_dir, const char * old_name, int old_len,
-	struct inode * new_dir, const char * new_name, int new_len, int must_be_dir);
+extern int minix_link(struct dentry * old_dentry, struct inode * dir, struct dentry *dentry);
+extern int minix_mknod(struct inode * dir, struct dentry *dentry, int mode, int rdev);
+extern int minix_rename(struct inode * old_dir, struct dentry *old_dentry,
+			struct inode * new_dir, struct dentry *new_dentry);
 extern struct inode * minix_new_inode(const struct inode * dir);
 extern void minix_free_inode(struct inode * inode);
 extern unsigned long minix_count_free_inodes(struct super_block *sb);
@@ -114,21 +113,14 @@ extern struct buffer_head * minix_getblk(struct inode *, int, int);
 extern struct buffer_head * minix_bread(struct inode *, int, int);
 
 extern void minix_truncate(struct inode *);
-extern void minix_put_super(struct super_block *);
-extern struct super_block *minix_read_super(struct super_block *,void *,int);
 extern int init_minix_fs(void);
-extern void minix_write_super(struct super_block *);
-extern int minix_remount (struct super_block * sb, int * flags, char * data);
-extern void minix_read_inode(struct inode *);
-extern void minix_write_inode(struct inode *);
-extern void minix_put_inode(struct inode *);
-extern void minix_statfs(struct super_block *, struct statfs *, int);
 extern int minix_sync_inode(struct inode *);
-extern int minix_sync_file(struct inode *, struct file *);
+extern int minix_sync_file(struct file *, struct dentry *);
 
 extern struct inode_operations minix_file_inode_operations;
 extern struct inode_operations minix_dir_inode_operations;
 extern struct inode_operations minix_symlink_inode_operations;
+extern struct dentry_operations minix_dentry_operations;
 
 #endif /* __KERNEL__ */
 

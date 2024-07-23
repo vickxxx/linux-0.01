@@ -1,3 +1,5 @@
+#include <linux/config.h>
+
 #ifndef _PPC_PAGE_H
 #define _PPC_PAGE_H
 
@@ -6,8 +8,10 @@
 #define PAGE_SIZE	(1UL << PAGE_SHIFT)
 #define PAGE_MASK	(~(PAGE_SIZE-1))
 
-void invalidate(void);
+#define PAGE_OFFSET	0xc0000000
 
+
+#ifndef __ASSEMBLY__
 #ifdef __KERNEL__
 
 #define STRICT_MM_TYPECHECKS
@@ -52,39 +56,31 @@ typedef unsigned long pgprot_t;
 
 #endif
 
+
+/* align addr on a size boundry - adjust address up if needed -- Cort */
+#define _ALIGN(addr,size)	(((addr)+size-1)&(~(size-1)))
+
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-/* This handles the memory map.. */
 
-#define KERNELBASE	0x90000000
-#define PAGE_OFFSET	KERNELBASE
-#define MAP_NR(addr)	((((unsigned long)addr) - PAGE_OFFSET) >> PAGE_SHIFT)
-#define MAP_PAGE_RESERVED	(1<<15)
-
-
-#if 0  /* Now defined in "mm.h" */
-/*
- * This used to be an unsigned short...
- * 
- *                         -- Cort
- */
-/*typedef unsigned short mem_map_t;*/
-
-typedef struct {
-	unsigned count:30,
-		 dirty:1,
-		 reserved:1;
-} mem_map_t;
+#define clear_page(page)        memset((void *)(page), 0, PAGE_SIZE)
+#define copy_page(to,from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
+/* map phys->virtual and virtual->phys for RAM pages */
+#ifdef CONFIG_APUS
+#include <asm/amigappc.h>
+/* Word at CYBERBASEp has the value (-KERNELBASE+CYBERBASE). */
+#define __pa(x)			((unsigned long)(x)+(*(unsigned long*)CYBERBASEp))
+#define __va(x)			((void *)((unsigned long)(x)-(*(unsigned long*)CYBERBASEp)))
+#else
+#define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
+#define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
 #endif
 
-/* Certain architectures need to do special things when pte's
- * within a page table are directly modified.  Thus, the following
- * hook is made available.
- */
-#define set_pte(pteptr, pteval) ((*(pteptr)) = (pteval))
+#define MAP_NR(addr)		(((unsigned long)addr-PAGE_OFFSET) >> PAGE_SHIFT)
+#define MAP_PAGE_RESERVED	(1<<15)
 
-
+extern unsigned long get_zero_page_fast(void);
 #endif /* __KERNEL__ */
-
+#endif /* __ASSEMBLY__ */
 #endif /* _PPC_PAGE_H */

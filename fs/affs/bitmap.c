@@ -3,11 +3,11 @@
  *
  *  (c) 1996 Hans-Joachim Widmaier
  *
- *
  *  bitmap.c contains the code that handles all bitmap related stuff -
  *  block allocation, deallocation, calculation of free space.
  */
 
+#define DEBUG 0
 #include <linux/sched.h>
 #include <linux/affs_fs.h>
 #include <linux/stat.h>
@@ -54,7 +54,7 @@ affs_count_free_blocks(struct super_block *s)
 }
 
 void
-affs_free_block(struct super_block *sb, int block)
+affs_free_block(struct super_block *sb, s32 block)
 {
 	int			 bmap;
 	int			 bit;
@@ -70,7 +70,7 @@ affs_free_block(struct super_block *sb, int block)
 	zone_no = (bmap << (sb->s_blocksize_bits - 7)) + bit / 1024;
 	bm      = &sb->u.affs_sb.s_bitmap[bmap];
 	if (bmap >= sb->u.affs_sb.s_bm_count) {
-		printk("AFFS: free_block(): block %d outside partition.\n",block);
+		affs_error(sb,"affs_free_block","Block %d outside partition",block);
 		return;
 	}
 	blk = 0;
@@ -83,15 +83,16 @@ affs_free_block(struct super_block *sb, int block)
 		if (!bm->bm_bh) {
 			bm->bm_count--;
 			unlock_super(sb);
-			printk("AFFS: free_block(): Cannot read bitmap block %d\n",bm->bm_key);
+			affs_error(sb,"affs_free_block","Cannot read bitmap block %d",bm->bm_key);
 			return;
 		}
 	}
-	if (set_bit(bit ^ BO_EXBITS,bm->bm_bh->b_data + 4))
-		printk("AFFS: free_block(): block %d is already free.\n",block);
+	if (test_and_set_bit(bit ^ BO_EXBITS,bm->bm_bh->b_data + 4))
+		affs_warning(sb,"affs_free_block","Trying to free block %d which is already free",
+				block);
 	else {
 		sb->u.affs_sb.s_alloc[zone_no].az_free++;
-		((__u32 *)bm->bm_bh->b_data)[0] = ntohl(htonl(((__u32 *)bm->bm_bh->b_data)[0]) - blk);
+		((u32 *)bm->bm_bh->b_data)[0] = cpu_to_be32(be32_to_cpu(((u32 *)bm->bm_bh->b_data)[0]) - blk);
 		mark_buffer_dirty(bm->bm_bh,1);
 		sb->s_dirt = 1;
 	}
@@ -102,15 +103,24 @@ affs_free_block(struct super_block *sb, int block)
 	unlock_super(sb);
 }
 
-static int
+/*
+ * Allocate a block in the given allocation zone.
+ * Since we have to byte-swap the bitmap on little-endian
+ * machines, this is rather expensive. Therefor we will
+ * preallocate up to 16 blocks from the same word, if
+ * possible. We are not doing preallocations in the
+ * header zone, though.
+ */
+
+static s32
 affs_balloc(struct inode *inode, int zone_no)
 {
-	__u32			 w;
-	__u32			*bm;
+	u32			 w;
+	u32			*bm;
 	int			 fb;
 	int			 i;
 	int			 fwb;
-	int			 block;
+	s32			 block;
 	struct affs_zone	*zone;
 	struct affs_alloc_zone	*az;
 	struct super_block	*sb;
@@ -124,7 +134,7 @@ affs_balloc(struct inode *inode, int zone_no)
 	pr_debug("AFFS: balloc(inode=%lu,zone=%d)\n",inode->i_ino,zone_no);
 
 	az = &sb->u.affs_sb.s_alloc[zone->z_az_no];
-	bm = (__u32 *)zone->z_bm->bm_bh->b_data;
+	bm = (u32 *)zone->z_bm->bm_bh->b_data;
 repeat:
 	for (i = zone->z_start; i < zone->z_end; i++) {
 		if (bm[i])
@@ -136,11 +146,11 @@ found:
 	fwb = zone->z_bm->bm_firstblk + (i - 1) * 32;
 	lock_super(sb);
 	zone->z_start = i;
-	w   = ~htonl(bm[i]);
+	w   = ~be32_to_cpu(bm[i]);
 	fb  = find_first_zero_bit(&w,32);
-	if (fb > 31 || !clear_bit(fb ^ BO_EXBITS,&bm[i])) {
+	if (fb > 31 || !test_and_clear_bit(fb ^ BO_EXBITS,&bm[i])) {
 		unlock_super(sb);
-		printk("AFFS: balloc(): empty block disappeared somehow\n");
+		affs_warning(sb,"balloc","Empty block disappeared somehow");
 		goto repeat;
 	}
 	block = fwb + fb;
@@ -149,28 +159,31 @@ found:
 	/* prealloc as much as possible within this word, but not in header zone */
 
 	if (zone_no) {
-		while (inode->u.affs_i.i_pa_cnt < MAX_PREALLOC && ++fb < 32) {
+		while (inode->u.affs_i.i_pa_cnt < AFFS_MAX_PREALLOC && ++fb < 32) {
 			fb = find_next_zero_bit(&w,32,fb);
 			if (fb > 31)
 				break;
-			if (!clear_bit(fb ^ BO_EXBITS,&bm[i])) {
-				printk("AFFS: balloc(): empty block disappeared\n");
+			if (!test_and_clear_bit(fb ^ BO_EXBITS,&bm[i])) {
+				affs_warning(sb,"balloc","Empty block disappeared somehow");
 				break;
 			}
 			inode->u.affs_i.i_data[inode->u.affs_i.i_pa_last++] = fwb + fb;
-			inode->u.affs_i.i_pa_last &= MAX_PREALLOC - 1;
+			inode->u.affs_i.i_pa_last &= AFFS_MAX_PREALLOC - 1;
 			inode->u.affs_i.i_pa_cnt++;
 			az->az_free--;
 		}
 	}
-	w     = ~w - htonl(bm[i]);
-	bm[0] = ntohl(htonl(bm[0]) + w);
+	w     = ~w - be32_to_cpu(bm[i]);
+	bm[0] = cpu_to_be32(be32_to_cpu(bm[0]) + w);
 	unlock_super(sb);
 	mark_buffer_dirty(zone->z_bm->bm_bh,1);
+	sb->s_dirt = 1;
 	zone->z_lru_time = jiffies;
 
 	return block;
 }
+
+/* Find a new allocation zone, starting at zone_no. */
 
 static int
 affs_find_new_zone(struct super_block *sb, int zone_no)
@@ -204,12 +217,10 @@ affs_find_new_zone(struct super_block *sb, int zone_no)
 		if (az->az_count)
 			az->az_count--;
 		else
-			printk("AFFS: find_new_zone(): az_count=0, but bm used\n");
+			affs_error(sb,"find_new_zone","az_count=0, but bm used");
 
 	}
 	while (1) {
-		if (i >= sb->u.affs_sb.s_num_az)
-			i = 0;
 		az = &sb->u.affs_sb.s_alloc[i];
 		if (!az->az_count) {
 			if (az->az_free > min) {
@@ -223,7 +234,9 @@ affs_find_new_zone(struct super_block *sb, int zone_no)
 			lusers   = az->az_count;
 			bestused = i;
 		}
-		if (++i == zone->z_az_no) {		/* Seen all */
+		if (++i >= sb->u.affs_sb.s_num_az)
+			i = 0;
+		if (i == zone->z_az_no) {		/* Seen all */
 			if (bestno >= 0) {
 				i = bestno;
 			} else {
@@ -247,7 +260,7 @@ affs_find_new_zone(struct super_block *sb, int zone_no)
 		bm->bm_count--;
 		az->az_count--;
 		unlock_super(sb);
-		printk("AFFS: find_new_zone(): Cannot read bitmap\n");
+		affs_error(sb,"find_new_zone","Cannot read bitmap");
 		return 0;
 	}
 	zone->z_bm    = bm;
@@ -255,22 +268,24 @@ affs_find_new_zone(struct super_block *sb, int zone_no)
 	zone->z_end   = zone->z_start + az->az_size;
 	zone->z_az_no = i;
 	zone->z_lru_time = jiffies;
-	pr_debug("  ++ found zone (%d) in bm %d at lw offset %d with %d free blocks\n",
+	pr_debug("AFFS: found zone (%d) in bm %d at lw offset %d with %d free blocks\n",
 		 i,(i >> (sb->s_blocksize_bits - 7)),zone->z_start,az->az_free);
 	unlock_super(sb);
 	return az->az_free;
 }
 
-int
+/* Allocate a new header block. */
+
+s32
 affs_new_header(struct inode *inode)
 {
-	int			 block;
+	s32			 block;
 	struct buffer_head	*bh;
 
 	pr_debug("AFFS: new_header(ino=%lu)\n",inode->i_ino);
 
 	if (!(block = affs_balloc(inode,0))) {
-		while(affs_find_new_zone(inode->i_sb,0)) {
+		while (affs_find_new_zone(inode->i_sb,0)) {
 			if ((block = affs_balloc(inode,0)))
 				goto init_block;
 			schedule();
@@ -279,7 +294,7 @@ affs_new_header(struct inode *inode)
 	}
 init_block:
 	if (!(bh = getblk(inode->i_dev,block,AFFS_I2BSIZE(inode)))) {
-		printk("AFFS: balloc(): cannot read block %d\n",block);
+		affs_error(inode->i_sb,"new_header","Cannot get block %d",block);
 		return 0;
 	}
 	memset(bh->b_data,0,AFFS_I2BSIZE(inode));
@@ -290,7 +305,9 @@ init_block:
 	return block;
 }
 
-int
+/* Allocate a new data block. */
+
+s32
 affs_new_data(struct inode *inode)
 {
 	int			 empty, old;
@@ -299,7 +316,7 @@ affs_new_data(struct inode *inode)
 	struct super_block	*sb;
 	struct buffer_head	*bh;
 	int			 i = 0;
-	int			 block;
+	s32			 block;
 
 	pr_debug("AFFS: new_data(ino=%lu)\n",inode->i_ino);
 
@@ -309,7 +326,7 @@ affs_new_data(struct inode *inode)
 		inode->u.affs_i.i_pa_cnt--;
 		unlock_super(sb);
 		block = inode->u.affs_i.i_data[inode->u.affs_i.i_pa_next++];
-		inode->u.affs_i.i_pa_next &= MAX_PREALLOC - 1;
+		inode->u.affs_i.i_pa_next &= AFFS_MAX_PREALLOC - 1;
 		goto init_block;
 	}
 	unlock_super(sb);
@@ -345,7 +362,7 @@ affs_new_data(struct inode *inode)
 found:
 	zone = &sb->u.affs_sb.s_zones[i];
 	if (!(block = affs_balloc(inode,i))) {		/* No data zones left */
-		while(affs_find_new_zone(sb,i)) {
+		while (affs_find_new_zone(sb,i)) {
 			if ((block = affs_balloc(inode,i)))
 				goto init_block;
 			schedule();
@@ -357,7 +374,7 @@ found:
 
 init_block:
 	if (!(bh = getblk(inode->i_dev,block,sb->s_blocksize))) {
-		printk("AFFS: balloc(): cannot read block %u\n",block);
+		affs_error(inode->i_sb,"new_data","Cannot get block %d",block);
 		return 0;
 	}
 	memset(bh->b_data,0,sb->s_blocksize);
@@ -376,9 +393,7 @@ affs_make_zones(struct super_block *sb)
 	pr_debug("AFFS: make_zones(): num_zones=%d\n",sb->u.affs_sb.s_num_az);
 
 	mid = (sb->u.affs_sb.s_num_az + 1) / 2;
-	sb->u.affs_sb.s_zones[0].z_az_no = mid;
-	affs_find_new_zone(sb,0);
-	for (i = 1; i < MAX_ZONES; i++) {
+	for (i = 0; i < MAX_ZONES; i++) {
 		sb->u.affs_sb.s_zones[i].z_az_no = mid;
 		affs_find_new_zone(sb,i);
 	}

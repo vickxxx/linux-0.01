@@ -26,7 +26,7 @@ struct _fpstate {
 	unsigned long	status;
 };
 
-struct sigcontext_struct {
+struct sigcontext {
 	unsigned short gs, __gsh;
 	unsigned short fs, __fsh;
 	unsigned short es, __esh;
@@ -50,5 +50,6 @@ struct sigcontext_struct {
 	unsigned long oldmask;
 	unsigned long cr2;
 };
+
 
 #endif

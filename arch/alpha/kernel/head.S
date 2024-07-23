@@ -7,10 +7,7 @@
  * the kernel global pointer and jump to the kernel entry-point.
  */
 
-#define __ASSEMBLY__
 #include <asm/system.h>
-
-#define halt call_pal PAL_halt
 
 .globl swapper_pg_dir
 .globl _stext
@@ -21,17 +18,45 @@ swapper_pg_dir=SWAPPER_PGD
 	.ent	__start
 _stext:
 __start:
+	.prologue 0
 	br	$27,1f
 1:	ldgp	$29,0($27)
-	lda	$27,start_kernel
-	jsr	$26,($27),start_kernel
-	halt
+	/* We need to get current loaded up with our first task...  */
+	lda	$8,init_task_union
+	/* ... and find our stack ... */
+	lda	$30,0x4000($8)
+	/* ... and then we can start the kernel.  */
+	jsr	$26,start_kernel
+	call_pal PAL_halt
 	.end __start
+
+#ifdef __SMP__
+	.align 3
+	.globl	__start_cpu
+	.ent	__start_cpu
+	/* On entry here from SRM console, the HWPCB of this processor
+	   has been loaded, and $27 contains the task pointer */
+__start_cpu:
+	.prologue 0
+	/* First order of business, load the GP */
+	br	$26,1f
+1:	ldgp	$29,0($26)
+	/* We need to get current loaded up with our first task...  */
+	mov	$27,$8
+	/* Set FEN */
+	lda	$16,1($31)
+	call_pal PAL_wrfen
+	/* ... and then we can start the processor.  */
+	jsr	$26,start_secondary
+	call_pal PAL_halt
+	.end __start_cpu
+#endif /* __SMP__ */
 
 	.align 3
 	.globl	wrent
 	.ent	wrent
 wrent:
+	.prologue 0
 	call_pal PAL_wrent
 	ret	($26)
 	.end wrent
@@ -40,6 +65,7 @@ wrent:
 	.globl	wrkgp
 	.ent	wrkgp
 wrkgp:
+	.prologue 0
 	call_pal PAL_wrkgp
 	ret	($26)
 	.end wrkgp
@@ -48,6 +74,7 @@ wrkgp:
 	.globl	wrusp
 	.ent	wrusp
 wrusp:
+	.prologue 0
 	call_pal PAL_wrusp
 	ret	($26)
 	.end wrusp
@@ -56,30 +83,16 @@ wrusp:
 	.globl	rdusp
 	.ent	rdusp
 rdusp:
+	.prologue 0
 	call_pal PAL_rdusp
 	ret	($26)
 	.end rdusp
 
 	.align 3
-	.globl	tbi
-	.ent	tbi
-tbi:
-	call_pal PAL_tbi
-	ret	($26)
-	.end tbi
-
-	.align 3
-	.globl	imb
-	.ent	imb
-imb:
-	call_pal PAL_imb
-	ret	($26)
-	.end imb
-
-	.align 3
 	.globl	rdmces
 	.ent	rdmces
 rdmces:
+	.prologue 0
 	call_pal PAL_rdmces
 	ret	($26)
 	.end rdmces
@@ -88,40 +101,76 @@ rdmces:
 	.globl	wrmces
 	.ent	wrmces
 wrmces:
+	.prologue 0
 	call_pal PAL_wrmces
 	ret	($26)
 	.end wrmces
 
-	#
-	# The following two functions don't need trapb/excb instructions
-	# around the mf_fpcr/mt_fpcr instructions because (a) the kernel
-	# never generates arithmetic faults and (b) call_pal instructions
-	# are implied trap barriers.
-	#
 	.align 3
-	.globl	rdfpcr
-	.ent	rdfpcr
-rdfpcr:
-	lda	$30,-0x10($30)
-	stt	$f0,0($30)
-	mf_fpcr	$f0
-	stt	$f0,8($30)
-	ldt	$f0,0($30)
-	ldq	$0,8($30)
-	lda	$30,0x10($30)
-	ret	($26)
-	.end	rdfpcr
+	.globl  whami
+	.ent    whami
+whami:
+	.prologue 0
+	call_pal PAL_whami
+	ret     ($26)
+	.end whami
+ 
+	.align 3
+	.globl  wripir
+	.ent    wripir
+wripir:
+	.prologue 0
+	call_pal PAL_wripir
+	ret     ($26)
+	.end wripir
 
 	.align 3
-	.globl	wrfpcr
-	.ent	wrfpcr
-wrfpcr:
-	lda	$30,-0x10($30)
-	stt	$f0,0($30)
-	stq	$16,8($30)
-	ldt	$f0,8($30)
-	mt_fpcr	$f0
-	ldt	$f0,0($30)
-	lda	$30,0x10($30)
+	.globl wrvptptr
+	.ent wrvptptr
+wrvptptr:
+	.prologue 0
+	call_pal PAL_wrvptptr
 	ret	($26)
-	.end	wrfpcr
+	.end wrvptptr
+
+	#
+	# The following two functions are needed for supporting SRM PALcode
+	# on the PC164 (at least), since that PALcode manages the interrupt
+	# masking, and we cannot duplicate the effort without causing problems
+	#
+
+	.align 3
+	.globl	cserve_ena
+	.ent	cserve_ena
+cserve_ena:
+	.prologue 0
+	bis	$16,$16,$17
+	lda	$16,52($31)
+	call_pal PAL_cserve
+	ret	($26)
+	.end	cserve_ena
+
+	.align 3
+	.globl	cserve_dis
+	.ent	cserve_dis
+cserve_dis:
+	.prologue 0
+	bis	$16,$16,$17
+	lda	$16,53($31)
+	call_pal PAL_cserve
+	ret	($26)
+	.end	cserve_dis
+
+	#
+	# It is handy, on occasion, to make halt actually just loop. 
+	# Putting it here means we dont have to recompile the whole
+	# kernel.
+	#
+
+	.align 3
+	.globl	halt
+	.ent	halt
+halt:
+	.prologue 0
+	call_pal PAL_halt
+	.end	halt

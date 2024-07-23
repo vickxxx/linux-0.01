@@ -14,7 +14,23 @@
  * They use the standard big-endian m680x0 bit ordering.
  */
 
-extern __inline__ int set_bit(int nr,void * vaddr)
+#define test_and_set_bit(nr,vaddr) \
+  (__builtin_constant_p(nr) ? \
+   __constant_test_and_set_bit(nr, vaddr) : \
+   __generic_test_and_set_bit(nr, vaddr))
+
+extern __inline__ int __constant_test_and_set_bit(int nr,void * vaddr)
+{
+	char retval;
+
+	__asm__ __volatile__ ("bset %1,%2; sne %0"
+	     : "=d" (retval)
+	     : "di" (nr & 7), "m" (((char *)vaddr)[(nr^31) >> 3]));
+
+	return retval;
+}
+
+extern __inline__ int __generic_test_and_set_bit(int nr,void * vaddr)
 {
 	char retval;
 
@@ -24,7 +40,40 @@ extern __inline__ int set_bit(int nr,void * vaddr)
 	return retval;
 }
 
-extern __inline__ int clear_bit(int nr, void * vaddr)
+#define set_bit(nr,vaddr) \
+  (__builtin_constant_p(nr) ? \
+   __constant_set_bit(nr, vaddr) : \
+   __generic_set_bit(nr, vaddr))
+
+extern __inline__ void __constant_set_bit(int nr, void * vaddr)
+{
+	__asm__ __volatile__ ("bset %0,%1"
+	     : : "di" (nr & 7), "m" (((char *)vaddr)[(nr^31) >> 3]));
+}
+
+extern __inline__ void __generic_set_bit(int nr, void * vaddr)
+{
+	__asm__ __volatile__ ("bfset %1@{%0:#1}"
+	     : : "d" (nr^31), "a" (vaddr));
+}
+
+#define test_and_clear_bit(nr,vaddr) \
+  (__builtin_constant_p(nr) ? \
+   __constant_test_and_clear_bit(nr, vaddr) : \
+   __generic_test_and_clear_bit(nr, vaddr))
+
+extern __inline__ int __constant_test_and_clear_bit(int nr, void * vaddr)
+{
+	char retval;
+
+	__asm__ __volatile__ ("bclr %1,%2; sne %0"
+	     : "=d" (retval)
+	     : "di" (nr & 7), "m" (((char *)vaddr)[(nr^31) >> 3]));
+
+	return retval;
+}
+
+extern __inline__ int __generic_test_and_clear_bit(int nr, void * vaddr)
 {
 	char retval;
 
@@ -34,7 +83,40 @@ extern __inline__ int clear_bit(int nr, void * vaddr)
 	return retval;
 }
 
-extern __inline__ int change_bit(int nr, void * vaddr)
+#define clear_bit(nr,vaddr) \
+  (__builtin_constant_p(nr) ? \
+   __constant_clear_bit(nr, vaddr) : \
+   __generic_clear_bit(nr, vaddr))
+
+extern __inline__ void __constant_clear_bit(int nr, void * vaddr)
+{
+	__asm__ __volatile__ ("bclr %0,%1"
+	     : : "di" (nr & 7), "m" (((char *)vaddr)[(nr^31) >> 3]));
+}
+
+extern __inline__ void __generic_clear_bit(int nr, void * vaddr)
+{
+	__asm__ __volatile__ ("bfclr %1@{%0:#1}"
+	     : : "d" (nr^31), "a" (vaddr));
+}
+
+#define test_and_change_bit(nr,vaddr) \
+  (__builtin_constant_p(nr) ? \
+   __constant_test_and_change_bit(nr, vaddr) : \
+   __generic_test_and_change_bit(nr, vaddr))
+
+extern __inline__ int __constant_test_and_change_bit(int nr, void * vaddr)
+{
+	char retval;
+
+	__asm__ __volatile__ ("bchg %1,%2; sne %0"
+	     : "=d" (retval)
+	     : "di" (nr & 7), "m" (((char *)vaddr)[(nr^31) >> 3]));
+
+	return retval;
+}
+
+extern __inline__ int __generic_test_and_change_bit(int nr, void * vaddr)
 {
 	char retval;
 
@@ -42,6 +124,23 @@ extern __inline__ int change_bit(int nr, void * vaddr)
 	     : "=d" (retval) : "d" (nr^31), "a" (vaddr));
 
 	return retval;
+}
+
+#define change_bit(nr,vaddr) \
+  (__builtin_constant_p(nr) ? \
+   __constant_change_bit(nr, vaddr) : \
+   __generic_change_bit(nr, vaddr))
+
+extern __inline__ void __constant_change_bit(int nr, void * vaddr)
+{
+	__asm__ __volatile__ ("bchg %0,%1"
+	     : : "di" (nr & 7), "m" (((char *)vaddr)[(nr^31) >> 3]));
+}
+
+extern __inline__ void __generic_change_bit(int nr, void * vaddr)
+{
+	__asm__ __volatile__ ("bfchg %1@{%0:#1}"
+	     : : "d" (nr^31), "a" (vaddr));
 }
 
 extern __inline__ int test_bit(int nr, const void * vaddr)
@@ -110,6 +209,32 @@ extern __inline__ unsigned long ffz(unsigned long word)
 			      : "=d" (res) : "d" (~word & -~word));
 	return res ^ 31;
 }
+
+#ifdef __KERNEL__
+
+/*
+ * ffs: find first bit set. This is defined the same way as
+ * the libc and compiler builtin ffs routines, therefore
+ * differs in spirit from the above ffz (man ffs).
+ */
+
+extern __inline__ int ffs(int x)
+{
+	int cnt;
+
+	asm ("bfffo %1{#0:#0}" : "=d" (cnt) : "dm" (x & -x));
+
+	return 32 - cnt;
+}
+
+/*
+ * hweightN: returns the hamming weight (i.e. the number
+ * of bits set) of a N-bit word
+ */
+
+#define hweight32(x) generic_hweight32(x)
+#define hweight16(x) generic_hweight16(x)
+#define hweight8(x) generic_hweight8(x)
 
 /* Bitmap functions for the minix filesystem */
 
@@ -239,19 +364,6 @@ ext2_find_next_zero_bit (const void *vaddr, unsigned size, unsigned offset)
 	return (p - addr) * 32 + res;
 }
 
-/* Byte swapping. */
-
-extern __inline__ unsigned short
-swab16 (unsigned short val)
-{
-	return (val << 8) | (val >> 8);
-}
-
-extern __inline__ unsigned int
-swab32 (unsigned int val)
-{
-	__asm__ ("rolw #8,%0; swap %0; rolw #8,%0" : "=d" (val) : "0" (val));
-	return val;
-}
+#endif /* __KERNEL__ */
 
 #endif /* _M68K_BITOPS_H */

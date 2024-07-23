@@ -1,5 +1,5 @@
 #
-# Makefile for the Linux TCP/IP (INET) layer.
+# Makefile for the Linux Ethernet layer.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -9,7 +9,11 @@
 
 O_TARGET := ethernet.o
 
-OBJS	:= eth.o sysctl_net_ether.o
+OBJS	:= eth.o
+
+ifeq ($(CONFIG_SYSCTL),y)
+OBJS += sysctl_net_ether.o
+endif
 
 ifdef CONFIG_IPX
 OBJ2	:= pe2.o

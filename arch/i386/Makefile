@@ -13,39 +13,15 @@
 # Copyright (C) 1994 by Linus Torvalds
 #
 
-AS86    =$(CROSS_COMPILE)as86 -0 -a
-AS386   =$(CROSS_COMPILE)as86 -3
-LD86    =$(CROSS_COMPILE)ld86 -0
-
-#
-# ZIMAGE_OFFSET is the load offset of the compression loader
-# BZIMAGE_OFFSET is the load offset of the high loaded compression loader
-#
-ZIMAGE_OFFSET=0x1000
-BZIMAGE_OFFSET=0x100000
-
-#
-# IMAGE_OFFSET is the load offset of the _real_ kernel, soon
-# to be offset by another 0xC0000000...
-#
-IMAGE_OFFSET=0xC0100000
-
-# This is used for ELF - it needs to migrate or be moved.
-LD_RFLAG = -m elf_i386
-
 LD=$(CROSS_COMPILE)ld -m elf_i386
-CPP=$(CC) -E -D__ELF__
-OBJDUMP=$(CROSS_COMPILE)objdump
-OBJDUMP_FLAGS=-k -q 
-ENCAPS=$(CROSS_COMPILE)encaps
-OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -R .stab -R .stabstr
-ZLDFLAGS=-e startup_32 
+CPP=$(CC) -E
+OBJCOPY=$(CROSS_COMPILE)objcopy -O binary -R .note -R .comment -S
 LDFLAGS=-e stext
-ZLINKFLAGS =-Ttext $(ZIMAGE_OFFSET) $(ZLDFLAGS)
-BZLINKFLAGS =-Ttext $(BZIMAGE_OFFSET) $(ZLDFLAGS)
-LINKFLAGS =-Ttext $(IMAGE_OFFSET) $(LDFLAGS)
+LINKFLAGS =-T $(TOPDIR)/arch/i386/vmlinux.lds $(LDFLAGS)
 
-CFLAGS := $(CFLAGS) -pipe
+CFLAGS_PIPE := -pipe
+CFLAGS_NSR  := -fno-strength-reduce
+CFLAGS := $(CFLAGS) $(CFLAGS_PIPE) $(CFLAGS_NSR)
 
 ifdef CONFIG_M386
 CFLAGS := $(CFLAGS) -m386 -DCPU=386
@@ -63,14 +39,10 @@ ifdef CONFIG_M686
 CFLAGS := $(CFLAGS) -m486 -malign-loops=2 -malign-jumps=2 -malign-functions=2 -DCPU=686
 endif
 
-ifdef SMP
-CFLAGS := $(CFLAGS) -D__SMP__
-endif
-
-HEAD := arch/i386/kernel/head.o
+HEAD := arch/i386/kernel/head.o arch/i386/kernel/init_task.o
 
 SUBDIRS := $(SUBDIRS) arch/i386/kernel arch/i386/mm arch/i386/lib
-ARCHIVES := arch/i386/kernel/kernel.o arch/i386/mm/mm.o $(ARCHIVES)
+CORE_FILES := arch/i386/kernel/kernel.o arch/i386/mm/mm.o $(CORE_FILES)
 LIBS := $(TOPDIR)/arch/i386/lib/lib.a $(LIBS) $(TOPDIR)/arch/i386/lib/lib.a
 
 ifdef CONFIG_MATH_EMULATION
@@ -107,11 +79,12 @@ bzdisk: vmlinux
 	@$(MAKEBOOT) BOOTIMAGE=bzImage zdisk
 
 install: vmlinux
-	@$(MAKEBOOT) install
+	@$(MAKEBOOT) BOOTIMAGE=bzImage install
 
 archclean:
 	@$(MAKEBOOT) clean
-	$(MAKE) -C arch/$(ARCH)/kernel clean
+
+archmrproper:
 
 archdep:
 	@$(MAKEBOOT) dep

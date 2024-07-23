@@ -19,7 +19,7 @@
     EtherLink II Technical Reference Manual,
     EtherLink II/16 Technical Reference Manual Supplement,
     3Com Corporation, 5400 Bayfront Plaza, Santa Clara CA 95052-8145
-    
+
     The Crynwr 3c503 packet driver.
 
     Changelog:
@@ -42,6 +42,7 @@ static const char *version =
 #include <linux/delay.h>
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
+#include <linux/init.h>
 
 #include <asm/io.h>
 #include <asm/system.h>
@@ -49,14 +50,14 @@ static const char *version =
 
 #include "8390.h"
 #include "3c503.h"
-#define WRD_COUNT 4 
+#define WRD_COUNT 4
 
 int el2_probe(struct device *dev);
 int el2_pio_probe(struct device *dev);
 int el2_probe1(struct device *dev, int ioaddr);
 
 /* A zero-terminated list of I/O addresses to be probed in PIO mode. */
-static unsigned int netcard_portlist[] =
+static unsigned int netcard_portlist[] __initdata =
 	{ 0x300,0x310,0x330,0x350,0x250,0x280,0x2a0,0x2e0,0};
 
 #define EL2_IO_EXTENT	16
@@ -75,7 +76,7 @@ static int el2_close(struct device *dev);
 static void el2_reset_8390(struct device *dev);
 static void el2_init_card(struct device *dev);
 static void el2_block_output(struct device *dev, int count,
-			     const unsigned char *buf, const start_page);
+			     const unsigned char *buf, int start_page);
 static void el2_block_input(struct device *dev, int count, struct sk_buff *skb,
 			   int ring_offset);
 static void el2_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
@@ -89,8 +90,8 @@ static void el2_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
    If the ethercard isn't found there is an optional probe for
    ethercard jumpered to programmed-I/O mode.
    */
-int
-el2_probe(struct device *dev)
+__initfunc(int
+el2_probe(struct device *dev))
 {
     int *addr, addrs[] = { 0xddffe, 0xd9ffe, 0xcdffe, 0xc9ffe, 0};
     int base_addr = dev->base_addr;
@@ -124,8 +125,8 @@ el2_probe(struct device *dev)
 #ifndef HAVE_DEVLIST
 /*  Try all of the locations that aren't obviously empty.  This touches
     a lot of locations, and is much riskier than the code above. */
-int
-el2_pio_probe(struct device *dev)
+__initfunc(int
+el2_pio_probe(struct device *dev))
 {
     int i;
     int base_addr = dev ? dev->base_addr : 0;
@@ -150,8 +151,8 @@ el2_pio_probe(struct device *dev)
 /* Probe for the Etherlink II card at I/O port base IOADDR,
    returning non-zero on success.  If found, set the station
    address and memory parameters in DEVICE. */
-int
-el2_probe1(struct device *dev, int ioaddr)
+__initfunc(int
+el2_probe1(struct device *dev, int ioaddr))
 {
     int i, iobase_reg, membase_reg, saved_406, wordlength;
     static unsigned version_printed = 0;
@@ -159,7 +160,7 @@ el2_probe1(struct device *dev, int ioaddr)
 
     /* Reset and/or avoid any lurking NE2000 */
     if (inb(ioaddr + 0x408) == 0xff) {
-    	udelay(1000);
+    	mdelay(1);
 	return ENODEV;
     }
 
@@ -184,6 +185,9 @@ el2_probe1(struct device *dev, int ioaddr)
 	outb(saved_406, ioaddr + 0x406);
 	return ENODEV;
     }
+
+    if (load_8390_module("3c503.c"))
+	return -ENOSYS;
 
     /* We should have a "dev" from Space.c or the static module table. */
     if (dev == NULL) {
@@ -277,9 +281,9 @@ el2_probe1(struct device *dev, int ioaddr)
     /*
 	Divide up the memory on the card. This is the same regardless of
 	whether shared-mem or PIO is used. For 16 bit cards (16kB RAM),
-	we use the entire 8k of bank1 for an Rx ring. We only use 3k 
+	we use the entire 8k of bank1 for an Rx ring. We only use 3k
 	of the bank0 for 2 full size Tx packet slots. For 8 bit cards,
-	(8kB RAM) we use 3kB of bank1 for two Tx slots, and the remaining 
+	(8kB RAM) we use 3kB of bank1 for two Tx slots, and the remaining
 	5kB for an Rx ring.  */
 
     if (wordlength) {
@@ -339,13 +343,13 @@ el2_open(struct device *dev)
 
 	outb(EGACFR_NORM, E33G_GACFR);	/* Enable RAM and interrupts. */
 	do {
-	    if (request_irq (*irqp, NULL, 0, "bogus", NULL) != -EBUSY) {
+	    if (request_irq (*irqp, NULL, 0, "bogus", dev) != -EBUSY) {
 		/* Twinkle the interrupt, and check if it's seen. */
 		autoirq_setup(0);
 		outb_p(0x04 << ((*irqp == 9) ? 2 : *irqp), E33G_IDCFR);
 		outb_p(0x00, E33G_IDCFR);
 		if (*irqp == autoirq_report(0)	 /* It's a good IRQ line! */
-		    && request_irq (dev->irq = *irqp, &ei_interrupt, 0, ei_status.name, NULL) == 0)
+		    && request_irq (dev->irq = *irqp, ei_interrupt, 0, ei_status.name, dev) == 0)
 		    break;
 	    }
 	} while (*++irqp);
@@ -354,7 +358,7 @@ el2_open(struct device *dev)
 	    return -EAGAIN;
 	}
     } else {
-	if (request_irq(dev->irq, &ei_interrupt, 0, ei_status.name, NULL)) {
+	if (request_irq(dev->irq, ei_interrupt, 0, ei_status.name, dev)) {
 	    return -EAGAIN;
 	}
     }
@@ -368,9 +372,8 @@ el2_open(struct device *dev)
 static int
 el2_close(struct device *dev)
 {
-    free_irq(dev->irq, NULL);
+    free_irq(dev->irq, dev);
     dev->irq = ei_status.saved_irq;
-    irq2dev_map[dev->irq] = NULL;
     outb(EGACFR_IRQOFF, E33G_GACFR);	/* disable interrupts. */
 
     ei_close(dev);
@@ -432,7 +435,7 @@ el2_init_card(struct device *dev)
  */
 static void
 el2_block_output(struct device *dev, int count,
-		 const unsigned char *buf, const start_page)
+		 const unsigned char *buf, int start_page)
 {
     unsigned short int *wrd;
     int boguscount;		/* timeout counter */
@@ -440,7 +443,7 @@ el2_block_output(struct device *dev, int count,
 
     if (ei_status.word16)      /* Tx packets go into bank 0 on EL2/16 card */
 	outb(EGACFR_RSEL|EGACFR_TCM, E33G_GACFR);
-    else 
+    else
 	outb(EGACFR_NORM, E33G_GACFR);
 
     if (dev->mem_start) {	/* Shared memory transfer */
@@ -473,7 +476,7 @@ el2_block_output(struct device *dev, int count,
  */
     wrd = (unsigned short int *) buf;
     count  = (count + 1) >> 1;
-    for(;;) 
+    for(;;)
     {
         boguscount = 0x1000;
         while ((inb(E33G_STATUS) & ESTAT_DPRDY) == 0)
@@ -582,14 +585,14 @@ el2_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_off
  *  can read one extra byte without clobbering anything in the kernel because
  *  this would only occur on an odd byte-count and allocation of skb->data
  *  is word-aligned. Variable 'count' is NOT checked. Caller must check
- *  for a valid count. 
+ *  for a valid count.
  *  [This is currently quite safe.... but if one day the 3c503 explodes
  *   you know where to come looking ;)]
  */
 
     buf =  (unsigned short int *) skb->data;
     count =  (count + 1) >> 1;
-    for(;;) 
+    for(;;)
     {
         boguscount = 0x1000;
         while ((inb(E33G_STATUS) & ESTAT_DPRDY) == 0)
@@ -602,7 +605,7 @@ el2_block_input(struct device *dev, int count, struct sk_buff *skb, int ring_off
             }
         }
         if(count > WRD_COUNT)
-        { 
+        {
             insw(E33G_FIFOH, buf, WRD_COUNT);
             buf   += WRD_COUNT;
             count -= WRD_COUNT;
@@ -634,6 +637,9 @@ static struct device dev_el2[MAX_EL2_CARDS] = {
 static int io[MAX_EL2_CARDS] = { 0, };
 static int irq[MAX_EL2_CARDS]  = { 0, };
 static int xcvr[MAX_EL2_CARDS] = { 0, };	/* choose int. or ext. xcvr */
+MODULE_PARM(io, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
+MODULE_PARM(xcvr, "1-" __MODULE_STRING(MAX_EL2_CARDS) "i");
 
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
@@ -655,11 +661,15 @@ init_module(void)
 		}
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "3c503.c: No 3c503 card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) return 0;	/* Got at least one. */
+			if (found != 0) {	/* Got at least one. */
+				lock_8390_module();
+				return 0;
+			}
 			return -ENXIO;
 		}
 		found++;
 	}
+	lock_8390_module();
 	return 0;
 }
 
@@ -671,13 +681,14 @@ cleanup_module(void)
 	for (this_dev = 0; this_dev < MAX_EL2_CARDS; this_dev++) {
 		struct device *dev = &dev_el2[this_dev];
 		if (dev->priv != NULL) {
-			/* NB: el2_close() handles free_irq + irq2dev map */
-			kfree(dev->priv);
-			dev->priv = NULL;
+			void *priv = dev->priv;
+			/* NB: el2_close() handles free_irq */
 			release_region(dev->base_addr, EL2_IO_EXTENT);
 			unregister_netdev(dev);
+			kfree(priv);
 		}
 	}
+	unlock_8390_module();
 }
 #endif /* MODULE */
 

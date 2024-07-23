@@ -1,9 +1,9 @@
 /*
  *  History:
- *  Started: Aug 9 by Lawrence Foard (entropy@world.std.com), 
+ *  Started: Aug 9 by Lawrence Foard (entropy@world.std.com),
  *           to allow user process control of SCSI devices.
  *  Development Sponsored by Killy Corp. NY NY
- *   
+ *
  *  Borrows code from st driver.
  */
 #include <linux/module.h>
@@ -17,8 +17,9 @@
 #include <linux/mtio.h>
 #include <linux/ioctl.h>
 #include <linux/fcntl.h>
+#include <linux/poll.h>
 #include <asm/io.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 
 #include <linux/blk.h>
@@ -27,13 +28,15 @@
 #include <scsi/scsi_ioctl.h>
 #include <scsi/sg.h>
 
+int sg_big_buff = SG_BIG_BUFF;		/* for now, sg_big_buff is read-only through sysctl */
+
 static int sg_init(void);
 static int sg_attach(Scsi_Device *);
 static int sg_detect(Scsi_Device *);
 static void sg_detach(Scsi_Device *);
 
 
-struct Scsi_Device_Template sg_template = {NULL, NULL, "sg", NULL, 0xff, 
+struct Scsi_Device_Template sg_template = {NULL, NULL, "sg", NULL, 0xff,
 					       SCSI_GENERIC_MAJOR, 0, 0, 0, 0,
 					       sg_detect, sg_init,
 					       NULL, sg_attach, sg_detach};
@@ -66,20 +69,41 @@ static void sg_free(char *buff,int size);
 static int sg_ioctl(struct inode * inode,struct file * file,
 		    unsigned int cmd_in, unsigned long arg)
 {
-    int result;
-    int dev = MINOR(inode->i_rdev);
+    int                         dev = MINOR(inode->i_rdev);
+    int                         result;
+
     if ((dev<0) || (dev>=sg_template.dev_max))
 	return -ENXIO;
+
+    /*
+     * If we are in the middle of error recovery, then don't allow any
+     * access to this device.  Also, error recovery *may* have taken the
+     * device offline, in which case all further access is prohibited.
+     */
+    if( !scsi_block_when_processing_errors(scsi_generics[dev].device) )
+      {
+        return -ENXIO;
+      }
+
     switch(cmd_in)
     {
     case SG_SET_TIMEOUT:
-        result = verify_area(VERIFY_READ, (const void *)arg, sizeof(long));
+        result = verify_area(VERIFY_READ, (const void *)arg, sizeof(int));
         if (result) return result;
 
-	scsi_generics[dev].timeout=get_user((int *) arg);
+	get_user(scsi_generics[dev].timeout, (int *) arg);
 	return 0;
     case SG_GET_TIMEOUT:
 	return scsi_generics[dev].timeout;
+    case SG_EMULATED_HOST:
+    	return put_user(scsi_generics[dev].device->host->hostt->emulated, (int *) arg);
+    case SCSI_IOCTL_SEND_COMMAND:
+	/*
+	  Allow SCSI_IOCTL_SEND_COMMAND without checking suser() since the
+	  user already has read/write access to the generic device and so
+	  can execute arbitrary SCSI commands.
+	*/
+	return scsi_ioctl_send_command(scsi_generics[dev].device, (void *) arg);
     default:
 	return scsi_ioctl(scsi_generics[dev].device, cmd_in, (void *) arg);
     }
@@ -91,6 +115,12 @@ static int sg_open(struct inode * inode, struct file * filp)
     int flags=filp->f_flags;
     if (dev>=sg_template.dev_max || !scsi_generics[dev].device)
 	return -ENXIO;
+
+    if( !scsi_block_when_processing_errors(scsi_generics[dev].device) )
+      {
+        return -ENXIO;
+      }
+
     if (O_RDWR!=(flags & O_ACCMODE))
 	return -EACCES;
 
@@ -105,7 +135,7 @@ static int sg_open(struct inode * inode, struct file * filp)
 	    if (flags & O_NONBLOCK)
 		return -EBUSY;
 	    interruptible_sleep_on(&scsi_generics[dev].generic_wait);
-	    if (current->signal & ~current->blocked)
+	    if (signal_pending(current))
 		return -ERESTARTSYS;
 	}
 	scsi_generics[dev].exclude=1;
@@ -120,7 +150,7 @@ static int sg_open(struct inode * inode, struct file * filp)
 	    if (flags & O_NONBLOCK)
 		return -EBUSY;
 	    interruptible_sleep_on(&scsi_generics[dev].generic_wait);
-	    if (current->signal & ~current->blocked)
+	    if (signal_pending(current))
 		return -ERESTARTSYS;
 	}
 
@@ -129,7 +159,7 @@ static int sg_open(struct inode * inode, struct file * filp)
      * that other processes know that we have it, and initialize the
      * state variables to known values.
      */
-    if (!scsi_generics[dev].users 
+    if (!scsi_generics[dev].users
         && scsi_generics[dev].pending
         && scsi_generics[dev].complete)
     {
@@ -140,22 +170,25 @@ static int sg_open(struct inode * inode, struct file * filp)
     }
     if (!scsi_generics[dev].users)
 	scsi_generics[dev].timeout=SG_DEFAULT_TIMEOUT;
-    if (scsi_generics[dev].device->host->hostt->usage_count)
-	(*scsi_generics[dev].device->host->hostt->usage_count)++;
-    if(sg_template.usage_count) (*sg_template.usage_count)++;
+    if (scsi_generics[dev].device->host->hostt->module)
+	__MOD_INC_USE_COUNT(scsi_generics[dev].device->host->hostt->module);
+    if (sg_template.module)
+        __MOD_INC_USE_COUNT(sg_template.module);
     scsi_generics[dev].users++;
     return 0;
 }
 
-static void sg_close(struct inode * inode, struct file * filp)
+static int sg_close(struct inode * inode, struct file * filp)
 {
     int dev=MINOR(inode->i_rdev);
     scsi_generics[dev].users--;
-    if (scsi_generics[dev].device->host->hostt->usage_count)
-	(*scsi_generics[dev].device->host->hostt->usage_count)--;
-    if(sg_template.usage_count) (*sg_template.usage_count)--;
+    if (scsi_generics[dev].device->host->hostt->module)
+	__MOD_DEC_USE_COUNT(scsi_generics[dev].device->host->hostt->module);
+    if(sg_template.module)
+        __MOD_DEC_USE_COUNT(sg_template.module);
     scsi_generics[dev].exclude=0;
     wake_up(&scsi_generics[dev].generic_wait);
+    return 0;
 }
 
 static char *sg_malloc(int size)
@@ -168,17 +201,17 @@ static char *sg_malloc(int size)
 	while(big_inuse)
 	{
 	    interruptible_sleep_on(&big_wait);
-	    if (current->signal & ~current->blocked)
+	    if (signal_pending(current))
 		return NULL;
 	}
 	big_inuse=1;
 	return big_buff;
     }
-#endif   
+#endif
     return NULL;
 }
 
-static void sg_free(char *buff,int size) 
+static void sg_free(char *buff,int size)
 {
 #ifdef SG_BIG_BUFF
     if (buff==big_buff)
@@ -196,35 +229,47 @@ static void sg_free(char *buff,int size)
  * complete semaphores to tell us whether the buffer is available for us
  * and whether the command is actually done.
  */
-static int sg_read(struct inode *inode,struct file *filp,char *buf,int count)
+static ssize_t sg_read(struct file *filp, char *buf,
+                       size_t count, loff_t *ppos)
 {
+    struct inode *inode = filp->f_dentry->d_inode;
     int dev=MINOR(inode->i_rdev);
     int i;
-    unsigned long flags;
     struct scsi_generic *device=&scsi_generics[dev];
+
+    /*
+     * If we are in the middle of error recovery, don't let anyone
+     * else try and use this device.  Also, if error recovery fails, it
+     * may try and take the device offline, in which case all further
+     * access to the device is prohibited.
+     */
+    if( !scsi_block_when_processing_errors(scsi_generics[dev].device) )
+      {
+        return -ENXIO;
+      }
+
+    if (ppos != &filp->f_pos) {
+      /* FIXME: Hmm.  Seek to the right place, or fail?  */
+    }
+
     if ((i=verify_area(VERIFY_WRITE,buf,count)))
 	return i;
 
     /*
      * Wait until the command is actually done.
      */
-    save_flags(flags);
-    cli();
     while(!device->pending || !device->complete)
     {
 	if (filp->f_flags & O_NONBLOCK)
 	{
-	    restore_flags(flags);
 	    return -EAGAIN;
 	}
 	interruptible_sleep_on(&device->read_wait);
-	if (current->signal & ~current->blocked)
+	if (signal_pending(current))
 	{
-	    restore_flags(flags);
 	    return -ERESTARTSYS;
 	}
     }
-    restore_flags(flags);
 
     /*
      * Now copy the result back to the user buffer.
@@ -233,17 +278,17 @@ static int sg_read(struct inode *inode,struct file *filp,char *buf,int count)
 
     if (count>=sizeof(struct sg_header))
     {
-	memcpy_tofs(buf,&device->header,sizeof(struct sg_header));
+	copy_to_user(buf,&device->header,sizeof(struct sg_header));
 	buf+=sizeof(struct sg_header);
 	if (count>device->header.pack_len)
 	    count=device->header.pack_len;
 	if (count > sizeof(struct sg_header)) {
-	    memcpy_tofs(buf,device->buff,count-sizeof(struct sg_header));
+	    copy_to_user(buf,device->buff,count-sizeof(struct sg_header));
 	}
     }
     else
 	count= device->header.result==0 ? 0 : -EIO;
-    
+
     /*
      * Clean up, and release the device so that we can send another
      * command.
@@ -267,7 +312,8 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
     if (!device->pending)
     {
 	printk("unexpected done for sg %d\n",dev);
-	SCpnt->request.rq_status = RQ_INACTIVE;
+        scsi_release_command(SCpnt);
+        SCpnt = NULL;
 	return;
     }
 
@@ -283,14 +329,14 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
       break;
     case DID_NO_CONNECT:
     case DID_BUS_BUSY:
-    case DID_TIME_OUT: 
+    case DID_TIME_OUT:
       device->header.result = EBUSY;
       break;
-    case DID_BAD_TARGET: 
-    case DID_ABORT: 
-    case DID_PARITY: 
+    case DID_BAD_TARGET:
+    case DID_ABORT:
+    case DID_PARITY:
     case DID_RESET:
-    case DID_BAD_INTR: 
+    case DID_BAD_INTR:
       device->header.result = EIO;
       break;
     case DID_ERROR:
@@ -314,12 +360,16 @@ static void sg_command_done(Scsi_Cmnd * SCpnt)
      * result.
      */
     device->complete=1;
-    SCpnt->request.rq_status = RQ_INACTIVE;
+    scsi_release_command(SCpnt);
+    SCpnt = NULL;
     wake_up(&scsi_generics[dev].read_wait);
 }
 
-static int sg_write(struct inode *inode,struct file *filp,const char *buf,int count)
+static ssize_t sg_write(struct file *filp, const char *buf, 
+                        size_t count, loff_t *ppos)
 {
+    unsigned long	  flags;
+    struct inode         *inode = filp->f_dentry->d_inode;
     int			  bsize,size,amt,i;
     unsigned char	  cmnd[MAX_COMMAND_SIZE];
     kdev_t		  devt = inode->i_rdev;
@@ -328,12 +378,27 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
     int			  input_size;
     unsigned char	  opcode;
     Scsi_Cmnd		* SCpnt;
-    
+
+    /*
+     * If we are in the middle of error recovery, don't let anyone
+     * else try and use this device.  Also, if error recovery fails, it
+     * may try and take the device offline, in which case all further
+     * access to the device is prohibited.
+     */
+    if( !scsi_block_when_processing_errors(scsi_generics[dev].device) )
+      {
+        return -ENXIO;
+      }
+
+    if (ppos != &filp->f_pos) {
+      /* FIXME: Hmm.  Seek to the right place, or fail?  */
+    }
+
     if ((i=verify_area(VERIFY_READ,buf,count)))
 	return i;
     /*
      * The minimum scsi command length is 6 bytes.  If we get anything
-     * less than this, it is clearly bogus.  
+     * less than this, it is clearly bogus.
      */
     if (count<(sizeof(struct sg_header) + 6))
 	return -EIO;
@@ -349,9 +414,9 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
 	    return -EAGAIN;
 #ifdef DEBUG
 	printk("sg_write: sleeping on pending request\n");
-#endif     
+#endif
 	interruptible_sleep_on(&device->write_wait);
-	if (current->signal & ~current->blocked)
+	if (signal_pending(current))
 	    return -ERESTARTSYS;
     }
 
@@ -360,7 +425,7 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
      */
     device->pending=1;
     device->complete=0;
-    memcpy_fromfs(&device->header,buf,sizeof(struct sg_header));
+    copy_from_user(&device->header,buf,sizeof(struct sg_header));
 
     device->header.pack_len=count;
     buf+=sizeof(struct sg_header);
@@ -368,7 +433,7 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
     /*
      * Now we need to grab the command itself from the user's buffer.
      */
-    opcode = get_user(buf);
+    get_user(opcode, buf);
     size=COMMAND_SIZE(opcode);
     if (opcode >= 0xc0 && device->header.twelve_byte) size = 12;
 
@@ -382,7 +447,7 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
     } else {
         bsize = device->header.reply_len;
     }
-    
+
     /*
      * Don't include the command header itself in the size.
      */
@@ -398,7 +463,7 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
         wake_up( &device->write_wait );
 	return -EIO;
     }
-    
+
     /*
      * Allocate a buffer that is large enough to hold the data
      * that has been requested.  Round up to an even number of sectors,
@@ -427,17 +492,17 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
      * Grab a device pointer for the device we want to talk to.  If we
      * don't want to block, just return with the appropriate message.
      */
-    if (!(SCpnt=allocate_device(NULL,device->device, !(filp->f_flags & O_NONBLOCK))))
+    if (!(SCpnt=scsi_allocate_device(NULL,device->device, !(filp->f_flags & O_NONBLOCK))))
     {
 	device->pending=0;
 	wake_up(&device->write_wait);
 	sg_free(device->buff,device->buff_len);
 	device->buff = NULL;
 	return -EAGAIN;
-    } 
+    }
 #ifdef DEBUG
     printk("device allocated\n");
-#endif    
+#endif
 
     SCpnt->request.rq_dev = devt;
     SCpnt->request.rq_status = RQ_ACTIVE;
@@ -447,7 +512,7 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
     /*
      * Now copy the SCSI command from the user's address space.
      */
-    memcpy_fromfs(cmnd,buf,size);
+    copy_from_user(cmnd,buf,size);
     buf+=size;
 
     /*
@@ -455,8 +520,8 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
      * field also includes the length of the header and the command,
      * so we need to subtract these off.
      */
-    if (input_size > 0) memcpy_fromfs(device->buff, buf, input_size);
-    
+    if (input_size > 0) copy_from_user(device->buff, buf, input_size);
+
     /*
      * Set the LUN field in the command structure.
      */
@@ -471,42 +536,33 @@ static int sg_write(struct inode *inode,struct file *filp,const char *buf,int co
      * do not do any more here - when the interrupt arrives, we will
      * then do the post-processing.
      */
+    spin_lock_irqsave(&io_request_lock, flags);
     scsi_do_cmd (SCpnt,(void *) cmnd,
 		 (void *) device->buff,amt,
 		 sg_command_done,device->timeout,SG_DEFAULT_RETRIES);
+    spin_unlock_irqrestore(&io_request_lock, flags);
 
 #ifdef DEBUG
     printk("done cmd\n");
-#endif               
+#endif
 
     return count;
 }
 
-static int sg_select(struct inode *inode, struct file *file, int sel_type, select_table * wait)
+static unsigned int sg_poll(struct file *file, poll_table * wait)
 {
-    int dev=MINOR(inode->i_rdev);
-    int r = 0;
-    struct scsi_generic *device=&scsi_generics[dev];
+        int dev = MINOR(file->f_dentry->d_inode->i_rdev);
+        struct scsi_generic *device = &scsi_generics[dev];
+        unsigned int mask = 0;
 
-    if (sel_type == SEL_IN) {
+        poll_wait(file, &scsi_generics[dev].read_wait, wait);
+        poll_wait(file, &scsi_generics[dev].write_wait, wait);
         if(device->pending && device->complete)
-        {
-            r = 1;
-    	} else {
-	    select_wait(&scsi_generics[dev].read_wait, wait);
-    	}
-    }
-    if (sel_type == SEL_OUT) {
-        if(!device->pending){
-            r = 1;
-        }
-        else
-        {
-	    select_wait(&scsi_generics[dev].write_wait, wait);
-        }
-    }
+                mask |= POLLIN | POLLRDNORM;
+        if(!device->pending)
+                mask |= POLLOUT | POLLWRNORM;
 
-    return(r);
+        return mask;
 }
 
 static struct file_operations sg_fops = {
@@ -514,10 +570,11 @@ static struct file_operations sg_fops = {
     sg_read,         /* read */
     sg_write,        /* write */
     NULL,            /* readdir */
-    sg_select,       /* select */
+    sg_poll,         /* poll */
     sg_ioctl,        /* ioctl */
     NULL,            /* mmap */
     sg_open,         /* open */
+    NULL,	     /* flush */
     sg_close,        /* release */
     NULL             /* fsync */
 };
@@ -531,7 +588,7 @@ static int sg_detect(Scsi_Device * SDp){
 	case TYPE_ROM:
 	case TYPE_WORM:
 	case TYPE_TAPE: break;
-	default: 
+	default:
 	printk("Detected scsi generic sg%c at scsi%d, channel %d, id %d, lun %d\n",
            'a'+sg_template.dev_noticed,
            SDp->host->host_no, SDp->channel, SDp->id, SDp->lun);
@@ -544,11 +601,11 @@ static int sg_detect(Scsi_Device * SDp){
 static int sg_init()
 {
     static int sg_registered = 0;
-    
+
     if (sg_template.dev_noticed == 0) return 0;
-    
+
     if(!sg_registered) {
-	if (register_chrdev(SCSI_GENERIC_MAJOR,"sg",&sg_fops)) 
+	if (register_chrdev(SCSI_GENERIC_MAJOR,"sg",&sg_fops))
 	{
 	    printk("Unable to get major %d for generic SCSI device\n",
 		   SCSI_GENERIC_MAJOR);
@@ -556,24 +613,24 @@ static int sg_init()
 	}
 	sg_registered++;
     }
-    
+
     /* If we have already been through here, return */
     if(scsi_generics) return 0;
-    
+
 #ifdef DEBUG
     printk("sg: Init generic device.\n");
 #endif
-    
+
 #ifdef SG_BIG_BUFF
     big_buff= (char *) scsi_init_malloc(SG_BIG_BUFF, GFP_ATOMIC | GFP_DMA);
 #endif
-    
-    scsi_generics = (struct scsi_generic *) 
-	scsi_init_malloc((sg_template.dev_noticed + SG_EXTRA_DEVS) 
+
+    scsi_generics = (struct scsi_generic *)
+	scsi_init_malloc((sg_template.dev_noticed + SG_EXTRA_DEVS)
 			 * sizeof(struct scsi_generic), GFP_ATOMIC);
     memset(scsi_generics, 0, (sg_template.dev_noticed + SG_EXTRA_DEVS)
 	   * sizeof(struct scsi_generic));
-    
+
     sg_template.dev_max = sg_template.dev_noticed + SG_EXTRA_DEVS;
     return 0;
 }
@@ -582,18 +639,18 @@ static int sg_attach(Scsi_Device * SDp)
 {
     struct scsi_generic * gpnt;
     int i;
-    
-    if(sg_template.nr_dev >= sg_template.dev_max) 
+
+    if(sg_template.nr_dev >= sg_template.dev_max)
     {
 	SDp->attached--;
 	return 1;
     }
-    
-    for(gpnt = scsi_generics, i=0; i<sg_template.dev_max; i++, gpnt++) 
+
+    for(gpnt = scsi_generics, i=0; i<sg_template.dev_max; i++, gpnt++)
 	if(!gpnt->device) break;
-    
+
     if(i >= sg_template.dev_max) panic ("scsi_devices corrupt (sg)");
-    
+
     scsi_generics[i].device=SDp;
     scsi_generics[i].users=0;
     scsi_generics[i].generic_wait=NULL;
@@ -613,14 +670,14 @@ static void sg_detach(Scsi_Device * SDp)
 {
     struct scsi_generic * gpnt;
     int i;
-    
-    for(gpnt = scsi_generics, i=0; i<sg_template.dev_max; i++, gpnt++) 
+
+    for(gpnt = scsi_generics, i=0; i<sg_template.dev_max; i++, gpnt++)
 	if(gpnt->device == SDp) {
 	    gpnt->device = NULL;
 	    SDp->attached--;
 	    sg_template.nr_dev--;
-            /* 
-             * avoid associated device /dev/sg? bying incremented 
+            /*
+             * avoid associated device /dev/sg? bying incremented
              * each time module is inserted/removed , <dan@lectra.fr>
              */
             sg_template.dev_noticed--;
@@ -632,18 +689,18 @@ static void sg_detach(Scsi_Device * SDp)
 #ifdef MODULE
 
 int init_module(void) {
-    sg_template.usage_count = &mod_use_count_;
+    sg_template.module = &__this_module;
     return scsi_register_module(MODULE_SCSI_DEV, &sg_template);
 }
 
-void cleanup_module( void) 
+void cleanup_module( void)
 {
     scsi_unregister_module(MODULE_SCSI_DEV, &sg_template);
     unregister_chrdev(SCSI_GENERIC_MAJOR, "sg");
-    
+
     if(scsi_generics != NULL) {
 	scsi_init_free((char *) scsi_generics,
-		       (sg_template.dev_noticed + SG_EXTRA_DEVS) 
+		       (sg_template.dev_noticed + SG_EXTRA_DEVS)
 		       * sizeof(struct scsi_generic));
     }
     sg_template.dev_max = 0;

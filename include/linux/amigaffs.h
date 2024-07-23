@@ -4,10 +4,18 @@
 #include <asm/byteorder.h>
 #include <linux/types.h>
 
+/* AmigaOS allows file names with up to 30 characters length.
+ * Names longer than that will be silently truncated. If you
+ * want to disallow this, comment out the following #define.
+ * Creating filesystem objects with longer names will then
+ * result in an error (ENAMETOOLONG).
+ */
+/*#define AFFS_NO_TRUNCATE */
+
 /* Ugly macros make the code more pretty. */
 
 #define GET_END_PTR(st,p,sz)		 ((st *)((char *)(p)+((sz)-sizeof(st))))
-#define AFFS_GET_HASHENTRY(data,hashkey) htonl(((struct dir_front *)data)->hashtable[hashkey])
+#define AFFS_GET_HASHENTRY(data,hashkey) be32_to_cpu(((struct dir_front *)data)->hashtable[hashkey])
 #define AFFS_BLOCK(data,ino,blk)	 ((struct file_front *)data)->blocks[AFFS_I2HSIZE(ino)-1-(blk)]
 
 #define FILE_END(p,i)	GET_END_PTR(struct file_end,p,AFFS_I2BSIZE(i))
@@ -16,6 +24,7 @@
 #define LINK_END(p,i)	GET_END_PTR(struct hlink_end,p,AFFS_I2BSIZE(i))
 #define ROOT_END_S(p,s)	GET_END_PTR(struct root_end,p,(s)->s_blocksize)
 #define DATA_FRONT(bh)	((struct data_front *)(bh)->b_data)
+#define DIR_FRONT(bh)	((struct dir_front *)(bh)->b_data)
 
 /* Only for easier debugging if need be */
 #define affs_bread	bread
@@ -56,131 +65,131 @@
 
 struct root_front
 {
-  __s32 primary_type;
-  __s32 spare1[2];
-  __s32 hash_size;
-  __s32 spare2;
-  __u32 checksum;
-  __s32 hashtable[0];
+  s32 primary_type;
+  s32 spare1[2];
+  s32 hash_size;
+  s32 spare2;
+  u32 checksum;
+  s32 hashtable[0];
 };
 
 struct root_end
 {
-  __s32 bm_flag;
-  __s32 bm_keys[25];
-  __s32 bm_extend;
+  s32 bm_flag;
+  s32 bm_keys[25];
+  s32 bm_extend;
   struct DateStamp dir_altered;
-  __u8 disk_name[40];
+  u8 disk_name[40];
   struct DateStamp disk_altered;
   struct DateStamp disk_made;
-  __s32 spare1[3];
-  __s32 secondary_type;
+  s32 spare1[3];
+  s32 secondary_type;
 };
 
 struct dir_front
 {
-  __s32 primary_type;
-  __s32 own_key;
-  __s32 spare1[3];
-  __u32 checksum;
-  __s32 hashtable[0];
+  s32 primary_type;
+  s32 own_key;
+  s32 spare1[3];
+  u32 checksum;
+  s32 hashtable[0];
 };
 
 struct dir_end
 {
-  __s32 spare1;
-  __s16 owner_uid;
-  __s16 owner_gid;
-  __u32 protect;
-  __s32 spare2;
-  __u8 comment[92];
+  s32 spare1;
+  s16 owner_uid;
+  s16 owner_gid;
+  u32 protect;
+  s32 spare2;
+  u8 comment[92];
   struct DateStamp created;
-  __u8 dir_name[32];
-  __s32 spare3[2];
-  __s32 link_chain;
-  __s32 spare4[5];
-  __s32 hash_chain;
-  __s32 parent;
-  __s32 spare5;
-  __s32 secondary_type;
+  u8 dir_name[32];
+  s32 spare3[2];
+  s32 link_chain;
+  s32 spare4[5];
+  s32 hash_chain;
+  s32 parent;
+  s32 spare5;
+  s32 secondary_type;
 };
 
 struct file_front
 {
-  __s32 primary_type;
-  __s32 own_key;
-  __s32 block_count;
-  __s32 unknown1;
-  __s32 first_data;
-  __u32 checksum;
-  __s32 blocks[0];
+  s32 primary_type;
+  s32 own_key;
+  s32 block_count;
+  s32 unknown1;
+  s32 first_data;
+  u32 checksum;
+  s32 blocks[0];
 };
 
 struct file_end
 {
-  __s32 spare1;
-  __s16 owner_uid;
-  __s16 owner_gid;
-  __u32 protect;
-  __s32 byte_size;
-  __u8 comment[92];
+  s32 spare1;
+  s16 owner_uid;
+  s16 owner_gid;
+  u32 protect;
+  s32 byte_size;
+  u8 comment[92];
   struct DateStamp created;
-  __u8 file_name[32];
-  __s32 spare2;
-  __s32 original;	/* not really in file_end */
-  __s32 link_chain;
-  __s32 spare3[5];
-  __s32 hash_chain;
-  __s32 parent;
-  __s32 extension;
-  __s32 secondary_type;
+  u8 file_name[32];
+  s32 spare2;
+  s32 original;	/* not really in file_end */
+  s32 link_chain;
+  s32 spare3[5];
+  s32 hash_chain;
+  s32 parent;
+  s32 extension;
+  s32 secondary_type;
 };
 
 struct hlink_front
 {
-  __s32 primary_type;
-  __s32 own_key;
-  __s32 spare1[3];
-  __u32 checksum;
+  s32 primary_type;
+  s32 own_key;
+  s32 spare1[3];
+  u32 checksum;
 };
 
 struct hlink_end
 {
-  __s32 spare1;
-  __s16 owner_uid;
-  __s16 owner_gid;
-  __u32 protect;
-  __u8 comment[92];
+  s32 spare1;
+  s16 owner_uid;
+  s16 owner_gid;
+  u32 protect;
+  u8 comment[92];
   struct DateStamp created;
-  __u8 link_name[32];
-  __s32 spare2;
-  __s32 original;
-  __s32 link_chain;
-  __s32 spare3[5];
-  __s32 hash_chain;
-  __s32 parent;
-  __s32 spare4;
-  __s32 secondary_type;
+  u8 link_name[32];
+  s32 spare2;
+  s32 original;
+  s32 link_chain;
+  s32 spare3[5];
+  s32 hash_chain;
+  s32 parent;
+  s32 spare4;
+  s32 secondary_type;
 };
 
 struct slink_front
 {
-  __s32 primary_type;
-  __s32 own_key;
-  __s32 spare1[3];
-  __s32 checksum;
-  __u8	symname[288];	/* depends on block size */
+  s32 primary_type;
+  s32 own_key;
+  s32 spare1[3];
+  s32 checksum;
+  u8	symname[288];	/* depends on block size */
 };
 
 struct data_front
 {
-  __s32 primary_type;
-  __s32 header_key;
-  __s32 sequence_number;
-  __s32 data_size;
-  __s32 next_data;
-  __s32 checksum;
-  __u8 data[488];	/* depends on block size */
+  s32 primary_type;
+  s32 header_key;
+  s32 sequence_number;
+  s32 data_size;
+  s32 next_data;
+  s32 checksum;
+  u8 data[488];	/* depends on block size */
 };
 
 /* Permission bits */
@@ -206,14 +215,14 @@ struct data_front
 
 #define AFFS_UMAYWRITE(prot)	(((prot) & (FIBF_WRITE|FIBF_DELETE)) == (FIBF_WRITE|FIBF_DELETE))
 #define AFFS_UMAYREAD(prot)	((prot) & FIBF_READ)
-#define AFFS_UMAYEXECUTE(prot)	(((prot) & (FIBF_SCRIPT|FIBF_READ)) == (FIBF_SCRIPT|FIBF_READ))
+#define AFFS_UMAYEXECUTE(prot)	((prot) & FIBF_EXECUTE)
 #define AFFS_GMAYWRITE(prot)	(((prot)&(FIBF_GRP_WRITE|FIBF_GRP_DELETE))==\
 							(FIBF_GRP_WRITE|FIBF_GRP_DELETE))
 #define AFFS_GMAYREAD(prot)	((prot) & FIBF_GRP_READ)
-#define AFFS_GMAYEXECUTE(prot)	(((prot)&(FIBF_SCRIPT|FIBF_GRP_READ))==(FIBF_SCRIPT|FIBF_GRP_READ))
+#define AFFS_GMAYEXECUTE(prot)	((prot) & FIBF_EXECUTE)
 #define AFFS_OMAYWRITE(prot)	(((prot)&(FIBF_OTR_WRITE|FIBF_OTR_DELETE))==\
 							(FIBF_OTR_WRITE|FIBF_OTR_DELETE))
 #define AFFS_OMAYREAD(prot)	((prot) & FIBF_OTR_READ)
-#define AFFS_OMAYEXECUTE(prot)	(((prot)&(FIBF_SCRIPT|FIBF_OTR_READ))==(FIBF_SCRIPT|FIBF_OTR_READ))
+#define AFFS_OMAYEXECUTE(prot)	((prot) & FIBF_EXECUTE)
 
 #endif

@@ -8,7 +8,61 @@
 
 #ifdef __KERNEL__
 
+#include<linux/config.h>
+
 #define STRICT_MM_TYPECHECKS
+
+#define get_user_page(vaddr)	__get_free_page(GFP_KERNEL)
+#define free_user_page(page, addr)	free_page(addr)
+
+/*
+ * We don't need to check for alignment etc.
+ */
+#if defined(CONFIG_OPTIMIZE_040) || defined(CONFIG_OPTIMIZE_060)
+static inline void copy_page(unsigned long to, unsigned long from)
+{
+  unsigned long tmp;
+
+  __asm__ __volatile__("1:\t"
+		       ".chip 68040\n\t"
+		       "move16 %1@+,%0@+\n\t"
+		       "move16 %1@+,%0@+\n\t"
+		       ".chip 68k\n\t"
+		       "dbra  %2,1b\n\t"
+		       : "=a" (to), "=a" (from), "=d" (tmp)
+		       : "0" (to), "1" (from) , "2" (PAGE_SIZE / 32 - 1)
+		       );
+}
+
+static inline void clear_page(unsigned long page)
+{
+	unsigned long data, sp, tmp;
+
+	sp = page;
+
+	data = 0;
+
+	*((unsigned long *)(page))++ = 0;
+	*((unsigned long *)(page))++ = 0;
+	*((unsigned long *)(page))++ = 0;
+	*((unsigned long *)(page))++ = 0;
+
+	__asm__ __volatile__("1:\t"
+			     ".chip 68040\n\t"
+			     "move16 %2@+,%0@+\n\t"
+			     ".chip 68k\n\t"
+			     "subqw  #8,%2\n\t"
+			     "subqw  #8,%2\n\t"
+			     "dbra   %1,1b\n\t"
+			     : "=a" (page), "=d" (tmp)
+			     : "a" (sp), "0" (page),
+			       "1" ((PAGE_SIZE - 16) / 16 - 1));
+}
+
+#else
+#define clear_page(page)	memset((void *)(page), 0, PAGE_SIZE)
+#define copy_page(to,from)	memcpy((void *)(to), (void *)(from), PAGE_SIZE)
+#endif
 
 #ifdef STRICT_MM_TYPECHECKS
 /*
@@ -50,18 +104,14 @@ typedef unsigned long pgprot_t;
 
 #endif
 
-/* This is the cache mode to be used for pages containing page descriptors for
- * processors >= '040. It is in pte_mknocache(), and the variable is defined
- * and initialized in head.S */
-extern int m68k_pgtable_cachemode;
-
 /* to align the pointer to the (next) page boundary */
 #define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
 /* This handles the memory map.. */
 #define PAGE_OFFSET		0
-#define MAP_NR(addr)		(((unsigned long)(addr)) >> PAGE_SHIFT)
-#define MAP_PAGE_RESERVED	(1<<15)
+#define __pa(x)			((unsigned long)(x)-PAGE_OFFSET)
+#define __va(x)			((void *)((unsigned long)(x)+PAGE_OFFSET))
+#define MAP_NR(addr)		(__pa(addr) >> PAGE_SHIFT)
 
 #endif /* __KERNEL__ */
 

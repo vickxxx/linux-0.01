@@ -14,8 +14,10 @@
 ** 94/11/14 Andreas Schwab: put kernel at PAGESIZE
 ** 94/11/18 Andreas Schwab: remove identity mapping of STRAM for Atari
 ** ++ Bjoern & Roman: ATARI-68040 support for the Medusa
+** 95/11/18 Richard Hirst: Added MVME166 support
 ** 96/04/26 Guenther Kelleter: fixed identity mapping for Falcon with
 ** 			      Magnum- and FX-alternate ram
+** 98/04/25 Phil Blundell: added HP300 support
 **
 ** This file is subject to the terms and conditions of the GNU General Public
 ** License. See the file README.legal in the main directory of this archive
@@ -67,13 +69,29 @@
 
 #include <linux/config.h>
 #include <linux/linkage.h>
+#include <asm/bootinfo.h>
 #include <asm/setup.h>
 #include <asm/pgtable.h>
 
 .globl SYMBOL_NAME(kernel_pg_dir), SYMBOL_NAME(kpt)
-.globl SYMBOL_NAME(availmem), SYMBOL_NAME(is_medusa)
+.globl SYMBOL_NAME(availmem)
 .globl SYMBOL_NAME(m68k_pgtable_cachemode)
 .globl SYMBOL_NAME(kernel_pmd_table), SYMBOL_NAME(swapper_pg_dir)
+
+#if defined(CONFIG_MVME16x)
+.globl SYMBOL_NAME(mvme_bdid_ptr)
+#endif
+
+/*
+ * Added m68k_supervisor_cachemode for 68060 boards where some drivers
+ * need writethrough caching for supervisor accesses.  Drivers known to
+ * be effected are 53c7xx.c and apricot.c (when used on VME boards).
+ * Richard Hirst.
+ */
+
+#ifdef CONFIG_060_WRITETHROUGH
+.globl SYMBOL_NAME(m68k_supervisor_cachemode)
+#endif
 
 D6B_0460 = 16		/* indicates 680[46]0 in d6 */
 D6B_060  = 17		/* indicates 68060 in d6 */
@@ -143,11 +161,23 @@ TABLENR_16MB	= 64	/* same for 16 MB */
 
 #define is_not_amiga(lab) moveq &MACH_AMIGA,%d7; cmpl %d4,%d7; jne lab
 #define is_not_atari(lab) moveq &MACH_ATARI,%d7; cmpl %d4,%d7; jne lab
+#define is_not_mvme16x(lab) moveq &MACH_MVME16x,%d7; cmpl %d4,%d7; jne lab
+#define is_not_bvme6000(lab) moveq &MACH_BVME6000,%d7; cmpl %d4,%d7; jne lab
+#define is_not_hp300(lab) moveq &MACH_HP300,%d7	;  cmpl %d4,%d7; jne lab
 
 #define is_040_or_060(lab) btst &D6B_0460,%d6; jne lab
 #define is_not_040_or_060(lab) btst &D6B_0460,%d6; jeq lab
 #define is_060(lab) btst &D6B_060,%d6; jne lab
 #define is_not_060(lab) btst &D6B_060,%d6; jeq lab
+
+/* On the HP300 we use the on-board LEDs for debug output before
+   the console is running.  Writing a 1 bit turns the corresponding LED
+   _off_ - on the 340 bit 7 is towards the back panel of the machine.  */
+#ifdef CONFIG_HP300
+#define leds(x) is_not_hp300(42f) ; moveb #(x),%d7 ; jbsr Lset_leds; 42:
+#else
+#define leds(x)
+#endif
 
 .text
 ENTRY(_stext)
@@ -160,6 +190,8 @@ ENTRY(_stext)
 	.long	BOOTINFOV_MAGIC
 	.long	MACH_AMIGA, AMIGA_BOOTI_VERSION
 	.long	MACH_ATARI, ATARI_BOOTI_VERSION
+	.long	MACH_MVME16x, MVME16x_BOOTI_VERSION
+	.long	MACH_BVME6000, BVME6000_BOOTI_VERSION
 	.long	0
 1:	jra	SYMBOL_NAME(_start)
 
@@ -178,21 +210,29 @@ ENTRY(_start)
 	lea	%pc@(SYMBOL_NAME(_stext):w),%sp
 
 /*
- * Copy bootinfo from position after BSS to final resting place
- */
-	lea	%pc@(SYMBOL_NAME(_end)),%a0
-	lea	%pc@(SYMBOL_NAME(boot_info)),%a1
-	movel	%pc@(SYMBOL_NAME(bisize)),%d0
-	subql	#1,%d0
-1:	moveb	%a0@+,%a1@+
-	dbra	%d0,1b
-
-/*
  * Record the CPU and machine type.
  */
-	lea	%pc@(SYMBOL_NAME(boot_info)),%a0
-	movel	%a0@(BI_machtype),%d4
-	movel	%a0@(BI_cputype),%d0
+
+	movew	#BI_MACHTYPE,%d0
+	jbsr	Lget_bi_record
+	movel	%a0@,%d4
+	lea	%pc@(SYMBOL_NAME(m68k_machtype)),%a0
+	movel	%d4,%a0@
+	movew	#BI_FPUTYPE,%d0
+	jbsr	Lget_bi_record
+	movel	%a0@,%d0
+	lea	%pc@(SYMBOL_NAME(m68k_fputype)),%a0
+	movel	%d0,%a0@
+	movew	#BI_MMUTYPE,%d0
+	jbsr	Lget_bi_record
+	movel	%a0@,%d0
+	lea	%pc@(SYMBOL_NAME(m68k_mmutype)),%a0
+	movel	%d0,%a0@
+	movew	#BI_CPUTYPE,%d0
+	jbsr	Lget_bi_record
+	movel	%a0@,%d0
+	lea	%pc@(SYMBOL_NAME(m68k_cputype)),%a0
+	movel	%d0,%a0@
 
 	btst	#CPUB_68060,%d0
 	jeq	1f
@@ -212,32 +252,85 @@ ENTRY(_start)
 	movew	%d6,%d0
 	movel	%d0,%a0@		/* save cache mode for page tables */
 
-/*
- * raise interrupt level with MASTER bit set, copy isp to msp (if not 68060)
- */
-#ifdef FROM_PL9
-	movew	#0x3700,%sr
-	is_060(1f)
-	movec	%isp,%d0
-	movel	%d0,%sp
+	/*
+	 * If this is a 68060 board using drivers with cache coherency
+	 * problems, then supervisor memory accesses need to be write-through
+         * also; otherwise, we want copyback.
+	 */
+
+#if defined(CONFIG_060_WRITETHROUGH)
+	is_not_060(Lset_norm)
+	jra	1f
+Lset_norm:
+	move.w	#_PAGE_CACHE040,%d0
 1:
-#else
+  	lea	%pc@(SYMBOL_NAME(m68k_supervisor_cachemode)),%a0
+	movel	%d0,%a0@
+#endif
+
+/*
+ * raise interrupt level
+ */
 	movew	#0x2700,%sr
+
+/*
+   If running on an Atari, determine the I/O base of the
+   serial port and test if we are running on a Medusa or Hades.
+   This test is necessary here, because on the Hades the serial
+   port is only accessible in the high I/O memory area.
+
+   The test whether it is a Medusa is done by writing to the byte at
+   phys. 0x0. This should result in a bus error on all other machines.
+
+   ...should, but doesn't. The Afterburner040 for the Falcon has the
+   same behaviour (0x0..0x7 are no ROM shadow). So we have to do
+   another test to distinguish Medusa and AB040. This is a
+   read attempt for 0x00ff82fe phys. that should bus error on a Falcon
+   (+AB040), but is in the range where the Medusa always asserts DTACK.
+
+   The test for the Hades is done by reading address 0xb0000000. This
+   should give a bus error on the Medusa.
+ */
+
+#ifdef CONFIG_ATARI
+	is_not_atari(Lnotypetest)
+
+	/* get special machine type (Medusa/Hades/AB40) */
+	moveq	#0,%d3 /* default if tag doesn't exist */
+	movew	#BI_ATARI_MCH_TYPE,%d0
+	jbsr	Lget_bi_record
+	tstl	%d0
+	jbmi	1f
+	movel	%a0@,%d3
+1:	
+	/* %d3 is not clobbered until Atari page tables are set up,
+	 * where it is used again. */
+
+	/* On the Hades, the iobase must be set up before opening the
+	 * serial port. There are no I/O regs at 0x00ffxxxx at all. */
+	moveq	#0,%d0
+	cmpl	#ATARI_MACH_HADES,%d3
+	jbne	1f
+	movel	#0xff000000,%d0		/* Hades I/O base addr: 0xff000000 */
+1:	lea     %pc@(Liobase),%a0
+	movel   %d0,%a0@
+Lnotypetest:
 #endif
 
 /*
  * Initialize serial port
  */
+
 	jbsr Lserial_init
 
 	putr()
 	putc('A')
 
 /*
- * Get address at end of kernel code/data/bss and
- * mask off at a page boundary.
+ * Get address at end of bootinfo and mask off at a page boundary.
  */
-	lea	%pc@(SYMBOL_NAME(_end)),%a0
+	moveq	#0,%d0
+	jbsr	Lget_bi_record
 	addw	#PAGESIZE-1,%a0
 	movel	%a0,%d0
 	andl	#-PAGESIZE,%d0
@@ -250,10 +343,6 @@ ENTRY(_start)
  */
 	lea	%pc@(SYMBOL_NAME(_stext)-PAGESIZE:w),%a0
 	movel	%a0,%d5
-#ifdef HACKER_KERNEL
-	lea	%pc@(Lkernel_start),%a0
-	movel	%d5,%a0@
-#endif
 
 /*
  * initialize the kernel root table.
@@ -319,7 +408,7 @@ ENTRY(_start)
 	lea	%pc@(SYMBOL_NAME(kpt)),%a1
 	movel	%a3,%a1@		/* save address of page table */
 	movel	%a3,%a1
-	addql	#_PAGE_TABLE,%a1	/* descriptor type */
+	addw	#_PAGE_TABLE+_PAGE_ACCESSED,%a1	/* descriptor type */
 	movel	#PAGE_TABLE_SIZE<<2,%d2 /* increment */
 
 2:	movel	%a1,%a0@+
@@ -341,7 +430,12 @@ ENTRY(_start)
 
 	movel	%a3,%a0
 	movel	%d5,%a1
-	addw	#_PAGE_GLOBAL040+_PAGE_CACHE040+_PAGE_PRESENT,%a1
+#if defined(CONFIG_060_WRITETHROUGH)
+	addw	#_PAGE_GLOBAL040+_PAGE_PRESENT+_PAGE_ACCESSED,%a1
+	addl	m68k_supervisor_cachemode,%a1
+#else
+	addw    #_PAGE_GLOBAL040+_PAGE_CACHE040+_PAGE_PRESENT+_PAGE_ACCESSED,%a1
+#endif
 	movew	#(PAGE_TABLE_SIZE*TABLENR_4MB)-1,%d1
 	movel	#PAGESIZE,%d2
 1:	movel	%a1,%a0@+
@@ -379,6 +473,9 @@ ENTRY(_start)
 	 * of %a2 are forgotten.
 	 */
 Lnot040:
+
+	leds(0x4)
+	
 /*
  * Do any machine specific page table initializations.
  */
@@ -404,7 +501,7 @@ Lnot040:
 
 	putc('I')
 
-	moveq	#_PAGE_NOCACHE030+_PAGE_PRESENT,%d0
+	movel	#_PAGE_NOCACHE030+_PAGE_PRESENT+_PAGE_ACCESSED,%d0
 	movel	%d0,%a5@(0x40<<2)
 
 	jra	Lmapphys
@@ -431,7 +528,7 @@ Lspami68040:
 	/* initialize the pointer table */
 	movel	%a4,%a0
 	movel	%a3,%a1
-	addql	#_PAGE_TABLE,%a1	/* base descriptor */
+	addw	#_PAGE_TABLE+_PAGE_ACCESSED,%a1	/* base descriptor */
 	movel	#PAGE_TABLE_SIZE<<2,%d2 /* increment */
 	moveq	#TABLENR_16MB-1,%d1
 
@@ -441,7 +538,7 @@ Lspami68040:
 
 	/* ensure that the root table points to the pointer table */
 	movel	%a4,%a0
-	addql	#_PAGE_TABLE,%a0
+	addw	#_PAGE_TABLE+_PAGE_ACCESSED,%a0
 	movel	%a0,%a5@(0x40<<2)
 
 	/*
@@ -449,7 +546,7 @@ Lspami68040:
 	 * descriptor bits include noncachable/serialized and global bits.
 	 */
 	movel	%a3,%a0
-	movew	#_PAGE_GLOBAL040+_PAGE_NOCACHE_S+_PAGE_PRESENT,%a1
+	movew	#_PAGE_GLOBAL040+_PAGE_NOCACHE_S+_PAGE_PRESENT+_PAGE_ACCESSED,%a1
 	movel	#PAGESIZE,%d2
 	movew	#(PAGE_TABLE_SIZE*TABLENR_16MB)-1,%d1
 
@@ -486,39 +583,25 @@ Lnotami:
 
    For the Medusa it is better to map the I/O region transparently
    (i.e. 0xffxxxxxx -> 0xffxxxxxx), because some I/O registers are
-   accessible only in the high area. The test whether it is a Medusa
-   is done by writing to the byte at phys. 0x0. This should result
-   in a bus error on all other machines.
+   accessible only in the high area.
 
-   ...should, but doesn't. The Afterburner040 for the Falcon has the
-   same behaviour (0x0..0x7 are no ROM shadow). So we have to do
-   another test to distinguish Medusa and AB040. This is a
-   read attempt for 0x00ff82fe phys. that should bus error on a Falcon
-   (+AB040), but is in the range where the Medusa always asserts DTACK.
+   On the Hades all I/O registers are only accessible in the high
+   area.
 */
 
-	moveq	#0,%d3			/* base addr for others: 0x00000000 */
-	movec	%d3,%vbr
-	lea	%pc@(Ltest_berr),%a0
-	movel	%a0,0x8
-	movel	%sp,%a0
-	moveb	0x0,%d1
-	clrb	0x0
-	nop
-	moveb	%d1,0x0
-	nop
-	tstb	0x00ff82fe
-	nop
-	movel	#0xff000000,%d3		/* Medusa base addr: 0xff000000 */
-Ltest_berr:
-	movel	%a0,%sp
-	lea     %pc@(SYMBOL_NAME(is_medusa)),%a0
-	movel	%d3,%a0@
-
+	/* I/O base addr for non-Medusa, non-Hades: 0x00000000 */
+	moveq	#0,%d0
+	cmpl	#ATARI_MACH_MEDUSA,%d3
+	jbeq	2f
+	cmpl	#ATARI_MACH_HADES,%d3
+	jbne	1f
+2:	movel	#0xff000000,%d0 /* Medusa/Hades base addr: 0xff000000 */
+1:	movel	%d0,%d3
+	
 	/* Let the root table point to the new pointer table */
 	lea	%a4@(PTR_TABLE_SIZE<<2),%a4
 	movel	%a4,%a0
-	addl	#_PAGE_TABLE,%a0
+	addw	#_PAGE_TABLE+_PAGE_ACCESSED,%a0
 	movel	%a0,%a5@(0x7f<<2)       /* 0xFE000000 - 0xFFFFFFFF */
 
 	/* clear lower half of the pointer table (0xfexxxxxx) */
@@ -534,7 +617,7 @@ Ltest_berr:
 	movel	#PAGE_TABLE_SIZE*PAGESIZE,%d1
 	movel	#(PTR_TABLE_SIZE/2)-1,%d2
 	movel	%d3,%d0
-	addl	#_PAGE_PRESENT,%d0
+	orw	#_PAGE_PRESENT+_PAGE_ACCESSED,%d0
 1:	movel	%d0,%a0@+
 	addl	%d1,%d0
 	dbra	%d2,1b
@@ -552,7 +635,7 @@ Lspata68040:
 
 	/* Initialize the upper half of the pointer table (a0 is still valid) */
 	movel	%a3,%a1
-	addql	#_PAGE_TABLE,%a1
+	addw	#_PAGE_TABLE+_PAGE_ACCESSED,%a1
 	movel	#PAGE_TABLE_SIZE<<2,%d2
 	moveq	#TABLENR_16MB-1,%d1
 1:	movel	%a1,%a0@+
@@ -562,7 +645,7 @@ Lspata68040:
 	/* Initialize the page tables as noncacheable/serialized! */
 	movel	%a3,%a0
 	movel	%d3,%a1
-	addw	#_PAGE_GLOBAL040+_PAGE_NOCACHE_S+_PAGE_PRESENT,%a1
+	addw	#_PAGE_GLOBAL040+_PAGE_NOCACHE_S+_PAGE_PRESENT+_PAGE_ACCESSED,%a1
 	movel	#PAGESIZE,%d2
 	movew	#(PAGE_TABLE_SIZE*TABLENR_16MB)-1,%d1
 1:	movel	%a1,%a0@+
@@ -584,6 +667,64 @@ Lspata68040:
 Lnotatari:
 #endif
 
+#ifdef CONFIG_HP300
+	is_not_hp300(Lnothp300)
+
+/* On the HP300, we map the ROM, INTIO and DIO regions (phys. 0x00xxxxxx)
+   by mapping 32MB from 0xf0xxxxxx -> 0x00xxxxxx) using an 030 early 
+   termination page descriptor.  The ROM mapping is needed because the LEDs 
+   are mapped there too.  */
+
+	movel	#_PAGE_NOCACHE030+_PAGE_PRESENT+_PAGE_ACCESSED,%d0
+	movel	%d0,%a5@(0x78<<2)
+
+Lnothp300:
+	
+#endif
+
+#if defined(CONFIG_MVME16x)
+	is_not_mvme16x(Lnot16x)
+
+	/* Get pointer to board ID data */
+	movel	%d2,%sp@-
+	.long	0x4e4f0070		/* trap 0x70 - .BRD_ID */
+	movel	%sp@+,%d2
+	lea	%pc@(SYMBOL_NAME(mvme_bdid_ptr)),%a0
+	movel	%d2,%a0@
+
+	/*
+	 * On MVME16x we have already created kernel page tables for
+	 * 4MB of RAM at address 0, so now need to do a transparent
+	 * mapping of the top of memory space.  Make it 0.5GByte for now.
+	 */
+
+	movel	#0xe01f0000,%d2		/* logical address base */
+	orw	#0xa040,%d2		/* add in magic bits */
+	.long	0x4e7b2005		/* movec d2,ittr1 */
+	.long	0x4e7b2007		/* movec d2,dttr1 */
+
+Lnot16x:
+#endif
+
+#if defined(CONFIG_BVME6000)
+	is_not_bvme6000(Lnotbvm)
+
+	/*
+	 * On BVME6000 we have already created kernel page tables for
+	 * 4MB of RAM at address 0, so now need to do a transparent
+	 * mapping of the top of memory space.  Make it 0.5GByte for now.
+	 */
+
+	movel	#0xe01f0000,%d2		/* logical address base */
+	orw	#0xa040,%d2		/* add in magic bits */
+	.long	0x4e7b2005		/* movec d2,ittr1 */
+	.long	0x4e7b2007		/* movec d2,dttr1 */
+	.long	0x4e7b2004		/* movec d2,ittr0 */
+	.long	0x4e7b2006		/* movec d2,dttr0 */
+
+Lnotbvm:
+#endif
+
 /*
  * Setup a transparent mapping of the physical memory we are executing in.
  *
@@ -592,6 +733,7 @@ Lnotatari:
  */
 Lmapphys:
 	putc('J')
+	leds(0x8)
 
 #ifdef CONFIG_AMIGA
 	is_not_amiga(Lmapphysnotamiga)
@@ -629,7 +771,7 @@ Lmapphys:
 	lsrl	%d2,%d0
 	movel	%d0,%d1
 	lsll	%d2,%d1
-	addql	#_PAGE_PRESENT,%d1
+	orw	#_PAGE_PRESENT+_PAGE_ACCESSED,%d1
 	lsll	#2,%d0
 	movel	%a5@(%d0:w),%d2
 	movel	%d1,%a5@(%d0:w)
@@ -637,45 +779,47 @@ Lmapphys:
 	/* no limit, 4byte descriptors */
 	movel	#0x80000002,%a3@
 	movel	%a5,%a3@(4)
-	.long	0xf0134800	/* pmove %a3@,%srp */
-	.long	0xf0134c00	/* pmove %a3@,%crp */
-	.long	0xf0002400	/* pflusha */
+	pmove	%a3@,%srp
+	pmove	%a3@,%crp
+	pflusha
 	/*
 	 * enable,super root enable,4096 byte pages,7 bit root index,
 	 * 7 bit pointer index, 6 bit page table index.
 	 */
 	movel	#0x82c07760,%a3@
-	.long	0xf0134000	/* pmove %a3@,%tc (enable the MMU) */
+	pmove	%a3@,%tc	/* enable the MMU */
 	tstl	%d0
 	jne	1f
 	jmp	%pc@(2f+0x80000000)
 1:	jmp	2f:w
 2:	movel	%d2,%a5@(%d0:w)
-	.long	0xf0002400	/* pflusha */
+	pflusha
 	jmp	LdoneMMUenable:w
 
 Lamimmu68040:
 
+	.chip	68040
 	lea	2f:w,%a0
 	movel	%d5,%d0
 	andl	#0xff000000,%d0
 	jne	1f
 	lea	%pc@(2f+0x80000000),%a0
 1:	orw	#TTR_ENABLE+TTR_KERNELMODE+_PAGE_NOCACHE_S,%d0
-	.long	0x4e7b0004	/* movec %d0,%itt0 */
-	.long	0x4e7bd806	/* movec %a5,%urp */
-	.long	0x4e7bd807	/* movec %a5,%srp */
-	.word	0xf518		/* pflusha */
+	movec	%d0,%itt0
+	movec	%a5,%urp
+	movec	%a5,%srp
+	pflusha
 	movel	#TC_ENABLE+TC_PAGE4K,%d0
 	/*
 	 * this value is also ok for the 68060, we don`t use the cache
 	 * mode/protection defaults
 	 */
-	.long	0x4e7b0003	/* movec %d0,%tc (enable the MMU) */
+	movec	%d0,%tc		/* enable the MMU */
 	jmp	%a0@
 2:	moveq	#0,%d0
-	.long	0x4e7b0004	/* movec %d0,%itt0 */
+	movec	%d0,%itt0
 	jmp	LdoneMMUenable:w
+	.chip	68k
 
 Lmapphysnotamiga:
 #endif
@@ -696,6 +840,7 @@ Lmapphysnotamiga:
 
 	is_040_or_060(Latarimmu68040)
 
+	.chip	68030
 	lea	%pc@(Lmmu),%a3
 	movel	%d5,%d0
 	jne	1f
@@ -706,7 +851,7 @@ Lmapphysnotamiga:
 	jeq	2f
 	orw	#TTR_ENABLE+TTR_CI+TTR_RWM+TTR_FCB2+TTR_FCM1+TTR_FCM0,%d0
 	movel	%d0,%a3@
-	.long	0xf0130800	/* pmove %a3@,%tt0 */
+	pmove	%a3@,%tt0
 	jra	3f
 	/* tt0 doesn't work if physical and virtual address of kernel is in
 	 * the same 16M area (Falcon with Magnum/FX, kernel in alternate ram)
@@ -722,30 +867,32 @@ Lmapphysnotamiga:
 	lsrl	%d0,%d1
 	lea	%a1@(%d1:l:4),%a1
 	movel	%d5,%d1
-	addql	#_PAGE_PRESENT,%d1
+	orw	#_PAGE_PRESENT+_PAGE_ACCESSED,%d1
 	movel	%a1@,%d2
 	movel	%d1,%a1@
 	lea	5f:w,%a0
 	/* no limit, 4byte descriptors */
 3:	movel	#0x80000002,%a3@
 	movel	%a5,%a3@(4)
-	.long	0xf0134800	/* pmove %a3@,%srp */
-	.long	0xf0134c00	/* pmove %a3@,%crp */
-	.long	0xf0002400	/* pflusha */
+	pmove	%a3@,%srp
+	pmove	%a3@,%crp
+	pflusha
 	/*
 	 * enable,super root enable,4096 byte pages,7 bit root index,
 	 * 7 bit pointer index, 6 bit page table index.
 	 */
 	movel	#0x82c07760,%a3@
-	.long	0xf0134000	/* pmove %a3@,%tc (enable the MMU) */
+	pmove	%a3@,%tc	/* enable the MMU */
 	jmp	%a0@
 4:	clrl	%a3@
-	.long	0xf0130800	/* pmove %a3@,%tt0 */
+	pmove	%a3@,%tt0
 	jra	LdoneMMUenable
 5:	movel	%d2,%a1@
 	jra	LdoneMMUenable
+	.chip	68k
 
 Latarimmu68040:
+	.chip	68040
 	movel	%d5,%d0
 	jne	1f
 	lea	LdoneMMUenable:w,%a0
@@ -753,24 +900,118 @@ Latarimmu68040:
 1:	lea	3f:w,%a0
 	andl	#0xff000000,%d0 /* logical address base */
 	orw	#TTR_ENABLE+TTR_KERNELMODE+_PAGE_NOCACHE_S,%d0
-	.long	0x4e7b0004	/* movec %d0,%itt0 */
+	movec	%d0,%itt0
 2:	nop
-	.word	0xf518		/* pflusha */
-	.long	0x4e7bd807	/* movec %a5,%srp */
-	.long	0x4e7bd806	/* movec %a5,%urp */
+	pflusha
+	movec	%a5,%srp
+	movec	%a5,%urp
 	movel	#TC_ENABLE+TC_PAGE4K,%d0
 	/*
 	 * this value is also ok for the 68060, we don`t use the cache
 	 * mode/protection defaults
 	 */
-	.long	0x4e7b0003	/* movec %d0,%tc (enable the MMU) */
+	movec	%d0,%tc		/* enable the MMU */
 	jmp	%a0@
 3:	moveq	#0,%d0
-	.long	0x4e7b0004	/* movec %d0,%itt0 */
-	tstl	%a1
+	movec	%d0,%itt0
 	jra	LdoneMMUenable
+	.chip	68k
 
 Lmapphysnotatari:
+#endif
+
+#if defined(CONFIG_MVME16x)
+	is_not_mvme16x(Lmapphysnot16x)
+	/*
+	 * save physaddr of phys mem in register a3
+	 */
+	moveq	#'L',%d7
+	jbsr	Lserial_putc
+
+	.word	0xf4d8		/* CINVA I/D    */
+	.word	0xf518		/* pflusha      */
+	.long	0x4e7bd807	/* movec a5,srp */
+	.long	0x4e7bd806	/* movec a5,urp */
+	movel	#(TC_ENABLE+TC_PAGE4K),%d0
+	.long	0x4e7b0003	/* movec d0,tc  (enable the MMU) */
+	jra	LdoneMMUenable	/* branch to continuation of startup */
+
+Lmapphysnot16x:
+
+#endif
+
+#if defined(CONFIG_HP300)
+	is_not_hp300(Lmapphysnothp300)
+
+/*
+ * Physical RAM is at 0xff000000.  We want to map the kernel at 0x00000000.
+ * In order to avoid disaster when we enable the MMU we need to make a
+ * transparent mapping of the RAM we're executing out of as well.
+ */
+	/*
+	 * save physaddr of phys mem in register a3
+	 */
+
+	.chip	68030
+	lea	%pc@(Lmmu),%a3
+	movel	%d5,%d0
+	andl	#0xff000000,%d0 /* logical address base */
+	orw	#TTR_ENABLE+TTR_CI+TTR_RWM+TTR_FCB2+TTR_FCM1+TTR_FCM0,%d0
+	movel	%d0,%a3@
+	pmove	%a3@,%tt0
+	/* no limit, 4byte descriptors */
+	movel	#0x80000002,%a3@
+	movel	%a5,%a3@(4)
+	pmove	%a3@,%srp
+	pmove	%a3@,%crp
+	pflusha
+	/*
+	 * enable,super root enable,4096 byte pages,7 bit root index,
+	 * 7 bit pointer index, 6 bit page table index.
+	 */
+	movel	#0x82c07760,%a3@
+	pmove	%a3@,%tc	/* enable the MMU */
+	jmp	1f
+1:	
+	.chip	68k
+
+	/*
+	 * Fix up the custom register to point to the new location of the LEDs.
+	 */
+	lea	%pc@(Lcustom),%a1
+	movel	#0xf0000000,%a1@
+
+	/*
+	 * Energise the FPU and caches.
+	 */
+	orl	#0x64, 0xf05f400c 
+	
+Lmapphysnothp300:
+
+#endif
+
+#if defined(CONFIG_BVME6000)
+	is_not_bvme6000(Lmapphysnotbvm)
+	/*
+	 * save physaddr of phys mem in register a3
+	 */
+	moveq	#'L',%d7
+	jbsr	Lserial_putc
+
+	.word	0xf4d8		/* CINVA I/D    */
+	.word	0xf518		/* pflusha      */
+	.long	0x4e7bd807	/* movec a5,srp */
+	.long	0x4e7bd806	/* movec a5,urp */
+	movel	#(TC_ENABLE+TC_PAGE4K),%d0
+	/*
+	 * this value is also ok for the 68060, we don`t use the cache
+	 * mode/protection defaults
+	 */
+	.long	0x4e7b0003	/* movec d0,tc  (enable the MMU) */
+	jra	LdoneMMUenable	/* branch to continuation of startup */
+
+Lmapphysnotbvm:
+
 #endif
 
 LdoneMMUenable:
@@ -781,6 +1022,7 @@ LdoneMMUenable:
  */
 
 	putc('M')
+	leds(0x10)
 
 	/*
 	 * d5 contains physaddr of kernel start
@@ -796,30 +1038,6 @@ LdoneMMUenable:
 
 	putc('N')
 
-#if 0
-	putr()
-	lea	SYMBOL_NAME(kernel_pmd_table),%a0
-	moveq	#63,%d0
-1:	moveq	#7,%d1
-	putn(%a0)
-	putc(':')
-	putc(' ')
-2:	putn(%a0@+)
-	dbra	%d1,2b
-	putr()
-	dbra	%d0,1b
-	putr()
-	movel	SYMBOL_NAME(kpt),%a0
-	moveq	#639,%d0
-1:	moveq	#7,%d1
-	putn(%a0)
-	putc(':')
-	putc(' ')
-2:	putn(%a0@+)
-	dbra	%d1,2b
-	putr()
-	dbra	%d0,1b
-#endif
 /*
  * Enable caches
  */
@@ -830,7 +1048,9 @@ LdoneMMUenable:
 	jra	1f
 
 Lcache680460:
-	.word	0xf4f8		/* cpusha %bc */
+	.chip	68040
+	cpusha	%bc
+	.chip	68k
 
 	is_060(Lcache68060)
 
@@ -840,62 +1060,51 @@ Lcache680460:
 	jra	1f
 
 Lcache68060:
+	.chip	68060
 	movel	#CC6_ENABLE_D+CC6_ENABLE_I+CC6_ENABLE_SB+CC6_PUSH_DPI+CC6_ENABLE_B+CC6_CLRA_B,%d0
 	/* MMU stuff works in copyback mode now, so enable the cache */
 	movec	%d0,%cacr
 	/* enable superscalar dispatch in PCR */
 	moveq	#1,%d0
-	.long	0x4e7b0808	/* movec d0,pcr */
+	movec	%d0,%pcr
+	.chip	68k
 1:
 
 /*
  * Setup initial stack pointer
+ * We need to get current loaded up with our first task...
  */
-	lea	SYMBOL_NAME(init_user_stack)+PAGESIZE,%sp
+	lea	SYMBOL_NAME(init_task_union),%a2
+	lea	8192(%a2),%sp
 
 /* jump to the kernel start */
 	putr()
+	leds(0x55)
 
+	subl	%a6,%a6 /* clear a6 for gdb */
 	jbsr	SYMBOL_NAME(start_kernel)
 
 /*
- * switch off mmu and exit
+ * Find a tag record in the bootinfo structure
+ * The bootinfo structure is located right after the kernel bss
+ * Returns: d0: size (-1 if not found)
+ *          a0: data pointer (end-of-records if not found)
  */
-
-#ifdef HACKER_KERNEL
-ENTRY(kernel_exit)
-	lea	2f:w,%a0
-	movel	%pc@(Lkernel_start),%a0
-	lea	%a0@(2f:w),%a1
-	movel	%a1,%d0
-	andl	#0xff000000,%d0
-	jne	1f
-	jmp	%a0@(1f+0x80000000)
-1:	orw	#TTR_ENABLE+TTR_KERNELMODE+_PAGE_NOCACHE_S,%d0
-	.long	0x4e7b0004	/* movec %d0,%itt0 */
-	jmp	%a1@
+Lget_bi_record:
+	lea	%pc@(SYMBOL_NAME(_end)),%a0
+1:	tstw	%a0@(BIR_tag)
+	jeq	3f
+	cmpw	%a0@(BIR_tag),%d0
+	jeq	2f
+	addw	%a0@(BIR_size),%a0
+	jra	1b
 2:	moveq	#0,%d0
-	.long	0x4e7b0003	/* movec %d0,%tc (disable the MMU) */
-	.word	0xf518		/* pflusha */
-	.long	0x4e7b0004	/* movec %d0,%itt0 */
-	movec	%d0,%cacr
-	.word	0xf4f8		/* cpusha %bc */
-
-	lea	%pc@(SYMBOL_NAME(boot_info)),%a0
-	jmp	%a0@(BI_amiga_exit_func:w)@(0:w)
-#endif
-
-/*
- * Serial port output support.
- */
-LSERPER      = 0xdff032
-LSERDAT      = 0xdff030
-LSERDATR     = 0xdff018
-LNTSC_PERIOD = 371
-LPAL_PERIOD  = 368
-LNTSC_ECLOCK = 7159090
-LSERIAL_CNTRL = 0xbfd000
-LSERIAL_DTR   = 7
+	movew	%a0@(BIR_size),%d0
+	lea	%a0@(BIR_data),%a0
+	rts
+3:	moveq	#-1,%d0
+	lea	%a0@(BIR_size),%a0
+	rts
 
 /*
  * Debug output support
@@ -952,9 +1161,24 @@ LMFP_UDR     = 0xfffa2f
 #endif
 #endif
 
+#if defined (CONFIG_BVME6000)
+BVME_SCC_CTRL_A = 0xffb0000b
+BVME_SCC_DATA_A = 0xffb0000f
+#endif
+
+/*
+ * Serial port output support.
+ */
+LSERPER		= 0xdff032
+LSERDAT		= 0xdff030
+LSERDATR	= 0xdff018
+LSERIAL_CNTRL	= 0xbfd000
+LSERIAL_DTR	= 7
+
 /*
  * Initialize serial port hardware for 9600/8/1
  * a0 thrashed
+ * Amiga d0 trashed
  * Atari d0 trashed (a1 in case of SCC)
  */
 	.even
@@ -962,31 +1186,30 @@ Lserial_init:
 #ifdef CONFIG_AMIGA
 	cmpil	#MACH_AMIGA,%d4
 	jne	1f
-	lea	%pc@(SYMBOL_NAME(boot_info)),%a0
 	bclr	#LSERIAL_DTR,LSERIAL_CNTRL
-	movew	#LNTSC_PERIOD,LSERPER
-	cmpl	#LNTSC_ECLOCK,%a0@(BI_amiga_eclock)
-	jeq	9f
-	movew	#LPAL_PERIOD,LSERPER
+	movew	#BI_AMIGA_SERPER,%d0
+	jbsr	Lget_bi_record
+	movew	%a0@,LSERPER
 	jra	9f
 1:
 #endif
 #ifdef CONFIG_ATARI
 	cmpil   #MACH_ATARI,%d4
 	jne	4f
+	movel	%pc@(Liobase),%a1
 #ifdef USE_PRINTER
-	bclr	#0,LSTMFP_IERB
-	bclr	#0,LSTMFP_DDR
-	moveb	#LPSG_CONTROL,LPSG_SELECT
-	moveb	#0xff,LPSG_WRITE
-	moveb	#LPSG_IO_B,LPSG_SELECT
-	clrb	LPSG_WRITE
-	moveb	#LPSG_IO_A,LPSG_SELECT
-	moveb	LPSG_READ,%d0
+	bclr	#0,%a1@(LSTMFP_IERB)
+	bclr	#0,%a1@(LSTMFP_DDR)
+	moveb	#LPSG_CONTROL,%a1@(LPSG_SELECT)
+	moveb	#0xff,%a1@(LPSG_WRITE)
+	moveb	#LPSG_IO_B,%a1@(LPSG_SELECT)
+	clrb	%a1@(LPSG_WRITE)
+	moveb	#LPSG_IO_A,%a1@(LPSG_SELECT)
+	moveb	%a1@(LPSG_READ),%d0
 	bset	#5,%d0
-	moveb	%d0,LPSG_WRITE
+	moveb	%d0,%a1@(LPSG_WRITE)
 #elif defined(USE_SCC)
-	lea	LSCC_CTRL_B,%a0
+	lea	%a1@(LSCC_CTRL_B),%a0
 	lea	%pc@(scc_initable:w),%a1
 2:	moveb	%a1@+,%d0
 	jmi	3f
@@ -995,24 +1218,52 @@ Lserial_init:
 	jra	2b
 3:	clrb	%a0@
 #elif defined(USE_MFP)
-	bclr	#1,LMFP_TSR
-	moveb   #0x88,LMFP_UCR
-	andb	#0x70,LMFP_TDCDR
-	moveb   #2,LMFP_TDDR
-	orb	#1,LMFP_TDCDR
-	bset	#1,LMFP_TSR
+	bclr	#1,%a1@(LMFP_TSR)
+	moveb   #0x88,%a1@(LMFP_UCR)
+	andb	#0x70,%a1@(LMFP_TDCDR)
+	moveb   #2,%a1@(LMFP_TDDR)
+	orb	#1,%a1@(LMFP_TDCDR)
+	bset	#1,%a1@(LMFP_TSR)
 #endif
 4:
 #endif
 9:
 	rts
 
+#ifdef CONFIG_HP300
+/* Set LEDs to %d7 */
+	.even
+Lset_leds:
+	moveml	%a0/%a1,%sp@-
+	movel	%pc@(Lcustom),%a1
+	moveb	%d7,%a1@(0x1ffff)
+	moveml	%sp@+,%a0/%a1
+	rts
+#endif
+	
 /*
  * Output character in d7 on serial port.
  * d7 thrashed.
  */
 Lserial_putc:
 	moveml	%a0/%a1,%sp@-
+#if defined(CONFIG_MVME16x)
+	cmpil	#MACH_MVME16x,%d4
+	jne	2f
+	moveb	%d7,%sp@-
+	.long	0x4e4f0020
+	jra	9f
+2:
+#endif
+#ifdef CONFIG_BVME6000
+	cmpil	#MACH_BVME6000,%d4
+	jne	2f
+1:	btst	#2,BVME_SCC_CTRL_A
+	jeq	1b
+	moveb	%d7,BVME_SCC_DATA_A
+	jra	9f
+2:
+#endif
 #ifdef CONFIG_AMIGA
 	cmpil	#MACH_AMIGA,%d4
 	jne	2f
@@ -1073,8 +1324,6 @@ Lserial_puts:
 
 /*
  * Output number in d7 in hex notation on serial port.
- * d0-d2 trashed.
- * d7 trashed.
  */
 
 Lserial_putnum:
@@ -1097,13 +1346,14 @@ L1:	roll	%d0,%d1
 	moveml	%sp@+,%d0-%d2/%d7
 	rts
 
+#if 0
 Lshowtest:
 	moveml	%a0/%d7,%sp@-
 	putc('A')
 	putc('=')
 	putn(%a1)
 
-	.long	0xf0119f15		| ptestr	#5,%a1@,#7,%a0
+	ptestr	#5,%a1@,#7,%a0
 
 	putc('D')
 	putc('A')
@@ -1117,7 +1367,7 @@ Lshowtest:
 	putc('S')
 	putc('=')
 	lea	%pc@(Lmmu),%a0
-	.long	0xf0106200		| pmove		%psr,%a0@
+	pmove	%psr,%a0@
 	clrl	%d7
 	movew	%a0@,%d7
 	jbsr	Lserial_putnum
@@ -1125,13 +1375,9 @@ Lshowtest:
 	putr()
 	moveml	%sp@+,%a0/%d7
 	rts
-
+#endif
 	.data
 	.even
-#ifdef HACKER_KERNEL
-Lkernel_start:
-	.long 0
-#endif
 Lcustom:
 Liobase:
 	.long 0
@@ -1140,7 +1386,13 @@ SYMBOL_NAME_LABEL(kpt)
 	.long 0
 SYMBOL_NAME_LABEL(availmem)
 	.long 0
-SYMBOL_NAME_LABEL(is_medusa)
-	.long 0
 SYMBOL_NAME_LABEL(m68k_pgtable_cachemode)
 	.long 0
+#ifdef CONFIG_060_WRITETHROUGH
+SYMBOL_NAME_LABEL(m68k_supervisor_cachemode)
+	.long 0
+#endif
+#if defined(CONFIG_MVME16x)
+SYMBOL_NAME_LABEL(mvme_bdid_ptr)
+	.long 0
+#endif

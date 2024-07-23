@@ -9,18 +9,21 @@
  * These constants are also useful for user-level apps (e.g., VC
  * resizing).
  */
-#define MIN_NR_CONSOLES	1	/* must be at least 1 */
+#define MIN_NR_CONSOLES 1       /* must be at least 1 */
 #define MAX_NR_CONSOLES	63	/* serial lines start at 64 */
 #define MAX_NR_USER_CONSOLES 63	/* must be root to allocate above this */
 		/* Note: the ioctl VT_GETSTATE does not work for
 		   consoles 16 and higher (since it returns a short) */
 
 #ifdef __KERNEL__
+#include <linux/config.h>
 #include <linux/fs.h>
+#include <linux/major.h>
 #include <linux/termios.h>
 #include <linux/tqueue.h>
 #include <linux/tty_driver.h>
 #include <linux/tty_ldisc.h>
+#include <linux/serialP.h>
 
 #include <asm/system.h>
 
@@ -31,26 +34,63 @@
  * (Note: the *_driver.minor_start values 1, 64, 128, 192 are
  * hardcoded at present.)
  */
-#define NR_PTYS		256
+#define NR_PTYS		256	/* ptys/major */
 #define NR_LDISCS	16
+
+/*
+ * Unix98 PTY's can be defined as any multiple of NR_PTYS up to
+ * UNIX98_PTY_MAJOR_COUNT; this section defines what we need from the
+ * config options
+ */
+#ifdef CONFIG_UNIX98_PTYS
+# define UNIX98_NR_MAJORS ((CONFIG_UNIX98_PTY_COUNT+NR_PTYS-1)/NR_PTYS)
+# if UNIX98_NR_MAJORS <= 0
+#  undef CONFIG_UNIX98_PTYS
+# elif UNIX98_NR_MAJORS > UNIX98_PTY_MAJOR_COUNT
+#  error  Too many Unix98 ptys defined
+#  undef  UNIX98_NR_MAJORS
+#  define UNIX98_NR_MAJORS UNIX98_PTY_MAJOR_COUNT
+# endif
+#endif
 
 /*
  * These are set up by the setup-routine at boot-time:
  */
 
 struct screen_info {
-	unsigned char  orig_x;
-	unsigned char  orig_y;
-	unsigned char  unused1[2];
-	unsigned short orig_video_page;
-	unsigned char  orig_video_mode;
-	unsigned char  orig_video_cols;
-	unsigned short unused2;
-	unsigned short orig_video_ega_bx;
-	unsigned short unused3;
-	unsigned char  orig_video_lines;
-	unsigned char  orig_video_isVGA;
-	unsigned short orig_video_points;
+	unsigned char  orig_x;			/* 0x00 */
+	unsigned char  orig_y;			/* 0x01 */
+	unsigned short dontuse1;		/* 0x02 -- EXT_MEM_K sits here */
+	unsigned short orig_video_page;		/* 0x04 */
+	unsigned char  orig_video_mode;		/* 0x06 */
+	unsigned char  orig_video_cols;		/* 0x07 */
+	unsigned short unused2;			/* 0x08 */
+	unsigned short orig_video_ega_bx;	/* 0x0a */
+	unsigned short unused3;			/* 0x0c */
+	unsigned char  orig_video_lines;	/* 0x0e */
+	unsigned char  orig_video_isVGA;	/* 0x0f */
+	unsigned short orig_video_points;	/* 0x10 */
+
+	/* VESA graphic mode -- linear frame buffer */
+	unsigned short lfb_width;		/* 0x12 */
+	unsigned short lfb_height;		/* 0x14 */
+	unsigned short lfb_depth;		/* 0x16 */
+	unsigned long  lfb_base;		/* 0x18 */
+	unsigned long  lfb_size;		/* 0x1c */
+	unsigned short dontuse2, dontuse3;	/* 0x20 -- CL_MAGIC and CL_OFFSET here */
+	unsigned short lfb_linelength;		/* 0x24 */
+	unsigned char  red_size;		/* 0x26 */
+	unsigned char  red_pos;			/* 0x27 */
+	unsigned char  green_size;		/* 0x28 */
+	unsigned char  green_pos;		/* 0x29 */
+	unsigned char  blue_size;		/* 0x2a */
+	unsigned char  blue_pos;		/* 0x2b */
+	unsigned char  rsvd_size;		/* 0x2c */
+	unsigned char  rsvd_pos;		/* 0x2d */
+	unsigned short vesapm_seg;		/* 0x2e */
+	unsigned short vesapm_off;		/* 0x30 */
+	unsigned short pages;			/* 0x32 */
+						/* 0x34 -- 0x3f reserved for future expansion */
 };
 
 extern struct screen_info screen_info;
@@ -69,10 +109,14 @@ extern struct screen_info screen_info;
 #define VIDEO_TYPE_EGAM		0x20	/* EGA/VGA in Monochrome Mode	*/
 #define VIDEO_TYPE_EGAC		0x21	/* EGA in Color Mode		*/
 #define VIDEO_TYPE_VGAC		0x22	/* VGA+ in Color Mode		*/
+#define VIDEO_TYPE_VLFB		0x23	/* VESA VGA in graphic mode    	*/
 
 #define VIDEO_TYPE_TGAC		0x40	/* DEC TGA */
 
 #define VIDEO_TYPE_SUN          0x50    /* Sun frame buffer. */
+#define VIDEO_TYPE_SUNPCI       0x51    /* Sun PCI based frame buffer. */
+
+#define VIDEO_TYPE_PMAC		0x60	/* PowerMacintosh frame buffer. */
 
 /*
  * This character is the same as _POSIX_VDISABLE: it cannot be used as
@@ -90,13 +134,19 @@ extern struct screen_info screen_info;
 
 struct tty_flip_buffer {
 	struct tq_struct tqueue;
-	unsigned char	char_buf[2*TTY_FLIPBUF_SIZE];
-	char		flag_buf[2*TTY_FLIPBUF_SIZE];
+	struct semaphore pty_sem;
 	char		*char_buf_ptr;
 	unsigned char	*flag_buf_ptr;
 	int		count;
 	int		buf_num;
+	unsigned char	char_buf[2*TTY_FLIPBUF_SIZE];
+	char		flag_buf[2*TTY_FLIPBUF_SIZE];
+	unsigned char	slop[4]; /* N.B. bug overwrites buffer by 1 */
 };
+/*
+ * The pty uses char_buf and flag_buf as a contiguous buffer
+ */
+#define PTY_BUF_SIZE	4*TTY_FLIPBUF_SIZE
 
 /*
  * When a break, frame error, or parity error happens, these codes are
@@ -198,7 +248,7 @@ struct tty_flip_buffer {
  * most often used by a windowing system, which will set the correct
  * size each time the window is created or resized anyway.
  * IMPORTANT: since this structure is dynamically allocated, it must
- * be no larger than 4096 bytes.  Changing TTY_BUF_SIZE will change
+ * be no larger than 4096 bytes.  Changing TTY_FLIPBUF_SIZE will change
  * the size of this structure, and it needs to be done with care.
  * 						- TYT, 9/14/92
  */
@@ -213,15 +263,18 @@ struct tty_struct {
 	unsigned long flags;
 	int count;
 	struct winsize winsize;
-	unsigned char stopped:1, hw_stopped:1, packet:1;
+	unsigned char stopped:1, hw_stopped:1, flow_stopped:1, packet:1;
+	unsigned char low_latency:1, warned:1;
 	unsigned char ctrl_status;
 
 	struct tty_struct *link;
 	struct fasync_struct *fasync;
 	struct tty_flip_buffer flip;
 	int max_flip_cnt;
+	int alt_speed;		/* For magic substitution of 38400 bps */
 	struct wait_queue *write_wait;
 	struct wait_queue *read_wait;
+	struct tq_struct tq_hangup;
 	void *disc_data;
 	void *driver_data;
 
@@ -267,6 +320,9 @@ struct tty_struct {
 #define TTY_DO_WRITE_WAKEUP 5
 #define TTY_PUSH 6
 #define TTY_CLOSING 7
+#define TTY_HW_COOK_OUT 14
+#define TTY_HW_COOK_IN 15
+#define TTY_PTY_LOCK 16
 
 #define TTY_WRITE_FLUSH(tty) tty_write_flush((tty))
 
@@ -278,7 +334,6 @@ extern struct tty_ldisc ldiscs[];
 extern int fg_console, last_console, want_console;
 
 extern int kmsg_redirect;
-extern struct wait_queue * keypress_wait;
 
 extern unsigned long con_init(unsigned long);
 
@@ -287,18 +342,21 @@ extern int lp_init(void);
 extern int pty_init(void);
 extern int tty_init(void);
 extern int pcxe_init(void);
+extern int pc_init(void);
 extern int vcs_init(void);
+extern int rp_init(void);
 extern int cy_init(void);
 extern int stl_init(void);
 extern int stli_init(void);
 extern int riscom8_init(void);
-extern int baycom_init(void);
+extern int specialix_init(void);
+extern int espserial_init(void);
+extern int macserial_init(void);
 
 extern int tty_paranoia_check(struct tty_struct *tty, kdev_t device,
 			      const char *routine);
-extern char *_tty_name(struct tty_struct *tty, char *buf);
-extern char *tty_name(struct tty_struct *tty);
-extern void tty_wait_until_sent(struct tty_struct * tty, int timeout);
+extern char *tty_name(struct tty_struct *tty, char *buf);
+extern void tty_wait_until_sent(struct tty_struct * tty, long timeout);
 extern int tty_check_change(struct tty_struct * tty);
 extern void stop_tty(struct tty_struct * tty);
 extern void start_tty(struct tty_struct * tty);
@@ -318,6 +376,8 @@ extern void tty_unhangup(struct file *filp);
 extern int tty_hung_up_p(struct file * filp);
 extern void do_SAK(struct tty_struct *tty);
 extern void disassociate_ctty(int priv);
+extern void tty_flip_buffer_push(struct tty_struct *tty);
+extern int tty_get_baud_rate(struct tty_struct *tty);
 
 /* n_tty.c */
 extern struct tty_ldisc tty_ldisc_N_TTY;
@@ -328,17 +388,14 @@ extern int n_tty_ioctl(struct tty_struct * tty, struct file * file,
 
 /* serial.c */
 
-extern int  rs_open(struct tty_struct * tty, struct file * filp);
+extern long serial_console_init(long kmem_start, long kmem_end);
+ 
+/* pcxx.c */
 
-/* pty.c */
-
-extern int  pty_open(struct tty_struct * tty, struct file * filp);
 extern int pcxe_open(struct tty_struct *tty, struct file *filp);
 
-/* console.c */
+/* printk.c */
 
-extern int con_open(struct tty_struct * tty, struct file * filp);
-extern void update_screen(int new_console);
 extern void console_print(const char *);
 
 /* vt.c */

@@ -8,7 +8,7 @@
 #define file_operation_handle file_operations
 
 #define connect_wrapper(x) 0
-#define current_got_fatal_signal() (current->signal & ~current->blocked)
+#define current_got_fatal_signal() (signal_pending(current))
 #define current_set_timeout(val) current->timeout = val
 
 #define module_interruptible_sleep_on interruptible_sleep_on
@@ -35,6 +35,6 @@
 
 #define mem_map_reserve(p) set_bit(PG_reserved, &mem_map[p].flags)
 #define mem_map_unreserve(p) clear_bit(PG_reserved, &mem_map[p].flags)
-#define mem_map_inc_count(p) mem_map[p].count++
-#define mem_map_dec_count(p) mem_map[p].count--
+#define mem_map_inc_count(p) atomic_inc(&(mem_map[p].count))
+#define mem_map_dec_count(p) atomic_dec(&(mem_map[p].count))
 #endif

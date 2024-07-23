@@ -16,17 +16,9 @@ struct vm_struct {
 struct vm_struct * get_vm_area(unsigned long size);
 void vfree(void * addr);
 void * vmalloc(unsigned long size);
-int vread(char *buf, char *addr, int count);
-
-extern inline void set_pgdir(unsigned long address, pgd_t entry)
-{
-	struct task_struct * p;
-
-	for_each_task(p) {
-		if (!p->mm)
-			continue;
-		*pgd_offset(p->mm,address) = entry;
-	}
-}
+long vread(char *buf, char *addr, unsigned long count);
+void vmfree_area_pages(unsigned long address, unsigned long size);
+int vmalloc_area_pages(unsigned long address, unsigned long size);
 
 #endif
+

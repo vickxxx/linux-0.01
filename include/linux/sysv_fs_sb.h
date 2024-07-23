@@ -15,8 +15,8 @@ struct sysv_sb_info {
 	unsigned int   s_block_size;	/* zone size, = 512 or = 1024 */
 	unsigned int   s_block_size_1;	/* block_size - 1 */
 	unsigned int   s_block_size_bits;	/* log2(block_size) */
-	unsigned int   s_block_size_ratio;	/* BLOCK_SIZE / block_size */
-	unsigned int   s_block_size_ratio_bits;	/* log2(block_size_ratio) */
+	unsigned int   s_block_size_inc_bits;	/* log2(block_size/BLOCK_SIZE) if >0 */
+	unsigned int   s_block_size_dec_bits;	/* log2(BLOCK_SIZE/block_size) if >0 */
 	char	       s_convert;	/* flag whether byte ordering requires conversion */
 	char	       s_kludge_symlinks; /* flag whether symlinks have a kludgey mode */
 	char	       s_truncate;	/* if 1: names > SYSV_NAMELEN chars are truncated */
@@ -50,31 +50,31 @@ struct sysv_sb_info {
 	   different superblock layout. */
 	char *         s_sbd1;		/* entire superblock data, for part 1 */
 	char *         s_sbd2;		/* entire superblock data, for part 2 */
-	unsigned short *s_sb_fic_count;	/* pointer to s_sbd->s_ninode */
-        unsigned short *s_sb_fic_inodes; /* pointer to s_sbd->s_inode */
-	unsigned short *s_sb_total_free_inodes; /* pointer to s_sbd->s_tinode */
-	unsigned short *s_sb_flc_count;	/* pointer to s_sbd->s_nfree */
-	unsigned long  *s_sb_flc_blocks; /* pointer to s_sbd->s_free */
-	unsigned long  *s_sb_total_free_blocks;/* pointer to s_sbd->s_tfree */
-	unsigned long  *s_sb_time;	/* pointer to s_sbd->s_time */
-	unsigned long  *s_sb_state;	/* pointer to s_sbd->s_state, only FSTYPE_SYSV */
+	u16            *s_sb_fic_count;	/* pointer to s_sbd->s_ninode */
+        u16            *s_sb_fic_inodes; /* pointer to s_sbd->s_inode */
+	u16            *s_sb_total_free_inodes; /* pointer to s_sbd->s_tinode */
+	u16            *s_sb_flc_count;	/* pointer to s_sbd->s_nfree */
+	u32	       *s_sb_flc_blocks; /* pointer to s_sbd->s_free */
+	u32            *s_sb_total_free_blocks;/* pointer to s_sbd->s_tfree */
+	u32            *s_sb_time;	/* pointer to s_sbd->s_time */
+	u32            *s_sb_state;	/* pointer to s_sbd->s_state, only FSTYPE_SYSV */
 	/* We keep those superblock entities that don't change here;
 	   this saves us an indirection and perhaps a conversion. */
-	unsigned long  s_firstinodezone; /* index of first inode zone */
-	unsigned long  s_firstdatazone;	/* same as s_sbd->s_isize */
-	unsigned long  s_ninodes;	/* total number of inodes */
-	unsigned long  s_ndatazones;	/* total number of data zones */
-	unsigned long  s_nzones;	/* same as s_sbd->s_fsize */
+	u32            s_firstinodezone; /* index of first inode zone */
+	u32            s_firstdatazone;	/* same as s_sbd->s_isize */
+	u32            s_ninodes;	/* total number of inodes */
+	u32            s_ndatazones;	/* total number of data zones */
+	u32            s_nzones;	/* same as s_sbd->s_fsize */
 };
-/* The fields s_block_size_ratio, s_ind_per_block_2_1, s_toobig_block are currently unused. */
+/* The fields s_ind_per_block_2_1, s_toobig_block are currently unused. */
 
 /* sv_ == u.sysv_sb.s_ */
 #define sv_type					u.sysv_sb.s_type
 #define sv_block_size				u.sysv_sb.s_block_size
 #define sv_block_size_1				u.sysv_sb.s_block_size_1
 #define sv_block_size_bits			u.sysv_sb.s_block_size_bits
-#define sv_block_size_ratio			u.sysv_sb.s_block_size_ratio
-#define sv_block_size_ratio_bits		u.sysv_sb.s_block_size_ratio_bits
+#define sv_block_size_inc_bits			u.sysv_sb.s_block_size_inc_bits
+#define sv_block_size_dec_bits			u.sysv_sb.s_block_size_dec_bits
 #define sv_convert				u.sysv_sb.s_convert
 #define sv_kludge_symlinks			u.sysv_sb.s_kludge_symlinks
 #define sv_truncate				u.sysv_sb.s_truncate

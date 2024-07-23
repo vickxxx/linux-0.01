@@ -1,7 +1,10 @@
 #ifndef _M68K_SEMAPHORE_H
 #define _M68K_SEMAPHORE_H
 
+#include <linux/config.h>
 #include <linux/linkage.h>
+#include <asm/system.h>
+#include <asm/atomic.h>
 
 /*
  * SMP- and interrupt-safe semaphores..
@@ -12,19 +15,59 @@
  */
 
 struct semaphore {
-	int count;
-	int waiting;
+	atomic_t count;
+	atomic_t waking;
 	struct wait_queue * wait;
 };
 
-#define MUTEX ((struct semaphore) { 1, 0, NULL })
-#define MUTEX_LOCKED ((struct semaphore) { 0, 0, NULL })
+#define MUTEX ((struct semaphore) { ATOMIC_INIT(1), ATOMIC_INIT(0), NULL })
+#define MUTEX_LOCKED ((struct semaphore) { ATOMIC_INIT(0), ATOMIC_INIT(0), NULL })
 
-asmlinkage void down_failed(void /* special register calling convention */);
-asmlinkage void up_wakeup(void /* special register calling convention */);
+asmlinkage void __down_failed(void /* special register calling convention */);
+asmlinkage int  __down_failed_interruptible(void  /* params in registers */);
+asmlinkage void __up_wakeup(void /* special register calling convention */);
 
 extern void __down(struct semaphore * sem);
+extern int  __down_interruptible(struct semaphore * sem);
 extern void __up(struct semaphore * sem);
+
+#define sema_init(sem, val)	atomic_set(&((sem)->count), val)
+
+static inline void wake_one_more(struct semaphore * sem)
+{
+	atomic_inc(&sem->waking);
+}
+
+static inline int waking_non_zero(struct semaphore *sem)
+{
+#ifndef CONFIG_RMW_INSNS
+	unsigned long flags;
+	int ret = 0;
+
+	save_flags(flags);
+	cli();
+	if (atomic_read(&sem->waking) > 0) {
+		atomic_dec(&sem->waking);
+		ret = 1;
+	}
+	restore_flags(flags);
+#else
+	int ret, tmp;
+
+	__asm__ __volatile__
+	  ("1:	movel	%2,%0\n"
+	   "	jeq	3f\n"
+	   "2:	movel	%0,%1\n"
+	   "	subql	#1,%1\n"
+	   "	casl	%0,%1,%2\n"
+	   "	jeq	3f\n"
+	   "	tstl	%0\n"
+	   "	jne	2b\n"
+	   "3:"
+	   : "=d" (ret), "=d" (tmp), "=m" (sem->waking));
+#endif
+	return ret;
+}
 
 /*
  * This is ugly, but we want the default case to fall through.
@@ -35,14 +78,40 @@ extern inline void down(struct semaphore * sem)
 {
 	register struct semaphore *sem1 __asm__ ("%a1") = sem;
 	__asm__ __volatile__(
-		"# atomic down operation\n"
-		"1:\n\t"
-		"lea %%pc@(1b),%%a0\n\t"
-		"subql #1,%0\n\t"
-		"jmi " SYMBOL_NAME_STR(down_failed)
+		"| atomic down operation\n\t"
+		"subql #1,%0@\n\t"
+		"jmi 2f\n"
+		"1:\n"
+		".section .text.lock,\"ax\"\n"
+		".even\n"
+		"2:\tpea 1b\n\t"
+		"jbra __down_failed\n"
+		".previous"
 		: /* no outputs */
-		: "m" (sem->count), "a" (sem1)
-		: "%a0", "%d0", "%d1", "memory");
+		: "a" (sem1)
+		: "memory");
+}
+
+extern inline int down_interruptible(struct semaphore * sem)
+{
+	register struct semaphore *sem1 __asm__ ("%a1") = sem;
+	register int result __asm__ ("%d0");
+
+	__asm__ __volatile__(
+		"| atomic interruptible down operation\n\t"
+		"subql #1,%1@\n\t"
+		"jmi 2f\n\t"
+		"clrl %0\n"
+		"1:\n"
+		".section .text.lock,\"ax\"\n"
+		".even\n"
+		"2:\tpea 1b\n\t"
+		"jbra __down_failed_interruptible\n"
+		".previous"
+		: "=d" (result)
+		: "a" (sem1)
+		: "%d0", "memory");
+	return result;
 }
 
 /*
@@ -55,14 +124,18 @@ extern inline void up(struct semaphore * sem)
 {
 	register struct semaphore *sem1 __asm__ ("%a1") = sem;
 	__asm__ __volatile__(
-		"# atomic up operation\n\t"
-		"lea %%pc@(1f),%%a0\n\t"
-		"addql #1,%0\n\t"
-		"jls " SYMBOL_NAME_STR(up_wakeup) "\n"
-		"1:"
+		"| atomic up operation\n\t"
+		"addql #1,%0@\n\t"
+		"jle 2f\n"
+		"1:\n"
+		".section .text.lock,\"ax\"\n"
+		".even\n"
+		"2:\tpea 1b\n\t"
+		"jbra __up_wakeup\n"
+		".previous"
 		: /* no outputs */
-		: "m" (sem->count), "a" (sem1)
-		: "%a0", "%d0", "%d1", "memory");
+		: "a" (sem1)
+		: "memory");
 }
 
 #endif

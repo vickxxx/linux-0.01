@@ -339,7 +339,9 @@ __asm__ __volatile__(
 	"cmpl $-1,%2\n\t"
 	"jne 1b\n"
 	"3:\tsubl %1,%0"
-	:"=a" (__res):"c" (s),"d" (count));
+	:"=a" (__res)
+	:"c" (s),"d" (count)
+	:"dx");
 return __res;
 }
 /* end of additional stuff */
@@ -497,6 +499,7 @@ __asm__ __volatile__ (
 	"std\n\t"
 	"rep\n\t"
 	"movsb\n\t"
+	"cld"
 	: /* no output */
 	:"c" (n), "S" (n-1+(const char *)src), "D" (n-1+(char *)tmp)
 	:"cx","si","di","memory");

@@ -18,10 +18,10 @@
 #include <linux/sysv_fs.h>
 #include <linux/stat.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-static int sysv_readlink(struct inode *, char *, int);
-static int sysv_follow_link(struct inode *, struct inode *, int, int, struct inode **);
+static int sysv_readlink(struct dentry *, char *, int);
+static struct dentry *sysv_follow_link(struct dentry *, struct dentry *, unsigned int);
 
 /*
  * symlinks can't do much...
@@ -46,59 +46,35 @@ struct inode_operations sysv_symlink_inode_operations = {
 	NULL			/* permission */
 };
 
-static int sysv_follow_link(struct inode * dir, struct inode * inode,
-	int flag, int mode, struct inode ** res_inode)
+static struct dentry *sysv_follow_link(struct dentry * dentry,
+					struct dentry * base,
+					unsigned int follow)
 {
-	int error;
+	struct inode *inode = dentry->d_inode;
 	struct buffer_head * bh;
 
-	*res_inode = NULL;
-	if (!dir) {
-		dir = current->fs->root;
-		dir->i_count++;
+	bh = sysv_file_bread(inode, 0, 0);
+	if (!bh) {
+		dput(base);
+		return ERR_PTR(-EIO);
 	}
-	if (!inode) {
-		iput(dir);
-		return -ENOENT;
-	}
-	if (!S_ISLNK(inode->i_mode)) {
-		iput(dir);
-		*res_inode = inode;
-		return 0;
-	}
-	if (current->link_count > 5) {
-		iput(inode);
-		iput(dir);
-		return -ELOOP;
-	}
-	if (!(bh = sysv_file_bread(inode, 0, 0))) { /* is reading 1 block enough ?? */
-		iput(inode);
-		iput(dir);
-		return -EIO;
-	}
-	iput(inode);
-	current->link_count++;
-	error = open_namei(bh->b_data,flag,mode,res_inode,dir);
-	current->link_count--;
+	UPDATE_ATIME(inode);
+	base = lookup_dentry(bh->b_data, base, follow);
 	brelse(bh);
-	return error;
+	return base;
 }
 
-static int sysv_readlink(struct inode * inode, char * buffer, int buflen)
+static int sysv_readlink(struct dentry * dentry, char * buffer, int buflen)
 {
+	struct inode *inode = dentry->d_inode;
 	struct buffer_head * bh;
 	char * bh_data;
 	int i;
 	char c;
 
-	if (!S_ISLNK(inode->i_mode)) {
-		iput(inode);
-		return -EINVAL;
-	}
 	if (buflen > inode->i_sb->sv_block_size_1)
 		buflen = inode->i_sb->sv_block_size_1;
 	bh = sysv_file_bread(inode, 0, 0);
-	iput(inode);
 	if (!bh)
 		return 0;
 	bh_data = bh->b_data;

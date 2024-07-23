@@ -9,21 +9,33 @@
 #include <linux/linkage.h>
 
 /*
- * "down_failed" is called with the eventual return address
- * in %a0, and the address of the semaphore in %a1. We need
- * to increment the number of waiters on the semaphore,
- * call "__down()", and then eventually return to try again.
+ * The semaphore operations have a special calling sequence that
+ * allow us to do a simpler in-line version of them. These routines
+ * need to convert that sequence back into the C sequence when
+ * there is contention on the semaphore.
  */
-ENTRY(down_failed)
-	movel %a0,-(%sp)
+ENTRY(__down_failed)
+	moveml %a0/%d0/%d1,-(%sp)
 	movel %a1,-(%sp)
 	jbsr SYMBOL_NAME(__down)
 	movel (%sp)+,%a1
+	moveml (%sp)+,%a0/%d0/%d1
 	rts
 
-ENTRY(up_wakeup)
+ENTRY(__down_failed_interruptible)
 	movel %a0,-(%sp)
+	movel %d1,-(%sp)
+	movel %a1,-(%sp)
+	jbsr SYMBOL_NAME(__down_interruptible)
+	movel (%sp)+,%a1
+	movel (%sp)+,%d1
+	movel (%sp)+,%a0
+	rts
+
+ENTRY(__up_wakeup)
+	moveml %a0/%d0/%d1,-(%sp)
 	movel %a1,-(%sp)
 	jbsr SYMBOL_NAME(__up)
 	movel (%sp)+,%a1
+	moveml (%sp)+,%a0/%d0/%d1
 	rts

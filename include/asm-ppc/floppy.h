@@ -19,7 +19,7 @@
 #define fd_free_dma()           free_dma(FLOPPY_DMA)
 #define fd_clear_dma_ff()       clear_dma_ff(FLOPPY_DMA)
 #define fd_set_dma_mode(mode)   set_dma_mode(FLOPPY_DMA,mode)
-#define fd_set_dma_addr(addr)   set_dma_addr(FLOPPY_DMA,virt_to_bus(addr))
+#define fd_set_dma_addr(addr)   set_dma_addr(FLOPPY_DMA,(unsigned int)virt_to_bus(addr))
 #define fd_set_dma_count(count) set_dma_count(FLOPPY_DMA,count)
 #define fd_enable_irq()         enable_irq(FLOPPY_IRQ)
 #define fd_disable_irq()        disable_irq(FLOPPY_IRQ)
@@ -45,6 +45,8 @@ static int FDC2 = -1;
 
 #define N_FDC 2			/* Don't change this! */
 #define N_DRIVE 8
+
+#define FLOPPY_MOTOR_MASK 0xf0
 
 /*
  * The PowerPC has no problems with floppy DMA crossing 64k borders.

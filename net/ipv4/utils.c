@@ -6,14 +6,14 @@
  *		Various kernel-resident INET utility functions; mainly
  *		for format conversion and debugging output.
  *
- * Version:	@(#)utils.c	1.0.7	05/18/93
+ * Version:	$Id: utils.c,v 1.6 1997/12/13 21:53:03 kuznet Exp $
  *
  * Author:	Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *
  * Fixes:
  *		Alan Cox	:	verify_area check.
  *		Alan Cox	:	removed old debugging.
- *
+ *		Andi Kleen	:	add net_ratelimit()  
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -21,7 +21,7 @@
  *		2 of the License, or (at your option) any later version.
  */
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -46,7 +46,7 @@
  *	Display an IP address in readable format. 
  */
  
-char *in_ntoa(unsigned long in)
+char *in_ntoa(__u32 in)
 {
 	static char buff[18];
 	char *p;
@@ -62,7 +62,7 @@ char *in_ntoa(unsigned long in)
  *	Convert an ASCII string to binary IP. 
  */
  
-unsigned long in_aton(const char *str)
+__u32 in_aton(const char *str)
 {
 	unsigned long l;
 	unsigned int val;

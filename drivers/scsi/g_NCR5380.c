@@ -10,6 +10,12 @@
  * NCR53C400 extensions (c) 1994,1995,1996, Kevin Lentin
  *    K.Lentin@cs.monash.edu.au
  *
+ * NCR53C400A extensions (c) 1996, Ingmar Baumgart
+ *    ingmar@gonzo.schwaben.de
+ *
+ * DTC3181E extensions (c) 1997, Ronald van Cuijlenborg
+ * ronald.van.cuijlenborg@tip.nl or nutty@dds.nl
+ *
  * ALPHA RELEASE 1. 
  *
  * For more information, please consult 
@@ -73,6 +79,12 @@
  * $Log: generic_NCR5380.c,v $
  */
 
+/* settings for DTC3181E card with only Mustek scanner attached */
+#define USLEEP
+#define USLEEP_POLL	1
+#define USLEEP_SLEEP	20
+#define USLEEP_WAITLONG	500
+
 #define AUTOPROBE_IRQ
 #define AUTOSENSE
 
@@ -103,7 +115,9 @@
 #include "NCR5380.h"
 #include "constants.h"
 #include "sd.h"
-#include<linux/stat.h>
+#include <linux/stat.h>
+#include <linux/init.h>
+#include<linux/ioport.h>
 
 struct proc_dir_entry proc_scsi_g_ncr5380 = {
     PROC_SCSI_GENERIC_NCR5380, 9, "g_NCR5380",
@@ -116,6 +130,8 @@ static int ncr_dma=NCR_NOT_SET;
 static int ncr_addr=NCR_NOT_SET;
 static int ncr_5380=NCR_NOT_SET;
 static int ncr_53c400=NCR_NOT_SET;
+static int ncr_53c400a=NCR_NOT_SET;
+static int dtc_3181e=NCR_NOT_SET;
 
 static struct override {
 	NCR5380_implementation_fields;
@@ -124,9 +140,9 @@ static struct override {
     int board;	/* Use NCR53c400, Ricoh, etc. extensions ? */
 } overrides 
 #ifdef GENERIC_NCR5380_OVERRIDE 
-    [] = GENERIC_NCR5380_OVERRIDE
+    [] __initdata = GENERIC_NCR5380_OVERRIDE
 #else
-    [1] = {{0,},};
+    [1] __initdata = {{0,},};
 #endif
 
 #define NO_OVERRIDES (sizeof(overrides) / sizeof(struct override))
@@ -142,7 +158,7 @@ static struct override {
  *
  */
 
-static void internal_setup(int board, char *str, int *ints) {
+__initfunc(static void internal_setup(int board, char *str, int *ints)) {
     static int commandline_current = 0;
     switch (board) {
     case BOARD_NCR5380:
@@ -153,6 +169,16 @@ static void internal_setup(int board, char *str, int *ints) {
     case BOARD_NCR53C400:
 	if (ints[0] != 2) {
 	    printk("generic_NCR53C400_setup : usage ncr53c400=" STRVAL(NCR5380_map_name) ",irq\n");
+	    return;
+	}
+    case BOARD_NCR53C400A:
+	if (ints[0] != 2) {
+	    printk("generic_NCR53C400A_setup : usage ncr53c400a=" STRVAL(NCR5380_map_name) ",irq\n");
+	    return;
+	}
+    case BOARD_DTC3181E:
+	if (ints[0] != 2) {
+	    printk("generic_DTC3181E_setup : usage dtc3181e=" STRVAL(NCR5380_map_name) ",irq\n");
 	    return;
 	}
     }
@@ -178,7 +204,7 @@ static void internal_setup(int board, char *str, int *ints) {
  * 	equal to the number of ints.
  */
 
-void generic_NCR5380_setup (char *str, int *ints) {
+__initfunc(void generic_NCR5380_setup (char *str, int *ints)) {
     internal_setup (BOARD_NCR5380, str, ints);
 }
 
@@ -191,8 +217,34 @@ void generic_NCR5380_setup (char *str, int *ints) {
  * 	equal to the number of ints.
  */
 
-void generic_NCR53C400_setup (char *str, int *ints) {
+__initfunc(void generic_NCR53C400_setup (char *str, int *ints)) {
     internal_setup (BOARD_NCR53C400, str, ints);
+}
+
+/*
+ * Function : generic_NCR53C400A_setup (char *str, int *ints)
+ *
+ * Purpose : LILO command line initialization of the overrides array,
+ * 
+ * Inputs : str - unused, ints - array of integer parameters with ints[0] 
+ * 	equal to the number of ints.
+ */
+
+void generic_NCR53C400A_setup (char *str, int *ints) {
+    internal_setup (BOARD_NCR53C400A, str, ints);
+}
+
+/*
+ * Function : generic_DTC3181E_setup (char *str, int *ints)
+ *
+ * Purpose : LILO command line initialization of the overrides array,
+ * 
+ * Inputs : str - unused, ints - array of integer parameters with ints[0] 
+ * 	equal to the number of ints.
+ */
+
+void generic_DTC3181E_setup (char *str, int *ints) {
+    internal_setup (BOARD_DTC3181E, str, ints);
 }
 
 /* 
@@ -207,9 +259,14 @@ void generic_NCR53C400_setup (char *str, int *ints) {
  *
  */
 
-int generic_NCR5380_detect(Scsi_Host_Template * tpnt) {
+__initfunc(int generic_NCR5380_detect(Scsi_Host_Template * tpnt)) {
     static int current_override = 0;
-    int count;
+    int count, i;
+    u_int *ports;
+    u_int ncr_53c400a_ports[] = {0x280, 0x290, 0x300, 0x310, 0x330,
+    		     		0x340, 0x348, 0x350, 0};
+    u_int dtc_3181e_ports[] = {0x220, 0x240, 0x280, 0x2a0, 0x2c0,
+    			     0x300, 0x320, 0x340, 0};
     int flags = 0;
     struct Scsi_Host *instance;
 
@@ -223,6 +280,10 @@ int generic_NCR5380_detect(Scsi_Host_Template * tpnt) {
 	overrides[0].board=BOARD_NCR5380;
     else if (ncr_53c400 != NCR_NOT_SET)
 	overrides[0].board=BOARD_NCR53C400;
+    else if (ncr_53c400a != NCR_NOT_SET)
+        overrides[0].board=BOARD_NCR53C400A;
+    else if (dtc_3181e != NCR_NOT_SET)
+        overrides[0].board=BOARD_DTC3181E;
 
     tpnt->proc_dir = &proc_scsi_g_ncr5380;
 
@@ -230,6 +291,7 @@ int generic_NCR5380_detect(Scsi_Host_Template * tpnt) {
 	if (!(overrides[current_override].NCR5380_map_name))
 	    continue;
 
+	ports = 0;
 	switch (overrides[current_override].board) {
 	case BOARD_NCR5380:
 	    flags = FLAG_NO_PSEUDO_DMA;
@@ -237,7 +299,55 @@ int generic_NCR5380_detect(Scsi_Host_Template * tpnt) {
 	case BOARD_NCR53C400:
 	    flags = FLAG_NCR53C400;
 	    break;
+	case BOARD_NCR53C400A:
+	    flags = FLAG_NO_PSEUDO_DMA;
+            ports = ncr_53c400a_ports;
+	    break;
+	case BOARD_DTC3181E:
+	    flags = FLAG_NO_PSEUDO_DMA | FLAG_DTC3181E;
+	    ports = dtc_3181e_ports;
+	    break;
 	}
+
+	if (ports) {
+	    /* wakeup sequence for the NCR53C400A and DTC3181E*/
+
+	    /* Disable the adapter and look for a free io port */
+	    outb(0x59, 0x779);
+	    outb(0xb9, 0x379);
+	    outb(0xc5, 0x379);
+	    outb(0xae, 0x379);
+	    outb(0xa6, 0x379);
+	    outb(0x00, 0x379);
+
+	    if (overrides[current_override].NCR5380_map_name != PORT_AUTO)
+	        for(i=0; ports[i]; i++) {
+	            if (overrides[current_override].NCR5380_map_name == ports[i])
+	                break;
+	        }
+	    else
+	        for(i=0; ports[i]; i++) {
+	            if ((!check_region(ports[i], 16)) && (inb(ports[i]) == 0xff))
+	                break;
+		}
+	    if (ports[i]) {
+	        outb(0x59, 0x779);
+	        outb(0xb9, 0x379);
+	        outb(0xc5, 0x379);
+	        outb(0xae, 0x379);
+	        outb(0xa6, 0x379);
+	        outb(0x80 | i, 0x379);          /* set io port to be used */
+        	outb(0xc0, ports[i] + 9);
+	        if (inb(ports[i] + 9) != 0x80)
+	            continue;
+	        else
+	            overrides[current_override].NCR5380_map_name=ports[i];
+	    } else
+	        continue;
+	}
+
+	request_region(overrides[current_override].NCR5380_map_name,
+					NCR5380_region_size, "ncr5380");
 
 	instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
 	instance->NCR5380_instance_name = overrides[current_override].NCR5380_map_name;
@@ -250,7 +360,7 @@ int generic_NCR5380_detect(Scsi_Host_Template * tpnt) {
 	    instance->irq = NCR5380_probe_irq(instance, 0xffff);
 
 	if (instance->irq != IRQ_NONE) 
-	    if (request_irq(instance->irq, generic_NCR5380_intr, SA_INTERRUPT, "NCR5380", NULL)) {
+	    if (request_irq(instance->irq, do_generic_NCR5380_intr, SA_INTERRUPT, "NCR5380", NULL)) {
 		printk("scsi%d : IRQ%d not free, interrupts disabled\n", 
 		    instance->host_no, instance->irq);
 		instance->irq = IRQ_NONE;
@@ -287,6 +397,8 @@ int generic_NCR5380_release_resources(struct Scsi_Host * instance)
     NCR5380_local_declare();
 
     NCR5380_setup(instance);
+
+    release_region(instance->NCR5380_instance_name, NCR5380_region_size);
 
     if (instance->irq != IRQ_NONE)
 	free_irq(instance->irq, NULL);
@@ -330,8 +442,11 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
 {
     int blocks = len / 128;
     int start = 0;
-    int i;
     int bl;
+#ifdef CONFIG_SCSI_G_NCR5380_PORT
+    int i;
+#endif 
+
     NCR5380_local_declare();
 
     NCR5380_setup(instance);
@@ -386,14 +501,15 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
 	blocks--;
     }
 
+    if (blocks) {
 #if (NDEBUG & NDEBUG_C400_PREAD)
-    printk("53C400r: EXTRA: Waiting for buffer\n");
+	printk("53C400r: EXTRA: Waiting for buffer\n");
 #endif
-    while (NCR5380_read(C400_CONTROL_STATUS_REG) & CSR_HOST_BUF_NOT_RDY)
-	;
+	while (NCR5380_read(C400_CONTROL_STATUS_REG) & CSR_HOST_BUF_NOT_RDY)
+	    ;
 
 #if (NDEBUG & NDEBUG_C400_PREAD)
-    printk("53C400r: Transferring EXTRA 128 bytes\n");
+	printk("53C400r: Transferring EXTRA 128 bytes\n");
 #endif
 #ifdef CONFIG_SCSI_G_NCR5380_PORT
 	for (i=0; i<128; i++)
@@ -402,8 +518,13 @@ static inline int NCR5380_pread (struct Scsi_Host *instance, unsigned char *dst,
 	/* implies CONFIG_SCSI_G_NCR5380_MEM */
 	memmove(dst+start,NCR53C400_host_buffer+NCR5380_map_name,128);
 #endif
-    start+=128;
-    blocks--;
+	start+=128;
+	blocks--;
+    }
+#if (NDEBUG & NDEBUG_C400_PREAD)
+    else
+	printk("53C400r: No EXTRA required\n");
+#endif
 
 #if (NDEBUG & NDEBUG_C400_PREAD)
     printk("53C400r: Final values: blocks=%d   start=%d\n", blocks, start);
@@ -600,32 +721,21 @@ static int sprint_Scsi_Cmnd (char* buffer, int len, Scsi_Cmnd *cmd) {
     return len-start;
 }
 
-const char *const private_scsi_device_types[] =
-{
-    "Direct-Access    ",
-    "Sequential-Access",
-    "Printer          ",
-    "Processor        ",
-    "WORM             ",
-    "CD-ROM           ",
-    "Scanner          ",
-    "Optical Device   ",
-    "Medium Changer   ",
-    "Communications   "
-};
-#define MAX_SCSI_DEVICE_CODE sizeof(private_scsi_device_types)/sizeof(char*)
-
 int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int length, int hostno, int inout)
 {
     int len = 0;
     NCR5380_local_declare();
+    unsigned long flags;
     unsigned char status;
     int i;
     struct Scsi_Host *scsi_ptr;
-	Scsi_Device *dev;
     Scsi_Cmnd *ptr;
     struct NCR5380_hostdata *hostdata;
-
+#ifdef NCR5380_STATS
+    Scsi_Device *dev;
+    extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
+#endif
+    save_flags(flags);
     cli();
 
     for (scsi_ptr = first_instance; scsi_ptr; scsi_ptr=scsi_ptr->next)
@@ -646,7 +756,7 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 #else
     PRINTP("NO NCR53C400 driver extensions\n");
 #endif
-    PRINTP("Using %s mapping at %s 0x%x, " ANDP STRVAL(NCR5380_map_config) ANDP STRVAL(NCR5380_map_name) ANDP scsi_ptr->NCR5380_instance_name);
+    PRINTP("Using %s mapping at %s 0x%lx, " ANDP STRVAL(NCR5380_map_config) ANDP STRVAL(NCR5380_map_name) ANDP scsi_ptr->NCR5380_instance_name);
     if (scsi_ptr->irq == IRQ_NONE)
 	PRINTP("no interrupt\n");
     else
@@ -661,14 +771,13 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 	PRINTP("  %d pending writes" ANDP hostdata->pendingw);
     if (hostdata->pendingr || hostdata->pendingw)
 	PRINTP("\n");
-    for (dev = scsi_devices; dev; dev=dev->next) {
-	if (dev->host == scsi_ptr) {
+    for (dev = scsi_ptr->host_queue; dev; dev=dev->next) {
 	    unsigned long br = hostdata->bytes_read[dev->id];
 	    unsigned long bw = hostdata->bytes_write[dev->id];
 	    long tr = hostdata->time_read[dev->id] / HZ;
 	    long tw = hostdata->time_write[dev->id] / HZ;
 
-	    PRINTP("  T:%d %s " ANDP dev->id ANDP (dev->type < MAX_SCSI_DEVICE_CODE) ? private_scsi_device_types[(int)dev->type] : "Unknown");
+	    PRINTP("  T:%d %s " ANDP dev->id ANDP (dev->type < MAX_SCSI_DEVICE_CODE) ? scsi_device_types[(int)dev->type] : "Unknown");
 	    for (i=0; i<8; i++)
 		if (dev->vendor[i] >= 0x20)
 		    *(buffer+(len++)) = dev->vendor[i];
@@ -690,7 +799,6 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
 	    if (tw)
 		PRINTP(" @ %5ld bps" ANDP bw / tw); 
 	    PRINTP("\n");
-	}
     }
 #endif
 	
@@ -726,7 +834,7 @@ int generic_NCR5380_proc_info(char* buffer, char** start, off_t offset, int leng
     len -= offset;
     if (len > length)
 	    len = length;
-    sti();
+    restore_flags(flags);
     return len;
 }
 
@@ -739,4 +847,13 @@ Scsi_Host_Template driver_template = GENERIC_NCR5380;
 
 #include <linux/module.h>
 #include "scsi_module.c"
+
+MODULE_PARM(ncr_irq, "i");
+MODULE_PARM(ncr_dma, "i");
+MODULE_PARM(ncr_addr, "i");
+MODULE_PARM(ncr_5380, "i");
+MODULE_PARM(ncr_53c400, "i");
+MODULE_PARM(ncr_53c400a, "i");
+MODULE_PARM(dtc_3181e, "i");
+
 #endif

@@ -1,18 +1,21 @@
-/* $Id: dma.h,v 1.7 1992/12/14 00:29:34 root Exp root $
+/* $Id: dma.h,v 1.2 1998/10/19 21:29:10 ralf Exp $
  * linux/include/asm/dma.h: Defines for using and allocating dma channels.
  * Written by Hennus Bergman, 1992.
  * High DMA channel support & info by Hannu Savolainen
  * and John Boyd, Nov. 1992.
  *
  * NOTE: all this is true *only* for ISA/EISA expansions on Mips boards
- * and can only be used for expansion cards. Onboard DMA controller, such
+ * and can only be used for expansion cards. Onboard DMA controllers, such
  * as the R4030 on Jazz boards behave totally different!
  */
 
 #ifndef __ASM_MIPS_DMA_H
 #define __ASM_MIPS_DMA_H
 
-#include <asm/io.h>		/* need byte IO */
+#include <linux/config.h>
+#include <asm/io.h>			/* need byte IO */
+#include <asm/spinlock.h>		/* And spinlocks */
+#include <linux/delay.h>
 
 
 #ifdef HAVE_REALLY_SLOW_DMA_CONTROLLER
@@ -74,12 +77,16 @@
 #define MAX_DMA_CHANNELS	8
 
 /*
- * The maximum address that we can perform a DMA transfer to on this platform
- * This describes only the PC style part of the DMA logic like on Deskstations
- * or Acer PICA but not the much more versatile DMA logic used for the
- * local devices on Acer PICA or Magnums.
+ * The maximum address in KSEG0 that we can perform a DMA transfer to on this
+ * platform.  This describes only the PC style part of the DMA logic like on
+ * Deskstations or Acer PICA but not the much more versatile DMA logic used
+ * for the local devices on Acer PICA or Magnums.
  */
-#define MAX_DMA_ADDRESS		0x1000000
+#ifndef CONFIG_SGI
+#define MAX_DMA_ADDRESS		(PAGE_OFFSET + 0x01000000)
+#else
+#define MAX_DMA_ADDRESS		(~0UL)
+#endif
 
 /* 8237 DMA controllers */
 #define IO_DMA1_BASE	0x00	/* 8 bit slave DMA, channels 0..3 */
@@ -138,6 +145,21 @@
 #define DMA_MODE_WRITE	0x48	/* memory to I/O, no autoinit, increment, single mode */
 #define DMA_MODE_CASCADE 0xC0   /* pass thru DREQ->HRQ, DACK<-HLDA only */
 
+
+extern spinlock_t  dma_spin_lock;
+
+static __inline__ unsigned long claim_dma_lock(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dma_spin_lock, flags);
+	return flags;
+}
+
+static __inline__ void release_dma_lock(unsigned long flags)
+{
+	spin_unlock_irqrestore(&dma_spin_lock, flags);
+}
+
 /* enable/disable a specific DMA channel */
 static __inline__ void enable_dma(unsigned int dmanr)
 {
@@ -153,6 +175,8 @@ static __inline__ void disable_dma(unsigned int dmanr)
 		dma_outb(dmanr | 4,  DMA1_MASK_REG);
 	else
 		dma_outb((dmanr & 3) | 4,  DMA2_MASK_REG);
+	/* I hate voodoo programming but .. */
+	udelay(20);
 }
 
 /* Clear the 'DMA Pointer Flip Flop'.
@@ -160,7 +184,7 @@ static __inline__ void disable_dma(unsigned int dmanr)
  * Use this once to initialize the FF to a known state.
  * After that, keep track of it. :-)
  * --- In order to do that, the DMA routines below should ---
- * --- only be used while interrupts are disabled! ---
+ * --- only be used while holding the DMA lock ! ---
  */
 static __inline__ void clear_dma_ff(unsigned int dmanr)
 {
@@ -275,10 +299,5 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 /* These are in kernel/dma.c: */
 extern int request_dma(unsigned int dmanr, const char * device_id);	/* reserve a DMA channel */
 extern void free_dma(unsigned int dmanr);	/* release it again */
-
-/*
- * DMA memory allocation - formerly in include/linux/mm.h
- */
-#define __get_dma_pages(priority, order) __get_free_pages((priority),(order), 1)
 
 #endif /* __ASM_MIPS_DMA_H */

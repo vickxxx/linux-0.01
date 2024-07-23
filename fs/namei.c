@@ -8,84 +8,148 @@
  * Some corrections by tytso.
  */
 
-#include <asm/segment.h>
+/* [Feb 1997 T. Schoebel-Theuer] Complete rewrite of the pathname
+ * lookup logic.
+ */
 
-#include <linux/errno.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/string.h>
-#include <linux/fcntl.h>
-#include <linux/stat.h>
 #include <linux/mm.h>
+#include <linux/proc_fs.h>
+#include <linux/smp_lock.h>
+#include <linux/quotaops.h>
+
+#include <asm/uaccess.h>
+#include <asm/unaligned.h>
+#include <asm/semaphore.h>
+#include <asm/page.h>
+#include <asm/pgtable.h>
+
+/*
+ * The bitmask for a lookup event:
+ *  - follow links at the end
+ *  - require a directory
+ *  - ending slashes ok even for nonexistent files
+ *  - internal "there are more path compnents" flag
+ */
+#define LOOKUP_FOLLOW		(1)
+#define LOOKUP_DIRECTORY	(2)
+#define LOOKUP_SLASHOK		(4)
+#define LOOKUP_CONTINUE		(8)
+
+#include <asm/namei.h>
+
+/* This can be removed after the beta phase. */
+#define CACHE_SUPERVISE	/* debug the correctness of dcache entries */
+#undef DEBUG		/* some other debugging */
+
 
 #define ACC_MODE(x) ("\000\004\002\006"[(x)&O_ACCMODE])
 
-/*
- * How long a filename can we get from user space?
- *  -EFAULT if invalid area
- *  0 if ok (ENAMETOOLONG before EFAULT)
- *  >0 EFAULT after xx bytes
+/* [Feb-1997 T. Schoebel-Theuer]
+ * Fundamental changes in the pathname lookup mechanisms (namei)
+ * were necessary because of omirr.  The reason is that omirr needs
+ * to know the _real_ pathname, not the user-supplied one, in case
+ * of symlinks (and also when transname replacements occur).
+ *
+ * The new code replaces the old recursive symlink resolution with
+ * an iterative one (in case of non-nested symlink chains).  It does
+ * this with calls to <fs>_follow_link().
+ * As a side effect, dir_namei(), _namei() and follow_link() are now 
+ * replaced with a single function lookup_dentry() that can handle all 
+ * the special cases of the former code.
+ *
+ * With the new dcache, the pathname is stored at each inode, at least as
+ * long as the refcount of the inode is positive.  As a side effect, the
+ * size of the dcache depends on the inode cache and thus is dynamic.
+ *
+ * [29-Apr-1998 C. Scott Ananian] Updated above description of symlink
+ * resolution to correspond with current state of the code.
+ *
+ * Note that the symlink resolution is not *completely* iterative.
+ * There is still a significant amount of tail- and mid- recursion in
+ * the algorithm.  Also, note that <fs>_readlink() is not used in
+ * lookup_dentry(): lookup_dentry() on the result of <fs>_readlink()
+ * may return different results than <fs>_follow_link().  Many virtual
+ * filesystems (including /proc) exhibit this behavior.
  */
-static inline int get_max_filename(unsigned long address)
-{
-	struct vm_area_struct * vma;
 
-	if (get_fs() == KERNEL_DS)
-		return 0;
-	vma = find_vma(current->mm, address);
-	if (!vma || vma->vm_start > address || !(vma->vm_flags & VM_READ))
-		return -EFAULT;
-	address = vma->vm_end - address;
-	if (address > PAGE_SIZE)
-		return 0;
-	if (vma->vm_next && vma->vm_next->vm_start == vma->vm_end &&
-	   (vma->vm_next->vm_flags & VM_READ))
-		return 0;
-	return address;
+/* [24-Feb-97 T. Schoebel-Theuer] Side effects caused by new implementation:
+ * New symlink semantics: when open() is called with flags O_CREAT | O_EXCL
+ * and the name already exists in form of a symlink, try to create the new
+ * name indicated by the symlink. The old code always complained that the
+ * name already exists, due to not following the symlink even if its target
+ * is nonexistent.  The new semantics affects also mknod() and link() when
+ * the name is a symlink pointing to a non-existant name.
+ *
+ * I don't know which semantics is the right one, since I have no access
+ * to standards. But I found by trial that HP-UX 9.0 has the full "new"
+ * semantics implemented, while SunOS 4.1.1 and Solaris (SunOS 5.4) have the
+ * "old" one. Personally, I think the new semantics is much more logical.
+ * Note that "ln old new" where "new" is a symlink pointing to a non-existing
+ * file does succeed in both HP-UX and SunOs, but not in Solaris
+ * and in the old Linux semantics.
+ */
+
+/* [16-Dec-97 Kevin Buhr] For security reasons, we change some symlink
+ * semantics.  See the comments in "open_namei" and "do_link" below.
+ *
+ * [10-Sep-98 Alan Modra] Another symlink change.
+ */
+
+static inline char * get_page(void)
+{
+	char * res;
+	res = (char*)__get_free_page(GFP_KERNEL);
+	return res;
 }
 
-/*
- * In order to reduce some races, while at the same time doing additional
+inline void putname(char * name)
+{
+	free_page((unsigned long) name); 
+}
+
+/* In order to reduce some races, while at the same time doing additional
  * checking and hopefully speeding things up, we copy filenames to the
  * kernel data space before using them..
  *
  * POSIX.1 2.4: an empty pathname is invalid (ENOENT).
  */
-int getname(const char * filename, char **result)
+static inline int do_getname(const char *filename, char *page)
 {
-	int i, error;
-	unsigned long page;
-	char * tmp, c;
+	int retval;
+	unsigned long len = PAGE_SIZE;
 
-	i = get_max_filename((unsigned long) filename);
-	if (i < 0)
-		return i;
-	error = -EFAULT;
-	if (!i) {
-		error = -ENAMETOOLONG;
-		i = PAGE_SIZE;
-	}
-	c = get_user(filename++);
-	if (!c)
-		return -ENOENT;
-	if(!(page = __get_free_page(GFP_KERNEL)))
-		return -ENOMEM;
-	*result = tmp = (char *) page;
-	while (--i) {
-		*(tmp++) = c;
-		c = get_user(filename++);
-		if (!c) {
-			*tmp = '\0';
+	if ((unsigned long) filename >= TASK_SIZE) {
+		if (!segment_eq(get_fs(), KERNEL_DS))
+			return -EFAULT;
+	} else if (TASK_SIZE - (unsigned long) filename < PAGE_SIZE)
+		len = TASK_SIZE - (unsigned long) filename;
+
+	retval = strncpy_from_user((char *)page, filename, len);
+	if (retval > 0) {
+		if (retval < len)
 			return 0;
-		}
-	}
-	free_page(page);
-	return error;
+		return -ENAMETOOLONG;
+	} else if (!retval)
+		retval = -ENOENT;
+	return retval;
 }
 
-void putname(char * name)
+char * getname(const char * filename)
 {
-	free_page((unsigned long) name);
+	char *tmp, *result;
+
+	result = ERR_PTR(-ENOMEM);
+	tmp = get_page();
+	if (tmp)  {
+		int retval = do_getname(filename, tmp);
+
+		result = tmp;
+		if (retval < 0) {
+			putname(tmp);
+			result = ERR_PTR(retval);
+		}
+	}
+	return result;
 }
 
 /*
@@ -111,8 +175,13 @@ int permission(struct inode * inode,int mask)
 		mode >>= 6;
 	else if (in_group_p(inode->i_gid))
 		mode >>= 3;
-	if (((mode & mask & 0007) == mask) || fsuser())
+	if (((mode & mask & S_IRWXO) == mask) || capable(CAP_DAC_OVERRIDE))
 		return 0;
+	/* read and search access */
+	if ((mask == S_IROTH) ||
+	    (S_ISDIR(mode)  && !(mask & ~(S_IROTH | S_IXOTH))))
+		if (capable(CAP_DAC_READ_SEARCH))
+			return 0;
 	return -EACCES;
 }
 
@@ -121,24 +190,16 @@ int permission(struct inode * inode,int mask)
  * put_write_access() releases this write permission.
  * This is used for regular files.
  * We cannot support write (and maybe mmap read-write shared) accesses and
- * MAP_DENYWRITE mmappings simultaneously.
+ * MAP_DENYWRITE mmappings simultaneously. The i_writecount field of an inode
+ * can have the following values:
+ * 0: no writers, no VM_DENYWRITE mappings
+ * < 0: (-i_writecount) vm_area_structs with VM_DENYWRITE set exist
+ * > 0: (i_writecount) users are writing to the file.
  */
 int get_write_access(struct inode * inode)
 {
-	struct task_struct * p;
-
-	if ((inode->i_count > 1) && S_ISREG(inode->i_mode)) /* shortcut */
-		for_each_task(p) {
-		        struct vm_area_struct * mpnt;
-			if (!p->mm)
-				continue;
-			for(mpnt = p->mm->mmap; mpnt; mpnt = mpnt->vm_next) {
-				if (inode != mpnt->vm_inode)
-					continue;
-				if (mpnt->vm_flags & VM_DENYWRITE)
-					return -ETXTBSY;
-			}
-		}
+	if (inode->i_writecount < 0)
+		return -ETXTBSY;
 	inode->i_writecount++;
 	return 0;
 }
@@ -149,154 +210,254 @@ void put_write_access(struct inode * inode)
 }
 
 /*
- * lookup() looks up one part of a pathname, using the fs-dependent
- * routines (currently minix_lookup) for it. It also checks for
- * fathers (pseudo-roots, mount-points)
+ * "." and ".." are special - ".." especially so because it has to be able
+ * to know about the current root directory and parent relationships
  */
-int lookup(struct inode * dir,const char * name, int len,
-           struct inode ** result)
+static struct dentry * reserved_lookup(struct dentry * parent, struct qstr * name)
 {
-	struct super_block * sb;
-	int perm;
+	struct dentry *result = NULL;
+	if (name->name[0] == '.') {
+		switch (name->len) {
+		default:
+			break;
+		case 2:	
+			if (name->name[1] != '.')
+				break;
 
-	*result = NULL;
-	if (!dir)
-		return -ENOENT;
-/* check permissions before traversing mount-points */
-	perm = permission(dir,MAY_EXEC);
-	if (len==2 && name[0] == '.' && name[1] == '.') {
-		if (dir == current->fs->root) {
-			*result = dir;
-			return 0;
-		} else if ((sb = dir->i_sb) && (dir == sb->s_mounted)) {
-			iput(dir);
-			dir = sb->s_covered;
-			if (!dir)
-				return -ENOENT;
-			dir->i_count++;
+			if (parent != current->fs->root)
+				parent = parent->d_covers->d_parent;
+			/* fallthrough */
+		case 1:
+			result = parent;
 		}
 	}
-	if (!dir->i_op || !dir->i_op->lookup) {
-		iput(dir);
-		return -ENOTDIR;
-	}
- 	if (perm != 0) {
-		iput(dir);
-		return perm;
-	}
-	if (!len) {
-		*result = dir;
-		return 0;
-	}
-	return dir->i_op->lookup(dir, name, len, result);
-}
-
-int follow_link(struct inode * dir, struct inode * inode,
-	int flag, int mode, struct inode ** res_inode)
-{
-	if (!dir || !inode) {
-		iput(dir);
-		iput(inode);
-		*res_inode = NULL;
-		return -ENOENT;
-	}
-	if (!inode->i_op || !inode->i_op->follow_link) {
-		iput(dir);
-		*res_inode = inode;
-		return 0;
-	}
-	return inode->i_op->follow_link(dir,inode,flag,mode,res_inode);
+	return dget(result);
 }
 
 /*
- *	dir_namei()
- *
- * dir_namei() returns the inode of the directory of the
- * specified name, and the name within that directory.
+ * Internal lookup() using the new generic dcache.
  */
-static int dir_namei(const char *pathname, int *namelen, const char **name,
-                     struct inode * base, struct inode **res_inode)
+static struct dentry * cached_lookup(struct dentry * parent, struct qstr * name)
 {
-	char c;
-	const char * thisname;
-	int len,error;
-	struct inode * inode;
+	struct dentry * dentry = d_lookup(parent, name);
 
-	*res_inode = NULL;
-	if (!base) {
-		base = current->fs->pwd;
-		base->i_count++;
-	}
-	if ((c = *pathname) == '/') {
-		iput(base);
-		base = current->fs->root;
-		pathname++;
-		base->i_count++;
-	}
-	while (1) {
-		thisname = pathname;
-		for(len=0;(c = *(pathname++))&&(c != '/');len++)
-			/* nothing */ ;
-		if (!c)
-			break;
-		base->i_count++;
-		error = lookup(base, thisname, len, &inode);
-		if (error) {
-			iput(base);
-			return error;
+	if (dentry && dentry->d_op && dentry->d_op->d_revalidate) {
+		if (!dentry->d_op->d_revalidate(dentry) && !d_invalidate(dentry)) {
+			dput(dentry);
+			dentry = NULL;
 		}
-		error = follow_link(base,inode,0,0,&base);
-		if (error)
-			return error;
 	}
-	if (!base->i_op || !base->i_op->lookup) {
-		iput(base);
-		return -ENOTDIR;
-	}
-	*name = thisname;
-	*namelen = len;
-	*res_inode = base;
-	return 0;
+	return dentry;
 }
 
-static int _namei(const char * pathname, struct inode * base,
-                  int follow_links, struct inode ** res_inode)
+/*
+ * This is called when everything else fails, and we actually have
+ * to go to the low-level filesystem to find out what we should do..
+ *
+ * We get the directory semaphore, and after getting that we also
+ * make sure that nobody added the entry to the dcache in the meantime..
+ */
+static struct dentry * real_lookup(struct dentry * parent, struct qstr * name)
 {
-	const char *basename;
-	int namelen,error;
-	struct inode * inode;
+	struct dentry * result;
+	struct inode *dir = parent->d_inode;
 
-	*res_inode = NULL;
-	error = dir_namei(pathname, &namelen, &basename, base, &base);
-	if (error)
-		return error;
-	base->i_count++;	/* lookup uses up base */
-	error = lookup(base, basename, namelen, &inode);
-	if (error) {
-		iput(base);
-		return error;
+	down(&dir->i_sem);
+	/*
+	 * First re-do the cached lookup just in case it was created
+	 * while we waited for the directory semaphore..
+	 *
+	 * FIXME! This could use version numbering or similar to
+	 * avoid unnecessary cache lookups.
+	 */
+	result = cached_lookup(parent, name);
+	if (!result) {
+		struct dentry * dentry = d_alloc(parent, name);
+		result = ERR_PTR(-ENOMEM);
+		if (dentry) {
+			int error = dir->i_op->lookup(dir, dentry);
+			result = dentry;
+			if (error) {
+				dput(dentry);
+				result = ERR_PTR(error);
+			}
+		}
 	}
-	if (follow_links) {
-		error = follow_link(base, inode, 0, 0, &inode);
-		if (error)
-			return error;
-	} else
-		iput(base);
-	*res_inode = inode;
-	return 0;
+	up(&dir->i_sem);
+	return result;
 }
 
-int lnamei(const char *pathname, struct inode **res_inode)
+static struct dentry * do_follow_link(struct dentry *base, struct dentry *dentry, unsigned int follow)
 {
-	int error;
-	char * tmp;
+	struct inode * inode = dentry->d_inode;
 
-	error = getname(pathname, &tmp);
-	if (!error) {
-		error = _namei(tmp, NULL, 0, res_inode);
-		putname(tmp);
+	if (inode && inode->i_op && inode->i_op->follow_link) {
+		if (current->link_count < 5) {
+			struct dentry * result;
+
+			current->link_count++;
+			/* This eats the base */
+			result = inode->i_op->follow_link(dentry, base, follow);
+			current->link_count--;
+			dput(dentry);
+			return result;
+		}
+		dput(dentry);
+		dentry = ERR_PTR(-ELOOP);
 	}
-	return error;
+	dput(base);
+	return dentry;
+}
+
+static inline struct dentry * follow_mount(struct dentry * dentry)
+{
+	struct dentry * mnt = dentry->d_mounts;
+
+	if (mnt != dentry) {
+		dget(mnt);
+		dput(dentry);
+		dentry = mnt;
+	}
+	return dentry;
+}
+
+/*
+ * Name resolution.
+ *
+ * This is the basic name resolution function, turning a pathname
+ * into the final dentry.
+ */
+struct dentry * lookup_dentry(const char * name, struct dentry * base, unsigned int lookup_flags)
+{
+	struct dentry * dentry;
+	struct inode *inode;
+
+	if (*name == '/') {
+		if (base)
+			dput(base);
+		do {
+			name++;
+		} while (*name == '/');
+		__prefix_lookup_dentry(name, lookup_flags);
+		base = dget(current->fs->root);
+	} else if (!base) {
+		base = dget(current->fs->pwd);
+	}
+
+	if (!*name)
+		goto return_base;
+
+	inode = base->d_inode;
+	lookup_flags &= LOOKUP_FOLLOW | LOOKUP_DIRECTORY | LOOKUP_SLASHOK;
+
+	/* At this point we know we have a real path component. */
+	for(;;) {
+		int err;
+		unsigned long hash;
+		struct qstr this;
+		unsigned int flags;
+		unsigned int c;
+
+		err = permission(inode, MAY_EXEC);
+		dentry = ERR_PTR(err);
+ 		if (err)
+			break;
+
+		this.name = name;
+		c = *(const unsigned char *)name;
+
+		hash = init_name_hash();
+		do {
+			name++;
+			hash = partial_name_hash(c, hash);
+			c = *(const unsigned char *)name;
+		} while (c && (c != '/'));
+		this.len = name - (const char *) this.name;
+		this.hash = end_name_hash(hash);
+
+		/* remove trailing slashes? */
+		flags = lookup_flags;
+		if (c) {
+			char tmp;
+
+			flags |= LOOKUP_FOLLOW | LOOKUP_DIRECTORY;
+			do {
+				tmp = *++name;
+			} while (tmp == '/');
+			if (tmp)
+				flags |= LOOKUP_CONTINUE;
+		}
+
+		/*
+		 * See if the low-level filesystem might want
+		 * to use its own hash..
+		 */
+		if (base->d_op && base->d_op->d_hash) {
+			int error;
+			error = base->d_op->d_hash(base, &this);
+			if (error < 0) {
+				dentry = ERR_PTR(error);
+				break;
+			}
+		}
+
+		/* This does the actual lookups.. */
+		dentry = reserved_lookup(base, &this);
+		if (!dentry) {
+			dentry = cached_lookup(base, &this);
+			if (!dentry) {
+				dentry = real_lookup(base, &this);
+				if (IS_ERR(dentry))
+					break;
+			}
+		}
+
+		/* Check mountpoints.. */
+		dentry = follow_mount(dentry);
+
+		if (!(flags & LOOKUP_FOLLOW))
+			break;
+
+		base = do_follow_link(base, dentry, flags);
+		if (IS_ERR(base))
+			goto return_base;
+
+		inode = base->d_inode;
+		if (flags & LOOKUP_DIRECTORY) {
+			if (!inode)
+				goto no_inode;
+			dentry = ERR_PTR(-ENOTDIR); 
+			if (!inode->i_op || !inode->i_op->lookup)
+				break;
+			if (flags & LOOKUP_CONTINUE)
+				continue;
+		}
+return_base:
+		return base;
+/*
+ * The case of a nonexisting file is special.
+ *
+ * In the middle of a pathname lookup (ie when
+ * LOOKUP_CONTINUE is set), it's an obvious
+ * error and returns ENOENT.
+ *
+ * At the end of a pathname lookup it's legal,
+ * and we return a negative dentry. However, we
+ * get here only if there were trailing slashes,
+ * which is legal only if we know it's supposed
+ * to be a directory (ie "mkdir"). Thus the
+ * LOOKUP_SLASHOK flag.
+ */
+no_inode:
+		dentry = ERR_PTR(-ENOENT);
+		if (flags & LOOKUP_CONTINUE)
+			break;
+		if (flags & LOOKUP_SLASHOK)
+			goto return_base;
+		break;
+	}
+	dput(base);
+	return dentry;
 }
 
 /*
@@ -305,18 +466,160 @@ int lnamei(const char *pathname, struct inode **res_inode)
  * is used by most simple commands to get the inode of a specified name.
  * Open, link etc use their own routines, but this is enough for things
  * like 'chmod' etc.
+ *
+ * namei exists in two versions: namei/lnamei. The only difference is
+ * that namei follows links, while lnamei does not.
  */
-int namei(const char *pathname, struct inode **res_inode)
+struct dentry * __namei(const char *pathname, unsigned int lookup_flags)
+{
+	char *name;
+	struct dentry *dentry;
+
+	name = getname(pathname);
+	dentry = (struct dentry *) name;
+	if (!IS_ERR(name)) {
+		dentry = lookup_dentry(name, NULL, lookup_flags);
+		putname(name);
+		if (!IS_ERR(dentry)) {
+			if (!dentry->d_inode) {
+				dput(dentry);
+				dentry = ERR_PTR(-ENOENT);
+			}
+		}
+	}
+	return dentry;
+}
+
+/*
+ * It's inline, so penalty for filesystems that don't use sticky bit is
+ * minimal.
+ */
+static inline int check_sticky(struct inode *dir, struct inode *inode)
+{
+	if (!(dir->i_mode & S_ISVTX))
+		return 0;
+	if (inode->i_uid == current->fsuid)
+		return 0;
+	if (dir->i_uid == current->fsuid)
+		return 0;
+	return !capable(CAP_FOWNER);
+}
+
+/*
+ *	Check whether we can remove a link victim from directory dir, check
+ *  whether the type of victim is right.
+ *  1. We can't do it if dir is read-only (done in permission())
+ *  2. We should have write and exec permissions on dir
+ *  3. We can't remove anything from append-only dir
+ *  4. We can't do anything with immutable dir (done in permission())
+ *  5. If the sticky bit on dir is set we should either
+ *	a. be owner of dir, or
+ *	b. be owner of victim, or
+ *	c. have CAP_FOWNER capability
+ *  6. If the victim is append-only or immutable we can't do antyhing with
+ *     links pointing to it.
+ *  7. If we were asked to remove a directory and victim isn't one - ENOTDIR.
+ *  8. If we were asked to remove a non-directory and victim isn't one - EISDIR.
+ *  9. We can't remove a root or mountpoint.
+ */
+static inline int may_delete(struct inode *dir,struct dentry *victim, int isdir)
 {
 	int error;
-	char * tmp;
+	if (!victim->d_inode || victim->d_parent->d_inode != dir)
+		return -ENOENT;
+	error = permission(dir,MAY_WRITE | MAY_EXEC);
+	if (error)
+		return error;
+	if (IS_APPEND(dir))
+		return -EPERM;
+	if (check_sticky(dir, victim->d_inode)||IS_APPEND(victim->d_inode)||
+	    IS_IMMUTABLE(victim->d_inode))
+		return -EPERM;
+	if (isdir) {
+		if (!S_ISDIR(victim->d_inode->i_mode))
+			return -ENOTDIR;
+		if (IS_ROOT(victim))
+			return -EBUSY;
+		if (victim->d_mounts != victim->d_covers)
+			return -EBUSY;
+	} else if (S_ISDIR(victim->d_inode->i_mode))
+		return -EISDIR;
+	return 0;
+}
 
-	error = getname(pathname, &tmp);
-	if (!error) {
-		error = _namei(tmp, NULL, 1, res_inode);
-		putname(tmp);
+/*	Check whether we can create an object with dentry child in directory
+ *  dir.
+ *  1. We can't do it if child already exists (open has special treatment for
+ *     this case, but since we are inlined it's OK)
+ *  2. We can't do it if dir is read-only (done in permission())
+ *  3. We should have write and exec permissions on dir
+ *  4. We can't do it if dir is immutable (done in permission())
+ */
+static inline int may_create(struct inode *dir, struct dentry *child) {
+	if (child->d_inode)
+		return -EEXIST;
+	return permission(dir,MAY_WRITE | MAY_EXEC);
+}
+
+static inline struct dentry *get_parent(struct dentry *dentry)
+{
+	return dget(dentry->d_parent);
+}
+
+static inline void unlock_dir(struct dentry *dir)
+{
+	up(&dir->d_inode->i_sem);
+	dput(dir);
+}
+
+/*
+ * Locking the parent is needed to:
+ *  - serialize directory operations
+ *  - make sure the parent doesn't change from
+ *    under us in the middle of an operation.
+ *
+ * NOTE! Right now we'd rather use a "struct inode"
+ * for this, but as I expect things to move toward
+ * using dentries instead for most things it is
+ * probably better to start with the conceptually
+ * better interface of relying on a path of dentries.
+ */
+static inline struct dentry *lock_parent(struct dentry *dentry)
+{
+	struct dentry *dir = dget(dentry->d_parent);
+
+	down(&dir->d_inode->i_sem);
+
+	/* Un-hashed or moved?  Punt if so.. */
+	if (dir != dentry->d_parent || list_empty(&dentry->d_hash)) {
+		if (dir != dentry) {
+			unlock_dir(dir);
+			dir = ERR_PTR(-ENOENT);
+		}
 	}
-	return error;
+	return dir;
+}
+
+/* 
+ * Special case: O_CREAT|O_EXCL implies O_NOFOLLOW for security
+ * reasons.
+ *
+ * O_DIRECTORY translates into forcing a directory lookup.
+ */
+static inline int lookup_flags(unsigned int f)
+{
+	unsigned long retval = LOOKUP_FOLLOW;
+
+	if (f & O_NOFOLLOW)
+		retval &= ~LOOKUP_FOLLOW;
+	
+	if ((f & (O_CREAT|O_EXCL)) == (O_CREAT|O_EXCL))
+		retval &= ~LOOKUP_FOLLOW;
+	
+	if (f & O_DIRECTORY)
+		retval |= LOOKUP_DIRECTORY;
+	
+	return retval;
 }
 
 /*
@@ -332,167 +635,165 @@ int namei(const char *pathname, struct inode **res_inode)
  * which is a lot more logical, and also allows the "no perm" needed
  * for symlinks (where the permissions are checked later).
  */
-int open_namei(const char * pathname, int flag, int mode,
-               struct inode ** res_inode, struct inode * base)
+struct dentry * open_namei(const char * pathname, int flag, int mode)
 {
-	const char * basename;
-	int namelen,error;
-	struct inode * dir, *inode;
+	int acc_mode, error;
+	struct inode *inode;
+	struct dentry *dentry;
 
 	mode &= S_IALLUGO & ~current->fs->umask;
 	mode |= S_IFREG;
-	error = dir_namei(pathname, &namelen, &basename, base, &dir);
-	if (error)
-		return error;
-	if (!namelen) {			/* special case: '/usr/' etc */
-		if (flag & 2) {
-			iput(dir);
-			return -EISDIR;
-		}
-		/* thanks to Paul Pluzhnikov for noticing this was missing.. */
-		if ((error = permission(dir,ACC_MODE(flag))) != 0) {
-			iput(dir);
-			return error;
-		}
-		*res_inode=dir;
-		return 0;
-	}
-	dir->i_count++;		/* lookup eats the dir */
+
+	dentry = lookup_dentry(pathname, NULL, lookup_flags(flag));
+	if (IS_ERR(dentry))
+		return dentry;
+
+	acc_mode = ACC_MODE(flag);
 	if (flag & O_CREAT) {
-		down(&dir->i_sem);
-		error = lookup(dir, basename, namelen, &inode);
-		if (!error) {
-			if (flag & O_EXCL) {
-				iput(inode);
-				error = -EEXIST;
-			}
-		} else if (IS_RDONLY(dir))
-			error = -EROFS;
-		else if (!dir->i_op || !dir->i_op->create)
-			error = -EACCES;
-		else if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0)
-			;	/* error is already set! */
-		else {
-			dir->i_count++;		/* create eats the dir */
-			if (dir->i_sb && dir->i_sb->dq_op)
-				dir->i_sb->dq_op->initialize(dir, -1);
-			error = dir->i_op->create(dir, basename, namelen, mode, res_inode);
-			up(&dir->i_sem);
-			iput(dir);
-			return error;
-		}
-		up(&dir->i_sem);
-	} else
-		error = lookup(dir, basename, namelen, &inode);
-	if (error) {
-		iput(dir);
-		return error;
-	}
-	error = follow_link(dir,inode,flag,mode,&inode);
-	if (error)
-		return error;
-	if (S_ISDIR(inode->i_mode) && (flag & 2)) {
-		iput(inode);
-		return -EISDIR;
-	}
-	if ((error = permission(inode,ACC_MODE(flag))) != 0) {
-		iput(inode);
-		return error;
-	}
-	if (S_ISFIFO(inode->i_mode) || S_ISSOCK(inode->i_mode)) {
+		struct dentry *dir;
+
+		error = -EEXIST;
+		if (dentry->d_inode && (flag & O_EXCL))
+			goto exit;
+
+		dir = lock_parent(dentry);
+		error = PTR_ERR(dir);
+		if (IS_ERR(dir))
+			goto exit;
+
 		/*
-		 * 2-Feb-1995 Bruce Perens <Bruce@Pixar.com>
-		 * Allow opens of Unix domain sockets and FIFOs for write on
-		 * read-only filesystems. Their data does not live on the disk.
-		 *
-		 * If there was something like IS_NODEV(inode) for
-		 * pipes and/or sockets I'd check it here.
+		 * Somebody might have created the file while we
+		 * waited for the directory lock.. So we have to
+		 * re-do the existence test.
 		 */
-	    	flag &= ~O_TRUNC;
-	}
-	else if (S_ISBLK(inode->i_mode) || S_ISCHR(inode->i_mode)) {
-		if (IS_NODEV(inode)) {
-			iput(inode);
-			return -EACCES;
+		if (dentry->d_inode) {
+			error = 0;
+			if (flag & O_EXCL)
+				error = -EEXIST;
+		} else if ((error = may_create(dir->d_inode, dentry)) == 0) {
+			if (!dir->d_inode->i_op || !dir->d_inode->i_op->create)
+				error = -EACCES;
+			else {
+				DQUOT_INIT(dir->d_inode);
+				error = dir->d_inode->i_op->create(dir->d_inode, dentry, mode);
+				/* Don't check for write permission, don't truncate */
+				acc_mode = 0;
+				flag &= ~O_TRUNC;
+			}
 		}
+		unlock_dir(dir);
+		if (error)
+			goto exit;
+	}
+
+	error = -ENOENT;
+	inode = dentry->d_inode;
+	if (!inode)
+		goto exit;
+
+	error = -ELOOP;
+	if (S_ISLNK(inode->i_mode))
+		goto exit;
+	
+	error = -EISDIR;
+	if (S_ISDIR(inode->i_mode) && (flag & FMODE_WRITE))
+		goto exit;
+
+	error = permission(inode,acc_mode);
+	if (error)
+		goto exit;
+
+	/*
+	 * FIFO's, sockets and device files are special: they don't
+	 * actually live on the filesystem itself, and as such you
+	 * can write to them even if the filesystem is read-only.
+	 */
+	if (S_ISFIFO(inode->i_mode) || S_ISSOCK(inode->i_mode)) {
+	    	flag &= ~O_TRUNC;
+	} else if (S_ISBLK(inode->i_mode) || S_ISCHR(inode->i_mode)) {
+		error = -EACCES;
+		if (IS_NODEV(inode))
+			goto exit;
+
 		flag &= ~O_TRUNC;
 	} else {
-		if (IS_RDONLY(inode) && (flag & 2)) {
-			iput(inode);
-			return -EROFS;
-		}
+		error = -EROFS;
+		if (IS_RDONLY(inode) && (flag & 2))
+			goto exit;
 	}
 	/*
-	 * An append-only file must be opened in append mode for writing
+	 * An append-only file must be opened in append mode for writing.
 	 */
-	if (IS_APPEND(inode) && ((flag & FMODE_WRITE) && !(flag & O_APPEND))) {
-		iput(inode);
-		return -EPERM;
+	error = -EPERM;
+	if (IS_APPEND(inode)) {
+		if  ((flag & FMODE_WRITE) && !(flag & O_APPEND))
+			goto exit;
+		if (flag & O_TRUNC)
+			goto exit;
 	}
+
 	if (flag & O_TRUNC) {
-		if ((error = get_write_access(inode))) {
-			iput(inode);
-			return error;
-		}
+		error = get_write_access(inode);
+		if (error)
+			goto exit;
+
 		/*
-		 * Refuse to truncate files with mandatory locks held on them
+		 * Refuse to truncate files with mandatory locks held on them.
 		 */
 		error = locks_verify_locked(inode);
-		if (error) {
-			iput(inode);
-			return error;
-		}
-		if (inode->i_sb && inode->i_sb->dq_op)
-			inode->i_sb->dq_op->initialize(inode, -1);
+		if (!error) {
+			DQUOT_INIT(inode);
 			
-		error = do_truncate(inode, 0);
-		put_write_access(inode);
-		if (error) {
-			iput(inode);
-			return error;
+			error = do_truncate(dentry, 0);
 		}
+		put_write_access(inode);
+		if (error)
+			goto exit;
 	} else
 		if (flag & FMODE_WRITE)
-			if (inode->i_sb && inode->i_sb->dq_op)
-				inode->i_sb->dq_op->initialize(inode, -1);
-	*res_inode = inode;
-	return 0;
+			DQUOT_INIT(inode);
+
+	return dentry;
+
+exit:
+	dput(dentry);
+	return ERR_PTR(error);
 }
 
-int do_mknod(const char * filename, int mode, dev_t dev)
+struct dentry * do_mknod(const char * filename, int mode, dev_t dev)
 {
-	const char * basename;
-	int namelen, error;
-	struct inode * dir;
+	int error;
+	struct dentry *dir;
+	struct dentry *dentry, *retval;
 
 	mode &= ~current->fs->umask;
-	error = dir_namei(filename, &namelen, &basename, NULL, &dir);
+	dentry = lookup_dentry(filename, NULL, LOOKUP_FOLLOW);
+	if (IS_ERR(dentry))
+		return dentry;
+
+	dir = lock_parent(dentry);
+	retval = dir;
+	if (IS_ERR(dir))
+		goto exit;
+
+	error = may_create(dir->d_inode, dentry);
 	if (error)
-		return error;
-	if (!namelen) {
-		iput(dir);
-		return -ENOENT;
-	}
-	if (IS_RDONLY(dir)) {
-		iput(dir);
-		return -EROFS;
-	}
-	if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0) {
-		iput(dir);
-		return error;
-	}
-	if (!dir->i_op || !dir->i_op->mknod) {
-		iput(dir);
-		return -EPERM;
-	}
-	dir->i_count++;
-	if (dir->i_sb && dir->i_sb->dq_op)
-		dir->i_sb->dq_op->initialize(dir, -1);
-	down(&dir->i_sem);
-	error = dir->i_op->mknod(dir,basename,namelen,mode,dev);
-	up(&dir->i_sem);
-	iput(dir);
-	return error;
+		goto exit_lock;
+
+	error = -EPERM;
+	if (!dir->d_inode->i_op || !dir->d_inode->i_op->mknod)
+		goto exit_lock;
+
+	DQUOT_INIT(dir->d_inode);
+	error = dir->d_inode->i_op->mknod(dir->d_inode, dentry, mode, dev);
+exit_lock:
+	retval = ERR_PTR(error);
+	if (!error)
+		retval = dget(dentry);
+	unlock_dir(dir);
+exit:
+	dput(dentry);
+	return retval;
 }
 
 asmlinkage int sys_mknod(const char * filename, int mode, dev_t dev)
@@ -500,8 +801,11 @@ asmlinkage int sys_mknod(const char * filename, int mode, dev_t dev)
 	int error;
 	char * tmp;
 
-	if (S_ISDIR(mode) || (!S_ISFIFO(mode) && !fsuser()))
-		return -EPERM;
+	lock_kernel();
+	error = -EPERM;
+	if (S_ISDIR(mode) || (!S_ISFIFO(mode) && !capable(CAP_SYS_ADMIN)))
+		goto out;
+	error = -EINVAL;
 	switch (mode & S_IFMT) {
 	case 0:
 		mode |= S_IFREG;
@@ -509,85 +813,61 @@ asmlinkage int sys_mknod(const char * filename, int mode, dev_t dev)
 	case S_IFREG: case S_IFCHR: case S_IFBLK: case S_IFIFO: case S_IFSOCK:
 		break;
 	default:
-		return -EINVAL;
+		goto out;
 	}
-	error = getname(filename,&tmp);
-	if (!error) {
-		error = do_mknod(tmp,mode,dev);
+	tmp = getname(filename);
+	error = PTR_ERR(tmp);
+	if (!IS_ERR(tmp)) {
+		struct dentry * dentry = do_mknod(tmp,mode,dev);
 		putname(tmp);
+		error = PTR_ERR(dentry);
+		if (!IS_ERR(dentry)) {
+			dput(dentry);
+			error = 0;
+		}
 	}
+out:
+	unlock_kernel();
 	return error;
 }
 
 /*
- * Some operations need to remove trailing slashes for POSIX.1
- * conformance. For rename we also need to change the behaviour
- * depending on whether we had a trailing slash or not.. (we
- * cannot rename normal files with trailing slashes, only dirs)
- *
- * "dummy" is used to make sure we don't do "/" -> "".
+ * Look out: this function may change a normal dentry
+ * into a directory dentry (different size)..
  */
-static int remove_trailing_slashes(char * name)
+static inline int do_mkdir(const char * pathname, int mode)
 {
-	int result;
-	char dummy[1];
-	char *remove = dummy+1;
+	int error;
+	struct dentry *dir;
+	struct dentry *dentry;
 
-	for (;;) {
-		char c = *name;
-		name++;
-		if (!c)
-			break;
-		if (c != '/') {
-			remove = NULL;
-			continue;
-		}
-		if (remove)
-			continue;
-		remove = name;
-	}
+	dentry = lookup_dentry(pathname, NULL, LOOKUP_SLASHOK);
+	error = PTR_ERR(dentry);
+	if (IS_ERR(dentry))
+		goto exit;
 
-	result = 0;
-	if (remove) {
-		remove[-1] = 0;
-		result = 1;
-	}
+	dir = lock_parent(dentry);
+	error = PTR_ERR(dir);
+	if (IS_ERR(dir))
+		goto exit_dput;
 
-	return result;
-}
-
-static int do_mkdir(const char * pathname, int mode)
-{
-	const char * basename;
-	int namelen, error;
-	struct inode * dir;
-
-	error = dir_namei(pathname, &namelen, &basename, NULL, &dir);
+	error = may_create(dir->d_inode, dentry);
 	if (error)
-		return error;
-	if (!namelen) {
-		iput(dir);
-		return -ENOENT;
-	}
-	if (IS_RDONLY(dir)) {
-		iput(dir);
-		return -EROFS;
-	}
-	if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0) {
-		iput(dir);
-		return error;
-	}
-	if (!dir->i_op || !dir->i_op->mkdir) {
-		iput(dir);
-		return -EPERM;
-	}
-	dir->i_count++;
-	if (dir->i_sb && dir->i_sb->dq_op)
-		dir->i_sb->dq_op->initialize(dir, -1);
-	down(&dir->i_sem);
-	error = dir->i_op->mkdir(dir, basename, namelen, mode & 01777 & ~current->fs->umask);
-	up(&dir->i_sem);
-	iput(dir);
+		goto exit_lock;
+
+	error = -EPERM;
+	if (!dir->d_inode->i_op || !dir->d_inode->i_op->mkdir)
+		goto exit_lock;
+
+	DQUOT_INIT(dir->d_inode);
+	mode &= 0777 & ~current->fs->umask;
+	error = dir->d_inode->i_op->mkdir(dir->d_inode, dentry, mode);
+
+exit_lock:
+	unlock_dir(dir);
+exit_dput:
+	dput(dentry);
+exit:
 	return error;
 }
 
@@ -596,50 +876,125 @@ asmlinkage int sys_mkdir(const char * pathname, int mode)
 	int error;
 	char * tmp;
 
-	error = getname(pathname,&tmp);
-	if (!error) {
-		remove_trailing_slashes(tmp);
+	lock_kernel();
+	tmp = getname(pathname);
+	error = PTR_ERR(tmp);
+	if (!IS_ERR(tmp)) {
 		error = do_mkdir(tmp,mode);
 		putname(tmp);
 	}
+	unlock_kernel();
 	return error;
 }
 
-static int do_rmdir(const char * name)
+/*
+ * Whee.. Deadlock country. Happily there are only two VFS
+ * operations that do this..
+ */
+static inline void double_lock(struct dentry *d1, struct dentry *d2)
 {
-	const char * basename;
-	int namelen, error;
-	struct inode * dir;
+	struct semaphore *s1 = &d1->d_inode->i_sem;
+	struct semaphore *s2 = &d2->d_inode->i_sem;
 
-	error = dir_namei(name, &namelen, &basename, NULL, &dir);
+	if (s1 != s2) {
+		if ((unsigned long) s1 < (unsigned long) s2) {
+			struct semaphore *tmp = s2;
+			s2 = s1; s1 = tmp;
+		}
+		down(s1);
+	}
+	down(s2);
+}
+
+static inline void double_unlock(struct dentry *d1, struct dentry *d2)
+{
+	struct semaphore *s1 = &d1->d_inode->i_sem;
+	struct semaphore *s2 = &d2->d_inode->i_sem;
+
+	up(s1);
+	if (s1 != s2)
+		up(s2);
+	dput(d1);
+	dput(d2);
+}
+
+
+
+int vfs_rmdir(struct inode *dir, struct dentry *dentry)
+{
+	int error;
+
+	error = may_delete(dir, dentry, 1);
 	if (error)
 		return error;
-	if (!namelen) {
-		iput(dir);
-		return -ENOENT;
-	}
-	if (IS_RDONLY(dir)) {
-		iput(dir);
-		return -EROFS;
-	}
-	if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0) {
-		iput(dir);
-		return error;
-	}
+
+	if (!dir->i_op || !dir->i_op->rmdir)
+		return -EPERM;
+
+	DQUOT_INIT(dir);
+
 	/*
-	 * A subdirectory cannot be removed from an append-only directory
+	 * We try to drop the dentry early: we should have
+	 * a usage count of 2 if we're the only user of this
+	 * dentry, and if that is true (possibly after pruning
+	 * the dcache), then we drop the dentry now.
+	 *
+	 * A low-level filesystem can, if it choses, legally
+	 * do a
+	 *
+	 *	if (!list_empty(&dentry->d_hash))
+	 *		return -EBUSY;
+	 *
+	 * if it cannot handle the case of removing a directory
+	 * that is still in use by something else..
 	 */
-	if (IS_APPEND(dir)) {
-		iput(dir);
-		return -EPERM;
+	switch (dentry->d_count) {
+	default:
+		shrink_dcache_parent(dentry);
+		if (dentry->d_count != 2)
+			break;
+	case 2:
+		d_drop(dentry);
 	}
-	if (!dir->i_op || !dir->i_op->rmdir) {
-		iput(dir);
-		return -EPERM;
-	}
-	if (dir->i_sb && dir->i_sb->dq_op)
-		dir->i_sb->dq_op->initialize(dir, -1);
-	return dir->i_op->rmdir(dir,basename,namelen);
+
+	error = dir->i_op->rmdir(dir, dentry);
+
+	return error;
+}
+
+static inline int do_rmdir(const char * name)
+{
+	int error;
+	struct dentry *dir;
+	struct dentry *dentry;
+
+	dentry = lookup_dentry(name, NULL, 0);
+	error = PTR_ERR(dentry);
+	if (IS_ERR(dentry))
+		goto exit;
+
+	error = -ENOENT;
+	if (!dentry->d_inode)
+		goto exit_dput;
+
+	dir = dget(dentry->d_parent);
+
+	/*
+	 * The dentry->d_count stuff confuses d_delete() enough to
+	 * not kill the inode from under us while it is locked. This
+	 * wouldn't be needed, except the dentry semaphore is really
+	 * in the inode, not in the dentry..
+	 */
+	dentry->d_count++;
+	double_lock(dir, dentry);
+
+	error = vfs_rmdir(dir->d_inode, dentry);
+
+	double_unlock(dentry, dir);
+exit_dput:
+	dput(dentry);
+exit:
+	return error;
 }
 
 asmlinkage int sys_rmdir(const char * pathname)
@@ -647,50 +1002,59 @@ asmlinkage int sys_rmdir(const char * pathname)
 	int error;
 	char * tmp;
 
-	error = getname(pathname,&tmp);
-	if (!error) {
-		remove_trailing_slashes(tmp);
+	lock_kernel();
+	tmp = getname(pathname);
+	error = PTR_ERR(tmp);
+	if (!IS_ERR(tmp)) {
 		error = do_rmdir(tmp);
 		putname(tmp);
 	}
+	unlock_kernel();
 	return error;
 }
 
-static int do_unlink(const char * name)
+int vfs_unlink(struct inode *dir, struct dentry *dentry)
 {
-	const char * basename;
-	int namelen, error;
-	struct inode * dir;
+	int error;
 
-	error = dir_namei(name, &namelen, &basename, NULL, &dir);
+	error = may_delete(dir, dentry, 0);
 	if (error)
-		return error;
-	if (!namelen) {
-		iput(dir);
-		return -EPERM;
-	}
-	if (IS_RDONLY(dir)) {
-		iput(dir);
-		return -EROFS;
-	}
-	if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0) {
-		iput(dir);
-		return error;
-	}
-	/*
-	 * A file cannot be removed from an append-only directory
-	 */
-	if (IS_APPEND(dir)) {
-		iput(dir);
-		return -EPERM;
-	}
-	if (!dir->i_op || !dir->i_op->unlink) {
-		iput(dir);
-		return -EPERM;
-	}
-	if (dir->i_sb && dir->i_sb->dq_op)
-		dir->i_sb->dq_op->initialize(dir, -1);
-	return dir->i_op->unlink(dir,basename,namelen);
+		goto exit_lock;
+
+	if (!dir->i_op || !dir->i_op->unlink)
+		goto exit_lock;
+
+	DQUOT_INIT(dir);
+
+	error = dir->i_op->unlink(dir, dentry);
+
+exit_lock:
+	return error;
+}
+
+static inline int do_unlink(const char * name)
+{
+	int error;
+	struct dentry *dir;
+	struct dentry *dentry;
+
+	dentry = lookup_dentry(name, NULL, 0);
+	error = PTR_ERR(dentry);
+	if (IS_ERR(dentry))
+		goto exit;
+
+	dir = lock_parent(dentry);
+	error = PTR_ERR(dir);
+	if (IS_ERR(dir))
+		goto exit_dput;
+
+	error = vfs_unlink(dir->d_inode, dentry);
+
+        unlock_dir(dir);
+exit_dput:
+	dput(dentry);
+exit:
+	return error;
 }
 
 asmlinkage int sys_unlink(const char * pathname)
@@ -698,224 +1062,257 @@ asmlinkage int sys_unlink(const char * pathname)
 	int error;
 	char * tmp;
 
-	error = getname(pathname,&tmp);
-	if (!error) {
+	lock_kernel();
+	tmp = getname(pathname);
+	error = PTR_ERR(tmp);
+	if (!IS_ERR(tmp)) {
 		error = do_unlink(tmp);
 		putname(tmp);
 	}
+	unlock_kernel();
 	return error;
 }
 
-static int do_symlink(const char * oldname, const char * newname)
+static inline int do_symlink(const char * oldname, const char * newname)
 {
-	struct inode * dir;
-	const char * basename;
-	int namelen, error;
+	int error;
+	struct dentry *dir;
+	struct dentry *dentry;
 
-	error = dir_namei(newname, &namelen, &basename, NULL, &dir);
+	dentry = lookup_dentry(newname, NULL, 0);
+
+	error = PTR_ERR(dentry);
+	if (IS_ERR(dentry))
+		goto exit;
+
+	dir = lock_parent(dentry);
+	error = PTR_ERR(dir);
+	if (IS_ERR(dir))
+		goto exit_dput;
+
+	error = may_create(dir->d_inode, dentry);
 	if (error)
-		return error;
-	if (!namelen) {
-		iput(dir);
-		return -ENOENT;
-	}
-	if (IS_RDONLY(dir)) {
-		iput(dir);
-		return -EROFS;
-	}
-	if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0) {
-		iput(dir);
-		return error;
-	}
-	if (!dir->i_op || !dir->i_op->symlink) {
-		iput(dir);
-		return -EPERM;
-	}
-	dir->i_count++;
-	if (dir->i_sb && dir->i_sb->dq_op)
-		dir->i_sb->dq_op->initialize(dir, -1);
-	down(&dir->i_sem);
-	error = dir->i_op->symlink(dir,basename,namelen,oldname);
-	up(&dir->i_sem);
-	iput(dir);
+		goto exit_lock;
+
+	error = -EPERM;
+	if (!dir->d_inode->i_op || !dir->d_inode->i_op->symlink)
+		goto exit_lock;
+
+	DQUOT_INIT(dir->d_inode);
+	error = dir->d_inode->i_op->symlink(dir->d_inode, dentry, oldname);
+
+exit_lock:
+	unlock_dir(dir);
+exit_dput:
+	dput(dentry);
+exit:
 	return error;
 }
 
 asmlinkage int sys_symlink(const char * oldname, const char * newname)
 {
 	int error;
-	char * from, * to;
+	char * from;
 
-	error = getname(oldname,&from);
-	if (!error) {
-		error = getname(newname,&to);
-		if (!error) {
+	lock_kernel();
+	from = getname(oldname);
+	error = PTR_ERR(from);
+	if (!IS_ERR(from)) {
+		char * to;
+		to = getname(newname);
+		error = PTR_ERR(to);
+		if (!IS_ERR(to)) {
 			error = do_symlink(from,to);
 			putname(to);
 		}
 		putname(from);
 	}
+	unlock_kernel();
 	return error;
 }
 
-static int do_link(struct inode * oldinode, const char * newname)
+static inline int do_link(const char * oldname, const char * newname)
 {
-	struct inode * dir;
-	const char * basename;
-	int namelen, error;
+	struct dentry *old_dentry, *new_dentry, *dir;
+	struct inode *inode;
+	int error;
 
-	error = dir_namei(newname, &namelen, &basename, NULL, &dir);
-	if (error) {
-		iput(oldinode);
-		return error;
-	}
-	if (!namelen) {
-		iput(oldinode);
-		iput(dir);
-		return -EPERM;
-	}
-	if (IS_RDONLY(dir)) {
-		iput(oldinode);
-		iput(dir);
-		return -EROFS;
-	}
-	if (dir->i_dev != oldinode->i_dev) {
-		iput(dir);
-		iput(oldinode);
-		return -EXDEV;
-	}
-	if ((error = permission(dir,MAY_WRITE | MAY_EXEC)) != 0) {
-		iput(dir);
-		iput(oldinode);
-		return error;
-	}
 	/*
-	 * A link to an append-only or immutable file cannot be created
+	 * Hardlinks are often used in delicate situations.  We avoid
+	 * security-related surprises by not following symlinks on the
+	 * newname.  --KAB
+	 *
+	 * We don't follow them on the oldname either to be compatible
+	 * with linux 2.0, and to avoid hard-linking to directories
+	 * and other special files.  --ADM
 	 */
-	if (IS_APPEND(oldinode) || IS_IMMUTABLE(oldinode)) {
-		iput(dir);
-		iput(oldinode);
-		return -EPERM;
-	}
-	if (!dir->i_op || !dir->i_op->link) {
-		iput(dir);
-		iput(oldinode);
-		return -EPERM;
-	}
-	dir->i_count++;
-	if (dir->i_sb && dir->i_sb->dq_op)
-		dir->i_sb->dq_op->initialize(dir, -1);
-	down(&dir->i_sem);
-	error = dir->i_op->link(oldinode, dir, basename, namelen);
-	up(&dir->i_sem);
-	iput(dir);
+	old_dentry = lookup_dentry(oldname, NULL, 0);
+	error = PTR_ERR(old_dentry);
+	if (IS_ERR(old_dentry))
+		goto exit;
+
+	new_dentry = lookup_dentry(newname, NULL, 0);
+	error = PTR_ERR(new_dentry);
+	if (IS_ERR(new_dentry))
+		goto exit_old;
+
+	dir = lock_parent(new_dentry);
+	error = PTR_ERR(dir);
+	if (IS_ERR(dir))
+		goto exit_new;
+
+	error = -ENOENT;
+	inode = old_dentry->d_inode;
+	if (!inode)
+		goto exit_lock;
+
+	error = may_create(dir->d_inode, new_dentry);
+	if (error)
+		goto exit_lock;
+
+	error = -EXDEV;
+	if (dir->d_inode->i_dev != inode->i_dev)
+		goto exit_lock;
+
+	/*
+	 * A link to an append-only or immutable file cannot be created.
+	 */
+	error = -EPERM;
+	if (IS_APPEND(inode) || IS_IMMUTABLE(inode))
+		goto exit_lock;
+
+	error = -EPERM;
+	if (!dir->d_inode->i_op || !dir->d_inode->i_op->link)
+		goto exit_lock;
+
+	DQUOT_INIT(dir->d_inode);
+	error = dir->d_inode->i_op->link(old_dentry, dir->d_inode, new_dentry);
+
+exit_lock:
+	unlock_dir(dir);
+exit_new:
+	dput(new_dentry);
+exit_old:
+	dput(old_dentry);
+exit:
 	return error;
 }
 
 asmlinkage int sys_link(const char * oldname, const char * newname)
 {
 	int error;
-	char * to;
-	struct inode * oldinode;
+	char * from;
 
-	error = lnamei(oldname, &oldinode);
-	if (error)
-		return error;
-	error = getname(newname,&to);
-	if (error) {
-		iput(oldinode);
-		return error;
+	lock_kernel();
+	from = getname(oldname);
+	error = PTR_ERR(from);
+	if (!IS_ERR(from)) {
+		char * to;
+		to = getname(newname);
+		error = PTR_ERR(to);
+		if (!IS_ERR(to)) {
+			error = do_link(from,to);
+			putname(to);
+		}
+		putname(from);
 	}
-	error = do_link(oldinode,to);
-	putname(to);
+	unlock_kernel();
 	return error;
 }
 
-static int do_rename(const char * oldname, const char * newname, int must_be_dir)
+int vfs_rename(struct inode *old_dir, struct dentry *old_dentry,
+	       struct inode *new_dir, struct dentry *new_dentry)
 {
-	struct inode * old_dir, * new_dir;
-	const char * old_base, * new_base;
-	int old_len, new_len, error;
+	int error;
+	int isdir;
 
-	error = dir_namei(oldname, &old_len, &old_base, NULL, &old_dir);
+	isdir = S_ISDIR(old_dentry->d_inode->i_mode);
+
+	error = may_delete(old_dir, old_dentry, isdir); /* XXX */
 	if (error)
 		return error;
-	if ((error = permission(old_dir,MAY_WRITE | MAY_EXEC)) != 0) {
-		iput(old_dir);
-		return error;
-	}
-	if (!old_len || (old_base[0] == '.' &&
-	    (old_len == 1 || (old_base[1] == '.' &&
-	     old_len == 2)))) {
-		iput(old_dir);
-		return -EPERM;
-	}
-	error = dir_namei(newname, &new_len, &new_base, NULL, &new_dir);
-	if (error) {
-		iput(old_dir);
-		return error;
-	}
-	if ((error = permission(new_dir,MAY_WRITE | MAY_EXEC)) != 0){
-		iput(old_dir);
-		iput(new_dir);
-		return error;
-	}
-	if (!new_len || (new_base[0] == '.' &&
-	    (new_len == 1 || (new_base[1] == '.' &&
-	     new_len == 2)))) {
-		iput(old_dir);
-		iput(new_dir);
-		return -EPERM;
-	}
-	if (new_dir->i_dev != old_dir->i_dev) {
-		iput(old_dir);
-		iput(new_dir);
+
+	if (new_dir->i_dev != old_dir->i_dev)
 		return -EXDEV;
-	}
-	if (IS_RDONLY(new_dir) || IS_RDONLY(old_dir)) {
-		iput(old_dir);
-		iput(new_dir);
-		return -EROFS;
-	}
-	/*
-	 * A file cannot be removed from an append-only directory
-	 */
-	if (IS_APPEND(old_dir)) {
-		iput(old_dir);
-		iput(new_dir);
+
+	if (!new_dentry->d_inode)
+		error = may_create(new_dir, new_dentry);
+	else
+		error = may_delete(new_dir, new_dentry, isdir);
+	if (error)
+		return error;
+
+	if (!old_dir->i_op || !old_dir->i_op->rename)
 		return -EPERM;
+
+	DQUOT_INIT(old_dir);
+	DQUOT_INIT(new_dir);
+	error = old_dir->i_op->rename(old_dir, old_dentry, new_dir, new_dentry);
+
+	return error;
+}
+
+static inline int do_rename(const char * oldname, const char * newname)
+{
+	int error;
+	struct dentry * old_dir, * new_dir;
+	struct dentry * old_dentry, *new_dentry;
+
+	old_dentry = lookup_dentry(oldname, NULL, 0);
+
+	error = PTR_ERR(old_dentry);
+	if (IS_ERR(old_dentry))
+		goto exit;
+
+	error = -ENOENT;
+	if (!old_dentry->d_inode)
+		goto exit_old;
+
+	{
+		unsigned int flags = 0;
+		if (S_ISDIR(old_dentry->d_inode->i_mode))
+			flags = LOOKUP_SLASHOK;
+		new_dentry = lookup_dentry(newname, NULL, flags);
 	}
-	if (!old_dir->i_op || !old_dir->i_op->rename) {
-		iput(old_dir);
-		iput(new_dir);
-		return -EPERM;
-	}
-	new_dir->i_count++;
-	if (new_dir->i_sb && new_dir->i_sb->dq_op)
-		new_dir->i_sb->dq_op->initialize(new_dir, -1);
-	down(&new_dir->i_sem);
-	error = old_dir->i_op->rename(old_dir, old_base, old_len, 
-		new_dir, new_base, new_len, must_be_dir);
-	up(&new_dir->i_sem);
-	iput(new_dir);
+
+	error = PTR_ERR(new_dentry);
+	if (IS_ERR(new_dentry))
+		goto exit_old;
+
+	new_dir = get_parent(new_dentry);
+	old_dir = get_parent(old_dentry);
+
+	double_lock(new_dir, old_dir);
+
+	error = vfs_rename(old_dir->d_inode, old_dentry,
+			   new_dir->d_inode, new_dentry);
+
+	double_unlock(new_dir, old_dir);
+	dput(new_dentry);
+exit_old:
+	dput(old_dentry);
+exit:
 	return error;
 }
 
 asmlinkage int sys_rename(const char * oldname, const char * newname)
 {
 	int error;
-	char * from, * to;
+	char * from;
 
-	error = getname(oldname,&from);
-	if (!error) {
-		error = getname(newname,&to);
-		if (!error) {
-			error = do_rename(from,to,
-				remove_trailing_slashes(from) |
-				remove_trailing_slashes(to));
+	lock_kernel();
+	from = getname(oldname);
+	error = PTR_ERR(from);
+	if (!IS_ERR(from)) {
+		char * to;
+		to = getname(newname);
+		error = PTR_ERR(to);
+		if (!IS_ERR(to)) {
+			error = do_rename(from,to);
 			putname(to);
 		}
 		putname(from);
 	}
+	unlock_kernel();
 	return error;
 }

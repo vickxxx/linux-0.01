@@ -33,10 +33,14 @@
  *  1.5.7 July 22, 1996 Martin Mares: CLOCAL fix, pcxe_table clearing.
  *		David Nugent: Bug in pcxe_open.
  *		Brian J. Murrell: Modem Control fixes, Majors correctly assigned
+ *  1.6.1 April 6, 1997 Bernhard Kaindl: fixed virtual memory access for 2.1
+ *              i386-kernels and use on other archtitectures, Allowing use
+ *              as module, added module parameters, added switch to enable
+ *              verbose messages to assist user during card configuration.
+ *              Currently only tested on a PC/Xi card, but should work on Xe
+ *              and Xeve also.
  *
  */
-#undef MODULE
-/* Module code is broken right now. Don't enable this unless you want to fix it */
 
 #undef SPEED_HACK
 /* If you define SPEED_HACK then you get the following Baudrate translation
@@ -65,24 +69,18 @@
 #include <linux/tty_driver.h>
 #include <linux/malloc.h>
 #include <linux/string.h>
+#include <linux/init.h>
 
 #ifndef MODULE
-
-/* is* routines not available in modules
-** the need for this should go away when probing is done.  :-)
-** brian@ilinx.com
-*/
-
-#include <linux/ctype.h>
+#include <linux/ctype.h> /* We only need it for parsing the "digi="-line */
 #endif
 
 #include <asm/system.h>
 #include <asm/io.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/bitops.h>
 
-#define VERSION 	"1.5.7"
-static char *banner = "Digiboard PC/X{i,e,eve} driver v1.5.7";
+#define VERSION 	"1.6.1"
 
 #include "digi.h"
 #include "fep.h"
@@ -90,11 +88,45 @@ static char *banner = "Digiboard PC/X{i,e,eve} driver v1.5.7";
 #include "digi_fep.h"
 #include "digi_bios.h"
 
-/* Define one default setting if no digi= config line is used.
- * Default is ALTPIN = ON, PC/16E, 16 ports, I/O 200h Memory 0D0000h
+/*
+ * Define one default setting if no digi= config line is used.
+ * Default is altpin = disabled, 16 ports, I/O 200h, Memory 0D0000h
  */
-static struct board_info boards[MAX_DIGI_BOARDS] = { {	ENABLED, 0, ON, 16, 0x200, 0xd0000,0 } };
+static struct board_info boards[MAX_DIGI_BOARDS] = { {
+/* Board is enabled       */	ENABLED,
+/* Type is auto-detected  */	0,
+/* altping is disabled    */    DISABLED,
+/* number of ports = 16   */	16,
+/* io address is 0x200    */	0x200,
+/* card memory at 0xd0000 */	0xd0000,
+/* first minor device no. */	0
+} };
  
+static int verbose = 0;
+static int debug   = 0;
+
+#ifdef MODULE
+/* Variables for insmod */
+static int io[]           = {0, 0, 0, 0};
+static int membase[]      = {0, 0, 0, 0};
+static int memsize[]      = {0, 0, 0, 0};
+static int altpin[]       = {0, 0, 0, 0};
+static int numports[]     = {0, 0, 0, 0};
+
+# if (LINUX_VERSION_CODE > 0x020111)
+MODULE_AUTHOR("Bernhard Kaindl");
+MODULE_DESCRIPTION("Digiboard PC/X{i,e,eve} driver");
+MODULE_PARM(verbose,     "i");
+MODULE_PARM(debug,       "i");
+MODULE_PARM(io,          "1-4i");
+MODULE_PARM(membase,     "1-4i");
+MODULE_PARM(memsize,     "1-4i");
+MODULE_PARM(altpin,      "1-4i");
+MODULE_PARM(numports,    "1-4i");
+# endif
+
+#endif MODULE
+
 static int numcards = 1;
 static int nbdevs = 0;
  
@@ -159,19 +191,14 @@ static inline void assertmemoff(struct channel *ch);
 
 /* function definitions */
 #ifdef MODULE
-int		init_module(void);
-void		cleanup_module(void);
 
 /*
- *	Loadable module initialization stuff.
+ * pcxe_init() is our init_module():
  */
+#define pcxe_init init_module
 
-int init_module()
-{
+void	cleanup_module(void);
 
-	return pcxe_init();
-
-}
 
 /*****************************************************************************/
 
@@ -184,13 +211,14 @@ void cleanup_module()
 	struct board_info *bd;
 	struct channel *ch;
 
-	printk(KERN_INFO "Unloading PC/Xx: version %s\n", VERSION);
+	printk(KERN_NOTICE "Unloading PC/Xx version %s\n", VERSION);
 
 	save_flags(flags);
 	cli();
 	timer_active &= ~(1 << DIGI_TIMER);
 	timer_table[DIGI_TIMER].fn = NULL;
 	timer_table[DIGI_TIMER].expires = 0;
+	remove_bh(DIGI_BH);
 
 	if ((e1 = tty_unregister_driver(&pcxe_driver)))
 		printk("SERIAL: failed to unregister serial driver (%d)\n", e1);
@@ -287,7 +315,7 @@ static inline void assertmemoff(struct channel *ch)
 static inline void pcxe_sched_event(struct channel *info, int event)
 {
 	info->event |= 1 << event;
-	queue_task_irq_off(&info->tqueue, &tq_pcxx);
+	queue_task(&info->tqueue, &tq_pcxx);
 	mark_bh(DIGI_BH);
 }
 
@@ -340,7 +368,7 @@ static int pcxx_waitcarrier(struct tty_struct *tty,struct file *filp,struct chan
 		    (info->asyncflags & ASYNC_CLOSING) == 0 &&
 			(do_clocal || (info->imodem & info->dcd)))
 			break;
-		if(current->signal & ~current->blocked) {
+		if(signal_pending(current)) {
 			retval = -ERESTARTSYS;
 			break;
 		}
@@ -591,7 +619,7 @@ static void pcxe_close(struct tty_struct * tty, struct file * filp)
 ** worth noting that while I'm not sure what this hunk of code is supposed
 ** to do, it is not present in the serial.c driver.  Hmmm.  If you know,
 ** please send me a note.  brian@ilinx.com
-** Dont know either what this is supposed to do clameter@waterf.org.
+** Don't know either what this is supposed to do clameter@waterf.org.
 */
 		if(tty->ldisc.num != ldiscs[N_TTY].num) {
 			if(tty->ldisc.close)
@@ -605,8 +633,7 @@ static void pcxe_close(struct tty_struct * tty, struct file * filp)
 		if(info->blocked_open) {
 			if(info->close_delay) {
 				current->state = TASK_INTERRUPTIBLE;
-				current->timeout = jiffies + info->close_delay;
-				schedule();
+				schedule_timeout(info->close_delay);
 			}
 			wake_up_interruptible(&info->open_wait);
 		}
@@ -674,7 +701,7 @@ static int pcxe_write(struct tty_struct * tty, int from_user, const unsigned cha
 		if (count) {
 			if (verify_area(VERIFY_READ, (char*)buf, count))
 				count=0;
-			else memcpy_fromfs(ch->tmp_buf, buf, count);
+			else copy_from_user(ch->tmp_buf, buf, count);
 		}
 		buf = ch->tmp_buf;
 		memoff(ch);
@@ -861,13 +888,13 @@ static void pcxe_flush_chars(struct tty_struct *tty)
 	}
 }
 
-/* Flag if lilo configuration option is used. If so the
- * default settings are removed
+#ifndef MODULE
+
+/*
+ * Driver setup function when linked into the kernel to optionally parse multible
+ * "digi="-lines and initialize the driver at boot time. No probing.
  */
-
-static int liloconfig=0;
-
-void pcxx_setup(char *str, int *ints)
+__initfunc(void pcxx_setup(char *str, int *ints))
 {
 
 	struct board_info board;
@@ -875,11 +902,7 @@ void pcxx_setup(char *str, int *ints)
 	char              *temp, *t2;
 	unsigned          len;
 
-#if 0
-	if (!numcards)
-		memset(&boards, 0, sizeof(boards));
-#endif
-	if (liloconfig==0) { liloconfig=1;numcards=0; }
+	numcards=0;
 
 	memset(&board, 0, sizeof(board));
 
@@ -921,7 +944,6 @@ void pcxx_setup(char *str, int *ints)
 				return;
 		}
 
-	
 	while (str && *str) 
 	{
 		/* find the next comma or terminator */
@@ -985,11 +1007,6 @@ void pcxx_setup(char *str, int *ints)
 
 			case 4:
 				t2 = str;
-#ifndef MODULE
-/* is* routines not available in modules
-** the need for this should go away when probing is done.  :-)
-** brian@ilinx.com
-*/
 				while (isdigit(*t2))
 					t2++;
 
@@ -998,39 +1015,27 @@ void pcxx_setup(char *str, int *ints)
 					printk("PC/Xx: Invalid port count %s\n", str);
 					return;
 				}
-#endif
 
 				board.numports = simple_strtoul(str, NULL, 0);
 				last = i;
 				break;
 
 			case 5:
-#ifndef MODULE
-/* is* routines not available in modules
-** the need for this should go away when probing is done.  :-)
-** brian@ilinx.com
-*/
 				t2 = str;
 				while (isxdigit(*t2))
 					t2++;
 
 				if (*t2)
 				{
-					printk("PC/Xx: Invalid port count %s\n", str);
+					printk("PC/Xx: Invalid io port address %s\n", str);
 					return;
 				}
-#endif
 
 				board.port = simple_strtoul(str, NULL, 16);
 				last = i;
 				break;
 
 			case 6:
-#ifndef MODULE
-/* is* routines not available in modules
-** the need for this should go away when probing is done.  :-)
-** brian@ilinx.com
-*/
 				t2 = str;
 				while (isxdigit(*t2))
 					t2++;
@@ -1040,7 +1045,6 @@ void pcxx_setup(char *str, int *ints)
 					printk("PC/Xx: Invalid memory base %s\n", str);
 					return;
 				}
-#endif
 
 				board.membase = simple_strtoul(str, NULL, 16);
 				last = i;
@@ -1075,33 +1079,97 @@ void pcxx_setup(char *str, int *ints)
 	/* yeha!  string parameter was successful! */
 	numcards++;
 }
+#endif
 
-
-int pcxe_init(void)
+/*
+ * function to initialize the driver with the given parameters, which are either
+ * the default values from this file or the parameters given at boot.
+ */
+__initfunc(int pcxe_init(void))
 {
-	ulong flags, memory_seg=0, memory_size;
-	int lowwater, i, crd, shrinkmem=0, topwin = 0xff00L, botwin=0x100L;
+	ulong memory_seg=0, memory_size=0;
+	int lowwater, enabled_cards=0, i, crd, shrinkmem=0, topwin = 0xff00L, botwin=0x100L;
 	unchar *fepos, *memaddr, *bios, v;
 	volatile struct global_data *gd;
-	struct board_info *bd;
 	volatile struct board_chan *bc;
+	struct board_info *bd;
 	struct channel *ch;
 
-	printk("%s\n", banner);
+	printk(KERN_NOTICE "Digiboard PC/X{i,e,eve} driver v%s\n", VERSION);
+
+#ifdef MODULE
+	for (i = 0; i < 4; i++) {
+		if (io[i]) {
+			numcards = 0;
+			break;
+		}
+	}
+	if (numcards == 0) {
+		int first_minor = 0;
+
+		for (i = 0; i < 4; i++) {
+			if (io[i] == 0) {
+				boards[i].port    = 0;
+				boards[i].status  = DISABLED;
+			}
+			else {
+				boards[i].port         = (ushort)io[i];
+				boards[i].status       = ENABLED;
+				boards[i].first_minor  = first_minor;
+				numcards=i+1;
+			}
+			if (membase[i])
+				boards[i].membase = (ulong)membase[i];
+			else
+				boards[i].membase = 0xD0000;
+
+			if (memsize[i])
+				boards[i].memsize = (ulong)(memsize[i] * 1024);
+			else
+				boards[i].memsize = 0;
+
+			if (altpin[i])
+				boards[i].altpin  = ON;
+			else
+				boards[i].altpin  = OFF;
+
+			if (numports[i])
+				boards[i].numports  = (ushort)numports[i];
+			else
+				boards[i].numports  = 16;
+
+			first_minor += boards[i].numports;
+		}
+	}
+#endif
 
 	if (numcards <= 0)
 	{
-		printk("PC/Xx: No cards configured, exiting.\n");
-		return(0);
+		printk("PC/Xx: No cards configured, driver not active.\n");
+		return -EIO;
 	}
+#if 1
+	if (debug)
+	    for (i = 0; i < numcards; i++) {
+		    printk("Card %d:status=%d, port=0x%x, membase=0x%lx, memsize=0x%lx, altpin=%d, numports=%d, first_minor=%d\n",
+			    i+1,
+			    boards[i].status,
+			    boards[i].port,
+			    boards[i].membase,
+			    boards[i].memsize,
+			    boards[i].altpin,
+			    boards[i].numports,
+			    boards[i].first_minor);
+	    }
+#endif
 
 	for (i=0;i<numcards;i++)
 		nbdevs += boards[i].numports;
 
 	if (nbdevs <= 0)
 	{
-		printk("PC/Xx: No devices activated, exiting.\n");
-		return(0);
+		printk("PC/Xx: No devices activated, driver not active.\n");
+		return -EIO;
 	}
 
 	/*
@@ -1111,6 +1179,7 @@ int pcxe_init(void)
 	digi_channels = kmalloc(sizeof(struct channel) * nbdevs, GFP_KERNEL);
 	if (!digi_channels)
 		panic("Unable to allocate digi_channel struct");
+	memset(digi_channels, 0, sizeof(struct channel) * nbdevs);
 
 	pcxe_table =  kmalloc(sizeof(struct tty_struct *) * nbdevs, GFP_KERNEL);
 	if (!pcxe_table)
@@ -1120,10 +1189,12 @@ int pcxe_init(void)
 	pcxe_termios = kmalloc(sizeof(struct termios *) * nbdevs, GFP_KERNEL);
 	if (!pcxe_termios)
 		panic("Unable to allocate pcxe_termios struct");
+	memset(pcxe_termios,0,sizeof(struct termios *)*nbdevs);
 
 	pcxe_termios_locked = kmalloc(sizeof(struct termios *) * nbdevs, GFP_KERNEL);
 	if (!pcxe_termios_locked)
 		panic("Unable to allocate pcxe_termios_locked struct");
+	memset(pcxe_termios_locked,0,sizeof(struct termios *)*nbdevs);
 
 	init_bh(DIGI_BH,do_pcxe_bh);
 	enable_bh(DIGI_BH);
@@ -1172,22 +1243,22 @@ int pcxe_init(void)
 	pcxe_callout.subtype = SERIAL_TYPE_CALLOUT;
 	pcxe_callout.init_termios.c_cflag = B9600 | CS8 | CREAD | HUPCL | CLOCAL;
 
-	save_flags(flags);
-	cli();
-
 	for(crd=0; crd < numcards; crd++) {
 		bd = &boards[crd];
 		outb(FEPRST, bd->port);
 		pcxxdelay(1);
 
 		for(i=0; (inb(bd->port) & FEPMASK) != FEPRST; i++) {
-			if(i > 1000) {
+			if(i > 100) {
 				printk("PC/Xx: Board not found at port 0x%x! Check switch settings.\n",
 					bd->port);
 				bd->status = DISABLED;
 				break;
 			}
-			pcxxdelay(1);
+#ifdef MODULE
+			schedule();
+#endif
+			pcxxdelay(10);
 		}
 		if(bd->status == DISABLED)
 			continue;
@@ -1234,18 +1305,38 @@ int pcxe_init(void)
 				memory_size = 0x10000;
 			}
 		}
+		if (verbose)
+			printk("Configuring card %d as a %s %ldK card. io=0x%x, mem=%lx-%lx\n",
+				crd+1, board_desc[bd->type], memory_size/1024,
+				bd->port,bd->membase,bd->membase+memory_size-1);
 
-		memaddr = (unchar *) bd->membase;
+		if (boards[crd].memsize == 0)
+			boards[crd].memsize = memory_size;
+		else
+			if (boards[crd].memsize != memory_size) {
+			    printk("PC/Xx: memory size mismatch:supplied=%lx(%ldK) probed=%ld(%ldK)\n",
+				    boards[crd].memsize, boards[crd].memsize / 1024,
+				    memory_size, memory_size / 1024);
+			    continue;
+			}
+
+		memaddr = (unchar *)phys_to_virt(bd->membase);
+
+		if (verbose)
+			printk("Resetting board and testing memory access:");
 
 		outb(FEPRST|FEPMEM, bd->port);
 
 		for(i=0; (inb(bd->port) & FEPMASK) != (FEPRST|FEPMEM); i++) {
-			if(i > 10000) {
-				printk("PC/Xx: %s not resetting at port 0x%x! Check switch settings.\n",
+			if(i > 1000) {
+				printk("\nPC/Xx: %s not resetting at port 0x%x! Check switch settings.\n",
 					board_desc[bd->type], bd->port);
 				bd->status = DISABLED;
 				break;
 			}
+#ifdef MODULE
+			schedule();
+#endif
 			pcxxdelay(1);
 		}
 		if(bd->status == DISABLED)
@@ -1262,6 +1353,8 @@ int pcxe_init(void)
 			bd->status = DISABLED;
 			continue;
 		}
+		if (verbose)
+			printk(" done.\n");
 
 		for(i=0; i < 16; i++) {
 			memaddr[MISCGLOBAL+i] = 0;
@@ -1270,19 +1363,36 @@ int pcxe_init(void)
 		if(bd->type == PCXI || bd->type == PCXE) {
 			bios = memaddr + BIOSCODE + ((0xf000 - memory_seg) << 4);
 
+			if (verbose)
+				printk("Downloading BIOS to 0x%lx:", virt_to_phys(bios));
+
 			memcpy(bios, pcxx_bios, pcxx_nbios);
+
+			if (verbose)
+				printk(" done.\n");
 
 			outb(FEPMEM, bd->port);
 
-			for(i=0; i <= 10000; i++) {
+			if (verbose)
+				printk("Waiting for BIOS to become ready");
+
+			for(i=1; i <= 30; i++) {
 				if(*(ushort *)((ulong)memaddr + MISCGLOBAL) == *(ushort *)"GD" ) {
 					goto load_fep;
 				}
-				pcxxdelay(1);
+				if (verbose) {
+					printk(".");
+					if (i % 50 == 0)
+						printk("\n");
+				}
+#ifdef MODULE
+				schedule();
+#endif
+				pcxxdelay(50);
 			}
 
-			printk("PC/Xx: BIOS download failed on the %s at 0x%x!\n",
-							board_desc[bd->type], bd->port);
+			printk("\nPC/Xx: BIOS download failed for board at 0x%x(addr=%lx-%lx)!\n",
+							bd->port, bd->membase, bd->membase+bd->memsize);
 			bd->status = DISABLED;
 			continue;
 		}
@@ -1296,14 +1406,22 @@ int pcxe_init(void)
 			outb(FEPCLR, bd->port);
 			memwinon(bd,0);
 
-			for(i=0; i <= 10000; i++) {
+			for(i=0; i <= 1000; i++) {
 				if(*(ushort *)((ulong)memaddr + MISCGLOBAL) == *(ushort *)"GD" ) {
 					goto load_fep;
 				}
-				pcxxdelay(1);
+				if (verbose) {
+					printk(".");
+					if (i % 50 == 0)
+						printk("\n");
+				}
+#ifdef MODULE
+				schedule();
+#endif
+				pcxxdelay(10);
 			}
 
-			printk("PC/Xx: BIOS download failed on the %s at 0x%x!\n",
+			printk("\nPC/Xx: BIOS download failed on the %s at 0x%x!\n",
 				board_desc[bd->type], bd->port);
 			bd->status = DISABLED;
 			continue;
@@ -1314,9 +1432,15 @@ load_fep:
 		if(bd->type == PCXEVE)
 			fepos = memaddr + (FEPCODE & 0x1fff);
 
+		if (verbose)
+			printk(" ok.\nDownloading FEP/OS to 0x%lx:", virt_to_phys(fepos));
+
 		memwinon(bd, (FEPCODE >> 13));
 		memcpy(fepos, pcxx_cook, pcxx_ncook);
 		memwinon(bd, 0);
+
+		if (verbose)
+			printk(" done.\n");
 
 		*(ushort *)((ulong)memaddr + MBOX +  0) = 2;
 		*(ushort *)((ulong)memaddr + MBOX +  2) = memory_seg + FEPCODESEG;
@@ -1335,11 +1459,17 @@ load_fep:
 				bd->status = DISABLED;
 				break;
 			}
+#ifdef MODULE
+			schedule();
+#endif
 			pcxxdelay(1);
 		}
 
 		if(bd->status == DISABLED)
 			continue;
+
+		if (verbose)
+			printk("Waiting for FEP/OS to become ready");
 
 		*(ushort *)(memaddr + FEPSTAT) = 0;
 		*(ushort *)(memaddr + MBOX + 0) = 1;
@@ -1350,17 +1480,28 @@ load_fep:
 		outb(FEPCLR, bd->port);
 		memwinon(bd, 0);
 
-		for(i=0; *(ushort *)((ulong)memaddr + FEPSTAT) != *(ushort *)"OS"; i++) {
-			if(i > 10000) {
-				printk("PC/Xx: FEP/OS download failed on the %s at 0x%x!\n",
+		for(i=1; *(ushort *)((ulong)memaddr + FEPSTAT) != *(ushort *)"OS"; i++) {
+			if(i > 1000) {
+				printk("\nPC/Xx: FEP/OS download failed on the %s at 0x%x!\n",
 					board_desc[bd->type], bd->port);
 				bd->status = DISABLED;
 				break;
 			}
+			if (verbose) {
+				printk(".");
+				if (i % 50 == 0)
+					printk("\n%5d",i/50);
+			}
+#ifdef MODULE
+			schedule();
+#endif
 			pcxxdelay(1);
 		}
 		if(bd->status == DISABLED)
 			continue;
+
+		if (verbose)
+			printk(" ok.\n");
 
 		ch = digi_channels+bd->first_minor;
 		pcxxassert(ch < digi_channels+nbdevs, "ch out of range");
@@ -1420,9 +1561,7 @@ load_fep:
 
 			ch->txbufsize = bc->tmax + 1;
 			ch->rxbufsize = bc->rmax + 1;
-
 			ch->tmp_buf = kmalloc(ch->txbufsize,GFP_KERNEL);
-
 			lowwater = ch->txbufsize >= 2000 ? 1024 : ch->txbufsize/2;
 			fepcmd(ch, STXLWATER, lowwater, 0, 10, 0);
 			fepcmd(ch, SRXLWATER, ch->rxbufsize/4, 0, 10, 0);
@@ -1451,17 +1590,25 @@ load_fep:
 			ch->normal_termios = pcxe_driver.init_termios;
 			ch->open_wait = 0;
 			ch->close_wait = 0;
-			/* zero out flags as it is unassigned at this point
-			 * brian@ilinx.com
-			 */
 			ch->asyncflags = 0;
 		}
 
-		printk("PC/Xx: %s (%s) I/O=0x%x Mem=0x%lx Ports=%d\n", 
-			board_desc[bd->type], board_mem[bd->type], bd->port, 
-			bd->membase, bd->numports);
+		if (verbose)
+		    printk("Card No. %d ready: %s (%s) I/O=0x%x Mem=0x%lx Ports=%d\n", 
+			    crd+1, board_desc[bd->type], board_mem[bd->type], bd->port, 
+			    bd->membase, bd->numports);
+		else
+		    printk("PC/Xx: %s (%s) I/O=0x%x Mem=0x%lx Ports=%d\n", 
+			    board_desc[bd->type], board_mem[bd->type], bd->port, 
+			    bd->membase, bd->numports);
 
 		memwinoff(bd, 0);
+		enabled_cards++;
+	}
+
+	if (enabled_cards <= 0) {
+		printk(KERN_NOTICE "PC/Xx: No cards enabled, no driver.\n");
+		return -EIO;
 	}
 
 	if(tty_register_driver(&pcxe_driver))
@@ -1470,15 +1617,13 @@ load_fep:
 	if(tty_register_driver(&pcxe_callout))
 		panic("Couldn't register PC/Xe callout");
 
-#if 0
-	loops_per_sec = save_loops_per_sec;  /* reset it to what it should be */
-#endif
-
 	/*
 	 * Start up the poller to check for events on all enabled boards
 	 */
 	timer_active |= 1 << DIGI_TIMER;
-	restore_flags(flags);
+
+	if (verbose)
+		printk(KERN_NOTICE "PC/Xx: Driver with %d card(s) ready.\n", enabled_cards);
 
 	return 0;
 }
@@ -1543,7 +1688,7 @@ static void doevent(int crd)
 
 	while ((tail = chan0->mailbox->eout) != (head = chan0->mailbox->ein)) {
 		assertgwinon(chan0);
-		eventbuf = (volatile unchar *)bd->membase + tail + ISTART;
+		eventbuf = (volatile unchar *)phys_to_virt(bd->membase + tail + ISTART);
 		channel = eventbuf[0];
 		event = eventbuf[1];
 		mstat = eventbuf[2];
@@ -1654,7 +1799,7 @@ fepcmd(struct channel *ch, int cmd, int word_or_byte, int byte2, int ncmds,
 
 	assertgwinon(ch);
 
-	memaddr = (unchar *)ch->board->membase;
+	memaddr = (unchar *)phys_to_virt(ch->board->membase);
 	head = ch->mailbox->cin;
 
 	if(head >= (CMAX-CSTART) || (head & 03)) {
@@ -1695,6 +1840,7 @@ fepcmd(struct channel *ch, int cmd, int word_or_byte, int byte2, int ncmds,
 
 		if(n <= ncmds * (sizeof(short)*4))
 			break;
+		/* Seems not to be good here: schedule(); */
 	}
 }
 
@@ -1969,19 +2115,17 @@ static int pcxe_ioctl(struct tty_struct *tty, struct file * file,
 			return 0;
 
 		case TIOCGSOFTCAR:
-			error = verify_area(VERIFY_WRITE, (void *) arg,sizeof(long));
-			if(error)
-				return error;
-			put_fs_long(C_CLOCAL(tty) ? 1 : 0,
-				    (unsigned long *) arg);
-			return 0;
+			return put_user(C_CLOCAL(tty) ? 1 : 0,
+			    (unsigned int *) arg);
 
 		case TIOCSSOFTCAR:
-			error = verify_area(VERIFY_READ, (void *) arg,sizeof(long));
-			if(error)
+			{
+			    unsigned int value;
+			    error = get_user( value, (unsigned int *) arg);
+			    if (error)
 				return error;
-			arg = get_fs_long((unsigned long *) arg);
-			tty->termios->c_cflag =	((tty->termios->c_cflag & ~CLOCAL) | (arg ? CLOCAL : 0));
+			    tty->termios->c_cflag = ((tty->termios->c_cflag & ~CLOCAL) | (value ? CLOCAL : 0));
+			}
 			return 0;
 
 		case TIOCMODG:
@@ -2007,20 +2151,18 @@ static int pcxe_ioctl(struct tty_struct *tty, struct file * file,
 			if(mstat & ch->dcd)
 				mflag |= TIOCM_CD;
 
-			error = verify_area(VERIFY_WRITE, (void *) arg,sizeof(long));
+			error = put_user(mflag, (unsigned int *) arg);
 			if(error)
 				return error;
-			put_fs_long(mflag, (unsigned long *) arg);
 			break;
 
 		case TIOCMBIS:
 		case TIOCMBIC:
 		case TIOCMODS:
 		case TIOCMSET:
-			error = verify_area(VERIFY_READ, (void *) arg,sizeof(long));
+			error = get_user(mstat, (unsigned int *) arg);
 			if(error)
 				return error;
-			mstat = get_fs_long((unsigned long *) arg);
 
 			mflag = 0;
 			if(mstat & TIOCM_DTR)
@@ -2075,7 +2217,7 @@ static int pcxe_ioctl(struct tty_struct *tty, struct file * file,
 			if((error=verify_area(VERIFY_WRITE, (char*)arg, sizeof(digi_t))))
 				return(error);
 
-			memcpy_tofs((char*)arg, &ch->digiext, sizeof(digi_t));
+			copy_to_user((char*)arg, &ch->digiext, sizeof(digi_t));
 			break;
 
 		case DIGI_SETAW:
@@ -2095,7 +2237,7 @@ static int pcxe_ioctl(struct tty_struct *tty, struct file * file,
 			if((error=verify_area(VERIFY_READ, (char*)arg,sizeof(digi_t))))
 				return(error);
 
-			memcpy_fromfs(&ch->digiext, (char*)arg, sizeof(digi_t));
+			copy_from_user(&ch->digiext, (char*)arg, sizeof(digi_t));
 #ifdef DEBUG_IOCTL
 			printk("ioctl(DIGI_SETA): flags = %x\n", ch->digiext.digi_flags);
 #endif
@@ -2132,7 +2274,7 @@ static int pcxe_ioctl(struct tty_struct *tty, struct file * file,
 			if((error=verify_area(VERIFY_WRITE, (char*)arg,sizeof(dflow))))
 				return(error);
 
-			memcpy_tofs((char*)arg, &dflow, sizeof(dflow));
+			copy_to_user((char*)arg, &dflow, sizeof(dflow));
 			break;
 
 		case DIGI_SETAFLOW:
@@ -2148,7 +2290,7 @@ static int pcxe_ioctl(struct tty_struct *tty, struct file * file,
 			if((error=verify_area(VERIFY_READ, (char*)arg,sizeof(dflow))))
 				return(error);
 
-			memcpy_fromfs(&dflow, (char*)arg, sizeof(dflow));
+			copy_from_user(&dflow, (char*)arg, sizeof(dflow));
 
 			if(dflow.startc != startc || dflow.stopc != stopc) {
 				cli();
@@ -2215,7 +2357,7 @@ static void do_softint(void *private_)
 	if(info && info->magic == PCXX_MAGIC) {
 		struct tty_struct *tty = info->tty;
 		if (tty && tty->driver_data) {
-			if(clear_bit(PCXE_EVENT_HANGUP, &info->event)) {
+			if(test_and_clear_bit(PCXE_EVENT_HANGUP, &info->event)) {
 				tty_hangup(tty);
 				wake_up_interruptible(&info->open_wait);
 				info->asyncflags &= ~(ASYNC_NORMAL_ACTIVE|ASYNC_CALLOUT_ACTIVE);

@@ -1,9 +1,11 @@
-/*
- *  include/asm-mips/gdb-stub.h
+/* $Id: gdb-stub.h,v 1.3 1998/07/20 17:52:19 ralf Exp $
  *
- *  Copyright (C) 1995 Andreas Busse
+ * This file is subject to the terms and conditions of the GNU General Public
+ * License.  See the file "COPYING" in the main directory of this archive
+ * for more details.
+ *
+ * Copyright (C) 1995 Andreas Busse
  */
-
 #ifndef __ASM_MIPS_GDB_STUB_H
 #define __ASM_MIPS_GDB_STUB_H
 
@@ -116,8 +118,8 @@
 #define GDB_FR_CP0_RANDOM	((GDB_FR_CP0_INDEX) + 4)	/* 75 */
 #define GDB_FR_CP0_ENTRYLO0	((GDB_FR_CP0_RANDOM) + 4)	/* 76 */
 #define GDB_FR_CP0_ENTRYLO1	((GDB_FR_CP0_ENTRYLO0) + 4)	/* 77 */
-#define GDB_FR_CP0_REG4		((GDB_FR_CP0_ENTRYLO1) + 4)	/* 78 */
-#define GDB_FR_CP0_PAGEMASK	((GDB_FR_CP0_REG4) + 4)		/* 79 */
+#define GDB_FR_CP0_CONTEXT	((GDB_FR_CP0_ENTRYLO1) + 4)	/* 78 */
+#define GDB_FR_CP0_PAGEMASK	((GDB_FR_CP0_CONTEXT) + 4)	/* 79 */
 #define GDB_FR_CP0_WIRED	((GDB_FR_CP0_PAGEMASK) + 4)	/* 80 */
 #define GDB_FR_CP0_REG7		((GDB_FR_CP0_WIRED) + 4)	/* 81 */
 #define GDB_FR_CP0_REG8		((GDB_FR_CP0_REG7) + 4)		/* 82 */
@@ -131,7 +133,7 @@
 
 #define GDB_FR_SIZE		((((GDB_FR_CP0_PRID) + 4) + (PTRSIZE-1)) & ~(PTRSIZE-1))
 
-#ifndef __LANGUAGE_ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 
 /*
  * This is the same as above, but for the high-level
@@ -187,7 +189,7 @@ struct gdb_regs {
 	long	cp0_random;
 	long	cp0_entrylo0;
 	long	cp0_entrylo1;
-	long	cp0_reg4;
+	long	cp0_context;
 	long	cp0_pagemask;
 	long	cp0_wired;
 	long	cp0_reg7;
@@ -207,5 +209,5 @@ struct gdb_regs {
 
 void set_debug_traps(void);
 
-#endif /* __LANGUAGE_ASSEMBLY */
+#endif /* _LANGUAGE_ASSEMBLY */
 #endif /* __ASM_MIPS_GDB_STUB_H */

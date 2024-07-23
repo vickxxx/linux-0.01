@@ -39,6 +39,7 @@
 |
 
 #include <linux/linkage.h>
+#include <asm/entry.h>
 
 |SKELETON	idnt    2,1 | Motorola 040 Floating Point Software Package
 
@@ -50,14 +51,6 @@
 	|section 8
  
 	.include "fpsp.h"
-
-LOFF_ORIG_D0	= 0x20
-
-#define SAVE_ALL				\
-	clrl	%sp@-;     /* stk_adj */	\
-	movel	%d0,%sp@-; /* orig d0 */	\
-	movel	%d0,%sp@-; /* d0 */		\
-	moveml	%d1-%d5/%a0-%a1,%sp@-
 
 	|xref	b1238_fix
 
@@ -76,11 +69,8 @@ real_dz:
 	frestore	(%sp)+
 	unlk		%a6
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -170,11 +160,8 @@ inex_done:
 	frestore	(%sp)+
 	unlk		%a6
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -199,11 +186,8 @@ ovfl_done:
 	frestore	(%sp)+
 	unlk		%a6
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -228,11 +212,8 @@ unfl_done:
 	frestore	(%sp)+
 	unlk		%a6
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -253,11 +234,8 @@ real_snan:
 	frestore	(%sp)+
 	unlk		%a6
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -278,11 +256,8 @@ real_operr:
 	frestore	(%sp)+
 	unlk		%a6
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -309,11 +284,8 @@ real_bsun:
 	frestore	(%sp)+
 	unlk		%a6
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -333,11 +305,8 @@ fline:
 	jmp	fpsp_fline
 real_fline:
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -358,11 +327,8 @@ real_unsupp:
 	frestore	(%sp)+
 	unlk		%a6
 
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | a -1 in the ORIG_D0 field
-					| signifies that the stack frame
-					| is NOT for syscall
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
 	movel	%sp,%sp@- 		| stack frame pointer argument
 	bsrl	SYMBOL_NAME(trap_c)
 	addql	#4,%sp
@@ -412,15 +378,12 @@ fpsp_done:
 	beq	Lnotkern
 	rte
 Lnotkern:
-	tstl	SYMBOL_NAME(need_resched)
-	bne	Lmustsched
-	rte
-Lmustsched:
-	SAVE_ALL
-	moveq	#-1,%d0
-	movel	%d0,%sp@(LOFF_ORIG_D0)    | indicate stack frame not for syscall
-	bral	SYMBOL_NAME(ret_from_exception)	| deliver signals, reschedule etc..
-
+	SAVE_ALL_INT
+	GET_CURRENT(%d0)
+	tstl	%curptr@(LTASK_NEEDRESCHED)
+	jne	SYMBOL_NAME(ret_from_exception)	| deliver signals,
+						| reschedule etc..
+	RESTORE_ALL
 
 |
 |	mem_write --- write to user or supervisor address space
@@ -497,7 +460,7 @@ user_read:
 	movel	%d0,-(%sp)
 	movel	%a1,-(%sp)
 	movel	%a0,-(%sp)
-	jsr		copyin
+	jsr	copyin
 	addw	#12,%sp
 	movel	(%sp)+,%d1
 	rts
@@ -513,9 +476,12 @@ copyout:
 	movel	12(%sp),%d0	| count
 	subl	#1,%d0		| dec count by 1 for dbra
 	movel	#1,%d1
-	movec	%d1,%DFC		| set dfc for user data space
+
+|	DFC is already set
+|	movec	%d1,%DFC		| set dfc for user data space
 moreout:
 	moveb	(%a0)+,%d1	| fetch supervisor byte
+out_ea:
 	movesb	%d1,(%a1)+	| write user byte
 	dbf	%d0,moreout
 	rts
@@ -526,11 +492,24 @@ copyin:
 	movel	12(%sp),%d0	| count
 	subl	#1,%d0		| dec count by 1 for dbra
 	movel	#1,%d1
-	movec	%d1,%SFC		| set sfc for user space
+|	SFC is already set
+|	movec	%d1,%SFC		| set sfc for user space
 morein:
+in_ea:
 	movesb	(%a0)+,%d1	| fetch user byte
 	moveb	%d1,(%a1)+	| write supervisor byte
 	dbf	%d0,morein
 	rts
+
+	.section .fixup,#alloc,#execinstr
+	.even
+1:
+	jbra	SYMBOL_NAME(fpsp040_die)
+
+	.section __ex_table,#alloc
+	.align	4
+
+	.long	in_ea,1b
+	.long	out_ea,1b
 
 	|end

@@ -1,10 +1,7 @@
 /*
- *	AX.25 release 032
+ *	AX.25 release 037
  *
- *	This is ALPHA test software. This code may break your machine, randomly fail to work with new 
- *	releases, misbehave and/or generally screw up. It might even work. 
- *
- *	This code REQUIRES 1.2.1 or higher/ NET3.029
+ *	This code REQUIRES 2.1.15 or higher/ NET3.038
  *
  *	This module:
  *		This module is free software; you can redistribute it and/or
@@ -19,10 +16,16 @@
  *	AX.25 029	Alan(GW4PTS)	Switched to KA9Q constant names.
  *	AX.25 031	Joerg(DL1BKE)	Added DAMA support
  *	AX.25 032	Joerg(DL1BKE)	Fixed DAMA timeout bug
+ *	AX.25 033	Jonathan(G4KLX)	Modularisation functions.
+ *	AX.25 035	Frederic(F1OAT)	Support for pseudo-digipeating.
+ *	AX.25 036	Jonathan(G4KLX)	Split Standard and DAMA code into separate files.
+ *			Joerg(DL1BKE)	Fixed DAMA Slave. We are *required* to start with
+ *					standard AX.25 mode.
+ *	AX.25 037	Jonathan(G4KLX)	New timer architecture.
  */
 
 #include <linux/config.h>
-#ifdef CONFIG_AX25
+#if defined(CONFIG_AX25) || defined(CONFIG_AX25_MODULE)
 #include <linux/errno.h>
 #include <linux/types.h>
 #include <linux/socket.h>
@@ -38,291 +41,214 @@
 #include <linux/netdevice.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/fcntl.h>
 #include <linux/mm.h>
 #include <linux/interrupt.h>
-#ifdef CONFIG_NETROM
-#include <net/netrom.h>
-#endif
 
-static void ax25_timer(unsigned long);
+static void ax25_heartbeat_expiry(unsigned long);
+static void ax25_t1timer_expiry(unsigned long);
+static void ax25_t2timer_expiry(unsigned long);
+static void ax25_t3timer_expiry(unsigned long);
+static void ax25_idletimer_expiry(unsigned long);
 
-/*
- *	Linux set/reset timer routines
- */
-void ax25_set_timer(ax25_cb *ax25)
+void ax25_start_heartbeat(ax25_cb *ax25)
 {
-	unsigned long flags;	
-
-	save_flags(flags);
-	cli();
 	del_timer(&ax25->timer);
-	restore_flags(flags);
 
-	ax25->timer.next     = ax25->timer.prev = NULL;	
 	ax25->timer.data     = (unsigned long)ax25;
-	ax25->timer.function = &ax25_timer;
+	ax25->timer.function = &ax25_heartbeat_expiry;
+	ax25->timer.expires  = jiffies + 5 * HZ;
 
-	ax25->timer.expires = jiffies + 10;
 	add_timer(&ax25->timer);
 }
 
-static void ax25_reset_timer(ax25_cb *ax25)
+void ax25_start_t1timer(ax25_cb *ax25)
 {
-	unsigned long flags;
-	
-	save_flags(flags);
-	cli();
-	del_timer(&ax25->timer);
-	restore_flags(flags);
+	del_timer(&ax25->t1timer);
 
-	ax25->timer.data     = (unsigned long)ax25;
-	ax25->timer.function = &ax25_timer;
-	ax25->timer.expires  = jiffies + 10;
-	add_timer(&ax25->timer);
+	ax25->t1timer.data     = (unsigned long)ax25;
+	ax25->t1timer.function = &ax25_t1timer_expiry;
+	ax25->t1timer.expires  = jiffies + ax25->t1;
+
+	add_timer(&ax25->t1timer);
 }
 
-/*
- *	AX.25 TIMER 
- *
- *	This routine is called every 500ms. Decrement timer by this
- *	amount - if expired then process the event.
- */
-static void ax25_timer(unsigned long param)
+void ax25_start_t2timer(ax25_cb *ax25)
+{
+	del_timer(&ax25->t2timer);
+
+	ax25->t2timer.data     = (unsigned long)ax25;
+	ax25->t2timer.function = &ax25_t2timer_expiry;
+	ax25->t2timer.expires  = jiffies + ax25->t2;
+
+	add_timer(&ax25->t2timer);
+}
+
+void ax25_start_t3timer(ax25_cb *ax25)
+{
+	del_timer(&ax25->t3timer);
+
+	if (ax25->t3 > 0) {
+		ax25->t3timer.data     = (unsigned long)ax25;
+		ax25->t3timer.function = &ax25_t3timer_expiry;
+		ax25->t3timer.expires  = jiffies + ax25->t3;
+
+		add_timer(&ax25->t3timer);
+	}
+}
+
+void ax25_start_idletimer(ax25_cb *ax25)
+{
+	del_timer(&ax25->idletimer);
+
+	if (ax25->idle > 0) {
+		ax25->idletimer.data     = (unsigned long)ax25;
+		ax25->idletimer.function = &ax25_idletimer_expiry;
+		ax25->idletimer.expires  = jiffies + ax25->idle;
+
+		add_timer(&ax25->idletimer);
+	}
+}
+
+void ax25_stop_heartbeat(ax25_cb *ax25)
+{
+	del_timer(&ax25->timer);
+}
+
+void ax25_stop_t1timer(ax25_cb *ax25)
+{
+	del_timer(&ax25->t1timer);
+}
+
+void ax25_stop_t2timer(ax25_cb *ax25)
+{
+	del_timer(&ax25->t2timer);
+}
+
+void ax25_stop_t3timer(ax25_cb *ax25)
+{
+	del_timer(&ax25->t3timer);
+}
+
+void ax25_stop_idletimer(ax25_cb *ax25)
+{
+	del_timer(&ax25->idletimer);
+}
+
+int ax25_t1timer_running(ax25_cb *ax25)
+{
+	return (ax25->t1timer.prev != NULL || ax25->t1timer.next != NULL);
+}
+
+unsigned long ax25_display_timer(struct timer_list *timer)
+{
+	if (timer->prev == NULL && timer->next == NULL)
+		return 0;
+
+	return timer->expires - jiffies;
+}
+
+static void ax25_heartbeat_expiry(unsigned long param)
 {
 	ax25_cb *ax25 = (ax25_cb *)param;
 
-	switch (ax25->state) {
-		case AX25_STATE_0:
-			/* Magic here: If we listen() and a new link dies before it
-			   is accepted() it isn't 'dead' so doesn't get removed. */
-			if (ax25->sk == NULL || ax25->sk->destroy || (ax25->sk->state == TCP_LISTEN && ax25->sk->dead)) {
-				del_timer(&ax25->timer);
-				ax25_destroy_socket(ax25);
-				return;
-			}
+	switch (ax25->ax25_dev->values[AX25_VALUES_PROTOCOL]) {
+		case AX25_PROTO_STD_SIMPLEX:
+		case AX25_PROTO_STD_DUPLEX:
+			ax25_std_heartbeat_expiry(ax25);
 			break;
 
-		case AX25_STATE_3:
-		case AX25_STATE_4:
-			/*
-			 * Check the state of the receive buffer.
-			 */
-			if (ax25->sk != NULL) {
-				if (ax25->sk->rmem_alloc < (ax25->sk->rcvbuf / 2) && (ax25->condition & OWN_RX_BUSY_CONDITION)) {
-					ax25->condition &= ~OWN_RX_BUSY_CONDITION;
-					if (!ax25->dama_slave)
-						ax25_send_control(ax25, RR, POLLOFF, C_RESPONSE);
-					ax25->condition &= ~ACK_PENDING_CONDITION;
-					break;
-				}
-			}
-			/*
-			 * Check for frames to transmit.
-			 */
-			if (!ax25->dama_slave)
-				ax25_kick(ax25);
+#ifdef CONFIG_AX25_DAMA_SLAVE
+		case AX25_PROTO_DAMA_SLAVE:
+			if (ax25->ax25_dev->dama.slave)
+				ax25_ds_heartbeat_expiry(ax25);
+			else
+				ax25_std_heartbeat_expiry(ax25);
 			break;
-
-		default:
-			break;
-	}
-
-	if (ax25->t2timer > 0 && --ax25->t2timer == 0) {
-		if (ax25->state == AX25_STATE_3 || ax25->state == AX25_STATE_4) {
-			if (ax25->condition & ACK_PENDING_CONDITION) {
-				ax25->condition &= ~ACK_PENDING_CONDITION;
-				if (!ax25->dama_slave)
-					ax25_timeout_response(ax25);
-			}
-		}
-	}
-
-	if (ax25->t3timer > 0 && --ax25->t3timer == 0) {
-		/* dl1bke 960114: T3 expires and we are in DAMA mode:  */
-		/*                send a DISC and abort the connection */
-		if (ax25->dama_slave) {
-#ifdef CONFIG_NETROM
-			nr_link_failed(&ax25->dest_addr, ax25->device);
 #endif
-			ax25_clear_queues(ax25);
-			ax25_send_control(ax25, DISC, POLLON, C_COMMAND);
-				
-			ax25->state = AX25_STATE_0;
-			if (ax25->sk != NULL) {
-				if (ax25->sk->debug)
-					printk("T3 Timeout\n");
-				ax25->sk->state = TCP_CLOSE;
-				ax25->sk->err   = ETIMEDOUT;
-				if (!ax25->sk->dead)
-					ax25->sk->state_change(ax25->sk);
-				ax25->sk->dead  = 1;
-			}
-
-			ax25_reset_timer(ax25);
-			return;
-		}
-		
-		if (ax25->state == AX25_STATE_3) {
-			ax25->n2count = 0;
-			ax25_transmit_enquiry(ax25);
-			ax25->state   = AX25_STATE_4;
-		}
-		ax25->t3timer = ax25->t3;
-	}
-	
-	if (ax25->idletimer > 0 && --ax25->idletimer == 0) {
-		/* dl1bke 960228: close the connection when IDLE expires */
-		/* 		  similar to DAMA T3 timeout but with    */
-		/* 		  a "clean" disconnect of the connection */
-
-		ax25_clear_queues(ax25);
-
-		ax25->n2count = 0;
-		if (!ax25->dama_slave) {
-			ax25->t3timer = 0;
-			ax25_send_control(ax25, DISC, POLLON, C_COMMAND);
-		} else {
-			ax25->t3timer = ax25->t3;
-		}
-		
-		/* state 1 or 2 should not happen, but... */
-		
-		if (ax25->state == AX25_STATE_1 || ax25->state == AX25_STATE_2)
-			ax25->state = AX25_STATE_0;
-		else
-			ax25->state = AX25_STATE_2;
-
-		ax25->t1timer = ax25->t1 = ax25_calculate_t1(ax25);
-
-		if (ax25->sk != NULL) {
-			ax25->sk->state = TCP_CLOSE;
-			ax25->sk->err = 0;
-			if (!ax25->sk->dead)
-				ax25->sk->state_change(ax25->sk);
-			ax25->sk->dead = 1;
-			ax25->sk->destroy = 1;
-		}
-	}
-		                                                                                                                                                                                                                                                                                                                                        
-	/* dl1bke 960114: DAMA T1 timeouts are handled in ax25_dama_slave_transmit */
-	/* 		  nevertheless we have to re-enqueue the timer struct...   */
-	
-	if (ax25->t1timer == 0 || --ax25->t1timer > 0) {
-		ax25_reset_timer(ax25);
-		return;
-	}
-
-	if (!ax25_dev_is_dama_slave(ax25->device)) {
-		if (ax25->dama_slave)
-			ax25->dama_slave = 0;
-		ax25_t1_timeout(ax25);
 	}
 }
 
+static void ax25_t1timer_expiry(unsigned long param)
+{
+	ax25_cb *ax25 = (ax25_cb *)param;
 
-/* dl1bke 960114: The DAMA protocol requires to send data and SABM/DISC
- *                within the poll of any connected channel. Remember 
- *                that we are not allowed to send anything unless we
- *                get polled by the Master.
- *                
- *                Thus we'll have to do parts of our T1 handling in
- *                ax25_enquiry_response().
- */
-void ax25_t1_timeout(ax25_cb * ax25)
-{	
-	switch (ax25->state) {
-		case AX25_STATE_1: 
-			if (ax25->n2count == ax25->n2) {
-				if (ax25->modulus == MODULUS) {
-#ifdef CONFIG_NETROM
-					nr_link_failed(&ax25->dest_addr, ax25->device);
+	switch (ax25->ax25_dev->values[AX25_VALUES_PROTOCOL]) {
+		case AX25_PROTO_STD_SIMPLEX:
+		case AX25_PROTO_STD_DUPLEX:
+			ax25_std_t1timer_expiry(ax25);
+			break;
+
+#ifdef CONFIG_AX25_DAMA_SLAVE
+		case AX25_PROTO_DAMA_SLAVE:
+			if (!ax25->ax25_dev->dama.slave)
+				ax25_std_t1timer_expiry(ax25);
+			break;
 #endif
-					ax25_clear_queues(ax25);
-					ax25->state = AX25_STATE_0;
-					if (ax25->sk != NULL) {
-						ax25->sk->state = TCP_CLOSE;
-						ax25->sk->err   = ETIMEDOUT;
-						if (!ax25->sk->dead)
-							ax25->sk->state_change(ax25->sk);
-						ax25->sk->dead  = 1;
-					}
-				} else {
-					ax25->modulus = MODULUS;
-					ax25->window  = ax25_dev_get_value(ax25->device, AX25_VALUES_WINDOW);
-					ax25->n2count = 0;
-					ax25_send_control(ax25, SABM, ax25_dev_is_dama_slave(ax25->device)? POLLOFF : POLLON, C_COMMAND);
-				}
-			} else {
-				ax25->n2count++;
-				if (ax25->modulus == MODULUS) {
-					ax25_send_control(ax25, SABM, ax25_dev_is_dama_slave(ax25->device)? POLLOFF : POLLON, C_COMMAND);
-				} else {
-					ax25_send_control(ax25, SABME, ax25_dev_is_dama_slave(ax25->device)? POLLOFF : POLLON, C_COMMAND);
-				}
-			}
-			break;
-
-		case AX25_STATE_2:
-			if (ax25->n2count == ax25->n2) {
-#ifdef CONFIG_NETROM
-				nr_link_failed(&ax25->dest_addr, ax25->device);
-#endif
-				ax25_clear_queues(ax25);
-				ax25->state = AX25_STATE_0;
-				ax25_send_control(ax25, DISC, POLLON, C_COMMAND);
-				
-				if (ax25->sk != NULL) {
-					ax25->sk->state = TCP_CLOSE;
-					ax25->sk->err   = ETIMEDOUT;
-					if (!ax25->sk->dead)
-						ax25->sk->state_change(ax25->sk);
-					ax25->sk->dead  = 1;
-				}
-			} else {
-				ax25->n2count++;
-				if (!ax25_dev_is_dama_slave(ax25->device))
-					ax25_send_control(ax25, DISC, POLLON, C_COMMAND);
-			}
-			break;
-
-		case AX25_STATE_3: 
-			ax25->n2count = 1;
-			if (!ax25->dama_slave)
-				ax25_transmit_enquiry(ax25);
-			ax25->state   = AX25_STATE_4;
-			break;
-
-		case AX25_STATE_4:
-			if (ax25->n2count == ax25->n2) {
-#ifdef CONFIG_NETROM
-				nr_link_failed(&ax25->dest_addr, ax25->device);
-#endif
-				ax25_clear_queues(ax25);
-				ax25_send_control(ax25, DM, POLLON, C_RESPONSE);
-				ax25->state = AX25_STATE_0;
-				if (ax25->sk != NULL) {
-					if (ax25->sk->debug)
-						printk("Link Failure\n");
-					ax25->sk->state = TCP_CLOSE;
-					ax25->sk->err   = ETIMEDOUT;
-					if (!ax25->sk->dead)
-						ax25->sk->state_change(ax25->sk);
-					ax25->sk->dead  = 1;
-				}
-			} else {
-				ax25->n2count++;
-				if (!ax25->dama_slave)
-					ax25_transmit_enquiry(ax25);
-			}
-			break;
 	}
+}
 
-	ax25->t1timer = ax25->t1 = ax25_calculate_t1(ax25);
+static void ax25_t2timer_expiry(unsigned long param)
+{
+	ax25_cb *ax25 = (ax25_cb *)param;
 
-	ax25_set_timer(ax25);
+	switch (ax25->ax25_dev->values[AX25_VALUES_PROTOCOL]) {
+		case AX25_PROTO_STD_SIMPLEX:
+		case AX25_PROTO_STD_DUPLEX:
+			ax25_std_t2timer_expiry(ax25);
+			break;
+
+#ifdef CONFIG_AX25_DAMA_SLAVE
+		case AX25_PROTO_DAMA_SLAVE:
+			if (!ax25->ax25_dev->dama.slave)
+				ax25_std_t2timer_expiry(ax25);
+			break;
+#endif
+	}
+}
+
+static void ax25_t3timer_expiry(unsigned long param)
+{
+	ax25_cb *ax25 = (ax25_cb *)param;
+
+	switch (ax25->ax25_dev->values[AX25_VALUES_PROTOCOL]) {
+		case AX25_PROTO_STD_SIMPLEX:
+		case AX25_PROTO_STD_DUPLEX:
+			ax25_std_t3timer_expiry(ax25);
+			break;
+
+#ifdef CONFIG_AX25_DAMA_SLAVE
+		case AX25_PROTO_DAMA_SLAVE:
+			if (ax25->ax25_dev->dama.slave)
+				ax25_ds_t3timer_expiry(ax25);
+			else
+				ax25_std_t3timer_expiry(ax25);
+			break;
+#endif
+	}
+}
+
+static void ax25_idletimer_expiry(unsigned long param)
+{
+	ax25_cb *ax25 = (ax25_cb *)param;
+
+	switch (ax25->ax25_dev->values[AX25_VALUES_PROTOCOL]) {
+		case AX25_PROTO_STD_SIMPLEX:
+		case AX25_PROTO_STD_DUPLEX:
+			ax25_std_idletimer_expiry(ax25);
+			break;
+
+#ifdef CONFIG_AX25_DAMA_SLAVE
+		case AX25_PROTO_DAMA_SLAVE:
+			if (ax25->ax25_dev->dama.slave)
+				ax25_ds_idletimer_expiry(ax25);
+			else
+				ax25_std_idletimer_expiry(ax25);
+			break;
+#endif
+	}
 }
 
 #endif

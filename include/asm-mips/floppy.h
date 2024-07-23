@@ -1,11 +1,12 @@
-/*
+/* $Id: floppy.h,v 1.4 1998/05/07 18:38:41 ralf Exp $
+ *
  * Architecture specific parts of the Floppy driver
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995
+ * Copyright (C) 1995, 1996, 1997, 1998 Ralf Baechle
  */
 #ifndef __ASM_MIPS_FLOPPY_H
 #define __ASM_MIPS_FLOPPY_H
@@ -14,74 +15,77 @@
 #include <asm/jazz.h>
 #include <asm/jazzdma.h>
 #include <asm/mipsconfig.h>
-#include <asm/vector.h>
 
-#define fd_inb(port)			feature->fd_inb(port)
-#define fd_outb(value,port)		feature->fd_outb(value,port)
+struct fd_ops {
+	unsigned char (*fd_inb)(unsigned int port);
+	void (*fd_outb)(unsigned char value, unsigned int port);
 
-#define fd_enable_dma()			feature->fd_enable_dma()
-#define fd_disable_dma()		feature->fd_disable_dma()
-#define fd_request_dma()		feature->fd_request_dma()
-#define fd_free_dma()			feature->fd_free_dma()
-#define fd_clear_dma_ff()		feature->fd_clear_dma_ff()
-#define fd_set_dma_mode(mode)		feature->fd_set_dma_mode(mode)
-#define fd_set_dma_addr(addr)		feature->fd_set_dma_addr(virt_to_bus(addr))
-#define fd_set_dma_count(count)		feature->fd_set_dma_count(count)
-#define fd_get_dma_residue()		feature->fd_get_dma_residue()
-#define fd_enable_irq()			feature->fd_enable_irq()
-#define fd_disable_irq()		feature->fd_disable_irq()
-#define fd_cacheflush(addr, size)	feature->fd_cacheflush((void *)addr, size)
-#define fd_request_irq()        request_irq(FLOPPY_IRQ, floppy_interrupt, \
-					    SA_INTERRUPT|SA_SAMPLE_RANDOM, \
-				            "floppy", NULL)
-#define fd_free_irq()           free_irq(FLOPPY_IRQ, NULL);
+	/*
+	 * How to access the floppy DMA functions.
+	 */
+	void (*fd_enable_dma)(int channel);
+	void (*fd_disable_dma)(int channel);
+	int (*fd_request_dma)(int channel);
+	void (*fd_free_dma)(int channel);
+	void (*fd_clear_dma_ff)(int channel);
+	void (*fd_set_dma_mode)(int channel, char mode);
+	void (*fd_set_dma_addr)(int channel, unsigned int a);
+	void (*fd_set_dma_count)(int channel, unsigned int count);
+	int (*fd_get_dma_residue)(int channel);
+	void (*fd_enable_irq)(int irq);
+	void (*fd_disable_irq)(int irq);
+	unsigned long (*fd_getfdaddr1)(void);
+	unsigned long (*fd_dma_mem_alloc)(unsigned long size);
+	void (*fd_dma_mem_free)(unsigned long addr, unsigned long size);
+	unsigned long (*fd_drive_type)(unsigned long);
+};
+
+extern struct fd_ops *fd_ops;
+
+#define fd_inb(port)			fd_ops->fd_inb(port)
+#define fd_outb(value,port)		fd_ops->fd_outb(value,port)
+
+#define fd_enable_dma(channel)		fd_ops->fd_enable_dma(channel)
+#define fd_disable_dma(channel)		fd_ops->fd_disable_dma(channel)
+#define fd_request_dma(channel)		fd_ops->fd_request_dma(channel)
+#define fd_free_dma(channel)		fd_ops->fd_free_dma(channel)
+#define fd_clear_dma_ff(channel)	fd_ops->fd_clear_dma_ff(channel)
+#define fd_set_dma_mode(channel, mode)	fd_ops->fd_set_dma_mode(channel, mode)
+#define fd_set_dma_addr(channel, addr)	fd_ops->fd_set_dma_addr(channel, \
+					         virt_to_bus(addr))
+#define fd_set_dma_count(channel,count)	fd_ops->fd_set_dma_count(channel,count)
+#define fd_get_dma_residue(channel)	fd_ops->fd_get_dma_residue(channel)
+
+#define fd_enable_irq(irq)		fd_ops->fd_enable_irq(irq)
+#define fd_disable_irq(irq)		fd_ops->fd_disable_irq(irq)
+#define fd_request_irq(irq)		request_irq(irq, floppy_interrupt, \
+						    SA_INTERRUPT \
+					            | SA_SAMPLE_RANDOM, \
+				                    "floppy", NULL)
+#define fd_free_irq(irq)		free_irq(irq, NULL);
+#define fd_dma_mem_alloc(size) fd_ops->fd_dma_mem_alloc(size)
+#define fd_dma_mem_free(mem,size) fd_ops->fd_dma_mem_free(mem,size)
+#define fd_drive_type(n)		fd_ops->fd_drive_type(n)
 
 #define MAX_BUFFER_SECTORS 24
 
-static unsigned long mips_dma_mem_alloc(unsigned long size)
-{
-	int order = __get_order(size);
-	unsigned long mem;
-
-	mem = __get_dma_pages(GFP_KERNEL,order);
-	if(!mem)
-		return 0;
-        if (boot_info.machtype == MACH_ACER_PICA_61 ||
-            boot_info.machtype == MACH_MIPS_MAGNUM_4000 ||
-            boot_info.machtype == MACH_OLIVETTI_M700)
-		vdma_alloc(PHYSADDR(mem), size);
-	return mem;
-}
-
-static void mips_dma_mem_free(unsigned long addr, unsigned long size)
-{       
-        if (boot_info.machtype == MACH_ACER_PICA_61 ||
-            boot_info.machtype == MACH_MIPS_MAGNUM_4000 ||
-            boot_info.machtype == MACH_OLIVETTI_M700)
-		vdma_free(PHYSADDR(addr));
-	free_pages(addr, __get_order(size));	
-}
-
-#define fd_dma_mem_alloc(mem,size) mips_dma_mem_alloc(mem,size)
-#define fd_dma_mem_free(mem) mips_dma_mem_free(mem)
 
 /*
  * And on Mips's the CMOS info fails also ...
  *
  * FIXME: This information should come from the ARC configuration tree
- *        or wherever a particular machine has stored this ...
+ *        or whereever a particular machine has stored this ...
  */
-#define FLOPPY0_TYPE 4		/* this is wrong for the Olli M700, but who cares... */
-#define FLOPPY1_TYPE 0
+#define FLOPPY0_TYPE 			fd_drive_type(0)
+#define FLOPPY1_TYPE			fd_drive_type(1)
 
-#define FDC1			((boot_info.machtype == MACH_ACER_PICA_61 || \
-				boot_info.machtype == MACH_MIPS_MAGNUM_4000 || \
-				boot_info.machtype == MACH_OLIVETTI_M700) ? \
-				0xe0003000 : 0x3f0)
+#define FDC1			fd_ops->fd_getfdaddr1();
 static int FDC2=-1;
 
 #define N_FDC 1			/* do you *really* want a second controller? */
 #define N_DRIVE 8
+
+#define FLOPPY_MOTOR_MASK 0xf0
 
 /*
  * The DMA channel used by the floppy controller cannot access data at

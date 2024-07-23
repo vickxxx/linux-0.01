@@ -96,6 +96,7 @@ static const char *version =
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/errno.h>
+#include <linux/init.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -139,7 +140,7 @@ static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
 static void net_rx(struct device *dev);
 static void read_block(short ioaddr, int length, unsigned char *buffer, int data_mode);
 static int net_close(struct device *dev);
-static struct enet_statistics *net_get_stats(struct device *dev);
+static struct net_device_stats *net_get_stats(struct device *dev);
 static void set_multicast_list(struct device *dev);
 
 
@@ -149,8 +150,8 @@ static void set_multicast_list(struct device *dev);
    If dev->base_addr == 2, allocate space for the device and return success
    (detachable devices only).
    */
-int
-atp_init(struct device *dev)
+__initfunc(int
+atp_init(struct device *dev))
 {
 	int *port, ports[] = {0x378, 0x278, 0x3bc, 0};
 	int base_addr = dev->base_addr;
@@ -172,7 +173,7 @@ atp_init(struct device *dev)
 	return ENODEV;
 }
 
-static int atp_probe1(struct device *dev, short ioaddr)
+__initfunc(static int atp_probe1(struct device *dev, short ioaddr))
 {
 	int saved_ctrl_reg, status;
 
@@ -258,7 +259,7 @@ static int atp_probe1(struct device *dev, short ioaddr)
 }
 
 /* Read the station address PROM, usually a word-wide EEPROM. */
-static void get_node_ID(struct device *dev)
+__initfunc(static void get_node_ID(struct device *dev))
 {
 	short ioaddr = dev->base_addr;
 	int sa_offset = 0;
@@ -290,7 +291,7 @@ static void get_node_ID(struct device *dev)
  * DO :	 _________X_______X
  */
 
-static unsigned short eeprom_op(short ioaddr, unsigned int cmd)
+__initfunc(static unsigned short eeprom_op(short ioaddr, unsigned int cmd))
 {
 	unsigned eedata_out = 0;
 	int num_bits = EE_CMD_SIZE;
@@ -326,9 +327,7 @@ static int net_open(struct device *dev)
 	/* The interrupt line is turned off (tri-stated) when the device isn't in
 	   use.  That's especially important for "attached" interfaces where the
 	   port or interrupt may be shared. */
-	if (irq2dev_map[dev->irq] != 0
-		|| (irq2dev_map[dev->irq] = dev) == 0
-		|| request_irq(dev->irq, &net_interrupt, 0, "ATP", NULL)) {
+	if (request_irq(dev->irq, &net_interrupt, 0, "ATP", dev)) {
 		return -EAGAIN;
 	}
 
@@ -434,17 +433,9 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		dev->trans_start = jiffies;
 	}
 
-	/* If some higher layer thinks we've missed an tx-done interrupt
-	   we are passed NULL. Caution: dev_tint() handles the cli()/sti()
-	   itself. */
-	if (skb == NULL) {
-		dev_tint(dev);
-		return 0;
-	}
-
 	/* Block a timer-based transmit from overlapping.  This could better be
 	   done with atomic_swap(1, dev->tbusy), but set_bit() works as well. */
-	if (set_bit(0, (void*)&dev->tbusy) != 0)
+	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0)
 		printk("%s: Transmitter access conflict.\n", dev->name);
 	else {
 		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
@@ -476,7 +467,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		write_reg_high(ioaddr, IMR, ISRh_RxErr);
 	}
 
-	dev_kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb);
 
 	return 0;
 }
@@ -486,7 +477,7 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 static void
 net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct device *dev = (struct device *)(irq2dev_map[irq]);
+	struct device *dev = dev_id;
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 20;
 	static int num_tx_since_rx = 0;
@@ -565,7 +556,7 @@ net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 			}
 			num_tx_since_rx++;
 		} else if (num_tx_since_rx > 8
-				   && jiffies > dev->last_rx + 100) {
+				   && jiffies - dev->last_rx > 100) {
 			if (net_debug > 2)
 				printk("%s: Missed packet? No Rx after %d Tx and %ld jiffies"
 					   " status %02x  CMR1 %02x.\n", dev->name,
@@ -736,8 +727,7 @@ net_close(struct device *dev)
 
 	/* Free the IRQ line. */
 	outb(0x00, ioaddr + PAR_CONTROL);
-	free_irq(dev->irq, NULL);
-	irq2dev_map[dev->irq] = 0;
+	free_irq(dev->irq, dev);
 
 	/* Leave the hardware in a reset state. */
     write_reg_high(ioaddr, CMR1, CMR1h_RESET);
@@ -747,8 +737,7 @@ net_close(struct device *dev)
 
 /* Get the current statistics.	This may be called with the card open or
    closed. */
-static struct enet_statistics *
-net_get_stats(struct device *dev)
+static struct net_device_stats *net_get_stats(struct device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	return &lp->stats;
@@ -762,7 +751,7 @@ static void set_multicast_list(struct device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	short ioaddr = dev->base_addr;
-	int num_addrs=dev->mc_list;
+	int num_addrs=dev->mc_count;
 	
 	if(dev->flags&(IFF_ALLMULTI|IFF_PROMISC))
 		num_addrs=1;

@@ -19,9 +19,11 @@ typedef unsigned long	__kernel_size_t;
 typedef long		__kernel_ssize_t;
 typedef long		__kernel_ptrdiff_t;
 typedef long		__kernel_time_t;
+typedef long		__kernel_suseconds_t;
 typedef long		__kernel_clock_t;
 typedef int		__kernel_daddr_t;
 typedef char *		__kernel_caddr_t;
+typedef short             __kernel_ipc_pid_t;
 
 #ifdef __GNUC__
 typedef long long	__kernel_loff_t;
@@ -41,6 +43,7 @@ typedef struct {
 
 #else /* __GNUC__ */
 
+#if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2)
 /* With GNU C, use inline functions instead so args are evaluated only once: */
 
 #undef __FD_SET
@@ -74,7 +77,7 @@ static __inline__ int __FD_ISSET(unsigned long fd, __kernel_fd_set *p)
 #undef __FD_ZERO
 static __inline__ void __FD_ZERO(__kernel_fd_set *p)
 {
-	unsigned int *tmp = p->fds_bits;
+	unsigned int *tmp = (unsigned int *)p->fds_bits;
 	int i;
 
 	if (__builtin_constant_p(__FDSET_LONGS)) {
@@ -93,6 +96,6 @@ static __inline__ void __FD_ZERO(__kernel_fd_set *p)
 	}
 }
 
+#endif /* defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2) */
 #endif /* __GNUC__ */
-
 #endif /* _PPC_POSIX_TYPES_H */

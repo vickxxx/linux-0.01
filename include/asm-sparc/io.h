@@ -1,8 +1,9 @@
-/* $Id: io.h,v 1.8 1995/11/25 02:31:50 davem Exp $ */
+/* $Id: io.h,v 1.18 1998/09/21 05:07:17 jj Exp $ */
 #ifndef __SPARC_IO_H
 #define __SPARC_IO_H
 
 #include <linux/kernel.h>
+#include <linux/types.h>
 
 #include <asm/page.h>      /* IO address mapping routines need this */
 #include <asm/system.h>
@@ -14,77 +15,84 @@
  * space only works on sun4's
  */
 
-extern inline unsigned long inb_local(unsigned long addr)
-{
-	return 0;
+#define virt_to_bus virt_to_phys
+
+extern __inline__ unsigned  flip_dword (unsigned d) {
+        return ((d&0xff)<<24) | (((d>>8)&0xff)<<16) | (((d>>16)&0xff)<<8)| ((d>>24)&0xff);
 }
 
-extern inline void outb_local(unsigned char b, unsigned long addr)
-{
-	return;
+extern __inline__ unsigned short flip_word (unsigned short d) {
+        return ((d&0xff) << 8) | ((d>>8)&0xff);
 }
 
-extern inline unsigned long inb(unsigned long addr)
+extern __inline__ unsigned long readb(unsigned long addr)
 {
-	return 0;
+       return *(volatile unsigned char*)addr;
 }
 
-extern inline unsigned long inw(unsigned long addr)
+extern __inline__ unsigned long readw(unsigned long addr)
 {
-	return 0;
+       return flip_word(*(volatile unsigned short*)addr);
 }
 
-extern inline unsigned long inl(unsigned long addr)
+extern __inline__ unsigned long readl(unsigned long addr)
 {
-	return 0;
+       return flip_dword(*(volatile unsigned long*)addr);
 }
 
-extern inline void outb(unsigned char b, unsigned long addr)
+extern __inline__ void writeb(unsigned short b, unsigned long addr)
 {
-	return;
+       *(volatile unsigned char*)addr = b;
 }
 
-extern inline void outw(unsigned short b, unsigned long addr)
+extern __inline__ void writew(unsigned short b, unsigned long addr)
 {
-	return;
+       *(volatile unsigned short*)addr = flip_word(b);
 }
 
-extern inline void outl(unsigned int b, unsigned long addr)
+extern __inline__ void writel(unsigned int b, unsigned long addr)
 {
-	return;
+        *(volatile unsigned long*)addr = flip_dword(b);
 }
 
-/*
- * Memory functions
- */
-extern inline unsigned long readb(unsigned long addr)
+extern __inline__ unsigned long inb_local(unsigned long addr)
 {
-	return 0;
+       return readb(addr);
 }
 
-extern inline unsigned long readw(unsigned long addr)
+extern __inline__ void outb_local(unsigned char b, unsigned long addr)
 {
-	return 0;
+       return writeb(b,addr);
 }
 
-extern inline unsigned long readl(unsigned long addr)
+extern __inline__ unsigned long inb(unsigned long addr)
 {
-	return 0;
+       return readb(addr);
 }
 
-extern inline void writeb(unsigned short b, unsigned long addr)
+extern __inline__ unsigned long inw(unsigned long addr)
 {
-	return;
+       return readw(addr);
 }
 
-extern inline void writew(unsigned short b, unsigned long addr)
+extern __inline__ unsigned long inl(unsigned long addr)
 {
-	return;
+       return readl(addr);
 }
 
-extern inline void writel(unsigned int b, unsigned long addr)
+extern __inline__ void outb(unsigned char b, unsigned long addr)
 {
-	return;
+       return writeb(b,addr);
+}
+
+extern __inline__ void outw(unsigned short b, unsigned long addr)
+{
+       return writew(b,addr);
+}
+
+extern __inline__ void outl(unsigned int b, unsigned long addr)
+{
+       return writel(b,addr);
 }
 
 #define inb_p inb
@@ -93,11 +101,12 @@ extern inline void writel(unsigned int b, unsigned long addr)
 extern void sun4c_mapioaddr(unsigned long, unsigned long, int bus_type, int rdonly);
 extern void srmmu_mapioaddr(unsigned long, unsigned long, int bus_type, int rdonly);
 
-extern inline void mapioaddr(unsigned long physaddr, unsigned long virt_addr,
-			     int bus, int rdonly)
+extern __inline__ void mapioaddr(unsigned long physaddr, unsigned long virt_addr,
+				 int bus, int rdonly)
 {
 	switch(sparc_cpu_model) {
 	case sun4c:
+	case sun4:
 		sun4c_mapioaddr(physaddr, virt_addr, bus, rdonly);
 		break;
 	case sun4m:
@@ -114,7 +123,43 @@ extern inline void mapioaddr(unsigned long physaddr, unsigned long virt_addr,
 	return;
 }
 
-extern void *sparc_alloc_io (void *, void *, int, char *, int, int);
-extern void *sparc_dvma_malloc (int, char *);
+extern void srmmu_unmapioaddr(unsigned long virt);
+extern void sun4c_unmapioaddr(unsigned long virt);
+
+extern __inline__ void unmapioaddr(unsigned long virt_addr)
+{
+	switch(sparc_cpu_model) {
+	case sun4c:
+	case sun4:
+		sun4c_unmapioaddr(virt_addr);
+		break;
+	case sun4m:
+	case sun4d:
+	case sun4e:
+		srmmu_unmapioaddr(virt_addr);
+		break;
+	default:
+		printk("unmapioaddr: sparc_cpu_model = %d, halt...\n", sparc_cpu_model);
+		halt();
+	};
+	return;
+}
+
+extern void *sparc_alloc_io (u32 pa, void *va, int sz, char *name, u32 io, int rdonly);
+extern void sparc_free_io (void *vaddr, int sz);
+extern void *_sparc_dvma_malloc (int sz, char *name);
+
+/* Returns CPU visible address, dvmaaddr_p is a pointer to where
+ * the DVMA visible (ie. SBUS/PSYCO+PCI) address should be stored.
+ */
+static __inline__ void *sparc_dvma_malloc(int size, char *name, __u32 *dvmaaddr_p)
+{
+	void *cpuaddr = _sparc_dvma_malloc(size, name);
+	*dvmaaddr_p = (__u32) cpuaddr;
+	return cpuaddr;
+}
+
+#define virt_to_phys(x) __pa((unsigned long)(x))
+#define phys_to_virt(x) __va((unsigned long)(x))
 
 #endif /* !(__SPARC_IO_H) */

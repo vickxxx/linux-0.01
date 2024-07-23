@@ -51,14 +51,16 @@
  */
 
 #include <linux/config.h>
+#include <linux/module.h>
+#include <linux/types.h>
+#include <linux/string.h>
+#include <linux/errno.h>
+#include <linux/kernel.h>
+
 #ifdef CONFIG_INET
 /* Entire module is for IP only */
-#include <linux/module.h>
-
-#include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
-#include <linux/string.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/termios.h>
@@ -72,11 +74,11 @@
 #include <net/tcp.h>
 #include <linux/skbuff.h>
 #include <net/sock.h>
-#include <linux/errno.h>
 #include <linux/timer.h>
 #include <asm/system.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <linux/mm.h>
+#include <linux/init.h>
 #include <net/checksum.h>
 #include <net/slhc_vj.h>
 #include <asm/unaligned.h>
@@ -87,7 +89,6 @@ static unsigned char *encode(unsigned char *cp, unsigned short n);
 static long decode(unsigned char **cpp);
 static unsigned char * put16(unsigned char *cp, unsigned short x);
 static unsigned short pull16(unsigned char **cpp);
-static void export_slhc_syms(void);
 
 /* Initialize compression data structure
  *	slots must be in range 0 to 255 (zero meaning no compression)
@@ -99,21 +100,18 @@ slhc_init(int rslots, int tslots)
 	register struct cstate *ts;
 	struct slcompress *comp;
 
+	MOD_INC_USE_COUNT;
 	comp = (struct slcompress *)kmalloc(sizeof(struct slcompress),
 					    GFP_KERNEL);
 	if (! comp)
-		return NULL;
-
+		goto out_fail;
 	memset(comp, 0, sizeof(struct slcompress));
 
 	if ( rslots > 0  &&  rslots < 256 ) {
 		size_t rsize = rslots * sizeof(struct cstate);
 		comp->rstate = (struct cstate *) kmalloc(rsize, GFP_KERNEL);
 		if (! comp->rstate)
-		{
-			kfree((unsigned char *)comp);
-			return NULL;
-		}
+			goto out_free;
 		memset(comp->rstate, 0, rsize);
 		comp->rslot_limit = rslots - 1;
 	}
@@ -122,11 +120,7 @@ slhc_init(int rslots, int tslots)
 		size_t tsize = tslots * sizeof(struct cstate);
 		comp->tstate = (struct cstate *) kmalloc(tsize, GFP_KERNEL);
 		if (! comp->tstate)
-		{
-			kfree((unsigned char *)comp->rstate);
-			kfree((unsigned char *)comp);
-			return NULL;
-		}
+			goto out_free2;
 		memset(comp->tstate, 0, tsize);
 		comp->tslot_limit = tslots - 1;
 	}
@@ -151,8 +145,15 @@ slhc_init(int rslots, int tslots)
 		ts[0].next = &(ts[comp->tslot_limit]);
 		ts[0].cs_this = 0;
 	}
-	MOD_INC_USE_COUNT;
 	return comp;
+
+out_free2:
+	kfree((unsigned char *)comp->rstate);
+out_free:
+	kfree((unsigned char *)comp);
+out_fail:
+	MOD_DEC_USE_COUNT;
+	return NULL;
 }
 
 
@@ -163,14 +164,14 @@ slhc_free(struct slcompress *comp)
 	if ( comp == NULLSLCOMPR )
 		return;
 
-	if ( comp->rstate != NULLSLSTATE )
-		kfree( comp->rstate );
-
 	if ( comp->tstate != NULLSLSTATE )
 		kfree( comp->tstate );
 
-	MOD_DEC_USE_COUNT;
+	if ( comp->rstate != NULLSLSTATE )
+		kfree( comp->rstate );
+
 	kfree( comp );
+	MOD_DEC_USE_COUNT;
 }
 
 
@@ -246,6 +247,14 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	struct iphdr *ip;
 	struct tcphdr *th, *oth;
 
+
+	/*
+	 *	Don't play with runt packets.
+	 */
+	 
+	if(isize<sizeof(struct iphdr))
+		return isize;
+		
 	ip = (struct iphdr *) icp;
 
 	/* Bail if this packet isn't TCP, or is an IP fragment */
@@ -264,9 +273,10 @@ slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
 	hlen = ip->ihl*4 + th->doff*4;
 
 	/*  Bail if the TCP packet isn't `compressible' (i.e., ACK isn't set or
-	 *  some other control bit is set).
+	 *  some other control bit is set). Also uncompressible if
+	 *  its a runt.
 	 */
-	if(th->syn || th->fin || th->rst ||
+	if(hlen > isize || th->syn || th->fin || th->rst ||
 	    ! (th->ack)){
 		/* TCP connection stuff; send as regular IP */
 		comp->sls_o_tcp++;
@@ -697,7 +707,7 @@ slhc_toss(struct slcompress *comp)
 void slhc_i_status(struct slcompress *comp)
 {
 	if (comp != NULLSLCOMPR) {
-		printk("\t%ld Cmp, %ld Uncmp, %ld Bad, %ld Tossed\n",
+		printk("\t%d Cmp, %d Uncmp, %d Bad, %d Tossed\n",
 			comp->sls_i_compressed,
 			comp->sls_i_uncompressed,
 			comp->sls_i_error,
@@ -709,41 +719,31 @@ void slhc_i_status(struct slcompress *comp)
 void slhc_o_status(struct slcompress *comp)
 {
 	if (comp != NULLSLCOMPR) {
-		printk("\t%ld Cmp, %ld Uncmp, %ld AsIs, %ld NotTCP\n",
+		printk("\t%d Cmp, %d Uncmp, %d AsIs, %d NotTCP\n",
 			comp->sls_o_compressed,
 			comp->sls_o_uncompressed,
 			comp->sls_o_tcp,
 			comp->sls_o_nontcp);
-		printk("\t%10ld Searches, %10ld Misses\n",
+		printk("\t%10d Searches, %10d Misses\n",
 			comp->sls_o_searches,
 			comp->sls_o_misses);
 	}
 }
 
-static struct symbol_table slhc_syms = {
 /* Should this be surrounded with "#ifdef CONFIG_MODULES" ? */
-#include <linux/symtab_begin.h>
-        /* VJ header compression */
-        X(slhc_init),
-        X(slhc_free),
-        X(slhc_remember),
-        X(slhc_compress),
-        X(slhc_uncompress),
-        X(slhc_toss),
-#include <linux/symtab_end.h>
-};
-
-static void export_slhc_syms(void)
-{
-	register_symtab(&slhc_syms);
-}
+/* VJ header compression */
+EXPORT_SYMBOL(slhc_init);
+EXPORT_SYMBOL(slhc_free);
+EXPORT_SYMBOL(slhc_remember);
+EXPORT_SYMBOL(slhc_compress);
+EXPORT_SYMBOL(slhc_uncompress);
+EXPORT_SYMBOL(slhc_toss);
 
 #ifdef MODULE
 
 int init_module(void)
 {
 	printk(KERN_INFO "CSLIP: code copyright 1989 Regents of the University of California\n");
-	export_slhc_syms();
 	return 0;
 }
 
@@ -751,11 +751,60 @@ void cleanup_module(void)
 {
 	return;
 }
+
 #else /* MODULE */
 
-void slhc_install(void)
+__initfunc(void slhc_install(void))
 {
-	export_slhc_syms();
 }
-#endif
+
+#endif /* MODULE */
+#else /* CONFIG_INET */
+EXPORT_SYMBOL(slhc_init);
+EXPORT_SYMBOL(slhc_free);
+EXPORT_SYMBOL(slhc_remember);
+EXPORT_SYMBOL(slhc_compress);
+EXPORT_SYMBOL(slhc_uncompress);
+EXPORT_SYMBOL(slhc_toss);
+
+int
+slhc_toss(struct slcompress *comp)
+{
+  printk(KERN_DEBUG "Called IP function on non IP-system: slhc_toss");
+  return -EINVAL;
+}
+int
+slhc_uncompress(struct slcompress *comp, unsigned char *icp, int isize)
+{
+  printk(KERN_DEBUG "Called IP function on non IP-system: slhc_uncompress");
+  return -EINVAL;
+}
+int
+slhc_compress(struct slcompress *comp, unsigned char *icp, int isize,
+	unsigned char *ocp, unsigned char **cpp, int compress_cid)
+{
+  printk(KERN_DEBUG "Called IP function on non IP-system: slhc_compress");
+  return -EINVAL;
+}
+
+int
+slhc_remember(struct slcompress *comp, unsigned char *icp, int isize)
+{
+  printk(KERN_DEBUG "Called IP function on non IP-system: slhc_remember");
+  return -EINVAL;
+}
+
+void
+slhc_free(struct slcompress *comp)
+{
+  printk(KERN_DEBUG "Called IP function on non IP-system: slhc_free");
+  return;
+}
+struct slcompress *
+slhc_init(int rslots, int tslots)
+{
+  printk(KERN_DEBUG "Called IP function on non IP-system: slhc_init");
+  return NULL;
+}
+
 #endif /* CONFIG_INET */

@@ -11,13 +11,12 @@
  * 
  * generic command parser provided by: 
  * Andreas Heilwagen <crashcar@informatik.uni-koblenz.de>
+ *
+ * generic_proc_info() support of xxxx_info() by:
+ * Michael A. Griffith <grif@acm.org>
  */
 
-/*
- * Don't import our own symbols, as this would severely mess up our
- * symbol tables.
- */
-#define _SCSI_SYMS_VER_
+#include <linux/config.h> /* for CONFIG_PROC_FS */
 #define __NO_VERSION__
 #include <linux/module.h>
 
@@ -36,6 +35,7 @@
 #define FALSE 0
 #endif
 
+#ifdef CONFIG_PROC_FS
 extern int scsi_proc_info(char *, char **, off_t, int, int, int);
  
 struct scsi_dir {
@@ -48,7 +48,9 @@ struct scsi_dir {
  * Used if the driver currently has no own support for /proc/scsi
  */
 int generic_proc_info(char *buffer, char **start, off_t offset, 
-		     int length, int inode, int inout)
+		     int length, int inode, int inout, 
+                     const char *(*info)(struct Scsi_Host *),
+                     struct Scsi_Host *sh)
 {
     int len, pos, begin;
 
@@ -56,8 +58,13 @@ int generic_proc_info(char *buffer, char **start, off_t offset,
 	return(-ENOSYS);  /* This is a no-op */
     
     begin = 0;
-    pos = len = sprintf(buffer, 
-			"The driver does not yet support the proc-fs\n");
+    if (info && sh) {
+          pos = len = sprintf(buffer, "%s\n", info(sh));
+    }
+    else {
+      pos = len = sprintf(buffer, 
+                          "The driver does not yet support the proc-fs\n");
+    }
     if(pos < offset) {
 	len = 0;
 	begin = pos;
@@ -91,7 +98,9 @@ extern int dispatch_scsi_info(int ino, char *buffer, char **start,
         if (ino == (hpnt->host_no + PROC_SCSI_FILE)) {
             if(hpnt->hostt->proc_info == NULL)
                 return generic_proc_info(buffer, start, offset, length, 
-                                         hpnt->host_no, func);
+                                         hpnt->host_no, func,
+                                         hpnt->hostt->info,
+                                         hpnt);
             else
                 return(hpnt->hostt->proc_info(buffer, start, offset, 
                                               length, hpnt->host_no, func));
@@ -101,14 +110,29 @@ extern int dispatch_scsi_info(int ino, char *buffer, char **start,
     return(-EBADF);
 }
 
+static void scsi_proc_fill_inode(struct inode *inode, int fill)
+{
+Scsi_Host_Template *shpnt;
+
+shpnt = scsi_hosts;
+while (shpnt && shpnt->proc_dir->low_ino != inode->i_ino)
+    shpnt = shpnt->next;
+if (!shpnt || !shpnt->module)
+    return;
+if (fill)
+    __MOD_INC_USE_COUNT(shpnt->module);
+else
+    __MOD_DEC_USE_COUNT(shpnt->module);
+}
+
 void build_proc_dir_entries(Scsi_Host_Template *tpnt)
 {
     struct Scsi_Host *hpnt;
-
     struct scsi_dir *scsi_hba_dir;
 
     proc_scsi_register(0, tpnt->proc_dir);
-    
+    tpnt->proc_dir->fill_inode = &scsi_proc_fill_inode;
+
     hpnt = scsi_hostlist;
     while (hpnt) {
         if (tpnt == hpnt->hostt) {
@@ -175,9 +199,9 @@ parseHandle *parseInit(char *buf, char *cmdList, int cmdNum)
     
     if (!buf || !cmdList)                           /* bad input ?     */
 	return(NULL);
-    if ((handle = (parseHandle*) kmalloc(sizeof(parseHandle), 1)) == 0)
+    if ((handle = (parseHandle*) kmalloc(sizeof(parseHandle), GFP_KERNEL)) == 0)
 	return(NULL);                               /* out of memory   */
-    if ((handle->cmdPos = (char**) kmalloc(sizeof(int), cmdNum)) == 0) {
+    if ((handle->cmdPos = (char**) kmalloc(sizeof(int) * cmdNum, GFP_KERNEL)) == 0) {
 	kfree(handle);
 	return(NULL);                               /* out of memory   */
     }
@@ -239,25 +263,12 @@ int parseOpt(parseHandle *handle, char **param)
     return(cmdIndex);
 }
 
-#define MAX_SCSI_DEVICE_CODE 10
-const char *const scsi_dev_types[MAX_SCSI_DEVICE_CODE] =
-{
-    "Direct-Access    ",
-    "Sequential-Access",
-    "Printer          ",
-    "Processor        ",
-    "WORM             ",
-    "CD-ROM           ",
-    "Scanner          ",
-    "Optical Device   ",
-    "Medium Changer   ",
-    "Communications   "
-};
-
 void proc_print_scsidevice(Scsi_Device *scd, char *buffer, int *size, int len)
 {	    
+  
     int x, y = *size;
-    
+    extern const char *const scsi_device_types[MAX_SCSI_DEVICE_CODE];
+        
     y = sprintf(buffer + len, 
 		    "Host: scsi%d Channel: %02d Id: %02d Lun: %02d\n  Vendor: ",
 		    scd->host->host_no, scd->channel, scd->id, scd->lun);
@@ -285,7 +296,7 @@ void proc_print_scsidevice(Scsi_Device *scd, char *buffer, int *size, int len)
     
     y += sprintf(buffer + len + y, "  Type:   %s ",
 		     scd->type < MAX_SCSI_DEVICE_CODE ? 
-		     scsi_dev_types[(int)scd->type] : "Unknown          " );
+		     scsi_device_types[(int)scd->type] : "Unknown          " );
     y += sprintf(buffer + len + y, "               ANSI"
 		     " SCSI revision: %02x", (scd->scsi_level < 3)?1:2);
     if (scd->scsi_level == 2)
@@ -296,6 +307,7 @@ void proc_print_scsidevice(Scsi_Device *scd, char *buffer, int *size, int len)
     *size = y; 
     return;
 }
+#endif /* CONFIG_PROC_FS */
 
 /*
  * Overrides for Emacs so that we get a uniform tabbing style.
@@ -315,3 +327,4 @@ void proc_print_scsidevice(Scsi_Device *scd, char *buffer, int *size, int len)
  * tab-width: 8
  * End:
  */
+

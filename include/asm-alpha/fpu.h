@@ -37,28 +37,82 @@
  * compatibly.  The corresponding definitions are in
  * /usr/include/machine/fpu.h under OSF/1.
  */
-#define IEEE_TRAP_ENABLE_INV	(1<<1)	/* invalid op */
-#define IEEE_TRAP_ENABLE_DZE	(1<<2)	/* division by zero */
-#define IEEE_TRAP_ENABLE_OVF	(1<<3)	/* overflow */
-#define IEEE_TRAP_ENABLE_UNF	(1<<4)	/* underflow */
-#define IEEE_TRAP_ENABLE_INE	(1<<5)	/* inexact */
+#define IEEE_TRAP_ENABLE_INV	(1UL<<1)	/* invalid op */
+#define IEEE_TRAP_ENABLE_DZE	(1UL<<2)	/* division by zero */
+#define IEEE_TRAP_ENABLE_OVF	(1UL<<3)	/* overflow */
+#define IEEE_TRAP_ENABLE_UNF	(1UL<<4)	/* underflow */
+#define IEEE_TRAP_ENABLE_INE	(1UL<<5)	/* inexact */
 #define IEEE_TRAP_ENABLE_MASK	(IEEE_TRAP_ENABLE_INV | IEEE_TRAP_ENABLE_DZE |\
 				 IEEE_TRAP_ENABLE_OVF | IEEE_TRAP_ENABLE_UNF |\
 				 IEEE_TRAP_ENABLE_INE)
 
 /* status bits coming from fpcr: */
-#define IEEE_STATUS_INV		(1<<17)
-#define IEEE_STATUS_DZE		(1<<18)
-#define IEEE_STATUS_OVF		(1<<19)
-#define IEEE_STATUS_UNF		(1<<20)
-#define IEEE_STATUS_INE		(1<<21)
+#define IEEE_STATUS_INV		(1UL<<17)
+#define IEEE_STATUS_DZE		(1UL<<18)
+#define IEEE_STATUS_OVF		(1UL<<19)
+#define IEEE_STATUS_UNF		(1UL<<20)
+#define IEEE_STATUS_INE		(1UL<<21)
 
 #define IEEE_STATUS_MASK	(IEEE_STATUS_INV | IEEE_STATUS_DZE |	\
 				 IEEE_STATUS_OVF | IEEE_STATUS_UNF |	\
 				 IEEE_STATUS_INE)
 
+#define IEEE_SW_MASK		(IEEE_TRAP_ENABLE_MASK | IEEE_STATUS_MASK)
+
 #define IEEE_STATUS_TO_EXCSUM_SHIFT	16
 
 #define IEEE_INHERIT    (1UL<<63)	/* inherit on thread create? */
+
+/*
+ * Convert the software IEEE trap enable and status bits into the
+ * hardware fpcr format.
+ */
+
+static inline unsigned long
+ieee_swcr_to_fpcr(unsigned long sw)
+{
+	unsigned long fp;
+	fp = (sw & IEEE_STATUS_MASK) << 35;
+	fp |= sw & IEEE_STATUS_MASK ? FPCR_SUM : 0;
+	fp |= (~sw & (IEEE_TRAP_ENABLE_INV
+		      | IEEE_TRAP_ENABLE_DZE
+		      | IEEE_TRAP_ENABLE_OVF)) << 48;
+	fp |= (~sw & (IEEE_TRAP_ENABLE_UNF | IEEE_TRAP_ENABLE_INE)) << 57;
+	return fp;
+}
+
+#ifdef __KERNEL__
+
+/* The following two functions don't need trapb/excb instructions
+   around the mf_fpcr/mt_fpcr instructions because (a) the kernel
+   never generates arithmetic faults and (b) call_pal instructions
+   are implied trap barriers.  */
+
+static inline unsigned long rdfpcr(void)
+{
+	unsigned long tmp, ret;
+	__asm__ ("stt $f0,%0\n\t"
+		 "mf_fpcr $f0\n\t"
+		 "stt $f0,%1\n\t"
+		 "ldt $f0,%0"
+		: "=m"(tmp), "=m"(ret));
+	return ret;
+}
+
+static inline void wrfpcr(unsigned long val)
+{
+	unsigned long tmp;
+	__asm__ __volatile__ (
+		"stt $f0,%0\n\t"
+		"ldt $f0,%1\n\t"
+		"mt_fpcr $f0\n\t"
+		"ldt $f0,%0"
+		: "=m"(tmp) : "m"(val));
+}
+
+extern unsigned long alpha_read_fp_reg (unsigned long reg);
+extern void alpha_write_fp_reg (unsigned long reg, unsigned long val);
+
+#endif /* __KERNEL__ */
 
 #endif /* __ASM_ALPHA_FPU_H */

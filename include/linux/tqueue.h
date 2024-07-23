@@ -15,6 +15,7 @@
 
 #include <asm/bitops.h>
 #include <asm/system.h>
+#include <asm/spinlock.h>
 
 /*
  * New proposed "bottom half" handlers:
@@ -41,7 +42,7 @@
 
 struct tq_struct {
 	struct tq_struct *next;		/* linked list of active bh's */
-	int sync;			/* must be initialized to zero */
+	unsigned long sync;		/* must be initialized to zero */
 	void (*routine)(void *);	/* function to call */
 	void *data;			/* argument to function */
 };
@@ -74,48 +75,20 @@ extern task_queue tq_timer, tq_immediate, tq_scheduler, tq_disk;
  * interrupt.
  */
 
-/*
- * queue_task_irq: put the bottom half handler "bh_pointer" on the list
- * "bh_list".  You may call this function only from an interrupt
- * handler or a bottom half handler.
- */
-extern __inline__ void queue_task_irq(struct tq_struct *bh_pointer,
-			       task_queue *bh_list)
-{
-	if (!set_bit(0,&bh_pointer->sync)) {
-		bh_pointer->next = *bh_list;
-		*bh_list = bh_pointer;
-	}
-}
+extern spinlock_t tqueue_lock;
 
 /*
- * queue_task_irq_off: put the bottom half handler "bh_pointer" on the list
- * "bh_list".  You may call this function only when interrupts are off.
- */
-extern __inline__ void queue_task_irq_off(struct tq_struct *bh_pointer,
-				 task_queue *bh_list)
-{
-	if (!(bh_pointer->sync & 1)) {
-		bh_pointer->sync = 1;
-		bh_pointer->next = *bh_list;
-		*bh_list = bh_pointer;
-	}
-}
-
-
-/*
- * queue_task: as queue_task_irq, but can be called from anywhere.
+ * queue_task
  */
 extern __inline__ void queue_task(struct tq_struct *bh_pointer,
 			   task_queue *bh_list)
 {
-	if (!set_bit(0,&bh_pointer->sync)) {
+	if (!test_and_set_bit(0,&bh_pointer->sync)) {
 		unsigned long flags;
-		save_flags(flags);
-		cli();
+		spin_lock_irqsave(&tqueue_lock, flags);
 		bh_pointer->next = *bh_list;
 		*bh_list = bh_pointer;
-		restore_flags(flags);
+		spin_unlock_irqrestore(&tqueue_lock, flags);
 	}
 }
 
@@ -124,19 +97,27 @@ extern __inline__ void queue_task(struct tq_struct *bh_pointer,
  */
 extern __inline__ void run_task_queue(task_queue *list)
 {
-	struct tq_struct *p;
+	if (*list) {
+		unsigned long flags;
+		struct tq_struct *p;
 
-	p = xchg(list,NULL);
-	while (p) {
-		void *arg;
-		void (*f) (void *);
-		struct tq_struct *save_p;
-		arg    = p -> data;
-		f      = p -> routine;
-		save_p = p;
-		p      = p -> next;
-		save_p -> sync = 0;
-		(*f)(arg);
+		spin_lock_irqsave(&tqueue_lock, flags);
+		p = *list;
+		*list = NULL;
+		spin_unlock_irqrestore(&tqueue_lock, flags);
+		
+		while (p) {
+			void *arg;
+			void (*f) (void *);
+			struct tq_struct *save_p;
+			arg    = p -> data;
+			f      = p -> routine;
+			save_p = p;
+			p      = p -> next;
+			mb();
+			save_p -> sync = 0;
+			(*f)(arg);
+		}
 	}
 }
 

@@ -27,7 +27,7 @@
 /*
  * We time out our entries in the FDB after this many seconds.
  */
-#define FDB_TIMEOUT	300
+#define FDB_TIMEOUT	20 /* JRP: 20s as NSC bridge code, was 300 for Linux */
 
 /*
  * the following defines are the initial values used when the 
@@ -39,6 +39,10 @@
 #define BRIDGE_HELLO_TIME	2
 #define BRIDGE_FORWARD_DELAY	15
 #define HOLD_TIME		1
+
+/* broacast/multicast storm limitation. This per source. */
+#define MAX_MCAST_PER_PERIOD    4
+#define MCAST_HOLD_TIME		10	/* in jiffies unit (10ms increment) */
 
 #define Default_path_cost 10
 
@@ -71,13 +75,25 @@ typedef struct {
 #define BRIDGE_ID_ULA	bi.p_u.ula
 #define BRIDGE_ID	bi.id
 
+/* JRP: on the network the flags field is between "type" and "root_id"
+ * this is unfortunated! To make the code portable to a RISC machine
+ * the pdus are now massaged a little bit for processing
+ */ 
+#define TOPOLOGY_CHANGE		0x01
+#define TOPOLOGY_CHANGE_ACK	0x80
+#define BRIDGE_BPDU_8021_CONFIG_SIZE            35	/* real size */
+#define BRIDGE_BPDU_8021_CONFIG_FLAG_OFFSET	 4
+#define BRIDGE_BPDU_8021_PROTOCOL_ID 0
+#define BRIDGE_BPDU_8021_PROTOCOL_VERSION_ID 0
+#define BRIDGE_LLC1_HS 3
+#define BRIDGE_LLC1_DSAP 0x42
+#define BRIDGE_LLC1_SSAP 0x42
+#define BRIDGE_LLC1_CTRL 0x03
+
 typedef struct {
 	unsigned short	protocol_id;	
 	unsigned char	protocol_version_id;
 	unsigned char   type;
-	unsigned char   flags;
-#define TOPOLOGY_CHANGE		0x01
-#define TOPOLOGY_CHANGE_ACK	0x80
 	bridge_id_t      root_id;		  /* (4.5.1.1)	 */
 	unsigned int     root_path_cost;	  /* (4.5.1.2)	 */
 	bridge_id_t      bridge_id;		  /* (4.5.1.3)	 */
@@ -86,7 +102,22 @@ typedef struct {
 	unsigned short   max_age;		  /* (4.5.1.6)	 */
 	unsigned short   hello_time;		  /* (4.5.1.7)	 */
 	unsigned short   forward_delay;		  /* (4.5.1.8)	 */
+	unsigned char   top_change_ack;
+	unsigned char   top_change;
 } Config_bpdu;
+
+#ifdef __LITTLE_ENDIAN
+#define config_bpdu_hton(config_bpdu) \
+        (config_bpdu)->root_path_cost = htonl((config_bpdu)->root_path_cost); \
+        (config_bpdu)->port_id = htons((config_bpdu)->port_id); \
+        (config_bpdu)->message_age = htons((config_bpdu)->message_age); \
+        (config_bpdu)->max_age = htons((config_bpdu)->max_age); \
+        (config_bpdu)->hello_time = htons((config_bpdu)->hello_time); \
+        (config_bpdu)->forward_delay = htons((config_bpdu)->forward_delay);
+#else
+#define config_bpdu_hton(config_bpdu)
+#endif
+#define config_bpdu_ntoh config_bpdu_hton
 
 
 /** Topology Change Notification BPDU Parameters (4.5.2) **/
@@ -112,12 +143,10 @@ typedef struct {
 	unsigned short   bridge_max_age;	  /* (4.5.3.8)	 */
 	unsigned short   bridge_hello_time;	  /* (4.5.3.9)	 */
 	unsigned short   bridge_forward_delay;	  /* (4.5.3.10)	 */
-	unsigned int     topology_change_detected; /* (4.5.3.11) */
-	unsigned int     topology_change;	  /* (4.5.3.12)	 */
+	unsigned int     top_change_detected;	  /* (4.5.3.11) */
+	unsigned int     top_change;		  /* (4.5.3.12)	 */
 	unsigned short   topology_change_time;	  /* (4.5.3.13)	 */
 	unsigned short   hold_time;		  /* (4.5.3.14)	 */
-	unsigned int     top_change;
-	unsigned int     top_change_detected;
 } Bridge_data;
 
 /** Port Parameters (4.5.5) **/
@@ -149,8 +178,11 @@ struct fdb {
 	unsigned char pad[2];
 	unsigned short port;
 	unsigned int timer;
-	unsigned int flags;
+	unsigned short flags;
 #define FDB_ENT_VALID	0x01
+	unsigned short mcast_count;
+	unsigned int   mcast_timer;		/* oldest xxxxxcast */
+	
 /* AVL tree of all addresses, sorted by address */
 	short fdb_avl_height;
 	struct fdb *fdb_avl_left;
@@ -159,17 +191,73 @@ struct fdb {
 	struct fdb *fdb_next;
 };
 
+/* data returned on BRCMD_DISPLAY_FDB */
+struct fdb_info {
+	unsigned char ula[6];
+	unsigned char port;
+        unsigned char flags;
+        unsigned int timer;
+};
+struct fdb_info_hdr {
+	int	copied;			/* nb of entries copied to user */
+	int	not_copied;		/* when user buffer is too small */
+	int	cmd_time;
+};	
+
 #define IS_BRIDGED	0x2e
+
+
+#define BR_MAX_PROTOCOLS 32
+#define BR_MAX_PROT_STATS BR_MAX_PROTOCOLS
+
+/* policy values for policy field */
+#define BR_ACCEPT 1
+#define BR_REJECT 0
+
+/* JRP: extra statistics for debug */
+typedef struct {
+	/* br_receive_frame counters */
+	int port_disable_up_stack;
+	int rcv_bpdu;
+	int notForwarding;
+	int forwarding_up_stack;
+	int unknown_state;
+
+	/* br_tx_frame counters */
+	int port_disable;
+	int port_not_disable;
+
+	/* br_forward counters */
+	int local_multicast;
+	int forwarded_multicast;	/* up stack as well */
+	int flood_unicast;
+	int aged_flood_unicast;
+	int forwarded_unicast;
+	int forwarded_unicast_up_stack;
+	int forwarded_ip_up_stack;
+	int forwarded_ip_up_stack_lie;	/* received on alternate device */
+	int arp_for_local_mac;
+	int drop_same_port;
+	int drop_same_port_aged;
+	int drop_multicast;
+} br_stats_counter;
 
 struct br_stat {
 	unsigned int flags;
 	Bridge_data bridge_data;
 	Port_data port_data[No_of_ports];
+	unsigned int policy;
+	unsigned int exempt_protocols;
+	unsigned short protocols[BR_MAX_PROTOCOLS];
+	unsigned short prot_id[BR_MAX_PROT_STATS];	/* Protocol encountered */
+	unsigned int prot_counter[BR_MAX_PROT_STATS];	/* How many packets ? */
+	br_stats_counter packet_cnts;
 };
 
 /* defined flags for br_stat.flags */
 #define BR_UP		0x0001	/* bridging enabled */
 #define BR_DEBUG	0x0002	/* debugging enabled */
+#define BR_PROT_STATS	0x0004	/* protocol statistics enabled */
 
 struct br_cf {
 	unsigned int cmd;
@@ -188,83 +276,28 @@ struct br_cf {
 #define	BRCMD_DISPLAY_FDB	8	/* arg1 = port */
 #define	BRCMD_ENABLE_DEBUG	9
 #define	BRCMD_DISABLE_DEBUG	10
+#define BRCMD_SET_POLICY	11	/* arg1 = default policy (1==bridge all) */
+#define BRCMD_EXEMPT_PROTOCOL	12	/* arg1 = protocol (see net/if_ether.h) */
+#define BRCMD_ENABLE_PROT_STATS	13
+#define BRCMD_DISABLE_PROT_STATS 14
+#define BRCMD_ZERO_PROT_STATS	15
 
-/* prototypes of all bridging functions... */
+/* prototypes of exported bridging functions... */
 
-void transmit_config(int port_no);
-int root_bridge(void);
-int supersedes_port_info(int port_no, Config_bpdu *config);
-void record_config_information(int port_no, Config_bpdu *config);
-void record_config_timeout_values(Config_bpdu *config);
-void config_bpdu_generation(void);
-int designated_port(int port_no);
-void reply(int port_no);
-void transmit_tcn(void);
-void configuration_update(void);
-void root_selection(void);
-void designated_port_selection(void);
-void become_designated_port(int port_no);
-void port_state_selection(void);
-void make_forwarding(int port_no);
-void topology_change_detection(void);
-void topology_change_acknowledged(void);
-void acknowledge_topology_change(int port_no);
-void make_blocking(int port_no);
-void set_port_state(int port_no, int state);
-void received_config_bpdu(int port_no, Config_bpdu *config);
-void received_tcn_bpdu(int port_no, Tcn_bpdu *tcn);
-void hello_timer_expiry(void);
-void message_age_timer_expiry(int port_no);
-void forward_delay_timer_expiry(int port_no);
-int designated_for_some_port(void);
-void tcn_timer_expiry(void);
-void topology_change_timer_expiry(void);
-void hold_timer_expiry(int port_no);
 void br_init(void);
-void br_init_port(int port_no);
-void enable_port(int port_no);
-void disable_port(int port_no);
-void set_bridge_priority(bridge_id_t *new_bridge_id);
-void set_port_priority(int port_no, unsigned short new_port_id);
-void set_path_cost(int port_no, unsigned short path_cost);
-void start_hello_timer(void);
-void stop_hello_timer(void);
-int hello_timer_expired(void);
-void start_tcn_timer(void);
-void stop_tcn_timer(void);
-int tcn_timer_expired(void);
-void start_topology_change_timer(void);
-void stop_topology_change_timer(void);
-int topology_change_timer_expired(void);
-void start_message_age_timer(int port_no, unsigned short message_age);
-void stop_message_age_timer(int port_no);
-int message_age_timer_expired(int port_no);
-void start_forward_delay_timer(int port_no);
-void stop_forward_delay_timer(int port_no);
-int forward_delay_timer_expired(int port_no);
-void start_hold_timer(int port_no);
-void stop_hold_timer(int port_no);
-int hold_timer_expired(int port_no);
-
-struct fdb *br_avl_find_addr(unsigned char addr[6]);
-int br_avl_insert (struct fdb * new_node);
-int br_avl_remove (struct fdb * node_to_delete);
-
-int send_tcn_bpdu(int port_no, Tcn_bpdu *bpdu);
-int send_config_bpdu(int port_no, Config_bpdu *config_bpdu);
-int find_port(struct device *dev);
-int br_flood(struct sk_buff *skb, int port);
-int br_drop(struct sk_buff *skb);
-int br_learn(struct sk_buff *skb, int port);	/* 3.8 */
-
 int br_receive_frame(struct sk_buff *skb);	/* 3.5 */
 int br_tx_frame(struct sk_buff *skb);
 int br_ioctl(unsigned int cmd, void *arg);
+int br_protocol_ok(unsigned short protocol);
+void requeue_fdb(struct fdb *node, int new_port);
 
-void free_fdb(struct fdb *);
-struct fdb *get_fdb(void);
+struct fdb *br_avl_find_addr(unsigned char addr[6]);
+struct fdb *br_avl_insert (struct fdb * new_node);
+void sprintf_avl (char **pbuffer, struct fdb * tree, off_t *pos,int* len, off_t offset, int length);
+int br_tree_get_info(char *buffer, char **start, off_t offset, int length, int dummy);
 
 /* externs */
 
 extern struct br_stat br_stats;
+
 

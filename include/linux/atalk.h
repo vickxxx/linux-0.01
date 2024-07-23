@@ -1,5 +1,5 @@
 /*
- *	Appletalk networking structures
+ *	AppleTalk networking structures
  *
  *	The following are directly referenced from the University Of Michigan
  *	netatalk for compatibility reasons.
@@ -16,6 +16,9 @@
 #define ATADDR_ANYPORT  (__u8)0
 #define ATADDR_BCAST	(__u8)255
 #define DDP_MAXSZ	587
+#define DDP_MAXHOPS     15      /* 4 bits of hop counter */
+
+#define SIOCATALKDIFADDR       (SIOCPROTOPRIVATE + 0)
 
 struct at_addr 
 {
@@ -25,7 +28,7 @@ struct at_addr
 
 struct sockaddr_at 
 {
-	short		sat_family;
+	sa_family_t	sat_family;
 	__u8		sat_port;
 	struct at_addr	sat_addr;
 	char		sat_zero[ 8 ];
@@ -51,7 +54,7 @@ struct atalk_iface
 {
 	struct device *dev;
 	struct at_addr address;		/* Our address */
-	int status;			/* What are we doing ?? */
+	int status;			/* What are we doing? */
 #define ATIF_PROBE	1		/* Probing for an address */
 #define ATIF_PROBE_FAIL	2		/* Probe collided */
 	struct netrange nets;		/* Associated direct netrange */
@@ -68,15 +71,17 @@ struct atalk_sock
 	unsigned char src_port;
 };
 
-#define DDP_MAXHOPS	15	/* 4 bits of hop counter */
-
 #ifdef __KERNEL__
+
+#include <asm/byteorder.h>
 
 struct ddpehdr
 {
-	/* FIXME for bigendians */
-	/*__u16	deh_pad:2,deh_hops:4,deh_len:10;*/
-	__u16	deh_len:10,deh_hops:4,deh_pad:2;
+#ifdef __LITTLE_ENDIAN_BITFIELD
+	__u16	deh_len:10, deh_hops:4, deh_pad:2;
+#else
+	__u16	deh_pad:2, deh_hops:4, deh_len:10;
+#endif
 	__u16	deh_sum;
 	__u16	deh_dnet;
 	__u16	deh_snet;
@@ -88,19 +93,36 @@ struct ddpehdr
 };
 
 /*
- *	Unused (and currently unsupported)
+ *	Don't drop the struct into the struct above.  You'll get some
+ *	surprise padding.
+ */
+ 
+struct ddpebits
+{
+#ifdef __LITTLE_ENDIAN_BITFIELD
+	__u16	deh_len:10, deh_hops:4, deh_pad:2;
+#else
+	__u16	deh_pad:2, deh_hops:4, deh_len:10;
+#endif
+};
+
+/*
+ *	Short form header
  */
  
 struct ddpshdr
 {
-	/* FIXME for bigendians */
+#ifdef __LITTLE_ENDIAN_BITFIELD
 	__u16	dsh_len:10, dsh_pad:6;
+#else
+	__u16	dsh_pad:6, dsh_len:10;
+#endif
 	__u8	dsh_dport;
 	__u8	dsh_sport;
 	/* And netatalk apps expect to stick the type in themselves */
 };
 
-/* Appletalk AARP headers */
+/* AppleTalk AARP headers */
 
 struct elapaarp
 {
@@ -125,8 +147,6 @@ struct elapaarp
 	__u8	pa_dst_node		__attribute__ ((packed));	
 };
 
-typedef struct sock	atalk_socket;
-
 #define AARP_EXPIRY_TIME	(5*60*HZ)	/* Not specified - how long till we drop a resolved entry */
 #define AARP_HASH_SIZE		16		/* Size of hash table */
 #define AARP_TICK_TIME		(HZ/5)		/* Fast retransmission timer when resolving */
@@ -136,13 +156,25 @@ typedef struct sock	atalk_socket;
 extern struct datalink_proto *ddp_dl, *aarp_dl;
 extern void aarp_proto_init(void);
 /* Inter module exports */
-extern struct atalk_iface *atalk_find_dev(struct device *dev);
+
+/*
+ *	Give a device find its atif control structure
+ */
+
+extern __inline__ struct atalk_iface *atalk_find_dev(struct device *dev)
+{
+	return dev->atalk_ptr;
+}
+
 extern struct at_addr *atalk_find_dev_addr(struct device *dev);
+extern struct device *atrtr_get_dev(struct at_addr *sa);
 extern int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, void *hwaddr);
 extern void aarp_send_probe(struct device *dev, struct at_addr *addr);
+extern void aarp_device_down(struct device *dev);
+
 #ifdef MODULE
 extern void aarp_cleanup_module(void);
-#endif
+#endif /* MODULE */
 
-#endif
-#endif
+#endif /* __KERNEL__ */
+#endif /* __LINUX_ATALK_H__ */

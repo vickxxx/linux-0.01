@@ -20,9 +20,6 @@
  */
 
 #include <linux/config.h>
- 
-#define WATCHDOG_MINOR		130	/* Watchdog timer     */
-#define TEMP_MINOR		131	/* Temperature Sensor */
 
 #define WDT_COUNT0		(io+0)
 #define WDT_COUNT1		(io+1)
@@ -51,8 +48,10 @@
 
 #ifdef CONFIG_WDT501_FAN	/* Full board, Fan has no tachometer */
 #define FEATUREMAP1		0
+#define WDT_OPTION_MASK		(WDIOF_OVERHEAT|WDIOF_POWERUNDER|WDIOF_POWEROVER|WDIOF_EXTERN1|WDIOF_EXTERN2|WDIOF_FANFAULT)
 #else
 #define FEATUREMAP1		WDC_SR_FANGOOD
+#define WDT_OPTION_MASK		(WDIOF_OVERHEAT|WDIOF_POWERUNDER|WDIOF_POWEROVER|WDIOF_EXTERN1|WDIOF_EXTERN2)
 #endif
 
 #define FEATUREMAP2		0
@@ -65,6 +64,7 @@
 #ifdef CONFIG_WDT_500		/* Minimal board */
 #define FEATUREMAP1		(WDC_SR_TGOOD|WDC_SR_FANGOOD)
 #define FEATUREMAP2		(WDC_SR_PSUOVER|WDC_SR_PSUUNDR)
+#define WDT_OPTION_MASK		(WDIOF_OVERHEAT)
 #endif
 
 #ifndef FEATUREMAP1

@@ -41,7 +41,15 @@
 #define ENV_LANGUAGE		0x0E
 #define ENV_TTY_DEV		0x0F
 
-extern unsigned long dispatch(unsigned long code, ...);
-#define puts(x,l) dispatch(CCB_PUTS,0,x,l)
+#ifdef __KERNEL__
+extern long srm_dispatch(long code, ...);
+extern void srm_puts(const char *);
+extern long srm_printk(const char *, ...)
+	__attribute__ ((format (printf, 1, 2)));
 
-#endif
+struct crb_struct;
+struct hwrpb_struct;
+extern long srm_fixup(struct crb_struct *, struct hwrpb_struct *);
+#endif /* __KERNEL__ */
+
+#endif /* __AXP_CONSOLE_H */

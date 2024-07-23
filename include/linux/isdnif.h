@@ -1,4 +1,8 @@
-/* $Id: isdnif.h,v 1.9 1996/06/06 21:24:24 fritz Exp $
+/* X25 changes:
+   Added constants ISDN_PROTO_L2_X25DTE/DCE and corresponding ISDN_FEATURE_..
+   */
+
+/* $Id: isdnif.h,v 1.23 1998/02/20 17:36:52 fritz Exp $
  *
  * Linux ISDN subsystem
  *
@@ -22,6 +26,60 @@
  * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA. 
  *
  * $Log: isdnif.h,v $
+ * Revision 1.23  1998/02/20 17:36:52  fritz
+ * Added L2-protocols for V.110, changed FEATURE-Flag-constants.
+ *
+ * Revision 1.22  1998/01/31 22:14:12  keil
+ * changes for 2.1.82
+ *
+ * Revision 1.21  1997/10/09 21:28:13  fritz
+ * New HL<->LL interface:
+ *   New BSENT callback with nr. of bytes included.
+ *   Sending without ACK.
+ *   New L1 error status (not yet in use).
+ *   Cleaned up obsolete structures.
+ * Implemented Cisco-SLARP.
+ * Changed local net-interface data to be dynamically allocated.
+ * Removed old 2.0 compatibility stuff.
+ *
+ * Revision 1.20  1997/05/27 15:18:06  fritz
+ * Added changes for recent 2.1.x kernels:
+ *   changed return type of isdn_close
+ *   queue_task_* -> queue_task
+ *   clear/set_bit -> test_and_... where apropriate.
+ *   changed type of hard_header_cache parameter.
+ *
+ * Revision 1.19  1997/03/25 23:13:56  keil
+ * NI-1 US protocol
+ *
+ * Revision 1.18  1997/03/04 22:09:18  calle
+ * Change macros copy_from_user and copy_to_user in inline function.
+ * These are now correct replacements of the functions for 2.1.xx
+ *
+ * Revision 1.17  1997/02/10 21:12:53  fritz
+ * More setup-interface changes.
+ *
+ * Revision 1.16  1997/02/10 19:42:57  fritz
+ * New interface for reporting incoming calls.
+ *
+ * Revision 1.15  1997/02/09 00:18:42  keil
+ * leased line support
+ *
+ * Revision 1.14  1997/02/03 23:43:00  fritz
+ * Misc changes for Kernel 2.1.X compatibility.
+ *
+ * Revision 1.13  1996/11/13 02:39:59  fritz
+ * More compatibility changes.
+ *
+ * Revision 1.12  1996/11/06 17:38:48  keil
+ * more changes for 2.1.X
+ *
+ * Revision 1.11  1996/10/23 11:59:42  fritz
+ * More compatibility changes.
+ *
+ * Revision 1.10  1996/10/22 23:14:19  fritz
+ * Changes for compatibility to 2.0.X and 2.1.X kernels.
+ *
  * Revision 1.9  1996/06/06 21:24:24  fritz
  * Started adding support for suspend/resume.
  *
@@ -64,20 +122,30 @@
 #define ISDN_PTYPE_UNKNOWN   0   /* Protocol undefined   */
 #define ISDN_PTYPE_1TR6      1   /* german 1TR6-protocol */
 #define ISDN_PTYPE_EURO      2   /* EDSS1-protocol       */
+#define ISDN_PTYPE_LEASED    3   /* for leased lines     */
+#define ISDN_PTYPE_NI1       4   /* US NI-1 protocol     */
+#define ISDN_PTYPE_MAX       7   /* Max. 8 Protocols     */
 
 /*
  * Values for Layer-2-protocol-selection
  */
-#define ISDN_PROTO_L2_X75I   0   /* X75/LAPB with I-Frames      */
-#define ISDN_PROTO_L2_X75UI  1   /* X75/LAPB with UI-Frames     */
-#define ISDN_PROTO_L2_X75BUI 2   /* X75/LAPB with UI-Frames     */
-#define ISDN_PROTO_L2_HDLC   3   /* HDLC                        */
-#define ISDN_PROTO_L2_TRANS  4   /* Transparent (Voice)         */
+#define ISDN_PROTO_L2_X75I   0   /* X75/LAPB with I-Frames            */
+#define ISDN_PROTO_L2_X75UI  1   /* X75/LAPB with UI-Frames           */
+#define ISDN_PROTO_L2_X75BUI 2   /* X75/LAPB with UI-Frames           */
+#define ISDN_PROTO_L2_HDLC   3   /* HDLC                              */
+#define ISDN_PROTO_L2_TRANS  4   /* Transparent (Voice)               */
+#define ISDN_PROTO_L2_X25DTE 5   /* X25/LAPB DTE mode                 */
+#define ISDN_PROTO_L2_X25DCE 6   /* X25/LAPB DCE mode                 */
+#define ISDN_PROTO_L2_V11096 7   /* V.110 bitrate adaption 9600 Baud  */
+#define ISDN_PROTO_L2_V11019 8   /* V.110 bitrate adaption 19200 Baud */
+#define ISDN_PROTO_L2_V11038 9   /* V.110 bitrate adaption 38400 Baud */
+#define ISDN_PROTO_L2_MAX    15  /* Max. 16 Protocols                 */
 
 /*
  * Values for Layer-3-protocol-selection
  */
 #define ISDN_PROTO_L3_TRANS  0   /* Transparent                 */
+#define ISDN_PROTO_L3_MAX    7   /* Max. 8 Protocols            */
 
 #ifdef __KERNEL__
 
@@ -87,7 +155,7 @@
  * Commands from linklevel to lowlevel
  *
  */
-#define ISDN_CMD_IOCTL   0       /* Perform ioctl                         */
+#define ISDN_CMD_IOCTL    0       /* Perform ioctl                         */
 #define ISDN_CMD_DIAL     1       /* Dial out                              */
 #define ISDN_CMD_ACCEPTD  2       /* Accept an incoming call on D-Chan.    */
 #define ISDN_CMD_ACCEPTB  3       /* Request B-Channel connect.            */
@@ -126,6 +194,13 @@
 #define ISDN_STAT_NODCH   268    /* Signal no D-Channel                   */
 #define ISDN_STAT_ADDCH   269    /* Add more Channels                     */
 #define ISDN_STAT_CAUSE   270    /* Cause-Message                         */
+#define ISDN_STAT_L1ERR   271    /* Signal Layer-1 Error                  */
+
+/*
+ * Values for errcode field
+ */
+#define ISDN_STAT_L1ERR_SEND 1
+#define ISDN_STAT_L1ERR_RECV 2
 
 /*
  * Values for feature-field of interface-struct.
@@ -136,14 +211,38 @@
 #define ISDN_FEATURE_L2_X75BUI  (0x0001 << ISDN_PROTO_L2_X75BUI)
 #define ISDN_FEATURE_L2_HDLC    (0x0001 << ISDN_PROTO_L2_HDLC)
 #define ISDN_FEATURE_L2_TRANS   (0x0001 << ISDN_PROTO_L2_TRANS)
+#define ISDN_FEATURE_L2_X25DTE  (0x0001 << ISDN_PROTO_L2_X25DTE)
+#define ISDN_FEATURE_L2_X25DCE  (0x0001 << ISDN_PROTO_L2_X25DCE)
+#define ISDN_FEATURE_L2_V11096  (0x0001 << ISDN_PROTO_L2_V11096)
+#define ISDN_FEATURE_L2_V11019  (0x0001 << ISDN_PROTO_L2_V11019)
+#define ISDN_FEATURE_L2_V11038  (0x0001 << ISDN_PROTO_L2_V11038)
+
+#define ISDN_FEATURE_L2_MASK    (0x0FFFF) /* Max. 16 protocols */
+#define ISDN_FEATURE_L2_SHIFT   (0)
 
 /* Layer 3 */
-#define ISDN_FEATURE_L3_TRANS   (0x0100 << ISDN_PROTO_L3_TRANS)
+#define ISDN_FEATURE_L3_TRANS   (0x10000 << ISDN_PROTO_L3_TRANS)
+
+#define ISDN_FEATURE_L3_MASK    (0x0FF0000) /* Max. 8 Protocols */
+#define ISDN_FEATURE_L3_SHIFT   (16)
 
 /* Signaling */
-#define ISDN_FEATURE_P_UNKNOWN  (0x1000 << ISDN_PTYPE_UNKNOWN)
-#define ISDN_FEATURE_P_1TR6     (0x1000 << ISDN_PTYPE_1TR6)
-#define ISDN_FEATURE_P_EURO     (0x1000 << ISDN_PTYPE_EURO)
+#define ISDN_FEATURE_P_UNKNOWN  (0x1000000 << ISDN_PTYPE_UNKNOWN)
+#define ISDN_FEATURE_P_1TR6     (0x1000000 << ISDN_PTYPE_1TR6)
+#define ISDN_FEATURE_P_EURO     (0x1000000 << ISDN_PTYPE_EURO)
+#define ISDN_FEATURE_P_NI1      (0x1000000 << ISDN_PTYPE_NI1)
+
+#define ISDN_FEATURE_P_MASK     (0x0FF000000) /* Max. 8 Protocols */
+#define ISDN_FEATURE_P_SHIFT    (24)
+
+typedef struct setup_parm {
+    char phone[32];         /* Remote Phone-Number */
+    char eazmsn[32];        /* Local EAZ or MSN    */
+    unsigned char si1;      /* Service Indicator 1 */
+    unsigned char si2;      /* Service Indicator 2 */
+    unsigned char plan;     /* Numbering plan      */
+    unsigned char screen;   /* Screening info      */
+} setup_parm;
 
 /*
  * Structure for exchanging above infos
@@ -153,7 +252,12 @@ typedef struct {
   int   driver;                  /* Lowlevel-Driver-ID                    */
   int   command;                 /* Command or Status (see above)         */
   ulong arg;                     /* Additional Data                       */
-  char  num[50];                 /* Additional Data                       */
+  union {
+	ulong errcode;               /* Type of error with STAT_L1ERR         */
+	int   length;                /* Amount of bytes sent with STAT_BSENT  */
+	char  num[50];               /* Additional Data                       */
+	setup_parm setup;
+  } parm;
 } isdn_ctrl;
 
 /*
@@ -185,19 +289,6 @@ typedef struct {
    */
   unsigned short hl_hdrlen;
 
-  /* Receive-Callback
-   * Parameters:
-   *             int    Driver-ID
-   *             int    local channel-number (0 ...)
-   *             u_char pointer to received data (in Kernel-Space, volatile)
-   *             int    length of data
-   *
-   * NOTE: This callback is obsolete, and will be removed when all
-   *       current LL-drivers support rcvcall_skb. Do NOT use for new
-   *       drivers.
-   */
-  void (*rcvcallb)(int, int, u_char*, int);
-
   /*
    * Receive-Callback using sk_buff's
    * Parameters:
@@ -216,6 +307,7 @@ typedef struct {
    *                   num     = depending on status-type.
    */
   int (*statcallb)(isdn_ctrl*);
+
   /* Send command
    * Parameters:
    *             isdn_ctrl*
@@ -225,31 +317,16 @@ typedef struct {
    *                   num     = depending on command.
    */
   int (*command)(isdn_ctrl*);
-  /* Send Data
-   * Parameters:
-   *             int    driverId
-   *             int    local channel-number (0 ...)
-   *             u_char pointer to data
-   *             int    length of data
-   *             int    Flag: 0 = Call form Kernel-Space (use memcpy,
-   *                              no schedule allowed) 
-   *                          1 = Data is in User-Space (use memcpy_fromfs,
-   *                              may schedule)
-   *
-   * NOTE: This call is obsolete, and will be removed when all
-   *       current LL-drivers support writebuf_skb. Do NOT use for new
-   *       drivers.
-   */
-  int (*writebuf)(int, int, const u_char*, int, int);
 
   /*
    * Send data using sk_buff's
    * Parameters:
    *             int                    driverId
    *             int                    local channel-number (0...)
+   *             int                    Flag: Need ACK for this packet.
    *             struct sk_buff *skb    Data to send
    */
-  int (*writebuf_skb) (int, int, struct sk_buff *);
+  int (*writebuf_skb) (int, int, int, struct sk_buff *);
 
   /* Send raw D-Channel-Commands
    * Parameters:
@@ -263,6 +340,7 @@ typedef struct {
    *             int    local channel-number (0 ...)
    */
   int (*writecmd)(const u_char*, int, int, int, int);
+
   /* Read raw Status replies
    *             u_char pointer data (volatile)
    *             int    length of buffer
@@ -274,6 +352,7 @@ typedef struct {
    *             int    local channel-number (0 ...)
    */
   int (*readstat)(u_char*, int, int, int, int);
+
   char id[20];
 } isdn_if;
 
@@ -286,8 +365,7 @@ typedef struct {
  *              supporting sk_buff's should set this to 0.
  * command      Address of Command-Handler.
  * features     Bitwise coded Features of this driver. (use ISDN_FEATURE_...)
- * writebuf     Address of Send-Command-Handler. OBSOLETE do NOT use anymore.
- * writebuf_skb Address of Skbuff-Send-Handler. (NULL if not supported)
+ * writebuf_skb Address of Skbuff-Send-Handler.
  * writecmd        "    "  D-Channel  " which accepts raw D-Ch-Commands.
  * readstat        "    "  D-Channel  " which delivers raw Status-Data.
  *
@@ -295,13 +373,16 @@ typedef struct {
  *
  * channels      Driver-ID assigned to this driver. (Must be used on all
  *               subsequent callbacks.
- * rcvcallb      Address of handler for received data. OBSOLETE, do NOT use anymore.
- * rcvcallb_skb  Address of handler for received Skbuff's. (NULL if not supp.)
+ * rcvcallb_skb  Address of handler for received Skbuff's.
  * statcallb        "    "     "    for status-changes.
  *
  */
 extern int register_isdn(isdn_if*);
 
+#ifndef LINUX_VERSION_CODE
+#include <linux/version.h>
+#endif
+#include <asm/uaccess.h>
+
 #endif /* __KERNEL__ */
 #endif /* isdnif_h */
-

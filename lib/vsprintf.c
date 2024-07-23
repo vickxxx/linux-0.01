@@ -39,6 +39,13 @@ unsigned long simple_strtoul(const char *cp,char **endp,unsigned int base)
 	return result;
 }
 
+long simple_strtol(const char *cp,char **endp,unsigned int base)
+{
+	if(*cp=='-')
+		return -simple_strtoul(cp+1,endp,base);
+	return simple_strtoul(cp,endp,base);
+}
+
 /* we use this so that we can do without the ctype library */
 #define is_digit(c)	((c) >= '0' && (c) <= '9')
 
@@ -112,13 +119,14 @@ static char * number(char * str, long num, int base, int size, int precision
 			*str++ = ' ';
 	if (sign)
 		*str++ = sign;
-	if (type & SPECIAL)
+	if (type & SPECIAL) {
 		if (base==8)
 			*str++ = '0';
 		else if (base==16) {
 			*str++ = '0';
 			*str++ = digits[33];
 		}
+	}
 	if (!(type & LEFT))
 		while (size-- > 0)
 			*str++ = c;
@@ -130,6 +138,9 @@ static char * number(char * str, long num, int base, int size, int precision
 		*str++ = ' ';
 	return str;
 }
+
+/* Forward decl. needed for IP address printing stuff... */
+int sprintf(char * buf, const char *fmt, ...);
 
 int vsprintf(char *buf, const char *fmt, va_list args)
 {
@@ -278,12 +289,11 @@ int vsprintf(char *buf, const char *fmt, va_list args)
 		}
 		if (qualifier == 'l')
 			num = va_arg(args, unsigned long);
-		else if (qualifier == 'h')
+		else if (qualifier == 'h') {
+			num = (unsigned short) va_arg(args, int);
 			if (flags & SIGN)
-				num = va_arg(args, short);
-			else
-				num = va_arg(args, unsigned short);
-		else if (flags & SIGN)
+				num = (short) num;
+		} else if (flags & SIGN)
 			num = va_arg(args, int);
 		else
 			num = va_arg(args, unsigned int);

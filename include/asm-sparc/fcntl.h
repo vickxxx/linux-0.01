@@ -1,4 +1,4 @@
-/* $Id: fcntl.h,v 1.6 1996/01/28 02:09:23 davem Exp $ */
+/* $Id: fcntl.h,v 1.11 1998/10/26 20:03:10 davem Exp $ */
 #ifndef _SPARC_FCNTL_H
 #define _SPARC_FCNTL_H
 
@@ -8,7 +8,6 @@
 #define O_WRONLY	0x0001
 #define O_RDWR		0x0002
 #define O_ACCMODE	0x0003
-#define O_NDELAY	0x0004
 #define O_APPEND	0x0008
 #define FASYNC		0x0040	/* fcntl, for BSD compatibility */
 #define O_CREAT		0x0200	/* not fcntl */
@@ -16,7 +15,10 @@
 #define O_EXCL		0x0800	/* not fcntl */
 #define O_SYNC		0x2000
 #define O_NONBLOCK	0x4000
+#define O_NDELAY	(0x0004 | O_NONBLOCK)
 #define O_NOCTTY	0x8000	/* not fcntl */
+#define O_DIRECTORY	0x10000	/* must be a directory */
+#define O_NOFOLLOW	0x20000	/* don't follow links */
 
 #define F_DUPFD		0	/* dup */
 #define F_GETFD		1	/* get f_flags */
@@ -28,6 +30,8 @@
 #define F_GETLK		7
 #define F_SETLK		8
 #define F_SETLKW	9
+#define F_SETSIG	10	/*  for sockets. */
+#define F_GETSIG	11	/*  for sockets. */
 
 /* for F_[GET|SET]FL */
 #define FD_CLOEXEC	1	/* actually anything with low bit set goes */

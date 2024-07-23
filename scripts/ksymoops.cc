@@ -2,6 +2,9 @@
 // Copyright (C) 1995 Greg McGary <gkm@magilla.cichlid.com>
 // compile like so: g++ -o ksymoops ksymoops.cc -liostream
 
+// Update to binutils 2.8 and handling of header text on oops lines by
+// Keith Owens <kaos@ocs.com.au>
+
 //////////////////////////////////////////////////////////////////////////////
 
 // This program is free software; you can redistribute it and/or modify
@@ -23,23 +26,25 @@
 // command-line argument, and redirect the oops-log into stdin.  Out
 // will come the EIP and call-trace in symbolic form.
 
+// Changed by Andreas Schwab <schwab@issan.informatik.uni-dortmund.de>
+// adapted to Linux/m68k
+
 //////////////////////////////////////////////////////////////////////////////
 
 // BUGS:
-// * Doesn't deal with line-prefixes prepended by syslog--strip
-//   these off first, before submitting to ksymoops.
 // * Only resolves operands of jump and call instructions.
 
 #include <fstream.h>
+#include <strstream.h>
 #include <iomanip.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <ctype.h>
+#include <a.out.h>
 
-inline int strequ(char const* x, char const* y) { return (::strcmp(x, y) == 0); }
-inline int strnequ(char const* x, char const* y, size_t n) { return (::strncmp(x, y, n) == 0); }
+inline int strnequ(char const* x, char const* y, size_t n) { return (strncmp(x, y, n) == 0); }
 
 const int code_size = 20;
 
@@ -50,7 +55,7 @@ class KSym
     friend class NameList;
 
   private:
-    long address_;
+    unsigned long address_;
     char* name_;
     long offset_;
     long extent_;
@@ -107,7 +112,7 @@ class NameList
   public:
     int valid() { return (cardinality_ > 0); }
 	
-    KSym* find(long address);
+    KSym* find(unsigned long address);
     void decode(unsigned char* code, long eip_addr);
     
   public:
@@ -115,7 +120,7 @@ class NameList
 };
 
 KSym*
-NameList::find(long address)
+NameList::find(unsigned long address)
 {
     if (!valid())
 	return 0;
@@ -148,32 +153,34 @@ NameList::decode(unsigned char* code, long eip_addr)
     /* This is a hack to avoid using gcc.  We create an object file by
        concatenating objfile_head, the twenty bytes of code, and
        objfile_tail.  */
-    unsigned char objfile_head[] = {
-	0x07, 0x01, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x24, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+    static struct exec objfile_head = {
+	OMAGIC, code_size + 4, 0, 0, sizeof (struct nlist) * 3, 0, 0, 0
     };
-    unsigned char objfile_tail[] = {
-	0x00, 0x90, 0x90, 0x90,
-	0x04, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x13, 0x00, 0x00, 0x00,
-	0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-	0x25, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00,
-	0x00, 0x00, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00,
-	'g',  'c',  'c',  '2',  '_',  'c',  'o',  'm',  
-	'p',  'i',  'l',  'e',  'd',  '.',  '\0', '_',  
-	'E',  'I',  'P',  '\0', '\0', '\0', '\0', '\0',
-	'\0', '\0', '\0', '\0', '\0', '\0', '\0', '\0',
-	'\0', '\0', '\0', '\0', '\0', '\0'
+    static struct {
+	unsigned char tail[4];
+	struct nlist syms[3];
+	unsigned long strsize;
+	char strings[42];
+    } objfile_tail = {
+#ifdef i386
+	{ 0x00, 0x90, 0x90, 0x90 },
+#endif
+#ifdef mc68000
+	{ 0x00, 0x00, 0x00, 0x00 },
+#endif
+	{ { (char *) 4, N_TEXT, 0, 0, 0 },
+	  { (char *) 19, N_TEXT, 0, 0, 0 },
+	  { (char *) 37, N_TEXT | N_EXT, 0, 0, 0 } },
+	42,
+	"gcc2_compiled.\0___gnu_compiled_c\0_EIP\0"
     };
     char const* objdump_command = "objdump -d oops_decode.o";
     char const* objfile_name = &objdump_command[11];
     ofstream objfile_stream(objfile_name);
 
-    objfile_stream.write(objfile_head, sizeof(objfile_head));
+    objfile_stream.write((char *) &objfile_head, sizeof(objfile_head));
     objfile_stream.write(code, code_size);
-    objfile_stream.write(objfile_tail, sizeof(objfile_tail));
+    objfile_stream.write((char *) &objfile_tail, sizeof(objfile_tail));
     objfile_stream.close();
     
     FILE* objdump_FILE = popen(objdump_command, "r");
@@ -184,9 +191,25 @@ NameList::decode(unsigned char* code, long eip_addr)
     
     char buf[1024];
     int lines = 0;
+    int eip_seen = 0;
+    long offset;
     while (fgets(buf, sizeof(buf), objdump_FILE)) {
+	if (strlen(buf) < 14)
+	    continue;
+	if (eip_seen && buf[4] == ':') {
+	    // assume objdump from binutils 2.8..., reformat to old style
+	    offset = strtol(buf, 0, 16);
+	    char newbuf[sizeof(buf)];
+	    memset(newbuf, '\0', sizeof(newbuf));
+	    ostrstream ost(newbuf, sizeof(newbuf));
+	    ost.width(8);
+	    ost << hex << offset;
+	    ost << " <_EIP+" << hex << offset << ">: " << &buf[6] << ends;
+	    strcpy(buf, newbuf);
+	}
 	if (!strnequ(&buf[9], "<_EIP", 5))
 	    continue;
+	eip_seen = 1;
 	if (strstr(buf, " is out of bounds"))
 	    break;
 	lines++;
@@ -195,19 +218,29 @@ NameList::decode(unsigned char* code, long eip_addr)
 	    cout << buf;
 	    continue;
 	}
-	long offset = strtol(buf, 0, 16);
-	char* bp_0 = strchr(buf, '>') + 2;
+	offset = strtol(buf, 0, 16);
+	char* bp_0 = strchr(buf, '>');
 	KSym* ksym = find(eip_addr + offset);
+	if (bp_0)
+	    bp_0 += 2;
+	else
+	    bp_0 = strchr(buf, ':');
 	if (ksym)
 	    cout << *ksym << ' ';
-	char* bp = bp_0;
+	char *bp_1 = strstr(bp_0, "\t");        // objdump from binutils 2.8...
+	if (bp_1)
+	    ++bp_1;
+	else
+	    bp_1 = bp_0;
+	char *bp = bp_1;
 	while (!isspace(*bp))
 	    bp++;
 	while (isspace(*bp))
 	    bp++;
-	if (*bp != '0') {
+	if (!isxdigit(*bp)) {
 	    cout << bp_0;
-	} else if (*bp_0 == 'j' || strnequ(bp_0, "call", 4)) { // a jump or call insn
+#ifdef i386
+	} else if (*bp_1 == 'j' || strnequ(bp_1, "call", 4)) { // a jump or call insn
 	    long rel_addr = strtol(bp, 0, 16);
 	    ksym = find(eip_addr + rel_addr);
 	    if (ksym) {
@@ -215,6 +248,21 @@ NameList::decode(unsigned char* code, long eip_addr)
 		cout << bp_0 << *ksym << endl;
 	    } else
 		cout << bp_0;
+#endif
+#ifdef mc68000
+	} else if ((bp_1[0] == 'b' && bp_1[4] == ' ' && strchr("swl", bp_1[3]))
+		   || (bp_1[0] == 'd' && bp_1[1] == 'b')) {
+	    // a branch or decr-and-branch insn
+	    if (bp_1[0] == 'd') // skip register
+		while (*bp && *bp++ != ',');
+	    long rel_addr = strtoul(bp, 0, 16);
+	    ksym = find(eip_addr + rel_addr);
+	    if (ksym) {
+		*bp++ = '\0';
+		cout << bp_0 << *ksym << endl;
+	    } else
+	      cout << bp_0;
+#endif
 	} else {
 	    cout << bp_0;
 	}
@@ -255,6 +303,7 @@ int
 main(int argc, char** argv)
 {
     char c;
+    char *oops_column = NULL;
     program_name = (argc--, *argv++);
 
     NameList names;
@@ -275,46 +324,83 @@ main(int argc, char** argv)
     cout << endl;
 
     char buffer[1024];
-    while (!cin.eof())
-    {
+    while (1) {
 	long eip_addr;
-	cin >> buffer;
-	if (strequ(buffer, "EIP:") && names.valid()) {
-	    cin >> ::hex >> eip_addr;
-	    cin >> c >> c >> c;
-	    cin >> ::hex >> eip_addr;
-	    cin >> c >> c >> buffer;
-	    if (!strequ(buffer, "EFLAGS:")) {
-		clog << "Please strip the line-prefixes and rerun " << program_name << endl;
+	cin.get(buffer, sizeof(buffer));
+	if (cin.eof())
+	    break;
+	cin.get(c);	/* swallow newline */
+#ifdef i386
+	if (strstr(buffer, "EIP:") && names.valid()) {
+	    oops_column =  strstr(buffer, "EIP:");
+	    if (sscanf(oops_column+13, "[<%x>]", &eip_addr) != 1) {
+	    	cout << "Cannot read eip address from EIP: line.  Is this a valid oops file?" << endl;
 		exit(1);
 	    }
+	    cout << ">>EIP: ";
 	    KSym* ksym = names.find(eip_addr);
 	    if (ksym)
-		cout << ">>EIP: " << *ksym << endl;
-	} else if (strequ(buffer, "Trace:") && names.valid()) {
-	    long address;
-	    while ((cin >> buffer) && 
-		   (sscanf(buffer, " [<%x>]", &address) == 1) &&
-		   address > 0xc) {
-		cout << "Trace: ";
-		KSym* ksym = names.find(address);
-		if (ksym)
-		    cout << *ksym;
-		else
-		    cout << ::hex << address;
-		cout << endl;
-	    }
-	    cout << endl;
+		cout << *ksym << endl;
+	    else
+		cout << ::hex << eip_addr << " cannot be resolved" << endl;
 	}
-	if (strequ(buffer, "ode:") || strequ(buffer, "Code:")) {
-	    // The 'C' might have been consumed as a hex number
+#endif
+#ifdef mc68000
+	if (strstr(buffer, "PC:") && names.valid()) {
+	    oops_column =  strstr(buffer, "PC:");
+	    if (sscanf(oops_column+4, "[<%x>]", &eip_addr) != 1) {
+	    	cout << "Cannot read pc address from PC: line.  Is this a valid oops file?" << endl;
+		exit(1);
+	    }
+	    cout << ">>PC: ";
+	    KSym* ksym = names.find(eip_addr);
+	    if (ksym)
+		cout << *ksym << endl;
+	    else
+		cout << ::hex << eip_addr << " cannot be resolved" << endl;
+	}
+#endif
+	else if (oops_column && strstr(oops_column, "[<") && names.valid()) {
+	    unsigned long address;
+	    while (strstr(oops_column, "[<")) {
+		char *p = oops_column;
+		while (1) {
+		    while (*p && *p++ != '[')
+			;
+		    if (sscanf(p, "<%x>]", &address) != 1)
+			break;
+		    cout << "Trace: ";
+		    KSym* ksym = names.find(address);
+		    if (ksym)
+			cout << *ksym;
+		    else
+			cout << ::hex << address;
+		    cout << endl;
+		}
+		cin.get(buffer, sizeof(buffer));
+		if (cin.eof())
+		    break;
+		cin.get(c);	/* swallow newline */
+	    }
+	}
+	if (oops_column && strnequ(oops_column, "Code:", 5)) {
 	    unsigned char code[code_size];
 	    unsigned char* cp = code;
 	    unsigned char* end = &code[code_size];
-	    while (cp < end) {
-		int c;
-		cin >> ::hex >> c;
+	    char *p = oops_column + 5;
+	    int c;
+	    memset(code, '\0', sizeof(code));
+	    while (*p && cp < end) {
+	    	while (*p == ' ')
+		    ++p;
+		if (sscanf(p, "%x", &c) != 1)
+		    break;
+#ifdef mc68000
+		*cp++ = c >> 8;
+#endif
 		*cp++ = c;
+	    	while (*p && *p++ != ' ')
+		    ;
 	    }
 	    names.decode(code, eip_addr);
 	}

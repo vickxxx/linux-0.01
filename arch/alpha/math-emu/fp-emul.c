@@ -1,9 +1,9 @@
+#include <linux/module.h>
 #include <linux/types.h>
-
 #include <linux/kernel.h>
 #include <linux/sched.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #include "ieee-math.h"
 
@@ -13,9 +13,9 @@
 #define OPC_INTL	0x11
 #define OPC_INTS	0x12
 #define OPC_INTM	0x13
-#define OPC_FLTV	0x14
-#define OPC_FLTI	0x15
-#define OPC_FLTL	0x16
+#define OPC_FLTV	0x15
+#define OPC_FLTI	0x16
+#define OPC_FLTL	0x17
 
 #define OPC_MISC	0x18
 
@@ -52,111 +52,44 @@
 #define MISC_TRAPB	0x0000
 #define MISC_EXCB	0x0400
 
+extern unsigned long alpha_read_fp_reg (unsigned long reg);
+extern void alpha_write_fp_reg (unsigned long reg, unsigned long val);
 
-extern unsigned long	rdfpcr (void);
-extern void		wrfpcr (unsigned long);
 
+#ifdef MODULE
 
-unsigned long
-alpha_read_fp_reg (unsigned long reg)
+MODULE_DESCRIPTION("FP Software completion module");
+
+extern long (*alpha_fp_emul_imprecise)(struct pt_regs *, unsigned long);
+extern long (*alpha_fp_emul) (unsigned long pc);
+
+static long (*save_emul_imprecise)(struct pt_regs *, unsigned long);
+static long (*save_emul) (unsigned long pc);
+
+long do_alpha_fp_emul_imprecise(struct pt_regs *, unsigned long);
+long do_alpha_fp_emul(unsigned long);
+
+int init_module(void)
 {
-	unsigned long r;
-
-	switch (reg) {
-	      case  0: asm ("stt  $f0,%0" : "m="(r)); break;
-	      case  1: asm ("stt  $f1,%0" : "m="(r)); break;
-	      case  2: asm ("stt  $f2,%0" : "m="(r)); break;
-	      case  3: asm ("stt  $f3,%0" : "m="(r)); break;
-	      case  4: asm ("stt  $f4,%0" : "m="(r)); break;
-	      case  5: asm ("stt  $f5,%0" : "m="(r)); break;
-	      case  6: asm ("stt  $f6,%0" : "m="(r)); break;
-	      case  7: asm ("stt  $f7,%0" : "m="(r)); break;
-	      case  8: asm ("stt  $f8,%0" : "m="(r)); break;
-	      case  9: asm ("stt  $f9,%0" : "m="(r)); break;
-	      case 10: asm ("stt $f10,%0" : "m="(r)); break;
-	      case 11: asm ("stt $f11,%0" : "m="(r)); break;
-	      case 12: asm ("stt $f12,%0" : "m="(r)); break;
-	      case 13: asm ("stt $f13,%0" : "m="(r)); break;
-	      case 14: asm ("stt $f14,%0" : "m="(r)); break;
-	      case 15: asm ("stt $f15,%0" : "m="(r)); break;
-	      case 16: asm ("stt $f16,%0" : "m="(r)); break;
-	      case 17: asm ("stt $f17,%0" : "m="(r)); break;
-	      case 18: asm ("stt $f18,%0" : "m="(r)); break;
-	      case 19: asm ("stt $f19,%0" : "m="(r)); break;
-	      case 20: asm ("stt $f20,%0" : "m="(r)); break;
-	      case 21: asm ("stt $f21,%0" : "m="(r)); break;
-	      case 22: asm ("stt $f22,%0" : "m="(r)); break;
-	      case 23: asm ("stt $f23,%0" : "m="(r)); break;
-	      case 24: asm ("stt $f24,%0" : "m="(r)); break;
-	      case 25: asm ("stt $f25,%0" : "m="(r)); break;
-	      case 26: asm ("stt $f26,%0" : "m="(r)); break;
-	      case 27: asm ("stt $f27,%0" : "m="(r)); break;
-	      case 28: asm ("stt $f28,%0" : "m="(r)); break;
-	      case 29: asm ("stt $f29,%0" : "m="(r)); break;
-	      case 30: asm ("stt $f30,%0" : "m="(r)); break;
-	      case 31: asm ("stt $f31,%0" : "m="(r)); break;
-	      default:
-		break;
-	}
-	return r;
+	save_emul_imprecise = alpha_fp_emul_imprecise;
+	save_emul = alpha_fp_emul;
+	alpha_fp_emul_imprecise = do_alpha_fp_emul_imprecise;
+	alpha_fp_emul = do_alpha_fp_emul;
+	return 0;
 }
 
-
-#if 0
-/*
- * This is IMHO the better way of implementing LDT().  But it
- * has the disadvantage that gcc 2.7.0 refuses to compile it
- * (invalid operand constraints), so instead, we use the uglier
- * macro below.
- */
-# define LDT(reg,val)	\
-  asm volatile ("ldt $f"#reg",%0" :: "m"(val));
-#else
-# define LDT(reg,val)	\
-  asm volatile ("ldt $f"#reg",0(%0)" :: "r"(&val));
-#endif
-
-void
-alpha_write_fp_reg (unsigned long reg, unsigned long val)
+void cleanup_module(void)
 {
-	switch (reg) {
-	      case  0: LDT( 0, val); break;
-	      case  1: LDT( 1, val); break;
-	      case  2: LDT( 2, val); break;
-	      case  3: LDT( 3, val); break;
-	      case  4: LDT( 4, val); break;
-	      case  5: LDT( 5, val); break;
-	      case  6: LDT( 6, val); break;
-	      case  7: LDT( 7, val); break;
-	      case  8: LDT( 8, val); break;
-	      case  9: LDT( 9, val); break;
-	      case 10: LDT(10, val); break;
-	      case 11: LDT(11, val); break;
-	      case 12: LDT(12, val); break;
-	      case 13: LDT(13, val); break;
-	      case 14: LDT(14, val); break;
-	      case 15: LDT(15, val); break;
-	      case 16: LDT(16, val); break;
-	      case 17: LDT(17, val); break;
-	      case 18: LDT(18, val); break;
-	      case 19: LDT(19, val); break;
-	      case 20: LDT(20, val); break;
-	      case 21: LDT(21, val); break;
-	      case 22: LDT(22, val); break;
-	      case 23: LDT(23, val); break;
-	      case 24: LDT(24, val); break;
-	      case 25: LDT(25, val); break;
-	      case 26: LDT(26, val); break;
-	      case 27: LDT(27, val); break;
-	      case 28: LDT(28, val); break;
-	      case 29: LDT(29, val); break;
-	      case 30: LDT(30, val); break;
-	      case 31: LDT(31, val); break;
-	      default:
-		break;
-	}
+	alpha_fp_emul_imprecise = save_emul_imprecise;
+	alpha_fp_emul = save_emul;
 }
 
+#undef  alpha_fp_emul_imprecise
+#define alpha_fp_emul_imprecise		do_alpha_fp_emul_imprecise
+#undef  alpha_fp_emul
+#define alpha_fp_emul			do_alpha_fp_emul
+
+#endif /* MODULE */
 
 /*
  * Emulate the floating point instruction at address PC.  Returns 0 if
@@ -173,7 +106,9 @@ alpha_fp_emul (unsigned long pc)
 	unsigned long va, vb, vc, res, fpcr;
 	__u32 insn;
 
-	insn = get_user((__u32*)pc);
+	MOD_INC_USE_COUNT;
+
+	get_user(insn, (__u32*)pc);
 	fc     = (insn >>  0) &  0x1f;	/* destination register */
 	func   = (insn >>  5) & 0x7ff;
 	fb     = (insn >> 16) &  0x1f;
@@ -182,8 +117,8 @@ alpha_fp_emul (unsigned long pc)
 	
 	va = alpha_read_fp_reg(fa);
 	vb = alpha_read_fp_reg(fb);
-
 	fpcr = rdfpcr();
+
 	/*
 	 * Try the operation in software.  First, obtain the rounding
 	 * mode...
@@ -290,33 +225,46 @@ alpha_fp_emul (unsigned long pc)
 	      default:
 		printk("alpha_fp_emul: unexpected function code %#lx at %#lx\n",
 		       func & 0x3f, pc);
+		MOD_DEC_USE_COUNT;
 		return 0;
 	}
+
 	/*
 	 * Take the appropriate action for each possible
 	 * floating-point result:
 	 *
 	 *	- Set the appropriate bits in the FPCR
 	 *	- If the specified exception is enabled in the FPCR,
-	 *	  return.  The caller (mxr_signal_handler) will dispatch
+	 *	  return.  The caller (entArith) will dispatch
 	 *	  the appropriate signal to the translated program.
+	 *
+	 * In addition, properly track the exception state in software
+	 * as described in the Alpha Architectre Handbook section 4.7.7.3.
 	 */
 	if (res) {
-		fpcr |= FPCR_SUM | res;
+		/* Record exceptions in software control word.  */
+		current->tss.flags = fpcw |= res >> 35;
+
+		/* Update hardware control register */
+		fpcr &= (~FPCR_MASK | FPCR_DYN_MASK);
+		fpcr |= ieee_swcr_to_fpcr(fpcw | (~fpcw&IEEE_STATUS_MASK)>>16);
 		wrfpcr(fpcr);
-		if (((res & FPCR_INV) && (fpcw & IEEE_TRAP_ENABLE_INV)) ||
-		    ((res & FPCR_DZE) && (fpcw & IEEE_TRAP_ENABLE_DZE)) ||
-		    ((res & FPCR_OVF) && (fpcw & IEEE_TRAP_ENABLE_OVF)) ||
-		    ((res & FPCR_UNF) && (fpcw & IEEE_TRAP_ENABLE_UNF)) ||
-		    ((res & FPCR_INE) && (fpcw & IEEE_TRAP_ENABLE_INE)))
+
+		/* Do we generate a signal?  */
+		if (res >> 51 & fpcw & IEEE_TRAP_ENABLE_MASK) {
+			MOD_DEC_USE_COUNT;
 			return 0;
+		}
 	}
+
 	/*
 	 * Whoo-kay... we got this far, and we're not generating a signal
 	 * to the translated program.  All that remains is to write the
 	 * result:
 	 */
 	alpha_write_fp_reg(fc, vc);
+
+	MOD_DEC_USE_COUNT;
 	return 1;
 }
 
@@ -326,6 +274,9 @@ alpha_fp_emul_imprecise (struct pt_regs *regs, unsigned long write_mask)
 {
 	unsigned long trigger_pc = regs->pc - 4;
 	unsigned long insn, opcode, rc;
+
+	MOD_INC_USE_COUNT;
+
 	/*
 	 * Turn off the bits corresponding to registers that are the
 	 * target of instructions that set bits in the exception
@@ -338,7 +289,7 @@ alpha_fp_emul_imprecise (struct pt_regs *regs, unsigned long write_mask)
 	 * up to the first occurrence of such an instruction.
 	 */
 	while (write_mask) {
-		insn = get_user((__u32*)(trigger_pc));
+		get_user(insn, (__u32*)(trigger_pc));
 		opcode = insn >> 26;
 		rc = insn & 0x1f;
 
@@ -346,12 +297,14 @@ alpha_fp_emul_imprecise (struct pt_regs *regs, unsigned long write_mask)
 		      case OPC_PAL:
 		      case OPC_JSR:
 		      case 0x30 ... 0x3f:	/* branches */
+			MOD_DEC_USE_COUNT;
 			return 0;
 
 		      case OPC_MISC:
 			switch (insn & 0xffff) {
 			      case MISC_TRAPB:
 			      case MISC_EXCB:
+				MOD_DEC_USE_COUNT;
 				return 0;
 
 			      default:
@@ -378,11 +331,13 @@ alpha_fp_emul_imprecise (struct pt_regs *regs, unsigned long write_mask)
 			{
 			    /* re-execute insns in trap-shadow: */
 			    regs->pc = trigger_pc + 4;
+			    MOD_DEC_USE_COUNT;
 			    return 1;
 			}
 			break;
 		}
 		trigger_pc -= 4;
 	}
+	MOD_DEC_USE_COUNT;
 	return 0;
 }

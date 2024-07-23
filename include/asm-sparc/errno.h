@@ -1,4 +1,4 @@
-/* $Id: errno.h,v 1.4 1995/11/25 02:31:41 davem Exp $ */
+/* $Id: errno.h,v 1.6 1997/04/15 09:03:38 davem Exp $ */
 #ifndef _SPARC_ERRNO_H
 #define _SPARC_ERRNO_H
 
@@ -37,7 +37,7 @@
 #define	EPIPE		32	/* Broken pipe */
 #define	EDOM		33	/* Math argument out of domain of func */
 #define	ERANGE		34	/* Math result not representable */
-#define	EWOULDBLOCK	35	/* Operation would block */
+#define	EWOULDBLOCK	EAGAIN	/* Operation would block */
 #define	EINPROGRESS	36	/* Operation now in progress */
 #define	EALREADY	37	/* Operation already in progress */
 #define	ENOTSOCK	38	/* Socket operation on non-socket */
@@ -129,5 +129,8 @@
 #define	EILSEQ		122	/* Illegal byte sequence */
 #define	ELIBMAX		123	/* Atmpt to link in too many shared libs */
 #define	ELIBSCN		124	/* .lib section in a.out corrupted */
+
+#define	ENOMEDIUM	125	/* No medium found */
+#define	EMEDIUMTYPE	126	/* Wrong medium type */
 
 #endif

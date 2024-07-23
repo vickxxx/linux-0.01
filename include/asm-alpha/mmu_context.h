@@ -9,6 +9,7 @@
 
 #include <linux/config.h>
 #include <asm/system.h>
+#include <asm/machvec.h>
 
 /*
  * The maximum ASN's the processor supports.  On the EV4 this is 63
@@ -16,7 +17,7 @@
  * EV5 this is 127.
  *
  * On the EV4, the ASNs are more-or-less useless anyway, as they are
- * only used as a icache tag, not for TB entries.  On the EV5 ASN's
+ * only used as an icache tag, not for TB entries.  On the EV5 ASN's
  * also validate the TB entries, and thus make a lot more sense.
  *
  * The EV4 ASN's don't even match the architecture manual, ugh.  And
@@ -32,35 +33,49 @@
  * work correctly and can thus not be used (explaining the lack of PAL-code
  * support).
  */
-#ifdef CONFIG_ALPHA_EV5
-#define MAX_ASN 127
+#define EV4_MAX_ASN 63
+#define EV5_MAX_ASN 127
+#define EV6_MAX_ASN 255
+
+#ifdef CONFIG_ALPHA_GENERIC
+# define MAX_ASN	(alpha_mv.max_asn)
 #else
-#define MAX_ASN 63
-#define BROKEN_ASN 1
+# ifdef CONFIG_ALPHA_EV4
+#  define MAX_ASN	EV4_MAX_ASN
+# elif defined(CONFIG_ALPHA_EV5)
+#  define MAX_ASN	EV5_MAX_ASN
+# else
+#  define MAX_ASN	EV6_MAX_ASN
+# endif
 #endif
 
+#ifdef __SMP__
+#define WIDTH_THIS_PROCESSOR	5
+/*
+ * last_asn[processor]:
+ * 63                                            0
+ * +-------------+----------------+--------------+
+ * | asn version | this processor | hardware asn |
+ * +-------------+----------------+--------------+
+ */
+extern unsigned long last_asn[];
+#define asn_cache last_asn[p->processor]
+
+#else
+#define WIDTH_THIS_PROCESSOR	0
+/*
+ * asn_cache:
+ * 63                                            0
+ * +------------------------------+--------------+
+ * |         asn version          | hardware asn |
+ * +------------------------------+--------------+
+ */
 extern unsigned long asn_cache;
+#endif /* __SMP__ */
 
-#define ASN_VERSION_SHIFT 16
-#define ASN_VERSION_MASK ((~0UL) << ASN_VERSION_SHIFT)
-#define ASN_FIRST_VERSION (1UL << ASN_VERSION_SHIFT)
-
-extern inline void get_new_mmu_context(struct task_struct *p,
-	struct mm_struct *mm,
-	unsigned long asn)
-{
-	/* check if it's legal.. */
-	if ((asn & ~ASN_VERSION_MASK) > MAX_ASN) {
-		/* start a new version, invalidate all old asn's */
-		tbiap(); imb();
-		asn = (asn & ASN_VERSION_MASK) + ASN_FIRST_VERSION;
-		if (!asn)
-			asn = ASN_FIRST_VERSION;
-	}
-	asn_cache = asn + 1;
-	mm->context = asn;			/* full version + asn */
-	p->tss.asn = asn & ~ASN_VERSION_MASK;	/* just asn */
-}
+#define WIDTH_HARDWARE_ASN	7
+#define ASN_FIRST_VERSION (1UL << (WIDTH_THIS_PROCESSOR + WIDTH_HARDWARE_ASN))
+#define HARDWARE_ASN_MASK ((1UL << WIDTH_HARDWARE_ASN) - 1)
 
 /*
  * NOTE! The way this is set up, the high bits of the "asn_cache" (and
@@ -73,18 +88,105 @@ extern inline void get_new_mmu_context(struct task_struct *p,
  * force a new asn for any other processes the next time they want to
  * run.
  */
-extern inline void get_mmu_context(struct task_struct *p)
+
+#ifndef __EXTERN_INLINE
+#define __EXTERN_INLINE extern inline
+#define __MMU_EXTERN_INLINE
+#endif
+
+extern void get_new_mmu_context(struct task_struct *p, struct mm_struct *mm);
+
+__EXTERN_INLINE void ev4_get_mmu_context(struct task_struct *p)
 {
-#ifndef BROKEN_ASN
+	/* As described, ASN's are broken.  */
+}
+
+__EXTERN_INLINE void ev5_get_mmu_context(struct task_struct *p)
+{
 	struct mm_struct * mm = p->mm;
 
 	if (mm) {
 		unsigned long asn = asn_cache;
 		/* Check if our ASN is of an older version and thus invalid */
-		if ((mm->context ^ asn) & ASN_VERSION_MASK)
-			get_new_mmu_context(p, mm, asn);
+		if ((mm->context ^ asn) & ~HARDWARE_ASN_MASK)
+			get_new_mmu_context(p, mm);
 	}
-#endif
 }
 
+#ifdef CONFIG_ALPHA_GENERIC
+# define get_mmu_context		(alpha_mv.mv_get_mmu_context)
+#else
+# ifdef CONFIG_ALPHA_EV4
+#  define get_mmu_context		ev4_get_mmu_context
+# else
+#  define get_mmu_context		ev5_get_mmu_context
+# endif
 #endif
+
+extern inline void init_new_context(struct mm_struct *mm)
+{
+	mm->context = 0;
+}
+
+extern inline void destroy_context(struct mm_struct *mm)
+{
+	/* Nothing to do.  */
+}
+
+
+/*
+ * Force a context reload. This is needed when we change the page
+ * table pointer or when we update the ASN of the current process.
+ */
+
+#if defined(CONFIG_ALPHA_GENERIC)
+#define MASK_CONTEXT(tss) \
+ ((struct thread_struct *)((unsigned long)(tss) & alpha_mv.mmu_context_mask))
+#elif defined(CONFIG_ALPHA_DP264)
+#define MASK_CONTEXT(tss) \
+ ((struct thread_struct *)((unsigned long)(tss) & 0xfffffffffful))
+#else
+#define MASK_CONTEXT(tss)  (tss)
+#endif
+
+__EXTERN_INLINE struct thread_struct *
+__reload_tss(struct thread_struct *tss)
+{
+	register struct thread_struct *a0 __asm__("$16");
+	register struct thread_struct *v0 __asm__("$0");
+
+	a0 = MASK_CONTEXT(tss);
+
+	__asm__ __volatile__(
+		"call_pal %2 #__reload_tss"
+		: "=r"(v0), "=r"(a0)
+		: "i"(PAL_swpctx), "r"(a0)
+		: "$1", "$16", "$22", "$23", "$24", "$25");
+
+	return v0;
+}
+
+__EXTERN_INLINE void
+reload_context(struct task_struct *task)
+{
+	__reload_tss(&task->tss);
+}
+
+/*
+ * After we have set current->mm to a new value, this activates the
+ * context for the new mm so we see the new mappings.
+ */
+
+__EXTERN_INLINE void
+activate_context(struct task_struct *task)
+{
+	get_mmu_context(task);
+	reload_context(task);
+}
+
+#ifdef __MMU_EXTERN_INLINE
+#undef __EXTERN_INLINE
+#undef __MMU_EXTERN_INLINE
+#endif
+
+#endif /* __ALPHA_MMU_CONTEXT_H */

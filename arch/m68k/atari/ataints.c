@@ -39,8 +39,8 @@
 #include <linux/kernel.h>
 #include <linux/ptrace.h>
 #include <linux/kernel_stat.h>
+#include <linux/init.h>
 
-#include <asm/setup.h>
 #include <asm/system.h>
 #include <asm/traps.h>
 
@@ -48,6 +48,7 @@
 #include <asm/atariints.h>
 #include <asm/atari_stdma.h>
 #include <asm/irq.h>
+#include <asm/entry.h>
 
 
 /*
@@ -57,9 +58,7 @@
  * All interrupt source have an internal number (defined in
  * <asm/atariints.h>): Autovector interrupts are 1..7, then follow ST-MFP,
  * TT-MFP, SCC, and finally VME interrupts. Vector numbers for the latter can
- * be allocated by atari_register_vme_int(). Currently, all int source numbers
- * have the IRQ_MACHSPEC bit set, to keep the general int handling functions
- * in kernel/ints.c from them.
+ * be allocated by atari_register_vme_int().
  *
  * Each interrupt can be of three types:
  * 
@@ -163,47 +162,38 @@ static int free_vme_vec_bitmap = 0;
 
 #define IRQ_NAME(nr) atari_slow_irq_##nr##_handler(void)
 
-#define	MFP_MK_BASE	"0xfa13"
-
-/* This must agree with head.S.  */
-#define ORIG_DO "0x20"
-#define FORMATVEC "0x2E"
-#define SR "0x28"
-#define SAVE_ALL				\
-	"clrl	%%sp@-;"    /* stk_adj */	\
-	"pea	-1:w;"	    /* orig d0 = -1 */	\
-	"movel	%%d0,%%sp@-;" /* d0 */		\
-	"moveml	%%d1-%%d5/%%a0-%%a1,%%sp@-"
-
 #define	BUILD_SLOW_IRQ(n)						   \
 asmlinkage void IRQ_NAME(n);						   \
 /* Dummy function to allow asm with operands.  */			   \
 void atari_slow_irq_##n##_dummy (void) {				   \
-__asm__ (ALIGN_STR "\n"							   \
+__asm__ (__ALIGN_STR "\n"						   \
 SYMBOL_NAME_STR(atari_slow_irq_) #n "_handler:\t"			   \
-"	addql	#1,"SYMBOL_NAME_STR(intr_count)"\n"			   \
-	SAVE_ALL "\n"							   \
-"	andb	#~(1<<(" #n "&7)),"	/* mask this interrupt */	   \
-	"("MFP_MK_BASE"+(((" #n "&8)^8)>>2)+((" #n "&16)<<3)):w\n"	   \
-"	bfextu	%%sp@("SR"){#5,#3},%%d0\n" /* get old IPL from stack frame */ \
+"	addql	#1,"SYMBOL_NAME_STR(local_irq_count)"\n"		   \
+	SAVE_ALL_INT "\n"						   \
+	GET_CURRENT(%%d0) "\n"						   \
+"	andb	#~(1<<(%c3&7)),%a4:w\n"	/* mask this interrupt */	   \
+	/* get old IPL from stack frame */				   \
+"	bfextu	%%sp@(%c2){#5,#3},%%d0\n"				   \
 "	movew	%%sr,%%d1\n"						   \
 "	bfins	%%d0,%%d1{#21,#3}\n"					   \
 "	movew	%%d1,%%sr\n"		/* set IPL = previous value */	   \
 "	addql	#1,%a0\n"						   \
-"	lea	"SYMBOL_NAME_STR(irq_handler)"+("#n"+8)*8,%%a0\n"	   \
+"	lea	%a1,%%a0\n"						   \
 "	pea 	%%sp@\n"		/* push addr of frame */	   \
 "	movel	%%a0@(4),%%sp@-\n"	/* push handler data */		   \
-"	pea 	(" #n "+0x10000008)\n"	/* push int number */		   \
+"	pea 	(%c3+8)\n"		/* push int number */		   \
 "	movel	%%a0@,%%a0\n"						   \
 "	jbsr	%%a0@\n"		/* call the handler */		   \
 "	addql	#8,%%sp\n"						   \
 "	addql	#4,%%sp\n"						   \
 "	orw	#0x0600,%%sr\n"						   \
 "	andw	#0xfeff,%%sr\n"		/* set IPL = 6 again */		   \
-"	orb 	#(1<<(" #n "&7)),"	/* now unmask the int again */	   \
-	    "("MFP_MK_BASE"+(((" #n "&8)^8)>>2)+((" #n "&16)<<3)):w\n"	   \
+"	orb 	#(1<<(%c3&7)),%a4:w\n"	/* now unmask the int again */	   \
 "	jbra	"SYMBOL_NAME_STR(ret_from_interrupt)"\n"		   \
-	 : : "i" (&kstat.interrupts[n+8])				   \
+	 : : "i" (&kstat.irqs[0][n+8]), "i" (&irq_handler[n+8]),	   \
+	     "n" (PT_OFF_SR), "n" (n),					   \
+	     "i" (n & 8 ? (n & 16 ? &tt_mfp.int_mk_a : &mfp.int_mk_a)	   \
+		        : (n & 16 ? &tt_mfp.int_mk_b : &mfp.int_mk_b))	   \
 );									   \
 }
 
@@ -280,14 +270,15 @@ asmlinkage void atari_prio_irq_handler( void );
 
 /* Dummy function to allow asm with operands.  */
 void atari_fast_prio_irq_dummy (void) {
-__asm__ (ALIGN_STR "\n"
+__asm__ (__ALIGN_STR "\n"
 SYMBOL_NAME_STR(atari_fast_irq_handler) ":
 	orw 	#0x700,%%sr		/* disable all interrupts */
 "SYMBOL_NAME_STR(atari_prio_irq_handler) ":\t
-	addql	#1,"SYMBOL_NAME_STR(intr_count)"\n"
-	SAVE_ALL "
+	addql	#1,"SYMBOL_NAME_STR(local_irq_count)"\n"
+	SAVE_ALL_INT "\n"
+	GET_CURRENT(%%d0) "
 	/* get vector number from stack frame and convert to source */
-	bfextu	%%sp@(" FORMATVEC "){#4,#10},%%d0
+	bfextu	%%sp@(%c1){#4,#10},%%d0
 	subw	#(0x40-8),%%d0
 	jpl 	1f
 	addw	#(0x40-8-0x18),%%d0
@@ -297,14 +288,13 @@ SYMBOL_NAME_STR(atari_fast_irq_handler) ":
 	lea	%%a0@(%%d0:l:8),%%a0
 	pea 	%%sp@			/* push frame address */
 	movel	%%a0@(4),%%sp@-		/* push handler data */
-	bset	#28,%%d0		/* set MACHSPEC bit */
 	movel	%%d0,%%sp@-		/* push int number */
 	movel	%%a0@,%%a0
 	jsr	%%a0@			/* and call the handler */
 	addql	#8,%%sp
 	addql	#4,%%sp
 	jbra	"SYMBOL_NAME_STR(ret_from_interrupt)
-	 : : "i" (&kstat.interrupts)
+	 : : "i" (&kstat.irqs[0]), "n" (PT_OFF_FORMATVEC)
 );
 }
 
@@ -314,7 +304,7 @@ SYMBOL_NAME_STR(atari_fast_irq_handler) ":
  */
 asmlinkage void falcon_hblhandler(void);
 asm(".text\n"
-ALIGN_STR "\n"
+__ALIGN_STR "\n"
 SYMBOL_NAME_STR(falcon_hblhandler) ":
 	orw	#0x200,%sp@	/* set saved ipl to 2 */
 	rte");
@@ -323,6 +313,8 @@ SYMBOL_NAME_STR(falcon_hblhandler) ":
 asmlinkage void bad_interrupt(void);
 
 extern void atari_microwire_cmd( int cmd );
+
+extern int atari_SCC_reset_done;
 
 /*
  * void atari_init_IRQ (void)
@@ -335,7 +327,7 @@ extern void atari_microwire_cmd( int cmd );
  * the atari IRQ handling routines.
  */
 
-void atari_init_IRQ(void)
+__initfunc(void atari_init_IRQ(void))
 {
 	int i;
 
@@ -368,7 +360,7 @@ void atari_init_IRQ(void)
 		tt_mfp.int_mk_b = 0xff;
 	}
 
-	if (ATARIHW_PRESENT(SCC)) {
+	if (ATARIHW_PRESENT(SCC) && !atari_SCC_reset_done) {
 		scc.cha_a_ctrl = 9;
 		MFPDELAY();
 		scc.cha_a_ctrl = (char) 0xc0; /* hardware reset */
@@ -384,16 +376,19 @@ void atari_init_IRQ(void)
 		tt_scu.vme_mask = 0x60;		/* enable MFP and SCC ints */
 	}
 	else {
-		/* If no SCU, the HSYNC interrupt needs to be disabled this
-		 * way. (Else _inthandler in kernel/sys_call.S gets overruns)
+		/* If no SCU and no Hades, the HSYNC interrupt needs to be
+		 * disabled this way. (Else _inthandler in kernel/sys_call.S
+		 * gets overruns)
 		 */
-		vectors[VEC_INT2] = falcon_hblhandler;
+
+		if (!MACH_IS_HADES)
+			vectors[VEC_INT2] = falcon_hblhandler;
 	}
 
 	if (ATARIHW_PRESENT(PCM_8BIT) && ATARIHW_PRESENT(MICROWIRE)) {
 		/* Initialize the LM1992 Sound Controller to enable
 		   the PSG sound.  This is misplaced here, it should
-		   be in a atasound_init(), that doesn't exist yet. */
+		   be in an atasound_init(), that doesn't exist yet. */
 		atari_microwire_cmd(MW_LM1992_PSG_HIGH);
 	}
 	
@@ -424,10 +419,23 @@ int atari_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_r
                       unsigned long flags, const char *devname, void *dev_id)
 {
 	int vector;
-	
+	unsigned long oflags = flags;
+
+	/*
+	 * The following is a hack to make some PCI card drivers work,
+	 * which set the SA_SHIRQ flag.
+	 */
+
+	flags &= ~SA_SHIRQ;
+
+	if (flags == SA_INTERRUPT) {
+		printk ("%s: SA_INTERRUPT changed to IRQ_TYPE_SLOW for %s\n",
+			__FUNCTION__, devname);
+		flags = IRQ_TYPE_SLOW;
+	}
 	if (flags < IRQ_TYPE_SLOW || flags > IRQ_TYPE_PRIO) {
-		printk ("%s: Bad irq type %ld requested from %s\n",
-		        __FUNCTION__, flags, devname);
+		printk ("%s: Bad irq type 0x%lx <0x%lx> requested from %s\n",
+		        __FUNCTION__, flags, oflags, devname);
 		return -EINVAL;
 	}
 	if (!IS_VALID_INTNO(irq)) {
@@ -588,14 +596,12 @@ unsigned long atari_register_vme_int(void)
 		return 0;
 
 	free_vme_vec_bitmap |= 1 << i;
-	return (VME_SOURCE_BASE + i) | IRQ_MACHSPEC;
+	return (VME_SOURCE_BASE + i);
 }
 
 
 void atari_unregister_vme_int(unsigned long irq)
 {
-	irq &= ~IRQ_MACHSPEC;
-	
 	if(irq >= VME_SOURCE_BASE && irq < VME_SOURCE_BASE + VME_MAX_SOURCES) {
 		irq -= VME_SOURCE_BASE;
 		free_vme_vec_bitmap &= ~(1 << irq);
@@ -612,11 +618,11 @@ int atari_get_irq_list(char *buf)
 			continue;
 		if (i < STMFP_SOURCE_BASE)
 			len += sprintf(buf+len, "auto %2d: %10u ",
-				       i, kstat.interrupts[i]);
+				       i, kstat.irqs[0][i]);
 		else
 			len += sprintf(buf+len, "vec $%02x: %10u ",
 				       IRQ_SOURCE_TO_VECTOR(i),
-				       kstat.interrupts[i]);
+				       kstat.irqs[0][i]);
 
 		if (irq_handler[i].handler != atari_call_irq_list) {
 			len += sprintf(buf+len, "%s\n", irq_param[i].devname);
@@ -626,7 +632,7 @@ int atari_get_irq_list(char *buf)
 			for( p = (irq_node_t *)irq_handler[i].dev_id; p; p = p->next ) {
 				len += sprintf(buf+len, "%s\n", p->devname);
 				if (p->next)
-					len += sprintf( buf+len, "                  " );
+					len += sprintf( buf+len, "                    " );
 			}
 		}
 	}

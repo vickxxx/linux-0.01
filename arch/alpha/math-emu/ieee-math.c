@@ -137,9 +137,8 @@ sub128 (const unsigned long a[2], const unsigned long b[2], unsigned long c[2])
 static inline void
 mul64 (const unsigned long a, const unsigned long b, unsigned long c[2])
 {
-	asm ("mulq  %2,%3,%0\n\t"
-	     "umulh %2,%3,%1"
-	     : "r="(c[0]), "r="(c[1]) : "r"(a), "r"(b));
+	c[0] = a * b;
+	asm ("umulh %1,%2,%0" : "=r"(c[1]) : "r"(a), "r"(b));
 }
 
 
@@ -276,7 +275,7 @@ make_s_ieee (long f, EXTENDED *a, unsigned long *b)
 {
 	unsigned long res, sticky;
 
-	if (!a->f[0] && !a->f[1]) {
+	if (!a->e && !a->f[0] && !a->f[1]) {
 		*b = (unsigned long) a->s << 63;	/* return +/-0 */
 		return 0;
 	}
@@ -356,7 +355,7 @@ make_t_ieee (long f, EXTENDED *a, unsigned long *b)
 {
 	unsigned long res, sticky;
 
-	if (!a->f[0] && !a->f[1]) {
+	if (!a->e && !a->f[0] && !a->f[1]) {
 		*b = (unsigned long) a->s << 63;	/* return +/-0 */
 		return 0;
 	}
@@ -384,7 +383,7 @@ make_t_ieee (long f, EXTENDED *a, unsigned long *b)
 			a->e = -0x3ff;
 		}
 	}
-	if (a->e > 0x3ff) {
+	if (a->e >= 0x3ff) {
 		res = FPCR_OVF | FPCR_INE;
 		if (f & IEEE_TRAP_ENABLE_OVF) {
 			a->e -= 0x600;	/* scale down result by 2^alpha */
@@ -734,19 +733,23 @@ ieee_CVTQT (int f, unsigned long a, unsigned long *b)
  *       FPCR_INV if invalid operation occurred, etc.
  */
 unsigned long
-ieee_CVTTQ (int f, unsigned long a, unsigned long *b)
+ieee_CVTTQ (int f, unsigned long a, unsigned long *pb)
 {
 	unsigned int midway;
-	unsigned long ov, uv, res = 0;
+	unsigned long ov, uv, res, b;
 	fpclass_t a_type;
 	EXTENDED temp;
 
-	*b = 0;
 	a_type = extend_ieee(a, &temp, DOUBLE);
+
+	b = 0x7fffffffffffffff;
+	res = FPCR_INV;
 	if (a_type == NaN || a_type == INFTY)
-		return FPCR_INV;
+		goto out;
+
+	res = 0;
 	if (a_type == QNaN)
-		return 0;
+		goto out;
 
 	if (temp.e > 0) {
 		ov = 0;
@@ -758,7 +761,7 @@ ieee_CVTTQ (int f, unsigned long a, unsigned long *b)
 		if (ov || (temp.f[1] & 0xffc0000000000000))
 			res |= FPCR_IOV | FPCR_INE;
 	}
-	if (temp.e < 0) {
+	else if (temp.e < 0) {
 		while (temp.e < 0) {
 			++temp.e;
 			uv = temp.f[0] & 1;		/* save sticky bit */
@@ -766,7 +769,8 @@ ieee_CVTTQ (int f, unsigned long a, unsigned long *b)
 			temp.f[0] |= uv;
 		}
 	}
-	*b = ((temp.f[1] << 9) | (temp.f[0] >> 55)) & 0x7fffffffffffffff;
+	b = (temp.f[1] << 9) | (temp.f[0] >> 55);
+
 	/*
 	 * Notice: the fraction is only 52 bits long.  Thus, rounding
 	 * cannot possibly result in an integer overflow.
@@ -782,25 +786,26 @@ ieee_CVTTQ (int f, unsigned long a, unsigned long *b)
 		break;
 
 	      case ROUND_PINF:
-		if ((temp.f[0] & 0x003fffffffffffff) != 0)
-			++b;
+		b += ((temp.f[0] & 0x007fffffffffffff) != 0 && !temp.s);
 		break;
 
 	      case ROUND_NINF:
-		if ((temp.f[0] & 0x003fffffffffffff) != 0)
-			--b;
+		b += ((temp.f[0] & 0x007fffffffffffff) != 0 && temp.s);
 		break;
 
 	      case ROUND_CHOP:
 		/* no action needed */
 		break;
 	}
-	if ((temp.f[0] & 0x003fffffffffffff) != 0)
+	if ((temp.f[0] & 0x007fffffffffffff) != 0)
 		res |= FPCR_INE;
 
 	if (temp.s) {
-		*b = -*b;
+		b = -b;
 	}
+
+out:
+	*pb = b;
 	return res;
 }
 
@@ -1143,11 +1148,8 @@ ieee_MULS (int f, unsigned long a, unsigned long b, unsigned long *c)
 		return 0;
 	}
 	op_c.s = op_a.s ^ op_b.s;
-	op_c.e = op_a.e + op_b.e;
+	op_c.e = op_a.e + op_b.e - 55;
 	mul64(op_a.f[0], op_b.f[0], op_c.f);
-
-	normalize(&op_c);
-	op_c.e -= 55;		/* drop the 55 original bits. */
 
 	return round_s_ieee(f, &op_c, c);
 }
@@ -1200,11 +1202,8 @@ ieee_MULT (int f, unsigned long a, unsigned long b, unsigned long *c)
 		return 0;
 	}
 	op_c.s = op_a.s ^ op_b.s;
-	op_c.e = op_a.e + op_b.e;
+	op_c.e = op_a.e + op_b.e - 55;
 	mul64(op_a.f[0], op_b.f[0], op_c.f);
-
-	normalize(&op_c);
-	op_c.e -= 55;	/* drop the 55 original bits. */
 
 	return round_t_ieee(f, &op_c, c);
 }

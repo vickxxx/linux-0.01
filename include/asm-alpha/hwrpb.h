@@ -1,5 +1,5 @@
-#ifndef _HWRPB_H
-#define _HWRPB_H
+#ifndef __ALPHA_HWRPB_H
+#define __ALPHA_HWRPB_H
 
 #define INIT_HWRPB ((struct hwrpb_struct *) 0x10000000)
 
@@ -15,6 +15,8 @@
 #define EV45_CPU                6       /* EV4.5 (21064/xxx)    */
 #define EV56_CPU		7	/* EV5.6 (21164)	*/
 #define EV6_CPU			8	/* EV6 (21164)		*/
+#define PCA56_CPU		9	/* PCA56 (21164PC)	*/
+#define PCA57_CPU		10	/* PCA57 (21164??)	*/
 
 /*
  * DEC system types for Alpha systems.  Found in HWRPB.
@@ -35,11 +37,28 @@
 #define ST_DEC_MUSTANG		 14	/* Mustang systype	*/
 #define ST_DEC_ALCOR		 15	/* Alcor (EV5) systype	*/
 #define ST_DEC_1000		 17	/* Mikasa systype	*/
+#define ST_DEC_EB64		 18	/* EB64 systype		*/
 #define ST_DEC_EB66		 19	/* EB66 systype		*/
 #define ST_DEC_EB64P		 20	/* EB64+ systype	*/
-#define ST_DEC_EB66P		-19	/* EB66 systype		*/
-#define ST_DEC_EBPC64		-20	/* Cabriolet (AlphaPC64) systype */
+#define ST_DEC_BURNS		 21	/* laptop systype	*/
+#define ST_DEC_RAWHIDE		 22	/* Rawhide systype	*/
+#define ST_DEC_K2		 23	/* K2 systype		*/
+#define ST_DEC_LYNX		 24	/* Lynx systype		*/
+#define ST_DEC_XL		 25	/* Alpha XL systype	*/
 #define ST_DEC_EB164		 26	/* EB164 systype	*/
+#define ST_DEC_NORITAKE		 27	/* Noritake systype	*/
+#define ST_DEC_CORTEX		 28	/* Cortex systype	*/
+#define ST_DEC_MIATA		 30	/* Miata systype        */
+#define ST_DEC_XXM		 31	/* XXM systype		*/
+#define ST_DEC_TAKARA		 32	/* Takara systype	*/
+#define ST_DEC_YUKON		 33	/* Yukon systype	*/
+#define ST_DEC_TSUNAMI		 34	/* Tsunami systype	*/
+#define ST_DEC_WILDFIRE		 35	/* Wildfire systype	*/
+#define ST_DEC_CUSCO		 36	/* CUSCO systype	*/
+
+/* UNOFFICIAL!!! */
+#define ST_UNOFFICIAL_BIAS	100
+#define ST_DTI_RUFFIAN		101	/* RUFFIAN systype	*/
 
 struct pcb_struct {
 	unsigned long ksp;
@@ -118,6 +137,12 @@ struct memdesc_struct {
 	struct memclust_struct cluster[0];
 };
 
+struct dsr_struct {
+	long smm;			/* SMM nubber used by LMF       */
+	unsigned long  lurt_off;	/* offset to LURT table         */
+	unsigned long  sysname_off;	/* offset to sysname char count */
+};
+
 struct hwrpb_struct {
 	unsigned long phys_addr;	/* check: physical address of the hwrpb */
 	unsigned long id;		/* check: "HWRPB\0\0\0" */
@@ -157,7 +182,22 @@ struct hwrpb_struct {
 	unsigned long chksum;
 	unsigned long rxrdy;
 	unsigned long txrdy;
-	unsigned long dsrdbt_offset;	/* "Dynamic System Recognition Data Block Table" Whee */
+	unsigned long dsr_offset;	/* "Dynamic System Recognition Data Block Table" */
 };
 
-#endif
+#ifdef __KERNEL__
+
+extern struct hwrpb_struct *hwrpb;
+
+static inline void
+hwrpb_update_checksum(struct hwrpb_struct *h)
+{
+	unsigned long sum = 0, *l;
+        for (l = (unsigned long *) h; l < (unsigned long *) &h->chksum; ++l)
+                sum += *l;
+        h->chksum = sum;
+}
+
+#endif /* __KERNEL__ */
+
+#endif /* __ALPHA_HWRPB_H */

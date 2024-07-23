@@ -84,8 +84,56 @@
 #include "NCR5380.h"
 #include "constants.h"
 #include "sd.h"
-#include<linux/stat.h>
-#include<linux/string.h>
+#include <linux/stat.h>
+#include <linux/string.h>
+#include <linux/init.h>
+
+
+#define DTC_PUBLIC_RELEASE 2
+
+/*#define DTCDEBUG 0x1*/
+#define DTCDEBUG_INIT	0x1
+#define DTCDEBUG_TRANSFER 0x2
+
+/*
+ * The DTC3180 & 3280 boards are memory mapped.
+ * 
+ */
+
+/*
+ */ 
+/* Offset from DTC_5380_OFFSET */
+#define DTC_CONTROL_REG		0x100	/* rw */
+#define D_CR_ACCESS		0x80	/* ro set=can access 3280 registers */
+#define CSR_DIR_READ		0x40	/* rw direction, 1 = read 0 = write */
+
+#define CSR_RESET              0x80    /* wo  Resets 53c400 */
+#define CSR_5380_REG           0x80    /* ro  5380 registers can be accessed */
+#define CSR_TRANS_DIR          0x40    /* rw  Data transfer direction */
+#define CSR_SCSI_BUFF_INTR     0x20    /* rw  Enable int on transfer ready */
+#define CSR_5380_INTR          0x10    /* rw  Enable 5380 interrupts */
+#define CSR_SHARED_INTR        0x08    /* rw  Interrupt sharing */
+#define CSR_HOST_BUF_NOT_RDY   0x04    /* ro  Host buffer not ready */
+#define CSR_SCSI_BUF_RDY       0x02    /* ro  SCSI buffer ready */
+#define CSR_GATED_5380_IRQ     0x01    /* ro  Last block xferred */
+#define CSR_INT_BASE (CSR_SCSI_BUFF_INTR | CSR_5380_INTR)
+
+
+#define DTC_BLK_CNT		0x101   /* rw 
+					 * # of 128-byte blocks to transfer */
+
+
+#define D_CR_ACCESS             0x80    /* ro set=can access 3280 registers */
+
+#define DTC_SWITCH_REG		0x3982	/* ro - DIP switches */
+#define DTC_RESUME_XFER		0x3982	/* wo - resume data xfer 
+					   * after disconnect/reconnect*/
+
+#define DTC_5380_OFFSET		0x3880	/* 8 registers here, see NCR5380.h */
+
+/*!!!! for dtc, it's a 128 byte buffer at 3900 !!! */
+#define DTC_DATA_BUF		0x3900  /* rw 128 bytes long */
+
 
 struct proc_dir_entry proc_scsi_dtc = {
    PROC_SCSI_T128, 7, "dtc3x80",
@@ -94,23 +142,21 @@ struct proc_dir_entry proc_scsi_dtc = {
 
 
 static struct override {
-   unsigned char *address;
+   unsigned int address;
    int irq;
 } overrides
 #ifdef OVERRIDE
-[] = OVERRIDE;
+[] __initdata = OVERRIDE;
 #else
-[4] = {{NULL, IRQ_AUTO}, {NULL, IRQ_AUTO}, {NULL, IRQ_AUTO},
-     {NULL, IRQ_AUTO}};
+[4] __initdata = {{0, IRQ_AUTO}, {0, IRQ_AUTO}, {0, IRQ_AUTO}, {0, IRQ_AUTO}};
 #endif
 
 #define NO_OVERRIDES (sizeof(overrides) / sizeof(struct override))
 
 static struct base {
-   unsigned char *address;
+   unsigned int address;
    int noauto;
-} bases[] = {{(unsigned char *) 0xcc000, 0}, {(unsigned char *) 0xc8000, 0},
-{(unsigned char *) 0xdc000, 0}, {(unsigned char *) 0xd8000, 0}};
+} bases[] __initdata = {{0xcc000, 0}, {0xc8000, 0}, {0xdc000, 0}, {0xd8000, 0}};
 
 #define NO_BASES (sizeof (bases) / sizeof (struct base))
 
@@ -131,17 +177,17 @@ static const struct signature {
  *
 */
 
-void dtc_setup(char *str, int *ints) {
+__initfunc(void dtc_setup(char *str, int *ints)) {
    static int commandline_current = 0;
    int i;
    if (ints[0] != 2)
       printk("dtc_setup: usage dtc=address,irq\n");
    else
       if (commandline_current < NO_OVERRIDES) {
-      overrides[commandline_current].address = (unsigned char *) ints[1];
+      overrides[commandline_current].address = ints[1];
       overrides[commandline_current].irq = ints[2];
       for (i = 0; i < NO_BASES; ++i)
-	 if (bases[i].address == (unsigned char *) ints[1]) {
+	 if (bases[i].address == ints[1]) {
 	 bases[i].noauto = 1;
 	 break;
       }
@@ -163,28 +209,29 @@ void dtc_setup(char *str, int *ints) {
 */
 
 
-int dtc_detect(Scsi_Host_Template * tpnt) {
+__initfunc(int dtc_detect(Scsi_Host_Template * tpnt)) {
    static int current_override = 0, current_base = 0;
    struct Scsi_Host *instance;
-   unsigned char *base;
+   unsigned int base;
    int sig, count;
 
    tpnt->proc_dir = &proc_scsi_dtc;
    tpnt->proc_info = &dtc_proc_info;
 
    for (count = 0; current_override < NO_OVERRIDES; ++current_override) {
-      base = NULL;
+      base = 0;
 
       if (overrides[current_override].address)
 	 base = overrides[current_override].address;
       else
 	 for (; !base && (current_base < NO_BASES); ++current_base) {
 #if (DTCDEBUG & DTCDEBUG_INIT)
-	 printk("scsi : probing address %08x\n", (unsigned int) bases[current_base].address);
+	 printk("scsi-dtc : probing address %08x\n", bases[current_base].address);
 #endif
 	 for (sig = 0; sig < NO_SIGNATURES; ++sig)
-	    if (!bases[current_base].noauto && !memcmp
-	      (bases[current_base].address + signatures[sig].offset,
+	    if (!bases[current_base].noauto && 
+		check_signature(bases[current_base].address +
+				signatures[sig].offset,
 	      signatures[sig].string, strlen(signatures[sig].string))) {
 	    base = bases[current_base].address;
 #if (DTCDEBUG & DTCDEBUG_INIT)
@@ -195,14 +242,14 @@ int dtc_detect(Scsi_Host_Template * tpnt) {
       }
 
 #if defined(DTCDEBUG) && (DTCDEBUG & DTCDEBUG_INIT)
-      printk("scsi-dtc : base = %08x\n", (unsigned int) base);
+      printk("scsi-dtc : base = %08x\n", base);
 #endif
 
       if (!base)
 	 break;
 
       instance = scsi_register (tpnt, sizeof(struct NCR5380_hostdata));
-      instance->base = base;
+      instance->base = (void *)base;
 
       NCR5380_init(instance, 0);
 
@@ -216,7 +263,7 @@ int dtc_detect(Scsi_Host_Template * tpnt) {
 /* With interrupts enabled, it will sometimes hang when doing heavy
  * reads. So better not enable them until I finger it out. */
       if (instance->irq != IRQ_NONE)
-	 if (request_irq(instance->irq, dtc_intr, SA_INTERRUPT, "dtc")) {
+	 if (request_irq(instance->irq, do_dtc_intr, SA_INTERRUPT, "dtc")) {
 	 printk("scsi%d : IRQ%d not free, interrupts disabled\n",
 	      instance->host_no, instance->irq);
 	 instance->irq = IRQ_NONE;
@@ -282,6 +329,7 @@ int dtc_biosparam(Disk * disk, kdev_t dev, int * ip)
    return 0;
 }
 
+
 /****************************************************************
  * Function : int NCR5380_pread (struct Scsi_Host *instance, 
  *	unsigned char *dst, int len)
@@ -320,7 +368,7 @@ static inline int NCR5380_pread (struct Scsi_Host *instance,
       while (NCR5380_read(DTC_CONTROL_REG) & CSR_HOST_BUF_NOT_RDY)
 	 ++i;
       rtrc(3);
-      memcpy(d, (char *)(base + DTC_DATA_BUF), 128);
+      memcpy_fromio(d, base + DTC_DATA_BUF, 128);
       d += 128;
       len -= 128;
       rtrc(7);	/*** with int's on, it sometimes hangs after here.
@@ -370,7 +418,7 @@ static inline int NCR5380_pwrite (struct Scsi_Host *instance,
       while (NCR5380_read(DTC_CONTROL_REG) & CSR_HOST_BUF_NOT_RDY)
 	 ++i;
       rtrc(3);
-      memcpy((char *)(base + DTC_DATA_BUF), src, 128);
+      memcpy_toio(base + DTC_DATA_BUF, src, 128);
       src += 128;
       len -= 128;
    }

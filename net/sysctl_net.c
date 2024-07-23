@@ -24,19 +24,11 @@ extern ctl_table ipv4_table[];
 extern ctl_table ipx_table[];
 #endif
 
-#ifdef CONFIG_ATALK
-extern ctl_table atalk_table[];
-#endif
+extern ctl_table core_table[];
 
-#ifdef CONFIG_NETROM
-extern ctl_table netrom_table[];
+#ifdef CONFIG_UNIX
+extern ctl_table unix_table[];
 #endif
-
-#ifdef CONFIG_AX25
-extern ctl_table ax25_table[];
-#endif
-
-extern ctl_table core_table[], unix_table[];
 
 #ifdef CONFIG_NET
 extern ctl_table ether_table[], e802_table[];
@@ -46,9 +38,19 @@ extern ctl_table ether_table[], e802_table[];
 extern ctl_table bridge_table[];
 #endif
 
+#ifdef CONFIG_IPV6
+extern ctl_table ipv6_table[];
+#endif
+
+#ifdef CONFIG_TR
+extern ctl_table tr_table[];
+#endif
+
 ctl_table net_table[] = {
 	{NET_CORE,   "core",      NULL, 0, 0555, core_table},      
+#ifdef CONFIG_UNIX
         {NET_UNIX,   "unix",      NULL, 0, 0555, unix_table},
+#endif
 #ifdef CONFIG_NET
 	{NET_802,    "802",       NULL, 0, 0555, e802_table},
 	{NET_ETHER,  "ethernet",  NULL, 0, 0555, ether_table},
@@ -59,17 +61,14 @@ ctl_table net_table[] = {
 #ifdef CONFIG_IPX
         {NET_IPX,    "ipx",       NULL, 0, 0555, ipx_table},
 #endif
-#ifdef CONFIG_ATALK
-        {NET_ATALK,  "appletalk", NULL, 0, 0555, atalk_table},
-#endif
-#ifdef CONFIG_NETROM
-	{NET_NETROM, "netrom",    NULL, 0, 0555, netrom_table},
-#endif
-#ifdef CONFIG_AX25
-	{NET_AX25,   "ax25",      NULL, 0, 0555, ax25_table},
-#endif
 #ifdef CONFIG_BRIDGE
         {NET_BRIDGE, "bridge",    NULL, 0, 0555, bridge_table},
+#endif
+#ifdef CONFIG_IPV6
+	{NET_IPV6, "ipv6", NULL, 0, 0555, ipv6_table},
+#endif
+#ifdef CONFIG_TR
+	{NET_TR, "token-ring", NULL, 0, 0555, tr_table},
 #endif
 	{0}
 };

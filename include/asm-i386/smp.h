@@ -6,6 +6,8 @@
 
 #include <asm/i82489.h>
 #include <asm/bitops.h>
+#include <asm/fixmap.h>
+
 #include <linux/tasks.h>
 #include <linux/ptrace.h>
 
@@ -149,51 +151,32 @@ struct mpc_config_intlocal
  */
 
 /*
- *	Per process x86 parameters
- */
- 
-struct cpuinfo_x86
-{
-	char hard_math;
-	char x86;
-	char x86_model;
-	char x86_mask;
-	char x86_vendor_id[16];
-	int  x86_capability;
-	int  fdiv_bug;
-	int  have_cpuid;
-	char wp_works_ok;
-	char hlt_works_ok;
-	unsigned long udelay_val;
-};
-
-
-extern struct cpuinfo_x86 cpu_data[NR_CPUS];
-
-/*
  *	Private routines/data
  */
  
 extern int smp_found_config;
 extern int smp_scan_config(unsigned long, unsigned long);
 extern unsigned long smp_alloc_memory(unsigned long mem_base);
-extern unsigned char *apic_reg;
-extern unsigned char *kernel_stacks[NR_CPUS];
 extern unsigned char boot_cpu_id;
 extern unsigned long cpu_present_map;
 extern volatile int cpu_number_map[NR_CPUS];
-extern volatile int cpu_logical_map[NR_CPUS];
 extern volatile unsigned long smp_invalidate_needed;
 extern void smp_flush_tlb(void);
-extern volatile unsigned long kernel_flag, kernel_counter;
+
 extern volatile unsigned long cpu_callin_map[NR_CPUS];
-extern volatile unsigned char active_kernel_processor;
 extern void smp_message_irq(int cpl, void *dev_id, struct pt_regs *regs);
-extern void smp_reschedule_irq(int cpl, struct pt_regs *regs);
+extern void smp_send_reschedule(int cpu);
 extern unsigned long ipi_count;
 extern void smp_invalidate_rcv(void);		/* Process an NMI */
-extern volatile unsigned long kernel_counter;
-extern volatile unsigned long syscall_count;
+extern void smp_local_timer_interrupt(struct pt_regs * regs);
+extern void (*mtrr_hook) (void);
+extern void setup_APIC_clock (void);
+extern volatile int __cpu_logical_map[NR_CPUS];
+extern inline int cpu_logical_map(int cpu)
+{
+	return __cpu_logical_map[cpu];
+}
+
 
 /*
  *	General functions that each host system must provide.
@@ -201,38 +184,43 @@ extern volatile unsigned long syscall_count;
  
 extern void smp_callin(void);
 extern void smp_boot_cpus(void);
-extern void smp_store_cpu_info(int id);		/* Store per cpu info (like the initial udelay numbers */
+extern void smp_store_cpu_info(int id);		/* Store per CPU info (like the initial udelay numbers */
+extern void smp_message_pass(int target, int msg, unsigned long data, int wait);
 
 extern volatile unsigned long smp_proc_in_lock[NR_CPUS]; /* for computing process time */
-extern volatile unsigned long smp_process_available;
+extern volatile int smp_process_available;
 
 /*
  *	APIC handlers: Note according to the Intel specification update
  *	you should put reads between APIC writes.
  *	Intel Pentium processor specification update [11AP, pg 64]
- *		"Back to Back Assertions of HOLD May Cause Lost APIC Write Cycle"
+ *	"Back to Back Assertions of HOLD May Cause Lost APIC Write Cycle"
  */
+
+#define APIC_BASE (fix_to_virt(FIX_APIC_BASE))
 
 extern __inline void apic_write(unsigned long reg, unsigned long v)
 {
-	*((volatile unsigned long *)(apic_reg+reg))=v;
+	*((volatile unsigned long *)(APIC_BASE+reg))=v;
 }
 
 extern __inline unsigned long apic_read(unsigned long reg)
 {
-	return *((volatile unsigned long *)(apic_reg+reg));
+	return *((volatile unsigned long *)(APIC_BASE+reg));
 }
 
 /*
- *	This function is needed by all SMP systems. It must _always_ be valid from the initial
- *	startup. This may require magic on some systems (in the i86 case we dig out the boot 
- *	cpu id from the config and set up a fake apic_reg pointer so that before we activate
- *	the apic we get the right answer). Hopefully other processors are more sensible 8)
+ * This function is needed by all SMP systems. It must _always_ be valid
+ * from the initial startup. We map APIC_BASE very early in page_setup(),
+ * so this is correct in the x86 case.
  */
- 
-extern __inline int smp_processor_id(void)
+
+#define smp_processor_id() (current->processor)
+
+extern __inline int hard_smp_processor_id(void)
 {
-	return GET_APIC_ID(apic_read(APIC_ID));
+	/* we don't want to mark this access volatile - bad code generation */
+	return GET_APIC_ID(*(unsigned long *)(APIC_BASE+APIC_ID));
 }
 
 #endif /* !ASSEMBLY */
@@ -249,10 +237,9 @@ extern __inline int smp_processor_id(void)
  *	processes are run.
  */
  
-#define PROC_CHANGE_PENALTY	20		/* Schedule penalty */
+#define PROC_CHANGE_PENALTY	10		/* Schedule penalty */
 
 #define SMP_FROM_INT		1
 #define SMP_FROM_SYSCALL	2
-
 #endif
 #endif

@@ -1,110 +1,56 @@
 #ifndef _ALPHA_BYTEORDER_H
 #define _ALPHA_BYTEORDER_H
 
-#undef ntohl
-#undef ntohs
-#undef htonl
-#undef htons
+#include <asm/types.h>
 
-#ifndef __LITTLE_ENDIAN
-#define __LITTLE_ENDIAN
-#endif
+/* EGCS 1.1 can, without scheduling, do just as good as we do here
+   with the standard macros.  And since it can schedule, it does even
+   better in the end.  */
 
-#ifndef __LITTLE_ENDIAN_BITFIELD
-#define __LITTLE_ENDIAN_BITFIELD
-#endif
+#if defined(__GNUC__) && __GNUC_MINOR__ < 91
 
-extern unsigned long int	ntohl(unsigned long int);
-extern unsigned short int	ntohs(unsigned short int);
-extern unsigned long int	htonl(unsigned long int);
-extern unsigned short int	htons(unsigned short int);
-
-extern unsigned long int	__ntohl(unsigned long int);
-extern unsigned short int	__ntohs(unsigned short int);
-
-#ifdef __GNUC__
-
-extern unsigned long int	__constant_ntohl(unsigned long int);
-extern unsigned short int	__constant_ntohs(unsigned short int);
-
-/*
- * The constant and non-constant versions here are the same.
- * Maybe I'll come up with an alpha-optimized routine for the
- * non-constant ones (the constant ones don't need it: gcc
- * will optimize it to the correct constant)
- */
-
-extern __inline__ unsigned long int
-__ntohl(unsigned long int x)
+static __inline__ __const__ __u32 ___arch__swab32(__u32 x)
 {
-	unsigned long int res, t1, t2;
+	__u64 t1, t2, t3;
+
+	/* Break the final or's out of the block so that gcc can
+	   schedule them at will.  Further, use add not or so that
+	   we elide the sign extend gcc will put in because the
+	   return type is not a long.  */
 
 	__asm__(
-	"# bswap input: %0 (aabbccdd)\n\t"
-	"# output: %0, used %1 %2\n\t"
-	"extlh	%0,5,%1		# %1 = dd000000\n\t"
-	"zap	%0,0xfd,%2	# %2 = 0000cc00\n\t"
-	"sll	%2,5,%2		# %2 = 00198000\n\t"
-	"s8addq	%2,%1,%1	# %1 = ddcc0000\n\t"
-	"zap	%0,0xfb,%2	# %2 = 00bb0000\n\t"
-	"srl	%2,8,%2		# %2 = 0000bb00\n\t"
-	"extbl	%0,3,%0		# %0 = 000000aa\n\t"
-	"or	%1,%0,%0	# %0 = ddcc00aa\n\t"
-	"or	%2,%0,%0	# %0 = ddccbbaa\n"
-	: "r="(res), "r="(t1), "r="(t2)
-	: "0" (x & 0xffffffffUL));
-	return res;
+	"insbl	%3,3,%1		# %1 = dd000000\n\t"
+	"zapnot	%3,2,%2		# %2 = 0000cc00\n\t"
+	"sll	%2,8,%2		# %2 = 00cc0000\n\t"
+	"or	%2,%1,%1	# %1 = ddcc0000\n\t"
+	"zapnot	%3,4,%2		# %2 = 00bb0000\n\t"
+	"extbl	%3,3,%0		# %0 = 000000aa\n\t"
+	"srl	%2,8,%2		# %2 = 0000bb00"
+	: "=r"(t3), "=&r"(t1), "=&r"(t2)
+	: "r"(x));
+
+	return t3 + t2 + t1;
 }
 
-#define __constant_ntohl(x) \
-   ((unsigned long int)((((x) & 0x000000ffUL) << 24) | \
-			(((x) & 0x0000ff00UL) <<  8) | \
-			(((x) & 0x00ff0000UL) >>  8) | \
-			(((x) & 0xff000000UL) >> 24)))
-
-extern __inline__ unsigned short int
-__ntohs(unsigned short int x)
+static __inline__ __const__ __u16 ___arch__swab16(__u16 x)
 {
-	unsigned long int res, t1;
-	
+	__u64 t1, t2;
+
 	__asm__(
-	"# v0 is result; swap in-place.\n\t"
-	"bis	%2,%2,%0	# v0 = aabb\n\t"
-	"extwh	%0,7,%1		# t1 = bb00\n\t"
-	"extbl	%0,1,%0		# v0 = 00aa\n\t"
-	"bis	%0,%1,%0	# v0 = bbaa\n"
-	: "r="(res), "r="(t1) : "r"(x));
-	return res;
+	"insbl	%2,1,%1		# %1 = bb00\n\t"
+	"extbl	%2,1,%0		# %0 = 00aa"
+	: "=r"(t1), "=&r"(t2) : "r"(x));
+
+	return t1 | t2;
 }
 
-#define __constant_ntohs(x) \
-((unsigned short int)((((unsigned short int)(x) & 0x00ff) << 8) | \
-		      (((unsigned short int)(x) & 0xff00) >> 8)))
-
-#define __htonl(x) __ntohl(x)
-#define __htons(x) __ntohs(x)
-#define __constant_htonl(x) __constant_ntohl(x)
-#define __constant_htons(x) __constant_ntohs(x)
-
-#ifdef  __OPTIMIZE__
-#  define ntohl(x) \
-(__builtin_constant_p((long)(x)) ? \
- __constant_ntohl((x)) : \
- __ntohl((x)))
-#  define ntohs(x) \
-(__builtin_constant_p((short)(x)) ? \
- __constant_ntohs((x)) : \
- __ntohs((x)))
-#  define htonl(x) \
-(__builtin_constant_p((long)(x)) ? \
- __constant_htonl((x)) : \
- __htonl((x)))
-#  define htons(x) \
-(__builtin_constant_p((short)(x)) ? \
- __constant_htons((x)) : \
- __htons((x)))
-#endif /* __OPTIMIZE__ */
+#define __arch__swab32(x) ___arch__swab32(x)
+#define __arch__swab16(x) ___arch__swab16(x)
 
 #endif /* __GNUC__ */
+
+#define __BYTEORDER_HAS_U64__
+
+#include <linux/byteorder/little_endian.h>
 
 #endif /* _ALPHA_BYTEORDER_H */

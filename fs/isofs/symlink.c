@@ -1,7 +1,7 @@
 /*
  *  linux/fs/isofs/symlink.c
  *
- *  (C) 1992  Eric Youngdale Modified for ISO9660 filesystem.
+ *  (C) 1992  Eric Youngdale Modified for ISO 9660 filesystem.
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *
@@ -16,10 +16,10 @@
 #include <linux/stat.h>
 #include <linux/malloc.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-static int isofs_readlink(struct inode *, char *, int);
-static int isofs_follow_link(struct inode *, struct inode *, int, int, struct inode **);
+static int isofs_readlink(struct dentry *, char *, int);
+static struct dentry * isofs_follow_link(struct dentry *, struct dentry *, unsigned int);
 
 /*
  * symlinks can't do much...
@@ -44,65 +44,41 @@ struct inode_operations isofs_symlink_inode_operations = {
 	NULL			/* permission */
 };
 
-static int isofs_follow_link(struct inode * dir, struct inode * inode,
-	int flag, int mode, struct inode ** res_inode)
-{
-	int error;
-	char * pnt;
-
-	if (!dir) {
-		dir = current->fs->root;
-		dir->i_count++;
-	}
-	if (!inode) {
-		iput(dir);
-		*res_inode = NULL;
-		return -ENOENT;
-	}
-	if (!S_ISLNK(inode->i_mode)) {
-		iput(dir);
-		*res_inode = inode;
-		return 0;
-	}
-	if ((current->link_count > 5) ||
-	   !(pnt = get_rock_ridge_symlink(inode))) {
-		iput(dir);
-		iput(inode);
-		*res_inode = NULL;
-		return -ELOOP;
-	}
-	iput(inode);
-	current->link_count++;
-	error = open_namei(pnt,flag,mode,res_inode,dir);
-	current->link_count--;
-	kfree(pnt);
-	return error;
-}
-
-static int isofs_readlink(struct inode * inode, char * buffer, int buflen)
+static int isofs_readlink(struct dentry * dentry, char * buffer, int buflen)
 {
         char * pnt;
 	int i;
-	char c;
-
-	if (!S_ISLNK(inode->i_mode)) {
-		iput(inode);
-		return -EINVAL;
-	}
 
 	if (buflen > 1023)
 		buflen = 1023;
-	pnt = get_rock_ridge_symlink(inode);
+	pnt = get_rock_ridge_symlink(dentry->d_inode);
 
-	iput(inode);
 	if (!pnt)
 		return 0;
-	i = 0;
 
-	while (i<buflen && (c = pnt[i])) {
-		i++;
-		put_user(c,buffer++);
-	}
+	i = strlen(pnt);
+	if (i > buflen)
+		i = buflen; 
+	if (copy_to_user(buffer, pnt, i))
+		i = -EFAULT; 	
 	kfree(pnt);
 	return i;
+}
+
+static struct dentry * isofs_follow_link(struct dentry * dentry,
+					struct dentry *base,
+					unsigned int follow)
+{
+	char * pnt;
+
+	pnt = get_rock_ridge_symlink(dentry->d_inode);
+	if(!pnt) {
+		dput(base);
+		return ERR_PTR(-ELOOP);
+	}
+
+	base = lookup_dentry(pnt, base, follow);
+
+	kfree(pnt);
+	return base;
 }

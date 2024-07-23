@@ -4,20 +4,16 @@
  *	(C) Copyright 1996 Linus Torvalds
  */
 
-#include <linux/stat.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/shm.h>
-#include <linux/errno.h>
 #include <linux/mman.h>
-#include <linux/string.h>
-#include <linux/malloc.h>
 #include <linux/swap.h>
 
-#include <asm/segment.h>
-#include <asm/system.h>
+#include <asm/uaccess.h>
 #include <asm/pgtable.h>
+
+extern int vm_enough_memory(long pages);
 
 static inline pte_t *get_one_pte(struct mm_struct *mm, unsigned long addr)
 {
@@ -119,8 +115,8 @@ oops_we_failed:
 	flush_cache_range(mm, new_addr, new_addr + len);
 	while ((offset += PAGE_SIZE) < len)
 		move_one_page(mm, new_addr + offset, old_addr + offset);
-	flush_tlb_range(mm, new_addr, new_addr + len);
 	zap_page_range(mm, new_addr, new_addr + len);
+	flush_tlb_range(mm, new_addr, new_addr + len);
 	return -1;
 }
 
@@ -129,8 +125,7 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * new_vma;
 
-	new_vma = (struct vm_area_struct *)
-		kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	new_vma = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (new_vma) {
 		unsigned long new_addr = get_unmapped_area(addr, new_len);
 
@@ -139,16 +134,22 @@ static inline unsigned long move_vma(struct vm_area_struct * vma,
 			new_vma->vm_start = new_addr;
 			new_vma->vm_end = new_addr+new_len;
 			new_vma->vm_offset = vma->vm_offset + (addr - vma->vm_start);
-			if (new_vma->vm_inode)
-				new_vma->vm_inode->i_count++;
+			if (new_vma->vm_file)
+				new_vma->vm_file->f_count++;
 			if (new_vma->vm_ops && new_vma->vm_ops->open)
 				new_vma->vm_ops->open(new_vma);
 			insert_vm_struct(current->mm, new_vma);
 			merge_segments(current->mm, new_vma->vm_start, new_vma->vm_end);
 			do_munmap(addr, old_len);
+			current->mm->total_vm += new_len >> PAGE_SHIFT;
+			if (new_vma->vm_flags & VM_LOCKED) {
+				current->mm->locked_vm += new_len >> PAGE_SHIFT;
+				make_pages_present(new_vma->vm_start,
+						   new_vma->vm_end);
+			}
 			return new_addr;
 		}
-		kfree(new_vma);
+		kmem_cache_free(vm_area_cachep, new_vma);
 	}
 	return -ENOMEM;
 }
@@ -162,9 +163,12 @@ asmlinkage unsigned long sys_mremap(unsigned long addr,
 	unsigned long flags)
 {
 	struct vm_area_struct *vma;
+	unsigned long ret = -EINVAL;
 
+	down(&current->mm->mmap_sem);
+	lock_kernel();
 	if (addr & ~PAGE_MASK)
-		return -EINVAL;
+		goto out;
 	old_len = PAGE_ALIGN(old_len);
 	new_len = PAGE_ALIGN(new_len);
 
@@ -172,26 +176,38 @@ asmlinkage unsigned long sys_mremap(unsigned long addr,
 	 * Always allow a shrinking remap: that just unmaps
 	 * the unnecessary pages..
 	 */
-	if (old_len > new_len) {
+	ret = addr;
+	if (old_len >= new_len) {
 		do_munmap(addr+new_len, old_len - new_len);
-		return addr;
+		goto out;
 	}
 
 	/*
 	 * Ok, we need to grow..
 	 */
+	ret = -EFAULT;
 	vma = find_vma(current->mm, addr);
 	if (!vma || vma->vm_start > addr)
-		return -EFAULT;
+		goto out;
 	/* We can't remap across vm area boundaries */
 	if (old_len > vma->vm_end - addr)
-		return -EFAULT;
+		goto out;
 	if (vma->vm_flags & VM_LOCKED) {
 		unsigned long locked = current->mm->locked_vm << PAGE_SHIFT;
 		locked += new_len - old_len;
+		ret = -EAGAIN;
 		if (locked > current->rlim[RLIMIT_MEMLOCK].rlim_cur)
-			return -EAGAIN;
+			goto out;
 	}
+	ret = -ENOMEM;
+	if ((current->mm->total_vm << PAGE_SHIFT) + (new_len - old_len)
+	    > current->rlim[RLIMIT_AS].rlim_cur)
+		goto out;
+	/* Private writable mapping? Check memory availability.. */
+	if ((vma->vm_flags & (VM_SHARED | VM_WRITE)) == VM_WRITE &&
+	    !(flags & MAP_NORESERVE)				 &&
+	    !vm_enough_memory((new_len - old_len) >> PAGE_SHIFT))
+		goto out;
 
 	/* old_len exactly to the end of the area.. */
 	if (old_len == vma->vm_end - addr &&
@@ -204,9 +220,13 @@ asmlinkage unsigned long sys_mremap(unsigned long addr,
 			int pages = (new_len - old_len) >> PAGE_SHIFT;
 			vma->vm_end = addr + new_len;
 			current->mm->total_vm += pages;
-			if (vma->vm_flags & VM_LOCKED)
+			if (vma->vm_flags & VM_LOCKED) {
 				current->mm->locked_vm += pages;
-			return addr;
+				make_pages_present(addr + old_len,
+						   addr + new_len);
+			}
+			ret = addr;
+			goto out;
 		}
 	}
 
@@ -215,6 +235,11 @@ asmlinkage unsigned long sys_mremap(unsigned long addr,
 	 * we need to create a new one and move it..
 	 */
 	if (flags & MREMAP_MAYMOVE)
-		return move_vma(vma, addr, old_len, new_len);
-	return -ENOMEM;
+		ret = move_vma(vma, addr, old_len, new_len);
+	else
+		ret = -ENOMEM;
+out:
+	unlock_kernel();
+	up(&current->mm->mmap_sem);
+	return ret;
 }

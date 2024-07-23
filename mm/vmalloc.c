@@ -7,8 +7,7 @@
 #include <linux/malloc.h>
 #include <linux/vmalloc.h>
 
-#include <asm/segment.h>
-#include <asm/system.h>
+#include <asm/uaccess.h>
 
 static struct vm_struct * vmlist = NULL;
 
@@ -68,12 +67,12 @@ static inline void free_area_pmd(pgd_t * dir, unsigned long address, unsigned lo
 	}
 }
 
-static void free_area_pages(unsigned long address, unsigned long size)
+void vmfree_area_pages(unsigned long address, unsigned long size)
 {
 	pgd_t * dir;
 	unsigned long end = address + size;
 
-	dir = pgd_offset(&init_mm, address);
+	dir = pgd_offset_k(address);
 	flush_cache_all();
 	while (address < end) {
 		free_area_pmd(dir, address, end - address);
@@ -125,20 +124,24 @@ static inline int alloc_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 	return 0;
 }
 
-static int alloc_area_pages(unsigned long address, unsigned long size)
+int vmalloc_area_pages(unsigned long address, unsigned long size)
 {
 	pgd_t * dir;
 	unsigned long end = address + size;
 
-	dir = pgd_offset(&init_mm, address);
+	dir = pgd_offset_k(address);
 	flush_cache_all();
 	while (address < end) {
-		pmd_t *pmd = pmd_alloc_kernel(dir, address);
+		pmd_t *pmd;
+		pgd_t olddir = *dir;
+		
+		pmd = pmd_alloc_kernel(dir, address);
 		if (!pmd)
 			return -ENOMEM;
 		if (alloc_area_pmd(pmd, address, end - address))
 			return -ENOMEM;
-		set_pgdir(address, *dir);
+		if (pgd_val(olddir) != pgd_val(*dir))
+			set_pgdir(address, *dir);
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
 		dir++;
 	}
@@ -148,21 +151,22 @@ static int alloc_area_pages(unsigned long address, unsigned long size)
 
 struct vm_struct * get_vm_area(unsigned long size)
 {
-	void *addr;
+	unsigned long addr;
 	struct vm_struct **p, *tmp, *area;
 
 	area = (struct vm_struct *) kmalloc(sizeof(*area), GFP_KERNEL);
 	if (!area)
 		return NULL;
-	addr = (void *) VMALLOC_START;
-	area->size = size + PAGE_SIZE;
-	area->next = NULL;
+	addr = VMALLOC_START;
 	for (p = &vmlist; (tmp = *p) ; p = &tmp->next) {
-		if (size + (unsigned long) addr < (unsigned long) tmp->addr)
+		if (size + addr < (unsigned long) tmp->addr)
 			break;
-		addr = (void *) (tmp->size + (unsigned long) tmp->addr);
+		if (addr > VMALLOC_END-size)
+			return NULL;
+		addr = tmp->size + (unsigned long) tmp->addr;
 	}
-	area->addr = addr;
+	area->addr = (void *)addr;
+	area->size = size + PAGE_SIZE;
 	area->next = *p;
 	*p = area;
 	return area;
@@ -181,7 +185,7 @@ void vfree(void * addr)
 	for (p = &vmlist ; (tmp = *p) ; p = &tmp->next) {
 		if (tmp->addr == addr) {
 			*p = tmp->next;
-			free_area_pages(VMALLOC_VMADDR(tmp->addr), tmp->size);
+			vmfree_area_pages(VMALLOC_VMADDR(tmp->addr), tmp->size);
 			kfree(tmp);
 			return;
 		}
@@ -201,21 +205,27 @@ void * vmalloc(unsigned long size)
 	if (!area)
 		return NULL;
 	addr = area->addr;
-	if (alloc_area_pages(VMALLOC_VMADDR(addr), size)) {
+	if (vmalloc_area_pages(VMALLOC_VMADDR(addr), size)) {
 		vfree(addr);
 		return NULL;
 	}
 	return addr;
 }
 
-int vread(char *buf, char *addr, int count)
+long vread(char *buf, char *addr, unsigned long count)
 {
-	struct vm_struct **p, *tmp;
+	struct vm_struct *tmp;
 	char *vaddr, *buf_start = buf;
-	int n;
+	unsigned long n;
 
-	for (p = &vmlist; (tmp = *p) ; p = &tmp->next) {
+	/* Don't allow overflow */
+	if ((unsigned long) addr + count < count)
+		count = -(unsigned long) addr;
+
+	for (tmp = vmlist; tmp; tmp = tmp->next) {
 		vaddr = (char *) tmp->addr;
+		if (addr >= vaddr + tmp->size - PAGE_SIZE)
+			continue;
 		while (addr < vaddr) {
 			if (count == 0)
 				goto finished;
@@ -224,17 +234,15 @@ int vread(char *buf, char *addr, int count)
 			addr++;
 			count--;
 		}
-		n = tmp->size - PAGE_SIZE;
-		if (addr > vaddr)
-			n -= addr - vaddr;
-		while (--n >= 0) {
+		n = vaddr + tmp->size - PAGE_SIZE - addr;
+		do {
 			if (count == 0)
 				goto finished;
 			put_user(*addr, buf);
 			buf++;
 			addr++;
 			count--;
-		}
+		} while (--n > 0);
 	}
 finished:
 	return buf - buf_start;

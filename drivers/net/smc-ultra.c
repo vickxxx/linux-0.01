@@ -19,7 +19,7 @@
 	8390.c.  The code in this file is responsible for
 
 		ultra_probe()	 	Detecting and initializing the card.
-		ultra_probe1()	
+		ultra_probe1()
 
 		ultra_open()		The card-specific details of starting, stopping
 		ultra_reset_8390()	and resetting the 8390 NIC core.
@@ -53,6 +53,7 @@ static const char *version =
 #include <linux/sched.h>
 #include <linux/errno.h>
 #include <linux/string.h>
+#include <linux/init.h>
 #include <asm/io.h>
 #include <asm/system.h>
 
@@ -61,7 +62,7 @@ static const char *version =
 #include "8390.h"
 
 /* A zero-terminated list of I/O addresses to be probed. */
-static unsigned int ultra_portlist[] =
+static unsigned int ultra_portlist[] __initdata =
 {0x200, 0x220, 0x240, 0x280, 0x300, 0x340, 0x380, 0};
 
 int ultra_probe(struct device *dev);
@@ -69,18 +70,18 @@ int ultra_probe1(struct device *dev, int ioaddr);
 
 static int ultra_open(struct device *dev);
 static void ultra_reset_8390(struct device *dev);
-static void ultra_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, 
+static void ultra_get_8390_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
 						int ring_page);
 static void ultra_block_input(struct device *dev, int count,
 						  struct sk_buff *skb, int ring_offset);
 static void ultra_block_output(struct device *dev, int count,
-							const unsigned char *buf, const start_page);
-static void ultra_pio_get_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, 
+							const unsigned char *buf, int start_page);
+static void ultra_pio_get_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
 						int ring_page);
 static void ultra_pio_input(struct device *dev, int count,
 						  struct sk_buff *skb, int ring_offset);
 static void ultra_pio_output(struct device *dev, int count,
-							const unsigned char *buf, const start_page);
+							const unsigned char *buf, int start_page);
 static int ultra_close_card(struct device *dev);
 
 
@@ -104,7 +105,7 @@ struct netdev_entry ultra_drv =
 {"ultra", ultra_probe1, NETCARD_IO_EXTENT, netcard_portlist};
 #else
 
-int ultra_probe(struct device *dev)
+__initfunc(int ultra_probe(struct device *dev))
 {
 	int i;
 	int base_addr = dev ? dev->base_addr : 0;
@@ -126,7 +127,7 @@ int ultra_probe(struct device *dev)
 }
 #endif
 
-int ultra_probe1(struct device *dev, int ioaddr)
+__initfunc(int ultra_probe1(struct device *dev, int ioaddr))
 {
 	int i;
 	int checksum = 0;
@@ -150,6 +151,9 @@ int ultra_probe1(struct device *dev, int ioaddr)
 		checksum += inb(ioaddr + 8 + i);
 	if ((checksum & 0xff) != 0xFF)
 		return ENODEV;
+
+	if (load_8390_module("smc-ultra.c"))
+		return -ENOSYS;
 
 	/* We should have a "dev" from Space.c or the static module table. */
 	if (dev == NULL) {
@@ -201,7 +205,7 @@ int ultra_probe1(struct device *dev, int ioaddr)
 		printk (", no memory for dev->priv.\n");
                 return -ENOMEM;
         }
- 
+
 	/* OK, we are certain this is going to work.  Setup the device. */
 	request_region(ioaddr, ULTRA_IO_EXTENT, model_name);
 
@@ -252,7 +256,7 @@ ultra_open(struct device *dev)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
 
-	if (request_irq(dev->irq, ei_interrupt, 0, ei_status.name, NULL))
+	if (request_irq(dev->irq, ei_interrupt, 0, ei_status.name, dev))
 		return -EAGAIN;
 
 	outb(0x00, ioaddr);	/* Disable shared memory for safety. */
@@ -357,7 +361,7 @@ ultra_block_output(struct device *dev, int count, const unsigned char *buf,
    must be always be rewritten between each read/write direction change.
    This is no problem for us, as the 8390 code ensures that we are single
    threaded. */
-static void ultra_pio_get_hdr(struct device *dev, struct e8390_pkt_hdr *hdr, 
+static void ultra_pio_get_hdr(struct device *dev, struct e8390_pkt_hdr *hdr,
 						int ring_page)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
@@ -384,7 +388,7 @@ static void ultra_pio_input(struct device *dev, int count,
 }
 
 static void ultra_pio_output(struct device *dev, int count,
-							const unsigned char *buf, const start_page)
+							const unsigned char *buf, int start_page)
 {
 	int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET; /* ASIC addr */
 	outb(0x00, ioaddr + IOPA);	/* Set the address, LSB first. */
@@ -404,8 +408,7 @@ ultra_close_card(struct device *dev)
 		printk("%s: Shutting down ethercard.\n", dev->name);
 
 	outb(0x00, ioaddr + 6);		/* Disable interrupts. */
-	free_irq(dev->irq, NULL);
-	irq2dev_map[dev->irq] = 0;
+	free_irq(dev->irq, dev);
 
 	NS8390_init(dev, 0);
 
@@ -434,6 +437,9 @@ static struct device dev_ultra[MAX_ULTRA_CARDS] = {
 static int io[MAX_ULTRA_CARDS] = { 0, };
 static int irq[MAX_ULTRA_CARDS]  = { 0, };
 
+MODULE_PARM(io, "1-" __MODULE_STRING(MAX_ULTRA_CARDS) "i");
+MODULE_PARM(irq, "1-" __MODULE_STRING(MAX_ULTRA_CARDS) "i");
+
 /* This is set up so that only a single autoprobe takes place per call.
 ISA device autoprobes on a running machine are not recommended. */
 int
@@ -453,12 +459,15 @@ init_module(void)
 		}
 		if (register_netdev(dev) != 0) {
 			printk(KERN_WARNING "smc-ultra.c: No SMC Ultra card found (i/o = 0x%x).\n", io[this_dev]);
-			if (found != 0) return 0;	/* Got at least one. */
+			if (found != 0) {	/* Got at least one. */
+				lock_8390_module();
+				return 0;
+			}
 			return -ENXIO;
 		}
 		found++;
 	}
-
+	lock_8390_module();
 	return 0;
 }
 
@@ -470,14 +479,15 @@ cleanup_module(void)
 	for (this_dev = 0; this_dev < MAX_ULTRA_CARDS; this_dev++) {
 		struct device *dev = &dev_ultra[this_dev];
 		if (dev->priv != NULL) {
-			/* NB: ultra_close_card() does free_irq + irq2dev */
 			int ioaddr = dev->base_addr - ULTRA_NIC_OFFSET;
-			kfree(dev->priv);
-			dev->priv = NULL;
+			void *priv = dev->priv;
+			/* NB: ultra_close_card() does free_irq */
 			release_region(ioaddr, ULTRA_IO_EXTENT);
 			unregister_netdev(dev);
+			kfree(priv);
 		}
 	}
+	unlock_8390_module();
 }
 #endif /* MODULE */
 

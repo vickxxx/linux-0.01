@@ -4,14 +4,14 @@
  *  Copyright (C) 1995  Linus Torvalds
  */
 
-#include <linux/types.h>
-#include <linux/errno.h>
-#include <linux/stat.h>
-#include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/mm.h>
+#include <linux/errno.h>
+#include <linux/stat.h>
+#include <linux/file.h>
+#include <linux/smp_lock.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 /*
  * Traditional linux readdir() handling..
@@ -48,7 +48,7 @@ static int fillonedir(void * __buf, const char * name, int namlen, off_t offset,
 	put_user(ino, &dirent->d_ino);
 	put_user(offset, &dirent->d_offset);
 	put_user(namlen, &dirent->d_namlen);
-	memcpy_tofs(dirent->d_name, name, namlen);
+	copy_to_user(dirent->d_name, name, namlen);
 	put_user(0, dirent->d_name + namlen);
 	return 0;
 }
@@ -57,21 +57,47 @@ asmlinkage int old_readdir(unsigned int fd, void * dirent, unsigned int count)
 {
 	int error;
 	struct file * file;
+	struct dentry * dentry;
+	struct inode * inode;
 	struct readdir_callback buf;
 
-	if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-		return -EBADF;
-	if (!file->f_op || !file->f_op->readdir)
-		return -ENOTDIR;
-	error = verify_area(VERIFY_WRITE, dirent, sizeof(struct old_linux_dirent));
-	if (error)
-		return error;
+	lock_kernel();
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto out;
+
+	dentry = file->f_dentry;
+	if (!dentry)
+		goto out_putf;
+
+	inode = dentry->d_inode;
+	if (!inode)
+		goto out_putf;
+
 	buf.count = 0;
 	buf.dirent = dirent;
-	error = file->f_op->readdir(file->f_inode, file, &buf, fillonedir);
+
+	error = -ENOTDIR;
+	if (!file->f_op || !file->f_op->readdir)
+		goto out_putf;
+
+	/*
+	 * Get the inode's semaphore to prevent changes
+	 * to the directory while we read it.
+	 */
+	down(&inode->i_sem);
+	error = file->f_op->readdir(file, &buf, fillonedir);
+	up(&inode->i_sem);
 	if (error < 0)
-		return error;
-	return buf.count;
+		goto out_putf;
+	error = buf.count;
+
+out_putf:
+	fput(file);
+out:
+	unlock_kernel();
+	return error;
 }
 
 /*
@@ -108,7 +134,7 @@ static int filldir(void * __buf, const char * name, int namlen, off_t offset, in
 	buf->previous = dirent;
 	put_user(ino, &dirent->d_ino);
 	put_user(reclen, &dirent->d_reclen);
-	memcpy_tofs(dirent->d_name, name, namlen);
+	copy_to_user(dirent->d_name, name, namlen);
 	put_user(0, dirent->d_name + namlen);
 	((char *) dirent) += reclen;
 	buf->current_dir = dirent;
@@ -119,27 +145,54 @@ static int filldir(void * __buf, const char * name, int namlen, off_t offset, in
 asmlinkage int sys_getdents(unsigned int fd, void * dirent, unsigned int count)
 {
 	struct file * file;
+	struct dentry * dentry;
+	struct inode * inode;
 	struct linux_dirent * lastdirent;
 	struct getdents_callback buf;
 	int error;
 
-	if (fd >= NR_OPEN || !(file = current->files->fd[fd]))
-		return -EBADF;
-	if (!file->f_op || !file->f_op->readdir)
-		return -ENOTDIR;
-	error = verify_area(VERIFY_WRITE, dirent, count);
-	if (error)
-		return error;
+	lock_kernel();
+	error = -EBADF;
+	file = fget(fd);
+	if (!file)
+		goto out;
+
+	dentry = file->f_dentry;
+	if (!dentry)
+		goto out_putf;
+
+	inode = dentry->d_inode;
+	if (!inode)
+		goto out_putf;
+
 	buf.current_dir = (struct linux_dirent *) dirent;
 	buf.previous = NULL;
 	buf.count = count;
 	buf.error = 0;
-	error = file->f_op->readdir(file->f_inode, file, &buf, filldir);
+
+	error = -ENOTDIR;
+	if (!file->f_op || !file->f_op->readdir)
+		goto out_putf;
+
+	/*
+	 * Get the inode's semaphore to prevent changes
+	 * to the directory while we read it.
+	 */
+	down(&inode->i_sem);
+	error = file->f_op->readdir(file, &buf, filldir);
+	up(&inode->i_sem);
 	if (error < 0)
-		return error;
+		goto out_putf;
+	error = buf.error;
 	lastdirent = buf.previous;
-	if (!lastdirent)
-		return buf.error;
-	put_user(file->f_pos, &lastdirent->d_off);
-	return count - buf.count;
+	if (lastdirent) {
+		put_user(file->f_pos, &lastdirent->d_off);
+		error = count - buf.count;
+	}
+
+out_putf:
+	fput(file);
+out:
+	unlock_kernel();
+	return error;
 }

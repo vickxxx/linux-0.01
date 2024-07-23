@@ -8,6 +8,8 @@
  *	the older version didn't come out right using gcc 2.5.8, the newer one
  *	seems to fall out with gcc 2.6.2.
  *
+ *	Version: $Id: igmp.c,v 1.27 1998/08/26 12:03:39 davem Exp $
+ *
  *	Authors:
  *		Alan Cox <Alan.Cox@linux.org>
  *
@@ -61,175 +63,81 @@
  *					miscalculation fixed in igmp_heard_query
  *					and random() made to return unsigned to
  *					prevent negative expiry times.
+ *		Alexey Kuznetsov:	Wrong group leaving behaviour, backport
+ *					fix from pending 2.1.x patches.
+ *		Alan Cox:		Forget to enable FDDI support earlier.
+ *		Alexey Kuznetsov:	Fixed leaving groups on device down.
+ *		Alexey Kuznetsov:	Accordance to igmp-v2-06 draft.
  */
 
 
-#include <asm/segment.h>
+#include <linux/config.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/string.h>
-#include <linux/config.h>
 #include <linux/socket.h>
 #include <linux/sockios.h>
 #include <linux/in.h>
 #include <linux/inet.h>
 #include <linux/netdevice.h>
+#include <linux/skbuff.h>
+#include <linux/inetdevice.h>
+#include <linux/igmp.h>
 #include <linux/if_arp.h>
+#include <linux/rtnetlink.h>
 #include <net/ip.h>
 #include <net/protocol.h>
 #include <net/route.h>
-#include <linux/skbuff.h>
 #include <net/sock.h>
-#include <linux/igmp.h>
 #include <net/checksum.h>
+#ifdef CONFIG_IP_MROUTE
+#include <linux/mroute.h>
+#endif
+
 
 #ifdef CONFIG_IP_MULTICAST
 
+/* Parameter names and values are taken from igmp-v2-06 draft */
 
-/*
- *	If time expired, change the router type to IGMP_NEW_ROUTER.
+#define IGMP_V1_Router_Present_Timeout		(400*HZ)
+#define IGMP_Unsolicited_Report_Interval	(10*HZ)
+#define IGMP_Query_Response_Interval		(10*HZ)
+#define IGMP_Unsolicited_Report_Count		2
+
+
+#define IGMP_Initial_Report_Delay		(1*HZ)
+
+/* IGMP_Initial_Report_Delay is not from IGMP specs!
+ * IGMP specs require to report membership immediately after
+ * joining a group, but we delay the first report by a
+ * small interval. It seems more natural and still does not
+ * contradict to specs provided this delay is small enough.
  */
 
-static void ip_router_timer_expire(unsigned long data)
-{
-	struct ip_router_info *i=(struct ip_router_info *)data;
-
-	del_timer(&i->timer);
-	i->type=IGMP_NEW_ROUTER;	/* Revert to new multicast router */
-	i->time=0;
-}
-
-/*
- *	Multicast router info manager
- */
-
-struct	ip_router_info	*ip_router_info_head=(struct ip_router_info *)0;
-
-/*
- *	Get the multicast router info on that device
- */
-
-static	struct	ip_router_info	*igmp_get_mrouter_info(struct device *dev)
-{
-	register struct ip_router_info *i;
-
-	for(i=ip_router_info_head;i!=NULL;i=i->next)
-	{
-		if (i->dev == dev)
-		{
-			return i;
-		}
-	}
-
-	/*
-	 *  Not found. Create a new entry. The default is IGMP V2 router
-	 */
-	 
-	i=(struct ip_router_info *)kmalloc(sizeof(*i), GFP_ATOMIC);
-	if(i==NULL)
-		return NULL;
-	i->dev = dev;
-	i->type = IGMP_NEW_ROUTER;
-	i->time = IGMP_AGE_THRESHOLD;
-	i->next = ip_router_info_head;
-	ip_router_info_head = i;
-
-	init_timer(&i->timer);
-	i->timer.data=(unsigned long)i;
-	i->timer.function=&ip_router_timer_expire;
-
-	return i;
-}
-
-/*
- *	Set the multicast router info on that device
- */
-
-static	struct	ip_router_info	*igmp_set_mrouter_info(struct device *dev,int type,int time)
-{
-	register struct ip_router_info *i;
-
-	for(i=ip_router_info_head;i!=NULL;i=i->next)
-	{
-		if (i->dev == dev)
-		{
-			if(i->type==IGMP_OLD_ROUTER)
-			{
-				del_timer(&i->timer);
-			}
-
-			i->type = type;
-			i->time = time;
-
-			if(i->type==IGMP_OLD_ROUTER)
-			{
-				i->timer.expires=jiffies+i->time*HZ;
-				add_timer(&i->timer);
-			}
-			return i;
-		}
-	}
-
-	/*
-	 *  Not found. Create a new entry.
-	 */
-	i=(struct ip_router_info *)kmalloc(sizeof(*i), GFP_ATOMIC);
-	if(i==NULL)
-		return NULL;
-	i->dev = dev;
-	i->type = type;
-	i->time = time;
-	i->next = ip_router_info_head;
-	ip_router_info_head = i;
-
-	init_timer(&i->timer);
-	i->timer.data=(unsigned long)i;
-	i->timer.function=&ip_router_timer_expire;
-	if(i->type==IGMP_OLD_ROUTER)
-	{
-		i->timer.expires=jiffies+i->time*HZ;
-		add_timer(&i->timer);
-	}
-
-	return i;
-}
-
+#define IGMP_V1_SEEN(in_dev) ((in_dev)->mr_v1_seen && (long)(jiffies - (in_dev)->mr_v1_seen) < 0)
 
 /*
  *	Timer management
  */
 
-static void igmp_stop_timer(struct ip_mc_list *im)
+static __inline__ void igmp_stop_timer(struct ip_mc_list *im)
 {
-  if (im->tm_running) {
-    del_timer(&im->timer);
-    im->tm_running=0;
-  }
-  else {
-    printk(KERN_ERR "igmp_stop_timer() called with timer not running by %p\n",__builtin_return_address(0));
-  }
+	if (im->tm_running) {
+		del_timer(&im->timer);
+		im->tm_running=0;
+	}
 }
 
-extern __inline__ unsigned int random(void)
-{
-	static unsigned long seed=152L;
-	seed=seed*69069L+1;
-	return seed^jiffies;
-}
-
-/*
- *	Inlined as it's only called once.
- */
-
-static void igmp_start_timer(struct ip_mc_list *im,unsigned char max_resp_time)
+static __inline__ void igmp_start_timer(struct ip_mc_list *im, int max_delay)
 {
 	int tv;
-	if(im->tm_running)
+	if (im->tm_running)
 		return;
-	tv=random()%(max_resp_time*HZ/IGMP_TIMER_SCALE); /* Pick a number any number 8) */
-	im->timer.expires=jiffies+tv;
+	tv=net_random() % max_delay;
+	im->timer.expires=jiffies+tv+2;
 	im->tm_running=1;
 	add_timer(&im->timer);
 }
@@ -238,247 +146,265 @@ static void igmp_start_timer(struct ip_mc_list *im,unsigned char max_resp_time)
  *	Send an IGMP report.
  */
 
-#define MAX_IGMP_SIZE (sizeof(struct igmphdr)+sizeof(struct iphdr)+64)
+#define IGMP_SIZE (sizeof(struct igmphdr)+sizeof(struct iphdr)+4)
 
-static void igmp_send_report(struct device *dev, unsigned long address, int type)
+static int igmp_send_report(struct device *dev, u32 group, int type)
 {
-	struct sk_buff *skb=alloc_skb(MAX_IGMP_SIZE, GFP_ATOMIC);
-	int tmp;
+	struct sk_buff *skb;
+	struct iphdr *iph;
 	struct igmphdr *ih;
+	struct rtable *rt;
+	u32	dst;
 
-	if(skb==NULL)
-		return;
-	tmp=ip_build_header(skb, INADDR_ANY, address, &dev, IPPROTO_IGMP, NULL,
-				28 , 0, 1, NULL);
-	if(tmp<0)
-	{
-		kfree_skb(skb, FREE_WRITE);
-		return;
+	/* According to IGMPv2 specs, LEAVE messages are
+	 * sent to all-routers group.
+	 */
+	dst = group;
+	if (type == IGMP_HOST_LEAVE_MESSAGE)
+		dst = IGMP_ALL_ROUTER;
+
+	if (ip_route_output(&rt, dst, 0, 0, dev->ifindex))
+		return -1;
+	if (rt->rt_src == 0) {
+		ip_rt_put(rt);
+		return -1;
 	}
-	ih=(struct igmphdr *)skb_put(skb,sizeof(struct igmphdr));
+
+	skb=alloc_skb(IGMP_SIZE+dev->hard_header_len+15, GFP_ATOMIC);
+	if (skb == NULL) {
+		ip_rt_put(rt);
+		return -1;
+	}
+
+	skb->dst = &rt->u.dst;
+
+	skb_reserve(skb, (dev->hard_header_len+15)&~15);
+
+	skb->nh.iph = iph = (struct iphdr *)skb_put(skb, sizeof(struct iphdr)+4);
+
+	iph->version  = 4;
+	iph->ihl      = (sizeof(struct iphdr)+4)>>2;
+	iph->tos      = 0;
+	iph->frag_off = 0;
+	iph->ttl      = 1;
+	iph->daddr    = dst;
+	iph->saddr    = rt->rt_src;
+	iph->protocol = IPPROTO_IGMP;
+	iph->tot_len  = htons(IGMP_SIZE);
+	iph->id	      = htons(ip_id_count++);
+	((u8*)&iph[1])[0] = IPOPT_RA;
+	((u8*)&iph[1])[1] = 4;
+	((u8*)&iph[1])[2] = 0;
+	((u8*)&iph[1])[3] = 0;
+	ip_send_check(iph);
+
+	ih = (struct igmphdr *)skb_put(skb, sizeof(struct igmphdr));
 	ih->type=type;
 	ih->code=0;
 	ih->csum=0;
-	ih->group=address;
-	ih->csum=ip_compute_csum((void *)ih,sizeof(struct igmphdr));	/* Checksum fill */
-	ip_queue_xmit(NULL,dev,skb,1);
+	ih->group=group;
+	ih->csum=ip_compute_csum((void *)ih, sizeof(struct igmphdr));
+
+	return skb->dst->output(skb);
 }
 
 
 static void igmp_timer_expire(unsigned long data)
 {
 	struct ip_mc_list *im=(struct ip_mc_list *)data;
-	struct ip_router_info *r;
+	struct in_device *in_dev = im->interface;
+	int err;
 
 	im->tm_running=0;
-	r=igmp_get_mrouter_info(im->interface);
-	if(r==NULL)
+
+	if (IGMP_V1_SEEN(in_dev))
+		err = igmp_send_report(in_dev->dev, im->multiaddr, IGMP_HOST_MEMBERSHIP_REPORT);
+	else
+		err = igmp_send_report(in_dev->dev, im->multiaddr, IGMP_HOST_NEW_MEMBERSHIP_REPORT);
+
+	/* Failed. Retry later. */
+	if (err) {
+		igmp_start_timer(im, IGMP_Unsolicited_Report_Interval);
 		return;
-	if(r->type==IGMP_NEW_ROUTER)
-		igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_NEW_MEMBERSHIP_REPORT);
-	else
-		igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_MEMBERSHIP_REPORT);
+	}
+
+	if (im->unsolicit_count) {
+		im->unsolicit_count--;
+		igmp_start_timer(im, IGMP_Unsolicited_Report_Interval);
+	}
+	im->reporter = 1;
 }
 
-static void igmp_init_timer(struct ip_mc_list *im)
-{
-	im->tm_running=0;
-	init_timer(&im->timer);
-	im->timer.data=(unsigned long)im;
-	im->timer.function=&igmp_timer_expire;
-}
-
-
-static void igmp_heard_report(struct device *dev, unsigned long address)
+static void igmp_heard_report(struct in_device *in_dev, u32 group)
 {
 	struct ip_mc_list *im;
 
-	if ((address & IGMP_LOCAL_GROUP_MASK) != IGMP_LOCAL_GROUP) {
-	  /* Timers are only set for non-local groups */
-	  for(im=dev->ip_mc_list;im!=NULL;im=im->next) {
-	    if(im->multiaddr==address && im->tm_running) {
-	      igmp_stop_timer(im);
-	    }
-	  }
+	/* Timers are only set for non-local groups */
+
+	if (LOCAL_MCAST(group))
+		return;
+
+	for (im=in_dev->mc_list; im!=NULL; im=im->next) {
+		if (im->multiaddr == group) {
+			igmp_stop_timer(im);
+			im->reporter = 0;
+			im->unsolicit_count = 0;
+			return;
+		}
 	}
 }
 
-static void igmp_heard_query(struct device *dev,unsigned char max_resp_time)
+static void igmp_heard_query(struct in_device *in_dev, unsigned char max_resp_time,
+			     u32 group)
 {
-	struct ip_mc_list *im;
-	int	mrouter_type;
+	struct ip_mc_list	*im;
+	int			max_delay;
 
+	max_delay = max_resp_time*(HZ/IGMP_TIMER_SCALE);
+
+	if (max_resp_time == 0) {
+		/* Alas, old v1 router presents here. */
+
+		max_delay = IGMP_Query_Response_Interval;
+		in_dev->mr_v1_seen = jiffies + IGMP_V1_Router_Present_Timeout;
+		group = 0;
+	}
+		
 	/*
-	 *	The max_resp_time is in units of 1/10 second.
+	 * - Start the timers in all of our membership records
+	 *   that the query applies to for the interface on
+	 *   which the query arrived excl. those that belong
+	 *   to a "local" group (224.0.0.X)
+	 * - For timers already running check if they need to
+	 *   be reset.
+	 * - Use the igmp->igmp_code field as the maximum
+	 *   delay possible
 	 */
-	if(max_resp_time>0)
-	{
-		mrouter_type=IGMP_NEW_ROUTER;
-
-		if(igmp_set_mrouter_info(dev,mrouter_type,0)==NULL)
-			return;
-		/*
-		 * - Start the timers in all of our membership records
-		 *   that the query applies to for the interface on
-		 *   which the query arrived excl. those that belong
-		 *   to a "local" group (224.0.0.X)
-		 * - For timers already running check if they need to
-		 *   be reset.
-		 * - Use the igmp->igmp_code field as the maximum
-		 *   delay possible
-		 */
-		for(im=dev->ip_mc_list;im!=NULL;im=im->next)
-		{
-			if(im->tm_running)
-			{
-				if(im->timer.expires>jiffies+max_resp_time*HZ/IGMP_TIMER_SCALE)
-				{
-					igmp_stop_timer(im);
-					igmp_start_timer(im,max_resp_time);
-				}
-			}
-			else
-			{
-				if((im->multiaddr & IGMP_LOCAL_GROUP_MASK)!=IGMP_LOCAL_GROUP)
-					igmp_start_timer(im,max_resp_time);
-			}
-		}
-	}
-	else
-	{
-		mrouter_type=IGMP_OLD_ROUTER;
-		max_resp_time=IGMP_MAX_HOST_REPORT_DELAY*IGMP_TIMER_SCALE;
-
-		if(igmp_set_mrouter_info(dev,mrouter_type,IGMP_AGE_THRESHOLD)==NULL)
-			return;
-
-		/*
-		 * Start the timers in all of our membership records for
-		 * the interface on which the query arrived, except those
-		 * that are already running and those that belong to a
-		 * "local" group (224.0.0.X).
-		 */
-
-		for(im=dev->ip_mc_list;im!=NULL;im=im->next)
-		{
-			if(!im->tm_running && (im->multiaddr & IGMP_LOCAL_GROUP_MASK)!=IGMP_LOCAL_GROUP)
-				igmp_start_timer(im,max_resp_time);
-		}
+	for (im=in_dev->mc_list; im!=NULL; im=im->next) {
+		if (group && group != im->multiaddr)
+			continue;
+		if (LOCAL_MCAST(im->multiaddr))
+			continue;
+		im->unsolicit_count = 0;
+		if (im->tm_running && (long)(im->timer.expires-jiffies) > max_delay)
+			igmp_stop_timer(im);
+		igmp_start_timer(im, max_delay);
 	}
 }
 
-/*
- *	Map a multicast IP onto multicast MAC for type ethernet.
- */
-
-extern __inline__ void ip_mc_map(unsigned long addr, char *buf)
+int igmp_rcv(struct sk_buff *skb, unsigned short len)
 {
-	addr=ntohl(addr);
-	buf[0]=0x01;
-	buf[1]=0x00;
-	buf[2]=0x5e;
-	buf[5]=addr&0xFF;
-	addr>>=8;
-	buf[4]=addr&0xFF;
-	addr>>=8;
-	buf[3]=addr&0x7F;
+	/* This basically follows the spec line by line -- see RFC1112 */
+	struct igmphdr *ih = skb->h.igmph;
+	struct in_device *in_dev = skb->dev->ip_ptr;
+
+	if (len < sizeof(struct igmphdr) || ip_compute_csum((void *)ih, len)
+	    || in_dev==NULL) {
+		kfree_skb(skb);
+		return 0;
+	}
+	
+	switch (ih->type) {
+	case IGMP_HOST_MEMBERSHIP_QUERY:
+		igmp_heard_query(in_dev, ih->code, ih->group);
+		break;
+	case IGMP_HOST_MEMBERSHIP_REPORT:
+	case IGMP_HOST_NEW_MEMBERSHIP_REPORT:
+		/* Is it our report looped back? */
+		if (((struct rtable*)skb->dst)->key.iif == 0)
+			break;
+		igmp_heard_report(in_dev, ih->group);
+		break;
+	case IGMP_PIM:
+#ifdef CONFIG_IP_PIMSM_V1
+		return pim_rcv_v1(skb, len);
+#endif
+	case IGMP_DVMRP:
+	case IGMP_TRACE:
+	case IGMP_HOST_LEAVE_MESSAGE:
+	case IGMP_MTRACE:
+	case IGMP_MTRACE_RESP:
+		break;
+	default:
+		NETDEBUG(printk(KERN_DEBUG "New IGMP type=%d, why we do not know about it?\n", ih->type));
+	}
+	kfree_skb(skb);
+	return 0;
 }
+
+#endif
+
 
 /*
  *	Add a filter to a device
  */
 
-void ip_mc_filter_add(struct device *dev, unsigned long addr)
+static void ip_mc_filter_add(struct in_device *in_dev, u32 addr)
 {
-	char buf[6];
-	if(dev->type!=ARPHRD_ETHER)
-		return; /* Only do ethernet now */
-	ip_mc_map(addr,buf);
-	dev_mc_add(dev,buf,ETH_ALEN,0);
+	char buf[MAX_ADDR_LEN];
+	struct device *dev = in_dev->dev;
+
+	/* Checking for IFF_MULTICAST here is WRONG-WRONG-WRONG.
+	   We will get multicast token leakage, when IFF_MULTICAST
+	   is changed. This check should be done in dev->set_multicast_list
+	   routine. Something sort of:
+	   if (dev->mc_list && dev->flags&IFF_MULTICAST) { do it; }
+	   --ANK
+	 */
+	if (arp_mc_map(addr, buf, dev, 0) == 0)
+		dev_mc_add(dev,buf,dev->addr_len,0);
 }
 
 /*
  *	Remove a filter from a device
  */
 
-void ip_mc_filter_del(struct device *dev, unsigned long addr)
+static void ip_mc_filter_del(struct in_device *in_dev, u32 addr)
 {
-	char buf[6];
-	if(dev->type!=ARPHRD_ETHER)
-		return; /* Only do ethernet now */
-	ip_mc_map(addr,buf);
-	dev_mc_delete(dev,buf,ETH_ALEN,0);
+	char buf[MAX_ADDR_LEN];
+	struct device *dev = in_dev->dev;
+
+	if (arp_mc_map(addr, buf, dev, 0) == 0)
+		dev_mc_delete(dev,buf,dev->addr_len,0);
 }
 
-extern __inline__ void igmp_group_dropped(struct ip_mc_list *im)
+static void igmp_group_dropped(struct ip_mc_list *im)
 {
-	del_timer(&im->timer);
-	igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_LEAVE_MESSAGE);
-	ip_mc_filter_del(im->interface, im->multiaddr);
-}
+	if (im->loaded) {
+		im->loaded = 0;
+		ip_mc_filter_del(im->interface, im->multiaddr);
+	}
 
-extern __inline__ void igmp_group_added(struct ip_mc_list *im)
-{
-	struct ip_router_info *r;
-	igmp_init_timer(im);
-	ip_mc_filter_add(im->interface, im->multiaddr);
-	r=igmp_get_mrouter_info(im->interface);
-	if(r==NULL)
+#ifdef CONFIG_IP_MULTICAST
+	if (LOCAL_MCAST(im->multiaddr))
 		return;
-	if(r->type==IGMP_NEW_ROUTER)
-		igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_NEW_MEMBERSHIP_REPORT);
-	else
-		igmp_send_report(im->interface, im->multiaddr, IGMP_HOST_MEMBERSHIP_REPORT);
+
+	start_bh_atomic();
+	igmp_stop_timer(im);
+	end_bh_atomic();
+
+	if (im->reporter && !IGMP_V1_SEEN(im->interface))
+		igmp_send_report(im->interface->dev, im->multiaddr, IGMP_HOST_LEAVE_MESSAGE);
+#endif
 }
 
-int igmp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
-	__u32 daddr, unsigned short len, __u32 saddr, int redo,
-	struct inet_protocol *protocol)
+static void igmp_group_added(struct ip_mc_list *im)
 {
-	/* This basically follows the spec line by line -- see RFC1112 */
-	struct igmphdr *ih;
-
-	/*
-	 *	Mrouted needs to able to query local interfaces. So
-	 *	report for the device this was sent at. (Which can
-	 *	be the loopback this time)
-	 */
-
-	if(dev->flags&IFF_LOOPBACK)
-	{
-		dev=ip_dev_find(saddr);
-		if(dev==NULL)
-			dev=&loopback_dev;
-	}
-	ih=(struct igmphdr *)skb->h.raw;
-
-	if(skb->len <sizeof(struct igmphdr) || skb->ip_hdr->ttl<1 || ip_compute_csum((void *)skb->h.raw,sizeof(struct igmphdr)))
-	{
-		kfree_skb(skb, FREE_READ);
-		return 0;
-	}
-	
-	/*
-	 *	I have a report that someone does this!
-	 */
-	 
-	if(saddr==0)
-	{
-		printk(KERN_INFO "Broken multicast host using 0.0.0.0 heard on %s\n",
-			dev->name);
-		kfree_skb(skb, FREE_READ);
-		return 0;
+	if (im->loaded == 0) {
+		im->loaded = 1;
+		ip_mc_filter_add(im->interface, im->multiaddr);
 	}
 
-	if(ih->type==IGMP_HOST_MEMBERSHIP_QUERY && daddr==IGMP_ALL_HOSTS)
-		igmp_heard_query(dev,ih->code);
-	if(ih->type==IGMP_HOST_MEMBERSHIP_REPORT && daddr==ih->group)
-		igmp_heard_report(dev,ih->group);
-	if(ih->type==IGMP_HOST_NEW_MEMBERSHIP_REPORT && daddr==ih->group)
-		igmp_heard_report(dev,ih->group);
-	kfree_skb(skb, FREE_READ);
-	return 0;
+#ifdef CONFIG_IP_MULTICAST
+	if (LOCAL_MCAST(im->multiaddr))
+		return;
+
+	start_bh_atomic();
+	igmp_start_timer(im, IGMP_Initial_Report_Delay);
+	end_bh_atomic();
+#endif
 }
+
 
 /*
  *	Multicast list managers
@@ -489,144 +415,205 @@ int igmp_rcv(struct sk_buff *skb, struct device *dev, struct options *opt,
  *	A socket has joined a multicast group on device dev.
  */
 
-static void ip_mc_inc_group(struct device *dev, unsigned long addr)
+void ip_mc_inc_group(struct in_device *in_dev, u32 addr)
 {
-	struct ip_mc_list *i;
-	for(i=dev->ip_mc_list;i!=NULL;i=i->next)
-	{
-		if(i->multiaddr==addr)
-		{
+	struct ip_mc_list *i, *im;
+
+	im = (struct ip_mc_list *)kmalloc(sizeof(*im), GFP_KERNEL);
+
+	for (i=in_dev->mc_list; i; i=i->next) {
+		if (i->multiaddr == addr) {
 			i->users++;
+			if (im)
+				kfree(im);
 			return;
 		}
 	}
-	i=(struct ip_mc_list *)kmalloc(sizeof(*i), GFP_KERNEL);
-	if(!i)
+	if (!im)
 		return;
-	i->users=1;
-	i->interface=dev;
-	i->multiaddr=addr;
-	i->next=dev->ip_mc_list;
-	igmp_group_added(i);
-	dev->ip_mc_list=i;
+	im->users=1;
+	im->interface=in_dev;
+	im->multiaddr=addr;
+#ifdef  CONFIG_IP_MULTICAST
+	im->tm_running=0;
+	init_timer(&im->timer);
+	im->timer.data=(unsigned long)im;
+	im->timer.function=&igmp_timer_expire;
+	im->unsolicit_count = IGMP_Unsolicited_Report_Count;
+	im->reporter = 0;
+	im->loaded = 0;
+#endif
+	im->next=in_dev->mc_list;
+	in_dev->mc_list=im;
+	igmp_group_added(im);
+	if (in_dev->dev->flags & IFF_UP)
+		ip_rt_multicast_event(in_dev);
+	return;
 }
 
 /*
  *	A socket has left a multicast group on device dev
  */
 
-static void ip_mc_dec_group(struct device *dev, unsigned long addr)
+int ip_mc_dec_group(struct in_device *in_dev, u32 addr)
 {
-	struct ip_mc_list **i;
-	for(i=&(dev->ip_mc_list);(*i)!=NULL;i=&(*i)->next)
-	{
-		if((*i)->multiaddr==addr)
-		{
-			if(--((*i)->users) == 0)
-			{
-				struct ip_mc_list *tmp= *i;
-				igmp_group_dropped(tmp);
-				*i=(*i)->next;
-				kfree_s(tmp,sizeof(*tmp));
+	struct ip_mc_list *i, **ip;
+
+	for (ip=&in_dev->mc_list; (i=*ip)!=NULL; ip=&i->next) {
+		if (i->multiaddr==addr) {
+			if (--i->users == 0) {
+				*ip = i->next;
+				igmp_group_dropped(i);
+				if (in_dev->dev->flags & IFF_UP)
+					ip_rt_multicast_event(in_dev);
+				kfree_s(i, sizeof(*i));
 			}
-			return;
+			return 0;
 		}
 	}
+	return -ESRCH;
+}
+
+/* Device going down */
+
+void ip_mc_down(struct in_device *in_dev)
+{
+	struct ip_mc_list *i;
+
+	for (i=in_dev->mc_list; i; i=i->next)
+		igmp_group_dropped(i);
+
+	ip_mc_dec_group(in_dev, IGMP_ALL_HOSTS);
+}
+
+/* Device going up */
+
+void ip_mc_up(struct in_device *in_dev)
+{
+	struct ip_mc_list *i;
+
+	ip_mc_inc_group(in_dev, IGMP_ALL_HOSTS);
+
+	for (i=in_dev->mc_list; i; i=i->next)
+		igmp_group_added(i);
 }
 
 /*
- *	Device going down: Clean up.
+ *	Device is about to be destroyed: clean up.
  */
 
-void ip_mc_drop_device(struct device *dev)
+void ip_mc_destroy_dev(struct in_device *in_dev)
 {
 	struct ip_mc_list *i;
-	struct ip_mc_list *j;
-	for(i=dev->ip_mc_list;i!=NULL;i=j)
-	{
-		j=i->next;
-		kfree_s(i,sizeof(*i));
+
+	while ((i = in_dev->mc_list) != NULL) {
+		in_dev->mc_list = i->next;
+		igmp_group_dropped(i);
+		kfree_s(i, sizeof(*i));
 	}
-	dev->ip_mc_list=NULL;
 }
 
-/*
- *	Device going up. Make sure it is in all hosts
- */
-
-void ip_mc_allhost(struct device *dev)
+static struct in_device * ip_mc_find_dev(struct ip_mreqn *imr)
 {
-	struct ip_mc_list *i;
-	for(i=dev->ip_mc_list;i!=NULL;i=i->next)
-		if(i->multiaddr==IGMP_ALL_HOSTS)
-			return;
-	i=(struct ip_mc_list *)kmalloc(sizeof(*i), GFP_KERNEL);
-	if(!i)
-		return;
-	i->users=1;
-	i->interface=dev;
-	i->multiaddr=IGMP_ALL_HOSTS;
-	i->tm_running=0;
-	i->next=dev->ip_mc_list;
-	dev->ip_mc_list=i;
-	ip_mc_filter_add(i->interface, i->multiaddr);
+	struct rtable *rt;
+	struct device *dev = NULL;
 
+	if (imr->imr_address.s_addr) {
+		dev = ip_dev_find(imr->imr_address.s_addr);
+		if (!dev)
+			return NULL;
+	}
+
+	if (!dev && !ip_route_output(&rt, imr->imr_multiaddr.s_addr, 0, 0, 0)) {
+		dev = rt->u.dst.dev;
+		ip_rt_put(rt);
+	}
+	if (dev) {
+		imr->imr_ifindex = dev->ifindex;
+		return dev->ip_ptr;
+	}
+	return NULL;
 }
 
 /*
  *	Join a socket to a group
  */
 
-int ip_mc_join_group(struct sock *sk , struct device *dev, unsigned long addr)
+int ip_mc_join_group(struct sock *sk , struct ip_mreqn *imr)
 {
-	int unused= -1;
-	int i;
-	if(!MULTICAST(addr))
+	int err;
+	u32 addr = imr->imr_multiaddr.s_addr;
+	struct ip_mc_socklist *iml, *i;
+	struct in_device *in_dev;
+	int count = 0;
+
+	if (!MULTICAST(addr))
 		return -EINVAL;
-	if(!(dev->flags&IFF_MULTICAST))
-		return -EADDRNOTAVAIL;
-	if(sk->ip_mc_list==NULL)
-	{
-		if((sk->ip_mc_list=(struct ip_mc_socklist *)kmalloc(sizeof(*sk->ip_mc_list), GFP_KERNEL))==NULL)
-			return -ENOMEM;
-		memset(sk->ip_mc_list,'\0',sizeof(*sk->ip_mc_list));
-	}
-	for(i=0;i<IP_MAX_MEMBERSHIPS;i++)
-	{
-		if(sk->ip_mc_list->multiaddr[i]==addr && sk->ip_mc_list->multidev[i]==dev)
-			return -EADDRINUSE;
-		if(sk->ip_mc_list->multidev[i]==NULL)
-			unused=i;
+
+	rtnl_shlock();
+
+	if (!imr->imr_ifindex)
+		in_dev = ip_mc_find_dev(imr);
+	else
+		in_dev = inetdev_by_index(imr->imr_ifindex);
+
+	if (!in_dev) {
+		iml = NULL;
+		err = -ENODEV;
+		goto done;
 	}
 
-	if(unused==-1)
-		return -ENOBUFS;
-	sk->ip_mc_list->multiaddr[unused]=addr;
-	sk->ip_mc_list->multidev[unused]=dev;
-	ip_mc_inc_group(dev,addr);
-	return 0;
+	iml = (struct ip_mc_socklist *)sock_kmalloc(sk, sizeof(*iml), GFP_KERNEL);
+
+	err = -EADDRINUSE;
+	for (i=sk->ip_mc_list; i; i=i->next) {
+		if (memcmp(&i->multi, imr, sizeof(*imr)) == 0) {
+			/* New style additions are reference counted */
+			if (imr->imr_address.s_addr == 0) {
+				i->count++;
+				err = 0;
+			}
+			goto done;
+		}
+		count++;
+	}
+	err = -ENOBUFS;
+	if (iml == NULL || count >= IP_MAX_MEMBERSHIPS)
+		goto done;
+	memcpy(&iml->multi, imr, sizeof(*imr));
+	iml->next = sk->ip_mc_list;
+	iml->count = 1;
+	sk->ip_mc_list = iml;
+	ip_mc_inc_group(in_dev, addr);
+	iml = NULL;
+	err = 0;
+done:
+	rtnl_shunlock();
+	if (iml)
+		sock_kfree_s(sk, iml, sizeof(*iml));
+	return err;
 }
 
 /*
  *	Ask a socket to leave a group.
  */
 
-int ip_mc_leave_group(struct sock *sk, struct device *dev, unsigned long addr)
+int ip_mc_leave_group(struct sock *sk, struct ip_mreqn *imr)
 {
-	int i;
-	if(!MULTICAST(addr))
-		return -EINVAL;
-	if(!(dev->flags&IFF_MULTICAST))
-		return -EADDRNOTAVAIL;
-	if(sk->ip_mc_list==NULL)
-		return -EADDRNOTAVAIL;
+	struct ip_mc_socklist *iml, **imlp;
 
-	for(i=0;i<IP_MAX_MEMBERSHIPS;i++)
-	{
-		if(sk->ip_mc_list->multiaddr[i]==addr && sk->ip_mc_list->multidev[i]==dev)
-		{
-			sk->ip_mc_list->multidev[i]=NULL;
-			ip_mc_dec_group(dev,addr);
+	for (imlp=&sk->ip_mc_list; (iml=*imlp)!=NULL; imlp=&iml->next) {
+		if (iml->multi.imr_multiaddr.s_addr==imr->imr_multiaddr.s_addr &&
+		    iml->multi.imr_address.s_addr==imr->imr_address.s_addr &&
+		    (!imr->imr_ifindex || iml->multi.imr_ifindex==imr->imr_ifindex)) {
+			struct in_device *in_dev;
+			if (--iml->count)
+				return 0;
+			*imlp = iml->next;
+			in_dev = inetdev_by_index(iml->multi.imr_ifindex);
+			if (in_dev)
+				ip_mc_dec_group(in_dev, imr->imr_multiaddr.s_addr);
+			sock_kfree_s(sk, iml, sizeof(*iml));
 			return 0;
 		}
 	}
@@ -639,21 +626,64 @@ int ip_mc_leave_group(struct sock *sk, struct device *dev, unsigned long addr)
 
 void ip_mc_drop_socket(struct sock *sk)
 {
-	int i;
+	struct ip_mc_socklist *iml;
 
-	if(sk->ip_mc_list==NULL)
-		return;
-
-	for(i=0;i<IP_MAX_MEMBERSHIPS;i++)
-	{
-		if(sk->ip_mc_list->multidev[i])
-		{
-			ip_mc_dec_group(sk->ip_mc_list->multidev[i], sk->ip_mc_list->multiaddr[i]);
-			sk->ip_mc_list->multidev[i]=NULL;
-		}
+	while ((iml=sk->ip_mc_list) != NULL) {
+		struct in_device *in_dev;
+		sk->ip_mc_list = iml->next;
+		if ((in_dev = inetdev_by_index(iml->multi.imr_ifindex)) != NULL)
+			ip_mc_dec_group(in_dev, iml->multi.imr_multiaddr.s_addr);
+		sock_kfree_s(sk, iml, sizeof(*iml));
 	}
-	kfree_s(sk->ip_mc_list,sizeof(*sk->ip_mc_list));
-	sk->ip_mc_list=NULL;
 }
 
+
+#ifdef CONFIG_IP_MULTICAST
+ 
+int ip_mc_procinfo(char *buffer, char **start, off_t offset, int length, int dummy)
+{
+	off_t pos=0, begin=0;
+	struct ip_mc_list *im;
+	int len=0;
+	struct device *dev;
+	
+	len=sprintf(buffer,"Idx\tDevice    : Count Querier\tGroup    Users Timer\tReporter\n");  
+	
+	for(dev = dev_base; dev; dev = dev->next)
+	{
+		struct in_device *in_dev = dev->ip_ptr;
+		char   *querier = "NONE";
+		
+		if (in_dev == NULL)
+			continue;
+
+		querier = IGMP_V1_SEEN(in_dev) ? "V1" : "V2";
+
+		len+=sprintf(buffer+len,"%d\t%-10s: %5d %7s\n",
+			     dev->ifindex, dev->name, dev->mc_count, querier);
+
+		for (im = in_dev->mc_list; im; im = im->next) {
+			len+=sprintf(buffer+len,
+				     "\t\t\t\t%08lX %5d %d:%08lX\t\t%d\n",
+				     im->multiaddr, im->users,
+				     im->tm_running, im->timer.expires-jiffies, im->reporter);
+
+			pos=begin+len;
+			if(pos<offset)
+			{
+				len=0;
+				begin=pos;
+			}
+			if(pos>offset+length)
+				goto done;
+		}
+	}
+done:
+	*start=buffer+(offset-begin);
+	len-=(offset-begin);
+	if(len>length)
+		len=length;
+	return len;
+}
 #endif
+

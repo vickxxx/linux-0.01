@@ -7,21 +7,36 @@
 #include <linux/linkage.h>
 
 /*
- * "down_failed" is called with the eventual return address
- * in %eax, and the address of the semaphore in %ecx. We need
- * to increment the number of waiters on the semaphore,
- * call "__down()", and then eventually return to try again.
+ * The semaphore operations have a special calling sequence that
+ * allow us to do a simpler in-line version of them. These routines
+ * need to convert that sequence back into the C sequence when
+ * there is contention on the semaphore.
  */
-ENTRY(down_failed)
-	pushl %eax
-	pushl %ecx
+ENTRY(__down_failed)
+	pushl %eax	/* save %eax */
+	pushl %edx	/* save %edx */
+	pushl %ecx	/* save %ecx (and argument) */
 	call SYMBOL_NAME(__down)
-	popl %ecx
+	popl %ecx	/* restore %ecx (count on __down not changing it) */
+	popl %edx	/* restore %edx */
+	popl %eax	/* restore %eax */
 	ret
 
-ENTRY(up_wakeup)
-	pushl %eax
-	pushl %ecx
+/* Don't save/restore %eax, because that will be our return value */
+ENTRY(__down_failed_interruptible)
+	pushl %edx	/* save %edx */
+	pushl %ecx	/* save %ecx (and argument) */
+	call SYMBOL_NAME(__down_interruptible)
+	popl %ecx	/* restore %ecx (count on __down_interruptible not changing it) */
+	popl %edx	/* restore %edx */
+	ret
+
+ENTRY(__up_wakeup)
+	pushl %eax	/* save %eax */
+	pushl %edx	/* save %edx */
+	pushl %ecx	/* save %ecx (and argument) */
 	call SYMBOL_NAME(__up)
-	popl %ecx
+	popl %ecx	/* restore %ecx (count on __up not changing it) */
+	popl %edx	/* restore %edx */
+	popl %eax	/* restore %eax */
 	ret

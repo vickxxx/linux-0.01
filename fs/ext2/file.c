@@ -13,9 +13,12 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  *
  *  ext2 fs regular file handling primitives
+ *
+ *  64-bit file support on 64-bit platforms by Jakub Jelinek
+ * 	(jj@sunsite.ms.mff.cuni.cz)
  */
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 
 #include <linux/errno.h>
@@ -33,25 +36,45 @@
 #define MIN(a,b) (((a)<(b))?(a):(b))
 #define MAX(a,b) (((a)>(b))?(a):(b))
 
-#include <linux/fs.h>
-#include <linux/ext2_fs.h>
+static long long ext2_file_lseek(struct file *, long long, int);
+static ssize_t ext2_file_write (struct file *, const char *, size_t, loff_t *);
+static int ext2_release_file (struct inode *, struct file *);
+#if BITS_PER_LONG < 64
+static int ext2_open_file (struct inode *, struct file *);
 
-static long ext2_file_write (struct inode *, struct file *, const char *, unsigned long);
-static void ext2_release_file (struct inode *, struct file *);
+#else
+
+#define EXT2_MAX_SIZE(bits)							\
+	(((EXT2_NDIR_BLOCKS + (1LL << (bits - 2)) + 				\
+	   (1LL << (bits - 2)) * (1LL << (bits - 2)) + 				\
+	   (1LL << (bits - 2)) * (1LL << (bits - 2)) * (1LL << (bits - 2))) * 	\
+	  (1LL << bits)) - 1)
+
+static long long ext2_max_sizes[] = {
+0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 
+EXT2_MAX_SIZE(10), EXT2_MAX_SIZE(11), EXT2_MAX_SIZE(12), EXT2_MAX_SIZE(13)
+};
+
+#endif
 
 /*
  * We have mostly NULL's here: the current defaults are ok for
  * the ext2 filesystem.
  */
 static struct file_operations ext2_file_operations = {
-	NULL,			/* lseek - default */
+	ext2_file_lseek,	/* lseek */
 	generic_file_read,	/* read */
 	ext2_file_write,	/* write */
 	NULL,			/* readdir - bad */
-	NULL,			/* select - default */
+	NULL,			/* poll - default */
 	ext2_ioctl,		/* ioctl */
 	generic_file_mmap,	/* mmap */
+#if BITS_PER_LONG == 64	
 	NULL,			/* no special open is needed */
+#else
+	ext2_open_file,
+#endif
+	NULL,			/* flush */
 	ext2_release_file,	/* release */
 	ext2_sync_file,		/* fsync */
 	NULL,			/* fasync */
@@ -80,12 +103,59 @@ struct inode_operations ext2_file_inode_operations = {
 	NULL			/* smap */
 };
 
-static long ext2_file_write (struct inode * inode, struct file * filp,
-			    const char * buf, unsigned long count)
+/*
+ * Make sure the offset never goes beyond the 32-bit mark..
+ */
+static long long ext2_file_lseek(
+	struct file *file,
+	long long offset,
+	int origin)
 {
-	const loff_t two_gb = 2147483647;
-	loff_t pos;
-	off_t pos2;
+	struct inode *inode = file->f_dentry->d_inode;
+
+	switch (origin) {
+		case 2:
+			offset += inode->i_size;
+			break;
+		case 1:
+			offset += file->f_pos;
+	}
+	if (((unsigned long long) offset >> 32) != 0) {
+#if BITS_PER_LONG < 64
+		return -EINVAL;
+#else
+		if (offset > ext2_max_sizes[EXT2_BLOCK_SIZE_BITS(inode->i_sb)])
+			return -EINVAL;
+#endif
+	} 
+	if (offset != file->f_pos) {
+		file->f_pos = offset;
+		file->f_reada = 0;
+		file->f_version = ++event;
+	}
+	return offset;
+}
+
+static inline void remove_suid(struct inode *inode)
+{
+	unsigned int mode;
+
+	/* set S_IGID if S_IXGRP is set, and always set S_ISUID */
+	mode = (inode->i_mode & S_IXGRP)*(S_ISGID/S_IXGRP) | S_ISUID;
+
+	/* was any of the uid bits set? */
+	mode &= inode->i_mode;
+	if (mode && !capable(CAP_FSETID)) {
+		inode->i_mode &= ~mode;
+		mark_inode_dirty(inode);
+	}
+}
+
+static ssize_t ext2_file_write (struct file * filp, const char * buf,
+				size_t count, loff_t *ppos)
+{
+	struct inode * inode = filp->f_dentry->d_inode;
+	off_t pos;
 	long block;
 	int offset;
 	int written, c;
@@ -94,6 +164,9 @@ static long ext2_file_write (struct inode * inode, struct file * filp,
 	int err;
 	int i,buffercount,write_error;
 
+	/* POSIX: mtime/ctime may not change for 0 count */
+	if (!count)
+		return 0;
 	write_error = buffercount = 0;
 	if (!inode) {
 		printk("ext2_file_write: inode = NULL\n");
@@ -111,11 +184,48 @@ static long ext2_file_write (struct inode * inode, struct file * filp,
 			      inode->i_mode);
 		return -EINVAL;
 	}
+	remove_suid(inode);
+
 	if (filp->f_flags & O_APPEND)
 		pos = inode->i_size;
-	else
-		pos = filp->f_pos;
-	pos2 = (off_t) pos;
+	else {
+		pos = *ppos;
+		if (pos != *ppos)
+			return -EINVAL;
+#if BITS_PER_LONG >= 64
+		if (pos > ext2_max_sizes[EXT2_BLOCK_SIZE_BITS(sb)])
+			return -EINVAL;
+#endif
+	}
+
+	/* Check for overflow.. */
+#if BITS_PER_LONG < 64
+	if (pos > (__u32) (pos + count)) {
+		count = ~pos; /* == 0xFFFFFFFF - pos */
+		if (!count)
+			return -EFBIG;
+	}
+#else
+	{
+		off_t max = ext2_max_sizes[EXT2_BLOCK_SIZE_BITS(sb)];
+
+		if (pos + count > max) {
+			count = max - pos;
+			if (!count)
+				return -EFBIG;
+		}
+		if (((pos + count) >> 32) && 
+		    !(sb->u.ext2_sb.s_es->s_feature_ro_compat &
+		      cpu_to_le32(EXT2_FEATURE_RO_COMPAT_LARGE_FILE))) {
+			/* If this is the first large file created, add a flag
+			   to the superblock */
+			sb->u.ext2_sb.s_es->s_feature_ro_compat |=
+				cpu_to_le32(EXT2_FEATURE_RO_COMPAT_LARGE_FILE);
+			mark_buffer_dirty(sb->u.ext2_sb.s_sbh, 1);
+		}
+	}
+#endif
+
 	/*
 	 * If a file has been opened in synchronous mode, we have to ensure
 	 * that meta-data will also be written synchronously.  Thus, we
@@ -124,16 +234,11 @@ static long ext2_file_write (struct inode * inode, struct file * filp,
 	 */
 	if (filp->f_flags & O_SYNC)
 		inode->u.ext2_i.i_osync++;
-	block = pos2 >> EXT2_BLOCK_SIZE_BITS(sb);
-	offset = pos2 & (sb->s_blocksize - 1);
+	block = pos >> EXT2_BLOCK_SIZE_BITS(sb);
+	offset = pos & (sb->s_blocksize - 1);
 	c = sb->s_blocksize - offset;
 	written = 0;
-	while (count > 0) {
-		if (pos > two_gb) {
-			if (!written)
-				written = -EFBIG;
-			break;
-		}
+	do {
 		bh = ext2_getblk (inode, block, 1, &err);
 		if (!bh) {
 			if (!written)
@@ -142,7 +247,6 @@ static long ext2_file_write (struct inode * inode, struct file * filp,
 		}
 		if (c > count)
 			c = count;
-		count -= c;
 		if (c != sb->s_blocksize && !buffer_uptodate(bh)) {
 			ll_rw_block (READ, 1, &bh);
 			wait_on_buffer (bh);
@@ -153,14 +257,21 @@ static long ext2_file_write (struct inode * inode, struct file * filp,
 				break;
 			}
 		}
-		memcpy_fromfs (bh->b_data + offset, buf, c);
+		c -= copy_from_user (bh->b_data + offset, buf, c);
+		if (!c) {
+			brelse(bh);
+			if (!written)
+				written = -EFAULT;
+			break;
+		}
 		update_vm_cache(inode, pos, bh->b_data + offset, c);
-		pos2 += c;
 		pos += c;
 		written += c;
 		buf += c;
+		count -= c;
 		mark_buffer_uptodate(bh, 1);
 		mark_buffer_dirty(bh, 0);
+
 		if (filp->f_flags & O_SYNC)
 			bufferlist[buffercount++] = bh;
 		else
@@ -180,7 +291,7 @@ static long ext2_file_write (struct inode * inode, struct file * filp,
 		block++;
 		offset = 0;
 		c = sb->s_blocksize;
-	}
+	} while (count);
 	if ( buffercount ){
 		ll_rw_block(WRITE, buffercount, bufferlist);
 		for(i=0; i<buffercount; i++){
@@ -195,18 +306,32 @@ static long ext2_file_write (struct inode * inode, struct file * filp,
 	if (filp->f_flags & O_SYNC)
 		inode->u.ext2_i.i_osync--;
 	inode->i_ctime = inode->i_mtime = CURRENT_TIME;
-	filp->f_pos = pos;
-	inode->i_dirt = 1;
+	*ppos = pos;
+	mark_inode_dirty(inode);
 	return written;
 }
 
 /*
- * Called when a inode is released. Note that this is different
- * from ext2_open: open gets called at every open, but release
+ * Called when an inode is released. Note that this is different
+ * from ext2_file_open: open gets called at every open, but release
  * gets called only when /all/ the files are closed.
  */
-static void ext2_release_file (struct inode * inode, struct file * filp)
+static int ext2_release_file (struct inode * inode, struct file * filp)
 {
-	if (filp->f_mode & 2)
+	if (filp->f_mode & FMODE_WRITE)
 		ext2_discard_prealloc (inode);
+	return 0;
 }
+
+#if BITS_PER_LONG < 64
+/*
+ * Called when an inode is about to be open.
+ * We use this to disallow opening RW large files on 32bit systems.
+ */
+static int ext2_open_file (struct inode * inode, struct file * filp)
+{
+	if (inode->u.ext2_i.i_high_size && (filp->f_mode & FMODE_WRITE))
+		return -EFBIG;
+	return 0;
+}
+#endif

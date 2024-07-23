@@ -2,7 +2,7 @@
 #define _AHA152X_H
 
 /*
- * $Id: aha152x.h,v 1.18 1996/09/07 20:10:26 fischer Exp $
+ * $Id: aha152x.h,v 1.7 1997/01/19 23:07:11 davem Exp $
  */
 
 #if defined(__KERNEL__)
@@ -15,6 +15,7 @@ int aha152x_detect(Scsi_Host_Template *);
 int aha152x_command(Scsi_Cmnd *);
 int aha152x_queue(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
 int aha152x_abort(Scsi_Cmnd *);
+int aha152x_release(struct Scsi_Host *shpnt);
 int aha152x_reset(Scsi_Cmnd *, unsigned int);
 int aha152x_biosparam(Disk *, kdev_t, int*);
 int aha152x_proc_info(char *buffer, char **start, off_t offset, int length, int hostno, int inout);
@@ -23,32 +24,29 @@ int aha152x_proc_info(char *buffer, char **start, off_t offset, int length, int 
    (unless we support more than 1 cmd_per_lun this should do) */
 #define AHA152X_MAXQUEUE 7
 
-#define AHA152X_REVID "Adaptec 152x SCSI driver; $Revision: 1.18 $"
+#define AHA152X_REVID "Adaptec 152x SCSI driver; $Revision: 1.7 $"
 
 extern struct proc_dir_entry proc_scsi_aha152x;
 
 /* Initial value of Scsi_Host entry */
-#define AHA152X { /* next */               0, \
-                  /* usage_count */        0, \
-                  /* proc_dir */           &proc_scsi_aha152x, \
-                  /* proc_info */          aha152x_proc_info, \
-                  /* name */               AHA152X_REVID, \
-                  /* detect */             aha152x_detect, \
-                  /* release */            0, \
-                  /* info */               0, \
-                  /* command */		       aha152x_command, \
-                  /* queuecommand */       aha152x_queue, \
-                  /* abort */              aha152x_abort, \
-                  /* reset */              aha152x_reset, \
-                  /* slave_attach */       0, \
-                  /* bios_param */         aha152x_biosparam, \
-                  /* can_queue */          1, \
-                  /* this_id */            7, \
-                  /* sg_tablesize */       SG_ALL, \
-                  /* cmd_per_lun */        1, \
-                  /* present */            0, \
-                  /* unchecked_isa_dma */  0, \
-                  /* use_clustering */     DISABLE_CLUSTERING }
+#define AHA152X { proc_dir:           &proc_scsi_aha152x, \
+                  proc_info:          aha152x_proc_info,  \
+                  name:               AHA152X_REVID,	  \
+                  detect:             aha152x_detect,	  \
+                  command:	      aha152x_command,	  \
+                  queuecommand:       aha152x_queue,	  \
+                  abort:              aha152x_abort,	  \
+                  reset:              aha152x_reset,	  \
+                  release:            aha152x_release,	  \
+                  slave_attach:       0,		  \
+                  bios_param:         aha152x_biosparam,  \
+                  can_queue:          1,		  \
+                  this_id:            7,		  \
+                  sg_tablesize:       SG_ALL,		  \
+                  cmd_per_lun:        1,		  \
+                  present:            0,		  \
+                  unchecked_isa_dma:  0,		  \
+                  use_clustering:     DISABLE_CLUSTERING }
 #endif
 
 

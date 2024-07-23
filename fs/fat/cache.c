@@ -9,9 +9,15 @@
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/stat.h>
+#include <linux/fat_cvf.h>
 
 #include "msbuffer.h"
 
+#if 0
+#  define PRINTK(x) printk x
+#else
+#  define PRINTK(x)
+#endif
 
 static struct fat_cache *fat_cache,cache[FAT_CACHE];
 
@@ -22,11 +28,17 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 {
 	struct buffer_head *bh,*bh2,*c_bh,*c_bh2;
 	unsigned char *p_first,*p_last;
-	int first,last,next,copy,b;
+	int copy,first,last,next,b;
+
+	if (MSDOS_SB(sb)->cvf_format &&
+	    MSDOS_SB(sb)->cvf_format->fat_access)
+		return MSDOS_SB(sb)->cvf_format->fat_access(sb,nr,new_value);
 
 	if ((unsigned) (nr-2) >= MSDOS_SB(sb)->clusters)
 		return 0;
-	if (MSDOS_SB(sb)->fat_bits == 16) {
+	if (MSDOS_SB(sb)->fat_bits == 32) {
+		first = last = nr*4;
+	} else if (MSDOS_SB(sb)->fat_bits == 16) {
 		first = last = nr*2;
 	} else {
 		first = nr*3/2;
@@ -46,13 +58,19 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 			return 0;
 		}
 	}
-	if (MSDOS_SB(sb)->fat_bits == 16) {
+	if (MSDOS_SB(sb)->fat_bits == 32) {
+		p_first = p_last = NULL; /* GCC needs that stuff */
+		next = CF_LE_L(((unsigned long *) bh->b_data)[(first &
+		    (SECTOR_SIZE-1)) >> 2]);
+		if (next >= 0xffffff7) next = -1;
+		PRINTK(("fat_bread: 0x%x, nr=0x%x, first=0x%x, next=0x%d\n", b, nr, first, next));
+
+	} else if (MSDOS_SB(sb)->fat_bits == 16) {
 		p_first = p_last = NULL; /* GCC needs that stuff */
 		next = CF_LE_W(((unsigned short *) bh->b_data)[(first &
 		    (SECTOR_SIZE-1)) >> 1]);
 		if (next >= 0xfff7) next = -1;
-	}
-	else {
+	} else {
 		p_first = &((unsigned char *) bh->b_data)[first & (SECTOR_SIZE-1)];
 		p_last = &((unsigned char *) bh2->b_data)[(first+1) &
 		    (SECTOR_SIZE-1)];
@@ -61,10 +79,13 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 		if (next >= 0xff7) next = -1;
 	}
 	if (new_value != -1) {
-		if (MSDOS_SB(sb)->fat_bits == 16)
+		if (MSDOS_SB(sb)->fat_bits == 32) {
+			((unsigned long *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
+			    2] = CT_LE_L(new_value);
+		} else if (MSDOS_SB(sb)->fat_bits == 16) {
 			((unsigned short *) bh->b_data)[(first & (SECTOR_SIZE-1)) >>
 			    1] = CT_LE_W(new_value);
-		else {
+		} else {
 			if (nr & 1) {
 				*p_first = (*p_first & 0xf) | (new_value << 4);
 				*p_last = new_value >> 4;
@@ -101,7 +122,7 @@ int fat_access(struct super_block *sb,int nr,int new_value)
 }
 
 
-void cache_init(void)
+void fat_cache_init(void)
 {
 	static int initialized = 0;
 	int count;
@@ -117,7 +138,7 @@ void cache_init(void)
 }
 
 
-void cache_lookup(struct inode *inode,int cluster,int *f_clu,int *d_clu)
+void fat_cache_lookup(struct inode *inode,int cluster,int *f_clu,int *d_clu)
 {
 	struct fat_cache *walk;
 
@@ -158,7 +179,7 @@ static void list_cache(void)
 #endif
 
 
-void cache_add(struct inode *inode,int f_clu,int d_clu)
+void fat_cache_add(struct inode *inode,int f_clu,int d_clu)
 {
 	struct fat_cache *walk,*last;
 
@@ -172,7 +193,8 @@ printk("cache add: <%s,%d> %d (%d)\n", kdevname(inode->i_dev),
 		    && walk->ino == inode->i_ino
 		    && walk->file_cluster == f_clu) {
 			if (walk->disk_cluster != d_clu) {
-				printk("FAT cache corruption");
+				printk("FAT cache corruption inode=%ld\n",
+					inode->i_ino);
 				fat_cache_inval_inode(inode);
 				return;
 			}
@@ -223,22 +245,21 @@ void fat_cache_inval_dev(kdev_t device)
 }
 
 
-int get_cluster(struct inode *inode,int cluster)
+int fat_get_cluster(struct inode *inode,int cluster)
 {
 	int nr,count;
 
 	if (!(nr = MSDOS_I(inode)->i_start)) return 0;
 	if (!cluster) return nr;
 	count = 0;
-	for (cache_lookup(inode,cluster,&count,&nr); count < cluster;
+	for (fat_cache_lookup(inode,cluster,&count,&nr); count < cluster;
 	    count++) {
 		if ((nr = fat_access(inode->i_sb,nr,-1)) == -1) return 0;
 		if (!nr) return 0;
 	}
-	cache_add(inode,cluster,nr);
+	fat_cache_add(inode,cluster,nr);
 	return nr;
 }
-
 
 int fat_smap(struct inode *inode,int sector)
 {
@@ -246,14 +267,18 @@ int fat_smap(struct inode *inode,int sector)
 	int cluster,offset;
 
 	sb = MSDOS_SB(inode->i_sb);
-	if (inode->i_ino == MSDOS_ROOT_INO || (S_ISDIR(inode->i_mode) &&
-	    !MSDOS_I(inode)->i_start)) {
-		if (sector >= sb->dir_entries >> MSDOS_DPS_BITS) return 0;
+	if (sb->cvf_format && sb->cvf_format->cvf_smap)
+		return sb->cvf_format->cvf_smap(inode,sector);
+	if ((sb->fat_bits != 32) &&
+	    (inode->i_ino == MSDOS_ROOT_INO || (S_ISDIR(inode->i_mode) &&
+	     !MSDOS_I(inode)->i_start))) {
+		if (sector >= sb->dir_entries >> MSDOS_DPS_BITS)
+			return 0;
 		return sector+sb->dir_start;
 	}
 	cluster = sector/sb->cluster_size;
 	offset = sector % sb->cluster_size;
-	if (!(cluster = get_cluster(inode,cluster))) return 0;
+	if (!(cluster = fat_get_cluster(inode,cluster))) return 0;
 	return (cluster-2)*sb->cluster_size+sb->data_start+offset;
 }
 
@@ -276,11 +301,11 @@ int fat_free(struct inode *inode,int skip)
 		}
 	}
 	if (last)
-		fat_access(inode->i_sb,last,MSDOS_SB(inode->i_sb)->fat_bits ==
-		    12 ? 0xff8 : 0xfff8);
+		fat_access(inode->i_sb,last,EOF_FAT(inode->i_sb));
 	else {
 		MSDOS_I(inode)->i_start = 0;
-		inode->i_dirt = 1;
+		MSDOS_I(inode)->i_logstart = 0;
+		mark_inode_dirty(inode);
 	}
 	lock_fat(inode->i_sb);
 	while (nr != -1) {
@@ -288,8 +313,12 @@ int fat_free(struct inode *inode,int skip)
 			fat_fs_panic(inode->i_sb,"fat_free: deleting beyond EOF");
 			break;
 		}
-		if (MSDOS_SB(inode->i_sb)->free_clusters != -1)
+		if (MSDOS_SB(inode->i_sb)->free_clusters != -1) {
 			MSDOS_SB(inode->i_sb)->free_clusters++;
+			if (MSDOS_SB(inode->i_sb)->fat_bits == 32) {
+				fat_clusters_flush(inode->i_sb);
+			}
+		}
 		inode->i_blocks -= MSDOS_SB(inode->i_sb)->cluster_size;
 	}
 	unlock_fat(inode->i_sb);

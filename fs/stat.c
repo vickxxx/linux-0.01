@@ -4,28 +4,43 @@
  *  Copyright (C) 1991, 1992  Linus Torvalds
  */
 
-#include <linux/errno.h>
-#include <linux/string.h>
-#include <linux/stat.h>
-#include <linux/fs.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/errno.h>
+#include <linux/file.h>
+#include <linux/smp_lock.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-#ifndef __alpha__
+/*
+ * Revalidate the inode. This is required for proper NFS attribute caching.
+ */
+static __inline__ int
+do_revalidate(struct dentry *dentry)
+{
+	struct inode * inode = dentry->d_inode;
+	if (inode->i_op && inode->i_op->revalidate)
+		return inode->i_op->revalidate(dentry);
+	return 0;
+}
+
+
+#if !defined(__alpha__) && !defined(__sparc__)
 
 /*
  * For backward compatibility?  Maybe this should be moved
  * into arch/i386 instead?
  */
-static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
+static int cp_old_stat(struct inode * inode, struct __old_kernel_stat * statbuf)
 {
-	struct old_stat tmp;
+	static int warncount = 5;
+	struct __old_kernel_stat tmp;
 
-	printk("VFS: Warning: %s using old stat() call. Recompile your binary.\n",
-		current->comm);
+	if (warncount) {
+		warncount--;
+		printk("VFS: Warning: %s using old stat() call. Recompile your binary.\n",
+			current->comm);
+	}
+
 	tmp.st_dev = kdev_t_to_nr(inode->i_dev);
 	tmp.st_ino = inode->i_ino;
 	tmp.st_mode = inode->i_mode;
@@ -34,19 +49,17 @@ static void cp_old_stat(struct inode * inode, struct old_stat * statbuf)
 	tmp.st_gid = inode->i_gid;
 	tmp.st_rdev = kdev_t_to_nr(inode->i_rdev);
 	tmp.st_size = inode->i_size;
-	if (inode->i_pipe)
-		tmp.st_size = PIPE_SIZE(*inode);
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
-	memcpy_tofs(statbuf,&tmp,sizeof(tmp));
+	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
 #endif
 
-static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
+static int cp_new_stat(struct inode * inode, struct stat * statbuf)
 {
-	struct new_stat tmp;
+	struct stat tmp;
 	unsigned int blocks, indirect;
 
 	memset(&tmp, 0, sizeof(tmp));
@@ -58,8 +71,6 @@ static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 	tmp.st_gid = inode->i_gid;
 	tmp.st_rdev = kdev_t_to_nr(inode->i_rdev);
 	tmp.st_size = inode->i_size;
-	if (inode->i_pipe)
-		tmp.st_size = PIPE_SIZE(*inode);
 	tmp.st_atime = inode->i_atime;
 	tmp.st_mtime = inode->i_mtime;
 	tmp.st_ctime = inode->i_ctime;
@@ -75,7 +86,7 @@ static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 /*
  * Use minix fs values for the number of direct and indirect blocks.  The
  * count is now exact for the minix fs except that it counts zero blocks.
- * Everything is in BLOCK_SIZE'd units until the assignment to
+ * Everything is in units of BLOCK_SIZE until the assignment to
  * tmp.st_blksize.
  */
 #define D_B   7
@@ -99,141 +110,173 @@ static void cp_new_stat(struct inode * inode, struct new_stat * statbuf)
 		tmp.st_blocks = inode->i_blocks;
 		tmp.st_blksize = inode->i_blksize;
 	}
-	memcpy_tofs(statbuf,&tmp,sizeof(tmp));
+	return copy_to_user(statbuf,&tmp,sizeof(tmp)) ? -EFAULT : 0;
 }
 
-#ifndef __alpha__
+
+#if !defined(__alpha__) && !defined(__sparc__)
 /*
  * For backward compatibility?  Maybe this should be moved
  * into arch/i386 instead?
  */
-asmlinkage int sys_stat(char * filename, struct old_stat * statbuf)
+asmlinkage int sys_stat(char * filename, struct __old_kernel_stat * statbuf)
 {
-	struct inode * inode;
+	struct dentry * dentry;
 	int error;
 
-	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
-	if (error)
-		return error;
-	error = namei(filename,&inode);
-	if (error)
-		return error;
-	cp_old_stat(inode,statbuf);
-	iput(inode);
-	return 0;
+	lock_kernel();
+	dentry = namei(filename);
+
+	error = PTR_ERR(dentry);
+	if (!IS_ERR(dentry)) {
+		error = do_revalidate(dentry);
+		if (!error)
+			error = cp_old_stat(dentry->d_inode, statbuf);
+
+		dput(dentry);
+	}
+	unlock_kernel();
+	return error;
 }
 #endif
 
-asmlinkage int sys_newstat(char * filename, struct new_stat * statbuf)
+asmlinkage int sys_newstat(char * filename, struct stat * statbuf)
 {
-	struct inode * inode;
+	struct dentry * dentry;
 	int error;
 
-	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
-	if (error)
-		return error;
-	error = namei(filename,&inode);
-	if (error)
-		return error;
-	cp_new_stat(inode,statbuf);
-	iput(inode);
-	return 0;
+	lock_kernel();
+	dentry = namei(filename);
+
+	error = PTR_ERR(dentry);
+	if (!IS_ERR(dentry)) {
+		error = do_revalidate(dentry);
+		if (!error)
+			error = cp_new_stat(dentry->d_inode, statbuf);
+
+		dput(dentry);
+	}
+	unlock_kernel();
+	return error;
 }
 
-#ifndef __alpha__
+#if !defined(__alpha__) && !defined(__sparc__)
 
 /*
  * For backward compatibility?  Maybe this should be moved
  * into arch/i386 instead?
  */
-asmlinkage int sys_lstat(char * filename, struct old_stat * statbuf)
+asmlinkage int sys_lstat(char * filename, struct __old_kernel_stat * statbuf)
 {
-	struct inode * inode;
+	struct dentry * dentry;
 	int error;
 
-	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
-	if (error)
-		return error;
-	error = lnamei(filename,&inode);
-	if (error)
-		return error;
-	cp_old_stat(inode,statbuf);
-	iput(inode);
-	return 0;
+	lock_kernel();
+	dentry = lnamei(filename);
+
+	error = PTR_ERR(dentry);
+	if (!IS_ERR(dentry)) {
+		error = do_revalidate(dentry);
+		if (!error)
+			error = cp_old_stat(dentry->d_inode, statbuf);
+
+		dput(dentry);
+	}
+	unlock_kernel();
+	return error;
 }
 
 #endif
 
-asmlinkage int sys_newlstat(char * filename, struct new_stat * statbuf)
+asmlinkage int sys_newlstat(char * filename, struct stat * statbuf)
 {
-	struct inode * inode;
+	struct dentry * dentry;
 	int error;
 
-	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
-	if (error)
-		return error;
-	error = lnamei(filename,&inode);
-	if (error)
-		return error;
-	cp_new_stat(inode,statbuf);
-	iput(inode);
-	return 0;
+	lock_kernel();
+	dentry = lnamei(filename);
+
+	error = PTR_ERR(dentry);
+	if (!IS_ERR(dentry)) {
+		error = do_revalidate(dentry);
+		if (!error)
+			error = cp_new_stat(dentry->d_inode, statbuf);
+
+		dput(dentry);
+	}
+	unlock_kernel();
+	return error;
 }
 
-#ifndef __alpha__
+#if !defined(__alpha__) && !defined(__sparc__)
 
 /*
  * For backward compatibility?  Maybe this should be moved
  * into arch/i386 instead?
  */
-asmlinkage int sys_fstat(unsigned int fd, struct old_stat * statbuf)
+asmlinkage int sys_fstat(unsigned int fd, struct __old_kernel_stat * statbuf)
 {
 	struct file * f;
-	struct inode * inode;
-	int error;
+	int err = -EBADF;
 
-	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
-	if (error)
-		return error;
-	if (fd >= NR_OPEN || !(f=current->files->fd[fd]) || !(inode=f->f_inode))
-		return -EBADF;
-	cp_old_stat(inode,statbuf);
-	return 0;
+	lock_kernel();
+	f = fget(fd);
+	if (f) {
+		struct dentry * dentry = f->f_dentry;
+
+		err = do_revalidate(dentry);
+		if (!err)
+			err = cp_old_stat(dentry->d_inode, statbuf);
+		fput(f);
+	}
+	unlock_kernel();
+	return err;
 }
 
 #endif
 
-asmlinkage int sys_newfstat(unsigned int fd, struct new_stat * statbuf)
+asmlinkage int sys_newfstat(unsigned int fd, struct stat * statbuf)
 {
 	struct file * f;
-	struct inode * inode;
-	int error;
+	int err = -EBADF;
 
-	error = verify_area(VERIFY_WRITE,statbuf,sizeof (*statbuf));
-	if (error)
-		return error;
-	if (fd >= NR_OPEN || !(f=current->files->fd[fd]) || !(inode=f->f_inode))
-		return -EBADF;
-	cp_new_stat(inode,statbuf);
-	return 0;
+	lock_kernel();
+	f = fget(fd);
+	if (f) {
+		struct dentry * dentry = f->f_dentry;
+
+		err = do_revalidate(dentry);
+		if (!err)
+			err = cp_new_stat(dentry->d_inode, statbuf);
+		fput(f);
+	}
+	unlock_kernel();
+	return err;
 }
 
 asmlinkage int sys_readlink(const char * path, char * buf, int bufsiz)
 {
-	struct inode * inode;
+	struct dentry * dentry;
 	int error;
 
 	if (bufsiz <= 0)
 		return -EINVAL;
-	error = verify_area(VERIFY_WRITE,buf,bufsiz);
-	if (error)
-		return error;
-	error = lnamei(path,&inode);
-	if (error)
-		return error;
-	if (!inode->i_op || !inode->i_op->readlink) {
-		iput(inode);
-		return -EINVAL;
+
+	lock_kernel();
+	dentry = lnamei(path);
+
+	error = PTR_ERR(dentry);
+	if (!IS_ERR(dentry)) {
+		struct inode * inode = dentry->d_inode;
+
+		error = -EINVAL;
+		if (inode->i_op && inode->i_op->readlink &&
+		    !(error = do_revalidate(dentry))) {
+			UPDATE_ATIME(inode);
+			error = inode->i_op->readlink(dentry, buf, bufsiz);
+		}
+		dput(dentry);
 	}
-	return inode->i_op->readlink(inode,buf,bufsiz);
+	unlock_kernel();
+	return error;
 }

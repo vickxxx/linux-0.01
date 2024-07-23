@@ -24,7 +24,7 @@
 
 /*
  * Truncate has the most races in the whole filesystem: coding it is
- * a pain in the a**. Especially as I don't do any locking...
+ * a pain in the a**, especially as I don't do any locking.
  *
  * The code may look a bit weird, but that's just because I've tried to
  * handle things like file-size changes in a somewhat graceful manner.
@@ -41,8 +41,8 @@ static int trunc_direct(struct inode * inode)
 {
 	struct super_block * sb;
 	unsigned int i;
-	unsigned long * p;
-	unsigned long block;
+	u32 * p;
+	u32 block;
 	struct buffer_head * bh;
 	int retry = 0;
 
@@ -64,14 +64,14 @@ repeat:
 			continue;
 		}
 		*p = 0;
-		inode->i_dirt = 1;
+		mark_inode_dirty(inode);
 		brelse(bh);
 		sysv_free_block(sb,block);
 	}
 	return retry;
 }
 
-static int trunc_indirect(struct inode * inode, unsigned long offset, unsigned long * p, int convert, unsigned char * dirt)
+static int trunc_indirect(struct inode * inode, unsigned long offset, sysv_zone_t * p, int convert, unsigned char * dirt)
 {
 	unsigned long indtmp, indblock;
 	struct super_block * sb;
@@ -140,14 +140,14 @@ done:
 	return retry;
 }
 
-static int trunc_dindirect(struct inode * inode, unsigned long offset, unsigned long * p, int convert, unsigned char * dirt)
+static int trunc_dindirect(struct inode * inode, unsigned long offset, sysv_zone_t * p, int convert, unsigned char * dirt)
 {
-	unsigned long indtmp, indblock;
+	u32 indtmp, indblock;
 	struct super_block * sb;
 	struct buffer_head * indbh;
 	unsigned int i;
 	sysv_zone_t * ind;
-	unsigned long tmp, block;
+	u32 tmp, block;
 	int retry = 0;
 
 	indblock = indtmp = *p;
@@ -197,14 +197,14 @@ done:
 	return retry;
 }
 
-static int trunc_tindirect(struct inode * inode, unsigned long offset, unsigned long * p, int convert, unsigned char * dirt)
+static int trunc_tindirect(struct inode * inode, unsigned long offset, sysv_zone_t * p, int convert, unsigned char * dirt)
 {
-	unsigned long indtmp, indblock;
+	u32 indtmp, indblock;
 	struct super_block * sb;
 	struct buffer_head * indbh;
 	unsigned int i;
 	sysv_zone_t * ind;
-	unsigned long tmp, block;
+	u32 tmp, block;
 	int retry = 0;
 
 	indblock = indtmp = *p;
@@ -257,12 +257,13 @@ done:
 static int trunc_all(struct inode * inode)
 {
 	struct super_block * sb;
+	char dirty;
 
 	sb = inode->i_sb;
 	return trunc_direct(inode)
-	     | trunc_indirect(inode,sb->sv_ind0_size,&inode->u.sysv_i.i_data[10],0,&inode->i_dirt)
-	     | trunc_dindirect(inode,sb->sv_ind1_size,&inode->u.sysv_i.i_data[11],0,&inode->i_dirt)
-	     | trunc_tindirect(inode,sb->sv_ind2_size,&inode->u.sysv_i.i_data[12],0,&inode->i_dirt);
+	     | trunc_indirect(inode,sb->sv_ind0_size,&inode->u.sysv_i.i_data[10],0,&dirty)
+	     | trunc_dindirect(inode,sb->sv_ind1_size,&inode->u.sysv_i.i_data[11],0,&dirty)
+	     | trunc_tindirect(inode,sb->sv_ind2_size,&inode->u.sysv_i.i_data[12],0,&dirty);
 }
 
 
@@ -285,5 +286,5 @@ void sysv_truncate(struct inode * inode)
 		schedule();
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	inode->i_dirt = 1;
+	mark_inode_dirty(inode);
 }

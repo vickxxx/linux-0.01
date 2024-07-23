@@ -8,6 +8,11 @@
 # Note 2! The CFLAGS definition is now in the main makefile...
 
 O_TARGET := mm.o
-O_OBJS	 := fault.o init.o
+O_OBJS	 := extable.o init.o fault.o r4xx0.o r2300.o r6000.o tfp.o \
+            andes.o loadmmu.o
+
+ifdef CONFIG_SGI
+O_OBJS   += umap.o
+endif
 
 include $(TOPDIR)/Rules.make

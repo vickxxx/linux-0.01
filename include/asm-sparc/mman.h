@@ -1,4 +1,4 @@
-/* $Id: mman.h,v 1.7 1996/04/25 06:13:15 davem Exp $ */
+/* $Id: mman.h,v 1.8 1996/10/27 08:55:28 davem Exp $ */
 #ifndef __SPARC_MMAN_H__
 #define __SPARC_MMAN_H__
 
@@ -22,7 +22,7 @@
 
 #define MAP_GROWSDOWN	0x0100		/* stack-like segment */
 #define MAP_DENYWRITE	0x0800		/* ETXTBSY */
-#define MAP_EXECUTABLE	0x1000		/* mark it as a executable */
+#define MAP_EXECUTABLE	0x1000		/* mark it as an executable */
 
 #define MS_ASYNC	1		/* sync memory asynchronously */
 #define MS_INVALIDATE	2		/* invalidate the caches */

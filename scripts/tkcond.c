@@ -96,12 +96,12 @@ static void free_condition(struct condition * cnd)
  * Walk all of the conditions, and look for choice values.  Convert
  * the tokens into something more digestible.
  */
-void fix_choice_cond()
+void fix_choice_cond(void)
 {
   struct condition * cond;
   struct condition * cond2;
   struct kconfig * cfg;
-  char tmpbuf[10];
+  char tmpbuf[255];
 
   for(cfg = config;cfg != NULL; cfg = cfg->next)
     {
@@ -195,6 +195,7 @@ struct condition * get_token_cond(struct condition ** cond, int depth)
 		      if( cfg->tok != tok_bool
 		         && cfg->tok != tok_int
 		         && cfg->tok != tok_hex
+		         && cfg->tok != tok_string
 			 && cfg->tok != tok_tristate 
 			 && cfg->tok != tok_choice
 			 && cfg->tok != tok_dep_tristate)
@@ -358,8 +359,8 @@ void fix_conditionals(struct kconfig * scfg)
 	case tok_tristate:
 	case tok_int:
 	case tok_hex:
+	case tok_string:
 	case tok_choice:
-	case tok_make:
 	  /*
 	   * We need to duplicate the chain of conditions and attach them to
 	   * this token.
@@ -402,6 +403,7 @@ void fix_conditionals(struct kconfig * scfg)
 	case tok_dep_tristate:
 	case tok_int:
 	case tok_hex:
+	case tok_string:
 	  for(cfg1=cfg;cfg1 != NULL; cfg1 = cfg1->next)
 	    {
 	      switch(cfg1->tok)
@@ -412,6 +414,7 @@ void fix_conditionals(struct kconfig * scfg)
 		case tok_dep_tristate:
 		case tok_int:
 		case tok_hex:
+		case tok_string:
 		  if( strcmp(cfg->optionname, cfg1->optionname) == 0)
 		    {
 		      cfg->flags |= CFG_DUP;

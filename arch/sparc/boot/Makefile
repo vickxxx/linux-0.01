@@ -1,21 +1,42 @@
-# $Id: Makefile,v 1.2 1995/11/25 00:57:37 davem Exp $
-# Makefile for the Sparc low level /boot module.
+# $Id: Makefile,v 1.9 1998/10/26 20:01:03 davem Exp $
+# Makefile for the Sparc boot stuff.
 #
 # Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+# Copyright (C) 1997,1998 Jakub Jelinek (jj@ultra.linux.cz)
 
-OBJS	=bare.o init_me.o ../kernel/promops.o ../lib/lib.a
-BOOTLINKFLAGS = -N -Ttext 0x200000 -e _first_adr_in_text
+ROOT_IMG	=/usr/src/root.img
+ELFTOAOUT	=elftoaout
 
-.S.s:
-	$(CC) -D__ASSEMBLY__ -D__KERNEL__ -ansi -E -o $*.o $<
-.S.o:
-	$(CC) -D__ASSEMBLY__ -D__KERNEL__ -ansi -c -o $*.o $<
+all: btfix.o
 
-all: boot
+tftpboot.img: piggyback
+	$(ELFTOAOUT) $(TOPDIR)/vmlinux -o tftpboot.img
+	./piggyback tftpboot.img $(TOPDIR)/System.map $(ROOT_IMG)
 
-boot: $(OBJS)
-	$(LD) $(BOOTLINKFLAGS) $(OBJS) -o boot
+piggyback: piggyback.c
+	$(HOSTCC) $(HOSTCFLAGS) -o piggyback piggyback.c
 
-dep:
-	$(CPP) -M *.c > .depend
-	$(CPP) -M -D__ASSEMBLY__ -ansi *.S >>.depend
+btfixupprep: btfixupprep.c
+	$(HOSTCC) $(HOSTCFLAGS) -o btfixupprep btfixupprep.c
+
+clean:
+	rm -f btfixupprep piggyback tftpboot.img btfix.o btfix.s
+
+BTOBJS := $(HEAD) init/main.o init/version.o \
+	$(CORE_FILES_NO_BTFIX) $(FILESYSTEMS) \
+	$(NETWORKS) $(DRIVERS)
+
+# I wanted to make this depend upon BTOBJS so that a parallel
+# build would work, but this fails because $(HEAD) cannot work
+# properly as it will cause head.o to be built with the implicit
+# rules not the ones in kernel/Makefile.  Someone please fix. --DaveM
+vmlinux.o: dummy
+	$(LD) -r $(patsubst %,$(TOPDIR)/%,$(BTOBJS)) $(LIBS) -o vmlinux.o
+
+btfix.s: btfixupprep vmlinux.o
+	$(OBJDUMP) -x vmlinux.o | ./btfixupprep > btfix.s
+
+btfix.o: btfix.s
+	$(CC) -c -o btfix.o btfix.s
+
+include $(TOPDIR)/Rules.make

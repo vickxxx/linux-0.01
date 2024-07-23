@@ -5,7 +5,7 @@
  *
  *		INET protocol dispatch tables.
  *
- * Version:	@(#)protocol.c	1.0.5	05/25/93
+ * Version:	$Id: protocol.c,v 1.9 1997/10/29 20:27:34 kuznet Exp $
  *
  * Authors:	Ross Biro, <bir7@leland.Stanford.Edu>
  *		Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
@@ -23,7 +23,7 @@
  *		2 of the License, or (at your option) any later version.
  */
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <linux/types.h>
 #include <linux/kernel.h>
@@ -45,80 +45,71 @@
 #include <net/ipip.h>
 #include <linux/igmp.h>
 
+#define IPPROTO_PREVIOUS NULL
 
-#ifdef CONFIG_IP_FORWARD
-#ifdef CONFIG_NET_IPIP
+#ifdef CONFIG_IP_MULTICAST
 
-static struct inet_protocol ipip_protocol = 
-{
-	ipip_rcv,             /* IPIP handler          */
-	NULL,                 /* TUNNEL error control    */
-	0,                    /* next                 */
-	IPPROTO_IPIP,         /* protocol ID          */
-	0,                    /* copy                 */
-	NULL,                 /* data                 */
-	"IPIP"                /* name                 */
-};
-
-
-#endif
-#endif
-
-static struct inet_protocol tcp_protocol = 
-{
-	tcp_rcv,		/* TCP handler		*/
-	tcp_err,		/* TCP error control	*/  
-#if defined(CONFIG_NET_IPIP) && defined(CONFIG_IP_FORWARD)
-	&ipip_protocol,
-#else  
-	NULL,			/* next			*/
-#endif  
-	IPPROTO_TCP,		/* protocol ID		*/
-	0,			/* copy			*/
-	NULL,			/* data			*/
-	"TCP"			/* name			*/
-};
-
-
-static struct inet_protocol udp_protocol = 
-{
-	udp_rcv,		/* UDP handler		*/
-	udp_err,		/* UDP error control	*/
-	&tcp_protocol,		/* next			*/
-	IPPROTO_UDP,		/* protocol ID		*/
-	0,			/* copy			*/
-	NULL,			/* data			*/
-	"UDP"			/* name			*/
-};
-
-
-static struct inet_protocol icmp_protocol = 
-{
-	icmp_rcv,		/* ICMP handler		*/
-	NULL,			/* ICMP error control	*/
-	&udp_protocol,		/* next			*/
-	IPPROTO_ICMP,		/* protocol ID		*/
-	0,			/* copy			*/
-	NULL,			/* data			*/
-	"ICMP"			/* name			*/
-};
-
-#ifndef CONFIG_IP_MULTICAST
-struct inet_protocol *inet_protocol_base = &icmp_protocol;
-#else
 static struct inet_protocol igmp_protocol = 
 {
 	igmp_rcv,		/* IGMP handler		*/
 	NULL,			/* IGMP error control	*/
-	&icmp_protocol,		/* next			*/
+	IPPROTO_PREVIOUS,	/* next			*/
 	IPPROTO_IGMP,		/* protocol ID		*/
 	0,			/* copy			*/
 	NULL,			/* data			*/
 	"IGMP"			/* name			*/
 };
 
-struct inet_protocol *inet_protocol_base = &igmp_protocol;
+#undef  IPPROTO_PREVIOUS
+#define IPPROTO_PREVIOUS &igmp_protocol
+
 #endif
+
+static struct inet_protocol tcp_protocol = 
+{
+	tcp_v4_rcv,		/* TCP handler		*/
+	tcp_v4_err,		/* TCP error control	*/  
+	IPPROTO_PREVIOUS,
+	IPPROTO_TCP,		/* protocol ID		*/
+	0,			/* copy			*/
+	NULL,			/* data			*/
+	"TCP"			/* name			*/
+};
+
+#undef  IPPROTO_PREVIOUS
+#define IPPROTO_PREVIOUS &tcp_protocol
+
+static struct inet_protocol udp_protocol = 
+{
+	udp_rcv,		/* UDP handler		*/
+	udp_err,		/* UDP error control	*/
+	IPPROTO_PREVIOUS,	/* next			*/
+	IPPROTO_UDP,		/* protocol ID		*/
+	0,			/* copy			*/
+	NULL,			/* data			*/
+	"UDP"			/* name			*/
+};
+
+#undef  IPPROTO_PREVIOUS
+#define IPPROTO_PREVIOUS &udp_protocol
+
+
+static struct inet_protocol icmp_protocol = 
+{
+	icmp_rcv,		/* ICMP handler		*/
+	NULL,			/* ICMP error control	*/
+	IPPROTO_PREVIOUS,	/* next			*/
+	IPPROTO_ICMP,		/* protocol ID		*/
+	0,			/* copy			*/
+	NULL,			/* data			*/
+	"ICMP"			/* name			*/
+};
+
+#undef  IPPROTO_PREVIOUS
+#define IPPROTO_PREVIOUS &icmp_protocol
+
+
+struct inet_protocol *inet_protocol_base = IPPROTO_PREVIOUS;
 
 struct inet_protocol *inet_protos[MAX_INET_PROTOS] = 
 {

@@ -19,10 +19,14 @@
 	may increase the number of keymaps beyond MAX_NR_OF_USER_KEYMAPS. */
 #define MAX_NR_OF_USER_KEYMAPS 256 	/* should be at least 7 */
 
+#ifdef __KERNEL__
 extern const int NR_TYPES;
 extern const int max_vals[];
 extern unsigned short *key_maps[MAX_NR_KEYMAPS];
 extern unsigned short plain_map[NR_KEYS];
+extern struct wait_queue * keypress_wait;
+extern unsigned char keyboard_type;
+#endif
 
 #define MAX_NR_FUNC	256	/* max nr of strings assigned to keys */
 
@@ -299,7 +303,7 @@ extern unsigned short plain_map[NR_KEYS];
 #define K_F243		K(KT_FN,252)
 #define K_F244		K(KT_FN,253)
 #define K_F245		K(KT_FN,254)
-#define K_F246		K(KT_FN,255)
+#define K_UNDO		K(KT_FN,255)
 
 
 #define K_HOLE		K(KT_SPEC,0)
@@ -344,16 +348,19 @@ extern unsigned short plain_map[NR_KEYS];
 #define K_PCOMMA	K(KT_PAD,15)	/* key-pad comma: kludge... */
 #define K_PDOT		K(KT_PAD,16)	/* key-pad dot (period): kludge... */
 #define K_PPLUSMINUS	K(KT_PAD,17)	/* key-pad plus/minus */
+#define K_PPARENL	K(KT_PAD,18)	/* key-pad left parenthesis */
+#define K_PPARENR	K(KT_PAD,19)	/* key-pad right parenthesis */
 
-#define NR_PAD		18
+#define NR_PAD		20
 
 #define K_DGRAVE	K(KT_DEAD,0)
 #define K_DACUTE	K(KT_DEAD,1)
 #define K_DCIRCM	K(KT_DEAD,2)
 #define K_DTILDE	K(KT_DEAD,3)
 #define K_DDIERE	K(KT_DEAD,4)
+#define K_DCEDIL	K(KT_DEAD,5)
 
-#define NR_DEAD		5
+#define NR_DEAD		6
 
 #define K_DOWN		K(KT_CUR,0)
 #define K_LEFT		K(KT_CUR,1)

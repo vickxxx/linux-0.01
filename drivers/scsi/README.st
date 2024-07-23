@@ -2,7 +2,7 @@ This file contains brief information about the SCSI tape driver.
 The driver is currently maintained by Kai M{kisara (email
 Kai.Makisara@metla.fi)
 
-Last modified: Sun Jun 30 15:47:14 1996 by root@kai.makisara.fi
+Last modified: Sun Sep  6 10:03:47 1998 by makisara@home
 
 
 BASICS
@@ -78,6 +78,17 @@ returning zero bytes for two consecutive reads.
 The compile options are defined in the file linux/drivers/scsi/st_options.h.
 
 
+BSD AND SYS V SEMANTICS
+
+The user can choose between these two behaviours of the tape driver by
+defining the value of the symbol ST_SYSV. The semantics differ when a
+file being read is closed. The BSD semantics leaves the tape where it
+currently is whereas the SYS V semantics moves the tape past the next
+filemark unless the filemark has just been crossed.
+
+The default is BSD semantics.
+
+
 BUFFERING
 
 The driver uses tape buffers allocated either at system initialization
@@ -106,9 +117,9 @@ a filemark to truncate a read request or that don't like backspacing.
 The buffer size is defined (in 1024 byte units) by ST_BUFFER_BLOCKS or
 at boot time. If this size is not enough, the driver tries to allocate
 a large enough temporary buffer that is released when the device is
-closed. The maximum buffer size is defined by the kernel memory
-allocation (currently 256 kB for Alphas and 128 kB for other
-architectures).
+closed. Buffer allocation uses chunks of memory having sizes
+2^n * (page size). Because of this the actual buffer size may be
+larger than the buffer size specified with ST_BUFFER_BLOCKS.
 
 Allocation of the buffers is done at run-time when they are
 needed. Allocation of the specified number of buffers can be done at
@@ -132,6 +143,31 @@ is defined by ST_WRITE_THRESHOLD. This may be optimized for each
 use pattern. The default triggers asynchronous write after three
 default sized writes (10 kB) from tar.
 
+Scatter/gather buffers (buffers that consist of chunks non-contiguous
+in the physical memory) are used if contiguous buffers can't be
+allocated. To support all SCSI adapters (including those not
+supporting scatter/gather), buffer allocation is using the following
+three kinds of chunks:
+1. The initial segment that is used for all SCSI adapters including
+those not supporting scatter/gather. The size of this buffer will be
+(PAGE_SIZE << ST_FIRST_ORDER) bytes if the system can give a chunk of
+this size (and it is not larger than the buffer size specified by
+ST_BUFFER_BLOCKS). If this size is not available, the driver halves
+the size and tries again until the size of one page. The default
+settings in st_options.h make the driver to try to allocate all of the
+buffer as one chunk.
+2. The scatter/gather segments to fill the specified buffer size are
+allocated so that as many segments as possible are used but the number
+of segments does not exceed ST_FIRST_SG.
+3. The remaining segments between ST_MAX_SG (or the module parameter
+max_sg_segs) and the number of segments used in phases 1 and 2
+are used to extend the buffer at run-time if this is necessary. The
+number of scatter/gather segments allowed for the SCSI adapter is not
+exceeded if it is smaller than the maximum number of scatter/gather
+segments specified. If the maximum number allowed for the SCSI adapter
+is smaller than the number of segments used in phases 1 and 2,
+extending the buffer will always fail.
+
 
 BOOT TIME CONFIGURATION
 
@@ -146,6 +182,18 @@ where
   bb is the write threshold in 1024 byte units
   cc is the maximum number of tape buffers to allocate (the number of
         buffers is bounded also by the number of drives detected)
+
+
+MODULE PARAMETERS
+
+The same parameters can be also set when the driver is loaded as a
+module. The keywords are:
+
+buffer_kbs=xxx             the buffer size in kilobytes is set to xxx
+write_threshold_kbs=xxx    the write threshold in kilobytes set to xxx
+max_buffers=xxx            the maximum number of tape buffer set to xxx
+max_sg_segs=xxx		   the maximum number of scatter/gather
+			   segments
 
 
 IOCTLS
@@ -186,7 +234,11 @@ MTSETBLK Set the drive block size. Setting to zero sets the drive into
 MTSETDENSITY Sets the drive density code to arg. See drive
         documentation for available codes.
 MTLOCK and MTUNLOCK Explicitly lock/unlock the tape drive door.
-MTLOAD and MTUNLOAD Explicitly load and unload the tape.
+MTLOAD and MTUNLOAD Explicitly load and unload the tape. If the
+	command argument x is between MT_ST_HPLOADER_OFFSET + 1 and
+	MT_ST_HPLOADER_OFFSET + 6, the number x is used sent to the
+	drive with the command and it selects the tape slot to use of
+	HP C1553A changer.
 MTCOMPRESSION Sets compressing or uncompressing drive mode using the
 	SCSI mode page 15. Note that some drives other methods for
 	control of compression. Some drives (like the Exabytes) use
@@ -238,6 +290,7 @@ MTSETDRVBUFFER
 		the device dependent address. It is recommended to set
 		this flag unless there are tapes using the device
 		dependent (from the old times) (global)
+	     MT_ST_SYSV sets the SYSV sematics (mode)
 	     MT_ST_DEBUGGING debugging (global; debugging must be
 		compiled into the driver)
 	MT_ST_SETBOOLEANS
@@ -257,6 +310,16 @@ MTSETDRVBUFFER
 	   MT_ST_CLEAR_DEFAULT (0xfffff), the default will not be used
 	   any more. Otherwise the lower-most bits of the value contain
 	   the new value of the parameter.
+	MT_ST_SET_TIMEOUT
+	   Set the normal timeout in seconds for this device. The
+	   default is 900 seconds (15 minutes). The timeout should be
+	   long enough for the retries done by the device while
+	   reading/writing.
+	MT_ST_SET_LONG_TIMEOUT
+	   Set the long timeout that is used for operations that are
+	   known to take a long time. The default is 14000 seconds
+	   (3.9 hours). For erase this value is further multiplied by
+	   eight.
 
 The following ioctl uses the structure mtpos:
 MTIOCPOS Reads the current position from the drive. Uses
@@ -316,3 +379,23 @@ within file can be obtained if ST_IN_FILE_POS is defined at compile
 time or the MT_ST_CAN_BSR bit is set for the drive with an ioctl.
 (The driver always backs over a filemark crossed by read ahead if the
 user does not request data that far.)
+
+
+DEBUGGING HINTS
+
+To enable debugging messages, edit st.c and #define DEBUG 1. As seen
+above, debugging can be switched off with an ioctl if debugging is
+compiled into the driver. The debugging output is not voluminuous.
+
+If the tape seems to hang, I would be very interested to hear where
+the driver is waiting. With the command 'ps -l' you can see the state
+of the process using the tape. If the state is D, the process is
+waiting for something. The field WCHAN tells where the driver is
+waiting. If you have the current System.map in the correct place (in
+/boot for the procps I use) or have updated /etc/psdatabase (for kmem
+ps), ps writes the function name in the WCHAN field. If not, you have
+to look up the function from System.map.
+
+Note also that the timeouts are very long compared to most other
+drivers. This means that the Linux driver may appear hung although the
+real reason is that the tape firmware has got confused.

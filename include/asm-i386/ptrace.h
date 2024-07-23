@@ -31,20 +31,24 @@ struct pt_regs {
 	long edi;
 	long ebp;
 	long eax;
-	unsigned short ds, __dsu;
-	unsigned short es, __esu;
-	unsigned short fs, __fsu;
-	unsigned short gs, __gsu;
+	int  xds;
+	int  xes;
 	long orig_eax;
 	long eip;
-	unsigned short cs, __csu;
+	int  xcs;
 	long eflags;
 	long esp;
-	unsigned short ss, __ssu;
+	int  xss;
 };
 
+/* Arbitrarily choose the same ptrace numbers as used by the Sparc code. */
+#define PTRACE_GETREGS            12
+#define PTRACE_SETREGS            13
+#define PTRACE_GETFPREGS          14
+#define PTRACE_SETFPREGS          15
+
 #ifdef __KERNEL__
-#define user_mode(regs) ((VM_MASK & (regs)->eflags) || (3 & (regs)->cs))
+#define user_mode(regs) ((VM_MASK & (regs)->eflags) || (3 & (regs)->xcs))
 #define instruction_pointer(regs) ((regs)->eip)
 extern void show_regs(struct pt_regs *);
 #endif

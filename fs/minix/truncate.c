@@ -21,7 +21,7 @@
 
 /*
  * Truncate has the most races in the whole filesystem: coding it is
- * a pain in the a**. Especially as I don't do any locking...
+ * a pain in the a**, especially as I don't do any locking.
  *
  * The code may look a bit weird, but that's just because I've tried to
  * handle things like file-size changes in a somewhat graceful manner.
@@ -58,7 +58,7 @@ repeat:
 			continue;
 		}
 		*p = 0;
-		inode->i_dirt = 1;
+		mark_inode_dirty(inode);
 		if (bh) {
 			mark_buffer_clean(bh);
 			brelse(bh);
@@ -117,7 +117,7 @@ repeat:
 	for (i = 0; i < 512; i++)
 		if (*(ind++))
 			break;
-	if (i >= 512)
+	if (i >= 512) {
 		if (ind_bh->b_count != 1)
 			retry = 1;
 		else {
@@ -125,6 +125,7 @@ repeat:
 			*p = 0;
 			minix_free_block(inode->i_sb,tmp);
 		}
+	}
 	brelse(ind_bh);
 	return retry;
 }
@@ -161,20 +162,21 @@ repeat:
 	for (i = 0; i < 512; i++)
 		if (*(dind++))
 			break;
-	if (i >= 512)
+	if (i >= 512) {
 		if (dind_bh->b_count != 1)
 			retry = 1;
 		else {
 			tmp = *p;
 			*p = 0;
-			inode->i_dirt = 1;
+			mark_inode_dirty(inode);
 			minix_free_block(inode->i_sb,tmp);
 		}
+	}
 	brelse(dind_bh);
 	return retry;
 }
 
-void V1_minix_truncate(struct inode * inode)
+static void V1_minix_truncate(struct inode * inode)
 {
 	int retry;
 
@@ -191,7 +193,7 @@ void V1_minix_truncate(struct inode * inode)
 		schedule();
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	inode->i_dirt = 1;
+	mark_inode_dirty(inode);
 }
 
 /*
@@ -220,7 +222,7 @@ repeat:
 			continue;
 		}
 		*p = 0;
-		inode->i_dirt = 1;
+		mark_inode_dirty(inode);
 		if (bh) {
 			mark_buffer_clean(bh);
 			brelse(bh);
@@ -279,7 +281,7 @@ repeat:
 	for (i = 0; i < 256; i++)
 		if (*(ind++))
 			break;
-	if (i >= 256)
+	if (i >= 256) {
 		if (ind_bh->b_count != 1)
 			retry = 1;
 		else {
@@ -287,6 +289,7 @@ repeat:
 			*p = 0;
 			minix_free_block(inode->i_sb,tmp);
 		}
+	}
 	brelse(ind_bh);
 	return retry;
 }
@@ -323,15 +326,16 @@ repeat:
 	for (i = 0; i < 256; i++)
 		if (*(dind++))
 			break;
-	if (i >= 256)
+	if (i >= 256) {
 		if (dind_bh->b_count != 1)
 			retry = 1;
 		else {
 			tmp = *p;
 			*p = 0;
-			inode->i_dirt = 1;
+			mark_inode_dirty(inode);
 			minix_free_block(inode->i_sb,tmp);
 		}
+	}
 	brelse(dind_bh);
 	return retry;
 }
@@ -368,15 +372,16 @@ repeat:
         for (i = 0; i < 256; i++)
                 if (*(tind++))
                         break;
-        if (i >= 256)
+        if (i >= 256) {
                 if (tind_bh->b_count != 1)
                         retry = 1;
                 else {
                         tmp = *p;
                         *p = 0;
-                        inode->i_dirt = 1;
+                        mark_inode_dirty(inode);
                         minix_free_block(inode->i_sb,tmp);
 		}
+	}
         brelse(tind_bh);
         return retry;
 }
@@ -402,7 +407,7 @@ static void V2_minix_truncate(struct inode * inode)
 		schedule();
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	inode->i_dirt = 1;
+	mark_inode_dirty(inode);
 }
 
 /*

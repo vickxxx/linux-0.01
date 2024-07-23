@@ -7,7 +7,7 @@
  *		PROC file system.  It is mainly used for debugging and
  *		statistics.
  *
- * Version:	@(#)proc.c	1.0.5	05/27/93
+ * Version:	$Id: proc.c,v 1.33 1998/10/21 05:44:35 davem Exp $
  *
  * Authors:	Fred N. van Kempen, <waltje@uWalt.NL.Mugnet.ORG>
  *		Gerald J. Heim, <heim@peanuts.informatik.uni-tuebingen.de>
@@ -23,6 +23,9 @@
  *		Alan Cox	:	Handle dead sockets properly.
  *	Gerhard Koerting	:	Show both timers
  *		Alan Cox	:	Allow inode to be NULL (kernel socket)
+ *	Andi Kleen		:	Add support for open_requests and 
+ *					split functions for more readibility.
+ *	Andi Kleen		:	Add support for /proc/net/netstat
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -47,133 +50,191 @@
 #include <net/sock.h>
 #include <net/raw.h>
 
+/* Format a single open_request into tmpbuf. */
+static inline void get__openreq(struct sock *sk, struct open_request *req, 
+				char *tmpbuf, 
+				int i)
+{
+	sprintf(tmpbuf, "%4d: %08lX:%04X %08lX:%04X"
+		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %u",
+		i,
+		(long unsigned int)req->af.v4_req.loc_addr,
+		ntohs(sk->sport),
+		(long unsigned int)req->af.v4_req.rmt_addr,
+		ntohs(req->rmt_port),
+		TCP_SYN_RECV,
+		0,0, /* could print option size, but that is af dependent. */
+		1,   /* timers active (only the expire timer) */  
+		(unsigned long)(req->expires - jiffies), 
+		req->retrans,
+		sk->socket ? sk->socket->inode->i_uid : 0,
+		0,  /* non standard timer */  
+		0 /* open_requests have no inode */
+		); 
+}
+
+/* Format a single socket into tmpbuf. */
+static inline void get__sock(struct sock *sp, char *tmpbuf, int i, int format)
+{
+	unsigned long  dest, src;
+	unsigned short destp, srcp;
+	int timer_active, timer_active1, timer_active2;
+	int tw_bucket = 0;
+	unsigned long timer_expires;
+	struct tcp_opt *tp = &sp->tp_pinfo.af_tcp;
+
+	dest  = sp->daddr;
+	src   = sp->rcv_saddr;
+	destp = sp->dport;
+	srcp  = sp->sport;
+	
+	/* FIXME: The fact that retransmit_timer occurs as a field
+	 * in two different parts of the socket structure is,
+	 * to say the least, confusing. This code now uses the
+	 * right retransmit_timer variable, but I'm not sure
+	 * the rest of the timer stuff is still correct.
+	 * In particular I'm not sure what the timeout value
+	 * is suppose to reflect (as opposed to tm->when). -- erics
+	 */
+	
+	destp = ntohs(destp);
+	srcp  = ntohs(srcp);
+	if((format == 0) && (sp->state == TCP_TIME_WAIT)) {
+		extern int tcp_tw_death_row_slot;
+		struct tcp_tw_bucket *tw = (struct tcp_tw_bucket *)sp;
+		int slot_dist;
+
+		tw_bucket	= 1;
+		timer_active1	= timer_active2 = 0;
+		timer_active	= 3;
+		slot_dist	= tw->death_slot;
+		if(slot_dist > tcp_tw_death_row_slot)
+			slot_dist = (TCP_TWKILL_SLOTS - slot_dist) + tcp_tw_death_row_slot;
+		else
+			slot_dist = tcp_tw_death_row_slot - slot_dist;
+		timer_expires	= jiffies + (slot_dist * TCP_TWKILL_PERIOD);
+	} else {
+		timer_active1 = del_timer(&tp->retransmit_timer);
+		timer_active2 = del_timer(&sp->timer);
+		if (!timer_active1) tp->retransmit_timer.expires=0;
+		if (!timer_active2) sp->timer.expires=0;
+		timer_active	= 0;
+		timer_expires	= (unsigned) -1;
+	}
+	if (timer_active1 && tp->retransmit_timer.expires < timer_expires) {
+		timer_active	= 1;
+		timer_expires	= tp->retransmit_timer.expires;
+	}
+	if (timer_active2 && sp->timer.expires < timer_expires) {
+		timer_active	= 2;
+		timer_expires	= sp->timer.expires;
+	}
+	if(timer_active == 0)
+		timer_expires = jiffies;
+	sprintf(tmpbuf, "%4d: %08lX:%04X %08lX:%04X"
+		" %02X %08X:%08X %02X:%08lX %08X %5d %8d %ld",
+		i, src, srcp, dest, destp, sp->state, 
+		(tw_bucket ?
+		 0 :
+		 (format == 0) ?
+		 tp->write_seq-tp->snd_una : atomic_read(&sp->wmem_alloc)),
+		(tw_bucket ?
+		 0 :
+		 (format == 0) ?
+		 tp->rcv_nxt-tp->copied_seq: atomic_read(&sp->rmem_alloc)),
+		timer_active, timer_expires-jiffies,
+		(tw_bucket ? 0 : tp->retransmits),
+		(!tw_bucket && sp->socket) ? sp->socket->inode->i_uid : 0,
+		(!tw_bucket && timer_active) ? sp->timeout : 0,
+		(!tw_bucket && sp->socket) ? sp->socket->inode->i_ino : 0);
+	
+	if (timer_active1) add_timer(&tp->retransmit_timer);
+	if (timer_active2) add_timer(&sp->timer);	
+}
+
 /*
  * Get__netinfo returns the length of that string.
  *
  * KNOWN BUGS
  *  As in get_unix_netinfo, the buffer might be too small. If this
  *  happens, get__netinfo returns only part of the available infos.
+ *
+ *  Assumes that buffer length is a multiply of 128 - if not it will
+ *  write past the end.   
  */
 static int
 get__netinfo(struct proto *pro, char *buffer, int format, char **start, off_t offset, int length)
 {
-	struct sock **s_array;
-	struct sock *sp;
-	int i;
-	int timer_active;
-	int timer_active1;
-	int timer_active2;
-	unsigned long timer_expires;
-	unsigned long  dest, src;
-	unsigned short destp, srcp;
-	int len=0;
+	struct sock *sp, *next;
+	int len=0, i = 0;
 	off_t pos=0;
 	off_t begin;
 	char tmpbuf[129];
   
-	s_array = pro->sock_array;
 	if (offset < 128) 
 		len += sprintf(buffer, "%-127s\n",
 			       "  sl  local_address rem_address   st tx_queue "
 			       "rx_queue tr tm->when retrnsmt   uid  timeout inode");
 	pos = 128;
-/*
- *	This was very pretty but didn't work when a socket is destroyed
- *	at the wrong moment (eg a syn recv socket getting a reset), or
- *	a memory timer destroy. Instead of playing with timers we just
- *	concede defeat and cli().
- */
-	for(i = 0; i < SOCK_ARRAY_SIZE; i++) 
-	{
-	  	cli();
-		sp = s_array[i];
-		while(sp != NULL) 
-		{
-			pos += 128;
-			if (pos < offset)
-			{
-				sp = sp->next;
-				continue;
-			}
-			dest  = sp->daddr;
-			src   = sp->saddr;
-			destp = sp->dummy_th.dest;
-			srcp  = sp->dummy_th.source;
+	SOCKHASH_LOCK(); 
+	sp = pro->sklist_next;
+	while(sp != (struct sock *)pro) {
+		if (format == 0 && sp->state == TCP_LISTEN) {
+			struct open_request *req;
 
-			/* Since we are Little Endian we need to swap the bytes :-( */
-			destp = ntohs(destp);
-			srcp  = ntohs(srcp);
-			timer_active1 = del_timer(&sp->retransmit_timer);
-			timer_active2 = del_timer(&sp->timer);
-			if (!timer_active1) sp->retransmit_timer.expires=0;
-			if (!timer_active2) sp->timer.expires=0;
-			timer_active=0;
-			timer_expires=(unsigned)-1;
-			if (timer_active1 &&
-			  sp->retransmit_timer.expires < timer_expires) {
-			    timer_active=timer_active1;
-			    timer_expires=sp->retransmit_timer.expires;
+			for (req = sp->tp_pinfo.af_tcp.syn_wait_queue; req;
+			     i++, req = req->dl_next) {
+				pos += 128;
+				if (pos < offset) 
+					continue;
+				get__openreq(sp, req, tmpbuf, i); 
+				len += sprintf(buffer+len, "%-127s\n", tmpbuf);
+				if(len >= length) 
+					goto out;
 			}
-			if (timer_active2 &&
-			  sp->timer.expires < timer_expires) {
-			    timer_active=timer_active2;
-			    timer_expires=sp->timer.expires;
-			}
-			sprintf(tmpbuf, "%4d: %08lX:%04X %08lX:%04X"
-				" %02X %08X:%08X %02X:%08lX %08X %5d %8d %ld",
-				i, src, srcp, dest, destp, sp->state, 
-				format==0?sp->write_seq-sp->rcv_ack_seq:sp->wmem_alloc, 
-				format==0?sp->acked_seq-sp->copied_seq:sp->rmem_alloc,
-				timer_active, timer_expires-jiffies, (unsigned) sp->retransmits,
-				(sp->socket&&SOCK_INODE(sp->socket))?SOCK_INODE(sp->socket)->i_uid:0,
-				timer_active?sp->timeout:0,
-				sp->socket && SOCK_INODE(sp->socket) ?
-				SOCK_INODE(sp->socket)->i_ino : 0);
-			if (timer_active1) add_timer(&sp->retransmit_timer);
-			if (timer_active2) add_timer(&sp->timer);
-			len += sprintf(buffer+len, "%-127s\n", tmpbuf);
-			/*
-			 * All sockets with (port mod SOCK_ARRAY_SIZE) = i
-			 * are kept in sock_array[i], so we must follow the
-			 * 'next' link to get them all.
-			 */
-			if(len >= length)
-				break;
-			sp = sp->next;
 		}
-		sti();	/* We only turn interrupts back on for a moment,
-			   but because the interrupt queues anything built
-			   up before this will clear before we jump back
-			   and cli(), so it's not as bad as it looks */
-		if(len>= length)
+		
+		pos += 128;
+		if (pos < offset)
+			goto next;
+		
+		get__sock(sp, tmpbuf, i, format);
+		
+		len += sprintf(buffer+len, "%-127s\n", tmpbuf);
+		if(len >= length)
 			break;
+	next:
+		next = sp->sklist_next;
+		sp = next;
+		i++;
 	}
+out: 
+	SOCKHASH_UNLOCK();
+	
 	begin = len - (pos - offset);
 	*start = buffer + begin;
 	len -= begin;
 	if(len>length)
 		len = length;
+	if (len<0)
+		len = 0; 
 	return len;
 } 
-
 
 int tcp_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
 {
 	return get__netinfo(&tcp_prot, buffer,0, start, offset, length);
 }
 
-
 int udp_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
 {
 	return get__netinfo(&udp_prot, buffer,1, start, offset, length);
 }
 
-
 int raw_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
 {
 	return get__netinfo(&raw_prot, buffer,1, start, offset, length);
 }
-
 
 /*
  *	Report socket allocation statistics [mea@utu.fi]
@@ -182,23 +243,26 @@ int afinet_get_info(char *buffer, char **start, off_t offset, int length, int du
 {
 	/* From  net/socket.c  */
 	extern int socket_get_info(char *, char **, off_t, int);
-	extern struct proto packet_prot;
 
 	int len  = socket_get_info(buffer,start,offset,length);
 
-	len += sprintf(buffer+len,"SOCK_ARRAY_SIZE=%d\n",SOCK_ARRAY_SIZE);
 	len += sprintf(buffer+len,"TCP: inuse %d highest %d\n",
 		       tcp_prot.inuse, tcp_prot.highestinuse);
 	len += sprintf(buffer+len,"UDP: inuse %d highest %d\n",
 		       udp_prot.inuse, udp_prot.highestinuse);
 	len += sprintf(buffer+len,"RAW: inuse %d highest %d\n",
 		       raw_prot.inuse, raw_prot.highestinuse);
-	len += sprintf(buffer+len,"PAC: inuse %d highest %d\n",
-		       packet_prot.inuse, packet_prot.highestinuse);
+	if (offset >= len)
+	{
+		*start = buffer;
+		return 0;
+	}
 	*start = buffer + offset;
 	len -= offset;
 	if (len > length)
 		len = length;
+	if (len < 0)
+		len = 0;
 	return len;
 }
 
@@ -248,14 +312,15 @@ int snmp_get_info(char *buffer, char **start, off_t offset, int length, int dumm
 		    icmp_statistics.IcmpOutAddrMasks, icmp_statistics.IcmpOutAddrMaskReps);
 	
 	len += sprintf (buffer + len,
-		"Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs\n"
-		"Tcp: %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu\n",
+		"Tcp: RtoAlgorithm RtoMin RtoMax MaxConn ActiveOpens PassiveOpens AttemptFails EstabResets CurrEstab InSegs OutSegs RetransSegs InErrs OutRsts\n"
+		"Tcp: %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu %lu\n",
 		    tcp_statistics.TcpRtoAlgorithm, tcp_statistics.TcpRtoMin,
 		    tcp_statistics.TcpRtoMax, tcp_statistics.TcpMaxConn,
 		    tcp_statistics.TcpActiveOpens, tcp_statistics.TcpPassiveOpens,
 		    tcp_statistics.TcpAttemptFails, tcp_statistics.TcpEstabResets,
 		    tcp_statistics.TcpCurrEstab, tcp_statistics.TcpInSegs,
-		    tcp_statistics.TcpOutSegs, tcp_statistics.TcpRetransSegs);
+		    tcp_statistics.TcpOutSegs, tcp_statistics.TcpRetransSegs,
+		    tcp_statistics.TcpInErrs, tcp_statistics.TcpOutRsts);
 		
 	len += sprintf (buffer + len,
 		"Udp: InDatagrams NoPorts InErrors OutDatagrams\nUdp: %lu %lu %lu %lu\n",
@@ -276,5 +341,45 @@ int snmp_get_info(char *buffer, char **start, off_t offset, int length, int dumm
 	len -= offset;
 	if (len > length)
 		len = length;
+	if (len < 0)
+		len = 0; 
+	return len;
+}
+
+/* 
+ *	Output /proc/net/netstat
+ */
+ 
+int netstat_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
+{
+	extern struct linux_mib net_statistics;
+	int len;
+
+	len = sprintf(buffer,
+		      "TcpExt: SyncookiesSent SyncookiesRecv SyncookiesFailed"
+		      " EmbryonicRsts PruneCalled RcvPruned OfoPruned"
+		      " OutOfWindowIcmps LockDroppedIcmps\n" 	
+		      "TcpExt: %lu %lu %lu %lu %lu %lu %lu %lu %lu\n",
+		      net_statistics.SyncookiesSent,
+		      net_statistics.SyncookiesRecv,
+		      net_statistics.SyncookiesFailed,
+		      net_statistics.EmbryonicRsts,
+		      net_statistics.PruneCalled,
+		      net_statistics.RcvPruned,
+		      net_statistics.OfoPruned,
+		      net_statistics.OutOfWindowIcmps,
+		      net_statistics.LockDroppedIcmps);
+
+	if (offset >= len)
+	{
+		*start = buffer;
+		return 0;
+	}
+	*start = buffer + offset;
+	len -= offset;
+	if (len > length)
+		len = length;
+	if (len < 0)
+		len = 0; 
 	return len;
 }

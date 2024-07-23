@@ -13,85 +13,86 @@
 # Copyright (C) 1994 by Hamish Macdonald
 #
 
-# override top level makefile
-ifdef CONFIG_KERNEL_ELF
-AS	= as -m68020
-LD	= ld -m m68kelf
-CC	:= $(CC)
-# set up for cross compiling
+# test for cross compiling
 COMPILE_ARCH = $(shell uname -m)
+
+# override top level makefile
+AS += -m68020
+LD += -m m68kelf
 ifneq ($(COMPILE_ARCH),$(ARCH))
-	CROSSDIR=/usr/$(ARCH)-linux/bin
-	CC := $(CROSSDIR)/$(CC)
-	AS := $(CROSSDIR)/$(AS)
-	LD := $(CROSSDIR)/$(LD)
-	AR := $(CROSSDIR)/$(AR)
-	NM := $(CROSSDIR)/$(NM)
-	STRIP := $(CROSSDIR)/$(STRIP)
-endif
-else
-AS	= /usr/m68k-linuxaout/bin/as -m68020 
-CC	:= $(CC) -pipe -b m68k-linuxaout
-LD	= ld -m m68klinux
+	# prefix for cross-compiling binaries
+	CROSS_COMPILE = m68k-linux-
 endif
 
-#
-# Set these to indicate how to link it..
-#
-# -zmagic:   
-#
-# LINKFLAGS    = -Ttext 0x100000
-#
-# -qmagic (we need to remove the 32 byte header for bootup purposes)
-#
+LINKFLAGS = -T $(TOPDIR)/arch/m68k/vmlinux.lds
 
-ifdef CONFIG_KERNEL_ELF
-LINKFLAGS = -Ttext 0x1000
-else
-LINKFLAGS = -qmagic -Ttext 0xFE0
-endif
-
-CFLAGS := $(CFLAGS) -pipe
+# without -fno-strength-reduce the 53c7xx.c driver fails ;-(
+CFLAGS += -pipe -fno-strength-reduce -ffixed-a2
 
 ifdef CONFIG_OPTIMIZE_040
 CFLAGS := $(CFLAGS) -m68040
 endif
 
+ifdef CONFIG_OPTIMIZE_060
+CFLAGS := $(CFLAGS) -m68060
+endif
+
+ifdef CONFIG_KGDB
+# If configured for kgdb support, include debugging infos and keep the
+# frame pointer
+CFLAGS := $(subst -fomit-frame-pointer,,$(CFLAGS)) -g
+endif
+
 HEAD := arch/m68k/kernel/head.o
 
-SUBDIRS += arch/m68k/kernel arch/m68k/mm arch/m68k/console arch/m68k/lib
-ARCHIVES := arch/m68k/kernel/kernel.o arch/m68k/mm/mm.o $(ARCHIVES)
+SUBDIRS += arch/m68k/kernel arch/m68k/mm arch/m68k/lib
+CORE_FILES := arch/m68k/kernel/kernel.o arch/m68k/mm/mm.o $(CORE_FILES)
 LIBS += arch/m68k/lib/lib.a
 
 ifdef CONFIG_AMIGA
-ARCHIVES := $(ARCHIVES) arch/m68k/amiga/amiga.o
+CORE_FILES := $(CORE_FILES) arch/m68k/amiga/amiga.o
 SUBDIRS := $(SUBDIRS) arch/m68k/amiga
 endif
 
 ifdef CONFIG_ATARI
-ARCHIVES := $(ARCHIVES) arch/m68k/atari/atari.o
+CORE_FILES := $(CORE_FILES) arch/m68k/atari/atari.o
 SUBDIRS := $(SUBDIRS) arch/m68k/atari
 endif
 
 ifdef CONFIG_MAC
-ARCHIVES := $(ARCHIVES) arch/m68k/mac/mac.o
+CORE_FILES := $(CORE_FILES) arch/m68k/mac/mac.o
 SUBDIRS := $(SUBDIRS) arch/m68k/mac
 endif
 
-# add in console.a after {amiga,atari}.o that need it
-ARCHIVES := $(ARCHIVES) arch/m68k/console/console.a
+ifdef CONFIG_HP300
+CORE_FILES := $(CORE_FILES) arch/m68k/hp300/hp300.o
+SUBDIRS := $(SUBDIRS) arch/m68k/hp300
+endif
+
+ifdef CONFIG_APOLLO
+CORE_FILES := $(CORE_FILES) arch/m68k/apollo/apollo.o
+SUBDIRS := $(SUBDIRS) arch/m68k/apollo
+endif
+
+ifdef CONFIG_MVME16x
+CORE_FILES := $(CORE_FILES) arch/m68k/mvme16x/mvme16x.o
+SUBDIRS := $(SUBDIRS) arch/m68k/mvme16x
+endif
+
+ifdef CONFIG_BVME6000
+CORE_FILES := $(CORE_FILES) arch/m68k/bvme6000/bvme6000.o
+SUBDIRS := $(SUBDIRS) arch/m68k/bvme6000
+endif
 
 ifdef CONFIG_M68040
-ARCHIVES := $(ARCHIVES) arch/m68k/fpsp040/fpsp.o
+CORE_FILES := $(CORE_FILES) arch/m68k/fpsp040/fpsp.o
 SUBDIRS := $(SUBDIRS) arch/m68k/fpsp040
 endif
 
 ifdef CONFIG_M68060
-ARCHIVES := $(ARCHIVES) arch/m68k/ifpsp060/ifpsp.o
+CORE_FILES := $(CORE_FILES) arch/m68k/ifpsp060/ifpsp.o
 SUBDIRS := $(SUBDIRS) arch/m68k/ifpsp060
 endif
-
-MAKEBOOT = $(MAKE) -C arch/$(ARCH)/boot
 
 lilo:	vmlinux
 	if [ -f $(INSTALL_PATH)/vmlinux ]; then mv -f $(INSTALL_PATH)/vmlinux $(INSTALL_PATH)/vmlinux.old; fi
@@ -100,11 +101,23 @@ lilo:	vmlinux
 	cp System.map $(INSTALL_PATH)/System.map
 	if [ -x /sbin/lilo ]; then /sbin/lilo; else /etc/lilo/install; fi
 
-bootstrap:
-	@$(MAKEBOOT) bootstrap
+zImage compressed: vmlinux.gz
+
+vmlinux.gz: vmlinux
+
+ifdef CONFIG_KGDB
+	cp vmlinux vmlinux.tmp
+	$(STRIP) vmlinux.tmp
+	gzip -9c vmlinux.tmp >vmlinux.gz
+	rm vmlinux.tmp
+else
+	gzip -9c vmlinux >vmlinux.gz
+endif
 
 archclean:
-	@$(MAKEBOOT) clean
+	rm -f vmlinux.gz
+	rm -f kernel/m68k_defs.h kernel/m68k_defs.d
+
+archmrproper:
 
 archdep:
-	$(MAKEBOOT) dep

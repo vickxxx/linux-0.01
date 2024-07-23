@@ -1,15 +1,11 @@
-/*
- * Hardware info about Mips JAZZ and similar systems
+/* $Id: jazz.h,v 1.8 1998/09/16 22:52:41 ralf Exp $
  *
  * This file is subject to the terms and conditions of the GNU General Public
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 by Andreas Busse and Ralf Baechle
- *
- * This file is a mess. It really needs some reorganisation!
+ * Copyright (C) 1995 - 1998 by Andreas Busse and Ralf Baechle
  */
-
 #ifndef __ASM_MIPS_JAZZ_H 
 #define __ASM_MIPS_JAZZ_H 
 
@@ -75,7 +71,7 @@
 #define LED_E                   0x9e
 #define LED_F                   0x8e
 
-#ifndef __LANGUAGE_ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 
 extern __inline__ void pica_set_led(unsigned int bits)
 {
@@ -87,6 +83,16 @@ extern __inline__ void pica_set_led(unsigned int bits)
 #endif
 
 /*
+ * Base address of the Sonic Ethernet adapter in Jazz machines.
+ */
+#define JAZZ_ETHERNET_BASE  0xe0001000
+
+/*
+ * Base address of the 53C94 SCSI hostadapter in Jazz machines.
+ */
+#define JAZZ_SCSI_BASE		0xe0002000
+
+/*
  * i8042 keyboard controller for JAZZ and PICA chipsets.
  * This address is just a guess and seems to differ from
  * other mips machines such as RC3xxx...
@@ -95,7 +101,7 @@ extern __inline__ void pica_set_led(unsigned int bits)
 #define JAZZ_KEYBOARD_DATA      0xe0005000
 #define JAZZ_KEYBOARD_COMMAND   0xe0005001
 
-#ifndef __LANGUAGE_ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 
 typedef struct {
 	unsigned char data;
@@ -147,7 +153,7 @@ typedef struct {
 /*
  * DRAM configuration register
  */
-#ifndef __LANGUAGE_ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 #ifdef __MIPSEL__
 typedef struct {
 	unsigned int bank2 : 3;
@@ -167,15 +173,15 @@ typedef struct {
 	unsigned int bank2 : 3;
 } dram_configuration;
 #endif
-#endif /* __LANGUAGE_ASSEMBLY__ */
+#endif /* _LANGUAGE_ASSEMBLY */
 
 #define PICA_DRAM_CONFIG        0xe00fffe0
 
 /*
  * JAZZ interrupt control registers
  */
-#define JAZZ_IO_IRQ_SOURCE      0xe0100000
-#define JAZZ_IO_IRQ_ENABLE      0xe0100002
+#define JAZZ_IO_IRQ_SOURCE      0xe0010000
+#define JAZZ_IO_IRQ_ENABLE      0xe0010002
 
 /*
  * JAZZ interrupt enable bits
@@ -193,15 +199,19 @@ typedef struct {
 
 /*
  * JAZZ Interrupt Level definitions
+ *
+ * This is somewhat broken.  For reasons which nobody can remember anymore
+ * we remap the Jazz interrupts to the usual ISA style interrupt numbers.
  */
 #define JAZZ_TIMER_IRQ          0
 #define JAZZ_KEYBOARD_IRQ       1
-#define JAZZ_ETHERNET_IRQ       2 /* 15 */
-#define JAZZ_SERIAL1_IRQ        3
-#define JAZZ_SERIAL2_IRQ        4
-#define JAZZ_PARALLEL_IRQ       5
 #define JAZZ_FLOPPY_IRQ         6 /* needs to be consistent with floppy driver! */
-
+#define JAZZ_SCSI_IRQ           16
+#define JAZZ_ETHERNET_IRQ       17
+#define JAZZ_SERIAL1_IRQ        18
+#define JAZZ_SERIAL2_IRQ        19
+#define JAZZ_PARALLEL_IRQ       20
+#define JAZZ_MOUSE_IRQ          21
 
 /*
  * JAZZ DMA Channels
@@ -245,66 +255,63 @@ typedef struct {
 #define JAZZ_R4030_REM_SPEED	0xE0000070	/* 16 Remote Speed Registers */
 						/* 0xE0000070,78,80... 0xE00000E8 */
 #define JAZZ_R4030_IRQ_ENABLE   0xE00000E8	/* Internal Interrupt Enable */
-
-#define JAZZ_R4030_IRQ_SOURCE   0xE0000200	/* Interrupt Source Reg */
+#define JAZZ_R4030_INVAL_ADDR   0xE0000010	/* Invalid address Register */
+#define JAZZ_R4030_IRQ_SOURCE   0xE0000200	/* Interrupt Source Register */
 #define JAZZ_R4030_I386_ERROR   0xE0000208	/* i386/EISA Bus Error */
 
+/*
+ * Virtual (E)ISA controller address
+ */
+#define JAZZ_EISA_IRQ_ACK	0xE0000238	/* EISA interrupt acknowledge */
 
 /*
  * Access the R4030 DMA and I/O Controller
  */
-#ifndef __LANGUAGE_ASSEMBLY__
+#ifndef _LANGUAGE_ASSEMBLY
 
-extern inline unsigned short r4030_read_reg16(unsigned addr) {
+extern inline void r4030_delay(void)
+{
+__asm__ __volatile__(
+	".set\tnoreorder\n\t"
+	"nop\n\t"
+	"nop\n\t"
+	"nop\n\t"
+	"nop\n\t"
+	".set\treorder");
+}
+
+extern inline unsigned short r4030_read_reg16(unsigned addr)
+{
 	unsigned short ret = *((volatile unsigned short *)addr);
-	__asm__ __volatile__(
-		".set\tnoreorder\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		".set\treorder");
+	r4030_delay();
 	return ret;
 }
 
-extern inline unsigned int r4030_read_reg32(unsigned addr) {
+extern inline unsigned int r4030_read_reg32(unsigned addr)
+{
 	unsigned int ret = *((volatile unsigned int *)addr);
-	__asm__ __volatile__(
-		".set\tnoreorder\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		".set\treorder");
+	r4030_delay();
 	return ret;
 }
 
-extern inline void r4030_write_reg16(unsigned addr, unsigned val) {
+extern inline void r4030_write_reg16(unsigned addr, unsigned val)
+{
 	*((volatile unsigned short *)addr) = val;
-	__asm__ __volatile__(
-		".set\tnoreorder\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		".set\treorder");
+	r4030_delay();
 }
 
-extern inline unsigned int r4030_write_reg32(unsigned addr, unsigned val) {
+extern inline void r4030_write_reg32(unsigned addr, unsigned val)
+{
 	*((volatile unsigned int *)addr) = val;
-	__asm__ __volatile__(
-		".set\tnoreorder\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		"nop\n\t"
-		".set\treorder");
+	r4030_delay();
 }
 
 #endif /* !LANGUAGE_ASSEMBLY__ */
 
-#define JAZZ_FDC_BASE 0xe0003000
+#define JAZZ_FDC_BASE	0xe0003000
+#define JAZZ_RTC_BASE	0xe0004000
+#define JAZZ_PORT_BASE	0xe2000000
 
-#define JAZZ_RTC_BASE 0xe0004000
+#define JAZZ_EISA_BASE	0xe3000000
 
 #endif /* __ASM_MIPS_JAZZ_H */

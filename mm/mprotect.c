@@ -3,18 +3,12 @@
  *
  *  (C) Copyright 1994 Linus Torvalds
  */
-#include <linux/stat.h>
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/mm.h>
+#include <linux/slab.h>
+#include <linux/smp_lock.h>
 #include <linux/shm.h>
-#include <linux/errno.h>
 #include <linux/mman.h>
-#include <linux/string.h>
-#include <linux/malloc.h>
 
-#include <asm/segment.h>
-#include <asm/system.h>
+#include <asm/uaccess.h>
 #include <asm/pgtable.h>
 
 static inline void change_pte_range(pmd_t * pmd, unsigned long address,
@@ -99,7 +93,7 @@ static inline int mprotect_fixup_start(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * n;
 
-	n = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	n = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!n)
 		return -ENOMEM;
 	*n = *vma;
@@ -108,8 +102,8 @@ static inline int mprotect_fixup_start(struct vm_area_struct * vma,
 	vma->vm_offset += vma->vm_start - n->vm_start;
 	n->vm_flags = newflags;
 	n->vm_page_prot = prot;
-	if (n->vm_inode)
-		n->vm_inode->i_count++;
+	if (n->vm_file)
+		n->vm_file->f_count++;
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
 	insert_vm_struct(current->mm, n);
@@ -122,7 +116,7 @@ static inline int mprotect_fixup_end(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * n;
 
-	n = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	n = kmem_cache_alloc(vm_area_cachep, GFP_KERNEL);
 	if (!n)
 		return -ENOMEM;
 	*n = *vma;
@@ -131,8 +125,8 @@ static inline int mprotect_fixup_end(struct vm_area_struct * vma,
 	n->vm_offset += n->vm_start - vma->vm_start;
 	n->vm_flags = newflags;
 	n->vm_page_prot = prot;
-	if (n->vm_inode)
-		n->vm_inode->i_count++;
+	if (n->vm_file)
+		n->vm_file->f_count++;
 	if (n->vm_ops && n->vm_ops->open)
 		n->vm_ops->open(n);
 	insert_vm_struct(current->mm, n);
@@ -145,12 +139,12 @@ static inline int mprotect_fixup_middle(struct vm_area_struct * vma,
 {
 	struct vm_area_struct * left, * right;
 
-	left = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	left = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!left)
 		return -ENOMEM;
-	right = (struct vm_area_struct *) kmalloc(sizeof(struct vm_area_struct), GFP_KERNEL);
+	right = kmem_cache_alloc(vm_area_cachep, SLAB_KERNEL);
 	if (!right) {
-		kfree(left);
+		kmem_cache_free(vm_area_cachep, left);
 		return -ENOMEM;
 	}
 	*left = *vma;
@@ -163,8 +157,8 @@ static inline int mprotect_fixup_middle(struct vm_area_struct * vma,
 	right->vm_offset += right->vm_start - left->vm_start;
 	vma->vm_flags = newflags;
 	vma->vm_page_prot = prot;
-	if (vma->vm_inode)
-		vma->vm_inode->i_count += 2;
+	if (vma->vm_file)
+		vma->vm_file->f_count += 2;
 	if (vma->vm_ops && vma->vm_ops->open) {
 		vma->vm_ops->open(left);
 		vma->vm_ops->open(right);
@@ -183,12 +177,12 @@ static int mprotect_fixup(struct vm_area_struct * vma,
 	if (newflags == vma->vm_flags)
 		return 0;
 	newprot = protection_map[newflags & 0xf];
-	if (start == vma->vm_start)
+	if (start == vma->vm_start) {
 		if (end == vma->vm_end)
 			error = mprotect_fixup_all(vma, newflags, newprot);
 		else
 			error = mprotect_fixup_start(vma, end, newflags, newprot);
-	else if (end == vma->vm_end)
+	} else if (end == vma->vm_end)
 		error = mprotect_fixup_end(vma, start, newflags, newprot);
 	else
 		error = mprotect_fixup_middle(vma, start, end, newflags, newprot);
@@ -204,7 +198,7 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 {
 	unsigned long nstart, end, tmp;
 	struct vm_area_struct * vma, * next;
-	int error;
+	int error = -EINVAL;
 
 	if (start & ~PAGE_MASK)
 		return -EINVAL;
@@ -216,9 +210,14 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 		return -EINVAL;
 	if (end == start)
 		return 0;
+
+	down(&current->mm->mmap_sem);
+	lock_kernel();
+
 	vma = find_vma(current->mm, start);
+	error = -EFAULT;
 	if (!vma || vma->vm_start > start)
-		return -EFAULT;
+		goto out;
 
 	for (nstart = start ; ; ) {
 		unsigned int newflags;
@@ -249,5 +248,8 @@ asmlinkage int sys_mprotect(unsigned long start, size_t len, unsigned long prot)
 		}
 	}
 	merge_segments(current->mm, start, end);
+out:
+	unlock_kernel();
+	up(&current->mm->mmap_sem);
 	return error;
 }

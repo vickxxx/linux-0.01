@@ -4,11 +4,11 @@ FAQ list:
 =========
 
  A FAQ list may be found in the fdutils package (see below), and also
-at ftp.imag.fr:pub/Linux/ZLIBC/floppy/FAQ
+at http://poboxes.com/Alain.Knaff/floppy/FAQ.html
 
 
-Lilo config options (Thinkpad users, read this)
-===============================================
+LILO configuration options (Thinkpad users, read this)
+======================================================
 
  The floppy driver is configured using the 'floppy=' option in
 lilo. This option can be typed at the boot prompt, or entered in the
@@ -49,14 +49,9 @@ isn't, use the old method using environment variables.
 
  The floppy related options include:
 
- floppy=<mask>,allowed_drive_mask         
-	Obsolete. Use the floppy=<drive>,<type>,cmos option instead
-
- floppy=all_drives
-	Obsolete. Use the floppy=<drive>,<type>,cmos option instead
-
  floppy=asus_pci
-	Sets the bit mask to allow only units 0 and 1. (The default)
+	Sets the bit mask to allow only units 0 and 1. Obsolete, as
+	this is the default setting anyways	
 
  floppy=daring
 	Tells the floppy driver that you have a well behaved floppy controller.
@@ -90,25 +85,29 @@ isn't, use the old method using environment variables.
 	This is needed on HP Omnibooks, which don't have a workable
 	DMA channel for the floppy driver. This option is also useful
 	if you frequently get "Unable to allocate DMA memory" messages.
-	Indeed, dma memory needs to be continuous in physical, and is
-	thus harder to find, whereas non-dma buffers may be allocated
-	in virtual memory. However, I advise against this if you have
-	an FDC without a FIFO (8272A or 82072). 82072A and later are
-	OK. You also need at least a 486 to use nodma.
+	Indeed, dma memory needs to be continuous in physical memory,
+	and is thus harder to find, whereas non-dma buffers may be
+	allocated in virtual memory. However, I advise against this if
+	you have an FDC without a FIFO (8272A or 82072). 82072A and
+	later are OK). You also need at least a 486 to use nodma.
 	If you use nodma mode, I suggest you also set the FIFO
 	threshold to 10 or lower, in order to limit the number of data
 	transfer interrupts.
-	
- floppy=dma
+
+	If you have a FIFO-able FDC, the floppy driver automatically
+	falls back on non DMA mode if no DMA-able memory can be found.
+	If you want to avoid this, explicitely ask for 'yesdma'.
+
+ floppy=yesdma
 	Tells the floppy driver that a workable DMA channel is available
 	(the default).
 
-floppy=nofifo
+ floppy=nofifo
 	Disables the FIFO entirely. This is needed if you get "Bus
-	master arbitration error" messages from your ethernet card (or
+	master arbitration error" messages from your Ethernet card (or
 	from other devices) while accessing the floppy.
 
-floppy=fifo
+ floppy=fifo
 	Enables the FIFO (default)
 
  floppy=<threshold>,fifo_depth
@@ -161,6 +160,42 @@ floppy=fifo
 	to be an interaction between video and floppy. The unexpected interrupts
 	only affect performance, and can safely be ignored.)
 
+ floppy=broken_dcl
+	Don't use the disk change line, but assume that the disk was
+	changed whenever the device node is reopened. Needed on some
+	boxes where the disk change line is broken or unsupported.
+	This should be regarded as a stopgap measure, indeed it makes
+	floppy operation less efficient due to unneeded cache
+	flushings, and slightly more unreliable. Please verify your
+	cable, connection and jumper settings if you have any DCL
+	problems. However, some older drives, and also some Laptops
+	are known not to have a DCL.
+
+ floppy=debug
+	Print debugging messages
+
+ floppy=messages
+	Print informational messages for some operations (disk change
+	notifications, warnings about over and underruns, and about
+	autodetection)
+
+ floppy=silent_dcl_clear
+	Uses a less noisy way to clear the disk change line (which
+	doesn't involve seeks). Implied by daring.
+
+ floppy=<nr>,irq
+	Sets the floppy IRQ to <nr> instead of 6
+
+ floppy=<nr>,dma
+	Sets the floppy DMA channel to <nr> instead of 2
+
+ floppy=slow
+	Use PS/2 stepping rate:
+	 " PS/2 floppies have much slower step rates than regular floppies.
+	   It's been recommended that take about 1/4 of the default speed
+	   in some more extreme cases."
+	 
+
 
 Supporting utilities and additional documentation:
 ==================================================
@@ -171,58 +206,25 @@ package. This package also contains a new version of mtools which
 allows to access high capacity disks (up to 1992K on a high density 3
 1/2 disk!). It also contains additional documentation about the floppy
 driver. It can be found at:
- ftp.imag.fr:pub/Linux/ZLIBC/fdutils/fdutils-4.1.src.tar.gz
- sunsite.unc.edu:/pub/Linux/system/Misc/fdutils-4.1.src.tar.gz
- tsx-11.mit.edu:/pub/linux/sources/sbin/fdutils-4.1.src.tar.gz
+ linux.wauug.org:/pub/knaff/fdutils/fdutils-4.3.src.tar.gz
+ sunsite.unc.edu:/pub/Linux/system/Misc/fdutils-4.3.src.tar.gz
+ tsx-11.mit.edu:/pub/linux/sources/sbin/fdutils-4.3.src.tar.gz
 
  Alpha patches to these utilities are at:
- ftp.imag.fr:pub/Linux/ZLIBC/fdutils/ALPHA
+ http://www.club.innet.lu/~year3160/fdutils/ALPHA
  All patches contained in this directory are directly against the base
 version, i.e. DON'T APPLY THEM ON TOP OF EACH OTHER. Only apply the
 most recent one.
-
-
-Alpha patches for the floppy driver:
-====================================
-
- You may find ALPHA patches of the driver itself in
-ftp.imag.fr:pub/Linux/ZLIBC/floppy/ALPHA. These patches are named
-fdp<kernel-version>-<day><month>.diff.gz
- WARNING: These _are_ ALPHA, and may introduce new problems! Some
-problems may only show up on certain hardware, or when trying weirdo
-things. So don't be misled by people claiming they are stable and
-should really be BETA. What works for one person, may not work for
-somebody else at all. This directory contains a RELEASES file
-describing the features of some of these patches.
-
- If after some testing these patches prove to be sufficiently stable,
-they'll move into ftp.imag.fr:pub/Linux/ZLIBC/floppy/BETA.
-
- You may find quick&dirty fixes to the driver in
-ftp.imag.fr:pub/Linux/ZLIBC/QDF. These patches are named
-fdp<kernel-version>-<day><month>.diff
- These patches fix only the most obvious problems, or provide trivial
-enhancements. The main objective is to keep these patches small and
-local, in order to keep the probability of introducing new problems as
-small as possible. However, they may not attack the root of the
-problem but only cure the symptoms. This directory contains a RELEASES
-file describing the features of these patches.
-
- The ALPHA, BETA and QDF directories are removed, and replaced by a
-README file when they get empty due to integration of the patches into
-the stock kernel. You may still find patches to old kernels in
-ftp.imag.fr:pub/Linux/ZLIBC/obsolete
-
 
 Reporting problems about the floppy driver
 ==========================================
 
  If you have a question or a bug report about the floppy driver, mail
-me at Alain.Knaff@imag.fr. If you post to the news, use preferably one
-of the groups comp.os.linux.help (for questions) or
-comp.os.linux.hardware (for bug reports). As the volume in these
-groups is rather high, be sure to include the word "floppy" (or
-"FLOPPY") in the subject line.
+me at Alain.Knaff@poboxes.com . If you post to Usenet, preferably use
+comp.os.linux.hardware. As the volume in these groups is rather high,
+be sure to include the word "floppy" (or "FLOPPY") in the subject
+line.  If the reported problem happens when mounting floppy disks, be
+sure to mention also the type of the filesystem in the subject line.
 
  Be sure to read the FAQ before mailing/posting any bug reports!
 

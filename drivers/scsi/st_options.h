@@ -3,7 +3,7 @@
 
    Copyright 1995 Kai Makisara.
 
-   Last modified: Thu Dec 14 21:51:27 1995 by root@kai.makisara.fi
+   Last modified: Wed Sep  2 21:24:07 1998 by root@home
 */
 
 #ifndef _ST_OPTIONS_H
@@ -54,6 +54,18 @@
    maximum number of concurrently active tape drives. */
 #define ST_MAX_BUFFERS (2 + ST_EXTRA_DEVS)
 
+/* Maximum number of scatter/gather segments */
+#define ST_MAX_SG      16
+
+/* The number of scatter/gather segments to allocate at first try (must be
+   smaller or equal to the maximum). */
+#define ST_FIRST_SG    8
+
+/* The size of the first scatter/gather segments (determines the maximum block
+   size for SCSI adapters not supporting scatter/gather). The default is set
+   to try to allocate the buffer as one chunk. */
+#define ST_FIRST_ORDER  5
+
 
 /* The following lines define defaults for properties that can be set
    separately for each drive using the MTSTOPTIONS ioctl. */
@@ -87,5 +99,15 @@
    is fast with some drives. Otherwise MTEOM is done by spacing over
    files and the file number status is retained. */
 #define ST_FAST_MTEOM 0
+
+/* If ST_SCSI2LOGICAL is nonzero, the logical block addresses are used for
+   MTIOCPOS and MTSEEK by default. Vendor addresses are used if ST_SCSI2LOGICAL
+   is zero. */
+#define ST_SCSI2LOGICAL 0
+
+/* If ST_SYSV is non-zero, the tape behaves according to the SYS V semantics.
+   The default is BSD semantics. */
+#define ST_SYSV 0
+
 
 #endif

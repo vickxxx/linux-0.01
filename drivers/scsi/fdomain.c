@@ -1,10 +1,10 @@
 /* fdomain.c -- Future Domain TMC-16x0 SCSI driver
  * Created: Sun May  3 18:53:19 1992 by faith@cs.unc.edu
- * Revised: Thu Aug  8 14:58:51 1996 by r.faith@ieee.org
+ * Revised: Wed Oct  2 11:10:55 1996 by faith@acm.org
  * Author: Rickard E. Faith, faith@cs.unc.edu
  * Copyright 1992, 1993, 1994, 1995, 1996 Rickard E. Faith
  *
- * $Id: fdomain.c,v 5.44 1996/08/08 18:58:53 root Exp $
+ * Version 5.46 (23-04-1998)
 
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License as published by the
@@ -105,6 +105,9 @@
  1.3.72      5.39         8 Feb 1996  Adaptec AHA-2920 board
  1.3.85      5.41         4 Apr 1996
  2.0.12      5.44         8 Aug 1996  Use ID 7 for all PCI cards
+ 2.1.1       5.45         2 Oct 1996  Update ROM accesses for 2.1.x
+ 2.1.97      5.46	 23 Apr 1998  Rewritten PCI detection routines [mj]
+ 2.1.11x     5.47	  9 Aug 1998  Touched for 8 SCSI disk majors support
 
  
 
@@ -202,6 +205,8 @@
 
  Thanks to Tom Cavin (tec@usa1.com) for preliminary command-line option
  patches.
+
+ New PCI detection code written by Martin Mares <mj@atrey.karlin.mff.cuni.cz>
  
  All of the alpha testers deserve much thanks.
 
@@ -261,13 +266,14 @@
 #include "hosts.h"
 #include "fdomain.h"
 #include <asm/system.h>
+#include <asm/spinlock.h>
 #include <linux/errno.h>
 #include <linux/string.h>
 #include <linux/ioport.h>
 #include <linux/proc_fs.h>
-#include <linux/bios32.h>
 #include <linux/pci.h>
 #include <linux/stat.h>
+#include <linux/delay.h>
 
 #include <linux/config.h>	/* for CONFIG_PCI */
 
@@ -276,7 +282,7 @@ struct proc_dir_entry proc_scsi_fdomain = {
     S_IFDIR | S_IRUGO | S_IXUGO, 2
 };
   
-#define VERSION          "$Revision: 5.44 $"
+#define VERSION          "$Revision: 5.45 $"
 
 /* START OF USER DEFINABLE OPTIONS */
 
@@ -363,7 +369,7 @@ enum out_port_type {
 };
 
 static int               port_base         = 0;
-static void              *bios_base        = NULL;
+static unsigned long     bios_base         = 0;
 static int               bios_major        = 0;
 static int               bios_minor        = 0;
 static int               PCI_bus           = 0;
@@ -397,16 +403,17 @@ static int               Write_SCSI_Data_port;
 static int               FIFO_Size = 0x2000; /* 8k FIFO for
 						pre-tmc18c30 chips */
 
-extern void              fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs );
+extern void              do_fdomain_16x0_intr( int irq, void *dev_id,
+					    struct pt_regs * regs );
 
-static void *addresses[] = {
-   (void *)0xc8000,
-   (void *)0xca000,
-   (void *)0xce000,
-   (void *)0xde000,
-   (void *)0xcc000,		/* Extra addresses for PCI boards */
-   (void *)0xd0000,
-   (void *)0xe0000,
+static unsigned long addresses[] = {
+   0xc8000,
+   0xca000,
+   0xce000,
+   0xde000,
+   0xcc000,		/* Extra addresses for PCI boards */
+   0xd0000,
+   0xe0000,
 };
 #define ADDRESS_COUNT (sizeof( addresses ) / sizeof( unsigned ))
 		       
@@ -425,7 +432,7 @@ static unsigned short ints[] = { 3, 5, 10, 11, 12, 14, 15, 0 };
 
   This driver works *ONLY* for Future Domain cards using the TMC-1800,
   TMC-18C50, or TMC-18C30 chip.  This includes models TMC-1650, 1660, 1670,
-  and 1680.
+  and 1680.  These are all 16-bit cards.
 
   The following BIOS signature signatures are for boards which do *NOT*
   work with this driver (these TMC-8xx and TMC-9xx boards may work with the
@@ -438,6 +445,12 @@ static unsigned short ints[] = { 3, 5, 10, 11, 12, 14, 15, 0 };
   FUTURE DOMAIN CORP. (C) 1986-1990 V6.0209/18/90
   FUTURE DOMAIN CORP. (C) 1986-1990 V7.009/18/90
   FUTURE DOMAIN CORP. (C) 1992 V8.00.004/02/92
+
+  (The cards which do *NOT* work are all 8-bit cards -- although some of
+  them have a 16-bit form-factor, the upper 8-bits are used only for IRQs
+  and are *NOT* used for data.  You can tell the difference by following
+  the tracings on the circuit board -- if only the IRQ lines are involved,
+  you have a "8-bit" card, and should *NOT* use this driver.)
 
 */
 
@@ -461,7 +474,8 @@ struct signature {
    { "IBM F1 P2 BIOS v1.0104/29/93",                        5, 28,  3, -1, 0 },
    { "Future Domain Corp. V1.0008/18/93",                   5, 33,  3,  4, 0 },
    { "Future Domain Corp. V1.0008/18/93",                  26, 33,  3,  4, 1 },
-   { "Adaptec AHA-2920 PCI-SCSI Card",                     42, 31,  3,  0, 1 },
+   { "Adaptec AHA-2920 PCI-SCSI Card",                     42, 31,  3, -1, 1 },
+   { "IBM F1 P264/32",                                      5, 14,  3, -1, 1 },
 				/* This next signature may not be a 3.5 bios */
    { "Future Domain Corp. V2.0108/18/93",                   5, 33,  3,  5, 0 },
    { "FUTURE DOMAIN CORP.  V3.5008/18/93",                  5, 34,  3,  5, 0 },
@@ -501,8 +515,8 @@ static void print_banner( struct Scsi_Host *shpnt )
       if (bios_minor >= 0) printk( "%d", bios_minor );
       else                 printk( "?." );
    
-      printk( " at 0x%x using scsi id %d\n",
-	      (unsigned)bios_base, shpnt->this_id );
+      printk( " at 0x%lx using scsi id %d\n",
+	      bios_base, shpnt->this_id );
    }
 
 				/* If this driver works for later FD PCI
@@ -541,9 +555,9 @@ void fdomain_setup( char *str, int *ints )
 
 static void do_pause( unsigned amount )	/* Pause for amount*10 milliseconds */
 {
-   unsigned long the_time = jiffies + amount; /* 0.01 seconds per jiffy */
-
-   while (jiffies < the_time);
+   do {
+	udelay(10*1000);
+   } while (--amount);
 }
 
 inline static void fdomain_make_bus_idle( void )
@@ -577,7 +591,7 @@ static int fdomain_is_valid_port( int port )
       if (inb( port + MSB_ID_Code ) != 0x60) return 0;
       chip = tmc18c50;
 
-#if 0
+#if 1
 
 				/* Try to toggle 32-bit mode.  This only
 				   works on an 18c30 chip.  (User reports
@@ -675,16 +689,13 @@ static int fdomain_isa_detect( int *irq, int *iobase )
       switch (Quantum) {
       case 2:			/* ISA_200S */
       case 3:			/* ISA_250MG */
-	 base = *((char *)bios_base + 0x1fa2)
-	       + (*((char *)bios_base + 0x1fa3) << 8);
+	 base = readb(bios_base + 0x1fa2) + (readb(bios_base + 0x1fa3) << 8);
 	 break;
       case 4:			/* ISA_200S (another one) */
-	 base = *((char *)bios_base + 0x1fa3)
-	       + (*((char *)bios_base + 0x1fa4) << 8);
+	 base = readb(bios_base + 0x1fa3) + (readb(bios_base + 0x1fa4) << 8);
 	 break;
       default:
-	 base = *((char *)bios_base + 0x1fcc)
-	       + (*((char *)bios_base + 0x1fcd) << 8);
+	 base = readb(bios_base + 0x1fcc) + (readb(bios_base + 0x1fcd) << 8);
 	 break;
       }
    
@@ -743,168 +754,63 @@ static int fdomain_isa_detect( int *irq, int *iobase )
    return 1;			/* success */
 }
 
-static int fdomain_pci_nobios_detect( int *irq, int *iobase )
-{
-   int i;
-   int flag = 0;
-
-   /* The proper way of doing this is to use ask the PCI bus for the device
-      IRQ and interrupt level.  But we can't do that if PCI BIOS32 support
-      isn't compiled into the kernel, or if a PCI BIOS32 isn't present.
-
-      Instead, we scan down a bunch of addresses (Future Domain tech
-      support says we will probably find the address before we get to
-      0xf800).  This works fine on some systems -- other systems may have
-      to scan more addresses.  If you have to modify this section for your
-      installation, please send mail to faith@cs.unc.edu. */
-
-   for (i = 0xfff8; i > 0xe000; i -= 8) {
-      if (check_region( i, 0x10 )) {
-#if DEBUG_DETECT
-	 printk( " (%x inuse)," , i );
-#endif
-	 continue;
-      }
-      if ((flag = fdomain_is_valid_port( i ))) break;
-   }
-
-   if (!flag) return 0;		/* iobase not found */
-
-   *irq    = fdomain_get_irq( i );
-   *iobase = i;
-
-   return 1;			/* success */
-}
-
 /* PCI detection function: int fdomain_pci_bios_detect(int* irq, int*
    iobase) This function gets the Interrupt Level and I/O base address from
-   the PCI configuration registers.  The I/O base address is masked with
-   0xfff8 since on my card the address read from the PCI config registers
-   is off by one from the actual I/O base address necessary for accessing
-   the status and control registers on the card (PCI config register gives
-   0xf801, actual address is 0xf800).  This is likely a bug in the FD
-   config code that writes to the PCI registers, however using a mask
-   should be safe since I think the scan done by the card to determine the
-   I/O base is done in increments of 8 (i.e., 0xf800, 0xf808, ...), at
-   least the old scan code we used to use to get the I/O base did...  Also,
-   the device ID from the PCI config registers is 0x0 and should be 0x60e9
-   as it is in the status registers (offset 5 from I/O base).  If this is
-   changed in future hardware/BIOS changes it will need to be fixed in this
-   detection function.  Comments, bug reports, etc... on this function
-   should be sent to mckinley@msupa.pa.msu.edu - James T. McKinley.  */
+   the PCI configuration registers. */
 
 #ifdef CONFIG_PCI
 static int fdomain_pci_bios_detect( int *irq, int *iobase )
 {
-   int              error;
-   unsigned char    pci_bus, pci_dev_fn;    /* PCI bus & device function */
-   unsigned char    pci_irq;                /* PCI interrupt line */
-   unsigned int     pci_base;               /* PCI I/O base address */
-   unsigned short   pci_vendor, pci_device; /* PCI vendor & device IDs */
+   unsigned int     pci_irq;                /* PCI interrupt line */
+   unsigned long    pci_base;               /* PCI I/O base address */
+   struct pci_dev   *pdev = NULL;
 
-   /* If the PCI BIOS doesn't exist, use the old-style detection routines.
-      Otherwise, get the I/O base address and interrupt from the PCI config
-      registers. */
-   
-   if (!pcibios_present()) return fdomain_pci_nobios_detect( irq, iobase );
+   if (!pci_present()) return 0;
 
 #if DEBUG_DETECT
    /* Tell how to print a list of the known PCI devices from bios32 and
       list vendor and device IDs being used if in debug mode.  */
       
-   printk( "\nINFO: cat /proc/pci to see list of PCI devices from bios32\n" );
+   printk( "\nINFO: use lspci -v to see list of PCI devices\n" );
    printk( "\nTMC-3260 detect:"
 	   " Using PCI Vendor ID: 0x%x, PCI Device ID: 0x%x\n",
 	   PCI_VENDOR_ID_FD, 
 	   PCI_DEVICE_ID_FD_36C70 );
 #endif 
 
-   /* We will have to change this if more than 1 PCI bus is present and the
-      FD scsi host is not on the first bus (i.e., a PCI to PCI bridge,
-      which is not supported by bios32 right now anyway).  This should
-      probably be done by a call to pcibios_find_device but I can't get it
-      to work...  Also the device ID reported from the PCI config registers
-      does not match the device ID quoted in the tech manual or available
-      from offset 5 from the I/O base address.  It should be 0x60E9, but it
-      is 0x0 if read from the PCI config registers.  I guess the FD folks
-      neglected to write it to the PCI registers...  This loop is necessary
-      to get the device function (at least until someone can get
-      pcibios_find_device to work, I cannot but 53c7,8xx.c uses it...). */
-    
-   pci_bus = 0;
-
-   for (pci_dev_fn = 0x0; pci_dev_fn < 0xff; pci_dev_fn++) {
-      pcibios_read_config_word( pci_bus,
-				pci_dev_fn,
-				PCI_VENDOR_ID,
-				&pci_vendor );
-
-      if (pci_vendor == PCI_VENDOR_ID_FD) {
-	 pcibios_read_config_word( pci_bus,
-				   pci_dev_fn,
-				   PCI_DEVICE_ID,
-				   &pci_device );
-
-	 if (pci_device == PCI_DEVICE_ID_FD_36C70) {
-	    /* Break out once we have the correct device.  If other FD
-	       PCI devices are added to this driver we will need to add
-	       an or of the other PCI_DEVICE_ID_FD_XXXXX's here. */
-	    break;
-	 } else {
-	    /* If we can't find an FD scsi card we give up. */
-	    return 0;
-	 }
-      }
-   }
+   if ((pdev = pci_find_device(PCI_VENDOR_ID_FD, PCI_DEVICE_ID_FD_36C70, pdev)) == NULL)
+     return 0;
        
 #if DEBUG_DETECT
    printk( "Future Domain 36C70 : at PCI bus %u, device %u, function %u\n",
-	   pci_bus,
-	   (pci_dev_fn & 0xf8) >> 3, 
-	   pci_dev_fn & 7 );
+	   pdev->bus->number,
+	   PCI_SLOT(pdev->devfn),
+	   PCI_FUNC(pdev->devfn));
 #endif
 
    /* We now have the appropriate device function for the FD board so we
       just read the PCI config info from the registers.  */
 
-   if ((error = pcibios_read_config_dword( pci_bus,
-					   pci_dev_fn, 
-					   PCI_BASE_ADDRESS_0,
-					   &pci_base ))
-       || (error = pcibios_read_config_byte( pci_bus,
-					     pci_dev_fn, 
-					     PCI_INTERRUPT_LINE,
-					     &pci_irq ))) {
-      printk ( "PCI ERROR: Future Domain 36C70 not initializing"
-	       " due to error reading configuration space\n" );
-      return 0;
-   } else {
+   pci_base = pdev->base_address[0];
+   pci_irq = pdev->irq;
 #if DEBUG_DETECT
       printk( "TMC-3260 PCI: IRQ = %u, I/O base = 0x%lx\n", 
 	      pci_irq, pci_base );
 #endif
 
-      /* Now we have the I/O base address and interrupt from the PCI
-	 configuration registers.  Unfortunately it seems that the I/O base
-	 address is off by one on my card so I mask it with 0xfff8.  This
-	 must be some kind of goof in the FD code that does the autoconfig
-	 and writes to the PCI registers (or maybe I just don't understand
-	 something).  If they fix it in later versions of the card or BIOS
-	 we may have to adjust the address based on the signature or
-	 something...  */
+   /* Now we have the I/O base address and interrupt from the PCI
+      configuration registers. */
 
-      *irq    = pci_irq;
-      *iobase = (pci_base & 0xfff8);
+   *irq    = pci_irq;
+   *iobase = (pci_base & PCI_BASE_ADDRESS_IO_MASK);
 
 #if DEBUG_DETECT
-      printk( "TMC-3260 fix: Masking I/O base address with 0xff00.\n" ); 
-      printk( "TMC-3260: IRQ = %d, I/O base = 0x%x\n", *irq, *iobase );
+   printk( "TMC-3260 fix: Masking I/O base address with 0xff00.\n" ); 
+   printk( "TMC-3260: IRQ = %d, I/O base = 0x%x\n", *irq, *iobase );
 #endif
 
-      if (!fdomain_is_valid_port( *iobase )) return 0;
-      return 1;
-   }
-   return 0;
+   if (!fdomain_is_valid_port( *iobase )) return 0;
+   return 1;
 }
 #endif
 
@@ -944,11 +850,12 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
       
       for (i = 0; !bios_base && i < ADDRESS_COUNT; i++) {
 #if DEBUG_DETECT
-	 printk( " %x(%x),", (unsigned)addresses[i], (unsigned)bios_base );
+	 printk( " %lx(%lx),", addresses[i], bios_base );
 #endif
 	 for (j = 0; !bios_base && j < SIGNATURE_COUNT; j++) {
-	    if (!memcmp( ((char *)addresses[i] + signatures[j].sig_offset),
-			 signatures[j].signature, signatures[j].sig_length )) {
+	    if (check_signature(addresses[i] + signatures[j].sig_offset,
+				signatures[j].signature,
+				signatures[j].sig_length )) {
 	       bios_major = signatures[j].major_bios_version;
 	       bios_minor = signatures[j].minor_bios_version;
 	       PCI_bus    = (signatures[j].flag == 1);
@@ -971,7 +878,8 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
 #ifdef CONFIG_PCI
 	 flag = fdomain_pci_bios_detect( &interrupt_level, &port_base );
 #else
-	 flag = fdomain_pci_nobios_detect( &interrupt_level, &port_base );
+	 printk(KERN_ERR "No PCI support in this kernel, giving up.\n");
+	 flag = 0;
 #endif
       }
 	 
@@ -981,7 +889,6 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
 #endif
 #ifdef CONFIG_PCI
 	 printk( "\nTMC-3260 36C70 PCI scsi chip detection failed.\n" );
-	 printk( "Send mail to mckinley@msupa.pa.msu.edu.\n" );
 #endif
 	 return 0;		/* Cannot find valid set of ports */
       }
@@ -1001,7 +908,7 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
    Write_FIFO_port       = port_base + Write_FIFO;
    Write_SCSI_Data_port  = port_base + Write_SCSI_Data;
 
-   fdomain_16x0_reset( NULL );
+   fdomain_16x0_reset( NULL, 0 );
 
    if (fdomain_test_loopback()) {
 #if DEBUG_DETECT
@@ -1044,20 +951,20 @@ int fdomain_16x0_detect( Scsi_Host_Template *tpnt )
       /* Register the IRQ with the kernel */
 
       retcode = request_irq( interrupt_level,
-			     fdomain_16x0_intr, SA_INTERRUPT, "fdomain", NULL);
+			     do_fdomain_16x0_intr, 0, "fdomain", NULL);
 
       if (retcode < 0) {
 	 if (retcode == -EINVAL) {
 	    printk( "fdomain: IRQ %d is bad!\n", interrupt_level );
 	    printk( "         This shouldn't happen!\n" );
-	    printk( "         Send mail to faith@cs.unc.edu\n" );
+	    printk( "         Send mail to faith@acm.org\n" );
 	 } else if (retcode == -EBUSY) {
 	    printk( "fdomain: IRQ %d is already in use!\n", interrupt_level );
 	    printk( "         Please use another IRQ!\n" );
 	 } else {
 	    printk( "fdomain: Error getting IRQ %d\n", interrupt_level );
 	    printk( "         This shouldn't happen!\n" );
-	    printk( "         Send mail to faith@cs.unc.edu\n" );
+	    printk( "         Send mail to faith@acm.org\n" );
 	 }
 	 panic( "fdomain: Driver requires interruptions\n" );
       }
@@ -1196,12 +1103,13 @@ static int fdomain_arbitrate( void )
    outb( adapter_mask, port_base + SCSI_Data_NoACK ); /* Set our id bit */
    outb( 0x04 | PARITY_MASK, TMC_Cntl_port ); /* Start arbitration */
 
-   timeout = jiffies + 50;		      /* 500 mS */
-   while (jiffies < timeout) {
+   timeout = 500;
+   do {
       status = inb( TMC_Status_port );        /* Read adapter status */
       if (status & 0x02)		      /* Arbitration complete */
-	    return 0;	
-   }
+	    return 0;
+      mdelay(1);			/* Wait one millisecond */
+   } while (--timeout);
 
    /* Make bus idle */
    fdomain_make_bus_idle();
@@ -1229,17 +1137,17 @@ static int fdomain_select( int target )
    /* Stop arbitration and enable parity */
    outb( PARITY_MASK, TMC_Cntl_port ); 
 
-   timeout = jiffies + 35;		/* 350mS -- because of timeouts
-					   (was 250mS) */
+   timeout = 350;			/* 350 msec */
 
-   while (jiffies < timeout) {
+   do {
       status = inb( SCSI_Status_port ); /* Read adapter status */
       if (status & 1) {			/* Busy asserted */
 	 /* Enable SCSI Bus (on error, should make bus idle with 0) */
 	 outb( 0x80, SCSI_Cntl_port );
 	 return 0;
       }
-   }
+      mdelay(1);			/* wait one msec */
+   } while (--timeout);
    /* Make bus idle */
    fdomain_make_bus_idle();
 #if EVERY_ACCESS
@@ -1274,8 +1182,9 @@ void my_done( int error )
 #endif
 }
 
-void fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
+void do_fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 {
+   unsigned long flags;
    int      status;
    int      done = 0;
    unsigned data_count;
@@ -1286,7 +1195,7 @@ void fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 				   interruptions while this routine is
 				   running. */
 
-   sti();			/* Yes, we really want sti() here */
+   /* sti();			 Yes, we really want sti() here if we want to lock up our machine */
    
    outb( 0x00, Interrupt_Cntl_port );
 
@@ -1318,7 +1227,9 @@ void fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 #if EVERY_ACCESS
 	 printk( " AFAIL " );
 #endif
+         spin_lock_irqsave(&io_request_lock, flags);
 	 my_done( DID_BUS_BUSY << 16 );
+         spin_unlock_irqrestore(&io_request_lock, flags);
 	 return;
       }
       current_SC->SCp.phase = in_selection;
@@ -1342,7 +1253,9 @@ void fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 #if EVERY_ACCESS
 	    printk( " SFAIL " );
 #endif
+            spin_lock_irqsave(&io_request_lock, flags);
 	    my_done( DID_NO_CONNECT << 16 );
+            spin_unlock_irqrestore(&io_request_lock, flags);
 	    return;
 	 } else {
 #if EVERY_ACCESS
@@ -1686,8 +1599,10 @@ void fdomain_16x0_intr( int irq, void *dev_id, struct pt_regs * regs )
 #if EVERY_ACCESS
       printk( "BEFORE MY_DONE. . ." );
 #endif
+      spin_lock_irqsave(&io_request_lock, flags);
       my_done( (current_SC->SCp.Status & 0xff)
 	       | ((current_SC->SCp.Message & 0xff) << 8) | (DID_OK << 16) );
+      spin_unlock_irqrestore(&io_request_lock, flags);
 #if EVERY_ACCESS
       printk( "RETURNING.\n" );
 #endif
@@ -1886,7 +1801,7 @@ int fdomain_16x0_abort( Scsi_Cmnd *SCpnt)
    return SCSI_ABORT_SUCCESS;
 }
 
-int fdomain_16x0_reset( Scsi_Cmnd *SCpnt )
+int fdomain_16x0_reset( Scsi_Cmnd *SCpnt, unsigned int ignored )
 {
 #if DEBUG_RESET
    static int called_once = 0;
@@ -1921,17 +1836,18 @@ int fdomain_16x0_reset( Scsi_Cmnd *SCpnt )
 int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
 {
    int              drive;
-   unsigned char    buf[512 + sizeof( int ) * 2];
+   unsigned char    buf[512 + sizeof (Scsi_Ioctl_Command)];
+   Scsi_Ioctl_Command *sic = (Scsi_Ioctl_Command *) buf;
    int		    size      = disk->capacity;
-   int              *sizes    = (int *)buf;
-   unsigned char    *data     = (unsigned char *)(sizes + 2);
+   unsigned char    *data     = sic->data;
    unsigned char    do_read[] = { READ_6, 0, 0, 0, 1, 0 };
    int              retcode;
+   unsigned long    offset;
    struct drive_info {
       unsigned short cylinders;
       unsigned char  heads;
       unsigned char  sectors;
-   } *i;
+   } i;
    
    /* NOTES:
       The RAM area starts at 0x1f00 from the bios_base address.
@@ -1976,44 +1892,50 @@ int fdomain_16x0_biosparam( Scsi_Disk *disk, kdev_t dev, int *info_array )
       0x0a bytes long.  Heads are one less than we need to report.
     */
 
-   drive = MINOR(dev) / 16;
+   if (MAJOR(dev) != SCSI_DISK0_MAJOR) {
+      printk("fdomain_16x0_biosparam: too many disks");
+      return 0;
+   }
+   drive = MINOR(dev) >> 4;
 
    if (bios_major == 2) {
       switch (Quantum) {
       case 2:			/* ISA_200S */
 				/* The value of 25 has never been verified.
 				   It should probably be 15. */
-	 i = (struct drive_info *)( (char *)bios_base + 0x1f33 + drive * 25 );
+	 offset = bios_base + 0x1f33 + drive * 25;
 	 break;
       case 3:			/* ISA_250MG */
-	 i = (struct drive_info *)( (char *)bios_base + 0x1f36 + drive * 15 );
+	 offset = bios_base + 0x1f36 + drive * 15;
 	 break;
       case 4:			/* ISA_200S (another one) */
-	 i = (struct drive_info *)( (char *)bios_base + 0x1f34 + drive * 15 );
+	 offset = bios_base + 0x1f34 + drive * 15;
 	 break;
       default:
-	 i = (struct drive_info *)( (char *)bios_base + 0x1f31 + drive * 25 );
+	 offset = bios_base + 0x1f31 + drive * 25;
 	 break;
       }
-      info_array[0] = i->heads;
-      info_array[1] = i->sectors;
-      info_array[2] = i->cylinders;
+      memcpy_fromio( &i, offset, sizeof( struct drive_info ) );
+      info_array[0] = i.heads;
+      info_array[1] = i.sectors;
+      info_array[2] = i.cylinders;
    } else if (bios_major == 3
 	      && bios_minor >= 0
 	      && bios_minor < 4) { /* 3.0 and 3.2 BIOS */
-      i = (struct drive_info *)( (char *)bios_base + 0x1f71 + drive * 10 );
-      info_array[0] = i->heads + 1;
-      info_array[1] = i->sectors;
-      info_array[2] = i->cylinders;
+      memcpy_fromio( &i, bios_base + 0x1f71 + drive * 10,
+		     sizeof( struct drive_info ) );
+      info_array[0] = i.heads + 1;
+      info_array[1] = i.sectors;
+      info_array[2] = i.cylinders;
    } else {			/* 3.4 BIOS (and up?) */
       /* This algorithm was provided by Future Domain (much thanks!). */
 
-      sizes[0] = 0;		/* zero bytes out */
-      sizes[1] = 512;		/* one sector in */
+      sic->inlen  = 0;		/* zero bytes out */
+      sic->outlen = 512;		/* one sector in */
       memcpy( data, do_read, sizeof( do_read ) );
       retcode = kernel_scsi_ioctl( disk->device,
 				   SCSI_IOCTL_SEND_COMMAND,
-				   (void *)buf );
+				   sic );
       if (!retcode				    /* SCSI command ok */
 	  && data[511] == 0xaa && data[510] == 0x55 /* Partition table valid */
 	  && data[0x1c2]) {			    /* Partition type */

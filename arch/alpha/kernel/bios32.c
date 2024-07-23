@@ -23,39 +23,266 @@
  * Manuals are $25 each or $50 for all three, plus $7 shipping
  * within the United States, $35 abroad.
  */
-#include <linux/config.h>
 
-#if 0
+#include <linux/config.h>
+#include <linux/kernel.h>
+#include <linux/tasks.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
+#include <linux/init.h>
+#include <linux/errno.h>
+#include <linux/pci.h>
+#include <asm/pci.h>
+#include <asm/dma.h>
+
+#include "proto.h"
+#include "bios32.h"
+
+#define DEBUG_DEVS 0
+#define DEBUG_HOSE 0
+
+#if DEBUG_DEVS
 # define DBG_DEVS(args)		printk args
 #else
 # define DBG_DEVS(args)
 #endif
 
+#if DEBUG_HOSE
+# define DBG_HOSE(args)		printk args
+#else
+# define DBG_HOSE(args)
+#endif
+
 #ifndef CONFIG_PCI
 
-int pcibios_present(void)
-{
-        return 0;
-}
+asmlinkage int sys_pciconfig_read() { return -ENOSYS; }
+asmlinkage int sys_pciconfig_write() { return -ENOSYS; }
+void reset_for_srm(void) { }
 
 #else /* CONFIG_PCI */
 
-#include <linux/kernel.h>
-#include <linux/bios32.h>
-#include <linux/pci.h>
 #include <linux/malloc.h>
 #include <linux/mm.h>
 
-#include <asm/hwrpb.h>
 #include <asm/io.h>
+#include <asm/uaccess.h>
+#include <asm/segment.h>
+#include <asm/system.h>
 
-
-#define KB		1024
-#define MB		(1024*KB)
-#define GB		(1024*MB)
+/*
+ * PCI public interfaces.
+ */
 
 #define MAJOR_REV	0
-#define MINOR_REV	3
+#define MINOR_REV	4	/* minor revision 4, add multi-PCI handling */
+
+struct linux_hose_info *bus2hose[256];
+struct linux_hose_info *hose_head, **hose_tail = &hose_head;
+int hose_count;
+int pci_probe_enabled;
+
+static void layout_hoses(void);
+
+int
+pcibios_present(void)
+{
+	return alpha_mv.hose_read_config_byte != NULL;
+}
+
+void __init
+pcibios_init(void)
+{
+	if (!pcibios_present())
+		return;
+
+	printk("Alpha PCI BIOS32 revision %d.%02d\n", MAJOR_REV, MINOR_REV);
+	if (alpha_use_srm_setup)
+		printk("   NOT modifying existing (SRM) PCI configuration\n");
+}
+
+char * __init
+pcibios_setup(char *str)
+{
+	return str;
+}
+
+void __init
+pcibios_fixup(void)
+{
+	alpha_mv.pci_fixup();
+}
+
+void __init
+pcibios_fixup_bus(struct pci_bus *bus)
+{
+}
+
+int
+pcibios_read_config_byte (u8 bus, u8 dev, u8 where, u8 *value)
+{
+	int r = PCIBIOS_FUNC_NOT_SUPPORTED;
+	*value = 0xff;
+	if (alpha_mv.hose_read_config_byte) {
+		r = (alpha_mv.hose_read_config_byte
+		     (bus, dev, where, value, bus2hose[bus]));
+	}
+	return r;
+}
+
+int
+pcibios_read_config_word (u8 bus, u8 dev, u8 where, u16 *value)
+{
+	int r = PCIBIOS_FUNC_NOT_SUPPORTED;
+	*value = 0xffff;
+	if (alpha_mv.hose_read_config_word) {
+		r = PCIBIOS_BAD_REGISTER_NUMBER;
+		if (!(where & 1))
+			r = (alpha_mv.hose_read_config_word
+			     (bus, dev, where, value, bus2hose[bus]));
+	}
+	return r;
+}
+
+int
+pcibios_read_config_dword (u8 bus, u8 dev, u8 where, u32 *value)
+{
+	int r = PCIBIOS_FUNC_NOT_SUPPORTED;
+	*value = 0xffffffff;
+	if (alpha_mv.hose_read_config_dword) {
+		r = PCIBIOS_BAD_REGISTER_NUMBER;
+		if (!(where & 3))
+			r = (alpha_mv.hose_read_config_dword
+			     (bus, dev, where, value, bus2hose[bus]));
+	}
+	return r;
+}
+
+int
+pcibios_write_config_byte (u8 bus, u8 dev, u8 where, u8 value)
+{
+	int r = PCIBIOS_FUNC_NOT_SUPPORTED;
+	if (alpha_mv.hose_write_config_byte) {
+		r = (alpha_mv.hose_write_config_byte
+		     (bus, dev, where, value, bus2hose[bus]));
+	}
+	return r;
+}
+
+int
+pcibios_write_config_word (u8 bus, u8 dev, u8 where, u16 value)
+{
+	int r = PCIBIOS_FUNC_NOT_SUPPORTED;
+	if (alpha_mv.hose_write_config_word) {
+		r = PCIBIOS_BAD_REGISTER_NUMBER;
+		if (!(where & 1))
+			r = (alpha_mv.hose_write_config_word
+			     (bus, dev, where, value, bus2hose[bus]));
+	}
+	return r;
+}
+
+int
+pcibios_write_config_dword (u8 bus, u8 dev, u8 where, u32 value)
+{
+	int r = PCIBIOS_FUNC_NOT_SUPPORTED;
+	if (alpha_mv.hose_write_config_dword) {
+		r = PCIBIOS_BAD_REGISTER_NUMBER;
+		if (!(where & 3))
+			r = (alpha_mv.hose_write_config_dword
+			     (bus, dev, where, value, bus2hose[bus]));
+	}
+	return r;
+}
+
+asmlinkage int
+sys_pciconfig_read(unsigned long bus, unsigned long dfn,
+		   unsigned long off, unsigned long len,
+		   unsigned char *buf)
+{
+	unsigned char ubyte;
+	unsigned short ushort;
+	unsigned int uint;
+	long err = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (!pcibios_present())
+		return -ENOSYS;
+	
+	switch (len) {
+	case 1:
+		err = pcibios_read_config_byte(bus, dfn, off, &ubyte);
+		put_user(ubyte, buf);
+		break;
+	case 2:
+		err = pcibios_read_config_word(bus, dfn, off, &ushort);
+		put_user(ushort, (unsigned short *)buf);
+		break;
+	case 4:
+		err = pcibios_read_config_dword(bus, dfn, off, &uint);
+		put_user(uint, (unsigned int *)buf);
+		break;
+	default:
+		err = -EINVAL;
+		break;
+	}
+	return err;
+}
+
+asmlinkage int
+sys_pciconfig_write(unsigned long bus, unsigned long dfn,
+		    unsigned long off, unsigned long len,
+		    unsigned char *buf)
+{
+	unsigned char ubyte;
+	unsigned short ushort;
+	unsigned int uint;
+	long err = 0;
+
+	if (!capable(CAP_SYS_ADMIN))
+		return -EPERM;
+	if (!pcibios_present())
+		return -ENOSYS;
+
+	switch (len) {
+	case 1:
+		err = get_user(ubyte, buf);
+		if (err)
+			break;
+		err = pcibios_write_config_byte(bus, dfn, off, ubyte);
+		if (err != PCIBIOS_SUCCESSFUL) {
+			err = -EFAULT;
+		}
+		break;
+	case 2:
+		err = get_user(ushort, (unsigned short *)buf);
+		if (err)
+			break;
+		err = pcibios_write_config_word(bus, dfn, off, ushort);
+		if (err != PCIBIOS_SUCCESSFUL) {
+			err = -EFAULT;
+		}
+		break;
+	case 4:
+		err = get_user(uint, (unsigned int *)buf);
+		if (err)
+			break;
+		err = pcibios_write_config_dword(bus, dfn, off, uint);
+		if (err != PCIBIOS_SUCCESSFUL) {
+			err = -EFAULT;
+		}
+		break;
+	default:
+		err = -EINVAL;
+		break;
+	}
+	return err;
+}
+
+
+/*
+ * Gory details start here...
+ */
 
 /*
  * Align VAL to ALIGN, which must be a power of two.
@@ -63,72 +290,140 @@ int pcibios_present(void)
 #define ALIGN(val,align)	(((val) + ((align) - 1)) & ~((align) - 1))
 
 
-/*
- * Temporary internal macro.  If this 0, then do not write to any of
- * the PCI registers, merely read them (i.e., use configuration as
- * determined by SRM).  The SRM seem do be doing a less than perfect
- * job in configuring PCI devices, so for now we do it ourselves.
- * Reconfiguring PCI devices breaks console (RPB) callbacks, but
- * those don't work properly with 64 bit addresses anyways.
- *
- * The accepted convention seems to be that the console (POST
- * software) should fully configure boot devices and configure the
- * interrupt routing of *all* devices.  In particular, the base
- * addresses of non-boot devices need not be initialized.  For
- * example, on the AXPpci33 board, the base address a #9 GXE PCI
- * graphics card reads as zero (this may, however, be due to a bug in
- * the graphics card---there have been some rumor that the #9 BIOS
- * incorrectly resets that address to 0...).
+/* 
+ * The following structure records initial configuration of devices
+ * so that we can reset them on shutdown and so enable clean reboots
+ * on SRM.  It is more trouble than it iw worth to conditionalize this.
  */
-#define PCI_MODIFY		1
 
-extern struct hwrpb_struct *hwrpb;
+struct srm_irq_reset {
+	struct srm_irq_reset *next;
+	struct pci_dev *dev;
+	u8 irq;
+} *srm_irq_resets;
 
+struct srm_io_reset {
+	struct srm_io_reset *next;
+	struct pci_dev *dev;
+	u32 io;
+	u8 reg;
+} *srm_io_resets;
 
-#if PCI_MODIFY
+/* Apply the collected reset modifications.  */
 
-/* NOTE: we can't just blindly use 64K for machines with EISA busses; they
-   may also have PCI-PCI bridges present, and then we'd configure the bridge
-   incorrectly */
-#if 0
-static unsigned int	io_base	 = 64*KB;	/* <64KB are (E)ISA ports */
-#else
-static unsigned int	io_base	 = 0xb000;
+void
+reset_for_srm(void)
+{
+	struct srm_irq_reset *qreset;
+	struct srm_io_reset *ireset;
+
+	/* Reset any IRQs that we changed.  */
+	for (qreset = srm_irq_resets; qreset ; qreset = qreset->next) {
+		pcibios_write_config_byte(qreset->dev->bus->number,
+					  qreset->dev->devfn,
+					  PCI_INTERRUPT_LINE,
+					  qreset->irq);
+#if 1
+		printk("reset_for_srm: bus %d slot 0x%x "
+		       "SRM IRQ 0x%x changed back from 0x%x\n",
+		       qreset->dev->bus->number,
+		       PCI_SLOT(qreset->dev->devfn),
+		       qreset->irq, qreset->dev->irq);
 #endif
+	}
 
-#if defined(CONFIG_ALPHA_XL)
-/*
-   an AVANTI *might* be an XL, and an XL has only 27 bits of ISA address
-   that get passed through the PCI<->ISA bridge chip. Because this causes
-   us to set the PCI->Mem window bases lower than normal, we've gotta allocate
-   PCI bus devices' memory addresses *above* the PCI<->memory mapping windows,
-   so that CPU memory DMA addresses issued by a bus device don't conflict
-   with bus memory addresses, like frame buffer memory for graphics cards.
-*/
-static unsigned int	mem_base = 1024*MB;
-#else /* CONFIG_ALPHA_XL */
-static unsigned int	mem_base = 16*MB;	/* <16MB is ISA memory */
-#endif /* CONFIG_ALPHA_XL */
+	/* Reset any IO addresses that we changed.  */
+	for (ireset = srm_io_resets; ireset ; ireset = ireset->next) {
+		pcibios_write_config_dword(ireset->dev->bus->number,
+					   ireset->dev->devfn,
+					   ireset->reg, ireset->io);
+#if 1
+		printk("reset_for_srm: bus %d slot 0x%x "
+		       "SRM MEM/IO restored to 0x%x\n",
+		       ireset->dev->bus->number,
+		       PCI_SLOT(ireset->dev->devfn),
+		       ireset->io);
+#endif
+	}
+}
+
+static void
+new_irq_reset(struct pci_dev *dev, u8 irq)
+{
+	struct srm_irq_reset *n;
+	n = kmalloc(sizeof(*n), GFP_KERNEL);
+
+	n->next = srm_irq_resets;
+	n->dev = dev;
+	n->irq = irq;
+	srm_irq_resets = n;
+}
+
+static void
+new_io_reset(struct pci_dev *dev, u8 reg, u32 io)
+{
+	struct srm_io_reset *n;
+	n = kmalloc(sizeof(*n), GFP_KERNEL);
+
+	n->next = srm_io_resets;
+	n->dev = dev;
+	n->reg = reg;
+	n->io = io;
+	srm_io_resets = n;
+}
+
 
 /*
  * Disable PCI device DEV so that it does not respond to I/O or memory
  * accesses.
  */
-static void disable_dev(struct pci_dev *dev)
+static void __init
+disable_dev(struct pci_dev *dev)
 {
 	struct pci_bus *bus;
 	unsigned short cmd;
 
-#if defined(CONFIG_ALPHA_MIKASA) || defined(CONFIG_ALPHA_ALCOR)
 	/*
 	 * HACK: the PCI-to-EISA bridge does not seem to identify
 	 *       itself as a bridge... :-(
 	 */
-        if (dev->vendor == 0x8086 && dev->device == 0x0482) {
-          DBG_DEVS(("disable_dev: ignoring PCEB...\n"));
-          return;
-        }
+	if (dev->vendor == PCI_VENDOR_ID_INTEL &&
+	    dev->device == PCI_DEVICE_ID_INTEL_82375) {
+		dev->class = PCI_CLASS_BRIDGE_EISA;
+		DBG_DEVS(("disable_dev: ignoring PCEB...\n"));
+		return;
+	}
+
+	if (dev->vendor == PCI_VENDOR_ID_INTEL &&
+	    dev->device == PCI_DEVICE_ID_INTEL_82378) {
+		dev->class = PCI_CLASS_BRIDGE_ISA;
+		DBG_DEVS(("disable_dev: ignoring SIO...\n"));
+		return;
+	}
+
+	/*
+	 * We don't have code that will init the CYPRESS bridge correctly
+	 * so we do the next best thing, and depend on the previous
+	 * console code to do the right thing, and ignore it here... :-\
+	 */
+	if (dev->vendor == PCI_VENDOR_ID_CONTAQ &&
+	    dev->device == PCI_DEVICE_ID_CONTAQ_82C693) {
+		DBG_DEVS(("disable_dev: ignoring CYPRESS bridge...\n"));
+		return;
+	}
+
+#if DEBUG_DEVS && 0
+	/* Worse HACK: Don't disable the video card, so I can see where
+	   it is *really* falling over.  */
+	if (dev->class >> 16 == PCI_BASE_CLASS_DISPLAY) {
+		DBG_DEVS(("disable_dev: ignoring video card %04x:%04x\n",
+			  dev->vendor, dev->device));
+		return;
+	}
 #endif
+
+	DBG_DEVS(("disable_dev: disabling %04x:%04x\n",
+		  dev->vendor, dev->device));
 
 	bus = dev->bus;
 	pcibios_read_config_word(bus->number, dev->devfn, PCI_COMMAND, &cmd);
@@ -142,41 +437,73 @@ static void disable_dev(struct pci_dev *dev)
 /*
  * Layout memory and I/O for a device:
  */
-#define MAX(val1, val2) ( ((val1) > (val2)) ? val1 : val2)
+#define MAX(val1, val2) ((val1) > (val2) ? (val1) : (val2))
 
-static void layout_dev(struct pci_dev *dev)
+static unsigned int io_base;
+static unsigned int mem_base; 
+
+static void __init
+layout_dev(struct pci_dev *dev)
 {
 	struct pci_bus *bus;
 	unsigned short cmd;
-	unsigned int base, mask, size, reg;
+	unsigned int base, mask, size, off, idx;
+	unsigned int orig_base;
 	unsigned int alignto;
+	unsigned long handle;
 
-#if defined(CONFIG_ALPHA_MIKASA) || defined(CONFIG_ALPHA_ALCOR)
 	/*
 	 * HACK: the PCI-to-EISA bridge does not seem to identify
 	 *       itself as a bridge... :-(
 	 */
-        if (dev->vendor == 0x8086 && dev->device == 0x0482) {
-          DBG_DEVS(("layout_dev: ignoring PCEB...\n"));
-          return;
-        }
-#endif
+	if (dev->vendor == PCI_VENDOR_ID_INTEL &&
+	    dev->device == PCI_DEVICE_ID_INTEL_82375) {
+		dev->class = PCI_CLASS_BRIDGE_EISA;
+		DBG_DEVS(("layout_dev: ignoring PCEB...\n"));
+		return;
+	}
+
+	if (dev->vendor == PCI_VENDOR_ID_INTEL &&
+	    dev->device == PCI_DEVICE_ID_INTEL_82378) {
+		dev->class = PCI_CLASS_BRIDGE_ISA;
+		DBG_DEVS(("layout_dev: ignoring SIO...\n"));
+		return;
+	}
+
+	/*
+	 * We don't have code that will init the CYPRESS bridge correctly
+	 * so we do the next best thing, and depend on the previous
+	 * console code to do the right thing, and ignore it here... :-\
+	 */
+	if (dev->vendor == PCI_VENDOR_ID_CONTAQ &&
+	    dev->device == PCI_DEVICE_ID_CONTAQ_82C693) {
+		DBG_DEVS(("layout_dev: ignoring CYPRESS bridge...\n"));
+		return;
+	}
 
 	bus = dev->bus;
 	pcibios_read_config_word(bus->number, dev->devfn, PCI_COMMAND, &cmd);
 
-	for (reg = PCI_BASE_ADDRESS_0; reg <= PCI_BASE_ADDRESS_5; reg += 4) {
+	for (idx = 0; idx <= 5; idx++) {
+		off = PCI_BASE_ADDRESS_0 + 4*idx;
 		/*
 		 * Figure out how much space and of what type this
 		 * device wants.
 		 */
-		pcibios_write_config_dword(bus->number, dev->devfn, reg,
+		pcibios_read_config_dword(bus->number, dev->devfn, off,
+					  &orig_base);
+		pcibios_write_config_dword(bus->number, dev->devfn, off,
 					   0xffffffff);
-		pcibios_read_config_dword(bus->number, dev->devfn, reg, &base);
+		pcibios_read_config_dword(bus->number, dev->devfn, off, &base);
 		if (!base) {
 			/* this base-address register is unused */
+			dev->base_address[idx] = 0;
 			continue;
 		}
+
+		DBG_DEVS(("layout_dev: slot %d fn %d off 0x%x base 0x%x\n",
+			  PCI_SLOT(dev->devfn), PCI_FUNC(dev->devfn),
+			  off, base));
 
 		/*
 		 * We've read the base address register back after
@@ -191,12 +518,27 @@ static void layout_dev(struct pci_dev *dev)
 			base &= PCI_BASE_ADDRESS_IO_MASK;
 			mask = (~base << 1) | 0x1;
 			size = (mask & base) & 0xffffffff;
-			/* align to multiple of size of minimum base */
-			alignto = MAX(0x400, size) ;
-			base = ALIGN(io_base, alignto );
+			/*
+			 * Aligning to 0x800 rather than the minimum base of
+			 * 0x400 is an attempt to avoid having devices in 
+			 * any 0x?C?? range, which is where the de4x5 driver
+			 * probes for EISA cards.
+			 *
+			 * Adaptecs, especially, resent such intrusions.
+			 */
+			alignto = MAX(0x800, size);
+			base = ALIGN(io_base, alignto);
 			io_base = base + size;
+
 			pcibios_write_config_dword(bus->number, dev->devfn, 
-						   reg, base | 0x1);
+						   off, base | 0x1);
+			new_io_reset(dev, off, orig_base);
+
+			handle = PCI_HANDLE(bus->number) | base | 1;
+			dev->base_address[idx] = handle;
+
+			DBG_DEVS(("layout_dev: dev 0x%x IO @ 0x%lx (0x%x)\n",
+				  dev->device, handle, size));
 		} else {
 			unsigned int type;
 			/*
@@ -208,19 +550,11 @@ static void layout_dev(struct pci_dev *dev)
 			mask = (~base << 1) | 0x1;
 			size = (mask & base) & 0xffffffff;
 			switch (type) {
-			      case PCI_BASE_ADDRESS_MEM_TYPE_32:
+			case PCI_BASE_ADDRESS_MEM_TYPE_32:
+			case PCI_BASE_ADDRESS_MEM_TYPE_64:
 				break;
 
-			      case PCI_BASE_ADDRESS_MEM_TYPE_64:
-				printk("bios32 WARNING: "
-				       "ignoring 64-bit device in "
-				       "slot %d, function %d: \n",
-				       PCI_SLOT(dev->devfn),
-				       PCI_FUNC(dev->devfn));
-				reg += 4;	/* skip extra 4 bytes */
-				continue;
-
-			      case PCI_BASE_ADDRESS_MEM_TYPE_1M:
+			case PCI_BASE_ADDRESS_MEM_TYPE_1M:
 				/*
 				 * Allocating memory below 1MB is *very*
 				 * tricky, as there may be all kinds of
@@ -230,9 +564,9 @@ static void layout_dev(struct pci_dev *dev)
 				 * Alpha (or that the console has set it
 				 * up properly).
 				 */
-				printk("bios32 WARNING: slot %d, function %d "
-				       "requests memory below 1MB---don't "
-				       "know how to do that.\n",
+				printk("bios32 WARNING: slot %d, function %d"
+				       " requests memory below 1MB---don't"
+				       " know how to do that.\n",
 				       PCI_SLOT(dev->devfn),
 				       PCI_FUNC(dev->devfn));
 				continue;
@@ -243,7 +577,7 @@ static void layout_dev(struct pci_dev *dev)
 			 *
 			 * In sparse memory address space, the first
 			 * octant (16MB) of every 128MB segment is
-			 * aliased to the the very first 16MB of the
+			 * aliased to the very first 16 MB of the
 			 * address space (i.e., it aliases the ISA
 			 * memory address space).  Thus, we try to
 			 * avoid allocating PCI devices in that range.
@@ -253,13 +587,13 @@ static void layout_dev(struct pci_dev *dev)
 			 * dense memory space only!
 			 */
 			/* align to multiple of size of minimum base */
-			alignto = MAX(0x1000, size) ;
+			alignto = MAX(0x1000, size);
 			base = ALIGN(mem_base, alignto);
 			if (size > 7 * 16*MB) {
-				printk("bios32 WARNING: slot %d, function %d "
-				       "requests  %dB of contiguous address "
-				       " space---don't use sparse memory "
-				       " accesses on this device!!\n",
+				printk("bios32 WARNING: slot %d, function %d"
+				       " requests 0x%x bytes of contiguous"
+				       " address space---don't use sparse"
+				       " memory accesses on this device!!\n",
 				       PCI_SLOT(dev->devfn),
 				       PCI_FUNC(dev->devfn), size);
 			} else {
@@ -268,22 +602,60 @@ static void layout_dev(struct pci_dev *dev)
 					base += 16*MB;
 					base  = ALIGN(base, alignto);
 				}
-				if (base / (128*MB) != (base + size) / (128*MB)) {
+				if (base/(128*MB) != (base + size)/(128*MB)) {
 					base &= ~(128*MB - 1);
 					base += (128 + 16)*MB;
 					base  = ALIGN(base, alignto);
 				}
 			}
 			mem_base = base + size;
+
 			pcibios_write_config_dword(bus->number, dev->devfn,
-						   reg, base);
+						   off, base);
+			new_io_reset(dev, off, orig_base);
+
+			handle = PCI_HANDLE(bus->number) | base;
+			dev->base_address[idx] = handle;
+
+			/*
+			 * Currently for 64-bit cards, we simply do the usual
+			 * for setup of the first register (low) of the pair,
+			 * and then clear out the second (high) register, as
+			 * we are not yet able to do 64-bit addresses, and
+			 * setting the high register to 0 allows 32-bit SAC
+			 * addresses to be used.
+			 */
+			if (type == PCI_BASE_ADDRESS_MEM_TYPE_64) {
+				unsigned int orig_base2;
+				pcibios_read_config_dword(bus->number,
+							  dev->devfn,
+							  off+4, &orig_base2);
+				if (0 != orig_base2) {
+					pcibios_write_config_dword(bus->number,
+								   dev->devfn,
+								   off+4, 0);
+					new_io_reset (dev, off+4, orig_base2);
+				}
+				/* Bypass hi reg in the loop.  */
+				dev->base_address[++idx] = 0;
+
+				printk("bios32 WARNING: "
+				       "handling 64-bit device in "
+				       "slot %d, function %d: \n",
+				       PCI_SLOT(dev->devfn),
+				       PCI_FUNC(dev->devfn));
+			}
+
+			DBG_DEVS(("layout_dev: dev 0x%x MEM @ 0x%lx (0x%x)\n",
+				  dev->device, handle, size));
 		}
-        }
-	/* enable device: */
+	}
+
+	/* Enable device: */
 	if (dev->class >> 8 == PCI_CLASS_NOT_DEFINED ||
 	    dev->class >> 8 == PCI_CLASS_NOT_DEFINED_VGA ||
-	    dev->class >> 8 == PCI_CLASS_DISPLAY_VGA ||
-	    dev->class >> 8 == PCI_CLASS_DISPLAY_XGA)
+	    dev->class >> 8 == PCI_CLASS_STORAGE_IDE ||
+	    dev->class >> 16 == PCI_BASE_CLASS_DISPLAY)
 	{
 		/*
 		 * All of these (may) have I/O scattered all around
@@ -296,21 +668,25 @@ static void layout_dev(struct pci_dev *dev)
 
 	pcibios_write_config_word(bus->number, dev->devfn, PCI_COMMAND,
 				  cmd | PCI_COMMAND_MASTER);
-	DBG_DEVS(("layout_dev: bus %d  slot 0x%x  VID 0x%x  DID 0x%x  class 0x%x\n",
-		  bus->number, PCI_SLOT(dev->devfn), dev->vendor, dev->device, dev->class));
+
+	DBG_DEVS(("layout_dev: bus %d slot %d VID 0x%x DID 0x%x"
+		  " class 0x%x cmd 0 x%x\n",
+		  bus->number, PCI_SLOT(dev->devfn), dev->vendor,
+		  dev->device, dev->class, cmd|PCI_COMMAND_MASTER));
 }
 
-
-static void layout_bus(struct pci_bus *bus)
+static int __init
+layout_bus(struct pci_bus *bus)
 {
 	unsigned int l, tio, bio, tmem, bmem;
 	struct pci_bus *child;
 	struct pci_dev *dev;
+	int found_vga = 0;
 
 	DBG_DEVS(("layout_bus: starting bus %d\n", bus->number));
 
 	if (!bus->devices && !bus->children)
-	  return;
+		return 0;
 
 	/*
 	 * Align the current bases on appropriate boundaries (4K for
@@ -328,9 +704,12 @@ static void layout_bus(struct pci_bus *bus)
 	 * devices.  They'll be re-enabled only once all address
 	 * decoders are programmed consistently.
 	 */
+	DBG_DEVS(("layout_bus: disable_dev for bus %d\n", bus->number));
+
 	for (dev = bus->devices; dev; dev = dev->sibling) {
-		if (dev->class >> 16 != PCI_BASE_CLASS_BRIDGE) {
-		        disable_dev(dev) ;
+		if ((dev->class >> 16 != PCI_BASE_CLASS_BRIDGE) ||
+		    (dev->class >> 8 == PCI_CLASS_BRIDGE_PCMCIA)) {
+			disable_dev(dev);
 		}
 	}
 
@@ -340,9 +719,12 @@ static void layout_bus(struct pci_bus *bus)
 	DBG_DEVS(("layout_bus: starting bus %d devices\n", bus->number));
 
 	for (dev = bus->devices; dev; dev = dev->sibling) {
-		if (dev->class >> 16 != PCI_BASE_CLASS_BRIDGE) {
+		if ((dev->class >> 16 != PCI_BASE_CLASS_BRIDGE) ||
+		    (dev->class >> 8 == PCI_CLASS_BRIDGE_PCMCIA)) {
 			layout_dev(dev);
 		}
+		if ((dev->class >> 8) == PCI_CLASS_DISPLAY_VGA)
+			found_vga = 1;
 	}
 	/*
 	 * Recursively allocate space for all of the sub-buses:
@@ -350,8 +732,8 @@ static void layout_bus(struct pci_bus *bus)
 	DBG_DEVS(("layout_bus: starting bus %d children\n", bus->number));
 
     	for (child = bus->children; child; child = child->next) {
-		layout_bus(child);
-        }
+		found_vga += layout_bus(child);
+	}
 	/*
 	 * Align the current bases on 4K and 1MB boundaries:
 	 */
@@ -360,111 +742,103 @@ static void layout_bus(struct pci_bus *bus)
 
 	if (bus->self) {
 		struct pci_dev *bridge = bus->self;
+
+		DBG_DEVS(("layout_bus: config bus %d bridge\n", bus->number));
+
 		/*
 		 * Set up the top and bottom of the PCI I/O segment
 		 * for this bus.
 		 */
 		pcibios_read_config_dword(bridge->bus->number, bridge->devfn,
-					  0x1c, &l);
-		l = (l & 0xffff0000) | ((bio >> 8) & 0x00f0) | ((tio - 1) & 0xf000);
+					  PCI_IO_BASE, &l);
+		l &= 0xffff0000;
+		l |= ((bio >> 8) & 0x00f0) | ((tio - 1) & 0xf000);
 		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
-					   0x1c, l);
+					   PCI_IO_BASE, l);
+
 		/*
-		 * Set up the top and bottom of the  PCI Memory segment
+		 * Clear out the upper 16 bits of IO base/limit.
+		 * Clear out the upper 32 bits of PREF base/limit.
+		 */
+		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
+					   PCI_IO_BASE_UPPER16, 0);
+		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
+					   PCI_PREF_BASE_UPPER32, 0);
+		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
+					   PCI_PREF_LIMIT_UPPER32, 0);
+
+		/*
+		 * Set up the top and bottom of the PCI Memory segment
 		 * for this bus.
 		 */
 		l = ((bmem & 0xfff00000) >> 16) | ((tmem - 1) & 0xfff00000);
 		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
-					   0x20, l);
+					   PCI_MEMORY_BASE, l);
+
 		/*
-		 * Turn off downstream PF memory address range:
+		 * Turn off downstream PF memory address range, unless
+		 * there is a VGA behind this bridge, in which case, we
+		 * enable the PREFETCH range to include BIOS ROM at C0000.
+		 *
+		 * NOTE: this is a bit of a hack, done with PREFETCH for
+		 * simplicity, rather than having to add it into the above
+		 * non-PREFETCH range, which could then be bigger than we want.
+		 * We might assume that we could relocate the BIOS ROM, but
+		 * that would depend on having it found by those who need it
+		 * (the DEC BIOS emulator would find it, but I do not know
+		 * about the Xservers). So, we do it this way for now... ;-}
+		 */
+		l = (found_vga) ? 0 : 0x0000ffff;
+		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
+					   PCI_PREF_MEMORY_BASE, l);
+
+		/*
+		 * Tell bridge that there is an ISA bus in the system,
+		 * and (possibly) a VGA as well.
+		 */
+		l = (found_vga) ? 0x0c : 0x04;
+		pcibios_write_config_byte(bridge->bus->number, bridge->devfn,
+					   PCI_BRIDGE_CONTROL, l);
+
+		/*
+		 * Clear status bits,
+		 * turn on I/O    enable (for downstream I/O),
+		 * turn on memory enable (for downstream memory),
+		 * turn on master enable (for upstream memory and I/O).
 		 */
 		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
-					   0x24, 0x0000ffff);
-		/*
-		 * Tell bridge that there is an ISA bus in the system:
-		 */
-		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
-					   0x3c, 0x00040000);
-		/*
-		 * Clear status bits, enable I/O (for downstream I/O),
-		 * turn on master enable (for upstream I/O), turn on
-		 * memory enable (for downstream memory), turn on
-		 * master enable (for upstream memory and I/O).
-		 */
-		pcibios_write_config_dword(bridge->bus->number, bridge->devfn,
-					   0x4, 0xffff0007);
+					   PCI_COMMAND, 0xffff0007);
 	}
+	DBG_DEVS(("layout_bus: bus %d finished\n", bus->number));
+	return found_vga;
 }
 
-#endif /* !PCI_MODIFY */
-
-
-/*
- * Given the vendor and device ids, find the n'th instance of that device
- * in the system.  
- */
-int pcibios_find_device (unsigned short vendor, unsigned short device_id,
-			 unsigned short index, unsigned char *bus,
-			 unsigned char *devfn)
+void __init
+layout_all_busses(unsigned long default_io_base,
+		  unsigned long default_mem_base)
 {
-        unsigned int curr = 0;
-	struct pci_dev *dev;
+	struct pci_bus *cur;
 
-	for (dev = pci_devices; dev; dev = dev->next) {
-		if (dev->vendor == vendor && dev->device == device_id) {
-			if (curr == index) {
-				*devfn = dev->devfn;
-				*bus = dev->bus->number;
-				return PCIBIOS_SUCCESSFUL;
-			}
-			++curr;
-		}
+	layout_hoses();
+
+	/*
+	 * Scan the tree, allocating PCI memory and I/O space.
+	 */
+	/*
+	 * Sigh; check_region() will need changing to accept a PCI_HANDLE,
+	 * if we allocate I/O space addresses on a per-bus basis.
+	 * For now, make the I/O bases unique across all busses, so
+	 * that check_region() will not get confused... ;-}
+	 */
+	io_base = default_io_base;
+	for (cur = &pci_root; cur; cur = cur->next) {
+		mem_base = default_mem_base;
+		DBG_DEVS(("layout_all_busses: calling layout_bus()\n"));
+		layout_bus(cur);
 	}
-	return PCIBIOS_DEVICE_NOT_FOUND;
+	DBG_DEVS(("layout_all_busses: done.\n"));
 }
 
-
-/*
- * Given the class, find the n'th instance of that device
- * in the system.
- */
-int pcibios_find_class (unsigned int class_code, unsigned short index,
-			unsigned char *bus, unsigned char *devfn)
-{
-        unsigned int curr = 0;
-	struct pci_dev *dev;
-
-	for (dev = pci_devices; dev; dev = dev->next) {
-		if (dev->class == class_code) {
-			if (curr == index) {
-				*devfn = dev->devfn;
-				*bus = dev->bus->number;
-				return PCIBIOS_SUCCESSFUL;
-			}
-			++curr;
-		}
-	}
-	return PCIBIOS_DEVICE_NOT_FOUND;
-}
-
-
-int pcibios_present(void)
-{
-        return 1;
-}
-
-
-unsigned long pcibios_init(unsigned long mem_start,
-			   unsigned long mem_end)
-{
-	printk("Alpha PCI BIOS32 revision %x.%02x\n", MAJOR_REV, MINOR_REV);
-
-#if !PCI_MODIFY
-	printk("...NOT modifying existing (SRM) PCI configuration\n");
-#endif
-	return mem_start;
-}
 
 /*
  * The SRM console *disables* the IDE interface, this code ensures it's
@@ -480,717 +854,502 @@ unsigned long pcibios_init(unsigned long mem_start,
  * written twice (I believe this is a safety feature to prevent
  * accidental modification---fun, isn't it?).
  */
-static inline void enable_ide(long ide_base)
+
+void __init
+enable_ide(long ide_base)
 {
 	int data;
+	unsigned long flags;
 
+	__save_and_cli(flags);
 	outb(0, ide_base);		/* set the index register for reg #0 */
 	data = inb(ide_base+1);		/* read the current contents */
 	outb(0, ide_base);		/* set the index register for reg #0 */
 	outb(data | 0x40, ide_base+1);	/* turn on IDE */
 	outb(data | 0x40, ide_base+1);	/* turn on IDE, really! */
+	__restore_flags(flags);
 }
 
-/* 
- * A small note about bridges and interrupts.    The DECchip 21050 (and later chips)
- * adheres to the PCI-PCI bridge specification.   This says that the interrupts on
- * the other side of a bridge are swizzled in the following manner:
- *
- * Dev    Interrupt   Interrupt 
- *        Pin on      Pin on 
- *        Device      Connector
- *
- *   4    A           A
- *        B           B
- *        C           C
- *        D           D
- * 
- *   5    A           B
- *        B           C
- *        C           D
- *        D           A
- *
- *   6    A           C
- *        B           D
- *        C           A
- *        D           B
- *
- *   7    A           D
- *        B           A
- *        C           B
- *        D           C
- *
- *   Where A = pin 1, B = pin 2 and so on and pin=0 = default = A.
- *   Thus, each swizzle is ((pin-1) + (device#-4)) % 4
- *
- *   The following code is somewhat simplistic as it assumes only one bridge.
- *   I will fix it later (david.rusling@reo.mts.dec.com).
- */
-static inline unsigned char bridge_swizzle(unsigned char pin, unsigned int slot) 
+/* Look for mis-configured devices' I/O space addresses behind bridges.  */
+static void
+check_behind_io(struct pci_dev *dev)
 {
-        /* swizzle */
-        return (((pin-1) + slot) % 4) + 1 ;
-}
+	struct pci_bus *bus = dev->bus;
+	unsigned int reg, orig_base, new_base, found_one = 0;
 
-/*
- * Most evaluation boards share most of the fixup code, which is isolated here.
- * This function is declared "inline" as only one platform will ever be selected
- * in any given kernel.  If that platform doesn't need this code, we don't want
- * it around as dead code.
- */
-static inline void common_fixup(long min_idsel, long max_idsel, long irqs_per_slot,
-				char irq_tab[max_idsel - min_idsel + 1][irqs_per_slot],
-				long ide_base)
-{
-	struct pci_dev *dev;
-	unsigned char pin;
-	unsigned char slot ;
+	for (reg = PCI_BASE_ADDRESS_0; reg <= PCI_BASE_ADDRESS_5; reg += 4) {
+		/* Read the current setting, check for I/O space and >= 64K */
+		pcibios_read_config_dword(bus->number, dev->devfn,
+					  reg, &orig_base);
 
-	/*
-	 * Go through all devices, fixing up irqs as we see fit:
-	 */
-	for (dev = pci_devices; dev; dev = dev->next) {
-	        if (dev->class >> 16 != PCI_BASE_CLASS_BRIDGE
-#if defined(CONFIG_ALPHA_MIKASA) || defined(CONFIG_ALPHA_ALCOR)
-		    /* PCEB (PCI to EISA bridge) does not identify
-		       itself as a bridge... :-( */
-		    && !((dev->vendor==0x8086) && (dev->device==0x482))
+		if (!orig_base || !(orig_base & PCI_BASE_ADDRESS_SPACE_IO))
+			continue; /* unused or non-IO */
+
+		if (orig_base < 64*1024) {
+#if 1
+printk("check_behind_io: ALREADY OK! bus %d slot %d base 0x%x\n",
+       bus->number, PCI_SLOT(dev->devfn), orig_base);
 #endif
-		    ) {
-		        dev->irq = 0;
-			/*
-			 * This device is not on the primary bus, we need to figure out which
-			 * interrupt pin it will come in on.   We know which slot it will come
-			 * in on 'cos that slot is where the bridge is.   Each time the interrupt
-			 * line passes through a PCI-PCI bridge we must apply the swizzle function
-			 * (see the inline static routine above).
-			 */
-			if (dev->bus->number != 0) {
-			        struct pci_dev *curr = dev ;
-				/* read the pin and do the PCI-PCI bridge interrupt pin swizzle */
-				pcibios_read_config_byte(dev->bus->number, dev->devfn,
-							 PCI_INTERRUPT_PIN, &pin);
-				/* cope with 0 */
-				if (pin == 0) pin = 1 ;
-				/* follow the chain of bridges, swizzling as we go */
-				do {
-				        /* swizzle */
-				        pin = bridge_swizzle(pin, PCI_SLOT(curr->devfn)) ;
-					/* move up the chain of bridges */
-					curr = curr->bus->self ;
-				} while (curr->bus->self) ;
-				/* The slot is the slot of the last bridge. */
-				slot = PCI_SLOT(curr->devfn) ;
-			} else {
-			        /* work out the slot */
-		                slot = PCI_SLOT(dev->devfn) ;
-				/* read the pin */
-				pcibios_read_config_byte(dev->bus->number,
-							 dev->devfn,
-							 PCI_INTERRUPT_PIN,
-							 &pin);
-			}
-			if (irq_tab[slot - min_idsel][pin] != -1)
-			        dev->irq = irq_tab[slot - min_idsel][pin];
-#if PCI_MODIFY
-			/* tell the device: */
-			pcibios_write_config_byte(dev->bus->number, dev->devfn,
-						  PCI_INTERRUPT_LINE, dev->irq);
-#endif
-			/*
-			 * if it's a VGA, enable its BIOS ROM at C0000
-			 */
-			if ((dev->class >> 8) == PCI_CLASS_DISPLAY_VGA) {
-			  pcibios_write_config_dword(dev->bus->number,
-						     dev->devfn,
-						     PCI_ROM_ADDRESS,
-						     0x000c0000 | PCI_ROM_ADDRESS_ENABLE);
-			}
+			if (orig_base & ~1)
+				continue; /* OK! */
+			orig_base = 0x12001; /* HACK! FIXME!! */
 		}
 
+		/* HACK ALERT! for now, just subtract 32K from the
+		   original address, which should give us addresses
+		   in the range 0x8000 and up */
+		new_base = orig_base - 0x8000;
+#if 1
+printk("check_behind_io: ALERT! bus %d slot %d old 0x%x new 0x%x\n",
+       bus->number, PCI_SLOT(dev->devfn), orig_base, new_base);
+#endif
+		pcibios_write_config_dword(bus->number, dev->devfn,
+					   reg, new_base);
+
+		new_io_reset(dev, reg, orig_base);
+		found_one++;
 	}
-	if (ide_base) {
-		enable_ide(ide_base);
+
+	/* If any were modified, gotta hack the bridge IO limits too. */
+	if (found_one) {
+		if (bus->self) {
+			struct pci_dev *bridge = bus->self;
+			unsigned int l;
+			/*
+			 * Set up the top and bottom of the PCI I/O segment
+			 * for this bus.
+			 */
+			pcibios_read_config_dword(bridge->bus->number,
+						  bridge->devfn, 0x1c, &l);
+#if 1
+printk("check_behind_io: ALERT! bus %d slot %d oldLIM 0x%x\n",
+       bus->number, PCI_SLOT(bridge->devfn), l);
+#endif
+			l = (l & 0xffff0000U) | 0xf080U; /* give it ALL */
+			pcibios_write_config_dword(bridge->bus->number,
+						   bridge->devfn, 0x1c, l);
+			pcibios_write_config_dword(bridge->bus->number,
+						   bridge->devfn,
+						   0x3c, 0x00040000);
+			pcibios_write_config_dword(bridge->bus->number,
+						   bridge->devfn,
+						   0x4, 0xffff0007);
+		} else
+			printk("check_behind_io: WARNING! bus->self NULL\n");
 	}
 }
 
-/*
- * The EB66+ is very similar to the EB66 except that it does not have
- * the on-board NCR and Tulip chips.  In the code below, I have used
- * slot number to refer to the id select line and *not* the slot
- * number used in the EB66+ documentation.  However, in the table,
- * I've given the slot number, the id select line and the Jxx number
- * that's printed on the board.  The interrupt pins from the PCI slots
- * are wired into 3 interrupt summary registers at 0x804, 0x805 and
- * 0x806 ISA.
- *
- * In the table, -1 means don't assign an IRQ number.  This is usually
- * because it is the Saturn IO (SIO) PCI/ISA Bridge Chip.
- */
-static inline void eb66p_fixup(void)
-{
-	char irq_tab[5][5] = {
-		{16+0, 16+0, 16+5,  16+9, 16+13},	/* IdSel 6,  slot 0, J25 */
-		{16+1, 16+1, 16+6, 16+10, 16+14},	/* IdSel 7,  slot 1, J26 */
-		{  -1,   -1,   -1,    -1,    -1},	/* IdSel 8,  SIO         */
-		{16+2, 16+2, 16+7, 16+11, 16+15},	/* IdSel 9,  slot 2, J27 */
-		{16+3, 16+3, 16+8, 16+12,  16+6}	/* IdSel 10, slot 3, J28 */
-	};
-	common_fixup(6, 10, 5, irq_tab, 0x398);
-}
-
 
 /*
- * The PC164 has 19 PCI interrupts, four from each of the four PCI
- * slots, the SIO, PCI/IDE, and USB.
- * 
- * Each of the interrupts can be individually masked. This is
- * accomplished by setting the appropriate bit in the mask register.
- * A bit is set by writing a "1" to the desired position in the mask
- * register and cleared by writing a "0". There are 3 mask registers
- * located at ISA address 804h, 805h and 806h.
- * 
- * An I/O read at ISA address 804h, 805h, 806h will return the
- * state of the 11 PCI interrupts and not the state of the MASKED
- * interrupts.
- * 
- * Note: A write to I/O 804h, 805h, and 806h the mask register will be
- * updated.
- * 
- * 
- * 				ISA DATA<7:0>
- * ISA     +--------------------------------------------------------------+
- * ADDRESS |   7   |   6   |   5   |   4   |   3   |   2  |   1   |   0   |
- *         +==============================================================+
- * 0x804   | INTB0 |  USB  |  IDE  |  SIO  | INTA3 |INTA2 | INTA1 | INTA0 |
- *         +--------------------------------------------------------------+
- * 0x805   | INTD0 | INTC3 | INTC2 | INTC1 | INTC0 |INTB3 | INTB2 | INTB1 |
- *         +--------------------------------------------------------------+
- * 0x806   | Rsrv  | Rsrv  | Rsrv  | Rsrv  | Rsrv  |INTD3 | INTD2 | INTD1 |
- *         +--------------------------------------------------------------+
- *         * Rsrv = reserved bits
- *         Note: The mask register is write-only.
- * 
- * IdSel	
- *   5	 32 bit PCI option slot 2
- *   6	 64 bit PCI option slot 0
- *   7	 64 bit PCI option slot 1
- *   8	 Saturn I/O
- *   9	 32 bit PCI option slot 3
- *  10	 USB
- *  11	 IDE
- * 
+ * Most boards share most of the fixup code, which is isolated here.
  */
 
-static inline void alphapc164_fixup(void)
-{
-	char irq_tab[7][5] = {
-	  /*
-	   *      int   intA  intB   intC   intD
-	   *      ----  ----  ----   ----   ----
-	   */
-		{ 16+2, 16+2, 16+9,  16+13, 16+17},	/* IdSel  5,  slot 2, J20 */
-		{ 16+0, 16+0, 16+7,  16+11, 16+15},	/* IdSel  6,  slot 0, J29 */
-		{ 16+1, 16+1, 16+8,  16+12, 16+16},	/* IdSel  7,  slot 1, J26 */
-		{   -1,   -1,   -1,    -1,    -1},	/* IdSel  8,  SIO         */
-		{ 16+3, 16+3, 16+10, 16+14, 16+18},	/* IdSel  9,  slot 3, J19 */
-		{ 16+6, 16+6, 16+6,  16+6,  16+6},	/* IdSel 10,  USB */
-		{ 16+5, 16+5, 16+5,  16+5,  16+5}	/* IdSel 11,  IDE */
-	};
-
-	common_fixup(5, 11, 5, irq_tab, 0);
-}
-
-/*
- * The AlphaPC64 is very similar to the EB66+ except that its slots
- * are numbered differently.  In the code below, I have used slot
- * number to refer to the id select line and *not* the slot number
- * used in the AlphaPC64 documentation.  However, in the table, I've
- * given the slot number, the id select line and the Jxx number that's
- * printed on the board.  The interrupt pins from the PCI slots are
- * wired into 3 interrupt summary registers at 0x804, 0x805 and 0x806
- * ISA.
- *
- * In the table, -1 means don't assign an IRQ number.  This is usually
- * because it is the Saturn IO (SIO) PCI/ISA Bridge Chip.
- */
-static inline void cabriolet_fixup(void)
-{
-	char irq_tab[5][5] = {
-		{ 16+2, 16+2, 16+7, 16+11, 16+15},      /* IdSel 5,  slot 2, J21 */
-		{ 16+0, 16+0, 16+5,  16+9, 16+13},      /* IdSel 6,  slot 0, J19 */
-		{ 16+1, 16+1, 16+6, 16+10, 16+14},      /* IdSel 7,  slot 1, J20 */
-		{   -1,   -1,   -1,    -1,    -1},	/* IdSel 8,  SIO         */
-		{ 16+3, 16+3, 16+8, 16+12, 16+16}       /* IdSel 9,  slot 3, J22 */
-	};
-
-	common_fixup(5, 9, 5, irq_tab, 0x398);
-}
-
-
-/*
- * Fixup configuration for EB66/EB64+ boards.
- *
- * Both these boards use the same interrupt summary scheme.  There are
- * two 8 bit external summary registers as follows:
- *
- * Summary @ 0x26:
- * Bit      Meaning
- * 0        Interrupt Line A from slot 0
- * 1        Interrupt Line A from slot 1
- * 2        Interrupt Line B from slot 0
- * 3        Interrupt Line B from slot 1
- * 4        Interrupt Line C from slot 0
- * 5        Interrupt line from the two ISA PICs
- * 6        Tulip (slot 
- * 7        NCR SCSI
- *
- * Summary @ 0x27
- * Bit      Meaning
- * 0        Interrupt Line C from slot 1
- * 1        Interrupt Line D from slot 0
- * 2        Interrupt Line D from slot 1
- * 3        RAZ
- * 4        RAZ
- * 5        RAZ
- * 6        RAZ
- * 7        RAZ
- *
- * The device to slot mapping looks like:
- *
- * Slot     Device
- *  5       NCR SCSI controller
- *  6       PCI on board slot 0
- *  7       PCI on board slot 1
- *  8       Intel SIO PCI-ISA bridge chip
- *  9       Tulip - DECchip 21040 ethernet controller
- *   
- *
- * This two layered interrupt approach means that we allocate IRQ 16 and 
- * above for PCI interrupts.  The IRQ relates to which bit the interrupt
- * comes in on.  This makes interrupt processing much easier.
- */
-static inline void eb66_and_eb64p_fixup(void)
-{
-	char irq_tab[5][5] = {
-		{16+7, 16+7, 16+7, 16+7,  16+7},	/* IdSel 5,  slot ?, ?? */
-		{16+0, 16+0, 16+2, 16+4,  16+9},	/* IdSel 6,  slot ?, ?? */
-		{16+1, 16+1, 16+3, 16+8, 16+10},	/* IdSel 7,  slot ?, ?? */
-		{  -1,   -1,   -1,   -1,    -1},	/* IdSel 8,  SIO */
-		{16+6, 16+6, 16+6, 16+6,  16+6},	/* IdSel 9,  TULIP */
-	};
-	common_fixup(5, 9, 5, irq_tab, 0);
-}
-
-
-/*
- * Fixup configuration for MIKASA (NORITAKE is different)
- *
- * Summary @ 0x536:
- * Bit      Meaning
- * 0        Interrupt Line A from slot 0
- * 1        Interrupt Line B from slot 0
- * 2        Interrupt Line C from slot 0
- * 3        Interrupt Line D from slot 0
- * 4        Interrupt Line A from slot 1
- * 5        Interrupt line B from slot 1
- * 6        Interrupt Line C from slot 1
- * 7        Interrupt Line D from slot 1
- * 8        Interrupt Line A from slot 2
- * 9        Interrupt Line B from slot 2
- *10        Interrupt Line C from slot 2
- *11        Interrupt Line D from slot 2
- *12        NCR 810 SCSI
- *13        Power Supply Fail
- *14        Temperature Warn
- *15        Reserved
- *
- * The device to slot mapping looks like:
- *
- * Slot     Device
- *  6       NCR SCSI controller
- *  7       Intel PCI-EISA bridge chip
- * 11       PCI on board slot 0
- * 12       PCI on board slot 1
- * 13       PCI on board slot 2
- *   
- *
- * This two layered interrupt approach means that we allocate IRQ 16 and 
- * above for PCI interrupts.  The IRQ relates to which bit the interrupt
- * comes in on.  This makes interrupt processing much easier.
- */
-static inline void mikasa_fixup(void)
-{
-	char irq_tab[8][5] = {
-	  /*INT    INTA   INTB   INTC   INTD */
-	  {16+12, 16+12, 16+12, 16+12, 16+12},	/* IdSel 17,  SCSI */
-	  {   -1,    -1,    -1,    -1,    -1},	/* IdSel 18,  PCEB */
-	  {   -1,    -1,    -1,    -1,    -1},	/* IdSel 19,  ???? */
-	  {   -1,    -1,    -1,    -1,    -1},	/* IdSel 20,  ???? */
-	  {   -1,    -1,    -1,    -1,    -1},	/* IdSel 21,  ???? */
-	  { 16+0,  16+0,  16+1,  16+2,  16+3},	/* IdSel 22,  slot 0 */
-	  { 16+4,  16+4,  16+5,  16+6,  16+7},	/* IdSel 23,  slot 1 */
-	  { 16+8,  16+8,  16+9, 16+10, 16+11},	/* IdSel 24,  slot 2 */
-	};
-	common_fixup(6, 13, 5, irq_tab, 0);
-}
-
-/*
- * Fixup configuration for ALCOR
- *
- * Summary @ GRU_INT_REQ:
- * Bit      Meaning
- * 0        Interrupt Line A from slot 2
- * 1        Interrupt Line B from slot 2
- * 2        Interrupt Line C from slot 2
- * 3        Interrupt Line D from slot 2
- * 4        Interrupt Line A from slot 1
- * 5        Interrupt line B from slot 1
- * 6        Interrupt Line C from slot 1
- * 7        Interrupt Line D from slot 1
- * 8        Interrupt Line A from slot 0
- * 9        Interrupt Line B from slot 0
- *10        Interrupt Line C from slot 0
- *11        Interrupt Line D from slot 0
- *12        Interrupt Line A from slot 4
- *13        Interrupt Line B from slot 4
- *14        Interrupt Line C from slot 4
- *15        Interrupt Line D from slot 4
- *16        Interrupt Line D from slot 3
- *17        Interrupt Line D from slot 3
- *18        Interrupt Line D from slot 3
- *19        Interrupt Line D from slot 3
- *20-30     Reserved
- *31        EISA interrupt
- *
- * The device to slot mapping looks like:
- *
- * Slot     Device
- *  7       PCI on board slot 0
- *  8       PCI on board slot 3
- *  9       PCI on board slot 4
- * 10       PCEB (PCI-EISA bridge)
- * 11       PCI on board slot 2
- * 12       PCI on board slot 1
- *   
- *
- * This two layered interrupt approach means that we allocate IRQ 16 and 
- * above for PCI interrupts.  The IRQ relates to which bit the interrupt
- * comes in on.  This makes interrupt processing much easier.
- */
-static inline void alcor_fixup(void)
-{
-	char irq_tab[6][5] = {
-	  /*INT    INTA   INTB   INTC   INTD */
-	  { 16+8,  16+8,  16+9, 16+10, 16+11},	/* IdSel 18,  slot 0 */
-	  {16+16, 16+16, 16+17, 16+18, 16+19},	/* IdSel 19,  slot 3 */
-	  {16+12, 16+12, 16+13, 16+14, 16+15},	/* IdSel 20,  slot 4 */
-	  {   -1,    -1,    -1,    -1,    -1},	/* IdSel 21,  PCEB   */
-	  { 16+0,  16+0,  16+1,  16+2,  16+3},	/* IdSel 22,  slot 2 */
-	  { 16+4,  16+4,  16+5,  16+6,  16+7},	/* IdSel 23,  slot 1 */
-	};
-	common_fixup(7, 12, 5, irq_tab, 0);
-}
-
-/*
- * Fixup configuration for ALPHA XLT (EV5/EV56)
- *
- * Summary @ GRU_INT_REQ:
- * Bit      Meaning
- * 0        Interrupt Line A from slot 2
- * 1        Interrupt Line B from slot 2
- * 2        Interrupt Line C from slot 2
- * 3        Interrupt Line D from slot 2
- * 4        Interrupt Line A from slot 1
- * 5        Interrupt line B from slot 1
- * 6        Interrupt Line C from slot 1
- * 7        Interrupt Line D from slot 1
- * 8        Interrupt Line A from slot 0
- * 9        Interrupt Line B from slot 0
- *10        Interrupt Line C from slot 0
- *11        Interrupt Line D from slot 0
- *12        NCR810 SCSI in slot 9
- *13        DC-21040 (TULIP) in slot 6
- *14-19     Reserved
- *20-23     Jumpers (interrupt)
- *24-27     Module revision
- *28-30     Reserved
- *31        EISA interrupt
- *
- * The device to slot mapping looks like:
- *
- * Slot     Device
- *  6       TULIP
- *  7       PCI on board slot 0
- *  8       none
- *  9       SCSI
- * 10       PCI-ISA bridge
- * 11       PCI on board slot 2
- * 12       PCI on board slot 1
- *   
- *
- * This two layered interrupt approach means that we allocate IRQ 16 and 
- * above for PCI interrupts.  The IRQ relates to which bit the interrupt
- * comes in on.  This makes interrupt processing much easier.
- */
-static inline void xlt_fixup(void)
-{
-	char irq_tab[7][5] = {
-	  /*INT    INTA   INTB   INTC   INTD */
-	  {16+13, 16+13, 16+13, 16+13, 16+13},	/* IdSel 17,  TULIP  */
-	  { 16+8,  16+8,  16+9, 16+10, 16+11},	/* IdSel 18,  slot 0 */
-	  {   -1,    -1,    -1,    -1,    -1},	/* IdSel 19,  none   */
-	  {16+12, 16+12, 16+12, 16+12, 16+12},	/* IdSel 20,  SCSI   */
-	  {   -1,    -1,    -1,    -1,    -1},	/* IdSel 21,  SIO    */
-	  { 16+0,  16+0,  16+1,  16+2,  16+3},	/* IdSel 22,  slot 2 */
-	  { 16+4,  16+4,  16+5,  16+6,  16+7},	/* IdSel 23,  slot 1 */
-	};
-	common_fixup(6, 12, 5, irq_tab, 0);
-}
-
-
-/*
- * Fixup configuration for all boards that route the PCI interrupts
- * through the SIO PCI/ISA bridge.  This includes Noname (AXPpci33),
- * Avanti (AlphaStation) and Kenetics's Platform 2000.
- */
-static inline void sio_fixup(void)
+void __init
+common_pci_fixup(int (*map_irq)(struct pci_dev *dev, int slot, int pin),
+		 int (*swizzle)(struct pci_dev *dev, int *pin))
 {
 	struct pci_dev *dev;
-	/*
-	 * The Noname board has 5 PCI slots with each of the 4
-	 * interrupt pins routed to different pins on the PCI/ISA
-	 * bridge (PIRQ0-PIRQ3).  The table below is based on
-	 * information available at:
-	 *
-	 *   http://ftp.digital.com/pub/DEC/axppci/ref_interrupts.txt
-	 *
-	 * I have no information on the Avanti interrupt routing, but
-	 * the routing seems to be identical to the Noname except
-	 * that the Avanti has an additional slot whose routing I'm
-	 * unsure of.
-	 *
-	 * pirq_tab[0] is a fake entry to deal with old PCI boards
-	 * that have the interrupt pin number hardwired to 0 (meaning
-	 * that they use the default INTA line, if they are interrupt
-	 * driven at all).
-	 */
-	static const char pirq_tab[][5] = {
-#ifdef CONFIG_ALPHA_P2K
-		{ 0,  0, -1, -1, -1}, /* idsel  6 (53c810) */
-		{-1, -1, -1, -1, -1}, /* idsel  7 (SIO: PCI/ISA bridge) */
-		{ 1,  1,  2,  3,  0}, /* idsel  8 (slot A) */
-		{ 2,  2,  3,  0,  1}, /* idsel  9 (slot B) */
-		{-1, -1, -1, -1, -1}, /* idsel 10 (unused) */
-		{-1, -1, -1, -1, -1}, /* idsel 11 (unused) */
-		{ 3,  3, -1, -1, -1}, /* idsel 12 (CMD0646) */
-#else
-		{ 3,  3,  3,  3,  3}, /* idsel  6 (53c810) */ 
-		{-1, -1, -1, -1, -1}, /* idsel  7 (SIO: PCI/ISA bridge) */
-		{ 2,  2, -1, -1, -1}, /* idsel  8 (Noname hack: slot closest to ISA) */
-		{-1, -1, -1, -1, -1}, /* idsel  9 (unused) */
-		{-1, -1, -1, -1, -1}, /* idsel 10 (unused) */
-		{ 0,  0,  2,  1,  0}, /* idsel 11 KN25_PCI_SLOT0 */
-		{ 1,  1,  0,  2,  1}, /* idsel 12 KN25_PCI_SLOT1 */
-		{ 2,  2,  1,  0,  2}, /* idsel 13 KN25_PCI_SLOT2 */
-		{ 0,  0,  0,  0,  0}, /* idsel 14 AS255 TULIP */
-#endif
-	};
-	/*
-	 * route_tab selects irq routing in PCI/ISA bridge so that:
-	 *		PIRQ0 -> irq 15
-	 *		PIRQ1 -> irq  9
-	 *		PIRQ2 -> irq 10
-	 *		PIRQ3 -> irq 11
-	 *
-	 * This probably ought to be configurable via MILO.  For
-	 * example, sound boards seem to like using IRQ 9.
-	 */
-#ifdef CONFIG_ALPHA_NONAME
-	/*
-	 * For UDB, the only available PCI slot must not map to IRQ 9,
-	 *  since that's the builtin MSS sound chip. That PCI slot
-	 *  will map to PIRQ1 (for INTA at least), so we give it IRQ 15
-	 *  instead.
-	 *
-	 * Unfortunately we have to do this for NONAME as well, since
-	 *  they are co-indicated when the platform type "Noname" is
-	 *  selected... :-(
-	 */
-	const unsigned int route_tab = 0x0b0a0f09;
-#else /* CONFIG_ALPHA_NONAME */
-	const unsigned int route_tab = 0x0b0a090f;
-#endif /* CONFIG_ALPHA_NONAME */
-	unsigned int level_bits;
-	unsigned char pin, slot;
-	int pirq;
-
-	pcibios_write_config_dword(0, PCI_DEVFN(7, 0), 0x60, route_tab);
+	u8 pin, slot, irq_orig;
+	int irq;
 
 	/*
-	 * Go through all devices, fixing up irqs as we see fit:
+	 * Go through all devices, fixing up irqs as we see fit.
 	 */
-	level_bits = 0;
 	for (dev = pci_devices; dev; dev = dev->next) {
-	        if (dev->class >> 16 == PCI_BASE_CLASS_BRIDGE)
+		if ((dev->class >> 16 == PCI_BASE_CLASS_BRIDGE) &&
+		    (dev->class >> 8 != PCI_CLASS_BRIDGE_PCMCIA))
 			continue;
-		dev->irq = 0;
-		if (dev->bus->number != 0) {
-			struct pci_dev *curr = dev ;
-			/*
-			 * read the pin and do the PCI-PCI bridge
-			 * interrupt pin swizzle
-			 */
-			pcibios_read_config_byte(dev->bus->number, dev->devfn,
-						 PCI_INTERRUPT_PIN, &pin);
-			/* cope with 0 */
-			if (pin == 0) pin = 1 ;
-			/* follow the chain of bridges, swizzling as we go */
-			do {
-				/* swizzle */
-				pin = bridge_swizzle(pin, PCI_SLOT(curr->devfn)) ;
-				/* move up the chain of bridges */
-				curr = curr->bus->self ;
-			} while (curr->bus->self) ;
-			/* The slot is the slot of the last bridge. */
-			slot = PCI_SLOT(curr->devfn) ;
-		} else {
-			/* work out the slot */
-			slot = PCI_SLOT(dev->devfn) ;
-			/* read the pin */
-			pcibios_read_config_byte(dev->bus->number, dev->devfn,
-						 PCI_INTERRUPT_PIN, &pin);
-		}
 
-		if (slot < 6 || slot >= 6 + sizeof(pirq_tab)/sizeof(pirq_tab[0])) {
-			printk("bios32.sio_fixup: "
-			       "weird, found device %04x:%04x in non-existent slot %d!!\n",
-			       dev->vendor, dev->device, slot);
-			continue;
-		}
-		pirq = pirq_tab[slot - 6][pin];
-
-		DBG_DEVS(("sio_fixup: bus %d  slot 0x%x  VID 0x%x  DID 0x%x\n"
-			  "           int_slot 0x%x  int_pin 0x%x,  pirq 0x%x\n",
-			  dev->bus->number, PCI_SLOT(dev->devfn), dev->vendor, dev->device,
-			  slot, pin, pirq));
 		/*
-		 * if it's a VGA, enable its BIOS ROM at C0000
+		 * We don't have code that will init the CYPRESS bridge
+		 * correctly so we do the next best thing, and depend on
+		 * the previous console code to do the right thing, and
+		 * ignore it here... :-\
 		 */
-		if ((dev->class >> 8) == PCI_CLASS_DISPLAY_VGA) {
-			pcibios_write_config_dword(dev->bus->number, dev->devfn,
-						   PCI_ROM_ADDRESS,
-						   0x000c0000 | PCI_ROM_ADDRESS_ENABLE);
-		}
-		if ((dev->class >> 16) == PCI_BASE_CLASS_DISPLAY) {
-			continue; /* for now, displays get no IRQ */
-		}
-
-		if (pirq < 0) {
-			printk("bios32.sio_fixup: "
-			       "weird, device %04x:%04x coming in on slot %d has no irq line!!\n",
-			       dev->vendor, dev->device, slot);
+		if (dev->vendor == PCI_VENDOR_ID_CONTAQ &&
+		    dev->device == PCI_DEVICE_ID_CONTAQ_82C693) {
+			DBG_DEVS(("common_pci_fixup: ignoring CYPRESS bridge...\n"));
 			continue;
 		}
 
-		dev->irq = (route_tab >> (8 * pirq)) & 0xff;
+		/*
+		 * This device is not on the primary bus, we need
+		 * to figure out which interrupt pin it will come
+		 * in on.   We know which slot it will come in on
+		 * 'cos that slot is where the bridge is.   Each
+		 * time the interrupt line passes through a PCI-PCI
+		 * bridge we must apply the swizzle function (see
+		 * the inline static routine above).
+		 */
+		dev->irq = 0;
 
-		/* must set the PCI IRQs to level triggered */
-		level_bits |= (1 << dev->irq);
+		pcibios_read_config_byte(dev->bus->number, dev->devfn,
+					 PCI_INTERRUPT_PIN, &pin);
+		/* Cope with 0 and illegal. */
+		if (pin == 0 || pin > 4)
+			pin = 1;
 
-#if PCI_MODIFY
-		/* tell the device: */
+		if (!DEV_IS_ON_PRIMARY(dev)) {
+			/* Follow the chain of bridges, swizzling as we go.  */
+
+			int spill = pin;
+			slot = (*swizzle)(dev, &spill);
+			pin = spill;
+
+			/* Must make sure that SRM didn't screw up
+			   and allocate an address > 64K for I/O
+			   space behind a PCI-PCI bridge. */
+			if (alpha_use_srm_setup)
+				check_behind_io(dev);
+		} else {
+			/* Just a device on a primary bus.  */
+			slot = PCI_SLOT(dev->devfn);
+		}
+
+		irq = (*map_irq)(dev, slot, pin);
+
+		DBG_DEVS(("common_pci_fixup: bus %d slot %d "
+			  "pin %d irq %d\n",
+			  dev->bus->number, slot, pin, irq));
+
+		if (irq != -1)
+			dev->irq = irq;
+
+		if (alpha_using_srm) {
+			/* Read the original SRM-set IRQ and tell. */
+			pcibios_read_config_byte(dev->bus->number,
+						 dev->devfn,
+						 PCI_INTERRUPT_LINE,
+						 &irq_orig);
+
+			if (irq_orig != dev->irq) {
+				DBG_DEVS(("common_pci_fixup: bus %d "
+					  "slot 0x%x SRM IRQ 0x%x "
+					  "changed to 0x%x\n",
+					  dev->bus->number,
+					  PCI_SLOT(dev->devfn),
+					  irq_orig, dev->irq));
+
+				new_irq_reset(dev, irq_orig);
+			}
+		}
+
+		/* Always tell the device, so the driver knows what is
+		   the real IRQ to use; the device does not use it. */
 		pcibios_write_config_byte(dev->bus->number, dev->devfn,
 					  PCI_INTERRUPT_LINE, dev->irq);
-#endif
+
+		DBG_DEVS(("common_pci_fixup: bus %d slot 0x%x"
+			  " VID 0x%x DID 0x%x\n"
+			  "              int_slot 0x%x pin 0x%x"
+			  " pirq 0x%x\n",
+			  dev->bus->number, PCI_SLOT(dev->devfn),
+			  dev->vendor, dev->device,
+			  slot, pin, dev->irq));
+
+		/*
+		 * If it's a VGA, enable its BIOS ROM at C0000.
+		 */
+		if ((dev->class >> 8) == PCI_CLASS_DISPLAY_VGA) {
+			/* But if its a Cirrus 543x/544x DISABLE it,
+			   since enabling ROM disables the memory... */
+			if ((dev->vendor == PCI_VENDOR_ID_CIRRUS) &&
+			    (dev->device >= 0x00a0) &&
+			    (dev->device <= 0x00ac)) {
+				pcibios_write_config_dword(
+					dev->bus->number,
+					dev->devfn,
+					PCI_ROM_ADDRESS,
+					0x00000000);
+			} else {
+				pcibios_write_config_dword(
+					dev->bus->number,
+					dev->devfn,
+					PCI_ROM_ADDRESS,
+					0x000c0000 | PCI_ROM_ADDRESS_ENABLE);
+			}
+		}
+		/*
+		 * If it's a SCSI, disable its BIOS ROM.
+		 */
+		if ((dev->class >> 8) == PCI_CLASS_STORAGE_SCSI) {
+			pcibios_write_config_dword(dev->bus->number,
+						   dev->devfn,
+						   PCI_ROM_ADDRESS,
+						   0x0000000);
+		}
 	}
-	/*
-	 * Now, make all PCI interrupts level sensitive.  Notice:
-	 * these registers must be accessed byte-wise.  inw()/outw()
-	 * don't work.
-	 *
-	 * Make sure to turn off any level bits set for IRQs 9,10,11,15,
-	 *  so that the only bits getting set are for devices actually found.
-	 * Note that we do preserve the remainder of the bits, which we hope
-	 *  will be set correctly by ARC/SRM.
-	 */
-	level_bits |= ((inb(0x4d0) | (inb(0x4d1) << 8)) & 0x71ff);
-	outb((level_bits >> 0) & 0xff, 0x4d0);
-	outb((level_bits >> 8) & 0xff, 0x4d1);
-	enable_ide(0x26e);
 }
 
+/* Most Alphas have straight-forward swizzling needs.  */
 
-#ifdef CONFIG_TGA_CONSOLE
-extern void tga_console_init(void);
-#endif /* CONFIG_TGA_CONSOLE */
-
-unsigned long pcibios_fixup(unsigned long mem_start, unsigned long mem_end)
+int __init
+common_swizzle(struct pci_dev *dev, int *pinp)
 {
-#if PCI_MODIFY
-	/*
-	 * Scan the tree, allocating PCI memory and I/O space.
-	 */
-	layout_bus(&pci_root);
-#endif
-	
-	/*
-	 * Now is the time to do all those dirty little deeds...
-	 */
-#if defined(CONFIG_ALPHA_NONAME) || defined(CONFIG_ALPHA_AVANTI) || defined(CONFIG_ALPHA_P2K)
-	sio_fixup();
-#elif defined(CONFIG_ALPHA_CABRIOLET) || defined(CONFIG_ALPHA_EB164)
-	cabriolet_fixup();
-#elif defined(CONFIG_ALPHA_PC164)
-	alphapc164_fixup();
-#elif defined(CONFIG_ALPHA_EB66P)
-	eb66p_fixup();
-#elif defined(CONFIG_ALPHA_EB66)
-	eb66_and_eb64p_fixup();
-#elif defined(CONFIG_ALPHA_EB64P)
-	eb66_and_eb64p_fixup();
-#elif defined(CONFIG_ALPHA_MIKASA)
-	mikasa_fixup();
-#elif defined(CONFIG_ALPHA_ALCOR)
-	alcor_fixup();
-#elif defined(CONFIG_ALPHA_XLT)
-	xlt_fixup();
-#else
-#	error You must tell me what kind of platform you want.
-#endif
+	int pin = *pinp;
+	do {
+		pin = bridge_swizzle(pin, PCI_SLOT(dev->devfn));
+		/* Move up the chain of bridges. */
+		dev = dev->bus->self;
+	} while (dev->bus->self);
+	*pinp = pin;
 
-#ifdef CONFIG_TGA_CONSOLE
-        tga_console_init();
-#endif /* CONFIG_TGA_CONSOLE */
-
-	return mem_start;
+	/* The slot is the slot of the last bridge. */
+	return PCI_SLOT(dev->devfn);
 }
 
+/*
+ * On multiple bus machines, in order to cope with a somewhat deficient
+ * API, we must map the 8-bit bus identifier so that it is unique across
+ * multiple interfaces (hoses).  At the same time we do this, chain the
+ * other hoses off of pci_root so that they will be found during normal
+ * PCI probing and layout.
+ */
 
-const char *pcibios_strerror (int error)
+#define PRIMARY(b)	((b)&0xff)
+#define SECONDARY(b)	(((b)>>8)&0xff)
+#define SUBORDINATE(b)	(((b)>>16)&0xff)
+
+static int __init
+hose_scan_bridges(struct linux_hose_info *hose, unsigned char bus)
 {
-        static char buf[80];
+	unsigned int devfn, l, class;
+	unsigned char hdr_type = 0;
+	unsigned int found = 0;
 
-        switch (error) {
-                case PCIBIOS_SUCCESSFUL:
-                        return "SUCCESSFUL";
+	for (devfn = 0; devfn < 0xff; ++devfn) {
+		if (PCI_FUNC(devfn) == 0) {
+			alpha_mv.hose_read_config_byte(bus, devfn,
+						       PCI_HEADER_TYPE,
+						       &hdr_type, hose);
+		} else if (!(hdr_type & 0x80)) {
+			/* not a multi-function device */
+			continue;
+		}
 
-                case PCIBIOS_FUNC_NOT_SUPPORTED:
-                        return "FUNC_NOT_SUPPORTED";
+		/* Check if there is anything here. */
+		alpha_mv.hose_read_config_dword(bus, devfn, PCI_VENDOR_ID,
+						&l, hose);
+		if (l == 0xffffffff || l == 0x00000000) {
+			hdr_type = 0;
+			continue;
+		}
 
-                case PCIBIOS_BAD_VENDOR_ID:
-                        return "SUCCESSFUL";
+		/* See if this is a bridge device. */
+		alpha_mv.hose_read_config_dword(bus, devfn, PCI_CLASS_REVISION,
+						&class, hose);
 
-                case PCIBIOS_DEVICE_NOT_FOUND:
-                        return "DEVICE_NOT_FOUND";
+		if ((class >> 16) == PCI_CLASS_BRIDGE_PCI) {
+			unsigned int busses;
 
-                case PCIBIOS_BAD_REGISTER_NUMBER:
-                        return "BAD_REGISTER_NUMBER";
+			found++;
 
-                default:
-                        sprintf (buf, "UNKNOWN RETURN 0x%x", error);
-                        return buf;
-        }
+			alpha_mv.hose_read_config_dword(bus, devfn,
+							PCI_PRIMARY_BUS,
+							&busses, hose);
+
+			DBG_HOSE(("hose_scan_bridges: hose %d bus %d "
+				  "slot %d busses 0x%x\n",
+				  hose->pci_hose_index, bus, PCI_SLOT(devfn),
+				  busses));
+
+			/*
+			 * Do something with first_busno and last_busno
+			 */
+			if (hose->pci_first_busno > PRIMARY(busses)) {
+				hose->pci_first_busno = PRIMARY(busses);
+				DBG_HOSE(("hose_scan_bridges: hose %d bus %d "
+					  "slot %d change first to %d\n",
+					  hose->pci_hose_index, bus,
+					 PCI_SLOT(devfn), PRIMARY(busses)));
+			}
+			if (hose->pci_last_busno < SUBORDINATE(busses)) {
+				hose->pci_last_busno = SUBORDINATE(busses);
+				DBG_HOSE(("hose_scan_bridges: hose %d bus %d "
+					  "slot %d change last to %d\n",
+					  hose->pci_hose_index, bus,
+					  PCI_SLOT(devfn),
+					  SUBORDINATE(busses)));
+			}
+			/*
+			 * Now scan everything underneath the bridge.
+			 */
+			hose_scan_bridges(hose, SECONDARY(busses));
+		}
+	}
+	return found;
+}
+
+static void __init
+hose_reconfigure_bridges(struct linux_hose_info *hose, unsigned char bus)
+{
+	unsigned int devfn, l, class;
+	unsigned char hdr_type = 0;
+
+	for (devfn = 0; devfn < 0xff; ++devfn) {
+		if (PCI_FUNC(devfn) == 0) {
+			alpha_mv.hose_read_config_byte(bus, devfn,
+						       PCI_HEADER_TYPE,
+						       &hdr_type, hose);
+		} else if (!(hdr_type & 0x80)) {
+			/* not a multi-function device */
+			continue;
+		}
+
+		/* Check if there is anything here. */
+		alpha_mv.hose_read_config_dword(bus, devfn, PCI_VENDOR_ID,
+						&l, hose);
+		if (l == 0xffffffff || l == 0x00000000) {
+			hdr_type = 0;
+			continue;
+		}
+
+		/* See if this is a bridge device. */
+		alpha_mv.hose_read_config_dword(bus, devfn, PCI_CLASS_REVISION,
+						&class, hose);
+
+		if ((class >> 16) == PCI_CLASS_BRIDGE_PCI) {
+			unsigned int busses;
+
+			alpha_mv.hose_read_config_dword(bus, devfn,
+							PCI_PRIMARY_BUS,
+							&busses, hose);
+
+			/*
+			 * First reconfigure everything underneath the bridge.
+			 */
+			hose_reconfigure_bridges(hose, (busses >> 8) & 0xff);
+
+			/*
+			 * Unconfigure this bridges bus numbers,
+			 * pci_scan_bus() will fix this up properly.
+			 */
+			busses &= 0xff000000;
+			alpha_mv.hose_write_config_dword(bus, devfn,
+							 PCI_PRIMARY_BUS,
+							 busses, hose);
+		}
+	}
+}
+
+static void __init
+hose_fixup_busno(struct linux_hose_info *hose, unsigned char bus)
+{
+	int nbus;
+
+	/*
+	 * First, scan for all bridge devices underneath this hose,
+	 * to determine the first and last busnos.
+	 */
+	DBG_HOSE(("hose_fixup_busno: before hose_scan_bridges()\n"));
+
+	if (!hose_scan_bridges(hose, 0)) {
+		/* none found, exit */
+		hose->pci_first_busno = bus;
+		hose->pci_last_busno = bus;
+	} else {
+		/*
+		 * Reconfigure all bridge devices underneath this hose.
+		 */
+		DBG_HOSE(("hose_fixup_busno: before hose_reconfigure_bridges\n"));
+		hose_reconfigure_bridges(hose, hose->pci_first_busno);
+	}
+
+	/*
+	 * Now reconfigure the hose to it's new bus number and set up
+	 * our bus2hose mapping for this hose.
+	 */
+	nbus = hose->pci_last_busno - hose->pci_first_busno;
+
+	hose->pci_first_busno = bus;
+
+	DBG_HOSE(("hose_fixup_busno: hose %d startbus %d nbus %d\n",
+		  hose->pci_hose_index, bus, nbus));
+
+	do {
+		bus2hose[bus++] = hose;
+	} while (nbus-- > 0);
+	DBG_HOSE(("hose_fixup_busno: returning...\n"));
+}
+
+static void __init
+layout_one_hose(struct linux_hose_info *hose)
+{
+	static struct pci_bus *pchain = NULL;
+	struct pci_bus *pbus = &hose->pci_bus;
+	static unsigned char busno = 0;
+
+	DBG_HOSE(("layout_one_hose: entry\n"));
+
+	/*
+	 * Hoses include child PCI bridges in bus-range property,
+	 * but we don't scan each of those ourselves, Linux generic PCI
+	 * probing code will find child bridges and link them into this
+	 * hose's root PCI device hierarchy.
+	 */
+
+	pbus->number = pbus->secondary = busno;
+	pbus->sysdata = hose;
+
+	DBG_HOSE(("layout_one_hose: before hose_fixup_busno()\n"));
+
+	hose_fixup_busno(hose, busno);
+
+	DBG_HOSE(("layout_one_hose: before pci_scan_bus()\n"));
+
+	pbus->subordinate = pci_scan_bus(pbus); /* the original! */
+
+	/*
+	 * Set the maximum subordinate bus of this hose.
+	 */
+	hose->pci_last_busno = pbus->subordinate;
+#if 0
+	alpha_mv.hose_write_config_byte(busno, 0, 0x41, hose->pci_last_busno,
+					hose);
+#endif
+	busno = pbus->subordinate + 1;
+
+	/*
+	 * Fixup the chain of primary PCI busses.
+	 */
+	if (pchain) {
+		pchain->next = &hose->pci_bus;
+		pchain = pchain->next;
+	} else {
+		pchain = &pci_root;
+		memcpy(pchain, &hose->pci_bus, sizeof(pci_root));
+	}
+	DBG_HOSE(("layout_one_hose: returning...\n"));
+}
+
+static void __init
+layout_hoses(void)
+{
+	struct linux_hose_info * hose;
+	int i;
+
+	/* On multiple bus machines, we play games with pci_root in order
+	   that all of the busses are probed as part of the normal PCI
+	   setup.  The existance of the busses was determined in init_arch.  */
+
+	if (hose_head) {
+		/* Multi-bus machines did not yet wish to allow bus
+		   accesses.  We now do our own thing after the normal
+		   pci_scan_bus is over.  This mechanism is relatively
+		   broken but will be fixed later.  */
+		pci_probe_enabled = 1;
+
+		for (hose = hose_head; hose; hose = hose->next)
+			layout_one_hose(hose);
+	} else {
+		/* For the benefit of single-bus machines, emulate a
+		   multi-bus machine to the (limited) extent necessary. 
+		   Init all bus2hose entries to point to a dummy.  */
+		hose = kmalloc(sizeof(*hose), GFP_KERNEL);
+		memset(hose, 0, sizeof(*hose));
+		for (i = 0; i < 256; ++i)
+			bus2hose[i] = hose;
+	}
 }
 
 #endif /* CONFIG_PCI */

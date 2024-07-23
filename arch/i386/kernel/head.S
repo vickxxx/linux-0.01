@@ -1,23 +1,38 @@
 /*
- *  linux/arch/i386/head.S
+ *  linux/arch/i386/head.S -- the 32-bit startup code.
  *
  *  Copyright (C) 1991, 1992  Linus Torvalds
- */
-
-/*
- *  head.S contains the 32-bit startup code.
+ *
+ *  Enhanced CPU detection and feature setting code by Mike Jagdis
+ *  and Martin Mares, November 1997.
  */
 
 .text
 #include <linux/tasks.h>
 #include <linux/linkage.h>
 #include <asm/segment.h>
-#include <linux/config.h>
+#include <asm/page.h>
+#include <asm/pgtable.h>
+
 
 #define CL_MAGIC_ADDR	0x90020
 #define CL_MAGIC	0xA33F
 #define CL_BASE_ADDR	0x90000
 #define CL_OFFSET	0x90022
+
+/*
+ * References to members of the boot_cpu_data structure.
+ */
+
+#define CPU_PARAMS	SYMBOL_NAME(boot_cpu_data)
+#define X86		CPU_PARAMS+0
+#define X86_VENDOR	CPU_PARAMS+1
+#define X86_MODEL	CPU_PARAMS+2
+#define X86_MASK	CPU_PARAMS+3
+#define X86_HARD_MATH	CPU_PARAMS+6
+#define X86_CPUID	CPU_PARAMS+8
+#define X86_CAPABILITY	CPU_PARAMS+12
+#define X86_VENDOR_ID	CPU_PARAMS+16
 
 /*
  * swapper_pg_dir is the main page directory, address 0x00101000
@@ -29,14 +44,30 @@ startup_32:
  * Set segments to known values
  */
 	cld
-	movl $(KERNEL_DS),%eax
-	mov %ax,%ds
-	mov %ax,%es
-	mov %ax,%fs
-	mov %ax,%gs
+	movl $(__KERNEL_DS),%eax
+	movl %ax,%ds
+	movl %ax,%es
+	movl %ax,%fs
+	movl %ax,%gs
+#ifdef __SMP__
+	orw %bx,%bx
+	jz 1f
+/*
+ *	New page tables may be in 4Mbyte page mode and may
+ *	be using the global pages. 
+ *
+ *	NOTE! We have to correct for the fact that we're
+ *	not yet offset PAGE_OFFSET..
+ */
+#define cr4_bits mmu_cr4_features-__PAGE_OFFSET
+	movl %cr4,%eax		# Turn on 4Mb pages
+	orl cr4_bits,%eax
+	movl %eax,%cr4
+#endif
 /*
  * Setup paging (the tables are already set up, just switch them on)
  */
+1:
 	movl $0x101000,%eax
 	movl %eax,%cr3		/* set the page table pointer.. */
 	movl %cr0,%eax
@@ -47,28 +78,22 @@ startup_32:
 	movl $1f,%eax
 	jmp *%eax		/* make sure eip is relocated */
 1:
+	/* Set up the stack pointer */
+	lss stack_start,%esp
 
 #ifdef __SMP__
 	orw  %bx,%bx
 	jz  1f				/* Initial CPU cleans BSS */
-/*
- *	Set up the stack
- */
-	mov %ax,%ss
-	xorl %eax,%eax
-	movw %cx, %ax
-	movl %eax,%esp
 	pushl $0
 	popfl
 	jmp checkCPUtype
 1:
-	lss stack_start,%esp
 #endif __SMP__
 /*
  * Clear BSS first so that there are no surprises...
  */
 	xorl %eax,%eax
-	movl $ SYMBOL_NAME(_edata),%edi
+	movl $ SYMBOL_NAME(__bss_start),%edi
 	movl $ SYMBOL_NAME(_end),%ecx
 	subl %edi,%ecx
 	cld
@@ -79,11 +104,6 @@ startup_32:
  * in 16-bit mode for the "real" operations.
  */
 	call setup_idt
-	xorl %eax,%eax
-1:	incl %eax		# check that A20 really IS enabled
-	movl %eax,0x000000	# loop forever if it isn't
-	cmpl %eax,0x100000
-	je 1b
 /*
  * Initialize eflags.  Some BIOS's leave bits like NT set.  This would
  * confuse the debugger if this code is traced.
@@ -119,13 +139,16 @@ startup_32:
 checkCPUtype:
 #endif
 
+	movl $-1,X86_CPUID		#  -1 for no CPUID initially
+
 /* check if it is 486 or 386. */
 /*
  * XXX - this does a lot of unnecessary setup.  Alignment checks don't
  * apply at our cpl of 0 and the stack ought to be aligned already, and
  * we don't need to preserve eflags.
  */
-	movl $3, SYMBOL_NAME(x86)
+
+	movl $3,X86		# at least 386
 	pushfl			# push EFLAGS
 	popl %eax		# get EFLAGS
 	movl %eax,%ecx		# save original EFLAGS
@@ -137,7 +160,8 @@ checkCPUtype:
 	xorl %ecx,%eax		# change in flags
 	andl $0x40000,%eax	# check if AC bit changed
 	je is386
-	movl $4,SYMBOL_NAME(x86)
+
+	movl $4,X86		# at least 486
 	movl %ecx,%eax
 	xorl $0x200000,%eax	# check ID flag
 	pushl %eax
@@ -145,40 +169,40 @@ checkCPUtype:
 	pushfl			# 487SX we can't change it
 	popl %eax
 	xorl %ecx,%eax
+	pushl %ecx		# restore original EFLAGS
+	popfl
 	andl $0x200000,%eax
 	je is486
-isnew:	pushl %ecx		# restore original EFLAGS
-	popfl
-	incl SYMBOL_NAME(have_cpuid)	# we have CPUID
-	/* get processor type */
-	movl $1, %eax		# Use the CPUID instruction to 
-	.byte 0x0f, 0xa2	# check the processor type
-	movb %al, %cl		# save reg for future use
-	andb $0x0f,%ah		# mask processor family
-	movb %ah,SYMBOL_NAME(x86)
-	andb $0xf0, %eax	# mask model
-	shrb $4, %al
-	movb %al,SYMBOL_NAME(x86_model)
-	andb $0x0f, %cl		# mask mask revision
-	movb %cl,SYMBOL_NAME(x86_mask)
-	movl %edx,SYMBOL_NAME(x86_capability)
-	/* get vendor info */
-	xorl %eax, %eax			# call CPUID with 0 -> return vendor ID
-	.byte 0x0f, 0xa2		# CPUID
-	movl %ebx,SYMBOL_NAME(x86_vendor_id)	# lo 4 chars
-	movl %edx,SYMBOL_NAME(x86_vendor_id)+4	# next 4 chars
-	movl %ecx,SYMBOL_NAME(x86_vendor_id)+8	# last 4 chars
 
-	movl %cr0,%eax		# 486+
+	/* get vendor info */
+	xorl %eax,%eax			# call CPUID with 0 -> return vendor ID
+	cpuid
+	movl %eax,X86_CPUID		# save CPUID level
+	movl %ebx,X86_VENDOR_ID		# lo 4 chars
+	movl %edx,X86_VENDOR_ID+4	# next 4 chars
+	movl %ecx,X86_VENDOR_ID+8	# last 4 chars
+
+	orl %eax,%eax			# do we have processor info as well?
+	je is486
+
+	movl $1,%eax		# Use the CPUID instruction to get CPU type
+	cpuid
+	movb %al,%cl		# save reg for future use
+	andb $0x0f,%ah		# mask processor family
+	movb %ah,X86
+	andb $0xf0,%al		# mask model
+	shrb $4,%al
+	movb %al,X86_MODEL
+	andb $0x0f,%cl		# mask mask revision
+	movb %cl,X86_MASK
+	movl %edx,X86_CAPABILITY
+
+is486:
+	movl %cr0,%eax		# 486 or better
 	andl $0x80000011,%eax	# Save PG,PE,ET
 	orl $0x50022,%eax	# set AM, WP, NE and MP
 	jmp 2f
-is486:	pushl %ecx		# restore original EFLAGS
-	popfl
-	movl %cr0,%eax		# 486
-	andl $0x80000011,%eax	# Save PG,PE,ET
-	orl $0x50022,%eax	# set AM, WP, NE and MP
-	jmp 2f
+
 is386:	pushl %ecx		# restore original EFLAGS
 	popfl
 	movl %cr0,%eax		# 386
@@ -187,44 +211,36 @@ is386:	pushl %ecx		# restore original EFLAGS
 2:	movl %eax,%cr0
 	call check_x87
 #ifdef __SMP__
-	movb ready,%eax
-	orb %eax,%eax
-	jz 3f	
-#ifdef GAS_KNOWS_CR4
-	movl %cr4,%eax
+	movb ready,%al		# First CPU if 0
+	orb %al,%al
+	jz 4f			# First CPU skip this stuff
+	movl %cr4,%eax		# Turn on 4Mb pages
 	orl $16,%eax
 	movl %eax,%cr4
-#else
-	.byte 0x0f,0x20,0xe0
-	orl $16,%eax
-	.byte 0x0f,0x22,0xe0
+	movl %cr3,%eax		# Intel specification clarification says
+	movl %eax,%cr3		# to do this. Maybe it makes a difference.
+				# Who knows ?
 #endif
-	jmp 4f
-#endif
-3:
+4:
 #ifdef __SMP__
 	incb ready
 #endif
-4:
 	lgdt gdt_descr
 	lidt idt_descr
-	ljmp $(KERNEL_CS),$1f
-1:	movl $(KERNEL_DS),%eax	# reload all the segment registers
-	mov %ax,%ds		# after changing gdt.
-	mov %ax,%es
-	mov %ax,%fs
-	mov %ax,%gs
+	ljmp $(__KERNEL_CS),$1f
+1:	movl $(__KERNEL_DS),%eax	# reload all the segment registers
+	movl %ax,%ds		# after changing gdt.
+	movl %ax,%es
+	movl %ax,%fs
+	movl %ax,%gs
 #ifdef __SMP__
-	movl $(KERNEL_DS), %eax
+	movl $(__KERNEL_DS), %eax
 	mov  %ax,%ss		# Reload the stack pointer (segment only)
 #else
 	lss stack_start,%esp	# Load processor stack
 #endif
 	xorl %eax,%eax
 	lldt %ax
-	pushl %eax		# These are the parameters to main :-)
-	pushl %eax
-	pushl %eax
 	cld			# gcc2 wants the direction flag cleared at all times
 	call SYMBOL_NAME(start_kernel)
 L6:
@@ -239,7 +255,7 @@ ready:	.byte 0
  * We depend on ET to be correct. This checks for 287/387.
  */
 check_x87:
-	movb $0,SYMBOL_NAME(hard_math)
+	movb $0,X86_HARD_MATH
 	clts
 	fninit
 	fstsw %ax
@@ -250,7 +266,7 @@ check_x87:
 	movl %eax,%cr0
 	ret
 	ALIGN
-1:	movb $1,SYMBOL_NAME(hard_math)
+1:	movb $1,X86_HARD_MATH
 	.byte 0xDB,0xE4		/* fsetpm for 287, ignored by 387 */
 	ret
 
@@ -260,17 +276,17 @@ check_x87:
  *  sets up a idt with 256 entries pointing to
  *  ignore_int, interrupt gates. It doesn't actually load
  *  idt - that can be done only after paging has been enabled
- *  and the kernel moved to 0xC0000000. Interrupts
+ *  and the kernel moved to PAGE_OFFSET. Interrupts
  *  are enabled elsewhere, when we can be relatively
  *  sure everything is ok.
  */
 setup_idt:
 	lea ignore_int,%edx
-	movl $(KERNEL_CS << 16),%eax
+	movl $(__KERNEL_CS << 16),%eax
 	movw %dx,%ax		/* selector = 0x0010 = cs */
 	movw $0x8E00,%dx	/* interrupt gate - dpl=0, present */
 
-	lea SYMBOL_NAME(idt),%edi
+	lea SYMBOL_NAME(idt_table),%edi
 	mov $256,%ecx
 rp_sidt:
 	movl %eax,(%edi)
@@ -280,25 +296,72 @@ rp_sidt:
 	jne rp_sidt
 	ret
 
+ENTRY(stack_start)
+	.long SYMBOL_NAME(init_task_union)+8192
+	.long __KERNEL_DS
+
+/* This is the default interrupt "handler" :-) */
+int_msg:
+	.asciz "Unknown interrupt\n"
+	ALIGN
+ignore_int:
+	cld
+	pushl %eax
+	pushl %ecx
+	pushl %edx
+	pushl %es
+	pushl %ds
+	movl $(__KERNEL_DS),%eax
+	movl %ax,%ds
+	movl %ax,%es
+	pushl $int_msg
+	call SYMBOL_NAME(printk)
+	popl %eax
+	popl %ds
+	popl %es
+	popl %edx
+	popl %ecx
+	popl %eax
+	iret
 
 /*
- * page 0 is made non-existent, so that kernel NULL pointer references get
- * caught. Thus the swapper page directory has been moved to 0x101000
- * with the introduction of the compressed boot code.  Theoretically,
- * the original design of overlaying the startup code with the swapper
- * page directory is still possible --- it would reduce the size of the kernel
- * by 2-3k.  This would be a good thing to do at some point.....
- *
+ * The interrupt descriptor table has room for 256 idt's,
+ * the global descriptor table is dependent on the number
+ * of tasks we can have..
+ */
+#define IDT_ENTRIES	256
+#define GDT_ENTRIES	(12+2*NR_TASKS)
+
+
+.globl SYMBOL_NAME(idt)
+.globl SYMBOL_NAME(gdt)
+
+	ALIGN
+	.word 0
+idt_descr:
+	.word IDT_ENTRIES*8-1		# idt contains 256 entries
+SYMBOL_NAME(idt):
+	.long SYMBOL_NAME(idt_table)
+
+	.word 0
+gdt_descr:
+	.word GDT_ENTRIES*8-1
+SYMBOL_NAME(gdt):
+	.long SYMBOL_NAME(gdt_table)
+
+/*
  * This is initialized to create a identity-mapping at 0-4M (for bootup
  * purposes) and another mapping of the 0-4M area at virtual address
- * 0xC0000000.
+ * PAGE_OFFSET.
  */
 .org 0x1000
 ENTRY(swapper_pg_dir)
 	.long 0x00102007
-	.fill 767,4,0
+	.fill __USER_PGD_PTRS-1,4,0
+	/* default: 767 entries */
 	.long 0x00102007
-	.fill 127,4,0
+	/* default: 255 entries */
+	.fill __KERNEL_PGD_PTRS-1,4,0
 
 /*
  * The page tables are initialized to only 4MB here - the final page
@@ -447,75 +510,41 @@ ENTRY(empty_zero_page)
 
 .org 0x6000
 
-stack_start:
-	.long SYMBOL_NAME(init_user_stack)+4096
-	.long KERNEL_DS
-
-/* This is the default interrupt "handler" :-) */
-int_msg:
-	.asciz "Unknown interrupt\n"
-	ALIGN
-ignore_int:
-	cld
-	pushl %eax
-	pushl %ecx
-	pushl %edx
-	push %ds
-	push %es
-	push %fs
-	movl $(KERNEL_DS),%eax
-	mov %ax,%ds
-	mov %ax,%es
-	mov %ax,%fs
-	pushl $int_msg
-	call SYMBOL_NAME(printk)
-	popl %eax
-	pop %fs
-	pop %es
-	pop %ds
-	popl %edx
-	popl %ecx
-	popl %eax
-	iret
-
 /*
- * The interrupt descriptor table has room for 256 idt's
+ * This starts the data section. Note that the above is all
+ * in the text section because it has alignment requirements
+ * that we cannot fulfill any other way.
  */
-	ALIGN
-.word 0
-idt_descr:
-	.word 256*8-1		# idt contains 256 entries
-	.long SYMBOL_NAME(idt)
+.data
 
-ENTRY(idt)
-	.fill 256,8,0		# idt is uninitialized
-
-	ALIGN
-.word 0
-gdt_descr:
-#ifdef CONFIG_APM
-	.word (11+2*NR_TASKS)*8-1
-#else
-	.word (8+2*NR_TASKS)*8-1
-#endif
-	.long SYMBOL_NAME(gdt)
-
+ALIGN
 /*
- * This gdt setup gives the kernel a 1GB address space at virtual
- * address 0xC0000000 - space enough for expansion, I hope.
+ * This contains up to 8192 quadwords depending on NR_TASKS - 64kB of
+ * gdt entries.  Ugh. 
+ *
+ * NOTE! Make sure the gdt descriptor in head.S matches this if you
+ * change anything.
  */
-ENTRY(gdt)
+ENTRY(gdt_table)
 	.quad 0x0000000000000000	/* NULL descriptor */
 	.quad 0x0000000000000000	/* not used */
 	.quad 0x00cf9a000000ffff	/* 0x10 kernel 4GB code at 0x00000000 */
 	.quad 0x00cf92000000ffff	/* 0x18 kernel 4GB data at 0x00000000 */
-	.quad 0x00cbfa000000ffff	/* 0x23 user   3GB code at 0x00000000 */
-	.quad 0x00cbf2000000ffff	/* 0x2b user   3GB data at 0x00000000 */
+	.quad 0x00cffa000000ffff	/* 0x23 user   4GB code at 0x00000000 */
+	.quad 0x00cff2000000ffff	/* 0x2b user   4GB data at 0x00000000 */
 	.quad 0x0000000000000000	/* not used */
 	.quad 0x0000000000000000	/* not used */
+	.quad 0x00c0920000000000	/* 0x40 APM set up for bad BIOS's */
+	.quad 0x00c09a0000000000	/* 0x48 APM CS    code */
+	.quad 0x00809a0000000000	/* 0x50 APM CS 16 code (16 bit) */
+	.quad 0x00c0920000000000	/* 0x58 APM DS    data */
 	.fill 2*NR_TASKS,8,0		/* space for LDT's and TSS's etc */
-#ifdef CONFIG_APM
-	.quad 0x00c09a0000000000	/* APM CS    code */
-	.quad 0x00809a0000000000	/* APM CS 16 code (16 bit) */
-	.quad 0x00c0920000000000	/* APM DS    data */
-#endif
+
+/*
+ * This is to aid debugging, the various locking macros will be putting
+ * code fragments here.  When an oops occurs we'd rather know that it's
+ * inside the .text.lock section rather than as some offset from whatever
+ * function happens to be last in the .text segment.
+ */
+.section .text.lock
+ENTRY(stext_lock)

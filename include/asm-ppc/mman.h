@@ -12,6 +12,7 @@
 #define MAP_FIXED	0x10		/* Interpret addr exactly */
 #define MAP_ANONYMOUS	0x20		/* don't use a file */
 #define MAP_RENAME      MAP_ANONYMOUS   /* In SunOS terminology */
+#define MAP_NORESERVE   0x40            /* don't reserve swap pages */
 
 #define MAP_GROWSDOWN	0x0100		/* stack-like segment */
 #define MAP_DENYWRITE	0x0800		/* ETXTBSY */

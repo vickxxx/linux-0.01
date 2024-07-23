@@ -1,13 +1,17 @@
-/* $Id: memory.c,v 1.7 1996/04/25 06:09:46 davem Exp $
+/* $Id: memory.c,v 1.13 1998/01/30 10:59:03 jj Exp $
  * memory.c: Prom routine for acquiring various bits of information
  *           about RAM on the machine, both virtual and physical.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1997 Michael A. Griffith (grif@acm.org)
  */
 
+#include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/init.h>
 
 #include <asm/openprom.h>
+#include <asm/sun4prom.h>
 #include <asm/oplib.h>
 
 /* This routine, for consistency, returns the ram parameters in the
@@ -35,8 +39,8 @@ struct linux_mem_v0 prom_memlist;
 /* Internal Prom library routine to sort a linux_mlist_v0 memory
  * list.  Used below in initialization.
  */
-void
-prom_sortmemlist(struct linux_mlist_v0 *thislist)
+__initfunc(static void
+prom_sortmemlist(struct linux_mlist_v0 *thislist))
 {
 	int swapi = 0;
 	int i, mitr, tmpsize;
@@ -65,8 +69,7 @@ prom_sortmemlist(struct linux_mlist_v0 *thislist)
 }
 
 /* Initialize the memory lists based upon the prom version. */
-void
-prom_meminit(void)
+__initfunc(void prom_meminit(void))
 {
 	int node = 0;
 	unsigned int iter, num_regs;
@@ -106,7 +109,6 @@ prom_meminit(void)
 		break;
 	case PROM_V2:
 	case PROM_V3:
-	case PROM_P1275:
 		/* Grrr, have to traverse the prom device tree ;( */
 		node = prom_getchild(prom_root_node);
 		node = prom_searchsiblings(node, "memory");
@@ -116,7 +118,7 @@ prom_meminit(void)
 		num_regs = (num_regs/sizeof(struct linux_prom_registers));
 		for(iter=0; iter<num_regs; iter++) {
 			prom_phys_avail[iter].start_adr =
-				prom_reg_memlist[iter].phys_addr;
+				(char *) prom_reg_memlist[iter].phys_addr;
 			prom_phys_avail[iter].num_bytes =
 				(unsigned long) prom_reg_memlist[iter].reg_size;
 			prom_phys_avail[iter].theres_more =
@@ -130,7 +132,7 @@ prom_meminit(void)
 		num_regs = (num_regs/sizeof(struct linux_prom_registers));
 		for(iter=0; iter<num_regs; iter++) {
 			prom_phys_total[iter].start_adr =
-				prom_reg_memlist[iter].phys_addr;
+				(char *) prom_reg_memlist[iter].phys_addr;
 			prom_phys_total[iter].num_bytes =
 				(unsigned long) prom_reg_memlist[iter].reg_size;
 			prom_phys_total[iter].theres_more =
@@ -150,7 +152,7 @@ prom_meminit(void)
 		 */
 		for(iter=0; iter<num_regs; iter++) {
 			prom_prom_taken[iter].start_adr =
-				prom_reg_memlist[iter].phys_addr;
+				(char *) prom_reg_memlist[iter].phys_addr;
 			prom_prom_taken[iter].num_bytes =
 				(unsigned long) prom_reg_memlist[iter].reg_size;
 			prom_prom_taken[iter].theres_more =
@@ -177,22 +179,36 @@ prom_meminit(void)
 		prom_sortmemlist(prom_phys_avail);
 		break;
 
+	case PROM_SUN4:
+#ifdef CONFIG_SUN4	
+		/* how simple :) */
+		prom_phys_total[0].start_adr = 0x0;
+		prom_phys_total[0].num_bytes = *(sun4_romvec->memorysize);
+		prom_phys_total[0].theres_more = 0x0;
+		prom_prom_taken[0].start_adr = 0x0; 
+		prom_prom_taken[0].num_bytes = 0x0;
+		prom_prom_taken[0].theres_more = 0x0;
+		prom_phys_avail[0].start_adr = 0x0;
+		prom_phys_avail[0].num_bytes = *(sun4_romvec->memoryavail);
+		prom_phys_avail[0].theres_more = 0x0;
+#endif
+		break;
+
         case PROM_AP1000:
-          /* really simple memory map */
-          prom_phys_total[0].start_adr = 0x00000000;
-          prom_phys_total[0].num_bytes = 0x01000000; /* 16MB */
-          prom_phys_total[0].theres_more = 0x0;
-          prom_prom_taken[0].start_adr = 0x00000000; 
-          prom_prom_taken[0].num_bytes = 0x00000000;
-          prom_prom_taken[0].theres_more = 0x0;
-          prom_phys_avail[0].start_adr = 0x00000000;
-          prom_phys_avail[0].num_bytes = 0x01000000; /* 16MB */
-          prom_phys_avail[0].theres_more = 0x0;
-          prom_sortmemlist(prom_phys_total);
-          prom_sortmemlist(prom_prom_taken);
-          prom_sortmemlist(prom_phys_avail);
-          printk("Initialised AP1000 memory lists (forced 16MB)\n");
-          break;
+#if CONFIG_AP1000
+		/* really simple memory map */
+		prom_phys_total[0].start_adr = 0x00000000;
+		prom_phys_total[0].num_bytes = ap_memory_size();
+		prom_phys_total[0].theres_more = 0x0;
+		prom_prom_taken[0].start_adr = 0x00000000; 
+		prom_prom_taken[0].num_bytes = 0x00000000;
+		prom_prom_taken[0].theres_more = 0x0;
+		prom_phys_avail[0].start_adr = 0x00000000;
+		prom_phys_avail[0].num_bytes = prom_phys_total[0].num_bytes;
+		prom_phys_avail[0].theres_more = 0x0;
+#endif
+	default:
+		break;
 	};
 
 	/* Link all the lists into the top-level descriptor. */

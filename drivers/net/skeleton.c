@@ -56,6 +56,7 @@ static const char *version =
 #include <asm/io.h>
 #include <asm/dma.h>
 #include <linux/errno.h>
+#include <linux/init.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -70,7 +71,7 @@ static const char* cardname = "netcard";
 /* First, a few definitions that the brave might change. */
 
 /* A zero-terminated list of I/O addresses to be probed. */
-static unsigned int netcard_portlist[] =
+static unsigned int netcard_portlist[] __initdata =
    { 0x200, 0x240, 0x280, 0x2C0, 0x300, 0x320, 0x340, 0};
 
 /* use 0 for production, 1 for verification, >2 for debug */
@@ -84,7 +85,7 @@ static unsigned int net_debug = NET_DEBUG;
 
 /* Information that need to be kept for each board. */
 struct net_local {
-	struct enet_statistics stats;
+	struct net_device_stats stats;
 	long open_time;			/* Useless example local info. */
 };
 
@@ -97,19 +98,19 @@ struct net_local {
 
 extern int netcard_probe(struct device *dev);
 
-static int netcard_probe1(struct device *dev, int ioaddr);
-static int net_open(struct device *dev);
+static int	netcard_probe1(struct device *dev, int ioaddr);
+static int	net_open(struct device *dev);
 static int	net_send_packet(struct sk_buff *skb, struct device *dev);
-static void net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
-static void net_rx(struct device *dev);
-static int net_close(struct device *dev);
-static struct enet_statistics *net_get_stats(struct device *dev);
-static void set_multicast_list(struct device *dev);
+static void	net_interrupt(int irq, void *dev_id, struct pt_regs *regs);
+static void	net_rx(struct device *dev);
+static int	net_close(struct device *dev);
+static struct	net_device_stats *net_get_stats(struct device *dev);
+static void	set_multicast_list(struct device *dev);
 
 /* Example routines you must write ;->. */
 #define tx_done(dev) 1
 extern void	hardware_send_packet(short ioaddr, char *buf, int length);
-extern void chipset_init(struct device *dev, int startp);
+extern void 	chipset_init(struct device *dev, int startp);
 
 /*
  * Check for a network adaptor of this type, and return '0' iff one exists.
@@ -120,14 +121,14 @@ extern void chipset_init(struct device *dev, int startp);
  */
 #ifdef HAVE_DEVLIST
 /*
- * Support for a alternate probe manager,
+ * Support for an alternate probe manager,
  * which will eliminate the boilerplate below.
  */
 struct netdev_entry netcard_drv =
 {cardname, netcard_probe1, NETCARD_IO_EXTENT, netcard_portlist};
 #else
-int
-netcard_probe(struct device *dev)
+__initfunc(int
+netcard_probe(struct device *dev))
 {
 	int i;
 	int base_addr = dev ? dev->base_addr : 0;
@@ -154,7 +155,7 @@ netcard_probe(struct device *dev)
  * probes on the ISA bus. A good device probes avoids doing writes, and
  * verifies that the correct device exists and functions.
  */
-static int netcard_probe1(struct device *dev, int ioaddr)
+__initfunc(static int netcard_probe1(struct device *dev, int ioaddr))
 {
 	static unsigned version_printed = 0;
 	int i;
@@ -220,7 +221,7 @@ static int netcard_probe1(struct device *dev, int ioaddr)
 		dev->irq = 9;
 
 	{
-		int irqval = request_irq(dev->irq, &net_interrupt, 0, cardname, NULL);
+		int irqval = request_irq(dev->irq, &net_interrupt, 0, cardname, dev);
 		if (irqval) {
 			printk("%s: unable to get IRQ %d (irqval=%d).\n",
 				   dev->name, dev->irq, irqval);
@@ -286,8 +287,8 @@ static int netcard_probe1(struct device *dev, int ioaddr)
 
 	dev->open		= net_open;
 	dev->stop		= net_close;
-	dev->hard_start_xmit = net_send_packet;
-	dev->get_stats	= net_get_stats;
+	dev->hard_start_xmit	= net_send_packet;
+	dev->get_stats		= net_get_stats;
 	dev->set_multicast_list = &set_multicast_list;
 
 	/* Fill in the fields of the device structure with ethernet values. */
@@ -313,7 +314,7 @@ net_open(struct device *dev)
 	 * This is used if the interrupt line can turned off (shared).
 	 * See 3c503.c for an example of selecting the IRQ at config-time.
 	 */
-	if (request_irq(dev->irq, &net_interrupt, 0, cardname, NULL)) {
+	if (request_irq(dev->irq, &net_interrupt, 0, cardname, dev)) {
 		return -EAGAIN;
 	}
 	/*
@@ -321,10 +322,9 @@ net_open(struct device *dev)
 	 * and clean up on failure.
 	 */
 	if (request_dma(dev->dma, cardname)) {
-		free_irq(dev->irq, NULL);
+		free_irq(dev->irq, dev);
 		return -EAGAIN;
 	}
-	irq2dev_map[dev->irq] = dev;
 
 	/* Reset the hardware here. Don't forget to set the station address. */
 	/*chipset_init(dev, 1);*/
@@ -340,8 +340,7 @@ net_open(struct device *dev)
 	return 0;
 }
 
-static int
-net_send_packet(struct sk_buff *skb, struct device *dev)
+static int net_send_packet(struct sk_buff *skb, struct device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	int ioaddr = dev->base_addr;
@@ -361,29 +360,21 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
 		dev->tbusy=0;
 		dev->trans_start = jiffies;
 	}
-	/*
-	 * If some higher layer thinks we've missed an tx-done interrupt
-	 * we are passed NULL. Caution: dev_tint() handles the cli()/sti()
-	 * itself.
-	 */
-	if (skb == NULL) {
-		dev_tint(dev);
-		return 0;
-	}
+
 	/*
 	 * Block a timer-based transmit from overlapping. This could better be
 	 * done with atomic_swap(1, dev->tbusy), but set_bit() works as well.
 	 */
-	if (set_bit(0, (void*)&dev->tbusy) != 0)
+	if (test_and_set_bit(0, (void*)&dev->tbusy) != 0)
 		printk(KERN_WARNING "%s: Transmitter access conflict.\n", dev->name);
 	else {
 		short length = ETH_ZLEN < skb->len ? skb->len : ETH_ZLEN;
 		unsigned char *buf = skb->data;
-
+		lp->stats.tx_bytes+=skb->len;
 		hardware_send_packet(ioaddr, buf, length);
 		dev->trans_start = jiffies;
 	}
-	dev_kfree_skb (skb, FREE_WRITE);
+	dev_kfree_skb (skb);
 
 	/* You might need to clean up and record Tx statistics here. */
 	if (inw(ioaddr) == /*RU*/81)
@@ -396,10 +387,9 @@ net_send_packet(struct sk_buff *skb, struct device *dev)
  * The typical workload of the driver:
  *   Handle the network interface interrupts.
  */
-static void
-net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
+static void net_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
-	struct device *dev = (struct device *)(irq2dev_map[irq]);
+	struct device *dev = dev_id;
 	struct net_local *lp;
 	int ioaddr, status, boguscount = 0;
 
@@ -458,6 +448,8 @@ net_rx(struct device *dev)
 			/* Malloc up new buffer. */
 			struct sk_buff *skb;
 
+			lp->stats.rx_bytes+=pkt_len;
+			
 			skb = dev_alloc_skb(pkt_len);
 			if (skb == NULL) {
 				printk(KERN_NOTICE "%s: Memory squeeze, dropping packet.\n",
@@ -505,10 +497,8 @@ net_close(struct device *dev)
 	/* If not IRQ or DMA jumpered, free up the line. */
 	outw(0x00, ioaddr+0);	/* Release the physical interrupt line. */
 
-	free_irq(dev->irq, NULL);
+	free_irq(dev->irq, dev);
 	free_dma(dev->dma);
-
-	irq2dev_map[dev->irq] = 0;
 
 	/* Update the statistics here. */
 
@@ -522,8 +512,7 @@ net_close(struct device *dev)
  * Get the current statistics.
  * This may be called with the card open or closed.
  */
-static struct enet_statistics *
-net_get_stats(struct device *dev)
+static struct net_device_stats *net_get_stats(struct device *dev)
 {
 	struct net_local *lp = (struct net_local *)dev->priv;
 	short ioaddr = dev->base_addr;
@@ -615,7 +604,7 @@ cleanup_module(void)
 	 * allocate them in net_probe1().
 	 */
 	/*
-	   free_irq(this_device.irq, NULL);
+	   free_irq(this_device.irq, dev);
 	   free_dma(this_device.dma);
 	*/
 	release_region(this_device.base_addr, NETCARD_IO_EXTENT);

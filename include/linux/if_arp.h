@@ -44,14 +44,28 @@
 #define ARPHRD_CSLIP6	259
 #define ARPHRD_RSRVD	260		/* Notional KISS type 		*/
 #define ARPHRD_ADAPT	264
+#define ARPHRD_ROSE	270
+#define ARPHRD_X25	271		/* CCITT X.25			*/
 #define ARPHRD_PPP	512
+#define ARPHRD_HDLC	513		/* (Cisco) HDLC 		*/
+#define ARPHRD_LAPB	516		/* LAPB				*/
 
 #define ARPHRD_TUNNEL	768		/* IPIP tunnel			*/
 #define ARPHRD_TUNNEL6	769		/* IPIP6 tunnel			*/
-#define ARPHRD_FRAD	770		/* Frame Relay Access Device	*/
+#define ARPHRD_FRAD	770             /* Frame Relay Access Device    */
 #define ARPHRD_SKIP	771		/* SKIP vif			*/
 #define ARPHRD_LOOPBACK	772		/* Loopback device		*/
 #define ARPHRD_LOCALTLK 773		/* Localtalk device		*/
+#define ARPHRD_FDDI	774		/* Fiber Distributed Data Interface */
+#define ARPHRD_BIF      775             /* AP1000 BIF                   */
+#define ARPHRD_SIT	776		/* sit0 device - IPv6-in-IPv4	*/
+#define ARPHRD_IPDDP	777		/* IP over DDP tunneller	*/
+#define ARPHRD_IPGRE	778		/* GRE over IP			*/
+#define ARPHRD_PIMREG	779		/* PIMSM register interface	*/
+#define ARPHRD_HIPPI	780		/* High Performance Parallel Interface */
+#define ARPHRD_ASH	781		/* Nexus 64Mbps Ash		*/
+#define ARPHRD_ECONET	782		/* Acorn Econet			*/
+#define ARPHRD_IRDA 	783		/* Linux/IR			*/
 
 /* ARP protocol opcodes. */
 #define	ARPOP_REQUEST	1		/* ARP request			*/
@@ -83,6 +97,7 @@ struct arpreq_old {
 #define	ATF_USETRAILERS	0x10		/* has requested trailers	*/
 #define ATF_NETMASK     0x20            /* want to use a netmask (only
 					   for proxy entries) */
+#define ATF_DONTPUB	0x40		/* don't answer this addresses	*/
 
 /*
  *	This structure defines an ethernet arp header.
@@ -106,22 +121,6 @@ struct arphdr
 	unsigned char		ar_tip[4];		/* target IP address		*/
 #endif
 
-};
-
-/* Support for the user space arp daemon, arpd */
-
-#define ARPD_UPDATE	0x01
-#define ARPD_LOOKUP	0x02
-#define ARPD_FLUSH	0x03
-
-struct arpd_request
-{
-	unsigned short	req;			/* request type */
-	__u32		ip;			/* ip address of entry */
-	unsigned long	dev;			/* Device entry is tied to */
-	unsigned long	stamp;
-	unsigned long	updated;
-	unsigned char	ha[MAX_ADDR_LEN];	/* Hardware address */
 };
 
 #endif	/* _LINUX_IF_ARP_H */

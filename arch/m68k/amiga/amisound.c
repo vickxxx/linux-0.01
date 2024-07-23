@@ -10,8 +10,8 @@
 
 #include <linux/sched.h>
 #include <linux/timer.h>
+#include <linux/init.h>
 
-#include <asm/amigatypes.h>
 #include <asm/system.h>
 #include <asm/amigahw.h>
 
@@ -40,7 +40,7 @@ u_short amiga_audio_period = MAX_PERIOD;
 
 static u_long clock_constant;
 
-static void init_sound(void)
+__initfunc(void amiga_init_sound(void))
 {
 	snd_data = amiga_chip_alloc(sizeof(sine_data));
 	if (!snd_data) {
@@ -58,13 +58,7 @@ static struct timer_list sound_timer = { NULL, NULL, 0, 0, nosound };
 
 void amiga_mksound( unsigned int hz, unsigned int ticks )
 {
-	static int inited = 0;
 	unsigned long flags;
-
-	if (!inited) {
-		init_sound();
-		inited = 1;
-	}
 
 	if (!snd_data)
 		return;
@@ -85,7 +79,7 @@ void amiga_mksound( unsigned int hz, unsigned int ticks )
 		custom.aud[2].audlc = snd_data;
 		custom.aud[2].audlen = sizeof(sine_data)/2;
 		custom.aud[2].audper = (u_short)period;
-		custom.aud[2].audvol = 64; /* maxvol */
+		custom.aud[2].audvol = 32; /* 50% of maxvol */
 	
 		if (ticks) {
 			sound_timer.expires = jiffies + ticks;

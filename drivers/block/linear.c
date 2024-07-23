@@ -20,8 +20,10 @@
 #include <linux/module.h>
 
 #include <linux/md.h>
-#include <linux/linear.h>
 #include <linux/malloc.h>
+#include <linux/init.h>
+
+#include "linear.h"
 
 #define MAJOR_NR MD_MAJOR
 #define MD_DRIVER
@@ -161,6 +163,7 @@ static int linear_status (char *page, int minor, struct md_dev *mddev)
 
   sz+=sprintf (page+sz, "\n");
 #endif
+  sz+=sprintf (page+sz, " %dk rounding", 1<<FACTOR_SHIFT(FACTOR(mddev)));
   return sz;
 }
 
@@ -169,6 +172,8 @@ static struct md_personality linear_personality=
 {
   "linear",
   linear_map,
+  NULL,
+  NULL,
   linear_run,
   linear_stop,
   linear_status,
@@ -179,7 +184,7 @@ static struct md_personality linear_personality=
 
 #ifndef MODULE
 
-void linear_init (void)
+__initfunc(void linear_init (void))
 {
   register_md_personality (LINEAR, &linear_personality);
 }

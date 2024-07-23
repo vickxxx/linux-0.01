@@ -1,35 +1,27 @@
 		       LINUX ALLOCATED DEVICES
-
 	     Maintained by H. Peter Anvin <hpa@zytor.com>
 
-		     Last revised: July 9, 1996
+		    Last revised: August 10, 1998
 
-This list is the successor to Rick Miller's Linux Device List, which
-he stopped maintaining when he got busy with other things in 1993.  It
-is a registry of allocated major device numbers, as well as the
-recommended /dev directory nodes for these devices.
+This list is the Linux Device List, the official registry of allocated
+device numbers and /dev directory nodes for the Linux operating
+system.
 
 The latest version of this list is included with the Linux kernel
-sources in LaTeX and ASCII form.  In case of discrepancy, the LaTeX
-version is authoritative.
+sources in LaTeX and ASCII form.  It is also available separately from
+ftp://ftp.kernel.org/pub/linux/docs/device-list/.  In case of
+discrepancy between the text and LaTeX versions, the LaTeX version is
+authoritative.
 
 This document is included by reference into the Linux Filesystem
-Standard (FSSTND).  The FSSTND is available via FTP from
-tsx-11.mit.edu in the directory /pub/linux/docs/linux-standards/fsstnd.
-
-To have a major number allocated, or a minor number in situations
-where that applies (e.g. busmice), please contact me with the
-appropriate device information.  Also, if you have additional
-information regarding any of the devices listed below, or if I have
-made a mistake, I would greatly appreciate a note.  When sending me
-mail, please include the word "device" in the subject so your mail
-won't accidentally get buried!
+Standard (FSSTND).  The FSSTND is available from
+ftp://tsx-11.mit.edu/pub/linux/docs/linux-standards/fsstnd/.
 
 Allocations marked (68k/Amiga) apply to Linux/68k on the Amiga
-platform only.  Allocations marked (68k/Atari) apply to Linux/68k on
+platform only.	Allocations marked (68k/Atari) apply to Linux/68k on
 the Atari platform only.
 
-This document is in the public domain.  The author requests, however,
+This document is in the public domain.	The author requests, however,
 that semantically altered versions are not distributed without
 permission of the author, assuming the author can be contacted without
 an unreasonable effort.
@@ -41,11 +33,34 @@ I do not have any information about these devices beyond what appears
 on this list.  Any such information requests will be deleted without
 reply.
 
-  0 		Unnamed devices (e.g. non-device mounts)
+     **** PLEASE READ THIS BEFORE SUBMITTING A DEVICE ENTRY ****
+
+To have a major number allocated, or a minor number in situations
+where that applies (e.g. busmice), please contact me with the
+appropriate device information.	 Also, if you have additional
+information regarding any of the devices listed below, or if I have
+made a mistake, I would greatly appreciate a note.
+
+I do, however, make two requests about the nature of your report.
+This is necessary for me to be able to keep this list up to date and
+correct in a timely manner.  First of all, *please* include the word
+"device" in the subject so your mail won't accidentally get buried!  I
+receive hundreds of email messages a day, so mail sent with other
+subjects may very well get lost in the avalanche.
+
+Second, please include a description of the device *in the same format
+as this list*.	The reason for this is that it is the only way I have
+found to ensure I have all the requisite information to publish your
+device and avoid conflicts.
+
+Your cooperation is appreciated.
+
+
+  0		Unnamed devices (e.g. non-device mounts)
 		  0 = reserved as null device number
 
   1 char	Memory devices
-    		  1 = /dev/mem		Physical memory access
+		  1 = /dev/mem		Physical memory access
 		  2 = /dev/kmem		Kernel virtual memory access
 		  3 = /dev/null		Null device
 		  4 = /dev/port		I/O port access
@@ -76,12 +91,21 @@ reply.
 		  the 1st through 16th series of 16 pseudo-ttys each, and
 		* the fifth letter is one of 0123456789abcdef indicating
 		  the position within the series.
+
+		These are the old-style (BSD) PTY devices; Unix98
+		devices are on major 128 and above and use the PTY
+		master multiplex (/dev/ptmx) to acquire a PTY on
+		demand.
   
     block	Floppy disks
-		  0 = /dev/fd0		First floppy disk autodetect
-		  1 = /dev/fd1		Second floppy disk autodetect
-		  2 = /dev/fd2		Third floppy disk autodetect
-		  3 = /dev/fd3		Fourth floppy disk autodetect
+		  0 = /dev/fd0		Controller 1, drive 1 autodetect
+		  1 = /dev/fd1		Controller 1, drive 2 autodetect
+		  2 = /dev/fd2		Controller 1, drive 3 autodetect
+		  3 = /dev/fd3		Controller 1, drive 4 autodetect
+		128 = /dev/fd4		Controller 2, drive 1 autodetect
+		129 = /dev/fd5		Controller 2, drive 2 autodetect
+		130 = /dev/fd6		Controller 2, drive 3 autodetect
+		131 = /dev/fd7		Controller 2, drive 4 autodetect
 
 		To specify format, add to the autodetect device number:
 		  0 = /dev/fd?		Autodetect format
@@ -94,12 +118,13 @@ reply.
 		  8 = /dev/fd?h1200	5.25" 1200K in a 1200K drive(1)
 		 40 = /dev/fd?h1440	5.25" 1440K in a 1200K drive(1)
 		 56 = /dev/fd?h1476	5.25" 1476K in a 1200K drive
-	  	 72 = /dev/fd?h1494	5.25" 1494K in a 1200K drive
+		 72 = /dev/fd?h1494	5.25" 1494K in a 1200K drive
 		 92 = /dev/fd?h1600	5.25" 1600K in a 1200K drive(1)
 
-		 12 = /dev/fd?u360	3.5"   360K Double Density
-		120 = /dev/fd?u800	3.5"   800K Double Density(1)
-		 52 = /dev/fd?u820	3.5"   820K Double Density(2)
+		 12 = /dev/fd?u360	3.5"   360K Double Density(2)
+		 16 = /dev/fd?u720	3.5"   720K Double Density(1)
+		120 = /dev/fd?u800	3.5"   800K Double Density(2)
+		 52 = /dev/fd?u820	3.5"   820K Double Density
 		 68 = /dev/fd?u830	3.5"   830K Double Density
 		 84 = /dev/fd?u1040	3.5"  1040K Double Density(1)
 		 88 = /dev/fd?u1120	3.5"  1120K Double Density(1)
@@ -125,7 +150,7 @@ reply.
 		NOTE: The letter in the device name (d, q, h or u)
 		signifies the type of drive: 5.25" Double Density (d),
 		5.25" Quad Density (q), 5.25" High Density (h) or 3.5"
-		(any model, u).  The use of the capital letters D, H
+		(any model, u).	 The use of the capital letters D, H
 		and E for the 3.5" models have been deprecated, since
 		the drive type is insignificant for these devices.
 
@@ -133,12 +158,15 @@ reply.
 		  0 = /dev/ttyp0	First PTY slave
 		  1 = /dev/ttyp1	Second PTY slave
 		    ...
-		256 = /dev/ttyef	256th PTY slave
+		255 = /dev/ttyef	256th PTY slave
+
+		These are the old-style (BSD) PTY devices; Unix98
+		devices are on major 136 and above.
 
     block	First MFM, RLL and IDE hard disk/CD-ROM interface
-    		  0 = /dev/hda		Master: whole disk (or CD-ROM)
+		  0 = /dev/hda		Master: whole disk (or CD-ROM)
 		 64 = /dev/hdb		Slave: whole disk (or CD-ROM)
-		
+
 		For partitions, add to the whole disk device number:
 		  0 = /dev/hd?		Whole disk
 		  1 = /dev/hd?1		First partition
@@ -150,9 +178,9 @@ reply.
 		partitions, and 5 and above are logical partitions.
 		Other versions of Linux use partitioning schemes
 		appropriate to their respective architectures.
-		
+
   4 char	TTY devices
-    		  0 = /dev/console	Console device
+		  0 = /dev/tty0		Current virtual console
 
 		  1 = /dev/tty1		First virtual console
 		      ...
@@ -160,27 +188,31 @@ reply.
 		 64 = /dev/ttyS0	First serial port
 		      ...
 		127 = /dev/ttyS63	64th serial port
-		128 = /dev/ptyp0	First pseudo-tty master
+		128 = /dev/ptyp0	OBSOLETE
 		      ...
-		191 = /dev/ptysf	64th pseudo-tty master
-		192 = /dev/ttyp0	First pseudo-tty slave
+		191 = /dev/ptysf	OBSOLETE
+		192 = /dev/ttyp0	OBSOLETE
 		      ...
-		255 = /dev/ttysf	64th pseudo-tty slave
+		255 = /dev/ttysf	OBSOLETE
 
-		For compatibility with previous versions of Linux, the
-		first 64 PTYs are replicated under this device
-		number.  This use will be obsolescent with the release
-		of Linux 1.4 and may be removed in a future version of
-		Linux.
+		Older versions of the Linux kernel used this major
+		number for BSD PTY devices.  As of Linux 2.1.115, this
+		is no longer supported.  Use major numbers 2 and 3.
 
   5 char	Alternate TTY devices
-    		  0 = /dev/tty		Current TTY device
+		  0 = /dev/tty		Current TTY device
+		  1 = /dev/console	System console
+		  2 = /dev/ptmx		PTY master multiplex
 		 64 = /dev/cua0		Callout device corresponding to ttyS0
 		      ...
 		127 = /dev/cua63	Callout device corresponding to ttyS63
 
+		(5,1) is /dev/console starting with Linux 2.1.71.  See
+		the section on terminal devices for more information
+		on /dev/console.
+
   6 char	Parallel printer devices
-    		  0 = /dev/lp0		First parallel printer (0x3bc)
+		  0 = /dev/lp0		First parallel printer (0x3bc)
 		  1 = /dev/lp1		Second parallel printer (0x378)
 		  2 = /dev/lp2		Third parallel printer (0x278)
 
@@ -189,7 +221,7 @@ reply.
 		/dev/lp1.
 
   7 char	Virtual console capture devices
-    		  0 = /dev/vcs		Current vc text contents
+		  0 = /dev/vcs		Current vc text contents
 		  1 = /dev/vcs1		tty1 text contents
 		      ...
 		 63 = /dev/vcs63	tty63 text contents
@@ -206,14 +238,14 @@ reply.
 		      ...
 
 		The loopback devices are used to mount filesystems not
-		associated with block devices.  The binding to the
-		loopback devices is usually handled by mount(8).
+		associated with block devices.	The binding to the
+		loopback devices is handled by mount(8) or losetup(8).
 
-  8 block	SCSI disk devices
-    		  0 = /dev/sda		First SCSI disk whole disk
+  8 block	SCSI disk devices (0-15)
+		  0 = /dev/sda		First SCSI disk whole disk
 		 16 = /dev/sdb		Second SCSI disk whole disk
 		 32 = /dev/sdc		Third SCSI disk whole disk
-  		      ...
+		      ...
 		240 = /dev/sdp		Sixteenth SCSI disk whole disk
 
 		Partitions are handled in the same way as for IDE
@@ -221,16 +253,16 @@ reply.
 		partitions is 15.
 
   9 char	SCSI tape devices
-    		  0 = /dev/st0		First SCSI tape, mode 0
+		  0 = /dev/st0		First SCSI tape, mode 0
 		  1 = /dev/st1		Second SCSI tape, mode 0
 		      ...
-    		 32 = /dev/st0l		First SCSI tape, mode 1
+		 32 = /dev/st0l		First SCSI tape, mode 1
 		 33 = /dev/st1l		Second SCSI tape, mode 1
 		      ...
-    		 64 = /dev/st0m		First SCSI tape, mode 2
+		 64 = /dev/st0m		First SCSI tape, mode 2
 		 65 = /dev/st1m		Second SCSI tape, mode 2
 		      ...
-    		 96 = /dev/st0a		First SCSI tape, mode 3
+		 96 = /dev/st0a		First SCSI tape, mode 3
 		 97 = /dev/st1a		Second SCSI tape, mode 3
 		      ...
 		128 = /dev/nst0		First SCSI tape, mode 0, no rewind
@@ -269,6 +301,8 @@ reply.
 		  5 = /dev/atarimouse	Atari mouse
 		  6 = /dev/sunmouse	Sun mouse
 		  7 = /dev/amigamouse1	Second Amiga mouse
+		  8 = /dev/smouse	Simple serial mouse driver
+		  9 = /dev/pc110pad	IBM PC-110 digitizer pad
 		128 = /dev/beep		Fancy beep device
 		129 = /dev/modreq	Kernel module load request
 		130 = /dev/watchdog	Watchdog timer port
@@ -277,10 +311,21 @@ reply.
 		133 = /dev/exttrp	External device trap
 		134 = /dev/apm_bios	Advanced Power Management BIOS
 		135 = /dev/rtc		Real Time Clock
-		136 = /dev/qcam0	QuickCam on lp0
-		137 = /dev/qcam1	QuickCam on lp1
-		138 = /dev/qcam2	QuickCam on lp2
 		139 = /dev/openprom	SPARC OpenBoot PROM
+		140 = /dev/relay8	Berkshire Products Octal relay card
+		141 = /dev/relay16	Berkshire Products ISO-16 relay card
+		142 = /dev/msr		x86 model-specific registers
+		143 = /dev/pciconf	PCI configuration space
+		144 = /dev/nvram	Non-volatile configuration RAM
+		145 = /dev/hfmodem	Soundcard shortwave modem control
+		146 = /dev/graphics	Linux/SGI graphics device
+		147 = /dev/opengl	Linux/SGI OpenGL pipe
+		148 = /dev/gfx		Linux/SGI graphics effects device
+		149 = /dev/input/mouse	Linux/SGI Irix emulation mouse
+		150 = /dev/input/keyboard Linux/SGI Irix emulation keyboard
+		151 = /dev/led		Front panel LEDs
+		153 = /dev/mergemem	Memory merge device
+		154 = /dev/pmu		Macintosh PowerBook power manager
 
  11 char	Raw keyboard device
 		  0 = /dev/kbd		Raw keyboard device
@@ -288,7 +333,7 @@ reply.
 		The raw keyboard device is used on Linux/SPARC only.
 
     block	SCSI CD-ROM devices
-    		  0 = /dev/sr0		First SCSI CD-ROM
+		  0 = /dev/sr0		First SCSI CD-ROM
 		  1 = /dev/sr1		Second SCSI CD-ROM
 		      ...
 
@@ -406,12 +451,25 @@ reply.
 		  1 = /dev/sg1		Second generic SCSI device
 		      ...
 
+		Most distributions name these /dev/sga, /dev/sgb...;
+		this sets an unnecessary limit of 26 SCSI devices in
+		the system and is counter to standard Linux
+		device-naming practice.
+
+    block	Acorn MFM hard drive interface
+		  0 = /dev/mfma		First MFM drive whole disk
+		 64 = /dev/mfmb		Second MFM drive whole disk
+
+		This device is used on the ARM-based Acorn RiscPC.
+		Partitions are handled the same way as for IDE disks
+		(see major number 3). 
+
  22 char	Digiboard serial card
 		  0 = /dev/ttyD0	First Digiboard port
 		  1 = /dev/ttyD1	Second Digiboard port
 		      ...
     block	Second IDE hard disk/CD-ROM interface
-    		  0 = /dev/hdc		Master: whole disk (or CD-ROM)
+		  0 = /dev/hdc		Master: whole disk (or CD-ROM)
 		 64 = /dev/hdd		Slave: whole disk (or CD-ROM)
 		
 		Partitions are handled the same way as for the first
@@ -468,14 +526,30 @@ reply.
 		  3 = /dev/sbpcd7	Panasonic CD-ROM controller 1 unit 3
 
  27 char	QIC-117 tape
-		  0 = /dev/rft0		Unit 0, rewind-on-close
-		  1 = /dev/rft1		Unit 1, rewind-on-close
-		  2 = /dev/rft2		Unit 2, rewind-on-close
-		  3 = /dev/rft3		Unit 3, rewind-on-close
-		  4 = /dev/nrft0	Unit 0, no rewind-on-close
-		  5 = /dev/nrft1	Unit 1, no rewind-on-close
-		  6 = /dev/nrft2	Unit 2, no rewind-on-close
-		  7 = /dev/nrft3	Unit 3, no rewind-on-close
+		  0 = /dev/qft0		Unit 0, rewind-on-close
+		  1 = /dev/qft1		Unit 1, rewind-on-close
+		  2 = /dev/qft2		Unit 2, rewind-on-close
+		  3 = /dev/qft3		Unit 3, rewind-on-close
+		  4 = /dev/nqft0	Unit 0, no rewind-on-close
+		  5 = /dev/nqft1	Unit 1, no rewind-on-close
+		  6 = /dev/nqft2	Unit 2, no rewind-on-close
+		  7 = /dev/nqft3	Unit 3, no rewind-on-close
+		 16 = /dev/zqft0	Unit 0, rewind-on-close, compression
+		 17 = /dev/zqft1	Unit 1, rewind-on-close, compression
+		 18 = /dev/zqft2	Unit 2, rewind-on-close, compression
+		 19 = /dev/zqt3		Unit 3, rewind-on-close, compression
+		 20 = /dev/nzqft0	Unit 0, no rewind-on-close, compression
+		 21 = /dev/nzqft1	Unit 1, no rewind-on-close, compression
+		 22 = /dev/nzqft2	Unit 2, no rewind-on-close, compression
+		 23 = /dev/nzqft3	Unit 3, no rewind-on-close, compression
+		 32 = /dev/rawqft0	Unit 0, rewind-on-close, no file marks
+		 33 = /dev/rawqft1	Unit 1, rewind-on-close, no file marks
+		 34 = /dev/rawqft2	Unit 2, rewind-on-close, no file marks
+		 35 = /dev/rawqft3	Unit 3, rewind-on-close, no file marks
+		 32 = /dev/nrawqft0	Unit 0, no rewind-on-close, no file marks
+		 33 = /dev/nrawqft1	Unit 1, no rewind-on-close, no file marks
+		 34 = /dev/nrawqft2	Unit 2, no rewind-on-close, no file marks
+		 35 = /dev/nrawqft3	Unit 3, no rewind-on-close, no file marks
     block	Third Matsushita (Panasonic/SoundBlaster) CD-ROM
 		  0 = /dev/sbpcd8	Panasonic CD-ROM controller 2 unit 0
 		  1 = /dev/sbpcd9	Panasonic CD-ROM controller 2 unit 1
@@ -509,28 +583,11 @@ reply.
 
  29 char	Universal frame buffer
 		  0 = /dev/fb0		First frame buffer
-		  1 = /dev/fb0autodetect
-		 24 = /dev/fb0user0
-	              ...
-		 31 = /dev/fb0user7
 		 32 = /dev/fb1		Second frame buffer
-		 33 = /dev/fb1autodetect
-		 56 = /dev/fb1user0
 		      ...
-		 63 = /dev/fb1user7
+		240 = /dev/fb7		Eighth frame buffer
 
-		The universal frame buffer device is currently only
-		supported on Linux/68k and Linux/SPARC.  The plain
-		device accesses the frame buffer at current resolution
-		(Linux/68k calls this device "current",
-		e.g. /dev/fb0current); the "autodetect" one at bootup
-		(default) resolution.  Minor numbers 2-23 within each
-		frame buffer assignment are used for specific
-		device-dependent resolutions.  There appears to be no
-		standard naming for these devices.  Finally, 2-31
-		within each device are reserved for user-selected
-		modes, usually entered at boot time.  Currently only
-		Linux/68k uses the mode-specific devices.
+		All additional minor numbers are reserved.
 
     block	Aztech/Orchid/Okano/Wearnes CD-ROM
 		  0 = /dev/aztcd	Aztech CD-ROM
@@ -544,8 +601,9 @@ reply.
 		  2 = /dev/inet/udp	Network access
 		  2 = /dev/inet/tcp	Network access
 
-		iBCS-2 requires /dev/nfsd to be a link to
-		/dev/socksys, and /dev/X0R to be a link to /dev/null.
+		Additionally, iBCS-2 requires /dev/nfsd to be a link
+		to /dev/socksys, and /dev/X0R to be a link to
+		/dev/null.
 
     block	Philips LMS CM-205 CD-ROM
 		  0 = /dev/cm205cd	Philips LMS CM-205 CD-ROM
@@ -587,7 +645,7 @@ reply.
 		  1 = /dev/cux1		Callout device corresponding to ttyX1
 		      ...
     block	Third IDE hard disk/CD-ROM interface
-    		  0 = /dev/hde		Master: whole disk (or CD-ROM)
+		  0 = /dev/hde		Master: whole disk (or CD-ROM)
 		 64 = /dev/hdf		Slave: whole disk (or CD-ROM)
 
 		Partitions are handled the same way as for the first
@@ -605,7 +663,7 @@ reply.
 		on.
 
     block	Fourth IDE hard disk/CD-ROM interface
-    		  0 = /dev/hdg		Master: whole disk (or CD-ROM)
+		  0 = /dev/hdg		Master: whole disk (or CD-ROM)
 		 64 = /dev/hdh		Slave: whole disk (or CD-ROM)
 		
 		Partitions are handled the same way as for the first
@@ -616,20 +674,16 @@ reply.
 		  1 = /dev/midi1	Second MIDI port, kernel timed
 		  2 = /dev/midi2	Third MIDI port, kernel timed
 		  3 = /dev/midi3	Fourth MIDI port, kernel timed
-	         64 = /dev/rmidi0	First MIDI port, untimed
-	         65 = /dev/rmidi1	Second MIDI port, untimed
-	         66 = /dev/rmidi2	Third MIDI port, untimed
-	         67 = /dev/rmidi3	Fourth MIDI port, untimed
+		 64 = /dev/rmidi0	First MIDI port, untimed
+		 65 = /dev/rmidi1	Second MIDI port, untimed
+		 66 = /dev/rmidi2	Third MIDI port, untimed
+		 67 = /dev/rmidi3	Fourth MIDI port, untimed
 		128 = /dev/smpte0	First MIDI port, SMPTE timed
 		129 = /dev/smpte1	Second MIDI port, SMPTE timed
 		130 = /dev/smpte2	Third MIDI port, SMPTE timed
 		131 = /dev/smpte3	Fourth MIDI port, SMPTE timed
-    block	Modular RAM disk device
-
-		This device number is provided for older kernels which
-		did not have the modular RAM disk in the standard
-		distribution.  See major number 1.  This assignment
-		will be removed when the 2.0 kernel is released.
+    block	Slow memory ramdisk
+		  0 = /dev/slram	Slow memory ramdisk
 
  36 char	Netlink support
 		  0 = /dev/route	Routing, device updates, kernel to user
@@ -687,6 +741,9 @@ reply.
     block	Syquest EZ135 parallel port removable drive
 		  0 = /dev/eza		Parallel EZ135 drive, whole disk
 
+		This device is obsolete and will be removed in a
+		future version of Linux.  It has been replaced with
+		the parallel port IDE disk driver at major number 45.
 		Partitions are handled in the same way as IDE disks
 		(see major number 3).
 
@@ -694,6 +751,10 @@ reply.
 		  0 = /dev/yamm		Yet Another Micro Monitor
     block	MicroSolutions BackPack parallel port CD-ROM
 		  0 = /dev/bpcd		BackPack CD-ROM
+
+		This device is obsolete and will be removed in a
+		future version of Linux.  It has been replaced with
+		the parallel port ATAPI CD-ROM driver at major number 46.
 
  42		Demo/sample use
 
@@ -705,15 +766,39 @@ reply.
 		removal of a driver with this number should not cause
 		ill effects to the system (bugs excepted.)
 
+		IN PARTICULAR, ANY DISTRIBUTION WHICH CONTAINS A
+		DEVICE DRIVER USING MAJOR NUMBER 42 IS NONCOMPLIANT.
+
  43 char	isdn4linux virtual modem
 		  0 = /dev/ttyI0	First virtual modem
 		      ...
 		 63 = /dev/ttyI63	64th virtual modem
+    block	Network block devices
+		  0 = /dev/nb0		First network block device
+		  1 = /dev/nb1		Second network block device
+		      ...
+
+		Network Block Device is somehow similar to loopback
+		devices: If you read from it, it sends packet accross
+		network asking server for data. If you write to it, it
+		sends packet telling server to write. It could be used
+		to mounting filesystems over the net, swapping over
+		the net, implementing block device in userland etc.
 
  44 char	isdn4linux virtual modem - alternate devices
 		  0 = /dev/cui0		Callout device corresponding to ttyI0
 		      ...
 		 63 = /dev/cui63	Callout device corresponding to ttyI63
+    block	Flash Translatio Layer (FTL) filesystems
+		  0 = /dev/ftla		FTL on first Memory Technology Device
+		 16 = /dev/ftlb		FTL on second Memory Technology Device
+		 32 = /dev/ftlc		FTL on third Memory Technology Device
+		      ...
+		240 = /dev/ftlp		FTL on 16th Memory Technology Device 
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) expect that the partition
+		limit is 15 rather than 63 per disk (same as SCSI.)
 
  45 char	isdn4linux ISDN BRI driver
 		  0 = /dev/isdn0	First virtual B channel raw data
@@ -728,44 +813,71 @@ reply.
 		191 = /dev/ippp63	64th SyncPPP device
 
 		255 = /dev/isdninfo	ISDN monitor interface
+    block	Parallel port IDE disk devices
+		  0 = /dev/pda		First parallel port IDE disk
+		 16 = /dev/pdb		Second parallel port IDE disk
+		 32 = /dev/pdc		Third parallel port IDE disk
+		 48 = /dev/pdd		Fourth parallel port IDE disk
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) except that the partition
+		limit is 15 rather than 63 per disk.
 
  46 char	Comtrol Rocketport serial card
 		  0 = /dev/ttyR0	First Rocketport port
 		  1 = /dev/ttyR1	Second Rocketport port
 		      ...
+    block	Parallel port ATAPI CD-ROM devices
+		  0 = /dev/pcd0		First parallel port ATAPI CD-ROM
+		  1 = /dev/pcd1		Second parallel port ATAPI CD-ROM
+		  2 = /dev/pcd2		Third parallel port ATAPI CD-ROM
+		  3 = /dev/pcd3		Fourth parallel port ATAPI CD-ROM
 
  47 char	Comtrol Rocketport serial card - alternate devices
 		  0 = /dev/cur0		Callout device corresponding to ttyR0
 		  1 = /dev/cur1		Callout device corresponding to ttyR1
 		      ...
+    block	Parallel port ATAPI disk devices
+		  0 = /dev/pf0		First parallel port ATAPI disk
+		  1 = /dev/pf1		Second parallel port ATAPI disk
+		  2 = /dev/pf2		Third parallel port ATAPI disk
+		  3 = /dev/pf3		Fourth parallel port ATAPI disk
+
+		This driver is intended for floppy disks and similar
+		devices and hence does not support partitioning.
 
  48 char	SDL RISCom serial card
 		  0 = /dev/ttyL0	First RISCom port
 		  1 = /dev/ttyL1	Second RISCom port
 		      ...
+    block	Reserved for Mylex DAC960 PCI RAID controller
 
  49 char	SDL RISCom serial card - alternate devices
 		  0 = /dev/cul0		Callout device corresponding to ttyL0
 		  1 = /dev/cul1		Callout device corresponding to ttyL1
 		      ...
+    block	Reserved for Mylex DAC960 PCI RAID controller
 
  50 char	Reserved for GLINT
+    block	Reserved for Mylex DAC960 PCI RAID controller
 
  51 char	Baycom radio modem
 		  0 = /dev/bc0		First Baycom radio modem
 		  1 = /dev/bc1		Second Baycom radio modem
 		      ...
+    block	Reserved for Mylex DAC960 PCI RAID controller
 
  52 char	Spellcaster DataComm/BRI ISDN card
 		  0 = /dev/dcbri0	First DataComm card
 		  1 = /dev/dcbri1	Second DataComm card
 		  2 = /dev/dcbri2	Third DataComm card
 		  3 = /dev/dcbri3	Fourth DataComm card
+    block	Reserved for Mylex DAC960 PCI RAID controller
 
  53 char	BDM interface for remote debugging MC683xx microcontrollers
 		  0 = /dev/pd_bdm0	PD BDM interface on lp0
-          	  1 = /dev/pd_bdm1	PD BDM interface on lp1
-          	  2 = /dev/pd_bdm2	PD BDM interface on lp2
+		  1 = /dev/pd_bdm1	PD BDM interface on lp1
+		  2 = /dev/pd_bdm2	PD BDM interface on lp2
 		  4 = /dev/icd_bdm0	ICD BDM interface on lp0
 		  5 = /dev/icd_bdm1	ICD BDM interface on lp1
 		  6 = /dev/icd_bdm2	ICD BDM interface on lp2
@@ -776,6 +888,8 @@ reply.
 		Domain Interface and ICD is the commercial interface
 		by P&E.
 
+    block	Reserved for Mylex DAC960 PCI RAID controller
+
  54 char	Electrocardiognosis Holter serial card
 		  0 = /dev/holter0	First Holter port
 		  1 = /dev/holter1	Second Holter port
@@ -785,27 +899,473 @@ reply.
 		<mseritan@ottonel.pub.ro> to transfer data from Holter
 		24-hour heart monitoring equipment.
 
- 55-59		UNALLOCATED
+    block	Reserved for Mylex DAC960 PCI RAID controller
+
+ 55 char	DSP56001 digital signal processor
+		  0 = /dev/dsp56k	First DSP56001
+    block	Reserved for Mylex DAC960 PCI RAID controller
+
+ 56 char	Apple Desktop Bus
+		  0 = /dev/adb		ADB bus control
+
+		Additional devices will be added to this number, all
+		starting with /dev/adb.
+
+    block	Fifth IDE hard disk/CD-ROM interface
+		  0 = /dev/hdi		Master: whole disk (or CD-ROM)
+		 64 = /dev/hdj		Slave: whole disk (or CD-ROM)
+
+		Partitions are handled the same way as for the first
+		interface (see major number 3).
+
+ 57 char	Hayes ESP serial card
+		  0 = /dev/ttyP0	First ESP port
+		  1 = /dev/ttyP1	Second ESP port
+		      ...
+
+    block	Sixth IDE hard disk/CD-ROM interface
+		  0 = /dev/hdk		Master: whole disk (or CD-ROM)
+		 64 = /dev/hdl		Slave: whole disk (or CD-ROM)
+
+		Partitions are handled the same way as for the first
+		interface (see major number 3).
+
+ 58 char	Hayes ESP serial card - alternate devices
+		  0 = /dev/cup0		Callout device corresponding to ttyP0
+		  1 = /dev/cup1		Callout device corresponding to ttyP1
+		      ...
+    block	Reserved for logical volume manager
+
+ 59 char	sf firewall package
+		  0 = /dev/firewall	Communication with sf kernel module
 
  60-63		LOCAL/EXPERIMENTAL USE
 		Allocated for local/experimental use.  For devices not
 		assigned official numbers, these ranges should be
 		used, in order to avoid conflicting with future assignments.
 
- 64-119		UNALLOCATED
+ 64 char	ENskip kernel encryption package
+		  0 = /dev/enskip	Communication with ENskip kernel module
+
+ 65 char	Sundance "plink" Transputer boards
+		  0 = /dev/plink0	First plink device
+		  1 = /dev/plink1	Second plink device
+		  2 = /dev/plink2	Third plink device
+		  3 = /dev/plink3	Fourth plink device
+		 64 = /dev/rplink0	First plink device, raw
+		 65 = /dev/rplink1	Second plink device, raw
+		 66 = /dev/rplink2	Third plink device, raw
+		 67 = /dev/rplink3	Fourth plink device, raw
+		128 = /dev/plink0d	First plink device, debug
+		129 = /dev/plink1d	Second plink device, debug
+		130 = /dev/plink2d	Third plink device, debug
+		131 = /dev/plink3d	Fourth plink device, debug
+		192 = /dev/rplink0d	First plink device, raw, debug
+		193 = /dev/rplink1d	Second plink device, raw, debug
+		194 = /dev/rplink2d	Third plink device, raw, debug
+		195 = /dev/rplink3d	Fourth plink device, raw, debug
+
+		This is a commercial driver; contact James Howes
+		<jth@prosig.demon.co.uk> for information.
+
+    block	SCSI disk devices (16-31)
+		  0 = /dev/sdq		16th SCSI disk whole disk
+		 16 = /dev/sdr		17th SCSI disk whole disk
+		 32 = /dev/sds		18th SCSI disk whole disk
+		      ...
+		240 = /dev/sdaf		32nd SCSI disk whole disk
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) except that the limit on
+		partitions is 15.
+
+ 66 char	YARC PowerPC PCI coprocessor card
+		  0 = /dev/yppcpci0	First YARC card
+		  1 = /dev/yppcpci1	Second YARC card
+		      ...
+
+    block	SCSI disk devices (32-47)
+		  0 = /dev/sdag		33th SCSI disk whole disk
+		 16 = /dev/sdah		34th SCSI disk whole disk
+		 32 = /dev/sdai		35th SCSI disk whole disk
+		      ...
+		240 = /dev/sdav		48nd SCSI disk whole disk
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) except that the limit on
+		partitions is 15.
+
+ 67 char	Coda network file system
+		  0 = /dev/cfs0		Coda cache manager
+
+		See http://www.coda.cs.cmu.edu for information about Coda.
+
+    block	SCSI disk devices (48-63)
+		  0 = /dev/sdaw		49th SCSI disk whole disk
+		 16 = /dev/sdax		50th SCSI disk whole disk
+		 32 = /dev/sday		51st SCSI disk whole disk
+		      ...
+		240 = /dev/sdbl		64th SCSI disk whole disk
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) except that the limit on
+		partitions is 15.
+
+ 68 char	CAPI 2.0 interface
+		  0 = /dev/capi20	Control device
+		  1 = /dev/capi20.00	First CAPI 2.0 application
+		  2 = /dev/capi20.01	Second CAPI 2.0 application
+		      ...
+		 20 = /dev/capi20.19	19th CAPI 2.0 application
+
+		ISDN CAPI 2.0 driver for use with CAPI 2.0
+		applications; currently supports the AVM B1 card.
+
+    block	SCSI disk devices (64-79)
+		  0 = /dev/sdbm		64th SCSI disk whole disk
+		 16 = /dev/sdbn		65th SCSI disk whole disk
+		 32 = /dev/sdbo		66th SCSI disk whole disk
+		      ...
+		240 = /dev/sdcb		80th SCSI disk whole disk
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) except that the limit on
+		partitions is 15.
+
+ 69 char	MA16 numeric accelerator card
+		  0 = /dev/ma16		Board memory access
+
+    block	SCSI disk devices (80-95)
+		  0 = /dev/sdcc		81st SCSI disk whole disk
+		 16 = /dev/sdcd		82nd SCSI disk whole disk
+		 32 = /dev/sdce		83th SCSI disk whole disk
+		      ...
+		240 = /dev/sdcr		96th SCSI disk whole disk
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) except that the limit on
+		partitions is 15.
+
+ 70 char	SpellCaster Protocol Services Interface
+		  0 = /dev/apscfg	Configuration interface
+		  1 = /dev/apsauth	Authentication interface
+		  2 = /dev/apslog	Logging interface
+		  3 = /dev/apsdbg	Debugging interface
+		 64 = /dev/apsisdn	ISDN command interface
+		 65 = /dev/apsasync	Async command interface
+		128 = /dev/apsmon	Monitor interface
+
+    block	SCSI disk devices (96-111)
+		  0 = /dev/sdcs		97th SCSI disk whole disk
+		 16 = /dev/sdct		98th SCSI disk whole disk
+		 32 = /dev/sdcu		99th SCSI disk whole disk
+		      ...
+		240 = /dev/sddh		112nd SCSI disk whole disk
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) except that the limit on
+		partitions is 15.
+
+ 71 char	Computone IntelliPort II serial card
+		  0 = /dev/ttyF0	IntelliPort II board 0, port 0
+		  1 = /dev/ttyF1	IntelliPort II board 0, port 1
+		      ...
+		 63 = /dev/ttyF63	IntelliPort II board 0, port 63
+		 64 = /dev/ttyF64	IntelliPort II board 1, port 0
+		 65 = /dev/ttyF65	IntelliPort II board 1, port 1
+		      ...
+		127 = /dev/ttyF127	IntelliPort II board 1, port 63
+		128 = /dev/ttyF128	IntelliPort II board 2, port 0
+		129 = /dev/ttyF129	IntelliPort II board 2, port 1
+		      ...
+		191 = /dev/ttyF191	IntelliPort II board 2, port 63
+		192 = /dev/ttyF192	IntelliPort II board 3, port 0
+		193 = /dev/ttyF193	IntelliPort II board 3, port 1
+		      ...
+		255 = /dev/ttyF255	IntelliPort II board 3, port 63
+
+    block	SCSI disk devices (112-127)
+		  0 = /dev/sddi		113th SCSI disk whole disk
+		 16 = /dev/sddj		114th SCSI disk whole disk
+		 32 = /dev/sddk		115th SCSI disk whole disk
+		      ...
+		240 = /dev/sddx		128th SCSI disk whole disk
+
+		Partitions are handled in the same way as for IDE
+		disks (see major number 3) except that the limit on
+		partitions is 15.
+
+ 72 char	Computone IntelliPort II serial card - alternate devices
+		  0 = /dev/cuf0		Callout device corresponding to ttyF0
+		  1 = /dev/cuf1		Callout device corresponding to ttyF1
+		      ...
+		 63 = /dev/cuf63	Callout device corresponding to ttyF63
+		 64 = /dev/cuf64	Callout device corresponding to ttyF64
+		 65 = /dev/cuf65	Callout device corresponding to ttyF65
+		      ...
+		127 = /dev/cuf127	Callout device corresponding to ttyF127
+		128 = /dev/cuf128	Callout device corresponding to ttyF128
+		129 = /dev/cuf129	Callout device corresponding to ttyF129
+		      ...
+		191 = /dev/cuf191	Callout device corresponding to ttyF191
+		192 = /dev/cuf192	Callout device corresponding to ttyF192
+		193 = /dev/cuf193	Callout device corresponding to ttyF193
+		      ...
+		255 = /dev/cuf255	Callout device corresponding to ttyF255
+
+ 73 char	Computone IntelliPort II serial card - control devices
+		  0 = /dev/ip2ipl0	Loadware device for board 0
+		  1 = /dev/ip2stat0	Status device for board 0
+		  4 = /dev/ip2ipl1	Loadware device for board 1
+		  5 = /dev/ip2stat1	Status device for board 1
+		  8 = /dev/ip2ipl2	Loadware device for board 2
+		  9 = /dev/ip2stat2	Status device for board 2
+		 12 = /dev/ip2ipl3	Loadware device for board 3
+		 13 = /dev/ip2stat3	Status device for board 3
+
+ 74 char	SCI bridge
+		  0 = /dev/SCI/0	SCI device 0
+		  1 = /dev/SCI/1	SCI device 1
+		      ...
+
+		Currently for Dolphin Interconnect Solutions' PCI-SCI
+		bridge.
+
+ 75 char	Specialix IO8+ serial card
+		  0 = /dev/ttyW0	First IO8+ port, first card
+		  1 = /dev/ttyW1	Second IO8+ port, first card
+		      ...
+		  8 = /dev/ttyW8	First IO8+ port, second card
+		      ...
+
+ 76 char	Specialix IO8+ serial card - alternate devices
+		  0 = /dev/cuw0		Callout device corresponding to ttyW0
+		  1 = /dev/cuw1		Callout device corresponding to ttyW1
+		      ...
+		  8 = /dev/cuw8		Callout device corresponding to ttyW8
+		      ...
+
+ 77 char	ComScire Quantum Noise Generator
+		  0 = /dev/qng		ComScire Quantum Noise Generator
+
+ 78 char	PAM Software's multimodem boards
+		  0 = /dev/ttyM0	First PAM modem
+		  1 = /dev/ttyM1	Second PAM modem
+		      ...
+
+ 79 char	PAM Software's multimodem boards - alternate devices
+		  0 = /dev/cum0		Callout device corresponding to ttyM0
+		  1 = /dev/cum1		Callout device corresponding to ttyM1
+		      ...
+
+ 80 char	Photometrics AT200 CCD camera
+		  0 = /dev/at200	Photometrics AT200 CCD camera
+
+ 81 char	video4linux
+		  0 = /dev/video0	Video capture/overlay device
+		      ...
+		 63 = /dev/video63	Video capture/overlay device
+		 64 = /dev/radio0	Radio device
+		      ...
+		127 = /dev/radio63	Radio device
+		192 = /dev/vtx0		Teletext device
+		      ...
+		223 = /dev/vtx31	Teletext device
+		224 = /dev/vbi0		Vertical blank interrupt
+		      ...
+		255 = /dev/vbi31	Vertical blank interrupt
+
+ 82 char	WiNRADiO communications receiver card
+		  0 = /dev/winradio0	First WiNRADiO card
+		  1 = /dev/winradio1	Second WiNRADiO card
+		      ...
+
+		The driver and documentation may be obtained from
+		http://www.proximity.com.au/~brian/winradio/
+
+ 83 char	Teletext/videotext interfaces
+		  0 = /dev/vtx		Teletext decoder
+		 16 = /dev/vttuner	TV tuner on teletext interface
+
+		Devices for the driver contained in the VideoteXt package.
+		More information on http://home.pages.de/~videotext/
+
+ 84 char	Ikon 1011[57] Versatec Greensheet Interface
+		  0 = /dev/ihcp0	First Greensheet port
+		  1 = /dev/ihcp1	Second Greensheet port
+
+ 85 char	Linux/SGI shared memory input queue
+		  0 = /dev/shmiq	Master shared input queue
+		  1 = /dev/qcntl0	First device pushed
+		  2 = /dev/qcntl1	Second device pushed
+		    ...
+
+ 86 char	SCSI media changer
+		  0 = /dev/sch0		First SCSI media changer
+		  1 = /dev/sch1		Second SCSI media changer
+		    ...
+
+ 87 char	Sony Control-A1 stereo control bus
+		  0 = /dev/controla0	First device on chain
+		  1 = /dev/controla1	Second device on chain
+		    ...
+
+ 88 char	COMX synchronous serial card
+		  0 = /dev/comx0	COMX channel 0
+		  1 = /dev/comx1	COMX channel 1
+		    ...
+
+ 89 char	I2C bus interface
+		  0 = /dev/i2c0		First I2C adapter
+		  1 = /dev/i2c1		Second I2C adapter
+		    ...
+
+ 90 char	Memory Technology Device (RAM, ROM, Flash)
+		  0 = /dev/mtd0		First MTD (rw)
+		  1 = /dev/mtdr0	First MTD (ro)
+		    ...
+		 30 = /dev/mtd15	16th MTD (rw)
+		 31 = /dev/mtdr15	16th MTD (ro)
+
+ 91 char	CAN-Bus devices
+		  0 = /dev/can0		First CAN-Bus controller
+		  1 = /dev/can1		Second CAN-Bus controller
+		    ...
+
+ 92 char	Reserved for ith Kommunikationstechnik MIC ISDN card
+
+ 93 char	IBM Smart Capture Card frame grabber
+		  0 = /dev/iscc0	First Smart Capture Card
+		  1 = /dev/iscc1	Second Smart Capture Card
+		    ...
+		128 = /dev/isccctl0	First Smart Capture Card control
+		129 = /dev/isccctl1	Second Smart Capture Card control
+		    ...
+
+ 94 char	miroVIDEO DC10/30 capture/playback device
+		  0 = /dev/dcxx0	First capture card
+		  1 = /dev/dcxx1	Second capture card
+		    ...
+
+ 95 char	IP filter
+		  0 = /dev/ipl		Filter control device/log file
+		  1 = /dev/ipnat	NAT control device/log file
+		  2 = /dev/ipstate	State information log file
+		  3 = /dev/ipauth	Authentication control device/log file
+
+ 96 char	Parallel port ATAPI tape devices
+		  0 = /dev/pt0		First parallel port ATAPI tape
+		  1 = /dev/pt1		Second parallel port ATAPI tape
+		  2 = /dev/pt2		Third parallel port ATAPI tape
+		  3 = /dev/pt3		Fourth parallel port ATAPI tape
+		128 = /dev/npt0		First p.p. ATAPI tape, no rewind
+		129 = /dev/npt1		Second p.p. ATAPI tape, no rewind
+		130 = /dev/npt2		Third p.p. ATAPI tape, no rewind
+		131 = /dev/npt3		Fourth p.p. ATAPI tape, no rewind
+
+ 97 char	Parallel port generic ATAPI interface
+		  0 = /dev/pg0		First parallel port ATAPI device
+		  1 = /dev/pg1		Second parallel port ATAPI device
+		  2 = /dev/pg2		Third parallel port ATAPI device
+		  3 = /dev/pg3		Fourth parallel port ATAPI device
+
+		These devices support the same API as the generic SCSI
+		devices.
+
+ 98 char	Control and Measurement Device (comedi)
+		  0 = /dev/comedi0	First comedi device
+		  1 = /dev/comedi1	Second comedi device
+		    ...
+
+		See http://stm.lbl.gov/comedi or http://www.llp.fu-berlin.de/.
+
+ 99 char	Raw parallel ports
+		  0 = /dev/parport0	First parallel port
+		  1 = /dev/parport1	Second parallel port
+		    ...
+
+100 char	POTS (analogue telephone) A/B port
+		  0 = /dev/phone0	First telephone port
+		  1 = /dev/phone1	Second telephone port
+		    ...
+
+101 char	Motorola DSP 56xxx board
+		  0 = /dev/mdspstat	Status information
+		  1 = /dev/mdsp1	First DSP board I/O controls
+		    ...
+		 16 = /dev/mdsp16	16th DSP board I/O controls
+
+102 char	Philips SAA5249 Teletext signal decoder
+		  0 = /dev/tlk0		First Teletext decoder
+		  1 = /dev/tlk1		Second Teletext decoder
+		  2 = /dev/tlk2		Third Teletext decoder
+		  3 = /dev/tlk3		Fourth Teletext decoder
+
+103 char	Arla network file system
+		  0 = /dev/xfs0		Arla XFS
+
+		Arla is a free clone of the Andrew File System, AFS.
+		Any resemblance with the Swedish milk producer is
+		coincidental.  For more information about the project,
+		write to <arla-drinkers@stacken.kth.se> or subscribe
+		to the arla announce mailing list by sending a mail to
+		<arla-announce-request@stacken.kth.se>.
+
+104 char	Flash BIOS support
+
+105 char	Comtrol VS-1000 serial controller
+		  0 = /dev/ttyV0	First VS-1000 port
+		  1 = /dev/ttyV1	Second VS-1000 port
+		    ...
+
+106 char	Comtrol VS-1000 serial controller - alternate devices
+		  0 = /dev/cuv0		First VS-1000 port
+		  1 = /dev/cuv1		Second VS-1000 port
+		    ...
+
+107 char	3Dfx Voodoo Graphics device
+		  0 = /dev/3dfx		Primary 3Dfx graphics device
+
+108 char	Device independent PPP interface
+		  0 = /dev/ppp		Device independent PPP interface
+
+109 char	Reserved for logical volume manager
+
+110 char	miroMEDIA Surround board
+		  0 = /dev/srnd0	First miroMEDIA Surround board
+		  1 = /dev/srnd1	Second miroMEDIA Surround board
+		    ...
+
+111-119		UNALLOCATED
 
 120-127		LOCAL/EXPERIMENTAL USE
 
-128-239		UNALLOCATED
+128-135	char	Unix98 PTY masters
+
+		These devices should not have corresponding device
+		nodes; instead they should be accessed through the
+		/dev/ptmx cloning interface.
+
+136-143 char	Unix98 PTY slaves
+		  0 = /dev/pts/0	First Unix98 pseudo-TTY
+		  1 = /dev/pts/1	Second Unix98 pesudo-TTY
+
+		These device nodes are automatically generated with
+		the proper permissions and modes by mounting the
+		devpts filesystem onto /dev/pts with the appropriate
+		mount options (distribution dependent).
+
+144-239		UNALLOCATED
 
 240-254		LOCAL/EXPERIMENTAL USE
 
 255		RESERVED
 
+		This major is reserved to assist the expansion to a
+		larger number space.  No device nodes with this major
+		should ever be created on the filesystem.
 
-
-
-	ADDITIONAL /dev DIRECTORY ENTRIES
+ ****	ADDITIONAL /dev DIRECTORY ENTRIES
 
 This section details additional entries that should or may exist in
 the /dev directory.  It is preferred that symbolic links use the same
@@ -833,9 +1393,10 @@ It is recommended that these links exist on all systems:
 
 /dev/core	/proc/kcore	symbolic	Backward compatibility
 /dev/ramdisk	ram0		symbolic	Backward compatibility
-/dev/ftape	rft0		symbolic	Backward compatibility
+/dev/ftape	qft0		symbolic	Backward compatibility
+/dev/bttv0	video0		symbolic	Backward compatibility
+/dev/radio	radio0		symbolic	Backward compatibility
 /dev/scd?	sr?		hard		Alternate SCSI CD-ROM name
-
 
 	Locally defined links
 
@@ -855,8 +1416,8 @@ exist, they should have the following uses.
 
 /dev/modem should not be used for a modem which supports dialin as
 well as dialout, as it tends to cause lock file problems.  If it
-exists, /dev/modem should point to the appropriate dialout (alternate)
-device.
+exists, /dev/modem should point to the appropriate primary TTY device
+(the use of the alternate callout devices is deprecated).
 
 For SCSI devices, /dev/tape and /dev/cdrom should point to the
 ``cooked'' devices (/dev/st* and /dev/sr*, respectively), whereas
@@ -873,3 +1434,112 @@ Non-transient sockets and named pipes may exist in /dev.  Common entries are:
 /dev/printer	socket		lpd local socket
 /dev/log	socket		syslog local socket
 /dev/gpmdata	socket		gpm mouse multiplexer
+
+
+ ****	TERMINAL DEVICES
+
+Terminal, or TTY devices are a special class of character devices.  A
+terminal device is any device that could act as a controlling terminal
+for a session; this includes virtual consoles, serial ports, and
+pseudoterminals (PTYs).
+
+All terminal devices share a common set of capabilities known as line
+diciplines; these include the common terminal line dicipline as well
+as SLIP and PPP modes.
+
+All terminal devices are named similarly; this section explains the
+naming and use of the various types of TTYs.  Note that the naming
+conventions include several historical warts; some of these are
+Linux-specific, some were inherited from other systems, and some
+reflect Linux outgrowing a borrowed convention.
+
+A hash mark (#) in a device name is used here to indicate a decimal
+number without leading zeroes.
+
+	Virtual consoles and the console device
+
+Virtual consoles are full-screen terminal displays on the system video
+monitor.  Virtual consoles are named /dev/tty#, with numbering
+starting at /dev/tty1; /dev/tty0 is the current virtual console.
+/dev/tty0 is the device that should be used to access the system video
+card on those architectures for which the frame buffer devices
+(/dev/fb*) are not applicable.  Do not use /dev/console
+for this purpose.
+
+The console device, /dev/console, is the device to which system
+messages should be sent, and on which logins should be permitted in
+single-user mode.  Starting with Linux 2.1.71, /dev/console is managed
+by the kernel; for previous versions it should be a symbolic link to
+either /dev/tty0, a specific virtual console such as /dev/tty1, or to
+a serial port primary (tty*, not cu*) device, depending on the
+configuration of the system.
+
+	Serial ports
+
+Serial ports are RS-232 serial ports and any device which simulates
+one, either in hardware (such as internal modems) or in software (such
+as the ISDN driver.)  Under Linux, each serial ports has two device
+names, the primary or callin device and the alternate or callout one.
+Each kind of device is indicated by a different letter.  For any
+letter X, the names of the devices are /dev/ttyX# and /dev/cux#,
+respectively; for historical reasons, /dev/ttyS# and /dev/ttyC#
+correspond to /dev/cua# and /dev/cub#.  In the future, it should be
+expected that multiple letters will be used; all letters will be upper
+case for the "tty" device (e.g. /dev/ttyDP#) and lower case for the
+"cu" device (e.g. /dev/cudp#).
+
+The names /dev/ttyQ# and /dev/cuq# are reserved for local use.
+
+The alternate devices provide for kernel-based exclusion and somewhat
+different defaults than the primary devices.  Their main purpose is to
+allow the use of serial ports with programs with no inherent or broken
+support for serial ports.  Their use is deprecated, and they may be
+removed from a future version of Linux.
+
+Arbitration of serial ports is provided by the use of lock files with
+the names /var/lock/LCK..ttyX#.  The contents of the lock file should
+be the PID of the locking process as an ASCII number.
+
+It is common practice to install links such as /dev/modem
+which point to serial ports.  In order to ensure proper locking in the
+presence of these links, it is recommended that software chase
+symlinks and lock all possible names; additionally, it is recommended
+that a lock file be installed with the corresponding alternate
+device.  In order to avoid deadlocks, it is recommended that the locks
+are acquired in the following order, and released in the reverse:
+
+	1. The symbolic link name, if any (/var/lock/LCK..modem)
+	2. The "tty" name (/var/lock/LCK..ttyS2)
+	3. The alternate device name (/var/lock/LCK..cua2)
+
+In the case of nested symbolic links, the lock files should be
+installed in the order the symlinks are resolved.
+
+Under no circumstances should an application hold a lock while waiting
+for another to be released.  In addition, applications which attempt
+to create lock files for the corresponding alternate device names
+should take into account the possibility of being used on a non-serial
+port TTY, for which no alternate device would exist.
+
+	Pseudoterminals (PTYs)
+
+Pseudoterminals, or PTYs, are used to create login sessions or provide
+other capabilities requiring a TTY line dicipline (including SLIP or
+PPP capability) to arbitrary data-generation processes.  Each PTY has
+a master side, named /dev/pty[p-za-e][0-9a-f], and a slave side, named
+/dev/tty[p-za-e][0-9a-f].  The kernel arbitrates the use of PTYs by
+allowing each master side to be opened only once.
+
+Once the master side has been opened, the corresponding slave device
+can be used in the same manner as any TTY device.  The master and
+slave devices are connected by the kernel, generating the equivalent
+of a bidirectional pipe with TTY capabilities.
+
+Recent versions of the Linux kernels and GNU libc contain support for
+the System V/Unix98 naming scheme for PTYs, which assigns a common
+device, /dev/ptmx, to all the masters (opening it will automatically
+give you a previously unassigned PTY) and a subdirectory, /dev/pts,
+for the slaves; the slaves are named with decimal integers (/dev/pts/#
+in our notation).  This removes the problem of exhausting the
+namespace and enables the kernel to automatically create the device
+nodes for the slaves on demand using the "devpts" filesystem.

@@ -42,10 +42,11 @@
 #define WIN_RESTORE		0x10
 #define WIN_READ		0x20
 #define WIN_WRITE		0x30
+#define WIN_WRITE_VERIFY	0x3C
 #define WIN_VERIFY		0x40
 #define WIN_FORMAT		0x50
 #define WIN_INIT		0x60
-#define WIN_SEEK 		0x70
+#define WIN_SEEK		0x70
 #define WIN_DIAGNOSE		0x90
 #define WIN_SPECIFY		0x91	/* set drive geometry translation */
 #define WIN_SETIDLE1		0xE3
@@ -62,18 +63,37 @@
 #define WIN_READDMA		0xc8	/* read sectors using DMA transfers */
 #define WIN_WRITEDMA		0xca	/* write sectors using DMA transfers */
 
+#define WIN_READ_BUFFER		0xE4	/* force read only 1 sector */
+#define WIN_WRITE_BUFFER	0xE8	/* force write only 1 sector */
+
+#define WIN_SMART		0xb0	/* self-monitoring and reporting */
+
 /* Additional drive command codes used by ATAPI devices. */
 #define WIN_PIDENTIFY		0xA1	/* identify ATAPI device	*/
 #define WIN_SRST		0x08	/* ATAPI soft reset command */
 #define WIN_PACKETCMD		0xa0	/* Send a packet command. */
 
+/* WIN_SMART sub-commands */
+
+#define SMART_READ_VALUES	0xd0
+#define SMART_READ_THRESHOLDS	0xd1
+#define SMART_AUTOSAVE		0xd2
+#define SMART_SAVE		0xd3
+#define SMART_IMMEDIATE_OFFLINE	0xd4
+#define SMART_ENABLE		0xd8
+#define SMART_DISABLE		0xd9
+#define SMART_STATUS		0xda
+#define SMART_AUTO_OFFLINE	0xdb
+
 /* Bits for HD_ERROR */
 #define MARK_ERR	0x01	/* Bad address mark */
 #define TRK0_ERR	0x02	/* couldn't find track 0 */
 #define ABRT_ERR	0x04	/* Command aborted */
+#define MCR_ERR		0x08	/* media change request */
 #define ID_ERR		0x10	/* ID field not found */
 #define ECC_ERR		0x40	/* Uncorrectable ECC error */
-#define	BBD_ERR		0x80	/* block marked bad */
+#define	BBD_ERR		0x80	/* pre-EIDE meaning:  block marked bad */
+#define	ICRC_ERR	0x80	/* new meaning:  CRC error during transfer */
 
 struct hd_geometry {
       unsigned char heads;
@@ -86,11 +106,13 @@ struct hd_geometry {
 #define HDIO_GETGEO		0x0301	/* get device geometry */
 #define HDIO_GET_UNMASKINTR	0x0302	/* get current unmask setting */
 #define HDIO_GET_MULTCOUNT	0x0304	/* get current IDE blockmode setting */
-#define HDIO_GET_IDENTITY 	0x0307	/* get IDE identification info */
-#define HDIO_GET_KEEPSETTINGS 	0x0308	/* get keep-settings-on-reset flag */
-#define HDIO_GET_32BIT 		0x0309	/* get current io_32bit setting */
+#define HDIO_OBSOLETE_IDENTITY	0x0307	/* OBSOLETE, DO NOT USE: returns 142 bytes */
+#define HDIO_GET_KEEPSETTINGS	0x0308	/* get keep-settings-on-reset flag */
+#define HDIO_GET_32BIT		0x0309	/* get current io_32bit setting */
 #define HDIO_GET_NOWERR		0x030a	/* get ignore-write-error flag */
 #define HDIO_GET_DMA		0x030b	/* get use-dma flag */
+#define HDIO_GET_NICE		0x030c	/* get nice flags */
+#define HDIO_GET_IDENTITY	0x030d	/* get IDE identification info */
 #define HDIO_DRIVE_CMD		0x031f	/* execute a special drive command */
 
 /* hd/ide ctl's that pass (arg) non-ptr values are numbered 0x032n/0x033n */
@@ -101,6 +123,8 @@ struct hd_geometry {
 #define HDIO_SET_NOWERR		0x0325	/* change ignore-write-error flag */
 #define HDIO_SET_DMA		0x0326	/* change use-dma flag */
 #define HDIO_SET_PIO_MODE	0x0327	/* reconfig interface to new speed */
+#define HDIO_SCAN_HWIF		0x0328	/* register and (re)scan interface */
+#define HDIO_SET_NICE		0x0329	/* set nice flags */
 
 /* structure returned by HDIO_GET_IDENTITY, as per ANSI ATA2 rev.2f spec */
 struct hd_driveid {
@@ -146,12 +170,40 @@ struct hd_driveid {
 	unsigned short  eide_dma_time;	/* recommended mword dma cycle time (ns) */
 	unsigned short  eide_pio;       /* min cycle time (ns), no IORDY  */
 	unsigned short  eide_pio_iordy; /* min cycle time (ns), with IORDY */
-	unsigned short  reserved69;	/* reserved (word 69) */
-	unsigned short  reserved70;	/* reserved (word 70) */
-	/* unsigned short reservedxx[57];*/	/* reserved (words 71-127) */
-	/* unsigned short vendor7  [32];*/	/* vendor unique (words 128-159) */
-	/* unsigned short reservedyy[96];*/	/* reserved (words 160-255) */
+	unsigned short  word69;
+	unsigned short  word70;
+	/* HDIO_GET_IDENTITY currently returns only words 0 through 70 */
+	unsigned short  word71;
+	unsigned short  word72;
+	unsigned short  word73;
+	unsigned short  word74;
+	unsigned short  word75;
+	unsigned short  word76;
+	unsigned short  word77;
+	unsigned short  word78;
+	unsigned short  word79;
+	unsigned short  word80;
+	unsigned short  word81;
+	unsigned short  word82;
+	unsigned short  word83;
+	unsigned short  word84;
+	unsigned short  word85;
+	unsigned short  word86;
+	unsigned short  word87;
+	unsigned short  dma_ultra;
+	unsigned short  reserved[167];
 };
+
+/*
+ * IDE "nice" flags. These are used on a per drive basis to determine
+ * when to be nice and give more bandwidth to the other devices which
+ * share the same IDE bus.
+ */
+#define IDE_NICE_DSC_OVERLAP	(0)	/* per the DSC overlap protocol */
+#define IDE_NICE_ATAPI_OVERLAP	(1)	/* not supported yet */
+#define IDE_NICE_0		(2)	/* when sure that it won't affect us */
+#define IDE_NICE_1		(3)	/* when probably won't affect us much */
+#define IDE_NICE_2		(4)	/* when we know it's on our expense */
 
 #ifdef __KERNEL__
 /*
@@ -162,15 +214,11 @@ struct hd_driveid {
 #ifdef CONFIG_BLK_DEV_HD
 void hd_setup(char *, int *);
 #endif	/* CONFIG_BLK_DEV_HD */
-#ifdef CONFIG_BLK_DEV_IDE
-void ide_setup(char *);
 
-#ifdef CONFIG_BLK_DEV_IDE_PCMCIA
+#if defined(CONFIG_BLK_DEV_IDE) || defined(CONFIG_BLK_DEV_IDE_MODULE)
 int ide_register(int io_port, int ctl_port, int irq);
 void ide_unregister(unsigned int);
-#endif  /* CONFIG_BLK_DEV_IDE_PCMCIA */
-
-#endif	/* CONFIG_BLK_DEV_IDE */
+#endif /* CONFIG_BLK_DEV_IDE || CONFIG_BLK_DEV_IDE_MODULE */
 
 #endif  /* __KERNEL__ */
 

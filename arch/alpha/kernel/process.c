@@ -5,7 +5,7 @@
  */
 
 /*
- * This file handles the architecture-dependent parts of process handling..
+ * This file handles the architecture-dependent parts of process handling.
  */
 
 #include <linux/config.h>
@@ -13,11 +13,12 @@
 #include <linux/sched.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/stddef.h>
 #include <linux/unistd.h>
 #include <linux/ptrace.h>
 #include <linux/malloc.h>
-#include <linux/ldt.h>
 #include <linux/user.h>
 #include <linux/a.out.h>
 #include <linux/utsname.h>
@@ -26,40 +27,176 @@
 #include <linux/stat.h>
 #include <linux/mman.h>
 #include <linux/elfcore.h>
+#include <linux/reboot.h>
+#include <linux/console.h>
+
+#ifdef CONFIG_RTC
+#include <linux/mc146818rtc.h>
+#endif
 
 #include <asm/reg.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/io.h>
+#include <asm/pgtable.h>
+#include <asm/hwrpb.h>
+#include <asm/fpu.h>
 
-asmlinkage int sys_sethae(unsigned long hae, unsigned long a1, unsigned long a2,
-	unsigned long a3, unsigned long a4, unsigned long a5,
-	struct pt_regs regs)
+#include "proto.h"
+#include "bios32.h"
+
+/*
+ * Initial task structure. Make this a per-architecture thing,
+ * because different architectures tend to have different
+ * alignment requirements and potentially different initial
+ * setup.
+ */
+
+unsigned long init_user_stack[1024] = { STACK_MAGIC, };
+static struct vm_area_struct init_mmap = INIT_MMAP;
+static struct fs_struct init_fs = INIT_FS;
+static struct file * init_fd_array[NR_OPEN] = { NULL, };
+static struct files_struct init_files = INIT_FILES;
+static struct signal_struct init_signals = INIT_SIGNALS;
+struct mm_struct init_mm = INIT_MM;
+
+union task_union init_task_union __attribute__((section("init_task")))
+	 = { task: INIT_TASK };
+
+/*
+ * No need to acquire the kernel lock, we're entirely local..
+ */
+asmlinkage int
+sys_sethae(unsigned long hae, unsigned long a1, unsigned long a2,
+	   unsigned long a3, unsigned long a4, unsigned long a5,
+	   struct pt_regs regs)
 {
 	(&regs)->hae = hae;
 	return 0;
 }
 
-asmlinkage int sys_idle(void)
+static void __attribute__((noreturn))
+do_cpu_idle(void)
 {
-	if (current->pid != 0)
-		return -EPERM;
-
-	/* endless idle loop with no priority at all */
-	current->counter = -100;
-	for (;;) {
+	/* An endless idle loop with no priority at all.  */
+	current->priority = 0;
+	while (1) {
+		check_pgt_cache();
+		run_task_queue(&tq_scheduler);
+		current->counter = 0;
 		schedule();
 	}
 }
 
-void hard_reset_now(void)
+#ifdef __SMP__
+void
+cpu_idle(void *unused)
 {
-#if defined(CONFIG_ALPHA_SRM) && defined(CONFIG_ALPHA_ALCOR)
-	/* who said DEC engineer's have no sense of humor? ;-)) */
-	*(int *) GRU_RESET = 0x0000dead;
-	mb();
+	do_cpu_idle();
+}
 #endif
+
+asmlinkage int
+sys_idle(void)
+{
+	if (current->pid == 0)
+        	do_cpu_idle();
+	return -EPERM;
+}
+
+void
+generic_kill_arch (int mode, char *restart_cmd)
+{
+	/* The following currently only has any effect on SRM.  We should
+	   fix MILO to understand it.  Should be pretty easy.  Also we can
+	   support RESTART2 via the ipc_buffer machinations pictured below,
+	   which SRM ignores.  */
+
+	if (alpha_using_srm) {
+		struct percpu_struct *cpup;
+		unsigned long flags;
+	
+		cpup = (struct percpu_struct *)
+		  ((unsigned long)hwrpb + hwrpb->processor_offset);
+
+		flags = cpup->flags;
+
+		/* Clear reason to "default"; clear "bootstrap in progress". */
+		flags &= ~0x00ff0001UL;
+
+		if (mode == LINUX_REBOOT_CMD_RESTART) {
+			if (!restart_cmd) {
+				flags |= 0x00020000UL; /* "cold bootstrap" */
+				cpup->ipc_buffer[0] = 0;
+			} else {
+				flags |=  0x00030000UL; /* "warm bootstrap" */
+				strncpy((char *)cpup->ipc_buffer, restart_cmd,
+					sizeof(cpup->ipc_buffer));
+			}
+		} else {
+			flags |=  0x00040000UL; /* "remain halted" */
+		}
+			
+		cpup->flags = flags;					       
+		mb();						
+
+		reset_for_srm();
+		set_hae(srm_hae);
+
+#ifdef CONFIG_DUMMY_CONSOLE
+		/* This has the effect of reseting the VGA video origin.  */
+		take_over_console(&dummy_con, 0, MAX_NR_CONSOLES-1, 1);
+#endif
+	}
+
+#ifdef CONFIG_RTC
+	/* Reset rtc to defaults.  */
+	{
+		unsigned char control;
+
+		cli();
+
+		/* Reset periodic interrupt frequency.  */
+		CMOS_WRITE(0x26, RTC_FREQ_SELECT);
+
+		/* Turn on periodic interrupts.  */
+		control = CMOS_READ(RTC_CONTROL);
+		control |= RTC_PIE;
+		CMOS_WRITE(control, RTC_CONTROL);	
+		CMOS_READ(RTC_INTR_FLAGS);
+
+		sti();
+	}
+#endif
+
+	if (!alpha_using_srm && mode != LINUX_REBOOT_CMD_RESTART) {
+		/* Unfortunately, since MILO doesn't currently understand
+		   the hwrpb bits above, we can't reliably halt the 
+		   processor and keep it halted.  So just loop.  */
+		return;
+	}
+
+	if (alpha_using_srm)
+		srm_paging_stop();
+
 	halt();
+}
+
+void
+machine_restart(char *restart_cmd)
+{
+	alpha_mv.kill_arch(LINUX_REBOOT_CMD_RESTART, restart_cmd);
+}
+
+void
+machine_halt(void)
+{
+	alpha_mv.kill_arch(LINUX_REBOOT_CMD_HALT, NULL);
+}
+
+void machine_power_off(void)
+{
+	alpha_mv.kill_arch(LINUX_REBOOT_CMD_POWER_OFF, NULL);
 }
 
 void show_regs(struct pt_regs * regs)
@@ -100,6 +237,10 @@ void exit_thread(void)
 
 void flush_thread(void)
 {
+	/* Arrange for each exec'ed process to start off with a 
+	   clean slate with respect to the FPU.  */
+	current->tss.flags &= ~IEEE_SW_MASK;
+	wrfpcr(FPCR_DYN_NORMAL);
 }
 
 void release_thread(struct task_struct *dead_task)
@@ -124,6 +265,7 @@ int alpha_clone(unsigned long clone_flags, unsigned long usp,
 }
 
 extern void ret_from_sys_call(void);
+extern void ret_from_smpfork(void);
 /*
  * Copy an alpha thread..
  *
@@ -134,7 +276,7 @@ extern void ret_from_sys_call(void);
  * Use the passed "regs" pointer to determine how much space we need
  * for a kernel fork().
  */
-void copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
+int copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	struct task_struct * p, struct pt_regs * regs)
 {
 	struct pt_regs * childregs;
@@ -144,7 +286,7 @@ void copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	stack_offset = PAGE_SIZE - sizeof(struct pt_regs);
 	if (!(regs->ps & 8))
 		stack_offset = (PAGE_SIZE-1) & (unsigned long) regs;
-	childregs = (struct pt_regs *) (p->kernel_stack_page + stack_offset);
+	childregs = (struct pt_regs *) (stack_offset + PAGE_SIZE + (unsigned long)p);
 		
 	*childregs = *regs;
 	childregs->r0 = 0;
@@ -154,12 +296,18 @@ void copy_thread(int nr, unsigned long clone_flags, unsigned long usp,
 	stack = ((struct switch_stack *) regs) - 1;
 	childstack = ((struct switch_stack *) childregs) - 1;
 	*childstack = *stack;
+#ifdef __SMP__
+	childstack->r26 = (unsigned long) ret_from_smpfork;
+#else
 	childstack->r26 = (unsigned long) ret_from_sys_call;
+#endif
 	p->tss.usp = usp;
 	p->tss.ksp = (unsigned long) childstack;
 	p->tss.pal_flags = 1;	/* set FEN, clear everything else */
 	p->tss.flags = current->tss.flags;
 	p->mm->context = 0;
+
+	return 0;
 }
 
 /*
@@ -245,10 +393,14 @@ asmlinkage int sys_execve(unsigned long a0, unsigned long a1, unsigned long a2,
 	int error;
 	char * filename;
 
-	error = getname((char *) a0, &filename);
-	if (error)
-		return error;
+	lock_kernel();
+	filename = getname((char *) a0);
+	error = PTR_ERR(filename);
+	if (IS_ERR(filename))
+		goto out;
 	error = do_execve(filename, (char **) a1, (char **) a2, &regs);
 	putname(filename);
+out:
+	unlock_kernel();
 	return error;
 }

@@ -23,7 +23,8 @@
  * set, making the functions fast and clean. String instructions have been
  * used through-out, making for "slightly" unclear code :-)
  *
- *		Copyright (C) 1991, 1992 Linus Torvalds
+ *		NO Copyright (C) 1991, 1992 Linus Torvalds,
+ *		consider these trivial functions to be PD.
  */
 
 #define __HAVE_ARCH_STRCPY
@@ -113,7 +114,7 @@ __asm__ __volatile__(
 	"xorl %%eax,%%eax\n\t"
 	"jmp 3f\n"
 	"2:\tsbbl %%eax,%%eax\n\t"
-	"orb $1,%%eax\n"
+	"orb $1,%%al\n"
 	"3:"
 	:"=a" (__res):"S" (cs),"D" (ct):"si","di");
 return __res;
@@ -402,6 +403,10 @@ extern inline void * __constant_memcpy(void * to, const void * from, size_t n)
 		case 4:
 			*(unsigned long *)to = *(const unsigned long *)from;
 			return to;
+		case 6:	/* for Ethernet addresses */
+			*(unsigned long *)to = *(const unsigned long *)from;
+			*(2+(unsigned short *)to) = *(2+(const unsigned short *)from);
+			return to;
 		case 8:
 			*(unsigned long *)to = *(const unsigned long *)from;
 			*(1+(unsigned long *)to) = *(1+(const unsigned long *)from);
@@ -437,7 +442,7 @@ __asm__("cld\n\t" \
 		case 0: COMMON(""); return to;
 		case 1: COMMON("\n\tmovsb"); return to;
 		case 2: COMMON("\n\tmovsw"); return to;
-		case 3: COMMON("\n\tmovsw\n\tmovsb"); return to;
+		default: COMMON("\n\tmovsw\n\tmovsb"); return to;
 	}
 #undef COMMON
 }
@@ -546,7 +551,9 @@ __asm__ __volatile__(
 	"cmpl $-1,%2\n\t"
 	"jne 1b\n"
 	"3:\tsubl %1,%0"
-	:"=a" (__res):"c" (s),"d" (count));
+	:"=a" (__res)
+	:"c" (s),"d" (count)
+	:"dx");
 return __res;
 }
 /* end of additional stuff */
@@ -586,7 +593,7 @@ __asm__("cld\n\t" \
 		case 0: COMMON(""); return s;
 		case 1: COMMON("\n\tstosb"); return s;
 		case 2: COMMON("\n\tstosw"); return s;
-		case 3: COMMON("\n\tstosw\n\tstosb"); return s;
+		default: COMMON("\n\tstosw\n\tstosb"); return s;
 	}
 #undef COMMON
 }

@@ -4,10 +4,6 @@
  *  written by Paul H. Hargrove
  */
 
-#include <linux/sched.h>
-#include <linux/kernel.h>
-#include <linux/errno.h>
-#include <linux/fcntl.h>
 #include <linux/mm.h>
 
 static int fifo_open(struct inode * inode,struct file * filp)
@@ -29,7 +25,7 @@ static int fifo_open(struct inode * inode,struct file * filp)
 		if (!(filp->f_flags & O_NONBLOCK) && !PIPE_WRITERS(*inode)) {
 			PIPE_RD_OPENERS(*inode)++;
 			while (!PIPE_WRITERS(*inode)) {
-				if (current->signal & ~current->blocked) {
+				if (signal_pending(current)) {
 					retval = -ERESTARTSYS;
 					break;
 				}
@@ -62,7 +58,7 @@ static int fifo_open(struct inode * inode,struct file * filp)
 		if (!PIPE_READERS(*inode)) {
 			PIPE_WR_OPENERS(*inode)++;
 			while (!PIPE_READERS(*inode)) {
-				if (current->signal & ~current->blocked) {
+				if (signal_pending(current)) {
 					retval = -ERESTARTSYS;
 					break;
 				}
@@ -128,6 +124,8 @@ static struct file_operations def_fifo_fops = {
 	NULL,
 	fifo_open,		/* will set read or write pipe_fops */
 	NULL,
+	NULL,
+	NULL,
 	NULL
 };
 
@@ -143,7 +141,6 @@ struct inode_operations fifo_inode_operations = {
 	NULL,			/* mknod */
 	NULL,			/* rename */
 	NULL,			/* readlink */
-	NULL,			/* follow_link */
 	NULL,			/* readpage */
 	NULL,			/* writepage */
 	NULL,			/* bmap */
@@ -154,7 +151,6 @@ struct inode_operations fifo_inode_operations = {
 void init_fifo(struct inode * inode)
 {
 	inode->i_op = &fifo_inode_operations;
-	inode->i_pipe = 1;
 	PIPE_LOCK(*inode) = 0;
 	PIPE_BASE(*inode) = NULL;
 	PIPE_START(*inode) = PIPE_LEN(*inode) = 0;

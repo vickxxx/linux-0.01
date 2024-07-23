@@ -1,5 +1,5 @@
 #
-# Makefile for the Linux TCP/IP (INET) layer.
+# Makefile for the Linux IPX layer.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
@@ -7,9 +7,23 @@
 #
 # Note 2! The CFLAGS definition is now in the main makefile...
 
+# We only get in/to here if CONFIG_IPX = 'y' or 'm'
+
 O_TARGET := ipx.o
-O_OBJS   := af_ipx.o sysctl_net_ipx.o
 M_OBJS   := $(O_TARGET)
+OX_OBJS  += af_ipx.o
+
+ifeq ($(CONFIG_SYSCTL),y)
+  O_OBJS += sysctl_net_ipx.o
+endif
+
+ifeq ($(CONFIG_SPX),y)
+OX_OBJS += af_spx.o
+else
+  ifeq ($(CONFIG_SPX),m)
+  MX_OBJS += af_spx.o
+  endif
+endif
 
 include $(TOPDIR)/Rules.make
 

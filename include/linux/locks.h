@@ -9,12 +9,6 @@
 #endif
 
 /*
- * Unlocked, temporary IO buffer_heads gets moved to the reuse_list
- * once their page becomes unlocked.  
- */
-extern struct buffer_head *reuse_list;
-
-/*
  * Buffer cache locking - note that interrupts may only unlock, not
  * lock buffers.
  */
@@ -28,12 +22,15 @@ extern inline void wait_on_buffer(struct buffer_head * bh)
 
 extern inline void lock_buffer(struct buffer_head * bh)
 {
-	if (set_bit(BH_Lock, &bh->b_state))
+	while (test_and_set_bit(BH_Lock, &bh->b_state))
 		__wait_on_buffer(bh);
 }
 
-void unlock_buffer(struct buffer_head *);
-
+extern inline void unlock_buffer(struct buffer_head *bh)
+{
+	clear_bit(BH_Lock, &bh->b_state);
+	wake_up(&bh->b_wait);
+}
 
 /*
  * super-block locking. Again, interrupts may only unlock

@@ -10,11 +10,11 @@
 #define rti	.long PAL_rti
 #define SIGCHLD	20
 
-#define NR_SYSCALLS 350
+#define NR_SYSCALLS 370
 #define osf_vfork sys_fork
 
 /*
- * These offsets must match with "struct hae" in io.h:	
+ * These offsets must match with alpha_mv in <asm/machvec.h>.
  */
 #define HAE_CACHE	0
 #define HAE_REG		8
@@ -22,19 +22,19 @@
 /*
  * stack offsets
  */
-#define SP_OFF		160
+#define SP_OFF		184
 
 #define SWITCH_STACK_SIZE 320
 
 /*
  * task structure offsets
  */
-#define TASK_STATE	0
-#define TASK_COUNTER	8
-#define TASK_PRIORITY	16
-#define TASK_SIGNAL	24
-#define TASK_BLOCKED	32
-#define TASK_FLAGS	40
+#define TASK_STATE		0
+#define TASK_FLAGS		8
+#define TASK_SIGPENDING		16
+#define TASK_ADDR_LIMIT		24	
+#define TASK_EXEC_DOMAIN	32
+#define TASK_NEED_RESCHED	40
 
 /*
  * task flags (must match include/linux/sched.h):
@@ -47,14 +47,19 @@
  * regs 9-15 preserved by C code
  * regs 16-18 saved by PAL-code
  * regs 29-30 saved and set up by PAL-code
+ * JRP - Save regs 16-18 in a special area of the stack, so that
+ * the palcode-provided values are available to the signal handler.
  */
+
 #define SAVE_ALL			\
-	subq	$30,160,$30;		\
+	subq	$30,184,$30;		\
 	stq	$0,0($30);		\
 	stq	$1,8($30);		\
 	stq	$2,16($30);		\
 	stq	$3,24($30);		\
 	stq	$4,32($30);		\
+	stq	$28,144($30);		\
+	lda	$2,alpha_mv;		\
 	stq	$5,40($30);		\
 	stq	$6,48($30);		\
 	stq	$7,56($30);		\
@@ -62,41 +67,43 @@
 	stq	$19,72($30);		\
 	stq	$20,80($30);		\
 	stq	$21,88($30);		\
+	ldq	$2,HAE_CACHE($2);	\
 	stq	$22,96($30);		\
 	stq	$23,104($30);		\
 	stq	$24,112($30);		\
 	stq	$25,120($30);		\
 	stq	$26,128($30);		\
 	stq	$27,136($30);		\
-	stq	$28,144($30);		\
-	lda	$2,hae;			\
-	ldq	$2,HAE_CACHE($2);	\
-	stq	$2,152($30)
+	stq	$2,152($30);		\
+	stq	$16,160($30);		\
+	stq	$17,168($30);		\
+	stq	$18,176($30)
 
 #define RESTORE_ALL			\
-	lda	$8,hae;			\
-	ldq	$7,HAE_CACHE($8);	\
-	ldq	$6,152($30);		\
-	subq	$7,$6,$5;		\
-	beq	$5,99f;			\
-	ldq	$7,HAE_REG($8);		\
-	addq	$31,7,$16;		\
-	call_pal PAL_swpipl;		\
-	stq	$6,HAE_CACHE($8);	\
-	stq	$6,0($7);		\
-	mb;				\
-	bis	$0,$0,$16;		\
-	call_pal PAL_swpipl;		\
-99:;					\
+	lda	$19,alpha_mv;		\
 	ldq	$0,0($30);		\
 	ldq	$1,8($30);		\
 	ldq	$2,16($30);		\
 	ldq	$3,24($30);		\
+	ldq	$20,152($30);		\
+	ldq	$21,HAE_CACHE($19);	\
 	ldq	$4,32($30);		\
 	ldq	$5,40($30);		\
 	ldq	$6,48($30);		\
 	ldq	$7,56($30);		\
+	subq	$20,$21,$20;		\
 	ldq	$8,64($30);		\
+	beq	$20,99f;		\
+	ldq	$20,HAE_REG($19);	\
+	addq	$31,7,$16;		\
+	call_pal PAL_swpipl;		\
+	stq	$21,HAE_CACHE($19);	\
+	stq	$21,0($20);		\
+	bis	$0,$0,$16;		\
+	call_pal PAL_swpipl;		\
+	ldq	$0,0($30);		\
+	ldq	$1,8($30);		\
+99:;					\
 	ldq	$19,72($30);		\
 	ldq	$20,80($30);		\
 	ldq	$21,88($30);		\
@@ -107,11 +114,11 @@
 	ldq	$26,128($30);		\
 	ldq	$27,136($30);		\
 	ldq	$28,144($30);		\
-	addq	$30,160,$30
+	addq	$30,184,$30
 
 .text
 .set noat
-#ifdef __linux__
+#if defined(__linux__) && !defined(__ELF__)
   .set singlegp
 #endif
 
@@ -120,20 +127,10 @@
 .ent	entInt
 entInt:
 	SAVE_ALL
-/* start atomic operation with respect to software interrupts */
-	lda	$0,intr_count
-	ldq	$1,0($0)
-	addq	$1,1,$1
-	stq	$1,0($0)
-/* set up the arguments to the C interrupt handler */
-	lda	$27,do_entInt
-	jsr	$26,($27),do_entInt
-/* ok, return */
-	lda	$0,intr_count
-	ldq	$1,0($0)
-	subq	$1,1,$1
-	stq	$1,0($0)
-	br	$31,ret_from_sys_call
+	lda	$8,0x3fff
+	bic	$30,$8,$8
+	lda	$26,ret_from_sys_call
+	jsr	$31,do_entInt
 .end entInt
 
 .align 3
@@ -141,9 +138,31 @@ entInt:
 .ent	entMM
 entMM:
 	SAVE_ALL
-	lda	$27,do_page_fault
-	lda	$26,ret_from_sys_call
-	jsr	$31,($27),do_page_fault
+/* save $9 - $15 so the inline exception code can manipulate them.  */
+	subq	$30,56,$30
+	stq	$9,0($30)
+	stq	$10,8($30)
+	stq	$11,16($30)
+	stq	$12,24($30)
+	stq	$13,32($30)
+	stq	$14,40($30)
+	stq	$15,48($30)
+	addq	$30,56,$19
+/* handle the fault */
+	lda	$8,0x3fff
+	bic	$30,$8,$8
+	jsr	$26,do_page_fault
+/* reload the registers after the exception code played.  */
+	ldq	$9,0($30)
+	ldq	$10,8($30)
+	ldq	$11,16($30)
+	ldq	$12,24($30)
+	ldq	$13,32($30)
+	ldq	$14,40($30)
+	ldq	$15,48($30)
+	addq	$30,56,$30
+/* finish up the syscall as normal.  */
+	br	ret_from_sys_call
 .end entMM
 
 .align 3
@@ -151,9 +170,10 @@ entMM:
 .ent	entArith
 entArith:
 	SAVE_ALL
-	lda	$27,do_entArith
+	lda	$8,0x3fff
+	bic	$30,$8,$8
 	lda	$26,ret_from_sys_call
-	jsr	$31,($27),do_entArith
+	jsr	$31,do_entArith
 .end entArith
 
 .align 3
@@ -161,9 +181,10 @@ entArith:
 .ent	entIF
 entIF:
 	SAVE_ALL
-	lda	$27,do_entIF
+	lda	$8,0x3fff
+	bic	$30,$8,$8
 	lda	$26,ret_from_sys_call
-	jsr	$31,($27),do_entIF
+	jsr	$31,do_entIF
 .end entIF
 
 /*
@@ -178,6 +199,8 @@ entIF:
 .align 3
 .ent	kernel_clone
 kernel_clone:
+	.frame $30, 0, $26
+	.prologue 0
 	subq $30,6*8,$30
 	stq $31,0($30)
 	stq $26,8($30)
@@ -187,9 +210,8 @@ kernel_clone:
 	stq $18,40($30)
 	bis $31,2,$0	/* Register v0: syscall nr for fork() */
 	SAVE_ALL
-	lda $27,sys_clone
-	jsr $26,($27),sys_clone
-	stq $0,0($30)	
+	bsr $26,sys_clone
+	stq $0,0($30)
 	br $31,ret_from_sys_call
 .end	kernel_clone
 
@@ -200,28 +222,55 @@ kernel_clone:
 .globl	__kernel_thread
 .ent	__kernel_thread
 __kernel_thread:
+	ldgp $29,0($27)		/* we can be called from a module */
+	.frame $30, 4*8, $26
 	subq $30,4*8,$30
-	stq $9,0($30)
-	stq $10,8($30)
-	stq $26,16($30)
+	stq $10,16($30)
+	stq $9,8($30)
+	stq $26,0($30)
+	.prologue 1
 	bis $17,$17,$9		/* save fn */
 	bis $18,$18,$10		/* save arg */
 	bsr $26,kernel_clone
 	bne $20,1f		/* $20 is non-zero in child */
-	ldq $9,0($30)
-	ldq $10,8($30)
-	ldq $26,16($30)
+	ldq $26,0($30)
+	ldq $9,8($30)
+	ldq $10,16($30)
 	addq $30,4*8,$30
 	ret $31,($26),1
 /* this is in child: look out as we don't have any stack here.. */
 1:	bis $9,$9,$27		/* get fn */
+	lda $8,0x3fff
 	bis $10,$10,$16		/* get arg */
+	bic $30,$8,$8		/* get current */
 	jsr $26,($27)
+	ldgp	$29,0($26)
 	bis $0,$0,$16
-	lda $27,sys_exit
-	jsr $26,($27),sys_exit
+	jsr $26,sys_exit
 	call_pal PAL_halt
 .end	__kernel_thread
+
+/*
+ * __kernel_execve(path, argv, envp, regs)
+ */
+.align 3
+.globl	__kernel_execve
+.ent	__kernel_execve
+__kernel_execve:
+	ldgp	$29,0($27)	/* we can be called from modules.  */
+	subq	$30,16,$30
+	.frame	$30,16,$26,0
+	stq	$26,0($30)
+	stq	$19,8($30)
+	.prologue 1
+	jsr	$26,do_execve
+	bne	$0,1f		/* error! */
+	ldq	$30,8($30)
+	br	$31,ret_from_sys_call
+1:	ldq	$26,0($30)
+	addq	$30,16,$30
+	ret
+.end	__kernel_execve
 
 .align 3
 .ent	do_switch_stack
@@ -268,6 +317,7 @@ do_switch_stack:
 	stt $f29,296($30)
 	stt $f30,304($30)
 	stt $f0,312($30)	# save fpcr in slot of $f31
+	ldt $f0,64($30)		# dont let "do_switch_stack" change fp state.
 	ret $31,($1),1
 .end do_switch_stack
 
@@ -357,8 +407,9 @@ entUna:
 	stq $29,232($30)
 	stq $30,240($30)
 	stq $31,248($30)
-	lda $27,do_entUna
-	jsr $26,($27),do_entUna
+	lda $8,0x3fff
+	bic $30,$8,$8
+	jsr $26,do_entUna
 	ldq $0,0($30)
 	ldq $1,8($30)
 	ldq $2,16($30)
@@ -406,9 +457,10 @@ entUnaUser:
 	stq $13,32($30)
 	stq $14,40($30)
 	stq $15,48($30)
-	lda $27,do_entUnaUser
-	bis $31,$30,$19
-	jsr $26,($27),do_entUnaUser
+	lda $8,0x3fff
+	addq $30,56,$19
+	bic $30,$8,$8
+	jsr $26,do_entUnaUser
 	ldq $9,0($30)
 	ldq $10,8($30)
 	ldq $11,16($30)
@@ -423,7 +475,7 @@ entUnaUser:
 
 /*
  * A fork is the same as clone(SIGCHLD, 0);
-*/
+ */
 .align 3
 .globl	sys_fork
 .ent	sys_fork
@@ -432,8 +484,7 @@ sys_fork:
 	bis $31,SIGCHLD,$16
 	bis $31,$31,$17
 	bis $30,$30,$18
-	lda $27,alpha_clone
-	jsr $26,($27),alpha_clone
+	jsr $26,alpha_clone
 	bsr $1,undo_switch_stack
 	ret $31,($26),1
 .end	sys_fork
@@ -445,8 +496,7 @@ sys_clone:
 	bsr $1,do_switch_stack
 	/* arg1 and arg2 come from the user */
 	bis $30,$30,$18
-	lda $27,alpha_clone
-	jsr $26,($27),alpha_clone
+	jsr $26,alpha_clone
 	bsr $1,undo_switch_stack
 	ret $31,($26),1
 .end	sys_clone
@@ -455,8 +505,11 @@ sys_clone:
 .globl  alpha_switch_to
 .ent    alpha_switch_to
 alpha_switch_to:
+	.prologue 0
 	bsr $1,do_switch_stack
 	call_pal PAL_swpctx
+	lda $16,-2($31)
+	call_pal PAL_tbi
 	bsr $1,undo_switch_stack
 	ret $31,($26),1
 .end alpha_switch_to
@@ -473,25 +526,24 @@ alpha_switch_to:
 .globl	ret_from_sys_call
 .ent	entSys
 entSys:
-	stq	$16,24($30)
-	stq	$17,32($30)
-	stq	$18,40($30)
 	SAVE_ALL
-	/* FIXME: optimize */
-	lda	$1,current_set
-	ldq	$2,0($1)
-	ldq	$3,TASK_FLAGS($2)
+	lda	$8,0x3fff
+	bic	$30,$8,$8
+	lda	$4,NR_SYSCALLS($31)
+	stq	$16,SP_OFF+24($30)
+	lda	$5,sys_call_table
+	lda	$27,sys_ni_syscall
+	cmpult	$0,$4,$4
+	ldq	$3,TASK_FLAGS($8)
+	stq	$17,SP_OFF+32($30)
+	s8addq	$0,$5,$5
 	and     $3,PF_PTRACED,$3
+	stq	$18,SP_OFF+40($30)
 	bne     $3,strace
-	/* end of strace */	
-	lda	$1,NR_SYSCALLS($31)
-	lda	$2,sys_call_table
-	lda	$27,do_entSys
-	cmpult	$0,$1,$1
-	s8addq	$0,$2,$2
-	beq	$1,1f
-	ldq	$27,0($2)
-1:	jsr	$26,($27),do_entSys
+	beq	$4,1f
+	ldq	$27,0($5)
+1:	jsr	$26,($27),alpha_ni_syscall
+	ldgp	$29,0($26)
 	blt	$0,syscall_error	/* the call failed */
 	stq	$0,0($30)
 	stq	$31,72($30)		/* a3=0 => no error */
@@ -500,45 +552,33 @@ entSys:
 ret_from_sys_call:
 	cmovne	$26,0,$19		/* $19 = 0 => non-restartable */
 	/* check bottom half interrupts */
-	lda	$0,intr_count
-	ldq	$1,0($0)
-	bne	$1,ret_from_handle_bh
-	lda	$2,bh_active
-	ldq	$3,0($2)
-	lda	$2,bh_mask
-	ldq	$4,0($2)
-	addq	$1,1,$1
+	ldq	$3,bh_active
+	ldq	$4,bh_mask
 	and	$3,$4,$2
-	bne	$2,handle_bottom_half	
+	bne	$2,handle_bottom_half
 ret_from_handle_bh:
 	ldq	$0,SP_OFF($30)
 	and	$0,8,$0
 	beq	$0,restore_all
 ret_from_reschedule:
-	lda	$0,need_resched
-	lda	$1,current_set
-	ldl	$2,0($0)
-	lda	$4,init_task
-	ldq	$3,0($1)
+	ldq	$2,TASK_NEED_RESCHED($8)
+	lda	$4,init_task_union
 	bne	$2,reschedule
-	subq	$4,$3,$4
+	xor	$4,$8,$4
+	ldl	$5,TASK_SIGPENDING($8)
 	beq	$4,restore_all
-	ldq	$4,TASK_SIGNAL($3)
-	ldq	$16,TASK_BLOCKED($3)
-	bic	$4,$16,$4
-	bne	$4,signal_return
+	bne	$5,signal_return
 restore_all:
 	RESTORE_ALL
 	rti
-	
-	
-/* PTRACE syscall handler */	
+
+
+/* PTRACE syscall handler */
 .align 3
 strace:
 	/* set up signal stack, call syscall_trace */
 	bsr	$1,do_switch_stack
-	lda     $27,syscall_trace
-	jsr     $26,($27),syscall_trace
+	jsr     $26,syscall_trace
 	bsr	$1,undo_switch_stack
 
 	/* get the system call number and the arguments back.. */
@@ -553,12 +593,13 @@ strace:
 	/* get the system call pointer.. */
 	lda	$1,NR_SYSCALLS($31)
 	lda	$2,sys_call_table
-	lda	$27,do_entSys
+	lda	$27,alpha_ni_syscall
 	cmpult	$0,$1,$1
 	s8addq	$0,$2,$2
 	beq	$1,1f
 	ldq	$27,0($2)
-1:	jsr	$26,($27),do_entSys
+1:	jsr	$26,($27),alpha_ni_syscall
+	ldgp	$29,0($26)
 
 	/* check return.. */
 	blt	$0,strace_error	/* the call failed */
@@ -567,8 +608,7 @@ strace_success:
 	stq	$0,0($30)		/* save return value */
 
 	bsr	$1,do_switch_stack
-	lda     $27,syscall_trace
-	jsr     $26,($27),syscall_trace
+	jsr     $26,syscall_trace
 	bsr	$1,undo_switch_stack
 	br	$31,ret_from_sys_call
 
@@ -586,10 +626,9 @@ strace_error:
 	bsr	$1,do_switch_stack
 	bis	$19,$19,$9	/* save old syscall number */
 	bis	$20,$20,$10	/* save old a3 */
-	lda     $27,syscall_trace
-	jsr     $26,($27),syscall_trace
+	jsr     $26,syscall_trace
 	bis	$9,$9,$19
-	bis	$10,$10,$20	
+	bis	$10,$10,$20
 	bsr	$1,undo_switch_stack
 
 	bis	$31,$31,$26	/* tell "ret_from_sys_call" that we can restart */
@@ -597,21 +636,13 @@ strace_error:
 
 	.align 3
 handle_bottom_half:
-	/*
-	 * We're called with $0 containing the address of
-	 * 'intr_count' and $1 containing 'intr_count+1'
-	 */
-	stq	$1,0($0)	/* intr_count = 1 */
 	subq	$30,16,$30
 	stq	$19,0($30)	/* save syscall nr */
 	stq	$20,8($30)	/* and error indication (a3) */
-	lda	$27,do_bottom_half
-	jsr	$26,($27),do_bottom_half
-	lda	$0,intr_count
+	jsr	$26,do_bottom_half
 	ldq	$19,0($30)
 	ldq	$20,8($30)
 	addq	$30,16,$30
-	stq	$31,0($0)	/* intr_count = 0 */
 	br	$31,ret_from_handle_bh
 
 	.align 3
@@ -629,10 +660,14 @@ syscall_error:
 	ldq	$20,72($30)	/* .. and this a3 */
 	subq	$31,$0,$0	/* with error in v0 */
 	addq	$31,1,$1	/* set a3 for errno return */
-	bis	$31,$31,$26	/* tell "ret_from_sys_call" that we can restart */
+	stq	$0,0($30)
+	bis	$31,$31,$26	/* tell "ret_from_sys_call" we can restart */
 	stq	$1,72($30)	/* a3 for return */
+	br	$31,ret_from_sys_call
+
 ret_success:
 	stq	$0,0($30)
+	stq	$31,72($30)	/* a3=0 => no error */
 	br	$31,ret_from_sys_call
 
 .align 3
@@ -640,11 +675,24 @@ signal_return:
 	bis	$30,$30,$17
 	br	$1,do_switch_stack
 	bis	$30,$30,$18
-	lda	$27,do_signal
-	jsr	$26,($27),do_signal
-	lda	$30,SWITCH_STACK_SIZE($30)
+	bis	$31,$31,$16
+	jsr	$26,do_signal
+	bsr	$1,undo_switch_stack
 	br	$31,restore_all
 .end entSys
+
+#ifdef __SMP__
+        .globl  ret_from_smpfork
+.align 3
+.ent ret_from_smpfork
+ret_from_smpfork:
+	.set at
+	mb	/* Make the changed data visible before the freed lock. */
+	stq	$31,scheduler_lock	
+	br	ret_from_sys_call
+	.set noat
+.end ret_from_smpfork
+#endif /* __SMP__ */
 
 .align 3
 .ent reschedule
@@ -652,8 +700,7 @@ reschedule:
 	subq	$30,16,$30
 	stq	$19,0($30)	/* save syscall nr */
 	stq	$20,8($30)	/* and error indication (a3) */
-	lda	$27,schedule
-	jsr	$26,($27),schedule
+	jsr	$26,schedule
 	ldq	$19,0($30)
 	ldq	$20,8($30)
 	addq	$30,16,$30
@@ -666,11 +713,21 @@ sys_sigreturn:
 	bis	$30,$30,$17
 	lda	$30,-SWITCH_STACK_SIZE($30)
 	bis	$30,$30,$18
-	lda	$27,do_sigreturn
-	jsr	$26,($27),do_sigreturn
+	jsr	$26,do_sigreturn
 	br	$1,undo_switch_stack
 	br	$31,ret_from_sys_call
 .end sys_sigreturn
+
+.align 3
+.ent sys_rt_sigreturn
+sys_rt_sigreturn:
+	bis	$30,$30,$17
+	lda	$30,-SWITCH_STACK_SIZE($30)
+	bis	$30,$30,$18
+	jsr	$26,do_rt_sigreturn
+	br	$1,undo_switch_stack
+	br	$31,ret_from_sys_call
+.end sys_rt_sigreturn
 
 .align 3
 .ent sys_sigsuspend
@@ -678,84 +735,396 @@ sys_sigsuspend:
 	bis	$30,$30,$17
 	br	$1,do_switch_stack
 	bis	$30,$30,$18
-	lda	$27,do_sigsuspend
-	jsr	$26,($27),do_sigsuspend
+	jsr	$26,do_sigsuspend
 	lda	$30,SWITCH_STACK_SIZE($30)
 	br	$31,ret_from_sys_call
 .end sys_sigsuspend
 
+.align 3
+.ent sys_rt_sigsuspend
+sys_rt_sigsuspend:
+	bis	$30,$30,$18
+	br	$1,do_switch_stack
+	bis	$30,$30,$19
+	jsr	$26,do_rt_sigsuspend
+	lda	$30,SWITCH_STACK_SIZE($30)
+	br	$31,ret_from_sys_call
+.end sys_rt_sigsuspend
+
+	.data
 	.align 3
 	.globl sys_call_table
 sys_call_table:
-/*0*/	.quad do_entSys, sys_exit, sys_fork, sys_read, sys_write
-	.quad do_entSys, sys_close, sys_wait4, do_entSys, sys_link
-	.quad sys_unlink, do_entSys, sys_chdir, sys_fchdir, sys_mknod
-	.quad sys_chmod, sys_chown, sys_brk, do_entSys, sys_lseek
-	.quad sys_getxpid, osf_mount, osf_umount, sys_setuid, sys_getxuid
-	.quad do_entSys, sys_ptrace, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, sys_access, do_entSys
-	.quad do_entSys, sys_sync, sys_kill, do_entSys, sys_setpgid
-	.quad do_entSys, sys_dup, sys_pipe, do_entSys, do_entSys
-	.quad sys_open, do_entSys, sys_getxgid, osf_sigprocmask, do_entSys
-/*50*/	.quad do_entSys, sys_acct, sys_sigpending, do_entSys, sys_ioctl
-	.quad do_entSys, do_entSys, sys_symlink, sys_readlink, sys_execve
-	.quad sys_umask, sys_chroot, do_entSys, sys_getpgrp, sys_getpagesize
-	.quad do_entSys, osf_vfork, sys_newstat, sys_newlstat, do_entSys
-	.quad do_entSys, osf_mmap, do_entSys, sys_munmap, sys_mprotect
-	.quad sys_madvise, sys_vhangup, do_entSys, do_entSys, sys_getgroups
+	.quad alpha_ni_syscall			/* 0 */
+	.quad sys_exit
+	.quad sys_fork
+	.quad sys_read
+	.quad sys_write
+	.quad alpha_ni_syscall			/* 5 */
+	.quad sys_close
+	.quad osf_wait4
+	.quad alpha_ni_syscall
+	.quad sys_link
+	.quad sys_unlink			/* 10 */
+	.quad alpha_ni_syscall
+	.quad sys_chdir
+	.quad sys_fchdir
+	.quad sys_mknod
+	.quad sys_chmod				/* 15 */
+	.quad sys_chown
+	.quad osf_brk
+	.quad alpha_ni_syscall
+	.quad sys_lseek
+	.quad sys_getxpid			/* 20 */
+	.quad osf_mount
+	.quad sys_umount
+	.quad sys_setuid
+	.quad sys_getxuid
+	.quad alpha_ni_syscall			/* 25 */
+	.quad sys_ptrace
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 30 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad sys_access
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 35 */
+	.quad sys_sync
+	.quad sys_kill
+	.quad alpha_ni_syscall
+	.quad sys_setpgid
+	.quad alpha_ni_syscall			/* 40 */
+	.quad sys_dup
+	.quad sys_pipe
+	.quad osf_set_program_attributes
+	.quad alpha_ni_syscall
+	.quad sys_open				/* 45 */
+	.quad alpha_ni_syscall
+	.quad sys_getxgid
+	.quad osf_sigprocmask
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 50 */
+	.quad sys_acct
+	.quad osf_sigpending
+	.quad alpha_ni_syscall
+	.quad sys_ioctl
+	.quad alpha_ni_syscall			/* 55 */
+	.quad alpha_ni_syscall
+	.quad sys_symlink
+	.quad sys_readlink
+	.quad sys_execve
+	.quad sys_umask				/* 60 */
+	.quad sys_chroot
+	.quad alpha_ni_syscall
+	.quad sys_getpgrp
+	.quad sys_getpagesize
+	.quad alpha_ni_syscall			/* 65 */
+	.quad osf_vfork
+	.quad sys_newstat
+	.quad sys_newlstat
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 70 */
+	.quad osf_mmap
+	.quad alpha_ni_syscall
+	.quad sys_munmap
+	.quad sys_mprotect
+	.quad sys_madvise			/* 75 */
+	.quad sys_vhangup
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad sys_getgroups
 	/* map BSD's setpgrp to sys_setpgid for binary compatibility: */
-	.quad sys_setgroups, do_entSys, sys_setpgid, sys_setitimer, do_entSys
-	.quad do_entSys, sys_getitimer, sys_gethostname, sys_sethostname, sys_getdtablesize
-	.quad sys_dup2, sys_newfstat, sys_fcntl, sys_select, do_entSys
-	.quad sys_fsync, sys_setpriority, sys_socket, sys_connect, sys_accept
-/*100*/	.quad osf_getpriority, sys_send, sys_recv, sys_sigreturn, sys_bind
-	.quad sys_setsockopt, sys_listen, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, sys_sigsuspend, do_entSys, sys_recvmsg, sys_sendmsg
-	.quad do_entSys, sys_gettimeofday, sys_getrusage, sys_getsockopt, do_entSys
-	.quad sys_readv, sys_writev, sys_settimeofday, sys_fchown, sys_fchmod
-	.quad sys_recvfrom, sys_setreuid, sys_setregid, sys_rename, sys_truncate
-	.quad sys_ftruncate, sys_flock, sys_setgid, sys_sendto, sys_shutdown
-	.quad sys_socketpair, sys_mkdir, sys_rmdir, sys_utimes, do_entSys
-	.quad do_entSys, sys_getpeername, do_entSys, do_entSys, sys_getrlimit
-	.quad sys_setrlimit, do_entSys, sys_setsid, sys_quotactl, do_entSys
-/*150*/	.quad sys_getsockname, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, sys_sigaction, do_entSys, do_entSys, osf_getdirentries
-	.quad osf_statfs, osf_fstatfs, do_entSys, do_entSys, do_entSys
-	.quad osf_getdomainname, sys_setdomainname, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, osf_swapon
-/*200*/	.quad sys_msgctl, sys_msgget, sys_msgrcv, sys_msgsnd, sys_semctl
-	.quad sys_semget, sys_semop, osf_utsname, do_entSys, osf_shmat
-	.quad sys_shmctl, sys_shmdt, sys_shmget, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, sys_msync, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, sys_getpgid, sys_getsid
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, osf_proplist_syscall
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-/*250*/	.quad do_entSys, osf_usleep_thread, do_entSys, do_entSys, sys_sysfs
-	.quad do_entSys, osf_getsysinfo, osf_setsysinfo, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
+	.quad sys_setgroups			/* 80 */
+	.quad alpha_ni_syscall
+	.quad sys_setpgid
+	.quad osf_setitimer
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 85 */
+	.quad osf_getitimer
+	.quad sys_gethostname
+	.quad sys_sethostname
+	.quad sys_getdtablesize
+	.quad sys_dup2				/* 90 */
+	.quad sys_newfstat
+	.quad sys_fcntl
+	.quad osf_select
+	.quad sys_poll
+	.quad sys_fsync				/* 95 */
+	.quad sys_setpriority
+	.quad sys_socket
+	.quad sys_connect
+	.quad sys_accept
+	.quad osf_getpriority			/* 100 */
+	.quad sys_send
+	.quad sys_recv
+	.quad sys_sigreturn
+	.quad sys_bind
+	.quad sys_setsockopt			/* 105 */
+	.quad sys_listen
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 110 */
+	.quad sys_sigsuspend
+	.quad osf_sigstack
+	.quad sys_recvmsg
+	.quad sys_sendmsg
+	.quad alpha_ni_syscall			/* 115 */
+	.quad osf_gettimeofday
+	.quad osf_getrusage
+	.quad sys_getsockopt
+	.quad alpha_ni_syscall
+	.quad sys_readv				/* 120 */
+	.quad sys_writev
+	.quad osf_settimeofday
+	.quad sys_fchown
+	.quad sys_fchmod
+	.quad sys_recvfrom			/* 125 */
+	.quad sys_setreuid
+	.quad sys_setregid
+	.quad sys_rename
+	.quad sys_truncate
+	.quad sys_ftruncate			/* 130 */
+	.quad sys_flock
+	.quad sys_setgid
+	.quad sys_sendto
+	.quad sys_shutdown
+	.quad sys_socketpair			/* 135 */
+	.quad sys_mkdir
+	.quad sys_rmdir
+	.quad osf_utimes
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 140 */
+	.quad sys_getpeername
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad sys_getrlimit
+	.quad sys_setrlimit			/* 145 */
+	.quad alpha_ni_syscall
+	.quad sys_setsid
+	.quad sys_quotactl
+	.quad alpha_ni_syscall
+	.quad sys_getsockname			/* 150 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 155 */
+	.quad osf_sigaction
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad osf_getdirentries
+	.quad osf_statfs			/* 160 */
+	.quad osf_fstatfs
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad osf_getdomainname			/* 165 */
+	.quad sys_setdomainname
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 170 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 175 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 180 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 185 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 190 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 195 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad osf_swapon
+	.quad sys_msgctl			/* 200 */
+	.quad sys_msgget
+	.quad sys_msgrcv
+	.quad sys_msgsnd
+	.quad sys_semctl
+	.quad sys_semget			/* 205 */
+	.quad sys_semop
+	.quad osf_utsname
+	.quad sys_lchown
+	.quad osf_shmat
+	.quad sys_shmctl			/* 210 */
+	.quad sys_shmdt
+	.quad sys_shmget
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 215 */
+	.quad alpha_ni_syscall
+	.quad sys_msync
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 220 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 225 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 230 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad sys_getpgid
+	.quad sys_getsid
+	.quad sys_sigaltstack			/* 235 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 240 */
+	.quad osf_sysinfo
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad osf_proplist_syscall
+	.quad alpha_ni_syscall			/* 245 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 250 */
+	.quad osf_usleep_thread
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad sys_sysfs
+	.quad alpha_ni_syscall			/* 255 */
+	.quad osf_getsysinfo
+	.quad osf_setsysinfo
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 260 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 265 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 270 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 275 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 280 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 285 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 290 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall			/* 295 */
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
+	.quad alpha_ni_syscall
 /* linux-specific system calls start at 300 */
-/*300*/	.quad sys_bdflush, sys_sethae, sys_mount, sys_adjtimex, sys_swapoff
-	.quad sys_getdents, alpha_create_module, sys_init_module, sys_delete_module, sys_get_kernel_syms
-	.quad sys_syslog, sys_reboot, sys_clone, sys_uselib, sys_mlock
-	.quad sys_munlock, sys_mlockall, sys_munlockall, sys_sysinfo, sys_sysctl
-	.quad sys_idle, sys_umount, sys_swapon, sys_times, sys_personality
-	.quad sys_setfsuid, sys_setfsgid, sys_ustat, sys_statfs, sys_fstatfs
-	.quad sys_sched_setparam, sys_sched_getparam, sys_sched_setscheduler, sys_sched_getscheduler, sys_sched_yield
-	.quad sys_sched_get_priority_max, sys_sched_get_priority_min, sys_sched_rr_get_interval, do_entSys /* sys_afs_syscall */, sys_newuname
-	.quad sys_nanosleep, sys_mremap, do_entSys, do_entSys, do_entSys
-	.quad do_entSys, do_entSys, do_entSys, do_entSys, do_entSys
+	.quad sys_bdflush			/* 300 */
+	.quad sys_sethae
+	.quad sys_mount
+	.quad sys_old_adjtimex
+	.quad sys_swapoff
+	.quad sys_getdents			/* 305 */
+	.quad alpha_create_module
+	.quad sys_init_module
+	.quad sys_delete_module
+	.quad sys_get_kernel_syms
+	.quad sys_syslog			/* 310 */
+	.quad sys_reboot
+	.quad sys_clone
+	.quad sys_uselib
+	.quad sys_mlock
+	.quad sys_munlock			/* 315 */
+	.quad sys_mlockall
+	.quad sys_munlockall
+	.quad sys_sysinfo
+	.quad sys_sysctl
+	.quad sys_idle				/* 320 */
+	.quad sys_oldumount
+	.quad sys_swapon
+	.quad sys_times
+	.quad sys_personality
+	.quad sys_setfsuid			/* 325 */
+	.quad sys_setfsgid
+	.quad sys_ustat
+	.quad sys_statfs
+	.quad sys_fstatfs
+	.quad sys_sched_setparam		/* 330 */
+	.quad sys_sched_getparam
+	.quad sys_sched_setscheduler
+	.quad sys_sched_getscheduler
+	.quad sys_sched_yield
+	.quad sys_sched_get_priority_max	/* 335 */
+	.quad sys_sched_get_priority_min
+	.quad sys_sched_rr_get_interval
+	.quad sys_ni_syscall			/* sys_afs_syscall */
+	.quad sys_newuname
+	.quad sys_nanosleep			/* 340 */
+	.quad sys_mremap
+	.quad sys_nfsservctl
+	.quad sys_setresuid
+	.quad sys_getresuid
+	.quad sys_pciconfig_read		/* 345 */
+	.quad sys_pciconfig_write
+	.quad sys_query_module
+	.quad sys_prctl
+	.quad sys_pread
+	.quad sys_pwrite			/* 350 */
+	.quad sys_rt_sigreturn
+	.quad sys_rt_sigaction
+	.quad sys_rt_sigprocmask
+	.quad sys_rt_sigpending
+	.quad sys_rt_sigtimedwait		/* 355 */
+	.quad sys_rt_sigqueueinfo
+	.quad sys_rt_sigsuspend
+	.quad sys_select
+	.quad sys_gettimeofday
+	.quad sys_settimeofday			/* 360 */
+	.quad sys_getitimer
+	.quad sys_setitimer
+	.quad sys_utimes
+	.quad sys_getrusage
+	.quad sys_wait4				/* 365 */
+	.quad sys_adjtimex
+	.quad sys_getcwd
+	.quad sys_capget
+	.quad sys_capset
+	.quad sys_ni_syscall			/* 370 */

@@ -33,9 +33,17 @@ struct request {
 	struct request * next;
 };
 
+typedef void (request_fn_proc) (void);
+typedef struct request ** (queue_proc) (kdev_t dev);
+
 struct blk_dev_struct {
-	void (*request_fn)(void);
-	struct request * current_request;
+	request_fn_proc		*request_fn;
+	/*
+	 * queue_proc has to be atomic
+	 */
+	queue_proc		*queue;
+	void			*data;
+	struct request		*current_request;
 	struct request   plug;
 	struct tq_struct plug_tq;
 };
@@ -50,14 +58,32 @@ extern struct blk_dev_struct blk_dev[MAX_BLKDEV];
 extern struct wait_queue * wait_for_request;
 extern void resetup_one_dev(struct gendisk *dev, int drive);
 extern void unplug_device(void * data);
+extern void make_request(int major,int rw, struct buffer_head * bh);
 
 /* md needs this function to remap requests */
 extern int md_map (int minor, kdev_t *rdev, unsigned long *rsector, unsigned long size);
+extern int md_make_request (int minor, int rw, struct buffer_head * bh);
+extern int md_error (kdev_t mddev, kdev_t rdev);
 
 extern int * blk_size[MAX_BLKDEV];
 
 extern int * blksize_size[MAX_BLKDEV];
 
 extern int * hardsect_size[MAX_BLKDEV];
+
+extern int * max_readahead[MAX_BLKDEV];
+
+extern int * max_sectors[MAX_BLKDEV];
+
+#define MAX_SECTORS 244 /* 254 ? */
+
+#define PageAlignSize(size) (((size) + PAGE_SIZE -1) & PAGE_MASK)
+#if 0  /* small readahead */
+#define MAX_READAHEAD PageAlignSize(4096*7)
+#define MIN_READAHEAD PageAlignSize(4096*2)
+#else /* large readahead */
+#define MAX_READAHEAD PageAlignSize(4096*18)
+#define MIN_READAHEAD PageAlignSize(4096*3)
+#endif
 
 #endif

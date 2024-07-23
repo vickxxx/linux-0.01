@@ -20,7 +20,7 @@
 #include <linux/fs.h>
 #include <linux/minix_fs.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 
 #define blocksize BLOCK_SIZE
@@ -144,7 +144,7 @@ static int V1_sync_dindirect(struct inode *inode, unsigned short *diblock,
 	return err;
 }
 
-int V1_minix_sync_file(struct inode * inode, struct file * file)
+static int V1_minix_sync_file(struct inode * inode, struct file * file)
 {
 	int wait, err = 0;
 	
@@ -305,7 +305,7 @@ static int V2_sync_tindirect(struct inode *inode, unsigned long *tiblock,
 	return err;
 }
 
-int V2_minix_sync_file(struct inode * inode, struct file * file)
+static int V2_minix_sync_file(struct inode * inode, struct file * file)
 {
 	int wait, err = 0;
 	
@@ -328,10 +328,14 @@ int V2_minix_sync_file(struct inode * inode, struct file * file)
 }
 
 /*
- * The function which is called for file synchronization.
+ *	The function which is called for file synchronization. File may be
+ *	NULL
  */
-int minix_sync_file(struct inode * inode, struct file * file)
+ 
+int minix_sync_file(struct file * file, struct dentry *dentry)
 {
+	struct inode *inode = dentry->d_inode;
+	
 	if (INODE_VERSION(inode) == MINIX_V1)
 		return V1_minix_sync_file(inode, file);
 	else

@@ -1,8 +1,6 @@
 #ifndef _ASM_SOCKET_H
 #define _ASM_SOCKET_H
 
-#include <linux/types.h>
-#include <asm/ioctl.h>
 #include <asm/sockios.h>
 
 /* For setsockoptions(2) */
@@ -27,10 +25,27 @@
 #define SO_ERROR	0x1007
 #define SO_SNDBUF	0x1001
 #define SO_RCVBUF	0x1002
+#define	SO_RCVLOWAT	0x1010
+#define	SO_SNDLOWAT	0x1011
+#define	SO_RCVTIMEO	0x1012
+#define	SO_SNDTIMEO	0x1013
 
 /* linux-specific, might as well be the same as on i386 */
 #define SO_NO_CHECK	11
 #define SO_PRIORITY	12
 #define SO_BSDCOMPAT	14
+
+#define SO_PASSCRED	17
+#define SO_PEERCRED	18
+#define SO_BINDTODEVICE 25
+
+/* Socket filtering */
+#define SO_ATTACH_FILTER        26
+#define SO_DETACH_FILTER        27
+
+/* Security levels - as per NRL IPv6 - don't actually do anything */
+#define SO_SECURITY_AUTHENTICATION		19
+#define SO_SECURITY_ENCRYPTION_TRANSPORT	20
+#define SO_SECURITY_ENCRYPTION_NETWORK		21
 
 #endif /* _ASM_SOCKET_H */

@@ -9,11 +9,10 @@
  */
 
 #include <linux/vmalloc.h>
-
 #include <asm/io.h>
 
 static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned long size,
-	unsigned long phys_addr)
+	unsigned long phys_addr, unsigned long flags)
 {
 	unsigned long end;
 
@@ -24,7 +23,8 @@ static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned l
 	do {
 		if (!pte_none(*pte))
 			printk("remap_area_pte: page already exists\n");
-		set_pte(pte, mk_pte_phys(phys_addr, PAGE_KERNEL));
+		set_pte(pte, mk_pte_phys(phys_addr, __pgprot(_PAGE_PRESENT | _PAGE_RW | 
+					_PAGE_DIRTY | _PAGE_ACCESSED | flags)));
 		address += PAGE_SIZE;
 		phys_addr += PAGE_SIZE;
 		pte++;
@@ -32,7 +32,7 @@ static inline void remap_area_pte(pte_t * pte, unsigned long address, unsigned l
 }
 
 static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned long size,
-	unsigned long phys_addr)
+	unsigned long phys_addr, unsigned long flags)
 {
 	unsigned long end;
 
@@ -45,14 +45,15 @@ static inline int remap_area_pmd(pmd_t * pmd, unsigned long address, unsigned lo
 		pte_t * pte = pte_alloc_kernel(pmd, address);
 		if (!pte)
 			return -ENOMEM;
-		remap_area_pte(pte, address, end - address, address + phys_addr);
+		remap_area_pte(pte, address, end - address, address + phys_addr, flags);
 		address = (address + PMD_SIZE) & PMD_MASK;
 		pmd++;
 	} while (address < end);
 	return 0;
 }
 
-static int remap_area_pages(unsigned long address, unsigned long phys_addr, unsigned long size)
+static int remap_area_pages(unsigned long address, unsigned long phys_addr,
+				 unsigned long size, unsigned long flags)
 {
 	pgd_t * dir;
 	unsigned long end = address + size;
@@ -64,7 +65,8 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr, unsi
 		pmd_t *pmd = pmd_alloc_kernel(dir, address);
 		if (!pmd)
 			return -ENOMEM;
-		if (remap_area_pmd(pmd, address, end - address, phys_addr + address))
+		if (remap_area_pmd(pmd, address, end - address,
+					 phys_addr + address, flags))
 			return -ENOMEM;
 		set_pgdir(address, *dir);
 		address = (address + PGDIR_SIZE) & PGDIR_MASK;
@@ -75,35 +77,65 @@ static int remap_area_pages(unsigned long address, unsigned long phys_addr, unsi
 }
 
 /*
+ * Generic mapping function (not visible outside):
+ */
+
+/*
  * Remap an arbitrary physical address space into the kernel virtual
  * address space. Needed when the kernel wants to access high addresses
  * directly.
+ *
+ * NOTE! We need to allow non-page-aligned mappings too: we will obviously
+ * have to convert them into an offset in a page-aligned mapping, but the
+ * caller shouldn't need to know that small detail.
  */
-void * ioremap(unsigned long phys_addr, unsigned long size)
+void * __ioremap(unsigned long phys_addr, unsigned long size, unsigned long flags)
 {
 	void * addr;
 	struct vm_struct * area;
+	unsigned long offset;
 
-	if (phys_addr < virt_to_phys(high_memory))
+	/*
+	 * Don't remap the low PCI/ISA area, it's always mapped..
+	 */
+	if (phys_addr >= 0xA0000 && (phys_addr+size) <= 0x100000)
 		return phys_to_virt(phys_addr);
-	if (phys_addr & ~PAGE_MASK)
+
+	/*
+	 * Don't allow anybody to remap normal RAM that we're using..
+	 */
+	if (phys_addr < virt_to_phys(high_memory))
 		return NULL;
-	size = PAGE_ALIGN(size);
+
+	/*
+	 * Mappings have to be page-aligned
+	 */
+	offset = phys_addr & ~PAGE_MASK;
+	phys_addr &= PAGE_MASK;
+	size = PAGE_ALIGN(size + offset);
+
+	/*
+	 * Don't allow mappings that wrap..
+	 */
 	if (!size || size > phys_addr + size)
 		return NULL;
+
+	/*
+	 * Ok, go for it..
+	 */
 	area = get_vm_area(size);
 	if (!area)
 		return NULL;
 	addr = area->addr;
-	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size)) {
+	if (remap_area_pages(VMALLOC_VMADDR(addr), phys_addr, size, flags)) {
 		vfree(addr);
 		return NULL;
 	}
-	return addr;
+	return (void *) (offset + (char *)addr);
 }
 
 void iounmap(void *addr)
 {
 	if (addr > high_memory)
-		return vfree(addr);
+		return vfree((void *) (PAGE_MASK & (unsigned long) addr));
 }

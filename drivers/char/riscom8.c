@@ -1,7 +1,7 @@
 /*
  *      linux/drivers/char/riscom.c  -- RISCom/8 multiport serial driver.
  *
- *      Copyright (C) 1994-1996  Dmitry Gorodchanin (begemot@bgm.rosprint.net)
+ *      Copyright (C) 1994-1996  Dmitry Gorodchanin (pgmdsg@ibi.com)
  *
  *      This code is loosely based on the Linux serial driver, written by
  *      Linus Torvalds, Theodore T'so and others. The RISCom/8 card 
@@ -40,6 +40,9 @@
 #include <linux/serial.h>
 #include <linux/fcntl.h>
 #include <linux/major.h>
+#include <linux/init.h>
+
+#include <asm/uaccess.h>
 
 #include "riscom8.h"
 #include "riscom8_reg.h"
@@ -229,7 +232,7 @@ extern inline void rc_long_delay(unsigned long delay)
 }
 
 /* Reset and setup CD180 chip */
-static void rc_init_CD180(struct riscom_board const * bp)
+__initfunc(static void rc_init_CD180(struct riscom_board const * bp))
 {
 	unsigned long flags;
 	
@@ -254,7 +257,7 @@ static void rc_init_CD180(struct riscom_board const * bp)
 }
 
 /* Main probing routine, also sets irq. */
-static int rc_probe(struct riscom_board *bp)
+__initfunc(static int rc_probe(struct riscom_board *bp))
 {
 	unsigned char val1, val2;
 	int irqs = 0;
@@ -262,7 +265,7 @@ static int rc_probe(struct riscom_board *bp)
 	
 	bp->irq = 0;
 
-	if (rc_check_io_range(bp)) 
+	if (rc_check_io_range(bp))
 		return 1;
 	
 	/* Are the I/O ports here ? */
@@ -334,7 +337,7 @@ extern inline void rc_mark_event(struct riscom_port * port, int event)
 	 * Still hope this will be changed in near future.
          */
 	set_bit(event, &port->event);
-	queue_task_irq_off(&port->tqueue, &tq_riscom);
+	queue_task(&port->tqueue, &tq_riscom);
 	mark_bh(RISCOM8_BH);
 }
 
@@ -416,7 +419,7 @@ extern inline void rc_receive_exc(struct riscom_board const * bp)
 	
 	*tty->flip.char_buf_ptr++ = ch;
 	tty->flip.count++;
-	queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
 extern inline void rc_receive(struct riscom_board const * bp)
@@ -446,7 +449,7 @@ extern inline void rc_receive(struct riscom_board const * bp)
 		*tty->flip.flag_buf_ptr++ = 0;
 		tty->flip.count++;
 	}
-	queue_task_irq_off(&tty->flip.tqueue, &tq_timer);
+	queue_task(&tty->flip.tqueue, &tq_timer);
 }
 
 extern inline void rc_transmit(struct riscom_board const * bp)
@@ -535,8 +538,7 @@ extern inline void rc_check_modem(struct riscom_board const * bp)
 			wake_up_interruptible(&port->open_wait);
 		else if (!((port->flags & ASYNC_CALLOUT_ACTIVE) &&
 			   (port->flags & ASYNC_CALLOUT_NOHUP)))
-			queue_task_irq_off(&port->tqueue_hangup,  
-					   &tq_scheduler);      
+			queue_task(&port->tqueue_hangup,  &tq_scheduler);      
 	}
 	
 #ifdef RISCOM_BRAIN_DAMAGED_CTS
@@ -1038,7 +1040,7 @@ static int block_til_ready(struct tty_struct *tty, struct file * filp,
 		    !(port->flags & ASYNC_CLOSING) &&
 		    (do_clocal || CD))
 			break;
-		if (current->signal & ~current->blocked) {
+		if (signal_pending(current)) {
 			retval = -ERESTARTSYS;
 			break;
 		}
@@ -1170,8 +1172,7 @@ static void rc_close(struct tty_struct * tty, struct file * filp)
 		timeout = jiffies+HZ;
 		while(port->IER & IER_TXEMPTY)  {
 			current->state = TASK_INTERRUPTIBLE;
-			current->timeout = jiffies + port->timeout;
-			schedule();
+			schedule_timeout(port->timeout);
 			if (jiffies > timeout)
 				break;
 		}
@@ -1187,8 +1188,7 @@ static void rc_close(struct tty_struct * tty, struct file * filp)
 	if (port->blocked_open) {
 		if (port->close_delay) {
 			current->state = TASK_INTERRUPTIBLE;
-			current->timeout = jiffies + port->close_delay;
-			schedule();
+			schedule_timeout(port->close_delay);
 		}
 		wake_up_interruptible(&port->open_wait);
 	}
@@ -1226,7 +1226,7 @@ static int rc_write(struct tty_struct * tty, int from_user,
 			break;
 
 		if (from_user) {
-			memcpy_fromfs(tmp_buf, buf, c);
+			copy_from_user(tmp_buf, buf, c);
 			c = MIN(c, MIN(SERIAL_XMIT_SIZE - port->xmit_cnt - 1,
 				       SERIAL_XMIT_SIZE - port->xmit_head));
 			memcpy(port->xmit_buf + port->xmit_head, tmp_buf, c);
@@ -1354,7 +1354,7 @@ static int rc_get_modem_info(struct riscom_port * port, unsigned int *value)
 		| ((status & MSVR_CD)  ? TIOCM_CAR : 0)
 		| ((status & MSVR_DSR) ? TIOCM_DSR : 0)
 		| ((status & MSVR_CTS) ? TIOCM_CTS : 0);
-	put_user(result,(unsigned long *) value);
+	put_user(result, value);
 	return 0;
 }
 
@@ -1366,10 +1366,9 @@ static int rc_set_modem_info(struct riscom_port * port, unsigned int cmd,
 	unsigned long flags;
 	struct riscom_board *bp = port_Board(port);
 
-	error = verify_area(VERIFY_READ, value, sizeof(int));
+	error = get_user(arg, value);
 	if (error) 
 		return error;
-	arg = get_fs_long((unsigned long *) value);
 	switch (cmd) {
 	 case TIOCMBIS: 
 		if (arg & TIOCM_RTS) 
@@ -1430,7 +1429,7 @@ extern inline int rc_set_serial_info(struct riscom_port * port,
 	error = verify_area(VERIFY_READ, (void *) newinfo, sizeof(tmp));
 	if (error)
 		return error;
-	memcpy_fromfs(&tmp, newinfo, sizeof(tmp));
+	copy_from_user(&tmp, newinfo, sizeof(tmp));
 	
 #if 0	
 	if ((tmp.irq != bp->irq) ||
@@ -1446,7 +1445,7 @@ extern inline int rc_set_serial_info(struct riscom_port * port,
 	change_speed = ((port->flags & ASYNC_SPD_MASK) !=
 			(tmp.flags & ASYNC_SPD_MASK));
 	
-	if (!suser()) {
+	if (!capable(CAP_SYS_ADMIN)) {
 		if ((tmp.close_delay != port->close_delay) ||
 		    (tmp.closing_wait != port->closing_wait) ||
 		    ((tmp.flags & ~ASYNC_USR_MASK) !=
@@ -1489,7 +1488,7 @@ extern inline int rc_get_serial_info(struct riscom_port * port,
 	tmp.close_delay = port->close_delay * HZ/100;
 	tmp.closing_wait = port->closing_wait * HZ/100;
 	tmp.xmit_fifo_size = CD180_NFIFO;
-	memcpy_tofs(retinfo, &tmp, sizeof(tmp));
+	copy_to_user(retinfo, &tmp, sizeof(tmp));
 	return 0;
 }
 
@@ -1521,14 +1520,11 @@ static int rc_ioctl(struct tty_struct * tty, struct file * filp,
 		rc_send_break(port, arg ? arg*(HZ/10) : HZ/4);
 		return 0;
 	 case TIOCGSOFTCAR:
-		error = verify_area(VERIFY_WRITE, (void *) arg, sizeof(long));
-		if (error)
-			return error;
-		put_user(C_CLOCAL(tty) ? 1 : 0,
-			    (unsigned long *) arg);
-		return 0;
+		return put_user(C_CLOCAL(tty) ? 1 : 0, (unsigned int *) arg);
 	 case TIOCSSOFTCAR:
-		arg = get_user((unsigned long *) arg);
+		retval = get_user(arg,(unsigned int *) arg);
+		if (retval)
+			return retval;
 		tty->termios->c_cflag =
 			((tty->termios->c_cflag & ~CLOCAL) |
 			(arg ? CLOCAL : 0));
@@ -1712,7 +1708,7 @@ static void do_softint(void *private_)
 	if(!(tty = port->tty)) 
 		return;
 
-	if (clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
+	if (test_and_clear_bit(RS_EVENT_WRITE_WAKEUP, &port->event)) {
 		if ((tty->flags & (1 << TTY_DO_WRITE_WAKEUP)) &&
 		    tty->ldisc.write_wakeup)
 			(tty->ldisc.write_wakeup)(tty);
@@ -1720,7 +1716,7 @@ static void do_softint(void *private_)
 	}
 }
 
-static int rc_init_drivers(void)
+static inline int rc_init_drivers(void)
 {
 	int error;
 	int i;
@@ -1801,9 +1797,15 @@ static int rc_init_drivers(void)
 
 static void rc_release_drivers(void)
 {
+	unsigned long flags;
+
+	save_flags(flags);
+	cli();
+	remove_bh(RISCOM8_BH);
 	free_page((unsigned long)tmp_buf);
 	tty_unregister_driver(&riscom_driver);
 	tty_unregister_driver(&riscom_callout_driver);
+	restore_flags(flags);
 }
 
 #ifndef MODULE
@@ -1816,7 +1818,7 @@ static void rc_release_drivers(void)
  * addresses in this case.
  *
  */ 
-void riscom8_setup(char *str, int * ints)
+__initfunc(void riscom8_setup(char *str, int * ints))
 {
 	int i;
 
@@ -1832,7 +1834,7 @@ void riscom8_setup(char *str, int * ints)
 /* 
  * This routine must be called by kernel at boot time 
  */
-int riscom8_init(void) 
+__initfunc(int riscom8_init(void))
 {
 	int i;
 	int found = 0;
@@ -1859,6 +1861,10 @@ int iobase  = 0;
 int iobase1 = 0;
 int iobase2 = 0;
 int iobase3 = 0;
+MODULE_PARM(iobase, "i");
+MODULE_PARM(iobase1, "i");
+MODULE_PARM(iobase2, "i");
+MODULE_PARM(iobase3, "i");
 
 /*
  * You can setup up to 4 boards (current value of RC_NBOARD)

@@ -1,11 +1,16 @@
 #
-# Makefile for i386-specific library files..
+# Makefile for ppc-specific library files..
 #
 
-L_TARGET = lib.o
-L_OBJS  = checksum.o cksum_support.o
+.S.o:
+	$(CC) -D__ASSEMBLY__ -c $< -o $*.o
 
-${L_TARGET}: $(L_OBJS)
-	$(LD) -r -o ${L_TARGET} $(L_OBJS)
+O_TARGET = lib.o
+O_OBJS  = checksum.o string.o strcase.o
 
-fastdep:
+ifdef SMP
+O_OBJS += locks.o
+endif
+
+
+include $(TOPDIR)/Rules.make

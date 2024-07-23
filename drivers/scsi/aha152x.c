@@ -432,14 +432,19 @@ enum {
 #if defined(DEBUG_AHA152X)
 int aha152x[]  = { 0, 11, 7, 1, 1, 0, DELAY_DEFAULT, 0, DEBUG_DEFAULT };
 int aha152x1[] = { 0, 11, 7, 1, 1, 0, DELAY_DEFAULT, 0, DEBUG_DEFAULT };
+MODULE_PARM(aha152x, "1-9i");
+MODULE_PARM(aha152x1, "1-9i");
 #else
 int aha152x[]  = { 0, 11, 7, 1, 1, 0, DELAY_DEFAULT, 0 };
 int aha152x1[] = { 0, 11, 7, 1, 1, 0, DELAY_DEFAULT, 0 };
+MODULE_PARM(aha152x, "1-8i");
+MODULE_PARM(aha152x1, "1-8i");
 #endif
 #endif
 
 /* set by aha152x_setup according to the command line */
 static int  setup_count=0;
+static int  registered_count=0;
 static struct aha152x_setup {
   int io_port;
   int irq;
@@ -551,6 +556,7 @@ static struct signature {
 } signatures[] =
 {
   { "Adaptec AHA-1520 BIOS",      0x102e, 21 },  /* Adaptec 152x */
+  { "Adaptec AHA-1520B",            0x0b, 19 },  /* Adaptec 152x rev B */
   { "Adaptec ASW-B626 BIOS",      0x1029, 21 },  /* on-board controller */
   { "Adaptec BIOS: ASW-B626",       0x0f, 22 },  /* on-board controller */
   { "Adaptec ASW-B626 S2",        0x2e6c, 19 },  /* on-board controller */
@@ -609,11 +615,12 @@ static inline Scsi_Cmnd *remove_SC(Scsi_Cmnd **SC, int target, int lun)
       prev = ptr, ptr = (Scsi_Cmnd *) ptr->host_scribble)
     ;
 
-  if(ptr)
+  if(ptr){
     if(prev)
       prev->host_scribble = ptr->host_scribble;
     else
       *SC= (Scsi_Cmnd *) ptr->host_scribble;
+  }
 
   return ptr;
 }
@@ -945,6 +952,7 @@ int aha152x_detect(Scsi_Host_Template * tpnt)
 
     shpnt = aha152x_host[setup[i].irq-IRQ_MIN] =
       scsi_register(tpnt, sizeof(struct aha152x_hostdata));
+    registered_count++;
 
     shpnt->io_port                     = setup[i].io_port;
     shpnt->n_io_port                   = IO_RANGE;
@@ -987,7 +995,7 @@ int aha152x_detect(Scsi_Host_Template * tpnt)
 
     aha152x_reset_ports(shpnt);
       
-    printk("aha152x%d: vital data: PORTBASE=0x%03x, IRQ=%d, SCSI ID=%d,"
+    printk("aha152x%d: vital data: PORTBASE=0x%03lx, IRQ=%d, SCSI ID=%d,"
            " reconnect=%s, parity=%s, synchronous=%s, delay=%d, extended translation=%s\n",
            i,
            shpnt->io_port,
@@ -1007,7 +1015,7 @@ int aha152x_detect(Scsi_Host_Template * tpnt)
 
     SETBITS(DMACNTRL0, INTEN);
 
-    ok = request_irq(shpnt->irq, aha152x_swintr, SA_INTERRUPT, "aha152x", NULL);
+    ok = request_irq(shpnt->irq, aha152x_swintr, SA_INTERRUPT, "aha152x", shpnt);
     if(ok<0) {
       if(ok == -EINVAL)
         printk("aha152x%d: bad IRQ %d.\n", i, shpnt->irq);
@@ -1018,6 +1026,8 @@ int aha152x_detect(Scsi_Host_Template * tpnt)
       printk("aha152x: driver needs an IRQ.\n");
 
       scsi_unregister(shpnt);
+      registered_count--;
+      release_region(shpnt->io_port, IO_RANGE);
       shpnt=aha152x_host[shpnt->irq-IRQ_MIN]=0;
       continue;
     }
@@ -1031,7 +1041,7 @@ int aha152x_detect(Scsi_Host_Template * tpnt)
     while(!HOSTDATA(shpnt)->swint && jiffies<the_time)
       barrier();
 
-    free_irq(shpnt->irq,0);
+    free_irq(shpnt->irq,shpnt);
 
     if(!HOSTDATA(shpnt)->swint) {
       if(TESTHI(DMASTAT, INTSTAT)) {
@@ -1043,6 +1053,8 @@ int aha152x_detect(Scsi_Host_Template * tpnt)
       printk("aha152x: IRQ %d possibly wrong.  Please verify.\n", shpnt->irq);
 
       scsi_unregister(shpnt);
+      registered_count--;
+      release_region(shpnt->io_port, IO_RANGE);
       shpnt=aha152x_host[shpnt->irq-IRQ_MIN]=0;
       continue;
     }
@@ -1055,12 +1067,23 @@ int aha152x_detect(Scsi_Host_Template * tpnt)
     SETPORT(SSTAT0, 0x7f);
     SETPORT(SSTAT1, 0xef);
 
-    if(request_irq(shpnt->irq,aha152x_intr,SA_INTERRUPT,"aha152x",NULL)<0) {
+    if(request_irq(shpnt->irq,aha152x_intr,SA_INTERRUPT,"aha152x",shpnt)<0) {
       printk("aha152x: failed to reassign interrupt.\n");
     }
   }
   
-  return (setup_count>0);
+  return (registered_count>0);
+}
+
+
+int aha152x_release(struct Scsi_Host *shpnt)
+{
+  if (shpnt->irq)
+    free_irq(shpnt->irq, shpnt);
+  if (shpnt->io_port)
+    release_region(shpnt->io_port, IO_RANGE);
+
+  return 0;
 }
 
 /* 
@@ -1267,7 +1290,7 @@ int aha152x_abort(Scsi_Cmnd *SCpnt)
     HOSTDATA(shpnt)->aborting++;
     HOSTDATA(shpnt)->abortion_complete=0;
 
-    sti();  /* Hi Eric, guess what ;-) */
+    restore_flags(flags);
 
     /* sleep until the abortion is complete */
     while(!HOSTDATA(shpnt)->abortion_complete)
@@ -1552,7 +1575,7 @@ void aha152x_intr(int irqno, void *dev_id, struct pt_regs * regs)
      intr(). To avoid race conditions, we have to return
      immediately afterwards. */
   CLRBITS(DMACNTRL0, INTEN);
-  sti();  /* Yes, sti() really needs to be here */
+  /* sti();  FIXME!!! Yes, sti() really needs to be here if we want to lock up */
 
   /* disconnected target is trying to reconnect.
      Only possible, if we have disconnected nexuses and
@@ -1723,7 +1746,7 @@ void aha152x_intr(int irqno, void *dev_id, struct pt_regs * regs)
 
   /* we are waiting for the result of a selection attempt */
   if(CURRENT_SC->SCp.phase & in_selection) {
-    if(TESTLO(SSTAT1, SELTO))
+    if(TESTLO(SSTAT1, SELTO)) {
       /* no timeout */
       if(TESTHI(SSTAT0, SELDO)) {
         /* clear BUS FREE interrupt */
@@ -1799,7 +1822,7 @@ void aha152x_intr(int irqno, void *dev_id, struct pt_regs * regs)
         return;
       } else
         aha152x_panic(shpnt, "neither timeout nor selection\007");
-    else {
+    } else {
 #if defined(DEBUG_SELECTION) || defined(DEBUG_PHASES)
       if(HOSTDATA(shpnt)->debug & (debug_selection|debug_phases))
         printk("SELTO, ");
@@ -3171,7 +3194,7 @@ int aha152x_proc_info(char *buffer, char **start,
   save_flags(flags);
   cli();
   
-  SPRINTF("ioports 0x%04x to 0x%04x\n",
+  SPRINTF("ioports 0x%04lx to 0x%04lx\n",
           shpnt->io_port, shpnt->io_port+shpnt->n_io_port-1);
   SPRINTF("interrupt 0x%02x\n", shpnt->irq);
   SPRINTF("disconnection/reconnection %s\n", 

@@ -5,24 +5,23 @@
  * License.  See the file "COPYING" in the main directory of this archive
  * for more details.
  *
- * Copyright (C) 1995 by Ralf Baechle
+ * Copyright (C) 1995, 1996, 1997 by Ralf Baechle
+ *
+ * $Id: sysmips.c,v 1.4 1998/05/07 15:20:05 ralf Exp $
  */
 #include <linux/errno.h>
 #include <linux/linkage.h>
 #include <linux/mm.h>
+#include <linux/smp.h>
+#include <linux/smp_lock.h>
 #include <linux/sched.h>
 #include <linux/string.h>
 #include <linux/utsname.h>
 
 #include <asm/cachectl.h>
-#include <asm/segment.h>
+#include <asm/pgtable.h>
 #include <asm/sysmips.h>
-
-static inline size_t
-strnlen_user(const char *s, size_t count)
-{
-	return strnlen(s, count);
-}
+#include <asm/uaccess.h>
 
 /*
  * How long a hostname can we get from user space?
@@ -35,7 +34,7 @@ get_max_hostname(unsigned long address)
 {
 	struct vm_area_struct * vma;
 
-	vma = find_vma(current, address);
+	vma = find_vma(current->mm, address);
 	if (!vma || vma->vm_start > address || !(vma->vm_flags & VM_READ))
 		return -EFAULT;
 	address = vma->vm_end - address;
@@ -52,46 +51,67 @@ sys_sysmips(int cmd, int arg1, int arg2, int arg3)
 {
 	int	*p;
 	char	*name;
-	int	flags, len, retval = -EINVAL;
+	int	flags, tmp, len, retval;
 
+	lock_kernel();
 	switch(cmd)
 	{
 	case SETNAME:
-		if (!suser())
-			return -EPERM;
+		retval = -EPERM;
+		if (!capable(CAP_SYS_ADMIN))
+			goto out;
+
 		name = (char *) arg1;
-		len = get_max_hostname((unsigned long)name);
-		if (retval < 0)
-			return len;
-		len = strnlen_user(name, retval);
+		len = strlen_user(name);
+
+		retval = len;
+		if (len < 0)
+			goto out;
+
+		retval = -EINVAL;
 		if (len == 0 || len > __NEW_UTS_LEN)
-			return -EINVAL;
-		memcpy_fromfs(system_utsname.nodename, name, len);
+			goto out;
+
+		copy_from_user(system_utsname.nodename, name, len);
 		system_utsname.nodename[len] = '\0';
-		return 0;
+		retval = 0;
+		goto out;
+
 	case MIPS_ATOMIC_SET:
+		/* This is broken in case of page faults and SMP ...
+		   Risc/OS fauls after maximum 20 tries with EAGAIN.  */
 		p = (int *) arg1;
 		retval = verify_area(VERIFY_WRITE, p, sizeof(*p));
-		if(retval)
-			return -EINVAL;
-		save_flags(flags);
-		cli();
+		if (retval)
+			goto out;
+		save_and_cli(flags);
 		retval = *p;
 		*p = arg2;
 		restore_flags(flags);
-		return retval;
+		goto out;
+
 	case MIPS_FIXADE:
-		if (arg1)
-			current->tss.mflags |= MF_FIXADE;
-		else
-			current->tss.mflags |= MF_FIXADE;
+		tmp = current->tss.mflags & ~3;
+		current->tss.mflags = tmp | (arg1 & 3);
 		retval = 0;
-		break;
+		goto out;
+
 	case FLUSH_CACHE:
-		sys_cacheflush(0, ~0, BCACHE);
-		break;
+		flush_cache_all();
+		retval = 0;
+		goto out;
+
+	case MIPS_RDNVRAM:
+		retval = -EIO;
+		goto out;
+
+	default:
+		retval = -EINVAL;
+		goto out;
 	}
 
+out:
+	unlock_kernel();
 	return retval;
 }
 

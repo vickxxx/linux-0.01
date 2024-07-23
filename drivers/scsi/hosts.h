@@ -1,5 +1,5 @@
 /*
- *  hosts.h Copyright (C) 1992 Drew Eckhardt 
+ *  hosts.h Copyright (C) 1992 Drew Eckhardt
  *          Copyright (C) 1993, 1994, 1995 Eric Youngdale
  *
  *  mid to low-level SCSI driver interface header
@@ -11,22 +11,25 @@
  *	 Modified by Eric Youngdale eric@aib.com to
  *	 add scatter-gather, multiple outstanding request, and other
  *	 enhancements.
- * 
+ *
  *  Further modified by Eric Youngdale to support multiple host adapters
  *  of the same type.
+ *
+ *  Jiffies wrap fixes (host->resetting), 3 Dec 1998 Andrea Arcangeli
  */
 
 #ifndef _HOSTS_H
 #define _HOSTS_H
 
 /*
-    $Header: /usr/src/linux/kernel/blk_drv/scsi/RCS/hosts.h,v 1.3 1993/09/24 12:21:00 drew Exp drew $
+    $Header: /vger/u4/cvs/linux/drivers/scsi/hosts.h,v 1.6 1997/01/19 23:07:13 davem Exp $
 */
 
+#include <linux/config.h>
 #include <linux/proc_fs.h>
 
 /* It is senseless to set SG_ALL any higher than this - the performance
- *  does not get any better, and it wastes memory 
+ *  does not get any better, and it wastes memory
  */
 #define SG_NONE 0
 #define SG_ALL 0xff
@@ -53,18 +56,18 @@ typedef struct scsi_disk Disk;
 
 typedef struct	SHT
 {
-    
+
     /* Used with loadable modules so we can construct a linked list. */
     struct SHT * next;
-    
+
     /* Used with loadable modules so that we know when it is safe to unload */
-    long * usage_count;
-    
+    struct module * module;
+
     /* The pointer to the /proc/scsi directory entry */
     struct proc_dir_entry *proc_dir;
 
     /* proc-fs info function.
-     * Can be used to export driver statistics and other infos to the world 
+     * Can be used to export driver statistics and other infos to the world
      * outside the kernel ie. userspace and it also provides an interface
      * to feed the driver with information. Check eata_dma_proc.c for reference
      */
@@ -75,7 +78,7 @@ typedef struct	SHT
      * device detected.
      */
     const char *name;
-    
+
     /*
      * The detect function shall return non zero on detection,
      * indicating the number of host adapters of this particular
@@ -83,7 +86,7 @@ typedef struct	SHT
      * initialize all data necessary for this particular
      * SCSI driver.  It is passed the host number, so this host
      * knows where the first entry is in the scsi_hosts[] array.
-     * 
+     *
      * Note that the detect routine MUST not call any of the mid level
      * functions to queue commands because things are not guaranteed
      * to be set up yet.  The detect routine can send commands to
@@ -91,12 +94,12 @@ typedef struct	SHT
      * passed to scsi.c in the processing of the command.  Note
      * especially that scsi_malloc/scsi_free must not be called.
      */
-    int (* detect)(struct SHT *); 
-    
+    int (* detect)(struct SHT *);
+
     /* Used with loadable modules to unload the host structures.  Note:
      * there is a default action built into the modules code which may
      * be sufficient for most host adapters.  Thus you may not have to supply
-     * this at all. 
+     * this at all.
      */
     int (*release)(struct Scsi_Host *);
 
@@ -106,12 +109,17 @@ typedef struct	SHT
      * the name field will be used instead.
      */
     const char *(* info)(struct Scsi_Host *);
-    
+
     /*
-     * The command function takes a target, a command (this is a SCSI 
-     * command formatted as per the SCSI spec, nothing strange), a 
+     * ioctl interface
+     */
+    int (*ioctl)(Scsi_Device *dev, int cmd, void *arg);
+
+    /*
+     * The command function takes a target, a command (this is a SCSI
+     * command formatted as per the SCSI spec, nothing strange), a
      * data buffer pointer, and data buffer length pointer.  The return
-     * is a status int, bit fielded as follows : 
+     * is a status int, bit fielded as follows :
      * Byte What
      * 0    SCSI status code
      * 1    SCSI 1 byte message
@@ -123,31 +131,58 @@ typedef struct	SHT
     /*
      * The QueueCommand function works in a similar manner
      * to the command function.	 It takes an additional parameter,
-     * void (* done)(int host, int code) which is passed the host 
-     * # and exit result when the command is complete.	
+     * void (* done)(int host, int code) which is passed the host
+     * # and exit result when the command is complete.
      * Host number is the POSITION IN THE hosts array of THIS
      * host adapter.
+     *
+     * The done() function must only be called after QueueCommand() 
+     * has returned.
      */
     int (* queuecommand)(Scsi_Cmnd *, void (*done)(Scsi_Cmnd *));
-    
+
     /*
-     * Since the mid level driver handles time outs, etc, we want to 
-     * be able to abort the current command.  Abort returns 0 if the 
+     * This is an error handling strategy routine.  You don't need to
+     * define one of these if you don't want to - there is a default
+     * routine that is present that should work in most cases.  For those
+     * driver authors that have the inclination and ability to write their
+     * own strategy routine, this is where it is specified.  Note - the
+     * strategy routine is *ALWAYS* run in the context of the kernel eh
+     * thread.  Thus you are guaranteed to *NOT* be in an interrupt handler
+     * when you execute this, and you are also guaranteed to *NOT* have any
+     * other commands being queued while you are in the strategy routine.
+     * When you return from this function, operations return to normal.
+     *
+     * See scsi_error.c scsi_unjam_host for additional comments about what
+     * this function should and should not be attempting to do.
+     */
+     int (*eh_strategy_handler)(struct Scsi_Host *);
+     int (*eh_abort_handler)(Scsi_Cmnd *);
+     int (*eh_device_reset_handler)(Scsi_Cmnd *);
+     int (*eh_bus_reset_handler)(Scsi_Cmnd *);
+     int (*eh_host_reset_handler)(Scsi_Cmnd *);
+
+    /*
+     * Since the mid level driver handles time outs, etc, we want to
+     * be able to abort the current command.  Abort returns 0 if the
      * abortion was successful.	 The field SCpnt->abort reason
      * can be filled in with the appropriate reason why we wanted
      * the abort in the first place, and this will be used
      * in the mid-level code instead of the host_byte().
-     * If non-zero, the code passed to it 
-     * will be used as the return code, otherwise 
+     * If non-zero, the code passed to it
+     * will be used as the return code, otherwise
      * DID_ABORT  should be returned.
-     * 
-     * Note that the scsi driver should "clean up" after itself, 
-     * resetting the bus, etc.	if necessary. 
+     *
+     * Note that the scsi driver should "clean up" after itself,
+     * resetting the bus, etc.	if necessary.
+     *
+     * NOTE - this interface is depreciated, and will go away.  Use
+     * the eh_ routines instead.
      */
     int (* abort)(Scsi_Cmnd *);
 
     /*
-     * The reset function will reset the SCSI bus.  Any executing 
+     * The reset function will reset the SCSI bus.  Any executing
      * commands should fail with a DID_RESET in the host byte.
      * The Scsi_Cmnd  is passed so that the reset routine can figure
      * out which host adapter should be reset, and also which command
@@ -155,24 +190,27 @@ typedef struct	SHT
      * the first place.	 Some hosts do not implement a reset function,
      * and these hosts must call scsi_request_sense(SCpnt) to keep
      * the command alive.
-     */ 
+     *
+     * NOTE - this interface is depreciated, and will go away.  Use
+     * the eh_ routines instead.
+     */
     int (* reset)(Scsi_Cmnd *, unsigned int);
 
     /*
      * This function is used to select synchronous communications,
      * which will result in a higher data throughput.  Not implemented
      * yet.
-     */ 
+     */
     int (* slave_attach)(int, int);
-    
+
     /*
      * This function determines the bios parameters for a given
      * harddisk.  These tend to be numbers that are made up by
      * the host adapter.  Parameters:
      * size, device number, list (heads, sectors, cylinders)
-     */ 
+     */
     int (* bios_param)(Disk *, kdev_t, int []);
-    
+
     /*
      * This determines if we will use a non-interrupt driven
      * or an interrupt driven scheme,  It is set to the maximum number
@@ -181,10 +219,10 @@ typedef struct	SHT
     int can_queue;
 
     /*
-     * In many instances, especially where disconnect / reconnect are 
-     * supported, our host also has an ID on the SCSI bus.  If this is 
+     * In many instances, especially where disconnect / reconnect are
+     * supported, our host also has an ID on the SCSI bus.  If this is
      * the case, then it must be reserved.  Please set this_id to -1 if
-     * your setup is in single initiator mode, and the host lacks an 
+     * your setup is in single initiator mode, and the host lacks an
      * ID.
      */
     int this_id;
@@ -210,13 +248,13 @@ typedef struct	SHT
      * present contains counter indicating how many boards of this
      * type were found when we did the scan.
      */
-    unsigned char present;  
-    
+    unsigned char present;
+
     /*
      * true if this host adapter uses unchecked DMA onto an ISA bus.
      */
     unsigned unchecked_isa_dma:1;
-    
+
     /*
      * true if this host adapter can make good use of clustering.
      * I originally thought that if the tablesize was large that it
@@ -227,10 +265,22 @@ typedef struct	SHT
      */
     unsigned use_clustering:1;
 
+    /*
+     * True if this driver uses the new error handling code.  This flag is
+     * really only temporary until all of the other drivers get converted
+     * to use the new error handling code.
+     */
+    unsigned use_new_eh_code:1;
+
+    /*
+     * True for emulated SCSI host adapters (e.g. ATAPI)
+     */
+    unsigned emulated:1;
+
 } Scsi_Host_Template;
 
 /*
- * The scsi_hosts array is the array containing the data for all 
+ * The scsi_hosts array is the array containing the data for all
  * possible <supported> scsi hosts.   This is similar to the
  * Scsi_Host_Template, except that we have one entry for each
  * actual physical host adapter on the system, stored as a linked
@@ -240,40 +290,67 @@ typedef struct	SHT
 
 struct Scsi_Host
 {
-    struct Scsi_Host * next;
-    unsigned short extra_bytes;
-    volatile unsigned char host_busy;
-    char host_no;  /* Used for IOCTL_GET_IDLUN, /proc/scsi et al. */
-    unsigned long last_reset;
-    struct wait_queue *host_wait;
-    Scsi_Cmnd *host_queue;
-    Scsi_Host_Template * hostt;
+/* private: */
+    /*
+     * This information is private to the scsi mid-layer.  Wrapping it in a
+     * struct private is a way of marking it in a sort of C++ type of way.
+     */
+    struct Scsi_Host      * next;
+    Scsi_Device           * host_queue;
+    /*
+     * List of commands that have been rejected because either the host
+     * or the device was busy.  These need to be retried relatively quickly,
+     * but we need to hold onto it for a short period until the host/device
+     * is available.
+     */
+    Scsi_Cmnd             * pending_commands;
+
+    struct task_struct    * ehandler;  /* Error recovery thread. */
+    struct semaphore      * eh_wait;   /* The error recovery thread waits on
+                                          this. */
+    struct semaphore      * eh_notify; /* wait for eh to begin */
+    struct semaphore      * eh_action; /* Wait for specific actions on the
+                                          host. */
+    unsigned int            eh_active:1; /* Indicates the eh thread is awake and active if
+                                          this is true. */
+    struct wait_queue     * host_wait;
+    Scsi_Host_Template    * hostt;
+    atomic_t                host_active; /* commands checked out */
+    volatile unsigned short host_busy;   /* commands actually active on low-level */
+    volatile unsigned short host_failed; /* commands that failed. */
     
+/* public: */
+    unsigned short extra_bytes;
+    unsigned short host_no;  /* Used for IOCTL_GET_IDLUN, /proc/scsi et al. */
+    int resetting; /* if set, it means that last_reset is a valid value */
+    unsigned long last_reset;
+
+
     /*
      *	These three parameters can be used to allow for wide scsi,
-     *	and for host adapters that support multiple busses 
+     *	and for host adapters that support multiple busses
      *	The first two should be set to 1 more than the actual max id
      *	or lun (i.e. 8 for normal systems).
      */
     unsigned int max_id;
     unsigned int max_lun;
     unsigned int max_channel;
-   
+
     /*
      * Pointer to a circularly linked list - this indicates the hosts
      * that should be locked out of performing I/O while we have an active
-     * command on this host. 
+     * command on this host.
      */
     struct Scsi_Host * block;
     unsigned wish_block:1;
-    
+
     /* These parameters should be set by the detect routine */
     unsigned char *base;
-    unsigned int  io_port;
+    unsigned long io_port;
     unsigned char n_io_port;
-    unsigned char irq;
     unsigned char dma_channel;
-    
+    unsigned int  irq;
+
     /*
      * This is a unique identifier that must be assigned so that we
      * have some way of identifying each detected host adapter properly
@@ -282,26 +359,46 @@ struct Scsi_Host
      * initialized to 0 in scsi_register.
      */
     unsigned int unique_id;
-    
+
     /*
      * The rest can be copied from the template, or specifically
      * initialized, as required.
      */
-    
+
     int this_id;
     int can_queue;
     short cmd_per_lun;
     short unsigned int sg_tablesize;
+
+    unsigned in_recovery:1;
     unsigned unchecked_isa_dma:1;
     unsigned use_clustering:1;
     /*
      * True if this host was loaded as a loadable module
      */
     unsigned loaded_as_module:1;
- 
+
+    /*
+     * Host has rejected a command because it was busy.
+     */
+    unsigned host_blocked:1;
+    
+    /*
+     * Host uses correct SCSI ordering not PC ordering. The bit is
+     * set for the minority of drivers whose authors actually read the spec ;)
+     */
+
+    unsigned reverse_ordering:1;
+    
     void (*select_queue_depths)(struct Scsi_Host *, Scsi_Device *);
 
-    unsigned long hostdata[0];  /* Used for storage of host specific stuff */
+    /*
+     * We should ensure that this is aligned, both for better performance
+     * and also because some compilers (m68k) don't automatically force
+     * alignment to a long boundary.
+     */
+    unsigned long hostdata[0]  /* Used for storage of host specific stuff */
+        __attribute__ ((aligned (sizeof(unsigned long))));
 };
 
 extern struct Scsi_Host * scsi_hostlist;
@@ -316,11 +413,11 @@ extern void build_proc_dir_entries(Scsi_Host_Template  *);
  *  scsi_init initializes the scsi hosts.
  */
 
-/* 
+/*
  * We use these goofy things because the MM is not set up when we init
  * the scsi subsystem.	By using these functions we can write code that
  * looks normal.  Also, it makes it possible to use the same code for a
- * loadable module. 
+ * loadable module.
  */
 
 extern void * scsi_init_malloc(unsigned int size, int priority);
@@ -333,6 +430,8 @@ unsigned int scsi_init(void);
 extern struct Scsi_Host * scsi_register(Scsi_Host_Template *, int j);
 extern void scsi_unregister(struct Scsi_Host * i);
 
+extern void scsi_mark_host_reset(struct Scsi_Host *Host);
+
 #define BLANK_HOST {"", 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 
 struct Scsi_Device_Template
@@ -340,7 +439,7 @@ struct Scsi_Device_Template
     struct Scsi_Device_Template * next;
     const char * name;
     const char * tag;
-    long * usage_count;		  /* Used for loadable modules */
+    struct module * module;	  /* Used for loadable modules */
     unsigned char scsi_type;
     unsigned char major;
     unsigned char nr_dev;	  /* Number currently attached */
@@ -375,11 +474,18 @@ extern void scsi_unregister_module(int, void *);
 
 /*
  * This is an ugly hack.  If we expect to be able to load devices at run time,
- * we need to leave extra room in some of the data structures.	Doing a 
- * realloc to enlarge the structures would be riddled with race conditions, 
+ * we need to leave extra room in some of the data structures.	Doing a
+ * realloc to enlarge the structures would be riddled with race conditions,
  * so until a better solution is discovered, we use this crude approach
+ *
+ * Even bigger hack for SparcSTORAGE arrays. Those are at least 6 disks, but
+ * usually up to 30 disks, so everyone would need to change this. -jj
  */
-#define SD_EXTRA_DEVS 2
+#ifdef CONFIG_SCSI_PLUTO_MODULE
+#define SD_EXTRA_DEVS 40
+#else
+#define SD_EXTRA_DEVS 4
+#endif
 #define ST_EXTRA_DEVS 2
 #define SR_EXTRA_DEVS 2
 #define SG_EXTRA_DEVS (SD_EXTRA_DEVS + SR_EXTRA_DEVS + ST_EXTRA_DEVS)

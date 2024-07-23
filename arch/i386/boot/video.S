@@ -1,12 +1,15 @@
 !
-!	Display adapter & video mode setup, version 2.9 (12-May-96)
+!	Display adapter & video mode setup, version 2.12 (25-May-98)
 !
-!	Copyright (C) 1995, 1996 Martin Mares <mj@k332.feld.cvut.cz>
-!	Based on the original setup.S code (C) Linus Torvalds
+!	Copyright (C) 1995 -- 1998 Martin Mares <mj@atrey.karlin.mff.cuni.cz>
+!	Based on the original setup.S code (C) Linus Torvalds and Mats Anderson
 !
 
-! Enable autodetection of SVGA adapters and modes
-#define CONFIG_VIDEO_SVGA
+#include <linux/config.h> /* for CONFIG_VIDEO_* */
+
+! Enable autodetection of SVGA adapters and modes. If you really need this
+! feature, drop me a mail as I think of removing it some day...
+#undef CONFIG_VIDEO_SVGA
 
 ! Enable autodetection of VESA modes
 #define CONFIG_VIDEO_VESA
@@ -19,6 +22,18 @@
 
 ! Enable local mode list
 #undef CONFIG_VIDEO_LOCAL
+
+! Force 400 scan lines for standard modes (hack to fix bad behaviour
+! of certain broken BIOSes -- don't use unless needed)
+#undef CONFIG_VIDEO_400_HACK
+
+! A special hack allowing to force specific BIOS mode ID along with specific
+! dimensions. Especially useful for certain X-Window graphics mode hacks
+! (e.g., 800x600 modes on IBM ThinkPad).
+#undef CONFIG_VIDEO_GFX_HACK
+#define VIDEO_GFX_BIOS_AX 0x4f02	/* 800x600 on ThinkPad */
+#define VIDEO_GFX_BIOS_BX 0x0102
+#define VIDEO_GFX_DUMMY_RESOLUTION 0x6425	/* 100x37 */
 
 ! This code uses an extended set of video mode numbers. These include:
 ! Aliases for standard modes
@@ -44,7 +59,8 @@
 #define VIDEO_80x30 0x0f05
 #define VIDEO_80x34 0x0f06
 #define VIDEO_80x60 0x0f07
-#define VIDEO_LAST_SPECIAL 0x0f08
+#define VIDEO_GFX_HACK 0x0f08
+#define VIDEO_LAST_SPECIAL 0x0f09
 ! Video modes given by resolution
 #define VIDEO_FIRST_RESOLUTION 0x1000
 
@@ -52,27 +68,39 @@
 #define VIDEO_RECALC 0x8000
 
 ! Positions of various video parameters passed to the kernel
-#define PARAM_CURSOR_POS	0
-#define PARAM_VIDEO_PAGE	4
-#define PARAM_VIDEO_MODE	6
-#define PARAM_VIDEO_COLS	7
-#define PARAM_VIDEO_EGA_BX	10
-#define PARAM_VIDEO_LINES	14
-#define PARAM_HAVE_VGA		15
-#define PARAM_FONT_POINTS	16
+! (see also include/linux/tty.h)
+#define PARAM_CURSOR_POS	0x00
+#define PARAM_VIDEO_PAGE	0x04
+#define PARAM_VIDEO_MODE	0x06
+#define PARAM_VIDEO_COLS	0x07
+#define PARAM_VIDEO_EGA_BX	0x0a
+#define PARAM_VIDEO_LINES	0x0e
+#define PARAM_HAVE_VGA		0x0f
+#define PARAM_FONT_POINTS	0x10
+
+#define PARAM_LFB_WIDTH		0x12
+#define PARAM_LFB_HEIGHT	0x14
+#define PARAM_LFB_DEPTH		0x16
+#define PARAM_LFB_BASE		0x18
+#define PARAM_LFB_SIZE		0x1c
+#define PARAM_LFB_LINELENGTH	0x24
+#define PARAM_LFB_COLORS	0x26
+#define PARAM_VESAPM_SEG	0x2e
+#define PARAM_VESAPM_OFF	0x30
+#define PARAM_LFB_PAGES		0x32
 
 ! Define DO_STORE according to CONFIG_VIDEO_RETAIN
 #ifdef CONFIG_VIDEO_RETAIN
 #define DO_STORE call store_screen
 #else
 #define DO_STORE
-#endif
+#endif /* CONFIG_VIDEO_RETAIN */
 
 !
 ! This is the main entry point called by setup.S
 !
 ! Input:
-!	DS pointing to the bootsector
+!	DS pointing to the boot sector
 
 video:	push	ds		! We use different segments
 	push	ds		! FS contains original DS
@@ -85,6 +113,7 @@ video:	push	ds		! We use different segments
 	mov	gs,ax		! GS is zero
 	cld
 	call	basic_detect	! Basic adapter type testing (EGA/VGA/MDA/CGA)
+#ifdef CONFIG_VIDEO_SELECT
 	seg	fs		! User-selected video mode
 	mov	ax,[0x01fa]
 	cmp	ax,#ASK_VGA	! Bring up the menu
@@ -97,7 +126,8 @@ vid2:	call	mode_menu
 vid1:
 #ifdef CONFIG_VIDEO_RETAIN
 	call	restore_screen	! Restore screen contents
-#endif
+#endif /* CONFIG_VIDEO_RETAIN */
+#endif /* CONFIG_VIDEO_SELECT */
 	call	mode_params	! Store mode parameters
 	pop	ds		! Restore original DS
 	ret
@@ -137,6 +167,11 @@ basret:	ret
 !
 
 mode_params:
+#ifdef CONFIG_VIDEO_SELECT
+	cmpb	[graphic_mode],#0
+	jnz	mopar_gr
+#endif
+
 	mov	ah,#0x03	! Read cursor position
 	xor	bh,bh
 	int	0x10
@@ -174,6 +209,76 @@ mopar1:	mov	al,#25
 	inc	al
 mopar2:	seg	fs
 	movb	[PARAM_VIDEO_LINES],al
+	ret
+
+#ifdef CONFIG_VIDEO_SELECT
+
+!
+! Fetching of VESA frame buffer parameters
+!
+
+mopar_gr:
+	lea	di,modelist+1024
+	seg	fs
+	movb	[PARAM_HAVE_VGA],#0x23
+
+	mov	ax,(di+16)
+	seg	fs
+	mov	[PARAM_LFB_LINELENGTH],ax
+
+	mov	ax,(di+18)
+	seg	fs
+	mov	[PARAM_LFB_WIDTH],ax
+
+	mov	ax,(di+20)
+	seg	fs
+	mov	[PARAM_LFB_HEIGHT],ax
+
+	mov	al,(di+25)
+	mov	ah,#0
+	seg	fs
+	mov	[PARAM_LFB_DEPTH],ax
+
+	mov	al,(di+29)
+	mov	ah,#0
+	seg	fs
+	mov	[PARAM_LFB_PAGES],ax
+
+	mov	eax,(di+40)
+	seg	fs
+	mov	[PARAM_LFB_BASE],eax
+
+	mov	eax,(di+31)
+	seg	fs
+	mov	[PARAM_LFB_COLORS],eax
+
+	mov	eax,(di+35)
+	seg	fs
+	mov	[PARAM_LFB_COLORS+4],eax
+
+	! get video mem size
+	lea	di,modelist+1024
+	mov	ax,#0x4f00
+	int	0x10
+
+	xor	eax,eax	
+	mov	ax,(di+18)
+	seg	fs
+	mov	[PARAM_LFB_SIZE],eax
+
+	! get protected mode interface informations	
+	mov	ax,#0x4f0a
+	xor	bx,bx
+	xor	di,di
+	int	0x10
+	cmp	ax,#0x004f
+	jnz	no_pm
+	seg	fs
+	mov	[PARAM_VESAPM_SEG],es
+	seg	fs
+	mov	[PARAM_VESAPM_OFF],di
+
+no_pm:
 	ret
 
 !
@@ -335,6 +440,9 @@ setv7:				! Video7 extended modes
 	stc
 	ret
 
+_setrec:	br	setrec		! Ugly...
+_set_80x25:	br	set_80x25
+
 !
 ! Aliases for backward compatibility.
 !
@@ -347,7 +455,7 @@ setalias:
 	inc	bx
 	jnz	setbad
 
-	! Fall-thru !
+	! Fall-through!
 
 !
 ! Setting of user mode (AX=mode ID) => CF=success
@@ -358,7 +466,7 @@ mode_set:
 	cmp	ah,#0xff
 	jz	setalias
 	test	ah,#VIDEO_RECALC>>8
-	jnz	setrec
+	jnz	_setrec
 	cmp	ah,#VIDEO_FIRST_RESOLUTION>>8
 	jnc	setres
 	cmp	ah,#VIDEO_FIRST_SPECIAL>>8
@@ -366,7 +474,7 @@ mode_set:
 	cmp	ah,#VIDEO_FIRST_V7>>8
 	jz	setv7
 	cmp	ah,#VIDEO_FIRST_VESA>>8
-	jnc	setvesa
+	jnc	check_vesa
 	or	ah,ah
 	jz	setmenu
 	dec	ah
@@ -404,6 +512,8 @@ setspc:	xor	bh,bh		! Set special mode
 	.word	0xa7ff, spec_inits	! JMP [BX+spec_inits]
 
 setmenu:
+	or	al,al		! 80x25 is an exception
+	jz	_set_80x25
 	push	bx		! Set mode chosen from menu
 	call	mode_table	! Build the mode table
 	pop	ax
@@ -428,6 +538,41 @@ setr1:	lodsw
 	mov	ax,(si-4)	! Fetch mode ID
 	jmp	_m_s
 
+
+check_vesa:
+	lea	di,modelist+1024
+	sub	bh,#VIDEO_FIRST_VESA>>8
+	mov	cx,bx		! Get mode information structure
+	mov	ax,#0x4f01
+	int	0x10
+	add	bh,#VIDEO_FIRST_VESA>>8
+	cmp	ax,#0x004f
+	jnz	setbad
+
+	mov	al,(di)		! Check capabilities.
+	and	al,#0x19
+	cmp	al,#0x09
+	jz	setvesa		! this is a text mode
+
+	mov	al,(di)		! Check capabilities.
+	and	al,#0x99
+	cmp	al,#0x99
+	jnz	_setbad		! to bad, no linear frame buffer
+
+	sub	bh,#VIDEO_FIRST_VESA>>8
+	or	bx,#0x4000	! want use linear frame buffer	
+	mov	ax,#0x4f02	! VESA BIOS mode set call
+	int	0x10
+	cmp	ax,#0x004f	! AL=4f if implemented, AH=0 if OK
+	jnz	_setbad
+
+	movb	[graphic_mode],#1 ! flag graphic mode
+	movb	[do_restore],#0   ! no screen restore
+	stc
+	ret
+	
+_setbad:	br	setbad		! Ugly...
+	
 !
 ! Recalculate vertical display end registers -- this fixes various
 ! inconsistencies of extended modes on many adapters. Called when
@@ -477,6 +622,7 @@ spec_inits:
 	.word	set_80x30
 	.word	set_80x34
 	.word	set_80x60
+	.word	set_gfx
 
 !
 ! Set the 80x25 mode. If already set, do nothing.
@@ -485,6 +631,11 @@ spec_inits:
 set_80x25:
 	mov	[force_size],#0x5019	! Override possibly broken BIOS vars
 use_80x25:
+#ifdef CONFIG_VIDEO_400_HACK
+	mov	ax,#0x1202	! Force 400 scan lines
+	mov	bl,#0x30
+	int	0x10
+#else
 	mov	ah,#0x0f	! Get current mode ID
 	int	0x10
 	cmp	ax,#0x5007	! Mode 7 (80x25 mono) is the only one available
@@ -495,10 +646,11 @@ st80:	cmpb	[adapter],#0	! CGA/MDA/HGA => mode 3/7 is always 80x25
 	jz	set80
 	seg	gs		! This is EGA+ -- beware of 80x50 etc.
 	mov	al,[0x0484]
-	or	al,al		! Some buggy BIOS'es set 0 rows
+	or	al,al		! Some buggy BIOSes set 0 rows
 	jz	set80
-	cmp	al,#24		! It's hopefully correct
+	cmp	al,#24		! Let's hope this is correct
 	jz	set80
+#endif /* CONFIG_VIDEO_400_HACK */
 force3:	DO_STORE
 	mov	ax,#0x0003	! Forced set
 	int	0x10
@@ -622,6 +774,20 @@ set_80x60:
 	mov	ax,#0xdf12	! VGA vertical display end
 	mov	[force_size],#0x503c
 	jmp	setvde
+
+!
+! Special hack for ThinkPad graphics
+!
+
+set_gfx:
+#ifdef CONFIG_VIDEO_GFX_HACK
+	mov	ax,# VIDEO_GFX_BIOS_AX
+	mov	bx,# VIDEO_GFX_BIOS_BX
+	int	0x10
+	mov	[force_size],# VIDEO_GFX_DUMMY_RESOLUTION
+	stc
+#endif
+	ret
 
 #ifdef CONFIG_VIDEO_RETAIN
 
@@ -780,9 +946,9 @@ mode_table:
 mtab1x:	jmp	mtab1
 
 mtabv:	lea	si,vga_modes			! All modes for std VGA
-	mov	cx,#12
-	rep
-	movsw
+	mov	cx,#vga_modes_end-vga_modes
+	rep	! I'm unable to use movsw as I don't know how to store a half
+	movsb	! of the expression above to cx without using explicit shr.
 
 	cmpb	[scanning],#0			! Mode scan requested?
 	jz	mscan1
@@ -791,16 +957,16 @@ mscan1:
 
 #ifdef CONFIG_VIDEO_LOCAL
 	call	local_modes
-#endif
+#endif /* CONFIG_VIDEO_LOCAL */
 #ifdef CONFIG_VIDEO_VESA
 	call	vesa_modes			! Detect VESA VGA modes
-#endif
+#endif /* CONFIG_VIDEO_VESA */
 #ifdef CONFIG_VIDEO_SVGA
 	cmpb	[scanning],#0			! Bypass when scanning
 	jnz	mscan2
 	call	svga_modes			! Detect SVGA cards & modes
 mscan2:
-#endif
+#endif /* CONFIG_VIDEO_SVGA */
 
 mtabe:
 
@@ -848,6 +1014,11 @@ vga_modes:
 	.word	0x5022		! 80x34
 	.word	VIDEO_80x60
 	.word	0x503c		! 80x60
+#ifdef CONFIG_VIDEO_GFX_HACK
+	.word	VIDEO_GFX_HACK
+	.word	VIDEO_GFX_DUMMY_RESOLUTION
+#endif
+vga_modes_end:
 
 !
 ! Detect VESA modes.
@@ -879,7 +1050,7 @@ vesa1:	seg	gs		! Get next mode in the list
 	jz	vesar
 	cmp	ax,#0x0080	! Check validity of mode ID
 	jc	vesa2
-	or	ah,ah		! Valid ID's are 0x0000-0x007f and 0x0100-0x07ff
+	or	ah,ah		! Valid IDs are 0x0000-0x007f and 0x0100-0x07ff
 	jz	vesan		! [Certain BIOSes erroneously report 0x80-0xff]
 	cmp	ax,#0x0800
 	jnc	vesae
@@ -1343,7 +1514,7 @@ cirrus6_test:
 	cmp	al,#0x01
 	jne	c2fail
 	mov	al,#0xaa
-	call	inidx	! 4X, 5X, 7X and 8X are valid 64XX chip ID's
+	call	inidx	! 4X, 5X, 7X and 8X are valid 64XX chip IDs
 	shr	al,#4
 	sub	al,#4
 	jz	c6done
@@ -1527,7 +1698,7 @@ trident_md:
 
 tseng_test:
 	mov	dx,#0x3cd
-	in	al,dx			! Could things be this simple ! :-)
+	in	al,dx			! Could things be this simple? :-)
 	mov	bl,al
 	mov	al,#0x55
 	out	dx,al
@@ -1738,19 +1909,21 @@ skip10:	mov	al,ah
 	pop	ax
 	ret
 
-! Variables:
+!
+! VIDEO_SELECT-only variables
+!
 
-adapter:	.byte	0	! Video adapter: 0=CGA/MDA/HGA,1=EGA,2=VGA
 mt_end:		.word	0	! End of video mode table if built
 edit_buf:	.space	6	! Line editor buffer
 card_name:	.word	0	! Pointer to adapter name
 scanning:	.byte	0	! Performing mode scan
 do_restore:	.byte	0	! Screen contents altered during mode change
 svga_prefix:	.byte	VIDEO_FIRST_BIOS>>8	! Default prefix for BIOS modes
-video_segment:	.word	0xb800	! Video memory segment
-force_size:	.word	0	! Use this size instead of the one in BIOS vars
+graphic_mode:	.byte	0	! Graphic mode with a linear frame buffer
 
+!
 ! Messages:
+!
 
 keymsg:		.ascii	"Press <RETURN> to see video modes available, "
 		.ascii	"<SPACE> to continue or wait 30 secs"
@@ -1759,11 +1932,11 @@ listhdr:	db	0x0d, 0x0a
 		.ascii	"Mode:    COLSxROWS:"
 crlft:		db	0x0d, 0x0a, 0
 prompt:		db	0x0d, 0x0a
-		.ascii	"Enter mode number: "
+		.ascii	"Enter mode number or `scan': "
 		db	0
 unknt:		.ascii	"Unknown mode ID. Try again."
 		db	0
-badmdt:		.ascii	"You passed an undefined mode number to setup."
+badmdt:		.ascii	"You passed an undefined mode number."
 		db	0x0d, 0x0a, 0
 vesaer:		.ascii	"Error: Scanning of VESA modes failed. Please "
 		.ascii	"report to <mj@k332.feld.cvut.cz>."
@@ -1779,3 +1952,13 @@ vesa_name:	.ascii	"VESA"
 		db	0
 name_bann:	.ascii	"Video adapter: "
 		db	0
+
+#endif /* CONFIG_VIDEO_SELECT */
+
+!
+! Other variables:
+!
+
+adapter:	.byte	0	! Video adapter: 0=CGA/MDA/HGA,1=EGA,2=VGA
+video_segment:	.word	0xb800	! Video memory segment
+force_size:	.word	0	! Use this size instead of the one in BIOS vars

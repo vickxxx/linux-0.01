@@ -1,4 +1,4 @@
-/* $Id: openprom.h,v 1.16 1996/04/23 01:54:46 davem Exp $ */
+/* $Id: openprom.h,v 1.23 1998/09/21 05:07:26 jj Exp $ */
 #ifndef __SPARC_OPENPROM_H
 #define __SPARC_OPENPROM_H
 
@@ -42,7 +42,7 @@ struct linux_dev_v2_funcs {
 	void (*v2_dev_close)(int d);
 	int (*v2_dev_read)(int d, char *buf, int nbytes);
 	int (*v2_dev_write)(int d, char *buf, int nbytes);
-	void (*v2_dev_seek)(int d, int hi, int lo);
+	int (*v2_dev_seek)(int d, int hi, int lo);
 
 	/* Never issued (multistage load support) */
 	void (*v2_wheee2)(void);
@@ -117,9 +117,9 @@ struct linux_romvec {
 
 	/* Miscellany. */
 	void (*pv_reboot)(char *bootstr);
-	void (*pv_printf)(const char *fmt, ...);
+	void (*pv_printf)(__const__ char *fmt, ...);
 	void (*pv_abort)(void);
-	int *pv_ticks;
+	__volatile__ int *pv_ticks;
 	void (*pv_halt)(void);
 	void (**pv_synchook)(void);
 
@@ -186,9 +186,9 @@ struct linux_nodeops {
 #define PROMINTR_MAX    15
 
 struct linux_prom_registers {
-	int which_io;         /* is this in OBIO space? */
-	char *phys_addr;      /* The physical address of this register */
-	int reg_size;         /* How many bytes does this register take up? */
+	unsigned int which_io;         /* is this in OBIO space? */
+	unsigned int phys_addr;        /* The physical address of this register */
+	unsigned int reg_size;         /* How many bytes does this register take up? */
 };
 
 struct linux_prom_irqs {
@@ -203,6 +203,55 @@ struct linux_prom_ranges {
 	unsigned int ot_parent_space;
 	unsigned int ot_parent_base;		/* CPU looks from here */
 	unsigned int or_size;
+};
+
+/* Ranges and reg properties are a bit different for PCI. */
+struct linux_prom_pci_registers {
+	/* 
+	 * We don't know what information this field contain.
+	 * We guess, PCI device function is in bits 15:8
+	 * So, ...
+	 */
+	unsigned int which_io;  /* Let it be which_io */
+
+	unsigned int phys_hi;
+	unsigned int phys_lo;
+
+	unsigned int size_hi;
+	unsigned int size_lo;
+};
+
+struct linux_prom_pci_ranges {
+	unsigned int child_phys_hi;	/* Only certain bits are encoded here. */
+	unsigned int child_phys_mid;
+	unsigned int child_phys_lo;
+
+	unsigned int parent_phys_hi;
+	unsigned int parent_phys_lo;
+
+	unsigned int size_hi;
+	unsigned int size_lo;
+};
+
+struct linux_prom_pci_assigned_addresses {
+	unsigned int which_io;
+
+	unsigned int phys_hi;
+	unsigned int phys_lo;
+
+	unsigned int size_hi;
+	unsigned int size_lo;
+};
+
+struct linux_prom_ebus_ranges {
+	unsigned int child_phys_hi;
+	unsigned int child_phys_lo;
+
+	unsigned int parent_phys_hi;
+	unsigned int parent_phys_mid;
+	unsigned int parent_phys_lo;
+
+	unsigned int size;
 };
 
 #endif /* !(__ASSEMBLY__) */

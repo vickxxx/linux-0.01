@@ -15,17 +15,17 @@
  *  ext2 symlink handling code
  */
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #include <linux/errno.h>
 #include <linux/fs.h>
 #include <linux/ext2_fs.h>
 #include <linux/sched.h>
+#include <linux/mm.h>
 #include <linux/stat.h>
 
-static int ext2_readlink (struct inode *, char *, int);
-static int ext2_follow_link (struct inode *, struct inode *, int, int,
-			       struct inode **);
+static int ext2_readlink (struct dentry *, char *, int);
+static struct dentry *ext2_follow_link(struct dentry *, struct dentry *, unsigned int);
 
 /*
  * symlinks can't do much...
@@ -51,87 +51,58 @@ struct inode_operations ext2_symlink_inode_operations = {
 	NULL			/* smap */
 };
 
-static int ext2_follow_link(struct inode * dir, struct inode * inode,
-			    int flag, int mode, struct inode ** res_inode)
+static struct dentry * ext2_follow_link(struct dentry * dentry,
+					struct dentry *base,
+					unsigned int follow)
 {
-	int error;
+	struct inode *inode = dentry->d_inode;
 	struct buffer_head * bh = NULL;
+	int error;
 	char * link;
 
-	*res_inode = NULL;
-	if (!dir) {
-		dir = current->fs->root;
-		dir->i_count++;
-	}
-	if (!inode) {
-		iput (dir);
-		return -ENOENT;
-	}
-	if (!S_ISLNK(inode->i_mode)) {
-		iput (dir);
-		*res_inode = inode;
-		return 0;
-	}
-	if (current->link_count > 5) {
-		iput (dir);
-		iput (inode);
-		return -ELOOP;
-	}
+	link = (char *) inode->u.ext2_i.i_data;
 	if (inode->i_blocks) {
 		if (!(bh = ext2_bread (inode, 0, 0, &error))) {
-			iput (dir);
-			iput (inode);
-			return -EIO;
+			dput(base);
+			return ERR_PTR(-EIO);
 		}
 		link = bh->b_data;
-	} else
-		link = (char *) inode->u.ext2_i.i_data;
-	if (!IS_RDONLY(inode)) {
-		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
 	}
-	current->link_count++;
-	error = open_namei (link, flag, mode, res_inode, dir);
-	current->link_count--;
-	iput (inode);
+	UPDATE_ATIME(inode);
+	base = lookup_dentry(link, base, follow);
 	if (bh)
-		brelse (bh);
-	return error;
+		brelse(bh);
+	return base;
 }
 
-static int ext2_readlink (struct inode * inode, char * buffer, int buflen)
+static int ext2_readlink (struct dentry * dentry, char * buffer, int buflen)
 {
+	struct inode *inode = dentry->d_inode;
 	struct buffer_head * bh = NULL;
 	char * link;
-	int i, err;
-	char c;
+	int i;
 
-	if (!S_ISLNK(inode->i_mode)) {
-		iput (inode);
-		return -EINVAL;
-	}
 	if (buflen > inode->i_sb->s_blocksize - 1)
 		buflen = inode->i_sb->s_blocksize - 1;
+
+	link = (char *) inode->u.ext2_i.i_data;
 	if (inode->i_blocks) {
+		int err;
 		bh = ext2_bread (inode, 0, 0, &err);
 		if (!bh) {
-			iput (inode);
+			if(err < 0) /* indicate type of error */
+				return err;
 			return 0;
 		}
 		link = bh->b_data;
 	}
-	else
-		link = (char *) inode->u.ext2_i.i_data;
+
 	i = 0;
-	while (i < buflen && (c = link[i])) {
+	while (i < buflen && link[i])
 		i++;
-		put_user (c, buffer++);
-	}
-	if (!IS_RDONLY(inode)) {
-		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
-	}
-	iput (inode);
+	if (copy_to_user(buffer, link, i))
+		i = -EFAULT;
+ 	UPDATE_ATIME(inode);
 	if (bh)
 		brelse (bh);
 	return i;

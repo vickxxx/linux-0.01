@@ -39,11 +39,7 @@ int ext2_permission (struct inode * inode, int mask)
 	 */
 	if ((mask & S_IWOTH) && IS_IMMUTABLE(inode))
 		return -EACCES;
-	/*
-	 * Special case, access is always granted for root
-	 */
-	if (fsuser())
-		return 0;
+
 	/*
 	 * If no ACL, checks using the file mode
 	 */
@@ -51,8 +47,15 @@ int ext2_permission (struct inode * inode, int mask)
 		mode >>= 6;
 	else if (in_group_p (inode->i_gid))
 		mode >>= 3;
-	if (((mode & mask & S_IRWXO) == mask))
+	/*
+	 * Access is always granted for root. We now check last,
+         * though, for BSD process accounting correctness
+	 */
+	if (((mode & mask & S_IRWXO) == mask) || capable(CAP_DAC_OVERRIDE))
 		return 0;
-	else
-		return -EACCES;
+	if ((mask == S_IROTH) ||
+	    (S_ISDIR(mode)  && !(mask & ~(S_IROTH | S_IXOTH))))
+		if (capable(CAP_DAC_READ_SEARCH))
+			return 0;
+	return -EACCES;
 }

@@ -1,23 +1,24 @@
 #
-# Makefile for the linux filesystem.
+# Makefile for the Linux filesystems.
 #
 # Note! Dependencies are done automagically by 'make dep', which also
 # removes any old dependencies. DON'T put your own dependencies here
-# unless it's something special (ie not a .c file).
+# unless it's something special (not a .c file).
 #
-# Note 2! The CFLAGS definitions are now in the main makefile...
+# Note 2! The CFLAGS definitions are now in the main makefile.
 
 L_TARGET := filesystems.a
 L_OBJS    = $(join $(SUB_DIRS),$(SUB_DIRS:%=/%.o))
 O_TARGET := fs.o
-O_OBJS    = open.o read_write.o inode.o devices.o file_table.o buffer.o \
+O_OBJS    = open.o read_write.o devices.o file_table.o buffer.o \
 		super.o  block_dev.o stat.o exec.o pipe.o namei.o fcntl.o \
 		ioctl.o readdir.o select.o fifo.o locks.o filesystems.o \
-		dcache.o $(BINFMTS) 
+		dcache.o inode.o attr.o bad_inode.o $(BINFMTS) 
 
 MOD_LIST_NAME := FS_MODULES
-ALL_SUB_DIRS = minix ext ext2 fat msdos vfat proc isofs nfs xiafs umsdos \
-		hpfs sysv smbfs ncpfs ufs affs
+ALL_SUB_DIRS = coda minix ext2 fat msdos vfat proc isofs nfs umsdos ntfs \
+		hpfs sysv smbfs ncpfs ufs affs romfs autofs hfs lockd nfsd \
+		nls devpts adfs qnx4
 
 ifeq ($(CONFIG_QUOTA),y)
 O_OBJS += dquot.o
@@ -25,19 +26,19 @@ else
 O_OBJS += noquot.o
 endif
 
+ifeq ($(CONFIG_CODA_FS),y)
+SUB_DIRS += coda
+else
+  ifeq ($(CONFIG_CODA_FS),m)
+  MOD_SUB_DIRS += coda
+  endif
+endif
+
 ifeq ($(CONFIG_MINIX_FS),y)
 SUB_DIRS += minix
 else
   ifeq ($(CONFIG_MINIX_FS),m)
   MOD_SUB_DIRS += minix
-  endif
-endif
-
-ifeq ($(CONFIG_EXT_FS),y)
-SUB_DIRS += ext
-else
-  ifeq ($(CONFIG_EXT_FS),m)
-  MOD_SUB_DIRS += ext
   endif
 endif
 
@@ -75,6 +76,10 @@ endif
 
 ifdef CONFIG_PROC_FS
 SUB_DIRS += proc
+ifeq ($(CONFIG_SUN_OPENPROMFS),m)
+MOD_IN_SUB_DIRS += proc
+MOD_TO_LIST += openpromfs.o
+endif
 endif
 
 ifeq ($(CONFIG_ISO9660_FS),y)
@@ -82,6 +87,14 @@ SUB_DIRS += isofs
 else
   ifeq ($(CONFIG_ISO9660_FS),m)
   MOD_SUB_DIRS += isofs
+  endif
+endif
+
+ifeq ($(CONFIG_HFS_FS),y)
+SUB_DIRS += hfs
+else
+  ifeq ($(CONFIG_HFS_FS),m)
+  MOD_SUB_DIRS += hfs
   endif
 endif
 
@@ -93,11 +106,32 @@ else
   endif
 endif
 
-ifeq ($(CONFIG_XIA_FS),y)
-SUB_DIRS += xiafs
+ifeq ($(CONFIG_NFSD),y)
+CONFIG_LOCKD := y
+SUB_DIRS += nfsd
 else
-  ifeq ($(CONFIG_XIA_FS),m)
-  MOD_SUB_DIRS += xiafs
+  ifeq ($(CONFIG_NFSD),m)
+  MOD_SUB_DIRS += nfsd
+  endif
+endif
+
+ifeq ($(CONFIG_LOCKD),y)
+SUB_DIRS += lockd
+else
+  ifeq ($(CONFIG_LOCKD),m)
+  MOD_SUB_DIRS := lockd $(MOD_SUB_DIRS)
+  endif
+endif
+
+# Since CONFIG_NLS might be set to y while there are modules
+# to be build in the nls/ directory, we need to enter the nls
+# directory every time, but with different rules.
+ifeq ($(CONFIG_NLS),y)
+SUB_DIRS += nls
+MOD_IN_SUB_DIRS += nls
+else
+  ifeq ($(CONFIG_NLS),m)
+  MOD_SUB_DIRS += nls
   endif
 endif
 
@@ -141,6 +175,14 @@ else
   endif
 endif
 
+ifeq ($(CONFIG_NTFS_FS),y)
+SUB_DIRS += ntfs
+else
+  ifeq ($(CONFIG_NTFS_FS),m)
+  MOD_SUB_DIRS += ntfs
+  endif
+endif
+
 ifeq ($(CONFIG_UFS_FS),y)
 SUB_DIRS += ufs
 else
@@ -154,6 +196,46 @@ SUB_DIRS += affs
 else
   ifeq ($(CONFIG_AFFS_FS),m)
   MOD_SUB_DIRS += affs
+  endif
+endif
+
+ifeq ($(CONFIG_ROMFS_FS),y)
+SUB_DIRS += romfs
+else
+  ifeq ($(CONFIG_ROMFS_FS),m)
+  MOD_SUB_DIRS += romfs
+  endif
+endif
+
+ifeq ($(CONFIG_QNX4FS_FS),y)
+SUB_DIRS += qnx4
+else
+  ifeq ($(CONFIG_QNX4FS_FS),m)
+  MOD_SUB_DIRS += qnx4
+  endif
+endif
+
+ifeq ($(CONFIG_AUTOFS_FS),y)
+SUB_DIRS += autofs
+else
+  ifeq ($(CONFIG_AUTOFS_FS),m)
+  MOD_SUB_DIRS += autofs
+  endif
+endif
+
+ifeq ($(CONFIG_ADFS_FS),y)
+SUB_DIRS += adfs
+else
+  ifeq ($(CONFIG_ADFS_FS),m)
+  MOD_SUB_DIRS += adfs
+  endif
+endif
+
+ifeq ($(CONFIG_DEVPTS_FS),y)
+SUB_DIRS += devpts
+else
+  ifeq ($(CONFIG_DEVPTS_FS),m)
+  MOD_SUB_DIRS += devpts
   endif
 endif
 
@@ -178,6 +260,23 @@ BINFMTS += binfmt_java.o
 else
   ifeq ($(CONFIG_BINFMT_JAVA),m)
   M_OBJS += binfmt_java.o
+  endif
+endif
+
+ifeq ($(CONFIG_BINFMT_EM86),y)
+BINFMTS += binfmt_em86.o
+else
+  ifeq ($(CONFIG_BINFMT_EM86),m)
+  M_OBJS += binfmt_em86.o
+  endif
+endif
+
+
+ifeq ($(CONFIG_BINFMT_MISC),y)
+BINFMTS += binfmt_misc.o
+else
+  ifeq ($(CONFIG_BINFMT_MISC),m)
+  M_OBJS += binfmt_misc.o
   endif
 endif
 

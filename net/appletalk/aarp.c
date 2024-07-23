@@ -1,17 +1,17 @@
 /*
- *	AARP:		An implementation of the Appletalk aarp protocol for
- *			ethernet 'ELAP'.
+ *	AARP:		An implementation of the AppleTalk AARP protocol for
+ *			Ethernet 'ELAP'.
  *
  *		Alan Cox  <Alan.Cox@linux.org>
- *			  <alan@cymru.net>
  *
- *	This doesn't fit cleanly with the IP arp. This isn't a problem as
- *	the IP arp wants extracting from the device layer in 1.3.x anyway.
- *	[see the pre-1.3 test code for details 8)]
+ *	This doesn't fit cleanly with the IP arp. Potentially we can use
+ *	the generic neighbour discovery code to clean this up.
  *
  *	FIXME:
  *		We ought to handle the retransmits with a single list and a 
  *	separate fast timer for when it is needed.
+ *		Use neighbour discovery code.
+ *		Token Ring Support.
  *
  *		This program is free software; you can redistribute it and/or
  *		modify it under the terms of the GNU General Public License
@@ -20,10 +20,17 @@
  *
  *
  *	References:
- *		Inside Appletalk (2nd Ed).
+ *		Inside AppleTalk (2nd Ed).
+ *	Fixes:
+ *		Jaume Grau	-	flush caches on AARP_PROBE
+ *		Rob Newberry	-	Added proxy AARP and AARP proc fs, 
+ *					moved probing from DDP module.
+ *
  */
- 
-#include <asm/segment.h>
+
+#include <linux/config.h>
+#if defined(CONFIG_ATALK) || defined(CONFIG_ATALK_MODULE) 
+#include <asm/uaccess.h>
 #include <asm/system.h>
 #include <asm/bitops.h>
 #include <linux/types.h>
@@ -47,6 +54,14 @@
 #include <net/datalink.h>
 #include <net/psnap.h>
 #include <linux/atalk.h>
+#include <linux/init.h>
+#include <linux/proc_fs.h>
+
+ 
+int sysctl_aarp_expiry_time = AARP_EXPIRY_TIME;
+int sysctl_aarp_tick_time = AARP_TICK_TIME;
+int sysctl_aarp_retransmit_limit = AARP_RETRANSMIT_LIMIT;
+int sysctl_aarp_resolve_time = AARP_RESOLVE_TIME;
 
 /*
  *	Lists of aarp entries
@@ -57,6 +72,7 @@ struct aarp_entry
 	/* These first two are only used for unresolved entries */
 	unsigned long last_sent;		/* Last time we xmitted the aarp request */
 	struct sk_buff_head packet_queue;	/* Queue of frames wait for resolution */
+	int status;				/* Used for proxy AARP */
 	unsigned long expires_at;		/* Entry expiry time */
 	struct at_addr target_addr;		/* DDP Address */
 	struct device *dev;			/* Device to use */
@@ -65,12 +81,11 @@ struct aarp_entry
 	struct aarp_entry *next;		/* Next entry in chain */
 };
 
-
 /*
- *	Hashed list of resolved and unresolved entries
+ *	Hashed list of resolved, unresolved and proxy entries
  */
 
-static struct aarp_entry *resolved[AARP_HASH_SIZE], *unresolved[AARP_HASH_SIZE];
+static struct aarp_entry *resolved[AARP_HASH_SIZE], *unresolved[AARP_HASH_SIZE], *proxies[AARP_HASH_SIZE];
 static int unresolved_count=0;
 
 /*
@@ -82,13 +97,12 @@ static struct timer_list aarp_timer;
 /*
  *	Delete an aarp queue
  */
-
 static void aarp_expire(struct aarp_entry *a)
 {
 	struct sk_buff *skb;
 	
 	while((skb=skb_dequeue(&a->packet_queue))!=NULL)
-		kfree_skb(skb, FREE_WRITE);
+		kfree_skb(skb);
 	kfree_s(a,sizeof(*a));
 }
 
@@ -114,9 +128,7 @@ static void aarp_send_query(struct aarp_entry *a)
 
 	skb_reserve(skb,dev->hard_header_len+aarp_dl->header_length);
 	eah		=	(struct elapaarp *)skb_put(skb,sizeof(struct elapaarp));
-	skb->arp	=	1;
-	skb->free	=	1;
-	skb->dev	=	a->dev;
+	skb->dev	=	dev;
 	
 	/*
 	 *	Set up the ARP.
@@ -149,8 +161,8 @@ static void aarp_send_query(struct aarp_entry *a)
 	/*
 	 *	Send it.
 	 */	
-	 
-	dev_queue_xmit(skb, dev, SOPRI_NORMAL);
+	
+	dev_queue_xmit(skb);
 	
 	/*
 	 *	Update the sending count
@@ -174,8 +186,6 @@ static void aarp_send_reply(struct device *dev, struct at_addr *us, struct at_ad
 
 	skb_reserve(skb,dev->hard_header_len+aarp_dl->header_length);
 	eah		=	(struct elapaarp *)skb_put(skb,sizeof(struct elapaarp));	 
-	skb->arp	=	1;
-	skb->free	=	1;
 	skb->dev	=	dev;
 	
 	/*
@@ -212,13 +222,12 @@ static void aarp_send_reply(struct device *dev, struct at_addr *us, struct at_ad
 	/*
 	 *	Send it.
 	 */	
-	 
-	dev_queue_xmit(skb, dev, SOPRI_NORMAL);
+	dev_queue_xmit(skb);
 	
 }
 
 /*
- *	Send probe frames. Called from atif_probe_device.
+ *	Send probe frames. Called from aarp_probe_network and aarp_proxy_probe_network.
  */
  
 void aarp_send_probe(struct device *dev, struct at_addr *us)
@@ -238,8 +247,6 @@ void aarp_send_probe(struct device *dev, struct at_addr *us)
 	skb_reserve(skb,dev->hard_header_len+aarp_dl->header_length);
 	eah		=	(struct elapaarp *)skb_put(skb,sizeof(struct elapaarp));
 	
-	skb->arp	=	1;
-	skb->free	=	1;
 	skb->dev	=	dev;
 	
 	/*
@@ -273,8 +280,7 @@ void aarp_send_probe(struct device *dev, struct at_addr *us)
 	/*
 	 *	Send it.
 	 */	
-	 
-	dev_queue_xmit(skb, dev, SOPRI_NORMAL);
+	dev_queue_xmit(skb);
 	
 }
 	
@@ -310,7 +316,7 @@ static void aarp_kick(struct aarp_entry **n)
 	{
 		/* Expired - if this will be the 11th transmit, we delete
 		   instead */
-		if((*n)->xmit_count>=AARP_RETRANSMIT_LIMIT)
+		if((*n)->xmit_count>=sysctl_aarp_retransmit_limit)
 		{
 			t= *n;
 			*n=(*n)->next;
@@ -357,12 +363,13 @@ static void aarp_expire_timeout(unsigned long unused)
 		aarp_expire_timer(&resolved[ct]);
 		aarp_kick(&unresolved[ct]);
 		aarp_expire_timer(&unresolved[ct]);
+		aarp_expire_timer(&proxies[ct]);
 	}
 	del_timer(&aarp_timer);
 	if(unresolved_count==0)
-		aarp_timer.expires=jiffies+AARP_EXPIRY_TIME;
+		aarp_timer.expires=jiffies+sysctl_aarp_expiry_time;
 	else
-		aarp_timer.expires=jiffies+AARP_TICK_TIME;
+		aarp_timer.expires=jiffies+sysctl_aarp_tick_time;
 	add_timer(&aarp_timer);
 }
 
@@ -379,6 +386,7 @@ static int aarp_device_event(struct notifier_block *this, unsigned long event, v
 		{
 			aarp_expire_device(&resolved[ct],ptr);
 			aarp_expire_device(&unresolved[ct],ptr);
+			aarp_expire_device(&proxies[ct],ptr);
 		}
 	}
 	return NOTIFY_DONE;
@@ -398,10 +406,9 @@ static struct aarp_entry *aarp_alloc(void)
 }
 
 /*
- *	Find an entry. We might return an expired but not yet purged entry. We
- *	don't care as it will do no harm.
+ * Find an entry. We might return an expired but not yet purged entry. We
+ * don't care as it will do no harm.
  */
- 
 static struct aarp_entry *aarp_find_entry(struct aarp_entry *list, struct device *dev, struct at_addr *sat)
 {
 	unsigned long flags;
@@ -418,10 +425,159 @@ static struct aarp_entry *aarp_find_entry(struct aarp_entry *list, struct device
 	return list;
 }
 
+void aarp_proxy_remove(struct device *dev, struct at_addr *sa)
+{
+	struct aarp_entry *a;
+	int hash;
+	
+	hash = 	sa->s_node % (AARP_HASH_SIZE-1);
+	a = aarp_find_entry(proxies[hash], dev, sa);
+	if (a)
+	{
+		a->expires_at = 0;
+		
+	}
+}
+
+struct at_addr* aarp_proxy_find(struct device *dev, struct at_addr *sa)
+{
+	struct aarp_entry *a;
+	int hash;
+
+	hash = 	sa->s_node % (AARP_HASH_SIZE-1);
+	a = aarp_find_entry(proxies[hash], dev, sa);
+	if (a != NULL)
+		return sa;
+	
+	return NULL;
+}
+
+	
+/*
+ * Probe a Phase 1 device or a device that requires its Net:Node to
+ * be set via an ioctl.
+ */
+void aarp_send_probe_phase1(struct atalk_iface *iface)
+{
+    struct ifreq atreq;
+    struct sockaddr_at *sa = (struct sockaddr_at *)&atreq.ifr_addr;
+
+    sa->sat_addr.s_node = iface->address.s_node;
+    sa->sat_addr.s_net  = ntohs(iface->address.s_net);
+
+	/* We pass the Net:Node to the drivers/cards by a Device ioctl. */
+	if(!(iface->dev->do_ioctl(iface->dev, &atreq, SIOCSIFADDR)))
+    {
+    	(void)iface->dev->do_ioctl(iface->dev, &atreq, SIOCGIFADDR);
+    	if((iface->address.s_net != htons(sa->sat_addr.s_net))
+				|| (iface->address.s_node != sa->sat_addr.s_node))
+			iface->status |= ATIF_PROBE_FAIL;
+
+		iface->address.s_net  = htons(sa->sat_addr.s_net);
+		iface->address.s_node = sa->sat_addr.s_node;
+	}
+
+	return;
+}
+
+
+void aarp_probe_network(struct atalk_iface *atif)
+{
+	if(atif->dev->type == ARPHRD_LOCALTLK || atif->dev->type == ARPHRD_PPP)
+		aarp_send_probe_phase1(atif);
+	else
+	{
+		unsigned int count;
+		for (count = 0; count < AARP_RETRANSMIT_LIMIT; count++)
+		{
+			aarp_send_probe(atif->dev, &atif->address);
+
+			/*
+			 * Defer 1/10th
+			 */
+			current->state = TASK_INTERRUPTIBLE;
+			schedule_timeout(HZ/10);
+							
+			if (atif->status & ATIF_PROBE_FAIL)
+				break;
+		}
+	}
+}
+
+int aarp_proxy_probe_network(struct atalk_iface *atif, struct at_addr *sa)
+{
+	struct	aarp_entry	*entry;
+	unsigned int count;
+	int	hash;
+	
+	/*
+	 * we don't currently support LocalTalk or PPP for proxy AARP;
+	 * if someone wants to try and add it, have fun
+	 */
+	if (atif->dev->type == ARPHRD_LOCALTLK)
+		return (-EPROTONOSUPPORT);
+		
+	if (atif->dev->type == ARPHRD_PPP)
+		return (-EPROTONOSUPPORT);
+		
+	/* 
+	 * create a new AARP entry with the flags set to be published -- 
+	 * we need this one to hang around even if it's in use
+	 */
+	entry = aarp_alloc();
+	if (entry == NULL)
+		return (-ENOMEM);
+	
+	entry->expires_at = -1;
+	entry->status = ATIF_PROBE;
+	entry->target_addr.s_node = sa->s_node;
+	entry->target_addr.s_net = sa->s_net;
+	entry->dev = atif->dev;
+
+	hash = sa->s_node % (AARP_HASH_SIZE-1);
+	entry->next = proxies[hash];
+	proxies[hash] = entry;
+	
+	for(count = 0; count < AARP_RETRANSMIT_LIMIT; count++)
+	{
+		aarp_send_probe(atif->dev, sa);
+
+		/*
+		 * Defer 1/10th
+		 */
+		current->state = TASK_INTERRUPTIBLE;
+		schedule_timeout(HZ/10);
+						
+		if (entry->status & ATIF_PROBE_FAIL)
+			break;
+	}
+	
+	/*
+	 * FIX ME: I think we need exclusive access to the status flags,
+	 * 		in case some one fails the probe while we're removing
+	 *		the probe flag.
+	 */
+	if (entry->status & ATIF_PROBE_FAIL)
+	{
+		/* free the entry */
+		entry->expires_at = 0;
+		
+		/* return network full */
+		return (-EADDRINUSE);
+	}
+	else
+	{
+		/* clear the probing flag */
+		entry->status &= ~ATIF_PROBE;
+	}
+
+	return 1;	
+}
+
+
 /*
  *	Send a DDP frame
  */
- 
 int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, void *hwaddr)
 {
 	static char ddp_eth_multicast[ETH_ALEN]={ 0x09, 0x00, 0x07, 0xFF, 0xFF, 0xFF };
@@ -429,9 +585,12 @@ int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, vo
 	struct aarp_entry *a;
 	unsigned long flags;
 	
+	skb->nh.raw=skb->data;
+	
 	/*
-	 *	Check for localtalk first
+	 *	Check for LocalTalk first
 	 */
+	 
 	 
 	if(dev->type==ARPHRD_LOCALTLK)
 	{
@@ -443,9 +602,11 @@ int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, vo
 		 *	Compressible ?
 		 * 
 		 *	IFF: src_net==dest_net==device_net
+		 *	(zero matches anything)
 		 */
 		 
-		if(at->s_net==sa->s_net && sa->s_net==ddp->deh_snet)
+		if( ( ddp->deh_snet==0 || at->s_net==ddp->deh_snet)
+		  &&( ddp->deh_dnet==0 || at->s_net==ddp->deh_dnet) )
 		{
 			skb_pull(skb,sizeof(struct ddpehdr)-4);
 			/*
@@ -466,12 +627,25 @@ int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, vo
 		skb->data[1]=at->s_node;
 		skb->data[2]=ft;
 		 
-		if(skb->sk==NULL)
-			dev_queue_xmit(skb, skb->dev, SOPRI_NORMAL);
-		else
-			dev_queue_xmit(skb, skb->dev, skb->sk->priority);
+		if(skb->sk)
+			skb->priority = skb->sk->priority;
+		skb->dev = dev;
+		dev_queue_xmit(skb);
 		return 1;
 	}	
+
+	/*
+	 *	On a PPP link we neither compress nor aarp.
+	 */
+	if(dev->type==ARPHRD_PPP)
+	{
+		skb->protocol = htons(ETH_P_PPPTALK);
+		if(skb->sk)
+			skb->priority = skb->sk->priority;
+		skb->dev = dev;
+		dev_queue_xmit(skb);
+		return 1;
+	}
 	 
 	/*
 	 *	Non ELAP we cannot do.
@@ -496,10 +670,9 @@ int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, vo
 	if(sa->s_node==ATADDR_BCAST)
 	{
 		ddp_dl->datalink_header(ddp_dl, skb, ddp_eth_multicast);
-		if(skb->sk==NULL)
-			dev_queue_xmit(skb, skb->dev, SOPRI_NORMAL);
-		else
-			dev_queue_xmit(skb, skb->dev, skb->sk->priority);
+		if(skb->sk)
+			skb->priority = skb->sk->priority;
+		dev_queue_xmit(skb);
 		restore_flags(flags);
 		return 1;
 	}
@@ -510,12 +683,11 @@ int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, vo
 		 *	Return 1 and fill in the address
 		 */
 
-		a->expires_at=jiffies+AARP_EXPIRY_TIME*10;
+		a->expires_at=jiffies+sysctl_aarp_expiry_time*10;
 		ddp_dl->datalink_header(ddp_dl, skb, a->hwaddr);
-		if(skb->sk==NULL)
-			dev_queue_xmit(skb, skb->dev, SOPRI_NORMAL);
-		else
-			dev_queue_xmit(skb, skb->dev, skb->sk->priority);
+		if(skb->sk)
+			skb->priority = skb->sk->priority;
+		dev_queue_xmit(skb);
 		restore_flags(flags);
 		return 1;
 	}
@@ -556,7 +728,7 @@ int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, vo
 	 */
 
 	skb_queue_tail(&a->packet_queue, skb);
-	a->expires_at=jiffies+AARP_RESOLVE_TIME;
+	a->expires_at=jiffies+sysctl_aarp_resolve_time;
 	a->dev=dev;
 	a->next=unresolved[hash];
 	a->target_addr= *sa;
@@ -579,7 +751,7 @@ int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, vo
 	if(unresolved_count==1)
 	{
 		del_timer(&aarp_timer);
-		aarp_timer.expires=jiffies+AARP_TICK_TIME;
+		aarp_timer.expires=jiffies+sysctl_aarp_tick_time;
 		add_timer(&aarp_timer);
 	}
 
@@ -594,7 +766,6 @@ int aarp_send_ddp(struct device *dev,struct sk_buff *skb, struct at_addr *sa, vo
  *	An entry in the aarp unresolved queue has become resolved. Send
  *	all the frames queued under it.
  */
- 
 static void aarp_resolved(struct aarp_entry **list, struct aarp_entry *a, int hash)
 {
 	struct sk_buff *skb;
@@ -618,12 +789,11 @@ static void aarp_resolved(struct aarp_entry **list, struct aarp_entry *a, int ha
 			 
 			while((skb=skb_dequeue(&a->packet_queue))!=NULL)
 			{
-				a->expires_at=jiffies+AARP_EXPIRY_TIME*10;
+				a->expires_at=jiffies+sysctl_aarp_expiry_time*10;
 				ddp_dl->datalink_header(ddp_dl,skb,a->hwaddr);
-				if(skb->sk==NULL)
-					dev_queue_xmit(skb, skb->dev, SOPRI_NORMAL);
-				else
-					dev_queue_xmit(skb, skb->dev, skb->sk->priority);
+				if(skb->sk)
+					skb->priority = skb->sk->priority;
+				dev_queue_xmit(skb);
 			}
 		}
 		else
@@ -633,26 +803,25 @@ static void aarp_resolved(struct aarp_entry **list, struct aarp_entry *a, int ha
 
 /*
  *	This is called by the SNAP driver whenever we see an AARP SNAP
- *	frame. We currently only support ethernet.
+ *	frame. We currently only support Ethernet.
  */
- 
 static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type *pt)
 {
 	struct elapaarp *ea=(struct elapaarp *)skb->h.raw;
 	struct aarp_entry *a;
-	struct at_addr sa, *ma;
+	struct at_addr sa, *ma, da;
 	unsigned long flags;
 	int hash;
 	struct atalk_iface *ifa;
 	
 	
 	/*
-	 *	We only do ethernet SNAP AARP
+	 *	We only do Ethernet SNAP AARP
 	 */
 	 
 	if(dev->type!=ARPHRD_ETHER)
 	{
-		kfree_skb(skb, FREE_READ);
+		kfree_skb(skb);
 		return 0;
 	}
 	
@@ -662,7 +831,7 @@ static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 	 
 	if(!skb_pull(skb,sizeof(*ea)))
 	{
-		kfree_skb(skb, FREE_READ);
+		kfree_skb(skb);
 		return 0;
 	}
 
@@ -675,7 +844,7 @@ static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 	if(ea->function<AARP_REQUEST || ea->function > AARP_PROBE || ea->hw_len != ETH_ALEN || ea->pa_len != AARP_PA_ALEN ||
 		ea->pa_src_zero != 0 || ea->pa_dst_zero != 0)
 	{
-		kfree_skb(skb, FREE_READ);
+		kfree_skb(skb);
 		return 0;
 	}
 	
@@ -706,7 +875,7 @@ static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 	if(ifa==NULL)
 	{
 		restore_flags(flags);
-		kfree_skb(skb, FREE_READ);
+		kfree_skb(skb);
 		return 1;		
 	}
 	if(ifa->status&ATIF_PROBE)
@@ -719,11 +888,37 @@ static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 			 
 			ifa->status|=ATIF_PROBE_FAIL;
 			restore_flags(flags);
-			kfree_skb(skb, FREE_READ);
+			kfree_skb(skb);
 			return 1;		
 		}
-	}				 
+	}
 	
+	/*
+	 * Check for replies of proxy AARP entries
+	 */
+
+	/*
+	 * FIX ME: do we need a cli() here? 
+	 * aarp_find_entry does one on its own, between saving and restoring flags, so
+	 * I don't think it is necessary, but I could be wrong -- it's happened before
+	 */
+	da.s_node = ea->pa_dst_node;
+	da.s_net = ea->pa_dst_net;
+	a = aarp_find_entry(proxies[hash], dev, &da);
+	if (a != NULL)
+		if (a->status & ATIF_PROBE)
+		{
+			a->status |= ATIF_PROBE_FAIL;
+			
+			/*
+			 * we do not respond to probe or request packets for 
+			 * this address while we are probing this address
+			 */
+			restore_flags(flags);
+			kfree_skb(skb);
+			return 1;
+		}
+
 	switch(ea->function)
 	{
 		case AARP_REPLY:	
@@ -733,7 +928,7 @@ static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 			 *	Find the entry	
 			 */
 			 
-			cli();
+			cli();	/* FIX ME: is this cli() necessary? aarp_find_entry does one on its own... */
 			if((a=aarp_find_entry(unresolved[hash],dev,&sa))==NULL || dev != a->dev)
 				break;
 			/*
@@ -745,7 +940,7 @@ static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 			if(unresolved_count==0)
 			{
 				del_timer(&aarp_timer);
-				aarp_timer.expires=jiffies+AARP_EXPIRY_TIME;
+				aarp_timer.expires=jiffies+sysctl_aarp_expiry_time;
 				add_timer(&aarp_timer);
 			}
 			break;
@@ -756,12 +951,47 @@ static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 			 *	If it is my address set ma to my address and reply. We can treat probe and
 			 *	request the same. Probe simply means we shouldn't cache the querying host, 
 			 *	as in a probe they are proposing an address not using one.
+			 *	
+			 *	Support for proxy-AARP added.  We check if the address is one
+			 *	of our proxies before we toss the packet out.
 			 */
 			 
-			ma=&ifa->address;
 			sa.s_node=ea->pa_dst_node;
 			sa.s_net=ea->pa_dst_net;
-			
+
+			/*
+			 * see if we have a matching proxy
+			 */
+			ma = aarp_proxy_find(dev, &sa);
+			if (!ma)
+			{
+				ma=&ifa->address;
+			}
+			else
+			{
+				/*
+				 * we need to make a copy of the entry
+				 */
+				da.s_node = sa.s_node;
+				da.s_net = da.s_net;
+				ma = &da;
+			}
+
+			if(ea->function==AARP_PROBE)
+			{
+				/* A probe implies someone trying to get an
+				   address. So as a precaution flush any
+				   entries we have for this address */
+				struct aarp_entry *a=aarp_find_entry(
+						resolved[sa.s_node%(AARP_HASH_SIZE-1)],
+						skb->dev,
+						&sa);
+				/* Make it expire next tick - that avoids us
+				   getting into a probe/flush/learn/probe/flush/learn
+				   cycle during probing of a slow to respond host addr */
+				if(a!=NULL)
+					a->expires_at=jiffies-1;
+			}
 			if(sa.s_node!=ma->s_node)
 				break;
 			if(sa.s_net && ma->s_net && sa.s_net!=ma->s_net)
@@ -778,7 +1008,7 @@ static int aarp_rcv(struct sk_buff *skb, struct device *dev, struct packet_type 
 			break;
 	}
 	restore_flags(flags);
-	kfree_skb(skb, FREE_READ);
+	kfree_skb(skb);
 	return 1;		
 }
 
@@ -791,54 +1021,162 @@ static struct notifier_block aarp_notifier={
 static char aarp_snap_id[]={0x00,0x00,0x00,0x80,0xF3};
 
 
-void aarp_proto_init(void)
+__initfunc(void aarp_proto_init(void))
 {
 	if((aarp_dl=register_snap_client(aarp_snap_id, aarp_rcv))==NULL)
 		printk(KERN_CRIT "Unable to register AARP with SNAP.\n");
 	init_timer(&aarp_timer);
 	aarp_timer.function=aarp_expire_timeout;
 	aarp_timer.data=0;
-	aarp_timer.expires=jiffies+AARP_EXPIRY_TIME;
+	aarp_timer.expires=jiffies+sysctl_aarp_expiry_time;
 	add_timer(&aarp_timer);
 	register_netdevice_notifier(&aarp_notifier);
 }
 
 
-#ifdef MODULE
 
-/* Free all the entries in an aarp list. Caller should turn off interrupts. */
-static void free_entry_list(struct aarp_entry *list)
+/*
+ * Remove the AARP entries associated with a device.
+ */
+void aarp_device_down(struct device *dev)
 {
-	struct aarp_entry *tmp;
+	int ct = 0;
 
-	while (list != NULL)
+	for(ct = 0; ct < AARP_HASH_SIZE; ct++)
 	{
-		tmp = list->next;
-		aarp_expire(list);
-		list = tmp;
+		aarp_expire_device(&resolved[ct], dev);
+		aarp_expire_device(&unresolved[ct], dev);
+		aarp_expire_device(&proxies[ct], dev);
 	}
+
+	return;
 }
 
-/* General module cleanup. Called from cleanup_module() in ddp.c. */
+/*
+ * Called from proc fs
+ */
+int aarp_get_info(char *buffer, char **start, off_t offset, int length, int dummy)
+{
+	/* we should dump all our AARP entries */
+	struct aarp_entry	*entry;
+	int			len, ct;
+
+	len = sprintf(buffer,
+		"%-10.10s  ""%-10.10s""%-18.18s""%12.12s""%12.12s"" xmit_count  status\n",
+		"address","device","hw addr","last_sent", "expires");
+	for (ct = 0; ct < AARP_HASH_SIZE; ct++)
+	{
+		for (entry = resolved[ct]; entry; entry = entry->next)
+		{
+			len+= sprintf(buffer+len,"%6u:%-3u  ",
+				(unsigned int)ntohs(entry->target_addr.s_net),
+				(unsigned int)(entry->target_addr.s_node));
+			len+= sprintf(buffer+len,"%-10.10s",
+				entry->dev->name);
+			len+= sprintf(buffer+len,"%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
+				(int)(entry->hwaddr[0] & 0x000000FF),
+				(int)(entry->hwaddr[1] & 0x000000FF),
+				(int)(entry->hwaddr[2] & 0x000000FF),
+				(int)(entry->hwaddr[3] & 0x000000FF),
+				(int)(entry->hwaddr[4] & 0x000000FF),
+				(int)(entry->hwaddr[5] & 0x000000FF));
+			len+= sprintf(buffer+len,"%12lu ""%12lu ",
+				(unsigned long)entry->last_sent,
+				(unsigned long)entry->expires_at);
+			len+=sprintf(buffer+len,"%10u",
+				(unsigned int)entry->xmit_count);
+
+			len+=sprintf(buffer+len,"   resolved\n");
+		}
+	}
+
+	for (ct = 0; ct < AARP_HASH_SIZE; ct++)
+	{
+		for (entry = unresolved[ct]; entry; entry = entry->next)
+		{
+			len+= sprintf(buffer+len,"%6u:%-3u  ",
+				(unsigned int)ntohs(entry->target_addr.s_net),
+				(unsigned int)(entry->target_addr.s_node));
+			len+= sprintf(buffer+len,"%-10.10s",
+				entry->dev->name);
+			len+= sprintf(buffer+len,"%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
+				(int)(entry->hwaddr[0] & 0x000000FF),
+				(int)(entry->hwaddr[1] & 0x000000FF),
+				(int)(entry->hwaddr[2] & 0x000000FF),
+				(int)(entry->hwaddr[3] & 0x000000FF),
+				(int)(entry->hwaddr[4] & 0x000000FF),
+				(int)(entry->hwaddr[5] & 0x000000FF));
+			len+= sprintf(buffer+len,"%12lu ""%12lu ",
+				(unsigned long)entry->last_sent,
+				(unsigned long)entry->expires_at);
+			len+=sprintf(buffer+len,"%10u",
+				(unsigned int)entry->xmit_count);
+			len+=sprintf(buffer+len," unresolved\n");
+		}
+	}
+
+	for (ct = 0; ct < AARP_HASH_SIZE; ct++)
+	{
+		for (entry = proxies[ct]; entry; entry = entry->next)
+		{
+			len+= sprintf(buffer+len,"%6u:%-3u  ",
+				(unsigned int)ntohs(entry->target_addr.s_net),
+				(unsigned int)(entry->target_addr.s_node));
+			len+= sprintf(buffer+len,"%-10.10s",
+				entry->dev->name);
+			len+= sprintf(buffer+len,"%2.2X:%2.2X:%2.2X:%2.2X:%2.2X:%2.2X",
+				(int)(entry->hwaddr[0] & 0x000000FF),
+				(int)(entry->hwaddr[1] & 0x000000FF),
+				(int)(entry->hwaddr[2] & 0x000000FF),
+				(int)(entry->hwaddr[3] & 0x000000FF),
+				(int)(entry->hwaddr[4] & 0x000000FF),
+				(int)(entry->hwaddr[5] & 0x000000FF));
+			len+= sprintf(buffer+len,"%12lu ""%12lu ",
+				(unsigned long)entry->last_sent,
+				(unsigned long)entry->expires_at);
+			len+=sprintf(buffer+len,"%10u",
+				(unsigned int)entry->xmit_count);
+			len+=sprintf(buffer+len,"      proxy\n");
+		}
+	}
+
+
+	return len;
+}
+
+#ifdef MODULE
+/*
+ * General module cleanup. Called from cleanup_module() in ddp.c.
+ */
 void aarp_cleanup_module(void)
 {
-	unsigned long flags;
-	int i;
-
-	save_flags(flags);
-	cli();
-
 	del_timer(&aarp_timer);
 	unregister_netdevice_notifier(&aarp_notifier);
 	unregister_snap_client(aarp_snap_id);
-
-	for (i = 0; i < AARP_HASH_SIZE; i++)
-	{
-		free_entry_list(resolved[i]);
-		free_entry_list(unresolved[i]);
-	}
-
-	restore_flags(flags);
 }
 
 #endif  /* MODULE */
+
+#ifdef CONFIG_PROC_FS
+
+static struct proc_dir_entry proc_aarp_entries=
+{
+	PROC_NET_AT_AARP, 4, "aarp",
+	S_IFREG | S_IRUGO, 1, 0, 0,
+	0, &proc_net_inode_operations,
+	aarp_get_info
+};
+
+void aarp_register_proc_fs(void)
+{
+	proc_net_register(&proc_aarp_entries);
+}
+
+void aarp_unregister_proc_fs(void)
+{
+	proc_net_unregister(PROC_NET_AT_AARP);
+}
+
+#endif
+
+#endif  /* CONFIG_ATALK || CONFIG_ATALK_MODULE */

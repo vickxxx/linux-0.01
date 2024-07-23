@@ -5,23 +5,17 @@
  *  Swap reorganised 29.12.95, Stephen Tweedie
  */
 
+#include <linux/config.h>
 #include <linux/mm.h>
-#include <linux/sched.h>
-#include <linux/head.h>
-#include <linux/kernel.h>
 #include <linux/kernel_stat.h>
-#include <linux/errno.h>
-#include <linux/string.h>
-#include <linux/stat.h>
 #include <linux/swap.h>
-#include <linux/fs.h>
 #include <linux/swapctl.h>
 #include <linux/interrupt.h>
+#include <linux/init.h>
+#include <linux/pagemap.h>
 
 #include <asm/dma.h>
-#include <asm/system.h> /* for cli()/sti() */
-#include <asm/segment.h> /* for memcpy_to/fromfs */
-#include <asm/bitops.h>
+#include <asm/uaccess.h> /* for copy_to/from_user */
 #include <asm/pgtable.h>
 
 int nr_swap_pages = 0;
@@ -34,7 +28,13 @@ int nr_free_pages = 0;
  * of different sizes
  */
 
+#if CONFIG_AP1000
+/* the AP+ needs to allocate 8MB contiguous, aligned chunks of ram
+   for the ring buffers */
+#define NR_MEM_LISTS 12
+#else
 #define NR_MEM_LISTS 6
+#endif
 
 /* The start of this MUST match the start of "struct page" */
 struct free_area_struct {
@@ -81,10 +81,6 @@ static inline void remove_mem_queue(struct page * entry)
  *
  * With the above two rules, you get a straight-line execution path
  * for the normal case, giving better asm-code.
- *
- * free_page() may sleep since the page being freed may be a buffer
- * page or present in the swap cache. It will not sleep, however,
- * for a freshly allocated page (get_free_page()).
  */
 
 /*
@@ -92,6 +88,35 @@ static inline void remove_mem_queue(struct page * entry)
  *
  * Hint: -mask = 1+~mask
  */
+spinlock_t page_alloc_lock = SPIN_LOCK_UNLOCKED;
+
+/*
+ * This routine is used by the kernel swap daemon to determine
+ * whether we have "enough" free pages. It is fairly arbitrary,
+ * having a low-water and high-water mark.
+ *
+ * This returns:
+ *  0 - urgent need for memory
+ *  1 - need some memory, but do it slowly in the background
+ *  2 - no need to even think about it.
+ */
+int free_memory_available(void)
+{
+	static int available = 1;
+
+	if (nr_free_pages < freepages.low) {
+		available = 0;
+		return 0;
+	}
+
+	if (nr_free_pages > freepages.high) {
+		available = 1;
+		return 2;
+	}
+
+	return available;
+}
+
 static inline void free_pages_ok(unsigned long map_nr, unsigned long order)
 {
 	struct free_area_struct *area = free_area + order;
@@ -99,15 +124,14 @@ static inline void free_pages_ok(unsigned long map_nr, unsigned long order)
 	unsigned long mask = (~0UL) << order;
 	unsigned long flags;
 
-	save_flags(flags);
-	cli();
+	spin_lock_irqsave(&page_alloc_lock, flags);
 
 #define list(x) (mem_map+(x))
 
 	map_nr &= mask;
 	nr_free_pages -= mask;
 	while (mask + (1 << (NR_MEM_LISTS-1))) {
-		if (!change_bit(index, area->map))
+		if (!test_and_change_bit(index, area->map))
 			break;
 		remove_mem_queue(list(map_nr ^ -mask));
 		mask <<= 1;
@@ -119,16 +143,22 @@ static inline void free_pages_ok(unsigned long map_nr, unsigned long order)
 
 #undef list
 
-	restore_flags(flags);
+	spin_unlock_irqrestore(&page_alloc_lock, flags);
 }
 
 void __free_page(struct page *page)
 {
 	if (!PageReserved(page) && atomic_dec_and_test(&page->count)) {
-		unsigned long map_nr = page->map_nr;
-		delete_from_swap_cache(map_nr);
-		free_pages_ok(map_nr, 0);
+		if (PageSwapCache(page))
+			panic ("Freeing swap cache page");
+		free_pages_ok(page->map_nr, 0);
+		return;
 	}
+#if 0
+	if (PageSwapCache(page) && atomic_read(&page->count) == 1)
+		printk(KERN_WARNING "VM: Releasing swap cache page at %p",
+			__builtin_return_address(0));
+#endif
 }
 
 void free_pages(unsigned long addr, unsigned long order)
@@ -140,10 +170,17 @@ void free_pages(unsigned long addr, unsigned long order)
 		if (PageReserved(map))
 			return;
 		if (atomic_dec_and_test(&map->count)) {
-			delete_from_swap_cache(map_nr);
+			if (PageSwapCache(map))
+				panic ("Freeing swap cache pages");
 			free_pages_ok(map_nr, order);
 			return;
 		}
+#if 0
+		if (PageSwapCache(map) && atomic_read(&map->count) == 1)
+			printk(KERN_WARNING 
+				"VM: Releasing swap cache pages at %p",
+				__builtin_return_address(0));
+#endif
 	}
 }
 
@@ -157,18 +194,19 @@ void free_pages(unsigned long addr, unsigned long order)
 #define RMQUEUE(order, dma) \
 do { struct free_area_struct * area = free_area+order; \
      unsigned long new_order = order; \
-	do { struct page *prev = memory_head(area), *ret; \
-		while (memory_head(area) != (ret = prev->next)) { \
+	do { struct page *prev = memory_head(area), *ret = prev->next; \
+		while (memory_head(area) != ret) { \
 			if (!dma || CAN_DMA(ret)) { \
 				unsigned long map_nr = ret->map_nr; \
 				(prev->next = ret->next)->prev = prev; \
 				MARK_USED(map_nr, new_order, area); \
 				nr_free_pages -= 1 << order; \
 				EXPAND(ret, map_nr, order, new_order, area); \
-				restore_flags(flags); \
+				spin_unlock_irqrestore(&page_alloc_lock, flags); \
 				return ADDRESS(map_nr); \
 			} \
 			prev = ret; \
+			ret = ret->next; \
 		} \
 		new_order++; area++; \
 	} while (new_order < NR_MEM_LISTS); \
@@ -183,39 +221,53 @@ do { unsigned long size = 1 << high; \
 		index += size; \
 		map += size; \
 	} \
-	map->count = 1; \
-	map->age = PAGE_INITIAL_AGE; \
+	atomic_set(&map->count, 1); \
 } while (0)
 
-unsigned long __get_free_pages(int priority, unsigned long order, int dma)
+unsigned long __get_free_pages(int gfp_mask, unsigned long order)
 {
 	unsigned long flags;
-	int reserved_pages;
 
 	if (order >= NR_MEM_LISTS)
-		return 0;
-	if (intr_count && priority != GFP_ATOMIC) {
-		static int count = 0;
-		if (++count < 5) {
-			printk("gfp called nonatomically from interrupt %p\n",
-				__builtin_return_address(0));
-			priority = GFP_ATOMIC;
+		goto nopage;
+
+	if (gfp_mask & __GFP_WAIT) {
+		if (in_interrupt()) {
+			static int count = 0;
+			if (++count < 5) {
+				printk("gfp called nonatomically from interrupt %p\n",
+					__builtin_return_address(0));
+			}
+			goto nopage;
+		}
+
+		if (freepages.min > nr_free_pages) {
+			int freed;
+			freed = try_to_free_pages(gfp_mask, SWAP_CLUSTER_MAX);
+			/*
+			 * Low priority (user) allocations must not
+			 * succeed if we didn't have enough memory
+			 * and we couldn't get more..
+			 */
+			if (!freed && !(gfp_mask & (__GFP_MED | __GFP_HIGH)))
+				goto nopage;
 		}
 	}
-	reserved_pages = 5;
-	if (priority != GFP_NFS)
-		reserved_pages = min_free_pages;
-	save_flags(flags);
-repeat:
-	cli();
-	if ((priority==GFP_ATOMIC) || nr_free_pages > reserved_pages) {
-		RMQUEUE(order, dma);
-		restore_flags(flags);
-		return 0;
+	spin_lock_irqsave(&page_alloc_lock, flags);
+	RMQUEUE(order, (gfp_mask & GFP_DMA));
+	spin_unlock_irqrestore(&page_alloc_lock, flags);
+
+	/*
+	 * If we can schedule, do so, and make sure to yield.
+	 * We may be a real-time process, and if kswapd is
+	 * waiting for us we need to allow it to run a bit.
+	 */
+	if (gfp_mask & __GFP_WAIT) {
+		current->policy |= SCHED_YIELD;
+		schedule();
 	}
-	restore_flags(flags);
-	if (priority != GFP_BUFFER && try_to_free_page(priority, dma, 1))
-		goto repeat;
+
+nopage:
 	return 0;
 }
 
@@ -230,8 +282,12 @@ void show_free_areas(void)
  	unsigned long total = 0;
 
 	printk("Free pages:      %6dkB\n ( ",nr_free_pages<<(PAGE_SHIFT-10));
-	save_flags(flags);
-	cli();
+	printk("Free: %d (%d %d %d)\n",
+		nr_free_pages,
+		freepages.min,
+		freepages.low,
+		freepages.high);
+	spin_lock_irqsave(&page_alloc_lock, flags);
  	for (order=0 ; order < NR_MEM_LISTS; order++) {
 		struct page * tmp;
 		unsigned long nr = 0;
@@ -239,9 +295,9 @@ void show_free_areas(void)
 			nr ++;
 		}
 		total += nr * ((PAGE_SIZE>>10) << order);
-		printk("%lu*%lukB ", nr, (PAGE_SIZE>>10) << order);
+		printk("%lu*%lukB ", nr, (unsigned long)((PAGE_SIZE>>10) << order));
 	}
-	restore_flags(flags);
+	spin_unlock_irqrestore(&page_alloc_lock, flags);
 	printk("= %lukB)\n", total);
 #ifdef SWAP_CACHE_INFO
 	show_swap_cache_info();
@@ -256,29 +312,34 @@ void show_free_areas(void)
  *   - mark all memory queues empty
  *   - clear the memory bitmaps
  */
-unsigned long free_area_init(unsigned long start_mem, unsigned long end_mem)
+unsigned long __init free_area_init(unsigned long start_mem, unsigned long end_mem)
 {
 	mem_map_t * p;
 	unsigned long mask = PAGE_MASK;
-	int i;
+	unsigned long i;
 
 	/*
-	 * select nr of pages we try to keep free for important stuff
-	 * with a minimum of 16 pages. This is totally arbitrary
+	 * Select nr of pages we try to keep free for important stuff
+	 * with a minimum of 10 pages and a maximum of 256 pages, so
+	 * that we don't waste too much memory on large systems.
+	 * This is fairly arbitrary, but based on some behaviour
+	 * analysis.
 	 */
 	i = (end_mem - PAGE_OFFSET) >> (PAGE_SHIFT+7);
-	if (i < 16)
-		i = 16;
-	min_free_pages = i;
-	free_pages_low = i + (i>>1);
-	free_pages_high = i + i;
-	start_mem = init_swap_cache(start_mem, end_mem);
-	mem_map = (mem_map_t *) start_mem;
+	if (i < 10)
+		i = 10;
+	if (i > 256)
+		i = 256;
+	freepages.min = i;
+	freepages.low = i * 2;
+	freepages.high = i * 3;
+	mem_map = (mem_map_t *) LONG_ALIGN(start_mem);
 	p = mem_map + MAP_NR(end_mem);
 	start_mem = LONG_ALIGN((unsigned long) p);
 	memset(mem_map, 0, start_mem - (unsigned long) mem_map);
 	do {
 		--p;
+		atomic_set(&p->count, 0);
 		p->flags = (1 << PG_DMA) | (1 << PG_reserved);
 		p->map_nr = p - mem_map;
 	} while (p > mem_map);
@@ -298,6 +359,38 @@ unsigned long free_area_init(unsigned long start_mem, unsigned long end_mem)
 	return start_mem;
 }
 
+/* 
+ * Primitive swap readahead code. We simply read an aligned block of
+ * (1 << page_cluster) entries in the swap area. This method is chosen
+ * because it doesn't cost us any seek time.  We also make sure to queue
+ * the 'original' request together with the readahead ones...  
+ */
+void swapin_readahead(unsigned long entry)
+{
+	int i;
+	struct page *new_page;
+	unsigned long offset = SWP_OFFSET(entry);
+	struct swap_info_struct *swapdev = SWP_TYPE(entry) + swap_info;
+	
+	offset = (offset >> page_cluster) << page_cluster;
+	
+	for (i = 1 << page_cluster; i > 0; i--) {
+	      if (offset >= swapdev->max
+			      || nr_free_pages - atomic_read(&nr_async_pages) <
+			      (freepages.high + freepages.low)/2)
+		      return;
+	      if (!swapdev->swap_map[offset] ||
+		  swapdev->swap_map[offset] == SWAP_MAP_BAD ||
+		  test_bit(offset, swapdev->swap_lockmap))
+		      continue;
+	      new_page = read_swap_cache_async(SWP_ENTRY(SWP_TYPE(entry), offset), 0);
+	      if (new_page != NULL)
+		      __free_page(new_page);
+	      offset++;
+	}
+	return;
+}
+
 /*
  * The tests may look silly, but it essentially makes sure that
  * no other process did a swap-in on us just as we were waiting.
@@ -308,32 +401,41 @@ unsigned long free_area_init(unsigned long start_mem, unsigned long end_mem)
 void swap_in(struct task_struct * tsk, struct vm_area_struct * vma,
 	pte_t * page_table, unsigned long entry, int write_access)
 {
-	unsigned long page = __get_free_page(GFP_KERNEL);
+	unsigned long page;
+	struct page *page_map = lookup_swap_cache(entry);
 
+	if (!page_map) {
+		swapin_readahead(entry);
+		page_map = read_swap_cache(entry);
+	}
 	if (pte_val(*page_table) != entry) {
-		free_page(page);
+		if (page_map)
+			free_page_and_swap_cache(page_address(page_map));
 		return;
 	}
-	if (!page) {
+	if (!page_map) {
 		set_pte(page_table, BAD_PAGE);
 		swap_free(entry);
 		oom(tsk);
 		return;
 	}
-	read_swap_page(entry, (char *) page);
-	if (pte_val(*page_table) != entry) {
-		free_page(page);
-		return;
-	}
+
+	page = page_address(page_map);
 	vma->vm_mm->rss++;
-	tsk->maj_flt++;
-	if (!write_access && add_to_swap_cache(MAP_NR(page), entry)) {
-		/* keep swap page allocated for the moment (swap cache) */
+	tsk->min_flt++;
+	swap_free(entry);
+
+	if (!write_access || is_page_shared(page_map)) {
 		set_pte(page_table, mk_pte(page, vma->vm_page_prot));
 		return;
 	}
+
+	/* The page is unshared, and we want write access.  In this
+	   case, it is safe to tear down the swap cache and give the
+	   page over entirely to this process. */
+
+	if (PageSwapCache(page_map))
+		delete_from_swap_cache(page_map);
 	set_pte(page_table, pte_mkwrite(pte_mkdirty(mk_pte(page, vma->vm_page_prot))));
-  	swap_free(entry);
   	return;
 }
-

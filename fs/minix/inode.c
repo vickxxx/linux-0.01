@@ -5,26 +5,34 @@
  *
  *  Copyright (C) 1996  Gertjan van Wingerde    (gertjan@cs.vu.nl)
  *	Minix V2 fs support.
+ *
+ *  Modified for 680x0 by Andreas Schwab
  */
 
 #include <linux/module.h>
 
 #include <linux/sched.h>
-#include <linux/minix_fs.h>
 #include <linux/kernel.h>
 #include <linux/mm.h>
+#include <linux/malloc.h>
 #include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/locks.h>
+#include <linux/init.h>
 
 #include <asm/system.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/bitops.h>
 
-void minix_put_inode(struct inode *inode)
+#include <linux/minix_fs.h>
+
+static void minix_read_inode(struct inode * inode);
+static void minix_write_inode(struct inode * inode);
+static int minix_statfs(struct super_block *sb, struct statfs *buf, int bufsiz);
+static int minix_remount (struct super_block * sb, int * flags, char * data);
+
+static void minix_delete_inode(struct inode *inode)
 {
-	if (inode->i_nlink)
-		return;
 	inode->i_size = 0;
 	minix_truncate(inode);
 	minix_free_inode(inode);
@@ -37,7 +45,7 @@ static void minix_commit_super (struct super_block * sb,
 	sb->s_dirt = 0;
 }
 
-void minix_write_super (struct super_block * sb)
+static void minix_write_super (struct super_block * sb)
 {
 	struct minix_super_block * ms;
 
@@ -52,38 +60,38 @@ void minix_write_super (struct super_block * sb)
 }
 
 
-void minix_put_super(struct super_block *sb)
+static void minix_put_super(struct super_block *sb)
 {
 	int i;
 
-	lock_super(sb);
 	if (!(sb->s_flags & MS_RDONLY)) {
 		sb->u.minix_sb.s_ms->s_state = sb->u.minix_sb.s_mount_state;
 		mark_buffer_dirty(sb->u.minix_sb.s_sbh, 1);
 	}
-	sb->s_dev = 0;
-	for(i = 0 ; i < MINIX_I_MAP_SLOTS ; i++)
+	for (i = 0; i < sb->u.minix_sb.s_imap_blocks; i++)
 		brelse(sb->u.minix_sb.s_imap[i]);
-	for(i = 0 ; i < MINIX_Z_MAP_SLOTS ; i++)
+	for (i = 0; i < sb->u.minix_sb.s_zmap_blocks; i++)
 		brelse(sb->u.minix_sb.s_zmap[i]);
 	brelse (sb->u.minix_sb.s_sbh);
-	unlock_super(sb);
+	kfree(sb->u.minix_sb.s_imap);
+
 	MOD_DEC_USE_COUNT;
 	return;
 }
 
-static struct super_operations minix_sops = { 
+static struct super_operations minix_sops = {
 	minix_read_inode,
-	NULL,
 	minix_write_inode,
-	minix_put_inode,
+	NULL,			/* put_inode */
+	minix_delete_inode,
+	NULL,			/* notify_change */
 	minix_put_super,
 	minix_write_super,
 	minix_statfs,
 	minix_remount
 };
 
-int minix_remount (struct super_block * sb, int * flags, char * data)
+static int minix_remount (struct super_block * sb, int * flags, char * data)
 {
 	struct minix_super_block * ms;
 
@@ -119,18 +127,16 @@ int minix_remount (struct super_block * sb, int * flags, char * data)
 
 /*
  * Check the root directory of the filesystem to make sure
- * it really _is_ a minix filesystem, and to check the size
+ * it really _is_ a Minix filesystem, and to check the size
  * of the directory entry.
  */
-static const char * minix_checkroot(struct super_block *s)
+static const char * minix_checkroot(struct super_block *s, struct inode *dir)
 {
-	struct inode * dir;
 	struct buffer_head *bh;
 	struct minix_dir_entry *de;
 	const char * errmsg;
 	int dirsize;
 
-	dir = s->s_mounted;
 	if (!S_ISDIR(dir->i_mode))
 		return "root directory is not a directory";
 
@@ -161,29 +167,30 @@ static const char * minix_checkroot(struct super_block *s)
 	return errmsg;
 }
 
-struct super_block *minix_read_super(struct super_block *s,void *data, 
+static struct super_block *minix_read_super(struct super_block *s, void *data,
 				     int silent)
 {
 	struct buffer_head *bh;
+	struct buffer_head **map;
 	struct minix_super_block *ms;
 	int i, block;
 	kdev_t dev = s->s_dev;
 	const char * errmsg;
-
+	struct inode *root_inode;
+	
+	/* N.B. These should be compile-time tests.
+	   Unfortunately that is impossible. */
 	if (32 != sizeof (struct minix_inode))
 		panic("bad V1 i-node size");
 	if (64 != sizeof(struct minix2_inode))
 		panic("bad V2 i-node size");
+
 	MOD_INC_USE_COUNT;
 	lock_super(s);
 	set_blocksize(dev, BLOCK_SIZE);
-	if (!(bh = bread(dev,1,BLOCK_SIZE))) {
-		s->s_dev = 0;
-		unlock_super(s);
-		printk("MINIX-fs: unable to read superblock\n");
-		MOD_DEC_USE_COUNT;
-		return NULL;
-	}
+	if (!(bh = bread(dev,1,BLOCK_SIZE)))
+		goto out_bad_sb;
+
 	ms = (struct minix_super_block *) bh->b_data;
 	s->u.minix_sb.s_ms = ms;
 	s->u.minix_sb.s_sbh = bh;
@@ -191,6 +198,7 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 	s->s_blocksize = 1024;
 	s->s_blocksize_bits = 10;
 	s->u.minix_sb.s_ninodes = ms->s_ninodes;
+	s->u.minix_sb.s_nzones = ms->s_nzones;
 	s->u.minix_sb.s_imap_blocks = ms->s_imap_blocks;
 	s->u.minix_sb.s_zmap_blocks = ms->s_zmap_blocks;
 	s->u.minix_sb.s_firstdatazone = ms->s_firstdatazone;
@@ -199,102 +207,78 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 	s->s_magic = ms->s_magic;
 	if (s->s_magic == MINIX_SUPER_MAGIC) {
 		s->u.minix_sb.s_version = MINIX_V1;
-		s->u.minix_sb.s_nzones = ms->s_nzones;
 		s->u.minix_sb.s_dirsize = 16;
 		s->u.minix_sb.s_namelen = 14;
+		s->u.minix_sb.s_link_max = MINIX_LINK_MAX;
 	} else if (s->s_magic == MINIX_SUPER_MAGIC2) {
 		s->u.minix_sb.s_version = MINIX_V1;
-		s->u.minix_sb.s_nzones = ms->s_nzones;
 		s->u.minix_sb.s_dirsize = 32;
 		s->u.minix_sb.s_namelen = 30;
+		s->u.minix_sb.s_link_max = MINIX_LINK_MAX;
 	} else if (s->s_magic == MINIX2_SUPER_MAGIC) {
 		s->u.minix_sb.s_version = MINIX_V2;
 		s->u.minix_sb.s_nzones = ms->s_zones;
 		s->u.minix_sb.s_dirsize = 16;
 		s->u.minix_sb.s_namelen = 14;
+		s->u.minix_sb.s_link_max = MINIX2_LINK_MAX;
 	} else if (s->s_magic == MINIX2_SUPER_MAGIC2) {
 		s->u.minix_sb.s_version = MINIX_V2;
 		s->u.minix_sb.s_nzones = ms->s_zones;
 		s->u.minix_sb.s_dirsize = 32;
 		s->u.minix_sb.s_namelen = 30;
-	} else {
-		s->s_dev = 0;
-		unlock_super(s);
-		brelse(bh);
-		if (!silent)
-			printk("VFS: Can't find a minix or minix V2 filesystem on dev "
-			       "%s.\n", kdevname(dev));
-		MOD_DEC_USE_COUNT;
-		return NULL;
-	}
-	for (i=0;i < MINIX_I_MAP_SLOTS;i++)
-		s->u.minix_sb.s_imap[i] = NULL;
-	for (i=0;i < MINIX_Z_MAP_SLOTS;i++)
-		s->u.minix_sb.s_zmap[i] = NULL;
-	if (s->u.minix_sb.s_zmap_blocks > MINIX_Z_MAP_SLOTS) {
-		s->s_dev = 0;
-		unlock_super (s);
-		brelse (bh);
-		if (!silent)
-			printk ("MINIX-fs: filesystem too big\n");
-		MOD_DEC_USE_COUNT;
-		return NULL;
-	}
+		s->u.minix_sb.s_link_max = MINIX2_LINK_MAX;
+	} else
+		goto out_no_fs;
+
+	/*
+	 * Allocate the buffer map to keep the superblock small.
+	 */
+	i = (s->u.minix_sb.s_imap_blocks + s->u.minix_sb.s_zmap_blocks) * sizeof(bh);
+	map = kmalloc(i, GFP_KERNEL);
+	if (!map)
+		goto out_no_map;
+	memset(map, 0, i);
+	s->u.minix_sb.s_imap = &map[0];
+	s->u.minix_sb.s_zmap = &map[s->u.minix_sb.s_imap_blocks];
+
 	block=2;
-	for (i=0 ; i < s->u.minix_sb.s_imap_blocks ; i++)
-		if ((s->u.minix_sb.s_imap[i]=bread(dev,block,BLOCK_SIZE)) != NULL)
-			block++;
-		else
-			break;
-	for (i=0 ; i < s->u.minix_sb.s_zmap_blocks ; i++)
-		if ((s->u.minix_sb.s_zmap[i]=bread(dev,block,BLOCK_SIZE)) != NULL)
-			block++;
-		else
-			break;
-	if (block != 2+s->u.minix_sb.s_imap_blocks+s->u.minix_sb.s_zmap_blocks) {
-		for(i=0;i<MINIX_I_MAP_SLOTS;i++)
-			brelse(s->u.minix_sb.s_imap[i]);
-		for(i=0;i<MINIX_Z_MAP_SLOTS;i++)
-			brelse(s->u.minix_sb.s_zmap[i]);
-		s->s_dev = 0;
-		unlock_super(s);
-		brelse(bh);
-		printk("MINIX-fs: bad superblock or unable to read bitmaps\n");
-		MOD_DEC_USE_COUNT;
-		return NULL;
+	for (i=0 ; i < s->u.minix_sb.s_imap_blocks ; i++) {
+		if (!(s->u.minix_sb.s_imap[i]=bread(dev,block,BLOCK_SIZE)))
+			goto out_no_bitmap;
+		block++;
 	}
-	set_bit(0,s->u.minix_sb.s_imap[0]->b_data);
-	set_bit(0,s->u.minix_sb.s_zmap[0]->b_data);
-	unlock_super(s);
-	/* set up enough so that it can read an inode */
-	s->s_dev = dev;
-	s->s_op = &minix_sops;
-	s->s_mounted = iget(s,MINIX_ROOT_INO);
-	if (!s->s_mounted) {
-		s->s_dev = 0;
-		brelse(bh);
-		if (!silent)
-			printk("MINIX-fs: get root inode failed\n");
-		MOD_DEC_USE_COUNT;
-		return NULL;
+	for (i=0 ; i < s->u.minix_sb.s_zmap_blocks ; i++) {
+		if (!(s->u.minix_sb.s_zmap[i]=bread(dev,block,BLOCK_SIZE)))
+			goto out_no_bitmap;
+		block++;
 	}
 
-	errmsg = minix_checkroot(s);
-	if (errmsg) {
-		if (!silent)
-			printk("MINIX-fs: %s\n", errmsg);
-		iput (s->s_mounted);
-		s->s_dev = 0;
-		brelse (bh);
-		MOD_DEC_USE_COUNT;
-		return NULL;
-	}
+	minix_set_bit(0,s->u.minix_sb.s_imap[0]->b_data);
+	minix_set_bit(0,s->u.minix_sb.s_zmap[0]->b_data);
+	/* set up enough so that it can read an inode */
+	s->s_op = &minix_sops;
+	root_inode = iget(s, MINIX_ROOT_INO);
+	if (!root_inode)
+		goto out_no_root;
+	/*
+	 * Check the fs before we get the root dentry ...
+	 */
+	errmsg = minix_checkroot(s, root_inode);
+	if (errmsg)
+		goto out_bad_root;
+
+	s->s_root = d_alloc_root(root_inode, NULL);
+	if (!s->s_root)
+		goto out_iput;
+
+	s->s_root->d_op = &minix_dentry_operations;
 
 	if (!(s->s_flags & MS_RDONLY)) {
 		ms->s_state &= ~MINIX_VALID_FS;
 		mark_buffer_dirty(bh, 1);
 		s->s_dirt = 1;
 	}
+	unlock_super(s);
 	if (!(s->u.minix_sb.s_mount_state & MINIX_VALID_FS))
 		printk ("MINIX-fs: mounting unchecked file system, "
 			"running fsck is recommended.\n");
@@ -302,9 +286,52 @@ struct super_block *minix_read_super(struct super_block *s,void *data,
 		printk ("MINIX-fs: mounting file system with errors, "
 			"running fsck is recommended.\n");
 	return s;
+
+out_bad_root:
+	if (!silent)
+		printk("MINIX-fs: %s\n", errmsg);
+out_iput:
+	iput(root_inode);
+	goto out_freemap;
+
+out_no_root:
+	if (!silent)
+		printk("MINIX-fs: get root inode failed\n");
+	goto out_freemap;
+
+out_no_bitmap:
+	printk("MINIX-fs: bad superblock or unable to read bitmaps\n");
+    out_freemap:
+	for (i = 0; i < s->u.minix_sb.s_imap_blocks; i++)
+		brelse(s->u.minix_sb.s_imap[i]);
+	for (i = 0; i < s->u.minix_sb.s_zmap_blocks; i++)
+		brelse(s->u.minix_sb.s_zmap[i]);
+	kfree(s->u.minix_sb.s_imap);
+	goto out_release;
+
+out_no_map:
+	if (!silent)
+		printk ("MINIX-fs: can't allocate map\n");
+	goto out_release;
+
+out_no_fs:
+	if (!silent)
+		printk("VFS: Can't find a Minix or Minix V2 filesystem on device "
+		       "%s.\n", kdevname(dev));
+    out_release:
+	brelse(bh);
+	goto out_unlock;
+
+out_bad_sb:
+	printk("MINIX-fs: unable to read superblock\n");
+    out_unlock:
+	s->s_dev = 0;
+	unlock_super(s);
+	MOD_DEC_USE_COUNT;
+	return NULL;
 }
 
-void minix_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
+static int minix_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
 {
 	struct statfs tmp;
 
@@ -316,7 +343,7 @@ void minix_statfs(struct super_block *sb, struct statfs *buf, int bufsiz)
 	tmp.f_files = sb->u.minix_sb.s_ninodes;
 	tmp.f_ffree = minix_count_free_inodes(sb);
 	tmp.f_namelen = sb->u.minix_sb.s_namelen;
-	memcpy_tofs(buf, &tmp, bufsiz);
+	return copy_to_user(buf, &tmp, bufsiz) ? -EFAULT : 0;
 }
 
 /*
@@ -439,7 +466,7 @@ int minix_bmap(struct inode * inode,int block)
 /*
  * The minix V1 fs getblk functions.
  */
-static struct buffer_head * V1_inode_getblk(struct inode * inode, int nr, 
+static struct buffer_head * V1_inode_getblk(struct inode * inode, int nr,
 					    int create)
 {
 	int tmp;
@@ -469,11 +496,11 @@ repeat:
 	}
 	*p = tmp;
 	inode->i_ctime = CURRENT_TIME;
-	inode->i_dirt = 1;
+	mark_inode_dirty(inode);
 	return result;
 }
 
-static struct buffer_head * V1_block_getblk(struct inode * inode, 
+static struct buffer_head * V1_block_getblk(struct inode * inode,
 	struct buffer_head * bh, int nr, int create)
 {
 	int tmp;
@@ -523,7 +550,7 @@ repeat:
 	return result;
 }
 
-static struct buffer_head * V1_minix_getblk(struct inode * inode, int block, 
+static struct buffer_head * V1_minix_getblk(struct inode * inode, int block,
 					    int create)
 {
 	struct buffer_head * bh;
@@ -552,7 +579,7 @@ static struct buffer_head * V1_minix_getblk(struct inode * inode, int block,
 /*
  * The minix V2 fs getblk functions.
  */
-static struct buffer_head * V2_inode_getblk(struct inode * inode, int nr, 
+static struct buffer_head * V2_inode_getblk(struct inode * inode, int nr,
 					    int create)
 {
 	int tmp;
@@ -582,11 +609,11 @@ repeat:
 	}
 	*p = tmp;
 	inode->i_ctime = CURRENT_TIME;
-	inode->i_dirt = 1;
+	mark_inode_dirty(inode);
 	return result;
 }
 
-static struct buffer_head * V2_block_getblk(struct inode * inode, 
+static struct buffer_head * V2_block_getblk(struct inode * inode,
 	struct buffer_head * bh, int nr, int create)
 {
 	int tmp;
@@ -636,7 +663,7 @@ repeat:
 	return result;
 }
 
-static struct buffer_head * V2_minix_getblk(struct inode * inode, int block, 
+static struct buffer_head * V2_minix_getblk(struct inode * inode, int block,
 					    int create)
 {
 	struct buffer_head * bh;
@@ -707,7 +734,7 @@ static void V1_minix_read_inode(struct inode * inode)
 	ino = inode->i_ino;
 	inode->i_op = NULL;
 	inode->i_mode = 0;
-	if (!ino || ino >= inode->i_sb->u.minix_sb.s_ninodes) {
+	if (!ino || ino > inode->i_sb->u.minix_sb.s_ninodes) {
 		printk("Bad inode number on dev %s"
 		       ": %d is out of range\n",
 			kdevname(inode->i_dev), ino);
@@ -761,7 +788,7 @@ static void V2_minix_read_inode(struct inode * inode)
 	ino = inode->i_ino;
 	inode->i_op = NULL;
 	inode->i_mode = 0;
-	if (!ino || ino >= inode->i_sb->u.minix_sb.s_ninodes) {
+	if (!ino || ino > inode->i_sb->u.minix_sb.s_ninodes) {
 		printk("Bad inode number on dev %s"
 		       ": %d is out of range\n",
 			kdevname(inode->i_dev), ino);
@@ -808,7 +835,7 @@ static void V2_minix_read_inode(struct inode * inode)
 /*
  * The global function to read an inode.
  */
-void minix_read_inode(struct inode * inode)
+static void minix_read_inode(struct inode * inode)
 {
 	if (INODE_VERSION(inode) == MINIX_V1)
 		V1_minix_read_inode(inode);
@@ -826,18 +853,16 @@ static struct buffer_head * V1_minix_update_inode(struct inode * inode)
 	int ino, block;
 
 	ino = inode->i_ino;
-	if (!ino || ino >= inode->i_sb->u.minix_sb.s_ninodes) {
+	if (!ino || ino > inode->i_sb->u.minix_sb.s_ninodes) {
 		printk("Bad inode number on dev %s"
 		       ": %d is out of range\n",
 			kdevname(inode->i_dev), ino);
-		inode->i_dirt = 0;
 		return 0;
 	}
 	block = 2 + inode->i_sb->u.minix_sb.s_imap_blocks + inode->i_sb->u.minix_sb.s_zmap_blocks +
 		(ino-1)/MINIX_INODES_PER_BLOCK;
 	if (!(bh=bread(inode->i_dev, block, BLOCK_SIZE))) {
 		printk("unable to read i-node block\n");
-		inode->i_dirt = 0;
 		return 0;
 	}
 	raw_inode = ((struct minix_inode *)bh->b_data) +
@@ -852,7 +877,6 @@ static struct buffer_head * V1_minix_update_inode(struct inode * inode)
 		raw_inode->i_zone[0] = kdev_t_to_nr(inode->i_rdev);
 	else for (block = 0; block < 9; block++)
 		raw_inode->i_zone[block] = inode->u.minix_i.u.i1_data[block];
-	inode->i_dirt=0;
 	mark_buffer_dirty(bh, 1);
 	return bh;
 }
@@ -867,18 +891,16 @@ static struct buffer_head * V2_minix_update_inode(struct inode * inode)
 	int ino, block;
 
 	ino = inode->i_ino;
-	if (!ino || ino >= inode->i_sb->u.minix_sb.s_ninodes) {
+	if (!ino || ino > inode->i_sb->u.minix_sb.s_ninodes) {
 		printk("Bad inode number on dev %s"
 		       ": %d is out of range\n",
 			kdevname(inode->i_dev), ino);
-		inode->i_dirt = 0;
 		return 0;
 	}
 	block = 2 + inode->i_sb->u.minix_sb.s_imap_blocks + inode->i_sb->u.minix_sb.s_zmap_blocks +
 		(ino-1)/MINIX2_INODES_PER_BLOCK;
 	if (!(bh=bread(inode->i_dev, block, BLOCK_SIZE))) {
 		printk("unable to read i-node block\n");
-		inode->i_dirt = 0;
 		return 0;
 	}
 	raw_inode = ((struct minix2_inode *)bh->b_data) +
@@ -895,12 +917,11 @@ static struct buffer_head * V2_minix_update_inode(struct inode * inode)
 		raw_inode->i_zone[0] = kdev_t_to_nr(inode->i_rdev);
 	else for (block = 0; block < 10; block++)
 		raw_inode->i_zone[block] = inode->u.minix_i.u.i2_data[block];
-	inode->i_dirt=0;
 	mark_buffer_dirty(bh, 1);
 	return bh;
 }
 
-struct buffer_head *minix_update_inode(struct inode *inode)
+static struct buffer_head *minix_update_inode(struct inode *inode)
 {
 	if (INODE_VERSION(inode) == MINIX_V1)
 		return V1_minix_update_inode(inode);
@@ -908,7 +929,7 @@ struct buffer_head *minix_update_inode(struct inode *inode)
 		return V2_minix_update_inode(inode);
 }
 
-void minix_write_inode(struct inode * inode)
+static void minix_write_inode(struct inode * inode)
 {
 	struct buffer_head *bh;
 
@@ -941,22 +962,23 @@ int minix_sync_inode(struct inode * inode)
 }
 
 static struct file_system_type minix_fs_type = {
-	minix_read_super, "minix", 1, NULL
+	"minix",
+	FS_REQUIRES_DEV,
+	minix_read_super,
+	NULL
 };
 
-int init_minix_fs(void)
+__initfunc(int init_minix_fs(void))
 {
         return register_filesystem(&minix_fs_type);
 }
 
 #ifdef MODULE
+EXPORT_NO_SYMBOLS;
+
 int init_module(void)
 {
-	int status;
-
-	if ((status = init_minix_fs()) == 0)
-		register_symtab(0);
-	return status;
+	return init_minix_fs();
 }
 
 void cleanup_module(void)

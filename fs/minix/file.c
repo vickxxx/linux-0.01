@@ -16,7 +16,7 @@
 #include <linux/mm.h>
 #include <linux/pagemap.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 
 #define	NBUF	32
@@ -27,10 +27,10 @@
 #include <linux/fs.h>
 #include <linux/minix_fs.h>
 
-static long minix_file_write(struct inode *, struct file *, const char *, unsigned long);
+static ssize_t minix_file_write(struct file *, const char *, size_t, loff_t *);
 
 /*
- * We have mostly NULL's here: the current defaults are ok for
+ * We have mostly NULLs here: the current defaults are OK for
  * the minix filesystem.
  */
 static struct file_operations minix_file_operations = {
@@ -38,10 +38,11 @@ static struct file_operations minix_file_operations = {
 	generic_file_read,	/* read */
 	minix_file_write,	/* write */
 	NULL,			/* readdir - bad */
-	NULL,			/* select - default */
+	NULL,			/* poll - default */
 	NULL,			/* ioctl - default */
 	generic_file_mmap,	/* mmap */
 	NULL,			/* no special open is needed */
+	NULL,			/* flush */
 	NULL,			/* release */
 	minix_sync_file		/* fsync */
 };
@@ -66,11 +67,12 @@ struct inode_operations minix_file_inode_operations = {
 	NULL			/* permission */
 };
 
-static long minix_file_write(struct inode * inode, struct file * filp,
-	const char * buf, unsigned long count)
+static ssize_t minix_file_write(struct file * filp, const char * buf,
+				size_t count, loff_t *ppos)
 {
+	struct inode * inode = filp->f_dentry->d_inode;
 	off_t pos;
-	int written,c;
+	ssize_t written, c;
 	struct buffer_head * bh;
 	char * p;
 
@@ -85,7 +87,7 @@ static long minix_file_write(struct inode * inode, struct file * filp,
 	if (filp->f_flags & O_APPEND)
 		pos = inode->i_size;
 	else
-		pos = filp->f_pos;
+		pos = *ppos;
 	written = 0;
 	while (written < count) {
 		bh = minix_getblk(inode,pos/BLOCK_SIZE,1);
@@ -108,7 +110,13 @@ static long minix_file_write(struct inode * inode, struct file * filp,
 			}
 		}
 		p = (pos % BLOCK_SIZE) + bh->b_data;
-		memcpy_fromfs(p,buf,c);
+		c -= copy_from_user(p,buf,c);
+		if (!c) {
+			brelse(bh);
+			if (!written)
+				written = -EFAULT;
+			break;
+		}
 		update_vm_cache(inode, pos, p, c);
 		mark_buffer_uptodate(bh, 1);
 		mark_buffer_dirty(bh, 0);
@@ -120,7 +128,7 @@ static long minix_file_write(struct inode * inode, struct file * filp,
 	if (pos > inode->i_size)
 		inode->i_size = pos;
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	filp->f_pos = pos;
-	inode->i_dirt = 1;
+	*ppos = pos;
+	mark_inode_dirty(inode);
 	return written;
 }

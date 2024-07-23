@@ -235,11 +235,13 @@
 #define DMA_NONE	255
 #define IRQ_AUTO	254
 #define DMA_AUTO	254
+#define PORT_AUTO	0xffff		/* autoprobe io port for 53c400a */
 
 #define FLAG_HAS_LAST_BYTE_SENT		1	/* NCR53c81 or better */
 #define FLAG_CHECK_LAST_BYTE_SENT	2	/* Only test once */
 #define FLAG_NCR53C400			4	/* NCR53c400 */
 #define FLAG_NO_PSEUDO_DMA		8	/* Inhibit DMA */
+#define FLAG_DTC3181E			16	/* DTC3181E */
 
 #ifndef ASM
 struct NCR5380_hostdata {
@@ -264,6 +266,8 @@ struct NCR5380_hostdata {
 #ifdef USLEEP
     unsigned long time_expires;			/* in jiffies, set prior to sleeping */
     struct Scsi_Host *next_timer;
+    int select_time;				/* timer in select for target response */
+    volatile Scsi_Cmnd *selecting;
 #endif
 #ifdef NCR5380_STATS
     unsigned timebase;				/* Base for time calcs */
@@ -286,6 +290,7 @@ static void NCR5380_init (struct Scsi_Host *instance, int flags);
 static void NCR5380_information_transfer (struct Scsi_Host *instance);
 #ifndef DONT_USE_INTR
 static void NCR5380_intr (int irq, void *dev_id, struct pt_regs * regs);
+static void do_NCR5380_intr (int irq, void *dev_id, struct pt_regs * regs);
 #endif
 static void NCR5380_main (void);
 static void NCR5380_print_options (struct Scsi_Host *instance);
@@ -314,29 +319,33 @@ static int NCR5380_transfer_dma (struct Scsi_Host *instance,
 static int NCR5380_transfer_pio (struct Scsi_Host *instance,
 	unsigned char *phase, int *count, unsigned char **data);
 
-#if (defined(REAL_DMA) || defined(REAL_DMA_POLL)) && defined(i386)
-static __inline__ int NCR5380_i386_dma_setup (struct Scsi_Host *instance,
+#if (defined(REAL_DMA) || defined(REAL_DMA_POLL))
+
+#if defined(i386) || defined(__alpha__)
+
+static __inline__ int NCR5380_pc_dma_setup (struct Scsi_Host *instance,
 	unsigned char *ptr, unsigned int count, unsigned char mode) {
     unsigned limit;
+    unsigned long bus_addr = virt_to_bus(ptr);
 
     if (instance->dma_channel <=3) {
 	if (count > 65536)
 	    count = 65536;
-	limit = 65536 - (((unsigned) ptr) & 0xFFFF);
+	limit = 65536 - (bus_addr & 0xFFFF);
     } else {
 	if (count > 65536 * 2) 
 	    count = 65536 * 2;
-	limit = 65536* 2 - (((unsigned) ptr) & 0x1FFFF);
+	limit = 65536* 2 - (bus_addr & 0x1FFFF);
     }
 
     if (count > limit) count = limit;
 
-    if ((count & 1) || (((unsigned) ptr) & 1))
+    if ((count & 1) || (bus_addr & 1))
 	panic ("scsi%d : attempted unaligned DMA transfer\n", instance->host_no);
     cli();
     disable_dma(instance->dma_channel);
     clear_dma_ff(instance->dma_channel);
-    set_dma_addr(instance->dma_channel, (unsigned int) ptr);
+    set_dma_addr(instance->dma_channel, bus_addr);
     set_dma_count(instance->dma_channel, count);
     set_dma_mode(instance->dma_channel, mode);
     enable_dma(instance->dma_channel);
@@ -344,17 +353,17 @@ static __inline__ int NCR5380_i386_dma_setup (struct Scsi_Host *instance,
     return count;
 }
 
-static __inline__ int NCR5380_i386_dma_write_setup (struct Scsi_Host *instance,
+static __inline__ int NCR5380_pc_dma_write_setup (struct Scsi_Host *instance,
     unsigned char *src, unsigned int count) {
-    return NCR5380_i386_dma_setup (instance, src, count, DMA_MODE_WRITE);
+    return NCR5380_pc_dma_setup (instance, src, count, DMA_MODE_WRITE);
 }
 
-static __inline__ int NCR5380_i386_dma_read_setup (struct Scsi_Host *instance,
+static __inline__ int NCR5380_pc_dma_read_setup (struct Scsi_Host *instance,
     unsigned char *src, unsigned int count) {
-    return NCR5380_i386_dma_setup (instance, src, count, DMA_MODE_READ);
+    return NCR5380_pc_dma_setup (instance, src, count, DMA_MODE_READ);
 }
 
-static __inline__ int NCR5380_i386_dma_residual (struct Scsi_Host *instance) {
+static __inline__ int NCR5380_pc_dma_residual (struct Scsi_Host *instance) {
     register int tmp;
     cli();
     clear_dma_ff(instance->dma_channel);
@@ -362,7 +371,8 @@ static __inline__ int NCR5380_i386_dma_residual (struct Scsi_Host *instance) {
     sti();
     return tmp;
 }
-#endif /* defined(REAL_DMA) && defined(i386)  */
+#endif /* defined(i386) || defined(__alpha__) */
+#endif /* defined(REAL_DMA)  */
 #endif __KERNEL_
 #endif /* ndef ASM */
 #endif /* NCR5380_H */

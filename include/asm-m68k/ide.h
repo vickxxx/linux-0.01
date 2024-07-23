@@ -1,60 +1,132 @@
-#ifndef _M68K_IDE_H
-#define _M68K_IDE_H
-
+/*
+ *  linux/include/asm-m68k/ide.h
+ *
+ *  Copyright (C) 1994-1996  Linus Torvalds & authors
+ */
+ 
 /* Copyright(c) 1996 Kars de Jong */
 /* Based on the ide driver from 1.2.13pl8 */
 
+/*
+ * Credits (alphabetical):
+ *
+ *  - Bjoern Brauel
+ *  - Kars de Jong
+ *  - Torsten Ebeling
+ *  - Dwight Engen
+ *  - Thorsten Floeck
+ *  - Roman Hodek
+ *  - Guenther Kelleter
+ *  - Chris Lawrence
+ *  - Michael Rausch
+ *  - Christian Sauer
+ *  - Michael Schmitz
+ *  - Jes Soerensen
+ *  - Michael Thurm
+ *  - Geert Uytterhoeven
+ */
+
+#ifndef _M68K_IDE_H
+#define _M68K_IDE_H
+
+#ifdef __KERNEL__
+
 #include <linux/config.h>
 
-#ifdef CONFIG_AMIGA
-#include <asm/amigahw.h>
-#include <asm/amihdreg.h>
-#include <asm/amigaints.h>
-#endif /* CONFIG_AMIGA */
+#include <asm/setup.h>
+#include <asm/io.h>
+#include <asm/irq.h>
 
 #ifdef CONFIG_ATARI
-#include <asm/atarihw.h>
-#include <asm/atarihdreg.h>
-#include <asm/atariints.h>
 #include <asm/atari_stdma.h>
-#endif /* CONFIG_ATARI */
+#endif
 
-#include <asm/bootinfo.h>
+#ifdef CONFIG_MAC
+#include <asm/macints.h>
+#endif
 
-struct hd_regs_struct {
-  unsigned int hd_error,
-  hd_nsector,
-  hd_sector,
-  hd_lcyl,
-  hd_hcyl,
-  hd_select,
-  hd_status;
-};
+typedef unsigned char * ide_ioreg_t;
 
-static struct hd_regs_struct hd_regs;
-static void probe_m68k_ide (void);
+#ifndef MAX_HWIFS
+#define MAX_HWIFS	4	/* same as the other archs */
+#endif
 
-/* Undefine these again, they were defined for the PC. */
-#undef IDE_ERROR_OFFSET
-#undef IDE_NSECTOR_OFFSET
-#undef IDE_SECTOR_OFFSET
-#undef IDE_LCYL_OFFSET
-#undef IDE_HCYL_OFFSET
-#undef IDE_SELECT_OFFSET
-#undef IDE_STATUS_OFFSET
-#undef IDE_FEATURE_OFFSET
-#undef IDE_COMMAND_OFFSET
-#undef SELECT_DRIVE
+static __inline int ide_default_irq (ide_ioreg_t base)
+{
+	return 0;
+}
 
-#define IDE_ERROR_OFFSET	hd_regs.hd_error
-#define IDE_NSECTOR_OFFSET	hd_regs.hd_nsector
-#define IDE_SECTOR_OFFSET	hd_regs.hd_sector
-#define IDE_LCYL_OFFSET		hd_regs.hd_lcyl
-#define IDE_HCYL_OFFSET		hd_regs.hd_hcyl
-#define IDE_SELECT_OFFSET	hd_regs.hd_select
-#define IDE_STATUS_OFFSET	hd_regs.hd_status
-#define IDE_FEATURE_OFFSET	IDE_ERROR_OFFSET
-#define IDE_COMMAND_OFFSET	IDE_STATUS_OFFSET
+/*
+ *  Can we do this in a generic manner??
+ */
+static __inline__ void ide_init_hwif_ports (ide_ioreg_t *p, ide_ioreg_t base, int *irq)
+{
+    printk("ide_init_hwif_ports: must not be called\n");
+}
+
+typedef union {
+	unsigned all			: 8;	/* all of the bits together */
+	struct {
+		unsigned bit7		: 1;	/* always 1 */
+		unsigned lba		: 1;	/* using LBA instead of CHS */
+		unsigned bit5		: 1;	/* always 1 */
+		unsigned unit		: 1;	/* drive select number, 0 or 1 */
+		unsigned head		: 4;	/* always zeros here */
+	} b;
+	} select_t;
+
+#ifdef CONFIG_MAC	/* MSch: Hack; wrapper for ide_intr */
+void mac_ide_intr(int irq, void *dev_id, struct pt_regs *regs);
+#endif
+
+static __inline__ int ide_request_irq(unsigned int irq, void (*handler)(int, void *, struct pt_regs *),
+			unsigned long flags, const char *device, void *dev_id)
+{
+#ifdef CONFIG_AMIGA
+	if (MACH_IS_AMIGA)
+		return request_irq(irq, handler, 0, device, dev_id);
+#endif /* CONFIG_AMIGA */
+#ifdef CONFIG_MAC
+	if (MACH_IS_MAC)
+#if 0	/* MSch Hack: maybe later we'll call ide_intr without a wrapper */
+	return nubus_request_irq(12, dev_id, handler);
+#else
+	return nubus_request_irq(12, dev_id, mac_ide_intr);
+#endif
+#endif /* CONFIG_MAC */
+	return 0;
+}
+
+static __inline__ void ide_free_irq(unsigned int irq, void *dev_id)
+{
+#ifdef CONFIG_AMIGA
+	if (MACH_IS_AMIGA)
+		free_irq(irq, dev_id);
+#endif /* CONFIG_AMIGA */
+#ifdef CONFIG_MAC
+	if (MACH_IS_MAC)
+		nubus_free_irq(12);
+#endif /* CONFIG_MAC */
+}
+
+/*
+ * We should really implement those some day.
+ */
+static __inline__ int ide_check_region (ide_ioreg_t from, unsigned int extent)
+{
+	return 0;
+}
+
+static __inline__ void ide_request_region (ide_ioreg_t from, unsigned int extent, const char *name)
+{
+}
+
+static __inline__ void ide_release_region (ide_ioreg_t from, unsigned int extent)
+{
+}
+
+#undef SUPPORT_SLOW_DATA_PORTS
+#define SUPPORT_SLOW_DATA_PORTS 0
 
 #undef SUPPORT_VLB_SYNC
 #define SUPPORT_VLB_SYNC 0
@@ -62,111 +134,194 @@ static void probe_m68k_ide (void);
 #undef HD_DATA
 #define HD_DATA NULL
 
-/* MSch: changed sti() to STI() wherever possible in ide.c; moved STI() def. 
- * to asm/ide.h 
- */
-/* The Atari interrupt structure strictly requires that the IPL isn't lowered
- * uncontrolled in an interrupt handler. In the concrete case, the IDE
- * interrupt is already a slow int, so the irq is already disabled at the time
- * the handler is called, and the IPL has been lowered to the minimum value
- * possible. To avoid going below that, STI() checks for being called inside
- * an interrupt, and in that case it does nothing. Hope that is reasonable and
- * works. (Roman)
- */
-#if defined(CONFIG_ATARI) && !defined(CONFIG_AMIGA)
-#define	STI()					\
-    do {					\
-	if (!intr_count) sti();			\
-    } while(0)
-#elif defined(CONFIG_ATARI)
-#define	STI()						\
-    do {						\
-	if (!MACH_IS_ATARI || !intr_count) sti();	\
-    } while(0)
-#else /* !defined(CONFIG_ATARI) */
-#define	STI()	sti()
-#endif
+#define insl(data_reg, buffer, wcount) insw(data_reg, buffer, (wcount)<<1)
+#define outsl(data_reg, buffer, wcount) outsw(data_reg, buffer, (wcount)<<1)
 
-#define SELECT_DRIVE(hwif,drive)  OUT_BYTE((drive)->select.all, hwif->io_base+IDE_SELECT_OFFSET);
+#define insw(port, buf, nr) ({				\
+	unsigned char *_port = (unsigned char *)(port);	\
+	unsigned char *_buf = (buf);			\
+	int _nr = (nr);					\
+	unsigned long _tmp;				\
+							\
+	if (_nr & 15) {					\
+		_tmp = (_nr & 15) - 1;			\
+		asm volatile (				\
+			"1: movew %2@,%0@+; dbra %1,1b"	\
+			: "=a" (_buf), "=d" (_tmp)	\
+			: "a" (_port), "0" (_buf),	\
+			  "1" (_tmp));			\
+	}						\
+	if (_nr >> 4) {					\
+		_tmp = (_nr >> 4) - 1;			\
+		asm volatile (				\
+			"1: "				\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"movew %2@,%0@+; "		\
+			"dbra %1,1b"			\
+			: "=a" (_buf), "=d" (_tmp)	\
+			: "a" (_port), "0" (_buf),	\
+			  "1" (_tmp));			\
+	}						\
+})
 
-#define insl(data_reg, buffer, wcount) insw(data_reg, buffer, wcount<<1)
-#define outsl(data_reg, buffer, wcount) outsw(data_reg, buffer, wcount<<1)
+#define outsw(port, buf, nr) ({				\
+	unsigned char *_port = (unsigned char *)(port);	\
+	unsigned char *_buf = (buf);			\
+	int _nr = (nr);					\
+	unsigned long _tmp;				\
+							\
+	if (_nr & 15) {					\
+		_tmp = (_nr & 15) - 1;			\
+		asm volatile (				\
+			"1: movew %0@+,%2@; dbra %1,1b"	\
+			: "=a" (_buf), "=d" (_tmp)	\
+			: "a" (_port), "0" (_buf),	\
+			  "1" (_tmp));			\
+	}						\
+	if (_nr >> 4) {					\
+		_tmp = (_nr >> 4) - 1;			\
+		asm volatile (				\
+			"1: "				\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"movew %0@+,%2@; "		\
+			"dbra %1,1b"	   		\
+			: "=a" (_buf), "=d" (_tmp)	\
+			: "a" (_port), "0" (_buf),	\
+			  "1" (_tmp));			\
+	}						\
+})
 
-#define insw(port, buf, nr) \
-    if (nr % 16) \
+#ifdef CONFIG_ATARI
+#define insl_swapw(data_reg, buffer, wcount) \
+    insw_swapw(data_reg, buffer, (wcount)<<1)
+#define outsl_swapw(data_reg, buffer, wcount) \
+    outsw_swapw(data_reg, buffer, (wcount)<<1)
+
+#define insw_swapw(port, buf, nr) \
+    if ((nr) % 8) \
 	__asm__ __volatile__ \
 	       ("movel %0,%/a0; \
 		 movel %1,%/a1; \
 		 movel %2,%/d6; \
 		 subql #1,%/d6; \
-	       1:movew %/a0@,%/a1@+; \
+	       1:movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
 		 dbra %/d6,1b" : \
 		: "g" (port), "g" (buf), "g" (nr) \
-		: "a0", "a1", "d6"); \
+		: "d0", "a0", "a1", "d6"); \
     else \
 	__asm__ __volatile__ \
 	       ("movel %0,%/a0; \
 		 movel %1,%/a1; \
 		 movel %2,%/d6; \
-		 lsrl  #4,%/d6; \
+		 lsrl  #3,%/d6; \
 		 subql #1,%/d6; \
-	       1:movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
-		 movew %/a0@,%/a1@+; \
+	       1:movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
+		 movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
+		 movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
+		 movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
+		 movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
+		 movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
+		 movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
+		 movew %/a0@,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a1@+; \
 		 dbra %/d6,1b" : \
 		: "g" (port), "g" (buf), "g" (nr) \
-		: "a0", "a1", "d6");
+		: "d0", "a0", "a1", "d6")
 
-#define outsw(port, buf, nr) \
-    if (nr % 16) \
+#define outsw_swapw(port, buf, nr) \
+    if ((nr) % 8) \
 	__asm__ __volatile__ \
 	       ("movel %0,%/a0; \
 		 movel %1,%/a1; \
 		 movel %2,%/d6; \
 		 subql #1,%/d6; \
-	       1:movew %/a1@+,%/a0@; \
+	       1:movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
 		 dbra %/d6,1b" : \
 		: "g" (port), "g" (buf), "g" (nr) \
-		: "a0", "a1", "d6"); \
+		: "d0", "a0", "a1", "d6"); \
     else \
 	__asm__ __volatile__ \
 	       ("movel %0,%/a0; \
 		 movel %1,%/a1; \
 		 movel %2,%/d6; \
-		 lsrl  #4,%/d6; \
+		 lsrl  #3,%/d6; \
 		 subql #1,%/d6; \
-	       1:movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
-		 movew %/a1@+,%/a0@; \
+	       1:movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
+		 movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
+		 movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
+		 movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
+		 movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
+		 movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
+		 movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
+		 movew %/a1@+,%/d0; \
+		 rolw  #8,%/d0; \
+		 movew %/d0,%/a0@; \
 		 dbra %/d6,1b" : \
 		: "g" (port), "g" (buf), "g" (nr) \
-		: "a0", "a1", "d6");
+		: "d0", "a0", "a1", "d6")
+
+#endif /* CONFIG_ATARI */
 
 #define T_CHAR          (0x0000)        /* char:  don't touch  */
 #define T_SHORT         (0x4000)        /* short: 12 -> 21     */
@@ -181,10 +336,11 @@ static void probe_m68k_ide (void);
 #define D_INT(cnt)      (T_INT   | (cnt))
 #define D_TEXT(cnt)     (T_TEXT  | (cnt))
 
+#if defined(CONFIG_AMIGA) || defined (CONFIG_MAC)
 static u_short driveid_types[] = {
 	D_SHORT(10),	/* config - vendor2 */
 	D_TEXT(20),	/* serial_no */
-	D_SHORT(3),	/* buf_type - ecc_bytes */
+	D_SHORT(3),	/* buf_type, buf_size - ecc_bytes */
 	D_TEXT(48),	/* fw_rev - model */
 	D_CHAR(2),	/* max_multsect - vendor3 */
 	D_SHORT(1),	/* dword_io */
@@ -199,13 +355,17 @@ static u_short driveid_types[] = {
 };
 
 #define num_driveid_types       (sizeof(driveid_types)/sizeof(*driveid_types))
+#endif /* CONFIG_AMIGA */
 
-static __inline__ void big_endianize_driveid(struct hd_driveid *id)
+static __inline__ void ide_fix_driveid(struct hd_driveid *id)
 {
+#if defined(CONFIG_AMIGA) || defined (CONFIG_MAC)
    u_char *p = (u_char *)id;
    int i, j, cnt;
    u_char t;
 
+   if (!MACH_IS_AMIGA && !MACH_IS_MAC)
+   	return;
    for (i = 0; i < num_driveid_types; i++) {
       cnt = driveid_types[i] & T_MASK_COUNT;
       switch (driveid_types[i] & T_MASK_TYPE) {
@@ -241,6 +401,68 @@ static __inline__ void big_endianize_driveid(struct hd_driveid *id)
             break;
       }
    }
+#endif /* CONFIG_AMIGA */
 }
+
+static __inline__ void ide_release_lock (int *ide_lock)
+{
+#ifdef CONFIG_ATARI
+	if (MACH_IS_ATARI) {
+		if (*ide_lock == 0) {
+			printk("ide_release_lock: bug\n");
+			return;
+		}
+		*ide_lock = 0;
+		stdma_release();
+	}
+#endif /* CONFIG_ATARI */
+}
+
+static __inline__ void ide_get_lock (int *ide_lock, void (*handler)(int, void *, struct pt_regs *), void *data)
+{
+#ifdef CONFIG_ATARI
+	if (MACH_IS_ATARI) {
+		if (*ide_lock == 0) {
+			if (in_interrupt() > 0)
+				panic( "Falcon IDE hasn't ST-DMA lock in interrupt" );
+			stdma_lock(handler, data);
+			*ide_lock = 1;
+		}
+	}
+#endif /* CONFIG_ATARI */
+}
+
+#define ide_ack_intr(hwif)	((hwif)->ack_intr ? (hwif)->ack_intr(hwif) : 1)
+
+/*
+ * On the Atari, we sometimes can't enable interrupts:
+ */
+
+/* MSch: changed sti() to STI() wherever possible in ide.c; moved STI() def. 
+ * to asm/ide.h 
+ */
+/* The Atari interrupt structure strictly requires that the IPL isn't lowered
+ * uncontrolled in an interrupt handler. In the concrete case, the IDE
+ * interrupt is already a slow int, so the irq is already disabled at the time
+ * the handler is called, and the IPL has been lowered to the minimum value
+ * possible. To avoid going below that, STI() checks for being called inside
+ * an interrupt, and in that case it does nothing. Hope that is reasonable and
+ * works. (Roman)
+ */
+#ifdef CONFIG_ATARI_ONLY
+#define	ide__sti()					\
+    do {						\
+	if (!in_interrupt()) __sti();			\
+    } while(0)
+#elif defined(CONFIG_ATARI)
+#define	ide__sti()						\
+    do {							\
+	if (!MACH_IS_ATARI || !in_interrupt()) sti();		\
+    } while(0)
+#else /* !defined(CONFIG_ATARI) */
+#define	ide__sti()	__sti()
+#endif
+
+#endif /* __KERNEL__ */
 
 #endif /* _M68K_IDE_H */

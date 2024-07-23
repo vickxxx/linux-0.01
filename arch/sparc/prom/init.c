@@ -1,22 +1,28 @@
-/* $Id: init.c,v 1.7 1996/04/04 16:31:00 tridge Exp $
+/* $Id: init.c,v 1.12 1998/01/30 10:59:02 jj Exp $
  * init.c:  Initialize internal variables used by the PROM
  *          library functions.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
+ * Copyright (C) 1998 Jakub Jelinek (jj@sunsite.mff.cuni.cz)
  */
 
 #include <linux/config.h>
 #include <linux/kernel.h>
+#include <linux/init.h>
 
 #include <asm/openprom.h>
 #include <asm/oplib.h>
+#include <asm/sun4prom.h>
 
 struct linux_romvec *romvec;
 enum prom_major_version prom_vers;
 unsigned int prom_rev, prom_prev;
+linux_sun4_romvec *sun4_romvec;
 
 /* The root node of the prom device tree. */
 int prom_root_node;
+
+int prom_stdin, prom_stdout;
 
 /* Pointer to the device tree operations structure. */
 struct linux_nodeops *prom_nodeops;
@@ -29,17 +35,18 @@ struct linux_nodeops *prom_nodeops;
 extern void prom_meminit(void);
 extern void prom_ranges_init(void);
 
-void
-prom_init(struct linux_romvec *rp)
+__initfunc(void prom_init(struct linux_romvec *rp))
 {
+#ifdef CONFIG_SUN4
+	extern struct linux_romvec *sun4_prom_init(void);
+	rp = sun4_prom_init();
+#endif
+#if CONFIG_AP1000
+	extern struct linux_romvec *ap_prom_init(void);
+	rp = ap_prom_init();
+#endif
 	romvec = rp;
 
-#if CONFIG_AP1000
-        prom_vers = PROM_AP1000;
-        prom_meminit();
-        prom_ranges_init();
-	return;
-#endif
 	switch(romvec->pv_romvers) {
 	case 0:
 		prom_vers = PROM_V0;
@@ -50,11 +57,13 @@ prom_init(struct linux_romvec *rp)
 	case 3:
 		prom_vers = PROM_V3;
 		break;
-	case 4:
-		prom_vers = PROM_P1275;
-		prom_printf("PROMLIB: Sun IEEE Prom not supported yet\n");
-		prom_halt();
+	case 40:
+		prom_vers = PROM_SUN4;
 		break;
+	case 42: /* why not :-) */
+		prom_vers = PROM_AP1000;
+		break;
+
 	default:
 		prom_printf("PROMLIB: Bad PROM version %d\n",
 			    romvec->pv_romvers);
@@ -74,12 +83,20 @@ prom_init(struct linux_romvec *rp)
 	   (((unsigned long) prom_nodeops) == -1))
 		prom_halt();
 
+	if(prom_vers == PROM_V2 || prom_vers == PROM_V3) {
+		prom_stdout = *romvec->pv_v2bootargs.fd_stdout;
+		prom_stdin  = *romvec->pv_v2bootargs.fd_stdin;
+	}
+	
 	prom_meminit();
 
 	prom_ranges_init();
 
+#ifndef CONFIG_SUN4
+	/* SUN4 prints this in sun4_prom_init */
 	printk("PROMLIB: Sun Boot Prom Version %d Revision %d\n",
 	       romvec->pv_romvers, prom_rev);
+#endif
 
 	/* Initialization successful. */
 	return;

@@ -1,4 +1,4 @@
-/* $Id: winmacro.h,v 1.16 1996/03/27 02:43:18 davem Exp $
+/* $Id: winmacro.h,v 1.20 1998/03/09 14:04:54 jj Exp $
  * winmacro.h: Window loading-unloading macros.
  *
  * Copyright (C) 1995 David S. Miller (davem@caip.rutgers.edu)
@@ -98,32 +98,44 @@
         STORE_PT_INS(base_reg)
 
 #define SAVE_BOLIXED_USER_STACK(cur_reg, scratch) \
-        ld       [%cur_reg + THREAD_W_SAVED], %scratch; \
+        ld       [%cur_reg + AOFF_task_tss + AOFF_thread_w_saved], %scratch; \
         sll      %scratch, 2, %scratch; \
         add      %scratch, %cur_reg, %scratch; \
-        st       %sp, [%scratch + THREAD_STACK_PTRS]; \
+        st       %sp, [%scratch + AOFF_task_tss + AOFF_thread_rwbuf_stkptrs]; \
         sub      %scratch, %cur_reg, %scratch; \
         sll      %scratch, 4, %scratch; \
         add      %scratch, %cur_reg, %scratch; \
-        STORE_WINDOW(scratch + THREAD_REG_WINDOW); \
+        STORE_WINDOW(scratch + AOFF_task_tss + AOFF_thread_reg_window); \
         sub      %scratch, %cur_reg, %scratch; \
         srl      %scratch, 6, %scratch; \
         add      %scratch, 1, %scratch; \
-        st       %scratch, [%cur_reg + THREAD_W_SAVED];
+        st       %scratch, [%cur_reg + AOFF_task_tss + AOFF_thread_w_saved];
 
 #ifdef __SMP__
-#define LOAD_CURRENT(dest_reg, idreg) \
+#define LOAD_CURRENT4M(dest_reg, idreg) \
         rd       %tbr, %idreg; \
-        srl      %idreg, 10, %idreg; \
-	and      %idreg, 0xc, %idreg; \
 	sethi    %hi(C_LABEL(current_set)), %dest_reg; \
+        srl      %idreg, 10, %idreg; \
 	or       %dest_reg, %lo(C_LABEL(current_set)), %dest_reg; \
-	add      %dest_reg, %idreg, %dest_reg; \
-	ld       [%dest_reg], %dest_reg;
+	and      %idreg, 0xc, %idreg; \
+	ld       [%idreg + %dest_reg], %dest_reg;
+
+/* Sliiick. We have a Linux current register :) -jj */
+#define LOAD_CURRENT4D(dest_reg) \
+	lda	 [%g0] ASI_M_VIKING_TMP2, %dest_reg;
+
+/* Blackbox - take care with this... - check smp4m and smp4d before changing this. */
+#define LOAD_CURRENT(dest_reg, idreg) 					\
+	sethi	 %hi(___b_load_current), %idreg;			\
+	sethi    %hi(C_LABEL(current_set)), %dest_reg; 			\
+	sethi    %hi(C_LABEL(boot_cpu_id4)), %idreg; 			\
+	or       %dest_reg, %lo(C_LABEL(current_set)), %dest_reg; 	\
+	ldub	 [%idreg + %lo(C_LABEL(boot_cpu_id4))], %idreg;		\
+	ld       [%idreg + %dest_reg], %dest_reg;
 #else
 #define LOAD_CURRENT(dest_reg, idreg) \
-        sethi    %hi(C_LABEL(current_set)), %dest_reg; \
-        ld       [%dest_reg + %lo(C_LABEL(current_set))], %dest_reg;
+        sethi    %hi(C_LABEL(current_set)), %idreg; \
+        ld       [%idreg + %lo(C_LABEL(current_set))], %dest_reg;
 #endif
 
 #endif /* !(_SPARC_WINMACRO_H) */

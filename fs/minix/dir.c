@@ -12,25 +12,26 @@
 #include <linux/minix_fs.h>
 #include <linux/stat.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-static long minix_dir_read(struct inode * inode, struct file * filp,
-	char * buf, unsigned long count)
+static ssize_t minix_dir_read(struct file * filp, char * buf,
+			      size_t count, loff_t *ppos)
 {
 	return -EISDIR;
 }
 
-static int minix_readdir(struct inode *, struct file *, void *, filldir_t);
+static int minix_readdir(struct file *, void *, filldir_t);
 
 static struct file_operations minix_dir_operations = {
 	NULL,			/* lseek - default */
 	minix_dir_read,		/* read */
 	NULL,			/* write - bad */
 	minix_readdir,		/* readdir */
-	NULL,			/* select - default */
+	NULL,			/* poll - default */
 	NULL,			/* ioctl - default */
 	NULL,			/* mmap */
 	NULL,			/* no special open code */
+	NULL,			/* flush */
 	NULL,			/* no special release code */
 	file_fsync		/* default fsync */
 };
@@ -54,17 +55,18 @@ struct inode_operations minix_dir_inode_operations = {
 	NULL,			/* readpage */
 	NULL,			/* writepage */
 	NULL,			/* bmap */
-	minix_truncate,		/* truncate */
+	NULL,			/* truncate */
 	NULL			/* permission */
 };
 
-static int minix_readdir(struct inode * inode, struct file * filp,
+static int minix_readdir(struct file * filp,
 	void * dirent, filldir_t filldir)
 {
 	unsigned int offset;
 	struct buffer_head * bh;
 	struct minix_dir_entry * de;
 	struct minix_sb_info * info;
+	struct inode *inode = filp->f_dentry->d_inode;
 
 	if (!inode || !inode->i_sb || !S_ISDIR(inode->i_mode))
 		return -EBADF;
@@ -92,5 +94,6 @@ static int minix_readdir(struct inode * inode, struct file * filp,
 		} while (offset < 1024 && filp->f_pos < inode->i_size);
 		brelse(bh);
 	}
+	UPDATE_ATIME(inode);
 	return 0;
 }

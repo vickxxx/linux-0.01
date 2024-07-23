@@ -13,12 +13,14 @@ typedef unsigned short	__kernel_mode_t;
 typedef unsigned short	__kernel_nlink_t;
 typedef long		__kernel_off_t;
 typedef int		__kernel_pid_t;
+typedef unsigned short	__kernel_ipc_pid_t;
 typedef unsigned short	__kernel_uid_t;
 typedef unsigned short	__kernel_gid_t;
 typedef unsigned int	__kernel_size_t;
 typedef int		__kernel_ssize_t;
 typedef int		__kernel_ptrdiff_t;
 typedef long		__kernel_time_t;
+typedef long		__kernel_suseconds_t;
 typedef long		__kernel_clock_t;
 typedef int		__kernel_daddr_t;
 typedef char *		__kernel_caddr_t;
@@ -34,6 +36,8 @@ typedef struct {
 	int	__val[2];
 #endif /* !defined(__KERNEL__) && !defined(__USE_ALL) */
 } __kernel_fsid_t;
+
+#if defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2)
 
 #undef	__FD_SET
 #define __FD_SET(fd,fdsetp) \
@@ -59,5 +63,7 @@ typedef struct {
 			:"=m" (*(__kernel_fd_set *) (fdsetp)) \
 			:"a" (0), "c" (__FDSET_LONGS), \
 			"D" ((__kernel_fd_set *) (fdsetp)) :"cx","di")
+
+#endif /* defined(__KERNEL__) || !defined(__GLIBC__) || (__GLIBC__ < 2) */
 
 #endif

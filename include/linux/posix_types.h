@@ -41,9 +41,15 @@
 #undef __FDMASK
 #define	__FDMASK(d)	(1UL << ((d) % __NFDBITS))
 
-typedef struct fd_set {
+typedef struct {
 	unsigned long fds_bits [__FDSET_LONGS];
 } __kernel_fd_set;
+
+/* Type of a signal handler.  */
+typedef void (*__kernel_sighandler_t)(int);
+
+/* Type of a SYSV IPC key.  */
+typedef int __kernel_key_t;
 
 #include <asm/posix_types.h>
 

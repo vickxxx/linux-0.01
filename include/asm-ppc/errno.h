@@ -124,10 +124,15 @@
 #define	EREMOTEIO	121	/* Remote I/O error */
 #define	EDQUOT		122	/* Quota exceeded */
 
+#define	ENOMEDIUM	123	/* No medium found */
+#define	EMEDIUMTYPE	124	/* Wrong medium type */
+
 /* Should never be seen by user programs */
 #define ERESTARTSYS	512
 #define ERESTARTNOINTR	513
 #define ERESTARTNOHAND	514	/* restart if no handler.. */
 #define ENOIOCTLCMD	515	/* No ioctl command */
+
+#define _LAST_ERRNO	515
 
 #endif

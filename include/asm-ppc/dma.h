@@ -1,15 +1,25 @@
-/* $Id: dma.h,v 1.7 1992/12/14 00:29:34 root Exp root $
+/* $Id: dma.h,v 1.3 1997/03/16 06:20:39 cort Exp $
  * linux/include/asm/dma.h: Defines for using and allocating dma channels.
  * Written by Hennus Bergman, 1992.
  * High DMA channel support & info by Hannu Savolainen
  * and John Boyd, Nov. 1992.
+ * Changes for ppc sound by Christoph Nadig
  */
+
+#include <linux/config.h>
+#include <asm/io.h>
+#include <asm/spinlock.h>
+#include <asm/system.h>
 
 /*
  * Note: Adapted for PowerPC by Gary Thomas
+ * Modified by Cort Dougan <cort@cs.nmt.edu>
+ *
+ * None of this really applies for Power Macintoshes.  There is
+ * basically just enough here to get kernel/dma.c to compile.
  *
  * There may be some comments or restrictions made here which are
- * not valid for the PowerPC (PreP) platform.  Take what you read
+ * not valid for the PReP platform.  Take what you read
  * with a grain of salt.
  */
  
@@ -17,7 +27,44 @@
 #ifndef _ASM_DMA_H
 #define _ASM_DMA_H
 
-#include <asm/io.h>		/* need byte IO */
+#ifndef MAX_DMA_CHANNELS
+#define MAX_DMA_CHANNELS	8
+#endif
+
+/* The maximum address that we can perform a DMA transfer to on this platform */
+/* Doesn't really apply... */
+#define MAX_DMA_ADDRESS      0xFFFFFFFF
+
+#if defined(CONFIG_MACH_SPECIFIC)
+
+#if defined(CONFIG_PREP)
+#define DMA_MODE_READ 0x44
+#define DMA_MODE_WRITE 0x48
+#define ISA_DMA_THRESHOLD 0x00ffffff
+#endif /* CONFIG_PREP */
+
+#if defined(CONFIG_CHRP)
+#define DMA_MODE_READ 0x44
+#define DMA_MODE_WRITE 0x48
+#define ISA_DMA_THRESHOLD ~0L
+#endif /* CONFIG_CHRP */
+
+#ifdef CONFIG_PMAC
+#define DMA_MODE_READ 1
+#define DMA_MODE_WRITE 2
+#define ISA_DMA_THRESHOLD ~0L
+#endif /* CONFIG_PMAC */
+
+#ifdef CONFIG_APUS
+/* This is bogus and should go away. */
+#define ISA_DMA_THRESHOLD (0x00ffffff)
+#endif
+
+#else
+/* in arch/ppc/kernel/setup.c -- Cort */
+extern unsigned long DMA_MODE_WRITE, DMA_MODE_READ;
+extern unsigned long ISA_DMA_THRESHOLD;
+#endif
 
 
 #ifdef HAVE_REALLY_SLOW_DMA_CONTROLLER
@@ -44,7 +91,8 @@
  *  - page registers for 5-7 don't use data bit 0, represent 128K pages
  *  - page registers for 0-3 use bit 0, represent 64K pages
  *
- * DMA transfers are limited to the lower 16MB of _physical_ memory.  
+ * On PReP, DMA transfers are limited to the lower 16MB of _physical_ memory.  
+ * On CHRP, the W83C553F (and VLSI Tollgate?) support full 32 bit addressing.
  * Note that addresses loaded into registers must be _physical_ addresses,
  * not logical addresses (which may differ if paging is active).
  *
@@ -76,11 +124,20 @@
  *
  */
 
-#define MAX_DMA_CHANNELS	8
-
-/* The maximum address that we can perform a DMA transfer to on this platform */
-/* Doesn't really apply... */
-#define MAX_DMA_ADDRESS      0xFFFFFFFF
+/* used in nasty hack for sound - see prep_setup_arch() -- Cort */
+extern long ppc_cs4232_dma, ppc_cs4232_dma2;
+#ifdef CONFIG_CS4232
+#define SND_DMA1 ppc_cs4232_dma
+#define SND_DMA2 ppc_cs4232_dma2
+#else
+#ifdef CONFIG_MSS
+#define SND_DMA1 CONFIG_MSS_DMA
+#define SND_DMA2 CONFIG_MSS_DMA2
+#else
+#define SND_DMA1 -1
+#define SND_DMA2 -1
+#endif
+#endif
 
 /* 8237 DMA controllers */
 #define IO_DMA1_BASE	0x00	/* 8 bit slave DMA, channels 0..3 */
@@ -143,9 +200,24 @@
 #define DMA_HI_PAGE_6              0x489
 #define DMA_HI_PAGE_7              0x48A
 
-#define DMA_MODE_READ	0x44	/* I/O to memory, no autoinit, increment, single mode */
-#define DMA_MODE_WRITE	0x48	/* memory to I/O, no autoinit, increment, single mode */
+#define DMA1_EXT_REG               0x40B
+#define DMA2_EXT_REG               0x4D6
+
 #define DMA_MODE_CASCADE 0xC0   /* pass thru DREQ->HRQ, DACK<-HLDA only */
+
+extern spinlock_t  dma_spin_lock;
+
+static __inline__ unsigned long claim_dma_lock(void)
+{
+	unsigned long flags;
+	spin_lock_irqsave(&dma_spin_lock, flags);
+	return flags;
+}
+
+static __inline__ void release_dma_lock(unsigned long flags)
+{
+	spin_unlock_irqrestore(&dma_spin_lock, flags);
+}
 
 /* enable/disable a specific DMA channel */
 static __inline__ void enable_dma(unsigned int dmanr)
@@ -207,9 +279,11 @@ static __inline__ void set_dma_page(unsigned int dmanr, int pagenr)
 	switch(dmanr) {
 		case 0:
 			dma_outb(pagenr, DMA_LO_PAGE_0);
+                        dma_outb(pagenr>>8, DMA_HI_PAGE_0);
 			break;
 		case 1:
 			dma_outb(pagenr, DMA_LO_PAGE_1);
+                        dma_outb(pagenr>>8, DMA_HI_PAGE_1);
 			break;
 		case 2:
 			dma_outb(pagenr, DMA_LO_PAGE_2);
@@ -217,16 +291,29 @@ static __inline__ void set_dma_page(unsigned int dmanr, int pagenr)
 			break;
 		case 3:
 			dma_outb(pagenr, DMA_LO_PAGE_3);
+			dma_outb(pagenr>>8, DMA_HI_PAGE_3); 
 			break;
-		case 5:
-			dma_outb(pagenr & 0xfe, DMA_LO_PAGE_5);
+	        case 5:
+		        if (SND_DMA1 == 5 || SND_DMA2 == 5)
+				dma_outb(pagenr, DMA_LO_PAGE_5);
+			else
+				dma_outb(pagenr & 0xfe, DMA_LO_PAGE_5);
+                        dma_outb(pagenr>>8, DMA_HI_PAGE_5);
 			break;
 		case 6:
-			dma_outb(pagenr & 0xfe, DMA_LO_PAGE_6);
+		        if (SND_DMA1 == 6 || SND_DMA2 == 6)
+				dma_outb(pagenr, DMA_LO_PAGE_6);
+			else
+				dma_outb(pagenr & 0xfe, DMA_LO_PAGE_6);
+			dma_outb(pagenr>>8, DMA_HI_PAGE_6);
 			break;
 		case 7:
-			dma_outb(pagenr & 0xfe, DMA_LO_PAGE_7);
-			break;
+			if (SND_DMA1 == 7 || SND_DMA2 == 7)
+				dma_outb(pagenr, DMA_LO_PAGE_7);
+			else
+				dma_outb(pagenr & 0xfe, DMA_LO_PAGE_7);
+			dma_outb(pagenr>>8, DMA_HI_PAGE_7);
+		  break;
 	}
 }
 
@@ -240,8 +327,14 @@ static __inline__ void set_dma_addr(unsigned int dmanr, unsigned int phys)
 	    dma_outb( phys & 0xff, ((dmanr&3)<<1) + IO_DMA1_BASE );
             dma_outb( (phys>>8) & 0xff, ((dmanr&3)<<1) + IO_DMA1_BASE );
 	}  else  {
+	  if (dmanr == SND_DMA1 || dmanr == SND_DMA2) {
+	    dma_outb( phys  & 0xff, ((dmanr&3)<<2) + IO_DMA2_BASE );
+	    dma_outb( (phys>>8)  & 0xff, ((dmanr&3)<<2) + IO_DMA2_BASE );
+	    dma_outb( (dmanr&3), DMA2_EXT_REG);
+	  } else {
 	    dma_outb( (phys>>1) & 0xff, ((dmanr&3)<<2) + IO_DMA2_BASE );
 	    dma_outb( (phys>>9) & 0xff, ((dmanr&3)<<2) + IO_DMA2_BASE );
+	  }
 	}
 	set_dma_page(dmanr, phys>>16);
 }
@@ -262,8 +355,13 @@ static __inline__ void set_dma_count(unsigned int dmanr, unsigned int count)
 	    dma_outb( count & 0xff, ((dmanr&3)<<1) + 1 + IO_DMA1_BASE );
 	    dma_outb( (count>>8) & 0xff, ((dmanr&3)<<1) + 1 + IO_DMA1_BASE );
         } else {
+	  if (dmanr == SND_DMA1 || dmanr == SND_DMA2) {
+	    dma_outb( count & 0xff, ((dmanr&3)<<2) + 2 + IO_DMA2_BASE );
+	    dma_outb( (count>>8) & 0xff, ((dmanr&3)<<2) + 2 + IO_DMA2_BASE );
+	  } else {
 	    dma_outb( (count>>1) & 0xff, ((dmanr&3)<<2) + 2 + IO_DMA2_BASE );
 	    dma_outb( (count>>9) & 0xff, ((dmanr&3)<<2) + 2 + IO_DMA2_BASE );
+	  }
         }
 }
 
@@ -287,13 +385,12 @@ static __inline__ int get_dma_residue(unsigned int dmanr)
 	count = 1 + dma_inb(io_port);
 	count += dma_inb(io_port) << 8;
 	
-	return (dmanr<=3)? count : (count<<1);
+	return (dmanr <= 3 || dmanr == SND_DMA1 || dmanr == SND_DMA2)
+	  ? count : (count<<1);
 }
 
-
 /* These are in kernel/dma.c: */
-/*extern int request_dma(unsigned int dmanr, char * device_id);*/	/* reserve a DMA channel */
+extern int request_dma(unsigned int dmanr, const char * device_id);	/* reserve a DMA channel */
 extern void free_dma(unsigned int dmanr);	/* release it again */
-
 
 #endif /* _ASM_DMA_H */

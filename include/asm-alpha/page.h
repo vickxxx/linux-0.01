@@ -8,7 +8,65 @@
 
 #ifdef __KERNEL__
 
+#ifndef __ASSEMBLY__
+
 #define STRICT_MM_TYPECHECKS
+
+/*
+ * A _lot_ of the kernel time is spent clearing pages, so
+ * do this as fast as we possibly can. Also, doing this
+ * as a separate inline function (rather than memset())
+ * results in clearer kernel profiles as we see _who_ is
+ * doing page clearing or copying.
+ */
+static inline void clear_page(unsigned long page)
+{
+	unsigned long count = PAGE_SIZE/64;
+	unsigned long *ptr = (unsigned long *)page;
+
+	do {
+		ptr[0] = 0;
+		ptr[1] = 0;
+		ptr[2] = 0;
+		ptr[3] = 0;
+		count--;
+		ptr[4] = 0;
+		ptr[5] = 0;
+		ptr[6] = 0;
+		ptr[7] = 0;
+		ptr += 8;
+	} while (count);
+}
+
+static inline void copy_page(unsigned long _to, unsigned long _from)
+{
+	unsigned long count = PAGE_SIZE/64;
+	unsigned long *to = (unsigned long *)_to;
+	unsigned long *from = (unsigned long *)_from;
+
+	do {
+		unsigned long a,b,c,d,e,f,g,h;
+		a = from[0];
+		b = from[1];
+		c = from[2];
+		d = from[3];
+		e = from[4];
+		f = from[5];
+		g = from[6];
+		h = from[7];
+		count--;
+		from += 8;
+		to[0] = a;
+		to[1] = b;
+		to[2] = c;
+		to[3] = d;
+		to[4] = e;
+		to[5] = f;
+		to[6] = g;
+		to[7] = h;
+		to += 8;
+	} while (count);
+}
 
 #ifdef STRICT_MM_TYPECHECKS
 /*
@@ -46,12 +104,18 @@ typedef unsigned long pgprot_t;
 #define __pgd(x)	(x)
 #define __pgprot(x)	(x)
 
-#endif
+#endif /* STRICT_MM_TYPECHECKS */
+#endif /* !ASSEMBLY */
 
 /* to align the pointer to the (next) page boundary */
-#define PAGE_ALIGN(addr)		(((addr)+PAGE_SIZE-1)&PAGE_MASK)
+#define PAGE_ALIGN(addr)	(((addr)+PAGE_SIZE-1)&PAGE_MASK)
 
-#define PAGE_OFFSET		0xFFFFFC0000000000UL
+#ifdef USE_48_BIT_KSEG
+#define PAGE_OFFSET		0xffff800000000000
+#else
+#define PAGE_OFFSET		0xfffffc0000000000
+#endif
+
 #define __pa(x)			((unsigned long) (x) - PAGE_OFFSET)
 #define __va(x)			((void *)((unsigned long) (x) + PAGE_OFFSET))
 #define MAP_NR(addr)		(__pa(addr) >> PAGE_SHIFT)

@@ -1,523 +1,496 @@
 /*
  *  linux/fs/umsdos/inode.c
  *
- *	Written 1993 by Jacques Gelinas 
- *	Inspired from linux/fs/msdos/... by Werner Almesberger
- *
+ *      Written 1993 by Jacques Gelinas
+ *      Inspired from linux/fs/msdos/... by Werner Almesberger
  */
 
 #include <linux/module.h>
 
+#include <linux/init.h>
 #include <linux/fs.h>
 #include <linux/msdos_fs.h>
 #include <linux/kernel.h>
 #include <linux/sched.h>
 #include <linux/errno.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <linux/string.h>
 #include <linux/stat.h>
 #include <linux/umsdos_fs.h>
+#include <linux/list.h>
 
-struct inode *pseudo_root=NULL;		/* Useful to simulate the pseudo DOS */
-									/* directory. See UMSDOS_readdir_x() */
-
-/* #Specification: convention / PRINTK Printk and printk
-	Here is the convention for the use of printk inside fs/umsdos
-
-	printk carry important message (error or status).
-	Printk is for debugging (it is a macro defined at the beginning of
-		   most source.
-	PRINTK is a nulled Printk macro.
-
-	This convention makes the source easier to read, and Printk easier
-	to shut off.
-*/
-#define PRINTK(x)
-#define Printk(x) printk x
+extern struct dentry_operations umsdos_dentry_operations;
+extern struct inode_operations umsdos_rdir_inode_operations;
 
 
-void UMSDOS_put_inode(struct inode *inode)
+struct dentry *saved_root = NULL;	/* Original root if changed */
+struct inode *pseudo_root = NULL;	/* Useful to simulate the pseudo DOS */
+					/* directory. See UMSDOS_readdir_x() */
+
+static struct dentry *check_pseudo_root(struct super_block *);
+
+
+/*
+ * Initialize a private filp
+ */
+void fill_new_filp (struct file *filp, struct dentry *dentry)
 {
-	PRINTK (("put inode %x owner %x pos %d dir %x\n",inode
-		,inode->u.umsdos_i.i_emd_owner,inode->u.umsdos_i.pos
-		,inode->u.umsdos_i.i_emd_dir));
-	if (inode != NULL && inode == pseudo_root){
-		printk ("Umsdos: Oops releasing pseudo_root. Notify jacques@solucorp.qc.ca\n");
-	}
-	fat_put_inode(inode);
+	if (!dentry)
+		printk(KERN_ERR "fill_new_filp: NULL dentry!\n");
+
+	memset (filp, 0, sizeof (struct file));
+	filp->f_reada = 1;
+	filp->f_flags = O_RDWR;
+	filp->f_dentry = dentry;
+	filp->f_op = &umsdos_file_operations;
 }
 
 
-void UMSDOS_put_super(struct super_block *sb)
+
+void UMSDOS_put_inode (struct inode *inode)
 {
-	msdos_put_super(sb);
+	PRINTK ((KERN_DEBUG 
+		"put inode %p (%lu) owner %lu pos %lu dir %lu count=%d\n"
+		 ,inode, inode->i_ino
+		 ,inode->u.umsdos_i.i_emd_owner, inode->u.umsdos_i.pos
+		 ,inode->u.umsdos_i.i_emd_dir, inode->i_count));
+
+	if (inode == pseudo_root) {
+		printk (KERN_ERR "Umsdos: Oops releasing pseudo_root."
+			" Notify jacques@solucorp.qc.ca\n");
+	}
+
+	inode->u.umsdos_i.i_patched = 0;
+	fat_put_inode (inode);
+}
+
+
+void UMSDOS_put_super (struct super_block *sb)
+{
+	Printk ((KERN_DEBUG "UMSDOS_put_super: entering\n"));
+	if (saved_root) {
+		shrink_dcache_parent(saved_root);
+printk("UMSDOS_put_super: freeing saved root, d_count=%d\n",
+saved_root->d_count);
+		dput(saved_root);
+		saved_root = NULL;
+		pseudo_root = NULL;
+	}
+	msdos_put_super (sb);
 	MOD_DEC_USE_COUNT;
 }
 
 
-void UMSDOS_statfs(struct super_block *sb,struct statfs *buf, int bufsiz)
-{
-	fat_statfs(sb,buf,bufsiz);
-}
-
-
 /*
-	Call msdos_lookup, but set back the original msdos function table.
-	Return 0 if ok, or a negative error code if not.
-*/
-int umsdos_real_lookup (
-	struct inode *dir,
-	const char *name,
-	int len,
-	struct inode **result)	/* Will hold inode of the file, if successful */
+ * Complete the setup of a directory dentry based on its
+ * EMD/non-EMD status.  If it has an EMD, then plug the
+ * umsdos function table. If not, use the msdos one.
+ */
+void umsdos_setup_dir(struct dentry *dir)
 {
-	int ret;
-	dir->i_count++;
-	ret = msdos_lookup (dir,name,len,result);
-	return ret;
-}
-/*
-	Complete the setup of an directory inode.
-	First, it completes the function pointers, then
-	it locates the EMD file. If the EMD is there, then plug the
-	umsdos function table. If not, use the msdos one.
-*/
-void umsdos_setup_dir_inode (struct inode *inode)
-{
+	struct inode *inode = dir->d_inode;
+
+	if (!S_ISDIR(inode->i_mode))
+		printk(KERN_ERR "umsdos_setup_dir: %s/%s not a dir!\n",
+			dir->d_parent->d_name.name, dir->d_name.name);
+
 	inode->u.umsdos_i.i_emd_dir = 0;
-	{
-		struct inode *emd_dir = umsdos_emd_dir_lookup (inode,0);
-		extern struct inode_operations umsdos_rdir_inode_operations;
-		inode->i_op = emd_dir != NULL
-			? &umsdos_dir_inode_operations
-			: &umsdos_rdir_inode_operations;
-		iput (emd_dir);
+	inode->i_op = &umsdos_rdir_inode_operations;
+	if (umsdos_have_emd(dir)) {
+Printk((KERN_DEBUG "umsdos_setup_dir: %s/%s using EMD\n",
+dir->d_parent->d_name.name, dir->d_name.name));
+		inode->i_op = &umsdos_dir_inode_operations;
 	}
 }
+
+
 /*
-	Add some info into an inode so it can find its owner quickly
-*/
-void umsdos_set_dirinfo(
-	struct inode *inode,
-	struct inode *dir,
-	off_t f_pos)
+ * Add some info into an inode so it can find its owner quickly
+ */
+void umsdos_set_dirinfo_new (struct dentry *dentry, off_t f_pos)
 {
-	struct inode *emd_owner = umsdos_emd_dir_lookup(dir,1);
-	inode->u.umsdos_i.i_dir_owner = dir->i_ino;
-	inode->u.umsdos_i.i_emd_owner = emd_owner->i_ino;
-	iput (emd_owner);
+	struct inode *inode = dentry->d_inode;
+	struct dentry *demd;
+
+	inode->u.umsdos_i.i_emd_owner = 0;
 	inode->u.umsdos_i.pos = f_pos;
+
+	/* now check the EMD file */
+	demd = umsdos_get_emd_dentry(dentry->d_parent);
+	if (!IS_ERR(demd)) {
+		if (demd->d_inode)
+			inode->u.umsdos_i.i_emd_owner = demd->d_inode->i_ino;
+		dput(demd);
+	}
+	return;
 }
+
+
+
 /*
-	Tells if an Umsdos inode has been "patched" once.
-	Return != 0 if so.
-*/
-int umsdos_isinit (struct inode *inode)
+ * Connect the proper tables in the inode and add some info.
+ */
+/* #Specification: inode / umsdos info
+ * The first time an inode is seen (inode->i_count == 1),
+ * the inode number of the EMD file which controls this inode
+ * is tagged to this inode. It allows operations such as
+ * notify_change to be handled.
+ */
+void umsdos_patch_dentry_inode(struct dentry *dentry, off_t f_pos)
 {
-#if	1
-	return inode->u.umsdos_i.i_emd_owner != 0;
-#elif 0
-	return inode->i_atime != 0;
-#else
-	return inode->i_count > 1;
-#endif
-}
-/*
-	Connect the proper tables in the inode and add some info.
-*/
-void umsdos_patch_inode (
-	struct inode *inode,
-	struct inode *dir,		/* May be NULL */
-	off_t f_pos)
-{
+	struct inode *inode = dentry->d_inode;
+
+PRINTK (("umsdos_patch_dentry_inode: inode=%lu\n", inode->i_ino));
+
 	/*
-		This function is called very early to setup the inode, somewhat
-		too early (called by UMSDOS_read_inode). At this point, we can't
-		do to much, such as lookup up EMD files and so on. This causes
-		confusion in the kernel. This is why some initialisation
-		will be done when dir != NULL only.
+	 * Classify the inode based on EMD/non-EMD status.
+	 */
+PRINTK (("umsdos_patch_inode: call umsdos_set_dirinfo_new(%p,%lu)\n",
+dentry, f_pos));
+	umsdos_set_dirinfo_new(dentry, f_pos);
 
-		UMSDOS do run piggy back on top of msdos fs. It looks like something
-		is missing in the VFS to accommodate stacked fs. Still unclear what
-		(quite honestly).
-
-		Well, maybe one! A new entry "may_unmount" which would allow
-		the stacked fs to allocate some inode permanently and release
-		them at the end. Doing that now introduce a problem. unmount
-		always fail because some inodes are in use.
-	*/
-	if (!umsdos_isinit(inode)){
-		inode->u.umsdos_i.i_emd_dir = 0;
-		if (S_ISREG(inode->i_mode)){
-			if (inode->i_op->bmap != NULL){
-				inode->i_op = &umsdos_file_inode_operations;
-			}else{
+	inode->u.umsdos_i.i_emd_dir = 0;
+	if (S_ISREG (inode->i_mode)) {
+		if (MSDOS_SB (inode->i_sb)->cvf_format) {
+			if (MSDOS_SB (inode->i_sb)->cvf_format->flags & CVF_USE_READPAGE) {
+				inode->i_op = &umsdos_file_inode_operations_readpage;
+			} else {
 				inode->i_op = &umsdos_file_inode_operations_no_bmap;
 			}
-		}else if (S_ISDIR(inode->i_mode)){
-			if (dir != NULL){
-				umsdos_setup_dir_inode(inode);
+		} else {
+			if (inode->i_op->bmap != NULL) {
+				inode->i_op = &umsdos_file_inode_operations;
+			} else {
+				inode->i_op = &umsdos_file_inode_operations_no_bmap;
 			}
-		}else if (S_ISLNK(inode->i_mode)){
-			inode->i_op = &umsdos_symlink_inode_operations;
-		}else if (S_ISCHR(inode->i_mode)){
-			inode->i_op = &chrdev_inode_operations;
-		}else if (S_ISBLK(inode->i_mode)){
-			inode->i_op = &blkdev_inode_operations;
-		}else if (S_ISFIFO(inode->i_mode)){
-			init_fifo(inode);
 		}
-		if (dir != NULL){
-			/* #Specification: inode / umsdos info
-				The first time an inode is seen (inode->i_count == 1),
-				the inode number of the EMD file which control this inode
-				is tagged to this inode. It allows operation such
-				as notify_change to be handled.
-			*/
-			/*
-				This is done last because it also control the
-				status of umsdos_isinit()
-			*/
-			umsdos_set_dirinfo (inode,dir,f_pos);
-		}
-	}else if (dir != NULL){
-		/*
-			Test to see if the info is maintained.
-			This should be removed when the file system will be proven.
-		*/
-		struct inode *emd_owner = umsdos_emd_dir_lookup(dir,1);
-		iput (emd_owner);
-		if (emd_owner->i_ino != inode->u.umsdos_i.i_emd_owner){
-			printk ("UMSDOS: *** EMD_OWNER ??? *** ino = %ld %ld <> %ld "
-				,inode->i_ino,emd_owner->i_ino,inode->u.umsdos_i.i_emd_owner);
-		}
+	} else if (S_ISDIR (inode->i_mode)) {
+		umsdos_setup_dir(dentry);
+	} else if (S_ISLNK (inode->i_mode)) {
+		inode->i_op = &umsdos_symlink_inode_operations;
+	} else if (S_ISCHR (inode->i_mode)) {
+		inode->i_op = &chrdev_inode_operations;
+	} else if (S_ISBLK (inode->i_mode)) {
+		inode->i_op = &blkdev_inode_operations;
+	} else if (S_ISFIFO (inode->i_mode)) {
+		init_fifo (inode);
 	}
 }
+
+
 /*
-	Get the inode of the directory which owns this inode.
-	Return 0 if ok, -EIO if error.
-*/
-int umsdos_get_dirowner(
-	struct inode *inode,
-	struct inode **result)	/* Hold NULL if any error */
-							/* else, the inode of the directory */
+ * Load an inode from disk.
+ */
+/* #Specification: Inode / post initialisation
+ * To completely initialise an inode, we need access to the owner
+ * directory, so we can locate more info in the EMD file. This is
+ * not available the first time the inode is accessed, so we use
+ * a value in the inode to tell if it has been finally initialised.
+ * 
+ * New inodes are obtained by the lookup and create routines, and
+ * each of these must ensure that the inode gets patched.
+ */
+void UMSDOS_read_inode (struct inode *inode)
 {
-	int ret = -EIO;
-	unsigned long ino = inode->u.umsdos_i.i_dir_owner;
-	*result = NULL;
-	if (ino == 0){
-		printk ("UMSDOS: umsdos_get_dirowner ino == 0\n");
-	}else{
-		struct inode *dir = *result = iget(inode->i_sb,ino);
-		if (dir != NULL){
-			umsdos_patch_inode (dir,NULL,0);
-			ret = 0;
-		}
-	}
+	Printk ((KERN_DEBUG "UMSDOS_read_inode %p ino = %lu ",
+		inode, inode->i_ino));
+	msdos_read_inode (inode);
+
+	/* inode needs patching */
+	inode->u.umsdos_i.i_patched = 0;
+}
+
+
+int umsdos_notify_change_locked(struct dentry *, struct iattr *);
+/*
+ * lock the parent dir before starting ...
+ */
+int UMSDOS_notify_change (struct dentry *dentry, struct iattr *attr)
+{
+	struct inode *dir = dentry->d_parent->d_inode;
+	int ret;
+
+	down(&dir->i_sem);
+	ret = umsdos_notify_change_locked(dentry, attr);
+	up(&dir->i_sem);
 	return ret;
 }
-/*
-	Load an inode from disk.
-*/
-void UMSDOS_read_inode(struct inode *inode)
-{
-	PRINTK (("read inode %x ino = %d ",inode,inode->i_ino));
-	msdos_read_inode(inode);
-	PRINTK (("ino = %d %d\n",inode->i_ino,inode->i_count));
-	if (S_ISDIR(inode->i_mode)
-		&& (inode->u.umsdos_i.u.dir_info.creating != 0
-			|| inode->u.umsdos_i.u.dir_info.looking != 0
-			|| waitqueue_active(&inode->u.umsdos_i.u.dir_info.p))){
-		Printk (("read inode %d %d %p\n"
-			,inode->u.umsdos_i.u.dir_info.creating
-			,inode->u.umsdos_i.u.dir_info.looking
-			,inode->u.umsdos_i.u.dir_info.p));
-	}
-	/* #Specification: Inode / post initialisation
-		To completely initialise an inode, we need access to the owner
-		directory, so we can locate more info in the EMD file. This is
-		not available the first time the inode is access, we use
-		a value in the inode to tell if it has been finally initialised.
 
-		At first, we have tried testing i_count but it was causing
-		problem. It is possible that two or more process use the
-		newly accessed inode. While the first one block during
-		the initialisation (probably while reading the EMD file), the
-		others believe all is well because i_count > 1. They go banana
-		with a broken inode. See umsdos_lookup_patch and umsdos_patch_inode.
-	*/
-	umsdos_patch_inode(inode,NULL,0);
+/*
+ * Must be called with the parent lock held.
+ */
+int umsdos_notify_change_locked(struct dentry *dentry, struct iattr *attr)
+{
+	struct inode *inode = dentry->d_inode;
+	struct dentry *demd;
+	int ret;
+	struct file filp;
+	struct umsdos_dirent entry;
+
+Printk(("UMSDOS_notify_change: entering for %s/%s (%d)\n",
+dentry->d_parent->d_name.name, dentry->d_name.name, inode->u.umsdos_i.i_patched));
+
+	ret = inode_change_ok (inode, attr);
+	if (ret) {
+printk("UMSDOS_notify_change: %s/%s change not OK, ret=%d\n",
+dentry->d_parent->d_name.name, dentry->d_name.name, ret);
+		goto out;
+	}
+
+	if (inode->i_nlink == 0)
+		goto out;
+	if (inode->i_ino == UMSDOS_ROOT_INO)
+		goto out;
+
+	/* get the EMD file dentry */
+	demd = umsdos_get_emd_dentry(dentry->d_parent);
+	ret = PTR_ERR(demd);
+	if (IS_ERR(demd))
+		goto out;
+	ret = -EPERM;
+	if (!demd->d_inode) {
+		printk(KERN_WARNING
+			"UMSDOS_notify_change: no EMD file %s/%s\n",
+			demd->d_parent->d_name.name, demd->d_name.name);
+		goto out_dput;
+	}
+
+	ret = 0;
+	/* don't do anything if this is the EMD itself */
+	if (inode == demd->d_inode)
+		goto out_dput;
+
+	/* This inode is not a EMD file nor an inode used internally
+	 * by MSDOS, so we can update its status.
+	 * See emd.c
+	 */
+
+	fill_new_filp (&filp, demd);
+	filp.f_pos = inode->u.umsdos_i.pos;
+Printk(("UMSDOS_notify_change: %s/%s reading at %d\n",
+dentry->d_parent->d_name.name, dentry->d_name.name, (int) filp.f_pos));
+
+	/* Read only the start of the entry since we don't touch the name */
+	ret = umsdos_emd_dir_read (&filp, (char *) &entry, UMSDOS_REC_SIZE);
+	if (ret) {
+		printk(KERN_WARNING
+			"umsdos_notify_change: %s/%s EMD read error, ret=%d\n",
+			dentry->d_parent->d_name.name, dentry->d_name.name,ret);
+		goto out_dput;
+	}
+	if (attr->ia_valid & ATTR_UID)
+		entry.uid = attr->ia_uid;
+	if (attr->ia_valid & ATTR_GID)
+		entry.gid = attr->ia_gid;
+	if (attr->ia_valid & ATTR_MODE)
+		entry.mode = attr->ia_mode;
+	if (attr->ia_valid & ATTR_ATIME)
+		entry.atime = attr->ia_atime;
+	if (attr->ia_valid & ATTR_MTIME)
+		entry.mtime = attr->ia_mtime;
+	if (attr->ia_valid & ATTR_CTIME)
+		entry.ctime = attr->ia_ctime;
+
+	entry.nlink = inode->i_nlink;
+	filp.f_pos = inode->u.umsdos_i.pos;
+	ret = umsdos_emd_dir_write (&filp, (char *) &entry, UMSDOS_REC_SIZE);
+	if (ret)
+		printk(KERN_WARNING
+			"umsdos_notify_change: %s/%s EMD write error, ret=%d\n",
+			dentry->d_parent->d_name.name, dentry->d_name.name,ret);
+
+	Printk (("notify pos %lu ret %d nlink %d ",
+		inode->u.umsdos_i.pos, ret, entry.nlink));
+	/* #Specification: notify_change / msdos fs
+	 * notify_change operation are done only on the
+	 * EMD file. The msdos fs is not even called.
+	 */
+#ifdef UMSDOS_DEBUG_VERBOSE
+if (entry.flags & UMSDOS_HIDDEN)
+printk("umsdos_notify_change: %s/%s hidden, nlink=%d, ret=%d\n",
+dentry->d_parent->d_name.name, dentry->d_name.name, entry.nlink, ret);
+#endif
+
+out_dput:
+	dput(demd);
+out:
+	if (ret == 0)
+		inode_setattr (inode, attr);
+	return ret;
 }
 
+
 /*
-	Update the disk with the inode content
-*/
-void UMSDOS_write_inode(struct inode *inode)
+ * Update the disk with the inode content
+ */
+void UMSDOS_write_inode (struct inode *inode)
 {
 	struct iattr newattrs;
 
-	PRINTK (("UMSDOS_write_inode emd %d\n",inode->u.umsdos_i.i_emd_owner));
-	fat_write_inode(inode);
+	PRINTK (("UMSDOS_write_inode emd %d (FIXME: missing notify_change)\n",
+		inode->u.umsdos_i.i_emd_owner));
+	fat_write_inode (inode);
 	newattrs.ia_mtime = inode->i_mtime;
 	newattrs.ia_atime = inode->i_atime;
 	newattrs.ia_ctime = inode->i_ctime;
 	newattrs.ia_valid = ATTR_MTIME | ATTR_ATIME | ATTR_CTIME;
 	/*
-		UMSDOS_notify_change is convenient to call here
-		to update the EMD entry associated with this inode.
-		But it has the side effect to re"dirt" the inode.
-	*/
-	UMSDOS_notify_change (inode, &newattrs);
-	inode->i_dirt = 0;
+	 * UMSDOS_notify_change is convenient to call here
+	 * to update the EMD entry associated with this inode.
+	 * But it has the side effect to re"dirt" the inode.
+	 */
+/*      
+ * UMSDOS_notify_change (inode, &newattrs);
+
+ * inode->i_state &= ~I_DIRTY; / * FIXME: this doesn't work.  We need to remove ourselves from list on dirty inodes. /mn/ */
 }
 
-int UMSDOS_notify_change(struct inode *inode, struct iattr *attr)
+
+static struct super_operations umsdos_sops =
 {
-	int ret = 0;
-
-	if ((ret = inode_change_ok(inode, attr)) != 0) 
-		return ret;
-
-	if (inode->i_nlink > 0){
-		/* #Specification: notify_change / i_nlink > 0
-			notify change is only done for inode with nlink > 0. An inode
-			with nlink == 0 is no longer associated with any entry in
-			the EMD file, so there is nothing to update.
-		*/
-		unsigned long i_emd_owner = inode->u.umsdos_i.i_emd_owner;
-		if (inode == inode->i_sb->s_mounted){
-			/* #Specification: root inode / attributes
-				I don't know yet how this should work. Normally
-				the attributes (permissions bits, owner, times) of
-				a directory are stored in the EMD file of its parent.
-
-				One thing we could do is store the attributes of the root
-				inode in its own EMD file. A simple entry named "." could
-				be used for this special case. It would be read once
-				when the file system is mounted and update in
-				UMSDOS_notify_change() (right here).
-
-				I am not sure of the behavior of the root inode for
-				a real UNIX file system. For now, this is a nop.
-			*/
-		}else if (i_emd_owner != 0xffffffff && i_emd_owner != 0){
-			/* This inode is not a EMD file nor an inode used internally
-				by MSDOS, so we can update its status.
-				See emd.c
-			*/
-			struct inode *emd_owner = iget (inode->i_sb,i_emd_owner);
-			PRINTK (("notify change %p ",inode));
-			if (emd_owner == NULL){
-				printk ("UMSDOS: emd_owner = NULL ???");
-				ret = -EPERM;
-			}else{
-				struct file filp;
-				struct umsdos_dirent entry;
-				filp.f_pos = inode->u.umsdos_i.pos;
-				filp.f_reada = 0;
-				PRINTK (("pos = %d ",filp.f_pos));
-				/* Read only the start of the entry since we don't touch */
-				/* the name */
-				ret = umsdos_emd_dir_read (emd_owner,&filp,(char*)&entry
-					,UMSDOS_REC_SIZE);
-				if (ret == 0){
-					if (attr->ia_valid & ATTR_UID) 
-						entry.uid = attr->ia_uid;
-					if (attr->ia_valid & ATTR_GID) 
-						entry.gid = attr->ia_gid;
-					if (attr->ia_valid & ATTR_MODE) 
-						entry.mode = attr->ia_mode;
-					if (attr->ia_valid & ATTR_ATIME) 
-						entry.atime = attr->ia_atime;
-					if (attr->ia_valid & ATTR_MTIME) 
-						entry.mtime = attr->ia_mtime;
-					if (attr->ia_valid & ATTR_CTIME) 
-						entry.ctime = attr->ia_ctime;
-
-					entry.nlink = inode->i_nlink;
-					filp.f_pos = inode->u.umsdos_i.pos;
-					ret = umsdos_emd_dir_write (emd_owner,&filp,(char*)&entry
-						,UMSDOS_REC_SIZE);
-
-					PRINTK (("notify pos %d ret %d nlink %d "
-						,inode->u.umsdos_i.pos
-						,ret,entry.nlink));
-					/* #Specification: notify_change / msdos fs
-						notify_change operation are done only on the
-						EMD file. The msdos fs is not even called.
-					*/
-				}
-				iput (emd_owner);
-			}
-			PRINTK (("\n"));
-		}
-	}
-	if (ret == 0) 
-		inode_setattr(inode, attr);
-	return ret;
-}
-
-/* #Specification: function name / convention
-	A simple convention for function name has been used in
-	the UMSDOS file system. First all function use the prefix
-	umsdos_ to avoid name clash with other part of the kernel.
-
-	And standard VFS entry point use the prefix UMSDOS (upper case)
-	so it's easier to tell them apart.
-*/
-
-static struct super_operations umsdos_sops = { 
-	UMSDOS_read_inode,
-	UMSDOS_notify_change,
-	UMSDOS_write_inode,
-	UMSDOS_put_inode,
-	UMSDOS_put_super,
-	NULL, /* added in 0.96c */
-	UMSDOS_statfs,
-	NULL
+	UMSDOS_read_inode,	/* read_inode */
+	UMSDOS_write_inode,	/* write_inode */
+	UMSDOS_put_inode,	/* put_inode */
+	fat_delete_inode,	/* delete_inode */
+	UMSDOS_notify_change,	/* notify_change */
+	UMSDOS_put_super,	/* put_super */
+	NULL,			/* write_super */
+	fat_statfs,		/* statfs */
+	NULL			/* remount_fs */
 };
 
 /*
-	Read the super block of an Extended MS-DOS FS.
-*/
-struct super_block *UMSDOS_read_super(
-	struct super_block *s,
-	void *data,
-	int silent)
+ * Read the super block of an Extended MS-DOS FS.
+ */
+struct super_block *UMSDOS_read_super (struct super_block *sb, void *data,
+				      int silent)
 {
-	/* #Specification: mount / options
-		Umsdos run on top of msdos. Currently, it supports no
-		mount option, but happily pass all option received to
-		the msdos driver. I am not sure if all msdos mount option
-		make sense with Umsdos. Here are at least those who
-		are useful.
-			uid=
-			gid=
+	struct super_block *res;
+	struct dentry *new_root;
 
-		These options affect the operation of umsdos in directories
-		which do not have an EMD file. They behave like normal
-		msdos directory, with all limitation of msdos.
-	*/
-	struct super_block *sb;
 	MOD_INC_USE_COUNT;
-	sb = msdos_read_super(s,data,silent);
-	printk ("UMSDOS Beta 0.6 (compatibility level %d.%d, fast msdos)\n"
-		,UMSDOS_VERSION,UMSDOS_RELEASE);
-	if (sb != NULL){
-		MSDOS_SB(sb)->options.dotsOK = 0;  /* disable hidden==dotfile */
-		sb->s_op = &umsdos_sops;
-		PRINTK (("umsdos_read_super %p\n",sb->s_mounted));
-		umsdos_setup_dir_inode (sb->s_mounted);
-		PRINTK (("End umsdos_read_super\n"));
-		if (s == super_blocks){
-			/* #Specification: pseudo root / mount
-				When a umsdos fs is mounted, a special handling is done
-				if it is the root partition. We check for the presence
-				of the file /linux/etc/init or /linux/etc/rc or
-				/linux/sbin/init. If one is there, we do a chroot("/linux").
+	MSDOS_SB(sb)->options.isvfat = 0;
+	/*
+	 * Call msdos-fs to mount the disk.
+	 * Note: this returns res == sb or NULL
+	 */
+	res = msdos_read_super (sb, data, silent);
+	if (!res)
+		goto out_fail;
 
-				We check both because (see init/main.c) the kernel
-				try to exec init at different place and if it fails
-				it tries /bin/sh /etc/rc. To be consistent with
-				init/main.c, many more test would have to be done
-				to locate init. Any complain ?
+	printk (KERN_INFO "UMSDOS dentry-pre 0.84 "
+		"(compatibility level %d.%d, fast msdos)\n", 
+		UMSDOS_VERSION, UMSDOS_RELEASE);
 
-				The chroot is done manually in init/main.c but the
-				info (the inode) is located at mount time and store
-				in a global variable (pseudo_root) which is used at
-				different place in the umsdos driver. There is no
-				need to store this variable elsewhere because it
-				will always be one, not one per mount.
+	sb->s_op = &umsdos_sops;
+	MSDOS_SB(sb)->options.dotsOK = 0;	/* disable hidden==dotfile */
 
-				This feature allows the installation
-				of a linux system within a DOS system in a subdirectory.
-	
-				A user may install its linux stuff in c:\linux
-				avoiding any clash with existing DOS file and subdirectory.
-				When linux boots, it hides this fact, showing a normal
-				root directory with /etc /bin /tmp ...
+	/* install our dentry operations ... */
+	sb->s_root->d_op = &umsdos_dentry_operations;
+	umsdos_patch_dentry_inode(sb->s_root, 0);
 
-				The word "linux" is hardcoded in /usr/include/linux/umsdos_fs.h
-				in the macro UMSDOS_PSDROOT_NAME.
-			*/
+	/* Check whether to change to the /linux root */
+	new_root = check_pseudo_root(sb);
 
-			struct inode *pseudo;
-			Printk (("Mounting root\n"));
-			if (umsdos_real_lookup (sb->s_mounted,UMSDOS_PSDROOT_NAME
-					,UMSDOS_PSDROOT_LEN,&pseudo)==0
-				&& S_ISDIR(pseudo->i_mode)){
-				struct inode *etc = NULL;
-				struct inode *sbin = NULL;
-				int pseudo_ok = 0;
-				Printk (("/%s is there\n",UMSDOS_PSDROOT_NAME));
-				if (umsdos_real_lookup (pseudo,"etc",3,&etc)==0
-					&& S_ISDIR(etc->i_mode)){
-					struct inode *init = NULL;
-					struct inode *rc = NULL;
-					Printk (("/%s/etc is there\n",UMSDOS_PSDROOT_NAME));
-					if ((umsdos_real_lookup (etc,"init",4,&init)==0
-							&& S_ISREG(init->i_mode))
-						|| (umsdos_real_lookup (etc,"rc",2,&rc)==0
-							&& S_ISREG(rc->i_mode))){
-						pseudo_ok = 1;
-					}
-					iput (init);
-					iput (rc);
-				}
-				if (!pseudo_ok
-					&& umsdos_real_lookup (pseudo,"sbin",4,&sbin)==0
-					&& S_ISDIR(sbin->i_mode)){
-					struct inode *init = NULL;
-					Printk (("/%s/sbin is there\n",UMSDOS_PSDROOT_NAME));
-					if (umsdos_real_lookup (sbin,"init",4,&init)==0
-							&& S_ISREG(init->i_mode)){
-						pseudo_ok = 1;
-					}
-					iput (init);
-				}
-				if (pseudo_ok){
-					umsdos_setup_dir_inode (pseudo);
-					Printk (("Activating pseudo root /%s\n",UMSDOS_PSDROOT_NAME));
-					pseudo_root = pseudo;
-					pseudo->i_count++;
-					pseudo = NULL;
-				}
-				iput (sbin);
-				iput (etc);
-			}
-			iput (pseudo);
+	if (new_root) {
+		/* sanity check */
+		if (new_root->d_op != &umsdos_dentry_operations)
+			printk("umsdos_read_super: pseudo-root wrong ops!\n");
+
+		pseudo_root = new_root->d_inode;
+
+		saved_root = sb->s_root;
+		sb->s_root = new_root;
+		printk(KERN_INFO "UMSDOS: changed to alternate root\n");
+	}
+
+	/* if d_count is not 1, mount will fail with -EBUSY! */
+	if (sb->s_root->d_count > 1) {
+		shrink_dcache_sb(sb);
+		if (sb->s_root->d_count > 1) {
+			printk(KERN_ERR "UMSDOS: root count %d > 1 !", sb->s_root->d_count);
 		}
-	} else {
-		MOD_DEC_USE_COUNT;
 	}
 	return sb;
+
+out_fail:
+	printk(KERN_INFO "UMSDOS: msdos_read_super failed, mount aborted.\n");
+	sb->s_dev = 0;
+	MOD_DEC_USE_COUNT;
+	return NULL;
+}
+
+/*
+ * Check for an alternate root if we're the root device.
+ */
+static struct dentry *check_pseudo_root(struct super_block *sb)
+{
+	struct dentry *root, *init;
+
+	/*
+	 * Check whether we're mounted as the root device.
+	 * If so, this should be the only superblock.
+	 */
+	if (sb->s_list.next->next != &sb->s_list)
+		goto out_noroot;
+printk("check_pseudo_root: mounted as root\n");
+
+	root = lookup_dentry(UMSDOS_PSDROOT_NAME, dget(sb->s_root), 0); 
+	if (IS_ERR(root))
+		goto out_noroot;
+	if (!root->d_inode)
+		goto out_dput;
+printk("check_pseudo_root: found %s/%s\n",
+root->d_parent->d_name.name, root->d_name.name);
+
+	/* look for /sbin/init */
+	init = lookup_dentry("sbin/init", dget(root), 0);
+	if (!IS_ERR(init)) {
+		if (init->d_inode)
+			goto root_ok;
+		dput(init);
+	}
+	/* check for other files? */
+	goto out_dput;
+
+root_ok:
+printk("check_pseudo_root: found %s/%s, enabling pseudo-root\n",
+init->d_parent->d_name.name, init->d_name.name);
+	dput(init);
+	return root;
+
+	/* Alternate root not found ... */
+out_dput:
+	dput(root);
+out_noroot:
+	return NULL;
 }
 
 
-
-static struct file_system_type umsdos_fs_type = {
-	UMSDOS_read_super, "umsdos", 1, NULL
+static struct file_system_type umsdos_fs_type =
+{
+	"umsdos",
+	FS_REQUIRES_DEV,
+	UMSDOS_read_super,
+	NULL
 };
 
-int init_umsdos_fs(void)
+__initfunc (int init_umsdos_fs (void))
 {
-	return register_filesystem(&umsdos_fs_type);
+	return register_filesystem (&umsdos_fs_type);
 }
 
 #ifdef MODULE
-int init_module(void)
-{
-	int status;
+EXPORT_NO_SYMBOLS;
 
-	if ((status = init_umsdos_fs()) == 0)
-		register_symtab(0);
-	return status;
+int init_module (void)
+{
+	return init_umsdos_fs ();
 }
 
-void cleanup_module(void)
+void cleanup_module (void)
 {
-	unregister_filesystem(&umsdos_fs_type);
+	unregister_filesystem (&umsdos_fs_type);
 }
 
 #endif
-

@@ -23,7 +23,7 @@
 #include <linux/locks.h>
 #include <linux/pagemap.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #define	NBUF	32
 
@@ -33,10 +33,10 @@
 #include <linux/fs.h>
 #include <linux/sysv_fs.h>
 
-static long sysv_file_write(struct inode *, struct file *, const char *, unsigned long);
+static ssize_t sysv_file_write(struct file *, const char *, size_t, loff_t *);
 
 /*
- * We have mostly NULL's here: the current defaults are ok for
+ * We have mostly NULLs here: the current defaults are OK for
  * the coh filesystem.
  */
 static struct file_operations sysv_file_operations = {
@@ -44,10 +44,11 @@ static struct file_operations sysv_file_operations = {
 	sysv_file_read,		/* read */
 	sysv_file_write,	/* write */
 	NULL,			/* readdir - bad */
-	NULL,			/* select - default */
+	NULL,			/* poll - default */
 	NULL,			/* ioctl - default */
 	generic_file_mmap,	/* mmap */
 	NULL,			/* no special open is needed */
+	NULL,			/* flush */
 	NULL,			/* release */
 	sysv_sync_file		/* fsync */
 };
@@ -72,18 +73,19 @@ struct inode_operations sysv_file_inode_operations = {
 	NULL			/* permission */
 };
 
-long sysv_file_read(struct inode * inode, struct file * filp,
-	char * buf, unsigned long count)
+ssize_t sysv_file_read(struct file * filp, char * buf, 
+		       size_t count, loff_t *ppos)
 {
+	struct inode * inode = filp->f_dentry->d_inode;
 	struct super_block * sb = inode->i_sb;
-	int read,left,chars;
-	unsigned int block;
-	int blocks, offset;
+	ssize_t read,left,chars;
+	size_t block;
+	ssize_t blocks, offset;
 	int bhrequest, uptodate;
 	struct buffer_head ** bhb, ** bhe;
 	struct buffer_head * bhreq[NBUF];
 	struct buffer_head * buflist[NBUF];
-	unsigned int size;
+	size_t size;
 
 	if (!inode) {
 		printk("sysv_file_read: inode = NULL\n");
@@ -93,7 +95,7 @@ long sysv_file_read(struct inode * inode, struct file * filp,
 		printk("sysv_file_read: mode = %07o\n",inode->i_mode);
 		return -EINVAL;
 	}
-	offset = filp->f_pos;
+	offset = *ppos;
 	size = inode->i_size;
 	if (offset > size)
 		left = 0;
@@ -167,11 +169,11 @@ long sysv_file_read(struct inode * inode, struct file * filp,
 				chars = left;
 			else
 				chars = sb->sv_block_size - offset;
-			filp->f_pos += chars;
+			*ppos += chars;
 			left -= chars;
 			read += chars;
 			if (*bhe) {
-				memcpy_tofs(buf,offset+(*bhe)->b_data,chars);
+				copy_to_user(buf,offset+(*bhe)->b_data,chars);
 				brelse(*bhe);
 				buf += chars;
 			} else {
@@ -195,17 +197,18 @@ long sysv_file_read(struct inode * inode, struct file * filp,
 	filp->f_reada = 1;
 	if (!IS_RDONLY(inode)) {
 		inode->i_atime = CURRENT_TIME;
-		inode->i_dirt = 1;
+		mark_inode_dirty(inode);
 	}
 	return read;
 }
 
-static long sysv_file_write(struct inode * inode, struct file * filp,
-	const char * buf, unsigned long count)
+static ssize_t sysv_file_write(struct file * filp, const char * buf,
+			       size_t count, loff_t *ppos)
 {
+	struct inode * inode = filp->f_dentry->d_inode;
 	struct super_block * sb = inode->i_sb;
 	off_t pos;
-	int written,c;
+	ssize_t written, c;
 	struct buffer_head * bh;
 	char * p;
 
@@ -218,7 +221,7 @@ static long sysv_file_write(struct inode * inode, struct file * filp,
 		return -EINVAL;
 	}
 /*
- * ok, append may not work when many processes are writing at the same time
+ * OK, append may not work when many processes are writing at the same time
  * but so what. That way leads to madness anyway.
  * But we need to protect against simultaneous truncate as we may end up
  * writing our data into blocks that have meanwhile been incorporated into
@@ -227,7 +230,7 @@ static long sysv_file_write(struct inode * inode, struct file * filp,
 	if (filp->f_flags & O_APPEND)
 		pos = inode->i_size;
 	else
-		pos = filp->f_pos;
+		pos = *ppos;
 	written = 0;
 	while (written<count) {
 		bh = sysv_getblk (inode, pos >> sb->sv_block_size_bits, 1);
@@ -251,12 +254,12 @@ static long sysv_file_write(struct inode * inode, struct file * filp,
 		}
 		/* now either c==sb->sv_block_size or buffer_uptodate(bh) */
 		p = (pos & sb->sv_block_size_1) + bh->b_data;
-		memcpy_fromfs(p, buf, c);
+		copy_from_user(p, buf, c);
 		update_vm_cache(inode, pos, p, c);
 		pos += c;
 		if (pos > inode->i_size) {
 			inode->i_size = pos;
-			inode->i_dirt = 1;
+			mark_inode_dirty(inode);
 		}
 		written += c;
 		buf += c;
@@ -265,7 +268,7 @@ static long sysv_file_write(struct inode * inode, struct file * filp,
 		brelse(bh);
 	}
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
-	filp->f_pos = pos;
-	inode->i_dirt = 1;
+	*ppos = pos;
+	mark_inode_dirty(inode);
 	return written;
 }

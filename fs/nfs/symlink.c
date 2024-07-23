@@ -16,11 +16,10 @@
 #include <linux/malloc.h>
 #include <linux/string.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
-static int nfs_readlink(struct inode *, char *, int);
-static int nfs_follow_link(struct inode *, struct inode *, int, int,
-			   struct inode **);
+static int nfs_readlink(struct dentry *, char *, int);
+static struct dentry *nfs_follow_link(struct dentry *, struct dentry *, unsigned int);
 
 /*
  * symlinks can't do much...
@@ -45,74 +44,64 @@ struct inode_operations nfs_symlink_inode_operations = {
 	NULL			/* permission */
 };
 
-static int nfs_follow_link(struct inode *dir, struct inode *inode,
-			   int flag, int mode, struct inode **res_inode)
+static int nfs_readlink(struct dentry *dentry, char *buffer, int buflen)
 {
-	int error, *mem;
+	int error;
 	unsigned int len;
-	char *res, *res2;
+	char *res;
+	void *mem;
 
-	*res_inode = NULL;
-	if (!dir) {
-		dir = current->fs->root;
-		dir->i_count++;
-	}
-	if (!inode) {
-		iput(dir);
-		return -ENOENT;
-	}
-	if (!S_ISLNK(inode->i_mode)) {
-		iput(dir);
-		*res_inode = inode;
-		return 0;
-	}
-	if (current->link_count > 5) {
-		iput(inode);
-		iput(dir);
-		return -ELOOP;
-	}
-	error = nfs_proc_readlink(NFS_SERVER(inode), NFS_FH(inode), &mem,
-		&res, &len, NFS_MAXPATHLEN);
-	if (error) {
-		iput(inode);
-		iput(dir);
+	dfprintk(VFS, "nfs: readlink(%s/%s)\n",
+		dentry->d_parent->d_name.name, dentry->d_name.name);
+
+	if (buflen > NFS_MAXPATHLEN)
+		buflen = NFS_MAXPATHLEN;
+	error = nfs_proc_readlink(NFS_DSERVER(dentry), NFS_FH(dentry),
+					&mem, &res, &len, buflen);
+	if (! error) {
+		copy_to_user(buffer, res, len);
+		put_user('\0', buffer + len);
+		error = len;
 		kfree(mem);
-		return error;
 	}
-	while ((res2 = (char *) kmalloc(NFS_MAXPATHLEN + 1, GFP_NFS)) == NULL) {
-		schedule();
-	}
-	memcpy(res2, res, len);
-	res2[len] = '\0';
-	kfree(mem);
-	iput(inode);
-	current->link_count++;
-	error = open_namei(res2, flag, mode, res_inode, dir);
-	current->link_count--;
-	kfree_s(res2, NFS_MAXPATHLEN + 1);
 	return error;
 }
 
-static int nfs_readlink(struct inode *inode, char *buffer, int buflen)
+static struct dentry *
+nfs_follow_link(struct dentry * dentry, struct dentry *base, unsigned int follow)
 {
-	int error, *mem;
+	int error;
 	unsigned int len;
 	char *res;
+	void *mem;
+	char *path;
+	struct dentry *result;
 
-	if (!S_ISLNK(inode->i_mode)) {
-		iput(inode);
-		return -EINVAL;
-	}
-	if (buflen > NFS_MAXPATHLEN)
-		buflen = NFS_MAXPATHLEN;
-	error = nfs_proc_readlink(NFS_SERVER(inode), NFS_FH(inode), &mem,
-		&res, &len, buflen);
-	iput(inode);
-	if (! error) {
-		memcpy_tofs(buffer, res, len);
-		put_user('\0', buffer + len);
-		error = len;
-	}
+	dfprintk(VFS, "nfs: follow_link(%s/%s)\n",
+		dentry->d_parent->d_name.name, dentry->d_name.name);
+
+	error = nfs_proc_readlink(NFS_DSERVER(dentry), NFS_FH(dentry),
+				 &mem, &res, &len, NFS_MAXPATHLEN);
+	result = ERR_PTR(error);
+	if (error)
+		goto out_dput;
+
+	result = ERR_PTR(-ENOMEM);
+	path = kmalloc(len + 1, GFP_KERNEL);
+	if (!path)
+		goto out_mem;
+	memcpy(path, res, len);
+	path[len] = 0;
 	kfree(mem);
-	return error;
+
+	result = lookup_dentry(path, base, follow);
+	kfree(path);
+out:
+	return result;
+
+out_mem:
+	kfree(mem);
+out_dput:
+	dput(base);
+	goto out;
 }

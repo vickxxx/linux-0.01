@@ -16,6 +16,8 @@
  * Description    : Schneider & Koch G16 Ethernet Device Driver for
  *                  Linux Kernel >= 1.1.22
  * Update History :
+ *                  Paul Gortmaker, 03/97: Fix for v2.1.x to use read{b,w}
+ *                  write{b,w} and memcpy -> memcpy_{to,from}io
  *
 -*/
 
@@ -37,9 +39,6 @@ static const char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
  *                 A. Cox (A.Cox@swansea.ac.uk)
  *                 M. Hipp (mhipp@student.uni-tuebingen.de)
  *                 R. Bolz (Schneider & Koch, Germany)
- *
- * See README.sk_g16 for details about limitations and bugs for the
- * current version.
  *
  * To Do: 
  *        - Support of SK_G8 and other SK Network Cards.
@@ -64,10 +63,12 @@ static const char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
 #include <linux/interrupt.h>
 #include <linux/malloc.h>
 #include <linux/string.h> 
+#include <linux/delay.h>
 #include <asm/system.h>
 #include <asm/io.h>
 #include <asm/bitops.h> 
 #include <linux/errno.h>
+#include <linux/init.h>
 
 #include <linux/netdevice.h>
 #include <linux/etherdevice.h>
@@ -319,20 +320,6 @@ static const char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
 #define ETHERCARD_TOTAL_SIZE    SK_POS_SIZE
 
 /* 
- * Portreserve is there to mark the Card I/O Port region as used. 
- * Check_region is to check if the region at ioaddr with the size "size" 
- * is free or not.
- * Snarf_region allocates the I/O Port region.
- */
-
-#ifndef HAVE_PORTRESERVE
-
-#define check_region(ioaddr, size)              0
-#define request_region(ioaddr, size,name)       do ; while (0)
-
-#endif
-
-/* 
  * SK_DEBUG
  *
  * Here you can choose what level of debugging wanted.
@@ -390,7 +377,7 @@ static const char *rcsid = "$Id: sk_g16.c,v 1.1 1994/06/30 16:25:15 root Exp $";
  *
  * PROM: The PROM obtains the ETHERNET-MAC-Address. It is realised as a
  *       8-Bit PROM, this means only the 16 even addresses are used of the
- *       32 Byte Address region. Access to a odd address results in invalid
+ *       32 Byte Address region. Access to an odd address results in invalid
  *       data.
  * 
  * LANCE I/O Reg: The I/O Reg is build of 4 single Registers, Low-Byte Write,
@@ -457,14 +444,12 @@ struct priv
     int        tmdlast;  /* last sent descriptor used for error handling, etc */
     void       *rmdbufs[RMDNUM]; /* pointer to the receive buffers */
     void       *tmdbufs[TMDNUM]; /* pointer to the transmit buffers */
-    struct enet_statistics stats; /* Device driver statistics */
+    struct net_device_stats stats; /* Device driver statistics */
 };
 
 /* global variable declaration */
 
 /* IRQ map used to reserve a IRQ (see SK_open()) */
-
-/* extern void *irq2dev_map[16]; */ /* Declared in <linux/ioport.h> */
 
 /* static variables */
 
@@ -491,7 +476,7 @@ static void  SK_rxintr(struct device *dev);
 static void  SK_txintr(struct device *dev);
 static int   SK_close(struct device *dev);
 
-static struct enet_statistics *SK_get_stats(struct device *dev);
+static struct net_device_stats *SK_get_stats(struct device *dev);
 
 unsigned int SK_rom_addr(void);
 
@@ -546,7 +531,7 @@ void SK_print_ram(struct device *dev);
  *                         (detachable devices only).
  */
 
-int SK_init(struct device *dev)
+__initfunc(int SK_init(struct device *dev))
 {
 	int ioaddr         = 0;            /* I/O port address used for POS regs */
 	int *port, ports[] = SK_IO_PORTS;  /* SK_G16 supported ports */
@@ -623,14 +608,13 @@ int SK_init(struct device *dev)
  * Return Value   : 0 = Initialization done             
  * Errors         : ENODEV - No SK_G16 found
  *                  -1     - Configuration problem
- * Globals        : irq2dev_map - Which device uses which IRQ
- *                : board       - pointer to SK_RAM
+ * Globals        : board       - pointer to SK_RAM
  * Update History :
  *     YY/MM/DD  uid  Description
  *     94/06/30  pwe  SK_ADDR now checked and at the correct place
 -*/
 
-int SK_probe(struct device *dev, short ioaddr)
+__initfunc(int SK_probe(struct device *dev, short ioaddr))
 {
     int i,j;                /* Counters */
     int sk_addr_flag = 0;   /* SK ADDR correct? 1 - no, 0 - yes */
@@ -754,7 +738,7 @@ int SK_probe(struct device *dev, short ioaddr)
     /* Read in station address */
     for (i = 0, j = 0; i < ETH_ALEN; i++, j+=2)
     {
-	dev->dev_addr[i] = board->rom[j];          
+	dev->dev_addr[i] = readb(board->rom+j);          
     }
 
     /* Check for manufacturer code */
@@ -778,16 +762,16 @@ int SK_probe(struct device *dev, short ioaddr)
 	    dev->dev_addr[4],
 	    dev->dev_addr[5]);
 
-    /* Grab the I/O Port region */
-    request_region(ioaddr, ETHERCARD_TOTAL_SIZE,"sk_g16");
-
-    /* Initialize device structure */
-
     /* Allocate memory for private structure */
     p = dev->priv = (void *) kmalloc(sizeof(struct priv), GFP_KERNEL);
-    if (p == NULL)
+    if (p == NULL) {
+	   printk("%s: ERROR - no memory for driver data!\n", dev->name);
 	   return -ENOMEM;
+    }
     memset((char *) dev->priv, 0, sizeof(struct priv)); /* clear memory */
+
+    /* Grab the I/O Port region */
+    request_region(ioaddr, ETHERCARD_TOTAL_SIZE,"sk_g16");
 
     /* Assign our Device Driver functions */
 
@@ -851,7 +835,6 @@ int SK_probe(struct device *dev, short ioaddr)
  * Parameters     : I : struct device *dev - SK_G16 device structure
  * Return Value   : 0 - Device opened
  * Errors         : -EAGAIN - Open failed
- * Globals        : irq2dev_map - which device uses which irq
  * Side Effects   : None
  * Update History :
  *     YY/MM/DD  uid  Description
@@ -885,7 +868,7 @@ static int SK_open(struct device *dev)
 
 	do
 	{
-	  irqval = request_irq(irqtab[i], &SK_interrupt, 0, "sk_g16", NULL);
+	  irqval = request_irq(irqtab[i], &SK_interrupt, 0, "sk_g16", dev);
 	  i++;
 	} while (irqval && irqtab[i]);
 
@@ -902,7 +885,7 @@ static int SK_open(struct device *dev)
     }
     else if (dev->irq == 2) /* IRQ2 is always IRQ9 */
     {
-	if (request_irq(9, &SK_interrupt, 0, "sk_g16", NULL))
+	if (request_irq(9, &SK_interrupt, 0, "sk_g16", dev))
 	{
 	    printk("%s: unable to get IRQ 9\n", dev->name);
 	    return -EAGAIN;
@@ -923,7 +906,7 @@ static int SK_open(struct device *dev)
 
 	/* check if IRQ free and valid. Then install Interrupt handler */
 
-	if (request_irq(dev->irq, &SK_interrupt, 0, "sk_g16", NULL))
+	if (request_irq(dev->irq, &SK_interrupt, 0, "sk_g16", dev))
 	{
 	    printk("%s: unable to get selected IRQ\n", dev->name);
 	    return -EAGAIN;
@@ -950,8 +933,6 @@ static int SK_open(struct device *dev)
 	outb(i<<2, SK_POS4);           /* Set IRQ on card */
     }
 
-    irq2dev_map[dev->irq] = dev;       /* Set IRQ as used by us */
-    
     printk("%s: Schneider & Koch G16 at %#3x, IRQ %d, shared mem at %#08x\n",
 	    dev->name, (unsigned int)dev->base_addr, 
 	    (int) dev->irq, (unsigned int) p->ram);
@@ -1025,6 +1006,7 @@ static int SK_open(struct device *dev)
 static int SK_lance_init(struct device *dev, unsigned short mode)
 {
     int i;
+    unsigned long flags;
     struct priv *p = (struct priv *) dev->priv; 
     struct tmd  *tmdp;
     struct rmd  *rmdp;
@@ -1043,10 +1025,10 @@ static int SK_lance_init(struct device *dev, unsigned short mode)
     {
 	tmdp = p->tmdhead + i; 
    
-	tmdp->u.buffer = (unsigned long) p->tmdbufs[i]; /* assign buffer */
+	writel((unsigned long) p->tmdbufs[i], tmdp->u.buffer); /* assign buffer */
 	
 	/* Mark TMD as start and end of packet */
-	tmdp->u.s.status = TX_STP | TX_ENP;
+	writeb(TX_STP | TX_ENP, tmdp->u.s.status);
     }
 
 
@@ -1059,42 +1041,43 @@ static int SK_lance_init(struct device *dev, unsigned short mode)
 	rmdp = p->rmdhead + i;
 
 	
-	rmdp->u.buffer = (unsigned long) p->rmdbufs[i]; /* assign buffer */
+	writel((unsigned long) p->rmdbufs[i], rmdp->u.buffer); /* assign buffer */
 	
 	/* 
          * LANCE must be owner at beginning so that he can fill in 
 	 * receiving packets, set status and release RMD 
 	 */
 
-	rmdp->u.s.status = RX_OWN;  
+	writeb(RX_OWN, rmdp->u.s.status);
 
-	rmdp->blen = -PKT_BUF_SZ;    /* Buffer Size in a two's complement */
+	writew(-PKT_BUF_SZ, rmdp->blen); /* Buffer Size (two's complement) */
 
-	rmdp->mlen = 0;              /* init message length */       
+	writeb(0, rmdp->mlen);           /* init message length */       
 	
     }
 
     /* Fill LANCE Initialize Block */
 
-    (p->ram)->ib.mode = mode;        /* Set operation mode */
+    writew(mode, (p->ram)->ib.mode); /* Set operation mode */
 
     for (i = 0; i < ETH_ALEN; i++)   /* Set physical address */
     {
-	(p->ram)->ib.paddr[i] = dev->dev_addr[i]; 
+	writeb(dev->dev_addr[i], (p->ram)->ib.paddr[i]); 
     }
 
     for (i = 0; i < 8; i++)          /* Set multicast, logical address */
     {
-	(p->ram)->ib.laddr[i] = 0;   /* We do not use logical addressing */
+	writeb(0, (p->ram)->ib.laddr[i]); /* We do not use logical addressing */
     } 
 
     /* Set ring descriptor pointers and set number of descriptors */
 
-    (p->ram)->ib.rdrp = (int)  p->rmdhead | RMDNUMMASK;
-    (p->ram)->ib.tdrp = (int)  p->tmdhead | TMDNUMMASK;
+    writel((int)p->rmdhead | RMDNUMMASK, (p->ram)->ib.rdrp);
+    writel((int)p->tmdhead | TMDNUMMASK, (p->ram)->ib.tdrp);
 
     /* Prepare LANCE Control and Status Registers */
 
+    save_flags(flags);
     cli();
 
     SK_write_reg(CSR3, CSR3_ACON);   /* Ale Control !!!THIS MUST BE SET!!!! */
@@ -1130,7 +1113,7 @@ static int SK_lance_init(struct device *dev, unsigned short mode)
 
     SK_write_reg(CSR0, CSR0_INIT); 
 
-    sti();
+    restore_flags(flags);
 
     /* Wait until LANCE finished initialization */
     
@@ -1213,22 +1196,6 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
 
     }
 
-    /* 
-     * If some upper Layer thinks we missed a transmit done interrupt
-     * we are passed NULL.
-     * (dev_queue_xmit net/inet/dev.c 
-     */
-
-    if (skb == NULL)
-    {
-        /* 
-         * Dequeue packets from transmit queue and send them.
-         */
-	dev_tint(dev); 
-                    
-	return 0;
-    }
-    
     PRINTK2(("## %s: SK_send_packet() called, CSR0 %#04x.\n", 
 	    SK_NAME, SK_read_reg(CSR0)));
 
@@ -1238,7 +1205,7 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
      * This means check if we are already in. 
      */
 
-    if (set_bit(0, (void *) &dev->tbusy) != 0) /* dev->tbusy already set ? */ 
+    if (test_and_set_bit(0, (void *) &dev->tbusy) != 0) /* dev->tbusy already set ? */ 
     {
 	printk("%s: Transmitter access conflict.\n", dev->name);
     }
@@ -1253,10 +1220,9 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
 
 	/* Copy data into dual ported ram */
 
-	memcpy((char *) (tmdp->u.buffer & 0x00ffffff), (char *)skb->data,
-	       skb->len);
+	memcpy_toio((tmdp->u.buffer & 0x00ffffff), skb->data, skb->len);
 
-	tmdp->blen = -len;            /* set length to transmit */
+	writew(-len, tmdp->blen);            /* set length to transmit */
 
 	/* 
 	 * Packet start and end is always set because we use the maximum
@@ -1264,7 +1230,7 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
 	 * Relinquish ownership to LANCE
 	 */
 
-	tmdp->u.s.status = TX_OWN | TX_STP | TX_ENP;
+	writeb(TX_OWN | TX_STP | TX_ENP, tmdp->u.s.status);
 	
 	/* Start Demand Transmission */
 	SK_write_reg(CSR0, CSR0_TDMD | CSR0_INEA);
@@ -1276,7 +1242,7 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
 	p->tmdnum &= TMDNUM-1; 
 
 	/* Do we own the next transmit buffer ? */
-	if (! ((p->tmdhead + p->tmdnum)->u.s.status & TX_OWN) )
+	if (! (readb((p->tmdhead + p->tmdnum)->u.s.status) & TX_OWN) )
 	{
 	   /* 
 	    * We own next buffer and are ready to transmit, so
@@ -1284,8 +1250,10 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
 	    */
 	   dev->tbusy = 0;
 	}
+
+	p->stats.tx_bytes += skb->len;
     }
-    dev_kfree_skb(skb, FREE_WRITE);
+    dev_kfree_skb(skb);
     return 0;  
 } /* End of SK_send_packet */
 
@@ -1310,7 +1278,7 @@ static int SK_send_packet(struct sk_buff *skb, struct device *dev)
 static void SK_interrupt(int irq, void *dev_id, struct pt_regs * regs)
 {
     int csr0;
-    struct device *dev = (struct device *) irq2dev_map[irq];
+    struct device *dev = dev_id;
     struct priv *p = (struct priv *) dev->priv;
 
 
@@ -1398,7 +1366,7 @@ static void SK_txintr(struct device *dev)
     p->tmdlast++;
     p->tmdlast &= TMDNUM-1;
 
-    tmdstat = tmdp->u.s.status & 0xff00; /* filter out status bits 15:08 */
+    tmdstat = readb(tmdp->u.s.status);
 
     /* 
      * We check status of transmitted packet.
@@ -1406,21 +1374,22 @@ static void SK_txintr(struct device *dev)
      */
     if (tmdstat & TX_ERR) /* Error occurred */
     {
-	printk("%s: TX error: %04x %04x\n", dev->name, (int) tmdstat,
-		(int) tmdp->status2);
+	int stat2 = readw(tmdp->status2);
 
-	if (tmdp->status2 & TX_TDR)    /* TDR problems? */
+	printk("%s: TX error: %04x %04x\n", dev->name, tmdstat, stat2);
+
+	if (stat2 & TX_TDR)    /* TDR problems? */
 	{
 	    printk("%s: tdr-problems \n", dev->name);
 	}
 
-	if (tmdp->status2 & TX_RTRY)   /* Failed in 16 attempts to transmit ? */
+	if (stat2 & TX_RTRY)   /* Failed in 16 attempts to transmit ? */
             p->stats.tx_aborted_errors++;   
-        if (tmdp->status2 & TX_LCOL)   /* Late collision ? */
+        if (stat2 & TX_LCOL)   /* Late collision ? */
             p->stats.tx_window_errors++; 
-	if (tmdp->status2 & TX_LCAR)   /* Loss of Carrier ? */  
+	if (stat2 & TX_LCAR)   /* Loss of Carrier ? */  
             p->stats.tx_carrier_errors++;
-        if (tmdp->status2 & TX_UFLO)   /* Underflow error ? */
+        if (stat2 & TX_UFLO)   /* Underflow error ? */
         {
             p->stats.tx_fifo_errors++;
 
@@ -1434,7 +1403,7 @@ static void SK_txintr(struct device *dev)
 	
 	p->stats.tx_errors++;
 
-	tmdp->status2 = 0;             /* Clear error flags */
+	writew(0, tmdp->status2);             /* Clear error flags */
     }
     else if (tmdstat & TX_MORE)        /* Collisions occurred ? */
     {
@@ -1447,7 +1416,7 @@ static void SK_txintr(struct device *dev)
          * First I did not have this in but then I thought at minimum
          * we see that something was not ok.
          * If anyone knows something better than this to handle this
-         * please report it. (see Email addresses in the README file)
+         * please report it.
          */ 
 
         p->stats.collisions++; 
@@ -1517,7 +1486,7 @@ static void SK_rxintr(struct device *dev)
      * it up to higher layer 
      */
 
-    while (!( (rmdstat = rmdp->u.s.status) & RX_OWN))
+    while (!( (rmdstat = readb(rmdp->u.s.status)) & RX_OWN))
     {
 	/* 
          * Start and end of packet must be set, because we use 
@@ -1547,7 +1516,7 @@ static void SK_rxintr(struct device *dev)
 	     * packets. 
 	     */
 
-	    rmdp->u.s.status = RX_OWN;      /* Relinquish ownership to LANCE */ 
+	    writeb(RX_OWN, rmdp->u.s.status); /* Relinquish ownership to LANCE */ 
 
 	}
 	else if (rmdstat & RX_ERR)          /* Receive Error ? */
@@ -1559,13 +1528,13 @@ static void SK_rxintr(struct device *dev)
 	    if (rmdstat & RX_FRAM) p->stats.rx_frame_errors++;
 	    if (rmdstat & RX_CRC)  p->stats.rx_crc_errors++;
 
-	    rmdp->u.s.status = RX_OWN;      /* Relinquish ownership to LANCE */
+	    writeb(RX_OWN, rmdp->u.s.status); /* Relinquish ownership to LANCE */
 
 	}
 	else /* We have a packet which can be queued for the upper layers */
 	{
 
-	    int len = (rmdp->mlen & 0x0fff);  /* extract message length from receive buffer */
+	    int len = readw(rmdp->mlen) & 0x0fff;  /* extract message length from receive buffer */
 	    struct sk_buff *skb;
 
 	    skb = dev_alloc_skb(len+2); /* allocate socket buffer */ 
@@ -1578,7 +1547,7 @@ static void SK_rxintr(struct device *dev)
 		 * to Lance, update statistics and go ahead.
 		 */
 
-		rmdp->u.s.status = RX_OWN;  /* Relinquish ownership to LANCE */
+		writeb(RX_OWN, rmdp->u.s.status); /* Relinquish ownership to LANCE */
 		printk("%s: Couldn't allocate sk_buff, deferring packet.\n",
 		       dev->name);
 		p->stats.rx_dropped++;
@@ -1598,8 +1567,7 @@ static void SK_rxintr(struct device *dev)
 	     * ignore status fields) 
 	     */
 
-	    memcpy(skb_put(skb,len), (unsigned char *) (rmdp->u.buffer & 0x00ffffff),
-		   len);
+	    memcpy_fromio(skb_put(skb,len), (rmdp->u.buffer & 0x00ffffff), len);
 
 
 	    /* 
@@ -1617,8 +1585,9 @@ static void SK_rxintr(struct device *dev)
 	     * free our descriptor and update statistics 
 	     */
 
-	    rmdp->u.s.status = RX_OWN;
+	    writeb(RX_OWN, rmdp->u.s.status);
 	    p->stats.rx_packets++;
+	    p->stats.rx_bytes += len;
 
 
 	    p->rmdnum++;
@@ -1664,8 +1633,7 @@ static int SK_close(struct device *dev)
 
     SK_write_reg(CSR0, CSR0_STOP); /* STOP the LANCE */
 
-    free_irq(dev->irq, NULL);      /* Free IRQ */
-    irq2dev_map[dev->irq] = 0;     /* Mark IRQ as unused */
+    free_irq(dev->irq, dev);      /* Free IRQ */
 
     return 0; /* always succeed */
     
@@ -1681,14 +1649,14 @@ static int SK_close(struct device *dev)
  *                  It is called by sprintf_stats (dev.c).
  *
  * Parameters     : I : struct device *dev   - our device structure
- * Return Value   : struct enet_statistics * - our current statistics
+ * Return Value   : struct net_device_stats * - our current statistics
  * Errors         : None
  * Side Effects   : None
  * Update History :
  *     YY/MM/DD  uid  Description
 -*/
 
-static struct enet_statistics *SK_get_stats(struct device *dev)
+static struct net_device_stats *SK_get_stats(struct device *dev)
 {
 
     struct priv *p = (struct priv *) dev->priv;
@@ -1769,13 +1737,13 @@ static void set_multicast_list(struct device *dev)
  *     YY/MM/DD  uid  Description
 -*/
 
-unsigned int SK_rom_addr(void)
+__initfunc(unsigned int SK_rom_addr(void))
 {
     int i,j;
     int rom_found = 0;
     unsigned int rom_location[] = SK_BOOT_ROM_LOCATIONS;
     unsigned char rom_id[] = SK_BOOT_ROM_ID;
-    unsigned char *test_byte;
+    unsigned char test_byte;
 
     /* Autodetect Boot_ROM */
     PRINTK(("## %s: Autodetection of Boot_ROM\n", SK_NAME));
@@ -1788,10 +1756,10 @@ unsigned int SK_rom_addr(void)
 	rom_found = 1; 
 	for (j = 0; j < 6; j++)
 	{
-	    test_byte = (unsigned char *) (rom_location[i]+j);
+	    test_byte = readb(rom_location[i]+j);
 	    PRINTK((" %02x ", *test_byte));
 
-	    if(!(*test_byte == rom_id[j]))
+	    if(test_byte != rom_id[j])
 	    {
 		rom_found = 0;
 	    } 
@@ -1842,12 +1810,9 @@ unsigned int SK_rom_addr(void)
 
 void SK_reset_board(void)
 {
-    int i;
-
-    SK_PORT = 0x00;           /* Reset active */
-    for (i = 0; i < 10 ; i++) /* Delay min 5ms */
-	;
-    SK_PORT = SK_RESET;       /* Set back to normal operation */
+    writeb(0x00, SK_PORT);       /* Reset active */
+    mdelay(5);                /* Delay min 5ms */
+    writeb(SK_RESET, SK_PORT);   /* Set back to normal operation */
 
 } /* End of SK_reset_board() */
 
@@ -1870,12 +1835,12 @@ void SK_reset_board(void)
 
 void SK_set_RAP(int reg_number)
 {
-    SK_IOREG = reg_number;
-    SK_PORT  = SK_RESET | SK_RAP | SK_WREG;
-    SK_IOCOM = SK_DOIO;
+    writew(reg_number, SK_IOREG);
+    writeb(SK_RESET | SK_RAP | SK_WREG, SK_PORT);
+    writeb(SK_DOIO, SK_IOCOM);
 
-    while (SK_PORT & SK_IORUN) 
-	;
+    while (readb(SK_PORT) & SK_IORUN) 
+	barrier();
 } /* End of SK_set_RAP() */
 
 
@@ -1898,12 +1863,12 @@ int SK_read_reg(int reg_number)
 {
     SK_set_RAP(reg_number);
 
-    SK_PORT  = SK_RESET | SK_RDATA | SK_RREG;
-    SK_IOCOM = SK_DOIO;
+    writeb(SK_RESET | SK_RDATA | SK_RREG, SK_PORT);
+    writeb(SK_DOIO, SK_IOCOM);
 
-    while (SK_PORT & SK_IORUN)
-	;
-    return (SK_IOREG);
+    while (readb(SK_PORT) & SK_IORUN)
+	barrier();
+    return (readw(SK_IOREG));
 
 } /* End of SK_read_reg() */
 
@@ -1927,13 +1892,13 @@ int SK_read_reg(int reg_number)
 
 int SK_rread_reg(void)
 {
-    SK_PORT  = SK_RESET | SK_RDATA | SK_RREG;
+    writeb(SK_RESET | SK_RDATA | SK_RREG, SK_PORT);
 
-    SK_IOCOM = SK_DOIO;
+    writeb(SK_DOIO, SK_IOCOM);
 
-    while (SK_PORT & SK_IORUN)
-	;
-    return (SK_IOREG);
+    while (readb(SK_PORT) & SK_IORUN)
+	barrier();
+    return (readw(SK_IOREG));
 
 } /* End of SK_rread_reg() */
 
@@ -1961,12 +1926,12 @@ void SK_write_reg(int reg_number, int value)
 {
     SK_set_RAP(reg_number);
 
-    SK_IOREG = value;
-    SK_PORT  = SK_RESET | SK_RDATA | SK_WREG;
-    SK_IOCOM = SK_DOIO;
+    writew(value, SK_IOREG);
+    writeb(SK_RESET | SK_RDATA | SK_WREG, SK_PORT);
+    writeb(SK_DOIO, SK_IOCOM);
 
-    while (SK_PORT & SK_IORUN)
-	;
+    while (readb(SK_PORT) & SK_IORUN)
+	barrier();
 } /* End of SK_write_reg */
 
 
@@ -2040,7 +2005,7 @@ void SK_print_dev(struct device *dev, char *text)
 	printk("## Device Name: %s Base Address: %#06lx IRQ: %d\n", 
                dev->name, dev->base_addr, dev->irq);
 	       
-	printk("##   FLAGS: start: %d tbusy: %ld int: %d\n", 
+	printk("##   FLAGS: start: %d tbusy: %ld int: %ld\n", 
                dev->start, dev->tbusy, dev->interrupt);
 
 	printk("## next device: %#08x init function: %#08x\n", 

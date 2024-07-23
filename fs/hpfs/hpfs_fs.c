@@ -23,13 +23,14 @@
 #include <linux/locks.h>
 #include <linux/stat.h>
 #include <linux/string.h>
+#include <linux/init.h>
 #include <asm/bitops.h>
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 
 #include "hpfs.h"
 #include "hpfs_caps.h"
 
-/* 
+/*
  * HPFS is a mixture of 512-byte blocks and 2048-byte blocks.  The 2k blocks
  * are used for directories and bitmaps.  For bmap to work, we must run the
  * file system with 512-byte blocks.  The 2k blocks are assembled in buffers
@@ -115,7 +116,7 @@
  * seen -- in fact noncontiguous files are seldom seen.  I think this is
  * partly the open() call that lets programs specify the length of an
  * output file when they know it, and partly because HPFS.IFS really is
- * very good at resisting fragmentation. 
+ * very good at resisting fragmentation.
  */
 
 /* notation */
@@ -127,15 +128,16 @@ typedef void nonconst;
 
 static void hpfs_read_inode(struct inode *);
 static void hpfs_put_super(struct super_block *);
-static void hpfs_statfs(struct super_block *, struct statfs *, int);
+static int hpfs_statfs(struct super_block *, struct statfs *, int);
 static int hpfs_remount_fs(struct super_block *, int *, char *);
 
 static const struct super_operations hpfs_sops =
 {
 	hpfs_read_inode,		/* read_inode */
-	NULL,				/* notify_change */
 	NULL,				/* write_inode */
 	NULL,				/* put_inode */
+	NULL,				/* delete_inode */
+	NULL,				/* notify_change */
 	hpfs_put_super,			/* put_super */
 	NULL,				/* write_super */
 	hpfs_statfs,			/* statfs */
@@ -144,7 +146,7 @@ static const struct super_operations hpfs_sops =
 
 /* file ops */
 
-static long hpfs_file_read(struct inode *, struct file *, char *, unsigned long);
+static ssize_t hpfs_file_read(struct file *, char *, size_t, loff_t *);
 static secno hpfs_bmap(struct inode *, unsigned);
 
 static const struct file_operations hpfs_file_ops =
@@ -153,10 +155,11 @@ static const struct file_operations hpfs_file_ops =
 	hpfs_file_read,			/* read */
 	NULL,				/* write */
 	NULL,				/* readdir - bad */
-	NULL,				/* select - default */
+	NULL,				/* poll - default */
 	NULL,				/* ioctl - default */
 	generic_file_mmap,		/* mmap */
 	NULL,				/* no special open is needed */
+	NULL,				/* flush */
 	NULL,				/* release */
 	file_fsync,			/* fsync */
 };
@@ -185,11 +188,11 @@ static const struct inode_operations hpfs_file_iops =
 
 /* directory ops */
 
-static long hpfs_dir_read(struct inode *inode, struct file *filp,
-			  char *buf, unsigned long count);
-static int hpfs_readdir(struct inode *inode, struct file *filp,
+static ssize_t hpfs_dir_read(struct file *filp, char *buf, 
+			     size_t count, loff_t *ppos);
+static int hpfs_readdir(struct file *filp,
 			void *dirent, filldir_t filldir);
-static int hpfs_lookup(struct inode *, const char *, int, struct inode **);
+static int hpfs_lookup(struct inode *, struct dentry *);
 
 static const struct file_operations hpfs_dir_ops =
 {
@@ -197,10 +200,11 @@ static const struct file_operations hpfs_dir_ops =
 	hpfs_dir_read,			/* read */
 	NULL,				/* write - bad */
 	hpfs_readdir,			/* readdir */
-	NULL,				/* select - default */
+	NULL,				/* poll - default */
 	NULL,				/* ioctl - default */
 	NULL,				/* mmap */
 	NULL,				/* no special open code */
+	NULL,				/* flush */
 	NULL,				/* no special release code */
 	file_fsync,			/* fsync */
 };
@@ -218,7 +222,6 @@ static const struct inode_operations hpfs_dir_iops =
 	NULL,				/* mknod */
 	NULL,				/* rename */
 	NULL,				/* readlink */
-	NULL,				/* follow_link */
 	NULL,				/* readpage */
 	NULL,				/* writepage */
 	NULL,				/* bmap */
@@ -298,7 +301,7 @@ static inline fnode_secno ino_secno(ino_t ino)
 }
 
 /*
- * test for directory's inode number 
+ * test for directory's inode number
  */
 
 static inline int ino_is_dir(ino_t ino)
@@ -337,7 +340,7 @@ struct super_block *hpfs_read_super(struct super_block *s,
 	struct hpfs_boot_block *bootblock;
 	struct hpfs_super_block *superblock;
 	struct hpfs_spare_block *spareblock;
-	struct hpfs_dirent *de;
+	struct hpfs_dirent *de = NULL;
 	struct buffer_head *bh0, *bh1, *bh2;
 	struct quad_buffer_head qbh;
 	dnode_secno root_dno;
@@ -486,10 +489,10 @@ struct super_block *hpfs_read_super(struct super_block *s,
 	 * all set.  try it out.
 	 */
 
-	s->s_mounted = iget(s, s->s_hpfs_root);
+	s->s_root = d_alloc_root(iget(s, s->s_hpfs_root), NULL);
 	unlock_super(s);
 
-	if (!s->s_mounted) {
+	if (!s->s_root) {
 		printk("HPFS: hpfs_read_super: inode get failed\n");
 		s->s_dev = 0;
 		MOD_DEC_USE_COUNT;
@@ -502,7 +505,8 @@ struct super_block *hpfs_read_super(struct super_block *s,
 
 	root_dno = fnode_dno(dev, s->s_hpfs_root);
 	if (root_dno)
-		de = map_dirent(s->s_mounted, root_dno, "\001\001", 2, &qbh);
+		de = map_dirent(s->s_root->d_inode, root_dno,
+				"\001\001", 2, &qbh);
 	if (!root_dno || !de) {
 		printk("HPFS: "
 		       "hpfs_read_super: root dir isn't in the root dir\n");
@@ -511,9 +515,9 @@ struct super_block *hpfs_read_super(struct super_block *s,
 		return 0;
 	}
 
-	s->s_mounted->i_atime = local_to_gmt(de->read_date);
-	s->s_mounted->i_mtime = local_to_gmt(de->write_date);
-	s->s_mounted->i_ctime = local_to_gmt(de->creation_date);
+	s->s_root->d_inode->i_atime = local_to_gmt(de->read_date);
+	s->s_root->d_inode->i_mtime = local_to_gmt(de->write_date);
+	s->s_root->d_inode->i_ctime = local_to_gmt(de->creation_date);
 
 	brelse4(&qbh);
 	return s;
@@ -606,7 +610,7 @@ static int parse_opts(char *opts, uid_t *uid, gid_t *gid, umode_t *umask,
 			else
 				return 0;
 		}
-		else if (!strcmp(p,"nocheck")) 
+		else if (!strcmp(p,"nocheck"))
 			*nocheck=1;
 		else
 			return 1;
@@ -729,9 +733,6 @@ static void hpfs_read_inode(struct inode *inode)
 
 static void hpfs_put_super(struct super_block *s)
 {
-	lock_super(s);
-	s->s_dev = 0;
-	unlock_super(s);
 	MOD_DEC_USE_COUNT;
 }
 
@@ -740,7 +741,7 @@ static void hpfs_put_super(struct super_block *s)
  * directory band -- not exactly right but pretty analogous.
  */
 
-static void hpfs_statfs(struct super_block *s, struct statfs *buf, int bufsiz)
+static int hpfs_statfs(struct super_block *s, struct statfs *buf, int bufsiz)
 {
 	struct statfs tmp;
 
@@ -764,7 +765,8 @@ static void hpfs_statfs(struct super_block *s, struct statfs *buf, int bufsiz)
 	tmp.f_files = s->s_hpfs_dirband_size;
 	tmp.f_ffree = s->s_hpfs_n_free_dnodes;
 	tmp.f_namelen = 254;
-	memcpy_tofs(buf, &tmp, bufsiz);
+
+	return copy_to_user(buf, &tmp, bufsiz) ? -EFAULT : 0;
 }
 
 /*
@@ -878,10 +880,11 @@ static unsigned count_one_bitmap(kdev_t dev, secno secno)
  * read.  Read the bytes, put them in buf, return the count.
  */
 
-static long hpfs_file_read(struct inode *inode, struct file *filp,
-			  char *buf, unsigned long count)
+static ssize_t hpfs_file_read(struct file *filp, char *buf,
+			      size_t count, loff_t *ppos)
 {
-	unsigned q, r, n, n0;
+	struct inode *inode = filp->f_dentry->d_inode;
+	size_t q, r, n, n0;
 	struct buffer_head *bh;
 	char *block;
 	char *start;
@@ -892,8 +895,8 @@ static long hpfs_file_read(struct inode *inode, struct file *filp,
 	/*
 	 * truncate count at EOF
 	 */
-	if (count > inode->i_size - (off_t) filp->f_pos)
-		count = inode->i_size - filp->f_pos;
+	if (count > inode->i_size - (off_t) *ppos)
+		count = inode->i_size - *ppos;
 
 	start = buf;
 	while (count > 0) {
@@ -901,8 +904,8 @@ static long hpfs_file_read(struct inode *inode, struct file *filp,
 		 * get file sector number, offset in sector, length to end of
 		 * sector
 		 */
-		q = filp->f_pos >> 9;
-		r = filp->f_pos & 511;
+		q = *ppos >> 9;
+		r = *ppos & 511;
 		n = 512 - r;
 
 		/*
@@ -930,7 +933,7 @@ static long hpfs_file_read(struct inode *inode, struct file *filp,
 			 * regular copy, output length is same as input
 			 * length
 			 */
-			memcpy_tofs(buf, block + r, n);
+			copy_to_user(buf, block + r, n);
 			n0 = n;
 		}
 		else {
@@ -938,8 +941,8 @@ static long hpfs_file_read(struct inode *inode, struct file *filp,
 			 * squeeze out \r, output length varies
 			 */
 			n0 = convcpy_tofs(buf, block + r, n);
-			if (count > inode->i_size - (off_t) filp->f_pos - n + n0)
-				count = inode->i_size - filp->f_pos - n + n0;
+			if (count > inode->i_size - (off_t) *ppos - n + n0)
+				count = inode->i_size - *ppos - n + n0;
 		}
 
 		brelse(bh);
@@ -947,7 +950,7 @@ static long hpfs_file_read(struct inode *inode, struct file *filp,
 		/*
 		 * advance input n bytes, output n0 bytes
 		 */
-		filp->f_pos += n;
+		*ppos += n;
 		buf += n0;
 		count -= n0;
 	}
@@ -968,13 +971,13 @@ static unsigned choose_conv(unsigned char *p, unsigned len)
 
 	while (len--) {
 		c = *p++;
-		if (c < ' ')
+		if (c < ' ') {
 			if (c == '\r' && len && *p == '\n')
 				tvote += 10;
 			else if (c == '\t' || c == '\n');
 			else
 				bvote += 5;
-		else if (c < '\177')
+		} else if (c < '\177')
 			tvote++;
 		else
 			bvote += 5;
@@ -1043,7 +1046,7 @@ static secno hpfs_bmap(struct inode *inode, unsigned file_secno)
  * Search allocation tree *b for the given file sector number and return
  * the disk sector number.  Buffer *bhp has the tree in it, and can be
  * reused for subtrees when access to *b is no longer needed.
- * *bhp is busy on entry and exit. 
+ * *bhp is busy on entry and exit.
  */
 
 static secno bplus_lookup(struct inode *inode, struct bplus_header *b,
@@ -1116,21 +1119,23 @@ static secno bplus_lookup(struct inode *inode, struct bplus_header *b,
  * the boondocks.)
  */
 
-static int hpfs_lookup(struct inode *dir, const char *name, int len,
-		       struct inode **result)
+static int hpfs_lookup(struct inode *dir, struct dentry *dentry)
 {
-	struct quad_buffer_head qbh;
+	const char *name = dentry->d_name.name;
+	int len = dentry->d_name.len;
 	struct hpfs_dirent *de;
 	struct inode *inode;
 	ino_t ino;
+	int retval;
+	struct quad_buffer_head qbh;
 
 	/* In case of madness */
 
-	*result = 0;
+	retval = -ENOTDIR;
 	if (dir == 0)
-		return -ENOENT;
+		goto out;
 	if (!S_ISDIR(dir->i_mode))
-		goto bail;
+		goto out;
 
 	/*
 	 * Read in the directory entry. "." is there under the name ^A^A .
@@ -1150,8 +1155,11 @@ static int hpfs_lookup(struct inode *dir, const char *name, int len,
 	 * This is not really a bailout, just means file not found.
 	 */
 
-	if (!de)
-		goto bail;
+	if (!de) {
+		d_add(dentry, NULL);
+		retval = 0;
+		goto out;
+	}
 
 	/*
 	 * Get inode number, what we're after.
@@ -1166,8 +1174,9 @@ static int hpfs_lookup(struct inode *dir, const char *name, int len,
 	 * Go find or make an inode.
 	 */
 
+	retval = -EACCES;
 	if (!(inode = iget(dir->i_sb, ino)))
-		goto bail1;
+		goto free4;
 
 	/*
 	 * Fill in the info from the directory if this is a newly created
@@ -1192,24 +1201,14 @@ static int hpfs_lookup(struct inode *dir, const char *name, int len,
 		}
 	}
 
+	d_add(dentry, inode);
+	retval = 0;
+
+      free4:
 	brelse4(&qbh);
 
-	/*
-	 * Made it.
-	 */
-
-	*result = inode;
-	iput(dir);
-	return 0;
-
-	/*
-	 * Didn't.
-	 */
- bail1:
-	brelse4(&qbh);
- bail:
-	iput(dir);
-	return -ENOENT;
+      out:
+	return retval;
 }
 
 /*
@@ -1342,7 +1341,7 @@ static struct hpfs_dirent *map_dirent(struct inode *inode, dnode_secno dno,
  *     0 => .   -1 => ..   1 1.1 ... 8.9 9 => files  -2 => eof
  *
  * The directory inode caches one position-to-dnode correspondence so
- * we won't have to repeatedly scan the top levels of the tree. 
+ * we won't have to repeatedly scan the top levels of the tree.
  */
 
 /*
@@ -1364,7 +1363,7 @@ static void translate_hpfs_name(const unsigned char * from, int len, char * to, 
 	}
 }
 
-static int hpfs_readdir(struct inode *inode, struct file *filp, void * dirent,
+static int hpfs_readdir(struct file *filp, void * dirent,
 	filldir_t filldir)
 {
 	struct quad_buffer_head qbh;
@@ -1373,6 +1372,7 @@ static int hpfs_readdir(struct inode *inode, struct file *filp, void * dirent,
 	ino_t ino;
 	char * tempname;
 	long old_pos;
+	struct inode *inode = filp->f_dentry->d_inode;
 
 	if (inode == 0
 	    || inode->i_sb == 0
@@ -1427,7 +1427,7 @@ static int hpfs_readdir(struct inode *inode, struct file *filp, void * dirent,
 
 /*
  * Map the dir entry at subtree coordinates given by *posp, and
- * increment *posp to point to the following dir entry. 
+ * increment *posp to point to the following dir entry.
  */
 
 static struct hpfs_dirent *map_pos_dirent(struct inode *inode, loff_t *posp,
@@ -1579,8 +1579,8 @@ static struct hpfs_dirent *map_nth_dirent(kdev_t dev, dnode_secno dno,
 	return 0;
 }
 
-static long hpfs_dir_read(struct inode *inode, struct file *filp,
-			  char *buf, unsigned long count)
+static ssize_t hpfs_dir_read(struct file *filp, char *buf,
+			     size_t count, loff_t *ppos)
 {
 	return -EISDIR;
 }
@@ -1698,7 +1698,7 @@ static void *map_4sectors(kdev_t dev, unsigned secno,
 	if (!data)
 		goto bail;
 
-	qbh->bh[0] = bh = breada(dev, secno, 512, 0, UINT_MAX);
+	qbh->bh[0] = bh = bread(dev, secno, 512);
 	if (!bh)
 		goto bail0;
 	memcpy(data, bh->b_data, 512);
@@ -1745,22 +1745,23 @@ static void brelse4(struct quad_buffer_head *qbh)
 }
 
 static struct file_system_type hpfs_fs_type = {
-        hpfs_read_super, "hpfs", 1, NULL
+	"hpfs", 
+	FS_REQUIRES_DEV,
+        hpfs_read_super,
+	NULL
 };
 
-int init_hpfs_fs(void)
+__initfunc(int init_hpfs_fs(void))
 {
         return register_filesystem(&hpfs_fs_type);
 }
 
 #ifdef MODULE
+EXPORT_NO_SYMBOLS;
+
 int init_module(void)
 {
-	int status;
-
-	if ((status = init_hpfs_fs()) == 0)
-		register_symtab(0);
-	return status;
+	return init_hpfs_fs();
 }
 
 void cleanup_module(void)
@@ -1769,4 +1770,3 @@ void cleanup_module(void)
 }
 
 #endif
-

@@ -6,6 +6,8 @@
  *  regular file handling primitives for fat-based filesystems
  */
 
+#define ASC_LINUX_VERSION(V, P, S)	(((V) * 65536) + ((P) * 256) + (S))
+#include <linux/version.h>
 #include <linux/sched.h>
 #include <linux/locks.h>
 #include <linux/fs.h>
@@ -15,8 +17,9 @@
 #include <linux/stat.h>
 #include <linux/string.h>
 #include <linux/pagemap.h>
+#include <linux/fat_cvf.h>
 
-#include <asm/segment.h>
+#include <asm/uaccess.h>
 #include <asm/system.h>
 
 #include "msbuffer.h"
@@ -32,10 +35,11 @@ static struct file_operations fat_file_operations = {
 	fat_file_read,		/* read */
 	fat_file_write,		/* write */
 	NULL,			/* readdir - bad */
-	NULL,			/* select - default */
+	NULL,			/* select v2.0.x/poll v2.1.x - default */
 	NULL,			/* ioctl - default */
 	generic_file_mmap,	/* mmap */
 	NULL,			/* no special open is needed */
+	NULL,			/* flush */
 	NULL,			/* release */
 	file_fsync		/* fsync */
 };
@@ -60,6 +64,7 @@ struct inode_operations fat_file_inode_operations = {
 	NULL,			/* permission */
 	NULL			/* smap */
 };
+
 /* #Specification: msdos / special devices / mmap	
 	Mmapping does work because a special mmap is provide in that case.
 	Note that it is much less efficient than the generic_file_mmap normally
@@ -71,10 +76,11 @@ static struct file_operations fat_file_operations_1024 = {
 	fat_file_read,		/* read */
 	fat_file_write,		/* write */
 	NULL,			/* readdir - bad */
-	NULL,			/* select - default */
+	NULL,			/* select v2.0.x/poll v2.1.x - default */
 	NULL,			/* ioctl - default */
 	fat_mmap,		/* mmap */
 	NULL,			/* no special open is needed */
+	NULL,			/* flush */
 	NULL,			/* release */
 	file_fsync		/* fsync */
 };
@@ -82,7 +88,7 @@ static struct file_operations fat_file_operations_1024 = {
 /* #Specification: msdos / special devices / swap file
 	Swap file can't work on special devices with a large sector
 	size (1024 bytes hard sector). Those devices have a weird
-	MsDOS filesystem layout. Generally a single hardware sector
+	MS-DOS filesystem layout. Generally a single hardware sector
 	may contain 2 unrelated logical sector. This mean that there is
 	no easy way to do a mapping between disk sector of a file and virtual
 	memory. So swap file is difficult (not available right now)
@@ -101,7 +107,42 @@ struct inode_operations fat_file_inode_operations_1024 = {
 	NULL,			/* rename */
 	NULL,			/* readlink */
 	NULL,			/* follow_link */
-	NULL,			/* readpage */
+	generic_readpage,	/* readpage */
+	NULL,			/* writepage */
+	NULL,			/* bmap */
+	fat_truncate,		/* truncate */
+	NULL,			/* permission */
+	NULL			/* smap */
+};
+
+static struct file_operations fat_file_operations_readpage = {
+	NULL,			/* lseek - default */
+	fat_file_read,		/* read */
+	fat_file_write,		/* write */
+	NULL,			/* readdir - bad */
+	NULL,			/* select v2.0.x/poll v2.1.x - default */
+	NULL,			/* ioctl - default */
+	generic_file_mmap,	/* mmap */
+	NULL,			/* no special open is needed */
+	NULL,			/* flush */
+	NULL,			/* release */
+	file_fsync		/* fsync */
+};
+
+struct inode_operations fat_file_inode_operations_readpage = {
+	&fat_file_operations_readpage,	/* default file operations */
+	NULL,			/* create */
+	NULL,			/* lookup */
+	NULL,			/* link */
+	NULL,			/* unlink */
+	NULL,			/* symlink */
+	NULL,			/* mkdir */
+	NULL,			/* rmdir */
+	NULL,			/* mknod */
+	NULL,			/* rename */
+	NULL,			/* readlink */
+	NULL,			/* follow_link */
+	fat_readpage,		/* readpage */
 	NULL,			/* writepage */
 	NULL,			/* bmap */
 	fat_truncate,		/* truncate */
@@ -152,12 +193,13 @@ static void fat_prefetch (
 /*
 	Read a file into user space
 */
-long fat_file_read(
-	struct inode *inode,
+static ssize_t fat_file_read_text(
 	struct file *filp,
 	char *buf,
-	unsigned long count)
+	size_t count,
+	loff_t *ppos)
 {
+	struct inode *inode = filp->f_dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
 	char *start = buf;
 	char *end   = buf + count;
@@ -175,7 +217,7 @@ long fat_file_read(
 		printk("fat_file_read: mode = %07o\n",inode->i_mode);
 		return -EINVAL;
 	}
-	if (filp->f_pos >= inode->i_size || count == 0) return 0;
+	if (*ppos >= inode->i_size || count == 0) return 0;
 	/*
 		Tell the buffer cache which block we expect to read in advance
 		Since we are limited with the stack, we preread only MSDOS_PREFETCH
@@ -185,20 +227,20 @@ long fat_file_read(
 		Each time we process one block in bhlist, we replace
 		it by a new prefetch block if needed.
 	*/
-	PRINTK (("#### ino %ld pos %ld size %ld count %d\n",inode->i_ino,filp->f_pos,inode->i_size,count));
+	PRINTK (("#### ino %ld pos %ld size %ld count %d\n",inode->i_ino,*ppos,inode->i_size,count));
 	{
 		/*
 			We must prefetch complete block, so we must
 			take in account the offset in the first block.
 		*/
-		int count_max = (filp->f_pos & (SECTOR_SIZE-1)) + count;
+		int count_max = (*ppos & (SECTOR_SIZE-1)) + count;
 		int   to_reada;	/* How many block to read all at once */
-		pre.file_sector = filp->f_pos >> SECTOR_BITS;
+		pre.file_sector = *ppos >> SECTOR_BITS;
 		to_reada = count_max / SECTOR_SIZE;
 		if (count_max & (SECTOR_SIZE-1)) to_reada++;
 		if (filp->f_reada || !MSDOS_I(inode)->i_binary){
-			/* Doing a read ahead on ascii file make sure we always */
-			/* pre read enough, since we don't know how many blocks */
+			/* Doing a read ahead on ASCII file make sure we always */
+			/* read enough, since we don't know how many blocks */
 			/* we really need */
 			int ahead = read_ahead[MAJOR(inode->i_dev)];
 			PRINTK (("to_reada %d ahead %d\n",to_reada,ahead));
@@ -211,7 +253,7 @@ long fat_file_read(
 	}
 	pre.nolist = 0;
 	PRINTK (("count %d ahead %d nblist %d\n",count,read_ahead[MAJOR(inode->i_dev)],pre.nblist));
-	while ((left_in_file = inode->i_size - filp->f_pos) > 0
+	while ((left_in_file = inode->i_size - *ppos) > 0
 		&& buf < end){
 		struct buffer_head *bh = pre.bhlist[pre.nolist];
 		char *data;
@@ -226,27 +268,27 @@ long fat_file_read(
 			fat_prefetch (inode,&pre,MSDOS_PREFETCH/2);
 			pre.nolist = 0;
 		}
-		PRINTK (("file_read pos %ld nblist %d %d %d\n",filp->f_pos,pre.nblist,pre.fetched,count));
+		PRINTK (("file_read pos %ld nblist %d %d %d\n",*ppos,pre.nblist,pre.fetched,count));
 		wait_on_buffer(bh);
 		if (!fat_is_uptodate(sb,bh)){
 			/* read error  ? */
 			fat_brelse (sb, bh);
 			break;
 		}
-		offset = filp->f_pos & (SECTOR_SIZE-1);
+		offset = *ppos & (SECTOR_SIZE-1);
 		data = bh->b_data + offset;
 		size = MIN(SECTOR_SIZE-offset,left_in_file);
 		if (MSDOS_I(inode)->i_binary) {
 			size = MIN(size,end-buf);
-			memcpy_tofs(buf,data,size);
+			copy_to_user(buf,data,size);
 			buf += size;
-			filp->f_pos += size;
+			*ppos += size;
 		}else{
 			for (; size && buf < end; size--) {
 				char ch = *data++;
-				filp->f_pos++;
+				++*ppos;
 				if (ch == 26){
-					filp->f_pos = inode->i_size;
+					*ppos = inode->i_size;
 					break;
 				}else if (ch != '\r'){
 					put_user(ch,buf++);
@@ -266,15 +308,38 @@ long fat_file_read(
 	return buf-start;
 }
 
+ssize_t fat_file_read(
+	struct file *filp,
+	char *buf,
+	size_t count,
+	loff_t *ppos)
+{
+	struct inode *inode = filp->f_dentry->d_inode;
+	if (MSDOS_SB(inode->i_sb)->cvf_format &&
+	    MSDOS_SB(inode->i_sb)->cvf_format->cvf_file_read)
+		return MSDOS_SB(inode->i_sb)->cvf_format
+			->cvf_file_read(filp,buf,count,ppos);
+
+	/*
+	 * MS-DOS filesystems with a blocksize > 512 may have blocks
+	 * spread over several hardware sectors (unaligned), which
+	 * is not something the generic routines can (or would want
+	 * to) handle).
+	 */
+	if (!MSDOS_I(inode)->i_binary || inode->i_sb->s_blocksize > 512)
+		return fat_file_read_text(filp, buf, count, ppos);
+	return generic_file_read(filp, buf, count, ppos);
+}
 /*
 	Write to a file either from user space
 */
-long fat_file_write(
-	struct inode *inode,
+ssize_t fat_file_write(
 	struct file *filp,
 	const char *buf,
-	unsigned long count)
+	size_t count,
+	loff_t *ppos)
 {
+	struct inode *inode = filp->f_dentry->d_inode;
 	struct super_block *sb = inode->i_sb;
 	int sector,offset,size,left,written;
 	int error,carry;
@@ -283,10 +348,17 @@ long fat_file_write(
 	struct buffer_head *bh;
 	int binary_mode = MSDOS_I(inode)->i_binary;
 
+	PRINTK(("fat_file_write: dentry=%p, inode=%p, ino=%ld\n",
+		filp->f_dentry, inode, inode->i_ino));
 	if (!inode) {
 		printk("fat_file_write: inode = NULL\n");
 		return -EINVAL;
 	}
+        if (MSDOS_SB(sb)->cvf_format &&
+	    MSDOS_SB(sb)->cvf_format->cvf_file_write)
+		return MSDOS_SB(sb)->cvf_format
+			->cvf_file_write(filp,buf,count,ppos);
+
 	/* S_ISLNK allows for UMSDOS. Should never happen for normal MSDOS */
 	if (!S_ISREG(inode->i_mode) && !S_ISLNK(inode->i_mode)) {
 		printk("fat_file_write: mode = %07o\n",inode->i_mode);
@@ -300,23 +372,23 @@ long fat_file_write(
  * but so what. That way leads to madness anyway.
  */
 	if (filp->f_flags & O_APPEND)
-		filp->f_pos = inode->i_size;
+		*ppos = inode->i_size;
 	if (count == 0)
 		return 0;
 	error = carry = 0;
 	for (start = buf; count || carry; count -= size) {
-		while (!(sector = fat_smap(inode,filp->f_pos >> SECTOR_BITS)))
+		while (!(sector = fat_smap(inode,*ppos >> SECTOR_BITS)))
 			if ((error = fat_add_cluster(inode)) < 0) break;
 		if (error) {
 			fat_truncate(inode);
 			break;
 		}
-		offset = filp->f_pos & (SECTOR_SIZE-1);
+		offset = *ppos & (SECTOR_SIZE-1);
 		size = MIN(SECTOR_SIZE-offset,MAX(carry,count));
 		if (binary_mode
 			&& offset == 0
 			&& (size == SECTOR_SIZE
-				|| filp->f_pos + size >= inode->i_size)){
+				|| *ppos + size >= inode->i_size)){
 			/* No need to read the block first since we will */
 			/* completely overwrite it */
 			/* or at least write past the end of file */
@@ -329,18 +401,19 @@ long fat_file_write(
 			break;
 		}
 		if (binary_mode) {
-			memcpy_fromfs(bh->b_data+offset,buf,written = size);
+			copy_from_user(bh->b_data+offset,buf,written = size);
 			buf += size;
 		} else {
 			written = left = SECTOR_SIZE-offset;
-			to = (char *) bh->b_data+(filp->f_pos & (SECTOR_SIZE-1));
+			to = (char *) bh->b_data+(*ppos & (SECTOR_SIZE-1));
 			if (carry) {
 				*to++ = '\n';
 				left--;
 				carry = 0;
 			}
 			for (size = 0; size < count && left; size++) {
-				if ((ch = get_user(buf++)) == '\n') {
+				get_user(ch, buf++);
+				if (ch == '\n') {
 					*to++ = '\r';
 					left--;
 				}
@@ -352,11 +425,11 @@ long fat_file_write(
 			}
 			written -= left;
 		}
-		update_vm_cache(inode, filp->f_pos, bh->b_data + (filp->f_pos & (SECTOR_SIZE-1)), written);
-		filp->f_pos += written;
-		if (filp->f_pos > inode->i_size) {
-			inode->i_size = filp->f_pos;
-			inode->i_dirt = 1;
+		update_vm_cache(inode, *ppos, bh->b_data + (*ppos & (SECTOR_SIZE-1)), written);
+		*ppos += written;
+		if (*ppos > inode->i_size) {
+			inode->i_size = *ppos;
+			mark_inode_dirty(inode);
 		}
 		fat_set_uptodate(sb, bh, 1);
 		fat_mark_buffer_dirty(sb, bh, 0);
@@ -366,7 +439,7 @@ long fat_file_write(
 		return error;
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 	MSDOS_I(inode)->i_attrs |= ATTR_ARCH;
-	inode->i_dirt = 1;
+	mark_inode_dirty(inode);
 	return buf-start;
 }
 
@@ -380,5 +453,5 @@ void fat_truncate(struct inode *inode)
 	cluster = SECTOR_SIZE*MSDOS_SB(inode->i_sb)->cluster_size;
 	(void) fat_free(inode,(inode->i_size+(cluster-1))/cluster);
 	MSDOS_I(inode)->i_attrs |= ATTR_ARCH;
-	inode->i_dirt = 1;
+	mark_inode_dirty(inode);
 }

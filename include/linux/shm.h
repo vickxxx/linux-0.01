@@ -6,18 +6,26 @@
 #include <asm/shmparam.h>
 
 struct shmid_ds {
-	struct ipc_perm shm_perm;	/* operation perms */
-	int	shm_segsz;		/* size of segment (bytes) */
-	time_t	shm_atime;		/* last attach time */
-	time_t	shm_dtime;		/* last detach time */
-	time_t	shm_ctime;		/* last change time */
-	unsigned short	shm_cpid;	/* pid of creator */
-	unsigned short	shm_lpid;	/* pid of last operator */
-	short	shm_nattch;		/* no. of current attaches */
+	struct ipc_perm		shm_perm;	/* operation perms */
+	int			shm_segsz;	/* size of segment (bytes) */
+	__kernel_time_t		shm_atime;	/* last attach time */
+	__kernel_time_t		shm_dtime;	/* last detach time */
+	__kernel_time_t		shm_ctime;	/* last change time */
+	__kernel_ipc_pid_t	shm_cpid;	/* pid of creator */
+	__kernel_ipc_pid_t	shm_lpid;	/* pid of last operator */
+	unsigned short		shm_nattch;	/* no. of current attaches */
+	unsigned short 		shm_unused;	/* compatibility */
+	void 			*shm_unused2;	/* ditto - used by DIPC */
+	void			*shm_unused3;	/* unused */
+};
+
+struct shmid_kernel
+{	
+	struct shmid_ds		u;
 	/* the following are private */
-	unsigned short   shm_npages;	/* size of segment (pages) */
-	unsigned long   *shm_pages;	/* array of ptrs to frames -> SHMMAX */ 
-	struct vm_area_struct *attaches; /* descriptors for attaches */
+	unsigned long		shm_npages;	/* size of segment (pages) */
+	unsigned long		*shm_pages;	/* array of ptrs to frames -> SHMMAX */ 
+	struct vm_area_struct	*attaches;	/* descriptors for attaches */
 };
 
 /* permission flag for shmget */
@@ -33,12 +41,25 @@ struct shmid_ds {
 #define SHM_LOCK 	11
 #define SHM_UNLOCK 	12
 
+/* ipcs ctl commands */
+#define SHM_STAT 	13
+#define SHM_INFO 	14
+
 struct	shminfo {
-    int shmmax;	
-    int shmmin;	
-    int shmmni;	
-    int shmseg;	
-    int shmall;	
+	int shmmax;
+	int shmmin;
+	int shmmni;
+	int shmseg;
+	int shmall;
+};
+
+struct shm_info {
+	int used_ids;
+	unsigned long shm_tot;	/* total allocated shm */
+	unsigned long shm_rss;	/* total resident shm */
+	unsigned long shm_swp;	/* total swapped shm */
+	unsigned long swap_attempts;
+	unsigned long swap_successes;
 };
 
 #ifdef __KERNEL__
@@ -47,24 +68,12 @@ struct	shminfo {
 #define	SHM_DEST	01000	/* segment will be destroyed on last detach */
 #define SHM_LOCKED      02000   /* segment will not be swapped */
 
-/* ipcs ctl commands */
-#define SHM_STAT 	13
-#define SHM_INFO 	14
-struct shm_info {
-	int   used_ids;
-	ulong shm_tot; /* total allocated shm */
-	ulong shm_rss; /* total resident shm */
-	ulong shm_swp; /* total swapped shm */
-	ulong swap_attempts;
-	ulong swap_successes;
-};
-
 asmlinkage int sys_shmget (key_t key, int size, int flag);
-asmlinkage int sys_shmat (int shmid, char *shmaddr, int shmflg, ulong *addr);
+asmlinkage int sys_shmat (int shmid, char *shmaddr, int shmflg, unsigned long *addr);
 asmlinkage int sys_shmdt (char *shmaddr);
 asmlinkage int sys_shmctl (int shmid, int cmd, struct shmid_ds *buf);
+extern void shm_unuse(unsigned long entry, unsigned long page);
 
 #endif /* __KERNEL__ */
 
 #endif /* _LINUX_SHM_H_ */
-
